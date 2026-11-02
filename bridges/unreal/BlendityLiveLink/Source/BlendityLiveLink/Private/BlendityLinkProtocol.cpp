@@ -368,7 +368,65 @@ bool read_discovery(const std::string &path, Endpoint &out) {
   out.port = port;
   out.scene = j["scene"].string();
   out.app = j["app"].string();
+  out.inbox = j["inbox"].string();
   return true;
+}
+
+namespace {
+
+std::string quoted(const std::string &s) {
+  std::string out = "\"";
+  for (char c : s) {
+    if (c == '"' || c == '\\') out += '\\';
+    if ((unsigned char)c >= 32) out += c;
+  }
+  return out + "\"";
+}
+
+std::string num(double v) {
+  char buf[32];
+  std::snprintf(buf, sizeof(buf), "%.9g", std::isfinite(v) ? v : 0.0);
+  return buf;
+}
+
+std::string nums(std::initializer_list<double> v) {
+  std::string s = "[";
+  for (double d : v) s += (s.size() > 1 ? ", " : "") + num(d);
+  return s + "]";
+}
+
+std::string light_json(const SnapActor &a) {
+  static const char *kinds[] = {"", "directional", "point", "spot", "area"};
+  const double pi = 3.14159265358979;
+  const double i = a.light == 1 ? a.intensity / pi : a.intensity / 1000.0;  // (the applier's lux = pi x, candela = 1000 x)
+  std::string s = "{\"type\": " + quoted(kinds[a.light]) + ", \"color\": " + nums({a.color[0], a.color[1], a.color[2]}) + ", \"intensity\": " + num(i);
+  s += ", \"range\": " + num(a.radius_cm / 100.0) + ", \"spot_angle\": " + num(2.0 * a.outer_deg) + ", \"inner_spot_angle\": " + num(2.0 * a.inner_deg);
+  return s + ", \"area\": " + nums({a.width_cm / 100.0, a.height_cm / 100.0}) + "}";
+}
+
+std::string camera_json(const SnapActor &a) {
+  const double pi = 3.14159265358979, aspect = a.aspect > 0.01 ? a.aspect : 16.0 / 9.0;
+  const double vfov = 2.0 * std::atan(std::tan(a.hfov_deg * pi / 360.0) / aspect) * 180.0 / pi;  // (Unreal's is across)
+  std::string s = "{\"fov\": " + num(vfov) + ", \"near\": " + num(a.near_cm / 100.0) + ", \"far\": " + num(a.far_cm / 100.0);
+  return s + ", \"orthographic\": " + (a.ortho ? "true" : "false") + ", \"ortho_size\": " + num(a.ortho_width_cm / 100.0 / aspect * 0.5) + "}";
+}
+
+}  // namespace
+
+std::string snapshot_json(const std::string &source, const std::string &name, const std::string &model, const std::vector<SnapActor> &actors) {
+  std::string s = "{\"snapshot\": 1, \"source\": " + quoted(source) + ", \"name\": " + quoted(name) + ", \"model\": " + quoted(model);
+  s += ", \"model_rotation\": " + nums({kFbxModelRotation[0], kFbxModelRotation[1], kFbxModelRotation[2], kFbxModelRotation[3]}) + ", \"objects\": [";
+  for (size_t k = 0; k < actors.size(); k++) {
+    const SnapActor &a = actors[k];
+    s += std::string(k ? "," : "") + "\n {\"name\": " + quoted(a.name) + ", \"path\": " + quoted(a.path.empty() ? a.name : a.path);
+    if (!a.cls.empty()) s += ", \"class\": " + quoted(a.cls);
+    s += ", \"transform\": {\"position\": " + nums({a.loc[1] / 100.0, a.loc[2] / 100.0, a.loc[0] / 100.0});
+    s += ", \"rotation\": " + nums({a.quat[1], a.quat[2], a.quat[0], a.quat[3]}) + ", \"scale\": " + nums({a.scale[1], a.scale[2], a.scale[0]}) + "}";
+    if (a.light >= 1 && a.light <= 4) s += ", \"light\": " + light_json(a);
+    if (a.camera) s += ", \"camera\": " + camera_json(a);
+    s += "}";
+  }
+  return s + "\n]}\n";
 }
 
 std::string hello(const std::string &app) {

@@ -145,6 +145,11 @@ struct Material {
   /* Project-relative .mat file when this is a Material asset (Unity: a material in the
    * Project window, shared by every renderer that uses it); empty for a scene material. */
   std::string asset_path;
+  /* Round 371: read from another engine's file (a Unity .mat) - never written over it; the outline its shader drew,
+   * for the objects that use it. Neither is saved. */
+  bool foreign = false;
+  float import_outline = 0.0f;
+  Vec3 import_outline_color{0.0f, 0.0f, 0.0f};
 
   void reflect(Reflector &r);
   void reflect_principled_extras(Reflector &r);

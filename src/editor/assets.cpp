@@ -74,6 +74,11 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 }
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
+  if (fs::extension(path) == ".unitypackage") return (void)import_unity_package(path);  // (round 369: import <file>.unitypackage)
+  if (fs::extension(path) == ".prefab" || fs::extension(path) == ".unity") return (void)import_unity_scene(path);  // (round 370)
+  if (fs::extension(path) == ".tscn") return (void)import_godot_scene(path);  // (round 373)
+  if (fs::extension(path) == ".blend") return (void)import_blend(path);  // (round 374: through Blender)
+  if (fs::extension(path) == ".blendity-snapshot" || fs::filename(path) == "snapshot.json") return (void)import_snapshot(path);  // (round 374)
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
   if (import_preview_pref_ && (ipv_force_ || !headless_) && begin_import_preview(path, copy_into_assets)) return;  // (task 0152: the dialog first)
   ScopedTimer t;
@@ -123,7 +128,7 @@ static void import_outlines(const std::vector<GameObject *> &objects, ImportOutl
 /* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets,
  * the .mat files, the objects (an Outline on each mesh when `outline_width` is set), the clips. */
 void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
-                           bool rewrite_materials) {
+                           bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit) {
   /* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
    * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
    * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). */
@@ -172,6 +177,7 @@ void Editor::finish_import(const std::string &path, bool copy_into_assets, Impor
     if (!rel.empty()) clip_paths.push_back(rel);
     else Log::warn("Import: the clip '%s' couldn't be written under Assets/Animations/%s", clip.name.c_str(), model.c_str());
   }
+  if (before_commit) before_commit(root);
   mark_changed("Import " + fs::filename(path));
   project_listed_ = -100;
   image_assets_time_ = -100;
@@ -686,6 +692,8 @@ size_t Editor::import_material_assets(ImportResult &r, const std::string &model,
 }
 
 void Editor::assign_texture_to_selection(const std::string &asset_path) {
+  /* A procedural texture (round 337): its outputs, as the Textures window's Assign (read as a picture it was "unsupported TGA"). */
+  if (fs::extension(asset_path) == ".ptex") return assign_texture_asset_to_selection(asset_path);
   int n = 0;
   for (GameObject *g : selected_objects(false)) {
     auto *mr = g->get<MeshRenderer>();

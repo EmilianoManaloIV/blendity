@@ -13,14 +13,41 @@
 
 namespace bl {
 
+/* What a bar holds (round 364, task 0341): an animation clip, or - for an animatic or a cinematic - a picture held
+ * full-frame (an image file, or a paper's drawing), a camera cut (the scene's camera switched to `media`) or a sound
+ * (a WAV file, round 365, task 0342). */
+enum class SeqKind { Clip = 0, Image = 1, Paper = 2, Camera = 3, Audio = 4, Video = 5 };
+
+/* A key on a card (round 391, task 0368): Premiere's Effect Controls - opacity (0-1), x and y (fractions of the
+ * frame's width and height from its middle), scale (1 fitted) and rotation (degrees, clockwise) - at a frame from the
+ * bar's start; linear between keys, held before the first and after the last. */
+enum SeqChannel { kSeqOpacity, kSeqX, kSeqY, kSeqScale, kSeqRotation, kSeqChannels };
+struct SeqKey {
+  int channel = 0;
+  float frame = 0.0f, value = 0.0f;
+};
+/* A card's look at a frame: what its keys give (the defaults where a channel has none). */
+struct SeqCardLook {
+  float opacity = 1.0f, x = 0.0f, y = 0.0f, scale = 1.0f, rotation = 0.0f;
+};
+bool seq_is_video_file(const std::string &path);  // (.mp4, .mov, .mkv, .webm, .avi, .m4v)
+int seq_channel_index(const std::string &name);  // "opacity", "x", "y", "scale", "rotation" (any case); -1 none
+const char *seq_channel_name(int channel);
+float seq_channel_clamp(int channel, float v);  // (opacity 0-1, scale 0.01-100, x and y -10-10, rotation -36000-36000)
+
 /* One clip on the timeline: which clip, where it starts (sequence frames), the part of it used (clip frames; out < 0:
- * to the clip's end), its speed, and the name triggers jump to. */
+ * to the clip's end), its speed, and the name triggers jump to. A card (an Image, a Paper or a Camera bar) has no
+ * clip: its `media` (a file, a camera's name) and its length in trim_in..trim_out. */
 struct SeqInstance {
+  int kind = 0;  // SeqKind
+  std::string media;
   std::string clip, name;
   std::string target;  // the object it plays on, by name (task 0070); empty: the Sequencer's own object
   float start = 0.0f;
   float trim_in = 0.0f, trim_out = -1.0f;
   float speed = 1.0f;
+  float volume = 1.0f;  // (a sound's: 0 silent, 1 as recorded, up to 4)
+  std::vector<SeqKey> keys;  // (round 391: a picture card's, by channel then frame)
   float clip_out(const AnimationClip *c) const;  // the trimmed end in clip frames (the clip's end when not set)
   float duration(const AnimationClip *c) const;  // on the timeline, in sequence frames
   float clip_frame(float seq_frame) const;       // the clip frame shown at a sequence frame
@@ -65,6 +92,17 @@ size_t forget_sequence_assets(const std::string &path);
 void clear_sequence_assets();
 /* A .anim (or folder) moved: the instances in every loaded sequence follow it (and on disk, the ones not loaded). */
 size_t retarget_sequence_clips(const std::string &from, const std::string &to);
+
+/* A card's look `frame` frames into its bar (round 391). */
+SeqCardLook seq_card_look(const SeqInstance &i, float frame);
+/* A bar cut in two at sequence frame `frame` (Premiere's Add Edit): `i` becomes the left part, `right` the rest named
+ * `right_name` - its trim moved on by the cut times `scale` (a clip's speed; 1 for a card) and the keys after the cut
+ * moved to it, each keyed channel holding its value at the cut on both sides (round 391). */
+void seq_split_bar(SeqInstance &i, float frame, float scale, const std::string &right_name, SeqInstance &right);
+/* The card shown at `frame`: the topmost track's Image, Paper or Video bar there, else nullptr (round 364, 391). */
+const SeqInstance *sequence_card_at(const Sequence &s, float frame);
+/* The camera the cut at `frame` names (the topmost Camera bar there), else "". */
+std::string sequence_camera_at(const Sequence &s, float frame);
 
 /* Animated numbers by (path, property, axis): what a clip or a sequence gives at a frame, before it's applied. A value
  * is known by a 64-bit key of the three and points at a track that names them (read it only while the clips are as
@@ -117,6 +155,8 @@ struct Sequencer : ComponentBase<Sequencer> {
   AnimValues blend_from, scratch;
   float blend_left = 0.0f, blend_total = 0.0f;
   std::vector<uint8_t> was_down;  // each trigger's key last frame (a jump on the press, not while held)
+  uint64_t base_camera = 0;       // (round 364: the scene's camera at start, given back when a cut ends)
+  bool cut_on = false;
   void reflect(Reflector &r) override;
   void start(PlayContext &ctx) override;
   void update(PlayContext &ctx) override;

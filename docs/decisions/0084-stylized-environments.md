@@ -15,6 +15,10 @@ exists only as a retro display filter.
 - **A Stroke object is one mesh built from a stroke list.** The `Strokes` component keeps the strokes (cards and
   ribbons with their frames and sizes); the mesh is rebuilt from the list on every edit, so the strokes stay editable
   (undo is the list) while renderers and exporters see a plain mesh with custom normals - no new render primitive.
+  *Amended in round 385 (task 0362):* a stroke drawn in VR is added to the mesh (`Strokes::with_last_ribbon`) instead
+  of every stroke being built again - the same mesh the list gives. A mesh edited directly (Edit Mode, sculpting) keeps
+  its edit through the next VR stroke and loses it at the next full build (a desk stroke, a Normals change), as
+  before.
 - **The canopy normal is a custom normal**, the direction from a centre: the shading trick lives in the mesh data the
   renderers already honour, so it exports.
 - **Scatter places children, not a particle system.** Each instance is a GameObject sharing the source's mesh (copy on

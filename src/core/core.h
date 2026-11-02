@@ -130,6 +130,9 @@ std::string windows_command_line(const std::vector<std::string> &argv);
 std::string strprintf(const char *fmt, ...);
 std::string format_bytes(uint64_t bytes);
 std::string to_lower(std::string s);
+std::string forward_slashes(std::string path);  // (every '\\' a '/')
+/* Notes each once, with how many times they came up, in their first order (an import's warnings). */
+std::vector<std::pair<std::string, int>> count_notes(const std::vector<std::string> &notes);
 std::vector<std::string> split_ws(const std::string &s);
 /* `s` split at `sep`, each part trimmed of spaces, empty parts dropped ("Bricks, Wood Floor" -> two names). */
 std::vector<std::string> split_list(const std::string &s, char sep);

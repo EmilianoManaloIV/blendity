@@ -53,7 +53,7 @@ void Editor::draw_hierarchy(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Create Empty")) create_object("Empty", child);
     u.submenu("3D Object", u.px(170), [this, child] {
-      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+      for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
     u.submenu("Shapes (Parametric)", u.px(190), [this, child] {
@@ -523,6 +523,7 @@ struct InspectorReflector : Reflector {
    * "Material 0."); unset where a field isn't one track (a texture layer's, a filter effect's). */
   GameObject *anim_obj = nullptr;
   std::string anim_prefix;
+  GameObject *owner = nullptr;  // (round 338: the object whose component this is - its own objects first in an object field's picker)
   /* A field's menu, on a right-click of its name: Reset to Default when the thing edited has a default for it (round
    * 332; the reset lands when the field is drawn next, recorded as any edit), and Insert / Delete Keyframe when the
    * object is under an animated root (round 335: I over the name inserts too). A diamond after the name marks an
@@ -882,7 +883,7 @@ struct InspectorReflector : Reflector {
     if (skip()) return;
     Recti row = lay.row();
     u.label(label_rect(row), n);
-    if (!ed.object_field(n, field_rect(row), v, type)) return;
+    if (!ed.object_field(n, field_rect(row), v, type, owner)) return;
     record(FieldEdit::Text, n).s_new = v;
     changed = true;
   }
@@ -1282,6 +1283,18 @@ struct InspectorReflector : Reflector {
         if (uu.menu_item("Clear Mask")) edp->texture_layer_op(path, "clearmask", i, "");
         if (uu.menu_item("Group with the Layer Below", nullptr, false, i + 1 < n)) edp->texture_layer_op(path, "group", i, "");
         if (uu.menu_item("Save as Smart Material...", nullptr, false, is_group)) edp->texture_layer_op(path, "smat", i, "");
+        if (on_surface)  // (round 392: Substance's ID mask - one material slot's faces; last, so the pointer's way to Mask Preset's list crosses no other submenu)
+          uu.submenu("Material ID Mask", uu.px(200), [edp, path, i] {
+            GameObject *g = edp->active_object();
+            const ProceduralTexturePtr own = g ? edp->surface_of(g, nullptr) : nullptr;
+            const MeshRenderer *mr = own && own->asset_path == path ? g->get<MeshRenderer>() : nullptr;  // (review 392: the surface's own object's slots)
+            if (!mr) edp->ui_.menu_item("Select the surface's object first", nullptr, false, false);
+            const size_t slots = mr ? std::min<size_t>(mr->materials.size(), 256) : 0;  // (the ID map holds 256)
+            for (size_t k = 0; k < slots; k++) {
+              const std::string label = strprintf("Slot %zu: %s", k, mr->materials[k] ? mr->materials[k]->name.c_str() : "(none)");
+              if (edp->ui_.menu_item(label)) edp->texture_layer_op(path, "matid", i, std::to_string(k));
+            }
+          });
       });
       if (l.ui_expanded) {
         lay.indent += u.px(10);
@@ -1755,6 +1768,7 @@ void Editor::draw_inspector(const Recti &r) {
       InspectorReflector ir(*this, u, lay);
       ir.limit = essentials_limit(c->type_name());
       ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
+      ir.owner = g;
       c->reflect(ir);
       draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
       if (ir.changed) {
@@ -1782,6 +1796,19 @@ void Editor::draw_inspector(const Recti &r) {
             ApplyEditReflector a(fe, (int)i, (int)multi.size(), self);
             oc->reflect(a);
           }
+      }
+      if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
+      if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
+      if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
+        const Recti row = lay.row(u.row_h() + u.px(2));
+        const int bw = (row.w - u.px(16)) / 3;
+        const bool fk = ik_off(*ikc);
+        if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Switch to FK", fk)) ik_switch(*g, 0);
+        u.tooltip("Weight 0: turn the bones by hand - the pose the IK left stays (keyed with Record on).");
+        if (u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, "Switch to IK", !fk)) ik_switch(*g, 1);
+        u.tooltip("Weight 1: the target and the pole move to where the bones are, so the pose stays (keyed with Record on).");
+        if (u.button({row.x + u.px(12) + bw * 2, row.y, bw, row.h}, "Match Handles")) ik_switch(*g, 2);
+        u.tooltip("The target and the pole to the bones' pose, the Weight as it is.");
       }
       /* Camera: an eyedropper for the focus distance (Blender: the Focus Distance
        * eyedropper; Unity HDRP: Focus Distance). */
@@ -2346,6 +2373,8 @@ void Editor::draw_profiler(const Recti &r) {
   }
   plot(frame_history_, Color::hex(0x5AA0E6));
   plot(raster_history_, u.theme.accent);
+  lay.space(u.px(8));
+  draw_budget(lay);  // (round 355: what the scene or the selection costs against a target; below the graph - review 355)
 
   const RasterStats &s = scene_stats_;
   lay.space(u.px(6));
@@ -2809,6 +2838,7 @@ void Editor::draw_export_options() {
     o.selection_only = before.selection_only;
     o.apply_modifiers = before.apply_modifiers;
     o.scale = before.scale;
+    o.keep_transforms = before.keep_transforms;  // (review 375: GLB and glTF both keep it)
     export_opts_ = o;
   }
   export_panel_h_ = lay.y - area.y + u.px(2);
@@ -3503,10 +3533,42 @@ bool Editor::object_field_picked(ui::Id id, std::string &v) {
   return true;
 }
 
+/* Round 339: View Angle Shapes' live line - where the Game camera is as its reference sees it and what the rows give
+ * there - and a row added at that angle. */
+void Editor::draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay) {
+  auto &u = ui_;
+  GameObject *cam_obj = nullptr;
+  const Camera *cam = main_camera(*scene_, &cam_obj);
+  Recti row = lay.row(u.row_h() + u.px(2));
+  if (!cam || !cam_obj) {
+    u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "No camera: the angles are the Game camera's", u.theme.text_dim);
+    return;
+  }
+  float yaw = 0.0f, pitch = 0.0f;
+  view_angle_of(view_shapes_reference(g, vs)->world_matrix(), cam_obj->world_position(), cam_obj->world_rotation().rotate({0, 0, 1}), cam->orthographic, yaw, pitch);
+  std::vector<std::pair<std::string, float>> w;
+  const MeshFilter *mf = g.get<MeshFilter>();  // (the keys the object's mesh has, as the views take them; on a root, any)
+  view_angle_weights(vs, yaw, pitch, [mf](const std::string &k) { return !mf || !mf->mesh || mf->mesh->find_shape(k) >= 0; }, w);
+  std::string line = strprintf("Game camera at yaw %.0f, pitch %.0f", yaw, pitch);
+  for (const auto &[key, v] : w) line += strprintf("%s %s %.2f", &key == &w.front().first ? ":" : ",", key.c_str(), v);
+  if (w.empty()) line += ": no row";
+  u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, line, u.theme.text_dim);
+  if (u.record_buttons) u.button_rects["shown:" + line] = row;  // (tests read the line)
+  row = lay.row(u.row_h() + u.px(2));
+  const bool room = vs.rows.size() < 16;
+  const bool add = u.button_enabled({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Add Row at the Game Camera's Angle", room, "16 rows at most");
+  u.tooltip("A row at the angle the Game camera sees the reference from: set its Shape Key, then its Range and Falloff.");
+  if (!add) return;
+  ViewAngleRow r;
+  r.yaw = std::round(yaw), r.pitch = std::round(pitch);
+  vs.rows.push_back(r);
+  mark_changed("Add View Angle Row");
+}
+
 /* An object field (Unity's ObjectField): a name typed in, an object of its kind dropped on it from the Hierarchy (one
  * of another kind is refused: the field turns red), or one chosen with the picker at its right. True when the name
  * changed. `name` keys it among the fields drawn this frame. */
-bool Editor::object_field(const char *name, const Recti &f, std::string &v, const char *type) {
+bool Editor::object_field(const char *name, const Recti &f, std::string &v, const char *type, const GameObject *near) {
   auto &u = ui_;
   const ui::Id id = u.id(name);
   if (u.record_buttons) u.button_rects[std::string("field:") + name] = f;  // (tests drop onto a field by its name)
@@ -3518,11 +3580,20 @@ bool Editor::object_field(const char *name, const Recti &f, std::string &v, cons
   const ui::Id pid = u.id(std::string("pick:") + name);
   if (picker_button(pick)) u.open_popup(pid, {pick.x, pick.bottom(), 0, 0});
   u.tooltip("Select " + label + ": the scene's objects that can go here");
-  u.popup(pid, u.px(220), [this, id, type] {
+  u.popup(pid, u.px(220), [this, id, type, near] {
     if (ui_.menu_item("None")) field_pick_ = {id, ""};
-    scene_->for_each_ordered([&](GameObject &g, int) {
-      if (has_type(g, type) && ui_.menu_item(g.name)) field_pick_ = {id, g.name};
-    });
+    /* Round 338: the object's own first (a character's bones for its Camera Flatten or IK), then the rest. */
+    auto below = [near](const GameObject &g) {
+      for (const GameObject *o = &g; near && o; o = o->parent)
+        if (o == near) return true;
+      return false;
+    };
+    for (int pass = near ? 0 : 1; pass < 2; pass++) {
+      if (pass == 1 && near) ui_.menu_separator();
+      scene_->for_each_ordered([&](GameObject &g, int) {
+        if (has_type(g, type) && below(g) == (pass == 0) && ui_.menu_item(g.name)) field_pick_ = {id, g.name};
+      });
+    }
   });
   changed = object_field_box(id, box, v, v + " (" + label + ")", "None (" + label + ")", !held || !has_type(*held, type), type_icon(type)) || changed;
   u.mark_widget(box);  // (the field's own help tooltip goes on the box)
@@ -3827,6 +3898,7 @@ void Editor::draw_shape_key_buttons(ui::Layout &lay, GameObject &g) {
   if (u.button_enabled(rem, "Remove...", selected && !mf->mesh->shape_keys.empty(), selected ? "No shape keys yet." : "The Inspector is pinned to another object: select this one first."))
     u.open_popup(id, rem);
   u.tooltip("Pick a shape key to remove (Undo brings it back).");
+  draw_shape_key_problems(lay, *mf->mesh);  // (round 356: a key that moves nothing, a duplicate, the visemes missing)
   u.popup(id, u.px(220), [this, &g] {
     const MeshFilter *f = g.mesh_filter();
     if (!f || !f->mesh) return;
@@ -3898,6 +3970,10 @@ void Editor::draw_render_range(ui::Layout &lay) {
   br.field("Last Frame", ranim_last_, 0, 1000000);
   br.field("Frame Rate", ranim_fps_, 1.0f, 0.0f, 240.0f);
   br.help("First, Last and Frame Rate at 0: the scene sequence's own (or the selected object's clip's).");
+  static const char *const kPresets[] = {"H.264 (MP4)", "ProRes 422 (MOV)", "VRChat (MP4, 1080p)"};
+  int preset = ranim_preset_;
+  if (u.combo(u.id("render_preset"), lay.row(), preset, kPresets, 3)) set_render_preset(preset == 1 ? "prores" : preset == 2 ? "vrchat" : "h264");  // (round 391)
+  u.tooltip("What the frames become: H.264 to share, ProRes 422 to edit further (After Effects, Premiere), or VRChat's video players' MP4.");
 }
 
 /* The Strokes section (task 0248): the tool, its kind and sizes, the normals mode. */
@@ -4051,6 +4127,7 @@ void Editor::draw_paint_tools(ui::Layout &lay) {
   br.field("Lazy Mouse", paint_brush_.lazy, 1.0f, 0.0f, 200.0f);
   static const char *kPaintPressure[] = {"Nothing", "Opacity", "Size"};
   br.enumeration("Pressure", paint_brush_.pressure, kPaintPressure, 3);
+  draw_pen_curve(br);
   br.field("Erase", paint_brush_.erase);
   br.field("Mirror X", paint_brush_.sym_x);
   br.field("Mirror Y", paint_brush_.sym_y);
@@ -4077,7 +4154,7 @@ void Editor::draw_paint_extras(ui::Layout &lay) {
     }
   }
   br.help("Bucket Fill: a click on the model fills that part - its polygroup, its island, its material or the whole object - with\n"
-          "the brush's color, or a gradient along an axis (it needs the mesh maps: Object > Bake Mesh Maps).");
+          "the brush's color, or a gradient along an axis (it needs the mesh maps: GameObject > Bake Mesh Maps...).");
   int hit = -1;
   if (row_buttons(lay, "paint", {"Bake Light", "Bake Gradient"}, hit)) paint_bake_light({"paint", hit == 0 ? "bakelight" : "bakegradient"}, hit == 1);
   u.tooltip("Light painted in: the scene's light (or a top-to-bottom gradient) baked into a Multiply layer you can paint over.");
@@ -4151,6 +4228,12 @@ void Editor::draw_sculpt_tools(ui::Layout &lay) {
   br.field("Front Faces Only", sculpt_brush_.front_only);
   br.enumeration("Pressure", sculpt_brush_.pressure, kSculptPressure, 3);
   br.help("What a pen's pressure drives: the strength, the size, or nothing.");
+  draw_pen_curve(br);
+  br.field("Use Tilt", sculpt_brush_.tilt);
+  br.field("Tilt Strength", sculpt_brush_.tilt_strength, 0.05f, 0.0f, 1.0f);
+  br.help("Use Tilt: a pen's lean tips Clay Buildup's, Flatten's and Scrape's plane the way the pen leans (by its angle times Tilt Strength, "
+          "at most 60 degrees) and turns the alpha to it. The pen's eraser end inverts Draw, Clay Buildup and Inflate, as Alt does, and "
+          "takes a mask away (E switches Carve).");
   br.field("Mirror X", sculpt_brush_.sym_x);
   br.field("Mirror Y", sculpt_brush_.sym_y);
   br.field("Mirror Z", sculpt_brush_.sym_z);

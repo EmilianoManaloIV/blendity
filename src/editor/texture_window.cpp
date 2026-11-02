@@ -480,8 +480,13 @@ void Editor::draw_textures_window(const Recti &r) {
       if (!g || !surface_load_maps(g, *texture_selected_, &why))  // (task 0271: no maps yet - the Fix bakes them)
         refuse("Surface: " + (why.empty() ? std::string("select the object first") : why), why.find("mesh maps") != std::string::npos ? "bakedialog maps" : "", "Bake Mesh Maps...");
     }
-    u.tooltip("Read the active object's baked mesh maps (Object > Bake Mesh Maps) into this surface: what its Mesh Map layers and\nmask presets read.");
-    u.label({lb.right() + u.px(8), sr.y, sr.w - lb.w - u.px(16), sr.h},
+    u.tooltip("Read the active object's baked mesh maps (GameObject > Bake Mesh Maps...) into this surface: what its Mesh Map layers and\nmask presets read.");
+    const Recti bb{lb.right() + u.px(4), sr.y, u.px(110), sr.h};
+    texture_ui_rects_["surface_bake_all"] = bb;
+    if (u.button(bb, "Bake All Maps", false)) run_console_command("surface bakeall");  // (round 392)
+    u.tooltip("Bake the active object's mesh maps - normal, position, curvature, occlusion, thickness and material IDs - at this\n"
+              "surface's size, on a worker, and load them here when they land (Substance's Bake Mesh Maps in one step).");
+    u.label({bb.right() + u.px(8), sr.y, sr.w - lb.w - bb.w - u.px(20), sr.h},
             texture_selected_->maps ? strprintf("maps %d x %d%s", texture_selected_->maps->w, texture_selected_->maps->h, surface_job_ ? "  |  evaluating on a worker..." : "")
                                     : std::string("no mesh maps (Mesh Map layers read flat grey)") + (surface_job_ ? "  |  evaluating on a worker..." : ""),
             u.theme.text_dim);

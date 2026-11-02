@@ -11,6 +11,7 @@
 #include "../image/image.h"
 #include "../scene/uv.h"
 #include "../scene/dynamesh.h"
+#include "../core/ramp.h"
 
 #include <algorithm>
 #include <cmath>
@@ -281,7 +282,8 @@ bool Editor::sculpt_begin_stroke(const Recti &view, float x, float y) {
   sculpt_delta_->obj = sculpt_obj_;
   /* Ctrl, or the Mask brush: a mask stroke (Alt takes the mask away, Shift with the Mask brush blurs it). */
   const bool masking = ui_.in.ctrl() || sculpt_brush_.kind == kMask;
-  sculpt_mask_mode_ = !masking ? kMaskNone : ui_.in.alt() ? kMaskTake : ui_.in.shift() && !ui_.in.ctrl() ? kMaskBlur : kMaskAdd;
+  const bool eraser = sculpt_dab_pen_ ? sculpt_dab_eraser_ : ui_.in.eraser;
+  sculpt_mask_mode_ = !masking ? kMaskNone : ui_.in.alt() || eraser ? kMaskTake : ui_.in.shift() && !ui_.in.ctrl() ? kMaskBlur : kMaskAdd;  // (round 368: the eraser end takes the mask away)
   sculpt_delta_->mask = masking;
   if (masking && !m->mask_fits()) m->sculpt_mask.assign(m->vert_count(), 0.0f), sculpt_mask_version_++;  // (in place, the snapshots' too: all zero is no mask)
   sculpt_grab_ = SculptGrab{};
@@ -525,19 +527,26 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
     return;
   }
   Mesh &m = *mp;
-  const bool shift = ui_.in.shift(), alt = ui_.in.alt();
+  const bool shift = ui_.in.shift();
+  /* Round 368: the pen's eraser end inverts the brush as Alt does (Clay digs, Inflate deflates); its tilt leans the
+   * plane brushes and turns the alpha. A console dab brings its own pen (sculpt_pen_for_test). */
+  const bool eraser = sculpt_dab_pen_ ? sculpt_dab_eraser_ : ui_.in.eraser;
+  const bool alt = ui_.in.alt() || eraser;
+  const Vec2 tilt = sculpt_dab_pen_ ? sculpt_dab_tilt_ : ui_.in.pen ? Vec2(ui_.in.tilt_x, ui_.in.tilt_y) : Vec2(0.0f, 0.0f);
   const int kind = sculpt_mask_mode_ ? kMask : shift ? kSmooth : std::max(0, std::min(kBrushKinds - 1, sculpt_brush_.kind));
-  pressure = std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f;
+  pressure = pen_pressure(std::isfinite(pressure) ? std::max(0.0f, std::min(1.0f, pressure)) : 1.0f);
   const float strength = std::max(0.0f, std::min(1.0f, sculpt_brush_.strength)) * (sculpt_brush_.pressure == 1 ? pressure : 1.0f);
   const float px_radius = std::max(1.0f, sculpt_brush_.radius * ui_.scale * (sculpt_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f));
   const Mat4 &W = g->world_matrix();
   const Mat4 inv = W.inverse();
   const float scale = std::max(1e-6f, length(W.dir({1.0f, 0.0f, 0.0f})));
+  sculpt_tilt_now_ = sculpt_brush_.tilt ? tilt : Vec2(0.0f, 0.0f);  // (each instance leans its own way: sculpt_set_lean)
   if (m.vert_count() != sculpt_grid_.verts) {  // (the mesh changed under the stroke: it ends)
     sculpt_abort_stroke();
     return;
   }
   const Vec2 px(x, y), drag_px = px - sculpt_prev_px_;  // (the stroke's direction here: the alpha turns to it, Snake Hook pulls along it)
+  const Vec2 alpha_turn = sculpt_brush_.tilt && length(tilt) > 5.0f ? tilt : drag_px;  // (round 368: a leaning pen turns the alpha to its lean)
   sculpt_dab_px_.push_back(px);
   sculpt_prev_px_ = px;
   if (kind == kGrab && !sculpt_grab_sets_.empty()) {  // (Grab: the sets taken at the first dab follow the pointer)
@@ -574,7 +583,7 @@ void Editor::sculpt_dab(const Recti &view, float x, float y, float pressure) {
   std::vector<Instance> instances;
   for (const SculptSym &sym : sculpt_symmetries()) {
     Instance in{sym, {}, {}};
-    const size_t gathered = sculpt_weights(m, inv, sym, sym.apply(hit_local), r_local, strength, drag_px, kind != kMask, in.ids, in.w);
+    const size_t gathered = sculpt_weights(m, inv, sym, sym.apply(hit_local), r_local, strength, alpha_turn, kind != kMask, in.ids, in.w);
     if (sym.identity()) sculpt_last_ids_ = in.ids, sculpt_last_hit_ = hit_local, sculpt_last_radius_ = r_local, sculpt_last_gathered_ = gathered;
     if (!in.ids.empty()) instances.push_back(std::move(in));
   }
@@ -708,6 +717,7 @@ std::vector<Editor::SculptSym> Editor::sculpt_symmetries() const {
 
 /* One instance's brush on its vertices (Grab is handled by the dab: it takes a set instead). */
 void Editor::sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, int kind, bool carve, Vec2 drag_px) {
+  sculpt_set_lean(inv, sym);
   switch (kind) {
     case kDraw: sculpt_draw_brush(m, ids, w, r_local, carve); break;
     case kSmooth: sculpt_smooth(m, ids, w); break;
@@ -813,6 +823,7 @@ void Editor::sculpt_area(const Mesh &m, const std::vector<uint32_t> &ids, Vec3 &
 void Editor::sculpt_clay(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, bool carve) {
   Vec3 c, n;
   sculpt_area(m, ids, c, n);
+  n = sculpt_leaned(n);  // (round 368: the pen's lean)
   const float sign = carve ? -1.0f : 1.0f, height = kClayHeight * r_local * sign;
   for (size_t i = 0; i < ids.size(); i++) {
     const float h = dot(m.positions[ids[i]] - c, n);  // (above the plane)
@@ -834,6 +845,7 @@ void Editor::sculpt_inflate(Mesh &m, const std::vector<uint32_t> &ids, const std
 void Editor::sculpt_flatten(Mesh &m, const std::vector<uint32_t> &ids, const std::vector<float> &w, bool scrape) {
   Vec3 c, n;
   sculpt_area(m, ids, c, n);
+  n = sculpt_leaned(n);  // (round 368: the pen's lean)
   for (size_t i = 0; i < ids.size(); i++) {
     const float h = dot(m.positions[ids[i]] - c, n);
     if (scrape && h <= 0.0f) continue;
@@ -886,6 +898,53 @@ void Editor::sculpt_smooth(Mesh &m, const std::vector<uint32_t> &ids, const std:
   for (size_t i = 0; i < ids.size(); i++) m.positions[ids[i]] += (target[i] - m.positions[ids[i]]) * (w[i] * kSmoothStep);
 }
 
+
+/* One console dab, a stroke of its own. */
+void Editor::sculpt_console_dab(float x, float y, float p) {
+  if (!sculpt_begin_stroke(scene_rect_, x, y)) return Log::warn("sculpt dab: nothing of the sculpted object under (%g, %g)", x, y);
+  sculpt_dab(scene_rect_, x, y, p);
+  sculpt_end_stroke();
+}
+
+/* Round 368: the pressure through the pen's curve (Sculpt's and Paint's; a straight line by default), 0..1. */
+float Editor::pen_pressure(float p) const {
+  const float q = curve_eval(pen_curve_, std::max(0.0f, std::min(1.0f, p)));
+  return std::isfinite(q) ? std::max(0.0f, std::min(1.0f, q)) : p;
+}
+
+/* The pressure curve's field (Sculpt's and Paint's brush settings share it); kept in Preferences when it changes. */
+void Editor::draw_pen_curve(Reflector &br) {
+  const std::string before = curve_to_text(pen_curve_);
+  br.curve("Pressure Curve", pen_curve_);
+  br.help("How hard you press becomes how much the brush does: bow it down for a light touch, up for a firm one. Sculpt and Paint share it; "
+          "a mouse presses fully, so its end point sets the mouse's strength too.");
+  pen_curve_dirty_ = pen_curve_dirty_ || curve_to_text(pen_curve_) != before;
+  if (!pen_curve_dirty_ || ui_.in.down[0]) return;  // (review 368: saved once the drag ends, not every frame of it)
+  pen_curve_dirty_ = false;
+  save_prefs();
+}
+
+/* The pen's lean for one instance of the dab (round 368, after Blender's Use Tilt): toward the view's right as the pen
+ * leans right, down as it leans toward you - mirrored and turned with the instance, as its view directions are
+ * (review 368: the mirrored side leaned the same way), by the pen's angle times Tilt Strength, at most 60 degrees. */
+void Editor::sculpt_set_lean(const Mat4 &inv, const SculptSym &sym) {
+  const Vec2 t = sculpt_tilt_now_;
+  sculpt_lean_angle_ = 0.0f;
+  if (!std::isfinite(t.x) || !std::isfinite(t.y) || length(t) < 0.5f) return;
+  const Vec3 right = normalize(sym.dir(inv.dir(cam_.right()))), up = normalize(sym.dir(inv.dir(cam_.up())));
+  sculpt_lean_dir_ = normalize(right * t.x - up * t.y);
+  const float strength = std::max(0.0f, std::min(1.0f, sculpt_brush_.tilt_strength));
+  sculpt_lean_angle_ = std::min(60.0f, length(t)) * strength * kPi / 180.0f;
+}
+
+/* `n` turned by the lean's angle toward the lean (review 368: added, it could flip a plane seen side-on); a lean along
+ * the normal itself leaves it, and it never turns past 60 degrees, so the plane keeps its side. */
+Vec3 Editor::sculpt_leaned(Vec3 n) const {
+  if (sculpt_lean_angle_ <= 0.0f) return n;
+  const Vec3 side = sculpt_lean_dir_ - n * dot(n, sculpt_lean_dir_);
+  if (length(side) < 1e-6f) return n;
+  return normalize(n * std::cos(sculpt_lean_angle_) + normalize(side) * std::sin(sculpt_lean_angle_));
+}
 
 /* From the last dab to (x, y) by the stroke type: Dots and Freehand dab along the way (every quarter radius, or at every
  * move), Spray scatters dabs in the radius, Drag Dot moves one dab with the pointer, Drag Rect waits for the release.
@@ -1668,12 +1727,12 @@ void Editor::sculpt_command(const std::vector<std::string> &t) {
   else if (v == "dab" && t.size() > 3) {  // (a stroke of one dab, in the Scene view's pixels)
     if (!sculpt_ && !set_sculpt(true)) return;
     const float x = (float)std::atof(t[2].c_str()), y = (float)std::atof(t[3].c_str()), p = t.size() > 4 ? (float)std::atof(t[4].c_str()) : 1.0f;
-    if (!sculpt_begin_stroke(scene_rect_, x, y)) {
-      Log::warn("sculpt dab: nothing of the sculpted object under (%g, %g)", x, y);
-      return;
-    }
-    sculpt_dab(scene_rect_, x, y, p);
-    sculpt_end_stroke();
+    sculpt_console_dab(x, y, p);
+    sculpt_dab_pen_ = false;  // (a test's pen: this dab only, landed or not - review 368)
+  }
+  else if (v == "tilt") {  // (round 368: sculpt tilt on|off [strength])
+    sculpt_brush_.tilt = arg(2, "on") != "off";
+    if (t.size() > 3 && std::isfinite(std::atof(t[3].c_str()))) sculpt_brush_.tilt_strength = std::max(0.0f, std::min(1.0f, (float)std::atof(t[3].c_str())));
   }
   else if (v == "stroke" && t.size() > 5) {  // (n dabs from one point to another)
     if (!sculpt_ && !set_sculpt(true)) return;

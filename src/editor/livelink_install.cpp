@@ -50,6 +50,7 @@ std::string Editor::bridges_dir() const {
 /* Blender: BLENDITY_BLENDER, on the PATH, or the newest under Program Files (Windows) / Applications (macOS). */
 std::string Editor::find_blender(std::string &version) const {
   version.clear();
+  if (!blender_path_.empty() && fs::exists(blender_path_)) return blender_path_;  // (round 374: blender path <exe>)
   if (const char *env = std::getenv("BLENDITY_BLENDER"); env && *env) return env;
 #ifdef _WIN32
   const char *pf = std::getenv("ProgramFiles");

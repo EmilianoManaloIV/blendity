@@ -4,6 +4,7 @@
 #include "../core/core.h"
 #include "../image/image.h"
 #include "../render/canvas.h"
+#include "../render/lightmapper.h"
 #include "scene.h"
 
 #include <algorithm>
@@ -52,12 +53,34 @@ void ExportOptions::reflect(Reflector &r) {
   r.field("Selected Only", selection_only);
   r.help("Only the selected objects and their children (Blender: Limit to > Selected Only).");
   r.field("Apply Modifiers", apply_modifiers);
-  if (f == ExportFormat::GLB || f == ExportFormat::GLTF) {
+  if (f == ExportFormat::GLB || f == ExportFormat::GLTF || f == ExportFormat::FBX) {  // (FBX: round 352)
     r.field("Armatures and Animation", skins);
     r.help("Skinned meshes go at rest with their skeleton, their weights and their rig's clip, so Unity, Unreal and Blender\n"
            "import a character that still moves (Blender: Armature, Skinning, Animation). Off: the mesh as posed now.");
   }
   r.help("Export the meshes as the modifier stack makes them (Blender: Apply Modifiers).");
+  if (f == ExportFormat::GLB || f == ExportFormat::GLTF || f == ExportFormat::FBX) {
+    r.field("LOD Levels", lods);
+    r.help("An LOD Group's levels written as <name>_LOD0, _LOD1...: Unity's model import builds its LOD Group from them\n"
+           "(round 363; Unreal's import wants an FBX LOD Group node - not written yet). Off: the mesh alone.");
+    static const char *const kEngines[] = {"None", "Unity (_Collider)", "Unreal (UCX_)", "Godot (-colonly)"};
+    r.enumeration("Colliders", collider_names, kEngines, 4);
+    r.help("Each object's Collider as its own mesh, named as the engine reads it: the Unity bridge's postprocessor makes a MeshCollider\n"
+           "of <name>_Collider, Unreal's FBX import takes UCX_<name>_00 as simple collision, Godot's import makes -convcolonly a\n"
+           "convex shape and -colonly a trimesh (round 362).");
+    if (f == ExportFormat::GLB || f == ExportFormat::GLTF) {
+      r.field("Keep Transforms", keep_transforms);
+      r.help("Each object's position, rotation and scale on its own node (each a top-level node: parents aren't kept), its\n"
+             "vertices around its own pivot, so a round trip keeps pivots (round 375). A sheared or mirrored object is baked.\n"
+             "Off: the vertices where they are in the world.");
+    }
+    r.field("Lightmap UVs", lightmap_uvs);
+    r.help("A second UV set laid out for lightmaps (no overlaps, a margin between islands), as Unity's Generate Lightmap\n"
+           "UVs and Godot's UV2 import make: the engine bakes its own lighting onto it (round 353).");
+    r.field("Shape Keys", shape_keys);
+    r.help("Each shape key as a morph target (glTF) or blend shape (FBX), by name with its weight, so visemes, blinks and\n"
+           "expressions reach Unity, VRChat and Unreal (Blender: Shape Keys). Off: the mesh as the weights shape it now.");
+  }
   r.field("Scale", scale, 0.01f, 0.0001f, 10000.0f);
   r.help("Multiplies every coordinate (Blender: Scale). 1 unit = 1 metre.");
   if (f == ExportFormat::OBJ || f == ExportFormat::STL || f == ExportFormat::PLY || f == ExportFormat::USD) {
@@ -108,6 +131,8 @@ void ExportOptions::reflect(Reflector &r) {
 /* Shared preparation                                                     */
 /* ===================================================================== */
 
+static Mat4 gltf_m(const Mat4 &m, float s);  // (below, with glTF; round 375: Keep Transforms uses it)
+
 namespace {
 
 /* The file a texture slot names when it is an image other programs can open; empty for a generated image or a
@@ -137,11 +162,30 @@ Vec3 to_out(Vec3 v, int up) { return up ? Vec3(-v.x, -v.z, v.y) : Vec3(-v.x, v.y
 
 struct Prepared {
   std::string name;
+  bool has_node = false;  // (round 375: Keep Transforms) the object's world, in the file's space, on its node
+  Mat4 node;
   std::shared_ptr<const ExportSkin> skin;  // (task 0268)
-  Mesh mesh;                  // output space and scale, winding reversed
+  std::vector<float> shape_weights;  // (round 351) per mesh.shape_keys
+  std::vector<Vec2> uv2;             // (round 353) per corner of `mesh`: the lightmap UVs, when asked for
+  Mesh mesh;                  // output space and scale, winding reversed (its shape keys' offsets turned likewise)
   std::vector<Vec3> normals;  // per corner, output space
   std::vector<MaterialPtr> materials;
 };
+
+
+/* Round 375 (review): whether a world matrix is a translation, a rotation and a positive scale - what glTF lets a
+ * node's matrix be. A sheared one (a turned child under a non-uniformly scaled parent), a mirrored one or one that
+ * isn't finite is baked into the vertices instead. */
+static bool plain_trs(const Mat4 &w) {
+  for (int k = 0; k < 16; k++)
+    if (!std::isfinite(w.m[k])) return false;
+  const Vec3 c[3] = {w.dir(Vec3(1, 0, 0)), w.dir(Vec3(0, 1, 0)), w.dir(Vec3(0, 0, 1))};
+  const float len[3] = {length(c[0]), length(c[1]), length(c[2])};
+  if (len[0] < 1e-8f || len[1] < 1e-8f || len[2] < 1e-8f || dot(cross(c[0], c[1]), c[2]) <= 0.0f) return false;
+  for (int i = 0; i < 3; i++)
+    if (std::fabs(dot(c[i], c[(i + 1) % 3])) > 1e-4f * len[i] * len[(i + 1) % 3]) return false;
+  return true;
+}
 
 /* Per-corner normals the way Blender splits them: flat faces use the face
  * normal; smooth faces average the faces around the vertex that are reached
@@ -239,6 +283,24 @@ std::vector<Vec3> split_normals(const Mesh &m) {
   return out;
 }
 
+/* Round 351: the item's shape keys onto the prepared mesh, their offsets turned into the file's space as the vertices
+ * are (no translation); none when the option is off, a key doesn't fit, or triangulating changed the vertex count. */
+void prepare_shape_keys(const Mesh &src, const ExportItem &it, const Mat4 &bake, const ExportOptions &o, int up, Prepared &p) {
+  if (!o.shape_keys || src.shape_keys.empty() || !meshops::shape_keys_fit(src) || p.mesh.positions.size() != src.positions.size()) return;
+  for (size_t k = 0; k < src.shape_keys.size(); k++) {
+    ShapeKey key;
+    key.name = src.shape_keys[k].name;
+    key.delta.reserve(src.shape_keys[k].delta.size());
+    for (const Vec3 &d : src.shape_keys[k].delta) key.delta.push_back(finite_bits(d.x) && finite_bits(d.y) && finite_bits(d.z) ? to_out(bake.dir(d), up) * o.scale : Vec3(0.0f));  // (a NaN offset from a file: none)
+    p.mesh.shape_keys.push_back(std::move(key));
+    p.shape_weights.push_back(k < it.shape_weights.size() ? it.shape_weights[k] : 0.0f);
+  }
+}
+
+/* Round 353: the lightmap UVs' layout - a 1024-texel page with 4 texels between islands (Unity's Generate Lightmap UVs
+ * pack margin at that size), so a bake at up to that resolution doesn't bleed between charts. */
+constexpr int kLightmapRes = 1024, kLightmapPadding = 4;
+
 std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const ExportOptions &o, int up) {
   std::vector<Prepared> out;
   for (const ExportItem &it : items) {
@@ -264,9 +326,16 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
     m.custom_normals = src.custom_normals;  // (task 0149: written as they are)
     m.sync_attributes();
     if (o.triangulate) meshops::triangulate(m);
-    for (Vec3 &v : m.positions) v = to_out(it.world.point(v), up) * o.scale;
+    /* Keep Transforms (round 375, glTF, unskinned): the vertices mirrored into the file's space in the object's own,
+     * its world (S W S, the translation scaled - the object's own scale kept) on the node; else, and for a world glTF
+     * can't hold on a node (sheared, mirrored, not finite: review 375), the world baked into them. */
+    p.has_node = o.keep_transforms && (o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF) && !it.skin && plain_trs(it.world);
+    const Mat4 bake = p.has_node ? Mat4() : it.world;
+    if (p.has_node) p.node = gltf_m(it.world, o.scale);
+    for (Vec3 &v : m.positions) v = to_out(bake.point(v), up) * o.scale;
+    prepare_shape_keys(src, it, bake, o, up, p);
     if (m.custom_normals.size() == m.positions.size()) {  // (task 0149: turned with the positions, by the inverse transpose)
-      const Mat4 nm = it.world.inverse().transposed();
+      const Mat4 nm = bake.inverse().transposed();
       for (Vec3 &n : m.custom_normals) {
         const Vec3 t = to_out(nm.dir(n), up);
         const float len = length(t);
@@ -279,8 +348,8 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
       std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
       if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
     }
-    /* A negative-scale (mirrored) object reverses its winding once more. */
-    const Mat4 &w = it.world;
+    /* A negative-scale (mirrored) object reverses its winding once more (on a node, glTF's reader does it). */
+    const Mat4 &w = bake;
     const float det = w.m[0] * (w.m[5] * w.m[10] - w.m[6] * w.m[9]) - w.m[4] * (w.m[1] * w.m[10] - w.m[2] * w.m[9]) +
                       w.m[8] * (w.m[1] * w.m[6] - w.m[2] * w.m[5]);
     if (det < 0)
@@ -289,6 +358,9 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
         if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
       }
     p.normals = split_normals(m);
+    if (o.lightmap_uvs && !it.outline) p.uv2 = lightmap_uvs(m, true, kLightmapRes, kLightmapPadding);  // (round 353: on the mesh as written, its corners)
+    if (!p.uv2.empty() && !(o.uvs && m.has_uvs()))
+      Log::info("Export: %s has no UVs - its lightmap UVs go as its first set (UV0), so its textures follow them", p.name.c_str());
     out.push_back(std::move(p));
   }
   return out;
@@ -324,7 +396,7 @@ const MaterialPtr &slot_material(const Prepared &p, int slot) {
  * distinct (position, normal, UV) combination. */
 struct SplitKey {
   uint32_t v;
-  float n[3], t[2];
+  float n[3], t[2], t2[2];  // (t2: round 353's lightmap UVs)
   bool operator==(const SplitKey &o) const { return std::memcmp(this, &o, sizeof(SplitKey)) == 0; }
 };
 struct SplitKeyHash {
@@ -335,7 +407,7 @@ struct SplitKeyHash {
 
 struct SplitVerts {
   std::vector<Vec3> pos, nrm;
-  std::vector<Vec2> uv;
+  std::vector<Vec2> uv, uv2;
   std::vector<float> vid;  // each vertex's index in the mesh, when `ids` (glTF's _VERT, task 0172)
   std::vector<uint32_t> src;  // each vertex's index in the mesh (task 0268: its joints and weights)
   bool ids = false;
@@ -352,12 +424,15 @@ struct SplitVerts {
       const Vec2 t = p.mesh.uvs[corner];
       k.t[0] = t.x, k.t[1] = t.y;
     }
+    const bool second = p.uv2.size() == p.mesh.corner_verts.size();
+    if (second) k.t2[0] = p.uv2[corner].x, k.t2[1] = p.uv2[corner].y;
     auto it = index.find(k);
     if (it != index.end()) return it->second;
     const uint32_t id = (uint32_t)pos.size();
     pos.push_back(p.mesh.positions[k.v]);
     if (normals) nrm.push_back(p.normals[corner]);
     if (uvs) uv.push_back(p.mesh.uvs[corner]);
+    if (second) uv2.push_back(p.uv2[corner]);
     if (ids) vid.push_back((float)k.v);
     src.push_back(k.v);
     index.emplace(k, id);
@@ -372,7 +447,7 @@ template<class T> void put(std::string &b, T v) { b.append(reinterpret_cast<cons
 struct GltfMaterialUse {
   bool emissive_strength = false, toon = false, unlit = false;
 };
-std::string material_json(const Material &m, const std::string &name, int base, int metal_rough, int normal, GltfMaterialUse &use) {
+std::string material_json(const Material &m, const std::string &name, int base, int metal_rough, int normal, GltfMaterialUse &use, int emissive = -1) {
   std::string j = "{\"name\":\"" + json_escape(name) + "\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[" + num(m.base_color.x) + "," +
                   num(m.base_color.y) + "," + num(m.base_color.z) + "," + num(m.alpha) + "],\"metallicFactor\":" + num(m.metallic) +
                   ",\"roughnessFactor\":" + num(m.roughness);
@@ -384,6 +459,7 @@ std::string material_json(const Material &m, const std::string &name, int base, 
     if (std::fabs(m.normal_strength - 1.0f) > 1e-4f) j += ",\"scale\":" + num(m.normal_strength);
     j += "}";
   }
+  if (emissive >= 0) j += strprintf(",\"emissiveTexture\":{\"index\":%d}", emissive);  // (round 353: the emission map too)
   std::string ext;
   const Vec3 e = m.emission * m.emission_strength;
   const float emax = std::max(e.x, std::max(e.y, e.z));
@@ -512,6 +588,11 @@ void export_obj_mtl(const std::vector<ExportItem> &items, const std::string &mtl
   }
 }
 
+/* glTF's axes (defined with its writer); FBX shares them (round 352). */
+static Vec3 gltf_t(Vec3 t, float s);
+static Quat gltf_q(Quat q);
+static Mat4 gltf_m(const Mat4 &m, float s);
+
 /* ===================================================================== */
 /* FBX 7.4 (binary, or ASCII)                                             */
 /* ===================================================================== */
@@ -527,6 +608,8 @@ struct FbxProp {
   std::string s;
   std::vector<int32_t> ia;
   std::vector<double> da;
+  std::vector<int64_t> la;  // (round 352: KeyTime)
+  std::vector<float> fa;    // (round 352: KeyValueFloat)
 };
 
 struct FbxNode {
@@ -551,6 +634,8 @@ struct FbxNode {
   FbxNode &R(const std::string &bytes) { prop('R').s = bytes; return *this; }
   FbxNode &ia(std::vector<int32_t> v) { prop('i').ia = std::move(v); return *this; }
   FbxNode &da(std::vector<double> v) { prop('d').da = std::move(v); return *this; }
+  FbxNode &la(std::vector<int64_t> v) { prop('l').la = std::move(v); return *this; }
+  FbxNode &fa(std::vector<float> v) { prop('f').fa = std::move(v); return *this; }
   /* Properties70 entry: P: "name", "type", "label", "flags", values... */
   FbxNode &P(const char *n, const char *type, const char *label, const char *flags) { return add("P").S(n).S(type).S(label).S(flags); }
 };
@@ -590,6 +675,18 @@ void fbx_write_binary(std::string &out, const FbxNode &n, bool is_last) {
         put<uint32_t>(out, (uint32_t)(p.da.size() * 8));
         out.append(reinterpret_cast<const char *>(p.da.data()), p.da.size() * 8);
         break;
+      case 'l':
+        put<uint32_t>(out, (uint32_t)p.la.size());
+        put<uint32_t>(out, 0);
+        put<uint32_t>(out, (uint32_t)(p.la.size() * 8));
+        out.append(reinterpret_cast<const char *>(p.la.data()), p.la.size() * 8);
+        break;
+      case 'f':
+        put<uint32_t>(out, (uint32_t)p.fa.size());
+        put<uint32_t>(out, 0);
+        put<uint32_t>(out, (uint32_t)(p.fa.size() * 4));
+        out.append(reinterpret_cast<const char *>(p.fa.data()), p.fa.size() * 4);
+        break;
     }
   }
   const uint32_t plen = (uint32_t)(out.size() - pstart);
@@ -626,13 +723,15 @@ void fbx_write_ascii(std::string &out, const FbxNode &n, int depth) {
         break;
       }
       case 'i':
-      case 'd': {
-        const size_t count = p.type == 'i' ? p.ia.size() : p.da.size();
+      case 'd':
+      case 'l':
+      case 'f': {
+        const size_t count = p.type == 'i' ? p.ia.size() : p.type == 'd' ? p.da.size() : p.type == 'l' ? p.la.size() : p.fa.size();
         out += "*" + std::to_string(count) + " {\n" + pad + "\ta: ";
         for (size_t j = 0; j < count; j++) {
           if (j) out += ",";
           if (j && j % 24 == 0) out += "\n" + pad + "\t";
-          out += p.type == 'i' ? std::to_string(p.ia[j]) : num(p.da[j]);
+          out += p.type == 'i' ? std::to_string(p.ia[j]) : p.type == 'd' ? num(p.da[j]) : p.type == 'l' ? std::to_string(p.la[j]) : num(p.fa[j]);
         }
         out += "\n" + pad + "}";
         array_block = true;
@@ -651,6 +750,300 @@ void fbx_write_ascii(std::string &out, const FbxNode &n, int depth) {
 }
 
 }  // namespace
+
+namespace {
+
+/* Round 352: FBX's time unit, ticks a second (as Blender and Maya write it). */
+constexpr int64_t kFbxTicks = 46186158000;
+
+/* Euler XYZ degrees (FBX's default order: about X, then Y, then Z) of a rotation, the one of its two solutions (x, y, z)
+ * and (x + 180, 180 - y, z + 180) nearer the previous frame's, each angle unwrapped toward it, so a turn keeps going
+ * instead of flipping (Blender: to_euler('XYZ', previous)). */
+Vec3 fbx_euler(Quat q, Vec3 near) {
+  q = normalize(q);
+  const float m00 = 1 - 2 * (q.y * q.y + q.z * q.z), m10 = 2 * (q.x * q.y + q.w * q.z), m20 = 2 * (q.x * q.z - q.w * q.y);
+  const float m21 = 2 * (q.y * q.z + q.w * q.x), m22 = 1 - 2 * (q.x * q.x + q.y * q.y);
+  const float d = 180.0f / kPi;
+  const Vec3 e(std::atan2(m21, m22) * d, std::asin(std::max(-1.0f, std::min(1.0f, -m20))) * d, std::atan2(m10, m00) * d);
+  auto unwrap = [&](Vec3 v) {
+    for (int k = 0; k < 3; k++) v[k] = near[k] + std::remainder(v[k] - near[k], 360.0f);
+    return v;
+  };
+  const Vec3 one = unwrap(e), other = unwrap(Vec3(e.x + 180.0f, 180.0f - e.y, e.z + 180.0f));
+  return length_sq(other - near) < length_sq(one - near) ? other : one;
+}
+
+/* A matrix's translation, rotation and scale (its columns' lengths; a mirrored basis - a negative determinant - keeps
+ * the mirror in the scale's X, so what's left is a rotation). */
+void fbx_trs(const Mat4 &m, Vec3 &t, Quat &r, Vec3 &s) {
+  t = m.translation();
+  Vec3 x = m.column(0);
+  const Vec3 y = m.column(1), z = m.column(2);
+  s = Vec3(length(x), length(y), length(z));
+  if (dot(cross(x, y), z) < 0.0f) s.x = -s.x, x = -x;
+  r = quat_from_axes(x / std::max(std::fabs(s.x), 1e-12f), y / std::max(s.y, 1e-12f), z / std::max(s.z, 1e-12f));
+}
+
+std::vector<double> fbx_matrix(const Mat4 &m) { return std::vector<double>(m.m, m.m + 16); }
+
+/* A Model with its local transform (FBX's Lcl properties; InheritType 1, RSrs, as Blender writes it - an FBX SDK
+ * reader's default, RrSs, shears a scaled parent's turned children). */
+void fbx_model(FbxNode &objects, int64_t id, const std::string &name, const char *kind, Vec3 t, Vec3 euler, Vec3 s) {
+  FbxNode &model = objects.add("Model").L(id).S(fbx_name(name, "Model")).S(kind);
+  model.add("Version").I(232);
+  FbxNode &mp = model.add("Properties70");
+  mp.P("InheritType", "enum", "", "").I(1);
+  mp.P("Lcl Translation", "Lcl Translation", "", "A").D(t.x).D(t.y).D(t.z);
+  mp.P("Lcl Rotation", "Lcl Rotation", "", "A").D(euler.x).D(euler.y).D(euler.z);
+  mp.P("Lcl Scaling", "Lcl Scaling", "", "A").D(s.x).D(s.y).D(s.z);
+  model.add("Culling").S("CullingOff");
+}
+
+bool fbx_rigged(const Prepared &p, const ExportOptions &o) {
+  return o.skins && p.skin && !p.skin->joints.empty() && p.skin->vjoints.size() == p.mesh.positions.size() && p.skin->vweights.size() == p.mesh.positions.size();
+}
+
+/* A skeleton written once for every mesh its armature deforms (review 352: a body, its hair and its clothes share
+ * one), with the meshes it skins and their blend-shape channels, for the clip. */
+struct FbxSkeleton {
+  uint64_t rig = 0;
+  const ExportSkin *sk = nullptr;
+  int64_t base = 0;
+  Mat4 base_world;  // the Null's world, in the file's space
+  std::vector<int64_t> bones;
+  std::vector<Mat4> world;  // each joint's world at bind, in the file's space
+  std::vector<std::pair<const Prepared *, std::vector<int64_t>>> meshes;
+};
+
+/* The skeleton for `p`'s rig: the one already written for its armature, else a new one - a Null holding it where it
+ * stands and a LimbNode model (with its NodeAttribute) a joint at rest under its parent. Its index in `skels`. */
+size_t fbx_skeleton(const Prepared &p, const ExportOptions &o, std::vector<FbxSkeleton> &skels, FbxNode &objects, FbxNode &conns, int64_t &next_id) {
+  const ExportSkin &sk = *p.skin;
+  for (size_t i = 0; i < skels.size(); i++)
+    if (sk.rig && skels[i].rig == sk.rig && skels[i].bones.size() == sk.joints.size()) return i;
+  FbxSkeleton out;
+  out.rig = sk.rig, out.sk = &sk, out.base = next_id++;
+  const size_t nj = sk.joints.size();
+  const Mat4 bm = gltf_m(sk.base, o.scale);
+  out.base_world = bm;
+  Vec3 bt, bs;
+  Quat bq;
+  fbx_trs(bm, bt, bq, bs);
+  fbx_model(objects, out.base, sk.base_name, "Null", bt, fbx_euler(bq, Vec3(0.0f)), bs);
+  conns.add("C").S("OO").L(out.base).L(0);
+  out.bones.resize(nj), out.world.resize(nj);
+  for (size_t j = 0; j < nj; j++) {
+    const ExportSkin::Joint &jt = sk.joints[j];
+    const bool child = jt.parent >= 0 && jt.parent < (int)j;
+    const Vec3 t = gltf_t(jt.t, o.scale);
+    const Quat q = gltf_q(normalize(jt.r));
+    out.world[j] = (child ? out.world[(size_t)jt.parent] : bm) * Mat4::trs(t, q, jt.s);
+    out.bones[j] = next_id++;
+    const int64_t attr = next_id++;
+    objects.add("NodeAttribute").L(attr).S(fbx_name(jt.name, "NodeAttribute")).S("LimbNode").add("TypeFlags").S("Skeleton");
+    fbx_model(objects, out.bones[j], jt.name, "LimbNode", t, fbx_euler(q, Vec3(0.0f)), jt.s);
+    conns.add("C").S("OO").L(attr).L(out.bones[j]);
+    conns.add("C").S("OO").L(out.bones[j]).L(child ? out.bones[(size_t)jt.parent] : out.base);
+  }
+  skels.push_back(std::move(out));
+  return skels.size() - 1;
+}
+
+/* Round 352: a mesh's Skin deformer on its geometry, a Cluster a joint (its vertices and weights - none for a joint
+ * that moves no vertex, written all the same for its rest, as Blender does - TransformLink the joint's world at bind,
+ * Transform the mesh, at the file's origin, in the joint's space) and its BindPose (the mesh, the Null and the joints). */
+void fbx_skin(const Prepared &p, const FbxSkeleton &skel, int64_t gid, int64_t mid, FbxNode &objects, FbxNode &conns, int64_t &next_id) {
+  const ExportSkin &sk = *p.skin;
+  const size_t nj = skel.bones.size();
+  const int64_t skin = next_id++;
+  FbxNode &sd = objects.add("Deformer").L(skin).S(fbx_name(p.name, "Deformer")).S("Skin");
+  sd.add("Version").I(101);
+  sd.add("Link_DeformAcuracy").D(50.0);
+  conns.add("C").S("OO").L(skin).L(gid);
+  std::vector<std::vector<int32_t>> idx(nj);
+  std::vector<std::vector<double>> wts(nj);
+  for (size_t v = 0; v < sk.vjoints.size(); v++) {
+    for (size_t k = 0; k < 4; k++) {
+      const uint16_t j = sk.vjoints[v][k];
+      const float w = sk.vweights[v][k];
+      if (!(w > 0.0f) || j >= nj) continue;
+      idx[j].push_back((int32_t)v);
+      wts[j].push_back(w);
+    }
+  }
+  for (size_t j = 0; j < nj; j++) {
+    const int64_t cl = next_id++;
+    FbxNode &c = objects.add("Deformer").L(cl).S(fbx_name(sk.joints[j].name, "SubDeformer")).S("Cluster");
+    c.add("Version").I(100);
+    c.add("UserData").S("").S("");
+    c.add("Indexes").ia(std::move(idx[j]));
+    c.add("Weights").da(std::move(wts[j]));
+    c.add("Transform").da(fbx_matrix(skel.world[j].inverse()));
+    c.add("TransformLink").da(fbx_matrix(skel.world[j]));
+    conns.add("C").S("OO").L(cl).L(skin);
+    conns.add("C").S("OO").L(skel.bones[j]).L(cl);
+  }
+  FbxNode &pn = objects.add("Pose").L(next_id++).S(fbx_name(p.name, "Pose")).S("BindPose");
+  pn.add("Type").S("BindPose");
+  pn.add("Version").I(100);
+  pn.add("NbPoseNodes").I((int64_t)nj + 2);
+  FbxNode &pm = pn.add("PoseNode");
+  pm.add("Node").L(mid);
+  pm.add("Matrix").da(fbx_matrix(Mat4::identity()));
+  FbxNode &pb = pn.add("PoseNode");
+  pb.add("Node").L(skel.base);
+  pb.add("Matrix").da(fbx_matrix(skel.base_world));
+  for (size_t j = 0; j < nj; j++) {
+    FbxNode &bp = pn.add("PoseNode");
+    bp.add("Node").L(skel.bones[j]);
+    bp.add("Matrix").da(fbx_matrix(skel.world[j]));
+  }
+}
+
+/* A curve: a key a frame, linear between (as the glTF clip samples it). */
+int64_t fbx_curve(FbxNode &objects, int64_t &next_id, const std::vector<int64_t> &times, std::vector<float> values) {
+  const int64_t id = next_id++;
+  FbxNode &c = objects.add("AnimationCurve").L(id).S(fbx_name("", "AnimCurve")).S("");
+  c.add("Default").D(values.empty() ? 0.0 : (double)values[0]);
+  c.add("KeyVer").I(4009);
+  c.add("KeyTime").la(times);
+  c.add("KeyValueFloat").fa(std::move(values));
+  c.add("KeyAttrFlags").ia({4});  // linear (FBX SDK's eInterpolationLinear)
+  c.add("KeyAttrDataFloat").fa({0.0f, 0.0f, 0.0f, 0.0f});
+  c.add("KeyAttrRefCount").ia({(int32_t)times.size()});
+  return id;
+}
+
+/* A curve node driving `prop` of `target` with one curve per channel name ("d|X"...), each a list of values. */
+void fbx_curves(FbxNode &objects, FbxNode &conns, int64_t &next_id, int64_t layer, int64_t target, const char *prop, const char *node_name,
+                const std::vector<const char *> &axes, std::vector<std::vector<float>> values, const std::vector<int64_t> &times) {
+  const int64_t id = next_id++;
+  FbxNode &pp = objects.add("AnimationCurveNode").L(id).S(fbx_name(node_name, "AnimCurveNode")).S("").add("Properties70");
+  for (size_t k = 0; k < axes.size(); k++) pp.P(axes[k], "Number", "", "A").D(values[k].empty() ? 0.0 : (double)values[k][0]);
+  conns.add("C").S("OO").L(id).L(layer);
+  conns.add("C").S("OP").L(id).L(target).S(prop);
+  for (size_t k = 0; k < axes.size(); k++) conns.add("C").S("OP").L(fbx_curve(objects, next_id, times, std::move(values[k]))).L(id).S(axes[k]);
+}
+
+/* One joint's translation, rotation (Euler XYZ, continuous) and scale a frame, on its bone model. */
+void fbx_joint_curves(const ExportSkin::Anim &an, size_t j, int64_t bone, int64_t layer, const ExportOptions &o, const std::vector<int64_t> &times, FbxNode &objects,
+                      FbxNode &conns, int64_t &next_id) {
+  if ((int)an.t[j].size() < an.frames || (int)an.r[j].size() < an.frames || (int)an.s[j].size() < an.frames) return;
+  std::vector<std::vector<float>> t(3), r(3), s(3);
+  Vec3 near(0.0f);
+  for (int f = 0; f < an.frames; f++) {
+    const Vec3 tv = gltf_t(an.t[j][(size_t)f], o.scale), sv = an.s[j][(size_t)f];
+    near = fbx_euler(gltf_q(an.r[j][(size_t)f]), near);
+    for (int k = 0; k < 3; k++) t[(size_t)k].push_back(tv[k]), r[(size_t)k].push_back(near[k]), s[(size_t)k].push_back(sv[k]);
+  }
+  fbx_curves(objects, conns, next_id, layer, bone, "Lcl Translation", "T", {"d|X", "d|Y", "d|Z"}, std::move(t), times);
+  fbx_curves(objects, conns, next_id, layer, bone, "Lcl Rotation", "R", {"d|X", "d|Y", "d|Z"}, std::move(r), times);
+  fbx_curves(objects, conns, next_id, layer, bone, "Lcl Scaling", "S", {"d|X", "d|Y", "d|Z"}, std::move(s), times);
+}
+
+/* The shape keys' weights of every mesh on the skeleton, from that mesh's own sampling of the same clip, on their
+ * channels' DeformPercent. */
+void fbx_shape_curves(const FbxSkeleton &skel, const std::string &clip, int frames, int64_t layer, const std::vector<int64_t> &times, FbxNode &objects,
+                      FbxNode &conns, int64_t &next_id) {
+  for (const auto &[p, channels] : skel.meshes) {
+    const auto an = std::find_if(p->skin->anims.begin(), p->skin->anims.end(), [&](const ExportSkin::Anim &a) { return a.name == clip; });
+    if (an == p->skin->anims.end()) continue;
+    for (size_t k = 0; k < channels.size() && k < an->shape_w.size(); k++) {
+      if ((int)an->shape_w[k].size() < frames) continue;
+      std::vector<std::vector<float>> w(1);
+      for (int f = 0; f < frames; f++) w[0].push_back(an->shape_w[k][(size_t)f] * 100.0f);
+      fbx_curves(objects, conns, next_id, layer, channels[k], "DeformPercent", "DeformPercent", {"d|DeformPercent"}, std::move(w), times);
+    }
+  }
+}
+
+/* One clip as an AnimationStack with one layer: the skeleton's joints, then its meshes' shape keys. Key times are
+ * rounded to the tick (truncated, a third of a 30 fps clip's keys would land a tick early). */
+void fbx_clip(const FbxSkeleton &skel, const ExportSkin::Anim &an, const ExportOptions &o, FbxNode &objects, FbxNode &conns, int64_t &next_id) {
+  const size_t nj = skel.bones.size();
+  if (an.frames < 1 || an.t.size() != nj || an.r.size() != nj || an.s.size() != nj) return;
+  std::vector<int64_t> times((size_t)an.frames);
+  for (int f = 0; f < an.frames; f++) times[(size_t)f] = std::llround((double)f * (double)kFbxTicks / std::max(1.0, (double)an.fps));
+  const int64_t stack = next_id++, layer = next_id++;
+  FbxNode &sp = objects.add("AnimationStack").L(stack).S(fbx_name(an.name, "AnimStack")).S("").add("Properties70");
+  sp.P("LocalStart", "KTime", "Time", "").L(0);  // (readers take the range from both ends - ufbx needs the pair)
+  sp.P("LocalStop", "KTime", "Time", "").L(times.back());
+  sp.P("ReferenceStart", "KTime", "Time", "").L(0);
+  sp.P("ReferenceStop", "KTime", "Time", "").L(times.back());
+  objects.add("AnimationLayer").L(layer).S(fbx_name("BaseLayer", "AnimLayer")).S("");
+  conns.add("C").S("OO").L(layer).L(stack);
+  for (size_t j = 0; j < nj; j++) fbx_joint_curves(an, j, skel.bones[j], layer, o, times, objects, conns, next_id);
+  fbx_shape_curves(skel, an.name, an.frames, layer, times, objects, conns, next_id);
+}
+
+/* Round 352: each skeleton's clips (sampled with the first mesh it skins), every mesh's shape weights in them. */
+void fbx_animation(const std::vector<FbxSkeleton> &skels, const ExportOptions &o, FbxNode &objects, FbxNode &conns, int64_t &next_id) {
+  for (const FbxSkeleton &skel : skels)
+    for (const ExportSkin::Anim &an : skel.sk->anims) fbx_clip(skel, an, o, objects, conns, next_id);
+}
+
+/* FBX's TimeMode for a frame rate: the standard ones by number (as Blender writes them), else 14, custom. */
+int fbx_time_mode(float fps) {
+  static const std::pair<float, int> kModes[] = {{120.0f, 1}, {100.0f, 2}, {60.0f, 3}, {50.0f, 4}, {48.0f, 5}, {30.0f, 6}, {25.0f, 10}, {24.0f, 11}};
+  for (const auto &m : kModes)
+    if (std::fabs(fps - m.first) < 1e-3f) return m.second;
+  return 14;
+}
+
+/* The Definitions block: each object type's count, as the file holds them (written after the objects). */
+void fbx_definitions(FbxNode &d, const FbxNode &objects) {
+  std::vector<std::pair<std::string, int64_t>> types;
+  int64_t total = 1;  // (GlobalSettings)
+  for (const FbxNode &k : objects.kids) {
+    auto it = std::find_if(types.begin(), types.end(), [&](const auto &t) { return t.first == k.name; });
+    if (it == types.end()) types.push_back({k.name, 0}), it = types.end() - 1;
+    it->second++, total++;
+  }
+  d.add("Version").I(100);
+  d.add("Count").I(total);
+  d.add("ObjectType").S("GlobalSettings").add("Count").I(1);
+  for (const auto &t : types) d.add("ObjectType").S(t.first).add("Count").I(t.second);
+}
+
+}  // namespace
+
+/* Round 351: a mesh's shape keys as Blender's FBX exporter writes them - a BlendShape deformer on the geometry, a
+ * BlendShapeChannel a key (its weight as DeformPercent) and the key's Shape geometry under it: the vertices it moves
+ * (Indexes) and by how much. A key that moves nothing keeps one vertex (an empty shape is dropped on import). */
+static std::vector<int64_t> fbx_blend_shapes(const Prepared &p, int64_t gid, FbxNode &objects, FbxNode &conns, int64_t &next_id) {
+  const Mesh &m = p.mesh;
+  std::vector<int64_t> channels;  // (round 352: the animation's DeformPercent curves drive them)
+  if (m.shape_keys.empty()) return channels;
+  const int64_t bid = next_id++;
+  objects.add("Deformer").L(bid).S(fbx_name(p.name, "Deformer")).S("BlendShape").add("Version").I(100);
+  conns.add("C").S("OO").L(bid).L(gid);
+  for (size_t k = 0; k < m.shape_keys.size(); k++) {
+    const ShapeKey &key = m.shape_keys[k];
+    std::vector<int32_t> idx;
+    std::vector<double> v, n;
+    for (size_t i = 0; i < key.delta.size(); i++) {
+      const Vec3 d = key.delta[i];
+      if (!(std::fabs(d.x) + std::fabs(d.y) + std::fabs(d.z) > 1e-9f) && !(idx.empty() && i + 1 == key.delta.size())) continue;
+      idx.push_back((int32_t)i);
+      v.insert(v.end(), {(double)d.x, (double)d.y, (double)d.z});
+      n.insert(n.end(), {0.0, 0.0, 0.0});
+    }
+    const int64_t cid = next_id++, sid = next_id++;
+    channels.push_back(cid);
+    FbxNode &ch = objects.add("Deformer").L(cid).S(fbx_name(key.name, "SubDeformer")).S("BlendShapeChannel");
+    ch.add("Version").I(100);
+    ch.add("DeformPercent").D(100.0 * (k < p.shape_weights.size() ? p.shape_weights[k] : 0.0f));
+    ch.add("FullWeights").da({100.0});
+    FbxNode &sh = objects.add("Geometry").L(sid).S(fbx_name(key.name, "Geometry")).S("Shape");
+    sh.add("Version").I(100);
+    sh.add("Indexes").ia(std::move(idx));
+    sh.add("Vertices").da(std::move(v));
+    sh.add("Normals").da(std::move(n));
+    conns.add("C").S("OO").L(cid).L(bid);
+    conns.add("C").S("OO").L(sid).L(cid);
+  }
+  return channels;
+}
 
 std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions &o) {
   const std::vector<Prepared> prepared = prepare(items, o, 0);  // FBX declares its axes: always Y up
@@ -736,22 +1129,19 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
     p.P("OriginalUpAxisSign", "int", "Integer", "").I(1);
     p.P("UnitScaleFactor", "double", "Number", "").D(100.0);  // 1 unit = 1 m, as Unity and Blender expect
     p.P("OriginalUnitScaleFactor", "double", "Number", "").D(100.0);
-  }
-  {
-    FbxNode &d = root.add("Definitions");
-    d.add("Version").I(100);
-    d.add("Count").I((int64_t)(prepared.size() * 2 + mats.size() + fbx_tex.size() * 2 + 1));
-    d.add("ObjectType").S("GlobalSettings").add("Count").I(1);
-    d.add("ObjectType").S("Model").add("Count").I((int64_t)prepared.size());
-    d.add("ObjectType").S("Geometry").add("Count").I((int64_t)prepared.size());
-    d.add("ObjectType").S("Material").add("Count").I((int64_t)mats.size());
-    if (!fbx_tex.empty()) {
-      d.add("ObjectType").S("Texture").add("Count").I((int64_t)fbx_tex.size());
-      d.add("ObjectType").S("Video").add("Count").I((int64_t)fbx_tex.size());
+    const ExportSkin::Anim *first = nullptr;  // (round 352: the clips' frame rate, so the keys land on frames)
+    for (const Prepared &q : prepared)
+      if (!first && fbx_rigged(q, o) && !q.skin->anims.empty()) first = &q.skin->anims[0];
+    if (first) {
+      p.P("TimeMode", "enum", "", "").I(fbx_time_mode(first->fps));  // (several clips at different rates: the first's; each keeps its own times)
+      p.P("CustomFrameRate", "double", "Number", "").D(first->fps);
     }
   }
+  const size_t defs = root.kids.size();  // (round 352: counted from the objects once they're written)
+  root.add("Definitions");
   root.add("Objects");
   FbxNode conns("Connections");
+  std::vector<FbxSkeleton> skels;  // (review 352: one a rig, whatever number of meshes it skins)
   for (size_t i = 0; i < prepared.size(); i++) {
     const Prepared &p = prepared[i];
     const Mesh &m = p.mesh;
@@ -805,13 +1195,33 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
       lm.add("ReferenceInformationType").S("IndexToDirect");
       lm.add("Materials").ia(std::move(matidx));
     }
+    const bool uv2 = p.uv2.size() == m.corner_verts.size();
+    if (uv2) {  // (round 353: the lightmap UVs, a second UV map)
+      std::vector<double> lv;
+      std::vector<int32_t> li;
+      for (size_t c = 0; c < p.uv2.size(); c++) lv.insert(lv.end(), {(double)p.uv2[c].x, (double)p.uv2[c].y}), li.push_back((int32_t)c);
+      FbxNode &l2 = geo.add("LayerElementUV").I(uv ? 1 : 0);
+      l2.add("Version").I(101);
+      l2.add("Name").S("Lightmap");
+      l2.add("MappingInformationType").S("ByPolygonVertex");
+      l2.add("ReferenceInformationType").S("IndexToDirect");
+      l2.add("UV").da(std::move(lv));
+      l2.add("UVIndex").ia(std::move(li));
+    }
     FbxNode &layer = geo.add("Layer").I(0);
     layer.add("Version").I(100);
     for (const char *type : {"LayerElementNormal", "LayerElementUV", "LayerElementMaterial"}) {
-      if ((type[12] == 'N' && !o.normals) || (type[12] == 'U' && !uv)) continue;
+      if ((type[12] == 'N' && !o.normals) || (type[12] == 'U' && !uv && !uv2)) continue;
       FbxNode &e = layer.add("LayerElement");
       e.add("Type").S(type);
       e.add("TypedIndex").I(0);
+    }
+    if (uv && uv2) {
+      FbxNode &layer1 = geo.add("Layer").I(1);
+      layer1.add("Version").I(100);
+      FbxNode &e = layer1.add("LayerElement");
+      e.add("Type").S("LayerElementUV");
+      e.add("TypedIndex").I(1);
     }
     FbxNode &model = objects.add("Model").L(mid).S(fbx_name(p.name, "Model")).S("Mesh");
     model.add("Version").I(232);
@@ -823,6 +1233,11 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
     conns.add("C").S("OO").L(mid).L(0);
     conns.add("C").S("OO").L(gid).L(mid);
     for (int64_t m2 : item_mats[i]) conns.add("C").S("OO").L(m2).L(mid);
+    const std::vector<int64_t> channels = fbx_blend_shapes(p, gid, objects, conns, next_id);
+    if (!fbx_rigged(p, o)) continue;
+    const size_t si = fbx_skeleton(p, o, skels, objects, conns, next_id);
+    fbx_skin(p, skels[si], gid, mid, objects, conns, next_id);
+    skels[si].meshes.push_back({&p, channels});
   }
   for (const Mat &mt : mats) {
     const Vec3 c = mt.m ? mt.m->base_color : Vec3(0.8f);
@@ -867,6 +1282,8 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
     conns.add("C").S("OO").L(t.vid).L(t.tex);
   }
   for (const FbxTexLink &l : tex_links) conns.add("C").S("OP").L(l.tex).L(l.mat).S(l.prop);
+  fbx_animation(skels, o, root.kids[defs + 1], conns, next_id);
+  fbx_definitions(root.kids[defs], root.kids[defs + 1]);
   root.kids.push_back(std::move(conns));
   std::string s;
   if (o.ascii) {
@@ -1097,6 +1514,48 @@ std::string export_usda(const std::vector<ExportItem> &items, const ExportOption
 /* Task 0268: a transform in the file's space - X mirrored on both sides (S M S, as the vertices), translations scaled. */
 static Vec3 gltf_t(Vec3 t, float s) { return Vec3(-t.x, t.y, t.z) * s; }
 static Quat gltf_q(Quat q) { return Quat(q.x, -q.y, -q.z, q.w); }
+/* Round 351: a primitive's morph targets - each shape key's offsets at its split vertices (from their mesh vertex, as
+ * the joints are), a POSITION accessor with its bounds - as `,"targets":[...]`, or "" without keys. */
+template <class VecAccessor>
+static std::string gltf_targets(const Mesh &m, const std::vector<uint32_t> &src, VecAccessor &vec_accessor) {
+  if (m.shape_keys.empty()) return "";
+  std::string out = ",\"targets\":[";
+  std::vector<Vec3> d;
+  for (size_t k = 0; k < m.shape_keys.size(); k++) {
+    d.clear();
+    for (uint32_t v : src) d.push_back(v < m.shape_keys[k].delta.size() ? m.shape_keys[k].delta[v] : Vec3(0.0f));
+    out += strprintf("%s{\"POSITION\":%d}", k ? "," : "", vec_accessor(d, true));
+  }
+  return out + "]";
+}
+
+/* Round 351: the mesh's default weights and its keys' names (`extras.targetNames`, as Blender writes them). */
+static std::string gltf_target_names(const Prepared &p) {
+  if (p.mesh.shape_keys.empty()) return "";
+  std::string w = ",\"weights\":[", names = ",\"extras\":{\"targetNames\":[";
+  for (size_t k = 0; k < p.mesh.shape_keys.size(); k++) {
+    w += (k ? "," : "") + num(k < p.shape_weights.size() ? p.shape_weights[k] : 0.0f);
+    names += std::string(k ? "," : "") + "\"" + json_escape(p.mesh.shape_keys[k].name) + "\"";
+  }
+  return w + "]" + names + "]}";
+}
+
+/* Round 351: a clip's shape key weights as one `weights` channel on the mesh's node (every key at every frame). */
+template <class ChannelValues>
+static void gltf_weights_channel(const ExportSkin::Anim &an, size_t keys, int mesh_node, ChannelValues &channel_values, std::string &samplers,
+                                 std::string &channels, int &si, size_t time_acc) {
+  if (!keys || an.shape_w.size() != keys) return;
+  for (const std::vector<float> &w : an.shape_w)
+    if ((int)w.size() < an.frames) return;
+  std::vector<float> vals;
+  for (int f = 0; f < an.frames; f++)
+    for (size_t k = 0; k < keys; k++) vals.push_back(an.shape_w[k][(size_t)f]);
+  const size_t acc = channel_values(vals, an.frames * (int)keys, "SCALAR");
+  samplers += strprintf("%s{\"input\":%zu,\"output\":%zu,\"interpolation\":\"LINEAR\"}", si ? "," : "", time_acc, acc);
+  channels += strprintf("%s{\"sampler\":%d,\"target\":{\"node\":%d,\"path\":\"weights\"}}", si ? "," : "", si, mesh_node);
+  si++;
+}
+
 static Mat4 gltf_m(const Mat4 &m, float s) {
   Mat4 r = m;
   for (int c = 0; c < 4; c++)
@@ -1111,6 +1570,19 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
   std::vector<Prepared> prepared = prepare(items, o, 0);  // glTF is Y up by definition
   std::string bin;
   std::vector<std::string> views, accessors, meshes, nodes, materials, images, textures, skins, animations;
+  /* Round 354: a clip kept open until the end, so a later mesh on the same rig adds its shape-key weights to it. */
+  struct GltfClip {
+    uint64_t rig = 0;
+    std::string name, samplers, channels;
+    int si = 0;
+    size_t time_acc = 0;
+  };
+  std::vector<GltfClip> clips;
+  struct GltfRig {
+    uint64_t rig = 0;
+    size_t skin = 0, joints = 0;
+  };
+  std::vector<GltfRig> rigs;  // (round 354: the skeletons written, by armature)
   std::vector<int> roots;  // (task 0268: the scene's top nodes - a skeleton's joints hang under its base)
   auto align4 = [&] {
     while (bin.size() % 4) bin += '\0';
@@ -1122,6 +1594,11 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     views.push_back(strprintf("{\"buffer\":0,\"byteOffset\":%zu,\"byteLength\":%zu", off, bytes) +
                     (target ? strprintf(",\"target\":%d}", target) : std::string("}")));
     return (int)views.size() - 1;
+  };
+  auto channel_values = [&](const std::vector<float> &vals, int count, const char *type) {  // (round 351: an animation output accessor)
+    const int vv = add_view(vals.data(), vals.size() * sizeof(float), 0);
+    accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%d,\"type\":\"%s\"}", vv, count, type));
+    return accessors.size() - 1;
   };
   auto vec_accessor = [&](const std::vector<Vec3> &v, bool minmax) {
     const int view = add_view(v.data(), v.size() * sizeof(Vec3), 34962);
@@ -1199,7 +1676,8 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
     const int tex = texture_of(m.base_map);
     const int mr = metal_rough_of(m);
     const int nt = texture_of(m.normal_map);
-    materials.push_back(material_json(m, mp ? m.name : "Default", tex, mr, nt, use));
+    const int et = texture_of(m.emission_map);
+    materials.push_back(material_json(m, mp ? m.name : "Default", tex, mr, nt, use, et));
     mat_index[mp.get()] = (int)materials.size() - 1;
     return (int)materials.size() - 1;
   };
@@ -1229,6 +1707,13 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
         attrs += strprintf(",\"TEXCOORD_0\":%zu", accessors.size() - 1);
       }
+      if (!sv.uv2.empty()) {  // (round 353: the lightmap UVs)
+        std::vector<Vec2> t = sv.uv2;
+        for (Vec2 &q : t) q.y = 1.0f - q.y;
+        const int view = add_view(t.data(), t.size() * sizeof(Vec2), 34962);
+        accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"VEC2\"}", view, t.size()));
+        attrs += strprintf(",\"TEXCOORD_%d\":%zu", uv ? 1 : 0, accessors.size() - 1);
+      }
       const bool skinned = o.skins && p.skin && p.skin->vjoints.size() == m.positions.size() && p.skin->vweights.size() == m.positions.size();
       if (skinned) {  // (task 0268) each vertex's four joints and weights, from its mesh vertex
         std::vector<uint16_t> js;
@@ -1248,20 +1733,34 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5126,\"count\":%zu,\"type\":\"SCALAR\"}", view, sv.vid.size()));
         attrs += strprintf(",\"_VERT\":%zu", accessors.size() - 1);
       }
+      const std::string targets = gltf_targets(m, sv.src, vec_accessor);  // (round 351: before the indices, which the primitive names last)
       const int iv = add_view(idx.data(), idx.size() * 4, 34963);
       accessors.push_back(strprintf("{\"bufferView\":%d,\"componentType\":5125,\"count\":%zu,\"type\":\"SCALAR\"}", iv, idx.size()));
-      std::string prim = "{\"attributes\":{" + attrs + strprintf("},\"indices\":%zu,\"mode\":4,\"extras\":{\"slot\":%d}", accessors.size() - 1, slot);
+      std::string prim = "{\"attributes\":{" + attrs + strprintf("},\"indices\":%zu,\"mode\":4,\"extras\":{\"slot\":%d}", accessors.size() - 1, slot) + targets;
       const int mat = material_of(slot_material(p, slot));
       if (mat >= 0) prim += strprintf(",\"material\":%d", mat);
       prims += (prims.empty() ? "" : ",") + prim + "}";
     }
     if (prims.empty()) continue;
-    meshes.push_back("{\"name\":\"" + json_escape(p.name) + "\",\"primitives\":[" + prims + "]}");
+    meshes.push_back("{\"name\":\"" + json_escape(p.name) + "\",\"primitives\":[" + prims + "]" + gltf_target_names(p) + "}");
+    const int mesh_node = (int)nodes.size();  // (round 351: the node an animated weights channel targets)
     const bool with_skin = o.skins && p.skin && !p.skin->joints.empty() && p.skin->vjoints.size() == m.positions.size();
+    const auto shared = with_skin ? std::find_if(rigs.begin(), rigs.end(), [&](const GltfRig &r) { return p.skin->rig && r.rig == p.skin->rig && r.joints == p.skin->joints.size(); })
+                                  : rigs.end();
     roots.push_back((int)nodes.size());
-    nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) +
-                    (with_skin ? strprintf(",\"skin\":%zu}", skins.size()) : std::string("}")));
+    std::string matrix;  // (round 375: Keep Transforms - column-major, as glTF's)
+    for (int k = 0; p.has_node && k < 16; k++) matrix += (k ? "," : ",\"matrix\":[") + num(p.node.m[k]) + (k == 15 ? "]" : "");
+    nodes.push_back("{\"name\":\"" + json_escape(p.name) + strprintf("\",\"mesh\":%zu", meshes.size() - 1) + matrix +
+                    (with_skin ? strprintf(",\"skin\":%zu}", shared != rigs.end() ? shared->skin : skins.size()) : std::string("}")));
     if (!with_skin) continue;
+    if (shared != rigs.end()) {  // (round 354: the rig's skeleton and clip written already: this mesh's weights join the clip)
+      for (const ExportSkin::Anim &an : p.skin->anims) {
+        const auto clip = std::find_if(clips.begin(), clips.end(), [&](const GltfClip &c) { return c.rig == p.skin->rig && c.name == an.name; });
+        if (clip != clips.end()) gltf_weights_channel(an, m.shape_keys.size(), mesh_node, channel_values, clip->samplers, clip->channels, clip->si, clip->time_acc);
+      }
+      continue;
+    }
+    rigs.push_back({p.skin->rig, skins.size(), p.skin->joints.size()});
     /* Task 0268: the base (a node holding the skeleton where it stands), the joints under it at rest, their inverse
      * bind matrices from the rest pose (the vertices are in the file's world: the mesh node has no transform). */
     const ExportSkin &sk = *p.skin;
@@ -1336,9 +1835,11 @@ std::string export_gltf(const std::vector<ExportItem> &items, const ExportOption
         channel(rv4, "VEC4", j, "rotation");
         channel(sv3, "VEC3", j, "scale");
       }
-      animations.push_back("{\"name\":\"" + json_escape(an.name) + "\",\"samplers\":[" + samplers + "],\"channels\":[" + channels + "]}");
+      gltf_weights_channel(an, m.shape_keys.size(), mesh_node, channel_values, samplers, channels, si, time_acc);
+      clips.push_back({sk.rig, an.name, samplers, channels, si, time_acc});
     }
   }
+  for (const GltfClip &c : clips) animations.push_back("{\"name\":\"" + json_escape(c.name) + "\",\"samplers\":[" + c.samplers + "],\"channels\":[" + c.channels + "]}");
   align4();
   auto list = [](const std::vector<std::string> &v) {
     std::string r = "[";

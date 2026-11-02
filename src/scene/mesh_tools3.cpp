@@ -23,7 +23,7 @@ static float det3(const Mat4 &w) {
          w.m[8] * (w.m[1] * w.m[6] - w.m[2] * w.m[5]);
 }
 
-void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap) {
+void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<int> &slot_remap, bool join_keys) {
   const uint32_t base = (uint32_t)dst.vert_count();
   const bool flip = det3(xf) < 0;  // a mirrored object: keep its faces pointing out
   /* Vertex groups joined by name: dst's go on with src's weights (0 where src has none), src's new ones start at 0
@@ -34,6 +34,16 @@ void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<i
     for (VertexGroup &dg : dst.vertex_groups) {
       const int si = src.find_group(dg.name);
       for (size_t i = 0; i < src.vert_count(); i++) dg.weights.push_back(si >= 0 ? src.vertex_groups[(size_t)si].weights[i] : 0.0f);
+    }
+  }
+  /* Shape keys joined by name too (round 357: they had been left a vertex count short - "the mesh was edited since"):
+   * dst's go on with src's offsets turned into dst's space (0 where src has none), src's new ones start at 0. */
+  if (join_keys && dst.keys_fit() && src.keys_fit()) {
+    for (const ShapeKey &sk : src.shape_keys)
+      if (dst.find_shape(sk.name) < 0) dst.shape_keys.push_back({sk.name, std::vector<Vec3>(dst.vert_count(), Vec3(0.0f))});
+    for (ShapeKey &dk : dst.shape_keys) {
+      const int si = src.find_shape(dk.name);
+      for (size_t i = 0; i < src.vert_count(); i++) dk.delta.push_back(si >= 0 ? xf.dir(src.shape_keys[(size_t)si].delta[i]) : Vec3(0.0f));
     }
   }
   for (const Vec3 &p : src.positions) dst.positions.push_back(xf.point(p));
@@ -68,6 +78,13 @@ void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<i
   dst.touch();
 }
 
+size_t drop_unmoving_keys(Mesh &m) {
+  const size_t before = m.shape_keys.size();
+  const auto still = [](const ShapeKey &k) { return std::all_of(k.delta.begin(), k.delta.end(), [](const Vec3 &d) { return length(d) <= 1e-7f; }); };
+  m.shape_keys.erase(std::remove_if(m.shape_keys.begin(), m.shape_keys.end(), still), m.shape_keys.end());
+  return before - m.shape_keys.size();
+}
+
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   Mesh out;
   out.name = m.name;
@@ -89,7 +106,16 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
     }
   }
   if (!m.face_material.empty()) out.face_material.resize(out.face_count(), 0);
-  remove_loose_verts(out);
+  const std::vector<uint32_t> remap = remove_loose_verts(out);
+  /* The shape keys' offsets for the vertices kept (round 358; only their rows: a copy of every key a part had made a
+   * many-part Separate slow - review 358). */
+  for (const ShapeKey &k : m.shape_keys) {
+    if (k.delta.size() != remap.size()) continue;
+    ShapeKey nk{k.name, std::vector<Vec3>(out.vert_count(), Vec3(0.0f))};
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) nk.delta[remap[i]] = k.delta[i];
+    out.shape_keys.push_back(std::move(nk));
+  }
   out.sync_attributes();
   out.touch();
   return out;

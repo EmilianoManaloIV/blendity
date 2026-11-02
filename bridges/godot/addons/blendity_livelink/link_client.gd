@@ -106,6 +106,11 @@ func poll() -> void:
 	if _pending_since >= 0.0:
 		_finish_connect()
 		return
+	_drain()
+	applier.flush()  # (review 378: the skins posed once for the batch)
+
+
+func _drain() -> void:
 	var start := Time.get_ticks_usec()
 	while (Time.get_ticks_usec() - start) / 1000.0 < BUDGET_MS:
 		var m = stream.next_message()

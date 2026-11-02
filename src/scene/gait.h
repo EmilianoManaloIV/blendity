@@ -54,13 +54,14 @@ struct Rig {
   Vec3 rest_hips;            // the hips' head as the rig stood (the pose analysed is the gait's rest)
   Quat rest_hips_rot;
   std::string problem;       // why the rig can't walk ("" when it can)
+  std::vector<std::string> part_problems;  // (round 347) parts set by hand that weren't taken, and why
   bool valid() const { return problem.empty(); }
 };
 
 /* The rig under `armature` read for walking: its hips, spine and head, two legs (or four) with their feet and toes and
  * the IK controls that move them, its arms; by the bones' names (Mixamo, Unity, Rigify, create_rig's) and then by
  * their shape (the two-bone chains ending lowest are legs). `problem` says why when there are no legs to walk on. */
-Rig analyse(const Scene &scene, GameObject &armature);
+Rig analyse(const Scene &scene, GameObject &armature, bool with_parts = true);  // (with_parts: the Armature's Puppet Controls taken - round 347)
 
 /* ---------------------------------------------------------------- the gait (task 0125) */
 

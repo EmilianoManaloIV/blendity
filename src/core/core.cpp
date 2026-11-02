@@ -122,6 +122,21 @@ std::string to_lower(std::string s) {
   return s;
 }
 
+std::string forward_slashes(std::string path) {
+  std::replace(path.begin(), path.end(), '\\', '/');
+  return path;
+}
+
+std::vector<std::pair<std::string, int>> count_notes(const std::vector<std::string> &notes) {
+  std::vector<std::pair<std::string, int>> out;
+  for (const std::string &n : notes) {
+    auto it = std::find_if(out.begin(), out.end(), [&](const std::pair<std::string, int> &e) { return e.first == n; });
+    if (it == out.end()) out.push_back({n, 1});
+    else it->second++;
+  }
+  return out;
+}
+
 std::vector<std::string> split_ws(const std::string &s) {
   std::vector<std::string> out;
   std::istringstream is(s);

@@ -20,6 +20,48 @@ static std::string mmss(double seconds) {
   return strprintf("%d:%02d", t / 60, t % 60);
 }
 
+/* Round 354: the job still working on `g`'s mesh, by its tray label - "" when none is. `surfaces`: the surface paths
+ * found when the export was asked for (a waiting export doesn't look them up every frame). */
+std::string Editor::pending_job_on(GameObject &g, const std::vector<std::string> *surfaces) {
+  if (sculpt_remesh_ && sculpt_remesh_->obj == g.id) return "Quad Remesh";
+  if (skin_job_ && skin_job_->object == g.id) return skin_job_->label;
+  if (meshmaps_job_ && meshmaps_job_->obj == g.id) return "Mesh Maps";
+  if (!surface_job_) return "";
+  if (surfaces) return std::find(surfaces->begin(), surfaces->end(), surface_job_->path) != surfaces->end() ? "Surface" : "";
+  const ProceduralTexturePtr surface = surface_of(&g, nullptr);
+  return surface && surface->asset_path == surface_job_->path ? "Surface" : "";
+}
+
+/* Round 354: each frame, the waiting exports whose objects no job works on any more go - or one whose Export Now was
+ * pressed, said; the objects asked for, not what is selected now. */
+void Editor::export_wait_poll() {
+  for (size_t i = 0; i < export_waits_.size();) {
+    ExportWait &w = export_waits_[i];
+    std::vector<GameObject *> objs;
+    std::string busy;
+    for (uint64_t id : w.objects) {
+      GameObject *g = scene_->find(id);
+      if (!g) continue;
+      objs.push_back(g);
+      if (busy.empty()) busy = pending_job_on(*g, &w.surfaces);
+    }
+    if (!busy.empty() && !w.now) {
+      i++;
+      continue;
+    }
+    if (!busy.empty()) Log::warn("Export: %s written now, without waiting for %s (it had not finished)", fs::filename(w.path).c_str(), busy.c_str());
+    const ExportWait go = w;
+    export_waits_.erase(export_waits_.begin() + (std::ptrdiff_t)i);
+    export_objects(objs, go.options, go.path);
+  }
+}
+
+/* Review 354: the waiting exports dropped - their objects are another scene's now - and said. */
+void Editor::export_waits_drop(const char *why) {
+  for (const ExportWait &w : export_waits_) Log::warn("Export of %s dropped: %s", fs::filename(w.path).c_str(), why);
+  export_waits_.clear();
+}
+
 /* The running jobs, newest state each frame; `started` from the tray's own record (jobs_poll). */
 std::vector<Editor::JobView> Editor::jobs_running() {
   std::vector<JobView> jobs;
@@ -28,6 +70,19 @@ std::vector<Editor::JobView> Editor::jobs_running() {
     j.label = label, j.progress = progress, j.cancellable = cancel != nullptr, j.cancel = std::move(cancel), j.cancelled = cancelled;
     jobs.push_back(std::move(j));
   };
+  /* Review 354: a waiting export first, so the tray's buttons reach it - Cancel drops it, Export Now writes it at once. */
+  for (const ExportWait &w : export_waits_) {
+    const std::string label = w.label;
+    add(label, -1.0f, [this, label] {
+      const auto it = std::find_if(export_waits_.begin(), export_waits_.end(), [&](const ExportWait &e) { return e.label == label; });
+      if (it == export_waits_.end()) return;
+      Log::info("Export of %s cancelled", fs::filename(it->path).c_str());
+      export_waits_.erase(it);
+    });
+    jobs.back().now = [this, label] {
+      for (ExportWait &e : export_waits_) e.now = e.now || e.label == label;
+    };
+  }
   if (!busy_label_.empty()) add(busy_label_, -1.0f, nullptr);
   if (sculpt_remesh_)
     add("Quad Remesh", -1.0f, [this] { sculpt_remesh_->cancel.store(true, std::memory_order_relaxed); }, sculpt_remesh_->cancel.load(std::memory_order_relaxed));
@@ -36,6 +91,10 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   if (bakelight_)
     add(bakelight_->gradient ? "Baked Gradient" : "Baked Light", bakelight_->progress.load(std::memory_order_relaxed),
         [this] { bakelight_->cancel.store(true, std::memory_order_relaxed); }, bakelight_->cancel.load(std::memory_order_relaxed));
+  if (pkg_job_)  // (round 369)
+    add("Unpacking " + fs::filename(pkg_job_->path), pkg_job_->progress.load(), [this] { pkg_job_->cancel.store(true); }, pkg_job_->cancel.load());
+  if (export_job_)  // (round 372)
+    add("Writing " + fs::filename(export_job_->out), export_job_->progress.load(), [this] { export_job_->cancel.store(true); }, export_job_->cancel.load());
   if (surface_job_) add("Surface", -1.0f, nullptr);  // (no Cancel: the stack would be evaluated again at once)
   if (skin_job_) add(skin_job_->label, skin_job_->progress.load(), [this] { skin_job_->cancel = true; }, skin_job_->cancel.load());
   if (baking_) add("Baking lighting", probe_phase_ ? -1.0f : baker_.progress(), [this] { bake_cancel(); });  // (one job through both phases)
@@ -54,6 +113,7 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   }
   if (seq_.active) add("Rendering camera sequence", (float)seq_.index / (float)std::max<size_t>(1, seq_.cams.size()), [this] { stop_render_sequence(); });
   if (ranim_.encode) add("Encoding video", -1.0f, nullptr);  // (no Cancel: an external FFmpeg cannot be told)
+
   for (JobView &j : jobs) {
     const auto seen = std::find_if(jobs_seen_.begin(), jobs_seen_.end(), [&](const JobSeen &s) { return s.label == j.label; });
     if (seen != jobs_seen_.end()) j.started = seen->started;
@@ -108,7 +168,8 @@ int Editor::draw_job_tray(int right_x, int y, int h, const std::vector<JobView> 
   if (jobs.size() > 1) text += strprintf("  +%zu", jobs.size() - 1);
   const int bw = j.cancellable ? u.font.text_width("Cancel") + u.px(16) : 0;
   const int tw = u.font.text_width(text) + u.px(16);
-  const int w = tw + (bw ? bw + u.px(6) : 0) + u.px(12);
+  const int nw = j.now ? u.font.text_width("Export Now") + u.px(22) : 0;  // (review 354)
+  const int w = tw + (bw ? bw + u.px(6) : 0) + u.px(12) + nw;
   const Recti bar{right_x - w + u.px(6), y + u.px(3), tw, h - u.px(6)};
   u.frame(bar, u.theme.well, u.theme.border, u.px(3));
   const Recti inner{bar.x + 1, bar.y + 1, bar.w - 2, bar.h - 2};
@@ -130,8 +191,15 @@ int Editor::draw_job_tray(int right_x, int y, int h, const std::vector<JobView> 
   if (bw) {
     const Recti cb{bar.right() + u.px(6), y + u.px(3), bw, h - u.px(6)};
     if (u.button(cb, "Cancel")) jobs_cancel(j.label);
-    u.tooltip("Stop this job; what it made so far is dropped.");
+    u.tooltip(j.now ? "Don't write this file (the job it waits for goes on)." : "Stop this job; what it made so far is dropped.");
     if (u.record_buttons) u.button_rects["job:Cancel"] = cb;
+  }
+  if (j.now) {  // (review 354: a waiting export's Export Now, left of the bar)
+    const int nw = u.font.text_width("Export Now") + u.px(16);
+    const Recti nb{bar.x - nw - u.px(6), y + u.px(3), nw, h - u.px(6)};
+    if (u.button(nb, "Export Now")) j.now();
+    u.tooltip("Write the file at once, with the mesh as it is now (the job it waits for hasn't finished).");
+    if (u.record_buttons) u.button_rects["job:Export Now"] = nb;
   }
   u.redraw = true;  // (the times and the stripe move)
   return w;

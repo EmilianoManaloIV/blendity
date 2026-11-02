@@ -1280,7 +1280,7 @@ static void tests_round251() {
     std::string on_disk;
     CHECK(fs::read_file(dir + "/mine.blendity-ui", on_disk) && on_disk == saved);
     ed.command("theme Light");
-    ed.command("scale 1.5");
+    ed.command("ui scale 1.5");
     ed.command("keymap Maya");
     ed.command("feel Blender");
     ed.command("panel delete Mine");

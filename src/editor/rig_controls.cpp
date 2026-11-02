@@ -267,7 +267,7 @@ std::unordered_set<uint64_t> Editor::ik_driven_bones() const {
   if (IKConstraint::live.load(std::memory_order_relaxed) == 0) return out;
   scene_->for_each([&](GameObject &g) {
     const IKConstraint *ik = g.get<IKConstraint>();
-    if (!ik || !ik->enabled || ik->target.empty()) return;
+    if (!ik || !ik->enabled || ik->target.empty() || ik_off(*ik)) return;  // (Weight 0: FK - round 348)
     for (GameObject *b : ik_turned_bones(g, *ik)) out.insert(b->id);
   });
   return out;

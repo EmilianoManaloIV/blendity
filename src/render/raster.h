@@ -218,6 +218,7 @@ struct DrawItem {
   /* Camera Flatten (round 334): `model` places the flattened shape; the normals, the face shadow map's key and the
    * object's own space for shading come from `shade_model`, the true placement. */
   bool flattened = false;
+  bool view_shaped = false;  // (round 339: its mesh is a camera view's - View Angle Shapes - the plain mesh's topology and UVs)
   Mat4 shade_model;
 };
 

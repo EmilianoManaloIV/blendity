@@ -37,6 +37,7 @@ void Editor::livelink_write_discovery() {
   w.obj().key("protocol").str(livelink::kProtocol).key("port").integer(livelink_->port()).key("pid").integer((int64_t)BL_GETPID());
   w.key("app").str("Blendity").key("version").str(releases::version());
   w.key("scene").str(scene_ && !scene_->path.empty() ? fs::stem(scene_->path) : std::string("Untitled"));
+  w.key("inbox").str(forward_slashes(snapshot_inbox()));  // (round 374: where a bridge's Send to Blendity writes)
   w.key("started").integer((int64_t)std::time(nullptr)).end();
   const std::string path = livelink_discovery_path(), tmp = path + ".tmp";
   livelink_discovery_ = fs::write_file(tmp, w.out + "\n");  // (whole, then in its place: a bridge never reads half a file)
@@ -98,15 +99,18 @@ void Editor::livelink_autostart() {
 bool Editor::livelink_pref(const std::string &k, const std::string &v) {
   if (k == "livelink_autostart") return livelink_autostart_ = std::atoi(v.c_str()) != 0, true;
   if (k == "livelink_port") return livelink_port_ = std::max(0, std::min(65535, std::atoi(v.c_str()))), true;
+  if (k == "blender_path") return blender_path_ = v, true;  // (round 374)
   return false;
 }
 
 std::string Editor::livelink_prefs_text() const {
-  return strprintf("livelink_autostart=%d\nlivelink_port=%d\n", livelink_autostart_ ? 1 : 0, livelink_port_);
+  return strprintf("livelink_autostart=%d\nlivelink_port=%d\n", livelink_autostart_ ? 1 : 0, livelink_port_) + (blender_path_.empty() ? "" : "blender_path=" + blender_path_ + "\n");
 }
 
 void Editor::livelink_tick() {
   bridge_job_poll();  // (task 0278)
+  blend_job_poll();   // (round 374)
+  if (livelink_ && livelink_->running() && scene_) poll_snapshot_inbox(false);
   if (livelink_ && scene_) livelink_->tick(*scene_, playing_, now_seconds());
 }
 
@@ -219,6 +223,8 @@ void Editor::draw_livelink_window(const Recti &r) {
   stat("Objects / transforms / poses", strprintf("%llu / %llu / %llu", (unsigned long long)s.objects, (unsigned long long)s.transforms, (unsigned long long)s.poses));
   stat("Meshes / deforms", strprintf("%llu / %llu (built in %.0f ms)", (unsigned long long)s.meshes, (unsigned long long)s.deforms, s.mesh_encode_ms));
   stat("Materials / lights / cameras", strprintf("%llu / %llu / %llu", (unsigned long long)s.materials, (unsigned long long)s.lights, (unsigned long long)s.cameras));
+  stat("Clips", s.clips_too_big ? strprintf("%llu sent, %llu too big to send (over 32 MB baked)", (unsigned long long)s.clips, (unsigned long long)s.clips_too_big)
+                                : strprintf("%llu sent", (unsigned long long)s.clips));
   stat("Replaced before sending", strprintf("%llu", (unsigned long long)n.coalesced));
   stat("Comparing the scene", strprintf("%.2f ms (most %.2f)", s.tick_ms, s.tick_ms_max));
 }

@@ -2,6 +2,7 @@
 // blendity_tests: the animation tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/scene/puppet.h"
+#include "../src/scene/humanoid.h"
 #include "../src/scene/motion_check.h"
 #include "../src/scene/ragdoll.h"
 
@@ -5675,7 +5676,7 @@ static void tests_round301() {
     std::printf("    Reach 0: frame 5 %.4f, 10 %.3f degrees\n", turn_at(5), turn_at(10));
     CHECK(turn_at(10) > 2.0f && turn_at(5) < 1e-4f);
   });
-  test("Puppet Posing's handles (task 0281): with AutoPosing on the selected rig's hands, feet, head and hips are handles; a drag on the left hand's moves it and keys the pose; a click on the right hand's pins it, another frees it - all by real mouse events", [] {
+  test("Puppet Posing's handles (task 0281; round 346: controls): with AutoPosing on the selected rig's hands, feet, head and hips are controls; a drag on the left hand's moves it and keys the pose; a click on the right hand's selects it, a double-click pins it, another frees it - all by real mouse events", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     ed.record_buttons_for_test(true);
@@ -5716,13 +5717,535 @@ static void tests_round301() {
       for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, x, y)});
       ed.step_frame_headless();
     };
+    ed.set_clock_for_test(1000.0);  // (the editor's clock still: a second click at once is a double-click, whatever the build's speed)
     ed.button_rect_for_test("puppet:RightHand", rh);
-    click(rh);
+    click(rh);  // (one click: selected, not pinned)
+    GameObject *rhand = ed.scene().find_by_name("RightHand");
+    const bool selected = rhand && ed.puppet_selected_for_test() == rhand->id && ed.autopose_locks_for_test().empty() &&
+                          ed.active_object_for_test() == rhand && ed.puppet_control_selected_for_test();  // (its bone selected, no gizmo)
+    const Vec3 pivot0 = ed.scene_camera_for_test().pivot;
+    const float dist0 = ed.scene_camera_for_test().distance;
+    ed.button_rect_for_test("puppet:RightHand", rh);
+    click(rh);  // (a second at once: a double-click - pinned)
     const bool pinned = ed.autopose_locks_for_test().size() == 1;
-    ed.button_rect_for_test("puppet:RightHand", rh);
-    click(rh);
-    std::printf("    a click on the right hand's handle: pinned %d; another: %zu pins\n", (int)pinned, ed.autopose_locks_for_test().size());
-    CHECK(pinned && ed.autopose_locks_for_test().empty());
+    const bool still = length(ed.scene_camera_for_test().pivot - pivot0) < 1e-6f && ed.scene_camera_for_test().distance == dist0 && !ed.scene_camera_for_test().animating;  // (a framing would start a camera move)
+    std::printf("    the double-click left the view where it was: %d\n", (int)still);
+    CHECK(still);  // (review 346: the pin's double-click isn't Frame Selected too)
+    for (int i = 0; i < 2; i++) {  // (a double-click again: freed)
+      ed.button_rect_for_test("puppet:RightHand", rh);
+      click(rh);
+    }
+    std::printf("    a click on the right hand's control: selected %d; a double-click: pinned %d; another: %zu pins\n", (int)selected, (int)pinned,
+                ed.autopose_locks_for_test().size());
+    CHECK(selected && pinned && ed.autopose_locks_for_test().empty());
+  });
+}
+
+/* ---------------------------------------------------------------- round 346: Puppet Posing's controls, clickable */
+static void tests_round346() {
+  using ET = platform::EventType;
+  auto ev = [](ET t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    return e;
+  };
+  test("Puppet Posing's controls (round 346): with only the character's mesh selected (its Skin names the rig) the controls show; feet are boxes under the soles, the head's ring above it, each control apart from its joint; while AutoPosing a click on a bone keeps the mesh selected (no gizmo on the bone), Ctrl+click picks it; Control Size scales them", [&] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(1000.0);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    GameObject *body = ed.scene().create("R346Body");
+    body->add<MeshFilter>()->mesh = primitives::cube(0.3f);
+    body->add<MeshRenderer>();
+    body->add<SkinModifier>()->object = rig->name;
+    ed.mark_changed_for_test("R346");
+    ed.command("select R346Body");
+    ed.command("anim new R346");
+    ed.command("autopose on");
+    ed.command("select " + rig->name);
+    ed.frame_selected_for_test();
+    ed.command("select R346Body");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti lf, head;
+    const bool shown = ed.button_rect_for_test("puppet:LeftFoot", lf) && ed.button_rect_for_test("puppet:Head", head);
+    std::printf("    the controls with the mesh selected: %s\n", shown ? "shown" : "NOT shown");
+    CHECK(shown);
+    if (!shown) return;
+    /* The foot's box is below its joint on screen, the head's ring above (Control Size 3: a few pixels each at this zoom otherwise). */
+    rig->get<Armature>()->control_size = 3.0f;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.button_rect_for_test("puppet:LeftFoot", lf), ed.button_rect_for_test("puppet:Head", head);
+    GameObject *foot = ed.scene().find_by_name("LeftFoot"), *hd = ed.scene().find_by_name("Head");
+    int fx = 0, fy = 0, hx = 0, hy = 0;
+    CHECK(foot && hd && ed.project_to_window(foot->world_position(), fx, fy) && ed.project_to_window(hd->world_position(), hx, hy));
+    std::printf("    the foot's control %d px below its joint, the head's %d px above\n", lf.y + lf.h / 2 - fy, hy - (head.y + head.h / 2));
+    CHECK(lf.y + lf.h / 2 > fy + 2 && head.y + head.h / 2 < hy - 2);
+    /* A click on a bone that isn't a control (the left upper arm's middle, away from every control; Control Size back to
+     * 1): the mesh stays selected. */
+    rig->get<Armature>()->control_size = 1.0f;
+    ed.command("select LeftUpperArm");  // (framed close: at the whole rig's framing the arm is a few pixels from the hand)
+    ed.frame_selected_for_test();
+    ed.command("select R346Body");
+    for (int i = 0; i < 8; i++) ed.step_frame_headless();
+    GameObject *upper = ed.scene().find_by_name("LeftUpperArm"), *fore = ed.scene().find_by_name("LeftLowerArm");
+    int ax = 0, ay = 0, bx = 0, by = 0;
+    CHECK(upper && fore && ed.project_to_window(upper->world_position(), ax, ay) && ed.project_to_window(fore->world_position(), bx, by));
+    const int mx = (ax + bx) / 2, my = (ay + by) / 2;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, mx, my)});
+    ed.step_frame_headless();
+    GameObject *after = ed.active_object_for_test();
+    std::printf("    a click on the upper arm while AutoPosing: %s selected (a control: %s)\n", after ? after->name.c_str() : "nothing",
+                ed.puppet_selected_for_test() ? "selected" : "none");
+    CHECK(after && after->name == "R346Body" && ed.puppet_selected_for_test() == 0);
+    /* Ctrl+click: the bone (apart in time from the last click, or the two are a double-click). */
+    ed.set_clock_for_test(ed.clock_for_test() + 1.0);
+    platform::Event down = ev(ET::MouseDown, mx, my), up = ev(ET::MouseUp, mx, my);
+    down.mods = up.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({ev(ET::MouseMove, mx, my)});
+    ed.step_frame_headless({down});
+    ed.step_frame_headless({up});
+    ed.step_frame_headless();
+    GameObject *picked = ed.active_object_for_test();
+    std::printf("    Ctrl+click there: %s selected\n", picked ? picked->name.c_str() : "nothing");
+    CHECK(picked && picked->get<Bone>() && ed.selection_size_for_test() == 1);  // (it alone: a toggle had added it to the mesh)
+    /* Control Size 6: the head's ring twice as far above as at 3 (the whole rig framed again, as it was measured). */
+    ed.command("select " + rig->name);
+    ed.frame_selected_for_test();
+    ed.command("select R346Body");
+    for (int i = 0; i < 8; i++) ed.step_frame_headless();
+    CHECK(ed.project_to_window(hd->world_position(), hx, hy));
+    rig->get<Armature>()->control_size = 3.0f;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.button_rect_for_test("puppet:Head", head);
+    rig->get<Armature>()->control_size = 6.0f;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti head2;
+    CHECK(ed.button_rect_for_test("puppet:Head", head2));
+    std::printf("    Control Size 6: the head's control %d px above (at 3: %d)\n", hy - (head2.y + head2.h / 2), hy - (head.y + head.h / 2));
+    CHECK(hy - (head2.y + head2.h / 2) > (hy - (head.y + head.h / 2)) * 3 / 2);
+  });
+}
+
+/* ---------------------------------------------------------------- round 347: control points you choose */
+static bool scene_parent_is(const GameObject *child, const GameObject *parent) { return child && child->parent == parent; }
+
+static void tests_round348() {
+  /* A humanoid preset's left arm bent by its handle (the IK solved), the root selected. */
+  struct BentArm {
+    Editor ed;
+    GameObject *ua = nullptr, *la = nullptr, *hand = nullptr, *target = nullptr, *pole = nullptr;
+    IKConstraint *ik = nullptr;
+    BentArm() {
+      ed.init_headless(1200, 900);
+      ed.command("rig humanoid");
+      Scene &s = ed.scene();
+      ua = s.find_by_name("LeftUpperArm"), la = s.find_by_name("LeftLowerArm"), hand = s.find_by_name("LeftHand");
+      target = s.find_by_name("LeftHandIK"), pole = s.find_by_name("LeftElbowPole");
+      ik = la ? la->get<IKConstraint>() : nullptr;
+      if (!target) return;
+      target->set_world_position(target->world_position() + Vec3(0.1f, -0.2f, 0.15f));  // (a bent arm)
+      target->set_world_rotation(normalize(Quat::axis_angle(Vec3(0, 0, 1), 0.4f) * target->world_rotation()));
+      ed.mark_changed_for_test("bend the arm");
+      ed.step_frame_headless();
+    }
+    bool ok() const { return ua && la && hand && target && pole && ik; }
+  };
+  auto qdot = [](Quat a, Quat b) { return std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w); };
+  test("FK / IK per limb (round 348): to FK the arm keeps its pose and its bones turn by hand; to IK the handles meet the FK pose", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    const Vec3 h0 = b.hand->world_position(), e0 = b.la->world_position();
+    const Quat r0 = b.hand->world_rotation();
+    ed.command("autopose fk larm");
+    ed.step_frame_headless();
+    std::printf("    to FK: the hand moved %.6f, the elbow %.6f (Weight %g)\n", length(b.hand->world_position() - h0), length(b.la->world_position() - e0), b.ik->weight);
+    CHECK(b.ik->weight == 0.0f && ik_off(*b.ik));
+    CHECK(length(b.hand->world_position() - h0) < 1e-4f && length(b.la->world_position() - e0) < 1e-4f && qdot(b.hand->world_rotation(), r0) > 0.9999f);
+    /* FK: the bones are the user's - the gizmo may turn them, a turn holds, the handle moves nothing. */
+    CHECK(!ik_drives(ed.scene(), *b.ua) && !ik_drives(ed.scene(), *b.la) && !ik_end_driven(ed.scene(), *b.hand));
+    b.ua->set_local_rotation(normalize(Quat::axis_angle(Vec3(0, 0, 1), 0.5f) * b.ua->local().rotation));
+    b.target->set_world_position(b.target->world_position() + Vec3(0, 0.3f, 0));
+    ed.mark_changed_for_test("turn the upper arm");
+    ed.step_frame_headless();
+    const Vec3 h1 = b.hand->world_position(), e1 = b.la->world_position();
+    const Quat r1 = b.hand->world_rotation();
+    const Quat ua1 = b.ua->local().rotation, la1 = b.la->local().rotation;
+    std::printf("    FK: the upper arm's turn moved the hand %.3f\n", length(h1 - h0));
+    CHECK(length(h1 - h0) > 0.05f);
+    /* To IK: the handle and the pole go to the FK pose - nothing jumps. */
+    ed.command("autopose ik larm");
+    ed.step_frame_headless();
+    std::printf("    to IK: the hand moved %.6f, the elbow %.6f, the handle is %.6f from the hand\n", length(b.hand->world_position() - h1), length(b.la->world_position() - e1),
+                length(b.target->world_position() - h1));
+    CHECK(b.ik->weight == 1.0f && !ik_off(*b.ik));
+    CHECK(length(b.hand->world_position() - h1) < 1e-3f && length(b.la->world_position() - e1) < 1e-3f && qdot(b.hand->world_rotation(), r1) > 0.9999f);
+    CHECK(length(b.target->world_position() - h1) < 1e-4f && ik_drives(ed.scene(), *b.ua));
+    CHECK(qdot(b.ua->local().rotation, ua1) > 0.9999f && qdot(b.la->local().rotation, la1) > 0.9999f);  // (the bones' own turns kept, not only the joints)
+    /* Undo goes back to FK. */
+    ed.command("undo");
+    ed.step_frame_headless();
+    const GameObject *la2 = ed.scene().find_by_name("LeftLowerArm");  // (undo rebuilt the objects)
+    CHECK(la2 && la2->get<IKConstraint>() && la2->get<IKConstraint>()->weight == 0.0f);
+  });
+  test("FK / IK (round 348): Match moves only the handles; the Inspector's FK / IK / Match buttons; a limb with no IK is said; the legs", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("autopose fk larm");
+    b.ua->set_local_rotation(normalize(Quat::axis_angle(Vec3(1, 0, 0), 0.4f) * b.ua->local().rotation));
+    ed.mark_changed_for_test("turn");
+    ed.step_frame_headless();
+    const Vec3 h = b.hand->world_position();
+    ed.command("autopose match larm");
+    ed.step_frame_headless();
+    CHECK(b.ik->weight == 0.0f && length(b.target->world_position() - h) < 1e-4f && length(b.hand->world_position() - h) < 1e-4f);
+    /* The Inspector on the forearm: Switch to IK, Switch to FK (clicked). */
+    ed.record_buttons_for_test(true);
+    ed.command("select LeftLowerArm");
+    r34_steps(ed, 3);
+    auto press = [&](const std::string &label) {
+      Recti at{0, 0, 0, 0};
+      for (int tries = 0; tries < 60; tries++) {  // (scrolled into the Inspector's view)
+        const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+        if (ed.button_rect_for_test(label, at) && at.y >= w.y + ed.ui_for_test().row_h() * 2 && at.bottom() <= w.bottom()) break;
+        platform::Event wheel;
+        wheel.type = platform::EventType::Wheel;
+        wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = at.w > 0 && at.y < w.y + ed.ui_for_test().row_h() * 2 ? 3.0f : -3.0f;
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+        ed.step_frame_headless({wheel});
+      }
+      if (at.w <= 0) return false;
+      r34_click(ed, at.x + at.w / 2, at.y + at.h / 2);
+      r34_steps(ed, 1);
+      return true;
+    };
+    CHECK(press("Switch to IK"));
+    std::printf("    Switch to IK clicked: Weight %g, the hand moved %.6f\n", b.ik->weight, length(b.hand->world_position() - h));
+    CHECK(b.ik->weight == 1.0f && length(b.hand->world_position() - h) < 1e-3f);
+    CHECK(press("Switch to FK"));
+    CHECK(b.ik->weight == 0.0f);
+    /* The legs by name; a word that isn't a limb, or a rig not selected, changes nothing. */
+    ed.command("select LeftUpperArm");
+    ed.command("autopose fk rleg");
+    const IKConstraint *leg = ed.scene().find_by_name("RightLowerLeg") ? ed.scene().find_by_name("RightLowerLeg")->get<IKConstraint>() : nullptr;
+    CHECK(leg && leg->weight == 0.0f);
+    ed.command("autopose ik tail");
+    CHECK(leg && leg->weight == 0.0f);  // (not a limb: nothing changed)
+    ed.command("autopose ik lleg");
+    const IKConstraint *lleg = ed.scene().find_by_name("LeftLowerLeg") ? ed.scene().find_by_name("LeftLowerLeg")->get<IKConstraint>() : nullptr;
+    CHECK(lleg && lleg->weight == 1.0f);
+    ed.command("create cube");  // (selected: no rig)
+    ed.command("autopose fk lleg");
+    CHECK(lleg && lleg->weight == 1.0f);
+  });
+  test("FK / IK (round 348): with Record on the switch is keyed - FK keys the Weight and the bones, IK the Weight and the handles", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("anim new");
+    ed.command("anim frame 12");
+    ed.command("anim record on");
+    ed.step_frame_headless();
+    ed.command("autopose fk larm");
+    AnimationClipPtr c = ed.anim_clip_for_test();
+    auto keyed = [&](const std::string &property, const std::string &name) {
+      if (!c) return false;
+      for (const AnimTrack &t : c->tracks)
+        if (t.property == property && t.path.size() >= name.size() && t.path.compare(t.path.size() - name.size(), name.size(), name) == 0 && t.key_at(12.0f) >= 0) return true;
+      return false;
+    };
+    std::printf("    FK keyed: the Weight %d, the upper arm %d, the hand %d\n", (int)keyed("IKConstraint.Weight", "LeftLowerArm"), (int)keyed("Rotation", "LeftUpperArm"), (int)keyed("Rotation", "LeftHand"));
+    CHECK(keyed("IKConstraint.Weight", "LeftLowerArm") && keyed("Rotation", "LeftUpperArm") && keyed("Rotation", "LeftLowerArm") && keyed("Rotation", "LeftHand"));
+    ed.command("anim frame 20");
+    ed.step_frame_headless();
+    ed.command("autopose ik larm");
+    c = ed.anim_clip_for_test();
+    auto keyed20 = [&](const std::string &property, const std::string &name) {
+      if (!c) return false;
+      for (const AnimTrack &t : c->tracks)
+        if (t.property == property && t.path.size() >= name.size() && t.path.compare(t.path.size() - name.size(), name.size(), name) == 0 && t.key_at(20.0f) >= 0) return true;
+      return false;
+    };
+    CHECK(keyed20("IKConstraint.Weight", "LeftLowerArm") && keyed20("Position", "LeftHandIK") && keyed20("Position", "LeftElbowPole") && keyed20("Rotation", "LeftHandIK"));
+    ed.command("anim record off");
+  });
+  test("FK / IK (review 348): FK, IK, FK again on one clip doesn't jump; the Weight held between switches; the frames before the first switch kept", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("anim new");
+    ed.command("anim record on");
+    ed.command("anim frame 12");
+    ed.step_frame_headless();
+    ed.command("autopose fk larm");
+    b.ua->set_local_rotation(normalize(Quat::axis_angle(Vec3(0, 0, 1), 0.4f) * b.ua->local().rotation));
+    ed.mark_changed_for_test("an FK turn at 12");
+    ed.step_frame_headless();
+    const Vec3 fk12 = b.hand->world_position();
+    ed.command("anim frame 20");
+    ed.step_frame_headless();
+    ed.command("autopose ik larm");
+    ed.step_frame_headless();
+    b.target->set_world_position(b.target->world_position() + Vec3(0, 0.2f, 0));
+    ed.mark_changed_for_test("the handle up at 20");
+    ed.step_frame_headless();
+    ed.command("anim frame 30");
+    ed.step_frame_headless();
+    const Vec3 ik30 = b.hand->world_position();
+    ed.command("autopose fk larm");
+    ed.step_frame_headless();
+    std::printf("    FK again at 30 on a clip that keys the arm at 12: the hand moved %.6f (frame 12's pose is %.3f away)\n", length(b.hand->world_position() - ik30),
+                length(fk12 - ik30));
+    CHECK(length(b.hand->world_position() - ik30) < 1e-3f);
+    /* Between the switches the Weight is held (no blend through the rest pose): frame 16 is frame 12's FK pose. */
+    ed.command("anim frame 16");
+    ed.step_frame_headless();
+    std::printf("    frame 16: Weight %g, the hand %.6f from frame 12's\n", b.ik->weight, length(b.hand->world_position() - fk12));
+    CHECK(b.ik->weight == 0.0f && length(b.hand->world_position() - fk12) < 1e-2f);  // (the bones' curve eases between its keys at 12, 20 and 30: millimetres, not the rest pose's 20 cm)
+    /* Before the first switch, IK as it was. */
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    CHECK(b.ik->weight == 1.0f);
+    ed.command("anim record off");
+  });
+  test("FK / IK (review 348): a clip turning an IK off shows its unkeyed bones at rest whichever frame was shown before; the walk poses an FK leg's bones", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("anim new");
+    ed.command("anim preview on");
+    AnimationClipPtr c = ed.anim_clip_for_test();
+    GameObject *root = ed.active_object_for_test();
+    CHECK(c && root);
+    if (!c || !root) return;
+    AnimTrack &w = c->track(anim_path(*root, *b.la), "IKConstraint.Weight", 0);
+    w.set_key(0.0f, 1.0f, AnimConstant);
+    w.set_key(30.0f, 0.0f, AnimConstant);
+    c->touch();
+    auto at_rest = [&] { return qdot(b.ua->local().rotation, b.ua->get<Bone>()->rest_rotation) > 0.9999f && qdot(b.la->local().rotation, b.la->get<Bone>()->rest_rotation) > 0.9999f; };
+    ed.command("anim frame 0");
+    ed.step_frame_headless();
+    CHECK(!at_rest());  // (frame 0: IK, the arm bent)
+    ed.command("anim frame 30");
+    ed.step_frame_headless();
+    std::printf("    frame 30 straight after frame 0: Weight %g, the arm at rest %d\n", b.ik->weight, (int)at_rest());
+    CHECK(b.ik->weight == 0.0f && at_rest());
+    /* The walk's analysis: an FK leg has no handle (its bones are posed and keyed). */
+    ed.command("autopose fk lleg");
+    GameObject *rig = root;  // (the rig humanoid root, selected)
+    const gait::Rig r = rig ? gait::analyse(ed.scene(), *rig) : gait::Rig();
+    bool fk_leg_handle = false, ik_leg_handle = false;
+    for (const gait::Leg &l : r.legs) (l.side == 0 ? fk_leg_handle : ik_leg_handle) = l.ik_target != nullptr;
+    CHECK(rig && !fk_leg_handle && ik_leg_handle);
+  });
+  test("FK / IK (review 348): to IK with a forearm twisted in FK says the twist changed; a four-legged rig's limbs are said, not switched", [&] {
+    BentArm b;
+    CHECK(b.ok());
+    if (!b.ok()) return;
+    Editor &ed = b.ed;
+    ed.command("autopose fk larm");
+    const Vec3 axis = normalize(b.hand->world_position() - b.la->world_position());
+    b.la->set_world_rotation(normalize(Quat::axis_angle(axis, 1.0f) * b.la->world_rotation()));
+    ed.mark_changed_for_test("twist the forearm");
+    ed.step_frame_headless();
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("autopose ik larm");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.level == LogLevel::Warning && e.text.find("twist") != std::string::npos);
+    CHECK(said);
+    Editor q;
+    q.init_headless(1200, 900);
+    q.command("rig quadruped");
+    q.command("autopose fk lleg");
+    bool any_off = false;
+    q.scene().for_each([&](GameObject &g) { any_off = any_off || (g.get<IKConstraint>() && ik_off(*g.get<IKConstraint>())); });
+    CHECK(!any_off);
+  });
+  test("the lesson's Try-it (round 348): rig humanoid, then autopose fk larm turns the left arm's IK off", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    for (const char *c : {"rig humanoid", "autopose fk larm"}) ed.command(c);
+    const GameObject *la = ed.scene().find_by_name("LeftLowerArm");
+    const IKConstraint *ik = la ? la->get<IKConstraint>() : nullptr;
+    CHECK(ik && ik->weight == 0.0f);
+  });
+}
+
+static void tests_round349() {
+  test("Puppet Controls (round 349, found making the HCI productions): a left hand posed across the body isn't said to be on the right; a rig built mirrored still is", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("rig humanoid");
+    ed.command("autopose on");
+    ed.command("autopose drag LeftHand 0.3 1.6 0.3");  // (across the chest, past the middle)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    auto swapped = [&] {
+      bool said = false;
+      for (const std::string &l : ed.button_labels_for_test()) said = said || l.find("is on the right") != std::string::npos;
+      return said;
+    };
+    const GameObject *lh = ed.scene().find_by_name("LeftHand");
+    std::printf("    the left hand posed at x %.2f: said swapped %d\n", lh ? lh->world_position().x : 0.0f, (int)swapped());
+    CHECK(lh && lh->world_position().x > 0.0f && !swapped());
+    /* A rig whose "Left" bones really stand on its right: the shoulders swapped, said. */
+    GameObject *l = ed.scene().find_by_name("LeftUpperArm"), *r = ed.scene().find_by_name("RightUpperArm");
+    CHECK(l && r);
+    if (!l || !r) return;
+    l->name = "Tmp", r->name = "LeftUpperArm", l->name = "RightUpperArm";
+    for (const char *side : {"LowerArm", "Hand"}) {
+      GameObject *a = ed.scene().find_by_name(std::string("Left") + side), *b = ed.scene().find_by_name(std::string("Right") + side);
+      if (a && b) a->name = "Tmp", b->name = std::string("Left") + side, a->name = std::string("Right") + side;
+    }
+    ed.mark_changed_for_test("mirror the arms' names");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(swapped());
+  });
+}
+
+static void tests_round347() {
+  test("Puppet Controls (review 347): an imported rig named Bone.001... - no limbs found by name or shape - is read from the parts set by hand: both feet and both hands give two legs and two arms", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    /* Every bone renamed Bone.NNN: the legs are still found by their shape, the arms (found by name only) not at all. */
+    std::map<std::string, std::string> renamed;
+    int n = 0;
+    std::function<void(GameObject &)> walk = [&](GameObject &g) {
+      if (g.get<Bone>()) renamed[g.name] = strprintf("Bone.%03d", n++), g.name = renamed[g.name];
+      for (GameObject *c : g.children) walk(*c);
+    };
+    walk(*rig);
+    const gait::Rig before = gait::analyse(s, *rig);
+    Armature *a = rig->get<Armature>();
+    for (const char *side : {"Left", "Right"}) {
+      a->set_puppet_bone(std::string(side) + " Foot", renamed[std::string(side) + "Foot"]);
+      a->set_puppet_bone(std::string(side) + " Hand", renamed[std::string(side) + "Hand"]);
+    }
+    const gait::Rig after = gait::analyse(s, *rig);
+    std::printf("    named Bone.NNN: %zu legs, %zu arms (%s); with the feet and hands set: %zu legs, %zu arms (%s)\n", before.legs.size(), before.arms.size(),
+                before.valid() ? "valid" : before.problem.c_str(), after.legs.size(), after.arms.size(), after.valid() ? "valid" : after.problem.c_str());
+    CHECK(after.valid() && after.legs.size() == 2 && after.arms.size() == 2);
+  });
+  test("Puppet Controls (round 347): a part set on the Armature takes the analysis' place - the left hand on another bone, the left thigh on another - for every tool that reads the rig; set from the console's field names; other entries kept; round 324's text loads", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    Armature *a = rig ? rig->get<Armature>() : nullptr;
+    CHECK(a != nullptr);
+    if (!a) return;
+    a->puppet_bones = "Head=Neck";  // (round 324's text)
+    a->set_puppet_bone("Left Hand", "LeftLowerArm");
+    a->set_puppet_bone("Left Thigh", "Hips");
+    CHECK(a->puppet_bone("Head") == "Neck" && a->puppet_bone("Left Hand") == "LeftLowerArm" && a->puppet_bone("Left Thigh") == "Hips");
+    a->set_puppet_bone("Left Thigh", "");
+    CHECK(a->puppet_bone("Left Thigh").empty() && a->puppet_bone("Head") == "Neck");
+    a->set_puppet_bone("Left Thigh", "LeftLowerLeg");  // (the shin as the thigh: not a chain - refused, said)
+    a->set_puppet_bone("Right Foot", "LeftFoot");       // (the left foot on the right leg: not a chain either)
+    const gait::Rig r = gait::analyse(s, *rig);
+    const gait::Arm *left_arm = nullptr;
+    const gait::Leg *left_leg = nullptr, *right_leg = nullptr;
+    for (const gait::Arm &arm : r.arms) left_arm = arm.side == 0 ? &arm : left_arm;
+    for (const gait::Leg &leg : r.legs) (leg.side == 0 ? left_leg : right_leg) = &leg;
+    std::printf("    the analysis: the left hand %s (its forearm %s, upper arm %s), the left thigh %s, the right foot %s, the head %s; %zu problems\n",
+                left_arm && left_arm->hand ? left_arm->hand->name.c_str() : "-", left_arm && left_arm->lower ? left_arm->lower->name.c_str() : "-",
+                left_arm && left_arm->upper ? left_arm->upper->name.c_str() : "-", left_leg && left_leg->upper ? left_leg->upper->name.c_str() : "-",
+                right_leg && right_leg->foot ? right_leg->foot->name.c_str() : "-", r.head ? r.head->name.c_str() : "-", r.part_problems.size());
+    for (const std::string &p : r.part_problems) std::printf("      %s\n", p.c_str());
+    /* A hand set pulls its chain: the forearm is the hand's parent, the upper arm its parent. */
+    CHECK(left_arm && left_arm->hand && left_arm->hand->name == "LeftLowerArm" && left_arm->lower && left_arm->lower->name == "LeftUpperArm" &&
+          left_arm->upper && scene_parent_is(left_arm->lower, left_arm->upper));
+    CHECK(left_leg && left_leg->upper && left_leg->upper->name == "LeftUpperLeg");  // (the analysis' kept)
+    CHECK(right_leg && right_leg->foot && right_leg->foot->name == "RightFoot");    // (likewise)
+    CHECK(r.part_problems.size() == 2);
+    CHECK(r.head && r.head->name == "Neck");
+    /* Found Automatically is the analysis' own, whatever is set. */
+    const humanoid::Map own = humanoid::map(s, *rig, false);
+    CHECK(own.part[humanoid::LHand] && own.part[humanoid::LHand]->name == "LeftHand");
+    /* A name with the list's own separators is cleaned. */
+    a->set_puppet_bone("Extra Controls", "Chest;Tail=");
+    CHECK(a->puppet_bone("Extra Controls") == "Chest,Tail" && a->puppet_bone("Head") == "Neck");
+    /* The console's `set` reaches each part's field (the Inspector's Puppet Controls). */
+    Editor ed;
+    ed.init_headless(1200, 900);
+    GameObject *rig2 = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("R347");
+    ed.command("select " + rig2->name);
+    ed.command("set Armature.RightFoot RightLowerLeg");
+    CHECK(rig2->get<Armature>()->puppet_bone("Right Foot") == "RightLowerLeg");
+    /* Saved and loaded: the one text. */
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *rb = back.find_by_name(rig2->name);
+    CHECK(rb && rb->get<Armature>() && rb->get<Armature>()->puppet_bone("Right Foot") == "RightLowerLeg");
+  });
+  test("Puppet Controls (round 347): Extra Controls give a tail or a sword a ring of its own (dragged, the bones above bend); the Inspector says when a part set by hand was refused (the right hand set as the left)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.set_clock_for_test(1000.0);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("R347b");
+    ed.command("select " + rig->name);
+    ed.command("anim new R347");
+    ed.command("autopose on");
+    ed.frame_selected_for_test();
+    rig->get<Armature>()->set_puppet_bone("Extra Controls", "Chest, NoSuchBone");
+    ed.mark_changed_for_test("R347 extra");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti chest;
+    const bool ring = ed.button_rect_for_test("puppet:Chest", chest);
+    std::printf("    the Extra Control on the Chest: %s\n", ring ? "drawn" : "NOT drawn");
+    CHECK(ring);
+    /* Dragged: the chest moves (AutoPose bends the spine). */
+    GameObject *c = ed.scene().find_by_name("Chest");
+    const Vec3 c0 = c ? c->world_position() : Vec3(0.0f);
+    using ET = platform::EventType;
+    auto ev = [](ET t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    const int x0 = chest.x + chest.w / 2, y0 = chest.y + chest.h / 2;
+    ed.step_frame_headless({ev(ET::MouseMove, x0, y0)});
+    ed.step_frame_headless({ev(ET::MouseDown, x0, y0)});
+    for (int i = 1; i <= 6; i++) ed.step_frame_headless({ev(ET::MouseMove, x0 + i * 6, y0)});
+    ed.step_frame_headless({ev(ET::MouseUp, x0 + 36, y0)});
+    ed.step_frame_headless();
+    std::printf("    the chest dragged 36 px: it moved %.1f cm\n", c ? length(c->world_position() - c0) * 100.0f : -1.0f);
+    CHECK(c && length(c->world_position() - c0) > 0.01f);
+    /* The hands set the wrong way round: the Inspector says so. */
+    ed.command("autopose off");
+    Armature *a = rig->get<Armature>();
+    a->set_puppet_bone("Left Hand", "RightHand"), a->set_puppet_bone("Right Hand", "LeftHand");
+    ed.mark_changed_for_test("R347 swapped");
+    ed.command("select " + rig->name);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    bool warned = false;
+    for (const std::string &l : ed.button_labels_for_test()) warned = warned || l.rfind("shown:? Left arm: ", 0) == 0 && l.find("another limb") != std::string::npos;  // (the right hand set as the left: refused, and said)
+    std::printf("    the refused part said in the Inspector: %d\n", (int)warned);
+    CHECK(warned);
+  });
+  test("the lesson's Try-it (round 347): rig humanoid, then set Armature.ExtraControls Chest gives the Chest a control", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    for (const char *c : {"rig humanoid", "set Armature.ExtraControls Chest"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    GameObject *root = ed.active_object_for_test();
+    const Armature *a = root ? root->get<Armature>() : nullptr;
+    CHECK(a && a->puppet_bone("Extra Controls") == "Chest");
   });
 }
 
@@ -6123,6 +6646,137 @@ static void tests_round304() {
   });
 }
 
+/* ---------------------------------------------------------------- round 340: on 2s and 3s everywhere, the camera smooth */
+static void tests_round340() {
+  /* A root with a Lid and a camera both keyed along x from 0 at frame 0 to 10 at frame 10, its Animation on 2s. */
+  auto rig = [](Editor &ed) -> GameObject * {
+    ed.init_headless(1400, 900);
+    std::remove(resolve_asset_path("Assets/Animations/R340Box.anim").c_str());
+    GameObject *box = ed.scene().create("R340Box");
+    ed.scene().create("Lid", box);
+    GameObject *cam = ed.scene().create("Cam", box);
+    cam->add<Camera>();
+    ed.command("select R340Box");
+    ed.mark_changed_for_test("R340 box");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    for (const char *k : {"anim key Lid Position 0 0 0", "anim key Lid Position 0 10 10", "anim key Cam Position 0 0 0", "anim key Cam Position 0 10 10"}) ed.command(k);
+    Animation *a = box->get<Animation>();
+    if (a) a->hold = 2;
+    ed.step_frame_headless();
+    return box;
+  };
+  test("on 2s (round 340): the Animation window's Preview holds as Play does - frame 5 shows frame 4's pose - while a camera the clip animates moves every frame; Hold the Camera holds it too", [&] {
+    Editor ed;
+    GameObject *box = rig(ed);
+    CHECK(box && box->get<Animation>() && ed.anim_clip_for_test());
+    if (!box || !box->get<Animation>()) return;
+    ed.command("anim preview on");
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    /* (The keys ease - Auto: the clip's own values at frames 4 and 5, not 4 and 5.) */
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *lt = clip ? clip->find("Lid", "Position", 0) : nullptr, *ct = clip ? clip->find("Cam", "Position", 0) : nullptr;
+    CHECK(lt && ct);
+    if (!lt || !ct) return;
+    const float lid = ed.scene().find_by_name("Lid")->local().position.x, cam = ed.scene().find_by_name("Cam")->local().position.x;
+    std::printf("    frame 5 on 2s: the Lid at %.2f (frame 4's %.2f, frame 5's %.2f), the camera at %.2f (frame 5's %.2f)\n", lid, lt->sample(4.0f),
+                lt->sample(5.0f), cam, ct->sample(5.0f));
+    CHECK(std::fabs(lid - lt->sample(4.0f)) < 1e-4f && std::fabs(cam - ct->sample(5.0f)) < 1e-4f && std::fabs(lid - lt->sample(5.0f)) > 0.1f);
+    box->get<Animation>()->hold_camera = true;
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    CHECK(std::fabs(ed.scene().find_by_name("Cam")->local().position.x - ct->sample(4.0f)) < 1e-4f);
+    ed.command("anim preview off");
+  });
+  test("on 2s (round 340): Play holds the Lid on even frames and moves the camera every frame; the ruler marks every second frame; Hold the Camera saves", [&] {
+    Editor ed;
+    GameObject *box = rig(ed);
+    CHECK(box && box->get<Animation>());
+    if (!box || !box->get<Animation>()) return;
+    /* The component's own update, as Play runs it: 5 frames' time at the clip's rate. */
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    Animation &a = *box->get<Animation>();
+    const AnimTrack *lt = clip->find("Lid", "Position", 0), *ct = clip->find("Cam", "Position", 0);
+    CHECK(lt && ct);
+    if (!lt || !ct) return;
+    PlayContext ctx;
+    ctx.scene = &ed.scene();
+    a.start(ctx);
+    ctx.dt = 1.0f / (clip->frame_rate > 0.0f ? clip->frame_rate : 30.0f);
+    a.time = 0.0f;
+    for (int k = 0; k < 5; k++) a.update(ctx);  // (Play's own step: 5 frames' time)
+    const float lid5 = ed.scene().find_by_name("Lid")->local().position.x, cam5 = ed.scene().find_by_name("Cam")->local().position.x;
+    a.update(ctx);
+    const float lid6 = ed.scene().find_by_name("Lid")->local().position.x;
+    std::printf("    Play at frames 5 and 6: the Lid %.2f then %.2f (frames 4 and 6: %.2f, %.2f), the camera %.2f (frame 5: %.2f)\n", lid5, lid6,
+                lt->sample(4.0f), lt->sample(6.0f), cam5, ct->sample(5.0f));
+    CHECK(std::fabs(lid5 - lt->sample(4.0f)) < 1e-3f && std::fabs(cam5 - ct->sample(5.0f)) < 1e-3f && std::fabs(lid6 - lt->sample(6.0f)) < 1e-3f);
+    /* The ruler's marks: with the Animation window open, one at every second frame in view. */
+    ed.record_buttons_for_test(true);
+    ed.command("window Animation");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::string holds;
+    for (const std::string &l : ed.button_labels_for_test())
+      if (l.rfind("anim_holds:", 0) == 0) holds = l;
+    std::printf("    the ruler: %s\n", holds.empty() ? "(no marks)" : holds.c_str());
+    CHECK(holds.rfind("anim_holds:2:", 0) == 0 && std::atoi(holds.c_str() + 13) >= 5);
+    a.hold_camera = true;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    const GameObject *b2 = back.find_by_name("R340Box");
+    CHECK(b2 && b2->get<Animation>() && b2->get<Animation>()->hold == 2 && b2->get<Animation>()->hold_camera);
+  });
+  test("on 2s (review 340): Render Animation of frames 3-6 poses 3, 3, 5, 5 (held from its first frame, once) while the camera moves every frame; Set Key at frame 5 keys the drawn frame 4, not 5, so the curve isn't bent; a camera on an animated rig's empty moves every frame too", [&] {
+    Editor ed;
+    GameObject *box = rig(ed);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(box && clip);
+    if (!box || !clip) return;
+    const AnimTrack *lt = clip->find("Lid", "Position", 0), *ct = clip->find("Cam", "Position", 0);
+    CHECK(lt && ct);
+    if (!lt || !ct) return;
+    ed.command("anim preview on");
+    std::vector<float> lids, cams;
+    for (int f = 3; f <= 6; f++) {
+      ed.render_animation_pose_for_test(3, f);
+      lids.push_back(ed.scene().find_by_name("Lid")->local().position.x);
+      cams.push_back(ed.scene().find_by_name("Cam")->local().position.x);
+    }
+    std::printf("    rendered 3-6: the Lid %.2f %.2f %.2f %.2f, the camera %.2f %.2f %.2f %.2f\n", lids[0], lids[1], lids[2], lids[3], cams[0], cams[1], cams[2], cams[3]);
+    CHECK(std::fabs(lids[0] - lt->sample(3.0f)) < 1e-4f && lids[1] == lids[0] && std::fabs(lids[2] - lt->sample(5.0f)) < 1e-4f && lids[3] == lids[2]);
+    CHECK(std::fabs(cams[1] - ct->sample(4.0f)) < 1e-4f && std::fabs(cams[3] - ct->sample(6.0f)) < 1e-4f);
+    ed.render_animation_pose_for_test(0, 0);  // (the hold counted from 0 again, as after a render)
+    /* Set Key at frame 5 on 2s: the key goes on frame 4 (what the playhead shows); the camera's at 5. */
+    const size_t lid_keys = lt->keys.size();
+    ed.command("anim frame 5");
+    ed.step_frame_headless();
+    ed.set_key_for_test();
+    clip = ed.anim_clip_for_test();
+    lt = clip->find("Lid", "Position", 0), ct = clip->find("Cam", "Position", 0);
+    bool at4 = false, at5 = false, cam_at5 = false;
+    for (const AnimKey &k : lt->keys) at4 = at4 || k.frame == 4.0f, at5 = at5 || k.frame == 5.0f;
+    for (const AnimKey &k : ct->keys) cam_at5 = cam_at5 || k.frame == 5.0f;
+    std::printf("    Set Key at frame 5 on 2s: the Lid's keys %zu -> %zu (at 4: %d, at 5: %d), the camera's at 5: %d\n", lid_keys, lt->keys.size(), (int)at4, (int)at5, (int)cam_at5);
+    CHECK(at4 && !at5 && cam_at5);
+    ed.command("anim preview off");
+    /* A camera rig: the camera under an empty the clip pans - the empty moves every frame with it. */
+    GameObject *rig_empty = ed.scene().create("CamRig", box);
+    GameObject *cam = ed.scene().find_by_name("Cam");
+    ed.scene().set_parent(cam, rig_empty);
+    AnimationClip c2;
+    c2.track("CamRig", "Position", 0).set_key(0.0f, 0.0f, AnimLinear);
+    c2.track("CamRig", "Position", 0).set_key(10.0f, 10.0f, AnimLinear);
+    apply_clip(c2, *box, 5.0f, 2, false);
+    CHECK(std::fabs(rig_empty->local().position.x - 5.0f) < 1e-4f);
+    apply_clip(c2, *box, 5.0f, 2, true);  // (Hold the Camera: the rig holds too)
+    CHECK(std::fabs(rig_empty->local().position.x - 4.0f) < 1e-4f);
+  });
+}
+
 /* Round 335 (task 0315): animate almost any property of an object. */
 static void tests_round335() {
   test("round 335's tracks: a material slot's fields (Roughness, Base Color) and the object's Active are read, written and played by a clip; a slot that isn't there or a field that isn't refuses", [] {
@@ -6373,6 +7027,11 @@ void run_animation_tests() {
   tests_round304();
   tests_round309();
   tests_round335();
+  tests_round340();
+  tests_round346();
+  tests_round347();
+  tests_round348();
+  tests_round349();
   round64_tests();
   round69_tests();
   tests_round81();

@@ -1778,9 +1778,9 @@ static void coverage_tests() {
     CHECK(ed.scene().environment.mode == 3);
     ed.command("world gradient");
     CHECK(ed.scene().environment.mode == 0);
-    ed.command("scale 1.5");
+    ed.command("ui scale 1.5");
     ed.step_frame_headless();
-    ed.command("scale 0");  // (0: follow the DPI, the default)
+    ed.command("ui scale 0");  // (0: follow the DPI, the default)
     ed.command("threads 2");
     CHECK(JobSystem::global().thread_limit() == 2);
     ed.command("threads 0");
@@ -3886,6 +3886,156 @@ static void tests_round266() {
      * carried one depends on the worker having landed, which the sanitizer build's timing made false: either is right here. */
     const bool assigned = am && am->base_map.path == ex + "Albedo.png" && am->roughness_map.path == ex + "Roughness.png" && am->metallic_map.path == ex + "Metallic.png" && (am->emission_map.path.empty() || am->emission_map.path == ex + "Emission.png") && am->metallic == 1.0f && am->roughness == 1.0f;
     CHECK(assigned && fs::exists(ed.resolve_asset_path_for_test(ex + "ORM.png")) && fs::exists(ed.resolve_asset_path_for_test(ex + "Metallic.png")));
+    ed.command("undo");
+  });
+}
+
+/* Round 392 (task 0369): Substance Painter's - VRChat shaders' texture presets, the ID map and its masks, Bake All Maps. */
+static void tests_round392() {
+  test("the ID map (round 392): a cube with two material slots bakes their numbers into _id.png's red, the surface reads the slot at a point, a Material ID mask is 1 on its slot's faces and 0 on the other's; a record from before (no _id.png) has no ID map", [] {
+    MeshPtr cube = primitives::cube(1.0f);
+    cube->face_material.assign(cube->face_count(), 0);
+    for (size_t f = 0; f < cube->face_count() / 2; f++) cube->face_material[f] = 1;
+    cube->touch();
+    MeshMapsSettings s;
+    s.size = 128, s.samples = 2;
+    MeshMapsResult r;
+    std::string why;
+    CHECK(bake_mesh_maps(*cube, Mat4::identity(), s, r, &why));
+    size_t on0 = 0, on1 = 0, odd = 0;
+    for (size_t i = 0; i < r.covered.size(); i++) {
+      if (!r.covered[i]) continue;
+      const uint32_t slot = (r.id[i] >> 16) & 255;
+      on0 += slot == 0, on1 += slot == 1, odd += slot > 1;
+    }
+    SurfaceMaps m;
+    surface_maps_from_bake(r, 128, m);
+    TextureLayer *layer = nullptr;
+    auto paint = create_texture_layer("Fill");
+    layer = paint.get();
+    apply_material_id_mask(*layer, 1);
+    LayerContext c;
+    c.w = c.h = 128, c.surface = true, c.maps = &m;
+    size_t agree = 0, checked = 0;
+    for (int y = 0; y < 128; y += 7)
+      for (int x = 0; x < 128; x += 7) {
+        const size_t i = (size_t)y * 128 + x;
+        if (!r.covered[i]) continue;
+        const float u = (x + 0.5f) / 128.0f, v = (y + 0.5f) / 128.0f;
+        const float mask = own_mask_at(*layer, TexPoint{}, u, v, c);
+        checked++;
+        agree += (m.slot_at(u, v) == 1) == (mask > 0.5f);
+      }
+    std::printf("    texels of slot 0: %zu, slot 1: %zu, other: %zu; the mask agreed with the slot at %zu of %zu points\n", on0, on1, odd, agree, checked);
+    CHECK(on0 > 100 && on1 > 100 && odd == 0 && checked > 20 && agree == checked && !m.id.empty());
+    /* A record from before round 392: five PNGs, no ID map. */
+    const std::string base = fs::join(test_dir(), "r392_maps/old");
+    CHECK(write_mesh_maps(r, base, &why));
+    fs::remove_file(base + "_id.png");
+    SurfaceMaps old;
+    CHECK(load_surface_maps(base, 64, old, &why) && old.id.empty() && old.slot_at(0.5f, 0.5f) == -1);
+    SurfaceMaps fresh;
+    CHECK(write_mesh_maps(r, base, &why) && load_surface_maps(base, 64, fresh, &why) && !fresh.id.empty());
+    /* Review 392: slots 0 and 2 - the padding between their islands copies a slot, never a mean (slot 1 isn't there);
+     * the maps' hash changes when only the slots do; with no maps a Material ID mask is empty. */
+    for (size_t f = 0; f < cube->face_count(); f++) cube->face_material[f] = f % 2 ? 2 : 0;
+    cube->touch();
+    MeshMapsResult r2;
+    CHECK(bake_mesh_maps(*cube, Mat4::identity(), s, r2, &why));
+    size_t padded = 0, phantom = 0;
+    for (size_t i = 0; i < r2.id.size(); i++) {
+      if (r2.covered[i] || (r2.id[i] >> 24) == 0 || r2.id[i] == 0xFF000000u) continue;
+      padded++;
+      phantom += ((r2.id[i] >> 16) & 255) == 1;
+    }
+    SurfaceMaps m2;
+    surface_maps_from_bake(r2, 128, m2);
+    for (size_t f = 0; f < cube->face_count(); f++) cube->face_material[f] = f % 2 ? 0 : 2;
+    cube->touch();
+    MeshMapsResult r3;
+    CHECK(bake_mesh_maps(*cube, Mat4::identity(), s, r3, &why));
+    SurfaceMaps m3;
+    surface_maps_from_bake(r3, 128, m3);
+    LayerContext none;
+    none.w = none.h = 128, none.surface = true;
+    std::printf("    slots 0 and 2: %zu padded texels with a slot, %zu of them slot 1; the hash changed with the slots alone %d; no maps: the mask %.2f\n", padded, phantom,
+                (int)(m2.hash != m3.hash), own_mask_at(*layer, TexPoint{}, 0.5f, 0.5f, none));
+    CHECK(padded > 0 && phantom == 0 && m2.hash != m3.hash && own_mask_at(*layer, TexPoint{}, 0.5f, 0.5f, none) == 0.0f);
+  });
+  test("texture presets for VRChat's shaders (round 392): urp, poiyomi and liltoon write the files their slots take - Poiyomi's Packed Maps metallic in R and smoothness in G, lilToon's metallic and smoothness each in R; the masks Ground Dirt and Cavity; Bake All Maps loads its maps, the ID map with them; the messages name GameObject > Bake Mesh Maps", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g);
+    if (!g) return;
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    std::string why;
+    ed.surface_of_for_test(g, &why);
+    ed.command("surface new R392");
+    ProceduralTexturePtr pt = ed.surface_of_for_test(g, &why);
+    CHECK(pt);
+    if (!pt) return;
+    ed.command("surface add Fill");
+    const std::vector<std::string> &packs = texture_packings();
+    CHECK(std::find(packs.begin(), packs.end(), "poiyomi") != packs.end() && std::find(packs.begin(), packs.end(), "liltoon") != packs.end() && std::find(packs.begin(), packs.end(), "urp") != packs.end());
+    const std::string dir = fs::join(test_dir(), "r392_export");
+    std::vector<std::string> files;
+    CHECK(export_texture_set(*pt, "poiyomi", dir, files, &why) && files.size() == 4);
+    Bitmap packed;
+    CHECK(load_image(fs::join(dir, pt->name + "_PackedMaps.png"), packed, why));
+    const uint8_t *px = packed.rgba8.empty() ? nullptr : &packed.rgba8[0];
+    TexPlanes p;
+    pt->evaluate(p);
+    const int metal = px ? px[0] : -1, smooth = px ? px[1] : -1;
+    const int want_metal = (int)std::lround(p.metal[0] * 255.0f), want_smooth = (int)std::lround((1.0f - p.rough[0]) * 255.0f);
+    std::printf("    Poiyomi's packed map: R %d (metallic %d), G %d (smoothness %d), B %d, A %d\n", metal, want_metal, smooth, want_smooth, px ? px[2] : -1, px ? px[3] : -1);
+    CHECK(px && std::abs(metal - want_metal) <= 1 && std::abs(smooth - want_smooth) <= 1 && px[2] == 255 && px[3] == 255);
+    CHECK(export_texture_set(*pt, "liltoon", dir, files, &why) && files.size() == 5 && fs::exists(fs::join(dir, pt->name + "_SmoothnessTex.png")) &&
+          fs::exists(fs::join(dir, pt->name + "_MetallicGlossMap.png")) && fs::exists(fs::join(dir, pt->name + "_MainTex.png")));
+    CHECK(export_texture_set(*pt, "urp", dir, files, &why) && fs::exists(fs::join(dir, pt->name + "_BaseMap.png")) && fs::exists(fs::join(dir, pt->name + "_OcclusionMap.png")));
+    for (const DirEntry &e : fs::list(dir)) fs::remove_file(fs::join(dir, e.name));
+    /* The message without maps names the menu (finding 29). */
+    std::string no_maps;
+    ed.surface_load_maps_for_test(g, *pt, &no_maps);
+    std::printf("    without maps: %s\n", no_maps.c_str());
+    CHECK(no_maps.find("GameObject > Bake Mesh Maps") != std::string::npos && no_maps.find(" Object > ") == std::string::npos);
+    ed.command("surface mask preset 0 cavity");
+    const bool cavity = pt->layers[0]->mask_layers.size() == 1;
+    ed.command("surface mask preset 0 grounddirt");
+    const bool ground = pt->layers[0]->mask_layers.size() == 3;
+    ed.command("surface mask id 0 0");
+    const bool id_mask = pt->layers[0]->mask_layers.size() == 1;
+    std::printf("    cavity %d, ground dirt %d, the ID mask %d\n", (int)cavity, (int)ground, (int)id_mask);
+    CHECK(cavity && ground && id_mask);
+    /* Bake All Maps: on a worker, then loaded into the surface - the ID map with them. */
+    /* Review 392: a Bake All Maps cancelled leaves no target behind - an ordinary bake after it loads into nothing. */
+    pt = ed.surface_of_for_test(ed.active_object_for_test(), &why);
+    const void *maps_before = pt ? (const void *)pt->maps.get() : nullptr;  // (re-check 392: the surface's maps, by identity)
+    ed.command("surface bakeall 128");
+    ed.command("meshmaps cancel");
+    for (int i = 0; i < 2000 && ed.meshmaps_busy_for_test(); i++) ed.step_frame_headless();
+    ed.command("meshmaps 128 2");
+    for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) {
+      ed.step_frame_headless();
+      if (ed.meshmaps_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ed.step_frame_headless();
+    pt = ed.surface_of_for_test(ed.active_object_for_test(), &why);
+    const bool untouched = pt && (const void *)pt->maps.get() == maps_before;
+    std::printf("    an ordinary bake after a cancelled Bake All Maps left the surface alone %d\n", (int)untouched);
+    CHECK(untouched);
+    ed.command("surface bakeall 128");
+    CHECK(ed.meshmaps_busy_for_test());
+    for (int i = 0; i < 20000 && ed.meshmaps_busy_for_test(); i++) {
+      ed.step_frame_headless();
+      if (ed.meshmaps_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ed.step_frame_headless();
+    pt = ed.surface_of_for_test(ed.active_object_for_test(), &why);
+    std::printf("    Bake All Maps: the surface's maps %d x %d, the ID map %s\n", pt && pt->maps ? pt->maps->w : 0, pt && pt->maps ? pt->maps->h : 0, pt && pt->maps && !pt->maps->id.empty() ? "loaded" : "missing");
+    CHECK(pt && pt->maps && !pt->maps->id.empty());
     ed.command("undo");
   });
 }
@@ -7290,6 +7440,7 @@ void run_editor_tests() {
   tests_round265();
   tests_round266();
   tests_round267();
+  tests_round392();
   tests_round267b();
   tests_round268();
   tests_round268b();

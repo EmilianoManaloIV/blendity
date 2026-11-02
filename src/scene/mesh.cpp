@@ -105,6 +105,12 @@ bool Mesh::groups_fit() const {
     if (g.weights.size() != positions.size()) return false;
   return true;
 }
+bool Mesh::keys_fit() const {
+  for (const ShapeKey &k : shape_keys)
+    if (k.delta.size() != vert_count()) return false;
+  return true;
+}
+
 
 void Mesh::copy_vertex_weights(uint32_t from) {
   for (VertexGroup &g : vertex_groups) g.weights.push_back(from < g.weights.size() ? g.weights[from] : 0.0f);
@@ -1638,6 +1644,41 @@ MeshPtr ico_sphere(float r, int subdivisions) {
   return m;
 }
 
+MeshPtr capsule(float r, float height, int segments, int rings) {
+  auto m = std::make_shared<Mesh>();
+  m->name = "Capsule";
+  segments = std::max(3, segments);
+  rings = std::max(2, rings + (rings & 1));  // (even: the equator splits into the two caps' rims)
+  const float half = std::max(0.0f, height * 0.5f - r);  // (the straight part's half height)
+  std::vector<std::pair<float, float>> rows;  // each ring's height and radius, top to bottom
+  for (int i = 1; i < rings; i++) {
+    const float phi = kPi * i / rings;
+    if (i == rings / 2) {  // (no straight part, when it's as short as it's wide: one rim, as a sphere's - review 367)
+      rows.push_back({half, r});
+      if (half > 0.0f) rows.push_back({-half, r});
+      continue;
+    }
+    rows.push_back({r * std::cos(phi) + (i < rings / 2 ? half : -half), r * std::sin(phi)});
+  }
+  const uint32_t top = m->add_vert({0, r + half, 0});
+  for (const auto &[y, rr] : rows)
+    for (int j = 0; j < segments; j++) {
+      const float th = 2.0f * kPi * j / segments;
+      m->add_vert({rr * std::cos(th), y, rr * std::sin(th)});
+    }
+  const uint32_t bottom = m->add_vert({0, -r - half, 0});
+  const int n = (int)rows.size();
+  auto ring = [&](int i, int j) { return (uint32_t)(1 + (i - 1) * segments + (j % segments)); };
+  for (int j = 0; j < segments; j++) m->add_face({top, ring(1, j + 1), ring(1, j)});
+  for (int i = 1; i < n; i++)
+    for (int j = 0; j < segments; j++) m->add_face({ring(i, j), ring(i, j + 1), ring(i + 1, j + 1), ring(i + 1, j)});
+  for (int j = 0; j < segments; j++) m->add_face({bottom, ring(n, j), ring(n, j + 1)});
+  orient_outward(*m);
+  m->smooth = true;
+  assign_uvs(*m, UvKind::Sphere);
+  return m;
+}
+
 MeshPtr cylinder(float r, float height, int seg) {
   auto m = std::make_shared<Mesh>();
   m->name = "Cylinder";
@@ -1991,6 +2032,13 @@ std::vector<uint32_t> remove_loose_verts(Mesh &m) {
     for (size_t i = 0; i < remap.size(); i++)
       if (remap[i] != UINT32_MAX) w[remap[i]] = g.weights[i];
     g.weights = std::move(w);
+  }
+  for (ShapeKey &k : m.shape_keys) {  // (round 358: keys that fitted follow the remap too)
+    if (k.delta.size() != remap.size()) continue;
+    std::vector<Vec3> d(np.size(), Vec3(0.0f));
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) d[remap[i]] = k.delta[i];
+    k.delta = std::move(d);
   }
   m.positions = std::move(np);
   remap_seams(m, remap);

@@ -2003,6 +2003,129 @@ static void tests_round262() {
   });
 }
 
+/* ---------------------------------------------------------------- round 368: the pen in sculpting (task 0345) */
+namespace {
+/* A Scrape dab (Flatten's, one-sided) at the sphere's front with the pen leaning `tilt` degrees: the moved vertices' mean move, in the
+ * object's space (each moves along the plane's normal). */
+Vec3 flatten_move(Vec2 tilt, Vec3 &right_local, bool mirror = false, Vec3 *pos_side = nullptr, Vec3 *neg_side = nullptr) {
+  Editor ed;
+  GameObject *g = sphere_scene(ed);
+  if (!g) return Vec3(0.0f);
+  ed.command("sculpt tilt on");  // (off at first - review 368)
+  if (mirror) ed.command("sculpt symmetry x");
+  const std::vector<Vec3> before = g->mesh_filter()->mesh->positions;
+  ed.command("sculpt brush scrape");  // (Scrape: only what stands above the plane moves, so the moves add up along it)
+  ed.command("sculpt size 40");
+  ed.command("sculpt strength 1");
+  ed.sculpt_pen_for_test(tilt, false);
+  const Vec2 off = pixel_of(ed, g->world_position() + ed.scene_camera_for_test().right() * 0.2f);  // (off the centre, on the sphere: the area plane cuts the curve there)
+  ed.command(strprintf("sculpt dab %g %g", off.x, off.y));
+  const std::vector<Vec3> &after = g->mesh_filter()->mesh->positions;
+  Vec3 sum(0.0f);
+  for (size_t i = 0; i < after.size() && i < before.size(); i++) {
+    sum += after[i] - before[i];
+    if (pos_side && before[i].x > 1e-4f) *pos_side += after[i] - before[i];
+    if (neg_side && before[i].x < -1e-4f) *neg_side += after[i] - before[i];
+  }
+  std::printf("    (tilt %g: %zu vertices changed, %zu under the brush)\n", tilt.x, changed_count(before, after), ed.sculpt_last_ids_for_test().size());
+  right_local = normalize(g->world_matrix().inverse().dir(ed.scene_camera_for_test().right()));
+  return sum;
+}
+}  // namespace
+
+static void tests_round368() {
+  test("sculpt with a pen (round 368): the eraser end inverts the brush - a Draw dab with it digs where the tip raises; in Mask mode it takes the mask away", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed);
+    CHECK(g != nullptr);
+    if (!g) return;
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 25");
+    ed.command("sculpt strength 1");
+    const double v0 = volume(*g->mesh_filter()->mesh);
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const double v1 = volume(*g->mesh_filter()->mesh);
+    ed.sculpt_pen_for_test(Vec2(0.0f, 0.0f), true);
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    ed.sculpt_pen_for_test(Vec2(0.0f, 0.0f), true);
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const double v2 = volume(*g->mesh_filter()->mesh);
+    std::printf("    the volume: %.5f, after the tip's dab %.5f, after two eraser dabs %.5f\n", v0, v1, v2);
+    CHECK(v1 > v0 && v2 < v1 && v2 < v0);
+    CHECK(!ed.sculpt_brush_for_test().carve);  // (the eraser inverts its own dabs only)
+    /* The Mask brush: the tip paints the mask, the eraser end takes it away. */
+    ed.command("sculpt brush mask");
+    auto mask_sum = [&] {
+      double s = 0.0;
+      for (float m : g->mesh_filter()->mesh->sculpt_mask) s += m;
+      return s;
+    };
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const double painted = mask_sum();
+    ed.sculpt_pen_for_test(Vec2(0.0f, 0.0f), true);
+    ed.command(strprintf("sculpt dab %g %g", px.x, px.y));
+    const double taken = mask_sum();
+    std::printf("    the mask: %.3f painted, %.3f after the eraser end\n", painted, taken);
+    CHECK(painted > 0.0 && taken < painted);
+  });
+  test("sculpt with a pen (round 368): its tilt leans Flatten's and Scrape's plane - leaning 40 degrees right, the vertices move along a plane tipped to the view's right; upright, along the area's own", [] {
+    Vec3 right_up, right_tilt;
+    const Vec3 upright = flatten_move(Vec2(0.0f, 0.0f), right_up), leaned = flatten_move(Vec2(40.0f, 0.0f), right_tilt);
+    const float a = length(upright) > 1e-9f ? dot(normalize(upright), right_up) : 0.0f;
+    const float b = length(leaned) > 1e-9f ? dot(normalize(leaned), right_tilt) : 0.0f;
+    std::printf("    the move's share along the view's right: upright %.3f, leaning 40 degrees %.3f\n", a, b);
+    CHECK(length(upright) > 1e-6f && length(leaned) > 1e-6f && std::fabs(a) < 0.1f && b < -0.25f);  // (Scrape cuts along -n: a plane tipped right moves them left)
+  });
+  test("sculpt with a pen (round 368, review): with Mirror X the mirrored side leans the mirrored way; the lean turns the normal by the pen's angle and never flips it, even side-on", [] {
+    Vec3 right, pos(0.0f), neg(0.0f);
+    flatten_move(Vec2(40.0f, 0.0f), right, true, &pos, &neg);
+    std::printf("    the +X side moved (%.4f %.4f %.4f), the -X side (%.4f %.4f %.4f)\n", pos.x, pos.y, pos.z, neg.x, neg.y, neg.z);
+    CHECK(length(pos) > 1e-6f && length(neg) > 1e-6f);
+    CHECK(std::fabs(pos.x + neg.x) < 0.1f * std::fabs(pos.x) + 1e-5f && std::fabs(pos.y - neg.y) < 0.1f * length(pos) + 1e-5f && std::fabs(pos.z - neg.z) < 0.1f * length(pos) + 1e-5f);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const SceneCamera &cam = ed.scene_camera_for_test();
+    const Vec3 facing = -cam.forward(), side_on = -cam.right();
+    const Vec3 a = ed.sculpt_lean_for_test(facing, Vec2(40.0f, 0.0f)), b = ed.sculpt_lean_for_test(side_on, Vec2(55.0f, 0.0f));
+    const float deg = std::acos(std::max(-1.0f, std::min(1.0f, dot(a, facing)))) * 180.0f / kPi;
+    std::printf("    facing the view, leaning 40 degrees: turned %.2f degrees, toward the right %.3f; side-on, leaning 55 against it: dot %.3f\n", deg, dot(a, cam.right()), dot(b, side_on));
+    CHECK(std::fabs(deg - 40.0f) < 0.1f && dot(a, cam.right()) > 0.6f && dot(b, side_on) > 0.0f);
+  });
+  test("sculpt with a pen (round 368): the pressure curve maps pressure for Sculpt and Paint - a straight line by default, a bowed one making half pressure a light touch; Carve switched by the Adobe preset's E in Sculpt", [] {
+    Editor ed;
+    GameObject *g = sphere_scene(ed);
+    CHECK(std::fabs(ed.pen_pressure_for_test(0.3f) - 0.3f) < 1e-5f && std::fabs(ed.pen_pressure_for_test(1.0f) - 1.0f) < 1e-5f);  // (the cubic through two points: not bit-exact on every compiler)
+    ed.pen_curve_for_test() = {{0.0f, 0.0f}, {0.5f, 0.1f}, {1.0f, 1.0f}};
+    const float half = ed.pen_pressure_for_test(0.5f);
+    std::printf("    half pressure through the bowed curve: %.3f\n", half);
+    CHECK(std::fabs(half - 0.1f) < 1e-4f);
+    if (!g) return;
+    /* A half-pressure dab through the bowed curve moves the centre far less than a full one. */
+    const Vec2 px = pixel_of(ed, g->world_position());
+    ed.command("sculpt size 25");
+    ed.command("sculpt strength 1");
+    const double v0 = volume(*g->mesh_filter()->mesh);
+    ed.command(strprintf("sculpt dab %g %g 0.5", px.x, px.y));
+    const double light = volume(*g->mesh_filter()->mesh) - v0;
+    ed.command(strprintf("sculpt dab %g %g 1", px.x, px.y));
+    const double full = volume(*g->mesh_filter()->mesh) - v0 - light;
+    std::printf("    the volume added: half pressure %.6f, full %.6f\n", light, full);
+    CHECK(light > 0.0 && light < full * 0.3);
+    const bool before = ed.sculpt_brush_for_test().carve;
+    ed.run_action_for_test("brush.erase");
+    CHECK(ed.sculpt_brush_for_test().carve != before);
+  });
+  test("the lesson's Try-it (round 368): create Sphere; sculpt on; sculpt brush clay; sculpt tilt on - the brush the pen's tilt leans", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Sphere");
+    ed.command("sculpt on");
+    ed.command("sculpt brush clay");
+    ed.command("sculpt tilt on");
+    CHECK(ed.sculpt_for_test() && ed.sculpt_brush_for_test().kind == 3 && ed.sculpt_brush_for_test().tilt);
+  });
+}
+
 void run_sculpt_tests() {
   tests_round256();
   tests_round256_pointer();
@@ -2012,4 +2135,5 @@ void run_sculpt_tests() {
   tests_round260();
   tests_round261();
   tests_round262();
+  tests_round368();
 }

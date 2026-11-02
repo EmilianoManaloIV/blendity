@@ -2,6 +2,1697 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 393): the HCI rerun after the fixes
+
+**Asked:** Phase D's last round: all seven productions measured again after rounds 351-392, before and after; the
+comparison, its page and the KLM table updated.
+
+**Added (task 0370)**
+- **The rerun** in `docs/hci/compare-2026-10.md` ("After the fixes"): refusals per production before and after, the
+  avatar measured again (shape keys and textures now in the file), every finding's status, a new finding 30 (`set
+  Render.Width` / `Height` can't reach the render size).
+- **The KLM table:** Blendity's cells for the Adobe tasks it couldn't do (rows 11, 13-15, 18-20) and Bake All Maps (16).
+- **The comparison page** at the same link, the rerun first.
+- **Two bugs the rerun found:** a new paper's SVG export wrote no layer; console coordinates on a paper before the pad
+  was drawn read each pixel as a view height.
+
+**Checked:** the seven runs' logs (A 2, B 5, C 0, E 0, F 1, G 0, H 0 refusals - each explained), the avatar's file, the
+SVG read back, the KLM check, the two bugs' tests.
+
+## 2026-11-02 (round 392): VRChat shaders' texture presets, ID masks and Bake All Maps
+
+**Asked:** Phase D's sixth round: texture export presets for URP and VRChat's shaders (Poiyomi, lilToon), a bake-all
+button, the smart masks against Substance's list, Material ID fills, and the menu's name in the messages (round 387's
+findings 26 and 29).
+
+**Added (task 0369)**
+- **Texture presets** `urp`, `poiyomi` and `liltoon` (Export Textures..., `export textures`): files named for the
+  shaders' slots, packed as they read them (Poiyomi's PackedMaps R metallic, G smoothness; lilToon's each from R).
+- **The ID map** (`_id.png`, baked with the mesh maps) and **Material ID masks** (the layer menu, `surface mask id`).
+- **Smart masks** Ground Dirt and Cavity.
+- **Bake All Maps** (the Textures window, `surface bakeall`): baked and loaded into the surface in one step.
+- **GameObject > Bake Mesh Maps...** in every message and lesson (finding 29).
+
+**The Opus review's fixes:**
+- Bake All Maps' surface kept with its bake (a cancelled or dropped one had loaded the next bake into the wrong surface),
+  checked against the object's surface when it lands, from the bake dialog's settings;
+- the ID map in the maps' hash (a reassigned slot showed the old mask);
+- the ID map's padding copying a slot, never a mean (slots 0 and 2 had made a slot 1 in the gutters);
+- a Material ID mask with no maps empty; the layer menu's slots the surface's own object's, 256 at most;
+- the step named Bake All Maps. An older build opening a texture with a Material ID mask reads it as Normal Z.
+
+**Checked:** the ID map's slots from a two-slot cube and the mask against them; a record without an ID map; Poiyomi's
+packed channels; the lilToon and URP files; the new masks; Bake All Maps loading its maps; a dropped bake's ID map
+removed; the review's cases (slots 0 and 2 in the gutters, the hash, an ordinary bake after a cancelled Bake All Maps,
+the menu's name in the message).
+
+## 2026-11-02 (round 391): footage, keyed cards, Add Edit, Ripple Delete and export presets
+
+**Asked:** Phase D's fifth round: video footage on the Sequencer, keyframed opacity and transform, a blade cut and ripple
+delete, H.264, ProRes and VRChat export presets, a paper card by its name (round 387's findings 23-25 and 27).
+
+**Added (task 0368)**
+- **Footage** (`seq video`, a video dropped onto a lane): decoded in-process with FFmpeg (render/video_decode); refused
+  in the dependency-free build with Get Blender's Libraries as the fix.
+- **Keys on a card** (`seq key|unkey`): opacity, x, y, scale and rotation, linear, over the render.
+- **Add Edit** (Alt+B, `seq blade`) and **Ripple Delete** (Shift+Delete, `seq ripple`), each one undo step.
+- **Export presets** (the Render window, `renderanim preset h264|prores|vrchat`): ProRes 422 in a .mov, VRChat's MP4
+  at most 1080 lines with its index first.
+- **A paper card by its name** (`seq paper <name> ...`).
+
+**The Opus review's fixes:**
+- a keyed card drawn over the render at every frame, at full opacity too (it had snapped back to black bars);
+- ProRes with an odd height: the chroma's last row written; every encoded picture a frame long (a one-frame MOV had
+  lost it);
+- Add Edit on Alt+B (B for the blade) and Ripple Delete on Shift+Delete as keymap actions over the Sequencer
+  (Ctrl+K stays the Command Palette; Ctrl+Alt+K was a user shortcut's in the tests);
+- a card with no end of its own cut at its length; the preset taken when a render starts; key lines after a skipped
+  bar left out; keys rounded before they are compared, an unkey of nothing refused;
+- the decoder: Blender's frame-rate guess, files only, frames over 8192 x 8192 refused, a slow decode said;
+- the re-check's: the Sequencer's keys forgotten once it isn't drawn, a key read from a file on a whole frame.
+
+**Checked:** keys' values and the file; a keyed card and a clip at speed 2 cut in two; Add Edit's undo; Ripple Delete;
+a keyed card at half opacity and moved over a render; three frames encoded and read back in order with a seek back;
+footage's length and the frame under the playhead; ProRes and H.264 probed; VRChat's 4 x 1080 from 8 x 2160; the
+ffmpeg program's arguments; the dependency-free build's refusal; a paper by its name.
+
+## 2026-11-02 (round 390): Illustrator's shapes, the Pen, fills, artboards and SVG
+
+**Asked:** Phase D's fourth round: a Bezier pen with anchors and handles in the Draw tab, vector shapes with fills and
+strokes, artboards on papers, SVG import and export (round 387's findings 21 and 22).
+
+**Added (task 0367)**
+- **Shapes** (More > Shapes, `sketch shape rect|ellipse|polygon [n]|star [n] x0 y0 x1 y1`): Illustrator's Rectangle,
+  Ellipse, Polygon and Star dragged on the pad - Shift even, Alt from the centre - each one undo step.
+- **The Pen** (More > Shapes > Pen, `sketch pen x y [hx hy] | close | end`): a click a corner, a drag pulls mirrored
+  handles, a click on the first anchor closes, Enter or Esc ends; the path drawn with its anchors as it is made.
+- **Fill and stroke** (`sketch fillcolor|strokecolor <hex>|none`, the menu's Fill and Stroke: None): a fill under the
+  line with the layer's opacity, blend, clipping and mask; **Restyle Selection** (`sketch restyle`).
+- **Artboards** (`sketch artboard add|remove|list`), outlined on the pad, saved with the scene and the paper.
+- **SVG** (`sketch svg export <path> [artboard]`, `sketch svg import <path>`, scene/sketch_svg.cpp): each layer a group
+  with its opacity and CSS blend; Pen paths as cubics; another program's paths (M L H V C S Q T A Z), rects, circles,
+  ellipses, lines, polylines and polygons with their fills, strokes, opacities, style= and transforms.
+- Free Transform moves a Pen path's anchors; cuts leave lines.
+
+**The Opus review's fixes:**
+- numbers after a path's Z ending the path (they had hung the editor);
+- a Pen path kept when another tool, source or paper is picked, and ended by Enter or Esc whatever the tool;
+- a second Z closing once, opacity set both ways counted once, a gradient's fill its fallback or none;
+- shapes whose transform overflows left out, widths held at 200 px;
+- Restyle refusing to hide strokes and leaving a locked layer alone;
+- a shape's drag the view's it began in;
+- a hidden group's layers left out of the SVG;
+- colors and sides checked at the console.
+
+**Checked:** a rectangle's corners, an ellipse on its equation, a hexagon's top point, a star's two radii; the fill and
+line on screen and Stroke None; one undo step a shape; the Pen's ends and middle against the cubic, a mouse-made closed
+path with mirrored handles, Esc ending the path; an SVG round trip (points 6.6e-7 off at most, layers and Multiply
+kept), a hand-written SVG with every element, a group transform, relative commands and an arc; an artboard's view box;
+the paper text keeping artboards, fills and paths; a transform of a Pen path; a Delete and the Eraser leaving lines;
+the review's hard cases (numbers after Z, Z Z, opacity twice, url(), overflow, a cut-short Pen group in the file, Esc
+on a console path, another tool picked mid-path, Restyle refused and on a locked layer).
+
+## 2026-11-01 (round 389): Free Transform, Space and H, the pen's tilt
+
+**Asked:** Phase D's third round: Ctrl+T free transform with handles on a layer or a selection, Space to pan and H for
+the Hand tool, pen tilt in the Draw tab's brushes.
+
+**Added (task 0366)**
+- **Free Transform** (Ctrl+T, More > Select > Free Transform, `sketch transform ...`): the active layer's strokes, or
+  the selection's, in a box.
+  - Corners scale in proportion (Shift freely); edges stretch.
+  - Ctrl distorts a corner and skews an edge.
+  - Outside a corner turns (Shift: 15 degrees); inside moves.
+  - Enter commits as one step; Esc puts it back.
+- **The Adobe preset:** H is the Hand tool; Space held with a drag pans the Scene view; the Wheel is Shift+Space.
+- **A brush's Tilt:** the pen's tilt widens the line (the Pencil's 0.8), saved with the brushes.
+
+**The Opus review's fixes:**
+- Space-drag on the pad in the Adobe preset;
+- a transform kept first or let go when the drawing changes under it (an undo, another source, paper or scene, a layer
+  op, a save);
+- a 12 px least box, with proportional drags along the diagonal;
+- crossing boxes refused;
+- Space-pan taking the press (no paint under it);
+- one view's drag;
+- Enter and Esc leaving text fields alone;
+- edges stretched across themselves;
+- the selection's untouched strokes left as they were;
+- the tilt's tooltip true;
+- an older brushes file keeping the Pencil's tilt.
+
+**The re-check's fixes:**
+- a transform kept first before another paper is opened, made, copied or deleted, before a layer is dragged, renamed or
+  its opacity or blend changed, and before Play;
+- Ctrl+Z or redo mid-transform as Esc - the drawing as it was, no step undone (it had left the half-moved strokes);
+- the brushes file's preset index checked before it is read;
+- the pad's Space left to a text field;
+- Space-drag panning in Sculpt too.
+
+**Checked:** scale, rotate, distort onto four points and the middle where the diagonals cross, a selection's half
+moved alone, Ctrl+T with a drag, Esc and Enter with undo, a single line's corner drag, a crossing distort refused, undo
+and another source mid-transform; H and Space-drag in the Adobe preset; the Pencil's tilt against its formula.
+
+## 2026-11-01 (round 388): Photoshop's layers in the Draw tab - blend modes, masks, selections
+
+**Asked:** Phase D's second round (round 387's findings 16-20 and 28): Photoshop's blend modes, layer and clipping
+masks, marquee and lasso selections with fill and delete, a new paper as the Draw tab's canvas, warnings for unknown
+verbs. Free transform, Space and H, and pen tilt follow in round 389.
+
+**Added (task 0365)**
+- **27 blend modes** on sketch layers, Photoshop's (the W3C formulas for Soft Light and the non-separable four;
+  Dissolve as whole pixels).
+- **Clipping masks** (Layers > Clip, `sketch layer clip`) and **layer masks** from a selection (Add Mask, `sketch layer
+  mask add|hide|invert|on|off|delete`).
+- **Selections:** More > Select > Rectangle or Lasso, dragged on the pad (`sketch select rect|lasso|all|none`).
+  - **Fill** (Alt+Backspace, `sketch fill`) puts the colour in it as a filled shape.
+  - **Delete** cuts the active layer's strokes out of it.
+  - **Ctrl+D** deselects.
+- **A new or opened paper** is the Draw tab's canvas; `sketch` and `sketch layer` warn on an unknown verb.
+- Saved in the scene and paper files.
+
+**The Opus review's fixes:**
+- the Layers row's blend list showing every mode;
+- Ctrl+D no longer also duplicating;
+- a clip's base looked up, not taken from the last layer drawn (a hidden base hides what is clipped to it);
+- the marching ants kept out of board thumbnails and exports;
+- a click deselects;
+- older tests' frame steps restored;
+- a failed `paper open` switches nothing;
+- the drag shown live;
+- Dissolve whole at full coverage;
+- a Fill's pieces from the eraser are lines;
+- a closed stroke's closing edge cut too;
+- no mask on a group;
+- the per-pixel callback gone;
+- a short window's footer;
+- ADR 0072 amended;
+- the re-check's:
+  - the Select tool before the eraser;
+  - a group as a clip base, with one coverage per base;
+  - Clip and the masks in a row's menu, with a marker;
+  - the selection gone with the tool and the scene;
+  - the console's select in the pad's pixels on Paper.
+
+**Checked:** the modes' formulas on a known pair of colours; clipping (a hidden base too), masks and Dissolve on
+screen; fill, delete, undo, the Select tool's drag and click, Ctrl+D with an object selected; the file round trip; the
+existing sketch, paper, layer and Draw tests.
+
+## 2026-11-01 (round 387): Adobe in the HCI comparison
+
+**Asked:** Phase D's first round: the basic Adobe suite in the HCI testing - Photoshop + Fresco, Substance Painter,
+Illustrator, After Effects + Premiere.
+
+**Done (task 0364)**
+- **Four productions made in Blendity** and compared with Adobe's documented steps: an illustration and concept sheet,
+  texturing the avatar, a logo, editing the film (`docs/hci/compare-2026-10.md`, sections E-H).
+- **KLM:** Adobe as a sixth program and ten Adobe tasks (`tools/hci_klm.py`): where both do a task Blendity matches
+  Photoshop's blend menu and Substance's texture export and is 1.6 s slower to bake mesh maps; seven of the ten are
+  tasks it can't do yet.
+- **Findings 16-29** (audience A): free transform, blend modes, masks, selections, a paper's source, vector shapes and
+  the pen, SVG, footage and cuts, keyed cards, export presets, texture presets, three small ones - for rounds 388-391.
+- **`tools/hci_klm.py`:** a row from before a program was added counts its cells as "-"; `--check` fails on a table it
+  reads no row from.
+- **The Opus review's fixes:** the productions run again on editors built from the current code (the first run had an
+  editor from before round 364) and each stage from an empty project; a false "missing" (Blendity has six smart-mask
+  presets) and a missed PNG route (Pin to the Board, Board Export) corrected; KLM rows 5, 11, 15 and 19 corrected;
+  unsourced Adobe steps marked assumed.
+- **The comparison page** updated at the same link.
+
+**Checked:** the KLM recount (`--compare --check`), the audits at their baselines; no product code changed.
+
+## 2026-11-01 (round 386): painting in VR
+
+**Asked:** Phase C's last round: the controller paints textures through the paint dab pipeline; size and opacity from
+the thumbstick; erase by the grip.
+
+**Added (task 0363)**
+- **A world dab:** a disc square to the controller's ray where it meets the surface - triangles facing away and texels
+  past the radius in front or behind left alone - through the desk's rasterizer, brush, symmetry, dilation and undo.
+- **`vr paint`:**
+  - with Paint on for an object, the right trigger paints along the ray, its pressure the pen's;
+  - the right grip erases;
+  - the right stick sizes the brush, the left stick's sideways sets its opacity;
+  - A undoes the last paint stroke.
+- **The eyes show** the ray and the brush's ring where it lands.
+
+**The Opus review's fixes:**
+- the desk's Paint mode had ended every VR stroke after its first dab: a stroke VR has under way is VR's;
+- the dabs between frames follow the ray and hit again, so a stroke that leaves the surface never bridges across it;
+- mirrored objects take paint;
+- Paint off at the desk turns VR's painting off;
+- a sketch stroke under way is kept when painting starts;
+- the dabs test only the triangles near them (the BVH);
+- the grip squeezed mid-stroke starts an erase stroke;
+- the trigger goes through the pen's pressure curve;
+- the re-check's: each dab between frames square to the ray that found it, the BVH's ball never too small under a
+  turned stretch, a stroke ended when the session stops or the scene changes, rays cast only as far as the ray swept,
+  an undo mid-stroke frees the desk.
+
+**Checked:** a world dab against a mouse dab of the same size on the same face (280 and 283 texels, 279 shared); the
+back face and a disc off the surface paint nothing, a mirrored face takes paint; the editor on a stub runtime (a 3 m
+sweep of 7,830 texels in one step, the grip's erase, A, the sticks, a stroke round the cube in the air against its two
+ends apart, Paint off, the refusal); the desk's paint tests.
+
+## 2026-11-01 (round 385): sketching in VR
+
+**Asked:** Phase C's third round: controller strokes into the Strokes system as 3D ribbons and tubes (Quill, Gravity
+Sketch), pressure from the trigger, a palette on the off hand, undo on a button.
+
+**Added (task 0362)**
+- **Stroke ribbons** gain a width and an up per point, tubes (8 sides, capped) and a material slot. Each is optional,
+  in the scene file too, so older scenes load as they were.
+- **`vr sketch`:**
+  - the right trigger draws, its pressure the width, the brush turning with the hand;
+  - A undoes;
+  - X switches ribbon and tube;
+  - the left stick flicks through 8 colours (each a "Sketch <n>" material);
+  - the right stick sizes the brush.
+- **The eyes show** the stroke under way, the brush at the tip, and the palette round the left hand.
+
+- **The tape** now also toggles with X (the left primary) outside sketching.
+
+**The Opus review's fixes:**
+- tubes wound outward (they had faced in);
+- frames that don't flip or twist: ribbons turned over rather than folded, the last normal carried where the up lies
+  along the path, tubes carried along;
+- a new stroke added to the mesh instead of every stroke built again (459,000 vertices: 46.6 ms to 11.9 ms);
+- slots capped at 255, and a cut-short group dropped;
+- A undoes only a VR stroke;
+- VR's own "VR Sketch" object with Own normals;
+- the tape off while sketching, and bad arguments refused;
+- the re-check's: tubes carried round sharp corners (a V no longer pinches), the appended mesh without the old one's
+  render caches, "VR Sketch" found by its name too, a pending desk change its own undo step, ADR 0084 amended, desk
+  ribbons as they were;
+- found on Linux: appending still copies the mesh (30-47 ms at 459,000 vertices), so VR's object is full at 100,000
+  vertices and the next stroke starts "VR Sketch 2".
+
+**Checked:** a recorded stroke as a ribbon and a tube against its widths, ups and normals, and every face's winding; a
+vertical stroke with a half roll; the scene file round trip; adding one stroke against building all; the editor on a
+stub runtime (a 30 cm stroke with rising pressure, undo, the palette, the brush, a tube, a desktop step left alone).
+
+## 2026-11-01 (round 384): moving around in VR, and scale
+
+**Asked:** Phase C's second round: teleport, smooth move, grab the world to move, turn and scale it, a 1:1 snap, a tape
+measure, the camera's frame and the controllers in view.
+
+**Added (task 0361)**
+- **`render/xr_nav.h`:** the stage (origin, yaw, scale), the teleport arc and landing, smooth move, snap turn, one- and
+  two-hand grabs (about the hands' middle; 1:1 snaps), and the tape.
+- **The controllers through OpenXR actions:** aim and grip poses, trigger, squeeze, stick and primary button, with
+  bindings for Touch, Index, Vive, Windows Mixed Reality and the simple controller.
+- **The gestures:**
+  - squeeze to grab (both: turn and scale);
+  - the right trigger for the arc, let go to teleport;
+  - the left stick to walk, the right stick to snap-turn 30 degrees;
+  - A for the tape.
+- **The eyes show** the controllers, their rays, the arc and its ring, the render camera's frame, the tape and the
+  scale.
+
+**The Opus review's fixes:**
+- a seated runtime's lift now goes through every path (the eyes, the arc, the grabs, the turns, the teleport);
+- Touch's tape button on each hand (A and X), refused bindings logged;
+- the arc's hit test through a segment BVH per mesh, made on a worker (it had tried every triangle 60 times a frame);
+- no stand-on-walls (a landing needs a floor's normal);
+- grabs with hands close together or one above the other, and the scale kept within 1:0.01 to 1:100;
+- a teleport only on a tracked release with nothing squeezed;
+- the hands move the world on their own frame (not the next);
+- the camera frame at the final render's aspect, without an orthographic camera's lines;
+- the stage's old helper `stage_in_world` gone (`Stage::matrix`), the constants named;
+- the re-check's: the BVHs keyed by the mesh's id and made again after a sculpt or deform, two at a time, let go when no
+  longer asked for; the meshes gathered once per arc; no jump when one hand goes over the other mid-turn; `vr scale` kept
+  to 1:0.01-1:100; tests of the drawn view's frame, a deform and a stretched ramp.
+
+**Checked:** recorded hand poses through the maths (1:2 about a fixed middle, a quarter turn, the arc against a throw and
+onto a box, the lift, the grabs' edges, the BVH against every triangle on 180,000); the gestures in the editor on a stub
+runtime (cancels, the same-frame grab, the head over the landing, the arc on a box).
+
+## 2026-11-01 (round 383): VR View
+
+**Asked:** Phase C's first round: the scene in a headset at 1:1, standing where the Scene view looks (OpenXR: SteamVR,
+Quest Link, Windows Mixed Reality).
+
+**Added (task 0360)**
+- **`render/xr.h`:**
+  - the stereo maths (OpenXR's poses in Blendity's axes, off-centre projections, the stage below the Scene view's
+    pivot at a scale);
+  - a session state machine on a `Runtime` (Ready, frames, Stopping, Exiting, Lost, each with its reason).
+- **`render/xr_openxr.cpp`:**
+  - the OpenXR loader loaded at run time;
+  - a Direct3D 11 device on the headset's adapter, the stage space, a swapchain per eye;
+  - each eye's pixels uploaded into it.
+- **The editor:**
+  - `vr start [resolution] | stop | status | here | scale <s>`, and Edit > VR View;
+  - each eye drawn as the Game view draws (CPU), at half the headset's size by default.
+- **The OpenXR SDK:** its loader package 1.1.65 (Apache-2.0 OR MIT) goes in Blender's lib folder as `openxr/`. The
+  build finds it and copies `openxr_loader.dll` beside Blendity (ADR 0096, licenses/README.md).
+- **The Opus review's fixes:**
+  - the editor draws every frame while VR runs (idle, it had dropped the headset to one frame a second);
+  - the session resumes after Stopping;
+  - the user's stop no longer calls xrEndSession outside Stopping;
+  - a failed eye ends the frame without its layer;
+  - brief tracking loss doesn't blank the headset;
+  - plain swapchain formats get linear values;
+  - a local space is raised to standing height;
+  - the loader is searched for only beside Blendity;
+  - odd numbers are refused.
+
+**Checked:**
+- the maths;
+- the state machine on a stub runtime;
+- a stereo frame of a red cube 3 m ahead: 5.52 px apart between the eyes (5.46 expected), level, up in the picture;
+- a frame with both eyes at 1008 x 1120 costs 10.9 ms in the default scene;
+- the verbs.
+- The live headset check is the spec's "Your own check with the headset" (SteamVR is this machine's runtime; the suite
+  never starts it).
+
+## 2026-11-01 (round 382): Live Link never pauses, and a live test of everything that flows
+
+**Asked:** Phase B's last round: no stalls while working with engines connected, Live Link going on during long jobs,
+and everything Phase B made flow shown to work with the installed engines.
+
+**Added (task 0359)**
+- **`tests_round382`** (four clients each, Windows release build):
+  - 200 objects, a 100,000-vertex mesh deformed, a 50-bone rig posed and a clip keyed every frame: the tick is 1.1 to
+    1.9 ms on average and at most 3.2 ms, with everything sent;
+  - a 100,000-vertex topology change costs about 4 ms;
+  - a surface painted with the paint tool costs 0.1 ms a tick on average, its texture sent about 4 a second;
+  - a Box moved during a 100,000-vertex skin bind reaches the client while the bind still runs.
+- **The live test with the installed engines** now also takes the fog, a 4 x 4 checker, a skinned Arm with Smile at
+  0.5, the clip, and a crate with three levels and a box collider. Blender 5.2, Godot 4.7.2, Unity 6000.6.7f1 and
+  Unreal 5.8 all report LIVE OK. Godot failed its "followed until stopped" check in two runs of eight; it now says why.
+- **The Opus review's fixes:**
+  - painting is measured with the paint tool (hand-written texels were almost never seen);
+  - the long-job test counts only moves sent while the bind runs;
+  - the Try-it opens the window by its title;
+  - stricter checks;
+  - the docs say what was measured.
+- **Found by it:**
+  - Godot's and Unity's live tests expected linear colours (the bridges have converted them since round 377);
+  - Unity's read URP's `_BaseColor` only;
+  - a short test folder had no texture folder.
+
+## 2026-11-01 (round 381): VRChat's setup in Unity through Live Link
+
+**Asked:** Phase B: with VRChat's SDK in the Unity project, the avatar's Avatar Descriptor (view, lip sync, eye look)
+and PhysBones; a world's Scene Descriptor and static flags; nothing VRChat-specific without the SDK.
+
+**Added (task 0358)**
+- **New messages:**
+  - `avatar`: an armature's view between its eyes, its visemes and blink meshes and keys, and its eye bones.
+  - `springs`: the armature's spring chains.
+  - The object message's `static` (Contribute GI).
+- **Unity:**
+  - The Avatar Descriptor, PhysBones (on "Blendity PhysBones") and the Scene Descriptor, made through reflection when
+    VRChat's SDK types are there.
+  - Static flags set for static objects either way.
+- The recorded session's rig gets eyes, a Face with the 15 visemes and a blink, a static Box and a spring chain.
+- **The Opus review's fixes:**
+  - **Main-thread cost:** a once-a-second spike with many rigs is gone (the skinned meshes are indexed, a few rigs a
+    tick, the humanoid analysis cached).
+  - **Where the descriptor goes:** on the avatar root, the object above the rig and its meshes.
+  - **Scene Descriptors:** one only, and only when the scene has none.
+  - **PhysBones:** their holder is marked; a hair rig's chains are not doubled; the mapping is the importer's turned
+    round.
+  - **Armatures that stop being one** say so.
+  - **Errors:** reflection or a missing eye no longer stops the link.
+  - **The user's own settings:** descriptor fields are written on change and cleared when gone; static flags are
+    cleared only where the link set them.
+  - **Tests:** the SDK stand-ins and their runner are in the repository.
+- **Found on Linux:**
+  - Two same-named materials found their keys again in hash-map order after Play/Stop, so Linux swapped them. The
+    smallest key now wins.
+  - Messages made on workers (meshes, textures, clips) are compared in any order.
+  - The recorded session makes its texture folder (a run of that test alone had none).
+
+**Checked:**
+- `tests_round381` (and the review's cases);
+- Unity's built-in project with stand-ins of VRChat's avatar types: the descriptor and PhysBone set;
+- the URP project as a world project: one Scene Descriptor and nothing of an avatar's;
+- the Godot, Blender and Unreal replays.
+- The real SDK isn't installed here; the spec gives the check for your own VRChat project.
+
+## 2026-11-01 (round 380): LODs and colliders in Live Link
+
+**Asked:** Phase B: "LOD and Collider components arrive as an LOD Group and colliders".
+
+**Added (task 0357)**
+- **New messages:**
+  - `collider`: the shape, its centre and sizes; `none` when the Collider is taken off.
+  - `lod`: each level's screen size and ratio, and whether the group culls.
+  - `lodmesh`: each level past 0, decimated on the mesh worker. Levels are made again once an edited mesh has stood
+    still for half a second.
+- **The bridges:**
+  - Unity: an LOD Group of child renderers, and Box, Sphere, Capsule and Mesh Colliders.
+  - Godot: levels switched by visibility range, and a StaticBody3D with the shape.
+  - Unreal: the static mesh's own LODs, and simple collision.
+  - Blender: the group and the collider as properties, hidden level objects, and a wire empty for a box or sphere.
+- The recorded session adds a crate with three levels and a box collider.
+- **The Opus review's fixes:**
+  - **Stale levels:** levels built before a group shrank are dropped.
+  - **Marked children:** the bridge's own children are found by marker, so renames are safe. The user's children and
+    colliders are left alone.
+  - **Mesh colliders:** made again after deforms stop.
+  - **Kind changes:** the collider and group are sent again.
+  - **Fewer resends:** a screen size alone doesn't resend levels. Unreal rebuilds once per batch, and only the body for
+    a collider change.
+  - **Godot:** its switch distances use the world size and follow transform changes.
+  - **One-level groups:** a one-level group that culls is kept.
+
+**Checked:**
+- `tests_round380` (and the review's cases: screen only, rename, fewer levels, the group taken off, a kind change);
+- each bridge's replay against the crate's levels and collider.
+
+## 2026-11-01 (round 379): clips in Live Link
+
+**Asked:** Phase B's fourth round: clips go to the engines when keyed. (The plan's round "clips, LODs, colliders and
+VRChat in Unity" is split in three: clips now, LODs and colliders next, then the VRChat setup.)
+
+**Added (task 0356)**
+- **A `clip` message:** an Animation component's clip baked - each keyed object's local transform a frame - at a sync
+  (after every object) and when it changes, at most 4 times a second while it keeps changing.
+- **The bridges keep it:**
+  - Unity: an AnimationClip asset in Assets/Blendity Live Link/Clips;
+  - Godot: an Animation in a "blendity" library on an AnimationPlayer under the root;
+  - Blender: an Action with a slot per object, kept with a fake user;
+  - Unreal: not yet.
+- The recorded session adds the rig's "Wave" and its frame-30 pose.
+- **The Opus review's fixes:**
+  - the bake moved to a clip worker (60 ms to 6 ms on the main thread for a minute of 100 bones), with a 32 MB cap;
+  - Unity and Blender reuse one clip per asset across reconnects;
+  - Unity's keys get linear tangents;
+  - Godot's skinned rigs follow a played clip (a SkeletonModifier3D);
+  - a clip is sent again when the objects it names or their unkeyed axes change;
+  - Blender's continuity pass is vectorised and its keys use the scene's frame rate;
+  - Godot refuses no clip names;
+  - the tests no longer delete the user's clip folder.
+
+**Checked:**
+- `tests_round379` (and the review's cases);
+- each bridge's own clip at frame 30 against Blendity's pose: 0 m and 0 degrees in Unity (built-in and URP), Godot and
+  Blender;
+- Unreal's replay.
+
+## 2026-11-01 (round 378): skins and blend shapes in Live Link
+
+**Asked:** Phase B's third round: a skinned character and its blend shapes once, then only poses and weights; real
+skinned meshes in the engines.
+
+**Added (task 0355)**
+- **A rig's mesh** (posed only by its Skin, or keyed) goes at rest with its skin and morph targets, naming its joints'
+  objects and its keys. A new `weights` message carries shape weights. Deforms go only to clients that don't say
+  `"caps":["skins"]`.
+- **`skin_for_export`** moved into the scene layer, so the export and Live Link share it.
+- **The bridges:**
+  - Unity: a SkinnedMeshRenderer with blend shapes;
+  - Godot: a Skeleton3D and a Skin with blend shapes;
+  - Blender: an armature copying the bone empties, vertex groups and shape keys;
+  - Unreal: keeps the deforms.
+- The recorded session adds a skinned, keyed Arm; its rig is scaled x2.
+- **The Opus review's fixes:**
+  - a rig no more (armature deleted, Preserve Volume, Rest Position) sent as a plain mesh, and Unity's skin taken off;
+  - Blender's Armature modifiers stacking on each resend, and armatures left behind;
+  - skeleton and Skin setting changes now resend the skin;
+  - Preserve Volume, Rest Position and more than four influences stream vertices;
+  - Blender's scaled joints;
+  - Godot's skins posed once per batch;
+  - a rename or material change no longer resends a rig;
+  - the mesh's place from the rig compared with a tolerance;
+  - the weights made on the mesh worker;
+  - leaks on delete;
+  - Blender waits for Object Mode;
+  - each client's hello read once;
+  - no empty weights messages.
+
+**Checked:**
+- `tests_round378` (a skinning client and a plain one; the rig as it changes);
+- the recording's counts;
+- the Unity, Godot and Blender replays, skinned against Blendity's posed vertices: within 1.2×10⁻⁷ m, 3.0×10⁻⁵ m and
+  1.2×10⁻⁷ m (Blender's for each of three sends);
+- Unreal's replay.
+
+## 2026-11-01 (round 377): textures by content in Live Link
+
+**Asked:** Phase B's second round: painted, procedural and generated textures reach the engines as you work, every
+map, and Unity's cache by path no more.
+
+**Added (task 0354)**
+- **Live Link's `texture` message** (docs/LIVELINK.md): a PNG of a texture's pixels, keyed per path and colour space,
+  named by the materials' maps.
+  - It's stamped cheaply each comparison, hashed and encoded on a worker, and sent only when the pixels changed.
+  - A painted surface goes when each stroke ends. An image that keeps changing (a procedural drag) goes at most 4
+    times a second, with the last state after.
+  - Textures go at most 2048 a side.
+- **The bridges load textures from the bytes:**
+  - Blender (temporary file, reloaded);
+  - Godot (ImageTexture, updated in place);
+  - Unity (a texture per key);
+  - Unreal (a transient texture on a material made in code with a BaseMap parameter).
+- **More maps:** Emission (Blender, Godot, Unity), Metallic (Godot, Unity) and Roughness (Godot).
+- **Godot's and Unity's material and light colours** are converted from linear (round 376's follow-up).
+- **The Opus review's fixes:**
+  - no main-thread copy of every texture at each change;
+  - the painting claim corrected;
+  - float colour maps made sRGB;
+  - emission maps multiplied as Blendity's (Godot, Blender);
+  - Unreal's textures updated in place;
+  - a new client no longer takes another's owed change;
+  - textures no material names aren't watched;
+  - Unity's built-in metallic keyword;
+  - maps taken off are cleared.
+
+**Checked:**
+- `tests_round377`: the sync, a repaint, the same pixels, a stroke's throttle;
+- the recording's texture;
+- Blender's and Godot's smoke tests;
+- Unity's replay (built-in and URP);
+- Unreal's replay.
+
+## 2026-11-01 (round 376): the world and the look in Live Link
+
+**Asked:** Phase B's first round, "lighting, modeling, and everything in between while bridges are running": the
+world, the render's look and the camera's filters, live in every engine.
+
+**Added (task 0353)**
+- **Live Link's `world`, `render` and `filters` messages** (docs/LIVELINK.md): the world (gradient, sky, HDRI,
+  colour, strength, fog), exposure and view transform, and a camera's filter stack. They're sent at the sync and
+  whenever they change.
+- **Blender:** the world (a ColorRamp gradient, sky, HDRI, fog), exposure and view transform, and the compositor
+  (Bloom, Color Grading, Vignette).
+- **Unity:**
+  - RenderSettings (Trilight ambient, skybox, linear fog);
+  - a Blendity Look object;
+  - in URP, a global Volume (ColorAdjustments, Tonemapping, Bloom, Vignette).
+- **Godot:** a WorldEnvironment (sky, depth fog, tone mapping, glow, adjustments).
+- **Unreal:** a SkyLight, an ExponentialHeightFog and an unbound PostProcessVolume.
+- The recorded session now carries the look, and each bridge's replay checks it.
+- **The Opus review's fixes:**
+  - Blender's fog is the mist pass in the compositor (a world volume had blacked out Cycles);
+  - Unreal adopts its look actors on reconnect;
+  - only the render camera's filters are sent, at every sync and when it changes or goes;
+  - colours are converted for Godot and Unity;
+  - the scene's own world, compositor and lighting are kept and restorable;
+  - Godot's depth fog is opaque by its end;
+  - skies are rebuilt only on a mode change.
+
+**Checked:**
+- `tests_round376`;
+- the recording's counts;
+- Blender's and Godot's smoke tests;
+- Unity's replay in a built-in and a URP project;
+- Unreal's replay in 5.8.
+
+## 2026-11-01 (round 375): the round trip as a production
+
+**Asked:** Phase E's last round: a VRChat avatar package and a world kit through Blendity and back into Unity, then
+a Godot scene, a .blend and an Unreal level; the HCI report's import column.
+
+**Run (task 0352):**
+- **Unity:** the package came back with the same GUIDs, the .mat, script, shader and texture byte for byte, every
+  VRChat component unchanged, and the prefabs different by exactly the renamed avatar, the moved kiosk and the
+  switched-off lamp. Imported again, the edits were there.
+- **Godot:** an unchanged scene came back byte for byte, and a moved one landed where it was put.
+- **Blender:** a .blend through Blender came back to Blender with the crate where Blendity moved it.
+
+**Found and fixed:**
+- A one-object .blend (or snapshot) came in named for its file; it keeps its object's name now.
+- Export baked each object's transform into its vertices. glTF has **Keep Transforms** (`export glb ... transforms`),
+  which puts the transform on the node and keeps the pivot, as Blender's glTF does.
+
+**Added:** docs/hci/compare-2026-10.md's "D. Round trip" (the import column), and the lesson.
+
+**The Opus review's fixes:**
+- Keep Transforms bakes a sheared, mirrored or non-finite object (glTF's node can't hold it), and puts the export's
+  Scale on positions, not on each node's scale.
+- The lesson and spec no longer promise that Live Link updates Unreal's sent actors.
+- The option survives a GLB/glTF switch, and `transforms` on another format is said.
+- The test covers a lopsided shape, winding, and the sheared and mirrored cases.
+
+**Checked:** `tests_round375`:
+- the Unity production;
+- the Godot round trip;
+- the Blender round trip (BLENDITY_TEST_BRIDGE);
+- Keep Transforms (a lopsided block back on the same world vertices, faces outward; sheared and mirrored ones
+  baked);
+- the Try-it.
+
+## 2026-11-01 (round 374): Blender and Unreal into Blendity
+
+**Asked:** Phase E's sixth round: .blend files through the installed Blender; Send to Blendity in the Unreal and
+Blender bridges.
+
+**Added (task 0351)**
+- **Snapshots** (`scene/snapshot`, docs/LIVELINK.md): a folder `<name>.blendity-snapshot` with the program's own
+  model and snapshot.json (each object's light and camera in Live Link's fields, an engine class, custom properties,
+  a transform for what the model doesn't hold). `import <folder>.blendity-snapshot` (or a drop) brings it in through
+  the usual model import, as one Undo step.
+- **.blend** (`import <file>.blend`, a drop, File > Import Model...): Blender in the background writes the snapshot
+  (`bridges/blender/blend_to_snapshot.py`), then Blendity imports it; `blender path [exe]` names Blender.
+- **The inbox:** Live Link's discovery file names `<project>/Incoming`; a bridge's snapshot there is imported within
+  a second and moved to Done (`livelink inbox` checks now).
+- **Blender's bridge:** Send to Blendity and Selected in its sidebar panel.
+- **Unreal's bridge:** Send to Blendity and Send Selected in its dock tab. The level goes out through Unreal's FBX
+  exporter, and each actor's transform, lights, cameras and Blueprint class are written by `snapshot_json` in the
+  protocol layer.
+- `finish_import` takes a hook run before its Undo step.
+- **The Opus review's fixes:**
+  - Unreal's FBX frame is turned by the snapshot's `model_rotation`, and meshes keep the model's placement (they had
+    come in turned 90 degrees);
+  - a one-object model no longer stacks the transform;
+  - Live Link's own actors stay out of Unreal's FBX;
+  - imports wait out Play;
+  - Blender runs with factory settings and no autoexec;
+  - Unreal's FBX options and light units are set by the plugin;
+  - the camera sensor is kept;
+  - Blender's selection is restored and modifiers are applied when no shape keys would be lost;
+  - failures are said aloud.
+
+**Checked:** `tests_round374`:
+- snapshot.json and its refusals;
+- a snapshot imported as one Undo step;
+- an FBX written as Unreal writes it, turned so a car's nose and its headlight agree;
+- the inbox;
+- a real .blend through Blender 5.2 (BLENDITY_TEST_BRIDGE);
+- the Try-it.
+
+test_livelink adds Unreal's snapshot read by Blendity (place, facing, light units, cone, fov, class, the inbox). The
+Unreal plugin was built with BuildPlugin.
+
+## 2026-11-01 (round 373): Godot scenes in and back
+
+**Asked:** Phase E's fifth round: a Godot project's scenes brought in for the art and layout, code kept in Godot.
+
+**Added (task 0350)**
+- **Godot's text formats** (`scene/godot_scene`): .tscn and .tres sections, values and references, Godot 4's and
+  Godot 3's with each one's defaults; transforms with X mirrored both ways, as glTF's and Live Link's (ADR 0055),
+  lights and cameras turned 180 degrees about Y.
+- **Import** (`import <file>.tscn`, a drop, File > Import Model...): the nodes under one root, as one Undo step:
+  - Node3D, MeshInstance3D with Godot's primitives and StandardMaterial3D (colours made linear, maps, transparency,
+    cull, unshaded), lights, Camera3D, CollisionShape3D;
+  - instanced scenes and models (res:// from the project.godot above the file); a scene instancing itself stopped;
+  - scripts and every other node kept as Engine Components with their lines as Godot wrote them;
+  - GodotOrigin on each object (its file and node path).
+- **Export Godot Scene** (File menu, `export tscn [out]`): the scene with the objects' transforms and visibility
+  written into their own lines, every other byte as it was, to Exports/ or where asked.
+- `objects_from_model` moved into the scene layer, shared by the Unity and Godot imports; `count_notes` and
+  `forward_slashes` shared from core.
+- **The Opus review's fixes:**
+  - X mirrored, not Z flipped (instanced models had come in turned);
+  - an inherited scene's overrides edit its nodes instead of copying them;
+  - Godot 3's defaults;
+  - each .tres's ids in its own table;
+  - a cap on instancing, with normalized loop keys;
+  - material_override first;
+  - unchanged instances' lines left alone;
+  - black default emission;
+  - one-pass parsing;
+  - numbers that aren't finite refused.
+
+**Checked:** `tests_round373`:
+- the parser (a multi-line value, escapes, both reference forms, the file given back whole);
+- a transform's Z flip and its way back;
+- a Godot 4 project imported (the box and its material, a hidden lamp, a camera, a collision box, an instanced
+  scene, an AnimationPlayer and a script kept, a self-instancing scene stopped), moved and written back with exactly
+  two lines changed;
+- a Godot 3 scene;
+- the review's cases (an inherited scene's overrides, a .tres's own ids, Godot 3's defaults, a built-in script, an
+  instanced OBJ mirrored as the scene, CRLF and Godot 3 written back, the object cap);
+- the Try-it.
+
+## 2026-11-01 (round 372): the way back to Unity - Export Unity Package
+
+**Asked:** Phase E's fourth round: work done in Blendity goes back to Unity for the finishing touches, scripts intact.
+
+**Added (task 0349)**
+- **Package writing** (`scene/unity_package`): an in-house deflate (LZ77 with the fixed Huffman codes, stored blocks
+  where smaller), gzip with CRC-32, ustar entries with long names.
+- **Export Unity Package** (File > Export Unity Package..., `export unitypackage <folder> [out]`): a package's folder
+  written back under each file's own GUID, Unity path and kept .meta.
+  - New files get new GUIDs.
+  - The prefabs and scenes carry the edits of the objects imported from them (name, active, local transform) in
+    their own lines; every other byte stays as it was (CRLF too), scripts and VRChat's components included.
+  - Objects of nested prefabs are left out (their edits would change every copy).
+  - The project's files are never written over.
+- **UnityOrigin:** each object imported from a prefab or scene records its file and fileIDs.
+- **The Opus review's fixes:**
+  - the deflate stream broke past a megabyte (padded blocks); it's one bit stream now, checked with Python's gzip too;
+  - the export runs as a job, a file at a time;
+  - a duplicate no longer overwrites its original;
+  - new files keep one GUID across exports;
+  - only changed values are written, in their shortest exact text;
+  - the menu works right after an import;
+  - names ending in ':' are quoted.
+
+**Checked:** `tests_round372`:
+- deflate and gzip round trips (127 KB of YAML to 8 KB; random bytes stored; 3 MB in several blocks), CRC-32's check
+  value, a 300-byte tar name;
+- Unity's string quoting with \uXXXX;
+- a package imported, its prefab's object moved and renamed in Japanese, a file added, exported: the same GUIDs and
+  .meta files, the edits in their CRLF lines, the script's document byte for byte, the new file's new GUID, the
+  project's prefab untouched;
+- the Try-it.
+
+## 2026-11-01 (round 371): Unity materials and VRChat's components
+
+**Asked:** Phase E's third round ("Mesh, Materials, Lights, no-code" from VRChat's Unity packages).
+
+**Added (task 0348)**
+- **Unity .mat files load as Blendity materials** (`scene/unity_material`), read by their shader:
+  - Standard and URP Lit / Unlit to PBR: colour and alpha, the main map with its tiling, normal, metal,
+    smoothness, HDR emission, Cutout / Fade / Transparent, Cull Off;
+  - lilToon, Poiyomi, MToon and UTS2 to Toon: the shade colour and texture, and the outline on the objects;
+  - Unity 5's first/second layout too;
+  - an unknown shader keeps its main texture and colour, said in the Console.
+- **Renderers wear their Unity materials** (a slot without one keeps the model's).
+- **Unity's .mat is never written over** (the material is `foreign`); edits last the session.
+- **VRChat's components by their fields** (their scripts sit in DLLs): Avatar Descriptor, PhysBone, PhysBone
+  Collider, Scene Descriptor, Udon Behaviour named as such. A PhysBone also leaves its settings as a spring bone on
+  its root (it moves once the skin's bones are bound, which an import doesn't do yet).
+- **The Opus review's fixes:**
+  - a Duplicate / Save As of a converted material is Blendity's own, so its edits are saved;
+  - Unity's gamma colours are made linear;
+  - a metallic map no longer turns metal off;
+  - only lilToon's outline shaders draw outlines;
+  - MToon's and lilToon's blend and cull modes are read;
+  - empty material slots stay in place;
+  - contacts aren't taken for colliders;
+  - a shader not in the project is said;
+  - the docs no longer claim PhysBone hair moves.
+- **Fixed from round 370:** an object held one Engine Component only, so a second script replaced the first.
+
+**Checked:** `tests_round371`:
+- Standard, URP Lit, MToon, lilToon, Unity 5's layout and an unknown shader converted;
+- an avatar with a lilToon material (Toon, its outline on the object, its .mat unchanged after a save), a PhysBone
+  as a spring bone and kept, the descriptor and Udon named;
+- the Try-it.
+
+## 2026-10-31 (round 370): Unity prefabs and scenes into the scene
+
+**Asked:** Phase E's second round ("import Unity packages and prefab packs related to VRChat into Blendity (Mesh,
+Materials, Lights, no-code, etc.)").
+
+**Added (task 0347)**
+- **A YAML reader for Unity's files** (`scene/unity_yaml`): documents by class and fileID, stripped ones, Unity's
+  sequences at their key's indent, flow references, quoted and wrapped strings.
+- **`import <file>.prefab|.unity`** (and a drop): the objects under one root named for the file, one Undo step.
+  - GameObjects and Transforms (no axis flip: Unity and Blendity share Y-up and handedness).
+  - MeshFilter / MeshRenderer / SkinnedMeshRenderer meshes, found by GUID through the packages' `.unity-guids`
+    and `.meta` files; an FBX's part by the fileID its `.meta` names; Unity's built-in meshes as Blendity's.
+  - Lights, Cameras, Box / Sphere / Capsule / Mesh Colliders.
+  - Nested prefabs with their position, rotation, scale, name and active overrides.
+- **Engine Components:** every other component (scripts, Udon, VRChat's) is kept with its YAML as Unity wrote it.
+- **Package unpacking keeps each asset's `.meta`** (hidden in `.unity-meta`), for the submeshes' names.
+- **The Opus review's fixes:**
+  - a prefab holding itself no longer grows without end;
+  - a model placed as a prefab (a VRChat avatar's root) comes in, with its added components;
+  - nothing lands outside the import's root;
+  - multi-mesh models get the right parts;
+  - \u names are decoded;
+  - the kept data is byte for byte and read-only in the Inspector;
+  - lights' and colliders' remaining fields are read;
+  - Unity's child order is kept;
+  - notes are said once.
+
+**Checked:** `tests_round370`:
+- the YAML reader on Unity's own layout;
+- a level with a built-in Plane and a Box Collider, an OBJ part by its `.meta`, a script with its fields, a
+  Camera, and a nested Lamp prefab moved and renamed by overrides;
+- one Undo;
+- the Try-it.
+
+## 2026-10-31 (round 369): Phase E begins - Unity packages unpacked into the project
+
+**Asked:** "Is it possible to import Unity packages and prefab packs related to VRChat into Blendity ... So I can work
+on VRChat worlds & avatars & games using a game engine as a refinement and finishing touch phase?"
+
+**Added (task 0346)**
+- **Import Unity Package:** a .unitypackage (gzip, tar, one GUID folder per asset) read in-house and unpacked into
+  Assets/Imported/<package>/ with Unity's own folders, on a worker shown in the job tray with Cancel.
+  - Where: File > Import Unity Package..., a drop on the window, or `import <file>.unitypackage`.
+  - Models and textures become ordinary project files; scripts, shaders, prefabs and materials are kept as they are.
+  - Each asset's GUID is kept in .unity-guids for the way back.
+  - Paths that would leave the package's folder (.., absolute, drives) are left out and named.
+- **The Opus review's fixes (the attack cases):**
+  - a non-UTF-8 path no longer closes Blendity;
+  - the inflate is capped, so a lying size can't fill memory;
+  - the package is held once in memory;
+  - Windows device names, trailing dots and spaces, control characters, duplicates and case collisions are refused or
+    left out;
+  - the folder's name is made safe;
+  - quitting waits for the job;
+  - .unity-guids lists only what was written.
+
+**Checked:** `tests_round369`:
+- gzip with a name, tar with ustar's prefix and GNU's long names, .meta GUIDs;
+- package paths kept inside;
+- a package of a folder, a model, a texture, a script and two escaping paths unpacked, and the model imported;
+- a non-package refused;
+- the Try-it.
+
+## 2026-10-31 (round 368): the pen in sculpting - the eraser end, tilt, a pressure curve
+
+**Asked:** the plan's last Phase A round (from round 350's comparison: sculpting ignored the pen's eraser end and tilt).
+
+**Added (task 0345)**
+- **The eraser end** inverts the brush as Alt does (Draw digs, Clay carves, Inflate deflates), and takes a mask away.
+- **Pen tilt** (Use Tilt, off at first, and Tilt Strength) turns Clay Buildup's, Flatten's and Scrape's plane the way
+  the pen leans, mirrored with symmetry, and turns the alpha to the lean.
+- **The Opus review's fixes:**
+  - the lean is now mirrored with symmetry;
+  - the normal is turned rather than added to, so it never flips;
+  - Use Tilt is off at first;
+  - prefs are saved once after a curve drag;
+  - the help names the inverted brushes.
+- **A test leak:** round 360's atlas test left a baked material and its images in the scratch project on every run,
+  crowding the Materials window's grid until the multi-select test failed. It now removes them.
+- **A Pressure Curve** in Sculpt's and Paint's brush settings, shared and kept in Preferences.
+- **E** (the Adobe keymap's Eraser) switches Carve in Sculpt.
+
+**Checked:** `tests_round368`:
+- a Draw dab raising and eraser dabs digging;
+- a Scrape dab leaning 40 degrees moving along a plane tipped to the view's right;
+- the curve mapping half pressure to 0.1, and a half-pressure dab adding a tenth of a full one;
+- E switching Carve;
+- the Try-it.
+
+## 2026-10-31 (round 367): the small fixes - Capsule, unique names, Join, Walk Cycle on, the new camera, the console
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 7, 8,
+12, 13 and 15, and the camera that faced +Z).
+
+**Changed (task 0344)**
+- **create:**
+  - a Capsule primitive (Unity's: 2 m tall, 1 m across);
+  - an unknown kind is refused with the list (it made an empty object named for the typo);
+  - kinds in any case;
+  - new objects named as Unity names them ("Sphere (1)").
+- **Join:** when the active object isn't a mesh (Select All ending on a light), the last mesh selected keeps the
+  result.
+- **Walk Cycle** is on from the start.
+- **A new Camera** is where the Scene view is, looking where it looks.
+- **The console:**
+  - `help` lists every command;
+  - `save [path]`, `open <path>`, `new`;
+  - `rotate <x y z>`, `scale <s | x y z>` and `set Transform.Position|Rotation|Scale` on the selection;
+  - `saverender [path]`;
+  - the UI's scale moved from `scale` to `ui scale` (a user's own shortcut or Wheel slice holding `scale 1.5` now
+    scales the selection).
+- **Existing preferences** keep Walk Cycle as they were saved (Preferences > Animation Assistants turns it on).
+- **The Opus review's fixes:**
+  - a failed `save <path>` no longer takes the path;
+  - Capsule is in the Tools window;
+  - special kinds work in any case;
+  - `saverender` handles folders, no extension and unknown types;
+  - bare names go to Assets/Scenes;
+  - `scale 0` is refused;
+  - a short capsule gets one rim.
+
+**Checked:** `tests_round367`:
+- the capsule's size, a second one's name, a typo refused, a kind in lower case;
+- Join kept on the last mesh after a light;
+- the new camera at the view's eye, facing its way;
+- help, rotate, scale, set Transform.*, save, new, open, saverender;
+- the Try-it.
+
+## 2026-10-31 (round 366): no MP4 says how to get one, and round 350's report corrected
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 6:
+"no video without installing FFmpeg").
+
+**Changed (task 0343)**
+- **The finding was wrong for the usual build:** the build with Blender's libraries already makes MP4s itself.
+  Only the dependency-free build has no video maker.
+- **That build's finish message** now names the frames' folder and the reason, with a Fix:
+  - Get Blender's Libraries... (`update libs`) downloads them for this build;
+  - Use Blender's Libraries (`update libson`) when they were turned off;
+  - an ffmpeg program on the PATH or in Preferences still works.
+- **docs/hci/compare-2026-10.md** is corrected: the C row, C6, KLM row 7, the Blender comparison and finding 6.
+- **The Opus review's fixes:**
+  - the Render Animation tooltip and Preferences' FFmpeg path still said "frames only" in the libraries' build;
+  - the message now fits each state (built without FFmpeg, `--no-libs`, turned off, missing);
+  - "nothing to download" now shows a toast instead of only a log line.
+
+**Checked:** `tests_round366`:
+- the message and its Fix, both ways;
+- a render's finish shows the offer exactly when there's no video maker;
+- the Try-it.
+
+## 2026-10-31 (round 365): the Sequencer's sound - WAV bars played in step and mixed into the video
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 11:
+the short film had no sound track - round 364 added the cards and cuts, this round the sound).
+
+**Added (task 0342)**
+- **Sound bars:** a WAV file on a Sequencer lane (8, 16, 24 and 32-bit PCM or 32-bit float, mono or stereo, any rate),
+  as long as the recording. Drop one from the Project window, or `seq sound <file.wav> <track> <start> [frames]`;
+  `seq volume <bar> <v>` and the bar's Volume field. Other formats are refused with the reason.
+- **Playback:** through the default device (WASAPI on Windows, PulseAudio loaded at run time on Linux; not yet on
+  macOS), in step with the Preview's playhead and Play's Sequencer, put back in step on a jump or a drift.
+- **Render Animation:** the sound bars mixed over the frames into sound.wav beside them, and an AAC stream in the
+  MP4 (made in-process with Blender's FFmpeg, or by an ffmpeg program).
+- **The Opus review's fixes:**
+  - paused Play repeated a fifth of a second;
+  - backward play chopped (sound now only while the picture moves forward);
+  - edits stuttered;
+  - sounds were loaded under the mixer's lock;
+  - the stream never closed, so Windows wouldn't sleep;
+  - a lost device was never reopened;
+  - decoded sounds were kept forever;
+  - the render's mix walked every sample for every bar;
+  - WAVs over an hour are refused;
+  - a missing AAC encoder no longer fails the MP4;
+  - lanes light up for sounds and cards.
+
+**Checked:** `tests_round365`:
+- the WAV formats decoded, a compressed one refused, a written WAV read back;
+- a bar mixed silent before and after it, at its volume, from its trim, resampled, and at Play's Speed;
+- saved with its volume;
+- `seq sound` at the file's length, a PNG refused;
+- Preview's Play starting the sound at the playhead, a jump moving it, holding or stepping back silencing it, Stop
+  silencing it;
+- malformed WAVs refused;
+- Render Animation's sound.wav, and the MP4's 48 kHz AAC stream in the libraries' build;
+- the real device opened and fed (opt-in, `BLENDITY_TEST_AUDIO_OUT=1`);
+- the Try-it.
+
+## 2026-10-31 (round 364): the Sequencer for animatics and cinematics - cards and camera cuts
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 11:
+the Sequencer held animation clips only - no storyboard pictures, no camera cuts).
+
+**Added (task 0341)**
+- **Cards:** an image or a paper on a Sequencer lane, held full-frame over the Game view and Render Animation's frames
+  (letterboxed on black). Drop one from the Project window, or `seq image|paper <file> <track> <start> [frames]`.
+- **Camera cuts:** `seq cut <camera> <track> <start> [frames]` switches the scene's camera in Play and in Preview, with
+  the old camera given back after Preview.
+- **The bars** are coloured and labelled by kind.
+- **Files:** cards are kept in the .seq file as `card` lines, which older readers skip.
+- **The Opus review's fixes:**
+  - a card's trim was clamped to 60 frames;
+  - a cut never gave the camera back after the playhead left it (in Preview or Play);
+  - pictures were cached forever (a paper card now follows its drawing, an image card its file);
+  - moved files and renamed cameras now show "(missing)";
+  - .hdr and .exr cards are refused;
+  - paths are kept relative;
+  - the first playing Sequencer is the one shown;
+  - no Speed or Object field on cards.
+
+**Checked:** `tests_round364`:
+- the cards saved and read back;
+- the topmost card and cut at a frame;
+- cards animating nothing;
+- a red picture fitted over a frame between black bars, and gone after its bar;
+- a card trimmed to 200 frames;
+- a cut in Preview, scrubbed out of and the camera given back;
+- a cut in Play, and the camera given back past it;
+- the Try-it.
+
+## 2026-10-31 (round 363): the VRChat world kit, part 2 - LOD Groups
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 9:
+no LODs for a world's engine).
+
+**Added (task 0340)**
+- **The LOD Group component**, as Unity's: up to four levels, each a Decimate of the mesh, with a Screen Height and
+  Cull Below Last.
+- **The Game view** shows the level the object's height on screen calls for.
+- **Exports** write `<name>_LOD0.._LODn` (the Export dialog's LOD Levels, on by default), which Unity's import makes
+  an LOD Group.
+
+**The Opus review's fixes:**
+- the test made true in the libraries' build;
+- deforming objects drawn whole;
+- only the Game view switches (not F12's raster or the camera previews);
+- levels cached per base mesh by its id and versions;
+- bounds from the mesh drawn;
+- no full copies where nothing decimates;
+- UCX_ following LOD0;
+- NaN ratios;
+- the Unreal claim withdrawn.
+
+**Checked:** `tests_round363`:
+- the levels by screen height, and Cull;
+- the levels' triangles at their ratios, kept between frames (the libraries' build);
+- a near tree drawn whole and a far one at LOD2;
+- a keyed tree drawn whole;
+- the three names in a .glb;
+- the Try-it.
+
+## 2026-10-31 (round 362): the VRChat world kit, part 1 - Colliders, and Generate Lighting's Fix
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 9
+and 10: no collider for a world's engine, and Generate Lighting baking "0 objects" without a word).
+
+**Added (task 0339)**
+- **The Collider component:** Box, Sphere, Capsule, Convex or Mesh, with Fit to Mesh. It is a green wire in the
+  Scene view and the shape Jolt uses in Play.
+- **Exports write colliders** as meshes named for the engine (the Export dialog's Colliders, `export ...
+  colliders=unity|unreal|godot`):
+  - Unity: `<name>_Collider`, which the Unity bridge's new import postprocessor makes a MeshCollider;
+  - Unreal: `UCX_<name>_00` for its FBX import;
+  - Godot: `<name>-convcolonly`.
+- **Generate Lighting with nothing marked** is refused, with Mark Static Meshes (`lighting markstatic`) as its Fix.
+
+**The Opus review's fixes:**
+- Undo after adding a collider (the fit joins its step);
+- a Unity postprocessor that the names now reach;
+- the world scale in Play;
+- Auto Generate's quiet refusal, and its words;
+- Mark Static leaving moving parents' children;
+- the wire cached;
+- disabled and hidden colliders;
+- no keys, bake or budget for colliders;
+- Godot's convex hint.
+
+**Checked:** `tests_round362`:
+- Undo and Redo of an added collider;
+- a scaled level's floor;
+- a switched-off bush;
+- Fit to Mesh for a box, a sphere and a capsule;
+- the names for each engine in a .glb, and none without;
+- the refusal, and Mark Static leaving a falling ball;
+- a ball's sphere resting on a floor's box in Play (Jolt);
+- the Try-it.
+
+## 2026-10-31 (round 361): the VRChat avatar module, part 6 - Merge Armatures, Attach Mesh, Translate, Export
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361: the module's
+last part).
+
+**Added (task 0338)**
+- **Merge Armatures** (`avatar mergearmature <name>`): a hair or outfit armature merged into the avatar's by its
+  bones' names, its meshes skinned to the avatar.
+- **Attach Mesh** (`avatar attach <bone>`): a rigid prop given wholly to one bone.
+- **Translate** (`avatar translate`): Japanese shape key and material names from MMD's common names.
+- **Export for VRChat** (`avatar export [path]`): FBX for Unity, with the checklist and PC rank said first and a
+  warning past Poor or without visemes.
+
+**The Opus review's fixes:**
+- props under the other rig's bones are kept;
+- Attach moves a bone-parented prop to the armature first;
+- Translate copies a material asset under its new name;
+- clips' BlendShape tracks follow translated keys;
+- a refused merge keeps the pose;
+- the avatar's body is refused as a prop;
+- names with spaces work.
+
+**Checked:** `tests_round361`:
+- the dictionary whole and by parts, and an avatar's key, weight and material renamed - its clip's track following,
+  the material asset copied, and Undo;
+- a hair rig resting 2 cm off with a hat kept;
+- a hat under the head attached, turning 30 degrees with a 30-degree head;
+- a hair rig merged: the strand under Head, the hair unmoved at rest and following the head;
+- a ring on a hand;
+- a body through Fix Model and Create Visemes exported: ufbx reads 1 skin, 26 bones and 15 viseme channels;
+- the Try-it.
+
+## 2026-10-31 (round 360): the VRChat avatar module, part 5 - Eye Tracking, the Texture Atlas
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0337)**
+- **Eye Tracking** (Window > Avatar, `avatar eyes`), as the CATS plugin's:
+  - LeftEye and RightEye bones under the head at the eyes' middles (a vertex group or a mesh named for an eye);
+  - the eyes follow them;
+  - a Blink key, and LowerLid, split into VRChat's left and right keys;
+  - Eye Movement and Eye Blinking options;
+  - the Test buttons (`avatar eyetest <yaw> <pitch> <blink>|reset`);
+  - the checklist's eye item has its Fix.
+- **The Texture Atlas** (`avatar atlas [size]`): each of the avatar's meshes baked into one texture set, one
+  material and one slot, as CATS' Material Combiner.
+
+**The Opus review's fixes:**
+- only the rig's bone groups are zeroed on the eyes (a Skin's limit group kept);
+- one mesh for both eyes is skinned to the two;
+- bones are looked up within the rig (two avatars);
+- a re-run keeps the eyes where they are;
+- blinks are split in the rig's frame;
+- the bones point the rig's forward;
+- the left is read from the rig;
+- the eye test is undone before an edit, save or export;
+- the atlas names what it couldn't bake.
+
+**Checked:** `tests_round360`:
+- one Eyes mesh skinned;
+- the test undone by an edit;
+- two avatars;
+- a re-run after a nudge;
+- the limit group;
+- a turned body's blinks;
+- the atlas' refusal named;
+- two eye meshes' bones at their middles, and the eyes following;
+- the Blink split by side;
+- the test and Reset;
+- the checklist's eye item and its Fix;
+- nothing found on a bare rig, said;
+- two materials baked to one;
+- the Try-it.
+
+## 2026-10-31 (round 359): the VRChat avatar module, part 4 - Decimation, Bone Root, Bone Merging
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0336)**
+- **Decimation** (Window > Avatar, `avatar decimate [smart|safe|half|full] [triangles] [exclude]`), using CATS'
+  modes:
+  - Smart: every mesh, keys kept;
+  - Safe: only meshes without keys;
+  - Half: only meshes with fewer than 4 keys;
+  - Full: every mesh, its keys dropped.
+
+  It cuts to a triangle count, and Exclude keeps named meshes whole. It shares round 355's cut.
+- **Bone Root** (`avatar boneroot`): spring chains that share a parent and a name go under a RootBone_ bone, so
+  VRChat needs one PhysBone for them, and the budget counts them so.
+- **Bone Merging** (`avatar mergebones <percent>`): that share of each chain's bones is merged into their parents.
+
+**The Opus review's fixes:**
+- Full drops keys only from the meshes it cuts, and only when it cuts;
+- Exclude takes every comma-separated name;
+- meshes under the rig are cut too;
+- a bone root is no collider;
+- grouping by a meaningful word;
+- a merged chain keeps its reach;
+- ADR 0095 amended.
+
+**Checked:** `tests_round359`:
+- each mode's meshes and Exclude;
+- a refused Full keeping the keys;
+- the words parsed;
+- a clip through Bone Root, and Undo;
+- a chain merged whole, keeping its reach;
+- Smart to 60 % with the face kept whole;
+- Full dropping keys;
+- two hair chains under RootBone_hair, with the PhysBones going from 2 to 1 and the body unmoved;
+- a chain of 5 merged to 3 at 50 %, with Undo;
+- the Try-it.
+
+## 2026-10-31 (round 358): the VRChat avatar module, part 3 - Model Options, Pose and Shape tools
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0335)**
+- **Model Options** (Window > Avatar), each as in the CATS plugin:
+  - Merge Weights;
+  - Delete Zero Weight Bones;
+  - Join Meshes;
+  - Separate by Material, Loose Parts or Shape Keys (`separate material|shapekeys`);
+  - Remove Doubles;
+  - Apply Transforms;
+  - Recalculate and Flip Normals;
+  - Connect Bones.
+- **Pose and Shape:**
+  - Pose to Shape Key;
+  - Apply as Rest Pose, with the meshes taking the pose and their keys carried through;
+  - Apply Shape Key as Basis, with a Reverted key;
+  - Sort Shape Keys in VRChat's order;
+  - T-Pose and A-Pose.
+- `avatar <verb>` for each tool.
+- **Shape keys survive more edits:** they follow Separate and every vertex compaction, and Apply Transform turns
+  their offsets.
+
+**The Opus review's fixes:**
+- Connect Bones starts from the rest and leaves bones a clip moves;
+- Remove Doubles never merges a vertex a key moves;
+- Separate by Shape Keys keeps the keyed faces and the clips with them, with no keys on the rest;
+- key names with spaces work;
+- T and A pose start from the rest in the rig's own frame;
+- the pose tools refuse while Rest Position is on;
+- custom normals are posed;
+- the Skin's limit group is honoured;
+- cheaper copies.
+
+**Checked:** `tests_round358`:
+- the pose's key exact;
+- the body unmoved through Apply as Rest Pose, and Undo;
+- the basis and its Reverted key;
+- the sort order;
+- A and T at 45 and 0 degrees;
+- a connected bone as long as its gap, the body unmoved;
+- Separate by Material and by Shape Keys;
+- Apply Transform's key;
+- Merge Weights' sums;
+- the Try-it.
+
+## 2026-10-31 (round 357): the VRChat avatar module, part 2 - Fix Model
+
+**Asked:** "Use CATS blender plugin as a reference for the VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0334)**
+- **Fix Model** (Window > Avatar, `avatar fixmodel`), as the CATS plugin's, in one Undo step:
+  - Unity's Humanoid names (MMD's Japanese translated, Mixamo's prefix dropped);
+  - a bone between two Humanoid bones merged into the one above, its weights with it;
+  - bones that move nothing, IK and empty vertex groups removed;
+  - the meshes joined into Body;
+  - slots of one material combined;
+  - clips' tracks following their bones.
+
+  Its options are Keep Twist Bones, Remove Zero-Weight Bones, Remove Constraints, Join Meshes and Combine
+  Materials.
+- **Join keeps shape keys:** they're joined by name, so a face's visemes survive being joined to a body. Before,
+  they were matched by position, and a joined torso took the face's offsets.
+
+**The Opus review's fixes:**
+- a body under a smaller mesh is joined safely;
+- clips' keys are converted when bones move, and a bone a clip moves is kept;
+- joined meshes' tracks and key weights move to Body;
+- Join's keys are opt-in (the Z-fight check and Scatter don't build them);
+- MMD's split upper and lower body: the spine goes under the hips;
+- IK targets are kept when constraints are;
+- a mesh with other modifiers isn't joined, said;
+- rename order, two rigs of one name, the checklist remade.
+
+**Checked:** `tests_round357`:
+- MMD's split body, with the head at the same place at a keyed frame before and after;
+- an animated Center kept;
+- a nested body joined, a Mirror part kept apart, constraints kept;
+- a rig with other programs' names, a Center above the hips, a twist bone and an unweighted bone: after Fix Model
+  the posed body is unchanged and a clip's track follows its bone;
+- Undo of the rig and the clip;
+- a face's key surviving the join, and two slots combined;
+- Join's keys;
+- the Try-it.
+
+## 2026-10-31 (round 356): the VRChat avatar module, part 1 - visemes, the checklist, the Avatar window
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's findings 4
+and 14: no visemes, nothing to say what an avatar lacks before Unity); "Use CATS blender plugin as a reference for the
+VRchat Avatar module" (rounds 356-361).
+
+**Added (task 0333)**
+- **Create Visemes:** the 15 `vrc.v_*` shape keys VRChat's lip sync finds by name, mixed from three sculpted mouths
+  (AA, OH, CH) by the CATS Blender plugin's table; `visemes [AA OH CH]`.
+- **The Avatar window** (Window > Avatar): the avatar's checklist - Humanoid bones and Unity's names, T or A pose,
+  height, at the origin, upright facing +Z, visemes, eye bones, the VRChat PC rank - green or amber, each with a Fix
+  where one exists; `avatar check`, `avatar fix <n>`. The Rigging window links to it.
+- **The Inspector** names a shape key that moves nothing, two of one name, or visemes missing.
+- **Humanoid Rig fits a selected mesh:** at its feet, as tall as it.
+
+**The Opus review's fixes:**
+- the quadruped preset's legs (the scale hidden by the leg index);
+- the PC rank's Fix cuts the avatar's own meshes and leaves the budget target alone;
+- the checklist cached;
+- height and the fit measured at rest;
+- the origin Fix in world space;
+- a key that doesn't fit the mesh named;
+- every duplicate viseme replaced.
+
+**Checked:** `tests_round356`:
+- the 15 keys and their mixes;
+- the Inspector's lines;
+- the fitted rig and the quadruped's feet with and without a height;
+- the checklist amber, then green through its Fix (with two objects of one name: the Fix selects by id);
+- Undo and Redo;
+- the origin Fix under a parent;
+- the PC rank's Fix with the body a sibling, with the export afterwards quiet;
+- the Avatar window;
+- the Try-it.
+
+## 2026-10-31 (round 355): a performance budget - VRChat's ranks in the Profiler
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 3: no
+check against VRChat's Performance Ranks; the avatar went out Very Poor without a word).
+
+**Added (task 0332)**
+- **The Profiler's Budget section:** the selection (or the scene) ranked against VRChat PC or Quest's Avatar Performance
+  Ranks - triangles, skinned and basic meshes, material slots, bones, spring chains and their bones, texture memory,
+  lights; shape keys shown - each row coloured by its rank; **Decimate to Good** for the triangles.
+- **`budget [pc|quest]`** and **`budget fix [good|medium|poor]`** in the Console; **every export says the file's rank**
+  (a warning past Poor).
+
+**The Opus review's fixes:** Decimate to Good lands just under the limit (small meshes left whole, an existing Decimate
+multiplied); Decimate keeps vertex groups and shape keys and goes before the Skin; the export's line counts what the
+file holds, for glTF and FBX, with a target chosen (None by default); keyed meshes count as skinned; the counts cached.
+
+**Checked:** `tests_round355` - the ranks (exactly Poor), the counts (an Outline doubling, spring chains, lights), the
+Profiler's line, the Console's rows, an export quiet without a target and its line without the scene's lights, Decimate
+to Good between 85 % of Quest's 10,000 and it on a skinned, keyed sphere that still exports its skin and key, an
+existing Decimate multiplied, Undo, the Try-it.
+
+## 2026-10-31 (round 354): an export never takes a stale mesh; one glTF skeleton a rig
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 5: the
+avatar's export took the mesh from before its Quad Remesh, without a word; round 352's review: glTF wrote a skeleton per
+mesh on one armature).
+
+**Fixed (task 0331)**
+- An export asked for while a Quad Remesh, a skin bind, mesh maps or a surface still works on what it would write waits
+  for it - "Export waits for ..." in the tray - and is written the frame the job lands; the tray's Cancel writes it at
+  once, with a warning.
+- glTF writes one skeleton, one skin and one clip for every mesh on an armature, each mesh's shape-key weights in it.
+
+**Checked:** `tests_round354` - the wait during a skin bind on a worker, written when it lands; Cancel; a Quad Remesh
+waited for; a Cube and a Sphere on one armature sharing one skin and one clip.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the tray's Export Now writes a waiting export at once and
+its Cancel drops it (Cancel had stopped the remesh instead); a waiting export writes the objects and file it was asked
+for, not the selection when it goes; a second export waits beside the first instead of replacing it; New Scene, Open
+and Play drop waiting exports, said; tests press the tray's buttons.
+
+## 2026-10-31 (round 353): textures and lightmap UVs in exports
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 2: the
+avatar's .glb held none of its painted texture set).
+
+**Fixed and added (task 0330)**
+- An export into a folder that didn't exist wrote its texture PNGs before the folder was made - they failed and the
+  material kept its procedural reference: the folder is made first (with round 351's project-relative paths, the cause).
+- FBX gets the baked procedural and painted maps too; generated images (UV Grid, Color Grid) go as PNGs; glTF writes
+  the emission map.
+- **Lightmap UVs** in the export options: a second UV set (glTF TEXCOORD_1, FBX a Lightmap UV map) for the engines'
+  lightmaps.
+
+**Checked:** `tests_round353` - the .glb's 3 embedded images, the FBX's 3 PNGs, TEXCOORD_1 in 0..1, the FBX's second UV
+map, the Try-it; Blender 5.2 imports both with all images and both UV maps.
+
+**The review (Opus code-reviewer: approved; its minors fixed):** the tests start from new folders and check the FBX's own
+references and the written pixels; generated images named Blendity_UV_Grid / Blendity_Color_Grid (a user's file of the
+same name never overwritten); failed writes said; no lightmap UVs on Outline shells; a mesh without UVs gets the
+lightmap set as UV0, said; `export ... lightmap` from the console; the lesson's question.
+
+## 2026-10-31 (round 352): FBX carries the rig and its clip
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (an avatar for Unity's Humanoid
+import and VRChat, which expect FBX).
+
+**Added (task 0329)**
+- **FBX export of a skinned mesh** at rest with its skeleton - LimbNode bones under a Null, a Skin deformer with a
+  Cluster a weighted bone, the bind pose - and its rig's clip as an animation stack: every bone's translation, rotation
+  (Euler XYZ, continuous) and scale a frame, the shape keys' weights on their channels. **Armatures and Animation** is
+  offered for FBX (on by default).
+
+**Checked:** `tests_round352` - an FBX and a glTF of the same rigged, keyed mesh import with the same bones, weights,
+clip turn and shape-key weight; the editor's rigged Cube to FBX with its skin and clip; the option offered. Blender 5.2
+imports the FBX with its armature, vertex groups, Armature modifier, shape keys and actions.
+
+**The review's fixes (Opus code-reviewer, changes needed):** an Outline's shell goes skinned with the body; the rig's
+mesh goes through its modifiers but the Skin (a Mirror'd half-body had gone as half); one skeleton and one clip for every
+mesh on an armature (each had its own copy); key times rounded; the nearer Euler solution (no swing past 90 degrees);
+InheritType RSrs; mirrored bases; a cluster for every bone; standard frame rates. Tested against ufbx's own skinning of
+the exported rig at a keyed frame: every vertex where Blendity's Skin puts it.
+
+## 2026-10-31 (round 351): shape keys in glTF and FBX exports
+
+**Asked:** "fix all fixes as stated in comparing with the other established programs" (the comparison's finding 1: the
+exported VRChat avatar carried none of its visemes).
+
+**Added (task 0328)**
+- **Shape keys export** as glTF morph targets (with `weights` and `extras.targetNames`) and FBX blend shapes (a
+  BlendShape, a channel a key with its weight, the key's Shape) - the mesh's basis with its keys, no longer the weighted
+  mesh; a skinned glTF's clip carries the weights as a `weights` channel.
+- **Shape Keys** in the export options (glTF, FBX; on by default). A modifier other than the Skin that changes the mesh
+  leaves the keys out, said in the log.
+
+**Checked:** `tests_round351` - the .glb's targets, names, weights and bounds; glTF and FBX imported back with both keys;
+the option off; a still key through FBX; a clip's weights channel; the editor's export of the basis; the Subdivision
+Surface's warning; the lesson's Try-it. Blender 5.2 imports both files with the keys' names, offsets and values.
+
+**The review's fixes (Opus code-reviewer, changes needed):** a Skin had let the basis through when the rig wasn't
+exported (FBX, glTF with Armatures off) - a posed character went out at rest without a word: the pose is kept and the
+log says why; on the rig's path the keys go with their weights and no false warning; normal-only modifiers keep the
+keys; an Outline's shell carries them; a relative export path is the project's; NaN offsets dropped; tests for signed
+offsets through a mirrored object, the weights' frame order, a real rig's clip, Armatures off, Shape Keys off, the
+Outline and Smooth Normals.
+
+## 2026-10-31 (round 350): Blendity against Blender, Unity, Godot and Unreal - three productions
+
+**Asked:** "Can we do another HCI analysis of the whole program, all tabs, several use cases. Comparing it to ease of
+use with Blender, Unity3D, Godot, and Unreal?" - then a VRChat world, a VRChat avatar "from pre-production, to modeling,
+and doing finishing renders, exporting, and showcasing", and "a basic production pipeline for an animation or
+short-film".
+
+**Done (task 0327, analysis only - no product code):** `docs/hci/compare-2026-10.md`.
+- The three productions made in Blendity through its headless mode in a scratch project (168 commands, a screenshot and
+  a per-command log a stage); the exported avatar measured against VRChat's ranks: 76,796 triangles, 27 bones named
+  as Unity Humanoid's, **no shape keys and no textures in the file**.
+- Each stage against Blender, Unity, Godot and Unreal from their documentation (cited); a five-program KLM table of ten
+  tasks, recounted by `tools/hci_klm.py --compare --check` (new); a verdict per audience.
+- 15 findings ranked by Nielsen severity, audiences hit and cost - led by shape keys and painted textures missing from
+  exports, no VRChat budget check or viseme preset, an export taken while a remesh runs, and video needing FFmpeg; none
+  was on the earlier walkthroughs' lists. One bug found on the way was fixed (round 349).
+
+## 2026-10-31 (round 349): a hand posed across the body isn't a swapped rig
+
+**Found** making the HCI analysis' short film: after Puppet Posing drew the left hand across the chest, the Armature's
+Inspector said "The left hand (LeftHand) is on the right" on Blendity's own humanoid preset.
+
+**Fixed (task 0326):** round 347's line compared where the hands are now; it compares the shoulders, and the hips as
+the rig stood, which a pose doesn't swap. **Checked:** `tests_round349` - the posed hand not said (it was without the
+fix), a rig with its arms' names swapped still said; the Puppet tests.
+
+## 2026-10-31 (round 348): FK / IK per limb, matched both ways
+
+**Asked:** "If possible, will it be useful to combine the FK/IK system with this as well?"
+
+**Added (task 0325)**
+- **Weight 0 is FK:** an IK constraint at Weight 0 leaves its bones alone - they keep their pose, turn with the gizmo
+  and take their keys (it had put the limb at its rest pose; an MMD motion's IK switches now show its FK keys).
+- **Switch to FK / Switch to IK / Match Handles** on the IK constraint, Animation > Puppet > FK / IK, and
+  `autopose fk|ik|match larm|rarm|lleg|rleg`: to FK the pose stays; to IK the handle goes to the hand or foot (turned
+  with it) and the pole off the elbow or knee, so nothing jumps; with Record on the switch is keyed (the Weight and the
+  bones, or the Weight and the handles).
+- A lesson, "IK and FK on a limb", with two Try-its.
+
+**Checked:** `tests_round348` - the hand and elbow kept both ways, a turned upper arm held in FK, the handles matched,
+undo, the Inspector's buttons clicked, the legs, the refusals, the keys with Record on, the lesson's Try-it; the IK,
+Puppet and MMD tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** Record keyed one value at a time, each applying the clip
+again - on a clip that already keyed the arm, FK, IK, then FK again jumped to the old pose: now read first and keyed in
+one edit at the drawn frame, one undo step; the Weight keyed as a step (a smooth key swung the arm through its rest pose
+between switches), the state before kept on the frame before; bones and handles keyed at every switch; a clip turning an
+IK off puts the bones it doesn't key at rest, whatever frame was shown before; going to IK says when a twist changed; an
+FK limb's bones are the walk's, FK controls' and AutoPose's; handles found by id; one analysis per menu draw; quadrupeds
+said (tested: FK-IK-FK on one clip, frame 16 between switches, frame 30 straight after 0, the twist said, a quadruped).
+
+## 2026-10-31 (round 347): Puppet Posing's control points you choose
+
+**Asked:** "For the auto posing system, where can we specify control point bones so that we can adjust certain points
+of the bone is incorrect." - "Yes add that to the plan."
+
+**Added (task 0324)**
+- **The Armature's Puppet Controls** (an Inspector fold): a bone field for each part - Hips, Head, the hands, the feet,
+  the upper and lower arms, the thighs, the shins - dropped from the Hierarchy, picked (the rig's bones first) or typed;
+  `set Armature.<Part> <bone>` from the console.
+- **The rig's analysis takes them**, so AutoPose and its prior, the walk, footsteps and the controls all agree.
+- **Extra Controls:** a tail's tip or a sword by name gets a purple ring to drag, the bones above bending.
+- **The Inspector says when the analysis looks wrong** (the left hand on the right, the head below the hips).
+- The file keeps round 324's one text; setting one part keeps the others (it had rebuilt the text from the six ends).
+
+**Checked:** `tests_round347` - a left hand and a left thigh set by hand being the analysis', the console's field, the
+other entries kept, save and load; an Extra Control on the Chest drawn and dragging it 17 cm; swapped hands warned; the
+lesson's Try-it; the Puppet, walk, footsteps, gait and humanoid tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** parts set on a side the analysis found no limb on did
+nothing (an imported rig named Bone.001: no arms by name) - the arms, and the legs when none are found, are made from
+the parts (tested on a renamed rig); each part had been set alone, unchecked - a hand set pulls its forearm and upper
+arm unless they are set too, every limb must be a chain and not another limb's, else the analysis' bones are kept and
+the Inspector says why (tested: a shin as the thigh, the left foot as the right); Found Automatically shows the
+analysis' own bone; the Inspector's line looks again when bones change, and says nothing on an armature never posed;
+names cleaned of the list's separators; one parser.
+
+## 2026-10-31 (round 341): Anime Face Normals from an ellipsoid
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): face normals from a head-shaped proxy - task
+0149 already made them from a sphere.
+
+**Added (task 0323)**
+- **Rigging > Anime Face Normals (Ellipsoid)** and `facenormals ellipsoid`: the proxy fitted to the head's width,
+  height and depth, so a tall, narrow anime head keeps its shadow line where it is drawn; `facenormals [sphere]` keeps
+  the ball.
+- Without a Head group, the head's slice keeps its height (a cap alone had made the proxy flat).
+- The other two methods of that list were already here: the toon materials' **Shadow Bias** map (task 0148: painted
+  shadow control, Guilty Gear's vertex colour as a texture) and the **Line Map** (task 0149: inner lines in the
+  texture) - not built again.
+
+**Checked:** `tests_round341` - a head three times as tall as wide getting a 0.5 x 1.5 x 0.5 proxy, a top corner's
+normal leaning out where a ball's leans up, `facenormals sphere` keeping the ball, a refused word; the no-group slice;
+a face card's proxy; the lesson's Try-it; the Normal Transfer tests.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the test now checks the normals' direction against a
+ball's (it had checked only their length); a flat head's proxy is never thinner than a quarter of its width (a sheet's
+two faces would flip the normals); the lesson's Try-it and the MANUAL's paragraph.
+
+## 2026-10-31 (round 346): Puppet Posing's controls you can click
+
+**Asked:** "I'm also having trouble just clicking the control points without clicking or transforming the bones. What
+would you recommend as a suitable approach?"
+
+**Changed (task 0322)**
+- **Controls, apart from the joints:** a ring round each wrist, a box under each foot, a ring above the head, a large
+  ring round the hips - left blue, right red, the middle yellow (the animators' convention), sized by the rig and the
+  Armature's new **Control Size**; hit anywhere inside on screen (16 px at least with a pen or a finger).
+- **They show with the character's mesh selected** (its Skin names the rig): no bone, and no gizmo on it, first.
+- **A click selects a control, a double-click pins it** (a click had pinned it); a drag poses from the control's point.
+- **While AutoPosing a click on the rig's bone keeps the selection** (no gizmo appears on it); Ctrl+click picks it.
+
+**Checked:** `tests_round346` - the controls with only the mesh selected, the foot's below its joint and the head's
+above, Control Size scaling them, a click on the upper arm keeping the mesh, Ctrl+click picking the bone; round 281's
+test - a click selecting the right hand's control, a double-click pinning it, another freeing it, a drag posing.
+
+**The review's fixes (Opus code-reviewer, changes needed):** a double-click to pin also framed the selection (tested:
+the view stays); Ctrl+click added the bone to the mesh's selection, so the gizmo moved both without AutoPose (it selects
+the bone alone, tested); a control's click was only drawn - it selects its bone now, so trails, onion skin, contacts and
+Lock follow it, with no gizmo or bone handles over the control (tested), and the trails find the rig from the mesh; the
+controls are hit on their drawn line, box and centre, not over the disc inside (the gizmo, a finger's orbit and objects
+there keep their presses); the size follows the bones' lengths, not the pose; a blocked bone click leaves the Hierarchy
+as it was; the field is Puppet Control Size (beside the Preferences' Rig Control Size); the tests on the editor's clock.
+
+## 2026-10-31 (round 343): forced perspective - a lens per object
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): forced perspective and a lens per object.
+
+**Added (task 0321, ADR 0093 amended)**
+- **Camera Flatten below 0:** Amount down to -1 stretches the depth toward the camera instead (twice at -1) - a punch
+  or a sword swelling at the lens.
+- **Mode > Focal Length:** the object drawn as if through its own lens (85 mm before a 24 mm camera: flatter; 12 mm:
+  swelling) - the depth kept at the camera's focal length over the object's, the pivot keeping its size; an
+  orthographic camera leaves it as modelled.
+- **Console:** `flatten <amount -1..1>`, `flatten lens <mm>|off`; the lesson's Try-its and a question.
+
+**Checked:** `tests_round343` - Amount -0.5 drawing 0.4 m at 0.6 m; 85 mm through a 24 mm camera keeping 24/85, 12 mm
+twice; an orthographic camera unchanged; `lens off` and a refused word; the Camera Flatten tests (62 checks).
+
+**The review's fixes (Opus code-reviewer, changes needed):** the camera's lens came from the projection's horizontal
+term, so the window's shape, a portrait render or a non-36 mm sensor changed the drawn shape - it is the camera's own
+now (a physical camera's Focal Length, else its vertical field of view on a 36 x 24 frame; tested at 16:9 and 0.9:1 and
+with a physical Super 35 camera in portrait); an amount typed and the anime preset go back to Amount; the Inspector
+shows only the field the Mode uses; a lens equal to the camera's leaves the object as modelled.
+
+## 2026-10-31 (round 342): a lattice turned to face the camera
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): a camera-aligned lattice.
+
+**Added (task 0320, ADR 0094)**
+- **Lattice > Align to Camera:** in the camera views the box faces the camera about its centre (X the screen's right,
+  Y its up, Z toward the camera), so its points shape the silhouette as the camera sees it - pull the far eye forward,
+  widen the jaw in profile; out of the camera views it moves nothing. Keyed points make a one-shot correction.
+- Evaluated in the camera views' own slots (round 339), the modifier's dependency hash with the box's turned frame.
+
+**Checked:** `tests_round342` - a lattice's +X points widening a Cube to world +X through a camera in front, to world
+-Z through one on its right, not in the Scene view; with Align to Camera off, the same from every camera.
+
+**The review's fixes (Opus code-reviewer, changes needed):** the camera reached every evaluation of the collect - a
+lightmap lookup, the lighting's out-of-date key, a Boolean reading the deformed object - so plain meshes took the
+camera's shape: lightmaps dropped, the scene rehashed every frame, and a mesh a traced view held could be rewritten.
+The box now faces the camera only while a camera view's own kind is evaluated (a thread-local mark; tested: the plain
+meshes and the scene's hash unchanged by a camera's collect). A modifier shown in renders only goes the camera way; a
+lattice at rest keeps the camera out of the key; a rolled camera's right is the screen's (tested); an orthographic
+camera tested; the help, the lesson (a Try-it) and the MANUAL say the box's rotation doesn't count.
+
+## 2026-10-31 (round 340): animating on 2s and 3s - held in the preview, the camera smooth
+
+**Asked:** the 2D-look methods ("Add those components onto the plan."): animating on 2s and 3s with the camera kept
+smooth.
+
+**Changed (task 0319)**
+- **The Animation window's Preview holds as Play does:** on 2s, scrubbing to frame 5 shows frame 4's pose.
+- **A camera the clip animates moves every frame** while the characters hold (anime's pan over held drawings); **Hold
+  the Camera** on the Animation component holds it with them.
+- **The ruler marks the frames a new pose is drawn on** when the clip's root holds 2s, 3s or 4s.
+- `apply_clip` takes the hold (Play and the Preview through it).
+- Not done: a scene-wide Hold default (each Animation has its own; two places would leave which wins unclear).
+
+**Checked:** `tests_round340` - the Preview at frame 5 on 2s showing frame 4's pose while the camera shows frame 5's
+(Hold the Camera holding it); frame 6 moving on; the ruler's marks at every second frame; Hold the Camera saved.
+
+**The review's fixes (Opus code-reviewer, changes needed):** Render Animation held twice - the camera stood still in
+the video and a range starting between drawn frames posed a frame early: the render passes the raw frame, held once
+from its first frame (tested: 3-6 on 2s poses 3, 3, 5, 5, the camera moving every frame); Set Key, Add Key and Record
+between drawn frames wrote the held pose there and bent the curve: they key the drawn frame (tested); a camera on an
+animated rig's empty was held: the rig moves every frame too; the curve drag and the Zoetrope hold as the Preview; the
+ruler walks only the frames in view; Play tested through the component; the lesson says a Sequencer holds everything.
+
+## 2026-10-31 (round 339): View Angle Shapes - shape keys by the camera's angle
+
+**Asked:** "Is there any other method we can use the flattice to make 3D look 2D?" - then "Add those components onto
+the plan." (the second method: Guilty Gear Xrd's per-angle corrections)
+
+**Added (task 0318, ADR 0094)**
+- **View Angle Shapes** (Add Component > Rendering): rows of a shape key, Yaw / Pitch, Range, Falloff, Weight and
+  Mirror; a row's key comes in when the camera sees the Reference (the head bone, dragged on) from within its range,
+  fading out smoothly over its falloff; Mirror fires it from the other side on the _L / _R key.
+- **Camera views only:** the Game view, Camera Preview and F12, added to the key's own weight (an animated
+  expression still plays); the Scene view, exports, bakes and MoonRay keep the model. On a parent it reaches the meshes
+  below; a child's own wins.
+- **Evaluated in slots of their own** (`evaluated_mesh` kinds 3-8, a pair a camera-view role), so the Scene view and the camera views don't
+  evict each other's mesh every frame; before the modifiers, so a corrected mouth is skinned with the head.
+- **The Inspector:** a line with the Game camera's angle and the rows' weights there; Add Row at the Game Camera's
+  Angle.
+- **Console:** `viewshape add <key> <yaw> <pitch> [range] [falloff] [weight] [mirror] | remove <row> | ref
+  <object>|none | list`.
+- The Learn lesson "Shapes by the Camera's Angle".
+
+**Checked:** `tests_round339` - the angle maths (yaw 90 on the right, pitch 90 above, a turned reference; full in
+range, 0.5 halfway through the falloff, 0 past it; Mirror on the _L key); a Cube's key in through a camera on its
+right, not in front, never in the Scene view; the renderer's own weight and the view's adding up; a turned reference
+moving the angle and the views' hash; save and load; the Inspector's line and Add Row by a click; the lesson's
+Try-its; a 10k-vertex sphere's collect while the camera orbits about 1-2 ms a frame (printed).
+
+**The review's fixes (Opus code-reviewer, changes needed):** two camera views shared the view-shaped mesh's slot, so
+the Game view's collect rewrote - or with a topology-changing modifier freed, its Outline shell too - a mesh the traced
+Camera Preview or F12 was still path tracing: each camera-view role has its own pair of slots and shell slot (ADR
+0094; tested by a preview's mesh and outline kept while the Game view collects from another angle); a view-shaped
+object kept its baked lightmap and its realtime-lightmap place (from the plain mesh: the same UVs); a mirrored key with
+no side counted twice near yaw 0 (the nearer side now); the Inspector's line names only keys the mesh has; an eye at
+the reference gives no weights; `viewshape add` refuses words for angles; `.l` / `_l` / Left sides; the reference
+found once a collect.
+
+## 2026-10-31 (round 338): drag an object or a bone onto Camera Flatten's pivot
+
+**Asked:** "For the CameraFlatten component, make it so that you can drag and drop objects and bones to the parameter."
+
+**Changed (task 0317)**
+- **Pivot Object** replaces the typed Pivot Bone: an object field - a bone or any object dragged from the Hierarchy
+  (outlined while it is over the field), picked with the circle at its right, or its name typed. A drop or a pick sets
+  the Pivot to the new **Object or Bone** (Bone's place in the list).
+- **The picker lists the object's own children first** (a character's bones), then the scene's - for every object
+  field (IK's Target and Pole too).
+- **Found below the object first, then in the scene:** an empty outside the character can be the pivot, and moving it
+  moves the flattened shape. A missing name falls back to the bounds' middle.
+- **Files** keep the round-334 key (Pivot Bone) beside Pivot Object, so older scenes load and older builds read newer
+  ones.
+- **Console:** `flatten pivot object <name>` (`pivot bone <name>` still works).
+
+**Checked:** `tests_round338` - a drag from the Hierarchy onto the field (one undo takes the field and the Pivot back),
+the picker's order and a pick, the pivot outside the character moving the shape, a missing name finite, the file's two
+keys and a round-334 file, the console words; the lesson's new Try-it.
+
+**The review's fixes (Opus code-reviewer, changes needed):** moving an empty that is the pivot left the Game view and
+the previews stale - a mesh-less, bone-less object is hashed nowhere, so the pivot object's place is now in the views'
+hash (tested by the hash); a face mesh named like the head bone took the pivot from round 334's files - a bone of the
+name below the object wins, then any object below, then the scene's; the lesson's Try-it run by its test; ADR 0093
+amended; the legacy key read first so a newer Pivot Object wins. Not done: Record doesn't key the Pivot a drop
+switches.
+
+## 2026-10-31 (round 337): a texture's Physical Size at 0.15 turned a cube black
+
+**Asked:** "Physical size parameter at textures on a cube at 0.15 turn the cube black."
+
+**Fixed (task 0316)**
+- **The GPU views drew a mesh with a normal map black** when the mesh was on the card before it got the normal map
+  (a procedural texture assigned to a cube already drawn). Its tangents are added to the same render mesh in place,
+  and the card re-sent a mesh only when it changed, so it kept zero tangents; the shader normalized a zero tangent to
+  NaN. The card's mesh cache now notices the tangents, and the shader keeps the plain normal where a tangent is zero.
+- **Why Physical Size showed it:** a texture with Live Shading is drawn on the CPU while its texels are magnified; at
+  the Bricks' 2 m a cube's are, at 0.15 m they aren't, and the card drew the cube. (With Live Shading off it was black
+  at any size.)
+- **Assign left Tiling z at 1** while x and y took 1 / Physical Size: Box mapping's sides tiled differently, and z
+  never followed a size change. z follows now.
+- **`texture <file>.ptex`** in the console read the texture as a picture ("unsupported TGA type"); it assigns it as
+  the Textures window does.
+- **The sanitizer job:** round 334's Camera Flatten test read a draw item from a vector already gone (a use after
+  free in the test only, which AddressSanitizer stopped on); it keeps the vector.
+
+**Checked:** `test_gpu` round 337 - the cube's middle 10.3 on the card against 103.5 on the CPU before the fix, 103.5
+against 103.5 after; `test_assets` round 337 - the CPU view and the Tiling on all three axes; the round-98 Physical
+Size test.
+
+**The review's fixes (Opus code-reviewer, approved):** the GPU test checks the card drew the cube (a CPU fallback would
+have passed it without the fix); both tests stop when the cube can't be projected; the retro vertex-snap copies are
+keyed by the tangents too (with a still camera a new normal map showed only after a move). Not done: the GPU path
+kernel's own tangent normalize keeps no guard (its tangents are never zero) until the kernel and the OptiX PTX are next
+rebuilt.
+
 ## 2026-10-30 (round 336): every open pull request merged, and the 0.12.0 pre-release
 
 **Asked:** "Merge all current standing pull requests on GitHub this one time." and "We can also for 0.12.0 pre-release".
@@ -2818,7 +4509,7 @@ own, a hotkey on anything, Store Config to share a layout") for Blendity, Unity'
 - Loading any UI file - the built-ins too - wiped the favorites, the Wheel's sets, the user actions and the panels
   even when the file carried none. A list is replaced only when the file has a line of its kind.
 - A cleared or replaced user action left its chords in the keymap's overrides, where the next new action picked them
-  up (Ctrl+Alt+K ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
+  up (Alt+B ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
 - Two uses after free: Assign Shortcut on a palette entry with no action passed the entry's name by reference into a
   call that rebuilds the palette (a long name read after its free); the My Tools grid read a panel and a palette
   entry after a button's command could have replaced them. The name is copied; the grid draws a copy of the entries

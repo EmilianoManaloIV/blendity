@@ -84,7 +84,7 @@ void Editor::offer_after_check(bool manual, bool updates) {
     upd_.want_ai = false;
     if (offer_ai()) return;
   }
-  const bool libs_shown = upd_.want_libs && offer_libraries();
+  const bool libs_shown = upd_.want_libs && offer_libraries(manual);
   if (libs_shown || !updates) return;  // (a libraries-only check never offers an update the user turned off)
   if (upd_.offer.empty()) {
     if (manual) Log::info("Updates: Blendity %s is the newest build for this system", releases::build_label().c_str());
@@ -355,10 +355,13 @@ void Editor::check_libraries_at_start() {
 
 /* This build's release has its libraries: the Libraries dialog. False when there's nothing to offer (a local build,
  * an older release without them). */
-bool Editor::offer_libraries() {
+bool Editor::offer_libraries(bool manual) {
   upd_.want_libs = false;
   const releases::Release *mine = update_release(releases::build_tag());
   const releases::Asset *a = mine ? releases::libraries(*mine, extras_release(), releases::platform()) : nullptr;
+  if ((!a || !releases::checksums(*mine)) && manual)  // (asked by a click: said where it shows - review 366)
+    return refuse(strprintf("Libraries: none to download for this build (%s, a local build or a release without them); for MP4s, put an ffmpeg program "
+                            "on the PATH or in Preferences", releases::build_label().c_str()), "preferences", "Open Preferences"), false;
   if (!a || !releases::checksums(*mine)) {
     Log::info("Libraries: none to download for this build (%s)", releases::build_label().c_str());
     return false;

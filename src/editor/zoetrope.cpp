@@ -131,7 +131,7 @@ void Editor::zoe_drag() {
   const float playhead = anim_.frame;
   anim_.frame = (float)zoe_.frame;  // (the cell's frame for the drag: its pose, its key)
   if (!autopose_.bone) {
-    apply_clip(*clip, *root, anim_.frame);
+    anim_apply_held(*clip, *root, anim_.frame);  // (round 340: held as the Preview holds)
     solve_constraints(*scene_);
     zoe_.start = g->world_position();
   }

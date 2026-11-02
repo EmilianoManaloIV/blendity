@@ -27,12 +27,18 @@ void MeshRenderer::set_shape_weight(const std::string &name, float w) {
   shape_weights.push_back({name, w});
 }
 
-uint64_t shape_key_hash(const Mesh &m, const MeshRenderer *mr) {
+float MeshRenderer::view_weight(const std::string &name) const {
+  for (const auto &w : view_weights)
+    if (w.first == name) return w.second;
+  return 0.0f;
+}
+
+uint64_t shape_key_hash(const Mesh &m, const MeshRenderer *mr, bool view) {
   if (!mr || m.shape_keys.empty()) return 0;
   uint64_t h = kFnvBasis;
   bool any = false;
   for (const ShapeKey &k : m.shape_keys) {
-    const float w = mr->shape_weight(k.name);
+    const float w = mr->shape_weight(k.name) + (view ? mr->view_weight(k.name) : 0.0f);
     if (w == 0.0f || k.delta.size() != m.positions.size()) continue;
     uint32_t bits;
     std::memcpy(&bits, &w, 4);
@@ -43,10 +49,10 @@ uint64_t shape_key_hash(const Mesh &m, const MeshRenderer *mr) {
   return any ? h : 0;
 }
 
-void apply_shape_keys(const Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions) {
+void apply_shape_keys(const Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions, bool view) {
   if (!mr) return;
   for (const ShapeKey &k : m.shape_keys) {
-    const float w = mr->shape_weight(k.name);
+    const float w = mr->shape_weight(k.name) + (view ? mr->view_weight(k.name) : 0.0f);
     if (w == 0.0f || k.delta.size() != positions.size()) continue;
     for (size_t i = 0; i < positions.size(); i++) positions[i] = positions[i] + k.delta[i] * w;
   }

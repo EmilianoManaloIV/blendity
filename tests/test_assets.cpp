@@ -1,7 +1,34 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the assets tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include <chrono>
+#include <thread>
+#include <filesystem>
 #include "fixtures/synthetic_mmd.h"
+#include "../src/render/video_decode.h"
+#include "../src/render/video_encode.h"
+#include "../src/core/json.h"
+#include "../src/scene/budget.h"
+#include "../src/scene/visemes.h"
+#include "../src/scene/humanoid.h"
+#include "../src/scene/colliders.h"
+#include "../src/scene/lod.h"
+#include "../src/scene/audio.h"
+#include "../src/scene/godot_scene.h"
+#include "../src/scene/snapshot.h"
+#include "../src/scene/unity_package.h"
+#include "../src/scene/unity_scene.h"
+#include "../src/scene/unity_material.h"
+#include "../src/core/audio_out.h"
+#include "../src/deps/deps.h"
+#include "../src/core/launch.h"
+#include "../src/scene/physics.h"
+#include "../src/scene/avatar_merge.h"
+#include "../src/scene/avatar_eyes.h"
+#include "../src/scene/avatar_optimize.h"
+#include "../src/scene/spring_bones.h"
+#include "../src/scene/avatar_tools.h"
+#include "../extern/ufbx/ufbx.h"
 
 static void image_tests() {
   test("image: PNG round-trip is exact", [] {
@@ -1318,6 +1345,7 @@ static void tests_round145_to_round163() {
     ed.mark_changed_for_test("Add the rig");
     ed.command("select " + rig->name);
     ed.step_frame_headless();
+    ed.command("assist off walk");  // (round 367: on at first now - switched off to see the refusal)
     ed.command("walk cycle walk");  // (off: refused)
     const bool refused = ed.anim_clip_for_test() == nullptr;
     ed.command("assist on walk");
@@ -4983,6 +5011,5034 @@ static void tests_round330_blends() {
   });
 }
 
+/* ---------------------------------------------------------------- round 351: shape keys in glTF and FBX exports */
+/* Round 351: a .glb's JSON chunk, parsed (Null when the header is wrong). */
+static Json r351_glb_json(const std::string &glb) {
+  auto u32 = [&](size_t at) {
+    uint32_t v = 0;
+    if (at + 4 <= glb.size()) std::memcpy(&v, glb.data() + at, 4);
+    return v;
+  };
+  if (glb.size() < 20 || u32(0) != 0x46546C67u || u32(16) != 0x4E4F534Au || 20 + (size_t)u32(12) > glb.size()) return Json();
+  JsonParser p{glb.data() + 20, glb.data() + 20 + u32(12)};
+  Json j = p.value();
+  return p.ok ? j : Json();
+}
+
+/* A cube whose top lifts by 0.5 ("Up", weight 0.25) and whose +X side pushes out by 0.2 ("Side", weight 0). */
+static MeshPtr r351_keyed_cube() {
+  MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+  ShapeKey up{"Up", std::vector<Vec3>(m->vert_count(), Vec3(0.0f))}, side{"Side", std::vector<Vec3>(m->vert_count(), Vec3(0.0f))};
+  for (size_t v = 0; v < m->vert_count(); v++) {
+    if (m->positions[v].y > 0.0f) up.delta[v] = Vec3(0, 0.5f, 0);
+    if (m->positions[v].x > 0.0f) side.delta[v] = Vec3(0.2f, 0, 0);
+  }
+  m->shape_keys = {up, side};
+  return m;
+}
+
+static float r351_largest(const ShapeKey &k) {
+  float best = 0.0f;
+  for (const Vec3 &d : k.delta) best = std::max(best, length(d));
+  return best;
+}
+
+/* Round 351: an accessor's floats from a .glb's binary chunk (empty when it isn't there). */
+static std::vector<float> r351_glb_floats(const std::string &glb, const Json &j, size_t accessor) {
+  uint32_t jl = 0;
+  if (glb.size() >= 20) std::memcpy(&jl, glb.data() + 12, 4);
+  const size_t bin = 20 + (size_t)jl + 8;
+  const Json &a = j["accessors"][accessor];
+  const Json &v = j["bufferViews"][(size_t)a["bufferView"].number()];
+  const size_t start = bin + (size_t)v["byteOffset"].number() + (size_t)a["byteOffset"].number();
+  const size_t comps = a["type"].str == "SCALAR" ? 1 : a["type"].str == "VEC2" ? 2 : a["type"].str == "VEC3" ? 3 : 4;
+  const size_t n = (size_t)a["count"].number() * comps;
+  std::vector<float> out(n);
+  if (start + n * 4 > glb.size()) return {};
+  std::memcpy(out.data(), glb.data() + start, n * 4);
+  return out;
+}
+
+/* A warning containing `text` among the log's entries since `since`. */
+static bool r351_warned(size_t since, const char *text) {
+  std::vector<LogEntry> log;
+  Log::fetch(since, log);
+  for (const LogEntry &e : log)
+    if (e.level == LogLevel::Warning && e.text.find(text) != std::string::npos) return true;
+  return false;
+}
+
+static size_t r351_log_now() {
+  std::vector<LogEntry> log;
+  return Log::fetch(0, log);
+}
+
+static void tests_round351() {
+  test("Shape keys in exports (round 351): glTF writes them as morph targets with names and weights, FBX as blend shapes; both import back", [] {
+    MeshPtr cube = r351_keyed_cube();
+    ExportItem it;
+    it.name = "Face", it.mesh = cube.get(), it.world = Mat4::identity(), it.shape_weights = {0.25f, 0.0f};
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    const Json j = r351_glb_json(glb);
+    const Json &mesh = j["meshes"][0];
+    const Json &prim = mesh["primitives"][0];
+    std::printf("    glTF: %zu targets, names %s / %s, weights %g %g\n", prim["targets"].size(), mesh["extras"]["targetNames"][0].str.c_str(),
+                mesh["extras"]["targetNames"][1].str.c_str(), mesh["weights"][0].number(-1), mesh["weights"][1].number(-1));
+    CHECK(prim["targets"].size() == 2 && mesh["extras"]["targetNames"][0].str == "Up" && mesh["extras"]["targetNames"][1].str == "Side");
+    CHECK(std::fabs(mesh["weights"][0].number(-1) - 0.25) < 1e-6 && mesh["weights"][1].number(-1) == 0.0);
+    CHECK(prim["targets"][0]["POSITION"].type == Json::Num && j["accessors"][(size_t)prim["targets"][0]["POSITION"].number()]["max"].size() == 3);
+    /* Back in, from the files. */
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string gp = fs::join(dir, "face.glb"), fp = fs::join(dir, "face.fbx");
+    fs::write_file(gp, glb);
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    for (const std::string &path : {gp, fp}) {
+      ImportResult r;
+      const bool ok = import_model(path, r);
+      const ImportedNode *n = nullptr;
+      for (const ImportedNode &x : r.nodes) n = n ? n : x.mesh ? &x : nullptr;
+      const std::vector<ShapeKey> keys = n ? n->mesh->shape_keys : std::vector<ShapeKey>();
+      std::printf("    %s back: %zu keys%s\n", fs::extension(path).c_str(), keys.size(),
+                  keys.size() == 2 ? strprintf(" (%s %.3f, %s %.3f)", keys[0].name.c_str(), r351_largest(keys[0]), keys[1].name.c_str(), r351_largest(keys[1])).c_str() : "");
+      CHECK(ok && keys.size() == 2);
+      if (keys.size() != 2) continue;
+      CHECK(keys[0].name == "Up" && keys[1].name == "Side");
+      CHECK(std::fabs(r351_largest(keys[0]) - 0.5f) < 1e-3f && std::fabs(r351_largest(keys[1]) - 0.2f) < 1e-3f);
+    }
+  });
+  test("Shape keys in exports (round 351): the Shape Keys option off writes the mesh as its weights shape it; a key that moves nothing still survives FBX; a clip's weights go as a glTF weights channel", [] {
+    MeshPtr cube = r351_keyed_cube();
+    cube->shape_keys[1].delta.assign(cube->vert_count(), Vec3(0.0f));  // (Side moves nothing now)
+    ExportItem it;
+    it.name = "Face", it.mesh = cube.get(), it.world = Mat4::identity(), it.shape_weights = {1.0f, 0.0f};
+    ExportOptions off = export_defaults((int)ExportFormat::GLB);
+    off.shape_keys = false;
+    CHECK(r351_glb_json(export_gltf({it}, off, true, "", nullptr))["meshes"][0]["primitives"][0]["targets"].size() == 0);
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string fp = fs::join(dir, "still.fbx");
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    ImportResult r;
+    import_model(fp, r);
+    size_t keys = 0;
+    for (const ImportedNode &n : r.nodes) keys += n.mesh ? n.mesh->shape_keys.size() : 0;
+    std::printf("    FBX with a key that moves nothing: %zu keys back\n", keys);
+    CHECK(keys == 2);
+    /* A skinned item whose clip keys the weights: one weights channel on the mesh's node, keys x frames values. */
+    auto sk = std::make_shared<ExportSkin>();
+    sk->joints.push_back({"Root", -1, Vec3(0.0f), Quat(), Vec3(1.0f)});
+    sk->vjoints.assign(cube->vert_count(), {0, 0, 0, 0});
+    sk->vweights.assign(cube->vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+    ExportSkin::Anim an;
+    an.name = "Talk", an.fps = 30.0f, an.frames = 3;
+    an.t = {{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)}}, an.r = {{Quat(), Quat(), Quat()}}, an.s = {{Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}};
+    an.shape_w = {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.5f}};
+    sk->anims.push_back(an);
+    it.skin = sk;
+    const Json j = r351_glb_json(export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr));
+    const Json &chs = j["animations"][0]["channels"];
+    int weights = -1;
+    for (size_t c = 0; c < chs.size(); c++)
+      if (chs[c]["target"]["path"].str == "weights") weights = (int)c;
+    const Json &smp = weights >= 0 ? j["animations"][0]["samplers"][(size_t)chs[(size_t)weights]["sampler"].number()] : Json();
+    const double count = weights >= 0 ? j["accessors"][(size_t)smp["output"].number()]["count"].number() : 0;
+    std::printf("    the clip's weights channel: %s, %g values\n", weights >= 0 ? "on the mesh's node" : "missing", count);
+    CHECK(weights >= 0 && j["nodes"][(size_t)chs[(size_t)weights]["target"]["node"].number()]["mesh"].type == Json::Num && count == 6);
+  });
+  test("Shape keys in exports (round 351): from the editor the basis and its keys go out; a Subdivision Surface on the mesh leaves them out and says why", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->get<MeshFilter>()->mesh = r351_keyed_cube();
+    g->get<MeshRenderer>()->shape_weights = {{"Up", 1.0f}};
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "editor.glb");
+    ed.command("export glb " + path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    const Json &acc = j["accessors"][(size_t)j["meshes"][0]["primitives"][0]["attributes"]["POSITION"].number()];
+    std::printf("    from the editor: %zu targets, the basis' top at y %g, its middle at %g (the weight 1 not baked in)\n", j["meshes"][0]["primitives"][0]["targets"].size(),
+                acc["max"][1].number(), g->world_position().y);
+    CHECK(j["meshes"][0]["primitives"][0]["targets"].size() == 2 && j["meshes"][0]["weights"][0].number(-1) == 1.0);
+    CHECK(acc["max"][1].number() < g->world_position().y + 0.6);  // (the cube's top half a metre above its middle, not lifted another 0.5 by the weight)
+    ed.command("component SubdivisionSurface");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("export glb " + path);
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.level == LogLevel::Warning && e.text.find("shape keys left out") != std::string::npos);
+    glb.clear();
+    fs::read_file(path, glb);
+    CHECK(r351_glb_json(glb)["meshes"][0]["primitives"][0]["targets"].size() == 0 && said);
+  });
+  test("Shape keys in exports (review 351): through a turned, scaled and mirrored object each key's offset lands where the vertex does, signed, in glTF and FBX; a clip's weights go frame by frame", [] {
+    MeshPtr cube = r351_keyed_cube();
+    ExportItem it;
+    it.name = "Turned", it.mesh = cube.get(), it.shape_weights = {0.0f, 0.0f};
+    it.world = Mat4::trs(Vec3(1, 2, 3), Quat::axis_angle(Vec3(0, 1, 0), kPi * 0.5f), Vec3(-2, 1, 1));  // (mirrored in X, stretched, turned)
+    const std::string dir = fs::join(test_dir(), "r351");
+    fs::make_dirs(dir);
+    const std::string gp = fs::join(dir, "turned.glb"), fp = fs::join(dir, "turned.fbx");
+    fs::write_file(gp, export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr));
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    for (const std::string &path : {gp, fp}) {
+      ImportResult r;
+      import_model(path, r);
+      const ImportedNode *n = nullptr;
+      for (const ImportedNode &x : r.nodes) n = n ? n : x.mesh ? &x : nullptr;
+      CHECK(n && n->mesh->shape_keys.size() == 2);
+      if (!n || n->mesh->shape_keys.size() != 2) continue;
+      const Mat4 nodew = Mat4::trs(n->position, n->rotation, n->scale);  // (the imported node's own placement, if the file has one)
+      float worst = 0.0f;
+      for (size_t v = 0; v < cube->vert_count(); v++) {
+        const Vec3 want_p = it.world.point(cube->positions[v]), want_d = it.world.dir(cube->shape_keys[0].delta[v]);
+        size_t best = 0;
+        float bd = 1e30f;
+        for (size_t u = 0; u < n->mesh->vert_count(); u++) {
+          const float d = length(nodew.point(n->mesh->positions[u]) - want_p);
+          if (d < bd) bd = d, best = u;
+        }
+        worst = std::max(worst, length(nodew.dir(n->mesh->shape_keys[0].delta[best]) - want_d) + bd);
+      }
+      std::printf("    %s: the Up key's offsets against the turned, mirrored object's, worst %.5f\n", fs::extension(path).c_str(), worst);
+      CHECK(worst < 1e-3f);
+    }
+  });
+  test("Shape keys in exports (review 351): the weights channel's values go frame-major (each frame every key)", [] {
+    MeshPtr cube = r351_keyed_cube();
+    ExportItem it;
+    it.name = "Face", it.mesh = cube.get(), it.world = Mat4::identity(), it.shape_weights = {0.0f, 0.0f};
+    auto sk = std::make_shared<ExportSkin>();
+    sk->joints.push_back({"Root", -1, Vec3(0.0f), Quat(), Vec3(1.0f)});
+    sk->vjoints.assign(cube->vert_count(), {0, 0, 0, 0});
+    sk->vweights.assign(cube->vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+    ExportSkin::Anim an;
+    an.name = "Talk", an.fps = 30.0f, an.frames = 3;
+    an.t = {{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)}}, an.r = {{Quat(), Quat(), Quat()}}, an.s = {{Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}};
+    an.shape_w = {{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.5f}};
+    sk->anims.push_back(an);
+    it.skin = sk;
+    const std::string glb = export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr);
+    const Json j = r351_glb_json(glb);
+    const Json &chs = j["animations"][0]["channels"];
+    std::vector<float> vals;
+    for (size_t c = 0; c < chs.size(); c++)
+      if (chs[c]["target"]["path"].str == "weights") vals = r351_glb_floats(glb, j, (size_t)j["animations"][0]["samplers"][(size_t)chs[c]["sampler"].number()]["output"].number());
+    std::printf("    the weights: %s\n", vals.size() == 6 ? strprintf("%g %g | %g %g | %g %g", vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]).c_str() : "missing");
+    CHECK(vals.size() == 6 && vals[0] == 0.0f && vals[1] == 0.0f && vals[2] == 1.0f && vals[3] == 0.0f && vals[4] == 0.0f && vals[5] == 0.5f);
+  });
+  test("Shape keys in exports (review 351): a rigged cube whose clip keys Smile exports the keys, the weight and the channel, and the Inspector's weight is put back; with Armatures off the posed mesh goes and the log says why", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("shape add Smile");
+    ed.command("create Armature");  // (the Cube in "Cube Rig", a Skin bound)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig"), *cube = ed.scene().find_by_name("Cube");
+    CHECK(rig && cube && cube->get<SkinModifier>());
+    if (!rig || !cube) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R351");
+    ed.command("anim key Cube MeshRenderer.BlendShape/Smile 0 0 0");
+    ed.command("anim key Cube MeshRenderer.BlendShape/Smile 0 10 1");
+    ed.command("anim frame 5");
+    ed.command("anim preview off");
+    cube->get<MeshRenderer>()->shape_weights = {{"Smile", 0.3f}};
+    ed.command("select Cube");
+    const std::string path = fs::join(fs::join(test_dir(), "r351"), "rig.glb");
+    fs::make_dirs(fs::parent(path));
+    const size_t since = r351_log_now();
+    ed.export_model_for_test(export_defaults((int)ExportFormat::GLB), path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    bool channel = false;
+    for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) channel = channel || j["animations"][0]["channels"][c]["target"]["path"].str == "weights";
+    const float back = cube->get<MeshRenderer>()->shape_weight("Smile");
+    std::printf("    rigged: targets %zu, weight %g, weights channel %d, the Inspector's weight after %g, warned %d\n", j["meshes"][0]["primitives"][0]["targets"].size(),
+                j["meshes"][0]["weights"][0].number(-1), (int)channel, back, (int)r351_warned(since, "shape keys left out"));
+    CHECK(j["meshes"][0]["primitives"][0]["targets"].size() == 1 && std::fabs(j["meshes"][0]["weights"][0].number(-1) - 0.3) < 1e-6 && channel);
+    CHECK(std::fabs(back - 0.3f) < 1e-6f && !r351_warned(since, "shape keys left out"));
+    /* Armatures and Animation off: the mesh as posed now, its keys applied, and the log says why they're not in the file. */
+    ExportOptions off = export_defaults((int)ExportFormat::GLB);
+    off.skins = false;
+    const size_t since2 = r351_log_now();
+    ed.export_model_for_test(off, path);
+    glb.clear();
+    fs::read_file(path, glb);
+    CHECK(r351_glb_json(glb)["meshes"][0]["primitives"][0]["targets"].size() == 0 && r351_warned(since2, "posed by its Skin"));
+  });
+  test("Shape keys in exports (review 351): with Shape Keys off the weights shape the mesh; an outline carries the keys; Smooth Normals keeps them", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->get<MeshFilter>()->mesh = r351_keyed_cube();
+    g->get<MeshRenderer>()->shape_weights = {{"Up", 1.0f}};
+    const std::string path = fs::join(fs::join(test_dir(), "r351"), "opts.glb");
+    fs::make_dirs(fs::parent(path));
+    ExportOptions off = export_defaults((int)ExportFormat::GLB);
+    off.shape_keys = false;
+    ed.export_model_for_test(off, path);
+    std::string glb;
+    fs::read_file(path, glb);
+    Json j = r351_glb_json(glb);
+    const double top = j["accessors"][(size_t)j["meshes"][0]["primitives"][0]["attributes"]["POSITION"].number()]["max"][1].number();
+    std::printf("    Shape Keys off: no targets %d, the top at %g (lifted: the weight applied; the middle at %g)\n", (int)(j["meshes"][0]["primitives"][0]["targets"].size() == 0), top,
+                g->world_position().y);
+    CHECK(j["meshes"][0]["primitives"][0]["targets"].size() == 0 && top > g->world_position().y + 0.9);
+    ed.command("component Outline");
+    ed.command("component SmoothNormalsModifier");
+    const size_t since = r351_log_now();
+    ed.export_model_for_test(export_defaults((int)ExportFormat::GLB), path);
+    glb.clear();
+    fs::read_file(path, glb);
+    j = r351_glb_json(glb);
+    size_t keyed = 0;
+    for (size_t k = 0; k < j["meshes"].size(); k++) keyed += j["meshes"][k]["primitives"][0]["targets"].size() == 2 && j["meshes"][k]["weights"][0].number(-1) == 1.0;
+    std::printf("    with an Outline and Smooth Normals: %zu of %zu meshes keyed, warned %d\n", keyed, j["meshes"].size(), (int)r351_warned(since, "shape keys left out"));
+    CHECK(j["meshes"].size() == 2 && keyed == 2 && !r351_warned(since, "shape keys left out"));
+  });
+  test("the lesson's Try-it (round 351): create Cube, shape add Smile, export glb gives a file with a morph target", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string path = fs::join(fs::join(test_dir(), "r351"), "tryit.glb");
+    fs::make_dirs(fs::parent(path));
+    for (const std::string &c : {std::string("create Cube"), std::string("shape add Smile"), "export glb " + path}) ed.command(c);
+    std::string glb;
+    fs::read_file(path, glb);
+    CHECK(r351_glb_json(glb)["meshes"][0]["extras"]["targetNames"][0].str == "Smile");
+  });
+}
+
+/* ---------------------------------------------------------------- round 352: FBX carries the rig and its clip */
+/* A two-bone rig on the keyed cube: Root at the bottom, Child half way up taking the top half, its clip turning Child
+ * 90 degrees about Z over three frames while Up's weight rises. */
+static ExportItem r352_rigged(MeshPtr &cube, const Mat4 &world) {
+  cube = r351_keyed_cube();
+  ExportItem it;
+  it.name = "Body", it.mesh = cube.get(), it.world = world, it.shape_weights = {0.0f, 0.0f};
+  auto sk = std::make_shared<ExportSkin>();
+  sk->base_name = "Rig";
+  sk->base = Mat4::trs(Vec3(0.0f, -0.5f, 0.0f), Quat(), Vec3(1.0f));
+  sk->joints.push_back({"Root", -1, Vec3(0.0f), Quat(), Vec3(1.0f)});
+  sk->joints.push_back({"Child", 0, Vec3(0.0f, 0.5f, 0.0f), Quat(), Vec3(1.0f)});
+  for (size_t v = 0; v < cube->vert_count(); v++) {
+    const bool top = cube->positions[v].y > 0.0f;
+    sk->vjoints.push_back({(uint16_t)(top ? 1 : 0), 0, 0, 0});
+    sk->vweights.push_back({1.0f, 0.0f, 0.0f, 0.0f});
+  }
+  ExportSkin::Anim an;
+  an.name = "Bend", an.fps = 24.0f, an.frames = 3;
+  an.t = {{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)}, {Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0)}};
+  an.r = {{Quat(), Quat(), Quat()}, {Quat(), Quat::axis_angle(Vec3(0, 0, 1), kPi * 0.25f), Quat::axis_angle(Vec3(0, 0, 1), kPi * 0.5f)}};
+  an.s = {{Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}, {Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)}};
+  an.shape_w = {{0.0f, 0.5f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+  sk->anims.push_back(an);
+  it.skin = sk;
+  return it;
+}
+
+/* What an import made of a rig: each bone's rest world position, the mesh's group weights, Child's Z turn at the clip's
+ * last frame and Up's weight there. */
+struct R352Rig {
+  bool ok = false;
+  std::vector<std::pair<std::string, Vec3>> bones;
+  std::vector<std::pair<std::string, float>> group_sum;
+  float child_turn = -999.0f, up_weight = -1.0f;
+  size_t skins = 0, clips = 0;
+};
+
+static R352Rig r352_read(const std::string &path) {
+  R352Rig r;
+  ImportResult res;
+  r.ok = import_model(path, res);
+  r.skins = res.skins.size(), r.clips = res.clips.size();
+  std::vector<Mat4> world(res.nodes.size());
+  for (size_t i = 0; i < res.nodes.size(); i++) {
+    const ImportedNode &n = res.nodes[i];
+    const Mat4 local = Mat4::trs(n.position, n.rotation, n.scale);
+    world[i] = n.parent >= 0 && n.parent < (int)i ? world[(size_t)n.parent] * local : local;
+    if (n.is_bone) r.bones.push_back({n.name, world[i].translation()});
+    if (!n.mesh) continue;
+    for (const VertexGroup &vg : n.mesh->vertex_groups) {
+      float s = 0.0f;
+      for (float w : vg.weights) s += w;
+      r.group_sum.push_back({vg.name, s});
+    }
+  }
+  for (const AnimationClip &c : res.clips)
+    for (const AnimTrack &t : c.tracks) {
+      const float last = t.keys.empty() ? 0.0f : t.keys.back().frame;
+      if (t.path.size() >= 5 && t.path.compare(t.path.size() - 5, 5, "Child") == 0 && t.property == "Rotation" && t.axis == 2) r.child_turn = t.sample(last);
+      if (t.property.find("BlendShape/Up") != std::string::npos) r.up_weight = t.sample(last);
+    }
+  std::sort(r.bones.begin(), r.bones.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  std::sort(r.group_sum.begin(), r.group_sum.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+  return r;
+}
+
+/* Review 352: ufbx's own skinning of an FBX's first mesh at `time` (seconds), in Blendity's space (X mirrored back),
+ * by control point - which is the exported mesh's vertex order. */
+static std::vector<Vec3> r352_skinned(const std::string &path, double time) {
+  ufbx_load_opts opts = {};
+  opts.target_axes = ufbx_axes_right_handed_y_up;
+  opts.target_unit_meters = 1.0f;
+  opts.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
+  ufbx_error err;
+  ufbx_scene *scene = ufbx_load_file(path.c_str(), &opts, &err);
+  std::vector<Vec3> out;
+  if (!scene) return out;
+  ufbx_evaluate_opts eo = {};
+  eo.evaluate_skinning = true;
+  ufbx_scene *ev = scene->anim_stacks.count ? ufbx_evaluate_scene(scene, scene->anim_stacks.data[0]->anim, time, &eo, &err) : nullptr;
+  const ufbx_scene *use = ev ? ev : scene;
+  const ufbx_node *node = nullptr;
+  for (size_t i = 0; i < use->nodes.count && !node; i++) node = use->nodes.data[i]->mesh ? use->nodes.data[i] : nullptr;
+  if (node) {
+    const ufbx_mesh *m = node->mesh;
+    for (size_t v = 0; v < m->num_vertices; v++) {
+      ufbx_vec3 p = m->skinned_position.values.data[v];
+      if (m->skinned_is_local) p = ufbx_transform_position(&node->geometry_to_world, p);
+      out.push_back(Vec3(-(float)p.x, (float)p.y, (float)p.z));
+    }
+  }
+  if (ev) ufbx_free_scene(ev);
+  ufbx_free_scene(scene);
+  return out;
+}
+
+struct R352Names : Reflector {  // (the option labels a dialog shows)
+  std::vector<std::string> names;
+  void field(const char *n, float &, float, float, float) override { names.push_back(n); }
+  void field(const char *n, int &, int, int) override { names.push_back(n); }
+  void field(const char *n, bool &) override { names.push_back(n); }
+  void field(const char *n, Vec3 &) override { names.push_back(n); }
+  void color(const char *n, Vec3 &) override { names.push_back(n); }
+  void enumeration(const char *n, int &, const char *const *, int) override { names.push_back(n); }
+  void text(const char *n, std::string &) override { names.push_back(n); }
+  void mesh(const char *n, MeshPtr &) override { names.push_back(n); }
+};
+
+static void tests_round352() {
+  test("FBX carries the rig (round 352): an FBX of a rigged, keyed mesh imports with the same bones, weights, clip turn and shape-key weight as its glTF", [] {
+    MeshPtr cube;
+    const Mat4 world = Mat4::trs(Vec3(0.5f, 0.0f, -1.0f), Quat::axis_angle(Vec3(0, 1, 0), 0.6f), Vec3(1.0f));
+    const ExportItem it = r352_rigged(cube, world);
+    const std::string dir = fs::join(test_dir(), "r352");
+    fs::make_dirs(dir);
+    const std::string gp = fs::join(dir, "rig.glb"), fp = fs::join(dir, "rig.fbx");
+    fs::write_file(gp, export_gltf({it}, export_defaults((int)ExportFormat::GLB), true, "", nullptr));
+    fs::write_file(fp, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    const R352Rig g = r352_read(gp), f = r352_read(fp);
+    auto bones = [](const R352Rig &r) {
+      std::string s;
+      for (const auto &b : r.bones) s += strprintf("%s (%.2f %.2f %.2f) ", b.first.c_str(), b.second.x, b.second.y, b.second.z);
+      return s;
+    };
+    std::printf("    glTF: %zu skin(s), bones %s, Child's turn %.1f, Up %.2f, %zu clip(s)\n", g.skins, bones(g).c_str(), g.child_turn, g.up_weight, g.clips);
+    std::printf("    FBX:  %zu skin(s), bones %s, Child's turn %.1f, Up %.2f, %zu clip(s)\n", f.skins, bones(f).c_str(), f.child_turn, f.up_weight, f.clips);
+    CHECK(f.ok && f.skins == 1 && f.clips >= 1 && f.bones.size() == 2 && g.bones.size() == 2);
+    if (f.bones.size() != 2 || g.bones.size() != 2) return;
+    for (size_t b = 0; b < 2; b++) CHECK(f.bones[b].first == g.bones[b].first && length(f.bones[b].second - g.bones[b].second) < 1e-3f);
+    CHECK(f.group_sum.size() == g.group_sum.size());
+    for (size_t k = 0; k < f.group_sum.size() && k < g.group_sum.size(); k++)
+      CHECK(f.group_sum[k].first == g.group_sum[k].first && std::fabs(f.group_sum[k].second - g.group_sum[k].second) < 1e-3f);
+    CHECK(std::fabs(f.child_turn - g.child_turn) < 0.5f && std::fabs(std::fabs(f.child_turn) - 90.0f) < 0.5f);
+    CHECK(std::fabs(f.up_weight - 1.0f) < 1e-3f);
+  });
+  test("FBX carries the rig (round 352): from the editor a Cube with an Armature and a clip goes to FBX with its skin and its clip; Armatures and Animation is offered for FBX", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R352");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 45");
+    ed.command("anim preview off");
+    ed.command("select Cube");
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "editor.fbx");
+    fs::make_dirs(fs::parent(path));
+    ed.export_model_for_test(export_defaults((int)ExportFormat::FBX), path);
+    const R352Rig f = r352_read(path);
+    size_t bone = 0;
+    for (const auto &b : f.bones) bone += b.first == "Bone";
+    std::printf("    the editor's FBX: %zu skin(s), the Bone %zu, %zu clip(s)\n", f.skins, bone, f.clips);
+    CHECK(f.ok && f.skins == 1 && bone == 1 && f.clips == 1);
+    bool offered = false;
+    ExportOptions o = export_defaults((int)ExportFormat::FBX);
+    R352Names names;
+    o.reflect(names);
+    for (const std::string &n : names.names) offered = offered || n == "Armatures and Animation";
+    CHECK(offered);
+  });
+  test("FBX carries the rig (review 352): ufbx's own skinning of the editor's exported rig at a keyed frame puts every vertex where Blendity's Skin puts it (the Cluster matrices), in binary and ASCII", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("position 0.5 0.5 -1");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig"), *cube = ed.scene().find_by_name("Cube");
+    CHECK(rig && cube);
+    if (!rig || !cube) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R352C");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 50");
+    ed.command("anim key Bone Rotation 0 30 20");
+    ed.command("anim preview on");
+    ed.command("anim frame 30");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const Mesh *em = cube->evaluated_mesh();
+    CHECK(clip && em);
+    if (!clip || !em) return;
+    std::vector<Vec3> want;  // (Blendity's own Skin at frame 30, in the world)
+    for (const Vec3 &p : em->positions) want.push_back(cube->world_matrix().point(p));
+    ed.command("select Cube");
+    const std::string dir = fs::join(test_dir(), "r352");
+    fs::make_dirs(dir);
+    const std::string bp = fs::join(dir, "skinned.fbx"), ap = fs::join(dir, "skinned_ascii.fbx");
+    ExportOptions o = export_defaults((int)ExportFormat::FBX);
+    ed.export_model_for_test(o, bp);
+    o.ascii = true;
+    ed.export_model_for_test(o, ap);
+    for (const std::string &path : {bp, ap}) {
+      const std::vector<Vec3> got = r352_skinned(path, 30.0 / clip->frame_rate);
+      float worst = got.size() == want.size() ? 0.0f : 1e9f;
+      for (size_t v = 0; v < got.size() && v < want.size(); v++) worst = std::max(worst, length(got[v] - want[v]));
+      std::printf("    %s: ufbx skins %zu vertices at frame 30, the worst %.5f from Blendity's Skin\n", fs::filename(path).c_str(), got.size(), worst);
+      CHECK(worst < 1e-3f);
+    }
+    const R352Rig back = r352_read(ap);
+    CHECK(back.skins == 1 && back.clips == 1);
+  });
+  test("FBX carries the rig (review 352): a joint that moves no vertex still goes (a cluster with none); a turn about Y past 90 degrees stays one turn between the keys", [] {
+    MeshPtr cube;
+    ExportItem it = r352_rigged(cube, Mat4::identity());
+    auto sk = std::make_shared<ExportSkin>(*it.skin);
+    sk->joints.push_back({"Tip", 1, Vec3(0.0f, 0.5f, 0.0f), Quat(), Vec3(1.0f)});
+    ExportSkin::Anim &an = sk->anims[0];
+    an.t.push_back({Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0), Vec3(0, 0.5f, 0)});
+    an.r.push_back({Quat(), Quat(), Quat()});
+    an.s.push_back({Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)});
+    an.r[1] = {Quat(), Quat::axis_angle(Vec3(0, 1, 0), kPi * 60.0f / 180.0f), Quat::axis_angle(Vec3(0, 1, 0), kPi * 120.0f / 180.0f)};
+    it.skin = sk;
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "tip.fbx");
+    fs::make_dirs(fs::parent(path));
+    fs::write_file(path, export_fbx({it}, export_defaults((int)ExportFormat::FBX)));
+    const R352Rig r = r352_read(path);
+    CHECK(r.bones.size() == 3);
+    /* Half way between 60 and 120 degrees: 90, about Y - not a swing through another axis. */
+    ufbx_load_opts opts = {};
+    ufbx_error err;
+    ufbx_scene *scene = ufbx_load_file(path.c_str(), &opts, &err);
+    CHECK(scene != nullptr);
+    if (!scene) return;
+    const ufbx_node *child = ufbx_find_node(scene, "Child");
+    const ufbx_transform t = child && scene->anim_stacks.count ? ufbx_evaluate_transform(scene->anim_stacks.data[0]->anim, child, 1.5 / 24.0) : ufbx_transform{};
+    const double angle = 2.0 * std::acos(std::min(1.0, std::fabs(t.rotation.w))) * 180.0 / kPi;
+    const double off_axis = std::sqrt(t.rotation.x * t.rotation.x + t.rotation.z * t.rotation.z);
+    std::printf("    half way between the 60 and 120 degree keys: %.2f degrees, off the Y axis %.4f\n", angle, off_axis);
+    CHECK(std::fabs(angle - 90.0) < 0.5 && off_axis < 1e-3);
+    ufbx_free_scene(scene);
+  });
+  test("FBX carries the rig (review 352): from the editor an Outline's shell is skinned too, a Mirror on the rig's mesh is applied, and two meshes on one armature share one skeleton and one clip", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("position 2 0.5 0");
+    ed.command("component MirrorModifier");
+    ed.command("component Outline");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("create Sphere");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R352B");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 45");
+    ed.command("anim preview off");
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "editor_many.fbx");
+    fs::make_dirs(fs::parent(path));
+    ExportOptions o = export_defaults((int)ExportFormat::FBX);
+    o.selection_only = false;
+    ed.export_model_for_test(o, path);
+    ImportResult res;
+    CHECK(import_model(path, res));
+    size_t bones = 0, cube_min = 0;
+    float xmin = 1e9f;
+    for (const ImportedNode &n : res.nodes) {
+      bones += n.is_bone && n.name == "Bone";
+      if (!n.mesh || n.name != "Cube") continue;
+      for (const Vec3 &p : n.mesh->positions) xmin = std::min(xmin, p.x);
+      cube_min = n.mesh->vert_count();
+    }
+    std::printf("    the editor's scene: %zu skin(s) (Cube, its Outline, the Sphere), the Bone %zu time(s), %zu clip(s); the Cube's %zu vertices (8 before the Mirror), x from %.2f\n",
+                res.skins.size(), bones, res.clips.size(), cube_min, xmin);
+    CHECK(res.skins.size() == 3 && bones == 1 && res.clips.size() == 1);
+    CHECK(cube_min > 8);  // (the Mirror applied: a centred cube mirrors onto itself, its vertices doubled)
+  });
+  test("the lesson's Try-it (round 352): create Cube, create Armature, export fbx all gives an FBX with a skin", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string path = fs::join(fs::join(test_dir(), "r352"), "tryit.fbx");
+    fs::make_dirs(fs::parent(path));
+    for (const std::string &c : {std::string("create Cube"), std::string("create Armature"), "export fbx all " + path}) ed.command(c);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(r352_read(path).skins == 1);
+  });
+}
+
+/* ---------------------------------------------------------------- round 353: textures and lightmap UVs in exports */
+/* A cube whose material takes a procedural texture's albedo and normal (a .ptex made by `newtex`), and the Color Grid as
+ * its emission. */
+static GameObject *r353_textured(Editor &ed) {
+  ed.command("create Cube");
+  GameObject *g = ed.active_object_for_test();
+  if (!g) return nullptr;
+  ed.command("newtex R353Bricks Bricks");
+  MaterialPtr m = make_material("R353", Vec3(1.0f));
+  m->base_map = TextureRef{"Assets/Textures/R353Bricks.ptex#albedo", false};
+  m->normal_map = TextureRef{"Assets/Textures/R353Bricks.ptex#normal", true};
+  m->emission_map = TextureRef{"generated:Color Grid", false};
+  m->emission = Vec3(1.0f), m->emission_strength = 1.0f;  // (lit, so the map shows - glTF multiplies them)
+  g->get<MeshRenderer>()->materials = {m};
+  return g;
+}
+
+static void tests_round353() {
+  test("Textures in exports (round 353): a relative path lands in the project; the .glb embeds the procedural texture's images and the Color Grid; the FBX references PNGs beside it", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    GameObject *g = r353_textured(ed);
+    CHECK(g != nullptr);
+    if (!g) return;
+    const std::string project = std::getenv("BLENDITY_PROJECT");
+    for (const char *d : {"Exports/R353", "Exports/R353F"}) { std::error_code ec; std::filesystem::remove_all(fs::join(project, d), ec); }  // (a new folder each run: the case that failed)
+    ed.command("export glb Exports/R353/cube.glb");
+    const std::string glb_path = fs::join(project, "Exports/R353/cube.glb");
+    std::string glb;
+    const bool there = fs::read_file(glb_path, glb);
+    const Json j = r351_glb_json(glb);
+    std::printf("    the .glb in the project: %d, %zu image(s) embedded, %zu texture(s)\n", (int)there, j["images"].size(), j["textures"].size());
+    CHECK(there && j["images"].size() >= 3 && j["materials"][0]["emissiveTexture"]["index"].type == Json::Num);  // (albedo, normal, the Color Grid as the emission)
+    bool embedded = true;
+    for (size_t i = 0; i < j["images"].size(); i++) embedded = embedded && j["images"][i]["bufferView"].type == Json::Num;
+    CHECK(embedded);
+    ed.command("export fbx Exports/R353F/cube.fbx");
+    const std::string dir = fs::join(project, "Exports/R353F");
+    ImportResult r;
+    CHECK(import_model(fs::join(dir, "cube.fbx"), r));
+    const MaterialPtr m = r.materials.empty() ? nullptr : r.materials[0];
+    auto found = [](const TextureRef &t) { return !t.empty() && fs::exists(resolve_asset_path(t.path)); };
+    std::printf("    the FBX (its own new folder): base %d, normal %d, emission %d maps found\n", m ? (int)found(m->base_map) : 0, m ? (int)found(m->normal_map) : 0,
+                m ? (int)found(m->emission_map) : 0);
+    CHECK(m && found(m->base_map) && found(m->normal_map) && found(m->emission_map));
+    /* The Color Grid as written: its pixels in the Color Grid's order (red, not blue, where it's red). */
+    Bitmap grid;
+    std::string err;
+    const TexturePtr cg = texture_color_grid();
+    CHECK(load_image(fs::join(dir, "Blendity_Color_Grid.png"), grid, err) && cg && !cg->levels.empty());
+    if (grid.rgba8.empty() || !cg || cg->levels.empty()) return;
+    int wrong = 0;
+    for (size_t i = 0; i < 64 && i * 4 + 2 < grid.rgba8.size(); i++) {
+      const uint32_t c = cg->levels[0].px8[i * 97 % cg->levels[0].px8.size()];
+      const size_t k = (i * 97 % cg->levels[0].px8.size()) * 4;
+      wrong += grid.rgba8[k] != (c & 0xFFu) || grid.rgba8[k + 2] != (c >> 16 & 0xFFu);
+    }
+    CHECK(wrong == 0);
+  });
+  test("Lightmap UVs in exports (round 353): the option writes a second UV set - glTF TEXCOORD_1 inside 0..1, FBX a second UV map - and off writes none", [] {
+    MeshPtr cube = primitives::cube();
+    ExportItem it;
+    it.name = "Box", it.mesh = cube.get(), it.world = Mat4::identity();
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    CHECK(r351_glb_json(export_gltf({it}, o, true, "", nullptr))["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].type != Json::Num);
+    o.lightmap_uvs = true;
+    const std::string glb = export_gltf({it}, o, true, "", nullptr);
+    const Json j = r351_glb_json(glb);
+    const Json &at = j["meshes"][0]["primitives"][0]["attributes"];
+    const std::vector<float> uv2 = at["TEXCOORD_1"].type == Json::Num ? r351_glb_floats(glb, j, (size_t)at["TEXCOORD_1"].number()) : std::vector<float>();
+    float lo = 1.0f, hi = 0.0f;
+    for (float v : uv2) lo = std::min(lo, v), hi = std::max(hi, v);
+    std::printf("    glTF: TEXCOORD_1 with %zu values in %.3f..%.3f\n", uv2.size(), lo, hi);
+    CHECK(!uv2.empty() && lo >= 0.0f && hi <= 1.0f);
+    ExportOptions f = export_defaults((int)ExportFormat::FBX);
+    f.lightmap_uvs = true, f.ascii = true;
+    const std::string fbx = export_fbx({it}, f);
+    fs::make_dirs(fs::join(test_dir(), "r353"));
+    fs::write_file(fs::join(test_dir(), "r353/uv2.glb"), glb);
+    ExportOptions fb = f;
+    fb.ascii = false;
+    fs::write_file(fs::join(test_dir(), "r353/uv2.fbx"), export_fbx({it}, fb));  // (for a look in Blender)
+    size_t maps = 0;
+    for (size_t at2 = fbx.find("LayerElementUV:"); at2 != std::string::npos; at2 = fbx.find("LayerElementUV:", at2 + 1)) maps++;
+    std::printf("    FBX: %zu UV map(s), Lightmap named %d\n", maps, (int)(fbx.find("\"Lightmap\"") != std::string::npos));
+    CHECK(maps == 2 && fbx.find("\"Lightmap\"") != std::string::npos && fbx.find("Layer: 1") != std::string::npos);
+    /* A mesh without UVs: the lightmap set is its first (TEXCOORD_0), and FBX's off writes one map. */
+    MeshPtr bare = std::make_shared<Mesh>(*cube);
+    bare->uvs.clear();
+    ExportItem bi = it;
+    bi.mesh = bare.get();
+    const Json jb = r351_glb_json(export_gltf({bi}, o, true, "", nullptr));
+    CHECK(jb["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"].type == Json::Num && jb["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].type != Json::Num);
+    ExportOptions foff = export_defaults((int)ExportFormat::FBX);
+    foff.ascii = true;
+    const std::string plain = export_fbx({it}, foff);
+    size_t plain_maps = 0;
+    for (size_t at3 = plain.find("LayerElementUV:"); at3 != std::string::npos; at3 = plain.find("LayerElementUV:", at3 + 1)) plain_maps++;
+    CHECK(plain_maps == 1);
+  });
+  test("the lesson's Try-it (round 353): create Cube, newtex, texture, export glb gives a .glb with the texture embedded, in the project", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::remove(fs::join(std::getenv("BLENDITY_PROJECT"), "Exports/Learn Textured.glb").c_str());
+    for (const char *c : {"create Cube", "newtex LearnBricks Bricks", "texture Assets/Textures/LearnBricks.ptex", "export glb lightmap Exports/Learn Textured.glb"}) ed.command(c);
+    std::string glb;
+    fs::read_file(fs::join(std::getenv("BLENDITY_PROJECT"), "Exports/Learn Textured.glb"), glb);
+    const Json j = r351_glb_json(glb);
+    CHECK(j["images"].size() >= 1 && j["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_1"].type == Json::Num);
+  });
+}
+
+/* ---------------------------------------------------------------- round 354: an export never takes a stale mesh; one glTF skeleton a rig */
+/* Steps the editor's frames until `done` or about 30 seconds (a worker's job landing), sleeping a little between. */
+template <class Done>
+static bool r354_until(Editor &ed, Done done) {
+  for (int i = 0; i < 3000 && !done(); i++) {
+    ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return done();
+}
+
+static void tests_round354() {
+  test("Export waits (round 354): an export asked for while a skin bind still works on an unbound mesh waits in the tray, then writes it with the bind's weights - the objects asked for, though the selection moved", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.set_skin_async_min_verts_for_test(0);  // (the bind on a worker, as a 5000-vertex mesh's is)
+    ed.command("create Sphere");  // (unbound: no weights until the bind lands)
+    const std::string sphere = ed.active_object_for_test() ? ed.active_object_for_test()->name : "";  // (round 367: "Sphere (1)" beside another)
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    const std::string path = fs::join(fs::join(test_dir(), "r354"), "waited.glb");
+    fs::make_dirs(fs::parent(path));
+    std::remove(path.c_str());
+    ed.command("export glb " + path);
+    bool waits = false;
+    for (const auto &j : ed.jobs_for_test()) waits = waits || j.label.rfind("Export waits for ", 0) == 0;
+    std::printf("    right after the export: written %d, the tray says it waits %d\n", (int)fs::exists(path), (int)waits);
+    CHECK(!fs::exists(path) && waits);
+    ed.command("select Cube");  // (the selection moves while it waits: the Sphere still goes)
+    CHECK(r354_until(ed, [&] { return fs::exists(path); }));
+    ImportResult r;
+    CHECK(import_model(path, r));
+    std::string names;
+    float bone = 0.0f;
+    for (const ImportedNode &n : r.nodes) {
+      if (!n.mesh) continue;
+      names += n.name + " ";
+      for (const VertexGroup &vg : n.mesh->vertex_groups)
+        for (float w : vg.weights) bone += vg.name == "Bone" ? w : 0.0f;
+    }
+    std::printf("    when the bind landed: the file holds %s, the Bone's weights sum %.2f\n", names.c_str(), bone);
+    CHECK(names == sphere + " " && bone > 1.0f);
+  });
+  test("Export waits (review 354): the tray's Export Now writes at once with a warning, Cancel drops the export, two exports both wait, New Scene drops them", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.set_skin_async_min_verts_for_test(0);
+    ed.command("create Sphere");  // (a dense mesh: its bind takes long enough to press the tray's buttons)
+    GameObject *dense = ed.active_object_for_test();  // (by id: the sample scene has a Sphere of its own)
+    ed.command("subdivide 3");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    ed.hold_skin_job_for_test(true);  // (running until released, however fast the machine)
+    const std::string dir = fs::join(test_dir(), "r354");
+    fs::make_dirs(dir);
+    const std::string a = fs::join(dir, "a.glb"), b = fs::join(dir, "b.fbx");
+    std::remove(a.c_str()), std::remove(b.c_str());
+    ed.command("export glb " + a);
+    ed.command("export fbx " + b);
+    size_t waiting = 0;
+    for (const auto &j : ed.jobs_for_test()) waiting += j.label.rfind("Export waits for ", 0) == 0;
+    CHECK(waiting == 2);
+    /* Export Now through the tray's own button: the front row, the first export. */
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.step_frame_headless();
+    Recti now{0, 0, 0, 0};
+    CHECK(ed.button_rect_for_test("job:Export Now", now));
+    r34_click(ed, now.x + now.w / 2, now.y + now.h / 2);
+    r34_steps(ed, 2);
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.level == LogLevel::Warning && e.text.find("without waiting") != std::string::npos);
+    std::printf("    Export Now in the tray: a.glb written %d, warned %d, b.fbx still waiting %d\n", (int)fs::exists(a), (int)said, (int)!fs::exists(b));
+    CHECK(fs::exists(a) && said && !fs::exists(b));
+    /* Cancel through the tray: the second export dropped, nothing written. */
+    Recti cancel{0, 0, 0, 0};
+    CHECK(ed.button_rect_for_test("job:Cancel", cancel));
+    r34_click(ed, cancel.x + cancel.w / 2, cancel.y + cancel.h / 2);
+    r34_steps(ed, 2);
+    bool still = false;
+    for (const auto &j : ed.jobs_for_test()) still = still || j.label.rfind("Export waits for ", 0) == 0;
+    CHECK(!still);
+    ed.hold_skin_job_for_test(false);
+    r354_until(ed, [&] { return ed.jobs_for_test().empty(); });
+    CHECK(!fs::exists(b));
+    /* Waiting, then New Scene: dropped and said. */
+    CHECK(dense != nullptr);
+    if (!dense) return;
+    ed.select_for_test(dense->id, false);
+    ed.command("skin bind");
+    ed.command("export glb " + a);
+    const size_t since2 = Log::fetch(0, log);
+    ed.command("newscene");
+    log.clear();
+    Log::fetch(since2, log);
+    bool dropped = false;
+    for (const LogEntry &e : log) dropped = dropped || e.text.find("dropped: a new scene") != std::string::npos;
+    CHECK(dropped);
+  });
+  test("Export waits (round 354): a Quad Remesh is waited for and the file has the remeshed triangles (the libraries' build: QuadriFlow)", [] {
+    if (!meshops::quad_remesh_available()) return;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("select Sphere");
+    ed.command("sculpt on");
+    ed.command("sculpt remesh 600");
+    const std::string p = fs::join(fs::join(test_dir(), "r354"), "remeshed.glb");
+    fs::make_dirs(fs::parent(p));
+    std::remove(p.c_str());
+    ed.command("export glb " + p);
+    CHECK(!fs::exists(p));
+    CHECK(r354_until(ed, [&] { return fs::exists(p); }));
+    GameObject *g = ed.scene().find_by_name("Sphere");
+    std::string glb;
+    fs::read_file(p, glb);
+    const Json j = r351_glb_json(glb);
+    size_t tris = 0, now = 0;
+    for (size_t k = 0; k < j["meshes"][0]["primitives"].size(); k++) tris += (size_t)j["accessors"][(size_t)j["meshes"][0]["primitives"][k]["indices"].number()]["count"].number() / 3;
+    for (size_t f = 0; g && f < g->evaluated_mesh()->face_count(); f++) now += g->evaluated_mesh()->face_size(f) - 2;
+    std::printf("    the file: %zu triangles, the remeshed sphere %zu\n", tris, now);
+    CHECK(g && tris == now);
+  });
+  test("glTF shares the rig (round 354): a Cube and a Sphere on one armature export one skeleton and one clip, the Sphere's shape-key weights in it", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("create Armature");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("create Sphere");
+    const std::string sphere = ed.active_object_for_test() ? ed.active_object_for_test()->name : "";  // (round 367: unique names)
+    ed.command("shape add Puff");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *rig = ed.scene().find_by_name("Cube Rig");
+    CHECK(rig != nullptr);
+    if (!rig) return;
+    ed.select_for_test(rig->id, false);
+    ed.command("anim new R354");
+    ed.command("anim key Bone Rotation 2 0 0");
+    ed.command("anim key Bone Rotation 2 30 45");
+    ed.command("anim preview off");
+    const std::string path = fs::join(fs::join(test_dir(), "r354"), "shared.glb");
+    fs::make_dirs(fs::parent(path));
+    ExportOptions o = export_defaults((int)ExportFormat::GLB);
+    o.selection_only = false;
+    ed.export_model_for_test(o, path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    size_t bones = 0, skinned = 0, weights = 0;
+    for (size_t n = 0; n < j["nodes"].size(); n++) bones += j["nodes"][n]["name"].str == "Bone", skinned += j["nodes"][n]["skin"].type == Json::Num;
+    for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) weights += j["animations"][0]["channels"][c]["target"]["path"].str == "weights";
+    std::printf("    the file: %zu skin(s) on %zu mesh node(s), the Bone %zu time(s), %zu clip(s), %zu weights channel(s)\n", j["skins"].size(), skinned, bones,
+                j["animations"].size(), weights);
+    CHECK(j["skins"].size() == 1 && skinned == 2 && bones == 1 && j["animations"].size() == 1 && weights == 1);
+    bool on_sphere = false;  // (the weights channel on the Sphere's own node)
+    for (size_t c = 0; c < j["animations"][0]["channels"].size(); c++) {
+      const Json &ch = j["animations"][0]["channels"][c];
+      if (ch["target"]["path"].str == "weights") on_sphere = j["nodes"][(size_t)ch["target"]["node"].number()]["name"].str == sphere;
+    }
+    CHECK(on_sphere);
+    ImportResult r;
+    CHECK(import_model(path, r) && r.clips.size() == 1);
+  });
+}
+
+/* ---------------------------------------------------------------- round 355: the performance budget */
+static void tests_round355() {
+  test("Budget (round 355): VRChat's ranks - the first rank each row fits, the worst row the avatar's rank, past Poor Very Poor", [] {
+    const std::vector<BudgetTarget> &t = budget_targets();
+    const int pc = budget_target_index("VRChat PC"), quest = budget_target_index("vrchat quest");
+    CHECK(pc >= 0 && quest >= 0);
+    if (pc < 0 || quest < 0) return;
+    BudgetCounts c;
+    c.value[(int)BudgetRow::Triangles] = 50000, c.value[(int)BudgetRow::SkinnedMeshes] = 1, c.value[(int)BudgetRow::Bones] = 80;
+    BudgetResult r = budget_rank(t[(size_t)pc], c);
+    std::printf("    PC, 50k triangles, 80 bones: %s (triangles %s, bones %s)\n", budget_rank_name(t[(size_t)pc], r.rank).c_str(),
+                budget_rank_name(t[(size_t)pc], r.row_rank[(int)BudgetRow::Triangles]).c_str(), budget_rank_name(t[(size_t)pc], r.row_rank[(int)BudgetRow::Bones]).c_str());
+    CHECK(budget_rank_name(t[(size_t)pc], r.rank) == "Good");
+    c.value[(int)BudgetRow::Triangles] = 80000;
+    CHECK(budget_rank_name(t[(size_t)pc], budget_rank(t[(size_t)pc], c).rank) == "Very Poor");
+    c.value[(int)BudgetRow::Triangles] = 9000;
+    r = budget_rank(t[(size_t)quest], c);
+    CHECK(budget_rank_name(t[(size_t)quest], r.rank) == "Good" && budget_rank_name(t[(size_t)quest], r.row_rank[(int)BudgetRow::Triangles]) == "Good");
+    c.value[(int)BudgetRow::Lights] = 1;  // (a light: Poor on PC, past Poor on Quest)
+    CHECK(budget_rank_name(t[(size_t)pc], budget_rank(t[(size_t)pc], c).rank) == "Poor");  // (PC's Poor allows one light)
+    CHECK(budget_rank_name(t[(size_t)quest], budget_rank(t[(size_t)quest], c).rank) == "Very Poor");
+  });
+  test("Budget (round 355): the counts of what's selected - a cube's 12 triangles, one mesh, one slot; an Outline doubles them; a spring chain and its bones; the scene's light", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    BudgetCounts c = budget_count({g});
+    std::printf("    a cube: %.0f triangles, %.0f mesh, %.0f slot\n", c.value[(int)BudgetRow::Triangles], c.value[(int)BudgetRow::Meshes], c.value[(int)BudgetRow::MaterialSlots]);
+    CHECK(c.value[(int)BudgetRow::Triangles] == 12 && c.value[(int)BudgetRow::Meshes] == 1 && c.value[(int)BudgetRow::MaterialSlots] == 1);
+    ed.command("component Outline");
+    c = budget_count({g});
+    CHECK(c.value[(int)BudgetRow::Triangles] == 24 && c.value[(int)BudgetRow::MaterialSlots] == 2);
+    std::vector<GameObject *> all;
+    ed.scene().for_each([&](GameObject &o) { all.push_back(&o); });
+    CHECK(budget_count(all).value[(int)BudgetRow::Lights] >= 1);
+    ed.command("rig humanoid");
+    ed.command("select Head");
+    ed.command("bone add Head 0.1");
+    ed.command("spring add Bone hair");
+    all.clear();
+    ed.scene().for_each([&](GameObject &o) { all.push_back(&o); });
+    c = budget_count(all);
+    std::printf("    the humanoid with a hair chain: %.0f bones, %.0f chain(s), %.0f spring bone(s)\n", c.value[(int)BudgetRow::Bones], c.value[(int)BudgetRow::SpringChains],
+                c.value[(int)BudgetRow::SpringBones]);
+    CHECK(c.value[(int)BudgetRow::SpringChains] >= 1 && c.value[(int)BudgetRow::SpringBones] >= 1 && c.value[(int)BudgetRow::Bones] >= 10);
+  });
+  test("Budget (round 355): no target, no ranking - exports quiet; `budget quest` chooses one; the Profiler shows the rank; an export's line counts what the file holds (no lights), and only for glTF and FBX", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("create Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    const std::string dir = fs::join(test_dir(), "r355");
+    fs::make_dirs(dir);
+    std::vector<LogEntry> log;
+    auto said = [&](size_t since, const char *text) {
+      log.clear();
+      Log::fetch(since, log);
+      for (const LogEntry &e : log)
+        if (e.text.find(text) != std::string::npos) return true;
+      return false;
+    };
+    size_t since = Log::fetch(0, log);
+    ed.command("export glb " + fs::join(dir, "quiet.glb"));
+    CHECK(!said(since, "Budget ("));
+    ed.command("budget quest");
+    ed.command("window Profiler");
+    r34_steps(ed, 3);
+    bool shown = false;
+    for (const std::string &l : ed.button_labels_for_test()) shown = shown || l.rfind("shown:budget ", 0) == 0;
+    CHECK(shown);
+    since = Log::fetch(0, log);
+    ExportOptions all = export_defaults((int)ExportFormat::GLB);
+    all.selection_only = false;  // (the whole scene: its Sun not in the file, so not counted)
+    ed.export_model_for_test(all, fs::join(dir, "scene.glb"));
+    const bool line = said(since, "Budget (VRChat Quest): the file is");
+    bool lights = false;
+    for (const LogEntry &e : log) lights = lights || (e.text.find("Budget (") != std::string::npos && e.text.find("Lights") != std::string::npos);
+    std::printf("    the scene's glb: the line %d, held by its lights %d\n", (int)line, (int)lights);
+    CHECK(line && !lights);
+    since = Log::fetch(0, log);
+    ed.command("export stl " + fs::join(dir, "print.stl"));
+    CHECK(!said(since, "Budget ("));
+  });
+  test("Budget (round 355): Decimate to Good lands near the limit, multiplies an existing Decimate, leaves small meshes whole, keeps a skinned, keyed mesh's weights and keys, and Undo takes it back", [] {
+    if (!meshops::decimate_available()) return;  // (meshoptimizer: the libraries' build)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("select Cube");
+    ed.command("create Armature");  // (the Cube skinned)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("create Sphere");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    ed.command("subdivide 2");
+    ed.command("shape add Puff");
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature Armature");
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.select_for_test(g->id, false);
+    ed.command("budget quest");
+    const double limit = budget_targets()[(size_t)budget_target_index("VRChat Quest")].ranks[1].limit[(int)BudgetRow::Triangles];
+    const double before = budget_count({g}).value[(int)BudgetRow::Triangles];
+    ed.command("budget fix good");
+    r34_steps(ed, 2);
+    const double after = budget_count({g}).value[(int)BudgetRow::Triangles];
+    const DecimateModifier *d = g->get<DecimateModifier>();
+    size_t at = 0, skin_at = 0;
+    for (size_t i = 0; i < g->components.size(); i++) at = g->components[i].get() == d ? i : at, skin_at = std::strcmp(g->components[i]->type_name(), SkinModifier::kName) == 0 ? i : skin_at;
+    const Mesh *em = g->evaluated_mesh();
+    std::printf("    Quest's Good (%.0f): %.0f triangles before, %.0f after (ratio %.3f); the Decimate at %zu, the Skin at %zu; groups %zu\n", limit, before, after, d ? d->ratio : -1.0f,
+                at, skin_at, em ? em->vertex_groups.size() : (size_t)0);
+    CHECK(before > limit && after <= limit && after > 0.85 * limit && d && at < skin_at);
+    /* Exported: its weights and its key still there. */
+    const std::string path = fs::join(fs::join(test_dir(), "r355"), "decimated.glb");
+    fs::make_dirs(fs::parent(path));
+    ed.export_model_for_test(export_defaults((int)ExportFormat::GLB), path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    CHECK(j["skins"].size() == 1 && j["meshes"][0]["extras"]["targetNames"][0].str == "Puff");
+    /* An existing Decimate is multiplied: from a ratio twice too high, one fix lands under the limit again. */
+    const_cast<DecimateModifier *>(d)->ratio = std::min(1.0f, d->ratio * 2.0f);
+    ed.mark_changed_for_test("raise the ratio");
+    r34_steps(ed, 2);  // (its own undo step)
+    ed.command("budget fix good");
+    r34_steps(ed, 2);
+    CHECK(budget_count({g}).value[(int)BudgetRow::Triangles] <= limit);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *back = ed.scene().find(g->id);
+    CHECK(back && back->get<DecimateModifier>() && budget_count({back}).value[(int)BudgetRow::Triangles] > limit);
+  });
+  test("the lesson's Try-it (round 355): create Cube, then budget quest ranks it", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    for (const char *c : {"create Cube", "budget quest"}) ed.command(c);
+    log.clear();
+    Log::fetch(since, log);
+    bool ranked = false;
+    for (const LogEntry &e : log) ranked = ranked || e.text.find("Budget (VRChat Quest)") != std::string::npos;
+    CHECK(ranked);
+  });
+}
+
+/* ---------------------------------------------------------------- round 356: the VRChat avatar kit */
+static MeshPtr r356_mouths() {  // (a cube with three sculpted mouths: AA up, OH out in Z, CH wide in X)
+  MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+  const size_t n = m->vert_count();
+  m->shape_keys = {{"AA", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))}, {"OH", std::vector<Vec3>(n, Vec3(0, 0, 0.1f))}, {"CH", std::vector<Vec3>(n, Vec3(0.1f, 0, 0))}};
+  return m;
+}
+
+static const ShapeKey *r356_key(const Mesh &m, const std::string &name) {
+  for (const ShapeKey &k : m.shape_keys)
+    if (k.name == name) return &k;
+  return nullptr;
+}
+
+static void tests_round356() {
+  test("Visemes (round 356): the 15 vrc.v_* keys mixed from AA, OH and CH - aa all AA, ou all OH, dd 0.3 AA + 0.7 CH, sil a hair - and refused without a base", [] {
+    MeshPtr m = r356_mouths();
+    std::string why;
+    CHECK(make_visemes(*m, "AA", "OH", "CH", why));
+    size_t made = 0;
+    for (const std::string &v : vrchat_viseme_names()) made += r356_key(*m, v) != nullptr;
+    const ShapeKey *aa = r356_key(*m, "vrc.v_aa"), *ou = r356_key(*m, "vrc.v_ou"), *dd = r356_key(*m, "vrc.v_dd"), *sil = r356_key(*m, "vrc.v_sil");
+    std::printf("    %zu of 15 made; aa (%.4f %.4f %.4f), dd (%.3f %.3f %.3f), sil moves %.6f\n", made, aa ? aa->delta[0].x : -1, aa ? aa->delta[0].y : -1,
+                aa ? aa->delta[0].z : -1, dd ? dd->delta[0].x : -1, dd ? dd->delta[0].y : -1, dd ? dd->delta[0].z : -1, sil ? length(sil->delta[0]) : -1);
+    CHECK(made == 15 && aa && ou && dd && sil);
+    if (!aa || !ou || !dd || !sil) return;
+    CHECK(std::fabs(aa->delta[0].y - 0.09998f) < 1e-5f && std::fabs(ou->delta[0].z - 0.09994f) < 1e-5f);
+    CHECK(std::fabs(dd->delta[0].y - 0.03f) < 1e-5f && std::fabs(dd->delta[0].x - 0.07f) < 1e-5f);
+    CHECK(length(sil->delta[0]) > 0.0f && length(sil->delta[0]) < 1e-3f);
+    CHECK(shape_key_problems(*m).empty());
+    MeshPtr bare = std::make_shared<Mesh>(*primitives::cube());
+    CHECK(!make_visemes(*bare, "AA", "OH", "CH", why) && why.find("AA") != std::string::npos);
+  });
+  test("Visemes (round 356): the Inspector's lines - a key that moves nothing, two of one name, visemes missing", [] {
+    MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+    const size_t n = m->vert_count();
+    m->shape_keys = {{"Blink", std::vector<Vec3>(n, Vec3(0.0f))}, {"Smile", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))}, {"Smile", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))},
+                     {"vrc.v_aa", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))}};
+    const std::vector<std::string> p = shape_key_problems(*m);
+    bool still = false, twice = false, missing = false;
+    for (const std::string &l : p) still = still || l.find("'Blink' moves nothing") != std::string::npos, twice = twice || l.find("two shape keys named 'Smile'") != std::string::npos,
+                                    missing = missing || (l.find("visemes missing") != std::string::npos && l.find("sil") != std::string::npos);
+    CHECK(still && twice && missing);
+  });
+  test("Avatar kit (round 356): Humanoid Rig fits a selected mesh; the checklist goes from amber to green through its Fixes; the Rigging window shows it; the Inspector shows a key's problem", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("create Cube");
+    GameObject *twin = ed.active_object_for_test();
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    CHECK(body != nullptr && twin != nullptr);
+    if (!body || !twin) return;
+    twin->name = body->name;  // (found first by name: the Fix must select the body by its id)
+    CHECK(ed.scene().find_by_name(body->name) != body);
+    ed.command("position 0 1.25 0");  // (the cylinder is 2 m tall: from 0.25 to 2.25)
+    const AABB bb = body->world_bounds();
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    GameObject *head = ed.scene().find_by_name("Head");
+    CHECK(rig && head);
+    if (!rig || !head) return;
+    const float top = head->world_position().y + head->get<Bone>()->length;
+    std::printf("    the mesh from y %.2f to %.2f; the rig's feet at %.2f, its head's top at %.2f\n", bb.min.y, bb.max.y, rig->world_position().y, top);
+    CHECK(std::fabs(rig->world_position().y - bb.min.y) < 1e-3f && std::fabs(top - bb.max.y) < 0.02f);
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.select_for_test(body->id, false);
+    for (const char *c : {"shape add AA", "shape add OH", "shape add CH"}) ed.command(c);
+    std::vector<AvatarCheck> list = avatar_check(ed.scene(), *rig);
+    auto get = [&](const char *name) {
+      for (const AvatarCheck &c : list)
+        if (c.item == name) return c;
+      return AvatarCheck();
+    };
+    std::printf("    before: visemes %d (%s), height %d (%s), Unity names %d\n", (int)get("Visemes").ok, get("Visemes").detail.c_str(), (int)get("Height 0.5 to 5 m").ok,
+                get("Height 0.5 to 5 m").detail.c_str(), (int)get("Unity's bone names").ok);
+    CHECK(!get("Visemes").ok && get("Height 0.5 to 5 m").ok && get("Humanoid bones").ok && get("Unity's bone names").ok);
+    size_t visemes = 0;
+    for (size_t i = 0; i < list.size(); i++) visemes = list[i].item == "Visemes" ? i + 1 : visemes;
+    ed.command(strprintf("avatar fix %zu", visemes));
+    list = avatar_check(ed.scene(), *rig);
+    std::printf("    after avatar fix %zu: visemes %d (%s)\n", visemes, (int)get("Visemes").ok, get("Visemes").detail.c_str());
+    CHECK(get("Visemes").ok);
+    const MeshFilter *tmf = twin->get<MeshFilter>();
+    CHECK(tmf && tmf->mesh && tmf->mesh->shape_keys.empty());  // (the twin left alone)
+    /* Undo takes the visemes back; Redo brings them again. */
+    r34_steps(ed, 2);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    list = avatar_check(ed.scene(), *rig);
+    CHECK(!get("Visemes").ok);
+    ed.command("redo");
+    r34_steps(ed, 2);
+    list = avatar_check(ed.scene(), *rig);
+    CHECK(get("Visemes").ok);
+    /* At the origin: under a moved parent, the Fix puts the root at the world's origin (not its local zero). */
+    ed.command("create Empty");
+    GameObject *holder = ed.active_object_for_test();
+    CHECK(holder != nullptr);
+    if (!holder) return;
+    holder->set_local_position(Vec3(1.0f, 0.0f, 2.0f));
+    ed.scene().set_parent(rig, holder, -1, true);
+    rig->set_local_position(Vec3(0.5f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("move the rig");
+    r34_steps(ed, 2);
+    list = avatar_check(ed.scene(), *rig);
+    size_t origin = 0;
+    for (size_t i = 0; i < list.size(); i++) origin = list[i].item == "At the origin" ? i + 1 : origin;
+    CHECK(!get("At the origin").ok);
+    ed.command(strprintf("avatar fix %zu", origin));
+    list = avatar_check(ed.scene(), *rig);
+    std::printf("    under a parent at (1, 0, 2): after its Fix the root at (%.3f, %.3f, %.3f)\n", rig->world_position().x, rig->world_position().y, rig->world_position().z);
+    CHECK(get("At the origin").ok);
+    ed.select_for_test(rig->id, false);
+    ed.command("window Avatar");
+    r34_steps(ed, 3);
+    bool shown = false;
+    for (const std::string &l : ed.button_labels_for_test()) shown = shown || l.rfind("shown:avatar Visemes ok", 0) == 0;
+    CHECK(shown);
+    ed.select_for_test(body->id, false);
+    ed.command("shape add Still");
+    MeshFilter *mf = body->get<MeshFilter>();
+    if (mf && mf->mesh) {
+      Mesh &mm = *mesh_make_mutable(mf->mesh);
+      for (ShapeKey &k : mm.shape_keys)
+        if (k.name == "Still") std::fill(k.delta.begin(), k.delta.end(), Vec3(0.0f));
+      mm.touch();
+    }
+    ed.command("window Inspector");
+    r34_steps(ed, 3);
+    bool said = false;
+    for (const std::string &l : ed.button_labels_for_test()) said = said || l.find("'Still' moves nothing") != std::string::npos;
+    CHECK(said);
+  });
+  test("Humanoid and Quadruped Rig (review 356): the presets' legs as before at no height, and every bone scaled with a fitted figure - the four feet level and mirrored", [] {
+    for (const float height : {0.0f, 1.52f}) {
+      Scene s;
+      GameObject *dog = create_rig(s, true, Vec3(0.0f), height);
+      const float k = height > 0.0f ? height / 0.76f : 1.0f;
+      const char *legs[4] = {"FrontLeftFoot", "FrontRightFoot", "HindLeftFoot", "HindRightFoot"};
+      Vec3 at[4];
+      bool all = dog != nullptr;
+      for (int i = 0; i < 4; i++) {
+        GameObject *f = s.find_by_name(legs[i]);
+        all = all && f;
+        at[i] = f ? f->world_position() : Vec3(0.0f);
+      }
+      std::printf("    a quadruped at %.2f m: feet at y %.3f %.3f %.3f %.3f, x %.3f %.3f\n", height, at[0].y, at[1].y, at[2].y, at[3].y, at[0].x, at[1].x);
+      CHECK(all);
+      for (int i = 0; i < 4; i++) CHECK(std::fabs(at[i].y - 0.04f * k) < 0.01f * k);
+      CHECK(std::fabs(at[0].x + at[1].x) < 1e-3f && std::fabs(at[2].x + at[3].x) < 1e-3f && std::fabs(at[0].x - -0.12f * k) < 1e-3f);
+      CHECK(std::fabs(at[0].z - 0.3f * k) < 0.02f * k && std::fabs(at[2].z + 0.3f * k) < 0.02f * k);
+    }
+  });
+  test("Avatar kit (review 356): the PC rank's Fix cuts the avatar's own meshes (the rig selected, the body a sibling) and leaves the budget's target None", [] {
+    if (!meshops::decimate_available()) return;  // (meshoptimizer: the libraries' build)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Sphere");
+    GameObject *body = ed.active_object_for_test();
+    CHECK(rig && body);
+    if (!rig || !body) return;
+    ed.command("subdivide 4");  // (about 190,000 triangles: Very Poor on PC)
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const double before = budget_count({body}).value[(int)BudgetRow::Triangles];
+    ed.select_for_test(rig->id, false);
+    std::vector<AvatarCheck> list = avatar_check(ed.scene(), *rig);
+    size_t rank = 0;
+    for (size_t i = 0; i < list.size(); i++) rank = list[i].item == "VRChat PC rank" ? i + 1 : rank;
+    ed.command(strprintf("avatar fix %zu", rank));
+    r34_steps(ed, 2);
+    const double after = budget_count({body}).value[(int)BudgetRow::Triangles];
+    list = avatar_check(ed.scene(), *rig);
+    std::printf("    the body: %.0f triangles before, %.0f after the rank's Fix (PC's Good: 70,000); the rank now %s\n", before, after, list[rank - 1].detail.c_str());
+    CHECK(before > 70000.0 && after <= 70000.0 && list[rank - 1].ok);
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    const std::string dir = fs::join(test_dir(), "r356");
+    fs::make_dirs(dir);
+    ed.command("export glb " + fs::join(dir, "avatar.glb"));
+    log.clear();
+    Log::fetch(since, log);
+    bool ranked = false;
+    for (const LogEntry &e : log) ranked = ranked || e.text.find("Budget (") != std::string::npos;
+    CHECK(!ranked);  // (the target still None: the Fix didn't choose one)
+  });
+  test("the lesson's Try-it (round 356): create Sphere, three mouths, visemes gives the 15 keys", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    for (const char *c : {"create Sphere", "shape add AA", "shape add OH", "shape add CH"}) ed.command(c);
+    ed.command("visemes");
+    GameObject *g = ed.active_object_for_test();
+    const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+    size_t made = 0;
+    for (const std::string &v : vrchat_viseme_names()) made += mf && mf->mesh && r356_key(*mf->mesh, v);
+    CHECK(made == 15);
+  });
+}
+
+/* ---------------------------------------------------------------- round 357: Fix Model (the CATS plugin's) */
+/* The body's skinned vertices in the world, as the views show them. */
+static std::vector<Vec3> r357_skinned(GameObject &body) {
+  std::vector<Vec3> out;
+  const Mesh *m = body.evaluated_mesh();
+  if (!m) return out;
+  for (const Vec3 &p : m->positions) out.push_back(body.world_matrix().point(p));
+  return out;
+}
+
+static GameObject *r357_bone(GameObject *parent, Scene &s, const char *name, Vec3 local) {
+  GameObject *b = s.create(name, parent);
+  Bone *bone = b->add<Bone>();
+  bone->length = 0.1f;
+  b->set_local_position(local);
+  bone->set_rest(b->local());
+  return b;
+}
+
+static void tests_round357() {
+  test("Fix Model (round 357): Mixamo and MMD names become Unity's; a Center above the hips merges into Hips; a twist bone stays; bones that move nothing and IK go; the skinned body doesn't move; a clip's track follows its bone", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    CHECK(body != nullptr);
+    if (!body) return;
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *chest = s.find_by_name("Chest"), *neck = s.find_by_name("Neck"), *hips = s.find_by_name("Hips");
+    GameObject *ua = s.find_by_name("LeftUpperArm"), *la = s.find_by_name("LeftLowerArm"), *head = s.find_by_name("Head");
+    CHECK(rig && chest && neck && hips && ua && la && head);
+    if (!rig || !chest || !neck || !hips || !ua || !la || !head) return;
+    /* A bone above the hips (MMD's Center), a twist bone between the arm's two, a bone moving nothing. */
+    GameObject *center = r357_bone(rig, s, "Center", hips->local().position * 0.9f);
+    s.set_parent(hips, center, -1, true);
+    hips->get<Bone>()->set_rest(hips->local());
+    GameObject *twist = r357_bone(ua, s, "LeftArmTwist", la->local().position * 0.5f);
+    s.set_parent(la, twist, -1, true);
+    la->get<Bone>()->set_rest(la->local());
+    r357_bone(hips, s, "Unused", Vec3(0.0f, -0.05f, 0.1f))->get<Bone>()->deform = false;  // (no group: it moves nothing)
+    /* Other programs' names: Mixamo's prefix, MMD's Japanese head. */
+    hips->name = "mixamorig:Hips";
+    head->name = "\xE9\xA0\xAD";  // (頭)
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* A clip keying the upper arm, played from the rig. */
+    std::remove(resolve_asset_path("Assets/Animations/R357Arm.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R357Arm.anim", "R357Arm");
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    const std::string arm_path = anim_path(*rig, *ua);
+    clip->track(arm_path, "Rotation", 2).set_key(0, 30.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    ed.mark_changed_for_test("key the arm");  // (an undo step of its own: Undo of Fix Model goes back to here)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* The pose: the upper arm down 30 degrees - the IK off, or its hand target would pull the arm back before the fix
+     * (and not after: Fix Model removes it). */
+    s.for_each([](GameObject &g) {
+      if (IKConstraint *ik = g.get<IKConstraint>()) ik->weight = 0.0f;
+    });
+    const uint64_t ua_id = ua->id, twist_id = twist->id, chest_id = chest->id;
+    ua->set_local_rotation(ua->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 0, 1), 0.52f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> before = r357_skinned(*body);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* The same pose again on the same bone (Fix Model put the rig at rest). */
+    GameObject *ua2 = s.find(ua_id);
+    CHECK(ua2 != nullptr);
+    if (!ua2) return;
+    ua2->set_local_rotation(ua2->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 0, 1), 0.52f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *b2 = s.find(body->id);  // (one mesh: nothing joined, its name kept)
+    const std::vector<Vec3> after = b2 ? r357_skinned(*b2) : std::vector<Vec3>();
+    float worst = after.size() == before.size() ? 0.0f : 1e9f;
+    for (size_t i = 0; i < after.size() && after.size() == before.size(); i++) worst = std::max(worst, length(after[i] - before[i]));
+    const bool names = s.find_by_name("Hips") && s.find_by_name("Head") && !s.find_by_name("mixamorig:Hips");
+    const bool merged = !s.find_by_name("Center") && s.find_by_name("Hips") && s.find_by_name("Hips")->parent == rig && s.find(chest_id);
+    bool iks = false;
+    s.for_each([&](GameObject &g) { iks = iks || g.get<IKConstraint>(); });
+    const MeshFilter *bmf = b2 ? b2->get<MeshFilter>() : nullptr;
+    const bool group = bmf && bmf->mesh && bmf->mesh->find_group("Center") < 0 && bmf->mesh->find_group("Hips") >= 0 && s.find_by_name("LeftHand");
+    const AnimTrack *t = clip->find(anim_path(*rig, *ua2), "Rotation", 2);
+    std::printf("    names %d, merged %d, twist kept %d, Unused gone %d, IK left %d, groups %d, the track at %s; the posed body moved %.6f\n", (int)names, (int)merged,
+                (int)(s.find(twist_id) != nullptr), (int)!s.find_by_name("Unused"), (int)iks, (int)group, t ? t->path.c_str() : "-", worst);
+    CHECK(names && merged && s.find(twist_id) && !s.find_by_name("Unused") && !iks && group && t);
+    CHECK(worst < 1e-3f);
+    /* One Undo step brings the rig back as it was. */
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.scene().find_by_name("Center") && ed.scene().find_by_name("mixamorig:Hips"));
+    AnimationClipPtr back = clip_asset("Assets/Animations/R357Arm.anim");
+    CHECK(back && back->find(arm_path, "Rotation", 2));  // (the clip's track back on its old path too)
+  });
+  test("Fix Model (round 357): the avatar's meshes joined into Body with the face's shape keys and both meshes' weights; two slots of one material become one", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *torso = ed.active_object_for_test();
+    ed.command("subdivide 2");
+    ed.command("create Sphere");
+    GameObject *face = ed.active_object_for_test();
+    CHECK(rig && torso && face);
+    if (!rig || !torso || !face) return;
+    ed.command("position 0 1.7 0");
+    {
+      Mesh &fm = *mesh_make_mutable(face->get<MeshFilter>()->mesh);  // (the face's own key, the torso none)
+      fm.shape_keys = {{"Smile", std::vector<Vec3>(fm.vert_count(), Vec3(0.0f, 0.05f, 0.0f))}};
+      fm.touch();
+    }
+    CHECK(torso->get<MeshFilter>()->mesh->shape_keys.empty());
+    for (GameObject *g : {torso, face}) {
+      ed.select_for_test(g->id, false);
+      ed.command("component SkinModifier");
+      ed.command("set SkinModifier.Armature " + rig->name);
+      ed.command("skin bind");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    /* The same material twice on the torso, as an import often leaves it. */
+    MeshRenderer *tr = torso->get<MeshRenderer>();
+    CHECK(tr != nullptr);
+    if (!tr) return;
+    MaterialPtr skin = std::make_shared<Material>();
+    skin->name = "Skin";
+    MaterialPtr copy = std::make_shared<Material>(*skin);
+    copy->name = "Skin.001";
+    tr->materials = {skin, copy};
+    Mesh &tm = *mesh_make_mutable(torso->get<MeshFilter>()->mesh);
+    tm.face_material.assign(tm.face_count(), 0);
+    for (size_t f = 0; f < tm.face_count(); f += 2) tm.face_material[f] = 1;
+    tm.touch();
+    const size_t tv = torso->get<MeshFilter>()->mesh->vert_count(), fv = face->get<MeshFilter>()->mesh->vert_count();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *body = ed.scene().find_by_name("Body");
+    const MeshFilter *mf = body ? body->get<MeshFilter>() : nullptr;
+    const Mesh *m = mf ? mf->mesh.get() : nullptr;
+    const int smile = m ? m->find_shape("Smile") : -1;
+    /* The face's vertices move with Smile, the torso's don't: as many moving offsets as the face has vertices. */
+    size_t moving = 0;
+    for (size_t i = 0; m && smile >= 0 && i < m->vert_count(); i++) moving += length(m->shape_keys[(size_t)smile].delta[i]) > 0.0f ? 1 : 0;
+    std::printf("    Body: %zu vertices (%zu + %zu), Smile at %d moving %zu of them (the face's %zu), keys fit %d, groups fit %d, %zu slot(s)\n", m ? m->vert_count() : (size_t)0,
+                tv, fv, smile, moving, fv, m ? (int)m->keys_fit() : -1, m ? (int)m->groups_fit() : -1, body && body->get<MeshRenderer>() ? body->get<MeshRenderer>()->materials.size() : (size_t)0);
+    CHECK(m && m->vert_count() == tv + fv && smile >= 0 && moving == fv && m->keys_fit() && m->groups_fit());
+    CHECK(body && body->get<MeshRenderer>() && body->get<MeshRenderer>()->materials.size() == 1);
+    CHECK(!ed.scene().find(face->id) || ed.scene().find(face->id) == body);
+  });
+  test("Fix Model (review 357): MMD's split body - the upper body beside the lower, both under the waist - comes out Hips > Spine; a clip's keys on the moved bones still put the head where they did; an animated Center stays", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *hips = s.find_by_name("Hips"), *spine = s.find_by_name("Spine"), *head = s.find_by_name("Head");
+    CHECK(rig && hips && spine && head);
+    if (!rig || !hips || !spine || !head) return;
+    /* armature > Waist > {LowerBody (the hips, the legs), UpperBody (the spine)}: MMD's 腰 > {下半身, 上半身}. */
+    GameObject *waist = r357_bone(rig, s, "\xE8\x85\xB0", hips->local().position);  // (腰)
+    const uint64_t waist_id = waist->id;
+    s.set_parent(hips, waist, -1, true);
+    hips->get<Bone>()->set_rest(hips->local());
+    s.set_parent(spine, waist, -1, true);
+    spine->get<Bone>()->set_rest(spine->local());
+    hips->name = "\xE4\xB8\x8B\xE5\x8D\x8A\xE8\xBA\xAB";   // (下半身)
+    spine->name = "\xE4\xB8\x8A\xE5\x8D\x8A\xE8\xBA\xAB";  // (上半身)
+    /* A clip turning the upper body and lifting the lower: keys in the waist's space. */
+    std::remove(resolve_asset_path("Assets/Animations/R357Mmd.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R357Mmd.anim", "R357Mmd");
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    const std::string sp = anim_path(*rig, *spine);
+    clip->track(sp, "Rotation", 0).set_key(10, 20.0f);
+    clip->track(sp, "Rotation", 2).set_key(10, -15.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    ed.mark_changed_for_test("key the body");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* The head where the clip's frame 10 puts it, before and after. */
+    const uint64_t head_id = head->id;
+    auto head_at = [&](AnimationClip &c) {
+      for (const AnimTrack &t : c.tracks)
+        if (GameObject *g = anim_target(*rig, t.path)) write_anim_value(*g, t.property, t.axis, t.sample(10.0f));
+      return s.find(head_id)->world_position();
+    };
+    const Vec3 before = head_at(*clip);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *h2 = s.find_by_name("Hips"), *s2 = s.find_by_name("Spine");
+    const Vec3 after = head_at(*clip);
+    std::printf("    the spine's parent %s, the waist %s; the head at frame 10 (%.3f %.3f %.3f) before, (%.3f %.3f %.3f) after\n", s2 && s2->parent ? s2->parent->name.c_str() : "-",
+                s.find(waist_id) ? "kept" : "merged", before.x, before.y, before.z, after.x, after.y, after.z);
+    CHECK(h2 && s2 && s2->parent == h2 && !s.find(waist_id));
+    CHECK(length(after - before) < 1e-3f);
+    /* A Center the clip moves isn't merged: its root motion would have nowhere to go. */
+    Editor ed2;
+    ed2.init_headless(1200, 900);
+    ed2.command("rig humanoid");
+    GameObject *rig2 = ed2.active_object_for_test();
+    GameObject *hips2 = ed2.scene().find_by_name("Hips");
+    CHECK(rig2 && hips2);
+    if (!rig2 || !hips2) return;
+    GameObject *center = r357_bone(rig2, ed2.scene(), "Center", hips2->local().position * 0.5f);
+    ed2.scene().set_parent(hips2, center, -1, true);
+    hips2->get<Bone>()->set_rest(hips2->local());
+    std::remove(resolve_asset_path("Assets/Animations/R357Center.anim").c_str());
+    AnimationClipPtr dance = create_clip_asset("Assets/Animations/R357Center.anim", "R357Center");
+    if (!dance) return;
+    dance->track(anim_path(*rig2, *center), "Position", 2).set_key(30, 2.0f);
+    rig2->add<Animation>()->clip = dance->asset_path;
+    ed2.select_for_test(rig2->id, false);
+    ed2.command("avatar fixmodel");
+    CHECK(ed2.scene().find(center->id) != nullptr);
+  });
+  test("Fix Model (review 357): the body under a smaller mesh is joined safely; a mesh with a Mirror isn't joined (said); with Remove Constraints off the IK and its targets stay", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *hair = ed.active_object_for_test();
+    ed.command("create Sphere");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("create Cylinder");
+    GameObject *cape = ed.active_object_for_test();
+    CHECK(rig && hair && body && cape);
+    if (!rig || !hair || !body || !cape) return;
+    ed.scene().set_parent(body, hair, -1, true);  // (the bigger mesh below the smaller)
+    for (GameObject *g : {hair, body, cape}) {
+      ed.select_for_test(g->id, false);
+      ed.command("component SkinModifier");
+      ed.command("set SkinModifier.Armature " + rig->name);
+      ed.command("skin bind");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    ed.select_for_test(cape->id, false);
+    ed.command("component MirrorModifier");
+    const size_t sv = body->get<MeshFilter>()->mesh->vert_count(), hv = hair->get<MeshFilter>()->mesh->vert_count();
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("not joined: its MirrorModifier") != std::string::npos;
+    GameObject *b = ed.scene().find(body->id);
+    std::printf("    Body %zu vertices (%zu + %zu), the cape kept apart %d, said %d\n", b ? b->get<MeshFilter>()->mesh->vert_count() : (size_t)0, sv, hv, (int)(ed.scene().find(cape->id) != nullptr), (int)said);
+    CHECK(b && b->get<MeshFilter>()->mesh->vert_count() == sv + hv && ed.scene().find(cape->id) && said);
+    /* Remove Constraints off: the IK keeps its targets (they move nothing, and stayed). */
+    Editor ed2;
+    ed2.init_headless(1200, 900);
+    ed2.command("rig humanoid");
+    GameObject *rig2 = ed2.active_object_for_test();
+    if (!rig2) return;
+    ed2.fix_model_options_for_test().remove_constraints = false;
+    ed2.command("avatar fixmodel");
+    size_t iks = 0, reached = 0;
+    ed2.scene().for_each([&](GameObject &g) {
+      const IKConstraint *ik = g.get<IKConstraint>();
+      if (!ik) return;
+      iks++;
+      reached += ed2.scene().find_by_name(ik->target) ? 1 : 0;
+    });
+    std::printf("    with the constraints kept: %zu IKs, %zu with their targets\n", iks, reached);
+    CHECK(iks == 4 && reached == 4);
+  });
+  test("the lesson's Try-it (round 357): rig humanoid, then avatar fixmodel - no IK left, the Humanoid bones kept", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    ed.command("avatar fixmodel");
+    bool iks = false;
+    ed.scene().for_each([&](GameObject &g) { iks = iks || g.get<IKConstraint>(); });
+    CHECK(!iks && ed.scene().find_by_name("Hips") && ed.scene().find_by_name("LeftHand") && ed.scene().find_by_name("Head"));
+  });
+  test("Join (round 357): shape keys carried through by name - the joined object's keys moved into the result's space, zero where a mesh has none", [] {
+    Mesh a = *primitives::cube(), b = *primitives::cube();
+    a.shape_keys = {{"Up", std::vector<Vec3>(a.vert_count(), Vec3(0, 0.1f, 0))}};
+    b.shape_keys = {{"Wide", std::vector<Vec3>(b.vert_count(), Vec3(0.1f, 0, 0))}};
+    const size_t na = a.vert_count();
+    Mesh plain = a;
+    meshops::append_mesh(plain, b, Mat4::identity(), {});  // (the Z-fight check's and Scatter's: no keys joined)
+    CHECK(plain.find_shape("Wide") < 0 && plain.shape_keys[0].delta.size() == na);
+    meshops::append_mesh(a, b, Mat4::trs(Vec3(2, 0, 0), Quat::axis_angle(Vec3(0, 1, 0), 1.5707963f), Vec3(1.0f)), {}, true);
+    const int up = a.find_shape("Up"), wide = a.find_shape("Wide");
+    CHECK(up >= 0 && wide >= 0 && a.keys_fit());
+    if (up < 0 || wide < 0 || !a.keys_fit()) return;
+    std::printf("    Up on the joined part %.3f; Wide on the first part %.3f, on the joined part (%.3f %.3f %.3f)\n", length(a.shape_keys[(size_t)up].delta[na]),
+                length(a.shape_keys[(size_t)wide].delta[0]), a.shape_keys[(size_t)wide].delta[na].x, a.shape_keys[(size_t)wide].delta[na].y, a.shape_keys[(size_t)wide].delta[na].z);
+    CHECK(length(a.shape_keys[(size_t)up].delta[na]) == 0.0f && length(a.shape_keys[(size_t)wide].delta[0]) == 0.0f);
+    CHECK(std::fabs(a.shape_keys[(size_t)wide].delta[na].z + 0.1f) < 1e-4f && std::fabs(a.shape_keys[(size_t)wide].delta[na].x) < 1e-4f);  // (X turned 90 degrees about Y: -Z)
+  });
+}
+
+/* ---------------------------------------------------------------- round 358: Model Options, Pose and Shape tools */
+/* A rig with a skinned cylinder for a body; its upper left arm turned 40 degrees down. */
+struct R358Avatar {
+  GameObject *rig = nullptr, *body = nullptr, *arm = nullptr;
+};
+static R358Avatar r358_avatar(Editor &ed, bool pose) {
+  R358Avatar a;
+  ed.command("create Cylinder");
+  a.body = ed.active_object_for_test();
+  ed.command("position 0 1 0");
+  ed.command("rig humanoid");
+  a.rig = ed.active_object_for_test();
+  a.arm = ed.scene().find_by_name("LeftUpperArm");
+  if (!a.body || !a.rig || !a.arm) return a;
+  ed.scene().for_each([](GameObject &g) {
+    if (IKConstraint *ik = g.get<IKConstraint>()) ik->weight = 0.0f;  // (the hand's IK would pull the arm back)
+  });
+  ed.select_for_test(a.body->id, false);
+  ed.command("component SkinModifier");
+  ed.command("set SkinModifier.Armature " + a.rig->name);
+  ed.command("skin bind");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  if (pose) a.arm->set_local_rotation(a.arm->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 0, 1), -0.7f));
+  for (int i = 0; i < 2; i++) ed.step_frame_headless();
+  return a;
+}
+
+static float r358_qdot(Quat a, Quat b) { return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w; }
+
+static float r358_worst(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  if (a.size() != b.size()) return 1e9f;
+  float w = 0.0f;
+  for (size_t i = 0; i < a.size(); i++) w = std::max(w, length(a[i] - b[i]));
+  return w;
+}
+
+static void tests_round358() {
+  test("Pose and Shape (round 358): Pose to Shape Key keeps the skinned pose; Apply as Rest Pose leaves the body where the pose had it, a key made at rest still moving it the same", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, true);
+    CHECK(a.rig && a.body && a.arm);
+    if (!a.rig || !a.body || !a.arm) return;
+    /* A key made at rest: the whole body 5 cm up. */
+    {
+      Mesh &m = *mesh_make_mutable(a.body->get<MeshFilter>()->mesh);
+      m.shape_keys.push_back({"Up", std::vector<Vec3>(m.vert_count(), Vec3(0, 0.05f, 0))});
+      m.touch();
+    }
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> posed_plain = r357_skinned(*a.body);  // (the evaluated body, Up at 0)
+    ed.select_for_test(a.body->id, false);
+    ed.command("avatar posekey Wave");
+    a.body->get<MeshRenderer>()->set_shape_weight("Up", 1.0f);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> posed = r357_skinned(*a.body);
+    const Mesh &pm = *a.body->get<MeshFilter>()->mesh;
+    const int wave = pm.find_shape("Wave");
+    float key_err = wave >= 0 && posed_plain.size() == pm.vert_count() ? 0.0f : 1e9f;
+    for (size_t i = 0; key_err == 0.0f && i < pm.vert_count(); i++)
+      key_err = std::max(key_err, length(a.body->world_matrix().point(pm.positions[i] + pm.shape_keys[(size_t)wave].delta[i]) - posed_plain[i]));
+    ed.command("avatar applyrest");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> after = r357_skinned(*a.body);
+    const Quat rest = a.arm->get<Bone>()->rest_rotation, now = a.arm->local().rotation;
+    std::printf("    Wave matches the skinned pose to %.6f; after Apply as Rest the body (Up at 1) moved %.6f; the arm's rest is its pose %d\n", key_err, r358_worst(posed, after),
+                (int)(std::fabs(r358_qdot(rest, now)) > 0.9999f));
+    CHECK(key_err < 1e-4f && r358_worst(posed, after) < 1e-3f && std::fabs(r358_qdot(rest, now)) > 0.9999f);
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.scene().find(a.arm->id) && std::fabs(r358_qdot(ed.scene().find(a.arm->id)->get<Bone>()->rest_rotation, now)) < 0.9999f);
+  });
+  test("Pose and Shape (round 358): Apply Shape Key as Basis with a Reverted key; Sort Shape Keys in VRChat's order", [] {
+    Mesh m = *primitives::cube();
+    const size_t n = m.vert_count();
+    const Vec3 p0 = m.positions[0];
+    m.shape_keys = {{"Smile", std::vector<Vec3>(n, Vec3(0.1f, 0, 0))}, {"vrc.v_ou", std::vector<Vec3>(n, Vec3(0, 0.1f, 0))},
+                    {"vrc.blink_left", std::vector<Vec3>(n, Vec3(0, 0, 0.1f))}, {"vrc.v_aa", std::vector<Vec3>(n, Vec3(0, 0.2f, 0))}};
+    std::string why;
+    CHECK(apply_shape_key_as_basis(m, "Smile", why));
+    const int rev = m.find_shape("Smile - Reverted");
+    CHECK(m.find_shape("Smile") < 0 && rev >= 0 && std::fabs(m.positions[0].x - (p0.x + 0.1f)) < 1e-6f && rev >= 0 && std::fabs(m.shape_keys[(size_t)rev].delta[0].x + 0.1f) < 1e-6f);
+    CHECK(!apply_shape_key_as_basis(m, "Nope", why) && why.find("Nope") != std::string::npos);
+    sort_shape_keys(m);
+    std::string order;
+    for (const ShapeKey &k : m.shape_keys) order += k.name + ";";
+    std::printf("    sorted: %s\n", order.c_str());
+    CHECK(order == "vrc.v_aa;vrc.v_ou;vrc.blink_left;Smile - Reverted;");
+  });
+  test("Pose and Shape (round 358): A-Pose drops the arms 45 degrees and T-Pose levels them, applied as the rest; Connect Bones points a bone at its one child, the body unchanged", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, false);
+    CHECK(a.rig && a.body);
+    if (!a.rig || !a.body) return;
+    const std::vector<Vec3> before = r357_skinned(*a.body);
+    ed.select_for_test(a.rig->id, false);
+    ed.command("avatar apose");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const humanoid::Map am = humanoid::map(ed.scene(), *a.rig);
+    const float followed = r358_worst(before, r357_skinned(*a.body));
+    ed.command("avatar tpose");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const humanoid::Map tm = humanoid::map(ed.scene(), *a.rig);
+    std::printf("    A-Pose: the arms %.1f and %.1f degrees down; T-Pose: %.1f and %.1f\n", am.arm_drop[0], am.arm_drop[1], tm.arm_drop[0], tm.arm_drop[1]);
+    CHECK(std::fabs(am.arm_drop[0] - 45.0f) < 3.0f && std::fabs(am.arm_drop[1] - 45.0f) < 3.0f && followed > 0.01f);
+    CHECK(std::fabs(tm.arm_drop[0]) < 3.0f && std::fabs(tm.arm_drop[1]) < 3.0f);
+    /* Connect Bones: Spine (one child, Chest) as long as the gap to it; the body where it was. */
+    const std::vector<Vec3> rest = r357_skinned(*a.body);
+    GameObject *sp0 = ed.scene().find_by_name("Spine");
+    if (sp0) sp0->set_local_rotation(sp0->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(1, 0, 0), 0.5f));  // (posed: Connect starts from the rest)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("avatar connect");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *spine = ed.scene().find_by_name("Spine"), *chest = ed.scene().find_by_name("Chest");
+    CHECK(spine && chest);
+    if (!spine || !chest) return;
+    const float gap = length(chest->world_position() - spine->world_position());
+    const Vec3 y = normalize(spine->world_matrix().dir(Vec3(0, 1, 0)));
+    std::printf("    Spine: length %.4f, the gap %.4f, pointing at Chest %.4f; the body moved %.6f\n", spine->get<Bone>()->length * bone_world_unit(*spine), gap,
+                dot(y, normalize(chest->world_position() - spine->world_position())), r358_worst(rest, r357_skinned(*a.body)));
+    CHECK(std::fabs(spine->get<Bone>()->length * bone_world_unit(*spine) - gap) < 1e-3f && dot(y, normalize(chest->world_position() - spine->world_position())) > 0.9999f);
+    CHECK(r358_worst(rest, r357_skinned(*a.body)) < 1e-3f);
+  });
+  test("Model Options (round 358): Separate by Material and by Shape Keys (the keyed part keeps its keys); Merge Weights; Apply Transforms turns a key's offsets with the vertices", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    {
+      Mesh &m = *mesh_make_mutable(cube->get<MeshFilter>()->mesh);
+      m.face_material.assign(m.face_count(), 0);
+      m.face_material[0] = 1;
+      std::vector<Vec3> d(m.vert_count(), Vec3(0.0f));
+      for (size_t i = 0; i < m.vert_count(); i++) d[i] = m.positions[i].y > 0.0f ? Vec3(0, 0.1f, 0) : Vec3(0.0f);
+      m.shape_keys = {{"Top", d}};
+      m.touch();
+    }
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    mr->materials = {std::make_shared<Material>(), std::make_shared<Material>()};
+    mr->materials[1]->base_color = Vec3(1, 0, 0);
+    size_t objects = 0;
+    ed.scene().for_each([&](GameObject &) { objects++; });
+    ed.select_for_test(cube->id, false);
+    ed.command("separate material");
+    size_t after = 0;
+    ed.scene().for_each([&](GameObject &) { after++; });
+    CHECK(after == objects + 1);
+    /* By shape keys: the top's faces (any vertex the key moves) apart; each part's keys fit it. */
+    ed.command("create Cube");
+    GameObject *c2 = ed.active_object_for_test();
+    {
+      Mesh &m = *mesh_make_mutable(c2->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"Lift", std::vector<Vec3>(m.vert_count(), Vec3(0.0f))}};
+      m.shape_keys[0].delta[0] = Vec3(0, 0.1f, 0);
+      m.touch();
+    }
+    const size_t faces = c2->get<MeshFilter>()->mesh->face_count();
+    ed.mark_changed_for_test("key the cube");  // (its own undo step: Undo of Separate comes back to here)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(c2->id, false);
+    ed.command("separate shapekeys");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *part = nullptr;
+    ed.scene().for_each([&](GameObject &g) { part = &g != c2 && g.name.rfind(c2->name, 0) == 0 && g.get<MeshFilter>() ? &g : part; });
+    const Mesh *keyed = c2->get<MeshFilter>()->mesh.get(), *rest = part ? part->get<MeshFilter>()->mesh.get() : nullptr;
+    std::printf("    by shape keys: %zu faces -> %zu keyed (kept, %zu key(s), fitting %d) + %zu without (%zu key(s))\n", faces, keyed->face_count(), keyed->shape_keys.size(),
+                (int)keyed->keys_fit(), rest ? rest->face_count() : (size_t)0, rest ? rest->shape_keys.size() : (size_t)99);
+    CHECK(rest && rest->face_count() + keyed->face_count() == faces && keyed->face_count() == 3 && keyed->keys_fit() && keyed->find_shape("Lift") >= 0 && rest->shape_keys.empty());
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(ed.scene().find(c2->id) && ed.scene().find(c2->id)->get<MeshFilter>()->mesh->face_count() == faces);
+    /* Apply Transforms: a quarter turn about Y goes into the vertices and the key's offsets; the keyed shape in the world unchanged. */
+    ed.command("create Cube");
+    GameObject *c3 = ed.active_object_for_test();
+    {
+      Mesh &m = *mesh_make_mutable(c3->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"Wide", std::vector<Vec3>(m.vert_count(), Vec3(0.1f, 0, 0))}};
+      m.touch();
+    }
+    c3->set_local_rotation(Quat::axis_angle(Vec3(0, 1, 0), 1.5707963f));
+    ed.select_for_test(c3->id, false);
+    ed.command("meshop apply_transform");
+    const Mesh &m3 = *c3->get<MeshFilter>()->mesh;
+    std::printf("    after Apply Transform: Wide's offset (%.3f %.3f %.3f)\n", m3.shape_keys[0].delta[0].x, m3.shape_keys[0].delta[0].y, m3.shape_keys[0].delta[0].z);
+    CHECK(std::fabs(m3.shape_keys[0].delta[0].z + 0.1f) < 1e-4f && std::fabs(m3.shape_keys[0].delta[0].x) < 1e-4f);
+    /* Merge Weights: a bone's group added into its parent's; the bone gone. */
+    Editor e2;
+    e2.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(e2, false);
+    if (!a.rig || !a.body) return;
+    GameObject *neck = e2.scene().find_by_name("Spine");  // (into Hips: both weighted on the body)
+    const uint64_t neck_id = neck ? neck->id : 0;
+    const float sum_before = [&] {
+      float s = 0.0f;
+      const Mesh &bm = *a.body->get<MeshFilter>()->mesh;
+      for (const char *g : {"Spine", "Hips"})
+        if (bm.find_group(g) >= 0)
+          for (float w : bm.vertex_groups[(size_t)bm.find_group(g)].weights) s += w;
+      return s;
+    }();
+    e2.select_for_test(neck_id, false);
+    e2.command("avatar mergeweights");
+    const Mesh &bm = *a.body->get<MeshFilter>()->mesh;
+    float chest = 0.0f;
+    if (bm.find_group("Hips") >= 0)
+      for (float w : bm.vertex_groups[(size_t)bm.find_group("Hips")].weights) chest += w;
+    std::printf("    Merge Weights: Spine %s, Spine + Hips %.3f before, Hips %.3f after\n", e2.scene().find(neck_id) ? "kept" : "merged", sum_before, chest);
+    CHECK(!e2.scene().find(neck_id) && bm.find_group("Spine") < 0 && sum_before > 1.0f && std::fabs(chest - sum_before) < 1e-3f);
+  });
+  test("Model Options (review 358): Remove Doubles leaves coinciding vertices a key pulls apart (a closed mouth); a key named with spaces; the verbs run", [] {
+    Mesh m;
+    m.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(1, 1, 0), Vec3(0, 2, 0), Vec3(0, 0, 0)};
+    const uint32_t f0[3] = {0, 1, 2}, f1[3] = {3, 4, 5}, f2[3] = {6, 4, 1};
+    m.add_face(f0, 3), m.add_face(f1, 3), m.add_face(f2, 3);
+    m.shape_keys = {{"Open", std::vector<Vec3>(m.positions.size(), Vec3(0.0f))}};
+    m.shape_keys[0].delta[3] = Vec3(0, 0.2f, 0);  // (the lower lip: vertex 3 sits on 2 until Open moves it)
+    const size_t merged = remove_doubles_keeping_keys(m, 0.001f);
+    std::printf("    Remove Doubles: %zu merged, %zu vertices left, the key fits %d\n", merged, m.vert_count(), (int)m.keys_fit());
+    CHECK(merged == 1 && m.vert_count() == 6 && m.keys_fit());  // (6 onto 0 merged; 3 kept apart from 2)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, true);
+    if (!a.rig || !a.body) return;
+    ed.select_for_test(a.body->id, false);
+    ed.command("avatar posekey Mouth Open");
+    CHECK(a.body->get<MeshFilter>()->mesh->find_shape("Mouth Open") >= 0);
+    ed.command("avatar basis Mouth Open");
+    CHECK(a.body->get<MeshFilter>()->mesh->find_shape("Mouth Open - Reverted") >= 0);
+    for (const char *c : {"avatar zeroweight", "avatar join", "avatar normals", "avatar normals flip", "avatar removedoubles", "avatar sortkeys", "avatar applytransforms"}) {
+      ed.select_for_test(a.body->id, false);
+      ed.command(c);
+    }
+    CHECK(ed.scene().find(a.body->id) != nullptr);
+  });
+  test("Pose and Shape (review 358): with the Armature showing its Rest Position, Apply as Rest Pose and A-Pose refuse; Connect Bones leaves a bone a clip moves", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    R358Avatar a = r358_avatar(ed, true);
+    if (!a.rig || !a.arm) return;
+    a.rig->get<Armature>()->rest_position = true;
+    const Quat rest = a.arm->get<Bone>()->rest_rotation;
+    ed.select_for_test(a.rig->id, false);
+    ed.command("avatar applyrest");
+    ed.command("avatar apose");
+    CHECK(r358_qdot(a.arm->get<Bone>()->rest_rotation, rest) > 0.9999f);
+    a.rig->get<Armature>()->rest_position = false;
+    /* A clip keying the Chest: Connect leaves the Spine (its parent) as it is. */
+    std::remove(resolve_asset_path("Assets/Animations/R358Chest.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R358Chest.anim", "R358Chest");
+    GameObject *spine = ed.scene().find_by_name("Spine"), *chest = ed.scene().find_by_name("Chest");
+    if (!clip || !spine || !chest) return;
+    clip->track(anim_path(*a.rig, *chest), "Rotation", 0).set_key(0, 5.0f);
+    a.rig->add<Animation>()->clip = clip->asset_path;
+    const Quat spine_rest = spine->get<Bone>()->rest_rotation;
+    ed.command("avatar connect");
+    CHECK(r358_qdot(spine->get<Bone>()->rest_rotation, spine_rest) > 0.99999f);
+  });
+  test("the lesson's Try-it (round 358): rig humanoid, then avatar apose - the arms 45 degrees down", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("avatar apose");
+    CHECK(rig && std::fabs(humanoid::map(ed.scene(), *rig).arm_drop[0] - 45.0f) < 3.0f);
+  });
+}
+
+/* ---------------------------------------------------------------- round 359: Decimation modes, Bone Root, Bone Merging */
+/* A chain of `n` bones under `parent`, 6 cm apart up its Y, a SpringBone on its first. */
+static GameObject *r359_chain(Scene &s, GameObject *parent, const std::string &name, Vec3 at, int n) {
+  GameObject *first = nullptr, *p = parent;
+  for (int i = 0; i < n; i++) {
+    GameObject *b = r357_bone(p, s, (name + std::to_string(i + 1)).c_str(), i == 0 ? at : Vec3(0, 0.06f, 0));
+    if (!first) first = b;
+    p = b;
+  }
+  first->add<SpringBone>();
+  return first;
+}
+
+static void tests_round359() {
+  test("Decimation (round 359): CATS' modes choose the meshes - Safe only those without keys, Half under 4 keys, Smart and Full all - and Exclude keeps a face whole", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    std::vector<GameObject *> meshes;
+    for (int keys : {0, 2, 5}) {
+      ed.command("create Sphere");
+      GameObject *g = ed.active_object_for_test();
+      if (!g || !rig) return;
+      g->name = keys == 5 ? "Face" : strprintf("Part%d", keys);
+      Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+      for (int k = 0; k < keys; k++) m.shape_keys.push_back({strprintf("K%d", k), std::vector<Vec3>(m.vert_count(), Vec3(0, 0.01f, 0))});
+      m.touch();
+      g->add<SkinModifier>()->object = rig->name;
+      meshes.push_back(g);
+    }
+    auto names = [&](DecimateMode mode, std::vector<std::string> ex) {
+      std::string out;
+      for (GameObject *g : decimate_candidates(ed.scene(), *rig, mode, ex)) out += g->name + ";";
+      return out;
+    };
+    std::printf("    Safe %s  Half %s  Smart %s  Full %s  Smart without Face %s\n", names(DecimateMode::Safe, {}).c_str(), names(DecimateMode::Half, {}).c_str(),
+                names(DecimateMode::Smart, {}).c_str(), names(DecimateMode::Full, {}).c_str(), names(DecimateMode::Smart, {"Face"}).c_str());
+    CHECK(names(DecimateMode::Safe, {}) == "Part0;" && names(DecimateMode::Half, {}) == "Part0;Part2;" && names(DecimateMode::Smart, {}) == "Part0;Part2;Face;");
+    CHECK(names(DecimateMode::Full, {}) == "Part0;Part2;Face;" && names(DecimateMode::Smart, {"Face"}) == "Part0;Part2;");
+    DecimateMode m;
+    CHECK(decimate_mode_named("save", m) && m == DecimateMode::Safe && !decimate_mode_named("nope", m));
+    /* A Full cut that doesn't happen (it fits already; or this build can't cut) leaves every key (review 359). */
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar decimate full 999999999");
+    CHECK(meshes[2]->get<MeshFilter>()->mesh->shape_keys.size() == 5 && meshes[1]->get<MeshFilter>()->mesh->shape_keys.size() == 2);
+    /* An unskinned hat under the head is a mesh the modes may cut, as the checklist's Fix had cut it. */
+    ed.command("create Cube");
+    GameObject *hat = ed.active_object_for_test();
+    if (hat && ed.scene().find_by_name("Head")) ed.scene().set_parent(hat, ed.scene().find_by_name("Head"), -1, true);
+    CHECK(hat && names(DecimateMode::Safe, {}) == "Part0;" + hat->name + ";");
+    if (!meshops::decimate_available()) return;  // (the cut itself: meshoptimizer, the libraries' build)
+    for (GameObject *g : meshes) {
+      ed.select_for_test(g->id, false);
+      ed.command("subdivide 1");
+    }
+    ed.select_for_test(rig->id, false);
+    const double before = budget_count(avatar_objects(ed.scene(), *rig)).value[(int)BudgetRow::Triangles];
+    const double face = budget_count({meshes[2]}).value[(int)BudgetRow::Triangles];
+    ed.command(strprintf("avatar decimate smart %.0f Face", before * 0.6));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const double after = budget_count(avatar_objects(ed.scene(), *rig)).value[(int)BudgetRow::Triangles];
+    std::printf("    Smart to %.0f without Face: %.0f -> %.0f triangles; Face %.0f -> %.0f, its Decimate %d\n", before * 0.6, before, after, face,
+                budget_count({meshes[2]}).value[(int)BudgetRow::Triangles], (int)(meshes[2]->get<DecimateModifier>() != nullptr));
+    CHECK(after <= before * 0.6 && after > before * 0.45 && !meshes[2]->get<DecimateModifier>());
+    ed.command(strprintf("avatar decimate full %.0f", before * 0.3));
+    CHECK(meshes[2]->get<MeshFilter>()->mesh->shape_keys.empty() && meshes[2]->get<DecimateModifier>());
+  });
+  test("Bone Root and Bone Merging (round 359): hair chains with one parent and one name go under RootBone_hair (one PhysBone in the budget); Merge Bones at 50% halves a chain, the weights kept, the body unmoved", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!body || !rig || !head) return;
+    GameObject *l = r359_chain(s, head, "Hair_L", Vec3(-0.08f, 0.15f, 0), 5);
+    GameObject *r = r359_chain(s, head, "Hair_R", Vec3(0.08f, 0.15f, 0), 5);
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const double chains = budget_count(avatar_objects(s, *rig)).value[(int)BudgetRow::SpringChains];
+    const std::vector<Vec3> before = r357_skinned(*body);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar boneroot");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *root = s.find_by_name("RootBone_hair");
+    const double after_chains = budget_count(avatar_objects(s, *rig)).value[(int)BudgetRow::SpringChains];
+    std::printf("    Bone Root: %s, the chains under it %d %d, PhysBones %.0f -> %.0f, the body moved %.6f\n", root ? root->name.c_str() : "-", (int)(root && l->parent == root),
+                (int)(root && r->parent == root), chains, after_chains, r358_worst(before, r357_skinned(*body)));
+    CHECK(root && l->parent == root && r->parent == root && root->parent == head && chains == 2.0 && after_chains == 1.0);
+    CHECK(r358_worst(before, r357_skinned(*body)) < 1e-3f);
+    /* Merge Bones at 50: each chain of 5 keeps its first and loses 2 of the other 4. */
+    const size_t len_before = spring::chain_bones(*l).size();
+    const uint64_t lid = l->id;  // (Undo replaces the objects: the id, not the pointer, finds it after)
+    ed.command("avatar mergebones 50");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t len_after = spring::chain_bones(*l).size();
+    std::printf("    Merge Bones 50%%: a chain of %zu now %zu; the body moved %.6f\n", len_before, len_after, r358_worst(before, r357_skinned(*body)));
+    CHECK(len_before == 5 && len_after == 3 && r358_worst(before, r357_skinned(*body)) < 1e-3f);
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *l2 = ed.scene().find(lid);
+    CHECK(l2 && spring::chain_bones(*l2).size() == 5);
+  });
+  test("Decimation and Bone Root (review 359): the words after `avatar decimate` - names after a comma, a name with a space, a name starting with a digit; the group word skips sides, numbers and namespaces", [] {
+    DecimateMode mode = DecimateMode::Smart;
+    double tris = 70000.0;
+    std::vector<std::string> ex;
+    parse_decimate_args({"smart", "5000", "Face,", "Eyes"}, mode, tris, ex);
+    CHECK(mode == DecimateMode::Smart && tris == 5000.0 && ex.size() == 2 && ex[0] == "Face" && ex[1] == "Eyes");
+    tris = 70000.0;
+    parse_decimate_args({"half", "Body", "Mesh,", "2Hats"}, mode, tris, ex);
+    CHECK(mode == DecimateMode::Half && tris == 70000.0 && ex.size() == 2 && ex[0] == "Body Mesh" && ex[1] == "2Hats");
+    parse_decimate_args({}, mode, tris, ex);
+    CHECK(ex.empty());
+    std::printf("    group words: %s %s %s %s\n", chain_group_word("J_Sec_L_Hair1_01").c_str(), chain_group_word("L_Ear").c_str(), chain_group_word("R_Hair").c_str(), chain_group_word("Hair_L").c_str());
+    CHECK(chain_group_word("J_Sec_L_Hair1_01") == "hair" && chain_group_word("L_Ear") == "ear" && chain_group_word("R_Hair") == "hair" && chain_group_word("Hair_L") == "hair");
+  });
+  test("Bone Root and Bone Merging (review 359): a clip on a grouped chain follows it and Undo takes Bone Root back; Merge Bones at 100% leaves one bone reaching the strand's end; the root is no collider", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!rig || !head) return;
+    GameObject *l = r359_chain(s, head, "L_Hair", Vec3(-0.08f, 0.15f, 0), 5);
+    r359_chain(s, head, "R_Hair", Vec3(0.08f, 0.15f, 0), 5);
+    const uint64_t lid = l->id;
+    std::remove(resolve_asset_path("Assets/Animations/R359Hair.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R359Hair.anim", "R359Hair");
+    if (!clip) return;
+    clip->track(anim_path(*rig, *l), "Rotation", 0).set_key(0, 10.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    ed.mark_changed_for_test("key the hair");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar boneroot");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *root = s.find_by_name("RootBone_hair");
+    GameObject *l1 = s.find(lid);
+    CHECK(root && l1 && l1->parent == root && clip_asset("Assets/Animations/R359Hair.anim")->find(anim_path(*rig, *l1), "Rotation", 0));
+    /* The root isn't a capsule the strands collide with. */
+    CHECK(root && spring::is_bone_root(*root));
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.scene().find_by_name("RootBone_hair") && ed.scene().find(lid) && ed.scene().find(lid)->parent == ed.scene().find_by_name("Head"));
+    /* Merge Bones at 100%: one bone left, its tip where the strand ended. */
+    GameObject *first = ed.scene().find(lid);
+    std::vector<GameObject *> chain = spring::chain_bones(*first);
+    GameObject *last = chain.back();
+    const Vec3 end = last->world_position() + normalize(last->world_matrix().dir(Vec3(0, 1, 0))) * (last->get<Bone>()->length * bone_world_unit(*last));
+    const float reach = length(end - first->world_position());
+    ed.command("avatar mergebones 100");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *f2 = ed.scene().find(lid);
+    const float len = f2 ? f2->get<Bone>()->length * bone_world_unit(*f2) : 0.0f;
+    std::printf("    Merge Bones 100%%: %zu bone(s) left, the first's length %.3f, the strand reached %.3f\n", f2 ? spring::chain_bones(*f2).size() : (size_t)0, len, reach);
+    CHECK(f2 && spring::chain_bones(*f2).size() == 1 && std::fabs(len - reach) < 1e-3f);
+  });
+  test("the lesson's Try-it (round 359): rig humanoid, then avatar boneroot - nothing to group, said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("avatar boneroot");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("nothing to group") != std::string::npos;
+    CHECK(said);
+  });
+}
+
+/* ---------------------------------------------------------------- round 360: Eye Tracking, Texture Atlas */
+static void tests_round360() {
+  test("Eye Tracking (round 360): two eye meshes on a humanoid become LeftEye (the rig's -X) and RightEye under Head at their middles, each eye following its bone; a Blink key splits into vrc.blink_left / right by side; the test turns and shuts them, Reset puts them back", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!body || !rig || !head) return;
+    const Vec3 hp = head->world_position();
+    GameObject *eye[2] = {};
+    for (int i = 0; i < 2; i++) {
+      ed.command("create Sphere");
+      eye[i] = ed.active_object_for_test();
+      eye[i]->name = i == 0 ? "Eye_L" : "Eye_R";
+      eye[i]->set_local_scale(Vec3(0.02f));
+      eye[i]->set_world_position(hp + Vec3(i == 0 ? -0.03f : 0.03f, 0.08f, 0.08f));
+      s.set_parent(eye[i], head, -1, true);
+    }
+    /* The body's Blink: every vertex 1 cm down. */
+    {
+      Mesh &m = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"Blink", std::vector<Vec3>(m.vert_count(), Vec3(0, -0.01f, 0))}};
+      m.touch();
+    }
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar eyes");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *le = s.find_by_name("LeftEye"), *re = s.find_by_name("RightEye");
+    CHECK(le && re && le->parent == head && re->parent == head);
+    if (!le || !re) return;
+    std::printf("    LeftEye at (%.3f %.3f %.3f), RightEye at (%.3f %.3f %.3f); the eyes' parents %s, %s\n", le->world_position().x, le->world_position().y, le->world_position().z,
+                re->world_position().x, re->world_position().y, re->world_position().z, eye[0]->parent->name.c_str(), eye[1]->parent->name.c_str());
+    CHECK(length(le->world_position() - eye[0]->world_position()) < 0.005f && length(re->world_position() - eye[1]->world_position()) < 0.005f);
+    CHECK(eye[0]->parent == le && eye[1]->parent == re);
+    const Mesh &bm = *body->get<MeshFilter>()->mesh;
+    const int bl = bm.find_shape("vrc.blink_left"), br = bm.find_shape("vrc.blink_right");
+    CHECK(bl >= 0 && br >= 0);
+    if (bl < 0 || br < 0) return;
+    const float side_x = body->world_matrix().inverse().point(hp).x;
+    bool sides = true;
+    for (size_t i = 0; i < bm.vert_count(); i++) {
+      const bool left = bm.positions[i].x < side_x;
+      sides = sides && (length(bm.shape_keys[(size_t)bl].delta[i]) > 0.0f) == left && (length(bm.shape_keys[(size_t)br].delta[i]) > 0.0f) == !left;
+    }
+    CHECK(sides);
+    /* The test: turned and shut, then back. */
+    const Quat rest = le->get<Bone>()->rest_rotation;
+    ed.command("avatar eyetest 25 0 1");
+    const float shut = body->get<MeshRenderer>()->shape_weight("vrc.blink_left");
+    const bool turned = std::fabs(r358_qdot(le->local().rotation, rest)) < 0.999f;
+    ed.command("avatar eyetest reset");
+    std::printf("    the test: turned %d, the blink at %.1f; after Reset the blink at %.1f\n", (int)turned, shut, body->get<MeshRenderer>()->shape_weight("vrc.blink_left"));
+    CHECK(turned && shut == 1.0f && body->get<MeshRenderer>()->shape_weight("vrc.blink_left") == 0.0f && std::fabs(r358_qdot(le->local().rotation, rest)) > 0.9999f);
+    /* The checklist's eye item passes now. */
+    bool eyes_ok = false;
+    for (const AvatarCheck &c : avatar_check(s, *rig)) eyes_ok = eyes_ok || (c.item == "Eye bones (Eye Look)" && c.ok);
+    CHECK(eyes_ok);
+  });
+  test("Eye Tracking (round 360): nothing to set up on a bare rig is said; split_key_by_side keeps each side's offsets; the checklist's eye item has its Fix", [] {
+    Mesh m = *primitives::cube();
+    m.shape_keys = {{"Blink", std::vector<Vec3>(m.vert_count(), Vec3(0, -0.1f, 0))}};
+    CHECK(split_key_by_side(m, "Blink", 0.0f, "L", "R") && !split_key_by_side(m, "Nope", 0.0f, "L", "R"));
+    const int l = m.find_shape("L"), r = m.find_shape("R");
+    float ls = 0.0f, rs = 0.0f;
+    for (size_t i = 0; l >= 0 && r >= 0 && i < m.vert_count(); i++) ls += length(m.shape_keys[(size_t)l].delta[i]), rs += length(m.shape_keys[(size_t)r].delta[i]);
+    CHECK(l >= 0 && r >= 0 && std::fabs(ls - rs) < 1e-5f && ls > 0.0f);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    if (!rig) return;
+    std::string fix;
+    for (const AvatarCheck &c : avatar_check(ed.scene(), *rig)) fix = c.item == "Eye bones (Eye Look)" ? c.fix : fix;
+    CHECK(fix == "avatar eyes");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("avatar eyes");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("Eye Tracking: no eyes") != std::string::npos;
+    CHECK(said && !ed.scene().find_by_name("LeftEye"));
+  });
+  test("Texture Atlas (round 360): a mesh with two materials baked into one texture set, one material, one slot, its UVs laid out anew", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    if (!rig || !cube) return;
+    MeshRenderer *mr = cube->get<MeshRenderer>();
+    mr->materials = {std::make_shared<Material>(), std::make_shared<Material>()};
+    mr->materials[0]->base_color = Vec3(1, 0, 0);
+    mr->materials[1]->base_color = Vec3(0, 0, 1);
+    {
+      Mesh &m = *mesh_make_mutable(cube->get<MeshFilter>()->mesh);
+      m.face_material.assign(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f += 2) m.face_material[f] = 1;
+      m.touch();
+    }
+    cube->add<SkinModifier>()->object = rig->name;
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar atlas 256");
+    const Mesh &m = *cube->get<MeshFilter>()->mesh;
+    const bool one_slot = std::all_of(m.face_material.begin(), m.face_material.end(), [](int f) { return f == 0; });
+    std::printf("    after the atlas: %zu material(s), one slot %d, its albedo map %s\n", mr->materials.size(), (int)one_slot, mr->materials.empty() ? "-" : mr->materials[0]->base_map.path.c_str());
+    CHECK(mr->materials.size() == 1 && one_slot && !mr->materials[0]->base_map.empty());
+    /* The baked material and its images out of the scratch project (each run left one more, crowding the Materials
+     * window's grid for the multi-select test). */
+    for (const MaterialPtr &mat : mr->materials) {
+      if (!mat->asset_path.empty()) std::remove(resolve_asset_path(mat->asset_path).c_str());
+      for (const TextureRef *t : {&mat->base_map, &mat->normal_map, &mat->metallic_map, &mat->roughness_map, &mat->emission_map})
+        if (!t->empty()) std::remove(resolve_asset_path(t->path).c_str());
+    }
+  });
+  test("Eye Tracking (review 360): one Eyes mesh for both eyes skinned to LeftEye and RightEye; a Skin's limit group kept on the eyes; a second avatar's eyes its own; a re-run after an eye moved keeps it; a turned body's blinks on the right sides; the test undone before an edit", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!rig || !head) return;
+    const Vec3 hp = head->world_position();
+    /* One "Eyes" mesh holding both: two small spheres joined. */
+    ed.command("create Sphere");
+    GameObject *eyes = ed.active_object_for_test();
+    {
+      Mesh both = *primitives::uv_sphere();
+      Mesh &m = *mesh_make_mutable(eyes->get<MeshFilter>()->mesh);
+      m = both;
+      for (Vec3 &p : m.positions) p = p * 0.02f + Vec3(-0.03f, 0.08f, 0.08f);
+      Mesh right = both;
+      for (Vec3 &p : right.positions) p = p * 0.02f + Vec3(0.03f, 0.08f, 0.08f);
+      meshops::append_mesh(m, right, Mat4::identity(), {});
+      m.touch();
+    }
+    eyes->name = "Eyes";
+    eyes->set_world_position(hp);
+    s.set_parent(eyes, head, -1, true);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar eyes");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *le = s.find_by_name("LeftEye"), *re = s.find_by_name("RightEye");
+    const SkinModifier *es = eyes->get<SkinModifier>();
+    std::printf("    the Eyes mesh: skinned %d, its parent %s, LeftEye x %.3f, RightEye x %.3f\n", (int)(es != nullptr), eyes->parent ? eyes->parent->name.c_str() : "-",
+                le ? le->world_position().x - hp.x : 0.0f, re ? re->world_position().x - hp.x : 0.0f);
+    CHECK(le && re && es && eyes->parent == rig && le->world_position().x < hp.x && re->world_position().x > hp.x);
+    /* The test is undone by the next edit (its pose and blinks aren't kept). */
+    const Quat lrest = le ? le->get<Bone>()->rest_rotation : Quat();
+    ed.command("avatar eyetest 30 0 1");
+    ed.command("avatar eyetest nan 0 0");  // (refused)
+    ed.command("create Cube");
+    CHECK(le && std::fabs(r358_qdot(le->local().rotation, lrest)) > 0.9999f);
+    /* A second avatar: its own eye bones (by the rig, not the first found by name). */
+    ed.command("rig humanoid");
+    GameObject *rig2 = ed.active_object_for_test();
+    GameObject *head2 = nullptr;
+    std::vector<GameObject *> bones2;
+    s.for_each([&](GameObject &g) { head2 = g.name == "Head" && rig2 && s.is_ancestor(rig2, &g) ? &g : head2; });
+    if (!rig2 || !head2) return;
+    rig2->set_world_position(Vec3(3, 0, 0));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *e2[2] = {};
+    for (int i = 0; i < 2; i++) {
+      ed.command("create Sphere");
+      e2[i] = ed.active_object_for_test();
+      e2[i]->name = i == 0 ? "Eye_L" : "Eye_R";
+      e2[i]->set_local_scale(Vec3(0.02f));
+      e2[i]->set_world_position(head2->world_position() + Vec3(i == 0 ? -0.03f : 0.03f, 0.08f, 0.08f));
+      s.set_parent(e2[i], head2, -1, true);
+    }
+    ed.select_for_test(rig2->id, false);
+    ed.command("avatar eyes");
+    CHECK(e2[0]->parent && e2[0]->parent->name == "LeftEye" && s.is_ancestor(rig2, e2[0]->parent) && e2[0]->parent != le);
+    /* A re-run after the left eye moved 1 cm: the bone at the eye, the eye where it was put. */
+    const Vec3 moved = e2[0]->world_position() + Vec3(0, 0.01f, 0);
+    e2[0]->set_world_position(moved);
+    ed.command("avatar eyes");
+    std::printf("    the re-run: the eye %.4f from where it was put, the bone %.4f from it\n", length(e2[0]->world_position() - moved), length(e2[0]->parent->world_position() - moved));
+    CHECK(length(e2[0]->world_position() - moved) < 1e-4f && length(e2[0]->parent->world_position() - moved) < 1e-3f);
+  });
+  test("Eye Tracking (review 360): a Skin's limit group stays on the eye vertices; a body turned half round blinks each eye on its own side; the atlas lists a mesh it couldn't bake", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    if (!body || !rig) return;
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Vec3 hp = ed.scene().find_by_name("Head")->world_position();
+    body->set_local_rotation(Quat::axis_angle(Vec3(0, 1, 0), 3.14159265f));  // (turned half round: its own X is the rig's -X)
+    {
+      Mesh &m = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+      const Mat4 inv = body->world_matrix().inverse();
+      std::vector<float> l(m.vert_count(), 0.0f), r(m.vert_count(), 0.0f);
+      l[0] = 1.0f, r[1] = 1.0f;
+      m.positions[0] = inv.point(hp + Vec3(-0.03f, 0.08f, 0.08f));
+      m.positions[1] = inv.point(hp + Vec3(0.03f, 0.08f, 0.08f));
+      m.vertex_groups.push_back({"Eye_L", l});
+      m.vertex_groups.push_back({"Eye_R", r});
+      m.vertex_groups.push_back({"Deform", std::vector<float>(m.vert_count(), 1.0f)});
+      m.shape_keys = {{"Blink", std::vector<Vec3>(m.vert_count(), Vec3(0, -0.01f, 0))}};
+      m.touch();
+    }
+    body->get<SkinModifier>()->vertex_group = "Deform";
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar eyes");
+    const Mesh &m = *body->get<MeshFilter>()->mesh;
+    const int deform = m.find_group("Deform"), bl = m.find_shape("vrc.blink_left");
+    CHECK(deform >= 0 && m.vertex_groups[(size_t)deform].weights[0] == 1.0f && m.vertex_groups[(size_t)m.find_group("LeftEye")].weights[0] == 1.0f);
+    /* vrc.blink_left moves the vertices on the rig's left (world x below the head's), whatever the body's turn. */
+    bool sides = bl >= 0;
+    for (size_t i = 0; sides && i < m.vert_count(); i++)
+      sides = (length(m.shape_keys[(size_t)bl].delta[i]) > 0.0f) == (body->world_matrix().point(m.positions[i]).x < hp.x);
+    CHECK(sides);
+    /* The atlas: a two-material mesh with a Mirror can't be baked - said, by name. */
+    ed.command("create Cube");
+    GameObject *cube = ed.active_object_for_test();
+    cube->get<MeshRenderer>()->materials = {std::make_shared<Material>(), std::make_shared<Material>()};
+    cube->add<SkinModifier>()->object = rig->name;
+    ed.select_for_test(cube->id, false);
+    ed.command("component MirrorModifier");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar atlas 256");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || (e.text.find("not baked") != std::string::npos && e.text.find(cube->name) != std::string::npos);
+    CHECK(said);
+  });
+  test("the lesson's Try-it (round 360): rig humanoid, then avatar eyes - no eyes on a bare rig, said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    ed.command("avatar eyes");
+    CHECK(!ed.scene().find_by_name("LeftEye"));
+  });
+}
+
+/* ---------------------------------------------------------------- round 361: Merge Armatures, Attach Mesh, Translate, Export */
+static void tests_round361() {
+  test("Translate (round 361): MMD's morph and material names from the dictionary - whole names, then by parts; an English or unknown name left", [] {
+    const char *const kIn[] = {"\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", "\xE3\x81\x82", "\xE3\x82\xA6\xE3\x82\xA3\xE3\x83\xB3\xE3\x82\xAF\xE5\x8F\xB3",
+                               "\xE8\x82\x8C", "\xE9\xAB\xAA\xE5\x8F\xB3", "Smile", "\xE6\x9C\xAA\xE7\x9F\xA5"};
+    const char *const kOut[] = {"Blink", "A", "Wink Right", "Skin", "Hair Right", "", ""};
+    for (int i = 0; i < 7; i++) {
+      const std::string got = translate_name(kIn[i]);
+      if (got != kOut[i]) std::printf("    %d: '%s', wanted '%s'\n", i, got.c_str(), kOut[i]);
+      CHECK(got == kOut[i]);
+    }
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *body = ed.active_object_for_test();
+    if (!rig || !body) return;
+    {
+      Mesh &m = *mesh_make_mutable(body->get<MeshFilter>()->mesh);
+      m.shape_keys = {{"\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", std::vector<Vec3>(m.vert_count(), Vec3(0, 0.01f, 0))}};
+      m.touch();
+    }
+    body->get<MeshRenderer>()->materials = {std::make_shared<Material>()};
+    body->get<MeshRenderer>()->materials[0]->name = "\xE8\x82\x8C";
+    body->get<MeshRenderer>()->set_shape_weight("\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", 0.5f);
+    body->add<SkinModifier>()->object = rig->name;
+    /* A clip's track on the Japanese key (as a VMD's morphs come in), and the material an asset. */
+    std::remove(resolve_asset_path("Assets/Animations/R361Blink.anim").c_str());
+    AnimationClipPtr clip = create_clip_asset("Assets/Animations/R361Blink.anim", "R361Blink");
+    if (!clip) return;
+    clip->track(anim_path(*rig, *body), "MeshRenderer.BlendShape/\xE3\x81\xBE\xE3\x81\xB0\xE3\x81\x9F\xE3\x81\x8D", 0).set_key(0, 1.0f);
+    rig->add<Animation>()->clip = clip->asset_path;
+    for (const char *p : {"Assets/Materials/R361/Skin.mat", "Assets/Materials/R361/Skin 2.mat"}) std::remove(resolve_asset_path(p).c_str());
+    Material skin_src;
+    skin_src.name = "\xE8\x82\x8C";
+    MaterialPtr asset = create_material_asset(skin_src, "Assets/Materials/R361/\xE8\x82\x8C.mat");
+    if (asset) body->get<MeshRenderer>()->materials = {asset};
+    ed.mark_changed_for_test("set up the names");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar translate");
+    const Mesh &m = *body->get<MeshFilter>()->mesh;
+    const MaterialPtr now = body->get<MeshRenderer>()->materials[0];
+    std::printf("    translated: the key %d, its weight %.1f, the clip's track %d, the material %s at %s (the original still %s)\n", m.find_shape("Blink"),
+                body->get<MeshRenderer>()->shape_weight("Blink"), (int)(clip->find(anim_path(*rig, *body), "MeshRenderer.BlendShape/Blink", 0) != nullptr), now->name.c_str(),
+                now->asset_path.c_str(), asset ? asset->name.c_str() : "-");
+    CHECK(m.find_shape("Blink") >= 0 && now->name == "Skin" && body->get<MeshRenderer>()->shape_weight("Blink") == 0.5f);
+    CHECK(clip->find(anim_path(*rig, *body), "MeshRenderer.BlendShape/Blink", 0) != nullptr);
+    CHECK(asset && asset->name != "Skin" && now != asset && now->asset_path.find("Skin") != std::string::npos);
+    ed.command("undo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *b2 = ed.scene().find_by_name(body->name);
+    CHECK(b2 && b2->get<MeshFilter>()->mesh->find_shape("Blink") < 0);
+  });
+  test("Merge Armatures and Attach Mesh (round 361): a hair rig with its own Head merged into the avatar's - its strand under the avatar's Head, its mesh skinned to the avatar and following the head; a ring given wholly to a hand", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    Scene &s = ed.scene();
+    GameObject *head = s.find_by_name("Head");
+    if (!rig || !head) return;
+    /* The hair's own rig: a Head where the avatar's is, a strand under it, a mesh skinned to the strand. */
+    GameObject *hrig = s.create("HairRig", nullptr);
+    hrig->add<Armature>();
+    GameObject *hhead = r357_bone(hrig, s, "Head", head->world_position() + Vec3(0, 0.02f, 0));  // (2 cm off the avatar's: the hair still doesn't jump)
+    GameObject *strand = r357_bone(hhead, s, "Strand", Vec3(0, 0.1f, -0.05f));
+    ed.command("create Cube");
+    GameObject *hair = ed.active_object_for_test();
+    if (!hair) return;
+    hair->set_world_position(strand->world_position());
+    hair->set_local_scale(Vec3(0.05f));
+    {
+      Mesh &m = *mesh_make_mutable(hair->get<MeshFilter>()->mesh);
+      m.vertex_groups = {{"Strand", std::vector<float>(m.vert_count(), 1.0f)}};
+      m.touch();
+    }
+    hair->add<SkinModifier>()->object = "HairRig";
+    /* A clip on the hair rig's Head: a hat (not a bone) hanging from it is kept, under the avatar's Head. */
+    ed.command("create Cone");
+    GameObject *clip_hat = ed.active_object_for_test();
+    if (!clip_hat) return;
+    s.set_parent(clip_hat, hhead, -1, true);
+    const uint64_t clip_hat_id = clip_hat->id;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> before = r357_skinned(*hair);
+    const uint64_t strand_id = strand->id, hrig_id = hrig->id;
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar mergearmature HairRig");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    GameObject *st = s.find(strand_id);
+    std::printf("    merged: the strand under %s, the hair skinned to %s, HairRig %s; the hair moved %.6f at rest\n", st && st->parent ? st->parent->name.c_str() : "-",
+                hair->get<SkinModifier>()->object.c_str(), s.find(hrig_id) ? "kept" : "gone", r358_worst(before, r357_skinned(*hair)));
+    CHECK(st && st->parent == head && hair->get<SkinModifier>()->object == rig->name && !s.find(hrig_id) && r358_worst(before, r357_skinned(*hair)) < 1e-4f);
+    CHECK(s.find(clip_hat_id) && s.find(clip_hat_id)->parent == head);
+    /* The head turned: the hair turns with it. */
+    head->set_local_rotation(head->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 1, 0), 0.6f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(r358_worst(before, r357_skinned(*hair)) > 0.01f);
+    /* Attach Mesh on a hat already under the Head: it turns once with the head, not twice. */
+    head->set_local_rotation(head->get<Bone>()->rest_rotation);
+    ed.command("create Cube");
+    GameObject *hat = ed.active_object_for_test();
+    if (!hat) return;
+    hat->set_world_position(head->world_position() + Vec3(0, 0.2f, 0));
+    s.set_parent(hat, head, -1, true);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.select_for_test(hat->id, false);
+    ed.command("avatar attach Head");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> hat_rest = r357_skinned(*hat);
+    head->set_local_rotation(head->get<Bone>()->rest_rotation * Quat::axis_angle(Vec3(0, 1, 0), 0.5236f));
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::vector<Vec3> hat_turned = r357_skinned(*hat);
+    /* Its top vertex's turn about the head's axis: 30 degrees, not 60. */
+    Vec3 a = hat_rest.empty() ? Vec3(0.0f) : hat_rest[0] - head->world_position(), b = hat_turned.empty() ? Vec3(0.0f) : hat_turned[0] - head->world_position();
+    a.y = 0.0f, b.y = 0.0f;
+    const float turned = std::acos(std::clamp(dot(normalize(a), normalize(b)), -1.0f, 1.0f)) * 57.29578f;
+    std::printf("    a hat under the head, attached: its parent %s, turned %.1f degrees with a 30-degree head\n", hat->parent ? hat->parent->name.c_str() : "-", turned);
+    CHECK(hat->parent == rig && std::fabs(turned - 30.0f) < 2.0f);
+    head->set_local_rotation(head->get<Bone>()->rest_rotation);
+    /* Attach Mesh: a ring on the left hand. */
+    ed.command("create Torus");
+    GameObject *ring = ed.active_object_for_test();
+    if (!ring) return;
+    ed.command("avatar attach LeftHand");
+    const Mesh &rm = *ring->get<MeshFilter>()->mesh;
+    CHECK(rm.vertex_groups.size() == 1 && rm.vertex_groups[0].name == "LeftHand" && ring->get<SkinModifier>() && ring->get<SkinModifier>()->object == rig->name);
+    ed.command("avatar attach NoSuchBone");
+    CHECK(rm.vertex_groups.size() == 1 && ring->get<MeshFilter>()->mesh->vertex_groups[0].name == "LeftHand");
+  });
+  test("Export for VRChat (round 361): a body with three mouths through Fix Model and Create Visemes goes out as FBX - the checklist and rank said first, its skeleton, skin and 15 visemes read back by ufbx", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *body = ed.active_object_for_test();
+    ed.command("position 0 1 0");
+    ed.command("rig humanoid");
+    GameObject *rig = ed.active_object_for_test();
+    if (!body || !rig) return;
+    ed.select_for_test(body->id, false);
+    ed.command("component SkinModifier");
+    ed.command("set SkinModifier.Armature " + rig->name);
+    ed.command("skin bind");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    for (const char *c : {"shape add AA", "shape add OH", "shape add CH", "visemes"}) ed.command(c);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar fixmodel");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::string dir = fs::join(test_dir(), "r361");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "avatar.fbx");
+    std::remove(path.c_str());
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.select_for_test(rig->id, false);
+    ed.command("avatar export " + path);
+    log.clear();
+    Log::fetch(since, log);
+    bool summary = false;
+    for (const LogEntry &e : log) summary = summary || e.text.find("Export for VRChat:") != std::string::npos;
+    ufbx_load_opts opts = {};
+    ufbx_error err;
+    ufbx_scene *sc = ufbx_load_file(path.c_str(), &opts, &err);
+    size_t visemes = 0;
+    for (size_t i = 0; sc && i < sc->blend_channels.count; i++) visemes += std::string(sc->blend_channels.data[i]->name.data).rfind("vrc.v_", 0) == 0 ? 1 : 0;
+    std::printf("    the FBX: %s, %zu skin(s), %zu bones, %zu viseme channels; the summary said %d\n", sc ? "read" : err.description.data, sc ? sc->skin_deformers.count : (size_t)0,
+                sc ? sc->bones.count : (size_t)0, visemes, (int)summary);
+    CHECK(sc && sc->skin_deformers.count >= 1 && sc->bones.count >= 15 && visemes == 15 && summary);
+    if (sc) ufbx_free_scene(sc);
+  });
+  test("the lesson's Try-it (round 361): rig humanoid, then avatar translate - nothing to translate, said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("avatar translate");
+    log.clear();
+    Log::fetch(since, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("none known") != std::string::npos;
+    CHECK(said);
+  });
+}
+
+/* ---------------------------------------------------------------- round 362: the world kit - Colliders, Mark Static */
+static void tests_round362() {
+  test("Colliders (round 362): Fit to Mesh sizes a box, a sphere and a capsule to the mesh; the collider's mesh is that shape where it says", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");  // (radius 0.5, 2 tall)
+    GameObject *g = ed.active_object_for_test();
+    if (!g) return;
+    ed.command("component Collider");
+    ColliderComponent *c = g->get<ColliderComponent>();
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->fit = true;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    std::printf("    the box fitted: size (%.2f %.2f %.2f), center (%.2f %.2f %.2f); Fit unticked %d\n", c->size.x, c->size.y, c->size.z, c->center.x, c->center.y, c->center.z, (int)!c->fit);
+    CHECK(std::fabs(c->size.x - 1.0f) < 0.02f && std::fabs(c->size.y - 2.0f) < 0.02f && !c->fit);
+    const Mesh &m = *g->evaluated_mesh();
+    for (int shape : {0, 1, 2}) {
+      c->shape = shape;
+      fit_collider(*c, m);
+      const std::shared_ptr<Mesh> cm = collider_mesh(*c, m);
+      const AABB b = cm ? cm->bounds() : AABB();
+      const Vec3 size = b.valid() ? b.max - b.min : Vec3(0.0f);
+      std::printf("    %s: its mesh %.2f x %.2f x %.2f\n", shape == 0 ? "Box" : shape == 1 ? "Sphere" : "Capsule", size.x, size.y, size.z);
+      CHECK(cm != nullptr);
+      if (shape == 0) CHECK(std::fabs(size.x - 1.0f) < 0.02f && std::fabs(size.y - 2.0f) < 0.02f);
+      if (shape == 1) CHECK(std::fabs(size.y - 2.0f) < 0.05f);  // (the largest half side: 1)
+      if (shape == 2) CHECK(std::fabs(size.y - 2.0f) < 0.05f && std::fabs(size.x - 1.0f) < 0.05f);
+    }
+    CHECK(collider_export_name(2, 4, "Wall").empty() && collider_export_name(2, 0, "Wall") == "UCX_Wall_00" && collider_export_name(3, 0, "Wall") == "Wall-convcolonly" &&
+          collider_export_name(3, 4, "Wall") == "Wall-colonly" && collider_export_name(1, 0, "Wall") == "Wall_Collider" && collider_export_name(1, 4, "Wall") == "Wall_MeshCollider");
+  });
+  test("Colliders (round 362): an export with colliders=unreal, godot or unity writes the collider as a mesh named for the engine; without, none", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    if (!g) return;
+    g->name = "Wall";
+    ed.command("component Collider");
+    const std::string dir = fs::join(test_dir(), "r362");
+    fs::make_dirs(dir);
+    for (auto [engine, want] : {std::pair<const char *, const char *>{"", ""}, {"colliders=unreal", "UCX_Wall_00"}, {"colliders=godot", "Wall-convcolonly"}, {"colliders=unity", "Wall_Collider"}}) {
+      const std::string path = fs::join(dir, std::string("wall") + (engine[0] ? engine + 10 : "plain") + ".glb");
+      ed.select_for_test(g->id, false);
+      ed.command(std::string("export glb ") + engine + (engine[0] ? " " : "") + path);
+      std::string glb;
+      fs::read_file(path, glb);
+      const Json j = r351_glb_json(glb);
+      std::string names;
+      for (size_t i = 0; i < j["nodes"].size(); i++) names += j["nodes"][i]["name"].str + ";";
+      std::printf("    %s: %s\n", engine[0] ? engine : "no colliders", names.c_str());
+      CHECK(want[0] ? names.find(want) != std::string::npos : names == "Wall;");
+    }
+  });
+  test("Generate Lighting (round 362): nothing with Contribute GI is refused with its Fix; Mark Static marks the still meshes, not a falling one", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("newscene");
+    ed.command("create Cube");
+    GameObject *still = ed.active_object_for_test();
+    ed.command("create Sphere");
+    GameObject *ball = ed.active_object_for_test();
+    if (!still || !ball) return;
+    ed.command("component Rigidbody");
+    ed.scene().for_each([](GameObject &g) {
+      if (MeshRenderer *mr = g.get<MeshRenderer>()) mr->contribute_gi = false;
+    });
+    ed.scene().lighting.baked_gi = true;
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("bake start");
+    log.clear();
+    Log::fetch(since, log);
+    bool refused = false;
+    for (const LogEntry &e : log) refused = refused || e.text.find("no object has Contribute GI on") != std::string::npos;
+    CHECK(refused);
+    ed.command("lighting markstatic");
+    CHECK(still->get<MeshRenderer>()->contribute_gi && !ball->get<MeshRenderer>()->contribute_gi);
+    ed.command("bake cancel");
+  });
+  test("the lesson's Try-it (round 362): create Cube, component Collider - a box its mesh's size", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    ed.command("component Collider");
+    GameObject *g = ed.active_object_for_test();
+    const ColliderComponent *c = g ? g->get<ColliderComponent>() : nullptr;
+    CHECK(c && c->shape == 0 && std::fabs(c->size.x - 1.0f) < 1e-4f);
+  });
+  test("Colliders (review 362): adding one from the Inspector and Ctrl+Z twice takes it away (the fit joins the step); a scaled parent's floor collides at its world size; a switched-off collider doesn't collide; Mark Static leaves an animated parent's child", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cylinder");
+    GameObject *g = ed.active_object_for_test();
+    if (!g) return;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    /* A collider added and fitted inside one frame's step (as the Inspector's menu does): one Undo takes it away. */
+    g->add<ColliderComponent>();
+    ed.mark_changed_for_test("Add Component");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const ColliderComponent *c = g->get<ColliderComponent>();
+    CHECK(c && !c->fit && std::fabs(c->size.y - 2.0f) < 0.02f);
+    ed.command("undo");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *back = ed.scene().find(g->id);
+    CHECK(back && !back->get<ColliderComponent>());
+    ed.command("redo");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    back = ed.scene().find(g->id);
+    CHECK(back && back->get<ColliderComponent>());
+    /* Mark Static: a child of an animated parent moves - not marked. */
+    ed.command("create Empty");
+    GameObject *windmill = ed.active_object_for_test();
+    ed.command("create Cube");
+    GameObject *blade = ed.active_object_for_test();
+    if (!windmill || !blade) return;
+    ed.scene().set_parent(blade, windmill, -1, true);
+    windmill->add<Animation>();
+    blade->get<MeshRenderer>()->contribute_gi = false;
+    ed.command("lighting markstatic");
+    CHECK(!blade->get<MeshRenderer>()->contribute_gi);
+    if (!physics_jolt_available()) return;
+    /* A floor under a parent scaled 2: its box collider 20 m wide in the world; a ball 7 m out still lands on it. */
+    Scene s;
+    GameObject *level = s.create("Level");
+    level->set_local_scale(Vec3(2.0f));
+    GameObject *floor = s.create("Floor", level);
+    floor->add<MeshFilter>()->mesh = primitives::plane(10.0f, 1);
+    floor->add<MeshRenderer>();
+    ColliderComponent *fc = floor->add<ColliderComponent>();
+    fc->fit = false, fc->shape = 0, fc->size = Vec3(10.0f, 0.5f, 10.0f), fc->center = Vec3(0, -0.25f, 0);
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ColliderComponent *bc = ball->add<ColliderComponent>();
+    bc->fit = false, bc->shape = 1, bc->radius = 0.3f;
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({7, 2, 0});
+    /* A second ball over a switched-off collider (a bush): it falls through. */
+    GameObject *bush = s.create("Bush");
+    bush->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    bush->add<MeshRenderer>();
+    bush->set_local_position({-6, 0, -6});
+    bush->add<ColliderComponent>()->enabled = false;
+    GameObject *ball2 = s.create("Ball2");
+    ball2->add<MeshFilter>()->mesh = primitives::cube(0.2f);
+    ball2->add<MeshRenderer>();
+    ball2->add<Rigidbody>()->bounciness = 0.0f;
+    ball2->set_local_position({-6, 3, -6});
+    PlayContext ctx;
+    s.start(ctx);
+    ctx.dt = 1.0f / 60.0f;
+    for (int i = 0; i < 240; i++) s.update(ctx);
+    std::printf("    on the scaled floor 7 m out: y %.3f; over the switched-off bush: y %.3f (the floor's top at 0)\n", ball->world_position().y, ball2->world_position().y);
+    CHECK_NEAR(ball->world_position().y, 0.3f, 0.05f);
+    CHECK(ball2->world_position().y < 0.5f);  // (through the bush, onto the floor)
+  });
+  test("Colliders (round 362): in Play, a ball's Sphere collider rests on a floor's Box collider at their radii (Jolt), the floor's mesh a thin plane", [] {
+    if (!physics_jolt_available()) return;
+    Scene s;
+    GameObject *floor = s.create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(10.0f, 1);
+    floor->add<MeshRenderer>();
+    ColliderComponent *fc = floor->add<ColliderComponent>();
+    fc->shape = 0, fc->size = Vec3(10.0f, 1.0f, 10.0f), fc->center = Vec3(0, -0.5f, 0);  // (a slab under the plane)
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ColliderComponent *bc = ball->add<ColliderComponent>();
+    bc->shape = 1, bc->radius = 0.3f;
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({0, 2, 0});
+    PlayContext ctx;
+    s.start(ctx);
+    ctx.dt = 1.0f / 60.0f;
+    for (int i = 0; i < 240; i++) s.update(ctx);
+    std::printf("    the ball (a cube's mesh, a 0.3 sphere's collider) rests at y %.3f\n", ball->world_position().y);
+    CHECK_NEAR(ball->world_position().y, 0.3f, 0.05f);  // (its sphere on the slab's top at 0, not the cube's half side)
+  });
+}
+
+/* ---------------------------------------------------------------- round 363: the world kit - LOD Groups */
+static void tests_round363() {
+  test("LOD Groups (round 363): the level by height on screen - LOD0 near, the next ones as it shrinks, the last (or nothing, Cull) when tiny; the levels' triangles at their ratios", [] {
+    LODGroupComponent g;
+    g.levels = 3;
+    CHECK(lod_level(g, 0.9f) == 0 && lod_level(g, 0.3f) == 1 && lod_level(g, 0.15f) == 2 && lod_level(g, 0.01f) == 2);
+    g.cull = true;
+    CHECK(lod_level(g, 0.01f) == -1 && lod_level(g, 0.12f) == 2);
+    CHECK(lod_export_name("Tree", 2) == "Tree_LOD2");
+    if (!meshops::decimate_available()) return;  // (the levels' meshes: meshoptimizer)
+    const MeshPtr sphere = primitives::uv_sphere(0.5f, 48, 32);
+    auto tris = [](const Mesh &m) { return (double)m.render_mesh().indices.size() / 3.0; };
+    const double full = tris(*sphere);
+    const double l1 = tris(*lod_mesh(g, *sphere, 1)), l2 = tris(*lod_mesh(g, *sphere, 2));
+    std::printf("    a sphere's levels: %.0f, %.0f, %.0f triangles (ratios 1, 0.5, 0.25)\n", full, l1, l2);
+    CHECK(l1 < full * 0.6 && l1 > full * 0.4 && l2 < full * 0.35 && l2 > full * 0.15);
+    CHECK(lod_mesh(g, *sphere, 1) == lod_mesh(g, *sphere, 1));  // (kept, not made a frame)
+  });
+  test("LOD Groups (round 363): the Game view draws a far tree's LOD2 and a near one's LOD0; an export writes Tree_LOD0.._LOD2", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Sphere");
+    GameObject *tree = ed.active_object_for_test();
+    if (!tree) return;
+    tree->name = "Tree";
+    tree->set_local_position(Vec3(20, 0, 0));  // (away from the scene's Cube at the origin)
+    ed.command("component LODGroup");
+    LODGroupComponent *lg = tree->get<LODGroupComponent>();
+    CHECK(lg != nullptr);
+    if (!lg) return;
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const Mat4 proj = Mat4::perspective(60.0f * 3.14159265f / 180.0f, 1.0f, 0.1f, 1000.0f);
+    auto drawn = [&](Vec3 eye) -> size_t {  // (the tree's triangles as the Game view draws it)
+      const Mat4 view = Mat4::look_at(eye, tree->world_position(), Vec3(0, 1, 0));
+      for (const DrawItem &it : ed.collect_items_for_test(true, view, proj, eye))
+        if (length(it.model.translation() - tree->world_position()) < 1e-5f) return it.mesh ? it.mesh->indices.size() / 3 : 0;
+      return 0;
+    };
+    /* 1 m away the 1 m tree stands 0.87 of the view (LOD0); 60 m away 0.014 (below LOD2's 0.1: the last level). */
+    const size_t near_faces = drawn(tree->world_position() + Vec3(0, 0, 1)), far_faces = drawn(tree->world_position() + Vec3(0, 0, 60));
+    const Mesh &base = *tree->evaluated_mesh(1);
+    const size_t base_tris = base.render_mesh().indices.size() / 3, lod2_tris = lod_mesh(*lg, base, 2)->render_mesh().indices.size() / 3;
+    std::printf("    the tree's triangles drawn near %zu (its mesh %zu), far %zu (LOD2 %zu)\n", near_faces, base_tris, far_faces, lod2_tris);
+    CHECK(near_faces == base_tris && far_faces == lod2_tris);
+    if (meshops::decimate_available()) CHECK(far_faces < base_tris / 2);
+    /* A skinned or keyed tree deforms: the Game view draws it whole (its levels would freeze at their first pose). */
+    {
+      Mesh &km = *mesh_make_mutable(tree->get<MeshFilter>()->mesh);
+      km.shape_keys = {{"Sway", std::vector<Vec3>(km.vert_count(), Vec3(0.01f, 0, 0))}};
+      km.touch();
+    }
+    tree->get<MeshRenderer>()->set_shape_weight("Sway", 0.5f);
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const size_t keyed_far = drawn(tree->world_position() + Vec3(0, 0, 60));
+    CHECK(keyed_far == tree->evaluated_mesh(1)->render_mesh().indices.size() / 3);
+    tree->get<MeshRenderer>()->shape_weights.clear();
+    tree->get<MeshFilter>()->mesh->shape_keys.clear();
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const std::string dir = fs::join(test_dir(), "r363");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "tree.glb");
+    ed.select_for_test(tree->id, false);
+    ed.command("export glb " + path);
+    std::string glb;
+    fs::read_file(path, glb);
+    const Json j = r351_glb_json(glb);
+    std::string names;
+    for (size_t i = 0; i < j["nodes"].size(); i++) names += j["nodes"][i]["name"].str + ";";
+    std::printf("    exported: %s\n", names.c_str());
+    CHECK(meshops::decimate_available() ? names == "Tree_LOD0;Tree_LOD1;Tree_LOD2;" : names == "Tree;");  // (no copies where nothing decimates)
+  });
+  test("the lesson's Try-it (round 363): create Sphere, component LODGroup - three levels", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Sphere");
+    ed.command("component LODGroup");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<LODGroupComponent>() && g->get<LODGroupComponent>()->levels == 3);
+  });
+}
+
+/* ---------------------------------------------------------------- round 391: footage, keyed cards, blade, presets (task 0368) */
+
+static void tests_round391() {
+  test("keyed cards and Add Edit (round 391): keys interpolate and hold, are saved with footage bars; a bar cut in two keeps its picture's place - the right's trim moved on (a clip's by its speed), the keys split with their value at the cut on both sides", [] {
+    SeqInstance c;
+    c.kind = (int)SeqKind::Image, c.media = "a.png", c.name = "Board", c.start = 10, c.trim_in = 0, c.trim_out = 100;
+    c.keys = {{kSeqOpacity, 0, 0.0f}, {kSeqOpacity, 20, 1.0f}, {kSeqX, 50, 0.5f}};
+    const SeqCardLook at10 = seq_card_look(c, 10.0f), at60 = seq_card_look(c, 60.0f);
+    const bool looks = std::fabs(at10.opacity - 0.5f) < 1e-6f && at10.x == 0.5f && at60.opacity == 1.0f && at60.scale == 1.0f;
+    Sequence s;
+    s.tracks.resize(1);
+    SeqInstance v = c;
+    v.kind = (int)SeqKind::Video, v.media = "clip.mp4", v.name = "Shot";
+    s.tracks[0].items = {c, v};
+    s.tracks[0].items[1].start = 200;
+    Sequence back;
+    const bool saved = load_sequence_text(save_sequence_text(s), back) && back.tracks[0].items.size() == 2 && back.tracks[0].items[1].kind == (int)SeqKind::Video &&
+                       back.tracks[0].items[0].keys.size() == 3 && back.tracks[0].items[1].keys.size() == 3 && sequence_card_at(back, 250.0f) &&
+                       sequence_card_at(back, 250.0f)->name == "Shot";
+    SeqInstance left = c, right;
+    seq_split_bar(left, 20.0f, 1.0f, "Board 2", right);  // (10 frames in: the opacity 0.5 there)
+    const bool split = left.trim_out == 10.0f && right.start == 20.0f && right.trim_in == 10.0f && right.trim_out == 100.0f && right.name == "Board 2" &&
+                       std::fabs(seq_card_look(left, 10.0f).opacity - 0.5f) < 1e-6f && std::fabs(seq_card_look(right, 0.0f).opacity - 0.5f) < 1e-6f &&
+                       std::fabs(seq_card_look(right, 10.0f).opacity - 1.0f) < 1e-6f && std::fabs(seq_card_look(right, 40.0f).x - 0.5f) < 1e-6f;
+    SeqInstance clip;
+    clip.kind = (int)SeqKind::Clip, clip.clip = "walk.anim", clip.name = "Walk", clip.start = 0, clip.trim_in = 4, clip.trim_out = 64, clip.speed = 2.0f;
+    SeqInstance clip_right;
+    seq_split_bar(clip, 10.0f, clip.speed, "Walk 2", clip_right);  // (10 frames on the timeline: 20 of the clip)
+    const bool by_speed = clip.trim_out == 24.0f && clip_right.trim_in == 24.0f && clip_right.start == 10.0f;
+    std::printf("    looks %d, saved %d, split %d, a clip at speed 2 %d\n", (int)looks, (int)saved, (int)split, (int)by_speed);
+    CHECK(looks && saved && split && by_speed);
+    CHECK(seq_channel_index("Rotation") == kSeqRotation && seq_channel_index("blur") < 0 && seq_channel_clamp(kSeqOpacity, 3.0f) == 1.0f);
+    CHECK(seq_is_video_file("Assets/Footage/a.MP4") && seq_is_video_file("b.mov") && !seq_is_video_file("c.png"));
+    /* Review 391: a card with no end of its own (trim_out -1: 60 frames) cut 20 in - 20 and 40, not 20 and 60. */
+    SeqInstance open = c, open_right;
+    open.keys.clear(), open.trim_out = -1.0f, open.start = 0.0f;
+    seq_split_bar(open, 20.0f, 1.0f, "Board 3", open_right);
+    CHECK(std::fabs(open.duration(nullptr) - 20.0f) < 1e-3f && std::fabs(open_right.duration(nullptr) - 40.0f) < 1e-3f);
+    /* Review 391: key lines after a card line the reader skips (a later kind) are skipped with it. */
+    Sequence skip;
+    const std::string text = "blendity_seq 1\nname S\nrate 60\ntrack T\ncard 1 0 0 48\tA\ta.png\ncard 9 50 0 48\tB\tb.xyz\nkey 0 0 0.25\n";
+    CHECK(load_sequence_text(text, skip) && skip.tracks.size() == 1 && skip.tracks[0].items.size() == 1 && skip.tracks[0].items[0].keys.empty());
+  });
+  test("the Sequencer like Premiere (round 391): a card keyed to half opacity and moved lies over the render; Add Edit cuts a bar at the playhead, one undo step; Ripple Delete closes the gap; a paper card by its name", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Edit");
+    const std::string dir = fs::join(test_dir(), "r391");
+    fs::make_dirs(dir);
+    const std::string a = fs::join(dir, "a.png"), b = fs::join(dir, "b.png");
+    std::vector<uint32_t> red(8, 0xFFFF0000u), green(8, 0xFF00FF00u);
+    CHECK(write_png(a, red.data(), 4, 2, 4) && write_png(b, green.data(), 4, 2, 4));
+    ed.command("seq image " + a + " 0 0 48");
+    ed.command("seq image " + b + " 0 60 30");
+    ed.command("seq key a opacity 0 0.5");
+    Image frame;
+    frame.resize(8, 8);
+    std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF0000FFu);
+    ed.composite_render_card_for_test(frame, 10.0f);
+    const uint32_t mid = frame.pixels[4 * 8 + 4], top = frame.pixels[0];
+    const bool half = ((mid >> 16) & 255) >= 126 && ((mid >> 16) & 255) <= 130 && (mid & 255) >= 125 && (mid & 255) <= 129 && top == 0xFF0000FFu;
+    /* Review 391: past its last key, at full opacity, a keyed card still lies over the render - no black bars. */
+    ed.command("seq key a opacity 24 1");
+    std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF0000FFu);
+    ed.composite_render_card_for_test(frame, 30.0f);
+    const bool after_last = frame.pixels[0] == 0xFF0000FFu && frame.pixels[4 * 8 + 4] == 0xFFFF0000u;
+    /* Review 391: a key at 9.6 lands on the one at 10 (rounded first): no second key; an unkey that matches nothing is refused. */
+    ed.command("seq key a opacity 10 0.3");
+    ed.command("seq key a opacity 9.6 0.4");
+    size_t at10 = 0;
+    for (const SeqKey &k : ed.seq_for_test_sequence()->find("a")->keys) at10 += k.frame == 10.0f;
+    ed.step_frame_headless();
+    const std::string before_unkey = ed.undo_label_for_test(0);
+    ed.command("seq unkey a rotation");
+    ed.step_frame_headless();
+    std::printf("    past the last key: the letterbox the render %d; keys at 10: %zu; an unkey of nothing took a step %d\n", (int)after_last, at10, (int)(ed.undo_label_for_test(0) != before_unkey));
+    CHECK(after_last && at10 == 1 && ed.undo_label_for_test(0) == before_unkey);
+    ed.command("seq unkey a opacity 10");
+    ed.command("seq unkey a opacity 24");
+    ed.command("seq key a x 0 0.5");  // (half the frame's width right: the card's middle on the right edge)
+    std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF0000FFu);
+    ed.composite_render_card_for_test(frame, 10.0f);
+    const bool moved = frame.pixels[4 * 8 + 1] == 0xFF0000FFu && ((frame.pixels[4 * 8 + 6] >> 16) & 255) > 100;
+    std::printf("    half opacity: middle 0x%08X, the bars left alone 0x%08X; moved right %d\n", mid, top, (int)moved);
+    CHECK(half && moved);
+    /* Add Edit at 24: two bars, one undo step. */
+    ed.step_frame_headless();  // (the setup's own undo step: the cut's is its alone)
+    SequencePtr s = ed.seq_for_test_sequence();
+    ed.command("seq frame 24");
+    ed.command("seq blade 24");
+    ed.step_frame_headless();  // (the undo step is taken at the frame's end)
+    const SeqInstance *l = s->find("a"), *r = s->find("a 2");
+    const bool cut = l && r && std::fabs(l->duration(nullptr) - 24.0f) < 1e-3f && r->start == 24.0f && r->trim_in == 24.0f && ed.undo_label_for_test(0) == "Add Edit";
+    ed.command("undo");
+    ed.step_frame_headless();
+    s = ed.seq_for_test_sequence();
+    const bool undone = s && s->find("a") && !s->find("a 2") && std::fabs(s->find("a")->duration(nullptr) - 48.0f) < 1e-3f;
+    ed.command("seq blade 500");  // (nothing there: refused)
+    CHECK(ed.undo_label_for_test(0) != "Add Edit");
+    /* The keymap's actions act over the Sequencer alone: seq.add_edit away from it does nothing, over it cuts. */
+    ed.set_seq_hovered_for_test(false);
+    const bool away = !ed.run_action_for_test("seq.add_edit") && !ed.seq_for_test_sequence()->find("a 2");
+    ed.set_seq_hovered_for_test(true);
+    ed.run_action_for_test("seq.add_edit");
+    ed.step_frame_headless();
+    const bool over = ed.seq_for_test_sequence()->find("a 2") != nullptr;
+    ed.command("undo");
+    ed.step_frame_headless();
+    std::printf("    seq.add_edit away from the Sequencer did nothing %d, over it cut %d\n", (int)away, (int)over);
+    CHECK(away && over && !ed.seq_for_test_sequence()->find("a 2"));
+    /* Ripple Delete (seq.ripple, Shift+Delete): b (60..90) moves to 12 when a (0..48) goes. */
+    ed.seq_select_for_test("a");
+    ed.set_seq_hovered_for_test(true);  // (a frame clears it: the Sequencer sets it while drawn)
+    ed.run_action_for_test("seq.ripple");
+    ed.set_seq_hovered_for_test(false);
+    s = ed.seq_for_test_sequence();
+    const bool rippled = s && !s->find("a") && s->find("b") && s->find("b")->start == 12.0f;
+    std::printf("    cut %d, undone %d, rippled %d\n", (int)cut, (int)undone, (int)rippled);
+    CHECK(cut && undone && rippled);
+    /* A paper by its name. */
+    const std::string paper = strprintf("R391Card%u", (unsigned)(std::rand() % 100000));  // (one word: the console's name)
+    ed.command("paper new " + paper);
+    ed.command("seq paper " + paper + " 1 0 24");
+    s = ed.seq_for_test_sequence();
+    const SeqInstance *p = s ? s->find(paper) : nullptr;
+    std::printf("    the paper card: %s\n", p ? p->media.c_str() : "(none)");
+    CHECK(p && p->kind == (int)SeqKind::Paper && fs::extension(p->media) == ".paper");
+    ed.command("seq key " + paper + " blur 0 1");  // (refused: no such channel)
+    CHECK(!p || s->find(paper)->keys.empty());
+    ed.command("paper delete");
+    fs::remove_file(a), fs::remove_file(b);
+  });
+  test("footage and export presets (round 391): three colored frames encoded and read back in order, a seek back; footage on the timeline shows the frame under the playhead; ProRes in a .mov, VRChat's at most 1080 lines; FFmpeg's arguments for each; without FFmpeg the footage refused", [] {
+    int ow = 0, oh = 0;
+    video::preset_size(video::Preset::VRChat, 3840, 2160, ow, oh);
+    const bool vr = ow == 1920 && oh == 1080;
+    video::preset_size(video::Preset::H264, 1281, 721, ow, oh);
+    const bool even = ow == 1282 && oh == 722;
+    video::Preset p = video::Preset::H264;
+    CHECK(vr && even && video::parse_preset("ProRes", p) && p == video::Preset::ProRes && !video::parse_preset("avi", p));
+    const std::vector<std::string> pr = ffmpeg_png_to_mp4_args("ffmpeg", "R/a", 24.0f, "R/a.mov", "", (int)video::Preset::ProRes);
+    const std::vector<std::string> vc = ffmpeg_png_to_mp4_args("ffmpeg", "R/a", 24.0f, "R/a.mp4", "", (int)video::Preset::VRChat);
+    CHECK(std::find(pr.begin(), pr.end(), "prores_ks") != pr.end() && std::find(vc.begin(), vc.end(), "+faststart") != vc.end());
+    const std::string dir = fs::join(test_dir(), "r391v");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Footage");
+    if (!video::available()) {
+      ed.command("seq video " + fs::join(dir, "none.mp4") + " 0 0");
+      SequencePtr s = ed.seq_for_test_sequence();
+      bool none = s != nullptr;
+      for (const SeqTrack &tr : s ? s->tracks : std::vector<SeqTrack>()) none = none && tr.items.empty();
+      std::printf("    no FFmpeg in this build: the footage refused %d\n", (int)none);
+      CHECK(none);
+      return;
+    }
+    const uint32_t colors[3] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu};
+    std::vector<std::string> frames;
+    for (int k = 0; k < 3; k++) {
+      std::vector<uint32_t> px(32 * 16, colors[k]);
+      frames.push_back(fs::join(dir, strprintf("%04d.png", k + 1)));
+      CHECK(write_png(frames.back(), px.data(), 32, 16, 32));
+    }
+    const std::string mp4 = fs::join(dir, "shot.mp4"), mov = fs::join(dir, "shot.mov");
+    std::string err;
+    CHECK(video::encode_png_frames(frames, 3.0f, mp4, &err));
+    CHECK(video::encode_png_frames(frames, 3.0f, mov, &err, nullptr, nullptr, 48000, video::Preset::ProRes));
+    std::shared_ptr<video::Reader> r = video::open_reader(mp4, &err);
+    Image img;
+    auto main_channel = [&](double t) {
+      if (!r || !video::read_frame_at(*r, t, img)) return -1;
+      const uint32_t c = img.pixels[(size_t)8 * img.width + 16];
+      const int rr = (c >> 16) & 255, gg = (c >> 8) & 255, bb = c & 255;
+      return rr > 180 && gg < 80 && bb < 80 ? 0 : gg > 180 && rr < 80 && bb < 80 ? 1 : bb > 180 && rr < 80 && gg < 80 ? 2 : -1;
+    };
+    const int c0 = main_channel(0.0), c1 = main_channel(0.4), c2 = main_channel(0.8), back = main_channel(0.1);
+    std::printf("    read back: %d %d %d, a seek back %d; %g fps, %.2f s; the .mov's codec '%s'\n", c0, c1, c2, back, r ? video::reader_fps(*r) : 0.0f,
+                r ? video::reader_seconds(*r) : 0.0, video::probe_codec(mov).c_str());
+    CHECK(r && c0 == 0 && c1 == 1 && c2 == 2 && back == 0 && video::probe_codec(mov) == "prores" && video::probe_codec(mp4) == "h264");
+    ed.command("seq video " + mp4 + " 0 0");
+    SequencePtr s = ed.seq_for_test_sequence();
+    const SeqInstance *shot = s ? s->find("shot") : nullptr;
+    Image frame;
+    frame.resize(32, 16);
+    ed.composite_render_card_for_test(frame, 25.0f);  // (0.42 s at the sequence's 60: the second frame)
+    const uint32_t at = frame.pixels[(size_t)8 * 32 + 16];
+    std::printf("    the footage bar %g frames; at frame 25: 0x%08X\n", shot ? shot->duration(nullptr) : -1.0f, at);
+    CHECK(shot && std::fabs(shot->duration(nullptr) - 60.0f) < 1.5f && ((at >> 8) & 255) > 180 && ((at >> 16) & 255) < 80);
+    /* Review 391: ProRes with an odd height - the last row's color read back as the row above it (its chroma written). */
+    std::vector<uint32_t> odd(32 * 15, 0xFF2080C0u);
+    const std::string odd_png = fs::join(dir, "odd.png"), odd_mov = fs::join(dir, "odd.mov");
+    CHECK(write_png(odd_png, odd.data(), 32, 15, 32));
+    CHECK(video::encode_png_frames({odd_png}, 30.0f, odd_mov, &err, nullptr, nullptr, 48000, video::Preset::ProRes));
+    std::shared_ptr<video::Reader> ro = video::open_reader(odd_mov, &err);
+    Image oimg;
+    const bool odd_read = ro && video::read_frame_at(*ro, 0.0, oimg) && oimg.height == 16;
+    const uint32_t last = odd_read ? oimg.pixels[(size_t)15 * oimg.width + 8] : 0, above = odd_read ? oimg.pixels[(size_t)14 * oimg.width + 8] : 1;
+    auto near_c = [](uint32_t a, uint32_t b) {
+      for (int s = 0; s < 24; s += 8)
+        if (std::abs((int)((a >> s) & 255) - (int)((b >> s) & 255)) > 6) return false;
+      return true;
+    };
+    std::printf("    ProRes at 32 x 15: the padded row 0x%08X, the row above 0x%08X\n", last, above);
+    CHECK(odd_read && near_c(last, above));
+    fs::remove_file(odd_png), fs::remove_file(odd_mov);
+    /* VRChat's: a 2160-line frame comes out 1080 lines, the width in proportion. */
+    std::vector<uint32_t> tall(8 * 2160, 0xFF808080u);
+    const std::string tall_png = fs::join(dir, "tall.png"), vr_mp4 = fs::join(dir, "vr.mp4");
+    CHECK(write_png(tall_png, tall.data(), 8, 2160, 8));
+    int vw = 0, vh = 0;
+    const bool vr_ok = video::encode_png_frames({tall_png}, 30.0f, vr_mp4, &err, nullptr, nullptr, 48000, video::Preset::VRChat) && video::probe_frames(vr_mp4, &vw, &vh) == 1;
+    std::printf("    VRChat's from 8 x 2160: %d x %d (%s)\n", vw, vh, vr_ok ? "ok" : err.c_str());
+    CHECK(vr_ok && vw == 4 && vh == 1080 && video::probe_codec(vr_mp4) == "h264");
+    for (const std::string &f : frames) fs::remove_file(f);
+    fs::remove_file(mp4), fs::remove_file(mov), fs::remove_file(tall_png), fs::remove_file(vr_mp4);
+  });
+}
+
+/* ---------------------------------------------------------------- round 364: the Sequencer's cards and camera cuts */
+
+static void tests_round364() {
+  test("Sequencer cards (round 364): Image, Paper and Camera bars saved and read back; the topmost card and cut at a frame; a card animates nothing and has its own length", [] {
+    Sequence s;
+    s.tracks.resize(3);
+    SeqInstance img, cut, top;
+    img.kind = (int)SeqKind::Image, img.media = "Assets/Textures/a.png", img.name = "Board1", img.start = 0, img.trim_out = 120;
+    top.kind = (int)SeqKind::Paper, top.media = "Assets/Papers/b.paper", top.name = "Board2", top.start = 100, top.trim_out = 40;
+    cut.kind = (int)SeqKind::Camera, cut.media = "CamB", cut.name = "Cut CamB", cut.start = 30, cut.trim_out = 50;
+    s.tracks[0].items = {img};
+    s.tracks[1].items = {cut};
+    s.tracks[2].items = {top};
+    Sequence back;
+    CHECK(load_sequence_text(save_sequence_text(s), back));
+    CHECK(back.tracks.size() == 3 && back.tracks[0].items.size() == 1 && back.tracks[0].items[0].kind == (int)SeqKind::Image && back.tracks[0].items[0].media == "Assets/Textures/a.png");
+    const SeqInstance *at50 = sequence_card_at(back, 50.0f), *at110 = sequence_card_at(back, 110.0f), *at200 = sequence_card_at(back, 200.0f);
+    std::printf("    card at 50: %s, at 110: %s, at 200: %s; cut at 40: '%s', at 90: '%s'\n", at50 ? at50->name.c_str() : "-", at110 ? at110->name.c_str() : "-",
+                at200 ? at200->name.c_str() : "-", sequence_camera_at(back, 40.0f).c_str(), sequence_camera_at(back, 90.0f).c_str());
+    CHECK(at50 && at50->name == "Board1" && at110 && at110->name == "Board2" && !at200);
+    CHECK(sequence_camera_at(back, 40.0f) == "CamB" && sequence_camera_at(back, 90.0f).empty());
+    CHECK(std::fabs(back.tracks[0].items[0].duration(nullptr) - 120.0f) < 1e-3f);  // (not a clip's 60)
+    AnimValues v;
+    sample_sequence(back, 50.0f, v);
+    CHECK(v.values.empty());
+  });
+  test("Sequencer cards (round 364): seq image puts a picture on the timeline, fitted over a render's frame with black bars; seq cut switches the camera in Preview and gives the old one back after; in Play the Sequencer cuts too", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Animatic");
+    /* A 4 x 2 red picture: fitted over an 8 x 8 frame, a 8 x 4 band of red between black bars. */
+    const std::string dir = fs::join(test_dir(), "r364");
+    fs::make_dirs(dir);
+    const std::string png = fs::join(dir, "board1.png");
+    std::vector<uint32_t> red(8, 0xFFFF0000u);
+    CHECK(write_png(png, red.data(), 4, 2, 4));
+    ed.command("seq image " + png + " 0 0 48");
+    Image frame;
+    frame.resize(8, 8);
+    ed.composite_render_card_for_test(frame, 10.0f);
+    std::printf("    the frame's pixels: top 0x%08X, middle 0x%08X\n", frame.pixels[0], frame.pixels[4 * 8 + 4]);
+    CHECK(frame.pixels[0] == 0xFF000000u && frame.pixels[4 * 8 + 4] == 0xFFFF0000u);
+    Image after;
+    after.resize(8, 8);
+    std::fill(after.pixels.begin(), after.pixels.end(), 0xFF336699u);
+    ed.composite_render_card_for_test(after, 60.0f);  // (past the card: the render as it was)
+    CHECK(after.pixels[0] == 0xFF336699u);
+    /* Review 364: a card trimmed past 60 frames keeps its length (no clip's end to clamp to); speed doesn't change it. */
+    ed.command("seq trim board1 0 200");
+    ed.command("seq speed board1 2");
+    SequencePtr anim = ed.seq_for_test_sequence();
+    const SeqInstance *board = anim ? anim->find("board1") : nullptr;
+    std::printf("    the card trimmed to 0..200: %g frames long\n", board ? board->duration(nullptr) : -1.0f);
+    CHECK(board && std::fabs(board->duration(nullptr) - 200.0f) < 1e-3f);
+    /* Two cameras; a cut to the second from frame 10 to 40. */
+    ed.command("create Camera");
+    GameObject *a = ed.active_object_for_test();
+    ed.command("create Camera");
+    GameObject *b = ed.active_object_for_test();
+    if (!a || !b) return;
+    a->name = "CamA", b->name = "CamB";
+    ed.scene().active_camera = a->id;
+    ed.command("seq cut CamB 1 10 30");
+    ed.command("seq preview on");
+    ed.command("seq frame 20");
+    const uint64_t during = ed.scene().active_camera;
+    ed.command("seq frame 60");  // (review 364: scrubbed out of the cut, still in Preview)
+    const uint64_t scrubbed_out = ed.scene().active_camera;
+    ed.command("seq preview off");
+    std::printf("    the camera during the cut %s, scrubbed past it %s, after Preview %s\n", during == b->id ? "CamB" : "not CamB",
+                scrubbed_out == a->id ? "CamA" : "not CamA", ed.scene().active_camera == a->id ? "CamA" : "not CamA");
+    CHECK(during == b->id && scrubbed_out == a->id && ed.scene().active_camera == a->id);
+    /* In Play: the Sequencer component cuts. */
+    Scene s;
+    GameObject *c1 = s.create("C1"), *c2 = s.create("C2"), *dir_obj = s.create("Director");
+    c1->add<Camera>(), c2->add<Camera>();
+    s.active_camera = c1->id;
+    std::remove(resolve_asset_path("Assets/Animations/R364Cuts.seq").c_str());
+    SequencePtr seq = create_sequence_asset("Assets/Animations/R364Cuts.seq", "R364Cuts");
+    if (!seq) return;
+    seq->tracks.resize(2);
+    SeqInstance cut, hold;
+    cut.kind = (int)SeqKind::Camera, cut.media = "C2", cut.name = "Cut C2", cut.start = 0, cut.trim_out = 120;
+    hold.kind = (int)SeqKind::Image, hold.media = "Assets/Textures/none.png", hold.name = "Hold", hold.start = 0, hold.trim_out = 300;
+    seq->tracks[0].items = {cut};
+    seq->tracks[1].items = {hold};  // (the sequence runs on past the cut)
+    Sequencer *sq = dir_obj->add<Sequencer>();
+    sq->sequence = seq->asset_path;
+    PlayContext ctx;
+    ctx.scene = &s;
+    ctx.dt = 1.0f / 60.0f;
+    sq->start(ctx);
+    sq->update(ctx);
+    const uint64_t in_cut = s.active_camera;
+    sq->time = 3.0f;  // (frame 180: past the cut)
+    sq->update(ctx);
+    std::printf("    Play: the cut's camera %s, past the cut %s\n", in_cut == c2->id ? "C2" : "not C2", s.active_camera == c1->id ? "C1" : "not C1");
+    CHECK(in_cut == c2->id && s.active_camera == c1->id);
+  });
+  test("the lesson's Try-it (round 364): seq new Animatic, window Sequencer - a sequence to lay cards and cuts on; a cut to no camera refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Animatic");
+    ed.command("window Sequencer");
+    ed.command("seq cut NoCamera 0 0 30");
+    SequencePtr s = ed.seq_for_test_sequence();
+    CHECK(s && (s->tracks.empty() || s->tracks[0].items.empty()));
+  });
+}
+
+/* ---------------------------------------------------------------- round 365: the Sequencer's sound (task 0342) */
+namespace r365 {
+/* A WAV's bytes: `tag` 1 PCM / 3 float / 0xFFFE extensible (of PCM), `bits`, `channels`, the samples as given. */
+std::string wav_bytes(int tag, int bits, int channels, int rate, const std::string &samples) {
+  std::string out;
+  auto u32 = [&](uint32_t v) { for (int k = 0; k < 4; k++) out += (char)(v >> (8 * k) & 255); };
+  auto u16 = [&](uint16_t v) { out += (char)(v & 255), out += (char)(v >> 8); };
+  const int fmt_size = tag == 0xFFFE ? 40 : 16, block = channels * bits / 8;
+  out += "RIFF", u32((uint32_t)(4 + 8 + fmt_size + 8 + samples.size())), out += "WAVEfmt ", u32((uint32_t)fmt_size);
+  u16((uint16_t)tag), u16((uint16_t)channels), u32((uint32_t)rate), u32((uint32_t)(rate * block)), u16((uint16_t)block), u16((uint16_t)bits);
+  if (tag == 0xFFFE) {
+    u16(22), u16((uint16_t)bits), u32(3), u16(1);  // (cbSize, valid bits, channel mask, the sub-format GUID's first two bytes: PCM)
+    for (int k = 0; k < 14; k++) out += (char)0;
+  }
+  out += "data", u32((uint32_t)samples.size());
+  return out + samples;
+}
+std::string s16(std::initializer_list<int> v) {
+  std::string out;
+  for (int x : v) out += (char)(x & 255), out += (char)((x >> 8) & 255);
+  return out;
+}
+/* A mono 16-bit WAV of `seconds` holding `level` throughout, at `rate`. */
+std::string dc_wav(float level, double seconds, int rate) {
+  std::string samples;
+  const int v = (int)std::lround(level * 32768.0f);
+  for (long k = 0; k < (long)(seconds * rate); k++) samples += (char)(v & 255), samples += (char)((v >> 8) & 255);
+  return wav_bytes(1, 16, 1, rate, samples);
+}
+}  // namespace r365
+
+static void tests_round365() {
+  test("Sequencer sound (round 365): WAVs decoded - 16-bit stereo, 8-bit mono, 24-bit, 32-bit float and WAVE_FORMAT_EXTENSIBLE; a compressed one and a non-WAV refused; a 16-bit WAV written and read back", [] {
+    using namespace r365;
+    AudioClip a;
+    std::string why;
+    CHECK(decode_wav(wav_bytes(1, 16, 2, 44100, s16({16384, -16384, 0, 32767})), a, why));
+    CHECK(a.rate == 44100 && a.frames() == 2 && a.stereo[0] == 0.5f && a.stereo[1] == -0.5f && a.stereo[2] == 0.0f);
+    CHECK(decode_wav(wav_bytes(1, 8, 1, 8000, std::string{(char)192, (char)128}), a, why));
+    CHECK(a.frames() == 2 && a.stereo[0] == 0.5f && a.stereo[1] == 0.5f && a.stereo[2] == 0.0f);  // (mono: both sides)
+    CHECK(decode_wav(wav_bytes(1, 24, 1, 48000, std::string{(char)0, (char)0, (char)0xC0}), a, why));
+    CHECK(a.frames() == 1 && a.stereo[0] == -0.5f);
+    float f = 0.25f;
+    std::string fb(4, '\0');
+    std::memcpy(&fb[0], &f, 4);
+    CHECK(decode_wav(wav_bytes(3, 32, 1, 48000, fb), a, why) && a.stereo[0] == 0.25f);
+    CHECK(decode_wav(wav_bytes(0xFFFE, 16, 1, 48000, s16({-16384})), a, why) && a.stereo[0] == -0.5f);
+    CHECK(!decode_wav(wav_bytes(2, 4, 1, 48000, "xx"), a, why));
+    std::printf("    a compressed WAV refused: %s\n", why.c_str());
+    CHECK(why.find("compressed") != std::string::npos);
+    CHECK(!decode_wav("ID3 an mp3", a, why) && why == "not a WAV file");
+    /* Review 365: malformed and unusable ones. */
+    std::string cut = wav_bytes(1, 16, 1, 8000, s16({16384, 16384}));
+    cut[cut.size() - 4 - 4] = (char)100;  // (the data chunk claims 100 bytes; 4 are there)
+    CHECK(decode_wav(cut, a, why) && a.frames() == 2);
+    CHECK(!decode_wav(wav_bytes(1, 16, 0, 8000, s16({1})), a, why));
+    std::printf("    0 channels: %s\n", why.c_str());
+    std::string early = "RIFF____WAVEdata" + std::string("\x02\x00\x00\x00", 4) + s16({1});
+    CHECK(!decode_wav(early, a, why) && why == "data before its format");
+    CHECK(!decode_wav(wav_bytes(3, 16, 1, 8000, s16({1})), a, why) && why.find("float") != std::string::npos);
+    CHECK(!decode_wav(wav_bytes(1, 8, 1, 1000, std::string(3600001, (char)128)), a, why) && why.find("hour") != std::string::npos);
+    const std::vector<float> ramp = {-1.0f, 1.0f, -0.5f, 0.5f, 0.25f, -0.25f};
+    CHECK(decode_wav(encode_wav16(ramp, 48000), a, why) && a.rate == 48000 && a.frames() == 3);
+    bool same = a.stereo.size() == ramp.size();
+    for (size_t k = 0; same && k < ramp.size(); k++) same = std::fabs(a.stereo[k] - ramp[k]) < 1.0f / 16000.0f;
+    CHECK(same);
+  });
+  test("Sequencer sound (round 365): a sound bar mixed where it sits - silent before and after it, its volume, its trim's offset into the sound, a sound at half the rate resampled, Play's Speed; saved with its volume and read back", [] {
+    auto dc = std::make_shared<AudioClip>();
+    dc->rate = 48000;
+    dc->stereo.assign(48000 * 2 * 2, 0.5f);  // (2 s of 0.5)
+    auto ramp = std::make_shared<AudioClip>();
+    ramp->rate = 24000;  // (half the output's rate: each value the time in seconds)
+    for (int k = 0; k < 24000 * 2; k++) ramp->stereo.push_back(k / 24000.0f * 0.25f), ramp->stereo.push_back(k / 24000.0f * 0.25f);
+    Sequence s;
+    s.frame_rate = 60.0f;
+    s.tracks.resize(1);
+    SeqInstance bar;
+    bar.kind = (int)SeqKind::Audio, bar.media = "dc.wav", bar.name = "Hum", bar.start = 30, bar.trim_in = 0, bar.trim_out = 60, bar.volume = 0.5f;
+    s.tracks[0].items = {bar};
+    const SoundSet sounds = {{"dc.wav", dc}, {"ramp.wav", ramp}};
+    std::vector<float> out;
+    mix_sequence_audio(s, sounds, 0.0, 96000, 48000, out);
+    std::printf("    at 0.25 s %g, 0.75 s %g, 1.6 s %g\n", out[12000 * 2], out[36000 * 2], out[76800 * 2]);
+    CHECK(out[12000 * 2] == 0.0f && std::fabs(out[36000 * 2] - 0.25f) < 1e-6f && out[76800 * 2] == 0.0f);  // (the bar: 0.5 s to 1.5 s, at half volume)
+    /* The ramp from half a second in (trim_in 30 frames): 0.5 s at the bar's start, 0.75 s a quarter second on. */
+    SeqInstance r;
+    r.kind = (int)SeqKind::Audio, r.media = "ramp.wav", r.name = "Ramp", r.start = 0, r.trim_in = 30, r.trim_out = 120;
+    s.tracks[0].items = {r};
+    mix_sequence_audio(s, sounds, 0.0, 24000, 48000, out);
+    std::printf("    the ramp trimmed half a second in: %g at 0 s, %g at 0.25 s (0.125, 0.1875)\n", out[0], out[12000 * 2]);
+    CHECK(std::fabs(out[0] - 0.125f) < 1e-4f && std::fabs(out[12000 * 2] - 0.1875f) < 1e-4f && std::fabs(out[12001 * 2] - (0.75f + 1.0f / 48000.0f) * 0.25f) < 1e-4f);
+    mix_sequence_audio(s, sounds, 0.0, 24000, 48000, out, 2.0);  // (twice as fast: a quarter second in, the sound is a half second further)
+    CHECK(std::fabs(out[12000 * 2] - 0.25f) < 1e-4f);
+    s.tracks[0].items = {bar};
+    Sequence back;
+    CHECK(load_sequence_text(save_sequence_text(s), back));
+    const SeqInstance *b = back.tracks.empty() || back.tracks[0].items.empty() ? nullptr : &back.tracks[0].items[0];
+    CHECK(b && b->kind == (int)SeqKind::Audio && b->media == "dc.wav" && b->volume == 0.5f && b->duration(nullptr) == 60.0f);
+    CHECK(sequence_has_audio(back) && !sequence_card_at(back, 40.0f) && sequence_camera_at(back, 40.0f).empty());
+  });
+  test("Sequencer sound (round 365): seq sound puts a WAV on the timeline at its own length; Preview's Play starts the sound at the playhead, a jump moves it, Stop silences it; not a WAV refused; Render Animation writes sound.wav beside the frames (and an AAC stream into the MP4 when built with FFmpeg)", [] {
+    using namespace r365;
+    const std::string dir = fs::join(test_dir(), "r365");
+    fs::make_dirs(dir);
+    const std::string wav = fs::join(dir, "hum.wav"), png = fs::join(dir, "not_a_sound.png");
+    CHECK(fs::write_file(wav, dc_wav(0.5f, 1.0, 44100)));
+    std::vector<uint32_t> px(4, 0xFF808080u);
+    CHECK(write_png(png, px.data(), 2, 2, 2));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("engine raster");
+    ed.scene().render.width = 64, ed.scene().render.height = 36;
+    ed.command("seq new R365 Sound");
+    ed.command("seq sound " + wav + " 0 30");
+    ed.command("seq sound " + png + " 0 200");
+    SequencePtr seq = ed.seq_for_test_sequence();
+    const SeqInstance *hum = seq ? seq->find("hum") : nullptr;
+    std::printf("    the sound bar: %s, %g frames long at %g fps; bars %zu\n", hum ? hum->name.c_str() : "-", hum ? hum->duration(nullptr) : -1.0f,
+                seq ? seq->frame_rate : 0.0f, seq && !seq->tracks.empty() ? seq->tracks[0].items.size() : 0);
+    CHECK(hum && hum->kind == (int)SeqKind::Audio && std::fabs(hum->duration(nullptr) - seq->frame_rate) < 1e-3f);
+    if (!hum) return;
+    size_t bars = 0;
+    for (const SeqTrack &t : seq->tracks) bars += t.items.size();
+    CHECK(bars == 1);  // (the PNG refused)
+    if (!hum) return;
+    ed.command("seq volume hum 0.5");
+    double pos = 0.0;
+    bool active = false;
+    ed.command("seq frame 40");
+    ed.command("seq play");
+    ed.seq_audio_tick_for_test();
+    CHECK(ed.seq_audio_for_test(pos, active) && active && std::fabs(pos - 40.0) < 1.0);
+    std::vector<float> buf(480 * 2);
+    ed.seq_audio_pull_for_test(buf.data(), 480);
+    std::printf("    playing at frame 40: the sound at %g (0.25), the stream at frame %g\n", buf[0], pos);
+    CHECK(std::fabs(buf[0] - 0.25f) < 1e-3f && std::fabs(buf[959] - 0.25f) < 1e-3f);
+    ed.command("seq frame 200");  // (a jump past the sound)
+    ed.seq_audio_tick_for_test();
+    CHECK(ed.seq_audio_for_test(pos, active) && active && std::fabs(pos - 200.0) < 1e-3);
+    ed.seq_audio_pull_for_test(buf.data(), 480);
+    CHECK(buf[0] == 0.0f);
+    /* Review 365: the sound only while the picture moves forward - held (paused) or a step back is silent; a step on
+     * plays again from there. */
+    ed.seq_audio_tick_for_test();
+    const bool held = ed.seq_audio_for_test(pos, active) && !active;
+    ed.command("seq frame 45");
+    ed.seq_audio_tick_for_test();
+    ed.command("seq frame 46");
+    ed.seq_audio_tick_for_test();
+    const bool on_again = ed.seq_audio_for_test(pos, active) && active && std::fabs(pos - 46.0) < 1.5;
+    ed.command("seq frame 40");
+    ed.seq_audio_tick_for_test();
+    const bool back = ed.seq_audio_for_test(pos, active) && !active;
+    std::printf("    held: %s; on again at 46: %s; a step back: %s\n", held ? "silent" : "SOUND", on_again ? "sound" : "SILENT", back ? "silent" : "SOUND");
+    CHECK(held && on_again && back);
+    ed.command("seq stop");
+    ed.seq_audio_tick_for_test();
+    CHECK(ed.seq_audio_for_test(pos, active) && !active);
+    ed.command("seq preview off");
+    /* Render Animation over the sound: frames 30 to 41 (12 frames at the sequence's rate) and their sound. */
+    ed.command("renderanim 30 41");
+    for (int i = 0; i < 200 && ed.render_animation_for_test().active; i++) ed.step_frame_headless();
+    const auto &ra = ed.render_animation_for_test();
+    std::string bytes, why;
+    AudioClip got;
+    const bool read = fs::read_file(fs::join(ra.dir, "sound.wav"), bytes) && decode_wav(bytes, got, why);
+    const size_t want = (size_t)std::llround(ra.written.size() / (double)ra.fps * 48000.0);
+    std::printf("    %zu frame(s) at %g fps; sound.wav %s: %zu samples (%zu), %g\n", ra.written.size(), ra.fps, read ? "read" : why.c_str(),
+                got.frames(), want, got.frames() ? got.stereo[2000] : -1.0f);
+    CHECK(ra.written.size() == 12 && read && got.frames() == want && std::fabs(got.stereo[2000] - 0.25f) < 1e-3f);
+    const std::vector<std::string> args = ffmpeg_png_to_mp4_args("ffmpeg", "R/a", 60.0f, "R/a.mp4", "R/a/sound.wav");
+    CHECK(args.size() == 25 && args[11] == "-i" && args[12] == "R/a/sound.wav" && args[17] == "-shortest" && args.back() == "R/a.mp4");
+    auto clean = [&] {  // (the scratch project's Renders and sequences left as they were)
+      for (const std::string &f : ra.written) std::remove(f.c_str());
+      std::remove(fs::join(ra.dir, "sound.wav").c_str());
+      std::remove(ra.video.c_str());
+      std::error_code ec;
+      std::filesystem::remove(ra.dir, ec);  // (only once empty)
+      std::remove(resolve_asset_path(seq->asset_path).c_str());
+    };
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {  // (an ffmpeg program reads the frames: let it finish)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    if (!video::available()) return clean();
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    int rate = 0;
+    const int streams = video::probe_audio(ra.video, &rate);
+    std::printf("    the MP4: %d audio stream(s) at %d Hz, %d frames\n", streams, rate, video::probe_frames(ra.video));
+    CHECK(streams == 1 && rate == 48000 && video::probe_frames(ra.video) == 12);
+    clean();
+  });
+  test("Sequencer sound (round 365): the default audio device opened and fed (BLENDITY_TEST_AUDIO_OUT=1 only: a quiet 440 Hz tone for a third of a second; CI has no device)", [] {
+    if (!std::getenv("BLENDITY_TEST_AUDIO_OUT")) return;
+    audio_out::Stream out;
+    std::atomic<size_t> fed{0};
+    std::string why;
+    const bool open = out.open(48000, [&](float *o, size_t n) {
+      for (size_t k = 0; k < n; k++) o[k * 2] = o[k * 2 + 1] = 0.05f * std::sin(6.2831853f * 440.0f * (float)(fed + k) / 48000.0f);
+      fed += n;
+    }, &why);
+    std::this_thread::sleep_for(std::chrono::milliseconds(330));
+    out.close();
+    std::printf("    the device: %s; %zu frames fed\n", open ? "open" : why.c_str(), fed.load());
+    CHECK(open && fed.load() >= 9600);
+  });
+  test("the lesson's Try-it (round 365): seq new Film, window Sequencer - a sequence to drop WAV sounds on; seq sound refuses a file that isn't one", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Film");
+    ed.command("window Sequencer");
+    const std::string mp3 = fs::join(test_dir(), "r365_song.mp3");
+    CHECK(fs::write_file(mp3, "ID3 not a wav"));
+    ed.command("seq sound " + mp3 + " 0 0");  // (there, but not a WAV)
+    SequencePtr s = ed.seq_for_test_sequence();
+    CHECK(s && (s->tracks.empty() || s->tracks[0].items.empty()));
+    if (s) std::remove(resolve_asset_path(s->asset_path).c_str());
+    std::remove(mp3.c_str());
+  });
+}
+
+/* ---------------------------------------------------------------- round 366: no MP4 says how to get one (task 0343) */
+static void tests_round366() {
+  test("Render Animation without a video maker (round 366): the message names the frames' folder and why, with a Fix that gets Blender's libraries (FFmpeg) - or turns them back on when they were turned off", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.step_frame_headless();  // (the toasts' first look takes the log so far as history)
+    /* Which Fix goes with which state (review 366): a full build without FFmpeg points to an ffmpeg program;
+     * libraries off with the full build there turns them on; otherwise they're downloaded. */
+    const bool full = launch::status().full, installed = ed.full_build_installed_for_test();
+    auto offer = [&](const std::string &dir) {
+      ed.clear_toasts_for_test();
+      ed.offer_video_libraries_for_test(dir);
+      ed.step_frame_headless();
+      const Editor::Toast *found = nullptr;
+      for (const Editor::Toast &x : ed.toasts_for_test()) found = x.text.find("Render Animation") != std::string::npos ? &x : found;
+      return found ? *found : Editor::Toast{};
+    };
+    const Editor::Toast on = offer("Renders/R366_animation_1");
+    std::printf("    the toast: %s\n    its Fix: %s (%s)\n", on.text.c_str(), on.fix_label.c_str(), on.fix_cmd.c_str());
+    CHECK(on.text.find("Renders/R366_animation_1") != std::string::npos && on.text.find("ffmpeg program") != std::string::npos);
+    CHECK(on.fix_cmd == (full ? "preferences" : "update libs") && !on.fix_label.empty());
+    ed.command("update libsoff");
+    const Editor::Toast off = offer("Renders/R366_animation_2");
+    std::printf("    turned off (the full build %s): %s (%s)\n", installed ? "there" : "not there", off.fix_label.c_str(), off.fix_cmd.c_str());
+    CHECK(off.fix_cmd == (full ? "preferences" : installed ? "update libson" : "update libs"));
+    CHECK(full || !installed || off.text.find("turned off") != std::string::npos);
+    ed.command("update libson");
+  });
+  test("Render Animation without a video maker (round 366): a render's finish in the dependency-free build with no ffmpeg program ends in that message (the libraries' build makes the MP4 instead)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("engine raster");
+    ed.scene().render.width = 32, ed.scene().render.height = 18;
+    ed.command("seq new R366 Video");
+    const std::string png = fs::join(test_dir(), "r366_board.png");
+    std::vector<uint32_t> px(4, 0xFF336699u);
+    CHECK(write_png(png, px.data(), 2, 2, 2));
+    ed.command("seq image " + png + " 0 0 3");  // (a 3-frame card: something to render)
+    SequencePtr seq = ed.seq_for_test_sequence();
+    ed.step_frame_headless();
+    ed.clear_toasts_for_test();
+    ed.command("renderanim 0 2");
+    for (int i = 0; i < 100 && ed.render_animation_for_test().active; i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    const auto &ra = ed.render_animation_for_test();
+    bool offered = false;
+    for (const Editor::Toast &x : ed.toasts_for_test()) offered = offered || (x.text.find("no MP4") != std::string::npos && x.fix_cmd.rfind("update libs", 0) == 0);
+    const bool maker = video::available() || !ed.ffmpeg_program().empty();
+    std::printf("    %zu frame(s); a video maker here: %s; the offer shown: %s\n", ra.written.size(), maker ? "yes" : "no", offered ? "yes" : "no");
+    CHECK(ra.written.size() == 3 && offered == !maker);
+    for (int i = 0; i < 400 && ed.render_animation_for_test().encode; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      ed.step_frame_headless();
+    }
+    for (const std::string &f : ra.written) std::remove(f.c_str());
+    std::remove(ra.video.c_str());
+    std::error_code ec;
+    std::filesystem::remove(ra.dir, ec);
+    if (seq) std::remove(resolve_asset_path(seq->asset_path).c_str());
+    std::remove(png.c_str());
+  });
+  test("the lesson's Try-it (round 366): libs lists Blender's libraries this build uses - FFmpeg among them or not", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::vector<LogEntry> before;
+    const size_t from = Log::fetch(0, before);
+    ed.command("libs");  // (the lesson's Try-it line)
+    std::vector<LogEntry> lines;
+    Log::fetch(from, lines);
+    bool row = false;
+    for (const LogEntry &e : lines) row = row || e.text.rfind("FFmpeg", 0) == 0;  // (its row: in use, or "not built in")
+    CHECK(row);
+  });
+}
+
+/* ---------------------------------------------------------------- round 367: the small fixes (task 0344) */
+static void tests_round367() {
+  test("create (round 367): a Capsule 2 m tall and 1 m across; a second one named \"Capsule (1)\" as Unity names it; an unknown kind refused, making nothing; a kind in any case", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    size_t before = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("create Capsule");
+    GameObject *a = ed.active_object_for_test();
+    const std::string first = a ? a->name : "";
+    ed.command("create Capsule");
+    GameObject *b = ed.active_object_for_test();
+    const Mesh *m = a && a->get<MeshFilter>() ? a->get<MeshFilter>()->mesh.get() : nullptr;
+    AABB box;
+    for (const Vec3 &p : m ? m->positions : std::vector<Vec3>()) box.add(p);
+    std::printf("    %s and %s; the capsule %.3f tall, %.3f across, %zu faces\n", first.c_str(), b ? b->name.c_str() : "-", box.max.y - box.min.y, box.max.x - box.min.x,
+                m ? m->face_count() : 0);
+    CHECK(m && std::fabs(box.max.y - box.min.y - 2.0f) < 1e-4f && std::fabs(box.max.x - box.min.x - 1.0f) < 1e-3f);
+    CHECK(b && b != a && b->name == first + " (1)");
+    size_t mid = 0;
+    ed.scene().for_each([&](GameObject &) { mid++; });
+    ed.command("create Capsul");  // (a typo: refused, nothing made - it made an empty object named "Capsul")
+    ed.command("create point light");
+    size_t after = 0;
+    bool typo = false, light = false;
+    ed.scene().for_each([&](GameObject &g) {
+      after++;
+      typo = typo || g.name == "Capsul";
+      light = light || (g.get<Light>() && g.name.rfind("Point Light", 0) == 0);
+    });
+    CHECK(mid == before + 2 && after == mid + 1 && !typo && light);
+    ed.command("create armature");  // (review 367: the special kinds in any case too)
+    GameObject *rig = ed.active_object_for_test();
+    CHECK(rig && (rig->get<Bone>() || rig->get<Armature>()));
+  });
+  test("Join (round 367): after the selection ends on a light (Select All's way), the last mesh selected keeps the result instead of a refusal", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Cube");
+    const std::string cube = ed.active_object_for_test()->name;
+    ed.command("create Sphere");
+    GameObject *sphere = ed.active_object_for_test();
+    const std::string sname = sphere->name;
+    const size_t faces = sphere->get<MeshFilter>()->mesh->face_count();
+    ed.command("create Point Light");
+    const std::string lname = ed.active_object_for_test()->name;
+    ed.command("select " + cube);
+    ed.command("selectadd " + sname);
+    ed.command("selectadd " + lname);  // (the active one: a light)
+    ed.command("join");
+    GameObject *kept = ed.scene().find_by_name(sname);
+    const bool cube_gone = ed.scene().find_by_name(cube) == nullptr;
+    const size_t now = kept && kept->get<MeshFilter>() ? kept->get<MeshFilter>()->mesh->face_count() : 0;
+    std::printf("    %s kept: %zu faces (was %zu); %s joined into it: %s\n", sname.c_str(), now, faces, cube.c_str(), cube_gone ? "yes" : "no");
+    CHECK(kept && cube_gone && now == faces + 6);
+  });
+  test("a new Camera (round 367): where the Scene view is, looking where it looks (it faced +Z at the pivot)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("camera 30 -20 8 1 0 2");
+    ed.command("create Camera");
+    GameObject *c = ed.active_object_for_test();
+    const Quat q = Quat::euler({-20.0f, 30.0f, 0.0f});
+    const Vec3 fwd = q.rotate({0, 0, 1}), eye = Vec3(1, 0, 2) - fwd * 8.0f;
+    const Vec3 got = c ? c->world_rotation().rotate({0, 0, 1}) : Vec3(0.0f);
+    std::printf("    the camera at (%.2f %.2f %.2f), the view's eye (%.2f %.2f %.2f); facing dot %.4f\n", c ? c->world_position().x : 0.0f,
+                c ? c->world_position().y : 0.0f, c ? c->world_position().z : 0.0f, eye.x, eye.y, eye.z, dot(got, fwd));
+    CHECK(c && c->get<Camera>() && length(c->world_position() - eye) < 1e-3f && dot(got, fwd) > 0.9999f);
+  });
+  test("the console (round 367): help lists every command; rotate, scale and set Transform.*; ui scale is the UI's; save to a path, new, open it again; saverender to a path", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::vector<LogEntry> lines;
+    const size_t from = Log::fetch(0, lines);
+    ed.command("help");
+    lines.clear();
+    Log::fetch(from, lines);
+    std::string all;
+    for (const LogEntry &e : lines) all += e.text + "\n";
+    CHECK(all.find("zfight") != std::string::npos && all.find("wpstroke") != std::string::npos && all.find("rotate") != std::string::npos);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    const std::string name = g->name;
+    ed.command("rotate 0 90 0");
+    ed.command("scale 2");
+    ed.command("set Transform.Position 1 2 3");
+    const Vec3 e = g->local().euler_hint, s = g->local().scale, p = g->local().position;
+    std::printf("    rotation (%g %g %g), scale (%g %g %g), position (%g %g %g)\n", e.x, e.y, e.z, s.x, s.y, s.z, p.x, p.y, p.z);
+    CHECK(std::fabs(e.y - 90.0f) < 1e-4f && s.x == 2.0f && s.z == 2.0f && p.x == 1.0f && p.y == 2.0f && p.z == 3.0f);
+    ed.command("scale 1 3 1");
+    CHECK(g->local().scale.y == 3.0f && g->local().scale.x == 1.0f);
+    ed.command("scale 0");  // (refused: a flat matrix)
+    CHECK(g->local().scale.y == 3.0f);
+    ed.command("ui scale 1.25");
+    CHECK(std::fabs(ed.ui_scale_pref_for_test() - 1.25f) < 1e-6f);
+    ed.command("ui scale 0");
+    /* A save that can't be written (a folder under a file) leaves the scene's path and name, and no file. */
+    const std::string blocker = fs::join(test_dir(), "r367_blocker");
+    CHECK(fs::write_file(blocker, "x"));
+    const std::string path_before = ed.scene().path, name_before = ed.scene().name;
+    ed.command("save " + fs::join(blocker, "x"));
+    CHECK(ed.scene().path == path_before && ed.scene().name == name_before && !fs::exists(fs::join(blocker, "x.scene")));
+    std::remove(blocker.c_str());
+    /* A bare name goes to Assets/Scenes, as Save As puts it; open takes the same word. */
+    const std::string bare = resolve_asset_path("Assets/Scenes/R367Bare.scene");
+    std::remove(bare.c_str());
+    ed.command("save R367Bare");
+    const bool in_scenes = fs::exists(bare);
+    ed.command("open R367Bare");
+    CHECK(in_scenes && ed.scene().path == bare);
+    std::remove(bare.c_str());
+    /* save <path> / new / open <path>, in the scratch project. */
+    const std::string rel = "Assets/Scenes/R367 Console.scene";
+    std::remove(resolve_asset_path(rel).c_str());
+    ed.command("save Assets/Scenes/R367 Console");
+    const bool saved = fs::exists(resolve_asset_path(rel));
+    ed.command("new");
+    const bool emptied = ed.scene().find_by_name(name) == nullptr;
+    ed.command("open " + rel);
+    GameObject *back = ed.scene().find_by_name(name);
+    std::printf("    saved %s, gone after new %s, back after open %s\n", saved ? "yes" : "no", emptied ? "yes" : "no", back ? "yes" : "no");
+    CHECK(saved && emptied && back && back->local().scale.y == 3.0f);
+    ed.command("open Assets/Scenes/none.scene");  // (refused: no file)
+    /* saverender <path>: no question asked. */
+    ed.command("engine raster");
+    ed.scene().render.width = 32, ed.scene().render.height = 18;
+    ed.command("render");
+    const std::string png = resolve_asset_path("Renders/r367 still.png");
+    std::remove(png.c_str());
+    ed.command("saverender Renders/r367 still.png");
+    CHECK(fs::exists(png));
+    std::remove(png.c_str());
+    /* No extension: the format's; a type it doesn't write: refused, nothing written (review 367). */
+    const std::string noext = resolve_asset_path("Renders/r367 plain"), bmp = resolve_asset_path("Renders/r367 still.bmp");
+    ed.command("saverender Renders/r367 plain");
+    ed.command("saverender Renders/r367 still.bmp");
+    CHECK(fs::exists(noext + ".png") && !fs::exists(bmp));
+    std::remove((noext + ".png").c_str());
+    std::remove(resolve_asset_path(rel).c_str());
+  });
+  test("the lesson's Try-it (round 367): create Capsule, then rotate and scale it from the console", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("create Capsule");
+    ed.command("rotate 0 0 90");
+    ed.command("scale 0.5");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->name.rfind("Capsule", 0) == 0 && std::fabs(g->local().euler_hint.z - 90.0f) < 1e-4f && g->local().scale.x == 0.5f);
+  });
+}
+
+/* ---------------------------------------------------------------- round 369: Unity packages (task 0346) */
+namespace r369 {
+/* A tar entry: a ustar header (its name split into prefix and name past 100 bytes) and the data in 512-byte blocks. */
+void tar_add(std::string &tar, std::string name, const std::string &data, char type = '0') {
+  std::string h(512, '\0');
+  std::string prefix;
+  if (name.size() > 100) {
+    const size_t cut = name.rfind('/', name.size() - 1 - 0);
+    prefix = name.substr(0, cut), name = name.substr(cut + 1);
+  }
+  std::copy(name.begin(), name.end(), h.begin());
+  const std::string mode = "0000644", size = strprintf("%011llo", (unsigned long long)data.size());
+  std::copy(mode.begin(), mode.end(), h.begin() + 100);
+  std::copy(size.begin(), size.end(), h.begin() + 124);
+  h[156] = type;
+  const std::string magic = "ustar";
+  std::copy(magic.begin(), magic.end(), h.begin() + 257);
+  h[263] = '0', h[264] = '0';
+  std::copy(prefix.begin(), prefix.end(), h.begin() + 345);
+  std::fill(h.begin() + 148, h.begin() + 156, ' ');
+  unsigned sum = 0;
+  for (char c : h) sum += (uint8_t)c;
+  const std::string chk = strprintf("%06o", sum);
+  std::copy(chk.begin(), chk.end(), h.begin() + 148);
+  tar += h + data + std::string((512 - data.size() % 512) % 512, '\0');
+}
+/* gzip with stored deflate blocks (the reader inflates any deflate; tests needn't compress). */
+std::string gzip_stored(const std::string &data, bool with_name) {
+  std::string out = {(char)0x1f, (char)0x8b, 8, (char)(with_name ? 8 : 0), 0, 0, 0, 0, 0, 3};
+  if (with_name) out += std::string("archtemp.tar") + '\0';
+  size_t at = 0;
+  do {
+    const size_t n = std::min<size_t>(65535, data.size() - at);
+    const bool last = at + n == data.size();
+    out += (char)(last ? 1 : 0);
+    out += (char)(n & 255), out += (char)(n >> 8), out += (char)(~n & 255), out += (char)((~n >> 8) & 255);
+    out += data.substr(at, n);
+    at += n;
+  } while (at < data.size());
+  for (int k = 0; k < 4; k++) out += '\0';  // (CRC32: not checked)
+  for (int k = 0; k < 4; k++) out += (char)(data.size() >> (8 * k) & 255);
+  return out;
+}
+void asset(std::string &tar, const std::string &guid, const std::string &pathname, const std::string *data, bool folder = false) {
+  tar_add(tar, guid + "/", "", '5');
+  if (data) tar_add(tar, guid + "/asset", *data);
+  tar_add(tar, guid + "/asset.meta", "fileFormatVersion: 2\nguid: " + guid + "\n" + (folder ? "folderAsset: yes\n" : "") + "DefaultImporter:\n  userData: \n");
+  tar_add(tar, guid + "/pathname", pathname + "\n00");
+}
+}  // namespace r369
+
+static void tests_round369() {
+  test("Unity packages (round 369): gzip with a name field, tar with ustar's prefix and GNU's long name, a .meta's GUID, and package paths kept inside their folder (.., absolute, drives, backslashes refused)", [] {
+    using namespace r369;
+    std::string tar;
+    const std::string deep = "Assets/" + std::string(70, 'a') + "/" + std::string(60, 'b') + "/file.txt";
+    tar_add(tar, deep, "deep");
+    tar_add(tar, "././LongLink", std::string(130, 'c') + std::string("/x.txt") + '\0', 'L');
+    tar_add(tar, "ignored", "long");
+    std::string out, why;
+    CHECK(gunzip(gzip_stored(tar, true), out, why) && out == tar);
+    std::vector<TarEntry> e;
+    CHECK(read_tar(out, e, why) && e.size() == 2);
+    CHECK(e.size() == 2 && e[0].name == deep && e[0].data == "deep" && e[1].name == std::string(130, 'c') + "/x.txt" && e[1].data == "long");
+    std::string bad = gzip_stored(tar, false);
+    bad.resize(bad.size() / 2);
+    CHECK(!gunzip(bad, out, why));
+    std::printf("    a cut gzip refused: %s\n", why.c_str());
+    CHECK(!gunzip("PK\x03\x04 a zip", out, why) && why == "not a gzip file");
+    CHECK(meta_guid("fileFormatVersion: 2\r\nguid: 0123abcd\r\nNativeFormatImporter:\n") == "0123abcd" && meta_guid("nothing") == "");
+    const std::string into = "Assets/Imported/Kit";
+    CHECK(unity_package_target("Assets/Models/box.fbx", into) == "Assets/Imported/Kit/Models/box.fbx");
+    CHECK(unity_package_target("Packages/com.vrchat/Runtime/a.cs", into) == "Assets/Imported/Kit/Packages/com.vrchat/Runtime/a.cs");
+    for (const char *evil : {"Assets/../../evil.txt", "../x", "/etc/passwd", "C:/Windows/x.dll", "Assets\\..\\..\\x", "Assets", ""})
+      CHECK(unity_package_target(evil, into).empty());
+    /* Review 369: not UTF-8, control characters, Windows devices, parts ending in a dot or a space. */
+    for (const char *evil : {"Assets/bad\xFF\xFE.txt", "Assets/tab\there.txt", "Assets/NUL", "Assets/aux.png", "Assets/COM1.txt", "Assets/x.", "Assets/x /y.txt"})
+      CHECK(unity_package_target(evil, into).empty());
+    CHECK(unity_package_target("Assets/Ünïcode ✓.png", into) == "Assets/Imported/Kit/Ünïcode ✓.png");
+    CHECK(unity_package_folder("..") == "Package" && unity_package_folder("...") == "Package" && unity_package_folder("CON") == "Package" &&
+          unity_package_folder(" My Kit. ") == "My Kit" && unity_package_folder("a/b:c") == "a_b_c");
+    CHECK(unity_path_key("Assets/Imported/K/Case.TXT") == unity_path_key("assets/imported/k/case.txt.") && valid_utf8("plain") && !valid_utf8("\xC0\xAF"));
+    /* A size the trailer lies about: inflating stops at the limit, refused - 5000 bytes against a limit of 1000. */
+    std::string big = gzip_stored(std::string(5000, 'z'), false);
+    for (int k = 0; k < 4; k++) big[big.size() - 4 + k] = k == 0 ? 10 : 0;  // (ISIZE 10)
+    CHECK(!gunzip(big, out, why, 1000) && why == "too large to unpack");
+    CHECK(!gunzip(big, out, why) && why.find("doesn't match") != std::string::npos);
+  });
+  test("Unity packages (round 369): import <file>.unitypackage unpacks into Assets/Imported/<package>/ with Unity's folders - a model, a texture, a script kept as it is, a folder - the GUIDs kept beside them; paths that would leave the folder never written", [] {
+    using namespace r369;
+    const std::string dir = fs::join(test_dir(), "r369");
+    fs::make_dirs(dir);
+    const std::string png_path = fs::join(dir, "red.png");
+    std::vector<uint32_t> red(4, 0xFFFF0000u);
+    CHECK(write_png(png_path, red.data(), 2, 2, 2));
+    std::string png, obj = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", cs = "using UnityEngine;\npublic class Spin : MonoBehaviour { }\n", evil = "escaped";
+    CHECK(fs::read_file(png_path, png));
+    std::string tar;
+    asset(tar, "11111111111111111111111111111111", "Assets/Kit Models", nullptr, true);
+    asset(tar, "22222222222222222222222222222222", "Assets/Kit Models/tri.obj", &obj);
+    asset(tar, "33333333333333333333333333333333", "Assets/Textures/red.png", &png);
+    asset(tar, "44444444444444444444444444444444", "Assets/Scripts/Spin.cs", &cs);
+    asset(tar, "55555555555555555555555555555555", "Assets/../../r369_evil.txt", &evil);
+    asset(tar, "66666666666666666666666666666666", "C:/r369_evil.txt", &evil);
+    std::string first = "first", second = "second", bad = "bad";
+    asset(tar, "77777777777777777777777777777777", "Assets/Notes/Case.txt", &first);
+    asset(tar, "88888888888888888888888888888888", "Assets/Notes/case.txt", &second);  // (one file on Windows: the second left out)
+    asset(tar, "99999999999999999999999999999999", "Assets/bad\xFF.txt", &bad);  // (not UTF-8: left out, no crash)
+    asset(tar, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Assets/Notes/twice.txt", &first);
+    asset(tar, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Assets/Notes/twice2.txt", &second);  // (one GUID twice: neither trusted)
+    const std::string pkg = fs::join(dir, "R369 Kit.unitypackage");
+    CHECK(fs::write_file(pkg, gzip_stored(tar, true)));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string root = resolve_asset_path("Assets/Imported/R369 Kit");
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    ed.command("import " + pkg);
+    const Editor::PackageJob *job = ed.last_package_for_test();
+    std::string guids, got_cs;
+    fs::read_file(fs::join(root, ".unity-guids"), guids);
+    fs::read_file(fs::join(root, "Scripts/Spin.cs"), got_cs);
+    std::printf("    models %d, textures %d, scripts %d, folders %d, left out %zu; why '%s'\n", job ? job->counts[0] : -1, job ? job->counts[1] : -1,
+                job ? job->counts[2] : -1, job ? job->folders : -1, job ? job->skipped.size() : 0, job ? job->why.c_str() : "-");
+    CHECK(job && job->why.empty() && job->counts[0] == 1 && job->counts[1] == 1 && job->counts[2] == 1 && job->folders == 1 && job->skipped.size() == 5);
+    std::string case_txt;
+    fs::read_file(fs::join(root, "Notes/Case.txt"), case_txt);
+    CHECK(case_txt == "first" && !fs::exists(fs::join(root, "Notes/twice.txt")) && !fs::exists(fs::join(root, "Notes/twice2.txt")));
+    CHECK(guids.find("88888888888888888888888888888888") == std::string::npos && guids.find("aaaaaaaa") == std::string::npos);
+    CHECK(fs::exists(fs::join(root, "Kit Models/tri.obj")) && fs::exists(fs::join(root, "Textures/red.png")) && got_cs == cs);
+    CHECK(guids.find("22222222222222222222222222222222\tAssets/Kit Models/tri.obj\tAssets/Imported/R369 Kit/Kit Models/tri.obj") != std::string::npos);
+    for (const char *where : {"r369_evil.txt", "Assets/r369_evil.txt", "Assets/Imported/r369_evil.txt"})  // (where a careless join would land)
+      CHECK(!fs::exists(resolve_asset_path(where)));
+    /* The unpacked model imports as any file does. */
+    ed.command("import " + fs::join(root, "Kit Models/tri.obj"));
+    bool tri = false;
+    ed.scene().for_each([&](GameObject &g) { tri = tri || (g.get<MeshFilter>() && g.get<MeshFilter>()->mesh && g.get<MeshFilter>()->mesh->face_count() == 1); });
+    CHECK(tri);
+    /* Not a package: refused with why, nothing made. */
+    const std::string junk = fs::join(dir, "junk.unitypackage");
+    CHECK(fs::write_file(junk, "not gzip"));
+    ed.command("import " + junk);
+    CHECK(ed.last_package_for_test() && ed.last_package_for_test()->why == "not a gzip file");
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::remove_all(resolve_asset_path("Assets/Imported/junk"), ec);
+  });
+  test("the lesson's Try-it (round 369): window Project - where an unpacked package lands; import of a package that isn't there refused", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("window Project");
+    ed.command("import Assets/none.unitypackage");
+    CHECK(ed.last_package_for_test() == nullptr);
+  });
+}
+
+/* ---------------------------------------------------------------- round 370: Unity prefabs and scenes (task 0347) */
+namespace r370 {
+const char *kLamp = R"(%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &100
+GameObject:
+  m_ObjectHideFlags: 0
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 400}
+  - component: {fileID: 10800}
+  m_Layer: 0
+  m_Name: Lamp
+  m_IsActive: 1
+--- !u!4 &400
+Transform:
+  m_GameObject: {fileID: 100}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 2, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!108 &10800
+Light:
+  m_GameObject: {fileID: 100}
+  m_Enabled: 1
+  serializedVersion: 10
+  m_Type: 2
+  m_Color: {r: 1, g: 0.5, b: 0.25, a: 1}
+  m_Intensity: 3
+  m_Range: 7.5
+  m_SpotAngle: 30
+)";
+const char *kLevel = R"(%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &1
+GameObject:
+  m_Component:
+  - component: {fileID: 2}
+  - component: {fileID: 3}
+  - component: {fileID: 4}
+  - component: {fileID: 5}
+  m_Name: Floor
+  m_IsActive: 1
+--- !u!4 &2
+Transform:
+  m_GameObject: {fileID: 1}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 2, y: 1, z: 2}
+  m_Children:
+  - {fileID: 22}
+  - {fileID: 902}
+  m_Father: {fileID: 0}
+--- !u!33 &3
+MeshFilter:
+  m_GameObject: {fileID: 1}
+  m_Mesh: {fileID: 10209, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &4
+MeshRenderer:
+  m_GameObject: {fileID: 1}
+  m_Enabled: 1
+  m_Materials:
+  - {fileID: 10303, guid: 0000000000000000f000000000000000, type: 0}
+--- !u!65 &5
+BoxCollider:
+  m_GameObject: {fileID: 1}
+  m_IsTrigger: 0
+  serializedVersion: 2
+  m_Size: {x: 10, y: 0.1, z: 10}
+  m_Center: {x: 0, y: -0.05, z: 0}
+--- !u!1 &21
+GameObject:
+  m_Component:
+  - component: {fileID: 22}
+  - component: {fileID: 23}
+  - component: {fileID: 24}
+  - component: {fileID: 25}
+  - component: {fileID: 26}
+  m_Name: Tri
+  m_IsActive: 1
+--- !u!4 &22
+Transform:
+  m_GameObject: {fileID: 21}
+  m_LocalRotation: {x: 0, y: 0.70710677, z: 0, w: 0.70710677}
+  m_LocalPosition: {x: 1, y: 0.5, z: -2}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 2}
+--- !u!33 &23
+MeshFilter:
+  m_GameObject: {fileID: 21}
+  m_Mesh: {fileID: 4300000, guid: aaaa0000aaaa0000aaaa0000aaaa0001, type: 3}
+--- !u!23 &24
+MeshRenderer:
+  m_GameObject: {fileID: 21}
+  m_Enabled: 1
+--- !u!114 &25
+MonoBehaviour:
+  m_GameObject: {fileID: 21}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: aaaa0000aaaa0000aaaa0000aaaa0002, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  speed: 2
+  axis: {x: 0, y: 1, z: 0}
+  message: 'It''s spinning: fast'
+  targets:
+  - {fileID: 2}
+  - {fileID: 0}
+--- !u!20 &26
+Camera:
+  m_GameObject: {fileID: 21}
+  m_Enabled: 1
+  near clip plane: 0.1
+  far clip plane: 500
+  field of view: 45
+  orthographic: 0
+--- !u!1001 &900
+PrefabInstance:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Modification:
+    serializedVersion: 3
+    m_TransformParent: {fileID: 2}
+    m_Modifications:
+    - target: {fileID: 400, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 3
+      objectReference: {fileID: 0}
+    - target: {fileID: 100, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+      propertyPath: m_Name
+      value: Porch Lamp
+      objectReference: {fileID: 0}
+    - target: {fileID: 10800, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+      propertyPath: m_Intensity
+      value: 5
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+--- !u!4 &902 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 400, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}
+  m_PrefabInstance: {fileID: 900}
+  m_PrefabAsset: {fileID: 0}
+)";
+}  // namespace r370
+
+static void tests_round370() {
+  test("Unity YAML (round 370): documents by class and fileID, a stripped one; Unity's sequences at their key's indent; flow references; quoted strings; a mapping in a sequence item", [] {
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(r370::kLevel, docs, why));
+    CHECK(docs.size() == 13);
+    const UnityDoc *mono = nullptr, *pi = nullptr, *stripped = nullptr;
+    for (const UnityDoc &d : docs) {
+      mono = d.class_id == 114 ? &d : mono;
+      pi = d.class_id == 1001 ? &d : pi;
+      stripped = d.stripped ? &d : stripped;
+    }
+    CHECK(mono && mono->type == "MonoBehaviour" && mono->file_id == 25 && mono->body.guid("m_Script") == "aaaa0000aaaa0000aaaa0000aaaa0002");
+    CHECK(mono && mono->body.num("speed") == 2.0 && mono->body.str("message") == "It's spinning: fast" && mono->body.get("targets") &&
+          mono->body.get("targets")->seq.size() == 2 && mono->body.get("targets")->seq[0].str("fileID") == "2");
+    const YamlNode *mods = pi && pi->body.get("m_Modification") ? pi->body.get("m_Modification")->get("m_Modifications") : nullptr;
+    CHECK(mods && mods->seq.size() == 3 && mods->seq[0].str("propertyPath") == "m_LocalPosition.x" && mods->seq[1].str("value") == "Porch Lamp" &&
+          mods->seq[0].file_id("target") == 400);
+    CHECK(stripped && stripped->file_id == 902 && stripped->class_id == 4 && stripped->body.file_id("m_PrefabInstance") == 900);
+    CHECK(!parse_unity_yaml("\x01\x02 binary", docs, why));
+    const YamlNode meta = parse_yaml("fileFormatVersion: 2\nguid: abc\nModelImporter:\n  fileIDToRecycleName:\n    4300000: Tri\n    100000: //RootNode\n");
+    CHECK(meta.get("ModelImporter") && meta.get("ModelImporter")->get("fileIDToRecycleName") && meta.get("ModelImporter")->get("fileIDToRecycleName")->str("4300000") == "Tri");
+  });
+  test("Unity scenes (round 370): import Level.unity - the hierarchy and transforms, Unity's built-in Plane, a BoxCollider, an OBJ's mesh by its .meta's fileID, a script kept as an Engine Component with its fields, a Camera, a nested Lamp prefab with its overrides; one Undo step takes it all away", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R370");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    CHECK(fs::write_file(fs::join(dir, "tri.obj"), "o Tri\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"));
+    CHECK(fs::write_file(fs::join(dir, "Spin.cs"), "public class Spin : UnityEngine.MonoBehaviour {}\n"));
+    CHECK(fs::write_file(fs::join(dir, "Lamp.prefab"), r370::kLamp));
+    CHECK(fs::write_file(fs::join(dir, "Level.unity"), r370::kLevel));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/aaaa0000aaaa0000aaaa0000aaaa0001.meta"),
+                         "fileFormatVersion: 2\nguid: aaaa0000aaaa0000aaaa0000aaaa0001\nModelImporter:\n  fileIDToRecycleName:\n    100000: //RootNode\n    4300000: Tri\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"),
+                         "aaaa0000aaaa0000aaaa0000aaaa0001\tAssets/tri.obj\tAssets/Imported/R370/tri.obj\n"
+                         "aaaa0000aaaa0000aaaa0000aaaa0002\tAssets/Spin.cs\tAssets/Imported/R370/Spin.cs\n"
+                         "aaaa0000aaaa0000aaaa0000aaaa0003\tAssets/Lamp.prefab\tAssets/Imported/R370/Lamp.prefab\n"));
+    size_t before = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("import " + fs::join(dir, "Level.unity"));
+    GameObject *root = ed.scene().find_by_name("Level"), *floor = ed.scene().find_by_name("Floor"), *tri = ed.scene().find_by_name("Tri");
+    GameObject *lamp = ed.scene().find_by_name("Porch Lamp");
+    CHECK(root && floor && tri && lamp && floor->parent == root && tri->parent == floor && lamp->parent == floor);
+    if (!root || !floor || !tri || !lamp) return;
+    const Mesh *plane = floor->get<MeshFilter>() ? floor->get<MeshFilter>()->mesh.get() : nullptr;
+    const ColliderComponent *box = floor->get<ColliderComponent>();
+    std::printf("    Floor: %zu faces, scale (%g %g %g), collider shape %d size (%g %g %g)\n", plane ? plane->face_count() : 0, floor->local().scale.x,
+                floor->local().scale.y, floor->local().scale.z, box ? box->shape : -1, box ? box->size.x : 0.0f, box ? box->size.y : 0.0f, box ? box->size.z : 0.0f);
+    CHECK(plane && plane->face_count() == primitives::plane()->face_count() && floor->get<MeshRenderer>() && floor->local().scale.x == 2.0f);
+    CHECK(box && box->shape == 0 && std::fabs(box->size.x - 10.0f) < 1e-5f && std::fabs(box->center.y + 0.05f) < 1e-5f && !box->fit);
+    const Mesh *tm = tri->get<MeshFilter>() ? tri->get<MeshFilter>()->mesh.get() : nullptr;
+    const Vec3 e = tri->local().rotation.to_euler();
+    std::printf("    Tri: %zu face(s), at (%g %g %g), turned (%g %g %g)\n", tm ? tm->face_count() : 0, tri->local().position.x, tri->local().position.y,
+                tri->local().position.z, e.x, e.y, e.z);
+    CHECK(tm && tm->face_count() == 1 && tri->local().position.z == -2.0f && std::fabs(std::fabs(e.y) - 90.0f) < 0.01f);
+    const EngineComponent *spin = tri->get<EngineComponent>();
+    CHECK(spin && spin->type == "Spin" && spin->script == "aaaa0000aaaa0000aaaa0000aaaa0002" && spin->data.find("speed: 2") != std::string::npos &&
+          spin->data.find("--- !u!114 &25") == 0);
+    const Camera *cam = tri->get<Camera>();
+    CHECK(cam && cam->fov == 45.0f && cam->near_clip == 0.1f && cam->far_clip == 500.0f);
+    const Light *light = lamp->get<Light>();
+    std::printf("    Porch Lamp: at (%g %g %g), light type %d, range %g, intensity %g (the override isn't held: Unity keeps it)\n", lamp->local().position.x,
+                lamp->local().position.y, lamp->local().position.z, light ? light->type : -1, light ? light->range : 0.0f, light ? light->intensity : 0.0f);
+    CHECK(light && light->type == 1 && light->range == 7.5f && lamp->local().position.x == 3.0f && lamp->local().position.y == 2.0f);
+    /* One Undo step. */
+    ed.command("undo");
+    size_t after = 0;
+    ed.scene().for_each([&](GameObject &) { after++; });
+    CHECK(after == before && !ed.scene().find_by_name("Level"));
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Unity scenes (round 370, review): a prefab holding itself stops; a model placed as a prefab with a script added; names escaped as u+hex; a 2019 .meta's table and a part by its object's name; a parent loop under the root; a rotation override; the console's path match; the kept data byte for byte", [] {
+    const YamlNode names = parse_yaml("m_Name: \"\\u9AEA\\u306E\\U0001F600 \\uD83D\\uDE00\"\n");
+    CHECK(names.str("m_Name") == "\xE9\xAB\xAA\xE3\x81\xAE\xF0\x9F\x98\x80 \xF0\x9F\x98\x80");
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R370b"), dot_unity = fs::join(dir, "com.unity.r370");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    fs::make_dirs(dot_unity);
+    CHECK(fs::write_file(fs::join(dir, "two.obj"), "o A\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\no B\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\nf 4 5 6\nf 4 6 7\n"));
+    CHECK(fs::write_file(fs::join(dot_unity, "tri.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/bbbb0000bbbb0000bbbb0000bbbb0001.meta"),
+                         "fileFormatVersion: 2\nguid: bbbb0000bbbb0000bbbb0000bbbb0001\nModelImporter:\n  internalIDToNameTable:\n  - first:\n      43: -2432090755550338912\n    second: B\n"));
+    const std::string self = "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Selfie\n--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+                             "--- !u!1001 &3\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 2}\n    m_Modifications: []\n"
+                             "  m_SourcePrefab: {fileID: 100100000, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n";
+    CHECK(fs::write_file(fs::join(dir, "Selfie.prefab"), self));
+    /* The scene, CRLF as Unity writes on Windows. */
+    std::string scene = std::string("%YAML 1.1\n") +
+        "--- !u!1 &10\nGameObject:\n  m_Name: PartB\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: -2432090755550338912, guid: bbbb0000bbbb0000bbbb0000bbbb0001, type: 3}\n"
+        "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n"
+        "--- !u!1 &20\nGameObject:\n  m_Name: A\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &22\nMeshFilter:\n  m_GameObject: {fileID: 20}\n  m_Mesh: {fileID: 777, guid: bbbb0000bbbb0000bbbb0000bbbb0001, type: 3}\n"
+        "--- !u!1 &30\nGameObject:\n  m_Name: LoopOne\n--- !u!4 &31\nTransform:\n  m_GameObject: {fileID: 30}\n  m_Father: {fileID: 41}\n"
+        "--- !u!1 &40\nGameObject:\n  m_Name: LoopTwo\n--- !u!4 &41\nTransform:\n  m_GameObject: {fileID: 40}\n  m_Father: {fileID: 31}\n"
+        "--- !u!1001 &50\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications: []\n"
+        "  m_SourcePrefab: {fileID: 100100000, guid: bbbb0000bbbb0000bbbb0000bbbb0003, type: 3}\n"
+        "--- !u!1 &51 stripped\nGameObject:\n  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: bbbb0000bbbb0000bbbb0000bbbb0003, type: 3}\n"
+        "  m_PrefabInstance: {fileID: 50}\n"
+        "--- !u!114 &52\nMonoBehaviour:\n  m_GameObject: {fileID: 51}\n  m_Script: {fileID: 542108242, guid: bbbb0000bbbb0000bbbb0000bbbb0004, type: 3}\n  Name: \"\\u30A2\"\n"
+        "--- !u!1001 &60\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications:\n"
+        "    - target: {fileID: 2, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n      propertyPath: m_LocalRotation.x\n      value: 0.70710677\n"
+        "    - target: {fileID: 2, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n      propertyPath: m_LocalRotation.w\n      value: 0.70710677\n"
+        "    - target: {fileID: 2, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n      propertyPath: m_LocalEulerAnglesHint.x\n      value: 90\n"
+        "  m_SourcePrefab: {fileID: 100100000, guid: bbbb0000bbbb0000bbbb0000bbbb0002, type: 3}\n";
+    std::string crlf;
+    for (char ch : scene) crlf += ch == '\n' ? std::string("\r\n") : std::string(1, ch);
+    CHECK(fs::write_file(fs::join(dir, "Mixed.unity"), crlf));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"),
+                         "bbbb0000bbbb0000bbbb0000bbbb0001\tAssets/two.obj\tAssets/Imported/R370b/two.obj\n"
+                         "bbbb0000bbbb0000bbbb0000bbbb0002\tAssets/Selfie.prefab\tAssets/Imported/R370b/Selfie.prefab\n"
+                         "bbbb0000bbbb0000bbbb0000bbbb0003\tAssets/tri.obj\tAssets/Imported/R370b/com.unity.r370/tri.obj\n"
+                         "bbbb0000bbbb0000bbbb0000bbbb0004\tAssets/VRCSDK3A.dll\tAssets/Imported/R370b/VRCSDK3A.dll\n"));
+    size_t before = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("import " + fs::join(dir, "Mixed.unity"));
+    GameObject *root = ed.scene().find_by_name("Mixed");
+    size_t made = 0, selfies = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      made++;
+      selfies += g.name == "Selfie";
+    });
+    CHECK(root != nullptr);
+    if (!root) return;
+    /* Every new object under the root. */
+    size_t top_new = 0;
+    for (GameObject *g : ed.scene().roots) top_new += g != root && g->name != "Main Camera" && g->name != "Directional Light" && g->name != "Cube" && g->name != "Plane";
+    GameObject *b = ed.scene().find_by_name("PartB"), *a = ed.scene().find_by_name("A"), *l1 = ed.scene().find_by_name("LoopOne"), *l2 = ed.scene().find_by_name("LoopTwo");
+    const size_t fb = b && b->get<MeshFilter>() ? b->get<MeshFilter>()->mesh->face_count() : 0, fa = a && a->get<MeshFilter>() ? a->get<MeshFilter>()->mesh->face_count() : 0;
+    std::printf("    %zu objects made, %zu Selfie(s); PartB %zu face(s) (B's 2), A %zu (A's 1); loop parents %s / %s; new top-level besides the root %zu\n",
+                made - before, selfies, fb, fa, l1 && l1->parent ? l1->parent->name.c_str() : "-", l2 && l2->parent ? l2->parent->name.c_str() : "-", top_new);
+    CHECK(selfies >= 1 && selfies <= 3 && made - before < 40);  // (the self-holding prefab stops at its second appearance)
+    CHECK(fb == 2 && fa == 1);
+    CHECK(l1 && l2 && (l1->parent == root || l2->parent == root) && l1->parent != nullptr && l2->parent != nullptr);
+    /* The model placed as a prefab: its mesh, and the script added to it on its root. */
+    GameObject *tri = ed.scene().find_by_name("tri");
+    const EngineComponent *sdk = tri ? tri->get<EngineComponent>() : nullptr;
+    std::printf("    the placed model: %s, its added component %s\n", tri ? "made" : "missing", sdk ? sdk->type.c_str() : "-");
+    CHECK(tri && sdk && sdk->type == "MonoBehaviour (bbbb0000bbbb0000bbbb0000bbbb0004:542108242)" && sdk->data.find("--- !u!114 &52\r\n") == 0 &&
+          sdk->data.find("Name: \"\\u30A2\"\r\n") != std::string::npos);
+    /* The rotation override, made whole: 90 degrees about X. */
+    GameObject *turned = nullptr;
+    ed.scene().for_each([&](GameObject &g) { turned = g.name == "Selfie" && std::fabs(g.local().rotation.w - 0.70710677f) < 1e-4f ? &g : turned; });
+    CHECK(turned && std::fabs(turned->local().rotation.to_euler().x - 90.0f) < 0.01f);
+    /* The console: ".unity" in a folder's name doesn't make an .obj a Unity scene. */
+    const size_t objs_before = made;
+    ed.command("import " + fs::join(dot_unity, "tri.obj"));
+    size_t now = 0;
+    ed.scene().for_each([&](GameObject &) { now++; });
+    CHECK(now > objs_before);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the lesson's Try-it (round 370): import of a .prefab that isn't there says so, making nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    size_t before = 0, after = 0;
+    ed.scene().for_each([&](GameObject &) { before++; });
+    ed.command("window Project");
+    ed.command("import Assets/none.prefab");
+    ed.scene().for_each([&](GameObject &) { after++; });
+    CHECK(after == before);
+  });
+}
+
+/* ---------------------------------------------------------------- round 371: Unity materials and VRChat's components (task 0348) */
+namespace r371 {
+std::string mat(const std::string &shader, const std::string &tex, const std::string &floats, const std::string &colors, const std::string &keywords = "") {
+  return "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  serializedVersion: 6\n  m_Name: Skin\n  m_Shader: " + shader + "\n  m_ShaderKeywords: " + keywords +
+         "\n  m_SavedProperties:\n    serializedVersion: 3\n    m_TexEnvs:\n" + tex + "    m_Floats:\n" + floats + "    m_Colors:\n" + colors;
+}
+const std::function<std::string(const std::string &)> kTex = [](const std::string &g) { return g.empty() ? std::string() : "Assets/T/" + g + ".png"; };
+std::function<std::string(const std::string &, int64_t)> shader(const std::string &name) {
+  return [name](const std::string &, int64_t) { return name; };
+}
+}  // namespace r371
+
+static void tests_round371() {
+  test("Unity materials (round 371): Standard's colour, alpha, tiled main map, normal, metal, smoothness, Cutout and HDR emission; URP Lit's transparent, double-sided; MToon's shade and outline; lilToon by name; Unity 5's first/second layout; an unknown shader keeping its main texture", [] {
+    using namespace r371;
+    Material m;
+    UnityMaterialInfo info;
+    const std::string standard = mat("{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}",
+        "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: albedo, type: 3}\n        m_Scale: {x: 2, y: 3}\n        m_Offset: {x: 0.5, y: 0}\n"
+        "    - _BumpMap:\n        m_Texture: {fileID: 2800000, guid: normal, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n",
+        "    - _Metallic: 0.7\n    - _Glossiness: 0.8\n    - _Mode: 1\n    - _Cutoff: 0.3\n    - _BumpScale: 0.5\n",
+        "    - _Color: {r: 1, g: 0.5, b: 0.25, a: 0.75}\n    - _EmissionColor: {r: 2, g: 0, b: 0, a: 1}\n", "_EMISSION _NORMALMAP");
+    CHECK(unity_material(standard, kTex, shader("Standard"), m, info) && info.shader == "Standard" && info.known);
+    std::printf("    Standard: colour (%g %g %g) alpha %g, map %s x(%g %g) +(%g), normal %s %g, metal %g rough %.2f, surface %d clip %g, emission (%g %g %g) x %g\n",
+                m.base_color.x, m.base_color.y, m.base_color.z, m.alpha, m.base_map.path.c_str(), m.tiling.x, m.tiling.y, m.offset.x, m.normal_map.path.c_str(),
+                m.normal_strength, m.metallic, m.roughness, m.surface, m.alpha_clip, m.emission.x, m.emission.y, m.emission.z, m.emission_strength);
+    CHECK(m.name == "Skin" && std::fabs(m.base_color.y - srgb_to_linear(0.5f)) < 1e-5f && m.alpha == 0.75f && m.base_map.path == "Assets/T/albedo.png" && m.tiling.x == 2.0f && m.tiling.y == 3.0f && m.offset.x == 0.5f);
+    CHECK(m.normal_map.path == "Assets/T/normal.png" && m.normal_strength == 0.5f && std::fabs(m.metallic - 0.7f) < 1e-6f && std::fabs(m.roughness - 0.2f) < 1e-5f);
+    CHECK(m.surface == (int)MaterialSurface::Cutout && std::fabs(m.alpha_clip - 0.3f) < 1e-6f && m.emission.x == 1.0f && std::fabs(m.emission_strength - std::pow(2.0f, 2.2f)) < 1e-4f &&
+          m.shading_model == 0);  // (Unity's colours are gamma: linear here, an HDR 2 by the same curve - review 371)
+    /* Review 371: a metallic map - metal from its red, the slider (0 in the file) ignored; smoothness by _GlossMapScale. */
+    Material mm;
+    CHECK(unity_material(mat("{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}", "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: metal, type: 3}\n",
+                             "    - _Metallic: 0\n    - _Glossiness: 0.5\n    - _GlossMapScale: 0.9\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex, shader("Standard"), mm, info));
+    CHECK(mm.metallic == 1.0f && mm.metallic_map.path == "Assets/T/metal.png" && std::fabs(mm.roughness - 0.1f) < 1e-5f);
+    Material u;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: 933532a4fcc9baf4fa0491de14d08ed7, type: 3}", "    - _BaseMap:\n        m_Texture: {fileID: 2800000, guid: base, type: 3}\n",
+                             "    - _Smoothness: 0.25\n    - _Surface: 1\n    - _Cull: 0\n", "    - _BaseColor: {r: 0.2, g: 0.4, b: 0.6, a: 0.5}\n"),
+                         kTex, shader("Lit"), u, info) && info.shader == "URP Lit");
+    CHECK(u.base_map.path == "Assets/T/base.png" && std::fabs(u.roughness - 0.75f) < 1e-5f && u.surface == (int)MaterialSurface::Transparent && u.double_sided && u.alpha == 0.5f);
+    Material t;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: whatever, type: 3}", "    - _ShadeTexture:\n        m_Texture: {fileID: 2800000, guid: shade, type: 3}\n",
+                             "    - _OutlineWidth: 0.5\n    - _OutlineWidthMode: 1\n", "    - _ShadeColor: {r: 0.6, g: 0.5, b: 0.7, a: 1}\n    - _OutlineColor: {r: 0.1, g: 0, b: 0, a: 1}\n"),
+                         kTex, shader("MToon"), t, info) && info.shader == "MToon");
+    CHECK(t.shading_model == 1 && std::fabs(t.toon_shadow.z - srgb_to_linear(0.7f)) < 1e-5f && t.shade_map.path == "Assets/T/shade.png" && std::fabs(info.outline_width - 0.005f) < 1e-6f &&
+          std::fabs(info.outline_color.x - srgb_to_linear(0.1f)) < 1e-5f);
+    /* MToon's blend and cull modes (review 371), and no outline without its mode. */
+    Material mt;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _BlendMode: 1\n    - _Cutoff: 0.4\n    - _CullMode: 0\n    - _OutlineWidth: 0.5\n",
+                             "    - _ShadeColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}\n"), kTex, shader("VRM/MToon"), mt, info));
+    CHECK(mt.surface == (int)MaterialSurface::Cutout && std::fabs(mt.alpha_clip - 0.4f) < 1e-6f && mt.double_sided && info.outline_width == 0.0f);
+    Material l;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _OutlineWidth: 0.08\n", "    - _ShadowColor: {r: 0.8, g: 0.7, b: 0.9, a: 1}\n"),
+                         kTex, shader("Hidden/lilToonOutline"), l, info) && info.shader == "lilToon" && l.shading_model == 1 && std::fabs(info.outline_width - 0.0008f) < 1e-7f);
+    CHECK(std::fabs(l.toon_shadow.x - std::min(1.0f, srgb_to_linear(0.8f) / l.base_color.x)) < 1e-5f);  // (no shade texture: the ratio to the lit colour)
+    Material plain;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _OutlineWidth: 0.08\n    - _lilToonVersion: 40\n", ""), kTex, shader("lilToon"), plain, info) &&
+          info.shader == "lilToon" && info.outline_width == 0.0f);  // (review 371: only lilToon's outline shaders draw one)
+    /* A copy of a converted Unity material is Blendity's own (review 371): its edits are saved. */
+    auto foreign = std::make_shared<Material>(plain);
+    foreign->foreign = true;
+    const std::string copy_path = "Assets/Materials/R371 Copy.mat";
+    MaterialPtr copy = create_material_asset(*foreign, copy_path);
+    CHECK(copy && !copy->foreign);
+    if (copy) {
+      copy->base_color = Vec3(0.1f, 0.2f, 0.3f);
+      copy->touch();
+      save_dirty_material_assets();
+      std::string text;
+      fs::read_file(resolve_asset_path(copy_path), text);
+      Material back;
+      CHECK(load_material_text(text, back) && std::fabs(back.base_color.z - 0.3f) < 1e-5f);
+      std::remove(resolve_asset_path(copy_path).c_str());
+    }
+    const std::string old = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Old\n  m_Shader: {fileID: 46, guid: 0000000000000000f000000000000000, type: 0}\n"
+                            "  m_SavedProperties:\n    m_TexEnvs:\n    - first:\n        name: _MainTex\n      second:\n        m_Texture: {fileID: 2800000, guid: oldtex, type: 3}\n"
+                            "        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n    m_Floats:\n    - first:\n        name: _Metallic\n      second: 0.4\n"
+                            "    m_Colors:\n    - first:\n        name: _Color\n      second: {r: 0, g: 1, b: 0, a: 1}\n";
+    Material o;
+    CHECK(unity_material(old, kTex, shader("Standard"), o, info) && o.base_map.path == "Assets/T/oldtex.png" && std::fabs(o.metallic - 0.4f) < 1e-6f && o.base_color.y == 1.0f);
+    Material x;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: main, type: 3}\n", "", "    - _Color: {r: 1, g: 0, b: 0, a: 1}\n"),
+                         kTex, shader("Custom/MyWater"), x, info) && !info.known && x.base_map.path == "Assets/T/main.png" && x.base_color.x == 1.0f);
+    CHECK(unity_material(mat("{fileID: 4800000, guid: x, type: 3}", "", "    - _SomethingElse: 1\n", ""), kTex, shader(""), x, info) && !info.known);  // (not in the project: said)
+    CHECK(!unity_material("blendity_material 1\n", kTex, shader(""), x, info));
+  });
+  test("Unity materials and VRChat (round 371): an avatar's renderer wears its Unity .mat converted (lilToon's outline shader: Toon with its outline on the object), the .mat never written over; a PhysBone's settings kept as a spring bone on its root and the PhysBone kept for Unity; the Avatar Descriptor and an Udon behaviour named and kept", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R371");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    std::vector<uint32_t> px(4, 0xFFFFCCAAu);
+    CHECK(write_png(fs::join(dir, "skin.png"), px.data(), 2, 2, 2));
+    const std::string mat_text = r371::mat("{fileID: 4800000, guid: cccc0000cccc0000cccc0000cccc0005, type: 3}",
+        "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: cccc0000cccc0000cccc0000cccc0002, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n",
+        "    - _OutlineWidth: 0.1\n    - _lilToonVersion: 40\n", "    - _Color: {r: 1, g: 0.9, b: 0.8, a: 1}\n    - _OutlineColor: {r: 0.2, g: 0.1, b: 0.1, a: 1}\n");
+    CHECK(fs::write_file(fs::join(dir, "Skin.mat"), mat_text));
+    CHECK(fs::write_file(fs::join(dir, "lts_o.shader"), "Shader \"Hidden/lilToonOutline\" {}\n"));
+    const std::string scene = std::string("%YAML 1.1\n") +
+        "--- !u!1 &1\nGameObject:\n  m_Name: Avatar\n--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n"
+        "--- !u!33 &3\nMeshFilter:\n  m_GameObject: {fileID: 1}\n  m_Mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}\n"
+        "--- !u!23 &4\nMeshRenderer:\n  m_GameObject: {fileID: 1}\n  m_Materials:\n  - {fileID: 2100000, guid: cccc0000cccc0000cccc0000cccc0001, type: 2}\n"
+        "--- !u!114 &5\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: 542108242, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}\n"
+        "  ViewPosition: {x: 0, y: 1.6, z: 0.05}\n  lipSync: 3\n  VisemeBlendShapes:\n  - vrc.v_sil\n  - vrc.v_pp\n"
+        "--- !u!1 &10\nGameObject:\n  m_Name: Hair\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 2}\n"
+        "--- !u!114 &12\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: -1427037861, guid: 2a2c05204084d904aa4945ccff20d8e5, type: 3}\n"
+        "  rootTransform: {fileID: 11}\n  pull: 0.4\n  spring: 0.3\n  stiffness: 0.2\n  gravity: 0.5\n  radius: 0.03\n"
+        "--- !u!114 &13\nMonoBehaviour:\n  m_GameObject: {fileID: 10}\n  m_Script: {fileID: 1, guid: 45115577ef41a5b4ca741ed302693907, type: 3}\n"
+        "  serializedProgramAsset: {fileID: 11400000, guid: abc, type: 2}\n";
+    CHECK(fs::write_file(fs::join(dir, "R371Kit.prefab"), scene));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"),
+                         "cccc0000cccc0000cccc0000cccc0001\tAssets/Skin.mat\tAssets/Imported/R371/Skin.mat\n"
+                         "cccc0000cccc0000cccc0000cccc0002\tAssets/skin.png\tAssets/Imported/R371/skin.png\n"
+                         "cccc0000cccc0000cccc0000cccc0005\tAssets/lts_o.shader\tAssets/Imported/R371/lts_o.shader\n"));
+    ed.command("import " + fs::join(dir, "R371Kit.prefab"));
+    GameObject *avatar = ed.scene().find_by_name("Avatar"), *hair = ed.scene().find_by_name("Hair");
+    CHECK(avatar && hair);
+    if (!avatar || !hair) return;
+    const MeshRenderer *r = avatar->get<MeshRenderer>();
+    const MaterialPtr skin = r && !r->materials.empty() ? r->materials[0] : nullptr;
+    const Outline *line = avatar->get<Outline>();
+    std::printf("    the skin: %s, Toon %d, map %s, foreign %d; outline %s %.4f m\n", skin ? skin->name.c_str() : "-", skin ? skin->shading_model : -1,
+                skin ? skin->base_map.path.c_str() : "-", skin ? (int)skin->foreign : -1, line ? "on" : "off", line ? line->thickness : 0.0f);
+    CHECK(skin && skin->foreign && skin->shading_model == 1 && skin->base_map.path == "Assets/Imported/R371/skin.png" && std::fabs(skin->base_color.y - srgb_to_linear(0.9f)) < 1e-5f);
+    CHECK(line && std::fabs(line->thickness - 0.001f) < 1e-6f && std::fabs(line->color.x - srgb_to_linear(0.2f)) < 1e-5f);
+    if (!skin) return;
+    /* An edit to the converted material never goes into Unity's file. */
+    skin->base_color = Vec3(0.0f, 0.0f, 1.0f);
+    skin->touch();
+    save_dirty_material_assets();
+    std::string after;
+    fs::read_file(fs::join(dir, "Skin.mat"), after);
+    CHECK(after == mat_text);
+    /* VRChat's components: the PhysBone a spring bone on Hair (and kept), the descriptor and the Udon behaviour named. */
+    const SpringBone *spring = hair->get<SpringBone>();
+    std::vector<std::string> kinds;
+    for (GameObject *g : {avatar, hair})
+      for (const auto &c : g->components)
+        if (const EngineComponent *e = dynamic_cast<const EngineComponent *>(c.get())) kinds.push_back(e->type);
+    std::string all;
+    for (const std::string &k : kinds) all += k + " ";
+    std::printf("    spring bone on Hair: %s (stiffness %.2f, damping %.2f, gravity %.2f, radius %.3f); kept: %s\n", spring ? "yes" : "no", spring ? spring->stiffness : 0.0f,
+                spring ? spring->damping : 0.0f, spring ? spring->gravity : 0.0f, spring ? spring->radius : 0.0f, all.c_str());
+    CHECK(spring && std::fabs(spring->stiffness - 0.4f) < 1e-5f && std::fabs(spring->damping - 0.7f) < 1e-5f && spring->gravity == 0.5f && std::fabs(spring->radius - 0.03f) < 1e-6f);
+    CHECK(all.find("VRCAvatarDescriptor") != std::string::npos && all.find("VRCPhysBone") != std::string::npos && all.find("UdonBehaviour") != std::string::npos);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the lesson's Try-it (round 371): window Materials - where a package's converted Unity materials are listed", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("window Materials");
+    CHECK(load_unity_material("not yaml", "x.mat", *std::make_shared<Material>()) == false);
+  });
+}
+
+/* ---------------------------------------------------------------- round 372: the way back to Unity (task 0349) */
+static void tests_round372() {
+  test("Unity packages written (round 372): deflate round-trips text (smaller) and random bytes (stored), gzip's CRC is CRC-32's, tar keeps a 300-byte name and folders; Unity's string quoting", [] {
+    std::string text;
+    for (int i = 0; i < 2000; i++) text += "--- !u!4 &" + std::to_string(400 + i) + "\nTransform:\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n";
+    std::string random(70000, '\0');
+    uint32_t s = 12345;
+    for (char &c : random) s = s * 1664525u + 1013904223u, c = (char)(s >> 24);
+    for (const std::string *d : {&text, &random}) {
+      std::string back, why;
+      const std::string gz = gzip(*d);
+      CHECK(gunzip(gz, back, why) && back == *d);
+      std::printf("    %zu bytes -> %zu gzip'd\n", d->size(), gz.size());
+    }
+    std::string empty_back, why;
+    CHECK(gunzip(gzip(""), empty_back, why) && empty_back.empty());
+    CHECK(gzip(text).size() < text.size() / 4 && gzip(random).size() < random.size() + 64);
+    CHECK(crc32("123456789") == 0xCBF43926u);
+    std::string tar;
+    const std::string longname = "aaaa/" + std::string(140, 'b') + "/" + std::string(150, 'c') + ".txt";
+    tar_append(tar, "guid/", "", true);
+    tar_append(tar, longname, "long");
+    tar_append(tar, "guid/pathname", "Assets/x.png");
+    std::vector<TarEntry> e;
+    CHECK(read_tar(tar + std::string(1024, '\0'), e, why) && e.size() == 3 && e[0].dir && e[1].name == longname && e[1].data == "long" && e[2].data == "Assets/x.png");
+    const std::string g1 = stable_unity_guid("Assets/Imported/K", "Assets/a.png");
+    CHECK(g1.size() == 32 && g1 == stable_unity_guid("Assets/Imported/K", "Assets/a.png") && g1 != stable_unity_guid("Assets/Imported/K", "Assets/b.png"));
+    /* Review 372: past a megabyte, several blocks in one bit stream - compressible, and text, random and text again. */
+    std::string big, mixed;
+    while (big.size() < (3u << 20)) big += "--- !u!4 &" + std::to_string(big.size()) + "\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n";
+    mixed = big.substr(0, 1300000) + random + random + random.substr(0, 50000) + std::string(900000, 'z') + big.substr(0, 1200000);
+    for (const std::string *d : {&big, &mixed}) {
+      std::string back, w2;
+      const std::string gz = gzip(*d);
+      std::printf("    %zu bytes in %zu block(s) -> %zu gzip'd\n", d->size(), d->size() / (1u << 20) + 1, gz.size());
+      CHECK(gunzip(gz, back, w2) && back == *d);
+      if (const char *dump = std::getenv("BLENDITY_DUMP_GZIP")) {  // (opt-in: an independent reader - Python's gzip - checks these)
+        fs::write_file(fs::join(dump, d == &big ? "big.gz" : "mixed.gz"), gz);
+        fs::write_file(fs::join(dump, d == &big ? "big.raw" : "mixed.raw"), *d);
+      }
+    }
+    CHECK(unity_yaml_string("Cube (1)") == "Cube (1)" && unity_yaml_string("a: b") == "\"a: b\"" && unity_yaml_string("- x") == "\"- x\"");
+    CHECK(unity_yaml_string("\xE7\x9C\x8B\xE6\x9D\xBF") == "\"\\u770B\\u677F\"" && unity_yaml_string("\xF0\x9F\x98\x80") == "\"\\uD83D\\uDE00\"");
+    CHECK(parse_yaml("m_Name: " + unity_yaml_string("\xE7\x9C\x8B\xE6\x9D\xBF: sign") + "\n").str("m_Name") == "\xE7\x9C\x8B\xE6\x9D\xBF: sign");
+  });
+  test("the way back to Unity (round 372): a package imported, its prefab brought in, an object moved and renamed, a file added - export unitypackage writes the same GUIDs, the changed lines only (CRLF kept), the script byte for byte, the new file under a GUID its path always gives; a duplicate doesn't overwrite its original; the project's prefab untouched", [] {
+    const std::string kit = std::string("%YAML 1.1\r\n%TAG !u! tag:unity3d.com,2011:\r\n") +
+        "--- !u!1 &100\r\nGameObject:\r\n  m_Component:\r\n  - component: {fileID: 400}\r\n  - component: {fileID: 11400}\r\n  m_Name: Board\r\n  m_IsActive: 1\r\n"
+        "--- !u!4 &400\r\nTransform:\r\n  m_GameObject: {fileID: 100}\r\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\r\n  m_LocalPosition: {x: 0, y: 0, z: 0}\r\n"
+        "  m_LocalScale: {x: 1, y: 1, z: 1}\r\n  m_Children: []\r\n  m_Father: {fileID: 0}\r\n"
+        "--- !u!114 &11400\r\nMonoBehaviour:\r\n  m_GameObject: {fileID: 100}\r\n  m_Script: {fileID: 11500000, guid: dddd0000dddd0000dddd0000dddd0003, type: 3}\r\n  speed: 2\r\n";
+    std::vector<UnityAsset> in(3);
+    in[0].guid = "dddd0000dddd0000dddd0000dddd0001", in[0].pathname = "Assets/Kit", in[0].folder = true;
+    in[0].meta = "fileFormatVersion: 2\nguid: dddd0000dddd0000dddd0000dddd0001\nfolderAsset: yes\n";
+    in[1].guid = "dddd0000dddd0000dddd0000dddd0002", in[1].pathname = "Assets/Kit/Sign.prefab", in[1].data = kit, in[1].has_data = true;
+    in[1].meta = "fileFormatVersion: 2\nguid: dddd0000dddd0000dddd0000dddd0002\nPrefabImporter:\n  userData: kept\n";
+    in[2].guid = "dddd0000dddd0000dddd0000dddd0003", in[2].pathname = "Assets/Kit/Spin.cs", in[2].data = "class Spin {}\n", in[2].has_data = true;
+    in[2].meta = "fileFormatVersion: 2\nguid: dddd0000dddd0000dddd0000dddd0003\nMonoImporter:\n  userData: \n";
+    const std::string dir = fs::join(test_dir(), "r372");
+    fs::make_dirs(dir);
+    const std::string pkg = fs::join(dir, "R372.unitypackage"), out = fs::join(dir, "R372 back.unitypackage");
+    CHECK(fs::write_file(pkg, write_unity_package(in)));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string root = resolve_asset_path("Assets/Imported/R372");
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    std::remove(out.c_str());
+    struct Cleanup {  // (on every way out: the scratch project left as it was)
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(root, e2);
+      std::remove(out.c_str());
+      std::remove(resolve_asset_path("Exports/R372.unitypackage").c_str());
+    }};
+    ed.command("import " + pkg);
+    ed.command("import " + fs::join(root, "Kit/Sign.prefab"));
+    ed.command("export unitypackage");  // (no folder: the selection's - the import's root, selected after the import)
+    std::printf("    the selection's export: %s\n", ed.last_export_for_test() ? ed.last_export_for_test()->out.c_str() : "-");
+    CHECK(ed.last_export_for_test() && ed.last_export_for_test()->why.empty() && fs::filename(ed.last_export_for_test()->out) == "R372.unitypackage");
+    GameObject *sign = ed.scene().find_by_name("Board");
+    CHECK(sign && sign->get<UnityOrigin>() && sign->get<UnityOrigin>()->transform == "400");
+    if (!sign) return;
+    Transform t = sign->local();
+    t.position = Vec3(1.5f, 0.25f, -3.0f);
+    sign->set_local(t);
+    sign->name = "\xE7\x9C\x8B\xE6\x9D\xBF";  // (a Japanese name: written back as \u escapes)
+    /* A copy of it, moved elsewhere: its UnityOrigin is the original's - the original's edits go, the copy's are left. */
+    ed.select_object(sign->id);
+    ed.command("duplicate");
+    GameObject *copy = ed.selected_object();
+    if (copy && copy != sign) {
+      Transform ct = copy->local();
+      ct.position = Vec3(5.0f, 0.0f, 0.0f);
+      copy->set_local(ct);
+      copy->name = "Copy";
+    }
+    CHECK(fs::write_file(fs::join(root, "Kit/Notes.txt"), "a new file\n"));
+    ed.command("export unitypackage Assets/Imported/R372 " + out);
+    std::string bytes, why;
+    std::vector<UnityAsset> back;
+    CHECK(fs::read_file(out, bytes) && read_unity_package(bytes, back, why));
+    const UnityAsset *prefab = nullptr, *script = nullptr, *notes = nullptr, *folder = nullptr;
+    for (const UnityAsset &a : back) {
+      prefab = a.pathname == "Assets/Kit/Sign.prefab" ? &a : prefab;
+      script = a.pathname == "Assets/Kit/Spin.cs" ? &a : script;
+      notes = a.pathname == "Assets/Kit/Notes.txt" ? &a : notes;
+      folder = a.pathname == "Assets/Kit" ? &a : folder;
+    }
+    std::printf("    %zu asset(s) back; the prefab %s, the script %s, the new file %s (GUID %s)\n", back.size(), prefab ? prefab->guid.c_str() : "-",
+                script ? script->guid.c_str() : "-", notes ? "there" : "-", notes ? notes->guid.c_str() : "-");
+    CHECK(prefab && script && notes && folder && prefab->guid == in[1].guid && script->guid == in[2].guid && folder->guid == in[0].guid && folder->folder);
+    if (!prefab || !script || !notes) return;
+    CHECK(prefab->meta == in[1].meta && script->data == in[2].data && script->meta == in[2].meta);
+    CHECK(notes->guid.size() == 32 && notes->guid != in[1].guid && notes->meta.find("guid: " + notes->guid) != std::string::npos && notes->data == "a new file\n");
+    const std::string &p = prefab->data;
+    std::printf("    the prefab's edited lines: %s", p.substr(p.find("  m_Name:"), p.find('\n', p.find("  m_Name:")) - p.find("  m_Name:") + 1).c_str());
+    CHECK(p.find("  m_Name: \"\\u770B\\u677F\"\r\n") != std::string::npos && p.find("  m_LocalPosition: {x: 1.5, y: 0.25, z: -3}\r\n") != std::string::npos);
+    CHECK(p.find("--- !u!114 &11400\r\nMonoBehaviour:\r\n  m_GameObject: {fileID: 100}\r\n  m_Script: {fileID: 11500000, guid: dddd0000dddd0000dddd0000dddd0003, type: 3}\r\n  speed: 2\r\n") !=
+          std::string::npos);
+    CHECK(p.find("m_IsActive: 1\r\n") != std::string::npos && p.find("  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\r\n") != std::string::npos &&
+          p.find("  m_LocalScale: {x: 1, y: 1, z: 1}\r\n") != std::string::npos);  // (unchanged values: their lines as Unity wrote them)
+    CHECK(p.find("Copy") == std::string::npos && p.find("x: 5") == std::string::npos && ed.last_export_for_test() && ed.last_export_for_test()->copies == 1);
+    std::string project_copy;
+    fs::read_file(fs::join(root, "Kit/Sign.prefab"), project_copy);
+    CHECK(project_copy == kit);  // (never written over: the package carries the edits)
+    /* Exported again: the new file under the same GUID (its path's). */
+    const std::string first_notes = notes->guid;
+    ed.command("export unitypackage Assets/Imported/R372 " + out);
+    std::vector<UnityAsset> again;
+    bytes.clear();
+    CHECK(fs::read_file(out, bytes) && read_unity_package(bytes, again, why));
+    std::string notes_again;
+    for (const UnityAsset &a : again) notes_again = a.pathname == "Assets/Kit/Notes.txt" ? a.guid : notes_again;
+    CHECK(notes_again == first_notes);
+  });
+  test("the lesson's Try-it (round 372): export unitypackage of a folder that isn't there is refused, writing nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("export unitypackage Assets/Imported/NoSuchPackage");
+    CHECK(!fs::exists(resolve_asset_path("Exports/NoSuchPackage.unitypackage")));
+  });
+}
+
+static void tests_round373() {
+  test("Godot's text (round 373): sections, attributes with spaces and brackets, a value over several lines, strings, numbers, Godot 3's and 4's references; a Transform3D into Blendity's (X mirrored, as glTF) and back, a light's turn its own inverse", [] {
+    const std::string text = "[gd_scene load_steps=2 format=3 uid=\"uid://abc\"]\n\n[ext_resource type=\"Script\" path=\"res://a b.gd\" id=\"1_x\"]\n\n"
+                             "[node name=\"My Root\" type=\"Node3D\"]\nscript = ExtResource(\"1_x\")\nmetadata/notes = {\n\"a\": [1, 2],\n\"b\": \"x = y\"\n}\n"
+                             "; a comment\n[node name=\"Kid\" type=\"Node3D\" parent=\".\" instance=ExtResource( 1 )]\nname_text = \"q\\\"uote\\n\"\n";
+    std::vector<GodotSection> s;
+    std::string why;
+    CHECK(parse_godot_text(text, s, why) && s.size() == 4);
+    if (s.size() != 4) return;
+    CHECK(s[0].tag == "gd_scene" && s[0].attr("format") == "3" && godot_string(s[1].attr("path")) == "res://a b.gd" && godot_string(s[2].attr("name")) == "My Root");
+    CHECK(s[2].prop("metadata/notes").find("\"b\": \"x = y\"") != std::string::npos && godot_ref(s[2].prop("script")) == "1_x" && godot_ref(s[3].attr("instance")) == "1");
+    CHECK(godot_string(s[3].prop("name_text")) == "q\"uote\n" && godot_string(s[3].attr("parent")) == ".");
+    std::string joined;
+    for (const GodotSection &x : s) joined += x.text;
+    CHECK(joined == text);  // (every byte kept with its section)
+    std::vector<GodotSection> none;
+    CHECK(!parse_godot_text("PK\x03\x04 binary", none, why) && !why.empty());
+    /* Review 373: a BOM, an escaped quote and bracket inside a header's string, \u escapes, a line with no " = ". */
+    const std::string odd = "\xEF\xBB\xBF[gd_scene format=3]\n\n[node name=\"a\\\"] b\" type=\"Node3D\"]\nodd line\nlabel = \"\\u00e9\"\n";
+    std::vector<GodotSection> o;
+    CHECK(parse_godot_text(odd, o, why) && o.size() == 2 && o.size() == 2 && godot_string(o[1].attr("name")) == "a\"] b" && godot_string(o[1].attr("type")) == "Node3D");
+    if (o.size() == 2) CHECK(o[0].text + o[1].text == odd && godot_string(o[1].prop("label")) == "\xC3\xA9");
+    /* Godot's +90 degrees about Y at (1, 2, 3), X mirrored as glTF's (ADR 0055): at (-1, 2, 3), its +Z axis along -X. */
+    const std::string g = "Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 1, 2, 3)";
+    const Transform t = godot_transform(g);
+    const Mat4 m = Mat4::rotate(t.rotation);
+    const Vec3 fwd(m.at(0, 2), m.at(1, 2), m.at(2, 2));
+    std::printf("    %s -> position (%g, %g, %g), +Z (%g, %g, %g)\n", g.c_str(), t.position.x, t.position.y, t.position.z, fwd.x, fwd.y, fwd.z);
+    CHECK(length(t.position - Vec3(-1, 2, 3)) < 1e-5f && length(fwd - Vec3(-1, 0, 0)) < 1e-4f && length(t.scale - Vec3(1.0f)) < 1e-5f);
+    const Transform turned = godot_turn(godot_turn(t, true, true), true, true);  // (its own inverse)
+    CHECK(length(turned.position - t.position) < 1e-5f && std::fabs(std::fabs(turned.rotation.y * t.rotation.y + turned.rotation.w * t.rotation.w + turned.rotation.x * t.rotation.x + turned.rotation.z * t.rotation.z) - 1.0f) < 1e-5f);
+    CHECK(godot_path_key("C:/A/./b/../Loop.tscn") == godot_path_key("c:/a/loop.tscn"));
+    const std::vector<double> a = godot_numbers(g), b = godot_numbers(godot_transform_text(t, true));
+    CHECK(a.size() == 12 && b.size() == 12);
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) CHECK(std::fabs(a[i] - b[i]) < 1e-5);
+    CHECK(godot_transform_text(Transform(), false) == "Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 )");
+  });
+  test("Godot scenes in and back (round 373): a project's .tscn imported under one root - a box with its red material, a hidden lamp, a camera, a body's collision box, an instanced scene, an AnimationPlayer and the root's script kept as Godot nodes, a scene instancing itself stopped; export tscn writes the moved box's transform and the lamp's visibility into their lines, every other byte as it was; a Godot 3 scene too", [] {
+    const std::string dir = fs::join(test_dir(), "r373 godot");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, "props"));
+    const std::string main_tscn = "[gd_scene load_steps=6 format=3 uid=\"uid://main\"]\n\n"
+        "[ext_resource type=\"Script\" path=\"res://level.gd\" id=\"1_lv\"]\n[ext_resource type=\"PackedScene\" path=\"res://props/prop.tscn\" id=\"2_pr\"]\n"
+        "[ext_resource type=\"PackedScene\" path=\"res://loop.tscn\" id=\"3_lp\"]\n\n"
+        "[sub_resource type=\"StandardMaterial3D\" id=\"Mat_red\"]\nresource_name = \"Red\"\nalbedo_color = Color(1, 0, 0, 1)\nroughness = 0.25\n\n"
+        "[sub_resource type=\"BoxMesh\" id=\"Box_1\"]\nmaterial = SubResource(\"Mat_red\")\nsize = Vector3(4, 0.5, 4)\n\n"
+        "[sub_resource type=\"BoxShape3D\" id=\"Shape_1\"]\nsize = Vector3(2, 2, 2)\n\n"
+        "[node name=\"Level\" type=\"Node3D\"]\nscript = ExtResource(\"1_lv\")\nmetadata/kept = {\n\"x\": 1\n}\n\n"
+        "[node name=\"Floor\" type=\"MeshInstance3D\" parent=\".\"]\nmesh = SubResource(\"Box_1\")\n\n"
+        "[node name=\"Lamp\" type=\"OmniLight3D\" parent=\".\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)\nvisible = false\nlight_energy = 2.0\nomni_range = 7.0\n\n"
+        "[node name=\"Cam\" type=\"Camera3D\" parent=\".\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 5)\nfov = 60.0\n\n"
+        "[node name=\"Body\" type=\"StaticBody3D\" parent=\".\"]\n\n"
+        "[node name=\"Shape\" type=\"CollisionShape3D\" parent=\"Body\"]\nshape = SubResource(\"Shape_1\")\n\n"
+        "[node name=\"Anim\" type=\"AnimationPlayer\" parent=\".\"]\nautoplay = \"idle\"\n\n"
+        "[node name=\"Prop\" parent=\".\" instance=ExtResource(\"2_pr\")]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0, 0)\n\n"
+        "[node name=\"Loop\" parent=\".\" instance=ExtResource(\"3_lp\")]\n";
+    const std::string prop = "[gd_scene load_steps=2 format=3]\n\n[sub_resource type=\"SphereMesh\" id=\"S\"]\n\n[node name=\"PropRoot\" type=\"Node3D\"]\n\n"
+                             "[node name=\"Ball\" type=\"MeshInstance3D\" parent=\".\"]\nmesh = SubResource(\"S\")\n";
+    const std::string loop = "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://loop.tscn\" id=\"1\"]\n\n"
+                             "[node name=\"LoopRoot\" type=\"Node3D\"]\n\n[node name=\"Again\" parent=\".\" instance=ExtResource(\"1\")]\n";
+    CHECK(fs::write_file(fs::join(dir, "project.godot"), "config_version=5\n") && fs::write_file(fs::join(dir, "main.tscn"), main_tscn) &&
+          fs::write_file(fs::join(dir, "props/prop.tscn"), prop) && fs::write_file(fs::join(dir, "loop.tscn"), loop) && fs::write_file(fs::join(dir, "level.gd"), "extends Node3D\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("import " + fs::join(dir, "main.tscn"));
+    Scene &sc = ed.scene();
+    GameObject *root = sc.find_by_name("main"), *level = sc.find_by_name("Level"), *floor = sc.find_by_name("Floor"), *lamp = sc.find_by_name("Lamp");
+    GameObject *cam = sc.find_by_name("Cam"), *shape = sc.find_by_name("Shape"), *anim = sc.find_by_name("Anim"), *ball = sc.find_by_name("Ball");
+    CHECK(root && level && floor && lamp && cam && shape && anim && ball && ed.selected_object() == root && level->parent == root);
+    if (!root || !level || !floor || !lamp || !cam || !shape || !anim || !ball) return;
+    const MeshFilter *mf = floor->get<MeshFilter>();
+    const MeshRenderer *mr = floor->get<MeshRenderer>();
+    float wide = 0.0f;
+    for (const Vec3 &p : mf && mf->mesh ? mf->mesh->positions : std::vector<Vec3>()) wide = std::max(wide, p.x);
+    std::printf("    the floor: half width %g, %zu material(s)\n", wide, mr ? mr->materials.size() : 0);
+    CHECK(std::fabs(wide - 2.0f) < 1e-4f && mr && mr->materials.size() == 1 && mr->materials[0] && mr->materials[0]->name == "Red");
+    if (mr && !mr->materials.empty() && mr->materials[0]) CHECK(std::fabs(mr->materials[0]->base_color.x - 1.0f) < 1e-4f && mr->materials[0]->base_color.y < 1e-4f && std::fabs(mr->materials[0]->roughness - 0.25f) < 1e-5f);
+    const Light *l = lamp->get<Light>();
+    CHECK(!lamp->active && l && l->type == 1 && std::fabs(l->intensity - 2.0f) < 1e-5f && std::fabs(l->range - 7.0f) < 1e-5f && length(lamp->local().position - Vec3(0, 3, 0)) < 1e-5f);
+    const Vec3 cam_fwd = cam->local().rotation.rotate(Vec3(0, 0, 1));  // (Godot's camera looks down -Z: Blendity's along +Z - turned)
+    CHECK(cam->get<Camera>() && std::fabs(cam->get<Camera>()->fov - 60.0f) < 1e-4f && length(cam->local().position - Vec3(0, 1.6f, 5)) < 1e-5f && length(cam_fwd - Vec3(0, 0, -1)) < 1e-4f);
+    const ColliderComponent *col = shape->get<ColliderComponent>();
+    CHECK(col && col->shape == 0 && length(col->size - Vec3(2.0f)) < 1e-5f && shape->parent && shape->parent->name == "Body" && shape->get<GodotOrigin>() && shape->get<GodotOrigin>()->path == "Body/Shape");
+    const EngineComponent *ae = anim->get<EngineComponent>(), *le = level->get<EngineComponent>();
+    CHECK(ae && ae->engine == "Godot" && ae->type == "AnimationPlayer" && ae->data.find("autoplay = \"idle\"") != std::string::npos);
+    CHECK(le && le->script == "res://level.gd" && le->type == "level (Node3D)" && le->data.find("metadata/kept") != std::string::npos);
+    CHECK(ball->get<MeshFilter>() && ball->parent && ball->parent->name == "Prop" && !ball->get<GodotOrigin>() && length(ball->parent->local().position - Vec3(-2, 0, 0)) < 1e-5f);
+    int agains = 0;
+    sc.for_each([&](GameObject &g) { agains += g.name == "Again"; });
+    CHECK(agains == 1);  // (the loop stopped at its second appearance)
+    /* Moved and shown here; written back. */
+    Transform ft = floor->local();
+    ft.position = Vec3(1.5f, 0.0f, -3.0f);
+    floor->set_local(ft);
+    lamp->active = true;
+    const std::string out = fs::join(dir, "main back.tscn");
+    ed.select_object(floor->id);
+    ed.command("export tscn " + out);
+    std::string back;
+    CHECK(fs::read_file(out, back));
+    std::string expect = main_tscn;
+    const std::string floor_head = "[node name=\"Floor\" type=\"MeshInstance3D\" parent=\".\"]\n";
+    expect.insert(expect.find(floor_head) + floor_head.size(), "transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 0, -3)\n");
+    expect.erase(expect.find("visible = false\n"), std::string("visible = false\n").size());
+    std::printf("    written back: %s\n", back == expect ? "the two lines only" : "something else");
+    CHECK(back == expect);
+    std::string source;
+    CHECK(fs::read_file(fs::join(dir, "main.tscn"), source) && source == main_tscn);  // (the Godot project's file as it was)
+    /* Godot 3: Spatial, MeshInstance, CubeMesh (2 m), SpatialMaterial unshaded, Transform( ... ), numeric ids. */
+    const std::string old = "[gd_scene load_steps=3 format=2]\n\n[sub_resource type=\"CubeMesh\" id=1]\n\n[sub_resource type=\"SpatialMaterial\" id=2]\n"
+                            "albedo_color = Color( 0.5, 0.5, 0.5, 1 )\nflags_unshaded = true\n\n[node name=\"Old\" type=\"Spatial\"]\n\n"
+                            "[node name=\"Box3\" type=\"MeshInstance\" parent=\".\"]\ntransform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -2 )\nmesh = SubResource( 1 )\nmaterial/0 = SubResource( 2 )\n";
+    CHECK(fs::write_file(fs::join(dir, "old.tscn"), old));
+    ed.command("import " + fs::join(dir, "old.tscn"));
+    GameObject *box3 = sc.find_by_name("Box3");
+    CHECK(box3 && box3->get<MeshFilter>() && box3->get<MeshRenderer>() && length(box3->local().position - Vec3(0, 1, -2)) < 1e-5f);
+    if (!box3 || !box3->get<MeshRenderer>() || box3->get<MeshRenderer>()->materials.empty()) return;
+    const MaterialPtr &m3 = box3->get<MeshRenderer>()->materials[0];
+    float wide3 = 0.0f;
+    for (const Vec3 &p : box3->get<MeshFilter>()->mesh->positions) wide3 = std::max(wide3, p.x);
+    CHECK(m3 && m3->unlit && std::fabs(m3->base_color.x - srgb_to_linear(0.5f)) < 1e-4f && std::fabs(wide3 - 1.0f) < 1e-4f);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Godot scenes, the review's cases (round 373): an inherited scene's overrides edit its nodes (no copies; material_override first); a Godot 3 scene with ids shared between its .tres and itself, a 1 m default sphere and cylinder, a built-in script; an instanced OBJ mirrored as the scene; CRLF and Godot 3 written back; the object cap", [] {
+    const std::string dir = fs::join(test_dir(), "r373 review");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    const std::string base = "[gd_scene load_steps=2 format=3]\n\n[sub_resource type=\"SphereMesh\" id=\"S\"]\n\n[node name=\"Base\" type=\"Node3D\"]\n\n"
+                             "[node name=\"Orb\" type=\"MeshInstance3D\" parent=\".\"]\nmesh = SubResource(\"S\")\n";
+    const std::string inh = "[gd_scene load_steps=4 format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://base.tscn\" id=\"1\"]\n\n"
+                            "[sub_resource type=\"StandardMaterial3D\" id=\"Red\"]\nalbedo_color = Color(1, 0, 0, 1)\n\n"
+                            "[sub_resource type=\"StandardMaterial3D\" id=\"Green\"]\nalbedo_color = Color(0, 1, 0, 1)\n\n"
+                            "[node name=\"Inh\" instance=ExtResource(\"1\")]\n\n"
+                            "[node name=\"Orb\" parent=\".\" index=\"0\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)\n"
+                            "surface_material_override/0 = SubResource(\"Green\")\nmaterial_override = SubResource(\"Red\")\n";
+    /* Godot 3: ext 1 a script, ext 2 a .tres whose own ext 1 is its texture; sub 1 a sphere, sub 2 a cylinder, sub 3 a built-in script. */
+    const std::string tres = "[gd_resource type=\"SpatialMaterial\" load_steps=2 format=2]\n\n[ext_resource path=\"res://wood.png\" type=\"Texture\" id=1]\n\n"
+                             "[resource]\nalbedo_texture = ExtResource( 1 )\n";
+    const std::string g3 = "[gd_scene load_steps=6 format=2]\r\n\r\n[ext_resource path=\"res://player.gd\" type=\"Script\" id=1]\r\n"
+                           "[ext_resource path=\"res://mat.tres\" type=\"Material\" id=2]\r\n[ext_resource path=\"res://post.obj\" type=\"PackedScene\" id=3]\r\n\r\n"
+                           "[sub_resource type=\"SphereMesh\" id=1]\r\n\r\n[sub_resource type=\"CylinderMesh\" id=2]\r\n\r\n[sub_resource type=\"GDScript\" id=3]\r\nscript/source = \"extends Spatial\"\r\n\r\n"
+                           "[node name=\"G3\" type=\"Spatial\"]\r\nscript = ExtResource( 1 )\r\n\r\n"
+                           "[node name=\"Globe\" type=\"MeshInstance\" parent=\".\"]\r\nmesh = SubResource( 1 )\r\nmaterial/0 = ExtResource( 2 )\r\n\r\n"
+                           "[node name=\"Can\" type=\"MeshInstance\" parent=\".\"]\r\nmesh = SubResource( 2 )\r\nscript = SubResource( 3 )\r\n\r\n"
+                           "[node name=\"Mark\" type=\"Position3D\" parent=\".\"]\r\ntransform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 )\r\n\r\n"
+                           "[node name=\"Post\" parent=\".\" instance=ExtResource( 3 )]\r\n";
+    CHECK(fs::write_file(fs::join(dir, "project.godot"), "config_version=4\n") && fs::write_file(fs::join(dir, "base.tscn"), base) && fs::write_file(fs::join(dir, "inh.tscn"), inh) &&
+          fs::write_file(fs::join(dir, "mat.tres"), tres) && fs::write_file(fs::join(dir, "wood.png"), "not read here") && fs::write_file(fs::join(dir, "player.gd"), "extends Spatial\n") &&
+          fs::write_file(fs::join(dir, "g3.tscn"), g3) && fs::write_file(fs::join(dir, "post.obj"), "v 1 0 0\nv 1 1 0\nv 1 0 1\nf 1 2 3\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    Scene &sc = ed.scene();
+    ed.command("import " + fs::join(dir, "inh.tscn"));
+    int orbs = 0;
+    GameObject *orb = nullptr;
+    sc.for_each([&](GameObject &g) { orbs += g.name == "Orb", orb = g.name == "Orb" ? &g : orb; });
+    CHECK(orbs == 1 && orb && length(orb->local().position - Vec3(0, 2, 0)) < 1e-5f && orb->get<GodotOrigin>() && orb->get<GodotOrigin>()->path == "Orb");
+    const MeshRenderer *orb_r = orb ? orb->get<MeshRenderer>() : nullptr;
+    CHECK(orb_r && orb_r->materials.size() == 1 && orb_r->materials[0] && orb_r->materials[0]->base_color.x > 0.99f && orb_r->materials[0]->base_color.y < 0.01f);
+    float orb_h = 0.0f;
+    for (const Vec3 &p : orb && orb->get<MeshFilter>() ? orb->get<MeshFilter>()->mesh->positions : std::vector<Vec3>()) orb_h = std::max(orb_h, p.y);
+    CHECK(std::fabs(orb_h - 0.5f) < 1e-3f);  // (Godot 4's default sphere: 1 m tall)
+    ed.command("import " + fs::join(dir, "g3.tscn"));
+    GameObject *globe = sc.find_by_name("Globe"), *can = sc.find_by_name("Can"), *mark = sc.find_by_name("Mark"), *g3root = sc.find_by_name("G3"), *post = sc.find_by_name("Post");
+    CHECK(globe && can && mark && g3root && post);
+    if (!globe || !can || !mark || !g3root || !post) return;
+    auto widest = [](const GameObject *g) {
+      float w = 0.0f;
+      for (const Vec3 &p : g->get<MeshFilter>() ? g->get<MeshFilter>()->mesh->positions : std::vector<Vec3>()) w = std::max(w, p.x);
+      return w;
+    };
+    const MeshRenderer *gr = globe->get<MeshRenderer>();
+    CHECK(std::fabs(widest(globe) - 1.0f) < 1e-3f && std::fabs(widest(can) - 1.0f) < 1e-3f);  // (Godot 3's defaults: 1 m radii)
+    CHECK(gr && gr->materials.size() == 1 && gr->materials[0] && fs::filename(gr->materials[0]->base_map.path) == "wood.png");  // (the .tres's own id 1, not the scene's script)
+    CHECK(g3root->get<EngineComponent>() && g3root->get<EngineComponent>()->script == "res://player.gd" && can->get<EngineComponent>() &&
+          can->get<EngineComponent>()->type == "built-in script (MeshInstance)");
+    float post_x = 0.0f;  // (the instanced OBJ's vertices at Godot's x = 1: Blendity's -1, as Mark's)
+    std::function<void(GameObject *)> walk = [&](GameObject *g) {
+      if (g->get<MeshFilter>()) post_x = g->get<MeshFilter>()->mesh->positions[0].x;
+      for (GameObject *c : g->children) walk(c);
+    };
+    walk(post);
+    std::printf("    the OBJ's vertex x %g, the marker's %g\n", post_x, mark->local().position.x);
+    CHECK(std::fabs(post_x + 1.0f) < 1e-4f && std::fabs(mark->local().position.x + 1.0f) < 1e-4f);
+    /* Godot 3 and CRLF written back: the marker moved to Blendity's x = 2 (Godot's -2). */
+    Transform mt = mark->local();
+    mt.position = Vec3(2.0f, 0.0f, 0.0f);
+    mark->set_local(mt);
+    const std::string out = fs::join(dir, "g3 back.tscn");
+    ed.select_object(mark->id);
+    ed.command("export tscn " + out);
+    std::string back, expect = g3;
+    CHECK(fs::read_file(out, back));
+    const std::string old_line = "transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0 )\r\n";
+    expect.replace(expect.find(old_line), old_line.size(), "transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 0, 0 )\r\n");
+    CHECK(back == expect);
+    /* The cap: three instances of a 30-node scene, at most 50 objects. */
+    std::string many = "[gd_scene format=3]\n\n[node name=\"M\" type=\"Node3D\"]\n";
+    for (int i = 0; i < 29; i++) many += "\n[node name=\"N" + std::to_string(i) + "\" type=\"Node3D\" parent=\".\"]\n";
+    const std::string three = "[gd_scene format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://many.tscn\" id=\"1\"]\n\n[node name=\"T\" type=\"Node3D\"]\n\n"
+                              "[node name=\"A\" parent=\".\" instance=ExtResource(\"1\")]\n\n[node name=\"B\" parent=\".\" instance=ExtResource(\"1\")]\n\n[node name=\"C\" parent=\".\" instance=ExtResource(\"1\")]\n";
+    CHECK(fs::write_file(fs::join(dir, "many.tscn"), many));
+    std::vector<GodotSection> secs;
+    std::string why;
+    CHECK(parse_godot_text(three, secs, why));
+    GodotImport capped;
+    capped.res_root = dir, capped.max_objects = 50;
+    build_godot_scene(secs, sc, nullptr, capped);
+    std::printf("    capped: %d object(s) made\n", *capped.total);
+    CHECK(*capped.total <= 51 && *capped.total >= 40 && std::any_of(capped.notes.begin(), capped.notes.end(), [](const std::string &n) { return n.find("passed 50") != std::string::npos; }));
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the lesson's Try-it (round 373): export tscn with nothing from Godot selected is refused, writing nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const int before = (int)fs::list(resolve_asset_path("Exports")).size();
+    ed.command("export tscn");
+    CHECK((int)fs::list(resolve_asset_path("Exports")).size() == before);
+  });
+}
+
+/* How many objects carry a name (round 374: MSVC rejected a counting lambda beside a local Cleanup struct). */
+static int count_named(Scene &sc, const std::string &name) {
+  int n = 0;
+  sc.for_each([&](GameObject &g) { n += g.name == name; });
+  return n;
+}
+
+static void tests_round374() {
+  test("Send to Blendity's snapshots (round 374): snapshot.json read - Live Link's light and camera fields, a class and custom properties, a transform; a model path leaving its folder refused", [] {
+    Snapshot s;
+    std::string why;
+    const std::string json = "{\"snapshot\": 1, \"source\": \"Unreal 5.5\", \"name\": \"Level\", \"model\": \"Level.fbx\", \"objects\": ["
+                             "{\"name\": \"Door\", \"path\": \"Room/Door\", \"class\": \"/Game/BP_Door.BP_Door_C\", \"props\": {\"locked\": true, \"code\": 1234, \"tag\": \"red\"}},"
+                             "{\"name\": \"Sun\", \"light\": {\"type\": \"directional\", \"intensity\": 2.5, \"color\": [1, 0.5, 0.25]}, "
+                             "\"transform\": {\"position\": [1, 2, 3], \"rotation\": [0, 0.70710678, 0, 0.70710678], \"scale\": [1, 1, 1]}}]}";
+    CHECK(read_snapshot(json, s, why) && s.objects.size() == 2 && snapshot_engine(s) == "Unreal" && s.name == "Level" && s.model == "Level.fbx");
+    if (s.objects.size() != 2) return;
+    CHECK(s.objects[0].path == "Room/Door" && s.objects[0].engine_class == "/Game/BP_Door.BP_Door_C" && s.objects[0].props == "locked = true\ncode = 1234\ntag = red\n");
+    CHECK(s.objects[1].has_light && s.objects[1].has_transform && !s.objects[1].has_camera && length(s.objects[1].transform.position - Vec3(1, 2, 3)) < 1e-6f);
+    Light l;
+    snapshot_light(s.objects[1].light, l);
+    CHECK(l.type == 0 && std::fabs(l.intensity - 2.5f) < 1e-6f && std::fabs(l.color.y - 0.5f) < 1e-6f);
+    Snapshot bad;
+    CHECK(!read_snapshot("{\"snapshot\": 1, \"model\": \"../../outside.glb\"}", bad, why) && !why.empty());
+    CHECK(!read_snapshot("{\"snapshot\": 1, \"model\": \"C:/Windows/x.glb\"}", bad, why) && !read_snapshot("{\"model\": \"a.glb\"}", bad, why));
+  });
+  test("a snapshot imported (round 374): its model through the usual import, the snapshot's name on the root, a class and properties as an Engine Component, a light and a camera made where the snapshot puts them, all one Undo step; the inbox imports a bridge's snapshot and moves it to Done", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string project = fs::parent(resolve_asset_path("Assets"));
+    const std::string dir = fs::join(test_dir(), "r374"), snap = fs::join(dir, "Level.blendity-snapshot"), inbox = fs::join(project, "Incoming");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    static const char *const kLeft[] = {"Assets/Meshes/r374kit.obj", "Assets/Materials/r374kit", "Assets/Textures/r374kit", "Assets/Meshes/r374inbox.obj",
+                                        "Assets/Materials/r374inbox"};
+    struct Cleanup {  // (the scratch project left as it was: review 360's lesson)
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(inbox, e2);
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    fs::make_dirs(snap);
+    const std::string obj = "o Crate\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\no Barrel\nv 0 0 1\nv 1 0 1\nv 0 1 1\nf 4 5 6\n";
+    const std::string json = "{\"snapshot\": 1, \"source\": \"Unreal 5.5\", \"name\": \"Level\", \"model\": \"r374kit.obj\", \"objects\": ["
+                             "{\"name\": \"Crate\", \"class\": \"/Game/BP_Crate.BP_Crate_C\", \"props\": {\"health\": 42}},"
+                             "{\"name\": \"Lamp\", \"light\": {\"type\": \"point\", \"intensity\": 3, \"range\": 7}, \"transform\": {\"position\": [1, 2, 3], \"rotation\": [0, 0, 0, 1]}},"
+                             "{\"name\": \"Cam\", \"camera\": {\"fov\": 50, \"near\": 0.2, \"far\": 300}, \"transform\": {\"position\": [0, 1.5, -6], \"rotation\": [0, 0, 0, 1]}}]}";
+    CHECK(fs::write_file(fs::join(snap, "r374kit.obj"), obj) && fs::write_file(fs::join(snap, "snapshot.json"), json));
+    ed.command("import " + snap);
+    Scene &sc = ed.scene();
+    GameObject *root = sc.find_by_name("Level"), *crate = sc.find_by_name("Crate"), *lamp = sc.find_by_name("Lamp"), *cam = sc.find_by_name("Cam");
+    CHECK(root && crate && lamp && cam && ed.selected_object() == root);
+    if (!root || !crate || !lamp || !cam) return;
+    const EngineComponent *e = crate->get<EngineComponent>();
+    CHECK(e && e->engine == "Unreal" && e->type == "/Game/BP_Crate.BP_Crate_C" && e->data == "health = 42\n" && crate->get<MeshFilter>());
+    CHECK(lamp->light() && lamp->light()->type == 1 && std::fabs(lamp->light()->intensity - 3.0f) < 1e-6f && std::fabs(lamp->light()->range - 7.0f) < 1e-6f &&
+          lamp->parent == root && length(lamp->local().position - Vec3(1, 2, 3)) < 1e-4f);
+    CHECK(cam->camera() && std::fabs(cam->camera()->fov - 50.0f) < 1e-4f && std::fabs(cam->camera()->far_clip - 300.0f) < 1e-3f && length(cam->local().position - Vec3(0, 1.5f, -6)) < 1e-4f);
+    ed.command("undo");
+    CHECK(!ed.scene().find_by_name("Level") && !ed.scene().find_by_name("Lamp"));  // (one step took all of it away)
+    /* The inbox: a bridge's snapshot written into Incoming, then livelink inbox (Live Link's tick does it each second). */
+    const std::string sent = fs::join(inbox, "Sent.blendity-snapshot");
+    fs::make_dirs(sent);
+    CHECK(fs::write_file(fs::join(sent, "r374inbox.obj"), obj) &&
+          fs::write_file(fs::join(sent, "snapshot.json"), "{\"snapshot\": 1, \"source\": \"Blender 5.2\", \"name\": \"Sent\", \"model\": \"r374inbox.obj\"}"));
+    ed.command("livelink inbox");
+    CHECK(ed.scene().find_by_name("Sent") && !fs::exists(sent) && fs::exists(fs::join(inbox, "Done/Sent.blendity-snapshot/snapshot.json")));
+    ed.command("livelink inbox");
+    CHECK(count_named(ed.scene(), "Sent") == 1);  // (moved to Done: not again)
+  });
+  test("an Unreal snapshot's frame (round 374, review): an FBX as Unreal writes it (Z up, front -Y) turned by the snapshot's model_rotation, so a car's nose at Unreal's +50 cm X lies 0.5 m along Blendity's +Z from its pivot, where the snapshot puts the headlight; a lone object keeps its name and the model's place; a refused snapshot is said", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = fs::join(test_dir(), "r374 frame"), snap = fs::join(dir, "Yard.blendity-snapshot"), lone = fs::join(dir, "Lone.blendity-snapshot");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    static const char *const kLeft[] = {"Assets/Meshes/r374yard.fbx", "Assets/Materials/r374yard", "Assets/Meshes/r374lone.obj", "Assets/Materials/r374lone"};
+    struct Cleanup {
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    fs::make_dirs(snap);
+    fs::make_dirs(lone);
+    const std::string fbx = "; FBX 7.4.0 project file\n"
+        "FBXHeaderExtension:  {\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}\n"
+        "GlobalSettings:  {\n\tVersion: 1000\n\tProperties70:  {\n"
+        "\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",2\n\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",1\n\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",-1\n"
+        "\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n"
+        "\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",1\n\t}\n}\n"
+        "Objects:  {\n\tGeometry: 100, \"Geometry::Car\", \"Mesh\" {\n\t\tVertices: *9 {\n\t\t\ta: 50,0,0,0,10,0,0,0,10\n\t\t}\n"
+        "\t\tPolygonVertexIndex: *3 {\n\t\t\ta: 0,1,-3\n\t\t}\n\t}\n"
+        "\tGeometry: 101, \"Geometry::Rock\", \"Mesh\" {\n\t\tVertices: *9 {\n\t\t\ta: 0,0,0,10,0,0,0,0,10\n\t\t}\n"
+        "\t\tPolygonVertexIndex: *3 {\n\t\t\ta: 0,1,-3\n\t\t}\n\t}\n"
+        "\tModel: 200, \"Model::Car\", \"Mesh\" {\n\t\tVersion: 232\n\t\tProperties70:  {\n"
+        "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",100,0,0\n\t\t}\n\t}\n"
+        "\tModel: 201, \"Model::Rock\", \"Mesh\" {\n\t\tVersion: 232\n\t\tProperties70:  {\n"
+        "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0\n\t\t}\n\t}\n}\n"
+        "Connections:  {\n\tC: \"OO\",100,200\n\tC: \"OO\",101,201\n\tC: \"OO\",200,0\n\tC: \"OO\",201,0\n}\n";
+    /* What the plugin's snapshot_json writes for the car at Unreal's (100, 0, 0) and a headlight spot there: (0, 0, 1) m. */
+    const std::string json = "{\"snapshot\": 1, \"source\": \"Unreal 5.8\", \"name\": \"Yard\", \"model\": \"r374yard.fbx\", \"model_rotation\": [0, 0.70710678, 0, 0.70710678], \"objects\": ["
+                             "{\"name\": \"Car\", \"transform\": {\"position\": [0, 0, 1], \"rotation\": [0, 0, 0, 1], \"scale\": [1, 1, 1]}},"
+                             "{\"name\": \"Head\", \"transform\": {\"position\": [0, 0, 1], \"rotation\": [0, 0, 0, 1], \"scale\": [1, 1, 1]}, \"light\": {\"type\": \"spot\"}}]}";
+    CHECK(fs::write_file(fs::join(snap, "r374yard.fbx"), fbx) && fs::write_file(fs::join(snap, "snapshot.json"), json));
+    ed.command("import " + snap);
+    GameObject *car = ed.scene().find_by_name("Car"), *head = ed.scene().find_by_name("Head");
+    CHECK(car && head && car->get<MeshFilter>() && head->light());
+    if (!car || !head || !car->get<MeshFilter>()) return;
+    Vec3 nose(-1e9f);
+    for (const Vec3 &p : car->get<MeshFilter>()->mesh->positions) {
+      const Vec3 w = car->world_matrix().point(p);
+      nose = w.z > nose.z ? w : nose;
+    }
+    const Vec3 lamp = head->world_position(), lamp_fwd = head->world_matrix().dir(Vec3(0, 0, 1));
+    std::printf("    the nose at (%g, %g, %g), the headlight at (%g, %g, %g) facing (%g, %g, %g)\n", nose.x, nose.y, nose.z, lamp.x, lamp.y, lamp.z, lamp_fwd.x, lamp_fwd.y, lamp_fwd.z);
+    CHECK(length(nose - (lamp + Vec3(0, 0, 0.5f))) < 1e-3f && length(lamp_fwd - Vec3(0, 0, 1)) < 1e-4f);
+    /* M2: a model of one object - it is the root; the snapshot's transform isn't stacked on it, its name kept. */
+    CHECK(fs::write_file(fs::join(lone, "r374lone.obj"), "o Solo\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n") &&
+          fs::write_file(fs::join(lone, "snapshot.json"), "{\"snapshot\": 1, \"name\": \"Lone\", \"model\": \"r374lone.obj\", \"objects\": ["
+                                                          "{\"name\": \"Solo\", \"class\": \"/Game/BP_Solo.BP_Solo_C\", \"transform\": {\"position\": [5, 0, 0], \"rotation\": [0, 0, 0, 1], \"scale\": [2, 2, 2]}}]}"));
+    ed.command("import " + lone);
+    GameObject *solo = ed.selected_object();
+    CHECK(solo && solo->name == "Solo" && solo->get<EngineComponent>() && length(solo->local().scale - Vec3(1.0f)) < 1e-5f &&
+          length(solo->world_position() - ed.scene_view_pivot_for_test()) < 1e-4f);
+    /* A snapshot that isn't one: refused aloud. */
+    CHECK(fs::write_file(fs::join(lone, "snapshot.json"), "{\"model\": \"r374lone.obj\"}"));
+    ed.step_frame_headless();  // (the toasts start: the log so far is history)
+    ed.command("import " + lone);
+    ed.step_frame_headless();
+    CHECK(!ed.toasts_for_test().empty() && ed.toasts_for_test().front().text.find("not a Blendity snapshot") != std::string::npos);
+  });
+  test("a .blend through the installed Blender (round 374): a crate with custom properties, a lamp and a camera come in from Blender's own exporter with their light, camera and properties (BLENDITY_TEST_BRIDGE runs it; skipped without)", [] {
+    if (!std::getenv("BLENDITY_TEST_BRIDGE")) return (void)std::printf("    skipped: set BLENDITY_TEST_BRIDGE to run Blender\n");
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::string version;
+    const std::string blender = ed.find_blender_for_test(version);
+    if (blender.empty()) return (void)std::printf("    skipped: Blender isn't installed\n");
+    const std::string dir = fs::join(test_dir(), "r374 blend"), blend = fs::join(dir, "Room.blend"), make = fs::join(dir, "make.py");
+    fs::make_dirs(dir);
+    static const char *const kLeft[] = {"Assets/Meshes/Room.glb", "Assets/Materials/Room", "Assets/Textures/Room", "Library/Blend"};
+    struct Cleanup {  // (on every way out, a failed CHECK's too: review 374)
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    CHECK(fs::write_file(make, "import sys, bpy\nout = sys.argv[sys.argv.index('--') + 1]\nfor o in list(bpy.data.objects): bpy.data.objects.remove(o)\n"
+                               "bpy.ops.mesh.primitive_cube_add(size=2.0, location=(1.0, 2.0, 3.0))\nc = bpy.context.active_object\nc.name = 'Crate'\nc['health'] = 42\n"
+                               "l = bpy.data.objects.new('Lamp', bpy.data.lights.new('Lamp', 'POINT'))\nbpy.context.scene.collection.objects.link(l)\nl.location = (0, 0, 4)\n"
+                               "k = bpy.data.objects.new('Cam', bpy.data.cameras.new('Cam'))\nbpy.context.scene.collection.objects.link(k)\nk.location = (0, -6, 1.5)\n"
+                               "bpy.ops.wm.save_as_mainfile(filepath=out)\n"));
+    std::string out;
+    CHECK(sys::run_capture({blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python", make, "--", blend}, out, 300) == 0 && fs::exists(blend));
+    ed.command("import " + blend);
+    GameObject *root = ed.scene().find_by_name("Room"), *crate = ed.scene().find_by_name("Crate"), *lamp = ed.scene().find_by_name("Lamp"), *cam = ed.scene().find_by_name("Cam");
+    std::printf("    Blender %s: root %s, crate %s, lamp %s, camera %s\n", version.c_str(), root ? "yes" : "no", crate ? "yes" : "no", lamp && lamp->light() ? "lit" : "no",
+                cam && cam->camera() ? "yes" : "no");
+    CHECK(root && crate && crate->get<MeshFilter>() && lamp && lamp->light() && cam && cam->camera());
+    if (!crate || !cam) return;
+    CHECK(crate->get<EngineComponent>() && crate->get<EngineComponent>()->data.find("health = 42") != std::string::npos);
+    const Vec3 fwd = cam->world_matrix().dir(Vec3(0, 0, 1));  // (Blender's camera at rest looks down: Blendity's -Y)
+    std::printf("    the camera looks (%g, %g, %g)\n", fwd.x, fwd.y, fwd.z);
+    CHECK(fwd.y < -0.99f);
+  });
+  test("the lesson's Try-it (round 374): blender path says which Blender .blend files are read through; a path that isn't a file is refused and not kept", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("blender path");
+    ed.step_frame_headless();  // (the toasts start: the log so far is history)
+    ed.command("blender path C:/no/such/blender.exe");
+    ed.step_frame_headless();
+    CHECK(!ed.toasts_for_test().empty() && ed.toasts_for_test().front().text.find("no file") != std::string::npos);
+    std::string version;
+    CHECK(ed.find_blender_for_test(version) != "C:/no/such/blender.exe");
+  });
+}
+
+/* ---------------------------------------------------------------- round 375: the round trip as a production (task 0352) */
+namespace r375 {
+const char *kDescriptor = "--- !u!114 &5\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: 542108242, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}\n"
+                          "  ViewPosition: {x: 0, y: 1.6, z: 0.05}\n  lipSync: 3\n  VisemeBlendShapes:\n  - vrc.v_sil\n  - vrc.v_pp\n";
+const char *kPhysBone = "--- !u!114 &12\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: -1427037861, guid: 2a2c05204084d904aa4945ccff20d8e5, type: 3}\n"
+                        "  rootTransform: {fileID: 11}\n  pull: 0.4\n  spring: 0.3\n  stiffness: 0.2\n  gravity: 0.5\n  radius: 0.03\n";
+const char *kUdon = "--- !u!114 &11401\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Script: {fileID: 1, guid: 45115577ef41a5b4ca741ed302693907, type: 3}\n"
+                    "  serializedProgramAsset: {fileID: 11400000, guid: abc, type: 2}\n";
+const char *kDoor = "--- !u!114 &11400\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Script: {fileID: 11500000, guid: eeee0000eeee0000eeee0000eeee0007, type: 3}\n  open: 0\n";
+const char *kCollider = "--- !u!65 &6500\nBoxCollider:\n  m_GameObject: {fileID: 100}\n  m_Size: {x: 2, y: 1, z: 1}\n  m_Center: {x: 0, y: 0.5, z: 0}\n";
+
+std::string transform(int id, int go, int father, const std::string &pos, const std::string &children = "[]") {
+  return "--- !u!4 &" + std::to_string(id) + "\nTransform:\n  m_GameObject: {fileID: " + std::to_string(go) + "}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n"
+         "  m_LocalPosition: " + pos + "\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: " + children + "\n  m_Father: {fileID: " + std::to_string(father) + "}\n";
+}
+std::string game_object(int id, const std::string &name) {
+  return "--- !u!1 &" + std::to_string(id) + "\nGameObject:\n  m_Name: " + name + "\n  m_IsActive: 1\n";
+}
+
+/* An avatar package and a world kit in one: the avatar wearing lilToon with its outline, a PhysBone, the Avatar
+ * Descriptor; the kit's kiosk with a script, Udon, a Box Collider and a lamp. */
+std::vector<UnityAsset> package(const std::string &png) {
+  const std::string avatar = std::string("%YAML 1.1\n") + game_object(1, "Avatar") + transform(2, 1, 0, "{x: 0, y: 0, z: 0}", "\n  - {fileID: 11}") +
+      "--- !u!33 &3\nMeshFilter:\n  m_GameObject: {fileID: 1}\n  m_Mesh: {fileID: 10207, guid: 0000000000000000e000000000000000, type: 0}\n"
+      "--- !u!23 &4\nMeshRenderer:\n  m_GameObject: {fileID: 1}\n  m_Materials:\n  - {fileID: 2100000, guid: eeee0000eeee0000eeee0000eeee0003, type: 2}\n" +
+      kDescriptor + game_object(10, "Hair") + transform(11, 10, 2, "{x: 0, y: 1.5, z: 0}") + kPhysBone;
+  const std::string kit = std::string("%YAML 1.1\n") + game_object(100, "Kiosk") + transform(400, 100, 0, "{x: 0, y: 0, z: 0}", "\n  - {fileID: 410}") +
+      "--- !u!33 &3300\nMeshFilter:\n  m_GameObject: {fileID: 100}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n" + kCollider + kDoor + kUdon +
+      game_object(110, "Lamp") + transform(410, 110, 400, "{x: 0, y: 2, z: 0}") +
+      "--- !u!108 &10800\nLight:\n  m_GameObject: {fileID: 110}\n  m_Type: 2\n  m_Intensity: 1.5\n  m_Range: 6\n";
+  const std::string mat = r371::mat("{fileID: 4800000, guid: eeee0000eeee0000eeee0000eeee0005, type: 3}",
+      "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: eeee0000eeee0000eeee0000eeee0004, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n",
+      "    - _OutlineWidth: 0.1\n    - _lilToonVersion: 40\n", "    - _Color: {r: 1, g: 0.9, b: 0.8, a: 1}\n    - _OutlineColor: {r: 0.2, g: 0.1, b: 0.1, a: 1}\n");
+  const std::vector<std::pair<std::string, std::string>> files = {
+      {"Assets/Avatar", ""}, {"Assets/Avatar/Chibi.prefab", avatar}, {"Assets/Avatar/Skin.mat", mat}, {"Assets/Avatar/skin.png", png},
+      {"Assets/Avatar/lts_o.shader", "Shader \"Hidden/lilToonOutline\" {}\n"}, {"Assets/World", ""}, {"Assets/World/Kit.prefab", kit},
+      {"Assets/World/Door.cs", "public class Door : UdonSharpBehaviour { public bool open; }\n"}};
+  const char *guids[] = {"eeee0000eeee0000eeee0000eeee0000", "eeee0000eeee0000eeee0000eeee0001", "eeee0000eeee0000eeee0000eeee0003", "eeee0000eeee0000eeee0000eeee0004",
+                         "eeee0000eeee0000eeee0000eeee0005", "eeee0000eeee0000eeee0000eeee0006", "eeee0000eeee0000eeee0000eeee0008", "eeee0000eeee0000eeee0000eeee0007"};
+  std::vector<UnityAsset> out;
+  for (size_t i = 0; i < files.size(); i++) {
+    UnityAsset a;
+    a.guid = guids[i], a.pathname = files[i].first, a.folder = files[i].second.empty(), a.data = files[i].second, a.has_data = !a.folder;
+    a.meta = "fileFormatVersion: 2\nguid: " + a.guid + "\n" + (a.folder ? "folderAsset: yes\n" : "");
+    out.push_back(a);
+  }
+  return out;
+}
+
+const UnityAsset *asset(const std::vector<UnityAsset> &all, const std::string &pathname) {
+  for (const UnityAsset &a : all)
+    if (a.pathname == pathname) return &a;
+  return nullptr;
+}
+
+/* The scene's object names, a mesh's marked (MSVC rejects the lambda beside a test's local Cleanup struct). */
+std::string names(Scene &sc) {
+  std::string out;
+  sc.for_each([&](GameObject &g) { out += " '" + g.name + "'" + (g.get<MeshFilter>() ? "(mesh)" : ""); });
+  return out;
+}
+
+/* The unpacked folder a package's file name gives (spaces and all, as the import names it). */
+std::string unpacked(const std::string &stem) { return resolve_asset_path("Assets/Imported/" + unity_package_folder(stem)); }
+}  // namespace r375
+
+static void tests_round375() {
+  test("the round trip as a production (round 375): a VRChat avatar package and a world kit through Blendity and back - unpacked, both prefabs brought in (lilToon as Toon with its outline, the PhysBone as a spring bone, the Avatar Descriptor, Udon and a script kept), the avatar renamed, the kiosk moved, its lamp switched off, exported; the package carries the same GUIDs, the .mat, script, shader and every VRChat component byte for byte and only the edited lines changed; imported again, the edits are there", [] {
+    const std::string dir = fs::join(test_dir(), "r375");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(4, 0xFFFFCCAAu);
+    std::string png;
+    CHECK(write_png(fs::join(dir, "skin.png"), px.data(), 2, 2, 2) && fs::read_file(fs::join(dir, "skin.png"), png));
+    const std::vector<UnityAsset> in = r375::package(png);
+    const std::string pkg = fs::join(dir, "R375 Kit.unitypackage"), out = fs::join(dir, "R375 Back.unitypackage");
+    CHECK(fs::write_file(pkg, write_unity_package(in)));
+    const std::string first = r375::unpacked("R375 Kit"), second = r375::unpacked("R375 Back");
+    struct Cleanup {
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      for (const std::string &p : {first, second, dir}) std::filesystem::remove_all(p, e2);
+    }};
+    for (const std::string &p : {first, second}) std::filesystem::remove_all(p, ec);
+    {
+      Editor ed;
+      ed.init_headless(1200, 900);
+      ed.command("import " + pkg);
+      ed.command("import " + fs::join(first, "Avatar/Chibi.prefab"));
+      ed.command("import " + fs::join(first, "World/Kit.prefab"));
+      Scene &sc = ed.scene();
+      GameObject *avatar = sc.find_by_name("Avatar"), *hair = sc.find_by_name("Hair"), *kiosk = sc.find_by_name("Kiosk"), *lamp = sc.find_by_name("Lamp");
+      CHECK(avatar && hair && kiosk && lamp);
+      if (!avatar || !hair || !kiosk || !lamp) return;
+      const MeshRenderer *r = avatar->get<MeshRenderer>();
+      CHECK(r && !r->materials.empty() && r->materials[0] && r->materials[0]->shading_model == 1 && avatar->get<Outline>() && hair->get<SpringBone>());
+      CHECK(kiosk->get<ColliderComponent>() && kiosk->get<MeshFilter>() && lamp->light() && count_named(sc, "Kiosk") == 1);
+      int kept = 0;
+      for (GameObject *g : {avatar, kiosk})
+        for (const auto &c : g->components) kept += dynamic_cast<const EngineComponent *>(c.get()) != nullptr;
+      std::printf("    in: the avatar Toon with its outline and a spring bone; the kiosk with its collider and lamp; %d engine component(s) kept\n", kept);
+      CHECK(kept == 4);  // (the descriptor and the PhysBone; the script and Udon)
+      avatar->name = "MyAvatar";
+      Transform t = kiosk->local();
+      t.position = Vec3(1.5f, 0.0f, -2.0f);
+      kiosk->set_local(t);
+      lamp->active = false;
+      ed.command("export unitypackage Assets/Imported/" + unity_package_folder("R375 Kit") + " " + out);
+      CHECK(ed.last_export_for_test() && ed.last_export_for_test()->why.empty());
+    }
+    std::string bytes, why;
+    std::vector<UnityAsset> back;
+    CHECK(fs::read_file(out, bytes) && read_unity_package(bytes, back, why));
+    for (const UnityAsset &a : in) {
+      const UnityAsset *b = r375::asset(back, a.pathname);
+      CHECK(b && b->guid == a.guid);
+      if (b && (a.pathname.find(".mat") != std::string::npos || a.pathname.find(".cs") != std::string::npos || a.pathname.find(".shader") != std::string::npos ||
+                a.pathname.find(".png") != std::string::npos))
+        CHECK(b->data == a.data);  // (byte for byte)
+    }
+    const UnityAsset *avatar_back = r375::asset(back, "Assets/Avatar/Chibi.prefab"), *kit_back = r375::asset(back, "Assets/World/Kit.prefab");
+    CHECK(avatar_back && kit_back);
+    if (!avatar_back || !kit_back) return;
+    const std::string &a = avatar_back->data, &k = kit_back->data;
+    CHECK(a.find("  m_Name: MyAvatar\n") != std::string::npos && a.find(r375::kDescriptor) != std::string::npos && a.find(r375::kPhysBone) != std::string::npos);
+    CHECK(k.find("  m_LocalPosition: {x: 1.5, y: 0, z: -2}\n") != std::string::npos && k.find("--- !u!1 &110\nGameObject:\n  m_Name: Lamp\n  m_IsActive: 0\n") != std::string::npos);
+    CHECK(k.find(r375::kUdon) != std::string::npos && k.find(r375::kDoor) != std::string::npos && k.find(r375::kCollider) != std::string::npos);
+    /* Only the edited lines: the prefabs differ from what came in by exactly those. */
+    const std::string avatar_in = r375::asset(in, "Assets/Avatar/Chibi.prefab")->data, kit_in = r375::asset(in, "Assets/World/Kit.prefab")->data;
+    std::string kit_expect = kit_in;
+    kit_expect.replace(kit_expect.find("{x: 0, y: 0, z: 0}\n  m_LocalScale"), 18, "{x: 1.5, y: 0, z: -2}");
+    kit_expect.replace(kit_expect.find("  m_Name: Lamp\n  m_IsActive: 1"), 30, "  m_Name: Lamp\n  m_IsActive: 0");
+    std::string avatar_expect = avatar_in;
+    avatar_expect.replace(avatar_expect.find("m_Name: Avatar"), 14, "m_Name: MyAvatar");
+    std::printf("    back: the avatar's prefab %s, the kit's %s\n", a == avatar_expect ? "changed in its name line only" : "changed elsewhere too",
+                k == kit_expect ? "in the kiosk's position and the lamp's active lines only" : "elsewhere too");
+    CHECK(a == avatar_expect && k == kit_expect);
+    /* Imported again (as Unity would see it): the edits are there, the materials and VRChat's components too. */
+    Editor ed2;
+    ed2.init_headless(1200, 900);
+    ed2.command("import " + out);
+    ed2.command("import " + fs::join(second, "Avatar/Chibi.prefab"));
+    ed2.command("import " + fs::join(second, "World/Kit.prefab"));
+    GameObject *my = ed2.scene().find_by_name("MyAvatar"), *kiosk2 = ed2.scene().find_by_name("Kiosk"), *lamp2 = ed2.scene().find_by_name("Lamp");
+    CHECK(my && kiosk2 && lamp2 && my->get<Outline>() && length(kiosk2->local().position - Vec3(1.5f, 0, -2)) < 1e-5f && !lamp2->active);
+  });
+  test("the round trip, Godot (round 375): a scene imported and exported with nothing changed comes back byte for byte; moved, exported and imported again, it is where it was put", [] {
+    const std::string dir = fs::join(test_dir(), "r375 godot");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    const std::string tscn = "[gd_scene load_steps=3 format=3 uid=\"uid://r375\"]\r\n\r\n[ext_resource type=\"Script\" path=\"res://door.gd\" id=\"1_d\"]\r\n\r\n"
+                             "[sub_resource type=\"BoxMesh\" id=\"B\"]\r\nsize = Vector3(2, 1, 1)\r\n\r\n[node name=\"Yard\" type=\"Node3D\"]\r\n\r\n"
+                             "[node name=\"Kiosk\" type=\"MeshInstance3D\" parent=\".\"]\r\ntransform = Transform3D(0.866025, 0, 0.5, 0, 1, 0, -0.5, 0, 0.866025, 3, 0, 1)\r\n"
+                             "mesh = SubResource(\"B\")\r\nscript = ExtResource(\"1_d\")\r\n\r\n[node name=\"Sun\" type=\"DirectionalLight3D\" parent=\".\"]\r\n"
+                             "transform = Transform3D(1, 0, 0, 0, 0.707107, 0.707107, 0, -0.707107, 0.707107, 0, 4, 0)\r\n";
+    CHECK(fs::write_file(fs::join(dir, "project.godot"), "config_version=5\n") && fs::write_file(fs::join(dir, "yard.tscn"), tscn) &&
+          fs::write_file(fs::join(dir, "door.gd"), "extends MeshInstance3D\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("import " + fs::join(dir, "yard.tscn"));
+    GameObject *kiosk = ed.scene().find_by_name("Kiosk");
+    CHECK(kiosk);
+    if (!kiosk) return;
+    ed.select_object(kiosk->id);
+    ed.command("export tscn " + fs::join(dir, "same.tscn"));
+    std::string same;
+    CHECK(fs::read_file(fs::join(dir, "same.tscn"), same) && same == tscn);  // (nothing changed: nothing written - a turned sun and a rotated kiosk included)
+    Transform t = kiosk->local();
+    t.position = Vec3(-1.0f, 0.5f, 2.0f);
+    kiosk->set_local(t);
+    ed.command("export tscn " + fs::join(dir, "moved.tscn"));
+    Editor ed2;
+    ed2.init_headless(1200, 900);
+    ed2.command("import " + fs::join(dir, "moved.tscn"));
+    GameObject *again = ed2.scene().find_by_name("Kiosk"), *sun = ed2.scene().find_by_name("Sun");
+    std::printf("    moved and back: (%g, %g, %g)\n", again ? again->local().position.x : 0.0f, again ? again->local().position.y : 0.0f, again ? again->local().position.z : 0.0f);
+    CHECK(again && sun && length(again->local().position - Vec3(-1.0f, 0.5f, 2.0f)) < 1e-5f && again->get<EngineComponent>() && sun->light());
+    if (again) CHECK(std::fabs(std::fabs(dot(Vec3(again->local().rotation.x, again->local().rotation.y, again->local().rotation.z), Vec3(t.rotation.x, t.rotation.y, t.rotation.z)) +
+                                         again->local().rotation.w * t.rotation.w) - 1.0f) < 1e-5f);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("the round trip, Blender (round 375): a .blend through Blender into Blendity, the crate moved, exported as glTF and opened in Blender again - the crate where Blendity put it (BLENDITY_TEST_BRIDGE runs it; skipped without)", [] {
+    if (!std::getenv("BLENDITY_TEST_BRIDGE")) return (void)std::printf("    skipped: set BLENDITY_TEST_BRIDGE to run Blender\n");
+    Editor ed;
+    ed.init_headless(1200, 900);
+    std::string version;
+    const std::string blender = ed.find_blender_for_test(version);
+    if (blender.empty()) return (void)std::printf("    skipped: Blender isn't installed\n");
+    const std::string dir = fs::join(test_dir(), "r375 blend"), blend = fs::join(dir, "Shed.blend"), make = fs::join(dir, "make.py"), check = fs::join(dir, "check.py");
+    const std::string glb = fs::join(dir, "Shed back.glb");
+    static const char *const kLeft[] = {"Assets/Meshes/Shed.glb", "Assets/Materials/Shed", "Assets/Textures/Shed", "Library/Blend"};
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    struct Cleanup {
+      std::function<void()> f;
+      ~Cleanup() { f(); }
+    } cleanup{[&] {
+      std::error_code e2;
+      std::filesystem::remove_all(dir, e2);
+      for (const char *p : kLeft) std::filesystem::remove_all(resolve_asset_path(p), e2);
+    }};
+    CHECK(fs::write_file(make, "import sys, bpy\nout = sys.argv[sys.argv.index('--') + 1]\nfor o in list(bpy.data.objects): bpy.data.objects.remove(o)\n"
+                               "bpy.ops.mesh.primitive_cube_add(size=1.0, location=(1.0, 2.0, 0.5))\nbpy.context.active_object.name = 'Crate'\n"
+                               "bpy.ops.wm.save_as_mainfile(filepath=out)\n"));
+    CHECK(fs::write_file(check, "import sys, bpy\npath = sys.argv[sys.argv.index('--') + 1]\nfor o in list(bpy.data.objects): bpy.data.objects.remove(o)\n"
+                                "bpy.ops.import_scene.gltf(filepath=path)\nc = bpy.data.objects['Crate']\n"
+                                "print('CRATE %.4f %.4f %.4f' % tuple(c.matrix_world.translation))\n"));
+    std::string log;
+    CHECK(sys::run_capture({blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python", make, "--", blend}, log, 300) == 0);
+    ed.command("import " + blend);
+    GameObject *crate = ed.scene().find_by_name("Crate");
+    CHECK(crate);
+    if (!crate) return;
+    crate->set_world_position(Vec3(4.0f, 1.0f, -3.0f));
+    ed.command("export glb all transforms " + glb);
+    log.clear();
+    const int code = sys::run_capture({blender, "-b", "--factory-startup", "--python-exit-code", "1", "--python", check, "--", glb}, log, 300);
+    if (code != 0) std::printf("    Blender said: %s\n", log.substr(log.size() > 600 ? log.size() - 600 : 0).c_str());
+    CHECK(code == 0);
+    const size_t at = log.find("CRATE ");
+    float x = 0, y = 0, z = 0;
+    CHECK(at != std::string::npos && std::sscanf(log.c_str() + at + 6, "%f %f %f", &x, &y, &z) == 3);
+    std::printf("    in Blender again: the crate at (%g, %g, %g); Blendity's (4, 1, -3) is Blender's (-4, 3, 1)\n", x, y, z);
+    CHECK(std::fabs(x + 4.0f) < 1e-3f && std::fabs(y - 3.0f) < 1e-3f && std::fabs(z - 1.0f) < 1e-3f);
+  });
+  test("Keep Transforms (round 375): a turned, moved, scaled lopsided block exported as glTF keeps its transform on its node (its own scale, not the export's) and comes back on the same world vertices, its faces outward; a turned child under a stretched parent (sheared) and a mirrored object are baked instead - glTF's node can't hold them - and come back right too", [] {
+    Scene sc;
+    auto lopsided = [] {  // (a cube leaning one way: a mirror of it is another shape)
+      MeshPtr m = primitives::cube();
+      for (Vec3 &v : mesh_make_mutable(m)->positions) v.x += 0.3f * v.y + 0.1f * v.z;
+      m->touch();
+      return m;
+    };
+    GameObject *turned = sc.create("Turned"), *table = sc.create("Table"), *leg = sc.create("Leg", table), *mirror = sc.create("Mirror");
+    for (GameObject *g : {turned, leg, mirror}) g->add<MeshFilter>()->mesh = lopsided(), g->add<MeshRenderer>();
+    Transform t;
+    t.position = Vec3(3.0f, 1.0f, -2.0f), t.rotation = Quat::euler(Vec3(20.0f, 35.0f, -10.0f)), t.scale = Vec3(1.0f, 2.0f, 0.5f);
+    turned->set_local(t);
+    Transform tt, lt, mt;
+    tt.scale = Vec3(2.0f, 1.0f, 1.0f), lt.rotation = Quat::euler(Vec3(0.0f, 45.0f, 0.0f)), lt.position = Vec3(0.5f, 0, 0);
+    mt.position = Vec3(-2.0f, 0, 0), mt.scale = Vec3(-1.0f, 1.0f, 1.0f);
+    table->set_local(tt), leg->set_local(lt), mirror->set_local(mt);
+    const std::string path = fs::join(test_dir(), "r375_keep.glb");
+    for (GameObject *g : {turned, leg, mirror}) {
+      ExportItem it;
+      it.name = g->name, it.mesh = g->get<MeshFilter>()->mesh.get(), it.world = g->world_matrix();
+      ExportOptions o = export_defaults((int)ExportFormat::GLB);
+      o.keep_transforms = true, o.scale = 2.0f;
+      std::string error, glb;
+      CHECK(export_file(path, {it}, o, &error) && fs::read_file(path, glb));
+      ImportResult r;
+      CHECK(import_model(path, r) && r.nodes.size() == 1 && r.nodes[0].mesh);
+      if (r.nodes.size() != 1 || !r.nodes[0].mesh) continue;
+      const ImportedNode &n = r.nodes[0];
+      const Mat4 back = Mat4::translate(n.position) * Mat4::rotate(n.rotation) * Mat4::scale(n.scale);
+      std::vector<Vec3> want, got;
+      for (const Vec3 &v : g->get<MeshFilter>()->mesh->positions) want.push_back(g->world_matrix().point(v) * 2.0f);
+      for (const Vec3 &v : n.mesh->positions) got.push_back(back.point(v));
+      auto covered = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+        for (const Vec3 &x : a)
+          if (std::none_of(b.begin(), b.end(), [&](const Vec3 &y) { return length(x - y) < 1e-3f; })) return false;
+        return true;
+      };
+      float volume = 0.0f;  // (positive: the faces face out)
+      const Mesh &m = *n.mesh;
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t c = m.face_offsets[f] + 1; c + 1 < m.face_offsets[f + 1]; c++)
+          volume += dot(back.point(m.positions[m.corner_verts[m.face_offsets[f]]]), cross(back.point(m.positions[m.corner_verts[c]]), back.point(m.positions[m.corner_verts[c + 1]])));
+      const bool node = glb.find("\"matrix\":[") != std::string::npos;
+      std::printf("    %s: %s, vertices %s, volume %+.3f\n", g->name.c_str(), node ? "on its node" : "baked", covered(want, got) && covered(got, want) ? "the same" : "DIFFERENT", volume / 6.0f);
+      CHECK(covered(want, got) && covered(got, want) && volume > 0.0f);
+      CHECK(node == (g == turned));  // (only the plain TRS goes on a node)
+      if (g == turned) CHECK(length(n.scale - t.scale) < 1e-4f && length(n.position - t.position * 2.0f) < 1e-4f);  // (the object's scale, the export's on positions)
+    }
+    std::remove(path.c_str());
+  });
+  test("the lesson's Try-it (round 375): window Project - where an unpacked package's folder is, to export it back", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("window Project");
+    CHECK(ed.window_docked_for_test(WindowKind::Project));
+  });
+}
+
+/* ---------------------------------------------------------------- round 337: Physical Size 0.15 turned a cube black */
+static void tests_round337() {
+  test("Physical Size 0.15 on a cube's texture (the user's report): the cube stays textured in the CPU's Shaded view, its tiling 1 / 0.15 on every axis - z too, which Assign had left at 1 (the GPU half: test_gpu's round 337)", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    std::remove(resolve_asset_path("Assets/Textures/Bricks.ptex").c_str());
+    for (int k = 2; k < 10; k++) std::remove(resolve_asset_path(strprintf("Assets/Textures/Bricks %d.ptex", k)).c_str());
+    ProceduralTexturePtr t = ed.new_texture_asset_for_test("Bricks");
+    CHECK(t != nullptr);
+    if (!t) return;
+    ed.command("select Cube");  // (the scene's own: a new one would sit inside it)
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    ed.assign_texture_asset_for_test(t->asset_path);
+    ed.command("shading shaded");
+    ed.command("tool view");
+    ed.command("focus");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    const bool seen = ed.project_to_window(cube->world_position(), cx, cy);
+    CHECK(seen);
+    if (!seen) return;
+    const float size0 = t->physical_size;
+    auto mean = [&] {
+      const Image &fb = ed.main_fb_for_test();
+      double sum = 0;
+      int n = 0;
+      for (int y = cy - 12; y <= cy + 12; y++)
+        for (int x = cx - 12; x <= cx + 12; x++) {
+          const uint32_t p = fb.pixels[(size_t)y * fb.width + x];
+          sum += ((p >> 16) & 255) + ((p >> 8) & 255) + (p & 255);
+          n++;
+        }
+      return sum / (3.0 * n);
+    };
+    const double before = mean();
+    ed.command("settex " + t->asset_path + " PhysicalSize 0.15");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const double after = mean();
+    const Vec3 til = cube->get<MeshRenderer>()->materials[0]->tiling;
+    std::printf("    the cube's middle: %.1f at %g m a tile, %.1f at 0.15 m (tiling %.3f %.3f %.3f, mapping %d, wrap %d)\n", before, size0, after,
+                til.x, til.y, til.z, cube->get<MeshRenderer>()->materials[0]->mapping, cube->get<MeshRenderer>()->materials[0]->wrap);
+    CHECK(after > before * 0.5);
+    CHECK(std::fabs(til.x - 1.0f / 0.15f) < 1e-3f && std::fabs(til.y - 1.0f / 0.15f) < 1e-3f && std::fabs(til.z - 1.0f / 0.15f) < 1e-3f);
+    std::remove(resolve_asset_path(t->asset_path).c_str());
+  });
+}
+
 /* Round 332 (task 0313): the Textures and Materials windows' HCI pass. */
 static void tests_round332() {
   test("round 332's data: every layer type sits in one of Blender's node groups (none in Other); every material preset in one group, Volume's Fog / Smoke / Mist among them; a layer at Opacity 0 or with no targets says why it changes nothing", [] {
@@ -5297,4 +10353,30 @@ void run_assets_tests() {
   tests_round329();
   tests_round330_blends();
   tests_round332();
+  tests_round337();
+  tests_round351();
+  tests_round352();
+  tests_round353();
+  tests_round354();
+  tests_round355();
+  tests_round356();
+  tests_round357();
+  tests_round358();
+  tests_round359();
+  tests_round360();
+  tests_round361();
+  tests_round362();
+  tests_round363();
+  tests_round364();
+  tests_round365();
+  tests_round366();
+  tests_round367();
+  tests_round369();
+  tests_round370();
+  tests_round371();
+  tests_round372();
+  tests_round373();
+  tests_round374();
+  tests_round375();
+  tests_round391();
 }

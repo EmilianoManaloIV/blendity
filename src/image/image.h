@@ -56,8 +56,9 @@ bool write_texture_exr(const std::string &path, const float *rgb, int width, int
  * off = Blendity's own decoders (stress tests compare both). */
 void set_image_library_codecs(bool on);
 bool image_library_codecs();
-/* zlib inflate (RFC 1950/1951); used by PNG, exposed for tests. */
-bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, bool has_zlib_header = true);
+/* zlib inflate (RFC 1950/1951); used by PNG, exposed for tests. False past `max_out` bytes (round 369: a package's
+ * gzip can't inflate without end). */
+bool zlib_inflate(const uint8_t *data, size_t size, std::vector<uint8_t> &out, bool has_zlib_header = true, size_t max_out = SIZE_MAX);
 
 /* ---------------------------------------------------------- colour */
 float srgb_to_linear(float c);

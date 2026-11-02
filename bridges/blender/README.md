@@ -30,11 +30,22 @@ date (and removes what Blendity deleted meanwhile).
 | objects, hierarchy, transforms | objects with the same parents (Y up turned to Z up, as Blender's glTF importer does) |
 | meshes, modifiers applied | meshes with Blendity's own vertices, triangulated, UVs, custom normals, a material per slot |
 | vertices moving (Edit Mode drags, skinning, physics) | the mesh's vertices moved in place |
-| PBR materials and their texture files | Principled BSDF with image textures |
+| PBR materials and their textures | Principled BSDF with image textures loaded from the pixels Live Link sends (round 377: painted and procedural ones too): Base, Normal, Metallic, Roughness and Emission |
 | Toon materials | a cel setup (Shader to RGB, a constant ramp of Toon Bands, the shadow colour): EEVEE; every toon field is in the material's custom property `blendity_toon` |
 | lights | sun, point, spot and area lights; strength as Blendity's path tracer gives it (a sun of intensity 1 is pi W/m2) |
 | cameras | the same vertical field of view, clipping, orthographic size, physical lens |
-| armatures and bones | empties posed as the bones (skinned meshes come across as moving vertices) |
+| the look (round 376) | a "Blendity Live Link" world (the Gradient as a ColorRamp, the sky, an HDRI; fog as the mist pass), the scene's exposure and view transform, a compositor node group for the fog, Bloom, Color Grading and a Vignette; the scene's own world and compositor kept and put back when the link stops |
+| armatures and bones | empties posed as the bones; a skinned mesh (round 378) has an armature whose bones copy them, vertex groups and an Armature modifier, its keys as shape keys |
+| clips (round 379) | an Action named for the clip, a slot per object (location, rotation_quaternion, scale), kept with a fake user, not assigned |
+| LODs and colliders (round 380) | the group and collider as custom properties; levels as hidden children `<name>_LOD<n>`; a wire empty for a box or sphere collider |
+| VRChat setup (round 381) | not taken (VRChat is Unity's) |
+
+## Send to Blendity (round 374)
+
+The sidebar panel's **Send to Blendity** (or **Selected**) writes this scene as a snapshot into the inbox Blendity's
+Live Link names: the glTF exporter's model plus snapshot.json with the lights, cameras and custom properties.
+Blendity imports it within a second. Blendity's own `import <file>.blend` uses the same writer through
+`blend_to_snapshot.py`. Objects Live Link made from Blendity's scene are never sent back.
 
 ## Test
 

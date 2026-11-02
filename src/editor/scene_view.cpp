@@ -217,6 +217,7 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   /* Task 0216: a pen with its side button held (Windows sends it as the right button) navigates in every feel - orbit,
    * Shift pans, Ctrl zooms - as the middle button does in Blender's pen setup. */
   const int barrel_button = in.pressed[1] ? 1 : in.pressed[0] ? 0 : -1;
+  if (in.pressed[0] && keymap_preset_ == "Adobe" && in.key_down[platform::KEY_SPACE]) return {Drag::Pan, 0};  // (round 389: Photoshop's Space-drag, in Sculpt too: re-check 389)
   if (sculpt_ && in.pressed[0] && !in.barrel) return {Drag::None, 0};  // (task 0236: the left button is the brush's, Shift and Alt its smooth and carve)
   if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal)
     return {in.shift() ? Drag::Pan : in.ctrl() ? Drag::Zoom : Drag::Orbit, barrel_button};
@@ -287,7 +288,8 @@ void Editor::scene_navigation(const Recti &view) {
     /* A pen's side button that came as the left button: its press is navigation's alone - no tool, bone handle or
      * brush after this takes it, and no Alt+click loop select (task 0216). */
     const bool barrel_left = drag_ != Drag::None && drag_button_ == 0 && in.pen && in.barrel;
-    if (barrel_left) in.pressed[0] = false;
+    const bool space_pan = drag_ == Drag::Pan && drag_button_ == 0 && in.key_down[platform::KEY_SPACE];  // (review 389: Photoshop's Space-drag is the view's alone - no brush under it)
+    if (barrel_left || space_pan) in.pressed[0] = false;
     if (!barrel_left && drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
       alt_click_ = true;  // a click without moving selects a loop (Blender's Alt+click) instead
       alt_click_ring_ = in.ctrl();
@@ -412,7 +414,22 @@ void Editor::click_select(const Recti &view, int x, int y, int mode) {
   }
   if (point_pick(view, x, y, mode)) return;
   pt_sel_.clear();
+  const std::vector<uint64_t> was = selection_;
+  const std::unordered_set<uint64_t> was_expanded = expanded_;
+  const uint64_t was_active = active_;
+  const bool was_scroll = scroll_to_active_;
   pick(view, x, y, mode);
+  /* Round 346: while AutoPosing, a click that lands on a bone of the rig being posed keeps what was selected - the
+   * controls pose it, and a stray click had put a gizmo on a bone; Ctrl+click picks the bone (it alone: review 346 - a
+   * toggle had added it to the mesh, the gizmo moving both). */
+  if (!autopose_.on || selection_ == was) return;
+  GameObject *a = active_object();
+  GameObject *rig = a && a->get<Bone>() ? puppet_rig_of(a) : nullptr;
+  if (!rig || rig->id != puppet_.arm) return;
+  if (ui_.in.ctrl()) return select(a->id, SEL_REPLACE);
+  selection_ = was, active_ = was_active;
+  expanded_ = was_expanded, scroll_to_active_ = was_scroll;  // (the Hierarchy as it was too)
+  Log::info("AutoPosing: the controls pose the rig - Ctrl+click picks a bone");
 }
 
 /* ---- a finger in Tablet Mode (task 0214) ---- */
@@ -790,6 +807,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &in = u.in;
   gizmo_hot_ = -1;
   if (!show_gizmos_ || weight_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (puppet_control_selected()) return false;  // (round 346: a bone selected by its control is posed by the control, no gizmo over it)
 
   /* Targets & pivot. */
   GameObject *eo = edit_mode_ ? edit_object() : nullptr;
@@ -1248,7 +1266,7 @@ void Editor::draw_gizmo(const Recti &view) {
   auto &u = ui_;
   if (tool_ == Tool::View || weight_paint_ || sculpt_ || paint_) return;  // Weight Paint, Sculpt, Paint: the brush, not the gizmo
   bool has_target = edit_mode_ ? std::find(vert_sel_.begin(), vert_sel_.end(), 1) != vert_sel_.end() : !selection_.empty();
-  if (!has_target) return;
+  if (!has_target || puppet_control_selected()) return;
   /* Snapping markers: the vertex / surface point a move is snapping to, and with V
    * held (before dragging) the vertex the move would start from - Unity's square. */
   {
@@ -2674,9 +2692,11 @@ void Editor::draw_game_view(const Recti &r) {
     if (hit && !cache_verify_) prof_.view_cache_hits++;
     else if (!hit && hold_other_views() && view_cache_show(game_cache_, img)) prof_.views_held++;  // (task 0103: drawn on release)
     else {
+      game_view_drawing_ = true;  // (round 363: the LOD Groups switch here only)
       render_scaled(game_r3d_, game_rt_, game_vs_, v, p, [&](RenderTarget &t) {
         render_camera(game_r3d_, t, game_ft_, v, p, eye, q.rotate({0, 0, 1}), owner, cam, aspect, true, true, playing_);  // paused: the same time, the same grain
       }, owner, false, false);  // (nothing picks in the Game view: no full-size depth and ids)
+      game_view_drawing_ = false;
       game_stats_ = game_r3d_.stats();
       prof_.view_renders++;
       if (hit) view_cache_verify(game_cache_, img, "Game view");
@@ -2684,6 +2704,7 @@ void Editor::draw_game_view(const Recti &r) {
     }
     prof_.ms_game += rt.ms();
   }
+  draw_sequence_card(img);  // (round 364: an animatic's held picture over the Game view)
   /* Composition guides over the camera's frame: the image, or a filter's letterboxed frame inside it. */
   {
     Recti frame = img;

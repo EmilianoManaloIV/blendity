@@ -31,6 +31,16 @@
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
+#include "../render/xr.h"
+#include "../render/xr_nav.h"
+#include "../scene/budget.h"
+#include "../scene/unity_package.h"
+#include "../scene/godot_scene.h"
+#include "../scene/unity_scene.h"
+#include "../scene/avatar_eyes.h"
+#include "../scene/avatar_fix.h"
+#include "../scene/avatar_tools.h"
+#include "../scene/visemes.h"
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
@@ -78,8 +88,13 @@
 
 namespace bl {
 
+namespace video {
+struct Reader;  // (render/video_decode.h: round 391)
+}
+
 /* FFmpeg's arguments to make an MP4 of numbered PNGs (task 0074). */
-std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out);
+std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
+                                                const std::string &wav = "", int preset = 0);  // (round 391: video::Preset)
 
 /* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
 struct KeyChord {
@@ -144,6 +159,8 @@ struct SculptBrush {
   std::string alpha;     // (an image's path: its luminance shapes the dab; empty: none)
   bool alpha_turn = true;  // (the alpha turned to the stroke's direction; off: as the image lies)
   int stroke = 0;        // kSculptStrokes: Dots, Drag Dot, Drag Rect, Freehand, Spray
+  bool tilt = false;     // (round 368: a pen's tilt leans Clay / Flatten / Scrape's plane and turns the alpha; off at first, as a resting pen leans)
+  float tilt_strength = 1.0f;  // (how much of the lean: 1 the pen's own angle, capped at 60 degrees)
 };
 extern const char *const kSculptBrushes[11];
 extern const char *const kSculptPressure[3];
@@ -151,7 +168,7 @@ extern const char *const kSculptStrokes[5];
 Vec3 weight_color(float w);  // Blender's weight colours: blue 0, green 0.5, red 1
 
 /* (Saved layouts store a window's kind as its number: new kinds go just before Count.) */
-enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Board, Count };
+enum class WindowKind { Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research, Profiler, Render, UVEditor, Materials, Tools, Lighting, Textures, Rigging, Animation, Sequencer, LiveLink, Editing, MyTools, Draw, Layers, History, Board, Avatar, Count };
 const char *window_title(WindowKind k);
 /* The Hierarchy's drop zones (task 0255): 1 before, 2 after, 0 into - the outer thirds and the middle of a row. */
 int hier_drop_mode(int ry, int rh);
@@ -427,6 +444,7 @@ struct AnimEditorState {
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
   float view_start = 0.0f, view_span = 0.0f;  // (task 0267: the frames the sheet shows; span 0: the whole clip)
+  float hold_from = 0.0f;  // (round 340: the frame the hold counts from - a render range's first; 0 otherwise)
   int view_pan_x = 0;  // (a middle-button pan's last x)
   const void *view_for = nullptr;  // (the clip the view was set for)
   bool view_panning = false;
@@ -459,6 +477,8 @@ struct SeqEditorState {
   int drag_track = 0, drag_x = 0, drag_y = 0;
   std::vector<std::pair<uint64_t, Transform>> saved_pose;  // as the Animation window's Preview
   std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;
+  uint64_t saved_camera = 0;  // (round 364: the scene's camera before Preview's cuts)
+  bool cut_on = false;        // (a cut's camera is on: out of it, saved_camera again)
   Recti lanes{0, 0, 0, 0};  // where the lanes were last drawn and the frames across them (drops, tests)
   int lane_h = 1;
   float end = 60.0f;
@@ -622,6 +642,14 @@ struct PaintBrush {
   float grain_scale = 1.0f;
 };
 
+bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p);
+int sketch_brush_find_preset(const std::string &name);  // (round 389: shared by Delete and Free Transform)
+std::vector<SketchPoint> sketch_densified(const std::vector<SketchPoint> &pts);
+std::string sketch_blend_list();  // (round 388: the blend modes' names, for messages)
+std::string line_rest_words(const std::vector<std::string> &t, size_t k);
+constexpr int kVrPaletteSize = 8;  // (round 385: VR sketching's colours)
+Vec3 vr_palette_colour(int i);
+
 struct UndoState {
   std::unique_ptr<Scene> scene;
   std::shared_ptr<SculptDelta> delta;  // (set: a delta step; `scene` is empty)
@@ -721,6 +749,20 @@ class Editor {
   void start_asset_drag_for_test(const std::string &path) { asset_drag_ = {true, false, path, nullptr, ui_.in.mx, ui_.in.my}; }  // (a Project window file pressed)
   bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
   int draw_source_for_test() const { return draw_source_; }
+  void sketch_select_tool_for_test(int k) { sketch_select_tool_ = k; }  // (round 388: the Draw tab's Select, 1 Rectangle, 2 Lasso)
+  void sketch_vec_tool_for_test(int k) { sketch_vec_pick(k); }  // (round 390: 1-4 the shapes, 5 the Pen)
+  size_t sketch_pen_anchors_for_test() const { return sketch_pen_.size() / 3; }
+  const std::vector<Vec2> &sketch_selection_for_test() const { return sketch_sel_; }
+  bool sketch_transforming_for_test() const { return sketch_xf_.on; }
+  std::string sketch_brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
+  float sketch_tilted_for_test(float pressure, float tilt_x, float tilt_y) {  // (the pad's brush, the pen tilted so)
+    const int kind = sketch_view_.kind;
+    const float tx = ui_.in.tilt_x, ty = ui_.in.tilt_y;
+    sketch_view_.kind = 2, ui_.in.tilt_x = tilt_x, ui_.in.tilt_y = tilt_y;
+    const float p = sketch_tilted(pressure);
+    sketch_view_.kind = kind, ui_.in.tilt_x = tx, ui_.in.tilt_y = ty;
+    return p;
+  }
   int anim_bar_rows_for_test() const { return anim_bar_rows_; }  // (round 324)
   bool spring_row_for_test(const std::string &first, int &label, bool &ignored);  // (round 324: a found chain's kind)
   std::string mode_name_for_test() const { return mode_name(); }
@@ -761,6 +803,7 @@ class Editor {
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
   bool paint_for_test() const { return paint_; }                                   // (task 0245)
   ProceduralTexturePtr surface_of_for_test(GameObject *g, std::string *why) const { return surface_of(g, why); }
+  bool surface_load_maps_for_test(GameObject *g, ProceduralTexture &pt, std::string *why) { return surface_load_maps(g, pt, why); }  // (round 392)
   PaintBrush &paint_brush_for_test() { return paint_brush_; }
   PaintImagesPtr paint_images_for_test() { return paint_images_; }
   int paint_last_fill_for_test() const { return paint_last_fill_; }
@@ -775,12 +818,14 @@ class Editor {
   };
   const std::vector<Toast> &toasts_for_test() const { return toasts_; }  // (task 0252)
   void clear_toasts_for_test() { toasts_.clear(); }
+  Vec3 scene_view_pivot_for_test() const { return cam_.pivot; }  // (round 374)
   struct JobView {  // (task 0253: one running job as the tray shows it)
     std::string label;
     float progress = -1.0f;  // (-1: none to show)
     double started = 0.0;
     bool cancellable = false, cancelled = false;  // (cancelled: the job's own flag is set - by the tray, Esc or a console verb)
     std::function<void()> cancel;
+    std::function<void()> now;  // (review 354: a waiting export's Export Now)
   };
   std::vector<JobView> jobs_for_test() { return jobs_running(); }
   /* Task 0254: the History window's rows (the steps taken; the steps undone, the next one first), the unsaved-changes prompt. */
@@ -996,6 +1041,34 @@ class Editor {
   bool livelink_start(int port);
   void livelink_stop();
   livelink::Link *livelink_for_test() { return livelink_.get(); }
+  /* Round 383: VR View on a given runtime (a test's stub), and the session. */
+  bool vr_start_for_test(std::unique_ptr<xr::Runtime> rt, std::string &why);
+  xr::Session *vr_for_test() { return vr_.get(); }
+  Mat4 vr_stage_for_test() const { return vr_stage_.matrix(); }
+  Mat4 vr_last_view_for_test() const { return vr_last_view_; }
+  bool vr_sketch_for_test() const { return vr_sketch_; }
+  GameObject *vr_sketch_object_for_test() { return vr_sk_obj_ ? scene_->find(vr_sk_obj_) : nullptr; }
+  void vr_sketch_chunk_for_test(size_t verts) { vr_sk_chunk_ = verts; }
+  bool vr_paint_for_test() const { return vr_paint_; }
+  float vr_paint_radius_for_test() const { return vr_paint_radius_; }
+  bool vr_paint_aimed_for_test() const { return vr_pt_aimed_; }
+  std::string undo_label_for_test(size_t back) const { return back < undo_.size() ? undo_[undo_.size() - 1 - back].label : ""; }
+  void paint_world_stroke_for_test(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float radius) {  // (one stroke of one world dab, as VR's brush makes)
+    if (!paint_begin_stroke_images()) return;
+    paint_erase_ = paint_brush_.erase;
+    paint_world_dab(hit, axis, right, down, radius, 1.0f);
+    paint_end_stroke();
+  }
+  bool raycast_scene_for_test(const Ray &ray, Vec3 &hit) { return raycast_scene(ray, hit); }
+  bool vr_tube_for_test() const { return vr_tube_; }
+  int vr_colour_for_test() const { return vr_colour_; }
+  float vr_brush_for_test() const { return vr_brush_; }
+  size_t vr_stroke_points_for_test() const { return vr_sk_pts_.size(); }
+  const xr::Stage &vr_stage_value_for_test() const { return vr_stage_; }
+  bool vr_tape_for_test() const { return vr_tape_; }
+  float vr_tape_length_for_test() const { return vr_tape_m_; }
+  const xr::Arc &vr_arc_for_test() const { return vr_arc_; }
+  bool vr_wants_frames_for_test() const { return wants_continuous_redraw(); }
   std::string livelink_discovery_path() const;  // (task 0274: ~/.blendity/livelink.json, beside the prefs)
   void livelink_autostart();
   bool livelink_autostart_pref_for_test() const { return livelink_autostart_; }
@@ -1048,6 +1121,15 @@ class Editor {
   bool write_render_file_for_test(const std::string &base, std::string *written) { return write_render_file(base, written); }
   std::string export_model_for_test(const ExportOptions &o, const std::string &path) { return export_model(o, path); }
   void mark_changed_for_test(const std::string &label) { mark_changed(label); }  // a test's direct edit as an undo step
+  void composite_render_card_for_test(Image &img, float frame) { composite_render_card(img, frame); }  // (round 364)
+  bool seq_audio_for_test(double &pos, bool &active);  // (round 365: false before any sound played)
+  void seq_audio_pull_for_test(float *out, size_t frames);
+  void seq_audio_tick_for_test() { seq_audio_tick(); }
+  void offer_video_libraries_for_test(const std::string &dir) {  // (round 366)
+    ranim_.dir = dir;
+    offer_video_libraries();
+  }
+  bool full_build_installed_for_test() const { return full_build_installed(); }
   const std::vector<int> &points_selected_for_test() const { return pt_sel_; }
   GameObject *active_object_for_test() const { return active_object(); }
   std::vector<uint8_t> &vert_sel_for_test() { return vert_sel_; }
@@ -1169,6 +1251,21 @@ class Editor {
   void commit_change(const std::string &what) { mark_changed(what); }
   size_t pickable_materials_for_test(GameObject *g) { return pickable_materials(g).size(); }
   uint64_t render_hash_for_test() { return scene_render_hash(); }
+  uint64_t puppet_selected_for_test() const { return puppet_.selected; }  // (round 346)
+  bool puppet_control_selected_for_test() const { return puppet_control_selected(); }
+  size_t selection_size_for_test() const { return selection_.size(); }
+  void frame_selected_for_test() {  // (Frame Selected, its camera move finished: the console's focus is a camera's depth of field)
+    frame_selected();
+    cam_.update(clock_now() + 10.0);
+  }
+  Camera *main_camera_for_test(GameObject **owner = nullptr) { return main_camera(*scene_, owner); }  // (round 343)
+  void render_animation_pose_for_test(int first, int frame) { render_animation_pose(first, frame); }  // (round 340)
+  void set_key_for_test() { anim_key_all(); }
+  Vec3 camera_flatten_pivot_for_test(const GameObject &owner) {
+    flatten_pivots_.clear();
+    const CameraFlatten *cf = owner.get<CameraFlatten>();
+    return cf ? camera_flatten_pivot(owner, *cf) : owner.world_position();
+  }
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
   /* The Textures window last frame: "new", "size", "assign", "output", "add_layer", "layer<i>", "thumb:<name>". */
@@ -1220,6 +1317,65 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  void set_seq_hovered_for_test(bool on) { seq_hovered_ = on; }  // (round 391: the Sequencer under the pointer)
+  void seq_select_for_test(const std::string &name) { seqr_.selected_name = name; }
+  /* Round 369 (unity_package_ui.cpp): Import Unity Package, unpacked on a worker (at once in headless runs). */
+  struct PackageJob {
+    std::string path, project_root, into_rel, why;
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false}, done{false};
+    int counts[5] = {};  // models, textures, scripts and shaders, prefabs / scenes / materials, other
+    int folders = 0;
+    std::vector<std::string> skipped;
+    void run();
+    void unpack();
+    bool write_asset(const UnityAsset &a, const std::string &rel);
+    void finish(const std::string &failure);
+  };
+  bool import_unity_package(const std::string &path);
+  bool import_unity_scene(const std::string &path);  // (round 370: a .prefab or .unity file's objects)
+  bool export_unity_package(const std::string &folder, const std::string &out = "");  // (round 372: the way back)
+  std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
+  void export_package_of_selection();
+  bool import_godot_scene(const std::string &path);  // (round 373: a .tscn's nodes)
+  /* Round 374 (snapshot_ui.cpp): Send to Blendity's snapshots, .blend files through Blender, the inbox. */
+  bool import_snapshot(const std::string &folder_or_json);
+  bool import_blend(const std::string &path);
+  void blend_job_poll();
+  void poll_snapshot_inbox(bool now);
+  std::string snapshot_inbox() const;
+  void blender_path_command(const std::string &exe);
+  struct BlendJob {
+    std::string blend, out;  // (set before the thread starts)
+    std::atomic<bool> done{false}, ok{false};
+    std::string message;  // (written before `done`)
+  };
+  std::shared_ptr<BlendJob> blend_job_;
+  static void run_blend_job(BlendJob &job, const std::string &blender, const std::string &script);
+  std::string blender_path_;  // (prefs blender_path=: "" finds it)
+  double inbox_checked_ = -100.0;
+  std::set<std::string> inbox_tried_;
+  bool export_godot_scene(const std::string &out = "");  // (round 373: the selection's .tscn with its edits)
+  std::vector<GodotEdit> godot_edits(const std::string &file, bool format4, int &copies);
+  /* Round 372 (unity_export_ui.cpp): the export on a worker, a file at a time. */
+  struct UnityExportItem {
+    std::string abs, guid, pathname, meta;
+    bool folder = false;
+    std::vector<UnityEdit> edits;
+  };
+  struct ExportJob {
+    std::vector<UnityExportItem> items;
+    std::string out, folder, why;
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false}, done{false};
+    int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0;
+    std::vector<std::string> skipped;
+    void run();
+    void finish(const std::string &failure);
+  };
+  const ExportJob *last_export_for_test() const { return export_last_.get(); }
+  void import_package_dialog();
+  const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
   std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
   bool scene_planes_deferred_for_test() const { return scene_planes_slot_ >= 0; }
   Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
@@ -1329,10 +1485,12 @@ class Editor {
   void anim_unkey_property_for_test(GameObject *g, const std::string &property, int axes) { anim_unkey_property(g, property, axes); }
   /* Round 334: the items the Game view would draw from this camera (flattened where a Camera Flatten says), or the
    * Scene view's (game false: never flattened). */
-  std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye) {
-    if (game) set_flatten_view(view, proj, eye);
+  std::vector<DrawItem> collect_items_for_test(bool game, const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0) {
+    if (game) set_flatten_view(view, proj, eye, role);
+    if (game) lod_view_ = {true, eye, 0.5f * proj.m[5], proj.m[15] == 1.0f};
     std::vector<DrawItem> items = collect_items(game, false);
     flatten_view_.on = false;
+    lod_view_.on = false;
     return items;
   }
   /* Round 332: the Textures window's preview showing the stack only up to a layer (Alt+click its name): the texture's
@@ -1346,6 +1504,17 @@ class Editor {
   void open_dialog_for_test(int k) { dialog_ = (Dialog)k; }
   int dialog_kind_for_test() const { return (int)dialog_; }
   void set_ui_scale_for_test(float s) { ui_scale_pref_ = s, apply_ui_scale(); }
+  float ui_scale_pref_for_test() const { return ui_scale_pref_; }  // (round 367)
+  /* Round 368: a console dab as the pen would make it - its tilt (degrees) and its eraser end. */
+  void sculpt_pen_for_test(Vec2 tilt, bool eraser) { sculpt_dab_tilt_ = tilt, sculpt_dab_eraser_ = eraser, sculpt_dab_pen_ = true; }
+  std::vector<Vec2> &pen_curve_for_test() { return pen_curve_; }
+  float pen_pressure_for_test(float p) const { return pen_pressure(p); }
+  /* The area normal `n` (object space, the object unmoved) leaned by a pen tilted `tilt` degrees, as a dab would. */
+  Vec3 sculpt_lean_for_test(Vec3 n, Vec2 tilt) {
+    sculpt_tilt_now_ = tilt;
+    sculpt_set_lean(Mat4::identity(), SculptSym{});
+    return sculpt_leaned(n);
+  }
   std::vector<std::string> workspace_names_for_test() const { return workspace_names(); }
   int fb_width_for_test() const { return fb_.width; }
   int fb_height_for_test() const { return fb_.height; }
@@ -1402,6 +1571,7 @@ class Editor {
   bool weight_paint_active_for_test() const { return weight_paint_; }
   bool scene_on_gpu_for_test() const { return scene_on_gpu_; }  // (task 0195: the Scene view's last frame drew on the card)
   void set_skin_async_min_verts_for_test(size_t n) { skin_async_min_verts_ = n; }
+  void hold_skin_job_for_test(bool hold) { skin_job_held_ = hold; }  // (round 354: a bind that stays running until released)
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
@@ -1473,7 +1643,7 @@ class Editor {
   void object_field_took_drop() { hier_field_took_drop_ = true; }
   /* Unity's object field (task 0064, panels.cpp): "Robot (Armature)" / "None (Armature)", a typed name, a Hierarchy
    * drop of the right kind, the picker. `type` a component name, nullptr for any object. */
-  bool object_field(const char *name, const Recti &f, std::string &v, const char *type = nullptr);
+  bool object_field(const char *name, const Recti &f, std::string &v, const char *type = nullptr, const GameObject *near = nullptr);
   bool asset_field(const char *name, const Recti &f, std::string &path, const char *ext, const char *kind);
   bool object_field_box(ui::Id id, const Recti &box, std::string &v, const std::string &shown, const std::string &none, bool bad, ui::Icon icon);
   bool object_field_picked(ui::Id id, std::string &v);  // a picker's choice from last frame, for this field
@@ -1709,19 +1879,57 @@ class Editor {
     float px_per_m = 0.0f;
     bool ortho = false;  // an orthographic view: the width on screen doesn't depend on the distance
   } outline_view_;
+  /* Round 363: the Game view's eye and focal term, for the LOD Groups (off: every view and render draws LOD0). */
+  struct LodView {
+    bool on = false;
+    Vec3 eye;
+    float half_focal = 1.0f;  // a 1 m object at 1 m stands this much of the view's height
+    bool ortho = false;
+  } lod_view_;
+  bool game_view_drawing_ = false;
   /* Round 334: the camera the Game view or a render flattens toward (Camera Flatten); off for the Scene view, bakes,
    * exports and MoonRay, which keep the true shape. */
   struct FlattenView {
     bool on = false;
     Vec3 eye{0.0f}, forward{0.0f, 0.0f, 1.0f};
     bool ortho = false;
+    int role = 0;
+    Vec3 up{0.0f, 1.0f, 0.0f};  // (round 342: the camera's up - a lattice facing it takes the screen's right from it)
+    float focal = 0.0f;  // (round 343: the camera's lens in mm - its Focal Length when physical, else its vertical field of view on a 36 x 24 frame; 0 orthographic)
   } flatten_view_;
+  std::unordered_map<uint64_t, uint64_t> view_refs_;  // (round 339: each View Angle Shapes' reference's id, found once a collect - ids, never pointers: a deleted object isn't found)
   std::unordered_map<uint64_t, Vec3> flatten_pivots_;  // (each Camera Flatten's pivot, once a collect)
   bool flatten_any_ = false;                            // (a Camera Flatten in the scene, this collect)
   void apply_camera_flatten(const GameObject &g, DrawItem &it);
   Vec3 camera_flatten_pivot(const GameObject &owner, const CameraFlatten &cf);
-  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye);
+  const GameObject *camera_flatten_pivot_object(const GameObject &owner, const CameraFlatten &cf);
+  /* Round 339: an object a component names (a pivot, a reference) - a bone of the name below `owner` first, then any
+   * object below it, then the scene's; null when none is. */
+  const GameObject *named_from(const GameObject &owner, const std::string &name);
+  /* Round 339 (View Angle Shapes): the reference a component measures from (its object when unnamed or missing), and
+   * the weights reaching g at this camera view put on mr.view_weights - false when none apply. */
+  const GameObject *view_shapes_reference(const GameObject &owner, const ViewAngleShapes &vs);
+  bool set_view_shapes(const GameObject &g, const MeshRenderer &mr, const Mesh &mesh);
+  /* Round 342: the camera-aligned lattices told where this collect's camera is (or that there's none); and whether g's
+   * mesh goes through one (its camera views' own slots, then). */
+  void set_view_lattices(bool on);
+  bool view_lattice_on(const GameObject &g, bool game) const;
+  bool view_lattices_any_ = false;
+  bool view_shapes_any_ = false;  // (a View Angle Shapes in the scene, this collect)
+  void viewshape_command(const std::vector<std::string> &t);
+  void draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay);
+  /* `role` (round 339): which camera view collects - 0 the Game view and the raster previews, 1 F12, 2 the traced Camera
+   * Preview; each has its own view-shaped meshes and outline shells, so none rewrites what another traces. */
+  void set_flatten_view(const Mat4 &view, const Mat4 &proj, Vec3 eye, int role = 0, const Camera *cam = nullptr);  // (round 343: the camera's own lens; null - the main camera's)
   void flatten_command(const std::vector<std::string> &t);
+  void draw_anim_holds(const Recti &ruler, const Recti &sheet, float end, const GameObject &root);  // (round 340)
+  /* Round 340: the clip onto the root as the root's Animation holds it (on 2s, 3s; its camera smooth unless held). */
+  void anim_apply_held(const AnimationClip &clip, GameObject &root, float frame);
+  /* The frame a key goes on: on 2s or 3s, the drawn frame the playhead shows (a key between them would bend the curve
+   * where no pose is drawn) - the playhead itself for a camera and its rig unless Hold the Camera. */
+  float anim_key_frame(const GameObject *g);
+  /* A render range's frame posed (Render Animation): the raw frame, held from the range's first. */
+  void render_animation_pose(int first, int frame);
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
@@ -1759,7 +1967,7 @@ class Editor {
   uint64_t camera_render_hash(const GameObject *owner, Camera *cam, uint64_t scene_hash);
   void draw_camera_preview(const Recti &view);  // Unity's Camera Preview inset
   void step_final_render();
-  void save_render();
+  void save_render(const std::string &to = "");
   uint64_t scene_render_hash(bool memo = true);
   uint64_t object_render_hash(GameObject &g, bool memo);
   bool camera_for_render(Mat4 &view, Mat4 &proj, float aspect);
@@ -1879,7 +2087,26 @@ class Editor {
   void assist_command(const std::vector<std::string> &t);
 
  private:
-  bool assist_[(int)Assist::Count] = {true, false, false, false, false};  // (physics tools as before; the rest off)
+  /* Round 368 (sculpt.cpp): the pen's pressure through one curve for Sculpt and Paint (Preferences keep it); a console
+   * dab's pen (sculpt_pen_for_test); the dab's plane lean from the pen's tilt, in the object's space. */
+  std::vector<Vec2> pen_curve_ = {{0.0f, 0.0f}, {1.0f, 1.0f}};
+  float pen_pressure(float p) const;
+  Vec2 sculpt_dab_tilt_{0.0f, 0.0f};
+  bool sculpt_dab_eraser_ = false, sculpt_dab_pen_ = false;
+  Vec2 sculpt_tilt_now_{0.0f, 0.0f};  // (this dab's tilt, 0 with Use Tilt off)
+  Vec3 sculpt_lean_dir_{0.0f, 0.0f, 0.0f};  // (this instance's lean, mirrored with it - review 368)
+  float sculpt_lean_angle_ = 0.0f;
+  bool pen_curve_dirty_ = false;  // (saved once the drag ends - review 368)
+  std::shared_ptr<PackageJob> pkg_job_, pkg_last_;  // (round 369: the unpacking under way, the last one finished)
+  std::shared_ptr<ExportJob> export_job_, export_last_;  // (round 372)
+  void poll_unity_export();
+  void stop_unity_export();
+  void poll_unity_package();
+  void stop_unity_package();
+  Vec3 sculpt_leaned(Vec3 n) const;
+  void sculpt_console_dab(float x, float y, float p);
+  void draw_pen_curve(Reflector &br);
+  bool assist_[(int)Assist::Count] = {true, true, false, false, false};  // (physics tools and Walk Cycle on - round 367, finding 12; the rest off)
   bool assist_require(Assist a);
   bool assist_pref(const std::string &key, const std::string &value);
   std::string assist_prefs_text() const;
@@ -2017,11 +2244,37 @@ class Editor {
     uint64_t arm = 0, key = 0;     // the rig mapped, and as what (body::body_key)
     std::vector<uint64_t> handles; // the hands, the feet, the head, the hips
     uint64_t part[6] = {}, found[6] = {};  // (each handle's bone, and the one the analysis found: round 324)
-    uint64_t dragging = 0, hover = 0;
-    Vec3 start, normal;
+    uint64_t dragging = 0, hover = 0, selected = 0;  // (round 346: a control clicked - selected; double-clicked - pinned)
+    std::vector<uint64_t> extra;  // (round 347: the Armature's Extra Controls' bones)
+    Vec3 start, normal, bone_start;
     Vec2 press;
-    bool moved = false;
+    bool moved = false, double_press = false;
   } puppet_;
+  struct PuppetControl {
+    Vec3 at;
+    float r = 0.1f;
+    int kind = 0;  // 0 a ring, 1 a box
+    uint32_t color = 0;
+  };
+  PuppetControl puppet_control(int k, const GameObject &bone, float size) const;
+  float puppet_control_size(const GameObject &arm);
+  GameObject *puppet_rig_of(GameObject *g);
+  std::vector<std::pair<int, uint64_t>> puppet_control_list() const;
+  /* Round 348: an IK between IK and FK (its Weight 1 or 0) without the pose jumping: to FK the bones keep the solved
+   * pose; to IK (and Match) the target and the pole go where the pose has the tip and the bend. Keyed with Record on.
+   * Mode: 0 FK, 1 IK, 2 Match (the handles only). */
+  bool ik_switch(GameObject &owner, int mode);
+  bool ik_switch_keys(GameObject &owner, IKConstraint &c, int mode, float was, const char *label);
+  void warn_ik_reshaped(GameObject &owner, const IKConstraint &c, const std::vector<Quat> &before);
+  /* The same on a limb of the selected character's rig: 0 left arm, 1 right arm, 2 left leg, 3 right leg. */
+  bool limb_ik(int limb, int mode);
+  GameObject *limb_ik_owner(int limb);
+  void draw_puppet_fkik_items();
+  void draw_puppet_controls_extras(GameObject &arm, ui::Layout &lay);
+  std::vector<std::string> puppet_problems_;  // (round 347: the analysis' problems shown, and what they were found for)
+  uint64_t puppet_problems_key_ = 0;
+  /* A bone selected by its control while AutoPosing (round 346): posed by the control, no gizmo drawn over it. */
+  bool puppet_control_selected() const { return autopose_.on && puppet_.selected && puppet_.selected == active_ && selection_.size() == 1; }
   const std::vector<uint64_t> &puppet_handles();
   const std::vector<uint64_t> &rig_ends();
   void puppet_set_handle(int k, const std::string &bone);
@@ -2113,6 +2366,7 @@ class Editor {
   SeqInstance *seq_selected(Sequence &s, int *track = nullptr, int *index = nullptr);
   bool seq_move(const std::string &name, int track, float start);
   bool seq_trim(const std::string &name, float trim_in, float trim_out, float start);
+  bool seq_set_volume(const std::string &name, float volume);  // (round 365)
   bool seq_rename(const std::string &from, const std::string &to);
   void seq_delete_selected();
   float seq_frame_at(const Recti &lanes, int x, float end) const;
@@ -2228,6 +2482,91 @@ class Editor {
   void livelink_command(const std::vector<std::string> &t);
   void livelink_status();
   void livelink_tick();  // once a frame, after the scene's changes
+  /* Round 383: VR View (render/xr.h) - a headset sees the scene at 1:1, its stage at y = 0 below where the Scene view
+   * looks, facing as it faces; each eye drawn as the Game view draws (render_deferred, at vr_resolution_). */
+  std::unique_ptr<xr::Session> vr_;
+  float vr_resolution_ = 0.5f;
+  xr::Stage vr_stage_;  // (where the headset's floor stands in the scene: the Scene view's pivot at start, moved by the hands)
+  /* Round 384: the hands' gestures - a grab (one hand moves the world, two also turn and scale it), the teleport arc
+   * while the right trigger is held, the right stick's snap turn, the tape measure the right primary button toggles. */
+  xr::Grab vr_grab_;
+  int vr_grab_hands_ = 0;
+  xr::Arc vr_arc_;
+  bool vr_aiming_ = false, vr_tape_ = false, vr_primary_was_ = false, vr_turned_ = false;
+  float vr_tape_m_ = 0.0f;
+  double vr_last_tick_ = 0.0;
+  void vr_hands(double dt);
+  bool vr_segment_hit(Vec3 a, Vec3 b, Vec3 &hit, Vec3 &normal);
+  /* The arc's hit test: a segment BVH per mesh, made on a worker on its first aim and again when the mesh changes
+   * (review 384: every triangle of the scene had been tested 60 times a frame; a 180,000-triangle mesh's BVH takes
+   * 80 ms to make). Until it lands the arc passes through that mesh, or uses its last one. */
+  struct VrBvh {
+    uint64_t version = 0, deform = 0, seen = 0;  // (the mesh's version and deform_version it was made for; the arc that last asked)
+    size_t tris = 0;
+    std::shared_ptr<const xr::SegmentBvh> bvh;
+    std::future<std::shared_ptr<const xr::SegmentBvh>> job;
+  };
+  std::unordered_map<uint64_t, VrBvh> vr_bvh_;  // (by Mesh::uid: a freed mesh's address reused never finds its BVH - re-check 384)
+  /* An arc's meshes, gathered once per arc (re-check 384: every segment had walked the scene). */
+  struct VrTarget {
+    Mat4 inv;
+    const xr::SegmentBvh *bvh;
+  };
+  std::vector<VrTarget> vr_targets_;
+  uint64_t vr_arc_stamp_ = 0;
+  void vr_gather_targets();
+  xr::Grab vr_grab_begin(int held, const xr::Hand &l, const xr::Hand &r) const;
+  Mat4 vr_last_view_;  // (the view the last eye was drawn with: the tests' check that the hands move it on their own frame)
+  /* Round 385 (task 0362): sketching in VR - the right trigger draws ribbons or tubes into the Stroke object
+   * (vr_sketch.cpp). */
+  bool vr_sketch_ = false, vr_tube_ = false, vr_sk_drawing_ = false;
+  int vr_colour_ = 0;
+  float vr_brush_ = 0.01f;  // metres, at life size
+  std::vector<Vec3> vr_sk_pts_, vr_sk_ups_;  // the stroke under way (world)
+  std::vector<float> vr_sk_w_;
+  bool vr_sk_flick_colour_ = true, vr_sk_flick_size_ = true, vr_sk_x_was_ = false;
+  uint64_t vr_sk_obj_ = 0;  // (VR's Stroke object)
+  size_t vr_sk_chunk_ = 100000;
+  int vr_sk_parts_ = 1;  // (vertices: past this VR's Stroke object is full and the next stroke starts another)
+  GameObject *vr_sketch_object();
+  Vec3 vr_sketch_tip(const xr::Hand &h) const;
+  void vr_sketch_hands(const xr::Hand &l, const xr::Hand &r, int held);
+  void vr_sketch_sample(const xr::Hand &r);
+  int vr_sketch_slot(GameObject &g, int colour);
+  void vr_sketch_commit();
+  void vr_sketch_undo();
+  void vr_sketch_overlay(const std::function<void(Vec3, Vec3, uint32_t, float)> &line);
+  void vr_sketch_command(const std::vector<std::string> &t);
+  /* Round 386 (task 0363): painting in VR - the right controller's ray paints the object in Paint mode (vr_paint.cpp). */
+  bool vr_paint_ = false, vr_pt_stroking_ = false, vr_pt_aimed_ = false, vr_pt_erase_ = false;
+  float vr_paint_radius_ = 0.03f;  // metres, at life size
+  Vec3 vr_pt_hit_, vr_pt_last_, vr_pt_from_, vr_pt_axis_, vr_pt_right_, vr_pt_down_;  // (the last hit and the last ray's frame: the dabs between frames follow the ray, re-hit)
+  bool vr_pt_flick_size_ = true, vr_pt_flick_opacity_ = true;
+  void vr_paint_frame(const xr::Hand &r, Vec3 &from, Vec3 &axis, Vec3 &right, Vec3 &down) const;
+  bool vr_paint_ray(Vec3 from, Vec3 axis, Vec3 &hit);
+  const xr::SegmentBvh *vr_paint_bvh(bool fresh_only);
+  void vr_paint_hands(const xr::Hand &l, const xr::Hand &r);
+  void vr_paint_to(const xr::Hand &r);
+  void vr_paint_begin(const xr::Hand &r);
+  void vr_paint_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float trigger);
+  void vr_paint_end();
+  void vr_paint_undo();
+  void vr_paint_overlay(const std::function<void(Vec3, Vec3, uint32_t, float)> &line);
+  void vr_paint_command(const std::vector<std::string> &t);
+  int vr_bvh_harvest();
+  float vr_render_aspect();
+  const xr::SegmentBvh *vr_bvh_of(const Mesh &m, int &building);
+  void vr_overlay(const Mat4 &view, const Mat4 &proj, int width, int height);
+  Image vr_img_;
+  RenderTarget vr_rt_;
+  Renderer3D vr_r3d_;
+  std::string vr_why_;  // (why VR isn't running, for the status line and the button's tooltip)
+  void vr_command(const std::vector<std::string> &t);
+  bool vr_start(std::unique_ptr<xr::Runtime> rt, std::string &why);
+  void vr_stop();
+  void vr_tick();  // once a frame, after Live Link's
+  bool vr_running() const { return vr_ && vr_->state() != xr::Session::State::Off && vr_->state() != xr::Session::State::Lost; }
+  void vr_draw_eye(const Mat4 &view, const Mat4 &proj, Vec3 eye, int width, int height, uint32_t *pixels);
   void livelink_write_discovery();
   void livelink_remove_discovery();
   bool livelink_pref(const std::string &k, const std::string &v);
@@ -2388,6 +2727,7 @@ class Editor {
   void draw_skin_transfer(GameObject *target, ui::Layout &lay);  // the Rigging window's Transfer Weights
   std::unique_ptr<SkinWeightJob> skin_job_;
   size_t skin_async_min_verts_ = 5000;  // smaller meshes solve at once
+  bool skin_job_held_ = false;  // (tests: a finished bind waits to land until released)
   std::string skin_transfer_source_;    // the Rigging window's Transfer From field
   void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
   bool point_pick(const Recti &view, int mx, int my, int mode);
@@ -2532,6 +2872,7 @@ class Editor {
     int source = 0;  // 1 the scene's sequence, 2 the selected object's clip
     int first = 0, last = 0, frame = 0;
     float fps = 30.0f;
+    int preset = 0;     // (round 391: video::Preset, taken when it starts)
     uint64_t root = 0;  // a clip's object
     std::string dir, video;
     std::vector<std::string> written;
@@ -2545,7 +2886,9 @@ class Editor {
   bool render_animation_source(int &source, int &last, float &fps);
   void step_render_animation();
   void finish_render_animation();
-  void encode_render_video();
+  void encode_render_video(std::vector<float> sound = {});
+  void offer_video_libraries();  // (round 366)
+  bool full_build_installed() const;
   void cancel_render_video();
   void poll_render_video();
   void set_ffmpeg_path(const std::string &path);
@@ -2800,9 +3143,169 @@ class Editor {
   void new_scene();
   bool open_scene(const std::string &path);
   void save_scene_cmd(bool save_as);
+  void save_scene_to(const std::string &path);  // (round 367: the console's save / open / rotate / scale / help)
+  void open_scene_cmd(const std::string &path);
+  std::string scene_file_path(const std::string &path) const;
+  void transform_command(const std::string &what, const std::vector<std::string> &v);
+  void log_all_commands();
+  bool round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line);
   void import_obj_file(const std::string &path);
   /* Export (Blender: File > Export). Writes `path`, or Assets/Exports/<name><ext> when empty; returns the file. */
   std::string export_model(const ExportOptions &o, const std::string &path = "");
+  /* Round 354: an export asked for while a job (a Quad Remesh, a skin bind, mesh maps, a surface) still works on one of
+   * the objects it would write waits for the job, shown in the tray; Cancel there exports at once. */
+  struct ExportWait {
+    ExportOptions options;
+    std::string path, job, label;  // (path resolved when asked for; label: the tray's row, unique per file)
+    std::vector<uint64_t> objects;  // (the objects asked for: written whatever is selected when it goes - review 354)
+    std::vector<std::string> surfaces;  // (the surfaces they paint, found once)
+    bool now = false;  // (Export Now pressed: written at the next poll, unfinished jobs and all)
+  };
+  std::vector<ExportWait> export_waits_;  // (review 354: each export asked for keeps its own place, none replaced)
+  std::string pending_job_on(GameObject &g, const std::vector<std::string> *surfaces = nullptr);
+  std::vector<GameObject *> export_candidates(const ExportOptions &o);
+  std::string export_path_for(const ExportOptions &o, const std::string &path_in);
+  std::string export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path);
+  /* Round 355: the performance budget - the target (VRChat PC, Quest), what it counts (the selection and what's under
+   * it, else the scene), the Profiler's Budget section, the console's `budget`, the export's line, Decimate to fit. */
+  int budget_target_ = -1;  // (-1: none - no ranking, exports quiet; review 355)
+  /* Round 356: VRChat's visemes from three sculpted keys, the shape keys' problems in the Inspector, the avatar's
+   * checklist in the Rigging window (each item's Fix runs its console line). */
+  bool visemes_command(const std::vector<std::string> &t);
+  void avatar_command(const std::vector<std::string> &t);
+  void draw_avatar_window(const Recti &r);  // (round 356: the module's home, CATS' tab top to bottom)
+  void draw_avatar_section(ui::Layout &lay, GameObject *root);
+  void draw_shape_key_problems(ui::Layout &lay, const Mesh &m);
+  void run_fix(const std::string &lines);
+  void avatar_origin(GameObject &root);
+  /* Round 357: Fix Model (CATS'), its options kept for the window. */
+  void avatar_fix_model(GameObject &root);
+  void draw_fix_model_section(ui::Layout &lay, GameObject *root);
+  /* Round 358: CATS' Model Options and Pose and Shape tools (avatar_tools_ui.cpp). */
+  bool avatar_tool_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  void draw_model_options_section(ui::Layout &lay, GameObject *root);
+  void draw_pose_shape_section(ui::Layout &lay, GameObject *root);
+  /* Round 359: CATS' Decimation, Bone Root and Bone Merging (avatar_optimize_ui.cpp). */
+  bool avatar_optimize_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  void draw_optimize_section(ui::Layout &lay, GameObject *root);
+  int avatar_decimate_mode_ = 0, avatar_decimate_tris_ = 70000, avatar_merge_percent_ = 50;
+  std::string avatar_decimate_exclude_;
+  std::string avatar_key_field_ = "Pose";
+  void note_avatar_clips(GameObject &root);
+  /* `avatar <verb> <words...>`: the words after the verb as one name (names with spaces; rounds 358, 361). */
+  static std::string avatar_name_arg(const std::vector<std::string> &t);
+  bool avatar_merge_weights(GameObject &root);
+  bool avatar_zero_weight(GameObject &root);
+  bool avatar_join(GameObject &root);
+  bool avatar_remove_doubles(GameObject &root);
+  bool avatar_normals(GameObject &root, bool flip);
+  bool avatar_connect(GameObject &root);
+  bool avatar_pose_key(GameObject &root, const std::string &name);
+  bool avatar_apply_rest(GameObject &root);
+  bool avatar_basis(GameObject &root, const std::string &name);
+  bool avatar_sort_keys(GameObject &root);
+  bool avatar_arms(GameObject &root, bool t_pose);
+  FixModelOptions fix_model_options_;
+  public:
+  FixModelOptions &fix_model_options_for_test() { return fix_model_options_; }
+  private:
+  const std::vector<AvatarCheck> &avatar_checklist(GameObject &root);
+  void run_avatar_fix(const AvatarCheck &c);  // (its object selected by id first)
+  /* The checklist kept half a second for the window (review 356: humanoid::map, gait::analyse and the budget every frame). */
+  struct AvatarCache {
+    uint64_t root = 0;
+    double at = -1.0;
+    std::vector<AvatarCheck> list;
+  } avatar_cache_;
+  struct BudgetCache {
+    BudgetCounts counts;
+    double at = -1.0;
+  } budget_cache_;
+  std::vector<GameObject *> budget_objects();
+  void draw_budget(ui::Layout &lay);
+  void budget_command(const std::vector<std::string> &t);
+  bool budget_fix_triangles(int rank);
+  bool budget_fix_triangles(int rank, const std::vector<GameObject *> &objs, int target);  // (review 356: the avatar's own objects)
+  bool decimate_to(const std::vector<GameObject *> &cut_from, const std::vector<GameObject *> &fixed, double limit, const std::string &what, bool drop_keys = false);
+  void avatar_decimate(GameObject &root, const std::vector<std::string> &t);
+  /* Round 360: CATS' Eye Tracking and the Texture Atlas (avatar_eyes_ui.cpp). */
+  bool avatar_eyes_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  bool avatar_eyes(GameObject &root);
+  void avatar_eye_test(GameObject &root, const std::vector<std::string> &t);
+  bool avatar_atlas(GameObject &root, int size);
+  void draw_eyes_section(ui::Layout &lay, GameObject *root);
+  EyeOptions eye_options_;
+  uint64_t eye_test_root_ = 0;  // (the avatar whose eyes the test has turned: undone before anything is kept)
+  void eye_test_off();
+  /* Round 364: the Sequencer's cards and camera cuts (seq_cards.cpp). */
+  const Image *card_picture(const SeqInstance &i, uint64_t *stamp = nullptr);
+  /* Round 391 (seq_footage.cpp): footage, keyed cards, Premiere's Add Edit and Ripple Delete. */
+  const Image *card_picture_at(const SeqInstance &i, float frame, float rate, uint64_t *stamp = nullptr);
+  const Image *card_video_picture(const SeqInstance &i, float frame, float rate, uint64_t *stamp);
+  bool seq_add_video(const std::string &file, int track, float start, float frames);
+  float seq_bar_frames(const SeqInstance &i);
+  bool seq_blade(float frame, int track);
+  bool seq_ripple(const std::string &name);
+  bool seq_hovered_ = false;  // (review 391: the Sequencer under the pointer - its Add Edit and Ripple Delete keys)
+  bool seq_key(const std::string &name, const std::string &channel, float frame, float value, bool remove);
+  std::string seq_paper_by_name(const std::string &media);
+  void card_trim_pictures(const Sequence &s);
+  /* Round 365 (seq_audio.cpp): the Sequencer's sound, in step with the playhead. */
+  struct SeqAudio;
+  std::shared_ptr<SeqAudio> seq_audio_;
+  Sequencer *playing_sequencer();
+  float seq_audio_frame(SequencePtr &seq, double &step);
+  void seq_audio_tick();
+  bool render_animation_sound(std::vector<float> &out);
+  bool seq_card_there(const SeqInstance &i);
+  float sequence_frame_now(SequencePtr &seq);
+  void draw_sequence_card(const Recti &img);
+  void draw_keyed_card(const Recti &img, const Image &pic, const SeqCardLook &look);
+  void composite_render_card(Image &frame_img, float frame);
+  void seq_camera_cut();
+  bool seq_add_card(int kind, const std::string &media, int track, float start, float frames);
+  bool seq_drop_card(const std::string &abs_path, int mx, int my);
+  struct CardPicture {
+    Image img;
+    std::shared_ptr<BoardPicture> paper;  // (a paper's: rebuilt when the Board's picture of it changes)
+    int64_t mtime = -1;                   // (an image's file time when read, looked at once a second)
+    double checked = -1e9;
+    uint64_t made = 0;  // (a stamp: the Game view's fitted copy redone when it changes)
+    std::shared_ptr<video::Reader> video;  // (round 391: footage's reader, opened once; the frame decoded as the playhead moves)
+    bool video_failed = false;
+    double video_at = -1.0;  // (the seconds `img` was decoded at)
+  };
+  std::unordered_map<std::string, CardPicture> card_pictures_;  // (by kind and path; review 364: never kept stale)
+  uint64_t card_stamp_ = 0;
+  Image card_view_;                                       // (the Game view's card, fitted to it)
+  std::string card_view_key_;
+  /* Round 362: the world kit (world_kit.cpp). */
+  void update_collider_fits();
+  void draw_colliders();
+  const Mesh *lod_for_view(const GameObject &g, const Mesh &m);
+  void add_lod_items(GameObject &g, const Mesh &m, std::vector<ExportItem> &items, size_t index, const ExportOptions &o, GameObject *arm, const SkinModifier *skm);
+  bool exports_lods(const GameObject &g, const ExportOptions &o);
+  struct ColliderWire {
+    uint64_t key = 0;
+    std::shared_ptr<Mesh> mesh;
+  };
+  std::unordered_map<uint64_t, ColliderWire> collider_wires_;  // (by object id)
+  const Mesh *collider_wire(const GameObject &g, const ColliderComponent &c);
+  void mark_static_meshes();
+  void bake_refuse_empty();
+  uint64_t bake_refused_key_ = 0;
+  void add_collider_item(GameObject &g, const Mesh &m, const ExportItem &it, const ExportOptions &o, std::vector<ExportItem> &items, std::vector<std::shared_ptr<Mesh>> &keep);
+  /* Round 361: CATS' Merge Armatures, Attach Mesh, Translate and Export (avatar_merge_ui.cpp). */
+  bool avatar_merge_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root);
+  bool avatar_merge_armature(GameObject &root, const std::string &other);
+  bool avatar_attach(GameObject &root, const std::string &bone);
+  bool avatar_translate(GameObject &root);
+  void avatar_export(GameObject &root, const std::string &path);
+  void draw_merge_section(ui::Layout &lay, GameObject *root);
+  std::string avatar_merge_field_;
+  void budget_report(const BudgetCounts &counts, const char *what);
+  void export_wait_poll();
+  void export_waits_drop(const char *why);
   std::shared_ptr<ExportSkin> export_skin_of(GameObject &armature, const Mesh &m, const GameObject &owner, const SkinModifier &skin);  // (task 0268)
   std::string export_model(const std::string &format, bool selection_only);  // "obj" "fbx" "glb" "gltf" "stl" "ply" "usda"
   void open_export_dialog(int format);  // the options, then the Save As dialog
@@ -2873,7 +3376,7 @@ class Editor {
   void toonstyle_command(const std::string &name);  // toonstyle <style>: the selected materials' toon preset (task 0148)
   /* Anime face normals (task 0149): a sphere proxy fitted to the head (the Head vertex group, else the top of the
    * mesh) and a Normal Transfer modifier reading it, so the face shades like a ball. Console: facenormals. */
-  GameObject *add_face_normals(GameObject *mesh_obj);
+  GameObject *add_face_normals(GameObject *mesh_obj, bool ellipsoid = false);  // (round 341: an ellipsoid fitted to the head's three sizes)
   void customnormals_command(const std::string &verb);  // customnormals clear|show: the selected meshes' own normals (task 0149)
   /* Rig Hair from Mesh (task 0153): the mesh's loose parts (hair cards) - or one shell split into `locks` sectors - each
    * a chain of `bones` bones from the scalp to the tip under a new hair armature (under the character's head bone when
@@ -2885,6 +3388,8 @@ class Editor {
   MaterialPtr animemat_command(const std::string &preset);
   int export_panel_h_ = 0;
   GameObject *create_object(const std::string &kind, bool as_child = false);
+  static std::string known_create_kind(const std::string &kind);  // (round 367)
+  std::string unique_object_name(const std::string &base) const;
   void duplicate_selected();
   void delete_selected();
   void add_component_to_selection(const std::string &name);
@@ -2975,6 +3480,7 @@ class Editor {
   void update_camera_focus();  // cameras keeping a picked point in focus
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
   void join_selected();
+  GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
   uint64_t boolean_kept_ = 0;  // (the Boolean dialog's choice: task 0255)
   int export_packing_ = 0;  // (the Export Textures dialog: task 0257)
@@ -3048,7 +3554,7 @@ class Editor {
   void draw_ipv_outline_row();
   void import_with_shading(const std::string &path, bool copy_into_assets, int shading);  // the console's import <file> <shading>
   void finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
-                     bool rewrite_materials);
+                     bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit = {});  // (round 374: a snapshot's parts, in the same Undo step)
   /* The draw items a view and the import preview share (task 0152): a mesh's, and its toon outline's hull. */
   DrawItem mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing);
   bool outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &out);
@@ -3577,6 +4083,7 @@ class Editor {
     bool identity() const;
   };
   std::vector<SculptSym> sculpt_symmetries() const;
+  void sculpt_set_lean(const Mat4 &inv, const SculptSym &sym);  // (round 368)
   void sculpt_apply_brush(Mesh &m, const Mat4 &inv, const SculptSym &sym, const std::vector<uint32_t> &ids, const std::vector<float> &w, float r_local, int kind, bool carve, Vec2 drag_px);
   size_t sculpt_weights(const Mesh &m, const Mat4 &inv, const SculptSym &sym, Vec3 hit_local, float r_local, float strength, Vec2 drag_px, bool use_mask, std::vector<uint32_t> &ids,
                         std::vector<float> &w) const;
@@ -3674,14 +4181,17 @@ class Editor {
     Mat4 model;
     MeshMapsSettings settings;
     MeshMapsResult result;
+    std::string load_into;  // (round 392: Bake All Maps - the surface it loads into when it lands; review: dies with the job)
     ~MeshMapsJob() {
       cancel.store(true, std::memory_order_relaxed);
       if (thread.joinable()) thread.join();
       if (landed || base.empty()) return;
-      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"}) fs::remove_file(base + suffix);
+      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png", "_id.png"}) fs::remove_file(base + suffix);
     }
   };
   std::unique_ptr<MeshMapsJob> meshmaps_job_;
+  bool surface_bake_all(int size);
+  void meshmaps_load_landed(GameObject *g, const std::string &into);
   /* Task 0245 (ADR 0081): Paint Mode - the brush, the stroke's tiles, the layer written. */
   PaintBrush paint_brush_;
   bool paint_ = false, paint_stroking_ = false, paint_dabbed_ = false, paint_erase_ = false;
@@ -3709,8 +4219,10 @@ class Editor {
   /* Task 0288: render, MoonRay and AI without the console. */
   int ranim_first_ = 0, ranim_last_ = 0;  // (0: the sequence's or the clip's own)
   float ranim_fps_ = 0.0f;
+  int ranim_preset_ = 0;  // (round 391: video::Preset - H.264, ProRes 422, VRChat)
   std::string seq_folder_;                // (empty: Renders/<scene>_sequence_<time>)
   void draw_render_range(ui::Layout &lay);
+  void set_render_preset(const std::string &name);
   bool start_render_animation_from_fields();
   void draw_ffmpeg_settings();
   void draw_moonray_own_row();
@@ -3876,6 +4388,20 @@ class Editor {
   bool paint_hit(const Recti &view, float x, float y, Vec3 &world, float &dist);
   uint32_t paint_face_under(float x, float y);
   bool paint_begin_stroke(const Recti &view, float x, float y);
+  /* Round 386 (task 0363): a dab in the world, for VR's brush - the disc square to the ray (paint.cpp). */
+  struct PaintWorldDab {
+    bool on = false;
+    Vec3 centre, axis, right, down;
+    float radius = 0.0f, facing = 1.0f;  // (facing -1: the object's transform mirrors, its winding turned)
+  };
+  /* The triangles near a point of the painted object (its space) within r; false: none known, try them all. */
+  using NearFn = std::function<bool(Vec3 centre, float r, std::vector<uint32_t> &tris)>;
+  PaintWorldDab paint_wdab_;
+  Vec3 paint_last_world_;
+  template <class Weigh>
+  void paint_raster_uv(const Mesh &mesh, const uint32_t *cn, Vec3 p0, Vec3 p1, Vec3 p2, Weigh weigh);
+  void paint_triangle_world(const Mesh &mesh, const uint32_t *cn, Vec3 p0, Vec3 p1, Vec3 p2, float k_max);
+  void paint_world_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float radius, float pressure, const NearFn &near = nullptr);
   bool paint_begin_stroke_images();
   PaintImages &paint_layer_images(PaintLayer &l, int size);
   void paint_reattach_images(ProceduralTexture &pt);
@@ -4383,7 +4909,7 @@ class Editor {
   bool draw_tab_command(const std::vector<std::string> &t);
   /* The Layers panel (task 0234, editor/sketch_layers.cpp): the sketch's layers composited in order with their opacity
    * and blend, the window that edits them, the console's verbs. */
-  Image sketch_comp_[3];  // (task 0297: [2] a see-through stroke's own picture)  // (a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
+  Image sketch_comp_[4];  // ([2] a see-through stroke's own picture, task 0297; [3] a layer mask's shapes, round 388) - a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
   int sketch_solo_ = -1;  // (one layer shown alone; -1 none - the editor's, not the scene's; dropped by the stack's operations)
   int layers_rename_ = -1;
   std::string layers_rename_text_;
@@ -4405,6 +4931,84 @@ class Editor {
   void draw_layer_thumb(int i, const Recti &box);
   void layers_drop(int from, int to);
   void sketch_layer_command(const std::vector<std::string> &t, const std::string &line);
+  /* Round 388 (task 0365): selections, fill, delete, clipping and layer masks (sketch_select.cpp, sketch_layers.cpp). */
+  std::vector<Vec2> sketch_sel_;  // (the selection's outline in the canvas's frame; empty: none)
+  int sketch_select_tool_ = 0;    // (the Draw tab's Select: 0 off, 1 Rectangle, 2 Lasso)
+  /* Round 390 (task 0367): More > Shapes - 0 off, 1 Rectangle, 2 Ellipse, 3 Polygon, 4 Star, 5 Pen; a shape's drag in
+   * pixels; the Pen's path (an anchor, its in- and out-handle each, the canvas's frame); the fill and the stroke. */
+  int sketch_vec_tool_ = 0, sketch_vec_sides_ = 5;
+  int sketch_vec_view_ = -1;  // (the view a shape's drag or a handle's pull began in: sketch_view_.kind)
+  std::vector<Vec2> sketch_vec_drag_, sketch_pen_;
+  bool sketch_pen_drag_ = false;
+  Vec2 sketch_pen_from_;
+  uint32_t sketch_fill_ = 0;
+  bool sketch_stroke_none_ = false;
+  SketchStroke sketch_vector_stroke(std::vector<Vec2> pts, bool closed) const;
+  bool sketch_vector_add(SketchStroke st, const char *label);
+  bool sketch_shape_add(int kind, int sides, Vec2 a, Vec2 b);
+  void sketch_pen_end(bool close);
+  void sketch_vec_pick(int tool);
+  bool sketch_pen_keys();
+  Recti sketch_command_view() const;
+  bool sketch_pen_update(const Recti &view, Vec2 px);
+  void sketch_pen_pull(const Recti &view, Vec2 px);
+  bool sketch_shape_update(const Recti &view, Vec2 px);
+  bool sketch_vector_update(const Recti &view, Vec2 px);
+  void sketch_vector_draw(const Recti &view);
+  void draw_sketch_shape_items();
+  void sketch_restyle();
+  void sketch_shape_command(const std::vector<std::string> &t);
+  void sketch_pen_command(const std::vector<std::string> &t);
+  void sketch_paint_colour_command(const std::vector<std::string> &t, bool fill);
+  void sketch_artboard_command(const std::vector<std::string> &t);
+  void sketch_svg_command(const std::vector<std::string> &t);
+  void sketch_svg_import(const std::string &path);
+  std::vector<Vec2> sketch_sel_drag_;  // (the drag under way, view pixels)
+  std::unordered_map<int, std::vector<uint8_t>> sketch_clip_covs_;  // (each base's coverage, this picture: a layer or a group)
+  bool sketch_clips_onto(int i) const;
+  int sketch_clip_base(int i) const;
+  void sketch_apply_mask(Image &c, const Recti &view, const SketchMask &m);
+  void sketch_apply_clip(Image &c, const Recti &view, int base);
+  void sketch_keep_clip(const Image &c, const Recti &view, int base);
+  std::vector<Vec2> sketch_selection_from_px(const Recti &view, const std::vector<Vec2> &px) const;
+  void sketch_select_set(std::vector<Vec2> poly, const char *what);
+  void sketch_select_command(const std::vector<std::string> &t);
+  bool sketch_select_update(const Recti &view, Vec2 px);
+  void sketch_fill();
+  void sketch_delete();
+  void sketch_layer_clip(const std::string &how);
+  void sketch_layer_mask(const std::string &how);
+  void sketch_draw_selection(const Recti &view);
+  void draw_sketch_select_items();
+  /* Round 389 (task 0366): Free Transform (sketch_transform.cpp). */
+  struct SketchXf {
+    bool on = false;
+    std::vector<SketchStroke> before, orig;  // (the whole list before; the transformed strokes as they were)
+    std::vector<size_t> idx;                 // (where they are in the list)
+    Vec2 lo, hi, q[4], q_from[4];
+    int drag = -1, view_kind = -1;
+    Vec2 drag_from;
+    const Sketch *doc = nullptr;  // (the drawing it began on, its size then: review 389)
+    size_t count = 0, layers = 0;
+    bool from_paper = false;
+    std::string paper;  // (the paper it began on: re-check 389 - another paper is the same Sketch)
+  };
+  SketchXf sketch_xf_;
+  bool sketch_xf_begin();
+  bool sketch_xf_valid();
+  void sketch_xf_settle();
+  void sketch_xf_drop();
+  void sketch_xf_press(const Recti &view, Vec2 px);
+  void sketch_xf_split(SketchStroke &st, std::vector<SketchStroke> &kept, std::vector<size_t> &idx);
+  void sketch_xf_apply();
+  void sketch_xf_commit();
+  void sketch_xf_cancel();
+  void sketch_transform_command(const std::vector<std::string> &t);
+  void sketch_xf_draw(const Recti &view);
+  bool sketch_xf_update(const Recti &view, Vec2 px);
+  int sketch_xf_pick(const Recti &view, Vec2 px) const;
+  void sketch_xf_drag(const Recti &view, Vec2 px, bool shift, bool ctrl);
+  float sketch_tilted(float pressure);  // (round 389: the brush's tilt widens the line)
   void sketch_layer_op(const std::string &op, int i);
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;
@@ -4811,6 +5415,7 @@ class Editor {
     int id = -1;
     uint64_t serial = 0;
     uint32_t vertices = 0, indices = 0;
+    bool tangents = false;  // (round 337) sent with tangents: Mesh::render_mesh_tangents adds them in place, the serial kept
     uint64_t used = 0;  // the gpu_calls_ count it was last drawn at
     uint64_t bytes = 0;
     float uv_stretch = -1.0f;     // task 0196: its UVs' most stretch (live_close_up_of), -1 not measured
@@ -5378,7 +5983,7 @@ class Editor {
   void cancel_update_download();
   bool use_libs_ = true, libs_never_ask_ = false;  // Preferences > Libraries (read by the launcher too, task 0080)
   void check_libraries_at_start();
-  bool offer_libraries();
+  bool offer_libraries(bool manual = false);
   void offer_after_check(bool manual, bool updates);  // (task 0261: MoonRay, AI, the libraries, a newer build - once no dialog is open)
   void draw_libraries_dialog(const std::function<void()> &close);
   void download_verified(const releases::Asset &a, const releases::Asset &sums, bool libraries, bool moonray = false, bool ai = false);

@@ -39,7 +39,7 @@ struct Map {
 };
 
 /* The rig under `armature`, as it stands now (its rest, or a pose the caller put it in). */
-Map map(const Scene &scene, GameObject &armature);
+Map map(const Scene &scene, GameObject &armature, bool with_parts = true);  // (false: the analysis' own, not the parts set by hand)
 
 /* What to key for `bone`: its FK control (Rig Control, role FK, driving it) when the rig has one - an artist poses a
  * control rig through its controls - otherwise the bone itself. */

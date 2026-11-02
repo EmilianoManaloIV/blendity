@@ -26,9 +26,106 @@
 
 namespace bl {
 
-static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "vsel", "walk", "weightpaint", "wheel", "where", "window", "world", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight"};
+static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "where", "window", "world", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr"};
 // (The names above: the sketch families dispatched before the chain, then this file's `c == "..."` cases as generated by
 // round 280's patch; regenerate when commands change - nothing checks the list against the dispatcher yet.)
+
+namespace {
+/* The rest of a console line from word `from` (a path or a name with spaces), trimmed. */
+std::string line_rest(const std::string &line, size_t from) {
+  size_t at = line.find_first_not_of(' ');
+  for (size_t i = 0; i < from && at != std::string::npos; i++) {
+    at = line.find(' ', at);
+    if (at != std::string::npos) at = line.find_first_not_of(' ', at);
+  }
+  if (at == std::string::npos) return "";
+  std::string out = line.substr(at);
+  while (!out.empty() && out.back() == ' ') out.pop_back();
+  return out;
+}
+}  // namespace
+
+/* help's first lines (round 367, finding 13: it listed about 25 of some 200): every command, in rows. */
+void Editor::log_all_commands() {
+  std::vector<std::string> names(std::begin(kConsoleCommands), std::end(kConsoleCommands));
+  std::sort(names.begin(), names.end());
+  names.erase(std::unique(names.begin(), names.end()), names.end());
+  Log::info("All %zu commands (each says how it's used when given too little; the Manual's Console section has them all):", names.size());
+  std::string row;
+  for (const std::string &n : names) {
+    if (row.size() + n.size() > 110) Log::info("  %s", row.c_str()), row.clear();
+    row += (row.empty() ? "" : ", ") + n;
+  }
+  if (!row.empty()) Log::info("  %s", row.c_str());
+  Log::info("Examples:");
+}
+
+/* save [path] (round 367): the scene - to a path when given (project-relative or absolute; .scene added), else where it
+ * was saved (a new scene asks, as Ctrl+S does). */
+void Editor::save_scene_to(const std::string &path) {
+  if (path.empty() || playing_) return save_scene_cmd(false);  // (Play: refused there, with its Fix)
+  const std::string p = scene_file_path(path);
+  fs::make_dirs(fs::parent(p));
+  const bool made = !fs::exists(p);
+  if (made && !fs::write_file(p, ""))  // (review 367: a path that can't be written leaves the scene's own as it was)
+    return Log::warn("save: can't write %s; the scene keeps %s", p.c_str(), scene_->path.empty() ? "no file yet" : scene_->path.c_str());
+  const std::string old_path = scene_->path, old_name = scene_->name;
+  scene_->path = p, scene_->name = fs::stem(p);
+  save_scene_cmd(false);
+  std::string head;
+  if (fs::read_prefix(p, 1, head) && !head.empty()) return;
+  scene_->path = old_path, scene_->name = old_name;  // (not written: nothing changed, no empty file left)
+  if (made) fs::remove_file(p);
+}
+
+/* A scene file named on the console: a bare name in Assets/Scenes (where Save As puts it, and the Project window shows
+ * it), a path the project's or absolute; .scene added (review 367). */
+std::string Editor::scene_file_path(const std::string &path) const {
+  const bool bare = path.find('/') == std::string::npos && path.find('\\') == std::string::npos;
+  std::string p = bare ? fs::join(fs::join(assets_dir_, "Scenes"), path) : resolve_asset_path(path);
+  if (fs::extension(p) != ".scene") p += ".scene";
+  return p;
+}
+
+/* open <path> (round 367): a scene file, asking first when this one has unsaved changes. */
+void Editor::open_scene_cmd(const std::string &path) {
+  const std::string p = path.empty() ? path : scene_file_path(path);
+  if (p.empty() || !fs::exists(p)) return Log::warn("open <file.scene>: no file %s", path.empty() ? "given" : p.c_str());
+  open_scene_asked(p);
+}
+
+/* rotate <x> <y> <z> | scale <s> or <x> <y> <z> | set Transform.Position|Rotation|Scale <x> <y> <z> (round 367): the
+ * selected objects' own (local) transform, as the Inspector's Transform shows it - degrees for rotation. */
+void Editor::transform_command(const std::string &what, const std::vector<std::string> &v) {
+  auto num = [&](size_t i, float d) { return v.size() > i ? (float)std::atof(v[i].c_str()) : d; };
+  const float x = num(0, 0.0f);
+  const Vec3 p(x, num(1, what == "scale" ? x : 0.0f), num(2, what == "scale" ? x : 0.0f));  // (one number: a uniform scale)
+  if (what != "position" && what != "rotation" && what != "scale") return Log::warn("set Transform.Position, Transform.Rotation or Transform.Scale <x> <y> <z>");
+  const std::vector<GameObject *> sel = selected_objects(false);
+  if (v.empty() || !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+    return Log::warn("%s <x> <y> <z>%s", what.c_str(), what == "scale" ? " (or one number for all three)" : "");
+  if (sel.empty()) return Log::warn("%s: select an object", what.c_str());
+  if (what == "scale" && (p.x == 0.0f || p.y == 0.0f || p.z == 0.0f))  // (review 367: a flat object's matrix has no inverse - Join's NaNs)
+    return Log::warn("scale: not 0 (a tiny scale, like 0.001, flattens it)");
+  for (GameObject *g : sel) {
+    if (what == "position") g->set_local_position(p);
+    if (what == "rotation") g->set_local_euler(p);
+    if (what == "scale") g->set_local_scale(p);
+  }
+  mark_changed(what == "position" ? "Position" : what == "rotation" ? "Rotation" : "Scale");
+}
+
+/* Round 367's verbs (finding 13): the scene's file, and the selection's transform (`scale` was the UI's: ui scale). */
+bool Editor::round367_command(const std::string &c, const std::vector<std::string> &t, const std::string &line) {
+  const std::string field = t.size() > 1 ? to_lower(t[1]) : std::string();
+  if (c == "new") return new_scene_asked(), true;  // (asking first, as File > New does)
+  if (c == "save") return save_scene_to(line_rest(line, 1)), true;
+  if (c == "open") return open_scene_cmd(line_rest(line, 1)), true;
+  if (c == "rotate" || c == "scale") return transform_command(c == "scale" ? "scale" : "rotation", std::vector<std::string>(t.begin() + 1, t.end())), true;
+  if (c != "set" || field.rfind("transform.", 0) != 0) return false;
+  transform_command(field.substr(10), std::vector<std::string>(t.begin() + 2, t.end()));
+  return true;
+}
 
 /* Up to three known commands - the console's own names, then the palette's console lines' first words - that start with
  * what was typed, then those that contain it (task 0260: an unknown command points at the nearest known ones). */
@@ -244,8 +341,11 @@ void Editor::customnormals_command(const std::string &verb) {
 }
 
 /* Anime Face Normals (task 0149): a sphere proxy fitted to the head and a Normal Transfer reading it, placed before a
- * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). */
-GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
+ * Skin modifier (the transfer runs once in the rest pose and the skin turns the normals with the bones). Round 341: or an
+ * ellipsoid fitted to the head's width, height and depth - an anime head is taller and narrower than a ball, and a
+ * sphere's normals on its sides turn the shadow line too early (the transfer turns the normals by the inverse
+ * transpose, so the stretched sphere's are the ellipsoid's). */
+GameObject *Editor::add_face_normals(GameObject *mesh_obj, bool ellipsoid) {
   MeshFilter *mf = mesh_obj ? mesh_obj->mesh_filter() : nullptr;
   if (!mf || !mf->mesh || mf->mesh->vert_count() == 0) {
     Log::warn("Anime Face Normals: the object has no mesh");
@@ -268,7 +368,10 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
     if (in) hb.add(m.positions[i]);
   }
   if (!hb.valid()) hb = all;
-  const Vec3 ext = hb.extent();  // (half the head's size each way)
+  Vec3 ext = hb.extent();  // (half the head's size each way)
+  /* (Round 341: without a Head group the head is the top sixth - as tall as that slice, even when only a cap's vertices
+   * are in it: an ellipsoid would otherwise be flat.) */
+  if (head < 0) ext.y = std::max(ext.y, (all.max.y - all.min.y) / 12.0f);
   const float radius = std::max(1e-3f, std::max(ext.x, std::max(ext.y, ext.z)));
   std::string group = head >= 0 ? m.vertex_groups[(size_t)head].name : std::string();
   /* The proxy: a sphere of that size at the head's centre, in the mesh's own space (its child), with no renderer. */
@@ -277,7 +380,9 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
   GameObject *proxy = scene_->create(name, mesh_obj);
   proxy->add<MeshFilter>()->mesh = primitives::uv_sphere(1.0f, 16, 12);  // (a few hundred triangles: the transfer's search is brute force)
   proxy->set_local_position(hb.center());
-  proxy->set_local_scale(Vec3(radius));
+  /* (Review 341: no axis under a quarter of the widest - a flat head (a face card) would be a sheet, its two faces flipping
+   * the normals vertex by vertex.) */
+  proxy->set_local_scale(ellipsoid ? vmax(ext, Vec3(std::max(1e-3f, 0.25f * radius))) : Vec3(radius));
   NormalTransferModifier *nt = mesh_obj->add<NormalTransferModifier>();
   nt->object = name;
   nt->vertex_group = group;
@@ -291,7 +396,8 @@ GameObject *Editor::add_face_normals(GameObject *mesh_obj) {
       break;
     }
   mark_changed("Anime Face Normals");
-  Log::info("Anime Face Normals: %s (radius %.3f%s) and a Normal Transfer on %s", name.c_str(), radius, group.empty() ? "" : (", group " + group).c_str(),
+  Log::info("Anime Face Normals: %s (%s %.3f%s) and a Normal Transfer on %s", name.c_str(), ellipsoid ? "an ellipsoid, height" : "radius",
+            ellipsoid ? ext.y : radius, group.empty() ? "" : (", group " + group).c_str(),
             mesh_obj->name.c_str());
   return proxy;
 }
@@ -546,39 +652,49 @@ static const GameObject *find_head_bone(const GameObject &g) {
   return nullptr;
 }
 
-static const char *kFlattenUsage = "flatten [amount 0..1] | pivot center|origin|bone <name> | direction camera|axis | preset anime | remove";
+static const char *kFlattenUsage = "flatten [amount -1..1] | lens <mm>|off | pivot center|origin|object <name> | direction camera|axis | preset anime | remove";
 
-/* The bone named `name` below g (or g itself), or null. */
-static const GameObject *find_bone_named(const GameObject &g, const std::string &name) {
-  if (g.get<Bone>() && g.name == name) return &g;
+/* The object named `name` below g (or g itself), or null - a bone, an empty, a mesh (round 338: any object). */
+static const GameObject *find_named_below(const GameObject &g, const std::string &name) {
+  if (g.name == name) return &g;
   for (const GameObject *c : g.children)
-    if (const GameObject *b = find_bone_named(*c, name)) return b;
+    if (const GameObject *b = find_named_below(*c, name)) return b;
   return nullptr;
 }
 
 /* One object's Camera Flatten set by the command's words; false (with the usage) when they don't say what to set. */
-static bool flatten_set(CameraFlatten &cf, const GameObject &g, const std::vector<std::string> &t) {
+static bool flatten_set(CameraFlatten &cf, const GameObject &g, const Scene &scene, const std::vector<std::string> &t) {
   const std::string op = t.size() > 1 ? to_lower(t[1]) : "";
   const std::string a2 = t.size() > 2 ? to_lower(t[2]) : "";
   if (op.empty()) return true;  // (just added: its own defaults)
   if (op == "preset" && a2 == "anime") {
     const GameObject *head = find_head_bone(g);
-    cf.amount = 0.6f, cf.direction = 0, cf.children = true;
+    cf.amount = 0.6f, cf.direction = 0, cf.children = true, cf.mode = 0;  // (round 343: by Amount)
     cf.pivot = head ? 2 : 0;
     cf.bone = head ? head->name : "";
     return true;
   }
   if (op == "pivot" && (a2 == "center" || a2 == "origin")) return cf.pivot = a2 == "origin" ? 1 : 0, true;
-  if (op == "pivot" && a2 == "bone" && t.size() > 3) {
-    if (!find_bone_named(g, t[3])) Log::warn("flatten: no bone '%s' below %s (names are exact: the bounds' middle is used meanwhile)", t[3].c_str(), g.name.c_str());
+  if (op == "pivot" && (a2 == "object" || a2 == "bone") && t.size() > 3) {  // ("bone": round 334's word)
+    if (!find_named_below(g, t[3]) && !scene.find_by_name(t[3]))
+      Log::warn("flatten: no object '%s' below %s or in the scene (names are exact: the bounds' middle is used meanwhile)", t[3].c_str(), g.name.c_str());
     cf.pivot = 2, cf.bone = t[3];
     return true;
   }
   if (op == "direction" && (a2 == "camera" || a2 == "axis")) return cf.direction = a2 == "axis" ? 1 : 0, true;
+  if (op == "lens" && a2 == "off") return cf.mode = 0, true;  // (round 343)
+  if (op == "lens" && t.size() > 2) {
+    char *end = nullptr;
+    const float mm = std::strtof(t[2].c_str(), &end);
+    if (end == t[2].c_str() || *end || !std::isfinite(mm) || mm < 1.0f) return false;
+    cf.mode = 1, cf.focal = std::min(1000.0f, mm);
+    return true;
+  }
   char *end = nullptr;
   const float amount = std::strtof(t[1].c_str(), &end);
   if (end == t[1].c_str() || *end || !std::isfinite(amount)) return false;
-  cf.amount = std::max(0.0f, std::min(1.0f, amount));
+  cf.amount = std::max(-1.0f, std::min(1.0f, amount));  // (round 343: below 0, exaggerated)
+  cf.mode = 0;  // (an amount typed: by Amount, not a lens set before)
   return true;
 }
 
@@ -603,6 +719,58 @@ static std::vector<std::string> split_quoted(const std::string &line) {
   return out;
 }
 
+static const char *kViewShapeUsage = "viewshape add <shape key> <yaw> <pitch> [range] [falloff] [weight] [mirror] | remove <row> | ref <object>|none | list";
+
+/* A number word, or `fallback` when it isn't one. */
+static float number_or(const std::vector<std::string> &t, size_t i, float fallback) {
+  if (i >= t.size()) return fallback;
+  char *end = nullptr;
+  const float v = std::strtof(t[i].c_str(), &end);
+  return end != t[i].c_str() && !*end && std::isfinite(v) ? v : fallback;
+}
+
+/* Round 339: View Angle Shapes on the active object from the console (a row added, removed, the reference set, listed). */
+void Editor::viewshape_command(const std::vector<std::string> &t) {
+  GameObject *g = active_object();
+  if (!g) return Log::warn("viewshape: select the object (a character's root, or its head mesh)");
+  const std::string op = t.size() > 1 ? to_lower(t[1]) : "";
+  ViewAngleShapes *vs = g->get<ViewAngleShapes>();
+  if (op == "list") {
+    if (!vs) return Log::info("%s has no View Angle Shapes", g->name.c_str());
+    for (size_t i = 0; i < vs->rows.size(); i++) {
+      const ViewAngleRow &w = vs->rows[i];
+      Log::info("  %zu: %s at yaw %g, pitch %g (range %g, falloff %g, weight %g%s)", i + 1, w.key.c_str(), w.yaw, w.pitch, w.range, w.falloff, w.weight, w.mirror ? ", mirrored" : "");
+    }
+    return;
+  }
+  if (op == "add" && t.size() > 4) {
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    if (std::isnan(number_or(t, 3, nan)) || std::isnan(number_or(t, 4, nan))) return Log::warn("viewshape add: the yaw and pitch are numbers (degrees): %s", kViewShapeUsage);
+    if (!vs) vs = g->add<ViewAngleShapes>();
+    ViewAngleRow w;
+    w.key = t[2];
+    w.yaw = number_or(t, 3, 90.0f), w.pitch = number_or(t, 4, 0.0f);
+    w.range = number_or(t, 5, w.range), w.falloff = number_or(t, 6, w.falloff), w.weight = number_or(t, 7, w.weight);
+    w.mirror = t.size() > 8 && to_lower(t[8]) == "mirror";
+    if (vs->rows.size() >= 16) return Log::warn("viewshape: 16 rows at most");
+    vs->rows.push_back(w);
+    return mark_changed("View Angle Shapes");
+  }
+  if (op == "remove" && t.size() > 2 && vs) {
+    const int row = std::atoi(t[2].c_str());
+    if (row < 1 || row > (int)vs->rows.size()) return Log::warn("viewshape remove: rows are 1 to %zu", vs->rows.size());
+    vs->rows.erase(vs->rows.begin() + (row - 1));
+    return mark_changed("View Angle Shapes");
+  }
+  if (op == "ref" && t.size() > 2) {
+    if (!vs) vs = g->add<ViewAngleShapes>();
+    vs->reference = to_lower(t[2]) == "none" ? std::string() : t[2];
+    if (!vs->reference.empty() && !named_from(*g, vs->reference)) Log::warn("viewshape: no object '%s' below %s or in the scene (this object is used meanwhile)", t[2].c_str(), g->name.c_str());
+    return mark_changed("View Angle Shapes");
+  }
+  Log::warn("%s", kViewShapeUsage);
+}
+
 void Editor::flatten_command(const std::vector<std::string> &t) {
   std::vector<GameObject *> sel = selected_objects(true);
   if (sel.empty()) return Log::warn("flatten: select the objects to flatten (a character's root reaches its meshes)");
@@ -615,11 +783,11 @@ void Editor::flatten_command(const std::vector<std::string> &t) {
     return;
   }
   CameraFlatten probe;  // (the words checked once, before any object is touched)
-  if (!flatten_set(probe, *sel[0], t)) return Log::warn("%s", kFlattenUsage);
+  if (!flatten_set(probe, *sel[0], *scene_, t)) return Log::warn("%s", kFlattenUsage);
   for (GameObject *g : sel) {
     CameraFlatten *cf = g->get<CameraFlatten>();
     if (!cf) cf = g->add<CameraFlatten>();
-    flatten_set(*cf, *g, t);
+    flatten_set(*cf, *g, *scene_, t);
   }
   mark_changed("Camera Flatten");
   Log::info("Camera Flatten on %zu object(s): the Game view and renders show it", sel.size());
@@ -821,6 +989,22 @@ void Editor::run_console_command(const std::string &line) {
     shortcut_command(t, line);
     return;
   }
+  if (round367_command(c, t, line)) return;
+  if (c == "export" && to_lower(arg(1, "")) == "tscn") return (void)export_godot_scene(t.size() > 2 ? line_rest(line, 2) : "");  // (round 373: export tscn [out])
+  if (c == "import" && to_lower(fs::extension(line_rest(line, 1))) == ".tscn") return import_model_file(line_rest(line, 1), true);  // (round 373)
+  if (c == "import" && (to_lower(fs::extension(line_rest(line, 1))) == ".blend" || to_lower(fs::extension(line_rest(line, 1))) == ".blendity-snapshot" ||
+                        fs::filename(line_rest(line, 1)) == "snapshot.json"))
+    return import_model_file(line_rest(line, 1), true);  // (round 374: through Blender; a bridge's snapshot)
+  if (c == "blender" && to_lower(arg(1, "")) == "path") return blender_path_command(t.size() > 2 ? line_rest(line, 2) : "");  // (round 374)
+  if (c == "livelink" && to_lower(arg(1, "")) == "inbox") return poll_snapshot_inbox(true);  // (round 374: the bridges' snapshots now)
+  if (c == "export" && to_lower(arg(1, "")) == "unitypackage") {  // (round 372: export unitypackage <folder> [out.unitypackage])
+    if (t.size() < 3) return export_package_of_selection();  // (no folder: the selection's package)
+    const std::string rest = line_rest(line, 2);  // (both may hold spaces: the folder is the longest part that is one - review 372)
+    if (fs::is_dir(resolve_asset_path(rest))) return (void)export_unity_package(rest, "");
+    for (size_t gap = rest.rfind(' '); gap != std::string::npos && gap > 0; gap = rest.rfind(' ', gap - 1))
+      if (fs::is_dir(resolve_asset_path(rest.substr(0, gap)))) return (void)export_unity_package(rest.substr(0, gap), rest.substr(gap + 1));
+    return (void)export_unity_package(rest, "");
+  }  // (save, open, new, rotate, scale, set Transform.*: before the long chain)
   if (c == "ui") {  // ui save <path> | load <path>|blender|zbrush (task 0231: the UI file)
     ui_file_command(t, line);
     return;
@@ -867,6 +1051,10 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "window" && window_mode_command(t)) return;  // window renderonly|fullscreen|tablet on|off [id] (task 0188)
   if (c == "dock") {  // dock move <Window> newwindow | main | monitor <n>; dock windows (task 0187)
     dock_command(t, line);
+    return;
+  }
+  if (c == "vr") {  // vr start [resolution] | stop | status | here | scale <s> (round 383) | sketch | tube | colour <1-8> | brush <cm> (round 385) | paint [on|off] | paint size <cm> | paint opacity <0-1> (round 386)
+    vr_command(t);
     return;
   }
   if (c == "livelink") {  // livelink start [port] | stop | status (task 0172)
@@ -962,6 +1150,9 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "spring") return spring_command(t);
   if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
   if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
+  if (c == "import" && (to_lower(fs::extension(line_rest(line, 1))) == ".prefab" || to_lower(fs::extension(line_rest(line, 1))) == ".unity"))
+    return import_model_file(line_rest(line, 1), true);  // (round 370: a Unity prefab or scene - by the path's own extension, review 370)
+  if (c == "import" && to_lower(line).find(".unitypackage") != std::string::npos) return import_model_file(line_rest(line.substr(0, to_lower(line).find(".unitypackage") + 13), 1), true);  // (round 369: a package takes no shading word)
   if (c == "import" && t.size() > 1) {  // import <model file> [asis|pbr|classic|guiltygear|soft|painterly|manga]: as dropped (copied into Assets); a shading word imports at once with it (task 0152)
     int shading = t.size() > 3 ? import_shading_index(t[t.size() - 2] + " " + t.back()) : -1;  // ("guilty gear", "soft anime")
     size_t words = shading >= 0 ? 2 : 0;
@@ -972,6 +1163,9 @@ void Editor::run_console_command(const std::string &line) {
     return import_model_file(p, true);
   }
   if (c == "assist") return assist_command(t);      // assist list | on <name> | off <name> (task 0124)
+  if (c == "budget") return budget_command(t);      // budget [pc|quest] | budget fix [good|medium|poor] (round 355)
+  if (c == "visemes") return (void)visemes_command(t);  // visemes [AA OH CH] (round 356)
+  if (c == "avatar") return avatar_command(t);           // avatar check [root] | fix <n> | origin | decimate (round 356) | fixmodel (357) | the Model Options and Pose and Shape verbs (358) | decimate, boneroot, mergebones (359) | eyes, eyetest, atlas (360) | mergearmature, attach, translate, export (361)
   if (c == "shape") return shape_command(t);        // shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135)
   if (c == "walk") return walk_command(t);          // walk cycle | set | save | load | presets (task 0125)  // spring find | apply | add | remove | label | ignore | bake (task 0120)  // body show on|off | mass [kg] | com [frame] (task 0115)
   if (c == "renderanim") return render_animation_command(t);  // renderanim [first last] [fps] | stop | ffmpeg [path] (task 0074)
@@ -1018,6 +1212,10 @@ void Editor::run_console_command(const std::string &line) {
     flatten_command(t);
     return;
   }
+  if (c == "viewshape") {  // viewshape add <key> <yaw> <pitch> [range] [falloff] [weight] [mirror] | remove <row> | ref <object>|none | list (round 339)
+    viewshape_command(t);
+    return;
+  }
   if (c == "animemat") {  // animemat <Anime preset>: the texture and a toon material on the selection (task 0150)
     std::string preset;
     for (size_t i = 1; i < t.size(); i++) preset += (i > 1 ? " " : "") + t[i];
@@ -1035,10 +1233,12 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("hair rig: select a mesh");
     return;
   }
-  if (c == "facenormals") {  // facenormals: a head proxy and a Normal Transfer on the selected mesh (task 0149)
+  if (c == "facenormals") {  // facenormals [sphere|ellipsoid]: a head proxy and a Normal Transfer on the selected mesh (task 0149; round 341: ellipsoid)
     GameObject *mesh_obj = rig_mesh();
+    const std::string shape = t.size() > 1 ? to_lower(t[1]) : "sphere";
+    if (shape != "sphere" && shape != "ellipsoid") return Log::warn("facenormals [sphere|ellipsoid]");
     if (!mesh_obj) Log::warn("facenormals: select a mesh");
-    else add_face_normals(mesh_obj);
+    else add_face_normals(mesh_obj, shape == "ellipsoid");
     return;
   }
   if (c == "toonstyle") {  // toonstyle <Classic|Guilty Gear|Soft Anime|Painterly|Manga>: the selected materials (task 0148)
@@ -1113,8 +1313,10 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "help") {
+    log_all_commands();
     Log::info("Commands: help, clear, create <Cube|Sphere|...> [count], stress <count> [Cube|Sphere|Icosphere|Torus], select <name>,");
-    Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, scale <1.0>,");
+    Log::info("  delete, subdivide [levels], smooth, stats, play, stop, layout <Default|2 by 3|Tall|Wide|Learning>, ui scale <1.0>,");
+    Log::info("  save [path], open <path>, new, rotate <x y z>, scale <s | x y z>, set Transform.Position|Rotation|Scale <x y z>, saverender [path]");
     Log::info("  screenshot [file.png], bench [frames], lesson <n>, references, window <name>, tool <move|rotate|...>,");
     Log::info("  edit [vertex|edge|face|off] [all], camera <yaw> <pitch> <dist> [px py pz], shading <wire|solid|shaded|rendered|both>,");
     Log::info("  fsel <faces...> | fsel facing <x y z>, redo <param> <value> (adjust last operation), gpu list,");
@@ -1170,7 +1372,6 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "play") enter_play();
   else if (c == "stop") exit_play();
-  else if (c == "scale") { ui_scale_pref_ = (float)std::atof(arg(1, "0").c_str()); apply_ui_scale(); }
   else if (c == "screenshot") screenshot(t.size() > 1 ? line.substr(line.find(' ') + 1) : "");
   else if (c == "lesson") { lesson_ = std::atoi(arg(1, "0").c_str()); dock_open(WindowKind::Learn); }
   else if (c == "research" || c == "references") open_references();  // (the Research window is retired: task 0034)
@@ -1202,7 +1403,8 @@ void Editor::run_console_command(const std::string &line) {
     else Log::warn("pickfocus: select a Camera or a Light first");
   }
   else if (c == "export") {
-    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [path]: the selection (or the whole scene) */
+    /* export <obj|fbx|glb|gltf|stl|ply|usda> [all] [ascii] [lightmap] [transforms] [path]: the selection (or the whole
+     * scene); lightmap: the second UV set (round 353); transforms: glTF nodes keep each object's transform (round 375) */
     std::string fmt = to_lower(arg(1, "obj"));
     if (fmt.empty() || fmt[0] != '.') fmt = "." + fmt;
     const int fi = export_format_from_extension(fmt);
@@ -1213,6 +1415,16 @@ void Editor::run_console_command(const std::string &line) {
       o.selection_only = !(t.size() > at && to_lower(t[at]) == "all");
       if (!o.selection_only) at++;
       if (t.size() > at && to_lower(t[at]) == "ascii") o.ascii = true, at++;
+      /* The options in any order: lightmap, transforms, colliders=unity|unreal|godot (round 362; a misspelt one said, not taken for the path). */
+      for (; t.size() > at; at++) {
+        const std::string w = to_lower(t[at]);
+        if (w == "transforms" && fi != (int)ExportFormat::GLB && fi != (int)ExportFormat::GLTF) Log::warn("export: transforms is glTF's only - the transforms are baked");
+        if (w == "lightmap") o.lightmap_uvs = true;
+        else if (w == "transforms") o.keep_transforms = true;  // (round 375: glTF, each object's own transform kept)
+        else if (w == "colliders=unity" || w == "colliders=unreal" || w == "colliders=godot") o.collider_names = w == "colliders=unity" ? 1 : w == "colliders=unreal" ? 2 : 3;
+        else if (w.rfind("colliders=", 0) == 0) Log::warn("export: colliders=unity, unreal or godot (not '%s')", t[at].c_str());
+        else break;
+      }
       std::string path;
       for (size_t k = at; k < t.size(); k++) path += (path.empty() ? "" : " ") + t[k];
       export_model(o, path);
@@ -1435,7 +1647,10 @@ void Editor::run_console_command(const std::string &line) {
     }
     boolean_selected(o == "union" ? 1 : o == "intersect" ? 2 : 0, to_lower(arg(2, "")) != "modifier", kept);
   }
-  else if (c == "separate") separate(to_lower(arg(1, "loose")) == "selection" ? "selection" : "loose");
+  else if (c == "separate") {  // separate [loose|selection|material|shapekeys] (material and shapekeys: round 358)
+    const std::string mode = to_lower(arg(1, "loose"));
+    separate(mode == "selection" || mode == "material" || mode == "shapekeys" ? mode : "loose");
+  }
   else if (c == "esel") {
     /* esel <a> <b> [<c> <d> ...]: select exactly these edges (vertex pairs), edge mode */
     if (!edit_mode_) enter_edit_mode();
@@ -1745,11 +1960,12 @@ void Editor::run_console_command(const std::string &line) {
     else if (w == "clear") bake_clear();
     else bake_start();
   }
-  else if (c == "saverender") save_render();
+  else if (c == "saverender") save_render(line_rest(line, 1));  // (round 367: a path, or ask)
   else if (c == "lighting") {
-    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) */
+    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) */
     const std::string sub = to_lower(arg(1, "update"));
     if (sub == "update") lighting_update();
+    else if (sub == "markstatic") mark_static_meshes();
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
       mark_changed("Preview Lighting");

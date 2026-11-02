@@ -114,6 +114,11 @@ void mix_hash(uint64_t &h, const void *data, size_t n);  // FNV-1a over bytes
 bool is_body_bone(const std::string &name);
 int secondary_label(const std::string &name);  // -1 when the name says nothing
 
+/* Bone Root's grouping bone (round 359, the CATS plugin's): its chains are one PhysBone in VRChat, and it isn't a body
+ * part the chains collide with. */
+constexpr const char *kBoneRootPrefix = "RootBone_";
+bool is_bone_root(const GameObject &g);
+
 /* A chain: its first bone and the run below it (one child at a time, up to a fork, a body bone or another chain). */
 std::vector<GameObject *> chain_bones(GameObject &first);
 

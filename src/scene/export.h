@@ -27,7 +27,7 @@ namespace bl {
 
 struct Reflector;
 
-/* Task 0268: a skinned mesh's skeleton, weights and clip, for glTF (the other formats write the mesh as posed). Joints
+/* Task 0268: a skinned mesh's skeleton, weights and clip, for glTF and (round 352) FBX (the others write the mesh as posed). Joints
  * are listed parents first, each local to its parent joint, the first ones to `base`; Blendity's space (the writer
  * mirrors and scales them as it does the vertices). */
 struct ExportSkin {
@@ -39,8 +39,10 @@ struct ExportSkin {
     Vec3 s{1, 1, 1};
   };
   std::string base_name = "Skeleton";
+  uint64_t rig = 0;  // (review 352) the armature's id: meshes on one rig share its skeleton in FBX (0: their own)
   Mat4 base;  // the skeleton's parent's world matrix
   std::vector<Joint> joints;
+  std::vector<uint64_t> joint_ids;  // (round 378) each joint's object, in order (Live Link's skin names them)
   std::vector<std::array<uint16_t, 4>> vjoints;  // per mesh vertex: its four strongest joints
   std::vector<std::array<float, 4>> vweights;     // ...their weights, summing to 1 (all 0: no joint)
   struct Anim {
@@ -49,6 +51,7 @@ struct ExportSkin {
     int frames = 0;
     std::vector<std::vector<Vec3>> t, s;  // [joint][frame], local
     std::vector<std::vector<Quat>> r;
+    std::vector<std::vector<float>> shape_w;  // (round 351) [shape key][frame]: the mesh's shape key weights
   };
   std::vector<Anim> anims;
 };
@@ -59,6 +62,9 @@ struct ExportItem {
   Mat4 world;                         // baked into the vertices
   std::vector<MaterialPtr> materials; // slot i -> material
   std::shared_ptr<const ExportSkin> skin;  // (task 0268: glTF writes the skeleton, the weights and the clip; the mesh at rest)
+  std::vector<float> shape_weights;  // (round 351) per shape key of `mesh` (the basis, keys unapplied): its weight now
+  bool outline = false;              // (review 353) an Outline's shell: no lightmap UVs (no engine lightmaps it)
+  bool collider = false;             // (round 362) a Collider's mesh: no textures baked, not in the budget's counts
 };
 
 enum class ExportFormat { OBJ = 0, FBX, GLB, GLTF, STL, PLY, USD, Count };
@@ -75,6 +81,11 @@ struct ExportOptions {
   bool uvs = true;              // Blender: UV Coordinates
   bool materials = true;        // Blender: Materials (glTF: with their base colour textures)
   bool skins = true;            // glTF: skinned meshes with their armature, weights and clip (task 0268; Blender: Armature, Skinning, Animation)
+  bool shape_keys = true;       // glTF morph targets / FBX blend shapes (round 351; Blender: Shape Keys)
+  bool lightmap_uvs = false;    // (round 353) glTF TEXCOORD_1 / FBX's second UV map, laid out for lightmaps (Unity: UV2)
+  bool keep_transforms = false;  // (round 375) glTF: each object's transform on its node, its vertices in its own space (Blender's glTF does)
+  bool lods = true;              // (round 363) an LOD Group's levels written as <name>_LOD0.._LODn (Unity, Unreal)
+  int collider_names = 0;       // (round 362) colliders as meshes named for an engine: 0 none, 1 Unity, 2 Unreal, 3 Godot
   bool ascii = false;           // STL / PLY: ASCII instead of binary
   /* Bake Textures (task 0036, OBJ / FBX / glTF): each object's look baked on a copy into one set of images beside
    * the file (albedo, roughness, metallic, normal) on new UVs; the copies' materials name them. */

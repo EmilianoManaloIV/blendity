@@ -175,9 +175,10 @@ void Editor::update_asset_drag() {
     if ((image || fs::extension(d.path) == ".paper") && board_has_mouse()) target = board_rect_;  // (task 0299: onto the reference board; 0305: a paper)
     for (auto &r : drop_rows_)
       if (!image && r.first.contains(in.mx, in.my)) target = r.first;
-    if (fs::extension(d.path) == ".anim")
-      for (auto &t : drop_seq_tracks_)
-        if (t.first.contains(in.mx, in.my)) target = t.first;
+    const std::string ext = fs::extension(d.path);
+    const bool on_lanes = ext == ".anim" || ext == ".wav" || ext == ".paper" || (image && !d.mat);  // (review 365: sounds and cards too)
+    for (auto &t : drop_seq_tracks_)
+      if (on_lanes && t.first.contains(in.mx, in.my)) target = t.first;
     ui_.overlay([this, label, target] {
       auto &cv = ui_.canvas;
       if (target.w > 0) cv.rect_outline(target, Color::hex(0x3A79BB), ui_.px(2));
@@ -206,6 +207,8 @@ void Editor::update_asset_drag() {
         board_add_paper(d.path, board_from_screen({(float)in.mx, (float)in.my}));  // (task 0305)
       else if (fs::extension(d.path) == ".ptex") drop_texture_asset(d.path, in.mx, in.my);
       else if (fs::extension(d.path) == ".anim") seq_drop_clip(d.path, in.mx, in.my);
+      else if ((fs::extension(d.path) == ".paper" || fs::extension(d.path) == ".wav" || (image_extension_supported(fs::extension(d.path)) && !d.mat)) &&
+               seq_drop_card(d.path, in.mx, in.my)) {}  // (round 364; round 365 a sound)
       else if (d.mat || fs::extension(d.path) == ".mat" || image_extension_supported(fs::extension(d.path)))
         drop_asset(d.path, in.mx, in.my, d.mat);
     }

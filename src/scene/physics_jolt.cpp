@@ -26,6 +26,9 @@
 #  include <Jolt/Core/TempAllocator.h>
 #  include <Jolt/Physics/Body/BodyCreationSettings.h>
 #  include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#  include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#  include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#  include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #  include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #  include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #  include <Jolt/Physics/PhysicsSettings.h>
@@ -34,6 +37,46 @@
 #endif
 
 namespace bl {
+
+#ifdef BL_WITH_JOLT
+namespace {
+
+/* A Collider's shape in the object's scaled frame (round 362): Box, Sphere and Capsule as themselves, offset by its
+ * center; Convex the mesh's hull; Mesh nullptr (the caller's triangles). The scale is the object's (a sphere and a
+ * capsule take its largest and its sideways one). */
+JPH::RefConst<JPH::Shape> collider_shape(const ColliderComponent &c, const Mesh *m, const Vec3 &s) {
+  using namespace JPH;
+  ShapeSettings::ShapeResult r;
+  const float side = std::max(std::fabs(s.x), std::fabs(s.z)), most = std::max(side, std::fabs(s.y));
+  if (c.shape == 0) r = BoxShapeSettings(JPH::Vec3(std::max(1e-3f, 0.5f * c.size.x * std::fabs(s.x)), std::max(1e-3f, 0.5f * c.size.y * std::fabs(s.y)), std::max(1e-3f, 0.5f * c.size.z * std::fabs(s.z)))).Create();
+  else if (c.shape == 1) r = SphereShapeSettings(std::max(1e-3f, c.radius * most)).Create();
+  else if (c.shape == 2) r = CapsuleShapeSettings(std::max(1e-3f, 0.5f * c.height * std::fabs(s.y) - c.radius * side), std::max(1e-3f, c.radius * side)).Create();
+  else if (c.shape == 3 && m && m->vert_count() >= 4) {
+    Array<JPH::Vec3> pts;
+    const size_t stride = std::max<size_t>(1, m->vert_count() / 4096);
+    for (size_t i = 0; i < m->vert_count(); i += stride) pts.push_back(JPH::Vec3(m->positions[i].x * s.x, m->positions[i].y * s.y, m->positions[i].z * s.z));
+    r = ConvexHullShapeSettings(pts, cDefaultConvexRadius * 0.5f).Create();
+    return r.IsValid() && !r.HasError() ? r.Get() : nullptr;
+  }
+  if (!r.IsValid() || r.HasError()) return nullptr;
+  const JPH::Vec3 off(c.center.x * s.x, c.center.y * s.y, c.center.z * s.z);
+  if (off.LengthSq() < 1e-12f) return r.Get();
+  ShapeSettings::ShapeResult moved = RotatedTranslatedShapeSettings(off, JPH::Quat::sIdentity(), r.Get()).Create();
+  return moved.IsValid() && !moved.HasError() ? moved.Get() : r.Get();
+}
+
+}  // namespace
+#endif
+
+#ifdef BL_WITH_JOLT
+namespace {
+/* An object's scale in the world (its parents' too - review 362: a scaled level's floor had collided at its local size). */
+Vec3 world_scale_of(const GameObject &g) {
+  const Mat4 &w = g.world_matrix();
+  return {length(w.dir(Vec3(1, 0, 0))), length(w.dir(Vec3(0, 1, 0))), length(w.dir(Vec3(0, 0, 1)))};
+}
+}  // namespace
+#endif
 
 bool physics_jolt_available() {
 #ifdef BL_WITH_JOLT
@@ -112,13 +155,15 @@ std::shared_ptr<PhysicsWorld> physics_create(Scene &scene) {
   BodyInterface &bi = w->system.GetBodyInterface();
   scene.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
+    const ColliderComponent *col = g.get<ColliderComponent>();
+    if (col && !col->enabled) return;  // (review 362: a switched-off collider collides with nothing, as Unity's)
     const Mesh *m = g.evaluated_mesh();
     auto *rb = g.get<Rigidbody>();
     if (rb && rb->enabled) {
       /* Convex hull of the mesh in the object's scaled local frame; the body
        * sits at the object's world position and rotation. */
       Array<JPH::Vec3> pts;
-      const Vec3 s = g.local().scale;
+      const Vec3 s = world_scale_of(g);
       if (m && m->vert_count() >= 4) {
         size_t stride = std::max<size_t>(1, m->vert_count() / 4096);  // big meshes: sample the points
         for (size_t i = 0; i < m->vert_count(); i += stride) {
@@ -126,11 +171,15 @@ std::shared_ptr<PhysicsWorld> physics_create(Scene &scene) {
           pts.push_back(JPH::Vec3(p.x * s.x, p.y * s.y, p.z * s.z));
         }
       }
-      ShapeSettings::ShapeResult shape;
-      if (pts.size() >= 4) shape = ConvexHullShapeSettings(pts, cDefaultConvexRadius * 0.5f).Create();
-      if (!shape.IsValid() || shape.HasError()) shape = BoxShapeSettings(JPH::Vec3(0.5f * s.x, 0.5f * s.y, 0.5f * s.z)).Create();
+      RefConst<Shape> use = col && col->shape != 4 ? collider_shape(*col, m, s) : nullptr;  // (round 362: a moving Mesh collider is its hull, below)
+      if (!use) {
+        ShapeSettings::ShapeResult shape;
+        if (pts.size() >= 4) shape = ConvexHullShapeSettings(pts, cDefaultConvexRadius * 0.5f).Create();
+        if (!shape.IsValid() || shape.HasError()) shape = BoxShapeSettings(JPH::Vec3(0.5f * s.x, 0.5f * s.y, 0.5f * s.z)).Create();
+        use = shape.Get();
+      }
       Vec3 p = g.world_position();
-      BodyCreationSettings bcs(shape.Get(), RVec3(p.x, p.y, p.z), to_jolt(g.world_rotation()),
+      BodyCreationSettings bcs(use, RVec3(p.x, p.y, p.z), to_jolt(g.world_rotation()),
                                rb->is_kinematic ? EMotionType::Kinematic : EMotionType::Dynamic, Layers::kMoving);
       bcs.mRestitution = std::clamp(rb->bounciness, 0.0f, 1.0f);
       bcs.mFriction = 0.5f;
@@ -142,8 +191,18 @@ std::shared_ptr<PhysicsWorld> physics_create(Scene &scene) {
       BodyID id = bi.CreateAndAddBody(bcs, EActivation::Activate);
       if (!id.IsInvalid()) w->links.push_back({&g, rb, id});
     }
-    else if (m && g.get<MeshRenderer>() && m->face_count() > 0) {
-      /* Static triangle mesh in world space (Unity: MeshCollider). */
+    else if (col && col->shape != 4) {
+      /* A still object's own Collider (round 362): its shape at the object's place - an empty's too (an invisible wall). */
+      RefConst<Shape> own = collider_shape(*col, m, world_scale_of(g));
+      if (!own) return;
+      const Vec3 p = g.world_position();
+      BodyCreationSettings bcs(own, RVec3(p.x, p.y, p.z), to_jolt(g.world_rotation()), EMotionType::Static, Layers::kStatic);
+      bcs.mFriction = 0.5f;
+      BodyID id = bi.CreateAndAddBody(bcs, EActivation::DontActivate);
+      if (!id.IsInvalid()) w->statics.push_back(id);
+    }
+    else if (m && (g.get<MeshRenderer>() || col) && m->face_count() > 0) {  // (a Mesh collider needs no renderer: hidden collision geometry)
+      /* Static triangle mesh in world space (Unity: MeshCollider; a Collider of shape Mesh too). */
       const Mat4 &xf = g.world_matrix();
       VertexList verts;
       verts.reserve(m->vert_count());

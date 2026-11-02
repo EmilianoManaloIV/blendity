@@ -28,11 +28,15 @@ The objects appear under a node "Blendity Live Link" of the edited scene, each w
 | objects, hierarchy, transforms | Node3D / MeshInstance3D with the same parents and local transforms |
 | meshes, modifiers applied | ArrayMeshes, a surface per material slot |
 | vertices moving | the surfaces rebuilt with the moved positions, normals worked out again (hard edges stay hard) |
-| PBR materials, base and normal maps | StandardMaterial3D, opaque, scissor or alpha, culled or double-sided |
+| PBR materials and every map | StandardMaterial3D (colours made sRGB), opaque, scissor or alpha, culled or double-sided; Base, Normal, Metallic, Roughness and Emission maps from the pixels Live Link sends (round 377) |
 | Toon materials | the same StandardMaterial3D, every toon field in its metadata `blendity_toon` |
 | lights | DirectionalLight3D, OmniLight3D, SpotLight3D (an area light as an omni) |
 | cameras | Camera3D with the same vertical field of view, clipping and orthographic size |
-| armatures and bones | plain nodes posed as the bones (skinned meshes come across as moving vertices) |
+| the look (round 376) | a WorldEnvironment: a procedural, physical or panorama sky, depth fog, tonemap exposure and mode, glow (Bloom) and adjustments (Color Grading), colours made sRGB; no vignette in Godot; a scene's own WorldEnvironment is warned about (Godot draws one) |
+| armatures and bones | plain nodes posed as the bones; a skinned mesh (round 378) has a Skeleton3D posed from them and a Skin, its keys as blend shapes |
+| clips (round 379) | an Animation in the "blendity" library of an AnimationPlayer ("Blendity Animation") under the animated object |
+| LODs and colliders (round 380) | `<name>_LOD<n>` MeshInstance3D children switched by visibility range; a StaticBody3D "Blendity Collider" with the shape |
+| VRChat setup (round 381) | not taken (VRChat is Unity's); meshes count for GI by default |
 
 ## Test
 

@@ -34,10 +34,14 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
 | objects, hierarchy, transforms | actors attached as the objects are parented |
 | meshes, modifiers applied | transient static meshes, a section per material slot |
 | vertices moving | the mesh rebuilt with the moved positions, normals worked out again |
-| materials | dynamic instances of the engine's BasicShapeMaterial with the base colour (textures, metallic and roughness not yet) |
+| materials | dynamic instances of a material made in code (a Color times a BaseMap texture, round 377) with the base colour and the Base Map from its bytes (metallic and roughness not yet) |
 | lights | directional, point and spot lights attached to their objects |
 | cameras | camera actors, Blendity's vertical field of view turned into Unreal's horizontal one at 16:9 |
-| armatures and bones | empty actors posed as the bones (skinned meshes come across as moving vertices) |
+| the look (round 376) | a SkyLight captured from the level (tinted, the ground as its lower hemisphere), an Exponential Height Fog (approximating Blendity's linear fog) and an unbound Post Process Volume (exposure bias, Bloom, Vignette, contrast, saturation); adopted again on a reconnect |
+| armatures and bones | empty actors posed as the bones (skinned meshes come across as moving vertices: the bridge doesn't say "skins") |
+| clips (round 379) | not yet: the poses keep streaming |
+| LODs and colliders (round 380) | the static mesh's own LODs (LOD i from Blendity's screen[i-1]); simple collision (box, sphere, sphyl, convex), Mesh as complex |
+| VRChat setup (round 381) | not taken (VRChat is Unity's) |
 
 ## Test
 
@@ -57,3 +61,15 @@ glTF's (x, y, z) in metres is Unreal's (100 z, -100 x, 100 y) in centimetres: Bl
     stop: 145 ms. Unreal's own static-mesh build (about 75 ms) is most of what is left.
 - **Install a Bridge:** a content-only project with the plugin from Install a Bridge builds
   (`Build.bat UnrealEditor Win64 Development -Project=<project>`), opens, and its replay test passes.
+
+## Send to Blendity (round 374)
+
+The dock tab's **Send to Blendity** (or **Send Selected**) writes the level as a snapshot (docs/LIVELINK.md):
+- **The model:** Unreal's FBX export, run as an automated task with no options dialog.
+- **snapshot.json:**
+  - each actor's transform in Blendity's axes;
+  - lights and cameras in Live Link's fields;
+  - a Blueprint's class path.
+
+It goes into the inbox Blendity's Live Link names, and Blendity imports it within a second. Without Blendity
+running, it goes to `Saved/Blendity`, to drop on Blendity. Live Link's own actors are never sent back.

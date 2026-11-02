@@ -145,7 +145,7 @@ stroke freehand - the hint says which - and `]` / `[` set a modal's segments or 
 Lighting window (the Render window points there); the Render window's Render Devices section is where every device choice
 is read, Auto meaning the GPU when there is one. The Render window's image pans with a left drag (a pen has no middle
 button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign to Selection, and the Textures toolbar's
-Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
+Export Textures... packs the texture set for glTF, Unity, URP, HDRP, Unreal, Poiyomi or lilToon. Animation has keys of its own in every preset -
 set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
 under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
 In Weight Paint, Ctrl or the pen's eraser subtracts weight with the Add brush, as in every other brush; in the Rigging
@@ -464,9 +464,34 @@ shared by other objects changes on them too: give the object its own first (the 
 **The 2D look - Camera Flatten** (round 334): Add Component > Rendering > Camera Flatten squashes the object's depth
 toward the camera about a pivot, as Guilty Gear Xrd does: the near parts no longer swell, so the picture is the drawn
 shape, and the shading stays as modelled (piloting a camera and the Draw tab's camera picture show it too, being
-through a camera). Put it on a character's root with Pivot Bone and the head bone's exact name
-(`flatten preset anime` does that); Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
-view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that.
+through a camera). Put it on a character's root and drag the head bone from the Hierarchy onto **Pivot Object** (or pick
+it with the circle at the field's right - the character's own bones come first; any object works, an empty you move by
+hand too) - `flatten preset anime` does that; Amount 0.5-0.7 is the usual range. The Scene view shows the true shape; the Game
+view and renders the flattened one. A child with its own Camera Flatten (a separate face mesh) uses that. Below 0,
+Amount stretches the depth instead - forced perspective, a punch swelling at the camera (round 343) - and Mode **Focal
+Length** draws the object as if through a lens of its own (an 85 mm character before a 24 mm camera's background:
+flatter; 12 mm: swelling) - the camera's lens is its Focal Length when physical, else its field of view on a 36 x 24 mm
+frame; `flatten lens <mm>|off`.
+
+**The 2D look - face normals** (task 0149, round 341): Rigging > **Anime Face Normals** gives a head a proxy - a ball
+fitted to its Head group (else the mesh's top sixth) - and a Normal Transfer reading it, so the face shades like the
+proxy and toon shadows fall as drawn shapes; **Anime Face Normals (Ellipsoid)** fits the head's width, height and depth
+instead, for a tall, narrow anime head. `facenormals [sphere|ellipsoid]`.
+
+**The 2D look - View Angle Shapes** (round 339): Add Component > Rendering > View Angle Shapes brings shape keys in by
+the camera's angle, as a 2D artist corrects each view (a mouth slid to the side in profile, a chin shortened from
+below). Each row: a shape key, Yaw (0 the reference's front, 90 its right) and Pitch (90 above), a Range at full
+weight, a Falloff to fade out, a Weight, Mirror (the other side, on the _L / _R key). Drag the head bone onto Reference
+so the angle follows the head. The Inspector's line shows the Game camera's angle and what the rows give there; Add Row
+at the Game Camera's Angle starts a row from it. The Game view, Camera Preview and F12 show it, added to the key's own
+weight; the Scene view keeps the model. `viewshape add <key> <yaw> <pitch> [range] [falloff] [weight] [mirror] |
+remove <row> | ref <object>|none | list`.
+
+**The 2D look - a lattice facing the camera** (round 342): a Lattice with **Align to Camera** turns to face the camera
+in the Game view, Camera Preview and F12 - X the screen's right, Y its up - so its points shape the silhouette as the
+camera sees it (a Lattice modifier on the mesh names it); out of the camera views it moves nothing, and the box's own
+rotation doesn't count (its place and size do) - edit the points watching the Game view. Key its points for one shot's
+correction.
 
 **Axis materials** pick top, side and bottom materials by slope (grass on top, rock on the sides, snow up high)
 without UVs. **Toon shading** and the **Outline** component give a cel-shaded look.
@@ -474,7 +499,7 @@ without UVs. **Toon shading** and the **Outline** component give a cel-shaded lo
 **Bake Textures** turns everything an object's materials do into plain images on new UVs, so other programs show what
 Blendity renders.
 
-**Bake Mesh Maps** (Object > Bake Mesh Maps; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
+**Bake Mesh Maps** (GameObject > Bake Mesh Maps...; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
 layout - world normal, position, curvature, ambient occlusion, thickness: Substance Painter's mesh maps - under
 Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
 records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
@@ -495,7 +520,7 @@ images are saved beside the surface's texture when the project saves.
 **Smart materials** are groups of layers with their masks saved as assets: the Textures window's shelf applies a built-in
 (Worn Steel, Painted Metal, Rubber, Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read this
 object's mesh maps; `smat save <layer> <name>` keeps a group of your own under Assets/Materials/Smart and `smat apply
-<name>` drops it onto another surface. `export textures gltf|unity|hdrp|unreal|separate <dir>` writes the surface as the
+<name>` drops it onto another surface. `export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>` writes the surface as the
 images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
 model; `paint stencil <image>` holds an image over the view that masks the brush.
 
@@ -525,7 +550,7 @@ range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Tr
 1. Make a material, set Axis Mode: World; Axis Top: a grass material asset, Axis Side: rock, Axis Bottom: dirt.
 2. Set Axis High to a snow material with High Start 30 (metres), and Axis Noise so the borders wander.
 
-**Painting the surface** - the Substance Painter pipeline, in order. 1. **Object > Bake Mesh Maps** (`meshmaps`): the
+**Painting the surface** - the Substance Painter pipeline, in order. 1. **GameObject > Bake Mesh Maps...** (`meshmaps`, or the Textures window's **Bake All Maps**, which loads them too): the
 normal, position, curvature, occlusion and thickness of the mesh baked into its UVs on a worker. 2. **A surface** (`surface
 new`): a texture flagged as this object's, its layers reading those maps - **Fill** layers with a **mask stack** (a Mesh Map
 through levels, Noise, Blur, Levels, an Anchor to another layer's mask) and the **smart masks** (edge wear, dirt, dust,
@@ -535,8 +560,9 @@ colour, roughness, metallic, height and emission by projection, the far side lef
 material / object, a stroke one light undo step of the tiles it touched; `paint 2d on` paints on the Textures window's
 canvas; `paint stencil` masks the brush with an image. 4. **Smart materials** (the Textures window's shelf: Worn Steel,
 Painted Metal, Rubber, Wood, Plastic, Concrete, Gold; `smat save` keeps your own group) dropped onto any surface, their
-generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|hdrp|unreal|separate <dir>`): the
-texture set packed as the engine reads it.
+generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>`): the
+texture set packed as the engine - or VRChat's Poiyomi or lilToon shader - reads it. A layer's menu has **Material ID Mask**
+(one material slot's faces, from the ID map the bake writes) and the smart masks, Ground Dirt and Cavity among them.
 
 **The hand-painted look.** When the light should live in the texture (Blizzard's and Riot's style): `paint bakelight` bakes
 the maps' occlusion and a key light into a Multiply layer to paint over (`paint bakegradient` the top-down value gradient,
@@ -700,8 +726,11 @@ turbulence, gusts) blows every chain by its own Wind. Bake writes the swing into
 ## 9. Animation
 
 **Puppet Posing.** Turn on AutoPosing (the Animation window) and the selected character's hands, feet, head and hips
-become handles in the Scene view: drag one and the body follows - with the AI download's pose prior, as motion
-capture would put a body there; the planted feet stay. Click a handle to pin it. The **Puppet** menu holds Reach (how
+get controls in the Scene view - rings round the wrists, boxes under the feet, a ring above the head and one round the
+hips (left blue, right red, the middle yellow; the Armature's Puppet Control Size sizes them), shown with just the mesh
+selected: drag one and the body follows - with the AI download's pose prior, as motion capture would put a body there;
+the planted feet stay. A click selects a control's bone (no gizmo over it), a double-click pins it; while AutoPosing a click on a bone keeps the
+selection (no gizmo on it), Ctrl+click picks the bone (round 346). The **Puppet** menu holds Reach (how
 far each side a pose edit fades in), Motion Trails (drag a key dot to pose that frame, Alt-drag it to move the key in
 time), Onion Skin, the Zoetrope (seven frames side by side, each poseable), Motion Check (sliding feet, pops and
 shaking, each with a Fix), the Smooth Brush (drag over the dope sheet) and Lock in Place. Any humanoid rig works -
@@ -783,9 +812,23 @@ bridge in: Window > Live Link > Install a Bridge > Blender (found and enabled fo
 Project... and pick the project's folder. The window lists who is connected. `tools/package_bridges.py` makes the
 packages to install by hand (docs/LIVELINK.md, bridges/*/README.md).
 
-**glTF (.glb / .gltf) carries a rig**: a mesh with a Skin modifier exports at rest with its armature as joints, four
-weights a vertex and its rig's clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and
-Blender import a character that still moves. The other formats write the mesh as posed.
+**glTF (.glb / .gltf) and FBX carry a rig** (FBX since round 352): a mesh with a Skin modifier exports at rest with
+its armature as joints (FBX: LimbNodes, a Skin with a Cluster a bone, the bind pose), four weights a vertex and its rig's
+clip sampled per frame (Armatures and Animation, on by default); Unity, Unreal and Blender import a character that
+still moves - in FBX every mesh on one armature (a body, its hair, its clothes) sharing its skeleton, an Outline's line
+skinned with it, the modifiers but the Skin applied. The other formats, and these with Armatures and Animation off, write
+the mesh as posed.
+
+**Textures go with the file** (round 353): procedural, painted and generated (UV Grid, Color Grid) maps are written as
+PNGs beside it - embedded in a .glb, referenced by FBX and OBJ - the emission map included. **Lightmap UVs** (glTF,
+FBX; `export glb lightmap <path>`) adds a second UV set laid out for lightmaps, which Unity, Godot and Unreal bake
+onto. Generated images go as Blendity_UV_Grid.png and Blendity_Color_Grid.png. An export asked for while a Quad
+Remesh, a skin bind, mesh maps or a surface still works on what it writes **waits** for it (round 354; the tray shows it,
+Export Now writes at once, Cancel drops it). **Shape keys** (round 351) go out as glTF morph targets and FBX blend shapes, by name with their weights -
+visemes, blinks and expressions reach Unity, VRChat and Unreal - with the mesh at rest when its rig goes too; a
+modifier that changes the mesh's shape (a Subdivision Surface, or a Skin whose rig isn't exported) leaves them out and
+the log says why. Normal-only modifiers (Anime Face Normals' transfer, Smooth Normals) keep them, and an Outline's
+shell carries them. A relative export path is the project's.
 
 **Import** (File > Import Model, or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text; their
 materials and textures come along, and rigged files come with their skeletons and skins. The model is shown first in
@@ -819,6 +862,108 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 ---
 
 ## 11. Performance and the minimum machine
+
+**A performance budget** (round 355): the Profiler's Budget section ranks the selection (or the scene) against VRChat PC or Quest's Avatar Performance Ranks - triangles, meshes, material slots, bones, spring chains, texture memory, lights - each row coloured by its rank, with Decimate to Good for the triangles; `budget pc|quest` lists them, and every export says the file's rank.
+
+**The Avatar window** (round 356, after the CATS Blender plugin): Create Visemes makes the 15 `vrc.v_*` shape keys VRChat's lip sync needs from three you sculpt (AA, OH, CH); the checklist below says whether the avatar has Unity's 15 Humanoid bones under Unity's names, a T or A pose, a height of 0.5-5 m, its root at the origin, faces +Z, has its visemes and eye bones, and its VRChat PC rank - each item with a Fix where one exists. Console: `visemes [AA OH CH]`, `avatar check`, `avatar fix <n>`. Humanoid Rig with a mesh selected fits the skeleton to it.
+
+**Fix Model** (round 357, the Avatar window's first button, as the CATS plugin's): in one Undo step the Humanoid bones get Unity's names (MMD's Japanese translated, Mixamo's prefix dropped), a bone between two of them is merged into the one above with its weights, bones that move nothing, IK and empty vertex groups go, the avatar's meshes become one Body keeping every shape key, and slots of one material become one; clips' tracks follow their bones. Options: Keep Twist Bones, Remove Zero-Weight Bones, Remove Constraints, Join Meshes, Combine Materials. Console: `avatar fixmodel`.
+
+**Model Options and Pose and Shape** (round 358, the Avatar window under Fix Model, as the CATS plugin's): Merge Weights, Delete Zero Weight Bones, Join Meshes, Separate by Material / Loose Parts / Shape Keys, Remove Doubles, Apply Transforms, Recalculate / Flip Normals, Connect Bones; Pose to Shape Key, Apply as Rest Pose (the meshes take the pose, their shape keys carried), Apply Shape Key as Basis (a '- Reverted' key takes it back), Sort Shape Keys (VRChat's order), T-Pose and A-Pose. Console: `avatar mergeweights|zeroweight|join|separate <material|loose|shapekeys>|removedoubles|applytransforms|normals [flip]|connect|posekey <name>|applyrest|basis <key>|sortkeys|tpose|apose`.
+
+**Decimation, Bone Root and Bone Merging** (round 359, the Avatar window, as the CATS plugin's): Decimation cuts the avatar to a triangle count with a Decimate modifier on each mesh its mode allows - Smart every mesh (keys kept), Safe meshes without keys, Half meshes under 4 keys, Full every mesh (keys dropped) - Exclude naming meshes never cut; Bone Root groups spring chains that share a parent and a name under a RootBone_ bone (one PhysBone in VRChat, counted so by the budget); Bone Merging merges a share of each chain's bones into their parents. Console: `avatar decimate [smart|safe|half|full] [triangles] [names]`, `avatar boneroot`, `avatar mergebones <percent>`.
+
+**Eye Tracking and the Texture Atlas** (round 360, the Avatar window, as the CATS plugin's): Set Up Eyes finds the eyes (a vertex group or a mesh named for an eye), puts LeftEye and RightEye bones under the head at their middles, makes the eyes follow them, and splits a Blink key (and LowerLid) into vrc.blink_left / right; Eye Movement and Eye Blinking choose which; the Test buttons turn and shut the eyes, Reset puts them back. Make Atlas bakes each of the avatar's meshes into one texture set, one material and one slot. Console: `avatar eyes`, `avatar eyetest <yaw> <pitch> <blink>|reset`, `avatar atlas [size]`.
+
+**Merge Armatures, Attach Mesh, Translate, Export** (round 361, the Avatar window, as the CATS plugin's): Merge Armatures takes a hair or outfit armature into the avatar's by its bones' names (its meshes skinned to the avatar); Attach Mesh gives the selected prop wholly to one bone; Translate renames Japanese shape keys and materials from MMD's common names; Export for VRChat writes FBX for Unity (Y up, metres, skeleton, skin, shape keys), saying the checklist and PC rank first. Console: `avatar mergearmature <name>`, `avatar attach <bone>`, `avatar translate`, `avatar export [path]`.
+
+**Colliders and Mark Static** (round 362, the VRChat world kit): the Collider component gives an object its physics shape apart from its mesh - Box, Sphere, Capsule, Convex (the hull) or Mesh (still objects) - with Fit to Mesh; it is drawn as a green wire, used by Play's physics, and exported as its own mesh named for the engine (Export > Colliders: Unity `<name>_Collider` or `_MeshCollider`, made MeshColliders by the Unity bridge's import postprocessor; Unreal `UCX_<name>_00` for its FBX import; Godot `<name>-convcolonly`, or `-colonly` for a Mesh; `export ... colliders=unity|unreal|godot`). Generate Lighting with no Contribute GI object refuses and offers Mark Static Meshes (`lighting markstatic`).
+
+**LOD Groups** (round 363): the LOD Group component (Add Component > Rendering), as Unity's - up to four levels, LOD0 the mesh and each next one a Decimate of it at its Triangles share, shown while the object's height on screen is at least its Screen Height (Cull Below Last hides it below the last); the Game view switches them; exports write `<name>_LOD0.._LODn` (Export > LOD Levels), which Unity's model import makes an LOD Group. The levels need meshoptimizer (Blender's libraries); a skinned or keyed object is drawn whole in the Game view.
+
+**Cards and camera cuts** (round 364, the Sequencer): an image or a paper dropped onto a lane is a card - held full-frame over the Game view (letterboxed) and over Render Animation's frames for its bar's length; a camera cut switches the scene's camera for its length, in Play and in Preview (the camera given back when Preview ends); the topmost track's card or cut wins. Console: `seq image|paper <file> <track> <start> [frames]`, `seq cut <camera> <track> <start> [frames]`.
+
+**Sound** (round 365, the Sequencer): a WAV dropped onto a lane is a sound bar as long as the recording, played through the default device in step with the Preview's playhead and Play's Sequencer; trim its ends, set its Volume. Render Animation writes sound.wav beside the frames and puts the sound into the MP4. Console: `seq sound <file.wav> <track> <start> [frames]`, `seq volume <bar> <v>`. Linux plays through PulseAudio (libpulse-simple) when it's installed; macOS doesn't play sound yet (the render still has it).
+
+**Footage, keys and edits** (round 391, the Sequencer):
+- **A video** (.mp4, .mov, .mkv, .webm, .avi) dropped onto a lane is footage, as long as the file (`seq video <file> <track> <start>`); it needs FFmpeg, which Blender's libraries bring.
+- **Keys:** `seq key <bar> opacity|x|y|scale|rotation <frame> <value>` (frames from the bar's start) fades, moves, scales or turns a card over the render; `seq unkey` takes them off.
+- **Add Edit** (Alt+B) cuts every bar under the playhead; **Ripple Delete** (Shift+Delete) removes the bar and closes the gap.
+- **Export:** the Render window's preset - H.264 (MP4), ProRes 422 (MOV) to edit further, or VRChat (MP4, at most 1080p, streamable); `renderanim preset h264|prores|vrchat`.
+
+**No MP4?** (round 366): the dependency-free build has no video maker of its own. Render Animation's finish message offers Blender's libraries for this build (Get Blender's Libraries..., `update libs`; or Use Blender's Libraries, `update libson`, when they were turned off), and an ffmpeg program on the PATH or set in Preferences works too. The build with the libraries makes the MP4 itself.
+
+**Objects and the console** (round 367): create makes a Capsule too, refuses a kind it doesn't know, and names a second object as Unity does ("Sphere (1)"); a new Camera is placed at the view, looking its way; Join keeps the last mesh selected when the active object isn't one. Console: `save [path]`, `open <path>`, `new`, `rotate <x y z>`, `scale <s | x y z>`, `set Transform.Position|Rotation|Scale <x y z>`, `saverender [path]`, `ui scale <s>` (was `scale`), and `help` lists every command.
+
+**Sculpting with a pen** (round 368): the pen's eraser end inverts the brush (as Alt) and takes a mask away; with Use Tilt on (off at first; `sculpt tilt on|off [strength]`), the pen's lean turns Clay Buildup's, Flatten's and Scrape's plane by its angle times Tilt Strength (at most 60 degrees, mirrored with symmetry) and turns the alpha; the Pressure Curve (Sculpt's and Paint's brush settings, shared, kept in Preferences) maps pressure; E switches Carve in Sculpt under the Adobe keymap.
+
+**Unity packages** (round 369): File > Import Unity Package..., a dropped .unitypackage, or `import <file>.unitypackage` unpacks it into Assets/Imported/<package>/ with Unity's folders, on a worker (the job tray shows it, with Cancel). Models and textures are then project files like any other; scripts, shaders, prefabs, scenes and materials are kept as they are; each asset's GUID is in the folder's .unity-guids. A path in the package that would leave its folder is left out and named in the Console.
+
+**Unity prefabs and scenes** (round 370): `import <file>.prefab` or `<file>.unity` (or a drop) brings the file's objects in under one root named for it: hierarchy, transforms, meshes (by GUID; an FBX's part by its .meta's fileID; Unity's built-in meshes), lights, cameras, Box / Sphere / Capsule / Mesh Colliders, and nested prefabs with their transform, name and active overrides. Other overrides stay Unity's. Every other component - scripts, Udon, VRChat's - is an Engine Component with its data as Unity wrote it. One Undo step.
+
+**Unity materials and VRChat** (round 371): a Unity .mat loads as a Blendity material by its shader - Standard and URP Lit / Unlit as PBR, lilToon / Poiyomi / MToon / UTS2 as Toon with their shade and outline (the outline on the objects), others by their main texture and colour (said). Unity's file is never written over. VRChat's PhysBones leave their settings as spring bones on their roots (moving once the skin's bones are bound - not yet by an import); the PhysBone, Avatar Descriptor, PhysBone Collider, Scene Descriptor and Udon Behaviour stay as named Engine Components.
+
+**Export Unity Package** (round 372): File > Export Unity Package... (the selected object's package) or `export unitypackage <folder> [out.unitypackage]` (default: Exports/<folder>.unitypackage) writes an unpacked package's folder back: each file under its own GUID, Unity path and .meta; new files under new GUIDs; the prefabs' and scenes' objects imported here with their changed names, active states and transforms written into their own lines, every other line as Unity wrote it (a duplicate of an imported object isn't written back). It runs in the job tray, with Cancel. Objects of nested prefabs keep their Unity values. Your project's copies aren't written over.
+
+**Godot scenes** (round 373): `import <file>.tscn` (or a drop, or File > Import Model...) brings a Godot 4 or Godot 3 scene in under one object named for the file, as one Undo step. Node3D, MeshInstance3D with Godot's primitive meshes and StandardMaterial3D, lights, Camera3D and CollisionShape3D become Blendity's; instanced scenes and models (.glb, .gltf, .obj, .fbx) come along, res:// paths found from the project.godot above the file; X mirrors both ways as in every import and Live Link, lights and cameras turned to face as they do in Godot; an inherited scene's overrides edit its nodes. Scripts and every other node are kept as Engine Components with their lines as Godot wrote them. File > Export Godot Scene or `export tscn [out]` writes the selected object's scene with its objects' transforms and visibility in their nodes' lines, every other line untouched, to Exports/<file>.tscn or `out`.
+
+**Blender and Unreal** (round 374): `import <file>.blend` (or a drop, or File > Import Model...) reads a .blend through the installed Blender in the background - its glTF exporter's meshes, rigs, shape keys, actions and materials, with each light's and camera's settings and the objects' custom properties - as one Undo step; `blender path [exe]` names Blender when it isn't found by itself. The Blender and Unreal Live Link bridges have **Send to Blendity**: the scene (or selection) is written as a snapshot into the inbox Blendity's Live Link names (`<project>/Incoming`) and imported within a second (`livelink inbox` checks now), then moved to Incoming/Done. Unreal sends the level through its FBX exporter with each actor's place, lights, cameras and Blueprint class (an Engine Component). A snapshot folder can also be dropped on Blendity or imported (`import <folder>.blendity-snapshot`). Snapshots wait while Play runs. Blender is run with its factory settings and the file's scripts off; modifiers are applied unless a mesh has shape keys. `blender path clear` forgets a named Blender.
+
+**Keep Transforms** (round 375, glTF): the Export dialog's option (or `export glb [all] transforms <file>`) writes each object's position, rotation and scale on its own node with its vertices around its own pivot, as Blender's glTF export does - a .blend brought in and sent back keeps its objects' origins. Off (the default), the vertices carry the transforms. Skinned meshes are written as before. Each object is a top-level node (parents aren't kept), and a sheared or mirrored object is baked, as glTF's nodes can't hold those.
+
+**Live Link's look** (round 376): with a bridge connected, the world (Gradient, Sky, HDRI, colour, strength), the distance fog, the render's exposure and view transform, and the render camera's Camera Filters are sent as you change them - Blender builds its world and compositor, Unity its RenderSettings (and a global URP Volume in a URP project; a Blendity Look object keeps them otherwise), Godot a WorldEnvironment, Unreal a SkyLight, an Exponential Height Fog and an unbound Post Process Volume. Bloom, Vignette and Color Grading are drawn; other filters travel as data. The engine's own lighting comes back: Blender's world and compositor when the link stops, Unity's with Blendity Look's Restore Scene Lighting. In URP, turn Post Processing on for the camera to see the Volume.
+
+**Live Link's textures** (round 377): each texture a material uses - an image file, a generated image, a procedural texture's output, a surface being painted - is sent by its pixels (a PNG, at most 2048 a side) whenever they change - a painted surface each time a stroke ends, a texture that keeps changing (a procedural field dragged) at most 4 times a second and once more when it stops; the same pixels aren't sent twice. The bridges load them from the bytes and put every map their materials take: Blender, Godot and Unity the Base, Normal, Metallic and Emission maps (Godot the Roughness map too), Unreal the Base Map.
+
+**Live Link's skins** (round 378): a mesh posed only by its Skin modifier, or carrying shape keys, goes to the engines once at rest with its skin (its joints the bones Live Link already sends) and its keys as blend shapes; then only the bones' poses and the shape weights travel. Unity builds a SkinnedMeshRenderer, Godot a Skeleton3D and a Skin, Blender an armature following the bones; Unreal keeps receiving the posed vertices. Another modifier on the mesh (a Mirror, a Subdivision) streams its vertices as before, and so does a Skin the engines can't match: a Preserve Volume armature, Rest Position, or more than four influences.
+
+**Live Link's clips** (round 379): the clip on an object's Animation component goes to the engines baked - each animated object's local place, turn and scale at every frame - at a sync and whenever it's keyed (at most four times a second while it keeps changing). Unity saves it as an AnimationClip in Assets/Blendity Live Link/Clips, Godot adds it to a "blendity" library on an AnimationPlayer under the object, Blender makes an Action (with a fake user, not assigned). Only Position, Rotation and Scale tracks go. Unreal doesn't take clips yet.
+
+**Live Link's LODs and colliders** (round 380): an object's Collider and LOD Group go to the engines at a sync and whenever they change; the levels past 0 are decimated on a worker, and after the mesh is edited they're made again once it has stood still for half a second. Unity builds an LOD Group from child renderers <name>_LOD1, _LOD2... and the matching Box, Sphere, Capsule or Mesh Collider; Godot switches its <name>_LOD<n> children by visibility range (a 75-degree view) and adds a StaticBody3D; Unreal gives the static mesh its own LODs and simple collision; Blender keeps both as properties (and hidden level objects) for export. A mesh that deforms every frame sends no levels.
+
+**Live Link and VRChat** (round 381): with VRChat's Avatars SDK in the Unity project, each armature that is an avatar (eye bones, vrc.v_* visemes on a mesh skinned to it, or a humanoid Head) gets its VRC Avatar Descriptor filled on the avatar root (the object above the armature and all its meshes - parent them under one) - the view between the eyes, Lip Sync on the 15 visemes, Eye Look with the eyes and the blink, each written when Blendity's values change - and a VRC Phys Bone per spring chain under a child "Blendity PhysBones" (Pull from Stiffness, Spring from 1 - Damping, Gravity and Radius as they are: what importing a PhysBone does, turned round). With the Worlds SDK the Live Link root gets a VRC Scene Descriptor when the scene has none. Meshes with Contribute GI get Unity's static flags, SDK or not. Without the SDK nothing of VRChat's is added.
+
+**Live Link's cost** (round 382): with four engines connected, a 100,000-vertex mesh changing and a 50-bone rig posing every frame, Live Link takes a millisecond or two of a frame (measured on a Windows release build); meshes, levels, textures and clips are built on its workers. Jobs that run on workers don't stop it: what you change during a skin bind or a bake reaches the engines the next frame. Work done on the main thread (an import's busy step) holds it like everything else.
+
+**VR View** (round 383): Edit > VR View (`vr start [resolution]`) shows the scene in an OpenXR headset (SteamVR, the Oculus app with Quest Link, Windows Mixed Reality) at life size, standing on the ground (y = 0) below where the Scene view looks and facing as it faces; the editor draws every frame while it runs, paced by the headset. `vr scale <s>` shows the world at 1:s (2: half size), `vr here` moves you to where the Scene view looks now, `vr status` says how it runs or why it doesn't, `vr stop` ends it. Each eye is drawn as the Game view draws, at half the headset's size each way by default (`vr start 0.35` for smaller, faster eyes); `vr start` waits for the runtime, so starting with SteamVR closed launches it and takes a few seconds. It needs the build with Blender's libraries and the OpenXR SDK in their lib folder (`openxr/include`, `openxr/bin/openxr_loader.dll`), on Windows.
+
+**Moving in VR** (round 384):
+- **Squeeze a grip and drag** to move the world with your hand.
+- **Squeeze both grips** and pull them apart or together to scale it (it snaps to 1:1 within 5%), or twist them to turn it about the vertical.
+- **Hold the right trigger** to throw an arc; let go to stand where it lands.
+- **The left stick** walks where you look (2 m/s at life size); **the right stick** snap-turns 30 degrees.
+- **A** (or X on the left Touch controller) shows a tape measure between the controllers, in the world's metres.
+- **In view:** the controllers as boxes with their rays, the render camera's frame (1 m in front of it), and the scale when it isn't 1:1.
+
+**Sketching in VR** (round 385): `vr sketch on`, then:
+- **The right trigger** draws. The harder you press, the wider the stroke, and a ribbon turns with your hand.
+- **X** switches between ribbons and tubes. **A** undoes.
+- **The left stick, flicked sideways,** picks one of 8 colours, shown round your left hand. **The right stick, flicked up or down,** makes the brush bigger or smaller (`vr brush <cm>`).
+- **Strokes** go into a Stroke object of their own, "VR Sketch", each colour its own material, so they render and export like any mesh. A undoes only VR strokes.
+
+**Draw: blend modes, masks and selections** (round 388):
+- **A layer's blend list** has Photoshop's 27 modes (`sketch layer blend <mode>`).
+- **Clip** (Layers) shows a layer only where the layer under it is; again releases it.
+- **More > Select > Rectangle or Lasso**, then drag on the pad: Alt+Backspace fills the selection with the pen's colour, Delete cuts it out of the active layer, Ctrl+D deselects.
+- **Add Mask** (Layers) shows the layer only inside the selection (no selection: all of it); `sketch layer mask hide|invert|off|delete`.
+- **A new or opened paper** becomes the pad's canvas.
+
+**Draw: Free Transform, Space and tilt** (round 389):
+- **Ctrl+T** (More > Select > Free Transform) puts the active layer's drawing, or the selection's, in a box: corners scale (Shift: freely), edges stretch, Ctrl+corner distorts, Ctrl+edge skews, outside a corner turns (Shift: 15-degree steps), inside moves; Enter keeps it, Esc undoes it.
+- **The Adobe keymap:** H is the Hand tool, Space held with a drag pans, Shift+Space opens the Wheel.
+- **A brush's Tilt** (Brushes window, `sketch brush tilt <0-1>`) widens the line as the pen tilts; the Pencil's is 0.8.
+
+**Draw: shapes, the Pen and SVG** (round 390):
+- **More > Shapes > Rectangle, Ellipse, Polygon or Star**, then drag on the pad: Shift makes it even, Alt draws it from the middle. Sides: 5, 6 or 8 (`sketch shape polygon <n> ...` for any).
+- **More > Shapes > Pen:** click for a corner, drag for a curve (the handles mirrored), click the first anchor to close; Enter or Esc ends an open path.
+- **Fill: Pen Color / Fill: None and Stroke: None** set what the shapes and the Pen make (`sketch fillcolor|strokecolor <hex>|none`); **Restyle Selection** applies them to the strokes inside the selection.
+- **Artboards:** `sketch artboard add <name> x0 y0 x1 y1`; **SVG:** `sketch svg export <file.svg> [artboard]` and `sketch svg import <file.svg>` - Blendity's file comes back as its layers, another program's on one layer fitted to the view.
+
+**Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
+- **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).
+- **Hold the right grip** while painting to erase.
+- **The right stick, flicked up or down,** sizes the brush (`vr paint size <cm>`); **the left stick, flicked sideways,** sets its opacity (`vr paint opacity <0-1>`).
+- **A** undoes the last paint stroke. Everything else is the desk's brush: colour, tip, channels, symmetry.
 
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
@@ -987,7 +1132,17 @@ It is written in the background, at full sharpness. `board export <path> [png|jp
 [bg board|white|none]`.
 
 **Puppet handles on the right bones:** if a Puppet Posing handle sits on the wrong bone, select the right bone, then
-Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`).
+Animation > Puppet > Handle Bones > that handle > Use the Selected Bone (`autopose handle <part> <bone>|auto`). Since
+round 347 the Armature's **Puppet Controls** fold has a bone field for each part - the ends and the upper and lower
+arms, the thighs and the shins - (drag the bone from the Hierarchy, or `set Armature.LeftThigh <bone>`), and every
+tool that reads the rig (AutoPose, the walk, footsteps) takes them; **Extra Controls** (bone names, commas) give a tail
+or a sword a ring to drag; a line under the fields says when the analysis has the left hand on the right.
+
+**IK and FK per limb (round 348):** an IK constraint's Weight 0 is FK - the bones keep their own pose and turn with the
+rotate gizmo. Switch with the constraint's **Switch to FK / Switch to IK** buttons, Animation > Puppet > **FK / IK**, or
+`autopose fk|ik|match larm|rarm|lleg|rleg`: the pose stays (to IK the handle and the pole move to the hand and the
+elbow), and with Record on the switch is keyed at the playhead. IK solves from the rest pose, so a forearm twisted in
+FK loses its twist when switched to IK (the Console says so).
 
 ## The reference board (round 322)
 Window > Board (a tab beside the Draw tab in the Drawing layout; beside it in Drawing with References).

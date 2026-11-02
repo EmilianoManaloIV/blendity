@@ -167,7 +167,7 @@ void Editor::anim_preview_move(const AnimationClip &clip, float dframes, float d
 void Editor::anim_show_drag() {
   GameObject *root = anim_root();
   if (!anim_.preview || !root) return;
-  apply_clip(anim_.drag_clip, *root, anim_.frame);
+  anim_apply_held(anim_.drag_clip, *root, anim_.frame);  // (round 340: held as the Preview holds)
   solve_constraints(*scene_);
   scene_dirty_ = true;
 }

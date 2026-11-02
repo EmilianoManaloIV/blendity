@@ -190,7 +190,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes };
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
@@ -254,6 +254,10 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
   std::vector<std::pair<std::string, float>> shape_weights;
   float shape_weight(const std::string &name) const;
   void set_shape_weight(const std::string &name, float w);
+  /* Round 339 (ADR 0094): a camera view's View Angle Shapes weights, added to shape_weights by evaluated_mesh's kinds 3
+   * and 4 (the camera views' own slots); set by the views before they collect, never saved. */
+  mutable std::vector<std::pair<std::string, float>> view_weights;
+  float view_weight(const std::string &name) const;
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();
@@ -601,7 +605,7 @@ struct Outline : ComponentBase<Outline> {
    * which use (the evaluated mesh's kind 0..2, 3 exports): each keeps its own, so a path tracer still holding one
    * view's shell isn't left with a freed mesh when another view builds its own. thickness_scale: the view's scale
    * for the distance (outline_distance_scale). */
-  static constexpr int kShellSlots = 6;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones)
+  static constexpr int kShellSlots = 9;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones; 6-8: a view-shaped mesh's, one a camera-view role - round 339)
   const Mesh *shell(const Mesh &src, float world_scale, int slot = 0, float thickness_scale = 1.0f) const;
   /* The scale of the thickness for an object `distance` metres from the eye, with `px_per_m` pixels per metre at
    * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
@@ -628,7 +632,9 @@ struct Outline : ComponentBase<Outline> {
  * shape's. On a parent it reaches the meshes below it; a child's own Camera Flatten wins for its subtree. */
 struct CameraFlatten : ComponentBase<CameraFlatten> {
   static constexpr const char *kName = "CameraFlatten";
-  float amount = 0.6f;   // 0: as modelled, 1: flat (2 % of the depth kept)
+  float amount = 0.6f;   // 0: as modelled, 1: flat (2 % of the depth kept); below 0 (round 343): exaggerated, -1 twice the depth
+  int mode = 0;          // (round 343) Amount, or Focal Length: drawn as if through a lens of `focal` mm
+  float focal = 85.0f;   // mm: the object's own lens in Focal Length mode (85 before a 24 mm camera: flatter; 14: swelling)
   int pivot = 0;         // Bounds Center (of this object and the meshes below), Object Origin, Bone
   std::string bone;      // (Pivot Bone) a bone below this object, by name
   int direction = 0;     // Toward the Camera (the line from the eye to the pivot), View Axis
@@ -636,6 +642,40 @@ struct CameraFlatten : ComponentBase<CameraFlatten> {
   RenderRole render_role() const override { return RenderRole::CameraFlatten; }  // (the views' hash; found without a cast)
   void reflect(Reflector &r) override;
 };
+
+/* Round 339 (task 0318, ADR 0094): shape keys set by the camera's angle - Guilty Gear Xrd's per-angle corrections (a
+ * mouth slid to the side in profile, a chin shortened from below). Each row brings its key in when the camera looks at
+ * the reference from within its range of (yaw, pitch), fading over its falloff; in the camera views only (the Game
+ * view, Camera Preview, F12), added to the renderer's own weights. On a parent it reaches the meshes below it; a
+ * child's own wins. */
+struct ViewAngleRow {
+  std::string key;              // the shape key
+  float yaw = 90.0f;            // degrees: 0 the reference's front (+Z), 90 its right (+X), 180 behind
+  float pitch = 0.0f;           // degrees: 90 above, -90 below
+  float range = 20.0f;          // degrees around it at full weight
+  float falloff = 25.0f;        // degrees over which it fades out
+  float weight = 1.0f;          // the key's weight at full
+  bool mirror = false;          // also at -yaw (the key with _L / _R swapped when the mesh has it)
+};
+struct ViewAngleShapes : ComponentBase<ViewAngleShapes> {
+  static constexpr const char *kName = "ViewAngleShapes";
+  std::string reference;  // the object the angles are measured from ("" this one): the head bone on a character
+  bool children = true;   // the meshes below take its weights
+  std::vector<ViewAngleRow> rows;
+  RenderRole render_role() const override { return RenderRole::ViewShapes; }
+  void reflect(Reflector &r) override;
+};
+/* The camera's yaw and pitch in degrees as the reference `ref` (its world matrix) sees it: the direction to the eye, or
+ * against the view's forward for an orthographic camera. */
+bool view_angle_of(const Mat4 &ref, Vec3 eye, Vec3 forward, bool ortho, float &yaw, float &pitch);  // (false: no direction - the eye at the reference, a NaN)
+/* The rows' weights at (yaw, pitch), added per key (`has_key` says which keys the mesh has: a mirrored row's swapped
+ * name is used only when it does). */
+void view_angle_weights(const ViewAngleShapes &v, float yaw, float pitch, const std::function<bool(const std::string &)> &has_key,
+                        std::vector<std::pair<std::string, float>> &out);
+/* Round 342 (review): true while this thread evaluates a camera view's mesh (evaluated_mesh's kinds 3-8, not a plain kind
+ * nested in one - a Boolean's cutter): only then does a camera-aligned lattice face the camera, so the plain caches,
+ * the lighting's keys and anything reading another object's mesh never see the camera. */
+bool evaluating_camera_view();
 
 struct Rotator : ComponentBase<Rotator> {
   static constexpr const char *kName = "Rotator";
@@ -663,6 +703,74 @@ struct PlayerController : ComponentBase<PlayerController> {
   float turn_speed = 120.0f;
   void reflect(Reflector &r) override;
   void update(PlayContext &ctx) override;
+};
+
+/* Unity's Box / Sphere / Capsule / Mesh Collider in one (round 362, task 0339): the object's physics shape, apart from
+ * its mesh - Jolt's in Play, a green wire in the Scene view, a collider mesh in exports (scene/colliders.h). Without
+ * one, a rigid body takes its mesh's hull and a still mesh its triangles, as before. */
+struct ColliderComponent : ComponentBase<ColliderComponent> {
+  static constexpr const char *kName = "Collider";
+  int shape = 0;  // ColliderShape: Box, Sphere, Capsule, Convex, Mesh
+  Vec3 center;
+  Vec3 size{1, 1, 1};     // (Box)
+  float radius = 0.5f;    // (Sphere, Capsule)
+  float height = 2.0f;    // (Capsule, along Y)
+  bool fit = true;        // the Inspector's Fit to Mesh: sized to the mesh's bounds on its next frame (on when added: it fits at once)
+  void reflect(Reflector &r) override;
+};
+
+/* A component of another engine that Blendity keeps but doesn't run (round 370, task 0347): a Unity script (C#,
+ * UdonSharp), VRChat's components and anything else Unity puts on an object - its type, its script's GUID and its
+ * data as the engine wrote it, saved with the scene and written back unchanged (task 0349). The engine is where code
+ * is written; Blendity carries it. */
+struct EngineComponent : ComponentBase<EngineComponent> {
+  static constexpr const char *kName = "EngineComponent";
+  std::string engine = "Unity";  // (Unity; Godot, Unreal and Blender later)
+  std::string type;              // (the script's class, or Unity's component type: "Spin", "VRC_AvatarDescriptor", "AudioSource")
+  std::string script;            // (the script's GUID, when it is one)
+  std::string data;              // (the engine's own text of it: Unity's YAML document)
+  bool unique() const override { return false; }  // (an object holds many: an avatar its descriptor and its PhysBones)
+  void reflect(Reflector &r) override;
+};
+
+/* Where an imported object came from in Unity (round 372, task 0349): its prefab or scene file (project-relative)
+ * and its GameObject's and Transform's fileIDs there - what Export Unity Package writes its edits back into. An
+ * object of a nested prefab is marked: its edits stay Blendity's (they'd change every copy of the prefab). */
+struct UnityOrigin : ComponentBase<UnityOrigin> {
+  static constexpr const char *kName = "UnityOrigin";
+  std::string file, game_object, transform;  // (fileIDs as text: 64-bit and negative)
+  bool nested = false;
+  void reflect(Reflector &r) override;
+};
+
+/* Where an imported object came from in Godot (round 373, task 0350): its .tscn (project-relative) and its node's
+ * path from the scene's root ("." the root) - what Export Godot Scene writes its transform and visibility back into;
+ * its transform as Godot's text when it came in (unchanged: its line left alone), and whether it or its parent is a
+ * light or camera (turned 180 degrees about Y against Godot's -Z). */
+struct GodotOrigin : ComponentBase<GodotOrigin> {
+  static constexpr const char *kName = "GodotOrigin";
+  std::string file, path, transform;
+  bool turned = false, parent_turned = false;
+  void reflect(Reflector &r) override;
+};
+
+/* Unity's LOD Group (round 363, task 0340): the mesh at a few triangle ratios, the Game view showing the level its
+ * height on screen calls for, exports writing <name>_LOD<n> (scene/lod.h). */
+struct LODGroupComponent : ComponentBase<LODGroupComponent> {
+  static constexpr const char *kName = "LODGroup";  // (Unity's "LOD Group"; one word for the console)
+  static constexpr int kMax = 4;
+  int levels = 3;
+  float ratio[kMax] = {1.0f, 0.5f, 0.25f, 0.1f};    // each level's share of the triangles (level 0: the mesh)
+  float screen[kMax] = {0.5f, 0.25f, 0.1f, 0.03f};  // shown while the object stands at least this much of the view's height
+  bool cull = false;                                // below the last level's: not drawn (Unity's Culled)
+  void reflect(Reflector &r) override;
+  /* (Runtime: the decimated levels of a base mesh, made on first use and again when that mesh or the ratios change;
+   * a few bases kept - scene/lod.cpp.) */
+  struct Levels {
+    uint64_t uid = 0, version = 0, deform = 0, ratios = 0;
+    std::vector<std::shared_ptr<Mesh>> meshes;
+  };
+  mutable std::vector<Levels> cache;
 };
 
 struct Rigidbody : ComponentBase<Rigidbody> {
@@ -1010,6 +1118,18 @@ struct Lattice : ComponentBase<Lattice> {
   int points_u = 2, points_v = 2, points_w = 2;
   int interpolation = 1;      // Linear, B-Spline (Blender's default)
   std::vector<Vec3> offsets = std::vector<Vec3>(8, Vec3(0.0f));  // each point from its rest place; u fastest, then v, then w
+  /* Round 342 (task 0320, ADR 0094): the box turned to face the camera in the camera views - X the screen's right, Y its
+   * up, Z toward the eye - so its points shape the silhouette as the camera sees it; elsewhere (the Scene view, exports)
+   * it moves nothing. The views set where the camera is (view_on and the eye) for their collect. */
+  bool align_to_camera = false;
+  mutable bool view_on = false;
+  mutable bool view_ortho = false;
+  mutable Vec3 view_eye{0.0f}, view_forward{0.0f, 0.0f, 1.0f}, view_up{0.0f, 1.0f, 0.0f};
+  /* Whether a point is off its rest (an aligned box at rest moves nothing: no camera in its result's key). */
+  bool moved() const;
+  /* The box's frame in the world: its object's, or (Align to Camera) turned to face the camera; false when an aligned
+   * box has no camera (it moves nothing then). */
+  bool frame(const GameObject &object, Mat4 &out) const;
   int size() const;
   Vec3 rest_point(int i) const;
   /* How far a point of the box at q (lattice space) moves: the offsets round it blended (lattice.cpp). Outside the
@@ -1115,6 +1235,10 @@ struct Armature : ComponentBase<Armature> {
   /* Puppet Posing's handles set by hand (round 324): "Left Hand=Bone.003; Head=head" - a handle the rig's analysis
    * finds wrongly is put on the bone named; the others stay found. */
   std::string puppet_bones;
+  /* Round 347: one entry of puppet_bones by its name ("" none), and set ("" takes it out; the others kept). */
+  std::string puppet_bone(const std::string &key) const;
+  void set_puppet_bone(const std::string &key, const std::string &bone);
+  float control_size = 1.0f;  // (round 346) Puppet Posing's controls, times a twelfth of the rig's height
   static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
@@ -1146,6 +1270,21 @@ struct ArmatureBone {
 };
 void armature_bones(const GameObject &root, std::vector<ArmatureBone> &out);
 Mat4 armature_base(const GameObject &root);  // the root's parent's world matrix (rest matrices are relative to it)
+struct ExportSkin;  // export.h
+/* Round 378: the armature's skeleton and the mesh's weights as its Skin modifier deforms (skin.cpp; the export adds a
+ * clip). In two halves for Live Link (review 378): the skeleton, read from the scene, and the weights, from a copy of
+ * the mesh on a worker. */
+struct SkinJoints {
+  std::shared_ptr<ExportSkin> skin;            // (its joints; no weights yet)
+  std::unordered_map<std::string, int> deform;  // a deforming bone's name -> its joint
+  int still = 0;                                // the joint a vertex no bone moves follows (the mesh's own, under the rig)
+  int max_influences = 4;
+  std::string limit;  // (the Skin's vertex group: only its vertices follow; `invert`: only the others)
+  bool invert = false;
+};
+SkinJoints skin_joints(GameObject &arm, const GameObject &owner, const SkinModifier &skin);
+void skin_weights(const SkinJoints &j, const Mesh &m, ExportSkin &out);
+std::shared_ptr<ExportSkin> skin_for_export(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin);
 /* Automatic weights: groups named after the bones, from each vertex's distance to them (skin.cpp). */
 bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error = nullptr);
 struct BoneSegment;  // skin_weights.h
@@ -1218,6 +1357,13 @@ bool ik_drives(const Scene &scene, const GameObject &bone);  // an enabled IK ch
 /* The bone below an IK chain's end (the foot, the hand: the child bone whose head sits at the end's tip - a twist
  * bone beside it starts elsewhere), or null (task 0156). */
 GameObject *ik_end_bone(GameObject &end);
+/* Round 348: an IK at Weight 0 is off - FK: the bones keep their own pose (turned by hand or keyed), the solve leaves
+ * them; under 1 it blends from the rest pose. */
+bool ik_off(const IKConstraint &ik);
+/* Round 348: the IK's target to the chain's tip (turned with the end bone when Rotate End is on) and its pole off the
+ * middle joint along the bend, so solving gives the pose the bones have now (FK to IK without a jump). False without
+ * a target. */
+bool ik_match_to_pose(Scene &scene, GameObject &owner);
 /* The bones an enabled IK constraint turns: its chain, and the end bone when Rotate End is on (task 0156). */
 std::vector<GameObject *> ik_turned_bones(GameObject &owner, const IKConstraint &ik);
 /* True when `bone` is the end bone a Rotate End IK turns (the gizmo says to turn the handle, not move it). */
@@ -1225,7 +1371,7 @@ bool ik_end_driven(const Scene &scene, const GameObject &bone);
 /* Rotate End on, with the offset that keeps the end bone as it is now against the target's rotation (task 0156). */
 bool ik_orient_end(Scene &scene, GameObject &bone);
 /* Rig presets: a skeleton with an Armature, IK on its limbs with target and pole objects. Its root is returned. */
-GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at);
+GameObject *create_rig(Scene &scene, bool quadruped, Vec3 at, float height = 0.0f);  // (height: the figure's, round 356; 0 the preset's 1.78 m / 0.76 m)
 /* Adds two-bone IK to the arms and legs of a skeleton under `root` found by bone names (Mixamo, Unity, Rigify). */
 int add_humanoid_ik(Scene &scene, GameObject *root);
 /* Which limb a bone is by its name (Mixamo "mixamorig:LeftUpLeg", Unity "LeftUpperLeg", Rigify "thigh.L"): side 0 left,
@@ -1237,6 +1383,7 @@ int name_side(const std::vector<std::string> &words);          // 0 left, 1 righ
 IKConstraint *add_ik_to_bone(Scene &scene, GameObject *bone);
 /* The object the IK constraint on `bone` aims at, looked for in its own character first (two copies share names). */
 GameObject *ik_target_of(const Scene &scene, const GameObject &bone);
+GameObject *ik_pole_of(const Scene &scene, const GameObject &bone);  // (its pole, found the same way - round 348)
 
 /* Blender: Screw modifier (lathe). */
 struct ScrewModifier : ComponentBase<ScrewModifier> {
@@ -1348,7 +1495,8 @@ class GameObject {
 
   /* Mesh after the modifier stack; cached by source version + params hash.
    * kind: 0 the viewport (enabled modifiers), 1 renders (Show in Renders),
-   * 2 Edit Mode (enabled and Show in Edit Mode). */
+   * 2 Edit Mode (enabled and Show in Edit Mode); 3 + 2 x role + (0 or 1) are 0 and 1 seen through a camera, the
+   * MeshRenderer's view_weights added to its shape keys - a pair for each camera-view role (round 339, ADR 0094). */
   const Mesh *evaluated_mesh(int kind = 0) const;
   /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
    * their settings), without evaluating anything: for caches that only need to know it changed. */
@@ -1375,18 +1523,20 @@ class GameObject {
   Transform local_;
   mutable Mat4 world_;
   mutable bool world_dirty_ = true;
-  mutable std::shared_ptr<Mesh> eval_mesh_[3];
-  mutable uint64_t eval_key_[3] = {0, 0, 0};
+  /* (Round 339: kinds 3-8 are 0 and 1 through a camera - View Angle Shapes' weights - a pair a camera-view role (the Game
+   * view, F12, the traced Camera Preview), so no view evicts or rewrites a mesh another is drawing or tracing.) */
+  mutable std::shared_ptr<Mesh> eval_mesh_[9];
+  mutable uint64_t eval_key_[9] = {};
   /* The stack before its deforming tail (ADR 0022): the result of the modifiers up to the last one that
    * isn't deform-only, its key, and the head key eval_mesh_ was deformed from (0: a full evaluation). */
-  mutable std::shared_ptr<Mesh> eval_head_[3];
-  mutable uint64_t eval_head_key_[3] = {0, 0, 0};
-  mutable uint64_t eval_from_[3] = {0, 0, 0};
+  mutable std::shared_ptr<Mesh> eval_head_[9];
+  mutable uint64_t eval_head_key_[9] = {};
+  mutable uint64_t eval_from_[9] = {};
   /* Dynamic Subdivision (ADR 0075, task 0239): the chain behind eval_head_ when the head is one Subdivision Surface,
    * and that head's key without the base's deform_version (the chain follows positions; anything else rebuilds). */
-  mutable std::shared_ptr<meshops::SubdivChain> eval_chain_[3];
-  mutable uint64_t eval_head_topo_[3] = {0, 0, 0};
-  mutable uint64_t eval_from_topo_[3] = {0, 0, 0};  // (the head topology key eval_mesh_ was deformed from: a chain-followed head deforms its tail again in place)
+  mutable std::shared_ptr<meshops::SubdivChain> eval_chain_[9];
+  mutable uint64_t eval_head_topo_[9] = {};
+  mutable uint64_t eval_from_topo_[9] = {};  // (the head topology key eval_mesh_ was deformed from: a chain-followed head deforms its tail again in place)
   friend class Scene;
 };
 
@@ -1636,6 +1786,10 @@ std::string export_obj(const std::vector<std::pair<const Mesh *, Mat4>> &meshes)
 std::string save_material_text(Material &m);
 bool load_material_text(const std::string &text, Material &m);
 MaterialPtr material_asset(const std::string &path);  // cached; null when the file is missing
+/* Round 371: a material file in another engine's format (a Unity .mat) read through this; the material is `foreign`,
+ * and save_dirty_material_assets leaves its file alone. */
+using ForeignMaterialLoader = std::function<bool(const std::string &text, const std::string &path, Material &m)>;
+void set_foreign_material_loader(ForeignMaterialLoader loader);
 MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
 size_t save_dirty_material_assets();  // writes the assets changed since they were saved
 /* The material assets loaded so far (path, shared instance). */

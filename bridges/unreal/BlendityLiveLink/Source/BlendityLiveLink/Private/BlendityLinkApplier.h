@@ -25,11 +25,18 @@ public:
 	int32 ObjectCount() const { return Objects.Num(); }
 	bool IsPlaying() const { return bPlaying; }
 	AActor* FindByName(const FString& Name) const;
+	/* Round 376: the look's own actors (a SkyLight, an ExponentialHeightFog, an unbound PostProcessVolume), made as the
+	 * world, render and filters messages first come. */
+	AActor* GetSky() const { return Sky.Get(); }
+	AActor* GetFog() const { return Fog.Get(); }
+	AActor* GetPost() const { return Post.Get(); }
 	const TMap<int64, TWeakObjectPtr<AActor>>& GetObjects() const { return Objects; }
 	/* Each tick (round 318): a mesh whose deforms have stopped for half a second is built once more with its CPU data
 	 * and gets its collision back - while it deforms it has neither, as cooking it each time cost 259 ms a frame on a
 	 * 32,000-vertex mesh. */
 	void Settle();
+	/** Round 380: the meshes and collisions LOD and collider messages changed, rebuilt once for the batch. */
+	void Flush();
 
 private:
 	void OnObject(const blendity_link::Json& J);
@@ -38,8 +45,21 @@ private:
 	void OnMesh(const blendity_link::Json& J, const TArray<uint8>& Bin);
 	void OnDeform(const blendity_link::Json& J, const TArray<uint8>& Bin);
 	void OnMaterial(const blendity_link::Json& J);
+	void OnTexture(const blendity_link::Json& J, const TArray<uint8>& Bin);
 	void OnLight(const blendity_link::Json& J);
 	void OnCamera(const blendity_link::Json& J);
+	void OnWorld(const blendity_link::Json& J);
+	void OnRender(const blendity_link::Json& J);
+	void OnFilters(const blendity_link::Json& J);
+	void OnLod(const blendity_link::Json& J);  // (round 380)
+	void OnLodMesh(const blendity_link::Json& J, const TArray<uint8>& Bin);
+	void OnCollider(const blendity_link::Json& J);
+	void Rebuild(int64 Id);
+	void UpdateCollision(int64 Id);
+	void ApplyCollision(int64 Id, UStaticMesh* Mesh) const;
+	AActor* LookActor(TWeakObjectPtr<AActor>& Slot, UClass* Class, const TCHAR* Label);
+	void AdoptLook(AActor* A);
+	void ApplyPost();
 	void Remove(int64 Id);
 	void EndSync();
 	void Reparent(int64 Id);
@@ -60,9 +80,18 @@ private:
 	TMap<int64, FString> Topology;
 	TMap<int64, double> Deforming;  // (the time of each deforming mesh's last deform: Settle)
 	TMap<int64, TSharedPtr<FMeshDescription>> Descriptions;  // (round 318: a deform changes the positions in place)
+	TMap<int64, blendity_link::Json> LodMsgs;                           // (round 380: each LOD Group's last message)
+	TMap<int64, TMap<int32, TSharedPtr<FMeshDescription>>> LodDescs;    // (...its levels past 0)
+	TMap<int64, blendity_link::Json> ColliderMsgs;                      // (...each collider's last message)
+	TSet<int64> DirtyMesh, DirtyCollision;  // (review 380: rebuilt once a batch (Flush), not once a message)
 	TMap<int32, TStrongObjectPtr<UMaterialInstanceDynamic>> Materials;
+	TMap<int32, TStrongObjectPtr<class UTexture2D>> Textures;  // (round 377: by texture key, from PNG bytes)
+	TMap<int32, blendity_link::Json> MaterialMsgs;               // (round 377: each material's last message)
 	TMap<int64, TWeakObjectPtr<AActor>> Parts;  // (a light's or a camera's own actor, attached to its object)
 	TSet<int64>* Seen = nullptr;
 	TSet<int64> SeenStorage;
 	bool bPlaying = false;
+	TWeakObjectPtr<AActor> Sky, Fog, Post;
+	double ExposureStops = 0, GradeStops = 0;
+	blendity_link::Json Effects;  // (the last filters message's effects)
 };

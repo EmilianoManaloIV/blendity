@@ -117,13 +117,47 @@ static const GameObject *lattice_target(const LatticeModifier &m, const Lattice 
   return *lat ? t : nullptr;
 }
 
+bool Lattice::moved() const {
+  for (const Vec3 &o : offsets)
+    if (o.x != 0.0f || o.y != 0.0f || o.z != 0.0f) return true;
+  return false;
+}
+
+bool Lattice::frame(const GameObject &object, Mat4 &out) const {
+  out = object.world_matrix();
+  if (!align_to_camera) return true;
+  if (!view_on || !evaluating_camera_view()) return false;  // (review 342: a camera view's evaluation only)
+  const Vec3 at = out.translation();
+  Vec3 z = view_ortho ? -view_forward : view_eye - at;
+  const float zl = length(z);
+  if (!(zl > 1e-6f) || !finite_bits(zl)) return false;
+  z = z / zl;
+  /* X the screen's right: from the camera's own up (a rolled camera's too), so looking straight down doesn't spin it. */
+  Vec3 x = cross(view_up, z);
+  if (!(length(x) > 1e-4f)) x = cross(Vec3(0.0f, 0.0f, 1.0f), z);
+  if (!(length(x) > 1e-4f)) x = cross(Vec3(1.0f, 0.0f, 0.0f), z);
+  x = normalize(x);
+  const Vec3 y = cross(z, x);
+  const Vec3 s{length(out.column(0)), length(out.column(1)), length(out.column(2))};
+  Mat4 m;
+  for (int k = 0; k < 3; k++) m.m[k] = x[k] * s.x, m.m[4 + k] = y[k] * s.y, m.m[8 + k] = z[k] * s.z, m.m[12 + k] = at[k];
+  out = m;
+  return true;
+}
+
 uint64_t LatticeModifier::modifier_dependency_hash() const {
   const Lattice *lt = nullptr;
   const GameObject *t = lattice_target(*this, &lt);
   if (!t) return 0;
   uint64_t h = kFnvBasis;
   auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
-  const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();
+  Mat4 frame;
+  /* (Round 342: turned to the camera's view when aligned - and only when it moves something, or the camera would be in
+   * the key of a result it doesn't change.) */
+  const bool on = lt->align_to_camera && (!lt->moved() || strength == 0.0f) ? false : lt->frame(*t, frame);
+  if (lt->align_to_camera && (!lt->moved() || strength == 0.0f)) frame = Mat4();
+  mix(&on, sizeof(on));
+  const Mat4 rel = owner->world_matrix().inverse() * frame;
   mix(rel.m, sizeof(rel.m));
   const uint64_t k = lt->content_key();
   mix(&k, sizeof(k));
@@ -137,7 +171,9 @@ void LatticeModifier::modify(Mesh &m) const {
   bool moved = false;
   for (const Vec3 &o : lt->offsets) moved = moved || o.x != 0.0f || o.y != 0.0f || o.z != 0.0f;
   if (!moved || strength == 0.0f) return;  // a lattice at rest moves nothing
-  const Mat4 rel = owner->world_matrix().inverse() * t->world_matrix();  // lattice space -> the mesh's
+  Mat4 frame;
+  if (!lt->frame(*t, frame)) return;  // (round 342: an aligned box out of the camera views moves nothing)
+  const Mat4 rel = owner->world_matrix().inverse() * frame;  // lattice space -> the mesh's
   const Vec3 c0 = rel.column(0), c1 = rel.column(1), c2 = rel.column(2);
   const float det = dot(cross(c0, c1), c2), sides = length(c0) * length(c1) * length(c2);
   /* Flattened to nothing (relative to its size, so any scale works): no inside. */

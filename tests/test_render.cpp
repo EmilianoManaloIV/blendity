@@ -11474,6 +11474,619 @@ static void tests_round331() {
   });
 }
 
+/* ---------------------------------------------------------------- round 338: an object or a bone dropped on Camera Flatten's pivot */
+static void tests_round338() {
+  auto at = [](platform::EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y;
+    return e;
+  };
+  using ET = platform::EventType;
+  /* The Cube flattened, an empty "Head" below it (a bone's stand-in: the field takes any object) and the Inspector on the Cube. */
+  auto rig = [](Editor &ed) -> GameObject * {
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("flatten 0.5");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    if (!cube) return nullptr;
+    GameObject *head = ed.scene().create("Head", cube);
+    head->set_local_position({0.0f, 0.4f, 0.0f});
+    ed.mark_changed_for_test("Head");
+    ed.command("select Head");  // (its row shown: the Hierarchy opens the Cube for it)
+    r34_steps(ed, 2);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    return cube;
+  };
+  test("Camera Flatten's pivot (round 338): an object dragged from the Hierarchy onto Pivot Object is the pivot - the Pivot switches to Object or Bone, one undo takes both back", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    CHECK(cube->get<CameraFlatten>()->pivot == 0);
+    int hx = 0, hy = 0;
+    Recti f;
+    const bool row = ed.hierarchy_row_for_test("Head", hx, hy), field = ed.button_rect_for_test("field:Pivot Object", f);
+    CHECK(row && field);
+    if (!row || !field) return;
+    const int fx = f.x + f.w / 3, fy = f.y + f.h / 2;
+    ed.step_frame_headless({at(ET::MouseMove, hx, hy)});
+    ed.step_frame_headless({at(ET::MouseDown, hx, hy)});
+    for (int k = 1; k <= 4; k++) ed.step_frame_headless({at(ET::MouseMove, hx + (fx - hx) * k / 4, hy + (fy - hy) * k / 4)});
+    ed.step_frame_headless({at(ET::MouseUp, fx, fy)});
+    ed.step_frame_headless();
+    const CameraFlatten *cf = cube->get<CameraFlatten>();
+    std::printf("    after the drop: Pivot %d, Pivot Object '%s'; the Inspector still on %s\n", cf->pivot, cf->bone.c_str(),
+                ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "nothing");
+    CHECK(cf->bone == "Head" && cf->pivot == 2);
+    CHECK(ed.active_object_for_test() == cube);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<CameraFlatten>() && cube->get<CameraFlatten>()->bone.empty() && cube->get<CameraFlatten>()->pivot == 0);
+  });
+  test("Camera Flatten's pivot (round 338): the picker lists the object's own children first and a pick sets the pivot; an object outside the character works and moving it moves the flattened placement; a missing name stays finite", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    Recti f;
+    CHECK(ed.button_rect_for_test("field:Pivot Object", f));
+    const int px = f.x + f.w - f.h / 2, py = f.y + f.h / 2;  // (the picker at the field's right)
+    ed.step_frame_headless({at(ET::MouseMove, px, py)});
+    ed.step_frame_headless({at(ET::MouseDown, px, py)});
+    ed.step_frame_headless({at(ET::MouseUp, px, py)});
+    ed.step_frame_headless();
+    Recti head_row, sphere_row;
+    const bool listed = ed.button_rect_for_test("menu:Head", head_row) && ed.button_rect_for_test("menu:Sphere", sphere_row);
+    std::printf("    the picker: Head at y %d, Sphere at y %d\n", head_row.y, sphere_row.y);
+    CHECK(listed && head_row.y < sphere_row.y);
+    if (!listed) return;
+    ed.step_frame_headless({at(ET::MouseMove, sphere_row.x + 8, sphere_row.y + sphere_row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseDown, sphere_row.x + 8, sphere_row.y + sphere_row.h / 2)});
+    ed.step_frame_headless({at(ET::MouseUp, sphere_row.x + 8, sphere_row.y + sphere_row.h / 2)});
+    r34_steps(ed, 2);
+    CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf->bone == "Sphere" && cf->pivot == 2);
+    /* The Sphere is outside the Cube: found in the scene; moving it moves the Cube's flattened placement. */
+    GameObject *sphere = ed.scene().find_by_name("Sphere");
+    CHECK(sphere != nullptr);
+    if (!sphere) return;
+    const Vec3 eye{0, 1, -6};
+    const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto model_of = [&] {
+      for (const DrawItem &it : ed.collect_items_for_test(true, v, p, eye))
+        if (it.id == (uint32_t)cube->id && !it.always_cull) return it.model;
+      return Mat4();
+    };
+    const Mat4 a = model_of();
+    sphere->set_local_position(sphere->world_position() + Vec3(0.0f, 0.0f, 2.0f));  // (a root: its local place is its world one)
+    ed.step_frame_headless();
+    const Mat4 b = model_of();
+    const float moved = length(a.point({0, 0, 0}) - b.point({0, 0, 0}));
+    std::printf("    the Cube's flattened centre moved %.3f m with the pivot\n", moved);
+    CHECK(moved > 0.05f);
+    cf->bone = "No Such Object";
+    ed.step_frame_headless();
+    const Mat4 c = model_of();
+    CHECK(std::isfinite(c.m[0]) && std::isfinite(c.m[12]) && std::isfinite(c.m[14]));
+  });
+  test("Camera Flatten's pivot (round 338): a file keeps Pivot Object and the round-334 Pivot Bone; a round-334 line (Pivot Bone only) loads into the field; flatten pivot object / bone set it from the console", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    ed.command("flatten pivot object Head");
+    CHECK(cube->get<CameraFlatten>()->bone == "Head" && cube->get<CameraFlatten>()->pivot == 2);
+    ed.command("flatten pivot center");
+    ed.command("flatten pivot bone Head");  // (round 334's word)
+    CHECK(cube->get<CameraFlatten>()->pivot == 2);
+    const std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Pivot_Object") != std::string::npos && text.find("Pivot_Bone") != std::string::npos);  // (keys: spaces as _)
+    /* A round-334 file: no Pivot Object line. */
+    std::string old;
+    size_t start = 0;
+    while (start < text.size()) {
+      size_t end = text.find('\n', start);
+      if (end == std::string::npos) end = text.size();
+      const std::string line = text.substr(start, end - start);
+      if (line.find("Pivot_Object") == std::string::npos) old += line + "\n";
+      start = end + 1;
+    }
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(old, back, err));
+    GameObject *c2 = back.find_by_name("Cube");
+    CHECK(c2 && c2->get<CameraFlatten>() && c2->get<CameraFlatten>()->bone == "Head" && c2->get<CameraFlatten>()->pivot == 2);
+  });
+  test("Camera Flatten's pivot (review 338): moving an empty that is the pivot - no mesh, no bone, hashed nowhere else - redraws the views (their hash changes); a bone below wins over a mesh of the same name", [&] {
+    Editor ed;
+    GameObject *cube = rig(ed);
+    CHECK(cube && cube->get<CameraFlatten>());
+    if (!cube || !cube->get<CameraFlatten>()) return;
+    GameObject *empty = ed.scene().create("FreePivot", nullptr);
+    empty->set_local_position({2.0f, 0.5f, 0.0f});
+    ed.command("select Cube");
+    ed.command("flatten pivot object FreePivot");
+    CHECK(cube->get<CameraFlatten>()->bone == "FreePivot");
+    r34_steps(ed, 2);
+    const uint64_t before = ed.render_hash_for_test();
+    empty->set_local_position({2.0f, 0.5f, 1.5f});
+    const uint64_t after = ed.render_hash_for_test();
+    std::printf("    the views' hash %s when the empty moved\n", before != after ? "changed" : "did NOT change");
+    CHECK(before != after);
+    /* A face mesh named like the head bone, listed before the armature: the bone is the pivot, as round 334's files meant. */
+    GameObject *face = ed.scene().create("HeadBone", cube);
+    GameObject *arm = ed.scene().create("Armature", cube);
+    GameObject *bone = ed.scene().create("HeadBone", arm);
+    bone->add<Bone>();
+    face->set_local_position({0.0f, -0.4f, 0.0f});
+    bone->set_local_position({0.0f, 0.7f, 0.0f});
+    ed.command("flatten pivot object HeadBone");
+    const Vec3 p = ed.camera_flatten_pivot_for_test(*cube);
+    std::printf("    the pivot: %.2f %.2f %.2f (the bone's %.2f, the mesh's %.2f)\n", p.x, p.y, p.z, bone->world_position().y, face->world_position().y);
+    CHECK(length(p - bone->world_position()) < 1e-4f);
+  });
+}
+
+/* ---------------------------------------------------------------- round 339: View Angle Shapes - shape keys by the camera's angle */
+static void tests_round339() {
+  test("View Angle Shapes' angles (round 339): the camera on the reference's right is yaw 90, above it pitch 90; a row is full within its range, half the way through its falloff, gone past it; Mirror fires at -yaw on the other side's key", [] {
+    float yaw = 0, pitch = 0;
+    view_angle_of(Mat4(), {10, 0, 0}, {0, 0, 1}, false, yaw, pitch);
+    CHECK(std::fabs(yaw - 90.0f) < 1e-3f && std::fabs(pitch) < 1e-3f);
+    view_angle_of(Mat4(), {0, 10, 0}, {0, 0, 1}, false, yaw, pitch);
+    CHECK(std::fabs(pitch - 90.0f) < 1e-3f);
+    view_angle_of(Mat4::rotate(Quat::axis_angle({0, 1, 0}, 90.0f * kDeg2Rad)), {0, 0, -10}, {0, 0, 1}, false, yaw, pitch);  // (turned: its right is now -Z)
+    std::printf("    a reference turned 90 degrees, the camera on -Z: yaw %.1f\n", yaw);
+    CHECK(std::fabs(std::fabs(yaw) - 90.0f) < 1e-2f);
+    ViewAngleShapes vs;
+    ViewAngleRow r;
+    r.key = "Mouth_R", r.yaw = 90.0f, r.pitch = 0.0f, r.range = 20.0f, r.falloff = 20.0f, r.weight = 1.0f, r.mirror = true;
+    vs.rows.push_back(r);
+    auto weight_at = [&](float y, const char *key) {
+      std::vector<std::pair<std::string, float>> w;
+      view_angle_weights(vs, y, 0.0f, [](const std::string &k) { return k == "Mouth_R" || k == "Mouth_L"; }, w);
+      for (const auto &e : w)
+        if (e.first == key) return e.second;
+      return 0.0f;
+    };
+    std::printf("    Mouth_R at yaw 90 / 60 / 30 / 0: %.2f %.2f %.2f %.2f; Mouth_L at -90: %.2f\n", weight_at(90, "Mouth_R"), weight_at(60, "Mouth_R"),
+                weight_at(30, "Mouth_R"), weight_at(0, "Mouth_R"), weight_at(-90, "Mouth_L"));
+    CHECK(std::fabs(weight_at(90, "Mouth_R") - 1.0f) < 1e-4f && std::fabs(weight_at(60, "Mouth_R") - 0.5f) < 1e-3f && weight_at(0, "Mouth_R") == 0.0f);
+    CHECK(std::fabs(weight_at(-90, "Mouth_L") - 1.0f) < 1e-4f && weight_at(-90, "Mouth_R") == 0.0f);
+  });
+  /* The Cube with a shape key raising it 0.5 and a row bringing it in from its right. */
+  auto shaped_cube = [](Editor &ed) -> GameObject * {
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    MeshFilter *mf = cube ? cube->get<MeshFilter>() : nullptr;
+    if (!mf || !mf->mesh) return nullptr;
+    auto m = std::make_shared<Mesh>(*mf->mesh);
+    m->shape_keys.push_back(ShapeKey{"Side", std::vector<Vec3>(m->positions.size(), Vec3(0.0f, 0.5f, 0.0f))});
+    m->version++;
+    mf->mesh = m;
+    ed.command("select Cube");
+    ed.command("viewshape add Side 90 0 20 20 1");
+    return cube;
+  };
+  auto top_of = [](const std::vector<DrawItem> &items, const GameObject *g) {
+    for (const DrawItem &it : items)
+      if (it.id == (uint32_t)g->id && !it.always_cull && it.mesh) return it.model.point({0, it.mesh->bounds.max.y, 0}).y;
+    return -1e9f;
+  };
+  test("View Angle Shapes in the editor (round 339): a shape key at yaw 90 comes in through a camera on the Cube's right, not one in front, and never in the Scene view; it adds to the renderer's own weight; viewshape list / remove", [&] {
+    Editor ed;
+    GameObject *cube = shaped_cube(ed);
+    CHECK(cube && cube->get<ViewAngleShapes>() && cube->get<ViewAngleShapes>()->rows.size() == 1);
+    if (!cube || !cube->get<ViewAngleShapes>()) return;
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto view_from = [&](Vec3 eye) { return Mat4::look_at(eye, c, {0, 1, 0}); };
+    const Vec3 side = c + Vec3(6, 0, 0), front = c + Vec3(0, 0, 6);
+    const float plain = top_of(ed.collect_items_for_test(false, view_from(side), p, side), cube);
+    const float from_side = top_of(ed.collect_items_for_test(true, view_from(side), p, side), cube);
+    const float from_front = top_of(ed.collect_items_for_test(true, view_from(front), p, front), cube);
+    const float scene_after = top_of(ed.collect_items_for_test(false, view_from(side), p, side), cube);
+    std::printf("    the Cube's top: %.3f in the Scene view, %.3f through a camera on its right, %.3f in front, %.3f in the Scene view again\n", plain,
+                from_side, from_front, scene_after);
+    CHECK(std::fabs(from_side - (plain + 0.5f)) < 1e-3f);
+    CHECK(std::fabs(from_front - plain) < 1e-3f && std::fabs(scene_after - plain) < 1e-3f);
+    /* The renderer's own weight (an animated expression) and the view's add up. */
+    cube->get<MeshRenderer>()->set_shape_weight("Side", 0.5f);
+    const float both = top_of(ed.collect_items_for_test(true, view_from(side), p, side), cube);
+    const float own = top_of(ed.collect_items_for_test(false, view_from(side), p, side), cube);
+    std::printf("    with the renderer's own 0.5: %.3f in the Scene view, %.3f through the side camera\n", own, both);
+    CHECK(std::fabs(own - (plain + 0.25f)) < 1e-3f && std::fabs(both - (plain + 0.75f)) < 1e-3f);
+    ed.command("viewshape remove 1");
+    CHECK(cube->get<ViewAngleShapes>()->rows.empty());
+  });
+  test("View Angle Shapes (round 339): the reference is any object - the angle is measured from it (drop the head bone); the views' hash moves when it turns; the rows save and load; the Inspector's line reads the Game camera's angle and Add Row adds one there", [&] {
+    Editor ed;
+    GameObject *cube = shaped_cube(ed);
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    GameObject *head = ed.scene().create("HeadRef", cube);
+    ed.command("select Cube");
+    ed.command("viewshape ref HeadRef");
+    ViewAngleShapes *vs = cube->get<ViewAngleShapes>();
+    CHECK(vs && vs->reference == "HeadRef");
+    r34_steps(ed, 2);
+    const uint64_t before = ed.render_hash_for_test();
+    head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 1.0f));
+    CHECK(ed.render_hash_for_test() != before);
+    /* Turned 90 degrees to the left, the reference's right is the world's -Z: the camera there brings the key in. */
+    head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 90.0f * kDeg2Rad));
+    const Vec3 c = cube->world_position(), eye = c + Vec3(0, 0, -6);
+    const Mat4 v = Mat4::look_at(eye, c, {0, 1, 0}), p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    const float plain = top_of(ed.collect_items_for_test(false, v, p, eye), cube), turned = top_of(ed.collect_items_for_test(true, v, p, eye), cube);
+    std::printf("    the reference turned 90 degrees, the camera on -Z: the top %.3f (plain %.3f)\n", turned, plain);
+    CHECK(std::fabs(turned - (plain + 0.5f)) < 1e-3f);
+    const std::string text = save_scene_text(ed.scene());
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(text, back, err));
+    const GameObject *c2 = back.find_by_name("Cube");
+    const ViewAngleShapes *v2 = c2 ? c2->get<ViewAngleShapes>() : nullptr;
+    CHECK(v2 && v2->rows.size() == 1 && v2->rows[0].key == "Side" && v2->rows[0].yaw == 90.0f && v2->reference == "HeadRef");
+    /* The Inspector: its line, and Add Row at the Game camera's angle. */
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    bool line = false;
+    for (const std::string &label : ed.button_labels_for_test())
+      line = line || label.rfind("shown:Game camera at yaw", 0) == 0;
+    CHECK(line);
+    Recti add{0, 0, 0, 0};
+    for (int tries = 0; tries < 60; tries++) {  // (scrolled into the Inspector's view: it sits below the component's rows)
+      const Recti w = ed.window_rect_for_test(WindowKind::Inspector);
+      if (ed.button_rect_for_test("Add Row at the Game Camera's Angle", add) && add.y >= w.y + ed.ui_for_test().row_h() * 2 && add.bottom() <= w.bottom()) break;
+      platform::Event wheel;
+      wheel.type = platform::EventType::Wheel;
+      wheel.x = w.x + w.w / 2, wheel.y = w.y + w.h / 2, wheel.wheel_y = add.w > 0 && add.y < w.y + ed.ui_for_test().row_h() * 2 ? 3.0f : -3.0f;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, wheel.x, wheel.y)});
+      ed.step_frame_headless({wheel});
+    }
+    CHECK(add.w > 0);
+    r34_click(ed, add.x + 8, add.y + add.h / 2);
+    r34_steps(ed, 1);
+    CHECK(cube->get<ViewAngleShapes>()->rows.size() == 2);
+  });
+  test("View Angle Shapes (review 339): the traced Camera Preview's shaped mesh and outline stay as it collected them while the Game view collects from another camera; a mirrored key with no side counts once near yaw 0; an eye at the reference gives no weights", [&] {
+    Editor ed;
+    GameObject *cube = shaped_cube(ed);
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("component Outline");
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    /* At yaw 60 the row gives 0.5: the Game view's mesh is shaped too, differently (one shared slot rewrote the preview's). */
+    const Vec3 side = c + Vec3(6, 0, 0), front = c + Vec3(6.0f * std::sin(60.0f * kDeg2Rad), 0, 6.0f * std::cos(60.0f * kDeg2Rad));
+    /* The preview (role 2) from the side; then the Game view (role 0) from yaw 60. */
+    const std::vector<DrawItem> preview = ed.collect_items_for_test(true, Mat4::look_at(side, c, {0, 1, 0}), p, side, 2);
+    const RenderMesh *pm = nullptr, *po = nullptr;
+    for (const DrawItem &it : preview)
+      if (it.id == (uint32_t)cube->id) (it.unlit ? po : pm) = it.mesh;
+    CHECK(pm && po);
+    if (!pm || !po) return;
+    auto top = [](const RenderMesh &rm) {
+      float y = -1e9f;
+      for (const Vec3 &q : rm.positions) y = std::max(y, q.y);
+      return y;
+    };
+    const float before = top(*pm), outline_before = top(*po);
+    const uint64_t serial = pm->serial, outline_serial = po->serial;
+    (void)ed.collect_items_for_test(true, Mat4::look_at(front, c, {0, 1, 0}), p, front, 0);
+    std::printf("    the preview's shaped top %.3f -> %.3f (serial kept: %d), its outline's %.3f -> %.3f (kept: %d)\n", before, top(*pm), (int)(pm->serial == serial),
+                outline_before, top(*po), (int)(po->serial == outline_serial));
+    CHECK(top(*pm) == before && pm->serial == serial && top(*po) == outline_before && po->serial == outline_serial);
+    /* One key for both sides near yaw 0: the nearer, not the two added. */
+    ViewAngleShapes vs;
+    ViewAngleRow r;
+    r.key = "ChinUp", r.yaw = 0.0f, r.range = 20.0f, r.falloff = 20.0f, r.mirror = true;
+    vs.rows.push_back(r);
+    std::vector<std::pair<std::string, float>> w;
+    view_angle_weights(vs, 0.0f, 0.0f, [](const std::string &) { return false; }, w);
+    CHECK(w.size() == 1 && std::fabs(w[0].second - 1.0f) < 1e-5f);
+    float yaw = 1, pitch = 1;
+    CHECK(!view_angle_of(Mat4(), {0, 0, 0}, {0, 0, 1}, false, yaw, pitch) && yaw == 0.0f && pitch == 0.0f);
+  });
+  test("the lesson \"Shapes by the Camera's Angle\": its Try-its add View Angle Shapes with a row on the Cube's right and list it", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Cube", "viewshape add Side 90 0 20 25 1", "viewshape list"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const ViewAngleShapes *vs = cube ? cube->get<ViewAngleShapes>() : nullptr;
+    CHECK(vs && vs->rows.size() == 1 && vs->rows[0].key == "Side" && vs->rows[0].yaw == 90.0f && vs->rows[0].falloff == 25.0f);
+  });
+  test("View Angle Shapes' cost (round 339, printed): a 10k-vertex mesh's camera-view evaluation each frame while the camera orbits", [&] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *ball = ed.scene().find_by_name("Sphere");
+    MeshFilter *mf = ball ? ball->get<MeshFilter>() : nullptr;
+    if (!mf) return;
+    auto m = std::make_shared<Mesh>(*primitives::uv_sphere(0.5f, 160, 64));
+    m->shape_keys.push_back(ShapeKey{"Side", std::vector<Vec3>(m->positions.size(), Vec3(0.1f, 0.0f, 0.0f))});
+    mf->mesh = m;
+    ed.command("select Sphere");
+    ed.command("viewshape add Side 90 0 30 60 1");
+    const Vec3 c = ball->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    const double t0 = now_seconds();
+    for (int k = 0; k < 20; k++) {
+      const float a = k * 0.05f;
+      const Vec3 eye = c + Vec3(std::sin(a) * 6, 0, std::cos(a) * 6);
+      ed.collect_items_for_test(true, Mat4::look_at(eye, c, {0, 1, 0}), p, eye);
+    }
+    std::printf("    %zu vertices: %.2f ms a frame (collecting the items, the camera view's evaluation included)\n", m->positions.size(), (now_seconds() - t0) * 1000.0 / 20.0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 342: a lattice turned to face the camera */
+static void tests_round342() {
+  test("Align to Camera (round 342): a lattice's right-hand points pulled out widen the Cube toward the screen's right - world +X through a camera in front, world -Z through one on its right - and never in the Scene view; off, the box moves the Cube the same from every camera", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    GameObject *box = ed.scene().create("R342Lattice");
+    box->set_local_position(cube->world_position());
+    box->set_local_scale(Vec3(2.0f));
+    Lattice *lt = box->add<Lattice>();
+    for (int i : {1, 3, 5, 7}) lt->offsets[(size_t)i] = Vec3(0.5f, 0.0f, 0.0f);  // (u = 1: the +X side, in the box's own frame)
+    lt->align_to_camera = true;
+    LatticeModifier *lm = cube->add<LatticeModifier>();
+    lm->object = "R342Lattice";
+    ed.mark_changed_for_test("R342");
+    ed.step_frame_headless();
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto extent = [&](bool game, Vec3 eye, Vec3 &lo, Vec3 &hi) {
+      lo = Vec3(1e9f), hi = Vec3(-1e9f);
+      for (const DrawItem &it : ed.collect_items_for_test(game, Mat4::look_at(eye, c, {0, 1, 0}), p, eye))
+        if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+          for (const Vec3 &q : it.mesh->positions) lo = vmin(lo, q), hi = vmax(hi, q);
+    };
+    Vec3 plo, phi, flo, fhi, slo, shi, alo, ahi;
+    extent(false, c + Vec3(0, 0, 6), plo, phi);
+    extent(true, c + Vec3(0, 0, 6), flo, fhi);
+    extent(true, c + Vec3(6, 0, 0), slo, shi);
+    extent(false, c + Vec3(6, 0, 0), alo, ahi);
+    std::printf("    the Cube's x / z extents: Scene view %.2f..%.2f / %.2f..%.2f; camera in front %.2f..%.2f / %.2f..%.2f; camera on the right %.2f..%.2f / %.2f..%.2f\n",
+                plo.x, phi.x, plo.z, phi.z, flo.x, fhi.x, flo.z, fhi.z, slo.x, shi.x, slo.z, shi.z);
+    CHECK(fhi.x > phi.x + 0.3f && std::fabs(flo.z - plo.z) < 1e-3f && std::fabs(fhi.z - phi.z) < 1e-3f);  // (front: wider to +X only)
+    CHECK(slo.z < plo.z - 0.3f && std::fabs(shi.x - phi.x) < 1e-3f);                                       // (right: wider to -Z)
+    CHECK(std::fabs(ahi.x - phi.x) < 1e-6f && std::fabs(alo.z - plo.z) < 1e-6f);                           // (the Scene view: the model)
+    /* Off: a plain lattice - the same widening to +X from both cameras, and in the Scene view. */
+    lt->align_to_camera = false;
+    ed.mark_changed_for_test("R342 off");
+    Vec3 olo, ohi, o2lo, o2hi;
+    extent(true, c + Vec3(6, 0, 0), olo, ohi);
+    extent(false, c + Vec3(0, 0, 6), o2lo, o2hi);
+    CHECK(ohi.x > phi.x + 0.3f && std::fabs(ohi.x - o2hi.x) < 1e-4f);
+  });
+  test("Align to Camera (review 342): a camera's collect leaves the plain meshes and the scene's hash as they were (only the camera view's own evaluation turns the box); a modifier shown in renders only goes the camera way too; a rolled camera's right and an orthographic camera are the screen's; the lesson's Try-it", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    GameObject *box = ed.scene().create("R342Box2");
+    box->set_local_position(cube->world_position());
+    box->set_local_scale(Vec3(2.0f));
+    Lattice *lt = box->add<Lattice>();
+    for (int i : {1, 3, 5, 7}) lt->offsets[(size_t)i] = Vec3(0.5f, 0.0f, 0.0f);
+    lt->align_to_camera = true;
+    LatticeModifier *lm = cube->add<LatticeModifier>();
+    lm->object = "R342Box2";
+    ed.mark_changed_for_test("R342b");
+    ed.step_frame_headless();
+    const Vec3 c = cube->world_position();
+    const Mat4 p = Mat4::perspective(40 * kDeg2Rad, 1.5f, 0.1f, 100);
+    auto top_x = [](const Mesh *m) {
+      float x = -1e9f;
+      for (const Vec3 &q : m ? m->positions : std::vector<Vec3>()) x = std::max(x, q.x);
+      return x;
+    };
+    const float plain1 = top_x(cube->evaluated_mesh(1)), plain0 = top_x(cube->evaluated_mesh(0));
+    const uint64_t hash_before = ed.render_hash_for_test();
+    (void)ed.collect_items_for_test(true, Mat4::look_at(c + Vec3(0, 0, 6), c, {0, 1, 0}), p, c + Vec3(0, 0, 6));
+    const float after1 = top_x(cube->evaluated_mesh(1)), after0 = top_x(cube->evaluated_mesh(0));
+    std::printf("    the plain meshes' right edge: render %.2f -> %.2f, viewport %.2f -> %.2f; the scene's hash %s\n", plain1, after1, plain0, after0,
+                ed.render_hash_for_test() == hash_before ? "the same" : "CHANGED");
+    CHECK(after1 == plain1 && after0 == plain0 && std::fabs(plain1 - 0.5f) < 1e-4f && ed.render_hash_for_test() == hash_before);
+    /* Shown in renders only: the camera view still turns it (the kind the Game view evaluates reads Show in Renders). */
+    lm->enabled = false;
+    lm->show_in_render = true;
+    ed.mark_changed_for_test("R342b renders only");
+    float right = -1e9f;
+    for (const DrawItem &it : ed.collect_items_for_test(true, Mat4::look_at(c + Vec3(0, 0, 6), c, {0, 1, 0}), p, c + Vec3(0, 0, 6)))
+      if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+        for (const Vec3 &q : it.mesh->positions) right = std::max(right, q.x);
+    CHECK(right > 0.8f && top_x(cube->evaluated_mesh(1)) == plain1);
+    lm->enabled = true;
+    /* A camera rolled 90 degrees about its view: the screen's right is the world's down - the box's +X points go there. */
+    ed.mark_changed_for_test("R342b rolled");
+    const Vec3 eye = c + Vec3(0, 0, 6);
+    float lowest = 1e9f, widest = -1e9f;
+    for (const DrawItem &it : ed.collect_items_for_test(true, Mat4::look_at(eye, c, {1, 0, 0}), p, eye))
+      if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+        for (const Vec3 &q : it.mesh->positions) lowest = std::min(lowest, q.y), widest = std::max(widest, q.x);
+    std::printf("    rolled 90 degrees: the Cube's lowest point %.2f (as modelled -0.50), its right edge %.2f\n", lowest, widest);
+    CHECK(lowest < -0.8f && std::fabs(widest - 0.5f) < 1e-3f);
+    /* Orthographic, looking along -Z: the same as the perspective camera in front. */
+    float oright = -1e9f;
+    for (const DrawItem &it : ed.collect_items_for_test(true, Mat4::look_at(eye, c, {0, 1, 0}), Mat4::ortho(3.0f, 1.5f, 0.1f, 100.0f), eye))
+      if (it.id == (uint32_t)cube->id && !it.unlit && it.mesh)
+        for (const Vec3 &q : it.mesh->positions) oright = std::max(oright, q.x);
+    CHECK(oright > 0.8f);
+    /* The lesson's Try-it. */
+    Editor ed2;
+    r34_open(ed2);
+    for (const char *k : {"create Lattice", "set Lattice.AlignToCamera 1"}) ed2.command(k);
+    GameObject *made = ed2.active_object_for_test();
+    CHECK(made && made->lattice() && made->lattice()->align_to_camera);
+  });
+}
+
+/* ---------------------------------------------------------------- round 343: forced perspective - a lens per object */
+static void tests_round343() {
+  test("forced perspective (round 343): Camera Flatten at Amount -0.5 stretches the Cube's depth toward the camera by half again; Focal Length 85 before a 24 mm camera keeps 24/85 of it, 12 mm twice it; an orthographic camera leaves a lens alone; flatten lens / off from the console", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("select Cube");
+    ed.command("flatten -0.5");
+    CameraFlatten *cf = cube->get<CameraFlatten>();
+    CHECK(cf && cf->amount == -0.5f);
+    if (!cf) return;
+    const Vec3 eye{0, 1, -6};
+    const float aspect = 1.5f, fovy = 2.0f * std::atan(18.0f / 24.0f / aspect);  // (a 24 mm lens on a 36 mm-wide frame: tan of half the width 18 / 24)
+    const Mat4 v = Mat4::look_at(eye, cube->world_position(), {0, 1, 0}), p = Mat4::perspective(fovy * 1.0f, aspect, 0.1f, 100);
+    auto toward = [&](const std::vector<DrawItem> &items, bool shaded) {  // (how far a point inside the cube toward the camera sits from the pivot)
+      const Vec3 c = cube->world_bounds().center(), dir = normalize(eye - c);
+      for (const DrawItem &it : items)
+        if (it.id == (uint32_t)cube->id && !it.always_cull && !it.unlit) {
+          const Mat4 true_model = it.flattened ? it.shade_model : it.model;  // (shade_model is set on flattened items only)
+          const Mat4 m = shaded ? true_model : it.model;
+          const Vec3 local = true_model.inverse().point(c + dir * 0.4f);
+          return dot(m.point(local) - c, dir);
+        }
+      return 0.0f;
+    };
+    const std::vector<DrawItem> ex = ed.collect_items_for_test(true, v, p, eye);
+    const float before = toward(ex, true), after = toward(ex, false);
+    std::printf("    Amount -0.5: toward the camera %.3f m as modelled, %.3f m drawn\n", before, after);
+    CHECK(std::fabs(after - before * 1.5f) < 1e-3f);
+    ed.command("flatten lens 85");
+    CHECK(cf->mode == 1 && cf->focal == 85.0f);
+    const std::vector<DrawItem> l85 = ed.collect_items_for_test(true, v, p, eye);
+    const float cam_focal = 12.0f * p.m[5];  // (a field-of-view camera: its vertical angle on a 36 x 24 frame - 24 mm here)
+    std::printf("    the camera's focal length %.1f mm; through an 85 mm lens %.3f m (keep %.3f)\n", cam_focal, toward(l85, false), toward(l85, false) / before);
+    CHECK(std::fabs(cam_focal - 24.0f) < 0.05f && std::fabs(toward(l85, false) - before * cam_focal / 85.0f) < 1e-3f);
+    ed.command("flatten lens 12");
+    CHECK(std::fabs(toward(ed.collect_items_for_test(true, v, p, eye), false) - before * cam_focal / 12.0f) < 1e-3f);
+    const std::vector<DrawItem> ortho = ed.collect_items_for_test(true, v, Mat4::ortho(3.0f, aspect, 0.1f, 100.0f), eye);
+    std::printf("    orthographic: %.3f (as modelled %.3f; the matrix m15 %g)\n", toward(ortho, false), before, Mat4::ortho(3.0f, aspect, 0.1f, 100.0f).m[15]);
+    CHECK(std::fabs(toward(ortho, false) - before) < 1e-4f);  // (no lens on an orthographic camera)
+    ed.command("flatten lens off");
+    CHECK(cf->mode == 0);
+    ed.command("flatten lens x");  // (not a number: refused, the usage shown)
+    CHECK(cf->mode == 0);
+    /* Review 343: the camera's own lens, whatever the view's shape - a field-of-view camera the same at 16:9 and 0.9:1, a
+     * physical one its Focal Length on any sensor; an amount typed or the anime preset go back to Amount. */
+    ed.command("flatten lens 85");
+    auto keep_through = [&](const Mat4 &proj) {
+      const std::vector<DrawItem> items = ed.collect_items_for_test(true, v, proj, eye);
+      return toward(items, false) / before;
+    };
+    const float wide = keep_through(Mat4::perspective(fovy, 16.0f / 9.0f, 0.1f, 100)), narrow = keep_through(Mat4::perspective(fovy, 0.9f, 0.1f, 100));
+    std::printf("    a field-of-view camera through 85 mm: keep %.3f at 16:9, %.3f at 0.9:1\n", wide, narrow);
+    CHECK(std::fabs(wide - narrow) < 1e-4f && std::fabs(wide - 24.0f / 85.0f) < 1e-3f);
+    GameObject *cam_obj = nullptr;
+    Camera *main = ed.main_camera_for_test(&cam_obj);
+    CHECK(main != nullptr);
+    if (main) {
+      main->physical = true, main->focal_length = 50.0f, main->sensor_width = 24.89f, main->sensor_height = 18.66f;  // (Super 35)
+      const float phys = keep_through(main->projection(9.0f / 16.0f));  // (a portrait render)
+      std::printf("    a physical 50 mm camera on Super 35, portrait: keep %.3f (50 / 85 = %.3f)\n", phys, 50.0f / 85.0f);
+      CHECK(std::fabs(phys - 50.0f / 85.0f) < 1e-3f);
+      main->physical = false;
+    }
+    ed.command("flatten 0.5");
+    CHECK(cf->mode == 0 && cf->amount == 0.5f);
+    ed.command("flatten lens 85");
+    ed.command("flatten preset anime");
+    CHECK(cf->mode == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 341: Anime Face Normals from an ellipsoid */
+static void tests_round341() {
+  test("Anime Face Normals (round 341): facenormals ellipsoid fits the proxy to a tall head's width, height and depth, and its shading normals lean out where a ball's lean up (a top corner of a head three times as tall as wide); facenormals sphere keeps the ball; a word it doesn't know is refused", [] {
+    Editor ed;
+    r34_open(ed);
+    /* Two heads three times as tall as wide (in the meshes' own space: the fit reads the mesh, not the object's scale). */
+    auto tall_head = [&](const char *name) {
+      GameObject *g = ed.scene().create(name);
+      auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+      for (Vec3 &q : m->positions) q.y *= 3.0f;
+      m->vertex_groups.push_back(VertexGroup{"Head", std::vector<float>(m->positions.size(), 1.0f)});  // (all of it the head)
+      g->add<MeshFilter>()->mesh = m;
+      g->add<MeshRenderer>();
+      return g;
+    };
+    GameObject *ea = tall_head("R341Ellipsoid"), *ba = tall_head("R341Ball");
+    ed.mark_changed_for_test("R341");
+    ed.command("select R341Ellipsoid");
+    ed.command("facenormals ellipsoid");
+    ed.command("select R341Ball");
+    ed.command("facenormals sphere");
+    ed.step_frame_headless();
+    GameObject *ep = ed.scene().find_by_name("R341Ellipsoid Face Normals"), *bp = ed.scene().find_by_name("R341Ball Face Normals");
+    CHECK(ep && bp);
+    if (!ep || !bp) return;
+    const Vec3 s = ep->local().scale, sb = bp->local().scale;
+    std::printf("    the ellipsoid %.3f x %.3f x %.3f; the ball %.3f x %.3f x %.3f\n", s.x, s.y, s.z, sb.x, sb.y, sb.z);
+    CHECK(s.y > s.x * 2.5f && std::fabs(s.x - s.z) < 1e-4f && std::fabs(sb.x - sb.y) < 1e-5f && std::fabs(sb.y - sb.z) < 1e-5f);
+    /* A top corner: the ellipsoid's normal leans out (its sides are steep that high up), the ball's up. */
+    auto corner_normal = [](const GameObject *g) {
+      const Mesh *em = g->evaluated_mesh();
+      if (!em || !em->custom_normals_fit()) return Vec3(0.0f);
+      size_t top = 0;
+      for (size_t i = 0; i < em->positions.size(); i++)
+        if (em->positions[i].y > em->positions[top].y) top = i;
+      return em->custom_normals[top];
+    };
+    const Vec3 ne = corner_normal(ea), nb = corner_normal(ba);
+    auto up_share = [](Vec3 n) { return std::fabs(n.y) / std::max(1e-6f, std::sqrt(n.x * n.x + n.z * n.z)); };
+    std::printf("    a top corner's normal: the ellipsoid's %.2f %.2f %.2f (up / out %.2f), the ball's %.2f %.2f %.2f (up / out %.2f)\n", ne.x, ne.y, ne.z,
+                up_share(ne), nb.x, nb.y, nb.z, up_share(nb));
+    CHECK(std::fabs(length(ne) - 1.0f) < 1e-3f && std::fabs(length(nb) - 1.0f) < 1e-3f);
+    CHECK(up_share(ne) < 1.0f && up_share(nb) > 1.0f);
+    ed.command("facenormals cube");  // (a shape it doesn't know: refused)
+    CHECK(!ed.scene().find_by_name("R341Ball Face Normals.001"));
+  });
+  test("Anime Face Normals (review 341): without a Head group the head's slice keeps its height (a cap alone had made the proxy flat); a flat head (a face card) gets a proxy a quarter as thick as it is wide, not a sheet whose two faces flip the normals", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *g = ed.scene().create("R341Cap");
+    auto m = std::make_shared<Mesh>(*primitives::cube(1.0f));
+    for (Vec3 &q : m->positions) q.y *= 3.0f;  // (no group: the head is the top sixth - only the top face's corners in it)
+    g->add<MeshFilter>()->mesh = m;
+    g->add<MeshRenderer>();
+    GameObject *card = ed.scene().create("R341Card");
+    auto cm = std::make_shared<Mesh>(*primitives::cube(1.0f));
+    for (Vec3 &q : cm->positions) q.z = 0.0f;  // (flat along z: a face card)
+    cm->vertex_groups.push_back(VertexGroup{"Head", std::vector<float>(cm->positions.size(), 1.0f)});
+    card->add<MeshFilter>()->mesh = cm;
+    card->add<MeshRenderer>();
+    ed.mark_changed_for_test("R341b");
+    ed.command("select R341Cap");
+    ed.command("facenormals ellipsoid");
+    ed.command("select R341Card");
+    ed.command("facenormals ellipsoid");
+    ed.step_frame_headless();
+    GameObject *cp = ed.scene().find_by_name("R341Cap Face Normals"), *kp = ed.scene().find_by_name("R341Card Face Normals");
+    CHECK(cp && kp);
+    if (!cp || !kp) return;
+    std::printf("    the cap's proxy %.3f tall (the slice %.3f); the card's %.3f thick, %.3f wide\n", cp->local().scale.y, 3.0f / 12.0f, kp->local().scale.z,
+                kp->local().scale.x);
+    CHECK(cp->local().scale.y >= 3.0f / 12.0f - 1e-4f);
+    CHECK(kp->local().scale.z >= 0.25f * kp->local().scale.x - 1e-4f);
+  });
+  test("the toon lesson's Try-it: facenormals ellipsoid on the Sphere makes its proxy", [] {
+    Editor ed;
+    r34_open(ed);
+    for (const char *c : {"select Sphere", "facenormals ellipsoid"}) ed.command(c);  // (a part at a time, as Learn runs them)
+    CHECK(ed.scene().find_by_name("Sphere Face Normals") != nullptr);
+  });
+}
+
 /* Round 334 (task 0314): Camera Flatten - the 2D look. */
 static void tests_round334() {
   test("Camera Flatten's matrix: the pivot stays, a point a metre toward the camera comes to `keep` of a metre, one across the view stays put", [] {
@@ -11630,13 +12243,19 @@ static void tests_round334() {
     std::printf("    the outline's shell: %s from two cameras, %s as without the flatten\n", a == b ? "the same" : "rebuilt", a == plain ? "the same" : "not the same");
     CHECK(plain && plain->positions.size() == a->positions.size());
   });
-  test("the lesson \"Flatten to the Camera (the 2D Look)\": its Try-its put Camera Flatten on the Sphere at 0.6 toward the camera, then about its origin", [] {
+  test("the lesson \"Flatten to the Camera (the 2D Look)\": its Try-its put Camera Flatten on the Sphere at 0.6 toward the camera, then about its origin, then about the Cube (round 338)", [] {
     Editor ed;
     r34_open(ed);
     for (const char *c : {"select Sphere", "flatten 0.6", "flatten pivot origin"}) ed.command(c);  // (a part at a time, as Learn runs them)
     GameObject *s = ed.scene().find_by_name("Sphere");
     const CameraFlatten *cf = s ? s->get<CameraFlatten>() : nullptr;
     CHECK(cf && cf->amount == 0.6f && cf->pivot == 1 && cf->direction == 0);
+    ed.command("flatten pivot object Cube");
+    CHECK(cf && cf->pivot == 2 && cf->bone == "Cube");
+    ed.command("flatten lens 85");  // (round 343's Try-its)
+    CHECK(cf && cf->mode == 1 && cf->focal == 85.0f);
+    for (const char *c : {"flatten lens off", "flatten -0.5"}) ed.command(c);
+    CHECK(cf && cf->mode == 0 && cf->amount == -0.5f);
   });
 }
 
@@ -11688,4 +12307,9 @@ void run_render_tests() {
   tests_round330();
   tests_round331();
   tests_round334();
+  tests_round338();
+  tests_round339();
+  tests_round342();
+  tests_round343();
+  tests_round341();
 }

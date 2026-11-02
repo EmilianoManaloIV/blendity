@@ -4,6 +4,7 @@
 // quaternions (Blender: Preserve Volume). Blender: blenkernel/intern/armature_deform.cc (armature_vert_task: weights
 // from deform groups, a matrix per bone of pose x inverse rest, DQ via BLI_math_rotation's dquat functions).
 // Theory: Kavan, Collins, Zara, O'Sullivan, "Skinning with Dual Quaternions" (I3D 2007).
+#include "export.h"
 #include "scene.h"
 #include "skin_weights.h"
 #include "../core/core.h"
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <array>
 #include <unordered_map>
 
 namespace bl {
@@ -102,6 +104,55 @@ void Bone::reflect(Reflector &r) {
          "Armature > Apply as Rest copies the current pose here.");
 }
 
+namespace {
+std::string trimmed_entry(std::string s) {
+  while (!s.empty() && (s.back() == ' ' || s.back() == ';')) s.pop_back();
+  while (!s.empty() && s.front() == ' ') s.erase(0, 1);
+  return s;
+}
+/* Puppet Posing's controls set by hand (round 347): the ends (round 324's handles), the chain starts and the middles,
+ * and the bones that get a control of their own. */
+const char *const kPuppetKeys[] = {"Hips", "Head", "Left Hand", "Right Hand", "Left Foot", "Right Foot", "Left Upper Arm", "Right Upper Arm",
+                                   "Left Lower Arm", "Right Lower Arm", "Left Thigh", "Right Thigh", "Left Shin", "Right Shin"};
+}  // namespace
+
+std::string Armature::puppet_bone(const std::string &key) const {
+  const std::string k = key + "=";
+  size_t at = 0;
+  while (at < puppet_bones.size()) {
+    size_t end = puppet_bones.find(';', at);
+    if (end == std::string::npos) end = puppet_bones.size();
+    const std::string item = trimmed_entry(puppet_bones.substr(at, end - at));
+    if (item.compare(0, k.size(), k) == 0) return trimmed_entry(item.substr(k.size()));
+    at = end + 1;
+  }
+  return "";
+}
+
+void Armature::set_puppet_bone(const std::string &key, const std::string &bone_in) {
+  /* (Review 347: a ';' or '=' in a name would split the list - the Extra Controls' ';' read as their ','.) */
+  std::string bone;
+  for (char ch : bone_in) bone += ch == ';' ? ',' : ch;
+  bone.erase(std::remove(bone.begin(), bone.end(), '='), bone.end());
+  bone = trimmed_entry(bone);
+  std::string out;
+  size_t at = 0;
+  bool done = false;
+  while (at <= puppet_bones.size()) {
+    size_t end = puppet_bones.find(';', at);
+    if (end == std::string::npos) end = puppet_bones.size();
+    const std::string item = trimmed_entry(puppet_bones.substr(at, end - at));
+    at = end + 1;
+    if (item.empty()) continue;
+    const bool same = item.compare(0, key.size() + 1, key + "=") == 0;
+    const std::string keep = same ? (bone.empty() ? std::string() : key + "=" + bone) : item;
+    done = done || same;
+    if (!keep.empty()) out += (out.empty() ? "" : "; ") + keep;
+  }
+  if (!done && !bone.empty()) out += (out.empty() ? "" : "; ") + key + "=" + bone;
+  puppet_bones = out;
+}
+
 void Armature::reflect(Reflector &r) {
   static const char *kDeform[] = {"Linear", "Dual Quaternion"};
   r.enumeration("Deform", deform, kDeform, 2);
@@ -112,9 +163,30 @@ void Armature::reflect(Reflector &r) {
   r.help("Shows every skin bound to this armature unposed (Blender: Rest Position).");
   r.field("In Front", in_front);
   if (!show_body_mass && !r.all_fields()) return;  // (the physics tools switched off: not shown; files and undo keep it)
-  r.text("Puppet Handles", puppet_bones);
-  r.help("The Puppet Posing handles put on bones by hand (Animation > Puppet > Handle Bones, or autopose handle <part>\n"
-         "<bone>): \"Left Hand=Bone.003; Head=head\". A handle not named here is found by the rig's analysis.");
+  r.field("Puppet Control Size", control_size, 0.05f, 0.1f, 10.0f);
+  r.help("Puppet Posing's controls (rings at the hands, the head and the hips, boxes under the feet), times their usual size\n"
+         "- a twelfth of the rig's height.");
+  /* Round 347: files keep the one list; the Inspector (and `set`) a field each - a bone dropped from the Hierarchy or
+   * picked (the rig's own first), the analysis taking it everywhere (AutoPose, the walk, footsteps, the controls). */
+  if (r.serializing()) r.text("Puppet Handles", puppet_bones);
+  if (!r.serializing() && r.group("Puppet Controls", false)) {
+    for (const char *key : kPuppetKeys) {
+      std::string bone = puppet_bone(key);
+      const std::string before = bone;
+      r.object(key, bone, "Bone");
+      if (bone != before) set_puppet_bone(key, bone);
+    }
+    r.help("A part the rig's analysis finds wrongly put on its bone: empty, the analysis decides. A hand or a foot set takes the\n"
+           "two bones above it unless they are set too; a limb that isn't a chain is kept as found (said below). Ignored on a\n"
+           "four-legged rig. Animation > Puppet > Handle Bones and `autopose handle <part> <bone>|auto` set them too.");
+    std::string extra = puppet_bone("Extra Controls");
+    const std::string before = extra;
+    r.text("Extra Controls", extra);
+    r.help("Bones with a control of their own - a tail's tip, a sword, a cape's corner - by name, comma separated: a ring at each\n"
+           "to drag, the bones above it bending (AutoPose).");
+    if (extra != before) set_puppet_bone("Extra Controls", extra);
+  }
+  if (!r.serializing()) r.group_end();
   r.field("Body Mass", body_mass, 0.5f, 0.01f, 100000.0f);
   r.help("The whole body in kilograms, shared among the bones by the volume of mesh each moves (Animation > Physics:\n"
          "the center of mass, ballistic jumps). Cascadeur: the character's mass.");
@@ -326,6 +398,95 @@ bool skin_bind_automatic(const SkinModifier &s, Mesh &m, std::string *error) {
   }
   m.touch();
   return true;
+}
+
+
+/* Round 378 (moved from the editor's export, task 0268): an armature's skeleton for a mesh its Skin modifier poses -
+ * the joints from the armature down at rest (each joint's object id kept, Live Link's skins name them), and each
+ * vertex's four strongest deforming bones and weights as the modifier deforms (its Max Influences and vertex group).
+ * The clip is the export's own to add. */
+SkinJoints skin_joints(GameObject &arm, const GameObject &owner, const SkinModifier &skin) {
+  SkinJoints out;
+  out.skin = std::make_shared<ExportSkin>();
+  ExportSkin *sk = out.skin.get();
+  sk->rig = arm.id;
+  sk->base = armature_base(arm);
+  sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
+  std::vector<GameObject *> objs;
+  std::vector<std::pair<GameObject *, int>> stack{{&arm, -1}};
+  while (!stack.empty() && objs.size() < 4096) {
+    auto [g, parent] = stack.back();
+    stack.pop_back();
+    ExportSkin::Joint j;
+    j.name = g->name, j.parent = parent;
+    const Bone *b = g->get<Bone>();
+    const Transform &l = g->local();
+    j.t = b ? b->rest_position : l.position, j.r = b ? b->rest_rotation : l.rotation, j.s = b ? b->rest_scale : l.scale;
+    const int me = (int)sk->joints.size();
+    sk->joints.push_back(j);
+    objs.push_back(g);
+    sk->joint_ids.push_back(g->id);
+    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], me});
+  }
+  /* The bones that deform: deforming, with an invertible rest. A vertex that follows none stays at rest in Blendity: in
+   * the file it follows the mesh's own object (a joint when the mesh sits under the rig) or the first joint. */
+  for (size_t k = 0; k < objs.size(); k++) {
+    if (objs[k] == &owner) out.still = (int)k;
+    const Bone *b = objs[k]->get<Bone>();
+    if (!b || !b->deform) continue;
+    const Mat4 rm = b->rest_matrix();
+    const float det = dot(cross(rm.column(0), rm.column(1)), rm.column(2));
+    if (std::fabs(det) > 1e-12f && finite_bits(det)) out.deform.emplace(objs[k]->name, (int)k);
+  }
+  const std::string *limit = skin.limit_group(out.invert);
+  out.limit = limit ? *limit : std::string();
+  out.max_influences = skin.max_influences;
+  return out;
+}
+
+/* One vertex's strongest bones, at most `most`, normalized; false when no bone moves it. */
+static bool vertex_weights(const Mesh &m, const std::vector<int> &group_joint, size_t v, size_t most, std::vector<std::pair<float, int>> &w,
+                           std::array<uint16_t, 4> &joints, std::array<float, 4> &weights) {
+  w.clear();
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    const std::vector<float> &gw = m.vertex_groups[gi].weights;
+    if (group_joint[gi] >= 0 && v < gw.size() && gw[v] > 0.0f && finite_bits(gw[v])) w.push_back({gw[v], group_joint[gi]});
+  }
+  if (w.empty()) return false;
+  std::sort(w.begin(), w.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  float sum = 0.0f;
+  for (size_t k = 0; k < w.size() && k < most; k++) sum += w[k].first;
+  joints = {0, 0, 0, 0}, weights = {0.0f, 0.0f, 0.0f, 0.0f};
+  for (size_t k = 0; k < w.size() && k < most; k++) joints[k] = (uint16_t)w[k].second, weights[k] = w[k].first / sum;
+  return true;
+}
+
+/* The weights as the Skin modifier deforms: at most its Max Influences (and four, glTF's), its vertex group limiting
+ * which vertices follow; a vertex no bone moves follows `still` with weight 1 - glTF's weights must add up to 1 (all
+ * zeros collapse to the origin in most engines). */
+void skin_weights(const SkinJoints &j, const Mesh &m, ExportSkin &out) {
+  std::vector<int> group_joint(m.vertex_groups.size(), -1);  // (each group's joint looked up once)
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    const auto it = j.deform.find(m.vertex_groups[gi].name);
+    if (it != j.deform.end()) group_joint[gi] = it->second;
+  }
+  const int limit_gi = j.limit.empty() ? -1 : m.find_group(j.limit);
+  const size_t most = (size_t)std::max(1, std::min(4, j.max_influences));
+  out.vjoints.assign(m.vert_count(), {(uint16_t)j.still, 0, 0, 0});
+  out.vweights.assign(m.vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
+  std::vector<std::pair<float, int>> w;
+  const std::vector<float> *lw = limit_gi >= 0 ? &m.vertex_groups[(size_t)limit_gi].weights : nullptr;
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    const bool in_group = lw && v < lw->size() && (*lw)[v] > 0.0f;
+    if (lw && in_group == j.invert) continue;  // (left out by the modifier's group: at rest)
+    vertex_weights(m, group_joint, v, most, w, out.vjoints[v], out.vweights[v]);
+  }
+}
+
+std::shared_ptr<ExportSkin> skin_for_export(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
+  SkinJoints j = skin_joints(arm, owner, skin);
+  skin_weights(j, m, *j.skin);
+  return j.skin;
 }
 
 }  // namespace bl

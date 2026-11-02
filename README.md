@@ -138,7 +138,9 @@ everything):
   assets, **Volume (fog)** materials - fog, smoke and mist inside a mesh, scattered truly by the path tracer - layered
   **procedural textures** with Blender's shader nodes as layers (Add Layer's search, Reset to Default on any field,
   the preview up to a layer), **Camera Flatten** for the anime 2D look (depth squashed toward the camera, shaded as
-  modelled), axis materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
+  modelled; a bone or any object dropped on its pivot; below 0 or through a lens of its own, forced perspective) and
+  **View Angle Shapes** (shape keys that come in by the camera's
+  angle - a mouth slid to the side in profile), axis materials, toon shading (five styles, painted shadow / highlight / rim control, shade maps, ramps, a face shadow
   map, inner lines and hatching, custom normals from a head proxy, hold frames on 2s / 3s), anime background
   generators (leaves, grass, walls, windows, roofs, sky, clouds, rocks, water; cards cut out by their cover), an
   import preview with the shading switchable before anything lands in the project, hair that keeps its curl, parts into
@@ -179,7 +181,8 @@ everything):
   capture comes in as a skeleton with its clip; **Collada** scenes with their skins and animations. Every such assistant is a
   switch in Preferences: hand animation never changes.
 
-Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2; **Live Link** sends the
+Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2 (shape keys go out as
+glTF morph targets and FBX blend shapes, round 351; FBX carries the skeleton, skin and clip as glTF does, round 352; the texture set and lightmap UVs go along, round 353; an export waits for a remesh or bind still running on it, round 354; the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355; the Avatar window makes VRChat's 15 visemes and checks an avatar, after the CATS plugin, round 356, and its Fix Model readies an imported character for Unity's Humanoid in one step, round 357, with CATS' Model Options and Pose and Shape tools, round 358, and its Decimation modes, Bone Root and Bone Merging, round 359, Eye Tracking and the Texture Atlas, round 360, Merge Armatures, Attach Mesh, Translate and Export for VRChat, round 361; a Collider component written for Unity, Unreal and Godot, round 362, and LOD Groups switched in the Game view and exported as _LOD0.._LODn for Unity, round 363); the Sequencer holds storyboard cards and camera cuts for animatics and cinematics (round 364) and WAV sound, played in step and mixed into Render Animation's video (round 365), and footage, keyed opacity and transform, Add Edit, Ripple Delete and ProRes and VRChat export presets (round 391); Poiyomi, lilToon and URP texture presets, Material ID masks and Bake All Maps (round 392); the dependency-free build's Render Animation offers Blender's libraries for its MP4 (round 366); a Capsule, Unity's unique names, and the console's save / open / new / rotate / scale (round 367); the pen's eraser end, tilt and a pressure curve in sculpting (round 368); Unity packages unpacked into the project (round 369) and their prefabs and scenes brought in, scripts kept as Engine Components (round 370), with Unity's materials converted by shader (lilToon, Poiyomi, MToon, UTS2, Standard, URP) and PhysBones' settings kept as spring bones (round 371); Export Unity Package sends the work back under the same GUIDs (round 372); Godot scenes (.tscn) come in, scripts kept, and go back with their nodes' transforms (round 373); .blend files come in through the installed Blender, and the Blender and Unreal bridges Send to Blendity (round 374); the round trip run as a production, glTF's Keep Transforms keeping pivots on the way back (round 375); its world, fog, exposure and the render camera's Bloom, Vignette and grading go to every bridge as you light (round 376), and textures go by their pixels - a painted surface each stroke, a procedural texture as you drag (round 377); skinned characters go once with their skin and blend shapes, then only poses and weights (round 378); clips go baked as the engines' own clips when keyed (round 379); LOD Groups and colliders arrive as the engines' own levels and collision (round 380); with VRChat's SDK in a Unity project, avatars get their Avatar Descriptor and PhysBones and worlds a Scene Descriptor (round 381); all of it streams at a millisecond or two a frame with four engines connected, and goes on while jobs run on workers (round 382); VR View puts you in the scene at life size through OpenXR - SteamVR, Quest Link, Windows Mixed Reality (Edit > VR View, `vr start`; round 383) - where your controllers teleport, walk, snap-turn, grab, turn and scale the world and measure it (round 384), and sketch ribbons and tubes in the air with pressure and a palette (`vr sketch`; round 385) and paint the object in Paint mode with the desk's brush (`vr paint`; round 386); **Live Link** sends the
 scene as you change it to Blender, Unity, Godot or Unreal on the same computer (`docs/LIVELINK.md`). The keymap starts
 from Unity, Unreal, Blender, Maya, 3ds Max or SketchUp, and **Edit > Editor Feel** switches the keys and the Scene view's
 mouse navigation together to Unity's, Unreal's, Blender's or Maya's. Any tab can have a window of its own, on any
@@ -206,7 +209,7 @@ Window*), and tabs dock into whichever window they are dropped on. The **Draw ta
 pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn;
 it works like SketchBook Pro's canvas - one slim toolbar (the brush, its color and size, the Ruler, Ellipse and Curve,
 symmetry, perspective, Steady and Predictive Stroke, Layers, More), the pad zoomed, panned, turned and flipped with the
-wheel, a middle-drag or Space+drag and two fingers, Tab to hide the tools, and blank Paper as a source - and SketchBook's
+wheel, a middle-drag or Space+drag and two fingers, Tab to hide the tools, and blank Paper as a source - its layers with Photoshop's 27 blend modes, clipping and layer masks, and rectangle and lasso selections to fill and delete (round 388), and Ctrl+T's Free Transform and a brush's pen tilt (round 389), Illustrator's shapes, Bezier Pen, fills, artboards and SVG in and out (round 390) - and SketchBook's
 brushes (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, an Eraser that cuts) in a floating palette with the puck for size
 and opacity, B / E / [ ] over the pad. The **Board** is a reference board in PureRef's way: images dropped, pasted or
 dragged from the Project window onto an endless canvas, moved, scaled and turned by their handles, kept in
@@ -266,7 +269,9 @@ grass, reference images from the side and top, UV material lists, the render ran
 ragdoll events, gait files, vertex group and shape key pickers - and a test that every one stays reachable.
 Rounds 311-315: the last console-only items in the interface; five interface conventions checked; a live sweep of every
 screen with the fixes it found (labels that don't fit, narrow panes, contrast); a 118-task checklist with target times
-(docs/hci/checklist.md); the Unity bridge run in Unity 6000.6.
+(docs/hci/checklist.md); the Unity bridge run in Unity 6000.6. Round 350: a VRChat avatar, a VRChat world and a short
+film made in Blendity and compared stage by stage with Blender, Unity, Godot and Unreal (docs/hci/compare-2026-10.md):
+the export's missing shape keys and painted textures lead the 15 ranked findings.
 Stylized environments: brush strokes as geometry (cards and ribbons with canopy normals), grass and canopies from strokes, a
 scatter brush with a painted mask, a sun disc and horizon band on the sky, distance fog in every renderer. The manual's
 chapters and five Learn lessons with Try-it buttons walk the sculpt, paint and stylize pipelines in order.
@@ -297,7 +302,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (14028 unit checks in 1261 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (15232 unit checks in 1480 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).

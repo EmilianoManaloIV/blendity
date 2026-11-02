@@ -27,6 +27,7 @@ import bpy
 
 from . import apply as _apply
 from . import discovery as _discovery
+from . import snapshot as _snapshot
 from . import stream as _stream
 
 WATCH_INTERVAL = 2.0
@@ -99,6 +100,8 @@ class _Link:
         self.status = "Connected to Blendity (%s)" % scene_name if scene_name else "Connected to 127.0.0.1:%d" % port
 
     def disconnect(self, why="Not connected"):
+        if self.applier is not None:  # (round 376: the scene's own world and compositor back)
+            self.applier.restore_look()
         for s in (self.sock, self.pending[0] if self.pending else None):
             if s is None:
                 continue
@@ -142,6 +145,7 @@ class _Link:
                 return None
             if not got:
                 break  # (nothing more for now)
+        self.applier.flush_skins()  # (review 378: skins that waited for Object Mode)
         return self.INTERVAL
 
 
@@ -240,6 +244,29 @@ class BLENDITY_OT_disconnect(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class BLENDITY_OT_send(bpy.types.Operator):
+    bl_idname = "blendity.send_to_blendity"
+    bl_label = "Send to Blendity"
+    bl_description = ("This scene (or the selection) to Blendity as a snapshot: meshes, rigs, shape keys, actions, materials, "
+                      "lights, cameras and custom properties. Blendity imports it as one Undo step (round 374)")
+
+    selected_only: bpy.props.BoolProperty(name="Selected Only", default=False)
+
+    def execute(self, context):
+        folder = _snapshot.inbox()
+        if not folder:
+            self.report({"WARNING"}, "Blendity's Live Link isn't running: start it in Blendity (Window > Live Link) and send again")
+            return {"CANCELLED"}
+        name = bpy.path.display_name_from_filepath(bpy.data.filepath) or "Blender Scene"
+        try:
+            _snapshot.write(folder, name, self.selected_only)
+        except Exception as e:  # (the exporter's errors, a full disk: said, not raised into Blender's UI)
+            self.report({"ERROR"}, "Send to Blendity: %s" % e)
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Sent to Blendity: %s" % name)
+        return {"FINISHED"}
+
+
 class BLENDITY_PT_livelink(bpy.types.Panel):
     bl_label = "Live Link"
     bl_space_type = "VIEW_3D"
@@ -256,6 +283,9 @@ class BLENDITY_PT_livelink(bpy.types.Panel):
         else:
             col.operator(BLENDITY_OT_disconnect.bl_idname, icon="UNLINKED")
         col.label(text=LINK.status)
+        row = col.row(align=True)
+        row.operator(BLENDITY_OT_send.bl_idname, icon="EXPORT").selected_only = False
+        row.operator(BLENDITY_OT_send.bl_idname, text="Selected", icon="RESTRICT_SELECT_OFF").selected_only = True
         if LINK.applier is not None:
             col.label(text="%d messages, %d objects" % (LINK.messages, len(LINK.applier.objects)))
             if LINK.applier.playing:
@@ -268,7 +298,7 @@ def _on_load_pre(*_):
     LINK.disconnect("Disconnected: another file was opened")
 
 
-_classes = (BLENDITY_LivelinkPreferences, BLENDITY_OT_connect, BLENDITY_OT_disconnect, BLENDITY_PT_livelink)
+_classes = (BLENDITY_LivelinkPreferences, BLENDITY_OT_connect, BLENDITY_OT_disconnect, BLENDITY_OT_send, BLENDITY_PT_livelink)
 
 
 def register():

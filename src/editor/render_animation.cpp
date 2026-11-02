@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Render > Render Animation (task 0074): every frame of the scene's sequence (or the selected object's clip) through
-// the F12 render, as numbered PNGs in Renders/<scene>_<time>/, then an MP4 (H.264) made by FFmpeg when there is one:
-// the program set in Preferences or found on the PATH. Blender renders an animation the same way (Ctrl+F12) and
-// writes video through FFmpeg too; Blendity doesn't link FFmpeg, it runs it, so without it the frames are the result.
+// the F12 render, as numbered PNGs in Renders/<scene>_animation_<time>/, then an MP4 (H.264): made here through
+// Blender's FFmpeg in the build with Blender's libraries (task 0077), else by an ffmpeg program set in Preferences or
+// found on the PATH, else the frames are the result and the finish offers the libraries (task 0343). Blender renders
+// an animation the same way (Ctrl+F12).
 #include "editor.h"
 #include "../render/canvas.h"
+#include "../core/launch.h"
 #include "../render/video_encode.h"
 
 #include <cmath>
@@ -15,10 +17,19 @@
 namespace bl {
 
 /* FFmpeg's arguments for numbered PNGs (0001.png...) in `dir` to an H.264 MP4 any player opens (yuv420p needs an even
- * size: an odd one is padded by a pixel). */
-std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out) {
-  return {ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-framerate", strprintf("%g", fps), "-start_number", "1", "-i", fs::join(dir, "%04d.png"),
-          "-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out};
+ * size: an odd one is padded by a pixel); `wav` (round 365), when given, its sound as AAC, cut at the last picture. */
+std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
+                                                const std::string &wav, int preset) {
+  std::vector<std::string> a = {ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-framerate", strprintf("%g", fps), "-start_number", "1",
+                                "-i", fs::join(dir, "%04d.png")};
+  if (!wav.empty()) a.insert(a.end(), {"-i", wav, "-c:a", "aac", "-b:a", "192k", "-shortest"});
+  if (preset == (int)video::Preset::ProRes)  // (round 391: ProRes 422 in a .mov)
+    return a.insert(a.end(), {"-c:v", "prores_ks", "-profile:v", "2", "-vendor", "apl0", "-pix_fmt", "yuv422p10le", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out}), a;
+  if (preset == (int)video::Preset::VRChat)  // (VRChat's players: H.264 High, at most 1080 lines, the index first)
+    return a.insert(a.end(), {"-c:v", "libx264", "-profile:v", "high", "-crf", "20", "-pix_fmt", "yuv420p", "-vf", "scale=-2:'min(1080,ih)',pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                              "-movflags", "+faststart", out}), a;
+  a.insert(a.end(), {"-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out});
+  return a;
 }
 
 /* The FFmpeg to run: Preferences' path when it's there, else one on the PATH; "" for none. Looked for again when a
@@ -87,7 +98,8 @@ bool Editor::start_render_animation(int first, int last, float fps) {
   std::string name = render_folder_name(scene_->name);
   for (int k = 2; fs::exists(fs::join(renders, name)) && k < 100; k++) name = render_folder_name(scene_->name) + strprintf("_%d", k);
   ranim_.dir = fs::join(renders, name);
-  ranim_.video = fs::join(renders, name + ".mp4");
+  ranim_.preset = ranim_preset_;  // (review 391: this render's, whatever is picked while it runs)
+  ranim_.video = fs::join(renders, name + video::preset_extension((video::Preset)ranim_.preset));  // (round 391: .mov for ProRes)
   fs::make_dirs(ranim_.dir);
   if (source == 1) seq_set_preview(true);
   else anim_set_preview(true);
@@ -103,9 +115,17 @@ bool Editor::start_render_animation(int first, int last, float fps) {
 
 /* Stopped (Stop, a new one, something that ended the preview it poses through) or finished: the pose shown goes back;
  * the frames written stay. */
+/* Round 340: the raw frame, the hold counted from the range's first (its first frame a drawn pose) - held once, in
+ * apply_clip, so the camera and its rig still move every frame. */
+void Editor::render_animation_pose(int first, int frame) {
+  anim_.hold_from = (float)first;
+  anim_set_frame((float)frame);
+}
+
 void Editor::stop_render_animation() {
   if (!ranim_.active) return;
   ranim_.active = false;
+  anim_.hold_from = 0.0f;
   if (rendering_) rendering_ = false;
   final_pt_.pause();  // (task 0161: the cards stop too)
   if (ranim_.source == 1) seq_set_preview(false);
@@ -134,11 +154,7 @@ void Editor::step_render_animation() {
       });
       seq_set_frame(hold_frame_from((float)ranim_.first, (float)ranim_.frame, hold));
     }
-    else {
-      GameObject *root = anim_root();
-      const Animation *an = root ? root->get<Animation>() : nullptr;
-      anim_set_frame(hold_frame_from((float)ranim_.first, (float)ranim_.frame, an ? an->hold : 1));
-    }
+    else render_animation_pose(ranim_.first, ranim_.frame);
     start_final_render(false, false);
     ranim_.started = true;
   }
@@ -148,6 +164,7 @@ void Editor::step_render_animation() {
     return;
   }
   const std::string path = frame_file(ranim_.dir, k);
+  if (ranim_.source == 1) composite_render_card(render_img_, seqr_.frame);  // (round 364: the card at this frame over the render)
   if (!write_png(path, render_img_.pixels.data(), render_img_.width, render_img_.height, render_img_.width, render_transparent_)) {
     Log::error("Render Animation: could not write %s; stopped (a gap would end the video there)", path.c_str());
     return stop_render_animation();
@@ -173,42 +190,66 @@ const char *Editor::render_animation_broken() {
 /* All frames written: the pose goes back, and FFmpeg (if there is one) makes the video in the background. */
 void Editor::finish_render_animation() {
   const size_t frames = ranim_.written.size();
+  std::vector<float> sound;
+  const bool wav_written = render_animation_sound(sound);  // (round 365: sound.wav beside the frames, and into the video)
   stop_render_animation();
   render_status_ = strprintf("Animation: %zu frame(s) in %s", frames, ranim_.dir.c_str());
   Log::info("%s", render_status_.c_str());
   if (!frames) return;
-  if (video::available()) return encode_render_video();
+  if (video::available()) return encode_render_video(std::move(sound));
   const std::string ffmpeg = ffmpeg_program();
-  if (ffmpeg.empty()) {
-    Log::info("Render Animation: no FFmpeg, so the frames are the result. For an MP4, install FFmpeg (ffmpeg.org) on the "
-              "PATH or set its path in Preferences, or open the frames in Blender's Video Sequencer.");
-    return;
-  }
+  if (ffmpeg.empty()) return offer_video_libraries();
   auto job = std::make_shared<VideoJob>();
   ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
-  const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video);
+  const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video, wav_written ? fs::join(ranim_.dir, "sound.wav") : "", ranim_.preset);
   std::thread([args, job] { job->code.store(sys::run_program(args)); }).detach();
-  render_status_ += "  |  making the MP4...";
+  render_status_ += strprintf("  |  making the %s video...", video::preset_name((video::Preset)ranim_.preset));
   Log::info("Render Animation: FFmpeg is making %s", ranim_.video.c_str());
 }
 
+/* No video maker (round 366, task 0343: the comparison's finding 6): only the dependency-free build lacks one, so the
+ * message says how to get one in a click - Blender's libraries (FFmpeg among them), downloaded for this build or
+ * turned back on - beside an ffmpeg program on the PATH or in Preferences. The frames are the result meanwhile. */
+void Editor::offer_video_libraries() {
+  const std::string head = "Render Animation: the frames are in " + ranim_.dir + "; no MP4, ";
+  const std::string program = " - or put an ffmpeg program on the PATH or in Preferences.";
+  const launch::Status &st = launch::status();
+  if (st.full)  // (review 366: the libraries are running; this one was built without their FFmpeg)
+    return refuse(head + "because this build was made without FFmpeg: put an ffmpeg program on the PATH or in Preferences.", "preferences", "Open Preferences");
+  if (st.why == launch::Status::Chosen && use_libs_)  // (--no-libs, or turned on since this start)
+    return refuse(head + "because this start ran without Blender's libraries (--no-libs, or turned on since): start Blendity again without --no-libs" + program,
+                  "preferences", "Open Preferences");
+  if (!use_libs_ && full_build_installed())
+    return refuse(head + "because Blender's libraries (FFmpeg) are turned off: turn them on, from the next start" + program, "update libson", "Use Blender's Libraries");
+  refuse(head + "because this build runs without Blender's libraries (FFmpeg): download them for this build, and MP4s are made here" + program,
+         "update libs", "Get Blender's Libraries...");
+}
+
+/* The full build there to run: beside this one, or downloaded (its probe is for the next start: here only the file). */
+bool Editor::full_build_installed() const {
+  for (const std::string &dir : {fs::executable_dir(), launch::user_libs_dir()})
+    if (fs::exists(fs::join(dir, launch::full_program_name()))) return true;
+  return false;
+}
+
 /* Built with FFmpeg's libraries (task 0077): the MP4 is encoded here, on a background thread, as Blender does. */
-void Editor::encode_render_video() {
+void Editor::encode_render_video(std::vector<float> sound) {
   auto job = std::make_shared<VideoJob>();
   ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
   const std::vector<std::string> frames = ranim_.written;
   const std::string out = ranim_.video;
   const float fps = ranim_.fps;
+  const video::Preset preset = (video::Preset)ranim_.preset;
   video::init();  // (FFmpeg's log, quieted from this thread)
-  std::thread([frames, out, fps, job] {
+  std::thread([frames, out, fps, preset, job, sound = std::move(sound)] {
     std::string error;
-    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel);
+    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel, sound.empty() ? nullptr : &sound, 48000, preset);
     job->error = error;  // (before the code: the main thread reads it once the code is set)
     job->code.store(ok ? 0 : 1);
   }).detach();
-  render_status_ += "  |  making the MP4...";
+  render_status_ += strprintf("  |  making the %s video...", video::preset_name(preset));
   Log::info("Render Animation: %s is making %s", video::description().c_str(), out.c_str());
 }
 
@@ -248,11 +289,21 @@ void Editor::render_animation_command(const std::vector<std::string> &t) {
   const std::string verb = t.size() > 1 ? to_lower(t[1]) : "";
   if (verb == "stop") return stop_render_animation();
   if (verb == "ffmpeg") return set_ffmpeg_path(t.size() > 2 ? t[2] : "");
+  if (verb == "preset") return set_render_preset(t.size() > 2 ? t[2] : "");  // (round 391)
   const bool numbers = t.size() == 1 || (t.size() >= 3 && std::isdigit((unsigned char)t[1][0]) && std::isdigit((unsigned char)t[2][0]));
-  if (!numbers) return Log::warn("renderanim [first last] [fps] | stop | ffmpeg [path]");
+  if (!numbers) return Log::warn("renderanim [first last] [fps] | stop | ffmpeg [path] | preset h264|prores|vrchat");
   const int first = t.size() > 2 ? std::atoi(t[1].c_str()) : -1, last = t.size() > 2 ? std::atoi(t[2].c_str()) : -1;
   const float fps = t.size() > 3 ? (float)std::atof(t[3].c_str()) : 0.0f;
   start_render_animation(first, last, fps);
+}
+
+/* renderanim preset h264|prores|vrchat (round 391): what the frames become, kept in the preferences. */
+void Editor::set_render_preset(const std::string &name) {
+  video::Preset p = video::Preset::H264;
+  if (!video::parse_preset(name, p)) return Log::warn("renderanim preset: h264 | prores | vrchat (now %s)", video::preset_name((video::Preset)ranim_preset_));
+  ranim_preset_ = (int)p;
+  save_prefs();
+  Log::info("Render Animation: %s (%s)", video::preset_name(p), video::preset_extension(p));
 }
 
 /* Preferences' FFmpeg (empty: look on the PATH). */
@@ -261,8 +312,11 @@ void Editor::set_ffmpeg_path(const std::string &path) {
   ffmpeg_looked_ = false;
   save_prefs();
   const std::string found = ffmpeg_program();
-  if (found.empty()) Log::warn("FFmpeg: none found%s; Render Animation writes PNG frames only", path.empty() ? " on the PATH" : (" at " + path).c_str());
-  else Log::info("FFmpeg: %s", found.c_str());
+  const std::string where = path.empty() ? " on the PATH" : " at " + path;
+  if (!found.empty()) return Log::info("FFmpeg: %s", found.c_str());
+  if (video::available())  // (review 366: the program isn't needed here - round 350 read this line as "no video")
+    return Log::info("FFmpeg: no program found%s; none is needed - Render Animation makes MP4s itself (%s)", where.c_str(), video::description().c_str());
+  Log::warn("FFmpeg: none found%s; Render Animation writes PNG frames only (its finish offers Blender's libraries, which make MP4s)", where.c_str());
 }
 
 /* Render Animation as the Render window's fields say (task 0288): its button, the Render menu and Ctrl+F12 alike. */
@@ -303,10 +357,12 @@ void Editor::draw_render_animation_button(ui::Layout &lay) {
     start_render_animation_from_fields();  // (task 0288: the range below)
   draw_render_range(lay);
   if (!u.hovered(r)) return;  // (the PATH is searched only for the tooltip)
-  const std::string ffmpeg = ffmpeg_program();
+  const std::string ffmpeg = video::available() ? std::string() : ffmpeg_program();
+  const std::string maker = video::available() ? "made here by " + video::description() + "."
+                            : !ffmpeg.empty()  ? "made by " + ffmpeg + "."
+                                               : std::string("once there's a video maker (this build has none: its finish offers Blender's libraries).");
   u.tooltip("Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"
-            "Renders/<scene>_animation_<time>/0001.png..., then an MP4 next to them " +
-            (ffmpeg.empty() ? std::string("once FFmpeg is installed (none found: frames only).") : "made by " + ffmpeg + "."));
+            "Renders/<scene>_animation_<time>/0001.png..., then a video next to them (the preset below) " + maker);
 }
 
 }  // namespace bl

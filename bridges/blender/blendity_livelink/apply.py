@@ -9,6 +9,7 @@ one onto the other (its scale stays glTF's own: the turned frame's axes are glTF
 light undo the turn through their parent inverse."""
 import json
 import math
+import os
 
 import bpy
 import numpy as np
@@ -17,6 +18,12 @@ from mathutils import Matrix, Quaternion, Vector
 from .glb import MeshData
 
 COLLECTION = "Blendity Live Link"
+SKIN_MODIFIER = "Blendity Skin"  # (round 378: a skinned mesh's Armature modifier)
+JOINT_GROUP = "joint_"  # (...its bones and vertex groups: joint_0, joint_1...)
+_LINEAR = 1  # (a keyframe's interpolation, as foreach_set takes it: 'LINEAR')
+SAMPLE_FLOATS = 10  # (a clip's sample: position 3, rotation 4, scale 3)
+CONV = Matrix(((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, -1.0, 0.0), (0.0, 1.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0)))  # (glTF's axes to Blender's)
+CONV_INV = CONV.inverted()
 FIX = Matrix(((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (0.0, 1.0, 0.0))).to_quaternion()
 FIX_INV = FIX.to_matrix().to_4x4().inverted()
 
@@ -56,6 +63,11 @@ def _output(node, kind):
 class Applier:
     def __init__(self, scene):
         self.scene = scene
+        self.textures = {}  # (round 377: texture key -> image, from its PNG bytes)
+        self.shape_weights = {}  # (round 378: a keyed mesh's last weights)
+        self.pending_skins = {}  # (review 378: id -> (mesh data, joints) of a skin waiting for Object Mode)
+        self.material_msgs = {}  # (round 377: each material key's last message)
+        self.fog, self.effects = {}, []  # (round 376: the look the compositor draws)
         self.objects = {}     # id -> bpy object
         self.parents = {}     # id -> its parent's id (0: a root)
         self.children = {}    # id -> the ids naming it as their parent
@@ -256,6 +268,8 @@ class Applier:
         self.objects.pop(oid, None)
         if obj is None:
             return
+        self._unskin(obj)  # (review 378: its armature with it)
+        self._drop_kit(obj)  # (round 380: its levels and collider)
         data = obj.data
         bpy.data.objects.remove(obj)
         if data is None or data.users:
@@ -276,6 +290,8 @@ class Applier:
         self.active.pop(oid, None)
         self.slots.pop(oid, None)
         self.lights.pop(oid, None)
+        self.shape_weights.pop(oid, None)
+        self.pending_skins.pop(oid, None)
 
     # -------------------------------------------------------------- meshes
 
@@ -294,6 +310,8 @@ class Applier:
         obj["blendity_topology"] = str(msg.get("topology", ""))
         obj["blendity_verts"] = int(msg["verts"])
         self._assign_materials(oid)
+        self._skin(obj, md, msg)  # (round 378)
+        self._apply_weights(oid)
 
     def on_deform(self, msg, att):
         obj = self._get(int(msg["id"]))
@@ -302,6 +320,8 @@ class Applier:
         same = obj.get("blendity_topology") == str(msg.get("topology")) and obj.get("blendity_verts") == int(msg["verts"])
         if not same or len(obj.data.vertices) != int(msg["verts"]):
             return  # (a newer mesh is on its way; a deform follows it)
+        if obj.modifiers.get(SKIN_MODIFIER) is not None or obj.data.shape_keys is not None:
+            return  # (round 378: it moves by its skin and shape keys)
         co = to_blender(np.frombuffer(att, dtype="<f4").reshape(-1, 3))
         obj.data.vertices.foreach_set("co", co.ravel())
         obj.data.update()  # (normals follow: smooth faces, the binary's hard edges marked sharp)
@@ -319,6 +339,7 @@ class Applier:
         me.materials.clear()
         for m in mats:
             me.materials.append(m)
+        self._lod_materials(obj)  # (round 380: its levels wear the same)
 
     def on_material(self, msg, att):
         key = int(msg["key"])
@@ -332,10 +353,36 @@ class Applier:
         gltf = msg.get("gltf", {})
         toon = gltf.get("extensions", {}).get("BLENDITY_toon")
         mat["blendity_toon"] = json.dumps(toon) if toon else ""
+        self.material_msgs[key] = msg  # (round 377: built again when one of its textures arrives)
+        TEXTURES.clear()
+        TEXTURES.update(self.textures)  # (this session's keys only: a restarted Blendity numbers them from 1 again - review 377)
         build_material(mat, gltf, msg.get("maps", {}), toon)
         for oid, keys in self.slots.items():
             if key in keys:
                 self._assign_materials(oid)
+
+    def on_texture(self, msg, att):
+        """Round 377: a texture's pixels as PNG bytes (painted, generated or a file's): an image of its own, written to
+        Blender's temporary folder and loaded from there (reloaded when it comes again); the materials naming its key
+        built again."""
+        key = int(msg["key"])
+        path = os.path.join(bpy.app.tempdir or os.environ.get("TEMP", "."), "blendity_texture_%d.png" % key)
+        with open(path, "wb") as f:
+            f.write(att)
+        name = "Blendity %s" % msg.get("name", key)
+        img = self.textures.get(key)
+        if img is None or img.name not in bpy.data.images:
+            img = bpy.data.images.load(path)
+            self.textures[key] = img
+        else:
+            img.filepath = path
+            img.reload()
+        img.name = name
+        img.colorspace_settings.name = "Non-Color" if msg.get("non_color") else "sRGB"
+        img["blendity_texture"] = key
+        for mkey, mmsg in list(self.material_msgs.items()):
+            if any(isinstance(m, dict) and m.get("texture") == key for m in mmsg.get("maps", {}).values()):
+                self.on_material(mmsg, b"")
 
     # -------------------------------------------------------------- lights and cameras
 
@@ -352,6 +399,512 @@ class Applier:
         if obj is None or obj.type != "CAMERA":
             return
         apply_camera(obj.data, msg)
+
+    # -------------------------------------------------------------- the look (round 376)
+
+    def on_world(self, msg, att):
+        apply_world(self.scene, msg)
+        self.fog = msg.get("fog", {})
+        apply_compositor(self.scene, self.fog, self.effects)
+
+    def on_render(self, msg, att):
+        vs = self.scene.view_settings
+        vs.exposure = float(msg.get("exposure", 0.0))
+        for name in (_VIEWS.get(msg.get("view_transform", ""), msg.get("view_transform", "")), "AgX"):
+            try:
+                vs.view_transform = name
+                return
+            except TypeError:  # (not one of this Blender's views: the next)
+                continue
+
+    def on_filters(self, msg, att):
+        """The render camera's stack (Live Link sends only that one): drawn by the compositor, kept on the camera."""
+        obj = self._get(int(msg.get("id", 0)))
+        self.effects = msg.get("effects", [])
+        if obj is not None:
+            obj["blendity_filters"] = json.dumps(self.effects)
+        apply_compositor(self.scene, self.fog, self.effects)
+
+    # -------------------------------------------------------------- skins (round 378)
+
+    def _skin(self, obj, md, msg):
+        """A skinned mesh: an armature under it (its bones at the joints' rest, each following its joint's object - the
+        bone empties Live Link sends), vertex groups of the joints' weights and an Armature modifier; each key a shape
+        key on a Basis. A mesh sent again, or no longer a rig, loses what the last one made first (review 378)."""
+        oid = int(obj.get("blendity_id", 0))
+        self._unskin(obj)
+        self.pending_skins.pop(oid, None)
+        joints = msg.get("skin", {}).get("joints", [])
+        if joints and md.joints is not None and md.inverse_binds is not None and len(md.inverse_binds) == len(joints):
+            self._armature_when_possible(oid, obj, md, joints)
+        shapes = msg.get("shapes", [])
+        if shapes and len(md.targets) == len(shapes):
+            obj.shape_key_add(name="Basis", from_mix=False)
+            base = to_blender(md.co)
+            for name, delta in zip(shapes, md.targets):
+                kb = obj.shape_key_add(name=str(name), from_mix=False)
+                kb.data.foreach_set("co", (base + to_blender(delta)).ravel())
+
+    def _unskin(self, obj):
+        for mod in [m for m in obj.modifiers if m.type == "ARMATURE" and m.name.startswith(SKIN_MODIFIER)]:
+            _drop_armature(mod.object)
+            obj.modifiers.remove(mod)
+        for child in [c for c in obj.children if c.type == "ARMATURE" and c.get("blendity_skin")]:
+            _drop_armature(child)
+        for vg in [g for g in obj.vertex_groups if g.name.startswith(JOINT_GROUP)]:
+            obj.vertex_groups.remove(vg)
+
+    def _armature_when_possible(self, oid, obj, md, joints):
+        """The bones are made in Edit Mode: a user in another mode (sculpting, editing) isn't taken out of it - the skin
+        waits for Object Mode (flush_skins)."""
+        if bpy.context.mode != "OBJECT":
+            self.pending_skins[oid] = (md, joints)
+            return
+        self._armature(obj, md, joints)
+
+    def flush_skins(self):
+        """The skins that waited for Object Mode, once it's back."""
+        if not self.pending_skins or bpy.context.mode != "OBJECT":
+            return
+        waiting, self.pending_skins = self.pending_skins, {}
+        for oid, (md, joints) in waiting.items():
+            obj = self._get(oid)
+            if obj is not None and obj.type == "MESH" and len(obj.data.vertices) == len(md.co):
+                self._armature(obj, md, joints)
+
+    def _armature(self, obj, md, joints):
+        arm = bpy.data.objects.new(obj.name + " Skin", bpy.data.armatures.new(obj.name + " Skin"))
+        arm["blendity_skin"] = True
+        arm.parent = obj  # (at the mesh, unturned: the armature's space is the mesh's, as the inverse binds are)
+        rests = [CONV @ _matrix(md.inverse_binds[b]).inverted() @ CONV_INV for b in range(len(joints))]
+        self._bones(arm, rests)
+        self.collection.objects.link(arm)
+        arm.hide_set(True)  # (hidden in the view, still evaluated: hide_viewport would stop its constraints)
+        arm.hide_render = True
+        for b, jid in enumerate(joints):
+            self._follow(arm.pose.bones[JOINT_GROUP + str(b)], self._get(int(jid)), rests[b])
+        for b in range(len(joints)):
+            _weigh(obj.vertex_groups.new(name=JOINT_GROUP + str(b)), md, b)
+        mod = obj.modifiers.new(SKIN_MODIFIER, "ARMATURE")
+        mod.object = arm
+
+    def _bones(self, arm, rests):
+        """The bones at the joints' rest (their scale apart: a bone's rest holds none), made in Edit Mode through the
+        scene's own collection - shown whatever the user hid of Live Link's."""
+        self.scene.collection.objects.link(arm)
+        layer = bpy.context.view_layer
+        was = layer.objects.active
+        layer.objects.active = arm  # (only ever in Object Mode: _armature_when_possible)
+        bpy.ops.object.mode_set(mode="EDIT")
+        for b, rest in enumerate(rests):
+            eb = arm.data.edit_bones.new(JOINT_GROUP + str(b))
+            eb.head, eb.tail = (0.0, 0.0, 0.0), (0.0, 0.1, 0.0)
+            eb.matrix = rest.normalized()
+        bpy.ops.object.mode_set(mode="OBJECT")
+        layer.objects.active = was
+        self.scene.collection.objects.unlink(arm)
+
+    @staticmethod
+    def _follow(pb, target, rest):
+        """A bone following its joint's object: its place and turn copied, its scale the object's over the joint's at rest
+        (review 378: a scaled rig - an FBX armature at 0.01 - deforms as Blendity's)."""
+        if target is None:
+            return
+        for kind in ("COPY_LOCATION", "COPY_ROTATION"):
+            c = pb.constraints.new(kind)
+            c.target = target
+        s = rest.to_scale()
+        pb.scale = (1.0 / s[0], 1.0 / s[1], 1.0 / s[2])
+        c = pb.constraints.new("COPY_SCALE")
+        c.target, c.owner_space, c.use_offset = target, "POSE", True
+
+    def on_weights(self, msg, att):
+        """A keyed mesh's shape weights, in its keys' order; kept, set again when its mesh comes."""
+        oid = int(msg["id"])
+        self.shape_weights[oid] = msg.get("weights", [])
+        self._apply_weights(oid)
+
+    def _apply_weights(self, oid):
+        obj = self._get(oid)
+        keys = obj.data.shape_keys if obj is not None and obj.type == "MESH" else None
+        if keys is None or oid not in self.shape_weights:
+            return
+        for i, w in enumerate(self.shape_weights[oid]):
+            if i + 1 < len(keys.key_blocks):
+                keys.key_blocks[i + 1].value = float(w)
+
+    # -------------------------------------------------------------- clips (round 379)
+
+    def on_clip(self, msg, att):
+        """A clip baked by Blendity: an Action named for it with a slot per object (location, rotation_quaternion and
+        scale curves, a key a frame), kept with a fake user and not assigned - Live Link still poses the objects."""
+        oid = int(msg["id"])
+        tracks = [int(t) for t in msg.get("tracks", [])]
+        frames = int(msg.get("frames", 0))
+        fps = float(msg.get("fps", 60.0))
+        if self._get(oid) is None or frames <= 0 or fps <= 0.0 or len(att) < len(tracks) * frames * SAMPLE_FLOATS * 4:
+            return
+        samples = np.frombuffer(att, dtype="<f4", count=len(tracks) * frames * SAMPLE_FLOATS).reshape(len(tracks), frames, SAMPLE_FLOATS)
+        action = _clip_action(str(msg.get("asset", "")), str(msg.get("name", "Clip")))
+        step = self.scene.render.fps / self.scene.render.fps_base / fps  # (a clip frame in this scene's frames: it plays at Blendity's speed)
+        for slot in list(action.slots):
+            action.slots.remove(slot)
+        layer = action.layers[0] if action.layers else action.layers.new("Blendity")
+        strip = layer.strips[0] if layer.strips else layer.strips.new(type="KEYFRAME")
+        for tid, rows in zip(tracks, samples):
+            obj = self._get(tid)
+            if obj is not None:
+                self._clip_curves(action, strip, tid, obj, rows, step)
+        action.use_frame_range = True
+        action.frame_range = (0.0, max(float(frames - 1) * step, 1.0))
+        action.use_cyclic = bool(msg.get("loop", False))
+        action["blendity_fps"] = fps
+
+    def _clip_curves(self, action, strip, tid, obj, rows, step):
+        slot = action.slots.new(id_type="OBJECT", name=obj.name)
+        bag = strip.channelbag(slot, ensure=True)
+        frames = np.arange(len(rows), dtype=np.float32) * np.float32(step)
+        for path, values in zip(("location", "rotation_quaternion", "scale"), self._trs_rows(tid, obj, rows)):
+            for i in range(values.shape[1]):
+                fc = bag.fcurves.new(path, index=i)
+                fc.keyframe_points.add(len(rows))
+                fc.keyframe_points.foreach_set("co", np.column_stack((frames, values[:, i])).ravel())
+                fc.keyframe_points.foreach_set("interpolation", [_LINEAR] * len(rows))
+                fc.update()
+
+    def _trs_rows(self, oid, obj, rows):
+        """A clip's frames (n, 10: Live Link's position, rotation, scale) as Blender's location, rotation_quaternion
+        (each turned the short way from the last, so the keys between interpolate straight) and scale - as _set_trs."""
+        loc = rows[:, [0, 2, 1]] * np.array([1.0, -1.0, 1.0], np.float32)
+        rot = rows[:, [6, 3, 5, 4]] * np.array([1.0, 1.0, -1.0, 1.0], np.float32)
+        scale = rows[:, [7, 9, 8]]
+        if self._is_turned(obj):
+            rot = _quat_mul(rot, np.array(tuple(FIX), np.float32))
+            scale = rows[:, 7:10]
+        flips = np.sign(np.einsum("ij,ij->i", rot[1:], rot[:-1]))  # (each turned the short way: numpy, not a loop - review 379)
+        flips[flips == 0] = 1.0
+        rot[1:] *= np.cumprod(flips)[:, None]
+        return loc, rot, scale
+
+    # -------------------------------------------------------------- LODs and colliders (round 380)
+
+    def on_lod(self, msg, att):
+        """An LOD Group: kept as a custom property; levels past those it has now dropped (Blender has no LODs: its
+        levels are hidden children named as an export to Unity names them)."""
+        obj = self._get(int(msg["id"]))
+        if obj is None:
+            return
+        levels = len(msg.get("screen", []))
+        obj["blendity_lod"] = json.dumps({"screen": msg.get("screen", []), "ratio": msg.get("ratio", []), "cull": bool(msg.get("cull", False))})
+        for child in [c for c in obj.children if c.get("blendity_lod_level", 0) >= max(levels, 1)]:
+            _drop_object(child)
+
+    def on_lodmesh(self, msg, att):
+        obj = self._get(int(msg["id"]))
+        level = int(msg.get("level", 0))
+        if obj is None or obj.type != "MESH" or level < 1:
+            return
+        if level >= len(json.loads(obj.get("blendity_lod", "{}")).get("screen", [])):
+            return  # (a level the group no longer has: built before it shrank or went - review 380)
+        me = bpy.data.meshes.new("%s_LOD%d" % (obj.name, level))
+        fill_mesh(me, MeshData(att, int(msg["verts"])))
+        lv = next((c for c in obj.children if c.get("blendity_lod_level") == level), None)
+        if lv is None:
+            lv = bpy.data.objects.new("%s_LOD%d" % (obj.name, level), me)
+            lv["blendity_lod_level"] = level
+            self.collection.objects.link(lv)
+            lv.parent = obj
+            lv.hide_set(True)
+            lv.hide_render = True
+        else:
+            old, lv.data = lv.data, me
+            if old.users == 0:
+                bpy.data.meshes.remove(old)
+        self._lod_materials(obj)
+
+    @staticmethod
+    def _lod_materials(obj):
+        for lv in [c for c in obj.children if c.get("blendity_lod_level")]:
+            lv.data.materials.clear()
+            for m in obj.data.materials:
+                lv.data.materials.append(m)
+
+    def on_collider(self, msg, att):
+        """A collider: a custom property (for an export) and, for a box or sphere, a wire empty where it is."""
+        obj = self._get(int(msg["id"]))
+        if obj is None:
+            return
+        for child in [c for c in obj.children if c.get("blendity_collider")]:
+            _drop_object(child)
+        shape = str(msg.get("shape", "none"))
+        if shape == "none":
+            obj.pop("blendity_collider", None)
+            return
+        obj["blendity_collider"] = json.dumps({k: msg[k] for k in ("shape", "center", "size", "radius", "height") if k in msg})
+        if shape not in ("box", "sphere"):
+            return
+        empty = bpy.data.objects.new(obj.name + " Collider", None)
+        empty["blendity_collider"] = True
+        empty.empty_display_type = "CUBE" if shape == "box" else "SPHERE"
+        empty.location = to_location(msg.get("center", [0.0, 0.0, 0.0]))
+        empty.scale = to_scale([v * 0.5 for v in msg.get("size", [1.0, 1.0, 1.0])]) if shape == "box" else Vector([float(msg.get("radius", 0.5))] * 3)
+        empty.hide_render = True
+        self.collection.objects.link(empty)
+        empty.parent = obj
+
+    def _drop_kit(self, obj):
+        for child in [c for c in obj.children if c.get("blendity_lod_level") or c.get("blendity_collider")]:
+            _drop_object(child)
+
+    def restore_look(self):
+        """The scene's own world and compositor back (the link stopped)."""
+        restore_look(self.scene)
+
+
+def _clip_action(asset, name):
+    """The Action of a Blendity clip: one per clip asset, found again by it - a reconnect or a switch back to an earlier
+    clip reuses it (review 379: each had made "Wave.001", "Wave.002"...)."""
+    key = asset or name
+    action = next((a for a in bpy.data.actions if a.get("blendity_clip_asset") == key), None)
+    if action is not None:
+        return action
+    action = bpy.data.actions.new(name)
+    action["blendity_clip_asset"] = key
+    action["blendity_clip"] = name
+    action.use_fake_user = True
+    return action
+
+
+def _quat_mul(a, b):
+    """Quaternions (n, 4: w x y z) times one (4,)."""
+    w1, x1, y1, z1 = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+    w2, x2, y2, z2 = b
+    return np.stack((w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                     w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2), axis=1).astype(np.float32)
+
+
+def _matrix(column_major):
+    return Matrix([column_major[c * 4:c * 4 + 4] for c in range(4)]).transposed()
+
+
+def _drop_object(obj):
+    data = obj.data
+    bpy.data.objects.remove(obj)
+    if isinstance(data, bpy.types.Mesh) and data.users == 0:
+        bpy.data.meshes.remove(data)
+
+
+def _drop_armature(arm):
+    if arm is None:
+        return
+    data = arm.data
+    bpy.data.objects.remove(arm)
+    if data is not None and data.users == 0:
+        bpy.data.armatures.remove(data)
+
+
+def _weigh(vg, md, b):
+    """Joint b's weights into its vertex group: one add per distinct weight, not per vertex."""
+    for k in range(4):
+        rows = np.nonzero((md.joints[:, k] == b) & (md.weights[:, k] > 0.0))[0]
+        values = md.weights[rows, k]
+        for w in np.unique(values):
+            vg.add(rows[values == w].tolist(), float(w), "ADD")
+
+
+# ------------------------------------------------------------------ the look (round 376)
+
+WORLD = "Blendity Live Link"
+_VIEWS = {"ACES": "ACES 1.3"}  # (Blendity's built-in ACES; Standard and Filmic are Blender's names too)
+
+
+def _take_over(scene, key, current):
+    """The scene's own world or compositor, kept the first time Blendity's goes on (a fake user: saved with the file
+    even while unused), so restore_look() can put it back (review 376: it was lost on save)."""
+    if key in scene.keys() or (current is not None and current.name == WORLD):
+        return
+    if current is None:  # (none of its own: none back)
+        scene[key] = ""
+        return
+    scene[key] = current.name
+    scene[key + "_fake"] = bool(current.use_fake_user)
+    current.use_fake_user = True
+
+
+def restore_look(scene):
+    """The scene's own world and compositor back, as they were before Live Link's look (the link stopped)."""
+    for key, coll, attr in (("blendity_prev_world", bpy.data.worlds, "world"), ("blendity_prev_compositor", bpy.data.node_groups, "compositing_node_group")):
+        if key not in scene.keys():
+            continue
+        prev = coll.get(scene[key]) if scene[key] else None
+        setattr(scene, attr, prev)
+        if prev is not None:
+            prev.use_fake_user = bool(scene.get(key + "_fake", False))
+        del scene[key]
+        if key + "_fake" in scene.keys():
+            del scene[key + "_fake"]
+
+
+def _node(nt, kind, name):
+    n = nt.nodes.get(name)
+    if n is None:
+        n = nt.nodes.new(kind)
+        n.name = name
+    return n
+
+
+def _world_key(msg):
+    return msg.get("mode", "gradient") + "|" + (msg.get("hdri", "") if msg.get("mode") == "hdri" else "")
+
+
+def _build_world(nt, msg):
+    """The world's nodes for its mode (made again only when the mode or the HDRI changes: review 376)."""
+    nt.nodes.clear()
+    out = _node(nt, "ShaderNodeOutputWorld", "BL Output")
+    bg = _node(nt, "ShaderNodeBackground", "BL Background")
+    nt.links.new(bg.outputs["Background"], out.inputs["Surface"])
+    mode = msg.get("mode", "gradient")
+    if mode == "gradient":
+        coord, xyz, half = _node(nt, "ShaderNodeTexCoord", "BL Coord"), _node(nt, "ShaderNodeSeparateXYZ", "BL XYZ"), _node(nt, "ShaderNodeMath", "BL Half")
+        half.operation = "MULTIPLY_ADD"
+        half.inputs[1].default_value, half.inputs[2].default_value = 0.5, 0.5
+        ramp = _node(nt, "ShaderNodeValToRGB", "BL Ramp")
+        ramp.color_ramp.elements.new(0.5)
+        nt.links.new(coord.outputs["Generated"], xyz.inputs["Vector"])
+        nt.links.new(xyz.outputs["Z"], half.inputs[0])
+        nt.links.new(half.outputs["Value"], ramp.inputs["Fac"])
+        nt.links.new(ramp.outputs["Color"], bg.inputs["Color"])
+    elif mode == "sky":
+        sky = _node(nt, "ShaderNodeTexSky", "BL Sky")
+        sky.sky_type = "HOSEK_WILKIE"  # (Blendity's own)
+        nt.links.new(sky.outputs["Color"], bg.inputs["Color"])
+    elif mode == "hdri" and msg.get("hdri"):
+        env = _node(nt, "ShaderNodeTexEnvironment", "BL Environment")
+        try:
+            env.image = bpy.data.images.load(msg["hdri"], check_existing=True)
+        except RuntimeError:  # (a file this Blender can't open: the sky stays plain)
+            return
+        coord, mapping = _node(nt, "ShaderNodeTexCoord", "BL Coord"), _node(nt, "ShaderNodeMapping", "BL Mapping")
+        nt.links.new(coord.outputs["Generated"], mapping.inputs["Vector"])
+        nt.links.new(mapping.outputs["Vector"], env.inputs["Vector"])
+        nt.links.new(env.outputs["Color"], bg.inputs["Color"])
+
+
+def _set_world(nt, msg):
+    """The values on the world's nodes as they are: a colour or the strength moving rebuilds nothing."""
+    bg = nt.nodes.get("BL Background")
+    bg.inputs["Strength"].default_value = float(msg.get("strength", 1.0))
+    bg.inputs["Color"].default_value = (*msg.get("color", [0.05, 0.05, 0.05]), 1.0)
+    ramp, sky, mapping = nt.nodes.get("BL Ramp"), nt.nodes.get("BL Sky"), nt.nodes.get("BL Mapping")
+    if ramp is not None:
+        els = ramp.color_ramp.elements
+        els[0].color = (*msg.get("ground", [0.16, 0.15, 0.14]), 1.0)
+        els[1].color = (*msg.get("equator", [0.32, 0.34, 0.36]), 1.0)
+        els[-1].color = (*msg.get("sky", [0.45, 0.52, 0.62]), 1.0)
+    if sky is not None:
+        sky.turbidity = float(msg.get("turbidity", 3.0))
+    if mapping is not None:
+        mapping.inputs["Rotation"].default_value[2] = -math.radians(float(msg.get("rotation", 0.0)))  # (about Y in Blendity: Z here, mirrored)
+
+
+def apply_world(scene, msg):
+    """Blendity's world as a "Blendity Live Link" world (the scene's own kept for restore_look). Its fog - distance fog on
+    the surfaces, as Blendity's, not a volume (review 376: a world volume swallowed the sky and the sun) - is Blender's
+    mist, drawn by the compositor (apply_compositor)."""
+    _take_over(scene, "blendity_prev_world", scene.world)
+    w = bpy.data.worlds.get(WORLD) or bpy.data.worlds.new(WORLD)
+    scene.world = w
+    w.use_nodes = True
+    if w.get("blendity_key") != _world_key(msg) or w.node_tree.nodes.get("BL Background") is None:
+        _build_world(w.node_tree, msg)
+        w["blendity_key"] = _world_key(msg)
+    _set_world(w.node_tree, msg)
+    fog = msg.get("fog", {})
+    w.mist_settings.start = float(fog.get("start", 10.0))
+    w.mist_settings.depth = max(float(fog.get("end", 60.0)) - w.mist_settings.start, 0.01)
+    w.mist_settings.falloff = "LINEAR"
+    w["blendity_world"] = json.dumps(msg.get("fields", {}))
+
+
+def _effect(effects, name):
+    return next((e for e in effects if e.get("type") == name and e.get("enabled", True)), None)
+
+
+def _comp_mix(g, image, other, factor, blend):
+    mix = g.nodes.new("ShaderNodeMix")
+    mix.data_type, mix.blend_type = "RGBA", blend
+    if isinstance(factor, float):
+        mix.inputs[0].default_value = factor
+    else:
+        g.links.new(factor, mix.inputs[0])
+    g.links.new(image, mix.inputs[6])
+    if isinstance(other, tuple):
+        mix.inputs[7].default_value = other
+    else:
+        g.links.new(other, mix.inputs[7])
+    return mix.outputs[2]
+
+
+def apply_compositor(scene, fog, effects):
+    """The look on the image as the scene's compositor: Render Layers > the fog (toward its colour by the mist pass) >
+    Glare (Bloom) > Exposure > Bright/Contrast > Hue/Saturation (Color Grading) > a vignette > the output. Without fog
+    or filters the scene's own compositor is put back."""
+    if not fog.get("enabled") and not effects:
+        restore_look_compositor(scene)
+        return
+    _take_over(scene, "blendity_prev_compositor", scene.compositing_node_group)
+    g = bpy.data.node_groups.get(WORLD) or bpy.data.node_groups.new(WORLD, "CompositorNodeTree")
+    g.nodes.clear()
+    if not any(s.item_type == "SOCKET" and s.in_out == "OUTPUT" for s in g.interface.items_tree):
+        g.interface.new_socket("Image", in_out="OUTPUT", socket_type="NodeSocketColor")
+    scene.compositing_node_group = g
+    layers = g.nodes.new("CompositorNodeRLayers")
+    image = layers.outputs["Image"]
+    if fog.get("enabled"):
+        bpy.context.view_layer.use_pass_mist = True
+        image = _comp_mix(g, image, (*fog.get("color", [0.6, 0.65, 0.75]), 1.0), layers.outputs["Mist"], "MIX")
+    bloom, grade, vig = _effect(effects, "Bloom"), _effect(effects, "Color Grading"), _effect(effects, "Vignette")
+    if bloom:
+        f = bloom.get("fields", {})
+        glare = g.nodes.new("CompositorNodeGlare")
+        glare.inputs["Type"].default_value = "Bloom"
+        glare.inputs["Strength"].default_value = float(f.get("Intensity", 0.6))
+        glare.inputs["Threshold"].default_value = float(f.get("Threshold", 1.0))
+        g.links.new(image, glare.inputs["Image"])
+        image = glare.outputs["Image"]
+    if grade:
+        f = grade.get("fields", {})
+        exp, bc, hs = g.nodes.new("CompositorNodeExposure"), g.nodes.new("CompositorNodeBrightContrast"), g.nodes.new("CompositorNodeHueSat")
+        exp.inputs["Exposure"].default_value = float(f.get("Exposure", 0.0))
+        bc.inputs["Contrast"].default_value = 100.0 * float(f.get("Contrast", 0.0))
+        hs.inputs["Saturation"].default_value = 1.0 + float(f.get("Saturation", 0.0))
+        for node in (exp, bc, hs):
+            g.links.new(image, node.inputs["Image"])
+            image = node.outputs["Image"]
+    if vig:
+        f = vig.get("fields", {})
+        soft = float(f.get("Smoothness", 0.5))
+        mask = g.nodes.new("CompositorNodeEllipseMask")
+        mask.inputs["Size"].default_value = (1.0 - 0.5 * soft, 1.0 - 0.5 * soft)
+        blur = g.nodes.new("CompositorNodeBlur")
+        r = scene.render
+        side = min(r.resolution_x, r.resolution_y) * r.resolution_percentage / 100.0
+        blur.inputs["Size"].default_value = (0.3 * side, 0.3 * side)  # (a share of the frame, whatever its size: review 376)
+        g.links.new(mask.outputs["Mask"], blur.inputs["Image"])
+        image = _comp_mix(g, image, blur.outputs["Image"], float(f.get("Intensity", 0.4)), "MULTIPLY")
+    g.links.new(image, g.nodes.new("NodeGroupOutput").inputs[0])
+
+
+def restore_look_compositor(scene):
+    if "blendity_prev_compositor" not in scene.keys():
+        return
+    prev = bpy.data.node_groups.get(scene["blendity_prev_compositor"]) if scene["blendity_prev_compositor"] else None
+    scene.compositing_node_group = prev
+    if prev is not None:
+        prev.use_fake_user = bool(scene.get("blendity_prev_compositor_fake", False))
+    del scene["blendity_prev_compositor"]
+    if "blendity_prev_compositor_fake" in scene.keys():
+        del scene["blendity_prev_compositor_fake"]
 
 
 # ------------------------------------------------------------------ meshes
@@ -420,11 +973,18 @@ def _image(path, non_color):
     return img
 
 
+TEXTURES = {}  # (round 377: the current session's texture keys -> images; an Applier's own, set while it builds)
+
+
 def _texture(nt, maps, name, x, y):
+    """A map's image: the one Live Link sent its bytes for (round 377), else the file at its path."""
     m = maps.get(name)
     if not m:
         return None
-    img = _image(m.get("path", ""), bool(m.get("non_color", False)))
+    img = TEXTURES.get(m.get("texture"))
+    if img is not None and img.name not in bpy.data.images:
+        img = None
+    img = img or _image(m.get("path", ""), bool(m.get("non_color", False)))
     if img is None:
         return None
     node = nt.nodes.new("ShaderNodeTexImage")
@@ -508,6 +1068,12 @@ def build_material(mat, gltf, maps, toon):
     metal = _texture(nt, maps, "Metallic Map", -500, -250)
     if metal is not None:
         nt.links.new(metal.outputs["Color"], bsdf.inputs["Metallic"])
+    emit = _texture(nt, maps, "Emission Map", -500, -750)  # (round 377: every map)
+    if emit is not None and any(e):  # (Blendity's: colour x strength x map - a map alone gives none: review 377)
+        times = _mix(nt, "MULTIPLY", -250, -750)
+        nt.links.new(emit.outputs["Color"], _socket(times, "A", "RGBA"))
+        _socket(times, "B", "RGBA").default_value = (e[0], e[1], e[2], 1.0)
+        nt.links.new(_output(times, "RGBA"), bsdf.inputs["Emission Color"])
     normal = _texture(nt, maps, "Normal Map", -500, -500)
     if normal is not None:
         nm = nt.nodes.new("ShaderNodeNormalMap")

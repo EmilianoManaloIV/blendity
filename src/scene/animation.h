@@ -99,7 +99,11 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
  * are made Constant (Blender does so for booleans and enums). */
 bool anim_value_stepped(GameObject &g, const std::string &property);
 /* The whole clip at `frame` onto the hierarchy under `root`. */
-void apply_clip(const AnimationClip &clip, GameObject &root, float frame);
+/* `hold` > 1: animation on 2s, 3s... - the poses sampled at the held frame; a camera's tracks (an object with a Camera)
+ * at `frame` itself unless `hold_cameras` (round 340: anime holds the characters, the camera moves every frame). */
+void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int hold = 1, bool hold_cameras = false, float hold_from = 0.0f);
+/* A camera, or what carries one (a camera rig's empty): what moves every frame while the rest holds (round 340). */
+bool camera_rig(const GameObject &g);
 /* The Euler angles (degrees, Unity's order) for q nearest `near`: each angle by whole turns, and the second solution
  * (180 - x, y + 180, z + 180). A chain of keys converted this way never wraps (tasks 0137, 0139). */
 Vec3 euler_near(Quat q, Vec3 near);
@@ -124,6 +128,7 @@ struct Animation : ComponentBase<Animation> {
   float speed = 1.0f;
   int wrap = 0;  // Loop, Once, Ping Pong, Clamp Forever
   int hold = 1;  // on 1s, 2s or 3s (task 0149): the pose changes every hold frames of the clip, the rest of the scene moves on
+  bool hold_camera = false;  // (round 340) a camera the clip animates is held too (off: it moves every frame)
   float time = 0.0f;  // seconds since it started (Play only)
   bool playing = false;
   void reflect(Reflector &r) override;

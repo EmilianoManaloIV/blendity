@@ -43,14 +43,25 @@ static std::vector<GameObject *> other_mesh_objects(const std::vector<GameObject
   return out;
 }
 
+/* The object Join keeps: the active one when it's a mesh, else the last mesh selected (round 367, finding 15: after
+ * Select All the active one could be a light, and Join refused). */
+GameObject *Editor::join_target() {
+  auto mesh_of = [](GameObject *g) { return g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh; };
+  GameObject *a = active_object();
+  if (mesh_of(a)) return a;
+  GameObject *last = nullptr;
+  for (GameObject *g : selected_objects(false)) last = mesh_of(g) ? g : last;
+  return last;
+}
+
 void Editor::join_selected() {
   if (edit_mode_) {
     Log::warn("Join combines objects: leave Edit Mode first (Tab)");
     return;
   }
-  GameObject *a = active_object();
-  if (!a || !a->get<MeshFilter>() || !a->get<MeshFilter>()->mesh) {
-    Log::warn("Join: the active object (selected last) must have a mesh; it keeps the result");
+  GameObject *a = join_target();
+  if (!a) {
+    Log::warn("Join: select two or more mesh objects; the last mesh selected keeps the result");
     return;
   }
   std::vector<GameObject *> others = other_mesh_objects(selected_objects(false), a);
@@ -66,7 +77,7 @@ void Editor::join_selected() {
   for (GameObject *o : others) {
     const Mesh &src = *o->get<MeshFilter>()->mesh;
     faces += src.face_count();
-    meshops::append_mesh(dst, src, inv * o->world_matrix(), merge_slots(*a, *o, src));
+    meshops::append_mesh(dst, src, inv * o->world_matrix(), merge_slots(*a, *o, src), true);
   }
   /* Children of the joined objects move to the result (Blender keeps them too). */
   for (GameObject *o : others) {
@@ -173,6 +184,33 @@ GameObject *Editor::spawn_part(GameObject *g, Mesh mesh) {
   return n;
 }
 
+/* Each face's part for Separate (round 358, CATS' Separate By): its loose part, its material slot (in order of use),
+ * or 1 where a shape key moves one of its vertices (0 the rest). */
+static size_t separate_parts(const Mesh &m, const std::string &mode, std::vector<int> &part) {
+  if (mode != "material" && mode != "shapekeys") return meshops::loose_parts(m, part);
+  part.assign(m.face_count(), 0);
+  if (mode == "material") {
+    std::vector<int> order;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      const auto at = std::find(order.begin(), order.end(), m.material_of(f));
+      part[f] = at != order.end() ? (int)(at - order.begin()) : (int)order.size();
+      if (at == order.end()) order.push_back(m.material_of(f));
+    }
+    return order.size();
+  }
+  std::vector<uint8_t> moved(m.vert_count(), 0);
+  for (const ShapeKey &k : m.shape_keys)
+    for (size_t i = 0; i < k.delta.size() && i < moved.size(); i++) moved[i] |= length(k.delta[i]) > 1e-7f ? 1 : 0;
+  size_t any = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    int keyed = 0;
+    for (uint32_t c = 0; c < m.face_size(f); c++) keyed |= moved[m.face_verts(f)[c]];
+    part[f] = keyed ? 0 : 1;  // (the keyed faces stay: part 0 is the object - review 358: its clips' tracks drive them)
+    any += keyed;
+  }
+  return any > 0 && any < m.face_count() ? 2 : 1;
+}
+
 void Editor::separate(const std::string &mode) {
   GameObject *g = edit_mode_ ? edit_object() : active_object();
   if (!g || !g->get<MeshFilter>() || !g->get<MeshFilter>()->mesh) {
@@ -199,9 +237,9 @@ void Editor::separate(const std::string &mode) {
   }
   else {
     std::vector<int> part;
-    const size_t parts = meshops::loose_parts(*mp, part);
+    const size_t parts = separate_parts(*mp, mode, part);
     if (parts < 2) {
-      Log::warn("Separate: '%s' is one connected piece", g->name.c_str());
+      Log::warn("Separate: '%s' is one %s", g->name.c_str(), mode == "material" ? "material" : mode == "shapekeys" ? "part (every face or none moved by its shape keys)" : "connected piece");
       return;
     }
     const Mesh src = *mp;
@@ -213,6 +251,11 @@ void Editor::separate(const std::string &mode) {
     std::vector<uint8_t> keep(src.face_count(), 0);
     for (size_t f = 0; f < src.face_count(); f++) keep[f] = part[f] == 0;
     mp = std::make_shared<Mesh>(meshops::extract_faces(src, keep));
+  }
+  if (mode == "shapekeys") {  // (each part only the keys that move it: the unkeyed part none - review 358)
+    meshops::drop_unmoving_keys(*mesh_make_mutable(mp));
+    for (GameObject *o : made)
+      if (MeshFilter *of = o->get<MeshFilter>(); of && of->mesh) meshops::drop_unmoving_keys(*mesh_make_mutable(of->mesh));
   }
   mp->touch();
   if (edit_mode_) {

@@ -1,6 +1,19 @@
 {
   "name": "Blendity.LiveLink.Editor",
   "rootNamespace": "Blendity.LiveLink",
-  "references": ["Blendity.LiveLink"],
-  "includePlatforms": ["Editor"]
+  "references": [
+    "Blendity.LiveLink",
+    "Unity.RenderPipelines.Core.Runtime",
+    "Unity.RenderPipelines.Universal.Runtime"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.render-pipelines.universal",
+      "expression": "",
+      "define": "BLENDITY_URP"
+    }
+  ]
 }

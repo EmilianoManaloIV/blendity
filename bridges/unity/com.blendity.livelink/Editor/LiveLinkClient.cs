@@ -219,8 +219,15 @@ namespace Blendity.LiveLink
             }
         }
 
-        /// <summary>Applies whole messages, reading more only when none is buffered, until the budget is spent.</summary>
+        /// <summary>Applies whole messages, reading more only when none is buffered, until the budget is spent; then what
+        /// waits for the stream to go quiet (round 380: a deformed mesh's collider).</summary>
         static void Pump()
+        {
+            PumpMessages();
+            Applier.Settle();
+        }
+
+        static void PumpMessages()
         {
             var clock = Stopwatch.StartNew();
             while (clock.Elapsed.TotalMilliseconds < BudgetMs)

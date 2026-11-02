@@ -91,7 +91,7 @@ const std::vector<PaletteEntry> &Editor::palette_entries() {
   int nw = 0;
   const Workspace *ws = builtin_workspaces(nw);
   for (int i = 0; i < nw; i++) add({std::string("Layout: ") + ws[i].name, "Layouts", "", std::string("layout ") + ws[i].name, ""});
-  for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot", "Empty", "Directional Light", "Point Light",
+  for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot", "Empty", "Directional Light", "Point Light",
                         "Spot Light", "Area Light", "Camera", "Lattice", "Armature"})
     add({std::string("Create ") + k, "Create", "", std::string("create ") + k, ""});
   for (const Curated &c : kCurated) add({c.name, c.category, c.help, c.command, ""});

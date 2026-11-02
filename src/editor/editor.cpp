@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "../scene/curve.h"
+#include "../scene/unity_scene.h"
 #include "editor.h"
 #include "../texture/surface.h"
 #include "learn.h"
@@ -77,6 +78,8 @@ Editor::~Editor() {
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
+  stop_unity_package();    // (round 369: an unpacking stopped at its next file and waited for)
+  stop_unity_export();     // (round 372: an export likewise, nothing written)
   paint_abort_stroke();    // (task 0245)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
   cancel_update_download();
@@ -135,6 +138,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
+  set_foreign_material_loader(load_unity_material);  // (round 371: a Unity .mat loads converted)
   clear_material_assets();  // assets belong to one project
   clear_texture_assets();
   clear_clip_assets();
@@ -228,7 +232,8 @@ bool Editor::wants_continuous_redraw() const {
          seq_.active || ranim_.active || ranim_.encode ||  // (a render animation goes on without input)
          body_.solve ||                                    // (AutoPhysics' result is picked up when it's done)
          !deferred_.empty() ||
-         (cam_preview_pt_hash_ != 0 && !cam_preview_done_);
+         (cam_preview_pt_hash_ != 0 && !cam_preview_done_) ||
+         vr_running();  // (round 383: the headset wants every frame - idle, the editor would draw one a second - review 383)
 }
 
 double Editor::frame_wait_seconds(double now, double last_frame) const {
@@ -371,7 +376,7 @@ int Editor::run() {
     /* The cap holds for input too: mouse moves arriving sooner are gathered
      * into the next frame instead of each drawing one. The pacer (task 0084) keeps the waits from
      * oversleeping the frame's turn by a timer tick. */
-    if (!first && max_fps_ > 0)
+    if (!first && max_fps_ > 0 && !vr_running())  // (VR View: xrWaitFrame paces the frames, at the headset's rate)
       pacer_.wait_until(now + frame_wait_seconds(now, last_frame), now_seconds, [&](double s) {
         more.clear();
         poll_events_for(window_, more, s);
@@ -619,6 +624,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   Log::fetch(log_.size(), log_);
   uv_rect_ = Recti{};  // (task 0254: the UV editor sets it again when it draws this frame; its hint row reads it)
   toasts_poll();   // (task 0252: new warnings and errors become toasts)
+  export_wait_poll();  // (round 354: an export waiting for a job on its objects - before the tray's poll, so a written one is "done", not "cancelled")
   jobs_poll();     // (task 0253: the jobs seen, their start and their end)
   hci_log_poll();  // (the study's log, when asked for)
 
@@ -657,7 +663,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   drop_seq_tracks_.clear();
   if (field_pick_.field && ++field_pick_.age > 1) field_pick_ = FieldPick{};  // (a pick its field didn't take at once)
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
-  seqr_.drawn = false;
+  seqr_.drawn = false, seq_hovered_ = false;  // (re-check 391: set again by the Sequencer while it is drawn)
   sync_material_asset_names();
   keymap_capture_frame();  // (task 0231: a key being assigned is taken before any window or the Wheel sees it)
   wheel_frame();  // (task 0230: a held pen or finger opens the Wheel; an open one takes the press before any window)
@@ -697,16 +703,23 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (pointer_window_ == active_window_) finish_hierarchy_drag();
   take_favorite_request();
   poll_skin_job();
+  poll_unity_package();  // (round 369)
+  poll_unity_export();   // (round 372)
   anim_tick();
   seq_tick();
+  seq_audio_tick();  // (round 365)
   ui_.end_frame();
   update_probes_live();  // after the views drew: they built this frame's voxel grid
   update_realtime_lightmaps();
   lighting_update_step();
   livelink_tick();  // (task 0172: what changed this frame goes out; nothing without a client)
+  vr_tick();        // (round 383: the headset's frame, when VR View runs)
   trail_refresh();  // (task 0282: a few more of the trails' frames, before the views draw them)
   if (window_) set_cursor(window_, ui_.cursor);
 
+  /* Round 362: a collider's Fit to Mesh, done before the step is kept - so no kept state asks for it (review 362: an undone
+   * state holding the tick had refitted at once, Ctrl+Z stuck). */
+  if (scene_) update_collider_fits();
   /* Undo: commit once the interaction that changed things has finished. */
   if (pending_change_ && !any_button_down() && drag_ != Drag::Gizmo && !bone_drag_.modal) commit_undo();  // (an extrude: one step, on its click)
 
@@ -868,6 +881,12 @@ void Editor::draw_menubar(const Recti &r) {
     u.menu_separator();
     if (u.menu_item("Import Model...")) import_dialog();
     u.tooltip("OBJ, FBX, glTF (.glb / .gltf), STL, PLY or USD (.usda): the formats Blender exports.");
+    if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
+    u.tooltip("A .unitypackage unpacked into Assets/Imported/<package>: models and textures to use, scripts kept as they are.");
+    if (u.menu_item("Export Unity Package...")) export_package_of_selection();  // (round 372)
+    u.tooltip("The selected object's package folder back to Unity: the same GUIDs, your edits in its prefabs and scenes, scripts as they were.");
+    if (u.menu_item("Export Godot Scene")) export_godot_scene();  // (round 373)
+    u.tooltip("The selected object's Godot scene (.tscn) to Exports: your transforms and visibility in its nodes' lines, scripts and every other line as they were.");
     u.submenu("Export", u.px(290), [this] {
       /* Blender's File > Export list (the mesh formats). */
       for (int f = 0; f < (int)ExportFormat::Count; f++)
@@ -917,12 +936,16 @@ void Editor::draw_menubar(const Recti &r) {
     if (u.menu_item(playing_ ? "Stop" : "Play", key("play.toggle").c_str())) { if (playing_) exit_play(); else enter_play(); }
     if (u.menu_item("Pause", key("play.pause").c_str(), paused_, playing_)) paused_ = !paused_;
     if (u.menu_item("Step", key("play.step").c_str(), false, playing_)) step_requested_ = true;
+    if (u.menu_item(vr_ ? "Stop VR View" : "VR View")) command(vr_ ? "vr stop" : "vr start");  // (round 383)
+    u.tooltip(vr_why_.empty() ? std::string("The scene in a headset at 1:1 (OpenXR: SteamVR, the Oculus app, Windows Mixed Reality), standing where the Scene view looks.")
+                              : "The scene in a headset at 1:1. Last time: " + vr_why_);
     u.menu_separator();
     if (u.menu_item("Preferences...")) dialog_ = Dialog::Preferences;
   });
   u.popup(u.id("Assets"), u.px(260), [this] {
     auto &u = ui_;
     if (u.menu_item("Import Model...")) import_dialog();
+    if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
     if (u.menu_item("Refresh", key("assets.refresh").c_str())) project_listed_ = -100;
@@ -936,7 +959,7 @@ void Editor::draw_menubar(const Recti &r) {
     /* The current layout's groups (task 0055); Show All Tools or the console reach the rest. */
     /* Task 0267: in every layout - the walkthrough's first step (add a cube) failed in the other layouts. */
     u.submenu("3D Object", u.px(170), [this] {
-        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Cone", "Torus", "Plane", "Quad", "Teapot"})
+        for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
     if (shows(FocusReference)) {
@@ -1459,6 +1482,11 @@ void Editor::handle_drop() {
     else if (ext == ".scene") {
       open_scene_asked(path);  // (task 0254)
     }
+    else if (ext == ".unitypackage") import_unity_package(path);  // (round 369)
+    else if (ext == ".prefab" || ext == ".unity") import_unity_scene(path);  // (round 370)
+    else if (ext == ".tscn") import_godot_scene(path);  // (round 373)
+    else if (ext == ".blend") import_blend(path);  // (round 374)
+    else if (ext == ".blendity-snapshot") import_snapshot(path);  // (round 374: a bridge's Send to Blendity, dropped)
     else if (ext == ".pdf" || ext == ".txt" || ext == ".md" || ext == ".tex" || ext == ".bib" || ext == ".docx" ||
              ext == ".html" || ext == ".htm" || ext == ".epub" || ext == ".ps" || ext == ".djvu") {
       /* (The Research window that collected papers is retired, task 0034.) */
@@ -1652,6 +1680,7 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Layers: draw_layers_window(r); break;  // (task 0234)
     case WindowKind::History: draw_history_window(r); break;  // (task 0254)
     case WindowKind::Board: draw_board_window(r); break;  // (task 0299)
+    case WindowKind::Avatar: draw_avatar_window(r); break;  // (round 356)
     case WindowKind::UVEditor: draw_uv_editor(r); break;
     case WindowKind::Materials: draw_materials_window(r); break;
     case WindowKind::Tools: draw_tools_window(r); break;
@@ -1872,6 +1901,7 @@ void Editor::prune_selection() {
 /* ===================================================================== */
 
 void Editor::mark_changed(const std::string &label) {
+  eye_test_off();  // (round 360: the eye test's pose isn't an edit - kept out of the step)
   scene_dirty_ = true;
   /* Another frame: a change made by a panel drawn after the Scene view (the Inspector's Set Origin > Apply)
    * would otherwise wait for the next input to show, the gizmo still on the old origin (task 0030). Not
@@ -1985,6 +2015,8 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  if (sketch_xf_valid()) return sketch_xf_cancel();  // (re-check 389: Ctrl+Z mid-transform is Esc - the drawing as it was, no step undone)
+  sketch_xf_drop();
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();  // (its item may not be where it was)
   sketch_layers_reset();  // (task 0234)
@@ -2038,6 +2070,8 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
 }
 
 void Editor::redo() {
+  if (sketch_xf_valid()) return sketch_xf_cancel();  // (re-check 389)
+  sketch_xf_drop();
   if (playing_ || redo_.empty()) return;
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();
@@ -2059,6 +2093,11 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  export_waits_drop("a new scene");  // (review 354: its objects are gone)
+  sketch_sel_.clear();  // (round 388: a selection is its canvas's)
+  sketch_xf_drop();
+  if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
+  sketch_pen_.clear(), sketch_vec_drag_.clear();  // (review 390: a Pen path is the old scene's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
@@ -2089,6 +2128,11 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  export_waits_drop("another scene opened");  // (review 354)
+  sketch_sel_.clear();  // (round 388: a selection is its canvas's)
+  sketch_xf_drop();
+  if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
+  sketch_pen_.clear(), sketch_vec_drag_.clear();  // (review 390: a Pen path is the old scene's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);
@@ -2122,6 +2166,8 @@ bool Editor::open_scene(const std::string &path) {
 }
 
 void Editor::save_scene_cmd(bool save_as) {
+  sketch_xf_settle();  // (review 389: a save keeps a transform first, as Photoshop's)
+  eye_test_off();  // (round 360: the eye test's pose isn't written)
   anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
   seq_set_preview(false);
   save_dirty_clip_assets();
@@ -2172,7 +2218,8 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 
 void Editor::import_dialog() {
   defer([this] {
-    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}}};
+    std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
+                                                 {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Godot scenes", {".tscn"}}, {"Blender files (through Blender)", {".blend"}}};  // (rounds 370, 373, 374)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
     switch (pick_open_path("Import Model or Motion", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {
@@ -2246,7 +2293,7 @@ void Editor::bake_textures_for_export(std::vector<ExportItem> &items, const std:
   ScopedTimer timer;
   int baked = 0;
   for (ExportItem &it : items) {
-    if (!it.mesh || !it.mesh->face_count()) continue;
+    if (!it.mesh || !it.mesh->face_count() || it.collider) continue;  // (a collider has no look)
     const TextureBakeResult r = bake_textures(*it.mesh, it.world, it.materials, s);
     if (!r.texels) continue;
     std::string name = file_safe(it.name);
@@ -2338,10 +2385,43 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
   return true;
 }
 
+/* Round 353: a generated image (UV Grid, Color Grid) written once as a PNG beside the exported file and the slot
+ * pointed at it (other programs have no "generated:" images). False when the slot isn't one. */
+static bool write_generated_png(TextureRef &t, const std::string &path, std::unordered_map<std::string, std::string> &written) {
+  static const std::string kGenerated = "generated:";
+  if (!starts_with(t.path, kGenerated)) return false;
+  const auto wi = written.find(t.path);
+  if (wi != written.end()) {
+    t.path = wi->second;
+    return true;
+  }
+  const TexturePtr tex = resolve_texture_ref(t);
+  if (!tex || tex->levels.empty() || tex->levels[0].px8.empty()) {
+    Log::warn("Export: the generated image %s isn't one Blendity makes - left out", t.path.c_str());
+    return true;
+  }
+  const Texture::Level &l = tex->levels[0];
+  std::vector<uint32_t> px(l.px8.size());
+  for (size_t i = 0; i < px.size(); i++) {  // (RGBA in memory, ARGB to the writer)
+    const uint32_t c = l.px8[i];
+    px[i] = (c & 0xFF000000u) | (c & 0xFFu) << 16 | (c & 0xFF00u) | (c >> 16 & 0xFFu);
+  }
+  std::string stem = t.path.substr(kGenerated.size());
+  for (char &ch : stem) ch = ch == ' ' ? '_' : ch;
+  /* "Blendity_" first: a picture of the user's own named UV_Grid.png beside the file is never overwritten. */
+  const std::string png = fs::join(fs::parent(path), "Blendity_" + stem + ".png");
+  if (!write_png(png, px.data(), l.w, l.h, l.w)) {
+    Log::warn("Export: could not write %s - the map is left out", png.c_str());
+    return true;
+  }
+  t.path = written.emplace(t.path, png).first->second;
+  return true;
+}
+
 void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o) {
-  /* Only the formats whose writers reference textures (OBJ / MTL, glTF), and only with materials. */
+  /* Only the formats whose writers reference textures (OBJ / MTL, glTF, FBX - round 353), and only with materials. */
   const ExportFormat f = (ExportFormat)o.format;
-  if (!o.materials || (f != ExportFormat::OBJ && f != ExportFormat::GLB && f != ExportFormat::GLTF)) return;
+  if (!o.materials || (f != ExportFormat::OBJ && f != ExportFormat::GLB && f != ExportFormat::GLTF && f != ExportFormat::FBX)) return;
   std::unordered_map<std::string, std::string> written;  // "X.ptex#albedo" -> the PNG's absolute path
   std::unordered_map<std::string, std::string> stem_of;  // asset path -> the PNGs' stem (unique beside the file)
   std::unordered_map<std::string, int> stems_used;
@@ -2354,7 +2434,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
       for (const TextureRef *t : {&mp->base_map, &mp->metallic_map, &mp->roughness_map, &mp->normal_map, &mp->emission_map}) {
         std::string asset;
         int out = 0;
-        if (split_texture_ref(t->path, asset, out)) any = true;
+        if (split_texture_ref(t->path, asset, out) || t->path.rfind("generated:", 0) == 0) any = true;  // (generated: round 353)
       }
       if (!any) continue;
       auto ci = copies.find(mp.get());
@@ -2363,6 +2443,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
         for (TextureRef *t : {&copy->base_map, &copy->metallic_map, &copy->roughness_map, &copy->normal_map, &copy->emission_map}) {
           std::string asset;
           int out = 0;
+          if (write_generated_png(*t, path, written)) continue;  // (round 353: UV Grid, Color Grid)
           if (!split_texture_ref(t->path, asset, out)) continue;
           auto wi = written.find(t->path);
           if (wi == written.end()) {
@@ -2394,7 +2475,7 @@ void Editor::bake_texture_assets_for_export(std::vector<ExportItem> &items, cons
       }
       mp = ci->second;
     }
-  if (!written.empty()) Log::info("Export: %zu procedural texture image(s) written beside the file", written.size());
+  if (!written.empty()) Log::info("Export: %zu generated or procedural texture image(s) written beside the file", written.size());
 }
 
 bool Editor::texture_stack_op(const std::string &asset, const std::string &op, int i, int j, const std::string &name, int outer, const std::string &which) {
@@ -2502,7 +2583,8 @@ void Editor::assign_texture_asset(GameObject *g, const std::string &asset_path) 
     if (pt->surface) surface_sync_emission(*pt);  // (the emission map only when a layer writes emission: an emission map makes the object a light)
     m.base_color = Vec3(1.0f);
     m.procedural = 0;
-    m.tiling = Vec3(1.0f / std::max(0.01f, pt->physical_size), 1.0f / std::max(0.01f, pt->physical_size), 1.0f);
+    const float tile = 1.0f / std::max(0.01f, pt->physical_size);
+    m.tiling = Vec3(tile, tile, tile);  // (round 337: z too - Box mapping tiles two of its projections by z, and it follows the size)
     m.touch();
   }
 }
@@ -2556,68 +2638,9 @@ std::vector<std::pair<MaterialPtr, bool>> Editor::texture_followers(const std::s
  * where it stands), the mesh's vertex groups as each vertex's four strongest joints, and the clip of the Animation
  * component above the armature sampled at every frame (the scene's pose put back after). */
 std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &m, const GameObject &owner, const SkinModifier &skin) {
-  auto sk = std::make_shared<ExportSkin>();
-  sk->base = armature_base(arm);
-  sk->base_name = arm.parent ? arm.parent->name + " Skeleton" : std::string("Skeleton");
+  auto sk = skin_for_export(arm, m, owner, skin);  // (round 378: the bones and weights in the scene layer, Live Link's too)
   std::vector<GameObject *> objs;
-  std::vector<std::pair<GameObject *, int>> stack{{&arm, -1}};
-  while (!stack.empty() && objs.size() < 4096) {
-    auto [g, parent] = stack.back();
-    stack.pop_back();
-    ExportSkin::Joint j;
-    j.name = g->name, j.parent = parent;
-    const Bone *b = g->get<Bone>();
-    const Transform &l = g->local();
-    j.t = b ? b->rest_position : l.position, j.r = b ? b->rest_rotation : l.rotation, j.s = b ? b->rest_scale : l.scale;
-    const int me = (int)sk->joints.size();
-    sk->joints.push_back(j);
-    objs.push_back(g);
-    for (size_t c = g->children.size(); c-- > 0;) stack.push_back({g->children[c], me});
-  }
-  /* The weights as the Skin modifier deforms: deforming bones with an invertible rest, at most its Max Influences (and
-   * four, glTF's), its vertex group limiting which vertices follow. A vertex that follows no bone stays at rest in
-   * Blendity: in the file it follows the mesh's own object (a joint when the mesh sits under the rig) or the first
-   * joint, with weight 1 - glTF's weights must add up to 1 (all zeros collapse to the origin in most engines). */
-  std::unordered_map<std::string, int> by_name;
-  int still = 0;
-  for (size_t k = 0; k < objs.size(); k++) {
-    if (objs[k] == &owner) still = (int)k;
-    const Bone *b = objs[k]->get<Bone>();
-    if (!b || !b->deform) continue;
-    const Mat4 rm = b->rest_matrix();
-    const float det = dot(cross(rm.column(0), rm.column(1)), rm.column(2));
-    if (std::fabs(det) > 1e-12f && finite_bits(det)) by_name.emplace(objs[k]->name, (int)k);
-  }
-  std::vector<int> group_joint(m.vertex_groups.size(), -1);  // (each group's joint looked up once)
-  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
-    const auto it = by_name.find(m.vertex_groups[gi].name);
-    if (it != by_name.end()) group_joint[gi] = it->second;
-  }
-  bool invert = false;
-  const std::string *limit = skin.limit_group(invert);
-  const int limit_gi = limit && !limit->empty() ? m.find_group(*limit) : -1;
-  const size_t most = (size_t)std::max(1, std::min(4, skin.max_influences));
-  sk->vjoints.assign(m.vert_count(), {(uint16_t)still, 0, 0, 0});
-  sk->vweights.assign(m.vert_count(), {1.0f, 0.0f, 0.0f, 0.0f});
-  std::vector<std::pair<float, int>> w;
-  for (size_t v = 0; v < m.vert_count(); v++) {
-    if (limit_gi >= 0) {
-      const std::vector<float> &lw = m.vertex_groups[(size_t)limit_gi].weights;
-      const bool in_group = v < lw.size() && lw[v] > 0.0f;
-      if (in_group == invert) continue;  // (left out by the modifier's group: at rest)
-    }
-    w.clear();
-    for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
-      const std::vector<float> &gw = m.vertex_groups[gi].weights;
-      if (group_joint[gi] >= 0 && v < gw.size() && gw[v] > 0.0f && finite_bits(gw[v])) w.push_back({gw[v], group_joint[gi]});
-    }
-    if (w.empty()) continue;
-    std::sort(w.begin(), w.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
-    float sum = 0.0f;
-    for (size_t k = 0; k < w.size() && k < most; k++) sum += w[k].first;
-    sk->vjoints[v] = {0, 0, 0, 0}, sk->vweights[v] = {0.0f, 0.0f, 0.0f, 0.0f};
-    for (size_t k = 0; k < w.size() && k < most; k++) sk->vjoints[v][k] = (uint16_t)w[k].second, sk->vweights[v][k] = w[k].first / sum;
-  }
+  for (uint64_t id : sk->joint_ids) objs.push_back(scene_->find(id));
   /* The clip: the Animation component on the armature or above it. */
   GameObject *root = &arm;
   while (root && !(root->get<Animation>() && !root->get<Animation>()->clip.empty())) root = root->parent;
@@ -2644,12 +2667,15 @@ std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &
   an.name = clip->name, an.fps = clip->frame_rate > 0.0f ? clip->frame_rate : 30.0f;
   an.frames = std::max(1, std::min(100000, (int)std::ceil(std::max(clip->length, clip->end_frame())) + 1));  // (keys past the length too)
   an.t.assign(objs.size(), {}), an.r.assign(objs.size(), {}), an.s.assign(objs.size(), {});
+  const MeshRenderer *smr = owner.get<MeshRenderer>();
+  an.shape_w.assign(smr ? m.shape_keys.size() : 0, {});  // (round 351: the visemes and expressions the clip keys)
   for (int f = 0; f < an.frames; f++) {
     apply_clip(*clip, *root, (float)f);
     for (size_t k = 0; k < objs.size(); k++) {
       const Transform &l = objs[k]->local();
       an.t[k].push_back(l.position), an.r[k].push_back(l.rotation), an.s[k].push_back(l.scale);
     }
+    for (size_t k = 0; k < an.shape_w.size(); k++) an.shape_w[k].push_back(smr->shape_weight(m.shape_keys[k].name));
   }
   for (auto &[g, t] : saved) g->set_local(t);
   for (auto &[g, prop, axis, v] : numbers) write_anim_value(*g, prop, axis, v);
@@ -2657,56 +2683,103 @@ std::shared_ptr<ExportSkin> Editor::export_skin_of(GameObject &arm, const Mesh &
   return sk;
 }
 
-std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
-  std::vector<ExportItem> items;
-  auto add = [&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
-    auto *mf = g.get<MeshFilter>();
-    /* Task 0268: a skinned mesh in glTF goes at rest with its rig (the skin is the file's to apply). */
-    const bool gltf = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF;
-    const SkinModifier *skm = o.skins && gltf ? g.get<SkinModifier>() : nullptr;
-    GameObject *arm = skm && !skm->object.empty() ? scene_->find_by_name(skm->object) : nullptr;
-    if (arm && !arm->get<Armature>()) arm = nullptr;
-    const Mesh *m = arm && mf && mf->mesh ? mf->mesh.get() : o.apply_modifiers ? g.evaluated_mesh() : (mf && mf->mesh ? mf->mesh.get() : nullptr);
-    if (!m || !m->face_count()) return;
-    ExportItem it;
-    it.name = g.name;
-    it.mesh = m;
-    it.world = g.world_matrix();
-    if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
-    if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
-    items.push_back(it);
-    /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
-     * back faces, as glTF's single-sided default asks, show the silhouette line). */
-    if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
-      const Outline &ol = *static_cast<const Outline *>(oc);
-      const Mat4 &w = it.world;
-      const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
-      if (const Mesh *shell = ol.shell(*m, scale, 3)) {
-        ExportItem oi;
-        oi.name = g.name + " Outline";
-        oi.mesh = shell;
-        oi.world = it.world;
-        oi.materials = ol.materials();
-        items.push_back(oi);
-      }
+/* Round 351: a modifier that changes only the normals (Anime Face Normals' transfer, Smooth Normals): the basis'
+ * positions stay, its normals go along. */
+static bool normals_only(const Component &c) {
+  return std::strcmp(c.type_name(), NormalTransferModifier::kName) == 0 || std::strcmp(c.type_name(), SmoothNormalsModifier::kName) == 0;
+}
+
+/* Round 351: the mesh exported with its shape keys - the basis, the keys as morph targets / blend shapes - or null when
+ * it has none, or the format or the option leaves them out, or a modifier changes the mesh's shape: then the posed
+ * mesh goes and the log says why. On the rig's path (`rigged`: the skeleton goes too) the mesh goes at rest whatever
+ * its stack, keys and all. Normal-only modifiers give a copy of the basis with their normals (kept in `keep`). */
+static const Mesh *shape_key_basis(GameObject &g, const ExportOptions &o, bool rigged, std::vector<std::shared_ptr<Mesh>> &keep) {
+  const bool holds = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF || o.format == (int)ExportFormat::FBX;
+  const MeshFilter *mf = g.get<MeshFilter>();
+  const Mesh *base = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  if (!o.shape_keys || !holds || !base || base->shape_keys.empty() || !meshops::shape_keys_fit(*base)) return nullptr;
+  if (rigged || !o.apply_modifiers) return base;
+  bool normals = false;
+  for (const auto &c : g.components) {
+    if (!c->enabled || !c->is_modifier()) continue;
+    if (normals_only(*c)) {
+      normals = true;
+      continue;
     }
-  };
-  if (o.selection_only) {
-    /* The selected objects and everything under them. */
-    std::vector<GameObject *> stack = selected_objects(true);
-    while (!stack.empty()) {
-      GameObject *g = stack.back();
-      stack.pop_back();
-      add(*g);
-      for (GameObject *c : g->children) stack.push_back(c);
-    }
+    if (std::strcmp(c->type_name(), SkinModifier::kName) == 0)
+      Log::warn("Export: %s's shape keys left out - it is posed by its Skin and the rig isn't exported (turn on Armatures and Animation)", g.name.c_str());
+    else Log::warn("Export: %s's shape keys left out - its %s changes the mesh (apply the modifiers first)", g.name.c_str(), c->type_name());
+    return nullptr;
   }
-  else scene_->for_each([&](GameObject &g) { add(g); });
-  if (items.empty()) {
-    Log::warn(o.selection_only ? "Export: select objects with meshes first" : "Export: the scene has no meshes");
-    return "";
+  const Mesh *ev = normals ? g.evaluated_mesh() : nullptr;
+  if (!ev || ev->custom_normals.size() != base->vert_count()) return base;
+  auto copy = std::make_shared<Mesh>(*base);
+  copy->custom_normals = ev->custom_normals;
+  keep.push_back(copy);
+  return copy.get();
+}
+
+/* The mesh an object exports: its keyed basis (round 351), else at rest on the rig's path or without the modifiers,
+ * else as the stack makes it. */
+static const Mesh *export_mesh_of(GameObject &g, const ExportOptions &o, const Mesh *keyed, bool rigged) {
+  if (keyed) return keyed;
+  const MeshFilter *mf = g.get<MeshFilter>();
+  const Mesh *base = mf && mf->mesh ? mf->mesh.get() : nullptr;
+  if (rigged || !o.apply_modifiers) return base;
+  return g.evaluated_mesh();
+}
+
+/* Review 352: the mesh a rigged object exports at rest - the basis through its stack without the Skin (a Mirror, a
+ * Subdivision Surface: Blender's exporter applies every modifier but the Armature), the vertex groups carried; the
+ * basis when a modifier loses them (said: its weights would not fit) or none is on. */
+static const Mesh *rest_with_modifiers(GameObject &g, const Mesh &base, std::vector<std::shared_ptr<Mesh>> &keep) {
+  std::vector<const Component *> mods;
+  for (const auto &c : g.components)
+    if (c->enabled && c->is_modifier() && std::strcmp(c->type_name(), SkinModifier::kName) != 0) mods.push_back(c.get());
+  if (mods.empty()) return &base;
+  auto m = std::make_shared<Mesh>(base);
+  for (const Component *c : mods) run_modifier(*c, *m);
+  for (const VertexGroup &vg : m->vertex_groups) {
+    if (vg.weights.size() == m->vert_count()) continue;
+    Log::warn("Export: %s goes as its base mesh - a modifier lost the vertex groups its weights are (apply the modifiers first)", g.name.c_str());
+    return &base;
   }
+  if (!base.shape_keys.empty() && !meshops::shape_keys_fit(*m))
+    Log::warn("Export: %s's shape keys left out - its modifiers change its vertices (apply them first)", g.name.c_str());
+  keep.push_back(m);
+  return m.get();
+}
+
+/* Round 351: an outline shell for a keyed mesh carries the same keys (the shell has the mesh's vertices, each pushed
+ * out along its normal), so a smile moves the line with the face. */
+static const Mesh *keyed_shell(const Mesh *shell, const Mesh *keyed, std::vector<std::shared_ptr<Mesh>> &keep) {
+  if (!shell || !keyed || shell->vert_count() != keyed->vert_count()) return shell;
+  auto copy = std::make_shared<Mesh>(*shell);
+  copy->shape_keys = keyed->shape_keys;
+  keep.push_back(copy);
+  return copy.get();
+}
+
+/* The objects an export would write: the selection and everything under it, or every object in the scene. */
+std::vector<GameObject *> Editor::export_candidates(const ExportOptions &o) {
+  std::vector<GameObject *> out;
+  if (!o.selection_only) {
+    scene_->for_each([&](GameObject &g) { out.push_back(&g); });
+    return out;
+  }
+  std::vector<GameObject *> stack = selected_objects(true);
+  while (!stack.empty()) {
+    GameObject *g = stack.back();
+    stack.pop_back();
+    out.push_back(g);
+    for (GameObject *c : g->children) stack.push_back(c);
+  }
+  return out;
+}
+
+/* The file an export writes: the path given (a relative one the project's), else the selection's or the scene's name
+ * in the export folder - settled when the export is asked for (review 354: not when a waiting one goes). */
+std::string Editor::export_path_for(const ExportOptions &o, const std::string &path_in) {
   std::string path = path_in;
   if (path.empty()) {
     GameObject *a = active_object();
@@ -2716,6 +2789,88 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
     const std::string dir = export_dir_.empty() ? fs::join(assets_dir_, "Exports") : export_dir_;
     path = fs::join(dir, base + export_format_extension(o.format));
   }
+  return resolve_asset_path(path);  // (round 351: a relative path is the project's, not the working folder's)
+}
+
+std::string Editor::export_model(const ExportOptions &o, const std::string &path_in) {
+  eye_test_off();  // (round 360: the eye test's pose isn't written)
+  const std::vector<GameObject *> objects = export_candidates(o);
+  const std::string path = export_path_for(o, path_in);
+  /* Round 354: a job still working on one of these meshes - the export waits for it rather than take the old mesh;
+   * each one asked for keeps its own place in the tray. */
+  for (GameObject *g : objects) {
+    const std::string job = pending_job_on(*g);
+    if (job.empty()) continue;
+    ExportWait w;
+    w.options = o, w.path = path, w.job = job, w.label = "Export waits for " + job + " (" + fs::filename(path) + ")";
+    for (GameObject *c : objects) {
+      w.objects.push_back(c->id);
+      if (const ProceduralTexturePtr sf = surface_of(c, nullptr)) w.surfaces.push_back(sf->asset_path);
+    }
+    export_waits_.erase(std::remove_if(export_waits_.begin(), export_waits_.end(), [&](const ExportWait &e) { return e.label == w.label; }), export_waits_.end());
+    export_waits_.push_back(std::move(w));
+    Log::info("Export of %s waits for %s on %s: it goes when that ends (the tray's Export Now writes it at once)", fs::filename(path).c_str(), job.c_str(),
+              g->name.c_str());
+    return "";
+  }
+  return export_objects(objects, o, path);
+}
+
+/* The export itself: `objects` written to `path` as `o` says. */
+std::string Editor::export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path) {
+  std::vector<ExportItem> items;
+  std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
+  auto add = [&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    auto *mf = g.get<MeshFilter>();
+    /* Task 0268: a skinned mesh in glTF goes at rest with its rig (the skin is the file's to apply). */
+    const bool gltf = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF;
+    const bool rigs = gltf || o.format == (int)ExportFormat::FBX;  // (round 352: FBX carries the rig too)
+    const SkinModifier *skm = o.skins && rigs ? g.get<SkinModifier>() : nullptr;
+    GameObject *arm = skm && !skm->object.empty() ? scene_->find_by_name(skm->object) : nullptr;
+    if (arm && !arm->get<Armature>()) arm = nullptr;
+    const Mesh *keyed = shape_key_basis(g, o, arm != nullptr, keep);  // (round 351: the basis, its keys written as targets)
+    const Mesh *m = export_mesh_of(g, o, keyed, arm != nullptr && mf && mf->mesh);
+    if (arm && m && o.apply_modifiers) m = rest_with_modifiers(g, *m, keep);  // (review 352: the stack, the Skin left to the file)
+    if (!m || !m->face_count()) return;
+    ExportItem it;
+    it.name = g.name;
+    it.mesh = m;
+    const MeshRenderer *wmr = g.get<MeshRenderer>();
+    if (keyed)
+      for (const ShapeKey &k : keyed->shape_keys) it.shape_weights.push_back(wmr ? wmr->shape_weight(k.name) : 0.0f);
+    it.world = g.world_matrix();
+    if (arm) it.skin = export_skin_of(*arm, *m, g, *skm);
+    if (auto *mr = g.get<MeshRenderer>()) it.materials = mr->materials;
+    items.push_back(it);
+    const size_t index = items.size() - 1;
+    add_collider_item(g, *m, it, o, items, keep);   // (round 362)
+    add_lod_items(g, *m, items, index, o, arm, skm);  // (round 363)
+    /* A toon outline's shell goes along (ADR 0020): its own mesh and material, faces flipped (engines that cull
+     * back faces, as glTF's single-sided default asks, show the silhouette line). */
+    if (const Component *oc = g.find_role(Component::RenderRole::Outline); oc && oc->enabled) {
+      const Outline &ol = *static_cast<const Outline *>(oc);
+      const Mat4 &w = it.world;
+      const float scale = (length(w.dir(Vec3(1, 0, 0))) + length(w.dir(Vec3(0, 1, 0))) + length(w.dir(Vec3(0, 0, 1)))) / 3.0f;
+      if (const Mesh *shell = keyed_shell(ol.shell(*m, scale, 3), keyed, keep)) {
+        ExportItem oi;
+        oi.name = g.name + " Outline";
+        oi.mesh = shell;
+        oi.shape_weights = it.shape_weights;
+        oi.outline = true;  // (review 353: no lightmap of its own)
+        if (shell->vert_count() == m->vert_count()) oi.skin = it.skin;  // (review 352: the line follows the bones, as the body does)
+        oi.world = it.world;
+        oi.materials = ol.materials();
+        items.push_back(oi);
+      }
+    }
+  };
+  for (GameObject *g : objects) add(*g);
+  if (items.empty()) {
+    Log::warn(o.selection_only ? "Export: select objects with meshes first" : "Export: the scene has no meshes");
+    return "";
+  }
+  fs::make_dirs(fs::parent(path));  // (round 353: the images beside the file need its folder before the file is written)
   std::string err;
   project_listed_ = -100;
   std::vector<std::shared_ptr<Mesh>> baked_meshes;
@@ -2731,6 +2886,8 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
   }
   export_dir_ = fs::parent(path);
   Log::info("Exported %zu mesh(es) as %s to %s", items.size(), export_format_name(o.format), path.c_str());
+  if (o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF || o.format == (int)ExportFormat::FBX)
+    budget_report(budget_count_items(items), "the file is");  // (round 355: what the file holds against the Budget's target, when one is chosen)
   return path;
 }
 
@@ -2784,6 +2941,7 @@ void Editor::export_with_dialog() {
     o.selection_only = export_opts_.selection_only;
     o.apply_modifiers = export_opts_.apply_modifiers;
     o.scale = export_opts_.scale;
+    o.keep_transforms = export_opts_.keep_transforms;  // (review 375: GLB and glTF both keep it)
     export_opts_ = o;
   }
   export_model(export_opts_, path);
@@ -3272,7 +3430,30 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
   if (rig && rig != armature && !scene_->is_ancestor(armature, rig)) scene_->set_parent(armature, rig, -1, true);
 }
 
+/* The kind as create knows it, matched without case ("sphere", "point light"); "" when there's none. */
+std::string Editor::known_create_kind(const std::string &kind) {
+  static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
+                                       "Directional Light", "Point Light", "Spot Light", "Area Light", "Camera", "Armature", "Lattice"};
+  for (const char *k : kKinds)
+    if (to_lower(kind) == to_lower(k)) return k;
+  for (const char *prefix : {"Curve:", "Shape:"})  // (review 367: "curve: path" too; the rest is matched where it's made)
+    if (to_lower(kind).rfind(to_lower(prefix), 0) == 0) return prefix + kind.substr(6);
+  return "";
+}
+
+/* Unity's way: "Sphere", then "Sphere (1)", "Sphere (2)" - a name no other object has, so select-by-name finds it. */
+std::string Editor::unique_object_name(const std::string &base) const {
+  if (!scene_->find_by_name(base)) return base;
+  for (int k = 1; k < 100000; k++) {
+    const std::string n = strprintf("%s (%d)", base.c_str(), k);
+    if (!scene_->find_by_name(n)) return n;
+  }
+  return base;
+}
+
 GameObject *Editor::create_object(const std::string &kind, bool as_child) {
+  const std::string canonical = known_create_kind(kind);  // (any case: "armature", "point light")
+  if (!canonical.empty() && canonical != kind) return create_object(canonical, as_child);
   GameObject *parent = as_child ? active_object() : nullptr;
   if (kind == "Armature") {
     /* Blender's Add > Armature: a root and one bone, a metre long. A selected mesh gets a Skin modifier bound to it
@@ -3387,10 +3568,18 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     mark_changed("Create " + std::string(kShapeNames[k]));
     return g;
   }
-  GameObject *g = kind == "Empty" ? scene_->create("GameObject", parent) : create_primitive(*scene_, kind, parent);
-  if (kind == "Directional Light" || kind == "Point Light" || kind == "Spot Light" || kind == "Area Light" || kind == "Camera") g->name = kind;
-  /* At the view's centre; spot and area lights 3 m above it, pointing down at it. */
-  if (!parent) g->set_world_position(cam_.pivot + (kind == "Spot Light" || kind == "Area Light" ? Vec3(0, 3, 0) : Vec3(0.0f)));
+  if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
+    Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
+              "Spot / Area Light, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>", kind.c_str());
+    return nullptr;
+  }
+  const std::string name = unique_object_name(kind == "Empty" ? "GameObject" : kind);  // (finding 8: Unity's "Sphere (1)")
+  GameObject *g = kind == "Empty" ? scene_->create(name, parent) : create_primitive(*scene_, kind, parent);
+  g->name = name;
+  /* At the view's centre; spot and area lights 3 m above it, pointing down at it; a camera where the view is, looking
+   * where it looks (round 367: it faced +Z wherever the view was). */
+  if (!parent && kind == "Camera") g->set_world_position(cam_.position()), g->set_world_rotation(cam_.rotation());
+  else if (!parent) g->set_world_position(cam_.pivot + (kind == "Spot Light" || kind == "Area Light" ? Vec3(0, 3, 0) : Vec3(0.0f)));
   if (parent) expanded_.insert(parent->id);
   select(g->id);
   mark_changed("Create " + kind);
@@ -3598,6 +3787,8 @@ void Editor::mesh_op(const std::string &op) {
       for (GameObject *c : g->children) kids.push_back({c, c->world_matrix()});
       Mesh &m = *mesh_make_mutable(mf->mesh);
       for (Vec3 &p : m.positions) p = rs.point(p);
+      for (ShapeKey &k : m.shape_keys)  // (round 358: a key's offsets turn and scale with the vertices)
+        for (Vec3 &d : k.delta) d = rs.dir(d);
       if (t.scale.x * t.scale.y * t.scale.z < 0) meshops::flip_normals(m);  // a mirrored scale turns faces inside out
       m.touch();
       t.rotation = Quat();
@@ -3807,6 +3998,8 @@ int Editor::startup_check() {
 }
 
 void Editor::enter_play() {
+  sketch_xf_settle();  // (re-check 389: Play clones the scene - a transform is kept first)
+  export_waits_drop("Play started (the jobs it waited for are stopped)");  // (review 354)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   sculpt_remesh_cancel();  // (task 0241: Play clones the scene; a result landing in the clone would be thrown away by Stop)
   set_weight_paint(false);
@@ -4232,6 +4425,11 @@ void Editor::load_prefs() {
     if (!v.empty() && v.back() == '\r') v.pop_back();
     if (moonray_pref(k, v)) continue;
     if (assist_pref(k, v)) continue;
+    if (k == "pen_curve") {  // (round 368)
+      std::vector<Vec2> pts;
+      if (curve_from_text(v, pts) && pts.size() >= 2) pen_curve_ = pts;
+      continue;
+    }
     if (ai_pref(k, v)) continue;
     if (livelink_pref(k, v)) continue;
     if (sketch_brush_pref(k, v)) continue;  // (task 0297)
@@ -4267,6 +4465,7 @@ void Editor::load_prefs() {
           if (w == l.key) *l.flag = false;
     }
     else if (k == "ffmpeg") ffmpeg_path_ = v;
+    else if (k == "render_preset") ranim_preset_ = std::clamp(std::atoi(v.c_str()), 0, 2);  // (round 391)
     else if (k == "update_check") update_check_ = v != "0";
     else if (k == "update_previews") update_previews_ = v != "0";
     else if (k == "import_preview") import_preview_pref_ = v != "0";  // (task 0152)
@@ -4391,7 +4590,9 @@ void Editor::save_prefs() {
   s += hci_prefs_text();  // (task 0235)
   s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += "render_preset=" + std::to_string(ranim_preset_) + "\n";
   s += assist_prefs_text();
+  s += "pen_curve=" + curve_to_text(pen_curve_) + "\n";  // (round 368)
   s += ai_prefs_text();
   s += livelink_prefs_text();
   s += strprintf("viewport_device=%d\nother_views_follow=%d\nsimpler_while_moving=%d\ncpu_fallback_noticed=%d\n", viewport_device_,
@@ -4528,12 +4729,15 @@ void Editor::carry_vertex_groups(const Scene &before) {
   });
 }
 
-/* Shape keys (task 0135) after an edit: no operator carries them, so any edit that renumbered the vertices (even to
- * the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are. */
+/* Shape keys (task 0135) after an edit: most operators don't carry them, so an edit that renumbered the vertices (even
+ * to the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are,
+ * and so does an operator that sized them itself (Join, round 357: each part keeps its own offsets - by position, a
+ * joined torso had taken the face's). */
 void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before) {
   if (!before || before->shape_keys.empty()) return;
   /* The same faces on the same vertices: the edit moved vertices or changed the keys themselves (shape add, remove). */
   if (mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before) && meshops::shape_keys_fit(*mesh)) return;
+  if (mesh->vert_count() != before->vert_count() && !mesh->shape_keys.empty() && meshops::shape_keys_fit(*mesh)) return;
   Mesh &m = *mesh_make_mutable(mesh);
   meshops::transfer_shape_keys(*before, m);
   m.touch();
@@ -4738,7 +4942,13 @@ void Editor::rig_command(const std::vector<std::string> &t) {
   if (t[0] == "rig") {  // rig humanoid|quadruped: a preset; rig autoik [root]: IK on a skeleton's limbs by bone names
     const std::string kind = to_lower(arg(1, ""));
     if (kind == "humanoid" || kind == "quadruped") {
-      GameObject *root = create_rig(*scene_, kind == "quadruped", Vec3());
+      /* Round 356: a selected mesh's figure - the rig at its feet, as tall as it. */
+      GameObject *sel = active_object();
+      const bool fit = sel && is_selected(sel->id) && sel->get<MeshFilter>() && !sel->get<Bone>();
+      const AABB fb = fit ? rest_bounds(*sel) : AABB();  // (at rest: a pose or a key doesn't change the fit - review 356)
+      const bool sized = fit && fb.valid() && fb.max.y - fb.min.y > 1e-3f;
+      GameObject *root = create_rig(*scene_, kind == "quadruped", sized ? Vec3(fb.center().x, fb.min.y, fb.center().z) : Vec3(), sized ? fb.max.y - fb.min.y : 0.0f);
+      if (sized) Log::info("Rig: fitted to %s, %.2f m", sel->name.c_str(), fb.max.y - fb.min.y);
       expanded_.insert(root->id);
       select(root->id);
       mark_changed(kind == "humanoid" ? "Add Humanoid Rig" : "Add Quadruped Rig");

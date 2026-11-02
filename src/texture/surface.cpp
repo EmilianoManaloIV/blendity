@@ -84,6 +84,8 @@ void finish_maps(SurfaceMaps &m) {
   mix(m.thickness.data(), n * sizeof(float));
   mix(m.position.data(), n * sizeof(Vec3));
   mix(m.normal.data(), n * sizeof(Vec3));
+  h = hash_mix(h, m.id.empty() ? 0x1D0u : 0x1D1u);  // (review 392: the ID map too - a slot reassigned changes only it)
+  if (!m.id.empty()) mix(m.id.data(), m.id.size());
   m.hash = h;
 }
 
@@ -95,6 +97,21 @@ inline size_t src_index(int x, int y, int sw, int sh, int dw, int dh) {
 }
 
 }  // namespace
+
+/* The ID map beside the others (round 392), its slots read from R at the nearest texel; none when the file isn't there. */
+void load_id_map(const std::string &base, SurfaceMaps &out) {
+  Bitmap b;
+  std::string err;
+  if (!fs::exists(base + "_id.png") || !load_image(base + "_id.png", b, err) || b.width <= 0 || b.rgba8.size() < (size_t)b.width * b.height * 4) return;
+  out.id.resize((size_t)out.w * out.h);
+  for (size_t i = 0; i < out.id.size(); i++) out.id[i] = b.rgba8[src_index((int)(i % out.w), (int)(i / out.w), b.width, b.height, out.w, out.h) * 4];
+}
+
+int SurfaceMaps::slot_at(float u, float v) const {
+  if (id.empty() || w <= 0 || h <= 0) return -1;
+  const int x = std::clamp((int)(u * w), 0, w - 1), y = std::clamp((int)(v * h), 0, h - 1);
+  return id[(size_t)y * w + x];
+}
 
 bool load_surface_maps(const std::string &base, int size, SurfaceMaps &out, std::string *error) {
   const char *suffixes[] = {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"};
@@ -127,6 +144,7 @@ bool load_surface_maps(const std::string &base, int size, SurfaceMaps &out, std:
       out.ao[i] = ao[0] / 255.0f;
       out.thickness[i] = th[0] / 255.0f;
     }
+  load_id_map(base, out);  // (round 392: optional - a record from before has none)
   finish_maps(out);
   return true;
 }
@@ -154,6 +172,8 @@ void surface_maps_from_bake(const MeshMapsResult &r, int size, SurfaceMaps &out)
       out.ao[i] = grey(r.ao[s]);
       out.thickness[i] = grey(r.thickness[s]);
     }
+  if (r.id.size() == (size_t)r.size * r.size) out.id.resize(n);  // (round 392: the slot, nearest - not blended)
+  for (size_t i = 0; i < out.id.size(); i++) out.id[i] = (uint8_t)((r.id[src_index((int)(i % out.w), (int)(i / out.w), r.size, r.size, out.w, out.h)] >> 16) & 255);
   finish_maps(out);
 }
 
@@ -312,27 +332,31 @@ struct FillLayer : TextureLayerBase<FillLayer> {
 struct MeshMapLayer : TextureLayerBase<MeshMapLayer> {
   bool mappable() const override { return false; }  // (round 328's review: no Mapping)
   static constexpr const char *kName = "Mesh Map";
-  int map = 1;  // 0 ambient occlusion, 1 curvature, 2 thickness, 3-5 position x y z, 6-8 world normal x y z
+  int map = 1;  // 0 ambient occlusion, 1 curvature, 2 thickness, 3-5 position x y z, 6-8 world normal x y z, 9 material ID
+  int slot = 0;  // (round 392: with Material ID, the slot it picks - Substance's ID mask)
   float low = 0.0f, high = 1.0f, softness = 0.0f;
   bool invert = false;
   MeshMapLayer() { targets = TargetHeight; }
   void reflect(Reflector &r) override {
-    static const char *names[] = {"Ambient Occlusion", "Curvature", "Thickness", "Position X", "Position Y", "Position Z", "Normal X", "Normal Y (up)", "Normal Z"};
-    r.enumeration("Map", map, names, 9);
-    r.help("The baked mesh map read (Object > Bake Mesh Maps, then Textures > Load Mesh Maps): occlusion and thickness 0..1, curvature\n"
+    static const char *names[] = {"Ambient Occlusion", "Curvature", "Thickness", "Position X", "Position Y", "Position Z", "Normal X", "Normal Y (up)", "Normal Z", "Material ID"};
+    r.enumeration("Map", map, names, 10);
+    r.help("The baked mesh map read (GameObject > Bake Mesh Maps..., then Textures > Load Mesh Maps - or Bake All Maps): occlusion and thickness 0..1, curvature\n"
            "0.5 flat and above convex, the position in the bounds, the world normal's component as 0..1.");
     r.field("Low", low, 0.01f, 0.0f, 1.0f);
     r.field("High", high, 0.01f, 0.0f, 1.0f);
     r.field("Softness", softness, 0.01f, 0.0f, 0.5f);
     r.field("Invert", invert);
+    r.field("Slot", slot, 0, 255);
+    r.help("With Material ID: the material slot whose faces it fills (1 there, 0 elsewhere) - Substance's ID mask.");
     r.help("Levels: the value rises from 0 at Low to 1 at High, the ramp widened by Softness at each end and rounded;\n"
            "Invert turns it over. An edge mask: Curvature with Low 0.55, High 0.7; dirt: Ambient Occlusion inverted.");
   }
   float value(const LayerContext &c, float u, float v) const {
-    if (!c.maps || c.maps->empty()) return 0.5f;
+    if (!c.maps || c.maps->empty()) return map != 9 ? 0.5f : invert ? 1.0f : 0.0f;  // (review 392: a Material ID mask with no maps is empty - Invert as with maps)
     const SurfaceMaps &m = *c.maps;
     float x = 0.5f;
     switch (map) {
+      case 9: x = m.slot_at(u, v) == slot ? 1.0f : 0.0f; break;  // (round 392: the slot's faces; nothing without the ID map)
       case 0: x = m.sample(m.ao, u, v); break;
       case 1: x = m.sample(m.curvature, u, v); break;
       case 2: x = m.sample(m.thickness, u, v); break;
@@ -627,8 +651,18 @@ std::unique_ptr<TextureLayer> make_group_layer() { return std::make_unique<Group
 /* ===================================================================== */
 
 const std::vector<std::string> &surface_mask_presets() {
-  static const std::vector<std::string> names = {"edgewear", "dirt", "dust", "metaledgewear", "positiongradient", "thickness"};
+  static const std::vector<std::string> names = {"edgewear", "dirt", "dust", "metaledgewear", "positiongradient", "thickness", "grounddirt", "cavity"};  // (round 392: Substance's Ground Dirt and Cavity)
   return names;
+}
+
+/* A layer's mask the faces of one material slot (round 392: Substance's ID mask, from the baked ID map). */
+void apply_material_id_mask(TextureLayer &l, int slot) {
+  l.mask_layers.clear();
+  auto e = make_mesh_map_layer();
+  auto *mm = static_cast<MeshMapLayer *>(e.get());
+  mm->map = 9, mm->slot = std::clamp(slot, 0, 255), mm->low = 0.0f, mm->high = 1.0f;
+  make_mask_effect(*e);
+  l.mask_layers.push_back(std::move(e));
 }
 
 bool apply_surface_mask_preset(TextureLayer &l, const std::string &preset) {
@@ -657,6 +691,8 @@ bool apply_surface_mask_preset(TextureLayer &l, const std::string &preset) {
   else if (p == "metaledgewear") mesh_map(1, 0.55f, 0.7f, 0.02f, false, 0), mesh_map(0, 0.0f, 0.6f, 0.1f, false, 1), noise(0.6f, 1);
   else if (p == "positiongradient") mesh_map(4, 0.0f, 1.0f, 0.0f, false, 0);
   else if (p == "thickness") mesh_map(2, 0.0f, 0.3f, 0.05f, true, 0);
+  else if (p == "grounddirt") mesh_map(4, 0.0f, 0.35f, 0.08f, true, 0), mesh_map(0, 0.0f, 0.8f, 0.1f, true, 1), noise(0.4f, 1);  // (the low part of the bounds, less where it's open, broken by noise)
+  else if (p == "cavity") mesh_map(1, 0.3f, 0.45f, 0.03f, true, 0);                                                          // (curvature below flat: the crevices alone)
   else return false;
   return true;
 }

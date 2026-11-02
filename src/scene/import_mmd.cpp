@@ -498,17 +498,11 @@ bool toon_shadow_of(const std::string &path, Vec3 &shadow, ImageMemo &memo) {
   return ok;
 }
 
-std::string slashes(std::string p) {
-  for (char &c : p)
-    if (c == '\\') c = '/';
-  return p;
-}
-
 bool absolute_path(const std::string &p) { return !p.empty() && (p[0] == '/' || (p.size() > 1 && p[1] == ':')); }
 
 /* The toon ramp a material names: its own file beside the model, or MMD's toonNN.bmp if the model brought a copy. */
 std::string toon_file(const MmdMaterial &mt, const std::string &dir) {
-  std::string t = slashes(mt.toon);
+  std::string t = forward_slashes(mt.toon);
   if (t.empty() && mt.shared_toon >= 0 && mt.shared_toon < 10) t = strprintf("toon%02d.bmp", mt.shared_toon + 1);
   if (t.empty()) return {};
   if (absolute_path(t)) return t;
@@ -528,7 +522,7 @@ MaterialPtr make_mmd_material(const MmdMaterial &mt, const std::string &dir, Imp
   m->double_sided = mt.flags & 0x01;
   if (m->alpha < 0.999f) m->surface = (int)MaterialSurface::Transparent;
   if (!mt.texture.empty()) {
-    const std::string t = slashes(mt.texture);
+    const std::string t = forward_slashes(mt.texture);
     m->base_map = TextureRef{find_texture(out, absolute_path(t) ? t : fs::join(dir, t)), false};
     if (std::find(out.textures.begin(), out.textures.end(), m->base_map.path) == out.textures.end()) out.textures.push_back(m->base_map.path);
     if (m->surface == (int)MaterialSurface::Opaque && image_has_alpha(m->base_map.path, memo)) m->surface = (int)MaterialSurface::Cutout;
