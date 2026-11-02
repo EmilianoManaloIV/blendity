@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 375): the round trip as a production
+
+**Asked:** Phase E's last round: a VRChat avatar package and a world kit through Blendity and back into Unity, then
+a Godot scene, a .blend and an Unreal level; the HCI report's import column.
+
+**Run (task 0352):**
+- **Unity:** the package came back with the same GUIDs, the .mat, script, shader and texture byte for byte, every
+  VRChat component unchanged, and the prefabs different by exactly the renamed avatar, the moved kiosk and the
+  switched-off lamp. Imported again, the edits were there.
+- **Godot:** an unchanged scene came back byte for byte, and a moved one landed where it was put.
+- **Blender:** a .blend through Blender came back to Blender with the crate where Blendity moved it.
+
+**Found and fixed:**
+- A one-object .blend (or snapshot) came in named for its file; it keeps its object's name now.
+- Export baked each object's transform into its vertices. glTF has **Keep Transforms** (`export glb ... transforms`),
+  which puts the transform on the node and keeps the pivot, as Blender's glTF does.
+
+**Added:** docs/hci/compare-2026-10.md's "D. Round trip" (the import column), and the lesson.
+
+**The Opus review's fixes:**
+- Keep Transforms bakes a sheared, mirrored or non-finite object (glTF's node can't hold it), and puts the export's
+  Scale on positions, not on each node's scale.
+- The lesson and spec no longer promise that Live Link updates Unreal's sent actors.
+- The option survives a GLB/glTF switch, and `transforms` on another format is said.
+- The test covers a lopsided shape, winding, and the sheared and mirrored cases.
+
+**Checked:** `tests_round375`:
+- the Unity production;
+- the Godot round trip;
+- the Blender round trip (BLENDITY_TEST_BRIDGE);
+- Keep Transforms (a lopsided block back on the same world vertices, faces outward; sheared and mirrored ones
+  baked);
+- the Try-it.
+
 ## 2026-11-01 (round 374): Blender and Unreal into Blendity
 
 **Asked:** Phase E's sixth round: .blend files through the installed Blender; Send to Blendity in the Unreal and

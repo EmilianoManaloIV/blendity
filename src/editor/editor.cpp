@@ -2983,6 +2983,7 @@ void Editor::export_with_dialog() {
     o.selection_only = export_opts_.selection_only;
     o.apply_modifiers = export_opts_.apply_modifiers;
     o.scale = export_opts_.scale;
+    o.keep_transforms = export_opts_.keep_transforms;  // (review 375: GLB and glTF both keep it)
     export_opts_ = o;
   }
   export_model(export_opts_, path);
