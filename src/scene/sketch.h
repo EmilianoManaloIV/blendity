@@ -147,6 +147,9 @@ struct SketchBrush {
   float min_size = 0.0f, steady = 0.0f;  // (steady: the lazy rope, pixels)
   uint32_t color = 0xFF202020;
   int base = -1;  // (a brush of the user's own: the preset it was duplicated from, for Reset)
+  /* Round 389 (task 0366): how much the pen's tilt widens the line, 0-1 - a pencil laid on its side shades wider, as
+   * Fresco's and Photoshop's tilt dynamics do; full tilt (the pen flat) widens it by this much again. */
+  float tilt = 0.0f;
 };
 /* The presets, in the palette's order: Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser. A
  * stroke's `brush` is its index here (the Pen is 1). */

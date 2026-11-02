@@ -235,6 +235,7 @@ bool Editor::pad_navigate(bool hovered) {
     pad_fit();
     return true;
   }
+  if (keymap_preset_ == "Adobe" && in.key_pressed[KEY_SPACE] && !in.shift() && !u.wants_keyboard() && pad_takes_space() && pad_space_ == 0) pad_space_begin(), pad_space_ = 2;  // (review 389: Photoshop's Space pans the pad; 2: a tap opens no Wheel - that is Shift+Space here)
   const bool space = pad_space_ > 0 && in.key_down[KEY_SPACE];
   if (space) u.cursor = Cursor::Hand;
   const int button = in.pressed[2] ? 2 : space && in.pressed[0] ? 0 : -1;
@@ -702,6 +703,7 @@ bool Editor::draw_source_command(const std::string &w) {
     Log::info("usage: draw source scene|game|paper");
     return true;
   }
+  sketch_xf_settle();  // (review 389: the transform is the canvas's being left)
   draw_source_ = w == "game" ? 1 : w == "paper" ? 2 : 0;
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_solo_ = -1;  // (another sketch, or the scene's again: review 324)

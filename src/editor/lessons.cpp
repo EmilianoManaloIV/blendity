@@ -119,7 +119,7 @@ With the keyboard folded away, Tablet Mode splits the work: fingers move the vie
 | One finger on a list | Scrolls it; sideways it still moves sliders
 | The pen | Selects, moves, draws, as the mouse does
 | The pen's side button held | Orbits; Shift pans, Ctrl zooms
-| Side button clicked, or the pen or a finger held still | The Wheel: flick or tap a command (Space opens it too)
+| Side button clicked, or the pen or a finger held still | The Wheel: flick or tap a command (Space opens it too; Shift+Space in the Adobe keymap)
 | The Scene Gizmo, its hand, its magnifier | Drag to orbit, pan, zoom
 ? With the keyboard folded away, how do you delete the selection? | Open the Wheel - click the pen's side button, or hold the pen or a finger still half a second - and tap Delete (or flick through it and lift).
 ? Two fingers touch the Scene view a moment apart. Does the first one start a box select? | No: a finger's press waits a moment, and a second finger in that time makes it a pinch; a later second finger takes the press back.
@@ -640,6 +640,12 @@ The Draw tab's layers work as Photoshop's. A layer's blend list has Photoshop's 
 ! cmd:sketch layer blend soft-light | The active sketch layer in Soft Light
 ? You painted shadows on a layer above your colours and they spill outside the shapes. What fixes it? | Clip the shadow layer to the colour layer under it (Layers > Clip): it shows only where the colours are.
 ? How do you fill a rectangle with the pen's colour? | More > Select > Rectangle, drag it on the pad, then Alt+Backspace (or More > Select > Fill).
+# Draw: Free Transform, Space and the pen's tilt
+Ctrl+T puts the active layer's drawing - or what is in your selection - in a box: drag a corner to scale it (Shift for free), an edge to stretch it, Ctrl and a corner to distort it, Ctrl and an edge to skew it, just outside a corner to turn it, inside to move it; Enter keeps it, Esc puts it back. In the Adobe keymap H is the Hand tool and Space held with a drag pans the view, as in Photoshop. The Pencil widens as you tilt the pen, like a pencil on its side; any brush's Tilt sets how much.
+> docs/tasks/0366-free-transform-space-tilt.md: Built
+! cmd:sketch transform scale 1.5 | The active sketch layer's drawing scaled by 1.5 about its middle
+? You transformed a sketch and don't like it. How do you get it back before committing? | Press Esc: the drawing goes back where it was (Enter would have kept it).
+? How do you make a box into a slanted shape, one corner at a time? | Hold Ctrl and drag a corner of the Free Transform box: that corner alone moves (distort).
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

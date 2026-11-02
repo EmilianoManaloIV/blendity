@@ -941,6 +941,11 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 - **Add Mask** (Layers) shows the layer only inside the selection (no selection: all of it); `sketch layer mask hide|invert|off|delete`.
 - **A new or opened paper** becomes the pad's canvas.
 
+**Draw: Free Transform, Space and tilt** (round 389):
+- **Ctrl+T** (More > Select > Free Transform) puts the active layer's drawing, or the selection's, in a box: corners scale (Shift: freely), edges stretch, Ctrl+corner distorts, Ctrl+edge skews, outside a corner turns (Shift: 15-degree steps), inside moves; Enter keeps it, Esc undoes it.
+- **The Adobe keymap:** H is the Hand tool, Space held with a drag pans, Shift+Space opens the Wheel.
+- **A brush's Tilt** (Brushes window, `sketch brush tilt <0-1>`) widens the line as the pen tilts; the Pencil's is 0.8.
+
 **Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
 - **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).
 - **Hold the right grip** while painting to erase.

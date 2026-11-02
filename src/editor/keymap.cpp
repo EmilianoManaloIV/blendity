@@ -346,6 +346,8 @@ static void adobe_bindings(Keymap &k) {
   b("brush.erase", {"E"});
   b("tool.rotate", {});
   b("tool.move", {"V", "W"});  // (Photoshop's V; Unity's W kept)
+  b("tool.view", {"Q", "H"});  // (round 389: Photoshop's Hand tool is H; Unity's Q kept)
+  b("menu.wheel", {"Shift+Space"});  // (round 389: Space held is Photoshop's pan - the Wheel moves to Shift+Space)
 }
 
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
@@ -813,7 +815,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "menu.wheel" && (drag_ == Drag::Fly || in.down[1] || (playing_ && !paused_ && focused_ == WindowKind::Game)))
     return false;  // (flying, or a game taking Space)
   else if (id == "menu.wheel" && qm_.open) qm_.open = false;
-  else if (id == "menu.wheel" && pad_takes_space()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
+  else if (id == "menu.wheel" && pad_takes_space() && !in.shift()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
   else if (id == "menu.wheel") quick_menu_open(in.mx, in.my, false);  // (task 0230)
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();

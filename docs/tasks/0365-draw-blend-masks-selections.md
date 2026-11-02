@@ -73,7 +73,7 @@ of the Photoshop and Fresco round - free transform, Space and H, and pen tilt fo
   - Fill makes a filled green shape;
   - Delete cuts a line in two where a rectangle crosses it, and undo brings it back;
   - the Select tool's drag on the view makes a four-corner selection.
-- **A new paper** is the Draw tab's canvas, and `sketch transform` warns "no verb 'transform'".
+- **A new paper** is the Draw tab's canvas, and an unknown verb (`sketch frobnicate`) warns "no verb 'frobnicate'".
 - **The file round trip:** clipping, a mask with two shapes inverted and off, Soft Light and a filled stroke all
   survive.
 - **The review's fixes, checked:**

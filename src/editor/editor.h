@@ -638,6 +638,9 @@ struct PaintBrush {
   float grain_scale = 1.0f;
 };
 
+bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p);
+int sketch_brush_find_preset(const std::string &name);  // (round 389: shared by Delete and Free Transform)
+std::vector<SketchPoint> sketch_densified(const std::vector<SketchPoint> &pts);
 std::string sketch_blend_list();  // (round 388: the blend modes' names, for messages)
 std::string line_rest_words(const std::vector<std::string> &t, size_t k);
 constexpr int kVrPaletteSize = 8;  // (round 385: VR sketching's colours)
@@ -744,6 +747,16 @@ class Editor {
   int draw_source_for_test() const { return draw_source_; }
   void sketch_select_tool_for_test(int k) { sketch_select_tool_ = k; }  // (round 388: the Draw tab's Select, 1 Rectangle, 2 Lasso)
   const std::vector<Vec2> &sketch_selection_for_test() const { return sketch_sel_; }
+  bool sketch_transforming_for_test() const { return sketch_xf_.on; }
+  std::string sketch_brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
+  float sketch_tilted_for_test(float pressure, float tilt_x, float tilt_y) {  // (the pad's brush, the pen tilted so)
+    const int kind = sketch_view_.kind;
+    const float tx = ui_.in.tilt_x, ty = ui_.in.tilt_y;
+    sketch_view_.kind = 2, ui_.in.tilt_x = tilt_x, ui_.in.tilt_y = tilt_y;
+    const float p = sketch_tilted(pressure);
+    sketch_view_.kind = kind, ui_.in.tilt_x = tx, ui_.in.tilt_y = ty;
+    return p;
+  }
   int anim_bar_rows_for_test() const { return anim_bar_rows_; }  // (round 324)
   bool spring_row_for_test(const std::string &first, int &label, bool &ignored);  // (round 324: a found chain's kind)
   std::string mode_name_for_test() const { return mode_name(); }
@@ -4909,6 +4922,35 @@ class Editor {
   void sketch_layer_mask(const std::string &how);
   void sketch_draw_selection(const Recti &view);
   void draw_sketch_select_items();
+  /* Round 389 (task 0366): Free Transform (sketch_transform.cpp). */
+  struct SketchXf {
+    bool on = false;
+    std::vector<SketchStroke> before, orig;  // (the whole list before; the transformed strokes as they were)
+    std::vector<size_t> idx;                 // (where they are in the list)
+    Vec2 lo, hi, q[4], q_from[4];
+    int drag = -1, view_kind = -1;
+    Vec2 drag_from;
+    const Sketch *doc = nullptr;  // (the drawing it began on, its size then: review 389)
+    size_t count = 0, layers = 0;
+    bool from_paper = false;
+    std::string paper;  // (the paper it began on: re-check 389 - another paper is the same Sketch)
+  };
+  SketchXf sketch_xf_;
+  bool sketch_xf_begin();
+  bool sketch_xf_valid();
+  void sketch_xf_settle();
+  void sketch_xf_drop();
+  void sketch_xf_press(const Recti &view, Vec2 px);
+  void sketch_xf_split(SketchStroke &st, std::vector<SketchStroke> &kept, std::vector<size_t> &idx);
+  void sketch_xf_apply();
+  void sketch_xf_commit();
+  void sketch_xf_cancel();
+  void sketch_transform_command(const std::vector<std::string> &t);
+  void sketch_xf_draw(const Recti &view);
+  bool sketch_xf_update(const Recti &view, Vec2 px);
+  int sketch_xf_pick(const Recti &view, Vec2 px) const;
+  void sketch_xf_drag(const Recti &view, Vec2 px, bool shift, bool ctrl);
+  float sketch_tilted(float pressure);  // (round 389: the brush's tilt widens the line)
   void sketch_layer_op(const std::string &op, int i);
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;

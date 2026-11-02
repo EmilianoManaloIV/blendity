@@ -30,6 +30,7 @@ void Editor::sketch_begin() {
 
 void Editor::sketch_end() {
   sketch_keynav_ = false;  // (task 0233: no key moves the view once the tool is off)
+  sketch_xf_commit();  // (round 389: a transform under way is kept, as Photoshop's when another tool is picked)
   sketch_select_tool_ = 0, sketch_sel_drag_.clear(), sketch_sel_.clear();  // (review 388: back to the brush next time; the selection goes with the tool)
   sketch_.active = false;
   sketch_.stroking = sketch_.erasing = false;
@@ -381,6 +382,11 @@ bool Editor::sketch_update(const Recti &view) {
   if (!g.active) return false;
   auto &u = ui_;
   auto &in = u.in;
+  if (sketch_xf_valid() && in.key_pressed[KEY_ESCAPE] && !u.wants_keyboard()) {  // (round 389: Esc puts a transform back, the tool stays)
+    in.key_pressed[KEY_ESCAPE] = false;
+    sketch_xf_cancel();
+    return true;
+  }
   if (in.key_pressed[KEY_ESCAPE] && !u.wants_keyboard()) {
     if (g.stroking) sketch_stroke_end(view);
     sketch_end();
@@ -436,6 +442,8 @@ bool Editor::sketch_update(const Recti &view) {
   /* The eraser end, or the Eraser or Stroke Eraser brush (task 0297): the Eraser cuts the strokes it crosses (the pen's
    * end too, on the Draw tab), the Stroke Eraser takes them whole. */
   const int brush_kind = sketch_brush_here() ? sketch_brush_cur().kind : 0;
+  if (!g.erasing && !g.stroking && sketch_xf_update(view, px)) return true;
+  if (sketch_xf_.on && sketch_xf_.drag >= 0) return false;  // (review 389: a drag begun in another view keeps the pointer there)
   if (!g.erasing && sketch_select_update(view, px)) return true;  // (round 388, re-check: the Select tool before the eraser - an Eraser brush had cut instead)
   if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered && (in.eraser || brush_kind != 0)) {
     g.erasing = true;
@@ -460,14 +468,14 @@ bool Editor::sketch_update(const Recti &view) {
       u.consume_click();
       return true;
     }
-    sketch_stroke_begin(view, px, in.pressure, in.ctrl());  // (Ctrl keeps a stroke freehand: Alt is the orbit modifier, task 0223)
+    sketch_stroke_begin(view, px, sketch_tilted(in.pressure), in.ctrl());  // (Ctrl keeps a stroke freehand: Alt is the orbit modifier, task 0223)
     g.view_kind = sketch_view_.kind;
     u.consume_click();
     u.redraw = true;
     return true;
   }
   if (g.stroking) {
-    if (in.down[0]) sketch_stroke_add(view, px, in.pressure);
+    if (in.down[0]) sketch_stroke_add(view, px, sketch_tilted(in.pressure));
     else sketch_stroke_end(view);
     u.redraw = true;
     return true;
@@ -484,6 +492,7 @@ void Editor::sketch_draw(const Recti &view) {
   const float px1 = (float)u.px(1.0f);
   sketch_draw_layers(view);  // (task 0234: bottom to top, each with its opacity and blend)
   sketch_draw_selection(view);  // (round 388: the live view's only - never a thumbnail's or a board's export)
+  sketch_xf_draw(view);  // (round 389)
   const auto &g = sketch_;
   if (!g.active) {
     u.canvas.pop_clip();
@@ -561,6 +570,8 @@ void Editor::sketch_draw(const Recti &view) {
 /* sketch ... and sketchguide ...: the console (task 0223). */
 bool Editor::sketch_command(const std::vector<std::string> &t, const std::string &line) {
   const std::string c0 = t.empty() ? std::string() : to_lower(t[0]);
+  const bool transform_verb = c0 == "sketch" && t.size() > 1 && to_lower(t[1]) == "transform";
+  if (!transform_verb && (c0 == "sketch" || c0 == "sketchstroke")) sketch_xf_settle();  // (review 389: another command keeps a transform first)
   if (c0 == "sketchstroke" && draw_source_ == 2) sketch_bind_work_view();  // (round 324: on Paper, the paper's pixels)
   else if (c0 == "sketchstroke") sketch_bind_scene(scene_rect_, true);  // (task 0233: a scripted stroke is in the Scene view's pixels)
   else if (c0 == "sketch" || c0 == "sketchguide") sketch_bind_work_view();  // (round 318: the view being drawn in)
@@ -605,9 +616,10 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "view") sketch_layer_view();  // (task 0226)
     else if (v == "overlay") g.overlay = to_lower(arg(2, "on")) != "off";
     else if (v == "select") sketch_select_command(t);  // (round 388)
+    else if (v == "transform") sketch_transform_command(t);  // (round 389)
     else if (v == "fill") sketch_fill();
     else if (v == "delete") sketch_delete();
-    else Log::warn("sketch: no verb '%s' - on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count|select ...|fill|delete (sketch layer for the layer verbs)", v.c_str());  // (round 388: a warning, naming it)
+    else Log::warn("sketch: no verb '%s' - on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count|select ...|fill|delete|transform ... (sketch layer for the layer verbs)", v.c_str());  // (round 388: a warning, naming it)
     ui_.redraw = true;
     return true;
   }

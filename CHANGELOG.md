@@ -2,6 +2,47 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 389): Free Transform, Space and H, the pen's tilt
+
+**Asked:** Phase D's third round: Ctrl+T free transform with handles on a layer or a selection, Space to pan and H for
+the Hand tool, pen tilt in the Draw tab's brushes.
+
+**Added (task 0366)**
+- **Free Transform** (Ctrl+T, More > Select > Free Transform, `sketch transform ...`): the active layer's strokes, or
+  the selection's, in a box.
+  - Corners scale in proportion (Shift freely); edges stretch.
+  - Ctrl distorts a corner and skews an edge.
+  - Outside a corner turns (Shift: 15 degrees); inside moves.
+  - Enter commits as one step; Esc puts it back.
+- **The Adobe preset:** H is the Hand tool; Space held with a drag pans the Scene view; the Wheel is Shift+Space.
+- **A brush's Tilt:** the pen's tilt widens the line (the Pencil's 0.8), saved with the brushes.
+
+**The Opus review's fixes:**
+- Space-drag on the pad in the Adobe preset;
+- a transform kept first or let go when the drawing changes under it (an undo, another source, paper or scene, a layer
+  op, a save);
+- a 12 px least box, with proportional drags along the diagonal;
+- crossing boxes refused;
+- Space-pan taking the press (no paint under it);
+- one view's drag;
+- Enter and Esc leaving text fields alone;
+- edges stretched across themselves;
+- the selection's untouched strokes left as they were;
+- the tilt's tooltip true;
+- an older brushes file keeping the Pencil's tilt.
+
+**The re-check's fixes:**
+- a transform kept first before another paper is opened, made, copied or deleted, before a layer is dragged, renamed or
+  its opacity or blend changed, and before Play;
+- Ctrl+Z or redo mid-transform as Esc - the drawing as it was, no step undone (it had left the half-moved strokes);
+- the brushes file's preset index checked before it is read;
+- the pad's Space left to a text field;
+- Space-drag panning in Sculpt too.
+
+**Checked:** scale, rotate, distort onto four points and the middle where the diagonals cross, a selection's half
+moved alone, Ctrl+T with a drag, Esc and Enter with undo, a single line's corner drag, a crossing distort refused, undo
+and another source mid-transform; H and Space-drag in the Adobe preset; the Pencil's tilt against its formula.
+
 ## 2026-11-01 (round 388): Photoshop's layers in the Draw tab - blend modes, masks, selections
 
 **Asked:** Phase D's second round (round 387's findings 16-20 and 28): Photoshop's blend modes, layer and clipping

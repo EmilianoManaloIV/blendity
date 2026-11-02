@@ -71,6 +71,9 @@ std::vector<std::vector<SketchPoint>> runs_outside(const std::vector<SketchPoint
 
 }  // namespace
 
+bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p) { return poly.size() >= 3 && inside(poly, p); }
+std::vector<SketchPoint> sketch_densified(const std::vector<SketchPoint> &pts) { return densified(pts); }
+
 std::string sketch_blend_list() {
   std::string s;
   for (int i = 0; i < kSketchBlendCount; i++) s += (i ? ", " : "") + std::string(sketch_blend_name(i));
@@ -253,6 +256,10 @@ void Editor::draw_sketch_select_items() {
   if (u.menu_item("Delete", "Delete", false, has)) run_console_command("sketch delete");
   u.tooltip("The active layer's strokes cut out of the selection.");
   if (u.menu_item("Deselect", "Ctrl+D", false, has)) run_console_command("sketch select none");
+  u.menu_separator();
+  if (u.menu_item("Free Transform", "Ctrl+T", sketch_xf_.on)) run_console_command("sketch transform begin");  // (round 389)
+  u.tooltip("The active layer's strokes (or the selection's) in a box: drag its corners to scale (Shift: freely), its\n"
+            "edges to stretch, Ctrl+corner to distort, Ctrl+edge to skew, outside a corner to turn, inside to move; Enter keeps it, Esc undoes it.");
 }
 
 /* The selection's outline over the view: marching ants (dark and light dashes). */

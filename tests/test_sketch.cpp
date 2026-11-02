@@ -3067,10 +3067,10 @@ static void tests_round388() {
     CHECK(!ed.sketch_for_test().layers[0].clip);
     std::vector<LogEntry> log;
     const size_t since = Log::fetch(0, log);
-    ed.command("sketch transform scale 2");
+    ed.command("sketch frobnicate 2");
     log.clear();
     Log::fetch(since, log);
-    CHECK(!log.empty() && log.back().level == LogLevel::Warning && log.back().text.find("no verb 'transform'") != std::string::npos);
+    CHECK(!log.empty() && log.back().level == LogLevel::Warning && log.back().text.find("no verb 'frobnicate'") != std::string::npos);
     ed.command("paper delete");
   });
   test("clipping, masks, blend modes and fills in the scene file (round 388): saved and loaded as they were", [] {
@@ -3092,6 +3092,230 @@ static void tests_round388() {
   });
 }
 
+/* Round 389 (task 0366): Free Transform, and the brush's tilt. */
+static void tests_round389() {
+  auto bounds = [](const Sketch &s, int layer, Vec2 &lo, Vec2 &hi) {
+    lo = {1e30f, 1e30f}, hi = {-1e30f, -1e30f};
+    for (const SketchStroke &st : s.strokes)
+      for (const SketchPoint &p : st.pts)
+        if (st.layer == layer) lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)}, hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
+  };
+  test("Free Transform (round 389): scale doubles the drawing about its box's centre and its widths; rotate 90 turns a level line upright; distort puts the box's corners on the points given; with a selection only what is inside moves; Esc puts it back; a commit is one undo step", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    const Recti v = ed.scene_rect_for_test();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch width 4");
+    ed.command(strprintf("sketchstroke %d %d %d %d", v.w / 4, v.h / 2, v.w / 2, v.h / 2));
+    ed.step_frame_headless();
+    const Sketch &s = ed.sketch_for_test();
+    Vec2 lo0, hi0, lo, hi;
+    bounds(s, 0, lo0, hi0);
+    const float w0 = s.strokes[0].width;
+    ed.command("sketch transform scale 2");
+    bounds(s, 0, lo, hi);
+    const Vec2 c0 = (lo0 + hi0) * 0.5f, c1 = (lo + hi) * 0.5f;
+    std::printf("    scale 2: width %.3f -> %.3f view heights across, %.2f -> %.2f px wide; the centre moved %.5f\n", hi0.x - lo0.x, hi.x - lo.x, w0, s.strokes[0].width, length(c1 - c0));
+    CHECK(std::fabs((hi.x - lo.x) - 2.0f * (hi0.x - lo0.x)) < 1e-3f && length(c1 - c0) < 1e-3f && std::fabs(s.strokes[0].width - 2.0f * w0) < 0.2f);
+    ed.step_frame_headless();
+    ed.command("sketch transform rotate 90");
+    bounds(s, 0, lo, hi);
+    std::printf("    rotate 90: %.3f across, %.3f down\n", hi.x - lo.x, hi.y - lo.y);
+    CHECK(hi.y - lo.y > 5.0f * (hi.x - lo.x));
+    /* Distort: a filled rectangle's corners land on four points. */
+    ed.command("sketch clear");
+    ed.command(strprintf("sketch select rect %d %d %d %d", 100, 100, 300, 200));
+    ed.command("sketch fill");
+    ed.command("sketch select none");
+    ed.command(strprintf("sketch transform distort %d %d %d %d %d %d %d %d", 120, 90, 330, 120, 310, 260, 90, 220));
+    const Vec2 want[4] = {{120, 90}, {330, 120}, {310, 260}, {90, 220}};
+    float worst = 0.0f;
+    const SketchStroke &fill = s.strokes.back();
+    for (int k = 0; k < 4 && (size_t)k < fill.pts.size(); k++) {
+      const Vec2 got{v.x + fill.pts[(size_t)k].x * v.h, v.y + fill.pts[(size_t)k].y * v.h};
+      worst = std::max(worst, length(got - Vec2(v.x + want[k].x, v.y + want[k].y)));
+    }
+    std::printf("    distort: the corners %.2f px from where they were sent\n", worst);
+    CHECK(fill.filled && fill.pts.size() == 4u && worst < 0.5f);
+    /* A selection: of two lines only the upper moves. */
+    ed.command("sketch clear");
+    ed.command(strprintf("sketchstroke %d %d %d %d", 200, 200, 400, 200));
+    ed.command(strprintf("sketchstroke %d %d %d %d", 200, 500, 400, 500));
+    ed.step_frame_headless();
+    const float lower_y = s.strokes[1].pts[0].y;
+    ed.command(strprintf("sketch select rect %d %d %d %d", 150, 150, 450, 250));
+    ed.command("sketch transform move 0 100");
+    float upper_y = 0.0f, lower_now = 0.0f;
+    for (const SketchStroke &st : s.strokes) (st.pts[0].y < lower_y - 1e-4f || st.pts[0].y > lower_y + 1e-4f ? upper_y : lower_now) = st.pts[0].y;
+    std::printf("    with a selection: the upper line now %.1f px down (was 200), the lower %.1f (was 500)\n", upper_y * v.h, lower_now * v.h);
+    CHECK(std::fabs(upper_y * v.h - 300.0f) < 1.0f && std::fabs(lower_now * v.h - 500.0f) < 1.0f);
+    /* Ctrl+T, a drag inside the box, Esc: back. Then a drag and Enter: one undo step. */
+    ed.command("sketch select none");
+    ed.step_frame_headless();
+    const size_t steps0 = ed.undo_steps_for_test();
+    const std::vector<SketchStroke> before = s.strokes;
+    const int mx = v.x + 300, my = v.y + 350;
+    auto key = [&](int k, int mods) {
+      platform::Event e = pen_ev(platform::EventType::KeyDown, mx, my);
+      e.key = k, e.mods = mods;
+      ed.step_frame_headless({pen_ev(platform::EventType::MouseMove, mx, my)});
+      ed.step_frame_headless({e});
+    };
+    auto drag_inside = [&] {
+      ed.step_frame_headless({pen_ev(platform::EventType::MouseDown, mx, my)});
+      ed.step_frame_headless({pen_ev(platform::EventType::MouseMove, mx + 50, my)});
+      ed.step_frame_headless({pen_ev(platform::EventType::MouseUp, mx + 50, my)});
+    };
+    key(platform::KEY_T, platform::MOD_CTRL);
+    const bool began = ed.sketch_transforming_for_test();
+    drag_inside();
+    const bool moved = std::fabs(s.strokes[0].pts[0].x - before[0].pts[0].x) * v.h > 40.0f;
+    key(platform::KEY_ESCAPE, 0);
+    const bool back = !ed.sketch_transforming_for_test() && std::fabs(s.strokes[0].pts[0].x - before[0].pts[0].x) < 1e-5f && ed.sketch_for_test().strokes.size() == before.size();
+    key(platform::KEY_T, platform::MOD_CTRL);
+    drag_inside();
+    key(platform::KEY_ENTER, 0);
+    ed.step_frame_headless();
+    const size_t steps = ed.undo_steps_for_test() - steps0;
+    ed.command("undo");
+    ed.step_frame_headless();
+    const bool undone = std::fabs(ed.sketch_for_test().strokes[0].pts[0].x - before[0].pts[0].x) < 1e-5f;
+    std::printf("    Ctrl+T %d, the drag moved it %d, Esc put it back %d; Enter: %zu step(s), undone %d\n", (int)began, (int)moved, (int)back, steps, (int)undone);
+    CHECK(began && moved && back && steps == 1u && undone);
+    ed.command("sketch off");
+  });
+  test("Photoshop's keys in the Adobe preset (round 389): H picks the Hand tool (Q still does), Space held and a drag pans the Scene view, in Sculpt too", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("keymap adobe");
+    ed.step_frame_headless();
+    const Recti v = ed.scene_rect_for_test();
+    const int mx = v.x + v.w / 2, my = v.y + v.h / 2;
+    auto ev = [&](platform::EventType t, int k = 0) {
+      platform::Event e = pen_ev(t, mx, my);
+      e.pointer = platform::Pointer::Mouse, e.pen = false, e.key = k;
+      return e;
+    };
+    ed.step_frame_headless({ev(platform::EventType::MouseMove)});
+    ed.step_frame_headless({ev(platform::EventType::KeyDown, platform::KEY_H)});
+    ed.step_frame_headless({ev(platform::EventType::KeyUp, platform::KEY_H)});
+    const bool hand = ed.tool_for_test() == (int)Tool::View;
+    ed.set_tool_for_test(Tool::Move);
+    const Vec3 before = ed.scene_camera_for_test().pivot;
+    ed.step_frame_headless({ev(platform::EventType::KeyDown, platform::KEY_SPACE)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown)});
+    platform::Event move = ev(platform::EventType::MouseMove);
+    move.x += 120, move.y += 40;
+    ed.step_frame_headless({move});
+    platform::Event up = ev(platform::EventType::MouseUp);
+    up.x += 120, up.y += 40;
+    ed.step_frame_headless({up});
+    ed.step_frame_headless({ev(platform::EventType::KeyUp, platform::KEY_SPACE)});
+    const float panned = length(ed.scene_camera_for_test().pivot - before);
+    /* In Sculpt the left button is the brush's - Space still takes it for the pan. */
+    ed.command("create cube");
+    ed.command("sculpt on");
+    ed.step_frame_headless({ev(platform::EventType::MouseMove)});  // (the pointer back where the first drag began)
+    const Vec3 before2 = ed.scene_camera_for_test().pivot;
+    ed.step_frame_headless({ev(platform::EventType::KeyDown, platform::KEY_SPACE)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown)});
+    ed.step_frame_headless({move});
+    ed.step_frame_headless({up});
+    ed.step_frame_headless({ev(platform::EventType::KeyUp, platform::KEY_SPACE)});
+    const float panned2 = length(ed.scene_camera_for_test().pivot - before2);
+    std::printf("    H: the Hand tool %d; Space + drag moved the pivot %.3f m, in Sculpt %.3f m (Sculpt %d)\n", (int)hand, panned, panned2, (int)ed.sculpt_for_test());
+    CHECK(hand && panned > 0.01f && panned2 > 0.01f && ed.sculpt_for_test());
+  });
+  test("Free Transform at its edges (round 389 review): a corner drag on one level line scales it by the drag along the box's diagonal, not by its height; a distort whose corners cross is refused; the box's middle lands where the quad's diagonals cross; an undo mid-transform is Esc (the drawing as it was, no step undone), another source keeps it first", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    const Recti v = ed.scene_rect_for_test();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    const int y = v.h / 2, x0 = v.w / 4, x1 = v.w / 2;
+    ed.command(strprintf("sketchstroke %d %d %d %d", x0, y, x1, y));
+    ed.step_frame_headless();
+    Vec2 lo0, hi0, lo, hi;
+    bounds(ed.sketch_for_test(), 0, lo0, hi0);
+    /* Ctrl+T, then the top-right corner (6 px above the line: the box is 12 px at least) dragged 20 px right and 1 down. */
+    const int mx = v.x + x1, my = v.y + y - 6;
+    platform::Event ctrl_t = pen_ev(platform::EventType::KeyDown, v.x + (x0 + x1) / 2, v.y + y);
+    ctrl_t.key = platform::KEY_T, ctrl_t.mods = platform::MOD_CTRL;
+    ed.step_frame_headless({pen_ev(platform::EventType::MouseMove, v.x + (x0 + x1) / 2, v.y + y)});
+    ed.step_frame_headless({ctrl_t});
+    ed.step_frame_headless({pen_ev(platform::EventType::MouseMove, mx, my)});
+    ed.step_frame_headless({pen_ev(platform::EventType::MouseDown, mx, my)});
+    ed.step_frame_headless({pen_ev(platform::EventType::MouseMove, mx + 20, my + 1)});
+    ed.step_frame_headless({pen_ev(platform::EventType::MouseUp, mx + 20, my + 1)});
+    bounds(ed.sketch_for_test(), 0, lo, hi);
+    const float ratio = (hi.x - lo.x) / (hi0.x - lo0.x);
+    std::printf("    a corner of one level line dragged 20 px: %.3f times as long (a sliver box had made it 6)\n", ratio);
+    CHECK(ratio > 1.01f && ratio < 1.15f);
+    ed.command("sketch transform cancel");
+    /* A distort whose corners cross: refused, nothing moved. */
+    const std::vector<SketchStroke> before = ed.sketch_for_test().strokes;
+    ed.command(strprintf("sketch transform distort %d %d %d %d %d %d %d %d", 100, 100, 300, 300, 300, 100, 100, 300));
+    CHECK(!ed.sketch_transforming_for_test() && ed.sketch_for_test().strokes.size() == before.size() &&
+          std::fabs(ed.sketch_for_test().strokes[0].pts[0].x - before[0].pts[0].x) < 1e-6f);
+    /* The middle: a dot at a filled square's centre lands where the distorted quad's diagonals cross. */
+    ed.command("sketch clear");
+    ed.command(strprintf("sketch select rect %d %d %d %d", 100, 100, 300, 300));
+    ed.command("sketch fill");
+    ed.command("sketch select none");
+    ed.command(strprintf("sketchstroke %d %d %d %d", 199, 200, 201, 200));
+    ed.command(strprintf("sketch transform distort %d %d %d %d %d %d %d %d", 100, 100, 340, 120, 300, 300, 80, 260));
+    const Sketch &s = ed.sketch_for_test();
+    const SketchStroke &dot = s.strokes.back();
+    const Vec2 mid{v.x + (dot.pts.front().x + dot.pts.back().x) * 0.5f * v.h, v.y + (dot.pts.front().y + dot.pts.back().y) * 0.5f * v.h};
+    /* The diagonals (100,100)-(300,300) and (340,120)-(80,260) cross where t solves p0 + t (p2 - p0) = p1 + u (p3 - p1). */
+    const Vec2 p0{100, 100}, p1{340, 120}, p2{300, 300}, p3{80, 260};
+    const Vec2 r = p2 - p0, q = p3 - p1;
+    const float t = ((p1.x - p0.x) * q.y - (p1.y - p0.y) * q.x) / (r.x * q.y - r.y * q.x);
+    const Vec2 cross_at{v.x + p0.x + r.x * t, v.y + p0.y + r.y * t};
+    std::printf("    the square's middle went to (%.1f, %.1f); the diagonals cross at (%.1f, %.1f)\n", mid.x - v.x, mid.y - v.y, cross_at.x - v.x, cross_at.y - v.y);
+    CHECK(length(mid - cross_at) < 1.5f);
+    /* An undo mid-transform lets it go; another source keeps it first. */
+    ed.step_frame_headless();
+    const std::vector<SketchStroke> was = ed.sketch_for_test().strokes;
+    const std::string top = ed.undo_label_for_test(0);
+    ed.command("sketch transform begin");
+    ed.command("sketch transform move 40 0");
+    ed.command("undo");
+    bool same = ed.sketch_for_test().strokes.size() == was.size();
+    for (size_t i = 0; same && i < was.size(); i++) same = std::fabs(ed.sketch_for_test().strokes[i].pts[0].x - was[i].pts[0].x) < 1e-6f;
+    const bool let_go = !ed.sketch_transforming_for_test() && same && ed.undo_label_for_test(0) == top;
+    ed.step_frame_headless();
+    const size_t n = ed.sketch_for_test().strokes.size();
+    ed.command("sketch transform begin");
+    ed.command("sketch transform move 40 0");
+    ed.command("draw source paper");
+    const bool kept = !ed.sketch_transforming_for_test();
+    ed.command("draw source scene");
+    std::printf("    an undo let it go %d; another source kept it first %d; the scene's strokes %zu (were %zu)\n", (int)let_go, (int)kept, ed.sketch_for_test().strokes.size(), n);
+    CHECK(let_go && kept && ed.sketch_for_test().strokes.size() == n);
+    ed.command("sketch off");
+  });
+  test("the pen's tilt on the Draw tab (round 389): the Pencil (Tilt 0.8) at half pressure with the pen tilted 60 degrees widens the line by 0.8 * sin 60; the Pen (no Tilt) doesn't; a brush's Tilt is saved", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    ed.command("sketch brush Pencil");
+    const float flat = ed.sketch_tilted_for_test(0.5f, 0.0f, 0.0f), tilted = ed.sketch_tilted_for_test(0.5f, 60.0f, 0.0f);
+    ed.command("sketch brush Pen");
+    const float pen = ed.sketch_tilted_for_test(0.5f, 60.0f, 0.0f);
+    std::printf("    Pencil at 0.5: upright %.3f, tilted 60 %.3f (want %.3f); Pen tilted %.3f\n", flat, tilted, 0.5f * (1.0f + 0.8f * std::sin(60.0f * 0.0174533f)), pen);
+    CHECK(std::fabs(flat - 0.5f) < 1e-5f && std::fabs(tilted - 0.5f * (1.0f + 0.8f * std::sin(60.0f * 0.0174533f))) < 1e-3f && std::fabs(pen - 0.5f) < 1e-5f);
+    ed.command("sketch brush Pencil");
+    ed.command("sketch brush tilt 0.3");
+    CHECK(ed.sketch_brush_prefs_text_for_test().find("Pencil|0|") != std::string::npos && ed.sketch_brush_prefs_text_for_test().find("|0.3\n") != std::string::npos);
+  });
+}
+
 void run_sketch_tests() {
   tests_round243();
   tests_round244();
@@ -3109,4 +3333,5 @@ void run_sketch_tests() {
   tests_round323();
   tests_round324();
   tests_round388();
+  tests_round389();
 }
