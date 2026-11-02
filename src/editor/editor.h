@@ -1025,6 +1025,17 @@ class Editor {
   bool vr_sketch_for_test() const { return vr_sketch_; }
   GameObject *vr_sketch_object_for_test() { return vr_sk_obj_ ? scene_->find(vr_sk_obj_) : nullptr; }
   void vr_sketch_chunk_for_test(size_t verts) { vr_sk_chunk_ = verts; }
+  bool vr_paint_for_test() const { return vr_paint_; }
+  float vr_paint_radius_for_test() const { return vr_paint_radius_; }
+  bool vr_paint_aimed_for_test() const { return vr_pt_aimed_; }
+  std::string undo_label_for_test(size_t back) const { return back < undo_.size() ? undo_[undo_.size() - 1 - back].label : ""; }
+  void paint_world_stroke_for_test(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float radius) {  // (one stroke of one world dab, as VR's brush makes)
+    if (!paint_begin_stroke_images()) return;
+    paint_erase_ = paint_brush_.erase;
+    paint_world_dab(hit, axis, right, down, radius, 1.0f);
+    paint_end_stroke();
+  }
+  bool raycast_scene_for_test(const Ray &ray, Vec3 &hit) { return raycast_scene(ray, hit); }
   bool vr_tube_for_test() const { return vr_tube_; }
   int vr_colour_for_test() const { return vr_colour_; }
   float vr_brush_for_test() const { return vr_brush_; }
@@ -2500,6 +2511,23 @@ class Editor {
   void vr_sketch_undo();
   void vr_sketch_overlay(const std::function<void(Vec3, Vec3, uint32_t, float)> &line);
   void vr_sketch_command(const std::vector<std::string> &t);
+  /* Round 386 (task 0363): painting in VR - the right controller's ray paints the object in Paint mode (vr_paint.cpp). */
+  bool vr_paint_ = false, vr_pt_stroking_ = false, vr_pt_aimed_ = false, vr_pt_erase_ = false;
+  float vr_paint_radius_ = 0.03f;  // metres, at life size
+  Vec3 vr_pt_hit_, vr_pt_last_, vr_pt_from_, vr_pt_axis_, vr_pt_right_, vr_pt_down_;  // (the last hit and the last ray's frame: the dabs between frames follow the ray, re-hit)
+  bool vr_pt_flick_size_ = true, vr_pt_flick_opacity_ = true;
+  void vr_paint_frame(const xr::Hand &r, Vec3 &from, Vec3 &axis, Vec3 &right, Vec3 &down) const;
+  bool vr_paint_ray(Vec3 from, Vec3 axis, Vec3 &hit);
+  const xr::SegmentBvh *vr_paint_bvh(bool fresh_only);
+  void vr_paint_hands(const xr::Hand &l, const xr::Hand &r);
+  void vr_paint_to(const xr::Hand &r);
+  void vr_paint_begin(const xr::Hand &r);
+  void vr_paint_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float trigger);
+  void vr_paint_end();
+  void vr_paint_undo();
+  void vr_paint_overlay(const std::function<void(Vec3, Vec3, uint32_t, float)> &line);
+  void vr_paint_command(const std::vector<std::string> &t);
+  int vr_bvh_harvest();
   float vr_render_aspect();
   const xr::SegmentBvh *vr_bvh_of(const Mesh &m, int &building);
   void vr_overlay(const Mat4 &view, const Mat4 &proj, int width, int height);
@@ -4314,6 +4342,20 @@ class Editor {
   bool paint_hit(const Recti &view, float x, float y, Vec3 &world, float &dist);
   uint32_t paint_face_under(float x, float y);
   bool paint_begin_stroke(const Recti &view, float x, float y);
+  /* Round 386 (task 0363): a dab in the world, for VR's brush - the disc square to the ray (paint.cpp). */
+  struct PaintWorldDab {
+    bool on = false;
+    Vec3 centre, axis, right, down;
+    float radius = 0.0f, facing = 1.0f;  // (facing -1: the object's transform mirrors, its winding turned)
+  };
+  /* The triangles near a point of the painted object (its space) within r; false: none known, try them all. */
+  using NearFn = std::function<bool(Vec3 centre, float r, std::vector<uint32_t> &tris)>;
+  PaintWorldDab paint_wdab_;
+  Vec3 paint_last_world_;
+  template <class Weigh>
+  void paint_raster_uv(const Mesh &mesh, const uint32_t *cn, Vec3 p0, Vec3 p1, Vec3 p2, Weigh weigh);
+  void paint_triangle_world(const Mesh &mesh, const uint32_t *cn, Vec3 p0, Vec3 p1, Vec3 p2, float k_max);
+  void paint_world_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float radius, float pressure, const NearFn &near = nullptr);
   bool paint_begin_stroke_images();
   PaintImages &paint_layer_images(PaintLayer &l, int size);
   void paint_reattach_images(ProceduralTexture &pt);

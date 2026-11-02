@@ -65,6 +65,7 @@ bool Editor::vr_start_for_test(std::unique_ptr<xr::Runtime> rt, std::string &why
 
 void Editor::vr_stop() {
   if (vr_sk_drawing_) vr_sketch_commit();
+  vr_paint_end();
   if (vr_) vr_->stop();
   vr_.reset();
   vr_bvh_.clear();
@@ -84,6 +85,8 @@ void Editor::vr_tick() {
   vr_->tick(stage_now, [&](int, const Mat4 &v, const Mat4 &p, Vec3 eye, int w, int h, uint32_t *px) { vr_draw_eye(v, p, eye, w, h, px); });
   if (vr_->state() != xr::Session::State::Lost && vr_->state() != xr::Session::State::Off) return;
   vr_why_ = vr_->why().empty() ? "the headset's session ended" : vr_->why();
+  vr_paint_end();  // (round 386: a stroke under way ends with the session - the desk can paint again)
+  if (vr_sk_drawing_) vr_sketch_commit();
   Log::warn("VR View stopped: %s", vr_why_.c_str());
   vr_.reset();
 }
@@ -118,6 +121,7 @@ void Editor::vr_command(const std::vector<std::string> &t) {
     return Log::info("VR View: standing at (%.2f, %.2f), facing %.0f degrees", vr_stage_.origin.x, vr_stage_.origin.z, vr_stage_.yaw);
   }
   if (verb == "sketch" || verb == "tube" || verb == "colour" || verb == "color" || verb == "brush") return vr_sketch_command(t);
+  if (verb == "paint") return vr_paint_command(t);
   if (verb == "scale" && t.size() > 2) {
     const float s = (float)std::atof(t[2].c_str());
     if (!std::isfinite(s) || s <= 0.0f) return Log::warn("VR View: scale wants a positive number");
@@ -141,29 +145,36 @@ void Editor::vr_command(const std::vector<std::string> &t) {
  * - Sketching (`vr sketch`, vr_sketch.cpp): the right trigger draws instead of the arc, the primaries undo and switch
  *   the tube, the left stick's sideways picks the colour instead of walking. */
 void Editor::vr_hands(double dt) {
-  if (vr_->state() != xr::Session::State::Running) return;
+  if (vr_->state() != xr::Session::State::Running) {  // (re-check 386: a session stopping - the headset taken off - ends a stroke under way)
+    vr_paint_end();
+    if (vr_sk_drawing_) vr_sketch_commit();
+    return;
+  }
   const xr::Hand &l = vr_->hand(0), &r = vr_->hand(1);
   const xr::Pose head = vr_->head();
-  const int held = (l.tracked && l.squeeze > kSqueezeDown ? 1 : 0) + (r.tracked && r.squeeze > kSqueezeDown ? 2 : 0);
+  const int held = (l.tracked && l.squeeze > kSqueezeDown ? 1 : 0) + (r.tracked && r.squeeze > kSqueezeDown && !vr_paint_ ? 2 : 0);  // (painting: the right grip erases)
   if (held != vr_grab_hands_) vr_grab_ = vr_grab_begin(held, l, r), vr_grab_hands_ = held;  // (a hand joined or let go: a new grab from here)
   if (held == 3) vr_stage_ = xr::grab_update(vr_grab_, l.grip.position, &r.grip.position);
   else if (held) vr_stage_ = xr::grab_update(vr_grab_, (held == 1 ? l : r).grip.position, nullptr);
-  const bool aiming = !vr_sketch_ && r.tracked && r.trigger > kTriggerDown && !held;  // (sketching: the trigger draws)
+  const bool aiming = !vr_sketch_ && !vr_paint_ && r.tracked && r.trigger > kTriggerDown && !held;  // (sketching, painting: the trigger draws or paints)
   if (aiming) vr_gather_targets();
   const bool released = vr_aiming_ && r.tracked && !held && r.trigger <= kTriggerDown;
   if (vr_sketch_) vr_sketch_hands(l, r, held);
+  if (vr_paint_) vr_paint_hands(l, r);
   if (aiming) vr_arc_ = xr::teleport_arc(vr_stage_, r, [&](Vec3 a, Vec3 b, Vec3 &hit, Vec3 &n) { return vr_segment_hit(a, b, hit, n); });
   if (released && vr_arc_.landed) vr_stage_ = xr::teleport(vr_stage_, head.position, vr_arc_.at);
   if (!aiming) vr_arc_ = {};
   vr_aiming_ = aiming;
-  const Vec2 walk = vr_sketch_ ? Vec2(0.0f, l.stick.y) : l.stick;  // (sketching: the left stick's sideways picks the colour)
+  const Vec2 walk = vr_sketch_ || vr_paint_ ? Vec2(0.0f, l.stick.y) : l.stick;  // (sketching, painting: the left stick's sideways picks the colour or opacity)
   if (!held && l.tracked && length(walk) > kStickDeadZone) vr_stage_ = xr::smooth_move(vr_stage_, head.orientation, walk, kWalkSpeed, (float)dt);
   const bool turn = r.tracked && std::fabs(r.stick.x) > kStickTurn;
   if (turn && !vr_turned_ && !held) vr_stage_ = xr::snap_turn(vr_stage_, head.position, r.stick.x > 0 ? kSnapTurnDegrees : -kSnapTurnDegrees);
   vr_turned_ = turn;
-  const bool tape_press = !vr_sketch_ && ((r.primary && !vr_primary_was_) || (l.primary && !vr_sk_x_was_));  // (A or X; sketching: undo and tube)
+  const bool brush = vr_sketch_ || vr_paint_;
+  const bool tape_press = !brush && ((r.primary && !vr_primary_was_) || (l.primary && !vr_sk_x_was_));  // (A or X; sketching or painting: A undoes)
   if (tape_press) vr_tape_ = !vr_tape_;
-  if (!vr_sketch_) vr_primary_was_ = r.primary, vr_sk_x_was_ = l.primary;
+  if (!vr_sketch_) vr_sk_x_was_ = l.primary;
+  if (!brush) vr_primary_was_ = r.primary;
   vr_tape_m_ = vr_tape_ && l.tracked && r.tracked ? xr::measure(vr_stage_, l.grip.position, r.grip.position) : 0.0f;
 }
 
@@ -174,16 +185,22 @@ xr::Grab Editor::vr_grab_begin(int held, const xr::Hand &l, const xr::Hand &r) c
   return xr::grab_begin(vr_stage_, (held == 1 ? l : r).grip.position, nullptr);
 }
 
-/* The arc's meshes once per arc: each with its inverse world matrix and its BVH (made on a worker, at most
- * kMaxBvhBuilds at a time); BVHs no mesh asked for are let go. */
-void Editor::vr_gather_targets() {
-  vr_targets_.clear();
-  vr_arc_stamp_++;
+/* The BVHs the workers finished taken in; the number still being made. */
+int Editor::vr_bvh_harvest() {
   int building = 0;
   for (auto &[uid, c] : vr_bvh_) {
     if (c.job.valid() && c.job.wait_for(std::chrono::seconds(0)) == std::future_status::ready) c.bvh = c.job.get();
     building += c.job.valid() ? 1 : 0;
   }
+  return building;
+}
+
+/* The arc's meshes once per arc: each with its inverse world matrix and its BVH (made on a worker, at most
+ * kMaxBvhBuilds at a time); BVHs no mesh asked for are let go. */
+void Editor::vr_gather_targets() {
+  vr_targets_.clear();
+  vr_arc_stamp_++;
+  int building = vr_bvh_harvest();
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -296,6 +313,7 @@ void Editor::vr_overlay(const Mat4 &view, const Mat4 &proj, int width, int heigh
     if (to_px((a + b) * 0.5f, mid)) cv.text(ui_.font, (int)mid.x - ui_.font.text_width(t) / 2, (int)mid.y - ui_.font.line_height() - 4, t, 0xFFFFD040u);
   }
   if (vr_sketch_) vr_sketch_overlay([&](Vec3 a, Vec3 b, uint32_t c, float thick) { line(cv, a, b, c, thick); });
+  if (vr_paint_) vr_paint_overlay([&](Vec3 a, Vec3 b, uint32_t c, float thick) { line(cv, a, b, c, thick); });
   if (std::fabs(vr_stage_.scale - 1.0f) > 1e-3f) {
     const std::string t = strprintf("1:%.2f", vr_stage_.scale);
     cv.text(ui_.font, width / 2 - ui_.font.text_width(t) / 2, height * 3 / 4, t, 0xFFFFFFFFu);

@@ -84,6 +84,9 @@ struct SegmentBvh {
   void build(const std::vector<Vec3> &positions, const std::vector<uint32_t> &indices);
   /* The nearest crossing of a -> b: its fraction along it and the triangle's normal (facing a). */
   bool first_hit(Vec3 a, Vec3 b, float &t, Vec3 &normal) const;
+  /* Round 386: the triangles (their index in `tris` / 3) whose leaf's box comes within r of c - a superset of those
+   * touching the ball (VR's paint dab tests these, not every triangle). */
+  void near(Vec3 c, float r, std::vector<uint32_t> &out) const;
 };
 
 /* The tape measure: the world distance between two stage points. */

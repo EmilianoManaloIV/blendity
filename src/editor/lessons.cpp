@@ -628,6 +628,12 @@ With `vr sketch on` your right controller draws in VR View: hold the trigger and
 ! cmd:vr sketch | Sketching on: with a headset, hold the right trigger and draw
 ? You want a thick stroke that tapers to a thin end. How do you draw it? | Start with the trigger pressed hard and ease off as you finish - the width follows the pressure, from 15% of the brush to all of it.
 ? You drew a stroke you don't want. What do you press? | A - it undoes the last stroke (only a stroke: a change made at the desk is left for the desk's Undo).
+# VR View: painting with your hands
+Turn Paint on for an object at the desk, then `vr paint on`: in VR View your right controller's ray paints it - hold the trigger and sweep, the harder you press the stronger the paint, and the brush's ring shows where it lands. Hold the right grip while painting to erase. Flick the right stick up or down to make the brush bigger or smaller, the left stick sideways for its opacity, and press A to undo the last stroke. It is the desk's brush - its colour, tip, symmetry and channels - so what you paint in VR is what you would paint with the mouse.
+> docs/tasks/0363-vr-paint.md: Built
+! cmd:vr paint | Painting in VR: needs Paint on for an object first (the message says so)
+? You want to erase a smudge in VR. What do you hold? | The right grip while you paint: the stroke erases (the grip doesn't grab while painting; the left one still does).
+? Why does `vr paint on` say to turn Paint on first? | VR paints the object in Paint mode, with the desk's brush and layer - choose the object and turn Paint on at the desk.
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

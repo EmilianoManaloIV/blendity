@@ -211,6 +211,22 @@ float segment_triangle(Vec3 a, Vec3 d, Vec3 p0, Vec3 p1, Vec3 p2) {
 
 }  // namespace
 
+void SegmentBvh::near(Vec3 c, float r, std::vector<uint32_t> &out) const {
+  out.clear();
+  if (nodes.empty()) return;
+  std::vector<uint32_t> stack{0};
+  while (!stack.empty()) {
+    const Node &n = nodes[stack.back()];
+    stack.pop_back();
+    if (length(vmax(n.lo, vmin(n.hi, c)) - c) > r) continue;
+    if (n.count == 0) {
+      stack.push_back(n.first), stack.push_back(n.right);
+      continue;
+    }
+    for (uint32_t k = n.first; k < n.first + n.count; k++) out.push_back(order[k]);
+  }
+}
+
 bool SegmentBvh::first_hit(Vec3 a, Vec3 b, float &t, Vec3 &normal) const {
   if (nodes.empty()) return false;
   const Vec3 d = b - a;

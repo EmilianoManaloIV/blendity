@@ -185,7 +185,8 @@ void Editor::vr_sketch_command(const std::vector<std::string> &t) {
   if (verb == "brush" && !(number > 0 && std::isfinite(number))) return Log::warn("vr brush wants a width in centimetres");
   if (colour) vr_colour_ = (int)number - 1;
   if (verb == "brush") vr_brush_ = std::clamp(number / 100.0f, kMinBrush, kMaxBrush);
-  if (vr_sketch_) vr_tape_ = false;  // (the tape's buttons undo and switch the tube while sketching)
+  if (vr_sketch_) vr_tape_ = false, vr_paint_ = false;  // (the tape's buttons undo and switch the tube while sketching; one brush at a time)
+  if (vr_sketch_) vr_paint_end();
   if (!vr_sketch_ && vr_sk_drawing_) vr_sketch_commit();
   Log::info("VR sketch: %s; %s, colour %d, brush %.1f cm", vr_sketch_ ? "on - the right trigger draws" : "off", vr_tube_ ? "tubes" : "ribbons", vr_colour_ + 1,
             vr_brush_ * 100.0f);

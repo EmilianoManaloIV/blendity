@@ -934,6 +934,12 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 - **The left stick, flicked sideways,** picks one of 8 colours, shown round your left hand. **The right stick, flicked up or down,** makes the brush bigger or smaller (`vr brush <cm>`).
 - **Strokes** go into a Stroke object of their own, "VR Sketch", each colour its own material, so they render and export like any mesh. A undoes only VR strokes.
 
+**Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
+- **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).
+- **Hold the right grip** while painting to erase.
+- **The right stick, flicked up or down,** sizes the brush (`vr paint size <cm>`); **the left stick, flicked sideways,** sets its opacity (`vr paint opacity <0-1>`).
+- **A** undoes the last paint stroke. Everything else is the desk's brush: colour, tip, channels, symmetry.
+
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /
 8-thread CPU and a GTX 1050 Ti is faster than that. On such a machine Blendity starts on the **Low** quality tier and

@@ -887,9 +887,235 @@ static void vr_sketch_tests() {
   });
 }
 
+/* The painted texels (their coverage) of the paint layer's images; `size` zeros before the first stroke makes them. */
+static std::vector<uint8_t> painted(Editor &ed, size_t size = 0) {
+  PaintImagesPtr im = ed.paint_images_for_test();
+  return im && !im->cover.empty() ? im->cover : std::vector<uint8_t>(size, 0);
+}
+
+/* How many texels differ (a missing one is 0). */
+static size_t differ(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
+  size_t n = 0;
+  for (size_t i = 0; i < std::max(a.size(), b.size()); i++) n += (i < a.size() ? a[i] : 0) != (i < b.size() ? b[i] : 0);
+  return n;
+}
+
+/* A cube 6 m across in Paint mode with a new surface, its front face at the view's centre (the desk's paint tests'). */
+static GameObject *paint_cube(Editor &ed, Vec2 &px) {
+  ed.init_headless(1400, 900);
+  ed.set_clock_for_test(100.0);
+  ed.command("select Cube");
+  for (int i = 0; i < 5; i++) ed.step_frame_headless();
+  GameObject *g = ed.active_object_for_test();
+  if (!g) return nullptr;
+  g->set_local_scale(Vec3(6.0f));
+  ed.command("surface new VrPaintSurf");
+  ed.step_frame_headless();
+  ed.command("paint on");
+  if (!ed.paint_for_test() || !ed.project_for_test(g->world_position(), px)) return nullptr;
+  for (int i = 0; i < 30; i++) ed.step_frame_headless();
+  ed.command("paint size 12");
+  ed.command("paint hardness 1");
+  ed.command("paint opacity 1");
+  return g;
+}
+
+/* Where a view pixel's ray meets the plane through `hit` square to `axis`. */
+static Vec3 on_plane(Editor &ed, Vec2 px, Vec3 hit, Vec3 axis) {
+  const Ray ray = ed.screen_ray_for_test(px);
+  const float t = dot(hit - ray.origin, axis) / dot(ray.dir, axis);
+  return ray.origin + ray.dir * t;
+}
+
+static void vr_paint_tests() {
+  test("VR's paint dab (round 386): a dab in the world - the disc square to the ray where it meets the surface - writes the texels a mouse dab of the same size there writes", [] {
+    Editor ed;
+    Vec2 px;
+    GameObject *g = paint_cube(ed, px);
+    CHECK(g != nullptr);
+    if (!g) return;
+    ed.command(strprintf("paint stroke %g %g %g %g 1", px.x, px.y, px.x, px.y));
+    const std::vector<uint8_t> mouse = painted(ed), before(mouse.size(), 0);
+    ed.command("undo");
+    const Ray ray = ed.screen_ray_for_test(px);
+    Vec3 hit;
+    CHECK(ed.raycast_scene_for_test(ray, hit));
+    const Vec3 axis = normalize(ray.dir);
+    const float r_px = ed.paint_brush_for_test().radius * ed.ui_for_test().scale;
+    const Vec3 rx = on_plane(ed, px + Vec2(10, 0), hit, axis), dy = on_plane(ed, px + Vec2(0, 10), hit, axis);
+    const float radius = r_px * length(rx - hit) / 10.0f;
+    ed.paint_world_stroke_for_test(hit, axis, normalize(rx - hit), normalize(dy - hit), radius);
+    const std::vector<uint8_t> world = painted(ed);
+    size_t a = 0, b = 0, both = 0;
+    for (size_t i = 0; i < world.size() && i < mouse.size() && i < before.size(); i++) {
+      const bool m = mouse[i] != before[i], w = world[i] != before[i];
+      a += m, b += w, both += m && w;
+    }
+    std::printf("    a %.0f px dab (%.4f m in the world): the mouse painted %zu texels, the world dab %zu, %zu of them the same\n", r_px, radius, a, b, both);
+    CHECK(a > 50 && b > 50 && both >= (size_t)(0.95 * std::max(a, b)));
+  });
+  test("VR's paint dab's limits (round 386): a surface facing away from the ray is not painted, nor one more than the radius behind the disc", [] {
+    Editor ed;
+    Vec2 px;
+    GameObject *g = paint_cube(ed, px);
+    CHECK(g != nullptr);
+    if (!g) return;
+    const Ray ray = ed.screen_ray_for_test(px);
+    Vec3 hit;
+    CHECK(ed.raycast_scene_for_test(ray, hit));
+    const Vec3 axis = normalize(ray.dir), right = normalize(cross(axis, Vec3(0, 1, 0))), down = normalize(cross(axis, right));
+    auto changed = [&] { return differ(std::vector<uint8_t>(), painted(ed)); };
+    ed.paint_world_stroke_for_test(hit, axis * -1.0f, right, down, 0.3f);  // (the ray turned round: the face's back to it)
+    const size_t backwards = changed();
+    ed.paint_world_stroke_for_test(hit - axis * 1.0f, axis, right, down, 0.3f);  // (the disc 1 m in front of the face: more than its 0.3 m radius)
+    const size_t floating = changed() - backwards;
+    ed.paint_world_stroke_for_test(hit, axis, right, down, 0.3f);
+    const size_t on = changed() - backwards - floating;
+    std::printf("    facing away: %zu texels; 1 m off the surface: %zu; on it: %zu\n", backwards, floating, on);
+    CHECK(backwards == 0u && floating == 0u && on > 50u);
+    /* Mirrored (scale -6 on X: the winding turned): the face toward the ray still takes paint (review 386). */
+    g->set_local_scale(Vec3(-6.0f, 6.0f, 6.0f));
+    ed.step_frame_headless();
+    Vec3 mhit;
+    CHECK(ed.raycast_scene_for_test(ray, mhit));
+    const size_t was = changed();
+    ed.paint_world_stroke_for_test(mhit, axis, right, down, 0.3f);
+    const size_t mirrored = changed() - was;
+    std::printf("    mirrored: %zu texels\n", mirrored);
+    CHECK(mirrored > 50u);
+  });
+  test("VR painting in the editor (round 386): with Paint on for an object and `vr paint on`, the right trigger held while the ray sweeps paints along it, one undo step; the grip erases; A undoes only a paint stroke; the sticks set the size and opacity; without Paint it refuses", [] {
+    Editor ed;
+    Vec2 px;
+    GameObject *g = paint_cube(ed, px);
+    CHECK(g != nullptr);
+    if (!g) return;
+    auto stub = std::make_unique<StubRuntime>();
+    StubRuntime *rt = stub.get();
+    rt->w = rt->h = 32;
+    std::string why;
+    CHECK(ed.vr_start_for_test(std::move(stub), why));
+    rt->events.push_back(xr::Runtime::Event::Ready);
+    ed.step_frame_headless();
+    ed.command("vr paint on");
+    CHECK(ed.vr_paint_for_test());
+    ed.command("vr paint size 30");
+    /* The right hand 15 m back from the cube's centre along the stage's -Z, aiming at it, swept sideways. */
+    const Mat4 stage = ed.vr_stage_for_test(), from_world = stage.inverse();
+    const Vec3 centre_xr = xr::to_blendity(from_world.point(g->world_position()));  // (to_blendity mirrors itself: back to OpenXR's axes)
+    const std::vector<uint8_t> before;
+    auto sweep = [&](float trigger, float squeeze) {
+      for (int i = 0; i <= 20; i++) {
+        rt->hands[1] = held_at(centre_xr + Vec3(-1.5f + i * 0.15f, 0.0f, 15.0f));
+        rt->hands[1].trigger = trigger, rt->hands[1].squeeze = squeeze;
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(i == 0 ? 50 : 1));  // (the cube's BVH lands on a worker)
+      }
+      rt->hands[1].trigger = 0.0f;
+      ed.step_frame_headless();
+    };
+    sweep(0.0f, 0.0f);  // (aiming only: the BVH made)
+    const bool aimed = ed.vr_paint_aimed_for_test();
+    const size_t steps0 = ed.undo_steps_for_test();
+    sweep(1.0f, 0.0f);
+    ed.step_frame_headless();
+    size_t sweep_steps = 0;  // (the stroke's own steps: its first on a new surface also makes the layer, "Add Paint Layer", as at the desk)
+    for (size_t k = 0; k < ed.undo_steps_for_test() - steps0; k++) sweep_steps += ed.undo_label_for_test(k) == "Paint";
+    std::printf("    the sweep's steps: '%s', '%s'\n", ed.undo_label_for_test(0).c_str(), ed.undo_label_for_test(1).c_str());
+    auto count = differ;
+    const std::vector<uint8_t> after = painted(ed);
+    const size_t swept = count(before, after);
+    sweep(1.0f, 1.0f);  // (the grip held: erased)
+    const size_t erased = count(after, painted(ed));
+    /* A: the erase undone, then the paint. */
+    auto press_a = [&] {
+      rt->hands[1].primary = true;
+      ed.step_frame_headless();
+      rt->hands[1].primary = false;
+      ed.step_frame_headless();
+    };
+    press_a();
+    const size_t back_to_paint = count(after, painted(ed));
+    press_a();
+    const size_t back_to_none = count(before, painted(ed));
+    /* The sticks: the size up a step, the opacity down one. */
+    const float r0 = ed.vr_paint_radius_for_test(), o0 = ed.paint_brush_for_test().opacity;
+    rt->hands[1].stick = Vec2(0, 1), rt->hands[0] = held_at(Vec3(-0.3f, 1.0f, -0.3f)), rt->hands[0].stick = Vec2(-1, 0);
+    ed.step_frame_headless();
+    rt->hands[1].stick = Vec2(), rt->hands[0].stick = Vec2();
+    ed.step_frame_headless();
+    std::printf("    aimed %d; swept %zu texels in %zu step(s); the grip erased %zu; A: %zu differ from the painted, then %zu from none; radius %.3f -> %.3f m, opacity %.2f -> %.2f\n", (int)aimed,
+                swept, sweep_steps, erased, back_to_paint, back_to_none, r0, ed.vr_paint_radius_for_test(), o0, ed.paint_brush_for_test().opacity);
+    CHECK(aimed && swept > 4000u && sweep_steps == 1u && erased > 100u && back_to_paint == 0u && back_to_none == 0u);  // (review 386: a single dab is about 1,100 texels - the desk had ended the stroke after its first)
+    CHECK(std::fabs(ed.vr_paint_radius_for_test() - r0 * 1.5f) < 1e-5f && std::fabs(ed.paint_brush_for_test().opacity - (o0 - 0.1f)) < 1e-5f);
+    /* Off the face to the left, round over the cube in the air and back on from the right: what the two ends paint as
+     * two strokes, no band across the middle the ray never crossed (review 386). */
+    ed.command("undo");
+    ed.step_frame_headless();
+    std::vector<Vec3> left, round, right;
+    for (float x = -1.5f; x >= -20.0f; x -= 2.0f) left.push_back({x, 0.0f, 0.0f});
+    for (float y = 4.0f; y <= 20.0f; y += 4.0f) round.push_back({-20.0f, y, 0.0f});
+    for (float x = -16.0f; x <= 20.0f; x += 4.0f) round.push_back({x, 20.0f, 0.0f});
+    for (float y = 16.0f; y >= 0.0f; y -= 4.0f) round.push_back({20.0f, y, 0.0f});
+    for (float x = 18.0f; x >= 1.5f; x -= 2.0f) right.push_back({x, 0.0f, 0.0f});
+    auto stroke = [&](const std::vector<std::vector<Vec3>> &paths) {
+      for (const auto &path : paths)
+        for (const Vec3 &p : path) {
+          rt->hands[1] = held_at(centre_xr + p + Vec3(0.0f, 0.0f, 15.0f));
+          rt->hands[1].trigger = 1.0f;
+          ed.step_frame_headless();
+        }
+      rt->hands[1].trigger = 0.0f;
+      ed.step_frame_headless();
+    };
+    const std::vector<uint8_t> clean = painted(ed);
+    stroke({left, round, right});
+    const size_t looped = differ(clean, painted(ed));
+    ed.command("undo");
+    ed.step_frame_headless();
+    stroke({left});
+    stroke({right});
+    const size_t apart = differ(clean, painted(ed));
+    std::printf("    left, round in the air, right as one stroke: %zu texels; the two ends as two strokes: %zu\n", looped, apart);
+    CHECK(looped > 500u && looped <= apart + apart / 20);
+    ed.command("undo"), ed.command("undo");
+    /* An undo mid-stroke: the stroke goes, and the desk can paint again (re-check 386). */
+    rt->hands[1] = held_at(centre_xr + Vec3(0.0f, 0.0f, 15.0f));
+    rt->hands[1].trigger = 1.0f;
+    ed.step_frame_headless();
+    ed.command("undo");
+    const size_t steps_before_desk = ed.undo_steps_for_test();
+    ed.command(strprintf("paint stroke %g %g %g %g 1", px.x, px.y, px.x, px.y));
+    const std::string desk_step = ed.undo_label_for_test(0);
+    const size_t desk_steps = ed.undo_steps_for_test() - steps_before_desk;
+    rt->hands[1].trigger = 0.0f;
+    ed.step_frame_headless();
+    std::printf("    a desk stroke after an undo mid VR stroke: %zu new step(s), '%s'\n", desk_steps, desk_step.c_str());
+    CHECK(desk_steps >= 1u && desk_step == "Paint");  // (locked out it would make none; the undo may have taken the layer's step, made again)
+    /* Paint turned off at the desk: VR's painting goes off with it. */
+    ed.command("paint off");
+    ed.step_frame_headless();
+    CHECK(!ed.vr_paint_for_test());
+    ed.command("vr stop");
+    ed.command("vr paint on");
+    CHECK(!ed.vr_paint_for_test());
+  });
+  test("the lesson's Try-it (round 386): vr paint - refused until Paint is on for an object", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("vr paint");
+    log.clear();
+    Log::fetch(since, log);
+    CHECK(!ed.vr_paint_for_test() && !log.empty() && log.back().text.find("VR paint: turn Paint on") == 0);
+  });
+}
+
 void run_vr_tests() {
   vr_math_tests();
   vr_session_tests();
   vr_nav_tests();
   vr_sketch_tests();
+  vr_paint_tests();
 }

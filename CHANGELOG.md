@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 386): painting in VR
+
+**Asked:** Phase C's last round: the controller paints textures through the paint dab pipeline; size and opacity from
+the thumbstick; erase by the grip.
+
+**Added (task 0363)**
+- **A world dab:** a disc square to the controller's ray where it meets the surface - triangles facing away and texels
+  past the radius in front or behind left alone - through the desk's rasterizer, brush, symmetry, dilation and undo.
+- **`vr paint`:**
+  - with Paint on for an object, the right trigger paints along the ray, its pressure the pen's;
+  - the right grip erases;
+  - the right stick sizes the brush, the left stick's sideways sets its opacity;
+  - A undoes the last paint stroke.
+- **The eyes show** the ray and the brush's ring where it lands.
+
+**The Opus review's fixes:**
+- the desk's Paint mode had ended every VR stroke after its first dab: a stroke VR has under way is VR's;
+- the dabs between frames follow the ray and hit again, so a stroke that leaves the surface never bridges across it;
+- mirrored objects take paint;
+- Paint off at the desk turns VR's painting off;
+- a sketch stroke under way is kept when painting starts;
+- the dabs test only the triangles near them (the BVH);
+- the grip squeezed mid-stroke starts an erase stroke;
+- the trigger goes through the pen's pressure curve;
+- the re-check's: each dab between frames square to the ray that found it, the BVH's ball never too small under a
+  turned stretch, a stroke ended when the session stops or the scene changes, rays cast only as far as the ray swept,
+  an undo mid-stroke frees the desk.
+
+**Checked:** a world dab against a mouse dab of the same size on the same face (280 and 283 texels, 279 shared); the
+back face and a disc off the surface paint nothing, a mirrored face takes paint; the editor on a stub runtime (a 3 m
+sweep of 7,830 texels in one step, the grip's erase, A, the sticks, a stroke round the cube in the air against its two
+ends apart, Paint off, the refusal); the desk's paint tests.
+
 ## 2026-11-01 (round 385): sketching in VR
 
 **Asked:** Phase C's third round: controller strokes into the Strokes system as 3D ribbons and tubes (Quill, Gravity
