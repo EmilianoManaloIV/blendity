@@ -490,6 +490,8 @@ void Editor::draw_pad_more_menu() {
   u.submenu("Pen", u.px(200), [this] { draw_sketch_pen_menu(); });
   u.submenu("Select", u.px(240), [this] { draw_sketch_select_items(); });  // (round 388)
   u.tooltip("Photoshop's selections: a rectangle or a lasso dragged on the pad, then Fill, Delete or Add Mask (Layers).");
+  u.submenu("Shapes", u.px(240), [this] { draw_sketch_shape_items(); });  // (round 390)
+  u.tooltip("Illustrator's shapes and Pen: a rectangle, an ellipse, a polygon or a star dragged on the pad, Bezier paths, a fill and a stroke color.");
   u.submenu("Guides", u.px(240), [this] { draw_sketch_guides_items(); });
   const bool scene_pic = draw_source_ != 2;  // (round 324: a paper isn't in the scene - Build and Place in 3D are the scene's)
   if (scene_pic) u.submenu("Build", u.px(240), [this] { draw_sketch_build_items(); });
@@ -704,6 +706,7 @@ bool Editor::draw_source_command(const std::string &w) {
     return true;
   }
   sketch_xf_settle();  // (review 389: the transform is the canvas's being left)
+  sketch_vec_pick(0);  // (review 390: a Pen path under way too)
   draw_source_ = w == "game" ? 1 : w == "paper" ? 2 : 0;
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_solo_ = -1;  // (another sketch, or the scene's again: review 324)

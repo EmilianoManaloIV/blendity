@@ -168,6 +168,7 @@ void Editor::sketch_delete() {
       SketchStroke piece = st;
       piece.pts = r, piece.raw.clear(), piece.kind = StrokeKind::Freehand, piece.closed = false;
       piece.center = {}, piece.rx = piece.ry = piece.angle = piece.start = piece.sweep = 0.0f;  // (no longer the fit's shape)
+      piece.fill = 0, piece.bez.clear();  // (round 390: a piece is a line, not the shape)
       kept.push_back(std::move(piece));
     }
   }
@@ -245,9 +246,9 @@ bool Editor::sketch_select_update(const Recti &view, Vec2 px) {
 void Editor::draw_sketch_select_items() {
   auto &u = ui_;
   const bool has = sketch_sel_.size() >= 3;
-  if (u.menu_item("Rectangle", nullptr, sketch_select_tool_ == 1)) sketch_select_tool_ = sketch_select_tool_ == 1 ? 0 : 1;
+  if (u.menu_item("Rectangle", nullptr, sketch_select_tool_ == 1)) sketch_vec_pick(0), sketch_select_tool_ = sketch_select_tool_ == 1 ? 0 : 1;
   u.tooltip("Drag a rectangle on the pad (Photoshop's Rectangular Marquee). Again: back to the brush.");
-  if (u.menu_item("Lasso", nullptr, sketch_select_tool_ == 2)) sketch_select_tool_ = sketch_select_tool_ == 2 ? 0 : 2;
+  if (u.menu_item("Lasso", nullptr, sketch_select_tool_ == 2)) sketch_vec_pick(0), sketch_select_tool_ = sketch_select_tool_ == 2 ? 0 : 2;
   u.tooltip("Drag round an area on the pad (Photoshop's Lasso). Again: back to the brush.");
   if (u.menu_item("Select All")) run_console_command("sketch select all");
   u.menu_separator();

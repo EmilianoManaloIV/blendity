@@ -163,6 +163,7 @@ void Editor::sketch_xf_split(SketchStroke &st, std::vector<SketchStroke> &kept, 
       SketchStroke piece = st;
       piece.pts = run, piece.raw.clear(), piece.kind = StrokeKind::Freehand, piece.closed = false;
       piece.center = {}, piece.rx = piece.ry = piece.angle = piece.start = piece.sweep = 0.0f;
+      piece.fill = 0, piece.bez.clear();  // (round 390: a piece is a line, not the shape)
       if (inside) idx.push_back(kept.size());
       kept.push_back(std::move(piece));
     }
@@ -195,6 +196,9 @@ void Editor::sketch_xf_apply() {
       const Vec2 q = m.map((p.x - xf.lo.x) / size.x, (p.y - xf.lo.y) / size.y);
       p.x = q.x, p.y = q.y;
     }
+    for (Vec2 &b : st.bez) b = m.map((b.x - xf.lo.x) / size.x, (b.y - xf.lo.y) / size.y);  // (round 390: the Pen's anchors and handles too)
+    if (st.bez.size() >= 6) st.pts.clear();  // (its points the mapped path's samples again)
+    for (Vec2 p : st.bez.size() >= 6 ? sketch_bezier_points(st.bez, st.closed) : std::vector<Vec2>()) st.pts.push_back({p.x, p.y, 1.0f});
     st.raw.clear(), st.kind = StrokeKind::Freehand;
     st.center = {}, st.rx = st.ry = st.angle = st.start = st.sweep = 0.0f;
     if (!st.filled) st.width = xf.orig[k].width * wscale;

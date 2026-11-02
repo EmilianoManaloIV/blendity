@@ -52,6 +52,10 @@ struct SketchStroke {
   int pressure_to = 1;
   float min_size = 0.0f;
   bool filled = false;  // (round 388: a closed shape filled with the colour - a selection's Fill - not a line along it)
+  /* Round 390 (task 0367): a closed shape's fill (0xAARRGGBB, 0 none), drawn under its line (a width of 0: no line),
+   * and the Pen's path - an anchor, its in-handle and its out-handle each, in the canvas's frame; pts are its samples. */
+  uint32_t fill = 0;
+  std::vector<Vec2> bez;
   /* The fit's parameters, in the canvas's frame (an arc, an ellipse): the centre, the radii, the first axis's angle,
    * where the arc starts and how far it sweeps (radians, counter-clockwise on a y-down canvas is negative). */
   Vec2 center;
@@ -101,6 +105,13 @@ struct SketchLayer {
   }
 };
 
+/* An artboard (round 390, task 0367): a named rectangle of the picture plane an SVG export can be cut to
+ * (Illustrator's), in the canvas's frame. */
+struct SketchArtboard {
+  std::string name;
+  Vec2 lo, hi;
+};
+
 /* The scene's sketch: its layers and strokes, and the perspective guide - saved with the scene, since its vanishing
  * points are the camera's directions (task 0224). */
 struct Sketch {
@@ -108,6 +119,7 @@ struct Sketch {
   std::vector<SketchStroke> strokes;
   int active_layer = 0;
   std::vector<SketchCanvas> canvases;  // (the planes in the scene; the picture plane isn't listed)
+  std::vector<SketchArtboard> artboards;  // (round 390)
   int active_canvas = 0;
   int perspective = 0;  // 0 off, 1-3 point
   /* The guide follows the camera and the camera the guide (task 0224): its points are the world axes' vanishing
@@ -206,4 +218,21 @@ float distance_to_polyline(Vec2 p, const std::vector<Vec2> &pts);
 std::vector<Vec2> french_curve(int which);
 
 }  // namespace sketch
+/* Vector shapes and SVG (round 390, task 0367; scene/sketch_svg.cpp). An outline: 1 a rectangle, 2 an ellipse, 3 a
+ * polygon of `sides`, 4 a star of `sides` points, in the box a-b; closed (its first point again last). */
+std::vector<Vec2> sketch_shape_outline(int kind, int sides, Vec2 a, Vec2 b);
+/* A Pen path's points (an anchor, its in- and out-handle each): each cubic sampled, the first anchor first. */
+std::vector<Vec2> sketch_bezier_points(const std::vector<Vec2> &bez, bool closed);
+/* A layer read from an SVG: Blendity's own groups are layers again; another program's drawing one layer, "SVG". */
+struct SketchSvgLayer {
+  std::string name;
+  float opacity = 1.0f;
+  int blend = 0;
+  std::vector<SketchStroke> strokes;
+};
+/* The picture plane's strokes of the shown layers as SVG, its view box lo-hi (the canvas's frame). */
+std::string sketch_svg_text(const Sketch &s, Vec2 lo, Vec2 hi);
+/* An SVG's drawing in the canvas's frame; false (with `err`) when it isn't one. */
+bool sketch_svg_read(const std::string &text, std::vector<SketchSvgLayer> &layers, std::string &err);
+
 }  // namespace bl

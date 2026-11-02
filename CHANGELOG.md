@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 390): Illustrator's shapes, the Pen, fills, artboards and SVG
+
+**Asked:** Phase D's fourth round: a Bezier pen with anchors and handles in the Draw tab, vector shapes with fills and
+strokes, artboards on papers, SVG import and export (round 387's findings 21 and 22).
+
+**Added (task 0367)**
+- **Shapes** (More > Shapes, `sketch shape rect|ellipse|polygon [n]|star [n] x0 y0 x1 y1`): Illustrator's Rectangle,
+  Ellipse, Polygon and Star dragged on the pad - Shift even, Alt from the centre - each one undo step.
+- **The Pen** (More > Shapes > Pen, `sketch pen x y [hx hy] | close | end`): a click a corner, a drag pulls mirrored
+  handles, a click on the first anchor closes, Enter or Esc ends; the path drawn with its anchors as it is made.
+- **Fill and stroke** (`sketch fillcolor|strokecolor <hex>|none`, the menu's Fill and Stroke: None): a fill under the
+  line with the layer's opacity, blend, clipping and mask; **Restyle Selection** (`sketch restyle`).
+- **Artboards** (`sketch artboard add|remove|list`), outlined on the pad, saved with the scene and the paper.
+- **SVG** (`sketch svg export <path> [artboard]`, `sketch svg import <path>`, scene/sketch_svg.cpp): each layer a group
+  with its opacity and CSS blend; Pen paths as cubics; another program's paths (M L H V C S Q T A Z), rects, circles,
+  ellipses, lines, polylines and polygons with their fills, strokes, opacities, style= and transforms.
+- Free Transform moves a Pen path's anchors; cuts leave lines.
+
+**The Opus review's fixes:**
+- numbers after a path's Z ending the path (they had hung the editor);
+- a Pen path kept when another tool, source or paper is picked, and ended by Enter or Esc whatever the tool;
+- a second Z closing once, opacity set both ways counted once, a gradient's fill its fallback or none;
+- shapes whose transform overflows left out, widths held at 200 px;
+- Restyle refusing to hide strokes and leaving a locked layer alone;
+- a shape's drag the view's it began in;
+- a hidden group's layers left out of the SVG;
+- colors and sides checked at the console.
+
+**Checked:** a rectangle's corners, an ellipse on its equation, a hexagon's top point, a star's two radii; the fill and
+line on screen and Stroke None; one undo step a shape; the Pen's ends and middle against the cubic, a mouse-made closed
+path with mirrored handles, Esc ending the path; an SVG round trip (points 6.6e-7 off at most, layers and Multiply
+kept), a hand-written SVG with every element, a group transform, relative commands and an arc; an artboard's view box;
+the paper text keeping artboards, fills and paths; a transform of a Pen path; a Delete and the Eraser leaving lines;
+the review's hard cases (numbers after Z, Z Z, opacity twice, url(), overflow, a cut-short Pen group in the file, Esc
+on a console path, another tool picked mid-path, Restyle refused and on a locked layer).
+
 ## 2026-11-01 (round 389): Free Transform, Space and H, the pen's tilt
 
 **Asked:** Phase D's third round: Ctrl+T free transform with handles on a layer or a selection, Space to pan and H for

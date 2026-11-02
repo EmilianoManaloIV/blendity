@@ -58,3 +58,12 @@ Photoshop and Substance Painter do layers", with opacity, easy to reach while dr
 - **Filled strokes** (a selection's Fill) are drawn as polygons.
 - **The file** gains `sketch_layer_clip`, `sketch_layer_mask` and `sketch_layer_mask_shape` lines and a stroke's
   `filled` word. Older builds skip them.
+
+## Amended (round 390, task 0367)
+- **Vector strokes** keep a fill (`SketchStroke::fill`, drawn under the line with the layer's coverage, so blend,
+  clipping and masks apply as to the line) and the Pen's anchors and handles (`bez`); their points stay the samples
+  every other tool works on. A cut leaves lines: the pieces lose the fill and the path.
+- **The file** gains a stroke's `fill <argb>` and `bez <n> ...` words before `filled`, which stays the line's last word
+  so an older build still reads a Fill, and `sketch_artboard` lines. Older builds skip them.
+- **SVG** carries layers as groups with their opacity and, for the modes CSS has, `mix-blend-mode`; the other modes,
+  clipping and masks don't go into the file.

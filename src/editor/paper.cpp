@@ -151,6 +151,7 @@ std::string Editor::paper_free_name(const std::string &base) const {
 
 void Editor::paper_new(const std::string &name) {
   sketch_xf_settle();  // (re-check 389: kept on the paper it began on)
+  sketch_vec_pick(0);  // (review 390: a Pen path too)
   if (paper_dirty_) paper_save();
   paper_reset(paper_free_name(name.empty() ? "Paper" : name));
   paper_save();  // (on disk at once: a board can pin it, the Open list shows it)
@@ -175,6 +176,7 @@ bool Editor::paper_open(const std::string &name) {
   const bool is_open = !paper_name_.empty() && (by_path ? to_lower(fs::normalize(name)) == to_lower(fs::normalize(paper_path(paper_name_))) : board_clean_name(name) == paper_name_);
   if (is_open) return true;  // (the open one: as it is, its unsaved edits and history kept - reviews 324, 326)
   sketch_xf_settle();  // (re-check 389: kept on the paper it began on)
+  sketch_vec_pick(0);  // (review 390: a Pen path too)
   const bool outside = by_path;
   if (paper_dirty_) paper_save();  // (before reading: the file may be this paper's)
   const std::string path = outside ? paper_take_in(name) : paper_path(name);

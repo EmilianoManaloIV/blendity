@@ -2096,6 +2096,8 @@ void Editor::new_scene() {
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_xf_drop();
+  if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
+  sketch_pen_.clear(), sketch_vec_drag_.clear();  // (review 390: a Pen path is the old scene's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
@@ -2129,6 +2131,8 @@ bool Editor::open_scene(const std::string &path) {
   export_waits_drop("another scene opened");  // (review 354)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_xf_drop();
+  if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
+  sketch_pen_.clear(), sketch_vec_drag_.clear();  // (review 390: a Pen path is the old scene's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);
