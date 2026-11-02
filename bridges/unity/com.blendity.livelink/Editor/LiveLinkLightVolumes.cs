@@ -101,6 +101,214 @@ namespace Blendity.LiveLink
             }
         }
 
+        // ------------------------------------------------------------ Blendity's bake (round 398)
+
+        /// <summary>The last bake refused and why (tests and the window read it); "" when the last one landed.</summary>
+        public string LastBakeRefusal = "";
+        /// <summary>The bakes landed, by Blendity's object id: their checksums.</summary>
+        public readonly Dictionary<long, uint> BakesLanded = new Dictionary<long, uint>();
+
+        /* A volume's bake from Blendity (its floats in Unity's axes and voxel order: L0, L1 red, green, blue, then the
+         * validity), saved as the package saves its own custom bakes - LightVolumeBaker.SaveCustomProbesBaked packs, dilates
+         * and writes the three textures - after it is checked: the grid the volume has here, its checksum, its size, every
+         * value a number; the textures it replaces copied into a Backup folder beside them first. The volume's Bake is
+         * turned off so the package's bake leaves it, and its baked rotation set as the package's bake sets it. Refused:
+         * nothing is written, and the console says why. */
+        void OnLightVolumeBake(Dictionary<string, object> j, byte[] bin)
+        {
+            GameObject go;
+            var type = FindType(LightVolumeType);
+            if (type == null)
+            {
+                LastBakeRefusal = "VRC Light Volumes isn't in this project";
+                Debug.LogWarning("Blendity Live Link: a Light Volume bake came, and VRC Light Volumes isn't in this project - nothing written");
+                return;
+            }
+            if (!Objects.TryGetValue(j.GetId("id"), out go) || go == null)
+                return;  // (its object isn't here yet: it comes again at the next sync)
+            var v = go.GetComponent(type);
+            string why = v == null ? "no Light Volume on " + go.name : CheckBake(j, bin, v);
+            if (why == null && string.IsNullOrEmpty(go.scene.path))
+                why = "save the Unity scene first (the package writes its bake beside the scene)";
+            if (why == null && Member(v, "LightVolumeManager") == null)
+                why = "the volume has no Light Volume Manager yet (the package's setup makes one: save the scene and send again)";
+            uint crc = (uint)(long)j.GetNumber("crc");
+            if (why == null && LandedCrc(v) == crc)
+            {
+                BakesLanded[j.GetId("id")] = crc;  // (review 398: already there - a reconnect's resend writes nothing)
+                LastBakeRefusal = "";
+                return;
+            }
+            if (why != null)
+            {
+                LastBakeRefusal = why;
+                Debug.LogWarning("Blendity Live Link: the Light Volume bake for " + go.name + " was refused: " + why);
+                return;
+            }
+            try
+            {
+                SaveBake(go, v, j, bin);
+            }
+            catch (Exception e)
+            {
+                LastBakeRefusal = (e.InnerException ?? e).Message;
+                Debug.LogWarning("Blendity Live Link: the Light Volume bake for " + go.name + " wasn't saved (" + LastBakeRefusal + ")");
+            }
+        }
+
+        /// <summary>Tests: why a bake would be refused, or null.</summary>
+        public string CheckBakeForTest(Dictionary<string, object> j, byte[] bin, Component v) { return CheckBake(j, bin, v); }
+
+        /* Why a bake can't be taken, or null: the grid, the size, the checksum, the numbers. */
+        static string CheckBake(Dictionary<string, object> j, byte[] bin, Component v)
+        {
+            var r = j.GetFloats("resolution", 0, 0, 0);
+            int rx = (int)r[0], ry = (int)r[1], rz = (int)r[2];
+            Refresh(v);  // (an adaptive grid made from the box as it is here)
+            var have = (Vector3Int)v.GetType().GetField("Resolution").GetValue(v);
+            if (have != new Vector3Int(rx, ry, rz))
+                return "it was baked at " + rx + " x " + ry + " x " + rz + " voxels, the volume here has " + have.x + " x " + have.y + " x " + have.z + " (bake again in Blendity)";
+            long n = (long)rx * ry * rz;
+            if (bin == null || n < 1 || bin.LongLength != n * 13 * 4)
+                return "its data isn't its grid's size";
+            if (Crc32(bin) != (uint)(long)j.GetNumber("crc"))
+                return "its data doesn't match its checksum";
+            for (int i = 0; i < bin.Length; i += 4)
+                if (float.IsNaN(BitConverter.ToSingle(bin, i)) || float.IsInfinity(BitConverter.ToSingle(bin, i)))
+                    return "it holds a value that isn't a number";
+            return null;
+        }
+
+        void SaveBake(GameObject go, Component v, Dictionary<string, object> j, byte[] bin)
+        {
+            var r = j.GetFloats("resolution", 0, 0, 0);
+            int n = (int)r[0] * (int)r[1] * (int)r[2];
+            var l0 = Vectors(bin, 0, n);
+            var l1r = Vectors(bin, n * 12, n);
+            var l1g = Vectors(bin, n * 24, n);
+            var l1b = Vectors(bin, n * 36, n);
+            var validity = new float[n];
+            Buffer.BlockCopy(bin, n * 48, validity, 0, n * 4);
+            BackUp(v);
+            var baker = FindAnyType("VRCLightVolumes.LightVolumeBaker");
+            var save = baker != null ? baker.GetMethod("SaveCustomProbesBaked", AnyStatic) : null;
+            if (save == null)
+                throw new MissingMethodException("VRCLightVolumes.LightVolumeBaker", "SaveCustomProbesBaked");
+            /* The Manager's own settings, as the package's bake takes them (review 398): its dilation and its denoise. */
+            var manager = Member(v, "LightVolumeManager");
+            object dilate = Member(manager, "DilateInvalidProbes"), denoise = Member(manager, "Denoise");
+            bool useValidity = !(dilate is bool) || (bool)dilate;
+            if (!(bool)save.Invoke(null, new object[] { v, l0, l1r, l1g, l1b, useValidity ? validity : null, denoise is bool && (bool)denoise }))
+                throw new InvalidOperationException("the package didn't save it (its console message says why)");
+            SetMember(v, "Bake", false);
+            /* The rotation the volume had when Blendity baked it (its L1 is in world axes), as the package's bake sets it. */
+            SetMember(v, "InvBakedRotation", Quaternion.Inverse(Rotation(j.GetFloats("rotation", 0, 0, 0, 1))));
+            Refresh(v);
+            LastBakeRefusal = "";
+            uint crc = (uint)(long)j.GetNumber("crc");
+            BakesLanded[j.GetId("id")] = crc;
+            RecordLanded(v, crc);
+            Debug.Log("Blendity Live Link: " + go.name + "'s Light Volume baked in Blendity (" + r[0] + " x " + r[1] + " x " + r[2] + " voxels)");
+        }
+
+        static Vector3[] Vectors(byte[] bin, int at, int n)
+        {
+            var v = new Vector3[n];
+            for (int i = 0; i < n; i++, at += 12)
+                v[i] = new Vector3(BitConverter.ToSingle(bin, at), BitConverter.ToSingle(bin, at + 4), BitConverter.ToSingle(bin, at + 8));
+            return v;
+        }
+
+        static object Member(object o, string name)
+        {
+            var f = o != null ? o.GetType().GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance) : null;
+            return f != null ? f.GetValue(o) : null;
+        }
+
+        /* Which of Blendity's bakes a volume's textures hold: its checksum, kept in the project's Library (never in
+         * Assets) by Texture0's GUID; 0 when they aren't one of Blendity's (Unity's own bake, or none). */
+        static string LandedPath(Component v)
+        {
+            var tex = Member(v, "Texture0") as UnityEngine.Object;
+            string guid = tex != null ? AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(tex)) : "";
+            return string.IsNullOrEmpty(guid) ? "" : System.IO.Path.Combine("Library", "BlendityLightVolumes", guid + ".crc");
+        }
+
+        /* The textures as they are on disk: their sizes and times (re-check 398: Unity's own bake writes the same files under
+         * the same GUID - a record of Blendity's bake only counts while the textures are the ones it wrote). */
+        static string Fingerprint(Component v)
+        {
+            var parts = new List<string>();
+            for (int k = 0; k < 3; k++)
+            {
+                var tex = Member(v, "Texture" + k) as UnityEngine.Object;
+                string file = tex != null ? AssetDatabase.GetAssetPath(tex) : "";
+                var info = file.Length > 0 ? new System.IO.FileInfo(file) : null;
+                parts.Add(info != null && info.Exists ? info.Length + "@" + info.LastWriteTimeUtc.Ticks : "-");
+            }
+            return string.Join(",", parts);
+        }
+
+        static uint LandedCrc(Component v)
+        {
+            string path = LandedPath(v);
+            if (path.Length == 0 || !System.IO.File.Exists(path))
+                return 0;
+            var lines = System.IO.File.ReadAllLines(path);
+            uint crc;
+            return lines.Length == 2 && lines[1] == Fingerprint(v) && uint.TryParse(lines[0].Trim(), out crc) ? crc : 0;
+        }
+
+        static void RecordLanded(Component v, uint crc)
+        {
+            string path = LandedPath(v);
+            if (path.Length == 0)
+                return;
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));
+            System.IO.File.WriteAllLines(path, new[] { crc.ToString(), Fingerprint(v) });
+        }
+
+        /* The volume's current textures - Unity's own bake - copied to <their folder>/Backup before they are replaced, never
+         * deleted; an earlier bake of Blendity's isn't (review 398: every resend had added three copies). */
+        static void BackUp(Component v)
+        {
+            if (LandedCrc(v) != 0)
+                return;
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            for (int k = 0; k < 3; k++)
+            {
+                var tex = v.GetType().GetField("Texture" + k).GetValue(v) as UnityEngine.Object;
+                string path = tex != null ? AssetDatabase.GetAssetPath(tex) : "";
+                if (string.IsNullOrEmpty(path))
+                    continue;
+                string dir = System.IO.Path.GetDirectoryName(path).Replace('\\', '/');
+                if (!AssetDatabase.IsValidFolder(dir + "/Backup"))
+                    AssetDatabase.CreateFolder(dir, "Backup");
+                AssetDatabase.CopyAsset(path, dir + "/Backup/" + System.IO.Path.GetFileNameWithoutExtension(path) + "_" + stamp + System.IO.Path.GetExtension(path));
+            }
+        }
+
+        static uint[] crcTable;
+        /* CRC-32 (IEEE, as Blendity's crc32 and zip's). */
+        public static uint Crc32(byte[] data)
+        {
+            if (crcTable == null)
+            {
+                crcTable = new uint[256];
+                for (uint i = 0; i < 256; i++)
+                {
+                    uint c = i;
+                    for (int b = 0; b < 8; b++)
+                        c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                    crcTable[i] = c;
+                }
+            }
+            uint crc = 0xFFFFFFFFu;
+            foreach (byte x in data)
+                crc = crcTable[(crc ^ x) & 0xFF] ^ (crc >> 8);
+            return crc ^ 0xFFFFFFFFu;
+        }
+
         /* A linked object moved: its volume's or light's package data with it. */
         static void RefreshMoved(GameObject go)
         {

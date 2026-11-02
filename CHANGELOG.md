@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 398): VRC Light Volumes baked in Blendity
+
+**Asked:** "a toggle so I can choose to bake the data in Blendity ... safely exported into Blendity".
+
+**Added (task 0375)**
+- **The bake**: Generate Lighting's last phase bakes each volume with Bake in Blendity on, its grid as probes through the
+  path tracer, fitted to the package's SH L1; saved beside the lightmaps with a checksum.
+- **To Unity, safely**: checked (grid, size, checksum, numbers, a saved scene), the old textures backed up, saved by the
+  package's own routine, its Bake off. **Back**: Unity's bakes read from its textures on import. Selected volumes show
+  their baked light on their voxels.
+
+**Checked:** the real package saved Blendity's bake; the round trip at most 0.04% apart; a changed byte refused; tests in
+lighting, Live Link and assets.
+
 ## 2026-11-02 (round 397): VRC Light Volumes - the component, Live Link and import
 
 **Asked:** "for the world we need to support VRC LightVolume", with a toggle to bake it in Blendity (round 398).

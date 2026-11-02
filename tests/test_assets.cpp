@@ -9169,6 +9169,44 @@ std::string material_name(GameObject *g, size_t slot = 0) {
 }
 }  // namespace r395
 
+static void tests_round398() {
+  test("Unity's Light Volume bake read back (round 398): a scene's Light Volume with its three baked textures in the project comes in with Unity's bake - shown on its voxels until Blendity bakes it", [] {
+    std::string t[3];
+    bool have = true;
+    for (int k = 0; k < 3; k++) have = have && fs::read_file("tests/fixtures/light_volume_unity/hall_" + std::to_string(k) + ".asset", t[k]);
+    if (!have) {
+      std::printf("    (not run from the source folder)\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(800, 600);
+    const std::string dir = resolve_asset_path("Assets/Imported/R398");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    std::string guids;
+    for (int k = 0; k < 3; k++) {
+      const std::string g = "eeee0000eeee0000eeee0000eeee000" + std::to_string(k);
+      CHECK(fs::write_file(fs::join(dir, "hall_" + std::to_string(k) + ".asset"), t[k]));
+      guids += g + "\tAssets/hall_" + std::to_string(k) + ".asset\tAssets/Imported/R398/hall_" + std::to_string(k) + ".asset\n";
+    }
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), guids));
+    const std::string scene = std::string("%YAML 1.1\n") +
+        "--- !u!1 &10\nGameObject:\n  m_Name: Hall Volume\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalScale: {x: 6, y: 3, z: 6}\n  m_Father: {fileID: 0}\n"
+        "--- !u!114 &12\nMonoBehaviour:\n  m_GameObject: {fileID: 10}\n  m_Script: {fileID: 11500000, guid: 21bc8ec8ba5e5f3408667533e591f313, type: 3}\n"
+        "  Texture0: {fileID: 11700000, guid: eeee0000eeee0000eeee0000eeee0000, type: 2}\n  Texture1: {fileID: 11700000, guid: eeee0000eeee0000eeee0000eeee0001, type: 2}\n"
+        "  Texture2: {fileID: 11700000, guid: eeee0000eeee0000eeee0000eeee0002, type: 2}\n  VoxelsPerUnit: 1\n";
+    CHECK(fs::write_file(fs::join(dir, "Hall.unity"), scene));
+    ed.command("import Assets/Imported/R398/Hall.unity");
+    GameObject *hall = ed.scene().find_by_name("Hall Volume");
+    const auto &bakes = ed.light_volume_bakes_for_test();
+    const auto it = hall ? bakes.find(hall->id) : bakes.end();
+    std::printf("    the hall: %s, its bake %s\n", hall ? "made" : "-", it != bakes.end() ? strprintf("%d x %d x %d", it->second.res[0], it->second.res[1], it->second.res[2]).c_str() : "-");
+    CHECK(hall && it != bakes.end() && it->second.res[0] == 6 && it->second.res[1] == 3 && !it->second.unity_axes);
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
 static void tests_round395() {
   test("Unity's VRC Light Volumes (round 397): a scene's Light Volume comes in as Blendity's with the package's fields and stays an Engine Component; a Point Light Volume after its light in the file turns the light's Light Volume on", [] {
     std::vector<UnityDoc> docs;
@@ -10600,6 +10638,7 @@ void run_assets_tests() {
   tests_round370();
   tests_round371();
   tests_round395();
+  tests_round398();
   tests_round372();
   tests_round373();
   tests_round374();

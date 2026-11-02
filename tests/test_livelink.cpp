@@ -12,6 +12,7 @@
 #include <thread>
 #include "../src/core/json.h"
 #include "../src/scene/budget.h"
+#include "../src/scene/unity_package.h"
 #include "../src/core/net_server.h"
 /* The Unreal plugin's protocol layer (task 0277): standard C++ only, compiled here so every build replays it. */
 #include "../bridges/unreal/BlendityLiveLink/Source/BlendityLiveLink/Private/BlendityLinkProtocol.cpp"
@@ -176,11 +177,18 @@ Session record_session(const std::function<void(Editor &)> &at_end = {}) {  // (
   GameObject *hall = ed.scene().create("Hall Volume");
   hall->set_local_position(Vec3(0, 1.5f, 0));
   hall->set_local_scale(Vec3(6, 3, 6));
-  hall->add<LightVolumeComponent>()->intensity = 1.25f;
+  LightVolumeComponent *hall_volume = hall->add<LightVolumeComponent>();
+  hall_volume->intensity = 1.25f;
+  hall_volume->voxels_per_unit = 1.0f, hall_volume->bake_in_blendity = true;  // (round 398: baked here - 6 x 3 x 6 voxels - and sent with its bake)
   GameObject *lamp = ed.scene().create("Lamp");
   lamp->set_local_position(Vec3(0, 2.5f, 1));
   lamp->add<Light>()->type = 1;
   lamp->light()->light_volume = true;
+  if (box) {  // (round 398: Generate Lighting, the hall's bake its last phase)
+    ed.scene().lighting.indirect_samples = 32, ed.scene().lighting.direct_samples = 8, ed.scene().lighting.max_size = 128;
+    ed.command("bake start");
+    for (int i = 0; i < 400 && ed.baking_for_test(); i++) ed.step_frame_headless();
+  }
   if (!box || !ed.livelink_start(0)) return s;
   Material &mat = *box->mesh_renderer()->materials[0];
   mat.name = "Cel";
@@ -625,6 +633,7 @@ static void livelink_fixture_tests() {
     CHECK(count_of(s.ms, "weights") == 2);  // (round 378: the Arm's Smile at the sync; round 381: the Face's keys)
     CHECK(count_of(s.ms, "avatar") == 1 && count_of(s.ms, "springs") == 1);  // (round 381: the rig's at the sync; its chain at the end)
     CHECK(count_of(s.ms, "lightvolume") == 1);  // (round 397: the hall's, at the sync)
+    CHECK(count_of(s.ms, "lightvolumebake") == 1);  // (round 398: its bake, after it)
     const std::string path = "tests/fixtures/livelink_stream.bin";
     if (std::getenv("BLENDITY_LIVELINK_RECORD")) {
       CHECK(fs::write_file(path, s.raw));
@@ -2010,6 +2019,79 @@ static void tests_round397() {
     const Message *none = last_for(off, "lightvolume", vol->id);
     CHECK(none && none->j["none"].b);
     ed.livelink_stop();
+  });
+  test("Live Link's VRC Light Volume bakes (round 398): a volume with Bake in Blendity and a bake sends it once - in Unity's axes, its checksum its floats' - again when the bakes change, never with the toggle off", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *vol = ed.scene().create("Volume");
+    LightVolumeComponent *v = vol->add<LightVolumeComponent>();
+    v->bake_in_blendity = true;
+    v->adaptive_resolution = false, v->resolution[0] = 2, v->resolution[1] = v->resolution[2] = 1;  // (the bake's grid)
+    LightVolumeSH sh;
+    sh.res[0] = 2, sh.res[1] = 1, sh.res[2] = 1;
+    sh.l0 = {Vec3(1, 0, 0), Vec3(2, 0, 0)}, sh.l1r = {Vec3(0.5f, 0, 0), Vec3(0)}, sh.l1g = sh.l1b = {Vec3(0), Vec3(0)}, sh.validity = {1, 1};
+    ed.light_volume_bakes_for_test()[vol->id] = sh;
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) s.push_back(m);
+    const Message *b = last_for(s, "lightvolumebake", vol->id);
+    const std::string want = light_volume_to_unity(sh).bytes();
+    std::printf("    at the sync: %s, %zu bytes, crc %s\n", b ? "sent" : "-", b ? b->bin.size() : 0, b && (uint32_t)b->j["crc"].number() == crc32(want) ? "its floats'" : "-");
+    CHECK(b && b->bin == want && (uint32_t)b->j["crc"].number() == crc32(b->bin) && b->j["resolution"][0].number() == 2);
+    if (!b) return;
+    float first;
+    std::memcpy(&first, b->bin.data(), 4);
+    CHECK(first == 2.0f);  // (Unity's voxel 0 is Blendity's last in x)
+    CHECK(count_of(drain(ed, c), "lightvolumebake") == 0);
+    ed.light_volume_bakes_changed_for_test();  // (a new bake)
+    CHECK(count_of(drain(ed, c), "lightvolumebake") == 1);
+    v->bake_in_blendity = false;
+    ed.light_volume_bakes_changed_for_test();
+    CHECK(count_of(drain(ed, c), "lightvolumebake") == 0);
+    /* Review 398: Unity's own bake read back is never sent back as Blendity's; a bake for another grid isn't sent. */
+    v->bake_in_blendity = true;
+    ed.light_volume_bakes_for_test()[vol->id].from_unity = true;
+    ed.light_volume_bakes_changed_for_test();
+    CHECK(count_of(drain(ed, c), "lightvolumebake") == 0);
+    ed.light_volume_bakes_for_test()[vol->id].from_unity = false;
+    v->resolution[0] = 3;  // (its grid now 3 x 1 x 1: the 2 x 1 x 1 bake is another grid's)
+    ed.light_volume_bakes_changed_for_test();
+    CHECK(count_of(drain(ed, c), "lightvolumebake") == 0);
+    ed.livelink_stop();
+  });
+  test("VRC Light Volumes, the round trip (round 398): the hall's bake in the recorded session, saved in Unity by the real package (its three textures kept in tests/fixtures/light_volume_unity), reads back as the bake Blendity sent - to half-float precision (the harness's Manager has Denoise off: the bridge follows it, as the package's own bake does)", [] {
+    std::string raw, t[3];
+    bool have = fs::read_file("tests/fixtures/livelink_stream.bin", raw);
+    for (int k = 0; k < 3; k++) have = have && fs::read_file("tests/fixtures/light_volume_unity/hall_" + std::to_string(k) + ".asset", t[k]);
+    if (!have) {
+      std::printf("    (not run from the source folder)\n");
+      return;
+    }
+    const std::vector<Message> ms = parse_stream(raw);
+    const Message *sent = nullptr;
+    for (const Message &m : ms) sent = m.type() == "lightvolumebake" ? &m : sent;
+    CHECK(sent != nullptr);
+    if (!sent) return;
+    const int res[3] = {(int)sent->j["resolution"][0].number(), (int)sent->j["resolution"][1].number(), (int)sent->j["resolution"][2].number()};
+    LightVolumeSH blendity, unity;
+    std::string why;
+    CHECK(LightVolumeSH::from_bytes(sent->bin, res, blendity, why) && light_volume_from_textures(t[0], t[1], t[2], unity, why));
+    CHECK(unity.res[0] == res[0] && unity.res[1] == res[1] && unity.res[2] == res[2]);
+    float worst = 0.0f, brightest = 0.0f;
+    size_t compared = 0;
+    for (const Vec3 &c : blendity.l0) brightest = std::max({brightest, c.x, c.y, c.z});
+    for (size_t i = 0; i < std::min(unity.count(), blendity.count()); i++) {
+      if (blendity.validity[i] >= 0.1f) continue;  // (inside geometry - Unity's sense: the package fills it from its neighbours)
+      for (const auto &pair : {std::make_pair(blendity.l0[i], unity.l0[i]), std::make_pair(blendity.l1r[i], unity.l1r[i]), std::make_pair(blendity.l1g[i], unity.l1g[i]),
+                               std::make_pair(blendity.l1b[i], unity.l1b[i])})
+        for (int a = 0; a < 3; a++) worst = std::max(worst, std::fabs(pair.first[a] - pair.second[a]) / std::max(1e-3f, brightest));
+      compared++;
+    }
+    std::printf("    %zu voxels compared, the worst %.4f of the brightest light apart\n", compared, worst);
+    CHECK(compared > 0 && worst < 0.005f);
   });
   test("Live Link's VRC Light Volumes, two at once (review 397): volumes on neighbouring ids changed in one tick both arrive - their messages no longer share a coalescing key", [] {
     Editor ed;

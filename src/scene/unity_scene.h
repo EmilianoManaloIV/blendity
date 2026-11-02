@@ -63,6 +63,8 @@ struct UnityImport {
   /* A model placed as a prefab (an FBX dragged into a scene: a VRChat avatar's usual root): its nodes made as objects
    * under one, returned; nullptr when the GUID isn't a model. */
   std::function<GameObject *(const std::string &guid, Scene &scene, UnityTargets &parts)> model;  // (round 395: `parts` its nodes by fileID, as far as known)
+  /* Round 398: a Light Volume's baked textures (Texture0-2's GUIDs) for its object - Unity's bake, read back. */
+  std::function<void(GameObject &g, const std::string &t0, const std::string &t1, const std::string &t2)> light_volume_textures;
   /* A material by its GUID (round 371: a Unity .mat converted; nullptr when not in the project). */
   std::function<MaterialPtr(const std::string &guid)> material;
   int depth = 0;

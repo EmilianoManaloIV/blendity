@@ -272,6 +272,7 @@ void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   UnityImport inner;
   inner.mesh = ctx.mesh, inner.script_name = ctx.script_name, inner.prefab = ctx.prefab, inner.model = ctx.model, inner.depth = ctx.depth + 1;
   inner.material = ctx.material;  // (round 395: a nested prefab's .mat files had come in as its model's own)
+  inner.light_volume_textures = ctx.light_volume_textures;
   inner.building = ctx.building, inner.total = ctx.total, inner.max_objects = ctx.max_objects;
   inner.path_of = ctx.path_of, inner.source = ctx.path_of ? ctx.path_of(guid) : std::string();
   ctx.building->insert(guid);
@@ -486,8 +487,10 @@ void mark_light_volume(const UnityDoc &d, GameObject &g) {
   if (l && d.body.num("m_Enabled", 1.0) != 0.0) l->light_volume = true;
 }
 
-void add_light_volume(const UnityDoc &d, GameObject *g) {
+void add_light_volume(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   if (g->get<LightVolumeComponent>()) return;
+  const std::string t0 = d.body.guid("Texture0"), t1 = d.body.guid("Texture1"), t2 = d.body.guid("Texture2");
+  if (ctx.light_volume_textures && !t0.empty() && !t1.empty() && !t2.empty()) ctx.light_volume_textures(*g, t0, t1, t2);  // (round 398: Unity's bake)
   LightVolumeComponent *v = g->add<LightVolumeComponent>();
   const YamlNode &b = d.body;
   v->enabled = b.num("m_Enabled", 1.0) != 0.0;
@@ -528,7 +531,7 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
     default:
       if (d.class_id == 114 && vrchat_type(d.body) == "VRCPhysBone" && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty()))
         add_physbone(d, g, ctx, b);  // (and kept below, for Unity; a project's own script with such fields isn't one)
-      if (is_script(d, kLightVolumeGuid)) add_light_volume(d, g), ctx.light_volumes++;  // (round 397: and kept below)
+      if (is_script(d, kLightVolumeGuid)) add_light_volume(d, g, ctx), ctx.light_volumes++;  // (round 397: and kept below)
       return add_engine(d, g, ctx);
   }
 }

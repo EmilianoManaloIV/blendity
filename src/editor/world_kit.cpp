@@ -7,6 +7,7 @@
 #include "../scene/lod.h"
 #include "../scene/export.h"
 #include "../core/core.h"
+#include "../image/image.h"
 
 namespace bl {
 
@@ -85,16 +86,25 @@ void Editor::draw_light_volumes() {
   });
 }
 
-/* A selected volume's voxel centres as dots - each axis at most 32 shown (a fine grid would hide the scene). */
+/* A selected volume's voxel centres as dots - each axis at most 32 shown (a fine grid would hide the scene); with a bake
+ * (Blendity's or Unity's read back, round 398), each dot its voxel's light (L0, clamped) - the bake previewed. */
 void Editor::draw_light_volume_grid(const GameObject &g, const LightVolumeComponent &v) {
   int res[3];
   light_volume_resolution(g, v, res);
   const Mat4 &w = g.world_matrix();
+  const auto baked = light_volume_bakes_.find(g.id);
+  const LightVolumeSH *sh = baked != light_volume_bakes_.end() && std::memcmp(baked->second.res, res, sizeof(res)) == 0 ? &baked->second : nullptr;
+  auto dot_color = [&](int x, int y, int z) {
+    if (!sh) return Color::hex(0xFFB020, 140);
+    const Vec3 c = sh->l0[(size_t)x + (size_t)res[0] * ((size_t)y + (size_t)res[1] * (size_t)z)];
+    auto ch = [](float f) { return std::clamp(linear_to_srgb(std::max(0.0f, f)), 0.0f, 1.0f); };
+    return Color::rgba(ch(c.x), ch(c.y), ch(c.z), 0.9f);
+  };
   const int step[3] = {(res[0] + 31) / 32, (res[1] + 31) / 32, (res[2] + 31) / 32};  // (review 397: res / 32 had shown up to 63 an axis)
   for (int z = 0; z < res[2]; z += step[2])
     for (int y = 0; y < res[1]; y += step[1])
       for (int x = 0; x < res[0]; x += step[0])
-        scene_r3d_.point(w.point(Vec3((x + 0.5f) / res[0] - 0.5f, (y + 0.5f) / res[1] - 0.5f, (z + 0.5f) / res[2] - 0.5f)), 2.0f, Color::hex(0xFFB020, 140));
+        scene_r3d_.point(w.point(Vec3((x + 0.5f) / res[0] - 0.5f, (y + 0.5f) / res[1] - 0.5f, (z + 0.5f) / res[2] - 0.5f)), sh ? 3.0f : 2.0f, dot_color(x, y, z));
 }
 
 /* An export's collider: the object's ColliderComponent as a mesh named as `o`'s engine reads it (no materials, no
