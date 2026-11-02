@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 397): VRC Light Volumes - the component, Live Link and import
+
+**Asked:** "for the world we need to support VRC LightVolume", with a toggle to bake it in Blendity (round 398).
+
+**Added (task 0374)**
+- **A Light Volume component** (the package's fields, its box the object's transform, its grid as the package
+  computes it, Bake in Blendity) and a light's **Light Volume** option; the Budget's Light Volume rows (32 and 128 at
+  once).
+- **Live Link** makes the package's own Light Volume and Point Light Volume in Unity and registers them with the
+  scene's Manager through the package's setup; **Unity import** reads them back.
+
+**Checked:** the real package in a copy of Test World - the volume and the lamp made and registered, one Manager;
+tests_livelink and tests_assets.
+
 ## 2026-11-02 (round 396): the Unity bridge against VRChat's real SDK
 
 **Asked:** "VCC is installed so you can test the actual world and avatar VRChat SDK."

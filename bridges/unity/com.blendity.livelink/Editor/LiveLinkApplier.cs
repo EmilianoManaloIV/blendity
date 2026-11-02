@@ -62,6 +62,7 @@ namespace Blendity.LiveLink
                 case "lod": OnLod(j); break;  // (round 380: LiveLinkWorld.cs)
                 case "lodmesh": OnLodMesh(j, m.Bin); break;
                 case "collider": OnCollider(j); break;
+                case "lightvolume": OnLightVolume(j); break;  // (round 397)
                 case "avatar": OnAvatar(j); break;  // (round 381: LiveLinkVRChat.cs)
                 case "springs": OnSprings(j); break;
                 case "light": OnLight(j); break;
@@ -161,6 +162,13 @@ namespace Blendity.LiveLink
 
         static void SetTrs(Transform t, float[] p, float[] q, float[] s)
         {
+            SetTrsOnly(t, p, q, s);
+            if (FindType(LightVolumeType) != null)  // (round 397: a volume's or light's package data follows; only with the package there)
+                RefreshMoved(t.gameObject);
+        }
+
+        static void SetTrsOnly(Transform t, float[] p, float[] q, float[] s)
+        {
             t.localPosition = Position(p);
             t.localRotation = Rotation(q);
             t.localScale = Scale(s);
@@ -197,7 +205,7 @@ namespace Blendity.LiveLink
                 var f = new float[11];
                 for (int i = 0; i < 11; i++)
                     f[i] = (float)(double)b[i];
-                SetTrs(go.transform, new[] { f[1], f[2], f[3] }, new[] { f[4], f[5], f[6], f[7] }, new[] { f[8], f[9], f[10] });
+                SetTrsOnly(go.transform, new[] { f[1], f[2], f[3] }, new[] { f[4], f[5], f[6], f[7] }, new[] { f[8], f[9], f[10] });  // (a pose: bones hold no volume)
             }
         }
 
@@ -678,6 +686,7 @@ namespace Blendity.LiveLink
 #if UNITY_EDITOR
             l.areaSize = new Vector2(a[0], a[1]);
 #endif
+            OnLightVolumeLight(go, j, type);  // (round 397: VRC Light Volumes' light beside it, when Light Volume is on)
         }
 
         void OnCamera(Dictionary<string, object> j)

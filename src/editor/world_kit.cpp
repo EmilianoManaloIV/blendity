@@ -65,6 +65,38 @@ void Editor::draw_colliders() {
   });
 }
 
+/* Round 397: each VRC Light Volume as its box (amber, as the package draws it) and, selected, its voxel grid's centres. */
+void Editor::draw_light_volumes() {
+  scene_->for_each([&](GameObject &g) {
+    const LightVolumeComponent *v = g.get<LightVolumeComponent>();
+    if (!v || !v->enabled || !g.active_in_hierarchy()) return;
+    const Mat4 &w = g.world_matrix();
+    const bool sel = is_selected(g.id);
+    const uint32_t col = Color::hex(0xFFB020, sel ? 255 : 150);
+    for (int e = 0; e < 12; e++) {  // (the unit cube's edges: two corners differing in one axis)
+      const int axis = e / 4, a = (axis + 1) % 3, b = (axis + 2) % 3;
+      Vec3 p0(-0.5f), p1(-0.5f);
+      p0[a] = p1[a] = (e & 1) ? 0.5f : -0.5f;
+      p0[b] = p1[b] = (e & 2) ? 0.5f : -0.5f;
+      p1[axis] = 0.5f;
+      scene_r3d_.line(w.point(p0), w.point(p1), col, true, 3e-4f);
+    }
+    if (sel) draw_light_volume_grid(g, *v);
+  });
+}
+
+/* A selected volume's voxel centres as dots - each axis at most 32 shown (a fine grid would hide the scene). */
+void Editor::draw_light_volume_grid(const GameObject &g, const LightVolumeComponent &v) {
+  int res[3];
+  light_volume_resolution(g, v, res);
+  const Mat4 &w = g.world_matrix();
+  const int step[3] = {(res[0] + 31) / 32, (res[1] + 31) / 32, (res[2] + 31) / 32};  // (review 397: res / 32 had shown up to 63 an axis)
+  for (int z = 0; z < res[2]; z += step[2])
+    for (int y = 0; y < res[1]; y += step[1])
+      for (int x = 0; x < res[0]; x += step[0])
+        scene_r3d_.point(w.point(Vec3((x + 0.5f) / res[0] - 0.5f, (y + 0.5f) / res[1] - 0.5f, (z + 0.5f) / res[2] - 0.5f)), 2.0f, Color::hex(0xFFB020, 140));
+}
+
 /* An export's collider: the object's ColliderComponent as a mesh named as `o`'s engine reads it (no materials, no
  * skin: engines hide and collide it). */
 void Editor::add_collider_item(GameObject &g, const Mesh &m, const ExportItem &it, const ExportOptions &o, std::vector<ExportItem> &items, std::vector<std::shared_ptr<Mesh>> &keep) {

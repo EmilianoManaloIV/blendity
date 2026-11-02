@@ -9170,6 +9170,31 @@ std::string material_name(GameObject *g, size_t slot = 0) {
 }  // namespace r395
 
 static void tests_round395() {
+  test("Unity's VRC Light Volumes (round 397): a scene's Light Volume comes in as Blendity's with the package's fields and stays an Engine Component; a Point Light Volume after its light in the file turns the light's Light Volume on", [] {
+    std::vector<UnityDoc> docs;
+    std::string why;
+    const std::string scene = std::string("%YAML 1.1\n") +
+        "--- !u!1 &10\nGameObject:\n  m_Name: Volume\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalScale: {x: 6, y: 3, z: 6}\n  m_Father: {fileID: 0}\n"
+        "--- !u!114 &12\nMonoBehaviour:\n  m_GameObject: {fileID: 10}\n  m_Enabled: 1\n  m_Script: {fileID: 11500000, guid: 21bc8ec8ba5e5f3408667533e591f313, type: 3}\n"
+        "  IsDynamic: 0\n  IsAdditive: 1\n  Color: {r: 1, g: 0.5, b: 1, a: 1}\n  Intensity: 2\n  SmoothBlending: 0.5\n  Exposure: 0.25\n  Bake: 0\n"
+        "  AdaptiveResolution: 0\n  VoxelsPerUnit: 4\n  Resolution: {x: 8, y: 4, z: 8}\n"
+        "--- !u!1 &20\nGameObject:\n  m_Name: Lamp\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+        "--- !u!114 &22\nMonoBehaviour:\n  m_GameObject: {fileID: 20}\n  m_Script: {fileID: 11500000, guid: 064ede0cbb894e94abe683cb8db91f6f, type: 3}\n  LightType: 0\n"
+        "--- !u!108 &23\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 2\n  m_Intensity: 1\n";
+    CHECK(parse_unity_yaml(scene, docs, why));
+    Scene s;
+    UnityImport ctx;
+    build_unity_objects(docs, s, nullptr, ctx);
+    const GameObject *vol = s.find_by_name("Volume"), *lamp = s.find_by_name("Lamp");
+    const LightVolumeComponent *v = vol ? vol->get<LightVolumeComponent>() : nullptr;
+    std::printf("    the volume: %s, additive %d, intensity %g, resolution %d x %d x %d, bake %d; the lamp's Light Volume %d; counted %d\n", v ? "made" : "-",
+                v ? (int)v->additive : -1, v ? v->intensity : 0.0f, v ? v->resolution[0] : 0, v ? v->resolution[1] : 0, v ? v->resolution[2] : 0,
+                v ? (int)v->bake : -1, lamp && lamp->get<Light>() ? (int)lamp->get<Light>()->light_volume : -1, ctx.light_volumes);
+    CHECK(v && v->additive && !v->dynamic && v->intensity == 2.0f && v->smooth_blending == 0.5f && v->exposure == 0.25f && !v->bake && !v->adaptive_resolution);
+    CHECK(v && v->resolution[0] == 8 && v->resolution[1] == 4 && std::fabs(v->color.y - srgb_to_linear(0.5f)) < 1e-5f && vol->local().scale.x == 6.0f);
+    CHECK(vol && vol->get<EngineComponent>() != nullptr && vol->get<EngineComponent>()->type == "LightVolumeInstance");  // (kept too: written back as it was)
+    CHECK(lamp && lamp->get<Light>() && lamp->get<Light>()->light_volume && ctx.light_volumes == 2);
+  });
   test("Unity model IDs (round 395): xxh64 against the reference and Unity's own numbers; a model's parts by a .unity-model-ids table, Unity's root numbers and a legacy table; a single top node is Unity's root; the scene's ambient and fog", [] {
     CHECK(xxh64("", 0) == 0xEF46DB3751D8E999ull && xxh64("a", 1) == 0xD24EC4F1A98C6E5Bull);
     CHECK(unity_hashed_file_id("Mesh", "mesh") == (int64_t)9776592800496368506ull);  // (the forum's own example)

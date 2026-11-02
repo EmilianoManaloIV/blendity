@@ -238,9 +238,43 @@ public static class BlendityVrcChecks
         var desc = (Component)all[0];
         var spawns = Member(desc, "spawns") as Transform[];
         report["spawns"] = spawns != null ? spawns.Length : -1;
+        if (!LightVolumes(report))
+            return 1;
         var issues = BuilderIssues("VRC.SDK3.Editor.VRCSdkControlPanelWorldBuilder", "OnGUISceneCheck", desc);
         report["issues"] = issues;
         return Failed(issues) ? 1 : 0;
+    }
+
+    /* Round 397: with VRC Light Volumes in the project, the session's Light Volume and Point Light Volume as the package's
+     * own components - their fields, and the scene's one Manager the package's setup made. False when the package is
+     * there and they aren't. */
+    static bool LightVolumes(Dictionary<string, object> report)
+    {
+        var volumeType = FindType(LiveLinkApplier.LightVolumeType);
+        report["lightVolumesPackage"] = volumeType != null;
+        if (volumeType == null)
+            return true;
+        var hall = GameObject.Find("Hall Volume");
+        var lamp = GameObject.Find("Lamp");
+        var v = hall != null ? hall.GetComponent(volumeType) : null;
+        var pointType = FindType(LiveLinkApplier.PointLightVolumeType);
+        var p = lamp != null && pointType != null ? lamp.GetComponent(pointType) : null;
+        var managerType = FindType("VRCLightVolumes.LightVolumeManager");
+        int managers = managerType != null ? UnityEngine.Object.FindObjectsByType(managerType, FindObjectsInactive.Include, FindObjectsSortMode.None).Length : -1;
+        report["lightVolume"] = v != null ? new Dictionary<string, object> { { "Intensity", Plain(Member(v, "Intensity")) }, { "Bake", Plain(Member(v, "Bake")) },
+                                                                          { "scale", hall.transform.lossyScale.ToString("F2") }, { "managed", Member(v, "LightVolumeManager") != null } } : null;
+        report["pointLightVolume"] = p != null ? new Dictionary<string, object> { { "LightType", Plain(Member(p, "LightType")) }, { "Intensity", Plain(Member(p, "Intensity")) },
+                                                                              { "managed", Member(p, "LightVolumeManager") != null } } : null;
+        report["lightVolumeManagers"] = managers;
+        if (v == null || p == null)
+            return false;
+        /* Review 397: the package's derived data made by its own routines - the volume's inverse world matrix takes its
+         * centre to the origin, the light's position is its transform's (both stay at their defaults otherwise). */
+        var inv = (Matrix4x4)Member(v, "InvWorldMatrix");
+        float centre = inv.MultiplyPoint3x4(hall.transform.position).magnitude;
+        float lightOff = Vector3.Distance((Vector3)Member(p, "Position"), lamp.transform.position);
+        report["derived"] = new Dictionary<string, object> { { "volumeCentreOff", centre }, { "lightPositionOff", lightOff } };
+        return managers == 1 && centre < 1e-3f && lightOff < 1e-3f;
     }
 
     // ------------------------------------------------------------ JSON

@@ -224,6 +224,8 @@ void register_builtin_components() {
                    "Godot's node paths in a .tscn; Blender has none");
   reg<EngineComponent>("Scripts", "A component of another engine, kept as it is: a Unity script (C# or UdonSharp), VRChat's components - written back unchanged, never run here (round 370).",
                        "Unity's MonoBehaviour and built-in components; Blender has no counterpart (its add-ons' data is custom properties)");
+  reg<LightVolumeComponent>("Rendering", "A VRC Light Volume: VRChat's baked-lighting box - its object's scale is the box - sent to Unity as red.sim.lightvolumes' Light Volume; Unity bakes it, or Blendity (round 397).",
+                            "VRC Light Volumes' Light Volume (red.sim.lightvolumes); Unity's Light Probe Group; Blender's Irradiance Volume");
   reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
                          "Unity's Box / Sphere / Capsule / Mesh Collider; Blender's Rigid Body > Collisions > Shape");
   reg<Rigidbody>("Physics", "Gravity, bounciness and simple sphere collisions in Play mode.",
@@ -557,6 +559,47 @@ void Light::reflect(Reflector &r) {
   r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
          "its bounced light baked. Baked: exists only through the bake (lightmaps and probes), nothing drawn live;\n"
          "Preview Lighting shows it before a bake. The path tracer lights with every mode.");
+  if (all || type != 0) {
+    r.field("Light Volume", light_volume);
+    r.help("In Unity with VRC Light Volumes: a Point Light Volume as well - VRChat worlds light by it on PC and Quest alike,\n"
+           "128 at once (round 397). Directional lights have none; an area light's size there is its object's scale (the package's).");
+  }
+}
+
+void LightVolumeComponent::reflect(Reflector &r) {
+  r.field("Dynamic", dynamic);
+  r.help("A volume that moves in game (the package's Auto Update Volumes on its Manager too).");
+  r.field("Additive", additive);
+  r.help("Adds its lighting on top of other volumes': lights that move or switch together.");
+  r.color("Color", color);
+  r.field("Intensity", intensity, 0.01f, 0.0f, 100.0f);
+  r.field("Smooth Blending", smooth_blending, 0.01f, 0.0f, 1.0f);
+  r.help("The blend at its edges, in metres: softer where volumes meet.");
+  r.field("Exposure", exposure, 0.01f, -10.0f, 10.0f);
+  r.field("Shadows", shadows, 0.01f, -1.0f, 1.0f);
+  r.field("Highlights", highlights, 0.01f, -1.0f, 1.0f);
+  r.field("Bake in Blendity", bake_in_blendity);
+  r.help("Unity's Bake off for it, so the package's bake leaves its lighting alone: Blendity's bake fills it (round 398). Off, Unity's\n"
+         "bake fills it as the package does.");
+  if (r.all_fields() || !bake_in_blendity) r.field("Bake", bake);
+  r.field("Adaptive Resolution", adaptive_resolution);
+  r.help("The grid from the box's size and Voxels Per Unit; off, Resolution as it is.");
+  r.field("Voxels Per Unit", voxels_per_unit, 0.05f, 0.1f, 64.0f);
+  if (r.all_fields() || !adaptive_resolution) {
+    r.field("Resolution X", resolution[0], 1, 256);
+    r.field("Resolution Y", resolution[1], 1, 256);
+    r.field("Resolution Z", resolution[2], 1, 256);
+  }
+}
+
+void light_volume_resolution(const GameObject &g, const LightVolumeComponent &v, int out[3]) {
+  const Mat4 &w = g.world_matrix();
+  const float axes[3] = {length(w.column(0)), length(w.column(1)), length(w.column(2))};  // (lossyScale)
+  for (int a = 0; a < 3; a++) {
+    const float n = axes[a] * std::max(0.0f, v.voxels_per_unit);
+    const float bounded = std::isnan(n) ? 1.0f : std::min(n, 4096.0f);  // (review 397: a huge, infinite or NaN scale is no cast past int)
+    out[a] = v.adaptive_resolution ? std::max(1, (int)std::nearbyint(bounded)) : std::max(1, v.resolution[a]);
+  }
 }
 
 Vec3 Light::final_color() const { return use_temperature ? Vec3(color.x, color.y, color.z) * kelvin_to_rgb(temperature) : color; }

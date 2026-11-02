@@ -32,8 +32,9 @@ namespace {
 
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
-enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip, kCollider, kLod };
-uint64_t ckey(uint64_t id, Kind k) { return id << 4 | (uint64_t)k; }
+enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip, kCollider, kLod, kLightVolume };
+uint64_t ckey(uint64_t id, Kind k) { return id << 5 | (uint64_t)k; }  // (review 397: 5 bits - kLightVolume is 16, past 4 bits it took the id's low bit)
+static_assert(kLightVolume < 32, "a message kind fits ckey's 5 bits");
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
  * computer), fog - and every field by its Inspector name. */
@@ -153,6 +154,7 @@ struct Sent {
   uint64_t rig_key = 0;       // (...its armature, skeleton and Skin settings)
   Mat4 rig_rel;               // (...where the rig sits from the mesh)
   uint64_t collider = 0;      // (round 380: its collider message's hash; 0 none sent)
+  uint64_t light_volume = 0;  // (round 397: its VRC Light Volume message's hash; 0 none sent)
   uint64_t lod = 0;           // (...its LOD Group's; 0 none sent)
   uint64_t lod_levels = 0;    // (...what its levels are made from: their count and ratios - review 380)
   MeshStamp lod_base, lod_seen;  // (...the mesh its levels were made from; the mesh last seen, and since when)
@@ -180,6 +182,25 @@ std::string collider_message(const GameObject &g) {
     const float center[3] = {-c->center.x, c->center.y, c->center.z}, size[3] = {c->size.x, c->size.y, c->size.z};
     w.key("center").nums(center, 3).key("size").nums(size, 3).key("radius").num(c->radius).key("height").num(c->height);
   }
+  w.end();
+  return w.out;
+}
+/* Round 397: a VRC Light Volume as its message - the package's fields (the box is the object's transform, sent as any
+ * object's); Unity's Bake off when Blendity bakes it; "none" with none on. */
+const LightVolumeComponent *live_volume(const GameObject &g) {
+  const LightVolumeComponent *v = g.get<LightVolumeComponent>();
+  return v && v->enabled ? v : nullptr;
+}
+std::string light_volume_message(const GameObject &g) {
+  const LightVolumeComponent *v = live_volume(g);
+  JsonWriter w;
+  w.obj().key("t").str("lightvolume").key("id").integer((int64_t)g.id);
+  if (!v) return w.key("none").boolean(true).end(), w.out;
+  const float res[3] = {(float)v->resolution[0], (float)v->resolution[1], (float)v->resolution[2]};
+  w.key("dynamic").boolean(v->dynamic).key("additive").boolean(v->additive).key("color").nums(&v->color.x, 3).key("intensity").num(v->intensity);
+  w.key("smooth_blending").num(v->smooth_blending).key("exposure").num(v->exposure).key("shadows").num(v->shadows).key("highlights").num(v->highlights);
+  w.key("bake").boolean(v->bake && !v->bake_in_blendity).key("bake_in_blendity").boolean(v->bake_in_blendity);
+  w.key("adaptive").boolean(v->adaptive_resolution).key("voxels_per_unit").num(v->voxels_per_unit).key("resolution").nums(res, 3);
   w.end();
   return w.out;
 }
@@ -760,7 +781,7 @@ struct Link::Impl {
   std::unordered_map<uint64_t, AvatarSent> avatars;
   void send_avatar(Scene &scene, GameObject &arm, const std::vector<GameObject *> &meshes, const std::vector<int> &to, bool all);
   void forget_avatar(Scene &scene, uint64_t id, const AvatarSent &as);
-  void send_text(const std::vector<int> &to, bool all, const std::string &line, bool count = true) {  // (no coalescing key: the 4 bits are taken, and these are rare)
+  void send_text(const std::vector<int> &to, bool all, const std::string &line, bool count = true) {  // (no coalescing key: rare, and never one replacing another)
     JsonWriter w;
     w.out = line;
     send(to, all, w);
@@ -770,6 +791,7 @@ struct Link::Impl {
   static std::string springs_none(uint64_t id) { return strprintf("{\"t\":\"springs\",\"id\":%lld,\"chains\":[]}", (long long)id); }
   /* Round 380: colliders and LOD Groups. */
   void send_collider(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
+  void send_light_volume(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void send_lod_levels(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void compare_kit(GameObject &g, Sent &s);
@@ -1282,6 +1304,7 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     send_mesh(fresh, false, g, s, m);  // (round 378: a rig at rest with its skin; its weights after)
     if (s.rig) send_weights(g, rig_of(g), s, fresh, false);
     if (live_collider(g)) send_collider(fresh, false, g, s);  // (round 380)
+    if (live_volume(g)) send_light_volume(fresh, false, g, s);  // (round 397)
     if (live_lod(g)) send_lod(fresh, false, g, s);
     if (const Animation *a = g.get<Animation>(); a && !a->clip.empty()) animated.push_back(&g);
     s.seen = true;
@@ -1348,6 +1371,7 @@ bool Link::Impl::compare_object(GameObject &g) {
       now.mesh = was.mesh, now.rig = was.rig, now.base = was.base, now.rig_key = was.rig_key, now.rig_rel = was.rig_rel, now.weights = was.weights;
       const bool same_kind = was.kind == now.kind;  // (a kind change makes the object again in the bridges: its collider and levels go again - review 380)
       now.collider = same_kind ? was.collider : 0, now.lod = same_kind ? was.lod : 0, now.lod_levels = same_kind ? was.lod_levels : 0;
+      now.light_volume = same_kind ? was.light_volume : 0;
       now.lod_base = was.lod_base, now.lod_seen = was.lod_seen, now.lod_since = was.lod_since;
     }
     it->second = std::move(now);
@@ -1476,6 +1500,16 @@ void Link::Impl::send_collider(const std::vector<int> &to, bool all, GameObject 
   stats.colliders++;
 }
 
+/* Round 397: a VRC Light Volume to `to` (or everyone), recorded as a collider is. */
+void Link::Impl::send_light_volume(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
+  JsonWriter w;
+  w.out = light_volume_message(g);
+  const uint64_t h = live_volume(g) ? std::hash<std::string>()(w.out) | 1 : 0;
+  if (all || server.ready_clients().empty()) s.light_volume = h;
+  send(to, all, w, ckey(g.id, kLightVolume));
+  stats.light_volumes++;
+}
+
 /* An LOD Group to `to` (or everyone): its message, then each level past 0 built on the mesh worker. */
 void Link::Impl::send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
   JsonWriter w;
@@ -1525,6 +1559,10 @@ void Link::Impl::compare_kit(GameObject &g, Sent &s) {
     const std::string m = collider_message(g);
     const uint64_t h = live_collider(g) ? std::hash<std::string>()(m) | 1 : 0;
     if (h != s.collider) send_collider({}, true, g, s);
+  }
+  if (live_volume(g) || s.light_volume) {  // (round 397)
+    const uint64_t h = live_volume(g) ? std::hash<std::string>()(light_volume_message(g)) | 1 : 0;
+    if (h != s.light_volume) send_light_volume({}, true, g, s);
   }
   if (live_lod(g) || s.lod) {
     const uint64_t h = live_lod(g) ? std::hash<std::string>()(lod_message(g)) | 1 : 0;

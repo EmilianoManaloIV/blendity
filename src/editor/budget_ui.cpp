@@ -77,6 +77,7 @@ void Editor::draw_budget(ui::Layout &lay) {
   Recti sk = lay.row();
   u.label({sk.x, sk.y, sk.w / 2, sk.h}, "Shape Keys", u.theme.text_dim);
   u.label({sk.x + sk.w / 2, sk.y, sk.w / 2, sk.h}, strprintf("%zu (not ranked)", c.shape_keys));
+  budget_light_volume_rows(u, lay, c);
   if (r.row_rank[(int)BudgetRow::Triangles] <= 1) return;
   Recti fix = lay.row(u.row_h() + u.px(2));
   if (u.button_enabled({fix.x, fix.y, fix.w, fix.h}, "Decimate to Good", meshops::decimate_available(), "This build has no meshoptimizer (Blender's libraries)")) {
@@ -85,6 +86,25 @@ void Editor::draw_budget(ui::Layout &lay) {
   }
   u.tooltip("A Decimate modifier on each mesh of 500 triangles or more (before its Skin; its weights and shape keys kept),\n"
             "one ratio for all, so the triangles fit the Good rank. Change its ratio or remove it; Undo takes it back.");
+}
+
+/* Round 397: a world's VRC Light Volumes and their lights against what one Manager holds at once (32 and 128) - shown
+ * when there are any, past the limit in the over colour. */
+void Editor::budget_light_volume_rows(ui::Context &u, ui::Layout &lay, const BudgetCounts &c) {
+  const struct {
+    const char *name;
+    size_t n;
+    int max;
+  } rows[] = {{"Light Volumes", c.light_volumes, LightVolumeComponent::kMaxVolumes}, {"Light Volume Lights", c.light_volume_lights, LightVolumeComponent::kMaxLights}};
+  for (const auto &row : rows) {
+    if (!row.n) continue;
+    Recti rr = lay.row();
+    u.label({rr.x, rr.y, rr.w / 2, rr.h}, row.name, u.theme.text_dim);
+    const std::string v = strprintf("%zu of %d at once", row.n, row.max);
+    u.label({rr.x + rr.w / 2, rr.y, rr.w / 2, rr.h}, v, row.n > (size_t)row.max ? u.theme.error : u.theme.text);
+    u.tooltip(row.n > (size_t)row.max ? "More than VRC Light Volumes' Manager holds at once: the rest go unlit in VRChat" : "VRC Light Volumes' Manager holds this many at once");
+    if (u.record_buttons) u.button_rects["shown:budget " + std::string(row.name) + " " + v] = rr;
+  }
 }
 
 /* Decimate to fit: each mesh's own Decimate modifier (added before its Skin, so the skin deforms the result and a pose

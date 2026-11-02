@@ -94,6 +94,14 @@ void add_skeleton(const GameObject &arm, std::unordered_set<const GameObject *> 
 void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string> &textures, std::unordered_set<const GameObject *> &roots) {
   double *v = c.value;
   if (const Light *l = g.get<Light>(); l && l->enabled) v[(int)BudgetRow::Lights] += 1;
+  const Light *lit = g.get<Light>();
+  const bool own_light = lit && lit->enabled && lit->light_volume && lit->type != 0;
+  if (own_light) c.light_volume_lights++;  // (round 397)
+  for (const auto &comp : g.components) {  // (review 397: the package's own lights from Unity - a Point Light Volume with no Unity light)
+    const auto *e = dynamic_cast<const EngineComponent *>(comp.get());
+    if (!own_light && e && e->enabled && e->type == "PointLightVolumeInstance" && e->data.find("m_Enabled: 0") == std::string::npos) c.light_volume_lights++;
+  }
+  if (const LightVolumeComponent *lv = g.get<LightVolumeComponent>(); lv && lv->enabled) c.light_volumes++;
   if (const SpringBone *sb = g.get<SpringBone>(); sb && sb->enabled) {
     /* (Round 359: chains under one RootBone_ are one PhysBone component - Bone Root's point.) */
     const bool grouped = g.parent && spring::is_bone_root(*g.parent);
