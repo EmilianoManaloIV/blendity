@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 387): Adobe in the HCI comparison
+
+**Asked:** Phase D's first round: the basic Adobe suite in the HCI testing - Photoshop + Fresco, Substance Painter,
+Illustrator, After Effects + Premiere.
+
+**Done (task 0364)**
+- **Four productions made in Blendity** and compared with Adobe's documented steps: an illustration and concept sheet,
+  texturing the avatar, a logo, editing the film (`docs/hci/compare-2026-10.md`, sections E-H).
+- **KLM:** Adobe as a sixth program and ten Adobe tasks (`tools/hci_klm.py`): where both do a task Blendity matches
+  Photoshop's blend menu and Substance's texture export and is 1.6 s slower to bake mesh maps; seven of the ten are
+  tasks it can't do yet.
+- **Findings 16-29** (audience A): free transform, blend modes, masks, selections, a paper's source, vector shapes and
+  the pen, SVG, footage and cuts, keyed cards, export presets, texture presets, three small ones - for rounds 388-391.
+- **`tools/hci_klm.py`:** a row from before a program was added counts its cells as "-"; `--check` fails on a table it
+  reads no row from.
+- **The Opus review's fixes:** the productions run again on editors built from the current code (the first run had an
+  editor from before round 364) and each stage from an empty project; a false "missing" (Blendity has six smart-mask
+  presets) and a missed PNG route (Pin to the Board, Board Export) corrected; KLM rows 5, 11, 15 and 19 corrected;
+  unsourced Adobe steps marked assumed.
+- **The comparison page** updated at the same link.
+
+**Checked:** the KLM recount (`--compare --check`), the audits at their baselines; no product code changed.
+
 ## 2026-11-01 (round 386): painting in VR
 
 **Asked:** Phase C's last round: the controller paints textures through the paint dab pipeline; size and opacity from
