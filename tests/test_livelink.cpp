@@ -1226,7 +1226,8 @@ static void tests_round376() {
                 f4 ? f4->j["effects"].size() : 0);
     CHECK(f4 && (uint64_t)f4->j["id"].number() == side->id && f4->j["effects"].size() == 1 && f4->j["effects"][0]["type"].str == "Vignette");
     sc.destroy(side);
-    const Message *f5 = last_of(drain(ed, c), "filters");
+    const std::vector<Message> none_left = drain(ed, c);  // (kept: last_of points into it - the sanitizers caught a pointer into a temporary)
+    const Message *f5 = last_of(none_left, "filters");
     CHECK(f5 && f5->j["id"].number() == 0 && f5->j["effects"].size() == 0);  // (no camera: no look)
     const livelink::Stats &st = ed.livelink_for_test()->stats();
     std::printf("    sent: %llu world, %llu render, %llu filters\n", (unsigned long long)st.worlds, (unsigned long long)st.renders, (unsigned long long)st.filters);
