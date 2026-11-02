@@ -14,7 +14,7 @@ namespace bl {
 
 namespace {
 
-constexpr const char *kMapSuffixes[] = {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"};
+constexpr const char *kMapSuffixes[] = {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png", "_id.png"};
 
 std::string safe_file_name(std::string s) {
   for (char &c : s)
@@ -126,11 +126,37 @@ void Editor::meshmaps_poll() {
   mr->mesh_maps_key = mesh_maps_key_text(src ? *src : *mf->mesh, g->world_matrix());
   job->landed = true;
   mark_changed("Bake Mesh Maps");
+  meshmaps_load_landed(g, job->load_into);  // (round 392: Bake All Maps loads them into its surface)
   project_listed_ = -100;  // (the Project window lists the new files)
-  Log::info("Mesh Maps: %s_{normal,position,curvature,ao,thickness}.png - %d x %d, %zu texels, %s UVs, %llu rays, %.0f ms", job->rel.c_str(), job->result.size, job->result.size,
+  Log::info("Mesh Maps: %s_{normal,position,curvature,ao,thickness,id}.png - %d x %d, %zu texels, %s UVs, %llu rays, %.0f ms", job->rel.c_str(), job->result.size, job->result.size,
             job->result.texels, job->result.own_uvs ? "the mesh's own" : (job->settings.keep_uvs ? "generated (the mesh's own overlap or leave 0..1: the layout is written onto the mesh)" : "generated (written onto the mesh)"),
             (unsigned long long)job->result.rays, job->result.ms_total);
   ui_.redraw = true;
+}
+
+/* Bake All Maps (round 392): a bake started for a surface loads into it when it lands. */
+void Editor::meshmaps_load_landed(GameObject *g, const std::string &into) {
+  if (into.empty()) return;
+  std::string why;
+  ProceduralTexturePtr pt = surface_of(g, &why);
+  if (!pt || pt->asset_path != into) return Log::warn("Bake All Maps: the maps baked; %s no longer has the surface they were for - Load Mesh Maps reads them", g->name.c_str());  // (review 392)
+  if (!surface_load_maps(g, *pt, &why)) return Log::warn("Bake All Maps: the maps baked but couldn't load into %s (%s)", pt->name.c_str(), why.c_str());
+  mark_changed("Bake All Maps");  // (review 392: the step's name - the UVs, the record and the surface's maps)
+  Log::info("Bake All Maps: %s reads the new maps", pt->name.c_str());
+}
+
+/* surface bakeall [size]: the active object's mesh maps baked - normal, position, curvature, occlusion, thickness and
+ * the material IDs - and loaded into its surface when they land (Substance's Bake Mesh Maps in one step). */
+bool Editor::surface_bake_all(int size) {
+  GameObject *g = active_object();
+  std::string why;
+  ProceduralTexturePtr pt = surface_of(g, &why);
+  if (!pt) return Log::warn("Bake All Maps: %s", why.c_str()), false;
+  MeshMapsSettings s = meshmaps_settings_;  // (review 392: the dialog's samples, padding and layout)
+  s.size = std::clamp(size > 0 ? size : std::max(pt->width, pt->height), 256, 4096);
+  if (!bake_mesh_maps_start(s) || !meshmaps_job_) return false;
+  meshmaps_job_->load_into = pt->asset_path;
+  return true;
 }
 
 void Editor::meshmaps_cancel() {

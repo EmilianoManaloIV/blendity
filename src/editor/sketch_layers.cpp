@@ -295,6 +295,7 @@ void Editor::draw_layers_window(const Recti &r) {
 /* A row dragged from display slot `from` to display slot `to` (the slots as drawn, top first; `to` already counts the
  * row taken out): the layer lands right above the row now under it, at the bottom when none; its group stays. */
 void Editor::layers_drop(int from, int to) {
+  sketch_xf_settle();  // (re-check 389: a layer op keeps a transform first)
   Sketch &s = sketch_doc();
   if (from < 0 || (size_t)from >= layers_shown_.size()) return;
   std::vector<int> order = layers_shown_;
@@ -345,14 +346,14 @@ void Editor::draw_layer_row(int i, const Recti &row, bool child) {
   x = name.right() + u.px(4);
   if (mid) {
     float op = l.opacity;
-    if (u.slider(u.id(("layer_opacity" + std::to_string(i)).c_str()), {x, top, slider_w, a}, op, 0.0f, 1.0f)) l.opacity = op, layers_opacity_dirty_ = true;
+    if (u.slider(u.id(("layer_opacity" + std::to_string(i)).c_str()), {x, top, slider_w, a}, op, 0.0f, 1.0f)) sketch_xf_settle(), l.opacity = op, layers_opacity_dirty_ = true;
     u.tooltip("Opacity: the layer's strokes mixed in by this much, together (two overlapping strokes stay one tone).");
     x += slider_w + u.px(4);
   }
   if (layers_opacity_dirty_ && !in.down[0]) layers_opacity_dirty_ = false, sketch_changed("Sketch Layer Opacity");  // (once the slider is let go)
   if (!wide) return;
   int blend = std::max(0, std::min((int)kSketchBlendCount - 1, l.blend));  // (review 388: it had stopped at Overlay)
-  if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, blend_names(), kSketchBlendCount)) l.blend = blend, sketch_changed("Sketch Layer Blend");
+  if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, blend_names(), kSketchBlendCount)) sketch_xf_settle(), l.blend = blend, sketch_changed("Sketch Layer Blend");
   u.tooltip("How the layer's color meets what is under it - Photoshop's 27: Multiply darkens, Screen lightens, Overlay and Soft Light do both.");
 }
 
@@ -369,7 +370,7 @@ void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int t
     u.text_field(u.id(("layer_name" + std::to_string(i)).c_str()), {name.x, top, name.w, a}, layers_rename_text_, &committed);
     if (in.key_pressed[platform::KEY_ESCAPE]) layers_rename_ = -1, in.key_pressed[platform::KEY_ESCAPE] = false;
     if (!committed) return;
-    if (!layers_rename_text_.empty() && layers_rename_text_ != l.name) l.name = layers_rename_text_, sketch_changed("Rename Sketch Layer");
+    if (!layers_rename_text_.empty() && layers_rename_text_ != l.name) sketch_xf_settle(), l.name = layers_rename_text_, sketch_changed("Rename Sketch Layer");
     layers_rename_ = -1;
     return;
   }
@@ -484,6 +485,7 @@ void Editor::sketch_layer_command(const std::vector<std::string> &t, const std::
 void Editor::sketch_layer_op(const std::string &op, int i) {
   Sketch &s = sketch_doc();
   if (i < 0 || (size_t)i >= s.layers.size()) return;
+  sketch_xf_settle();  // (review 389: a layer op keeps a transform first)
   SketchLayer &l = s.layers[(size_t)i];
   if (op == "add") {
     run_console_command("sketch layer add");

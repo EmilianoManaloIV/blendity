@@ -598,7 +598,7 @@ std::vector<Vec2> french_curve(int which) {
 const std::vector<SketchBrush> &sketch_brush_presets() {
   /* name, kind, width, opacity, soft, pressure_to, min_size, steady, color (SketchBook's own set, its usual settings) */
   static const std::vector<SketchBrush> presets = {
-      {"Pencil", 0, 2.0f, 0.85f, 0.2f, 3, 0.3f, 10.0f, 0xFF3A3A3A},
+      {"Pencil", 0, 2.0f, 0.85f, 0.2f, 3, 0.3f, 10.0f, 0xFF3A3A3A, -1, 0.8f},  // (round 389: tilt shades wider)
       {"Pen", 0, 2.0f, 1.0f, 0.0f, 1, 0.0f, 0.0f, 0xFF202020},
       {"Inker", 0, 4.0f, 1.0f, 0.0f, 1, 0.1f, 25.0f, 0xFF101010},
       {"Felt Pen", 0, 6.0f, 0.9f, 0.0f, 0, 1.0f, 0.0f, 0xFF2A4C8C},

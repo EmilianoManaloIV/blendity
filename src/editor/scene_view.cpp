@@ -217,6 +217,7 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   /* Task 0216: a pen with its side button held (Windows sends it as the right button) navigates in every feel - orbit,
    * Shift pans, Ctrl zooms - as the middle button does in Blender's pen setup. */
   const int barrel_button = in.pressed[1] ? 1 : in.pressed[0] ? 0 : -1;
+  if (in.pressed[0] && keymap_preset_ == "Adobe" && in.key_down[platform::KEY_SPACE]) return {Drag::Pan, 0};  // (round 389: Photoshop's Space-drag, in Sculpt too: re-check 389)
   if (sculpt_ && in.pressed[0] && !in.barrel) return {Drag::None, 0};  // (task 0236: the left button is the brush's, Shift and Alt its smooth and carve)
   if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal)
     return {in.shift() ? Drag::Pan : in.ctrl() ? Drag::Zoom : Drag::Orbit, barrel_button};
@@ -287,7 +288,8 @@ void Editor::scene_navigation(const Recti &view) {
     /* A pen's side button that came as the left button: its press is navigation's alone - no tool, bone handle or
      * brush after this takes it, and no Alt+click loop select (task 0216). */
     const bool barrel_left = drag_ != Drag::None && drag_button_ == 0 && in.pen && in.barrel;
-    if (barrel_left) in.pressed[0] = false;
+    const bool space_pan = drag_ == Drag::Pan && drag_button_ == 0 && in.key_down[platform::KEY_SPACE];  // (review 389: Photoshop's Space-drag is the view's alone - no brush under it)
+    if (barrel_left || space_pan) in.pressed[0] = false;
     if (!barrel_left && drag_button_ == 0 && in.alt() && (drag_ == Drag::Orbit || drag_ == Drag::Pan || drag_ == Drag::AltClick)) {
       alt_click_ = true;  // a click without moving selects a loop (Blender's Alt+click) instead
       alt_click_ring_ = in.ctrl();

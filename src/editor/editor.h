@@ -88,9 +88,13 @@
 
 namespace bl {
 
+namespace video {
+struct Reader;  // (render/video_decode.h: round 391)
+}
+
 /* FFmpeg's arguments to make an MP4 of numbered PNGs (task 0074). */
 std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
-                                                const std::string &wav = "");
+                                                const std::string &wav = "", int preset = 0);  // (round 391: video::Preset)
 
 /* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
 struct KeyChord {
@@ -638,6 +642,9 @@ struct PaintBrush {
   float grain_scale = 1.0f;
 };
 
+bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p);
+int sketch_brush_find_preset(const std::string &name);  // (round 389: shared by Delete and Free Transform)
+std::vector<SketchPoint> sketch_densified(const std::vector<SketchPoint> &pts);
 std::string sketch_blend_list();  // (round 388: the blend modes' names, for messages)
 std::string line_rest_words(const std::vector<std::string> &t, size_t k);
 constexpr int kVrPaletteSize = 8;  // (round 385: VR sketching's colours)
@@ -743,7 +750,19 @@ class Editor {
   bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
   int draw_source_for_test() const { return draw_source_; }
   void sketch_select_tool_for_test(int k) { sketch_select_tool_ = k; }  // (round 388: the Draw tab's Select, 1 Rectangle, 2 Lasso)
+  void sketch_vec_tool_for_test(int k) { sketch_vec_pick(k); }  // (round 390: 1-4 the shapes, 5 the Pen)
+  size_t sketch_pen_anchors_for_test() const { return sketch_pen_.size() / 3; }
   const std::vector<Vec2> &sketch_selection_for_test() const { return sketch_sel_; }
+  bool sketch_transforming_for_test() const { return sketch_xf_.on; }
+  std::string sketch_brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
+  float sketch_tilted_for_test(float pressure, float tilt_x, float tilt_y) {  // (the pad's brush, the pen tilted so)
+    const int kind = sketch_view_.kind;
+    const float tx = ui_.in.tilt_x, ty = ui_.in.tilt_y;
+    sketch_view_.kind = 2, ui_.in.tilt_x = tilt_x, ui_.in.tilt_y = tilt_y;
+    const float p = sketch_tilted(pressure);
+    sketch_view_.kind = kind, ui_.in.tilt_x = tx, ui_.in.tilt_y = ty;
+    return p;
+  }
   int anim_bar_rows_for_test() const { return anim_bar_rows_; }  // (round 324)
   bool spring_row_for_test(const std::string &first, int &label, bool &ignored);  // (round 324: a found chain's kind)
   std::string mode_name_for_test() const { return mode_name(); }
@@ -784,6 +803,7 @@ class Editor {
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
   bool paint_for_test() const { return paint_; }                                   // (task 0245)
   ProceduralTexturePtr surface_of_for_test(GameObject *g, std::string *why) const { return surface_of(g, why); }
+  bool surface_load_maps_for_test(GameObject *g, ProceduralTexture &pt, std::string *why) { return surface_load_maps(g, pt, why); }  // (round 392)
   PaintBrush &paint_brush_for_test() { return paint_brush_; }
   PaintImagesPtr paint_images_for_test() { return paint_images_; }
   int paint_last_fill_for_test() const { return paint_last_fill_; }
@@ -1297,6 +1317,8 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  void set_seq_hovered_for_test(bool on) { seq_hovered_ = on; }  // (round 391: the Sequencer under the pointer)
+  void seq_select_for_test(const std::string &name) { seqr_.selected_name = name; }
   /* Round 369 (unity_package_ui.cpp): Import Unity Package, unpacked on a worker (at once in headless runs). */
   struct PackageJob {
     std::string path, project_root, into_rel, why;
@@ -2850,6 +2872,7 @@ class Editor {
     int source = 0;  // 1 the scene's sequence, 2 the selected object's clip
     int first = 0, last = 0, frame = 0;
     float fps = 30.0f;
+    int preset = 0;     // (round 391: video::Preset, taken when it starts)
     uint64_t root = 0;  // a clip's object
     std::string dir, video;
     std::vector<std::string> written;
@@ -3216,6 +3239,16 @@ class Editor {
   void eye_test_off();
   /* Round 364: the Sequencer's cards and camera cuts (seq_cards.cpp). */
   const Image *card_picture(const SeqInstance &i, uint64_t *stamp = nullptr);
+  /* Round 391 (seq_footage.cpp): footage, keyed cards, Premiere's Add Edit and Ripple Delete. */
+  const Image *card_picture_at(const SeqInstance &i, float frame, float rate, uint64_t *stamp = nullptr);
+  const Image *card_video_picture(const SeqInstance &i, float frame, float rate, uint64_t *stamp);
+  bool seq_add_video(const std::string &file, int track, float start, float frames);
+  float seq_bar_frames(const SeqInstance &i);
+  bool seq_blade(float frame, int track);
+  bool seq_ripple(const std::string &name);
+  bool seq_hovered_ = false;  // (review 391: the Sequencer under the pointer - its Add Edit and Ripple Delete keys)
+  bool seq_key(const std::string &name, const std::string &channel, float frame, float value, bool remove);
+  std::string seq_paper_by_name(const std::string &media);
   void card_trim_pictures(const Sequence &s);
   /* Round 365 (seq_audio.cpp): the Sequencer's sound, in step with the playhead. */
   struct SeqAudio;
@@ -3227,6 +3260,7 @@ class Editor {
   bool seq_card_there(const SeqInstance &i);
   float sequence_frame_now(SequencePtr &seq);
   void draw_sequence_card(const Recti &img);
+  void draw_keyed_card(const Recti &img, const Image &pic, const SeqCardLook &look);
   void composite_render_card(Image &frame_img, float frame);
   void seq_camera_cut();
   bool seq_add_card(int kind, const std::string &media, int track, float start, float frames);
@@ -3237,6 +3271,9 @@ class Editor {
     int64_t mtime = -1;                   // (an image's file time when read, looked at once a second)
     double checked = -1e9;
     uint64_t made = 0;  // (a stamp: the Game view's fitted copy redone when it changes)
+    std::shared_ptr<video::Reader> video;  // (round 391: footage's reader, opened once; the frame decoded as the playhead moves)
+    bool video_failed = false;
+    double video_at = -1.0;  // (the seconds `img` was decoded at)
   };
   std::unordered_map<std::string, CardPicture> card_pictures_;  // (by kind and path; review 364: never kept stale)
   uint64_t card_stamp_ = 0;
@@ -4144,14 +4181,17 @@ class Editor {
     Mat4 model;
     MeshMapsSettings settings;
     MeshMapsResult result;
+    std::string load_into;  // (round 392: Bake All Maps - the surface it loads into when it lands; review: dies with the job)
     ~MeshMapsJob() {
       cancel.store(true, std::memory_order_relaxed);
       if (thread.joinable()) thread.join();
       if (landed || base.empty()) return;
-      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"}) fs::remove_file(base + suffix);
+      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png", "_id.png"}) fs::remove_file(base + suffix);
     }
   };
   std::unique_ptr<MeshMapsJob> meshmaps_job_;
+  bool surface_bake_all(int size);
+  void meshmaps_load_landed(GameObject *g, const std::string &into);
   /* Task 0245 (ADR 0081): Paint Mode - the brush, the stroke's tiles, the layer written. */
   PaintBrush paint_brush_;
   bool paint_ = false, paint_stroking_ = false, paint_dabbed_ = false, paint_erase_ = false;
@@ -4179,8 +4219,10 @@ class Editor {
   /* Task 0288: render, MoonRay and AI without the console. */
   int ranim_first_ = 0, ranim_last_ = 0;  // (0: the sequence's or the clip's own)
   float ranim_fps_ = 0.0f;
+  int ranim_preset_ = 0;  // (round 391: video::Preset - H.264, ProRes 422, VRChat)
   std::string seq_folder_;                // (empty: Renders/<scene>_sequence_<time>)
   void draw_render_range(ui::Layout &lay);
+  void set_render_preset(const std::string &name);
   bool start_render_animation_from_fields();
   void draw_ffmpeg_settings();
   void draw_moonray_own_row();
@@ -4892,6 +4934,35 @@ class Editor {
   /* Round 388 (task 0365): selections, fill, delete, clipping and layer masks (sketch_select.cpp, sketch_layers.cpp). */
   std::vector<Vec2> sketch_sel_;  // (the selection's outline in the canvas's frame; empty: none)
   int sketch_select_tool_ = 0;    // (the Draw tab's Select: 0 off, 1 Rectangle, 2 Lasso)
+  /* Round 390 (task 0367): More > Shapes - 0 off, 1 Rectangle, 2 Ellipse, 3 Polygon, 4 Star, 5 Pen; a shape's drag in
+   * pixels; the Pen's path (an anchor, its in- and out-handle each, the canvas's frame); the fill and the stroke. */
+  int sketch_vec_tool_ = 0, sketch_vec_sides_ = 5;
+  int sketch_vec_view_ = -1;  // (the view a shape's drag or a handle's pull began in: sketch_view_.kind)
+  std::vector<Vec2> sketch_vec_drag_, sketch_pen_;
+  bool sketch_pen_drag_ = false;
+  Vec2 sketch_pen_from_;
+  uint32_t sketch_fill_ = 0;
+  bool sketch_stroke_none_ = false;
+  SketchStroke sketch_vector_stroke(std::vector<Vec2> pts, bool closed) const;
+  bool sketch_vector_add(SketchStroke st, const char *label);
+  bool sketch_shape_add(int kind, int sides, Vec2 a, Vec2 b);
+  void sketch_pen_end(bool close);
+  void sketch_vec_pick(int tool);
+  bool sketch_pen_keys();
+  Recti sketch_command_view() const;
+  bool sketch_pen_update(const Recti &view, Vec2 px);
+  void sketch_pen_pull(const Recti &view, Vec2 px);
+  bool sketch_shape_update(const Recti &view, Vec2 px);
+  bool sketch_vector_update(const Recti &view, Vec2 px);
+  void sketch_vector_draw(const Recti &view);
+  void draw_sketch_shape_items();
+  void sketch_restyle();
+  void sketch_shape_command(const std::vector<std::string> &t);
+  void sketch_pen_command(const std::vector<std::string> &t);
+  void sketch_paint_colour_command(const std::vector<std::string> &t, bool fill);
+  void sketch_artboard_command(const std::vector<std::string> &t);
+  void sketch_svg_command(const std::vector<std::string> &t);
+  void sketch_svg_import(const std::string &path);
   std::vector<Vec2> sketch_sel_drag_;  // (the drag under way, view pixels)
   std::unordered_map<int, std::vector<uint8_t>> sketch_clip_covs_;  // (each base's coverage, this picture: a layer or a group)
   bool sketch_clips_onto(int i) const;
@@ -4909,6 +4980,35 @@ class Editor {
   void sketch_layer_mask(const std::string &how);
   void sketch_draw_selection(const Recti &view);
   void draw_sketch_select_items();
+  /* Round 389 (task 0366): Free Transform (sketch_transform.cpp). */
+  struct SketchXf {
+    bool on = false;
+    std::vector<SketchStroke> before, orig;  // (the whole list before; the transformed strokes as they were)
+    std::vector<size_t> idx;                 // (where they are in the list)
+    Vec2 lo, hi, q[4], q_from[4];
+    int drag = -1, view_kind = -1;
+    Vec2 drag_from;
+    const Sketch *doc = nullptr;  // (the drawing it began on, its size then: review 389)
+    size_t count = 0, layers = 0;
+    bool from_paper = false;
+    std::string paper;  // (the paper it began on: re-check 389 - another paper is the same Sketch)
+  };
+  SketchXf sketch_xf_;
+  bool sketch_xf_begin();
+  bool sketch_xf_valid();
+  void sketch_xf_settle();
+  void sketch_xf_drop();
+  void sketch_xf_press(const Recti &view, Vec2 px);
+  void sketch_xf_split(SketchStroke &st, std::vector<SketchStroke> &kept, std::vector<size_t> &idx);
+  void sketch_xf_apply();
+  void sketch_xf_commit();
+  void sketch_xf_cancel();
+  void sketch_transform_command(const std::vector<std::string> &t);
+  void sketch_xf_draw(const Recti &view);
+  bool sketch_xf_update(const Recti &view, Vec2 px);
+  int sketch_xf_pick(const Recti &view, Vec2 px) const;
+  void sketch_xf_drag(const Recti &view, Vec2 px, bool shift, bool ctrl);
+  float sketch_tilted(float pressure);  // (round 389: the brush's tilt widens the line)
   void sketch_layer_op(const std::string &op, int i);
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;

@@ -145,7 +145,7 @@ stroke freehand - the hint says which - and `]` / `[` set a modal's segments or 
 Lighting window (the Render window points there); the Render window's Render Devices section is where every device choice
 is read, Auto meaning the GPU when there is one. The Render window's image pans with a left drag (a pen has no middle
 button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign to Selection, and the Textures toolbar's
-Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
+Export Textures... packs the texture set for glTF, Unity, URP, HDRP, Unreal, Poiyomi or lilToon. Animation has keys of its own in every preset -
 set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
 under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
 In Weight Paint, Ctrl or the pen's eraser subtracts weight with the Add brush, as in every other brush; in the Rigging
@@ -499,7 +499,7 @@ without UVs. **Toon shading** and the **Outline** component give a cel-shaded lo
 **Bake Textures** turns everything an object's materials do into plain images on new UVs, so other programs show what
 Blendity renders.
 
-**Bake Mesh Maps** (Object > Bake Mesh Maps; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
+**Bake Mesh Maps** (GameObject > Bake Mesh Maps...; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
 layout - world normal, position, curvature, ambient occlusion, thickness: Substance Painter's mesh maps - under
 Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
 records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
@@ -520,7 +520,7 @@ images are saved beside the surface's texture when the project saves.
 **Smart materials** are groups of layers with their masks saved as assets: the Textures window's shelf applies a built-in
 (Worn Steel, Painted Metal, Rubber, Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read this
 object's mesh maps; `smat save <layer> <name>` keeps a group of your own under Assets/Materials/Smart and `smat apply
-<name>` drops it onto another surface. `export textures gltf|unity|hdrp|unreal|separate <dir>` writes the surface as the
+<name>` drops it onto another surface. `export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>` writes the surface as the
 images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
 model; `paint stencil <image>` holds an image over the view that masks the brush.
 
@@ -550,7 +550,7 @@ range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Tr
 1. Make a material, set Axis Mode: World; Axis Top: a grass material asset, Axis Side: rock, Axis Bottom: dirt.
 2. Set Axis High to a snow material with High Start 30 (metres), and Axis Noise so the borders wander.
 
-**Painting the surface** - the Substance Painter pipeline, in order. 1. **Object > Bake Mesh Maps** (`meshmaps`): the
+**Painting the surface** - the Substance Painter pipeline, in order. 1. **GameObject > Bake Mesh Maps...** (`meshmaps`, or the Textures window's **Bake All Maps**, which loads them too): the
 normal, position, curvature, occlusion and thickness of the mesh baked into its UVs on a worker. 2. **A surface** (`surface
 new`): a texture flagged as this object's, its layers reading those maps - **Fill** layers with a **mask stack** (a Mesh Map
 through levels, Noise, Blur, Levels, an Anchor to another layer's mask) and the **smart masks** (edge wear, dirt, dust,
@@ -560,8 +560,9 @@ colour, roughness, metallic, height and emission by projection, the far side lef
 material / object, a stroke one light undo step of the tiles it touched; `paint 2d on` paints on the Textures window's
 canvas; `paint stencil` masks the brush with an image. 4. **Smart materials** (the Textures window's shelf: Worn Steel,
 Painted Metal, Rubber, Wood, Plastic, Concrete, Gold; `smat save` keeps your own group) dropped onto any surface, their
-generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|hdrp|unreal|separate <dir>`): the
-texture set packed as the engine reads it.
+generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>`): the
+texture set packed as the engine - or VRChat's Poiyomi or lilToon shader - reads it. A layer's menu has **Material ID Mask**
+(one material slot's faces, from the ID map the bake writes) and the smart masks, Ground Dirt and Cavity among them.
 
 **The hand-painted look.** When the light should live in the texture (Blizzard's and Riot's style): `paint bakelight` bakes
 the maps' occlusion and a key light into a Multiply layer to paint over (`paint bakegradient` the top-down value gradient,
@@ -884,6 +885,12 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Sound** (round 365, the Sequencer): a WAV dropped onto a lane is a sound bar as long as the recording, played through the default device in step with the Preview's playhead and Play's Sequencer; trim its ends, set its Volume. Render Animation writes sound.wav beside the frames and puts the sound into the MP4. Console: `seq sound <file.wav> <track> <start> [frames]`, `seq volume <bar> <v>`. Linux plays through PulseAudio (libpulse-simple) when it's installed; macOS doesn't play sound yet (the render still has it).
 
+**Footage, keys and edits** (round 391, the Sequencer):
+- **A video** (.mp4, .mov, .mkv, .webm, .avi) dropped onto a lane is footage, as long as the file (`seq video <file> <track> <start>`); it needs FFmpeg, which Blender's libraries bring.
+- **Keys:** `seq key <bar> opacity|x|y|scale|rotation <frame> <value>` (frames from the bar's start) fades, moves, scales or turns a card over the render; `seq unkey` takes them off.
+- **Add Edit** (Alt+B) cuts every bar under the playhead; **Ripple Delete** (Shift+Delete) removes the bar and closes the gap.
+- **Export:** the Render window's preset - H.264 (MP4), ProRes 422 (MOV) to edit further, or VRChat (MP4, at most 1080p, streamable); `renderanim preset h264|prores|vrchat`.
+
 **No MP4?** (round 366): the dependency-free build has no video maker of its own. Render Animation's finish message offers Blender's libraries for this build (Get Blender's Libraries..., `update libs`; or Use Blender's Libraries, `update libson`, when they were turned off), and an ffmpeg program on the PATH or set in Preferences works too. The build with the libraries makes the MP4 itself.
 
 **Objects and the console** (round 367): create makes a Capsule too, refuses a kind it doesn't know, and names a second object as Unity does ("Sphere (1)"); a new Camera is placed at the view, looking its way; Join keeps the last mesh selected when the active object isn't one. Console: `save [path]`, `open <path>`, `new`, `rotate <x y z>`, `scale <s | x y z>`, `set Transform.Position|Rotation|Scale <x y z>`, `saverender [path]`, `ui scale <s>` (was `scale`), and `help` lists every command.
@@ -940,6 +947,17 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 - **More > Select > Rectangle or Lasso**, then drag on the pad: Alt+Backspace fills the selection with the pen's colour, Delete cuts it out of the active layer, Ctrl+D deselects.
 - **Add Mask** (Layers) shows the layer only inside the selection (no selection: all of it); `sketch layer mask hide|invert|off|delete`.
 - **A new or opened paper** becomes the pad's canvas.
+
+**Draw: Free Transform, Space and tilt** (round 389):
+- **Ctrl+T** (More > Select > Free Transform) puts the active layer's drawing, or the selection's, in a box: corners scale (Shift: freely), edges stretch, Ctrl+corner distorts, Ctrl+edge skews, outside a corner turns (Shift: 15-degree steps), inside moves; Enter keeps it, Esc undoes it.
+- **The Adobe keymap:** H is the Hand tool, Space held with a drag pans, Shift+Space opens the Wheel.
+- **A brush's Tilt** (Brushes window, `sketch brush tilt <0-1>`) widens the line as the pen tilts; the Pencil's is 0.8.
+
+**Draw: shapes, the Pen and SVG** (round 390):
+- **More > Shapes > Rectangle, Ellipse, Polygon or Star**, then drag on the pad: Shift makes it even, Alt draws it from the middle. Sides: 5, 6 or 8 (`sketch shape polygon <n> ...` for any).
+- **More > Shapes > Pen:** click for a corner, drag for a curve (the handles mirrored), click the first anchor to close; Enter or Esc ends an open path.
+- **Fill: Pen Color / Fill: None and Stroke: None** set what the shapes and the Pen make (`sketch fillcolor|strokecolor <hex>|none`); **Restyle Selection** applies them to the strokes inside the selection.
+- **Artboards:** `sketch artboard add <name> x0 y0 x1 y1`; **SVG:** `sketch svg export <file.svg> [artboard]` and `sketch svg import <file.svg>` - Blendity's file comes back as its layers, another program's on one layer fitted to the view.
 
 **Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
 - **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).

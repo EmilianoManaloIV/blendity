@@ -663,7 +663,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   drop_seq_tracks_.clear();
   if (field_pick_.field && ++field_pick_.age > 1) field_pick_ = FieldPick{};  // (a pick its field didn't take at once)
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
-  seqr_.drawn = false;
+  seqr_.drawn = false, seq_hovered_ = false;  // (re-check 391: set again by the Sequencer while it is drawn)
   sync_material_asset_names();
   keymap_capture_frame();  // (task 0231: a key being assigned is taken before any window or the Wheel sees it)
   wheel_frame();  // (task 0230: a held pen or finger opens the Wheel; an open one takes the press before any window)
@@ -2015,6 +2015,8 @@ size_t Editor::undo_bytes() const {
 
 void Editor::undo() {
   if (playing_) return;
+  if (sketch_xf_valid()) return sketch_xf_cancel();  // (re-check 389: Ctrl+Z mid-transform is Esc - the drawing as it was, no step undone)
+  sketch_xf_drop();
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();  // (its item may not be where it was)
   sketch_layers_reset();  // (task 0234)
@@ -2068,6 +2070,8 @@ void Editor::restore_state(UndoState s, std::vector<UndoState> &into, const char
 }
 
 void Editor::redo() {
+  if (sketch_xf_valid()) return sketch_xf_cancel();  // (re-check 389)
+  sketch_xf_drop();
   if (playing_ || redo_.empty()) return;
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   stack_drag_cancel();
@@ -2091,6 +2095,9 @@ void Editor::redo() {
 void Editor::new_scene() {
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
+  sketch_xf_drop();
+  if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
+  sketch_pen_.clear(), sketch_vec_drag_.clear();  // (review 390: a Pen path is the old scene's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
@@ -2123,6 +2130,9 @@ void Editor::new_scene() {
 bool Editor::open_scene(const std::string &path) {
   export_waits_drop("another scene opened");  // (review 354)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
+  sketch_xf_drop();
+  if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
+  sketch_pen_.clear(), sketch_vec_drag_.clear();  // (review 390: a Pen path is the old scene's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);
@@ -2156,6 +2166,7 @@ bool Editor::open_scene(const std::string &path) {
 }
 
 void Editor::save_scene_cmd(bool save_as) {
+  sketch_xf_settle();  // (review 389: a save keeps a transform first, as Photoshop's)
   eye_test_off();  // (round 360: the eye test's pose isn't written)
   anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
   seq_set_preview(false);
@@ -3987,6 +3998,7 @@ int Editor::startup_check() {
 }
 
 void Editor::enter_play() {
+  sketch_xf_settle();  // (re-check 389: Play clones the scene - a transform is kept first)
   export_waits_drop("Play started (the jobs it waited for are stopped)");  // (review 354)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   sculpt_remesh_cancel();  // (task 0241: Play clones the scene; a result landing in the clone would be thrown away by Stop)
@@ -4453,6 +4465,7 @@ void Editor::load_prefs() {
           if (w == l.key) *l.flag = false;
     }
     else if (k == "ffmpeg") ffmpeg_path_ = v;
+    else if (k == "render_preset") ranim_preset_ = std::clamp(std::atoi(v.c_str()), 0, 2);  // (round 391)
     else if (k == "update_check") update_check_ = v != "0";
     else if (k == "update_previews") update_previews_ = v != "0";
     else if (k == "import_preview") import_preview_pref_ = v != "0";  // (task 0152)
@@ -4577,6 +4590,7 @@ void Editor::save_prefs() {
   s += hci_prefs_text();  // (task 0235)
   s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += "render_preset=" + std::to_string(ranim_preset_) + "\n";
   s += assist_prefs_text();
   s += "pen_curve=" + curve_to_text(pen_curve_) + "\n";  // (round 368)
   s += ai_prefs_text();

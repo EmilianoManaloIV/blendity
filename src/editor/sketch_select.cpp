@@ -71,6 +71,9 @@ std::vector<std::vector<SketchPoint>> runs_outside(const std::vector<SketchPoint
 
 }  // namespace
 
+bool sketch_inside_polygon(const std::vector<Vec2> &poly, Vec2 p) { return poly.size() >= 3 && inside(poly, p); }
+std::vector<SketchPoint> sketch_densified(const std::vector<SketchPoint> &pts) { return densified(pts); }
+
 std::string sketch_blend_list() {
   std::string s;
   for (int i = 0; i < kSketchBlendCount; i++) s += (i ? ", " : "") + std::string(sketch_blend_name(i));
@@ -101,7 +104,7 @@ void Editor::sketch_select_set(std::vector<Vec2> poly, const char *what) {
 /* sketch select rect x0 y0 x1 y1 | lasso x y x y ... | all | none (view pixels, as sketchstroke's) */
 void Editor::sketch_select_command(const std::vector<std::string> &t) {
   const std::string how = t.size() > 2 ? to_lower(t[2]) : "";
-  const Recti view = draw_source_ == 2 ? sketch_view_.view : scene_rect_;  // (review 388: on Paper the pad's pixels, as sketchstroke's)
+  const Recti view = sketch_command_view();  // (review 388: on Paper the pad's pixels, as sketchstroke's; round 393: before the pad is drawn too)
   std::vector<float> v;
   for (size_t i = 3; i < t.size(); i++) v.push_back((float)std::atof(t[i].c_str()));
   if (how == "none") {
@@ -165,6 +168,7 @@ void Editor::sketch_delete() {
       SketchStroke piece = st;
       piece.pts = r, piece.raw.clear(), piece.kind = StrokeKind::Freehand, piece.closed = false;
       piece.center = {}, piece.rx = piece.ry = piece.angle = piece.start = piece.sweep = 0.0f;  // (no longer the fit's shape)
+      piece.fill = 0, piece.bez.clear();  // (round 390: a piece is a line, not the shape)
       kept.push_back(std::move(piece));
     }
   }
@@ -242,9 +246,9 @@ bool Editor::sketch_select_update(const Recti &view, Vec2 px) {
 void Editor::draw_sketch_select_items() {
   auto &u = ui_;
   const bool has = sketch_sel_.size() >= 3;
-  if (u.menu_item("Rectangle", nullptr, sketch_select_tool_ == 1)) sketch_select_tool_ = sketch_select_tool_ == 1 ? 0 : 1;
+  if (u.menu_item("Rectangle", nullptr, sketch_select_tool_ == 1)) sketch_vec_pick(0), sketch_select_tool_ = sketch_select_tool_ == 1 ? 0 : 1;
   u.tooltip("Drag a rectangle on the pad (Photoshop's Rectangular Marquee). Again: back to the brush.");
-  if (u.menu_item("Lasso", nullptr, sketch_select_tool_ == 2)) sketch_select_tool_ = sketch_select_tool_ == 2 ? 0 : 2;
+  if (u.menu_item("Lasso", nullptr, sketch_select_tool_ == 2)) sketch_vec_pick(0), sketch_select_tool_ = sketch_select_tool_ == 2 ? 0 : 2;
   u.tooltip("Drag round an area on the pad (Photoshop's Lasso). Again: back to the brush.");
   if (u.menu_item("Select All")) run_console_command("sketch select all");
   u.menu_separator();
@@ -253,6 +257,10 @@ void Editor::draw_sketch_select_items() {
   if (u.menu_item("Delete", "Delete", false, has)) run_console_command("sketch delete");
   u.tooltip("The active layer's strokes cut out of the selection.");
   if (u.menu_item("Deselect", "Ctrl+D", false, has)) run_console_command("sketch select none");
+  u.menu_separator();
+  if (u.menu_item("Free Transform", "Ctrl+T", sketch_xf_.on)) run_console_command("sketch transform begin");  // (round 389)
+  u.tooltip("The active layer's strokes (or the selection's) in a box: drag its corners to scale (Shift: freely), its\n"
+            "edges to stretch, Ctrl+corner to distort, Ctrl+edge to skew, outside a corner to turn, inside to move; Enter keeps it, Esc undoes it.");
 }
 
 /* The selection's outline over the view: marching ants (dark and light dashes). */

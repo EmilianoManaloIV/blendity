@@ -29,6 +29,7 @@ struct MeshMapsResult {
   std::vector<uint32_t> curvature;  // grey: 0.5 flat, toward 1 convex, toward 0 concave
   std::vector<uint32_t> ao;         // grey: the share of hemisphere rays that escape
   std::vector<uint32_t> thickness;  // grey: the mean distance inward rays travel before the mesh, over the reach (thin: dark)
+  std::vector<uint32_t> id;         // (round 392) the material slot: R the slot's number, G and B a colour to tell slots apart
   std::vector<uint8_t> covered;     // texels a triangle covers (before the padding)
   size_t texels = 0;
   bool own_uvs = false;
@@ -54,7 +55,7 @@ std::string mesh_maps_key_text(const Mesh &m, const Mat4 &model);
 bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings &settings, MeshMapsResult &out, std::string *why = nullptr,
                     const std::atomic<bool> *cancel = nullptr, std::atomic<float> *progress = nullptr);
 
-/* The images as PNGs: <base>_normal.png, _position.png, _curvature.png, _ao.png, _thickness.png. */
+/* The images as PNGs: <base>_normal.png, _position.png, _curvature.png, _ao.png, _thickness.png and (round 392) _id.png. */
 bool write_mesh_maps(const MeshMapsResult &r, const std::string &base, std::string *error = nullptr);
 
 }  // namespace bl

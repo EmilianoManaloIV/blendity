@@ -79,6 +79,7 @@ std::string save_sequence_text(const Sequence &s) {
         os << "card " << i.kind << " " << i.start << " " << i.trim_in << " " << i.trim_out;
         if (i.kind == (int)SeqKind::Audio) os << " " << i.volume;  // (round 365; a round-364 reader skips kind 4)
         os << "\t" << i.name << "\t" << i.media << "\n";
+        for (const SeqKey &k : i.keys) os << "key " << k.channel << " " << k.frame << " " << k.value << "\n";  // (round 391; an older reader skips them)
         continue;
       }
       os << "clip " << i.start << " " << i.trim_in << " " << i.trim_out << " " << i.speed << "\t" << i.name << "\t" << i.clip << (i.target.empty() ? "" : "\t" + i.target) << "\n";
@@ -112,6 +113,7 @@ bool load_sequence_text(const std::string &text, Sequence &s) {
   std::string line;
   if (!std::getline(is, line) || line.rfind("blendity_seq", 0) != 0) return false;
   s.tracks.clear(), s.triggers.clear();
+  bool bar_read = false;  // (review 391: the last bar line was kept - a key line after a skipped one is skipped too)
   while (std::getline(is, line)) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     std::istringstream ls(line);
@@ -120,10 +122,12 @@ bool load_sequence_text(const std::string &text, Sequence &s) {
     if (word == "name") std::getline(ls >> std::ws, s.name);
     else if (word == "rate") ls >> s.frame_rate;
     else if (word == "track") {
+      bar_read = false;
       s.tracks.emplace_back();
       std::getline(ls >> std::ws, s.tracks.back().name);
     }
     else if (word == "clip" && !s.tracks.empty()) {
+      bar_read = false;
       const std::vector<std::string> f = tab_fields(line);
       SeqInstance i;
       std::istringstream nums(f[0].substr(4));
@@ -134,18 +138,27 @@ bool load_sequence_text(const std::string &text, Sequence &s) {
       i.name = f[1], i.clip = f[2];
       if (f.size() > 3) i.target = f[3];  // (task 0070; older files: none)
       s.tracks.back().items.push_back(std::move(i));
+      bar_read = true;
     }
     else if (word == "card" && !s.tracks.empty()) {  // (round 364: a picture or a camera cut)
+      bar_read = false;
       const std::vector<std::string> f = tab_fields(line);
       SeqInstance i;
       std::istringstream nums(f[0].substr(4));
       if (f.size() < 3 || !(nums >> i.kind >> i.start >> i.trim_in >> i.trim_out)) continue;
-      if (!finite_all({i.start, i.trim_in, i.trim_out}) || i.kind < 1 || i.kind > 4 || f[2].empty()) continue;
+      if (!finite_all({i.start, i.trim_in, i.trim_out}) || i.kind < 1 || i.kind > 5 || f[2].empty()) continue;  // (round 391: 5, footage)
       i.start = std::max(0.0f, i.start), i.trim_in = std::max(0.0f, i.trim_in);
       float volume = 1.0f;
       if (nums >> volume && std::isfinite(volume)) i.volume = std::clamp(volume, 0.0f, 4.0f);
       i.name = f[1], i.media = f[2];
       s.tracks.back().items.push_back(std::move(i));
+      bar_read = true;
+    }
+    else if (word == "key" && bar_read && !s.tracks.empty() && !s.tracks.back().items.empty()) {  // (round 391: the last bar's)
+      SeqKey k;
+      if (!(ls >> k.channel >> k.frame >> k.value) || k.channel < 0 || k.channel >= kSeqChannels || !finite_all({k.frame, k.value})) continue;
+      k.frame = std::max(0.0f, std::round(k.frame)), k.value = seq_channel_clamp(k.channel, k.value);
+      s.tracks.back().items.back().keys.push_back(k);
     }
     else if (word == "trigger") {
       const std::vector<std::string> f = tab_fields(line);
@@ -388,7 +401,83 @@ static const SeqInstance *top_bar_at(const Sequence &s, float frame, std::initia
   return nullptr;
 }
 
-const SeqInstance *sequence_card_at(const Sequence &s, float frame) { return top_bar_at(s, frame, {SeqKind::Image, SeqKind::Paper}); }
+const SeqInstance *sequence_card_at(const Sequence &s, float frame) { return top_bar_at(s, frame, {SeqKind::Image, SeqKind::Paper, SeqKind::Video}); }
+
+/* ---------------------------------------------------------------- a card's keys (round 391) */
+
+namespace {
+const char *const kChannelNames[kSeqChannels] = {"opacity", "x", "y", "scale", "rotation"};
+const float kChannelDefault[kSeqChannels] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+
+/* One channel's value at `frame`: its keys' line through it, the default with none. */
+float channel_at(const std::vector<SeqKey> &keys, int c, float frame) {
+  const SeqKey *before = nullptr, *after = nullptr;
+  for (const SeqKey &k : keys) {
+    if (k.channel != c) continue;
+    if (k.frame <= frame) before = &k;
+    if (k.frame > frame && !after) after = &k;
+  }
+  if (!before && !after) return kChannelDefault[c];
+  if (!before) return after->value;
+  if (!after) return before->value;
+  const float t = (frame - before->frame) / std::max(1e-6f, after->frame - before->frame);
+  return before->value + (after->value - before->value) * t;
+}
+}  // namespace
+
+bool seq_is_video_file(const std::string &path) {
+  static const char *const kVideoExts[] = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"};
+  const std::string ext = to_lower(fs::extension(path));
+  return std::find(std::begin(kVideoExts), std::end(kVideoExts), ext) != std::end(kVideoExts);
+}
+
+int seq_channel_index(const std::string &name) {
+  const std::string n = to_lower(name);
+  for (int c = 0; c < kSeqChannels; c++)
+    if (n == kChannelNames[c]) return c;
+  return -1;
+}
+
+const char *seq_channel_name(int channel) { return channel >= 0 && channel < kSeqChannels ? kChannelNames[channel] : "?"; }
+
+float seq_channel_clamp(int channel, float v) {
+  if (channel == kSeqOpacity) return std::clamp(v, 0.0f, 1.0f);
+  if (channel == kSeqScale) return std::clamp(v, 0.01f, 100.0f);
+  if (channel == kSeqRotation) return std::clamp(v, -36000.0f, 36000.0f);
+  return std::clamp(v, -10.0f, 10.0f);
+}
+
+SeqCardLook seq_card_look(const SeqInstance &i, float frame) {
+  SeqCardLook l;
+  if (i.keys.empty()) return l;
+  l.opacity = channel_at(i.keys, kSeqOpacity, frame), l.x = channel_at(i.keys, kSeqX, frame), l.y = channel_at(i.keys, kSeqY, frame);
+  l.scale = channel_at(i.keys, kSeqScale, frame), l.rotation = channel_at(i.keys, kSeqRotation, frame);
+  return l;
+}
+
+void seq_split_bar(SeqInstance &i, float frame, float scale, const std::string &right_name, SeqInstance &right) {
+  if (i.kind != (int)SeqKind::Clip && i.trim_out <= i.trim_in) i.trim_out = i.clip_out(nullptr);  // (review 391: a card's own length first - it had grown)
+  const float d = frame - i.start;
+  right = i;
+  right.name = right_name, right.start = frame, right.trim_in = i.trim_in + d * scale, right.keys.clear();
+  i.trim_out = i.trim_in + d * scale;
+  std::vector<SeqKey> left;
+  for (int c = 0; c < kSeqChannels; c++) {
+    const bool keyed = std::any_of(i.keys.begin(), i.keys.end(), [&](const SeqKey &k) { return k.channel == c; });
+    if (!keyed) continue;
+    const float at_cut = channel_at(i.keys, c, d);
+    for (const SeqKey &k : i.keys) {
+      if (k.channel == c && k.frame < d) left.push_back(k);
+      if (k.channel == c && k.frame > d) right.keys.push_back({c, k.frame - d, k.value});
+    }
+    left.push_back({c, d, at_cut});
+    right.keys.insert(right.keys.begin(), SeqKey{c, 0.0f, at_cut});
+  }
+  i.keys = std::move(left);
+  auto order = [](const SeqKey &a, const SeqKey &b) { return a.channel != b.channel ? a.channel < b.channel : a.frame < b.frame; };
+  std::sort(i.keys.begin(), i.keys.end(), order);
+  std::sort(right.keys.begin(), right.keys.end(), order);
+}
 
 std::string sequence_camera_at(const Sequence &s, float frame) {
   const SeqInstance *i = top_bar_at(s, frame, {SeqKind::Camera});
