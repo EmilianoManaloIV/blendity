@@ -1881,8 +1881,20 @@ static void tests_round382() {
     ed.livelink_for_test()->tick(ed.scene(), false, 1e7 + 100.0);
     const double topo = ed.livelink_for_test()->stats().tick_ms;
     std::printf("    with a clip keyed each frame: %llu clips sent; a topology change of the dense mesh: %.2f ms\n", (unsigned long long)st.clips, topo);
-    CHECK(total / frames < 8.0 && worst < 25.0);  // (the time: generous for slower machines and debug builds - this one ran about 1.5 and 3)
-    CHECK(topo < 40.0);
+    /* A sanitizer build's every load and store is checked: CI's ran 8.9 and 41 ms there - its budget is four times. */
+#if defined(__SANITIZE_ADDRESS__)
+    const double slow = 4.0;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    const double slow = 4.0;
+#else
+    const double slow = 1.0;
+#endif
+#else
+    const double slow = 1.0;
+#endif
+    CHECK(total / frames < 8.0 * slow && worst < 25.0 * slow);  // (the time: generous for slower machines and debug builds - this one ran about 1.5 and 3)
+    CHECK(topo < 40.0 * slow);
     CHECK(st.deforms >= (uint64_t)frames && st.poses >= (uint64_t)frames - 1 && st.clips >= 6);  // (everything went: a cheap tick that sent nothing would pass the times)
     ed.livelink_stop();
     fs::remove_file(resolve_asset_path("Assets/Animations/r382_clip.anim"));
