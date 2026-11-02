@@ -145,7 +145,7 @@ stroke freehand - the hint says which - and `]` / `[` set a modal's segments or 
 Lighting window (the Render window points there); the Render window's Render Devices section is where every device choice
 is read, Auto meaning the GPU when there is one. The Render window's image pans with a left drag (a pen has no middle
 button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign to Selection, and the Textures toolbar's
-Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
+Export Textures... packs the texture set for glTF, Unity, URP, HDRP, Unreal, Poiyomi or lilToon. Animation has keys of its own in every preset -
 set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
 under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
 In Weight Paint, Ctrl or the pen's eraser subtracts weight with the Add brush, as in every other brush; in the Rigging
@@ -499,7 +499,7 @@ without UVs. **Toon shading** and the **Outline** component give a cel-shaded lo
 **Bake Textures** turns everything an object's materials do into plain images on new UVs, so other programs show what
 Blendity renders.
 
-**Bake Mesh Maps** (Object > Bake Mesh Maps; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
+**Bake Mesh Maps** (GameObject > Bake Mesh Maps...; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
 layout - world normal, position, curvature, ambient occlusion, thickness: Substance Painter's mesh maps - under
 Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
 records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
@@ -520,7 +520,7 @@ images are saved beside the surface's texture when the project saves.
 **Smart materials** are groups of layers with their masks saved as assets: the Textures window's shelf applies a built-in
 (Worn Steel, Painted Metal, Rubber, Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read this
 object's mesh maps; `smat save <layer> <name>` keeps a group of your own under Assets/Materials/Smart and `smat apply
-<name>` drops it onto another surface. `export textures gltf|unity|hdrp|unreal|separate <dir>` writes the surface as the
+<name>` drops it onto another surface. `export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>` writes the surface as the
 images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
 model; `paint stencil <image>` holds an image over the view that masks the brush.
 
@@ -550,7 +550,7 @@ range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Tr
 1. Make a material, set Axis Mode: World; Axis Top: a grass material asset, Axis Side: rock, Axis Bottom: dirt.
 2. Set Axis High to a snow material with High Start 30 (metres), and Axis Noise so the borders wander.
 
-**Painting the surface** - the Substance Painter pipeline, in order. 1. **Object > Bake Mesh Maps** (`meshmaps`): the
+**Painting the surface** - the Substance Painter pipeline, in order. 1. **GameObject > Bake Mesh Maps...** (`meshmaps`, or the Textures window's **Bake All Maps**, which loads them too): the
 normal, position, curvature, occlusion and thickness of the mesh baked into its UVs on a worker. 2. **A surface** (`surface
 new`): a texture flagged as this object's, its layers reading those maps - **Fill** layers with a **mask stack** (a Mesh Map
 through levels, Noise, Blur, Levels, an Anchor to another layer's mask) and the **smart masks** (edge wear, dirt, dust,
@@ -560,8 +560,9 @@ colour, roughness, metallic, height and emission by projection, the far side lef
 material / object, a stroke one light undo step of the tiles it touched; `paint 2d on` paints on the Textures window's
 canvas; `paint stencil` masks the brush with an image. 4. **Smart materials** (the Textures window's shelf: Worn Steel,
 Painted Metal, Rubber, Wood, Plastic, Concrete, Gold; `smat save` keeps your own group) dropped onto any surface, their
-generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|hdrp|unreal|separate <dir>`): the
-texture set packed as the engine reads it.
+generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>`): the
+texture set packed as the engine - or VRChat's Poiyomi or lilToon shader - reads it. A layer's menu has **Material ID Mask**
+(one material slot's faces, from the ID map the bake writes) and the smart masks, Ground Dirt and Cavity among them.
 
 **The hand-painted look.** When the light should live in the texture (Blizzard's and Riot's style): `paint bakelight` bakes
 the maps' occlusion and a key light into a Multiply layer to paint over (`paint bakegradient` the top-down value gradient,

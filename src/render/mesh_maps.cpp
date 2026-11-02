@@ -53,6 +53,34 @@ Vec3 cosine_dir(Vec3 n, float u1, float u2) {
   return normalize(t * (r * std::cos(phi)) + b * (r * std::sin(phi)) + n * std::sqrt(std::max(0.0f, 1.0f - u1)));
 }
 
+/* A material slot as the ID map's colour (round 392): R the slot's number (read back exactly), G and B spread so
+ * neighbouring slots look apart. */
+uint32_t id_colour(int slot) {
+  const uint32_t s = (uint32_t)std::max(0, std::min(255, slot));
+  return 0xFF000000u | s << 16 | ((s * 97u + 64u) & 255u) << 8 | ((s * 53u + 160u) & 255u);
+}
+
+/* The ID map's charts grown by `pad` texels (review 392): an uncovered texel beside covered ones takes the first one's
+ * value, pass by pass - a slot copied, never a mean (slots 0 and 2 would average to a slot 1 that isn't there). */
+void pad_ids(std::vector<uint32_t> &ids, const std::vector<uint8_t> &covered, int S, int pad) {
+  std::vector<uint8_t> filled = covered, next;
+  for (int pass = 0; pass < pad; pass++) {
+    next = filled;
+    const std::vector<uint32_t> copy = ids;
+    for (int y = 0; y < S; y++)
+      for (int x = 0; x < S; x++) {
+        const size_t idx = (size_t)y * S + x;
+        if (filled[idx]) continue;
+        for (int k = 0; k < 9 && !next[idx]; k++) {
+          const int nx = x + k % 3 - 1, ny = y + k / 3 - 1;
+          if (nx < 0 || ny < 0 || nx >= S || ny >= S || !filled[(size_t)ny * S + nx]) continue;
+          ids[idx] = copy[(size_t)ny * S + nx], next[idx] = 1;
+        }
+      }
+    filled.swap(next);
+  }
+}
+
 /* The charts grown by `pad` texels: an uncovered texel beside covered ones takes their mean, pass by pass; texels
  * farther out keep the map's default. */
 void pad_images(std::vector<std::vector<uint32_t> *> imgs, const std::vector<uint8_t> &covered, int S, int pad) {
@@ -276,6 +304,7 @@ bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings 
   r.curvature.assign(N, grey8(0.5f));
   r.ao.assign(N, grey8(1.0f));
   r.thickness.assign(N, grey8(0.0f));
+  r.id.assign(N, 0xFF000000u);
   r.covered.assign(N, 0);
   std::atomic<uint64_t> rays{0};
   std::atomic<bool> stop{false};
@@ -307,6 +336,7 @@ bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings 
         r.normal[idx] = rgb8(wn * 0.5f + Vec3(0.5f));
         r.position[idx] = rgb8(Vec3((lp.x - b.min.x) / std::max(1e-9f, ext.x), (lp.y - b.min.y) / std::max(1e-9f, ext.y), (lp.z - b.min.z) / std::max(1e-9f, ext.z)));
         r.curvature[idx] = grey8(curv_r[tri[0]] * b0 + curv_r[tri[1]] * b1 + curv_r[tri[2]] * b2);
+        r.id[idx] = id_colour((size_t)t < rm.tri_material.size() ? rm.tri_material[(size_t)t] : 0);
         uint32_t seed = (uint32_t)idx * 2654435761u + 12345u;
         int open = 0;
         float depth = 0.0f;  // (the mean distance an inward ray travels before the mesh, over the reach: thin reads dark)
@@ -335,6 +365,7 @@ bool bake_mesh_maps(const Mesh &mesh, const Mat4 &model, const MeshMapsSettings 
   for (size_t i = 0; i < N; i++) r.texels += r.covered[i];
   if (!r.texels) return fail("the layout covers no texel");
   pad_images({&r.normal, &r.position, &r.curvature, &r.ao, &r.thickness}, r.covered, S, pad);
+  pad_ids(r.id, r.covered, S, pad);  // (review 392: copied, not averaged)
   r.rays = rays.load();
   r.ms_total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   return true;
@@ -350,9 +381,10 @@ bool write_mesh_maps(const MeshMapsResult &r, const std::string &base, std::stri
   const struct {
     const char *suffix;
     const std::vector<uint32_t> *px;
-  } maps[] = {{"_normal.png", &r.normal}, {"_position.png", &r.position}, {"_curvature.png", &r.curvature}, {"_ao.png", &r.ao}, {"_thickness.png", &r.thickness}};
+  } maps[] = {{"_normal.png", &r.normal}, {"_position.png", &r.position}, {"_curvature.png", &r.curvature}, {"_ao.png", &r.ao}, {"_thickness.png", &r.thickness},
+              {"_id.png", &r.id}};  // (round 392: the material slots, Substance's ID map)
   for (const auto &m : maps)
-    if (!write_png(base + m.suffix, m.px->data(), r.size, r.size, r.size, false)) {
+    if (m.px->size() == (size_t)r.size * r.size && !write_png(base + m.suffix, m.px->data(), r.size, r.size, r.size, false)) {
       if (error) *error = "could not write " + base + m.suffix;
       return false;
     }

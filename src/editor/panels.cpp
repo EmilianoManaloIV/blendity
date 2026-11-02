@@ -1283,6 +1283,18 @@ struct InspectorReflector : Reflector {
         if (uu.menu_item("Clear Mask")) edp->texture_layer_op(path, "clearmask", i, "");
         if (uu.menu_item("Group with the Layer Below", nullptr, false, i + 1 < n)) edp->texture_layer_op(path, "group", i, "");
         if (uu.menu_item("Save as Smart Material...", nullptr, false, is_group)) edp->texture_layer_op(path, "smat", i, "");
+        if (on_surface)  // (round 392: Substance's ID mask - one material slot's faces; last, so the pointer's way to Mask Preset's list crosses no other submenu)
+          uu.submenu("Material ID Mask", uu.px(200), [edp, path, i] {
+            GameObject *g = edp->active_object();
+            const ProceduralTexturePtr own = g ? edp->surface_of(g, nullptr) : nullptr;
+            const MeshRenderer *mr = own && own->asset_path == path ? g->get<MeshRenderer>() : nullptr;  // (review 392: the surface's own object's slots)
+            if (!mr) edp->ui_.menu_item("Select the surface's object first", nullptr, false, false);
+            const size_t slots = mr ? std::min<size_t>(mr->materials.size(), 256) : 0;  // (the ID map holds 256)
+            for (size_t k = 0; k < slots; k++) {
+              const std::string label = strprintf("Slot %zu: %s", k, mr->materials[k] ? mr->materials[k]->name.c_str() : "(none)");
+              if (edp->ui_.menu_item(label)) edp->texture_layer_op(path, "matid", i, std::to_string(k));
+            }
+          });
       });
       if (l.ui_expanded) {
         lay.indent += u.px(10);
@@ -4142,7 +4154,7 @@ void Editor::draw_paint_extras(ui::Layout &lay) {
     }
   }
   br.help("Bucket Fill: a click on the model fills that part - its polygroup, its island, its material or the whole object - with\n"
-          "the brush's color, or a gradient along an axis (it needs the mesh maps: Object > Bake Mesh Maps).");
+          "the brush's color, or a gradient along an axis (it needs the mesh maps: GameObject > Bake Mesh Maps...).");
   int hit = -1;
   if (row_buttons(lay, "paint", {"Bake Light", "Bake Gradient"}, hit)) paint_bake_light({"paint", hit == 0 ? "bakelight" : "bakegradient"}, hit == 1);
   u.tooltip("Light painted in: the scene's light (or a top-to-bottom gradient) baked into a Multiply layer you can paint over.");

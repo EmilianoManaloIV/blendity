@@ -14,6 +14,7 @@ namespace bl {
 struct SurfaceMaps {
   int w = 0, h = 0;
   std::vector<float> cover, ao, curvature, thickness;  // 0..1
+  std::vector<uint8_t> id;                             // (round 392) the material slot per texel; empty: a record from before (no _id.png)
   std::vector<Vec3> position, normal;                  // the position in the bounds (0..1), the world normal (-1..1)
   std::vector<int32_t> nearest;                        // per texel: the nearest covered texel (itself when covered)
   uint64_t hash = 0;
@@ -23,6 +24,7 @@ struct SurfaceMaps {
   float sample(const std::vector<float> &pl, float u, float v) const;
   Vec3 sample3(const std::vector<Vec3> &pl, float u, float v) const;
   bool covered_at(float u, float v) const { return sample(cover, u, v) > 0.5f; }
+  int slot_at(float u, float v) const;  // (round 392: the nearest texel's material slot, -1 without the ID map)
 };
 using SurfaceMapsPtr = std::shared_ptr<const SurfaceMaps>;
 
@@ -59,6 +61,8 @@ int rect_halo(const ProceduralTexture &t, size_t from, const LayerContext &c);
 
 /* The smart-mask presets: a mask stack built on a layer (Mesh Map and Noise effects, editable afterwards). */
 const std::vector<std::string> &surface_mask_presets();
+/* A layer's mask the faces of one material slot, from the baked ID map (round 392: Substance's ID mask). */
+void apply_material_id_mask(TextureLayer &l, int slot);
 bool apply_surface_mask_preset(TextureLayer &l, const std::string &preset);
 
 /* The layer types this file adds (registered in texture_layer_infos). */

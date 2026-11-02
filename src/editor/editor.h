@@ -803,6 +803,7 @@ class Editor {
   bool sculpt_remesh_busy_for_test() const { return sculpt_remesh_ != nullptr; }  // (task 0241)
   bool paint_for_test() const { return paint_; }                                   // (task 0245)
   ProceduralTexturePtr surface_of_for_test(GameObject *g, std::string *why) const { return surface_of(g, why); }
+  bool surface_load_maps_for_test(GameObject *g, ProceduralTexture &pt, std::string *why) { return surface_load_maps(g, pt, why); }  // (round 392)
   PaintBrush &paint_brush_for_test() { return paint_brush_; }
   PaintImagesPtr paint_images_for_test() { return paint_images_; }
   int paint_last_fill_for_test() const { return paint_last_fill_; }
@@ -4180,14 +4181,17 @@ class Editor {
     Mat4 model;
     MeshMapsSettings settings;
     MeshMapsResult result;
+    std::string load_into;  // (round 392: Bake All Maps - the surface it loads into when it lands; review: dies with the job)
     ~MeshMapsJob() {
       cancel.store(true, std::memory_order_relaxed);
       if (thread.joinable()) thread.join();
       if (landed || base.empty()) return;
-      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png"}) fs::remove_file(base + suffix);
+      for (const char *suffix : {"_normal.png", "_position.png", "_curvature.png", "_ao.png", "_thickness.png", "_id.png"}) fs::remove_file(base + suffix);
     }
   };
   std::unique_ptr<MeshMapsJob> meshmaps_job_;
+  bool surface_bake_all(int size);
+  void meshmaps_load_landed(GameObject *g, const std::string &into);
   /* Task 0245 (ADR 0081): Paint Mode - the brush, the stroke's tiles, the layer written. */
   PaintBrush paint_brush_;
   bool paint_ = false, paint_stroking_ = false, paint_dabbed_ = false, paint_erase_ = false;

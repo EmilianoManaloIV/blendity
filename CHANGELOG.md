@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 392): VRChat shaders' texture presets, ID masks and Bake All Maps
+
+**Asked:** Phase D's sixth round: texture export presets for URP and VRChat's shaders (Poiyomi, lilToon), a bake-all
+button, the smart masks against Substance's list, Material ID fills, and the menu's name in the messages (round 387's
+findings 26 and 29).
+
+**Added (task 0369)**
+- **Texture presets** `urp`, `poiyomi` and `liltoon` (Export Textures..., `export textures`): files named for the
+  shaders' slots, packed as they read them (Poiyomi's PackedMaps R metallic, G smoothness; lilToon's each from R).
+- **The ID map** (`_id.png`, baked with the mesh maps) and **Material ID masks** (the layer menu, `surface mask id`).
+- **Smart masks** Ground Dirt and Cavity.
+- **Bake All Maps** (the Textures window, `surface bakeall`): baked and loaded into the surface in one step.
+- **GameObject > Bake Mesh Maps...** in every message and lesson (finding 29).
+
+**The Opus review's fixes:**
+- Bake All Maps' surface kept with its bake (a cancelled or dropped one had loaded the next bake into the wrong surface),
+  checked against the object's surface when it lands, from the bake dialog's settings;
+- the ID map in the maps' hash (a reassigned slot showed the old mask);
+- the ID map's padding copying a slot, never a mean (slots 0 and 2 had made a slot 1 in the gutters);
+- a Material ID mask with no maps empty; the layer menu's slots the surface's own object's, 256 at most;
+- the step named Bake All Maps. An older build opening a texture with a Material ID mask reads it as Normal Z.
+
+**Checked:** the ID map's slots from a two-slot cube and the mask against them; a record without an ID map; Poiyomi's
+packed channels; the lilToon and URP files; the new masks; Bake All Maps loading its maps; a dropped bake's ID map
+removed; the review's cases (slots 0 and 2 in the gutters, the hash, an ordinary bake after a cancelled Bake All Maps,
+the menu's name in the message).
+
 ## 2026-11-02 (round 391): footage, keyed cards, Add Edit, Ripple Delete and export presets
 
 **Asked:** Phase D's fifth round: video footage on the Sequencer, keyframed opacity and transform, a blade cut and ripple
