@@ -303,7 +303,9 @@ OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FF
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
 Each build produces **`Blendity`**, **`blendity_tests`** (15232 unit checks in 1480 tests with Blender's libraries; the
-dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite). GitHub
+dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
+`py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
+Windows builds in about a minute and a half). GitHub
 Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
 and tested only on CI (no Mac here).
 
