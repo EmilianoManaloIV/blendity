@@ -2090,6 +2090,7 @@ void Editor::redo() {
 
 void Editor::new_scene() {
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
+  sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);  // another scene's objects (their ids start again at 1)
   set_sculpt(false);
@@ -2121,6 +2122,7 @@ void Editor::new_scene() {
 
 bool Editor::open_scene(const std::string &path) {
   export_waits_drop("another scene opened");  // (review 354)
+  sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   obj_last_end();  // (task 0266: the Adjust Last panel is the newest step's)
   set_weight_paint(false);
   set_sculpt(false);

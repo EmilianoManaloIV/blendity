@@ -100,6 +100,16 @@ bool Sketch::merge_down(int i) {
   return true;
 }
 
+int Sketch::clip_base(int i) const {
+  if (i <= 0 || (size_t)i >= layers.size()) return -1;
+  const int group = layers[(size_t)i].group;
+  for (int k = i - 1; k >= 0; k--) {
+    const SketchLayer &l = layers[(size_t)k];
+    if (l.group == group && !l.clip) return k;
+  }
+  return -1;
+}
+
 bool Sketch::layer_shown(int i) const {
   if (i < 0 || (size_t)i >= layers.size()) return true;
   const SketchLayer &l = layers[(size_t)i];

@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-01 (round 388): Photoshop's layers in the Draw tab - blend modes, masks, selections
+
+**Asked:** Phase D's second round (round 387's findings 16-20 and 28): Photoshop's blend modes, layer and clipping
+masks, marquee and lasso selections with fill and delete, a new paper as the Draw tab's canvas, warnings for unknown
+verbs. Free transform, Space and H, and pen tilt follow in round 389.
+
+**Added (task 0365)**
+- **27 blend modes** on sketch layers, Photoshop's (the W3C formulas for Soft Light and the non-separable four;
+  Dissolve as whole pixels).
+- **Clipping masks** (Layers > Clip, `sketch layer clip`) and **layer masks** from a selection (Add Mask, `sketch layer
+  mask add|hide|invert|on|off|delete`).
+- **Selections:** More > Select > Rectangle or Lasso, dragged on the pad (`sketch select rect|lasso|all|none`).
+  - **Fill** (Alt+Backspace, `sketch fill`) puts the colour in it as a filled shape.
+  - **Delete** cuts the active layer's strokes out of it.
+  - **Ctrl+D** deselects.
+- **A new or opened paper** is the Draw tab's canvas; `sketch` and `sketch layer` warn on an unknown verb.
+- Saved in the scene and paper files.
+
+**The Opus review's fixes:**
+- the Layers row's blend list showing every mode;
+- Ctrl+D no longer also duplicating;
+- a clip's base looked up, not taken from the last layer drawn (a hidden base hides what is clipped to it);
+- the marching ants kept out of board thumbnails and exports;
+- a click deselects;
+- older tests' frame steps restored;
+- a failed `paper open` switches nothing;
+- the drag shown live;
+- Dissolve whole at full coverage;
+- a Fill's pieces from the eraser are lines;
+- a closed stroke's closing edge cut too;
+- no mask on a group;
+- the per-pixel callback gone;
+- a short window's footer;
+- ADR 0072 amended;
+- the re-check's:
+  - the Select tool before the eraser;
+  - a group as a clip base, with one coverage per base;
+  - Clip and the masks in a row's menu, with a marker;
+  - the selection gone with the tool and the scene;
+  - the console's select in the pad's pixels on Paper.
+
+**Checked:** the modes' formulas on a known pair of colours; clipping (a hidden base too), masks and Dissolve on
+screen; fill, delete, undo, the Select tool's drag and click, Ctrl+D with an object selected; the file round trip; the
+existing sketch, paper, layer and Draw tests.
+
 ## 2026-11-01 (round 387): Adobe in the HCI comparison
 
 **Asked:** Phase D's first round: the basic Adobe suite in the HCI testing - Photoshop + Fresco, Substance Painter,

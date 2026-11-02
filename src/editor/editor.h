@@ -638,6 +638,8 @@ struct PaintBrush {
   float grain_scale = 1.0f;
 };
 
+std::string sketch_blend_list();  // (round 388: the blend modes' names, for messages)
+std::string line_rest_words(const std::vector<std::string> &t, size_t k);
 constexpr int kVrPaletteSize = 8;  // (round 385: VR sketching's colours)
 Vec3 vr_palette_colour(int i);
 
@@ -740,6 +742,8 @@ class Editor {
   void start_asset_drag_for_test(const std::string &path) { asset_drag_ = {true, false, path, nullptr, ui_.in.mx, ui_.in.my}; }  // (a Project window file pressed)
   bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
   int draw_source_for_test() const { return draw_source_; }
+  void sketch_select_tool_for_test(int k) { sketch_select_tool_ = k; }  // (round 388: the Draw tab's Select, 1 Rectangle, 2 Lasso)
+  const std::vector<Vec2> &sketch_selection_for_test() const { return sketch_sel_; }
   int anim_bar_rows_for_test() const { return anim_bar_rows_; }  // (round 324)
   bool spring_row_for_test(const std::string &first, int &label, bool &ignored);  // (round 324: a found chain's kind)
   std::string mode_name_for_test() const { return mode_name(); }
@@ -4863,7 +4867,7 @@ class Editor {
   bool draw_tab_command(const std::vector<std::string> &t);
   /* The Layers panel (task 0234, editor/sketch_layers.cpp): the sketch's layers composited in order with their opacity
    * and blend, the window that edits them, the console's verbs. */
-  Image sketch_comp_[3];  // (task 0297: [2] a see-through stroke's own picture)  // (a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
+  Image sketch_comp_[4];  // ([2] a see-through stroke's own picture, task 0297; [3] a layer mask's shapes, round 388) - a layer's picture, transparent where it didn't draw; a group's, its children composited into it)
   int sketch_solo_ = -1;  // (one layer shown alone; -1 none - the editor's, not the scene's; dropped by the stack's operations)
   int layers_rename_ = -1;
   std::string layers_rename_text_;
@@ -4885,6 +4889,26 @@ class Editor {
   void draw_layer_thumb(int i, const Recti &box);
   void layers_drop(int from, int to);
   void sketch_layer_command(const std::vector<std::string> &t, const std::string &line);
+  /* Round 388 (task 0365): selections, fill, delete, clipping and layer masks (sketch_select.cpp, sketch_layers.cpp). */
+  std::vector<Vec2> sketch_sel_;  // (the selection's outline in the canvas's frame; empty: none)
+  int sketch_select_tool_ = 0;    // (the Draw tab's Select: 0 off, 1 Rectangle, 2 Lasso)
+  std::vector<Vec2> sketch_sel_drag_;  // (the drag under way, view pixels)
+  std::unordered_map<int, std::vector<uint8_t>> sketch_clip_covs_;  // (each base's coverage, this picture: a layer or a group)
+  bool sketch_clips_onto(int i) const;
+  int sketch_clip_base(int i) const;
+  void sketch_apply_mask(Image &c, const Recti &view, const SketchMask &m);
+  void sketch_apply_clip(Image &c, const Recti &view, int base);
+  void sketch_keep_clip(const Image &c, const Recti &view, int base);
+  std::vector<Vec2> sketch_selection_from_px(const Recti &view, const std::vector<Vec2> &px) const;
+  void sketch_select_set(std::vector<Vec2> poly, const char *what);
+  void sketch_select_command(const std::vector<std::string> &t);
+  bool sketch_select_update(const Recti &view, Vec2 px);
+  void sketch_fill();
+  void sketch_delete();
+  void sketch_layer_clip(const std::string &how);
+  void sketch_layer_mask(const std::string &how);
+  void sketch_draw_selection(const Recti &view);
+  void draw_sketch_select_items();
   void sketch_layer_op(const std::string &op, int i);
   Vec2 sketch_to_px(const Recti &view, Vec2 n) const;
   Vec2 sketch_to_canvas(const Recti &view, Vec2 px) const;

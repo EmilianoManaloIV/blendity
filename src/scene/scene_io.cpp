@@ -286,6 +286,13 @@ static void write_sketch_lines(Out &os, const Sketch &sk) {
          << fmt(l.view_pivot.z) << " " << fmt(l.view_dist) << "\n";
     if (l.locked || l.blend != 0 || l.group >= 0 || l.is_group)  // (task 0234; an older build skips the line)
       os << "sketch_layer_ext " << (l.locked ? 1 : 0) << " " << l.blend << " " << l.group << " " << (l.is_group ? 1 : 0) << "\n";
+    if (l.clip) os << "sketch_layer_clip 1\n";  // (round 388)
+    if (l.mask.on) os << "sketch_layer_mask " << (l.mask.invert ? 1 : 0) << " " << (l.mask.enabled ? 1 : 0) << "\n";
+    for (const std::vector<Vec2> &shape : l.mask.on ? l.mask.shapes : std::vector<std::vector<Vec2>>()) {
+      os << "sketch_layer_mask_shape " << shape.size();
+      for (Vec2 p : shape) os << " " << fmt(p.x) << " " << fmt(p.y);
+      os << "\n";
+    }
   }
   os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
   if (sk.perspective > 0) {
@@ -306,6 +313,7 @@ static void write_sketch_lines(Out &os, const Sketch &sk) {
     os << " " << st.raw.size();
     for (const SketchPoint &p : st.raw) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
     os << " " << st.brush << " " << fmt(st.opacity) << " " << fmt(st.soft) << " " << st.pressure_to << " " << fmt(st.min_size);  // (task 0297)
+    if (st.filled) os << " filled";  // (round 388; an older build stops before it)
     os << "\n";
   }
 }
@@ -542,7 +550,21 @@ static bool read_sketch_line(const std::vector<std::string> &t, std::string_view
   }
   else if (k == "sketch_layer_ext" && t.size() >= 5 && !sk.layers.empty()) {  // (task 0234: the layer before it)
     SketchLayer &l = sk.layers.back();
-    l.locked = t[1] != "0", l.blend = std::max(0, std::min(3, std::atoi(t[2].c_str()))), l.group = std::atoi(t[3].c_str()), l.is_group = t[4] != "0";
+    l.locked = t[1] != "0", l.blend = std::max(0, std::min((int)kSketchBlendCount - 1, std::atoi(t[2].c_str()))), l.group = std::atoi(t[3].c_str()), l.is_group = t[4] != "0";
+  }
+  else if (k == "sketch_layer_clip" && !sk.layers.empty()) sk.layers.back().clip = t.size() < 2 || t[1] != "0";  // (round 388: the layer before it)
+  else if (k == "sketch_layer_mask" && t.size() >= 3 && !sk.layers.empty()) {
+    SketchMask &m = sk.layers.back().mask;
+    m.on = true, m.invert = t[1] != "0", m.enabled = t[2] != "0";
+  }
+  else if (k == "sketch_layer_mask_shape" && t.size() >= 2 && !sk.layers.empty()) {
+    const size_t n = std::min<size_t>(std::strtoul(t[1].c_str(), nullptr, 10), 100000);
+    std::vector<Vec2> shape;
+    for (size_t i = 0; i < n && 3 + 2 * i < t.size(); i++) {
+      const Vec2 p{std::strtof(t[2 + 2 * i].c_str(), nullptr), std::strtof(t[3 + 2 * i].c_str(), nullptr)};
+      if (std::isfinite(p.x) && std::isfinite(p.y)) shape.push_back(p);  // (a broken number: the point left out)
+    }
+    if (shape.size() >= 3) sk.layers.back().mask.shapes.push_back(std::move(shape));
   }
   else if (k == "sketch_active" && t.size() >= 2) {
     sk.active_layer = std::atoi(t[1].c_str());
@@ -594,6 +616,7 @@ static bool read_sketch_line(const std::vector<std::string> &t, std::string_view
       st.pressure_to = std::max(0, std::min(3, std::atoi(t[at + 3].c_str())));
       st.min_size = std::max(0.0f, std::min(1.0f, f(at + 4)));
     }
+    st.filled = t.back() == "filled";  // (round 388)
     if (!st.pts.empty()) sk.strokes.push_back(std::move(st));
   }
   else return false;

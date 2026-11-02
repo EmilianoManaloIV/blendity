@@ -257,6 +257,7 @@ bool Editor::sketch_cut_stroke(const Recti &view, const SketchStroke &st, Vec2 c
   for (const auto &run : sketch::runs_outside(q, c, r)) {
     SketchStroke piece = st;
     piece.kind = StrokeKind::Freehand, piece.closed = false;
+    piece.filled = false;  // (round 388: a Fill cut by the eraser leaves its outline's pieces, not filled chords)
     piece.raw.clear();
     piece.center = {}, piece.rx = piece.ry = piece.angle = piece.start = piece.sweep = 0.0f;
     piece.pts.assign(sp.begin() + (ptrdiff_t)run.first, sp.begin() + (ptrdiff_t)run.second);
