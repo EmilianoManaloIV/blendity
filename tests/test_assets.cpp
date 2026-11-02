@@ -5,6 +5,8 @@
 #include <thread>
 #include <filesystem>
 #include "fixtures/synthetic_mmd.h"
+#include "../src/render/video_decode.h"
+#include "../src/render/video_encode.h"
 #include "../src/core/json.h"
 #include "../src/scene/budget.h"
 #include "../src/scene/visemes.h"
@@ -7733,7 +7735,227 @@ static void tests_round363() {
   });
 }
 
+/* ---------------------------------------------------------------- round 391: footage, keyed cards, blade, presets (task 0368) */
+
+static void tests_round391() {
+  test("keyed cards and Add Edit (round 391): keys interpolate and hold, are saved with footage bars; a bar cut in two keeps its picture's place - the right's trim moved on (a clip's by its speed), the keys split with their value at the cut on both sides", [] {
+    SeqInstance c;
+    c.kind = (int)SeqKind::Image, c.media = "a.png", c.name = "Board", c.start = 10, c.trim_in = 0, c.trim_out = 100;
+    c.keys = {{kSeqOpacity, 0, 0.0f}, {kSeqOpacity, 20, 1.0f}, {kSeqX, 50, 0.5f}};
+    const SeqCardLook at10 = seq_card_look(c, 10.0f), at60 = seq_card_look(c, 60.0f);
+    const bool looks = std::fabs(at10.opacity - 0.5f) < 1e-6f && at10.x == 0.5f && at60.opacity == 1.0f && at60.scale == 1.0f;
+    Sequence s;
+    s.tracks.resize(1);
+    SeqInstance v = c;
+    v.kind = (int)SeqKind::Video, v.media = "clip.mp4", v.name = "Shot";
+    s.tracks[0].items = {c, v};
+    s.tracks[0].items[1].start = 200;
+    Sequence back;
+    const bool saved = load_sequence_text(save_sequence_text(s), back) && back.tracks[0].items.size() == 2 && back.tracks[0].items[1].kind == (int)SeqKind::Video &&
+                       back.tracks[0].items[0].keys.size() == 3 && back.tracks[0].items[1].keys.size() == 3 && sequence_card_at(back, 250.0f) &&
+                       sequence_card_at(back, 250.0f)->name == "Shot";
+    SeqInstance left = c, right;
+    seq_split_bar(left, 20.0f, 1.0f, "Board 2", right);  // (10 frames in: the opacity 0.5 there)
+    const bool split = left.trim_out == 10.0f && right.start == 20.0f && right.trim_in == 10.0f && right.trim_out == 100.0f && right.name == "Board 2" &&
+                       std::fabs(seq_card_look(left, 10.0f).opacity - 0.5f) < 1e-6f && std::fabs(seq_card_look(right, 0.0f).opacity - 0.5f) < 1e-6f &&
+                       std::fabs(seq_card_look(right, 10.0f).opacity - 1.0f) < 1e-6f && std::fabs(seq_card_look(right, 40.0f).x - 0.5f) < 1e-6f;
+    SeqInstance clip;
+    clip.kind = (int)SeqKind::Clip, clip.clip = "walk.anim", clip.name = "Walk", clip.start = 0, clip.trim_in = 4, clip.trim_out = 64, clip.speed = 2.0f;
+    SeqInstance clip_right;
+    seq_split_bar(clip, 10.0f, clip.speed, "Walk 2", clip_right);  // (10 frames on the timeline: 20 of the clip)
+    const bool by_speed = clip.trim_out == 24.0f && clip_right.trim_in == 24.0f && clip_right.start == 10.0f;
+    std::printf("    looks %d, saved %d, split %d, a clip at speed 2 %d\n", (int)looks, (int)saved, (int)split, (int)by_speed);
+    CHECK(looks && saved && split && by_speed);
+    CHECK(seq_channel_index("Rotation") == kSeqRotation && seq_channel_index("blur") < 0 && seq_channel_clamp(kSeqOpacity, 3.0f) == 1.0f);
+    CHECK(seq_is_video_file("Assets/Footage/a.MP4") && seq_is_video_file("b.mov") && !seq_is_video_file("c.png"));
+    /* Review 391: a card with no end of its own (trim_out -1: 60 frames) cut 20 in - 20 and 40, not 20 and 60. */
+    SeqInstance open = c, open_right;
+    open.keys.clear(), open.trim_out = -1.0f, open.start = 0.0f;
+    seq_split_bar(open, 20.0f, 1.0f, "Board 3", open_right);
+    CHECK(std::fabs(open.duration(nullptr) - 20.0f) < 1e-3f && std::fabs(open_right.duration(nullptr) - 40.0f) < 1e-3f);
+    /* Review 391: key lines after a card line the reader skips (a later kind) are skipped with it. */
+    Sequence skip;
+    const std::string text = "blendity_seq 1\nname S\nrate 60\ntrack T\ncard 1 0 0 48\tA\ta.png\ncard 9 50 0 48\tB\tb.xyz\nkey 0 0 0.25\n";
+    CHECK(load_sequence_text(text, skip) && skip.tracks.size() == 1 && skip.tracks[0].items.size() == 1 && skip.tracks[0].items[0].keys.empty());
+  });
+  test("the Sequencer like Premiere (round 391): a card keyed to half opacity and moved lies over the render; Add Edit cuts a bar at the playhead, one undo step; Ripple Delete closes the gap; a paper card by its name", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Edit");
+    const std::string dir = fs::join(test_dir(), "r391");
+    fs::make_dirs(dir);
+    const std::string a = fs::join(dir, "a.png"), b = fs::join(dir, "b.png");
+    std::vector<uint32_t> red(8, 0xFFFF0000u), green(8, 0xFF00FF00u);
+    CHECK(write_png(a, red.data(), 4, 2, 4) && write_png(b, green.data(), 4, 2, 4));
+    ed.command("seq image " + a + " 0 0 48");
+    ed.command("seq image " + b + " 0 60 30");
+    ed.command("seq key a opacity 0 0.5");
+    Image frame;
+    frame.resize(8, 8);
+    std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF0000FFu);
+    ed.composite_render_card_for_test(frame, 10.0f);
+    const uint32_t mid = frame.pixels[4 * 8 + 4], top = frame.pixels[0];
+    const bool half = ((mid >> 16) & 255) >= 126 && ((mid >> 16) & 255) <= 130 && (mid & 255) >= 125 && (mid & 255) <= 129 && top == 0xFF0000FFu;
+    /* Review 391: past its last key, at full opacity, a keyed card still lies over the render - no black bars. */
+    ed.command("seq key a opacity 24 1");
+    std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF0000FFu);
+    ed.composite_render_card_for_test(frame, 30.0f);
+    const bool after_last = frame.pixels[0] == 0xFF0000FFu && frame.pixels[4 * 8 + 4] == 0xFFFF0000u;
+    /* Review 391: a key at 9.6 lands on the one at 10 (rounded first): no second key; an unkey that matches nothing is refused. */
+    ed.command("seq key a opacity 10 0.3");
+    ed.command("seq key a opacity 9.6 0.4");
+    size_t at10 = 0;
+    for (const SeqKey &k : ed.seq_for_test_sequence()->find("a")->keys) at10 += k.frame == 10.0f;
+    ed.step_frame_headless();
+    const std::string before_unkey = ed.undo_label_for_test(0);
+    ed.command("seq unkey a rotation");
+    ed.step_frame_headless();
+    std::printf("    past the last key: the letterbox the render %d; keys at 10: %zu; an unkey of nothing took a step %d\n", (int)after_last, at10, (int)(ed.undo_label_for_test(0) != before_unkey));
+    CHECK(after_last && at10 == 1 && ed.undo_label_for_test(0) == before_unkey);
+    ed.command("seq unkey a opacity 10");
+    ed.command("seq unkey a opacity 24");
+    ed.command("seq key a x 0 0.5");  // (half the frame's width right: the card's middle on the right edge)
+    std::fill(frame.pixels.begin(), frame.pixels.end(), 0xFF0000FFu);
+    ed.composite_render_card_for_test(frame, 10.0f);
+    const bool moved = frame.pixels[4 * 8 + 1] == 0xFF0000FFu && ((frame.pixels[4 * 8 + 6] >> 16) & 255) > 100;
+    std::printf("    half opacity: middle 0x%08X, the bars left alone 0x%08X; moved right %d\n", mid, top, (int)moved);
+    CHECK(half && moved);
+    /* Add Edit at 24: two bars, one undo step. */
+    ed.step_frame_headless();  // (the setup's own undo step: the cut's is its alone)
+    SequencePtr s = ed.seq_for_test_sequence();
+    ed.command("seq frame 24");
+    ed.command("seq blade 24");
+    ed.step_frame_headless();  // (the undo step is taken at the frame's end)
+    const SeqInstance *l = s->find("a"), *r = s->find("a 2");
+    const bool cut = l && r && std::fabs(l->duration(nullptr) - 24.0f) < 1e-3f && r->start == 24.0f && r->trim_in == 24.0f && ed.undo_label_for_test(0) == "Add Edit";
+    ed.command("undo");
+    ed.step_frame_headless();
+    s = ed.seq_for_test_sequence();
+    const bool undone = s && s->find("a") && !s->find("a 2") && std::fabs(s->find("a")->duration(nullptr) - 48.0f) < 1e-3f;
+    ed.command("seq blade 500");  // (nothing there: refused)
+    CHECK(ed.undo_label_for_test(0) != "Add Edit");
+    /* The keymap's actions act over the Sequencer alone: seq.add_edit away from it does nothing, over it cuts. */
+    ed.set_seq_hovered_for_test(false);
+    const bool away = !ed.run_action_for_test("seq.add_edit") && !ed.seq_for_test_sequence()->find("a 2");
+    ed.set_seq_hovered_for_test(true);
+    ed.run_action_for_test("seq.add_edit");
+    ed.step_frame_headless();
+    const bool over = ed.seq_for_test_sequence()->find("a 2") != nullptr;
+    ed.command("undo");
+    ed.step_frame_headless();
+    std::printf("    seq.add_edit away from the Sequencer did nothing %d, over it cut %d\n", (int)away, (int)over);
+    CHECK(away && over && !ed.seq_for_test_sequence()->find("a 2"));
+    /* Ripple Delete (seq.ripple, Shift+Delete): b (60..90) moves to 12 when a (0..48) goes. */
+    ed.seq_select_for_test("a");
+    ed.set_seq_hovered_for_test(true);  // (a frame clears it: the Sequencer sets it while drawn)
+    ed.run_action_for_test("seq.ripple");
+    ed.set_seq_hovered_for_test(false);
+    s = ed.seq_for_test_sequence();
+    const bool rippled = s && !s->find("a") && s->find("b") && s->find("b")->start == 12.0f;
+    std::printf("    cut %d, undone %d, rippled %d\n", (int)cut, (int)undone, (int)rippled);
+    CHECK(cut && undone && rippled);
+    /* A paper by its name. */
+    const std::string paper = strprintf("R391Card%u", (unsigned)(std::rand() % 100000));  // (one word: the console's name)
+    ed.command("paper new " + paper);
+    ed.command("seq paper " + paper + " 1 0 24");
+    s = ed.seq_for_test_sequence();
+    const SeqInstance *p = s ? s->find(paper) : nullptr;
+    std::printf("    the paper card: %s\n", p ? p->media.c_str() : "(none)");
+    CHECK(p && p->kind == (int)SeqKind::Paper && fs::extension(p->media) == ".paper");
+    ed.command("seq key " + paper + " blur 0 1");  // (refused: no such channel)
+    CHECK(!p || s->find(paper)->keys.empty());
+    ed.command("paper delete");
+    fs::remove_file(a), fs::remove_file(b);
+  });
+  test("footage and export presets (round 391): three colored frames encoded and read back in order, a seek back; footage on the timeline shows the frame under the playhead; ProRes in a .mov, VRChat's at most 1080 lines; FFmpeg's arguments for each; without FFmpeg the footage refused", [] {
+    int ow = 0, oh = 0;
+    video::preset_size(video::Preset::VRChat, 3840, 2160, ow, oh);
+    const bool vr = ow == 1920 && oh == 1080;
+    video::preset_size(video::Preset::H264, 1281, 721, ow, oh);
+    const bool even = ow == 1282 && oh == 722;
+    video::Preset p = video::Preset::H264;
+    CHECK(vr && even && video::parse_preset("ProRes", p) && p == video::Preset::ProRes && !video::parse_preset("avi", p));
+    const std::vector<std::string> pr = ffmpeg_png_to_mp4_args("ffmpeg", "R/a", 24.0f, "R/a.mov", "", (int)video::Preset::ProRes);
+    const std::vector<std::string> vc = ffmpeg_png_to_mp4_args("ffmpeg", "R/a", 24.0f, "R/a.mp4", "", (int)video::Preset::VRChat);
+    CHECK(std::find(pr.begin(), pr.end(), "prores_ks") != pr.end() && std::find(vc.begin(), vc.end(), "+faststart") != vc.end());
+    const std::string dir = fs::join(test_dir(), "r391v");
+    fs::make_dirs(dir);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("seq new Footage");
+    if (!video::available()) {
+      ed.command("seq video " + fs::join(dir, "none.mp4") + " 0 0");
+      SequencePtr s = ed.seq_for_test_sequence();
+      bool none = s != nullptr;
+      for (const SeqTrack &tr : s ? s->tracks : std::vector<SeqTrack>()) none = none && tr.items.empty();
+      std::printf("    no FFmpeg in this build: the footage refused %d\n", (int)none);
+      CHECK(none);
+      return;
+    }
+    const uint32_t colors[3] = {0xFFFF0000u, 0xFF00FF00u, 0xFF0000FFu};
+    std::vector<std::string> frames;
+    for (int k = 0; k < 3; k++) {
+      std::vector<uint32_t> px(32 * 16, colors[k]);
+      frames.push_back(fs::join(dir, strprintf("%04d.png", k + 1)));
+      CHECK(write_png(frames.back(), px.data(), 32, 16, 32));
+    }
+    const std::string mp4 = fs::join(dir, "shot.mp4"), mov = fs::join(dir, "shot.mov");
+    std::string err;
+    CHECK(video::encode_png_frames(frames, 3.0f, mp4, &err));
+    CHECK(video::encode_png_frames(frames, 3.0f, mov, &err, nullptr, nullptr, 48000, video::Preset::ProRes));
+    std::shared_ptr<video::Reader> r = video::open_reader(mp4, &err);
+    Image img;
+    auto main_channel = [&](double t) {
+      if (!r || !video::read_frame_at(*r, t, img)) return -1;
+      const uint32_t c = img.pixels[(size_t)8 * img.width + 16];
+      const int rr = (c >> 16) & 255, gg = (c >> 8) & 255, bb = c & 255;
+      return rr > 180 && gg < 80 && bb < 80 ? 0 : gg > 180 && rr < 80 && bb < 80 ? 1 : bb > 180 && rr < 80 && gg < 80 ? 2 : -1;
+    };
+    const int c0 = main_channel(0.0), c1 = main_channel(0.4), c2 = main_channel(0.8), back = main_channel(0.1);
+    std::printf("    read back: %d %d %d, a seek back %d; %g fps, %.2f s; the .mov's codec '%s'\n", c0, c1, c2, back, r ? video::reader_fps(*r) : 0.0f,
+                r ? video::reader_seconds(*r) : 0.0, video::probe_codec(mov).c_str());
+    CHECK(r && c0 == 0 && c1 == 1 && c2 == 2 && back == 0 && video::probe_codec(mov) == "prores" && video::probe_codec(mp4) == "h264");
+    ed.command("seq video " + mp4 + " 0 0");
+    SequencePtr s = ed.seq_for_test_sequence();
+    const SeqInstance *shot = s ? s->find("shot") : nullptr;
+    Image frame;
+    frame.resize(32, 16);
+    ed.composite_render_card_for_test(frame, 25.0f);  // (0.42 s at the sequence's 60: the second frame)
+    const uint32_t at = frame.pixels[(size_t)8 * 32 + 16];
+    std::printf("    the footage bar %g frames; at frame 25: 0x%08X\n", shot ? shot->duration(nullptr) : -1.0f, at);
+    CHECK(shot && std::fabs(shot->duration(nullptr) - 60.0f) < 1.5f && ((at >> 8) & 255) > 180 && ((at >> 16) & 255) < 80);
+    /* Review 391: ProRes with an odd height - the last row's color read back as the row above it (its chroma written). */
+    std::vector<uint32_t> odd(32 * 15, 0xFF2080C0u);
+    const std::string odd_png = fs::join(dir, "odd.png"), odd_mov = fs::join(dir, "odd.mov");
+    CHECK(write_png(odd_png, odd.data(), 32, 15, 32));
+    CHECK(video::encode_png_frames({odd_png}, 30.0f, odd_mov, &err, nullptr, nullptr, 48000, video::Preset::ProRes));
+    std::shared_ptr<video::Reader> ro = video::open_reader(odd_mov, &err);
+    Image oimg;
+    const bool odd_read = ro && video::read_frame_at(*ro, 0.0, oimg) && oimg.height == 16;
+    const uint32_t last = odd_read ? oimg.pixels[(size_t)15 * oimg.width + 8] : 0, above = odd_read ? oimg.pixels[(size_t)14 * oimg.width + 8] : 1;
+    auto near_c = [](uint32_t a, uint32_t b) {
+      for (int s = 0; s < 24; s += 8)
+        if (std::abs((int)((a >> s) & 255) - (int)((b >> s) & 255)) > 6) return false;
+      return true;
+    };
+    std::printf("    ProRes at 32 x 15: the padded row 0x%08X, the row above 0x%08X\n", last, above);
+    CHECK(odd_read && near_c(last, above));
+    fs::remove_file(odd_png), fs::remove_file(odd_mov);
+    /* VRChat's: a 2160-line frame comes out 1080 lines, the width in proportion. */
+    std::vector<uint32_t> tall(8 * 2160, 0xFF808080u);
+    const std::string tall_png = fs::join(dir, "tall.png"), vr_mp4 = fs::join(dir, "vr.mp4");
+    CHECK(write_png(tall_png, tall.data(), 8, 2160, 8));
+    int vw = 0, vh = 0;
+    const bool vr_ok = video::encode_png_frames({tall_png}, 30.0f, vr_mp4, &err, nullptr, nullptr, 48000, video::Preset::VRChat) && video::probe_frames(vr_mp4, &vw, &vh) == 1;
+    std::printf("    VRChat's from 8 x 2160: %d x %d (%s)\n", vw, vh, vr_ok ? "ok" : err.c_str());
+    CHECK(vr_ok && vw == 4 && vh == 1080 && video::probe_codec(vr_mp4) == "h264");
+    for (const std::string &f : frames) fs::remove_file(f);
+    fs::remove_file(mp4), fs::remove_file(mov), fs::remove_file(tall_png), fs::remove_file(vr_mp4);
+  });
+}
+
 /* ---------------------------------------------------------------- round 364: the Sequencer's cards and camera cuts */
+
 static void tests_round364() {
   test("Sequencer cards (round 364): Image, Paper and Camera bars saved and read back; the topmost card and cut at a frame; a card animates nothing and has its own length", [] {
     Sequence s;
@@ -10156,4 +10378,5 @@ void run_assets_tests() {
   tests_round373();
   tests_round374();
   tests_round375();
+  tests_round391();
 }

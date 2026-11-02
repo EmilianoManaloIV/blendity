@@ -688,6 +688,7 @@ void Editor::draw_sequencer_window(const Recti &r) {
   auto &in = u.in;
   if (u.hovered(r) && in.pressed[0]) focused_ = WindowKind::Sequencer;
   seqr_.drawn = true;
+  seq_hovered_ = u.hovered(r);  // (review 391: its keymap actions act here)
   if (seqr_.drag >= 2 && in.key_pressed[platform::KEY_ESCAPE]) seq_drag_cancel(), in.key_pressed[platform::KEY_ESCAPE] = false;  // (as Premiere: Esc drops a drag)
   GameObject *root = seq_root();
   const int bh = u.row_h() + u.px(6);
@@ -735,9 +736,14 @@ void Editor::draw_sequencer_window(const Recti &r) {
       if (i->kind == (int)SeqKind::Clip && ui_.menu_item(strprintf("Speed %gx", sp), nullptr, std::fabs(i->speed - sp) < 1e-4f))
         seq_edit("Clip Speed", [&](Sequence &x) { x.find(name)->speed = sp; });
     ui_.menu_separator();
+    if (ui_.menu_item("Add Edit at the Playhead", "Alt+B")) seq_blade(seqr_.frame, -1);
+    ui_.tooltip("Every bar under the playhead cut in two there (Premiere's Add Edit).");
     if (ui_.menu_item("Delete", "Del")) seq_delete_selected();
+    if (ui_.menu_item("Ripple Delete", "Shift+Del")) seq_ripple(name);
+    ui_.tooltip("Delete the bar and move the later bars on its track left to close the gap (Premiere's Ripple Delete).");
   });
   if (!u.hovered(r) || u.wants_keyboard()) return;
+  if (in.shift() && in.key_pressed[platform::KEY_DELETE]) return;  // (round 391: Ripple Delete's - the keymap's seq.ripple)
   if (in.key_pressed[platform::KEY_DELETE] || in.key_pressed[platform::KEY_BACKSPACE]) {
     seq_delete_selected();
     in.key_pressed[platform::KEY_DELETE] = in.key_pressed[platform::KEY_BACKSPACE] = false;
@@ -760,6 +766,7 @@ bool Editor::seq_drop_card(const std::string &abs_path, int mx, int my) {
     if (!rect.contains(mx, my)) continue;
     const std::string ext = fs::extension(abs_path);
     const int kind = ext == ".paper" ? (int)SeqKind::Paper : ext == ".wav" ? (int)SeqKind::Audio : (int)SeqKind::Image;
+    if (seq_is_video_file(abs_path)) return seq_add_video(make_asset_relative(abs_path), track, seq_frame_at(seqr_.lanes, mx, seqr_.end), -1.0f);  // (round 391: its own length)
     SequencePtr s = seq_sequence();
     const float frames = kind == (int)SeqKind::Audio ? -1.0f : s ? std::max(1.0f, std::round(2.0f * s->frame_rate)) : 60.0f;  // (a sound: its own length)
     return seq_add_card(kind, make_asset_relative(abs_path), track, seq_frame_at(seqr_.lanes, mx, seqr_.end), frames);
@@ -798,7 +805,13 @@ void Editor::seq_command(const std::vector<std::string> &t) {
   if (verb == "sound" && t.size() >= 5) return (void)seq_add_card((int)SeqKind::Audio, t[2], index(3), num(4, 0), num(5, -1.0f));  // (round 365)
   if (verb == "volume" && t.size() >= 4) return (void)seq_set_volume(t[2], num(3, 1.0f));
   if ((verb == "image" || verb == "paper" || verb == "cut") && t.size() >= 5)
-    return (void)seq_add_card(verb == "image" ? (int)SeqKind::Image : verb == "paper" ? (int)SeqKind::Paper : (int)SeqKind::Camera, t[2], index(3), num(4, 0), num(5, 60.0f));
+    return (void)seq_add_card(verb == "image" ? (int)SeqKind::Image : verb == "paper" ? (int)SeqKind::Paper : (int)SeqKind::Camera, verb == "paper" ? seq_paper_by_name(t[2]) : t[2],
+                              index(3), num(4, 0), num(5, 60.0f));  // (round 391: a paper by its name too)
+  if (verb == "video" && t.size() >= 5) return (void)seq_add_video(t[2], index(3), num(4, 0), num(5, -1.0f));  // (round 391)
+  if (verb == "blade" && t.size() >= 3) return (void)seq_blade(num(2, -1.0f), t.size() > 3 ? index(3) : -1);
+  if (verb == "ripple" && t.size() >= 3) return (void)seq_ripple(t[2]);
+  if (verb == "key" && t.size() >= 6) return (void)seq_key(t[2], t[3], num(4, 0.0f), num(5, 0.0f), false);
+  if (verb == "unkey" && t.size() >= 4) return (void)seq_key(t[2], t[3], t.size() > 4 ? num(4, 0.0f) : NAN, 0.0f, true);
   if (verb == "object" && t.size() >= 4 && s->find(t[2])) {  // seq object <clip> <object>: what it plays on
     seq_edit("Clip Object", [&](Sequence &q) { q.find(t[2])->target = t[3]; });
     return;
@@ -834,7 +847,8 @@ void Editor::seq_command(const std::vector<std::string> &t) {
   }
   Log::warn("seq new [name] | add <clip.anim> <track> <start> [object] | image|paper|cut <file or camera> <track> <start> [frames] | object <name> <object> | move <name> <track> <start> | trim <name> <in> <out> | "
             "speed <name> <s> | rename <name> <new> | remove <name> | track | trigger <key> <name> [blend] | jump <name> [blend] | "
-            "frame <n> | preview on|off | play | stop");
+            "frame <n> | preview on|off | play | stop | video <file> <track> <start> [frames] | blade <frame> [track] | ripple <name> | "
+            "key <name> opacity|x|y|scale|rotation <frame> <value> | unkey <name> <channel> [frame]");
 }
 
 /* seq jump <clip> [blend] (Play): the scene's sequence jumps (else the Sequencer of the selected object, or the scene's

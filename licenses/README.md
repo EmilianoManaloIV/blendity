@@ -40,6 +40,7 @@ When `blender/lib/<platform>` exists next to this project, the build scripts lin
 | [DPC++ runtime](https://github.com/intel/llvm) | 7.1.0 | runtime dependency of Embree's build (SYCL) | Apache-2.0 with LLVM exception (`LLVM-exception.txt`) |
 | [shaderc](https://github.com/google/shaderc) (with glslang, SPIRV-Tools) | v2025.4 | compiles the GPU path-tracing kernel (GLSL to SPIR-V) at run time | Apache-2.0 (glslang also BSD-3-Clause / MIT parts) |
 | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | 1.4.341 | GPU rendering API declarations (headers only; the Vulkan loader comes with the GPU driver) | Apache-2.0 / MIT |
+| [OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK-Source) (`OpenXR.Loader` package: the headers and `openxr_loader.dll`) | 1.1.65 | VR View (round 383, ADR 0096): the loader, loaded at run time, reaches the headset's OpenXR runtime | Apache-2.0 OR MIT (`Apache-2.0.txt`, `MIT.txt`) |
 | [FFmpeg](https://ffmpeg.org/) (libavcodec, libavformat, libavutil, libswscale, libswresample) | 8.1 | Render Animation's MP4, encoded in-process (task 0077) | LGPL-2.1-or-later (`LGPL-2.1-or-later.txt`); Blender's build enables GPL parts (x264, x265), so as built it is GPL-2.0-or-later (`GPL-2.0-or-later.txt`) |
 | [x264](https://www.videolan.org/developers/x264.html) | 35fe20d | H.264 encoding, inside FFmpeg | GPL-2.0-or-later |
 | [x265](https://www.videolan.org/developers/x265.html) | 4.1 | H.265 encoding, inside FFmpeg (Linux, macOS) | GPL-2.0-or-later |

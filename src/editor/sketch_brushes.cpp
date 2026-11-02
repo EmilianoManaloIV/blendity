@@ -257,6 +257,8 @@ bool Editor::sketch_cut_stroke(const Recti &view, const SketchStroke &st, Vec2 c
   for (const auto &run : sketch::runs_outside(q, c, r)) {
     SketchStroke piece = st;
     piece.kind = StrokeKind::Freehand, piece.closed = false;
+    piece.filled = false;  // (round 388: a Fill cut by the eraser leaves its outline's pieces, not filled chords)
+    piece.fill = 0, piece.bez.clear();  // (round 390: likewise a shape's fill and the Pen's path)
     piece.raw.clear();
     piece.center = {}, piece.rx = piece.ry = piece.angle = piece.start = piece.sweep = 0.0f;
     piece.pts.assign(sp.begin() + (ptrdiff_t)run.first, sp.begin() + (ptrdiff_t)run.second);
@@ -430,6 +432,9 @@ void Editor::draw_brush_properties() {
     u.tooltip("What the pen's pressure changes: the width, the opacity, both, or nothing.");
     row("Min Size", [&](Recti f) { u.slider(u.id("brush_min"), f, b.min_size, 0.0f, 1.0f); });
     u.tooltip("The width at the lightest touch, as a part of the full size.");
+    row("Tilt", [&](Recti f) { u.slider(u.id("brush_tilt"), f, b.tilt, 0.0f, 1.0f); });  // (round 389)
+    u.tooltip("How much the pen's tilt adds to the pressure the brush reads (a pencil on its side): up to this much more with the pen flat,\n"
+              "held at full pressure - wider where the pressure drives the width, and darker where it drives the opacity too.");
     row("Steadiness", [&](Recti f) { u.float_field(u.id("brush_steady"), f, sketch_.tether, 0.5f, 0.0f, 200.0f, "%.0f px"); });
     u.tooltip("Steady Stroke for this brush: the line trails the pen by this much.");
   }
@@ -448,7 +453,25 @@ void Editor::draw_pad_cursor(bool hovered) {
 
 /* ---- the console ---- */
 
-/* sketch brush <name>|list|last|size <px>|opacity <0-1>|edge <0-1>|pressure none|size|opacity|both|min <0-1>|smaller|
+/* A preset's index by name, -1 none. */
+int sketch_brush_find_preset(const std::string &name) {
+  const auto &p = sketch_brush_presets();
+  for (size_t i = 0; i < p.size(); i++)
+    if (p[i].name == name) return (int)i;
+  return -1;
+}
+
+/* The pen's pressure with the brush's tilt in it (round 389): a tilted pen raises the pressure the brush reads by up to
+ * the brush's Tilt again at the pen flat (90 degrees), held at 1 - wider where the pressure drives the width, darker
+ * too where it drives the opacity (the Pencil's both); only on a brush whose pressure drives the width. */
+float Editor::sketch_tilted(float pressure) {
+  const float p = std::isfinite(pressure) ? pressure : 1.0f;
+  if (!sketch_brush_here() || sketch_brush_cur().tilt <= 0.0f || !(sketch_brush_cur().pressure_to & 1)) return p;
+  const float deg = std::min(90.0f, std::hypot(ui_.in.tilt_x, ui_.in.tilt_y));
+  return std::min(1.0f, p * (1.0f + sketch_brush_cur().tilt * std::sin(deg * 0.017453292f)));
+}
+
+/* sketch brush <name>|list|last|size <px>|opacity <0-1>|edge <0-1>|pressure none|size|opacity|both|min <0-1>|tilt <0-1>|smaller|
  * larger|fainter|stronger|duplicate [name]|reset */
 void Editor::sketch_brush_command(const std::vector<std::string> &t) {
   sketch_brushes_init();
@@ -472,6 +495,7 @@ void Editor::sketch_brush_command(const std::vector<std::string> &t) {
   else if (v == "fainter" || v == "stronger") b.opacity = clampf(b.opacity + (v == "stronger" ? 0.1f : -0.1f), 0.02f, 1.0f);
   else if (v == "edge") number(0.0f, 1.0f, b.soft);
   else if (v == "min") number(0.0f, 1.0f, b.min_size);
+  else if (v == "tilt") number(0.0f, 1.0f, b.tilt);  // (round 389)
   else if (v == "pressure") {
     const std::string p = to_lower(arg);
     const int k = p == "none" ? 0 : p == "size" ? 1 : p == "opacity" ? 2 : p == "both" ? 3 : -1;
@@ -557,8 +581,8 @@ std::string Editor::sketch_brush_prefs_text() {
   sketch_brush_store();
   std::string s;
   for (const SketchBrush &b : sketch_brushes_)
-    s += strprintf("sketch_brush=%s|%d|%g|%g|%g|%d|%g|%g|%u|%d\n", b.name.c_str(), b.kind, b.width, b.opacity, b.soft, b.pressure_to, b.min_size, b.steady,
-                   (unsigned)b.color, b.base);
+    s += strprintf("sketch_brush=%s|%d|%g|%g|%g|%d|%g|%g|%u|%d|%g\n", b.name.c_str(), b.kind, b.width, b.opacity, b.soft, b.pressure_to, b.min_size, b.steady,
+                   (unsigned)b.color, b.base, b.tilt);  // (round 389: the tilt last; an older build stops before it)
   s += strprintf("sketch_brush_pick=%d\ndraw_palette=%d %d %d\ndraw_wheel=%d\n", sketch_brush_, draw_palette_rect_.x, draw_palette_rect_.y,
                  draw_palette_shown_ ? 1 : 0, pad_wheel_mode_);
   if (!board_last_.empty()) s += "board_last=" + board_last_ + "\n";
@@ -606,6 +630,10 @@ bool Editor::sketch_brush_pref(const std::string &k, const std::string &v) {
   b.pressure_to = std::max(0, std::min(3, std::atoi(f[5].c_str())));
   b.min_size = clampf((float)std::atof(f[6].c_str()), 0.0f, 1.0f), b.steady = clampf((float)std::atof(f[7].c_str()), 0.0f, 200.0f);
   b.color = (uint32_t)std::strtoul(f[8].c_str(), nullptr, 10), b.base = std::atoi(f[9].c_str());
+  b.base = b.base >= (int)sketch_brush_presets().size() ? -1 : b.base;  // (re-check 389: clamped before it indexes)
+  const int preset = b.base >= 0 ? b.base : sketch_brush_find_preset(b.name);
+  if (preset >= 0) b.tilt = sketch_brush_presets()[(size_t)preset].tilt;  // (review 389: a file from before round 389 keeps the preset's tilt)
+  if (f.size() > 10 && std::isfinite(std::atof(f[10].c_str()))) b.tilt = clampf((float)std::atof(f[10].c_str()), 0.0f, 1.0f);  // (round 389)
   b.base = b.base >= (int)sketch_brush_presets().size() ? -1 : b.base;
   const int at = sketch_brush_find(b.name);
   if (at >= 0) sketch_brushes_[(size_t)at] = b;

@@ -145,7 +145,7 @@ stroke freehand - the hint says which - and `]` / `[` set a modal's segments or 
 Lighting window (the Render window points there); the Render window's Render Devices section is where every device choice
 is read, Auto meaning the GPU when there is one. The Render window's image pans with a left drag (a pen has no middle
 button), a Tone Curve point goes by Alt+click, the Materials toolbar has Assign to Selection, and the Textures toolbar's
-Export Textures... packs the texture set for glTF, Unity, HDRP or Unreal. Animation has keys of its own in every preset -
+Export Textures... packs the texture set for glTF, Unity, URP, HDRP, Unreal, Poiyomi or lilToon. Animation has keys of its own in every preset -
 set a key, play the clip, step to the previous or next key, Record (Shift+K and Ctrl+Shift+K under Unity, Shift+I and Up / Down
 under Blender; the menus and the palette show your preset's) - and while Record is on the Scene view wears a red frame and a RECORD badge.
 In Weight Paint, Ctrl or the pen's eraser subtracts weight with the Add brush, as in every other brush; in the Rigging
@@ -499,7 +499,7 @@ without UVs. **Toon shading** and the **Outline** component give a cel-shaded lo
 **Bake Textures** turns everything an object's materials do into plain images on new UVs, so other programs show what
 Blendity renders.
 
-**Bake Mesh Maps** (Object > Bake Mesh Maps; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
+**Bake Mesh Maps** (GameObject > Bake Mesh Maps...; `meshmaps [size] [samples]`) writes the mesh's own geometry as images in its UV
 layout - world normal, position, curvature, ambient occlusion, thickness: Substance Painter's mesh maps - under
 Assets/Textures/MeshMaps, on a worker while you keep working (Esc or `meshmaps cancel` stops it). The Mesh Renderer
 records them; `meshmaps status` says whether the mesh has changed since. The layer stack's generators read them.
@@ -520,7 +520,7 @@ images are saved beside the surface's texture when the project saves.
 **Smart materials** are groups of layers with their masks saved as assets: the Textures window's shelf applies a built-in
 (Worn Steel, Painted Metal, Rubber, Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read this
 object's mesh maps; `smat save <layer> <name>` keeps a group of your own under Assets/Materials/Smart and `smat apply
-<name>` drops it onto another surface. `export textures gltf|unity|hdrp|unreal|separate <dir>` writes the surface as the
+<name>` drops it onto another surface. `export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>` writes the surface as the
 images a game engine reads, packed as it expects. `paint 2d on` paints on the Textures window's canvas instead of the
 model; `paint stencil <image>` holds an image over the view that masks the brush.
 
@@ -550,7 +550,7 @@ range, Ctrl+A; Delete asks once for all of them (they go to the Recycle Bin / Tr
 1. Make a material, set Axis Mode: World; Axis Top: a grass material asset, Axis Side: rock, Axis Bottom: dirt.
 2. Set Axis High to a snow material with High Start 30 (metres), and Axis Noise so the borders wander.
 
-**Painting the surface** - the Substance Painter pipeline, in order. 1. **Object > Bake Mesh Maps** (`meshmaps`): the
+**Painting the surface** - the Substance Painter pipeline, in order. 1. **GameObject > Bake Mesh Maps...** (`meshmaps`, or the Textures window's **Bake All Maps**, which loads them too): the
 normal, position, curvature, occlusion and thickness of the mesh baked into its UVs on a worker. 2. **A surface** (`surface
 new`): a texture flagged as this object's, its layers reading those maps - **Fill** layers with a **mask stack** (a Mesh Map
 through levels, Noise, Blur, Levels, an Anchor to another layer's mask) and the **smart masks** (edge wear, dirt, dust,
@@ -560,8 +560,9 @@ colour, roughness, metallic, height and emission by projection, the far side lef
 material / object, a stroke one light undo step of the tiles it touched; `paint 2d on` paints on the Textures window's
 canvas; `paint stencil` masks the brush with an image. 4. **Smart materials** (the Textures window's shelf: Worn Steel,
 Painted Metal, Rubber, Wood, Plastic, Concrete, Gold; `smat save` keeps your own group) dropped onto any surface, their
-generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|hdrp|unreal|separate <dir>`): the
-texture set packed as the engine reads it.
+generators reading *that* object's maps. 5. **Export** (`export textures gltf|unity|urp|hdrp|unreal|poiyomi|liltoon|separate <dir>`): the
+texture set packed as the engine - or VRChat's Poiyomi or lilToon shader - reads it. A layer's menu has **Material ID Mask**
+(one material slot's faces, from the ID map the bake writes) and the smart masks, Ground Dirt and Cavity among them.
 
 **The hand-painted look.** When the light should live in the texture (Blizzard's and Riot's style): `paint bakelight` bakes
 the maps' occlusion and a key light into a Multiply layer to paint over (`paint bakegradient` the top-down value gradient,
@@ -884,6 +885,12 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Sound** (round 365, the Sequencer): a WAV dropped onto a lane is a sound bar as long as the recording, played through the default device in step with the Preview's playhead and Play's Sequencer; trim its ends, set its Volume. Render Animation writes sound.wav beside the frames and puts the sound into the MP4. Console: `seq sound <file.wav> <track> <start> [frames]`, `seq volume <bar> <v>`. Linux plays through PulseAudio (libpulse-simple) when it's installed; macOS doesn't play sound yet (the render still has it).
 
+**Footage, keys and edits** (round 391, the Sequencer):
+- **A video** (.mp4, .mov, .mkv, .webm, .avi) dropped onto a lane is footage, as long as the file (`seq video <file> <track> <start>`); it needs FFmpeg, which Blender's libraries bring.
+- **Keys:** `seq key <bar> opacity|x|y|scale|rotation <frame> <value>` (frames from the bar's start) fades, moves, scales or turns a card over the render; `seq unkey` takes them off.
+- **Add Edit** (Alt+B) cuts every bar under the playhead; **Ripple Delete** (Shift+Delete) removes the bar and closes the gap.
+- **Export:** the Render window's preset - H.264 (MP4), ProRes 422 (MOV) to edit further, or VRChat (MP4, at most 1080p, streamable); `renderanim preset h264|prores|vrchat`.
+
 **No MP4?** (round 366): the dependency-free build has no video maker of its own. Render Animation's finish message offers Blender's libraries for this build (Get Blender's Libraries..., `update libs`; or Use Blender's Libraries, `update libson`, when they were turned off), and an ffmpeg program on the PATH or set in Preferences works too. The build with the libraries makes the MP4 itself.
 
 **Objects and the console** (round 367): create makes a Capsule too, refuses a kind it doesn't know, and names a second object as Unity does ("Sphere (1)"); a new Camera is placed at the view, looking its way; Join keeps the last mesh selected when the active object isn't one. Console: `save [path]`, `open <path>`, `new`, `rotate <x y z>`, `scale <s | x y z>`, `set Transform.Position|Rotation|Scale <x y z>`, `saverender [path]`, `ui scale <s>` (was `scale`), and `help` lists every command.
@@ -903,6 +910,60 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 **Blender and Unreal** (round 374): `import <file>.blend` (or a drop, or File > Import Model...) reads a .blend through the installed Blender in the background - its glTF exporter's meshes, rigs, shape keys, actions and materials, with each light's and camera's settings and the objects' custom properties - as one Undo step; `blender path [exe]` names Blender when it isn't found by itself. The Blender and Unreal Live Link bridges have **Send to Blendity**: the scene (or selection) is written as a snapshot into the inbox Blendity's Live Link names (`<project>/Incoming`) and imported within a second (`livelink inbox` checks now), then moved to Incoming/Done. Unreal sends the level through its FBX exporter with each actor's place, lights, cameras and Blueprint class (an Engine Component). A snapshot folder can also be dropped on Blendity or imported (`import <folder>.blendity-snapshot`). Snapshots wait while Play runs. Blender is run with its factory settings and the file's scripts off; modifiers are applied unless a mesh has shape keys. `blender path clear` forgets a named Blender.
 
 **Keep Transforms** (round 375, glTF): the Export dialog's option (or `export glb [all] transforms <file>`) writes each object's position, rotation and scale on its own node with its vertices around its own pivot, as Blender's glTF export does - a .blend brought in and sent back keeps its objects' origins. Off (the default), the vertices carry the transforms. Skinned meshes are written as before. Each object is a top-level node (parents aren't kept), and a sheared or mirrored object is baked, as glTF's nodes can't hold those.
+
+**Live Link's look** (round 376): with a bridge connected, the world (Gradient, Sky, HDRI, colour, strength), the distance fog, the render's exposure and view transform, and the render camera's Camera Filters are sent as you change them - Blender builds its world and compositor, Unity its RenderSettings (and a global URP Volume in a URP project; a Blendity Look object keeps them otherwise), Godot a WorldEnvironment, Unreal a SkyLight, an Exponential Height Fog and an unbound Post Process Volume. Bloom, Vignette and Color Grading are drawn; other filters travel as data. The engine's own lighting comes back: Blender's world and compositor when the link stops, Unity's with Blendity Look's Restore Scene Lighting. In URP, turn Post Processing on for the camera to see the Volume.
+
+**Live Link's textures** (round 377): each texture a material uses - an image file, a generated image, a procedural texture's output, a surface being painted - is sent by its pixels (a PNG, at most 2048 a side) whenever they change - a painted surface each time a stroke ends, a texture that keeps changing (a procedural field dragged) at most 4 times a second and once more when it stops; the same pixels aren't sent twice. The bridges load them from the bytes and put every map their materials take: Blender, Godot and Unity the Base, Normal, Metallic and Emission maps (Godot the Roughness map too), Unreal the Base Map.
+
+**Live Link's skins** (round 378): a mesh posed only by its Skin modifier, or carrying shape keys, goes to the engines once at rest with its skin (its joints the bones Live Link already sends) and its keys as blend shapes; then only the bones' poses and the shape weights travel. Unity builds a SkinnedMeshRenderer, Godot a Skeleton3D and a Skin, Blender an armature following the bones; Unreal keeps receiving the posed vertices. Another modifier on the mesh (a Mirror, a Subdivision) streams its vertices as before, and so does a Skin the engines can't match: a Preserve Volume armature, Rest Position, or more than four influences.
+
+**Live Link's clips** (round 379): the clip on an object's Animation component goes to the engines baked - each animated object's local place, turn and scale at every frame - at a sync and whenever it's keyed (at most four times a second while it keeps changing). Unity saves it as an AnimationClip in Assets/Blendity Live Link/Clips, Godot adds it to a "blendity" library on an AnimationPlayer under the object, Blender makes an Action (with a fake user, not assigned). Only Position, Rotation and Scale tracks go. Unreal doesn't take clips yet.
+
+**Live Link's LODs and colliders** (round 380): an object's Collider and LOD Group go to the engines at a sync and whenever they change; the levels past 0 are decimated on a worker, and after the mesh is edited they're made again once it has stood still for half a second. Unity builds an LOD Group from child renderers <name>_LOD1, _LOD2... and the matching Box, Sphere, Capsule or Mesh Collider; Godot switches its <name>_LOD<n> children by visibility range (a 75-degree view) and adds a StaticBody3D; Unreal gives the static mesh its own LODs and simple collision; Blender keeps both as properties (and hidden level objects) for export. A mesh that deforms every frame sends no levels.
+
+**Live Link and VRChat** (round 381): with VRChat's Avatars SDK in the Unity project, each armature that is an avatar (eye bones, vrc.v_* visemes on a mesh skinned to it, or a humanoid Head) gets its VRC Avatar Descriptor filled on the avatar root (the object above the armature and all its meshes - parent them under one) - the view between the eyes, Lip Sync on the 15 visemes, Eye Look with the eyes and the blink, each written when Blendity's values change - and a VRC Phys Bone per spring chain under a child "Blendity PhysBones" (Pull from Stiffness, Spring from 1 - Damping, Gravity and Radius as they are: what importing a PhysBone does, turned round). With the Worlds SDK the Live Link root gets a VRC Scene Descriptor when the scene has none. Meshes with Contribute GI get Unity's static flags, SDK or not. Without the SDK nothing of VRChat's is added.
+
+**Live Link's cost** (round 382): with four engines connected, a 100,000-vertex mesh changing and a 50-bone rig posing every frame, Live Link takes a millisecond or two of a frame (measured on a Windows release build); meshes, levels, textures and clips are built on its workers. Jobs that run on workers don't stop it: what you change during a skin bind or a bake reaches the engines the next frame. Work done on the main thread (an import's busy step) holds it like everything else.
+
+**VR View** (round 383): Edit > VR View (`vr start [resolution]`) shows the scene in an OpenXR headset (SteamVR, the Oculus app with Quest Link, Windows Mixed Reality) at life size, standing on the ground (y = 0) below where the Scene view looks and facing as it faces; the editor draws every frame while it runs, paced by the headset. `vr scale <s>` shows the world at 1:s (2: half size), `vr here` moves you to where the Scene view looks now, `vr status` says how it runs or why it doesn't, `vr stop` ends it. Each eye is drawn as the Game view draws, at half the headset's size each way by default (`vr start 0.35` for smaller, faster eyes); `vr start` waits for the runtime, so starting with SteamVR closed launches it and takes a few seconds. It needs the build with Blender's libraries and the OpenXR SDK in their lib folder (`openxr/include`, `openxr/bin/openxr_loader.dll`), on Windows.
+
+**Moving in VR** (round 384):
+- **Squeeze a grip and drag** to move the world with your hand.
+- **Squeeze both grips** and pull them apart or together to scale it (it snaps to 1:1 within 5%), or twist them to turn it about the vertical.
+- **Hold the right trigger** to throw an arc; let go to stand where it lands.
+- **The left stick** walks where you look (2 m/s at life size); **the right stick** snap-turns 30 degrees.
+- **A** (or X on the left Touch controller) shows a tape measure between the controllers, in the world's metres.
+- **In view:** the controllers as boxes with their rays, the render camera's frame (1 m in front of it), and the scale when it isn't 1:1.
+
+**Sketching in VR** (round 385): `vr sketch on`, then:
+- **The right trigger** draws. The harder you press, the wider the stroke, and a ribbon turns with your hand.
+- **X** switches between ribbons and tubes. **A** undoes.
+- **The left stick, flicked sideways,** picks one of 8 colours, shown round your left hand. **The right stick, flicked up or down,** makes the brush bigger or smaller (`vr brush <cm>`).
+- **Strokes** go into a Stroke object of their own, "VR Sketch", each colour its own material, so they render and export like any mesh. A undoes only VR strokes.
+
+**Draw: blend modes, masks and selections** (round 388):
+- **A layer's blend list** has Photoshop's 27 modes (`sketch layer blend <mode>`).
+- **Clip** (Layers) shows a layer only where the layer under it is; again releases it.
+- **More > Select > Rectangle or Lasso**, then drag on the pad: Alt+Backspace fills the selection with the pen's colour, Delete cuts it out of the active layer, Ctrl+D deselects.
+- **Add Mask** (Layers) shows the layer only inside the selection (no selection: all of it); `sketch layer mask hide|invert|off|delete`.
+- **A new or opened paper** becomes the pad's canvas.
+
+**Draw: Free Transform, Space and tilt** (round 389):
+- **Ctrl+T** (More > Select > Free Transform) puts the active layer's drawing, or the selection's, in a box: corners scale (Shift: freely), edges stretch, Ctrl+corner distorts, Ctrl+edge skews, outside a corner turns (Shift: 15-degree steps), inside moves; Enter keeps it, Esc undoes it.
+- **The Adobe keymap:** H is the Hand tool, Space held with a drag pans, Shift+Space opens the Wheel.
+- **A brush's Tilt** (Brushes window, `sketch brush tilt <0-1>`) widens the line as the pen tilts; the Pencil's is 0.8.
+
+**Draw: shapes, the Pen and SVG** (round 390):
+- **More > Shapes > Rectangle, Ellipse, Polygon or Star**, then drag on the pad: Shift makes it even, Alt draws it from the middle. Sides: 5, 6 or 8 (`sketch shape polygon <n> ...` for any).
+- **More > Shapes > Pen:** click for a corner, drag for a curve (the handles mirrored), click the first anchor to close; Enter or Esc ends an open path.
+- **Fill: Pen Color / Fill: None and Stroke: None** set what the shapes and the Pen make (`sketch fillcolor|strokecolor <hex>|none`); **Restyle Selection** applies them to the strokes inside the selection.
+- **Artboards:** `sketch artboard add <name> x0 y0 x1 y1`; **SVG:** `sketch svg export <file.svg> [artboard]` and `sketch svg import <file.svg>` - Blendity's file comes back as its layers, another program's on one layer fitted to the view.
+
+**Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
+- **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).
+- **Hold the right grip** while painting to erase.
+- **The right stick, flicked up or down,** sizes the brush (`vr paint size <cm>`); **the left stick, flicked sideways,** sets its opacity (`vr paint opacity <0-1>`).
+- **A** undoes the last paint stroke. Everything else is the desk's brush: colour, tip, channels, symmetry.
 
 **Minimum:** a thin laptop such as the HP Envy 13.3" 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7
 class), 8 GB of RAM shared with Iris Xe graphics, a 1920 x 1080 touch screen at 150 %. A desktop with a 4-core /

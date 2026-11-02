@@ -29,11 +29,15 @@ and scales come across as the same numbers.
 | objects, hierarchy, transforms | GameObjects with the same parents and local transforms |
 | meshes, modifiers applied | Meshes (a submesh per material slot; 32-bit indices past 65,535 vertices) |
 | vertices moving (Edit Mode drags, skinning, physics) | the mesh's vertices moved in place, normals worked out again (hard edges stay hard) |
-| PBR materials and their base and normal maps | URP Lit, or Standard in the built-in pipeline, opaque, cutout or transparent, culled or double-sided |
+| PBR materials and their maps | URP Lit, or Standard in the built-in pipeline (colours made gamma), opaque, cutout or transparent, culled or double-sided; Base, Normal, Metallic and Emission maps from the pixels Live Link sends (round 377) |
 | Toon materials | the same Lit material, and a `BlendityToon` component holding every toon field per slot for your own toon shader |
 | lights | Directional, Point, Spot, Rectangle and Disc lights with the same intensity, range and angles (Unity's area lights are baked only: they light nothing until you bake) |
 | cameras | Cameras (disabled, so the Game view keeps yours) with the same field of view, clipping and physical lens |
-| armatures and bones | empty GameObjects posed as the bones (skinned meshes come across as moving vertices) |
+| the look (round 376) | RenderSettings (Trilight ambient, the procedural or panoramic skybox, linear fog); colours made gamma; a Blendity Look object keeping the scene's own lighting (Restore Scene Lighting in its menu); in a URP project a global Volume with ColorAdjustments, Tonemapping, Bloom and Vignette (turn Post Processing on for the camera) |
+| armatures and bones | empty GameObjects posed as the bones; a skinned mesh (round 378) is a SkinnedMeshRenderer on them, its keys as blend shapes |
+| clips (round 379) | an AnimationClip asset in Assets/Blendity Live Link/Clips (localPosition, localRotation, localScale curves) |
+| LODs and colliders (round 380) | an LOD Group (the renderer, then `<name>_LOD<n>` children); Box, Sphere, Capsule and Mesh Colliders |
+| VRChat setup (round 381) | with VRChat's SDK: the Avatar Descriptor on the avatar root (view, lip sync, eye look), PhysBones under "Blendity PhysBones", a Scene Descriptor when the scene has none; static flags for Contribute GI either way. Tested with stand-ins (`VrcStandIns`, `run_replay_tests.py`) |
 
 ## Test
 

@@ -41,7 +41,7 @@ ProceduralTexturePtr Editor::surface_of(GameObject *g, std::string *why) const {
 bool Editor::surface_load_maps(GameObject *g, ProceduralTexture &pt, std::string *why, bool step) {
   const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
   if (!mr || mr->mesh_maps.empty()) {
-    if (why) *why = (g ? g->name : std::string("the object")) + " has no mesh maps baked (Object > Bake Mesh Maps)";
+    if (why) *why = (g ? g->name : std::string("the object")) + " has no mesh maps baked (GameObject > Bake Mesh Maps..., or Bake All Maps)";  // (finding 29: the menu is GameObject)
     return false;
   }
   auto maps = std::make_shared<SurfaceMaps>();
@@ -138,10 +138,11 @@ bool Editor::texture_layer_op(const std::string &asset, const std::string &op, i
     dialog_ = Dialog::SaveSmat;
     return true;
   }
-  if (op != "preset" && op != "clearmask" && op != "group") return false;
+  if (op != "preset" && op != "clearmask" && op != "group" && op != "matid") return false;
   if (op == "group" && layer + 1 >= (int)pt->layers.size()) return false;
   note_texture_edit(*pt);
   if (op == "preset") apply_surface_mask_preset(l, arg), mark_changed("Mask Preset " + arg);
+  else if (op == "matid") apply_material_id_mask(l, std::atoi(arg.c_str())), mark_changed("Material ID Mask");  // (round 392)
   else if (op == "clearmask") l.mask_layers.clear(), mark_changed("Clear Mask");
   else {  // (group: checked above)
     auto grp = create_texture_layer("Group");
@@ -151,6 +152,7 @@ bool Editor::texture_layer_op(const std::string &asset, const std::string &op, i
     pt->layers.insert(pt->layers.begin() + layer, std::move(grp));
     mark_changed("Group Layers");
   }
+  if (op == "matid" && (!pt->maps || pt->maps->id.empty())) Log::warn("Surface %s: no ID map loaded - Bake All Maps bakes one; until then the mask is empty", pt->name.c_str());  // (review 392)
   pt->touch();
   return true;
 }
@@ -189,6 +191,7 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
     }
     return;
   }
+  if (sub == "bakeall") return (void)surface_bake_all(is_int(arg(2, "")) ? std::atoi(arg(2, "").c_str()) : 0);  // (round 392)
   if (sub == "add") {
     const std::string type = rest(2);
     if (texture_stack_op(pt->asset_path, "add", 0, 0, type)) Log::info("Surface %s: added %s (%zu layers)", pt->name.c_str(), type.c_str(), pt->layers.size());
@@ -198,7 +201,7 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
     const std::string what = to_lower(arg(2, ""));
     const int layer = is_int(arg(3, "")) ? std::atoi(arg(3, "").c_str()) : -1;
     if (layer < 0 || layer >= n) {
-      Log::warn("surface mask add <layer 0-%d> <effect type> | preset <layer> edgewear|dirt|dust|metaledgewear|positiongradient|thickness | clear <layer>", std::max(0, n - 1));
+      Log::warn("surface mask add <layer 0-%d> <effect type> | preset <layer> edgewear|dirt|dust|metaledgewear|positiongradient|thickness|grounddirt|cavity | id <layer> <slot> | clear <layer>", std::max(0, n - 1));
       return;
     }
     if (what == "add") {
@@ -209,7 +212,7 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
     if (what == "preset") {
       const std::vector<std::string> &presets = surface_mask_presets();
       if (std::find(presets.begin(), presets.end(), to_lower(arg(4, ""))) == presets.end()) {  // (checked before anything changes)
-        Log::warn("surface mask preset: edgewear | dirt | dust | metaledgewear | positiongradient | thickness");
+        Log::warn("surface mask preset: edgewear | dirt | dust | metaledgewear | positiongradient | thickness | grounddirt | cavity");
         return;
       }
       note_texture_edit(*pt);
@@ -219,6 +222,16 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
       Log::info("Surface %s: layer %d's mask is the %s preset (%zu effects; edit them in the Textures window)", pt->name.c_str(), layer, arg(4, "").c_str(), pt->layers[(size_t)layer]->mask_layers.size());
       return;
     }
+    if (what == "id") {  // (round 392: surface mask id <layer> <slot> - the faces of one material)
+      const int slot = is_int(arg(4, "")) ? std::atoi(arg(4, "").c_str()) : -1;
+      if (slot < 0 || slot > 255) return Log::warn("surface mask id <layer> <slot 0-255>: the faces of one material slot (from the baked ID map)");
+      note_texture_edit(*pt);
+      apply_material_id_mask(*pt->layers[(size_t)layer], slot);
+      pt->touch();
+      mark_changed("Material ID Mask");
+      if (!pt->maps || pt->maps->id.empty()) Log::warn("Surface %s: no ID map loaded - Bake All Maps (`surface bakeall`) bakes one; until then the mask is empty", pt->name.c_str());
+      return;
+    }
     if (what == "clear") {
       note_texture_edit(*pt);
       pt->layers[(size_t)layer]->mask_layers.clear();
@@ -226,7 +239,7 @@ void Editor::surface_command(const std::vector<std::string> &t, const std::strin
       mark_changed("Clear Mask");
       return;
     }
-    Log::warn("surface mask add | preset | clear");
+    Log::warn("surface mask add | preset | id | clear");
     return;
   }
   if (sub == "group") {

@@ -53,6 +53,7 @@ class MeshData:
     def __init__(self, data, verts):
         doc, binc = parse(data)
         self.co = np.zeros((verts, 3), np.float32)
+        self.joints, self.weights, self.targets = None, None, []
         loops, uvs, normals, slots = [], [], [], []
         for prim in doc["meshes"][0]["primitives"]:
             at = prim["attributes"]
@@ -62,6 +63,7 @@ class MeshData:
             if len(vid) and vid.max() >= verts:
                 raise ValueError("a _VERT past the mesh's vertex count")
             self.co[vid] = pos
+            self._skin_and_targets(doc, binc, at, prim, vid, verts)
             loops.append(vid[idx])
             uv = accessor(doc, binc, at["TEXCOORD_0"]) if "TEXCOORD_0" in at else np.zeros((len(pos), 2), np.float32)
             uvs.append(uv[idx])
@@ -75,6 +77,20 @@ class MeshData:
         self.slots = cat(slots, (0,)).astype(np.int32)
         self._drop_degenerate()
         self.has_uv = any("TEXCOORD_0" in p["attributes"] for p in doc["meshes"][0]["primitives"])
+        skins = doc.get("skins", [])
+        self.inverse_binds = accessor(doc, binc, skins[0]["inverseBindMatrices"]) if skins else None  # (round 378: (joints, 16), column-major)
+
+    def _skin_and_targets(self, doc, binc, at, prim, vid, verts):
+        """Round 378: the joints and weights (four per mesh vertex) and each morph target's offsets per mesh vertex."""
+        if "JOINTS_0" in at and "WEIGHTS_0" in at:
+            if self.joints is None:
+                self.joints, self.weights = np.zeros((verts, 4), np.int32), np.zeros((verts, 4), np.float32)
+            self.joints[vid] = accessor(doc, binc, at["JOINTS_0"])
+            self.weights[vid] = accessor(doc, binc, at["WEIGHTS_0"])
+        for t, target in enumerate(prim.get("targets", [])):
+            while len(self.targets) <= t:
+                self.targets.append(np.zeros((verts, 3), np.float32))
+            self.targets[t][vid] = accessor(doc, binc, target["POSITION"])
 
     def _drop_degenerate(self):
         """Triangles with two corners on one mesh vertex (the binary can have them; Blender's mesh can't)."""

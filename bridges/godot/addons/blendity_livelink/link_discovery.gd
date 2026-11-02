@@ -31,4 +31,4 @@ static func read() -> Dictionary:
 
 ## The line a bridge sends first: who it is (Blendity's Live Link window lists it; nothing else reads it).
 static func hello(app: String) -> PackedByteArray:
-	return (JSON.stringify({"t": "client", "app": app, "bridge": BRIDGE_VERSION}) + "\n").to_utf8_buffer()
+	return (JSON.stringify({"t": "client", "app": app, "bridge": BRIDGE_VERSION, "caps": ["skins"]}) + "\n").to_utf8_buffer()  # (round 378: it skins)

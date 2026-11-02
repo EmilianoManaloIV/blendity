@@ -424,6 +424,18 @@ std::vector<int> Server::ready_clients() const {
   return out;
 }
 
+std::string Server::client_hello(int id) const {
+  std::shared_ptr<Client> found;
+  {
+    std::lock_guard<std::mutex> lk(d_->m);
+    for (const auto &c : d_->clients)
+      if (c->alive && c->id == id) found = c;
+  }
+  if (!found) return "";
+  std::lock_guard<std::mutex> hk(found->m);
+  return found->hello;
+}
+
 std::vector<std::string> Server::client_hellos() const {
   std::vector<std::shared_ptr<Client>> list;
   {

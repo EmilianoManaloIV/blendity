@@ -3,6 +3,8 @@
 // shows the state, Auto Connect, a port and Connect / Disconnect; the client is ticked by the core ticker.
 #include "BlendityLinkClient.h"
 #include "BlendityLinkSnapshot.h"
+
+void BlendityReleaseTexturedBase();  // (BlendityLinkApplier.cpp, round 377)
 #include "Containers/Ticker.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
@@ -46,6 +48,7 @@ public:
 		if (FSlateApplication::IsInitialized())
 			FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(TabName);
 		Client.Disconnect();
+		BlendityReleaseTexturedBase();
 	}
 
 private:

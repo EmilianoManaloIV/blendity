@@ -2,6 +2,606 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 393): the HCI rerun after the fixes
+
+**Asked:** Phase D's last round: all seven productions measured again after rounds 351-392, before and after; the
+comparison, its page and the KLM table updated.
+
+**Added (task 0370)**
+- **The rerun** in `docs/hci/compare-2026-10.md` ("After the fixes"): refusals per production before and after, the
+  avatar measured again (shape keys and textures now in the file), every finding's status, a new finding 30 (`set
+  Render.Width` / `Height` can't reach the render size).
+- **The KLM table:** Blendity's cells for the Adobe tasks it couldn't do (rows 11, 13-15, 18-20) and Bake All Maps (16).
+- **The comparison page** at the same link, the rerun first.
+- **Two bugs the rerun found:** a new paper's SVG export wrote no layer; console coordinates on a paper before the pad
+  was drawn read each pixel as a view height.
+
+**Checked:** the seven runs' logs (A 2, B 5, C 0, E 0, F 1, G 0, H 0 refusals - each explained), the avatar's file, the
+SVG read back, the KLM check, the two bugs' tests.
+
+## 2026-11-02 (round 392): VRChat shaders' texture presets, ID masks and Bake All Maps
+
+**Asked:** Phase D's sixth round: texture export presets for URP and VRChat's shaders (Poiyomi, lilToon), a bake-all
+button, the smart masks against Substance's list, Material ID fills, and the menu's name in the messages (round 387's
+findings 26 and 29).
+
+**Added (task 0369)**
+- **Texture presets** `urp`, `poiyomi` and `liltoon` (Export Textures..., `export textures`): files named for the
+  shaders' slots, packed as they read them (Poiyomi's PackedMaps R metallic, G smoothness; lilToon's each from R).
+- **The ID map** (`_id.png`, baked with the mesh maps) and **Material ID masks** (the layer menu, `surface mask id`).
+- **Smart masks** Ground Dirt and Cavity.
+- **Bake All Maps** (the Textures window, `surface bakeall`): baked and loaded into the surface in one step.
+- **GameObject > Bake Mesh Maps...** in every message and lesson (finding 29).
+
+**The Opus review's fixes:**
+- Bake All Maps' surface kept with its bake (a cancelled or dropped one had loaded the next bake into the wrong surface),
+  checked against the object's surface when it lands, from the bake dialog's settings;
+- the ID map in the maps' hash (a reassigned slot showed the old mask);
+- the ID map's padding copying a slot, never a mean (slots 0 and 2 had made a slot 1 in the gutters);
+- a Material ID mask with no maps empty; the layer menu's slots the surface's own object's, 256 at most;
+- the step named Bake All Maps. An older build opening a texture with a Material ID mask reads it as Normal Z.
+
+**Checked:** the ID map's slots from a two-slot cube and the mask against them; a record without an ID map; Poiyomi's
+packed channels; the lilToon and URP files; the new masks; Bake All Maps loading its maps; a dropped bake's ID map
+removed; the review's cases (slots 0 and 2 in the gutters, the hash, an ordinary bake after a cancelled Bake All Maps,
+the menu's name in the message).
+
+## 2026-11-02 (round 391): footage, keyed cards, Add Edit, Ripple Delete and export presets
+
+**Asked:** Phase D's fifth round: video footage on the Sequencer, keyframed opacity and transform, a blade cut and ripple
+delete, H.264, ProRes and VRChat export presets, a paper card by its name (round 387's findings 23-25 and 27).
+
+**Added (task 0368)**
+- **Footage** (`seq video`, a video dropped onto a lane): decoded in-process with FFmpeg (render/video_decode); refused
+  in the dependency-free build with Get Blender's Libraries as the fix.
+- **Keys on a card** (`seq key|unkey`): opacity, x, y, scale and rotation, linear, over the render.
+- **Add Edit** (Alt+B, `seq blade`) and **Ripple Delete** (Shift+Delete, `seq ripple`), each one undo step.
+- **Export presets** (the Render window, `renderanim preset h264|prores|vrchat`): ProRes 422 in a .mov, VRChat's MP4
+  at most 1080 lines with its index first.
+- **A paper card by its name** (`seq paper <name> ...`).
+
+**The Opus review's fixes:**
+- a keyed card drawn over the render at every frame, at full opacity too (it had snapped back to black bars);
+- ProRes with an odd height: the chroma's last row written; every encoded picture a frame long (a one-frame MOV had
+  lost it);
+- Add Edit on Alt+B (B for the blade) and Ripple Delete on Shift+Delete as keymap actions over the Sequencer
+  (Ctrl+K stays the Command Palette; Ctrl+Alt+K was a user shortcut's in the tests);
+- a card with no end of its own cut at its length; the preset taken when a render starts; key lines after a skipped
+  bar left out; keys rounded before they are compared, an unkey of nothing refused;
+- the decoder: Blender's frame-rate guess, files only, frames over 8192 x 8192 refused, a slow decode said;
+- the re-check's: the Sequencer's keys forgotten once it isn't drawn, a key read from a file on a whole frame.
+
+**Checked:** keys' values and the file; a keyed card and a clip at speed 2 cut in two; Add Edit's undo; Ripple Delete;
+a keyed card at half opacity and moved over a render; three frames encoded and read back in order with a seek back;
+footage's length and the frame under the playhead; ProRes and H.264 probed; VRChat's 4 x 1080 from 8 x 2160; the
+ffmpeg program's arguments; the dependency-free build's refusal; a paper by its name.
+
+## 2026-11-02 (round 390): Illustrator's shapes, the Pen, fills, artboards and SVG
+
+**Asked:** Phase D's fourth round: a Bezier pen with anchors and handles in the Draw tab, vector shapes with fills and
+strokes, artboards on papers, SVG import and export (round 387's findings 21 and 22).
+
+**Added (task 0367)**
+- **Shapes** (More > Shapes, `sketch shape rect|ellipse|polygon [n]|star [n] x0 y0 x1 y1`): Illustrator's Rectangle,
+  Ellipse, Polygon and Star dragged on the pad - Shift even, Alt from the centre - each one undo step.
+- **The Pen** (More > Shapes > Pen, `sketch pen x y [hx hy] | close | end`): a click a corner, a drag pulls mirrored
+  handles, a click on the first anchor closes, Enter or Esc ends; the path drawn with its anchors as it is made.
+- **Fill and stroke** (`sketch fillcolor|strokecolor <hex>|none`, the menu's Fill and Stroke: None): a fill under the
+  line with the layer's opacity, blend, clipping and mask; **Restyle Selection** (`sketch restyle`).
+- **Artboards** (`sketch artboard add|remove|list`), outlined on the pad, saved with the scene and the paper.
+- **SVG** (`sketch svg export <path> [artboard]`, `sketch svg import <path>`, scene/sketch_svg.cpp): each layer a group
+  with its opacity and CSS blend; Pen paths as cubics; another program's paths (M L H V C S Q T A Z), rects, circles,
+  ellipses, lines, polylines and polygons with their fills, strokes, opacities, style= and transforms.
+- Free Transform moves a Pen path's anchors; cuts leave lines.
+
+**The Opus review's fixes:**
+- numbers after a path's Z ending the path (they had hung the editor);
+- a Pen path kept when another tool, source or paper is picked, and ended by Enter or Esc whatever the tool;
+- a second Z closing once, opacity set both ways counted once, a gradient's fill its fallback or none;
+- shapes whose transform overflows left out, widths held at 200 px;
+- Restyle refusing to hide strokes and leaving a locked layer alone;
+- a shape's drag the view's it began in;
+- a hidden group's layers left out of the SVG;
+- colors and sides checked at the console.
+
+**Checked:** a rectangle's corners, an ellipse on its equation, a hexagon's top point, a star's two radii; the fill and
+line on screen and Stroke None; one undo step a shape; the Pen's ends and middle against the cubic, a mouse-made closed
+path with mirrored handles, Esc ending the path; an SVG round trip (points 6.6e-7 off at most, layers and Multiply
+kept), a hand-written SVG with every element, a group transform, relative commands and an arc; an artboard's view box;
+the paper text keeping artboards, fills and paths; a transform of a Pen path; a Delete and the Eraser leaving lines;
+the review's hard cases (numbers after Z, Z Z, opacity twice, url(), overflow, a cut-short Pen group in the file, Esc
+on a console path, another tool picked mid-path, Restyle refused and on a locked layer).
+
+## 2026-11-01 (round 389): Free Transform, Space and H, the pen's tilt
+
+**Asked:** Phase D's third round: Ctrl+T free transform with handles on a layer or a selection, Space to pan and H for
+the Hand tool, pen tilt in the Draw tab's brushes.
+
+**Added (task 0366)**
+- **Free Transform** (Ctrl+T, More > Select > Free Transform, `sketch transform ...`): the active layer's strokes, or
+  the selection's, in a box.
+  - Corners scale in proportion (Shift freely); edges stretch.
+  - Ctrl distorts a corner and skews an edge.
+  - Outside a corner turns (Shift: 15 degrees); inside moves.
+  - Enter commits as one step; Esc puts it back.
+- **The Adobe preset:** H is the Hand tool; Space held with a drag pans the Scene view; the Wheel is Shift+Space.
+- **A brush's Tilt:** the pen's tilt widens the line (the Pencil's 0.8), saved with the brushes.
+
+**The Opus review's fixes:**
+- Space-drag on the pad in the Adobe preset;
+- a transform kept first or let go when the drawing changes under it (an undo, another source, paper or scene, a layer
+  op, a save);
+- a 12 px least box, with proportional drags along the diagonal;
+- crossing boxes refused;
+- Space-pan taking the press (no paint under it);
+- one view's drag;
+- Enter and Esc leaving text fields alone;
+- edges stretched across themselves;
+- the selection's untouched strokes left as they were;
+- the tilt's tooltip true;
+- an older brushes file keeping the Pencil's tilt.
+
+**The re-check's fixes:**
+- a transform kept first before another paper is opened, made, copied or deleted, before a layer is dragged, renamed or
+  its opacity or blend changed, and before Play;
+- Ctrl+Z or redo mid-transform as Esc - the drawing as it was, no step undone (it had left the half-moved strokes);
+- the brushes file's preset index checked before it is read;
+- the pad's Space left to a text field;
+- Space-drag panning in Sculpt too.
+
+**Checked:** scale, rotate, distort onto four points and the middle where the diagonals cross, a selection's half
+moved alone, Ctrl+T with a drag, Esc and Enter with undo, a single line's corner drag, a crossing distort refused, undo
+and another source mid-transform; H and Space-drag in the Adobe preset; the Pencil's tilt against its formula.
+
+## 2026-11-01 (round 388): Photoshop's layers in the Draw tab - blend modes, masks, selections
+
+**Asked:** Phase D's second round (round 387's findings 16-20 and 28): Photoshop's blend modes, layer and clipping
+masks, marquee and lasso selections with fill and delete, a new paper as the Draw tab's canvas, warnings for unknown
+verbs. Free transform, Space and H, and pen tilt follow in round 389.
+
+**Added (task 0365)**
+- **27 blend modes** on sketch layers, Photoshop's (the W3C formulas for Soft Light and the non-separable four;
+  Dissolve as whole pixels).
+- **Clipping masks** (Layers > Clip, `sketch layer clip`) and **layer masks** from a selection (Add Mask, `sketch layer
+  mask add|hide|invert|on|off|delete`).
+- **Selections:** More > Select > Rectangle or Lasso, dragged on the pad (`sketch select rect|lasso|all|none`).
+  - **Fill** (Alt+Backspace, `sketch fill`) puts the colour in it as a filled shape.
+  - **Delete** cuts the active layer's strokes out of it.
+  - **Ctrl+D** deselects.
+- **A new or opened paper** is the Draw tab's canvas; `sketch` and `sketch layer` warn on an unknown verb.
+- Saved in the scene and paper files.
+
+**The Opus review's fixes:**
+- the Layers row's blend list showing every mode;
+- Ctrl+D no longer also duplicating;
+- a clip's base looked up, not taken from the last layer drawn (a hidden base hides what is clipped to it);
+- the marching ants kept out of board thumbnails and exports;
+- a click deselects;
+- older tests' frame steps restored;
+- a failed `paper open` switches nothing;
+- the drag shown live;
+- Dissolve whole at full coverage;
+- a Fill's pieces from the eraser are lines;
+- a closed stroke's closing edge cut too;
+- no mask on a group;
+- the per-pixel callback gone;
+- a short window's footer;
+- ADR 0072 amended;
+- the re-check's:
+  - the Select tool before the eraser;
+  - a group as a clip base, with one coverage per base;
+  - Clip and the masks in a row's menu, with a marker;
+  - the selection gone with the tool and the scene;
+  - the console's select in the pad's pixels on Paper.
+
+**Checked:** the modes' formulas on a known pair of colours; clipping (a hidden base too), masks and Dissolve on
+screen; fill, delete, undo, the Select tool's drag and click, Ctrl+D with an object selected; the file round trip; the
+existing sketch, paper, layer and Draw tests.
+
+## 2026-11-01 (round 387): Adobe in the HCI comparison
+
+**Asked:** Phase D's first round: the basic Adobe suite in the HCI testing - Photoshop + Fresco, Substance Painter,
+Illustrator, After Effects + Premiere.
+
+**Done (task 0364)**
+- **Four productions made in Blendity** and compared with Adobe's documented steps: an illustration and concept sheet,
+  texturing the avatar, a logo, editing the film (`docs/hci/compare-2026-10.md`, sections E-H).
+- **KLM:** Adobe as a sixth program and ten Adobe tasks (`tools/hci_klm.py`): where both do a task Blendity matches
+  Photoshop's blend menu and Substance's texture export and is 1.6 s slower to bake mesh maps; seven of the ten are
+  tasks it can't do yet.
+- **Findings 16-29** (audience A): free transform, blend modes, masks, selections, a paper's source, vector shapes and
+  the pen, SVG, footage and cuts, keyed cards, export presets, texture presets, three small ones - for rounds 388-391.
+- **`tools/hci_klm.py`:** a row from before a program was added counts its cells as "-"; `--check` fails on a table it
+  reads no row from.
+- **The Opus review's fixes:** the productions run again on editors built from the current code (the first run had an
+  editor from before round 364) and each stage from an empty project; a false "missing" (Blendity has six smart-mask
+  presets) and a missed PNG route (Pin to the Board, Board Export) corrected; KLM rows 5, 11, 15 and 19 corrected;
+  unsourced Adobe steps marked assumed.
+- **The comparison page** updated at the same link.
+
+**Checked:** the KLM recount (`--compare --check`), the audits at their baselines; no product code changed.
+
+## 2026-11-01 (round 386): painting in VR
+
+**Asked:** Phase C's last round: the controller paints textures through the paint dab pipeline; size and opacity from
+the thumbstick; erase by the grip.
+
+**Added (task 0363)**
+- **A world dab:** a disc square to the controller's ray where it meets the surface - triangles facing away and texels
+  past the radius in front or behind left alone - through the desk's rasterizer, brush, symmetry, dilation and undo.
+- **`vr paint`:**
+  - with Paint on for an object, the right trigger paints along the ray, its pressure the pen's;
+  - the right grip erases;
+  - the right stick sizes the brush, the left stick's sideways sets its opacity;
+  - A undoes the last paint stroke.
+- **The eyes show** the ray and the brush's ring where it lands.
+
+**The Opus review's fixes:**
+- the desk's Paint mode had ended every VR stroke after its first dab: a stroke VR has under way is VR's;
+- the dabs between frames follow the ray and hit again, so a stroke that leaves the surface never bridges across it;
+- mirrored objects take paint;
+- Paint off at the desk turns VR's painting off;
+- a sketch stroke under way is kept when painting starts;
+- the dabs test only the triangles near them (the BVH);
+- the grip squeezed mid-stroke starts an erase stroke;
+- the trigger goes through the pen's pressure curve;
+- the re-check's: each dab between frames square to the ray that found it, the BVH's ball never too small under a
+  turned stretch, a stroke ended when the session stops or the scene changes, rays cast only as far as the ray swept,
+  an undo mid-stroke frees the desk.
+
+**Checked:** a world dab against a mouse dab of the same size on the same face (280 and 283 texels, 279 shared); the
+back face and a disc off the surface paint nothing, a mirrored face takes paint; the editor on a stub runtime (a 3 m
+sweep of 7,830 texels in one step, the grip's erase, A, the sticks, a stroke round the cube in the air against its two
+ends apart, Paint off, the refusal); the desk's paint tests.
+
+## 2026-11-01 (round 385): sketching in VR
+
+**Asked:** Phase C's third round: controller strokes into the Strokes system as 3D ribbons and tubes (Quill, Gravity
+Sketch), pressure from the trigger, a palette on the off hand, undo on a button.
+
+**Added (task 0362)**
+- **Stroke ribbons** gain a width and an up per point, tubes (8 sides, capped) and a material slot. Each is optional,
+  in the scene file too, so older scenes load as they were.
+- **`vr sketch`:**
+  - the right trigger draws, its pressure the width, the brush turning with the hand;
+  - A undoes;
+  - X switches ribbon and tube;
+  - the left stick flicks through 8 colours (each a "Sketch <n>" material);
+  - the right stick sizes the brush.
+- **The eyes show** the stroke under way, the brush at the tip, and the palette round the left hand.
+
+- **The tape** now also toggles with X (the left primary) outside sketching.
+
+**The Opus review's fixes:**
+- tubes wound outward (they had faced in);
+- frames that don't flip or twist: ribbons turned over rather than folded, the last normal carried where the up lies
+  along the path, tubes carried along;
+- a new stroke added to the mesh instead of every stroke built again (459,000 vertices: 46.6 ms to 11.9 ms);
+- slots capped at 255, and a cut-short group dropped;
+- A undoes only a VR stroke;
+- VR's own "VR Sketch" object with Own normals;
+- the tape off while sketching, and bad arguments refused;
+- the re-check's: tubes carried round sharp corners (a V no longer pinches), the appended mesh without the old one's
+  render caches, "VR Sketch" found by its name too, a pending desk change its own undo step, ADR 0084 amended, desk
+  ribbons as they were;
+- found on Linux: appending still copies the mesh (30-47 ms at 459,000 vertices), so VR's object is full at 100,000
+  vertices and the next stroke starts "VR Sketch 2".
+
+**Checked:** a recorded stroke as a ribbon and a tube against its widths, ups and normals, and every face's winding; a
+vertical stroke with a half roll; the scene file round trip; adding one stroke against building all; the editor on a
+stub runtime (a 30 cm stroke with rising pressure, undo, the palette, the brush, a tube, a desktop step left alone).
+
+## 2026-11-01 (round 384): moving around in VR, and scale
+
+**Asked:** Phase C's second round: teleport, smooth move, grab the world to move, turn and scale it, a 1:1 snap, a tape
+measure, the camera's frame and the controllers in view.
+
+**Added (task 0361)**
+- **`render/xr_nav.h`:** the stage (origin, yaw, scale), the teleport arc and landing, smooth move, snap turn, one- and
+  two-hand grabs (about the hands' middle; 1:1 snaps), and the tape.
+- **The controllers through OpenXR actions:** aim and grip poses, trigger, squeeze, stick and primary button, with
+  bindings for Touch, Index, Vive, Windows Mixed Reality and the simple controller.
+- **The gestures:**
+  - squeeze to grab (both: turn and scale);
+  - the right trigger for the arc, let go to teleport;
+  - the left stick to walk, the right stick to snap-turn 30 degrees;
+  - A for the tape.
+- **The eyes show** the controllers, their rays, the arc and its ring, the render camera's frame, the tape and the
+  scale.
+
+**The Opus review's fixes:**
+- a seated runtime's lift now goes through every path (the eyes, the arc, the grabs, the turns, the teleport);
+- Touch's tape button on each hand (A and X), refused bindings logged;
+- the arc's hit test through a segment BVH per mesh, made on a worker (it had tried every triangle 60 times a frame);
+- no stand-on-walls (a landing needs a floor's normal);
+- grabs with hands close together or one above the other, and the scale kept within 1:0.01 to 1:100;
+- a teleport only on a tracked release with nothing squeezed;
+- the hands move the world on their own frame (not the next);
+- the camera frame at the final render's aspect, without an orthographic camera's lines;
+- the stage's old helper `stage_in_world` gone (`Stage::matrix`), the constants named;
+- the re-check's: the BVHs keyed by the mesh's id and made again after a sculpt or deform, two at a time, let go when no
+  longer asked for; the meshes gathered once per arc; no jump when one hand goes over the other mid-turn; `vr scale` kept
+  to 1:0.01-1:100; tests of the drawn view's frame, a deform and a stretched ramp.
+
+**Checked:** recorded hand poses through the maths (1:2 about a fixed middle, a quarter turn, the arc against a throw and
+onto a box, the lift, the grabs' edges, the BVH against every triangle on 180,000); the gestures in the editor on a stub
+runtime (cancels, the same-frame grab, the head over the landing, the arc on a box).
+
+## 2026-11-01 (round 383): VR View
+
+**Asked:** Phase C's first round: the scene in a headset at 1:1, standing where the Scene view looks (OpenXR: SteamVR,
+Quest Link, Windows Mixed Reality).
+
+**Added (task 0360)**
+- **`render/xr.h`:**
+  - the stereo maths (OpenXR's poses in Blendity's axes, off-centre projections, the stage below the Scene view's
+    pivot at a scale);
+  - a session state machine on a `Runtime` (Ready, frames, Stopping, Exiting, Lost, each with its reason).
+- **`render/xr_openxr.cpp`:**
+  - the OpenXR loader loaded at run time;
+  - a Direct3D 11 device on the headset's adapter, the stage space, a swapchain per eye;
+  - each eye's pixels uploaded into it.
+- **The editor:**
+  - `vr start [resolution] | stop | status | here | scale <s>`, and Edit > VR View;
+  - each eye drawn as the Game view draws (CPU), at half the headset's size by default.
+- **The OpenXR SDK:** its loader package 1.1.65 (Apache-2.0 OR MIT) goes in Blender's lib folder as `openxr/`. The
+  build finds it and copies `openxr_loader.dll` beside Blendity (ADR 0096, licenses/README.md).
+- **The Opus review's fixes:**
+  - the editor draws every frame while VR runs (idle, it had dropped the headset to one frame a second);
+  - the session resumes after Stopping;
+  - the user's stop no longer calls xrEndSession outside Stopping;
+  - a failed eye ends the frame without its layer;
+  - brief tracking loss doesn't blank the headset;
+  - plain swapchain formats get linear values;
+  - a local space is raised to standing height;
+  - the loader is searched for only beside Blendity;
+  - odd numbers are refused.
+
+**Checked:**
+- the maths;
+- the state machine on a stub runtime;
+- a stereo frame of a red cube 3 m ahead: 5.52 px apart between the eyes (5.46 expected), level, up in the picture;
+- a frame with both eyes at 1008 x 1120 costs 10.9 ms in the default scene;
+- the verbs.
+- The live headset check is the spec's "Your own check with the headset" (SteamVR is this machine's runtime; the suite
+  never starts it).
+
+## 2026-11-01 (round 382): Live Link never pauses, and a live test of everything that flows
+
+**Asked:** Phase B's last round: no stalls while working with engines connected, Live Link going on during long jobs,
+and everything Phase B made flow shown to work with the installed engines.
+
+**Added (task 0359)**
+- **`tests_round382`** (four clients each, Windows release build):
+  - 200 objects, a 100,000-vertex mesh deformed, a 50-bone rig posed and a clip keyed every frame: the tick is 1.1 to
+    1.9 ms on average and at most 3.2 ms, with everything sent;
+  - a 100,000-vertex topology change costs about 4 ms;
+  - a surface painted with the paint tool costs 0.1 ms a tick on average, its texture sent about 4 a second;
+  - a Box moved during a 100,000-vertex skin bind reaches the client while the bind still runs.
+- **The live test with the installed engines** now also takes the fog, a 4 x 4 checker, a skinned Arm with Smile at
+  0.5, the clip, and a crate with three levels and a box collider. Blender 5.2, Godot 4.7.2, Unity 6000.6.7f1 and
+  Unreal 5.8 all report LIVE OK. Godot failed its "followed until stopped" check in two runs of eight; it now says why.
+- **The Opus review's fixes:**
+  - painting is measured with the paint tool (hand-written texels were almost never seen);
+  - the long-job test counts only moves sent while the bind runs;
+  - the Try-it opens the window by its title;
+  - stricter checks;
+  - the docs say what was measured.
+- **Found by it:**
+  - Godot's and Unity's live tests expected linear colours (the bridges have converted them since round 377);
+  - Unity's read URP's `_BaseColor` only;
+  - a short test folder had no texture folder.
+
+## 2026-11-01 (round 381): VRChat's setup in Unity through Live Link
+
+**Asked:** Phase B: with VRChat's SDK in the Unity project, the avatar's Avatar Descriptor (view, lip sync, eye look)
+and PhysBones; a world's Scene Descriptor and static flags; nothing VRChat-specific without the SDK.
+
+**Added (task 0358)**
+- **New messages:**
+  - `avatar`: an armature's view between its eyes, its visemes and blink meshes and keys, and its eye bones.
+  - `springs`: the armature's spring chains.
+  - The object message's `static` (Contribute GI).
+- **Unity:**
+  - The Avatar Descriptor, PhysBones (on "Blendity PhysBones") and the Scene Descriptor, made through reflection when
+    VRChat's SDK types are there.
+  - Static flags set for static objects either way.
+- The recorded session's rig gets eyes, a Face with the 15 visemes and a blink, a static Box and a spring chain.
+- **The Opus review's fixes:**
+  - **Main-thread cost:** a once-a-second spike with many rigs is gone (the skinned meshes are indexed, a few rigs a
+    tick, the humanoid analysis cached).
+  - **Where the descriptor goes:** on the avatar root, the object above the rig and its meshes.
+  - **Scene Descriptors:** one only, and only when the scene has none.
+  - **PhysBones:** their holder is marked; a hair rig's chains are not doubled; the mapping is the importer's turned
+    round.
+  - **Armatures that stop being one** say so.
+  - **Errors:** reflection or a missing eye no longer stops the link.
+  - **The user's own settings:** descriptor fields are written on change and cleared when gone; static flags are
+    cleared only where the link set them.
+  - **Tests:** the SDK stand-ins and their runner are in the repository.
+- **Found on Linux:**
+  - Two same-named materials found their keys again in hash-map order after Play/Stop, so Linux swapped them. The
+    smallest key now wins.
+  - Messages made on workers (meshes, textures, clips) are compared in any order.
+  - The recorded session makes its texture folder (a run of that test alone had none).
+
+**Checked:**
+- `tests_round381` (and the review's cases);
+- Unity's built-in project with stand-ins of VRChat's avatar types: the descriptor and PhysBone set;
+- the URP project as a world project: one Scene Descriptor and nothing of an avatar's;
+- the Godot, Blender and Unreal replays.
+- The real SDK isn't installed here; the spec gives the check for your own VRChat project.
+
+## 2026-11-01 (round 380): LODs and colliders in Live Link
+
+**Asked:** Phase B: "LOD and Collider components arrive as an LOD Group and colliders".
+
+**Added (task 0357)**
+- **New messages:**
+  - `collider`: the shape, its centre and sizes; `none` when the Collider is taken off.
+  - `lod`: each level's screen size and ratio, and whether the group culls.
+  - `lodmesh`: each level past 0, decimated on the mesh worker. Levels are made again once an edited mesh has stood
+    still for half a second.
+- **The bridges:**
+  - Unity: an LOD Group of child renderers, and Box, Sphere, Capsule and Mesh Colliders.
+  - Godot: levels switched by visibility range, and a StaticBody3D with the shape.
+  - Unreal: the static mesh's own LODs, and simple collision.
+  - Blender: the group and the collider as properties, hidden level objects, and a wire empty for a box or sphere.
+- The recorded session adds a crate with three levels and a box collider.
+- **The Opus review's fixes:**
+  - **Stale levels:** levels built before a group shrank are dropped.
+  - **Marked children:** the bridge's own children are found by marker, so renames are safe. The user's children and
+    colliders are left alone.
+  - **Mesh colliders:** made again after deforms stop.
+  - **Kind changes:** the collider and group are sent again.
+  - **Fewer resends:** a screen size alone doesn't resend levels. Unreal rebuilds once per batch, and only the body for
+    a collider change.
+  - **Godot:** its switch distances use the world size and follow transform changes.
+  - **One-level groups:** a one-level group that culls is kept.
+
+**Checked:**
+- `tests_round380` (and the review's cases: screen only, rename, fewer levels, the group taken off, a kind change);
+- each bridge's replay against the crate's levels and collider.
+
+## 2026-11-01 (round 379): clips in Live Link
+
+**Asked:** Phase B's fourth round: clips go to the engines when keyed. (The plan's round "clips, LODs, colliders and
+VRChat in Unity" is split in three: clips now, LODs and colliders next, then the VRChat setup.)
+
+**Added (task 0356)**
+- **A `clip` message:** an Animation component's clip baked - each keyed object's local transform a frame - at a sync
+  (after every object) and when it changes, at most 4 times a second while it keeps changing.
+- **The bridges keep it:**
+  - Unity: an AnimationClip asset in Assets/Blendity Live Link/Clips;
+  - Godot: an Animation in a "blendity" library on an AnimationPlayer under the root;
+  - Blender: an Action with a slot per object, kept with a fake user;
+  - Unreal: not yet.
+- The recorded session adds the rig's "Wave" and its frame-30 pose.
+- **The Opus review's fixes:**
+  - the bake moved to a clip worker (60 ms to 6 ms on the main thread for a minute of 100 bones), with a 32 MB cap;
+  - Unity and Blender reuse one clip per asset across reconnects;
+  - Unity's keys get linear tangents;
+  - Godot's skinned rigs follow a played clip (a SkeletonModifier3D);
+  - a clip is sent again when the objects it names or their unkeyed axes change;
+  - Blender's continuity pass is vectorised and its keys use the scene's frame rate;
+  - Godot refuses no clip names;
+  - the tests no longer delete the user's clip folder.
+
+**Checked:**
+- `tests_round379` (and the review's cases);
+- each bridge's own clip at frame 30 against Blendity's pose: 0 m and 0 degrees in Unity (built-in and URP), Godot and
+  Blender;
+- Unreal's replay.
+
+## 2026-11-01 (round 378): skins and blend shapes in Live Link
+
+**Asked:** Phase B's third round: a skinned character and its blend shapes once, then only poses and weights; real
+skinned meshes in the engines.
+
+**Added (task 0355)**
+- **A rig's mesh** (posed only by its Skin, or keyed) goes at rest with its skin and morph targets, naming its joints'
+  objects and its keys. A new `weights` message carries shape weights. Deforms go only to clients that don't say
+  `"caps":["skins"]`.
+- **`skin_for_export`** moved into the scene layer, so the export and Live Link share it.
+- **The bridges:**
+  - Unity: a SkinnedMeshRenderer with blend shapes;
+  - Godot: a Skeleton3D and a Skin with blend shapes;
+  - Blender: an armature copying the bone empties, vertex groups and shape keys;
+  - Unreal: keeps the deforms.
+- The recorded session adds a skinned, keyed Arm; its rig is scaled x2.
+- **The Opus review's fixes:**
+  - a rig no more (armature deleted, Preserve Volume, Rest Position) sent as a plain mesh, and Unity's skin taken off;
+  - Blender's Armature modifiers stacking on each resend, and armatures left behind;
+  - skeleton and Skin setting changes now resend the skin;
+  - Preserve Volume, Rest Position and more than four influences stream vertices;
+  - Blender's scaled joints;
+  - Godot's skins posed once per batch;
+  - a rename or material change no longer resends a rig;
+  - the mesh's place from the rig compared with a tolerance;
+  - the weights made on the mesh worker;
+  - leaks on delete;
+  - Blender waits for Object Mode;
+  - each client's hello read once;
+  - no empty weights messages.
+
+**Checked:**
+- `tests_round378` (a skinning client and a plain one; the rig as it changes);
+- the recording's counts;
+- the Unity, Godot and Blender replays, skinned against Blendity's posed vertices: within 1.2×10⁻⁷ m, 3.0×10⁻⁵ m and
+  1.2×10⁻⁷ m (Blender's for each of three sends);
+- Unreal's replay.
+
+## 2026-11-01 (round 377): textures by content in Live Link
+
+**Asked:** Phase B's second round: painted, procedural and generated textures reach the engines as you work, every
+map, and Unity's cache by path no more.
+
+**Added (task 0354)**
+- **Live Link's `texture` message** (docs/LIVELINK.md): a PNG of a texture's pixels, keyed per path and colour space,
+  named by the materials' maps.
+  - It's stamped cheaply each comparison, hashed and encoded on a worker, and sent only when the pixels changed.
+  - A painted surface goes when each stroke ends. An image that keeps changing (a procedural drag) goes at most 4
+    times a second, with the last state after.
+  - Textures go at most 2048 a side.
+- **The bridges load textures from the bytes:**
+  - Blender (temporary file, reloaded);
+  - Godot (ImageTexture, updated in place);
+  - Unity (a texture per key);
+  - Unreal (a transient texture on a material made in code with a BaseMap parameter).
+- **More maps:** Emission (Blender, Godot, Unity), Metallic (Godot, Unity) and Roughness (Godot).
+- **Godot's and Unity's material and light colours** are converted from linear (round 376's follow-up).
+- **The Opus review's fixes:**
+  - no main-thread copy of every texture at each change;
+  - the painting claim corrected;
+  - float colour maps made sRGB;
+  - emission maps multiplied as Blendity's (Godot, Blender);
+  - Unreal's textures updated in place;
+  - a new client no longer takes another's owed change;
+  - textures no material names aren't watched;
+  - Unity's built-in metallic keyword;
+  - maps taken off are cleared.
+
+**Checked:**
+- `tests_round377`: the sync, a repaint, the same pixels, a stroke's throttle;
+- the recording's texture;
+- Blender's and Godot's smoke tests;
+- Unity's replay (built-in and URP);
+- Unreal's replay.
+
+## 2026-11-01 (round 376): the world and the look in Live Link
+
+**Asked:** Phase B's first round, "lighting, modeling, and everything in between while bridges are running": the
+world, the render's look and the camera's filters, live in every engine.
+
+**Added (task 0353)**
+- **Live Link's `world`, `render` and `filters` messages** (docs/LIVELINK.md): the world (gradient, sky, HDRI,
+  colour, strength, fog), exposure and view transform, and a camera's filter stack. They're sent at the sync and
+  whenever they change.
+- **Blender:** the world (a ColorRamp gradient, sky, HDRI, fog), exposure and view transform, and the compositor
+  (Bloom, Color Grading, Vignette).
+- **Unity:**
+  - RenderSettings (Trilight ambient, skybox, linear fog);
+  - a Blendity Look object;
+  - in URP, a global Volume (ColorAdjustments, Tonemapping, Bloom, Vignette).
+- **Godot:** a WorldEnvironment (sky, depth fog, tone mapping, glow, adjustments).
+- **Unreal:** a SkyLight, an ExponentialHeightFog and an unbound PostProcessVolume.
+- The recorded session now carries the look, and each bridge's replay checks it.
+- **The Opus review's fixes:**
+  - Blender's fog is the mist pass in the compositor (a world volume had blacked out Cycles);
+  - Unreal adopts its look actors on reconnect;
+  - only the render camera's filters are sent, at every sync and when it changes or goes;
+  - colours are converted for Godot and Unity;
+  - the scene's own world, compositor and lighting are kept and restorable;
+  - Godot's depth fog is opaque by its end;
+  - skies are rebuilt only on a mode change.
+
+**Checked:**
+- `tests_round376`;
+- the recording's counts;
+- Blender's and Godot's smoke tests;
+- Unity's replay in a built-in and a URP project;
+- Unreal's replay in 5.8.
+
 ## 2026-11-01 (round 375): the round trip as a production
 
 **Asked:** Phase E's last round: a VRChat avatar package and a world kit through Blendity and back into Unity, then
@@ -3909,7 +4509,7 @@ own, a hotkey on anything, Store Config to share a layout") for Blendity, Unity'
 - Loading any UI file - the built-ins too - wiped the favorites, the Wheel's sets, the user actions and the panels
   even when the file carried none. A list is replaced only when the file has a line of its kind.
 - A cleared or replaced user action left its chords in the keymap's overrides, where the next new action picked them
-  up (Ctrl+Alt+K ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
+  up (Alt+B ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
 - Two uses after free: Assign Shortcut on a palette entry with no action passed the entry's name by reference into a
   call that rebuilds the palette (a long name read after its free); the My Tools grid read a panel and a palette
   entry after a button's command could have replaced them. The name is copied; the grid draws a copy of the entries

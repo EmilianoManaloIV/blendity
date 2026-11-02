@@ -8,7 +8,7 @@ Usage: py tools/hci_klm.py [docs/hci/klm.md] [--check]
        py tools/hci_klm.py docs/hci/compare-2026-10.md --compare [--check]
 
 --compare (round 350) reads a table of one task per row and a pair of cells per program - operators, then seconds -
-for Blendity, Blender, Unity, Godot and Unreal; "-" is a program that doesn't do the task. Each pair is recounted and
+for Blendity, Blender, Unity, Godot, Unreal and Adobe (round 387); "-" is a program that doesn't do the task. Each pair is recounted and
 each program's total printed.
 """
 import io
@@ -45,18 +45,23 @@ def rows(path):
         yield cells
 
 
-PROGRAMS = ["Blendity", "Blender", "Unity", "Godot", "Unreal"]
+# (Adobe, round 387: Photoshop, Fresco, Illustrator, Substance Painter, After Effects, Premiere)
+PROGRAMS = ["Blendity", "Blender", "Unity", "Godot", "Unreal", "Adobe"]
+FIRST_PROGRAMS = 5  # (round 350's table: a task row has at least these programs' cells)
 
 
 def compare(path, argv):
-    """The five-program table: each (operators, seconds) pair recounted; the totals per program."""
+    """The program table: each (operators, seconds) pair recounted; the totals per program. A row with fewer program
+    cells than PROGRAMS (a table from before a program was added) counts the missing ones as "-"; --check fails when no
+    row was read at all."""
     bad = 0
     totals = [0.0] * len(PROGRAMS)
     counts = [0] * len(PROGRAMS)
     timed = 0
     for cells in rows(path):
-        if len(cells) < 2 + 2 * len(PROGRAMS):
+        if len(cells) < 2 + 2 * FIRST_PROGRAMS:  # (not a task row: the findings table, others)
             continue
+        cells = cells + ["-"] * max(0, 2 + 2 * len(PROGRAMS) - len(cells))
         timed += 1
         for k, name in enumerate(PROGRAMS):
             ops, written = cells[2 + 2 * k], cells[3 + 2 * k]
@@ -71,7 +76,9 @@ def compare(path, argv):
     print("%d tasks: " % timed + ", ".join("%s %.2f s over %d" % (n, t, c) for n, t, c in zip(PROGRAMS, totals, counts)))
     if bad:
         print("%d cell(s) disagree with their operators" % bad)
-    return 1 if bad and "--check" in argv else 0
+    if not timed:
+        print("no task rows read from %s" % path)
+    return 1 if (bad or not timed) and "--check" in argv else 0
 
 
 def main(argv):

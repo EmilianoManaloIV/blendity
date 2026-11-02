@@ -137,6 +137,8 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"anim.prev_key", "Previous Key", "Animation", CTX_GLOBAL},
       {"anim.next_key", "Next Key", "Animation", CTX_GLOBAL},
       {"anim.record", "Record (keys from edits)", "Animation", CTX_GLOBAL},
+      {"seq.add_edit", "Add Edit at the Playhead (the Sequencer)", "Sequencer", CTX_GLOBAL},  // (round 391: Premiere's; Ctrl+K stays the palette)
+      {"seq.ripple", "Ripple Delete (the Sequencer)", "Sequencer", CTX_GLOBAL},
       /* Lighting */
       {"lighting.update", "Update Lighting", "Lighting", CTX_GLOBAL},
       /* Tools and transforms */
@@ -277,6 +279,8 @@ static void common_bindings(Keymap &k) {
   b("play.step", {"Ctrl+Alt+P"});
   b("anim.key", {"Shift+K"});  // (task 0258: Unity's Animation window keys with K; K is the Knife here, so Shift+K)
   b("anim.record", {"Ctrl+Shift+K"});
+  b("seq.add_edit", {"Alt+B"});
+  b("seq.ripple", {"Shift+Delete"});
   b("anim.prev_key", {","});
   b("anim.next_key", {"."});
   b("lighting.update", {"Ctrl+Shift+L"});
@@ -346,6 +350,8 @@ static void adobe_bindings(Keymap &k) {
   b("brush.erase", {"E"});
   b("tool.rotate", {});
   b("tool.move", {"V", "W"});  // (Photoshop's V; Unity's W kept)
+  b("tool.view", {"Q", "H"});  // (round 389: Photoshop's Hand tool is H; Unity's Q kept)
+  b("menu.wheel", {"Shift+Space"});  // (round 389: Space held is Photoshop's pan - the Wheel moves to Shift+Space)
 }
 
 Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
@@ -813,7 +819,7 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "menu.wheel" && (drag_ == Drag::Fly || in.down[1] || (playing_ && !paused_ && focused_ == WindowKind::Game)))
     return false;  // (flying, or a game taking Space)
   else if (id == "menu.wheel" && qm_.open) qm_.open = false;
-  else if (id == "menu.wheel" && pad_takes_space()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
+  else if (id == "menu.wheel" && pad_takes_space() && !in.shift()) pad_space_begin();  // (round 319: Space+drag pans the pad; a tap is the Wheel)
   else if (id == "menu.wheel") quick_menu_open(in.mx, in.my, false);  // (task 0230)
   else if (id == "edit.undo" && edit_window_has_mouse()) edit_doc_.undo();  // (the Editing window's own stack, task 0181)
   else if (id == "edit.redo" && edit_window_has_mouse()) edit_doc_.redo();
@@ -958,6 +964,9 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "anim.prev_key") anim_step_key(-1);
   else if (id == "anim.next_key") anim_step_key(1);
   else if (id == "anim.record") anim_toggle_record();
+  else if (id.rfind("seq.", 0) == 0 && !seq_hovered_) return false;  // (round 391: the Sequencer's keys act over it alone)
+  else if (id == "seq.add_edit") seq_blade(seqr_.frame, -1);
+  else if (id == "seq.ripple") seq_ripple(seqr_.selected_name);
   else return false;
   return true;
 }

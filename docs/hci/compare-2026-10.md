@@ -1,4 +1,4 @@
-# Blendity against Blender, Unity, Godot and Unreal: three productions (round 350, 2026-10-31)
+# Blendity against Blender, Unity, Godot, Unreal and Adobe: seven productions (round 350, 2026-10-31; Adobe added in round 387)
 
 **Asked (2026-10-31):** "Can we do another HCI analysis of the whole program, all tabs, several use cases. Comparing it
 to ease of use with Blender, Unity3D, Godot, and Unreal?" - then: make "a VRChat World" and "a VRChat avatar"
@@ -117,27 +117,155 @@ production ran it (`tests_round375`). Steps as the other tables count them.
 - None writes an edited prefab or scene back into another program's file.
 - Blendity's way back keeps that program's own data (GUIDs, Udon, VRChat's components, GDScript) intact.
 
-## KLM: ten tasks in five programs
+## E-H. Adobe's work in Blendity (round 387)
+
+**Asked (2026-10-31):** "consider the basic adobe suite in the HCI testing like the programs; fix all fixes" - the user
+chose Photoshop + Fresco, Substance Painter, Illustrator, and After Effects + Premiere.
+
+**Method:** as for A-C. The four productions were made headless with Blendity built on 2026-11-01 from rounds 351-386
+(the editor itself rebuilt: a review found the first run had used an editor from before round 364), each stage from an
+empty scratch project (`scratchpad/hci_D.json` to `hci_G.json`, run by `hci_prod.py` with `HCI_FRESH`; H with the build
+with Blender's libraries). Adobe's steps come from Adobe's own help pages where cited [A1-A11]; a step marked
+"(assumed)" is the usual path with no page found for it. No Adobe program was installed or run. Adobe is a sixth
+program in the KLM table (rows 5, 7, 10 and the new rows 11-20) and audience **A** in the findings.
+
+### E. A character illustration and concept sheet (Photoshop + Fresco)
+
+| Stage | Blendity (as made) | Photoshop / Fresco | Blendity's friction |
+|---|---|---|---|
+| E1 Canvas | Paper: New (Concept Sheet), Draw tab, Source > Paper (3) | File > New (2, assumed) | **A new paper isn't the Draw tab's canvas**: More > Paper > New Paper (and Open Paper) leave the Source on the Scene - strokes land on the 3D view, though New Paper's tooltip says "The pad shows it" |
+| E2 Layers and blend modes | Layers: add three, blend Multiply and Screen (6) | Layers panel: New Layer, the blend menu (6) [A3] | **Four blend modes** (Normal, Multiply, Screen, Overlay): `soft-light` refused; Photoshop has six groups of them (Normal, Darken, Lighten, Contrast, Comparative, HSL) [A3] |
+| E3 Linework | Inker brush, pressure, Ruler and Ellipse guides (6) | Brush tool with pressure; Fresco's live brushes and pressure curve (4) [A11] | Brushes as Photoshop's (pressure on size and opacity). A scripted stroke with the Ruler or Ellipse on drew only a tick (the guides shape a live drag), so these strokes don't stand for the GUI's |
+| E4 Colour, transform, selection | A colour stroke on the Color layer (3) | Ctrl+T free transform [A1]; Marquee / Lasso; Fill (5, assumed) | **No free transform, no selection, no fill** on a sketch layer or a paper |
+| E5 Masks | - | Alt+click for a clipping mask [A2]; a layer mask (2, assumed) | **No layer masks, no clipping masks** |
+| E6 Save, hand off | Paper: Save; More > Paper > Pin to the Board; Board: Export as PNG, transparent (4) | File > Export As PNG (2, assumed) | The PNG goes through the board (a paper has no Export of its own); `board all` isn't a verb (`board select`) |
+
+### F. Texturing the avatar (Substance Painter)
+
+| Stage | Blendity (as made) | Substance Painter | Blendity's friction |
+|---|---|---|---|
+| F1 The model in | Smart UV, New Surface (3) | New project with the mesh (2, assumed) | The surface's message says "Object > Bake Mesh Maps"; the menu is **GameObject** > Bake Mesh Maps |
+| F2 Mesh maps | Bake Mesh Maps on a worker (1) | F8, Bake selected textures (2) [A6] | The same maps (normal, AO, curvature, thickness), on a worker with the tray. In the run the bake was still going when the headless run ended, so the generators below read flat grey |
+| F3 Smart materials and masks | 7 built-in smart materials; 6 smart-mask presets (Edge Wear added) (4) | Smart materials and smart masks from the shelf (4, assumed) | Fewer presets than Substance's shelf (7 materials, 6 masks) |
+| F4 Hand painting | Paint: colour + roughness, a fill by object (720 triangles), a fill by material (5) | A paint layer; fills by mesh, UV island or Material ID (5, assumed) | The material fill needs a point on the model ("nothing of Sphere at (-417, -208)"): a click in the GUI |
+| F5 Export | Export Textures: Unity, Unreal, glTF (3) | File > Export Textures, an output template (4) [A6] | **No VRChat shader presets** (Poiyomi, lilToon); no packing named URP (the Unity packing is URP Lit's layout): gltf, unity, hdrp, unreal, separate |
+
+### G. A logo and vector shapes (Illustrator)
+
+| Stage | Blendity (as made) | Illustrator | Blendity's friction |
+|---|---|---|---|
+| G1 Artboard | A paper, Source > Paper (3) | New document with an artboard (2, assumed) | As E1 |
+| G2 Shapes | - | Rectangle (M), Ellipse, Polygon tools (3) [A4] | **No vector shapes on a paper**: `sketchcircle` and `sketchline` are refused there ("Paper isn't in the scene"), and Mesh > Draw's Rectangle makes 3D geometry |
+| G3 The pen | - | Pen tool (P): anchors and handles [A4] | **No Bezier pen** for 2D: the Curve object is 3D |
+| G4 Fill and stroke | - | Fill and Stroke (2, assumed) | **No fill**, no stroke settings on a shape |
+| G5 Export | Paper: Save; Pin to the Board; Board: Export as PNG (4) | Export As > SVG > SVG Options: OK (6) [A5] | **No SVG export (or import)**: `export` writes obj, fbx, glb, gltf, stl, ply, usda |
+
+### H. Editing and compositing the short film (After Effects + Premiere)
+
+| Stage | Blendity (as made) | Premiere / After Effects | Blendity's friction |
+|---|---|---|---|
+| H1 Footage in | A shot clip, a paper card and a WAV sound on the Sequencer (4) | Import; drag to the timeline (3, assumed) | **No video footage** on the Sequencer (images, papers, cameras and WAV sound only); a paper card takes its file path (`Assets/Papers/Title.paper`) - its name was refused ("no file Title") |
+| H2 Cuts | Trim a clip (1) | Ctrl+K add edit; Shift+Delete ripple delete [A7, A8] | **No blade cut and no ripple delete** |
+| H3 Over time | The Anime filter on the camera; a camera cut (3) | Keyframe Opacity (Alt+Shift+T), effects keyed [A9] | **No keyframed opacity or transform on cards**; camera filters can't be keyed per clip |
+| H4 Deliver | Render Camera Sequence; Render Animation, an MP4 by FFmpeg (libx264) in-process (2) | Ctrl+M Export, H.264 and other presets (3) [A7] | **No export presets** (H.264 / ProRes / VRChat's player): one MP4 setting |
+
+## After the fixes: all seven productions again (round 393)
+
+**Method:** as before - the same harness (`hci_prod.py`), each stage from an empty scratch project - with Blendity built
+on 2026-11-02 from rounds 351-392, with Blender's libraries. A, B and C ran their round-350 stage lists unchanged
+(`hci_A.json` to `hci_C.json`): the same commands, so what changed is the editor's answer. E to H ran stage lists
+rewritten as an expert makes them now (`hci_D_after.json` to `hci_G_after.json`): the verbs rounds 388-392 added in
+place of the ones that were refused. The editing production read a 1.2 s MP4 and a 2 s WAV made for it.
+
+| Production | Commands | Refused or no-op, before | After | What changed |
+|---|---|---|---|---|
+| A. VRChat avatar | 75 | 9 first pass, 2 after corrections | 2 | The two left are clicks the console can't place (a sculpt stroke and an island fill need a point on the model: the GUI's click). The export waits for the Quad Remesh still running (round 354) instead of taking the old mesh silently |
+| B. VRChat world | 51 | 4 | 5 | Generate Lighting with nothing marked now refuses with a Fix (round 362) where it had baked 0 objects silently; Update Lighting says Realtime GI is off (a notice, as before); `set Render.Width` and `set Render.Height` can't reach the render size (finding 30: two commands); the scatter dab needs the GUI's click |
+| C. Short film | 42 | 2 | 0 | Puppet Posing, the cards and the cut all answered |
+| E. Illustration (Photoshop + Fresco) | 34 | 7 frictions | 0 | Paper as the canvas, Soft Light, free transform, a selection's fill, a clipping mask and a layer mask all ran |
+| F. Texturing (Substance) | 24 | 4 frictions | 1 | The one: an ID mask set before the background bake landed (a headless run doesn't wait: the GUI's Bake All Maps loads them when they land) |
+| G. Logo (Illustrator) | 22 | 5 frictions | 0 | Shapes, the Pen, fill and stroke, Restyle, an artboard, SVG out and back in |
+| H. Editing (After Effects + Premiere) | 24 | 4 frictions | 0 | Footage, a paper card by name, Add Edit, Ripple Delete, a keyed fade and scale, VRChat's MP4 |
+
+**The avatar measured again** (`hci_glb.py`, the same round-350 stage list):
+
+| Limit | Before | After |
+|---|---|---|
+| Triangles (PC Good 70,000) | 76,796 | 76,796 - the export now waited for the Quad Remesh (round 354); the stage list's DynaMesh is the mesh that went. The Profiler's Budget (round 355) names it and Decimate to Good fixes it: the stage list predates both |
+| Skinned meshes | 1 | 2 |
+| Shape keys in the file | 0 | 10 (the stage list's five per mesh: `vrc.v_aa`, `oh`, `ch`, `sil`, Blink); `visemes` (round 356) makes all 15 |
+| Textures in the file | 0 | 3 (round 353) |
+
+**The rerun found two bugs, fixed in this round:** a new paper's SVG export wrote no layer (a paper lists no layer -
+its strokes are layer 0's), and console coordinates on a paper before the Draw tab's pad had been drawn read each pixel
+as a whole view height (an artboard came out a thousand times too large). Both have tests.
+
+**The findings now** (the rounds that fixed them):
+
+| # | Status |
+|---|---|
+| 1 shape keys exported | Fixed, round 351 |
+| 2 textures in the .glb | Fixed, round 353 |
+| 3 performance budget | Fixed, round 355 |
+| 4 viseme preset | Fixed, round 356 (and the Avatar window, 357-361) |
+| 5 export during a remesh | Fixed, round 354 (seen in A above) |
+| 6 video in the dependency-free build | Fixed, round 366 |
+| 7, 8, 12, 15 create, names, Walk Cycle, Join | Fixed, round 367 |
+| 9 Generate Lighting's reason | Fixed, round 362 (seen in B above) |
+| 10 LODs and colliders | Fixed, rounds 362-363 |
+| 11 papers and audio on the Sequencer | Fixed, rounds 364-365 |
+| 13 the Console | Mostly fixed, round 367 - `set` still can't reach the render size (finding 30) |
+| 14 the rig fitted to the mesh | Fixed, round 356 |
+| 16 free transform | Fixed, round 389 |
+| 17-20 blend modes, masks, selections, paper as canvas | Fixed, round 388 |
+| 21-22 vector shapes, the Pen, SVG | Fixed, round 390 (and round 393's two bugs) |
+| 23-25, 27 footage, cuts, keyed cards, presets, paper by name | Fixed, round 391 |
+| 26, 29 shader presets, the menu's name | Fixed, round 392 |
+| 28 sub-verb warnings | Fixed, round 388 |
+| **30 (new)** `set Render.Width` / `Height` refused: the render size is in the Render window only | Open: severity 1, B U - a small fix for the next plan |
+
+## KLM: twenty tasks in six programs (Adobe added in round 387)
 
 Seconds by the operators (rules in `klm.md`); "-" where the program doesn't do it (made in a DCC, or not documented).
 
-| # | Task | Blendity | s | Blender | s | Unity | s | Godot | s | Unreal | s |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | Add a cube | M, P, BB (GameObject), P (3D Object), P, BB (Cube) | 5.05 | M, H, 2K (Shift+A), H, P (Mesh), P, BB (Cube) | 4.95 | M, P, BB (GameObject), P (3D Object), P, BB (Cube) | 5.05 | M, H, 2K (Ctrl+A), M, 6K (MeshIn), K (Enter), H, P, BB (Mesh), P, BB (New BoxMesh) | 7.9 | M, P, BB (Quick Add), P (Shapes), P, BB (Cube) | 5.05 |
-| 2 | Assign a material to an object | M, P, B, P, B (drag the material onto it) | 3.75 | M, P, BB (Material Properties), P, BB (Browse), P, BB (the material) | 5.25 | M, P, B, P, B (drag from Project) | 3.75 | M, P, B, P, B (drag onto Surface Material Override) | 3.75 | M, P, B, P, B (drag from the Content Browser) | 3.75 |
-| 3 | Bind a mesh to its skeleton with automatic weights | M, P, BB (the mesh), P, BB (Skeleton), P, BB (the armature), P, BB (Bind) | 6.55 | M, P, BB (the mesh), P, K, BB (Shift+click the armature), 2K (Ctrl+P), P, BB (With Automatic Weights) | 5.85 | - | - | - | - | - | - |
-| 4 | Add a shape key (blend shape) | M, P, BB (Add Shape Key) | 2.65 | M, P, BB (Object Data), P, BB, BB (+ twice: Basis, then the key) | 4.15 | - | - | - | - | - | - |
-| 5 | Key the selected object's transform | M, H, 2K (Shift+K) | 2.15 | M, H, K (I) | 1.95 | M, H, K (K, the Animation window focused) | 1.95 | M, P, BB (the key icon beside the property) | 2.65 | M, H, K (S in Sequencer) | 1.95 |
-| 6 | Render a still from the camera | M, H, K (F12) | 1.95 | M, H, K (F12) | 1.95 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Image Sequence), P, BB (Start Recording) | 10.05 | - | - | M, P, BB (the viewport menu), P, BB (High Resolution Screenshot), P, BB (Capture) | 5.25 |
-| 7 | Render the animation to a video file | M, H, 2K (Ctrl+F12; an MP4 in the libraries' build) | 2.15 | M, P, BB (Output Properties), P, BB (File Format), P, BB (FFmpeg Video), M, H, 2K (Ctrl+F12) | 7.4 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Movie), P, BB (Start Recording) | 10.05 | M, P, BB (Movie Maker), M, H, K (F5) | 4.6 | M, P, BB (Render), P, BB (Movie Render Queue), P, BB (+ Setting), P, BB (an encoder), P, BB (Render (Local)) | 7.85 |
-| 8 | Bake the level's lightmaps (one object marked) | M, P, BB (Contribute GI), M, P, BB (Window), P, BB (Lighting), P, BB (Generate Lighting) | 7.9 | - | - | M, P, BB (Static), M, P, BB (Window), P (Rendering), P, BB (Lighting), P, BB (Generate Lighting) | 9 | M, P, BB (Static Lightmaps), P, BB (Reimport), M, H, 2K (Ctrl+A), M, 9K (LightmapGI), K (Enter), H, P, BB (Bake Lightmaps) | 11.15 | M, P, BB (Build), P, BB (Build Lighting Only) | 3.95 |
-| 9 | Export the character as FBX | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export) | 6.35 | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export FBX) | 6.35 | - | - | - | - | - | - |
-| 10 | Find any command by name | M, H, 2K (Ctrl+K), 6K (a word), K (Enter) | 3.55 | M, H, K (F3), 6K, K (Enter) | 3.35 | M, H, 2K (Ctrl+K), 6K, K (Enter) | 3.55 | M, H, 3K (Ctrl+Shift+P), 6K, K (Enter) | 3.75 | - | - |
+| # | Task | Blendity | s | Blender | s | Unity | s | Godot | s | Unreal | s | Adobe | s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | Add a cube | M, P, BB (GameObject), P (3D Object), P, BB (Cube) | 5.05 | M, H, 2K (Shift+A), H, P (Mesh), P, BB (Cube) | 4.95 | M, P, BB (GameObject), P (3D Object), P, BB (Cube) | 5.05 | M, H, 2K (Ctrl+A), M, 6K (MeshIn), K (Enter), H, P, BB (Mesh), P, BB (New BoxMesh) | 7.9 | M, P, BB (Quick Add), P (Shapes), P, BB (Cube) | 5.05 | - | - |
+| 2 | Assign a material to an object | M, P, B, P, B (drag the material onto it) | 3.75 | M, P, BB (Material Properties), P, BB (Browse), P, BB (the material) | 5.25 | M, P, B, P, B (drag from Project) | 3.75 | M, P, B, P, B (drag onto Surface Material Override) | 3.75 | M, P, B, P, B (drag from the Content Browser) | 3.75 | - | - |
+| 3 | Bind a mesh to its skeleton with automatic weights | M, P, BB (the mesh), P, BB (Skeleton), P, BB (the armature), P, BB (Bind) | 6.55 | M, P, BB (the mesh), P, K, BB (Shift+click the armature), 2K (Ctrl+P), P, BB (With Automatic Weights) | 5.85 | - | - | - | - | - | - | - | - |
+| 4 | Add a shape key (blend shape) | M, P, BB (Add Shape Key) | 2.65 | M, P, BB (Object Data), P, BB, BB (+ twice: Basis, then the key) | 4.15 | - | - | - | - | - | - | - | - |
+| 5 | Key the selected object's transform | M, H, 2K (Shift+K) | 2.15 | M, H, K (I) | 1.95 | M, H, K (K, the Animation window focused) | 1.95 | M, P, BB (the key icon beside the property) | 2.65 | M, H, K (S in Sequencer) | 1.95 | M, H, 9K (After Effects: Alt+Shift+P, Alt+Shift+R, Alt+Shift+S - Position, Rotation, Scale) [A9] | 3.55 |
+| 6 | Render a still from the camera | M, H, K (F12) | 1.95 | M, H, K (F12) | 1.95 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Image Sequence), P, BB (Start Recording) | 10.05 | - | - | M, P, BB (the viewport menu), P, BB (High Resolution Screenshot), P, BB (Capture) | 5.25 | - | - |
+| 7 | Render the animation to a video file | M, H, 2K (Ctrl+F12; an MP4 in the libraries' build) | 2.15 | M, P, BB (Output Properties), P, BB (File Format), P, BB (FFmpeg Video), M, H, 2K (Ctrl+F12) | 7.4 | M, P, BB (Window), P (General), P (Recorder), P, BB (Recorder Window), P, BB (Add Recorder), P, BB (Movie), P, BB (Start Recording) | 10.05 | M, P, BB (Movie Maker), M, H, K (F5) | 4.6 | M, P, BB (Render), P, BB (Movie Render Queue), P, BB (+ Setting), P, BB (an encoder), P, BB (Render (Local)) | 7.85 | M, H, 2K (Premiere: Ctrl+M, Export Media), H, P, BB (Export) [A7] | 3.85 |
+| 8 | Bake the level's lightmaps (one object marked) | M, P, BB (Contribute GI), M, P, BB (Window), P, BB (Lighting), P, BB (Generate Lighting) | 7.9 | - | - | M, P, BB (Static), M, P, BB (Window), P (Rendering), P, BB (Lighting), P, BB (Generate Lighting) | 9 | M, P, BB (Static Lightmaps), P, BB (Reimport), M, H, 2K (Ctrl+A), M, 9K (LightmapGI), K (Enter), H, P, BB (Bake Lightmaps) | 11.15 | M, P, BB (Build), P, BB (Build Lighting Only) | 3.95 | - | - |
+| 9 | Export the character as FBX | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export) | 6.35 | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export FBX) | 6.35 | - | - | - | - | - | - | - | - |
+| 10 | Find any command by name | M, H, 2K (Ctrl+K), 6K (a word), K (Enter) | 3.55 | M, H, K (F3), 6K, K (Enter) | 3.35 | M, H, 2K (Ctrl+K), 6K, K (Enter) | 3.55 | M, H, 3K (Ctrl+Shift+P), 6K, K (Enter) | 3.75 | - | - | M, H, 2K (Photoshop: Ctrl+F, Discover), 6K, K (Enter) [A10] | 3.55 |
+| 11 | Scale a layer's drawing up (free transform, a corner drag) | M, H, 2K (Ctrl+T), H, P, B, P, B (a corner), H, K (Enter) | 5.55 | - | - | - | - | - | - | - | - | M, H, 2K (Photoshop: Ctrl+T), H, P, B, P, B (a corner), H, K (Enter) [A1] | 5.55 |
+| 12 | Set a layer's blend mode to Multiply | M, P, BB (the layer's blend list), P, BB (Multiply) | 3.95 | - | - | - | - | - | - | - | - | M, P, BB (Photoshop: the Layers panel's blend menu), P, BB (Multiply) [A3] | 3.95 |
+| 13 | Clip a layer to the one below | M, P, BB (right-click the layer's row), P, BB (Create Clipping Mask) | 3.95 | - | - | - | - | - | - | - | - | M, P, K, BB (Photoshop: Alt+click the border between them) [A2] | 2.85 |
+| 14 | Draw a rectangle on the artboard (paper) | M, P, BB (More), P (Shapes), P, BB (Rectangle), P, B, P, B (a drag on the pad) | 7.45 | - | - | - | - | - | - | - | - | M, H, K (Illustrator: M, the Rectangle tool), H, P, B, P, B [A4] | 4.75 |
+| 15 | Export the artwork as SVG | M, P, BB (Window), P, BB (Console), M, H, 26K (`sketch svg export logo.svg`), K (Enter) | 11.1 | - | - | - | - | - | - | - | - | M, P, BB (File), P (Export), P, BB (Export As), P, BB (SVG), P, BB (Export), P, BB (SVG Options: OK) [A5] | 8.95 |
+| 16 | Bake the mesh maps | M, P, BB (Textures: Bake All Maps - baked and loaded) | 2.65 | - | - | - | - | - | - | - | - | M, H, K (Substance Painter: F8, Bake mode), H, P, BB (Bake selected textures) [A6] | 3.65 |
+| 17 | Export the texture set for Unity | M, P, BB (Textures: Export Textures...), P, BB (Packing), P, BB (Unity), P, BB (Export) | 6.55 | - | - | - | - | - | - | - | - | M, H, 3K (Substance Painter: Ctrl+Shift+E), H, P, BB (Output template), P, BB (Unity), P, BB (Export) [A6] | 6.65 |
+| 18 | Cut the clip at the playhead | M, H, 2K (Alt+B, Add Edit) | 2.15 | - | - | - | - | - | - | - | - | M, H, 2K (Premiere: Ctrl+K, Add Edit) [A7] | 2.15 |
+| 19 | Ripple delete a clip | M, P, BB (the bar), H, 2K (Shift+Delete) | 3.45 | - | - | - | - | - | - | - | - | M, P, BB (the clip), H, 2K (Premiere: Shift+Delete) [A7, A8] | 3.45 |
+| 20 | Key a layer's opacity | M, P, BB (Window), P, BB (Console), M, H, 25K (`seq key Title opacity 0 0`), K (Enter) | 10.9 | - | - | - | - | - | - | - | - | M, P, BB (After Effects: the layer), H, 3K (Alt+Shift+T) [A9] | 3.65 |
 
 **Reading it:** where both do the task, Blendity is within 0.2 s of Blender on the modeling and keying rows (1, 3,
 5, 9, 10) and faster where Blender goes through a properties tab (2, 4, 7). Against the engines it matches Unity's
 drag-and-drop (2) and beats Unity's and Unreal's stills and videos (6, 7) - the engines render through a recorder.
 Unreal's one-menu lighting build (8) is the fastest of all. Row 7's 2.15 s holds in the build with Blender's libraries (corrected in round 366).
+
+**Adobe's rows, as round 387 read them:** where both do the task, Blendity matches Photoshop's blend menu (12) and
+Substance's texture export (17, 6.55 s against 6.65 s) and was 1.6 s slower to bake mesh maps (16: a menu and a dialog,
+5.25 s, against F8 - row 16 now holds round 392's Bake All Maps); keying the whole transform (5) is 1.4 s quicker than After Effects' three property chords. Rows 11, 13, 14, 15, 18, 19 and 20 are tasks Blendity can't do yet: free transform, clipping masks, a vector
+rectangle on a paper, SVG export, a blade cut, a ripple delete and keyed opacity - rounds 388-391 added them.
+
+**After the fixes (round 393):** Blendity now does all twenty. It matches Photoshop's free transform (11) and Premiere's
+Add Edit and Ripple Delete (18, 19), bakes mesh maps 1 s quicker than Substance's F8 (16: Bake All Maps loads them
+too), and is 1.1 s slower to clip a layer (13: a row's menu against Alt+click) and 2.7 s slower to draw a rectangle
+(14: a menu path against Illustrator's M). SVG export and a keyed opacity (15, 20) are console lines, 2.2 s and 7.3 s
+slower than Illustrator's dialog and After Effects' chord: a menu item or a key for each would close the gap.
 
 ## Verdict per audience
 
@@ -146,11 +274,13 @@ Unreal's one-menu lighting build (8) is the fastest of all. Row 7's 2.15 s holds
 | Blender | Same: the operators and many shortcuts match (Blender preset) | Easier: Puppet Posing, Motion Check, FK / IK matched | Same (video: the libraries' build, corrected in round 366) | **Harder**: no shape keys or painted textures in the export |
 | Unity | Easier than Unity alone (it has none); the Unity preset keeps its keys | Easier than Unity's Animation window | Easier (F12 vs the Recorder) | **Harder for avatars** (visemes lost); same for props |
 | Godot | Easier (Godot models nothing beyond CSG) | Easier | Easier | Same (glTF is Godot's own route) |
+| Adobe (round 387) | Painting a model's texture set: close to Substance (mesh maps, smart materials and masks, generators, paint channels; fewer presets); 2D illustration: **harder** - four blend modes, no free transform, selections or masks; vector work: **not possible** | - | Stills the same (F12); video one MP4 setting, no presets or editing (cuts, footage, keyed cards) | Texture sets out for Unity, Unreal and glTF; no URP or VRChat-shader presets; no SVG |
 | Unreal | Easier than Modeling Mode for organic work | Same as Control Rig for posing; easier for a first walk | Same | Harder for worlds: Unreal makes LODs and collision on import, Blendity hands neither over |
 
 ## Heuristic findings (Nielsen), ranked
 
-Severity 0-4 by how many users it stops and how often. Audiences: B Blender, U Unity, G Godot, R Unreal.
+Severity 0-4 by how many users it stops and how often. Audiences: B Blender, U Unity, G Godot, R Unreal, A Adobe
+(round 387).
 
 | # | Finding | Heuristic | Sev. | Hits | Where | Fits |
 |---|---|---|---|---|---|---|
@@ -169,6 +299,33 @@ Severity 0-4 by how many users it stops and how often. Audiences: B Blender, U U
 | 13 | The Console's `help` lists about 25 of ~200 verbs; there is no `save`/`open` scene verb; `set` can't reach Transform; no rotate or scale verb; `saverender` ignores a path; a relative export path is the working folder's, not the project's | 10 Help and documentation / 4 Consistency | 2 | scripting users | `editor_commands.cpp:1192` | One console round |
 | 14 | The humanoid preset rig isn't fitted to a selected mesh (Auto-Rig is) | 6 Recognition | 1 | U | `ik.cpp:400` | Small: fit to the selection's bounds |
 | 15 | Join refuses when the last-selected object isn't a mesh, after Select All | 5 Error prevention | 1 | B U | `object_ops.cpp` | Small: take the last mesh |
+
+**Added in round 387 (Adobe):**
+
+| # | Finding | Heuristic | Sev. | Hits | Where | Fits |
+|---|---|---|---|---|---|---|
+| 16 | No free transform (Ctrl+T: scale, rotate, skew, distort) on a sketch layer or a paper | 4 Consistency / 7 Flexibility | 3 | A | `sketch_layers.cpp` | Round 388 |
+| 17 | Four blend modes on sketch layers (Photoshop has six groups of them) | 4 Consistency | 2 | A | `sketch_layers.cpp:21` | Round 388 |
+| 18 | No layer masks and no clipping masks | 7 Flexibility | 3 | A | `sketch_layers.cpp` | Round 388 |
+| 19 | No pixel selections (marquee, lasso) and no fill on a layer | 7 Flexibility | 3 | A | - | Round 388 |
+| 20 | More > Paper > New Paper and Open Paper (and `paper new` / `paper open`) don't make the paper the Draw tab's canvas: strokes land on the 3D scene, though New Paper's tooltip says "The pad shows it" (only the board's double-click switches) | 1 Visibility | 2 | A | `paper.cpp:304-310`, `sketch_pad.cpp:703` | Small fix: a new or opened paper becomes the Draw tab's source |
+| 21 | No vector shapes, Bezier pen, fills or strokes on a paper (Mesh > Draw's shapes are 3D) | 7 Flexibility | 3 | A | - | Round 389 |
+| 22 | No SVG export or import | 7 Flexibility | 3 | A | `scene/export.cpp` | Round 389 |
+| 23 | No video footage on the Sequencer, no blade cut, no ripple delete | 7 Flexibility | 3 | A B | `seq_cards.cpp` | Round 390 |
+| 24 | No keyframed opacity or transform on Sequencer cards; filters can't be keyed per clip | 7 Flexibility | 2 | A | `seq_cards.cpp` | Round 390 |
+| 25 | No video export presets (H.264, ProRes, VRChat's player) | 7 Flexibility | 2 | A U | `render_animation.cpp` | Round 390 |
+| 26 | Texture export has no VRChat-shader presets (Poiyomi, lilToon) and no packing named URP (the Unity packing is URP Lit's layout) | 7 Flexibility | 2 | A U | `paint.cpp:1673` | Round 391 |
+| 27 | A Sequencer paper card takes the paper's file path, not its name | 6 Recognition | 1 | A | `seq_cards.cpp:171` | Small fix: take a paper's name |
+| 28 | An unknown sub-verb (`sketch transform`, `sketch layer clip`) answers with a usage line as information, not a warning | 9 Error recovery | 1 | all | `sketch_tool.cpp`, `sketch_layers.cpp:397` | Small fix: warn and name the verb |
+| 29 | Messages and lessons send to "Object > Bake Mesh Maps"; the menu is GameObject | 4 Consistency | 1 | all | `surface_ui.cpp:44`, `panels.cpp:4141`, `lessons.cpp` | Small fix: the menu's name |
+
+**Added in round 393 (the rerun):**
+
+| # | Finding | Heuristic | Sev. | Hits | Where | Fits |
+|---|---|---|---|---|---|---|
+| 30 | `set Render.Width` / `Height` are refused: the render size lives in the Render window only, out of the console's reach | 7 Flexibility | 1 | B U | `editor_commands.cpp` (`set`) | The next plan: a small fix |
+
+(The "Fits" column above is the plan as round 387 wrote it; the rounds that did the work are in "After the fixes".)
 
 **Fixed in this pass** (found by making the film, a bug in round 347's own line): after Puppet Posing drew the left hand
 across the chest, the Inspector said "The left hand is on the right" on Blendity's own humanoid preset. Round 349
@@ -212,3 +369,14 @@ walkthroughs ended at the export without measuring what the file carried).
 - [V1] VRChat: Avatar Performance Ranking - https://creators.vrchat.com/avatars/avatar-performance-ranking-system/
 - [V2] VRChat wiki: Visemes - https://wiki.vrchat.com/wiki/Visemes ; Avatar Descriptor - https://wiki.vrchat.com/wiki/Avatar_Descriptor
 - [V3] VRChat: making a world public - https://creators.vrchat.com/worlds/submitting-a-world-to-be-made-public/
+- [A1] Photoshop: Free Transform (Ctrl+T) - https://helpx.adobe.com/photoshop/using/free-transformations-images-shapes-paths.html
+- [A2] Photoshop: clipping masks - https://helpx.adobe.com/photoshop/desktop/create-masks/layer-masks/create-and-manage-clipping-masks.html
+- [A3] Photoshop: layer opacity and blending modes - https://helpx.adobe.com/photoshop/using/layer-opacity-blending.html ; blending mode descriptions - https://helpx.adobe.com/photoshop/desktop/repair-retouch/adjust-light-tone/blending-mode-descriptions.html
+- [A4] Illustrator: default keyboard shortcuts (Rectangle M, Pen P) - https://helpx.adobe.com/illustrator/using/default-keyboard-shortcuts.html ; Pen tool - https://helpx.adobe.com/illustrator/using/tool-techniques/pen-tool.html
+- [A5] Illustrator: export artwork (Export As, SVG) - https://helpx.adobe.com/illustrator/using/exporting-artwork.html
+- [A6] Substance 3D Painter: baking mesh maps - https://helpx.adobe.com/substance-3d-painter/baking/how-to-bake-mesh-maps.html ; Export (Ctrl+Shift+E, output templates) - https://helpx.adobe.com/substance-3d-painter/getting-started/export.html
+- [A7] Premiere: default keyboard shortcuts (Add Edit Ctrl+K, Export Media Ctrl+M) - https://helpx.adobe.com/premiere/desktop/get-started/keyboard-shortcuts/default-keyboard-shortcuts.html ; export video - https://helpx.adobe.com/premiere/desktop/render-and-export/export-files/export-video.html
+- [A8] Premiere: ripple delete - https://helpx.adobe.com/premiere/desktop/edit-projects/change-clip-sequence/remove-clips-from-a-sequence.html
+- [A9] After Effects: keyboard shortcuts (T, Alt+Shift+property) - https://helpx.adobe.com/after-effects/desktop/get-started/keyboard-shortcuts/keyboard-shortcuts-reference.html ; animation basics - https://helpx.adobe.com/after-effects/using/animation-basics.html
+- [A10] Photoshop: the Discover panel (Ctrl+F) - https://helpx.adobe.com/photoshop/desktop/get-started/learn-the-basics/access-discover-panel.html
+- [A11] Fresco: live brushes - https://helpx.adobe.com/fresco/using/live-brushes.html ; pressure curve - https://helpx.adobe.com/fresco/desktop/draw-paint-animate-and-share/pressure-curve.html

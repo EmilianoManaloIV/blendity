@@ -16,6 +16,9 @@ namespace Blendity.LiveLink
         public float[] Uvs;         // u, v per vertex
         public int[] VertexOf;      // each vertex's mesh vertex (what a deform's positions are indexed by)
         public int[] NormalGroup;   // vertices that share a mesh vertex and had the same normal: one smooth normal
+        public float[] Joints, Weights;  // (round 378) four per vertex, when the mesh is skinned
+        public float[] InverseBinds;     // (round 378) 16 per joint, glTF's (column-major, its axes)
+        public readonly List<float[]> Targets = new List<float[]>();  // (round 378) each morph target's offsets per vertex (Unity's axes)
         public readonly List<int[]> Submeshes = new List<int[]>();  // triangles, clockwise (Unity's front)
         public readonly List<int> Slots = new List<int>();          // each submesh's material slot
         public int VertexCount { get { return Positions.Length / 3; } }
@@ -23,7 +26,7 @@ namespace Blendity.LiveLink
 
     public static class GlbReader
     {
-        static readonly Dictionary<string, int> Count = new Dictionary<string, int> { { "SCALAR", 1 }, { "VEC2", 2 }, { "VEC3", 3 }, { "VEC4", 4 } };
+        static readonly Dictionary<string, int> Count = new Dictionary<string, int> { { "SCALAR", 1 }, { "VEC2", 2 }, { "VEC3", 3 }, { "VEC4", 4 }, { "MAT4", 16 } };
 
         public static void Parse(byte[] glb, out Dictionary<string, object> doc, out byte[] bin)
         {
@@ -59,8 +62,9 @@ namespace Blendity.LiveLink
             int count = (int)a.GetNumber("count"), type = (int)a.GetNumber("componentType");
             int start = (int)view.GetNumber("byteOffset") + (int)a.GetNumber("byteOffset");
             var r = new float[count * n];
-            for (int i = 0; i < r.Length; i++)
-                r[i] = type == 5126 ? BitConverter.ToSingle(bin, start + i * 4) : BitConverter.ToUInt32(bin, start + i * 4);
+            for (int i = 0; i < r.Length; i++)  // (round 378: bytes and shorts too - a skin's joints)
+                r[i] = type == 5126 ? BitConverter.ToSingle(bin, start + i * 4) : type == 5125 ? BitConverter.ToUInt32(bin, start + i * 4)
+                     : type == 5123 ? BitConverter.ToUInt16(bin, start + i * 2) : bin[start + i];
             return r;
         }
 
@@ -82,6 +86,12 @@ namespace Blendity.LiveLink
             mesh.Uvs = uv.ToArray();
             mesh.VertexOf = vof.ToArray();
             mesh.NormalGroup = NormalGroups(mesh);
+            var skins = doc.GetList("skins");
+            if (skins != null && skins.Count > 0)
+            {
+                int n;
+                mesh.InverseBinds = Floats(doc, bin, (int)((Dictionary<string, object>)skins[0]).GetNumber("inverseBindMatrices"), out n);
+            }
             return mesh;
         }
 
@@ -95,6 +105,7 @@ namespace Blendity.LiveLink
             float[] nm = at.Get("NORMAL") != null ? Floats(doc, bin, (int)at.GetNumber("NORMAL"), out n) : new float[verts * 3];
             float[] t = at.Get("TEXCOORD_0") != null ? Floats(doc, bin, (int)at.GetNumber("TEXCOORD_0"), out n) : new float[verts * 2];
             float[] v = at.Get("_VERT") != null ? Floats(doc, bin, (int)at.GetNumber("_VERT"), out n) : null;
+            ReadSkinAndTargets(doc, bin, prim, at, mesh, verts);
             for (int i = 0; i < verts; i++)
             {
                 pos.Add(-p[i * 3]); pos.Add(p[i * 3 + 1]); pos.Add(p[i * 3 + 2]);
@@ -113,6 +124,38 @@ namespace Blendity.LiveLink
             mesh.Submeshes.Add(tris);
             var extras = prim.GetDict("extras");
             mesh.Slots.Add(extras != null ? (int)extras.GetNumber("slot") : mesh.Slots.Count);
+        }
+
+        /// <summary>Round 378: a primitive's joints and weights (four per vertex) and its morph targets' offsets, appended
+        /// to the mesh's (its primitives in order, as the positions are).</summary>
+        static void ReadSkinAndTargets(Dictionary<string, object> doc, byte[] bin, Dictionary<string, object> prim, Dictionary<string, object> at, GlbMesh mesh, int verts)
+        {
+            int n;
+            if (at.Get("JOINTS_0") != null && at.Get("WEIGHTS_0") != null)
+            {
+                mesh.Joints = Append(mesh.Joints, Floats(doc, bin, (int)at.GetNumber("JOINTS_0"), out n));
+                mesh.Weights = Append(mesh.Weights, Floats(doc, bin, (int)at.GetNumber("WEIGHTS_0"), out n));
+            }
+            var targets = prim.GetList("targets");
+            for (int t = 0; targets != null && t < targets.Count; t++)
+            {
+                var d = Floats(doc, bin, (int)((Dictionary<string, object>)targets[t]).GetNumber("POSITION"), out n);
+                for (int i = 0; i < verts; i++)
+                    d[i * 3] = -d[i * 3];  // (glTF's axes to Unity's: X mirrored)
+                if (mesh.Targets.Count <= t)
+                    mesh.Targets.Add(new float[0]);
+                mesh.Targets[t] = Append(mesh.Targets[t], d);
+            }
+        }
+
+        static float[] Append(float[] a, float[] b)
+        {
+            if (a == null)
+                return b;
+            var r = new float[a.Length + b.Length];
+            a.CopyTo(r, 0);
+            b.CopyTo(r, a.Length);
+            return r;
         }
 
         /// <summary>Each vertex's group: the first vertex with its mesh vertex and its normal (a split by UV alone stays

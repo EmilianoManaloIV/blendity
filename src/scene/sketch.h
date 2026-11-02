@@ -51,11 +51,37 @@ struct SketchStroke {
   float opacity = 1.0f, soft = 0.0f;
   int pressure_to = 1;
   float min_size = 0.0f;
+  bool filled = false;  // (round 388: a closed shape filled with the colour - a selection's Fill - not a line along it)
+  /* Round 390 (task 0367): a closed shape's fill (0xAARRGGBB, 0 none), drawn under its line (a width of 0: no line),
+   * and the Pen's path - an anchor, its in-handle and its out-handle each, in the canvas's frame; pts are its samples. */
+  uint32_t fill = 0;
+  std::vector<Vec2> bez;
   /* The fit's parameters, in the canvas's frame (an arc, an ellipse): the centre, the radii, the first axis's angle,
    * where the arc starts and how far it sweeps (radians, counter-clockwise on a y-down canvas is negative). */
   Vec2 center;
   float rx = 0.0f, ry = 0.0f, angle = 0.0f, start = 0.0f, sweep = 0.0f;
 };
+
+/* A layer mask (round 388, task 0365): shapes in the canvas's frame (a selection's outline each) that reveal the layer
+ * inside them; `invert` hides it there instead; off, the layer shows whole. Photoshop: a layer mask made from a
+ * selection (Reveal Selection / Hide Selection). */
+struct SketchMask {
+  bool on = false, invert = false, enabled = true;
+  std::vector<std::vector<Vec2>> shapes;
+  bool shows_all() const { return !on || !enabled; }
+};
+
+/* Photoshop's blend modes in its menu's order (round 388): the first four are task 0234's, kept at their numbers. */
+enum SketchBlend {
+  kSketchNormal, kSketchMultiply, kSketchScreen, kSketchOverlay, kSketchDissolve, kSketchDarken, kSketchColorBurn, kSketchLinearBurn,
+  kSketchDarkerColor, kSketchLighten, kSketchColorDodge, kSketchLinearDodge, kSketchLighterColor, kSketchSoftLight, kSketchHardLight,
+  kSketchVividLight, kSketchLinearLight, kSketchPinLight, kSketchHardMix, kSketchDifference, kSketchExclusion, kSketchSubtract, kSketchDivide,
+  kSketchHue, kSketchSaturation, kSketchColor, kSketchLuminosity, kSketchBlendCount
+};
+const char *sketch_blend_name(int mode);
+int sketch_blend_index(const std::string &name);  // (any case; spaces and dashes ignored: "soft-light", "Soft Light"); -1 none
+/* The mode's colour of source `s` over backdrop `d` (0xAARRGGBB, as the frame keeps them), alpha left out. */
+uint32_t sketch_blend_rgb(uint32_t d, uint32_t s, int mode);
 
 struct SketchLayer {
   std::string name = "Layer";
@@ -69,10 +95,21 @@ struct SketchLayer {
   /* The Layers panel (task 0234): a locked layer takes no stroke and no erase; the blend mode and the opacity
    * composite the layer over what is under it, as Photoshop composites; a group is a layer holding others. */
   bool locked = false;
-  int blend = 0;     // 0 Normal, 1 Multiply, 2 Screen, 3 Overlay
+  int blend = 0;     // SketchBlend
   int group = -1;    // the index of the group layer it sits in, -1 none
   bool is_group = false;
-  bool plain() const { return visible && opacity == 1.0f && correct == 2 && name == "Layer" && !locked && blend == 0 && group < 0 && !is_group; }
+  bool clip = false;  // (round 388: a clipping mask - shown only where the nearest unclipped layer under it is)
+  SketchMask mask;
+  bool plain() const {
+    return visible && opacity == 1.0f && correct == 2 && name == "Layer" && !locked && blend == 0 && group < 0 && !is_group && !clip && !mask.on;
+  }
+};
+
+/* An artboard (round 390, task 0367): a named rectangle of the picture plane an SVG export can be cut to
+ * (Illustrator's), in the canvas's frame. */
+struct SketchArtboard {
+  std::string name;
+  Vec2 lo, hi;
 };
 
 /* The scene's sketch: its layers and strokes, and the perspective guide - saved with the scene, since its vanishing
@@ -82,6 +119,7 @@ struct Sketch {
   std::vector<SketchStroke> strokes;
   int active_layer = 0;
   std::vector<SketchCanvas> canvases;  // (the planes in the scene; the picture plane isn't listed)
+  std::vector<SketchArtboard> artboards;  // (round 390)
   int active_canvas = 0;
   int perspective = 0;  // 0 off, 1-3 point
   /* The guide follows the camera and the camera the guide (task 0224): its points are the world axes' vanishing
@@ -104,6 +142,9 @@ struct Sketch {
   void flatten();  // (one layer; hidden layers' strokes go, as Photoshop flattens)
   int add_group(const std::string &name, int child);  // (the group right above its child)
   bool layer_shown(int i) const;  // (visible, and its group visible)
+  /* A clipped layer's base (round 388): the nearest unclipped layer under it in the same group - a group too (its
+   * composited picture); -1 none. */
+  int clip_base(int i) const;
   const SketchCanvas *canvas_at(int id) const;
   SketchCanvas *canvas_at(int id);
 };
@@ -118,6 +159,9 @@ struct SketchBrush {
   float min_size = 0.0f, steady = 0.0f;  // (steady: the lazy rope, pixels)
   uint32_t color = 0xFF202020;
   int base = -1;  // (a brush of the user's own: the preset it was duplicated from, for Reset)
+  /* Round 389 (task 0366): how much the pen's tilt widens the line, 0-1 - a pencil laid on its side shades wider, as
+   * Fresco's and Photoshop's tilt dynamics do; full tilt (the pen flat) widens it by this much again. */
+  float tilt = 0.0f;
 };
 /* The presets, in the palette's order: Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, Eraser, Stroke Eraser. A
  * stroke's `brush` is its index here (the Pen is 1). */
@@ -174,4 +218,21 @@ float distance_to_polyline(Vec2 p, const std::vector<Vec2> &pts);
 std::vector<Vec2> french_curve(int which);
 
 }  // namespace sketch
+/* Vector shapes and SVG (round 390, task 0367; scene/sketch_svg.cpp). An outline: 1 a rectangle, 2 an ellipse, 3 a
+ * polygon of `sides`, 4 a star of `sides` points, in the box a-b; closed (its first point again last). */
+std::vector<Vec2> sketch_shape_outline(int kind, int sides, Vec2 a, Vec2 b);
+/* A Pen path's points (an anchor, its in- and out-handle each): each cubic sampled, the first anchor first. */
+std::vector<Vec2> sketch_bezier_points(const std::vector<Vec2> &bez, bool closed);
+/* A layer read from an SVG: Blendity's own groups are layers again; another program's drawing one layer, "SVG". */
+struct SketchSvgLayer {
+  std::string name;
+  float opacity = 1.0f;
+  int blend = 0;
+  std::vector<SketchStroke> strokes;
+};
+/* The picture plane's strokes of the shown layers as SVG, its view box lo-hi (the canvas's frame). */
+std::string sketch_svg_text(const Sketch &s, Vec2 lo, Vec2 hi);
+/* An SVG's drawing in the canvas's frame; false (with `err`) when it isn't one. */
+bool sketch_svg_read(const std::string &text, std::vector<SketchSvgLayer> &layers, std::string &err);
+
 }  // namespace bl

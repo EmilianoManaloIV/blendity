@@ -9,7 +9,7 @@ using UnityEngine.Rendering;
 
 namespace Blendity.LiveLink
 {
-    public sealed class LiveLinkApplier
+    public sealed partial class LiveLinkApplier
     {
         public const string RootName = "Blendity Live Link";
         public readonly Dictionary<long, GameObject> Objects = new Dictionary<long, GameObject>();
@@ -24,6 +24,8 @@ namespace Blendity.LiveLink
         readonly Dictionary<int, Material> materials = new Dictionary<int, Material>();
         readonly Dictionary<int, string> toonFields = new Dictionary<int, string>();
         readonly Dictionary<string, Texture2D> textures = new Dictionary<string, Texture2D>();
+        readonly Dictionary<int, Texture2D> texByKey = new Dictionary<int, Texture2D>();  // (round 377: from PNG bytes)
+        readonly Dictionary<int, Dictionary<string, object>> materialMsgs = new Dictionary<int, Dictionary<string, object>>();
         HashSet<long> seen;
         readonly Transform root;
 
@@ -44,7 +46,7 @@ namespace Blendity.LiveLink
             var j = m.Json;
             switch (t)
             {
-                case "sync": seen = new HashSet<long>(); Playing = j.GetBool("playing"); break;
+                case "sync": seen = new HashSet<long>(); Playing = j.GetBool("playing"); EnsureSceneDescriptor(); break;
                 case "sync_end": EndSync(); break;
                 case "play": Playing = j.GetBool("playing"); break;
                 case "object": OnObject(j); break;
@@ -54,8 +56,19 @@ namespace Blendity.LiveLink
                 case "mesh": OnMesh(j, m.Bin); break;
                 case "deform": OnDeform(j, m.Bin); break;
                 case "material": OnMaterial(j); break;
+                case "texture": OnTexture(j, m.Bin); break;  // (round 377)
+                case "weights": OnWeights(j); break;  // (round 378)
+                case "clip": OnClip(j, m.Bin); break;  // (round 379: LiveLinkClips.cs)
+                case "lod": OnLod(j); break;  // (round 380: LiveLinkWorld.cs)
+                case "lodmesh": OnLodMesh(j, m.Bin); break;
+                case "collider": OnCollider(j); break;
+                case "avatar": OnAvatar(j); break;  // (round 381: LiveLinkVRChat.cs)
+                case "springs": OnSprings(j); break;
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
+                case "world": OnWorld(j); break;  // (round 376: LiveLinkLook.cs)
+                case "render": OnRender(j); break;
+                case "filters": OnFilters(j); break;
                 default: break;  // (unknown messages are ignored: the protocol grows by adding)
             }
         }
@@ -119,6 +132,7 @@ namespace Blendity.LiveLink
             SetParentId(id, j.GetId("parent"));
             SetTrs(go.transform, j.GetFloats("position", 0, 0, 0), j.GetFloats("rotation", 0, 0, 0, 1), j.GetFloats("scale", 1, 1, 1));
             Reparent(id);
+            SetStatic(id, go, j.GetBool("static"));  // (round 381: Contribute GI)
             HashSet<long> kids;
             if (children.TryGetValue(id, out kids))
                 foreach (var child in kids)
@@ -199,6 +213,26 @@ namespace Blendity.LiveLink
             slots.Remove(id);
             meshes.Remove(id);
             topology.Remove(id);
+            shapeWeights.Remove(id);
+            lodScreens.Remove(id);
+            lodCull.Remove(id);
+            colliderMsgs.Remove(id);
+            colliderStale.Remove(id);
+            avatarMsgs.Remove(id);
+            avatarWritten.Remove(id);
+            madeStatic.Remove(id);
+        }
+
+        /* A deleted object's child: one the bridge made for it (an LOD level, its collider) goes with it; any other - one
+         * of Blendity's, or the user's own - waits at the root (review 380: the user's children had been deleted). */
+        void MoveOrDrop(Transform child)
+        {
+            if (child.GetComponent<BlendityPart>() != null)
+            {
+                DestroyPart(child.gameObject);
+                return;
+            }
+            child.SetParent(root, true);
         }
 
         void Destroy(GameObject go)
@@ -206,11 +240,14 @@ namespace Blendity.LiveLink
             var mf = go.GetComponent<MeshFilter>();
             if (mf != null && mf.sharedMesh != null)
                 Object.DestroyImmediate(mf.sharedMesh);
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (smr && smr.sharedMesh != null)
+                Object.DestroyImmediate(smr.sharedMesh);  // (review 378: a skinned mesh's too)
             var kids = new List<Transform>();
             foreach (Transform child in go.transform)
                 kids.Add(child);
             foreach (var child in kids)
-                child.SetParent(root, true);  // (its children have their own deletes or parents)
+                MoveOrDrop(child);
             Object.DestroyImmediate(go);
         }
 
@@ -220,10 +257,31 @@ namespace Blendity.LiveLink
         {
             long id = j.GetId("id");
             GameObject go;
-            if (!Objects.TryGetValue(id, out go) || go == null || go.GetComponent<MeshFilter>() == null)
+            if (!Objects.TryGetValue(id, out go) || go == null || (go.GetComponent<MeshFilter>() == null && go.GetComponent<SkinnedMeshRenderer>() == null))
                 return;  // (a mesh for an object already gone)
             var gm = GlbReader.ReadMesh(bin);
-            var mesh = new Mesh { name = go.name };
+            var mesh = BuildMesh(gm, go.name);
+            meshes[id] = gm;
+            if (Skin(go, j, gm, mesh))  // (round 378: a skinned or keyed mesh: a SkinnedMeshRenderer on the bones Live Link sent)
+            {
+                topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
+                AssignMaterials(id);
+                ApplyWeights(id);
+                AvatarsAgain(id);  // (round 381: its visemes or blink on an avatar)
+                return;
+            }
+            var mf = Unskin(go);  // (review 378: a rig no more - its MeshFilter and MeshRenderer back)
+            if (mf.sharedMesh != null)
+                Object.DestroyImmediate(mf.sharedMesh);
+            mf.sharedMesh = mesh;
+            topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
+            AssignMaterials(id);
+            ColliderAgain(id);  // (round 380: a Mesh or Convex collider is the mesh's)
+        }
+
+        static Mesh BuildMesh(GlbMesh gm, string name)
+        {
+            var mesh = new Mesh { name = name };
             if (gm.VertexCount > 65535)
                 mesh.indexFormat = IndexFormat.UInt32;
             mesh.vertices = ToVectors(gm.Positions);
@@ -236,13 +294,117 @@ namespace Blendity.LiveLink
             for (int i = 0; i < gm.Submeshes.Count; i++)
                 mesh.SetTriangles(gm.Submeshes[i], i);
             mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        /* Round 378: a mesh Live Link sent at rest with its skin ("skin": its joints the bone objects) or shape keys
+         * ("shapes"): its MeshFilter and MeshRenderer give way to a SkinnedMeshRenderer, the bones its joints' objects, the
+         * bind poses glTF's inverse bind matrices in Unity's axes (X mirrored on both sides), each key a blend shape.
+         * False for a mesh with neither. */
+        bool Skin(GameObject go, Dictionary<string, object> j, GlbMesh gm, Mesh mesh)
+        {
+            var skin = j.GetDict("skin");
+            var shapes = j.GetList("shapes");
+            if ((skin == null || gm.Joints == null || gm.InverseBinds == null) && (shapes == null || shapes.Count == 0))
+                return false;
+            var joints = skin != null && gm.Joints != null && gm.InverseBinds != null ? skin.GetList("joints") : null;
+            int jn = joints != null ? joints.Count : 0;
+            var bones = new Transform[jn];
+            var binds = new Matrix4x4[jn];
+            for (int b = 0; b < jn; b++)
+            {
+                GameObject bone;
+                bones[b] = Objects.TryGetValue(System.Convert.ToInt64(joints[b]), out bone) && bone != null ? bone.transform : go.transform;
+                binds[b] = BindPose(gm, b);
+            }
+            if (jn > 0)
+            {
+                mesh.boneWeights = BoneWeights(gm);
+                mesh.bindposes = binds;
+            }
+            for (int t = 0; shapes != null && t < shapes.Count && t < gm.Targets.Count; t++)
+                mesh.AddBlendShapeFrame(System.Convert.ToString(shapes[t]), 100f, ToVectors(gm.Targets[t]), null, null);
             var mf = go.GetComponent<MeshFilter>();
-            if (mf.sharedMesh != null)
-                Object.DestroyImmediate(mf.sharedMesh);
-            mf.sharedMesh = mesh;
-            meshes[id] = gm;
-            topology[id] = j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts");
-            AssignMaterials(id);
+            if (mf != null)
+                Object.DestroyImmediate(mf);
+            var mr = go.GetComponent<MeshRenderer>();
+            if (mr != null)
+                Object.DestroyImmediate(mr);
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (!smr)  // (not ??: a destroyed Unity object isn't null to it)
+                smr = go.AddComponent<SkinnedMeshRenderer>();
+            if (smr.sharedMesh != null)
+                Object.DestroyImmediate(smr.sharedMesh);
+            smr.sharedMesh = mesh;
+            smr.bones = bones;
+            smr.rootBone = jn > 0 ? bones[0] : go.transform;
+            smr.updateWhenOffscreen = true;
+            return true;
+        }
+
+        /* Joint b's inverse bind matrix (column-major) in Unity's axes: X mirrored on both sides. */
+        static Matrix4x4 BindPose(GlbMesh gm, int b)
+        {
+            var m = new Matrix4x4();
+            for (int i = 0; i < 16; i++)
+                m[i % 4, i / 4] = gm.InverseBinds[b * 16 + i] * ((i % 4 == 0) != (i / 4 == 0) ? -1f : 1f);
+            return m;
+        }
+
+        static BoneWeight[] BoneWeights(GlbMesh gm)
+        {
+            var weights = new BoneWeight[gm.VertexCount];
+            for (int v = 0; v < weights.Length; v++)
+            {
+                int o = v * 4;
+                weights[v] = new BoneWeight
+                {
+                    boneIndex0 = (int)gm.Joints[o], weight0 = gm.Weights[o], boneIndex1 = (int)gm.Joints[o + 1], weight1 = gm.Weights[o + 1],
+                    boneIndex2 = (int)gm.Joints[o + 2], weight2 = gm.Weights[o + 2], boneIndex3 = (int)gm.Joints[o + 3], weight3 = gm.Weights[o + 3]
+                };
+            }
+            return weights;
+        }
+
+        /* A mesh that is no longer a rig: its SkinnedMeshRenderer (and the mesh it held) gives way to a MeshFilter and a
+         * MeshRenderer again. */
+        static MeshFilter Unskin(GameObject go)
+        {
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            if (smr)
+            {
+                if (smr.sharedMesh != null)
+                    Object.DestroyImmediate(smr.sharedMesh);
+                Object.DestroyImmediate(smr);
+            }
+            var mf = go.GetComponent<MeshFilter>();
+            if (!mf)
+                mf = go.AddComponent<MeshFilter>();
+            if (!go.GetComponent<MeshRenderer>())
+                go.AddComponent<MeshRenderer>();
+            return mf;
+        }
+
+        /* Round 378: a keyed mesh's shape weights (0-1, Unity's 0-100), in its keys' order; kept, since they can come
+         * before the mesh (built off Blendity's main thread) and are set when it does. */
+        readonly Dictionary<long, List<object>> shapeWeights = new Dictionary<long, List<object>>();
+
+        void OnWeights(Dictionary<string, object> j)
+        {
+            long id = j.GetId("id");
+            shapeWeights[id] = j.GetList("weights");
+            ApplyWeights(id);
+        }
+
+        void ApplyWeights(long id)
+        {
+            GameObject go;
+            List<object> w;
+            if (!Objects.TryGetValue(id, out go) || go == null || !shapeWeights.TryGetValue(id, out w) || w == null)
+                return;
+            var smr = go.GetComponent<SkinnedMeshRenderer>();
+            for (int i = 0; smr && smr.sharedMesh && i < w.Count && i < smr.sharedMesh.blendShapeCount; i++)
+                smr.SetBlendShapeWeight(i, 100f * System.Convert.ToSingle(w[i]));
         }
 
         static Vector3[] ToVectors(float[] f)
@@ -263,6 +425,8 @@ namespace Blendity.LiveLink
                 return;
             if (topo != j.GetNumber("topology").ToString("R") + "/" + j.GetNumber("verts"))
                 return;  // (a newer mesh is on its way; a deform follows it)
+            if (go.GetComponent<SkinnedMeshRenderer>() != null)
+                return;  // (round 378: it skins itself on its bones)
             var into = new float[gm.Positions.Length];
             if (!GlbReader.Deform(gm, bin, into))
                 return;
@@ -270,6 +434,7 @@ namespace Blendity.LiveLink
             mesh.vertices = ToVectors(into);
             mesh.normals = ToVectors(GlbReader.SmoothNormals(gm, into));  // (not RecalculateNormals: UV seams stay smooth)
             mesh.RecalculateBounds();
+            ColliderDeformed(id);  // (review 380: a Mesh or Convex collider cooked again once it stands still)
         }
 
         // ------------------------------------------------------------ materials
@@ -280,7 +445,9 @@ namespace Blendity.LiveLink
             int[] keys;
             if (!Objects.TryGetValue(id, out go) || go == null || !slots.TryGetValue(id, out keys))
                 return;
-            var mr = go.GetComponent<MeshRenderer>();
+            Renderer mr = go.GetComponent<MeshRenderer>();
+            if (mr == null)
+                mr = go.GetComponent<SkinnedMeshRenderer>();  // (round 378)
             if (mr == null)
                 return;
             GlbMesh gm;
@@ -306,6 +473,7 @@ namespace Blendity.LiveLink
                 bt = go.AddComponent<BlendityToon>();
             if (bt != null)
                 bt.SlotFields = toon;
+            SetLods(id, go);  // (round 380: its levels wear the same)
         }
 
         static Shader LitShader()
@@ -324,10 +492,12 @@ namespace Blendity.LiveLink
                 materials[key] = m;
             }
             m.name = j.GetString("name", "Material");
+            materialMsgs[key] = j;
             var gltf = j.GetDict("gltf") ?? new Dictionary<string, object>();
             var pbr = gltf.GetDict("pbrMetallicRoughness") ?? new Dictionary<string, object>();
             var c = pbr.GetFloats("baseColorFactor", 0.8f, 0.8f, 0.8f, 1f);
-            var color = new Color(c[0], c[1], c[2], c[3]);
+            var color = new Color(c[0], c[1], c[2]).gamma;  // (Live Link's colours are linear; a material's are set as gamma)
+            color.a = c[3];
             float metallic = (float)pbr.GetNumber("metallicFactor", 0), smooth = 1f - (float)pbr.GetNumber("roughnessFactor", 0.5);
             m.SetColor("_BaseColor", color);
             m.SetColor("_Color", color);
@@ -338,7 +508,7 @@ namespace Blendity.LiveLink
             var ext = gltf.GetDict("extensions");
             float strength = ext != null && ext.GetDict("KHR_materials_emissive_strength") != null
                                  ? (float)ext.GetDict("KHR_materials_emissive_strength").GetNumber("emissiveStrength", 1) : 1f;
-            var emission = new Color(e[0], e[1], e[2]) * strength;
+            var emission = (new Color(e[0], e[1], e[2]) * strength).gamma;
             m.SetColor("_EmissionColor", emission);
             if (emission.maxColorComponent > 0)
                 m.EnableKeyword("_EMISSION");
@@ -348,6 +518,11 @@ namespace Blendity.LiveLink
             var maps = j.GetDict("maps");
             SetTexture(m, maps, "Base Map", "_BaseMap", "_MainTex", false);
             SetTexture(m, maps, "Normal Map", "_BumpMap", "_BumpMap", true);
+            bool metal = SetTexture(m, maps, "Metallic Map", "_MetallicGlossMap", "_MetallicGlossMap", false);  // (round 377: every map Unity's Lit has)
+            SetKeyword(m, "_METALLICSPECGLOSSMAP", metal);  // (URP's)
+            SetKeyword(m, "_METALLICGLOSSMAP", metal);      // (the built-in Standard's - review 377)
+            if (SetTexture(m, maps, "Emission Map", "_EmissionMap", "_EmissionMap", false))
+                m.EnableKeyword("_EMISSION");
             var toon = ext != null ? ext.GetDict("BLENDITY_toon") : null;
             toonFields[key] = toon != null ? Serialize(toon) : "";
             foreach (var kv in slots)
@@ -381,18 +556,62 @@ namespace Blendity.LiveLink
                 m.DisableKeyword(k);
         }
 
-        void SetTexture(Material m, Dictionary<string, object> maps, string slot, string urp, string builtin, bool normal)
+        /* A map's texture: the one Live Link sent its bytes for (round 377: no stale copy cached by path), else the file
+         * at its path. True when one was set. */
+        bool SetTexture(Material m, Dictionary<string, object> maps, string slot, string urp, string builtin, bool normal)
         {
             var entry = maps != null ? maps.GetDict(slot) : null;
             if (entry == null)
-                return;
-            var tex = LoadTexture(entry.GetString("path"), normal || entry.GetBool("non_color"));
+            {
+                m.SetTexture(urp, null);  // (a map taken off in Blendity: not kept - review 377)
+                m.SetTexture(builtin, null);
+                return false;
+            }
+            Texture2D tex;
+            if (!texByKey.TryGetValue((int)entry.GetNumber("texture", 0), out tex) || tex == null)
+                tex = LoadTexture(entry.GetString("path"), normal || entry.GetBool("non_color"));
             if (tex == null)
-                return;
+                return false;
             m.SetTexture(urp, tex);
             m.SetTexture(builtin, tex);
             if (normal)
                 m.EnableKeyword("_NORMALMAP");
+            return true;
+        }
+
+        /* Round 377: a texture's pixels as PNG bytes (painted, generated or a file's), loaded into a texture of its own
+         * (the same one when it comes again); the materials naming its key built again. */
+        void OnTexture(Dictionary<string, object> j, byte[] png)
+        {
+            int key = (int)j.GetNumber("key");
+            bool linear = j.GetBool("non_color");
+            Texture2D tex;
+            if (!texByKey.TryGetValue(key, out tex) || tex == null || tex.isDataSRGB == linear)
+            {
+                tex = new Texture2D(2, 2, TextureFormat.RGBA32, true, linear);
+                texByKey[key] = tex;
+            }
+            tex.name = j.GetString("name", "Texture");
+            if (png == null || !tex.LoadImage(png))
+                return;
+            var again = new List<Dictionary<string, object>>();
+            foreach (var kv in materialMsgs)
+            {
+                var maps = kv.Value.GetDict("maps");
+                if (maps == null)
+                    continue;
+                foreach (var entry in maps.Values)
+                {
+                    var e = entry as Dictionary<string, object>;
+                    if (e != null && (int)e.GetNumber("texture", 0) == key)
+                    {
+                        again.Add(kv.Value);
+                        break;
+                    }
+                }
+            }
+            foreach (var msg in again)
+                OnMaterial(msg);
         }
 
         Texture2D LoadTexture(string path, bool linear)
@@ -450,7 +669,7 @@ namespace Blendity.LiveLink
             l.type = type == "directional" ? LightType.Directional : type == "spot" ? LightType.Spot
                    : type == "area" ? (j.GetBool("disc") ? LightType.Disc : RectangleLight) : LightType.Point;
             var c = j.GetFloats("color", 1, 1, 1);
-            l.color = new Color(c[0], c[1], c[2]);
+            l.color = new Color(c[0], c[1], c[2]).gamma;  // (Live Link's colours are linear)
             l.intensity = (float)j.GetNumber("intensity", 1);  // (Blendity's intensity is Unity's)
             l.range = (float)j.GetNumber("range", 10);
             l.spotAngle = (float)j.GetNumber("spot_angle", 30);

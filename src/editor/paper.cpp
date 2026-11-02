@@ -77,6 +77,8 @@ void Editor::paper_trim_undo() {
 }
 
 void Editor::paper_step(bool undo) {
+  if (sketch_xf_valid()) return sketch_xf_cancel();  // (re-check 389: as Esc)
+  sketch_xf_drop();
   auto &from = undo ? paper_undo_ : paper_redo_;
   auto &to = undo ? paper_redo_ : paper_undo_;
   if (from.empty() || sketch_.stroking || sketch_.erasing) return;
@@ -109,7 +111,10 @@ bool Editor::paper_save() {
   if (assets_dir_.empty() || paper_name_.empty()) return false;
   fs::make_dirs(paper_dir());
   const std::string path = paper_path(paper_name_);
-  if (!fs::write_file(path, save_paper_text(paper_, paper_aspect_, draw_paper_))) {
+  const bool mid = sketch_xf_.on && sketch_xf_.doc == &paper_;  // (review 389: mid-transform the file keeps the drawing as it was before it)
+  Sketch kept;
+  if (mid) kept = paper_, kept.strokes = sketch_xf_.before;
+  if (!fs::write_file(path, save_paper_text(mid ? kept : paper_, paper_aspect_, draw_paper_))) {
     Log::warn("Paper: can't write %s", path.c_str());
     return false;
   }
@@ -145,6 +150,8 @@ std::string Editor::paper_free_name(const std::string &base) const {
 }
 
 void Editor::paper_new(const std::string &name) {
+  sketch_xf_settle();  // (re-check 389: kept on the paper it began on)
+  sketch_vec_pick(0);  // (review 390: a Pen path too)
   if (paper_dirty_) paper_save();
   paper_reset(paper_free_name(name.empty() ? "Paper" : name));
   paper_save();  // (on disk at once: a board can pin it, the Open list shows it)
@@ -168,6 +175,8 @@ bool Editor::paper_open(const std::string &name) {
   const bool by_path = fs::extension(name) == ".paper" && fs::exists(name);
   const bool is_open = !paper_name_.empty() && (by_path ? to_lower(fs::normalize(name)) == to_lower(fs::normalize(paper_path(paper_name_))) : board_clean_name(name) == paper_name_);
   if (is_open) return true;  // (the open one: as it is, its unsaved edits and history kept - reviews 324, 326)
+  sketch_xf_settle();  // (re-check 389: kept on the paper it began on)
+  sketch_vec_pick(0);  // (review 390: a Pen path too)
   const bool outside = by_path;
   if (paper_dirty_) paper_save();  // (before reading: the file may be this paper's)
   const std::string path = outside ? paper_take_in(name) : paper_path(name);
@@ -248,6 +257,7 @@ void Editor::paper_relink_boards(const std::string &from_rel, const std::string 
 
 void Editor::paper_duplicate() {
   if (paper_name_.empty()) return;
+  sketch_xf_settle();  // (re-check 389)
   const Sketch copy = paper_;
   paper_new(paper_name_ + " copy");
   paper_ = copy;
@@ -258,6 +268,7 @@ void Editor::paper_duplicate() {
 /* The paper to the trash; another one (or a new one) opened in its place. */
 void Editor::paper_delete() {
   if (paper_name_.empty()) return;
+  sketch_xf_settle();  // (re-check 389)
   const std::string path = paper_path(paper_name_);
   std::string err;
   if (fs::exists(path) && !fs::move_to_trash(path, &err)) {
@@ -284,8 +295,8 @@ std::vector<std::string> Editor::paper_names() const {
 bool Editor::paper_command(const std::vector<std::string> &t) {
   const std::string v = t.size() > 1 ? to_lower(t[1]) : "list";
   const std::string rest = t.size() > 2 ? join_words(t, 2) : "";
-  if (v == "new") paper_new(rest);
-  else if (v == "open" && !rest.empty()) paper_open(rest);
+  if (v == "new") paper_new(rest), draw_source_command("paper");  // (round 388: the pad shows it, as New Paper's tooltip says; the source change drops the selection)
+  else if (v == "open" && !rest.empty() && paper_open(rest)) draw_source_command("paper");  // (review 388: a failed open switches nothing)
   else if (v == "rename" && !rest.empty()) paper_rename(rest);
   else if (v == "duplicate") paper_duplicate();
   else if (v == "delete") paper_delete();

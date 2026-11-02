@@ -250,6 +250,7 @@ float Editor::paint_alpha_at(Vec2 uv) const {
 /* A stroke's start: the layer's images, the delta, the per-texel stroke tables (the weight built so far, the dab that
  * last wrote the texel, what this stroke wrote - for the dilation). */
 bool Editor::paint_begin_stroke_images() {
+  if (vr_pt_stroking_) return false;  // (round 386: a stroke VR's brush has under way is its own - the desk starts none)
   PaintLayer *l = paint_layer(true);
   if (!l) return false;
   PaintImages &im = paint_layer_images(*l, std::max(paint_surface_->width, paint_surface_->height));
@@ -545,29 +546,12 @@ void Editor::paint_write_texel(size_t i, float k) {
     const_cast<Texture &>(*paint_view_tex_).levels[0].px8[i] = to_rgba8(im.color[i]);  // (the cache's own image, written in place on purpose: the preview of the stroke)
 }
 
-/* The texels of a triangle inside the brush's disc at `centre` (screen) of `radius` px, written with the falloff;
- * each texel's world point by barycentrics, projected and kept when its depth is within the triangle's own depth slope
- * (two texels' worth) of the depth plane there - the far side and anything behind are not painted. `all` paints the
- * whole triangle (a fill). */
-void Editor::paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, const Mat4 &W, Vec2 centre, float radius, float k_max, bool all) {
+/* A triangle's texels (its UV triangle in the images; the slack a quarter texel, whatever the triangle's size: no gap and
+ * no spill between neighbours): each texel's world point by barycentrics, `weigh(world point, x, y)` its weight - at
+ * most 0.002 leaves it alone. */
+template <class Weigh>
+void Editor::paint_raster_uv(const Mesh &mesh, const uint32_t *cn, Vec3 p0, Vec3 p1, Vec3 p2, Weigh weigh) {
   PaintImages &im = *paint_images_;
-  const uint32_t *ix = &rm.indices[tri * 3], *cn = &rm.tri_corner[tri * 3];
-  if (cn[0] >= mesh.uvs.size() || cn[1] >= mesh.uvs.size() || cn[2] >= mesh.uvs.size()) return;
-  const Vec3 p0 = W.point(rm.positions[ix[0]]), p1 = W.point(rm.positions[ix[1]]), p2 = W.point(rm.positions[ix[2]]);
-  Vec2 s0, s1, s2;
-  float d0 = 0.0f, d1, d2;
-  float slope = 0.0f;
-  if (!all) {
-    if (!scene_r3d_.project(p0, s0, d0) || !scene_r3d_.project(p1, s1, d1) || !scene_r3d_.project(p2, s2, d2)) return;  // (a corner behind the camera: left alone)
-    const float x0 = std::min({s0.x, s1.x, s2.x}), x1 = std::max({s0.x, s1.x, s2.x}), y0 = std::min({s0.y, s1.y, s2.y}), y1 = std::max({s0.y, s1.y, s2.y});
-    if (x1 < centre.x - radius || x0 > centre.x + radius || y1 < centre.y - radius || y0 > centre.y + radius) return;
-    /* The depth tolerance: the triangle's depth range over its screen footprint, two texels of it. */
-    const float foot = std::max(1.0f, std::max(x1 - x0, y1 - y0));
-    slope = (std::max({d0, d1, d2}) - std::min({d0, d1, d2})) / foot;
-  }
-  const float tol = slope * 2.0f + std::fabs(d0) * 1e-4f + 1e-6f;
-  /* The UV triangle in texels (v down the image as the layout's rows run); the slack a quarter texel, whatever the
-   * triangle's size (no gap and no spill between neighbours). */
   const Vec2 t0 = Vec2(mesh.uvs[cn[0]].x * im.w, (1.0f - mesh.uvs[cn[0]].y) * im.h), t1 = Vec2(mesh.uvs[cn[1]].x * im.w, (1.0f - mesh.uvs[cn[1]].y) * im.h),
              t2 = Vec2(mesh.uvs[cn[2]].x * im.w, (1.0f - mesh.uvs[cn[2]].y) * im.h);
   const float area = (t1.x - t0.x) * (t2.y - t0.y) - (t2.x - t0.x) * (t1.y - t0.y);
@@ -576,7 +560,7 @@ void Editor::paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, 
   const float slack = 0.25f / extent;
   const int bx0 = std::max(0, (int)std::floor(std::min({t0.x, t1.x, t2.x}))), bx1 = std::min(im.w - 1, (int)std::ceil(std::max({t0.x, t1.x, t2.x})));
   const int by0 = std::max(0, (int)std::floor(std::min({t0.y, t1.y, t2.y}))), by1 = std::min(im.h - 1, (int)std::ceil(std::max({t0.y, t1.y, t2.y})));
-  const float inv = 1.0f / area, r2 = radius * radius;
+  const float inv = 1.0f / area;
   for (int y = by0; y <= by1; y++)
     for (int x = bx0; x <= bx1; x++) {
       const float cx = x + 0.5f, cy = y + 0.5f;
@@ -584,25 +568,62 @@ void Editor::paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, 
       const float b2 = ((t1.x - t0.x) * (cy - t0.y) - (cx - t0.x) * (t1.y - t0.y)) * inv;
       const float b0 = 1.0f - b1 - b2;
       if (b0 < -slack || b1 < -slack || b2 < -slack) continue;
-      float k = k_max;
-      if (!all) {
-        const Vec3 wp = p0 * b0 + p1 * b1 + p2 * b2;
-        Vec2 s;
-        float d;
-        if (!scene_r3d_.project(wp, s, d)) continue;
-        const float dist2 = (s.x - centre.x) * (s.x - centre.x) + (s.y - centre.y) * (s.y - centre.y);
-        if (dist2 > r2) continue;
-        const int sx = (int)s.x, sy = (int)s.y;
-        if (sx < 0 || sy < 0 || sx >= scene_rt_.width || sy >= scene_rt_.height) continue;  // (off the view: not seen, not painted)
-        if (scene_rt_.id_at(sx, sy) != (uint32_t)paint_obj_) continue;                      // (another object in front, or the background)
-        const float plane = scene_rt_.depth_at(sx, sy);                                       // (behind the surface the view shows - the far side - whichever way the depth runs)
-        if (paint_depth_grows_ ? d > plane + tol : d < plane - tol) continue;
-        const Vec2 local((s.x - centre.x) / radius, (s.y - centre.y) / radius);
-        k *= paint_stamp(local) * paint_alpha_at(local) * paint_stencil_at(s) * paint_grain_at(x, y);  // (after the tests: the Bristle stamp is the dear one)
-      }
-      if (k <= 0.002f) continue;
-      paint_write_texel((size_t)y * im.w + x, k);
+      const float k = weigh(p0 * b0 + p1 * b1 + p2 * b2, x, y);
+      if (k > 0.002f) paint_write_texel((size_t)y * im.w + x, k);
     }
+}
+
+/* The texels of a triangle inside the brush's disc at `centre` (screen) of `radius` px, written with the falloff;
+ * each texel's world point projected and kept when its depth is within the triangle's own depth slope (two texels'
+ * worth) of the depth plane there - the far side and anything behind are not painted. `all` paints the whole triangle
+ * (a fill). A world dab (paint_wdab_, VR's) tests the texels against its disc in the world instead. */
+void Editor::paint_triangle(const RenderMesh &rm, const Mesh &mesh, size_t tri, const Mat4 &W, Vec2 centre, float radius, float k_max, bool all) {
+  const uint32_t *ix = &rm.indices[tri * 3], *cn = &rm.tri_corner[tri * 3];
+  if (cn[0] >= mesh.uvs.size() || cn[1] >= mesh.uvs.size() || cn[2] >= mesh.uvs.size()) return;
+  const Vec3 p0 = W.point(rm.positions[ix[0]]), p1 = W.point(rm.positions[ix[1]]), p2 = W.point(rm.positions[ix[2]]);
+  if (all) return paint_raster_uv(mesh, cn, p0, p1, p2, [&](Vec3, int, int) { return k_max; });
+  if (paint_wdab_.on) return paint_triangle_world(mesh, cn, p0, p1, p2, k_max);
+  Vec2 s0, s1, s2;
+  float d0, d1, d2;
+  if (!scene_r3d_.project(p0, s0, d0) || !scene_r3d_.project(p1, s1, d1) || !scene_r3d_.project(p2, s2, d2)) return;  // (a corner behind the camera: left alone)
+  const float x0 = std::min({s0.x, s1.x, s2.x}), x1 = std::max({s0.x, s1.x, s2.x}), y0 = std::min({s0.y, s1.y, s2.y}), y1 = std::max({s0.y, s1.y, s2.y});
+  if (x1 < centre.x - radius || x0 > centre.x + radius || y1 < centre.y - radius || y0 > centre.y + radius) return;
+  /* The depth tolerance: the triangle's depth range over its screen footprint, two texels of it. */
+  const float foot = std::max(1.0f, std::max(x1 - x0, y1 - y0));
+  const float tol = (std::max({d0, d1, d2}) - std::min({d0, d1, d2})) / foot * 2.0f + std::fabs(d0) * 1e-4f + 1e-6f;
+  const float r2 = radius * radius;
+  paint_raster_uv(mesh, cn, p0, p1, p2, [&](Vec3 wp, int x, int y) {
+    Vec2 s;
+    float d;
+    if (!scene_r3d_.project(wp, s, d)) return 0.0f;
+    if ((s.x - centre.x) * (s.x - centre.x) + (s.y - centre.y) * (s.y - centre.y) > r2) return 0.0f;
+    const int sx = (int)s.x, sy = (int)s.y;
+    if (sx < 0 || sy < 0 || sx >= scene_rt_.width || sy >= scene_rt_.height) return 0.0f;  // (off the view: not seen, not painted)
+    if (scene_rt_.id_at(sx, sy) != (uint32_t)paint_obj_) return 0.0f;                      // (another object in front, or the background)
+    const float plane = scene_rt_.depth_at(sx, sy);                                          // (behind the surface the view shows - the far side - whichever way the depth runs)
+    if (paint_depth_grows_ ? d > plane + tol : d < plane - tol) return 0.0f;
+    const Vec2 local((s.x - centre.x) / radius, (s.y - centre.y) / radius);
+    return k_max * paint_stamp(local) * paint_alpha_at(local) * paint_stencil_at(s) * paint_grain_at(x, y);  // (after the tests: the Bristle stamp is the dear one)
+  });
+}
+
+/* Round 386 (task 0363: painting in VR): a triangle's texels against a world dab - the disc of paint_wdab_.radius square
+ * to its axis (the controller's ray) round its centre. A triangle facing away from the ray, or out of the ball round
+ * the centre, is left alone; a texel more than the radius in front of or behind the disc is not painted (the far side
+ * of a thin wall, a surface behind). The disc's right and down are the screen's (the stamp's and alpha's axes). */
+void Editor::paint_triangle_world(const Mesh &mesh, const uint32_t *cn, Vec3 p0, Vec3 p1, Vec3 p2, float k_max) {
+  const PaintWorldDab &d = paint_wdab_;
+  const Vec3 lo = vmin(vmin(p0, p1), p2), hi = vmax(vmax(p0, p1), p2);
+  const Vec3 nearest = vmax(lo, vmin(hi, d.centre));
+  if (length(nearest - d.centre) > d.radius) return;
+  if (dot(cross(p1 - p0, p2 - p0), d.axis) * d.facing >= 0.0f) return;  // (its back to the controller; a mirroring transform turns the winding - review 386)
+  paint_raster_uv(mesh, cn, p0, p1, p2, [&](Vec3 wp, int x, int y) {
+    const Vec3 off = wp - d.centre;
+    if (std::fabs(dot(off, d.axis)) > d.radius) return 0.0f;
+    const Vec2 local(dot(off, d.right) / d.radius, dot(off, d.down) / d.radius);
+    if (dot(local, local) > 1.0f) return 0.0f;
+    return k_max * paint_stamp(local) * paint_alpha_at(local) * paint_grain_at(x, y);
+  });
 }
 
 /* The symmetry instances: the hit point mirrored across the object's planes, each a disc of its own on screen. */
@@ -666,6 +687,53 @@ void Editor::paint_dab(const Recti &view, float x, float y, float pressure) {
   ui_.redraw = true;
 }
 
+/* Round 386: a dab in the world (VR's brush): at `hit` on the painted object, square to `axis` (the ray's direction),
+ * `radius` metres, its right and down for the stamp's axes; the brush's mirrors as paint_dab's, each with its own
+ * frame. Pressure through the pen's curve (opacity or size by the brush's Pressure). `near` (when given) lists the
+ * triangles that can be inside a ball in the object's space (VR's BVH: review 386 - every triangle had been tested
+ * every dab); without it every triangle is tried. */
+void Editor::paint_world_dab(Vec3 hit, Vec3 axis, Vec3 right, Vec3 down, float radius, float pressure, const NearFn &near) {
+  GameObject *g = scene_->find(paint_obj_);
+  MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+  if (!mf || !mf->mesh || !paint_images_ || !paint_surface_) return paint_abort_stroke();
+  const Mat4 &W = g->world_matrix();
+  const Mesh &mesh = *mf->mesh;
+  const RenderMesh &rm = mesh.render_mesh();
+  if (rm.tri_corner.size() != rm.indices.size()) return;
+  pressure = pen_pressure(std::isfinite(pressure) ? std::clamp(pressure, 0.0f, 1.0f) : 1.0f);
+  const float weight = paint_brush_.pressure == 1 ? pressure : 1.0f;
+  const float r = std::max(1e-4f, radius * (paint_brush_.pressure == 2 ? std::max(0.1f, pressure) : 1.0f));
+  paint_dab_serial_++;
+  paint_dab_rows_y0_ = paint_images_->h, paint_dab_rows_y1_ = 0;
+  const Vec3 moved = hit - paint_last_world_;
+  if (paint_dabbed_ && length(moved) > r * 0.05f) paint_dab_dir_ = Vec2(dot(moved, right), dot(moved, down)), paint_dir_known_ = true;  // (the drag's direction for the Flat tip and Smudge)
+  paint_last_world_ = hit;
+  if (paint_dab_serial_ == 255) std::fill(paint_stroke_dab_.begin(), paint_stroke_dab_.end(), 0), paint_dab_serial_ = 0;
+  paint_dab_begin(pressure);
+  const Mat4 inv = W.inverse();
+  const Vec3 hl = inv.point(hit);
+  const Vec3 c0 = W.dir({1, 0, 0}), c1 = W.dir({0, 1, 0}), c2 = W.dir({0, 0, 1});
+  const float facing = dot(cross(c0, c1), c2) < 0.0f ? -1.0f : 1.0f;
+  const Vec3 i0 = inv.dir({1, 0, 0}), i1 = inv.dir({0, 1, 0}), i2 = inv.dir({0, 0, 1});
+  const float local_r = r * std::sqrt(dot(i0, i0) + dot(i1, i1) + dot(i2, i2));  // (the ball in the object's space, never smaller: the Frobenius norm bounds any stretch - re-check 386)
+  const std::vector<Vec3> at = paint_mirrors(hl), ax = paint_mirrors(hl + inv.dir(axis)), rt = paint_mirrors(hl + inv.dir(right)), dn = paint_mirrors(hl + inv.dir(down));
+  std::vector<uint32_t> tris;
+  for (size_t m = 0; m < at.size(); m++) {
+    const Vec3 c = W.point(at[m]);
+    paint_wdab_ = {true, c, normalize(W.point(ax[m]) - c), normalize(W.point(rt[m]) - c), normalize(W.point(dn[m]) - c), r, facing};
+    if (near && near(at[m], local_r, tris)) {
+      for (uint32_t tri : tris) paint_triangle(rm, mesh, tri, W, Vec2(), 0.0f, weight, false);
+      continue;
+    }
+    for (size_t tri = 0; tri < rm.tri_count(); tri++) paint_triangle(rm, mesh, tri, W, Vec2(), 0.0f, weight, false);
+  }
+  paint_wdab_.on = false;
+  paint_dab_finish();
+  paint_dabbed_ = true;
+  if (paint_dab_rows_y1_ > paint_dab_rows_y0_) gpu_texture_rows_changed(paint_view_tex_, paint_dab_rows_y0_, paint_dab_rows_y1_);
+  ui_.redraw = true;
+}
+
 /* The stroke's end: the painted texels dilated two texels into their islands' unpainted neighbours (a painting stroke;
  * the tiles the dilation reaches join the step), the tiles' after taken, one undo step holding the tiles, the layer's
  * stamp bumped so the surface re-evaluates on its worker. */
@@ -724,7 +792,7 @@ void Editor::paint_abort_stroke() {
   if (paint_stroking_ && paint_delta_ && paint_images_) {  // (what the stroke wrote goes back)
     for (const PaintDelta::Tile &t : paint_delta_->tiles) paint_tile_write(*paint_images_, t, true);
   }
-  paint_stroking_ = false;
+  paint_stroking_ = false, vr_pt_stroking_ = false;  // (round 386: VR's stroke with it - an undo, Paint off - so the desk is never left waiting for it)
   paint_delta_.reset();
   paint_stroke_alpha_.clear(), paint_stroke_dab_.clear(), paint_written_.clear();
 }
@@ -1000,6 +1068,7 @@ bool Editor::paint_update(const Recti &view) {
     return false;
   }
   const float x = (float)(in.mx - view.x), y = (float)(in.my - view.y);
+  if (vr_pt_stroking_) return false;  // (round 386: VR's stroke - the mouse being up doesn't end it)
   if (!paint_stroking_) {
     if (scene_hovered_ && in.key_pressed[platform::KEY_ESCAPE] && !ui_.wants_keyboard()) {
       set_paint(false);

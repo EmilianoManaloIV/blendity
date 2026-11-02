@@ -184,7 +184,7 @@ std::unique_ptr<TextureLayer> smart_material_builtin(const std::string &name_in)
 /* ===================================================================== */
 
 const std::vector<std::string> &texture_packings() {
-  static const std::vector<std::string> p = {"gltf", "unity", "hdrp", "unreal", "separate"};
+  static const std::vector<std::string> p = {"gltf", "unity", "urp", "hdrp", "unreal", "poiyomi", "liltoon", "separate"};  // (round 392: URP, Poiyomi, lilToon)
   return p;
 }
 
@@ -192,6 +192,14 @@ std::vector<std::string> texture_packing_maps(const std::string &packing) {
   const std::string p = to_lower(packing);
   if (p == "gltf") return {"BaseColor", "Normal", "ORM", "Emissive"};
   if (p == "unity") return {"Albedo", "MetallicSmoothness", "Normal", "Emission", "AO"};
+  /* Round 392 (task 0369): named for the slots the shaders' inspectors show. URP Lit: _BaseMap, _MetallicGlossMap
+   * (metallic R, smoothness A), _BumpMap, _EmissionMap, _OcclusionMap. Poiyomi Toon: _MainTex, _BumpMap, its Packed
+   * Maps (R metallic, G smoothness, B reflection mask, A specular mask - poiyomi.com, Reflections & Specular),
+   * _EmissionMap. lilToon: _MainTex, _BumpMap, _MetallicGlossMap and _SmoothnessTex (each read from R - lilToon's
+   * lil_common_frag.hlsl), _EmissionMap. */
+  if (p == "urp") return {"BaseMap", "MetallicGlossMap", "BumpMap", "EmissionMap", "OcclusionMap"};
+  if (p == "poiyomi") return {"MainTex", "BumpMap", "PackedMaps", "EmissionMap"};
+  if (p == "liltoon") return {"MainTex", "BumpMap", "MetallicGlossMap", "SmoothnessTex", "EmissionMap"};
   if (p == "hdrp") return {"BaseColor", "MaskMap", "Normal", "Emission"};
   if (p == "unreal") return {"BaseColor", "Normal", "ORM", "Emissive"};
   if (p == "separate") return {"Albedo", "Normal", "Roughness", "Metallic", "Height", "Emission", "AO"};
@@ -201,7 +209,7 @@ std::vector<std::string> texture_packing_maps(const std::string &packing) {
 bool export_texture_set(ProceduralTexture &t, const std::string &packing, const std::string &dir, std::vector<std::string> &files, std::string *error) {
   const std::vector<std::string> maps = texture_packing_maps(packing);
   if (maps.empty()) {
-    if (error) *error = "no packing '" + packing + "' (gltf, unity, hdrp, unreal, separate)";
+    if (error) *error = "no packing '" + packing + "' (gltf, unity, urp, hdrp, unreal, poiyomi, liltoon, separate)";
     return false;
   }
   if (!fs::make_dirs(dir)) {
@@ -220,19 +228,23 @@ bool export_texture_set(ProceduralTexture &t, const std::string &packing, const 
   const bool directx = to_lower(packing) == "unreal";
   auto pack = [&](const std::string &map) {  // 0xAARRGGBB per texel
     std::vector<uint32_t> px(n);
-    const Bitmap normal = map == "Normal" ? t.output((int)TextureOutput::Normal, p) : Bitmap();
+    const Bitmap normal = map == "Normal" || map == "BumpMap" ? t.output((int)TextureOutput::Normal, p) : Bitmap();  // (round 392: URP's, Poiyomi's and lilToon's name for it)
     for (size_t i = 0; i < n; i++) {
       uint32_t r = 0, g = 0, b = 0, a = 255;
       const float smooth = 1.0f - p.rough[i];
-      if (map == "BaseColor" || map == "Albedo") {
+      if (map == "BaseColor" || map == "Albedo" || map == "BaseMap" || map == "MainTex") {
         r = display::linear_to_srgb8(p.albedo[i].x), g = display::linear_to_srgb8(p.albedo[i].y), b = display::linear_to_srgb8(p.albedo[i].z);
-        if (map == "Albedo") a = u8(p.alpha_written ? p.alpha[i] : 1.0f);
+        if (map != "BaseColor") a = u8(p.alpha_written ? p.alpha[i] : 1.0f);
       }
-      else if (map == "Normal") r = normal.rgba8[i * 4], g = directx ? 255 - normal.rgba8[i * 4 + 1] : normal.rgba8[i * 4 + 1], b = normal.rgba8[i * 4 + 2];  // (Unreal reads DirectX normals: green down)
+      else if (map == "Normal" || map == "BumpMap") r = normal.rgba8[i * 4], g = directx ? 255 - normal.rgba8[i * 4 + 1] : normal.rgba8[i * 4 + 1], b = normal.rgba8[i * 4 + 2];  // (Unreal reads DirectX normals: green down)
       else if (map == "ORM") r = u8(ao[i]), g = u8(p.rough[i]), b = u8(p.metal[i]);
       else if (map == "MetallicSmoothness") r = g = b = u8(p.metal[i]), a = u8(smooth);
+      else if (map == "MetallicGlossMap") r = g = b = u8(p.metal[i]), a = u8(smooth);  // (URP's: R metal, A smooth; lilToon reads R)
+      else if (map == "SmoothnessTex") r = g = b = u8(smooth);
+      else if (map == "PackedMaps") r = u8(p.metal[i]), g = u8(smooth), b = 255, a = 255;  // (reflections and specular everywhere)
+      else if (map == "OcclusionMap") r = g = b = u8(ao[i]);
       else if (map == "MaskMap") r = u8(p.metal[i]), g = u8(ao[i]), b = 255, a = u8(smooth);  // (B: the detail mask - full, so a detail map assigned in HDRP shows)
-      else if (map == "Emissive" || map == "Emission") r = display::linear_to_srgb8(p.emit[i].x), g = display::linear_to_srgb8(p.emit[i].y), b = display::linear_to_srgb8(p.emit[i].z);
+      else if (map == "Emissive" || map == "Emission" || map == "EmissionMap") r = display::linear_to_srgb8(p.emit[i].x), g = display::linear_to_srgb8(p.emit[i].y), b = display::linear_to_srgb8(p.emit[i].z);
       else if (map == "AO") r = g = b = u8(ao[i]);
       else if (map == "Roughness") r = g = b = u8(p.rough[i]);
       else if (map == "Metallic") r = g = b = u8(p.metal[i]);
@@ -244,7 +256,7 @@ bool export_texture_set(ProceduralTexture &t, const std::string &packing, const 
   files.clear();
   for (const std::string &map : maps) {
     const std::vector<uint32_t> px = pack(map);
-    const bool alpha = map == "Albedo" || map == "MetallicSmoothness" || map == "MaskMap";
+    const bool alpha = map == "Albedo" || map == "MetallicSmoothness" || map == "MaskMap" || map == "BaseMap" || map == "MainTex" || map == "MetallicGlossMap" || map == "PackedMaps";
     const std::string path = fs::join(dir, t.name + "_" + map + ".png");
     if (!write_png(path, px.data(), p.w, p.h, p.w, alpha)) {
       if (error) *error = "could not write " + path;

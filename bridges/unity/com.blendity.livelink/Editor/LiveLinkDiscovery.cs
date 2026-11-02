@@ -53,7 +53,7 @@ namespace Blendity.LiveLink
         public static byte[] Hello(string app)
         {
             string esc = app.Replace("\\", "\\\\").Replace("\"", "\\\"");
-            return Encoding.UTF8.GetBytes("{\"t\":\"client\",\"app\":\"" + esc + "\",\"bridge\":\"" + BridgeVersion + "\"}\n");
+            return Encoding.UTF8.GetBytes("{\"t\":\"client\",\"app\":\"" + esc + "\",\"bridge\":\"" + BridgeVersion + "\",\"caps\":[\"skins\"]}\n");  // (round 378: it skins)
         }
     }
 }
