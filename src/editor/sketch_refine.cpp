@@ -238,6 +238,7 @@ bool Editor::sketch_project() {
     st.canvas = id;
     st.raw.clear();
     st.center = {}, st.rx = st.ry = 0.0f;
+    st.fill = 0, st.bez.clear();  // (review 390: a face canvas draws no fill, and the Pen's path was the picture plane's)
     if (st.kind == StrokeKind::Arc || st.kind == StrokeKind::Ellipse) st.kind = StrokeKind::Curve;
     sketch_changed("Project Stroke");
     Log::info("Stroke projected onto %s", s.canvas_at(id)->name.c_str());

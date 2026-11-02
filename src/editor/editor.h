@@ -746,6 +746,8 @@ class Editor {
   bool pad_ui_hidden_for_test() const { return pad_ui_hidden_; }
   int draw_source_for_test() const { return draw_source_; }
   void sketch_select_tool_for_test(int k) { sketch_select_tool_ = k; }  // (round 388: the Draw tab's Select, 1 Rectangle, 2 Lasso)
+  void sketch_vec_tool_for_test(int k) { sketch_vec_pick(k); }  // (round 390: 1-4 the shapes, 5 the Pen)
+  size_t sketch_pen_anchors_for_test() const { return sketch_pen_.size() / 3; }
   const std::vector<Vec2> &sketch_selection_for_test() const { return sketch_sel_; }
   bool sketch_transforming_for_test() const { return sketch_xf_.on; }
   std::string sketch_brush_prefs_text_for_test() { return sketch_brush_prefs_text(); }
@@ -4905,6 +4907,35 @@ class Editor {
   /* Round 388 (task 0365): selections, fill, delete, clipping and layer masks (sketch_select.cpp, sketch_layers.cpp). */
   std::vector<Vec2> sketch_sel_;  // (the selection's outline in the canvas's frame; empty: none)
   int sketch_select_tool_ = 0;    // (the Draw tab's Select: 0 off, 1 Rectangle, 2 Lasso)
+  /* Round 390 (task 0367): More > Shapes - 0 off, 1 Rectangle, 2 Ellipse, 3 Polygon, 4 Star, 5 Pen; a shape's drag in
+   * pixels; the Pen's path (an anchor, its in- and out-handle each, the canvas's frame); the fill and the stroke. */
+  int sketch_vec_tool_ = 0, sketch_vec_sides_ = 5;
+  int sketch_vec_view_ = -1;  // (the view a shape's drag or a handle's pull began in: sketch_view_.kind)
+  std::vector<Vec2> sketch_vec_drag_, sketch_pen_;
+  bool sketch_pen_drag_ = false;
+  Vec2 sketch_pen_from_;
+  uint32_t sketch_fill_ = 0;
+  bool sketch_stroke_none_ = false;
+  SketchStroke sketch_vector_stroke(std::vector<Vec2> pts, bool closed) const;
+  bool sketch_vector_add(SketchStroke st, const char *label);
+  bool sketch_shape_add(int kind, int sides, Vec2 a, Vec2 b);
+  void sketch_pen_end(bool close);
+  void sketch_vec_pick(int tool);
+  bool sketch_pen_keys();
+  Recti sketch_command_view() const;
+  bool sketch_pen_update(const Recti &view, Vec2 px);
+  void sketch_pen_pull(const Recti &view, Vec2 px);
+  bool sketch_shape_update(const Recti &view, Vec2 px);
+  bool sketch_vector_update(const Recti &view, Vec2 px);
+  void sketch_vector_draw(const Recti &view);
+  void draw_sketch_shape_items();
+  void sketch_restyle();
+  void sketch_shape_command(const std::vector<std::string> &t);
+  void sketch_pen_command(const std::vector<std::string> &t);
+  void sketch_paint_colour_command(const std::vector<std::string> &t, bool fill);
+  void sketch_artboard_command(const std::vector<std::string> &t);
+  void sketch_svg_command(const std::vector<std::string> &t);
+  void sketch_svg_import(const std::string &path);
   std::vector<Vec2> sketch_sel_drag_;  // (the drag under way, view pixels)
   std::unordered_map<int, std::vector<uint8_t>> sketch_clip_covs_;  // (each base's coverage, this picture: a layer or a group)
   bool sketch_clips_onto(int i) const;

@@ -946,6 +946,12 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 - **The Adobe keymap:** H is the Hand tool, Space held with a drag pans, Shift+Space opens the Wheel.
 - **A brush's Tilt** (Brushes window, `sketch brush tilt <0-1>`) widens the line as the pen tilts; the Pencil's is 0.8.
 
+**Draw: shapes, the Pen and SVG** (round 390):
+- **More > Shapes > Rectangle, Ellipse, Polygon or Star**, then drag on the pad: Shift makes it even, Alt draws it from the middle. Sides: 5, 6 or 8 (`sketch shape polygon <n> ...` for any).
+- **More > Shapes > Pen:** click for a corner, drag for a curve (the handles mirrored), click the first anchor to close; Enter or Esc ends an open path.
+- **Fill: Pen Color / Fill: None and Stroke: None** set what the shapes and the Pen make (`sketch fillcolor|strokecolor <hex>|none`); **Restyle Selection** applies them to the strokes inside the selection.
+- **Artboards:** `sketch artboard add <name> x0 y0 x1 y1`; **SVG:** `sketch svg export <file.svg> [artboard]` and `sketch svg import <file.svg>` - Blendity's file comes back as its layers, another program's on one layer fitted to the view.
+
 **Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
 - **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).
 - **Hold the right grip** while painting to erase.

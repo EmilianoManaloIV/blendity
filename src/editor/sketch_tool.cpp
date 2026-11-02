@@ -32,6 +32,7 @@ void Editor::sketch_end() {
   sketch_keynav_ = false;  // (task 0233: no key moves the view once the tool is off)
   sketch_xf_commit();  // (round 389: a transform under way is kept, as Photoshop's when another tool is picked)
   sketch_select_tool_ = 0, sketch_sel_drag_.clear(), sketch_sel_.clear();  // (review 388: back to the brush next time; the selection goes with the tool)
+  sketch_pen_end(false), sketch_vec_tool_ = 0, sketch_vec_drag_.clear();  // (round 390: a Pen path under way is kept)
   sketch_.active = false;
   sketch_.stroking = sketch_.erasing = false;
   sketch_.drag_handle = -1;
@@ -344,6 +345,13 @@ bool Editor::sketch_erase_at(const Recti &view, Vec2 px) {
   return any;
 }
 
+/* A stroke's fill with the alpha it is drawn with: `color` is its line's with the layer's alpha in it (round 390). */
+static uint32_t sketch_fill_shown(const SketchStroke &st, uint32_t color) {
+  const uint32_t line_a = (st.color >> 24) & 0xFF, shown_a = (color >> 24) & 0xFF, fill_a = (st.fill >> 24) & 0xFF;
+  const uint32_t a = line_a ? std::min<uint32_t>(255, fill_a * shown_a / line_a) : fill_a;
+  return a << 24 | (st.fill & 0xFFFFFF);
+}
+
 /* One stroke as the view shows it: a scene canvas stroke segment by segment, clipped at the camera; a picture-plane
  * one through its points. `color` carries the alpha to draw with. */
 void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint32_t color) {
@@ -373,6 +381,8 @@ void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint3
   std::vector<float> w;
   for (const SketchPoint &p : st.pts) pts.push_back(sketch_to_px(view, {p.x, p.y})), w.push_back(p.w);
   if (st.filled && pts.size() >= 3) return u.canvas.fill_polygon(pts.data(), (int)pts.size(), color);  // (round 388: a Fill)
+  if (st.fill && pts.size() >= 3) u.canvas.fill_polygon(pts.data(), (int)pts.size(), sketch_fill_shown(st, color));  // (round 390: under its line)
+  if (st.width <= 0.0f) return;  // (round 390: Stroke None - the fill alone)
   sketch_paint_stroke(pts, w, color, st.width * px1, st);  // (task 0297: with its brush)
 }
 
@@ -387,7 +397,7 @@ bool Editor::sketch_update(const Recti &view) {
     sketch_xf_cancel();
     return true;
   }
-  if (in.key_pressed[KEY_ESCAPE] && !u.wants_keyboard()) {
+  if (in.key_pressed[KEY_ESCAPE] && !u.wants_keyboard() && sketch_pen_.empty()) {  // (round 390: Esc ends a Pen path first)
     if (g.stroking) sketch_stroke_end(view);
     sketch_end();
     in.key_pressed[KEY_ESCAPE] = false;
@@ -445,6 +455,7 @@ bool Editor::sketch_update(const Recti &view) {
   if (!g.erasing && !g.stroking && sketch_xf_update(view, px)) return true;
   if (sketch_xf_.on && sketch_xf_.drag >= 0) return false;  // (review 389: a drag begun in another view keeps the pointer there)
   if (!g.erasing && sketch_select_update(view, px)) return true;  // (round 388, re-check: the Select tool before the eraser - an Eraser brush had cut instead)
+  if (!g.erasing && !g.stroking && sketch_vector_update(view, px)) return true;  // (round 390: the shapes and the Pen)
   if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered && (in.eraser || brush_kind != 0)) {
     g.erasing = true;
     g.erased = false;
@@ -493,6 +504,7 @@ void Editor::sketch_draw(const Recti &view) {
   sketch_draw_layers(view);  // (task 0234: bottom to top, each with its opacity and blend)
   sketch_draw_selection(view);  // (round 388: the live view's only - never a thumbnail's or a board's export)
   sketch_xf_draw(view);  // (round 389)
+  sketch_vector_draw(view);  // (round 390)
   const auto &g = sketch_;
   if (!g.active) {
     u.canvas.pop_clip();
@@ -619,7 +631,13 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "transform") sketch_transform_command(t);  // (round 389)
     else if (v == "fill") sketch_fill();
     else if (v == "delete") sketch_delete();
-    else Log::warn("sketch: no verb '%s' - on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count|select ...|fill|delete|transform ... (sketch layer for the layer verbs)", v.c_str());  // (round 388: a warning, naming it)
+    else if (v == "shape") sketch_shape_command(t);  // (round 390)
+    else if (v == "pen") sketch_pen_command(t);
+    else if (v == "fillcolor" || v == "strokecolor") sketch_paint_colour_command(t, v == "fillcolor");
+    else if (v == "restyle") sketch_restyle();
+    else if (v == "artboard") sketch_artboard_command(t);
+    else if (v == "svg") sketch_svg_command(t);
+    else Log::warn("sketch: no verb '%s' - on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count|select ...|fill|delete|transform ...|shape ...|pen ...|fillcolor|strokecolor|restyle|artboard ...|svg ... (sketch layer for the layer verbs)", v.c_str());  // (round 388: a warning, naming it)
     ui_.redraw = true;
     return true;
   }

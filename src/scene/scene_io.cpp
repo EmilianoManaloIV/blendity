@@ -294,6 +294,8 @@ static void write_sketch_lines(Out &os, const Sketch &sk) {
       os << "\n";
     }
   }
+  for (const SketchArtboard &a : sk.artboards)  // (round 390)
+    os << "sketch_artboard " << fmt(a.lo.x) << " " << fmt(a.lo.y) << " " << fmt(a.hi.x) << " " << fmt(a.hi.y) << " " << (a.name.empty() ? "Artboard" : a.name) << "\n";
   os << "sketch_active " << sk.active_layer << " " << sk.active_canvas << " " << (sk.follow_camera ? 1 : 0) << "\n";
   if (sk.perspective > 0) {
     os << "sketch_perspective " << sk.perspective;
@@ -313,7 +315,12 @@ static void write_sketch_lines(Out &os, const Sketch &sk) {
     os << " " << st.raw.size();
     for (const SketchPoint &p : st.raw) os << " " << fmt(p.x) << " " << fmt(p.y) << " " << fmt(p.w);
     os << " " << st.brush << " " << fmt(st.opacity) << " " << fmt(st.soft) << " " << st.pressure_to << " " << fmt(st.min_size);  // (task 0297)
-    if (st.filled) os << " filled";  // (round 388; an older build stops before it)
+    if (st.fill) os << " fill " << st.fill;  // (round 390)
+    if (st.bez.size() >= 6 && st.bez.size() % 3 == 0) {
+      os << " bez " << st.bez.size() / 3;
+      for (Vec2 p : st.bez) os << " " << fmt(p.x) << " " << fmt(p.y);
+    }
+    if (st.filled) os << " filled";  // (round 388, last: an older build reads only the line's last word)
     os << "\n";
   }
 }
@@ -524,6 +531,25 @@ const char *parse_uint(const char *p, const char *end, uint64_t &out) {
 
 }  // namespace
 
+/* A Pen path's anchors after "bez" (round 390): its count, then an anchor, its in- and out-handle each as x y. A group cut
+ * short or with a broken number leaves the path out (the stroke keeps its points). The index of its last word. */
+static size_t read_bez(const std::vector<std::string> &t, size_t k, SketchStroke &st) {
+  const size_t n = std::min<size_t>(std::strtoul(t[k].c_str(), nullptr, 10), 300000);
+  std::vector<Vec2> bez;
+  for (size_t i = 0; i < 3 * n && k + 2 + 2 * i < t.size(); i++) bez.push_back({std::strtof(t[k + 1 + 2 * i].c_str(), nullptr), std::strtof(t[k + 2 + 2 * i].c_str(), nullptr)});
+  const bool whole = n >= 2 && bez.size() == 3 * n && std::all_of(bez.begin(), bez.end(), [](Vec2 p) { return std::isfinite(p.x) && std::isfinite(p.y); });
+  if (whole) st.bez = std::move(bez);
+  return k + 6 * n;
+}
+
+/* A stroke line's words after its brush (round 390): "fill <argb>" and "bez ..."; "filled" (round 388) is last. */
+static void read_stroke_extras(const std::vector<std::string> &t, size_t at, SketchStroke &st) {
+  for (size_t k = at; k < t.size(); k++) {
+    if (t[k] == "fill" && k + 1 < t.size()) st.fill = (uint32_t)std::strtoul(t[++k].c_str(), nullptr, 10);
+    else if (t[k] == "bez" && k + 1 < t.size()) k = read_bez(t, k + 1, st);
+  }
+}
+
 /* One line of a sketch (round 324: the scene's and a paper's); false when it isn't a sketch line. */
 static bool read_sketch_line(const std::vector<std::string> &t, std::string_view line, Sketch &sk) {
   const std::string &k = t[0];
@@ -556,6 +582,13 @@ static bool read_sketch_line(const std::vector<std::string> &t, std::string_view
   else if (k == "sketch_layer_mask" && t.size() >= 3 && !sk.layers.empty()) {
     SketchMask &m = sk.layers.back().mask;
     m.on = true, m.invert = t[1] != "0", m.enabled = t[2] != "0";
+  }
+  else if (k == "sketch_artboard" && t.size() >= 6) {  // (round 390)
+    SketchArtboard a;
+    a.lo = {std::strtof(t[1].c_str(), nullptr), std::strtof(t[2].c_str(), nullptr)}, a.hi = {std::strtof(t[3].c_str(), nullptr), std::strtof(t[4].c_str(), nullptr)};
+    for (size_t i = 5; i < t.size(); i++) a.name += (i > 5 ? " " : "") + t[i];
+    const bool ok = std::isfinite(a.lo.x) && std::isfinite(a.lo.y) && std::isfinite(a.hi.x) && std::isfinite(a.hi.y) && a.hi.x > a.lo.x && a.hi.y > a.lo.y;
+    if (ok) sk.artboards.push_back(std::move(a));
   }
   else if (k == "sketch_layer_mask_shape" && t.size() >= 2 && !sk.layers.empty()) {
     const size_t n = std::min<size_t>(std::strtoul(t[1].c_str(), nullptr, 10), 100000);
@@ -616,6 +649,7 @@ static bool read_sketch_line(const std::vector<std::string> &t, std::string_view
       st.pressure_to = std::max(0, std::min(3, std::atoi(t[at + 3].c_str())));
       st.min_size = std::max(0.0f, std::min(1.0f, f(at + 4)));
     }
+    if (at + 4 < t.size()) read_stroke_extras(t, at + 5, st);  // (round 390)
     st.filled = t.back() == "filled";  // (round 388)
     if (!st.pts.empty()) sk.strokes.push_back(std::move(st));
   }

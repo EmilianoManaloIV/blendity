@@ -3092,6 +3092,322 @@ static void tests_round388() {
   });
 }
 
+/* Round 390 (task 0367): Illustrator's shapes, the Pen, fills, artboards and SVG. */
+static void tests_round390() {
+  auto near2 = [](Vec2 a, Vec2 b, float tol) { return std::fabs(a.x - b.x) <= tol && std::fabs(a.y - b.y) <= tol; };
+  auto pt = [](const SketchPoint &p) { return Vec2{p.x, p.y}; };
+  test("Illustrator's shapes (round 390): a rectangle's corners, an ellipse on its equation, a polygon's first point straight up, a star's points alternating at half the radius; a fill under the line on screen, Stroke None the fill alone; each one undo step", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    const Recti v = ed.scene_rect_for_test();
+    const float h = (float)v.h;
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch color 0000ff");
+    ed.command("sketch width 6");
+    ed.command("sketch fillcolor ff0000");
+    ed.command("sketch shape rect 100 100 300 200");
+    const SketchStroke r = ed.sketch_for_test().strokes.back();
+    const bool rect = r.pts.size() == 5 && r.closed && near2(pt(r.pts[0]), {100 / h, 100 / h}, 1e-6f) && near2(pt(r.pts[2]), {300 / h, 200 / h}, 1e-6f) &&
+                      near2(pt(r.pts[4]), pt(r.pts[0]), 0.0f) && r.fill == 0xFFFF0000u && (r.color & 0xFFFFFF) == 0x0000FF && r.width == 6.0f;
+    ed.command("sketch shape ellipse 400 100 600 200");
+    const SketchStroke e = ed.sketch_for_test().strokes.back();
+    float worst = 0.0f;
+    for (const SketchPoint &p : e.pts) worst = std::max(worst, std::fabs(std::pow((p.x - 500 / h) / (100 / h), 2.0f) + std::pow((p.y - 150 / h) / (50 / h), 2.0f) - 1.0f));
+    ed.command("sketch shape polygon 6 100 300 300 500");
+    const SketchStroke g = ed.sketch_for_test().strokes.back();
+    const bool poly = g.pts.size() == 7 && near2(pt(g.pts[0]), {200 / h, 300 / h}, 1e-5f);
+    ed.command("sketch shape star 5 400 300 600 500");
+    const SketchStroke st = ed.sketch_for_test().strokes.back();
+    const Vec2 c{500 / h, 400 / h};
+    const bool star = st.pts.size() == 11 && std::fabs(length(pt(st.pts[0]) - c) - 100 / h) < 1e-5f && std::fabs(length(pt(st.pts[1]) - c) - 50 / h) < 1e-5f;
+    std::printf("    rect %d; the ellipse's points off its equation by %.2g at most; polygon %d; star %d\n", (int)rect, worst, (int)poly, (int)star);
+    CHECK(rect && e.pts.size() == 65 && worst < 1e-4f && poly && star);
+    /* On screen: red inside, the blue line on its edge; Stroke None - no line. */
+    ed.step_frame_headless();
+    const Image &fb = ed.main_fb_for_test();
+    auto px = [&](int x, int y) { return fb.pixels[(size_t)(v.y + y) * fb.width + (v.x + x)]; };
+    auto red = [](uint32_t c) { return ((c >> 16) & 255) > 200 && (c & 255) < 60; };
+    auto blue = [](uint32_t c) { return (c & 255) > 200 && ((c >> 16) & 255) < 60; };
+    const bool inside_red = red(px(200, 150)), edge_blue = blue(px(200, 100));
+    ed.command("sketch strokecolor none");
+    ed.command("sketch fillcolor 00ff00");
+    ed.command("sketch shape rect 700 100 900 200");
+    const SketchStroke &n = ed.sketch_for_test().strokes.back();
+    ed.step_frame_headless();
+    const uint32_t mid = px(800, 150), edge = px(800, 101);
+    const bool green_mid = ((mid >> 8) & 255) > 200 && ((mid >> 16) & 255) < 60, no_line = !blue(edge);
+    std::printf("    the fill red inside %d, the line blue on the edge %d; Stroke None: width %.1f, green inside %d, no line %d\n", (int)inside_red, (int)edge_blue, n.width, (int)green_mid, (int)no_line);
+    CHECK(inside_red && edge_blue && n.width == 0.0f && green_mid && no_line);
+    const size_t before = ed.sketch_for_test().strokes.size();
+    ed.command("undo");
+    CHECK(ed.sketch_for_test().strokes.size() == before - 1);
+    ed.command("sketch shape polygon 2 0 0 10 10");  // (refused: under three sides)
+    ed.command("sketch shape rect 5 5 5 50");         // (refused: no width)
+    CHECK(ed.sketch_for_test().strokes.size() == before - 1);
+    ed.command("sketch off");
+  });
+  test("the Pen (round 390): anchors with handles make a Bezier path - its ends exact, its middle on the cubic, 16 points a segment; clicking the first anchor on the pad closes it, a drag pulls mirrored handles; Esc ends a path before it ends the tool", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    const Recti v = ed.scene_rect_for_test();
+    const float h = (float)v.h;
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch fillcolor none");
+    ed.command("sketch pen 100 300 200 200");
+    ed.command("sketch pen 400 300");
+    ed.command("sketch pen end");
+    const SketchStroke &p = ed.sketch_for_test().strokes.back();
+    const Vec2 p0{100 / h, 300 / h}, c1{200 / h, 200 / h}, p3{400 / h, 300 / h};
+    const Vec2 half = p0 * 0.125f + c1 * 0.375f + p3 * 0.375f + p3 * 0.125f;  // (t = 1/2: the in-handle of a corner anchor is the anchor)
+    std::printf("    %zu anchors, %zu points; the middle at (%.4f, %.4f), the cubic's (%.4f, %.4f)\n", p.bez.size() / 3, p.pts.size(), p.pts[8].x, p.pts[8].y, half.x, half.y);
+    CHECK(p.bez.size() == 6 && p.pts.size() == 17 && near2(pt(p.pts[0]), p0, 1e-6f) && near2(pt(p.pts[16]), p3, 1e-6f) && near2(pt(p.pts[8]), half, 1e-5f) && !p.closed);
+    /* On the pad by the mouse: a click, a drag, a click on the first anchor. */
+    ed.sketch_vec_tool_for_test(5);
+    auto ev = [&](platform::EventType t, int x, int y) {
+      platform::Event e = pen_ev(t, v.x + x, v.y + y);
+      e.pointer = platform::Pointer::Mouse, e.pen = false;
+      return e;
+    };
+    const size_t n0 = ed.sketch_for_test().strokes.size();
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, 300, 400)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, 300, 400)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, 300, 400)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, 500, 400)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, 500, 400)});
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, 540, 440)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, 540, 440)});
+    const size_t anchors = ed.sketch_pen_anchors_for_test();
+    ed.step_frame_headless({ev(platform::EventType::MouseMove, 302, 401)});
+    ed.step_frame_headless({ev(platform::EventType::MouseDown, 302, 401)});
+    ed.step_frame_headless({ev(platform::EventType::MouseUp, 302, 401)});
+    const SketchStroke &q = ed.sketch_for_test().strokes.back();
+    const bool closed = ed.sketch_for_test().strokes.size() == n0 + 1 && q.closed && q.bez.size() == 6;
+    const bool mirrored = closed && near2(q.bez[5], {540 / h, 440 / h}, 1e-5f) && near2(q.bez[4], {460 / h, 360 / h}, 1e-5f);
+    std::printf("    by the mouse: %zu anchors before the close; closed %d, the handles mirrored %d\n", anchors, (int)closed, (int)mirrored);
+    CHECK(anchors == 2 && closed && mirrored && ed.sketch_pen_anchors_for_test() == 0);
+    /* Esc with a path under way ends the path; the tool stays on. */
+    ed.command("sketch pen 100 100");
+    ed.command("sketch pen 200 100");
+    platform::Event esc = ev(platform::EventType::KeyDown, 300, 400);
+    esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    CHECK(ed.sketch_pen_anchors_for_test() == 0 && ed.sketch_for_test().strokes.back().bez.size() == 6 && ed.sketch_active_for_test());
+    ed.command("sketch off");
+  });
+  test("SVG out and in (round 390): a drawing exported and read back has the same layers, blend, points, Pen anchors and fills; another program's SVG - path commands absolute and relative, each element, a group's transform, style= - lands fitted to the view; artboards cut the export and are saved", [&] {
+    const std::string dir = fs::join(fs::temp_dir(), "blendity_round390");
+    fs::make_dirs(dir);
+    const std::string file = fs::join(dir, "drawing.svg");
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch fillcolor 336699");
+    ed.command("sketch shape star 5 100 100 300 300");
+    ed.command("sketch fillcolor none");
+    ed.command("sketch pen 400 300 450 200");
+    ed.command("sketch pen 600 300 650 400");
+    ed.command("sketch pen 700 200");
+    ed.command("sketch pen end");
+    ed.command("sketch layer add Inks");
+    ed.command("sketch layer blend multiply");
+    ed.command("sketchstroke 100 500 300 520");
+    ed.command("sketch svg export " + file);
+    const Sketch a = ed.sketch_for_test();
+    Editor ed2;
+    ed2.init_headless(1400, 900);
+    ed2.step_frame_headless();
+    ed2.command("sketch on");
+    ed2.command("sketch clear");
+    ed2.command("sketch svg import " + file);
+    const Sketch &b = ed2.sketch_for_test();
+    float worst = 0.0f;
+    bool same = b.strokes.size() == a.strokes.size();
+    for (size_t i = 0; same && i < a.strokes.size(); i++) {
+      const SketchStroke &x = a.strokes[i], &y = b.strokes[i];
+      same = x.pts.size() == y.pts.size() && x.bez.size() == y.bez.size() && x.fill == y.fill && x.closed == y.closed && std::fabs(x.width - y.width) < 1e-3f;
+      for (size_t k = 0; same && k < x.pts.size(); k++) worst = std::max(worst, length(pt(x.pts[k]) - pt(y.pts[k])));
+      for (size_t k = 0; same && k < x.bez.size(); k++)  // (an open path's first in-handle and last out-handle shape nothing: SVG has no place for them)
+        if (x.closed || (k != 1 && k != x.bez.size() - 1)) worst = std::max(worst, length(x.bez[k] - y.bez[k]));
+    }
+    const bool layers = b.layers.size() >= 2 && b.layers[b.strokes.back().layer].name == "Inks" && b.layers[b.strokes.back().layer].blend == kSketchMultiply;
+    std::printf("    %zu strokes back, the points %.2g off at most, the layers and Multiply %d\n", b.strokes.size(), worst, (int)layers);
+    CHECK(same && worst < 1e-3f && layers);
+    /* Another program's SVG. */
+    const std::string foreign = fs::join(dir, "foreign.svg");
+    fs::write_file(foreign, R"svg(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <g transform="translate(10,20) scale(2)" style="stroke:#00ff00; stroke-width:1">
+    <rect x="0" y="0" width="10" height="5" fill="none"/>
+  </g>
+  <path d="M10 10 L20 10 h5 v5 C30 20 35 20 40 15 s10-5 15 0 Q60 10 65 15 T75 15 z m5 5 l5 0 a5 5 0 0 1 10 0" fill="#ff0000"/>
+  <circle cx="50" cy="50" r="10" fill="blue"/>
+  <ellipse cx="50" cy="80" rx="10" ry="5" fill="rgb(0,128,0)" opacity="0.5"/>
+  <line x1="0" y1="0" x2="100" y2="100" stroke="black"/>
+  <polyline points="0,90 10,95 20,90" fill="none" stroke="#123"/>
+  <polygon points="80,80 90,80 85,90"/>
+  <defs><rect x="0" y="0" width="5" height="5"/></defs>
+</svg>)svg");
+    Editor ed3;
+    ed3.init_headless(1400, 900);
+    ed3.step_frame_headless();
+    ed3.command("sketch on");
+    ed3.command("sketch clear");
+    ed3.command("sketch svg import " + foreign);
+    const Sketch &f = ed3.sketch_for_test();
+    const SketchStroke &rect = f.strokes[0];
+    const float s = 0.8f / 100.0f;
+    const bool rect_ok = rect.pts.size() == 5 && near2(pt(rect.pts[0]), {0.1f + 10 * s, 0.1f + 20 * s}, 1e-5f) && near2(pt(rect.pts[2]), {0.1f + 30 * s, 0.1f + 30 * s}, 1e-5f) &&
+                         rect.fill == 0 && (rect.color & 0xFFFFFF) == 0x00FF00 && std::fabs(rect.width - 2.0f * s * 1000.0f) < 1e-3f;
+    const SketchStroke &path = f.strokes[1];
+    const bool path_ok = path.closed && path.fill == 0xFFFF0000u && near2(pt(path.pts[0]), {0.1f + 10 * s, 0.1f + 10 * s}, 1e-5f);
+    const SketchStroke &sub2 = f.strokes[2];  // (the second subpath: from (10, 10) where z left it, m5 5, l5 0, then the arc's 10 0 - its end at (30, 15))
+    const bool arc_ok = near2(pt(sub2.pts.back()), {0.1f + 30 * s, 0.1f + 15 * s}, 1e-4f) && sub2.bez.empty();
+    const SketchStroke &ell = f.strokes[4];
+    const bool ell_ok = (ell.fill >> 24) == 128 && (ell.fill & 0xFFFFFF) == 0x008000;
+    std::printf("    %zu strokes from the foreign SVG on '%s'; the group's rect %d, the path %d, the arc's end %d, the ellipse half seen %d\n", f.strokes.size(),
+                f.layers[f.strokes[0].layer].name.c_str(), (int)rect_ok, (int)path_ok, (int)arc_ok, (int)ell_ok);
+    CHECK(f.strokes.size() == 8 && rect_ok && path_ok && arc_ok && ell_ok && f.layers[f.strokes[0].layer].name == "SVG foreign");
+    /* An artboard: the export's view box is it; the paper text keeps it, the fill and the Pen's path. */
+    ed.command("sketch artboard add Logo 100 100 300 300");
+    const std::string cut = fs::join(dir, "logo.svg");
+    ed.command("sketch svg export " + cut + " Logo");
+    std::string text;
+    fs::read_file(cut, text);
+    const float h = (float)ed.scene_rect_for_test().h;
+    char vb[96];
+    std::snprintf(vb, sizeof(vb), "viewBox=\"%.3f", 100 / h * 1000.0f);
+    std::string want = vb;
+    while (want.back() == '0') want.pop_back();
+    Sketch back;
+    float aspect = 0.0f;
+    uint32_t color = 0;
+    const bool loaded = load_paper_text(save_paper_text(ed.sketch_for_test(), 1.0f, 0xFFFFFFFFu), back, aspect, color);
+    const bool kept = loaded && back.artboards.size() == 1 && back.artboards[0].name == "Logo" && back.strokes.size() == ed.sketch_for_test().strokes.size() &&
+                      back.strokes[0].fill == ed.sketch_for_test().strokes[0].fill && back.strokes[1].bez.size() == 9;
+    std::printf("    the artboard's view box %d; the paper text keeps the artboard, the fill and the path %d\n", (int)(text.find(want) != std::string::npos), (int)kept);
+    CHECK(text.find(want) != std::string::npos && kept);
+    ed.command("sketch artboard remove Logo");
+    CHECK(ed.sketch_for_test().artboards.empty());
+    fs::remove_file(file), fs::remove_file(foreign), fs::remove_file(cut);
+    ed.command("sketch off");
+  });
+  test("SVG's hard cases (round 390 review): numbers after Z end the path (it had hung), Z Z closes once, opacity set both ways counts once, a gradient's fill is its fallback or none, a transform that overflows leaves the shape out; a broken Pen group in the file keeps the stroke's points", [&] {
+    auto read = [](const std::string &body, std::vector<SketchSvgLayer> &layers) {
+      std::string err;
+      layers.clear();
+      return sketch_svg_read("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\">" + body + "</svg>", layers, err);
+    };
+    std::vector<SketchSvgLayer> l;
+    const bool z_number = read("<path d=\"M0 0 L10 0 L10 10 Z 5 5\" stroke=\"#000\" fill=\"none\"/><path d=\"M0 0 L5 5 z#\" stroke=\"#000\"/>", l) && l.size() == 1 && l[0].strokes.size() == 2;
+    read("<path d=\"M0 0 C10 0 20 0 30 0 L30 30 Z Z\" stroke=\"#000\" fill=\"none\"/>", l);
+    const bool zz = l.size() == 1 && l[0].strokes.size() == 1 && l[0].strokes[0].pts.size() == 49;
+    read("<rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"#ff0000\" opacity=\"0.5\" style=\"opacity:0.5\"/>", l);
+    const bool once = l.size() == 1 && (l[0].strokes[0].fill >> 24) == 128;
+    read("<rect width=\"10\" height=\"10\" fill=\"url(#g) #00ff00\"/><rect width=\"10\" height=\"10\" fill=\"url(#g)\" stroke=\"#000\"/>", l);
+    const bool url = l.size() == 1 && l[0].strokes.size() == 2 && (l[0].strokes[0].fill & 0xFFFFFF) == 0x00FF00 && l[0].strokes[1].fill == 0;
+    read("<g transform=\"matrix(1e30 0 0 1e30 0 0)\"><g transform=\"scale(1e30)\"><rect width=\"10\" height=\"10\"/></g></g><rect width=\"10\" height=\"10\" stroke=\"#000\" stroke-width=\"1e30\"/>", l);
+    const bool overflow = l.size() == 1 && l[0].strokes.size() == 1 && std::isfinite(l[0].strokes[0].width) && l[0].strokes[0].width <= 200.0f;
+    Sketch back;
+    float aspect = 0.0f;
+    uint32_t color = 0;
+    const std::string text = "blendity_paper 1\npaper 1 4294967295\nsketch_layer Layer\nsketch_stroke 0 0 0 4278190080 2 0 0 0 0 0 0 0 0 2 0 0 1 1 1 1 0 1 1 0 1 0 fill 4294901760 bez 2 0 0 0 0 0.5\n";
+    const bool loaded = load_paper_text(text, back, aspect, color) && back.strokes.size() == 1 && back.strokes[0].pts.size() == 2 && back.strokes[0].bez.empty() && back.strokes[0].fill == 0xFFFF0000u;
+    std::printf("    numbers after Z %d, Z Z %d, opacity once %d, url %d, overflow left out %d, a cut-short Pen group %d\n", (int)z_number, (int)zz, (int)once, (int)url, (int)overflow, (int)loaded);
+    CHECK(z_number && zz && once && url && overflow && loaded);
+  });
+  test("the vector tools' edges (round 390 review): Esc ends a console Pen path with no tool picked, picking another tool keeps a path under way, Restyle refuses to hide strokes and leaves a locked layer alone", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    const Recti v = ed.scene_rect_for_test();
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch fillcolor none");
+    ed.command("sketch pen 100 100");
+    ed.command("sketch pen 200 100");
+    platform::Event esc = pen_ev(platform::EventType::KeyDown, v.x + 300, v.y + 300);
+    esc.pointer = platform::Pointer::Mouse, esc.pen = false, esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({pen_ev(platform::EventType::MouseMove, v.x + 300, v.y + 300)});
+    ed.step_frame_headless({esc});
+    const bool esc_ended = ed.sketch_pen_anchors_for_test() == 0 && ed.sketch_for_test().strokes.size() == 1 && ed.sketch_active_for_test();
+    ed.command("sketch pen 100 200");
+    ed.command("sketch pen 200 200");
+    ed.sketch_vec_tool_for_test(1);
+    const bool kept = ed.sketch_pen_anchors_for_test() == 0 && ed.sketch_for_test().strokes.size() == 2;
+    ed.command("sketch select rect 0 0 400 400");
+    ed.command("sketch strokecolor none");
+    ed.command("sketch restyle");
+    const bool refused = ed.sketch_for_test().strokes[0].width > 0.0f;
+    ed.command("sketch strokecolor 0000ff");
+    ed.command("sketch layer lock");
+    ed.command("sketch restyle");
+    const bool locked_left = (ed.sketch_for_test().strokes[0].color & 0xFFFFFF) != 0x0000FF;
+    ed.command("sketch layer unlock");
+    std::printf("    Esc ended the console path %d, another tool kept it %d, Restyle refused %d, the locked layer left %d\n", (int)esc_ended, (int)kept, (int)refused, (int)locked_left);
+    CHECK(esc_ended && kept && refused && locked_left);
+    ed.command("sketch off");
+  });
+  test("the Eraser across a filled rectangle drawn on the pad (round 390 review): its pieces are lines - no fill, no path", [&] {
+    PadRig r;
+    r.ed.command("sketch place flat");
+    r.ed.command("sketch fillcolor ff0000");
+    const Vec2 c = r.mid();
+    using platform::EventType;
+    r.ed.sketch_vec_tool_for_test(1);
+    r.step({pen_ev(EventType::MouseMove, (int)c.x - 100, (int)c.y - 60)});
+    r.step({pen_ev(EventType::MouseDown, (int)c.x - 100, (int)c.y - 60)});
+    r.step({pen_ev(EventType::MouseMove, (int)c.x + 100, (int)c.y + 60)});
+    r.step({pen_ev(EventType::MouseUp, (int)c.x + 100, (int)c.y + 60)});
+    const Sketch &s = r.ed.sketch_for_test();
+    const bool made = s.strokes.size() == 1 && s.strokes[0].fill == 0xFFFF0000u;
+    r.ed.sketch_vec_tool_for_test(0);
+    CHECK(r.click("brush:Eraser"));
+    r.step({pen_ev(EventType::MouseMove, (int)c.x, (int)c.y - 120)});
+    r.step({pen_ev(EventType::MouseDown, (int)c.x, (int)c.y - 120)});
+    for (int i = 1; i <= 12; i++) r.step({pen_ev(EventType::MouseMove, (int)c.x, (int)c.y - 120 + i * 20)});
+    r.step({pen_ev(EventType::MouseUp, (int)c.x, (int)c.y + 120)});
+    r.step();
+    bool lines = s.strokes.size() >= 2;
+    for (const SketchStroke &st : s.strokes) lines = lines && st.fill == 0 && st.bez.empty() && !st.closed;
+    std::printf("    the rectangle made %d; the Eraser's %zu pieces lines %d\n", (int)made, s.strokes.size(), (int)lines);
+    CHECK(made && lines);
+  });
+  test("vector strokes under the other tools (round 390): Free Transform moves a Pen path's anchors with its points; the eraser's and a selection's cuts leave lines, not shapes", [&] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.step_frame_headless();
+    const float h = (float)ed.scene_rect_for_test().h;
+    ed.command("sketch on");
+    ed.command("sketch clear");
+    ed.command("sketch fillcolor ff0000");
+    ed.command("sketch pen 100 100 150 50");
+    ed.command("sketch pen 300 100");
+    ed.command("sketch pen 200 250");
+    ed.command("sketch pen close");
+    ed.command("sketch transform move 40 0");
+    ed.command("sketch transform commit");
+    const SketchStroke &p = ed.sketch_for_test().strokes.back();
+    const bool moved = p.bez.size() == 9 && near2(p.bez[0], {140 / h, 100 / h}, 1e-5f) && near2(pt(p.pts[0]), p.bez[0], 1e-5f) && p.fill == 0xFFFF0000u;
+    ed.command("sketch select rect 0 0 200 400");
+    ed.command("sketch delete");
+    bool lines = !ed.sketch_for_test().strokes.empty();
+    for (const SketchStroke &st : ed.sketch_for_test().strokes) lines = lines && st.fill == 0 && st.bez.empty();
+    std::printf("    the path moved with its anchors %d; the cut pieces lines %d (%zu)\n", (int)moved, (int)lines, ed.sketch_for_test().strokes.size());
+    CHECK(moved && lines);
+    ed.command("sketch off");
+  });
+}
+
 /* Round 389 (task 0366): Free Transform, and the brush's tilt. */
 static void tests_round389() {
   auto bounds = [](const Sketch &s, int layer, Vec2 &lo, Vec2 &hi) {
@@ -3334,4 +3650,5 @@ void run_sketch_tests() {
   tests_round324();
   tests_round388();
   tests_round389();
+  tests_round390();
 }
