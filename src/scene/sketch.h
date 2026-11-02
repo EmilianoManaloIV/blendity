@@ -51,11 +51,33 @@ struct SketchStroke {
   float opacity = 1.0f, soft = 0.0f;
   int pressure_to = 1;
   float min_size = 0.0f;
+  bool filled = false;  // (round 388: a closed shape filled with the colour - a selection's Fill - not a line along it)
   /* The fit's parameters, in the canvas's frame (an arc, an ellipse): the centre, the radii, the first axis's angle,
    * where the arc starts and how far it sweeps (radians, counter-clockwise on a y-down canvas is negative). */
   Vec2 center;
   float rx = 0.0f, ry = 0.0f, angle = 0.0f, start = 0.0f, sweep = 0.0f;
 };
+
+/* A layer mask (round 388, task 0365): shapes in the canvas's frame (a selection's outline each) that reveal the layer
+ * inside them; `invert` hides it there instead; off, the layer shows whole. Photoshop: a layer mask made from a
+ * selection (Reveal Selection / Hide Selection). */
+struct SketchMask {
+  bool on = false, invert = false, enabled = true;
+  std::vector<std::vector<Vec2>> shapes;
+  bool shows_all() const { return !on || !enabled; }
+};
+
+/* Photoshop's blend modes in its menu's order (round 388): the first four are task 0234's, kept at their numbers. */
+enum SketchBlend {
+  kSketchNormal, kSketchMultiply, kSketchScreen, kSketchOverlay, kSketchDissolve, kSketchDarken, kSketchColorBurn, kSketchLinearBurn,
+  kSketchDarkerColor, kSketchLighten, kSketchColorDodge, kSketchLinearDodge, kSketchLighterColor, kSketchSoftLight, kSketchHardLight,
+  kSketchVividLight, kSketchLinearLight, kSketchPinLight, kSketchHardMix, kSketchDifference, kSketchExclusion, kSketchSubtract, kSketchDivide,
+  kSketchHue, kSketchSaturation, kSketchColor, kSketchLuminosity, kSketchBlendCount
+};
+const char *sketch_blend_name(int mode);
+int sketch_blend_index(const std::string &name);  // (any case; spaces and dashes ignored: "soft-light", "Soft Light"); -1 none
+/* The mode's colour of source `s` over backdrop `d` (0xAARRGGBB, as the frame keeps them), alpha left out. */
+uint32_t sketch_blend_rgb(uint32_t d, uint32_t s, int mode);
 
 struct SketchLayer {
   std::string name = "Layer";
@@ -69,10 +91,14 @@ struct SketchLayer {
   /* The Layers panel (task 0234): a locked layer takes no stroke and no erase; the blend mode and the opacity
    * composite the layer over what is under it, as Photoshop composites; a group is a layer holding others. */
   bool locked = false;
-  int blend = 0;     // 0 Normal, 1 Multiply, 2 Screen, 3 Overlay
+  int blend = 0;     // SketchBlend
   int group = -1;    // the index of the group layer it sits in, -1 none
   bool is_group = false;
-  bool plain() const { return visible && opacity == 1.0f && correct == 2 && name == "Layer" && !locked && blend == 0 && group < 0 && !is_group; }
+  bool clip = false;  // (round 388: a clipping mask - shown only where the nearest unclipped layer under it is)
+  SketchMask mask;
+  bool plain() const {
+    return visible && opacity == 1.0f && correct == 2 && name == "Layer" && !locked && blend == 0 && group < 0 && !is_group && !clip && !mask.on;
+  }
 };
 
 /* The scene's sketch: its layers and strokes, and the perspective guide - saved with the scene, since its vanishing
@@ -104,6 +130,9 @@ struct Sketch {
   void flatten();  // (one layer; hidden layers' strokes go, as Photoshop flattens)
   int add_group(const std::string &name, int child);  // (the group right above its child)
   bool layer_shown(int i) const;  // (visible, and its group visible)
+  /* A clipped layer's base (round 388): the nearest unclipped layer under it in the same group - a group too (its
+   * composited picture); -1 none. */
+  int clip_base(int i) const;
   const SketchCanvas *canvas_at(int id) const;
   SketchCanvas *canvas_at(int id);
 };

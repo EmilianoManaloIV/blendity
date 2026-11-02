@@ -934,6 +934,13 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 - **The left stick, flicked sideways,** picks one of 8 colours, shown round your left hand. **The right stick, flicked up or down,** makes the brush bigger or smaller (`vr brush <cm>`).
 - **Strokes** go into a Stroke object of their own, "VR Sketch", each colour its own material, so they render and export like any mesh. A undoes only VR strokes.
 
+**Draw: blend modes, masks and selections** (round 388):
+- **A layer's blend list** has Photoshop's 27 modes (`sketch layer blend <mode>`).
+- **Clip** (Layers) shows a layer only where the layer under it is; again releases it.
+- **More > Select > Rectangle or Lasso**, then drag on the pad: Alt+Backspace fills the selection with the pen's colour, Delete cuts it out of the active layer, Ctrl+D deselects.
+- **Add Mask** (Layers) shows the layer only inside the selection (no selection: all of it); `sketch layer mask hide|invert|off|delete`.
+- **A new or opened paper** becomes the pad's canvas.
+
 **Painting in VR** (round 386): turn Paint on for an object at the desk, then `vr paint on`:
 - **The right trigger** paints where the right controller's ray meets the object; the harder you press, the stronger (or bigger, by the brush's Pressure).
 - **Hold the right grip** while painting to erase.

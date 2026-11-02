@@ -18,36 +18,27 @@ namespace bl {
 
 namespace {
 
-constexpr int kBlendNormal = 0, kBlendMultiply = 1, kBlendScreen = 2, kBlendOverlay = 3;
-const char *const kBlendNames[4] = {"Normal", "Multiply", "Screen", "Overlay"};
+constexpr int kBlendNormal = kSketchNormal;
 constexpr int kThumbPoints = 400;  // (a thumbnail draws this many points at most)
 constexpr int kRowWide = 250, kRowMid = 180;  // (px: a row this wide shows the blend combo; this wide the slider)
 constexpr int kSliderW = 70, kComboW = 84;
 constexpr float kOpaque = 0.999f;
 
-inline uint32_t blend_channel(uint32_t d, uint32_t s, int mode) {
-  switch (mode) {
-    case kBlendMultiply: return d * s / 255;
-    case kBlendScreen: return 255 - (255 - d) * (255 - s) / 255;
-    case kBlendOverlay: return d < 128 ? 2 * d * s / 255 : 255 - 2 * (255 - d) * (255 - s) / 255;
-    default: return s;
-  }
+/* The modes' names for the blend list (round 388: Photoshop's 27). */
+const char *const *blend_names() {
+  static const char *names[kSketchBlendCount];
+  for (int i = 0; i < kSketchBlendCount; i++) names[i] = sketch_blend_name(i);
+  return names;
 }
 
-/* The layer's colour blended with the frame's by the mode, channel by channel; the alpha is the caller's. */
-inline uint32_t blend_rgb(uint32_t d, uint32_t s, int mode) {
-  uint32_t out = 0;
-  for (int shift = 0; shift <= 16; shift += 8) out |= blend_channel((d >> shift) & 255, (s >> shift) & 255, mode) << shift;
-  return out;
-}
+/* A Normal layer at full opacity, unclipped and unmasked, draws straight to the frame: no picture of its own. */
+bool layer_simple(const SketchLayer &l) { return l.blend == kBlendNormal && l.opacity >= kOpaque && !l.clip && l.mask.shows_all(); }
 
-/* A Normal layer at full opacity draws straight to the frame: no picture of its own. */
-bool layer_simple(const SketchLayer &l) { return l.blend == kBlendNormal && l.opacity >= kOpaque; }
-
-int blend_index(const std::string &name) {
-  for (int i = 0; i < 4; i++)
-    if (to_lower(name) == to_lower(kBlendNames[i])) return i;
-  return -1;
+/* Dissolve's noise at a pixel (0-255): a pixel shows when the coverage is above it, as Photoshop dissolves. */
+uint32_t dissolve_noise(int x, int y) {
+  uint32_t h = (uint32_t)x * 374761393u + (uint32_t)y * 668265263u;
+  h = (h ^ (h >> 13)) * 1274126177u;
+  return (h ^ (h >> 16)) % 255;  // (0-254: a fully covered pixel always shows - review 388)
 }
 
 }  // namespace
@@ -79,6 +70,8 @@ bool Editor::sketch_layer_takes_strokes(int i, bool say) {
 /* The layers bottom to top, each with its own strokes (bucketed once); a stroke whose layer is gone draws as it is. */
 void Editor::sketch_draw_layers(const Recti &view) {
   const Sketch &s = sketch_doc();
+  for (auto &kv : sketch_clip_covs_) kv.second.clear();  // (each picture: a base's coverage is only this frame's, this sketch's)
+  sketch_clip_covs_.clear();
   std::vector<std::vector<size_t>> by_layer(s.layers.size());
   for (size_t k = 0; k < s.strokes.size(); k++) {
     const int l = s.strokes[k].layer;
@@ -99,8 +92,12 @@ void Editor::sketch_draw_layers(const Recti &view) {
 void Editor::sketch_draw_layer(int i, const std::vector<size_t> &strokes, const Recti &view, bool in_group) {
   const Sketch &s = sketch_doc();
   const SketchLayer &l = s.layers[(size_t)i];
+  const bool base_of_clip = sketch_clips_onto(i);
+  const int base = l.clip ? sketch_clip_base(i) : -1;
+  if (l.clip && (base < 0 || !sketch_clip_covs_.count(base))) return;  // (its base hidden, empty or missing: nothing of it shows, as in Photoshop)
   if (strokes.empty() || l.opacity <= 0.0f) return;
-  const bool direct = !in_group && layer_simple(l);
+  const float opacity = l.clip ? l.opacity * s.layers[(size_t)base].opacity : l.opacity;  // (Photoshop: the base's opacity over its clipped layers)
+  const bool direct = !in_group && layer_simple(l) && !base_of_clip;
   Image &c = sketch_comp_[0];
   if (!direct) sketch_composite_clear(c, view);
   Image *frame = direct ? nullptr : ui_.canvas.swap_target(&c);
@@ -114,8 +111,76 @@ void Editor::sketch_draw_layer(int i, const std::vector<size_t> &strokes, const 
   }
   if (direct) return;
   ui_.canvas.swap_target(frame);
-  sketch_composite_over(c, view, l.opacity, l.blend);
+  if (!l.mask.shows_all()) sketch_apply_mask(c, view, l.mask);
+  if (l.clip) sketch_apply_clip(c, view, base);
+  if (base_of_clip) sketch_keep_clip(c, view, i);
+  sketch_composite_over(c, view, opacity, l.blend);
 }
+
+int Editor::sketch_clip_base(int i) const { return sketch_doc().clip_base(i); }
+
+/* Whether a clipped layer above i has i for its base: the layers above it in its group, up to the next unclipped one
+ * (nothing past that can clip to i). */
+bool Editor::sketch_clips_onto(int i) const {
+  const Sketch &s = sketch_doc();
+  if (i < 0 || (size_t)i >= s.layers.size() || s.layers[(size_t)i].clip) return false;
+  const int group = s.layers[(size_t)i].group;
+  for (size_t k = (size_t)i + 1; k < s.layers.size(); k++) {
+    if (s.layers[k].group != group) continue;
+    if (!s.layers[k].clip) return false;
+    return true;
+  }
+  return false;
+}
+
+/* The mask's shapes drawn into a picture of their own (white where they reveal), the layer's coverage multiplied by
+ * it (or by its inverse). */
+void Editor::sketch_apply_mask(Image &c, const Recti &view_, const SketchMask &m) {
+  Image &mk = sketch_comp_[3];
+  sketch_composite_clear(mk, view_);
+  Image *frame = ui_.canvas.swap_target(&mk);
+  std::vector<Vec2> px;
+  for (const std::vector<Vec2> &shape : m.shapes) {
+    px.clear();
+    for (Vec2 p : shape) px.push_back(sketch_to_px(view_, p));
+    if (px.size() >= 3) ui_.canvas.fill_polygon(px.data(), (int)px.size(), 0xFFFFFFFFu);
+  }
+  ui_.canvas.swap_target(frame);
+  const Recti view = sketch_screen_rect(view_);
+  for (int y = std::max(0, view.y); y < std::min(c.height, view.bottom()); y++) {
+    uint32_t *row = c.pixels.data() + (size_t)y * c.width;
+    const uint32_t *mrow = mk.pixels.data() + (size_t)y * mk.width;
+    for (int x = std::max(0, view.x); x < std::min(c.width, view.right()); x++) {
+      const uint32_t a = row[x] >> 24, mv = m.invert ? 255 - (mrow[x] >> 24) : mrow[x] >> 24;
+      if (a) row[x] = (row[x] & 0xFFFFFF) | ((a * mv / 255) << 24);
+    }
+  }
+}
+
+/* A clipped layer's coverage multiplied by its base's, kept when the base was drawn. */
+void Editor::sketch_apply_clip(Image &c, const Recti &view_, int base) {
+  const std::vector<uint8_t> &cov = sketch_clip_covs_[base];
+  const Recti view = sketch_screen_rect(view_);
+  for (int y = std::max(0, view.y); y < std::min(c.height, view.bottom()); y++) {
+    uint32_t *row = c.pixels.data() + (size_t)y * c.width;
+    for (int x = std::max(0, view.x); x < std::min(c.width, view.right()); x++) {
+      const size_t k = (size_t)y * c.width + x;
+      const uint32_t a = row[x] >> 24, b = k < cov.size() ? cov[k] : 0u;
+      if (a) row[x] = (row[x] & 0xFFFFFF) | ((a * b / 255) << 24);
+    }
+  }
+}
+
+/* A base's coverage kept for the layers clipped to it, its own slot (review 388: one slot had let a group's base
+ * overwrite a top-level one). */
+void Editor::sketch_keep_clip(const Image &c, const Recti &view_, int base) {
+  std::vector<uint8_t> &cov = sketch_clip_covs_[base];
+  cov.assign(c.pixels.size(), 0);
+  const Recti view = sketch_screen_rect(view_);
+  for (int y = std::max(0, view.y); y < std::min(c.height, view.bottom()); y++)
+    for (int x = std::max(0, view.x); x < std::min(c.width, view.right()); x++) cov[(size_t)y * c.width + x] = (uint8_t)(c.pixels[(size_t)y * c.width + x] >> 24);
+}
+
 
 /* A group: its children composited into the group's transparent picture, then that picture put over the frame by
  * the group's opacity and blend. */
@@ -128,6 +193,7 @@ void Editor::sketch_draw_group(int i, const std::vector<std::vector<size_t>> &by
   for (size_t k = 0; k < s.layers.size(); k++)
     if (s.layers[k].group == i && !s.layers[k].is_group && sketch_layer_shown((int)k)) sketch_draw_layer((int)k, by_layer[k], view, true);
   ui_.canvas.swap_target(frame);
+  if (sketch_clips_onto(i)) sketch_keep_clip(gc, view, i);  // (round 388: a layer clipped to the group)
   sketch_composite_over(gc, view, g.opacity, g.blend);
 }
 
@@ -156,8 +222,10 @@ void Editor::sketch_composite_over(const Image &c, const Recti &view_, float opa
       const uint32_t cov = src[x] >> 24;
       if (!cov) continue;
       uint32_t rgb = src[x] & 0xFFFFFF;
-      if (blend != kBlendNormal && (dst[x] >> 24) == 255) rgb = blend_rgb(dst[x], rgb, blend);
-      const uint32_t a = (uint32_t)std::lround(cov * op);
+      uint32_t a = (uint32_t)std::lround(cov * op);
+      if (blend == kSketchDissolve) a = a > dissolve_noise(x, y) ? 255 : 0;  // (round 388: whole pixels, by the coverage)
+      if (!a) continue;
+      if (blend != kBlendNormal && blend != kSketchDissolve && (dst[x] >> 24) == 255) rgb = sketch_blend_rgb(dst[x], rgb, blend);
       dst[x] = Color::over(dst[x], rgb | (a << 24));
     }
   }
@@ -181,7 +249,8 @@ void Editor::draw_layers_window(const Recti &r) {
   Sketch &s = sketch_doc();
   if (s.layers.empty()) s.layers.push_back(SketchLayer{});
   const int rh = u.row_h() + u.px(10), bh = u.row_h() + u.px(6);
-  const Recti footer{r.x, r.bottom() - 2 * bh - u.px(4), r.w, 2 * bh + u.px(4)};
+  const int rows = r.h >= 8 * bh ? 3 : 2;  // (review 388: a short window keeps two rows - Clip and the masks are in the row's right-click menu too)
+  const Recti footer{r.x, r.bottom() - rows * bh - u.px(4), r.w, rows * bh + u.px(4)};
   const Recti list{r.x, r.y, r.w, footer.y - r.y};
   const int n = (int)s.layers.size();
   layers_shown_.clear();
@@ -208,12 +277,15 @@ void Editor::draw_layers_window(const Recti &r) {
   u.canvas.pop_clip();
   u.canvas.fill_rect(footer, u.theme.bar);
   const int bw = (footer.w - u.px(8)) / 3;
-  const char *const labels[6] = {"New Layer", "Group", "Duplicate", "Merge Down", "Flatten", "Delete"};
-  const char *const ops[6] = {"add", "group", "duplicate", "merge", "flatten", "delete"};
-  const char *const tips[6] = {"A new layer on top of the stack (sketch layer add)", "A group right above the active layer, holding it; its opacity scales the children",
+  const char *const labels[9] = {"New Layer", "Group", "Duplicate", "Merge Down", "Flatten", "Delete", "Clip", "Add Mask", "Delete Mask"};
+  const char *const ops[9] = {"add", "group", "duplicate", "merge", "flatten", "delete", "clip", "mask add", "mask delete"};
+  const char *const tips[9] = {"A new layer on top of the stack (sketch layer add)", "A group right above the active layer, holding it; its opacity scales the children",
                                "A copy of the active layer with its strokes, above it", "The active layer's strokes onto the one under it (its opacity kept)",
-                               "Every shown stroke on one layer (hidden layers' strokes go, as in Photoshop)", "The active layer and its strokes (the last one is emptied)"};
-  for (int k = 0; k < 6; k++) {
+                               "Every shown stroke on one layer (hidden layers' strokes go, as in Photoshop)", "The active layer and its strokes (the last one is emptied)",
+                               "A clipping mask: the layer shows only where the layer under it is (again: released). Photoshop: Alt+click the border",
+                               "A layer mask from the selection: the layer shows only inside it (no selection: all of it). Photoshop: Add Layer Mask",
+                               "The active layer's mask removed: the layer shows whole"};
+  for (int k = 0; k < rows * 3; k++) {
     const Recti br{footer.x + u.px(4) + (k % 3) * bw, footer.y + u.px(2) + (k / 3) * bh, bw - u.px(2), bh - u.px(2)};
     if (u.button(br, labels[k])) sketch_layer_op(ops[k], s.active_layer);
     u.tooltip(tips[k]);
@@ -279,9 +351,9 @@ void Editor::draw_layer_row(int i, const Recti &row, bool child) {
   }
   if (layers_opacity_dirty_ && !in.down[0]) layers_opacity_dirty_ = false, sketch_changed("Sketch Layer Opacity");  // (once the slider is let go)
   if (!wide) return;
-  int blend = std::max(0, std::min(3, l.blend));
-  if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, kBlendNames, 4)) l.blend = blend, sketch_changed("Sketch Layer Blend");
-  u.tooltip("How the layer's color meets what is under it: Multiply darkens, Screen lightens, Overlay does both.");
+  int blend = std::max(0, std::min((int)kSketchBlendCount - 1, l.blend));  // (review 388: it had stopped at Overlay)
+  if (u.combo(u.id(("layer_blend" + std::to_string(i)).c_str()), {x, top, combo_w, a}, blend, blend_names(), kSketchBlendCount)) l.blend = blend, sketch_changed("Sketch Layer Blend");
+  u.tooltip("How the layer's color meets what is under it - Photoshop's 27: Multiply darkens, Screen lightens, Overlay and Soft Light do both.");
 }
 
 /* The name: a press on it or the thumbnail picks the layer, a drag reorders (the display slot is the drag's index),
@@ -301,7 +373,8 @@ void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int t
     layers_rename_ = -1;
     return;
   }
-  u.label(name, l.name, active ? u.theme.text_bright : u.theme.text);
+  const std::string marks = std::string(l.clip ? "  [clip]" : "") + (l.mask.on ? (l.mask.enabled ? "  [mask]" : "  [mask off]") : "");  // (round 388)
+  u.label(name, l.name + marks, active ? u.theme.text_bright : u.theme.text);
   if (u.hovered(name) && in.double_clicked[0]) layers_rename_ = i, layers_rename_text_ = l.name;
   else if ((u.hovered(name) || u.hovered(thumb)) && in.pressed[0]) s.active_layer = i;
   if (u.record_buttons) u.button_rects["layer_row" + std::to_string(i)] = name;
@@ -319,6 +392,14 @@ void Editor::draw_layer_name(int i, const Recti &name, const Recti &thumb, int t
     if (uu.menu_item("Merge Down", nullptr, false, i > 0)) return sketch_layer_op("merge", i);
     if (uu.menu_item(locked ? "Unlock" : "Lock")) return sketch_layer_op("lock toggle", i);
     if (uu.menu_item(sketch_solo_ == i ? "Show All" : "Solo")) return sketch_layer_op(sketch_solo_ == i ? "unsolo" : "solo", i);
+    uu.menu_separator();
+    const SketchLayer &lr = sk.layers[(size_t)i];
+    const bool clip = lr.clip, mask = lr.mask.on, mask_on = lr.mask.enabled;
+    if (uu.menu_item(clip ? "Release Clipping Mask" : "Create Clipping Mask", nullptr, false, !is_group)) return sketch_layer_op("clip", i);  // (round 388)
+    if (uu.menu_item("Add Mask", nullptr, false, !is_group)) return sketch_layer_op("mask add", i);
+    if (uu.menu_item("Invert Mask", nullptr, false, mask)) return sketch_layer_op("mask invert", i);
+    if (uu.menu_item(mask_on ? "Disable Mask" : "Enable Mask", nullptr, false, mask)) return sketch_layer_op(mask_on ? "mask off" : "mask on", i);
+    if (uu.menu_item("Delete Mask", nullptr, false, mask)) return sketch_layer_op("mask delete", i);
     uu.menu_separator();
     if (uu.menu_item("Delete")) sketch_layer_op("delete", i);
   });
@@ -383,18 +464,18 @@ void Editor::sketch_layer_command(const std::vector<std::string> &t, const std::
     if (!name.empty()) s.layer_at(s.active_layer).name = name, sketch_changed("Rename Sketch Layer");
   }
   else if (w == "blend") {
-    const int b = blend_index(t.size() > 3 ? t[3] : "normal");
-    if (b < 0) {
-      Log::info("usage: sketch layer blend normal|multiply|screen|overlay");
-      return;
-    }
+    const int b = sketch_blend_index(t.size() > 3 ? line_rest_words(t, 3) : "normal");
+    if (b < 0) return Log::warn("sketch layer blend: no mode '%s' - %s", t.size() > 3 ? line_rest_words(t, 3).c_str() : "", sketch_blend_list().c_str());
     s.layer_at(s.active_layer).blend = b;
     sketch_changed("Sketch Layer Blend");
   }
+  else if (w == "clip") sketch_layer_clip(t.size() > 3 ? to_lower(t[3]) : "");
+  else if (w == "mask") sketch_layer_mask(t.size() > 3 ? to_lower(t[3]) : "");
   else if (w == "lock" || w == "unlock" || w == "toggle" || w == "solo" || w == "unsolo" || w == "duplicate" || w == "merge" || w == "flatten" || w == "delete")
     sketch_layer_op(w == "lock" && t.size() > 3 && to_lower(t[3]) == "toggle" ? "lock toggle" : w, s.active_layer);
   else if (!w.empty() && std::isdigit((unsigned char)w[0])) s.active_layer = std::max(0, std::min((int)s.layers.size() - 1, std::atoi(w.c_str())));
-  else Log::info("usage: sketch layer add|group [name] | duplicate | merge | flatten | delete | move <from> <to> | rename <name> | lock|unlock | toggle | solo|unsolo | blend <mode> | <n>");
+  else if (w.empty()) Log::info("usage: sketch layer add|group [name] | duplicate | merge | flatten | delete | move <from> <to> | rename <name> | lock|unlock | toggle | solo|unsolo | blend <mode> | clip [on|off] | mask add|hide|invert|delete|on|off | <n>");
+  else Log::warn("sketch layer: no verb '%s' - add|group [name] | duplicate | merge | flatten | delete | move <from> <to> | rename <name> | lock|unlock | toggle | solo|unsolo | blend <mode> | clip [on|off] | mask add|hide|invert|delete|on|off | <n>", w.c_str());
   ui_.redraw = true;
 }
 
@@ -408,6 +489,8 @@ void Editor::sketch_layer_op(const std::string &op, int i) {
     run_console_command("sketch layer add");
     return;
   }
+  if (op == "clip") return sketch_layer_clip("");  // (round 388)
+  if (op.rfind("mask ", 0) == 0) return sketch_layer_mask(op.substr(5));
   if (op == "group") {
     s.add_group("", i);
     sketch_solo_ = -1;

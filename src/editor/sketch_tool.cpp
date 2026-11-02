@@ -30,6 +30,7 @@ void Editor::sketch_begin() {
 
 void Editor::sketch_end() {
   sketch_keynav_ = false;  // (task 0233: no key moves the view once the tool is off)
+  sketch_select_tool_ = 0, sketch_sel_drag_.clear(), sketch_sel_.clear();  // (review 388: back to the brush next time; the selection goes with the tool)
   sketch_.active = false;
   sketch_.stroking = sketch_.erasing = false;
   sketch_.drag_handle = -1;
@@ -370,6 +371,7 @@ void Editor::sketch_draw_stroke(const Recti &view, const SketchStroke &st, uint3
   std::vector<Vec2> pts;
   std::vector<float> w;
   for (const SketchPoint &p : st.pts) pts.push_back(sketch_to_px(view, {p.x, p.y})), w.push_back(p.w);
+  if (st.filled && pts.size() >= 3) return u.canvas.fill_polygon(pts.data(), (int)pts.size(), color);  // (round 388: a Fill)
   sketch_paint_stroke(pts, w, color, st.width * px1, st);  // (task 0297: with its brush)
 }
 
@@ -434,6 +436,7 @@ bool Editor::sketch_update(const Recti &view) {
   /* The eraser end, or the Eraser or Stroke Eraser brush (task 0297): the Eraser cuts the strokes it crosses (the pen's
    * end too, on the Draw tab), the Stroke Eraser takes them whole. */
   const int brush_kind = sketch_brush_here() ? sketch_brush_cur().kind : 0;
+  if (!g.erasing && sketch_select_update(view, px)) return true;  // (round 388, re-check: the Select tool before the eraser - an Eraser brush had cut instead)
   if (!g.stroking && !g.erasing && in.pressed[0] && sketch_view_.hovered && (in.eraser || brush_kind != 0)) {
     g.erasing = true;
     g.erased = false;
@@ -476,10 +479,11 @@ bool Editor::sketch_update(const Recti &view) {
 void Editor::sketch_draw(const Recti &view) {
   auto &u = ui_;
   const Sketch &s = sketch_doc();
-  if (s.strokes.empty() && !sketch_.active) return;
+  if (s.strokes.empty() && !sketch_.active && sketch_sel_.empty()) return;
   u.canvas.push_clip(sketch_screen_rect(view));  // (round 319: the pad zoomed or turned - its rect on screen)
   const float px1 = (float)u.px(1.0f);
   sketch_draw_layers(view);  // (task 0234: bottom to top, each with its opacity and blend)
+  sketch_draw_selection(view);  // (round 388: the live view's only - never a thumbnail's or a board's export)
   const auto &g = sketch_;
   if (!g.active) {
     u.canvas.pop_clip();
@@ -600,7 +604,10 @@ bool Editor::sketch_command(const std::vector<std::string> &t, const std::string
     else if (v == "count") Log::info("Sketch: %zu strokes on %zu layers", s.strokes.size(), s.layers.size());
     else if (v == "view") sketch_layer_view();  // (task 0226)
     else if (v == "overlay") g.overlay = to_lower(arg(2, "on")) != "off";
-    else Log::info("usage: sketch on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count (sketch layer for the layer verbs)");
+    else if (v == "select") sketch_select_command(t);  // (round 388)
+    else if (v == "fill") sketch_fill();
+    else if (v == "delete") sketch_delete();
+    else Log::warn("sketch: no verb '%s' - on|off|clear|color <hex>|width <px>|steady <px>|correct none|light|full|layer ...|opacity <0-1>|hide|show|count|select ...|fill|delete (sketch layer for the layer verbs)", v.c_str());  // (round 388: a warning, naming it)
     ui_.redraw = true;
     return true;
   }

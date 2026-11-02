@@ -634,6 +634,12 @@ Turn Paint on for an object at the desk, then `vr paint on`: in VR View your rig
 ! cmd:vr paint | Painting in VR: needs Paint on for an object first (the message says so)
 ? You want to erase a smudge in VR. What do you hold? | The right grip while you paint: the stroke erases (the grip doesn't grab while painting; the left one still does).
 ? Why does `vr paint on` say to turn Paint on first? | VR paints the object in Paint mode, with the desk's brush and layer - choose the object and turn Paint on at the desk.
+# Draw: selections, masks and blend modes
+The Draw tab's layers work as Photoshop's. A layer's blend list has Photoshop's 27 modes - Multiply for shadows, Screen and Soft Light for light. Clip makes a layer show only where the layer under it is (colour inside your linework without going over). More > Select > Rectangle or Lasso picks an area: Alt+Backspace fills it with the pen's colour, Delete cuts it out of the active layer, Add Mask shows the layer only inside it, and Ctrl+D deselects.
+> docs/tasks/0365-draw-blend-masks-selections.md: Built
+! cmd:sketch layer blend soft-light | The active sketch layer in Soft Light
+? You painted shadows on a layer above your colours and they spill outside the shapes. What fixes it? | Clip the shadow layer to the colour layer under it (Layers > Clip): it shows only where the colours are.
+? How do you fill a rectangle with the pen's colour? | More > Select > Rectangle, drag it on the pad, then Alt+Backspace (or More > Select > Fill).
 # Imported animations: a model's clips
 A model file often carries its animations: a Mixamo character with its walk, a Blender export with its actions, a glTF with animations. Blendity does what Unity's importer does: each becomes a clip asset in Assets/Animations/<model>/, the first one playing on the model's root through an Animation component, open in the Animation window and listed in the Sequencer. An FBX's clips are read at the file's frame rate, every bone's turn and move a frame at a time; a glTF's at the rate its keys fit (Blender's 24, 25, 30...), the turns baked a frame at a time (a quaternion curve isn't a few Euler keys) and the moves at the file's own keys. Shape-key animation comes along as BlendShape tracks. The clips are files: edit them, bake springs onto them, or play another on the character.
 ! cmd:window Animation | Open the Animation window: an imported model's clips play on its root

@@ -284,8 +284,8 @@ std::vector<std::string> Editor::paper_names() const {
 bool Editor::paper_command(const std::vector<std::string> &t) {
   const std::string v = t.size() > 1 ? to_lower(t[1]) : "list";
   const std::string rest = t.size() > 2 ? join_words(t, 2) : "";
-  if (v == "new") paper_new(rest);
-  else if (v == "open" && !rest.empty()) paper_open(rest);
+  if (v == "new") paper_new(rest), draw_source_command("paper");  // (round 388: the pad shows it, as New Paper's tooltip says; the source change drops the selection)
+  else if (v == "open" && !rest.empty() && paper_open(rest)) draw_source_command("paper");  // (review 388: a failed open switches nothing)
   else if (v == "rename" && !rest.empty()) paper_rename(rest);
   else if (v == "duplicate") paper_duplicate();
   else if (v == "delete") paper_delete();

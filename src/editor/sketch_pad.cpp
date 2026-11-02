@@ -487,6 +487,8 @@ void Editor::draw_pad_more_menu() {
   });
   u.tooltip("The paper's color when the source is Paper.");
   u.submenu("Pen", u.px(200), [this] { draw_sketch_pen_menu(); });
+  u.submenu("Select", u.px(240), [this] { draw_sketch_select_items(); });  // (round 388)
+  u.tooltip("Photoshop's selections: a rectangle or a lasso dragged on the pad, then Fill, Delete or Add Mask (Layers).");
   u.submenu("Guides", u.px(240), [this] { draw_sketch_guides_items(); });
   const bool scene_pic = draw_source_ != 2;  // (round 324: a paper isn't in the scene - Build and Place in 3D are the scene's)
   if (scene_pic) u.submenu("Build", u.px(240), [this] { draw_sketch_build_items(); });
@@ -701,6 +703,7 @@ bool Editor::draw_source_command(const std::string &w) {
     return true;
   }
   draw_source_ = w == "game" ? 1 : w == "paper" ? 2 : 0;
+  sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_solo_ = -1;  // (another sketch, or the scene's again: review 324)
   if (draw_source_ == 2) paper_ensure_open();  // (round 324: the paper used last, or a new one)
   draw_cache_.key = 0;
