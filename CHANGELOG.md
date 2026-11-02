@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 396): the Unity bridge against VRChat's real SDK
+
+**Asked:** "VCC is installed so you can test the actual world and avatar VRChat SDK."
+
+**Added (task 0373)**
+- **`bridges/unity/run_sdk_tests.py`:** copies of the VCC avatar and world projects, the bridge added, Blendity's recorded
+  session replayed onto the SDK's real types, and the SDK's own checks and Performance Rank as a report.
+- **What the SDK found, fixed:** an avatar with no body (its meshes beside the rig: no avatar is set up now until they
+  share a root, and the recorded session has one), no Animator, no pipeline manager by the descriptors, and the link's
+  own components refused (now VRChat's editor-only ones); the Budget's bones counted as VRChat counts them.
+
+**Checked:** both projects pass with no SDK error; Blendity's Budget of the recorded avatar equals the SDK's values and
+ranks on PC and Quest (tests_livelink, against the report kept in tests/fixtures).
+
 ## 2026-11-02 (round 395): Unity scenes as Unity shows them, and Filamented
 
 **Asked:** "see if you can import these models into the editor and place them with textures, shaders, etc." (a VRChat

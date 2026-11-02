@@ -5950,6 +5950,9 @@ static void tests_round355() {
     ed.command("select Head");
     ed.command("bone add Head 0.1");
     ed.command("spring add Bone hair");
+    GameObject *arm = nullptr;  // (review 396: bones are what a skin names, as VRChat counts them - the cube skinned to the rig)
+    ed.scene().for_each([&](GameObject &o) { arm = !arm && o.get<Armature>() ? &o : arm; });
+    if (arm) g->add<SkinModifier>()->object = arm->name;
     all.clear();
     ed.scene().for_each([&](GameObject &o) { all.push_back(&o); });
     c = budget_count(all);

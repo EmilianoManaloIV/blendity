@@ -1,4 +1,11 @@
 {
   "name": "Blendity.LiveLink",
-  "rootNamespace": "Blendity.LiveLink"
+  "rootNamespace": "Blendity.LiveLink",
+  "versionDefines": [
+    {
+      "name": "com.vrchat.base",
+      "expression": "",
+      "define": "BLENDITY_VRCSDK"
+    }
+  ]
 }

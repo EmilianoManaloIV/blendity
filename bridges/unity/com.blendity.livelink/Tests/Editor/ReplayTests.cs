@@ -33,10 +33,16 @@ namespace Blendity.LiveLink.Tests
 
         static void CheckAvatar(GameObject rigGo, System.Type descType)
         {
-            var desc = rigGo.GetComponent(descType);
+            Assert.NotNull(rigGo.transform.parent, "the rig under the avatar's root");
+            var avatarGo = rigGo.transform.parent.gameObject;  // (round 396: the avatar's root - Rig, Face and Arm under one, as VRChat needs)
+            Assert.AreEqual("Avatar", avatarGo.name);
+            var desc = avatarGo.GetComponent(descType);
             Assert.NotNull(desc);
+            Assert.NotNull(avatarGo.GetComponent<Animator>());  // (round 396: the real SDK refuses an avatar without one)
             var view = (Vector3)Member(desc, "ViewPosition");
-            Assert.That(Vector3.Distance(view, new Vector3(0, 1.5f, 0.05f)), Is.LessThan(1e-4f), "the view between the eyes: " + view);
+            // (round 396: in the avatar root's space - the rig is scaled 2, its eyes rest at 1.5 m and 5 cm in its own)
+            Assert.That(Vector3.Distance(view, new Vector3(0, 3f, 0.1f)), Is.LessThan(1e-4f), "the view between the eyes: " + view);
+            Assert.IsNull(rigGo.GetComponent(descType));
             Assert.AreEqual("VisemeBlendShape", Member(desc, "lipSync").ToString());
             var face = GameObject.Find("Face").GetComponent<SkinnedMeshRenderer>();
             Assert.AreEqual(face, Member(desc, "VisemeSkinnedMesh"));
@@ -142,17 +148,23 @@ namespace Blendity.LiveLink.Tests
             Assert.IsTrue(GameObjectUtility.GetStaticEditorFlags(box).HasFlag(StaticEditorFlags.ContributeGI));
             var rigGo = GameObject.Find("Rig");
             var descType = LiveLinkApplier.FindType(LiveLinkApplier.AvatarDescriptorType);
-            if (descType == null)
+            if (descType == null)  // (round 396: a world project has VRChat's PhysBone too - worlds use them - so only the descriptor's absence is checked)
             {
-                Assert.IsNull(rigGo.transform.Find(LiveLinkApplier.PhysBonesName));
-                Debug.Log("Blendity Live Link: no VRChat avatar SDK in this project - nothing of an avatar's set");
+                Assert.IsNull(rigGo.transform.parent.GetComponent<Animator>());
+                if (LiveLinkApplier.FindType(LiveLinkApplier.PhysBoneType) == null)
+                    Assert.IsNull(rigGo.transform.Find(LiveLinkApplier.PhysBonesName));
+                Debug.Log("Blendity Live Link: no VRChat avatar SDK in this project - no Avatar Descriptor set");
             }
             else
                 CheckAvatar(rigGo, descType);
             var sceneType = LiveLinkApplier.FindType(LiveLinkApplier.SceneDescriptorType);
             if (sceneType != null)  // (a world project: one Scene Descriptor, however many syncs)
             {
-                Assert.AreEqual(1, Object.FindObjectsByType(sceneType, FindObjectsInactive.Include, FindObjectsSortMode.None).Length);
+                var scenes = Object.FindObjectsByType(sceneType, FindObjectsInactive.Include, FindObjectsSortMode.None);
+                Assert.AreEqual(1, scenes.Length);
+                var pipeline = LiveLinkApplier.FindType(LiveLinkApplier.PipelineManagerType);
+                if (pipeline != null)  // (round 396: beside it, as the SDK's builder requires)
+                    Assert.NotNull(((Component)scenes[0]).GetComponent(pipeline));
                 Debug.Log("Blendity Live Link: VRChat's Scene Descriptor set (the world SDK's stand-in)");
             }
             // Round 379: the rig's "Wave" an AnimationClip asset; sampled at frame 30 it poses Upper as Blendity did last.

@@ -68,11 +68,31 @@ double texture_mb(const TextureRef &t, std::unordered_set<std::string> &seen) {
   return (double)tex->width * (double)tex->height * (4.0 / 3.0) / (1024.0 * 1024.0);
 }
 
-/* What one object adds: its mesh (and an Outline's shell, a mesh and a material slot more in an engine), its bone, its
- * spring chain and the bones under it, its light, its materials' textures. */
+/* The armature a mesh's skin follows (by name, as SkinModifier finds it), or nullptr. */
+const GameObject *skin_armature(const GameObject &g) {
+  const SkinModifier *s = g.get<SkinModifier>();
+  if (!s || !s->enabled || s->object.empty() || !g.scene) return nullptr;
+  const GameObject *t = g.scene->find_by_name(s->object);
+  return t && t != &g && t->get<Armature>() ? t : nullptr;
+}
+
+/* The transforms a skin names in an engine (skin_joints: its armature and everything under it, at most 4096), into
+ * `joints` - a set, so a nested rig or two meshes on one rig count once. Round 396: VRChat's SDK counts the bones the
+ * skinned meshes name (5 for a rig of 4 bones: the rig itself one of them); counting Bone components had said 4. */
+void add_skeleton(const GameObject &arm, std::unordered_set<const GameObject *> &joints) {
+  std::vector<const GameObject *> under{&arm};
+  for (size_t n = 0; !under.empty() && n < 4096; n++) {
+    const GameObject *b = under.back();
+    under.pop_back();
+    joints.insert(b);
+    for (const GameObject *k : b->children) under.push_back(k);
+  }
+}
+
+/* What one object adds: its mesh (and an Outline's shell, a mesh and a material slot more in an engine), its spring
+ * chain and the bones under it, its light, its materials' textures (its skin's bones: budget_count, as a set). */
 void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string> &textures, std::unordered_set<const GameObject *> &roots) {
   double *v = c.value;
-  if (g.get<Bone>()) v[(int)BudgetRow::Bones] += 1;
   if (const Light *l = g.get<Light>(); l && l->enabled) v[(int)BudgetRow::Lights] += 1;
   if (const SpringBone *sb = g.get<SpringBone>(); sb && sb->enabled) {
     /* (Round 359: chains under one RootBone_ are one PhysBone component - Bone Root's point.) */
@@ -113,16 +133,23 @@ BudgetCounts budget_count(const std::vector<GameObject *> &objects) {
   BudgetCounts c;
   std::unordered_set<const GameObject *> once;
   std::unordered_set<std::string> textures;
-  std::unordered_set<const GameObject *> roots;
-  for (GameObject *g : objects)
-    if (g && g->active_in_hierarchy() && once.insert(g).second) count_object(*g, c, textures, roots);
+  std::unordered_set<const GameObject *> roots, joints;
+  for (GameObject *g : objects) {
+    if (!g || !g->active_in_hierarchy() || !once.insert(g).second) continue;
+    count_object(*g, c, textures, roots);
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    const GameObject *arm = mr && mr->enabled ? skin_armature(*g) : nullptr;
+    if (arm) add_skeleton(*arm, joints);  // (review 396: what the skins name, not every armature present)
+  }
+  c.value[(int)BudgetRow::Bones] = (double)joints.size();
   return c;
 }
 
 BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
   BudgetCounts c;
   double *v = c.value;
-  std::unordered_set<const ExportSkin *> skins;
+  std::unordered_set<uint64_t> joints;  // (review 396: the skins' joints as a set - a nested rig's are its outer rig's too)
+  double unnamed = 0.0;                 // (a skin without its joints' objects: its joints counted once per rig)
   std::unordered_set<uint64_t> rigs;
   std::unordered_set<std::string> textures;
   for (const ExportItem &it : items) {
@@ -137,9 +164,10 @@ BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
       for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map})
         v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures);
     }
-    if (!it.skin || !skins.insert(it.skin.get()).second || (it.skin->rig && !rigs.insert(it.skin->rig).second)) continue;
-    v[(int)BudgetRow::Bones] += (double)it.skin->joints.size();
+    if (it.skin) joints.insert(it.skin->joint_ids.begin(), it.skin->joint_ids.end());
+    if (it.skin && it.skin->joint_ids.empty() && rigs.insert(it.skin->rig).second) unnamed += (double)it.skin->joints.size();
   }
+  v[(int)BudgetRow::Bones] = (double)joints.size() + unnamed;
   return c;
 }
 

@@ -18,6 +18,7 @@ namespace Blendity.LiveLink
         public const string AvatarDescriptorType = "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor";
         public const string PhysBoneType = "VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone";
         public const string SceneDescriptorType = "VRC.SDK3.Components.VRCSceneDescriptor";
+        public const string PipelineManagerType = "VRC.Core.PipelineManager";
         public const string PhysBonesName = "Blendity PhysBones";
         const StaticEditorFlags StaticFlags = StaticEditorFlags.ContributeGI | StaticEditorFlags.BatchingStatic | StaticEditorFlags.OccluderStatic |
                                               StaticEditorFlags.OccludeeStatic | StaticEditorFlags.ReflectionProbeStatic;
@@ -94,6 +95,11 @@ namespace Blendity.LiveLink
             try
             {
                 var desc = rootGo.GetComponent(type) ?? rootGo.AddComponent(type);
+                /* Round 396 (the real SDK's checks): an avatar's root needs an Animator ("This avatar does not contain an
+                 * Animator") and one pipeline manager - added when missing, never replaced. */
+                if (rootGo.GetComponent<Animator>() == null)
+                    rootGo.AddComponent<Animator>();
+                AddPipelineManager(rootGo);
                 Dictionary<string, string> written;
                 if (!avatarWritten.TryGetValue(id, out written))
                     avatarWritten[id] = written = new Dictionary<string, string>();
@@ -279,6 +285,15 @@ namespace Blendity.LiveLink
             if (type == null || UnityEngine.Object.FindObjectsByType(type, FindObjectsInactive.Include, FindObjectsSortMode.None).Length > 0)
                 return;
             SetMember(root.gameObject.AddComponent(type), "spawns", new[] { root });
+            AddPipelineManager(root.gameObject);  // (round 396: "There must be exactly one on the same game object as the scene descriptor")
+        }
+
+        /* VRChat's pipeline manager (its upload ID's holder) beside a descriptor, when the SDK has one and it isn't there. */
+        static void AddPipelineManager(GameObject go)
+        {
+            var type = FindType(PipelineManagerType);
+            if (type != null && go.GetComponent(type) == null)
+                go.AddComponent(type);
         }
     }
 }
