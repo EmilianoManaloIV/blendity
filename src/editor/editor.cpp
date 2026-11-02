@@ -663,7 +663,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   drop_seq_tracks_.clear();
   if (field_pick_.field && ++field_pick_.age > 1) field_pick_ = FieldPick{};  // (a pick its field didn't take at once)
   if (!seqr_.drawn) seq_drag_cancel();  // (a bar drag whose window went away is dropped, not committed later)
-  seqr_.drawn = false;
+  seqr_.drawn = false, seq_hovered_ = false;  // (re-check 391: set again by the Sequencer while it is drawn)
   sync_material_asset_names();
   keymap_capture_frame();  // (task 0231: a key being assigned is taken before any window or the Wheel sees it)
   wheel_frame();  // (task 0230: a held pen or finger opens the Wheel; an open one takes the press before any window)
@@ -4465,6 +4465,7 @@ void Editor::load_prefs() {
           if (w == l.key) *l.flag = false;
     }
     else if (k == "ffmpeg") ffmpeg_path_ = v;
+    else if (k == "render_preset") ranim_preset_ = std::clamp(std::atoi(v.c_str()), 0, 2);  // (round 391)
     else if (k == "update_check") update_check_ = v != "0";
     else if (k == "update_previews") update_previews_ = v != "0";
     else if (k == "import_preview") import_preview_pref_ = v != "0";  // (task 0152)
@@ -4589,6 +4590,7 @@ void Editor::save_prefs() {
   s += hci_prefs_text();  // (task 0235)
   s += sketch_brush_prefs_text();  // (task 0297)
   s += "ffmpeg=" + ffmpeg_path_ + "\n";
+  s += "render_preset=" + std::to_string(ranim_preset_) + "\n";
   s += assist_prefs_text();
   s += "pen_curve=" + curve_to_text(pen_curve_) + "\n";  // (round 368)
   s += ai_prefs_text();

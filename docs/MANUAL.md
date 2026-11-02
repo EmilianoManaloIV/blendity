@@ -884,6 +884,12 @@ build (**Download** / **Not now** / **Never ask**). The Windows installer's "Ble
 
 **Sound** (round 365, the Sequencer): a WAV dropped onto a lane is a sound bar as long as the recording, played through the default device in step with the Preview's playhead and Play's Sequencer; trim its ends, set its Volume. Render Animation writes sound.wav beside the frames and puts the sound into the MP4. Console: `seq sound <file.wav> <track> <start> [frames]`, `seq volume <bar> <v>`. Linux plays through PulseAudio (libpulse-simple) when it's installed; macOS doesn't play sound yet (the render still has it).
 
+**Footage, keys and edits** (round 391, the Sequencer):
+- **A video** (.mp4, .mov, .mkv, .webm, .avi) dropped onto a lane is footage, as long as the file (`seq video <file> <track> <start>`); it needs FFmpeg, which Blender's libraries bring.
+- **Keys:** `seq key <bar> opacity|x|y|scale|rotation <frame> <value>` (frames from the bar's start) fades, moves, scales or turns a card over the render; `seq unkey` takes them off.
+- **Add Edit** (Alt+B) cuts every bar under the playhead; **Ripple Delete** (Shift+Delete) removes the bar and closes the gap.
+- **Export:** the Render window's preset - H.264 (MP4), ProRes 422 (MOV) to edit further, or VRChat (MP4, at most 1080p, streamable); `renderanim preset h264|prores|vrchat`.
+
 **No MP4?** (round 366): the dependency-free build has no video maker of its own. Render Animation's finish message offers Blender's libraries for this build (Get Blender's Libraries..., `update libs`; or Use Blender's Libraries, `update libson`, when they were turned off), and an ffmpeg program on the PATH or set in Preferences works too. The build with the libraries makes the MP4 itself.
 
 **Objects and the console** (round 367): create makes a Capsule too, refuses a kind it doesn't know, and names a second object as Unity does ("Sphere (1)"); a new Camera is placed at the view, looking its way; Join keeps the last mesh selected when the active object isn't one. Console: `save [path]`, `open <path>`, `new`, `rotate <x y z>`, `scale <s | x y z>`, `set Transform.Position|Rotation|Scale <x y z>`, `saverender [path]`, `ui scale <s>` (was `scale`), and `help` lists every command.

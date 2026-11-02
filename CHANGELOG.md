@@ -2,6 +2,36 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 391): footage, keyed cards, Add Edit, Ripple Delete and export presets
+
+**Asked:** Phase D's fifth round: video footage on the Sequencer, keyframed opacity and transform, a blade cut and ripple
+delete, H.264, ProRes and VRChat export presets, a paper card by its name (round 387's findings 23-25 and 27).
+
+**Added (task 0368)**
+- **Footage** (`seq video`, a video dropped onto a lane): decoded in-process with FFmpeg (render/video_decode); refused
+  in the dependency-free build with Get Blender's Libraries as the fix.
+- **Keys on a card** (`seq key|unkey`): opacity, x, y, scale and rotation, linear, over the render.
+- **Add Edit** (Alt+B, `seq blade`) and **Ripple Delete** (Shift+Delete, `seq ripple`), each one undo step.
+- **Export presets** (the Render window, `renderanim preset h264|prores|vrchat`): ProRes 422 in a .mov, VRChat's MP4
+  at most 1080 lines with its index first.
+- **A paper card by its name** (`seq paper <name> ...`).
+
+**The Opus review's fixes:**
+- a keyed card drawn over the render at every frame, at full opacity too (it had snapped back to black bars);
+- ProRes with an odd height: the chroma's last row written; every encoded picture a frame long (a one-frame MOV had
+  lost it);
+- Add Edit on Alt+B (B for the blade) and Ripple Delete on Shift+Delete as keymap actions over the Sequencer
+  (Ctrl+K stays the Command Palette; Ctrl+Alt+K was a user shortcut's in the tests);
+- a card with no end of its own cut at its length; the preset taken when a render starts; key lines after a skipped
+  bar left out; keys rounded before they are compared, an unkey of nothing refused;
+- the decoder: Blender's frame-rate guess, files only, frames over 8192 x 8192 refused, a slow decode said;
+- the re-check's: the Sequencer's keys forgotten once it isn't drawn, a key read from a file on a whole frame.
+
+**Checked:** keys' values and the file; a keyed card and a clip at speed 2 cut in two; Add Edit's undo; Ripple Delete;
+a keyed card at half opacity and moved over a render; three frames encoded and read back in order with a seek back;
+footage's length and the frame under the playhead; ProRes and H.264 probed; VRChat's 4 x 1080 from 8 x 2160; the
+ffmpeg program's arguments; the dependency-free build's refusal; a paper by its name.
+
 ## 2026-11-02 (round 390): Illustrator's shapes, the Pen, fills, artboards and SVG
 
 **Asked:** Phase D's fourth round: a Bezier pen with anchors and handles in the Draw tab, vector shapes with fills and
@@ -4435,7 +4465,7 @@ own, a hotkey on anything, Store Config to share a layout") for Blendity, Unity'
 - Loading any UI file - the built-ins too - wiped the favorites, the Wheel's sets, the user actions and the panels
   even when the file carried none. A list is replaced only when the file has a line of its kind.
 - A cleared or replaced user action left its chords in the keymap's overrides, where the next new action picked them
-  up (Ctrl+Alt+K ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
+  up (Alt+B ran the new line). A user action takes its chords with it when it goes; a new id never inherits.
 - Two uses after free: Assign Shortcut on a palette entry with no action passed the entry's name by reference into a
   call that rebuilds the palette (a long name read after its free); the My Tools grid read a panel and a palette
   entry after a button's command could have replaced them. The name is copied; the grid draws a copy of the entries

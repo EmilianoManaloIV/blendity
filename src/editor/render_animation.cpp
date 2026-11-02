@@ -19,10 +19,15 @@ namespace bl {
 /* FFmpeg's arguments for numbered PNGs (0001.png...) in `dir` to an H.264 MP4 any player opens (yuv420p needs an even
  * size: an odd one is padded by a pixel); `wav` (round 365), when given, its sound as AAC, cut at the last picture. */
 std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
-                                                const std::string &wav) {
+                                                const std::string &wav, int preset) {
   std::vector<std::string> a = {ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-framerate", strprintf("%g", fps), "-start_number", "1",
                                 "-i", fs::join(dir, "%04d.png")};
   if (!wav.empty()) a.insert(a.end(), {"-i", wav, "-c:a", "aac", "-b:a", "192k", "-shortest"});
+  if (preset == (int)video::Preset::ProRes)  // (round 391: ProRes 422 in a .mov)
+    return a.insert(a.end(), {"-c:v", "prores_ks", "-profile:v", "2", "-vendor", "apl0", "-pix_fmt", "yuv422p10le", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out}), a;
+  if (preset == (int)video::Preset::VRChat)  // (VRChat's players: H.264 High, at most 1080 lines, the index first)
+    return a.insert(a.end(), {"-c:v", "libx264", "-profile:v", "high", "-crf", "20", "-pix_fmt", "yuv420p", "-vf", "scale=-2:'min(1080,ih)',pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                              "-movflags", "+faststart", out}), a;
   a.insert(a.end(), {"-c:v", "libx264", "-pix_fmt", "yuv420p", "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", out});
   return a;
 }
@@ -93,7 +98,8 @@ bool Editor::start_render_animation(int first, int last, float fps) {
   std::string name = render_folder_name(scene_->name);
   for (int k = 2; fs::exists(fs::join(renders, name)) && k < 100; k++) name = render_folder_name(scene_->name) + strprintf("_%d", k);
   ranim_.dir = fs::join(renders, name);
-  ranim_.video = fs::join(renders, name + ".mp4");
+  ranim_.preset = ranim_preset_;  // (review 391: this render's, whatever is picked while it runs)
+  ranim_.video = fs::join(renders, name + video::preset_extension((video::Preset)ranim_.preset));  // (round 391: .mov for ProRes)
   fs::make_dirs(ranim_.dir);
   if (source == 1) seq_set_preview(true);
   else anim_set_preview(true);
@@ -196,9 +202,9 @@ void Editor::finish_render_animation() {
   auto job = std::make_shared<VideoJob>();
   ranim_.encode = job;
   ranim_.encode_video = ranim_.video;
-  const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video, wav_written ? fs::join(ranim_.dir, "sound.wav") : "");
+  const std::vector<std::string> args = ffmpeg_png_to_mp4_args(ffmpeg, ranim_.dir, ranim_.fps, ranim_.video, wav_written ? fs::join(ranim_.dir, "sound.wav") : "", ranim_.preset);
   std::thread([args, job] { job->code.store(sys::run_program(args)); }).detach();
-  render_status_ += "  |  making the MP4...";
+  render_status_ += strprintf("  |  making the %s video...", video::preset_name((video::Preset)ranim_.preset));
   Log::info("Render Animation: FFmpeg is making %s", ranim_.video.c_str());
 }
 
@@ -235,14 +241,15 @@ void Editor::encode_render_video(std::vector<float> sound) {
   const std::vector<std::string> frames = ranim_.written;
   const std::string out = ranim_.video;
   const float fps = ranim_.fps;
+  const video::Preset preset = (video::Preset)ranim_.preset;
   video::init();  // (FFmpeg's log, quieted from this thread)
-  std::thread([frames, out, fps, job, sound = std::move(sound)] {
+  std::thread([frames, out, fps, preset, job, sound = std::move(sound)] {
     std::string error;
-    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel, sound.empty() ? nullptr : &sound, 48000);
+    const bool ok = video::encode_png_frames(frames, fps, out, &error, &job->cancel, sound.empty() ? nullptr : &sound, 48000, preset);
     job->error = error;  // (before the code: the main thread reads it once the code is set)
     job->code.store(ok ? 0 : 1);
   }).detach();
-  render_status_ += "  |  making the MP4...";
+  render_status_ += strprintf("  |  making the %s video...", video::preset_name(preset));
   Log::info("Render Animation: %s is making %s", video::description().c_str(), out.c_str());
 }
 
@@ -282,11 +289,21 @@ void Editor::render_animation_command(const std::vector<std::string> &t) {
   const std::string verb = t.size() > 1 ? to_lower(t[1]) : "";
   if (verb == "stop") return stop_render_animation();
   if (verb == "ffmpeg") return set_ffmpeg_path(t.size() > 2 ? t[2] : "");
+  if (verb == "preset") return set_render_preset(t.size() > 2 ? t[2] : "");  // (round 391)
   const bool numbers = t.size() == 1 || (t.size() >= 3 && std::isdigit((unsigned char)t[1][0]) && std::isdigit((unsigned char)t[2][0]));
-  if (!numbers) return Log::warn("renderanim [first last] [fps] | stop | ffmpeg [path]");
+  if (!numbers) return Log::warn("renderanim [first last] [fps] | stop | ffmpeg [path] | preset h264|prores|vrchat");
   const int first = t.size() > 2 ? std::atoi(t[1].c_str()) : -1, last = t.size() > 2 ? std::atoi(t[2].c_str()) : -1;
   const float fps = t.size() > 3 ? (float)std::atof(t[3].c_str()) : 0.0f;
   start_render_animation(first, last, fps);
+}
+
+/* renderanim preset h264|prores|vrchat (round 391): what the frames become, kept in the preferences. */
+void Editor::set_render_preset(const std::string &name) {
+  video::Preset p = video::Preset::H264;
+  if (!video::parse_preset(name, p)) return Log::warn("renderanim preset: h264 | prores | vrchat (now %s)", video::preset_name((video::Preset)ranim_preset_));
+  ranim_preset_ = (int)p;
+  save_prefs();
+  Log::info("Render Animation: %s (%s)", video::preset_name(p), video::preset_extension(p));
 }
 
 /* Preferences' FFmpeg (empty: look on the PATH). */
@@ -345,7 +362,7 @@ void Editor::draw_render_animation_button(ui::Layout &lay) {
                             : !ffmpeg.empty()  ? "made by " + ffmpeg + "."
                                                : std::string("once there's a video maker (this build has none: its finish offers Blender's libraries).");
   u.tooltip("Every frame of the scene's sequence (or the selected object's clip) through this render, as\n"
-            "Renders/<scene>_animation_<time>/0001.png..., then an MP4 next to them " + maker);
+            "Renders/<scene>_animation_<time>/0001.png..., then a video next to them (the preset below) " + maker);
 }
 
 }  // namespace bl

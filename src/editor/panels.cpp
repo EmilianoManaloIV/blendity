@@ -3958,6 +3958,10 @@ void Editor::draw_render_range(ui::Layout &lay) {
   br.field("Last Frame", ranim_last_, 0, 1000000);
   br.field("Frame Rate", ranim_fps_, 1.0f, 0.0f, 240.0f);
   br.help("First, Last and Frame Rate at 0: the scene sequence's own (or the selected object's clip's).");
+  static const char *const kPresets[] = {"H.264 (MP4)", "ProRes 422 (MOV)", "VRChat (MP4, 1080p)"};
+  int preset = ranim_preset_;
+  if (u.combo(u.id("render_preset"), lay.row(), preset, kPresets, 3)) set_render_preset(preset == 1 ? "prores" : preset == 2 ? "vrchat" : "h264");  // (round 391)
+  u.tooltip("What the frames become: H.264 to share, ProRes 422 to edit further (After Effects, Premiere), or VRChat's video players' MP4.");
 }
 
 /* The Strokes section (task 0248): the tool, its kind and sizes, the normals mode. */

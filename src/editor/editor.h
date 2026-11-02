@@ -88,9 +88,13 @@
 
 namespace bl {
 
+namespace video {
+struct Reader;  // (render/video_decode.h: round 391)
+}
+
 /* FFmpeg's arguments to make an MP4 of numbered PNGs (task 0074). */
 std::vector<std::string> ffmpeg_png_to_mp4_args(const std::string &ffmpeg, const std::string &dir, float fps, const std::string &out,
-                                                const std::string &wav = "");
+                                                const std::string &wav = "", int preset = 0);  // (round 391: video::Preset)
 
 /* A key with modifiers (platform::Mod bits): one binding of a shortcut. */
 struct KeyChord {
@@ -1312,6 +1316,8 @@ class Editor {
   Recti combo_rect_for_test(const char *name) const { return ui_.combo_rect(ui_.id(name)); }
   size_t popup_count_for_test() const { return ui_.popup_count(); }
   bool run_action_for_test(const std::string &id) { return run_action(id); }  // (a keymap action, as its shortcut runs it)
+  void set_seq_hovered_for_test(bool on) { seq_hovered_ = on; }  // (round 391: the Sequencer under the pointer)
+  void seq_select_for_test(const std::string &name) { seqr_.selected_name = name; }
   /* Round 369 (unity_package_ui.cpp): Import Unity Package, unpacked on a worker (at once in headless runs). */
   struct PackageJob {
     std::string path, project_root, into_rel, why;
@@ -2865,6 +2871,7 @@ class Editor {
     int source = 0;  // 1 the scene's sequence, 2 the selected object's clip
     int first = 0, last = 0, frame = 0;
     float fps = 30.0f;
+    int preset = 0;     // (round 391: video::Preset, taken when it starts)
     uint64_t root = 0;  // a clip's object
     std::string dir, video;
     std::vector<std::string> written;
@@ -3231,6 +3238,16 @@ class Editor {
   void eye_test_off();
   /* Round 364: the Sequencer's cards and camera cuts (seq_cards.cpp). */
   const Image *card_picture(const SeqInstance &i, uint64_t *stamp = nullptr);
+  /* Round 391 (seq_footage.cpp): footage, keyed cards, Premiere's Add Edit and Ripple Delete. */
+  const Image *card_picture_at(const SeqInstance &i, float frame, float rate, uint64_t *stamp = nullptr);
+  const Image *card_video_picture(const SeqInstance &i, float frame, float rate, uint64_t *stamp);
+  bool seq_add_video(const std::string &file, int track, float start, float frames);
+  float seq_bar_frames(const SeqInstance &i);
+  bool seq_blade(float frame, int track);
+  bool seq_ripple(const std::string &name);
+  bool seq_hovered_ = false;  // (review 391: the Sequencer under the pointer - its Add Edit and Ripple Delete keys)
+  bool seq_key(const std::string &name, const std::string &channel, float frame, float value, bool remove);
+  std::string seq_paper_by_name(const std::string &media);
   void card_trim_pictures(const Sequence &s);
   /* Round 365 (seq_audio.cpp): the Sequencer's sound, in step with the playhead. */
   struct SeqAudio;
@@ -3242,6 +3259,7 @@ class Editor {
   bool seq_card_there(const SeqInstance &i);
   float sequence_frame_now(SequencePtr &seq);
   void draw_sequence_card(const Recti &img);
+  void draw_keyed_card(const Recti &img, const Image &pic, const SeqCardLook &look);
   void composite_render_card(Image &frame_img, float frame);
   void seq_camera_cut();
   bool seq_add_card(int kind, const std::string &media, int track, float start, float frames);
@@ -3252,6 +3270,9 @@ class Editor {
     int64_t mtime = -1;                   // (an image's file time when read, looked at once a second)
     double checked = -1e9;
     uint64_t made = 0;  // (a stamp: the Game view's fitted copy redone when it changes)
+    std::shared_ptr<video::Reader> video;  // (round 391: footage's reader, opened once; the frame decoded as the playhead moves)
+    bool video_failed = false;
+    double video_at = -1.0;  // (the seconds `img` was decoded at)
   };
   std::unordered_map<std::string, CardPicture> card_pictures_;  // (by kind and path; review 364: never kept stale)
   uint64_t card_stamp_ = 0;
@@ -4194,8 +4215,10 @@ class Editor {
   /* Task 0288: render, MoonRay and AI without the console. */
   int ranim_first_ = 0, ranim_last_ = 0;  // (0: the sequence's or the clip's own)
   float ranim_fps_ = 0.0f;
+  int ranim_preset_ = 0;  // (round 391: video::Preset - H.264, ProRes 422, VRChat)
   std::string seq_folder_;                // (empty: Renders/<scene>_sequence_<time>)
   void draw_render_range(ui::Layout &lay);
+  void set_render_preset(const std::string &name);
   bool start_render_animation_from_fields();
   void draw_ffmpeg_settings();
   void draw_moonray_own_row();

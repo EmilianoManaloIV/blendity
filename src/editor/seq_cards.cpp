@@ -113,6 +113,38 @@ void composite_card(Image &dst, const Image &card) {
   }
 }
 
+uint32_t over_at(uint32_t src, uint32_t dst, float opacity) {
+  const uint32_t a = (uint32_t)std::lround(((src >> 24) & 255) * std::clamp(opacity, 0.0f, 1.0f));
+  if (a == 0) return dst;
+  auto mix = [&](int shift) { return (((src >> shift) & 255) * a + ((dst >> shift) & 255) * (255 - a)) / 255; };
+  return 0xFF000000u | mix(16) << 16 | mix(8) << 8 | mix(0);
+}
+
+/* `card` over `dst` with its keyed look (round 391): fitted as an untouched card is, then scaled about its middle,
+ * turned, moved by x and y (fractions of the frame's width and height) and laid over what is there at the opacity
+ * (nearest pixel) - Premiere's Opacity, Position, Scale and Rotation. */
+void composite_card_look(Image &dst, const Image &card, const SeqCardLook &look) {
+  if (!dst.width || !dst.height || !card.width || !card.height || look.opacity <= 0.0f || look.scale <= 0.0f) return;
+  const float fit = std::min((float)dst.width / card.width, (float)dst.height / card.height) * look.scale;
+  const float r = look.rotation * 3.14159265358979f / 180.0f, c = std::cos(r), s = std::sin(r);
+  const float cx = dst.width * (0.5f + look.x), cy = dst.height * (0.5f + look.y);
+  for (int y = 0; y < dst.height; y++) {
+    uint32_t *row = dst.row(y);
+    for (int x = 0; x < dst.width; x++) {
+      const float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+      const float u = (c * dx + s * dy) / fit + card.width * 0.5f, v = (-s * dx + c * dy) / fit + card.height * 0.5f;
+      if (u < 0.0f || v < 0.0f || u >= card.width || v >= card.height) continue;
+      row[x] = over_at(card.pixels[(size_t)v * card.width + (size_t)u], row[x], look.opacity);
+    }
+  }
+}
+
+/* A card's picture at a sequence frame: footage decoded there, any other card's own picture (round 391). */
+const Image *Editor::card_picture_at(const SeqInstance &i, float frame, float rate, uint64_t *stamp) {
+  if (i.kind == (int)SeqKind::Video) return card_video_picture(i, frame, rate, stamp);
+  return card_picture(i, stamp);
+}
+
 /* The frame the scene's sequence stands at now: Play's Sequencer, else the Sequencer window's Preview; -1 neither. */
 float Editor::sequence_frame_now(SequencePtr &seq) {
   seq = nullptr;
@@ -132,9 +164,10 @@ void Editor::draw_sequence_card(const Recti &img) {
   const float frame = sequence_frame_now(seq);
   const SeqInstance *card = seq && frame >= 0.0f ? sequence_card_at(*seq, frame) : nullptr;
   uint64_t stamp = 0;
-  const Image *pic = card ? card_picture(*card, &stamp) : nullptr;
+  const Image *pic = card ? card_picture_at(*card, frame, seq->frame_rate, &stamp) : nullptr;
   if (seq) card_trim_pictures(*seq);
   if (!pic || img.w <= 0 || img.h <= 0) return;
+  if (!card->keys.empty()) return draw_keyed_card(img, *pic, seq_card_look(*card, frame - card->start));  // (review 391: a keyed bar always - at full opacity too)
   const std::string key = card->media + "#" + std::to_string(stamp);  // (a redrawn paper or a saved image: fitted again)
   if (card_view_.width != img.w || card_view_.height != img.h || card_view_key_ != key) {
     card_view_.resize(img.w, img.h);
@@ -144,13 +177,27 @@ void Editor::draw_sequence_card(const Recti &img) {
   ui_.canvas.blit(card_view_, img.x, img.y);
 }
 
+/* A keyed card over the Game view's picture (round 391): the view's pixels under it, composited a frame at a time. */
+void Editor::draw_keyed_card(const Recti &img, const Image &pic, const SeqCardLook &look) {
+  Image *fb = ui_.canvas.target();
+  const Recti r = img.intersect({0, 0, fb ? fb->width : 0, fb ? fb->height : 0});
+  if (!fb || r.w <= 0 || r.h <= 0) return;
+  card_view_.resize(r.w, r.h);
+  for (int y = 0; y < r.h; y++) std::copy_n(fb->row(r.y + y) + r.x, r.w, card_view_.row(y));
+  composite_card_look(card_view_, pic, look);
+  card_view_key_.clear();  // (the plain card's cached copy is gone)
+  ui_.canvas.blit(card_view_, r.x, r.y);
+}
+
 /* Render Animation's frame: the card at that frame, if any, over the render. */
 void Editor::composite_render_card(Image &frame_img, float frame) {
   SequencePtr seq = seq_sequence();
   const SeqInstance *card = seq ? sequence_card_at(*seq, frame) : nullptr;
-  const Image *pic = card ? card_picture(*card) : nullptr;
+  const Image *pic = card ? card_picture_at(*card, frame, seq->frame_rate) : nullptr;
   if (seq) card_trim_pictures(*seq);
-  if (pic) composite_card(frame_img, *pic);
+  if (!pic) return;
+  if (card->keys.empty()) return composite_card(frame_img, *pic);
+  composite_card_look(frame_img, *pic, seq_card_look(*card, frame - card->start));  // (round 391: over the render, at its opacity and place - review: whenever it has keys)
 }
 
 /* The Preview's camera cut: the scene's camera the cut at the playhead names (the one before Preview restored after). */
@@ -180,6 +227,8 @@ bool Editor::seq_add_card(int kind, const std::string &media_in, int track, floa
   if (kind == (int)SeqKind::Camera && (!scene_->find_by_name(media) || !scene_->find_by_name(media)->get<Camera>()))
     return Log::warn("Sequencer: no camera named '%s'", media.c_str()), false;
   if (kind != (int)SeqKind::Camera && !fs::exists(resolve_asset_path(media))) return Log::warn("Sequencer: no file %s", media.c_str()), false;
+  if (kind == (int)SeqKind::Video && !seq_is_video_file(media))
+    return Log::warn("Sequencer: %s isn't footage (.mp4, .mov, .mkv, .webm, .avi, .m4v)", media.c_str()), false;
   if (kind == (int)SeqKind::Audio && ext != ".wav")
     return Log::warn("Sequencer: %s isn't a WAV file; sounds go on the timeline as WAV (save MP3 and others as WAV)", media.c_str()), false;
   const float sound = kind == (int)SeqKind::Audio ? audio_frames(media, s->frame_rate) : 0.0f;  // (round 365: the sound's own length)
@@ -187,11 +236,11 @@ bool Editor::seq_add_card(int kind, const std::string &media_in, int track, floa
   if (track < 0 || track > (int)s->tracks.size()) return Log::warn("Sequencer: track %d isn't there (0 to %zu)", track, s->tracks.size()), false;
   const float len = std::isfinite(frames) && frames >= 1.0f ? std::min(1e6f, std::round(frames)) : sound >= 1.0f ? sound : 60.0f;
   static const char *const kWhat[] = {"Add Clip to Sequence", "Add Image to Sequence", "Add Paper to Sequence", "Add Camera Cut to Sequence",
-                                      "Add Sound to Sequence"};
+                                      "Add Sound to Sequence", "Add Footage to Sequence"};
   return seq_edit(kWhat[kind], [&](Sequence &q) {
     if (track == (int)q.tracks.size()) {
       q.tracks.emplace_back();
-      q.tracks.back().name = kind == (int)SeqKind::Camera ? "Cameras" : kind == (int)SeqKind::Audio ? "Sound" : "Cards";
+      q.tracks.back().name = kind == (int)SeqKind::Camera ? "Cameras" : kind == (int)SeqKind::Audio ? "Sound" : kind == (int)SeqKind::Video ? "Footage" : "Cards";
     }
     SeqInstance i;
     i.kind = kind, i.media = media, i.start = std::max(0.0f, std::round(start)), i.trim_in = 0.0f, i.trim_out = len;

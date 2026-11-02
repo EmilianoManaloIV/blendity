@@ -137,6 +137,8 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"anim.prev_key", "Previous Key", "Animation", CTX_GLOBAL},
       {"anim.next_key", "Next Key", "Animation", CTX_GLOBAL},
       {"anim.record", "Record (keys from edits)", "Animation", CTX_GLOBAL},
+      {"seq.add_edit", "Add Edit at the Playhead (the Sequencer)", "Sequencer", CTX_GLOBAL},  // (round 391: Premiere's; Ctrl+K stays the palette)
+      {"seq.ripple", "Ripple Delete (the Sequencer)", "Sequencer", CTX_GLOBAL},
       /* Lighting */
       {"lighting.update", "Update Lighting", "Lighting", CTX_GLOBAL},
       /* Tools and transforms */
@@ -277,6 +279,8 @@ static void common_bindings(Keymap &k) {
   b("play.step", {"Ctrl+Alt+P"});
   b("anim.key", {"Shift+K"});  // (task 0258: Unity's Animation window keys with K; K is the Knife here, so Shift+K)
   b("anim.record", {"Ctrl+Shift+K"});
+  b("seq.add_edit", {"Alt+B"});
+  b("seq.ripple", {"Shift+Delete"});
   b("anim.prev_key", {","});
   b("anim.next_key", {"."});
   b("lighting.update", {"Ctrl+Shift+L"});
@@ -960,6 +964,9 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "anim.prev_key") anim_step_key(-1);
   else if (id == "anim.next_key") anim_step_key(1);
   else if (id == "anim.record") anim_toggle_record();
+  else if (id.rfind("seq.", 0) == 0 && !seq_hovered_) return false;  // (round 391: the Sequencer's keys act over it alone)
+  else if (id == "seq.add_edit") seq_blade(seqr_.frame, -1);
+  else if (id == "seq.ripple") seq_ripple(seqr_.selected_name);
   else return false;
   return true;
 }
