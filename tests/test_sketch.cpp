@@ -3356,6 +3356,26 @@ static void tests_round390() {
     CHECK(esc_ended && kept && refused && locked_left);
     ed.command("sketch off");
   });
+  test("the HCI rerun's two (round 393): a new paper's strokes (no layer listed) go into its SVG; a console shape on a paper before any view is drawn is read against the stand-in view (1080 high, the page at the paper's aspect), not a thousand view heights out", [&] {
+    Sketch fresh;
+    SketchStroke st;
+    st.pts = {{0.1f, 0.1f, 1.0f}, {0.5f, 0.2f, 1.0f}};
+    fresh.strokes.push_back(st);
+    const std::string svg = sketch_svg_text(fresh, {0.0f, 0.0f}, {1.0f, 1.0f});
+    std::vector<SketchSvgLayer> back;
+    std::string err;
+    const bool layered = svg.find("<path") != std::string::npos && sketch_svg_read(svg, back, err) && back.size() == 1 && back[0].strokes.size() == 1;
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("paper new R393Paper");
+    ed.command("sketch shape rect 100 100 300 200");  // (no frame drawn: the pad has no rect yet)
+    const Sketch &p = ed.paper_for_test();
+    const bool sane = !p.strokes.empty() && std::fabs(p.strokes.back().pts[2].x - 300.0f / 1080.0f) < 1e-4f && std::fabs(p.strokes.back().pts[2].y - 200.0f / 1080.0f) < 1e-4f;
+    std::printf("    a paper's implicit layer exported %d; the shape's far corner (%.3f, %.3f) in view heights\n", (int)layered, p.strokes.empty() ? -1.0f : p.strokes.back().pts[2].x,
+                p.strokes.empty() ? -1.0f : p.strokes.back().pts[2].y);
+    CHECK(layered && sane);
+    ed.command("paper delete");
+  });
   test("the Eraser across a filled rectangle drawn on the pad (round 390 review): its pieces are lines - no fill, no path", [&] {
     PadRig r;
     r.ed.command("sketch place flat");

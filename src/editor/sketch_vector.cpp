@@ -20,6 +20,7 @@ namespace {
 constexpr float kClosePx = 8.0f;   // (a Pen click this near the first anchor closes the path)
 constexpr float kDragPx = 3.0f;    // (a Pen press moved less than this is a corner; more pulls its handles)
 constexpr float kMinShapePx = 2.0f;  // (a shape drag smaller than this makes nothing)
+constexpr int kStandInViewHeight = 1080;  // (round 393: a paper's pixels before any view has a size - the default window's height)
 
 const char *const kVecShapeNames[] = {"", "Rectangle", "Ellipse", "Polygon", "Star", "Pen"};
 
@@ -44,7 +45,16 @@ void shape_box(Vec2 a, Vec2 b, bool square, bool centre, Vec2 &lo, Vec2 &hi) {
 }  // namespace
 
 /* The view a console command's pixels are in: the pad on Paper, else the Scene view (as sketchstroke's). */
-Recti Editor::sketch_command_view() const { return draw_source_ == 2 ? sketch_view_.view : scene_rect_; }
+Recti Editor::sketch_command_view() const {
+  if (draw_source_ != 2) return scene_rect_;
+  const Recti pad = sketch_view_.view;
+  if (pad.w > 1 && pad.h > 1) return pad;
+  /* Round 393 (the HCI rerun): the pad not drawn yet - a console line before the Draw tab shows - had read every pixel
+   * as a whole view height. The Scene view's height stands in (a headless run with no Scene view drawn: the editor's
+   * own default window height), and the page across it as the pad letterboxes it, at the paper's aspect. */
+  const int h = scene_rect_.h > 1 ? scene_rect_.h : kStandInViewHeight;
+  return {scene_rect_.x, scene_rect_.y, std::max(1, (int)std::lround(h * paper_aspect_)), h};
+}
 
 /* What the vector tools make: the pen's colour and width for the line (none: no line), the fill colour inside. */
 SketchStroke Editor::sketch_vector_stroke(std::vector<Vec2> pts, bool closed) const {

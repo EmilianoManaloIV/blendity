@@ -169,6 +169,61 @@ program in the KLM table (rows 5, 7, 10 and the new rows 11-20) and audience **A
 | H3 Over time | The Anime filter on the camera; a camera cut (3) | Keyframe Opacity (Alt+Shift+T), effects keyed [A9] | **No keyframed opacity or transform on cards**; camera filters can't be keyed per clip |
 | H4 Deliver | Render Camera Sequence; Render Animation, an MP4 by FFmpeg (libx264) in-process (2) | Ctrl+M Export, H.264 and other presets (3) [A7] | **No export presets** (H.264 / ProRes / VRChat's player): one MP4 setting |
 
+## After the fixes: all seven productions again (round 393)
+
+**Method:** as before - the same harness (`hci_prod.py`), each stage from an empty scratch project - with Blendity built
+on 2026-11-02 from rounds 351-392, with Blender's libraries. A, B and C ran their round-350 stage lists unchanged
+(`hci_A.json` to `hci_C.json`): the same commands, so what changed is the editor's answer. E to H ran stage lists
+rewritten as an expert makes them now (`hci_D_after.json` to `hci_G_after.json`): the verbs rounds 388-392 added in
+place of the ones that were refused. The editing production read a 1.2 s MP4 and a 2 s WAV made for it.
+
+| Production | Commands | Refused or no-op, before | After | What changed |
+|---|---|---|---|---|
+| A. VRChat avatar | 75 | 9 first pass, 2 after corrections | 2 | The two left are clicks the console can't place (a sculpt stroke and an island fill need a point on the model: the GUI's click). The export waits for the Quad Remesh still running (round 354) instead of taking the old mesh silently |
+| B. VRChat world | 51 | 4 | 5 | Generate Lighting with nothing marked now refuses with a Fix (round 362) where it had baked 0 objects silently; Update Lighting says Realtime GI is off (a notice, as before); `set Render.Width` and `set Render.Height` can't reach the render size (finding 30: two commands); the scatter dab needs the GUI's click |
+| C. Short film | 42 | 2 | 0 | Puppet Posing, the cards and the cut all answered |
+| E. Illustration (Photoshop + Fresco) | 34 | 7 frictions | 0 | Paper as the canvas, Soft Light, free transform, a selection's fill, a clipping mask and a layer mask all ran |
+| F. Texturing (Substance) | 24 | 4 frictions | 1 | The one: an ID mask set before the background bake landed (a headless run doesn't wait: the GUI's Bake All Maps loads them when they land) |
+| G. Logo (Illustrator) | 22 | 5 frictions | 0 | Shapes, the Pen, fill and stroke, Restyle, an artboard, SVG out and back in |
+| H. Editing (After Effects + Premiere) | 24 | 4 frictions | 0 | Footage, a paper card by name, Add Edit, Ripple Delete, a keyed fade and scale, VRChat's MP4 |
+
+**The avatar measured again** (`hci_glb.py`, the same round-350 stage list):
+
+| Limit | Before | After |
+|---|---|---|
+| Triangles (PC Good 70,000) | 76,796 | 76,796 - the export now waited for the Quad Remesh (round 354); the stage list's DynaMesh is the mesh that went. The Profiler's Budget (round 355) names it and Decimate to Good fixes it: the stage list predates both |
+| Skinned meshes | 1 | 2 |
+| Shape keys in the file | 0 | 10 (the stage list's five per mesh: `vrc.v_aa`, `oh`, `ch`, `sil`, Blink); `visemes` (round 356) makes all 15 |
+| Textures in the file | 0 | 3 (round 353) |
+
+**The rerun found two bugs, fixed in this round:** a new paper's SVG export wrote no layer (a paper lists no layer -
+its strokes are layer 0's), and console coordinates on a paper before the Draw tab's pad had been drawn read each pixel
+as a whole view height (an artboard came out a thousand times too large). Both have tests.
+
+**The findings now** (the rounds that fixed them):
+
+| # | Status |
+|---|---|
+| 1 shape keys exported | Fixed, round 351 |
+| 2 textures in the .glb | Fixed, round 353 |
+| 3 performance budget | Fixed, round 355 |
+| 4 viseme preset | Fixed, round 356 (and the Avatar window, 357-361) |
+| 5 export during a remesh | Fixed, round 354 (seen in A above) |
+| 6 video in the dependency-free build | Fixed, round 366 |
+| 7, 8, 12, 15 create, names, Walk Cycle, Join | Fixed, round 367 |
+| 9 Generate Lighting's reason | Fixed, round 362 (seen in B above) |
+| 10 LODs and colliders | Fixed, rounds 362-363 |
+| 11 papers and audio on the Sequencer | Fixed, rounds 364-365 |
+| 13 the Console | Mostly fixed, round 367 - `set` still can't reach the render size (finding 30) |
+| 14 the rig fitted to the mesh | Fixed, round 356 |
+| 16 free transform | Fixed, round 389 |
+| 17-20 blend modes, masks, selections, paper as canvas | Fixed, round 388 |
+| 21-22 vector shapes, the Pen, SVG | Fixed, round 390 (and round 393's two bugs) |
+| 23-25, 27 footage, cuts, keyed cards, presets, paper by name | Fixed, round 391 |
+| 26, 29 shader presets, the menu's name | Fixed, round 392 |
+| 28 sub-verb warnings | Fixed, round 388 |
+| **30 (new)** `set Render.Width` / `Height` refused: the render size is in the Render window only | Open: severity 1, B U - a small fix for the next plan |
+
 ## KLM: twenty tasks in six programs (Adobe added in round 387)
 
 Seconds by the operators (rules in `klm.md`); "-" where the program doesn't do it (made in a DCC, or not documented).
@@ -185,26 +240,32 @@ Seconds by the operators (rules in `klm.md`); "-" where the program doesn't do i
 | 8 | Bake the level's lightmaps (one object marked) | M, P, BB (Contribute GI), M, P, BB (Window), P, BB (Lighting), P, BB (Generate Lighting) | 7.9 | - | - | M, P, BB (Static), M, P, BB (Window), P (Rendering), P, BB (Lighting), P, BB (Generate Lighting) | 9 | M, P, BB (Static Lightmaps), P, BB (Reimport), M, H, 2K (Ctrl+A), M, 9K (LightmapGI), K (Enter), H, P, BB (Bake Lightmaps) | 11.15 | M, P, BB (Build), P, BB (Build Lighting Only) | 3.95 | - | - |
 | 9 | Export the character as FBX | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export) | 6.35 | M, P, BB (File), P (Export), P, BB (FBX), P, BB (Export FBX) | 6.35 | - | - | - | - | - | - | - | - |
 | 10 | Find any command by name | M, H, 2K (Ctrl+K), 6K (a word), K (Enter) | 3.55 | M, H, K (F3), 6K, K (Enter) | 3.35 | M, H, 2K (Ctrl+K), 6K, K (Enter) | 3.55 | M, H, 3K (Ctrl+Shift+P), 6K, K (Enter) | 3.75 | - | - | M, H, 2K (Photoshop: Ctrl+F, Discover), 6K, K (Enter) [A10] | 3.55 |
-| 11 | Scale a layer's drawing up (free transform, a corner drag) | - | - | - | - | - | - | - | - | - | - | M, H, 2K (Photoshop: Ctrl+T), H, P, B, P, B (a corner), H, K (Enter) [A1] | 5.55 |
+| 11 | Scale a layer's drawing up (free transform, a corner drag) | M, H, 2K (Ctrl+T), H, P, B, P, B (a corner), H, K (Enter) | 5.55 | - | - | - | - | - | - | - | - | M, H, 2K (Photoshop: Ctrl+T), H, P, B, P, B (a corner), H, K (Enter) [A1] | 5.55 |
 | 12 | Set a layer's blend mode to Multiply | M, P, BB (the layer's blend list), P, BB (Multiply) | 3.95 | - | - | - | - | - | - | - | - | M, P, BB (Photoshop: the Layers panel's blend menu), P, BB (Multiply) [A3] | 3.95 |
-| 13 | Clip a layer to the one below | - | - | - | - | - | - | - | - | - | - | M, P, K, BB (Photoshop: Alt+click the border between them) [A2] | 2.85 |
-| 14 | Draw a rectangle on the artboard (paper) | - | - | - | - | - | - | - | - | - | - | M, H, K (Illustrator: M, the Rectangle tool), H, P, B, P, B [A4] | 4.75 |
-| 15 | Export the artwork as SVG | - | - | - | - | - | - | - | - | - | - | M, P, BB (File), P (Export), P, BB (Export As), P, BB (SVG), P, BB (Export), P, BB (SVG Options: OK) [A5] | 8.95 |
-| 16 | Bake the mesh maps | M, P, BB (GameObject), P, BB (Bake Mesh Maps...), P, BB (Bake) | 5.25 | - | - | - | - | - | - | - | - | M, H, K (Substance Painter: F8, Bake mode), H, P, BB (Bake selected textures) [A6] | 3.65 |
+| 13 | Clip a layer to the one below | M, P, BB (right-click the layer's row), P, BB (Create Clipping Mask) | 3.95 | - | - | - | - | - | - | - | - | M, P, K, BB (Photoshop: Alt+click the border between them) [A2] | 2.85 |
+| 14 | Draw a rectangle on the artboard (paper) | M, P, BB (More), P (Shapes), P, BB (Rectangle), P, B, P, B (a drag on the pad) | 7.45 | - | - | - | - | - | - | - | - | M, H, K (Illustrator: M, the Rectangle tool), H, P, B, P, B [A4] | 4.75 |
+| 15 | Export the artwork as SVG | M, P, BB (Window), P, BB (Console), M, H, 26K (`sketch svg export logo.svg`), K (Enter) | 11.1 | - | - | - | - | - | - | - | - | M, P, BB (File), P (Export), P, BB (Export As), P, BB (SVG), P, BB (Export), P, BB (SVG Options: OK) [A5] | 8.95 |
+| 16 | Bake the mesh maps | M, P, BB (Textures: Bake All Maps - baked and loaded) | 2.65 | - | - | - | - | - | - | - | - | M, H, K (Substance Painter: F8, Bake mode), H, P, BB (Bake selected textures) [A6] | 3.65 |
 | 17 | Export the texture set for Unity | M, P, BB (Textures: Export Textures...), P, BB (Packing), P, BB (Unity), P, BB (Export) | 6.55 | - | - | - | - | - | - | - | - | M, H, 3K (Substance Painter: Ctrl+Shift+E), H, P, BB (Output template), P, BB (Unity), P, BB (Export) [A6] | 6.65 |
-| 18 | Cut the clip at the playhead | - | - | - | - | - | - | - | - | - | - | M, H, 2K (Premiere: Ctrl+K, Add Edit) [A7] | 2.15 |
-| 19 | Ripple delete a clip | - | - | - | - | - | - | - | - | - | - | M, P, BB (the clip), H, 2K (Premiere: Shift+Delete) [A7, A8] | 3.45 |
-| 20 | Key a layer's opacity | - | - | - | - | - | - | - | - | - | - | M, P, BB (After Effects: the layer), H, 3K (Alt+Shift+T) [A9] | 3.65 |
+| 18 | Cut the clip at the playhead | M, H, 2K (Alt+B, Add Edit) | 2.15 | - | - | - | - | - | - | - | - | M, H, 2K (Premiere: Ctrl+K, Add Edit) [A7] | 2.15 |
+| 19 | Ripple delete a clip | M, P, BB (the bar), H, 2K (Shift+Delete) | 3.45 | - | - | - | - | - | - | - | - | M, P, BB (the clip), H, 2K (Premiere: Shift+Delete) [A7, A8] | 3.45 |
+| 20 | Key a layer's opacity | M, P, BB (Window), P, BB (Console), M, H, 25K (`seq key Title opacity 0 0`), K (Enter) | 10.9 | - | - | - | - | - | - | - | - | M, P, BB (After Effects: the layer), H, 3K (Alt+Shift+T) [A9] | 3.65 |
 
 **Reading it:** where both do the task, Blendity is within 0.2 s of Blender on the modeling and keying rows (1, 3,
 5, 9, 10) and faster where Blender goes through a properties tab (2, 4, 7). Against the engines it matches Unity's
 drag-and-drop (2) and beats Unity's and Unreal's stills and videos (6, 7) - the engines render through a recorder.
 Unreal's one-menu lighting build (8) is the fastest of all. Row 7's 2.15 s holds in the build with Blender's libraries (corrected in round 366).
 
-**Adobe's rows (round 387):** where both do the task, Blendity matches Photoshop's blend menu (12) and Substance's
-texture export (17, 6.55 s against 6.65 s) and is 1.6 s slower to bake mesh maps (16: a menu and a dialog against
-F8); keying the whole transform (5) is 1.4 s quicker than After Effects' three property chords. Rows 11, 13, 14, 15, 18, 19 and 20 are tasks Blendity can't do yet: free transform, clipping masks, a vector
-rectangle on a paper, SVG export, a blade cut, a ripple delete and keyed opacity - rounds 388-390 add them.
+**Adobe's rows, as round 387 read them:** where both do the task, Blendity matches Photoshop's blend menu (12) and
+Substance's texture export (17, 6.55 s against 6.65 s) and was 1.6 s slower to bake mesh maps (16: a menu and a dialog,
+5.25 s, against F8 - row 16 now holds round 392's Bake All Maps); keying the whole transform (5) is 1.4 s quicker than After Effects' three property chords. Rows 11, 13, 14, 15, 18, 19 and 20 are tasks Blendity can't do yet: free transform, clipping masks, a vector
+rectangle on a paper, SVG export, a blade cut, a ripple delete and keyed opacity - rounds 388-391 added them.
+
+**After the fixes (round 393):** Blendity now does all twenty. It matches Photoshop's free transform (11) and Premiere's
+Add Edit and Ripple Delete (18, 19), bakes mesh maps 1 s quicker than Substance's F8 (16: Bake All Maps loads them
+too), and is 1.1 s slower to clip a layer (13: a row's menu against Alt+click) and 2.7 s slower to draw a rectangle
+(14: a menu path against Illustrator's M). SVG export and a keyed opacity (15, 20) are console lines, 2.2 s and 7.3 s
+slower than Illustrator's dialog and After Effects' chord: a menu item or a key for each would close the gap.
 
 ## Verdict per audience
 
@@ -257,6 +318,14 @@ Severity 0-4 by how many users it stops and how often. Audiences: B Blender, U U
 | 27 | A Sequencer paper card takes the paper's file path, not its name | 6 Recognition | 1 | A | `seq_cards.cpp:171` | Small fix: take a paper's name |
 | 28 | An unknown sub-verb (`sketch transform`, `sketch layer clip`) answers with a usage line as information, not a warning | 9 Error recovery | 1 | all | `sketch_tool.cpp`, `sketch_layers.cpp:397` | Small fix: warn and name the verb |
 | 29 | Messages and lessons send to "Object > Bake Mesh Maps"; the menu is GameObject | 4 Consistency | 1 | all | `surface_ui.cpp:44`, `panels.cpp:4141`, `lessons.cpp` | Small fix: the menu's name |
+
+**Added in round 393 (the rerun):**
+
+| # | Finding | Heuristic | Sev. | Hits | Where | Fits |
+|---|---|---|---|---|---|---|
+| 30 | `set Render.Width` / `Height` are refused: the render size lives in the Render window only, out of the console's reach | 7 Flexibility | 1 | B U | `editor_commands.cpp` (`set`) | The next plan: a small fix |
+
+(The "Fits" column above is the plan as round 387 wrote it; the rounds that did the work are in "After the fixes".)
 
 **Fixed in this pass** (found by making the film, a bug in round 347's own line): after Puppet Posing drew the left hand
 across the chest, the Inspector said "The left hand is on the right" on Blendity's own humanoid preset. Round 349

@@ -2,6 +2,23 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 393): the HCI rerun after the fixes
+
+**Asked:** Phase D's last round: all seven productions measured again after rounds 351-392, before and after; the
+comparison, its page and the KLM table updated.
+
+**Added (task 0370)**
+- **The rerun** in `docs/hci/compare-2026-10.md` ("After the fixes"): refusals per production before and after, the
+  avatar measured again (shape keys and textures now in the file), every finding's status, a new finding 30 (`set
+  Render.Width` / `Height` can't reach the render size).
+- **The KLM table:** Blendity's cells for the Adobe tasks it couldn't do (rows 11, 13-15, 18-20) and Bake All Maps (16).
+- **The comparison page** at the same link, the rerun first.
+- **Two bugs the rerun found:** a new paper's SVG export wrote no layer; console coordinates on a paper before the pad
+  was drawn read each pixel as a view height.
+
+**Checked:** the seven runs' logs (A 2, B 5, C 0, E 0, F 1, G 0, H 0 refusals - each explained), the avatar's file, the
+SVG read back, the KLM check, the two bugs' tests.
+
 ## 2026-11-02 (round 392): VRChat shaders' texture presets, ID masks and Bake All Maps
 
 **Asked:** Phase D's sixth round: texture export presets for URP and VRChat's shaders (Poiyomi, lilToon), a bake-all

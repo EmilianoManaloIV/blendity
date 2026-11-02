@@ -101,7 +101,7 @@ bool Editor::sketch_xf_begin() {
   Vec2 lo{1e30f, 1e30f}, hi{-1e30f, -1e30f};
   for (size_t k : xf.idx)
     for (const SketchPoint &p : s.strokes[k].pts) lo = {std::min(lo.x, p.x), std::min(lo.y, p.y)}, hi = {std::max(hi.x, p.x), std::max(hi.y, p.y)};
-  const Recti view = draw_source_ == 2 ? sketch_view_.view : scene_rect_;
+  const Recti view = sketch_command_view();
   const float pad = kMinBoxPx / (float)std::max(1, view.h) * 0.5f;  // (a line's box has no height: it is padded to kMinBoxPx so its handles stay apart)
   if (hi.x - lo.x < 2.0f * pad) lo.x -= pad, hi.x += pad;
   if (hi.y - lo.y < 2.0f * pad) lo.y -= pad, hi.y += pad;
@@ -240,7 +240,7 @@ void Editor::sketch_transform_command(const std::vector<std::string> &t) {
   SketchXf &xf = sketch_xf_;
   const Vec2 c = centre(xf.q);
   Vec2 was[4] = {xf.q[0], xf.q[1], xf.q[2], xf.q[3]};
-  const Recti view = draw_source_ == 2 ? sketch_view_.view : scene_rect_;
+  const Recti view = sketch_command_view();
   const float per_px = 1.0f / (float)std::max(1, view.h);
   for (Vec2 &q : xf.q) {
     if (v == "scale") q = c + Vec2((q.x - c.x) * n[0], (q.y - c.y) * (n.size() > 1 ? n[1] : n[0]));

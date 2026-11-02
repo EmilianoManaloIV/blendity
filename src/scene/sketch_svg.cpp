@@ -529,9 +529,10 @@ std::string sketch_svg_text(const Sketch &s, Vec2 lo, Vec2 hi) {
   std::string o = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
   o += "<svg xmlns=\"http://www.w3.org/2000/svg\" data-blendity=\"1\" viewBox=\"" + pt_text(lo) + " " + pt_text(size) + "\" width=\"" + fmt(size.x * kUnits) +
        "\" height=\"" + fmt(size.y * kUnits) + "\">\n";
-  for (size_t li = 0; li < s.layers.size(); li++) {
-    const SketchLayer &l = s.layers[li];
-    if (!s.layer_shown((int)li) || l.is_group) continue;  // (review 390: a hidden group's layers too)
+  const SketchLayer implicit;  // (round 393: a new paper lists no layer - its strokes are layer 0's; it had exported nothing)
+  for (size_t li = 0; li < std::max<size_t>(1, s.layers.size()); li++) {
+    const SketchLayer &l = s.layers.empty() ? implicit : s.layers[li];
+    if (!s.layer_shown((int)li) || l.is_group) continue;  // (layer_shown is true past the list: the implicit layer passes)  // (review 390: a hidden group's layers too)
     const std::string blend = css_blend(l.blend);
     o += "<g data-layer=\"" + xml_text(l.name) + "\" opacity=\"" + fmt(l.opacity) + "\"" + (blend.empty() ? "" : " style=\"mix-blend-mode:" + blend + "\"") + ">\n";
     for (const SketchStroke &st : s.strokes)

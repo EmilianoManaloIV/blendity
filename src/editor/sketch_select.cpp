@@ -104,7 +104,7 @@ void Editor::sketch_select_set(std::vector<Vec2> poly, const char *what) {
 /* sketch select rect x0 y0 x1 y1 | lasso x y x y ... | all | none (view pixels, as sketchstroke's) */
 void Editor::sketch_select_command(const std::vector<std::string> &t) {
   const std::string how = t.size() > 2 ? to_lower(t[2]) : "";
-  const Recti view = draw_source_ == 2 ? sketch_view_.view : scene_rect_;  // (review 388: on Paper the pad's pixels, as sketchstroke's)
+  const Recti view = sketch_command_view();  // (review 388: on Paper the pad's pixels, as sketchstroke's; round 393: before the pad is drawn too)
   std::vector<float> v;
   for (size_t i = 3; i < t.size(); i++) v.push_back((float)std::atof(t[i].c_str()));
   if (how == "none") {
