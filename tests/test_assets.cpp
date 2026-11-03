@@ -24,6 +24,7 @@
 #include "../src/scene/unity_sdk_types.h"  // (round 403)
 #include "../src/render/display.h"  // (round 405)
 #include "../src/image/edit_doc.h"  // (round 405: the saved view)
+#include "../src/scene/unity_anim.h"  // (round 407)
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -9336,6 +9337,198 @@ struct SetOne : Reflector {
 };
 }  // namespace r403
 
+/* Round 407 (task 0384): Unity .anim files in and out. */
+static const char *kBlendShapePrefixForTest = "MeshRenderer.BlendShape/Smile";
+static const char *kUnityAnimFixture =
+    "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!74 &7400000\nAnimationClip:\n  m_ObjectHideFlags: 0\n  m_Name: Wave\n  serializedVersion: 6\n  m_Legacy: 0\n"
+    "  m_RotationCurves:\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: {x: 0, y: 0, z: 0, w: 1}\n"
+    "        inSlope: {x: 0, y: 0, z: 0, w: 0}\n        outSlope: {x: 0, y: 0, z: 0, w: 0}\n        tangentMode: 0\n        weightedMode: 0\n"
+    "        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n"
+    "      - serializedVersion: 3\n        time: 1\n        value: {x: 0, y: 0.70710677, z: 0, w: 0.70710677}\n        inSlope: {x: 0, y: 0, z: 0, w: 0}\n        outSlope: {x: 0, y: 0, z: 0, w: 0}\n"
+    "        tangentMode: 0\n        weightedMode: 0\n        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n"
+    "      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    path: Arm\n  m_CompressedRotationCurves: []\n  m_EulerCurves: []\n"
+    "  m_PositionCurves:\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: {x: 0, y: 1, z: 0}\n        inSlope: {x: 0, y: 0, z: 0}\n"
+    "        outSlope: {x: 0, y: 0, z: 0}\n        tangentMode: 136\n        weightedMode: 0\n        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n"
+    "      - serializedVersion: 3\n        time: 0.5\n        value: {x: 2, y: 1, z: 0}\n        inSlope: {x: 4, y: 0, z: 0}\n        outSlope: {x: 4, y: 0, z: 0}\n        tangentMode: 136\n        weightedMode: 0\n"
+    "        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    path: \n"
+    "  m_ScaleCurves: []\n  m_FloatCurves:\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: 0\n        inSlope: 0\n        outSlope: 0\n        tangentMode: 136\n"
+    "        weightedMode: 0\n        inWeight: 0.33333334\n        outWeight: 0.33333334\n      - serializedVersion: 3\n        time: 0.25\n        value: 100\n        inSlope: Infinity\n        outSlope: Infinity\n        tangentMode: 103\n"
+    "        weightedMode: 0\n        inWeight: 0.33333334\n        outWeight: 0.33333334\n      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    attribute: blendShape.Smile\n    path: Face\n    classID: 137\n"
+    "    script: {fileID: 0}\n    flags: 0\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: 0.5\n        inSlope: 0\n        outSlope: 0\n        tangentMode: 136\n        weightedMode: 0\n"
+    "        inWeight: 0.33333334\n        outWeight: 0.33333334\n      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    attribute: material._Glossiness\n    path: Face\n    classID: 23\n    script: {fileID: 0}\n    flags: 0\n"
+    "  m_PPtrCurves: []\n  m_SampleRate: 60\n  m_WrapMode: 0\n  m_Bounds:\n    m_Center: {x: 0, y: 0, z: 0}\n    m_Extent: {x: 0, y: 0, z: 0}\n  m_ClipBindingConstant:\n    genericBindings: []\n    pptrCurveMapping: []\n"
+    "  m_AnimationClipSettings:\n    serializedVersion: 2\n    m_StartTime: 0\n    m_StopTime: 2\n    m_LoopTime: 1\n  m_EditorCurves: []\n  m_EulerEditorCurves: []\n  m_Events: []\n";
+
+static void tests_round407() {
+  test("A Unity .anim read (round 407): the sample rate as the frame rate, positions by time x rate with their slopes per frame, a quaternion curve as Unity's Euler degrees, a blend shape in 0-100 as 0-1 with a constant key, Active and material floats said", [] {
+    AnimationClip c;
+    std::vector<std::string> notes;
+    std::string why;
+    CHECK(is_unity_anim_text(kUnityAnimFixture) && unity_anim_to_clip(kUnityAnimFixture, c, &notes, &why));
+    std::printf("    %s: %zu tracks, %g fps, length %g, loop %d; %zu note(s)%s%s\n", c.name.c_str(), c.tracks.size(), c.frame_rate, c.length, c.loop, notes.size(), notes.empty() ? "" : ": ", notes.empty() ? "" : notes[0].c_str());
+    CHECK(c.name == "Wave" && c.frame_rate == 60.0f && c.loop && std::fabs(c.length - 120.0f) < 1e-3f && c.unity_yaml);
+    bool lossy = false;
+    AnimationClip again;
+    CHECK(unity_anim_to_clip(kUnityAnimFixture, again, nullptr, &why, &lossy) && lossy);  // (the material curve: the file holds more than the clip)
+    const AnimTrack *px = c.find("", "Position", 0), *py = c.find("", "Position", 1), *ry = c.find("Arm", "Rotation", 1), *sm = c.find("Face", kBlendShapePrefixForTest, 0);
+    CHECK(px && py && ry && sm);
+    if (!px || !py || !ry || !sm) return;
+    CHECK(px->keys.size() == 2 && std::fabs(px->keys[1].frame - 30.0f) < 1e-3f && std::fabs(px->keys[1].value - 2.0f) < 1e-6f && py->keys[1].value == 1.0f);
+    CHECK(std::fabs(px->sample(15.0f) - 1.0f) < 0.2f);  // (the clamped-auto curve through the middle)
+    CHECK(ry->keys.size() == 2 && std::fabs(ry->keys[1].value - 90.0f) < 0.01f && std::fabs(ry->keys[1].frame - 60.0f) < 1e-3f);  // (a quarter turn about Y)
+    /* Unity steps the span before a key whose in slope is infinite: the Smile key at 0.25 s (103, Infinity both sides)
+     * makes the span from frame 0 a step - 0 until frame 15, then 1 (review 407). */
+    CHECK(sm->keys.size() == 2 && std::fabs(sm->keys[1].value - 1.0f) < 1e-6f && std::fabs(sm->keys[1].frame - 15.0f) < 1e-3f && sm->keys[0].interp == AnimConstant && sm->sample(10.0f) == 0.0f);
+    CHECK(notes.size() == 1 && notes[0].find("material value") != std::string::npos);
+  });
+  test("A clip written as a Unity .anim and read again (round 407): positions, a rotation (Euler curves, with their per-axis editor curves), a scale, a blend shape in 0-100, Active, the tangent modes (constant, linear, auto), the rate, length and loop round trip", [] {
+    AnimationClip c;
+    c.name = "Nod", c.frame_rate = 30.0f, c.length = 45.0f, c.loop = false;
+    /* (track() may grow the clip's vector: each key through a fresh call, never two references held at once) */
+    c.track("Head", "Position", 0).set_key(0, 0.0f), c.track("Head", "Position", 0).set_key(15, 0.5f, AnimLinear, false), c.track("Head", "Position", 0).set_key(30, 0.25f);
+    c.track("Head", "Position", 1).set_key(0, 1.0f), c.track("Head", "Position", 1).set_key(15, 1.5f, AnimConstant, false), c.track("Head", "Position", 1).set_key(30, 1.75f);
+    c.track("Head", "Rotation", 0).set_key(0, 0.0f), c.track("Head", "Rotation", 0).set_key(30, 20.0f);
+    c.track("Head", "Rotation", 2).set_key(0, 0.0f), c.track("Head", "Rotation", 2).set_key(30, -35.0f);
+    c.track("Head", "Scale", 1).set_key(0, 1.0f), c.track("Head", "Scale", 1).set_key(30, 1.2f);
+    c.track("Head/Face", "MeshRenderer.BlendShape/Blink", 0).set_key(10, 0.0f), c.track("Head/Face", "MeshRenderer.BlendShape/Blink", 0).set_key(12, 1.0f, AnimConstant, false), c.track("Head/Face", "MeshRenderer.BlendShape/Blink", 0).set_key(20, 1.0f);
+    c.track("Hat", "Active", 0).set_key(0, 1.0f), c.track("Hat", "Active", 0).set_key(20, 0.0f, AnimConstant, false), c.track("Hat", "Active", 0).set_key(40, 0.0f);
+    std::vector<std::string> wnotes;
+    const std::string yaml = clip_to_unity_anim(c, nullptr, &wnotes);
+    CHECK(yaml.rfind("%YAML 1.1", 0) == 0 && yaml.find("--- !u!74 &7400000") != std::string::npos && yaml.find("m_SampleRate: 30") != std::string::npos && yaml.find("m_StopTime: 1.5") != std::string::npos);
+    CHECK(yaml.find("attribute: blendShape.Blink") != std::string::npos && yaml.find("classID: 137") != std::string::npos && yaml.find("attribute: m_IsActive") != std::string::npos && yaml.find("value: 100") != std::string::npos);
+    CHECK(yaml.find("outSlope: Infinity") != std::string::npos && yaml.find("path: Head/Face") != std::string::npos);
+    /* Unity's own layout (review 407): no quaternion curves, the axes as editor curves on the Transform, the Euler ones
+     * in m_EulerEditorCurves; a constant span writes Infinity on both of its keys (the next key's inSlope too); a
+     * linear span its secant on both sides; a blend shape's slopes scaled with its values. */
+    CHECK(yaml.find("m_RotationCurves: []") != std::string::npos && yaml.find("attribute: m_LocalPosition.x") != std::string::npos && yaml.find("attribute: localEulerAnglesRaw.z") != std::string::npos && yaml.find("attribute: m_LocalScale.y") != std::string::npos);
+    CHECK(yaml.find("attribute: localEulerAnglesRaw.z") < yaml.find("m_EulerEditorCurves:") && yaml.find("m_EulerEditorCurves: []") != std::string::npos);  // (in m_EditorCurves, as Unity keeps them)
+    CHECK(yaml.find("inSlope: Infinity") != std::string::npos);
+    const size_t px_editor = yaml.find("attribute: m_LocalPosition.x");
+    const size_t secant_at = yaml.rfind("outSlope: -0.5\n", px_editor);  // (the linear span 15 -> 30: 0.5 -> 0.25 over 15 frames at 30 fps, -0.5 a second, on the frame-15 key)
+    CHECK(secant_at != std::string::npos && secant_at > yaml.find("m_EditorCurves:") && yaml.find("inSlope: -0.5\n", secant_at) != std::string::npos);
+    CHECK(wnotes.size() == 2 && wnotes[0].find("Head Position: an axis without keys") != std::string::npos);  // (z had no track and no object to read; the rotation's y too)
+    AnimationClip back;
+    std::string why;
+    CHECK(unity_anim_to_clip(yaml, back, nullptr, &why));
+    std::printf("    %zu bytes of YAML; back: %zu tracks, %g fps, length %g\n", yaml.size(), back.tracks.size(), back.frame_rate, back.length);
+    CHECK(back.frame_rate == 30.0f && std::fabs(back.length - 45.0f) < 1e-3f && !back.loop && back.name == "Nod");
+    const AnimTrack *bx = back.find("Head", "Position", 0), *by = back.find("Head", "Position", 1), *brx = back.find("Head", "Rotation", 0), *brz = back.find("Head", "Rotation", 2);
+    const AnimTrack *bs = back.find("Head", "Scale", 1), *bb = back.find("Head/Face", "MeshRenderer.BlendShape/Blink", 0), *ba = back.find("Hat", "Active", 0);
+    CHECK(bx && by && brx && brz && bs && bb && ba);
+    if (!bx || !by || !brx || !brz || !bs || !bb || !ba) return;
+    std::printf("    x keys %zu (15 -> %.3f %s), y at 15 = %.3f; rotation back (%.2f, %.2f), scale %.3f\n", bx->keys.size(), bx->keys.size() > 1 ? bx->keys[1].value : -1.0f, bx->keys.size() > 1 && bx->keys[1].interp == AnimLinear ? "linear" : "?",
+                by->sample(15.0f), brx->keys.back().value, brz->keys.back().value, bs->keys.back().value);
+    /* Read back through the editor curves: each axis its own keys - x three, y two - nothing added (review 407). */
+    CHECK(bx->keys.size() == 3 && std::fabs(bx->keys[1].value - 0.5f) < 1e-5f && bx->keys[1].interp == AnimLinear && std::fabs(bx->keys[2].frame - 30.0f) < 1e-3f);
+    CHECK(by->keys.size() == 3 && by->keys[1].interp == AnimConstant && std::fabs(by->sample(20.0f) - 1.5f) < 1e-4f && by->sample(10.0f) > 1.0f && by->sample(10.0f) < 1.5f);
+    /* The same file read by its runtime curves alone (the editor lists dropped): the union's keys, the linear span kept
+     * linear on x, y's constant span kept a step from 15 (the sampled key at 15 is free, not constant). */
+    std::string runtime_only = yaml;
+    const size_t ed0 = runtime_only.find("  m_EditorCurves:"), ed1 = runtime_only.find("  m_HasGenericRootTransform");
+    runtime_only.replace(ed0, ed1 - ed0, "  m_EditorCurves: []\n  m_EulerEditorCurves: []\n");
+    AnimationClip rt;
+    CHECK(unity_anim_to_clip(runtime_only, rt, nullptr, &why));
+    const AnimTrack *rx = rt.find("Head", "Position", 0), *ry = rt.find("Head", "Position", 1);
+    CHECK(rx && ry && rx->keys.size() == 3 && ry->keys.size() == 3 && rx->keys[1].interp == AnimLinear && ry->keys[1].interp == AnimConstant && std::fabs(ry->keys[1].value - 1.5f) < 1e-3f);
+    CHECK(std::fabs(brx->keys.back().value - 20.0f) < 0.01f && std::fabs(brz->keys.back().value + 35.0f) < 0.01f && std::fabs(bs->keys.back().value - 1.2f) < 1e-5f);
+    CHECK(bb->keys.size() == 3 && std::fabs(bb->keys[1].value - 1.0f) < 1e-6f && bb->keys[1].interp == AnimConstant && bb->keys[0].interp != AnimConstant && std::fabs(bb->keys[1].frame - 12.0f) < 1e-3f);
+    CHECK(ba->keys.size() == 3 && ba->keys[1].value == 0.0f && ba->keys[1].interp == AnimConstant && ba->keys[0].interp != AnimConstant && ba->sample(30.0f) == 0.0f);
+    /* A blend shape's slopes written scaled with its values (review 407): keys 0, 0.5, 1 at 0 / 30 / 60 - the middle
+     * key's slope about 50 a second at 30 fps, not 0.5. */
+    AnimationClip ramp;
+    ramp.frame_rate = 30.0f;
+    for (float f : {0.0f, 30.0f, 60.0f}) ramp.track("Face", "MeshRenderer.BlendShape/Smile", 0).set_key(f, f / 60.0f);
+    const std::string ryaml = clip_to_unity_anim(ramp);
+    const size_t mid = ryaml.find("time: 1\n");
+    const size_t slope_at = ryaml.find("inSlope: ", mid);
+    const float slope = slope_at == std::string::npos ? 0.0f : (float)std::atof(ryaml.c_str() + slope_at + 9);
+    std::printf("    blend shape ramp: the middle key's slope %.1f a second\n", slope);
+    CHECK(slope > 40.0f && slope < 60.0f);
+    /* An axis without a track takes the object's value (review 407): a root with Position (3, 4, 5) and only y keyed. */
+    Scene s;
+    GameObject *obj = s.create("Root");
+    obj->set_local_position(Vec3(3.0f, 4.0f, 5.0f));
+    AnimationClip only_y;
+    only_y.track("", "Position", 1).set_key(0, 4.0f), only_y.track("", "Position", 1).set_key(30, 6.0f);
+    const std::string oy = clip_to_unity_anim(only_y, obj);
+    CHECK(oy.find("value: {x: 3, y: 4, z: 5}") != std::string::npos && oy.find("value: {x: 3, y: 6, z: 5}") != std::string::npos);
+  });
+  test("Unity .anim files in the project (round 407): a Unity clip loads as a clip asset; an edit saves to a Blendity copy beside it, the Unity file untouched, and the Animation component playing it keeps the edit through two edits and an undo (one copy); import into Assets/Animations and the Animation window; export anim writes Unity's YAML; a Blendity clip goes into a Unity package converted, with Unity's meta", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    const std::string dir = resolve_asset_path("Assets/Animations");
+    fs::make_dirs(dir);
+    for (const DirEntry &de : fs::list(dir))  // (an earlier run's files: the test project is shared)
+      if (de.name.rfind("R407", 0) == 0) fs::remove_file(fs::join(dir, de.name));
+    fs::remove_file(fs::join(fs::parent(dir), "R407Inside.anim"));
+    CHECK(fs::write_file(fs::join(dir, "R407Wave.anim"), kUnityAnimFixture));
+    const AnimationClipPtr c = clip_asset("Assets/Animations/R407Wave.anim");
+    CHECK(c && c->unity_yaml && c->tracks.size() >= 4);
+    if (!c) return;
+    /* An edit saved: the Unity file untouched, the clip now a Blendity copy beside it (review 407). */
+    c->track("", "Position", 0).set_key(0, 1.0f), c->touch();
+    const size_t saved = save_dirty_clip_assets();
+    std::printf("    saved %zu clip(s): now %s (unity %d)\n", saved, c->asset_path.c_str(), (int)c->unity_yaml);
+    CHECK(saved >= 1);
+    std::string kept;
+    CHECK(fs::read_file(fs::join(dir, "R407Wave.anim"), kept) && kept == kUnityAnimFixture);
+    CHECK(!c->unity_yaml && c->asset_path == "Assets/Animations/R407Wave (Blendity).anim" && fs::exists(resolve_asset_path(c->asset_path)));
+    std::string copy;
+    CHECK(fs::read_file(resolve_asset_path(c->asset_path), copy) && copy.rfind("blendity_anim", 0) == 0 && clip_asset(c->asset_path) == c);
+    CHECK(clip_asset("Assets/Animations/R407Wave.anim") == c);  // (the Unity path follows the clip to its copy)
+    /* Through the editor (review 407): an object plays the Unity clip, two keys are added and one undone - the window keeps
+     * the edits, the component names the copy, exactly one copy exists. */
+    fs::write_file(fs::join(dir, "R407Play.anim"), kUnityAnimFixture);
+    ed.command("newscene");
+    GameObject *player = ed.scene().create("R407Player");
+    player->add<Animation>()->clip = "Assets/Animations/R407Play.anim";
+    ed.command("select R407Player");
+    ed.step_frame_headless();
+    ed.command("anim key . Position 0 10 7");
+    ed.step_frame_headless();
+    ed.command("anim key . Position 0 20 8");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    const AnimationClipPtr played = ed.anim_clip_for_test();
+    const AnimTrack *pt = played ? played->find("", "Position", 0) : nullptr;
+    int copies = 0;
+    for (const DirEntry &de : fs::list(dir)) copies += de.name.rfind("R407Play (Blendity", 0) == 0;
+    std::printf("    played: component %s, clip %s, x keys %zu, copies %d\n", player->get<Animation>()->clip.c_str(), played ? played->asset_path.c_str() : "none", pt ? pt->keys.size() : (size_t)0, copies);
+    CHECK(played && pt && pt->key_at(10.0f) >= 0 && pt->key_at(20.0f) < 0 && copies == 1 && player->get<Animation>()->clip == "Assets/Animations/R407Play (Blendity).anim");
+    std::string play_kept;
+    CHECK(fs::read_file(fs::join(dir, "R407Play.anim"), play_kept) && play_kept == kUnityAnimFixture);
+    ed.command("create Cube");
+    const std::string inside = fs::join(fs::parent(dir), "R407Inside.anim");  // (Assets/R407Inside.anim: inside the project, kept where it is)
+    CHECK(fs::write_file(inside, kUnityAnimFixture));
+    CHECK(ed.import_unity_anim(inside));
+    const AnimationClipPtr open = ed.anim_clip_for_test();
+    std::printf("    imported: open clip %s (%zu tracks)\n", open ? open->asset_path.c_str() : "none", open ? open->tracks.size() : (size_t)0);
+    CHECK(open && open->asset_path.find("R407Inside") != std::string::npos && open->unity_yaml);
+    /* From outside the project: a copy into Assets/Animations, a second one numbered. */
+    const std::string outside = fs::join(fs::parent(fs::parent(dir)), "R407Far.anim");
+    const bool wrote = fs::write_file(outside, kUnityAnimFixture), far1 = wrote && ed.import_unity_anim(outside);
+    std::printf("    far: %s written %d, imported %d, open clip %s\n", outside.c_str(), (int)wrote, (int)far1, ed.anim_clip_for_test() ? ed.anim_clip_for_test()->asset_path.c_str() : "none");
+    CHECK(far1 && ed.anim_clip_for_test() && ed.anim_clip_for_test()->asset_path == "Assets/Animations/R407Far.anim");
+    CHECK(ed.import_unity_anim(outside) && ed.anim_clip_for_test() && ed.anim_clip_for_test()->asset_path == "Assets/Animations/R407Far 2.anim");
+    fs::remove_file(outside);
+    CHECK(ed.export_unity_anim("Exports/R407Out.anim", "Assets/Animations/R407Wave.anim"));
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path("Exports/R407Out.anim"), text) && is_unity_anim_text(text) && text.find("m_Name: Wave") != std::string::npos);
+    /* A Blendity clip: its own text in the project; Unity's meta for a .anim. */
+    CHECK(unity_anim_meta("abc").find("NativeFormatImporter") != std::string::npos && unity_anim_meta("abc").find("mainObjectFileID: 7400000") != std::string::npos);
+    /* The package export's view of the files: Blendity's clip converted (the dropped tracks counted), Unity's kept. */
+    AnimationClip own;
+    own.track("X", "Position", 0).set_key(0, 1.0f), own.track("X", "Light.Intensity", 0).set_key(0, 2.0f);
+    bool conv = false;
+    int dropped = 0;
+    const std::string data = unity_package_clip_data(save_clip_text(own), "Assets/Animations/Own.anim", &conv, &dropped);
+    CHECK(conv && dropped == 1 && is_unity_anim_text(data) && data.find("m_Name: Own") != std::string::npos);
+    CHECK(unity_package_clip_data(kUnityAnimFixture, "Assets/A.anim", &conv, nullptr) == kUnityAnimFixture && !conv);
+    CHECK(unity_package_clip_data("not a clip", "Assets/A.mat", &conv, nullptr) == "not a clip" && !conv);
+  });
+}
+
 /* Round 406 (task 0383): Unity's BlendShapes foldout and its Animation window layout. */
 static void tests_round406() {
   test("BlendShapes foldout (round 406): a row a shape under the MeshRenderer, the filter box from eight shapes on hides what doesn't match; rename carries the weight and the clip's track, duplicate copies the delta, New from Mix sums the weighted deltas", [] {
@@ -12618,6 +12811,7 @@ void run_assets_tests() {
   tests_round404();
   tests_round405();
   tests_round406();
+  tests_round407();
   tests_round372();
   tests_round373();
   tests_round374();

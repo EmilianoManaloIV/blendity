@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 407): Unity .anim files in and out
+
+**Asked:** Unity's animation clips as Blendity's and back (the 2026-11-03 plan's round 407).
+
+**Added (task 0384, ADR 0102)**
+- **Unity's .anim read as a clip** (`unity_anim_to_clip`): positions, Euler or quaternion rotations, scales, blend shapes
+  (0-100 to 0-1), Active; the sample rate, length, loop and tangent modes; what Blendity can't carry (material floats,
+  object curves, events) said. A Unity project's clip is never written over: an edit saves to a Blendity copy beside
+  it; `export anim` writes a Unity file on purpose.
+- **A clip written as a Unity .anim** (`clip_to_unity_anim`, `export anim <out.anim> [clip]`): the same mapping back in
+  Unity's own layout (Euler curves with per-axis editor curves, no quaternion curves), blend shapes on the Skinned Mesh
+  Renderer in 0-100, the axes you didn't key filled from the object.
+- **`import <file.anim>`** copies a clip into Assets/Animations and opens it in the Animation window on the selected
+  object; **Export Unity Package** converts Blendity's clips to Unity's on the way out, with Unity's meta.
+
+**The fresh-project flow (end to end):** `tools/unity_e2e.py` runs what a user does - a new project, `import <package>`,
+`open <scene>` (or the avatar prefab), Unity's lightmaps, a render at the comparison stations - and reads the log for
+anything about textures, materials or scripts. It found three things, fixed: Unity's lightmap fetch wrote its file by a
+path relative to the scratch project (none written - the scene stayed dark); the models' parts waiting for Unity's
+numbers needed a button and a second open (now Unity numbers them at once, in the background, and the scene opens again
+by itself; a script's `open` waits and opens again in the same step); a model's missing texture was said every frame
+(now once). Shinano from a fresh project: all four stations pass; SideRail: measured again after the fixes, see the spec.
+
+**Checked:** `tests_round407` (the fixture read with Unity's span rules - a step before an infinite in slope - and the
+lossy flag; the write-and-read round trip: per-axis editor curves read back exact, the runtime curves alone kept linear
+and constant, a blend shape's slopes scaled, an axis without keys filled from the object; the project paths: a Unity clip
+loads, its edit saves to the Blendity copy with the Unity file untouched, import from inside and outside the project with
+numbered copies, export anim, the package export's conversion with the dropped tracks counted, the meta); the suites, the
+audits. The Opus review's fixes: the Unity file never written over (a save had rewritten it without what Blendity doesn't
+carry), constant spans by Unity's rule (either key's infinite slope) both ways, linear spans' secants, blend-shape slopes
+scaled, Unity's layout (no quaternion curves, per-axis editor curves), axes without keys from the object, YAML quoting,
+a NaN sample rate, one note a kind for Humanoid and material curves, the drop and Import dialog routes.
+
 ## 2026-11-03 (round 406): Unity's BlendShapes menu and its Animation window layout
 
 **Asked:** "the similar keyframe layout in Unity for objects with blend shapes" - "It's not just the key frames, but the

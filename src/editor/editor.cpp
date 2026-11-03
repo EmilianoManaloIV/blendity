@@ -1461,7 +1461,7 @@ void Editor::handle_drop() {
       edit_open_file(path);
       continue;
     }
-    if (model_extension_supported(ext) || motion_extension_supported(ext)) {
+    if (model_extension_supported(ext) || motion_extension_supported(ext) || ext == ".anim") {  // (round 407: a Unity clip too)
       import_model_file(path, true);  // copies model + textures into Assets like Unity (a motion: onto the character)
     }
     else if (image_extension_supported(ext)) {
@@ -2004,7 +2004,9 @@ void Editor::commit_undo() {
   stable_ = scene_->clone();
   pending_change_ = false;
   paint_flush_images();  // (task 0245: the Paint layers' PNGs before their textures' texts)
-  if (save_dirty_material_assets() + save_dirty_texture_assets() + save_dirty_clip_assets() + save_dirty_sequence_assets()) project_listed_ = -100;  // edited assets go back to their files
+  const size_t clips_saved = save_dirty_clip_assets();
+  if (clips_saved) repoint_moved_clips();  // (round 407: a Unity clip's edits live in its Blendity copy - the components name it from now on)
+  if (save_dirty_material_assets() + save_dirty_texture_assets() + clips_saved + save_dirty_sequence_assets()) project_listed_ = -100;  // edited assets go back to their files
 }
 
 size_t Editor::undo_budget() const {
@@ -2228,7 +2230,7 @@ void Editor::import_obj_file(const std::string &path) { import_model_file(path, 
 void Editor::import_dialog() {
   defer([this] {
     std::vector<platform::FileFilter> filters = {{"3D models", {".obj", ".fbx", ".glb", ".gltf", ".stl", ".ply", ".usda", ".pmx", ".pmd", ".vrm", ".bvh", ".dae"}}, {"Motions", {".vmd"}},
-                                                 {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Godot scenes", {".tscn"}}, {"Blender files (through Blender)", {".blend"}}};  // (rounds 370, 373, 374)
+                                                 {"Unity prefabs and scenes", {".prefab", ".unity"}}, {"Unity animation clips", {".anim"}}, {"Godot scenes", {".tscn"}}, {"Blender files (through Blender)", {".blend"}}};  // (rounds 370, 373, 374)
     for (int i = 0; i < (int)ExportFormat::Count; i++) filters.push_back({export_format_name(i), {export_format_extension(i)}});
     std::string path;
     switch (pick_open_path("Import Model or Motion", import_dir_.empty() ? assets_dir_ : import_dir_, filters, path)) {

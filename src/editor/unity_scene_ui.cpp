@@ -378,7 +378,12 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
                                        ctx.model_overrides_waiting, ctx.models_waiting.size());
     const char *again = as_scene ? "open the scene again" : "import it again";
     if (unity_editor_program().empty()) Log::warn("%s - install Unity (Unity Hub) and run: unity modelids, then %s", what.c_str(), again);
-    else refuse(what + ": Unity is installed - number them, then " + again, "unity modelids", "Number Parts with Unity");
+    else if (headless_) Log::info("%s: Unity numbers them now%s", what.c_str(), as_scene ? " (a script's open waits for it and opens the scene again)" : " (unity modelids wait, then import again)");
+    else {  // (e2e 407: no button to press - Unity runs in the background and the scene opens again by itself)
+      unity_ids_auto_reopen_ = as_scene, unity_ids_reopen_serial_ = undo_serial_ + 1;  // (+1: this import's own step is about to be pushed)
+      toast(LogLevel::Info, what + ": Unity is numbering them in the background - the scene " + (as_scene ? "opens" : "imports") + " again by itself when it's done", "", "");
+      read_unity_model_ids(false, false);
+    }
   }
   if (ctx.materials || ctx.outlines || ctx.springs)
     Log::info("Import Unity: %d Unity material(s) converted, %d outline(s), %d PhysBone setting(s) kept as spring bones", ctx.materials, ctx.outlines, ctx.springs);

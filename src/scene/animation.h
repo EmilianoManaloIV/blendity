@@ -49,6 +49,7 @@ struct AnimationClip {
   float frame_rate = 60.0f;
   float length = 60.0f;  // frames; at least the last key's
   bool loop = true;
+  bool unity_yaml = false;  // round 407: read from a Unity .anim (its YAML) - its edits save to a Blendity copy beside it (unity_clip_sibling), never over it
   std::vector<AnimTrack> tracks;
   /* Where a bone's tip rests on something (task 0116, Cascadeur's fulcrum points): found from the motion, or set by hand
    * (kept when contacts are found again). Frames inclusive. */
@@ -83,6 +84,9 @@ bool load_clip_text(const std::string &text, AnimationClip &c);
 AnimationClipPtr clip_asset(const std::string &path);  // nullptr if missing
 AnimationClipPtr create_clip_asset(const std::string &path, const std::string &name);
 size_t save_dirty_clip_assets();
+std::string unity_clip_sibling(const std::string &path);  // (round 407: where a Unity clip's edits are saved)
+/* The path a clip moved to (its Blendity copy, when it came from a Unity file and was edited), else the key as given. */
+std::string clip_redirect(const std::string &path);
 size_t retarget_clip_assets(const std::string &from, const std::string &to);  // a .anim (or folder) moved
 size_t forget_clip_assets(const std::string &path);  // a .anim (or folder) deleted: not written back
 void clear_clip_assets();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Asset workflow (Unity: drop files into Assets / onto objects;
 // Blender: File > Import, Image Texture node "Open", Material slots > Assign).
+#include "../scene/unity_anim.h"  // (round 407)
 #include "editor.h"
 
 #include "../core/core.h"
@@ -75,6 +76,7 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".unitypackage") return (void)import_unity_package(path);  // (round 369: import <file>.unitypackage)
+  if (fs::extension(path) == ".anim") return (void)import_unity_anim(path);  // (round 407: a Unity AnimationClip, or Blendity's own)
   if (fs::extension(path) == ".prefab" || fs::extension(path) == ".unity") return (void)import_unity_scene(path);  // (round 370)
   if (fs::extension(path) == ".tscn") return (void)import_godot_scene(path);  // (round 373)
   if (fs::extension(path) == ".blend") return (void)import_blend(path);  // (round 374: through Blender)
@@ -531,6 +533,68 @@ std::string Editor::save_imported_clip(GameObject &root, const AnimationClip &cl
   an->clip = rel;
   anim_.root = root.id;
   return rel;
+}
+
+/* Round 407 (task 0384): a .anim file - Unity's AnimationClip YAML or Blendity's own clip text - copied into
+ * Assets/Animations and opened in the Animation window on the selected object (the clip's paths are Unity's child paths,
+ * which Blendity's tracks use too). What the file holds that Blendity can't carry is said. */
+bool Editor::import_unity_anim(const std::string &path_in) {
+  const std::string src = resolve_asset_path(path_in);  // (an absolute path stays as it is)
+  std::string text;
+  if (!fs::read_file(src, text)) return Log::warn("import: can't read %s", src.c_str()), false;
+  AnimationClip probe;
+  std::vector<std::string> notes;
+  std::string why;
+  const bool unity = is_unity_anim_text(text);
+  bool lossy = false;
+  if (unity ? !unity_anim_to_clip(text, probe, &notes, &why, &lossy) : !load_clip_text(text, probe)) return Log::warn("import: %s is not an animation clip%s%s", src.c_str(), why.empty() ? "" : ": ", why.c_str()), false;
+  std::string rel = make_asset_relative(src);
+  const bool inside = rel.rfind("Assets/", 0) == 0;
+  if (!inside) {  // (a file from elsewhere: a copy in the project, Unity's text kept as it is)
+    rel = "Assets/Animations/" + fs::stem(src) + ".anim";
+    for (int k = 2; fs::exists(resolve_asset_path(rel)); k++) rel = strprintf("Assets/Animations/%s %d.anim", fs::stem(src).c_str(), k);
+    fs::make_dirs(fs::parent(resolve_asset_path(rel)));
+    if (!fs::write_file(resolve_asset_path(rel), text)) return Log::warn("import: can't write %s", rel.c_str()), false;
+  }
+  const AnimationClipPtr clip = clip_asset(rel);
+  if (!clip) return Log::warn("import: %s didn't load as a clip", rel.c_str()), false;
+  GameObject *root = active_object();
+  if (root) anim_pick_clip(root, rel);
+  for (const std::string &n : notes) Log::warn("import %s: %s", fs::filename(rel).c_str(), n.c_str());
+  if (unity) Log::info("%s stays Unity's file%s: edits save to %s beside it; export anim writes a Unity file", fs::filename(rel).c_str(), lossy ? " (it holds more than the clip)" : "", fs::filename(unity_clip_sibling(rel)).c_str());
+  Log::info("%s: %s with %zu track(s) at %g fps%s%s", unity ? "Unity clip" : "Clip", fs::filename(rel).c_str(), clip->tracks.size(), clip->frame_rate, root ? " - in the Animation window on " : "", root ? root->name.c_str() : "");
+  project_listed_ = -100;  // (the Project panel lists again)
+  return true;
+}
+
+/* Round 407 (review): after a save moved a Unity clip's edits to its Blendity copy, the Animation components that name
+ * the Unity file name the copy - in the scene text too, so a saved scene opens with the edits. */
+void Editor::repoint_moved_clips() {
+  bool any = false;
+  scene_->for_each([&](GameObject &g) {
+    Animation *a = g.get<Animation>();
+    if (!a || a->clip.empty()) return;
+    const std::string to = clip_redirect(a->clip);
+    if (to == a->clip || !clip_asset(to)) return;
+    a->clip = to, any = true;
+  });
+  if (!any) return;
+  scene_dirty_ = true;
+  stable_ = scene_->clone();  // (the step just committed holds the new paths too)
+}
+
+/* Round 407: export anim <out.anim> [clip] - the open clip (or the one named) as a Unity AnimationClip file. */
+bool Editor::export_unity_anim(const std::string &out_in, const std::string &clip_path) {
+  const AnimationClipPtr clip = clip_path.empty() ? anim_clip() : clip_asset(clip_path);
+  if (!clip) return Log::warn("export anim: no clip - open one in the Animation window or name its path"), false;
+  std::string out = resolve_asset_path(out_in);
+  if (fs::extension(out) != ".anim") out += ".anim";
+  fs::make_dirs(fs::parent(out));
+  std::vector<std::string> notes;
+  if (!fs::write_file(out, clip_to_unity_anim(*clip, anim_root(), &notes))) return Log::warn("export anim: can't write %s", out.c_str()), false;
+  for (const std::string &n : notes) Log::warn("export anim: %s", n.c_str());
+  Log::info("Unity clip written: %s (%zu track(s); drop it into a Unity project's Assets - a .meta is made on import)", out.c_str(), clip->tracks.size());
+  return true;
 }
 
 /* shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename | duplicate | mix | edit | filter (task 0135,

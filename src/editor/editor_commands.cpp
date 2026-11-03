@@ -91,7 +91,20 @@ std::string Editor::scene_file_path(const std::string &path) const {
 /* open <path> (round 367): a scene file, asking first when this one has unsaved changes; a Unity .unity (round 395) too. */
 void Editor::open_scene_cmd(const std::string &path) {
   if (to_lower(fs::extension(path)) == ".unity" && !fs::exists(unity_scene_path(path))) return Log::warn("open: no file %s", path.c_str());  // (review 395)
-  if (to_lower(fs::extension(path)) == ".unity") return open_unity_scene_asked(unity_scene_path(path));
+  if (to_lower(fs::extension(path)) == ".unity") {
+    const std::string before = unity_ids_last_import_;
+    unity_ids_last_import_.clear();
+    open_unity_scene_asked(unity_scene_path(path));
+    const bool opened = !unity_ids_last_import_.empty();  // (the import sets it; a pending Unsaved Changes dialog doesn't)
+    if (!opened) unity_ids_last_import_ = before;
+    /* e2e 407: a script's open is one step - when the models' parts wait for Unity's numbers and Unity is there, it is
+     * asked now (held till done) and the scene opened again, so the materials are right in the same run. */
+    if (!opened || !headless_ || unity_ids_waiting_.empty() || unity_editor_program().empty()) return;
+    read_unity_model_ids(false, true);
+    if (unity_ids_waiting_.empty()) open_unity_scene(unity_scene_path(path));
+    else Log::warn("open: Unity didn't number every model's parts - the overrides on those wait (unity modelids)");
+    return;
+  }
   const std::string p = path.empty() ? path : scene_file_path(path);
   if (p.empty() || !fs::exists(p)) return Log::warn("open <file.scene>: no file %s", path.empty() ? "given" : p.c_str());
   open_scene_asked(p);
@@ -1008,6 +1021,7 @@ void Editor::run_console_command(const std::string &line) {
       if (fs::is_dir(resolve_asset_path(rest.substr(0, gap)))) return (void)export_unity_package(rest.substr(0, gap), rest.substr(gap + 1));
     return (void)export_unity_package(rest, "");
   }  // (save, open, new, rotate, scale, set Transform.*: before the long chain)
+  if (c == "export" && to_lower(arg(1, "")) == "anim") return (void)export_unity_anim(arg(2, "Exports/clip.anim"), arg(3, ""));  // (round 407: export anim <out.anim> [clip])
   if (c == "ui") {  // ui save <path> | load <path>|blender|zbrush (task 0231: the UI file)
     ui_file_command(t, line);
     return;

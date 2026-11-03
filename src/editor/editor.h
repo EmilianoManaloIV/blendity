@@ -1364,6 +1364,8 @@ class Editor {
   };
   std::shared_ptr<UnityIdsJob> unity_ids_job_;
   std::set<std::string> unity_ids_waiting_;  // (the models whose parts the last import's overrides named without numbers)
+  bool unity_ids_auto_reopen_ = false;       // (e2e 407: the import started the numbering itself - open the scene again when it's done)
+  uint64_t unity_ids_reopen_serial_ = 0;     // (the undo serial when it started: the scene must be as it was, else only the toast)
   std::string unity_ids_last_import_;
   bool unity_ids_last_opened_ = false;  // (review 395: an opened scene is opened again, not imported on top of itself)
   std::string unity_editor_program() const;
@@ -1424,7 +1426,7 @@ class Editor {
     std::string out, folder, why;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel{false}, done{false};
-    int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0;
+    int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0, converted = 0, dropped_tracks = 0, zeroed_axes = 0;  // (converted, dropped_tracks, zeroed_axes: round 407's clips)
     std::vector<std::string> skipped;
     void run();
     void finish(const std::string &failure);
@@ -1669,6 +1671,10 @@ class Editor {
     return true;
   }
   AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
+  /* Round 407 (task 0384): Unity .anim files in and out (the console's import and export anim; tests). */
+  bool import_unity_anim(const std::string &path);
+  bool export_unity_anim(const std::string &out, const std::string &clip_path);
+  void repoint_moved_clips();  // (the Animation components that name a Unity clip whose edits moved to its Blendity copy)
   const SeqEditorState &seq_for_test() const { return seqr_; }
   SequencePtr seq_for_test_sequence() { return seq_sequence(); }
   bool seq_drop_clip_for_test(const std::string &abs_path, int mx, int my) { return seq_drop_clip(abs_path, mx, my); }
