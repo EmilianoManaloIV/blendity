@@ -402,6 +402,9 @@ class Renderer3D {
   void draw_see_through(const std::vector<uint8_t> &see_through);
   /* Lights + image-based lighting for one shaded point (deferred and forward). */
   Vec3 light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
+  /* Round 402 (ADR 0100): a lilToon surface - the main pass (the key light plus the ambient, lilToon's shadow model, its
+   * extras) and the other lights added as lilToon's ForwardAdd passes; the whole colour (no light_finish). */
+  Vec3 light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const;
   float draw_volume_pixel(const DrawItem &it, const Mat4 &inv, const Material &mat, Vec3 eye, Vec3 front, bool from_eye, int x, int y, float behind_z, const Environment &env);  // (its cover, 0..1)
   /* light_surface after its lights' loop (`lo`): reflections, ambient, emission (the 8-wide shader's per-pixel end). */
   Vec3 light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const;

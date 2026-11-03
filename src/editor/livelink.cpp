@@ -35,9 +35,9 @@ namespace {
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
 enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip, kCollider, kLod, kLightVolume,
-                       kLightVolumeBake, kReflectionProbe };
+                       kLightVolumeBake, kReflectionProbe, kAvatarComponents };  // (round 402: the avatar's VRChat components, one message kind)
 uint64_t ckey(uint64_t id, Kind k) { return id << 5 | (uint64_t)k; }  // (review 397: 5 bits - kLightVolume is 16, past 4 bits it took the id's low bit)
-static_assert(kReflectionProbe < 32, "a message kind fits ckey's 5 bits");
+static_assert(kAvatarComponents < 32, "a message kind fits ckey's 5 bits");
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
  * computer), fog - and every field by its Inspector name. */
@@ -162,6 +162,7 @@ struct Sent {
   uint64_t light_volume = 0;  // (round 397: its VRC Light Volume message's hash; 0 none sent)
   uint64_t light_volume_bake = 0;  // (round 398: the bakes' generation it sent its bake at; 0 none)
   uint64_t reflection_probe = 0;  // (round 401: its Reflection Probe message's hash; 0 none sent)
+  uint64_t avatar_components = 0;  // (round 402: its VRChat components' message's hash; 0 none sent)
   uint64_t lod = 0;           // (...its LOD Group's; 0 none sent)
   uint64_t lod_levels = 0;    // (...what its levels are made from: their count and ratios - review 380)
   MeshStamp lod_base, lod_seen;  // (...the mesh its levels were made from; the mesh last seen, and since when)
@@ -210,6 +211,159 @@ std::string reflection_probe_message(const GameObject &g) {
   w.end();
   return w.out;
 }
+
+/* Round 402 (ADR 0100): the avatar's VRChat components on an object as one message - the descriptor, each PhysBone,
+ * PhysBone Collider, Contact and VRC Constraint with Unity's fields (object references by Blendity's ids; enums by the
+ * SDK's names); "none" with none on. The bridge sets them on the real SDK's components by reflection. */
+bool has_avatar_components(const GameObject &g) {
+  for (const auto &c : g.components) {
+    const char *t = c->type_name();
+    if (!std::strcmp(t, AvatarDescriptorComponent::kName) || !std::strcmp(t, PhysBoneComponent::kName) || !std::strcmp(t, PhysBoneColliderComponent::kName) ||
+        !std::strcmp(t, ContactComponent::kName) || !std::strcmp(t, VRCConstraintComponent::kName))
+      return true;
+  }
+  return false;
+}
+int64_t id_by_name(const Scene &scene, const std::string &name) {
+  const GameObject *g = name.empty() ? nullptr : scene.find_by_name(name);
+  return g ? (int64_t)g->id : 0;
+}
+void ids_by_names(JsonWriter &w, const char *key, const Scene &scene, const std::string &names) {
+  w.key(key).arr();
+  size_t at = 0;
+  while (at <= names.size()) {
+    const size_t semi = names.find(';', at);
+    const std::string n = names.substr(at, semi == std::string::npos ? std::string::npos : semi - at);
+    if (!n.empty()) w.integer(id_by_name(scene, n));
+    if (semi == std::string::npos) break;
+    at = semi + 1;
+  }
+  w.end();
+}
+void quat_x(JsonWriter &w, const char *key, Quat q) {  // (Unity's axes as Blendity keeps them - the bridge sets them as they are; review 402)
+  const float v[4] = {q.x, q.y, q.z, q.w};
+  w.key(key).nums(v, 4);
+}
+void vec3_x(JsonWriter &w, const char *key, Vec3 v) {
+  const float a[3] = {v.x, v.y, v.z};
+  w.key(key).nums(a, 3);
+}
+std::string avatar_components_message(const Scene &scene, const GameObject &g) {
+  JsonWriter w;
+  w.obj().key("t").str("vrccomponents").key("id").integer((int64_t)g.id);
+  if (!has_avatar_components(g)) return w.key("none").boolean(true).end(), w.out;
+  static const char *advanced[] = {"False", "True", "Other"};
+  static const char *integrations[] = {"Simplified", "Advanced"}, *children[] = {"Ignore", "First", "Average"}, *immobiles[] = {"AllMotion", "World"};
+  static const char *limits[] = {"None", "Angle", "Hinge", "Polar"}, *shapes[] = {"Sphere", "Capsule", "Plane"}, *receivers[] = {"Constant", "OnEnter", "Proximity"};
+  static const char *lips[] = {"Default", "JawFlapBone", "JawFlapBlendShape", "VisemeBlendShape", "VisemeParameterOnly"}, *lids[] = {"None", "Bones", "Blendshapes"};
+  static const char *kinds[] = {"Parent", "Position", "Rotation", "Scale", "LookAt", "Aim"};
+  auto pick = [](const char *const *names, int n, int v) { return names[std::max(0, std::min(n - 1, v))]; };
+  w.key("components").arr();
+  for (const auto &comp : g.components) {
+    if (const auto *a = dynamic_cast<const AvatarDescriptorComponent *>(comp.get())) {
+      w.obj().key("kind").str("descriptor").key("enabled").boolean(a->enabled);
+      vec3_x(w, "view", a->view_position);
+      w.key("lipSync").str(pick(lips, 5, a->lip_sync)).key("jaw").integer(id_by_name(scene, a->jaw_bone));
+      quat_x(w, "jawClosed", a->jaw_closed), quat_x(w, "jawOpen", a->jaw_open);
+      w.key("visemeMesh").integer(id_by_name(scene, a->viseme_mesh)).key("mouthOpen").str(a->mouth_open_shape).key("jawFlapShape").str(a->jaw_flap_shape);
+      w.key("visemes").arr();
+      for (const std::string &v : a->visemes) w.str(v);
+      w.end();
+      w.key("eyeLook").boolean(a->eye_look).key("confidence").num(a->eye_confidence).key("excitement").num(a->eye_excitement);
+      w.key("leftEye").integer(id_by_name(scene, a->left_eye)).key("rightEye").integer(id_by_name(scene, a->right_eye));
+      static const char *looks[5] = {"straight", "up", "down", "left", "right"};
+      for (int k = 0; k < 5; k++) {
+        w.key(looks[k]).obj().key("linked").boolean(a->look_linked[k]);
+        quat_x(w, "left", a->look_left[k]), quat_x(w, "right", a->look_right[k]);
+        w.end();
+      }
+      w.key("eyelidType").str(pick(lids, 3, a->eyelid_type)).key("eyelidsMesh").integer(id_by_name(scene, a->eyelids_mesh));
+      w.key("eyelidBones").arr();
+      for (const std::string &b : a->eyelid_bones) w.integer(id_by_name(scene, b));
+      w.end();
+      w.key("eyelidShapes").arr();
+      for (int s : a->eyelid_shapes) w.integer(s);
+      w.end();
+      w.key("customizeLayers").boolean(a->customize_layers).key("layers").arr();
+      for (int k = 0; k < 8; k++) {
+        const AvatarDescriptorComponent::Layer &l = k < 5 ? a->base_layers[k] : a->special_layers[k - 5];
+        w.obj().key("enabled").boolean(l.enabled).key("type").integer(l.type).key("controller").str(l.controller).key("mask").str(l.mask).key("default").boolean(l.is_default).end();
+      }
+      w.end();
+      w.key("customExpressions").boolean(a->custom_expressions).key("menu").str(a->expressions_menu).key("parameters").str(a->expression_parameters);
+      w.end();
+    }
+    else if (const auto *p = dynamic_cast<const PhysBoneComponent *>(comp.get())) {
+      w.obj().key("kind").str("physbone").key("enabled").boolean(p->enabled).key("unityId").str(p->unity_id);
+      w.key("integrationType").str(pick(integrations, 2, p->integration_type)).key("root").integer(id_by_name(scene, p->root_transform));
+      ids_by_names(w, "ignore", scene, p->ignore_transforms);
+      const float ep[3] = {p->endpoint_position.x, p->endpoint_position.y, p->endpoint_position.z};
+      w.key("endpoint").nums(ep, 3).key("multiChildType").str(pick(children, 3, p->multi_child_type));
+      w.key("pull").num(p->pull).key("spring").num(p->spring).key("stiffness").num(p->stiffness).key("gravity").num(p->gravity).key("gravityFalloff").num(p->gravity_falloff);
+      w.key("immobileType").str(pick(immobiles, 2, p->immobile_type)).key("immobile").num(p->immobile).key("allowCollision").str(pick(advanced, 3, p->allow_collision));
+      w.key("radius").num(p->radius);
+      ids_by_names(w, "colliders", scene, p->colliders);
+      const float lr[3] = {p->limit_rotation.x, p->limit_rotation.y, p->limit_rotation.z};
+      w.key("limitType").str(pick(limits, 4, p->limit_type)).key("maxAngleX").num(p->max_angle_x).key("maxAngleZ").num(p->max_angle_z).key("limitRotation").nums(lr, 3);
+      w.key("allowGrabbing").str(pick(advanced, 3, p->allow_grabbing)).key("allowPosing").str(pick(advanced, 3, p->allow_posing)).key("grabMovement").num(p->grab_movement);
+      w.key("maxStretch").num(p->max_stretch).key("maxSquish").num(p->max_squish).key("stretchMotion").num(p->stretch_motion).key("snapToHand").boolean(p->snap_to_hand);
+      w.key("isAnimated").boolean(p->is_animated).key("resetWhenDisabled").boolean(p->reset_when_disabled).key("parameter").str(p->parameter).key("showGizmos").boolean(p->show_gizmos);
+      w.end();
+    }
+    else if (const auto *pc = dynamic_cast<const PhysBoneColliderComponent *>(comp.get())) {
+      w.obj().key("kind").str("collider").key("enabled").boolean(pc->enabled).key("unityId").str(pc->unity_id).key("root").integer(id_by_name(scene, pc->root_transform));
+      w.key("shapeType").str(pick(shapes, 3, pc->shape_type)).key("insideBounds").boolean(pc->inside_bounds).key("radius").num(pc->radius).key("height").num(pc->height);
+      vec3_x(w, "position", pc->position), quat_x(w, "rotation", pc->rotation);
+      w.key("bonesAsSpheres").boolean(pc->bones_as_spheres).end();
+    }
+    else if (const auto *ct = dynamic_cast<const ContactComponent *>(comp.get())) {
+      w.obj().key("kind").str(ct->receiver ? "receiver" : "sender").key("enabled").boolean(ct->enabled).key("unityId").str(ct->unity_id).key("root").integer(id_by_name(scene, ct->root_transform));
+      w.key("shapeType").str(pick(shapes, 2, ct->shape_type)).key("radius").num(ct->radius).key("height").num(ct->height);
+      vec3_x(w, "position", ct->position), quat_x(w, "rotation", ct->rotation);
+      w.key("tags").arr();
+      size_t at = 0;
+      while (at <= ct->tags.size()) {
+        const size_t semi = ct->tags.find(';', at);
+        const std::string t = ct->tags.substr(at, semi == std::string::npos ? std::string::npos : semi - at);
+        if (!t.empty()) w.str(t);
+        if (semi == std::string::npos) break;
+        at = semi + 1;
+      }
+      w.end();
+      w.key("allowSelf").boolean(ct->allow_self).key("allowOthers").boolean(ct->allow_others).key("localOnly").boolean(ct->local_only);
+      w.key("receiverType").str(pick(receivers, 3, ct->receiver_type)).key("parameter").str(ct->parameter).key("value").num(ct->value).key("minVelocity").num(ct->min_velocity).end();
+    }
+    else if (const auto *vc = dynamic_cast<const VRCConstraintComponent *>(comp.get())) {
+      w.obj().key("kind").str("constraint").key("enabled").boolean(vc->enabled).key("unityId").str(vc->unity_id).key("constraint").str(pick(kinds, 6, vc->kind));
+      w.key("isActive").boolean(vc->is_active).key("globalWeight").num(vc->global_weight).key("target").integer(id_by_name(scene, vc->target_transform));
+      w.key("solveInLocalSpace").boolean(vc->solve_in_local_space).key("freezeToWorld").boolean(vc->freeze_to_world).key("locked").boolean(vc->locked);
+      w.key("sources").arr();
+      for (const auto &s : vc->sources) {
+        w.obj().key("transform").integer(id_by_name(scene, s.transform)).key("weight").num(s.weight);
+        vec3_x(w, "positionOffset", s.position_offset);
+        const float ro[3] = {s.rotation_offset.x, s.rotation_offset.y, s.rotation_offset.z};
+        w.key("rotationOffset").nums(ro, 3).end();
+      }
+      w.end();
+      vec3_x(w, "positionOffset", vc->position_offset), vec3_x(w, "positionAtRest", vc->position_at_rest);
+      const float ro[3] = {vc->rotation_offset.x, vc->rotation_offset.y, vc->rotation_offset.z}, rr[3] = {vc->rotation_at_rest.x, vc->rotation_at_rest.y, vc->rotation_at_rest.z};
+      const float so[3] = {vc->scale_offset.x, vc->scale_offset.y, vc->scale_offset.z}, sr[3] = {vc->scale_at_rest.x, vc->scale_at_rest.y, vc->scale_at_rest.z};
+      w.key("rotationOffset").nums(ro, 3).key("rotationAtRest").nums(rr, 3).key("scaleOffset").nums(so, 3).key("scaleAtRest").nums(sr, 3);
+      w.key("affects").arr();
+      for (bool b : vc->affects) w.boolean(b);
+      w.end();
+      w.key("affectsRotation").arr();
+      for (bool b : vc->affects_rotation) w.boolean(b);
+      w.end().end();
+    }
+  }
+  w.end().end();
+  return w.out;
+}
+
+}  // namespace
+std::string avatar_components_message_for_test(const Scene &scene, const GameObject &g) { return avatar_components_message(scene, g); }
+namespace {
 
 /* Round 397: a VRC Light Volume as its message - the package's fields (the box is the object's transform, sent as any
  * object's); Unity's Bake off when Blendity bakes it; "none" with none on. */
@@ -819,6 +973,7 @@ struct Link::Impl {
   void send_collider(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void send_light_volume(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void send_reflection_probe(const std::vector<int> &to, bool all, GameObject &g, Sent &s);  // (round 401)
+  void send_avatar_components(const std::vector<int> &to, bool all, GameObject &g, Sent &s);  // (round 402)
   void send_light_volume_bake(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   const LightVolumeSH *baked_volume(const GameObject &g) const;
   const std::map<uint64_t, LightVolumeSH> *lv_bakes = nullptr;  // (round 398: the editor's; not owned)
@@ -1338,6 +1493,7 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     if (live_collider(g)) send_collider(fresh, false, g, s);  // (round 380)
     if (live_volume(g)) send_light_volume(fresh, false, g, s);  // (round 397)
     if (live_probe(g)) send_reflection_probe(fresh, false, g, s);  // (round 401)
+    if (has_avatar_components(g)) send_avatar_components(fresh, false, g, s);  // (round 402)
     if (baked_volume(g)) send_light_volume_bake(fresh, false, g, s);  // (round 398: after it - the bridge needs the volume)
     if (live_lod(g)) send_lod(fresh, false, g, s);
     if (const Animation *a = g.get<Animation>(); a && !a->clip.empty()) animated.push_back(&g);
@@ -1585,6 +1741,15 @@ void Link::Impl::send_reflection_probe(const std::vector<int> &to, bool all, Gam
   send(to, all, w, ckey(g.id, kReflectionProbe));
 }
 
+/* Round 402: the avatar's VRChat components to `to` (or everyone), recorded as a probe is. */
+void Link::Impl::send_avatar_components(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
+  JsonWriter w;
+  w.out = avatar_components_message(*g.scene, g);
+  const uint64_t h = has_avatar_components(g) ? std::hash<std::string>()(w.out) | 1 : 0;
+  if (all || server.ready_clients().empty()) s.avatar_components = h;
+  send(to, all, w, ckey(g.id, kAvatarComponents));
+}
+
 /* An LOD Group to `to` (or everyone): its message, then each level past 0 built on the mesh worker. */
 void Link::Impl::send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
   JsonWriter w;
@@ -1643,6 +1808,10 @@ void Link::Impl::compare_kit(GameObject &g, Sent &s) {
   if (live_probe(g) || s.reflection_probe) {  // (round 401)
     const uint64_t h = live_probe(g) ? std::hash<std::string>()(reflection_probe_message(g)) | 1 : 0;
     if (h != s.reflection_probe) send_reflection_probe({}, true, g, s);
+  }
+  if (has_avatar_components(g) || s.avatar_components) {  // (round 402)
+    const uint64_t h = has_avatar_components(g) ? std::hash<std::string>()(avatar_components_message(*g.scene, g)) | 1 : 0;
+    if (h != s.avatar_components) send_avatar_components({}, true, g, s);
   }
   if (live_lod(g) || s.lod) {
     const uint64_t h = live_lod(g) ? std::hash<std::string>()(lod_message(g)) | 1 : 0;

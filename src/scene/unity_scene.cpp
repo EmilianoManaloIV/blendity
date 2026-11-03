@@ -433,6 +433,211 @@ void add_renderer(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) 
   const std::vector<MaterialPtr> mats = renderer_materials(d, g, ctx, b);
   if (!mats.empty()) r->materials = mats;
   add_outline(g, mats, ctx);
+  /* Round 402: a skinned renderer's blend shape weights (Unity's 0..100 by index; Blendity's 0..1 by name) - the avatar's
+   * default expression. */
+  const YamlNode *bw = d.class_id == 137 ? d.body.get("m_BlendShapeWeights") : nullptr;
+  const MeshPtr mesh = g->get<MeshFilter>()->mesh;
+  if (bw && bw->kind == YamlNode::Seq && mesh)
+    for (size_t i = 0; i < bw->seq.size() && i < mesh->shape_keys.size(); i++) {
+      const float w = (float)std::atof(bw->seq[i].value.c_str()) / 100.0f;
+      if (!(std::fabs(w) > 1e-6f)) continue;
+      const std::string &name = mesh->shape_keys[i].name;
+      auto it = std::find_if(r->shape_weights.begin(), r->shape_weights.end(), [&](const auto &p) { return p.first == name; });
+      if (it != r->shape_weights.end()) it->second = w;
+      else r->shape_weights.push_back({name, w});
+    }
+}
+
+/* Round 402 (ADR 0100): VRChat's avatar components as Blendity's, every field from the document; the references (transform
+ * and renderer fileIDs) kept to be resolved once every object is made (resolve_avatar_refs), the assets by GUID to their
+ * paths. Each stays an Engine Component too (add_engine: the curves and the fields not modelled). */
+Quat yaml_quat(const YamlNode *q) { return q ? Quat((float)q->num("x"), (float)q->num("y"), (float)q->num("z"), (float)q->num("w", 1.0)) : Quat(); }
+Vec3 yaml_vec3(const YamlNode *v, Vec3 def = Vec3(0.0f)) { return v ? Vec3((float)v->num("x", def.x), (float)v->num("y", def.y), (float)v->num("z", def.z)) : def; }
+std::string asset_path_of(const UnityImport &ctx, const YamlNode &b, const char *key) {
+  const std::string guid = b.guid(key);
+  return guid.empty() || !ctx.path_of ? std::string() : ctx.path_of(guid);
+}
+
+void add_avatar_descriptor(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
+  if (g->get<AvatarDescriptorComponent>()) return;
+  AvatarDescriptorComponent *a = g->add<AvatarDescriptorComponent>();
+  const YamlNode &b = d.body;
+  a->unity_id = std::to_string(d.file_id);
+  a->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  a->view_position = yaml_vec3(b.get("ViewPosition"), Vec3(0.0f, 1.6f, 0.2f));  // (Unity's axes, as every transform here)
+  a->lip_sync = std::max(0, std::min(4, (int)b.num("lipSync")));
+  a->jaw_fid = b.file_id("lipSyncJawBone");
+  a->jaw_closed = yaml_quat(b.get("lipSyncJawClosed")), a->jaw_open = yaml_quat(b.get("lipSyncJawOpen"));
+  a->viseme_mesh_fid = b.file_id("VisemeSkinnedMesh");
+  a->mouth_open_shape = b.str("MouthOpenBlendShapeName");
+  a->jaw_flap_shape = b.str("lipSyncJawBlendShapeName");  // (as the SDK names it)
+  if (const YamlNode *v = b.get("VisemeBlendShapes"))
+    for (size_t k = 0; k < 15 && k < v->seq.size(); k++) a->visemes[k] = v->seq[k].value;
+  a->eye_look = b.num("enableEyeLook") != 0.0;
+  if (const YamlNode *e = b.get("customEyeLookSettings")) {
+    if (const YamlNode *m = e->get("eyeMovement")) a->eye_confidence = (float)m->num("confidence", 0.5), a->eye_excitement = (float)m->num("excitement", 0.5);
+    a->left_eye_fid = e->file_id("leftEye"), a->right_eye_fid = e->file_id("rightEye");
+    static const char *looks[5] = {"eyesLookingStraight", "eyesLookingUp", "eyesLookingDown", "eyesLookingLeft", "eyesLookingRight"};
+    for (int k = 0; k < 5; k++)
+      if (const YamlNode *l = e->get(looks[k])) a->look_linked[k] = l->num("linked", 1.0) != 0.0, a->look_left[k] = yaml_quat(l->get("left")), a->look_right[k] = yaml_quat(l->get("right"));
+    a->eyelid_type = std::max(0, std::min(2, (int)e->num("eyelidType")));
+    static const char *lids[4] = {"upperLeftEyelid", "upperRightEyelid", "lowerLeftEyelid", "lowerRightEyelid"};
+    for (int k = 0; k < 4; k++) a->eyelid_bone_fids[k] = e->file_id(lids[k]);
+    a->eyelids_mesh_fid = e->file_id("eyelidsSkinnedMesh");
+    const std::string hex = e->str("eyelidsBlendshapes");  // (an int array as Unity writes it: 8 hex digits each, little-endian)
+    for (int k = 0; k < 3 && (size_t)(k + 1) * 8 <= hex.size(); k++) {
+      uint32_t v = 0;
+      for (int byte = 3; byte >= 0; byte--) v = v << 8 | (uint32_t)std::strtoul(hex.substr((size_t)k * 8 + (size_t)byte * 2, 2).c_str(), nullptr, 16);
+      a->eyelid_shapes[k] = (int32_t)v;
+    }
+  }
+  a->customize_layers = b.num("customizeAnimationLayers") != 0.0;
+  auto layers = [&](const char *key, AvatarDescriptorComponent::Layer *out, size_t count) {
+    const YamlNode *l = b.get(key);
+    for (size_t k = 0; l && k < count && k < l->seq.size(); k++) {
+      const YamlNode &e = l->seq[k];
+      out[k].enabled = e.num("isEnabled") != 0.0, out[k].type = (int)e.num("type"), out[k].is_default = e.num("isDefault", 1.0) != 0.0;
+      out[k].controller = asset_path_of(ctx, e, "animatorController"), out[k].mask = asset_path_of(ctx, e, "mask");
+    }
+  };
+  layers("baseAnimationLayers", a->base_layers, 5);
+  layers("specialAnimationLayers", a->special_layers, 3);
+  a->custom_expressions = b.num("customExpressions") != 0.0;
+  a->expressions_menu = asset_path_of(ctx, b, "expressionsMenu"), a->expression_parameters = asset_path_of(ctx, b, "expressionParameters");
+  a->portrait_offset = yaml_vec3(b.get("portraitCameraPositionOffset")), a->portrait_rotation = yaml_quat(b.get("portraitCameraRotationOffset"));
+  a->unity_version = b.str("unityVersion");
+}
+
+std::vector<int64_t> yaml_fids(const YamlNode *list) {
+  std::vector<int64_t> out;
+  for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>())
+    if (const YamlNode *f = e.get("fileID")) out.push_back((int64_t)std::strtoll(f->value.c_str(), nullptr, 10));
+  return out;
+}
+
+void add_physbone_component(const UnityDoc &d, GameObject *g) {
+  PhysBoneComponent *p = g->add<PhysBoneComponent>();
+  const YamlNode &b = d.body;
+  p->unity_id = std::to_string(d.file_id);
+  p->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  p->version = (int)b.num("version", 1.0), p->integration_type = (int)b.num("integrationType");
+  p->root_fid = b.file_id("rootTransform"), p->ignore_fids = yaml_fids(b.get("ignoreTransforms"));
+  p->endpoint_position = yaml_vec3(b.get("endpointPosition"));
+  p->multi_child_type = (int)b.num("multiChildType");
+  p->pull = (float)b.num("pull", 0.2), p->spring = (float)b.num("spring", 0.2), p->stiffness = (float)b.num("stiffness", 0.2);
+  p->gravity = (float)b.num("gravity"), p->gravity_falloff = (float)b.num("gravityFalloff"), p->immobile = (float)b.num("immobile"), p->immobile_type = (int)b.num("immobileType");
+  p->allow_collision = (int)b.num("allowCollision", 1.0), p->radius = (float)b.num("radius");
+  p->collider_fids = yaml_fids(b.get("colliders"));
+  p->limit_type = (int)b.num("limitType"), p->max_angle_x = (float)b.num("maxAngleX", 45.0), p->max_angle_z = (float)b.num("maxAngleZ", 45.0);
+  p->limit_rotation = yaml_vec3(b.get("limitRotation"));
+  p->allow_grabbing = (int)b.num("allowGrabbing", 1.0), p->allow_posing = (int)b.num("allowPosing", 1.0);
+  p->grab_movement = (float)b.num("grabMovement", 0.5), p->max_stretch = (float)b.num("maxStretch"), p->max_squish = (float)b.num("maxSquish"), p->stretch_motion = (float)b.num("stretchMotion");
+  p->snap_to_hand = b.num("snapToHand") != 0.0, p->is_animated = b.num("isAnimated") != 0.0, p->reset_when_disabled = b.num("resetWhenDisabled") != 0.0;
+  p->parameter = b.str("parameter"), p->show_gizmos = b.num("showGizmos", 1.0) != 0.0;
+  p->bone_opacity = (float)b.num("boneOpacity", 0.5), p->limit_opacity = (float)b.num("limitOpacity", 0.5);
+}
+
+void add_physbone_collider(const UnityDoc &d, GameObject *g) {
+  PhysBoneColliderComponent *c = g->add<PhysBoneColliderComponent>();
+  const YamlNode &b = d.body;
+  c->unity_id = std::to_string(d.file_id);
+  c->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  c->root_fid = b.file_id("rootTransform");
+  c->shape_type = (int)b.num("shapeType"), c->inside_bounds = b.num("insideBounds") != 0.0, c->bones_as_spheres = b.num("bonesAsSpheres") != 0.0;
+  c->radius = (float)b.num("radius", 0.1), c->height = (float)b.num("height");
+  c->position = yaml_vec3(b.get("position")), c->rotation = yaml_quat(b.get("rotation"));
+}
+
+void add_contact(const UnityDoc &d, GameObject *g, bool receiver) {
+  ContactComponent *c = g->add<ContactComponent>();
+  const YamlNode &b = d.body;
+  c->unity_id = std::to_string(d.file_id);
+  c->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  c->receiver = receiver;
+  c->root_fid = b.file_id("rootTransform");
+  c->shape_type = (int)b.num("shapeType"), c->radius = (float)b.num("radius", 0.1), c->height = (float)b.num("height");
+  c->position = yaml_vec3(b.get("position")), c->rotation = yaml_quat(b.get("rotation"));
+  std::string tags;
+  for (const YamlNode &t : b.get("collisionTags") ? b.get("collisionTags")->seq : std::vector<YamlNode>()) tags += (tags.empty() ? "" : ";") + t.value;
+  c->tags = tags;
+  c->allow_self = b.num("allowSelf", 1.0) != 0.0, c->allow_others = b.num("allowOthers", 1.0) != 0.0, c->local_only = b.num("localOnly") != 0.0;
+  c->receiver_type = (int)b.num("receiverType"), c->parameter = b.str("parameter"), c->value = (float)b.num("value", 1.0), c->min_velocity = (float)b.num("minVelocity");
+}
+
+void add_vrc_constraint(const UnityDoc &d, GameObject *g, const std::string &type) {
+  VRCConstraintComponent *c = g->add<VRCConstraintComponent>();
+  const YamlNode &b = d.body;
+  c->unity_id = std::to_string(d.file_id);
+  c->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  c->kind = type == "VRCPositionConstraint" ? 1 : type == "VRCRotationConstraint" ? 2 : type == "VRCScaleConstraint" ? 3 : type == "VRCLookAtConstraint" ? 4 : type == "VRCAimConstraint" ? 5 : 0;
+  c->is_active = b.num("IsActive", 1.0) != 0.0, c->global_weight = (float)b.num("GlobalWeight", 1.0);
+  c->target_fid = b.file_id("TargetTransform");
+  c->solve_in_local_space = b.num("SolveInLocalSpace") != 0.0, c->freeze_to_world = b.num("FreezeToWorld") != 0.0;
+  c->rebake_offsets_when_unfrozen = b.num("RebakeOffsetsWhenUnfrozen") != 0.0, c->locked = b.num("Locked") != 0.0;
+  if (const YamlNode *s = b.get("Sources"))
+    for (const auto &[key, src] : s->map) {  // (source0 .. source15; the ones with a transform count)
+      if (key.rfind("source", 0) != 0 || src.file_id("SourceTransform") == 0) continue;
+      VRCConstraintComponent::Source out;
+      out.fid = src.file_id("SourceTransform"), out.weight = (float)src.num("Weight", 1.0);
+      out.position_offset = yaml_vec3(src.get("ParentPositionOffset")), out.rotation_offset = yaml_vec3(src.get("ParentRotationOffset"));
+      c->sources.push_back(out);
+    }
+  c->position_offset = yaml_vec3(b.get("PositionOffset")), c->position_at_rest = yaml_vec3(b.get("PositionAtRest"));
+  c->rotation_offset = yaml_vec3(b.get("RotationOffset")), c->rotation_at_rest = yaml_vec3(b.get("RotationAtRest"));
+  c->scale_offset = yaml_vec3(b.get("ScaleOffset"), Vec3(1.0f)), c->scale_at_rest = yaml_vec3(b.get("ScaleAtRest"), Vec3(1.0f));
+  static const char *axes[6][3] = {{"AffectsPositionX", "AffectsPositionY", "AffectsPositionZ"}, {"AffectsPositionX", "AffectsPositionY", "AffectsPositionZ"},
+                                   {"AffectsRotationX", "AffectsRotationY", "AffectsRotationZ"}, {"AffectsScaleX", "AffectsScaleY", "AffectsScaleZ"}, {"", "", ""}, {"", "", ""}};
+  static const char *rot_axes[3] = {"AffectsRotationX", "AffectsRotationY", "AffectsRotationZ"};
+  for (int k = 0; k < 3; k++) c->affects[k] = axes[c->kind][k][0] ? b.num(axes[c->kind][k], 1.0) != 0.0 : true;
+  for (int k = 0; k < 3; k++) c->affects_rotation[k] = c->kind == 0 ? b.num(rot_axes[k], 1.0) != 0.0 : c->affects[k];  // (a Parent constraint's rotation part)
+}
+
+void add_animator(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
+  if (g->get<AnimatorComponent>()) return;
+  AnimatorComponent *a = g->add<AnimatorComponent>();
+  const YamlNode &b = d.body;
+  a->unity_id = std::to_string(d.file_id);
+  a->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  a->controller = asset_path_of(ctx, b, "m_Controller"), a->avatar = asset_path_of(ctx, b, "m_Avatar");
+  a->apply_root_motion = b.num("m_ApplyRootMotion") != 0.0, a->update_mode = (int)b.num("m_UpdateMode"), a->culling_mode = (int)b.num("m_CullingMode");
+}
+
+/* The references of round 402's components, once every object and component of the file is made: transforms by
+ * their fileIDs (the objects'), renderers by their documents' (the targets'), as names. */
+void resolve_avatar_refs(const Build &b) {
+  auto name_of = [&](int64_t fid) {
+    const GameObject *g = object_at(b.by_fid, fid);
+    if (!g) {
+      const auto t = b.targets.find(fid);
+      g = t != b.targets.end() ? t->second.object : nullptr;
+    }
+    return g ? g->name : std::string();
+  };
+  auto names_of = [&](const std::vector<int64_t> &fids) {
+    std::string s;
+    for (int64_t f : fids) {
+      const std::string n = name_of(f);
+      if (!n.empty()) s += (s.empty() ? "" : ";") + n;
+    }
+    return s;
+  };
+  for (const auto &[fid, g] : b.by_fid) {
+    if (!g) continue;
+    for (auto &c : g->components) {
+      if (auto *a = dynamic_cast<AvatarDescriptorComponent *>(c.get())) {
+        a->jaw_bone = name_of(a->jaw_fid), a->viseme_mesh = name_of(a->viseme_mesh_fid), a->eyelids_mesh = name_of(a->eyelids_mesh_fid);
+        a->left_eye = name_of(a->left_eye_fid), a->right_eye = name_of(a->right_eye_fid);
+        for (int k = 0; k < 4; k++) a->eyelid_bones[k] = name_of(a->eyelid_bone_fids[k]);
+      }
+      else if (auto *p = dynamic_cast<PhysBoneComponent *>(c.get())) p->root_transform = name_of(p->root_fid), p->ignore_transforms = names_of(p->ignore_fids), p->colliders = names_of(p->collider_fids);
+      else if (auto *pc = dynamic_cast<PhysBoneColliderComponent *>(c.get())) pc->root_transform = name_of(pc->root_fid);
+      else if (auto *ct = dynamic_cast<ContactComponent *>(c.get())) ct->root_transform = name_of(ct->root_fid);
+      else if (auto *vc = dynamic_cast<VRCConstraintComponent *>(c.get())) {
+        vc->target_transform = name_of(vc->target_fid);
+        for (auto &s : vc->sources) s.transform = name_of(s.fid);
+      }
+    }
+  }
 }
 
 void add_light(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
@@ -544,6 +749,14 @@ std::string vrchat_type(const YamlNode &b) {
   if (b.get("shapeType") && b.get("rootTransform") && (b.get("insideBounds") || b.get("bonesAsSpheres"))) return "VRCPhysBoneCollider";
   if (b.get("shapeType") && b.get("rootTransform") && b.get("collisionTags")) return b.get("allowSelf") ? "VRCContactReceiver" : "VRCContactSender";
   if (b.get("spawns") && b.get("RespawnHeightY")) return "VRCSceneDescriptor";
+  if (b.get("Sources") && b.get("GlobalWeight")) {  // (round 402: VRC Constraints by their own fields; a Parent one carries both parts' Affects)
+    if (b.get("AimAxis") || b.get("UpAxis")) return b.get("UseUpTransform") || b.get("RollOffset") ? "VRCLookAtConstraint" : "VRCAimConstraint";
+    if (b.get("AffectsPositionX") && b.get("AffectsRotationX")) return "VRCParentConstraint";
+    if (b.get("ScaleOffset") || b.get("ScaleAtRest") || b.get("AffectsScaleX")) return "VRCScaleConstraint";
+    if (b.get("RotationOffset") || b.get("RotationAtRest") || b.get("AffectsRotationX")) return "VRCRotationConstraint";
+    if (b.get("PositionOffset") || b.get("PositionAtRest") || b.get("AffectsPositionX")) return "VRCPositionConstraint";
+    return "VRCParentConstraint";
+  }
   if (b.get("serializedProgramAsset") || b.get("programSource")) return "UdonBehaviour";
   return "";
 }
@@ -626,9 +839,18 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
     case 215: return add_reflection_probe(d, g, ctx), (void)ctx.reflection_probes++;  // (round 401)
     case 33: return;  // (meshes: before)
     case 137: return add_renderer(d, g, ctx, b);
+    case 95: add_animator(d, g, ctx); return add_engine(d, g, ctx);  // (round 402: shown and written back; the document kept too)
     default:
       if (d.class_id == 114 && vrchat_type(d.body) == "VRCPhysBone" && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty()))
         add_physbone(d, g, ctx, b);  // (and kept below, for Unity; a project's own script with such fields isn't one)
+      if (d.class_id == 114 && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty())) {  // (round 402: the avatar's components as Blendity's)
+        const std::string vt = vrchat_type(d.body);
+        if (vt == "VRCAvatarDescriptor") add_avatar_descriptor(d, g, ctx);
+        else if (vt == "VRCPhysBone") add_physbone_component(d, g);
+        else if (vt == "VRCPhysBoneCollider") add_physbone_collider(d, g);
+        else if (vt == "VRCContactSender" || vt == "VRCContactReceiver") add_contact(d, g, vt == "VRCContactReceiver");
+        else if (vt.size() > 13 && vt.compare(vt.size() - 10, 10, "Constraint") == 0 && vt.rfind("VRC", 0) == 0) add_vrc_constraint(d, g, vt);
+      }
       if (is_script(d, kLightVolumeGuid)) add_light_volume(d, g, ctx), ctx.light_volumes++;  // (round 397: and kept below)
       return add_engine(d, g, ctx);
   }
@@ -1278,6 +1500,7 @@ std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> 
     if (g) add_component(d, g, ctx, b), b.targets[d.file_id] = {g, d.class_id};
     else ctx.dropped++;  // (review 370: never silently - counted, said)
   }
+  resolve_avatar_refs(b);  // (round 402: the descriptor's, PhysBones', contacts' and constraints' references, now that every object is made)
   for (const UnityDoc &d : docs) {  // (round 397: a Point Light Volume - after the components: its light may come later in the file)
     GameObject *g = is_script(d, kPointLightVolumeGuid) ? object_at(b.by_fid, d.body.file_id("m_GameObject")) : nullptr;
     if (g) mark_light_volume(d, *g), ctx.light_volumes++;

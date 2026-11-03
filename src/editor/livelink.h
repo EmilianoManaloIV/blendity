@@ -85,4 +85,11 @@ class Link {
 };
 
 }  // namespace livelink
+class Scene;
+class GameObject;
+namespace livelink {
+/* Round 402 (tests): the avatar's VRChat components' Live Link message for an object. */
+std::string avatar_components_message_for_test(const Scene &scene, const GameObject &g);
+}  // namespace livelink
+
 }  // namespace bl

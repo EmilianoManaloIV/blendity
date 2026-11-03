@@ -277,6 +277,10 @@ class PathTracer {
   float volume_density(const Medium &md, Vec3 p) const;
   Media media_at(Vec3 p) const;  // the fogs a point is in (a camera in a fog-filled room)
   bool sample_light(const RenderLight &l, Vec3 from, Vec3 at, uint32_t &rng, Vec3 &dir, float &dist, float &power) const;
+  /* Round 402 (ADR 0100): a lilToon surface the eye sees - its whole colour (the main light plus the sky's SH through
+   * lilToon's shadow model, the other lights added, the extras); the path ends there (lilToon has no bounce light but
+   * the SH). */
+  Vec3 lil_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 n, Vec3 V, Vec3 origin, bool backface, uint32_t &rng, uint64_t &rays, const Media &media) const;
   Vec3 transmittance_volumes(const Ray &r, float tmax, const Media *in) const;
   Vec3 volume_transmittance(const Medium &md, const Ray &r, float len) const;
   bool has_volume_ = false;

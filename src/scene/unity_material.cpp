@@ -38,6 +38,7 @@ struct Props {
   std::map<std::string, double> floats;
   std::map<std::string, Vec3> colors;
   std::map<std::string, double> alphas;
+  std::map<std::string, Vec4> raw;  // (round 402: the colour as written - a vector kept as a Color, lilToon's _MainTexHSVG)
   std::vector<std::string> names;
 };
 
@@ -69,6 +70,7 @@ Props read_props(const YamlNode &body) {
   for_each_prop(saved->get("m_Colors"), [&](const std::string &n, const YamlNode &v) {
     p.colors[n] = linear_of(Vec3((float)v.num("r", 1.0), (float)v.num("g", 1.0), (float)v.num("b", 1.0)));
     p.alphas[n] = v.num("a", 1.0);
+    p.raw[n] = Vec4((float)v.num("r", 1.0), (float)v.num("g", 1.0), (float)v.num("b", 1.0), (float)v.num("a", 1.0));
     p.names.push_back(n);
   });
   return p;
@@ -239,6 +241,78 @@ void read_filamented(const Props &p, const std::string &family, const std::funct
   if (tex_of(p, {"_OcclusionMap"})) info.notes.push_back("its occlusion map isn't carried (Blendity's materials have no occlusion slot)");
 }
 
+/* lilToon's lighting model (round 402, ADR 0100): every property of the block, by lilToon's name, the switches as they are
+ * (a part switched off stays off). The 3rd shadow, the 2nd MatCap and emission, the 2nd / 3rd main textures and the
+ * variants' extras stay with the material's kept properties. */
+void read_liltoon(const Props &p, const std::function<std::string(const std::string &)> &texture, Material &m) {
+  LilToonSettings &l = m.lil;
+  l = LilToonSettings{};
+  l.on = true;
+  auto f = [&](const char *n, float def) {
+    const double v = prop(p, n, def);
+    return std::isfinite(v) ? (float)v : def;  // (review 402: a NaN in the file stays out of the shading)
+  };
+  auto on = [&](const char *n, bool def) { return prop(p, n, def ? 1.0 : 0.0) > 0.5; };
+  auto col = [&](const char *n, Vec3 &c, float *a = nullptr) {
+    double al = 1.0;
+    Vec3 v;
+    if (!color_of(p, {n}, v, &al) || !std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) return;
+    c = v;
+    if (a && std::isfinite(al)) *a = (float)al;
+  };
+  auto tex = [&](const char *n, TextureRef &r, bool data = false) { set_tex(r, tex_of(p, {n}), texture, data); };
+  l.light_min = f("_LightMinLimit", 0.05f), l.light_max = f("_LightMaxLimit", 1.0f);
+  l.monochrome = f("_MonochromeLighting", 0.0f), l.as_unlit = f("_AsUnlit", 0.0f), l.shadow_env = f("_ShadowEnvStrength", 0.0f);
+  l.shadow = on("_UseShadow", true);
+  l.border = f("_ShadowBorder", 0.5f), l.blur = f("_ShadowBlur", 0.1f), l.strength = f("_ShadowStrength", 1.0f), l.receive = f("_ShadowReceive", 0.0f);
+  l.main_strength = f("_ShadowMainStrength", 0.0f), l.border_range = f("_ShadowBorderRange", 0.08f);
+  col("_ShadowColor", l.shadow_color);
+  tex("_ShadowColorTex", l.shadow_color_tex), tex("_ShadowStrengthMask", l.strength_mask, true), tex("_ShadowBorderMask", l.border_mask, true);
+  l.post_ao = on("_ShadowPostAO", false);
+  l.border2 = f("_Shadow2ndBorder", 0.15f), l.blur2 = f("_Shadow2ndBlur", 0.1f), l.receive2 = f("_Shadow2ndReceive", 0.0f);
+  col("_Shadow2ndColor", l.shadow2_color, &l.shadow2_alpha);
+  tex("_Shadow2ndColorTex", l.shadow2_color_tex);
+  col("_ShadowBorderColor", l.border_color);
+  l.backface_force_shadow = f("_BackfaceForceShadow", 0.0f);
+  l.rim = on("_UseRim", false);
+  col("_RimColor", l.rim_color, &l.rim_alpha);
+  tex("_RimColorTex", l.rim_color_tex);
+  l.rim_main_strength = f("_RimMainStrength", 1.0f), l.rim_fresnel = f("_RimFresnelPower", 3.5f), l.rim_border = f("_RimBorder", 0.5f), l.rim_blur = f("_RimBlur", 0.65f);
+  l.rim_enable_lighting = f("_RimEnableLighting", 1.0f), l.rim_shadow_mask = f("_RimShadowMask", 0.5f), l.rim_backface_mask = f("_RimBackfaceMask", 1.0f);
+  l.rim_dir_strength = f("_RimDirStrength", 0.0f), l.rim_dir_range = f("_RimDirRange", 0.0f), l.rim_indir_range = f("_RimIndirRange", 0.0f);
+  l.rim_indir_border = f("_RimIndirBorder", 0.5f), l.rim_indir_blur = f("_RimIndirBlur", 0.1f);
+  col("_RimIndirColor", l.rim_indir_color, &l.rim_indir_alpha);
+  l.rim_blend_mode = std::clamp((int)f("_RimBlendMode", 1.0f), 0, 3);
+  l.backlight = on("_UseBacklight", false);
+  col("_BacklightColor", l.backlight_color, &l.backlight_alpha);
+  tex("_BacklightColorTex", l.backlight_tex);
+  l.backlight_main_strength = f("_BacklightMainStrength", 0.0f), l.backlight_receive_shadow = f("_BacklightReceiveShadow", 1.0f);
+  l.backlight_backface_mask = f("_BacklightBackfaceMask", 1.0f), l.backlight_border = f("_BacklightBorder", 0.35f), l.backlight_blur = f("_BacklightBlur", 0.05f);
+  l.backlight_directivity = f("_BacklightDirectivity", 5.0f), l.backlight_view_strength = f("_BacklightViewStrength", 1.0f);
+  l.matcap = on("_UseMatCap", false);
+  tex("_MatCapTex", l.matcap_tex), tex("_MatCapBlendMask", l.matcap_mask, true);
+  col("_MatCapColor", l.matcap_color, &l.matcap_alpha);
+  l.matcap_blend = f("_MatCapBlend", 1.0f), l.matcap_blend_mode = std::clamp((int)f("_MatCapBlendMode", 1.0f), 0, 3);
+  l.matcap_enable_lighting = f("_MatCapEnableLighting", 1.0f), l.matcap_shadow_mask = f("_MatCapShadowMask", 0.0f);
+  l.matcap_backface_mask = f("_MatCapBackfaceMask", 0.0f), l.matcap_main_strength = f("_MatCapMainStrength", 0.0f);
+  l.emission = on("_UseEmission", false);
+  tex("_EmissionMap", l.emission_map), tex("_EmissionBlendMask", l.emission_blend_mask, true);
+  col("_EmissionColor", l.emission_color, &l.emission_alpha);
+  l.emission_blend = f("_EmissionBlend", 1.0f), l.emission_blend_mode = std::clamp((int)f("_EmissionBlendMode", 1.0f), 0, 3);
+  l.emission_main_strength = f("_EmissionMainStrength", 0.0f);
+  const auto hsvg = p.raw.find("_MainTexHSVG");
+  if (hsvg != p.raw.end()) l.hsv = Vec3(hsvg->second.x, hsvg->second.y, hsvg->second.z), l.gamma = hsvg->second.w;
+  l.reflection = on("_UseReflection", false);
+  l.smoothness = f("_Smoothness", 1.0f), l.metallic = f("_Metallic", 0.0f), l.reflectance = f("_Reflectance", 0.04f);
+  l.apply_specular = on("_ApplySpecular", true), l.apply_reflection = on("_ApplyReflection", true), l.specular_toon = on("_SpecularToon", true);
+  l.specular_border = f("_SpecularBorder", 0.5f), l.specular_blur = f("_SpecularBlur", 0.0f);
+  /* lilToon's own switches over the base reader's guesses: the normal map only with Use Bump Map, the emission lilToon's
+   * (not Blendity's too), the PBR metal and roughness left neutral (lilToon's are its reflection block's). */
+  if (!on("_UseBumpMap", false)) m.normal_map = TextureRef{};
+  m.emission_strength = 0.0f, m.emission_map = TextureRef{};
+  m.metallic = 0.0f, m.roughness = 1.0f, m.metallic_map = TextureRef{};
+}
+
 /* The toon families: the shade colour and texture, the outline. */
 void read_toon(const Props &p, const std::string &family, const std::function<std::string(const std::string &)> &texture, Material &m, UnityMaterialInfo &info) {
   m.shading_model = 1;
@@ -255,6 +329,7 @@ void read_toon(const Props &p, const std::string &family, const std::function<st
   }
   read_blend(p, family, m);
   read_outline(p, family, info);
+  if (family == "lilToon") read_liltoon(p, texture, m);  // (round 402)
 }
 
 /* The outline (an Outline on the objects that wear it), in metres:

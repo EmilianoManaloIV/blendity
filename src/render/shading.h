@@ -88,6 +88,16 @@ struct SurfaceSample {
   Vec3 toon_shadow_mul{1.0f, 1.0f, 1.0f};
   Vec3 toon_n_dx, toon_n_dy;  // task 0164: the normal's change across the pixel (sp.normal_dx / dy), for the band edges
   float face_sdf = -1.0f, face_sdf_mirror = -1.0f;
+  /* lilToon's maps at the point (round 402, ADR 0100): the shadow colours' textures (rgb, alpha the mix - 0 without one),
+   * the strength mask's red, the border (AO) mask (red the 1st shadow's, green the 2nd's), the rim's and the backlight's
+   * colour textures, the MatCap's mask and texture, the emission map and its blend mask. `lil` set: shade through
+   * lil_shade / lil_finish instead of shade_toon / toon_rim. */
+  bool lil = false;
+  Vec4 lil_shadow_tex{0.0f, 0.0f, 0.0f, 0.0f}, lil_shadow2_tex{0.0f, 0.0f, 0.0f, 0.0f}, lil_rim_tex{1.0f, 1.0f, 1.0f, 1.0f};
+  Vec4 lil_backlight_tex{1.0f, 1.0f, 1.0f, 1.0f}, lil_emission{1.0f, 1.0f, 1.0f, 1.0f};
+  Vec3 lil_border_mask{1.0f, 1.0f, 1.0f}, lil_matcap_mask{1.0f, 1.0f, 1.0f};
+  float lil_strength_mask = 1.0f, lil_emission_mask = 1.0f;
+  const Texture *lil_matcap = nullptr;
   /* Round 330: the Principled extras at the point (0: off), and the tangent the anisotropy follows. */
   float subsurface = 0.0f, subsurface_scale = 0.5f, sheen = 0.0f, sheen_roughness = 0.5f, coat = 0.0f, coat_roughness = 0.03f, coat_f0 = 0.04f;
   float anisotropic = 0.0f;
@@ -136,6 +146,41 @@ inline float toon_wrap_ndl(const Material &m, float ndl) {
   const float w = finite_bits(m.toon_wrap) ? std::max(0.0f, std::min(1.0f, m.toon_wrap)) : 0.0f;
   return w > 0.0f ? (ndl + w) / (1.0f + w) : ndl;
 }
+
+struct Environment;  // (below)
+/* --- lilToon (round 402, ADR 0100): lilToon's own formulas, from jp.lilxyzw.liltoon's lil_common_frag.hlsl --- */
+/* lilToon's step: `value` from 0 at border - blur / 2 to 1 at border + blur / 2 (a hard step at blur 0); with a range the
+ * lower edge moves down by it (the border colour's band). */
+float lil_step(float value, float border, float blur, float range = 0.0f);
+/* lilBlendColor: Normal / Add / Screen / Multiply of `src` over `dst` by `a` per channel. */
+Vec3 lil_blend(Vec3 dst, Vec3 src, Vec3 a, int mode);
+/* The ambient as lilToon's SH reads it along a direction: shMax (the light's side) and shMin (the dark side) from an
+ * environment's irradiance (L0 + L2 as the mean of the two ends, L1 as two thirds of their difference, as lilToon scales
+ * its L1 by 0.666). */
+void lil_sh(const Environment &env, Vec3 dir, Vec3 *sh_max, Vec3 *sh_min);
+/* lilToon's light direction: the main light's (toward it) weighted by its luminance plus the ambient's gradient; up when
+ * both are nothing. */
+Vec3 lil_light_direction(const Environment &env, Vec3 key_L, float key_luminance);
+/* The main light's colour as lilToon takes it: the key light's colour x intensity plus shMax, clamped to the limits,
+ * greyed by Monochrome Lighting, 1 by As Unlit. An added light (lilToon's ForwardAdd): min(colour, the max limit), greyed,
+ * 0 by As Unlit. */
+Vec3 lil_main_light(const Material &m, Vec3 key_color, Vec3 sh_max);
+Vec3 lil_add_light(const Material &m, Vec3 color);
+/* lilToon's shaded colour from one light (lilGetShading): the lit side the albedo x light, the shadow side the shadow
+ * colours (the 2nd within the 1st) x light, by N.L x 0.5 + 0.5 stepped at the borders, the cast shadow's visibility `vis`
+ * by Shadow Receive, the strength and masks, the border colour over its range; `main`: the ambient's dark side `indirect`
+ * lifts the shadow by Shadow Env Strength (the added lights pass false). `shadowmix` (out): the 1st shadow's lit term,
+ * what the rim, MatCap and specular are masked by. */
+Vec3 lil_shade(const SurfaceSample &s, Vec3 n, Vec3 L, float vis, bool backface, Vec3 light, Vec3 indirect, bool main, float *shadowmix);
+/* The main pass's extras on the shaded colour, in lilToon's order: MatCap, rim, backlight, the specular highlight when
+ * Use Reflection (lilToon's stepped or Blendity's GGX), the emission (unlit) - `light` the main light's colour, `L` its
+ * direction, `vis` its cast shadow's visibility. */
+Vec3 lil_finish(const SurfaceSample &s, Vec3 col, Vec3 n, Vec3 V, Vec3 L, float vis, float shadowmix, bool backface, Vec3 light);
+/* _MainTexHSVG: hue shift, saturation, value and gamma on a colour (lilToneCorrection). */
+Vec3 lil_tone(Vec3 c, Vec3 hsv, float gamma);
+/* lilToon's MatCap UV (lilCalcMatCapUV with Z Rot Cancel on): the normal in the frame of the view direction and the
+ * world's up, in Blendity's texture rows (v down). */
+Vec2 lil_matcap_uv(Vec3 n, Vec3 V);
 
 /* --- BRDF --- */
 Vec3 fresnel_f0(const SurfaceSample &s);

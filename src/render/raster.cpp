@@ -1908,6 +1908,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     return s.albedo + s.emission + m.hp_rim_color * rim + Vec3(spec);
   }
   if (s.unlit) return s.albedo + s.emission;
+  if (s.lil) return light_liltoon(s, sp, V, it, env);  // (round 402)
   Vec3 n = s.normal;
   Vec3 lo(0.0f);
   for (size_t li = 0; li < env_.lights.size(); li++) {
@@ -2014,7 +2015,63 @@ static Vec3 reflection_specular(const std::vector<RenderProbe> &probes, const En
   return rest > 1e-4f ? c + env.specular(R, roughness) * rest : c;
 }
 
+Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const {
+  const Material &m = *s.toon;
+  const Vec3 n = s.normal;
+  const bool backface = false;  // (the pixel loop turned a back side's normals toward the eye: not told apart here; the path tracer knows its front faces)
+  auto shadow_of = [&](size_t li, Vec3 L) {
+    if ((int)li != env_.shadow_light || !env_.shadow || !it.receive_shadows || dot(n, L) <= 0.0f) return 1.0f;
+    return env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
+  };
+  const bool baked_here = sp.has_lightmap || sp.probe_baked;
+  /* The main light: the key light (the brightest sun) unless the bake holds it; its direction blended with the ambient's
+   * gradient as lilToon's lilGetLightDirection. */
+  Vec3 key_color(0.0f), key_L = toon_key_L_;
+  const RenderLight *key = toon_key_ >= 0 && toon_key_ < (int)env_.lights.size() ? &env_.lights[toon_key_] : nullptr;
+  if (key && !(baked_here && key->bake_mode == 2) && key->intensity > 0.0f) key_color = key->color * key->intensity;
+  const Vec3 L = lil_light_direction(env, key_L, 0.2126f * key_color.x + 0.7152f * key_color.y + 0.0722f * key_color.z);
+  /* The ambient as lilToon's SH: the baked light where there is some (no direction in it), else the sky along L. */
+  Vec3 sh_max, sh_min;
+  if (sp.has_lightmap) sh_max = sh_min = sp.lightmap + sp.lightmap_add;
+  else if (sp.has_probe) sh_max = sh_min = sp.probe;
+  else {
+    lil_sh(env, L, &sh_max, &sh_min);
+    if (sp.has_gi) sh_max = sh_max * sp.gi_sky + sp.gi_bounce, sh_min = sh_min * sp.gi_sky + sp.gi_bounce;
+  }
+  const Vec3 light = lil_main_light(m, key_color, sh_max);
+  const float vis = key_color.x + key_color.y + key_color.z > 0.0f ? shadow_of((size_t)toon_key_, L) : 1.0f;
+  float shadowmix = 1.0f;
+  Vec3 col = lil_shade(s, n, L, vis, backface, light, sh_min, true, &shadowmix);
+  /* The other lights, as lilToon's ForwardAdd passes: each through the shadow model with its own colour, added. */
+  for (size_t li = 0; li < env_.lights.size(); li++) {
+    const RenderLight &l = env_.lights[li];
+    if ((int)li == toon_key_ || (baked_here && l.bake_mode == 2) || !(l.intensity > 0.0f)) continue;
+    Vec3 Lk;
+    float fall = 1.0f;
+    if (l.type == RenderLight::Directional) Lk = -l.direction;
+    else {
+      const Vec3 d = l.position - sp.position;
+      const float dist = length(d);
+      Lk = dist > 1e-6f ? d / dist : Vec3(0, 1, 0);
+      fall = light_falloff(l, sp.position, Lk);
+    }
+    if (!(fall > 0.0f)) continue;
+    const Vec3 lc = lil_add_light(m, l.color * (l.intensity * std::min(fall, 1.0f)));
+    col = col + lil_shade(s, n, Lk, shadow_of(li, Lk), backface, lc, Vec3(0.0f), false, nullptr);
+  }
+  col = lil_finish(s, col, n, V, L, vis, shadowmix, backface, light);
+  /* The environment's reflection (lilToon's _ApplyReflection): the probes' and the sky's, as the PBR surfaces take it. */
+  if (m.lil.reflection && m.lil.apply_reflection) {
+    const float metallic = saturate(m.lil.metallic), pr = std::max(1e-3f, 1.0f - saturate(m.lil.smoothness));
+    const Vec3 f0 = lerp(Vec3(saturate(m.lil.reflectance)), s.albedo, metallic);
+    const Vec3 R = n * (2.0f * dot(n, V)) - V;
+    col = col + reflection_specular(env_.reflection_probes, env, sp.position, R, pr) * env_brdf_approx(f0, pr, std::max(dot(n, V), 1e-4f));
+  }
+  return col + s.emission;
+}
+
 Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const {
+  if (s.lil) return lo;  // (round 402: light_liltoon gave the whole colour)
   Vec3 n = s.normal;
   float nv = std::max(dot(n, V), 1e-4f);
   if (s.toon) {

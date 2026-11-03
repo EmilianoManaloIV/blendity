@@ -66,12 +66,16 @@ bool material_uniform(const Material &m, const Material::Resolved &tx) {
   /* The painted toon maps and the hair's strands vary over the surface too (task 0148); the ramp alone doesn't. */
   if (m.shading_model == 1 && (tx.shade || tx.toon_bias || tx.toon_specular || tx.toon_rim_mask || m.toon_hair_highlight)) return false;
   if (m.shading_model == 1 && (tx.face_shadow || tx.line || tx.hatch)) return false;  // (task 0149)
+  if (m.liltoon() && (tx.lil_shadow_tex || tx.lil_shadow2_tex || tx.lil_strength_mask || tx.lil_border_mask || tx.lil_rim_tex || tx.lil_backlight_tex ||
+                      tx.lil_matcap || tx.lil_matcap_mask || tx.lil_emission || tx.lil_emission_mask))
+    return false;  // (round 402)
   return !tx.base && !tx.metallic && !tx.roughness && !tx.emission && !tx.normal;
 }
 
 SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx, const SurfacePoint &sp) {
   SurfaceSample s = evaluate_any(m, tx, sp);
   if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
+  if (m.liltoon()) s.lil = true;          // (round 402)
   if (m.shading_model == 2) s.handpainted = &m, s.unlit = true;  // (task 0247)
   return s;
 }
@@ -159,6 +163,197 @@ float toon_face_lit(const Material &m, const SurfaceSample &s, Vec3 local_L) {
   const float sdf = dot(l, right) >= 0.0f ? s.face_sdf : s.face_sdf_mirror;
   const float soft = clampf(finite_bits(m.face_shadow_softness) ? m.face_shadow_softness : 0.0f, 0.0f, 0.5f);
   return axis_step(thr - soft, thr + soft, sdf);
+}
+
+/* --- lilToon (round 402, ADR 0100) --- */
+float lil_step(float value, float border, float blur, float range) {
+  const float lo = saturate(border - blur * 0.5f - range), hi = saturate(border + blur * 0.5f);
+  const float d = saturate(hi - lo);
+  if (!(d > 1e-6f)) return value >= lo ? 1.0f : 0.0f;  // (lilToon divides by 0 here: a hard step)
+  return saturate((value - lo) / d);
+}
+
+Vec3 lil_blend(Vec3 dst, Vec3 src, Vec3 a, int mode) {
+  const Vec3 ad = dst + src, mu = dst * src;
+  const Vec3 out = mode == 0 ? src : mode == 1 ? ad : mode == 2 ? vmax(ad - mu, dst) : mu;
+  return Vec3(lerpf(dst.x, out.x, a.x), lerpf(dst.y, out.y, a.y), lerpf(dst.z, out.z, a.z));
+}
+
+static inline float lil_lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+static inline float lil_gray(Vec3 c) { return (c.x + c.y + c.z) / 3.0f; }  // (lilGray: the channels' mean, not a luminance)
+
+void lil_sh(const Environment &env, Vec3 dir, Vec3 *sh_max, Vec3 *sh_min) {
+  const float len = length(dir);
+  const Vec3 d = len > 1e-6f ? dir / len : Vec3(0, 1, 0);
+  const Vec3 a = env.irradiance(d), b = env.irradiance(d * -1.0f);
+  const Vec3 mean = (a + b) * 0.5f, half = (a - b) * (0.5f * 0.666666f);
+  if (sh_max) *sh_max = vmax(mean + half, Vec3(0.0f));
+  if (sh_min) *sh_min = vmax(mean - half, Vec3(0.0f));
+}
+
+Vec3 lil_light_direction(const Environment &env, Vec3 key_L, float key_luminance) {
+  /* The ambient's gradient: the luminance difference of the irradiance along each axis (unity_SHA's xyz, as lilToon
+   * averages the three channels). */
+  Vec3 grad(0.0f);
+  const Vec3 axes[3] = {Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1)};
+  for (const Vec3 &ax : axes) grad = grad + ax * ((lil_lum(env.irradiance(ax)) - lil_lum(env.irradiance(ax * -1.0f))) * 0.5f);
+  const Vec3 L = key_L * std::max(0.0f, key_luminance) + grad;
+  const float len = length(L);
+  return len > 1e-6f && finite_bits(len) ? L / len : Vec3(0, 1, 0);
+}
+
+Vec3 lil_main_light(const Material &m, Vec3 key_color, Vec3 sh_max) {
+  const LilToonSettings &l = m.lil;
+  Vec3 c = key_color + sh_max;
+  c = Vec3(clampf(c.x, l.light_min, l.light_max), clampf(c.y, l.light_min, l.light_max), clampf(c.z, l.light_min, l.light_max));
+  c = lerp(c, Vec3(lil_gray(c)), saturate(l.monochrome));
+  return lerp(c, Vec3(1.0f), saturate(l.as_unlit));
+}
+
+Vec3 lil_add_light(const Material &m, Vec3 color) {
+  const LilToonSettings &l = m.lil;
+  Vec3 c = vmin(color, Vec3(l.light_max));
+  c = lerp(c, Vec3(lil_gray(c)), saturate(l.monochrome));
+  return c * (1.0f - saturate(l.as_unlit));
+}
+
+Vec3 lil_shade(const SurfaceSample &s, Vec3 n, Vec3 L, float vis, bool backface, Vec3 light, Vec3 indirect_light, bool main, float *shadowmix) {
+  const LilToonSettings &l = s.toon->lil;
+  const Vec3 albedo = s.albedo;
+  if (!l.shadow) {
+    if (shadowmix) *shadowmix = 1.0f;
+    return albedo * light;
+  }
+  const float cast = saturate(vis);
+  float ln1 = saturate(dot(L, n) * 0.5f + 0.5f), ln2 = ln1;
+  ln1 *= lerpf(1.0f, cast, saturate(l.receive));
+  ln2 *= lerpf(1.0f, cast, saturate(l.receive2));
+  const float ao1 = saturate(s.lil_border_mask.x), ao2 = saturate(s.lil_border_mask.y);
+  if (!l.post_ao) ln1 *= ao1, ln2 *= ao2;
+  float x = lil_step(ln1, l.border, l.blur), y = lil_step(ln2, l.border2, l.blur2), w = lil_step(ln1, l.border, l.blur, l.border_range);
+  if (l.post_ao) x *= ao1, y *= ao2, w *= ao1;
+  const float bf = backface ? 1.0f - saturate(l.backface_force_shadow) : 1.0f;
+  x *= bf, y *= bf, w *= bf;
+  if (shadowmix) *shadowmix = x;
+  x = lerpf(1.0f, x, saturate(l.strength) * saturate(s.lil_strength_mask));
+  Vec3 indirect = lerp(albedo, s.lil_shadow_tex.xyz(), saturate(s.lil_shadow_tex.w)) * l.shadow_color;
+  const Vec3 c2 = lerp(albedo, s.lil_shadow2_tex.xyz(), saturate(s.lil_shadow2_tex.w)) * l.shadow2_color;
+  y = saturate(l.shadow2_alpha) - y * saturate(l.shadow2_alpha);
+  indirect = lerp(indirect, c2, y);
+  indirect = lerp(indirect, indirect * albedo, saturate(l.main_strength));
+  const Vec3 direct = albedo * light;
+  indirect = indirect * light;
+  if (main) {
+    const Vec3 env = indirect_light * saturate(l.shadow_env);
+    indirect = Vec3(lerpf(indirect.x, albedo.x, saturate(env.x)), lerpf(indirect.y, albedo.y, saturate(env.y)), lerpf(indirect.z, albedo.z, saturate(env.z)));
+  }
+  indirect = vmin(indirect, direct);
+  indirect = lil_blend(indirect, direct, l.border_color * w, 0);  // (lerp toward the lit colour by the border colour's band)
+  return lerp(indirect, direct, x);
+}
+
+Vec3 lil_tone(Vec3 c, Vec3 hsvg, float gamma) {
+  c = Vec3(std::pow(std::fabs(c.x), gamma), std::pow(std::fabs(c.y), gamma), std::pow(std::fabs(c.z), gamma));
+  Vec4 p = c.z > c.y ? Vec4(c.z, c.y, -1.0f, 2.0f / 3.0f) : Vec4(c.y, c.z, 0.0f, -1.0f / 3.0f);
+  Vec4 q = p.x > c.x ? Vec4(p.x, p.y, p.w, c.x) : Vec4(c.x, p.y, p.z, p.x);
+  const float d = q.x - std::min(q.w, q.y), e = 1.0e-10f;
+  Vec3 hsv(std::fabs(q.z + (q.w - q.y) / (6.0f * d + e)), d / (q.x + e), q.x);
+  hsv = Vec3(hsv.x + hsvg.x, saturate(hsv.y * hsvg.y), saturate(hsv.z * hsvg.z));
+  auto frac = [](float v) { return v - std::floor(v); };
+  const float k[3] = {1.0f, 2.0f / 3.0f, 1.0f / 3.0f};
+  Vec3 out;
+  for (int i = 0; i < 3; i++) out[i] = hsv.z - hsv.z * hsv.y + hsv.z * hsv.y * saturate(std::fabs(frac(hsv.x + k[i]) * 6.0f - 3.0f) - 1.0f);
+  return out;
+}
+
+Vec2 lil_matcap_uv(Vec3 n, Vec3 V) {
+  Vec3 nv = normalize(V);
+  Vec3 bit = Vec3(0, 1, 0) - nv * dot(Vec3(0, 1, 0), nv);
+  const float bl = length(bit);
+  bit = bl > 1e-4f ? bit / bl : Vec3(1, 0, 0);
+  const Vec3 tan = cross(nv, bit);
+  const float u = dot(tan, n) * 0.5f + 0.5f, v = dot(bit, n) * 0.5f + 0.5f;
+  return {u, 1.0f - v};  // (Unity's v up; Blendity's rows run down)
+}
+
+Vec3 lil_finish(const SurfaceSample &s, Vec3 col, Vec3 n, Vec3 V, Vec3 L, float vis, float shadowmix, bool backface, Vec3 light) {
+  const LilToonSettings &l = s.toon->lil;
+  const Vec3 albedo = s.albedo;
+  /* MatCap. */
+  if (l.matcap && s.lil_matcap) {
+    const Vec4 t = s.lil_matcap->sample(lil_matcap_uv(n, V), 0.0f, TexWrap::Extend, TexFilter::Linear);
+    Vec3 mc = l.matcap_color * t.xyz();
+    float a = l.matcap_alpha * t.w;
+    mc = lerp(mc, mc * light, saturate(l.matcap_enable_lighting));
+    a = lerpf(a, a * shadowmix, saturate(l.matcap_shadow_mask));
+    if (backface && l.matcap_backface_mask > 0.0f) a = 0.0f;
+    mc = lerp(mc, mc * albedo, saturate(l.matcap_main_strength));
+    col = lil_blend(col, mc, s.lil_matcap_mask * (saturate(l.matcap_blend) * a), l.matcap_blend_mode);
+  }
+  /* Rim: lilToon's fresnel stepped, on the light's side (Dir) and the dark side (Indir). */
+  if (l.rim) {
+    Vec3 rc = l.rim_color * s.lil_rim_tex.xyz(), ric = l.rim_indir_color * s.lil_rim_tex.xyz();
+    const float ra = l.rim_alpha * s.lil_rim_tex.w, ria = l.rim_indir_alpha * s.lil_rim_tex.w;
+    rc = lerp(rc, rc * albedo, saturate(l.rim_main_strength));
+    const float nvabs = std::fabs(dot(n, V));
+    const float ln_raw = dot(L, n) * 0.5f + 0.5f;
+    const float ln_dir = saturate((ln_raw + l.rim_dir_range) / (1.0f + l.rim_dir_range));
+    const float ln_indir = saturate((1.0f - ln_raw + l.rim_indir_range) / (1.0f + l.rim_indir_range));
+    float rim = std::pow(saturate(1.0f - nvabs), std::max(0.01f, l.rim_fresnel));
+    if (backface && l.rim_backface_mask > 0.0f) rim = 0.0f;
+    float rd = lerpf(rim, rim * ln_dir, saturate(l.rim_dir_strength)), ri = rim * ln_indir * saturate(l.rim_dir_strength);
+    rd = lil_step(rd, l.rim_border, l.rim_blur);
+    ri = lil_step(ri, l.rim_indir_border, l.rim_indir_blur);
+    rd = lerpf(rd, rd * shadowmix, saturate(l.rim_shadow_mask));
+    ri = lerpf(ri, ri * shadowmix, saturate(l.rim_shadow_mask));
+    const Vec3 mul = Vec3(1.0f - saturate(l.rim_enable_lighting)) + light * saturate(l.rim_enable_lighting);
+    col = lil_blend(col, rc * mul, Vec3(rd * ra), l.rim_blend_mode);
+    col = lil_blend(col, ric * mul, Vec3(ri * ria), l.rim_blend_mode);
+  }
+  /* Backlight: the light behind the figure, seen against it. */
+  if (l.backlight) {
+    Vec3 bc = l.backlight_color * s.lil_backlight_tex.xyz();
+    const float ba = l.backlight_alpha * s.lil_backlight_tex.w;
+    const float hl = dot(V, L);
+    const float factor = std::pow(saturate(-hl * 0.5f + 0.5f), std::max(0.0f, l.backlight_directivity));
+    float ln = dot(normalize(V * -saturate(l.backlight_view_strength) + L), n) * 0.5f + 0.5f;
+    if (l.backlight_receive_shadow > 0.0f) ln *= saturate(vis);
+    ln = lil_step(ln, l.backlight_border, l.backlight_blur);
+    float b = saturate(factor * ln);
+    if (backface && l.backlight_backface_mask > 0.0f) b = 0.0f;
+    bc = lerp(bc, bc * albedo, saturate(l.backlight_main_strength));
+    col = col + bc * light * (b * ba);
+  }
+  /* The highlight (lilReflection's specular): stepped when Specular Toon, else GGX's shape. */
+  if (l.reflection && l.apply_specular) {
+    const float metallic = saturate(l.metallic);
+    col = col - col * metallic;
+    const Vec3 spec = lerp(Vec3(saturate(l.reflectance)), albedo, metallic);
+    const float pr = std::max(1e-3f, 1.0f - saturate(l.smoothness)), rough = pr * pr;
+    const Vec3 H = normalize(V + L);
+    const float nh = saturate(dot(n, H));
+    /* lilCalcSpecular: the toon term is the stepped N.H alone (no F0, no attenuation); the GGX one Unity's BRDF1 with
+     * the fresnel of `spec` at L.H, times the shadow (review 402: the toon highlight had been 25 times too dim). Blended
+     * by lilToon's Add (its _ReflectionColor white). */
+    Vec3 term;
+    if (l.specular_toon) term = Vec3(lil_step(std::pow(nh, 1.0f / rough), l.specular_border, l.specular_blur));
+    else {
+      const float nl = saturate(dot(n, L)), nvv = saturate(dot(n, V)), lh = saturate(dot(L, H)), a2 = rough * rough;
+      const float d = nh * nh * (a2 - 1.0f) + 1.0f, D = a2 / (kPi * d * d + 1e-7f);
+      const float vis_t = 0.5f / (nl * std::sqrt(nvv * nvv * (1.0f - a2) + a2) + nvv * std::sqrt(nl * nl * (1.0f - a2) + a2) + 1e-5f);
+      const Vec3 F = spec + (Vec3(1.0f) - spec) * std::pow(1.0f - lh, 5.0f);
+      term = F * std::max(0.0f, D * vis_t * nl * kPi) * (shadowmix * saturate(vis));
+    }
+    col = col + light * term;
+  }
+  /* Emission, unlit. */
+  if (l.emission) {
+    Vec3 ec = l.emission_color * s.lil_emission.xyz();
+    const float blend = saturate(l.emission_blend) * l.emission_alpha * s.lil_emission.w * saturate(s.lil_emission_mask);
+    ec = lerp(ec, ec * albedo, saturate(l.emission_main_strength));
+    col = lil_blend(col, ec, Vec3(blend), l.emission_blend_mode);
+  }
+  return col;
 }
 
 int toon_key_light(const std::vector<RenderLight> &lights, Vec3 *L) {
@@ -428,6 +623,21 @@ static SurfaceSample evaluate_surface(const Material &m, const Material::Resolve
     if (tx.toon_rim_mask) s.toon_rim_mask = sample_image(tx.toon_rim_mask).x;
     if (!finite_bits(s.toon_bias)) s.toon_bias = 0.5f;  // (a float map's NaN: neutral)
     s.toon_ramp = tx.toon_ramp.get();
+    if (m.lil.on) {  // lilToon's maps (round 402), at the same point
+      if (!m.lil.hsvg_neutral()) s.albedo = lil_tone(s.albedo, m.lil.hsv, m.lil.gamma);
+      if (tx.lil_shadow_tex) s.lil_shadow_tex = sample_image(tx.lil_shadow_tex);
+      if (tx.lil_shadow2_tex) s.lil_shadow2_tex = sample_image(tx.lil_shadow2_tex);
+      if (tx.lil_strength_mask) s.lil_strength_mask = sample_image(tx.lil_strength_mask).x;
+      if (tx.lil_border_mask) s.lil_border_mask = sample_image(tx.lil_border_mask).xyz();
+      if (tx.lil_rim_tex) s.lil_rim_tex = sample_image(tx.lil_rim_tex);
+      if (tx.lil_backlight_tex) s.lil_backlight_tex = sample_image(tx.lil_backlight_tex);
+      if (tx.lil_matcap_mask) s.lil_matcap_mask = sample_image(tx.lil_matcap_mask).xyz();
+      if (tx.lil_emission) s.lil_emission = sample_image(tx.lil_emission);
+      if (tx.lil_emission_mask) s.lil_emission_mask = sample_image(tx.lil_emission_mask).x;
+      s.lil_matcap = tx.lil_matcap.get();
+      for (float *f : {&s.lil_strength_mask, &s.lil_emission_mask})
+        if (!finite_bits(*f)) *f = 1.0f;
+    }
     /* The 2D look (task 0149): the face shadow map at the UV and at its mirror (the light's side picks one), the inner
      * lines into the colour (or the shadow tones), the hatching tiled over the UVs into the shadow tones. */
     if (tx.face_shadow) {

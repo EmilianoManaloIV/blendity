@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 402): the avatar as Unity's - lilToon's lighting model, VRChat's avatar components as native
+
+**Asked:** the same comparison; the second of five rounds: the avatar. The user chose lilToon's full lighting model.
+
+**Added (task 0379, ADR 0100)**
+- **lilToon's lighting model** on a Toon material (`Material::lil`, the Inspector's lilToon group with lilToon's names):
+  the light as lilToon takes it (the main light plus the ambient's SH, the Light Min / Max Limits, Monochrome Lighting,
+  As Unlit), the 1st and 2nd shadows (border, blur, strength, receive, colours and their textures, the AO map, Shadow
+  Main Strength, Shadow Env Strength, the Shadow Border Color over its range, backface shadow), the rim (fresnel power,
+  border, blur, Dir / Indir, shadow mask, blend mode), the backlight, the MatCap, the emission (blend mode, mask), the
+  HSVG tone correction, the reflection block (Specular Toon) - lilToon's own formulas in the CPU views, F12 and the
+  path tracers; the GPU views through derived toon fields; the other lights added as lilToon's ForwardAdd passes.
+- **Against lilToon itself:** eight 64 x 64 renders by lilToon in Unity (a sphere, one sun, a flat ambient - synthetic,
+  `tests/fixtures/liltoon`) against Blendity's: the rasterizer's mean absolute error 0.13-0.18 / 255 on seven settings,
+  the path tracer's 0.19, the emission setting's 3.4. Shinano's front station (Unity's render against Blendity's F12, one sun and a
+  flat ambient, 900 x 1200): MAE 1.52 / 255, SSIM 0.973, grid correlation 0.999 - the acceptance target met (local, not in
+  the repo).
+- **The import** reads every lilToon property into the block (`read_liltoon`), the switches as they are, the HSVG vector
+  as written; MToon, UTS2 and Poiyomi keep their mapping.
+- **VRChat's avatar components as Blendity's:** the Avatar Descriptor (view, lip sync and the 15 visemes, eye look with
+  the eye bones, look rotations, eyelid type / bones / shapes, playable layers, expressions, portrait camera), PhysBones
+  with every field, PhysBone Colliders, Contact Senders / Receivers, VRC Constraints (Parent, Position, Rotation, Scale,
+  LookAt, Aim - sources with weights and offsets) and the Animator - imported from their documents, shown with Unity's
+  names, saved with the scene, written back by Export Unity Package into their own documents (the scalars) and sent over
+  Live Link as `vrccomponents`, which the bridge sets on the real SDK's components by reflection.
+- **Parent, Position and Rotation constraints solved** in the pose step after FK and IK (the sources' weighted blend
+  lerped by Global Weight): Shinano's 28 rotation constraints pose as in Unity.
+- **Skinned renderers' blend shape weights** read (the avatar's default expression).
+
+**Checked:** `tests_round402` - the sphere against lilToon's renders in the rasterizer and the path tracer, the formulas
+(the step, the blend modes, the light limits, lit and shadow sides, the tone correction), a lilToon .mat into the block,
+the components from a prefab (every field), the constraint solved, the blend shape weights, the write-back (four lines
+changed and no other; nothing when nothing changed), the Live Link message. The suites, the audits; the Opus review's
+fixes: no axis mirroring (Blendity keeps Unity's frame), the constraint blend from the At Rest pose, the constraint's kind
+by both parts' Affects, lilToon's hidden variant shaders, the bridge never clearing a reference, the highlight's strength,
+the path tracer's emission once.
+
 ## 2026-11-03 (round 401): a Unity scene's look as Unity shows it
 
 **Asked:** "Do a full comparison between Blendity and the Unity VCC SDK. Implement any attributes that are present in

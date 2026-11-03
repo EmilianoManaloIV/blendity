@@ -42,6 +42,61 @@ enum class Procedural { None = 0, Checker = 1, Noise = 2, UVGrid = 3, ColorGrid 
  *   (HDRP refraction)   Glass BSDF / Principled Transmission (refracts by IOR) */
 enum class MaterialSurface { Opaque = 0, Cutout = 1, Transparent = 2, Glass = 3, Volume = 4 };  // (Volume: fog inside the mesh, round 331)
 
+/* lilToon's lighting model (round 402, ADR 0100): the fields of jp.lilxyzw.liltoon a Toon material carries when it came
+ * from one (or the user turns it on), shaded by lilToon's own formulas in the CPU views, F12 and the path tracers (the GPU
+ * views derive the toon fields from them). The names are lilToon's, the defaults its defaults; the colours linear. */
+struct LilToonSettings {
+  bool on = false;
+  /* Lighting: the main light plus the ambient along lilToon's light direction, clamped. */
+  float light_min = 0.05f, light_max = 1.0f, monochrome = 0.0f, as_unlit = 0.0f, shadow_env = 0.0f;
+  /* Shadow (1st): N.L x 0.5 + 0.5 stepped at the border over the blur; the colour where it is shadow. */
+  bool shadow = true;
+  float border = 0.5f, blur = 0.1f, strength = 1.0f, receive = 0.0f, main_strength = 0.0f, border_range = 0.08f;
+  Vec3 shadow_color{0.64f, 0.54f, 0.69f};
+  TextureRef shadow_color_tex, strength_mask, border_mask;
+  bool post_ao = false;
+  /* Shadow (2nd): its own border and blur; its weight (lilToon: the colour's alpha). */
+  float border2 = 0.15f, blur2 = 0.1f, receive2 = 0.0f, shadow2_alpha = 0.0f;
+  Vec3 shadow2_color{0.42f, 0.4f, 0.59f};
+  TextureRef shadow2_color_tex;
+  Vec3 border_color{1.0f, 1.0f, 1.0f};  // the line along the terminator (over Border Range)
+  float backface_force_shadow = 0.0f;
+  /* Rim. */
+  bool rim = false;
+  Vec3 rim_color{0.4f, 0.21f, 0.2f};
+  float rim_alpha = 1.0f, rim_main_strength = 1.0f, rim_fresnel = 3.5f, rim_border = 0.5f, rim_blur = 0.65f;
+  float rim_enable_lighting = 1.0f, rim_shadow_mask = 0.5f, rim_backface_mask = 1.0f, rim_dir_strength = 0.0f, rim_dir_range = 0.0f;
+  float rim_indir_range = 0.0f, rim_indir_border = 0.5f, rim_indir_blur = 0.1f, rim_indir_alpha = 1.0f;
+  Vec3 rim_indir_color{1.0f, 1.0f, 1.0f};
+  int rim_blend_mode = 1;  // 0 Normal, 1 Add, 2 Screen, 3 Multiply (lilBlendColor)
+  TextureRef rim_color_tex;
+  /* Backlight. */
+  bool backlight = false;
+  Vec3 backlight_color{0.69f, 0.6f, 0.45f};
+  float backlight_alpha = 1.0f, backlight_main_strength = 0.0f, backlight_receive_shadow = 1.0f, backlight_backface_mask = 1.0f;
+  float backlight_border = 0.35f, backlight_blur = 0.05f, backlight_directivity = 5.0f, backlight_view_strength = 1.0f;
+  TextureRef backlight_tex;
+  /* MatCap (1st): the picture of a sphere, read by the normal in view space. */
+  bool matcap = false;
+  TextureRef matcap_tex, matcap_mask;
+  Vec3 matcap_color{1.0f, 1.0f, 1.0f};
+  float matcap_alpha = 1.0f, matcap_blend = 1.0f, matcap_enable_lighting = 1.0f, matcap_shadow_mask = 0.0f, matcap_backface_mask = 0.0f, matcap_main_strength = 0.0f;
+  int matcap_blend_mode = 1;
+  /* Emission (1st): unlit, after the light. */
+  bool emission = false;
+  TextureRef emission_map, emission_blend_mask;
+  Vec3 emission_color{1.0f, 1.0f, 1.0f};
+  float emission_alpha = 1.0f, emission_blend = 1.0f, emission_main_strength = 0.0f;
+  int emission_blend_mode = 1;
+  /* Main: hue shift, saturation, value (x, y, z) and gamma on the base map (lilToon's _MainTexHSVG). */
+  Vec3 hsv{0.0f, 1.0f, 1.0f};
+  float gamma = 1.0f;
+  /* Reflection: the highlight (stepped when Specular Toon) and the environment's reflection. */
+  bool reflection = false, apply_specular = true, apply_reflection = true, specular_toon = true;
+  float smoothness = 1.0f, metallic = 0.0f, reflectance = 0.04f, specular_border = 0.5f, specular_blur = 0.0f;
+  bool hsvg_neutral() const { return hsv.x == 0.0f && hsv.y == 1.0f && hsv.z == 1.0f && gamma == 1.0f; }
+};
+
 struct Material {
   std::string name = "Material";
   Vec3 base_color{0.8f, 0.8f, 0.8f};
@@ -133,6 +188,8 @@ struct Material {
   TextureRef toon_rim_map;            // where the rim may show (black: never)
   bool toon_key_light_only = false;   // only the brightest sun bands the tones; other lights add smooth fill
   float toon_wrap = 0.0f;             // light wrap: N.L remapped so the lit side reaches round the form (softer figures)
+  LilToonSettings lil;                // round 402 (ADR 0100): lilToon's model on a Toon material
+  bool liltoon() const { return shading_model == 1 && lil.on; }
   /* The 2D look (task 0149, ADR 0048): a face shadow map, inner lines and hatching, read by every renderer. */
   TextureRef face_shadow_map;         // a face's shadow by the key light's angle (the SDF sweep of anime faces): where the map is above the angle's threshold the face is lit, instead of N.L; mirrored for the other side
   float face_shadow_softness = 0.02f; // how soft the face shadow's edge is
@@ -155,6 +212,7 @@ struct Material {
   Vec3 import_outline_color{0.0f, 0.0f, 0.0f};
 
   void reflect(Reflector &r);
+  void reflect_liltoon(Reflector &r);  // (round 402)
   void reflect_principled_extras(Reflector &r);
   void reflect_volume(Reflector &r);
   void touch() { version++; }
@@ -164,6 +222,9 @@ struct Material {
     TexturePtr base, metallic, roughness, normal, emission;
     TexturePtr toon_ramp, shade, toon_bias, toon_specular, toon_rim_mask;  // the toon maps (task 0148)
     TexturePtr face_shadow, line, hatch;                                   // the 2D look's maps (task 0149)
+    /* lilToon's maps (round 402): the shadow colours' textures, the strength and border (AO) masks, the rim's and the
+     * backlight's colour textures, the MatCap and its mask, the emission map and its blend mask. */
+    TexturePtr lil_shadow_tex, lil_shadow2_tex, lil_strength_mask, lil_border_mask, lil_rim_tex, lil_backlight_tex, lil_matcap, lil_matcap_mask, lil_emission, lil_emission_mask;
     /* A slot naming a procedural texture's output with Live Shading on (task 0031): its live snapshot and which
      * output (0 albedo, 1 normal, 2 roughness, 3 height), in the order base, metallic, roughness, normal,
      * emission. The rasterizer evaluates it per pixel up close. */

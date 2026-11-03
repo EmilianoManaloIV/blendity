@@ -20,6 +20,7 @@
 #include "../src/scene/unity_package.h"
 #include "../src/scene/unity_scene.h"
 #include "../src/scene/unity_material.h"
+#include "../src/editor/livelink.h"  // (round 402)
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -9212,6 +9213,339 @@ std::string psd(int channels, int w, int h, int depth, int mode, int comp, const
 }
 }  // namespace r399
 
+/* Round 402 (task 0379, ADR 0100): lilToon's lighting model and the avatar's VRChat components. */
+namespace r402 {
+/* The sphere scene of tests/fixtures/liltoon (LilSphere.cs's, rendered by lilToon itself in Unity): a sphere of radius 0.5
+ * at the origin, an orthographic camera of size 0.6 at z 3 looking at it, one white sun along (-0.5, -0.7, -0.5) (the same in
+ * both: the camera looks down -Z in both, so X runs the same way), a flat ambient (0.2, 0.2, 0.25) that is the background too. The
+ * colours are linear, as LilSphere.cs hands them to the shader (Material.SetColor of their gamma encoding). */
+inline Vec3 lin(float r, float g, float b) { return Vec3(r, g, b); }
+inline GameObject *sphere_scene(Editor &ed, Light **sun_out, Camera **cam_out) {
+  r57_open(ed);
+  ed.command("set Render.ResolutionX 64");
+  ed.command("set Render.ResolutionY 64");
+  ed.command("set Render.Samples 64");
+  ed.scene().environment.mode = 3;
+  ed.scene().environment.color = lin(0.2f, 0.2f, 0.25f);
+  ed.scene().environment.strength = 1.0f;
+  ed.scene().environment.fog = false;
+  ed.scene().render.view_transform = 0;  // (Unity's camera: plain sRGB, no exposure)
+  ed.scene().render.exposure = 0.0f;
+  GameObject *g = ed.scene().find_by_name("Cube");
+  if (!g) return nullptr;
+  g->get<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 96, 48);
+  g->set_local(Transform{});
+  Light *sun = nullptr;
+  ed.scene().for_each([&](GameObject &o) {
+    Light *l = o.get<Light>();
+    if (l && l->type == 0 && !sun) {
+      sun = l;
+      o.set_world_rotation(rotation_between(Vec3(0, 0, 1), normalize(Vec3(-0.5f, -0.7f, -0.5f))));
+    }
+    else if (l) l->enabled = false;
+  });
+  if (sun) sun->color = Vec3(1.0f), sun->intensity = 1.0f, sun->shadows = 0;
+  ed.command("create Camera");
+  GameObject *cg = ed.active_object_for_test();
+  Camera *cam = cg ? cg->get<Camera>() : nullptr;
+  if (cam) {
+    Transform ct;
+    ct.position = Vec3(0.0f, 0.0f, 3.0f), ct.rotation = Quat::euler(Vec3(0.0f, 180.0f, 0.0f));
+    cg->set_local(ct);
+    cam->orthographic = true, cam->ortho_size = 0.6f, cam->clear_flags = 1, cam->background = lin(0.2f, 0.2f, 0.25f);
+    ed.scene().active_camera = cg->id;
+  }
+  if (sun_out) *sun_out = sun;
+  if (cam_out) *cam_out = cam;
+  return g;
+}
+/* The mean absolute difference (0..255) over the sphere's pixels (inside 0.9 of its radius: the silhouette's own pixels
+ * differ by tessellation), per channel averaged. -1 when the sizes differ. */
+inline float sphere_mae(const Image &img, const Bitmap &ref, float *worst = nullptr) {
+  if (img.width != ref.width || img.height != ref.height || ref.rgba8.empty()) return -1.0f;
+  double sum = 0.0;
+  int n = 0;
+  float w = 0.0f;
+  const float cx = img.width * 0.5f - 0.5f, cy = img.height * 0.5f - 0.5f, R = img.width * 0.5f * (0.5f / 0.6f) * 0.9f;
+  for (int y = 0; y < img.height; y++)
+    for (int x = 0; x < img.width; x++) {
+      if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > R * R) continue;
+      const uint32_t c = img.pixels[(size_t)y * img.width + x];
+      const uint8_t *r = &ref.rgba8[((size_t)y * ref.width + x) * 4];
+      const int d[3] = {std::abs((int)(c >> 16 & 255) - r[0]), std::abs((int)(c >> 8 & 255) - r[1]), std::abs((int)(c & 255) - r[2])};
+      sum += (d[0] + d[1] + d[2]) / 3.0, n++;
+      w = std::max({w, (float)d[0], (float)d[1], (float)d[2]});
+    }
+  if (worst) *worst = w;
+  return n ? (float)(sum / n) : -1.0f;
+}
+/* LilSphere.cs's eight settings on the material, the sun and the world (the colours linear as the shader sees them). */
+inline void setting(int k, Material &m, Light &sun, EnvironmentSettings &env) {
+  m.lil = LilToonSettings{};
+  m.lil.on = true;
+  m.base_color = lin(0.8f, 0.55f, 0.45f);
+  sun.color = Vec3(1.0f), sun.intensity = 1.0f;
+  env.color = lin(0.2f, 0.2f, 0.25f);
+  LilToonSettings &l = m.lil;
+  l.light_min = 0.0f, l.light_max = 10.0f, l.border = 0.5f, l.blur = 0.1f, l.strength = 1.0f, l.receive = 0.0f, l.border_range = 0.0f;
+  l.shadow_color = lin(0.6f, 0.5f, 0.7f), l.shadow2_alpha = 0.0f, l.border_color = Vec3(1.0f);
+  switch (k) {
+    case 1: l.border2 = 0.3f, l.blur2 = 0.2f, l.shadow2_color = lin(0.4f, 0.3f, 0.6f), l.shadow2_alpha = 1.0f; break;
+    case 2: l.border_range = 0.1f, l.border_color = lin(1.0f, 0.6f, 0.5f); break;
+    case 3:
+      l.rim = true, l.rim_color = lin(1.0f, 0.8f, 0.7f), l.rim_alpha = 1.0f, l.rim_fresnel = 3.0f, l.rim_border = 0.5f, l.rim_blur = 0.1f;
+      l.rim_shadow_mask = 0.5f, l.rim_enable_lighting = 1.0f, l.rim_blend_mode = 1, l.rim_main_strength = 0.0f, l.rim_dir_strength = 0.0f;
+      break;
+    case 4:
+      l.backlight = true, l.backlight_color = lin(0.9f, 0.8f, 0.5f), l.backlight_alpha = 1.0f, l.backlight_border = 0.35f, l.backlight_blur = 0.05f;
+      l.backlight_directivity = 5.0f, l.backlight_view_strength = 1.0f, l.backlight_main_strength = 0.0f, l.backlight_receive_shadow = 0.0f;
+      break;
+    case 5: env.color = lin(0.05f, 0.05f, 0.05f), sun.intensity = 1.5f, l.light_min = 0.3f, l.light_max = 0.8f; break;
+    case 6: sun.color = Vec3(1.0f, srgb_to_linear(0.6f), srgb_to_linear(0.3f)), l.monochrome = 1.0f; break;  // (a Light's colour: Unity linearises it)
+    case 7:
+      l.emission = true, l.emission_color = lin(0.2f, 0.4f, 1.0f), l.emission_alpha = 1.0f, l.emission_blend = 1.0f, l.emission_blend_mode = 1;
+      l.hsv = Vec3(0.0f, 1.0f, 1.0f), l.gamma = 1.0f;  // (LilSphere.cs asks for a hue shift too, but lilToon compiles its tone correction out of a project whose materials leave HSVG neutral: Unity's render has none)
+      break;
+    default: break;
+  }
+}
+}  // namespace r402
+
+static void tests_round402() {
+  test("lilToon's lighting model against lilToon (round 402): a sphere at eight settings - the two shadows, the border colour, the rim, the backlight, the light limits, monochrome lighting, the emission with HSVG - rendered by the CPU rasterizer and the path tracer against lilToon's own renders (tests/fixtures/liltoon)", [] {
+    using namespace r402;
+    static const char *names[8] = {"shadow1", "shadow2", "bordercolor", "rim", "backlight", "limits", "monochrome", "emission"};
+    Editor ed;
+    Light *sun = nullptr;
+    Camera *cam = nullptr;
+    GameObject *g = sphere_scene(ed, &sun, &cam);
+    CHECK(g && sun && cam);
+    if (!g || !sun || !cam) return;
+    MaterialPtr m = make_material_preset("Toon");
+    g->get<MeshRenderer>()->materials = {m};
+    g->mark_dirty();
+    int fixtures = 0;
+    float worst_mae = 0.0f, worst_pt = 0.0f;
+    for (int k = 0; k < 8; k++) {
+      std::string bytes, err;
+      Bitmap ref;
+      if (!fs::read_file(std::string("tests/fixtures/liltoon/") + std::to_string(k) + "_" + names[k] + ".png", bytes) || !decode_image(bytes, ref, err)) continue;
+      fixtures++;
+      setting(k, *m, *sun, ed.scene().environment);
+      m->touch();
+      ed.mark_changed_for_test("R402 setting");
+      ed.step_frame_headless();
+      const Image raster = r57_render(ed, "Rasterized", false);
+      if (const char *dump = std::getenv("BLENDITY_R402_DUMP"))  // (a folder: the renders beside the fixtures, for a look)
+        write_png(std::string(dump) + "/b_" + std::to_string(k) + "_" + names[k] + ".png", raster.pixels.data(), raster.width, raster.height, raster.width);
+      float worst = 0.0f;
+      const float mae = sphere_mae(raster, ref, &worst);
+      std::printf("    %-12s raster MAE %.2f (worst %3.0f)", names[k], mae, worst);
+      CHECK(mae >= 0.0f && mae <= 4.0f);
+      worst_mae = std::max(worst_mae, mae);
+      if (k == 0 || k == 3 || k == 7) {  // (the path tracer on three: its shadow model is the same code; its rays only differ in noise)
+        const Image pt = r57_render(ed, "Path", false);
+        const float mae_pt = sphere_mae(pt, ref, &worst);
+        std::printf("; path tracer MAE %.2f (worst %3.0f)", mae_pt, worst);
+        CHECK(mae_pt >= 0.0f && mae_pt <= 5.0f);
+        worst_pt = std::max(worst_pt, mae_pt);
+      }
+      std::printf("\n");
+    }
+    if (fixtures == 0) std::printf("    (no tests/fixtures/liltoon: the renders not compared)\n");
+    else std::printf("    %d settings: the raster's worst MAE %.2f, the path tracer's %.2f (target 4)\n", fixtures, worst_mae, worst_pt);
+    CHECK(fixtures == 0 || fixtures == 8);
+  });
+  test("A lilToon .mat fills the block (round 402): every property by lilToon's name, the switches as they are, the HSVG vector as written (not linearised), the normal map only with Use Bump Map, Blendity's emission left to the block", [] {
+    const std::string yaml =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!21 &2100000\nMaterial:\n  m_Name: Body\n  m_Shader: {fileID: 4800000, guid: aaaa, type: 3}\n"
+        "  m_SavedProperties:\n    m_TexEnvs:\n    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: t1, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+        "    - _ShadowColorTex:\n        m_Texture: {fileID: 2800000, guid: t2, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+        "    - _BumpMap:\n        m_Texture: {fileID: 2800000, guid: t3, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+        "    - _EmissionMap:\n        m_Texture: {fileID: 2800000, guid: t4, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+        "    m_Floats:\n    - _lilToonVersion: 45\n    - _UseShadow: 1\n    - _ShadowBorder: 0.42\n    - _ShadowBlur: 0.15\n    - _ShadowStrength: 0.9\n    - _Shadow2ndBorder: 0.3\n"
+        "    - _UseRim: 1\n    - _RimFresnelPower: 2.5\n    - _RimBlendMode: 2\n    - _UseBacklight: 0\n    - _UseEmission: 1\n    - _EmissionBlendMode: 1\n    - _UseBumpMap: 0\n"
+        "    - _LightMinLimit: 0.1\n    - _LightMaxLimit: 1.2\n    - _UseReflection: 1\n    - _Smoothness: 0.7\n    - _SpecularToon: 0\n    - _Cull: 2\n"
+        "    m_Colors:\n    - _Color: {r: 1, g: 1, b: 1, a: 1}\n    - _ShadowColor: {r: 0.5, g: 0.25, b: 1, a: 1}\n    - _Shadow2ndColor: {r: 0.2, g: 0.2, b: 0.4, a: 0.6}\n"
+        "    - _RimColor: {r: 1, g: 0.5, b: 0.5, a: 0.3}\n    - _EmissionColor: {r: 2, g: 1, b: 0, a: 1}\n    - _MainTexHSVG: {r: 0.25, g: 1.5, b: 0.8, a: 1.1}\n";
+    Material m;
+    UnityMaterialInfo info;
+    const bool ok = unity_material(yaml, [](const std::string &guid) { return "Assets/Textures/" + guid + ".png"; },
+                                   [](const std::string &, int64_t) { return std::string("lilToon"); }, m, info);
+    CHECK(ok && info.shader == "lilToon" && m.shading_model == 1 && m.lil.on);
+    const LilToonSettings &l = m.lil;
+    CHECK(l.shadow && std::fabs(l.border - 0.42f) < 1e-6f && std::fabs(l.blur - 0.15f) < 1e-6f && std::fabs(l.strength - 0.9f) < 1e-6f && std::fabs(l.border2 - 0.3f) < 1e-6f);
+    CHECK(std::fabs(l.shadow_color.x - srgb_to_linear(0.5f)) < 1e-5f && std::fabs(l.shadow_color.z - 1.0f) < 1e-6f && std::fabs(l.shadow2_alpha - 0.6f) < 1e-6f);
+    CHECK(l.shadow_color_tex.path == "Assets/Textures/t2.png" && l.shadow2_color_tex.empty());
+    CHECK(l.rim && std::fabs(l.rim_fresnel - 2.5f) < 1e-6f && l.rim_blend_mode == 2 && std::fabs(l.rim_alpha - 0.3f) < 1e-6f && !l.backlight);
+    CHECK(l.emission && l.emission_map.path == "Assets/Textures/t4.png" && l.emission_color.x > 3.5f && m.emission_strength == 0.0f && m.emission_map.empty());
+    CHECK(std::fabs(l.hsv.x - 0.25f) < 1e-6f && std::fabs(l.hsv.y - 1.5f) < 1e-6f && std::fabs(l.hsv.z - 0.8f) < 1e-6f && std::fabs(l.gamma - 1.1f) < 1e-6f && !l.hsvg_neutral());
+    CHECK(std::fabs(l.light_min - 0.1f) < 1e-6f && std::fabs(l.light_max - 1.2f) < 1e-6f && l.reflection && std::fabs(l.smoothness - 0.7f) < 1e-6f && !l.specular_toon);
+    CHECK(m.normal_map.empty() && m.base_map.path == "Assets/Textures/t1.png" && !m.double_sided);
+    std::printf("    border %.2f blur %.2f, 2nd weight %.1f, rim fresnel %.1f blend %d, HSVG (%.2f %.1f %.1f %.1f)\n", l.border, l.blur, l.shadow2_alpha, l.rim_fresnel, l.rim_blend_mode,
+                l.hsv.x, l.hsv.y, l.hsv.z, l.gamma);
+    /* Saved and read back: the block's fields travel with the material (only when on). */
+    Material copy;
+    const std::string json = reflect_to_json([&](Reflector &r) { m.reflect(r); });
+    CHECK(json.find("Lil Shadow Border") != std::string::npos);
+    Material off;
+    off.shading_model = 1;
+    CHECK(reflect_to_json([&](Reflector &r) { off.reflect(r); }).find("Lil Shadow Border") == std::string::npos);
+    (void)copy;
+  });
+  test("VRChat's avatar components as Blendity's (round 402): a descriptor, a PhysBone with limits, a collider, a contact, a parent constraint and the renderer's blend shape weights read from a prefab; shown with Unity's fields; written back by Export Unity Package - the document equal but the changed lines", [] {
+    const std::string prefab =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"
+        "--- !u!1 &100\nGameObject:\n  m_Name: Avatar\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 400}\n"
+        "--- !u!4 &400\nTransform:\n  m_GameObject: {fileID: 100}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children:\n  - {fileID: 401}\n  - {fileID: 402}\n  - {fileID: 403}\n  m_Father: {fileID: 0}\n"
+        "--- !u!1 &101\nGameObject:\n  m_Name: Face\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 401}\n  - component: {fileID: 1370}\n"
+        "--- !u!4 &401\nTransform:\n  m_GameObject: {fileID: 101}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 1.5, z: 0}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!137 &1370\nSkinnedMeshRenderer:\n  m_GameObject: {fileID: 101}\n  m_Enabled: 1\n  m_CastShadows: 1\n  m_ReceiveShadows: 1\n  m_Materials: []\n  m_BlendShapeWeights:\n  - 0\n  - 100\n  - 25\n  m_Mesh: {fileID: 10208, guid: 0000000000000000e000000000000000, type: 0}\n"
+        "--- !u!1 &102\nGameObject:\n  m_Name: LeftEye\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 402}\n"
+        "--- !u!4 &402\nTransform:\n  m_GameObject: {fileID: 102}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: -0.03, y: 1.6, z: 0.05}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!1 &103\nGameObject:\n  m_Name: Tail\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 403}\n  - component: {fileID: 1143}\n  - component: {fileID: 1144}\n  - component: {fileID: 1145}\n  - component: {fileID: 1146}\n"
+        "--- !u!4 &403\nTransform:\n  m_GameObject: {fileID: 103}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 1, z: -0.2}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!114 &1142\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  m_Script: {fileID: 542108242, guid: 67cc4cb7839cd3741b63733d5adf0442, type: 3}\n  Name: \n  ViewPosition: {x: 0.01, y: 1.62, z: 0.08}\n  lipSync: 3\n  lipSyncJawBone: {fileID: 0}\n"
+        "  VisemeSkinnedMesh: {fileID: 1370}\n  MouthOpenBlendShapeName: Jaw_Down\n  VisemeBlendShapes:\n  - vrc.v_sil\n  - vrc.v_pp\n  - vrc.v_ff\n  - vrc.v_th\n  - vrc.v_dd\n  - vrc.v_kk\n  - vrc.v_ch\n  - vrc.v_ss\n  - vrc.v_nn\n  - vrc.v_rr\n  - vrc.v_aa\n  - vrc.v_e\n  - vrc.v_ih\n  - vrc.v_oh\n  - vrc.v_ou\n"
+        "  unityVersion: 2022.3.22f1\n  customExpressions: 1\n  expressionsMenu: {fileID: 11400000, guid: aaaa, type: 2}\n  enableEyeLook: 1\n  customEyeLookSettings:\n    eyeMovement:\n      confidence: 0.4\n      excitement: 0.6\n    leftEye: {fileID: 402}\n    rightEye: {fileID: 0}\n"
+        "    eyesLookingUp:\n      linked: 1\n      left: {x: -0.08715574, y: 0, z: 0, w: 0.9961947}\n      right: {x: -0.08715574, y: 0, z: 0, w: 0.9961947}\n    eyelidType: 2\n    eyelidsSkinnedMesh: {fileID: 1370}\n    eyelidsBlendshapes: 0f0000001000000011000000\n"
+        "  customizeAnimationLayers: 1\n  baseAnimationLayers:\n  - isEnabled: 1\n    type: 0\n    animatorController: {fileID: 9100000, guid: bbbb, type: 2}\n    mask: {fileID: 0}\n    isDefault: 0\n"
+        "--- !u!114 &1143\nMonoBehaviour:\n  m_GameObject: {fileID: 103}\n  m_Enabled: 1\n  m_Script: {fileID: -1631200402, guid: 2a2c05204084d904aa4945ccff20d8e5, type: 3}\n  rootTransform: {fileID: 0}\n  shapeType: 1\n  insideBounds: 0\n  radius: 0.03\n  height: 0.3\n  position: {x: 0.1, y: 0.12, z: 0}\n  rotation: {x: 0, y: 0, z: 0, w: 1}\n  bonesAsSpheres: 0\n"
+        "--- !u!114 &1144\nMonoBehaviour:\n  m_GameObject: {fileID: 103}\n  m_Enabled: 1\n  m_Script: {fileID: 1, guid: 2a2c05204084d904aa4945ccff20d8e5, type: 3}\n  version: 1\n  integrationType: 1\n  rootTransform: {fileID: 403}\n  ignoreTransforms:\n  - {fileID: 402}\n  endpointPosition: {x: 0, y: 0.1, z: 0}\n  multiChildType: 0\n  pull: 0.3\n  spring: 0.7\n  stiffness: 0.25\n  gravity: 0.1\n  gravityFalloff: 0\n  immobileType: 0\n  immobile: 0.4\n"
+        "  allowCollision: 1\n  radius: 0.03\n  colliders:\n  - {fileID: 1143}\n  limitType: 3\n  maxAngleX: 10\n  maxAngleZ: 16\n  limitRotation: {x: -6, y: 0, z: 0}\n  allowGrabbing: 1\n  allowPosing: 0\n  snapToHand: 0\n  grabMovement: 0.5\n  maxStretch: 0\n  maxSquish: 0\n  stretchMotion: 0\n  isAnimated: 1\n  resetWhenDisabled: 1\n  parameter: Tail\n  showGizmos: 1\n  boneOpacity: 0.5\n  limitOpacity: 0.5\n"
+        "--- !u!114 &1145\nMonoBehaviour:\n  m_GameObject: {fileID: 103}\n  m_Enabled: 1\n  m_Script: {fileID: 2, guid: 2a2c05204084d904aa4945ccff20d8e5, type: 3}\n  rootTransform: {fileID: 0}\n  shapeType: 0\n  radius: 0.05\n  height: 0\n  position: {x: 0, y: 0, z: 0}\n  rotation: {x: 0, y: 0, z: 0, w: 1}\n  collisionTags:\n  - Hand\n  - Head\n  allowSelf: 0\n  allowOthers: 1\n  localOnly: 0\n  receiverType: 2\n  parameter: TailTouch\n  value: 1\n  minVelocity: 0\n"
+        "--- !u!114 &1146\nMonoBehaviour:\n  m_GameObject: {fileID: 103}\n  m_Enabled: 1\n  m_Script: {fileID: 1788371120, guid: 58e2f01a24261a14cb82e6d3399e8b16, type: 3}\n  IsActive: 1\n  GlobalWeight: 0.5\n  TargetTransform: {fileID: 0}\n  SolveInLocalSpace: 0\n  FreezeToWorld: 0\n  RebakeOffsetsWhenUnfrozen: 0\n  Locked: 1\n  Sources:\n    source0:\n      SourceTransform: {fileID: 401}\n      Weight: 1\n      ParentPositionOffset: {x: 0, y: 0, z: 0}\n      ParentRotationOffset: {x: 0, y: 0, z: 0}\n    source1:\n      SourceTransform: {fileID: 402}\n      Weight: 1\n      ParentPositionOffset: {x: 0, y: 0, z: 0}\n      ParentRotationOffset: {x: 0, y: 0, z: 0}\n    source2:\n      SourceTransform: {fileID: 0}\n      Weight: 1\n  PositionAtRest: {x: 0, y: 1, z: -0.2}\n  RotationAtRest: {x: 0, y: 0, z: 0}\n  AffectsPositionX: 1\n  AffectsPositionY: 1\n  AffectsPositionZ: 1\n  AffectsRotationX: 1\n  AffectsRotationY: 1\n  AffectsRotationZ: 1\n";
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(prefab, docs, why));
+    Scene scene;
+    UnityImport ctx;
+    ctx.total = std::make_shared<int>(0), ctx.building = std::make_shared<std::set<std::string>>();
+    ctx.source = "Assets/Avatar.prefab";
+    ctx.path_of = [](const std::string &guid) { return guid == "aaaa" ? "Assets/Menu.asset" : guid == "bbbb" ? "Assets/Base.controller" : ""; };
+    ctx.mesh = [](const std::string &, int64_t, const std::string &, std::vector<MaterialPtr> &) {
+      MeshPtr m = primitives::cube(0.2f);
+      m->shape_keys.resize(3);
+      m->shape_keys[0].name = "vrc.v_sil", m->shape_keys[1].name = "Smile", m->shape_keys[2].name = "Blink";
+      for (auto &k : m->shape_keys) k.delta.assign(m->positions.size(), Vec3(0.0f));
+      return m;
+    };
+    build_unity_objects(docs, scene, nullptr, ctx);
+    GameObject *root = scene.find_by_name("Avatar"), *tail = scene.find_by_name("Tail"), *face = scene.find_by_name("Face");
+    CHECK(root && tail && face);
+    if (!root || !tail || !face) return;
+    const AvatarDescriptorComponent *a = root->get<AvatarDescriptorComponent>();
+    CHECK(a && a->unity_id == "1142" && a->lip_sync == 3 && a->viseme_mesh == "Face" && a->visemes[14] == "vrc.v_ou" && a->mouth_open_shape == "Jaw_Down");
+    CHECK(a && std::fabs(a->view_position.x - 0.01f) < 1e-6f && std::fabs(a->view_position.y - 1.62f) < 1e-6f && a->eye_look && a->left_eye == "LeftEye" && a->right_eye.empty());
+    CHECK(a && std::fabs(a->eye_confidence - 0.4f) < 1e-6f && a->look_linked[1] && std::fabs(a->look_left[1].x + 0.08715574f) < 1e-6f && a->eyelid_type == 2 && a->eyelids_mesh == "Face");
+    CHECK(a && a->eyelid_shapes[0] == 15 && a->eyelid_shapes[1] == 16 && a->eyelid_shapes[2] == 17 && a->customize_layers && a->base_layers[0].enabled && a->base_layers[0].controller == "Assets/Base.controller");
+    CHECK(a && a->custom_expressions && a->expressions_menu == "Assets/Menu.asset" && a->unity_version == "2022.3.22f1");
+    const PhysBoneComponent *p = tail->get<PhysBoneComponent>();
+    CHECK(p && p->unity_id == "1144" && p->integration_type == 1 && p->root_transform == "Tail" && p->ignore_transforms == "LeftEye" && std::fabs(p->pull - 0.3f) < 1e-6f);
+    CHECK(p && p->limit_type == 3 && std::fabs(p->max_angle_z - 16.0f) < 1e-6f && std::fabs(p->limit_rotation.x + 6.0f) < 1e-6f && p->colliders == "Tail" && p->parameter == "Tail" && p->is_animated && !p->allow_posing);
+    const PhysBoneColliderComponent *pc = tail->get<PhysBoneColliderComponent>();
+    CHECK(pc && pc->unity_id == "1143" && pc->shape_type == 1 && std::fabs(pc->height - 0.3f) < 1e-6f && std::fabs(pc->position.x - 0.1f) < 1e-6f && std::fabs(pc->position.y - 0.12f) < 1e-6f);
+    const ContactComponent *ct = tail->get<ContactComponent>();
+    CHECK(ct && ct->receiver && ct->tags == "Hand;Head" && !ct->allow_self && ct->receiver_type == 2 && ct->parameter == "TailTouch" && std::fabs(ct->radius - 0.05f) < 1e-6f);
+    const VRCConstraintComponent *vc = tail->get<VRCConstraintComponent>();
+    CHECK(vc && vc->kind == 0 && vc->sources.size() == 2 && vc->sources[0].transform == "Face" && vc->sources[1].transform == "LeftEye" && std::fabs(vc->global_weight - 0.5f) < 1e-6f && vc->locked);
+    const MeshRenderer *mr = face->get<MeshRenderer>();
+    float smile = -1.0f, blink = -1.0f;
+    for (const auto &[n, w] : mr ? mr->shape_weights : std::vector<std::pair<std::string, float>>()) smile = n == "Smile" ? w : smile, blink = n == "Blink" ? w : blink;
+    CHECK(std::fabs(smile - 1.0f) < 1e-6f && std::fabs(blink - 0.25f) < 1e-6f);
+    /* The SpringBone of round 371 stays beside the PhysBone; the Engine Components stay too. */
+    CHECK(tail->get<SpringBone>() && tail->get<EngineComponent>());
+    std::printf("    descriptor: visemes on %s, eyes %s, lids %d/%d/%d; PhysBone %s pull %.2f limit %d, collider h %.2f, contact %s, constraint %zu sources; Smile %.2f\n",
+                a ? a->viseme_mesh.c_str() : "?", a ? a->left_eye.c_str() : "?", a ? a->eyelid_shapes[0] : -1, a ? a->eyelid_shapes[1] : -1, a ? a->eyelid_shapes[2] : -1,
+                p ? p->root_transform.c_str() : "?", p ? p->pull : 0.0f, p ? p->limit_type : -1, pc ? pc->height : 0.0f, ct ? ct->tags.c_str() : "?", vc ? vc->sources.size() : 0, smile);
+    /* The parent constraint solved: the Tail at its two sources' mean, half way (Global Weight 0.5). */
+    const Vec3 before = tail->world_position();
+    CHECK(solve_constraints(scene));
+    const Vec3 after = tail->world_position(), mean = (face->world_position() + scene.find_by_name("LeftEye")->world_position()) * 0.5f;
+    CHECK(length(after - lerp(before, mean, 0.5f)) < 1e-4f);  // (its At Rest position is where it stood)
+    solve_constraints(scene), solve_constraints(scene);
+    CHECK(length(tail->world_position() - after) < 1e-5f);  // (review 402: the blend from the At Rest pose - a solve a frame doesn't creep)
+    std::printf("    the Tail from (%.2f %.2f %.2f) to (%.3f %.3f %.3f): half way to the sources' mean (%.3f %.3f %.3f)\n", before.x, before.y, before.z, after.x, after.y, after.z, mean.x, mean.y, mean.z);
+    /* Written back: one field each changed; the document equal but those lines; Unity's X turned back. */
+    AvatarDescriptorComponent *am = root->get<AvatarDescriptorComponent>();
+    PhysBoneComponent *pm = tail->get<PhysBoneComponent>();
+    ContactComponent *cm = tail->get<ContactComponent>();
+    if (am) am->view_position.y = 1.7f;
+    if (pm) pm->pull = 0.45f, pm->limit_type = 1;
+    if (cm) cm->radius = 0.08f;
+    std::vector<UnityEdit> edits;
+    unity_component_edits(*root, 100, edits);
+    unity_component_edits(*tail, 103, edits);
+    int changed = 0;
+    const std::string out = patch_unity_objects(prefab, edits, &changed);
+    CHECK(changed == 4);
+    CHECK(out.find("  ViewPosition: {x: 0.01, y: 1.7, z: 0.08}") != std::string::npos && out.find("  pull: 0.45\n") != std::string::npos && out.find("  limitType: 1\n") != std::string::npos && out.find("  radius: 0.08\n") != std::string::npos);
+    CHECK(out.find("  position: {x: 0.1, y: 0.12, z: 0}") != std::string::npos);  // (the collider's line as Unity had it)
+    size_t lines_differ = 0;
+    for (size_t a0 = 0, b0 = 0; a0 < prefab.size() && b0 < out.size();) {
+      const size_t ae = prefab.find('\n', a0), be = out.find('\n', b0);
+      if (prefab.substr(a0, ae - a0) != out.substr(b0, be - b0)) lines_differ++;
+      if (ae == std::string::npos || be == std::string::npos) break;
+      a0 = ae + 1, b0 = be + 1;
+    }
+    std::printf("    written back: %d changes, %zu lines differ\n", changed, lines_differ);
+    CHECK(lines_differ == 4);
+    /* Nothing changed: nothing written. */
+    edits.clear(), changed = 0;
+    if (am) am->view_position.y = 1.62f;
+    if (pm) pm->pull = 0.3f, pm->limit_type = 3;
+    if (cm) cm->radius = 0.05f;
+    unity_component_edits(*root, 100, edits), unity_component_edits(*tail, 103, edits);
+    CHECK(patch_unity_objects(prefab, edits, &changed) == prefab && changed == 0);
+    /* Live Link's message names the objects by Blendity's ids and the enums by the SDK's names. */
+    const std::string msg = livelink::avatar_components_message_for_test(scene, *tail);
+    CHECK(msg.find("\"kind\":\"physbone\"") != std::string::npos && msg.find("\"limitType\":\"Polar\"") != std::string::npos && msg.find("\"integrationType\":\"Advanced\"") != std::string::npos);
+    CHECK(msg.find("\"kind\":\"receiver\"") != std::string::npos && msg.find("\"tags\":[\"Hand\",\"Head\"]") != std::string::npos && msg.find("\"constraint\":\"Parent\"") != std::string::npos);
+  });
+  test("lilToon's formulas (round 402): the step at a border over a blur, the blend modes, the light limits, the shaded colour's lit and shadow sides, the HSVG tone correction", [] {
+    CHECK(std::fabs(lil_step(0.5f, 0.5f, 0.0f) - 1.0f) < 1e-6f && lil_step(0.49f, 0.5f, 0.0f) == 0.0f);
+    CHECK(std::fabs(lil_step(0.5f, 0.5f, 0.2f) - 0.5f) < 1e-5f && std::fabs(lil_step(0.6f, 0.5f, 0.2f) - 1.0f) < 1e-5f && std::fabs(lil_step(0.45f, 0.5f, 0.2f) - 0.25f) < 1e-5f);
+    CHECK(std::fabs(lil_step(0.45f, 0.5f, 0.2f, 0.1f) - 0.5f) < 1e-5f);  // (the range moves the lower edge down)
+    const Vec3 d(0.2f, 0.4f, 0.6f), s(0.5f, 0.5f, 0.5f);
+    CHECK(std::fabs(lil_blend(d, s, Vec3(1.0f), 0).x - 0.5f) < 1e-6f && std::fabs(lil_blend(d, s, Vec3(1.0f), 1).x - 0.7f) < 1e-6f);
+    CHECK(std::fabs(lil_blend(d, s, Vec3(1.0f), 2).y - std::max(0.9f - 0.2f, 0.4f)) < 1e-6f && std::fabs(lil_blend(d, s, Vec3(1.0f), 3).z - 0.3f) < 1e-6f);
+    CHECK(std::fabs(lil_blend(d, s, Vec3(0.5f), 1).x - 0.45f) < 1e-6f);
+    Material m;
+    m.shading_model = 1, m.lil.on = true, m.lil.light_min = 0.2f, m.lil.light_max = 0.9f;
+    const Vec3 lc = lil_main_light(m, Vec3(1.0f, 0.1f, 0.0f), Vec3(0.0f));
+    CHECK(std::fabs(lc.x - 0.9f) < 1e-6f && std::fabs(lc.y - 0.2f) < 1e-6f && std::fabs(lc.z - 0.2f) < 1e-6f);
+    m.lil.monochrome = 1.0f;
+    const Vec3 grey = lil_main_light(m, Vec3(1.0f, 0.1f, 0.0f), Vec3(0.0f));
+    CHECK(std::fabs(grey.x - grey.y) < 1e-6f && std::fabs(grey.y - grey.z) < 1e-6f);
+    m.lil.monochrome = 0.0f, m.lil.as_unlit = 1.0f;
+    CHECK(std::fabs(lil_main_light(m, Vec3(0.0f), Vec3(0.0f)).x - 1.0f) < 1e-6f && lil_add_light(m, Vec3(1.0f)).x == 0.0f);
+    m.lil.as_unlit = 0.0f, m.lil.light_min = 0.0f, m.lil.light_max = 10.0f;
+    /* Lit and shadow sides: the sun from +Z on a normal toward it, then away; the border colour's band in between. */
+    SurfaceSample s2;
+    s2.toon = &m, s2.lil = true, s2.albedo = Vec3(0.8f, 0.5f, 0.4f);
+    m.lil.shadow_color = Vec3(0.5f, 0.5f, 1.0f), m.lil.blur = 0.0f, m.lil.border_range = 0.0f;
+    float mix = 0.0f;
+    const Vec3 lit = lil_shade(s2, Vec3(0, 0, 1), Vec3(0, 0, 1), 1.0f, false, Vec3(1.0f), Vec3(0.0f), true, &mix);
+    CHECK(std::fabs(lit.x - 0.8f) < 1e-6f && mix == 1.0f);
+    const Vec3 dark = lil_shade(s2, Vec3(0, 0, -1), Vec3(0, 0, 1), 1.0f, false, Vec3(1.0f), Vec3(0.0f), true, &mix);
+    CHECK(std::fabs(dark.x - 0.4f) < 1e-6f && std::fabs(dark.z - 0.4f) < 1e-6f && mix == 0.0f);  // (0.8 x 0.5; 0.4 x 1, never above the lit side)
+    m.lil.strength = 0.5f;
+    const Vec3 half = lil_shade(s2, Vec3(0, 0, -1), Vec3(0, 0, 1), 1.0f, false, Vec3(1.0f), Vec3(0.0f), true, nullptr);
+    CHECK(std::fabs(half.x - 0.6f) < 1e-6f);
+    m.lil.strength = 1.0f, m.lil.shadow_env = 1.0f;
+    const Vec3 lifted = lil_shade(s2, Vec3(0, 0, -1), Vec3(0, 0, 1), 1.0f, false, Vec3(1.0f), Vec3(1.0f), true, nullptr);
+    CHECK(std::fabs(lifted.x - 0.8f) < 1e-6f);  // (a bright ambient's dark side lifts the shadow to the albedo)
+    /* The tone correction: neutral leaves a colour; a value of 0.5 halves it; a hue shift of 1/3 turns red to green. */
+    const Vec3 c(0.8f, 0.2f, 0.1f);
+    CHECK(length(lil_tone(c, Vec3(0.0f, 1.0f, 1.0f), 1.0f) - c) < 1e-4f);
+    CHECK(std::fabs(lil_tone(c, Vec3(0.0f, 1.0f, 0.5f), 1.0f).x - 0.4f) < 1e-4f);
+    const Vec3 shifted = lil_tone(Vec3(1.0f, 0.0f, 0.0f), Vec3(1.0f / 3.0f, 1.0f, 1.0f), 1.0f);
+    CHECK(shifted.y > 0.99f && shifted.x < 0.01f);
+    std::printf("    step(0.5 | 0.5, 0.2) %.2f, lit %.2f / shadow %.2f / half %.2f / lifted %.2f, red shifted to (%.2f %.2f %.2f)\n", lil_step(0.5f, 0.5f, 0.2f), lit.x, dark.x, half.x, lifted.x,
+                shifted.x, shifted.y, shifted.z);
+  });
+}
+
 static void tests_round401() {
   test("Unity's world as it is (round 401): exponential fog by its density, a Flat black ambient and a black Unlit skybox, the reflection intensity; a procedural skybox as the Sky, a panorama as the HDRI; the Custom ambient said", [] {
     std::vector<UnityDoc> docs;
@@ -11623,6 +11957,7 @@ void run_assets_tests() {
   tests_round399();
   tests_round400();
   tests_round401();
+  tests_round402();
   tests_round372();
   tests_round373();
   tests_round374();

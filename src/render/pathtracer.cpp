@@ -667,6 +667,47 @@ Vec3 hg_sample(Vec3 dir, float g, float u1, float u2) {
 }
 }  // namespace
 
+Vec3 PathTracer::lil_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 n, Vec3 V, Vec3 origin, bool backface, uint32_t &rng, uint64_t &rays, const Media &media) const {
+  const Material &m = *s.toon;
+  const RenderLight *key = toon_key_ >= 0 && toon_key_ < (int)lights_.size() ? &lights_[toon_key_] : nullptr;
+  Vec3 key_color(0.0f);
+  if (key && key->intensity > 0.0f) key_color = key->color * key->intensity;
+  const Vec3 L = lil_light_direction(env_, toon_key_L_, 0.2126f * key_color.x + 0.7152f * key_color.y + 0.0722f * key_color.z);
+  Vec3 sh_max, sh_min;
+  lil_sh(env_, L, &sh_max, &sh_min);
+  const Vec3 light = lil_main_light(m, key_color, sh_max);
+  /* The key light's shadow: a ray toward the sun's disc (soft), its transmittance's brightest channel as the visibility. */
+  float vis = 1.0f;
+  if (key && key_color.x + key_color.y + key_color.z > 0.0f && dot(n, L) > 0.0f && dot(sp.geo_normal, L) > 0.0f) {
+    Vec3 dir;
+    float dist = 0.0f, power = 0.0f;
+    if (sample_light(*key, origin, sp.position, rng, dir, dist, power)) {
+      rays++;
+      const Vec3 Tr = key->shadows ? transmittance({origin, dir}, dist, &media) : Vec3(1.0f);
+      vis = std::max({Tr.x, Tr.y, Tr.z});
+    }
+  }
+  float shadowmix = 1.0f;
+  Vec3 col = lil_shade(s, n, L, vis, backface, light, sh_min, true, &shadowmix);
+  for (const RenderLight &l : lights_) {
+    if (&l == key || !(l.intensity > 0.0f)) continue;
+    Vec3 dir;
+    float dist = 0.0f, power = 0.0f;
+    if (!sample_light(l, origin, sp.position, rng, dir, dist, power) || power <= 0.0f) continue;
+    const float fall = std::min(1.0f, l.type == RenderLight::Area ? light_falloff(l, sp.position, dir) : power / (l.intensity * kPi));
+    float v = 1.0f;
+    if (dot(n, dir) > 0.0f && dot(sp.geo_normal, dir) > 0.0f) {
+      rays++;
+      const Vec3 Tr = l.shadows ? transmittance({origin, dir}, dist, &media) : Vec3(1.0f);
+      v = std::max({Tr.x, Tr.y, Tr.z});
+    }
+    const Vec3 lc = lil_add_light(m, l.color * (l.intensity * fall));
+    col = col + lil_shade(s, n, dir, v, backface, lc, Vec3(0.0f), false, nullptr);
+  }
+  col = lil_finish(s, col, n, V, L, vis, shadowmix, backface, light);
+  return col;  // (the material's own emission the hit added already - review 402)
+}
+
 /* One light's sample for next-event estimation from `from` (shading `at`): a direction in the sun's disc, a point on
  * an area light or a point light's sphere (soft shadows), and the power arriving - Range, the spot cone, an area
  * light's facing and size. False when the point is on the light. Surfaces and fog alike. */
@@ -1195,6 +1236,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
     /* Toon (ADR 0020) where the eye sees the surface: its tones and rim. Elsewhere (bounces, bakes) it is Lambert. */
     const bool toon_here = s.toon && bounce == 0 && camera_path;
+    if (toon_here && s.lil) {  // (round 402: lilToon's whole colour, then the path ends)
+      const Vec3 Lo = lil_surface(s, sp, n, V, origin, !front_face, rng, rays, media);
+      add(beta * Lo);
+      break;
+    }
     if (toon_here) add(beta * toon_rim(s, n, V, toon_key_L_));
 
     /* BSDF sampling setup (one-sample MIS between the diffuse and GGX lobes),
