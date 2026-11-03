@@ -1,0 +1,27 @@
+% The module layers of src/: each depends only on the ones below it.
+\begin{tikzpicture}[node distance=3mm]
+  \node[layer, minimum width=150mm, fill=blAmber!15, draw=blAmber, text width=146mm] (editor)
+    {\textbf{editor} \quad the IMGUI toolkit (\code{ui::Context}), docking, the 26 windows, tools, keymaps, undo, Live Link, the Learn tab, the console};
+  \node[layer, minimum width=150mm, below=of editor, text width=146mm] (render)
+    {\textbf{render} \quad canvas and fonts, the rasterizer, the path tracer, GPU devices (Vulkan, OptiX), colour management, lightmaps, probes, voxel GI, camera filters};
+  \node[layer, minimum width=72mm, below left=3mm and -72mm of render, text width=68mm] (texture) {\textbf{texture} \quad procedural stacks, surfaces, smart materials};
+  \node[layer, minimum width=72mm, right=6mm of texture, text width=68mm] (research) {\textbf{research} \quad paper-derived features behind a registry};
+  \node[layer, minimum width=150mm, below=14mm of render, fill=blMint!12, text width=146mm] (scene)
+    {\textbf{scene} \quad Mesh (Blender's layout) and \code{meshops}, UVs, materials, modifiers, GameObject / components, the Reflector, IO, skins, IK, clips, physics};
+  \node[layer, minimum width=72mm, below left=3mm and -72mm of scene, text width=68mm] (image) {\textbf{image} \quad codecs, mipmapped textures};
+  \node[layer, minimum width=72mm, right=6mm of image, text width=68mm] (platform) {\textbf{platform} \quad one window + input: Win32 / X11 / Cocoa};
+  \node[layer, minimum width=150mm, below=14mm of scene, fill=blBlue!10, text width=146mm] (core)
+    {\textbf{core} \quad math (Unity's conventions), hashes, logging, filesystem, jobs (TBB or own pool), CPU features, the frame pacer, the net server};
+  \node[layer, minimum width=72mm, below left=3mm and -72mm of core, text width=68mm, fill=blCode] (deps) {\textbf{deps} \quad which libraries were built in (\code{libs})};
+  \node[layer, minimum width=72mm, right=6mm of deps, text width=68mm, fill=blCode] (app) {\textbf{app} \quad \code{main()}, the headless entry points};
+  \draw[flow] (editor) -- (render);
+  \draw[flow] (render) -- (texture);
+  \draw[flow] (render) -- (research);
+  \draw[flow] (texture) -- (scene);
+  \draw[flow] (research) -- (scene);
+  \draw[flow] (scene) -- (image);
+  \draw[flow] (scene) -- (platform);
+  \draw[flow] (image) -- (core);
+  \draw[flow] (platform) -- (core);
+  \node[note, below=2mm of deps.south west, anchor=north west, text width=146mm] {\code{scene} never includes \code{editor} or \code{render}: mesh operators are pure functions on a \code{Mesh} plus selection vectors, which is what lets the tests and the stress suite call them directly. \code{deps} and \code{app} are the two small modules that see everything.};
+\end{tikzpicture}

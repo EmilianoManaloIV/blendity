@@ -1,0 +1,26 @@
+% Packaging and deployment: from a tag to the installed program and its updater.
+\begin{tikzpicture}[node distance=5mm and 7mm]
+  \node[box] (tag) {A \code{v*} tag\\ \footnotesize pushed when the user asks};
+  \node[box, right=of tag, minimum width=46mm] (meta) {\code{release.yml} / \code{meta}\\ \footnotesize the version from \code{VERSION};\\ \footnotesize a merge into \code{main} builds\\ \footnotesize artifacts only};
+  \node[box, right=of meta, yshift=18mm] (win) {windows\\ \footnotesize Blendity-full + Blendity (no libs),\\ \footnotesize Inno Setup, install / start / uninstall checked};
+  \node[box, right=of meta] (lin) {linux (Ubuntu 22.04)\\ \footnotesize AppImage + .tar.gz,\\ \footnotesize GCC 14's runtime shipped};
+  \node[box, right=of meta, yshift=-18mm] (mac) {macos (arm64)\\ \footnotesize a .dmg, started headless};
+  \node[box, right=of lin, yshift=-30mm] (books) {books\\ \footnotesize \code{make\_books.py --check --pdf}};
+  \node[box, right=of lin, yshift=30mm] (bridges) {bridges\\ \footnotesize the five Live Link packages\\ \footnotesize (artifacts; attached by hand)};
+  \node[box, right=22mm of lin, fill=blAmber!15, draw=blAmber] (rel) {\code{publish\_release.sh}\\ \footnotesize the GitHub Release: 3 installers under fixed\\ \footnotesize names, \code{SHA256SUMS.txt}, the two PDFs;\\ \footnotesize the libraries archives into the\\ \footnotesize ``libraries'' release};
+  \node[box, right=of rel] (user) {The user's machine\\ \footnotesize \code{releases/latest/download/<name>};\\ \footnotesize Blendity hands over to Blendity-full\\ \footnotesize when the libraries load};
+  \node[box, below=of user] (upd) {The updater (\code{src/core/releases.cpp})\\ \footnotesize once a day: a newer release? Install\\ \footnotesize checks the SHA-256; Version History\\ \footnotesize installs any build, older ones too};
+  \draw[flow] (tag) -- (meta);
+  \draw[flow] (meta) -- (win);
+  \draw[flow] (meta) -- (lin);
+  \draw[flow] (meta) -- (mac);
+  \draw[flow] (meta) |- (books);
+  \draw[flow] (meta) |- (bridges);
+  \draw[flow] (win) -- (rel);
+  \draw[flow] (lin) -- (rel);
+  \draw[flow] (mac) -- (rel);
+  \draw[flow] (books) -- (rel);
+  \draw[flow] (rel) -- (user);
+  \draw[flow, <->] (user) -- (upd);
+  \draw[dflow] (upd.west) -| node[lbl, pos=0.25] {\code{gh api releases}} (rel.south);
+\end{tikzpicture}

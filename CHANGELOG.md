@@ -2,6 +2,56 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 409): the two books, one reference list, the licensing review, the stack merged
+
+**Asked:** "Add two pdfs to the project. One for architectural documentation so someone can learn how the software
+works (comes with SDLC diagrams and artifacts). One for user documentation so the user can navigate the editor and feel
+comfortable coming from other software. Only write this once for now when I ask; not to edit the documentation for every
+round. Make sure to cite everything that is used in the project (papers, repositories, websites, etc.). There should be
+a reference page and every element (the code, UI, documentation) should be referenced. Due credit should be rewarded.
+Make sure the licensing for this software is compatible with the licensing in Blender and AI assisted projects. Finally,
+update the pre release and specific operating system downloads. Do another test suite for both with and without
+dependencies." Then: "Make sure the papers are acceptable by HCI guidelines." The user chose LaTeX, the PDFs committed in
+`docs/` and attached to the release, version 0.13.0, and the open stack #293-#307 merged first (merged bottom-up into
+main with merge commits, each branch updated and its CI green before its merge).
+
+**Added (task 0386, ADR 0104; ADR 0002 amended)**
+- **`docs/Blendity-Architecture.pdf`** (62 pages): purpose and scope, the context, the layers and the two
+  flows (one frame, one edit), the scene and mesh model, rendering, the editor, bridges and Live Link, the research
+  features, the agentic SDLC with its roles, lifecycle, gates and artifacts, build / test / release, performance, what
+  isn't recreated, licensing and credit; eight TikZ diagrams (context, layers, one edit, the render pipeline, the Live
+  Link sequence, the SDLC, deployment, requirements traceability); the References chapter; Index A (code ->
+  references) and Index B (documents -> references).
+- **`docs/Blendity-User-Guide.pdf`** (68 pages): install and the first start, getting around, coming from
+  Unity / Blender / Maya / 3ds Max / SketchUp / Unreal / Adobe (the feel, the presets side by side, what is where), the
+  stages (reference and blocking, modeling / sculpting / UVs, materials / textures / painting, lighting and rendering,
+  rigging and animation, files and Live Link), the Learn tab and the console, pen / Draw tab / papers / board / VR,
+  troubleshooting, licensing; eight headless figures; the References chapter; Index C (Learn lessons -> references).
+- **One reference list, generated** (`tools/make_books.py --bib`): 181 entries from the lessons' `> ` and `@ `
+  lines, `research/FEATURES.md`, `licenses/README.md` and a hand-written `refs_extra.bib` (the reference books, the
+  programs' manuals, the standards and licences, the papers the architecture's tables name), deduplicated, with
+  biblatex back-references to the citing pages; `--check-cited` (uncited, missing) runs in `build.yml` and `--bib` before the
+  PDFs in `release.yml`'s new `books` job, which attaches them to every release (`publish_release.sh` publishes
+  `*.pdf`); the README links both.
+- **HCI guidelines for the books** (the user's second request): every text colour, link and box title at WCAG 2.1 AA's
+  4.5:1 or more (the palette darkened where it is text: amber 5.4:1, blue 6.7:1, grey 6.4:1, mint 5.2:1); links told
+  apart by form as well as colour; alt text and a describing caption on every figure; the document's language
+  metadata declared, headings as bookmarks; a 152 mm text width (about 80 characters a line) in the editor's
+  DejaVu faces; task-first chapters with numbered steps, worked examples, a troubleshooting chapter and a Learn pointer
+  per chapter (Nielsen's help heuristic, Carroll's minimalist instruction); the guidelines stated in the colophon. PDF
+  structure tags stay off: LaTeX's tagging project does not yet support tcolorbox and titlesec (the build failed with
+  them on); said in the colophon.
+- **Licensing:** `src/render/sky.cpp`'s header names its Apache-2.0 origin (Cycles), the copyright holders and the
+  GPL-3.0-or-later combination; `licenses/README.md` gains "Ported, not copied" (the sky), "Read, not copied" (lilToon
+  MIT, Poiyomi, MToon MIT, CATS MIT, Cascadeur, MoonRay Apache-2.0, the bridges) and "Authorship and copyright";
+  `docs/AI_DISCLOSURE.md` the same statement; **`CREDITS.md`** names the people and products Blendity follows.
+- **The Learn lesson** "The Books and the References" (where the books are, how the list is made, what the licence
+  means, written with an AI under review), with three questions and three Try-it buttons.
+
+**Checked:** `tests_round409` (the PDFs, sources, generated list and CREDITS.md in the tree; every `\cite` of four
+chapters an entry of a `.bib`; the lesson with its questions and known commands); `make_books.py --check`
+(181 references, every one cited); both books built in WSL's TeX Live; both suites green - with Blender's libraries 15,902 checks in 1,543 tests, 0 failed; dependency-free 15,253 (Windows) and 15,259 (Linux, WSL) checks, 0 failed (`tools/run_suites.py`); the audits.
+
 ## 2026-11-03 (round 408): Humanoid retargeting like Mecanim
 
 **Asked:** a clip made on one humanoid rig played by another (the 2026-11-03 plan's round 408).

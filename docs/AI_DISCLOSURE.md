@@ -34,3 +34,14 @@ work.
 
 ## Questions
 Open an issue on GitHub. If something in this page is out of date, that is a bug: say so.
+
+## Authorship and copyright
+Blendity is copyright Emiliano Manalo and contributors. The model's outputs belong to the user who directed them
+under Anthropic's terms, and the project licenses them GPL-2.0-or-later (binaries GPL-3.0-or-later) to the extent
+copyright subsists in them - the human selection, direction, review and editing; a purely machine-written passage may
+carry no copyright of its own, and the licence claims none it does not have. The `Co-Authored-By` trailer on every
+commit is attribution, not a licence grant. No third-party
+code is claimed as the project's own: what is copied is listed with its licence in `licenses/README.md`, what is
+ported keeps its origin's notice in its header, and what is followed is credited in `CREDITS.md` and in the two books'
+References chapter (ADR 0104). The AI is a tool at build time, not in the product: the GPL program depends on no
+service.

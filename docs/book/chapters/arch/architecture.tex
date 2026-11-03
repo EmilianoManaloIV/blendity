@@ -1,0 +1,126 @@
+\chapter{Architecture}
+\label{ch:architecture}
+
+\section{Layers}
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/layers}}
+  \caption{The layers of \code{src/}. Each depends only on what is below it; the side modules are small and sit beside the stack.}
+  \label{fig:layers}
+\end{figure}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+Layer & Owns & Depends on \\
+\midrule
+\code{core} & math (Unity's left-handed, Y-up conventions), hashes (FNV-1a and the per-frame mixer), logging, the filesystem, jobs (TBB or its own pool), CPU features, the frame pacer, the TCP server & -- \\
+\code{platform} & one window, input events, clipboard, file dialogs, the trash (Win32 / X11 / Cocoa) & core \\
+\code{image} & PNG, JPEG, TGA, BMP, HDR decoding (EXR with OpenEXR), JPEG / HDR / PNG encoding, mipmapped textures & core \\
+\code{scene} & \code{Mesh} (Blender's corner-based layout) and the \code{meshops} operators, UVs, materials, modifiers, \code{GameObject} / components, scene and model IO, skins, IK, animation clips, sequences, physics, sketch data & core, image \\
+\code{texture} & procedural texture stacks, surfaces (the layer stack on an object), smart materials & scene \\
+\code{render} & 2D canvas and fonts, the rasterizer, the path tracer, GPU devices, colour management, lightmaps, probes, voxel GI, mesh maps, camera filters, video encoding & core, image, scene \\
+\code{editor} & the IMGUI toolkit (\code{ui::Context}), docking, the windows, tools (draw, knife, push/pull, modal transforms, sculpt, paint, sketch), keymaps, undo, Live Link, the Learn tab, the console & everything above \\
+\code{research} & paper-derived features behind a registry (cited in Learn $>$ References) & scene \\
+\code{deps}, \code{app} & which libraries were built in (the \code{libs} command); \code{main()} and the headless entry points & all \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\code{scene} never includes \code{editor} or \code{render}. Mesh operators (\code{meshops::*}, in
+\code{src/scene/mesh\_tools*.cpp}) are pure functions on a \code{Mesh} plus selection vectors, which is what lets the
+tests and the stress suite call them directly, and what keeps the editor a thin layer of intent over the data.
+
+\section{One frame}
+\code{platform} events $\to$ \code{Editor::frame} $\to$ the windows draw and handle input in docking order (the Scene
+view runs the active tool: \code{draw\_update}, \code{pushpull\_update}, \code{modal\_update}, the gizmo) $\to$
+\code{handle\_shortcuts} (the keymap; tools consume the keys they own first) $\to$ the frame is rasterized into the
+editor's framebuffer $\to$ \code{platform} presents it, only the 16-row bands whose pixels changed. Headless runs
+(\code{init\_headless} + \code{step\_frame\_headless}) execute the same frame without a window; the tests drive the UI this
+way with synthetic mouse and key events, and \code{Blendity --headless-screenshot} runs console commands and writes a
+picture. A \code{FramePacer} (\code{src/core/pacer.h}) starts frames at most \code{1 / max\_fps} apart without oversleeping
+\cite{Gregory2018vol1}.
+
+\section{One edit}
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/edit-flow}}
+  \caption{One edit, from a tool to an undo step. Solid arrows are the call path; dashed arrows are what the edit's version bump reaches.}
+  \label{fig:edit}
+\end{figure}
+
+A tool or menu calls \code{Editor::edit\_tool(op)} (or the console's \code{editop}). Operators that take numbers become a
+\code{LastOp}: \code{run\_last\_op} copies \code{LastOp::before}, applies the \code{meshops} function with the current
+values, records the result's pointer and version, and the F9 panel or the drag helper re-runs it when a value changes.
+\code{mark\_changed} turns the edit into one undo step: a scene clone sharing the unchanged meshes (\adr{0003}).
+
+\section{Invariants}
+\begin{rulebox}{What every change must keep}
+\begin{itemize}
+  \item \textbf{Copy-on-write meshes} (\adr{0003}): \code{mesh\_make\_mutable} before writing; re-read \code{MeshPtr}
+    after an edit; every change \code{touch()}es the mesh so version-keyed caches refresh. A redoable operator's
+    \code{LastOp::before} is the undo step's pointer, never written: \code{run\_last\_op} makes the operator's one copy
+    (\adr{0053}).
+  \item \textbf{Edit Mode selections} are vectors indexed like the mesh (\code{vert\_sel\_}, \code{face\_sel\_}) plus a set
+    of edge keys (\code{edge\_sel\_}); any operator that renumbers faces or vertices rebuilds them.
+  \item \textbf{Adjustable operations} re-run from \code{before}; anything that changes the result after it was recorded
+    must update \code{LastOp::result\_version} (\adr{0005}), or F9 treats the operation as gone.
+  \item \textbf{Geometry robustness} (Q-01): operators leave a structurally valid mesh or refuse with a message; closed
+    meshes stay closed; no new faces lying on top of each other without an explanation (Q-02, counted by the stress suite).
+  \item \textbf{Isolation of user files} (C-04): tests and stress run in a scratch project and trash
+    (\code{BLENDITY\_PROJECT}, \code{BLENDITY\_TRASH}); nothing they do touches \code{Assets/}.
+  \item \textbf{No main-thread stalls}: heavy work (bakes, remeshes, skin binds, Live Link's payloads, texture
+    evaluation) runs on workers with a cancel flag and shows in the job tray; the views keep their last picture
+    meanwhile (\adr{0039}, \adr{0095}).
+  \item \textbf{Every tool is reachable from the console} (\code{editop}, \code{edittool}, \code{drawpoint}, \ldots),
+    so tests and scripts can drive it, and \code{tools/test\_coverage\_map.py --check} finds no command, keymap action or
+    window without a test (\adr{0056}).
+\end{itemize}
+\end{rulebox}
+
+\section{Module map}
+\code{docs/ARCHITECTURE.md} keeps the full map, one row per subsystem with the Blender source file it mirrors and the
+Unity equivalent; this is the shape of it.
+
+{\small
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\textwidth}>{\raggedright\arraybackslash}p{0.42\textwidth}>{\raggedright\arraybackslash}p{0.24\textwidth}}
+\toprule Blendity & What it does & Blender source it mirrors \\ \midrule \endfirsthead
+\toprule Blendity & What it does & Blender source it mirrors \\ \midrule \endhead
+\bottomrule \endfoot
+\code{core/math.h} & vectors, quaternions, column-major matrices; Unity's left-handed Y-up, ZXY Euler & \code{blenlib/BLI\_math\_matrix.hh} \\
+\code{core/jobs.*} & \code{parallel\_for}: oneTBB when available, else its own pool & \code{blenlib/BLI\_task.hh} \\
+\code{render/canvas.*} & UI drawing, anti-aliased TrueType text from OS fonts & \code{blenfont/intern/blf\_glyph.cc} \\
+\code{render/raster.*} & tile-binned multithreaded rasterizer, z-buffer, id buffer, outlines & \code{draw/intern/draw\_manager.cc}, \code{gpu/intern/gpu\_select.cc} \\
+\code{scene/mesh.*} & \code{positions} + \code{face\_offsets} + \code{corner\_verts} (n-gons), render cache & \code{makesdna/DNA\_mesh\_types.h}, \code{blenkernel/BKE\_mesh.hh} \\
+\code{mesh\_make\_mutable} & copy-on-write sharing & \code{blenlib/BLI\_implicit\_sharing.hh} \\
+\code{meshops::*} & extrude, inset, bevel, bridge, loop cut, knife, dissolve, fill, spin, slice, push/pull, \ldots & \code{bmesh/operators}, \code{bmesh/tools}, \code{editors/mesh} \\
+\code{scene/uv*.cpp} & LSCM, ABF++ by parts, Smart UV, projections, packing & \code{geometry/intern/uv\_parametrizer.cc}, \code{uv\_pack.cc} \\
+\code{scene/material.*} & a Unity-style Material evaluating the Principled BSDF & \code{nodes/shader/nodes/node\_shader\_bsdf\_principled.cc} \\
+\code{scene/scene.*} & \code{GameObject} + \code{Transform}, components, the \code{Reflector} & \code{DNA\_object\_types.h}, RNA (\code{makesrna}) \\
+\code{scene/skin.cpp}, \code{ik.cpp} & bones, skins (linear / dual quaternion), IK (law of cosines, CCD) & \code{ikplugin/intern/iksolver\_plugin.cc} \\
+\code{scene/animation.cpp}, \code{sequence.cpp} & clips of float tracks bound by path, tangent modes; sequences with crossfades & actions / F-curves, the NLA \\
+\code{render/pathtracer.*} & SAH BVH with instancing, NEE, GGX VNDF, MIS, Russian roulette, denoisers & \code{intern/cycles/bvh}, \code{kernel/integrator} \\
+\code{render/shading.*} & GGX + Lambert, image-based lighting, toon, lilToon, view transforms & \code{draw/engines/eevee/shaders}, \code{imbuf/intern/colormanagement.cc} \\
+\code{render/sky.*} & the Hosek--Wilkie sky driven by the first Directional Light & \code{intern/cycles/kernel/svm/sky.h}, \code{intern/sky} \\
+\code{editor/ui.*} & immediate-mode widgets, popups, menus, tooltips & \code{editors/interface} \\
+\code{editor/editor.cpp} & the dock tree: tabs, split / merge areas, layouts, secondary windows & \code{editors/screen} \\
+\code{editor/scene\_view.cpp} & navigation, gizmos, picking, Edit Mode, the active tool & \code{editors/space\_view3d}, \code{editors/transform} \\
+\code{editor/keymap.cpp} & actions, presets, contexts, the editor feel & the keymap editor and presets \\
+\code{editor/learn.cpp}, \code{lessons.cpp} & 45 lessons linking Unity, Blender and the books & -- \\
+\end{longtable}}
+
+\section{Key conventions}
+\begin{itemize}
+  \item \textbf{Coordinates:} Unity's left-handed, Y-up space \cite{Gregory2018vol1}. OBJ import and export mirror X and
+    reverse the winding, as Unity's importer does; Live Link and glTF mirror X on the way out. Blendity keeps Unity's
+    axes: a scene opened from Unity is never mirrored.
+  \item \textbf{Front faces:} \code{cross(b - a, c - a)} points outward; faces wind clockwise on screen in a Y-up view.
+  \item \textbf{Undo:} a scene-graph snapshot after each finished interaction; meshes shared and copied on first write;
+    clips, materials and textures as text in the undo state.
+  \item \textbf{Caches key on content}: \code{RenderMesh::serial} is new for every build and every in-place deform and
+    never reused; the views' pictures key on \code{scene\_render\_hash} with a per-object memo (\adr{0009},
+    \adr{0015}); a texture's planes key on the stack's hash.
+  \item \textbf{Reflection}: one field description per component (\code{Reflector}) drives the Inspector, the scene file,
+    the undo hash, the console's \code{set}, Live Link's material fields and Unity's write-back; a field skipped by
+    hashing (composition guides) never re-renders a view.
+\end{itemize}

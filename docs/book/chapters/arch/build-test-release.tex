@@ -1,0 +1,87 @@
+\chapter{Build, test and release}
+\label{ch:build}
+
+\section{Building}
+You need a compiler. \code{build.bat release all} on Windows finds Visual Studio or the Build Tools; \code{./build.sh
+release all} on Linux (g++, libx11-dev, libxi-dev) and macOS (the command line tools); CMake is an optional route.
+Each build produces \code{Blendity}, \code{blendity\_tests} and \code{blendity\_stress} in \code{dist/<platform>/}. With
+\code{blender/lib/<platform>} beside the project (fetched by \code{packaging/fetch\_blender\_libs.sh} at the commits
+pinned in \code{packaging/blender-libs.txt}, about 600 MB) the build links Blender's libraries and copies their
+runtime files beside the executables; \code{BLENDITY\_NO\_LIBS=1} forces the dependency-free build. The two builds are
+the two test suites the user asked for: both must keep building and passing (C-02). Sanitizer builds need the
+dependency-free build, as the prebuilt Jolt has no RTTI. The GPU path tracer's shaders are pre-warmed by the build;
+the OptiX kernel's PTX is committed so no CUDA toolkit is needed.
+
+\section{The test suites}
+\code{blendity\_tests} runs every test (\code{test("what the user sees", []\{ CHECK(...) \})}) in 16 groups
+(\code{--list-groups}, \code{--group <name>}; \code{BLENDITY\_TEST\_FILTER} for one by name): modeling, render,
+lighting, gpu, assets, animation, physics, editor, livelink, input, sketch, board, sculpt, hci, vr and main. UI tests
+drive the editor headless with synthetic mouse and key events; geometry tests call \code{meshops}; every test runs in
+a scratch project. \code{tools/run\_suites.py} runs every group of every build given as its own process, each with its
+share of the cores, longest first, and exits 1 on a failure or a crash: both Windows builds in about a minute and a
+half.
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Suite at 0.13.0 & Checks & Tests \\
+\midrule
+Windows, with Blender's libraries & 15,902 & 1,543 \\
+Windows, dependency-free & 15,253 & 1,543 \\
+Linux (WSL), dependency-free & 15,259 & 1,543 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The dependency-free build skips the library-only tests (Embree, OIDN, Manifold, Jolt, FFmpeg, EXR) and says so; the
+counts differ by those. \code{blendity\_stress} is the other suite: limits, naive-against-optimised comparisons, problem
+and overlap counts, Live Link's cost, the Blender parity rows; \code{--quick} runs in CI in about a minute, and
+\code{stress/results/latest.md} is the committed baseline.
+
+\section{The audits}
+\code{tools/test\_coverage\_map.py --check} (no command, action, window, button or field without a test),
+\code{tools/hci\_consistency\_audit.py --check} (the interface conventions: ``\ldots'' means asks first, Title Case,
+tooltips as sentences, no command names in visible text, labels that fit), \code{tools/hci\_klm.py --check} (the KLM
+table recounted), \code{tools/hci\_label\_audit.py} (no hard-coded shortcut label), \code{tools/unity\_meta.py --check}
+(the Unity bridge's \code{.meta} files complete), \code{tools/make\_books.py --check} (the reference list and index
+tables not drifted, every entry cited). The HCI sweep (\code{tests/test\_hci.cpp}) walks 826 screens for cut labels,
+narrow panes and contrast.
+
+\section{Continuous integration}
+\code{build.yml} on every push and pull request: windows, linux (ubuntu-latest) and macos build everything, run the
+unit tests with each failing check as an annotation, run a quick stress pass under a 15-minute alarm, take a headless
+screenshot and upload the executables; linux-sanitizers builds the tests with ASan + UBSan and runs them. All four are
+required to merge. \code{release.yml} on a \code{v*} tag, on a merge into \code{main} and on a pull request touching
+packaging: builds Blendity-full and Blendity on each system with the libraries fetched and cached by their pinned
+commits, checks the builds are what they should be (\code{--probe}), installs and uninstalls on Windows (full and lite
+types), starts the AppImage and the mounted \code{.dmg} headless, packages the five bridges, builds the two books
+(\code{make\_books.py --check --pdf}), and on a tag publishes. \code{moonray.yml} builds MoonRay for the bridge.
+
+\section{Packaging and deployment}
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/deployment}}
+  \caption{From a tag to the installed program and its updater.}
+  \label{fig:deploy}
+\end{figure}
+
+Each system gets one installer holding Blendity (dependency-free, always starts) and Blendity-full (with the
+libraries): an Inno Setup installer for Windows \cite{InnoSetup2026} installing for the user alone with a \code{.scene}
+association, an AppImage \cite{AppImage2026} and a plain \code{.tar.gz} for Linux built on the oldest supported Ubuntu,
+a \code{.dmg} for Apple-silicon Macs. \code{publish\_release.sh} publishes the three installers under names without the
+version (so \code{releases/latest/download/<name>} always fetches the newest), \code{SHA256SUMS.txt} for everything, the
+two PDFs, and the libraries archives into one ``libraries'' release that Blendity's updater reads; a \code{0.x} version
+is titled a pre-release of the program, a suffixed tag (\code{-beta.1}) a GitHub pre-release. The release notes are
+GitHub's summary of the merged pull requests followed by \code{packaging/install-notes.md}.
+
+The updater (\adr{0033}) asks GitHub once a day, when online and when the user allows, whether a newer release exists,
+shows what it brings with Install / Not now / Skip this one, checks the download against the SHA-256 list, saves the
+scene and installs; Help $>$ Version History installs any build, older ones too. An install without the libraries
+offers to download them for this build; Preferences $>$ Libraries is always the user's choice.
+
+\section{Releasing}
+A release is the user's decision. The steps: \code{VERSION} bumped (with the fallback in \code{releases.cpp}, the
+installer script's example, the README's pre-release note and the manual's mention), a CHANGELOG entry, a merge,
+\code{git tag vX.Y.Z} on the merge and \code{git push origin vX.Y.Z}; \code{release.yml} does the rest and the user
+checks the assets on the Releases page. Version 0.13.0 is the release this book was written for; versions before 1.0
+are pre-releases.

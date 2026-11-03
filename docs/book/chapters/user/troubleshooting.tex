@@ -1,0 +1,66 @@
+\chapter{Performance, the minimum machine and troubleshooting}
+\label{ch:trouble}
+
+\section{The minimum machine and the quality tiers}
+A thin laptop such as the HP Envy 13.3-inch 2-in-1 (an Intel i7 with 4 cores / 8 threads, 8~GB of RAM shared with
+Iris Xe graphics, a 1920$\times$1080 touch screen at 150\,\%) runs Blendity on the \ui{Low} tier and says so on the
+first run: editing frames at about 35--40 fps, orbiting at 60. A desktop with a 4-core CPU and a GTX 1050 Ti is faster.
+The GPU is for path tracing, baking and realtime GI; a ray-tracing card (RTX, RX 6000+, Arc) is recommended for them.
+
+\begin{center}
+\begin{tabular}{lllll}
+\toprule
+Tier & Views drawn at & Shadow map & Frame cap & For \\
+\midrule
+Low & 67\,\% (scaled up) & 1024 & 60 fps & the minimum machine \\
+Medium & 85\,\% & 2048 & 120 fps & a mid-range PC \\
+High & 100\,\% & the scene's & 144 fps & a fast PC \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Renders (\key{F12}) always use the scene's own settings. \ui{CPU Threads} limits how many cores Blendity uses; the
+\textbf{Profiler} window shows where a frame's time goes and its \ui{Budget} ranks the scene against VRChat's limits.
+Tips for a scene that stays smooth: bake lighting, keep Lighting Updates on Manual, keep Subdivision Surface's Levels
+at 1 while modelling, turn on the Low tier for heavy scenes, keep the Game view and the Camera Preview closed while
+you don't need them (they keep their last picture during a drag anyway).
+
+\section{When something refuses}
+A refusal is a toast over the Scene view, and most carry a \ui{Fix}:
+\begin{itemize}
+  \item ``Edit Mode needs an active object with a MeshFilter'': select a mesh first.
+  \item ``Paint needs a surface / UVs'': \ui{Fix} unwraps or makes the surface.
+  \item ``\ldots\ can't run during Play'': \ui{Fix} stops Play.
+  \item ``\ldots\ while a job runs on it'': the tray's \ui{Cancel}, or wait; an export waits by itself.
+  \item ``Generate Lighting: no object contributes GI'': \ui{Mark Static Meshes}.
+  \item A dim button: its tooltip says why (no selection, no libraries, the wrong mode).
+  \item ``the Scene view has no Rendered mode'': path trace with \key{F12}; the Render window's \ui{Preview} is the quick look.
+\end{itemize}
+
+\section{Without Blender's libraries}
+Preferences $>$ Libraries shows why a build runs without them (missing, damaged, turned off, offline) and offers
+\ui{Download} or the switch. Without them: no Boolean or Decimate modifier, no EXR, no OpenColorIO views, slower path
+tracing and the \`A-Trous denoiser, sphere physics in Play, and no MP4 of its own (Render Animation offers the
+libraries or an \code{ffmpeg} on the PATH). Everything else works the same.
+
+\section{The GPU}
+A \ui{CPU} badge in the Scene view's bar says the views draw on the CPU although Auto wanted the graphics card; its
+tooltip says why (no Vulkan, a material or world the card doesn't draw yet: volumes and the Principled extras go to the
+CPU and say so). Render $>$ Device picks the path tracer's device; \code{gpu list} names the cards; a small GPU gets a
+quarter of the RAM and is never overrun.
+
+\section{Files and projects}
+Your project is a folder with \code{Assets} inside; copy it whole. A scene names its materials, textures and clips by
+project path and keeps values as a fallback, so a scene opened without its assets still shows. The Project window's
+moves and deletes keep references working; deletes go to the system's trash. Never edit a Unity project you care
+about in place: import a copy, or let Live Link write into a copy.
+
+\section{Where to ask}
+Open an issue on GitHub (\url{https://github.com/EmilianoManaloIV/blendity/issues}) with the Console's log (\ui{Copy}
+in the Report dialog, or \code{BlendityProject/Screenshots} for a picture). If something in the documentation is out
+of date, that is a bug too.
+
+\begin{fromnote}{Learn}
+\emph{Performance and Stress Testing > Quality tiers}, \emph{Rendering on the GPU > A small graphics card},
+\emph{Libraries and Performance}.
+\end{fromnote}

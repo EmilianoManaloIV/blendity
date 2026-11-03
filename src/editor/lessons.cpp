@@ -1890,6 +1890,28 @@ The Animation window's Add Property lists everything by group - Object, Transfor
 ? A door should vanish at frame 40 and come back at 80. Which property? | Active (Add Property > Object > Active, on the door - not on the clip's root itself): key it on (1) before, off (0) at 40 and on at 80; its keys are Constant, so it switches rather than fades.
 ? You animated the roughness of a material and another object changed too. Why? | The two share the material asset: an animated material is the material itself. Give the object its own (the slot's New Material) before animating it.
 )"},
+    {"The Books and the References", "Two PDFs, one reference list, and what the licence means", R"(
+Blendity has two books, written once (round 409), in the repository's docs/ folder and attached to every release on GitHub (not inside an installed Blendity): Blendity-Architecture.pdf, how the software works - its layers, one frame and one edit, the scene and the renderers, the bridges, the agentic development lifecycle with its diagrams and artifacts, how it is built, tested and released - and Blendity-User-Guide.pdf, the editor stage by stage for an artist coming from Unity, Blender, Maya, 3ds Max, SketchUp, Unreal or Adobe's tools. Each release attaches both. The manual (docs/MANUAL.md), the architecture notes and this tab stay the living record: where they and the books disagree, the files are newer.
+# One reference list, generated
+Every paper, book, manual, standard and library used anywhere in Blendity is in the books' References chapter, by kind, with the pages where it is cited. The list is not typed twice: tools/make_books.py reads the "> " and "@ " lines of these lessons, research/FEATURES.md and licenses/README.md, merges them with a hand-written list and writes refs.bib; three index tables tie the code (Index A), the documents (Index B) and these lessons (Index C) to their references. A check fails when an entry is never cited or a citation has no entry, so the list cannot drift.
+| Where it is cited | What it is
+| A lesson's "> " line | a book's chapter, a paper, a manual page
+| A lesson's "@ " line | the Blender source file the piece mirrors
+| research/FEATURES.md | the paper a feature was built from, its source file and its test
+| licenses/README.md | every library with its version and licence
+| CREDITS.md | the people and products whose work Blendity follows
+# What the licence means
+The source is GPL-2.0-or-later, the same as Blender's; the executables are GPL-3.0-or-later, because they combine that source with Apache-2.0 libraries (Embree, OpenImageDenoise, MikkTSpace, the sky evaluation ported from Cycles) and Apache-2.0 combines with GPL version 3, not version 2 alone - Blender's own situation. Code copied from Blender's tree keeps its licence in licenses/; code ported from it keeps the origin's notice in its header (src/render/sky.cpp); ideas read from other programs (lilToon's lighting formulas, the CATS plugin's tools, Cascadeur's physics) are credited, with no code in the tree. The scenes, meshes, textures and renders you make are yours: the GPL covers the program, not its output.
+# Written with an AI, under a person's review
+The code, the tests, the documentation and the books are written with Anthropic's Claude through Claude Code, from task specifications and decision records the author approves before code is written, reviewed by a person before anything lands (docs/AI_DISCLOSURE.md). The model's outputs belong to the person who directed them, and the project licenses them to the extent copyright subsists in them (the human selection, direction, review and editing); copyright is Emiliano Manalo's and the contributors'; the "Co-Authored-By" line on each commit is attribution, not a licence. The editor itself runs no AI except the optional, local AI Inbetweening download, keeps no cloud and sends no telemetry: the one request it makes on its own is the optional daily check for a newer release.
+> [GEA1] 1.6 Tools and the Asset Pipeline - why an editor documents its pipeline and its sources
+? A paper you read became a feature. Where must its citation go so the books pick it up? | In a lesson's "> " line or research/FEATURES.md's row (and in the code's comment for the reader): tools/make_books.py --bib reads the lesson lines and the tracker into refs.bib, and --check fails until a chapter or an index cites the new entry.
+? Why are the executables GPL-3.0-or-later when the source says GPL-2.0-or-later? | The executables combine the source with Apache-2.0 libraries and the Cycles sky port, and Apache-2.0 is compatible with GPL 3 but not with GPL 2 alone; the "or later" clause lets the combination go out under version 3, as Blender's binaries do.
+? You modelled and rendered a product shot in Blendity. Who owns the render? | You do. The GPL covers the program, not what it makes.
+! cmd:manual | Open the manual (the books are in the repository's docs/ and on the Releases page)
+! lesson:18 | The References lesson: the papers behind the features
+! cmd:libs | Which of Blender's libraries this build uses, each with its licence in licenses/README.md
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

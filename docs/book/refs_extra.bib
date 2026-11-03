@@ -1,0 +1,697 @@
+% Hand-written references (task 0386): the books the Learn lessons cite by tag, the programs Blendity follows, the
+% standards, the licences, and the sources the architecture's tables name that no lesson cites. tools/make_books.py
+% --bib writes refs.bib beside this file from the lessons, research/FEATURES.md and licenses/README.md; --check fails
+% when an entry here is never cited.
+
+% --- the reference books (the Learn tab's [FoCG], [GEA1], [GEA2]) ---------------------------------------------------
+
+@book{MarschnerShirley2021,
+  author = {Marschner, Steve and Shirley, Peter},
+  title = {Fundamentals of Computer Graphics},
+  edition = {5},
+  publisher = {CRC Press},
+  year = {2021},
+  keywords = {books},
+  note = {The Learn tab's [FoCG]: math, viewing, rasterization, meshes, texture mapping, ray tracing, colour.}
+}
+
+@book{Gregory2018vol1,
+  author = {Gregory, Jason},
+  title = {Game Engine Architecture},
+  subtitle = {Volume I: Foundations and Core Engine Systems},
+  edition = {3},
+  publisher = {CRC Press},
+  year = {2018},
+  keywords = {books},
+  note = {The Learn tab's [GEA1]: tools and the asset pipeline, profiling, SIMD, parallelism, math, memory, the game loop.}
+}
+
+@book{Gregory2018vol2,
+  author = {Gregory, Jason},
+  title = {Game Engine Architecture},
+  subtitle = {Volume II: Graphics, Motion, and Sound},
+  edition = {3},
+  publisher = {CRC Press},
+  year = {2018},
+  keywords = {books},
+  note = {The Learn tab's [GEA2]: the rendering engine, lighting, post-processing, physics, game objects, the world editor.}
+}
+
+@book{Card1983,
+  author = {Card, Stuart K. and Moran, Thomas P. and Newell, Allen},
+  title = {The Psychology of Human-Computer Interaction},
+  publisher = {Lawrence Erlbaum Associates},
+  year = {1983},
+  keywords = {books},
+  note = {The keystroke-level model's operators and the heuristics for placing M, as docs/hci/klm.md applies them.}
+}
+
+@book{Nielsen1993,
+  author = {Nielsen, Jakob},
+  title = {Usability Engineering},
+  publisher = {Academic Press},
+  year = {1993},
+  keywords = {books},
+  note = {The heuristic evaluation method behind the HCI passes (ADR 0085).}
+}
+
+% --- the programs Blendity follows (their documentation) ---------------------------------------------------------------
+
+@software{Blender2026,
+  title = {Blender},
+  author = {{Blender Foundation and the Blender authors}},
+  version = {5.2},
+  url = {https://projects.blender.org/blender/blender},
+  year = {2026},
+  keywords = {software},
+  note = {GPL-2.0-or-later. The design and source Blendity's meshes, Edit Mode tools, UVs, materials, renderers, skins and IK follow; the Learn lessons name the file each piece mirrors.}
+}
+
+@online{BlenderManual2026,
+  title = {Blender 5.2 Reference Manual},
+  author = {{Blender Foundation}},
+  url = {https://docs.blender.org/manual/en/latest/},
+  year = {2026},
+  keywords = {websites},
+  note = {Cited in the user guide's comparisons and the HCI reports.}
+}
+
+@online{UnityManual2026,
+  title = {Unity User Manual (Unity 6)},
+  author = {{Unity Technologies}},
+  url = {https://docs.unity3d.com/Manual/},
+  year = {2026},
+  keywords = {websites},
+  note = {The editor's windows, shortcuts, Play mode, lighting, the Animation window, Humanoid avatars and the YAML asset formats Blendity follows.}
+}
+
+@online{UnrealDocs2026,
+  title = {Unreal Engine Documentation},
+  author = {{Epic Games}},
+  url = {https://dev.epicgames.com/documentation/},
+  year = {2026},
+  keywords = {websites},
+  note = {The Unreal keymap preset and editor feel, FBX collision naming, Sequencer, Live Link.}
+}
+
+@online{GodotDocs2026,
+  title = {Godot Engine Documentation},
+  author = {{Godot Engine contributors}},
+  url = {https://docs.godotengine.org/},
+  year = {2026},
+  keywords = {websites},
+  note = {The TSCN format, importing 3D scenes, WorldEnvironment; the Godot bridge.}
+}
+
+@online{MayaDocs2026,
+  title = {Autodesk Maya Documentation},
+  author = {{Autodesk}},
+  url = {https://help.autodesk.com/view/MAYAUL/},
+  year = {2026},
+  keywords = {websites},
+  note = {The Maya keymap preset (Q W E R, F8-F11, Set Key on S) and the Maya editor feel.}
+}
+
+@online{MaxDocs2026,
+  title = {Autodesk 3ds Max Documentation},
+  author = {{Autodesk}},
+  url = {https://help.autodesk.com/view/3DSMAX/},
+  year = {2026},
+  keywords = {websites},
+  note = {The 3ds Max keymap preset (Chamfer, Cut, Clone).}
+}
+
+@online{SketchUpHelp2026,
+  title = {SketchUp Help Center},
+  author = {{Trimble}},
+  url = {https://help.sketchup.com/},
+  year = {2026},
+  keywords = {websites},
+  note = {Push/Pull's semantics (ADR 0004), the drawing tools, inference snapping, Follow Me, the SketchUp keymap preset.}
+}
+
+@online{PhotoshopHelp2026,
+  title = {Adobe Photoshop User Guide},
+  author = {{Adobe}},
+  url = {https://helpx.adobe.com/photoshop/user-guide.html},
+  year = {2026},
+  keywords = {websites},
+  note = {The Adobe keymap preset (B, E, V, [ ]), the 27 blend modes, Free Transform and the Layers window Blendity follows.}
+}
+
+@online{SubstancePainterDocs2026,
+  title = {Adobe Substance 3D Painter Documentation},
+  author = {{Adobe}},
+  url = {https://helpx.adobe.com/substance-3d-painter/home.html},
+  year = {2026},
+  keywords = {websites},
+  note = {Mesh maps, the layer stack, smart masks and smart materials (ADRs 0079-0082).}
+}
+
+@online{SketchBookDocs2026,
+  title = {SketchBook Pro Documentation},
+  author = {{Sketchbook, Inc.}},
+  url = {https://www.sketchbook.com/},
+  year = {2026},
+  keywords = {websites},
+  note = {The rulers, ellipse, French curves, symmetry and perspective guides, the toolbar's order, the brush puck (ADRs 0063, 0088).}
+}
+
+@online{UModelerDocs2026,
+  title = {UModeler X Documentation},
+  author = {{UModeler, Inc.}},
+  url = {https://umodeler.gitbook.io/},
+  year = {2026},
+  keywords = {websites},
+  note = {Drawing shapes onto faces, Follow, Lathe, Slice, the Shift-drag extrude.}
+}
+
+@online{PlasticityDocs2026,
+  title = {Plasticity Documentation},
+  author = {{Plasticity}},
+  url = {https://plasticity.xyz/},
+  year = {2026},
+  keywords = {websites},
+  note = {Construction planes and lines, the perpendicular snap, Shell, Thicken, Draft, Radial Array, Fillet.}
+}
+
+@online{ProBuilderDocs2026,
+  title = {Unity ProBuilder Package Documentation},
+  author = {{Unity Technologies}},
+  url = {https://docs.unity3d.com/Packages/com.unity.probuilder@latest},
+  year = {2026},
+  keywords = {websites},
+  note = {Parametric shapes and the per-mode edit actions the Modeling Tools window compares itself with.}
+}
+
+@online{ZBrushDocs2026,
+  title = {ZBrush Documentation},
+  author = {{Maxon}},
+  url = {https://help.maxon.net/zbrush/},
+  year = {2026},
+  keywords = {websites},
+  note = {Sculpt Mode's brushes, masks, polygroups, DynaMesh and ZRemesher (ADRs 0074-0077).}
+}
+
+@online{SculptrisDocs2026,
+  title = {Sculptris (dynamic tessellation)},
+  author = {{Pixologic}},
+  url = {https://pixologic.com/sculptris/},
+  year = {2026},
+  keywords = {websites},
+  note = {Dyntopo / Sculptris Pro: the mesh tessellated under the brush (ADR 0078).}
+}
+
+@online{VRChatCreators2026,
+  title = {VRChat Creator Documentation},
+  author = {{VRChat Inc.}},
+  url = {https://creators.vrchat.com/},
+  year = {2026},
+  keywords = {websites},
+  note = {The Avatar Descriptor, PhysBones, the performance ranks, the Worlds SDK; the Avatar window and the Profiler's Budget follow them.}
+}
+
+@software{VRCLightVolumes2026,
+  title = {VRC Light Volumes},
+  author = {{REDSIM}},
+  url = {https://github.com/REDSIM/VRCLightVolumes},
+  year = {2026},
+  keywords = {software},
+  note = {The Light Volume component and its baking (rounds 397-398, ADR 0097); the package stays in the user's Unity project.}
+}
+
+@software{lilToon2026,
+  title = {lilToon},
+  author = {lilxyzw},
+  url = {https://github.com/lilxyzw/lilToon},
+  year = {2026},
+  keywords = {software},
+  note = {MIT. Its lighting model's formulas (lil\_common\_frag.hlsl) are re-implemented in src/render/shading.cpp (ADR 0100); no code is copied.}
+}
+
+@software{Poiyomi2026,
+  title = {Poiyomi Toon Shader},
+  author = {Poiyomi},
+  url = {https://github.com/poiyomi/PoiyomiToonShader},
+  year = {2026},
+  keywords = {software},
+  note = {Read for its material properties (the Unity material converter and the Poiyomi texture preset).}
+}
+
+@software{MToon2026,
+  title = {UniVRM / MToon},
+  author = {{VRM Consortium}},
+  url = {https://github.com/vrm-c/UniVRM},
+  year = {2026},
+  keywords = {software},
+  note = {MIT. The VRM 0.x / 1.0 glTF extension and the MToon material Blendity's VRM import reads.}
+}
+
+@software{CATS2026,
+  title = {CATS Blender Plugin},
+  author = {absolute-quantum},
+  url = {https://github.com/absolute-quantum/cats-blender-plugin},
+  year = {2026},
+  keywords = {software},
+  note = {MIT. Fix Model, Create Visemes, Decimation, Eye Tracking, Merge Armatures: the Avatar window follows its tools (rounds 356-361).}
+}
+
+@software{Mixamo2026,
+  title = {Adobe Mixamo},
+  author = {{Adobe}},
+  url = {https://www.mixamo.com/},
+  year = {2026},
+  keywords = {software},
+  note = {The marker auto-rig's workflow (chin, wrists, elbows, knees, groin) and the bone naming the humanoid map knows.}
+}
+
+@software{VRoid2026,
+  title = {VRoid Studio},
+  author = {{pixiv Inc.}},
+  url = {https://vroid.com/en/studio},
+  year = {2026},
+  keywords = {software},
+  note = {The VRM avatars and the J\_Bip bone names Blendity's imports and the humanoid map read.}
+}
+
+@software{MMD2026,
+  title = {MikuMikuDance (PMX, PMD and VMD file formats)},
+  author = {{Yu Higuchi and the MMD community}},
+  url = {https://sites.google.com/view/vpvp/},
+  year = {2026},
+  keywords = {software},
+  note = {The .pmx / .pmd model and .vmd motion files Blendity imports (ADR 0047).}
+}
+
+@software{Cascadeur2026,
+  title = {Cascadeur},
+  author = {{Nekki}},
+  url = {https://cascadeur.com/},
+  year = {2026},
+  keywords = {software},
+  note = {The ideas behind physics for animation: the centre of mass, contacts, ballistic flight, AutoPhysics and AutoPosing (ADRs 0042-0045, 0087). Ideas only; no code.}
+}
+
+@software{MoonRay2026,
+  title = {OpenMoonRay},
+  author = {{DreamWorks Animation}},
+  url = {https://github.com/dreamworksanimation/openmoonray},
+  year = {2026},
+  keywords = {software},
+  note = {Apache-2.0. An optional external renderer run as a program of its own (ADR 0041, moonray.yml); not linked, not shipped.}
+}
+
+@software{PureRef2026,
+  title = {PureRef},
+  author = {{Idyllic Pixel}},
+  url = {https://www.pureref.com/},
+  year = {2026},
+  keywords = {software},
+  note = {The reference board's way of working (ADR 0089).}
+}
+
+@software{Krita2026,
+  title = {Krita},
+  author = {{Krita Foundation}},
+  url = {https://krita.org/},
+  year = {2026},
+  keywords = {software},
+  note = {GPL-3.0. The canvas-turning keys (4, 5, 6) the Draw tab answers.}
+}
+
+@software{ClaudeCode2026,
+  title = {Claude Code},
+  author = {{Anthropic}},
+  url = {https://claude.com/claude-code},
+  year = {2026},
+  keywords = {software},
+  note = {The agentic development environment Blendity is written with, under human direction and review (docs/AI\_DISCLOSURE.md).}
+}
+
+@software{GitHubActions2026,
+  title = {GitHub Actions},
+  author = {{GitHub}},
+  url = {https://docs.github.com/actions},
+  year = {2026},
+  keywords = {software},
+  note = {The build, release and MoonRay workflows run on it.}
+}
+
+@software{InnoSetup2026,
+  title = {Inno Setup},
+  author = {Russell, Jordan},
+  url = {https://jrsoftware.org/isinfo.php},
+  year = {2026},
+  keywords = {software},
+  note = {The Windows installer (packaging/windows/blendity.iss).}
+}
+
+@software{AppImage2026,
+  title = {AppImage and appimagetool},
+  author = {{AppImage project}},
+  url = {https://appimage.org/},
+  year = {2026},
+  keywords = {software},
+  note = {The Linux package (packaging/linux/make\_packages.sh).}
+}
+
+@software{OpenXR2026,
+  title = {OpenXR},
+  author = {{The Khronos Group}},
+  url = {https://www.khronos.org/openxr/},
+  year = {2026},
+  keywords = {software},
+  note = {The VR View's runtime API (ADR 0096).}
+}
+
+@software{CMUmocap2026,
+  title = {CMU Graphics Lab Motion Capture Database},
+  author = {{Carnegie Mellon University}},
+  url = {http://mocap.cs.cmu.edu/},
+  year = {2026},
+  keywords = {software},
+  note = {The data the AI inbetweening network and Puppet Posing's pose prior were trained on: ``The data used in this project was obtained from mocap.cs.cmu.edu. The database was created with funding from NSF EIA-0196217.''}
+}
+
+@software{ONNXRuntime2026,
+  title = {ONNX Runtime},
+  author = {{Microsoft}},
+  version = {1.31.0},
+  url = {https://onnxruntime.ai/},
+  year = {2026},
+  keywords = {software},
+  note = {MIT. The optional download that runs the inbetweening network (ADR 0046); only its C API's headers are in the tree.}
+}
+
+% --- standards and file formats --------------------------------------------------------------------------------------
+
+
+@report{USD2026,
+  author = {{Pixar Animation Studios}},
+  title = {Universal Scene Description (USD) Documentation},
+  institution = {Pixar},
+  year = {2026},
+  url = {https://openusd.org/},
+  keywords = {standards},
+  note = {The USDA text form Blendity reads and writes.}
+}
+
+@report{FBXBlender2026,
+  author = {{Blender Foundation}},
+  title = {FBX binary file format specification (the io\_scene\_fbx exporter's encode\_bin.py)},
+  institution = {Blender Foundation},
+  year = {2026},
+  url = {https://code.blender.org/2013/08/fbx-binary-file-format-specification/},
+  keywords = {standards},
+  note = {The record tree, header, null records and footer the FBX writer follows.}
+}
+
+@report{SPDX2024,
+  author = {{The Linux Foundation}},
+  title = {SPDX License List and Identifiers},
+  institution = {SPDX Workgroup},
+  year = {2024},
+  url = {https://spdx.org/licenses/},
+  keywords = {standards},
+  note = {The `SPDX-License-Identifier' headers in every source file.}
+}
+
+@report{GPLv2,
+  author = {{Free Software Foundation}},
+  title = {GNU General Public License, version 2},
+  institution = {Free Software Foundation},
+  year = {1991},
+  url = {https://www.gnu.org/licenses/old-licenses/gpl-2.0.html},
+  keywords = {standards},
+  note = {The licence of Blendity's source (GPL-2.0-or-later), as Blender's.}
+}
+
+@report{GPLv3,
+  author = {{Free Software Foundation}},
+  title = {GNU General Public License, version 3},
+  institution = {Free Software Foundation},
+  year = {2007},
+  url = {https://www.gnu.org/licenses/gpl-3.0.html},
+  keywords = {standards},
+  note = {The licence of the executables, which combine GPL-2.0-or-later code with Apache-2.0 libraries.}
+}
+
+@report{GPLFAQ2026,
+  author = {{Free Software Foundation}},
+  title = {Frequently Asked Questions about the GNU Licenses},
+  institution = {Free Software Foundation},
+  year = {2026},
+  url = {https://www.gnu.org/licenses/gpl-faq.html},
+  keywords = {standards},
+  note = {Why Apache-2.0 code combines with GPL-3 and not GPL-2-only (the ``or later'' clause).}
+}
+
+@report{Apache2,
+  author = {{The Apache Software Foundation}},
+  title = {Apache License, Version 2.0},
+  institution = {The Apache Software Foundation},
+  year = {2004},
+  url = {https://www.apache.org/licenses/LICENSE-2.0},
+  keywords = {standards},
+  note = {The licence of Embree, OpenImageDenoise, oneTBB, MikkTSpace and the Cycles sky code ported in src/render/sky.cpp.}
+}
+
+@report{AnthropicTerms2026,
+  author = {{Anthropic}},
+  title = {Anthropic Consumer Terms of Service and Commercial Terms},
+  institution = {Anthropic},
+  year = {2026},
+  url = {https://www.anthropic.com/legal/consumer-terms},
+  keywords = {standards},
+  note = {The terms under which the model's outputs belong to the user who directed them (the authorship statement).}
+}
+
+
+@report{psxspx,
+  author = {Korth, Martin},
+  title = {PSX-SPX: PlayStation Specifications (GPU Rendering, Dither Matrix)},
+  institution = {no\$psx},
+  year = {2024},
+  url = {https://psx-spx.consoledev.net/},
+  keywords = {standards},
+  note = {The Retro Console filter's PS1 look: integer vertices, affine texture mapping, the 4 x 4 dither matrix.}
+}
+
+@report{ASCCDL,
+  author = {{American Society of Cinematographers}},
+  title = {ASC Color Decision List (CDL) Transfer Functions and Interchange Syntax},
+  institution = {ASC Technology Committee},
+  year = {2009},
+  keywords = {standards},
+  note = {The lift / gain / gamma order of the Color Grading effect.}
+}
+
+@report{ACES2026,
+  author = {{Academy of Motion Picture Arts and Sciences}},
+  title = {Academy Color Encoding System (ACES)},
+  institution = {AMPAS},
+  year = {2026},
+  url = {https://acescentral.com/},
+  keywords = {standards},
+  note = {The RRT + ODT that the ACES view transforms approximate.}
+}
+
+% --- papers and talks the architecture's tables name that no lesson cites --------------------------------------------
+
+@inproceedings{Jimenez2014,
+  author = {Jimenez, Jorge},
+  title = {Next Generation Post Processing in Call of Duty: Advanced Warfare},
+  booktitle = {SIGGRAPH 2014 course: Advances in Real-Time Rendering in Games},
+  year = {2014},
+  keywords = {papers},
+  note = {The bloom's downsample and tent-filter upsample chain (render/camera\_filter.cpp).}
+}
+
+@inproceedings{McTaggart2004,
+  author = {McTaggart, Gary},
+  title = {Half-Life 2 / Valve Source Shading},
+  booktitle = {Game Developers Conference},
+  year = {2004},
+  keywords = {papers},
+  note = {The ambient cube the probe volumes' probes store (six directions, n-squared weights).}
+}
+
+@inproceedings{Dachsbacher2005,
+  author = {Dachsbacher, Carsten and Stamminger, Marc},
+  title = {Reflective Shadow Maps},
+  booktitle = {I3D '05},
+  year = {2005},
+  keywords = {papers},
+  note = {The sun's reflective shadow map that voxel GI's one bounce reads.}
+}
+
+@inproceedings{Jakobsen2001,
+  author = {Jakobsen, Thomas},
+  title = {Advanced Character Physics},
+  booktitle = {Game Developers Conference},
+  year = {2001},
+  keywords = {papers},
+  note = {The Verlet / constraint-projection scheme of the spring bone chains (ADR 0049).}
+}
+
+@inproceedings{Kugelstadt2016,
+  author = {Kugelstadt, Tassilo and Sch{\"o}mer, Elmar},
+  title = {Position and Orientation Based Cosserat Rods},
+  booktitle = {Symposium on Computer Animation},
+  year = {2016},
+  keywords = {papers},
+  note = {The bend-twist constraint the chains hold, simplified (ADR 0049).}
+}
+
+@inproceedings{Macklin2016,
+  author = {Macklin, Miles and M{\"u}ller, Matthias and Chentanez, Nuttapong},
+  title = {XPBD: Position-Based Simulation of Compliant Constrained Dynamics},
+  booktitle = {Motion in Games},
+  year = {2016},
+  keywords = {papers},
+  note = {Substepping and compliance in the strand and spring solvers (ADR 0049; the XPBD rods of task 0168).}
+}
+
+@article{Macklin2019,
+  author = {Macklin, Miles and Storey, Kier and Lu, Michelle and Terdiman, Pierre and Chentanez, Nuttapong and Jeschke, Stefan and M{\"u}ller, Matthias},
+  title = {Small Steps in Physics Simulation},
+  journaltitle = {Symposium on Computer Animation},
+  year = {2019},
+  keywords = {papers},
+  note = {Why the chain solver takes many small substeps rather than solver iterations.}
+}
+
+@article{Daviet2023,
+  author = {Daviet, Gilles},
+  title = {Interactive Hair Simulation on the GPU Using ADMM},
+  journaltitle = {ACM Transactions on Graphics},
+  volume = {42},
+  number = {4},
+  year = {2023},
+  keywords = {papers},
+  note = {Strand contacts in a uniform grid, as the chains' tips are pushed apart.}
+}
+
+@article{Akyurek2025,
+  author = {Aky{\"u}rek, Alp and Sahillio{\u{g}}lu, Yusuf},
+  title = {Spring-Decomposed Skinning},
+  journaltitle = {Computers \& Graphics},
+  year = {2025},
+  keywords = {papers},
+  note = {The soft-tissue bone's lag behind the body's acceleration, at its simplest (ADR 0049).}
+}
+
+@inproceedings{Hill2016ACES,
+  author = {Hill, Stephen},
+  title = {ACES Filmic Tone Mapping Curve (an analytic fit of the RRT + ODT)},
+  booktitle = {Published fit, used by Unity's Post Processing Stack},
+  year = {2016},
+  keywords = {papers},
+  note = {The ``ACES (full fit, Unity's)'' view transform of round 405 is this curve without the fit's matrices.}
+}
+
+@inproceedings{Kajiya1989,
+  author = {Kajiya, James T. and Kay, Timothy L.},
+  title = {Rendering Fur with Three Dimensional Textures},
+  booktitle = {SIGGRAPH '89},
+  year = {1989},
+  keywords = {papers},
+  note = {The anisotropic highlight band across the tangent used for toon hair.}
+}
+
+@inproceedings{Motomura2015,
+  author = {Motomura, Junya},
+  title = {GuiltyGearXrd's Art Style: The X Factor Between 2D and 3D},
+  booktitle = {Game Developers Conference},
+  year = {2015},
+  keywords = {papers},
+  note = {Toon shading's painted inputs, custom normals and the per-vertex outline width (ADR 0048); Camera Flatten (ADR 0093).}
+}
+
+@article{Brown1966,
+  author = {Brown, Duane C.},
+  title = {Decentering Distortion of Lenses},
+  journaltitle = {Photogrammetric Engineering},
+  volume = {32},
+  number = {3},
+  year = {1966},
+  keywords = {papers},
+  note = {The Brown-Conrady radial model of the Lens Distortion effect.}
+}
+
+@article{Sutherland1974,
+  author = {Sutherland, Ivan E. and Hodgman, Gary W.},
+  title = {Reentrant Polygon Clipping},
+  journaltitle = {Communications of the ACM},
+  volume = {17},
+  number = {1},
+  year = {1974},
+  keywords = {papers},
+  note = {The polygon clipping of the overlap and Z-fighting checks and of Array onto a surface.}
+}
+
+@article{Hammersley1960,
+  author = {Hammersley, J. M.},
+  title = {Monte Carlo Methods for Solving Multivariable Problems},
+  journaltitle = {Annals of the New York Academy of Sciences},
+  volume = {86},
+  year = {1960},
+  keywords = {papers},
+  note = {The interleaved Hammersley ray sets of the voxel GI gather.}
+}
+
+@inproceedings{Hill2012,
+  author = {Hill, Stephen and McAuley, Stephen and Burley, Brent and Chan, Danny and Gotanda, Yoshiharu and Hoffman, Naty and Smits, Brian and Tokuyoshi, Yusuke and Martinez, Adam},
+  title = {Physically Based Shading in Theory and Practice},
+  booktitle = {SIGGRAPH 2012 course},
+  year = {2012},
+  keywords = {papers},
+  note = {The split-sum environment BRDF approximation of image-based lighting (``env\_brdf\_approx'').}
+}
+
+
+@inproceedings{Lorensen1987,
+  author = {Lorensen, William E. and Cline, Harvey E.},
+  title = {Marching Cubes: A High Resolution 3D Surface Construction Algorithm},
+  booktitle = {SIGGRAPH '87},
+  year = {1987},
+  keywords = {papers},
+  note = {The sign-grid surface extraction DynaMesh's surface nets stand beside (ADR 0076).}
+}
+
+@article{Shoemake1985,
+  author = {Shoemake, Ken},
+  title = {Animating Rotation with Quaternion Curves},
+  journaltitle = {SIGGRAPH '85},
+  year = {1985},
+  keywords = {papers},
+  note = {Quaternion interpolation in the animation clips and the retargeter's turns.}
+}
+
+@inproceedings{Phong1975,
+  author = {Phong, Bui Tuong},
+  title = {Illumination for Computer Generated Pictures},
+  booktitle = {Communications of the ACM 18(6)},
+  year = {1975},
+  keywords = {papers},
+  note = {The Blinn-Phong preview spheres of the Materials window.}
+}
+
+@book{Carroll1990,
+  author = {Carroll, John M.},
+  title = {The Nurnberg Funnel: Designing Minimalist Instruction for Practical Computer Skill},
+  publisher = {MIT Press},
+  year = {1990},
+  keywords = {books},
+  note = {Minimalist instruction: the user guide's task-first chapters, short reading and error-recovery pages.}
+}
+
+@report{PDFUA2024,
+  author = {{ISO/TC 171}},
+  title = {ISO 14289-2:2024, Document management applications - PDF/UA-2: Accessibility of PDF},
+  institution = {International Organization for Standardization},
+  year = {2024},
+  url = {https://www.iso.org/standard/83216.html},
+  keywords = {standards},
+  note = {The accessible-PDF profile the books aim at: tags, language, alt text, a logical reading order.}
+}

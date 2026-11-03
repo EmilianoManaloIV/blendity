@@ -4,6 +4,10 @@ Blendity is a 3D editor that works like Unity (windows, navigation, gizmos, the 
 unwraps, textures, renders, rigs and animates the way Blender does. This manual walks through the work in the order
 you'd do it, one chapter per stage. Each chapter has short **examples** to follow and the **use cases** it's good for.
 
+The same ground, written once as a book with the editor's figures and a full reference list, is
+**docs/Blendity-User-Guide.pdf** (attached to every release); its companion **docs/Blendity-Architecture.pdf** is for
+whoever wants to know how the software works (round 409, ADR 0104). This file stays the living manual.
+
 Inside the editor the **Learn** tab (F1, or the orange Learn button) has the same ground as interactive lessons:
 "Try it" buttons that drive the editor while you watch, questions to check yourself, and the Blender source files
 and book chapters behind each idea. Each chapter here names its lesson.

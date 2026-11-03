@@ -1,0 +1,70 @@
+\chapter{The editor}
+\label{ch:editor}
+
+\section{The toolkit}
+\code{editor/ui.*} is an immediate-mode toolkit (\code{ui::Context}): buttons, fields with expressions (\code{+=1},
+\code{*=2}, \code{L(0,10)}, \code{R(0,1)}), dropdowns, colour fields and the Color window, popups, menus, tooltips,
+tab strips, toasts and the job tray, drawn by the canvas (\code{render/canvas.*}: anti-aliased TrueType text from the
+OS fonts; icons rasterized once per size). Every widget records its rectangle, which is what the Fitts audit reads and
+what the coverage map's \code{--widgets} counts. Text contrast is measured per theme against WCAG's 4.5:1
+\cite{W3C2018Web}; polygroup and signal colours follow Okabe and Ito's colour-universal set \cite{Okabe2008Color}.
+
+\section{Docking, windows and the module registry}
+\code{editor/editor.cpp} holds a dock tree of areas and tabs: drag a tab onto a tab bar to group it, onto an edge to
+split, out of the editor for a window of its own on any display (\adr{0059}); a layout is a dock string plus a focus
+(the tool groups a stage shows, \adr{0027}), and the user's layouts and the whole arrangement go into a
+\code{.blendity-ui} file. The module registry (\code{editor/modules.cpp}, \adr{0073}) is one row per window kind: title,
+icon, group, the stages it belongs to, whether a second window may hold one, whether its group folds, its shortcut.
+The 26 windows are Scene, Game, Hierarchy, Inspector, Project, Console, Learn, Research (retired), Profiler, Render, UV
+Editor, Materials, Modeling Tools, Lighting, Textures, Rigging, Animation, Sequencer, Live Link, Editing, My Tools,
+Draw, Layers, History, Board and Avatar; the tab strips, the Window menu, the layouts and the tests read the registry,
+so a new window is one row.
+
+\section{Keymaps, feels and the modal pattern}
+\code{editor/keymap.cpp}: \code{shortcut\_actions()} lists every action (id, label, category, context);
+\code{keymap\_preset(name)} builds the bindings for Unity, Unreal, Blender, Maya, 3ds Max, SketchUp and Adobe;
+\code{set\_editor\_feel} sets the preset and the Scene view's mouse navigation together; the user's overrides sit on top;
+\code{handle\_shortcuts} matches a key against the most specific active context first (Scene + Edit, Edit, Scene,
+anywhere). Every shortcut label in a menu or tooltip comes from the keymap through \code{shortcut\_text}, so no label can
+lie under another preset (\adr{0085}). Every edit operator follows one modal pattern (\code{docs/USABILITY.md}): a key
+starts it, the mouse or a typed number shapes it, X / Y / Z lock an axis, Ctrl snaps, a click or Enter confirms, Esc
+cancels leaving no undo step, F9 adjusts afterwards as the same step. The Wheel (\adr{0068}) is one radial menu for
+Space, the pen's button or a finger held still, with a set per mode the user fills from any menu; My Tools panels and
+Assign Shortcut give any command a button or a key (\adr{0069}).
+
+\section{Tools}
+The Scene view runs the active tool each frame: the Draw tools with SketchUp inference and guides (\code{draw\_tool.cpp}; the Materials window's preview spheres are
+Blinn--Phong \cite{Phong1975}),
+the Knife, Push/Pull as a modal operator, G / R / S (\code{modal\_transform.cpp}), the gizmo with Shift-extrude and
+origin editing, the sketch pen with its guides, canvases and the camera solved from the perspective guide
+(\adr{0063}--\adr{0067}, \cite{Igarashi1997Interactive, Chen2013Sweep, Gryaditskaya2020Lifting}), Sculpt Mode
+(\adr{0074}--\adr{0078}, \cite{Jacobson2013Robust, Gibson1998Constrained, Huang2018Quadriflow}), Paint Mode by
+projection (\adr{0081}, \cite{Baxter2004Impasto}), Weight Paint, Strokes and Scatter (\adr{0084}), Puppet Posing's
+handles with a learned pose prior and exact IK (\adr{0087}, \cite{Oreshkin2022Protores}), and the VR View's
+controllers through OpenXR (\adr{0096}, \cite{OpenXR2026}). Fingers and pens come through one pointer model
+(\adr{0062}): in Tablet Mode fingers navigate and the pen works; on Linux through XInput~2; on a Mac the trackpad.
+
+\section{The console and headless runs}
+Every tool is reachable from the Console's command line (\code{editor\_commands.cpp}; \code{help} lists about 240
+commands), and that is the editor's scripting surface: the tests, \code{--headless-screenshot --cmd}, the HCI
+production runs, \code{tools/unity\_compare.py} and \code{unity\_e2e.py} all drive it. The console recalls its
+history, answers an unknown command with the nearest known ones, and since \rnd{310} no verb an artist uses lives only
+there: a test keeps every one reachable from a menu, a button or a field.
+
+\section{The Learn tab}
+\code{editor/learn.cpp} renders 45 lessons from \code{lessons.cpp}, each connecting a Unity concept, the Blender
+concept with the source folder it lives in, and the theory in the reference books \cite{MarschnerShirley2021,
+Gregory2018vol1, Gregory2018vol2}, with Try-it buttons that run console commands, questions that reveal their
+answers, and a References lesson of the papers behind the features. Every new feature adds a lesson; the user guide
+names the lesson for each chapter, and Index C of that guide lists each lesson's sources.
+
+\section{Where the HCI work lives}
+\adr{0085} set the methods (Nielsen's heuristics \cite{Nielsen1994Enhancing, Nielsen1993}, Fitts's law
+\cite{Fitts1954Information}, the keystroke-level model \cite{Card1980Keystroke, Card1983}, cognitive walkthroughs
+\cite{Polson1992Cognitive}, transfer of learning, WCAG) and the foundations every area uses: toasts with a Fix and
+disabled buttons that say why, one job tray, status hints from a table, labels from the keymap, unsaved-changes
+prompts, a History window, a colour-vision-safe palette and a High Contrast theme. The measuring sticks are in the
+test suite (the Fitts dump, the coverage map, the label audit, the hint completeness test, the contrast test) and the
+artefacts in \code{docs/hci/} (walkthroughs, the KLM table recounted by \code{tools/hci\_klm.py}, the comparison reports
+against Blender, Unity, Godot, Unreal, Adobe and VRChat's limits, the 118-task checklist, the study protocol written
+but not yet run \cite{Brooke1996Sus}).

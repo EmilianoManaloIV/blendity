@@ -1,0 +1,33 @@
+\chapter{What is not recreated, and known limits}
+\label{ch:scope}
+
+\section{Not recreated from Blender}
+Materials are a fixed Principled BSDF with a layer stack of textures rather than a node graph (the Textures window maps
+Blender's texture and converter nodes to layers; Mix Shader, Light Path and the attribute nodes are not there); there is
+no node editor, no geometry nodes, no compositor beyond the Editing tab and the camera filters, no Grease Pencil beyond
+the sketch pen and the Draw tab, no Python API (the console is the scripting surface), no \code{.blend} reading except
+through the installed Blender, no Alembic, no caustics or subsurface scattering in the path tracer (glass refracts;
+light through it reaches surfaces only along paths, as Cycles without caustics), no hair system beyond strands as
+geometry and spring chains.
+
+\section{Not recreated from Unity}
+No scripting runtime (Play has Rigidbody, Rotator, Oscillator, PlayerController, Animation and the Sequencer's
+triggers, not C\# scripts); no Animator state machine (sequences and triggers instead, \adr{0030}); UI canvases and
+particle systems from a Unity scene are kept as data and not drawn; Unity's Avatar asset is not read (the humanoid map
+finds the parts by names and shape); Mecanim's muscle space is not implemented (a rig whose bones roll differently
+carries the roll with the turn); fingers, the face and IK are not retargeted.
+
+\section{Known limits worth knowing}
+\begin{itemize}
+  \item The dependency-free build has no Boolean, Decimate, EXR, OpenSubdiv, Open PGL or MP4 of its own; it offers
+    Blender's libraries in a click.
+  \item GPU path tracing and the GPU views do not draw volumes or the Principled extras (Subsurface, Sheen, Coat,
+    Anisotropic); such scenes go to the CPU and say so.
+  \item An OpenColorIO view saved by index can land on a different view when the view list changes; the fixed views
+    come first for that reason (\rnd{405}).
+  \item The think-aloud study (\code{docs/hci/study-protocol.md}) has not been run; the HCI numbers are expert-path
+    estimates and audits, not sessions with participants.
+  \item Macs with Intel processors are not supported; macOS is built and tested only on CI.
+  \item Sound in the Sequencer does not play on macOS (the render still carries it).
+  \item The humanoid map reads world directions and cannot read an arm with a helper bone inside its chain.
+\end{itemize}

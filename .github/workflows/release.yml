@@ -137,6 +137,35 @@ jobs:
           name: bridges
           path: dist/bridges/*
 
+  # The two books (task 0386, ADR 0104): the reference list regenerated from the sources as they stand (so a release's
+  # books carry every citation added since the committed PDFs), then both PDFs with lualatex + biber. The release step
+  # attaches them; a merge or a pull request keeps them as artifacts to read. A pinned image: the books need a 2023 or
+  # newer LaTeX (\DocumentMetadata, graphicx's alt key).
+  books:
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: TeX Live
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends texlive-luatex texlive-latex-extra texlive-pictures texlive-bibtex-extra fonts-dejavu biber latexmk
+      - name: The reference list from the sources as they stand
+        run: python3 tools/make_books.py --bib --check-cited
+      - name: Both books
+        run: python3 tools/make_books.py --pdf
+      - name: The books are what they should be
+        run: |
+          for f in docs/Blendity-Architecture.pdf docs/Blendity-User-Guide.pdf; do
+            test -s "$f" || { echo "::error::no $f"; exit 1; }
+            [ "$(stat -c %s "$f")" -gt 200000 ] || { echo "::error::$f is too small to be a book"; exit 1; }
+            head -c 5 "$f" | grep -q '%PDF-' || { echo "::error::$f is not a PDF"; exit 1; }
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: books
+          path: docs/Blendity-*.pdf
+
   linux:
     needs: meta
     # The oldest supported Ubuntu: an AppImage runs on systems at least as new as the one it was built on.
@@ -234,7 +263,7 @@ jobs:
             installed-macos.png
 
   release:
-    needs: [meta, windows, linux, macos]
+    needs: [meta, windows, linux, macos, books]
     if: needs.meta.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -259,4 +288,5 @@ jobs:
         run: |
           mkdir built
           cp artifacts/installer-*/dist/installers/* built/
+          cp artifacts/books/*.pdf built/
           bash packaging/publish_release.sh "$TAG" "$VERSION" "$PWD/built"

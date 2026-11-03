@@ -1,0 +1,21 @@
+% The system context: Blendity, the people and programs around it.
+\begin{tikzpicture}[node distance=9mm and 12mm]
+  \node[box, fill=blAmber!15, draw=blAmber, minimum width=52mm, minimum height=22mm, align=center] (bl)
+    {\textbf{Blendity}\\[1pt] \footnotesize one process, no plugins, no scripting runtime\\ \footnotesize the editor, \code{blendity\_tests}, \code{blendity\_stress}};
+  \node[person, above=of bl] (artist) {The artist\\ \footnotesize keyboard, mouse, pen, fingers, a VR headset};
+  \node[ext, left=18mm of bl, align=center] (os) {Windows / Linux / macOS\\ \footnotesize one window, input, files,\\ \footnotesize the trash, dialogs};
+  \node[ext, below left=12mm and -6mm of bl, align=center] (gpu) {Any Vulkan GPU\\ \footnotesize (OptiX on NVIDIA)};
+  \node[ext, below=of bl, align=center] (libs) {Blender's prebuilt libraries\\ \footnotesize optional, behind \code{BL\_WITH\_*}};
+  \node[ext, below right=12mm and -6mm of bl, align=center] (dl) {Optional downloads\\ \footnotesize the libraries, AI inbetweening, MoonRay};
+  \node[ext, right=18mm of bl, align=center] (engines) {Blender, Unity, Godot, Unreal\\ \footnotesize Live Link bridges (TCP, loopback)\\ \footnotesize files: OBJ, FBX, glTF, STL, PLY, USD,\\ \footnotesize .unitypackage, .tscn, .blend};
+  \node[ext, above right=8mm and 2mm of bl, align=center] (gh) {GitHub\\ \footnotesize releases, the daily update check};
+  \node[ext, above left=8mm and 2mm of bl, align=center] (proj) {The project folder\\ \footnotesize \code{Assets/}, scenes, materials, renders};
+  \draw[flow, <->] (artist) -- (bl);
+  \draw[flow, <->] (os) -- (bl);
+  \draw[flow] (bl) -- (gpu);
+  \draw[dflow] (libs) -- (bl);
+  \draw[dflow] (dl) -- (bl);
+  \draw[flow, <->] (bl) -- (engines);
+  \draw[dflow] (gh) -- (bl);
+  \draw[flow, <->] (proj) -- (bl);
+\end{tikzpicture}

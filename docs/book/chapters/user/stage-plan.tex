@@ -1,0 +1,91 @@
+\chapter{Reference, planning and blocking out}
+\label{ch:plan}
+
+\section{Reference images and the board}
+\menu{GameObject > Reference Image\ldots} puts a picture into the scene as an unlit plane facing the front, sized to
+the picture, kept out of renders and shadows (\code{refimage <path> front|side|top} picks the view). A picture from
+outside the project is copied into \code{Assets/Textures/References}, so the scene keeps it on another machine. The
+\textbf{Board} (\menu{Window > Board}, or the Drawing with References layout) is a reference board in PureRef's way
+\cite{PureRef2026}: drop images from the system, paste a screenshot with \key{Ctrl+V} or drag them from the Project
+window onto an endless canvas; move, scale and turn them by their handles; it saves itself to \code{Assets/Boards} and
+opens again next time. \menu{Boards > Export\ldots} writes it as PNG, JPEG or PDF.
+
+\begin{example}{model from a front and a side drawing}
+\begin{enumerate}
+  \item Layout $>$ Reference \& Planning.
+  \item \menu{GameObject > Reference Image\ldots}, pick the front drawing; for the side drawing type \code{refimage
+    <path> side} in the Console.
+  \item Scale and move the planes so the drawings line up (the Inspector's Scale field takes \code{*=2}).
+  \item Switch to Blocking Out and start with primitives over them.
+\end{enumerate}
+\end{example}
+
+\section{Cameras and shots}
+Add a Camera (\menu{GameObject > Camera}: it is placed at the view, looking its way) and pick it in the Game view's
+camera menu; selecting a camera shows a \textbf{Camera Preview} in the corner of the Scene view. \textbf{Pilot Camera}
+flies the Scene view as that camera; composition guides (thirds, golden ratio, safe areas) draw over its frame.
+Physical camera settings (focal length, sensor presets, f-stop, focus distance, blades, shift) are in the Camera's
+Inspector; the focus eyedropper focuses on the surface you click, and Pick Focus Point keeps a world point in focus.
+The scene's \textbf{Active Camera} is what F12 and the Game view use.
+
+\section{Blocking out}
+\menu{GameObject > 3D Object} is in every layout: cube, sphere, icosphere, cylinder, cone, torus, plane, quad, capsule
+and the Utah teapot \cite{Newell1975Utilization}. \menu{GameObject > Shapes (Parametric)}: box, plane, cylinder, cone,
+sphere, icosphere, torus, capsule, pipe, arch, stairs, wedge and prism keep their settings in the Inspector and rebuild
+as you change them, like ProBuilder's shapes \cite{ProBuilderDocs2026}. Right after adding a primitive, the
+\textbf{Adjust Last} panel at the bottom left of the Scene view (\key{F9}) changes its size, segments or rings as one
+undo step.
+
+\textbf{Drawing, SketchUp-style.} The Draw tools (Polyline, Rectangle, Circle, Arc, Polygon) draw onto faces or the
+ground with snapping to corners, midpoints, edges, face centres and the drawing plane's axes; \key{X} / \key{Y} / \key{Z}
+lay construction lines; \key{Ctrl}+click lays a guide along an edge; rectangles come from a corner, the centre or three
+points; circles from the centre, a diameter or three points. A closed shape on a face is cut into it, ready to
+\textbf{Push/Pull} (\key{P}): move the mouse or type a distance, click to confirm. Pushed through, it makes a hole,
+imprinted on whatever face it exits through; pulled onto another face, it joins it; \key{Ctrl} keeps the original face.
+\cite{SketchUpHelp2026, UModelerDocs2026, PlasticityDocs2026}
+
+\textbf{Booleans} (with Blender's libraries: the Manifold solver). Select the cutters, then \key{Ctrl}+click the object
+to cut last; \menu{Mesh > Boolean} (Union, Difference, Intersect) applies at once or adds a live modifier whose cutter
+stays editable as a wire outline. \textbf{Join} (\key{Ctrl+J}) combines meshes; \textbf{Separate} splits off the
+selection or each loose part. From UModeler and Plasticity: \textbf{Follow} (sweep a face along a path), \textbf{Spin /
+Lathe}, \textbf{Slice}, \textbf{Shell}, \textbf{Thicken}, \textbf{Draft}, a \textbf{Radial Array}; \textbf{Smart Fill}
+closes holes and wire loops. Hold \key{Ctrl} for grid snapping; \key{Ctrl+Shift} while moving drops an object onto the
+surface under the mouse.
+
+\begin{example}{a doorway in a wall}
+\begin{enumerate}
+  \item \menu{GameObject > Shapes (Parametric) > Box}; in the Inspector make it 4 $\times$ 3 $\times$ 0.2.
+  \item Select the box, \ui{Rectangle} (Modeling Tools $>$ Draw), and draw a rectangle about 1 $\times$ 2.1 on its front
+    face from the bottom edge (hold \key{Ctrl} to snap; the length shows as you draw).
+  \item Press \key{P} over the rectangle and push it through the wall: the doorway is cut.
+\end{enumerate}
+\end{example}
+
+\section{Drawing in perspective, building from the construction}
+For a drawing pad or a pen: \menu{Draw > Sketch (pen)} draws over the Scene view with SketchBook's aids under
+\menu{Draw > Guides} \cite{SketchBookDocs2026}: a ruler, an ellipse, French curves, symmetry, and 1-, 2- and 3-point
+perspective with draggable vanishing points. When the pen lifts the stroke is corrected to what it meant
+\cite{Igarashi1997Interactive}: split at its corners, each piece a line, an arc, an ellipse or a curve, pulled
+vertical, horizontal or onto a vanishing line, its ends joined to other strokes'. The 3-point guide \emph{is} the
+camera: orbit and its points move; drag a point and the camera turns to put it there. A \textbf{canvas} can be a plane
+in the scene (the ground, a face, a wall through a point) and a stroke on it sits in the scene from every view; a line
+along the plane's axis becomes a construction line. \menu{Draw > Build from Sketch} makes solids from the strokes that
+fix them, 3-Sweep's way \cite{Chen2013Sweep}: a box from three lines at a corner, a cylinder or cone from two
+circles, a sweep from two circles and a path, a face from a closed outline and its Push/Pull from a line along its
+normal, with their numbers in F9. \menu{Draw > Sketch over the Model} keeps a drawing true from its view and traces a
+stroke into a cut or a curve; \code{sketchlift} lifts a whole scaffold drawn under the 3-point guide into a wire object
+\cite{Gryaditskaya2020Lifting}. Nothing is guessed: the model is built by the artist's own steps.
+
+\begin{example}{a box from a drawing}
+\begin{enumerate}
+  \item \menu{Draw > Sketch (pen)}; \code{sketchcanvas ground}. Draw two lines from one point along the red and the blue
+    axis (they snap along the axes and become construction lines).
+  \item \code{sketchcanvas plane z 0 0 0} (a wall through the origin) and draw the upright from the same corner.
+  \item \menu{Draw > Build from Sketch > Box}: the box stands on the three lines; \key{F9} corrects its lengths.
+\end{enumerate}
+\end{example}
+
+\begin{fromnote}{Learn}
+\emph{Cameras and Projection}, \emph{Points, Lines, N-gons and Booleans}, \emph{Move, Rotate, Scale}, \emph{Drawing in
+Perspective}, \emph{Papers}.
+\end{fromnote}

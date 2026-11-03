@@ -1,0 +1,103 @@
+\chapter{The software development lifecycle}
+\label{ch:sdlc}
+
+Blendity is written with an AI under a person's direction and review. This chapter is the lifecycle as it is
+practised, with every artifact named by its path, so that someone can repeat it or audit it.
+
+\section{The roles}
+\begin{itemize}
+  \item \textbf{The user} (Emiliano Manalo) decides what Blendity is for, which features it gets and in what order,
+    approves each specification and decision record before code is written, reviews every pull request on GitHub and
+    merges it, and decides when a release is cut. Nothing lands without that review (C-05, \adr{0006}).
+  \item \textbf{The main session} (Claude through Claude Code \cite{ClaudeCode2026}) plans: it reads
+    \code{docs/requirements.md}, \code{docs/ARCHITECTURE.md} and the decision records, writes the task spec and any
+    ADR, implements the hard, cross-cutting or geometric work itself, runs the suites and the audits, writes the
+    documentation and opens the pull request.
+  \item \textbf{The \code{implementer} agent} implements a routine, well-specified task from its spec, builds and runs
+    the unit tests; it makes no architectural decisions, adds no dependency, never commits.
+  \item \textbf{The \code{test-engineer} agent} writes independent tests from the spec's acceptance criteria, edge cases
+    first; it edits only the test folders and reports bugs as failing tests.
+  \item \textbf{The \code{code-reviewer} agent} reviews the diff against the spec, the ADRs and \code{CLAUDE.md} and
+    reports ranked findings with concrete failure scenarios and a verdict; it never edits files. Its findings are fixed
+    or answered in the task's record. Agents run one after another, never fanned out.
+\end{itemize}
+
+\section{The lifecycle}
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/sdlc}}
+  \caption{One task from the request to the release. Diamonds are the human's gates; the boxes with paths are the artifacts.}
+  \label{fig:sdlc}
+\end{figure}
+
+\begin{enumerate}
+  \item \textbf{Plan.} A round of requests becomes task specs \code{docs/tasks/NNNN-slug.md} from \code{TEMPLATE.md}:
+    goal, scope (in / out), likely files, acceptance criteria that a test can check, the tests and stress sections to
+    run, risks and edge cases, the documentation to update. An architectural choice (a subsystem, a data-model change, a
+    dependency, a change to a convention, to how the project is built, tested or released) gets an ADR from the
+    template in \code{docs/decisions/README.md}: status, date, requirements, context, decision stated so review can
+    check it, consequences. Records are never rewritten; a later one supersedes by number. \textbf{Gate: the human
+    approves the spec and the ADR.}
+  \item \textbf{Implement and test.} The implementer or the main session writes the code; every behaviour change gets a
+    unit test in the \code{tests/test\_<group>.cpp} of its subsystem, named for what the user sees, in the round's group
+    at the end of the file; a measurement is a stress row, never an asserted time (\adr{0056}). The suites run on
+    Windows and Linux, both builds; the audits run (\code{test\_coverage\_map.py --check}, \code{hci\_consistency\_audit.py
+    --check}, \code{hci\_klm.py --check}, \code{unity\_meta.py --check}, \code{make\_books.py --check}); geometry changes
+    run the stress sections and their counts may not rise unexplained.
+  \item \textbf{Review.} The reviewer's findings are fixed in a second pass, each with a test, or answered in the task's
+    ``Review'' section. Some rounds took three passes; the record says so.
+  \item \textbf{Document.} Every change: a CHANGELOG entry (asked / added / changed / checked, with the numbers), the
+    README's count and feature paragraph, an ARCHITECTURE row for a new subsystem, a USABILITY row for a user-facing
+    problem solved, the manual, a Learn lesson with Try-it buttons and questions for every new feature, the spec marked
+    done with its PR link.
+  \item \textbf{Publish.} A subtree commit of \code{blendity/} is pushed to a branch \code{task/NNNN-slug} and a pull
+    request opened on \code{main} with the template (\code{.github/pull\_request\_template.md}): the task, what changed,
+    the tests with their counts, the review's verdict, the documentation boxes. Commits end with the model's
+    \code{Co-Authored-By} trailer; pull requests say they were generated with Claude Code. A round's PR is stacked on the
+    previous round's branch when the rounds depend on each other, and the body says which PRs a merge also merges.
+  \item \textbf{CI.} \code{build.yml} builds Windows, Linux and macOS, runs the unit tests and a quick stress pass, takes
+    a headless screenshot, and runs the tests under AddressSanitizer and UndefinedBehaviorSanitizer on Linux; the four
+    jobs are required checks. \code{main} is protected: pull requests only, no force pushes.
+  \item \textbf{Merge.} \textbf{Gate: the human reviews and merges} with a merge commit, never a squash or a rebase of a
+    stack; when the user asks an agent to merge, only after CI is green on all jobs. \code{release.yml} builds every
+    merge as artifacts to try.
+  \item \textbf{Release.} \textbf{Gate: the user asks for one.} \code{VERSION} is bumped, a \code{v*} tag pushed, and
+    \code{release.yml} builds the installers, checks them, attaches the books and publishes (chapter~\ref{ch:build}).
+\end{enumerate}
+
+\section{Traceability}
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/traceability}}
+  \caption{From a requirement ID to the tests and the audits that hold it.}
+  \label{fig:trace}
+\end{figure}
+
+A requirement's ID (R-, Q-, C-) is cited by the task spec and the ADR; the spec's acceptance criteria become the
+tests; the CHANGELOG entry names the task, the tests and the numbers; the coverage map ties every command, action,
+window, button and field to the tests that drive it; and the HCI tools recount their tables so the documents cannot
+drift from the counts. Changing a requirement is a human decision recorded in an ADR.
+
+\section{Engineering standards}
+\code{CLAUDE.md} is the contract every session reads first: the project map; how to build and run; the testing rules
+(real events for UI behaviour, \code{meshops} calls for geometry, a scratch project, a test that disagrees with the code
+is evidence); the code standards (C++17 on three compilers, match the surrounding code, copy-on-write, operators
+through \code{LastOp}, every tool reachable from the console, no new dependency outside what Blender bundles, an SPDX
+header in every file, robust geometry); the documentation duties; the workflow and approval gates; git and publishing
+rules (commit only when asked, never the user's \code{Assets/}, never push to \code{main}, never rewrite history).
+
+\section{The HCI method in the lifecycle}
+Usability is designed and measured, not assumed (\adr{0085}): each HCI addition names the heuristic or model that
+motivates it; the baseline is taken before any fix so each round's effect is a diff in git; the keystroke-level
+estimate for frequent actions went from 80.9~s to 54.65~s over the pass (\code{docs/hci/klm.md}), the failing
+walkthrough steps from 24 to 7, wrong shortcut labels to 0; the comparison reports put a VRChat avatar, a VRChat world
+and a short film made in Blendity beside Blender, Unity, Godot, Unreal and Adobe from their documentation, with the
+findings ranked for the user to choose from; the 118-task checklist carries target times. The think-aloud study with
+SUS is written (\code{docs/hci/study-protocol.md}) and not yet run; the record says so.
+
+\section{AI disclosure}
+\code{docs/AI\_DISCLOSURE.md} states, for anyone reading, using or building on the project: the direction is human; the
+code is written with Claude from approved specs under the standards above; every commit says so; numbers are measured,
+not guessed, and where something was not tried the record says so; there is no telemetry, no cloud, and no AI at run
+time except the optional local inbetweening download; what Blendity makes is the user's. Chapter~\ref{ch:licensing}
+sets out why that is compatible with the GPL.

@@ -1,0 +1,7 @@
+# latexmk settings for the Blendity books (task 0386): lualatex + biber, everything under build/.
+$pdf_mode = 4;            # lualatex
+$lualatex = 'lualatex -interaction=nonstopmode -halt-on-error -file-line-error %O %S';
+$bibtex_use = 2;
+$out_dir = 'build';
+$aux_dir = 'build';
+$clean_ext = 'bbl run.xml synctex.gz';

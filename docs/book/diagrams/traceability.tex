@@ -1,0 +1,21 @@
+% Requirements traceability: how an ID in requirements.md reaches a test, and how the tools check the chain.
+\begin{tikzpicture}[node distance=5mm and 9mm]
+  \node[artifact] (req) {\code{docs/requirements.md}\\ R-01 \ldots\ R-15 (product),\\ Q-01 \ldots\ Q-05 (quality),\\ C-01 \ldots\ C-05 (constraints)};
+  \node[artifact, right=of req] (task) {\code{docs/tasks/NNNN-*.md}\\ Requirements: R-xx, Q-xx\\ Decisions: ADR NNNN\\ Acceptance criteria 1..n\\ PR: the link};
+  \node[artifact, right=of task] (adr) {\code{docs/decisions/NNNN-*.md}\\ Status, Date, Requirements\\ Context / Decision / Consequences\\ (never rewritten; superseded by number)};
+  \node[artifact, below=of task] (test) {\code{tests/test\_<group>.cpp}\\ \code{test("...", []\{ CHECK(...) \})}\\ named for what the user sees;\\ \code{tests\_roundNNN} per round};
+  \node[artifact, right=of test] (stress) {\code{stress/stress\_main.cpp}\\ limits, problem counts,\\ faces on top of each other,\\ timings (never asserted: \adr{0056})};
+  \node[artifact, left=of test] (log) {\code{CHANGELOG.md}\\ one entry a round: asked,\\ added, changed, checked};
+  \node[box, below=10mm of test, fill=blCode] (map) {\code{tools/test\_coverage\_map.py --check}\\ \footnotesize every console command, keymap action, window,\\ \footnotesize button and Inspector field against the tests that drive it};
+  \node[box, left=of map, fill=blCode] (audits) {\code{hci\_consistency\_audit.py --check}\\ \code{hci\_klm.py --check}\\ \code{unity\_meta.py --check}\\ \code{make\_books.py --check}};
+  \node[box, right=of map, fill=blCode] (ci) {CI (\code{build.yml})\\ \footnotesize the suites on three systems,\\ \footnotesize sanitizers, a quick stress pass,\\ \footnotesize a headless screenshot};
+  \draw[flow] (req) -- (task);
+  \draw[flow, <->] (task) -- (adr);
+  \draw[flow] (task) -- (test);
+  \draw[flow] (task) -- (stress);
+  \draw[flow] (task) -- (log);
+  \draw[dflow] (test) -- (map);
+  \draw[dflow] (test) -- (ci);
+  \draw[dflow] (log) -- (audits);
+  \draw[dflow] (adr.east) to[bend left=30] (stress.east);
+\end{tikzpicture}

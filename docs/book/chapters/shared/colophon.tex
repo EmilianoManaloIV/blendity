@@ -1,0 +1,43 @@
+\chapter*{Colophon}
+\addcontentsline{toc}{chapter}{Colophon}
+\textbf{Authorship and copyright.} Blendity is copyright Emiliano Manalo and contributors. Its source code, tests,
+documentation and these two books were written with Anthropic's Claude through Claude Code \cite{ClaudeCode2026}, under
+a human's direction and review: the user decides what Blendity is for, approves each task's specification and decision
+record before code is written, reviews every pull request and merges it. The model's outputs belong to the user who
+directed them under Anthropic's terms \cite{AnthropicTerms2026}, and are licensed to the extent copyright subsists in
+them (the human selection, direction, review and editing); the \code{Co-Authored-By} trailer on every commit is
+attribution, not a licence grant. No third-party code is claimed as the project's own: what is copied is listed in
+\code{licenses/README.md} with its licence, what is followed is credited in \code{CREDITS.md} and the References
+chapter, and the whole story is in \code{docs/AI\_DISCLOSURE.md}.
+
+\textbf{Licence.} The source is GPL-2.0-or-later \cite{GPLv2}, the same as Blender's \cite{Blender2026}; the
+executables, which combine it with Apache-2.0 libraries \cite{Apache2}, are distributed under GPL-3.0-or-later
+\cite{GPLv3}. The scenes, meshes, textures, renders and animations made with Blendity are their maker's: the GPL covers
+the program, not its output.
+
+\textbf{How the books are made.} The sources are LaTeX under \code{docs/book/}, typeset with LuaLaTeX in the DejaVu
+faces (the editor's own) and biblatex with biber for the reference list. \code{tools/make\_books.py} generates the
+reference list and the index tables from the project's own files, takes the figures headless from a scratch project,
+builds both PDFs and checks that nothing has drifted. The release workflow builds them again on every tag and attaches
+them to the release.
+
+\textbf{Accessibility and readability.} The books follow the guidelines the editor itself is measured against
+(\adr{0085}), applied to documents: Nielsen's tenth heuristic, help and documentation \cite{Nielsen1994Enhancing,
+Nielsen1993} (easy to search: a table of contents, bookmarks, a list of figures, a reference list with back-references
+and three indexes; focused on the user's task: the user guide is the work stage by stage with numbered steps and worked
+examples, the architecture book the questions a maintainer asks; not too large: each chapter ends in a pointer to the
+Learn lesson that goes deeper); Carroll's minimalist instruction \cite{Carroll1990} (start on a real task, keep the
+reading short, support error recovery: a troubleshooting chapter and the ``when something refuses'' list); and WCAG 2.1
+\cite{W3C2018Web} as PDF/UA applies it \cite{PDFUA2024}: every text colour, link and box title reads at 4.5:1 or more
+(the ratios are in \code{blendity-common.sty}), links are told apart by form as well as colour (bracketed citation
+numbers, ``chapter 3'', monospace URLs), every figure carries alt text and a caption that says what it shows, the
+diagrams' meaning is in their captions and the text around them, the document's language and metadata are declared
+and its headings are the PDF's bookmarks (structure tags for a screen reader are the one open item: LaTeX's tagging
+project does not yet support the packages the books use, so the captions carry what the alt text would), the body
+type is about 10 points of a face made for screens with 80 characters a line, and nothing is conveyed by colour
+alone. Keys, menus and controls are
+typeset consistently: \key{Ctrl+K} is a key, \menu{Window > Layouts} a menu path, \ui{Generate Lighting} a control's
+label, \code{make\_books.py} a file or command.
+
+\textbf{Version.} Blendity 0.13.0, November 2026, from the \code{main} branch of
+\url{https://github.com/EmilianoManaloIV/blendity}.

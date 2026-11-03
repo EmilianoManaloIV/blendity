@@ -302,7 +302,7 @@ add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (15878 unit checks in 1542 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (15902 unit checks in 1543 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub
@@ -311,6 +311,15 @@ and tested only on CI (no Mac here).
 
 ## Documentation
 
+- **The two books** (PDF, written once in round 409 and attached to every release): **[Blendity: The User
+  Guide](docs/Blendity-User-Guide.pdf)** - the editor stage by stage, and how to feel at home coming from Unity, Blender,
+  Maya, 3ds Max, SketchUp, Unreal or Adobe's tools - and **[Blendity: Architecture and
+  Engineering](docs/Blendity-Architecture.pdf)** - how the software works, with the SDLC's diagrams and artifacts, how it
+  is built, tested and released. Both end with the full reference list (every paper, book, manual, standard and library
+  used, with the pages where it is cited) and indexes tying the code, the documents and the Learn lessons to those
+  references (`tools/make_books.py`, ADR 0104). The newest release's copies:
+  [User Guide](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-User-Guide.pdf),
+  [Architecture](https://github.com/EmilianoManaloIV/blendity/releases/latest/download/Blendity-Architecture.pdf).
 - **[docs/MANUAL.md](docs/MANUAL.md)** - the user manual, by workflow, with examples and use cases.
 - **The Learn tab** (F1) - interactive lessons with Try-it buttons, linking Unity, Blender's source and the graphics
   books (*Fundamentals of Computer Graphics*, *Game Engine Architecture*), and the papers behind the features.
@@ -334,9 +343,12 @@ commit names the model, every pull request is reviewed and merged by a person, a
 except the optional, local AI Inbetweening download. The whole story, including what is *not* in the program (no
 telemetry, no cloud), is in [docs/AI_DISCLOSURE.md](docs/AI_DISCLOSURE.md).
 
-## License
+## License and credits
 
 Source: GPL-2.0-or-later, the same as Blender (`LICENSE`). The executables also contain MIT, BSD-3-Clause and
 Apache-2.0 code from Blender's bundled libraries and, when built with Blender's prebuilt libraries, code under
 Apache-2.0, BSD, MIT, MPL-2.0, Zlib, libpng and TOST licenses, so **binaries are distributed under GPL-3.0-or-later**.
-Details in [licenses/README.md](licenses/README.md).
+Details in [licenses/README.md](licenses/README.md): what is copied (with its licence), what is ported (keeping its
+origin's notice), what is read and re-implemented (credited), and the authorship statement for a project written with an
+AI under a person's review. Copyright Emiliano Manalo and contributors. The people and products whose work Blendity
+follows are named in [CREDITS.md](CREDITS.md). Your scenes, meshes, textures and renders are yours.

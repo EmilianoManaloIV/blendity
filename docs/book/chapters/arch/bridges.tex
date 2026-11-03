@@ -1,0 +1,65 @@
+\chapter{Bridges, Live Link and file formats}
+\label{ch:bridges}
+
+\section{Live Link}
+\begin{figure}[H]
+  \centering
+  \resizebox{0.95\textwidth}{!}{\input{diagrams/livelink}}
+  \caption{The Live Link sequence (\code{docs/LIVELINK.md}, \adr{0055}, \adr{0086}). One way out: nothing a client sends is read but its hello.}
+  \label{fig:livelink}
+\end{figure}
+
+Live Link sends the scene open in Blendity to other programs on the same computer as it changes. The transport is a
+TCP server on 127.0.0.1 (\code{src/core/net\_server.*}, no library); the framing is one JSON object a line with a
+binary attachment of N bytes when the line ends with \code{"bin":N}; meshes go as glTF 2.0 binaries
+\cite{Khronos2021Gltf} from Blendity's own exporter in glTF's axes (right-handed, Y up, metres: X mirrored), materials as
+glTF material objects with the toon fields as an extension, textures by their pixels, skins once at rest and then
+poses and weights, clips baked as the engines' own, colliders and LOD levels, the world and the camera's look, VRChat's
+components where the SDK is there. What changed is found by comparing the scene with what was last sent, once a frame
+while a client is connected, so a drag streams while it happens and undo, Stop and a reload need no code of their
+own; each client has its own queue and sender thread, coalesced by key so a slow client skips to the present. With four
+engines connected, a 100,000-vertex mesh changing and a 50-bone rig posing every frame, it takes a millisecond or two
+of a frame (\rnd{382}).
+
+\section{The bridges}
+\code{bridges/} holds one package per engine, Blendity's own code under the same GPL: a Blender add-on (Python), a
+Unity package (\code{com.blendity.livelink}, C\#, with VRChat stand-ins and SDK checks), a Godot add-on (GDScript) and
+an Unreal plugin (C++), each with a smoke test, an auto-connect test and a live session test, packaged by
+\code{tools/package\_bridges.py} and installed from Window $>$ Live Link $>$ Install a Bridge. The Blender and Unreal
+bridges also send to Blendity: a snapshot folder into the inbox the discovery file names, imported within a second.
+\code{tools/livelink\_fake\_server.py} serves a recorded session for a bridge's tests, and \code{livelink\_dump.py} is
+the reading loop in fifty lines of Python.
+
+\section{File formats}
+Export shares one preparation step and a writer per format (\code{src/scene/export.cpp}): OBJ + MTL, FBX 7.4 as a
+record tree with Blender's binary encoding \cite{FBXBlender2026} and an ASCII one, glTF 2.0 (\code{.glb} or
+\code{.gltf}, embedded or copied textures, morph targets, skins and sampled channels), STL, PLY, USD text
+\cite{USD2026}; options as Blender's (Selected Only, Apply Modifiers, Scale, Up Axis, Triangulate, Keep Transforms,
+Armatures and Animation, Colliders and LOD levels named for Unity, Unreal or Godot). Every format was checked both ways
+against Blender 5.2 (R-06). Import reads the same formats plus MMD's PMX / PMD / VMD \cite{MMD2026}, VRM
+\cite{MToon2026}, BVH, Collada, and \code{.blend} through the installed Blender, with an Import Preview that shows the
+model under a chosen shading before anything is written (\adr{0047}).
+
+\section{Unity's project files}
+Rounds 369--408 made Blendity read and write Unity's own files: \code{.unitypackage} unpacked into the project with
+GUIDs kept; prefabs and scenes brought in with nested prefabs and overrides, every other component as an Engine
+Component editable under Unity's names (\adr{0101}); \code{.mat} files converted by shader (Standard, URP, lilToon,
+Poiyomi, MToon, UTS2, Filamented); a \code{.unity} opened as the scene with the look Unity gives it (fog modes, skybox,
+camera flags, post-processing, lights' shadows, reflection probes, \adr{0099}; Unity's own lightmaps and probes read
+by the installed Unity in the background, \adr{0098}); VRChat's components as Blendity's (\adr{0100}); Unity's
+\code{.anim} clips read and written, the Unity file never written over (\adr{0102}); humanoid retargeting as Mecanim
+reads a T and an A pose (\adr{0103}); Export Unity Package writing the work back under the same GUIDs. The parity is
+measured: \code{tools/unity\_compare.py} renders the same stations in Unity (batch mode) and in Blendity and scores them
+(MAE, PSNR, SSIM, a luminance grid's correlation), and \code{tools/unity\_e2e.py} runs the whole fresh-project flow;
+an avatar passes at every station, a world is near the target (\code{docs/hci/compare-unity-vrchat-2026-11.md}).
+
+\section{Godot, Blender, Unreal}
+Godot scenes (\code{.tscn}) come in with their nodes, primitives, materials, lights, cameras and collision shapes and go
+back with the objects' transforms in their own lines, scripts kept (\rnd{373}, \cite{GodotDocs2026}). Blender files come
+in through the installed Blender's glTF exporter with lights, cameras, actions and custom properties (\rnd{374}). Unreal's
+bridge sends a level through its FBX exporter with each actor's place and Blueprint class (\cite{UnrealDocs2026}).
+
+\section{MoonRay}
+DreamWorks' MoonRay \cite{MoonRay2026} is an optional external renderer (\adr{0041}): built by the \code{moonray.yml}
+workflow on Linux, run as a program of its own (in WSL on Windows), fed a scene written by Blendity, its picture read
+back into the Render window. It is never linked and never shipped with Blendity.

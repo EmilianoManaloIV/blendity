@@ -1,0 +1,72 @@
+\chapter{Rendering}
+\label{ch:rendering}
+
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/render-pipeline}}
+  \caption{The two render paths and where they meet. Every GPU path mirrors a CPU path with the same formulas, and the CPU path is the reference the tests compare it with.}
+  \label{fig:render}
+\end{figure}
+
+\section{The rasterizer}
+\code{render/raster.*} is a tile-binned, multithreaded software rasterizer with a z-buffer, an id buffer for picking and
+outlines \cite{MarschnerShirley2021, Gregory2018vol2}. Its \code{Deferred} mode writes a visibility buffer and shades
+once per pixel: GGX + Lambert \cite{Cook1982Reflectance, Schlick1994Inexpensive}, image-based lighting (SH9 irradiance
+\cite{Ramamoorthi2001Efficient}, mip-filtered specular with the split-sum approximation \cite{Karis2013Real,
+Hill2012}), sun shadow maps with PCF kept per caster set, area lights as emissive planes with an exact unshadowed
+integral \cite{Heitz2018Combining}, toon and lilToon responses (\adr{0020}, \adr{0100}), lightmaps, probes and voxel GI
+ranked by \code{light\_surface}. Eight same-triangle pixels of a plain material are lit at once with AVX2 (\adr{0035});
+triangle setup rejects eight at a time; the scalar path is the reference and the tests compare them.
+
+\section{The path tracer}
+\code{render/pathtracer.*} is progressive: a two-level binned-SAH BVH with instancing \cite{Wald2007Fast,
+Moller1997Fast, Duff2017Building} (or Embree's), next-event estimation of sun, point, spot, area and mesh lights with
+multiple importance sampling, GGX sampling of visible normals \cite{Heitz2018Sampling, Walter2007Microfacet}, a thin
+lens with bladed apertures \cite{Shirley1997Low}, stratified samples \cite{Cranley1976Randomization}, Russian
+roulette, clamping, path guiding through Open PGL \cite{Ruppert2020Robust}, volumes (fog inside a closed mesh,
+\adr{0092}), and two denoisers: OpenImageDenoise when it is there, else an edge-avoiding \`A-Trous filter
+\cite{Dammertz2010Edge}. Transparent renders count coverage; filtered renders carry depth and id planes so camera
+filters run on traced pictures too (\adr{0016}).
+
+\section{The GPU}
+\code{render/gpu\_kernel.h} is the megakernel in GLSL, a line-for-line port of the CPU's trace with the same PCG seeds,
+so GPU and CPU samples are interchangeable; \code{gpu\_device.cpp} opens the Vulkan loader at run time, compiles the
+kernel with shaderc (the SPIR-V cached on disk, pre-warmed by the build), uploads the scene as hashed sections and
+renders sample batches (\adr{0013}, \adr{0014}). Devices open in the background and a render adopts its card when
+ready (\adr{0021}); a worker per card keeps two submissions in flight (\adr{0052}); CPU threads and every GPU claim
+sample indices from one atomic counter, the CPU stopping when the cards would finish sooner. The OptiX device
+(\adr{0037}, \adr{0054}) runs the same kernel translated to CUDA with rays through \code{optixTrace}, its PTX committed
+so the build needs no CUDA toolkit. The views are drawn by \code{gpu::Raster} (\adr{0036}, \adr{0061}): a shadow pass,
+a G-buffer and full-screen lighting with the CPU's formulas, the Edit Mode cage, textures, toon maps, lightmaps and
+probes read per visible pixel, overlays recorded in the world and replayed on the CPU when the card cannot; a window is
+presented by the card one frame behind with only the changed tiles taken up. Each window's device is a preference and
+the fall-back to the CPU is said once (a CPU badge in the Scene view's bar).
+
+\section{Colour management}
+HDR $\to$ view transform $\to$ 8-bit sRGB runs in \code{render/display.cpp} at 4 or 8 pixels a step with an exact sRGB
+table (correctly rounded on 17 million floats in the test). The views are Standard, Filmic, Blendity's ACES curve,
+Unity's ACES (Hill's fit of the RRT + ODT, \rnd{405}) \cite{Hill2016ACES, ACES2026}, and with OpenColorIO Blender's
+config baked into $97^3$ tetrahedral LUTs over a log2 shaper, which the GPU views apply as the same table.
+Light colour temperature follows the Planckian locus \cite{Kang2002Design}.
+
+\section{Lighting}
+Global illumination like Unity's (R-11, R-12): baked lightmaps (charts sized from world area, shelf-packed pages,
+texels baked through the path tracer, saved beside the scene, \adr{0010}); probe volumes placed adaptively in bricks
+of $4^3$ ambient cubes \cite{McTaggart2004} with validity, virtual offset and dilation (\adr{0012}); voxel GI
+\cite{Thiedemann2011Voxel, Amanatides1987Fast, Dachsbacher2005, Hammersley1960} for one bounce of the sun and sky
+occlusion in the rasterized views with nothing to bake (\adr{0011}), on the GPU as a compute kernel; realtime lightmaps
+and live probes that gather through the voxel grid; reflection probes (\rnd{401}); mesh maps (normal, position,
+curvature, occlusion, thickness) baked into the UV layout (\adr{0079}); texture bakes that turn a material into plain
+images (\adr{0019}); and the world's Hosek--Wilkie sky \cite{Hosek2012Analytic}, HDRIs, sun disc, horizon band and fog.
+A scene opened from Unity shows Unity's own lightmaps, probes, reflection probes, fog, skybox, post-processing and
+BRDF weight as Unity shows them (\adr{0098}, \adr{0099}; rounds 400--405), measured against Unity's renders at fixed
+stations (\code{tools/unity\_compare.py}).
+
+\section{Camera filters}
+Filters are components on a camera's object (\adr{0007}, \adr{0008}): an ordered stack of effects, each contributing
+raster settings (vertex snap, affine UVs, texture rules, screen-door transparency: the PS1, N64, Saturn and DOS looks
+\cite{psxspx}), an internal resolution, and image passes in linear or display light (colour grading in ASC CDL order
+\cite{ASCCDL}, bloom \cite{Jimenez2014}, vignette, chromatic aberration, lens distortion \cite{Brown1966}, film grain,
+CRT, pixelate, edge outline, sharpen, halftone, hatching, line art, paper, colour ramp, and the Anime and Manga
+looks). The same stack runs on the Game view, the Camera Preview, F12 and camera sequences; the Scene view can look
+through it. Filters look the same at every picture size: pixel-sized parameters scale with the height.

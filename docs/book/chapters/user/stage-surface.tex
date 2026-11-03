@@ -1,0 +1,111 @@
+\chapter{Materials, textures and painting}
+\label{ch:surface}
+
+\section{Materials}
+Materials are Unity-style, evaluating Blender's \textbf{Principled BSDF}: base colour, metallic, roughness, specular,
+normal and emission, with tiling and offset, surface types Opaque, Cutout, Transparent, Glass and Volume (Fog), the
+folded \ui{Principled: Subsurface, Sheen, Coat} group (skin, cloth, lacquer; Anisotropic for brushed metal and hair), and
+shading models PBR, Toon (five styles with painted shadow, highlight and rim control, shade maps, ramps, a face shadow
+map, inner lines and hatching, an Outline component; the lilToon group for VRChat avatars \cite{lilToon2026}) and
+Hand-painted. The \textbf{Materials} window shows every material as a sphere (a software-shaded preview, Blinn--Phong
+\cite{Phong1975}): drag one onto an object (the face under
+the mouse picks the slot) or onto a face in Edit Mode; \ui{Assign to Selection} does it for the selection. Material
+assets (\code{Assets/Materials/<name>.mat}) are shared by every object that uses them, as in Unity; a Unity project's
+\code{.mat} loads by its shader and is never written over. \textbf{Axis materials} pick top, side and bottom materials by
+slope without UVs. \textbf{Fog}: Surface Type Volume (Fog) makes a closed mesh's inside fog with Blender's Principled
+Volume fields; F12 with path tracing draws it truly.
+
+\section{Procedural textures: Blender's nodes as layers}
+Procedural textures (\code{Assets/Textures/<name>.ptex}) are a stack of layers, like Blender's modifier stack:
+generators (Brick, Wood Floor, Tiles, Voronoi, Noise with Musgrave's types, Perlin Noise \cite{Perlin2002Improving},
+Wave, Magic, White Noise, Gabor, Checker, Gradient, the anime background generators) and filters (Blur, Levels, Warp,
+Edge Wear, Color Ramp, Map Range, Clamp, Math, RGB Curves, Separate Channel, Posterize, Cavity), each with a blend
+mode (Blender's Mix modes, Photoshop's too). One texture gives albedo, normal, roughness and height maps and stays
+sharp at any distance with Live Shading; its \ui{Physical Size} is the metres one tile covers. The \textbf{Textures}
+window makes and edits them: \ui{New} lists presets by theme; every pattern has a folded \ui{Mapping} group (offset,
+rotation, scale, Seamless); Add Layer has a search; \key{Alt}+click a layer's name to see the stack up to it;
+right-click any field's name for \ui{Reset to Default}. Blendity has no node canvas: each Blender node is a layer, a
+layer's option or a material field.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+Blender node & In Blendity \\
+\midrule
+Texture Coordinate, Mapping & the material's Mapping (UV, Box / triplanar, Generated); a layer's Mapping group \\
+Noise, Voronoi, Wave, Magic, White Noise, Gabor, Checker, Brick, Gradient & the layers of those names \\
+Image Texture & the Image layer, or a material's Base Map \\
+Sky Texture, Environment Texture & the Lighting window's Environment; the Sky Gradient layer \\
+Mix Color & a layer's Blend \\
+RGB Curves, Invert, Hue/Saturation/Value, Bright/Contrast & the RGB Curves, Invert, Hue / Saturation and Levels layers \\
+Color Ramp, Map Range, Clamp, Math, Separate RGB / HSV & the layers of those names \\
+Bump, Normal Map, Displacement & a texture's Height as its normal; the material's Normal Map; the Displace modifier \\
+Principled BSDF, Glass, Transparent, Principled Volume & the material; Surface Type Glass, Transparent, Volume (Fog) \\
+Toon BSDF, Shader to RGB & Shading Model Toon \\
+Mix Shader, Light Path, Attribute, Geometry & not yet (an axis material mixes three materials by slope) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{example}{a brick wall material}
+\begin{enumerate}
+  \item \menu{Window > Textures > New > Bricks}. Adjust the brick layer's fields; it already has an Edge Wear layer:
+    raise it for worn corners.
+  \item Select the wall and press \ui{Assign to Selection}: albedo, normal and roughness are set, with the tiling.
+\end{enumerate}
+\end{example}
+
+\section{Painting the surface: the Substance Painter pipeline}
+In order \cite{SubstancePainterDocs2026}:
+\begin{enumerate}
+  \item \menu{GameObject > Bake Mesh Maps\ldots} (or the Textures window's \ui{Bake All Maps}): the mesh's own normal,
+    position, curvature, ambient occlusion and thickness baked into its UV layout on a worker, under
+    \code{Assets/Textures/MeshMaps}.
+  \item \menu{GameObject > New Surface}: a texture in the object's own UV space whose layers write colour, height,
+    roughness, metallic and emission; \textbf{Fill} layers with a \textbf{mask stack} (a mesh map through levels,
+    Noise, Blur, Levels, an Anchor to another layer's mask), the \textbf{smart masks} (edge wear, dirt, dust, metal edge
+    wear, position gradient, thickness, Ground Dirt, Cavity, a Material ID Mask), \textbf{Group} layers. Editing a
+    layer redoes only the layers above it inside the edited rectangle.
+  \item \textbf{Paint Mode} (\menu{Modeling Tools > Paint}; \key{B} under the Adobe preset): a material brush paints
+    colour, roughness, metallic, height and emission at once by projection; the far side and anything behind are left
+    alone; the pen's eraser end erases; Mirror X / Y / Z; \ui{Bucket Fill} fills the group, island, material or object
+    you click, or a gradient; \ui{Stencil} holds an image over the view; a stroke is one light undo step. \code{paint 2d
+    on} paints on the Textures window's canvas instead.
+  \item \textbf{Smart materials}: the Textures window's shelf applies a built-in (Worn Steel, Painted Metal, Rubber,
+    Wood, Plastic, Concrete, Gold) on top of the surface, where its generators read \emph{this} object's mesh maps;
+    \ui{Save as Smart Material} keeps a group of your own.
+  \item \textbf{Export Textures\ldots} (the Textures toolbar): the texture set packed as glTF, Unity, URP, HDRP, Unreal,
+    Poiyomi or lilToon reads it, or separate maps.
+\end{enumerate}
+
+\textbf{The hand-painted look.} When the light should live in the texture: \code{paint bakelight} bakes the mesh maps'
+occlusion and a key light into a Multiply layer to paint over; the Paint section's \ui{Tip} (Round, Flat turned to the
+drag, Bristle), \ui{Mode} (Paint, Smudge, Blend), \ui{Wet} (the brush carries the colour it went over
+\cite{Baxter2004Impasto}), \ui{Jitter} and grain make the brush behave like paint; the palette row keeps swatches and
+shades; set the material's Shading Model to \ui{Hand-painted} so every renderer shows the texture as painted.
+
+\section{Stylized environments and the anime look}
+\menu{Modeling Tools > Strokes} paints geometry: a click on a surface adds a card, a drag with Ribbon a strip, into one
+Stroke object whose cards shade by their own facing, by the surface's normal, or away from a \ui{Canopy} centre so a
+bush of flat cards reads as one round volume; \code{strokeobj grass} drops blades onto the ground. \menu{Modeling Tools
+> Scatter} places instances of a named object by density with a painted mask. The World's Sun Disc, Horizon Band and
+Fog finish the look in every renderer alike. For the 2D look: \ui{Camera Flatten} squashes a character's depth toward
+the camera as Guilty Gear Xrd does \cite{Motomura2015}; \ui{View Angle Shapes} brings shape keys in by the camera's
+angle; \ui{Anime Face Normals} gives a head a proxy so toon shadows fall as drawn shapes; a Lattice can face the camera;
+the Anime and Manga camera filters add line art, halftone and paper.
+
+\section{Bake Textures}
+\ui{Bake Textures} turns everything an object's materials do into plain images on new UVs, so other programs show what
+Blendity renders; on export, \ui{Bake Textures} does it for the file.
+
+\begin{fromnote}{Where it comes from}
+The Principled BSDF and the texture nodes are Blender's \cite{Blender2026, BlenderManual2026}; the layer stack, mesh
+maps, smart masks and smart materials are Substance Painter's \cite{SubstancePainterDocs2026}; the painterly brush
+simplifies IMPaSTo \cite{Baxter2004Impasto}; the toon look follows Guilty Gear Xrd \cite{Motomura2015}, MToon
+\cite{MToon2026} and lilToon \cite{lilToon2026}; the theory is in \cite{MarschnerShirley2021} (texture mapping,
+procedural textures) and \cite{Gregory2018vol2} (materials, textures and shaders). Learn: \emph{Materials and
+Textures}, \emph{Blender's Shader Nodes in the Textures Window}, \emph{Fog with a Volume Material}, \emph{Working
+Faster with Textures and Materials}, \emph{Painting the Surface}, \emph{The Hand-painted Look}, \emph{Stylized
+Environments}, \emph{Flatten to the Camera}, \emph{Shapes by the Camera's Angle}.
+\end{fromnote}

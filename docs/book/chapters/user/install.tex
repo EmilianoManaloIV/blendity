@@ -1,0 +1,87 @@
+\chapter{Installing Blendity and the first start}
+\label{ch:install}
+
+Blendity is free. You don't need Blender or anything else: the installer brings everything Blendity uses. Version
+0.13.0 is a \textbf{pre-release}: it works, but it is still being refined, so expect rough edges and save your work
+often.
+
+\section{Download}
+Open the Releases page, \url{https://github.com/EmilianoManaloIV/blendity/releases}, or click the link for your
+computer in the project's README: it fetches the one file you need, always the newest version.
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Your computer & The file \\
+\midrule
+Windows 10 or 11 & \code{Blendity-Setup-Windows.exe} \\
+A Mac with an Apple chip (M1 or later) & \code{Blendity-macos.dmg} \\
+Linux (Ubuntu 22.04 or newer, Fedora, Mint, \ldots) & \code{Blendity-linux-x86\_64.AppImage} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Not sure which Mac you have? Apple menu $>$ About This Mac: ``Chip: Apple M\ldots'' means an Apple chip. Macs with an
+Intel processor aren't supported yet. Every release also carries \code{SHA256SUMS.txt} (Blendity's updater checks
+downloads against it), this guide and the architecture book as PDFs, and ``Source code'' archives that are for
+developers.
+
+\section{Install}
+\textbf{Windows.} Double-click \code{Blendity-Setup-Windows.exe}. If a blue box says ``Windows protected your PC'', click
+\ui{More info}, then \ui{Run anyway} (Blendity isn't signed with a paid certificate yet). Pick \ui{for me only} if asked
+(no administrator needed), accept the licence, keep \ui{Blendity with Blender's libraries (recommended)}, tick a
+desktop shortcut if you want one, \ui{Install}, \ui{Finish}. Next time, open it from the Start menu. To uninstall:
+Settings $>$ Apps $>$ Installed apps $>$ Blendity $>$ Uninstall; your projects are kept.
+
+\textbf{Mac.} Double-click the \code{.dmg}, drag \ui{Blendity} onto \ui{Applications}, open it from Applications. The
+first time macOS says it can't check the app: on macOS 15 or newer click \ui{Done}, then System Settings $>$ Privacy \&
+Security $>$ \ui{Open Anyway}; on macOS 14 or older right-click Blendity $>$ \ui{Open} $>$ \ui{Open}. If macOS says
+Blendity ``is damaged'', run \code{xattr -dr com.apple.quarantine /Applications/Blendity.app} in Terminal once. To
+uninstall, drag it to the Bin.
+
+\textbf{Linux.} Right-click the \code{.AppImage} $>$ Properties $>$ Permissions $>$ \ui{Allow executing file as program},
+then double-click it. If nothing happens, download the plain folder (\code{blendity-linux-x86\_64.tar.gz} from the
+``libraries'' release), extract it and double-click \ui{Blendity} inside. To uninstall, delete the file or the folder.
+
+\section{The first start}
+\begin{itemize}
+  \item The welcome asks \textbf{where you come from} (Unity, Unreal, Blender, Photoshop \& Substance) and sets the keys and
+    the editor feel together; Help $>$ Welcome asks again, and chapter~\ref{ch:comingfrom} explains each choice.
+  \item Your work is saved in a \textbf{project folder}: \code{BlendityProject} in your home folder unless you open
+    another. A project is just a folder with \code{Assets} inside, like Unity's; copy it to another machine and open a
+    scene in it. The program's folder belongs to the installer; your scenes, materials and renders never live there.
+  \item Press \key{F1} for the \textbf{Learn tab}: short interactive lessons for each part of Blendity, with Try-it
+    buttons that drive the editor while you watch (chapter~\ref{ch:learn}).
+  \item \textbf{Updates:} once a day, when online, Blendity asks GitHub whether a newer build exists and shows what it
+    brings with \ui{Install} / \ui{Not now} / \ui{Skip this one}; installs are checked against the release's SHA-256
+    list. Help $>$ Version History goes back to an older version if a new one gives you trouble. Preferences $>$ Updates
+    turns the check off or limits it to stable releases.
+  \item \textbf{With or without Blender's libraries:} an install holds two programs, Blendity (its own code only, always
+    starts) and Blendity-full (with Blender's libraries: faster ray tracing, denoising, OpenColorIO's views, Jolt
+    physics, video export, Booleans, Decimate, EXR). Blendity starts first and hands over to the full one when its
+    libraries load and you want them; offline, or with a library missing, it runs on its own code and says so.
+    Preferences $>$ Libraries is your choice; \code{--no-libs} starts without them once; when they are missing and you
+    are online, Blendity offers to download them for this build.
+  \item \textbf{On a small laptop} (the HP Envy 13-inch 2-in-1 class: 4 cores, 8~GB, Iris Xe) Blendity starts on the
+    \ui{Low} quality tier and says so, with \ui{High} one click away (chapter~\ref{ch:trouble}).
+\end{itemize}
+
+\section{Starting from the command line}
+\begin{lstlisting}[language=console]
+Blendity --layout Learning            # start with the Learn tab beside the Scene view
+Blendity --scene Assets/Scenes/SampleScene.scene
+Blendity --scale 1.5                  # force the UI scale (the default follows the OS DPI)
+Blendity --headless-screenshot out.png --cmd "select Cube" --cmd "shading rendered" --frames 30
+\end{lstlisting}
+The last form runs with no window: it executes console commands and writes a picture, which is how the tests, the
+figures in this guide and the comparison harnesses drive the editor.
+
+\section{Privacy}
+Blendity sends nothing about you or your work anywhere. The one network use it makes on its own is the optional daily
+update check. There is no telemetry and no cloud; the only learned model in the program is the optional, local AI
+Inbetweening download, which never changes a scene on its own (\code{docs/AI\_DISCLOSURE.md}).
+
+\begin{fromnote}{Learn}
+\emph{Welcome to Blendity}: how this editor and the Learn tab work, installing and sharing, updates and older versions,
+with or without Blender's libraries.
+\end{fromnote}

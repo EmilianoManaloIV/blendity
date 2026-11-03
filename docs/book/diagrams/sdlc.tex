@@ -1,0 +1,34 @@
+% The agentic software development lifecycle: one task from request to release, with every artifact named by path.
+\begin{tikzpicture}[node distance=4mm and 6mm]
+  \node[person] (ask) {The user asks\\ \footnotesize a round of requests};
+  \node[agent, right=of ask] (plan) {Plan (the main session)\\ \footnotesize reads \code{requirements.md},\\ \footnotesize \code{ARCHITECTURE.md}, the ADRs};
+  \node[artifact, right=of plan] (spec) {\code{docs/tasks/NNNN-slug.md}\\ status: draft $\to$ approved\\ \code{docs/decisions/NNNN-*.md} (an ADR)\\ when the choice is architectural};
+  \node[gate, right=of spec] (g1) {The human\\ approves the\\ spec and ADR};
+  \node[agent, below=8mm of g1] (impl) {Implement\\ \footnotesize \code{implementer} (routine) or\\ \footnotesize the main session (hard)};
+  \node[agent, left=of impl] (test) {Test\\ \footnotesize \code{test-engineer}: tests from the\\ \footnotesize acceptance criteria};
+  \node[artifact, left=of test] (code) {\code{src/**}, \code{tests/test\_<group>.cpp},\\ \code{stress/stress\_main.cpp};\\ the suites on Windows + Linux,\\ the audits (coverage, KLM, consistency)};
+  \node[agent, left=of code] (review) {Review\\ \footnotesize \code{code-reviewer} (read-only):\\ \footnotesize findings with failure scenarios};
+  \node[artifact, below=8mm of review] (docs) {\code{CHANGELOG.md}, \code{README.md},\\ \code{ARCHITECTURE.md}, \code{USABILITY.md},\\ \code{MANUAL.md}, a Learn lesson,\\ the spec marked done};
+  \node[artifact, right=of docs] (pr) {A branch \code{task/NNNN-slug}\\ (a subtree commit of \code{blendity/}),\\ a pull request on \code{main}\\ (\code{.github/pull\_request\_template.md})};
+  \node[box, right=of pr] (ci) {CI: \code{build.yml}\\ \footnotesize windows, linux, macos,\\ \footnotesize linux-sanitizers};
+  \node[gate, right=of ci] (g2) {The human\\ reviews and\\ merges};
+  \node[box, below=8mm of g2] (main) {\code{main}\\ \footnotesize a merge commit;\\ \footnotesize \code{release.yml} builds artifacts};
+  \node[gate, left=of main] (g3) {The user\\ asks for a\\ release};
+  \node[artifact, left=of g3] (tag) {\code{VERSION} bumped, a tag \code{vX.Y.Z};\\ \code{release.yml}: installers,\\ \code{SHA256SUMS.txt}, the two books;\\ \code{publish\_release.sh}};
+  \draw[flow] (ask) -- (plan);
+  \draw[flow] (plan) -- (spec);
+  \draw[flow] (spec) -- (g1);
+  \draw[flow] (g1) -- (impl);
+  \draw[flow] (impl) -- (test);
+  \draw[flow] (test) -- (code);
+  \draw[flow] (code) -- (review);
+  \draw[flow] (review) -- (docs);
+  \draw[flow] (docs) -- (pr);
+  \draw[flow] (pr) -- (ci);
+  \draw[flow] (ci) -- (g2);
+  \draw[flow] (g2) -- (main);
+  \draw[flow] (main) -- (g3);
+  \draw[flow] (g3) -- (tag);
+  \draw[dflow] (review.north) to[bend right=18] node[lbl, pos=0.5] {changes needed: fixed, or answered in the task's record} (impl.west);
+  \draw[dflow] (ci.north) to[bend right=10] node[lbl, pos=0.5] {red: fixed on the branch} (pr.north);
+\end{tikzpicture}
