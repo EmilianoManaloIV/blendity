@@ -683,6 +683,12 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
   }
   for (size_t i = 0; i < r.nodes.size(); i++)
     if (r.nodes[i].parent >= 0 && made[r.nodes[i].parent]) scene.set_parent(made[i], made[r.nodes[i].parent], -1, false);
+  bind_import_skins(scene, r, made, root);
+  if (made_out) *made_out = made;
+  return root ? root : (made.empty() ? nullptr : made[0]);
+}
+
+void bind_import_skins(Scene &scene, const ImportResult &r, const std::vector<GameObject *> &made, GameObject *root) {
   /* Skeletons (task 0047): each joint a Bone. Its rest is its bind pose relative to its parent's place at rest (task
    * 0056: Blender, Unity and Maya's way), so a file saved mid-pose keeps that pose on the bones and Reset Pose gives the
    * bound shape; a joint with no bind rests where the file puts it. */
@@ -796,8 +802,6 @@ GameObject *instantiate_import(Scene &scene, const ImportResult &r, const std::s
     if (!mg->get<SkinModifier>()) mg->add<SkinModifier>()->object = arm->name;
   }
   add_rig_parts(r, made);
-  if (made_out) *made_out = made;
-  return root ? root : (made.empty() ? nullptr : made[0]);
 }
 
 }  // namespace bl

@@ -38,8 +38,14 @@ struct BudgetCounts {
   double value[(int)BudgetRow::Count] = {};
   size_t shape_keys = 0;  // (shown, not ranked: VRChat has no limit on them)
   size_t light_volumes = 0, light_volume_lights = 0;  // (round 397: a world's VRC Light Volumes and their lights - 32 and 128 at once)
+  size_t textures_reading = 0;  // (review 399: engine-only textures not read yet - Texture Memory counts them once they are)
 };
 BudgetCounts budget_count(const std::vector<GameObject *> &objects);
+
+/* Review 399: a texture only an engine reads is counted once a worker has read it (the editor's recounts never wait);
+ * on, a count waits for it - headless runs and tests, whose one count must be whole. */
+void set_budget_wait_for_textures(bool wait);
+bool budget_wait_for_textures();
 /* Review 355: the counts of what an export writes - its items' meshes (an Outline's shell is an item of its own), their
  * slots and textures, and the joints of each skeleton once - not lights or what the file leaves out. */
 struct ExportItem;

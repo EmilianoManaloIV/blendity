@@ -504,7 +504,7 @@ Rig rig_of(GameObject &g) {
     if (std::strcmp(c->type_name(), SkinModifier::kName) != 0 || skin) return r;  // (another modifier changes the mesh: its vertices go)
     skin = static_cast<const SkinModifier *>(c.get());
   }
-  GameObject *arm = skin && g.scene && !skin->object.empty() ? g.scene->find_by_name(skin->object) : nullptr;
+  GameObject *arm = skin && g.scene && !skin->object.empty() ? skin_armature_of(g, skin->object) : nullptr;
   if (arm && !arm->get<Armature>()) arm = nullptr;
   if (arm && !engines_skin_like(*arm->get<Armature>(), *skin)) return r;  // (review 378: its vertices go)
   const bool keyed = !base->shape_keys.empty() && meshops::shape_keys_fit(*base);

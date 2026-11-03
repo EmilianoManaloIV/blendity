@@ -19,6 +19,14 @@
 
 - **Amended (round 359, task 0336):** spring chains under one Bone Root (`RootBone_`, `spring::is_bone_root`) count
   as one PhysBone component, as VRChat counts a PhysBone on their root.
+- **Amended (round 399, task 0376), checked against VRChat's SDK on a booth avatar:** hidden objects and switched-off
+  renderers count (the SDK counts them); several PhysBones on one root each count - `SpringBone::physbones`, saved
+  with the scene (written only when more than 1), a model's own spring replaced by the first PhysBone, not added to;
+  texture memory counts every texture a material names (`Material::engine_maps`, a converted Unity material's - not
+  drawn, not saved) at the size Unity imports it (the texture's .meta: maximum size, format, compression quality,
+  alpha source, power-of-two rounding, mips; crunched as uncompressed), else a byte a texel with alpha or for a normal
+  map, half without. Textures only an engine reads are read on a worker once per version of their file; the editor's
+  recounts don't wait for them (headless counts do).
 
 ## Consequences
 - Mobile and custom targets wait for published limits; materials and textures have no Fix yet (the rows say so).

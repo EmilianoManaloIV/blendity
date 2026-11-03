@@ -40,7 +40,7 @@ GameObject *Editor::rig_root() const {
         if (GameObject *r = skeleton_of(g)) return r;
   if (GameObject *m = rig_mesh())
     if (const SkinModifier *sk = m->get<SkinModifier>())
-      if (GameObject *r = scene_->find_by_name(sk->object))
+      if (GameObject *r = skin_armature_of(*m, sk->object))
         if (r->get<Armature>()) return r;
   return nullptr;
 }

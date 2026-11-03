@@ -158,6 +158,19 @@ void read_blend(const Props &p, const std::string &family, Material &m) {
 
 void read_outline(const Props &p, const std::string &family, UnityMaterialInfo &info);
 
+/* Every other texture the material names (round 399): what Unity loads for it, which Blendity doesn't draw. */
+void read_engine_maps(const Props &p, const std::function<std::string(const std::string &)> &texture, Material &m) {
+  m.engine_maps.clear();
+  for (const auto &[name, t] : p.tex) {
+    if (t.guid.empty()) continue;
+    const std::string path = texture(t.guid);
+    const bool drawn = path.empty() || path == m.base_map.path || path == m.normal_map.path || path == m.metallic_map.path ||
+                       path == m.roughness_map.path || path == m.emission_map.path;
+    const bool listed = std::any_of(m.engine_maps.begin(), m.engine_maps.end(), [&](const TextureRef &r) { return r.path == path; });
+    if (!drawn && !listed) m.engine_maps.push_back(TextureRef{path, false});
+  }
+}
+
 /* Filamented's setups over the Standard base (round 395). Metallic: Standard's own. Roughness: _Glossiness is the
  * roughness, the map its red (1 - its red is the smoothness). Specular: the specular colour as a metal estimate (F0
  * over the dielectric 4%) and the base mixed toward it. Cloth: the specular colour is the sheen's. The occlusion map
@@ -274,6 +287,7 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   if (filamented) read_filamented(p, info.shader, texture, m, info);
   m.unlit = info.shader == "Unlit";
   info.known = toon || filamented || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit";
+  read_engine_maps(p, texture, m);
   m.touch();
   return true;
 }

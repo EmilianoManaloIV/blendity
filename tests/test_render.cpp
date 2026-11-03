@@ -3433,8 +3433,12 @@ static void round30_tests() {
       for (int x = fr.x + 10; x < fr.right() - 10; x += 31) pts.push_back({x, y});
     std::vector<float> piloted;
     for (auto &q : pts) piloted.push_back(R.ed.scene_depth_for_test(q.first, q.second));
-    /* ...then stop: the view stays where the camera is, and the editor renders it itself. */
+    /* Round 399: stopping puts back the view from before piloting - the editor then renders the view piloting showed
+     * (its place, field of view and distance, so its near plane too), or the two depths are of different views. */
+    const SceneCamera piloted_view = R.ed.scene_camera_for_test();
+    /* ...then stop, and the editor renders that same view itself. */
     R.ed.command("pilot");
+    R.ed.set_scene_camera_for_test(piloted_view);
     R.ed.command("shading shaded");
     R.settle();
     int compared = 0, off = 0;

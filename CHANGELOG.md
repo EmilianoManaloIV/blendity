@@ -2,6 +2,25 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 399): Unity packages against Unity - Shinano and SideRail
+
+**Asked:** "do significant comparison testing with Blendity VRchat content and Unity Content" (Shinano), fix the
+differences with the real VRChat SDK and Unity, and compare the world package against Unity too.
+
+**Fixed (task 0376)**
+- **Avatars**: a model's Materials tab (its .meta's remap to .mat files) - Shinano wears its lilToon textures; a
+  prefab's model gets its skeleton and skin; PSD textures read.
+- **The Budget as VRChat's SDK counts**: hidden outfits and switched-off renderers, PhysBones sharing a root, every
+  texture a material names at the size Unity imports it (61.3 MB to the SDK's 61.27); `budget list`.
+- **Worlds as Unity places them**: objects of nested prefabs by Unity's derived ids (overrides, names and parents
+  reach them), a one-node model is its own root, only the materials in use, Unity's Default-Material, removed
+  renderers switched off - SideRail's objects, hidden ones, renderers shown and lights now equal Unity's.
+- `import` takes a path in the project; overrides Unity keeps unused are said to be stale; a hostile PSD is refused
+  before it allocates; the Budget reads textures only Unity uses on a worker.
+
+**Checked:** both packages against Unity 2022.3 and VRChat SDK 3.10.6 in copies of the VCC projects (spec 0376's
+tables); synthetic tests in assets; the pilot depth test now compares the view piloting showed.
+
 ## 2026-11-02 (round 398): VRC Light Volumes baked in Blendity
 
 **Asked:** "a toggle so I can choose to bake the data in Blendity ... safely exported into Blendity".

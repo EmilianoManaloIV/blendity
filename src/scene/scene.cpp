@@ -2781,6 +2781,16 @@ GameObject *Scene::find(uint64_t id) const {
   return it == by_id_.end() ? nullptr : it->second;
 }
 
+GameObject *skin_armature_of(const GameObject &mesh, const std::string &name) {
+  if (name.empty() || !mesh.scene) return nullptr;
+  for (GameObject *p = mesh.parent; p; p = p->parent) {
+    if (p->name == name && p->get<Armature>()) return p;
+    for (GameObject *c : p->children)
+      if (c != &mesh && c->name == name && c->get<Armature>()) return c;
+  }
+  return mesh.scene->find_by_name(name);
+}
+
 GameObject *Scene::find_by_name(const std::string &n) const {
   for (auto &o : objects_)
     if (o->name == n) return o.get();

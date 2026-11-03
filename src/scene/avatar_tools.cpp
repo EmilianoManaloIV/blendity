@@ -65,7 +65,7 @@ void pose_to_rest(GameObject &armature) {
 /* The rig a skinned mesh follows, for the Rest Position check. */
 const GameObject *rig_of(const GameObject &g) {
   const SkinModifier *s = g.get<SkinModifier>();
-  return s && g.scene ? g.scene->find_by_name(s->object) : nullptr;
+  return s && g.scene ? skin_armature_of(g, s->object) : nullptr;
 }
 
 /* One bone pointed at its one child from the rest, its length the gap; the children kept in place, their rests

@@ -44,6 +44,39 @@ int64_t unity_hashed_file_id(const std::string &type, const std::string &name, i
  * (the same numbers in every model, the persistent ones and the legacy 100000s) and a legacy table's names
  * (fileIDToRecycleName, internalIDToNameTable). */
 void unity_model_ids_from_meta(const YamlNode &meta, UnityModelIds &out);
+/* Round 399: a model with one top node, as Unity places it - that node is the root (with the model's name and its own
+ * transform, renderer and children), not a child of an empty root: the root is removed and the node takes its place.
+ * Returns the root to use (`root` when the model has several top nodes, or the root holds anything). An armature keeps
+ * its own name (its skins find it by that). SideRail's gratings, a model's prefab variant with a collider on its root,
+ * had stood at the scene's top in an empty root, the scene's parent and name given to the node inside. */
+GameObject *unity_collapse_model_root(Scene &scene, GameObject *root);
+
+/* Round 399: a model's parts as Unity imports them - a material no face of the part uses is no slot of its renderer
+ * (Unity makes a submesh only for a material in use: SideRail's Tunnel_Rail had 5 slots here, 1 there). The faces'
+ * material numbers follow. Returns the slots dropped. */
+int unity_drop_unused_materials(ImportResult &r);
+
+/* Round 399: Unity's fileID, in a prefab or scene, for an object of a prefab nested in it: its id in the nested prefab
+ * XOR the PrefabInstance document's, the top bit cleared. */
+int64_t unity_nested_file_id(int64_t inner, int64_t prefab_instance);
+
+/* Round 399: a texture's size on the card as Unity imports it, from its .meta beside it or in its package folder's
+ * .unity-meta (the Standalone override when it's on, else the default): its largest side capped, its format's bytes a
+ * texel (a crunched format counted as the one it unpacks to, as VRChat's SDK does; automatic: DXT5 with alpha or for a
+ * normal map, else DXT1), mips a third more. False when Unity has no settings for it. */
+bool unity_texture_megabytes(const std::string &asset_path, int width, int height, bool has_alpha, double &mb);
+
+/* Round 399: a model's material remapping - its .meta's externalObjects (Unity's Materials tab: each embedded material by
+ * name to a .mat's GUID), which Unity puts on the model's meshes wherever the model is placed. */
+std::map<std::string, std::string> unity_material_remap(const YamlNode &meta);
+/* ...applied to the model's objects: each renderer slot whose material has a remapped name takes `material(guid)`
+ * (nullptr: left as it is). Returns the .mat files converted. */
+int apply_unity_material_remap(const std::vector<GameObject *> &made, const std::map<std::string, std::string> &remap,
+                               const std::function<MaterialPtr(const std::string &guid)> &material);
+/* ...on one list of slots (a mesh's as a MeshFilter places it), `converted` keeping each .mat converted once. */
+void remap_unity_slots(std::vector<MaterialPtr> &slots, const std::map<std::string, std::string> &remap,
+                       const std::function<MaterialPtr(const std::string &guid)> &material, std::map<std::string, MaterialPtr> &converted);
+
 /* A .unity-model-ids file (written by Unity through Blendity: "<guid>\t<fileID>\t<class>\t<path>" a line), by GUID. */
 void parse_unity_model_ids(const std::string &text, std::map<std::string, UnityModelIds> &out);
 /* A model's objects (objects_from_model's: `made` its nodes' objects in r.nodes' order, under `root`) as override
@@ -78,6 +111,10 @@ struct UnityImport {
   int objects = 0, meshes = 0, missing_meshes = 0, lights = 0, cameras = 0, colliders = 0, engine = 0, prefabs = 0, overrides_kept = 0;
   int dropped = 0;  // (components whose object couldn't be found)
   int overrides_applied = 0, model_overrides_waiting = 0;  // (round 395: overrides on a model's parts whose fileIDs aren't known yet)
+  int model_overrides_stale = 0;                           // (round 399: ...or that Unity's own numbers don't have: parts the model no longer has)
+  std::shared_ptr<std::set<std::string>> models_numbered = std::make_shared<std::set<std::string>>();  // (round 399: models Unity has numbered - ctx.model adds them; shared down the nesting)
+  std::shared_ptr<MaterialPtr> builtin_default = std::make_shared<MaterialPtr>();  // (round 399: Unity's Default-Material, one for the import)
+  std::shared_ptr<std::set<const GameObject *>> physboned = std::make_shared<std::set<const GameObject *>>();  // (review 399: roots a PhysBone of this import is on)
   std::set<std::string> models_waiting;                    // (...their models' GUIDs: what Unity is asked for)
   int materials = 0, outlines = 0, springs = 0;  // (round 371)
   int light_volumes = 0;                         // (round 397: VRC Light Volumes and their lights)

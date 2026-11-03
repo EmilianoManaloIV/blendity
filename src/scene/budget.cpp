@@ -6,18 +6,28 @@
 #include "material.h"
 #include "scene.h"
 #include "spring_bones.h"
+#include "unity_scene.h"
 #include "../core/core.h"
 #include "../image/image.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <filesystem>
+#include <future>
+#include <map>
+#include <mutex>
 #include <unordered_set>
 
 namespace bl {
 
 namespace {
 constexpr double kNone = -1.0;
+std::atomic<bool> g_budget_wait{false};  // (set_budget_wait_for_textures)
 }  // namespace
+
+void set_budget_wait_for_textures(bool wait) { g_budget_wait = wait; }
+bool budget_wait_for_textures() { return g_budget_wait; }
 
 const char *budget_row_name(BudgetRow r) {
   static const char *const kNames[] = {"Triangles", "Skinned Meshes", "Meshes", "Material Slots", "Bones", "Spring Chains (PhysBones)",
@@ -60,19 +70,129 @@ double triangles_of(const Mesh &m) {
   return n;
 }
 
-/* A texture's memory on the card, as an engine compresses it: a byte a texel (BC7 / ASTC 4x4), a third more for mips. */
-double texture_mb(const TextureRef &t, std::unordered_set<std::string> &seen) {
+
+/* What the count needs of a texture: its size and whether any texel is less than opaque. */
+struct TextureFacts {
+  int w = 0, h = 0;
+  bool alpha = true;
+};
+
+/* A texture only an engine reads (a Unity material's masks and second layers: Blendity never draws or loads them) is
+ * read on a worker once per version of its file - review 399: the Budget recounts on the UI thread every half second,
+ * and decoding Shinano's dozen 4096 masks there took seconds. Until it has been read it counts nothing; `wait` (a
+ * headless count) waits for it. The Unity size of each is kept with it. */
+struct EngineTextures {
+  struct Entry {
+    int64_t version = -1;
+    TextureFacts facts;
+    std::shared_future<TextureFacts> reading;
+  };
+  std::mutex mu;
+  std::map<std::string, Entry> by_path;
+  int reading = 0;  // (workers at it: at most kReaders - review 399: a world names hundreds)
+};
+constexpr int kReaders = 2;
+thread_local size_t t_textures_unread = 0;  // (the count in progress's engine-only textures not read yet)
+
+EngineTextures &engine_textures() {
+  static EngineTextures e;
+  return e;
+}
+
+int64_t file_version(const std::string &path) {
+  std::error_code ec;
+  const auto t = std::filesystem::last_write_time(std::filesystem::u8path(path), ec);
+  return ec ? 0 : (int64_t)t.time_since_epoch().count();
+}
+
+TextureFacts read_texture_facts(const std::string &abs) {
+  TextureFacts f;
+  Bitmap b;
+  std::string why;
+  if (!load_image(abs, b, why) || b.width <= 0 || b.height <= 0) return f;
+  f.w = b.width, f.h = b.height, f.alpha = b.is_float;
+  for (size_t i = 3; !f.alpha && i < b.rgba8.size(); i += 4) f.alpha = b.rgba8[i] != 255;
+  return f;
+}
+
+/* An engine-only texture's facts once read (false: not yet - its reading started). */
+bool engine_texture_facts(const std::string &path, bool wait, TextureFacts &out) {
+  const std::string abs = resolve_asset_path(path);
+  const int64_t version = file_version(abs);
+  EngineTextures &et = engine_textures();
+  std::shared_future<TextureFacts> reading;
+  {
+    std::lock_guard<std::mutex> lock(et.mu);
+    EngineTextures::Entry &e = et.by_path[abs];
+    if (e.version == version && !e.reading.valid()) return out = e.facts, true;
+    if (e.version != version && e.reading.valid()) return false;  // (an older version still being read: next time)
+    if (!e.reading.valid() && wait) {  // (a waiting count reads it here: no worker to wait for)
+      e.version = version, e.facts = read_texture_facts(abs);
+      return out = e.facts, true;
+    }
+    if (!e.reading.valid()) {
+      if (et.reading >= kReaders) return false;
+      et.reading++;
+      e.version = version;
+      e.reading = std::async(std::launch::async, read_texture_facts, abs).share();
+    }
+    reading = e.reading;
+  }
+  if (!wait && reading.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+  const TextureFacts f = reading.get();
+  std::lock_guard<std::mutex> lock(et.mu);
+  EngineTextures::Entry &e = et.by_path[abs];
+  if (e.reading.valid()) et.reading--, e.facts = f, e.reading = {};
+  return out = f, true;
+}
+
+/* Unity's size for a texture, kept (review 399: its .meta and the package's .unity-guids had been read and parsed at
+ * every recount); -1: Unity has no settings for it. */
+double unity_mb_cached(const std::string &path, const TextureFacts &f) {
+  static std::mutex mu;
+  static std::map<std::string, double> known;
+  const std::string key = path + "|" + std::to_string(f.w) + "x" + std::to_string(f.h) + (f.alpha ? "a" : "o");
+  {
+    std::lock_guard<std::mutex> lock(mu);
+    const auto it = known.find(key);
+    if (it != known.end()) return it->second;
+  }
+  double mb = 0.0;
+  if (!unity_texture_megabytes(path, f.w, f.h, f.alpha, mb)) mb = -1.0;
+  std::lock_guard<std::mutex> lock(mu);
+  return known[key] = mb;
+}
+
+double texture_bytes_mb(const TextureFacts &f, bool normal_map) {
+  const double bytes = normal_map || f.alpha ? 1.0 : 0.5;
+  return (double)f.w * (double)f.h * bytes * (4.0 / 3.0) / (1024.0 * 1024.0);
+}
+
+/* A texture's memory on the card: as Unity imports it when it has Unity's settings, else as its automatic compression
+ * stores it, a third more for mips - a byte a texel with alpha or for a normal map (DXT5 / BC5), half a byte for an
+ * opaque colour map (DXT1). Round 399: Shinano's opaque 4096s had counted twice their size, 133 MB to the SDK's 61.
+ * A drawn map is the one Blendity loaded to draw; an engine-only one is read once on a worker. */
+double texture_mb(const TextureRef &t, std::unordered_set<std::string> &seen, bool normal_map = false, bool engine_only = false, bool wait = false) {
   if (t.empty() || !seen.insert(t.path).second) return 0.0;
+  if (engine_only) {
+    TextureFacts f;
+    if (!engine_texture_facts(t.path, wait, f)) return (void)t_textures_unread++, 0.0;
+    if (f.w <= 0) return 0.0;
+    const double unity = unity_mb_cached(t.path, f);
+    return unity >= 0.0 ? unity : texture_bytes_mb(f, normal_map);
+  }
   const TexturePtr tex = resolve_texture_ref(t);
   if (!tex || tex->width <= 0 || tex->height <= 0) return 0.0;
-  return (double)tex->width * (double)tex->height * (4.0 / 3.0) / (1024.0 * 1024.0);
+  const TextureFacts f{tex->width, tex->height, tex->has_alpha};
+  const double unity = unity_mb_cached(t.path, f);  // (Unity's own settings for it)
+  return unity >= 0.0 ? unity : texture_bytes_mb(f, normal_map);
 }
 
 /* The armature a mesh's skin follows (by name, as SkinModifier finds it), or nullptr. */
 const GameObject *skin_armature(const GameObject &g) {
   const SkinModifier *s = g.get<SkinModifier>();
   if (!s || !s->enabled || s->object.empty() || !g.scene) return nullptr;
-  const GameObject *t = g.scene->find_by_name(s->object);
+  const GameObject *t = skin_armature_of(g, s->object);
   return t && t != &g && t->get<Armature>() ? t : nullptr;
 }
 
@@ -105,7 +225,7 @@ void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string
   if (const SpringBone *sb = g.get<SpringBone>(); sb && sb->enabled) {
     /* (Round 359: chains under one RootBone_ are one PhysBone component - Bone Root's point.) */
     const bool grouped = g.parent && spring::is_bone_root(*g.parent);
-    v[(int)BudgetRow::SpringChains] += !grouped || roots.insert(g.parent).second ? 1 : 0;
+    v[(int)BudgetRow::SpringChains] += !grouped || roots.insert(g.parent).second ? std::max(1, sb->physbones) : 0;  // (round 399: Unity's several on one root)
     std::vector<GameObject *> under{&g};
     while (!under.empty()) {
       GameObject *b = under.back();
@@ -115,7 +235,7 @@ void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string
     }
   }
   const MeshRenderer *mr = g.get<MeshRenderer>();
-  const Mesh *m = mr && mr->enabled ? g.evaluated_mesh() : nullptr;
+  const Mesh *m = mr ? g.evaluated_mesh() : nullptr;  // (round 399: a renderer switched off counts - VRChat counts it, an avatar toggles it on)
   if (!m || !m->face_count()) return;
   const Component *ol = g.find_role(Component::RenderRole::Outline);
   const bool outline = ol && ol->enabled;
@@ -131,7 +251,8 @@ void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string
   for (const MaterialPtr &mp : mr->materials) {
     if (!mp) continue;
     for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map})
-      v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures);
+      v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map);
+    for (const TextureRef &t : mp->engine_maps) v[(int)BudgetRow::TextureMB] += texture_mb(t, textures, false, true, budget_wait_for_textures());
   }
 }
 
@@ -139,22 +260,25 @@ void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string
 
 BudgetCounts budget_count(const std::vector<GameObject *> &objects) {
   BudgetCounts c;
+  t_textures_unread = 0;
   std::unordered_set<const GameObject *> once;
   std::unordered_set<std::string> textures;
   std::unordered_set<const GameObject *> roots, joints;
   for (GameObject *g : objects) {
-    if (!g || !g->active_in_hierarchy() || !once.insert(g).second) continue;
+    if (!g || !once.insert(g).second) continue;  // (round 399: inactive objects count too - VRChat's SDK counts a hidden outfit)
     count_object(*g, c, textures, roots);
     const MeshRenderer *mr = g->get<MeshRenderer>();
-    const GameObject *arm = mr && mr->enabled ? skin_armature(*g) : nullptr;
+    const GameObject *arm = mr ? skin_armature(*g) : nullptr;
     if (arm) add_skeleton(*arm, joints);  // (review 396: what the skins name, not every armature present)
   }
   c.value[(int)BudgetRow::Bones] = (double)joints.size();
+  c.textures_reading = t_textures_unread;
   return c;
 }
 
 BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
   BudgetCounts c;
+  t_textures_unread = 0;
   double *v = c.value;
   std::unordered_set<uint64_t> joints;  // (review 396: the skins' joints as a set - a nested rig's are its outer rig's too)
   double unnamed = 0.0;                 // (a skin without its joints' objects: its joints counted once per rig)
@@ -170,12 +294,14 @@ BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
     for (const MaterialPtr &mp : it.materials) {
       if (!mp) continue;
       for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map})
-        v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures);
+        v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map);
+      for (const TextureRef &t : mp->engine_maps) v[(int)BudgetRow::TextureMB] += texture_mb(t, textures, false, true, budget_wait_for_textures());
     }
     if (it.skin) joints.insert(it.skin->joint_ids.begin(), it.skin->joint_ids.end());
     if (it.skin && it.skin->joint_ids.empty() && rigs.insert(it.skin->rig).second) unnamed += (double)it.skin->joints.size();
   }
   v[(int)BudgetRow::Bones] = (double)joints.size() + unnamed;
+  c.textures_reading = t_textures_unread;
   return c;
 }
 

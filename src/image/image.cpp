@@ -834,6 +834,121 @@ static bool decode_hdr(const uint8_t *d, size_t n, Bitmap &out, std::string &err
   return true;
 }
 
+/* Photoshop's PSD (round 399: BOOTH avatars ship their textures as PSDs - Shinano's face): the composite image every
+ * PSD saved with Maximize Compatibility carries after its layers - RGB or greyscale, 8 or 16 bits a channel, raw or
+ * PackBits; the layers themselves aren't read (Blender's image library reads the same composite). Big-endian; every
+ * length checked against the file. */
+namespace {
+struct PsdReader {
+  const uint8_t *d;
+  size_t n, at = 0;
+  bool ok = true;
+  uint32_t u(int bytes) {
+    if (at + (size_t)bytes > n) return ok = false, 0;
+    uint32_t v = 0;
+    for (int k = 0; k < bytes; k++) v = v << 8 | d[at++];
+    return v;
+  }
+  void skip(size_t bytes) { at = at + bytes <= n ? at + bytes : (ok = false, n); }
+};
+
+/* One PackBits row into `row` (its width times `bytes`): false when the row comes out short - never zero-filled. */
+bool psd_packbits_row(const uint8_t *d, size_t at, size_t end, std::vector<uint8_t> &row) {
+  size_t o = 0;
+  while (at < end && o < row.size()) {
+    const int h = (int8_t)d[at++];
+    if (h >= 0) {
+      const size_t k = (size_t)h + 1;
+      if (k > end - at || k > row.size() - o) return false;
+      std::memcpy(&row[o], d + at, k);
+      at += k, o += k;
+    }
+    else if (h != -128) {
+      const size_t k = (size_t)(1 - h);
+      if (at >= end || k > row.size() - o) return false;
+      std::memset(&row[o], d[at++], k);
+      o += k;
+    }
+  }
+  return o == row.size();
+}
+
+/* One channel plane (height rows of width samples, `bytes` each) at r.at, kept as 8 bits a sample (16-bit: its high
+ * byte) in `out`: raw or PackBits rows (their byte counts first, all channels' together - `counts_at` the first of
+ * them, `row0` this channel's first row among them; decode_psd checked they fit the file). */
+bool psd_plane(PsdReader &r, int comp, int width, int height, int bytes, size_t counts_at, size_t row0, std::vector<uint8_t> &out) {
+  const size_t row_bytes = (size_t)width * bytes;
+  out.resize((size_t)width * height);
+  std::vector<uint8_t> row(row_bytes);
+  for (int y = 0; y < height; y++) {
+    size_t len = row_bytes;
+    if (comp == 1) {
+      const size_t c = counts_at + (row0 + (size_t)y) * 2;
+      len = (size_t)r.d[c] << 8 | r.d[c + 1];
+      if (r.at + len > r.n || !psd_packbits_row(r.d, r.at, r.at + len, row)) return false;
+    }
+    else {
+      if (r.at + len > r.n) return false;
+      std::memcpy(row.data(), r.d + r.at, len);
+    }
+    r.at += len;
+    for (int x = 0; x < width; x++) out[(size_t)y * width + x] = row[(size_t)x * bytes];
+  }
+  return true;
+}
+
+/* Whether the file holds the composite it claims (round 399 review: a 250 KB file claiming 30000 x 30000 must not get
+ * gigabytes allocated first): raw - every sample; PackBits - every row's count, and the counted bytes. */
+bool psd_fits(const PsdReader &r, int comp, int width, int height, int bytes, int used, size_t counts_at) {
+  const size_t rows = (size_t)used * height;
+  if (comp == 0) return r.n - r.at >= rows * width * bytes;
+  if (counts_at + rows * 2 > r.n) return false;
+  const size_t least = 2 * (((size_t)width * bytes + 127) / 128);  // (PackBits' shortest row: a header byte and a byte per 128 samples)
+  size_t total = 0;
+  for (size_t k = 0; k < rows; k++) {
+    const size_t len = (size_t)r.d[counts_at + k * 2] << 8 | r.d[counts_at + k * 2 + 1];
+    if (len < least) return false;
+    total += len;
+  }
+  return r.n - r.at >= total;
+}
+}  // namespace
+
+bool decode_psd(const uint8_t *d, size_t n, Bitmap &out, std::string &error) {
+  PsdReader r{d, n};
+  r.skip(4);
+  const uint32_t version = r.u(2);
+  r.skip(6);
+  const int channels = (int)r.u(2), height = (int)r.u(4), width = (int)r.u(4), depth = (int)r.u(2), mode = (int)r.u(2);
+  if (!r.ok || version != 1) return error = "not a PSD (or a large-document PSB)", false;
+  if ((mode != 3 && mode != 1) || (depth != 8 && depth != 16)) return error = "a PSD that isn't 8- or 16-bit RGB or greyscale", false;
+  if (width < 1 || height < 1 || width > 30000 || height > 30000 || channels < 1 || channels > 56) return error = "a PSD of no size", false;
+  if ((int64_t)width * height > (1ll << 28)) return error = "a PSD too large to open", false;  // (PNG's limit)
+  r.skip(r.u(4));  // (colour mode data)
+  r.skip(r.u(4));  // (image resources)
+  r.skip(r.u(4));  // (layers and masks)
+  const int comp = (int)r.u(2);
+  if (!r.ok || (comp != 0 && comp != 1)) return error = "a PSD whose composite is neither raw nor PackBits (save it with Maximize Compatibility)", false;
+  const int bytes = depth / 8, used = std::min(channels, mode == 3 ? 4 : 2);
+  const size_t counts_at = r.at;
+  if (comp == 1) r.skip((size_t)channels * height * 2);
+  if (!r.ok || !psd_fits(r, comp, width, height, bytes, used, counts_at)) return error = "a PSD cut short", false;
+  std::vector<uint8_t> plane[4];
+  for (int c = 0; c < used; c++)
+    if (!r.ok || !psd_plane(r, comp, width, height, bytes, counts_at, (size_t)c * height, plane[c])) return error = "a PSD cut short", false;
+  out.width = width, out.height = height;
+  out.rgba8.resize((size_t)width * height * 4);
+  for (size_t i = 0; i < (size_t)width * height; i++) {
+    auto sample = [&](int c) { return c < used ? plane[c][i] : (uint8_t)255; };
+    const uint8_t v0 = sample(0);
+    out.rgba8[i * 4 + 0] = v0;
+    out.rgba8[i * 4 + 1] = mode == 3 ? sample(1) : v0;
+    out.rgba8[i * 4 + 2] = mode == 3 ? sample(2) : v0;
+    out.rgba8[i * 4 + 3] = mode == 3 ? sample(3) : sample(1);
+  }
+  return true;
+}
+
 /* image_libs.cpp: Blender's codec libraries (false = unavailable or failed). */
 bool decode_exr_lib(const std::string &bytes, Bitmap &out, std::string &error);
 bool decode_jpeg_lib(const uint8_t *data, size_t size, Bitmap &out, std::string &error);
@@ -861,6 +976,7 @@ bool decode_image(const std::string &bytes, Bitmap &out, std::string &error) {
     if (!lib_error.empty()) error = lib_error;
     return false;
   }
+  if (n >= 26 && !std::memcmp(d, "8BPS", 4)) return decode_psd(d, n, out, error);  // (round 399)
   if (n >= 2 && d[0] == 'B' && d[1] == 'M') return decode_bmp(d, n, out, error);
   if (n >= 2 && d[0] == '#' && d[1] == '?') return decode_hdr(d, n, out, error);
   if (n >= 18) return decode_tga(d, n, out, error);  // TGA has no magic number
@@ -1129,7 +1245,7 @@ bool load_image(const std::string &path, Bitmap &out, std::string &error) {
 }
 
 bool image_extension_supported(const std::string &ext) {
-  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".hdr" ||
+  return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".bmp" || ext == ".hdr" || ext == ".psd" ||
          (ext == ".exr" && exr_available());
 }
 
@@ -1424,6 +1540,8 @@ void Texture::build(const Bitmap &bmp, bool srgb_data) {
     l0.px8.resize((size_t)width * height);
     for (size_t i = 0; i < l0.px8.size(); i++) l0.px8[i] = pack8(&bmp.rgba8[i * 4]);
   }
+  has_alpha = is_float;  // (an HDR image: its own formats, counted at a byte a texel)
+  for (size_t i = 0; !has_alpha && i < l0.px8.size(); i++) has_alpha = (l0.px8[i] >> 24) != 255u;
   levels.push_back(std::move(l0));
   /* Mip chain: 2x2 box filter in linear space, re-encoded (FoCG 11.3). */
   while (levels.back().w > 1 || levels.back().h > 1) {

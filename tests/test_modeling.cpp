@@ -5758,6 +5758,7 @@ static void round63_tests() {
     GameObject *g = ed.scene().create("Twisted");
     g->add<MeshFilter>()->mesh = base;
     g->add<MeshRenderer>();
+    g->set_world_position(Vec3(1.5f, 1.0f, 1.5f));  // (round 399: in view - at the origin it stood inside the Cube, seen only where their tops fought for depth)
     auto *tw = g->add<SimpleDeformModifier>();
     tw->mode = 1;
     tw->angle = 20.0f;
