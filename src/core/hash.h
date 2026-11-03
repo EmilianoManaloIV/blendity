@@ -62,4 +62,36 @@ inline uint32_t hash32(uint32_t x) {
   return x ? x : 1u;
 }
 
+/* XXH64 (Yann Collet's xxHash, 64-bit, BSD-2-Clause: the reference algorithm) - the hash Unity names a model's
+ * sub-assets by (round 395: "Type:Mesh-><name>0", its fileID read as signed). */
+inline uint64_t xxh64(const void *p, size_t n, uint64_t seed = 0) {
+  constexpr uint64_t P1 = 11400714785074694791ull, P2 = 14029467366897019727ull, P3 = 1609587929392839161ull;
+  constexpr uint64_t P4 = 9650029242287828579ull, P5 = 2870177450012600261ull;
+  auto rotl = [](uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+  auto read64 = [](const uint8_t *b) { uint64_t v; std::memcpy(&v, b, 8); return v; };  // (little-endian: every target Blendity builds for)
+  auto rnd = [&](uint64_t acc, uint64_t in) { return rotl(acc + in * P2, 31) * P1; };
+  auto merge = [&](uint64_t acc, uint64_t v) { return (acc ^ rnd(0, v)) * P1 + P4; };
+  const uint8_t *b = (const uint8_t *)p, *end = b + n;
+  uint64_t h;
+  if (n >= 32) {
+    uint64_t v1 = seed + P1 + P2, v2 = seed + P2, v3 = seed, v4 = seed - P1;
+    for (; b + 32 <= end; b += 32) v1 = rnd(v1, read64(b)), v2 = rnd(v2, read64(b + 8)), v3 = rnd(v3, read64(b + 16)), v4 = rnd(v4, read64(b + 24));
+    h = rotl(v1, 1) + rotl(v2, 7) + rotl(v3, 12) + rotl(v4, 18);
+    h = merge(merge(merge(merge(h, v1), v2), v3), v4);
+  } else {
+    h = seed + P5;
+  }
+  h += (uint64_t)n;
+  for (; b + 8 <= end; b += 8) h = rotl(h ^ rnd(0, read64(b)), 27) * P1 + P4;
+  if (b + 4 <= end) {
+    uint32_t v;
+    std::memcpy(&v, b, 4);
+    h = rotl(h ^ (uint64_t)v * P1, 23) * P2 + P3;
+    b += 4;
+  }
+  for (; b < end; b++) h = rotl(h ^ (uint64_t)*b * P5, 11) * P1;
+  h ^= h >> 33, h *= P2, h ^= h >> 29, h *= P3, h ^= h >> 32;
+  return h;
+}
+
 }  // namespace bl

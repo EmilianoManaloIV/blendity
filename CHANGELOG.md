@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 395): Unity scenes as Unity shows them, and Filamented
+
+**Asked:** "see if you can import these models into the editor and place them with textures, shaders, etc." (a VRChat
+world package, SideRail); "support .unity scenes and .prefab objects"; "Blendity should also have filamented shader
+supported by default."
+
+**Added (task 0372)**
+- **Prefab overrides applied** where Blendity holds the field, by the target's class: a renderer's materials, switch,
+  shadows and lightmap scale; a light's switch, colour, intensity, range, spot angles and mode; a GameObject's name,
+  active state and static flags (Contribute GI); transforms. A nested prefab's and a variant's components are targets
+  too, and a nested prefab's own .mat files convert (they had come in as its model's).
+- **A model's parts by Unity's numbers:** meshes and materials by their hashed names (xxh64, as Unity numbers them),
+  the root's fixed numbers, a legacy .meta's table; the rest from the installed Unity, asked once - `unity modelids`
+  (the import's Fix, "Number Parts with Unity") runs it in batch mode on a worker and writes `Assets/.unity-model-ids`.
+  A model with one renderer needs none.
+- **Filamented** (Silent's): Metallic, Roughness, Specular and Cloth setups as PBR, from the shader's own inputs.
+- **A .unity opens as the scene** (`open`, File > Open, a drop): no starter objects, its objects at the top, its ambient
+  and fog, framed; `import` finds a path relative to the project.
+
+**Checked:** SideRail's scene - 425 Unity materials converted, 2,519 overrides applied, none waiting once Unity had
+numbered 9 models' parts, no mesh part guessed (42 before); its walls, bar, stools and bench textured. tests_assets:
+xxh64 against Unity's numbers, the tables, Filamented's setups, a scene's overrides, opening as a scene.
+
 ## 2026-11-02 (round 394): the tests in parallel
 
 **Asked:** "Any way to make rounds faster?" - the first step of the plan for rounds 394-397.
