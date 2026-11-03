@@ -105,7 +105,80 @@ std::map<std::string, std::vector<UnityEdit>> Editor::unity_edits(const std::str
 }
 
 /* Round 401: a Camera's and a Light's Unity fields as Blendity holds them now. */
+/* Round 402 (ADR 0100): the avatar's VRChat components written back into their own documents (by the fileID each came
+ * with): the scalars, by Unity's names; lists and curves stay as kept. Unity's X runs the other way: positions' X and
+ * rotations' Y and Z turned back. */
+namespace {
+std::string yes(bool b) { return b ? "1" : "0"; }
+std::string unity_vec3_x(Vec3 v) { return unity_yaml_vec3(v); }  // (Unity's axes as they are: review 402)
+std::string unity_euler_x(Vec3 e) { return unity_yaml_vec3(e); }
+std::string unity_quat_x(Quat q) {
+  return "{x: " + unity_yaml_num(q.x) + ", y: " + unity_yaml_num(q.y) + ", z: " + unity_yaml_num(q.z) + ", w: " + unity_yaml_num(q.w) + "}";
+}
+int64_t unity_fid(const std::string &id) { return id.empty() ? 0 : (int64_t)std::strtoll(id.c_str(), nullptr, 10); }
+void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
+  for (const auto &comp : g.components) {
+    UnityEdit e;
+    if (const auto *a = dynamic_cast<const AvatarDescriptorComponent *>(comp.get())) {
+      e.file_id = unity_fid(a->unity_id);
+      e.fields = {{"ViewPosition", unity_vec3_x(a->view_position)}, {"lipSync", std::to_string(a->lip_sync)}, {"MouthOpenBlendShapeName", a->mouth_open_shape},
+                  {"enableEyeLook", yes(a->eye_look)}, {"customizeAnimationLayers", yes(a->customize_layers)}, {"customExpressions", yes(a->custom_expressions)},
+                  {"customEyeLookSettings/eyelidType", std::to_string(a->eyelid_type)}, {"portraitCameraPositionOffset", unity_yaml_vec3(a->portrait_offset)},
+                  {"m_Enabled", yes(a->enabled)}};
+    }
+    else if (const auto *p = dynamic_cast<const PhysBoneComponent *>(comp.get())) {
+      e.file_id = unity_fid(p->unity_id);
+      e.fields = {{"integrationType", std::to_string(p->integration_type)}, {"endpointPosition", unity_yaml_vec3(p->endpoint_position)}, {"multiChildType", std::to_string(p->multi_child_type)},
+                  {"pull", unity_yaml_num(p->pull)}, {"spring", unity_yaml_num(p->spring)}, {"stiffness", unity_yaml_num(p->stiffness)}, {"gravity", unity_yaml_num(p->gravity)},
+                  {"gravityFalloff", unity_yaml_num(p->gravity_falloff)}, {"immobileType", std::to_string(p->immobile_type)}, {"immobile", unity_yaml_num(p->immobile)},
+                  {"allowCollision", std::to_string(p->allow_collision)}, {"radius", unity_yaml_num(p->radius)}, {"limitType", std::to_string(p->limit_type)},
+                  {"maxAngleX", unity_yaml_num(p->max_angle_x)}, {"maxAngleZ", unity_yaml_num(p->max_angle_z)}, {"limitRotation", unity_yaml_vec3(p->limit_rotation)},
+                  {"allowGrabbing", std::to_string(p->allow_grabbing)}, {"allowPosing", std::to_string(p->allow_posing)}, {"grabMovement", unity_yaml_num(p->grab_movement)},
+                  {"maxStretch", unity_yaml_num(p->max_stretch)}, {"maxSquish", unity_yaml_num(p->max_squish)}, {"stretchMotion", unity_yaml_num(p->stretch_motion)},
+                  {"snapToHand", yes(p->snap_to_hand)}, {"isAnimated", yes(p->is_animated)}, {"resetWhenDisabled", yes(p->reset_when_disabled)}, {"parameter", p->parameter},
+                  {"showGizmos", yes(p->show_gizmos)}, {"boneOpacity", unity_yaml_num(p->bone_opacity)}, {"limitOpacity", unity_yaml_num(p->limit_opacity)}, {"m_Enabled", yes(p->enabled)}};
+    }
+    else if (const auto *pc = dynamic_cast<const PhysBoneColliderComponent *>(comp.get())) {
+      e.file_id = unity_fid(pc->unity_id);
+      e.fields = {{"shapeType", std::to_string(pc->shape_type)}, {"insideBounds", yes(pc->inside_bounds)}, {"radius", unity_yaml_num(pc->radius)}, {"height", unity_yaml_num(pc->height)},
+                  {"position", unity_vec3_x(pc->position)}, {"rotation", unity_quat_x(pc->rotation)}, {"bonesAsSpheres", yes(pc->bones_as_spheres)}, {"m_Enabled", yes(pc->enabled)}};
+    }
+    else if (const auto *ct = dynamic_cast<const ContactComponent *>(comp.get())) {
+      e.file_id = unity_fid(ct->unity_id);
+      e.fields = {{"shapeType", std::to_string(ct->shape_type)}, {"radius", unity_yaml_num(ct->radius)}, {"height", unity_yaml_num(ct->height)}, {"position", unity_vec3_x(ct->position)},
+                  {"rotation", unity_quat_x(ct->rotation)}, {"m_Enabled", yes(ct->enabled)}};
+      if (ct->receiver)
+        e.fields.insert(e.fields.end(), {{"allowSelf", yes(ct->allow_self)}, {"allowOthers", yes(ct->allow_others)}, {"localOnly", yes(ct->local_only)},
+                                         {"receiverType", std::to_string(ct->receiver_type)}, {"parameter", ct->parameter}, {"value", unity_yaml_num(ct->value)},
+                                         {"minVelocity", unity_yaml_num(ct->min_velocity)}});
+    }
+    else if (const auto *vc = dynamic_cast<const VRCConstraintComponent *>(comp.get())) {
+      e.file_id = unity_fid(vc->unity_id);
+      e.fields = {{"IsActive", yes(vc->is_active)}, {"GlobalWeight", unity_yaml_num(vc->global_weight)}, {"SolveInLocalSpace", yes(vc->solve_in_local_space)},
+                  {"FreezeToWorld", yes(vc->freeze_to_world)}, {"RebakeOffsetsWhenUnfrozen", yes(vc->rebake_offsets_when_unfrozen)}, {"Locked", yes(vc->locked)}, {"m_Enabled", yes(vc->enabled)}};
+      if (vc->kind == 1) e.fields.insert(e.fields.end(), {{"PositionOffset", unity_vec3_x(vc->position_offset)}, {"PositionAtRest", unity_vec3_x(vc->position_at_rest)}});
+      if (vc->kind == 2) e.fields.insert(e.fields.end(), {{"RotationOffset", unity_euler_x(vc->rotation_offset)}, {"RotationAtRest", unity_euler_x(vc->rotation_at_rest)}});
+      if (vc->kind == 3) e.fields.insert(e.fields.end(), {{"ScaleOffset", unity_yaml_vec3(vc->scale_offset)}, {"ScaleAtRest", unity_yaml_vec3(vc->scale_at_rest)}});
+      static const char *axes[4][3] = {{"", "", ""}, {"AffectsPositionX", "AffectsPositionY", "AffectsPositionZ"}, {"AffectsRotationX", "AffectsRotationY", "AffectsRotationZ"},
+                                       {"AffectsScaleX", "AffectsScaleY", "AffectsScaleZ"}};
+      if (vc->kind >= 1 && vc->kind <= 3)
+        for (int k = 0; k < 3; k++) e.fields.push_back({axes[vc->kind][k], yes(vc->affects[k])});
+      if (vc->kind == 0)
+        for (int k = 0; k < 3; k++) e.fields.push_back({axes[1][k], yes(vc->affects[k])}), e.fields.push_back({axes[2][k], yes(vc->affects_rotation[k])});
+    }
+    else if (const auto *an = dynamic_cast<const AnimatorComponent *>(comp.get())) {
+      e.file_id = unity_fid(an->unity_id);
+      e.fields = {{"m_ApplyRootMotion", yes(an->apply_root_motion)}, {"m_UpdateMode", std::to_string(an->update_mode)}, {"m_CullingMode", std::to_string(an->culling_mode)},
+                  {"m_Enabled", yes(an->enabled)}};
+    }
+    else continue;
+    if (e.file_id) out.push_back(e);
+  }
+}
+}  // namespace
+
 void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out) {
+  avatar_component_edits(g, out);  // (round 402)
   if (const Camera *c = g.get<Camera>()) {
     UnityEdit e;
     e.class_id = 20, e.game_object = game_object;

@@ -162,6 +162,7 @@ void Material::reflect(Reflector &r) {
   r.help("Toon: the anime / cel look (Goo Engine; Blender: Shader to RGB + Color Ramp) - light in flat tones with a\n"
          "hard edge, a shadow color, a hard highlight and a rim light, in every renderer. Add an Outline component\n"
          "for the black lines.");
+  if (r.all_fields() || shading_model == 1) reflect_liltoon(r);  // (round 402)
   if (r.all_fields() || shading_model == 1) {
     if (r.group("Toon", true)) {
       static const char *styles[] = {"Classic", "Guilty Gear", "Soft Anime", "Painterly", "Manga"};
@@ -239,6 +240,106 @@ void Material::reflect(Reflector &r) {
 }
 
 /* Round 331: the Volume (fog) settings, shown with the Volume surface (appended: edits match by order). */
+/* Round 402 (ADR 0100): lilToon's fields, by lilToon's names; saved and sent only when the block is on. */
+void Material::reflect_liltoon(Reflector &r) {
+  static const char *blends[] = {"Normal", "Add", "Screen", "Multiply"};
+  if (!r.group("lilToon", lil.on)) return;
+  r.field("lilToon", lil.on);
+  r.help("lilToon's lighting model (VRChat's avatars): the two shadow tones with their borders and blurs, the border color, the rim,\n"
+         "the backlight, a MatCap, the emission and the light limits, shaded by lilToon's own formulas - the CPU views, F12 and the\n"
+         "path tracers exact, the GPU views through the Toon fields. A lilToon material from Unity turns it on; Live Link and Export\n"
+         "Unity Package write a lilToon material back when the project has lilToon.");
+  if (lil.on) {
+    r.field("Lil Light Min Limit", lil.light_min, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Light Max Limit", lil.light_max, 0.01f, 0.0f, 10.0f);
+    r.help("The light's color (the main light plus the ambient) clamped: lilToon's floor keeps an avatar readable in a dark world,\n"
+           "its ceiling keeps it from blowing out in a bright one.");
+    r.field("Lil Monochrome Lighting", lil.monochrome, 0.01f, 0.0f, 1.0f);
+    r.field("Lil As Unlit", lil.as_unlit, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Shadow Env Strength", lil.shadow_env, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Use Shadow", lil.shadow);
+    r.field("Lil Shadow Border", lil.border, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Shadow Blur", lil.blur, 0.01f, 0.0f, 1.0f);
+    r.help("Where the 1st shadow starts, in N.L x 0.5 + 0.5 (0.5: the terminator), and how wide its edge is.");
+    r.field("Lil Shadow Strength", lil.strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Shadow Receive", lil.receive, 0.01f, 0.0f, 1.0f);
+    r.help("How much the cast shadows of the lights darken the 1st shadow (0: only the form's own shading).");
+    r.field("Lil Shadow Main Strength", lil.main_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Shadow Border Range", lil.border_range, 0.01f, 0.0f, 1.0f);
+    r.color("Lil Shadow Color", lil.shadow_color);
+    r.texture("Lil Shadow Color Tex", lil.shadow_color_tex);
+    r.texture("Lil Shadow Strength Mask", lil.strength_mask);
+    r.texture("Lil Shadow Border Mask", lil.border_mask);
+    r.help("lilToon's AO map: red moves the 1st shadow's border, green the 2nd's (black: always in shadow).");
+    r.field("Lil Shadow Post AO", lil.post_ao);
+    r.field("Lil Shadow 2nd Border", lil.border2, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Shadow 2nd Blur", lil.blur2, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Shadow 2nd Receive", lil.receive2, 0.01f, 0.0f, 1.0f);
+    r.color_alpha("Lil Shadow 2nd Color", lil.shadow2_color, "Lil Shadow 2nd Weight", lil.shadow2_alpha);
+    r.texture("Lil Shadow 2nd Color Tex", lil.shadow2_color_tex);
+    r.color("Lil Shadow Border Color", lil.border_color);
+    r.help("A line along the terminator over Border Range (lilToon's warm edge between light and shadow).");
+    r.field("Lil Backface Force Shadow", lil.backface_force_shadow, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Use Rim", lil.rim);
+    r.color_alpha("Lil Rim Color", lil.rim_color, "Lil Rim Alpha", lil.rim_alpha);
+    r.texture("Lil Rim Color Tex", lil.rim_color_tex);
+    r.field("Lil Rim Main Strength", lil.rim_main_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Fresnel Power", lil.rim_fresnel, 0.05f, 0.01f, 50.0f);
+    r.field("Lil Rim Border", lil.rim_border, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Blur", lil.rim_blur, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Enable Lighting", lil.rim_enable_lighting, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Shadow Mask", lil.rim_shadow_mask, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Backface Mask", lil.rim_backface_mask, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Dir Strength", lil.rim_dir_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Dir Range", lil.rim_dir_range, 0.01f, -1.0f, 1.0f);
+    r.field("Lil Rim Indir Range", lil.rim_indir_range, 0.01f, -1.0f, 1.0f);
+    r.field("Lil Rim Indir Border", lil.rim_indir_border, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Rim Indir Blur", lil.rim_indir_blur, 0.01f, 0.0f, 1.0f);
+    r.color_alpha("Lil Rim Indir Color", lil.rim_indir_color, "Lil Rim Indir Alpha", lil.rim_indir_alpha);
+    r.enumeration("Lil Rim Blend Mode", lil.rim_blend_mode, blends, 4);
+    r.field("Lil Use Backlight", lil.backlight);
+    r.color_alpha("Lil Backlight Color", lil.backlight_color, "Lil Backlight Alpha", lil.backlight_alpha);
+    r.texture("Lil Backlight Tex", lil.backlight_tex);
+    r.field("Lil Backlight Main Strength", lil.backlight_main_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Backlight Receive Shadow", lil.backlight_receive_shadow, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Backlight Backface Mask", lil.backlight_backface_mask, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Backlight Border", lil.backlight_border, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Backlight Blur", lil.backlight_blur, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Backlight Directivity", lil.backlight_directivity, 0.1f, 0.0f, 100.0f);
+    r.field("Lil Backlight View Strength", lil.backlight_view_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Use MatCap", lil.matcap);
+    r.texture("Lil MatCap Tex", lil.matcap_tex);
+    r.color_alpha("Lil MatCap Color", lil.matcap_color, "Lil MatCap Alpha", lil.matcap_alpha);
+    r.field("Lil MatCap Blend", lil.matcap_blend, 0.01f, 0.0f, 1.0f);
+    r.texture("Lil MatCap Mask", lil.matcap_mask);
+    r.enumeration("Lil MatCap Blend Mode", lil.matcap_blend_mode, blends, 4);
+    r.field("Lil MatCap Enable Lighting", lil.matcap_enable_lighting, 0.01f, 0.0f, 1.0f);
+    r.field("Lil MatCap Shadow Mask", lil.matcap_shadow_mask, 0.01f, 0.0f, 1.0f);
+    r.field("Lil MatCap Backface Mask", lil.matcap_backface_mask, 0.01f, 0.0f, 1.0f);
+    r.field("Lil MatCap Main Strength", lil.matcap_main_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Use Emission", lil.emission);
+    r.texture("Lil Emission Map", lil.emission_map);
+    r.color_alpha("Lil Emission Color", lil.emission_color, "Lil Emission Alpha", lil.emission_alpha);
+    r.field("Lil Emission Blend", lil.emission_blend, 0.01f, 0.0f, 1.0f);
+    r.texture("Lil Emission Blend Mask", lil.emission_blend_mask);
+    r.enumeration("Lil Emission Blend Mode", lil.emission_blend_mode, blends, 4);
+    r.field("Lil Emission Main Strength", lil.emission_main_strength, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Main HSV", lil.hsv);
+    r.help("lilToon's hue shift (x, -0.5..0.5), saturation (y) and value (z) on the base map, with the gamma below.");
+    r.field("Lil Main Gamma", lil.gamma, 0.01f, 0.01f, 10.0f);
+    r.field("Lil Use Reflection", lil.reflection);
+    r.field("Lil Smoothness", lil.smoothness, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Metallic", lil.metallic, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Reflectance", lil.reflectance, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Apply Specular", lil.apply_specular);
+    r.field("Lil Apply Reflection", lil.apply_reflection);
+    r.field("Lil Specular Toon", lil.specular_toon);
+    r.field("Lil Specular Border", lil.specular_border, 0.01f, 0.0f, 1.0f);
+    r.field("Lil Specular Blur", lil.specular_blur, 0.01f, 0.0f, 1.0f);
+  }
+  r.group_end();
+}
+
 void Material::reflect_volume(Reflector &r) {
   if (!r.all_fields() && !volume()) return;
   if (r.group("Volume (Fog)", true)) {
@@ -357,6 +458,18 @@ const Material::Resolved &Material::textures() const {
   resolved_.face_shadow = load(toon ? TextureRef{face_shadow_map.path, true} : none);  // (task 0149)
   resolved_.line = load(toon ? line_map : none);
   resolved_.hatch = load(toon ? TextureRef{hatch_map.path, true} : none);
+  /* lilToon's maps (round 402): the colour textures as colours, the masks as data; only with the block on. */
+  const bool lt = liltoon();
+  resolved_.lil_shadow_tex = load(lt ? lil.shadow_color_tex : none);
+  resolved_.lil_shadow2_tex = load(lt ? lil.shadow2_color_tex : none);
+  resolved_.lil_strength_mask = load(lt ? TextureRef{lil.strength_mask.path, true} : none);
+  resolved_.lil_border_mask = load(lt ? TextureRef{lil.border_mask.path, true} : none);
+  resolved_.lil_rim_tex = load(lt ? lil.rim_color_tex : none);
+  resolved_.lil_backlight_tex = load(lt ? lil.backlight_tex : none);
+  resolved_.lil_matcap = load(lt ? lil.matcap_tex : none);
+  resolved_.lil_matcap_mask = load(lt ? TextureRef{lil.matcap_mask.path, true} : none);
+  resolved_.lil_emission = load(lt ? lil.emission_map : none);
+  resolved_.lil_emission_mask = load(lt ? TextureRef{lil.emission_blend_mask.path, true} : none);
   /* An axis material's sub-materials, resolved here with their textures (ADR 0018). One level: a sub-material that is
    * itself an axis material is used plainly; this material itself means its own maps. */
   for (int k = 0; k < 4; k++) {

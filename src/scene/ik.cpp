@@ -348,14 +348,84 @@ static bool solve_fk(Scene &scene) {
   return any;
 }
 
+/* Round 402 (ADR 0100): a VRC Parent, Position or Rotation Constraint - the sources' weighted blend (each source's world
+ * position plus its rotation times the position offset; its rotation times the rotation offset), lerped with the pose the
+ * animation gave by Global Weight; only the kind's own part, and only the axes it affects. Inactive, frozen, weightless
+ * or sourceless ones do nothing; Scale, LookAt and Aim are kept, not solved. */
+static Quat nlerp_quat(Quat a, Quat b, float t) {
+  if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0f) b = Quat(-b.x, -b.y, -b.z, -b.w);
+  Quat q(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+  const float len = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  return len > 1e-6f ? Quat(q.x / len, q.y / len, q.z / len, q.w / len) : a;
+}
+static bool solve_vrc(Scene &scene, GameObject &owner, VRCConstraintComponent &c) {
+  if (!c.enabled || !c.is_active || c.freeze_to_world || c.kind > 2 || c.sources.empty() || !(c.global_weight > 0.0f)) return false;
+  uint64_t target_id = 0;
+  GameObject *target = c.target_transform.empty() ? &owner : resolve(scene, owner, c.target_transform, target_id);
+  if (!target) return false;
+  Vec3 pos(0.0f);
+  Quat rot;
+  float total = 0.0f;
+  bool first = true;
+  for (auto &s : c.sources) {
+    uint64_t sid = 0;
+    GameObject *src = s.transform.empty() ? nullptr : resolve(scene, owner, s.transform, sid);
+    if (!src || src == target || !(s.weight > 0.0f)) continue;
+    const Quat sr = src->world_rotation();
+    const Quat r = c.kind == 0 ? sr * Quat::euler(s.rotation_offset) : c.kind == 2 ? sr * Quat::euler(c.rotation_offset) : sr;
+    const Vec3 p = c.kind == 0 ? src->world_position() + sr.rotate(s.position_offset) : src->world_position() + sr.rotate(c.position_offset);
+    const float w = s.weight;
+    pos = pos + p * w;
+    rot = first ? r : nlerp_quat(rot, r, w / (total + w));
+    total += w;
+    first = false;
+  }
+  if (!(total > 0.0f)) return false;
+  pos = pos / total;
+  const float t = std::min(1.0f, c.global_weight);
+  bool any = false;
+  /* The blend starts from the At Rest pose (the constraint's own, in the target's local space), as Unity's and VRChat's
+   * do - never from the pose the last frame left, which would creep to full weight (review 402). */
+  const GameObject *parent = target->parent;
+  if (c.kind == 0 || c.kind == 1) {
+    const Vec3 rest = parent ? parent->world_matrix().point(c.position_at_rest) : c.position_at_rest;
+    const Vec3 have = target->world_position();
+    Vec3 want = lerp(rest, pos, t);
+    for (int k = 0; k < 3; k++)
+      if (!c.affects[k]) want[k] = rest[k];
+    if (length(want - have) > 1e-6f) target->set_world_position(want), any = true;
+  }
+  if (c.kind == 0 || c.kind == 2) {
+    const bool *ax = c.kind == 0 ? c.affects_rotation : c.affects;
+    const Quat rest_local = Quat::euler(c.rotation_at_rest);
+    const Quat rest = parent ? parent->world_rotation() * rest_local : rest_local;
+    Quat want = nlerp_quat(rest, rot, t);
+    if (!ax[0] || !ax[1] || !ax[2]) {  // (an axis left alone keeps its At Rest angle, in the local frame)
+      const Quat local = parent ? parent->world_rotation().conjugate() * want : want;
+      Vec3 e = local.to_euler();
+      for (int k = 0; k < 3; k++)
+        if (!ax[k]) e[k] = c.rotation_at_rest[k];
+      want = parent ? parent->world_rotation() * Quat::euler(e) : Quat::euler(e);
+    }
+    const Quat have = target->world_rotation();
+    if (std::fabs(want.x * have.x + want.y * have.y + want.z * have.z + want.w * have.w) < 0.999999f) target->set_world_rotation(want), any = true;
+  }
+  return any;
+}
+
 bool solve_constraints(Scene &scene) {
   const bool fk = RigControl::live.load(std::memory_order_relaxed) != 0 && solve_fk(scene);
-  if (IKConstraint::live.load(std::memory_order_relaxed) == 0) return fk;  // no IK anywhere: no walk (most scenes)
   bool any = fk;
-  scene.for_each([&](GameObject &g) {
-    for (auto &c : g.components)
-      if (std::strcmp(c->type_name(), IKConstraint::kName) == 0) any = solve_one(*static_cast<IKConstraint *>(c.get())) || any;
-  });
+  if (IKConstraint::live.load(std::memory_order_relaxed) != 0)
+    scene.for_each([&](GameObject &g) {
+      for (auto &c : g.components)
+        if (std::strcmp(c->type_name(), IKConstraint::kName) == 0) any = solve_one(*static_cast<IKConstraint *>(c.get())) || any;
+    });
+  if (VRCConstraintComponent::live.load(std::memory_order_relaxed) != 0)  // (round 402: after FK and IK, as Unity's constraints run after the animator)
+    scene.for_each([&](GameObject &g) {
+      for (auto &c : g.components)
+        if (std::strcmp(c->type_name(), VRCConstraintComponent::kName) == 0) any = solve_vrc(scene, g, *static_cast<VRCConstraintComponent *>(c.get())) || any;
+    });
   return any;
 }
 

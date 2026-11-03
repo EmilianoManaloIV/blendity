@@ -66,6 +66,7 @@ namespace Blendity.LiveLink
                 case "reflectionprobe": OnReflectionProbe(j); break;  // (round 401: LiveLinkWorld.cs)
                 case "lightvolumebake": OnLightVolumeBake(j, m.Bin); break;  // (round 398)
                 case "avatar": OnAvatar(j); break;  // (round 381: LiveLinkVRChat.cs)
+                case "vrccomponents": OnVrcComponents(j); break;  // (round 402: LiveLinkVRChat.cs)
                 case "springs": OnSprings(j); break;
                 case "light": OnLight(j); break;
                 case "camera": OnCamera(j); break;
@@ -486,6 +487,70 @@ namespace Blendity.LiveLink
             SetLods(id, go);  // (round 380: its levels wear the same)
         }
 
+        /* Round 402 (ADR 0100): a material whose lilToon block is on becomes a lilToon material when the project has the
+         * shader (its cutout / transparent variants by the surface) - every field of the block by lilToon's property name,
+         * the colours as gamma (Material.SetColor linearises them), the vectors as they are; its textures stay the ones the
+         * main maps carried (the block's own textures aren't sent). Without lilToon in the project the Standard / URP Lit
+         * material stands, with the toon JSON as before. */
+        static readonly string[,] LilFloats = {
+            {"Lil Light Min Limit", "_LightMinLimit"}, {"Lil Light Max Limit", "_LightMaxLimit"}, {"Lil Monochrome Lighting", "_MonochromeLighting"}, {"Lil As Unlit", "_AsUnlit"},
+            {"Lil Shadow Env Strength", "_ShadowEnvStrength"}, {"Lil Shadow Border", "_ShadowBorder"}, {"Lil Shadow Blur", "_ShadowBlur"}, {"Lil Shadow Strength", "_ShadowStrength"},
+            {"Lil Shadow Receive", "_ShadowReceive"}, {"Lil Shadow Main Strength", "_ShadowMainStrength"}, {"Lil Shadow Border Range", "_ShadowBorderRange"},
+            {"Lil Shadow 2nd Border", "_Shadow2ndBorder"}, {"Lil Shadow 2nd Blur", "_Shadow2ndBlur"}, {"Lil Shadow 2nd Receive", "_Shadow2ndReceive"},
+            {"Lil Backface Force Shadow", "_BackfaceForceShadow"}, {"Lil Rim Main Strength", "_RimMainStrength"}, {"Lil Rim Fresnel Power", "_RimFresnelPower"},
+            {"Lil Rim Border", "_RimBorder"}, {"Lil Rim Blur", "_RimBlur"}, {"Lil Rim Enable Lighting", "_RimEnableLighting"}, {"Lil Rim Shadow Mask", "_RimShadowMask"},
+            {"Lil Rim Backface Mask", "_RimBackfaceMask"}, {"Lil Rim Dir Strength", "_RimDirStrength"}, {"Lil Rim Dir Range", "_RimDirRange"}, {"Lil Rim Indir Range", "_RimIndirRange"},
+            {"Lil Rim Indir Border", "_RimIndirBorder"}, {"Lil Rim Indir Blur", "_RimIndirBlur"}, {"Lil Rim Blend Mode", "_RimBlendMode"},
+            {"Lil Backlight Main Strength", "_BacklightMainStrength"}, {"Lil Backlight Receive Shadow", "_BacklightReceiveShadow"}, {"Lil Backlight Backface Mask", "_BacklightBackfaceMask"},
+            {"Lil Backlight Border", "_BacklightBorder"}, {"Lil Backlight Blur", "_BacklightBlur"}, {"Lil Backlight Directivity", "_BacklightDirectivity"}, {"Lil Backlight View Strength", "_BacklightViewStrength"},
+            {"Lil MatCap Blend", "_MatCapBlend"}, {"Lil MatCap Blend Mode", "_MatCapBlendMode"}, {"Lil MatCap Enable Lighting", "_MatCapEnableLighting"}, {"Lil MatCap Shadow Mask", "_MatCapShadowMask"},
+            {"Lil MatCap Backface Mask", "_MatCapBackfaceMask"}, {"Lil MatCap Main Strength", "_MatCapMainStrength"}, {"Lil Emission Blend", "_EmissionBlend"}, {"Lil Emission Blend Mode", "_EmissionBlendMode"},
+            {"Lil Emission Main Strength", "_EmissionMainStrength"}, {"Lil Smoothness", "_Smoothness"}, {"Lil Metallic", "_Metallic"}, {"Lil Reflectance", "_Reflectance"},
+            {"Lil Specular Border", "_SpecularBorder"}, {"Lil Specular Blur", "_SpecularBlur"},
+        };
+        static readonly string[,] LilToggles = {
+            {"Lil Use Shadow", "_UseShadow"}, {"Lil Shadow Post AO", "_ShadowPostAO"}, {"Lil Use Rim", "_UseRim"}, {"Lil Use Backlight", "_UseBacklight"}, {"Lil Use MatCap", "_UseMatCap"},
+            {"Lil Use Emission", "_UseEmission"}, {"Lil Use Reflection", "_UseReflection"}, {"Lil Apply Specular", "_ApplySpecular"}, {"Lil Apply Reflection", "_ApplyReflection"},
+            {"Lil Specular Toon", "_SpecularToon"},
+        };
+        static readonly string[,] LilColors = {  // (the colour's key, its alpha's key, lilToon's property)
+            {"Lil Shadow Color", "", "_ShadowColor"}, {"Lil Shadow 2nd Color", "Lil Shadow 2nd Weight", "_Shadow2ndColor"}, {"Lil Shadow Border Color", "", "_ShadowBorderColor"},
+            {"Lil Rim Color", "Lil Rim Alpha", "_RimColor"}, {"Lil Rim Indir Color", "Lil Rim Indir Alpha", "_RimIndirColor"}, {"Lil Backlight Color", "Lil Backlight Alpha", "_BacklightColor"},
+            {"Lil MatCap Color", "Lil MatCap Alpha", "_MatCapColor"}, {"Lil Emission Color", "Lil Emission Alpha", "_EmissionColor"},
+        };
+        static void LilToonMaterial(Material m, Dictionary<string, object> toon)
+        {
+            if (toon == null || !toon.GetBool("lilToon"))
+                return;
+            var shader = Shader.Find("lilToon");
+            if (shader == null)
+                return;
+            string mode = m.GetFloat("_Mode") >= 2f ? "Hidden/lilToonTransparent" : m.GetFloat("_Mode") >= 1f ? "Hidden/lilToonCutout" : "lilToon";  // (lilToon's variants are hidden shaders; Fade is transparent too)
+            var variant = Shader.Find(mode) ?? shader;
+            if (m.shader != variant)
+                m.shader = variant;
+            for (int k = 0; k < LilFloats.GetLength(0); k++)
+                if (toon.ContainsKey(LilFloats[k, 0]) && m.HasProperty(LilFloats[k, 1]))
+                    m.SetFloat(LilFloats[k, 1], (float)toon.GetNumber(LilFloats[k, 0], 0));
+            for (int k = 0; k < LilToggles.GetLength(0); k++)
+                if (toon.ContainsKey(LilToggles[k, 0]) && m.HasProperty(LilToggles[k, 1]))
+                    m.SetFloat(LilToggles[k, 1], toon.GetBool(LilToggles[k, 0]) ? 1f : 0f);
+            for (int k = 0; k < LilColors.GetLength(0); k++)
+            {
+                if (!toon.ContainsKey(LilColors[k, 0]) || !m.HasProperty(LilColors[k, 2]))
+                    continue;
+                var c = toon.GetFloats(LilColors[k, 0], 1f, 1f, 1f);
+                var color = new Color(c[0], c[1], c[2]).gamma;  // (linear in Blendity; a Color property takes gamma)
+                color.a = LilColors[k, 1].Length > 0 ? (float)toon.GetNumber(LilColors[k, 1], 1) : 1f;
+                m.SetColor(LilColors[k, 2], color);
+            }
+            var hsv = toon.GetFloats("Lil Main HSV", 0f, 1f, 1f);
+            if (m.HasProperty("_MainTexHSVG"))
+                m.SetVector("_MainTexHSVG", new Vector4(hsv[0], hsv[1], hsv[2], (float)toon.GetNumber("Lil Main Gamma", 1)));
+            if (m.HasProperty("_Cull"))
+                m.SetFloat("_Cull", m.GetFloat("_Cull"));  // (as SetSurface left it)
+        }
+
         static Shader LitShader()
         {
             bool srp = GraphicsSettings.currentRenderPipeline != null;
@@ -535,6 +600,7 @@ namespace Blendity.LiveLink
                 m.EnableKeyword("_EMISSION");
             var toon = ext != null ? ext.GetDict("BLENDITY_toon") : null;
             toonFields[key] = toon != null ? Serialize(toon) : "";
+            LilToonMaterial(m, toon);  // (round 402: a lilToon material when the block is on and the project has lilToon)
             foreach (var kv in slots)
                 if (System.Array.IndexOf(kv.Value, key) >= 0)
                     AssignMaterials(kv.Key);

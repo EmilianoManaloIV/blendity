@@ -1954,7 +1954,13 @@ void Editor::run_console_command(const std::string &line) {
       uv_op("mark_seam");
     }
   }
-  else if (c == "render") start_final_render();
+  else if (c == "render") {
+    /* render [wait]: F12; `wait` (a script's, headless) steps frames till the render is done, so a saverender after it
+     * saves the whole picture (round 402: a big raster render is spread over frames too). */
+    start_final_render();
+    if (headless_ && to_lower(arg(1, "")) == "wait")
+      for (int i = 0; i < 100000 && rendering_; i++) step_frame_headless();
+  }
   else if (c == "probes") {
     /* probes show|hide: the probe volume's probes in the Scene view. */
     scene_->lighting.show_probes = to_lower(arg(1, "show")) != "hide";

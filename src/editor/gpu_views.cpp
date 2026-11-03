@@ -347,6 +347,23 @@ void raster_toon(gpu::RasterInstance &in, const Material &m) {
   in.toon_wrap = clean(m.toon_wrap, 0.0f, 1.0f);
   in.toon_rim_side = m.toon_rim_side;
   in.toon_key_light_only = m.toon_key_light_only;
+  if (!m.liltoon()) return;
+  /* Round 402 (ADR 0100): a lilToon material in the GPU views through derived toon fields - the 1st shadow's border and
+   * blur as the threshold and softness (lilToon's are in N.L x 0.5 + 0.5), its colour as the shadow colour, lilToon's rim
+   * (its fresnel's border as a width), one flat ambient; the exact model is the CPU views' and F12's. */
+  const LilToonSettings &l = m.lil;
+  in.toon_bands = 1;
+  in.toon_threshold = clean(l.border * 2.0f - 1.0f, 0.0f, 0.95f);
+  in.toon_softness = clean(l.blur, 0.0f, 0.5f);
+  set3(in.toon_shadow, l.shadow ? lerp(Vec3(1.0f), l.shadow_color, clean(l.strength, 0.0f, 1.0f)) : Vec3(1.0f));
+  in.toon_specular_size = 0.0f;
+  in.toon_rim_width = l.rim ? clean(1.0f - std::pow(clean(l.rim_border, 0.0f, 1.0f), 1.0f / std::max(0.01f, l.rim_fresnel)), 0.0f, 1.0f) : 0.0f;
+  set3(in.toon_rim, l.rim_color);
+  in.toon_rim_strength = clean(l.rim_alpha, 0.0f, 10.0f);
+  in.toon_rim_side = 0;
+  in.toon_flat_ambient = true;
+  in.toon_wrap = 0.0f;
+  in.toon_key_light_only = false;
 }
 
 /* Task 0195: an instance as Solid shading draws it (the CPU raster's Gouraud mode): the object's one colour and

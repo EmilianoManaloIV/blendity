@@ -224,6 +224,18 @@ void register_builtin_components() {
                    "Godot's node paths in a .tscn; Blender has none");
   reg<EngineComponent>("Scripts", "A component of another engine, kept as it is: a Unity script (C# or UdonSharp), VRChat's components - written back unchanged, never run here (round 370).",
                        "Unity's MonoBehaviour and built-in components; Blender has no counterpart (its add-ons' data is custom properties)");
+  reg<AvatarDescriptorComponent>("VRChat", "VRChat's Avatar Descriptor: the view position, lip sync and visemes, eye look and eyelids, the playable layers and expressions - Unity's fields, imported in full, sent over Live Link and written back (round 402).",
+                                 "VRC SDK's VRCAvatarDescriptor; Blender has no counterpart");
+  reg<PhysBoneComponent>("VRChat", "VRChat's PhysBone, every field (its SpringBone beside it is the preview's physics) - sent over Live Link and written back (round 402).",
+                         "VRC SDK's VRCPhysBone; Blender: a spring bone add-on (Wiggle)");
+  reg<PhysBoneColliderComponent>("VRChat", "VRChat's PhysBone Collider: a sphere, capsule or plane the PhysBones collide with - sent over Live Link and written back (round 402).",
+                                 "VRC SDK's VRCPhysBoneCollider; Blender: a collision object");
+  reg<ContactComponent>("VRChat", "VRChat's Contact Sender or Receiver: a sphere or capsule with its tags, a receiver's parameter - sent over Live Link and written back (round 402).",
+                        "VRC SDK's VRCContactSender / VRCContactReceiver; Blender has no counterpart");
+  reg<VRCConstraintComponent>("VRChat", "VRChat's Parent, Position, Rotation, Scale, LookAt or Aim Constraint: its sources with weights and offsets, solved here for Parent, Position and Rotation (round 402).",
+                              "VRC SDK's VRCParentConstraint and kin; Blender's Child Of / Copy Location / Copy Rotation constraints");
+  reg<AnimatorComponent>("Scripts", "Unity's Animator: its controller and avatar assets, root motion, update and culling modes - kept, shown, written back (round 402).",
+                         "Unity's Animator; Blender's NLA on the armature");
   reg<LightVolumeComponent>("Rendering", "A VRC Light Volume: VRChat's baked-lighting box - its object's scale is the box - sent to Unity as red.sim.lightvolumes' Light Volume; Unity bakes it, or Blendity (round 397).",
                             "VRC Light Volumes' Light Volume (red.sim.lightvolumes); Unity's Light Probe Group; Blender's Irradiance Volume");
   reg<ReflectionProbeComponent>("Rendering", "Unity's Reflection Probe: a cubemap of the room baked here, which the metal and glass in its box reflect - Generate Lighting bakes it, or Unity's own bake comes with Unity's lightmaps (round 401).",
@@ -1795,6 +1807,221 @@ void UnityOrigin::reflect(Reflector &r) {
   r.field("Nested", nested);
   r.help("From a prefab inside the file: its edits aren't written back (they'd change every copy of that prefab).");
 }
+
+/* Round 402 (ADR 0100): VRChat's avatar components, Unity's fields by Unity's names. */
+namespace {
+void quat_field(Reflector &r, const char *name, Quat &q) {
+  Vec3 e = q.to_euler();
+  const Vec3 before = e;
+  r.field(name, e);
+  if (length(e - before) < 1e-6f && !r.all_fields()) return;  // (unchanged in the Inspector: the quaternion stays as it is, no drift through the angles)
+  q = Quat::euler(e);
+}
+}  // namespace
+
+void AvatarDescriptorComponent::reflect(Reflector &r) {
+  static const char *lips[] = {"Default", "Jaw Flap Bone", "Jaw Flap Blend Shape", "Viseme Blend Shapes", "Viseme Parameter Only"};
+  static const char *lids[] = {"None", "Bones", "Blend Shapes"};
+  static const char *looks[] = {"Looking Straight", "Looking Up", "Looking Down", "Looking Left", "Looking Right"};
+  static const char *layers[] = {"Base", "Additive", "Gesture", "Action", "FX", "Sitting", "TPose", "IKPose"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.field("View Position", view_position);
+  r.help("Where the eyes are, from the avatar's root (metres): VRChat's camera sits here.");
+  r.enumeration("Lip Sync", lip_sync, lips, 5);
+  if (r.all_fields() || lip_sync == 1) {
+    r.object("Jaw Bone", jaw_bone);
+    quat_field(r, "Jaw Closed", jaw_closed);
+    quat_field(r, "Jaw Open", jaw_open);
+  }
+  if (r.all_fields() || lip_sync == 2 || lip_sync == 3) {
+    r.object("Viseme Mesh", viseme_mesh, "MeshRenderer");
+    r.text("Mouth Open Shape", mouth_open_shape);
+  }
+  if (r.all_fields() || lip_sync == 2) r.text("Jaw Flap Shape", jaw_flap_shape);
+  if (r.all_fields() || lip_sync == 3) {
+    static const char *names[15] = {"Viseme sil", "Viseme PP", "Viseme FF", "Viseme TH", "Viseme DD", "Viseme kk", "Viseme CH", "Viseme SS",
+                                    "Viseme nn", "Viseme RR", "Viseme aa", "Viseme E", "Viseme ih", "Viseme oh", "Viseme ou"};
+    for (int k = 0; k < 15; k++) r.text(names[k], visemes[k]);
+  }
+  r.field("Eye Look", eye_look);
+  if (r.all_fields() || eye_look) {
+    r.field("Eye Confidence", eye_confidence, 0.01f, 0.0f, 1.0f);
+    r.field("Eye Excitement", eye_excitement, 0.01f, 0.0f, 1.0f);
+    r.object("Left Eye", left_eye);
+    r.object("Right Eye", right_eye);
+    for (int k = 0; k < 5; k++) {
+      std::string n = looks[k];
+      r.field((n + " Linked").c_str(), look_linked[k]);
+      quat_field(r, (n + " Left").c_str(), look_left[k]);
+      quat_field(r, (n + " Right").c_str(), look_right[k]);
+    }
+    r.enumeration("Eyelid Type", eyelid_type, lids, 3);
+    if (r.all_fields() || eyelid_type == 1) {
+      static const char *bones[4] = {"Upper Left Eyelid", "Upper Right Eyelid", "Lower Left Eyelid", "Lower Right Eyelid"};
+      for (int k = 0; k < 4; k++) r.object(bones[k], eyelid_bones[k]);
+    }
+    if (r.all_fields() || eyelid_type == 2) {
+      r.object("Eyelids Mesh", eyelids_mesh, "MeshRenderer");
+      r.field("Blink Shape", eyelid_shapes[0], -1, 100000);
+      r.field("Looking Up Shape", eyelid_shapes[1], -1, 100000);
+      r.field("Looking Down Shape", eyelid_shapes[2], -1, 100000);
+      r.help("The face mesh's blend shape indices (-1: none), as VRChat's eyelids use them.");
+    }
+  }
+  r.field("Customize Layers", customize_layers);
+  if (r.all_fields() || customize_layers) {
+    for (int k = 0; k < 8; k++) {
+      Layer &l = k < 5 ? base_layers[k] : special_layers[k - 5];
+      const std::string n = std::string(layers[k]) + " Layer ";
+      r.field((n + "Enabled").c_str(), l.enabled);
+      r.field((n + "Type").c_str(), l.type, 0, 8);
+      r.asset((n + "Controller").c_str(), l.controller, ".controller", "Animator Controller");
+      r.asset((n + "Mask").c_str(), l.mask, ".mask", "Avatar Mask");
+      r.field((n + "Default").c_str(), l.is_default);
+    }
+  }
+  r.field("Custom Expressions", custom_expressions);
+  if (r.all_fields() || custom_expressions) {
+    r.asset("Expressions Menu", expressions_menu, ".asset", "VRC Expressions Menu");
+    r.asset("Expression Parameters", expression_parameters, ".asset", "VRC Expression Parameters");
+  }
+  r.field("Portrait Offset", portrait_offset);
+  quat_field(r, "Portrait Rotation", portrait_rotation);
+  r.text("Unity Version", unity_version);
+}
+
+void PhysBoneComponent::reflect(Reflector &r) {
+  static const char *integrations[] = {"Simplified", "Advanced"};
+  static const char *children[] = {"Ignore", "First", "Average"};
+  static const char *immobiles[] = {"All Motion", "World (Experimental)"};
+  static const char *allows[] = {"False", "True", "Other"};
+  static const char *limits[] = {"None", "Angle", "Hinge", "Polar"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.field("Version", version, 0, 1);
+  r.enumeration("Integration Type", integration_type, integrations, 2);
+  r.object("Root Transform", root_transform);
+  r.text("Ignore Transforms", ignore_transforms);
+  r.help("Objects the chain leaves alone, their names joined by ';'.");
+  r.field("Endpoint Position", endpoint_position);
+  r.enumeration("Multi Child Type", multi_child_type, children, 3);
+  r.field("Pull", pull, 0.01f, 0.0f, 1.0f);
+  r.field("Spring", spring, 0.01f, 0.0f, 1.0f);
+  if (r.all_fields() || integration_type == 1) r.field("Stiffness", stiffness, 0.01f, 0.0f, 1.0f);
+  r.field("Gravity", gravity, 0.01f, -1.0f, 1.0f);
+  r.field("Gravity Falloff", gravity_falloff, 0.01f, 0.0f, 1.0f);
+  r.enumeration("Immobile Type", immobile_type, immobiles, 2);
+  r.field("Immobile", immobile, 0.01f, 0.0f, 1.0f);
+  r.enumeration("Allow Collision", allow_collision, allows, 3);
+  r.field("Radius", radius, 0.001f, 0.0f, 10.0f);
+  r.text("Colliders", colliders);
+  r.help("The PhysBone Colliders it collides with, their objects' names joined by ';'.");
+  r.enumeration("Limit Type", limit_type, limits, 4);
+  if (r.all_fields() || limit_type != 0) {
+    r.field("Max Angle X", max_angle_x, 0.5f, 0.0f, 180.0f);
+    r.field("Max Angle Z", max_angle_z, 0.5f, 0.0f, 180.0f);
+    r.field("Limit Rotation", limit_rotation);
+  }
+  r.enumeration("Allow Grabbing", allow_grabbing, allows, 3);
+  r.enumeration("Allow Posing", allow_posing, allows, 3);
+  r.field("Grab Movement", grab_movement, 0.01f, 0.0f, 1.0f);
+  r.field("Max Stretch", max_stretch, 0.01f, 0.0f, 100.0f);
+  r.field("Max Squish", max_squish, 0.01f, 0.0f, 1.0f);
+  r.field("Stretch Motion", stretch_motion, 0.01f, 0.0f, 1.0f);
+  r.field("Snap To Hand", snap_to_hand);
+  r.field("Is Animated", is_animated);
+  r.field("Reset When Disabled", reset_when_disabled);
+  r.text("Parameter", parameter);
+  r.field("Show Gizmos", show_gizmos);
+  r.field("Bone Opacity", bone_opacity, 0.01f, 0.0f, 1.0f);
+  r.field("Limit Opacity", limit_opacity, 0.01f, 0.0f, 1.0f);
+}
+
+void PhysBoneColliderComponent::reflect(Reflector &r) {
+  static const char *shapes[] = {"Sphere", "Capsule", "Plane"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.object("Root Transform", root_transform);
+  r.enumeration("Shape Type", shape_type, shapes, 3);
+  r.field("Inside Bounds", inside_bounds);
+  r.field("Radius", radius, 0.001f, 0.0f, 100.0f);
+  if (r.all_fields() || shape_type == 1) r.field("Height", height, 0.001f, 0.0f, 100.0f);
+  r.field("Position", position);
+  quat_field(r, "Rotation", rotation);
+  r.field("Bones As Spheres", bones_as_spheres);
+}
+
+void ContactComponent::reflect(Reflector &r) {
+  static const char *shapes[] = {"Sphere", "Capsule"};
+  static const char *types[] = {"Constant", "On Enter", "Proximity"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.field("Receiver", receiver);
+  r.object("Root Transform", root_transform);
+  r.enumeration("Shape Type", shape_type, shapes, 2);
+  r.field("Radius", radius, 0.001f, 0.0f, 100.0f);
+  if (r.all_fields() || shape_type == 1) r.field("Height", height, 0.001f, 0.0f, 100.0f);
+  r.field("Position", position);
+  quat_field(r, "Rotation", rotation);
+  r.text("Collision Tags", tags);
+  r.help("The tags, joined by ';' (Head, Hand, HandL, Finger ...).");
+  if (r.all_fields() || receiver) {
+    r.field("Allow Self", allow_self);
+    r.field("Allow Others", allow_others);
+    r.field("Local Only", local_only);
+    r.enumeration("Receiver Type", receiver_type, types, 3);
+    r.text("Parameter", parameter);
+    r.field("Value", value, 0.01f, -100.0f, 100.0f);
+    r.field("Min Velocity", min_velocity, 0.01f, 0.0f, 100.0f);
+  }
+}
+
+void VRCConstraintComponent::reflect(Reflector &r) {
+  static const char *kinds[] = {"Parent", "Position", "Rotation", "Scale", "LookAt", "Aim"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.enumeration("Kind", kind, kinds, 6);
+  r.field("Is Active", is_active);
+  r.field("Global Weight", global_weight, 0.01f, 0.0f, 1.0f);
+  r.object("Target Transform", target_transform);
+  r.help("The object the constraint moves (none: this one).");
+  r.field("Solve In Local Space", solve_in_local_space);
+  r.field("Freeze To World", freeze_to_world);
+  r.field("Rebake Offsets When Unfrozen", rebake_offsets_when_unfrozen);
+  r.field("Locked", locked);
+  int count = (int)sources.size();
+  r.field("Sources", count, 0, 16);
+  if (count != (int)sources.size()) sources.resize((size_t)std::max(0, std::min(16, count)));
+  for (size_t k = 0; k < sources.size(); k++) {
+    const std::string n = "Source " + std::to_string(k) + " ";
+    r.object((n + "Transform").c_str(), sources[k].transform);
+    r.field((n + "Weight").c_str(), sources[k].weight, 0.01f, 0.0f, 1.0f);
+    if (r.all_fields() || kind == 0) {
+      r.field((n + "Position Offset").c_str(), sources[k].position_offset);
+      r.field((n + "Rotation Offset").c_str(), sources[k].rotation_offset);
+    }
+  }
+  if (r.all_fields() || kind == 1) r.field("Position Offset", position_offset), r.field("Position At Rest", position_at_rest);
+  if (r.all_fields() || kind == 2) r.field("Rotation Offset", rotation_offset), r.field("Rotation At Rest", rotation_at_rest);
+  if (r.all_fields() || kind == 3) r.field("Scale Offset", scale_offset), r.field("Scale At Rest", scale_at_rest);
+  r.field("Affects X", affects[0]);
+  r.field("Affects Y", affects[1]);
+  r.field("Affects Z", affects[2]);
+  if (r.all_fields() || kind == 0) {
+    r.field("Affects Rotation X", affects_rotation[0]);
+    r.field("Affects Rotation Y", affects_rotation[1]);
+    r.field("Affects Rotation Z", affects_rotation[2]);
+  }
+}
+
+void AnimatorComponent::reflect(Reflector &r) {
+  static const char *updates[] = {"Normal", "Animate Physics", "Unscaled Time"};
+  static const char *cullings[] = {"Always Animate", "Cull Update Transforms", "Cull Completely"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.asset("Controller", controller, ".controller", "Animator Controller");
+  r.asset("Avatar", avatar, ".asset", "Avatar");
+  r.field("Apply Root Motion", apply_root_motion);
+  r.enumeration("Update Mode", update_mode, updates, 3);
+  r.enumeration("Culling Mode", culling_mode, cullings, 3);
+}
+
+std::atomic<int> VRCConstraintComponent::live{0};
 
 void EngineComponent::reflect(Reflector &r) {
   r.text("Engine", engine);

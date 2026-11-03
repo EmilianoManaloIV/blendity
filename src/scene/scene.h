@@ -778,6 +778,147 @@ struct ReflectionProbeComponent : ComponentBase<ReflectionProbeComponent> {
   void world_box(const GameObject &g, Vec3 &bmin, Vec3 &bmax) const;
 };
 
+/* Round 402 (ADR 0100): VRChat's avatar components as Blendity's - Unity's fields by Unity's names, imported from their
+ * documents (the references resolved to object names and asset paths), saved with the scene, written back into their own
+ * documents by `unity_id` (the document's fileID as text; "" when made here), sent over Live Link as their own messages.
+ * The Engine Component of each stays beside it (the fields not modelled, the curves). */
+struct AvatarDescriptorComponent : ComponentBase<AvatarDescriptorComponent> {
+  static constexpr const char *kName = "VRCAvatarDescriptor";
+  std::string unity_id;
+  Vec3 view_position{0.0f, 1.6f, 0.2f};
+  int lip_sync = 0;  // 0 Default, 1 Jaw Flap Bone, 2 Jaw Flap Blend Shape, 3 Viseme Blend Shapes, 4 Viseme Parameter Only
+  std::string jaw_bone;
+  Quat jaw_closed, jaw_open;
+  std::string viseme_mesh, mouth_open_shape, jaw_flap_shape;
+  std::string visemes[15];
+  bool eye_look = false;
+  float eye_confidence = 0.5f, eye_excitement = 0.5f;
+  std::string left_eye, right_eye;
+  Quat look_left[5], look_right[5];  // straight, up, down, left, right
+  bool look_linked[5] = {true, true, true, true, true};
+  int eyelid_type = 0;  // 0 None, 1 Bones, 2 Blend Shapes
+  std::string eyelid_bones[4];  // upper left, upper right, lower left, lower right
+  std::string eyelids_mesh;
+  int eyelid_shapes[3] = {-1, -1, -1};  // blink, looking up, looking down
+  bool customize_layers = false;
+  struct Layer {
+    bool enabled = false;
+    int type = 0;
+    std::string controller, mask;
+    bool is_default = true;
+  };
+  Layer base_layers[5], special_layers[3];
+  bool custom_expressions = false;
+  std::string expressions_menu, expression_parameters;
+  Vec3 portrait_offset;
+  Quat portrait_rotation;
+  std::string unity_version;
+  /* (The import's references, resolved once every object is made; not saved.) */
+  int64_t jaw_fid = 0, viseme_mesh_fid = 0, left_eye_fid = 0, right_eye_fid = 0, eyelids_mesh_fid = 0, eyelid_bone_fids[4] = {0, 0, 0, 0};
+  void reflect(Reflector &r) override;
+};
+
+struct PhysBoneComponent : ComponentBase<PhysBoneComponent> {
+  static constexpr const char *kName = "VRCPhysBone";
+  std::string unity_id;
+  int version = 1, integration_type = 0;  // Simplified, Advanced
+  std::string root_transform, ignore_transforms;  // (names; several joined by ';')
+  Vec3 endpoint_position;
+  int multi_child_type = 0;  // Ignore, First, Average
+  float pull = 0.2f, spring = 0.2f, stiffness = 0.2f, gravity = 0.0f, gravity_falloff = 0.0f, immobile = 0.0f;
+  int immobile_type = 0;  // All Motion, World (Experimental)
+  int allow_collision = 1;  // False, True, Other
+  float radius = 0.0f;
+  std::string colliders;  // (names joined by ';')
+  int limit_type = 0;  // None, Angle, Hinge, Polar
+  float max_angle_x = 45.0f, max_angle_z = 45.0f;
+  Vec3 limit_rotation;
+  int allow_grabbing = 1, allow_posing = 1;
+  float grab_movement = 0.5f, max_stretch = 0.0f, max_squish = 0.0f, stretch_motion = 0.0f;
+  bool snap_to_hand = false, is_animated = false, reset_when_disabled = false;
+  std::string parameter;
+  bool show_gizmos = true;
+  float bone_opacity = 0.5f, limit_opacity = 0.5f;
+  int64_t root_fid = 0;
+  std::vector<int64_t> ignore_fids, collider_fids;
+  bool unique() const override { return false; }
+  void reflect(Reflector &r) override;
+};
+
+struct PhysBoneColliderComponent : ComponentBase<PhysBoneColliderComponent> {
+  static constexpr const char *kName = "VRCPhysBoneCollider";
+  std::string unity_id, root_transform;
+  int shape_type = 0;  // Sphere, Capsule, Plane
+  bool inside_bounds = false, bones_as_spheres = false;
+  float radius = 0.1f, height = 0.0f;
+  Vec3 position;
+  Quat rotation;
+  int64_t root_fid = 0;
+  bool unique() const override { return false; }
+  void reflect(Reflector &r) override;
+};
+
+struct ContactComponent : ComponentBase<ContactComponent> {
+  static constexpr const char *kName = "VRCContact";
+  std::string unity_id, root_transform;
+  bool receiver = false;  // (a Contact Receiver; else a Contact Sender)
+  int shape_type = 0;  // Sphere, Capsule
+  float radius = 0.1f, height = 0.0f;
+  Vec3 position;
+  Quat rotation;
+  std::string tags;  // (joined by ';')
+  bool allow_self = true, allow_others = true, local_only = false;
+  int receiver_type = 0;  // Constant, On Enter, Proximity
+  std::string parameter;
+  float value = 1.0f, min_velocity = 0.0f;
+  int64_t root_fid = 0;
+  bool unique() const override { return false; }
+  void reflect(Reflector &r) override;
+};
+
+struct VRCConstraintComponent : ComponentBase<VRCConstraintComponent> {
+  static constexpr const char *kName = "VRCConstraint";
+  std::string unity_id;
+  int kind = 0;  // Parent, Position, Rotation, Scale, LookAt, Aim
+  bool is_active = true, solve_in_local_space = false, freeze_to_world = false, rebake_offsets_when_unfrozen = false, locked = true;
+  float global_weight = 1.0f;
+  std::string target_transform;
+  struct Source {
+    std::string transform;
+    float weight = 1.0f;
+    Vec3 position_offset, rotation_offset;  // (a Parent constraint's, per source; degrees)
+    int64_t fid = 0;
+  };
+  std::vector<Source> sources;  // (at most 16, as the SDK's)
+  Vec3 position_offset, rotation_offset, scale_offset{1.0f, 1.0f, 1.0f};  // (the single-offset kinds)
+  Vec3 position_at_rest, rotation_at_rest, scale_at_rest{1.0f, 1.0f, 1.0f};
+  bool affects[3] = {true, true, true};  // (X, Y, Z of the kind's own part; a Parent constraint's position part)
+  bool affects_rotation[3] = {true, true, true};  // (a Parent constraint's rotation part)
+  int64_t target_fid = 0;
+  static std::atomic<int> live;  // (as IKConstraint's: none, and the pose step walks nothing)
+  VRCConstraintComponent() { live.fetch_add(1, std::memory_order_relaxed); }
+  VRCConstraintComponent(const VRCConstraintComponent &o)
+      : ComponentBase<VRCConstraintComponent>(o), unity_id(o.unity_id), kind(o.kind), is_active(o.is_active), solve_in_local_space(o.solve_in_local_space),
+        freeze_to_world(o.freeze_to_world), rebake_offsets_when_unfrozen(o.rebake_offsets_when_unfrozen), locked(o.locked), global_weight(o.global_weight),
+        target_transform(o.target_transform), sources(o.sources), position_offset(o.position_offset), rotation_offset(o.rotation_offset), scale_offset(o.scale_offset),
+        position_at_rest(o.position_at_rest), rotation_at_rest(o.rotation_at_rest), scale_at_rest(o.scale_at_rest), target_fid(o.target_fid) {
+    for (int k = 0; k < 3; k++) affects[k] = o.affects[k], affects_rotation[k] = o.affects_rotation[k];
+    live.fetch_add(1, std::memory_order_relaxed);
+  }
+  VRCConstraintComponent &operator=(const VRCConstraintComponent &) = default;
+  ~VRCConstraintComponent() override { live.fetch_sub(1, std::memory_order_relaxed); }
+  bool unique() const override { return false; }
+  void reflect(Reflector &r) override;
+};
+
+struct AnimatorComponent : ComponentBase<AnimatorComponent> {
+  static constexpr const char *kName = "Animator";
+  std::string unity_id, controller, avatar;
+  bool apply_root_motion = false;
+  int update_mode = 0, culling_mode = 0;
+  void reflect(Reflector &r) override;
+};
+
 /* A component of another engine that Blendity keeps but doesn't run (round 370, task 0347): a Unity script (C#,
  * UdonSharp), VRChat's components and anything else Unity puts on an object - its type, its script's GUID and its
  * data as the engine wrote it, saved with the scene and written back unchanged (task 0349). The engine is where code
