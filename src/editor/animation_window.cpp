@@ -2,6 +2,9 @@
 // The Animation window (task 0059, ADR 0029): Unity's dopesheet. The clip of the selected object's Animation
 // component, its tracks down the left, their keys as diamonds along a ruler on the right. Preview poses the scene
 // without an undo step (and puts it back after); Record turns edits of the animated objects into keys at the playhead.
+#include "../scene/body_physics.h"  // (round 408: find_armature)
+#include "../scene/humanoid.h"  // (round 408)
+#include "../scene/retarget.h"  // (round 408)
 #include "editor.h"
 
 #include "../scene/animation.h"
@@ -328,6 +331,49 @@ void Editor::anim_record_changes() {
   anim_snapshot_shown();
 }
 
+/* Round 408 (task 0385): the scene's humanoid rigs apart from the one animated - each a root an Armature sits under. */
+std::vector<GameObject *> Editor::retarget_targets() {
+  std::vector<GameObject *> out;
+  GameObject *root = anim_root();
+  scene_->for_each([&](GameObject &g) {
+    if (!g.get<Armature>() || !humanoid::map(*scene_, g).valid()) return;
+    GameObject *top = rig_root_of(&g);  // (the character's root, as anim_root reads it)
+    if (!top) top = &g;
+    if (top == root || (root && body::find_armature(*root) == &g) || std::find(out.begin(), out.end(), top) != out.end()) return;
+    out.push_back(top);
+  });
+  return out;
+}
+
+bool Editor::retarget_open_clip(GameObject &target_root) {
+  GameObject *root = anim_root();
+  const AnimationClipPtr clip = anim_clip();
+  if (playing_) return refuse("Retarget: not while Play runs", "stop", "Stop Play"), false;
+  if (!root || !clip) return refuse("Retarget: open a clip on the rig it was made for first", "window Animation", "Animation"), false;
+  if (&target_root == root) return Log::warn("Retarget: %s is the clip's own rig", target_root.name.c_str()), false;
+  AnimationClip out;
+  RetargetResult r;
+  if (!retarget_clip(*scene_, *clip, *root, target_root, out, r)) {
+    for (const std::string &n : r.notes) Log::warn("Retarget: %s", n.c_str());
+    return false;
+  }
+  const std::string base = fs::stem(clip->asset_path.empty() ? clip->name : clip->asset_path), who = file_safe(target_root.name);
+  std::string path = fs::join(fs::parent(clip->asset_path.empty() ? std::string("Assets/Animations/x") : clip->asset_path), base + " (" + who + ").anim");
+  for (int k = 2; fs::exists(resolve_asset_path(path)); k++) path = fs::join(fs::parent(path), base + strprintf(" (%s %d).anim", who.c_str(), k));
+  const AnimationClipPtr made = create_clip_asset(path, base + " (" + target_root.name + ")");
+  if (!made) return Log::warn("Retarget: couldn't write %s", path.c_str()), false;
+  const std::string name = made->name;
+  *made = out;
+  made->name = name, made->asset_path = path;
+  made->touch();
+  for (const std::string &n : r.notes) Log::warn("Retarget: %s", n.c_str());
+  Log::info("Retarget: %s plays %s - %d part(s) over %d frame(s), the hips' moves x %.2f (saved as %s)", target_root.name.c_str(), clip->name.c_str(), r.parts, r.frames, r.hip_scale, path.c_str());
+  select(target_root.id);
+  anim_pick_clip(&target_root, path);  // (the target's Animation component made and set, the window on it)
+  mark_changed("Retarget Clip");
+  return true;
+}
+
 /* Round 406: Record on a shape weight that moved since it was shown - the BlendShape track made when missing (the
  * tracks that exist are keyed with the other components' numbers). */
 void Editor::anim_record_shape_weights(AnimationClip &clip, GameObject &root, bool &keyed) {
@@ -612,13 +658,28 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
     if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
   }
-  group(u.px(73 + 79 + 67));  // (Puppet, Dopesheet, Curves)
+  group(u.px(73 + 75 + 79 + 67));  // (Puppet, Retarget, Dopesheet, Curves)
   {  // (tasks 0281-0284: Puppet Posing's tools in one menu - the toolbar is already wider than most windows)
     const Recti pb{x, y, u.px(70), bh};
     const bool any = trails_.show || trails_.onion > 0 || zoe_.on || anim_.smooth;
     if (button(u.px(70), "Puppet", any, "Puppet Posing's tools: motion trails, onion skin, the Zoetrope, Motion Check, the smooth brush,\n"
                                         "Lock in Place, and how far a pose edit reaches."))
       u.open_popup(u.id("anim_puppet"), {pb.x, y + bh, 0, 0});
+  }
+  {  // (round 408: Mecanim's move of a clip between humanoids)
+    const Recti rb{x, y, u.px(72), bh};
+    if (u.record_buttons) u.button_rects["anim:Retarget"] = rb;
+    if (button(u.px(72), "Retarget", false, "Play this clip on another humanoid rig: a clip of that rig's own, by what each body part does (Unity's Humanoid\n"
+                                            "retargeting) - the hips' move scaled to its height, an A pose's arm drop taken out.")) {
+      retarget_targets_ = retarget_targets();  // (found once as the menu opens: the map's analysis isn't a per-frame cost)
+      u.open_popup(u.id("anim_retarget"), {rb.x, y + bh, 0, 0});
+    }
+    u.popup(u.id("anim_retarget"), u.px(240), [this] {
+      if (retarget_targets_.empty()) return ui_.menu_label("No other humanoid rig in the scene");
+      ui_.menu_label("Retarget to");
+      for (GameObject *t : retarget_targets_)
+        if (scene_->find(t->id) && ui_.menu_item(t->name)) retarget_open_clip(*t);
+    });
   }
   if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
   if (button(u.px(64), "Curves", anim_.curves,
@@ -1479,6 +1540,11 @@ void Editor::anim_command(const std::vector<std::string> &t) {
   const std::string verb = to_lower(arg(1, ""));
   auto on = [&](size_t i) { return to_lower(arg(i, "on")) != "off"; };
   if (verb == "new") return (void)anim_new_clip(anim_root(), arg(2, ""));
+  if (verb == "retarget") {  // anim retarget <target root> (round 408): the open clip onto another rig
+    GameObject *target = scene_->find_by_name(arg(2, ""));
+    if (!target) return Log::warn("anim retarget <object>: no object '%s' (the root of the rig to animate)", arg(2, "").c_str());
+    return (void)retarget_open_clip(*target);
+  }
   if (verb == "frame") return anim_set_frame((float)std::atof(arg(2, "0").c_str()));
   if (trail_command(t)) return;  // (anim trails on|off | onion off|<n> [step]: task 0282)
   if (zoetrope_command(t)) return;  // (anim zoetrope on|off [step]: task 0283)

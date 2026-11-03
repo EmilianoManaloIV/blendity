@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 408): Humanoid retargeting like Mecanim
+
+**Asked:** a clip made on one humanoid rig played by another (the 2026-11-03 plan's round 408).
+
+**Added (task 0385, ADR 0103)**
+- **Retarget** in the Animation window (and `anim retarget <object>`): the open clip onto another humanoid rig in the
+  scene, by what each body part does - the 21 parts of the humanoid map found on any naming scheme, each part's turn from
+  its rest given to the target's part, the hips' move scaled to the target's height, an A pose's arm drop reconciled
+  with a T pose as Mecanim reads them (a T-posed clip's rest frame means arms horizontal). The result is the target's
+  own clip, saved beside the source's, set on the target and opened.
+
+**Checked:** `tests_round408` (a Mixamo-named T rig's clip onto a VRoid-named rig twice its size: the parts' turns equal,
+the hips' move doubled, the target's paths; a T rig's rest frame puts an A rig's arms horizontal and an A rig's rest
+hangs a T rig's arms, an elbow's bend carries; the editor's menu and command); the suites, the audits.
+
 ## 2026-11-03 (round 407): Unity .anim files in and out
 
 **Asked:** Unity's animation clips as Blendity's and back (the 2026-11-03 plan's round 407).

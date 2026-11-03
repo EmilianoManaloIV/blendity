@@ -1675,6 +1675,11 @@ class Editor {
   bool import_unity_anim(const std::string &path);
   bool export_unity_anim(const std::string &out, const std::string &clip_path);
   void repoint_moved_clips();  // (the Animation components that name a Unity clip whose edits moved to its Blendity copy)
+  /* Round 408 (task 0385): the open clip retargeted onto another humanoid rig - a clip of the target's own, saved beside
+   * the source's as "<clip> (<target>).anim", set on the target's Animation and opened there. */
+  bool retarget_open_clip(GameObject &target_root);
+  std::vector<GameObject *> retarget_targets();  // (the scene's other objects with a humanoid rig under them)
+  std::vector<GameObject *> retarget_targets_;   // (as listed when the Retarget menu opened)
   const SeqEditorState &seq_for_test() const { return seqr_; }
   SequencePtr seq_for_test_sequence() { return seq_sequence(); }
   bool seq_drop_clip_for_test(const std::string &abs_path, int mx, int my) { return seq_drop_clip(abs_path, mx, my); }

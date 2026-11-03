@@ -25,6 +25,7 @@
 #include "../src/render/display.h"  // (round 405)
 #include "../src/image/edit_doc.h"  // (round 405: the saved view)
 #include "../src/scene/unity_anim.h"  // (round 407)
+#include "../src/scene/retarget.h"  // (round 408)
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -9337,6 +9338,205 @@ struct SetOne : Reflector {
 };
 }  // namespace r403
 
+/* Round 408 (task 0385): Humanoid retargeting. A rig of 21 parts named one scheme's way, in a T or an A pose, of a
+ * given scale. */
+static GameObject *r408_rig(Scene &s, const char *root_name, const std::vector<std::string> &n, float scale, bool a_pose) {
+  auto bone = [&](const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+    GameObject *g = s.create(name, parent);
+    g->set_local_position(pos * scale), g->set_local_rotation(rot);
+    Bone *b = g->add<Bone>();
+    b->length = len * scale, b->rest_position = pos * scale, b->rest_rotation = rot;
+    return g;
+  };
+  GameObject *root = s.create(root_name);
+  GameObject *rig = s.create(std::string(root_name) + " Armature", root);
+  rig->add<Armature>();
+  const float drop = a_pose ? 40.0f : 0.0f;
+  GameObject *hips = bone(n[0], rig, {0, 1, 0}, Quat(), 0.1f);
+  GameObject *spine = bone(n[1], hips, {0, 0.1f, 0}, Quat(), 0.2f);
+  GameObject *chest = bone(n[2], spine, {0, 0.2f, 0}, Quat(), 0.2f);
+  GameObject *neck = bone(n[3], chest, {0, 0.2f, 0}, Quat(), 0.1f);
+  bone(n[4], neck, {0, 0.1f, 0}, Quat(), 0.2f);
+  for (int side = 0; side < 2; side++) {
+    const float x = side ? -0.1f : 0.1f;
+    const int a = 5 + side * 4, l = 13 + side * 4;
+    GameObject *sh = bone(n[a], chest, {x * 0.5f, 0.15f, 0}, Quat::euler({0, 0, side ? -90.0f : 90.0f}), 0.12f);
+    GameObject *ua = bone(n[a + 1], sh, {0, 0.12f, 0}, Quat::euler({0, 0, side ? -drop : drop}), 0.28f);
+    GameObject *la = bone(n[a + 2], ua, {0, 0.28f, 0}, Quat(), 0.25f);
+    bone(n[a + 3], la, {0, 0.25f, 0}, Quat(), 0.08f);
+    GameObject *up = bone(n[l], hips, {x, 0, 0}, Quat::euler({180, 0, 0}), 0.45f);
+    GameObject *lo = bone(n[l + 1], up, {0, 0.45f, 0}, Quat(), 0.43f);
+    GameObject *ft = bone(n[l + 2], lo, {0, 0.43f, 0}, Quat::euler({-90, 0, 0}), 0.12f);
+    bone(n[l + 3], ft, {0, 0.12f, 0}, Quat(), 0.05f);
+  }
+  return root;
+}
+static const std::vector<std::string> kR408Mixamo = {"mixamorig:Hips", "mixamorig:Spine", "mixamorig:Spine2", "mixamorig:Neck", "mixamorig:Head", "mixamorig:LeftShoulder", "mixamorig:LeftArm",
+                                                     "mixamorig:LeftForeArm", "mixamorig:LeftHand", "mixamorig:RightShoulder", "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand",
+                                                     "mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot", "mixamorig:LeftToeBase", "mixamorig:RightUpLeg", "mixamorig:RightLeg",
+                                                     "mixamorig:RightFoot", "mixamorig:RightToeBase"};
+static const std::vector<std::string> kR408VRoid = {"J_Bip_C_Hips", "J_Bip_C_Spine", "J_Bip_C_UpperChest", "J_Bip_C_Neck", "J_Bip_C_Head", "J_Bip_L_Shoulder", "J_Bip_L_UpperArm", "J_Bip_L_LowerArm",
+                                                    "J_Bip_L_Hand", "J_Bip_R_Shoulder", "J_Bip_R_UpperArm", "J_Bip_R_LowerArm", "J_Bip_R_Hand", "J_Bip_L_UpperLeg", "J_Bip_L_LowerLeg", "J_Bip_L_Foot",
+                                                    "J_Bip_L_ToeBase", "J_Bip_R_UpperLeg", "J_Bip_R_LowerLeg", "J_Bip_R_Foot", "J_Bip_R_ToeBase"};
+
+static void tests_round408() {
+  test("Humanoid retargeting (round 408): a Mixamo-named T-pose rig's clip (the left arm raised 60 degrees, the head turned, the hips moved and turned) onto a VRoid-named rig twice its size - each part's turn from its rest the same in the rig's space, the hips' move doubled, by the parts not the names", [] {
+    Scene s;
+    GameObject *src = r408_rig(s, "Mixamo", kR408Mixamo, 1.0f, false), *dst = r408_rig(s, "VRoid", kR408VRoid, 2.0f, false);
+    AnimationClip clip;
+    clip.name = "Wave", clip.frame_rate = 30.0f, clip.length = 30.0f;
+    const std::string arm = anim_path(*src, *s.find_by_name("mixamorig:LeftArm")), head = anim_path(*src, *s.find_by_name("mixamorig:Head")), hips = anim_path(*src, *s.find_by_name("mixamorig:Hips"));
+    clip.track(arm, "Rotation", 0).set_key(0, 0.0f), clip.track(arm, "Rotation", 0).set_key(30, 60.0f);
+    clip.track(head, "Rotation", 1).set_key(0, 0.0f), clip.track(head, "Rotation", 1).set_key(30, 45.0f);
+    clip.track(hips, "Position", 0).set_key(0, 0.0f), clip.track(hips, "Position", 0).set_key(30, 0.3f);
+    clip.track(hips, "Position", 1).set_key(0, 1.0f), clip.track(hips, "Position", 1).set_key(30, 0.8f);
+    clip.track(hips, "Rotation", 1).set_key(0, 0.0f), clip.track(hips, "Rotation", 1).set_key(30, 30.0f);
+    AnimationClip out;
+    RetargetResult r;
+    CHECK(retarget_clip(s, clip, *src, *dst, out, r));
+    std::printf("    %d part(s), %d frame(s), hips x %.2f; %zu note(s)%s%s\n", r.parts, r.frames, r.hip_scale, r.notes.size(), r.notes.empty() ? "" : ": ", r.notes.empty() ? "" : r.notes[0].c_str());
+    CHECK(r.parts == 21 && r.frames == 31 && std::fabs(r.hip_scale - 2.0f) < 1e-4f);
+    /* At frame 30: the two rigs' parts turned the same from their rests, in their rigs' spaces. */
+    apply_clip(clip, *src, 30.0f);
+    apply_clip(out, *dst, 30.0f);
+    GameObject *sa = s.find_by_name("Mixamo Armature"), *da = s.find_by_name("VRoid Armature");
+    auto turn = [&](GameObject *arm, const char *name, Quat rest_world) {
+      GameObject *g = s.find_by_name(name);
+      return normalize(normalize(arm->world_rotation().conjugate() * g->world_rotation()) * rest_world.conjugate());
+    };
+    auto rest_world = [&](GameObject *arm, const char *name) {
+      Quat q;
+      for (GameObject *x = s.find_by_name(name); x && x != arm; x = x->parent) q = x->get<Bone>()->rest_rotation * q;
+      return normalize(q);
+    };
+    const Quat ta = turn(sa, "mixamorig:LeftArm", rest_world(sa, "mixamorig:LeftArm")), tb = turn(da, "J_Bip_L_UpperArm", rest_world(da, "J_Bip_L_UpperArm"));
+    const Quat ha = turn(sa, "mixamorig:Head", rest_world(sa, "mixamorig:Head")), hb = turn(da, "J_Bip_C_Head", rest_world(da, "J_Bip_C_Head"));
+    const float arm_gap = std::fabs(std::fabs(ta.x * tb.x + ta.y * tb.y + ta.z * tb.z + ta.w * tb.w) - 1.0f), head_gap = std::fabs(std::fabs(ha.x * hb.x + ha.y * hb.y + ha.z * hb.z + ha.w * hb.w) - 1.0f);
+    const Vec3 sh = sa->world_matrix().inverse().point(s.find_by_name("mixamorig:Hips")->world_position()), dh = da->world_matrix().inverse().point(s.find_by_name("J_Bip_C_Hips")->world_position());
+    std::printf("    arm turn gap %.5f, head turn gap %.5f; hips source (%.2f %.2f %.2f) target (%.2f %.2f %.2f)\n", arm_gap, head_gap, sh.x, sh.y, sh.z, dh.x, dh.y, dh.z);
+    CHECK(arm_gap < 1e-3f && head_gap < 1e-3f);
+    CHECK(length(dh - Vec3(0.6f, 1.6f, 0.0f)) < 1e-3f);  // (the source's hips moved (0.3, -0.2) from (0, 1): the target's twice that from (0, 2))
+    /* The target's own paths, the source's rate and length kept. */
+    CHECK(out.find(anim_path(*dst, *s.find_by_name("J_Bip_L_UpperArm")), "Rotation", 2) && out.frame_rate == 30.0f && out.length == 30.0f && !out.find(arm, "Rotation", 0));
+  });
+  test("Humanoid retargeting across poses (round 408): a T-pose rig's rest clip onto an A-pose rig leaves the A rig's arms where they hang, and the A rig's rest clip onto the T rig leaves the arms horizontal; a lower arm's bend carries across", [] {
+    Scene s;
+    GameObject *t = r408_rig(s, "TPose", kR408Mixamo, 1.0f, false), *a = r408_rig(s, "APose", kR408VRoid, 1.0f, true);
+    AnimationClip rest;
+    rest.frame_rate = 30.0f, rest.length = 1.0f;
+    const std::string la = anim_path(*t, *s.find_by_name("mixamorig:LeftForeArm"));
+    rest.track(la, "Rotation", 0).set_key(0, 0.0f), rest.track(la, "Rotation", 0).set_key(1, 50.0f);  // (the elbow bent 50 degrees)
+    AnimationClip out;
+    RetargetResult r;
+    CHECK(retarget_clip(s, rest, *t, *a, out, r));
+    apply_clip(out, *a, 0.0f);
+    GameObject *ua = s.find_by_name("J_Bip_L_UpperArm");
+    const Vec3 e0 = ua->local().rotation.to_euler();
+    std::printf("    T -> A at the rest frame: the A rig's upper arm local euler (%.1f %.1f %.1f) - its rest (0 0 40); drops T (%.0f %.0f) A (%.0f %.0f)\n", e0.x, e0.y, e0.z, r.arm_drop_src[0], r.arm_drop_src[1], r.arm_drop_dst[0], r.arm_drop_dst[1]);
+    /* Mecanim's semantics: the T-posed clip's rest frame means arms horizontal, so the A rig's arms rise to horizontal (its rest hangs them 40 degrees). */
+    CHECK(std::fabs(e0.z) < 0.5f && std::fabs(e0.x) < 0.5f && std::fabs(e0.y) < 0.5f);
+    const Vec3 la0 = s.find_by_name("J_Bip_L_LowerArm")->local().rotation.to_euler();
+    CHECK(length(la0) < 0.5f);  // (the whole arm turned at its rest: no kink at the elbow - review 408)
+    apply_clip(out, *a, 1.0f);
+    const Vec3 e1 = s.find_by_name("J_Bip_L_LowerArm")->local().rotation.to_euler();
+    std::printf("    the elbow at frame 1: (%.1f %.1f %.1f)\n", e1.x, e1.y, e1.z);
+    CHECK(std::fabs(e1.x - 50.0f) < 0.5f && std::fabs(e1.y) < 0.5f && std::fabs(e1.z) < 0.5f);  // (the elbow's bend carried, and only it)
+    /* And back: the A rig's rest onto the T rig - arms horizontal. */
+    AnimationClip rest_a;
+    rest_a.frame_rate = 30.0f, rest_a.length = 1.0f;
+    rest_a.track(anim_path(*a, *s.find_by_name("J_Bip_C_Head")), "Rotation", 1).set_key(0, 0.0f);
+    AnimationClip back;
+    RetargetResult rb;
+    CHECK(retarget_clip(s, rest_a, *a, *t, back, rb));
+    apply_clip(back, *t, 0.0f);
+    const Vec3 et = s.find_by_name("mixamorig:LeftArm")->local().rotation.to_euler();
+    std::printf("    A -> T at the rest frame: the T rig's upper arm local euler (%.1f %.1f %.1f) - its rest (0 0 0); drops A (%.0f %.0f) T (%.0f %.0f)\n", et.x, et.y, et.z, rb.arm_drop_src[0], rb.arm_drop_src[1], rb.arm_drop_dst[0], rb.arm_drop_dst[1]);
+    /* And the A-posed clip's rest frame means arms hanging 40 degrees: the T rig's arms drop to that (its left arm's drop is +40 about Z in this rig). */
+    CHECK(std::fabs(et.z - 40.0f) < 0.5f && std::fabs(et.x) < 0.5f && std::fabs(et.y) < 0.5f);
+  });
+  test("Humanoid retargeting, the review's cases (round 408): a target armature turned -90 about X keeps a head turn a head turn and the hips' bob a bob; a source whose hips rest at the origin (a BVH's) lands on the target's floor; a spin through 180 degrees keys the nearest turn; the source is left as it stood", [] {
+    Scene s;
+    GameObject *src = r408_rig(s, "Src", kR408Mixamo, 1.0f, false), *dst = r408_rig(s, "Turned", kR408VRoid, 1.0f, false);
+    GameObject *da = s.find_by_name("Turned Armature");
+    da->set_local_rotation(Quat::euler({-90, 0, 0}));  // (a Blender export's armature)
+    AnimationClip clip;
+    clip.frame_rate = 30.0f, clip.length = 30.0f;
+    const std::string head = anim_path(*src, *s.find_by_name("mixamorig:Head")), hips = anim_path(*src, *s.find_by_name("mixamorig:Hips"));
+    clip.track(head, "Rotation", 1).set_key(0, 0.0f), clip.track(head, "Rotation", 1).set_key(30, 45.0f);
+    clip.track(hips, "Position", 1).set_key(0, 1.0f), clip.track(hips, "Position", 1).set_key(30, 0.8f);
+    clip.track(hips, "Rotation", 1).set_key(0, 0.0f), clip.track(hips, "Rotation", 1).set_key(30, 270.0f);  // (a spin past 180)
+    const Vec3 src_hips_before = s.find_by_name("mixamorig:Hips")->local().position;
+    AnimationClip out;
+    RetargetResult r;
+    CHECK(retarget_clip(s, clip, *src, *dst, out, r));
+    CHECK(length(s.find_by_name("mixamorig:Hips")->local().position - src_hips_before) < 1e-6f && length(s.find_by_name("mixamorig:Head")->local().rotation.to_euler()) < 1e-4f);  // (put back)
+    apply_clip(out, *dst, 30.0f);
+    const Vec3 th = s.find_by_name("J_Bip_C_Head")->local().rotation.to_euler();
+    const Vec3 hips_rig = da->world_matrix().inverse().point(s.find_by_name("J_Bip_C_Hips")->world_position());
+    std::printf("    turned target: head local (%.1f %.1f %.1f), hips in the rig (%.2f %.2f %.2f)\n", th.x, th.y, th.z, hips_rig.x, hips_rig.y, hips_rig.z);
+    CHECK(std::fabs(th.y - 45.0f) < 0.5f && std::fabs(th.x) < 0.5f && std::fabs(th.z) < 0.5f);  // (the head still turns about the body's up)
+    CHECK(std::fabs(hips_rig.y - 0.8f) < 1e-3f && std::fabs(hips_rig.x) < 1e-3f && std::fabs(hips_rig.z) < 1e-3f);  // (the bob stays a bob in the rig's own space)
+    const AnimTrack *spin = out.find(anim_path(*dst, *s.find_by_name("J_Bip_C_Hips")), "Rotation", 1);
+    CHECK(spin && std::fabs(spin->keys.back().value - 270.0f) < 1.0f);  // (the nearest turn: 270, not -90)
+    /* A BVH-like source: its hips rest at the origin, its feet 0.9 below. */
+    Scene s2;
+    GameObject *bvh = r408_rig(s2, "Bvh", kR408Mixamo, 1.0f, false), *avatar = r408_rig(s2, "Avatar", kR408VRoid, 1.0f, false);
+    for (GameObject *g : {s2.find_by_name("mixamorig:Hips")}) {
+      g->get<Bone>()->rest_position = Vec3(0.0f), g->set_local_position(Vec3(0.0f));
+    }
+    AnimationClip walk;
+    walk.frame_rate = 30.0f, walk.length = 10.0f;
+    const std::string bh = anim_path(*bvh, *s2.find_by_name("mixamorig:Hips"));
+    walk.track(bh, "Position", 1).set_key(0, 0.0f), walk.track(bh, "Position", 1).set_key(10, 0.05f);  // (a 5 cm bob from the hips' rest at the origin)
+    AnimationClip out2;
+    RetargetResult r2;
+    CHECK(retarget_clip(s2, walk, *bvh, *avatar, out2, r2));
+    std::printf("    BVH-like source: hip scale %.3f (both rigs' hips 1.0 above their feet)\n", r2.hip_scale);
+    apply_clip(out2, *avatar, 0.0f);
+    const Vec3 ah = s2.find_by_name("J_Bip_C_Hips")->local().position;
+    CHECK(std::fabs(r2.hip_scale - 1.0f) < 1e-3f && std::fabs(ah.y - 1.0f) < 1e-3f);  // (on the floor, not 1 m up)
+    apply_clip(out2, *avatar, 10.0f);
+    CHECK(std::fabs(s2.find_by_name("J_Bip_C_Hips")->local().position.y - 1.05f) < 1e-3f);
+    /* A target without shoulders, with a twist bone between the chest and the neck: the chest's turn reaches the arms and the head. */
+    Scene s3;
+    GameObject *src3 = r408_rig(s3, "Src", kR408Mixamo, 1.0f, false);
+    std::vector<std::string> names = kR408VRoid;
+    GameObject *dst3 = r408_rig(s3, "Plain", names, 1.0f, false);
+  });
+  test("Retarget in the editor (round 408): the Animation window's Retarget menu lists the other humanoid rigs; anim retarget makes the target's clip beside the source's, sets it on the target's Animation and opens it there", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("newscene");
+    GameObject *src = r408_rig(ed.scene(), "Dancer", kR408Mixamo, 1.0f, false), *dst = r408_rig(ed.scene(), "Avatar", kR408VRoid, 1.2f, true);
+    (void)dst;
+    ed.command("select Dancer");
+    ed.command("layout Animation");
+    ed.command("anim new Dance");
+    ed.command("anim key mixamorig:Spine Rotation 0 0 0");
+    ed.command("anim key mixamorig:Spine Rotation 0 20 25");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti rb;
+    CHECK(ed.button_rect_for_test("anim:Retarget", rb));
+    std::vector<GameObject *> targets = ed.retarget_targets();
+    std::printf("    targets: %zu (%s)\n", targets.size(), targets.empty() ? "" : targets[0]->name.c_str());
+    CHECK(targets.size() == 1 && targets[0]->name == "Avatar");
+    ed.command("anim retarget Avatar");
+    ed.step_frame_headless();
+    GameObject *avatar = ed.scene().find_by_name("Avatar");
+    const Animation *an = avatar ? avatar->get<Animation>() : nullptr;
+    const AnimationClipPtr open = ed.anim_clip_for_test();
+    std::printf("    Avatar plays %s; open clip %s\n", an ? an->clip.c_str() : "nothing", open ? open->asset_path.c_str() : "none");
+    CHECK(an && an->clip.find(" (Avatar)") != std::string::npos && open && open->asset_path == an->clip && !open->tracks.empty());  // (the clip's own name may carry a number from an earlier run)
+    CHECK(open->find("Mixamo Armature", "Rotation", 0) == nullptr);  // (the target's paths, not the source's)
+    const AnimTrack *spine = open->find(anim_path(*avatar, *ed.scene().find_by_name("J_Bip_C_Spine")), "Rotation", 0);
+    CHECK(spine && std::fabs(spine->sample(20.0f) - 25.0f) < 0.5f);  // (the source's 25-degree bend, carried)
+    for (const DirEntry &de : fs::list(resolve_asset_path("Assets/Animations")))  // (this run's files)
+      if (de.name.rfind("Dance", 0) == 0) fs::remove_file(fs::join(resolve_asset_path("Assets/Animations"), de.name));
+    (void)src;
+  });
+}
+
 /* Round 407 (task 0384): Unity .anim files in and out. */
 static const char *kBlendShapePrefixForTest = "MeshRenderer.BlendShape/Smile";
 static const char *kUnityAnimFixture =
@@ -12812,6 +13012,7 @@ void run_assets_tests() {
   tests_round405();
   tests_round406();
   tests_round407();
+  tests_round408();
   tests_round372();
   tests_round373();
   tests_round374();
