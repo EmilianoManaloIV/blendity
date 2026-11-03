@@ -93,6 +93,7 @@ std::string render_message(const RenderSettings &rs) {
                      : rs.view_transform < (int)names.size() ? names[(size_t)rs.view_transform] : std::string("Standard");
   const size_t ocio = view.find(" (OpenColorIO)");
   if (ocio != std::string::npos) view.resize(ocio);
+  if (view.rfind("ACES (full", 0) == 0) view = "ACES";  // (round 405: the engines' ACES - Blender's view names know no "full fit")
   JsonWriter w;
   w.obj().key("t").str("render").key("exposure").num(rs.exposure).key("view_transform").str(view).end();
   return w.out;

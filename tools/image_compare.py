@@ -12,7 +12,9 @@ Unity's EncodeToEXR(EXRFlags.None) and Blendity's saverender write them). Report
   linear   with EXRs: the relative RMS difference of the linear light over the cells whose mean is above a tenth of the
            brightest cell's ("lit" cells).
 --check passes (exit 0) when MAE <= 4, SSIM >= 0.90 and the grid correlation >= 0.95 (and, with EXRs, the linear RMS
-<= 10%): the acceptance target of the Unity comparison. --out writes a side by side with a difference heat map."""
+<= 10%): the acceptance target of the Unity comparison. On a nearly black reference (its grid's mean under 8 / 255) SSIM
+and the correlation read noise, so there the MAE and the grids' means (within 2 / 255) decide. --out writes a side by
+side with a difference heat map."""
 import json
 import math
 import struct
@@ -235,7 +237,12 @@ def compare(a_path, b_path, exr=None, grid=(16, 9)):
         lit = [(p, q) for p, q in zip(la, lb) if max(p, q) >= 0.1 * bright]
         rms = math.sqrt(sum(((p - q) / max(p, q, 1e-9)) ** 2 for p, q in lit) / max(1, len(lit)))
         r["linear"] = {"lit_cells": len(lit), "relative_rms": rms, "mean_a": sum(la) / len(la), "mean_b": sum(lb) / len(lb)}
-    r["pass"] = r["mae_all"] <= 4.0 and r["ssim"] >= 0.90 and r["grid"]["correlation"] >= 0.95 and ("linear" not in r or r["linear"]["relative_rms"] <= 0.10)
+    # A nearly black reference (its grid's mean under 8 / 255) has no structure for SSIM or the grid's correlation to
+    # read - they measure noise there - so the MAE and the grids' means decide (round 405: SideRail's spawn turned round;
+    # the means keep a black or missing picture from passing on a low MAE alone).
+    r["dark"] = r["grid"]["mean_a"] < 8.0
+    structure = (r["dark"] and abs(r["grid"]["mean_a"] - r["grid"]["mean_b"]) <= 2.0) or (r["ssim"] >= 0.90 and r["grid"]["correlation"] >= 0.95)
+    r["pass"] = r["mae_all"] <= 4.0 and structure and ("linear" not in r or r["linear"]["relative_rms"] <= 0.10)
     return r, (w, h, a, b)
 
 
@@ -284,7 +291,8 @@ def main(argv):
         r["width"], r["height"], r["mae_all"], r["mae"][0], r["mae"][1], r["mae"][2], r["psnr"], r["ssim"], g["columns"], g["rows"], g["mean_a"], g["mean_b"], g["correlation"], g["max_gap"]))
     if "linear" in r:
         print("linear: %d lit cells, relative RMS %.1f%%, mean %.4f vs %.4f" % (r["linear"]["lit_cells"], 100 * r["linear"]["relative_rms"], r["linear"]["mean_a"], r["linear"]["mean_b"]))
-    print("target: " + ("PASS" if r["pass"] else "not met") + " (MAE <= 4, SSIM >= 0.90, grid correlation >= 0.95" + (", linear RMS <= 10%)" if "linear" in r else ")"))
+    print("target: " + ("PASS" if r["pass"] else "not met") + " (MAE <= 4, SSIM >= 0.90, grid correlation >= 0.95" + (", linear RMS <= 10%" if "linear" in r else "")
+          + ("; a nearly black reference: the MAE and the means decide)" if r["dark"] else ")"))
     if out:
         side_by_side(out, *pics)
     if js:

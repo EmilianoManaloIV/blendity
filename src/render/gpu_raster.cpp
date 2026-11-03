@@ -1374,6 +1374,12 @@ vec3 toon_rim(Inst I, vec3 n, vec3 V, vec3 keyL) {
   float w = clamp(I.toon0.y, 0.0, 0.5) + 0.02;
   return I.toon2.rgb * (axis_step(e - w, e + w, f) * I.toon3.x);
 }
+vec3 unity_indirect_specular(vec3 f0, float reflectivity, float r, float nv) {  // (round 405: Unity's BRDF1 indirect specular)
+  float rr = clamp(r, 0.0, 1.0) * clamp(r, 0.0, 1.0);
+  float reduction = 1.0 / (rr * rr + 1.0);
+  float grazing = clamp((1.0 - clamp(r, 0.0, 1.0)) + clamp(reflectivity, 0.0, 1.0), 0.0, 1.0);
+  return mix(f0, vec3(grazing), pow(1.0 - clamp(nv, 0.0, 1.0), 5.0)) * reduction;
+}
 vec3 env_brdf_approx(vec3 f0, float r, float nv) {
   float rx = r * -1.0 + 1.0, ry = r * -0.0275 + 0.0425, rz = r * -0.572 + 1.04, rw = r * 0.022 - 0.04;
   float a004 = min(rx * rx, exp2(-9.28 * nv)) * rx + ry;
@@ -1387,6 +1393,9 @@ float aces(float x) {
   x *= 0.6;
   return (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14);
 }
+float aces_full(float v) {  // (round 405: Hill's fit of ACES' RRT + ODT, Unity's; no scale)
+  return clamp((v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081), 0.0, 1.0);
+}
 /* shading.cpp tonemap: the exposure, then Standard, Filmic or ACES. */
 vec3 tonemap(vec3 c) {
   c *= exp2(env.w);
@@ -1396,6 +1405,7 @@ vec3 tonemap(vec3 c) {
     return vec3(hable(c.r * 2.0), hable(c.g * 2.0), hable(c.b * 2.0)) * wscale;
   }
   if (vt == 2) return vec3(aces(c.r), aces(c.g), aces(c.b));
+  if (vt == 4) return vec3(aces_full(c.r), aces_full(c.g), aces_full(c.b));
   return c;
 }
 float srgb(float c) {
@@ -1541,7 +1551,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   float nv = max(dot(n, V), 1e-4);
   vec3 f0 = fresnel_f0(albedo, metallic, specular);
   vec3 R = n * (2.0 * dot(n, V)) - V;
-  vec3 spec = probe_specular(P, R, rough) * env_brdf_approx(f0, rough, nv);  // (round 401: the reflection probes' box)
+  vec3 spec = probe_specular(P, R, rough) * (gi.z > 0.5 ? unity_indirect_specular(f0, mix(0.08 * specular, 1.0, metallic), rough, nv) : env_brdf_approx(f0, rough, nv));  // (round 401: the reflection probes' box; round 405: Unity's weight)
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
   return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
@@ -3694,7 +3704,7 @@ class VulkanRaster final : public Raster {
     u.env[3] = fr.exposure;
     u.bg[0] = (float)fr.background;
     u.probe[0] = fr.probe_normal_bias, u.probe[1] = fr.probe_view_bias, u.probe[2] = fr.probe_leak ? 1.0f : 0.0f, u.probe[3] = fr.probe_live ? 1.0f : 0.0f;
-    u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = (float)np, u.gi[2] = u.gi[3] = 0.0f;  // (task 0197; round 401: gi.y the probes)
+    u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = (float)np, u.gi[2] = fr.unity_brdf ? 1.0f : 0.0f, u.gi[3] = 0.0f;  // (task 0197; round 401: gi.y the probes; round 405: gi.z Unity's BRDF)
     for (int k = 0; k < 4; k++) u.sky_disc[k] = fr.sky_disc[k], u.sky_disc_color[k] = fr.sky_disc_color[k], u.sky_band[k] = fr.sky_band[k], u.fog[k] = fr.fog[k], u.fog_color[k] = fr.fog_color[k], u.fog_far[k] = fr.fog_far[k];  // (task 0248)
     u.cage[0] = fr.cage_bias;
     u.cage[1] = fr.cage_point_radius;

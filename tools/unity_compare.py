@@ -159,7 +159,7 @@ def main(argv):
         results[name] = m
         results[name]["pass"] = passed
         results[name]["blendity_s"] = round(bl_times.get(name, 0), 1)
-        rows.append("| %s | %.2f | %.3f | %.3f | %s | %.1f s |" % (name, m.get("mae_all", -1), m.get("ssim", -1), (m.get("grid") or {}).get("correlation", -1), "pass" if passed else "**miss**", bl_times.get(name, 0)))
+        rows.append("| %s | %.2f | %.3f | %.3f | %s | %.1f s |" % (name, m.get("mae_all", -1), m.get("ssim", -1), (m.get("grid") or {}).get("correlation", -1), ("pass (dark: MAE and means)" if m.get("dark") else "pass") if passed else "**miss**", bl_times.get(name, 0)))
     report = ["# Unity against Blendity: %s stations (%s)" % (kind, time.strftime("%Y-%m-%d")), "",
               "Unity's side took %.0f s (open + %d renders); Blendity's per station below. Target: MAE <= 4, SSIM >= 0.90, grid correlation >= 0.95." % (unity_s, len(stations["stations"])), "",
               "| station | MAE | SSIM | grid corr | target | Blendity |", "|---|---|---|---|---|---|"] + rows + [""]

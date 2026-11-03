@@ -2089,7 +2089,8 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
   }
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;
-  Vec3 spec = reflection_specular(env_.reflection_probes, env, sp.position, R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);  // (round 401)
+  Vec3 spec = reflection_specular(env_.reflection_probes, env, sp.position, R, s.roughness) *
+              (env_.unity_brdf ? unity_indirect_specular(f0, unity_reflectivity(s.specular, s.metallic), s.roughness, nv) : env_brdf_approx(f0, s.roughness, nv));  // (round 401; round 405: Unity's weight)
   /* Ambient light, best source first: the baked map (plus realtime GI's bounce of lights it doesn't
    * hold), the probe volume, voxel GI per pixel (the sky that gets through plus the bounce), or the sky
    * alone. */

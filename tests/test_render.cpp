@@ -49,7 +49,7 @@ static void colormanagement_tests() {
     }
     rgb[5] = -1.0f;
     rgb[7] = std::numeric_limits<float>::quiet_NaN();
-    for (ViewTransform vt : {ViewTransform::Standard, ViewTransform::Filmic, ViewTransform::ACES}) {
+    for (ViewTransform vt : {ViewTransform::Standard, ViewTransform::Filmic, ViewTransform::ACES, ViewTransform::AcesFull}) {  // (AcesFull: round 405)
       std::vector<uint32_t> ref(1003), got(1003);
       display::set_kernel(display::Kernel::Scalar);
       display::encode_span(rgb.data(), ref.data(), ref.size(), vt, 0.5f);

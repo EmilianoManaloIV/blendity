@@ -257,7 +257,22 @@ struct ShadowMap {
 /* --- view transform --- */
 /* Built-in curves, plus Blender's OpenColorIO views (colormanagement.h)
  * numbered from OcioView: OcioView + i is views()[i]. */
-enum class ViewTransform { Standard = 0, Filmic = 1, ACES = 2, OcioView = 16 };
+enum class ViewTransform { Standard = 0, Filmic = 1, ACES = 2, AcesFull = 3, OcioView = 16 };  // (AcesFull: round 405, Unity's)
+/* Round 405: Unity's built-in pipeline's indirect specular (UnityStandardBRDF's BRDF1): the Fresnel from f0 to the
+ * grazing term (smoothness + reflectivity) by (1 - N.V)^5, times the surface reduction 1 / (roughness^2 + 1) - what a
+ * Unity scene's reflection probes are weighted by (Blendity's own look keeps env_brdf_approx). `roughness` perceptual. */
+Vec3 unity_indirect_specular(Vec3 f0, float reflectivity, float roughness, float nv);
+/* Unity's metallic workflow's reflectivity for Blendity's surface: the dielectric F0 (0.08 x Specular: 0.04 at 0.5,
+ * Unity's) lerped to 1 by Metallic - what the rasterizers hand unity_indirect_specular (the GPU shader repeats it). */
+float unity_reflectivity(float specular, float metallic);
+/* The view transform's code in the GPU rasterizer's frame (gpu::RasterFrame::view_transform): the built-ins as they
+ * are, every OpenColorIO view 3 (its table set apart), AcesFull 4 (review 405: 3 had been read as a table). */
+int gpu_view_transform_code(ViewTransform vt);
+/* BLENDITY_UNITY_BRDF=0 in the environment turns that weight off (a diagnostic for the comparison harness: measuring the
+ * two weights against Unity's renders). */
+bool unity_brdf_off();
+/* The setting index (RenderSettings::view_transform) of a built-in view transform. */
+int view_transform_setting(ViewTransform vt);
 Vec3 tonemap(Vec3 hdr, ViewTransform vt, float exposure_stops);
 uint32_t to_display_pixel(Vec3 hdr, ViewTransform vt, float exposure_stops);
 /* RenderSettings::view_transform is an index into view_transform_names():

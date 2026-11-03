@@ -2,6 +2,32 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 405): the residuals - Unity's ACES, Unity's indirect specular, three shaders read
+
+**Asked:** the same comparison; the fifth round: round 404's residuals fixed in order of their weight.
+
+**Added (task 0382)**
+- **Unity's ACES** as a view transform ("ACES (full fit, Unity's)": Hill's fit of the RRT + ODT - its curve, no exposure
+  scale), picked by the post-processing import - the fog's tint and the lamps' highlights as Unity's ACES renders them;
+  in the CPU views, F12 and the GPU views alike.
+- **Unity's indirect specular** weighs the reflection probes' and the sky's reflection on a scene from Unity (the Fresnel
+  to the grazing term - smoothness plus the metallic workflow's reflectivity - and the surface reduction): a rough wall
+  catches more of a probe at a grazing angle than Blendity's approximation gave it, as Unity's walls do.
+- **Glass, candle flicker and mirror shaders** read as what they draw (glass, an emissive flame, a mirror) - by the
+  shader's own name, so a lit shader that mentions one isn't taken for it.
+
+- **image_compare.py**: on a nearly black reference (its grid's mean under 8 / 255) the MAE and the grids' means decide -
+  SSIM and the correlation read noise there.
+
+**Checked:** `tests_round405` (the curve in every display kernel and the GPU frame's code for it, the specular's values for
+a dielectric and two metals, the weight on for a Unity scene without lights, the three families and three lit shaders
+that aren't them); SideRail's stations measured again: spawn 7.03 → 3.46, the spawn turned round 2.40 → 1.61, floor 4.71 →
+2.85, ahead 6.25 → 3.00 / 255 - three of four pass the target, the floor on error (its SSIM 0.94 → 0.87 under the darker
+toe, not pinned down); measured before the review's two fixes to the weight (set without a rasterized light; a metal's
+reflectivity by its metallic). The suites, the audits. The Opus review's fixes: the GPU views had read the new view as an
+OpenColorIO table (a black or stale picture), the BRDF weight had been set only by a rasterized light, the grazing term
+had taken a metal's colour for its reflectivity, the docs had the grazing reflection's direction backwards.
+
 ## 2026-11-03 (round 404): the comparison - snapshots across the board, the attributes table, the report
 
 **Asked:** "Compare snapshots across the board to get accurate readings using Unity VCC's Shinano and SideRail

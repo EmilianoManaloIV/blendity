@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "shading.h"
 #include <cstdlib>
+#include <cstring>
 
 #include "colormanagement.h"
 #include "display.h"
@@ -1010,6 +1011,10 @@ Vec3 tonemap(Vec3 c, ViewTransform vt, float exposure) {
       };
       return {f(c.x), f(c.y), f(c.z)};
     }
+    case ViewTransform::AcesFull: {  // (round 405: Hill's fit of ACES' RRT + ODT, as Unity's post-processing tonemaps)
+      auto f = [](float v) { return clampf((v * (v + 0.0245786f) - 0.000090537f) / (v * (0.983729f * v + 0.4329510f) + 0.238081f), 0.0f, 1.0f); };
+      return {f(c.x), f(c.y), f(c.z)};
+    }
     default: return c;
   }
 }
@@ -1018,6 +1023,7 @@ const std::vector<std::string> &view_transform_names() {
   static const std::vector<std::string> names = [] {
     std::vector<std::string> n = {"Standard (built-in)", "Filmic (built-in)", "ACES (built-in)"};
     for (const std::string &v : colormanagement::views()) n.push_back(v + " (OpenColorIO)");
+    n.push_back("ACES (full fit, Unity's)");  // (round 405: after the OpenColorIO views, so a saved index keeps its view)
     return n;
   }();
   return names;
@@ -1027,7 +1033,38 @@ ViewTransform view_transform_from_setting(int index) {
   if (index >= 0 && index <= 2) return (ViewTransform)index;
   int ocio = index - 3;
   if (ocio >= 0 && ocio < (int)colormanagement::views().size()) return (ViewTransform)((int)ViewTransform::OcioView + ocio);
+  if (ocio == (int)colormanagement::views().size()) return ViewTransform::AcesFull;  // (round 405)
   return ViewTransform::Filmic;  // e.g. a scene saved with OpenColorIO, opened without it
+}
+
+int view_transform_setting(ViewTransform vt) {
+  if (vt == ViewTransform::AcesFull) return 3 + (int)colormanagement::views().size();
+  if ((int)vt >= (int)ViewTransform::OcioView) return 3 + ((int)vt - (int)ViewTransform::OcioView);
+  return (int)vt;
+}
+
+bool unity_brdf_off() {
+  static const bool off = [] {
+    const char *v = std::getenv("BLENDITY_UNITY_BRDF");
+    return v && std::strcmp(v, "0") == 0;
+  }();
+  return off;
+}
+
+Vec3 unity_indirect_specular(Vec3 f0, float reflectivity, float roughness, float nv) {
+  const float r = clampf(roughness, 0.0f, 1.0f), rr = r * r;
+  const float reduction = 1.0f / (rr * rr + 1.0f);
+  const float grazing = saturate((1.0f - r) + clampf(reflectivity, 0.0f, 1.0f));  // (Unity's: smoothness + reflectivity, the metallic workflow's 0.04..1)
+  const float t = std::pow(1.0f - clampf(nv, 0.0f, 1.0f), 5.0f);
+  return lerp(f0, Vec3(grazing), t) * reduction;
+}
+
+float unity_reflectivity(float specular, float metallic) { return 0.08f * specular * (1.0f - metallic) + metallic; }
+
+int gpu_view_transform_code(ViewTransform vt) {
+  if (vt == ViewTransform::AcesFull) return 4;
+  if ((int)vt >= (int)ViewTransform::OcioView) return 3;
+  return (int)vt;
 }
 
 uint32_t to_display_pixel(Vec3 hdr, ViewTransform vt, float exposure) {

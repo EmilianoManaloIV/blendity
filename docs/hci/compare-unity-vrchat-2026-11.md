@@ -43,21 +43,29 @@ Unity's side: 0.9 s to open, 0.4 s the first render, 0.1 s the next (timings.jso
 hair cards' alpha test and the eyelashes (sorting), the face station's 2.6 mostly the eyes' highlights (lilToon's
 reflection block on the eye material with its own textures, which Live Link doesn't carry - round 405).
 
-### SideRail (world) - near the target, not on it
+### SideRail (world) - round 404's state, then round 405's fixes
 
-| station | MAE | SSIM | grid corr | target | Blendity (open + lightmaps + render) |
-|---|---|---|---|---|---|
-| spawn | 7.03 | 0.931 | 0.989 | miss (MAE) | 147 s |
-| spawn_back | 2.40 | 0.928 | 0.751 | miss (corr) | 24 s |
-| floor | 4.71 | 0.937 | 0.999 | miss (MAE) | 49 s |
-| ahead | 6.25 | 0.928 | 0.987 | miss (MAE) | 83 s |
+| station | MAE (404 → 405) | SSIM (404 → 405) | grid corr (404 → 405) | target after 405 |
+|---|---|---|---|---|
+| spawn | 7.03 → **3.46** | 0.931 → 0.921 | 0.989 → 0.989 | pass |
+| spawn_back | 2.40 → **1.61** | 0.928 → 0.806 | 0.751 → 0.693 | pass (a nearly black picture: the MAE and the means - 1.63 against 0.37 - decide) |
+| floor | 4.71 → **2.85** | 0.937 → 0.870 | 0.999 → 0.998 | miss (SSIM fell under the darker toe; not pinned down) |
+| ahead | 6.25 → **3.00** | 0.928 → 0.949 | 0.987 → 0.984 | pass |
 
-Unity's side: 1.2 s to open, 0.4 s the first render, 0.13 s the next. Round 401's spawn figure (7.03) stands; the
-floor under the spawn is at 4.7, the walkway at 6.3. The spawn turned round sees mostly the dark tunnel: its MAE is 2.4
-but the luminance grid's correlation is low because the picture is nearly uniform (the few lit cells differ). The
-causes, from the difference maps: the fog's blue a little lighter under ACES and +1 EV (round 401's note), the walls'
-probe reflections at grazing angles, the lamps' glass and candle shaders Blendity doesn't read (their main colour came
-in), the particle smoke not drawn (the user's choice), the players-only mirror. These are round 405's items.
+Round 405 (Unity's own ACES curve, Unity's BRDF weight on the probes' reflection, the glass / candle / mirror shaders read)
+cuts the error at every station - by half on the three lit ones: three of four pass; the floor passes on error (2.85)
+and misses on SSIM (0.937 → 0.870): the darker toe of Unity's curve lowers a dark frame's contrast, and the two
+rasterizers' fine concrete texture agrees less there - the cause isn't pinned down. The spawn turned round, nearly
+black, lost SSIM too (0.928 → 0.806): on such a frame SSIM reads noise, so the comparison asks the MAE and the grids'
+means of it. Unity's ACES alone gives 3.44 / 2.77 / 2.98 on the three lit stations; the BRDF weight changes them by 0.02
+(it matters at grazing walls the stations see little of). These figures predate the review's two fixes to the weight
+(set for a Unity scene without a rasterized light; a metal's reflectivity by its metallic). Blendity's stations take
+23-24 s each (the import and the lightmaps from the cache).
+
+Unity's side: 1.2 s to open, 0.4 s the first render, 0.13 s the next. Before round 405 the causes, from the difference
+maps, were the fog's blue a little lighter under Blendity's own ACES (round 401 had mapped Unity's ACES to it), the
+walls' probe reflections, the lamps' glass and candle shaders Blendity didn't read, the particle smoke not drawn (the
+user's choice), the players-only mirror. The first three are fixed; the smoke and the mirror's players remain.
 
 Every station opens the scene afresh (the import and `unity lightmaps wait`); the first one also makes Unity write its
 lightmap file (round 400: Unity's own bake read through Unity), the later ones find it beside the scene.
@@ -96,16 +104,16 @@ the residual fixes, so that they measure the finished state once.
 - **For avatar makers:** Shinano shades as in Unity (lilToon's model, round 402) within 0.9-2.6 / 255 at every station
   (round 402's 1.52 for the front was measured with the sun mirrored in X - the review found it; Unity's own direction gives 1.00),
   and her VRChat components are editable in Blendity and go back. The target is met.
-- **For world makers:** SideRail is within 2.4-7.0 / 255 and SSIM ≥ 0.928 at every station - recognisably the same
-  picture, with the fog's tint, the grazing reflections and a few shaders Blendity doesn't read standing between it and
-  the target. Round 405 takes these in order of their weight.
+- **For world makers:** after round 405 SideRail is within 1.6-3.5 / 255 at every station - three of four stations
+  pass the target, the floor misses on SSIM alone (a dark frame's fine texture). What remains is the particle smoke (not
+  drawn by the user's choice) and the mirror's players.
 
-## Residuals, ranked
+## Residuals, ranked (after round 405)
 
-1. SideRail's fog tint under ACES / +1 EV (spawn, ahead): calibrate Blendity's ACES against Unity's (a grey ramp through
-   Unity's PPv2).
-2. The walls' probe reflections at grazing angles (spawn, floor): Unity's deferred reflections' fresnel.
-3. Shaders Blendity doesn't read (glass, candle flicker, the players-only mirror): read Glass_NoFog as glass, the candle
-   as emissive, the mirror as a plain reflective plane.
-4. The eye materials' reflection textures over Live Link (Shinano's face).
-5. Particle smoke (not drawn, the user's choice) - counted, not fixed.
+1. ~~SideRail's fog tint under ACES / +1 EV~~ - fixed in round 405 (Unity's ACES curve as the view transform).
+2. ~~The walls' probe reflections at grazing angles~~ - fixed in round 405 (Unity's BRDF weight).
+3. ~~Shaders Blendity doesn't read (glass, candle flicker, the players-only mirror)~~ - fixed in round 405.
+4. The floor station's SSIM (0.94 → 0.87 with Unity's curve): a dark frame's fine texture under the darker toe - not
+   pinned down; the ACES fit's input and output matrices (the fog's blue a little more saturated than Unity's).
+5. The eye materials' reflection textures (Shinano's face, 2.6).
+6. Particle smoke (not drawn, the user's choice) and the mirror's players - counted, not fixed.

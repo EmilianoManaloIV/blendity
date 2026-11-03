@@ -542,6 +542,7 @@ static LightingEnv build_env(const Scene &s) {
   env.sky = s.environment.sky;
   env.equator = s.environment.equator;
   env.ground = s.environment.ground;
+  env.unity_brdf = !s.unity.file.empty() && !unity_brdf_off();  // (round 405: lights or none)
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();

@@ -2,6 +2,7 @@
 // Unity prefabs and scenes into Blendity's objects (round 370, task 0347): see unity_scene.h.
 #include "unity_scene.h"
 #include "unity_sdk_types.h"
+#include "../render/shading.h"  // (round 405: the view transform's setting)
 #include "unity_material.h"
 
 #include "spring_bones.h"
@@ -1132,7 +1133,7 @@ bool unity_post_profile(const std::string &yaml, UnityPostProfile &out) {
 
 void unity_post_apply(const UnityPostProfile &p, Scene &scene, GameObject &camera, std::vector<std::string> &notes) {
   if (p.grading.on) {
-    scene.render.view_transform = p.grading.tonemapper == 2 ? 2 : p.grading.tonemapper == 1 ? 1 : 0;  // (ACES, Neutral as Filmic, None as Standard)
+    scene.render.view_transform = p.grading.tonemapper == 2 ? view_transform_setting(ViewTransform::AcesFull) : p.grading.tonemapper == 1 ? 1 : 0;  // (ACES as Unity's full fit - round 405; Neutral as Filmic, None as Standard)
     scene.render.exposure = p.grading.post_exposure;
   }
   CameraFilters *cf = camera.get<CameraFilters>();

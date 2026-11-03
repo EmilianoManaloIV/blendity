@@ -22,6 +22,8 @@
 #include "../src/scene/unity_material.h"
 #include "../src/editor/livelink.h"  // (round 402)
 #include "../src/scene/unity_sdk_types.h"  // (round 403)
+#include "../src/render/display.h"  // (round 405)
+#include "../src/image/edit_doc.h"  // (round 405: the saved view)
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -9334,6 +9336,90 @@ struct SetOne : Reflector {
 };
 }  // namespace r403
 
+/* Round 405 (task 0382): the residuals - Unity's ACES, Unity's indirect specular, three shaders read. */
+static void tests_round405() {
+  test("Unity's ACES (round 405): the full fit's curve - 0.18 grey to about 0.1 (display-linear), 1 to about 0.62, 10 to near white, monotonic - as the view transform the post-processing import picks, after the OpenColorIO views in the list so saved indices keep their view", [] {
+    const Vec3 g18 = tonemap(Vec3(0.18f), ViewTransform::AcesFull, 0.0f), g1 = tonemap(Vec3(1.0f), ViewTransform::AcesFull, 0.0f), g10 = tonemap(Vec3(10.0f), ViewTransform::AcesFull, 0.0f);
+    std::printf("    ACES full fit: 0.18 -> %.3f, 1 -> %.3f, 10 -> %.3f (Blendity's ACES: 0.18 -> %.3f)\n", g18.x, g1.x, g10.x, tonemap(Vec3(0.18f), ViewTransform::ACES, 0.0f).x);
+    CHECK(g18.x > 0.08f && g18.x < 0.14f && g1.x > 0.55f && g1.x < 0.7f && g10.x > 0.95f && g10.x <= 1.0f);  // (scene-referred to display-linear: ACES puts 0.18 at about 0.1, 1 at about 0.62)
+    float last = -1.0f;
+    bool mono = true;
+    for (int k = 0; k <= 64; k++) {
+      const float v = tonemap(Vec3(k / 16.0f), ViewTransform::AcesFull, 0.0f).x;
+      mono = mono && v >= last - 1e-6f, last = v;
+    }
+    CHECK(mono);
+    /* The curve the SIMD display path uses equals the scalar one. */
+    float rgb[24], want[24];
+    for (int i = 0; i < 24; i++) rgb[i] = i * 0.3f, want[i] = tonemap(Vec3(rgb[i]), ViewTransform::AcesFull, 0.5f).x;
+    uint32_t px[8];
+    display::encode_span(rgb, px, 8, ViewTransform::AcesFull, 0.5f);
+    bool same = true;
+    for (int i = 0; i < 8; i++) same = same && std::abs((int)(px[i] >> 16 & 255) - (int)std::lround(linear_to_srgb(want[i * 3]) * 255.0f)) <= 1;
+    CHECK(same);
+    const int idx = view_transform_setting(ViewTransform::AcesFull);
+    CHECK(idx >= 3 && view_transform_from_setting(idx) == ViewTransform::AcesFull && view_transform_from_setting(2) == ViewTransform::ACES);
+    CHECK((size_t)idx < view_transform_names().size() && view_transform_names()[(size_t)idx].find("full fit") != std::string::npos);
+    /* The GPU frame's code: AcesFull is 4 there (3 is an OpenColorIO table; review 405 - the GPU views had read it so). */
+    CHECK(gpu_view_transform_code(ViewTransform::AcesFull) == 4 && gpu_view_transform_code(ViewTransform::ACES) == 2 && gpu_view_transform_code(ViewTransform::OcioView) == 3);
+    /* An edit document saves the enum's value: AcesFull reopens as itself in any build, an OpenColorIO view as Standard. */
+    CHECK(edit::saved_view((int)ViewTransform::AcesFull) == ViewTransform::AcesFull && edit::saved_view(2) == ViewTransform::ACES && edit::saved_view((int)ViewTransform::OcioView) == ViewTransform::Standard);
+  });
+  test("Unity's BRDF weight (round 405) is on for a scene from Unity with no light at all, and off for Blendity's own scene", [] {
+    Editor ed;
+    ed.init_headless(300, 200);
+    std::vector<GameObject *> lights;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Light>()) lights.push_back(&g); });
+    for (GameObject *g : lights) ed.scene().destroy(g);  // (the sample scene's Point Light: no light at all)
+    CHECK(!ed.make_lighting_for_test().unity_brdf);
+    ed.scene().unity.file = "Assets/Imported/X/S.unity";
+    CHECK(ed.make_lighting_for_test().unity_brdf);
+  });
+  test("Unity's indirect specular (round 405): a rough dielectric wall reflects a probe at grazing angles by its grazing term (smoothness + reflectivity: 0.17 after the surface reduction, where Karis's fit gives 0.03); a dark rough metal's grazing term is 1 by its metallic, not its colour; a smooth metal facing by its colour; the surface reduction by the roughness", [] {
+    const Vec3 f0(0.04f);
+    const Vec3 rough_grazing = unity_indirect_specular(f0, 0.04f, 0.8f, 0.0f), rough_facing = unity_indirect_specular(f0, 0.04f, 0.8f, 1.0f);
+    const Vec3 approx_grazing = env_brdf_approx(f0, 0.8f, 0.0f);
+    std::printf("    rough wall at grazing: Unity %.3f, the approximation %.3f; facing %.4f\n", rough_grazing.x, approx_grazing.x, rough_facing.x);
+    CHECK(rough_grazing.x > approx_grazing.x && std::fabs(rough_grazing.x - 0.24f / (0.64f * 0.64f + 1.0f)) < 1e-4f);
+    CHECK(std::fabs(rough_facing.x - 0.04f / (0.64f * 0.64f + 1.0f)) < 1e-4f);
+    /* Dark steel (albedo 0.3, metallic 1, roughness 0.7): Unity's grazing term is saturate(0.3 + 1) = 1 - by the
+     * reflectivity 1 of a metal, not the colour's 0.3 (review 405). */
+    const Vec3 steel = unity_indirect_specular(Vec3(0.3f), unity_reflectivity(0.5f, 1.0f), 0.7f, 0.0f);
+    CHECK(std::fabs(steel.x - 1.0f / (0.49f * 0.49f + 1.0f)) < 1e-4f);
+    /* The rasterizers' reflectivity: Unity's 0.04 + 0.96 x metallic at Specular 0.5 (re-check 405). */
+    CHECK(std::fabs(unity_reflectivity(0.5f, 0.0f) - 0.04f) < 1e-6f && std::fabs(unity_reflectivity(0.5f, 0.5f) - 0.52f) < 1e-6f && unity_reflectivity(0.5f, 1.0f) == 1.0f);
+    const Vec3 gold(1.0f, 0.8f, 0.3f);
+    const Vec3 metal = unity_indirect_specular(gold, 1.0f, 0.0f, 1.0f);
+    CHECK(std::fabs(metal.x - 1.0f) < 1e-5f && std::fabs(metal.z - 0.3f) < 1e-5f);
+    CHECK(unity_indirect_specular(gold, 1.0f, 0.0f, 0.0f).z > 0.99f);  // (grazing: toward the grazing term, 1 for a smooth metal)
+  });
+  test("Three shaders read as what they draw (round 405): a glass shader is Glass, a candle flicker shader an emissive flame, a mirror shader a mirror; their families named", [] {
+    std::vector<std::string> none;
+    CHECK(unity_shader_family("Glass_NoFog", none) == "Glass" && unity_shader_family("VirtualFoxDesignStudio/GlassShader", none) == "Glass" && unity_shader_family("Unlit/GlassLike", none) == "Unlit");
+    CHECK(unity_shader_family("VirtualFoxDesignStudio/CandleFlicker", none) == "CandleFlicker" && unity_shader_family("Mirror/VRCPlayersOnlyMirror", none) == "Mirror" && unity_shader_family("FX/MirrorReflection", none) == "Mirror");
+    /* A lit shader that mentions one of the words isn't one (review 405): the family goes by the shader's own name. */
+    CHECK(unity_shader_family("Custom/Sunglasses", none) == "Custom/Sunglasses" && unity_shader_family("Unlit/MirroredTexture", none) == "Unlit" && unity_shader_family("Custom/UVMirror", none) == "Custom/UVMirror");
+    CHECK(unity_shader_family("Custom/MirroredUV", none) == "Custom/MirroredUV" && unity_shader_family("VRChat/VRCMirror", none) == "Mirror");
+    auto mat = [](const char *shader, const char *floats, const char *colors) {
+      const std::string yaml = std::string("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!21 &2100000\nMaterial:\n  m_Name: M\n  m_Shader: {fileID: 4800000, guid: s1, type: 3}\n"
+                                           "  m_SavedProperties:\n    m_TexEnvs: []\n    m_Floats:\n") + floats + "    m_Colors:\n" + colors;
+      Material m;
+      UnityMaterialInfo info;
+      const std::string name = shader;
+      const bool ok = unity_material(yaml, [](const std::string &) { return std::string(); }, [name](const std::string &, int64_t) { return name; }, m, info);
+      return std::make_pair(ok, std::make_pair(m, info));
+    };
+    auto g = mat("Glass_NoFog", "    - _Glossiness: 1\n    - _Metallic: 1\n", "    - _Color: {r: 1, g: 1, b: 1, a: 0}\n");
+    CHECK(g.first && g.second.second.known && g.second.first.surface == (int)MaterialSurface::Glass && std::fabs(g.second.first.ior - 1.5f) < 1e-6f && g.second.first.alpha == 1.0f && g.second.first.metallic == 0.0f);
+    auto c = mat("VirtualFoxDesignStudio/CandleFlicker", "    - _PowerMultiplier: 0.1\n", "    - _EmissionColor: {r: 0.4245283, g: 0.20175602, b: 0, a: 1}\n    - _Color: {r: 1, g: 1, b: 1, a: 1}\n");
+    CHECK(c.first && c.second.second.known && c.second.first.emission_strength > 0.1f && c.second.first.emission.x > 0.99f && c.second.first.emission.z == 0.0f && c.second.first.emission.y < 0.6f);
+    auto mr = mat("Mirror/VRCPlayersOnlyMirror", "    - _Glossiness: 0.5\n    - _Metallic: 0\n", "");
+    CHECK(mr.first && mr.second.second.known && mr.second.first.metallic == 1.0f && mr.second.first.roughness == 0.0f && mr.second.first.base_color.x == 1.0f);
+    std::printf("    glass ior %.2f, candle emission (%.2f %.2f %.2f) x %.2f, mirror metallic %.0f roughness %.0f\n", g.second.first.ior, c.second.first.emission.x, c.second.first.emission.y,
+                c.second.first.emission.z, c.second.first.emission_strength, mr.second.first.metallic, mr.second.first.roughness);
+  });
+}
+
 /* Round 404 (task 0381): the comparison harness's Blendity side. */
 static void tests_round404() {
   test("The comparison harness's Blendity side (round 404): `render wait` holds a script till the render is done, so the saverender after it saves the whole picture - the PNG and the linear HDR (brighter in sRGB than its own bytes)", [] {
@@ -9847,7 +9933,7 @@ static void tests_round401() {
     const VignetteEffect *v = cf ? cf->find<VignetteEffect>() : nullptr;
     std::printf("    view transform %d, exposure %g; bloom %s (%.4f), grading %s (gamma %.4f), vignette %s; %zu note(s)\n", s.render.view_transform, s.render.exposure, b ? "on" : "-",
                 b ? b->intensity : 0.0f, g ? "on" : "-", g ? g->gamma.x : 0.0f, v ? "on" : "-", notes.size());
-    CHECK(s.render.view_transform == 2 && s.render.exposure == 1.0f && b && std::fabs(b->intensity - (std::exp2(0.15f) - 1.0f)) < 1e-5f && std::fabs(b->scatter - 0.7f) < 1e-6f && g &&
+    CHECK(s.render.view_transform == view_transform_setting(ViewTransform::AcesFull) && s.render.exposure == 1.0f && b && std::fabs(b->intensity - (std::exp2(0.15f) - 1.0f)) < 1e-5f && std::fabs(b->scatter - 0.7f) < 1e-6f && g &&
           std::fabs(g->gamma.x - 1.108626194f) < 1e-5f && v && std::fabs(v->intensity - 0.3f) < 1e-6f && notes.size() == 1);
     unity_post_apply(p, s, *cam, notes);  // (again: the same effects replaced, not doubled)
     int blooms = 0;
@@ -12164,6 +12250,7 @@ void run_assets_tests() {
   tests_round402();
   tests_round403();
   tests_round404();
+  tests_round405();
   tests_round372();
   tests_round373();
   tests_round374();
