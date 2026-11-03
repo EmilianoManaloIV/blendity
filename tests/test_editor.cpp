@@ -1781,10 +1781,12 @@ static void coverage_tests() {
     ed.command("ui scale 1.5");
     ed.step_frame_headless();
     ed.command("ui scale 0");  // (0: follow the DPI, the default)
+    const int start_limit = JobSystem::global().thread_limit();  // (review 394: the run's own ceiling, put back after)
     ed.command("threads 2");
     CHECK(JobSystem::global().thread_limit() == 2);
     ed.command("threads 0");
     CHECK(JobSystem::global().thread_limit() != 2);
+    JobSystem::global().set_thread_limit(start_limit);
     ed.command("proportional on 2");
     ed.command("proportional off");
     ed.command("loopcuts 3 0.25");

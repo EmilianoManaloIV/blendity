@@ -955,12 +955,15 @@ static void round69_tests() {
       });
       return (int)ids.size();
     };
+    const int start_limit = js.thread_limit();  // (review 394: the ceiling the run started with - tools/run_suites.py sets one)
+    (void)distinct();  // (the built-in pool's workers start before any ceiling: alone, the test had started them under 3)
     js.set_thread_limit(3);
     const int capped = distinct();
     std::printf("    ceiling 3: %d threads ran the loop (the machine has %d), thread_count() says %d\n", capped, all, js.thread_count());
     CHECK(capped <= 3 && js.thread_count() <= 3);
-    js.set_thread_limit(0);
+    js.set_thread_limit(start_limit);  // (lifted to the ceiling the run started with)
     CHECK(js.thread_count() == all);
+    js.set_thread_limit(0);  // (the whole machine for the lift's own check below)
     /* Lifted: more than the old ceiling again. How many threads join one short loop is up to the scheduler (on a
      * 4-core CI runner all four must), so take the best of a few tries rather than one (it failed CI on PRs #49, #50). */
     int lifted = 0;
@@ -972,7 +975,7 @@ static void round69_tests() {
     (void)distinct();  // the workers start
     js.set_thread_limit(3);
     const int pool = distinct();
-    js.set_thread_limit(0);
+    js.set_thread_limit(start_limit);  // (review 394: the rest of the group under the run's ceiling again)
     js.set_backend(was);
     std::printf("    the built-in pool under a ceiling of 3: %d threads\n", pool);
     CHECK(pool <= 3);

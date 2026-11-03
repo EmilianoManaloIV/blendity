@@ -2,6 +2,23 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 394): the tests in parallel
+
+**Asked:** "Any way to make rounds faster?" - the first step of the plan for rounds 394-397.
+
+**Added (task 0371)**
+- **`tools/run_suites.py`:** every test group of every build as its own process, each with its own test folder and
+  share of the cores, longest first; the two Windows builds in one call, Linux the same in WSL.
+- The thread-ceiling test lifts the ceiling back to the one its process started with.
+
+**The Opus review's fixes:** each build runs in its own tree (a run from another folder had failed 41 checks), a build
+that doesn't run or names no group fails the run, group names checked before a folder is emptied, a build's own cache
+folder, the same group of two builds never at once, timeouts, no times from a filtered run, UTF-8 output; the ceiling
+tests put back their process's ceiling.
+
+**Checked:** the same totals as the serial runs (15,232 / 14,583 / 14,774 checks, 0 failed); both Windows builds in
+94 s (about 45 min serially), Linux in 49 s (about 35 min).
+
 ## 2026-11-02 (round 393): the HCI rerun after the fixes
 
 **Asked:** Phase D's last round: all seven productions measured again after rounds 351-392, before and after; the

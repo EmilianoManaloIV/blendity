@@ -115,8 +115,8 @@ inline bool opaque(uint32_t c) { return (c >> 24) == 0xFF; }
 /* Scratch files go to the OS temp folder, not next to the shipped executables. */
 inline std::string test_dir() {
   static std::string dir = [] {
-    /* BLENDITY_TEST_DIR: the check chain runs the groups as parallel processes, each with its own folder (a shared one
-     * made one group's files another's). */
+    /* BLENDITY_TEST_DIR: tools/run_suites.py runs the groups as parallel processes, each with its own folder (a shared
+     * one made one group's files another's). */
     const char *own = std::getenv("BLENDITY_TEST_DIR");
     if (own && *own) {
       fs::make_dirs(own);
