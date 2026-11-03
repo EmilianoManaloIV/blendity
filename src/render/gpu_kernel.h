@@ -787,9 +787,10 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     vec3 n = s.normal;
     if (dot(n, V) < 0.0) n = normalize(n + sp.geo_normal * (-dot(n, V) + 0.01));
     if (bounce == 0) { albedo_out = s.albedo + s.emission; normal_out = n; depth_out = h.t; id_out = float(h.obj + 1u); }
-    if (bounce == 0 && camera_path && P.fog.z > 0.5) {  // (task 0248: distance fog at the first hit)
+    if (bounce == 0 && camera_path && P.fog.z > 0.5) {  // (task 0248: fog at the first hit; round 401: by view depth, Unity's three modes - fog.w the mode, fog_color.w the density)
+      float fd = max(0.0, (since_scatter + h.t) * dot(rd, P.cam_fwd.xyz));
       float fe = max(P.fog.x + 1e-3, P.fog.y);
-      float f = clamp((since_scatter + h.t - P.fog.x) / (fe - P.fog.x), 0.0, 1.0);
+      float f = P.fog.w > 1.5 ? 1.0 - exp(-(P.fog_color.w * fd) * (P.fog_color.w * fd)) : P.fog.w > 0.5 ? 1.0 - exp(-P.fog_color.w * fd) : clamp((fd - P.fog.x) / (fe - P.fog.x), 0.0, 1.0);
       L += beta * mix(P.fog_color.xyz, P.fog_far.xyz, f) * f;
       beta *= (1.0 - f);
     }

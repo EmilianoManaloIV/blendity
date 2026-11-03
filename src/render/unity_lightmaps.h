@@ -68,6 +68,16 @@ struct UnityLighting {
     Vec3 position;
     std::array<Vec3, 6> axes{};
   };
+  /* Round 401 (version 2): a ReflectionProbe's baked cubemap - six faces +X -X +Y -Y +Z -Z, size x size half RGB each,
+   * top row first as Cubemap.GetPixels gives them (checked against Unity: review 401); size 0 when it has no bake. */
+  struct ReflectionProbe {
+    std::string path;
+    Vec3 position, box_size, box_offset;
+    bool projection = false;
+    float intensity = 1.0f;
+    int importance = 1, size = 0;
+    std::vector<uint16_t> faces[6];
+  };
   int lightmaps_mode = 0;
   std::string lighting_data;          // (the LightingData.asset it was read from: Unity path)
   uint32_t lighting_data_hash = 0;    // (its bytes', FNV-1a 32: a bake of Unity's since makes the file stale)
@@ -76,10 +86,14 @@ struct UnityLighting {
   std::vector<Renderer> renderers;
   std::vector<LightInfo> lights;
   std::vector<Probe> probes;
+  std::vector<ReflectionProbe> reflection_probes;  // (round 401)
 };
 
 bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::string &why);
 std::string write_unity_lighting(const UnityLighting &u);  // (the same format: tests, and nothing else writes it)
+
+/* A half float's value (round 401: the reflection probes' faces are read where they are applied). */
+float unity_half_to_float(uint16_t h);
 
 /* FNV-1a 32 of a file's bytes (the file's lighting_data_hash for the LightingData.asset it names). */
 uint32_t unity_lighting_hash(const std::string &bytes);

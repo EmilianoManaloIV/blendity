@@ -309,7 +309,8 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
   std::memcpy(&sum, bytes.data() + bytes.size() - 4, 4);
   if (sum != fnv1a32(bytes.data(), bytes.size() - 4)) return why = "its checksum doesn't match (a changed or cut file)", false;
   Reader r{bytes, 8, bytes.size() - 4};
-  if (r.get<int32_t>() != 1) return why = "a version Blendity doesn't read", false;
+  const int32_t version = r.get<int32_t>();
+  if (version != 1 && version != 2) return why = "a version Blendity doesn't read", false;
   r.get<int32_t>();
   out.lightmaps_mode = r.get<int32_t>();
   out.lighting_data = r.str();
@@ -353,6 +354,22 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
     for (Vec3 &a : p.axes) a = r.vec3();
     out.probes.push_back(p);
   }
+  const size_t nrp = version >= 2 ? r.count(52) : 0;  // (round 401: the reflection probes)
+  for (size_t i = 0; r.ok && i < nrp; i++) {
+    UnityLighting::ReflectionProbe p;
+    p.path = r.str();
+    p.position = r.vec3(), p.box_size = r.vec3(), p.box_offset = r.vec3();
+    p.projection = r.get<int32_t>() != 0;
+    p.intensity = r.real(), p.importance = r.get<int32_t>(), p.size = r.get<int32_t>();
+    if (p.size < 0 || p.size > 2048) r.ok = false;
+    const size_t n = r.ok ? (size_t)p.size * (size_t)p.size * 3 : 0;
+    if (n * 2 * 6 > r.end - std::min(r.at, r.end)) r.ok = false;
+    for (int f = 0; r.ok && f < 6; f++) {
+      p.faces[f].resize(n);
+      if (n) std::memcpy(p.faces[f].data(), r.b.data() + r.at, n * 2), r.at += n * 2;
+    }
+    out.reflection_probes.push_back(std::move(p));
+  }
   if (!r.ok || r.at != r.end) return out = UnityLighting{}, why = "a broken .unity-lighting file", false;
   return true;
 }
@@ -360,7 +377,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
 std::string write_unity_lighting(const UnityLighting &u) {
   Writer w;
   w.b.append(kMagic, 8);
-  w.put<int32_t>(1), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);
+  w.put<int32_t>(2), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2)
   w.str(u.lighting_data), w.put<uint32_t>(u.lighting_data_hash);
   w.put<int32_t>((int32_t)u.pages.size());
   for (const auto &p : u.pages) {
@@ -392,9 +409,17 @@ std::string write_unity_lighting(const UnityLighting &u) {
     w.vec3(p.position);
     for (Vec3 a : p.axes) w.vec3(a);
   }
+  w.put<int32_t>((int32_t)u.reflection_probes.size());  // (round 401)
+  for (const auto &p : u.reflection_probes) {
+    w.str(p.path), w.vec3(p.position), w.vec3(p.box_size), w.vec3(p.box_offset);
+    w.put<int32_t>(p.projection ? 1 : 0), w.put(p.intensity), w.put<int32_t>(p.importance), w.put<int32_t>(p.size);
+    for (int f = 0; f < 6; f++) w.b.append((const char *)p.faces[f].data(), p.faces[f].size() * 2);
+  }
   w.put<uint32_t>(fnv1a32(w.b.data(), w.b.size()));
   return w.b;
 }
+
+float unity_half_to_float(uint16_t h) { return half_bits(h); }
 
 std::string unity_lighting_path(const GameObject &g, const GameObject *under) {
   std::string path;

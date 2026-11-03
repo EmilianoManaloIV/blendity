@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Unity prefabs and scenes into Blendity's objects (round 370, task 0347): see unity_scene.h.
 #include "unity_scene.h"
+#include "unity_material.h"
 
 #include "spring_bones.h"
 #include "../core/core.h"
@@ -135,7 +136,10 @@ bool light_override(const std::string &prop, double v, GameObject *g) {
   Light *l = g->get<Light>();
   if (!l || !std::isfinite(v)) return false;
   if (prop == "m_Enabled") return l->enabled = v != 0.0, true;
-  if (prop == "m_Color.r" || prop == "m_Color.g" || prop == "m_Color.b") return l->color[prop.back() == 'r' ? 0 : prop.back() == 'g' ? 1 : 2] = (float)v, true;
+  if (prop == "m_Color.r" || prop == "m_Color.g" || prop == "m_Color.b") return l->color[prop.back() == 'r' ? 0 : prop.back() == 'g' ? 1 : 2] = srgb_to_linear((float)std::max(0.0, v)), true;  // (round 401: gamma in the file)
+  if (prop == "m_Shadows.m_Type") return l->shadows = v >= 0.0 && v <= 2.0 ? (int)v : 2, true;  // (round 401)
+  if (prop == "m_Shadows.m_Strength") return l->shadow_strength = (float)std::max(0.0, std::min(1.0, v)), true;
+  if (prop == "m_BounceIntensity") return l->bounce_intensity = (float)std::max(0.0, v), true;
   if (prop == "m_Color.a") return true;  // (a light's alpha does nothing in Unity either)
   if (prop == "m_Intensity") return l->intensity = (float)v, true;
   if (prop == "m_Range") return l->range = (float)v, true;
@@ -431,14 +435,26 @@ void add_renderer(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) 
   add_outline(g, mats, ctx);
 }
 
-void add_light(const UnityDoc &d, GameObject *g) {
+void add_light(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
   static const int kType[] = {2, 0, 1, 3, 3};  // (Unity: Spot, Directional, Point, Rectangle, Disc)
   const int t = (int)d.body.num("m_Type", 2.0);
   Light *l = g->add<Light>();
   l->type = kType[t >= 0 && t <= 4 ? t : 2];
   l->area_shape = t == 4 ? 1 : 0;
   const YamlNode *c = d.body.get("m_Color");
-  if (c) l->color = Vec3((float)c->num("r", 1.0), (float)c->num("g", 1.0), (float)c->num("b", 1.0));
+  /* Unity writes a light's colour in gamma, whatever the project's colour space; Blendity's is linear (round 401: it had
+   * been read as it was - a half-grey light a third too bright). */
+  if (c) l->color = Vec3(srgb_to_linear((float)std::max(0.0, c->num("r", 1.0))), srgb_to_linear((float)std::max(0.0, c->num("g", 1.0))), srgb_to_linear((float)std::max(0.0, c->num("b", 1.0))));
+  if (const YamlNode *sh = d.body.get("m_Shadows")) {  // (round 401)
+    const int st = (int)sh->num("m_Type", 2.0);
+    l->shadows = st >= 0 && st <= 2 ? st : 2;
+    l->shadow_strength = (float)std::max(0.0, std::min(1.0, sh->num("m_Strength", 1.0)));
+  }
+  l->bounce_intensity = (float)std::max(0.0, d.body.num("m_BounceIntensity", 1.0));
+  l->cookie_size = (float)std::max(0.01, d.body.num("m_CookieSize", 10.0));
+  const std::string cookie = d.body.guid("m_Cookie");
+  if (!cookie.empty() && d.body.file_id("m_Cookie") && ctx.path_of) l->cookie.path = ctx.path_of(cookie);
+  if (const YamlNode *mask = d.body.get("m_CullingMask")) l->culling_mask = (int)(int64_t)mask->num("m_Bits", -1.0);
   l->intensity = (float)d.body.num("m_Intensity", 1.0);
   l->range = (float)d.body.num("m_Range", 10.0);
   l->spot_angle = (float)d.body.num("m_SpotAngle", 30.0);
@@ -460,6 +476,47 @@ void add_camera(const UnityDoc &d, GameObject *g) {
   c->orthographic = d.body.num("orthographic", 0.0) != 0.0;
   c->ortho_size = (float)d.body.num("orthographic size", 5.0);
   c->enabled = d.body.num("m_Enabled", 1.0) != 0.0;
+  /* Round 401: the rest of Unity's Camera - Clear Flags (1 Skybox, 2 Solid Color, 3 Depth only, 4 Nothing), Background
+   * (gamma, as a material's colour), HDR, FOV Axis, and the physical camera (m_projectionMatrixMode 2): focal length,
+   * sensor, lens shift, gate fit (0 None, 1 Vertical, 2 Horizontal, 3 Fill, 4 Overscan: Blendity's Auto / Horizontal /
+   * Vertical fit). */
+  const int clear = (int)d.body.num("m_ClearFlags", 1.0);
+  c->clear_flags = clear == 2 ? 1 : 0;
+  c->unity_clear_flags = clear;
+  if (const YamlNode *bg = d.body.get("m_BackGroundColor"))
+    c->background = Vec3(srgb_to_linear((float)std::max(0.0, bg->num("r"))), srgb_to_linear((float)std::max(0.0, bg->num("g"))), srgb_to_linear((float)std::max(0.0, bg->num("b")))),
+    c->background_alpha = (float)bg->num("a", 0.0);
+  c->hdr = d.body.num("m_HDR", 1.0) != 0.0;
+  c->fov_axis = d.body.num("m_FOVAxisMode", 0.0) != 0.0 ? 1 : 0;
+  if (d.body.num("m_projectionMatrixMode", 0.0) == 2.0) {  // (Unity: 0 Implicit, 1 Explicit, 2 Physical Properties Based)
+    c->physical = true;
+    c->focal_length = (float)std::max(1.0, d.body.num("m_FocalLength", 50.0));
+    if (const YamlNode *s = d.body.get("m_SensorSize")) c->sensor_preset = 0, c->sensor_width = (float)s->num("x", 36.0), c->sensor_height = (float)s->num("y", 24.0);
+    if (const YamlNode *s = d.body.get("m_LensShift")) c->shift_x = (float)s->num("x", 0.0), c->shift_y = (float)s->num("y", 0.0);
+    const int gate = (int)d.body.num("m_GateFitMode", 2.0);
+    c->sensor_fit = gate == 2 ? 1 : gate == 1 ? 2 : 0;
+  }
+}
+
+/* Round 401: Unity's ReflectionProbe (class 215) as Blendity's. */
+void add_reflection_probe(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
+  ReflectionProbeComponent *p = g->add<ReflectionProbeComponent>();
+  const int mode = (int)d.body.num("m_Mode", 0.0);
+  p->mode = mode >= 0 && mode <= 2 ? mode : 0;
+  if (const YamlNode *s = d.body.get("m_BoxSize")) p->box_size = Vec3((float)s->num("x", 10.0), (float)s->num("y", 10.0), (float)s->num("z", 10.0));
+  if (const YamlNode *o = d.body.get("m_BoxOffset")) p->box_offset = Vec3((float)o->num("x", 0.0), (float)o->num("y", 0.0), (float)o->num("z", 0.0));
+  p->box_projection = d.body.num("m_BoxProjection", 0.0) != 0.0;
+  p->intensity = (float)std::max(0.0, d.body.num("m_IntensityMultiplier", 1.0));
+  p->blend_distance = (float)std::max(0.0, d.body.num("m_BlendDistance", 1.0));
+  p->importance = (int)d.body.num("m_Importance", 1.0);
+  p->resolution = std::max(16, std::min(2048, (int)d.body.num("m_Resolution", 128.0)));
+  p->hdr = d.body.num("m_HDR", 1.0) != 0.0;
+  p->near_clip = (float)std::max(0.01, d.body.num("m_NearClip", 0.3));
+  p->far_clip = (float)std::max(0.1, d.body.num("m_FarClip", 1000.0));
+  if (const YamlNode *mask = d.body.get("m_CullingMask")) p->culling_mask = (int)(int64_t)mask->num("m_Bits", -1.0);
+  p->enabled = d.body.num("m_Enabled", 1.0) != 0.0;
+  const std::string custom = d.body.guid("m_CustomBakedTexture");
+  if (!custom.empty() && d.body.file_id("m_CustomBakedTexture") && ctx.path_of) p->custom_cubemap.path = ctx.path_of(custom);
 }
 
 void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx);
@@ -563,9 +620,10 @@ void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
 void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
   switch (d.class_id) {
     case 23: return add_renderer(d, g, ctx, b);
-    case 108: return add_light(d, g), (void)ctx.lights++;
+    case 108: return add_light(d, g, ctx), (void)ctx.lights++;
     case 20: return add_camera(d, g), (void)ctx.cameras++;
     case 64: case 65: case 135: case 136: return add_collider(d, g, ctx), (void)ctx.colliders++;
+    case 215: return add_reflection_probe(d, g, ctx), (void)ctx.reflection_probes++;  // (round 401)
     case 33: return;  // (meshes: before)
     case 137: return add_renderer(d, g, ctx, b);
     default:
@@ -619,7 +677,65 @@ bool replace_line(std::string &doc, const std::string &key, const std::string &v
 
 std::string vec3_text(Vec3 v) { return "{x: " + fmt(v.x) + ", y: " + fmt(v.y) + ", z: " + fmt(v.z) + "}"; }
 
+/* A field's current text equals `value`: numbers within float noise, anything else as written. */
+bool same_scalar(const YamlNode *n, const std::string &value) {
+  if (!n) return false;
+  char *ea = nullptr, *eb = nullptr;
+  const double a = std::strtod(n->value.c_str(), &ea), b = std::strtod(value.c_str(), &eb);
+  const bool numbers = !n->value.empty() && !value.empty() && *ea == '\0' && *eb == '\0';
+  if (numbers) return std::fabs(a - b) <= 1e-5 * std::max(1.0, std::fabs(a));
+  if (n->kind == YamlNode::Map && value.size() > 1 && value.front() == '{') {  // (an inline mapping: each of its numbers)
+    const std::string inner = value.substr(1, value.size() - 2);
+    for (size_t at = 0; at < inner.size();) {
+      size_t comma = inner.find(',', at);
+      if (comma == std::string::npos) comma = inner.size();
+      const std::string part = inner.substr(at, comma - at);
+      const size_t colon = part.find(':');
+      if (colon == std::string::npos) return false;
+      std::string key = part.substr(0, colon), v = part.substr(colon + 1);
+      key.erase(0, key.find_first_not_of(' ')), v.erase(0, v.find_first_not_of(' '));
+      if (!same_scalar(n->get(key), v)) return false;
+      at = comma + 1;
+    }
+    return true;
+  }
+  return n->value == value;
+}
+
+/* The line "    child: ..." inside the mapping "  parent:" replaced; false when either isn't there. */
+bool replace_nested_line(std::string &doc, const std::string &parent, const std::string &child, const std::string &value) {
+  const size_t at = doc.find("\n  " + parent + ":");
+  if (at == std::string::npos) return false;
+  size_t line = doc.find('\n', at + 1);
+  while (line != std::string::npos && line + 1 < doc.size() && doc.compare(line + 1, 4, "    ") == 0) {
+    const size_t end = doc.find('\n', line + 1) == std::string::npos ? doc.size() : doc.find('\n', line + 1);
+    const std::string head = "    " + child + ": ";
+    if (doc.compare(line + 1, head.size(), head) == 0) {
+      const bool cr = end > line + 1 && doc[end - 1] == '\r';
+      doc.replace(line + 1, end - line - 1 - (cr ? 1 : 0), head + value);
+      return true;
+    }
+    line = end == doc.size() ? std::string::npos : end;
+  }
+  return false;
+}
+
+/* Round 401: a document's own fields written where they differ. */
+void apply_field_edits(std::string &doc, const UnityEdit &e, int &changed) {
+  const YamlNode b = doc_body(doc);
+  for (const auto &[key, value] : e.fields) {
+    const size_t slash = key.find('/');
+    if (slash == std::string::npos) {
+      if (!same_scalar(b.get(key), value)) changed += replace_line(doc, key, value);
+      continue;
+    }
+    const YamlNode *parent = b.get(key.substr(0, slash));
+    if (!same_scalar(parent ? parent->get(key.substr(slash + 1)) : nullptr, value)) changed += replace_nested_line(doc, key.substr(0, slash), key.substr(slash + 1), value);
+  }
+}
+
 void apply_edit(std::string &doc, const UnityEdit &e, int &changed) {
+  if (!e.fields.empty()) return apply_field_edits(doc, e, changed);
   const YamlNode b = doc_body(doc);
   if (!e.transform) {
     if (b.str("m_Name") != e.name) changed += replace_line(doc, "m_Name", unity_yaml_string(e.name));
@@ -638,6 +754,123 @@ void apply_edit(std::string &doc, const UnityEdit &e, int &changed) {
   if (!same3(b, "m_LocalScale", e.scale)) changed += replace_line(doc, "m_LocalScale", vec3_text(e.scale));
 }
 }  // namespace
+
+/* ----------------------------------------------------------------- post-processing (round 401) */
+
+namespace {
+
+/* A PPv2 parameter's value when the profile overrides it: {overrideState: 1, value: ...}. */
+const YamlNode *overridden(const YamlNode &effect, const char *name) {
+  const YamlNode *p = effect.get(name);
+  return p && p->num("overrideState", 0.0) != 0.0 ? p->get("value") : nullptr;
+}
+float post_num(const YamlNode &effect, const char *name, float def) {
+  const YamlNode *v = overridden(effect, name);
+  return v ? (float)std::atof(v->value.c_str()) : def;
+}
+Vec3 post_color(const YamlNode &effect, const char *name, Vec3 def) {
+  const YamlNode *v = overridden(effect, name);
+  return v ? Vec3((float)v->num("r", def.x), (float)v->num("g", def.y), (float)v->num("b", def.z)) : def;
+}
+void post_vec4(const YamlNode &effect, const char *name, float out[4]) {
+  const YamlNode *v = overridden(effect, name);
+  if (!v) return;
+  out[0] = (float)v->num("x", out[0]), out[1] = (float)v->num("y", out[1]), out[2] = (float)v->num("z", out[2]), out[3] = (float)v->num("w", out[3]);
+}
+bool post_on(const YamlNode &effect) {
+  if (effect.num("active", 1.0) == 0.0) return false;
+  const YamlNode *v = overridden(effect, "enabled");
+  return v ? v->value != "0" : false;  // (an effect not overriding `enabled` is off, as PPv2 takes it)
+}
+
+}  // namespace
+
+bool unity_post_profile(const std::string &yaml, UnityPostProfile &out) {
+  std::vector<UnityDoc> docs;
+  std::string why;
+  if (!parse_unity_yaml(yaml, docs, why)) return false;
+  out = UnityPostProfile{};
+  bool any = false;
+  for (const UnityDoc &d : docs) {
+    if (d.class_id != 114) continue;
+    const std::string name = d.body.str("m_Name");
+    if (name == "PostProcessProfile" || d.body.get("settings")) { any = true; continue; }  // (the profile's own document lists its effects)
+    any = true;
+    if (name == "ColorGrading") {
+      UnityPostProfile::Grading &g = out.grading;
+      g.on = post_on(d.body);
+      g.tonemapper = (int)post_num(d.body, "tonemapper", 0.0f);
+      g.post_exposure = post_num(d.body, "postExposure", 0.0f);
+      g.temperature = post_num(d.body, "temperature", 0.0f), g.tint = post_num(d.body, "tint", 0.0f), g.hue_shift = post_num(d.body, "hueShift", 0.0f);
+      g.saturation = post_num(d.body, "saturation", 0.0f), g.contrast = post_num(d.body, "contrast", 0.0f);
+      g.color_filter = post_color(d.body, "colorFilter", g.color_filter);
+      post_vec4(d.body, "lift", g.lift), post_vec4(d.body, "gamma", g.gamma), post_vec4(d.body, "gain", g.gain);
+      continue;
+    }
+    if (name == "Bloom") {
+      UnityPostProfile::Bloom &b = out.bloom;
+      b.on = post_on(d.body);
+      b.intensity = post_num(d.body, "intensity", 0.0f), b.threshold = post_num(d.body, "threshold", 1.0f), b.soft_knee = post_num(d.body, "softKnee", 0.5f);
+      b.diffusion = post_num(d.body, "diffusion", 7.0f), b.clamp = post_num(d.body, "clamp", 65472.0f);
+      b.color = post_color(d.body, "color", b.color);
+      continue;
+    }
+    if (name == "Vignette") {
+      UnityPostProfile::Vignette &v = out.vignette;
+      v.on = post_on(d.body);
+      v.intensity = post_num(d.body, "intensity", 0.0f), v.smoothness = post_num(d.body, "smoothness", 0.2f), v.roundness = post_num(d.body, "roundness", 1.0f);
+      v.color = post_color(d.body, "color", v.color);
+      continue;
+    }
+    if (!name.empty() && post_on(d.body)) out.undrawn.push_back(name);
+  }
+  return any;
+}
+
+void unity_post_apply(const UnityPostProfile &p, Scene &scene, GameObject &camera, std::vector<std::string> &notes) {
+  if (p.grading.on) {
+    scene.render.view_transform = p.grading.tonemapper == 2 ? 2 : p.grading.tonemapper == 1 ? 1 : 0;  // (ACES, Neutral as Filmic, None as Standard)
+    scene.render.exposure = p.grading.post_exposure;
+  }
+  CameraFilters *cf = camera.get<CameraFilters>();
+  if (!cf && (p.grading.on || p.bloom.on || p.vignette.on)) cf = camera.add<CameraFilters>();
+  auto replace = [&](const char *type) -> FilterEffect * {
+    for (size_t i = 0; cf && i < cf->effects.size(); i++)
+      if (cf->effects[i] && std::string(cf->effects[i]->type_name()) == type) cf->effects.erase(cf->effects.begin() + (std::ptrdiff_t)i), i--;
+    return cf ? cf->add(type) : nullptr;
+  };
+  const UnityPostProfile::Grading &g = p.grading;
+  const bool graded = g.on && (g.temperature != 0.0f || g.tint != 0.0f || g.saturation != 0.0f || g.contrast != 0.0f || g.lift[3] != 0.0f || g.gamma[3] != 0.0f || g.gain[3] != 0.0f ||
+                               g.lift[0] != g.lift[1] || g.lift[1] != g.lift[2] || g.gamma[0] != g.gamma[1] || g.gamma[1] != g.gamma[2] || g.gain[0] != g.gain[1] || g.gain[1] != g.gain[2]);
+  if (graded)
+    if (auto *e = dynamic_cast<ColorGradingEffect *>(replace(ColorGradingEffect::kName))) {
+      e->temperature = g.temperature / 100.0f, e->tint = g.tint / 100.0f, e->saturation = g.saturation / 100.0f, e->contrast = g.contrast / 100.0f;
+      /* PPv2's wheels: xyz the colour (grey 1 neutral), w the offset -1..1; Blendity's lift adds (black neutral), gamma
+       * and gain scale (1 neutral). */
+      e->lift = Vec3(g.lift[0] - 1.0f + g.lift[3], g.lift[1] - 1.0f + g.lift[3], g.lift[2] - 1.0f + g.lift[3]);
+      e->gamma = Vec3(g.gamma[0] + g.gamma[3], g.gamma[1] + g.gamma[3], g.gamma[2] + g.gamma[3]);
+      e->gain = Vec3(g.gain[0] + g.gain[3], g.gain[1] + g.gain[3], g.gain[2] + g.gain[3]);
+    }
+  if (p.bloom.on)
+    if (auto *b = dynamic_cast<BloomEffect *>(replace(BloomEffect::kName))) {
+      b->intensity = std::exp2(p.bloom.intensity / 10.0f) - 1.0f;  // (PPv2: intensity = 2^(i / 10) - 1)
+      b->threshold = srgb_to_linear(std::max(0.0f, std::min(1.0f, p.bloom.threshold))) + std::max(0.0f, p.bloom.threshold - 1.0f);  // (its threshold is gamma)
+      b->soft_knee = p.bloom.soft_knee, b->scatter = std::max(0.0f, std::min(1.0f, p.bloom.diffusion / 10.0f)), b->clamp = p.bloom.clamp;
+      b->tint = p.bloom.color;
+    }
+  if (p.vignette.on)
+    if (auto *v = dynamic_cast<VignetteEffect *>(replace(VignetteEffect::kName))) {
+      v->intensity = p.vignette.intensity, v->smoothness = p.vignette.smoothness, v->roundness = p.vignette.roundness, v->color = p.vignette.color;
+    }
+  for (const std::string &u : p.undrawn) notes.push_back("the post-processing profile's " + u + " is kept for Unity: Blendity doesn't draw it");
+}
+
+std::string unity_yaml_num(double v) { return fmt(v); }
+std::string unity_yaml_color(Vec3 c, float alpha) {
+  auto g = [](float v) { return v <= 1.0f ? linear_to_srgb(std::max(0.0f, v)) : std::pow(v, 1.0f / 2.2f); };  // (HDR past 1 by the same curve)
+  return "{r: " + fmt(g(c.x)) + ", g: " + fmt(g(c.y)) + ", b: " + fmt(g(c.z)) + ", a: " + fmt(alpha) + "}";
+}
+std::string unity_yaml_vec3(Vec3 v) { return vec3_text(v); }
 
 std::string unity_yaml_string(const std::string &s) {
   bool plain = !s.empty() && s.find(": ") == std::string::npos && s.find(":\t") == std::string::npos && s.find(" #") == std::string::npos && s.back() != ' ' &&
@@ -670,8 +903,14 @@ std::string patch_unity_objects(const std::string &text, const std::vector<Unity
     at = next;
     const size_t amp = doc.rfind("--- ", 0) == 0 ? doc.find('&') : std::string::npos;
     const int64_t fid = amp == std::string::npos || amp > doc.find('\n') ? 0 : std::strtoll(doc.c_str() + amp + 1, nullptr, 10);
-    for (const UnityEdit &e : edits)
-      if (fid && e.file_id == fid && doc.find("stripped") > doc.find('\n')) apply_edit(doc, e, n);
+    const size_t bang = doc.rfind("--- !u!", 0) == 0 ? 7 : std::string::npos;
+    const int cls = bang == std::string::npos ? 0 : (int)std::strtol(doc.c_str() + bang, nullptr, 10);
+    const bool live = doc.find("stripped") > doc.find('\n');
+    for (const UnityEdit &e : edits) {
+      if (!live || !fid) continue;
+      if (e.class_id == 0 && e.file_id == fid) apply_edit(doc, e, n);
+      else if (e.class_id != 0 && e.class_id == cls && (e.game_object == 0 || doc_body(doc).file_id("m_GameObject") == e.game_object)) apply_edit(doc, e, n);  // (round 401)
+    }
     out += doc;
   }
   if (changed) *changed = n;
@@ -954,10 +1193,41 @@ void unity_model_targets(const ImportResult &r, GameObject *root, const std::vec
 
 /* Unity's RenderSettings: AmbientMode 0 Skybox, 1 Trilight, 3 Flat, 4 Custom; FogMode 1 Linear, 2 Exponential,
  * 3 Exponential Squared. Colours are gamma, as a material's. */
-bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes) {
+/* Round 401: the skybox material as Blendity's world - Unity's procedural sky as the Sky, a panorama or cubemap as the
+ * HDRI, a plain colour as the Color; the ambient's Intensity Multiplier as the strength (it scales Unity's ambient alone,
+ * Blendity's background too - noted). */
+void skybox_world(const UnitySkybox &sb, EnvironmentSettings &env, std::vector<std::string> &notes) {
+  const std::string s = to_lower(sb.shader);
+  if (s.find("procedural") != std::string::npos) {
+    env.mode = 1;
+    env.turbidity = std::max(1.0f, std::min(10.0f, 1.0f + 2.0f * sb.atmosphere_thickness));  // (1 -> 3, Unity's and Hosek's clear days)
+    env.strength *= sb.exposure;
+    return;
+  }
+  if (s.find("panoramic") != std::string::npos || s.find("cubemap") != std::string::npos) {
+    if (sb.texture.empty()) return notes.push_back("the skybox's picture isn't in the project: Blendity's sky stays");
+    env.mode = 2, env.hdri.path = sb.texture, env.rotation = sb.rotation;
+    env.strength *= sb.exposure * std::max(0.0f, sb.tint.x + sb.tint.y + sb.tint.z) * (2.0f / 3.0f);  // (Unity's grey tint 0.5 is neutral)
+    if (s.find("cubemap") != std::string::npos) notes.push_back("the skybox is a cubemap: shown as the HDRI only when its file is a panorama");
+    return;
+  }
+  if (s.find("6 sided") != std::string::npos || s.find("6sided") != std::string::npos) {
+    env.mode = 3, env.color = sb.tint * (2.0f * sb.exposure);
+    return notes.push_back("a 6 Sided skybox isn't stitched yet: its tint as a plain colour");
+  }
+  if (s.find("unlit") != std::string::npos || s == "unlit/color") {
+    env.mode = 3, env.color = sb.color;
+    return;
+  }
+  notes.push_back("the skybox's shader (" + sb.shader + ") isn't one Blendity reads: Blendity's sky stays");
+}
+
+bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,
+                           const std::function<bool(const std::string &guid, UnitySkybox &out)> &skybox, UnitySceneLink *link) {
   const UnityDoc *rs = nullptr;
   for (const UnityDoc &d : docs) rs = !rs && d.class_id == 104 ? &d : rs;
   if (!rs) return false;
+  if (link) link->ambient_mode = (int)rs->body.num("m_AmbientMode", 0.0), link->ambient_intensity = (float)std::max(0.0, rs->body.num("m_AmbientIntensity", 1.0));
   auto linear = [](double c) { return c <= 1.0 ? srgb_to_linear((float)std::max(0.0, c)) : (float)std::pow(c, 2.2); };  // (HDR past 1 by the same curve)
   auto color = [&](const char *key, Vec3 def) {
     const YamlNode *c = rs->body.get(key);
@@ -965,17 +1235,24 @@ bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSetting
   };
   const int ambient = (int)rs->body.num("m_AmbientMode", 0.0);
   if (ambient == 1) env.mode = 0, env.sky = color("m_AmbientSkyColor", env.sky), env.equator = color("m_AmbientEquatorColor", env.equator), env.ground = color("m_AmbientGroundColor", env.ground);
-  if (ambient == 3) env.mode = 3, env.color = color("m_AmbientSkyColor", env.color);
-  if (ambient == 1 || ambient == 3) env.strength = 1.0f;  // (review 395: Unity's Intensity Multiplier is a Skybox source's; a colour is as it is)
-  if (ambient == 0 && rs->body.file_id("m_SkyboxMaterial")) notes.push_back("the scene's ambient is its skybox material's: Blendity's sky stays (set it in the Lighting window)");
+  if (ambient == 3 || ambient == 4) env.mode = 3, env.color = color("m_AmbientSkyColor", env.color);  // (round 401: Custom's probe isn't in the file - its sky colour)
+  if (ambient == 1 || ambient == 3 || ambient == 4) env.strength = 1.0f;  // (review 395: Unity's Intensity Multiplier is a Skybox source's; a colour is as it is)
+  if (ambient == 4) notes.push_back("the scene's Custom ambient probe isn't in the file: its sky colour as a flat ambient");
+  env.reflection_intensity = (float)std::max(0.0, rs->body.num("m_ReflectionIntensity", 1.0));
+  UnitySkybox sb;
+  if (ambient == 0 && rs->body.file_id("m_SkyboxMaterial") && skybox && skybox(rs->body.guid("m_SkyboxMaterial"), sb)) {
+    env.strength = (float)std::max(0.0, rs->body.num("m_AmbientIntensity", 1.0));
+    skybox_world(sb, env, notes);
+  }
+  else if (ambient == 0 && rs->body.file_id("m_SkyboxMaterial")) notes.push_back("the scene's ambient is its skybox material's: Blendity's sky stays (set it in the Lighting window)");
+  if (link) link->world_mode = env.mode, link->world_key = UnitySceneLink::ambient_key(env);  // (re-check 401: an untouched world writes no ambient back)
   env.fog = rs->body.num("m_Fog", 0.0) != 0.0;
   const int fog = (int)rs->body.num("m_FogMode", 3.0);
-  const double density = std::max(1e-6, rs->body.num("m_FogDensity", 0.01));
+  env.fog_mode = fog == 1 ? 0 : fog == 2 ? 1 : 2;  // (round 401: Unity's three modes as they are, by view depth)
+  env.fog_density = (float)std::max(0.0, rs->body.num("m_FogDensity", 0.01));
   env.fog_color = env.fog_color_far = color("m_FogColor", env.fog_color);
-  env.fog_start = fog == 1 ? (float)std::max(0.0, rs->body.num("m_LinearFogStart", 0.0)) : 0.0f;
-  env.fog_end = fog == 1 ? (float)std::max((double)env.fog_start + 0.1, rs->body.num("m_LinearFogEnd", 300.0))
-                         : (float)std::min(10000.0, (fog == 2 ? 3.0 : std::sqrt(3.0)) / density);  // (where 1 - e^-(d x) reaches 95%)
-  if (env.fog && fog != 1) notes.push_back("the scene's exponential fog came in as linear fog reaching 95% at the same distance");
+  env.fog_start = (float)std::max(0.0, rs->body.num("m_LinearFogStart", 0.0));
+  env.fog_end = (float)std::max((double)env.fog_start + 0.1, rs->body.num("m_LinearFogEnd", 300.0));
   return true;
 }
 

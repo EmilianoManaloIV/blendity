@@ -290,6 +290,15 @@ struct Light : ComponentBase<Light> {
   /* Round 397: a VRC Light Volumes light (red.sim.lightvolumes' Point Light Volume - point, spot or area) in Unity, beside
    * Unity's own: VRChat worlds light by it on every platform, 128 at once. */
   bool light_volume = false;
+  /* Round 401 (Unity's Light): Shadow Type 0 None, 1 Hard, 2 Soft and Strength; Indirect Multiplier (the bake's bounced
+   * light from it); a Cookie (its mask texture, kept and sent - not drawn yet) and Cookie Size (a directional's); the
+   * Culling Mask kept as Unity's bits. */
+  int shadows = 2;
+  float shadow_strength = 1.0f;
+  float bounce_intensity = 1.0f;
+  TextureRef cookie;
+  float cookie_size = 10.0f;
+  int culling_mask = -1;
   void reflect(Reflector &r) override;
   Vec3 final_color() const;  // colour x temperature tint
 };
@@ -308,6 +317,10 @@ struct Camera : ComponentBase<Camera> {
   float ortho_size = 5.0f;
   int clear_flags = 0;  // 0 skybox, 1 solid color
   Vec3 background{0.19f, 0.30f, 0.47f};
+  bool hdr = true;      // Unity's HDR rendering (round 401: kept for Unity; Blendity always lights in linear HDR)
+  int fov_axis = 0;     // Unity's FOV Axis, kept for Unity: 0 Vertical, 1 Horizontal (its Inspector's view; the field of view stays the vertical angle - round 401)
+  int unity_clear_flags = 0;  // Unity's own value (1 Skybox, 2 Solid Color, 3 Depth, 4 Nothing; 0 unknown): written back as it was when the flags weren't changed (review 401)
+  float background_alpha = 0.0f;  // Unity's background alpha, kept (review 401)
   /* Unity's Physical Camera / Blender's lens and sensor: the field of view
    * comes from the focal length and the sensor size. */
   bool physical = false;
@@ -743,6 +756,27 @@ struct LightVolumeComponent : ComponentBase<LightVolumeComponent> {
 /* The grid a volume bakes at: from its world size and Voxels Per Unit when adaptive (each axis rounded half to even, at
  * least 1 - the package's RecalculateAdaptiveResolution), else its own. */
 void light_volume_resolution(const GameObject &g, const LightVolumeComponent &v, int out[3]);
+
+/* Unity's Reflection Probe (round 401, ADR 0099): a cubemap of the room baked at the object's position, which the
+ * metal and glass inside its box reflect - box-projected when asked, blended between probes by importance and Blend
+ * Distance as Unity does. Mode Baked: Generate Lighting bakes it (the path tracer), or Unity's own bake comes with
+ * Unity's lightmaps; Custom: its own cubemap; Realtime: kept for Unity (drawn from the bake when there is one). The
+ * box is in world axes, its size scaled by the object's scale, its offset from the object's position. */
+struct ReflectionProbeComponent : ComponentBase<ReflectionProbeComponent> {
+  static constexpr const char *kName = "ReflectionProbe";
+  int mode = 0;  // 0 Baked, 1 Realtime, 2 Custom
+  Vec3 box_size{10.0f, 10.0f, 10.0f}, box_offset{0.0f, 0.0f, 0.0f};
+  bool box_projection = false;
+  float intensity = 1.0f, blend_distance = 1.0f;
+  int importance = 1, resolution = 128;
+  bool hdr = true;
+  float near_clip = 0.3f, far_clip = 1000.0f;
+  int culling_mask = -1;
+  TextureRef custom_cubemap;
+  void reflect(Reflector &r) override;
+  /* The box in world space: the object's position plus the offset, the size times the object's scale. */
+  void world_box(const GameObject &g, Vec3 &bmin, Vec3 &bmax) const;
+};
 
 /* A component of another engine that Blendity keeps but doesn't run (round 370, task 0347): a Unity script (C#,
  * UdonSharp), VRChat's components and anything else Unity puts on an object - its type, its script's GUID and its
@@ -1582,6 +1616,23 @@ inline std::vector<GameObject *> bone_children(const GameObject &g) {
 
 /* ----------------------------------------------------------------- Scene */
 
+struct EnvironmentSettings;
+
+/* Round 401: the Unity scene file this scene was opened from (project-relative, "" when none): Export Unity Package
+ * writes the scene's world, camera and light settings back into it. */
+struct UnitySceneLink {
+  std::string file;
+  int ambient_mode = -1;           // Unity's m_AmbientMode as read (0 Skybox, 1 Trilight, 3 Flat, 4 Custom; -1 none): written back only where Blendity's world still means it (review 401)
+  float ambient_intensity = 1.0f;  // Unity's m_AmbientIntensity as read (the world's strength folds the skybox's exposure in)
+  int world_mode = -1;             // the world mode the import made of the ambient (-1 none): an untouched world writes no ambient back (re-check 401)
+  uint64_t world_key = 0;          // the world's ambient colours and strength as imported, hashed: changed since means the user edited them
+  bool lights_gamma = true;        // the built-in pipeline's lights: colour x intensity taken in gamma, as Unity's lightsUseLinearIntensity off (review 401)
+  std::string world_key_text;      // (the key as the scene file carries it)
+  static uint64_t ambient_key(const EnvironmentSettings &e);
+  bool gamma_lights() const { return lights_gamma && !file.empty(); }  // (the one rule: a scene opened from Unity with Lights Gamma on)
+  void reflect(Reflector &r);
+};
+
 /* Blender: World properties. Unity: Lighting window > Environment. */
 struct EnvironmentSettings {
   int mode = 0;  // 0 Gradient (Unity default), 1 Sky (Hosek-Wilkie), 2 HDRI, 3 Color
@@ -1591,6 +1642,7 @@ struct EnvironmentSettings {
   Vec3 color{0.05f, 0.05f, 0.05f};
   TextureRef hdri;
   float strength = 1.0f;
+  float reflection_intensity = 1.0f;  // Unity's Environment Reflections > Intensity Multiplier (round 401: kept and sent)
   float rotation = 0.0f;
   float turbidity = 3.0f;
   float ground_albedo = 0.3f;
@@ -1603,6 +1655,8 @@ struct EnvironmentSettings {
   /* Distance fog in every renderer: the surface colour mixed toward the ramp (near colour to far colour) by the view
    * distance from `fog_start` to `fog_end`. */
   bool fog = false;
+  int fog_mode = 0;           // 0 Linear, 1 Exponential, 2 Exponential Squared (Unity's three, round 401)
+  float fog_density = 0.02f;  // the exponential modes' (Unity's Density)
   float fog_start = 10.0f, fog_end = 60.0f;
   Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_color_far{0.75f, 0.8f, 0.9f};
   void reflect(Reflector &r);
@@ -1733,6 +1787,7 @@ class Scene {
   /* The camera the Game view, F12 and the Scene view's filters use (Blender's scene camera, Unity's
    * MainCamera tag): an object id, 0 = none chosen (then "Main Camera" by name, else the first camera). */
   uint64_t active_camera = 0;
+  UnitySceneLink unity;  // (round 401)
   /* The scene's sequence (task 0070, ADR 0030 amended): a .seq whose bars each name a clip and the object it plays
    * on; played in Play by `director` (a Sequencer of the scene's, made at Play's start). */
   std::string sequence;

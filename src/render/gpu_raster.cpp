@@ -1226,17 +1226,72 @@ vec3 radiance(vec3 d, float lod) {
   }
   return g * env.y;
 }
-/* Task 0248: distance fog at a lit pixel (Environment::fog_apply). */
+/* Task 0248: distance fog at a lit pixel (Environment::fog_apply). Round 401: by the view depth, as Unity fogs; fog.w the
+ * mode (0 Linear, 1 Exponential, 2 Exponential Squared), fog_color.w the density. */
+float fog_depth(vec3 P) {
+  vec4 a = inv_view_proj * vec4(0.0, 0.0, 0.0, 1.0), b = inv_view_proj * vec4(0.0, 0.0, 1.0, 1.0);
+  return dot(P - eye.xyz, normalize(b.xyz / b.w - a.xyz / a.w));
+}
+float fog_amount(float d) {
+  d = max(d, 0.0);
+  if (fog.w > 1.5) { float k = fog_color.w * d; return 1.0 - exp(-k * k); }
+  if (fog.w > 0.5) return 1.0 - exp(-fog_color.w * d);
+  float fe = max(fog.x + 1e-3, fog.y);
+  return clamp((d - fog.x) / (fe - fog.x), 0.0, 1.0);
+}
 vec3 fog_apply(vec3 c, vec3 P) {
   if (fog.z < 0.5) return c;
-  float fe = max(fog.x + 1e-3, fog.y);
-  float f = clamp((length(P - eye.xyz) - fog.x) / (fe - fog.x), 0.0, 1.0);
+  float f = fog_amount(fog_depth(P));
   return mix(c, mix(fog_color.rgb, fog_far.rgb, f), f);
 }
 vec3 radiance(vec3 d) { return radiance(d, 0.0); }
 vec3 env_specular(vec3 r, float rough) {
   if (env_has_map()) return radiance(r, rough * env_map.z * 0.85);
   return mix(radiance(r), irradiance(r), clamp(rough * 1.2, 0.0, 1.0));
+}
+/* Round 401: the reflection probes (gi.y of them, after the lights in their buffer: pos_type = position, importance;
+ * dir_range = the box's min, blend distance; color = the box's max, intensity; spot = texture, box projection, levels).
+ * Unity's blending: of the boxes holding the point (or within Blend Distance of one) the most important (then the smallest)
+ * first, its weight 1 inside the box and fading outside it, the second what it leaves, the sky the rest. */
+vec3 probe_sample(int i, vec3 P, vec3 R, float rough) {
+  Light p = lights[int(view.z) + i];
+  vec3 d = normalize(R);
+  if (p.spot.y > 0.5) {  // (Unity's BoxProjectedCubemapDirection; a point outside the box clamped into it first)
+    P = clamp(P, p.dir_range.xyz, p.color.xyz);
+    vec3 rbmax = (p.color.xyz - P) / d, rbmin = (p.dir_range.xyz - P) / d;
+    vec3 rb = mix(rbmin, rbmax, step(0.0, d));
+    float fa = max(0.0, min(min(rb.x, rb.y), rb.z));
+    d = normalize((P - p.pos_type.xyz) + d * fa);
+  }
+  return tex_sample(int(p.spot.x), dir_to_equirect(d, 0.0), clamp(rough, 0.0, 1.0) * p.spot.z * 0.85, 0, 2).xyz * p.color.w;
+}
+vec3 probe_specular(vec3 P, vec3 R, float rough) {
+  int n = int(gi.y);
+  if (n <= 0) return env_specular(R, rough);
+  int best = -1, second = -1;
+  float best_vol = 0.0, second_vol = 0.0, best_imp = -1e9, second_imp = -1e9, wb = 0.0, ws = 0.0;
+  for (int i = 0; i < n; i++) {
+    Light p = lights[int(view.z) + i];
+    vec3 bmin = p.dir_range.xyz, bmax = p.color.xyz;
+    vec3 o = max(bmin - P, P - bmax);
+    float outside = max(max(o.x, o.y), o.z);  // (1 inside the box, fading to 0 Blend Distance outside it - Unity's deferred rule)
+    float w = outside <= 0.0 ? 1.0 : p.dir_range.w > 1e-6 ? max(0.0, 1.0 - outside / p.dir_range.w) : 0.0;
+    if (w <= 0.0) continue;
+    vec3 s = bmax - bmin;
+    float vol = s.x * s.y * s.z, imp = p.pos_type.w;
+    bool better = best < 0 || imp > best_imp || (imp == best_imp && vol < best_vol);
+    if (better) { second = best; second_vol = best_vol; second_imp = best_imp; ws = wb; best = i; best_vol = vol; best_imp = imp; wb = w; }
+    else if (second < 0 || imp > second_imp || (imp == second_imp && vol < second_vol)) { second = i; second_vol = vol; second_imp = imp; ws = w; }
+  }
+  if (best < 0) return env_specular(R, rough);
+  vec3 c = probe_sample(best, P, R, rough) * wb;
+  float rest = 1.0 - wb;
+  if (second >= 0 && rest > 1e-4) {
+    float w2 = rest * ws;
+    c += probe_sample(second, P, R, rough) * w2;
+    rest -= w2;
+  }
+  return rest > 1e-4 ? c + env_specular(R, rough) * rest : c;
 }
 /* Toon (ADR 0020; shading.cpp's toon_level, shade_toon, toon_rim): bands of N.L, the shadow colour, a hard spot. */
 float axis_step(float e0, float e1, float x) {
@@ -1486,7 +1541,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   float nv = max(dot(n, V), 1e-4);
   vec3 f0 = fresnel_f0(albedo, metallic, specular);
   vec3 R = n * (2.0 * dot(n, V)) - V;
-  vec3 spec = env_specular(R, rough) * env_brdf_approx(f0, rough, nv);
+  vec3 spec = probe_specular(P, R, rough) * env_brdf_approx(f0, rough, nv);  // (round 401: the reflection probes' box)
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
   return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
@@ -3614,8 +3669,8 @@ class VulkanRaster final : public Raster {
       u.equator[k] = fr.equator[k];
       u.ground[k] = fr.ground[k];
     }
-    const int nl = (int)fr.lights.size();  // (task 0195: every light, in their own buffer)
-    if (!fit_array(light_buf_, (size_t)nl * 24 * sizeof(float), err)) return false;
+    const int nl = (int)fr.lights.size(), np = (int)fr.probes.size();  // (task 0195: every light, in their own buffer; round 401: the reflection probes after them)
+    if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
     if (!write_toon_table(err) || !write_baked_table(err) || !write_array(corner_buf_, fr.corners.data(), fr.corners.size() * sizeof(float), err)) return false;
@@ -3639,7 +3694,7 @@ class VulkanRaster final : public Raster {
     u.env[3] = fr.exposure;
     u.bg[0] = (float)fr.background;
     u.probe[0] = fr.probe_normal_bias, u.probe[1] = fr.probe_view_bias, u.probe[2] = fr.probe_leak ? 1.0f : 0.0f, u.probe[3] = fr.probe_live ? 1.0f : 0.0f;
-    u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = u.gi[2] = u.gi[3] = 0.0f;  // (task 0197)
+    u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = (float)np, u.gi[2] = u.gi[3] = 0.0f;  // (task 0197; round 401: gi.y the probes)
     for (int k = 0; k < 4; k++) u.sky_disc[k] = fr.sky_disc[k], u.sky_disc_color[k] = fr.sky_disc_color[k], u.sky_band[k] = fr.sky_band[k], u.fog[k] = fr.fog[k], u.fog_color[k] = fr.fog_color[k], u.fog_far[k] = fr.fog_far[k];  // (task 0248)
     u.cage[0] = fr.cage_bias;
     u.cage[1] = fr.cage_point_radius;
@@ -3672,6 +3727,15 @@ class VulkanRaster final : public Raster {
       const float ul = std::sqrt(ux * ux + uy * uy + uz * uz), inv = ul > 1e-12f ? 1.0f / ul : 0.0f;
       o[16] = l.right[0], o[17] = l.right[1], o[18] = l.right[2], o[19] = l.width;
       o[20] = ux * inv, o[21] = uy * inv, o[22] = uz * inv, o[23] = l.height;
+    }
+    for (int i = 0; i < np; i++) {  // (round 401: a probe as one light-sized record)
+      const RasterProbe &p = fr.probes[(size_t)i];
+      float *o = (float *)light_buf_.mapped + (size_t)(nl + i) * 24;
+      o[0] = p.position[0], o[1] = p.position[1], o[2] = p.position[2], o[3] = (float)p.importance;
+      o[4] = p.box_min[0], o[5] = p.box_min[1], o[6] = p.box_min[2], o[7] = p.blend;
+      o[8] = p.box_max[0], o[9] = p.box_max[1], o[10] = p.box_max[2], o[11] = p.intensity;
+      o[12] = (float)p.texture, o[13] = p.projection ? 1.0f : 0.0f, o[14] = (float)p.levels, o[15] = 0.0f;
+      for (int k = 16; k < 24; k++) o[k] = 0.0f;
     }
     std::memcpy(ubo_.mapped, &u, sizeof(u));
     return true;

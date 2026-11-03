@@ -165,12 +165,19 @@ struct Environment {
   float band_width = 0.0f;          // the horizon band's half-width in d.y (0: none)
   Vec3 band_color{0.95f, 0.75f, 0.6f};
   bool fog = false;
+  int fog_mode = 0;           // 0 Linear, 1 Exponential, 2 Exponential Squared (Unity's three, round 401)
+  float fog_density = 0.02f;  // the exponential modes' density
   float fog_start = 10.0f, fog_end = 60.0f;
   Vec3 fog_color{0.6f, 0.65f, 0.75f}, fog_far{0.75f, 0.8f, 0.9f};
-  float fog_amount(float dist) const {  // 0 at fog_start, 1 at fog_end and beyond
+  /* The fog's share at a view depth (round 401: the depth along the camera's forward, as Unity fogs, not the distance):
+   * Linear 0 at fog_start, 1 at fog_end and beyond; Exponential 1 - e^-(density x depth); Squared 1 - e^-(density x depth)^2. */
+  float fog_amount(float depth) const {
     if (!fog) return 0.0f;
+    const float d = std::max(0.0f, depth);
+    if (fog_mode == 1) return 1.0f - std::exp(-fog_density * d);
+    if (fog_mode == 2) return 1.0f - std::exp(-(fog_density * d) * (fog_density * d));
     const float e = std::max(fog_start + 1e-3f, fog_end);
-    const float t = (dist - fog_start) / (e - fog_start);
+    const float t = (d - fog_start) / (e - fog_start);
     return t <= 0.0f ? 0.0f : t >= 1.0f ? 1.0f : t;
   }
   Vec3 fog_apply(Vec3 c, float dist) const {

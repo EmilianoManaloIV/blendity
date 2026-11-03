@@ -97,8 +97,67 @@ std::map<std::string, std::vector<UnityEdit>> Editor::unity_edits(const std::str
     tr.position = g.local().position, tr.rotation = g.local().rotation, tr.scale = g.local().scale, tr.euler = g.local().euler_hint;
     out[o->file].push_back(go);
     if (tr.file_id) out[o->file].push_back(tr);
+    unity_component_edits(g, go.file_id, out[o->file]);  // (round 401: its camera's and light's fields)
   });
+  /* Round 401: the scene's world settings into the .unity it came from. */
+  if (!scene_->unity.file.empty() && scene_->unity.file.rfind(folder_rel + "/", 0) == 0) out[scene_->unity.file].push_back(unity_world_edit(scene_->environment, scene_->unity));
   return out;
+}
+
+/* Round 401: a Camera's and a Light's Unity fields as Blendity holds them now. */
+void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out) {
+  if (const Camera *c = g.get<Camera>()) {
+    UnityEdit e;
+    e.class_id = 20, e.game_object = game_object;
+    /* Review 401: Unity's Depth-only and Nothing clear flags stay what they were while the camera still clears to the sky here. */
+    const bool skybox_kept = c->clear_flags == 0 && (c->unity_clear_flags == 3 || c->unity_clear_flags == 4);
+    e.fields = {{"m_ClearFlags", c->clear_flags == 1 ? "2" : skybox_kept ? std::to_string(c->unity_clear_flags) : "1"}, {"m_BackGroundColor", unity_yaml_color(c->background, c->background_alpha)}, {"m_HDR", c->hdr ? "1" : "0"},
+                {"m_FOVAxisMode", c->fov_axis == 1 ? "1" : "0"}, {"field of view", unity_yaml_num(c->fov)}, {"near clip plane", unity_yaml_num(c->near_clip)},
+                {"far clip plane", unity_yaml_num(c->far_clip)}, {"orthographic", c->orthographic ? "1" : "0"}, {"orthographic size", unity_yaml_num(c->ortho_size)},
+                {"m_Enabled", c->enabled ? "1" : "0"}};
+    if (c->physical) e.fields.push_back({"m_FocalLength", unity_yaml_num(c->focal_length)});
+    out.push_back(e);
+  }
+  if (const ReflectionProbeComponent *p = g.get<ReflectionProbeComponent>()) {  // (round 401)
+    UnityEdit e;
+    e.class_id = 215, e.game_object = game_object;
+    e.fields = {{"m_Mode", std::to_string(std::max(0, std::min(2, p->mode)))}, {"m_BoxSize", unity_yaml_vec3(p->box_size)}, {"m_BoxOffset", unity_yaml_vec3(p->box_offset)},
+                {"m_BoxProjection", p->box_projection ? "1" : "0"}, {"m_IntensityMultiplier", unity_yaml_num(p->intensity)}, {"m_BlendDistance", unity_yaml_num(p->blend_distance)},
+                {"m_Importance", std::to_string(p->importance)}, {"m_Resolution", std::to_string(p->resolution)}, {"m_HDR", p->hdr ? "1" : "0"},
+                {"m_NearClip", unity_yaml_num(p->near_clip)}, {"m_FarClip", unity_yaml_num(p->far_clip)}, {"m_Enabled", p->enabled ? "1" : "0"}};
+    out.push_back(e);
+  }
+  if (const Light *l = g.get<Light>()) {
+    static const char *kUnityType[] = {"1", "2", "0", "3"};  // (Blendity: directional, point, spot, area -> Unity's 1, 2, 0, 3 / 4)
+    UnityEdit e;
+    e.class_id = 108, e.game_object = game_object;
+    e.fields = {{"m_Type", l->type == 3 && l->area_shape == 1 ? "4" : kUnityType[std::max(0, std::min(3, l->type))]}, {"m_Color", unity_yaml_color(l->color)},
+                {"m_Intensity", unity_yaml_num(l->intensity)}, {"m_Range", unity_yaml_num(l->range)}, {"m_SpotAngle", unity_yaml_num(l->spot_angle)},
+                {"m_InnerSpotAngle", unity_yaml_num(l->inner_spot_angle)}, {"m_AreaSize", "{x: " + unity_yaml_num(l->area_width) + ", y: " + unity_yaml_num(l->area_height) + "}"},
+                {"m_Lightmapping", l->mode == 2 ? "2" : l->mode == 1 ? "1" : "4"}, {"m_Shadows/m_Type", std::to_string(std::max(0, std::min(2, l->shadows)))},
+                {"m_Shadows/m_Strength", unity_yaml_num(l->shadow_strength)}, {"m_BounceIntensity", unity_yaml_num(l->bounce_intensity)},
+                {"m_UseColorTemperature", l->use_temperature ? "1" : "0"}, {"m_ColorTemperature", unity_yaml_num(l->temperature)}, {"m_Enabled", l->enabled ? "1" : "0"}};
+    out.push_back(e);
+  }
+}
+
+/* Round 401: the scene's RenderSettings (fog, ambient, reflections) as Blendity's world holds them. */
+/* Review 401: the ambient is written only where Blendity's world still means what Unity's did - a Gradient that came from
+ * Trilight, a Color from Flat or Custom (the mode kept), a Sky or HDRI from a Skybox (its intensity as read: the world's
+ * strength folds the skybox's exposure in). A Gradient left from a skybox Blendity couldn't read writes nothing. */
+UnityEdit unity_world_edit(const EnvironmentSettings &e, const UnitySceneLink &link) {
+  UnityEdit w;
+  w.class_id = 104;
+  w.fields = {{"m_Fog", e.fog ? "1" : "0"}, {"m_FogMode", e.fog_mode == 1 ? "2" : e.fog_mode == 2 ? "3" : "1"}, {"m_FogDensity", unity_yaml_num(e.fog_density)},
+              {"m_FogColor", unity_yaml_color(e.fog_color)}, {"m_LinearFogStart", unity_yaml_num(e.fog_start)}, {"m_LinearFogEnd", unity_yaml_num(e.fog_end)},
+              {"m_ReflectionIntensity", unity_yaml_num(e.reflection_intensity)}};
+  if (link.world_mode >= 0 && UnitySceneLink::ambient_key(e) == link.world_key) return w;  // (re-check 401: the ambient as imported - nothing to write)
+  if (e.mode == 0 && link.ambient_mode == 1) w.fields.push_back({"m_AmbientMode", "1"}), w.fields.push_back({"m_AmbientSkyColor", unity_yaml_color(e.sky)}),
+      w.fields.push_back({"m_AmbientEquatorColor", unity_yaml_color(e.equator)}), w.fields.push_back({"m_AmbientGroundColor", unity_yaml_color(e.ground)});
+  if (e.mode == 3 && (link.ambient_mode == 3 || link.ambient_mode == 4)) w.fields.push_back({"m_AmbientMode", std::to_string(link.ambient_mode)}), w.fields.push_back({"m_AmbientSkyColor", unity_yaml_color(e.color)});
+  if (e.mode == 3 && link.ambient_mode != 3 && link.ambient_mode != 4) w.fields.push_back({"m_AmbientMode", "3"}), w.fields.push_back({"m_AmbientSkyColor", unity_yaml_color(e.color)});
+  if ((e.mode == 1 || e.mode == 2) && link.ambient_mode == 0) w.fields.push_back({"m_AmbientMode", "0"}), w.fields.push_back({"m_AmbientIntensity", unity_yaml_num(link.ambient_intensity)});
+  return w;
 }
 
 /* export unitypackage <folder> [out]: the folder (an unpacked package under Assets/Imported) as a .unitypackage, on a

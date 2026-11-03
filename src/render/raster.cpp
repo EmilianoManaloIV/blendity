@@ -1883,7 +1883,7 @@ void Renderer3D::shade_deferred() {
         }
         if (T.highlighted) s.albedo = lerp(s.albedo, it.highlight_color, 0.45f);
         Vec3 color = light_surface(s, sp, V, it, env);
-        if (env.fog) color = env.fog_apply(color, length(sp.position - env_.camera_pos));  // (task 0248)
+        if (env.fog) color = env.fog_apply(color, fog_depth(sp.position));  // (task 0248; round 401: by view depth)
         row_hdr.push_back(color);
         row_x.push_back(x);
       }
@@ -1994,12 +1994,25 @@ void Renderer3D::shade_run8(const Shade8Tri &t, const SurfaceSample &surface, in
     SurfaceSample s = surface;
     s.normal = sp.normal;
     Vec3 c = light_finish(s, sp, Vec3(o.vx[i], o.vy[i], o.vz[i]), Vec3(o.lx[i], o.ly[i], o.lz[i]), env);
-    if (env.fog) c = env.fog_apply(c, length(sp.position - eye));  // (task 0248: the 8-wide path fogs like the one-pixel path)
+    if (env.fog) c = env.fog_apply(c, fog_depth(sp.position));  // (task 0248: the 8-wide path fogs like the one-pixel path)
     row_hdr.push_back(c);
     row_x.push_back(x + i);
   }
 }
 #endif
+
+/* Round 401: the specular environment at a point - the reflection probes whose boxes hold it, blended as Unity does, the
+ * world's sky for what they leave. */
+static Vec3 reflection_specular(const std::vector<RenderProbe> &probes, const Environment &env, Vec3 at, Vec3 R, float roughness) {
+  if (probes.empty()) return env.specular(R, roughness);
+  int idx[2];
+  float w[2];
+  const int n = reflection_probe_weights(probes, at, idx, w);
+  Vec3 c(0.0f);
+  float rest = 1.0f;
+  for (int k = 0; k < n; k++) c = c + reflection_probe_specular(probes[(size_t)idx[k]], at, R, roughness) * w[k], rest -= w[k];
+  return rest > 1e-4f ? c + env.specular(R, roughness) * rest : c;
+}
 
 Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const {
   Vec3 n = s.normal;
@@ -2019,7 +2032,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
   }
   Vec3 f0 = fresnel_f0(s);
   Vec3 R = n * (2.0f * dot(n, V)) - V;
-  Vec3 spec = env.specular(R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);
+  Vec3 spec = reflection_specular(env_.reflection_probes, env, sp.position, R, s.roughness) * env_brdf_approx(f0, s.roughness, nv);  // (round 401)
   /* Ambient light, best source first: the baked map (plus realtime GI's bounce of lights it doesn't
    * hold), the probe volume, voxel GI per pixel (the sky that gets through plus the bounce), or the sky
    * alone. */
@@ -2210,7 +2223,7 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
           auto lit = [&](const SurfaceSample &ss) {
             if (gouraud) return pack(shade(env_, ss.albedo, it.specular, ss.normal, sp.position));
             Vec3 c = light_surface(ss, sp, V, it, env);
-            if (env.fog) c = env.fog_apply(c, length(sp.position - env_.camera_pos));  // (task 0248)
+            if (env.fog) c = env.fog_apply(c, fog_depth(sp.position));  // (task 0248)
             uint32_t out;
             display::encode_span(&c.x, &out, 1, env_.view_transform, env_.exposure);
             return out;

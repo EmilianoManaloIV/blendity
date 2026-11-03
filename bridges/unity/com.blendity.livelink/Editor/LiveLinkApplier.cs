@@ -63,6 +63,7 @@ namespace Blendity.LiveLink
                 case "lodmesh": OnLodMesh(j, m.Bin); break;
                 case "collider": OnCollider(j); break;
                 case "lightvolume": OnLightVolume(j); break;  // (round 397)
+                case "reflectionprobe": OnReflectionProbe(j); break;  // (round 401: LiveLinkWorld.cs)
                 case "lightvolumebake": OnLightVolumeBake(j, m.Bin); break;  // (round 398)
                 case "avatar": OnAvatar(j); break;  // (round 381: LiveLinkVRChat.cs)
                 case "springs": OnSprings(j); break;
@@ -687,6 +688,10 @@ namespace Blendity.LiveLink
 #if UNITY_EDITOR
             l.areaSize = new Vector2(a[0], a[1]);
 #endif
+            int shadows = (int)j.GetNumber("shadows", 2);  // (round 401: Unity's Shadow Type and Strength, the Indirect Multiplier)
+            l.shadows = shadows == 0 ? LightShadows.None : shadows == 1 ? LightShadows.Hard : LightShadows.Soft;
+            l.shadowStrength = (float)j.GetNumber("shadow_strength", 1);
+            l.bounceIntensity = (float)j.GetNumber("bounce_intensity", 1);
             OnLightVolumeLight(go, j, type);  // (round 397: VRC Light Volumes' light beside it, when Light Volume is on)
         }
 

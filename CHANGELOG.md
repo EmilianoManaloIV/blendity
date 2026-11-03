@@ -2,6 +2,43 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 401): a Unity scene's look as Unity shows it
+
+**Asked:** "Do a full comparison between Blendity and the Unity VCC SDK. Implement any attributes that are present in
+Unity but not present in Blendity. Compare snapshots across the board ... Lighting, Emissions, and other scene properties
+should be nearly the same and almost indistinguishable." The first of five rounds: the scene's look.
+
+**Added (task 0378, ADR 0099)**
+- **Fog as Unity's**: Linear, Exponential and Exponential Squared by the view depth (Unity's fog coordinate), the same
+  formula in every renderer; the World panel's Fog Mode and Density; imported as they are, sent to Unity as its modes.
+- **The skybox and ambient**: a scene's Skybox ambient becomes its skybox material's world (a procedural sky, a panorama
+  or cubemap, a plain colour), the ambient's intensity its strength; the reflection intensity kept and sent.
+- **The camera in full**: clear flags, background, HDR, FOV axis, the physical lens from Unity's; the scene's post-
+  processing profile (ACES, exposure, grading, bloom, vignette) on its Main Camera - the Scene view, the Game view and
+  F12 show it; undrawn effects said.
+- **Lights in full**: Unity's Shadow Type and Strength (No Shadows honoured in the views and the path tracer), Indirect
+  Multiplier, Cookie and Culling Mask, sent to Unity; a light's colour read as the gamma value Unity writes.
+- **Reflection probes**: Unity's as a Blendity component (box, projection, importance, blend distance, resolution) with
+  a cyan gizmo; metal and glass inside a probe's box reflect its cubemap - box-projected and blended between probes as
+  Unity does - in the Scene view, the GPU view and F12's rasterizer; the cubemaps from Unity's bake (Use Unity's
+  Lightmaps brings them: the lighting file's version 2) or from Generate Lighting (its last phase renders each probe's
+  six faces with the path tracer); kept in ReflectionProbes.bin beside the lightmaps; sent to Unity as its own component.
+- **Written back**: Export Unity Package writes the world's fog and ambient, the cameras', lights' and reflection
+  probes' fields into the .unity they came from - only the lines that differ.
+- **`tools/image_compare.py`**: two renders' MAE, PSNR, SSIM, a luminance grid's correlation and the linear light's
+  relative RMS, with the comparison's acceptance target as `--check`.
+
+**Checked:** tests in assets (the world, camera, light, post-processing and write-back from Unity's files; the probes'
+maths, file and Blendity's own bake in a six-walled room with its orientation pinned; fog against the three formulas in
+the rasterizer and the path tracer). SideRail: the spawn station through its Main Camera with post-processing against
+Blendity's F12 - luminance correlation 0.99 (0.23 before), SSIM 0.93 with Unity's reflection probes (0.97 without), MAE
+7.0 / 5.0 of the target 4 (the fog's blue and the walls' grazing reflections: round 405's calibration). The Opus review's
+fixes: the ambient, clear flags and background alpha written back only as Unity had them, the field of view vertical
+whatever the FOV Axis, probes fading outside their box (not inside), a scene's bakes never carried into the next, the
+probe maps capped and built when the bakes arrive, the shadow map from a sun that casts shadows, a cancelled bake kept,
+the first global volume on the layer's own camera, the box offset never turned, Unity's gamma light intensity, the
+physical camera's mode number, Cubemap.GetPixels' top row first (checked against Unity).
+
 ## 2026-11-02 (round 400): Unity's baked lightmaps in Blendity
 
 **Asked:** "implement a way to add Unity baked light maps into Blendity"; then "The materials in Blendity are not the

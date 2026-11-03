@@ -264,6 +264,7 @@ void Editor::render_overlays(const Recti &) {
   draw_ai_overlay();       // (task 0130)
   draw_colliders();        // (round 362: Unity's green collider wires)
   draw_light_volumes();    // (round 397: VRC Light Volumes' boxes)
+  draw_reflection_probes();  // (round 401)
   /* Wireframes. */
   bool all_wire = shading_ == Shading::Wireframe || shading_ == Shading::ShadedWireframe;
   scene_->for_each([&](GameObject &g) {

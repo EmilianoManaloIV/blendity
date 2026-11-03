@@ -29,6 +29,8 @@
 #include "../render/voxel_gi.h"
 #include "../render/probe_volume.h"
 #include "../render/light_volume_bake.h"
+#include "../render/reflection_probe.h"  // (round 401)
+#include "../render/unity_lightmaps.h"
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
@@ -270,7 +272,7 @@ struct FilterTarget {
 enum class Tool { View, Move, Rotate, Scale, Transform };
 enum class EditElement { Vertex, Edge, Face };
 /* One Edit Mode operator: which selection modes offer it (1 vertex, 2 edge, 4 face). */
-RenderLight to_render_light(const GameObject &g, const Light &l);  // render_view.cpp
+RenderLight to_render_light(const GameObject &g, const Light &l, bool gamma_intensity = false);  // render_view.cpp (gamma: Unity's built-in pipeline's colour x intensity in gamma - re-check 401)
 struct EditOpInfo {
   const char *op, *label, *keys, *tip;
   int elements;
@@ -1208,6 +1210,11 @@ class Editor {
   /* Probe volumes (task 0014). */
   const ProbeVolumeData &probes_for_test() const { return probes_; }
   std::map<uint64_t, LightVolumeSH> &light_volume_bakes_for_test() { return light_volume_bakes_; }  // (round 398)
+  std::map<uint64_t, ReflectionProbeBake> &reflection_probe_bakes_for_test() { return reflection_probe_bakes_; }  // (round 401)
+  LightingEnv make_lighting_for_test() { return make_lighting(cam_.position(), true, true); }
+  bool unity_lights_gamma() const { return scene_->unity.gamma_lights(); }  // (re-check 401: one rule for the views and the bakes)
+  void reflection_probe_bakes_changed() { reflection_probe_gen_++, reflection_probe_bakes_dirty_ = true, reflection_probe_maps_.clear(), build_reflection_probe_maps(); }
+  void build_reflection_probe_maps();  // (review 401: the renderers' maps made when the bakes arrive, not on the next frame)
   const Environment &env_for_test() const { return env_; }
   void light_volume_bakes_changed_for_test() { lv_bake_gen_++; }
   bool wants_continuous_redraw_for_test() const { return wants_continuous_redraw(); }
@@ -1378,6 +1385,8 @@ class Editor {
   void read_unity_lighting_cmd(bool wait);
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
+  void apply_unity_post_processing(const std::vector<UnityDoc> &docs, UnityImport &ctx);  // (round 401)
+  int apply_unity_reflection_probes(const UnityLighting &u, const GameObject *under);  // (round 401)
   void lighting_reset_for(const char *why);
   bool export_unity_package(const std::string &folder, const std::string &out = "");  // (round 372: the way back)
   std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
@@ -5363,6 +5372,29 @@ class Editor {
   };
   LightVolumeBakeRun lv_bake_;
   std::map<uint64_t, LightVolumeSH> light_volume_bakes_;
+  /* Round 401: the reflection probes' bakes (Unity's read back or Blendity's), their equirect maps for the renderers (made
+   * once per bake), the file beside the lightmaps. */
+  std::map<uint64_t, ReflectionProbeBake> reflection_probe_bakes_;
+  std::map<uint64_t, std::pair<const ReflectionProbeBake *, TexturePtr>> reflection_probe_maps_;
+  bool reflection_probe_bakes_dirty_ = false;
+  uint64_t reflection_probe_gen_ = 1;
+  std::vector<RenderProbe> render_reflection_probes();
+  /* Round 401: Generate Lighting's last phase - each Reflection Probe's six faces rendered by the path tracer from its
+   * position (the bake's meshes and lights, the world), in slices like the texels. */
+  struct ReflectionProbeBakeRun {
+    std::unique_ptr<PathTracer> pt;
+    std::vector<uint64_t> ids;  // (the probes to bake, in order)
+    size_t at = 0;              // (which probe)
+    int face = 0, samples = 16, size = 0;
+    ReflectionProbeBake current;
+    bool begun = false;
+  };
+  ReflectionProbeBakeRun rp_bake_;
+  bool reflection_probe_bake_begin();
+  bool reflection_probe_bake_step(double budget);  // true while baking
+  void load_reflection_probe_bakes(const std::string &dir);
+  void save_reflection_probe_bakes(const std::string &dir);
+  void draw_reflection_probes();
   bool light_volume_bake_step(double budget);  // true while baking
   uint64_t lv_bake_gen_ = 1;                   // (Live Link sends a volume's bake again when this moves)
   void livelink_light_volume_bakes_changed() { lv_bake_gen_++, light_volume_bakes_dirty_ = true; }
