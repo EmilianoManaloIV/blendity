@@ -1153,6 +1153,8 @@ void Editor::run_console_command(const std::string &line) {
   if (c == "autopose") return autopose_command(t);  // autopose on|off | drag | lock | unlock (task 0122)
   if (c == "unity" && t.size() > 1 && t[1] == "modelids")  // unity modelids [all] [wait] (round 395; wait: a script's, till Unity is done)
     return read_unity_model_ids(std::find(t.begin(), t.end(), "all") != t.end(), std::find(t.begin(), t.end(), "wait") != t.end());
+  if (c == "unity" && t.size() > 1 && t[1] == "lightmaps")  // unity lightmaps [wait] (round 400: Unity's baked lighting for this scene)
+    return read_unity_lighting_cmd(std::find(t.begin(), t.end(), "wait") != t.end());
   if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
   if (c == "import" && (to_lower(fs::extension(line_rest(line, 1))) == ".prefab" || to_lower(fs::extension(line_rest(line, 1))) == ".unity"))
     return import_model_file(line_rest(line, 1), true);  // (round 370: a Unity prefab or scene - by the path's own extension, review 370)

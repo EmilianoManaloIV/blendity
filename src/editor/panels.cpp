@@ -2485,12 +2485,23 @@ void Editor::draw_lighting_window(const Recti &r) {
   if (baking_) {
     if (u.button({b.x, b.y, bw, b.h}, "Cancel", true, Icon::Pause)) bake_cancel();
   }
-  else if (u.button_enabled({b.x, b.y, bw, b.h}, "Generate Lighting", !playing_ && scene_->lighting.baked_gi, playing_ ? "Not while playing: stop Play first." : "Baked Global Illumination is off (the Lightmapping Settings below).", false, Icon::Lightbulb))
+  else if (u.button_enabled({b.x, b.y, bw, b.h}, "Generate Lighting", !playing_ && scene_->lighting.baked_gi && !unity_lighting_job_,
+                            playing_ ? "Not while playing: stop Play first." : unity_lighting_job_ ? "Not while Unity reads its lightmaps." : "Baked Global Illumination is off (the Lightmapping Settings below).", false, Icon::Lightbulb))
     bake_start();
   u.tooltip("Bakes the Baked and Mixed lights, the sky and their bounces into lightmaps for objects marked\n"
             "Contribute GI (MeshRenderer). Saved next to the scene, in a folder with the scene's name.");
   if (u.button_enabled({b.x + bw + u.px(4), b.y, bw, b.h}, "Clear Baked Data", !lighting_data_.empty() || !probes_.empty(), "Nothing baked.", false, Icon::Close)) bake_clear();
   u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
+  if (!unity_lighting_scene_.empty()) {  // (round 400: a scene from Unity - its own bake, read by Unity)
+    Recti ur = lay.row(u.row_h() + u.px(4));
+    const bool running = unity_lighting_job_ != nullptr;
+    if (u.button_enabled({ur.x, ur.y, bw, ur.h}, running ? "Reading Unity's..." : "Use Unity's Lightmaps", !running && !baking_ && !playing_,
+                         running ? "Unity is reading them in the background." : baking_ ? "Not while baking." : "Not while playing.", false, Icon::Lightbulb))
+      read_unity_lighting_cmd(false);
+    u.tooltip("Shows the lightmaps Unity baked for this scene: your installed Unity opens it in a scratch project and reports\n"
+              "each object's lightmap; Generate Lighting replaces them with Blendity's own bake.");
+    u.label({ur.x + bw + u.px(8), ur.y, bw, ur.h}, lighting_from_unity_ ? "Shown: Unity's bake" : "", u.theme.text_dim);
+  }
   if (baking_) {
     Recti pr = lay.row(u.px(6));
     u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);

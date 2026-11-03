@@ -10,6 +10,7 @@
 
 #include "unity_yaml.h"
 #include "../image/image.h"
+#include "../core/core.h"
 
 #include <algorithm>
 #include <cmath>
@@ -98,10 +99,23 @@ const TexEnv *tex_of(const Props &p, std::initializer_list<const char *> names) 
   return nullptr;
 }
 
-void set_tex(TextureRef &ref, const TexEnv *t, const std::function<std::string(const std::string &)> &texture) {
+/* `data`: a normal, metal, roughness or mask map - numbers, not colours (Non-Color, as Unity imports them linear and the
+ * other importers mark them; round 400: they had been decoded as sRGB, bending every normal map in SideRail). */
+void set_tex(TextureRef &ref, const TexEnv *t, const std::function<std::string(const std::string &)> &texture, bool data = false) {
   if (!t) return;
   const std::string path = texture(t->guid);
-  if (!path.empty()) ref = TextureRef{path, false};
+  if (!path.empty()) ref = TextureRef{path, data};
+}
+
+/* Only what the shader declares (Unity ignores a .mat's other entries). */
+void keep_declared(Props &p, const std::vector<std::string> &declared) {
+  auto dropped = [&](const std::string &n) { return std::find(declared.begin(), declared.end(), n) == declared.end(); };
+  /* Nothing of the .mat's declared: another shader's list, or one misread - none dropped (review 400). */
+  if (declared.empty() || std::all_of(p.names.begin(), p.names.end(), dropped)) return;
+  for (auto it = p.tex.begin(); it != p.tex.end();) it = dropped(it->first) ? p.tex.erase(it) : std::next(it);
+  for (auto it = p.floats.begin(); it != p.floats.end();) it = dropped(it->first) ? p.floats.erase(it) : std::next(it);
+  for (auto it = p.colors.begin(); it != p.colors.end();) it = dropped(it->first) ? p.colors.erase(it) : std::next(it);
+  p.names.erase(std::remove_if(p.names.begin(), p.names.end(), dropped), p.names.end());
 }
 
 bool has(const std::vector<std::string> &v, const char *s) { return std::find(v.begin(), v.end(), s) != v.end(); }
@@ -122,14 +136,14 @@ void read_base(const Props &p, const YamlNode &body, const std::function<std::st
   const TexEnv *main = tex_of(p, {"_BaseMap", "_MainTex"});
   set_tex(m.base_map, main, texture);
   if (main) m.tiling = main->scale, m.offset = main->offset;
-  set_tex(m.normal_map, tex_of(p, {"_BumpMap", "_NormalMap"}), texture);
+  set_tex(m.normal_map, tex_of(p, {"_BumpMap", "_NormalMap"}), texture, true);
   m.normal_strength = (float)prop(p, "_BumpScale", 1.0);
   m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
   m.roughness = (float)std::clamp(1.0 - prop(p, "_Smoothness", prop(p, "_Glossiness", 0.5)), 0.0, 1.0);
   /* A metallic map: Unity takes metal from its red and ignores the slider (left at 0 in the file); smoothness from its
    * alpha times _GlossMapScale (Standard) or _Smoothness (URP) - review 371. The alpha's smoothness isn't carried. */
   const TexEnv *metal = tex_of(p, {"_MetallicGlossMap"});
-  set_tex(m.metallic_map, metal, texture);
+  set_tex(m.metallic_map, metal, texture, true);
   if (metal) m.metallic = 1.0f, m.roughness = (float)std::clamp(1.0 - prop(p, "_GlossMapScale", prop(p, "_Smoothness", 1.0)), 0.0, 1.0);
   /* Emission: on when its keyword is (Unity always keeps a colour); HDR colour as a colour and a strength. */
   const std::string keywords = shader_keywords(body);
@@ -158,6 +172,31 @@ void read_blend(const Props &p, const std::string &family, Material &m) {
 
 void read_outline(const Props &p, const std::string &family, UnityMaterialInfo &info);
 
+/* Round 400: uniuni's FakeInnerLight (SideRail's lamps, bulbs and signs - an Amplify shader): albedo _Albedo x _Color,
+ * normal _Normal at _NormalIntencity, _Metallic and _Smoothness; emission _Emission x (_EmissionColorBase x
+ * _BaseBrightness + a view-dependent glow x _EmissionColorLight x _LightBrightness), all x customColorMultiplier - the
+ * glow taken at half (its average over views), the extra masks (_EmissionMap_2, _TextureSample0) left out. */
+void read_fake_inner_light(const Props &p, const std::function<std::string(const std::string &)> &texture, Material &m) {
+  const float boost = (float)prop(p, "customColorMultiplier", 1.0);
+  Vec3 c(1.0f);
+  color_of(p, {"_Color"}, c);
+  m.base_color = c * boost, m.alpha = 1.0f;
+  const TexEnv *albedo = tex_of(p, {"_Albedo"});
+  set_tex(m.base_map, albedo, texture);
+  if (albedo) m.tiling = albedo->scale, m.offset = albedo->offset;
+  set_tex(m.normal_map, tex_of(p, {"_Normal"}), texture, true);
+  m.normal_strength = (float)prop(p, "_NormalIntencity", 1.0);
+  m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
+  m.roughness = (float)std::clamp(1.0 - prop(p, "_Smoothness", 0.0), 0.0, 1.0);
+  Vec3 base(1.0f), light(1.0f);
+  color_of(p, {"_EmissionColorBase"}, base);
+  color_of(p, {"_EmissionColorLight"}, light);
+  const Vec3 e = (base * (float)prop(p, "_BaseBrightness", 0.2) + light * ((float)prop(p, "_LightBrightness", 1.0) * 0.5f)) * boost;
+  const float s = std::max({e.x, e.y, e.z});
+  m.emission = s > 0.0f ? e / s : Vec3(1.0f), m.emission_strength = std::max(0.0f, s);
+  set_tex(m.emission_map, tex_of(p, {"_Emission"}), texture);
+}
+
 /* Every other texture the material names (round 399): what Unity loads for it, which Blendity doesn't draw. */
 void read_engine_maps(const Props &p, const std::function<std::string(const std::string &)> &texture, Material &m) {
   m.engine_maps.clear();
@@ -182,7 +221,7 @@ void read_filamented(const Props &p, const std::string &family, const std::funct
   if (family == "Filamented (Roughness setup)") {
     m.roughness = (float)std::clamp(prop(p, "_Glossiness", 0.5), 0.0, 1.0);
     if (!tex_of(p, {"_MetallicGlossMap"})) m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
-    set_tex(m.roughness_map, spec_map, texture);
+    set_tex(m.roughness_map, spec_map, texture, true);
     if (spec_map) m.roughness = 1.0f;  // (the map is the roughness: Blendity scales it by the slider)
   }
   if (family == "Filamented (Specular setup)" && has_spec) {
@@ -257,6 +296,7 @@ std::string unity_shader_family(const std::string &shader_name, const std::vecto
         return std::string("Filamented (") + (char)std::toupper((unsigned char)setup[0]) + (setup + 1) + " setup)";
     return "Filamented";
   }
+  if (n.find("fakeinnerlight") != std::string::npos) return "FakeInnerLight";  // (round 400: uniuni's, SideRail's lamps)
   if (n.find("unlit") != std::string::npos) return "Unlit";
   if (n == "standard" || n == "standard (specular setup)") return "Standard";
   if (n == "lit" || n == "simplelit" || n == "simple lit" || n.find("universal render pipeline/lit") != std::string::npos) return "URP Lit";
@@ -266,8 +306,85 @@ std::string unity_shader_family(const std::string &shader_name, const std::vecto
   return shader_name.empty() ? std::string("(a shader not in the project)") : shader_name;
 }
 
+namespace {
+
+bool ident_char(char c) { return std::isalnum((unsigned char)c) || c == '_'; }
+
+/* From `from` to the end of a comment or string starting there (`from` itself when none does). */
+size_t skip_comment_or_string(const std::string &s, size_t from) {
+  if (s.compare(from, 2, "//") == 0) return std::min(s.find('\n', from), s.size());
+  if (s.compare(from, 2, "/*") == 0) return s.find("*/", from + 2) == std::string::npos ? s.size() : s.find("*/", from + 2) + 2;
+  if (s[from] != '"') return from;
+  const size_t close = s.find('"', from + 1);
+  return close == std::string::npos ? s.size() : close + 1;
+}
+
+/* ShaderLab text with its comments and strings blanked (lines kept): braces and parentheses in them don't count
+ * (review 400: "// TODO { cleanup" or a display name "Mode }" had cut the Properties block short). */
+std::string shaderlab_code(const std::string &s) {
+  std::string out = s;
+  for (size_t i = 0; i < s.size();) {
+    const size_t end = skip_comment_or_string(s, i);
+    if (end == i) {
+      i++;
+      continue;
+    }
+    for (size_t k = i; k < end; k++) out[k] = s[k] == '\n' ? '\n' : ' ';
+    i = end;
+  }
+  return out;
+}
+
+/* Where the Properties block's brace is: the word on its own (any case, as ShaderLab reads it - not SurfaceProperties),
+ * then its brace. npos when there's none. */
+size_t properties_brace(const std::string &code) {
+  const std::string lower = to_lower(code);
+  for (size_t at = lower.find("properties"); at != std::string::npos; at = lower.find("properties", at + 10)) {
+    if ((at > 0 && ident_char(lower[at - 1])) || (at + 10 < lower.size() && ident_char(lower[at + 10]))) continue;
+    size_t k = at + 10;
+    while (k < code.size() && std::isspace((unsigned char)code[k])) k++;
+    if (k < code.size() && code[k] == '{') return k;
+  }
+  return std::string::npos;
+}
+
+/* The identifier ending just before `at` (white space between allowed: a name and its parenthesis on two lines), ""
+ * when none. */
+std::string identifier_before(const std::string &code, size_t at) {
+  size_t end = at;
+  while (end > 0 && std::isspace((unsigned char)code[end - 1])) end--;
+  size_t start = end;
+  while (start > 0 && ident_char(code[start - 1])) start--;
+  return code.substr(start, end - start);
+}
+
+}  // namespace
+
+std::vector<std::string> unity_shader_properties(const std::string &shader_text) {
+  std::vector<std::string> out;
+  const std::string code = shaderlab_code(shader_text);
+  const size_t open = properties_brace(code);
+  if (open == std::string::npos) return out;
+  /* Each "name (" at the block's own depth, outside an attribute's [] - "[Enum(CullMode)] _Cull ("Cull", Float) = 2" -
+   * its parentheses then skipped, so a default "(1,1,1,0)" or a second property on the line is read right. */
+  int depth = 0, square = 0, paren = 0;
+  for (size_t i = open; i < code.size(); i++) {
+    const char ch = code[i];
+    square += ch == '[' ? 1 : ch == ']' && square > 0 ? -1 : 0;
+    depth += ch == '{' ? 1 : ch == '}' ? -1 : 0;
+    if (depth == 0) return out;
+    if (ch == ')' && paren > 0) paren--;
+    if (ch != '(' || depth != 1 || square > 0) continue;
+    if (paren++ > 0) continue;
+    const std::string name = identifier_before(code, i);
+    if (!name.empty() && !std::isdigit((unsigned char)name[0])) out.push_back(name);
+  }
+  return {};  // (the block never closed: a list cut short would drop real properties - none dropped)
+}
+
 bool unity_material(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
-                    const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info) {
+                    const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info,
+                    const std::function<std::vector<std::string>(const std::string &guid)> &shader_properties) {
   info = UnityMaterialInfo{};  // (a fresh account each material)
   std::vector<UnityDoc> docs;
   std::string why;
@@ -275,7 +392,8 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   const UnityDoc *mat = nullptr;
   for (const UnityDoc &d : docs) mat = d.class_id == 21 && !mat ? &d : mat;
   if (!mat) return false;
-  const Props p = read_props(mat->body);
+  Props p = read_props(mat->body);
+  if (shader_properties) keep_declared(p, shader_properties(mat->body.guid("m_Shader")));  // (round 400: what Unity reads)
   info.shader_name = shader_name(mat->body.guid("m_Shader"), mat->body.file_id("m_Shader"));
   info.shader = unity_shader_family(info.shader_name, p.names);
   const std::string name = mat->body.str("m_Name");
@@ -285,8 +403,9 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   if (toon) read_toon(p, info.shader, texture, m, info);
   const bool filamented = info.shader.rfind("Filamented", 0) == 0;
   if (filamented) read_filamented(p, info.shader, texture, m, info);
+  if (info.shader == "FakeInnerLight") read_fake_inner_light(p, texture, m);
   m.unlit = info.shader == "Unlit";
-  info.known = toon || filamented || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit";
+  info.known = toon || filamented || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit" || info.shader == "FakeInnerLight";
   read_engine_maps(p, texture, m);
   m.touch();
   return true;

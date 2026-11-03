@@ -708,6 +708,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   poll_unity_package();  // (round 369)
   poll_unity_export();   // (round 372)
   poll_unity_model_ids();  // (round 395)
+  poll_unity_lighting();   // (round 400)
   anim_tick();
   seq_tick();
   seq_audio_tick();  // (round 365)
@@ -2098,6 +2099,7 @@ void Editor::redo() {
 
 void Editor::new_scene() {
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
+  unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_xf_drop();
   if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)
@@ -2133,6 +2135,7 @@ void Editor::new_scene() {
 
 bool Editor::open_scene(const std::string &path) {
   export_waits_drop("another scene opened");  // (review 354)
+  unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
   sketch_xf_drop();
   if (!sketch_pen_.empty()) Log::info("Sketch: the Pen path under way was let go - it was the old scene's");  // (re-check 390: said)

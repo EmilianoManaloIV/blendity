@@ -29,6 +29,12 @@ std::string unity_shader_family(const std::string &shader_name, const std::vecto
 /* A Unity .mat's text into `m`. `texture` gives a texture GUID's project-relative path ("" when not in the project);
  * `shader_name` a shader GUID's name ("" for a built-in one: then the fileID says). False when it isn't a material. */
 bool unity_material(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
-                    const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info);
+                    const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info,
+                    const std::function<std::vector<std::string>(const std::string &guid)> &shader_properties = {});
+
+/* Round 400: the property names a shader's source declares (its Properties block) - a .mat keeps every property any
+ * shader it ever had set, and Unity reads only its shader's: `shader_properties` (optional) gives them, and the rest
+ * are left out (SideRail's exit sign had taken a texture its shader no longer had). Empty when there's no block. */
+std::vector<std::string> unity_shader_properties(const std::string &shader_text);
 
 }  // namespace bl

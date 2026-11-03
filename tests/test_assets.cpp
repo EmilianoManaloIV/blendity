@@ -5,6 +5,7 @@
 #include <thread>
 #include <filesystem>
 #include "fixtures/synthetic_mmd.h"
+#include "../src/render/unity_lightmaps.h"
 #include "../src/render/video_decode.h"
 #include "../src/render/video_encode.h"
 #include "../src/core/json.h"
@@ -9169,6 +9170,23 @@ std::string material_name(GameObject *g, size_t slot = 0) {
 }
 }  // namespace r395
 
+/* Round 400: Unity's baked lighting written by hand - a half float, a page, a cube's lightmap UVs by face. */
+namespace r400 {
+uint16_t half_of(float f) {  // (normal numbers and 0: all the tests use)
+  if (f == 0.0f) return 0;
+  uint32_t b;
+  std::memcpy(&b, &f, 4);
+  return (uint16_t)(((b >> 16) & 0x8000) | ((((b >> 23) & 0xFF) - 112) << 10) | ((b >> 13) & 0x3FF));
+}
+/* A UV in a 3 x 2 grid of cells, one per face of a unit cube: the face by the normal's main axis and sign. */
+Vec2 cube_uv(Vec3 p, Vec3 n) {
+  const Vec3 a(std::fabs(n.x), std::fabs(n.y), std::fabs(n.z));
+  const int axis = a.x >= a.y && a.x >= a.z ? 0 : a.y >= a.z ? 1 : 2, face = axis * 2 + (n[axis] < 0.0f ? 1 : 0);
+  const float s = p[(axis + 1) % 3] + 0.5f, t = p[(axis + 2) % 3] + 0.5f;
+  return Vec2(((float)(face % 3) + 0.05f + 0.9f * s) / 3.0f, ((float)(face / 3) + 0.05f + 0.9f * t) / 2.0f);
+}
+}  // namespace r400
+
 /* Round 399: a PSD written by hand - the header, empty colour data, resources and layers, then the composite. */
 namespace r399 {
 void be(std::string &s, uint32_t v, int bytes) {
@@ -9193,6 +9211,272 @@ std::string psd(int channels, int w, int h, int depth, int mode, int comp, const
   return s;
 }
 }  // namespace r399
+
+static void tests_round400() {
+  test("Unity's lightmaps file (round 400): written and read back equal; a changed byte and a cut file refused; a page's halves turned to Blendity's rows (Unity's run up)", [] {
+    using namespace r400;
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/S/Lightmap-0_comp_light.exr", p.width = 2, p.height = 2;
+    for (float v : {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 4.0f, 0.125f, 0.75f, 1.5f, 3.0f, 0.5f, 0.25f}) p.rgb.push_back(half_of(v));
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    m.key = "guid:1", m.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 0, 1)}, m.uv = {Vec2(0, 0), Vec2(1, 0), Vec2(0, 1)}, m.indices = {0, 1, 2};
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.object_id = -42, r.prefab_id = 7;
+    u.renderers.push_back(r);
+    u.lights.push_back({"Lamp[0]", 2, 2});
+    u.probes.push_back({Vec3(1, 2, 3), {}});
+    const std::string bytes = write_unity_lighting(u);
+    UnityLighting back;
+    std::string why;
+    CHECK(read_unity_lighting(bytes, back, why));
+    CHECK(back.pages.size() == 1 && back.pages[0].rgb == p.rgb && back.meshes.size() == 1 && back.meshes[0].indices.size() == 3 && back.renderers.size() == 1 &&
+          back.renderers[0].path == "Floor[0]" && back.renderers[0].object_id == -42 && back.lights.size() == 1 && back.lights[0].bake == 2 && back.probes.size() == 1);
+    std::string changed = bytes;
+    changed[40] ^= 1;
+    CHECK(!read_unity_lighting(changed, back, why) && why.find("checksum") != std::string::npos);
+    CHECK(!read_unity_lighting(bytes.substr(0, bytes.size() / 2), back, why));
+    Lightmap lm;
+    CHECK(unity_lightmap_page(u.pages[0], 1.0f, lm) && lm.width == 2 && lm.height == 2);
+    std::printf("    texel (0,0) %.3f (Unity's top row's first: 0.125)\n", lm.texels[0].x);
+    CHECK(std::fabs(lm.texels[0].x - 0.125f) < 1e-3f && std::fabs(lm.texels[2].x - 0.0f) < 1e-3f);  // (Blendity's row 0 is Unity's top row)
+  });
+  test("Unity's lightmaps on a scene (round 400): a Unity scene opened with Unity's .unity-lighting beside it - its object's triangles matched to Unity's, their UVs scaled, offset and turned down; directional lightmaps shading by the face; the lights' modes; Unity's probes; shown as baked", [] {
+    using namespace r400;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R400");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4000eeee4000eeee4000eeee0001";
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"),
+                         "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightingDataAsset: {fileID: 112000000, guid: eeee4000eeee4000eeee4000eeee0009, type: 2}\n"
+                         "--- !u!1 &10\nGameObject:\n  m_Name: Floor\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalPosition: {x: 2, y: 0, z: 0}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n"
+                         "--- !u!1 &20\nGameObject:\n  m_Name: Lamp\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &22\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 2\n  m_Lightmapping: 2\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\tAssets/Imported/R400/Lit.unity\n"));
+    ed.command("open Assets/Imported/R400/Lit.unity");
+    GameObject *floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->evaluated_mesh());
+    if (!floor || !floor->evaluated_mesh()) return;
+    CHECK(ed.lighting_data_for_test().empty() && !ed.lighting_from_unity_);
+    /* What Unity would report: the cube as its own mesh (Unity's triangles, here Blendity's), UVs a cell a face. */
+    const RenderMesh &rm = floor->evaluated_mesh()->render_mesh();
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/Lit/Lightmap-0_comp_light.exr", p.width = 30, p.height = 20, p.dir_width = 30, p.dir_height = 20;
+    p.rgb.assign((size_t)30 * 20 * 3, half_of(1.0f));
+    for (int k = 0; k < 30 * 20; k++) p.dir.insert(p.dir.end(), {128, 255, 128, 128});  // (the light from straight above, fully directional)
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    m.key = "builtin:cube";
+    for (size_t i = 0; i < rm.positions.size(); i++) m.positions.push_back(rm.positions[i]), m.uv.push_back(cube_uv(rm.positions[i], rm.normals[i]));
+    m.indices = rm.indices;
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.world = floor->world_matrix();
+    const float so[4] = {0.5f, 0.5f, 0.25f, 0.125f};
+    std::copy(std::begin(so), std::end(so), r.scale_offset);
+    u.renderers.push_back(r);
+    u.lights.push_back({"Lamp[0]", 2, 2});
+    UnityLighting::Probe probe{Vec3(2, 3, 0), {}};
+    for (int k = 0; k < 6; k++) probe.axes[(size_t)k] = Vec3(0.1f * (float)(k + 1));
+    u.probes = {probe, UnityLighting::Probe{Vec3(2, 5, 0), probe.axes}};
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity.unity-lighting"), write_unity_lighting(u)));
+    ed.command("newscene");
+    ed.command("open Assets/Imported/R400/Lit.unity");
+    floor = ed.scene().find_by_name("Floor");
+    GameObject *lamp = ed.scene().find_by_name("Lamp");
+    const LightingData &ld = ed.lighting_data_for_test();
+    const auto e = floor ? ld.entries.find(floor->id) : ld.entries.end();
+    CHECK(floor && lamp && e != ld.entries.end() && ld.pages.size() == 1 && ed.lighting_from_unity_);
+    if (!floor || !lamp || e == ld.entries.end()) return;
+    const RenderMesh &rm2 = floor->evaluated_mesh()->render_mesh();
+    CHECK(e->second.tri_uv.size() == rm2.tri_count() * 3);
+    float worst = 0.0f;
+    for (size_t c = 0; c < e->second.tri_uv.size() && c < rm2.indices.size(); c++) {
+      const Vec2 uv = cube_uv(rm2.positions[rm2.indices[c]], rm2.normals[rm2.indices[c]]);
+      const Vec2 want(uv.x * so[0] + so[2], 1.0f - (uv.y * so[1] + so[3]));
+      worst = std::max(worst, length(e->second.tri_uv[c] - want));
+    }
+    float lo = 1e9f, hi = -1e9f;
+    for (const Vec3 &t : ld.pages[0].texels) lo = std::min(lo, t.y), hi = std::max(hi, t.y);
+    std::printf("    UVs at most %.6f off; texels %.3f to %.3f (the top face lit twice, the bottom none); %zu probes\n", worst, lo, hi, ed.probes_for_test().probe_count());
+    CHECK(worst < 1e-5f);
+    CHECK(hi > 1.9f && lo < 0.1f);  // (Unity's Directional lightmap: (dot(n, d) + 0.5) / w)
+    CHECK(ld.light_modes.count(lamp->id) && ld.light_modes.at(lamp->id) == 2);
+    CHECK(!ed.probes_for_test().empty() && ed.probes_for_test().scene_key == ld.scene_key);
+    CHECK(ed.scene().lighting.baked_gi && !ed.scene().lighting.realtime_gi);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Unity's lightmaps (review 400): a scene imported under a root wherever it stands; saved and opened again; a Light Volume's Unity bake kept; a file from an earlier bake of Unity's refused; good checksums over bad values refused", [] {
+    using namespace r400;
+    std::string t3[3];
+    bool fixtures = true;
+    for (int k = 0; k < 3; k++) fixtures = fixtures && fs::read_file("tests/fixtures/light_volume_unity/hall_" + std::to_string(k) + ".asset", t3[k]);
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R400B");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4100eeee4100eeee4100eeee0001", gd = "eeee4100eeee4100eeee4100eeee0002";
+    std::string guids = gs + "\tAssets/Lit.unity\tAssets/Imported/R400B/Lit.unity\n" + gd + "\tAssets/Lit/LightingData.asset\tAssets/Imported/R400B/LightingData.asset\n";
+    std::string volume;
+    for (int k = 0; fixtures && k < 3; k++) {
+      const std::string g = "eeee4100eeee4100eeee4100eeee001" + std::to_string(k);
+      CHECK(fs::write_file(fs::join(dir, "hall_" + std::to_string(k) + ".asset"), t3[k]));
+      guids += g + "\tAssets/hall_" + std::to_string(k) + ".asset\tAssets/Imported/R400B/hall_" + std::to_string(k) + ".asset\n";
+      volume += "  Texture" + std::to_string(k) + ": {fileID: 11700000, guid: " + g + ", type: 2}\n";
+    }
+    if (fixtures)
+      volume = "--- !u!1 &30\nGameObject:\n  m_Name: Hall Volume\n--- !u!4 &31\nTransform:\n  m_GameObject: {fileID: 30}\n  m_LocalScale: {x: 6, y: 3, z: 6}\n  m_Father: {fileID: 0}\n"
+               "--- !u!114 &32\nMonoBehaviour:\n  m_GameObject: {fileID: 30}\n  m_Script: {fileID: 11500000, guid: 21bc8ec8ba5e5f3408667533e591f313, type: 3}\n" + volume + "  VoxelsPerUnit: 1\n";
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"),
+                         "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightingDataAsset: {fileID: 112000000, guid: " + gd + ", type: 2}\n"
+                         "--- !u!1 &10\nGameObject:\n  m_Name: Floor\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalPosition: {x: 2, y: 0, z: 0}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n" + volume));
+    CHECK(fs::write_file(fs::join(dir, "LightingData.asset"), std::string("Unity's binary bake, as it is now")));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), guids));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    /* What Unity reports, in Unity's world (the floor at x = 2): made from the cube Blendity has for it. */
+    ed.command("open Assets/Imported/R400B/Lit.unity");
+    GameObject *floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->evaluated_mesh(1));
+    if (!floor || !floor->evaluated_mesh(1)) return;
+    const RenderMesh &rm = floor->evaluated_mesh(1)->render_mesh();
+    UnityLighting u;
+    u.lighting_data = "Assets/Lit/LightingData.asset";
+    u.lighting_data_hash = unity_lighting_hash("Unity's binary bake, as it is now");
+    UnityLighting::Page p;
+    p.color = "Assets/Lit/Lightmap-0_comp_light.exr", p.width = 8, p.height = 8;
+    p.rgb.assign((size_t)8 * 8 * 3, half_of(0.5f));
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    for (size_t i = 0; i < rm.positions.size(); i++) m.positions.push_back(rm.positions[i]), m.uv.push_back(cube_uv(rm.positions[i], rm.normals[i]));
+    m.indices = rm.indices;
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.world = Mat4::translate(Vec3(2, 0, 0));
+    u.renderers.push_back(r);
+    u.probes = {UnityLighting::Probe{Vec3(2, 3, 0), {}}};
+    u.probes[0].axes[0] = Vec3(1.0f, 0.0f, 0.0f);  // (+X red: where it ends up after a turned root)
+    u.lights.push_back({"Lamp[0]", 2, 2});
+    const std::string file = fs::join(dir, "Lit.unity.unity-lighting");
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    /* None of Unity's objects here: refused, nothing cleared. */
+    ed.command("newscene");
+    CHECK(!ed.apply_unity_lighting(file) && ed.lighting_data_for_test().empty());
+    /* Imported under a root the camera's pivot put elsewhere: matched through the root; the scene's own "Lamp" (not
+     * Unity's) keeps its light. */
+    ed.command("create Point Light");
+    if (GameObject *own = ed.active_object_for_test()) own->name = "Lamp";
+    const uint64_t own_lamp = ed.active_object_for_test() ? ed.active_object_for_test()->id : 0;
+    ed.command("camera 0 0 5 10 0 -4");
+    ed.command("import Assets/Imported/R400B/Lit.unity");
+    floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->parent && length(floor->parent->world_position()) > 1.0f);
+    CHECK(ed.apply_unity_lighting(file) && floor && ed.lighting_data_for_test().entries.count(floor->id));
+    const AABB pb = ed.probes_for_test().box;
+    std::printf("    imported at (%.1f %.1f %.1f): the floor %s; probes from x %.2f\n", floor && floor->parent ? floor->parent->world_position().x : 0.0f,
+                floor && floor->parent ? floor->parent->world_position().y : 0.0f, floor && floor->parent ? floor->parent->world_position().z : 0.0f,
+                floor && ed.lighting_data_for_test().entries.count(floor->id) ? "lit" : "not lit", pb.min.x);
+    CHECK(pb.valid() && pb.min.x > 10.0f);  // (Unity's probe at x 2, the root at x 10: past 10)
+    CHECK(own_lamp && !ed.lighting_data_for_test().light_modes.count(own_lamp));
+    /* The root turned a quarter about Y after the import: Unity's +X light comes along the scene's -Z. */
+    if (floor && floor->parent) floor->parent->set_world_rotation(Quat::euler(Vec3(0.0f, 90.0f, 0.0f)));
+    CHECK(ed.apply_unity_lighting(file));
+    const ProbeCube &pc = ed.probes_for_test().baked.empty() ? ProbeCube{} : ed.probes_for_test().baked[0];
+    std::printf("    turned: -Z %.2f, +X %.2f, +Z %.2f\n", pc.bounce[5].x, pc.bounce[0].x, pc.bounce[4].x);
+    CHECK(pc.bounce[5].x > 0.99f && pc.bounce[0].x < 0.01f);
+    /* Opened as the scene: Unity's Light Volume bake (read with it) survives Unity's lightmaps; saved and opened again. */
+    ed.command("newscene");
+    ed.command("open Assets/Imported/R400B/Lit.unity");
+    CHECK(!ed.lighting_data_for_test().empty() && ed.lighting_from_unity_);
+    if (fixtures) CHECK(ed.light_volume_bakes_for_test().size() == 1);
+    ed.command("save Assets/Scenes/R400B.scene");
+    ed.command("newscene");
+    ed.command("open Assets/Scenes/R400B.scene");
+    GameObject *again = ed.scene().find_by_name("Floor");
+    CHECK(again && ed.lighting_data_for_test().entries.count(again->id));
+    /* Unity baked again since: the file is refused, not shown. */
+    CHECK(fs::write_file(fs::join(dir, "LightingData.asset"), std::string("Unity's binary bake, baked again")));
+    ed.command("newscene");
+    ed.command("open Assets/Imported/R400B/Lit.unity");
+    CHECK(ed.lighting_data_for_test().empty());
+    /* A good checksum over bad contents: an index past the mesh, a value that isn't a number. */
+    std::string why;
+    UnityLighting bad = u, back;
+    bad.meshes[0].indices[0] = 100000;
+    CHECK(!read_unity_lighting(write_unity_lighting(bad), back, why));
+    bad = u;
+    bad.meshes[0].positions[0].x = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!read_unity_lighting(write_unity_lighting(bad), back, why));
+    bad = u;
+    bad.renderers[0].lightmap = 3;
+    CHECK(!read_unity_lighting(write_unity_lighting(bad), back, why));
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::remove(resolve_asset_path("Assets/Scenes/R400B.scene"), ec);
+    std::filesystem::remove_all(resolve_asset_path("Assets/Scenes/R400B"), ec);
+  });
+  test("Unity materials as their shaders read them (round 400): a shader's declared properties (attributes, a comment before the block); a .mat's leftover texture from another shader ignored; normal and mask maps as data; uniuni's FakeInnerLight's albedo and emission", [] {
+    const std::string shader = "Shader \"uniuni/FakeInnerLightUVBase\"\n{\n// Properties are below\n\tProperties\n\t{\n"
+                               "\t\t_Albedo(\"Albedo\", 2D) = \"white\" {}\n\t\t_Color(\"Color\", Color) = (1,1,1,0)\n\t\t[Normal]_Normal(\"Normal\", 2D) = \"bump\" {}\n"
+                               "\t\t_Emission(\"Emission\", 2D) = \"white\" {}\n\t\t[HDR]_EmissionColorBase(\"EmissionColorBase\", Color) = (1,1,1,0)\n"
+                               "\t\t_BaseBrightness(\"BaseBrightness\", Float) = 0.2\n\t\t[HDR]_EmissionColorLight(\"EmissionColorLight\", Color) = (1,1,1,0)\n"
+                               "\t\t_LightBrightness(\"LightBrightness\", Float) = 1\n\t\t[Enum(UnityEngine.Rendering.CullMode)] _Cull (\"Cull\", Float) = 2\n"
+                               "\t\tcustomColorMultiplier(\"customColorMultiplier\", Float) = 0\n\t}\n\tSubShader { Pass { } }\n}\n";
+    const std::vector<std::string> declared = unity_shader_properties(shader);
+    std::string listed;
+    for (const std::string &n : declared) listed += n + " ";
+    std::printf("    declared: %s\n", listed.c_str());
+    CHECK(declared.size() == 10 && std::find(declared.begin(), declared.end(), "_Cull") != declared.end() &&
+          std::find(declared.begin(), declared.end(), "Enum") == declared.end() && std::find(declared.begin(), declared.end(), "_MainTex") == declared.end());
+    const std::string mat = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Lamp\n  m_Shader: {fileID: 4800000, guid: 5ade5ade5ade5ade5ade5ade5ade5ade, type: 3}\n"
+                            "  m_ShaderKeywords: _EMISSION\n  m_SavedProperties:\n    m_TexEnvs:\n"
+                            "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: aaaa0000aaaa0000aaaa0000aaaa0001, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+                            "    - _EmissionMap:\n        m_Texture: {fileID: 2800000, guid: aaaa0000aaaa0000aaaa0000aaaa0002, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+                            "    - _Albedo:\n        m_Texture: {fileID: 2800000, guid: aaaa0000aaaa0000aaaa0000aaaa0003, type: 3}\n        m_Scale: {x: 2, y: 2}\n        m_Offset: {x: 0, y: 0}\n"
+                            "    - _Normal:\n        m_Texture: {fileID: 2800000, guid: aaaa0000aaaa0000aaaa0000aaaa0004, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+                            "    - _Emission:\n        m_Texture: {fileID: 2800000, guid: aaaa0000aaaa0000aaaa0000aaaa0005, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+                            "    m_Floats:\n    - _BaseBrightness: 0.5\n    - _LightBrightness: 2\n    - customColorMultiplier: 1\n"
+                            "    m_Colors:\n    - _Color: {r: 1, g: 1, b: 1, a: 1}\n    - _EmissionColorBase: {r: 0, g: 0, b: 1, a: 1}\n    - _EmissionColorLight: {r: 0, g: 0, b: 1, a: 1}\n"
+                            "    - _EmissionColor: {r: 1, g: 0, b: 0, a: 1}\n";
+    auto texture = [](const std::string &g) { return "Assets/T/" + g.substr(28) + ".png"; };
+    auto name = [](const std::string &, int64_t) { return std::string("uniuni/FakeInnerLightUVBase"); };
+    Material m;
+    UnityMaterialInfo info;
+    CHECK(unity_material(mat, texture, name, m, info, [&](const std::string &) { return declared; }));
+    std::printf("    %s: base %s (tiling %.0f), normal %s%s, emission %.2f %.2f %.2f x %.2f from %s\n", info.shader.c_str(), m.base_map.path.c_str(), m.tiling.x,
+                m.normal_map.path.c_str(), m.normal_map.non_color ? " (data)" : "", m.emission.x, m.emission.y, m.emission.z, m.emission_strength, m.emission_map.path.c_str());
+    CHECK(info.shader == "FakeInnerLight" && info.known && m.base_map.path == "Assets/T/0003.png" && m.tiling.x == 2.0f);
+    CHECK(m.normal_map.path == "Assets/T/0004.png" && m.normal_map.non_color && m.emission_map.path == "Assets/T/0005.png");
+    CHECK(m.emission.z > 0.99f && m.emission.x < 0.01f && std::fabs(m.emission_strength - 1.5f) < 1e-3f);  // (blue: 0.5 base + 2 x 0.5 glow, never the leftover red)
+    /* Without the shader's list (a built-in shader): the leftovers are all there is - read as before. */
+    Material legacy;
+    CHECK(unity_material(mat, texture, [](const std::string &, int64_t) { return std::string("Standard"); }, legacy, info));
+    CHECK(legacy.base_map.path == "Assets/T/0001.png");
+    /* Comments and strings with braces, two on a line, a name on its own line, lowercase, SurfaceProperties before:
+     * every property found - and a block that never closes gives none (nothing then dropped). */
+    const std::string hard = "HLSLINCLUDE struct SurfaceProperties { float3 F(float x); }; ENDHLSL\n"
+                             "Shader \"X\" { properties {\n  _A (\"a\", Float) = 0  _B (\"Mode }\", Float) = 1\n"
+                             "  // TODO { cleanup\n  /* { */ [Header(Main (base))] _C (\"c\", Color) = (1,1,1,1)\n  _D\n    (\"d\", 2D) = \"white\" {}\n}\n"
+                             "SubShader { Pass { } } }\n";
+    const std::vector<std::string> got = unity_shader_properties(hard);
+    std::string names;
+    for (const std::string &n : got) names += n + " ";
+    std::printf("    the hard one: %s\n", names.c_str());
+    CHECK(got == std::vector<std::string>({"_A", "_B", "_C", "_D"}));
+    CHECK(unity_shader_properties("Shader \"X\" { Properties { _A (\"a\", Float) = 0\n").empty());
+  });
+}
 
 static void tests_round399() {
   test("PSD (round 399): Photoshop's composite read - RGB with alpha raw and PackBits, 16-bit greyscale; a cut file and a CMYK one refused", [] {
@@ -10959,6 +11243,7 @@ void run_assets_tests() {
   tests_round395();
   tests_round398();
   tests_round399();
+  tests_round400();
   tests_round372();
   tests_round373();
   tests_round374();
