@@ -6,7 +6,8 @@ One entry per round of requests, newest first: what was asked, what changed, and
 
 **Asked:** "implement a way to add Unity baked light maps into Blendity"; then "The materials in Blendity are not the
 same in the Unity Project. I can also see an error with emission based materials" - "the texture is not the same for
-the world projects".
+the world projects"; then, with the side-by-side screens: "The textures on the materials still look off from what is
+in the Unity project. The floor in the Unity project should be the baseline for shows up in Blendity".
 
 **Added (task 0377)**
 - **Use Unity's Lightmaps** (Lighting window; offered when a Unity scene with baked lightmaps opens; `unity lightmaps`):
@@ -21,6 +22,12 @@ the world projects".
   been brightened); uniuni's FakeInnerLight lamps (albedo, emission colour times brightness) glow as in Unity.
   SideRail's 42 materials against Unity's: 8 different before, 4 after (a flickering candle's script-driven emission
   and three particle / Light Volume materials Blendity doesn't draw).
+- **Models' submeshes in Unity's order**: Unity numbers a model's submeshes by the order its polygons first use their
+  materials, not the file's material order; Blendity had kept the file's, so a scene's materials went on the wrong
+  parts - SideRail's tunnel floor wore the concrete trim sheet (a grate band and marks) and its walls the floor's
+  concrete. Every renderer's materials and triangles per submesh compared with Unity's: 9 of 347 swapped before
+  (tunnel floors and walls, the bar counter, the tables), none after; 12 lamp filaments still draw a small part Unity
+  leaves without a material, and 4 objects split many-sided faces into a triangle or two more.
 
 **Checked:** SideRail - 180 of 180 lightmapped objects, every triangle matched; its brightness from the spawn 0.94 of
 Unity's own render (0.60 before); Unity's scratch project forced to Linear (Gamma had handed the lightmaps over

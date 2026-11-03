@@ -9476,6 +9476,29 @@ static void tests_round400() {
     CHECK(got == std::vector<std::string>({"_A", "_B", "_C", "_D"}));
     CHECK(unity_shader_properties("Shader \"X\" { Properties { _A (\"a\", Float) = 0\n").empty());
   });
+  test("Unity models' submeshes in Unity's order (round 400): a model's slots numbered by the order its faces first use them - its first polygon's material is submesh 0, as Unity's importer makes it (SideRail's tunnel floor had worn its trim sheet); an unused slot still dropped, a model in order left alone", [] {
+    ImportResult r;
+    MeshPtr floor = std::make_shared<Mesh>(), plain = std::make_shared<Mesh>();
+    const uint32_t fa[3] = {0, 1, 2}, fb[3] = {0, 2, 3};
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)}) floor->add_vert(p), plain->add_vert(p);
+    floor->add_face(fa, 3, nullptr, 1);  // (the file's second material first: the walkway)
+    floor->add_face(fb, 3, nullptr, 0);  // (then its first: the trim)
+    plain->add_face(fa, 3, nullptr, 0);
+    plain->add_face(fb, 3, nullptr, 1);
+    ImportedNode a, b;
+    a.name = "Floor", a.mesh = floor;
+    a.materials = {make_material("Trim", Vec3(1.0f)), make_material("Worn", Vec3(1.0f)), make_material("Unused", Vec3(1.0f))};
+    b.name = "Plain", b.mesh = plain;
+    b.materials = {make_material("Trim", Vec3(1.0f)), make_material("Worn", Vec3(1.0f))};
+    r.nodes = {a, b};
+    CHECK(unity_drop_unused_materials(r) == 1);
+    const ImportedNode &fn = r.nodes[0], &pn = r.nodes[1];
+    std::printf("    Floor: %s %s, its faces %d %d; Plain: %s %s, its faces %d %d\n", fn.materials[0]->name.c_str(), fn.materials.size() > 1 ? fn.materials[1]->name.c_str() : "-",
+                floor->material_of(0), floor->material_of(1), pn.materials[0]->name.c_str(), pn.materials[1]->name.c_str(), plain->material_of(0), plain->material_of(1));
+    CHECK(fn.materials.size() == 2 && fn.materials[0]->name == "Worn" && fn.materials[1]->name == "Trim");
+    CHECK(floor->material_of(0) == 0 && floor->material_of(1) == 1);  // (the walkway still wears Worn, now as submesh 0)
+    CHECK(pn.materials[0]->name == "Trim" && plain->material_of(0) == 0 && plain->material_of(1) == 1);
+  });
 }
 
 static void tests_round399() {

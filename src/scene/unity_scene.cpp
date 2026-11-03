@@ -708,39 +708,52 @@ GameObject *unity_collapse_model_root(Scene &scene, GameObject *root) {
   return top;
 }
 
+namespace {
+
+/* A mesh's slots in the order its faces first use them - Unity's submesh order (a model's submesh 0 is the material
+ * of its first polygon, not the file's first material: SideRail's tunnel floor had worn its trim sheet). */
+std::vector<int> slots_by_first_use(const Mesh &m) {
+  std::vector<int> order;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const int k = m.material_of(f);
+    if (k >= 0 && std::find(order.begin(), order.end(), k) == order.end()) order.push_back(k);
+  }
+  return order;
+}
+
+bool in_order(const std::vector<int> &order, size_t slots) {
+  if (order.size() != slots) return false;
+  for (size_t i = 0; i < order.size(); i++)
+    if (order[i] != (int)i) return false;
+  return true;
+}
+
+}  // namespace
+
 int unity_drop_unused_materials(ImportResult &r) {
   /* Each mesh once (review 399: glTF and Collada nodes share one - renumbering it for the first node had given the
-   * second its slots by the new numbers): its slots in use, then every node of it keeps those. */
-  std::map<const Mesh *, std::vector<int>> to_of;
-  for (const ImportedNode &n : r.nodes) {
-    if (!n.mesh || to_of.count(n.mesh.get())) continue;
-    std::vector<int> &to = to_of[n.mesh.get()];
-    for (size_t f = 0; f < n.mesh->face_count(); f++) {
-      const int k = n.mesh->material_of(f);
-      if (k < 0) continue;
-      if ((size_t)k >= to.size()) to.resize((size_t)k + 1, -1);
-      to[(size_t)k] = 0;
-    }
-    int next = 0;
-    for (int &t : to) t = t == 0 ? next++ : -1;
-  }
+   * second its slots by the new numbers): its slots in use in Unity's order, then every node of it takes those. */
+  std::map<const Mesh *, std::vector<int>> order_of;
+  for (const ImportedNode &n : r.nodes)
+    if (n.mesh && !order_of.count(n.mesh.get())) order_of[n.mesh.get()] = slots_by_first_use(*n.mesh);
   int dropped = 0;
   for (ImportedNode &n : r.nodes) {
-    const auto it = n.mesh ? to_of.find(n.mesh.get()) : to_of.end();
-    if (it == to_of.end() || n.materials.size() < 2) continue;
+    const auto it = n.mesh ? order_of.find(n.mesh.get()) : order_of.end();
+    if (it == order_of.end() || it->second.empty() || n.materials.size() < 2 || in_order(it->second, n.materials.size())) continue;
     std::vector<MaterialPtr> kept;
-    for (size_t k = 0; k < n.materials.size(); k++)
-      if (k < it->second.size() && it->second[k] >= 0) kept.push_back(n.materials[k]);
-    if (kept.empty() || kept.size() == n.materials.size()) continue;
-    dropped += (int)(n.materials.size() - kept.size());
+    for (int k : it->second) kept.push_back((size_t)k < n.materials.size() ? n.materials[(size_t)k] : n.materials.back());
+    dropped += (int)(n.materials.size() - std::min(n.materials.size(), kept.size()));
     n.materials = std::move(kept);
   }
-  for (const auto &[mesh, to] : to_of) {
-    bool same = true;  // (every slot in use: the numbers stay)
-    for (size_t k = 0; k < to.size(); k++) same = same && to[k] == (int)k;
-    if (same) continue;
+  for (const auto &[mesh, order] : order_of) {
+    if (order.empty() || in_order(order, (size_t)*std::max_element(order.begin(), order.end()) + 1)) continue;
+    std::vector<int> to;
+    for (size_t i = 0; i < order.size(); i++) {
+      if ((size_t)order[i] >= to.size()) to.resize((size_t)order[i] + 1, 0);
+      to[(size_t)order[i]] = (int)i;
+    }
     Mesh *m = const_cast<Mesh *>(mesh);
-    for (int32_t &k : m->face_material) k = k >= 0 && k < (int)to.size() && to[(size_t)k] >= 0 ? to[(size_t)k] : 0;
+    for (int32_t &k : m->face_material) k = k >= 0 && k < (int)to.size() ? to[(size_t)k] : 0;
     m->touch();
   }
   return dropped;

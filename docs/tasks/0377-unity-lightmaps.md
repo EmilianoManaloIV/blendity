@@ -53,6 +53,10 @@ materials" - "the texture is not the same for the world projects".
   What still differs: Unity's exponential fog (linear in Blendity), the lamps' emissive glow, and overlay lines.
 - **SideRail's materials** dumped from Unity (`MaterialDump.cs`, local) against Blendity's: 8 of 42 differed, 4 after -
   a candle whose emission a script flickers, and three particle / Light Volume materials Blendity doesn't draw.
+- **Submesh order** (`unity_drop_unused_materials`): every shown renderer's material and triangle count per submesh
+  dumped from Unity and Blendity (local scripts) - 9 of 347 differed, every one a model whose polygons first use a
+  material other than the file's first: Unity numbers submeshes by first use. Now 0; left: 12 lamp filaments' second
+  part (no material in Unity, not drawn there; drawn with the first in Blendity) and 4 objects' n-gon splits.
 - Tests (`tests_round400`): the file written and read equal, a changed byte and a cut file refused, a page's rows turned;
   a Unity scene opened with a hand-written file beside it - the cube's UVs exact after scale, offset and v, the
   directional shading (the lit face 1.99, the far face 0), the lamp's mode, the probes, Baked GI on and Realtime off.
