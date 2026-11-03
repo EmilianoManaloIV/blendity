@@ -9169,6 +9169,325 @@ std::string material_name(GameObject *g, size_t slot = 0) {
 }
 }  // namespace r395
 
+/* Round 399: a PSD written by hand - the header, empty colour data, resources and layers, then the composite. */
+namespace r399 {
+void be(std::string &s, uint32_t v, int bytes) {
+  for (int k = bytes - 1; k >= 0; k--) s += (char)((v >> (8 * k)) & 0xFF);
+}
+std::string psd(int channels, int w, int h, int depth, int mode, int comp, const std::vector<std::vector<uint8_t>> &planes) {
+  std::string s = "8BPS";
+  be(s, 1, 2), s += std::string(6, '\0');
+  be(s, (uint32_t)channels, 2), be(s, (uint32_t)h, 4), be(s, (uint32_t)w, 4), be(s, (uint32_t)depth, 2), be(s, (uint32_t)mode, 2);
+  be(s, 0, 4), be(s, 0, 4), be(s, 0, 4);
+  be(s, (uint32_t)comp, 2);
+  if (comp == 0) {
+    for (const auto &p : planes) s.append((const char *)p.data(), p.size());
+    return s;
+  }
+  /* PackBits: each row one literal run (a header byte w-1, then the row) - its byte count w+1. */
+  const int row = w * depth / 8;
+  for (size_t c = 0; c < planes.size(); c++)
+    for (int y = 0; y < h; y++) be(s, (uint32_t)row + 1, 2);
+  for (const auto &p : planes)
+    for (int y = 0; y < h; y++) s += (char)(row - 1), s.append((const char *)p.data() + y * row, (size_t)row);
+  return s;
+}
+}  // namespace r399
+
+static void tests_round399() {
+  test("PSD (round 399): Photoshop's composite read - RGB with alpha raw and PackBits, 16-bit greyscale; a cut file and a CMYK one refused", [] {
+    using namespace r399;
+    {  /* Review 399: a small file claiming a huge picture is refused before anything that size is made. */
+      Bitmap b;
+      std::string why;
+      const std::string huge = psd(4, 30000, 30000, 16, 3, 1, {});
+      CHECK(!decode_psd((const uint8_t *)huge.data(), huge.size(), b, why) && b.rgba8.empty());
+      std::string zero_rows = psd(4, 16000, 16000, 16, 3, 1, {});  // (PackBits with every row's count 0)
+      zero_rows += std::string((size_t)4 * 16000 * 2, '\0');
+      CHECK(!decode_psd((const uint8_t *)zero_rows.data(), zero_rows.size(), b, why) && b.rgba8.empty());
+      const std::string raw_short = psd(3, 16000, 16000, 8, 3, 0, {});
+      CHECK(!decode_psd((const uint8_t *)raw_short.data(), raw_short.size(), b, why) && b.rgba8.empty());
+    }
+    const std::vector<std::vector<uint8_t>> rgba{{10, 20, 30, 40}, {50, 60, 70, 80}, {90, 100, 110, 120}, {255, 128, 0, 1}};
+    for (int comp : {0, 1}) {
+      Bitmap b;
+      std::string why;
+      CHECK(decode_image(psd(4, 2, 2, 8, 3, comp, rgba), b, why));
+      CHECK(b.width == 2 && b.height == 2 && b.rgba8.size() == 16 && b.rgba8[0] == 10 && b.rgba8[1] == 50 && b.rgba8[2] == 90 && b.rgba8[3] == 255);
+      CHECK(b.rgba8[12] == 40 && b.rgba8[13] == 80 && b.rgba8[14] == 120 && b.rgba8[15] == 1);
+    }
+    Bitmap g;
+    std::string why;
+    CHECK(decode_image(psd(1, 2, 1, 16, 1, 0, {{0xAB, 0x00, 0x12, 0x34}}), g, why));  // (16 bits: the high byte)
+    CHECK(g.rgba8[0] == 0xAB && g.rgba8[1] == 0xAB && g.rgba8[3] == 255 && g.rgba8[4] == 0x12);
+    const std::string whole = psd(4, 2, 2, 8, 3, 1, rgba);
+    CHECK(!decode_image(whole.substr(0, whole.size() - 5), g, why));
+    CHECK(!decode_image(psd(4, 2, 2, 8, 4, 0, rgba), g, why) && why.find("RGB") != std::string::npos);  // (CMYK)
+    CHECK(image_extension_supported(".psd"));
+  });
+  test("Unity models with their skeletons (round 399): a model placed from a prefab gets its Bones and its mesh's Skin, as an import does; the Budget counts a hidden outfit and a switched-off renderer as VRChat does; several PhysBones on one root each count", [] {
+    Scene scene;
+    ImportResult r;
+    r.nodes.resize(4);
+    r.nodes[0].name = "Armature";
+    r.nodes[1].name = "Hips", r.nodes[1].parent = 0, r.nodes[1].is_bone = true;
+    r.nodes[2].name = "Spine", r.nodes[2].parent = 1, r.nodes[2].is_bone = true, r.nodes[2].position = Vec3(0, 0.2f, 0);
+    r.nodes[3].name = "Body", r.nodes[3].mesh = primitives::cube();
+    {
+      Mesh &m = *mesh_make_mutable(r.nodes[3].mesh);
+      m.vertex_groups = {{"Hips", std::vector<float>(m.vert_count(), 1.0f)}, {"Spine", std::vector<float>(m.vert_count(), 0.0f)}};
+    }
+    r.skins.push_back({3, {1, 2}});
+    std::vector<GameObject *> made;
+    GameObject *root = objects_from_model(r, "Avatar", scene, &made);
+    CHECK(made.size() == 4 && made[1]->get<Bone>() && made[2]->get<Bone>() && made[0]->get<Armature>());
+    const SkinModifier *sk = made[3]->get<SkinModifier>();
+    CHECK(sk && sk->object == "Armature" && made[3]->parent == root);
+    std::vector<GameObject *> all{root, made[0], made[1], made[2], made[3]};
+    CHECK(budget_count(all).value[(int)BudgetRow::Bones] == 3.0);  // (Armature, Hips, Spine: the skin's transforms)
+    GameObject *bra = scene.create("Under", root);
+    bra->add<MeshFilter>()->mesh = primitives::cube();
+    bra->add<MeshRenderer>();
+    bra->active = false;  // (a hidden outfit)
+    GameObject *off = scene.create("Off", root);
+    off->add<MeshFilter>()->mesh = primitives::cube();
+    off->add<MeshRenderer>()->enabled = false;  // (a renderer switched off)
+    all.push_back(bra), all.push_back(off);
+    const BudgetCounts c = budget_count(all);
+    std::printf("    with a hidden outfit and a switched-off renderer: %.0f meshes, %.0f triangles\n", c.value[(int)BudgetRow::Meshes], c.value[(int)BudgetRow::Triangles]);
+    CHECK(c.value[(int)BudgetRow::Meshes] == 2.0 && c.value[(int)BudgetRow::SkinnedMeshes] == 1.0 && c.value[(int)BudgetRow::Triangles] == 36.0);
+    /* Three PhysBones on one root (as Shinano's breasts): one chain here, three to VRChat. */
+    std::vector<UnityDoc> docs;
+    std::string why;
+    std::string yaml = "%YAML 1.1\n--- !u!1 &1\nGameObject:\n  m_Name: Breast\n--- !u!4 &2\nTransform:\n  m_GameObject: {fileID: 1}\n  m_Father: {fileID: 0}\n";
+    for (int k = 0; k < 3; k++)
+      yaml += strprintf("--- !u!114 &%d\nMonoBehaviour:\n  m_GameObject: {fileID: 1}\n  m_Script: {fileID: 1, guid: cafe0000cafe0000cafe0000cafe0000, type: 3}\n"
+                        "  rootTransform: {fileID: 2}\n  pull: 0.2\n  spring: 0.2\n  integrationType: 0\n", 10 + k);
+    CHECK(parse_unity_yaml(yaml, docs, why));
+    Scene s2;
+    UnityImport ctx;
+    build_unity_objects(docs, s2, nullptr, ctx);
+    GameObject *breast = s2.find_by_name("Breast");
+    const SpringBone *sb = breast ? breast->get<SpringBone>() : nullptr;
+    CHECK(sb && sb->physbones == 3 && ctx.springs == 3 && budget_count({breast}).value[(int)BudgetRow::SpringChains] == 3.0);
+    Scene back;
+    CHECK(load_scene_text(save_scene_text(s2), back, why) && back.find_by_name("Breast")->get<SpringBone>()->physbones == 3);
+  });
+  test("budget list (round 399): each object's triangles, kind, slots and bones, the heaviest first, a hidden one marked", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    GameObject *big = ed.scene().find_by_name("Sphere");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(big && cube);
+    if (!big || !cube) return;
+    cube->active = false;
+    std::vector<LogEntry> got;
+    const size_t since = Log::fetch(0, got);
+    ed.command("budget list");
+    got.clear();
+    Log::fetch(since, got);
+    std::string text;
+    for (const LogEntry &e : got) text += e.text + "\n";
+    const size_t at_sphere = text.find("Sphere"), at_cube = text.find("Cube");
+    std::printf("%s", text.c_str());
+    CHECK(at_sphere != std::string::npos && at_cube != std::string::npos && at_sphere < at_cube && text.find("hidden: counted") != std::string::npos);
+  });
+  test("Unity's Materials tab (round 399): a model's .meta remaps its embedded materials to .mat files - the renderers wear them wherever the model is placed; an override on a part Unity's numbers don't have is stale, not waiting", [] {
+    using namespace r395;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R399"), table = resolve_asset_path("Assets/.unity-model-ids");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    /* Shinano's way: the FBX keeps Skin and Cloth inside it, and its .meta's externalObjects send them to Skin.mat and
+     * Cloth.mat; the prefab places the model with no material overrides at all. */
+    CHECK(fs::write_file(fs::join(dir, "doll.obj"), "o Body\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nusemtl Skin\nf 1 2 3\nusemtl Cloth\nf 2 4 3\n"
+                                                    "o Hat\nv 0 2 0\nv 1 2 0\nv 0 3 0\nusemtl Skin\nf 5 6 7\n"));
+    CHECK(fs::write_file(fs::join(dir, "Skin.mat"), color_mat("Skin Lil", "r: 1, g: 0.5, b: 0.4")));
+    CHECK(fs::write_file(fs::join(dir, "Cloth.mat"), color_mat("Cloth Lil", "r: 0, g: 0, b: 0")));
+    const std::string gm = "dddd0000dddd0000dddd0000dddd0001", gs = "dddd0000dddd0000dddd0000dddd0002", gc = "dddd0000dddd0000dddd0000dddd0003";
+    auto external = [](const std::string &name, const std::string &guid) {
+      return "  - first:\n      type: UnityEngine:Material\n      assembly: UnityEngine.CoreModule\n      name: " + name + "\n    second: {fileID: 2100000, guid: " + guid + ", type: 2}\n";
+    };
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gm + ".meta"),
+                         "fileFormatVersion: 2\nguid: " + gm + "\nModelImporter:\n  externalObjects:\n" + external("Skin", gs) + external("Cloth", gc) +
+                         "  - first:\n      type: UnityEngine:Material\n      assembly: UnityEngine.CoreModule\n      name: Gone\n    second: {fileID: 2100000, guid: dddd0000dddd0000dddd0000dddd0009, type: 2}\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gc + ".meta"), "fileFormatVersion: 2\nguid: " + gc + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gm + "\tAssets/doll.obj\tAssets/Imported/R399/doll.obj\n" + gs + "\tAssets/Skin.mat\tAssets/Imported/R399/Skin.mat\n" +
+                                                            gc + "\tAssets/Cloth.mat\tAssets/Imported/R399/Cloth.mat\n"));
+    /* Unity's numbers for the model (as `unity modelids` writes them): Body's renderer only - 777's part isn't there. */
+    CHECK(fs::write_file(table, gm + "\t111\t23\tBody\n"));
+    CHECK(fs::write_file(fs::join(dir, "Doll.prefab"), "%YAML 1.1\n" + instance(10, gm, mod("777", gm, "m_CastShadows", "0"))));
+    std::vector<LogEntry> got;
+    const size_t since = Log::fetch(0, got);
+    ed.command("import Assets/Imported/R399/Doll.prefab");
+    got.clear();
+    Log::fetch(since, got);
+    std::string text;
+    for (const LogEntry &e : got) text += e.text + "\n";
+    GameObject *body = ed.scene().find_by_name("Body"), *hat = ed.scene().find_by_name("Hat");
+    CHECK(body && hat);
+    if (!body || !hat) return;
+    const MeshRenderer *br = body->get<MeshRenderer>(), *hr = hat->get<MeshRenderer>();
+    auto file = [](const MeshRenderer *r, size_t k) {  // (a converted .mat is a material asset: the embedded one isn't)
+      return r && r->materials.size() > k && r->materials[k] ? fs::filename(r->materials[k]->asset_path) : std::string("-");
+    };
+    std::printf("    Body wears %s and %s, Hat %s\n", file(br, 0).c_str(), file(br, 1).c_str(), file(hr, 0).c_str());
+    CHECK(br && br->materials.size() == 2 && file(br, 0) == "Skin.mat" && file(br, 1) == "Cloth.mat" && file(hr, 0) == "Skin.mat");
+    CHECK(br && hr && br->materials[0] == hr->materials[0]);  // (Skin.mat converted once for the model)
+    CHECK(br && br->materials[0]->base_color.x > 0.99f && br->materials[0]->base_color.y > 0.15f && br->materials[0]->base_color.y < 0.3f);  // (0.5 in sRGB: 0.21 linear)
+    CHECK(text.find("override(s) name model parts Unity's own numbers don't have") != std::string::npos && text.find("wait for Unity's numbers") == std::string::npos);
+    /* The console's import of a model by its path in the project, as typed (it had said the file wasn't found). */
+    int hats = 0;
+    ed.command("import Assets/Imported/R399/doll.obj");
+    ed.scene().for_each([&](GameObject &g) { hats += g.name == "Hat"; });
+    CHECK(hats == 2);
+    /* The table and the folder go: the test project stays as it was. */
+    std::filesystem::remove(table, ec);
+    std::filesystem::remove(resolve_asset_path("Assets/Meshes/doll.obj"), ec);  // (the console import's copy, review 399)
+    std::filesystem::remove_all(resolve_asset_path("Assets/Materials/doll"), ec);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Unity worlds as Unity places them (round 399): a variant of a one-node model placed by a scene - the node is the root, the scene's rename reaches it through Unity's nested id, its parent is the scene's; a removed renderer draws nothing; a slot no face uses is gone; the built-in Default-Material is a slot", [] {
+    CHECK(unity_nested_file_id(-8679921383154817045LL, 5925718796175070894LL) == 6176362138179973445LL);  // (SideRail's LowTable, as Unity numbered it)
+    Editor ed;
+    ed.init_headless(1200, 900);
+    const std::string dir = resolve_asset_path("Assets/Imported/R399W");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gm = "eeee1111eeee1111eeee1111eeee0001", gv = "eeee1111eeee1111eeee1111eeee0002";
+    CHECK(fs::write_file(fs::join(dir, "plank.obj"), "o Plank\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl Wood\nf 1 2 3\nusemtl Unused\n"));
+    CHECK(fs::write_file(fs::join(dir, "Plank.prefab"),
+                         "%YAML 1.1\n--- !u!1001 &5925718796175070894\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications: []\n"
+                         "    m_RemovedComponents:\n    - {fileID: -7511558181221131132, guid: " + gm + ", type: 3}\n  m_SourcePrefab: {fileID: 100100000, guid: " + gm + ", type: 3}\n"));
+    const std::string root_go = std::to_string(unity_nested_file_id(919132149155446097LL, 5925718796175070894LL));
+    CHECK(fs::write_file(fs::join(dir, "Yard.unity"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: Shelves\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!1001 &20\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 11}\n    m_Modifications:\n"
+                         "    - target: {fileID: " + root_go + ", guid: " + gv + ", type: 3}\n      propertyPath: m_Name\n      value: Plank_1\n      objectReference: {fileID: 0}\n"
+                         "  m_SourcePrefab: {fileID: 100100000, guid: " + gv + ", type: 3}\n"
+                         "--- !u!1 &30\nGameObject:\n  m_Name: Trigger\n--- !u!4 &31\nTransform:\n  m_GameObject: {fileID: 30}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &32\nMeshFilter:\n  m_GameObject: {fileID: 30}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &33\nMeshRenderer:\n  m_GameObject: {fileID: 30}\n  m_Materials:\n  - {fileID: 10303, guid: 0000000000000000f000000000000000, type: 0}\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gm + ".meta"), "fileFormatVersion: 2\nguid: " + gm + "\nModelImporter:\n  externalObjects: {}\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gv + ".meta"), "fileFormatVersion: 2\nguid: " + gv + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gm + "\tAssets/plank.obj\tAssets/Imported/R399W/plank.obj\n" + gv + "\tAssets/Plank.prefab\tAssets/Imported/R399W/Plank.prefab\n"));
+    ed.command("open Assets/Imported/R399W/Yard.unity");
+    GameObject *plank = ed.scene().find_by_name("Plank_1"), *shelves = ed.scene().find_by_name("Shelves"), *trigger = ed.scene().find_by_name("Trigger");
+    int wrappers = 0;
+    ed.scene().for_each([&](GameObject &g) { wrappers += g.name == "plank" || g.name == "Plank"; });
+    const MeshRenderer *pr = plank ? plank->get<MeshRenderer>() : nullptr, *tr = trigger ? trigger->get<MeshRenderer>() : nullptr;
+    std::printf("    Plank_1 %s under %s, renderer %s; %d wrapper(s); Trigger's slots: %s\n", plank ? "made" : "-",
+                plank && plank->parent ? plank->parent->name.c_str() : "-", pr ? "kept" : "removed", wrappers,
+                tr && !tr->materials.empty() && tr->materials[0] ? tr->materials[0]->name.c_str() : "-");
+    CHECK(plank && shelves && plank->parent == shelves && wrappers == 0);
+    CHECK(plank && !pr && plank->get<MeshFilter>());  // (removed, as in Unity: not drawn, not in the Budget - review 399)
+    CHECK(plank && budget_count({plank}).value[(int)BudgetRow::Triangles] == 0.0);
+    CHECK(tr && tr->materials.size() == 1 && tr->materials[0] && tr->materials[0]->name == "Default-Material");
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Unity models (review 399): a slot no face uses is dropped once for a mesh two nodes share; a renamed armature's skins follow it; a PhysBone takes the place of a spring the model brought", [] {
+    ImportResult r;
+    MeshPtr shared = std::make_shared<Mesh>();
+    const uint32_t fa[3] = {0, 1, 2}, fb[3] = {0, 2, 3};
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)}) shared->add_vert(p);
+    shared->add_face(fa, 3, nullptr, 0);
+    shared->add_face(fb, 3, nullptr, 2);
+    for (int k = 0; k < 2; k++) {
+      ImportedNode n;
+      n.name = k ? "Second" : "First";
+      n.mesh = shared;
+      n.materials = {make_material("A", Vec3(1.0f)), make_material("B", Vec3(1.0f)), make_material("C", Vec3(1.0f))};
+      r.nodes.push_back(n);
+    }
+    CHECK(unity_drop_unused_materials(r) == 2);
+    for (const ImportedNode &n : r.nodes) CHECK(n.materials.size() == 2 && n.materials[0]->name == "A" && n.materials[1]->name == "C");
+    CHECK(shared->material_of(0) == 0 && shared->material_of(1) == 1);  // (C's faces wear C, through both nodes)
+    /* A rigged model placed by a scene that renames its armature (its root, Unity's) and puts a PhysBone on it, where the
+     * model brought a spring of its own. */
+    const std::string gm = "dddd2222dddd2222dddd2222dddd0001";
+    const std::string yaml = "%YAML 1.1\n--- !u!1001 &100\nPrefabInstance:\n  m_Modification:\n    m_TransformParent: {fileID: 0}\n    m_Modifications:\n"
+        "    - target: {fileID: 919132149155446097, guid: " + gm + ", type: 3}\n      propertyPath: m_Name\n      value: Rig_1\n      objectReference: {fileID: 0}\n"
+        "  m_SourcePrefab: {fileID: 100100000, guid: " + gm + ", type: 3}\n"
+        "--- !u!1 &101 stripped\nGameObject:\n  m_CorrespondingSourceObject: {fileID: 919132149155446097, guid: " + gm + ", type: 3}\n  m_PrefabInstance: {fileID: 100}\n"
+        "--- !u!4 &102 stripped\nTransform:\n  m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: " + gm + ", type: 3}\n  m_PrefabInstance: {fileID: 100}\n"
+        "--- !u!114 &103\nMonoBehaviour:\n  m_GameObject: {fileID: 101}\n  m_Script: {fileID: 1, guid: cafe0000cafe0000cafe0000cafe0000, type: 3}\n"
+        "  rootTransform: {fileID: 102}\n  pull: 0.4\n  spring: 0.2\n  integrationType: 0\n";
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(yaml, docs, why));
+    Scene s;
+    s.create("Rig_1");  // (review 399: an import's root named as the rig will be - the skin must still find its own)
+    UnityImport ctx;
+    GameObject *rig = nullptr, *body = nullptr;
+    ctx.model = [&](const std::string &guid, Scene &scene, UnityTargets &parts) -> GameObject * {
+      if (guid != gm) return nullptr;
+      rig = scene.create("Armature");  // (one top node: the model's root, as unity_collapse_model_root leaves it)
+      body = scene.create("Body", rig);
+      rig->add<Armature>();
+      rig->add<SpringBone>()->stiffness = 0.9f;  // (the model's own)
+      body->add<SkinModifier>()->object = "Armature";
+      parts[919132149155446097LL] = {rig, 1};
+      parts[-8679921383154817045LL] = {rig, 4};
+      return rig;
+    };
+    build_unity_objects(docs, s, nullptr, ctx);
+    const SpringBone *sb = rig ? rig->get<SpringBone>() : nullptr;
+    std::printf("    the rig: %s, the skin names %s; PhysBones on it %d, stiffness %.2f\n", rig ? rig->name.c_str() : "-",
+                body && body->get<SkinModifier>() ? body->get<SkinModifier>()->object.c_str() : "-", sb ? sb->physbones : 0, sb ? sb->stiffness : 0.0f);
+    CHECK(rig && rig->name == "Rig_1" && body && body->get<SkinModifier>()->object == "Rig_1" && skin_armature_of(*body, "Rig_1") == rig);
+    CHECK(sb && sb->physbones == 1 && std::fabs(sb->stiffness - 0.4f) < 1e-5f && ctx.springs == 1);
+  });
+  test("Unity's texture sizes (round 399): a texture's .meta - its default and Standalone settings, format, compression quality, normal map, mips - gives its memory as Unity imports it; an opaque image is known as one", [] {
+    const std::string dir = resolve_asset_path("Assets/Imported/R399T");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    auto meta = [&](const std::string &name, const std::string &importer, const std::string &platforms) {
+      CHECK(fs::write_file(fs::join(dir, name + ".png.meta"), "fileFormatVersion: 2\nguid: 1\nTextureImporter:\n  mipmaps:\n    enableMipMap: 1\n" + importer +
+                                                               "  maxTextureSize: 2048\n  platformSettings:\n" + platforms));
+      return "Assets/Imported/R399T/" + name + ".png";
+    };
+    auto platform = [](const std::string &target, int size, int format, int quality, int overridden) {
+      return "  - serializedVersion: 3\n    buildTarget: " + target + "\n    maxTextureSize: " + std::to_string(size) + "\n    textureFormat: " + std::to_string(format) +
+             "\n    textureCompression: " + std::to_string(quality) + "\n    overridden: " + std::to_string(overridden) + "\n";
+    };
+    const double mip = 4.0 / 3.0, mb = 1024.0 * 1024.0;
+    double v = 0.0;
+    /* A mask: the default's 512 for a 4096 source, automatic, opaque - DXT1. Standalone's 2048 isn't on. */
+    CHECK(unity_texture_megabytes(meta("mask", "", platform("DefaultTexturePlatform", 512, -1, 1, 0) + platform("Standalone", 2048, -1, 1, 0)), 4096, 4096, false, v));
+    CHECK(std::fabs(v - 512.0 * 512 * 0.5 * mip / mb) < 1e-6);
+    /* With alpha: DXT5. High quality: BC7 either way. */
+    CHECK(unity_texture_megabytes(meta("alpha", "", platform("DefaultTexturePlatform", 1024, -1, 1, 0)), 1024, 1024, true, v) && std::fabs(v - 1024.0 * 1024 * mip / mb) < 1e-6);
+    CHECK(unity_texture_megabytes(meta("hq", "", platform("DefaultTexturePlatform", 4096, -1, 2, 0)), 4096, 4096, false, v) && std::fabs(v - 4096.0 * 4096 * mip / mb) < 1e-6);
+    /* Standalone's override on: its size and format (DXT1 Crunched: counted as DXT1, as VRChat's SDK counts it). */
+    CHECK(unity_texture_megabytes(meta("crunched", "", platform("DefaultTexturePlatform", 4096, -1, 1, 0) + platform("Standalone", 1024, 28, 1, 1)), 4096, 4096, true, v));
+    CHECK(std::fabs(v - 1024.0 * 1024 * 0.5 * mip / mb) < 1e-6);
+    /* A normal map: a byte a texel. Uncompressed: four. */
+    CHECK(unity_texture_megabytes(meta("normal", "  textureType: 1\n", platform("DefaultTexturePlatform", 2048, -1, 1, 0)), 2048, 2048, false, v) && std::fabs(v - 2048.0 * 2048 * mip / mb) < 1e-6);
+    CHECK(unity_texture_megabytes(meta("raw", "", platform("DefaultTexturePlatform", 256, -1, 0, 0)), 256, 256, false, v) && std::fabs(v - 256.0 * 256 * 4 * mip / mb) < 1e-6);
+    CHECK(!unity_texture_megabytes("Assets/Imported/R399T/none.png", 64, 64, false, v));  // (no .meta: not Unity's)
+    /* Review 399: Alpha Source None is DXT1 whatever the image holds, From Gray Scale DXT5; ETC2_RGBA8 (47) a byte a
+     * texel; a 1000 x 600 rounded to the nearest powers of two first (1024 x 512). */
+    CHECK(unity_texture_megabytes(meta("noalpha", "  alphaSource: 0\n", platform("DefaultTexturePlatform", 1024, -1, 1, 0)), 1024, 1024, true, v) && std::fabs(v - 1024.0 * 1024 * 0.5 * mip / mb) < 1e-6);
+    CHECK(unity_texture_megabytes(meta("grey", "  alphaSource: 2\n", platform("DefaultTexturePlatform", 1024, -1, 1, 0)), 1024, 1024, false, v) && std::fabs(v - 1024.0 * 1024 * mip / mb) < 1e-6);
+    CHECK(unity_texture_megabytes(meta("etc2", "", platform("DefaultTexturePlatform", 1024, -1, 1, 0) + platform("Standalone", 1024, 47, 1, 1)), 1024, 1024, false, v) && std::fabs(v - 1024.0 * 1024 * mip / mb) < 1e-6);
+    CHECK(unity_texture_megabytes(meta("npot", "  nPOTScale: 1\n", platform("DefaultTexturePlatform", 2048, -1, 1, 0)), 1000, 600, false, v) && std::fabs(v - 1024.0 * 512 * 0.5 * mip / mb) < 1e-6);
+    std::filesystem::remove_all(dir, ec);
+    Bitmap b;
+    b.width = b.height = 2;
+    b.rgba8.assign(16, 255);
+    Texture opaque, see_through;
+    opaque.build(b, true);
+    b.rgba8[3] = 254;
+    see_through.build(b, true);
+    CHECK(!opaque.has_alpha && see_through.has_alpha);
+  });
+}
+
 static void tests_round398() {
   test("Unity's Light Volume bake read back (round 398): a scene's Light Volume with its three baked textures in the project comes in with Unity's bake - shown on its voxels until Blendity bakes it", [] {
     std::string t[3];
@@ -9354,7 +9673,7 @@ static void tests_round395() {
     /* Unity's numbers for two.obj's parts (as `unity modelids` writes them): A's renderer, B's GameObject and renderer. */
     CHECK(fs::write_file(table, std::string(kGuidTwo) + "\t111\t23\tA\n" + kGuidTwo + "\t222\t1\tB\n" + kGuidTwo + "\t333\t23\tB\n"));
     ed.command("import Assets/Imported/R395/Ovr.unity");  // (round 395: a path in the project, as typed)
-    GameObject *root = ed.scene().find_by_name("Ovr"), *a = ed.scene().find_by_name("A"), *b = ed.scene().find_by_name("B"), *solo = ed.scene().find_by_name("Solo");
+    GameObject *root = ed.scene().find_by_name("Ovr"), *a = ed.scene().find_by_name("A"), *b = ed.scene().find_by_name("B"), *solo = ed.scene().find_by_name("one");  // (round 399: one.obj's single node is its root, named for the file, as in Unity)
     GameObject *lamp = ed.scene().find_by_name("Lamp3"), *stat = ed.scene().find_by_name("Static");
     CHECK(root && a && b && solo && lamp && stat);
     if (!root || !a || !b || !solo || !lamp || !stat) return;
@@ -10639,6 +10958,7 @@ void run_assets_tests() {
   tests_round371();
   tests_round395();
   tests_round398();
+  tests_round399();
   tests_round372();
   tests_round373();
   tests_round374();

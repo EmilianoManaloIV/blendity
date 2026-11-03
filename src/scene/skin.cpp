@@ -222,7 +222,7 @@ void armature_bones(const GameObject &root, std::vector<ArmatureBone> &out) {
 
 static const GameObject *armature_target(const SkinModifier &s) {
   if (!s.owner || !s.owner->scene || s.object.empty()) return nullptr;
-  const GameObject *t = s.owner->scene->find_by_name(s.object);
+  const GameObject *t = skin_armature_of(*s.owner, s.object);
   if (!t || t == s.owner || !t->get<Armature>()) return nullptr;
   return t;
 }

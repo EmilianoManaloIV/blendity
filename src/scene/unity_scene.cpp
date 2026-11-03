@@ -150,6 +150,23 @@ void set_static_flags(GameObject *g, double flags) {
   if (MeshRenderer *r = g->get<MeshRenderer>()) r->contribute_gi = ((long long)flags & 1) != 0;
 }
 
+/* A new name for an object; when it holds an armature, the skins of its placement that named it by the old one follow
+ * (review 399: skins find their armature by name - a renamed placement had left its meshes unbound). */
+void rename_object(GameObject *g, const std::string &name) {
+  const std::string was = g->name;
+  g->name = name;
+  if (!g->get<Armature>() || was == name) return;
+  GameObject *top = g;
+  while (top->parent) top = top->parent;
+  std::vector<GameObject *> under{top};
+  while (!under.empty()) {
+    GameObject *o = under.back();
+    under.pop_back();
+    if (SkinModifier *s = o->get<SkinModifier>(); s && s->object == was) s->object = name;
+    for (GameObject *k : o->children) under.push_back(k);
+  }
+}
+
 /* One override of a nested prefab or a model: its transform, name, active state, a renderer's materials and switches,
  * a light's; false for what Blendity doesn't hold. */
 bool apply_override(const YamlNode &e, const UnityTargets &m, std::set<GameObject *> &turned, UnityImport &ctx) {
@@ -163,7 +180,7 @@ bool apply_override(const YamlNode &e, const UnityTargets &m, std::set<GameObjec
   if (is_renderer(cls)) return renderer_override(prop, v, g);
   if (cls == 108) return light_override(prop, v, g);
   if (cls != 0 && cls != 1 && cls != 4 && cls != 224) return false;  // (another component's field: Unity's)
-  if (prop == "m_Name") return g->name = value, true;
+  if (prop == "m_Name") return rename_object(g, value), true;
   if (prop == "m_IsActive") return g->active = v != 0.0, true;
   if (prop == "m_StaticEditorFlags") return set_static_flags(g, v), true;
   if (prop == "m_RootOrder" || prop.rfind("m_LocalEulerAnglesHint.", 0) == 0) return true;  // (Unity's bookkeeping: the rotation itself says it)
@@ -190,7 +207,14 @@ void apply_overrides(const YamlNode &instance, const UnityTargets &m, UnityImpor
   const YamlNode *mod = instance.get("m_Modification");
   const YamlNode *list = mod ? mod->get("m_Modifications") : nullptr;
   const YamlNode *removed = mod ? mod->get("m_RemovedComponents") : nullptr;
-  if (removed && !removed->seq.empty()) ctx.notes.push_back("a nested prefab's removed components came back (Unity removes them again)");
+  /* Round 399: a removed renderer draws nothing here either (switched off: SideRail's bar counter collider mesh had
+   * shown); any other removed component comes back, said - Unity removes it again. */
+  for (const YamlNode &ref : removed ? removed->seq : std::vector<YamlNode>()) {
+    const auto it = m.find(std::strtoll(ref.str("fileID").c_str(), nullptr, 10));
+    MeshRenderer *r = it != m.end() && it->second.object && is_renderer(it->second.class_id) ? it->second.object->get<MeshRenderer>() : nullptr;
+    if (r) it->second.object->remove_component(r);  // (review 399: gone, as in Unity - not drawn, not in the Budget)
+    else ctx.notes.push_back("a nested prefab's removed components came back (Unity removes them again)");
+  }
   std::set<GameObject *> turned;
   for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>()) {
     const bool done = apply_override(e, m, turned, ctx);
@@ -249,6 +273,10 @@ void instantiate_model(const UnityDoc &d, const std::string &guid, GameObject *r
     const bool own = e.guid("target") == guid;
     if (lone && own && !parts.count(fid) && renderer_only(e.str("propertyPath"))) parts[fid] = {lone, 23};
     if (parts.count(fid) || !own || !holdable(e.str("propertyPath"))) continue;
+    if (ctx.models_numbered->count(guid)) {  // (round 399: Unity numbered it and has no such part - an override Unity keeps unused)
+      ctx.model_overrides_stale++;
+      continue;
+    }
     ctx.model_overrides_waiting++;
     ctx.models_waiting.insert(guid);
   }
@@ -272,6 +300,9 @@ void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   UnityImport inner;
   inner.mesh = ctx.mesh, inner.script_name = ctx.script_name, inner.prefab = ctx.prefab, inner.model = ctx.model, inner.depth = ctx.depth + 1;
   inner.material = ctx.material;  // (round 395: a nested prefab's .mat files had come in as its model's own)
+  inner.models_numbered = ctx.models_numbered;
+  inner.builtin_default = ctx.builtin_default;
+  inner.physboned = ctx.physboned;
   inner.light_volume_textures = ctx.light_volume_textures;
   inner.building = ctx.building, inner.total = ctx.total, inner.max_objects = ctx.max_objects;
   inner.path_of = ctx.path_of, inner.source = ctx.path_of ? ctx.path_of(guid) : std::string();
@@ -284,7 +315,7 @@ void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   ctx.cameras += inner.cameras, ctx.colliders += inner.colliders, ctx.engine += inner.engine, ctx.prefabs += inner.prefabs + 1;
   ctx.overrides_kept += inner.overrides_kept, ctx.overrides_applied += inner.overrides_applied;
   ctx.materials += inner.materials, ctx.outlines += inner.outlines, ctx.springs += inner.springs, ctx.light_volumes += inner.light_volumes;
-  ctx.model_overrides_waiting += inner.model_overrides_waiting;
+  ctx.model_overrides_waiting += inner.model_overrides_waiting, ctx.model_overrides_stale += inner.model_overrides_stale;
   ctx.models_waiting.insert(inner.models_waiting.begin(), inner.models_waiting.end());
   ctx.notes.insert(ctx.notes.end(), inner.notes.begin(), inner.notes.end());
   apply_overrides(d.body, m, ctx);
@@ -359,6 +390,12 @@ std::vector<MaterialPtr> renderer_materials(const UnityDoc &d, GameObject *g, Un
   for (const YamlNode &ref : list ? list->seq : std::vector<YamlNode>()) {
     MaterialPtr m = ctx.material && !ref.str("guid").empty() ? ctx.material(ref.str("guid")) : nullptr;
     ctx.materials += m != nullptr;
+    /* Round 399: Unity's built-in Default-Material (a white Standard) - a slot, as Unity's renderer has (SideRail's
+     * mirror triggers had come in with none). */
+    if (!m && ref.str("guid") == "0000000000000000f000000000000000" && ref.str("fileID") == "10303") {
+      if (!*ctx.builtin_default) *ctx.builtin_default = make_material("Default-Material", Vec3(1.0f));
+      m = *ctx.builtin_default;
+    }
     out.push_back(m ? m : out.size() < model.size() ? model[out.size()] : nullptr);  // (a slot left empty stays empty: the default material - review 371)
   }
   const bool any = std::any_of(out.begin(), out.end(), [](const MaterialPtr &m) { return m != nullptr; });
@@ -461,8 +498,11 @@ std::string vrchat_type(const YamlNode &b) {
 void add_physbone(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) {
   GameObject *root = object_at(b.by_fid, d.body.file_id("rootTransform"));
   GameObject *on = root ? root : g;
-  if (on->get<SpringBone>()) return;
-  SpringBone *s = on->add<SpringBone>();
+  SpringBone *s = on->get<SpringBone>();
+  if (s && ctx.physboned->count(on)) return (void)s->physbones++, (void)ctx.springs++;  // (round 399: another PhysBone on the root - counted)
+  if (!s) s = on->add<SpringBone>();  // (review 399: a spring the model brought is this PhysBone's, not one more)
+  s->physbones = 1;
+  ctx.physboned->insert(on);
   const bool advanced = d.body.num("integrationType", 0.0) > 0.5;
   s->stiffness = (float)std::clamp(advanced ? d.body.num("pull", 0.2) * 0.5 + d.body.num("stiffness", 0.2) * 0.5 : d.body.num("pull", 0.2), 0.0, 1.0);
   s->damping = (float)std::clamp(1.0 - d.body.num("spring", 0.2), 0.0, 1.0);
@@ -647,14 +687,67 @@ GameObject *objects_from_model(const ImportResult &r, const std::string &name, S
     t.position = n.position, t.rotation = n.rotation, t.scale = n.scale, t.euler_hint = n.rotation.to_euler();
     g->set_local(t);
     if (n.mesh) g->add<MeshFilter>()->mesh = n.mesh, g->add<MeshRenderer>()->materials = n.materials;
+    if (n.mesh) g->get<MeshRenderer>()->shape_weights = n.shape_weights;  // (round 399: as the model import keeps them)
     made.push_back(g);
   }
   for (size_t i = 0; i < r.nodes.size(); i++) {
     const int p = r.nodes[i].parent;
     scene.set_parent(made[i], p >= 0 && p < (int)made.size() ? made[(size_t)p] : root, -1, false);
   }
+  bind_import_skins(scene, r, made, root);  // (round 399: its bones and skins - Shinano's 275 bones had come in as plain objects, the Budget's 0)
   if (made_out) *made_out = made;
   return root;
+}
+
+GameObject *unity_collapse_model_root(Scene &scene, GameObject *root) {
+  if (!root || root->children.size() != 1 || !root->components.empty()) return root;
+  GameObject *top = root->children[0];
+  scene.set_parent(top, root->parent, -1, true);  // (the root is where the model was placed: the node keeps its place)
+  if (!top->get<Armature>()) top->name = root->name;  // (an armature keeps the unique name its skins find it by - review 399)
+  scene.destroy(root);
+  return top;
+}
+
+int unity_drop_unused_materials(ImportResult &r) {
+  /* Each mesh once (review 399: glTF and Collada nodes share one - renumbering it for the first node had given the
+   * second its slots by the new numbers): its slots in use, then every node of it keeps those. */
+  std::map<const Mesh *, std::vector<int>> to_of;
+  for (const ImportedNode &n : r.nodes) {
+    if (!n.mesh || to_of.count(n.mesh.get())) continue;
+    std::vector<int> &to = to_of[n.mesh.get()];
+    for (size_t f = 0; f < n.mesh->face_count(); f++) {
+      const int k = n.mesh->material_of(f);
+      if (k < 0) continue;
+      if ((size_t)k >= to.size()) to.resize((size_t)k + 1, -1);
+      to[(size_t)k] = 0;
+    }
+    int next = 0;
+    for (int &t : to) t = t == 0 ? next++ : -1;
+  }
+  int dropped = 0;
+  for (ImportedNode &n : r.nodes) {
+    const auto it = n.mesh ? to_of.find(n.mesh.get()) : to_of.end();
+    if (it == to_of.end() || n.materials.size() < 2) continue;
+    std::vector<MaterialPtr> kept;
+    for (size_t k = 0; k < n.materials.size(); k++)
+      if (k < it->second.size() && it->second[k] >= 0) kept.push_back(n.materials[k]);
+    if (kept.empty() || kept.size() == n.materials.size()) continue;
+    dropped += (int)(n.materials.size() - kept.size());
+    n.materials = std::move(kept);
+  }
+  for (const auto &[mesh, to] : to_of) {
+    bool same = true;  // (every slot in use: the numbers stay)
+    for (size_t k = 0; k < to.size(); k++) same = same && to[k] == (int)k;
+    if (same) continue;
+    Mesh *m = const_cast<Mesh *>(mesh);
+    for (int32_t &k : m->face_material) k = k >= 0 && k < (int)to.size() && to[(size_t)k] >= 0 ? to[(size_t)k] : 0;
+    m->touch();
+  }
+  return dropped;
+}
+
+int64_t unity_nested_file_id(int64_t inner, int64_t prefab_instance) {
+  return (int64_t)(((uint64_t)inner ^ (uint64_t)prefab_instance) & 0x7FFFFFFFFFFFFFFFull);
 }
 
 int64_t unity_hashed_file_id(const std::string &type, const std::string &name, int occurrence) {
@@ -691,6 +784,116 @@ void unity_model_ids_from_meta(const YamlNode &meta, UnityModelIds &out) {
     const YamlNode *first = e.get("first");
     for (const auto &[cls, id] : first ? first->map : std::vector<std::pair<std::string, YamlNode>>()) add_legacy(std::strtoll(id.value.c_str(), nullptr, 10), e.str("second"), out);
   }
+}
+
+namespace {
+
+/* A texture's .meta text: beside it (a Unity project's Assets copied in) or by its GUID in the package folder that lists
+ * it (.unity-guids, the folder's .unity-meta). */
+bool texture_meta(const std::string &asset_path, std::string &meta) {
+  const std::string abs = resolve_asset_path(asset_path);
+  if (fs::read_file(abs + ".meta", meta)) return true;
+  std::string rel = make_asset_relative(abs);
+  std::replace(rel.begin(), rel.end(), '\\', '/');
+  for (std::string dir = fs::parent(abs); !dir.empty() && dir != fs::parent(dir); dir = fs::parent(dir)) {
+    std::string text;
+    if (!fs::read_file(fs::join(dir, ".unity-guids"), text)) continue;
+    const size_t at = text.find("\t" + rel + "\n");
+    if (at == std::string::npos) continue;  // (review 399: a nested package's list - the one above may hold it)
+    const size_t start = text.rfind('\n', at) == std::string::npos ? 0 : text.rfind('\n', at) + 1;
+    const std::string guid = text.substr(start, text.find('\t', start) - start);
+    return fs::read_file(fs::join(fs::join(dir, ".unity-meta"), guid + ".meta"), meta);
+  }
+  return false;
+}
+
+/* TextureImporterFormat's bytes a texel (crunched as what it unpacks to); 0: automatic or one not listed. */
+double format_bytes(int format) {
+  switch (format) {
+    case 10: case 28: case 26: case 34: case 41: case 45: case 46: case 64: return 0.5;  // DXT1 (+Crunched), BC4, ETC_RGB4 (+Crunched), EAC_R, ETC2_RGB4, ETC2 punch-through
+    case 1: case 12: case 29: case 24: case 25: case 27: case 47: case 48: case 63: case 65: return 1.0;  // Alpha8, DXT5 (+Crunched), BC6H, BC7, BC5, ETC2_RGBA8 (+Crunched), ASTC 4x4, R8
+    case 2: case 7: case 9: case 13: case 15: return 2.0;    // ARGB16, RGB16, R16, RGBA16, RHalf
+    case 3: return 3.0;                                      // RGB24
+    case 4: case 5: case 16: case 18: case 22: return 4.0;   // RGBA32, ARGB32, RGHalf, RFloat, RGB9E5
+    case 17: case 19: return 8.0;                            // RGBAHalf, RGFloat
+    case 20: return 16.0;                                    // RGBAFloat
+    default: return 0.0;
+  }
+}
+
+/* A side as Unity's Non-Power of 2 setting makes it (0 none, 1 to nearest, 2 to larger, 3 to smaller). */
+double npot_side(double side, int mode) {
+  if (mode == 0 || side < 1.0) return side;
+  const double below = std::exp2(std::floor(std::log2(side))), above = below == side ? side : below * 2.0;
+  if (mode == 2) return above;
+  if (mode == 3) return below;
+  return side - below <= above - side ? below : above;
+}
+
+}  // namespace
+
+bool unity_texture_megabytes(const std::string &asset_path, int width, int height, bool has_alpha, double &mb) {
+  std::string text;
+  if (width <= 0 || height <= 0 || !texture_meta(asset_path, text)) return false;
+  const YamlNode meta = parse_yaml(text);
+  const YamlNode *imp = meta.get("TextureImporter");
+  if (!imp) return false;
+  const YamlNode *chosen = nullptr;
+  const YamlNode *platforms = imp->get("platformSettings");
+  static const std::vector<YamlNode> kNoPlatforms;
+  const std::vector<YamlNode> &items = platforms ? platforms->seq : kNoPlatforms;  // (both lvalues: `chosen` points into the meta, not a copy)
+  for (const YamlNode &s : items) {
+    if (s.str("buildTarget") == "DefaultTexturePlatform" && !chosen) chosen = &s;
+    if (s.str("buildTarget") == "Standalone" && s.num("overridden") != 0.0) chosen = &s;
+  }
+  const double cap = chosen ? chosen->num("maxTextureSize", imp->num("maxTextureSize", 2048)) : imp->num("maxTextureSize", 2048);
+  const int npot = (int)imp->num("nPOTScale", 1.0);
+  const double pw = npot_side(width, npot), ph = npot_side(height, npot);  // (review 399: rounded first, then capped)
+  const double side = std::max(pw, ph), scale = side > cap && cap > 0 ? cap / side : 1.0;
+  const double w = std::max(1.0, std::floor(pw * scale)), h = std::max(1.0, std::floor(ph * scale));
+  const int alpha_source = (int)imp->num("alphaSource", 1.0);  // (0 none, 1 from the image, 2 from its grey)
+  has_alpha = alpha_source == 2 || (alpha_source == 1 && has_alpha);
+  const YamlNode *mips = imp->get("mipmaps");
+  const bool mipped = (mips ? mips->num("enableMipMap", 1) : imp->num("enableMipMap", 1)) != 0.0;
+  const bool normal = imp->num("textureType", 0) == 1.0;
+  double bytes = format_bytes(chosen ? (int)chosen->num("textureFormat", -1) : -1);
+  const int quality = chosen ? (int)chosen->num("textureCompression", 1) : 1;  // (0 none, 1 normal, 2 high: BC7, 3 low)
+  if (bytes == 0.0) bytes = quality == 0 ? 4.0 : quality == 2 || normal || has_alpha ? 1.0 : 0.5;
+  mb = w * h * bytes * (mipped ? 4.0 / 3.0 : 1.0) / (1024.0 * 1024.0);
+  return true;
+}
+
+std::map<std::string, std::string> unity_material_remap(const YamlNode &meta) {
+  std::map<std::string, std::string> out;
+  const YamlNode *importer = meta.get("ModelImporter");
+  const YamlNode *list = importer ? importer->get("externalObjects") : nullptr;
+  for (const YamlNode &e : list ? list->seq : std::vector<YamlNode>()) {
+    const YamlNode *first = e.get("first");
+    const std::string guid = e.guid("second");
+    if (first && first->str("type") == "UnityEngine:Material" && !first->str("name").empty() && !guid.empty()) out[first->str("name")] = guid;
+  }
+  return out;
+}
+
+void remap_unity_slots(std::vector<MaterialPtr> &slots, const std::map<std::string, std::string> &remap,
+                       const std::function<MaterialPtr(const std::string &guid)> &material, std::map<std::string, MaterialPtr> &converted) {
+  for (MaterialPtr &slot : slots) {
+    const auto it = slot ? remap.find(slot->name) : remap.end();
+    if (it == remap.end()) continue;
+    auto c = converted.find(it->second);
+    if (c == converted.end()) c = converted.emplace(it->second, material ? material(it->second) : nullptr).first;
+    if (c->second) slot = c->second;
+  }
+}
+
+int apply_unity_material_remap(const std::vector<GameObject *> &made, const std::map<std::string, std::string> &remap,
+                               const std::function<MaterialPtr(const std::string &guid)> &material) {
+  std::map<std::string, MaterialPtr> converted;  // (each .mat converted once for the model)
+  for (GameObject *g : made) {
+    MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+    if (mr) remap_unity_slots(mr->materials, remap, material, converted);  // (the renderer's own slots: `mr ? mr->materials : {}` would be a copy)
+  }
+  return (int)std::count_if(converted.begin(), converted.end(), [](const auto &c) { return c.second != nullptr; });
 }
 
 void parse_unity_model_ids(const std::string &text, std::map<std::string, UnityModelIds> &out) {
@@ -793,6 +996,11 @@ std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> 
     GameObject *g = d.class_id == 1 && !d.stripped ? object_at(b.by_fid, d.file_id) : nullptr;
     if (g && d.body.get("m_StaticEditorFlags")) set_static_flags(g, d.body.num("m_StaticEditorFlags"));
   }
+  /* Round 399: an object inside a nested prefab as a file around this one names it - Unity's id for it there is its id
+   * in the nested prefab XOR the PrefabInstance's, the top bit cleared - so a scene's override or parent on a part of a
+   * variant reaches it (SideRail's LowTable, a variant of a model: its name, place and parent had been lost). */
+  for (const auto &[pi, parts] : b.instances)
+    for (const auto &[fid, t] : parts) b.targets.emplace(unity_nested_file_id(fid, pi), t);
   if (targets) *targets = b.targets;
   if (b.skinned) ctx.notes.push_back("skinned meshes come in unbound to their bones (the bind is a later round)");
   return b.by_fid;

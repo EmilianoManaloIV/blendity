@@ -146,6 +146,7 @@ const ImportResult &model_of(ImportCache &c, const std::string &path) {
   if (m != c.models.end()) return m->second;
   m = c.models.emplace(path, ImportResult{}).first;
   if (!import_model(path, m->second)) Log::warn("Import Unity: %s - %s", fs::filename(path).c_str(), m->second.error.c_str());
+  unity_drop_unused_materials(m->second);  // (round 399: as Unity's submeshes - only the materials in use)
   return m->second;
 }
 
@@ -224,6 +225,8 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     if (meta == cache.metas.end()) meta = cache.metas.emplace(guid, parse_yaml(index.at(guid).meta)).first;
     const ImportedNode *pick = pick_part(model_of(cache, p), fid, meta_mesh_name(meta->second, fid), object, cache.first_mesh_fallbacks);
     if (pick) mats = pick->materials;
+    std::map<std::string, MaterialPtr> converted;
+    remap_unity_slots(mats, unity_material_remap(meta->second), ctx.material, converted);  // (round 399: the model's Materials tab, as Unity puts it)
     return pick ? pick->mesh : nullptr;
   };
   ctx.script_name = [&](const std::string &guid) {  // (a .cs file's class is its name; a DLL's many classes aren't)
@@ -268,11 +271,12 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     GameObject *root = objects_from_model(r, fs::stem(p), scene, &made);
     auto meta = cache.metas.find(guid);
     if (meta == cache.metas.end()) meta = cache.metas.emplace(guid, parse_yaml(index.at(guid).meta)).first;
+    ctx.materials += apply_unity_material_remap(made, unity_material_remap(meta->second), ctx.material);  // (round 399: Unity's Materials tab)
     UnityModelIds ids;
     unity_model_ids_from_meta(meta->second, ids);
-    if (const auto t = tables.find(guid); t != tables.end()) ids.insert(t->second.begin(), t->second.end());
+    if (const auto t = tables.find(guid); t != tables.end()) ids.insert(t->second.begin(), t->second.end()), ctx.models_numbered->insert(guid);
     unity_model_targets(r, root, made, ids, parts);
-    return root;
+    return unity_collapse_model_root(scene, root);  // (round 399: one top node is Unity's root itself)
   };
   commit_undo();
   std::set<uint64_t> before;
@@ -307,6 +311,9 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   unity_ids_last_import_ = typed, unity_ids_last_opened_ = as_scene;
   if (cache.first_mesh_fallbacks) ctx.notes.push_back(std::to_string(cache.first_mesh_fallbacks) + " mesh part(s) not named by their model's .meta or object: the model's first mesh used");
   if (ctx.dropped) ctx.notes.push_back(std::to_string(ctx.dropped) + " component(s) on objects that weren't found (a nested prefab not in the project) were left out");
+  if (ctx.model_overrides_stale)  // (round 399: Unity shows them as unused overrides too)
+    Log::info("Import Unity: %d override(s) name model parts Unity's own numbers don't have (the model changed since): kept for Unity, unused there too",
+              ctx.model_overrides_stale);
   if (ctx.model_overrides_waiting) {  // (round 395: the parts' numbers are Unity's: asked of it once)
     const std::string what = strprintf("Import Unity: %d override(s) on %zu model(s)' parts (materials, shadows, parts turned off) wait for Unity's numbers for those parts",
                                        ctx.model_overrides_waiting, ctx.models_waiting.size());

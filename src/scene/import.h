@@ -75,6 +75,14 @@ struct ImportedSkin {
   std::vector<int> joints;
 };
 
+struct ImportResult;
+class Scene;
+class GameObject;
+/* A model's skeletons and skins on objects already made for its nodes (`made`: one per node, in order; nullptr for a
+ * node not made): each joint a Bone at its bind pose, each skinned mesh a Skin on its armature (the joints' common
+ * parent, else `root`) - instantiate_import's, and round 399's for a model placed from a Unity prefab. */
+void bind_import_skins(Scene &scene, const ImportResult &r, const std::vector<GameObject *> &made, GameObject *root);
+
 struct ImportResult {
   std::vector<ImportedNode> nodes;
   std::vector<MaterialPtr> materials;

@@ -520,7 +520,7 @@ std::vector<GameObject *> avatar_meshes(Scene &scene, const GameObject &armature
     const SkinModifier *s = g.get<SkinModifier>();
     const MeshFilter *mf = g.get<MeshFilter>();
     /* (By name, as the skin finds its rig - and that name this rig's: two rigs called Armature are two avatars.) */
-    if (s && s->object == armature.name && mf && mf->mesh && scene.find_by_name(s->object) == &armature) out.push_back(&g);
+    if (s && s->object == armature.name && mf && mf->mesh && skin_armature_of(g, s->object) == &armature) out.push_back(&g);
   });
   return out;
 }

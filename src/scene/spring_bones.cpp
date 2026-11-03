@@ -13,6 +13,10 @@
 namespace bl {
 
 void SpringBone::reflect(Reflector &r) {
+  if (r.all_fields() || physbones > 1) {
+    r.field("PhysBones", physbones, 1, 64);
+    r.help("The VRChat PhysBones this chain came from in Unity (several on one root): the Budget counts each.");
+  }
   r.enumeration("Label", label, spring::kLabels, 5);
   r.help("What the chain is (hair, ear, tail, cloth, or soft tissue: a breast, a thigh, a belly on one bone): the settings\n"
          "below started as that label's.");
@@ -231,7 +235,7 @@ std::vector<std::pair<GameObject *, const Mesh *>> skins_of(GameObject &armature
     const MeshFilter *mf = o->mesh_filter();  // (by role first: most objects - the bones - have no mesh, and a cast per component each costs)
     if (!mf || !mf->mesh) continue;
     const SkinModifier *sk = o->get<SkinModifier>();
-    if (!sk || !o->active_in_hierarchy() || scene->find_by_name(sk->object) != &armature) continue;
+    if (!sk || !o->active_in_hierarchy() || skin_armature_of(*o, sk->object) != &armature) continue;
     skins.push_back({o.get(), mf->mesh.get()});
   }
   return skins;

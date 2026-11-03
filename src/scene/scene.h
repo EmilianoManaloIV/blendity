@@ -1775,6 +1775,11 @@ class Scene {
   friend bool load_scene_text(const std::string &, Scene &, std::string &);
 };
 
+/* The armature a skinned mesh's Skin names: one of that name holding an Armature among its own placement first - its
+ * ancestors and their children - then the scene's first (review 399: an import's root or another placement of the same
+ * model can share the name; the first in the scene had taken their skins). Null when there is none. */
+GameObject *skin_armature_of(const GameObject &mesh, const std::string &name);
+
 void physics_step(Scene &scene, float dt);
 
 /* Default content (Unity "SampleScene" + Blender's default cube). */

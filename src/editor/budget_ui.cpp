@@ -70,7 +70,8 @@ void Editor::draw_budget(ui::Layout &lay) {
     Recti rr = lay.row();
     u.label({rr.x, rr.y, rr.w / 2, rr.h}, budget_row_name((BudgetRow)row), u.theme.text_dim);
     u.tooltip(budget_row_name((BudgetRow)row));
-    const std::string v = value_text((BudgetRow)row, c.value[row]) + "  (" + budget_rank_name(t, at) + (at > 0 ? ", " + budget_rank_name(t, at - 1) + " at " + limit : std::string()) + ")";
+    std::string v = value_text((BudgetRow)row, c.value[row]) + "  (" + budget_rank_name(t, at) + (at > 0 ? ", " + budget_rank_name(t, at - 1) + " at " + limit : std::string()) + ")";
+    if (row == (int)BudgetRow::TextureMB && c.textures_reading) v += strprintf(" - %zu still being read", c.textures_reading);  // (review 399)
     u.label({rr.x + rr.w / 2, rr.y, rr.w / 2, rr.h}, v, rank_color(u.theme, at, ranks));
     if (u.record_buttons) u.button_rects["shown:budget " + std::string(budget_row_name((BudgetRow)row)) + " " + v] = rr;
   }
@@ -176,14 +177,44 @@ void Editor::budget_report(const BudgetCounts &c, const char *what) {
   for (int row = 0; row < (int)BudgetRow::Count; row++)
     if (r.row_rank[row] == r.rank && r.rank > 0) held += (held.empty() ? "" : ", ") + std::string(budget_row_name((BudgetRow)row)) + " " + value_text((BudgetRow)row, c.value[row]);
   const std::string rank = budget_rank_name(t, r.rank);
-  const std::string msg = strprintf("Budget (%s): %s %s%s", t.name, what, rank.c_str(), held.empty() ? "" : (" - held by " + held).c_str());
+  std::string msg = strprintf("Budget (%s): %s %s%s", t.name, what, rank.c_str(), held.empty() ? "" : (" - held by " + held).c_str());
+  if (c.textures_reading)  // (review 399: said, not silently low)
+    msg += strprintf(" (%zu texture(s) only the engine reads still being read: Texture Memory counts them next time)", c.textures_reading);
   if (r.rank >= (int)t.ranks.size()) Log::warn("%s", msg.c_str());
   else Log::info("%s", msg.c_str());
 }
 
-/* budget [pc|quest|<target name>] | budget fix [good|medium|...]: the rows in the Console; Decimate to fit. */
+/* budget list (round 399): what each object of the selection (or the scene) adds - its triangles, whether a skinned
+ * mesh or a plain one, its material slots, its skin's bones, hidden or not - the heaviest first: where a rank comes from
+ * (Shinano's comparison with VRChat's SDK was traced this way). */
+void Editor::budget_list() {
+  struct Line {
+    const GameObject *g;
+    BudgetCounts c;
+  };
+  std::vector<Line> lines;
+  for (GameObject *g : budget_objects()) {
+    const BudgetCounts c = budget_count({g});
+    const double *v = c.value;
+    if (v[(int)BudgetRow::Triangles] > 0 || v[(int)BudgetRow::SpringChains] > 0) lines.push_back({g, c});
+  }
+  std::stable_sort(lines.begin(), lines.end(), [](const Line &a, const Line &b) {
+    return a.c.value[(int)BudgetRow::Triangles] > b.c.value[(int)BudgetRow::Triangles];
+  });
+  Log::info("  %-32s %10s  %-8s %5s %5s %6s  %s", "object", "triangles", "mesh", "slots", "bones", "chains", "");
+  for (const Line &l : lines) {
+    const double *v = l.c.value;
+    const char *kind = v[(int)BudgetRow::SkinnedMeshes] > 0 ? "skinned" : v[(int)BudgetRow::Meshes] > 0 ? "plain" : "-";
+    Log::info("  %-32.32s %10.0f  %-8s %5.0f %5.0f %6.0f  %s", l.g->name.c_str(), v[(int)BudgetRow::Triangles], kind, v[(int)BudgetRow::MaterialSlots],
+              v[(int)BudgetRow::Bones], v[(int)BudgetRow::SpringChains], l.g->active_in_hierarchy() ? "" : "(hidden: counted, as VRChat counts it)");
+  }
+  Log::info("  %zu object(s) - `budget` for the totals and the rank", lines.size());
+}
+
+/* budget [pc|quest|<target name>] | budget list | budget fix [good|medium|...]: the rows in the Console; Decimate to fit. */
 void Editor::budget_command(const std::vector<std::string> &t) {
   const std::string a = t.size() > 1 ? to_lower(t[1]) : "";
+  if (a == "list") return budget_list();
   if (a == "fix") {
     if (budget_target_ < 0) budget_target_ = 0;  // (no target yet: VRChat PC, as `budget` alone would say)
     const BudgetTarget &bt = target_of(budget_target_);

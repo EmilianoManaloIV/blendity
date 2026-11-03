@@ -77,6 +77,9 @@ struct Material {
   float emission_strength = 0.0f;
   float normal_strength = 1.0f;
   TextureRef base_map, metallic_map, roughness_map, normal_map, emission_map;
+  /* Round 399: a converted Unity material's other textures (lilToon's masks, matcaps, second layers): not drawn, but in
+   * an engine they're on the card - the Budget counts them as VRChat's SDK does. Not saved (the .mat holds them). */
+  std::vector<TextureRef> engine_maps;
   Vec3 tiling{1.0f, 1.0f, 1.0f};  // xy used for UV, xyz scale for Box/Generated
   Vec3 offset{0.0f, 0.0f, 0.0f};
   int mapping = 0;      // MaterialMapping

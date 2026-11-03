@@ -1604,6 +1604,7 @@ class Editor {
   const AnimEditorState &anim_for_test() const { return anim_; }
   NavStyle nav_style_for_test() const { return nav_style_; }
   const SceneCamera &scene_camera_for_test() const { return cam_; }
+  void set_scene_camera_for_test(const SceneCamera &c) { cam_ = c; }
   struct SketchSeg {  // (task 0225: a line stroke on a scene canvas as a world segment)
     Vec3 a, b;
     size_t stroke;
@@ -3311,6 +3312,7 @@ class Editor {
   void draw_colliders();
   void draw_light_volumes();  // (round 397)
   void budget_light_volume_rows(ui::Context &u, ui::Layout &lay, const BudgetCounts &c);
+  void budget_list();  // (round 399)
   void draw_light_volume_grid(const GameObject &g, const LightVolumeComponent &v);
   const Mesh *lod_for_view(const GameObject &g, const Mesh &m);
   void add_lod_items(GameObject &g, const Mesh &m, std::vector<ExportItem> &items, size_t index, const ExportOptions &o, GameObject *arm, const SkinModifier *skm);

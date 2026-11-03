@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "../scene/curve.h"
 #include "../scene/unity_scene.h"
+#include "../scene/budget.h"
 #include "editor.h"
 #include "../texture/surface.h"
 #include "learn.h"
@@ -211,6 +212,7 @@ bool Editor::init(int argc, char **argv) {
 void Editor::init_headless(int width, int height) {
   common_init(this);
   headless_ = true;
+  set_budget_wait_for_textures(true);  // (review 399: a headless count is whole - engine-only textures read before it)
   inspector_essentials_ = false, guides_enabled_ = false;  // (the tests' Inspector shows every field; no guide strip moves the docks)
   resolve_project_paths();
   dpi_ = 1.0f;

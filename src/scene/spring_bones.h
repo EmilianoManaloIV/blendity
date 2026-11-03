@@ -35,6 +35,9 @@ struct SpringBone : ComponentBase<SpringBone> {
   float root_to_tip = 0.0f;  // 0..1: how much the pull toward the animation fades toward the tip (1: the tip swings free)
   float wind = 1.0f;         // how much a Wind component moves the chain (0: not at all)
   bool separate = false;     // kept apart from other chains by its radius (a ponytail's strands don't pass through each other)
+  /* Round 399: the VRChat PhysBones this chain came from - Unity can put several on one root (Shinano's breasts carry
+   * three each); VRChat's rank counts each, so the Budget does. 1 for a chain made here. */
+  int physbones = 1;
   /* Soft tissue (label 4, task 0153): a jiggle on a single bone (a breast, a thigh, a belly) driven by the body's
    * acceleration, not its position: the tissue trails a jump or a landing and settles by Stiffness and Damping. */
   float lag = 0.5f;      // 0..1: how much of the body's acceleration the tissue trails

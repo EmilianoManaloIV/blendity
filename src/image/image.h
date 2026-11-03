@@ -30,6 +30,7 @@ struct Bitmap {
 };
 
 bool decode_image(const std::string &bytes, Bitmap &out, std::string &error);
+bool decode_psd(const uint8_t *data, size_t size, Bitmap &out, std::string &error);  // (round 399: the composite image)
 bool load_image(const std::string &path, Bitmap &out, std::string &error);
 bool image_extension_supported(const std::string &ext);
 
@@ -77,6 +78,7 @@ class Texture {
   std::string name;
   bool srgb = true;     // colour data (sRGB) vs Non-Color data
   bool is_float = false;
+  bool has_alpha = true;  // (round 399: any texel less than opaque - an engine compresses an opaque one at half the size)
   int width = 0, height = 0;
   int64_t mtime = 0;
 

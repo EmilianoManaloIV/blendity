@@ -1163,6 +1163,7 @@ void Editor::run_console_command(const std::string &line) {
     if (shading < 0 && t.size() > 2) shading = import_shading_index(t.back()), words = shading >= 0 ? 1 : 0;
     std::string p;
     for (size_t i = 1; i + words < t.size(); i++) p += (i > 1 ? " " : "") + t[i];
+    p = unity_scene_path(p);  // (round 399: a path in the project, as typed - Assets/Imported/x.fbx - as a scene's or prefab's is)
     if (shading >= 0) return import_with_shading(p, true, shading);
     return import_model_file(p, true);
   }

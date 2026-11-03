@@ -18,7 +18,7 @@ GameObject *rig_above(GameObject *g) {
   /* Round 346: a skinned mesh's rig (its Skin modifier names it), or a character's root above its rig - the controls
    * show with the mesh selected, no bone (and no gizmo on it) needed first. */
   if (const SkinModifier *sk = g->get<SkinModifier>(); sk && g->scene && !sk->object.empty())
-    if (GameObject *t = g->scene->find_by_name(sk->object); t && t->get<Armature>()) return t;
+    if (GameObject *t = skin_armature_of(*g, sk->object); t && t->get<Armature>()) return t;
   for (GameObject *c : g->children)
     if (c->get<Armature>()) return c;
   return nullptr;
