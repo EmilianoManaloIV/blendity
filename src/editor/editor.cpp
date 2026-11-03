@@ -402,6 +402,7 @@ void Editor::request_close() {
     std::string path = scene_->path.empty() ? fs::join(assets_dir_, "Scenes/" + scene_->name + ".scene") : scene_->path;
     /* Unity asks; we auto-save to avoid data loss (and keep a backup). */
     if (fs::exists(path)) fs::copy_file(path, path + ".bak");
+    fold_edit_shape();  // (round 406)
     save_scene(*scene_, path);
     Log::info("Auto-saved %s on exit", path.c_str());
     if (scene_->path == path) save_lighting_data();
@@ -2173,6 +2174,7 @@ bool Editor::open_scene(const std::string &path) {
 }
 
 void Editor::save_scene_cmd(bool save_as) {
+  fold_edit_shape();  // (round 406: a file holds the basis and the keys, never a shape half folded)
   sketch_xf_settle();  // (review 389: a save keeps a transform first, as Photoshop's)
   eye_test_off();  // (round 360: the eye test's pose isn't written)
   anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
@@ -2826,6 +2828,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
 
 /* The export itself: `objects` written to `path` as `o` says. */
 std::string Editor::export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path) {
+  fold_edit_shape();  // (round 406: a file holds the basis and the keys)
   std::vector<ExportItem> items;
   std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
   auto add = [&](GameObject &g) {
@@ -3750,6 +3753,7 @@ bool Editor::origin_target(const GameObject &g, int mode, Vec3 world_point, Vec3
 }
 
 void Editor::set_origin(int mode, Vec3 world_point) {
+  fold_edit_shape();  // (round 406: an open shape edit folds before the positions are worked on)
   if (mode < 0 || mode >= kOriginModeCount) return;
   int n = 0;
   for (GameObject *g : selected_objects(false)) {
@@ -3781,6 +3785,7 @@ void Editor::set_origin(int mode, Vec3 world_point) {
 }
 
 void Editor::mesh_op(const std::string &op) {
+  if ((!edit_mode_ && !sculpt_) || op == "apply_transform") fold_edit_shape();  // (round 406: an object-level tool, and Reset XForm in any mode, fold an open shape first; Edit Mode's operators carry its basis)
   int n = 0;
   ScopedTimer t;
   for (GameObject *g : selected_objects(false)) {
@@ -4724,7 +4729,8 @@ void Editor::carry_vertex_groups(const Scene &before) {
     const GameObject *old = before.find(g.id);
     const MeshFilter *of = old ? old->mesh_filter() : nullptr;
     const Mesh *om = of && of->mesh && of->mesh.get() != mf->mesh.get() ? of->mesh.get() : nullptr;
-    carry_shape_keys(mf->mesh, om);
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    carry_shape_keys(mf->mesh, om, mr && !mr->edit_shape.empty());  // (round 406: the open shape's basis follows too)
     carry_custom_normals(mf->mesh, om);
     /* Groups that fit were kept by the operator (a move, a weld's remap, Mirror's and Array's copies, Join, a group
      * added or removed): leave them. Only groups an operator left the wrong size are mended from the mesh before. */
@@ -4741,13 +4747,36 @@ void Editor::carry_vertex_groups(const Scene &before) {
  * to the same count: a delete and an add) gets them from the mesh before, by position. A move keeps them as they are,
  * and so does an operator that sized them itself (Join, round 357: each part keeps its own offsets - by position, a
  * joined torso had taken the face's). */
-void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before) {
+void Editor::carry_shape_keys(MeshPtr &mesh, const Mesh *before, bool shape_open) {
   if (!before || before->shape_keys.empty()) return;
+  if (shape_open) carry_edit_basis(mesh, *before);  // (round 406: the open shape's basis follows the vertices as the keys do)
   /* The same faces on the same vertices: the edit moved vertices or changed the keys themselves (shape add, remove). */
   if (mesh->vert_count() == before->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(*before) && meshops::shape_keys_fit(*mesh)) return;
   if (mesh->vert_count() != before->vert_count() && !mesh->shape_keys.empty() && meshops::shape_keys_fit(*mesh)) return;
   Mesh &m = *mesh_make_mutable(mesh);
   meshops::transfer_shape_keys(*before, m);
+  m.touch();
+}
+
+/* Round 406: a shape open for editing keeps its basis through a topology edit - the basis carried as an offset from
+ * the positions (a key of its own, through transfer_shape_keys' map), so the fold after the edit lands on the right
+ * vertices; a basis that fits already (vertices only moved) is left alone. */
+void Editor::carry_edit_basis(MeshPtr &mesh, const Mesh &before) {
+  if (before.edit_basis.size() != before.vert_count() || before.edit_basis.empty()) return;
+  if (mesh->vert_count() == before.vert_count() && mesh->edit_basis.size() == mesh->vert_count() && meshops::topology_key(*mesh) == meshops::topology_key(before)) return;
+  Mesh from = before;
+  from.shape_keys.clear();
+  ShapeKey off{"(edit basis)", std::vector<Vec3>(before.vert_count())};
+  for (size_t v = 0; v < off.delta.size(); v++) off.delta[v] = before.edit_basis[v] - before.positions[v];
+  from.shape_keys.push_back(std::move(off));
+  Mesh &m = *mesh_make_mutable(mesh);
+  std::vector<ShapeKey> keep = std::move(m.shape_keys);
+  m.shape_keys.clear();
+  meshops::transfer_shape_keys(from, m);
+  m.edit_basis.assign(m.vert_count(), Vec3(0.0f));
+  for (size_t v = 0; v < m.edit_basis.size() && !m.shape_keys.empty() && v < m.shape_keys[0].delta.size(); v++) m.edit_basis[v] = m.positions[v] + m.shape_keys[0].delta[v];
+  m.shape_keys = std::move(keep);
+  m.edit_shape = before.edit_shape;
   m.touch();
 }
 

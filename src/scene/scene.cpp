@@ -273,7 +273,7 @@ void MeshRenderer::reflect(Reflector &r) {
   /* Shape keys (task 0135): files and hashes keep the weights as a list (whatever order the components come in, a
    * key's exact name); the Inspector and clips get a slider per key of the mesh (BlendShape/<name>). */
   if (r.serializing()) r.weight_list("Shape Weights", shape_weights);
-  const MeshFilter *mf = owner && !r.serializing() ? owner->mesh_filter() : nullptr;
+  const MeshFilter *mf = owner && !r.serializing() && !r.inspector() ? owner->mesh_filter() : nullptr;  // (round 406: the Inspector's BlendShapes foldout draws them)
   const Mesh *mesh = mf && mf->mesh ? mf->mesh.get() : nullptr;
   for (size_t i = 0; mesh && i < mesh->shape_keys.size(); i++) {
     const std::string field = "BlendShape/" + mesh->shape_keys[i].name;
@@ -3067,6 +3067,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     auto h = std::make_shared<Mesh>(*mf->mesh);
     apply_shape_keys(*mf->mesh, shaping, h->positions, view);
     h->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
+    h->edit_basis.clear(), h->edit_shape.clear(), h->edit_show_full = false;  // (round 406: the open edit is folded into it)
     eval_chain_[kind] = nullptr;
     if (chain_sub) {
       const Mesh in = *h;
@@ -3091,6 +3092,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     auto m = std::make_shared<Mesh>(*mf->mesh);
     apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
+    m->edit_basis.clear(), m->edit_shape.clear(), m->edit_show_full = false;  // (round 406)
     run(*m, 0, components.size());
     m->touch();
     eval_mesh_[kind] = m;
@@ -3134,6 +3136,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m = std::make_shared<Mesh>(*head);
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();
+    m->edit_basis.clear(), m->edit_shape.clear(), m->edit_show_full = false;  // (round 406)
     run(*m, split, components.size());
     m->touch();
   }

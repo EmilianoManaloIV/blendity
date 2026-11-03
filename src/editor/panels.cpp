@@ -494,6 +494,7 @@ struct InspectorReflector : Reflector {
   /* Progressive disclosure (task 0190): past `limit` fields (-1: none) the rest aren't drawn, only counted. */
   int limit = -1, seen = 0, hidden = 0;
   bool last_skipped = false;
+  bool inspector() const override { return true; }  // (round 406)
   bool skip() {
     last_skipped = limit >= 0 && ++seen > limit;
     seen += limit < 0;  // (counted either way: Show less needs to know there were more than seven)
@@ -1849,7 +1850,7 @@ void Editor::draw_inspector(const Recti &r) {
                   "(its range grows to reach it if needed). Like the camera's Pick Focus Point.");
         draw_light_aim_point(lay, *g);  // (task 0287: the point by numbers)
       }
-      if (dynamic_cast<MeshRenderer *>(c)) draw_shape_key_buttons(lay, *g);  // (task 0289)
+      if (dynamic_cast<MeshRenderer *>(c)) draw_blend_shapes(lay, *g);  // (task 0289; round 406: Unity's BlendShapes foldout)
       /* Mesh tools (Blender's Edit Mode operators, object-level). */
       if (auto *mf = dynamic_cast<MeshFilter *>(c)) {
         lay.space(u.px(4));
@@ -3918,6 +3919,185 @@ void Editor::draw_shape_key_buttons(ui::Layout &lay, GameObject &g) {
     for (const std::string &n : names)
       if (ui_.menu_item(n)) shape_command({"shape", "remove", n});
   });
+}
+
+/* Round 406 (task 0383): the MeshRenderer's BlendShapes as Unity's Skinned Mesh Renderer shows them - a foldout, a row a
+ * shape with its name, a slider and a number in 0-100 (stored 0-1), a filter box from eight shapes on, the name tinted
+ * when the open clip animates the shape (blue) or has a key at the playhead (red), an Edit toggle (Blender's active
+ * shape key) - then the key tools. */
+void Editor::draw_blend_shapes(ui::Layout &lay, GameObject &g) {
+  auto &u = ui_;
+  const MeshFilter *mf = g.mesh_filter();
+  if (!mf || !mf->mesh) return;
+  MeshRenderer *mr = g.get<MeshRenderer>();
+  const Mesh &m = *mf->mesh;
+  if (m.shape_keys.empty()) return draw_shape_key_buttons(lay, g);  // (as Unity: no foldout without blend shapes - Add alone)
+  const Recti head = lay.row(u.row_h() + u.px(2));
+  if (u.record_buttons) u.button_rects["shape:BlendShapes"] = head;
+  u.foldout({head.x + u.px(4), head.y, head.w - u.px(8), head.h}, strprintf("BlendShapes (%zu)", m.shape_keys.size()), blend_shapes_open_);
+  u.tooltip("The mesh's shape keys (Unity: the Skinned Mesh Renderer's BlendShapes; Blender: Shape Keys), 0-100 as Unity shows\n"
+            "them. Right-click a row for its keyframe; Edit opens the shape for Edit Mode and Sculpt.");
+  if (!blend_shapes_open_) return;
+  if (m.shape_keys.size() >= 8) {
+    const Recti fr = lay.row(u.row_h() + u.px(2));
+    if (u.record_buttons) u.button_rects["shape:Filter"] = fr;
+    u.text_field(u.id("shape_filter"), {fr.x + u.px(4), fr.y, fr.w - u.px(8), fr.h}, blend_shape_filter_, nullptr, "Filter shapes");
+  }
+  const std::string f = m.shape_keys.size() >= 8 ? to_lower(blend_shape_filter_) : std::string();  // (no box: no filter)
+  for (const ShapeKey &k : m.shape_keys) {
+    if (!f.empty() && to_lower(k.name).find(f) == std::string::npos) continue;
+    if (!mr) mr = g.add<MeshRenderer>();
+    draw_blend_shape_row(lay, g, *mr, k.name);
+  }
+  draw_blend_shape_tools(lay, g);
+}
+
+void Editor::draw_blend_shape_row(ui::Layout &lay, GameObject &g, MeshRenderer &mr, const std::string &name) {
+  auto &u = ui_;
+  const Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.record_buttons) u.button_rects["shape:row:" + name] = row;
+  const std::string prop = "MeshRenderer.BlendShape/" + name;
+  const int state = anim_keyable(&g) ? anim_property_state(&g, prop) : 0;  // (2: a key at the playhead - red; 1: animated - blue)
+  const uint32_t tint = state == 2 ? u.theme.warning : state ? u.theme.focus : u.theme.text;
+  const int label_w = std::max(u.px(60), row.w * 2 / 5), num_w = u.px(44), edit_w = u.px(34);
+  const Recti label{row.x + u.px(4), row.y, label_w - u.px(8), row.h};
+  u.label(label, name, tint);
+  if (u.hovered(label)) u.tooltip(state == 2 ? "Keyed at the playhead." : state ? "Animated by the open clip." : "The shape's name (right-click: Add Key, Reset, Copy Name).");
+  const bool editing = mr.edit_shape == name;
+  float pct = mr.shape_weight(name) * 100.0f;
+  const float before = pct;
+  const Recti sr{row.x + label_w, row.y + u.px(2), row.w - label_w - num_w - edit_w - u.px(12), row.h - u.px(4)};
+  const Recti nr{sr.right() + u.px(4), row.y, num_w, row.h};
+  u.slider(u.id("shape_slider:" + name), sr, pct, 0.0f, 100.0f);
+  u.float_field(u.id("shape_num:" + name), nr, pct, 0.5f, 0.0f, 100.0f, "%.0f");
+  if (pct != before) {
+    mr.set_shape_weight(name, pct / 100.0f);
+    mark_changed("Shape Key Weight");
+  }
+  const Recti er{nr.right() + u.px(4), row.y, edit_w, row.h};
+  if (u.record_buttons) u.button_rects["shape:edit:" + name] = er;
+  if (u.button(er, "Edit", editing)) set_edit_shape(g, editing ? "" : name);
+  u.tooltip(editing ? "Editing this shape: Edit Mode and Sculpt move it, not the basis. Click again to fold the edit into the shape."
+                    : "Edit this shape (Blender: the active shape key): Edit Mode and Sculpt then shape it, the basis stays.");
+  const ui::Id rid = u.id("shape_menu:" + name);
+  if (u.hovered(row) && u.in.pressed[1]) u.open_popup(rid, {u.in.mx, u.in.my, 0, 0});
+  GameObject *gp = &g;
+  MeshRenderer *mrp = &mr;
+  u.popup(rid, u.px(170), [this, gp, mrp, name, prop] {
+    if (ui_.menu_item("Add Key", nullptr, false, anim_keyable(gp))) anim_key_property(gp, prop, 1);
+    ui_.tooltip("A key of this shape's weight at the playhead in the open clip (Unity: the row's key menu).");
+    if (ui_.menu_item("Reset to 0")) mrp->set_shape_weight(name, 0.0f), mark_changed("Shape Key Weight");
+    if (ui_.menu_item("Copy Name") && ui_.clipboard_set) ui_.clipboard_set(name);
+  });
+}
+
+/* The key tools under the rows: Add and Remove (task 0289), Rename, Duplicate, New from Mix (round 406), the problems. */
+void Editor::draw_blend_shape_tools(ui::Layout &lay, GameObject &g) {
+  auto &u = ui_;
+  draw_shape_key_buttons(lay, g);
+  const MeshFilter *mf = g.mesh_filter();
+  if (!mf || !mf->mesh || mf->mesh->shape_keys.empty()) return;
+  const bool selected = &g == active_object();
+  Recti row = lay.row(u.row_h() + u.px(2));
+  const int tw = (row.w - u.px(16)) / 3;
+  const Recti ren{row.x + u.px(4), row.y, tw, row.h}, dup{ren.right() + u.px(4), row.y, tw, row.h}, mix{dup.right() + u.px(4), row.y, tw, row.h};
+  if (u.record_buttons) u.button_rects["shape:Rename"] = ren, u.button_rects["shape:Duplicate"] = dup, u.button_rects["shape:Mix"] = mix;
+  const ui::Id rid = u.id("shape_rename");
+  if (u.button_enabled(ren, "Rename...", selected, "The Inspector is pinned to another object: select this one first.")) u.open_popup(rid, ren);
+  u.tooltip("Rename a shape key: the clips' BlendShape tracks and the visemes that name it follow.");
+  if (u.button_enabled(dup, "Duplicate", selected, "The Inspector is pinned to another object: select this one first.")) {
+    const std::string first = mf->mesh->shape_keys.front().name;
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    shape_command({"shape", "duplicate", mr && !mr->edit_shape.empty() ? mr->edit_shape : first});
+  }
+  u.tooltip("A copy of the shape being edited (its edit folded first; else the first key) as a new key, to vary.");
+  if (u.button_enabled(mix, "New from Mix", selected, "The Inspector is pinned to another object: select this one first.")) shape_command({"shape", "mix"});
+  u.tooltip("A new shape key of the current mix of weights (Blender: New Shape from Mix): the pose you dialled in as one shape.");
+  u.popup(rid, u.px(240), [this, &g] {
+    const MeshFilter *f = g.mesh_filter();
+    if (!f || !f->mesh) return;
+    for (const ShapeKey &k : f->mesh->shape_keys)
+      if (ui_.menu_item(k.name, nullptr, blend_shape_rename_ == k.name)) blend_shape_rename_ = k.name;
+    if (blend_shape_rename_.empty()) return;
+    const Recti r = ui_.popup_row(ui_.row_h() + ui_.px(6));
+    const ui::Id tid = ui_.id("shape_rename_text");
+    bool committed = false;
+    if (!ui_.editing(tid)) ui_.begin_edit(tid, blend_shape_rename_, true), blend_shape_rename_text_ = blend_shape_rename_;
+    ui_.text_field(tid, r.shrink(ui_.px(3)), blend_shape_rename_text_, &committed, "New name, Enter");
+    if (!committed || blend_shape_rename_text_.empty() || blend_shape_rename_text_ == blend_shape_rename_) return;
+    shape_command({"shape", "rename", blend_shape_rename_, blend_shape_rename_text_});
+    blend_shape_rename_.clear();
+    ui_.close_popups();
+  });
+}
+
+/* Round 406: Edit this shape. The key's delta goes onto the positions (the basis kept here), so Edit Mode and Sculpt
+ * shape the key; clearing it (the toggle, leaving Edit Mode or Sculpt, a save) folds the positions back into the
+ * key's delta and restores the basis. A topology edit in between loses the key's edit (said). */
+void Editor::set_edit_shape(GameObject &g, const std::string &name) {
+  fold_edit_shape();
+  MeshFilter *mf = g.mesh_filter();
+  MeshRenderer *mr = g.get<MeshRenderer>();
+  if (!mf || !mf->mesh || name.empty()) return;
+  const int i = mf->mesh->find_shape(name);
+  if (i < 0) return Log::warn("shape edit: no key '%s'", name.c_str());
+  if (!mr) mr = g.add<MeshRenderer>();
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  const ShapeKey &k = m.shape_keys[(size_t)i];
+  if (k.delta.size() != m.vert_count()) return Log::warn("shape edit: '%s' doesn't fit the mesh any more (remove and add it again)", name.c_str());
+  m.edit_basis = m.positions;  // (in the mesh: undo and redo carry it with the positions; exporters fold by it)
+  m.edit_shape = name;
+  m.edit_show_full = edit_mode_ || sculpt_;  // (in those modes the key shows in full - the edit is what is worked on)
+  for (size_t v = 0; v < m.positions.size(); v++) m.positions[v] = m.positions[v] + k.delta[v];
+  mr->edit_shape = name;
+  m.touch();
+  mark_changed("Edit Shape Key");
+  Log::info("Editing shape '%s' on %s: Edit Mode and Sculpt now shape it; Edit again (or leave the mode) folds it back", name.c_str(), g.name.c_str());
+}
+
+void Editor::show_edit_shape_full(GameObject &g) {
+  MeshFilter *mf = g.mesh_filter();
+  if (!mf || !mf->mesh || mf->mesh->edit_shape.empty() || mf->mesh->edit_show_full) return;
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  m.edit_show_full = true;
+  m.touch();
+}
+
+/* Every shape open for editing folds (one is open at a time, but undo can bring an open one back). */
+void Editor::fold_edit_shape() {
+  if (!scene_) return;
+  std::vector<GameObject *> open;
+  scene_->for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    const MeshFilter *mf = g.mesh_filter();
+    if ((mr && !mr->edit_shape.empty()) || (mf && mf->mesh && !mf->mesh->edit_shape.empty())) open.push_back(&g);
+  });
+  for (GameObject *g : open) fold_edit_shape_of(*g);
+}
+
+void Editor::fold_edit_shape_of(GameObject &g) {
+  MeshFilter *mf = g.mesh_filter();
+  MeshRenderer *mr = g.get<MeshRenderer>();
+  if (!mf || !mf->mesh) return;
+  if ((!mr || mr->edit_shape.empty()) && mf->mesh->edit_shape.empty()) return;  // (nothing open: no step, nothing touched)
+  const std::string name = mr && !mr->edit_shape.empty() ? mr->edit_shape : mf->mesh->edit_shape;
+  if (mr) mr->edit_shape.clear();
+  Mesh &m = *mesh_make_mutable(mf->mesh);
+  m.edit_shape.clear();
+  m.edit_show_full = false;
+  const int i = m.find_shape(name);
+  if (i >= 0 && m.vert_count() == m.edit_basis.size()) {
+    ShapeKey &k = m.shape_keys[(size_t)i];
+    k.delta.resize(m.vert_count());
+    for (size_t v = 0; v < m.positions.size(); v++) k.delta[v] = m.positions[v] - m.edit_basis[v];
+    m.positions = m.edit_basis;
+  }
+  else if (i >= 0) {
+    Log::warn("Shape '%s': the mesh's vertices changed while it was edited - the edit stays in the mesh, the key is kept as it was", name.c_str());
+  }
+  m.edit_basis.clear();
+  m.touch();
+  mark_changed("Edit Shape Key");
 }
 
 /* A light aimed at a point typed in (task 0287): what `aimlight x y z` did, beside the eyedropper. */

@@ -83,9 +83,9 @@ size_t AnimTrack::put_key(const AnimKey &k) {
   return i;
 }
 
-int AnimTrack::key_at(float frame) const {
-  for (size_t i = 0; i < keys.size(); i++)
-    if (std::fabs(keys[i].frame - frame) < 0.01f) return (int)i;
+int AnimTrack::key_at(float frame) const {  // (round 406: by the keys' order - a summary row asks for every frame)
+  auto it = std::lower_bound(keys.begin(), keys.end(), frame - 0.01f, [](const AnimKey &k, float f) { return k.frame < f; });
+  if (it != keys.end() && std::fabs(it->frame - frame) < 0.01f) return (int)(it - keys.begin());
   return -1;
 }
 

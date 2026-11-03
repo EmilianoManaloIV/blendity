@@ -64,6 +64,7 @@ void Editor::log_all_commands() {
  * was saved (a new scene asks, as Ctrl+S does). */
 void Editor::save_scene_to(const std::string &path) {
   if (path.empty() || playing_) return save_scene_cmd(false);  // (Play: refused there, with its Fix)
+  fold_edit_shape();  // (round 406: a file holds the basis and the keys, never a shape half folded)
   const std::string p = scene_file_path(path);
   fs::make_dirs(fs::parent(p));
   const bool made = !fs::exists(p);

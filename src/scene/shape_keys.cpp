@@ -36,7 +36,9 @@ float MeshRenderer::view_weight(const std::string &name) const {
 uint64_t shape_key_hash(const Mesh &m, const MeshRenderer *mr, bool view) {
   if (!mr || m.shape_keys.empty()) return 0;
   uint64_t h = kFnvBasis;
-  bool any = false;
+  bool any = !m.edit_shape.empty();  // (round 406: an open shape shapes the mesh even at weight 0 - the basis shows)
+  for (unsigned char c : m.edit_shape) h = (h ^ c) * kFnvPrime;
+  if (m.edit_show_full) h = (h ^ 0x51u) * kFnvPrime;
   for (const ShapeKey &k : m.shape_keys) {
     const float w = mr->shape_weight(k.name) + (view ? mr->view_weight(k.name) : 0.0f);
     if (w == 0.0f || k.delta.size() != m.positions.size()) continue;
@@ -49,9 +51,32 @@ uint64_t shape_key_hash(const Mesh &m, const MeshRenderer *mr, bool view) {
   return any ? h : 0;
 }
 
+Mesh shape_edit_folded(const Mesh &m) {
+  Mesh out = m;
+  const int i = m.find_shape(m.edit_shape);
+  if (i >= 0 && m.edit_basis.size() == m.vert_count()) {
+    ShapeKey &k = out.shape_keys[(size_t)i];
+    k.delta.resize(m.vert_count());
+    for (size_t v = 0; v < m.positions.size(); v++) k.delta[v] = m.positions[v] - m.edit_basis[v];
+    out.positions = m.edit_basis;
+  }
+  out.edit_basis.clear();
+  out.edit_shape.clear();
+  out.edit_show_full = false;
+  return out;
+}
+
 void apply_shape_keys(const Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions, bool view) {
+  /* Round 406: a shape open for editing - the positions hold the basis plus the key; what is shown is the basis plus
+   * the key at its weight (the edit so far), as for any key. */
+  const bool open = !m.edit_shape.empty() && m.edit_basis.size() == positions.size() && m.positions.size() == positions.size();
+  if (open) {  // (in full for Edit Mode's cage - no renderer - and while the mesh is edited or sculpted)
+    const float w = !mr || m.edit_show_full ? 1.0f : mr->shape_weight(m.edit_shape) + (view ? mr->view_weight(m.edit_shape) : 0.0f);
+    for (size_t i = 0; i < positions.size(); i++) positions[i] = m.edit_basis[i] + (m.positions[i] - m.edit_basis[i]) * w;
+  }
   if (!mr) return;
   for (const ShapeKey &k : m.shape_keys) {
+    if (k.name == m.edit_shape) continue;  // (the open key: applied above from the positions)
     const float w = mr->shape_weight(k.name) + (view ? mr->view_weight(k.name) : 0.0f);
     if (w == 0.0f || k.delta.size() != positions.size()) continue;
     for (size_t i = 0; i < positions.size(); i++) positions[i] = positions[i] + k.delta[i] * w;

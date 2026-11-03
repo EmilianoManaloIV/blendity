@@ -139,6 +139,9 @@ struct Reflector {
   virtual bool hashing() const { return false; }
   /* True for files and hashes, which read and write lists whole (weight_list) rather than one field per entry. */
   virtual bool serializing() const { return false; }
+  /* True for the Inspector's own reflector (round 406): fields a component draws itself (the MeshRenderer's BlendShapes
+   * foldout) are left out there, and reflected everywhere else (files, clips, `set`, Add Property). */
+  virtual bool inspector() const { return false; }
 };
 
 struct PlayContext {
@@ -258,6 +261,10 @@ struct MeshRenderer : ComponentBase<MeshRenderer> {
    * and 4 (the camera views' own slots); set by the views before they collect, never saved. */
   mutable std::vector<std::pair<std::string, float>> view_weights;
   float view_weight(const std::string &name) const;
+  /* Round 406 (Blender's active shape key, Unity's "edit this blend shape"): while set, the mesh's positions hold the
+   * basis plus this key, Edit Mode and Sculpt work on them, and the key's delta is folded back when it is cleared
+   * (Editor::set_edit_shape). Not in files (a save folds first; undo clones the scene). apply_shape_keys shows it at its weight. */
+  std::string edit_shape;
   void reflect(Reflector &r) override;
   const MaterialPtr &material(int slot) const {
     if (materials.empty()) return default_material();

@@ -35,6 +35,10 @@ struct ShapeKey {
 };
 
 struct MeshRenderer;
+/* Round 406: the mesh as it would be with its open shape edit folded - the basis as the positions, the edited key's
+ * delta what the positions hold over it; the mesh itself when no shape is open. Exporters and Live Link read this, so
+ * a file never carries a shape half folded. */
+struct Mesh shape_edit_folded(const struct Mesh &m);
 /* The renderer's shape keys on `positions` (the basis's), and a hash of the weights in use (0: none). */
 void apply_shape_keys(const struct Mesh &m, const MeshRenderer *mr, std::vector<Vec3> &positions, bool view = false);
 uint64_t shape_key_hash(const struct Mesh &m, const MeshRenderer *mr, bool view = false);  // (view: the camera view's weights added, round 339)
@@ -210,6 +214,12 @@ struct Mesh : MeshCaches {
    * (meshops::transfer_vertex_groups). */
   std::vector<VertexGroup> vertex_groups;
   std::vector<ShapeKey> shape_keys;  // (task 0135)
+  /* Round 406: while a shape key is being edited (MeshRenderer::edit_shape), the positions the mesh had before the
+   * key went onto them - kept in the mesh so undo and redo carry it with the positions; empty otherwise. Never in a
+   * file: the editor folds the edit before a save. */
+  std::vector<Vec3> edit_basis;
+  std::string edit_shape;  // the key the edit is for (the MeshRenderer carries it too, for the Inspector and undo)
+  bool edit_show_full = false;  // Edit Mode or Sculpt on this mesh: the open key shown in full, not at its weight
   /* Custom normals (task 0149): an artist's shading normals, one per vertex (empty: none) - an anime face's smoothed
    * or proxy-transferred normals, or a file's own when they differ from the recomputed ones. They replace what
    * corner_normals works out (smooth, flat, sharp edges); saved with the mesh, carried through edits by position

@@ -2,6 +2,33 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 406): Unity's BlendShapes menu and its Animation window layout
+
+**Asked:** "the similar keyframe layout in Unity for objects with blend shapes" - "It's not just the key frames, but the
+blendshape menu in Unity when you're editing or at least adjusting a mesh." (the 2026-11-03 plan's round 406)
+
+**Added (task 0383)**
+- **BlendShapes foldout** on the MeshRenderer: a row a shape - its name, a slider and a number in 0-100 as Unity shows
+  them - a filter box from eight shapes on, the name blue when the open clip animates the shape and red when it has a
+  key at the playhead, a right-click menu (Add Key, Reset to 0, Copy Name); under the rows Add, Remove, Rename,
+  Duplicate and New from Mix (`shape rename|duplicate|mix|filter`).
+- **Edit this shape** (a row's Edit toggle, `shape edit <name>|off`; Blender's active shape key): Edit Mode and Sculpt
+  then shape that key - the basis stays; the edit folds into the key when the toggle goes off, the mode ends or the
+  scene is saved; undo across the toggle keeps the shape open with its basis (both live with the mesh).
+- **The Animation window as Unity's:** a Summary row of every key, an object row per animated path (folded by its
+  arrow), the property rows under it; every row a key button, a single track a value field at the playhead (typing
+  keys it; blend shapes in 0-100); Add Property as a tree of the objects under the root with their components; Record
+  makes a BlendShape track when a weight moves; K keys every track, comma and full stop step the keys.
+
+**Checked:** `tests_round406` (the foldout's rows and filter, rename / duplicate / mix, Edit this shape folding and
+undoing, the window's rows and fold, the value field, the summary's key button, Record's new track, the keys; the
+review's cases: Ctrl+S folds, Remove puts the basis back, an exporter's folded view, Duplicate takes the edit, a
+subdivide while open carries the basis, Rename inside undo and through the visemes, two objects' tracks apart in the
+clip under one row each); the suites, the audits; KLM rows 28-29 (`docs/hci/klm.md`). The Opus review's fixes: every save
+path and every export fold the open shape (Ctrl+S and the auto-save had written it half folded), a topology edit carries
+the basis, Remove / Duplicate / Mix fold first, Rename inside the undo step and through the avatar's visemes, the rows
+grouped per object across the clip, the summary row's cost, the tint rule, the filter, Space left to the Wheel; the evaluated mesh folds the open key itself (in full in Edit Mode and Sculpt), the raw-position tools (Set Origin, Join, Separate, Export, the avatar tools, Reset XForm) fold first.
+
 ## 2026-11-03 (round 405): the residuals - Unity's ACES, Unity's indirect specular, three shaders read
 
 **Asked:** the same comparison; the fifth round: round 404's residuals fixed in order of their weight.

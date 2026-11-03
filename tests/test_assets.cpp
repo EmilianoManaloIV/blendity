@@ -9336,6 +9336,372 @@ struct SetOne : Reflector {
 };
 }  // namespace r403
 
+/* Round 406 (task 0383): Unity's BlendShapes foldout and its Animation window layout. */
+static void tests_round406() {
+  test("BlendShapes foldout (round 406): a row a shape under the MeshRenderer, the filter box from eight shapes on hides what doesn't match; rename carries the weight and the clip's track, duplicate copies the delta, New from Mix sums the weighted deltas", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("newscene");  // (the sample scene has a Sphere of its own)
+    ed.command("create Sphere");
+    ed.command("shape add Smile 0.2");
+    ed.command("shape add Blink 0.1");
+    for (int k = 0; k < 6; k++) ed.command(strprintf("shape add Key%d 0.05", k));
+    ed.command("shape set Smile 0.4");
+    ed.command("anim new");
+    ed.command("anim key . MeshRenderer.BlendShape/Smile 0 0 0.4");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti r;
+    CHECK(ed.button_rect_for_test("shape:BlendShapes", r) && ed.button_rect_for_test("shape:Filter", r) && ed.button_rect_for_test("shape:row:Smile", r) && ed.button_rect_for_test("shape:row:Blink", r));
+    CHECK(ed.button_rect_for_test("shape:edit:Smile", r) && ed.button_rect_for_test("shape:Rename", r) && ed.button_rect_for_test("shape:Mix", r));
+    ed.command("shape filter Bli");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.button_rect_for_test("shape:row:Smile", r) && ed.button_rect_for_test("shape:row:Blink", r));
+    ed.command("shape filter");
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    ed.command("shape rename Smile Grin");
+    m = s->mesh_filter()->mesh.get();
+    const MeshRenderer *mr = s->get<MeshRenderer>();
+    const bool track_renamed = ed.anim_clip_for_test() && std::any_of(ed.anim_clip_for_test()->tracks.begin(), ed.anim_clip_for_test()->tracks.end(), [](const AnimTrack &t) { return t.property == "MeshRenderer.BlendShape/Grin"; });
+    std::printf("    renamed: key %d, weight %.2f, track %s\n", m->find_shape("Grin"), mr->shape_weight("Grin"), track_renamed ? "followed" : "not followed");
+    CHECK(m->find_shape("Grin") >= 0 && m->find_shape("Smile") < 0 && std::fabs(mr->shape_weight("Grin") - 0.4f) < 1e-6f && track_renamed);
+    ed.command("shape duplicate Grin");
+    m = s->mesh_filter()->mesh.get();
+    const int g = m->find_shape("Grin"), c = m->find_shape("Grin Copy");
+    CHECK(g >= 0 && c >= 0);
+    if (g < 0 || c < 0) return;
+    CHECK(m->shape_keys[(size_t)c].delta == m->shape_keys[(size_t)g].delta);
+    ed.command("shape set Blink 0.5");
+    ed.command("shape mix Pose");
+    m = s->mesh_filter()->mesh.get();
+    const int p = m->find_shape("Pose"), b = m->find_shape("Blink");
+    CHECK(p >= 0 && b >= 0);
+    if (p < 0 || b < 0) return;
+    const Vec3 want = m->shape_keys[(size_t)g].delta[0] * 0.4f + m->shape_keys[(size_t)b].delta[0] * 0.5f;
+    CHECK(length(m->shape_keys[(size_t)p].delta[0] - want) < 1e-6f);
+  });
+  test("Edit this shape (round 406): the key's delta goes onto the mesh, an edit of a vertex lands in the key when it is folded back - the basis unchanged - and Undo takes it back; leaving Edit Mode folds too", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");  // (the sample scene has a Sphere of its own)
+    ed.command("create Sphere");
+    ed.command("shape add Puff 0.2");
+    ed.step_frame_headless();  // (each change its own undo step: a step commits what the frame changed)
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    CHECK(s && s->mesh_filter() && s->mesh_filter()->mesh && !s->mesh_filter()->mesh->shape_keys.empty());
+    if (!s || !s->mesh_filter() || !s->mesh_filter()->mesh || s->mesh_filter()->mesh->shape_keys.empty()) return;
+    const std::vector<Vec3> basis = s->mesh_filter()->mesh->positions;
+    const Vec3 d0 = s->mesh_filter()->mesh->shape_keys[0].delta[0];
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    CHECK(s->get<MeshRenderer>()->edit_shape == "Puff" && length(m->positions[0] - (basis[0] + d0)) < 1e-6f);
+    /* An edit: vertex 0 moved up by one (what Edit Mode's grab or a sculpt stroke does to the positions). */
+    Mesh &mm = *mesh_make_mutable(s->mesh_filter()->mesh);
+    mm.positions[0] = mm.positions[0] + Vec3(0, 1, 0);
+    mm.touch();
+    ed.command("shape edit off");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    std::printf("    folded: delta[0] (%.3f %.3f %.3f) from (%.3f %.3f %.3f); basis back %s\n", m->shape_keys[0].delta[0].x, m->shape_keys[0].delta[0].y, m->shape_keys[0].delta[0].z, d0.x, d0.y, d0.z,
+                length(m->positions[0] - basis[0]) < 1e-6f ? "yes" : "no");
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && length(m->positions[0] - basis[0]) < 1e-6f && length(m->shape_keys[0].delta[0] - (d0 + Vec3(0, 1, 0))) < 1e-6f);
+    CHECK(length(m->positions[1] - basis[1]) < 1e-6f && length(m->shape_keys[0].delta[1] - s->mesh_filter()->mesh->shape_keys[0].delta[1]) < 1e-6f);
+    ed.command("undo");
+    ed.step_frame_headless();
+    s = ed.scene().find_by_name("Sphere");
+    m = s && s->mesh_filter() ? s->mesh_filter()->mesh.get() : nullptr;
+    CHECK(m && !m->shape_keys.empty() && length(m->shape_keys[0].delta[0] - d0) < 1e-6f);  // (the fold undone: the key as it was)
+    if (!m || m->shape_keys.empty()) return;
+    ed.command("shape edit off");
+    ed.command("shape edit Puff");
+    ed.command("edit");
+    ed.command("edit off");
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && length(s->mesh_filter()->mesh->positions[0] - basis[0]) < 1e-6f);
+  });
+  test("Animation window as Unity's (round 406): a Summary row, an object row per animated path (folded by its arrow), the property rows under it; a blend shape's value field shows 0-100 and typing keys it; the summary's key button keys every track", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R406Box");
+    ed.scene().create("Lid", box);
+    ed.command("select R406Box");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 0 10 0");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.command("anim key Lid Position 2 10 2");
+    GameObject *s = ed.scene().create("Mouth", box);
+    s->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    ed.command("select Mouth");
+    ed.command("shape add Smile 0.2");
+    ed.command("select R406Box");
+    ed.command("anim key Mouth MeshRenderer.BlendShape/Smile 0 10 0.5");
+    ed.command("anim frame 10");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti sum, lid, pos, smile;
+    CHECK(ed.button_rect_for_test("anim_track:Summary", sum) && ed.button_rect_for_test("anim_track:Lid", lid) && ed.button_rect_for_test("anim_track:Lid : Position", pos));
+    CHECK(ed.button_rect_for_test("anim_track:Mouth : MeshRenderer.BlendShape/Smile.x", smile) && sum.y < lid.y && lid.y < pos.y);
+    const auto &vals = ed.anim_row_values_for_test();
+    const auto it = vals.find("Mouth : MeshRenderer.BlendShape/Smile.x");
+    std::printf("    rows: Summary %d, Lid %d, Position %d, Smile %d; Smile's value field %.1f\n", sum.y, lid.y, pos.y, smile.y, it == vals.end() ? -1.0f : it->second);
+    CHECK(it != vals.end() && std::fabs(it->second - 50.0f) < 1e-3f);
+    /* The object row folded by its arrow: its property rows go. */
+    auto ev = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto click = [&](int x, int y) {
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      ed.step_frame_headless();
+    };
+    click(lid.x + 12, lid.y + lid.h / 2);
+    Recti r;
+    CHECK(!ed.button_rect_for_test("anim_track:Lid : Position", r) && ed.button_rect_for_test("anim_track:Lid", r));
+    click(lid.x + 12, lid.y + lid.h / 2);
+    CHECK(ed.button_rect_for_test("anim_track:Lid : Position", r));
+    /* The value field typed: a key at the playhead in 0-1. */
+    ed.command("anim frame 20");
+    CHECK(ed.anim_set_row_value_for_test("Mouth : MeshRenderer.BlendShape/Smile.x", 30.0f));
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *st = nullptr;
+    for (const AnimTrack &t : clip->tracks)
+      if (t.property == "MeshRenderer.BlendShape/Smile") st = &t;
+    CHECK(st && st->key_at(20.0f) >= 0 && std::fabs(st->keys[(size_t)st->key_at(20.0f)].value - 0.3f) < 1e-6f);
+    /* The summary row's key button at frame 30: every track gets a key there. */
+    ed.command("anim frame 30");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti kb;
+    CHECK(ed.button_rect_for_test("anim_key:Summary", kb));
+    click(kb.x + kb.w / 2, kb.y + kb.h / 2);
+    bool all = true;
+    for (const AnimTrack &t : ed.anim_clip_for_test()->tracks) all = all && t.key_at(30.0f) >= 0;
+    CHECK(all);
+  });
+  test("Edit this shape, the hard cases (round 406 review): Ctrl+S folds the open shape before the file is written, removing the key being edited puts the basis back, an exporter sees the folded mesh, Duplicate takes the edit so far", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");
+    ed.command("create Sphere");
+    ed.command("shape add Puff 0.2");
+    ed.command("save Assets/Scenes/R406Save.scene");
+    ed.step_frame_headless();
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const std::vector<Vec3> basis = s->mesh_filter()->mesh->positions;
+    const Vec3 d0 = s->mesh_filter()->mesh->shape_keys[0].delta[0];
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    Mesh &mm = *mesh_make_mutable(s->mesh_filter()->mesh);
+    mm.positions[0] = mm.positions[0] + Vec3(0, 1, 0), mm.touch();
+    /* An exporter's view while the shape is open: the basis as the positions, the key with the edit. */
+    const Mesh folded = shape_edit_folded(*s->mesh_filter()->mesh);
+    CHECK(length(folded.positions[0] - basis[0]) < 1e-6f && length(folded.shape_keys[0].delta[0] - (d0 + Vec3(0, 1, 0))) < 1e-6f && folded.edit_basis.empty());
+    /* What is shown and rendered while the shape is open: the basis plus the key at its weight (the edit so far), the
+     * key skipped from the stored list and taken from the positions instead (re-check 406). */
+    std::vector<Vec3> shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    CHECK(length(shown[0] - basis[0]) < 1e-6f);  // (weight 0: the basis)
+    s->get<MeshRenderer>()->set_shape_weight("Puff", 0.5f);
+    shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    CHECK(length(shown[0] - (basis[0] + (d0 + Vec3(0, 1, 0)) * 0.5f)) < 1e-6f);
+    s->get<MeshRenderer>()->set_shape_weight("Puff", 0.0f);
+    /* Ctrl+S (the keymap's file.save) folds before the file is written. */
+    CHECK(ed.run_action_for_test("file.save"));
+    ed.step_frame_headless();
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    std::printf("    after file.save: edit_shape '%s', positions[0] %s the basis, delta[0].y %.2f\n", s->get<MeshRenderer>()->edit_shape.c_str(), length(m->positions[0] - basis[0]) < 1e-6f ? "=" : "!=", m->shape_keys[0].delta[0].y);
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && m->edit_basis.empty() && length(m->positions[0] - basis[0]) < 1e-6f && length(m->shape_keys[0].delta[0] - (d0 + Vec3(0, 1, 0))) < 1e-6f);
+    ed.command("newscene");
+    ed.command("open Assets/Scenes/R406Save.scene");
+    s = ed.scene().find_by_name("Sphere");
+    CHECK(s && s->get<MeshRenderer>()->edit_shape.empty() && length(s->mesh_filter()->mesh->positions[0] - basis[0]) < 1e-6f);
+    /* Remove the key being edited: the basis comes back, the key goes. */
+    ed.command("select Sphere");
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    ed.command("shape remove Puff");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    CHECK(m->shape_keys.empty() && length(m->positions[0] - basis[0]) < 1e-6f && m->edit_basis.empty());
+    /* Duplicate while open: the copy holds the edit so far (folded first). */
+    ed.command("shape add Puff2 0.2");
+    ed.step_frame_headless();
+    ed.command("shape edit Puff2");
+    ed.step_frame_headless();
+    Mesh &m2 = *mesh_make_mutable(s->mesh_filter()->mesh);
+    m2.positions[0] = m2.positions[0] + Vec3(0, 0, 2), m2.touch();
+    ed.command("shape duplicate Puff2 Copy");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    const int c = m->find_shape("Copy"), o = m->find_shape("Puff2");
+    CHECK(c >= 0 && o >= 0 && s->get<MeshRenderer>()->edit_shape.empty());
+    if (c < 0 || o < 0) return;
+    CHECK(std::fabs(m->shape_keys[(size_t)c].delta[0].z - m->shape_keys[(size_t)o].delta[0].z) < 1e-6f && m->shape_keys[(size_t)c].delta[0].z > 1.9f);
+    /* Set Origin while open: it folds first, so the move lands in the basis and the key keeps its delta. */
+    ed.command("shape edit Puff2");
+    ed.step_frame_headless();
+    const Vec3 dz = s->mesh_filter()->mesh->shape_keys[(size_t)o].delta[0];
+    ed.command("origin bounds");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && m->edit_basis.empty() && length(m->shape_keys[(size_t)m->find_shape("Puff2")].delta[0] - dz) < 1e-6f);
+  });
+  test("Edit Mode and Sculpt show the open key in full (round 406 re-check): a shape opened at weight 0 shows the basis in Object Mode and the whole key once Edit Mode starts; the cage (no renderer) always the whole key", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");
+    ed.command("create Sphere");
+    ed.command("shape add Puff 0.2");
+    ed.step_frame_headless();
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const std::vector<Vec3> basis = s->mesh_filter()->mesh->positions;
+    const Vec3 d0 = s->mesh_filter()->mesh->shape_keys[0].delta[0];
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    std::vector<Vec3> shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    CHECK(!s->mesh_filter()->mesh->edit_show_full && length(shown[0] - basis[0]) < 1e-6f);  // (Object Mode, weight 0: the basis)
+    std::vector<Vec3> cage = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, nullptr, cage);
+    CHECK(length(cage[0] - (basis[0] + d0)) < 1e-6f);  // (the cage: the whole key)
+    ed.command("edit");
+    ed.step_frame_headless();
+    shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    std::printf("    Edit Mode: shown[0] - basis = %.3f (the key %.3f)\n", length(shown[0] - basis[0]), length(d0));
+    CHECK(s->mesh_filter()->mesh->edit_show_full && length(shown[0] - (basis[0] + d0)) < 1e-6f);
+    ed.command("edit off");
+    ed.step_frame_headless();
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && !s->mesh_filter()->mesh->edit_show_full);
+  });
+  test("A topology edit while a shape is open (round 406 review): the basis follows the vertices as the keys do, so the fold after it lands right", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");
+    ed.command("create Cube");
+    ed.command("shape add Puff 0.2");
+    ed.step_frame_headless();
+    GameObject *s = ed.scene().find_by_name("Cube");
+    const size_t nv = s->mesh_filter()->mesh->vert_count();
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("edit");
+    ed.command("selectall");
+    ed.command("subdivide");
+    ed.step_frame_headless();
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    std::printf("    subdivided while open: %zu -> %zu vertices, basis %zu, key %zu\n", nv, m->vert_count(), m->edit_basis.size(), m->shape_keys.empty() ? (size_t)0 : m->shape_keys[0].delta.size());
+    CHECK(m->vert_count() > nv && m->edit_basis.size() == m->vert_count() && !m->shape_keys.empty() && m->shape_keys[0].delta.size() == m->vert_count());
+    ed.command("edit off");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    /* Folded: the key's delta is what the open positions held over the carried basis - about 0.2 along the normal, as
+     * before - and the basis the positions. */
+    float longest = 0.0f;
+    for (const Vec3 &d : m->shape_keys[0].delta) longest = std::max(longest, length(d));
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && m->edit_basis.empty() && longest > 0.1f && longest < 0.4f);
+  });
+  test("Rename a shape key inside undo (round 406 review): the clip's track follows and comes back with Undo; the avatar's visemes that name it follow; two objects' tracks apart in the clip share one object row each", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R406R");
+    GameObject *body = ed.scene().create("Body", box), *head = ed.scene().create("Head", box);
+    body->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    (void)head;
+    ed.command("select Body");
+    ed.command("shape add vrc.v_aa 0.1");
+    AvatarDescriptorComponent *d = box->add<AvatarDescriptorComponent>();
+    d->visemes[0] = "vrc.v_aa", d->mouth_open_shape = "vrc.v_aa";
+    ed.command("select R406R");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim key Body Position 0 10 0");
+    ed.command("anim key Head Position 0 10 1");
+    ed.command("anim key Body MeshRenderer.BlendShape/vrc.v_aa 0 10 0.5");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti b, h, bs;
+    CHECK(ed.button_rect_for_test("anim_track:Body", b) && ed.button_rect_for_test("anim_track:Head", h) && ed.button_rect_for_test("anim_track:Body : MeshRenderer.BlendShape/vrc.v_aa.x", bs));
+    std::printf("    rows: Body %d, its shape track %d, Head %d\n", b.y, bs.y, h.y);
+    CHECK(b.y < bs.y && bs.y < h.y);  // (the shape track under Body, though the clip holds it after Head's)
+    ed.command("select Body");
+    ed.command("shape rename vrc.v_aa vrc.v_ah");
+    ed.step_frame_headless();
+    auto has = [&](const char *prop) {
+      for (const AnimTrack &t : ed.anim_clip_for_test()->tracks)
+        if (t.property == prop) return true;
+      return false;
+    };
+    CHECK(has("MeshRenderer.BlendShape/vrc.v_ah") && !has("MeshRenderer.BlendShape/vrc.v_aa") && d->visemes[0] == "vrc.v_ah" && d->mouth_open_shape == "vrc.v_ah");
+    ed.command("undo");
+    ed.step_frame_headless();
+    body = ed.scene().find_by_name("Body");
+    std::printf("    undone: key %s, track %s\n", body && body->mesh_filter()->mesh->find_shape("vrc.v_aa") >= 0 ? "vrc.v_aa" : "?", has("MeshRenderer.BlendShape/vrc.v_aa") ? "vrc.v_aa" : "renamed still");
+    CHECK(body && body->mesh_filter()->mesh->find_shape("vrc.v_aa") >= 0 && has("MeshRenderer.BlendShape/vrc.v_aa"));
+  });
+  test("Record makes a BlendShape track (round 406): a weight moved while Record is on becomes the shape's track with a key at the playhead", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("create Sphere");
+    ed.command("shape add Smile 0.2");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim preview on");
+    ed.command("anim record on");
+    ed.step_frame_headless();
+    ed.command("shape set Smile 0.7");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *st = nullptr;
+    for (const AnimTrack &t : clip->tracks)
+      if (t.property == "MeshRenderer.BlendShape/Smile") st = &t;
+    std::printf("    Record: %zu track(s), Smile %s\n", clip->tracks.size(), st ? strprintf("keyed at %.0f = %.2f", st->keys[0].frame, st->keys[0].value).c_str() : "no track");
+    CHECK(st && !st->keys.empty() && std::fabs(st->keys[0].value - 0.7f) < 1e-6f);
+    ed.command("anim record off");
+    ed.command("anim preview off");
+  });
+  test("Unity's keys in the Animation window (round 406): K keys every track at the playhead, full stop steps to the next key, comma back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R406K");
+    ed.scene().create("Lid", box);
+    ed.command("select R406K");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.command("anim key Lid Position 1 30 3");
+    ed.command("anim frame 20");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const AnimEditorState &st = ed.anim_for_test();
+    const int mx = st.sheet.x + st.sheet.w / 2, my = st.sheet.y + st.sheet.h / 2;
+    auto key = [&](int k) {
+      platform::Event m, e;
+      m.type = platform::EventType::MouseMove, m.x = mx, m.y = my;
+      e.type = platform::EventType::KeyDown, e.key = k, e.x = mx, e.y = my;
+      ed.step_frame_headless({m, e});
+      ed.step_frame_headless();
+    };
+    key(platform::KEY_K);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    bool keyed = true;
+    for (const AnimTrack &t : clip->tracks) keyed = keyed && t.key_at(20.0f) >= 0;
+    CHECK(keyed);
+    key(platform::KEY_PERIOD);
+    CHECK(std::fabs(ed.anim_for_test().frame - 30.0f) < 1e-3f);
+    key(platform::KEY_COMMA);
+    key(platform::KEY_COMMA);
+    std::printf("    K keyed %zu track(s); . then , , : frame %.0f\n", clip->tracks.size(), ed.anim_for_test().frame);
+    CHECK(std::fabs(ed.anim_for_test().frame - 10.0f) < 1e-3f);
+  });
+}
+
 /* Round 405 (task 0382): the residuals - Unity's ACES, Unity's indirect specular, three shaders read. */
 static void tests_round405() {
   test("Unity's ACES (round 405): the full fit's curve - 0.18 grey to about 0.1 (display-linear), 1 to about 0.62, 10 to near white, monotonic - as the view transform the post-processing import picks, after the OpenColorIO views in the list so saved indices keep their view", [] {
@@ -12251,6 +12617,7 @@ void run_assets_tests() {
   tests_round403();
   tests_round404();
   tests_round405();
+  tests_round406();
   tests_round372();
   tests_round373();
   tests_round374();

@@ -533,7 +533,8 @@ std::string Editor::save_imported_clip(GameObject &root, const AnimationClip &cl
   return rel;
 }
 
-/* shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135): the selected object's shape keys.
+/* shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename | duplicate | mix | edit | filter (task 0135,
+ * round 406): the selected object's shape keys.
  * add makes a key pushing every vertex out along its normal by `amount` (0.1 m): an inflate morph to animate. */
 void Editor::shape_command(const std::vector<std::string> &t) {
   GameObject *g = active_object();
@@ -547,13 +548,81 @@ void Editor::shape_command(const std::vector<std::string> &t) {
       Log::info("  %-24s %.3f%s", k.name.c_str(), mr ? mr->shape_weight(k.name) : 0.0f, k.delta.size() == mf->mesh->vert_count() ? "" : " (the mesh was edited since: off)");
     return;
   }
-  if (t.size() < 3) return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  if (sub == "mix") {  // (round 406: Blender's New Shape from Mix - the weighted deltas as one key)
+    fold_edit_shape_of(*g);  // (an open edit counts as its key)
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    std::string nm = t.size() > 2 ? t[2] : "Mix";
+    for (int k = 2; m.find_shape(nm) >= 0; k++) nm = strprintf("%s %d", t.size() > 2 ? t[2].c_str() : "Mix", k);
+    ShapeKey k{nm, std::vector<Vec3>(m.vert_count(), Vec3(0.0f))};
+    for (const ShapeKey &s : m.shape_keys) {
+      const float w = mr ? mr->shape_weight(s.name) : 0.0f;
+      if (w == 0.0f || s.delta.size() != k.delta.size()) continue;
+      for (size_t i = 0; i < k.delta.size(); i++) k.delta[i] = k.delta[i] + s.delta[i] * w;
+    }
+    m.shape_keys.push_back(std::move(k));
+    m.touch();
+    if (!mr) g->add<MeshRenderer>();
+    mark_changed("New Shape from Mix");
+    return Log::info("Shape key '%s': the mix of the weights as one shape", nm.c_str());
+  }
+  if (sub == "filter") {  // (round 406: the foldout's filter box, for scripts and tests)
+    blend_shape_filter_ = t.size() > 2 ? t[2] : "";
+    return;
+  }
+  if (t.size() < 3) return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename <name> <new> | duplicate <name> [new] | mix [name] | edit <name>|off | filter [text]");
   const std::string name = t[2];
+  if (sub == "edit") {  // (round 406: Edit this shape)
+    set_edit_shape(*g, to_lower(name) == "off" ? std::string() : name);
+    return;
+  }
+  if (sub == "rename") {  // (round 406: the key, the weights, the clips' tracks and the visemes follow)
+    if (t.size() < 4) return Log::warn("shape rename <name> <new>");
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    const int i = m.find_shape(name);
+    if (i < 0) return Log::warn("shape: no key '%s'", name.c_str());
+    if (m.find_shape(t[3]) >= 0) return Log::warn("shape: '%s' is there already", t[3].c_str());
+    m.shape_keys[(size_t)i].name = t[3];
+    if (m.edit_shape == name) m.edit_shape = t[3];
+    if (mr) {
+      const float w = mr->shape_weight(name);
+      mr->shape_weights.erase(std::remove_if(mr->shape_weights.begin(), mr->shape_weights.end(), [&](const auto &p) { return p.first == name; }), mr->shape_weights.end());
+      if (w != 0.0f) mr->set_shape_weight(t[3], w);
+      if (mr->edit_shape == name) mr->edit_shape = t[3];
+    }
+    const std::string old_prop = "MeshRenderer.BlendShape/" + name, new_prop = "MeshRenderer.BlendShape/" + t[3];
+    if (anim_clip())  // (the open clip's tracks, inside the undo step)
+      anim_edit_keys("Rename Shape Key", [&](AnimationClip &c) {
+        for (AnimTrack &tr : c.tracks)
+          if (tr.property == old_prop) tr.property = new_prop;
+      });
+    scene_->for_each([&](GameObject &o) {  // (the avatar's visemes and jaw shapes that name the shape on this mesh)
+      AvatarDescriptorComponent *d = o.get<AvatarDescriptorComponent>();
+      if (!d || (!d->viseme_mesh.empty() && d->viseme_mesh != g->name)) return;
+      for (std::string &v : d->visemes) v = v == name ? t[3] : v;
+      if (d->mouth_open_shape == name) d->mouth_open_shape = t[3];
+      if (d->jaw_flap_shape == name) d->jaw_flap_shape = t[3];
+    });
+    m.touch();
+    return mark_changed("Rename Shape Key");
+  }
+  if (sub == "duplicate") {  // (round 406)
+    fold_edit_shape_of(*g);  // (the copy takes the edit so far)
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    const int i = m.find_shape(name);
+    if (i < 0) return Log::warn("shape: no key '%s'", name.c_str());
+    std::string nm = t.size() > 3 ? t[3] : name + " Copy";
+    for (int k = 2; m.find_shape(nm) >= 0; k++) nm = strprintf("%s %d", t.size() > 3 ? t[3].c_str() : (name + " Copy").c_str(), k);
+    ShapeKey k{nm, m.shape_keys[(size_t)i].delta};
+    m.shape_keys.push_back(std::move(k));
+    m.touch();
+    return mark_changed("Duplicate Shape Key");
+  }
   if (sub == "set") {
     if (!mr) mr = g->add<MeshRenderer>();
     mr->set_shape_weight(name, t.size() > 3 ? (float)std::atof(t[3].c_str()) : 1.0f);
     return mark_changed("Shape Key Weight");
   }
+  if (sub == "remove" && mr && mr->edit_shape == name) fold_edit_shape_of(*g);  // (round 406: the basis back before the key goes)
   Mesh &m = *mesh_make_mutable(mf->mesh);
   if (sub == "remove") {
     const int i = m.find_shape(name);
@@ -562,7 +631,7 @@ void Editor::shape_command(const std::vector<std::string> &t) {
     m.touch();
     return mark_changed("Remove Shape Key");
   }
-  if (sub != "add") return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  if (sub != "add") return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename <name> <new> | duplicate <name> [new] | mix [name] | edit <name>|off | filter [text]");
   if (m.find_shape(name) >= 0) return Log::warn("shape: '%s' is there already", name.c_str());
   const float amount = t.size() > 3 ? (float)std::atof(t[3].c_str()) : 0.1f;
   const std::vector<Vec3> n = meshops::vertex_normals(m);
@@ -572,7 +641,7 @@ void Editor::shape_command(const std::vector<std::string> &t) {
   m.touch();
   if (!mr) g->add<MeshRenderer>();
   mark_changed("Add Shape Key");
-  Log::info("Shape key '%s' on %s: its weight in the Inspector (MeshRenderer > BlendShape/%s), animatable", name.c_str(), g->name.c_str(), name.c_str());
+  Log::info("Shape key '%s' on %s: its weight in the Inspector (MeshRenderer > BlendShapes), animatable as MeshRenderer.BlendShape/%s", name.c_str(), g->name.c_str(), name.c_str());
 }
 
 /* A file in the project's Assets already. */

@@ -55,6 +55,7 @@ GameObject *Editor::join_target() {
 }
 
 void Editor::join_selected() {
+  fold_edit_shape();  // (round 406: an open shape edit folds before the positions are worked on)
   if (edit_mode_) {
     Log::warn("Join combines objects: leave Edit Mode first (Tab)");
     return;
@@ -212,6 +213,7 @@ static size_t separate_parts(const Mesh &m, const std::string &mode, std::vector
 }
 
 void Editor::separate(const std::string &mode) {
+  fold_edit_shape();  // (round 406: an open shape edit folds before the positions are worked on)
   GameObject *g = edit_mode_ ? edit_object() : active_object();
   if (!g || !g->get<MeshFilter>() || !g->get<MeshFilter>()->mesh) {
     Log::warn("Separate: select a mesh object");
