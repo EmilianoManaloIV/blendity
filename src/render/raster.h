@@ -19,6 +19,7 @@
 #include "../scene/material.h"
 #include "canvas.h"
 #include "shading.h"
+#include "reflection_probe.h"
 
 #include <atomic>
 #include <functional>
@@ -185,6 +186,7 @@ struct LightingEnv {
   bool rt_bounce_not_baked = false;
   float rt_specular_occlusion = 0.0f;
   const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
+  std::vector<RenderProbe> reflection_probes;  // round 401: Unity's reflection probes with a bake (the specular environment inside their boxes)
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
 };
@@ -363,6 +365,7 @@ class Renderer3D {
   bool project(Vec3 world, Vec2 &screen, float &depth) const;
   Ray screen_ray(float x, float y) const;
   const Mat4 &view_proj() const { return vp_; }
+  float fog_depth(Vec3 p) const { return std::fabs(view_.point(p).z); }  // (round 401: the view depth Unity fogs by)
   const RasterStats &stats() const { return stats_; }
   /* A frame drawn elsewhere (task 0096: the GPU views) still reports what it drew. */
   void note_submitted(int objects, size_t tris) {

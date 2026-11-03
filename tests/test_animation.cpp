@@ -3886,7 +3886,7 @@ static void tests_round86_to_round100() {
   /* ---------------------------------------------------------------- round 97: dragging stacks into order (task 0071) */
   test("stacks: a modifier's or a filter's header dragged below another moves it there in one undo step; a click still folds it", [] {
     Editor ed;
-    ed.init_headless(1400, 1000);
+    ed.init_headless(1400, 1200);  // (round 401: the camera gained rows - its filter list clear of the panel's bottom edge)
     ed.command("layout Default");
     ed.record_buttons_for_test(true);
     using ET = platform::EventType;

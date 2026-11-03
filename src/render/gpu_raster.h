@@ -147,6 +147,13 @@ struct OverlayOutline {
 };
 
 /* A light: type 0 sun, 1 point, 2 spot (as RenderLight; a sun's direction points where its light goes). */
+/* Round 401: a reflection probe on the card - its box, settings and its equirect map (a texture id). Sent after the
+ * lights in their buffer, one light-sized record each. */
+struct RasterProbe {
+  float position[3] = {0, 0, 0}, box_min[3] = {0, 0, 0}, box_max[3] = {0, 0, 0};
+  float intensity = 1.0f, blend = 1.0f;
+  int importance = 1, projection = 0, texture = -1, levels = 0;
+};
 struct RasterLight {
   int type = 0;
   float position[3] = {0, 0, 0};
@@ -185,6 +192,7 @@ struct RasterFrame {
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
   std::vector<RasterLight> lights;
+  std::vector<RasterProbe> probes;  // (round 401: the reflection probes with a bake)
   std::vector<uint32_t> highlight_bits;  // task 0166: a bit per triangle of the highlighted meshes (see RasterInstance::highlight)
   /* Task 0195: Solid shading (the CPU raster's Gouraud): each vertex lit by shade()'s formulas - the ambient from
    * sky / equator / ground, Lambert and a ^32 highlight per light - and written as it is; a cutout per pixel. */

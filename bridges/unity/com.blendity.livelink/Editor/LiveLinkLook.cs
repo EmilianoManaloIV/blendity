@@ -48,11 +48,14 @@ namespace Blendity.LiveLink
             }
             else
                 RenderSettings.ambientMode = AmbientMode.Skybox;
+            RenderSettings.reflectionIntensity = (float)j.GetNumber("reflection_intensity", 1);  // (round 401)
             var fog = j.GetDict("fog");
             RenderSettings.fog = fog != null && fog.GetBool("enabled");
             if (fog == null)
                 return;
-            RenderSettings.fogMode = FogMode.Linear;  // (Blendity's fog: from a distance to a distance)
+            var fogMode = fog.GetString("mode", "linear");  // (round 401: Blendity's three modes are Unity's)
+            RenderSettings.fogMode = fogMode == "exponential" ? FogMode.Exponential : fogMode == "exponential_squared" ? FogMode.ExponentialSquared : FogMode.Linear;
+            RenderSettings.fogDensity = (float)fog.GetNumber("density", 0.02);
             RenderSettings.fogStartDistance = (float)fog.GetNumber("start", 10);
             RenderSettings.fogEndDistance = (float)fog.GetNumber("end", 60);
             RenderSettings.fogColor = Col(fog.GetFloats("color", 0.6f, 0.65f, 0.75f));

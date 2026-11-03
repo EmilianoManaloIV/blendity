@@ -341,6 +341,11 @@ std::string save_scene_text(const Scene &scene) {
     os << "end\nlighting\n";
     const_cast<Scene &>(scene).lighting.reflect(wr);
     os << "end\n";
+    if (!scene.unity.file.empty()) {  // (round 401: the Unity scene it came from)
+      os << "unity\n";
+      const_cast<Scene &>(scene).unity.reflect(wr);
+      os << "end\n";
+    }
   }
   const auto &e = scene.environment;
   os << "environment " << fmt(e.sky.x) << " " << fmt(e.sky.y) << " " << fmt(e.sky.z) << " " << fmt(e.equator.x) << " "
@@ -728,9 +733,10 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       rr->values[k] = std::vector<std::string>(t.begin() + 1, t.end());
       continue;
     }
-    if ((k == "world" || k == "render" || k == "lighting") && t.size() == 1) {
+    if ((k == "world" || k == "render" || k == "lighting" || k == "unity") && t.size() == 1) {
       if (k == "world") pending_block = [&fresh](Reflector &r) { fresh.environment.reflect(r); };
       else if (k == "lighting") pending_block = [&fresh](Reflector &r) { fresh.lighting.reflect(r); };
+      else if (k == "unity") pending_block = [&fresh](Reflector &r) { fresh.unity.reflect(r); };  // (round 401)
       else pending_block = [&fresh](Reflector &r) { fresh.render.reflect(r); };
       rr = std::make_unique<ReadReflector>(meshes, &materials);
       continue;

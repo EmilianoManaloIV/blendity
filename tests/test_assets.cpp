@@ -9212,6 +9212,361 @@ std::string psd(int channels, int w, int h, int depth, int mode, int comp, const
 }
 }  // namespace r399
 
+static void tests_round401() {
+  test("Unity's world as it is (round 401): exponential fog by its density, a Flat black ambient and a black Unlit skybox, the reflection intensity; a procedural skybox as the Sky, a panorama as the HDRI; the Custom ambient said", [] {
+    std::vector<UnityDoc> docs;
+    std::string why;
+    const std::string yaml = "%YAML 1.1\n--- !u!104 &2\nRenderSettings:\n  m_Fog: 1\n  m_FogColor: {r: 0.137, g: 0.181, b: 0.502, a: 1}\n  m_FogMode: 2\n  m_FogDensity: 0.02\n"
+                             "  m_LinearFogStart: 0\n  m_LinearFogEnd: 300\n  m_AmbientSkyColor: {r: 0, g: 0, b: 0, a: 1}\n  m_AmbientMode: 0\n  m_AmbientIntensity: 1\n  m_ReflectionIntensity: 1.5\n"
+                             "  m_SkyboxMaterial: {fileID: 2100000, guid: aaaa4010aaaa4010aaaa4010aaaa0001, type: 2}\n";
+    CHECK(parse_unity_yaml(yaml, docs, why));
+    auto sky = [](const char *shader) {
+      return [shader](const std::string &, UnitySkybox &sb) {
+        sb = UnitySkybox{};
+        sb.shader = shader, sb.texture = "Assets/pano.hdr", sb.exposure = 2.0f, sb.atmosphere_thickness = 1.0f;
+        return true;
+      };
+    };
+    EnvironmentSettings env;
+    std::vector<std::string> notes;
+    CHECK(unity_render_settings(docs, env, notes, sky("Unlit/Color")) && env.fog && env.fog_mode == 1 && std::fabs(env.fog_density - 0.02f) < 1e-6f && env.mode == 3 && env.color.x == 0.0f &&
+          std::fabs(env.reflection_intensity - 1.5f) < 1e-6f && std::fabs(env.fog_color.z - srgb_to_linear(0.502f)) < 1e-5f);
+    env = EnvironmentSettings{};
+    CHECK(unity_render_settings(docs, env, notes, sky("Skybox/Procedural")) && env.mode == 1 && std::fabs(env.turbidity - 3.0f) < 1e-5f && std::fabs(env.strength - 2.0f) < 1e-5f);
+    env = EnvironmentSettings{};
+    CHECK(unity_render_settings(docs, env, notes, sky("Skybox/Panoramic")) && env.mode == 2 && env.hdri.path == "Assets/pano.hdr");
+    std::printf("    unlit black -> Color, procedural -> Sky (turbidity %g), panoramic -> HDRI; %zu note(s)\n", env.turbidity, notes.size());
+    docs.clear();
+    CHECK(parse_unity_yaml("%YAML 1.1\n--- !u!104 &2\nRenderSettings:\n  m_AmbientMode: 4\n  m_AmbientSkyColor: {r: 1, g: 0.5, b: 0, a: 1}\n  m_Fog: 0\n", docs, why));
+    env = EnvironmentSettings{}, notes.clear();
+    CHECK(unity_render_settings(docs, env, notes) && env.mode == 3 && std::fabs(env.color.y - srgb_to_linear(0.5f)) < 1e-6f && !env.fog && notes.size() == 1 && notes[0].find("Custom") != std::string::npos);
+    /* The skybox material itself, as the shader reads it. */
+    UnitySkybox sb;
+    CHECK(unity_skybox("%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Sky\n  m_Shader: {fileID: 4800000, guid: 5ade5ade5ade5ade5ade5ade5ade5ade, type: 3}\n  m_SavedProperties:\n    m_TexEnvs:\n"
+                       "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: bbbb4010bbbb4010bbbb4010bbbb0001, type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n"
+                       "    m_Floats:\n    - _Exposure: 1.3\n    - _Rotation: 90\n    m_Colors:\n    - _Tint: {r: 0.5, g: 0.5, b: 0.5, a: 0.5}\n",
+                       [](const std::string &g) { return g == "bbbb4010bbbb4010bbbb4010bbbb0001" ? std::string("Assets/sky.png") : std::string(); },
+                       [](const std::string &, int64_t) { return std::string("Skybox/Panoramic"); }, sb));
+    CHECK(sb.shader == "Skybox/Panoramic" && sb.texture == "Assets/sky.png" && std::fabs(sb.exposure - 1.3f) < 1e-6f && sb.rotation == 90.0f);
+  });
+  test("Unity's Camera and Light in full (round 401): clear flags, background, HDR, FOV axis and the physical lens; shadows and their strength, the indirect multiplier, a cookie; a gamma light colour read as linear; the horizontal FOV", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string dir = resolve_asset_path("Assets/Imported/R401C");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4010eeee4010eeee4010eeee0001", gt = "eeee4010eeee4010eeee4010eeee0002";
+    CHECK(fs::write_file(fs::join(dir, "cookie.png"), std::string("not read")));
+    CHECK(fs::write_file(fs::join(dir, "Rig.prefab"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: Cam\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!20 &12\nCamera:\n  m_GameObject: {fileID: 10}\n  m_ClearFlags: 2\n  m_BackGroundColor: {r: 0.5, g: 0.25, b: 0, a: 0}\n  m_projectionMatrixMode: 2\n  m_FOVAxisMode: 1\n"
+                         "  m_FocalLength: 35\n  m_SensorSize: {x: 36, y: 24}\n  m_LensShift: {x: 0.1, y: -0.2}\n  m_GateFitMode: 1\n  field of view: 90\n  near clip plane: 0.5\n  far clip plane: 200\n  m_HDR: 0\n"
+                         "--- !u!1 &20\nGameObject:\n  m_Name: Lamp\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &22\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 2\n  m_Color: {r: 0.5, g: 0.5, b: 0.5, a: 1}\n  m_Intensity: 2\n  m_Shadows:\n    m_Type: 1\n    m_Strength: 0.6\n"
+                         "  m_BounceIntensity: 0.7\n  m_Cookie: {fileID: 2800000, guid: " + gt + ", type: 3}\n  m_CookieSize: 4\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Rig.prefab\tAssets/Imported/R401C/Rig.prefab\n" + gt + "\tAssets/cookie.png\tAssets/Imported/R401C/cookie.png\n"));
+    ed.command("import Assets/Imported/R401C/Rig.prefab");
+    GameObject *cam = ed.scene().find_by_name("Cam"), *lamp = ed.scene().find_by_name("Lamp");
+    const Camera *c = cam ? cam->get<Camera>() : nullptr;
+    const Light *l = lamp ? lamp->get<Light>() : nullptr;
+    std::printf("    camera: clear %d, background %.3f, hdr %d, axis %d, physical %d (%.0f mm, fit %d); light: shadows %d x %.2f, bounce %.2f, cookie %s\n",
+                c ? c->clear_flags : -1, c ? c->background.x : 0.0f, c ? (int)c->hdr : -1, c ? c->fov_axis : -1, c ? (int)c->physical : -1, c ? c->focal_length : 0.0f, c ? c->sensor_fit : -1,
+                l ? l->shadows : -1, l ? l->shadow_strength : 0.0f, l ? l->bounce_intensity : 0.0f, l ? l->cookie.path.c_str() : "-");
+    CHECK(c && c->clear_flags == 1 && std::fabs(c->background.x - srgb_to_linear(0.5f)) < 1e-6f && !c->hdr && c->fov_axis == 1 && c->physical && c->focal_length == 35.0f && c->sensor_preset == 0 &&
+          std::fabs(c->shift_x - 0.1f) < 1e-6f && c->sensor_fit == 2 && c->near_clip == 0.5f);
+    CHECK(l && l->shadows == 1 && std::fabs(l->shadow_strength - 0.6f) < 1e-6f && std::fabs(l->bounce_intensity - 0.7f) < 1e-6f && l->cookie.path == "Assets/Imported/R401C/cookie.png" &&
+          l->cookie_size == 4.0f && std::fabs(l->color.x - srgb_to_linear(0.5f)) < 1e-6f);
+    /* Re-check 401: a Unity scene's lights shine as the built-in pipeline lights them - (gamma colour x intensity) taken to linear
+     * (0.5 x 2 = 1 -> 1), the same through to_render_light for the views and the bakes; a scene not from Unity as before. */
+    const RenderLight plain = to_render_light(*lamp, *l), gamma = to_render_light(*lamp, *l, true);
+    std::printf("    the lamp: %.3f x %.1f plain, %.3f x %.1f in gamma\n", plain.color.x, plain.intensity, gamma.color.x, gamma.intensity);
+    CHECK(std::fabs(plain.color.x - srgb_to_linear(0.5f)) < 1e-6f && plain.intensity == 2.0f && std::fabs(gamma.color.x - 1.0f) < 1e-5f && gamma.intensity == 1.0f);
+    CHECK(!ed.unity_lights_gamma());  // (an imported prefab, not a scene opened from Unity)
+    Camera h;
+    h.fov = 90.0f, h.fov_axis = 1;
+    CHECK(h.vertical_fov_deg(16.0f / 9.0f) == 90.0f && c->unity_clear_flags == 2);  // (review 401: the field of view is the vertical angle whatever the axis shows)
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Unity's post-processing profile (round 401): ACES, +1 EV and a gamma lift as the scene's view transform, exposure and grading; bloom 1.5 as PPv2 scales it; a vignette; ambient occlusion said undrawn", [] {
+    UnityPostProfile p;
+    CHECK(unity_post_profile("%YAML 1.1\n--- !u!114 &1\nMonoBehaviour:\n  m_Name: ColorGrading\n  active: 1\n  enabled:\n    overrideState: 1\n    value: 1\n  tonemapper:\n    overrideState: 1\n    value: 2\n"
+                             "  postExposure:\n    overrideState: 1\n    value: 1\n  gamma:\n    overrideState: 1\n    value: {x: 1, y: 1, z: 1, w: 0.108626194}\n  saturation:\n    overrideState: 0\n    value: 50\n"
+                             "--- !u!114 &2\nMonoBehaviour:\n  m_Name: Bloom\n  active: 1\n  enabled:\n    overrideState: 1\n    value: 1\n  intensity:\n    overrideState: 1\n    value: 1.5\n"
+                             "--- !u!114 &3\nMonoBehaviour:\n  m_Name: Vignette\n  active: 1\n  enabled:\n    overrideState: 1\n    value: 1\n  intensity:\n    overrideState: 1\n    value: 0.3\n"
+                             "--- !u!114 &4\nMonoBehaviour:\n  m_Name: AmbientOcclusion\n  active: 1\n  enabled:\n    overrideState: 1\n    value: 1\n"
+                             "--- !u!114 &5\nMonoBehaviour:\n  m_Name: PostProcessProfile\n  settings:\n  - {fileID: 1}\n", p));
+    CHECK(p.grading.on && p.grading.tonemapper == 2 && p.grading.post_exposure == 1.0f && std::fabs(p.grading.gamma[3] - 0.108626194f) < 1e-6f && p.grading.saturation == 0.0f && p.bloom.on &&
+          p.bloom.intensity == 1.5f && p.vignette.on && p.undrawn.size() == 1 && p.undrawn[0] == "AmbientOcclusion");
+    Scene s;
+    GameObject *cam = s.create("Main Camera");
+    cam->add<Camera>();
+    std::vector<std::string> notes;
+    unity_post_apply(p, s, *cam, notes);
+    const CameraFilters *cf = cam->get<CameraFilters>();
+    const BloomEffect *b = cf ? cf->find<BloomEffect>() : nullptr;
+    const ColorGradingEffect *g = cf ? cf->find<ColorGradingEffect>() : nullptr;
+    const VignetteEffect *v = cf ? cf->find<VignetteEffect>() : nullptr;
+    std::printf("    view transform %d, exposure %g; bloom %s (%.4f), grading %s (gamma %.4f), vignette %s; %zu note(s)\n", s.render.view_transform, s.render.exposure, b ? "on" : "-",
+                b ? b->intensity : 0.0f, g ? "on" : "-", g ? g->gamma.x : 0.0f, v ? "on" : "-", notes.size());
+    CHECK(s.render.view_transform == 2 && s.render.exposure == 1.0f && b && std::fabs(b->intensity - (std::exp2(0.15f) - 1.0f)) < 1e-5f && std::fabs(b->scatter - 0.7f) < 1e-6f && g &&
+          std::fabs(g->gamma.x - 1.108626194f) < 1e-5f && v && std::fabs(v->intensity - 0.3f) < 1e-6f && notes.size() == 1);
+    unity_post_apply(p, s, *cam, notes);  // (again: the same effects replaced, not doubled)
+    int blooms = 0;
+    for (const auto &e : cam->get<CameraFilters>()->effects) blooms += std::string(e->type_name()) == BloomEffect::kName;
+    CHECK(blooms == 1);
+  });
+  test("Unity's settings written back (round 401): the RenderSettings document's fog by its class, a light's by its object, a nested shadow field - only the lines that differ", [] {
+    const std::string text = "%YAML 1.1\n--- !u!104 &2\nRenderSettings:\n  m_Fog: 1\n  m_FogColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}\n  m_FogMode: 1\n  m_FogDensity: 0.01\n  m_LinearFogStart: 0\n"
+                             "  m_LinearFogEnd: 300\n  m_AmbientMode: 3\n  m_AmbientSkyColor: {r: 0, g: 0, b: 0, a: 1}\n  m_ReflectionIntensity: 1\n"
+                             "--- !u!1 &10\nGameObject:\n  m_Name: Lamp\n--- !u!108 &12\nLight:\n  m_GameObject: {fileID: 10}\n  m_Type: 2\n  m_Intensity: 1\n  m_Shadows:\n    m_Type: 2\n    m_Resolution: -1\n"
+                             "    m_Strength: 1\n  m_BounceIntensity: 1\n";
+    EnvironmentSettings env;
+    env.fog = true, env.fog_mode = 1, env.fog_density = 0.02f, env.fog_color = Vec3(srgb_to_linear(0.5f)), env.fog_start = 0.0f, env.fog_end = 300.0f, env.mode = 3, env.color = Vec3(0.0f);
+    UnityEdit light;
+    light.class_id = 108, light.game_object = 10;
+    light.fields = {{"m_Intensity", "3"}, {"m_Shadows/m_Type", "0"}, {"m_Shadows/m_Strength", "1"}, {"m_BounceIntensity", "1"}};
+    int changed = 0;
+    UnitySceneLink link;
+    link.ambient_mode = 3;
+    const std::string out = patch_unity_objects(text, {unity_world_edit(env, link), light}, &changed);
+    std::printf("    %d line(s) changed\n", changed);
+    CHECK(changed == 4 && out.find("  m_FogMode: 2\n") != std::string::npos && out.find("  m_FogDensity: 0.02\n") != std::string::npos && out.find("    m_Type: 0\n") != std::string::npos &&
+          out.find("  m_Intensity: 3\n") != std::string::npos && out.find("    m_Resolution: -1\n") != std::string::npos && out.find("  m_FogColor: {r: 0.5, g: 0.5, b: 0.5, a: 1}\n") != std::string::npos);
+    /* A camera's and a light's edits from the objects themselves. */
+    Scene s;
+    GameObject *g = s.create("Cam");
+    Camera *c = g->add<Camera>();
+    c->clear_flags = 1, c->fov = 50.0f;
+    std::vector<UnityEdit> edits;
+    unity_component_edits(*g, 77, edits);
+    CHECK(edits.size() == 1 && edits[0].class_id == 20 && edits[0].game_object == 77 && !edits[0].fields.empty());
+    /* Review 401: nothing the user didn't change is written - a Gradient left from an unread skybox writes no ambient; a
+     * Custom ambient keeps its mode; a Depth-only camera keeps its flags; the background keeps its alpha. */
+    EnvironmentSettings untouched;
+    UnitySceneLink skybox_link;
+    skybox_link.ambient_mode = 0;
+    bool ambient_written = false;
+    for (const auto &[k, v] : unity_world_edit(untouched, skybox_link).fields) ambient_written = ambient_written || k.rfind("m_Ambient", 0) == 0;
+    CHECK(!ambient_written);
+    UnitySceneLink custom_link;
+    custom_link.ambient_mode = 4;
+    EnvironmentSettings custom;
+    custom.mode = 3;
+    std::string mode_written;
+    for (const auto &[k, v] : unity_world_edit(custom, custom_link).fields) mode_written = k == "m_AmbientMode" ? v : mode_written;
+    CHECK(mode_written == "4");
+    c->unity_clear_flags = 3, c->clear_flags = 0, c->background_alpha = 1.0f;
+    edits.clear();
+    unity_component_edits(*g, 77, edits);
+    std::string flags, bg;
+    for (const auto &[k, v] : edits[0].fields) flags = k == "m_ClearFlags" ? v : flags, bg = k == "m_BackGroundColor" ? v : bg;
+    CHECK(flags == "3" && bg.find("a: 1}") != std::string::npos);
+    /* Re-check 401: the kept fields survive the scene file; a world untouched since its import (a Skybox ambient with an
+     * Unlit skybox, as SideRail's) writes no ambient; a changed colour does. */
+    Editor ed;
+    ed.init_headless(300, 200);
+    GameObject *kept = ed.scene().create("Kept");
+    Camera *kc = kept->add<Camera>();
+    kc->unity_clear_flags = 4, kc->background_alpha = 0.5f;
+    ed.scene().unity.file = "Assets/Imported/X/S.unity", ed.scene().unity.world_mode = 3, ed.scene().unity.world_key = 77;
+    ed.command("save Assets/Scenes/R401K.scene");
+    ed.command("newscene");
+    ed.command("open Assets/Scenes/R401K.scene");
+    const GameObject *again = ed.scene().find_by_name("Kept");
+    const Camera *ac = again ? again->get<Camera>() : nullptr;
+    CHECK(ac && ac->unity_clear_flags == 4 && std::fabs(ac->background_alpha - 0.5f) < 1e-6f && ed.scene().unity.world_mode == 3 && ed.scene().unity.world_key == 77);
+    std::error_code kec;
+    std::filesystem::remove(resolve_asset_path("Assets/Scenes/R401K.scene"), kec);
+    std::filesystem::remove_all(resolve_asset_path("Assets/Scenes/R401K"), kec);
+    std::vector<UnityDoc> sky_docs;
+    std::string sky_why;
+    CHECK(parse_unity_yaml("%YAML 1.1\n--- !u!104 &2\nRenderSettings:\n  m_Fog: 0\n  m_AmbientMode: 0\n  m_AmbientIntensity: 1\n  m_SkyboxMaterial: {fileID: 2100000, guid: aaaa4010aaaa4010aaaa4010aaaa0001, type: 2}\n", sky_docs, sky_why));
+    EnvironmentSettings sky_env;
+    UnitySceneLink sky_link;
+    std::vector<std::string> sky_notes;
+    CHECK(unity_render_settings(sky_docs, sky_env, sky_notes, [](const std::string &, UnitySkybox &sb) { sb = UnitySkybox{}, sb.shader = "Unlit/Color"; return true; }, &sky_link) && sky_env.mode == 3 && sky_link.world_mode == 3);
+    bool sky_ambient = false;
+    for (const auto &[k, v] : unity_world_edit(sky_env, sky_link).fields) sky_ambient = sky_ambient || k.rfind("m_Ambient", 0) == 0;
+    CHECK(!sky_ambient);
+    sky_env.color = Vec3(0.5f, 0.0f, 0.0f);
+    for (const auto &[k, v] : unity_world_edit(sky_env, sky_link).fields) sky_ambient = sky_ambient || k == "m_AmbientSkyColor";
+    CHECK(sky_ambient);
+  });
+  test("Unity's reflection probes (round 401): the component's fields from the file and its box in world space, scaled; the lighting file's version 2 carries their cubemaps, read back onto the probe at its path with the rows turned", [] {
+    using namespace r400;
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string dir = resolve_asset_path("Assets/Imported/R401P");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4011eeee4011eeee4011eeee0001";
+    CHECK(fs::write_file(fs::join(dir, "Probes.unity"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: Hall\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalScale: {x: 2, y: 1, z: 1}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!215 &12\nReflectionProbe:\n  m_GameObject: {fileID: 10}\n  m_Mode: 0\n  m_Resolution: 32\n  m_BoxSize: {x: 4, y: 2, z: 2}\n  m_BoxOffset: {x: 1, y: 0, z: 0}\n"
+                         "  m_IntensityMultiplier: 1.5\n  m_BlendDistance: 0.5\n  m_BoxProjection: 1\n  m_Importance: 2\n  m_HDR: 1\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Probes.unity\tAssets/Imported/R401P/Probes.unity\n"));
+    ed.command("open Assets/Imported/R401P/Probes.unity");
+    GameObject *hall = ed.scene().find_by_name("Hall");
+    const ReflectionProbeComponent *p = hall ? hall->get<ReflectionProbeComponent>() : nullptr;
+    CHECK(p && p->box_projection && p->importance == 2 && p->resolution == 32 && p->box_size.x == 4.0f && std::fabs(p->blend_distance - 0.5f) < 1e-6f && std::fabs(p->intensity - 1.5f) < 1e-6f);
+    Vec3 bmin, bmax;
+    if (p) p->world_box(*hall, bmin, bmax);
+    std::printf("    the box: (%.1f %.1f %.1f) to (%.1f %.1f %.1f)\n", bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z);
+    CHECK(p && std::fabs(bmin.x + 2.0f) < 1e-5f && std::fabs(bmax.x - 6.0f) < 1e-5f && std::fabs(bmin.y + 1.0f) < 1e-5f && std::fabs(bmax.y - 1.0f) < 1e-5f);
+    /* The file's version 2: a probe's six 2 x 2 faces as Cubemap.GetPixels gives them (top row first, checked against Unity in
+     * review 401) - its top-left texel a quarter. */
+    UnityLighting u;
+    UnityLighting::ReflectionProbe rp;
+    rp.path = "Hall[0]", rp.size = 2, rp.position = Vec3(0.0f), rp.box_size = Vec3(4, 2, 2), rp.box_offset = Vec3(1, 0, 0), rp.projection = true, rp.importance = 2;
+    for (int f = 0; f < 6; f++) {
+      rp.faces[f].assign(12, half_of(1.0f));
+      rp.faces[f][0] = rp.faces[f][1] = rp.faces[f][2] = half_of(0.25f);
+    }
+    u.reflection_probes.push_back(rp);
+    const std::string bytes = write_unity_lighting(u);
+    UnityLighting back;
+    std::string why;
+    CHECK(read_unity_lighting(bytes, back, why) && back.reflection_probes.size() == 1 && back.reflection_probes[0].size == 2 && back.reflection_probes[0].faces[5].size() == 12 && back.reflection_probes[0].path == "Hall[0]");
+    CHECK(hall && ed.apply_unity_reflection_probes(back, nullptr) == 1);
+    const auto &bakes = ed.reflection_probe_bakes_for_test();
+    const auto it = hall ? bakes.find(hall->id) : bakes.end();
+    CHECK(it != bakes.end() && it->second.from_unity && it->second.size == 2 && it->second.faces[0][0].x == 0.25f && it->second.faces[0][2].x == 1.0f);  // (the rows as Unity gives them: the top first)
+    /* The renderers' probe from it: inside the box, box-projected, blended with nothing else. */
+    std::vector<RenderProbe> probes = ed.make_lighting_for_test().reflection_probes;
+    CHECK(probes.size() == 1 && probes[0].projection && probes[0].map && probes[0].importance == 2);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Reflection probes (round 401): a face's direction and back; Unity's box projection; two probes blended by importance and blend distance; a bake's file and its checksum", [] {
+    for (int f = 0; f < 6; f++)
+      for (float u : {0.1f, 0.5f, 0.9f})
+        for (float v : {0.2f, 0.5f, 0.8f}) {
+          int f2;
+          float u2, v2;
+          cube_face_uv(cube_direction(f, u, v), f2, u2, v2);
+          CHECK(f2 == f && std::fabs(u2 - u) < 1e-5f && std::fabs(v2 - v) < 1e-5f);
+        }
+    ReflectionProbeBake red;
+    red.size = 8;
+    for (int f = 0; f < 6; f++) red.faces[f].assign(64, f == 0 ? Vec3(1, 0, 0) : Vec3(0, 0, 0));
+    RenderProbe p;
+    p.position = Vec3(0, 1, 0), p.box_min = Vec3(-2, 0, -2), p.box_max = Vec3(2, 2, 2), p.projection = true, p.map = reflection_probe_texture(red);
+    const Vec3 d1 = box_projected_direction(p, Vec3(1, 0.5f, 0), Vec3(1, 0, 0)), d2 = box_projected_direction(p, Vec3(0, 0.5f, 0), Vec3(0, 1, 0)), d3 = box_projected_direction(p, Vec3(1, 1, 0), normalize(Vec3(1, 1, 0)));
+    std::printf("    projected: (%.2f %.2f %.2f) (%.2f %.2f %.2f) (%.2f %.2f %.2f)\n", d1.x, d1.y, d1.z, d2.x, d2.y, d2.z, d3.x, d3.y, d3.z);
+    CHECK(length(d1 - Vec3(2, -0.5f, 0)) < 1e-4f && length(d2 - Vec3(0, 1, 0)) < 1e-4f && length(d3 - Vec3(2, 1, 0)) < 1e-4f);
+    const Vec3 spec = reflection_probe_specular(p, Vec3(0, 1, 0), Vec3(1, 0, 0), 0.0f), back = reflection_probe_specular(p, Vec3(0, 1, 0), Vec3(-1, 0, 0), 0.0f);
+    std::printf("    +X reflects (%.2f %.2f %.2f), -X (%.2f %.2f %.2f)\n", spec.x, spec.y, spec.z, back.x, back.y, back.z);
+    CHECK(spec.x > 0.8f && spec.y < 0.1f && back.x < 0.1f);
+    RenderProbe big = p, small = p;
+    big.box_min = Vec3(-2), big.box_max = Vec3(2), big.blend = 1.0f, big.importance = 1;
+    small.box_min = Vec3(-1), small.box_max = Vec3(1), small.blend = 0.5f, small.importance = 1;
+    std::vector<RenderProbe> both = {big, small};
+    int idx[2];
+    float w[2];
+    CHECK(reflection_probe_weights(both, Vec3(0, 0, 0), idx, w) == 1 && idx[0] == 1 && w[0] == 1.0f);  // (the smaller wins)
+    CHECK(reflection_probe_weights(both, Vec3(0.9f, 0, 0), idx, w) == 1 && idx[0] == 1 && w[0] == 1.0f);  // (whole inside the box: a floor by its wall still reflects the room - review 401)
+    const int n = reflection_probe_weights(both, Vec3(1.2f, 0, 0), idx, w);
+    std::printf("    just outside the small box: %d probe(s), %d x %.2f, %d x %.2f\n", n, idx[0], w[0], n > 1 ? idx[1] : -1, n > 1 ? w[1] : 0.0f);
+    CHECK(n == 2 && idx[0] == 1 && std::fabs(w[0] - 0.6f) < 1e-5f && idx[1] == 0 && std::fabs(w[1] - 0.4f) < 1e-5f);  // (0.2 of 0.5 outside: 0.6 the small one's, the big one the rest)
+    both[0].importance = 2;
+    CHECK(reflection_probe_weights(both, Vec3(0, 0, 0), idx, w) == 1 && idx[0] == 0);  // (importance first)
+    CHECK(reflection_probe_weights(both, Vec3(3.5f, 0, 0), idx, w) == 0);  // (outside both and their blend distances)
+    const std::string path = resolve_asset_path("Assets/Imported/R401rp.bin");
+    std::map<uint64_t, ReflectionProbeBake> bakes{{7, red}}, loaded;
+    std::string err;
+    CHECK(save_reflection_probe_bakes(path, bakes, err) && load_reflection_probe_bakes(path, loaded, err) && loaded.count(7) && loaded[7].size == 8 && loaded[7].faces[0][0].x == 1.0f && !loaded[7].from_unity);
+    std::string raw;
+    fs::read_file(path, raw);
+    raw[raw.size() - 5] ^= 0x10;
+    fs::write_file(path, raw);
+    CHECK(!load_reflection_probe_bakes(path, loaded, err) && err.find("checksum") != std::string::npos);
+    ReflectionProbeBake bad = red;
+    bad.faces[1][3].y = std::nanf("");
+    CHECK(!bad.valid(err) && !save_reflection_probe_bakes(path, {{1, bad}}, err));
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  });
+  test("Reflection probes baked by Generate Lighting (round 401): a probe in a room of six emissive walls - each face's centre the wall it faces, a marker on the +X wall's upper front quarter where the faces' rows and columns say", [] {
+    Editor ed;
+    r35_open(ed);
+    for (const char *n : {"Cube", "Plane", "Sphere", "Cylinder", "Utah Teapot"})
+      if (GameObject *g = ed.scene().find_by_name(n)) g->active = false;
+    auto wall = [&](const char *name, Vec3 pos, Vec3 scale, Vec3 colour) {
+      GameObject *g = r35_add(ed, "Cube", name, pos, scale, Vec3(0.0f));
+      Material &m = *g->get<MeshRenderer>()->materials[0];
+      m.emission = colour, m.emission_strength = 1.0f;
+      m.touch();
+      return g;
+    };
+    wall("+X", Vec3(3, 0, 0), Vec3(0.1f, 6, 6), Vec3(1, 0, 0));
+    wall("-X", Vec3(-3, 0, 0), Vec3(0.1f, 6, 6), Vec3(0, 1, 0));
+    wall("+Y", Vec3(0, 3, 0), Vec3(6, 0.1f, 6), Vec3(0, 0, 1));
+    wall("-Y", Vec3(0, -3, 0), Vec3(6, 0.1f, 6), Vec3(1, 1, 0));
+    wall("+Z", Vec3(0, 0, 3), Vec3(6, 6, 0.1f), Vec3(0, 1, 1));
+    wall("-Z", Vec3(0, 0, -3), Vec3(6, 6, 0.1f), Vec3(1, 0, 1));
+    wall("Marker", Vec3(2.8f, 1.5f, 1.5f), Vec3(0.2f, 0.8f, 0.8f), Vec3(1, 1, 1));
+    GameObject *probe = ed.scene().create("Probe");
+    probe->add<ReflectionProbeComponent>()->resolution = 16;
+    ed.commit_change("probe");
+    r35_bake(ed);
+    const auto &bakes = ed.reflection_probe_bakes_for_test();
+    const auto it = bakes.find(probe->id);
+    CHECK(it != bakes.end() && it->second.size == 16 && !it->second.from_unity);
+    if (it == bakes.end()) return;
+    const ReflectionProbeBake &b = it->second;
+    auto at = [&](Vec3 d) { return b.sample(normalize(d)); };
+    const Vec3 px = at(Vec3(1, 0, 0)), nx = at(Vec3(-1, 0, 0)), py = at(Vec3(0, 1, 0)), ny = at(Vec3(0, -1, 0)), pz = at(Vec3(0, 0, 1)), nz = at(Vec3(0, 0, -1));
+    std::printf("    +X (%.2f %.2f %.2f) -X (%.2f %.2f %.2f) +Y (%.2f %.2f %.2f) -Y (%.2f %.2f %.2f) +Z (%.2f %.2f %.2f) -Z (%.2f %.2f %.2f)\n", px.x, px.y, px.z, nx.x, nx.y, nx.z, py.x, py.y, py.z,
+                ny.x, ny.y, ny.z, pz.x, pz.y, pz.z, nz.x, nz.y, nz.z);
+    CHECK(px.x > 0.5f && px.y < 0.2f && px.z < 0.2f);
+    CHECK(nx.y > 0.5f && nx.x < 0.2f && nx.z < 0.2f);
+    CHECK(py.z > 0.5f && py.x < 0.2f && py.y < 0.2f);
+    CHECK(ny.x > 0.5f && ny.y > 0.5f && ny.z < 0.2f);
+    CHECK(pz.y > 0.5f && pz.z > 0.5f && pz.x < 0.2f);
+    CHECK(nz.x > 0.5f && nz.z > 0.5f && nz.y < 0.2f);
+    const Vec3 marker = at(Vec3(1, 0.55f, 0.55f)), plain = at(Vec3(1, -0.55f, -0.55f));
+    std::printf("    the marker's corner (%.2f %.2f %.2f), the opposite corner (%.2f %.2f %.2f)\n", marker.x, marker.y, marker.z, plain.x, plain.y, plain.z);
+    CHECK(marker.y > 0.5f && marker.z > 0.5f && plain.y < 0.2f && plain.z < 0.2f);
+  });
+  test("Fog as Unity's (round 401): by the view depth in the rasterizer and the path tracer - Linear from start to end, Exponential 1 - e^-(density x depth), Exponential Squared 1 - e^-(density x depth)^2", [] {
+    Editor ed;
+    r57_open(ed);
+    ed.command("set Render.ViewTransform Standard");
+    ed.command("set Render.Exposure 0");
+    ed.command("set World.FogColor 0 0 0");
+    ed.command("set World.FogColorFar 0 0 0");
+    auto grey = [&](const char *engine) {
+      const Image &img = r57_render(ed, engine, false);
+      const uint32_t c = img.pixels[(size_t)(img.height / 2) * img.width + img.width / 2];
+      return srgb_to_linear((float)((c >> 16) & 255) / 255.0f);
+    };
+    for (const char *engine : {"Rasterized", "Path"}) {
+      ed.command("set World.Fog false");
+      const float off = grey(engine);
+      ed.command("set World.Fog true");
+      ed.command("set World.FogMode Linear");
+      ed.command("set World.FogStart 0");
+      ed.command("set World.FogEnd 20");
+      const float lin = grey(engine);
+      const float f_lin = off > 1e-4f ? 1.0f - lin / off : 0.0f, depth = f_lin * 20.0f;
+      ed.command("set World.FogMode Exponential");
+      ed.command("set World.FogDensity 0.1");
+      const float f_exp = off > 1e-4f ? 1.0f - grey(engine) / off : 0.0f;
+      ed.command("set World.FogMode ExponentialSquared");
+      ed.command("set World.FogDensity 0.15");
+      const float f_exp2 = off > 1e-4f ? 1.0f - grey(engine) / off : 0.0f;
+      std::printf("    %s: the cube's centre %.3f lit, depth %.2f m from the linear fog; exponential %.3f (formula %.3f), squared %.3f (formula %.3f)\n", engine, off, depth, f_exp,
+                  1.0f - std::exp(-0.1f * depth), f_exp2, 1.0f - std::exp(-(0.15f * depth) * (0.15f * depth)));
+      const float tol = engine[0] == 'P' ? 0.08f : 0.03f;
+      CHECK(off > 0.05f && depth > 1.0f && depth < 19.0f);
+      CHECK(std::fabs(f_exp - (1.0f - std::exp(-0.1f * depth))) < tol);
+      CHECK(std::fabs(f_exp2 - (1.0f - std::exp(-(0.15f * depth) * (0.15f * depth)))) < tol);
+    }
+  });
+}
+
 static void tests_round400() {
   test("Unity's lightmaps file (round 400): written and read back equal; a changed byte and a cut file refused; a page's halves turned to Blendity's rows (Unity's run up)", [] {
     using namespace r400;
@@ -9899,8 +10254,8 @@ static void tests_round395() {
     EnvironmentSettings env;
     std::vector<std::string> notes;
     CHECK(unity_render_settings(docs, env, notes) && env.mode == 0 && env.sky.x == 1.0f && env.equator.y == 1.0f && env.ground.z == 1.0f && env.strength == 1.0f);  // (review 395: the multiplier is a Skybox's)
-    std::printf("    fog: %s, %g to %g m, colour (%g %g %g); %zu note(s)\n", env.fog ? "on" : "off", env.fog_start, env.fog_end, env.fog_color.x, env.fog_color.y, env.fog_color.z, notes.size());
-    CHECK(env.fog && env.fog_start == 0.0f && std::fabs(env.fog_end - 150.0f) < 1e-3f && std::fabs(env.fog_color.x - srgb_to_linear(0.5f)) < 1e-5f && notes.size() == 1);
+    std::printf("    fog: %s, mode %d density %g, colour (%g %g %g); %zu note(s)\n", env.fog ? "on" : "off", env.fog_mode, env.fog_density, env.fog_color.x, env.fog_color.y, env.fog_color.z, notes.size());
+    CHECK(env.fog && env.fog_mode == 1 && std::fabs(env.fog_density - 0.02f) < 1e-6f && std::fabs(env.fog_color.x - srgb_to_linear(0.5f)) < 1e-5f && notes.empty());  // (round 401: Unity's mode as it is)
   });
   test("Unity Filamented (round 395): Silent's four setups by name - Metallic as Standard, Roughness's _Glossiness and roughness map, Specular's colour as metal, Cloth's sheen; the occlusion map said", [] {
     using namespace r371;
@@ -10000,7 +10355,7 @@ static void tests_round395() {
     /* Review 395: one top node is Unity's root - the instance's position replaces its own (not added over it), its static flags its renderer's. */
     CHECK(solo->local().position.x == 4.0f && solo->parent && solo->parent->local().position.x == 0.0f && solo->get<MeshRenderer>()->contribute_gi);
     CHECK(shelves == std::vector<std::string>({"Green", "Red"}));  // (the variant's Blue under the scene's Green; the plain one's own .mat)
-    CHECK(l && l->intensity == 4.0f && l->color.y == 0.25f && !l->enabled);
+    CHECK(l && l->intensity == 4.0f && std::fabs(l->color.y - srgb_to_linear(0.25f)) < 1e-6f && !l->enabled);  // (round 401: Unity's gamma colour read as linear)
     CHECK(sr && sr->contribute_gi && !sr->cast_shadows && !sr->receive_shadows && sr->scale_in_lightmap == 2.0f);
     CHECK(ed.scene().find_by_name("Main Camera") != nullptr && ed.scene().environment.fog == false);  // (an import adds to the scene: its lighting stays)
     /* Opened as a scene: a new one - no starter objects, the objects at the top, the scene's fog and ambient, nothing to undo. */
@@ -11267,6 +11622,7 @@ void run_assets_tests() {
   tests_round398();
   tests_round399();
   tests_round400();
+  tests_round401();
   tests_round372();
   tests_round373();
   tests_round374();

@@ -262,7 +262,7 @@ bool Editor::outline_draw_item(const GameObject &g, const Mesh &m, const DrawIte
 }
 
 /* A Light component as the renderers see it (all four types, temperature applied). */
-RenderLight to_render_light(const GameObject &g, const Light &l) {
+RenderLight to_render_light(const GameObject &g, const Light &l, bool gamma_intensity) {
   RenderLight rl;
   rl.type = l.type == 1 ? RenderLight::Point : l.type == 2 ? RenderLight::Spot : l.type == 3 ? RenderLight::Area : RenderLight::Directional;
   const Quat q = g.world_rotation();
@@ -271,6 +271,12 @@ RenderLight to_render_light(const GameObject &g, const Light &l) {
   rl.position = g.world_position();
   rl.color = l.final_color();
   rl.intensity = l.intensity;
+  if (gamma_intensity) {  // (Unity's built-in pipeline, lightsUseLinearIntensity off: (colour x intensity) in gamma, then linear - every renderer and bake alike)
+    auto lin = [](float v) { return v <= 1.0f ? srgb_to_linear(v) : std::pow(v, 2.2f); };
+    const Vec3 c = rl.color;
+    rl.color = Vec3(lin(linear_to_srgb(std::max(0.0f, c.x)) * l.intensity), lin(linear_to_srgb(std::max(0.0f, c.y)) * l.intensity), lin(linear_to_srgb(std::max(0.0f, c.z)) * l.intensity));
+    rl.intensity = 1.0f;
+  }
   rl.bake_mode = std::max(0, std::min(2, l.mode));
   rl.range = l.range;
   const float outer = std::max(1.0f, std::min(179.0f, l.spot_angle)) * 0.5f;
@@ -278,6 +284,7 @@ RenderLight to_render_light(const GameObject &g, const Light &l) {
   rl.cos_outer = std::cos(outer * kDeg2Rad);
   rl.cos_inner = std::cos(inner * kDeg2Rad);
   rl.disk = l.area_shape == 1;
+  rl.shadows = l.shadows != 0;  // (round 401: Unity's No Shadows)
   /* The object's scale stretches an area light, as in Blender. */
   const Mat4 &w = g.world_matrix();
   rl.width = l.area_width * length(w.dir({1, 0, 0}));
@@ -310,7 +317,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
     /* A Baked light exists only through the bake (task 0021, as Unity): never rasterized, so no direct
      * light, shadow map or live bounce from it. Before a bake, Preview Lighting shows it (Bakery's way). */
     if (rasterized && l->mode == 2) return;
-    RenderLight rl = to_render_light(g, *l);
+    RenderLight rl = to_render_light(g, *l, unity_lights_gamma());  // (review 401: a Unity scene's lights shine as Unity's do)
     /* What the lightmaps hold, not the light's current mode: a light baked as Baked and switched to
      * Realtime since must not shine twice, and one added since must not vanish. */
     const LightingData &ld = shown_lighting();
@@ -318,9 +325,41 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
     rl.bake_mode = baked != ld.light_modes.end() && scene_->lighting.baked_gi ? baked->second : 0;
     env.lights.push_back(rl);
   });
+  env.reflection_probes = render_reflection_probes();  // (round 401)
   update_environment();
   env.environment = &env_;
   return env;
+}
+
+/* Round 401: every bake's map for the renderers, made when the bakes change (a fetch, a bake, a load) - on the main
+ * thread, but capped at 1024 x 512 (review 401). */
+void Editor::build_reflection_probe_maps() {
+  for (const auto &[id, bake] : reflection_probe_bakes_) {
+    auto &slot = reflection_probe_maps_[id];
+    if (slot.first != &bake || !slot.second) slot = {&bake, reflection_probe_texture(bake)};
+  }
+}
+
+/* Round 401: the reflection probes with a bake, as the rasterizers light with them - each box in world space, its map
+ * built once per bake. */
+std::vector<RenderProbe> Editor::render_reflection_probes() {
+  std::vector<RenderProbe> out;
+  scene_->for_each([&](GameObject &g) {
+    const ReflectionProbeComponent *c = g.get<ReflectionProbeComponent>();
+    if (!c || !c->enabled || !g.active_in_hierarchy()) return;
+    const auto bake = reflection_probe_bakes_.find(g.id);
+    if (bake == reflection_probe_bakes_.end()) return;
+    auto &slot = reflection_probe_maps_[g.id];
+    if (slot.first != &bake->second || !slot.second) slot = {&bake->second, reflection_probe_texture(bake->second)};
+    if (!slot.second) return;
+    RenderProbe p;
+    p.position = g.world_position();
+    c->world_box(g, p.box_min, p.box_max);
+    p.projection = c->box_projection, p.intensity = c->intensity, p.blend = c->blend_distance, p.importance = c->importance;
+    p.map = slot.second;
+    out.push_back(p);
+  });
+  return out;
 }
 
 void Editor::update_environment() {
@@ -352,6 +391,7 @@ void Editor::update_environment() {
   env_.disc_soft = es.sun_disc_softness, env_.disc_color = es.sun_disc_color;
   env_.band_width = std::max(0.0f, es.horizon_band), env_.band_color = es.horizon_band_color;
   env_.fog = es.fog, env_.fog_start = es.fog_start, env_.fog_end = es.fog_end, env_.fog_color = es.fog_color, env_.fog_far = es.fog_color_far;
+  env_.fog_mode = es.fog_mode, env_.fog_density = es.fog_density;  // (round 401)
   if (key == env_key_) return;
   env_key_ = key;
   env_.map = nullptr;
@@ -547,10 +587,15 @@ const ShadowMap *Editor::shadow_for_view(ShadowMap &m, bool cpu_view) const {
   return m.valid() ? &m : nullptr;
 }
 
-const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env, bool frame_only) {
-  int li = -1;
+/* The light whose shadow map the views draw: the first sun that casts shadows (round 401: a sun with No Shadows casts none). */
+static int shadow_sun(const LightingEnv &env) {
   for (size_t i = 0; i < env.lights.size(); i++)
-    if (env.lights[i].type == RenderLight::Directional) { li = (int)i; break; }
+    if (env.lights[i].type == RenderLight::Directional && env.lights[i].shadows) return (int)i;
+  return -1;
+}
+
+const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, const LightingEnv &env, bool frame_only) {
+  const int li = shadow_sun(env);
   if (li < 0) return nullptr;
   std::vector<const DrawItem *> caster_ptrs;  // copied into `casters` only when the map is rendered
   std::vector<uint64_t> caster_keys, motion_keys;
@@ -702,8 +747,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   const bool shadows = scene_lights && scene_->render.shadows;
   if (shadows) {
     if (const ShadowMap *sm = update_shadow_map(items, env, gpu_maybe)) {
-      for (size_t i = 0; i < env.lights.size(); i++)
-        if (env.lights[i].type == RenderLight::Directional) { env.shadow_light = (int)i; break; }
+      env.shadow_light = shadow_sun(env);  // (round 401: a sun without shadows casts none)
       env.shadow = sm;
     }
   }

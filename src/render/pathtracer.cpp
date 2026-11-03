@@ -1107,7 +1107,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (id_out) *id_out = h.object + 1;
     }
     if (bounce == 0 && camera_path && env_.fog) {  // (task 0248: the fog's share of the pixel is the ramp's colour; the surface's path carries the rest)
-      const float f = env_.fog_amount(since_scatter + h.t);  // (from the camera, through the see-through passes)
+      const float f = env_.fog_amount((since_scatter + h.t) * std::max(0.0f, dot(ray.dir, cam_fwd_)));  // (from the camera, through the see-through passes; round 401: the view depth)
       if (f > 0.0f) {
         L += beta * (env_.fog_color + (env_.fog_far - env_.fog_color) * f) * f;
         beta = beta * (1.0f - f);
@@ -1268,7 +1268,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         Vec3 Tr(0.0f);
         if (ndl > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
-          Tr = transmittance({origin, dir}, dist, &media);
+          Tr = l.shadows ? transmittance({origin, dir}, dist, &media) : Vec3(1.0f);  // (round 401: No Shadows)
         }
         const int li_idx = (int)(&l - &lights_[0]);
         const float face = li_idx == toon_key_ && h.object < local_keys_.size() ? toon_face_lit(*s.toon, s, local_keys_[h.object]) : -1.0f;  // (task 0149)
@@ -1281,7 +1281,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       }
       if (power <= 0 || dot(n, dir) <= 0 || dot(sp.geo_normal, dir) <= 0) continue;
       rays++;
-      const Vec3 Tr = transmittance({origin, dir}, dist, &media);
+      const Vec3 Tr = l.shadows ? transmittance({origin, dir}, dist, &media) : Vec3(1.0f);  // (round 401: No Shadows)
       if (std::max({Tr.x, Tr.y, Tr.z}) <= 0.0f) continue;
       const Vec3 Lo = bsdf(dir) * l.color * Tr * power;  // scattered toward V, before throughput (a toon bounce: Lambert)
       add(beta * Lo);
@@ -2466,8 +2466,9 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   v4(p.env_disc, env_.sun_dir), p.env_disc[3] = env_.disc_cos;  // (task 0248)
   v4(p.env_disc_color, env_.disc_color), p.env_disc_color[3] = env_.disc_soft;
   v4(p.env_band, env_.band_color), p.env_band[3] = env_.band_width;
-  p.fog[0] = env_.fog_start, p.fog[1] = env_.fog_end, p.fog[2] = env_.fog ? 1.0f : 0.0f, p.fog[3] = 0.0f;
+  p.fog[0] = env_.fog_start, p.fog[1] = env_.fog_end, p.fog[2] = env_.fog ? 1.0f : 0.0f, p.fog[3] = (float)env_.fog_mode;
   v4(p.fog_color, env_.fog_color);
+  p.fog_color[3] = env_.fog_density;  // (round 401)
   v4(p.fog_far, env_.fog_far);
   v4(p.background, settings_.background);
   p.background[3] = settings_.solid_background ? (settings_.transparent_film ? 2.0f : 1.0f) : 0.0f;  // 2: transparent film

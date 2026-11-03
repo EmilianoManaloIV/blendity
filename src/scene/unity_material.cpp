@@ -360,6 +360,34 @@ std::string identifier_before(const std::string &code, size_t at) {
 
 }  // namespace
 
+bool unity_skybox(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
+                  const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, UnitySkybox &out) {
+  std::vector<UnityDoc> docs;
+  std::string why;
+  if (!parse_unity_yaml(yaml, docs, why)) return false;
+  const UnityDoc *mat = nullptr;
+  for (const UnityDoc &d : docs) mat = !mat && d.class_id == 21 ? &d : mat;
+  if (!mat) return false;
+  const Props p = read_props(mat->body);
+  out = UnitySkybox{};
+  out.shader = shader_name(mat->body.guid("m_Shader"), mat->body.file_id("m_Shader"));
+  if (mat->body.file_id("m_Shader") == 10755 && mat->body.guid("m_Shader") == "0000000000000000f000000000000000") out.shader = "Unlit/Color";  // (the built-in by number)
+  auto path_of = [&](const TexEnv *t) { return t ? texture(t->guid) : std::string(); };
+  out.texture = path_of(tex_of(p, {"_MainTex", "_Tex"}));
+  const char *sides[6] = {"_FrontTex", "_BackTex", "_LeftTex", "_RightTex", "_UpTex", "_DownTex"};
+  for (int k = 0; k < 6; k++) out.sides[k] = path_of(tex_of(p, {sides[k]}));
+  Vec3 c;
+  if (color_of(p, {"_Tint"}, c)) out.tint = c;
+  if (color_of(p, {"_Color"}, c)) out.color = c;
+  if (color_of(p, {"_SkyTint"}, c)) out.sky_tint = c;
+  if (color_of(p, {"_GroundColor"}, c)) out.ground = c;
+  out.exposure = (float)prop(p, "_Exposure", 1.0);
+  out.rotation = (float)prop(p, "_Rotation", 0.0);
+  out.sun_size = (float)prop(p, "_SunSize", 0.04);
+  out.atmosphere_thickness = (float)prop(p, "_AtmosphereThickness", 1.0);
+  return true;
+}
+
 std::vector<std::string> unity_shader_properties(const std::string &shader_text) {
   std::vector<std::string> out;
   const std::string code = shaderlab_code(shader_text);

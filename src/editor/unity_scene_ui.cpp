@@ -88,6 +88,48 @@ std::string unity_shader_name(const UnityGuidIndex &index, const std::string &gu
   return end == std::string::npos ? fs::stem(it->second.path) : head.substr(at + 8, end - at - 8);
 }
 
+/* Round 401: a scene's global PostProcessVolume (PPv2) - its profile onto the camera that carries the PostProcessLayer
+ * (else the Main Camera): the tonemapper and exposure as the scene's, bloom, grading and vignette as the camera's filter
+ * effects, so the Game view, F12 and the Scene view (which looks through the active camera's filters) show it. */
+void Editor::apply_unity_post_processing(const std::vector<UnityDoc> &docs, UnityImport &ctx) {
+  const UnityDoc *volume = nullptr, *layer = nullptr;
+  for (const UnityDoc &d : docs) {
+    if (d.class_id != 114) continue;
+    if (d.body.get("sharedProfile") && d.body.get("isGlobal") && d.body.num("isGlobal", 0.0) != 0.0 && d.body.file_id("sharedProfile")) volume = volume ? volume : &d;  // (the first global one - review 401)
+    if (d.body.get("volumeTrigger") && d.body.get("volumeLayer")) layer = layer ? layer : &d;
+  }
+  if (!volume) return;
+  const std::string rel = ctx.path_of ? ctx.path_of(volume->body.guid("sharedProfile")) : std::string();
+  std::string text;
+  if (rel.empty() || !fs::read_file(resolve_asset_path(rel), text)) return ctx.notes.push_back("the post-processing profile isn't in the project: the look stays Blendity's");
+  UnityPostProfile profile;
+  if (!unity_post_profile(text, profile)) return ctx.notes.push_back("the post-processing profile couldn't be read: the look stays Blendity's");
+  GameObject *cam = nullptr;
+  const std::string layer_object = layer ? std::to_string(layer->body.file_id("m_GameObject")) : std::string();  // (the layer sits on the camera it draws for - review 401)
+  scene_->for_each([&](GameObject &g) {
+    const UnityOrigin *o = cam || layer_object.empty() ? nullptr : g.get<UnityOrigin>();
+    if (o && o->game_object == layer_object && g.camera()) cam = &g;
+  });
+  if (!cam) main_camera(*scene_, &cam);
+  if (!cam) return ctx.notes.push_back("the post-processing profile has no camera to go on");
+  unity_post_apply(profile, *scene_, *cam, ctx.notes);
+  Log::info("Import Unity: the post-processing profile's look is on %s (%s%s%s)", cam->name.c_str(), profile.grading.on ? "grading" : "", profile.bloom.on ? " bloom" : "",
+            profile.vignette.on ? " vignette" : "");
+}
+
+/* Round 401: the scene's skybox material by GUID, read as the shader reads it. */
+bool load_unity_skybox(const std::string &guid, UnitySkybox &out) {
+  const std::string assets = resolve_asset_path("Assets");
+  const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets, fs::parent(assets));
+  const auto it = index->find(guid);
+  std::string text;
+  if (it == index->end() || !fs::read_file(it->second.path, text)) return false;
+  return unity_skybox(text, [&](const std::string &g) {
+        const auto t = index->find(g);
+        return t == index->end() ? std::string() : make_asset_relative(t->second.path);
+      }, [&](const std::string &g, int64_t fid) { return unity_shader_name(*index, g, fid); }, out);
+}
+
 bool load_unity_material(const std::string &text, const std::string &path, Material &m) {
   if (text.find("--- !u!21 ") == std::string::npos) return false;  // (a Material document: anything else isn't one - no index walked for it)
   const std::string assets = resolve_asset_path("Assets");
@@ -290,10 +332,14 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   GameObject *root = scene_->create(fs::stem(path));
   if (!as_scene) root->set_world_position(cam_.pivot);
   build_unity_objects(docs, *scene_, root, ctx);
-  if (as_scene && unity_render_settings(docs, scene_->environment, ctx.notes)) Log::info("Import Unity: the scene's ambient and fog came in");
+  if (as_scene && unity_render_settings(docs, scene_->environment, ctx.notes, [&](const std::string &guid, UnitySkybox &sb) { return load_unity_skybox(guid, sb); }, &scene_->unity))
+    Log::info("Import Unity: the scene's ambient, skybox and fog came in");
+  if (as_scene) scene_->unity.file = make_asset_relative(path);  // (round 401: Export Unity Package writes the world, cameras and lights back into it)
+  if (as_scene) apply_unity_post_processing(docs, ctx);  // (round 401: the scene's global Post Processing volume as the Main Camera's look)
   int probes = 0, lightmapped = 0;
-  for (const UnityDoc &d : docs) probes += d.class_id == 220 || d.class_id == 215, lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;
-  if (probes) ctx.notes.push_back(std::to_string(probes) + " light / reflection probe(s) kept as Unity's (Blendity bakes its own: the Lighting window)");
+  for (const UnityDoc &d : docs) probes += d.class_id == 220, lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;
+  if (probes) ctx.notes.push_back(std::to_string(probes) + " light probe group(s) kept as Unity's (their baked probes come with Unity's lightmaps)");
+  if (ctx.reflection_probes) ctx.notes.push_back(std::to_string(ctx.reflection_probes) + " reflection probe(s) came in (their bakes come with Unity's lightmaps, or Generate Lighting's)");  // (round 401)
   if (lightmapped && !fs::exists(path + ".unity-lighting"))  // (round 400: fetched once by Unity, shown after)
     ctx.notes.push_back("the scene's baked lightmaps are Unity's: Lighting > Use Unity's Lightmaps (or: unity lightmaps) has Unity read them - written back unchanged");
   std::vector<GameObject *> strays;  // (review 370: a variant's base, a parent loop - anything left at the top goes under the root)

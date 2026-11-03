@@ -171,6 +171,7 @@ void Editor::load_lighting_data() {
   lm_mesh_baked_.clear();
   lighting_data_ = LightingData{};
   light_volume_bakes_.clear();  // (round 398: the scene's, loaded below)
+  reflection_probe_bakes_.clear(), reflection_probe_maps_.clear(), reflection_probe_bakes_dirty_ = false, reflection_probe_gen_++;  // (review 401: never the last scene's)
   light_volume_bakes_dirty_ = false;
   probes_ = ProbeVolumeData{};
   probe_live_ready_ = false;
@@ -182,6 +183,7 @@ void Editor::load_lighting_data() {
   ood_key_ = 0;
   const std::string dir = lighting_dir();
   if (!dir.empty()) load_light_volume_bakes(dir);  // (round 398: their own file - review 398: also with no lightmaps)
+  if (!dir.empty()) load_reflection_probe_bakes(dir);  // (round 401)
   if (dir.empty() || !fs::exists(fs::join(dir, "LightingData.bin"))) return;
   std::string err;
   if (!lighting_data_.load(dir, err)) Log::warn("Baked lighting not loaded: %s", err.c_str());
@@ -209,6 +211,7 @@ void Editor::load_lighting_data() {
  * file, or the scene was saved under another name). */
 void Editor::save_lighting_data() {
   if (!lighting_dir().empty() && light_volume_bakes_dirty_) save_light_volume_bakes(lighting_dir()), light_volume_bakes_dirty_ = false;  // (review 398: on its own)
+  if (!lighting_dir().empty() && reflection_probe_bakes_dirty_) save_reflection_probe_bakes(lighting_dir()), reflection_probe_bakes_dirty_ = false;  // (round 401)
   if (lighting_data_.empty() && (probes_.empty() || probes_.scene_key == 0)) return;
   const std::string dir = lighting_dir();
   if (dir.empty() || dir == lighting_saved_dir_) return;
@@ -246,7 +249,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
           objects.push_back(std::move(o));
         }
     if (auto *l = g.get<Light>())
-      if (l->enabled) lights.push_back({to_render_light(g, *l), l->mode, g.id});
+      if (l->enabled) lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
   });
 }
 
@@ -307,6 +310,8 @@ void Editor::bake_cancel() {
   probe_phase_ = false;
   probe_pt_.reset();
   lv_bake_ = LightVolumeBakeRun{};  // (review 398: its tracer held the cancelled bake's meshes)
+  if (rp_bake_.begun) reflection_probe_bakes_changed();  // (review 401: the probes it finished are kept and shown)
+  rp_bake_ = ReflectionProbeBakeRun{};  // (round 401)
   bake_objects_.clear();
   bake_lights_.clear();
   if (!baking_) {
@@ -323,6 +328,7 @@ void Editor::bake_clear() {
   if (baking_) bake_cancel();
   light_volume_bakes_.clear();  // (review 398: the volumes' bakes go with the rest)
   livelink_light_volume_bakes_changed();
+  reflection_probe_bakes_.clear(), reflection_probe_bakes_changed();  // (round 401)
   lighting_data_ = LightingData{};
   lighting_from_unity_ = false;  // (round 400)
   probes_ = ProbeVolumeData{};
@@ -381,6 +387,7 @@ void Editor::step_bake() {
     Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - valid, probes_.bricks.size());
   }
   if (light_volume_bake_step(budget)) return;  // (round 398: the Light Volumes Blendity bakes, in slices)
+  if (reflection_probe_bake_step(budget)) return;  // (round 401: the Reflection Probes, their six faces each)
   baking_ = false;
   bake_objects_.clear();  // the bake's copies of the meshes
   bake_lights_.clear();

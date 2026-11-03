@@ -490,8 +490,9 @@ void raster_world(gpu::RasterFrame &fr, const LightingEnv &env, const Camera *ca
     set3(fr.sky_disc, e->sun_dir), fr.sky_disc[3] = e->disc_cos;
     set3(fr.sky_disc_color, e->disc_color), fr.sky_disc_color[3] = e->disc_soft;
     set3(fr.sky_band, e->band_color), fr.sky_band[3] = e->band_width;
-    fr.fog[0] = e->fog_start, fr.fog[1] = e->fog_end, fr.fog[2] = e->fog ? 1.0f : 0.0f;
+    fr.fog[0] = e->fog_start, fr.fog[1] = e->fog_end, fr.fog[2] = e->fog ? 1.0f : 0.0f, fr.fog[3] = (float)e->fog_mode;
     set3(fr.fog_color, e->fog_color), set3(fr.fog_far, e->fog_far);
+    fr.fog_color[3] = e->fog_density;  // (round 401)
   }
   else fr.sky_disc[3] = 2.0f, fr.sky_band[3] = 0.0f, fr.fog[2] = 0.0f;
   fr.view_transform = (int)env.view_transform;
@@ -1097,6 +1098,14 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     set3(fr.ground, env.ground);
   }
   raster_world_map(fr, env, tex);
+  for (const RenderProbe &p : env.reflection_probes) {  // (round 401: the reflection probes' maps on the card)
+    gpu::RasterProbe g;
+    set3(g.position, p.position), set3(g.box_min, p.box_min), set3(g.box_max, p.box_max);
+    g.intensity = p.intensity, g.blend = p.blend, g.importance = p.importance, g.projection = p.projection ? 1 : 0;
+    g.texture = p.map ? tex(p.map) : -1;
+    g.levels = p.map ? (int)p.map->levels.size() - 1 : 0;
+    if (g.texture >= 0) fr.probes.push_back(g);
+  }
   gpu_forget_old_world(env);
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);  // (the world's map too large for the card)
   ok = ok && raster_view_lut(*g, fr, env.view_transform, err);

@@ -37,4 +37,16 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
  * are left out (SideRail's exit sign had taken a texture its shader no longer had). Empty when there's no block. */
 std::vector<std::string> unity_shader_properties(const std::string &shader_text);
 
+/* Round 401: a scene's skybox material as Blendity's world. `shader` the shader's name (Skybox/Procedural, Skybox/Panoramic,
+ * Skybox/Cubemap, Skybox/6 Sided, Unlit/...); the fields each reads. */
+struct UnitySkybox {
+  std::string shader;
+  std::string texture;  // Panoramic's _MainTex, Cubemap's _Tex (project-relative path, "" when not in the project)
+  std::string sides[6];  // 6 Sided: front, back, left, right, up, down
+  Vec3 tint{0.5f, 0.5f, 0.5f}, color{0.0f, 0.0f, 0.0f}, sky_tint{0.5f, 0.5f, 0.5f}, ground{0.369f, 0.349f, 0.341f};  // (linear)
+  float exposure = 1.0f, rotation = 0.0f, sun_size = 0.04f, atmosphere_thickness = 1.0f;
+};
+bool unity_skybox(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
+                  const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, UnitySkybox &out);
+
 }  // namespace bl

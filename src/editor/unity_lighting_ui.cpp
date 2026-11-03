@@ -74,6 +74,19 @@ public static class BlendityLightmaps {
 
     /* The texture at `path` re-imported plain and readable in `format` (Default and Standalone, where a creator's cap or
      * compression would win over the default); null when it isn't a texture. */
+    /* Round 401: a baked reflection probe's cubemap (ReflectionProbe-N.exr) re-imported readable at full size, HDR. */
+    static Cubemap ReadableCube(string path) {
+        /* Only readable: its mips and specular convolution as Unity baked them (re-importing it flat and unconvolved had
+         * given magenta faces), its format the probe's own (RGBAHalf on PC). */
+        var importer = string.IsNullOrEmpty(path) ? null : AssetImporter.GetAtPath(path) as TextureImporter;
+        if (importer == null) return null;
+        if (!importer.isReadable) {
+            importer.isReadable = true;
+            importer.SaveAndReimport();
+        }
+        return AssetDatabase.LoadAssetAtPath<Cubemap>(path);
+    }
+
     static Texture2D Readable(string path, TextureImporterFormat format) {
         var importer = string.IsNullOrEmpty(path) ? null : AssetImporter.GetAtPath(path) as TextureImporter;
         if (importer == null) return null;
@@ -132,7 +145,7 @@ public static class BlendityLightmaps {
             EditorSceneManager.OpenScene(Arg("-blendityScene"), OpenSceneMode.Single);
             var o = new Out();
             o.w.Write(Encoding.ASCII.GetBytes("BLULIGHT"));
-            o.w.Write(1);  // version
+            o.w.Write(2);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes)
             o.w.Write(-1);  // (the lightmap encoding: not public in 2022.3 - the EXR itself is linear)
             o.w.Write((int)LightmapSettings.lightmapsMode);
             /* Which bake: the LightingData.asset's path and its bytes' FNV-1a 32 (Blendity refuses the file once Unity bakes again). */
@@ -218,6 +231,34 @@ public static class BlendityLightmaps {
                 o.w.Write(at[i].x); o.w.Write(at[i].y); o.w.Write(at[i].z);
                 sh[i].Evaluate(axes, seen);
                 foreach (Color c in seen) { o.w.Write(c.r); o.w.Write(c.g); o.w.Write(c.b); }
+            }
+            /* Round 401: each ReflectionProbe's baked cubemap - its path, box and settings, then six faces +X -X +Y -Y +Z -Z
+             * of size x size half RGB, each face as Cubemap.GetPixels gives it (the top row first). A probe with no bake, or
+             * one whose cubemap can't be read, writes size 0. */
+            var rprobes = new List<ReflectionProbe>();
+            foreach (GameObject root in EditorSceneManager.GetActiveScene().GetRootGameObjects())
+                rprobes.AddRange(root.GetComponentsInChildren<ReflectionProbe>(true));
+            o.w.Write(rprobes.Count);
+            CubemapFace[] faces = { CubemapFace.PositiveX, CubemapFace.NegativeX, CubemapFace.PositiveY, CubemapFace.NegativeY, CubemapFace.PositiveZ, CubemapFace.NegativeZ };
+            foreach (ReflectionProbe rp in rprobes) {
+                o.Str(PathOf(rp.transform));
+                Vector3 wp = rp.transform.position;
+                o.w.Write(wp.x); o.w.Write(wp.y); o.w.Write(wp.z);
+                o.w.Write(rp.size.x); o.w.Write(rp.size.y); o.w.Write(rp.size.z);
+                o.w.Write(rp.center.x); o.w.Write(rp.center.y); o.w.Write(rp.center.z);
+                o.w.Write(rp.boxProjection ? 1 : 0);
+                o.w.Write(rp.intensity);
+                o.w.Write(rp.importance);
+                Cubemap cube = null;
+                string cpath = rp.bakedTexture != null ? AssetDatabase.GetAssetPath(rp.bakedTexture) : "";
+                if (!string.IsNullOrEmpty(cpath)) cube = ReadableCube(cpath);
+                int size = cube != null ? cube.width : 0;
+                o.w.Write(size);
+                if (cube == null) continue;
+                foreach (CubemapFace f in faces) {
+                    Color[] px = cube.GetPixels(f, 0);
+                    foreach (Color c in px) { o.w.Write(Mathf.FloatToHalf(c.r)); o.w.Write(Mathf.FloatToHalf(c.g)); o.w.Write(Mathf.FloatToHalf(c.b)); }
+                }
             }
             File.WriteAllBytes(outPath, o.Done());
             code = 0;
@@ -436,13 +477,47 @@ bool Editor::apply_unity_lighting(const std::string &file) {
   });
   unity_probe_volume(u, probes_, placement);
   probes_.scene_key = probes_.empty() ? 0 : lighting_data_.scene_key;
+  const int reflections = apply_unity_reflection_probes(u, under);  // (round 401)
   lighting_from_unity_ = true;
   Log::info("Unity's lightmaps: %zu page(s)%s; %d of %d lightmapped renderers found (%.1f%% of their triangles matched Unity's)%s%s; %zu probe(s)",
             lighting_data_.pages.size(), directional ? ", directional" : "", m.matched, m.renderers, m.triangles ? 100.0 * (double)m.triangles_matched / (double)m.triangles : 0.0,
             m.not_found ? strprintf(", %d not found by name", m.not_found).c_str() : "", m.not_same ? strprintf(", %d with another mesh", m.not_same).c_str() : "",
             u.probes.size());
+  if (reflections || !u.reflection_probes.empty()) Log::info("Unity's reflection probes: %d of %zu with a bake read", reflections, u.reflection_probes.size());
   Log::info("Unity's lightmaps applied in %.0f ms", (now_seconds() - started) * 1000.0);
   return true;
+}
+
+/* Round 401: each of Unity's baked reflection probes onto the scene's Reflection Probe at its path, replacing a bake of
+ * Blendity's there. Cubemap.GetPixels gives a face's top row first (unlike Texture2D's; checked against Unity's own bake
+ * in review 401: the sky in row 0 of every side face), so the rows are Blendity's as they are. How many took one. */
+int Editor::apply_unity_reflection_probes(const UnityLighting &u, const GameObject *under) {
+  std::map<std::string, GameObject *> at;
+  scene_->for_each([&](GameObject &g) {
+    if (g.get<ReflectionProbeComponent>() && (!under || scene_->is_ancestor(under, &g))) at[unity_lighting_path(g, under)] = &g;
+  });
+  int took = 0;
+  for (const UnityLighting::ReflectionProbe &p : u.reflection_probes) {
+    const auto it = at.find(p.path);
+    if (it == at.end() || p.size < 1) continue;
+    ReflectionProbeBake b;
+    b.size = p.size, b.from_unity = true;
+    for (int f = 0; f < 6; f++) {
+      b.faces[f].resize((size_t)p.size * p.size);
+      for (int y = 0; y < p.size; y++)
+        for (int x = 0; x < p.size; x++) {
+          const uint16_t *h = &p.faces[f][((size_t)y * p.size + x) * 3];  // (Unity's top row first, as Blendity's)
+          const Vec3 c(unity_half_to_float(h[0]), unity_half_to_float(h[1]), unity_half_to_float(h[2]));
+          b.faces[f][(size_t)y * p.size + x] = std::isfinite(c.x) && std::isfinite(c.y) && std::isfinite(c.z) ? vmax(c, Vec3(0.0f)) : Vec3(0.0f);
+        }
+    }
+    std::string why;
+    if (!b.valid(why)) continue;
+    reflection_probe_bakes_[it->second->id] = std::move(b);
+    took++;
+  }
+  if (took) reflection_probe_bakes_changed();
+  return took;
 }
 
 }  // namespace bl

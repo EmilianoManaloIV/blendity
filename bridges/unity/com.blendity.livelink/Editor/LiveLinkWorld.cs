@@ -144,6 +144,37 @@ namespace Blendity.LiveLink
 
         /* The collider on a child of its own ("Blendity Collider", made again each time): the user's colliders on the
          * object are left alone. */
+        /* Round 401: a Reflection Probe on the object itself (Unity's own component), its fields as Blendity holds them;
+         * "none" takes it off. */
+        void OnReflectionProbe(Dictionary<string, object> j)
+        {
+            GameObject go;
+            if (!Objects.TryGetValue(j.GetId("id"), out go) || go == null)
+                return;
+            var probe = go.GetComponent<ReflectionProbe>();
+            if (j.GetBool("none"))
+            {
+                if (probe != null)
+                    Object.DestroyImmediate(probe);
+                return;
+            }
+            if (probe == null)
+                probe = go.AddComponent<ReflectionProbe>();
+            string mode = j.GetString("mode", "baked");
+            probe.mode = mode == "realtime" ? UnityEngine.Rendering.ReflectionProbeMode.Realtime
+                       : mode == "custom" ? UnityEngine.Rendering.ReflectionProbeMode.Custom : UnityEngine.Rendering.ReflectionProbeMode.Baked;
+            probe.size = Scale(j.GetFloats("size", 10, 10, 10));
+            probe.center = Position(j.GetFloats("offset", 0, 0, 0));
+            probe.boxProjection = j.GetBool("projection");
+            probe.intensity = (float)j.GetNumber("intensity", 1);
+            probe.blendDistance = (float)j.GetNumber("blend", 1);
+            probe.importance = (int)j.GetNumber("importance", 1);
+            probe.resolution = (int)j.GetNumber("resolution", 128);
+            probe.hdr = j.GetBool("hdr", true);
+            probe.nearClipPlane = (float)j.GetNumber("near", 0.3);
+            probe.farClipPlane = (float)j.GetNumber("far", 1000);
+        }
+
         void OnCollider(Dictionary<string, object> j)
         {
             long id = j.GetId("id");

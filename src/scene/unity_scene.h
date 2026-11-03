@@ -110,6 +110,7 @@ struct UnityImport {
   int max_objects = 200000;
   int objects = 0, meshes = 0, missing_meshes = 0, lights = 0, cameras = 0, colliders = 0, engine = 0, prefabs = 0, overrides_kept = 0;
   int dropped = 0;  // (components whose object couldn't be found)
+  int reflection_probes = 0;  // (round 401)
   int overrides_applied = 0, model_overrides_waiting = 0;  // (round 395: overrides on a model's parts whose fileIDs aren't known yet)
   int model_overrides_stale = 0;                           // (round 399: ...or that Unity's own numbers don't have: parts the model no longer has)
   std::shared_ptr<std::set<std::string>> models_numbered = std::make_shared<std::set<std::string>>();  // (round 399: models Unity has numbered - ctx.model adds them; shared down the nesting)
@@ -143,7 +144,40 @@ GameObject *objects_from_model(const ImportResult &r, const std::string &name, S
 
 /* Round 395: a Unity scene's RenderSettings into the environment - its ambient (flat or gradient) and its fog (Unity's
  * exponential fog as the linear distance it reaches 95% at); what doesn't map said in `notes`. False: none there. */
-bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes);
+struct UnitySkybox;
+bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,
+                           const std::function<bool(const std::string &guid, UnitySkybox &out)> &skybox = {}, UnitySceneLink *link = nullptr);
+
+/* Round 401: a Post Processing (PPv2) profile as Blendity reads it - each effect's parameters where the profile
+ * overrides them (overrideState 1), Unity's defaults otherwise. Tonemapper 0 None, 1 Neutral, 2 ACES. Effects
+ * Blendity doesn't draw (ambient occlusion, depth of field, chromatic aberration, grain, auto exposure, motion blur)
+ * are flagged, kept and said. */
+struct UnityPostProfile {
+  struct Grading {
+    bool on = false;
+    int tonemapper = 0;
+    float post_exposure = 0.0f, temperature = 0.0f, tint = 0.0f, hue_shift = 0.0f, saturation = 0.0f, contrast = 0.0f;
+    Vec3 color_filter{1.0f, 1.0f, 1.0f};
+    float lift[4] = {1, 1, 1, 0}, gamma[4] = {1, 1, 1, 0}, gain[4] = {1, 1, 1, 0};  // (xyz the wheel's colour, w its offset)
+  } grading;
+  struct Bloom {
+    bool on = false;
+    float intensity = 0.0f, threshold = 1.0f, soft_knee = 0.5f, diffusion = 7.0f, clamp = 65472.0f;
+    Vec3 color{1.0f, 1.0f, 1.0f};
+  } bloom;
+  struct Vignette {
+    bool on = false;
+    float intensity = 0.0f, smoothness = 0.2f, roundness = 1.0f;
+    Vec3 color{0.0f, 0.0f, 0.0f};
+  } vignette;
+  std::vector<std::string> undrawn;  // (the effects on in the profile that Blendity doesn't draw)
+};
+/* The profile asset's text into `out`; false when it isn't one. */
+bool unity_post_profile(const std::string &yaml, UnityPostProfile &out);
+/* The profile onto a camera's look (round 401): its tonemapper and exposure as the scene's view transform and exposure,
+ * its grading, bloom (PPv2's intensity 2^(i / 10) - 1, its threshold gamma, its diffusion a tenth as the scatter) and
+ * vignette as the camera's filter effects (replacing ones of the same kind). */
+void unity_post_apply(const UnityPostProfile &p, Scene &scene, GameObject &camera, std::vector<std::string> &notes);
 
 /* Round 372: an imported object's edits in its Unity file - its name and active state on its GameObject, its local
  * transform on its Transform. */
@@ -154,7 +188,21 @@ struct UnityEdit {
   bool active = true;
   Vec3 position, scale{1, 1, 1}, euler;  // (euler: the Inspector's angles - m_LocalEulerAnglesHint when the rotation changes)
   Quat rotation;
+  /* Round 401: the document's own fields (a Camera's, a Light's, the scene's RenderSettings) - each key's line rewritten
+   * when its value differs ("m_Shadows/m_Type": a key inside a nested mapping). The document is the one with `file_id`,
+   * or, with `class_id` set, the one of that class on the GameObject `game_object` (0: the first of that class). */
+  int class_id = 0;
+  int64_t game_object = 0;
+  std::vector<std::pair<std::string, std::string>> fields;
 };
+/* Round 401: a Camera's, a Light's and a Reflection Probe's Unity fields as the object holds them now (edits by class and
+ * GameObject), and the scene's RenderSettings as the world holds them (an edit by class). */
+void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out);
+UnityEdit unity_world_edit(const EnvironmentSettings &e, const UnitySceneLink &link);
+/* Unity's YAML scalars (round 401): a number, a colour (Blendity's linear colour as Unity's gamma one) and a vector. */
+std::string unity_yaml_num(double v);
+std::string unity_yaml_color(Vec3 linear, float alpha = 1.0f);
+std::string unity_yaml_vec3(Vec3 v);
 /* `text` (a .prefab or .unity) with the edits written into their documents' lines - m_Name, m_IsActive,
  * m_LocalPosition / Rotation / Scale (and the Euler hint) - only where the value differs from the file's (review 372:
  * untouched objects were rewritten with float noise); every other byte as it was, line ends too; `changed` how many

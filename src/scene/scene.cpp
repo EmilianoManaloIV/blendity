@@ -226,6 +226,8 @@ void register_builtin_components() {
                        "Unity's MonoBehaviour and built-in components; Blender has no counterpart (its add-ons' data is custom properties)");
   reg<LightVolumeComponent>("Rendering", "A VRC Light Volume: VRChat's baked-lighting box - its object's scale is the box - sent to Unity as red.sim.lightvolumes' Light Volume; Unity bakes it, or Blendity (round 397).",
                             "VRC Light Volumes' Light Volume (red.sim.lightvolumes); Unity's Light Probe Group; Blender's Irradiance Volume");
+  reg<ReflectionProbeComponent>("Rendering", "Unity's Reflection Probe: a cubemap of the room baked here, which the metal and glass in its box reflect - Generate Lighting bakes it, or Unity's own bake comes with Unity's lightmaps (round 401).",
+                                "Unity's Reflection Probe; Blender's Reflection Cubemap light probe");
   reg<ColliderComponent>("Physics", "The object's collision shape: Box, Sphere, Capsule, Convex or its Mesh - Jolt's in Play, written into exports for Unity, Unreal and Godot (round 362).",
                          "Unity's Box / Sphere / Capsule / Mesh Collider; Blender's Rigid Body > Collisions > Shape");
   reg<Rigidbody>("Physics", "Gravity, bounciness and simple sphere collisions in Play mode.",
@@ -385,13 +387,20 @@ void EnvironmentSettings::reflect(Reflector &r) {
   }
   if (r.group("Fog", false)) {  // (task 0248: in every renderer, by the view distance)
     r.field("Fog", fog);
-    r.field("Fog Start", fog_start, 0.1f, 0.0f, 10000.0f);
-    r.field("Fog End", fog_end, 0.1f, 0.0f, 10000.0f);
+    static const char *kFogModes[] = {"Linear", "Exponential", "Exponential Squared"};
+    r.enumeration("Fog Mode", fog_mode, kFogModes, 3);
+    r.help("Unity's three (Lighting > Environment > Fog > Mode): Linear from Fog Start to Fog End; Exponential 1 - e^-(Density x depth);\n"
+           "Exponential Squared 1 - e^-(Density x depth)^2 - all by the view depth, as Unity fogs.");
+    if (fog_mode == 0 || r.all_fields()) {
+      r.field("Fog Start", fog_start, 0.1f, 0.0f, 10000.0f);
+      r.field("Fog End", fog_end, 0.1f, 0.0f, 10000.0f);
+    }
+    if (fog_mode != 0 || r.all_fields()) r.field("Fog Density", fog_density, 0.001f, 0.0f, 10.0f);
     r.color("Fog Color", fog_color);
     r.color("Fog Color Far", fog_color_far);
-    r.help("Distance fog: a surface's color is mixed toward the ramp - Fog Color at Fog Start to Fog Color Far at Fog End and\n"
-           "beyond - by its distance from the eye, in the Scene view, the GPU view and renders alike (a stylization: no scattering;\n"
-           "the Retro camera filter's fog is a display effect of its own).");
+    r.help("Distance fog: a surface's color is mixed toward the ramp - Fog Color near to Fog Color Far at full fog - by its view\n"
+           "depth, in the Scene view, the GPU view and renders alike (a stylization: no scattering; the Retro camera filter's fog is a\n"
+           "display effect of its own). Unity has one color: an import sets both the same.");
   }
   r.group_end();
   if (all || mode == 1) {
@@ -405,6 +414,8 @@ void EnvironmentSettings::reflect(Reflector &r) {
   }
   if (all || mode == 3) r.color("Color", color);
   r.field("Strength", strength, 0.01f, 0.0f, 100.0f);
+  r.field("Reflection Intensity", reflection_intensity, 0.01f, 0.0f, 8.0f);
+  r.help("Unity's Environment Reflections > Intensity Multiplier (round 401: kept and sent to Unity).");
   r.field("Rotation", rotation, 0.5f, -360.0f, 360.0f);
 }
 
@@ -559,11 +570,74 @@ void Light::reflect(Reflector &r) {
   r.help("Unity's Light Mode. Realtime: lit every frame, not in baked lighting. Mixed: realtime light and shadows,\n"
          "its bounced light baked. Baked: exists only through the bake (lightmaps and probes), nothing drawn live;\n"
          "Preview Lighting shows it before a bake. The path tracer lights with every mode.");
+  static const char *shadow_types[] = {"No Shadows", "Hard Shadows", "Soft Shadows"};
+  r.enumeration("Shadow Type", shadows, shadow_types, 3);
+  r.help("Unity's Shadow Type (round 401). No Shadows: the light passes through everything, in the views and the path tracer\n"
+         "alike. Hard and Soft: it casts shadows (the views draw the sun's; the path tracer every light's).");
+  if (all || shadows != 0) r.field("Shadow Strength", shadow_strength, 0.01f, 0.0f, 1.0f);
+  r.field("Indirect Multiplier", bounce_intensity, 0.01f, 0.0f, 8.0f);
+  r.help("Unity's Indirect Multiplier: how much of this light's bounced light the bake keeps (0: none bounces).");
+  r.texture("Cookie", cookie);
+  r.help("Unity's Cookie: a mask the light shines through (kept and sent to Unity; the views don't draw it yet).");
+  if (all || type == 0) r.field("Cookie Size", cookie_size, 0.1f, 0.01f, 1000.0f);
+  if (all) r.field("Culling Mask", culling_mask, -1, 2147483647);
   if (all || type != 0) {
     r.field("Light Volume", light_volume);
     r.help("In Unity with VRC Light Volumes: a Point Light Volume as well - VRChat worlds light by it on PC and Quest alike,\n"
            "128 at once (round 397). Directional lights have none; an area light's size there is its object's scale (the package's).");
   }
+}
+
+void ReflectionProbeComponent::reflect(Reflector &r) {
+  static const char *modes[] = {"Baked", "Realtime", "Custom"};
+  r.enumeration("Mode", mode, modes, 3);
+  r.help("Baked: Generate Lighting renders the cubemap here (or Unity's bake comes with Unity's lightmaps). Realtime: Unity renders\n"
+         "it in game (Blendity shows the bake it has). Custom: the cubemap below.");
+  if (r.all_fields() || mode == 2) r.texture("Custom Cubemap", custom_cubemap);
+  r.field("Box Size", box_size);
+  r.help("The box the probe lights, in world axes (times the object's scale): surfaces inside reflect it.");
+  r.field("Box Offset", box_offset);
+  r.field("Box Projection", box_projection);
+  r.help("Reflections placed on the box's walls (Unity's Box Projection): right for a room the box fits; off, the probe is a sky far away.");
+  r.field("Intensity", intensity, 0.01f, 0.0f, 100.0f);
+  r.field("Blend Distance", blend_distance, 0.01f, 0.0f, 1000.0f);
+  r.help("How far inside the box's walls this probe fades into the next (Unity's).");
+  r.field("Importance", importance, 0, 100000);
+  r.help("A higher one wins where boxes overlap (Unity's).");
+  r.field("Resolution", resolution, 16, 2048);
+  r.field("HDR", hdr);
+  r.field("Near Clip", near_clip, 0.01f, 0.01f, 1000.0f);
+  r.field("Far Clip", far_clip, 1.0f, 0.1f, 100000.0f);
+  if (r.all_fields()) r.field("Culling Mask", culling_mask, -1, 2147483647);
+}
+
+void ReflectionProbeComponent::world_box(const GameObject &g, Vec3 &bmin, Vec3 &bmax) const {
+  const Mat4 &w = g.world_matrix();
+  const Vec3 scale(length(w.dir({1, 0, 0})), length(w.dir({0, 1, 0})), length(w.dir({0, 0, 1})));
+  /* The offset scaled, never turned (Unity's box is axis-aligned - review 401); the size times the scale. */
+  const Vec3 centre = g.world_position() + Vec3(box_offset.x * scale.x, box_offset.y * scale.y, box_offset.z * scale.z);
+  const Vec3 half(std::fabs(box_size.x * scale.x) * 0.5f, std::fabs(box_size.y * scale.y) * 0.5f, std::fabs(box_size.z * scale.z) * 0.5f);
+  bmin = centre - half, bmax = centre + half;
+}
+
+uint64_t UnitySceneLink::ambient_key(const EnvironmentSettings &e) {
+  uint64_t h = kFnvBasis;
+  h = fnv1a(&e.mode, sizeof(e.mode), h), h = fnv1a(&e.sky, sizeof(e.sky), h), h = fnv1a(&e.equator, sizeof(e.equator), h), h = fnv1a(&e.ground, sizeof(e.ground), h);
+  h = fnv1a(&e.color, sizeof(e.color), h), h = fnv1a(&e.strength, sizeof(e.strength), h), h = fnv1a(&e.reflection_intensity, sizeof(e.reflection_intensity), h);
+  return h;
+}
+
+void UnitySceneLink::reflect(Reflector &r) {
+  world_key_text = world_key ? std::to_string(world_key) : std::string();
+  r.text("File", file);
+  r.field("Ambient Mode", ambient_mode, -1, 4);
+  r.field("Ambient Intensity", ambient_intensity, 0.01f, 0.0f, 8.0f);
+  r.field("World Mode", world_mode, -1, 3);
+  r.text("World Key", world_key_text);
+  world_key = world_key_text.empty() ? 0 : std::strtoull(world_key_text.c_str(), nullptr, 10);
+  r.field("Lights Gamma", lights_gamma);
+  r.help("Unity's built-in pipeline multiplies a light's color by its intensity in gamma (lightsUseLinearIntensity off): a light at intensity\n"
+         "2 is about 4.6 times as bright in linear light. On, Blendity lights the same way for this scene.");
 }
 
 void LightVolumeComponent::reflect(Reflector &r) {
@@ -650,6 +724,13 @@ void Camera::reflect(Reflector &r) {
   static const char *clear[] = {"Skybox", "Solid Color"};
   r.enumeration("Clear Flags", clear_flags, clear, 2);
   if (clear_flags == 1 || all) r.color("Background", background);
+  r.field("HDR", hdr);
+  r.help("Unity's HDR rendering for this camera (kept for Unity: Blendity always lights in linear HDR).");
+  static const char *fov_axes[] = {"Vertical", "Horizontal"};
+  r.enumeration("FOV Axis", fov_axis, fov_axes, 2);
+  r.help("Unity's FOV Axis, kept for Unity: which way its Inspector shows the field of view. The Field Of View here is the vertical angle,\n"
+         "as Unity stores it, whichever axis is chosen.");
+  if (r.serializing()) r.field("Unity Clear Flags", unity_clear_flags, 0, 4), r.field("Background Alpha", background_alpha, 0.01f, 0.0f, 1.0f);  // (saved with the scene, not shown - re-check 401)
   r.field("Orthographic", orthographic);
   if (orthographic || all) r.field("Size", ortho_size, 0.05f, 0.01f, 1000.0f);
   if (!orthographic || all) {
@@ -776,7 +857,7 @@ float Camera::image_aspect(float render_aspect) const {
 }
 
 float Camera::vertical_fov_deg(float aspect) const {
-  if (!physical) return fov;
+  if (!physical) return fov;  // (Unity's field of view is the vertical angle whatever its FOV Axis shows - review 401)
   const float f = std::max(0.1f, focal_length);
   int fit = sensor_fit;
   if (fit == 0) fit = aspect >= 1.0f ? 1 : 2;  // Auto: the sensor width spans the larger side
@@ -2714,6 +2795,7 @@ void Scene::move_from(Scene &o) {
   environment = std::move(o.environment);
   render = o.render;
   lighting = o.lighting;
+  unity = o.unity;  // (round 401: the Unity scene it came from)
   guides = std::move(o.guides);
   sketch = std::move(o.sketch);
   active_camera = o.active_camera;
@@ -2903,6 +2985,7 @@ std::unique_ptr<Scene> Scene::clone() const {
   s->environment = environment;
   s->render = render;
   s->lighting = lighting;
+  s->unity = unity;  // (round 401)
   s->guides = guides;
   s->sketch = sketch;
   s->active_camera = active_camera;

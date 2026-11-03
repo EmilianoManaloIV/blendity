@@ -86,6 +86,36 @@ void Editor::draw_light_volumes() {
   });
 }
 
+/* Round 401: each Reflection Probe as its box (Unity's cyan) and three rings at the probe, cyan with a bake, white without. */
+void Editor::draw_reflection_probes() {
+  scene_->for_each([&](GameObject &g) {
+    const ReflectionProbeComponent *c = g.get<ReflectionProbeComponent>();
+    if (!c || !c->enabled || !g.active_in_hierarchy()) return;
+    const bool sel = is_selected(g.id);
+    const uint32_t col = Color::hex(0x40D0E0, sel ? 255 : 140);
+    Vec3 bmin, bmax;
+    c->world_box(g, bmin, bmax);
+    for (int e = 0; e < 12; e++) {
+      const int axis = e / 4, a = (axis + 1) % 3, b = (axis + 2) % 3;
+      Vec3 p0 = bmin, p1 = bmin;
+      p0[a] = p1[a] = (e & 1) ? bmax[a] : bmin[a];
+      p0[b] = p1[b] = (e & 2) ? bmax[b] : bmin[b];
+      p1[axis] = bmax[axis];
+      scene_r3d_.line(p0, p1, col, true, 3e-4f);
+    }
+    /* Three rings at the probe: cyan with a bake, white without. */
+    const Vec3 at = g.world_position();
+    const float r = 0.15f;
+    const uint32_t ring_col = reflection_probe_bakes_.count(g.id) ? col : Color::hex(0xFFFFFF, sel ? 200 : 110);
+    for (int ring = 0; ring < 3; ring++)
+      for (int k = 0; k < 24; k++) {
+        const float a0 = (float)k / 24.0f * 2.0f * kPi, a1 = (float)(k + 1) / 24.0f * 2.0f * kPi;
+        auto on = [&](float a) { return at + (ring == 0 ? Vec3(std::cos(a), std::sin(a), 0) : ring == 1 ? Vec3(0, std::cos(a), std::sin(a)) : Vec3(std::cos(a), 0, std::sin(a))) * r; };
+        scene_r3d_.line(on(a0), on(a1), ring_col, true, 3e-4f);
+      }
+  });
+}
+
 /* A selected volume's voxel centres as dots - each axis at most 32 shown (a fine grid would hide the scene); with a bake
  * (Blendity's or Unity's read back, round 398), each dot its voxel's light (L0, clamped) - the bake previewed. */
 void Editor::draw_light_volume_grid(const GameObject &g, const LightVolumeComponent &v) {

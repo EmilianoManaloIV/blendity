@@ -35,9 +35,9 @@ namespace {
 /* Coalescing keys: a newer message of the same kind about the same thing replaces one still queued. The scene's
  * own (the world, the render's look) are keyed on id 0, which no object has. */
 enum Kind : uint64_t { kMesh = 1, kDeform, kTransform, kPose, kLight, kCamera, kMaterial, kWorld, kRender, kFilters, kTexture, kWeights, kClip, kCollider, kLod, kLightVolume,
-                       kLightVolumeBake };
+                       kLightVolumeBake, kReflectionProbe };
 uint64_t ckey(uint64_t id, Kind k) { return id << 5 | (uint64_t)k; }  // (review 397: 5 bits - kLightVolume is 16, past 4 bits it took the id's low bit)
-static_assert(kLightVolumeBake < 32, "a message kind fits ckey's 5 bits");
+static_assert(kReflectionProbe < 32, "a message kind fits ckey's 5 bits");
 
 /* Round 376: the world as Live Link's `world` message - its mode, colours (linear), sky, HDRI (a path on this
  * computer), fog - and every field by its Inspector name. */
@@ -47,8 +47,10 @@ std::string world_message(EnvironmentSettings &e) {
   w.obj().key("t").str("world").key("mode").str(modes[std::clamp(e.mode, 0, 3)]);
   w.key("sky").nums(&e.sky.x, 3).key("equator").nums(&e.equator.x, 3).key("ground").nums(&e.ground.x, 3).key("color").nums(&e.color.x, 3);
   w.key("hdri").str(e.hdri.empty() ? std::string() : resolve_asset_path(e.hdri.path)).key("strength").num(e.strength).key("rotation").num(e.rotation);
-  w.key("turbidity").num(e.turbidity);
-  w.key("fog").obj().key("enabled").boolean(e.fog).key("start").num(e.fog_start).key("end").num(e.fog_end);
+  w.key("turbidity").num(e.turbidity).key("reflection_intensity").num(e.reflection_intensity);
+  static const char *fog_modes[] = {"linear", "exponential", "exponential_squared"};
+  w.key("fog").obj().key("enabled").boolean(e.fog).key("mode").str(fog_modes[std::clamp(e.fog_mode, 0, 2)]).key("density").num(e.fog_density);
+  w.key("start").num(e.fog_start).key("end").num(e.fog_end);
   w.key("color").nums(&e.fog_color.x, 3).key("color_far").nums(&e.fog_color_far.x, 3).end();
   w.key("fields").raw(reflect_to_json([&](Reflector &r) { e.reflect(r); }));
   w.end();
@@ -159,6 +161,7 @@ struct Sent {
   uint64_t collider = 0;      // (round 380: its collider message's hash; 0 none sent)
   uint64_t light_volume = 0;  // (round 397: its VRC Light Volume message's hash; 0 none sent)
   uint64_t light_volume_bake = 0;  // (round 398: the bakes' generation it sent its bake at; 0 none)
+  uint64_t reflection_probe = 0;  // (round 401: its Reflection Probe message's hash; 0 none sent)
   uint64_t lod = 0;           // (...its LOD Group's; 0 none sent)
   uint64_t lod_levels = 0;    // (...what its levels are made from: their count and ratios - review 380)
   MeshStamp lod_base, lod_seen;  // (...the mesh its levels were made from; the mesh last seen, and since when)
@@ -189,6 +192,25 @@ std::string collider_message(const GameObject &g) {
   w.end();
   return w.out;
 }
+/* Round 401: a Reflection Probe as its message - Unity's fields, the box offset X-mirrored as a collider's centre. */
+const ReflectionProbeComponent *live_probe(const GameObject &g) {
+  const ReflectionProbeComponent *p = g.get<ReflectionProbeComponent>();
+  return p && p->enabled ? p : nullptr;
+}
+std::string reflection_probe_message(const GameObject &g) {
+  const ReflectionProbeComponent *p = live_probe(g);
+  JsonWriter w;
+  w.obj().key("t").str("reflectionprobe").key("id").integer((int64_t)g.id);
+  if (!p) return w.key("none").boolean(true).end(), w.out;
+  static const char *modes[] = {"baked", "realtime", "custom"};
+  const float size[3] = {p->box_size.x, p->box_size.y, p->box_size.z}, offset[3] = {-p->box_offset.x, p->box_offset.y, p->box_offset.z};
+  w.key("mode").str(modes[std::max(0, std::min(2, p->mode))]).key("size").nums(size, 3).key("offset").nums(offset, 3).key("projection").boolean(p->box_projection);
+  w.key("intensity").num(p->intensity).key("blend").num(p->blend_distance).key("importance").integer(p->importance).key("resolution").integer(p->resolution);
+  w.key("hdr").boolean(p->hdr).key("near").num(p->near_clip).key("far").num(p->far_clip);
+  w.end();
+  return w.out;
+}
+
 /* Round 397: a VRC Light Volume as its message - the package's fields (the box is the object's transform, sent as any
  * object's); Unity's Bake off when Blendity bakes it; "none" with none on. */
 const LightVolumeComponent *live_volume(const GameObject &g) {
@@ -796,6 +818,7 @@ struct Link::Impl {
   /* Round 380: colliders and LOD Groups. */
   void send_collider(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   void send_light_volume(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
+  void send_reflection_probe(const std::vector<int> &to, bool all, GameObject &g, Sent &s);  // (round 401)
   void send_light_volume_bake(const std::vector<int> &to, bool all, GameObject &g, Sent &s);
   const LightVolumeSH *baked_volume(const GameObject &g) const;
   const std::map<uint64_t, LightVolumeSH> *lv_bakes = nullptr;  // (round 398: the editor's; not owned)
@@ -1150,6 +1173,7 @@ void Link::Impl::send_light(const std::vector<int> &to, bool all, GameObject &g)
   w.key("color").nums(&c.x, 3).key("intensity").num(l.intensity).key("range").num(l.range);
   w.key("spot_angle").num(l.spot_angle).key("inner_spot_angle").num(l.inner_spot_angle);
   w.key("area").arr().num(l.area_width).num(l.area_height).end().key("disc").boolean(l.area_shape == 1);
+  w.key("shadows").integer(std::max(0, std::min(2, l.shadows))).key("shadow_strength").num(l.shadow_strength).key("bounce_intensity").num(l.bounce_intensity);  // (round 401)
   w.key("fields").raw(reflect_to_json([&](Reflector &r) { l.reflect(r); }));
   w.end();
   send(to, all, w, ckey(g.id, kLight));
@@ -1313,6 +1337,7 @@ void Link::Impl::sync(Scene &scene, const std::vector<int> &fresh) {
     if (s.rig) send_weights(g, rig_of(g), s, fresh, false);
     if (live_collider(g)) send_collider(fresh, false, g, s);  // (round 380)
     if (live_volume(g)) send_light_volume(fresh, false, g, s);  // (round 397)
+    if (live_probe(g)) send_reflection_probe(fresh, false, g, s);  // (round 401)
     if (baked_volume(g)) send_light_volume_bake(fresh, false, g, s);  // (round 398: after it - the bridge needs the volume)
     if (live_lod(g)) send_lod(fresh, false, g, s);
     if (const Animation *a = g.get<Animation>(); a && !a->clip.empty()) animated.push_back(&g);
@@ -1381,6 +1406,7 @@ bool Link::Impl::compare_object(GameObject &g) {
       const bool same_kind = was.kind == now.kind;  // (a kind change makes the object again in the bridges: its collider and levels go again - review 380)
       now.collider = same_kind ? was.collider : 0, now.lod = same_kind ? was.lod : 0, now.lod_levels = same_kind ? was.lod_levels : 0;
       now.light_volume = same_kind ? was.light_volume : 0, now.light_volume_bake = same_kind ? was.light_volume_bake : 0;
+      now.reflection_probe = same_kind ? was.reflection_probe : 0;  // (round 401)
       now.lod_base = was.lod_base, now.lod_seen = was.lod_seen, now.lod_since = was.lod_since;
     }
     it->second = std::move(now);
@@ -1550,6 +1576,15 @@ void Link::Impl::send_light_volume(const std::vector<int> &to, bool all, GameObj
   stats.light_volumes++;
 }
 
+/* Round 401: a Reflection Probe to `to` (or everyone), recorded as a collider is. */
+void Link::Impl::send_reflection_probe(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
+  JsonWriter w;
+  w.out = reflection_probe_message(g);
+  const uint64_t h = live_probe(g) ? std::hash<std::string>()(w.out) | 1 : 0;
+  if (all || server.ready_clients().empty()) s.reflection_probe = h;
+  send(to, all, w, ckey(g.id, kReflectionProbe));
+}
+
 /* An LOD Group to `to` (or everyone): its message, then each level past 0 built on the mesh worker. */
 void Link::Impl::send_lod(const std::vector<int> &to, bool all, GameObject &g, Sent &s) {
   JsonWriter w;
@@ -1605,6 +1640,10 @@ void Link::Impl::compare_kit(GameObject &g, Sent &s) {
     if (h != s.light_volume) send_light_volume({}, true, g, s);
   }
   if (baked_volume(g) && s.light_volume_bake != lv_generation) send_light_volume_bake({}, true, g, s);  // (round 398)
+  if (live_probe(g) || s.reflection_probe) {  // (round 401)
+    const uint64_t h = live_probe(g) ? std::hash<std::string>()(reflection_probe_message(g)) | 1 : 0;
+    if (h != s.reflection_probe) send_reflection_probe({}, true, g, s);
+  }
   if (live_lod(g) || s.lod) {
     const uint64_t h = live_lod(g) ? std::hash<std::string>()(lod_message(g)) | 1 : 0;
     if (h != s.lod) return send_lod({}, true, g, s);

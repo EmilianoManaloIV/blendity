@@ -143,6 +143,100 @@ void Editor::load_light_volume_bakes(const std::string &dir) {
   light_volume_bakes_dirty_ = false;  // (as on disk)
 }
 
+/* Round 401: the Reflection Probes Blendity bakes - every enabled one in Baked or Realtime mode (Custom keeps its own
+ * cubemap). The tracer is built once from the bake's meshes and lights, as the probe volume's is. */
+bool Editor::reflection_probe_bake_begin() {
+  rp_bake_ = ReflectionProbeBakeRun{};
+  scene_->for_each([&](GameObject &g) {
+    const ReflectionProbeComponent *c = g.get<ReflectionProbeComponent>();
+    if (c && c->enabled && g.active_in_hierarchy() && c->mode != 2) rp_bake_.ids.push_back(g.id);
+  });
+  if (rp_bake_.ids.empty()) return false;
+  std::vector<PTObject> objs;
+  for (const BakeObject &o : bake_objects_) objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+  std::vector<RenderLight> lights;
+  for (const BakeLight &l : bake_lights_) lights.push_back(l.light);
+  rp_bake_.pt = std::make_unique<PathTracer>();
+  PTSettings ps;
+  ps.max_bounces = std::max(1, scene_->lighting.bounces);
+  ps.denoise = false;
+  ps.use_guiding = false;
+  rp_bake_.pt->set_settings(ps);
+  rp_bake_.pt->build(objs, lights, env_);
+  rp_bake_.samples = std::max(16, std::min(1024, scene_->lighting.indirect_samples / 8));
+  rp_bake_.begun = true;
+  return true;
+}
+
+/* A slice of the probes' faces: the current face traced until its samples are in, then kept; the next face, the next
+ * probe; every bake kept and the file marked changed when the last is done. */
+bool Editor::reflection_probe_bake_step(double budget) {
+  if (!rp_bake_.begun && !reflection_probe_bake_begin()) return false;
+  ScopedTimer t;
+  while (rp_bake_.at < rp_bake_.ids.size()) {
+    GameObject *g = scene_->find(rp_bake_.ids[rp_bake_.at]);
+    const ReflectionProbeComponent *c = g ? g->get<ReflectionProbeComponent>() : nullptr;
+    if (!c) { rp_bake_.at++, rp_bake_.face = 0; continue; }
+    const int size = std::max(16, std::min(512, c->resolution));
+    if (rp_bake_.face == 0 && rp_bake_.current.size != size) rp_bake_.current = ReflectionProbeBake{}, rp_bake_.current.size = size;
+    static const Vec3 kFwd[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    static const Vec3 kUp[6] = {{0, 1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}};
+    const Vec3 eye = g->world_position();
+    if (rp_bake_.pt->samples() == 0 || rp_bake_.pt->width() != size) {
+      rp_bake_.pt->set_camera(Mat4::look_at(eye, eye + kFwd[rp_bake_.face], kUp[rp_bake_.face]), Mat4::perspective(kPi * 0.5f, 1.0f, std::max(0.01f, c->near_clip), std::max(1.0f, c->far_clip)), size, size);
+      rp_bake_.pt->reset();
+    }
+    rp_bake_.pt->render(std::max(1.0, budget - t.ms()), rp_bake_.samples);
+    bake_status_ = strprintf("Baking reflection probe %zu of %zu, face %d  (%.1f s)", rp_bake_.at + 1, rp_bake_.ids.size(), rp_bake_.face + 1, now_seconds() - bake_start_);
+    if (rp_bake_.pt->samples() < rp_bake_.samples) return true;
+    const std::vector<float> rgb = rp_bake_.pt->linear_rgb(false);
+    std::vector<Vec3> &face = rp_bake_.current.faces[rp_bake_.face];
+    face.assign((size_t)size * size, Vec3(0.0f));
+    for (size_t i = 0; i < face.size() && i * 3 + 2 < rgb.size(); i++) {
+      const Vec3 v(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+      face[i] = std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) ? vmax(v, Vec3(0.0f)) : Vec3(0.0f);
+    }
+    rp_bake_.pt->reset();
+    rp_bake_.face++;
+    if (rp_bake_.face < 6) {
+      if (t.ms() >= budget) return true;
+      continue;
+    }
+    rp_bake_.current.from_unity = false;
+    reflection_probe_bakes_[g->id] = rp_bake_.current;
+    rp_bake_.current = ReflectionProbeBake{};
+    rp_bake_.at++, rp_bake_.face = 0;
+    if (t.ms() >= budget) return true;
+  }
+  const size_t baked = rp_bake_.ids.size();
+  rp_bake_ = ReflectionProbeBakeRun{};
+  reflection_probe_bakes_changed();
+  Log::info("Reflection probes: %zu baked", baked);
+  return false;
+}
+
+/* Round 401: the reflection probes' bakes, beside the Light Volumes'. */
+void Editor::load_reflection_probe_bakes(const std::string &dir) {
+  const std::string path = fs::join(dir, "ReflectionProbes.bin");
+  std::string err;
+  reflection_probe_bakes_.clear();
+  if (fs::exists(path) && !bl::load_reflection_probe_bakes(path, reflection_probe_bakes_, err))
+    Log::warn("Reflection probe bakes not loaded: %s", err.c_str()), reflection_probe_bakes_.clear();
+  reflection_probe_bakes_changed();
+  reflection_probe_bakes_dirty_ = false;  // (as on disk)
+}
+
+void Editor::save_reflection_probe_bakes(const std::string &dir) {
+  const std::string path = fs::join(dir, "ReflectionProbes.bin");
+  std::string err;
+  if (reflection_probe_bakes_.empty()) {
+    if (fs::exists(path)) std::remove(path.c_str());
+    return;
+  }
+  fs::make_dirs(dir);
+  if (!bl::save_reflection_probe_bakes(path, reflection_probe_bakes_, err)) Log::error("Could not save the reflection probe bakes: %s", err.c_str());
+}
+
 void Editor::save_light_volume_bakes(const std::string &dir) {
   const std::string path = fs::join(dir, kBakesFile);
   std::string err;
