@@ -54,6 +54,13 @@ and scales come across as the same numbers.
   `BLENDITY_TEST_BRIDGE` (see [LIVELINK.md](../../docs/LIVELINK.md#testing-a-bridge-live-round-318)). Run on
   2026-10-29: LIVE OK, the longest editor frame 33.3 ms while a 32,514-vertex mesh deformed. A project made by
   Install a Bridge compiled the package with no error.
+- **VRChat's real SDK (round 396):** `py run_sdk_tests.py <Unity.exe> <VCC avatar project> <VCC world project> [--work
+  C:/blvrc] [--update]` copies the projects (never touching them), adds the bridge, replays the session and has the SDK
+  check the result - the control panel's errors and warnings and the avatar's Performance Rank (PC and Android) - and runs
+  `ReplayTests` on the real types. Run on 2026-11-02 (SDK 3.10.6, Unity 2022.3.22f1): both pass, no SDK error; it had
+  found an avatar with no body, a missing Animator and pipeline manager, and the link's components refused - all fixed.
+  `--update` keeps the avatar's report as `tests/fixtures/vrchat_sdk_avatar.json`, which Blendity's Budget is tested
+  against. Uploading stays the user's (it needs their login).
 - Without Unity: `ReplayCheck/ReplayCheck.cs` runs the package's framing, JSON and glTF reading on the same session
   with any C# compiler (its header has the command); `ReplayCheck.exe --live <python> <repository's blendity folder>`
   finds the stand-in Live Link (`tools/livelink_fake_server.py`) through the discovery file twice, as the package does.

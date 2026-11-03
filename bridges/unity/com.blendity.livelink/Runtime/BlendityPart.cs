@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Round 380: on a child the Editor bridge made for one of Live Link's objects - an LOD level, its collider - so the
-// bridge finds it again by what it is, not by its name (a rename, an object of Blendity's named like one).
+// bridge finds it again by what it is, not by its name (a rename, an object of Blendity's named like one). VRChat's
+// editor-only component with its SDK there, as BlendityLink (round 396).
 using UnityEngine;
 
 namespace Blendity.LiveLink
 {
     [DisallowMultipleComponent]
     public sealed class BlendityPart : MonoBehaviour
+#if BLENDITY_VRCSDK
+        , VRC.SDKBase.IEditorOnly
+#endif
     {
         public const string Level = "lod", ColliderRole = "collider", PhysBonesRole = "physbones";
         [Tooltip("What the bridge made it for: lod, collider or physbones.")]

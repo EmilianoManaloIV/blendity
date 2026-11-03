@@ -250,6 +250,17 @@ GameObject *keyed_mesh(const std::vector<GameObject *> &meshes, const std::vecto
   }
   return best.first;
 }
+/* Something drawn under `root` (a mesh, skinned or not): an avatar's body. */
+bool drawn_under(const GameObject &root) {
+  std::vector<const GameObject *> under{&root};
+  for (size_t n = 0; !under.empty() && n < 100000; n++) {
+    const GameObject *g = under.back();
+    under.pop_back();
+    if (g->get<MeshRenderer>() && g->get<MeshFilter>()) return true;
+    for (const GameObject *k : g->children) under.push_back(k);
+  }
+  return false;
+}
 /* The nearest object above (or at) the armature that every mesh sits under; nullptr when there is none. */
 GameObject *avatar_root(GameObject &arm, const std::vector<GameObject *> &meshes) {
   std::vector<GameObject *> up;
@@ -325,9 +336,14 @@ std::string avatar_message(Scene &scene, GameObject &arm, const std::vector<Game
   GameObject *head = eyes ? nullptr : avatar_head(scene, arm, as);
   if (!eyes && !visemes && !head) return "";
   GameObject *root = avatar_root(arm, meshes);
-  if (!root && !as.warned) Log::warn("Live Link: %s's meshes aren't under one object with it - VRChat's avatar needs one root (parent them under one)", arm.name.c_str());
-  as.warned = !root;
-  root = root ? root : &arm;
+  const bool body = root && drawn_under(*root);  // (re-check 396: a rig with eyes and no mesh under its root is no body either)
+  if (!root && !as.warned)
+    Log::warn("Live Link: %s's meshes aren't under one object with it - VRChat's avatar is what its root holds, so none is set up until they are "
+              "(parent them under one)", arm.name.c_str());
+  if (root && !body && !as.warned) Log::warn("Live Link: %s has no mesh under %s - VRChat's avatar is what its root holds, so none is set up yet",
+                                             arm.name.c_str(), root->name.c_str());
+  as.warned = !body;
+  if (!body) return "";  // (round 396: the descriptor on the armature alone was an avatar with no body - the real SDK counted 0 polygons)
   std::vector<ArmatureBone> bones;
   armature_bones(arm, bones);
   const Vec3 view = eyes ? (rest_in(*root, arm, bones, *left) + rest_in(*root, arm, bones, *right)) * 0.5f

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <thread>
 #include "../src/core/json.h"
+#include "../src/scene/budget.h"
 #include "../src/core/net_server.h"
 /* The Unreal plugin's protocol layer (task 0277): standard C++ only, compiled here so every build replays it. */
 #include "../bridges/unreal/BlendityLiveLink/Source/BlendityLiveLink/Private/BlendityLinkProtocol.cpp"
@@ -116,12 +117,13 @@ struct Session {
   std::vector<Message> ms;
 };
 
-Session record_session() {
+Session record_session(const std::function<void(Editor &)> &at_end = {}) {  // (round 396: `at_end` sees the scene the bridges were left with)
   Session s;
   Editor ed;
   ed.init_headless(640, 400);
   GameObject *box = make_cube(ed, "Box");
-  GameObject *root = ed.scene().create("Rig");
+  GameObject *avatar = ed.scene().create("Avatar");  // (round 396: Rig, Face and Arm under one root, as a character's file has them)
+  GameObject *root = ed.scene().create("Rig", avatar);
   root->add<Armature>();
   root->set_local_scale(Vec3(2, 2, 2));  // (review 378: a scaled rig - an FBX armature at 0.01 - skins as Blendity does)
   GameObject *upper = ed.scene().create("Upper", root);
@@ -130,7 +132,7 @@ Session record_session() {
   lower->add<Bone>();
   lower->set_local_position(Vec3(0, 1, 0));
   /* Round 378: a skinned cylinder on the rig with a "Smile" shape key: it goes at rest with its skin and keys. */
-  GameObject *arm = ed.scene().create("Arm");
+  GameObject *arm = ed.scene().create("Arm", avatar);
   arm->add<MeshFilter>()->mesh = primitives::cylinder(0.2f, 2.0f, 8);
   arm->add<MeshRenderer>();
   arm->set_local_position(Vec3(3, 0, 0));
@@ -161,7 +163,7 @@ Session record_session() {
   /* Round 381: the rig an avatar's - eyes 6 cm apart at 1.5 m (their rests; the view between them), a Face skinned to it
    * with VRChat's 15 visemes and a blink (all at 0); the Box static (Contribute GI). */
   add_eyes(ed, *root, Vec3(0, 1.5f, 0.05f));
-  if (GameObject *face = add_face(ed, "Face", Vec3(0, 1.5f, 0))) face->get<SkinModifier>()->object = "Rig";
+  if (GameObject *face = add_face(ed, "Face", Vec3(0, 1.5f, 0))) face->get<SkinModifier>()->object = "Rig", ed.scene().set_parent(face, avatar, -1, false);
   if (box) box->mesh_renderer()->contribute_gi = true;
   /* Round 380: a crate with an LOD Group (three levels) and a Box Collider off its centre, 1 x 2 x 1. */
   if (GameObject *crate = make_cube(ed, "Crate")) {
@@ -228,6 +230,7 @@ Session record_session() {
   if (GameObject *lw = ed.scene().find_by_name("Lower")) lw->add<SpringBone>()->stiffness = 0.4f;
   std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // (an armature's setup is looked at once a second)
   take(drain(ed, c));
+  if (at_end) at_end(ed);
   fs::remove_file(resolve_asset_path("Assets/Textures/livelink_tile.png"));
   fs::remove_file(resolve_asset_path("Assets/Animations/livelink_wave.anim"));
   forget_clip_assets("Assets/Animations/livelink_wave.anim");
@@ -1700,7 +1703,8 @@ static void tests_round381() {
   test("Live Link's VRChat setup (round 381): an armature with eyes sends an avatar message - the view between the eyes at rest, the mesh with the 15 visemes, the blink, the eye bones; nothing again while unchanged; a SpringBone sends its chain; the eyes deleted fall back to the Head or none; Contribute GI marks the object static", [] {
     Editor ed;
     ed.init_headless(800, 600);
-    GameObject *rig = ed.scene().create("Rig");
+    GameObject *avatar = ed.scene().create("Avatar");  // (round 396: the rig and its meshes under one root - VRChat's avatar is what it holds)
+    GameObject *rig = ed.scene().create("Rig", avatar);
     rig->add<Armature>();
     GameObject *chain = ed.scene().create("Tail", rig);
     chain->add<Bone>();
@@ -1709,6 +1713,7 @@ static void tests_round381() {
     CHECK(face != nullptr);
     if (!face) return;
     face->get<SkinModifier>()->object = "Rig";
+    ed.scene().set_parent(face, avatar, -1, false);
     GameObject *floor = make_cube(ed, "Floor");
     floor->mesh_renderer()->contribute_gi = true;
     CHECK(ed.livelink_start(0));
@@ -1744,6 +1749,24 @@ static void tests_round381() {
     const Message *after = last_for(after_ms, "avatar", rig->id);
     std::printf("    the eyes deleted: %s\n", !after ? "nothing sent" : after->j["none"].b ? "none" : "the view from the visemes' rig");
     CHECK(after && !after->j["none"].b && after->j["eyes"]["left"].number() == 0);  // (still an avatar: its visemes)
+    /* Round 396: the Face taken out from under the root - the avatar would hold no body (the real SDK counted 0 polygons for
+     * such a descriptor): none is set up, and the log says why. */
+    ed.scene().set_parent(face, nullptr, -1, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> apart_ms = drain(ed, c);
+    const Message *apart = last_for(apart_ms, "avatar", rig->id);
+    CHECK(apart && apart->j["none"].b);
+    /* Re-check 396: the Face back under the root, then deleted - eyes and no mesh under the root: no body, none. */
+    ed.scene().set_parent(face, avatar, -1, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> back_ms = drain(ed, c);
+    const Message *back = last_for(back_ms, "avatar", rig->id);
+    CHECK(back && !back->j["none"].b);
+    ed.scene().destroy(face);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    const std::vector<Message> bare_ms = drain(ed, c);
+    const Message *bare = last_for(bare_ms, "avatar", rig->id);
+    CHECK(bare && bare->j["none"].b);
     ed.livelink_stop();
   });
   test("Live Link's VRChat setup as it changes (review 381): the avatar root is the object above the rig and its meshes, the view in its space; a blink on its own mesh; a hair rig's chains only in its own springs; a chain taken off sends an empty list; the Armature taken off sends none", [] {
@@ -1817,6 +1840,88 @@ static void tests_round381() {
 /* A Live Link line that is `id`'s transform. */
 static bool is_transform_of(const std::string &line, uint64_t id) {
   return line.find("\"transform\"") != std::string::npos && line.find(strprintf("\"id\":%llu,", (unsigned long long)id)) != std::string::npos;
+}
+
+/* Round 396: VRChat's own Performance Rank of the recorded session's avatar, from the real SDK in Unity
+ * (bridges/unity/run_sdk_tests.py --update writes tests/fixtures/vrchat_sdk_avatar.json), against Blendity's Budget of the
+ * same avatar: every row both count, its value and its rank on PC and Android. */
+static void tests_round396() {
+  test("VRChat's SDK and the Budget (round 396): the recorded avatar's triangles, skinned meshes, meshes, material slots, bones and PhysBones - Blendity's Budget counts what the real SDK counted in Unity, and ranks each the same on PC and Quest", [] {
+    std::string text;
+    if (!fs::read_file("tests/fixtures/vrchat_sdk_avatar.json", text)) {
+      std::printf("    (not run from the source folder: no SDK report to compare)\n");
+      return;
+    }
+    JsonParser p{text.data(), text.data() + text.size()};
+    const Json sdk = p.value();
+    CHECK(p.ok && sdk["passed"].b && sdk["descriptors"].number() == 1 && sdk["issues"]["errors"].arr.empty());
+    struct Row {
+      BudgetRow row;
+      const char *value, *sub, *category;
+    };
+    const Row rows[] = {{BudgetRow::Triangles, "polyCount", nullptr, "PolyCount"},
+                        {BudgetRow::SkinnedMeshes, "skinnedMeshCount", nullptr, "SkinnedMeshCount"},
+                        {BudgetRow::Meshes, "meshCount", nullptr, "MeshCount"},
+                        {BudgetRow::MaterialSlots, "materialCount", nullptr, "MaterialCount"},
+                        {BudgetRow::Bones, "boneCount", nullptr, "BoneCount"},
+                        {BudgetRow::SpringChains, "physBone", "componentCount", "PhysBoneComponentCount"},
+                        {BudgetRow::SpringBones, "physBone", "transformCount", "PhysBoneTransformCount"}};
+    int compared = 0;
+    record_session([&](Editor &ed) {
+      GameObject *avatar = ed.scene().find_by_name("Avatar");
+      CHECK(avatar != nullptr);
+      if (!avatar) return;
+      std::vector<GameObject *> objects;
+      std::function<void(GameObject *)> walk = [&](GameObject *g) {
+        objects.push_back(g);
+        for (GameObject *c : g->children) walk(c);
+      };
+      walk(avatar);
+      const BudgetCounts counts = budget_count(objects);
+      for (const char *platform : {"pc", "android"}) {
+        const BudgetTarget &target = budget_targets()[(size_t)budget_target_index(std::string(platform) == "pc" ? "VRChat PC" : "VRChat Quest")];
+        const BudgetResult ranked = budget_rank(target, counts);
+        for (const Row &r : rows) {
+          const Json &v = sdk[platform]["values"][r.value];
+          const double theirs = r.sub ? v[r.sub].number(-1) : v.number(-1);
+          std::string rank = budget_rank_name(target, ranked.row_rank[(int)r.row]), their_rank = sdk[platform]["ratings"][r.category].str;
+          rank.erase(std::remove(rank.begin(), rank.end(), ' '), rank.end());  // ("Very Poor" is the SDK's VeryPoor)
+          std::printf("    %s %s: Blendity %g (%s), VRChat %g (%s)\n", platform, budget_row_name(r.row), counts.value[(int)r.row], rank.c_str(), theirs, their_rank.c_str());
+          CHECK(counts.value[(int)r.row] == theirs && rank == their_rank);
+          compared++;
+        }
+      }
+    });
+    CHECK(compared == 14);
+  });
+  test("the Budget's bones (review 396): what the skins name, as a set - a mesh selected alone counts its rig, an armature nothing is skinned to counts none, a nested hair rig once with its body's, a mesh under the rig is one of its transforms", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *avatar = ed.scene().create("Avatar");
+    GameObject *rig = ed.scene().create("Body Rig", avatar);
+    rig->add<Armature>();
+    GameObject *spine = ed.scene().create("Spine", rig);
+    spine->add<Bone>();
+    GameObject *hair = ed.scene().create("Hair Rig", spine);  // (a rig inside the body's: its joints are the body's too)
+    hair->add<Armature>();
+    ed.scene().create("Strand", hair)->add<Bone>();
+    GameObject *body = make_cube(ed, "Body");
+    ed.scene().set_parent(body, avatar, -1, false);
+    body->add<SkinModifier>()->object = "Body Rig";
+    GameObject *bangs = make_cube(ed, "Bangs");
+    ed.scene().set_parent(bangs, avatar, -1, false);
+    bangs->add<SkinModifier>()->object = "Hair Rig";
+    GameObject *prop = ed.scene().create("Prop Rig");  // (nothing skinned to it: VRChat counts none)
+    prop->add<Armature>();
+    ed.scene().create("Hinge", prop)->add<Bone>();
+    auto bones = [](std::vector<GameObject *> objs) { return budget_count(objs).value[(int)BudgetRow::Bones]; };
+    const double all = bones({avatar, rig, spine, hair, body, bangs, prop}), body_only = bones({body}), bangs_only = bones({bangs}), prop_only = bones({prop});
+    std::printf("    bones: everything %g, the body alone %g, the bangs alone %g, the prop rig %g\n", all, body_only, bangs_only, prop_only);
+    CHECK(all == 4.0 && body_only == 4.0 && bangs_only == 2.0 && prop_only == 0.0);  // (Body Rig, Spine, Hair Rig, Strand; the hair's two inside them)
+    GameObject *gear = make_cube(ed, "Gear");  // (a mesh under the rig is a transform its skin names: one more)
+    ed.scene().set_parent(gear, spine, -1, false);
+    CHECK(bones({body}) == 5.0);
+  });
 }
 
 static void tests_round382() {
@@ -2013,4 +2118,5 @@ void run_livelink_tests() {
   tests_round380();
   tests_round381();
   tests_round382();
+  tests_round396();
 }
