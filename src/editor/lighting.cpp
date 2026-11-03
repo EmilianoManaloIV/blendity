@@ -170,6 +170,8 @@ void Editor::load_lighting_data() {
   frozen_key_ = 0;
   lm_mesh_baked_.clear();
   lighting_data_ = LightingData{};
+  light_volume_bakes_.clear();  // (round 398: the scene's, loaded below)
+  light_volume_bakes_dirty_ = false;
   probes_ = ProbeVolumeData{};
   probe_live_ready_ = false;
   probe_live_left_ = 0;
@@ -179,6 +181,7 @@ void Editor::load_lighting_data() {
   lm_mesh_hash_.clear();
   ood_key_ = 0;
   const std::string dir = lighting_dir();
+  if (!dir.empty()) load_light_volume_bakes(dir);  // (round 398: their own file - review 398: also with no lightmaps)
   if (dir.empty() || !fs::exists(fs::join(dir, "LightingData.bin"))) return;
   std::string err;
   if (!lighting_data_.load(dir, err)) Log::warn("Baked lighting not loaded: %s", err.c_str());
@@ -205,6 +208,7 @@ void Editor::load_lighting_data() {
 /* Writes the baked data next to the scene file if it isn't there yet (baked before the scene had a
  * file, or the scene was saved under another name). */
 void Editor::save_lighting_data() {
+  if (!lighting_dir().empty() && light_volume_bakes_dirty_) save_light_volume_bakes(lighting_dir()), light_volume_bakes_dirty_ = false;  // (review 398: on its own)
   if (lighting_data_.empty() && (probes_.empty() || probes_.scene_key == 0)) return;
   const std::string dir = lighting_dir();
   if (dir.empty() || dir == lighting_saved_dir_) return;
@@ -291,6 +295,7 @@ void Editor::bake_start() {
   s.gpu_device = bake_gpu_;
   bake_key_ = lightmap_scene_key();
   bake_start_ = now_seconds();
+  lv_bake_ = LightVolumeBakeRun{};  // (round 398: its volumes after its probes)
   baker_.begin(objects, lights, env_, s);
   baking_ = true;
   bake_status_ = strprintf("Baking %zu objects, %zu texels", objects.size(), baker_.texel_count());
@@ -300,6 +305,7 @@ void Editor::bake_start() {
 void Editor::bake_cancel() {
   probe_phase_ = false;
   probe_pt_.reset();
+  lv_bake_ = LightVolumeBakeRun{};  // (review 398: its tracer held the cancelled bake's meshes)
   bake_objects_.clear();
   bake_lights_.clear();
   if (!baking_) {
@@ -314,6 +320,8 @@ void Editor::bake_cancel() {
 
 void Editor::bake_clear() {
   if (baking_) bake_cancel();
+  light_volume_bakes_.clear();  // (review 398: the volumes' bakes go with the rest)
+  livelink_light_volume_bakes_changed();
   lighting_data_ = LightingData{};
   probes_ = ProbeVolumeData{};
   probe_live_ready_ = false;
@@ -369,6 +377,7 @@ void Editor::step_bake() {
     for (uint8_t v : probes_.valid) valid += v;
     Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - valid, probes_.bricks.size());
   }
+  if (light_volume_bake_step(budget)) return;  // (round 398: the Light Volumes Blendity bakes, in slices)
   baking_ = false;
   bake_objects_.clear();  // the bake's copies of the meshes
   bake_lights_.clear();

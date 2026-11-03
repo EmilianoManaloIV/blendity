@@ -242,6 +242,19 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     out = c->second;
     return !out.empty();
   };
+  int volume_bakes = 0;
+  std::vector<std::pair<GameObject *, LightVolumeSH>> unity_bakes;  // (round 398: Unity's Light Volume bakes, kept once the objects stand)
+  ctx.light_volume_textures = [&](GameObject &g, const std::string &t0, const std::string &t1, const std::string &t2) {
+    std::string text[3], why;
+    const std::string *guids[3] = {&t0, &t1, &t2};
+    for (int k = 0; k < 3; k++) {
+      const auto it = index.find(*guids[k]);
+      if (it == index.end() || !fs::read_file(it->second.path, text[k])) return;  // (not in the project: Unity keeps it)
+    }
+    LightVolumeSH sh;
+    if (!light_volume_from_textures(text[0], text[1], text[2], sh, why)) return Log::warn("Import Unity: %s's Light Volume bake not read (%s)", g.name.c_str(), why.c_str());
+    unity_bakes.push_back({&g, light_volume_from_unity(sh)});
+  };
   ctx.material = [&](const std::string &guid) -> MaterialPtr {  // (round 371: a Unity .mat, converted as it loads)
     const auto it = index.find(guid);
     return it == index.end() || fs::extension(it->second.path) != ".mat" ? nullptr : material_asset(make_asset_relative(it->second.path));
@@ -277,6 +290,8 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
     if (!g.parent && &g != root && !before.count(g.id)) strays.push_back(&g);
   });
   for (GameObject *g : strays) scene_->set_parent(g, root, -1, false);
+  for (auto &[g, sh] : unity_bakes) light_volume_bakes_[g->id] = std::move(sh), volume_bakes++;  // (round 398: shown till Blendity bakes it)
+  if (volume_bakes) livelink_light_volume_bakes_changed(), Log::info("Import Unity: %d Light Volume bake(s) read back from Unity", volume_bakes);
   if (ctx.objects == 0 && strays.empty() && root->children.empty()) {  // (nothing in it: no object, no Undo step)
     scene_->destroy(root);
     return Log::warn("Import Unity: %s has no objects", fs::filename(path).c_str()), false;

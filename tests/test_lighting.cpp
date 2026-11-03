@@ -491,6 +491,120 @@ static void round35_tests() {
     std::filesystem::remove(path);
   });
 
+  test("VRC Light Volumes baked in Blendity (round 398): the ambient cube's SH L1 fit; Unity's axes and back; the package's textures read back; a bake file's checksum refused when it doesn't match", [] {
+    /* The fit: irradiance 2 towards +X and 0 elsewhere - L0 the six directions' mean 1/3, L1 along X half of 2 (review 398:
+     * irradiance has no odd band past 1, so a + b . n comes back exactly). */
+    ProbeVolumeData d;
+    d.baked.resize(1), d.valid.assign(1, 1);
+    d.baked[0].bounce[0] = Vec3(2.0f, 1.0f, 0.0f);
+    Environment dark;
+    dark.mode = Environment::Color, dark.color = Vec3(0.0f);
+    const int one[3] = {1, 1, 1};
+    LightVolumeSH sh;
+    light_volume_fit(d, dark, one, sh);
+    std::printf("    the fit: L0 %g, L1 red (%g %g %g)\n", sh.l0[0].x, sh.l1r[0].x, sh.l1r[0].y, sh.l1r[0].z);
+    CHECK(std::fabs(sh.l0[0].x - 2.0f / 6.0f) < 1e-6f && std::fabs(sh.l1r[0].x - 1.0f) < 1e-6f && sh.l1r[0].y == 0.0f && std::fabs(sh.l1g[0].x - 0.5f) < 1e-6f);
+    CHECK(sh.validity[0] == 0.0f);  // (valid: open - Unity's sense)
+    /* A linear field a + b . n sampled on the six axes comes back exactly: (1, 0.2, -0.3) . n + 0.5. */
+    for (int k = 0; k < 6; k++) {
+      static const Vec3 kAxis[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+      d.baked[0].bounce[(size_t)k] = Vec3(0.5f + dot(Vec3(1.0f, 0.2f, -0.3f), kAxis[k]));
+    }
+    light_volume_fit(d, dark, one, sh);
+    CHECK(std::fabs(sh.l0[0].x - 0.5f) < 1e-6f && std::fabs(sh.l1r[0].x - 1.0f) < 1e-6f && std::fabs(sh.l1r[0].y - 0.2f) < 1e-6f && std::fabs(sh.l1r[0].z + 0.3f) < 1e-6f);
+    d.valid[0] = 0;
+    light_volume_fit(d, dark, one, sh);
+    CHECK(sh.validity[0] == 1.0f);  // (inside geometry: 1, which the package fills from its neighbours)
+    /* Unity's axes: x reversed, L1's x negated - and back. */
+    LightVolumeSH grid;
+    grid.res[0] = 2, grid.res[1] = 1, grid.res[2] = 1;
+    grid.l0 = {Vec3(1, 0, 0), Vec3(2, 0, 0)}, grid.l1r = {Vec3(0.5f, 0.25f, 0), Vec3(0)}, grid.l1g = grid.l1b = {Vec3(0), Vec3(0)}, grid.validity = {1, 0};
+    const LightVolumeSH u = light_volume_to_unity(grid), back = light_volume_from_unity(u);
+    CHECK(u.l0[0].x == 2.0f && u.l1r[1].x == -0.5f && u.l1r[1].y == 0.25f && u.validity[0] == 0.0f);
+    CHECK(back.l0[0].x == 1.0f && back.l1r[0].x == 0.5f && back.checksum() == grid.checksum());
+    /* The package's textures (RGBAHalf, its packing: L1 times 1.65) read back to the SH they hold. */
+    auto half = [](float f) {  // (exact for these values: 0, 0.5, 1, 2 and their multiples of 1.65's halves)
+      uint32_t b;
+      std::memcpy(&b, &f, 4);
+      const uint32_t e = (b >> 23) & 0xFF, m = b & 0x7FFFFF;
+      return (uint16_t)(f == 0.0f ? 0 : ((b >> 16) & 0x8000) | ((e - 112) << 10) | (m >> 13));
+    };
+    auto tex = [&](const std::vector<float> &rgba) {
+      std::string hex;
+      for (float f : rgba) hex += strprintf("%02x%02x", half(f) & 0xFF, half(f) >> 8);
+      return "%YAML 1.1\n--- !u!117 &11700000\nTexture3D:\n  m_Name: v\n  m_Width: 1\n  m_Height: 1\n  m_Depth: 1\n  m_Format: 17\n  image data: 8\n  _typelessdata: " + hex + "\n";
+    };
+    LightVolumeSH read;
+    std::string why;
+    CHECK(light_volume_from_textures(tex({1.0f, 0.5f, 2.0f, 1.65f}), tex({3.3f, 0.0f, 0.0f, 0.0f}), tex({0.0f, 0.0f, 0.0f, 0.0f}), read, why));
+    std::printf("    read back: L0 (%g %g %g), L1 red (%g %g %g) %s\n", read.l0[0].x, read.l0[0].y, read.l0[0].z, read.l1r[0].x, read.l1r[0].y, read.l1r[0].z, why.c_str());
+    CHECK(read.unity_axes && read.l0[0].y == 0.5f && std::fabs(read.l1r[0].x - 2.0f) < 2e-3f && std::fabs(read.l1r[0].z - 1.0f) < 2e-3f);
+    CHECK(!light_volume_from_textures(tex({1, 1, 1, 1}), "not a texture", tex({1, 1, 1, 1}), read, why));
+    /* The file: saved, read back equal; one byte changed, refused by its checksum. */
+    const std::string path = fs::join(test_dir(), "lv_bakes.bin");
+    std::map<uint64_t, LightVolumeSH> bakes{{42, grid}}, loaded;
+    std::string err;
+    bakes[42].from_unity = true, bakes[42].rotation = Quat::euler(Vec3(0, 30, 0));
+    CHECK(save_light_volume_bakes(path, bakes, err) && load_light_volume_bakes(path, loaded, err) && loaded.count(42) && loaded[42].checksum() == grid.checksum());
+    CHECK(loaded[42].from_unity && std::fabs(loaded[42].rotation.y - bakes[42].rotation.y) < 1e-7f);  // (version 2: its source and baked rotation kept)
+    std::string raw;
+    fs::read_file(path, raw);
+    raw[raw.size() - 3] ^= 0x40;
+    fs::write_file(path, raw);
+    CHECK(!load_light_volume_bakes(path, loaded, err) && err.find("checksum") != std::string::npos);
+    LightVolumeSH bad = grid;
+    bad.l0[1].y = std::nanf("");
+    CHECK(!bad.valid(err) && !save_light_volume_bakes(path, {{1, bad}}, err));
+    LightVolumeSH huge;
+    huge.res[0] = huge.res[1] = 2000, huge.res[2] = 1;  // (4M voxels: past the cap, refused before its arrays are looked at)
+    CHECK(!huge.valid(err) && err.find("too large") != std::string::npos);
+  });
+  test("VRC Light Volumes baked in Blendity (round 398): Generate Lighting bakes a volume with Bake in Blendity on - its grid, every voxel a number, lit where the scene's probe volume says - and leaves one with it off to Unity", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {4, 1, 4}, Vec3(0.8f));
+    r35_sun_mode(ed, 2);  // (Baked: the volumes and probes take it)
+    GameObject *hall = ed.scene().create("Hall");
+    hall->set_local_position(Vec3(0, 1, 0)), hall->set_local_scale(Vec3(4, 2, 4));
+    LightVolumeComponent *v = hall->add<LightVolumeComponent>();
+    v->voxels_per_unit = 1.0f, v->bake_in_blendity = true;
+    GameObject *other = ed.scene().create("Unity's");
+    other->add<LightVolumeComponent>();
+    ed.scene().create("Probes")->add<ProbeVolume>()->global = true;  // (the scene's own probes: the same path tracer, placed apart - what the volume is checked against)
+    ed.commit_change("volumes");
+    r35_bake(ed);
+    auto &bakes = ed.light_volume_bakes_for_test();
+    const auto it = bakes.find(hall->id);
+    CHECK(it != bakes.end() && !bakes.count(other->id));
+    if (it == bakes.end()) return;
+    const LightVolumeSH &sh = it->second;
+    std::string why;
+    CHECK(sh.res[0] == 4 && sh.res[1] == 2 && sh.res[2] == 4 && sh.valid(why));
+    /* The voxel over the floor's middle against the scene's own probe volume at the same point, like for like: its L0
+     * against the mean of the probes' six directions there, its L1 up against half their up less their down. */
+    const std::vector<Vec3> pos = light_volume_positions(hall->world_matrix(), sh.res);
+    const size_t i = 1 + 4 * (0 + 2 * 1);  // (x 1, y 0, z 1)
+    static const Vec3 kAxis[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    Vec3 axis[6], mean(0.0f);
+    bool sampled = true;
+    for (int k = 0; k < 6; k++) {
+      sampled = sampled && ed.probes_for_test().sample(pos[i], kAxis[k], ed.env_for_test().irradiance(kAxis[k]), false, axis[k]);
+      mean = mean + axis[k] / 6.0f;
+    }
+    const float l1_up = (axis[2].x - axis[3].x) * 0.5f;
+    std::printf("    voxel at (%.2f %.2f %.2f): L0 %.3f, L1 up %.3f; the probe volume there %s %.3f and %.3f\n", pos[i].x, pos[i].y, pos[i].z, sh.l0[i].x,
+                sh.l1r[i].y, sampled ? "says" : "has none:", mean.x, l1_up);
+    CHECK(sh.l0[i].x > 0.0f && std::isfinite(sh.l0[i].x));
+    CHECK(sampled && std::fabs(sh.l0[i].x - mean.x) <= 0.1f * std::max(mean.x, 0.05f));  // (two placements and sample sets, one path tracer)
+    CHECK(sampled && std::fabs(sh.l1r[i].y - l1_up) <= 0.1f * std::max(std::fabs(l1_up), 0.05f));
+    /* A volume past the voxel cap is refused, said - nothing baked for it. */
+    GameObject *world = ed.scene().create("World");
+    world->set_local_scale(Vec3(300, 50, 300));
+    world->add<LightVolumeComponent>()->bake_in_blendity = true;  // (3 a metre: 121M voxels)
+    ed.commit_change("world volume");
+    r35_bake(ed);
+    CHECK(!ed.light_volume_bakes_for_test().count(world->id) && ed.light_volume_bakes_for_test().count(hall->id));
+  });
   test("baked lighting: a new scene cancels a running bake and starts with no baked data", [] {
     Editor ed;
     r35_open(ed);

@@ -63,6 +63,7 @@ namespace Blendity.LiveLink
                 case "lodmesh": OnLodMesh(j, m.Bin); break;
                 case "collider": OnCollider(j); break;
                 case "lightvolume": OnLightVolume(j); break;  // (round 397)
+                case "lightvolumebake": OnLightVolumeBake(j, m.Bin); break;  // (round 398)
                 case "avatar": OnAvatar(j); break;  // (round 381: LiveLinkVRChat.cs)
                 case "springs": OnSprings(j); break;
                 case "light": OnLight(j); break;

@@ -61,6 +61,9 @@ and scales come across as the same numbers.
   found an avatar with no body, a missing Animator and pipeline manager, and the link's components refused - all fixed.
   `--update` keeps the avatar's report as `tests/fixtures/vrchat_sdk_avatar.json`, which Blendity's Budget is tested
   against. Uploading stays the user's (it needs their login).
+- **VRC Light Volumes (rounds 397-398):** with the package in a world project, the harness's world check also requires
+  the session's Light Volume and Point Light Volume made, registered and refreshed, and the hall's bake from Blendity
+  saved by the package (its first voxel to 1%, a changed byte refused). Run on 2026-11-02 with Light Volumes 3.0.1: passes.
 - Without Unity: `ReplayCheck/ReplayCheck.cs` runs the package's framing, JSON and glTF reading on the same session
   with any C# compiler (its header has the command); `ReplayCheck.exe --live <python> <repository's blendity folder>`
   finds the stand-in Live Link (`tools/livelink_fake_server.py`) through the discovery file twice, as the package does.

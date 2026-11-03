@@ -18,9 +18,11 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Linq;
 using System.Text;
 using Blendity.LiveLink;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 
 public static class BlendityVrcChecks
@@ -36,7 +38,10 @@ public static class BlendityVrcChecks
         int code = 1;
         try
         {
-            Replay(Arg("-blendityFixture"), report);
+            /* Round 398: a saved scene first - the package writes a bake beside it. */
+            var scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
+            EditorSceneManager.SaveScene(scene, "Assets/BlendityChecks" + (avatar ? "Avatar" : "World") + ".unity");
+            applier = Replay(Arg("-blendityFixture"), report, !avatar);
             code = avatar ? CheckAvatar(report) : CheckWorld(report);
         }
         catch (Exception e)
@@ -66,7 +71,12 @@ public static class BlendityVrcChecks
         return null;
     }
 
-    static void Replay(string path, Dictionary<string, object> report)
+    static LiveLinkApplier applier;
+
+    /* The session replayed; in the world, the package's Manager has Denoise off before the bake lands, so the textures
+     * the package writes are Blendity's data exactly (the round-trip fixture) - the bridge follows the Manager's setting,
+     * as the package's own bake does. */
+    static LiveLinkApplier Replay(string path, Dictionary<string, object> report, bool world)
     {
         var data = File.ReadAllBytes(path);
         var s = new LiveLinkStream();
@@ -74,8 +84,31 @@ public static class BlendityVrcChecks
         var a = new LiveLinkApplier();
         int n = 0;
         for (var m = s.Next(); m != null; m = s.Next(), n++)
+        {
+            if (m.Type == "lightvolumebake")
+            {
+                sentBake = m;
+                if (world)
+                    DenoiseOff(report);
+            }
             a.Apply(m);
+        }
         report["messages"] = n;
+        return a;
+    }
+
+    static LiveLinkMessage sentBake;
+
+    static void DenoiseOff(Dictionary<string, object> report)
+    {
+        var managerType = FindType("VRCLightVolumes.LightVolumeManager");
+        foreach (var m in managerType != null ? UnityEngine.Object.FindObjectsByType(managerType, FindObjectsInactive.Include, FindObjectsSortMode.None) : new UnityEngine.Object[0])
+        {
+            var f = managerType.GetField("Denoise", Any);
+            if (f != null)
+                f.SetValue(m, false);
+        }
+        report["denoise"] = false;
     }
 
     static object Member(object o, string name)
@@ -274,7 +307,34 @@ public static class BlendityVrcChecks
         float centre = inv.MultiplyPoint3x4(hall.transform.position).magnitude;
         float lightOff = Vector3.Distance((Vector3)Member(p, "Position"), lamp.transform.position);
         report["derived"] = new Dictionary<string, object> { { "volumeCentreOff", centre }, { "lightPositionOff", lightOff } };
-        return managers == 1 && centre < 1e-3f && lightOff < 1e-3f;
+        return managers == 1 && centre < 1e-3f && lightOff < 1e-3f && BakeLanded(v, report);
+    }
+
+    /* Round 398: Blendity's bake of the hall saved by the package as its own - three textures, Bake off, nothing refused -
+     * and its first voxel's L0 what Blendity sent (half floats: to 1%). */
+    static bool BakeLanded(Component v, Dictionary<string, object> report)
+    {
+        if (sentBake == null)
+        {
+            report["bake"] = "no bake in the session";
+            return false;
+        }
+        var t0 = Member(v, "Texture0") as Texture3D;
+        var bake = new Dictionary<string, object> { { "refused", applier.LastBakeRefusal }, { "landed", applier.BakesLanded.Count },
+                                                   { "texture0", t0 != null ? AssetDatabase.GetAssetPath(t0) : "" }, { "Bake", Plain(Member(v, "Bake")) } };
+        report["bake"] = bake;
+        if (t0 == null || applier.BakesLanded.Count != 1 || (bool)Member(v, "Bake"))
+            return false;
+        float sent = BitConverter.ToSingle(sentBake.Bin, 0), got = t0.GetPixels()[0].r;
+        bake["voxel0L0"] = new List<object> { sent, got };
+        if (Mathf.Abs(sent - got) > 0.01f * Mathf.Max(Mathf.Abs(sent), 0.01f))
+            return false;
+        /* A second bake with a changed checksum is refused, the textures kept. */
+        var crcBefore = applier.BakesLanded.Values.First();
+        var tampered = (byte[])sentBake.Bin.Clone();
+        tampered[0] ^= 0x40;
+        bake["tamperedRefused"] = applier.CheckBakeForTest(sentBake.Json, tampered, v) != null;
+        return (bool)bake["tamperedRefused"] && crcBefore != 0;
     }
 
     // ------------------------------------------------------------ JSON

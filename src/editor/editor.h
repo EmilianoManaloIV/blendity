@@ -28,6 +28,7 @@
 #include "../render/lightmapper.h"
 #include "../render/voxel_gi.h"
 #include "../render/probe_volume.h"
+#include "../render/light_volume_bake.h"
 #include "../render/realtime_lightmap.h"
 #include "../render/voxel_gi_gpu.h"
 #include "../render/gpu_raster.h"
@@ -1206,6 +1207,9 @@ class Editor {
   uint64_t rsm_renders_for_test() const { return vgi_[0].rsm_renders + vgi_[1].rsm_renders; }
   /* Probe volumes (task 0014). */
   const ProbeVolumeData &probes_for_test() const { return probes_; }
+  std::map<uint64_t, LightVolumeSH> &light_volume_bakes_for_test() { return light_volume_bakes_; }  // (round 398)
+  const Environment &env_for_test() const { return env_; }
+  void light_volume_bakes_changed_for_test() { lv_bake_gen_++; }
   bool wants_continuous_redraw_for_test() const { return wants_continuous_redraw(); }
   bool probe_volume_box_for_test(AABB &out) { return probe_volume_box(out); }
   bool probe_live_ready_for_test() const { return probe_live_ready_; }
@@ -5324,6 +5328,30 @@ class Editor {
   size_t probe_cursor_ = 0, probe_live_left_ = 0, probe_bake_next_ = 0;
   bool probe_phase_ = false;                 // Generate Lighting is baking the probes (after the lightmaps)
   std::unique_ptr<PathTracer> probe_pt_;     // the probe bake's scene
+  /* Round 398 (light_volume_bake_ui.cpp): VRC Light Volumes baked by Generate Lighting after its probes - each volume
+   * with Bake in Blendity on, its voxel grid as probes, in slices; the results by object id, saved beside the lightmaps. */
+  struct LightVolumeBakeRun {
+    bool started = false;
+    std::vector<uint64_t> ids;  // (the volumes to bake, in order)
+    size_t at = 0;              // (the one baking)
+    size_t next = 0;            // (its next probe)
+    size_t validated = 0;       // (its probes checked for geometry so far)
+    int kept = 0;               // (volumes baked and kept this run)
+    int res[3] = {0, 0, 0};
+    std::unique_ptr<ProbeVolumeData> probes;
+    std::unique_ptr<PathTracer> pt;
+  };
+  LightVolumeBakeRun lv_bake_;
+  std::map<uint64_t, LightVolumeSH> light_volume_bakes_;
+  bool light_volume_bake_step(double budget);  // true while baking
+  uint64_t lv_bake_gen_ = 1;                   // (Live Link sends a volume's bake again when this moves)
+  void livelink_light_volume_bakes_changed() { lv_bake_gen_++, light_volume_bakes_dirty_ = true; }
+  bool light_volume_bakes_dirty_ = false;  // (saved with the scene since it last changed)
+  bool light_volume_bake_next();
+  bool light_volume_bake_begin();
+  void light_volume_bake_keep();
+  void load_light_volume_bakes(const std::string &dir);
+  void save_light_volume_bakes(const std::string &dir);
   uint64_t probe_box_key_ = 0;               // probe_volume_box(), remembered while the scene is unchanged
   AABB probe_box_;
   bool probe_box_ok_ = false;

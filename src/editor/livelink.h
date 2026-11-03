@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ struct Stats {
   uint64_t clips = 0, clips_too_big = 0;          // (round 379: clips baked and sent; over the size cap, not sent)
   uint64_t colliders = 0, lods = 0;               // (round 380: collider and LOD Group messages)
   uint64_t light_volumes = 0;                     // (round 397: VRC Light Volume messages)
+  uint64_t light_volume_bakes = 0;                // (round 398: their bakes)
   uint64_t avatars = 0;                           // (round 381: avatar messages)
   uint64_t ticks = 0;          // ticks that compared the scene (at most 60 a second, none without a client)
   double tick_ms = 0;          // the last one's time on the main thread
@@ -41,6 +43,10 @@ struct Stats {
   double tick_ms_total = 0;    // over every comparison
   double mesh_encode_ms = 0;   // the worker's time building glTF binaries, in all
 };
+
+}  // namespace livelink
+struct LightVolumeSH;  // (render/light_volume_bake.h)
+namespace livelink {
 
 class Link {
  public:
@@ -61,6 +67,10 @@ class Link {
   /* Once a frame, on the main thread: new clients get the whole scene, every client what changed since the last
    * comparison (at most every 1/60 s). Nothing at all happens while no client is connected. */
   void tick(Scene &scene, bool playing, double now_s);
+
+  /* Round 398: the scene's Light Volume bakes (Blendity's, by object id) and their generation - a new number when they
+   * change; a volume with Bake in Blendity on sends its bake when the generation moves. Not owned. */
+  void set_light_volume_bakes(const std::map<uint64_t, LightVolumeSH> *bakes, uint64_t generation);
 
   const Stats &stats() const;
   net::Server::Stats net_stats() const;
