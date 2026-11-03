@@ -9334,6 +9334,43 @@ struct SetOne : Reflector {
 };
 }  // namespace r403
 
+/* Round 404 (task 0381): the comparison harness's Blendity side. */
+static void tests_round404() {
+  test("The comparison harness's Blendity side (round 404): `render wait` holds a script till the render is done, so the saverender after it saves the whole picture - the PNG and the linear HDR (brighter in sRGB than its own bytes)", [] {
+    using namespace r402;
+    Editor ed;
+    Light *sun = nullptr;
+    Camera *cam = nullptr;
+    GameObject *g = sphere_scene(ed, &sun, &cam);
+    CHECK(g && sun && cam);
+    if (!g || !sun || !cam) return;
+    ed.command("set Render.ResolutionX 96");
+    ed.command("set Render.ResolutionY 96");
+    ed.command("set Render.RenderEngine Path");  // (a linear picture needs the path tracer: the rasterizer keeps none)
+    ed.command("set Render.Samples 8");
+    ed.command("render wait");
+    CHECK(!ed.rendering_for_test());
+    const std::string png = resolve_asset_path("Assets/R404.png"), exr = resolve_asset_path("Assets/R404.hdr");
+    std::error_code ec;
+    std::filesystem::remove(png, ec), std::filesystem::remove(exr, ec);
+    ed.command("saverender " + png);
+    ed.command("saverender " + exr);
+    std::string pb, eb;
+    CHECK(fs::read_file(png, pb) && pb.size() > 100 && fs::read_file(exr, eb) && eb.size() > 100);
+    Bitmap p, e;
+    std::string err;
+    CHECK(decode_image(pb, p, err) && p.width == 96 && p.height == 96);
+    CHECK(decode_image(eb, e, err) && e.width == 96 && e.is_float);
+    /* The sphere's centre: the HDR's linear value is below the PNG's sRGB byte (0.8 linear is 231 sRGB). */
+    const size_t c = (size_t)48 * 96 + 48;
+    const float lin = e.is_float && e.rgbaf.size() > c * 4 ? e.rgbaf[c * 4] : -1.0f;
+    const int srgb = p.rgba8.size() > c * 4 ? p.rgba8[c * 4] : -1;
+    std::printf("    the centre: HDR %.3f linear, PNG %d / 255 (sRGB)\n", lin, srgb);
+    CHECK(lin >= 0.0f && srgb >= 0 && lin * 255.0f < (float)srgb && srgb > 100);
+    std::filesystem::remove(png, ec), std::filesystem::remove(exr, ec);
+  });
+}
+
 static void tests_round403() {
   test("VRChat's SDK classes by their fileIDs (round 403): Unity's MD4 of the full name gives the ids the files carry - the descriptor, the PhysBone collider, a rotation constraint - and an unknown one is empty", [] {
     CHECK(unity_script_file_id("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor") == 542108242);
@@ -12126,6 +12163,7 @@ void run_assets_tests() {
   tests_round401();
   tests_round402();
   tests_round403();
+  tests_round404();
   tests_round372();
   tests_round373();
   tests_round374();

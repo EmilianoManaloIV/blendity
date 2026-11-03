@@ -2,6 +2,28 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 404): the comparison - snapshots across the board, the attributes table, the report
+
+**Asked:** "Compare snapshots across the board to get accurate readings using Unity VCC's Shinano and SideRail
+project." The fourth of five rounds: the harness and the measurement.
+
+**Added (task 0381)**
+- **The snapshot harness:** `tools/unity_compare.py` with `bridges/unity/SdkCheck/BlendityCompare.cs` - the same
+  stations rendered by Unity (batch, through the scene's Main Camera with its post-processing; the prefab in the studio
+  rig) and by Blendity's headless mode (the imported scene, Unity's lightmaps, `render wait`), scored per station by
+  `tools/image_compare.py` with side by sides, a report and an exit code against the target. A VCC project is refused
+  unless it is a marked copy.
+- **`render wait`** in the console (its code came with round 402's commit): a headless script's render finished before the
+  `saverender` after it.
+- **`tools/unity_attribute_table.py`:** every component class and script of a project copy with Blendity's standing.
+- **The report** `docs/hci/compare-unity-vrchat-2026-11.md`: Shinano passes at every station (MAE 0.9-2.6 / 255, SSIM
+  0.944-0.989, correlation 1.000); SideRail is near the target at every station (MAE 2.4-7.0, SSIM 0.928-0.937) with
+  the residuals ranked for round 405 (the fog's tint under ACES, grazing probe reflections, three shaders Blendity doesn't
+  read); the attributes of both projects all native or data; the timings.
+
+**Checked:** `tests_round404` (render wait, the PNG and the linear HDR); the harness end to end on both project copies
+(local); the suites, the audits.
+
 ## 2026-11-03 (round 403): the world's VRChat attributes, Unity's components as editable data
 
 **Asked:** the same comparison; the third of five rounds: the world's components.
