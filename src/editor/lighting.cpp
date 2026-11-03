@@ -261,6 +261,7 @@ int Editor::choose_bake_gpu() {
 
 void Editor::bake_start() {
   if (baking_) return;
+  if (unity_lighting_job_) return refuse("Generate Lighting: not while Unity reads its lightmaps for this scene (they'd land in the middle of the bake)", "", "");  // (review 400)
   if (playing_) {
     refuse("Generate Lighting: not while playing.", "stop", "stop Play");
     return;
@@ -323,6 +324,7 @@ void Editor::bake_clear() {
   light_volume_bakes_.clear();  // (review 398: the volumes' bakes go with the rest)
   livelink_light_volume_bakes_changed();
   lighting_data_ = LightingData{};
+  lighting_from_unity_ = false;  // (round 400)
   probes_ = ProbeVolumeData{};
   probe_live_ready_ = false;
   probe_live_left_ = 0;
@@ -347,6 +349,7 @@ void Editor::step_bake() {
     if (!done) return;
     lighting_data_ = baker_.take_result();
     lighting_data_.scene_key = bake_key_;
+    lighting_from_unity_ = false;  // (round 400: Blendity's own bake in Unity's place)
     lm_mesh_baked_.clear();
     for (const BakeObject &o : bake_objects_) lm_mesh_baked_[o.id] = lightmap_mesh_hash(*o.mesh);
     probe_phase_ = bake_probes_begin();  // then the probes, in slices like the texels

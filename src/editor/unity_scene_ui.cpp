@@ -96,7 +96,13 @@ bool load_unity_material(const std::string &text, const std::string &path, Mater
   const bool ok = unity_material(text, [&](const std::string &guid) {
         const auto it = index->find(guid);
         return it == index->end() ? std::string() : make_asset_relative(it->second.path);
-      }, [&](const std::string &guid, int64_t fid) { return unity_shader_name(*index, guid, fid); }, m, info);
+      }, [&](const std::string &guid, int64_t fid) { return unity_shader_name(*index, guid, fid); }, m, info,
+      [&](const std::string &guid) {  // (round 400: the shader's own properties - a .shader in the project)
+        const auto it = index->find(guid);
+        std::string source;
+        if (it == index->end() || fs::extension(it->second.path) != ".shader" || !fs::read_file(it->second.path, source)) return std::vector<std::string>();
+        return unity_shader_properties(source);
+      });
   if (!ok) return false;
   m.import_outline = info.outline_width, m.import_outline_color = info.outline_color;
   for (const std::string &n : info.notes) Log::info("Unity material %s: %s", path.c_str(), n.c_str());
@@ -288,7 +294,8 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   int probes = 0, lightmapped = 0;
   for (const UnityDoc &d : docs) probes += d.class_id == 220 || d.class_id == 215, lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;
   if (probes) ctx.notes.push_back(std::to_string(probes) + " light / reflection probe(s) kept as Unity's (Blendity bakes its own: the Lighting window)");
-  if (lightmapped) ctx.notes.push_back("the scene's baked lightmaps stay Unity's (made with Unity's UVs): written back unchanged");
+  if (lightmapped && !fs::exists(path + ".unity-lighting"))  // (round 400: fetched once by Unity, shown after)
+    ctx.notes.push_back("the scene's baked lightmaps are Unity's: Lighting > Use Unity's Lightmaps (or: unity lightmaps) has Unity read them - written back unchanged");
   std::vector<GameObject *> strays;  // (review 370: a variant's base, a parent loop - anything left at the top goes under the root)
   scene_->for_each([&](GameObject &g) {
     if (!g.parent && &g != root && !before.count(g.id)) strays.push_back(&g);
@@ -309,6 +316,12 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   mark_changed("Import " + fs::filename(path));
   unity_ids_waiting_ = ctx.models_waiting;
   unity_ids_last_import_ = typed, unity_ids_last_opened_ = as_scene;
+  if (lightmapped && fs::extension(path) == ".unity")  // (round 400: where Unity's lightmaps come from - a scene's, not a prefab's)
+    unity_lighting_scene_ = path, unity_lighting_under_ = root ? root->id : 0;
+  const std::string lighting_file = path + ".unity-lighting";
+  if (lightmapped && as_scene && fs::exists(lighting_file)) apply_unity_lighting(lighting_file);  // (fetched before: shown at once)
+  else if (lightmapped && !unity_editor_program().empty())
+    toast(LogLevel::Info, "The scene's lightmaps are Unity's: Unity can read them for Blendity (a few minutes the first time)", "unity lightmaps", "Use Unity's Lightmaps");
   if (cache.first_mesh_fallbacks) ctx.notes.push_back(std::to_string(cache.first_mesh_fallbacks) + " mesh part(s) not named by their model's .meta or object: the model's first mesh used");
   if (ctx.dropped) ctx.notes.push_back(std::to_string(ctx.dropped) + " component(s) on objects that weren't found (a nested prefab not in the project) were left out");
   if (ctx.model_overrides_stale)  // (round 399: Unity shows them as unused overrides too)

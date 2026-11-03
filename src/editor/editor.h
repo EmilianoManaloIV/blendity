@@ -1361,6 +1361,24 @@ class Editor {
   std::string unity_model_ids_path() const;
   void read_unity_model_ids(bool all, bool wait = false);
   void poll_unity_model_ids();
+  /* Round 400 (unity_lighting_ui.cpp): Unity's baked lighting for the Unity scene this one came from. */
+  struct UnityLightingJob {
+    struct File {
+      std::string from, meta, unity;  // (the package's file, its .meta's text, its path in Unity's project)
+    };
+    std::atomic<int> code{-1000000};  // (running till then)
+    std::string project, why, scene, unity_scene, out;
+    std::vector<File> files;
+    void run(const std::string &unity);
+  };
+  std::shared_ptr<UnityLightingJob> unity_lighting_job_;
+  std::string unity_lighting_scene_;  // (the .unity this scene was opened or imported from: Blendity's copy, absolute)
+  uint64_t unity_lighting_under_ = 0;  // (its objects' root when imported; 0 when opened - its objects at the top)
+  bool lighting_from_unity_ = false;   // (the baked lighting shown is Unity's: Generate Lighting replaces it)
+  void read_unity_lighting_cmd(bool wait);
+  void poll_unity_lighting();
+  bool apply_unity_lighting(const std::string &file);
+  void lighting_reset_for(const char *why);
   bool export_unity_package(const std::string &folder, const std::string &out = "");  // (round 372: the way back)
   std::map<std::string, std::vector<UnityEdit>> unity_edits(const std::string &folder_rel, int &nested, int &copies);
   void export_package_of_selection();

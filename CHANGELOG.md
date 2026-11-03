@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-02 (round 400): Unity's baked lightmaps in Blendity
+
+**Asked:** "implement a way to add Unity baked light maps into Blendity"; then "The materials in Blendity are not the
+same in the Unity Project. I can also see an error with emission based materials" - "the texture is not the same for
+the world projects"; then, with the side-by-side screens: "The textures on the materials still look off from what is
+in the Unity project. The floor in the Unity project should be the baseline for shows up in Blendity".
+
+**Added (task 0377)**
+- **Use Unity's Lightmaps** (Lighting window; offered when a Unity scene with baked lightmaps opens; `unity lightmaps`):
+  your installed Unity reads the scene in a scratch project and reports each object's lightmap and UVs, the lightmaps,
+  the lights' modes and the baked probes; Blendity matches every triangle and shows them as the scene's baked lighting,
+  directional ones shaded by each surface as Unity does. Kept beside the scene; Generate Lighting replaces them. ADR 0098.
+
+**Fixed**
+- **World materials as Unity draws them**: a .mat keeps the properties of every shader it ever had, and Unity reads
+  only its shader's - Blendity now reads the shader's Properties block and ignores the rest (a lamp had taken an old
+  red emission and a sign an old texture); normal, metallic and roughness maps read as data, not colour (they had
+  been brightened); uniuni's FakeInnerLight lamps (albedo, emission colour times brightness) glow as in Unity.
+  SideRail's 42 materials against Unity's: 8 different before, 4 after (a flickering candle's script-driven emission
+  and three particle / Light Volume materials Blendity doesn't draw).
+- **Models' submeshes in Unity's order**: Unity numbers a model's submeshes by the order its polygons first use their
+  materials, not the file's material order; Blendity had kept the file's, so a scene's materials went on the wrong
+  parts - SideRail's tunnel floor wore the concrete trim sheet (a grate band and marks) and its walls the floor's
+  concrete. Every renderer's materials and triangles per submesh compared with Unity's: 9 of 347 swapped before
+  (tunnel floors and walls, the bar counter, the tables), none after; 12 lamp filaments still draw a small part Unity
+  leaves without a material, and 4 objects split many-sided faces into a triangle or two more.
+
+**Checked:** SideRail - 180 of 180 lightmapped objects, every triangle matched; its brightness from the spawn 0.94 of
+Unity's own render (0.60 before); Unity's scratch project forced to Linear (Gamma had handed the lightmaps over
+gamma-encoded); tests in assets (the file, a scene opened and imported under a moved root, save and reopen, a Light
+Volume's bake kept, a stale bake and bad values refused, the shader's properties, FakeInnerLight).
+
 ## 2026-11-02 (round 399): Unity packages against Unity - Shinano and SideRail
 
 **Asked:** "do significant comparison testing with Blendity VRchat content and Unity Content" (Shinano), fix the
