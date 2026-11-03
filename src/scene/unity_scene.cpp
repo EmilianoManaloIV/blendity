@@ -282,7 +282,7 @@ void instantiate(const UnityDoc &d, Scene &scene, UnityImport &ctx, Build &b) {
   ctx.objects += inner.objects, ctx.meshes += inner.meshes, ctx.missing_meshes += inner.missing_meshes, ctx.lights += inner.lights;
   ctx.cameras += inner.cameras, ctx.colliders += inner.colliders, ctx.engine += inner.engine, ctx.prefabs += inner.prefabs + 1;
   ctx.overrides_kept += inner.overrides_kept, ctx.overrides_applied += inner.overrides_applied;
-  ctx.materials += inner.materials, ctx.outlines += inner.outlines, ctx.springs += inner.springs;
+  ctx.materials += inner.materials, ctx.outlines += inner.outlines, ctx.springs += inner.springs, ctx.light_volumes += inner.light_volumes;
   ctx.model_overrides_waiting += inner.model_overrides_waiting;
   ctx.models_waiting.insert(inner.models_waiting.begin(), inner.models_waiting.end());
   ctx.notes.insert(ctx.notes.end(), inner.notes.begin(), inner.notes.end());
@@ -470,6 +470,38 @@ void add_physbone(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b) 
   ctx.springs++;
 }
 
+/* Round 397: VRC Light Volumes' components (red.sim.lightvolumes 3) by their scripts' GUIDs - a Light Volume as
+ * Blendity's, its fields the package's; a Point Light Volume as its light's Light Volume option. Both stay Engine
+ * Components too, written back as they were. */
+constexpr const char *kLightVolumeGuid = "21bc8ec8ba5e5f3408667533e591f313", *kPointLightVolumeGuid = "064ede0cbb894e94abe683cb8db91f6f";
+
+/* By the package's GUID only (review 397: a project's own script of the same name isn't the package's). */
+bool is_script(const UnityDoc &d, const char *guid) { return d.class_id == 114 && d.body.guid("m_Script") == guid; }
+
+/* A Point Light Volume beside a light: the light's option (the light comes with the object's Light component; one
+ * without a light is the package's own light - kept as its Engine Component, which the Budget counts). A disabled one
+ * turns nothing on. */
+void mark_light_volume(const UnityDoc &d, GameObject &g) {
+  Light *l = g.get<Light>();
+  if (l && d.body.num("m_Enabled", 1.0) != 0.0) l->light_volume = true;
+}
+
+void add_light_volume(const UnityDoc &d, GameObject *g) {
+  if (g->get<LightVolumeComponent>()) return;
+  LightVolumeComponent *v = g->add<LightVolumeComponent>();
+  const YamlNode &b = d.body;
+  v->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  v->dynamic = b.num("IsDynamic") != 0.0, v->additive = b.num("IsAdditive") != 0.0;
+  if (const YamlNode *c = b.get("Color"))
+    v->color = Vec3(srgb_to_linear((float)c->num("r", 1.0)), srgb_to_linear((float)c->num("g", 1.0)), srgb_to_linear((float)c->num("b", 1.0)));
+  v->intensity = (float)b.num("Intensity", 1.0), v->smooth_blending = (float)std::clamp(b.num("SmoothBlending", 0.25), 0.0, 1.0);
+  v->exposure = (float)b.num("Exposure"), v->shadows = (float)b.num("Shadows"), v->highlights = (float)b.num("Highlights");
+  v->bake = b.num("Bake", 1.0) != 0.0, v->adaptive_resolution = b.num("AdaptiveResolution", 1.0) != 0.0;
+  v->voxels_per_unit = (float)b.num("VoxelsPerUnit", 3.0);
+  if (const YamlNode *r = b.get("Resolution"))
+    v->resolution[0] = std::max(1, (int)r->num("x", 16)), v->resolution[1] = std::max(1, (int)r->num("y", 16)), v->resolution[2] = std::max(1, (int)r->num("z", 16));
+}
+
 /* Anything Blendity doesn't hold: kept as it is. */
 void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   EngineComponent *e = g->add<EngineComponent>();
@@ -479,6 +511,8 @@ void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   const std::string script_fid = std::to_string(d.body.file_id("m_Script"));  // (a DLL's scripts: one GUID, a fileID each)
   const std::string vrc = d.class_id == 114 ? vrchat_type(d.body) : std::string();
   e->type = !name.empty() ? name : !vrc.empty() ? vrc : d.class_id == 114 ? "MonoBehaviour (" + e->script + ":" + script_fid + ")" : d.type;
+  if (e->script == kLightVolumeGuid || e->script == kPointLightVolumeGuid)  // (round 397: named without the package's scripts in the project)
+    e->type = e->script == kLightVolumeGuid ? "LightVolumeInstance" : "PointLightVolumeInstance";
   e->data = d.header + d.text;  // (the document as written, its header line and line ends unchanged)
   ctx.engine++;
 }
@@ -494,6 +528,7 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
     default:
       if (d.class_id == 114 && vrchat_type(d.body) == "VRCPhysBone" && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty()))
         add_physbone(d, g, ctx, b);  // (and kept below, for Unity; a project's own script with such fields isn't one)
+      if (is_script(d, kLightVolumeGuid)) add_light_volume(d, g), ctx.light_volumes++;  // (round 397: and kept below)
       return add_engine(d, g, ctx);
   }
 }
@@ -746,6 +781,10 @@ std::map<int64_t, GameObject *> build_unity_objects(const std::vector<UnityDoc> 
     GameObject *g = object_at(b.by_fid, d.body.file_id("m_GameObject"));
     if (g) add_component(d, g, ctx, b), b.targets[d.file_id] = {g, d.class_id};
     else ctx.dropped++;  // (review 370: never silently - counted, said)
+  }
+  for (const UnityDoc &d : docs) {  // (round 397: a Point Light Volume - after the components: its light may come later in the file)
+    GameObject *g = is_script(d, kPointLightVolumeGuid) ? object_at(b.by_fid, d.body.file_id("m_GameObject")) : nullptr;
+    if (g) mark_light_volume(d, *g), ctx.light_volumes++;
   }
   for (const UnityDoc &d : docs) {  // (round 395: Contribute GI - a static flag on the GameObject, a renderer's in Blendity)
     GameObject *g = d.class_id == 1 && !d.stripped ? object_at(b.by_fid, d.file_id) : nullptr;

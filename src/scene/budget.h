@@ -37,6 +37,7 @@ int budget_target_index(const std::string &name);   // by name, case blind; -1 w
 struct BudgetCounts {
   double value[(int)BudgetRow::Count] = {};
   size_t shape_keys = 0;  // (shown, not ranked: VRChat has no limit on them)
+  size_t light_volumes = 0, light_volume_lights = 0;  // (round 397: a world's VRC Light Volumes and their lights - 32 and 128 at once)
 };
 BudgetCounts budget_count(const std::vector<GameObject *> &objects);
 /* Review 355: the counts of what an export writes - its items' meshes (an Outline's shell is an item of its own), their

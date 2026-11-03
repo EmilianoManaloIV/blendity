@@ -287,6 +287,9 @@ struct Light : ComponentBase<Light> {
   /* Unity's Light Mode: 0 Realtime (not in baked lighting), 1 Mixed (realtime direct light and shadows,
    * baked indirect), 2 Baked (direct and indirect in the lightmaps). */
   int mode = 0;
+  /* Round 397: a VRC Light Volumes light (red.sim.lightvolumes' Point Light Volume - point, spot or area) in Unity, beside
+   * Unity's own: VRChat worlds light by it on every platform, 128 at once. */
+  bool light_volume = false;
   void reflect(Reflector &r) override;
   Vec3 final_color() const;  // colour x temperature tint
 };
@@ -718,6 +721,28 @@ struct ColliderComponent : ComponentBase<ColliderComponent> {
   bool fit = true;        // the Inspector's Fit to Mesh: sized to the mesh's bounds on its next frame (on when added: it fits at once)
   void reflect(Reflector &r) override;
 };
+
+/* A VRC Light Volume (round 397, task 0374; red.sim.lightvolumes 3, MIT): VRChat's baked-lighting box - a unit cube about
+ * its object, sized, turned and placed by the object's transform as the package's LightVolumeInstance is - its lighting
+ * stored as SH L1 in three 3D textures on a voxel grid (at most 32 volumes at once in a world). Its fields are the
+ * package's; Unity bakes it, or Blendity (Bake in Blendity, round 398). */
+struct LightVolumeComponent : ComponentBase<LightVolumeComponent> {
+  static constexpr const char *kName = "LightVolume";
+  static constexpr int kMaxVolumes = 32, kMaxLights = 128;  // (LightVolumeManager's MaxLightVolumeCount and MaxPointLightCount)
+  bool dynamic = false, additive = false;
+  Vec3 color{1.0f, 1.0f, 1.0f};
+  float intensity = 1.0f, smooth_blending = 0.25f;  // (smooth blending: metres at the edges, 0..1)
+  float exposure = 0.0f, shadows = 0.0f, highlights = 0.0f;
+  bool bake = true;                // (Unity's Bake: the package's bake takes it)
+  bool bake_in_blendity = false;   // (round 398: Blendity bakes its data; Unity's Bake off so the package leaves it)
+  bool adaptive_resolution = true;
+  float voxels_per_unit = 3.0f;
+  int resolution[3] = {16, 16, 16};  // (used when Adaptive Resolution is off)
+  void reflect(Reflector &r) override;
+};
+/* The grid a volume bakes at: from its world size and Voxels Per Unit when adaptive (each axis rounded half to even, at
+ * least 1 - the package's RecalculateAdaptiveResolution), else its own. */
+void light_volume_resolution(const GameObject &g, const LightVolumeComponent &v, int out[3]);
 
 /* A component of another engine that Blendity keeps but doesn't run (round 370, task 0347): a Unity script (C#,
  * UdonSharp), VRChat's components and anything else Unity puts on an object - its type, its script's GUID and its

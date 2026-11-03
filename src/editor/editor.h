@@ -3305,6 +3305,9 @@ class Editor {
   /* Round 362: the world kit (world_kit.cpp). */
   void update_collider_fits();
   void draw_colliders();
+  void draw_light_volumes();  // (round 397)
+  void budget_light_volume_rows(ui::Context &u, ui::Layout &lay, const BudgetCounts &c);
+  void draw_light_volume_grid(const GameObject &g, const LightVolumeComponent &v);
   const Mesh *lod_for_view(const GameObject &g, const Mesh &m);
   void add_lod_items(GameObject &g, const Mesh &m, std::vector<ExportItem> &items, size_t index, const ExportOptions &o, GameObject *arm, const SkinModifier *skm);
   bool exports_lods(const GameObject &g, const ExportOptions &o);

@@ -172,6 +172,15 @@ Session record_session(const std::function<void(Editor &)> &at_end = {}) {  // (
     ColliderComponent *col = crate->add<ColliderComponent>();
     col->fit = false, col->center = Vec3(0.1f, 0, 0), col->size = Vec3(1, 2, 1);
   }
+  /* Round 397: a VRC Light Volume (a 6 x 3 x 6 m box) and a point light with Light Volume on. */
+  GameObject *hall = ed.scene().create("Hall Volume");
+  hall->set_local_position(Vec3(0, 1.5f, 0));
+  hall->set_local_scale(Vec3(6, 3, 6));
+  hall->add<LightVolumeComponent>()->intensity = 1.25f;
+  GameObject *lamp = ed.scene().create("Lamp");
+  lamp->set_local_position(Vec3(0, 2.5f, 1));
+  lamp->add<Light>()->type = 1;
+  lamp->light()->light_volume = true;
   if (!box || !ed.livelink_start(0)) return s;
   Material &mat = *box->mesh_renderer()->materials[0];
   mat.name = "Cel";
@@ -603,7 +612,7 @@ static void livelink_fixture_tests() {
     std::printf("    %zu messages, %zu bytes; types:", s.ms.size(), s.raw.size());
     for (const char *t : {"object", "mesh", "material", "light", "camera", "transform", "deform", "pose", "delete", "play", "world", "render", "filters", "texture", "weights", "clip"})
       std::printf(" %s %d", t, count_of(s.ms, t));
-    for (const char *t : {"lod", "lodmesh", "collider", "avatar", "springs"}) std::printf(" %s %d", t, count_of(s.ms, t));
+    for (const char *t : {"lod", "lodmesh", "collider", "avatar", "springs", "lightvolume"}) std::printf(" %s %d", t, count_of(s.ms, t));
     std::printf("\n");
     for (const char *t : {"transform", "delete"}) CHECK(count_of(s.ms, t) == 1);
     CHECK(count_of(s.ms, "pose") == 2);    // (a bone turned; round 379: the clip's frame 30)
@@ -615,6 +624,7 @@ static void livelink_fixture_tests() {
     CHECK(count_of(s.ms, "texture") == 1);  // (round 377: the tile once, at the sync)
     CHECK(count_of(s.ms, "weights") == 2);  // (round 378: the Arm's Smile at the sync; round 381: the Face's keys)
     CHECK(count_of(s.ms, "avatar") == 1 && count_of(s.ms, "springs") == 1);  // (round 381: the rig's at the sync; its chain at the end)
+    CHECK(count_of(s.ms, "lightvolume") == 1);  // (round 397: the hall's, at the sync)
     const std::string path = "tests/fixtures/livelink_stream.bin";
     if (std::getenv("BLENDITY_LIVELINK_RECORD")) {
       CHECK(fs::write_file(path, s.raw));
@@ -1924,6 +1934,111 @@ static void tests_round396() {
   });
 }
 
+/* Round 397: VRC Light Volumes - the component, its grid, the Budget's rows, Live Link's message and the light's option. */
+static void tests_round397() {
+  test("VRC Light Volumes (round 397): a Light Volume's grid from its box and Voxels Per Unit, rounded half to even as the package does, or its own; saved and read back; the Budget counts volumes and Light Volume lights against 32 and 128", [] {
+    Scene s;
+    GameObject *g = s.create("Hall Volume");
+    g->set_local_scale(Vec3(10.0f, 2.5f, 0.1f));
+    LightVolumeComponent *v = g->add<LightVolumeComponent>();
+    v->voxels_per_unit = 3.0f;
+    int res[3];
+    light_volume_resolution(*g, *v, res);
+    std::printf("    a 10 x 2.5 x 0.1 m box at 3 voxels a metre: %d x %d x %d\n", res[0], res[1], res[2]);
+    CHECK(res[0] == 30 && res[1] == 8 && res[2] == 1);  // (7.5 rounds to 8 and 0.3 to the least, 1)
+    g->set_local_scale(Vec3(2.5f, 3.5f, 1e30f));
+    v->voxels_per_unit = 1.0f;
+    light_volume_resolution(*g, *v, res);
+    CHECK(res[0] == 2 && res[1] == 4 && res[2] == 4096);  // (review 397: half to even - 2.5 to 2, 3.5 to 4 - as the package's RoundToInt; a huge box bounded)
+    g->set_local_scale(Vec3(10.0f, 2.5f, 0.1f)), v->voxels_per_unit = 3.0f;
+    v->adaptive_resolution = false, v->resolution[0] = 5, v->resolution[1] = 6, v->resolution[2] = 7;
+    light_volume_resolution(*g, *v, res);
+    CHECK(res[0] == 5 && res[1] == 6 && res[2] == 7);
+    v->bake_in_blendity = true, v->color = Vec3(1.0f, 0.5f, 0.25f), v->intensity = 2.0f, v->additive = true;
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(s), back, err));
+    const GameObject *bg = back.find_by_name("Hall Volume");
+    const LightVolumeComponent *bv = bg ? bg->get<LightVolumeComponent>() : nullptr;
+    CHECK(bv && bv->bake_in_blendity && bv->additive && bv->intensity == 2.0f && bv->color.y == 0.5f && !bv->adaptive_resolution && bv->resolution[2] == 7);
+    GameObject *lamp = s.create("Lamp");
+    lamp->add<Light>()->type = 1;
+    lamp->light()->light_volume = true;
+    GameObject *sun = s.create("Sun");
+    sun->add<Light>()->light_volume = true;  // (a directional light has no Light Volume: not counted)
+    GameObject *bulb = s.create("Bulb");  // (review 397: the package's own light from Unity - an Engine Component, no Unity light)
+    EngineComponent *pl = bulb->add<EngineComponent>();
+    pl->type = "PointLightVolumeInstance", pl->data = "--- !u!114 &5\nMonoBehaviour:\n  m_Enabled: 1\n";
+    GameObject *off = s.create("Off Bulb");
+    EngineComponent *pl_off = off->add<EngineComponent>();
+    pl_off->type = "PointLightVolumeInstance", pl_off->data = "--- !u!114 &6\nMonoBehaviour:\n  m_Enabled: 0\n";
+    const BudgetCounts c = budget_count({g, lamp, sun, bulb, off});
+    CHECK(c.light_volumes == 1 && c.light_volume_lights == 2);
+    Scene lit_back;
+    CHECK(load_scene_text(save_scene_text(s), lit_back, err));
+    const GameObject *lamp_back = lit_back.find_by_name("Lamp");
+    CHECK(lamp_back && lamp_back->get<Light>() && lamp_back->get<Light>()->light_volume);  // (the light's option saved)
+  });
+  test("Live Link's VRC Light Volumes (round 397): a Light Volume goes at the sync with the package's fields, Unity's Bake off when Blendity bakes it; changed it goes again, taken off \"none\"; a light's Light Volume option rides in its fields", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *vol = ed.scene().create("Volume");
+    vol->set_local_scale(Vec3(4, 3, 4));
+    LightVolumeComponent *v = vol->add<LightVolumeComponent>();
+    v->intensity = 1.5f;
+    GameObject *lamp = ed.scene().create("Lamp");
+    lamp->add<Light>()->type = 2;
+    lamp->light()->light_volume = true;
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    std::vector<Message> s = until(ed, c, "sync_end");
+    for (const Message &m : drain(ed, c)) s.push_back(m);
+    const Message *lv = last_for(s, "lightvolume", vol->id), *lt = last_for(s, "light", lamp->id);
+    std::printf("    at the sync: volume %s (intensity %g, bake %d), the lamp's Light Volume %d\n", lv ? "sent" : "-", lv ? lv->j["intensity"].number() : 0.0,
+                lv ? (int)lv->j["bake"].b : -1, lt ? (int)lt->j["fields"]["Light Volume"].b : -1);
+    CHECK(lv && lv->j["intensity"].number() == 1.5 && lv->j["bake"].b && !lv->j["bake_in_blendity"].b && lv->j["resolution"].size() == 3);
+    CHECK(lt && lt->j["fields"]["Light Volume"].b);
+    CHECK(count_of(drain(ed, c), "lightvolume") == 0);  // (unchanged: nothing)
+    v->bake_in_blendity = true;
+    const std::vector<Message> changed = drain(ed, c);
+    const Message *again = last_for(changed, "lightvolume", vol->id);
+    CHECK(again && !again->j["bake"].b && again->j["bake_in_blendity"].b);  // (Blendity bakes it: the package's bake leaves it)
+    vol->remove_component(v);
+    const std::vector<Message> off = drain(ed, c);
+    const Message *none = last_for(off, "lightvolume", vol->id);
+    CHECK(none && none->j["none"].b);
+    ed.livelink_stop();
+  });
+  test("Live Link's VRC Light Volumes, two at once (review 397): volumes on neighbouring ids changed in one tick both arrive - their messages no longer share a coalescing key", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    std::vector<GameObject *> vols;
+    for (int i = 0; i < 4; i++) {  // (four in a row: at least two neighbours on an even id and the next)
+      GameObject *g = ed.scene().create("Volume " + std::to_string(i));
+      g->add<LightVolumeComponent>();
+      vols.push_back(g);
+    }
+    CHECK(ed.livelink_start(0));
+    ed.livelink_for_test()->set_interval_for_test(0);
+    net::LineClient c;
+    CHECK(c.connect(ed.livelink_for_test()->port()));
+    until(ed, c, "sync_end");
+    drain(ed, c);
+    for (GameObject *g : vols) g->get<LightVolumeComponent>()->intensity = 3.0f;  // (one tick)
+    const std::vector<Message> changed = drain(ed, c);
+    int got = 0;
+    for (GameObject *g : vols) {
+      const Message *m = last_for(changed, "lightvolume", g->id);
+      got += m && m->j["intensity"].number() == 3.0;
+    }
+    std::printf("    %d of 4 volumes' changes arrived (ids %llu..%llu)\n", got, (unsigned long long)vols.front()->id, (unsigned long long)vols.back()->id);
+    CHECK(got == 4);
+    ed.livelink_stop();
+  });
+}
+
 static void tests_round382() {
   test("Live Link never pauses the editor (round 382): four clients connected, 200 objects, a 100,000-vertex mesh deformed and a 50-bone rig posed every frame, a clip keyed - the main thread's tick stays short, and everything goes", [] {
     Editor ed;
@@ -2119,4 +2234,5 @@ void run_livelink_tests() {
   tests_round381();
   tests_round382();
   tests_round396();
+  tests_round397();
 }

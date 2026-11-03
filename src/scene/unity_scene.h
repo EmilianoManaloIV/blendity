@@ -78,6 +78,7 @@ struct UnityImport {
   int overrides_applied = 0, model_overrides_waiting = 0;  // (round 395: overrides on a model's parts whose fileIDs aren't known yet)
   std::set<std::string> models_waiting;                    // (...their models' GUIDs: what Unity is asked for)
   int materials = 0, outlines = 0, springs = 0;  // (round 371)
+  int light_volumes = 0;                         // (round 397: VRC Light Volumes and their lights)
   std::vector<std::string> notes;
 };
 
