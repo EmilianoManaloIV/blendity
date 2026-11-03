@@ -158,6 +158,8 @@ namespace Blendity.LiveLink
                         case "sender": made = SetContact(go, c, false, kept); break;
                         case "receiver": made = SetContact(go, c, true, kept); break;
                         case "constraint": made = SetConstraint(go, c, kept); break;
+                        case "scenedescriptor": made = SetSceneDescriptor(go, c); break;  // (round 403)
+                        case "pipeline": made = SetPipeline(go, c); break;
                     }
                     if (made != null)
                         EditorUtility.SetDirty(made);
@@ -191,6 +193,9 @@ namespace Blendity.LiveLink
             else if (t == typeof(bool) && value is bool) v = value;
             else if (t == typeof(string) && value is string) v = value;
             else if (t == typeof(Transform) && value is double) v = TransformOf((long)(double)value);
+            else if (t == typeof(GameObject) && value is double) { var tr0 = TransformOf((long)(double)value); v = tr0 != null ? tr0.gameObject : null; }
+            else if (t == typeof(Transform[]) && value is Transform[]) v = value;
+            else if (t == typeof(Transform[]) && value is List<object>) { var ts = new List<Transform>(); foreach (var f0 in Floats(value)) { var tr = TransformOf((long)f0); if (tr != null) ts.Add(tr); } v = ts.ToArray(); }
             else if (t == typeof(Vector3) && value is List<object>) { var a = Floats(value); v = a.Length >= 3 ? (object)new Vector3(a[0], a[1], a[2]) : null; }
             else if (t == typeof(Quaternion) && value is List<object>) { var a = Floats(value); v = a.Length >= 4 ? (object)new Quaternion(a[0], a[1], a[2], a[3]) : null; }
             else if (typeof(Component).IsAssignableFrom(t) && value is Component && t.IsInstanceOfType(value)) v = value;
@@ -490,6 +495,48 @@ namespace Blendity.LiveLink
             }
             ((Behaviour)vc).enabled = c.GetBool("enabled", true);
             return vc;
+        }
+
+        /* Round 403: the world's Scene Descriptor as Blendity holds it - every field by the SDK's name (spawns by id); the
+         * Pipeline Manager's blueprint id and content type. */
+        Component SetSceneDescriptor(GameObject go, Dictionary<string, object> c)
+        {
+            var type = FindType(SceneDescriptorType);
+            if (type == null)
+                return null;
+            var desc = go.GetComponent(type) ?? go.AddComponent(type);
+            AddPipelineManager(go);
+            var spawnIds = Floats(c.Get("spawns"));
+            var spawnList = new List<Transform>();
+            foreach (var sid in spawnIds) { var st = TransformOf((long)sid); if (st != null) spawnList.Add(st); }
+            if (spawnList.Count > 0 && spawnList.Count == spawnIds.Length)  // (review 403: never a shorter list over Unity's)
+                Set(desc, "spawns", spawnList.ToArray());
+            Set(desc, "spawnOrder", c.GetString("spawnOrder", "First"));
+            Set(desc, "spawnOrientation", c.GetString("spawnOrientation", "Default"));
+            Set(desc, "ReferenceCamera", c["referenceCamera"]);
+            Set(desc, "RespawnHeightY", c["respawnHeight"]);
+            Set(desc, "ObjectBehaviourAtRespawnHeight", c.GetString("respawnBehaviour", "Respawn"));
+            Set(desc, "ForbidUserPortals", c.GetBool("forbidUserPortals"));
+            Set(desc, "interactThruLayers", c["interactThruLayers"]);
+            Set(desc, "autoSpatializeAudioSources", c.GetBool("autoSpatialize"));
+            Set(desc, "gravity", c["gravity"]);
+            Set(desc, "capacity", c["capacity"]);
+            Set(desc, "DrawDistance", c["drawDistance"]);
+            ((Behaviour)desc).enabled = c.GetBool("enabled", true);
+            return desc;
+        }
+
+        Component SetPipeline(GameObject go, Dictionary<string, object> c)
+        {
+            var type = FindType(PipelineManagerType);
+            if (type == null)
+                return null;
+            var pm = go.GetComponent(type) ?? go.AddComponent(type);
+            string id = c.GetString("blueprintId", "");
+            if (id.Length > 0)
+                Set(pm, "blueprintId", id);
+            Set(pm, "contentType", c.GetString("contentType", "world"));
+            return pm;
         }
 
         static Type FindSourceType()

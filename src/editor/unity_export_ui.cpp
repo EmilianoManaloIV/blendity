@@ -166,6 +166,17 @@ void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
       if (vc->kind == 0)
         for (int k = 0; k < 3; k++) e.fields.push_back({axes[1][k], yes(vc->affects[k])}), e.fields.push_back({axes[2][k], yes(vc->affects_rotation[k])});
     }
+    else if (const auto *sd = dynamic_cast<const SceneDescriptorComponent *>(comp.get())) {  // (round 403)
+      e.file_id = unity_fid(sd->unity_id);
+      e.fields = {{"spawnOrder", std::to_string(sd->spawn_order)}, {"spawnOrientation", std::to_string(sd->spawn_orientation)}, {"RespawnHeightY", unity_yaml_num(sd->respawn_height)},
+                  {"ObjectBehaviourAtRespawnHeight", std::to_string(sd->respawn_behaviour)}, {"ForbidUserPortals", yes(sd->forbid_user_portals)},
+                  {"interactThruLayers", std::to_string(sd->interact_thru_layers)}, {"autoSpatializeAudioSources", yes(sd->auto_spatialize)}, {"gravity", unity_yaml_vec3(sd->gravity)},
+                  {"capacity", std::to_string(sd->capacity)}, {"DrawDistance", unity_yaml_num(sd->draw_distance)}, {"m_Enabled", yes(sd->enabled)}};
+    }
+    else if (const auto *pm = dynamic_cast<const PipelineManagerComponent *>(comp.get())) {
+      e.file_id = unity_fid(pm->unity_id);
+      e.fields = {{"blueprintId", pm->blueprint_id.empty() ? std::string() : unity_yaml_string(pm->blueprint_id)}, {"contentType", std::to_string(pm->content_type)}};
+    }
     else if (const auto *an = dynamic_cast<const AnimatorComponent *>(comp.get())) {
       e.file_id = unity_fid(an->unity_id);
       e.fields = {{"m_ApplyRootMotion", yes(an->apply_root_motion)}, {"m_UpdateMode", std::to_string(an->update_mode)}, {"m_CullingMode", std::to_string(an->culling_mode)},
@@ -179,6 +190,15 @@ void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
 
 void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out) {
   avatar_component_edits(g, out);  // (round 402)
+  for (const auto &comp : g.components) {  // (round 403: a kept document edited in the Inspector goes back whole - the ones a Blendity component holds don't)
+    const auto *e = dynamic_cast<const EngineComponent *>(comp.get());
+    if (!e || e->native || e->engine != "Unity" || e->data.empty()) continue;
+    UnityEdit ed;
+    ed.file_id = e->unity_file_id();
+    if (!ed.file_id) continue;
+    ed.document = e->data;
+    out.push_back(ed);
+  }
   if (const Camera *c = g.get<Camera>()) {
     UnityEdit e;
     e.class_id = 20, e.game_object = game_object;

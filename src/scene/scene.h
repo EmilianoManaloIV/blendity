@@ -911,6 +911,33 @@ struct VRCConstraintComponent : ComponentBase<VRCConstraintComponent> {
   void reflect(Reflector &r) override;
 };
 
+/* Round 403: VRChat's world components as Blendity's - the Scene Descriptor and the Pipeline Manager, Unity's fields. */
+struct SceneDescriptorComponent : ComponentBase<SceneDescriptorComponent> {
+  static constexpr const char *kName = "VRCSceneDescriptor";
+  std::string unity_id;
+  std::string spawns;  // (object names joined by ';')
+  int spawn_order = 0;        // First, Sequential, Random, Demo
+  int spawn_orientation = 0;  // Default, Align Player With Spawn Point, Align Room With Spawn Point
+  std::string reference_camera;
+  float respawn_height = -100.0f;
+  int respawn_behaviour = 0;  // Respawn, Destroy (the SDK's order)
+  bool forbid_user_portals = false, auto_spatialize = false;
+  int interact_thru_layers = 0, capacity = 0;
+  Vec3 gravity{0.0f, -9.81f, 0.0f};
+  float draw_distance = 0.0f;
+  std::string unity_version;
+  std::vector<int64_t> spawn_fids;
+  int64_t camera_fid = 0;
+  void reflect(Reflector &r) override;
+};
+
+struct PipelineManagerComponent : ComponentBase<PipelineManagerComponent> {
+  static constexpr const char *kName = "PipelineManager";
+  std::string unity_id, blueprint_id;
+  int content_type = 0;  // Avatar, World
+  void reflect(Reflector &r) override;
+};
+
 struct AnimatorComponent : ComponentBase<AnimatorComponent> {
   static constexpr const char *kName = "Animator";
   std::string unity_id, controller, avatar;
@@ -929,8 +956,17 @@ struct EngineComponent : ComponentBase<EngineComponent> {
   std::string type;              // (the script's class, or Unity's component type: "Spin", "VRC_AvatarDescriptor", "AudioSource")
   std::string script;            // (the script's GUID, when it is one)
   std::string data;              // (the engine's own text of it: Unity's YAML document)
+  bool native = false;           // (round 403: a Blendity component holds this document's fields - the text here is read-only)
   bool unique() const override { return false; }  // (an object holds many: an avatar its descriptor and its PhysBones)
   void reflect(Reflector &r) override;
+  /* Round 403 (ADR 0101): the document's own fields in the Inspector - typed by their shape (number, text, a vector, a
+   * colour, a reference, a nested block, a list), under Unity's names - an edit rewriting that line of `data`. */
+  void reflect_fields(Reflector &r);
+  /* The document's fileID from its header line (0 when there is none). */
+  int64_t unity_file_id() const;
+  /* (The parsed document, kept while `data` is unchanged: the Inspector reads it every frame.) */
+  std::shared_ptr<const void> parsed_;
+  size_t parsed_hash_ = 0;
 };
 
 /* Where an imported object came from in Unity (round 372, task 0349): its prefab or scene file (project-relative)

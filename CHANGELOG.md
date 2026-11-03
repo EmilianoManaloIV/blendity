@@ -2,6 +2,25 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 403): the world's VRChat attributes, Unity's components as editable data
+
+**Asked:** the same comparison; the third of five rounds: the world's components.
+
+**Added (task 0380, ADR 0101)**
+- **VRC Scene Descriptor and Pipeline Manager** as Blendity components (spawns, order, orientation, reference camera,
+  respawn height and behaviour, portals, interact layers, gravity, capacity, draw distance; blueprint id, content type):
+  imported, shown with Unity's names, written back, sent over Live Link and set on the SDK's components.
+- **Every kept Unity component editable:** an Engine Component's Inspector shows its document's fields typed by their
+  shape (numbers, text, vectors, colours, references, nested blocks, lists) under Unity's names; an edit rewrites that
+  line of the kept text and nothing else. VRChat's SDK classes are named by their fileIDs (Unity's MD4 of the class name):
+  a world's mirrors, pickups, Udon behaviours and the rest read as themselves instead of "MonoBehaviour (guid:id)".
+
+**Checked:** `tests_round403` - the fileID formula against the ids the SDK's files carry, the generic Inspector on a
+12-field document (one edit, one line, no other; a whole-number float, a wrapped string, a big integer as text; the edit
+exported), the world's components imported, written back and sent, the respawn order as the SDK's. The suites, the
+audits; the Opus review's fixes (the generic edit exported, the respawn order, numbers as floats, the LOD Group kept as
+data, the bridge's references).
+
 ## 2026-11-03 (round 402): the avatar as Unity's - lilToon's lighting model, VRChat's avatar components as native
 
 **Asked:** the same comparison; the second of five rounds: the avatar. The user chose lilToon's full lighting model.

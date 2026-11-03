@@ -219,7 +219,8 @@ bool has_avatar_components(const GameObject &g) {
   for (const auto &c : g.components) {
     const char *t = c->type_name();
     if (!std::strcmp(t, AvatarDescriptorComponent::kName) || !std::strcmp(t, PhysBoneComponent::kName) || !std::strcmp(t, PhysBoneColliderComponent::kName) ||
-        !std::strcmp(t, ContactComponent::kName) || !std::strcmp(t, VRCConstraintComponent::kName))
+        !std::strcmp(t, ContactComponent::kName) || !std::strcmp(t, VRCConstraintComponent::kName) || !std::strcmp(t, SceneDescriptorComponent::kName) ||
+        !std::strcmp(t, PipelineManagerComponent::kName))
       return true;
   }
   return false;
@@ -332,6 +333,21 @@ std::string avatar_components_message(const Scene &scene, const GameObject &g) {
       w.end();
       w.key("allowSelf").boolean(ct->allow_self).key("allowOthers").boolean(ct->allow_others).key("localOnly").boolean(ct->local_only);
       w.key("receiverType").str(pick(receivers, 3, ct->receiver_type)).key("parameter").str(ct->parameter).key("value").num(ct->value).key("minVelocity").num(ct->min_velocity).end();
+    }
+    else if (const auto *sd = dynamic_cast<const SceneDescriptorComponent *>(comp.get())) {  // (round 403)
+      static const char *orders[] = {"First", "Sequential", "Random", "Demo"}, *orients[] = {"Default", "AlignPlayerWithSpawnPoint", "AlignRoomWithSpawnPoint"};
+      static const char *behaviours[] = {"Respawn", "Destroy"};
+      w.obj().key("kind").str("scenedescriptor").key("enabled").boolean(sd->enabled).key("unityId").str(sd->unity_id);
+      ids_by_names(w, "spawns", scene, sd->spawns);
+      w.key("spawnOrder").str(pick(orders, 4, sd->spawn_order)).key("spawnOrientation").str(pick(orients, 3, sd->spawn_orientation));
+      w.key("referenceCamera").integer(id_by_name(scene, sd->reference_camera)).key("respawnHeight").num(sd->respawn_height);
+      w.key("respawnBehaviour").str(pick(behaviours, 2, sd->respawn_behaviour)).key("forbidUserPortals").boolean(sd->forbid_user_portals);
+      w.key("interactThruLayers").integer(sd->interact_thru_layers).key("autoSpatialize").boolean(sd->auto_spatialize);
+      const float gr[3] = {sd->gravity.x, sd->gravity.y, sd->gravity.z};
+      w.key("gravity").nums(gr, 3).key("capacity").integer(sd->capacity).key("drawDistance").num(sd->draw_distance).end();
+    }
+    else if (const auto *pm = dynamic_cast<const PipelineManagerComponent *>(comp.get())) {
+      w.obj().key("kind").str("pipeline").key("blueprintId").str(pm->blueprint_id).key("contentType").str(pm->content_type == 1 ? "world" : "avatar").end();
     }
     else if (const auto *vc = dynamic_cast<const VRCConstraintComponent *>(comp.get())) {
       w.obj().key("kind").str("constraint").key("enabled").boolean(vc->enabled).key("unityId").str(vc->unity_id).key("constraint").str(pick(kinds, 6, vc->kind));

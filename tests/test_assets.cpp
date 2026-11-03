@@ -21,6 +21,7 @@
 #include "../src/scene/unity_scene.h"
 #include "../src/scene/unity_material.h"
 #include "../src/editor/livelink.h"  // (round 402)
+#include "../src/scene/unity_sdk_types.h"  // (round 403)
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -8968,7 +8969,7 @@ static void tests_round370() {
     ed.scene().for_each([&](GameObject &g) { tri = g.name == "tri" && g.get<EngineComponent>() ? &g : tri; });
     const EngineComponent *sdk = tri ? tri->get<EngineComponent>() : nullptr;
     std::printf("    the placed model: %s, its added component %s\n", tri ? "made" : "missing", sdk ? sdk->type.c_str() : "-");
-    CHECK(tri && sdk && sdk->type == "MonoBehaviour (bbbb0000bbbb0000bbbb0000bbbb0004:542108242)" && sdk->data.find("--- !u!114 &52\r\n") == 0 &&
+    CHECK(tri && sdk && sdk->type == "VRCAvatarDescriptor" &&  /* (round 403: the SDK class named by its fileID) */ sdk->data.find("--- !u!114 &52\r\n") == 0 &&
           sdk->data.find("Name: \"\\u30A2\"\r\n") != std::string::npos);
     /* The rotation override, made whole: 90 degrees about X. */
     GameObject *turned = nullptr;
@@ -9310,6 +9311,172 @@ inline void setting(int k, Material &m, Light &sun, EnvironmentSettings &env) {
   }
 }
 }  // namespace r402
+
+/* Round 403 (task 0380, ADR 0101): the world's VRChat components, Unity's components as editable data. */
+namespace r403 {
+/* A reflector that sets one float field by its label and records every label it saw. */
+struct SetOne : Reflector {
+  std::string want;
+  float value = 0.0f;
+  std::vector<std::string> seen;
+  bool all_fields() const override { return false; }
+  void field(const char *n, float &v, float, float, float) override {
+    seen.push_back(n);
+    if (want == n) v = value;
+  }
+  void field(const char *n, int &, int, int) override { seen.push_back(n); }
+  void field(const char *n, bool &) override { seen.push_back(n); }
+  void field(const char *n, Vec3 &) override { seen.push_back(n); }
+  void color(const char *n, Vec3 &) override { seen.push_back(n); }
+  void enumeration(const char *n, int &, const char *const *, int) override { seen.push_back(n); }
+  void text(const char *n, std::string &) override { seen.push_back(n); }
+  void mesh(const char *n, MeshPtr &) override { seen.push_back(n); }
+};
+}  // namespace r403
+
+static void tests_round403() {
+  test("VRChat's SDK classes by their fileIDs (round 403): Unity's MD4 of the full name gives the ids the files carry - the descriptor, the PhysBone collider, a rotation constraint - and an unknown one is empty", [] {
+    CHECK(unity_script_file_id("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor") == 542108242);
+    CHECK(unity_script_file_id("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider") == -1631200402);
+    CHECK(unity_script_file_id("VRC.SDK3.Dynamics.Constraint.Components.VRCRotationConstraint") == 1788371120);
+    CHECK(unity_sdk_class_name(542108242) == "VRCAvatarDescriptor" && unity_sdk_class_name(1661641543) == "VRCPhysBone" && unity_sdk_class_name(12345) == "");
+    size_t n = 0;
+    const char *const *names = unity_sdk_class_names(&n);
+    CHECK(n >= 30 && names);
+    std::printf("    %zu SDK classes: descriptor %d, PhysBone %d (%s)\n", n, unity_script_file_id("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor"),
+                unity_script_file_id("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone"), unity_sdk_class_name(1661641543).c_str());
+  });
+  test("An Engine Component's fields in the Inspector (round 403): a Unity script's document typed by its shape - numbers, text, a vector, a colour, a reference, a nested block, a list - under Unity's names; an edit rewrites that line and no other; a DLL class is named by its fileID on import", [] {
+    using namespace r403;
+    EngineComponent e;
+    e.engine = "Unity", e.type = "AudioSource";
+    e.data = "--- !u!82 &500\nAudioSource:\n  m_ObjectHideFlags: 0\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  serializedVersion: 4\n  OutputAudioMixerGroup: {fileID: 0}\n"
+             "  m_audioClip: {fileID: 8300000, guid: d3a3bb888e8, type: 3}\n  m_PlayOnAwake: 1\n  m_Volume: 0.5\n  m_Pitch: 1\n  Loop: 1\n  Priority: 128\n  MinDistance: 100\n  MaxDistance: 101\n"
+             "  rolloffMode: 1\n  interactText: Use\n  m_Color: {r: 1, g: 0.5, b: 0.25, a: 1}\n  m_Offset: {x: 1, y: 2, z: 3}\n  m_Calls:\n  - {fileID: 1}\n  - {fileID: 2}\n  m_Limits:\n    min: 0\n    max: 10.5\n"
+             "  m_Size: {x: 2, y: 3}\n  m_Bits: 4294967295\n  m_Bytes: 01000000\n  m_Note: 'Line one\n\n    Line two'\n  m_Last: 7\n";
+    const std::string original = e.data;
+    SetOne r;
+    r.want = "Volume", r.value = 0.25f;
+    e.reflect(r);
+    auto saw = [&](const char *n) { return std::find(r.seen.begin(), r.seen.end(), n) != r.seen.end(); };
+    CHECK(saw("Volume") && saw("Play On Awake") && saw("Loop") && saw("Interact Text") && saw("Color") && saw("Offset") && saw("Audio Clip") && saw("Calls") && saw("Limits / Min"));
+    CHECK(!saw("Object Hide Flags") && !saw("Game Object") && !saw("Serialized Version"));
+    CHECK(e.data.find("  m_Volume: 0.25\n") != std::string::npos && e.data.find("  m_Pitch: 1\n") != std::string::npos && e.data.find("  MinDistance: 100\n") != std::string::npos);
+    /* No other line changed. */
+    size_t differ = 0;
+    for (size_t a0 = 0, b0 = 0; a0 < original.size() && b0 < e.data.size();) {
+      const size_t ae = original.find('\n', a0), be = e.data.find('\n', b0);
+      differ += original.substr(a0, ae - a0) != e.data.substr(b0, be - b0);
+      if (ae == std::string::npos || be == std::string::npos) break;
+      a0 = ae + 1, b0 = be + 1;
+    }
+    CHECK(differ == 1);
+    /* A whole number is a float field too (Pitch 1 -> 1.5); a big integer and a zero-led digit string are text; an inline
+     * Vector2 is shown; a wrapped string edited goes with its continuation lines (review 403). */
+    SetOne r3;
+    r3.want = "Pitch", r3.value = 1.5f;
+    e.reflect(r3);
+    CHECK(e.data.find("  m_Pitch: 1.5\n") != std::string::npos && saw("Size") && std::find(r3.seen.begin(), r3.seen.end(), "Last") != r3.seen.end());
+    struct SetText : r403::SetOne {
+      void text(const char *n, std::string &v) override {
+        seen.push_back(n);
+        if (want == n) v = "Hi";
+        if (!std::strcmp(n, "Bits") || !std::strcmp(n, "Bytes")) big = v;
+      }
+      std::string big;
+    } r4;
+    r4.want = "Note";
+    e.reflect(r4);
+    CHECK(e.data.find("  m_Note: Hi\n  m_Last: 7\n") != std::string::npos && e.data.find("Line two") == std::string::npos);
+    CHECK(std::find(r4.seen.begin(), r4.seen.end(), "Bits") != r4.seen.end() && std::find(r4.seen.begin(), r4.seen.end(), "Bytes") != r4.seen.end());
+    /* The edited document goes back whole through Export Unity Package's edits; one a Blendity component holds doesn't. */
+    Scene s;
+    GameObject *g = s.create("Speaker");
+    EngineComponent *ec = g->add<EngineComponent>();
+    ec->engine = "Unity", ec->type = "AudioSource", ec->data = e.data;
+    EngineComponent *owned = g->add<EngineComponent>();
+    owned->engine = "Unity", owned->type = "VRCPhysBone", owned->data = "--- !u!114 &600\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  pull: 0.9\n", owned->native = true;
+    std::vector<UnityEdit> edits;
+    unity_component_edits(*g, 100, edits);
+    CHECK(edits.size() == 1 && edits[0].file_id == 500 && !edits[0].document.empty());
+    int changed = 0;
+    const std::string file = original + "--- !u!114 &600\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  pull: 0.1\n";
+    const std::string out = patch_unity_objects(file, edits, &changed);
+    CHECK(changed == 1 && out.find("  m_Volume: 0.25\n") != std::string::npos && out.find("  pull: 0.1\n") != std::string::npos);
+    CHECK(patch_unity_objects(out, edits, &changed) == out && changed == 0);
+    CHECK(unity_field_label("m_PlayOnAwake") == "Play On Awake" && unity_field_label("interactText") == "Interact Text" && unity_field_label("RespawnHeightY") == "Respawn Height Y");
+    /* A nested block's line. */
+    SetOne r2;
+    r2.want = "Limits / Max", r2.value = 20.0f;
+    e.reflect(r2);
+    CHECK(e.data.find("    max: 20\n") != std::string::npos && e.data.find("    min: 0\n") != std::string::npos);
+    /* Serialising still carries the whole text. */
+    const std::string json = reflect_to_json([&](Reflector &rr) { e.reflect(rr); });
+    CHECK(json.find("m_Volume: 0.25") != std::string::npos);
+    std::printf("    %zu fields shown; Volume rewritten to 0.25, Limits / Max to 20; the rest as written\n", r.seen.size());
+  });
+  test("The world's Scene Descriptor, Pipeline Manager and a Unity LOD Group (round 403): imported from a scene (spawns and the reference camera by name, the SDK's names on the kept components), shown with Unity's names, written back - the lines that differ - and sent over Live Link", [] {
+    const std::string scene =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"
+        "--- !u!1 &100\nGameObject:\n  m_Name: VRCWorld\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 400}\n"
+        "--- !u!4 &400\nTransform:\n  m_GameObject: {fileID: 100}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children:\n  - {fileID: 401}\n  - {fileID: 402}\n  m_Father: {fileID: 0}\n"
+        "--- !u!1 &101\nGameObject:\n  m_Name: Spawn\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 401}\n"
+        "--- !u!4 &401\nTransform:\n  m_GameObject: {fileID: 101}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 1, y: 0, z: 2}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!1 &102\nGameObject:\n  m_Name: Cam\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 402}\n  - component: {fileID: 2050}\n"
+        "--- !u!4 &402\nTransform:\n  m_GameObject: {fileID: 102}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 1.6, z: 0}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!205 &2050\nLODGroup:\n  m_GameObject: {fileID: 102}\n  m_Enabled: 1\n  m_LODs:\n  - screenRelativeHeight: 0.6\n    renderers: []\n  - screenRelativeHeight: 0.3\n    renderers: []\n  - screenRelativeHeight: 0.05\n    renderers: []\n"
+        "--- !u!114 &1140\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  m_Script: {fileID: -17141911, guid: 661092b4961be7145bfbe56e1e62337b, type: 3}\n  spawns:\n  - {fileID: 401}\n  spawnOrder: 2\n  spawnOrientation: 1\n  ReferenceCamera: {fileID: 402}\n  RespawnHeightY: -100\n  ObjectBehaviourAtRespawnHeight: 0\n  ForbidUserPortals: 0\n  interactThruLayers: 0\n  autoSpatializeAudioSources: 0\n  gravity: {x: 0, y: -9.81, z: 0}\n  capacity: 32\n  unityVersion: 2022.3.22f1\n  DrawDistance: 0\n  DynamicPrefabs: []\n"
+        "--- !u!114 &1141\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  m_Script: {fileID: -1427037861, guid: 4ecd63eff847044b68db9453ce219299, type: 3}\n  launchedFromSDKPipeline: 0\n  completedSDKPipeline: 0\n  blueprintId: wrld_1234\n  contentType: 1\n"
+        "--- !u!114 &1142\nMonoBehaviour:\n  m_GameObject: {fileID: 102}\n  m_Enabled: 1\n  m_Script: {fileID: -17141911, guid: 661092b4961be7145bfbe56e1e62337b, type: 3}\n  m_Dummy: 1\n";
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(scene, docs, why));
+    Scene s;
+    UnityImport ctx;
+    ctx.total = std::make_shared<int>(0), ctx.building = std::make_shared<std::set<std::string>>();
+    ctx.source = "Assets/World.unity";
+    build_unity_objects(docs, s, nullptr, ctx);
+    GameObject *world = s.find_by_name("VRCWorld"), *cam = s.find_by_name("Cam");
+    CHECK(world && cam);
+    if (!world || !cam) return;
+    SceneDescriptorComponent *sd = world->get<SceneDescriptorComponent>();
+    CHECK(sd && sd->spawns == "Spawn" && sd->reference_camera == "Cam" && sd->spawn_order == 2 && sd->spawn_orientation == 1 && sd->capacity == 32 && std::fabs(sd->gravity.y + 9.81f) < 1e-5f);
+    const PipelineManagerComponent *pm = world->get<PipelineManagerComponent>();
+    CHECK(pm && pm->blueprint_id == "wrld_1234" && pm->content_type == 1);
+    const LODGroupComponent *lod = cam->get<LODGroupComponent>();
+    CHECK(!lod);  // (review 403: Unity's LOD Group switches authored children - Blendity's decimates its own mesh; it stays data)
+    bool lod_kept = false;
+    for (const auto &c : cam->components)
+      if (const auto *ek = dynamic_cast<const EngineComponent *>(c.get())) lod_kept = lod_kept || ek->type == "LODGroup";
+    CHECK(lod_kept);
+    /* The respawn behaviour as the SDK numbers it: 0 is Respawn. */
+    CHECK(sd->respawn_behaviour == 0 && livelink::avatar_components_message_for_test(s, *world).find("\"respawnBehaviour\":\"Respawn\"") != std::string::npos);
+    /* The descriptor's own kept document is read-only text. */
+    bool owned = false;
+    for (const auto &c : world->components)
+      if (const auto *ek = dynamic_cast<const EngineComponent *>(c.get())) owned = owned || (ek->type == "VRCSceneDescriptor" && ek->native);
+    CHECK(owned);
+    /* The kept documents carry the SDK's names (the fileID of VRC.SDK3.Components.VRCSceneDescriptor). */
+    int named = 0;
+    for (const auto &c : world->components)
+      if (const auto *e = dynamic_cast<const EngineComponent *>(c.get())) named += e->type == "VRCSceneDescriptor" || e->type == "PipelineManager";
+    CHECK(named == 2 && unity_script_file_id("VRC.SDK3.Components.VRCSceneDescriptor") == -17141911);
+    /* Written back: the respawn height and the capacity; nothing else. */
+    sd->respawn_height = -50.0f, sd->capacity = 40;
+    PipelineManagerComponent *pmm = world->get<PipelineManagerComponent>();
+    if (pmm) pmm->blueprint_id = "wrld_5678";
+    std::vector<UnityEdit> edits;
+    unity_component_edits(*world, 100, edits);
+    int changed = 0;
+    const std::string out = patch_unity_objects(scene, edits, &changed);
+    CHECK(changed == 3 && out.find("  RespawnHeightY: -50\n") != std::string::npos && out.find("  capacity: 40\n") != std::string::npos && out.find("  blueprintId: wrld_5678\n") != std::string::npos);
+    CHECK(out.find("  m_Dummy: 1\n") != std::string::npos);  // (the kept documents the components own are not replaced)
+    CHECK(out.find("  spawnOrder: 2\n") != std::string::npos && out.find("  m_Dummy: 1\n") != std::string::npos);
+    const std::string msg = livelink::avatar_components_message_for_test(s, *world);
+    CHECK(msg.find("\"kind\":\"scenedescriptor\"") != std::string::npos && msg.find("\"spawnOrder\":\"Random\"") != std::string::npos && msg.find("\"kind\":\"pipeline\"") != std::string::npos);
+    std::printf("    spawns %s, camera %s, order %d; pipeline %s; the LOD Group kept as data; written back %d change(s)\n", sd->spawns.c_str(), sd->reference_camera.c_str(), sd->spawn_order, pm->blueprint_id.c_str(), changed);
+  });
+}
 
 static void tests_round402() {
   test("lilToon's lighting model against lilToon (round 402): a sphere at eight settings - the two shadows, the border colour, the rim, the backlight, the light limits, monochrome lighting, the emission with HSVG - rendered by the CPU rasterizer and the path tracer against lilToon's own renders (tests/fixtures/liltoon)", [] {
@@ -11958,6 +12125,7 @@ void run_assets_tests() {
   tests_round400();
   tests_round401();
   tests_round402();
+  tests_round403();
   tests_round372();
   tests_round373();
   tests_round374();

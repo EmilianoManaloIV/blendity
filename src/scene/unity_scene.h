@@ -194,6 +194,9 @@ struct UnityEdit {
   int class_id = 0;
   int64_t game_object = 0;
   std::vector<std::pair<std::string, std::string>> fields;
+  /* Round 403: the whole document as Blendity holds it (an Engine Component edited in the Inspector): it replaces the
+   * file's document of `file_id` when the two differ. */
+  std::string document;
 };
 /* Round 401: a Camera's, a Light's and a Reflection Probe's Unity fields as the object holds them now (edits by class and
  * GameObject), and the scene's RenderSettings as the world holds them (an edit by class). */
@@ -208,6 +211,10 @@ std::string unity_yaml_vec3(Vec3 v);
  * untouched objects were rewritten with float noise); every other byte as it was, line ends too; `changed` how many
  * lines changed. */
 std::string patch_unity_objects(const std::string &text, const std::vector<UnityEdit> &edits, int *changed = nullptr);
+/* Round 403: one field's line of a document rewritten ("key" or "block/key"); false when the document has no such line. */
+bool unity_set_field(std::string &doc, const std::string &key, const std::string &value);
+/* Round 403: Unity's field name as the Inspector shows it ("m_" dropped, the camel case split). */
+std::string unity_field_label(const std::string &key);
 /* A string as Unity's YAML writes it: plain when it can be, else double-quoted with non-ASCII as \uXXXX. */
 std::string unity_yaml_string(const std::string &s);
 
