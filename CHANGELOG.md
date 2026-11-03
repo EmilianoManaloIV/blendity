@@ -2,6 +2,16 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 410): the 0.13.0 pre-release
+
+**Asked:** "update the pre release and specific operating system downloads" (the 2026-11-03 refinement round).
+
+**Changed**
+- Version 0.13.0: VERSION, the README's pre-release note, the manual, the installer script's example and the version a
+  build without VERSION reports, ahead of the v0.13.0 tag. `release.yml` builds the Windows, macOS and Linux installers,
+  SHA256SUMS.txt and, new in this release, the two books, and `publish_release.sh` attaches all of them under the fixed
+  names the README's download links use (`releases/latest/download/<name>`).
+
 ## 2026-11-03 (round 409): the two books, one reference list, the licensing review, the stack merged
 
 **Asked:** "Add two pdfs to the project. One for architectural documentation so someone can learn how the software
