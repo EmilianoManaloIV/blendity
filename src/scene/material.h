@@ -236,10 +236,15 @@ struct Material {
     const Resolved *axis_tx[4] = {nullptr, nullptr, nullptr, nullptr};
   };
   const Resolved &textures() const;
+  /* Round 412 (ADR 0106): a worker's copy of a material - resolved here, once, and never again (a texture generation
+   * bump while a worker samples would re-resolve under its threads); an axis material's parts copied and frozen too. */
+  void freeze_textures() const;
+  bool textures_frozen() const { return textures_frozen_; }
 
  private:
   mutable Resolved resolved_;
   mutable uint64_t resolved_version_ = 0;
+  mutable bool textures_frozen_ = false;
   mutable uint64_t axis_versions_[4] = {0, 0, 0, 0};
   mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;

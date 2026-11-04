@@ -12,6 +12,8 @@
 #include "../src/render/texture_bake.h"
 
 #include <chrono>
+#include <ctime>
+#include <mutex>
 #include <thread>
 
 
@@ -7473,6 +7475,262 @@ static void tests_round409() {
   });
 }
 
+
+/* ----------------------------------------------------------- round 412: renders and bakes on workers (ADR 0106) */
+static void tests_round412() {
+  test("renders on a worker (round 412, ADR 0106): F12 rasterized and path traced run off the main thread - the frames while they run stay short, the tray lists the render, the rasterized picture is bit-identical to the one the main thread drew before, a traced one is the same twice; Stop lands what it had; a new scene mid-render waits for it", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("stress 60 Sphere");
+    ed.scene().render.engine = 0, ed.scene().render.width = 320, ed.scene().render.height = 180, ed.scene().render.raster_aa = 2;
+    ed.step_frame_headless();
+    /* The reference: the editor without workers (a headless editor's default) runs the same code in the starting frame. */
+    ed.command("render");
+    CHECK(!ed.rendering_for_test() && ed.render_image_for_test().width == 320);
+    const std::vector<uint32_t> sync = ed.render_image_for_test().pixels;
+    ed.set_async_jobs_for_test(true);
+    ed.command("render");
+    CHECK(ed.rendering_for_test() && ed.render_job_running_for_test());
+    bool listed = false;
+    double longest = 0.0;
+    int frames = 0;
+    while (ed.rendering_for_test() && frames < 5000) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      longest = std::max(longest, f.ms());
+      frames++;
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "Render";
+    }
+    std::printf("    F12 rasterized on a worker: %d frame(s) while it ran, the longest %.1f ms; %s\n", frames, longest, ed.render_status_for_test().c_str());
+    CHECK(!ed.rendering_for_test() && frames >= 1 && listed);
+    CHECK(ed.render_image_for_test().pixels == sync);
+    /* Path traced on the CPU: 4 samples at 160 x 90, denoised; the status says all the samples came in; the same
+     * picture twice (the sampling is deterministic). */
+    ed.scene().render.engine = 1, ed.scene().render.samples = 4, ed.scene().render.width = 160, ed.scene().render.height = 90;
+    ed.command("device cpu");
+    auto traced = [&](const char *what) {
+      ed.command("render");
+      CHECK(ed.rendering_for_test());
+      std::set<int> phases;
+      double worst = 0.0;
+      int n = 0;
+      while (ed.rendering_for_test() && n < 20000) {
+        ScopedTimer f;
+        ed.step_frame_headless();
+        worst = std::max(worst, f.ms());
+        n++;
+        phases.insert(ed.render_job_phase_for_test());
+      }
+      std::printf("    %s: %d frame(s), the longest %.1f ms; %s\n", what, n, worst, ed.render_status_for_test().c_str());
+      CHECK(!ed.rendering_for_test() && n >= 1);
+      return ed.render_image_for_test().pixels;
+    };
+    const std::vector<uint32_t> a = traced("F12 path traced on a worker");
+    CHECK(ed.render_status_for_test().find("sample 4 / 4") != std::string::npos);
+    const std::vector<uint32_t> b = traced("again");
+    CHECK(a == b && a.size() == 160u * 90u);
+    /* Stop (the tray's Cancel, the Render window's Stop): the tray's entry goes at once; the picture it had lands. */
+    ed.scene().render.samples = 100000;
+    ed.command("render");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(ed.rendering_for_test());
+    ed.stop_render_for_test();
+    CHECK(!ed.rendering_for_test());
+    for (int i = 0; i < 2000 && ed.render_job_running_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    std::printf("    stopped: %s\n", ed.render_status_for_test().c_str());
+    CHECK(!ed.render_job_running_for_test() && ed.render_status_for_test().find("(stopped)") != std::string::npos);
+    /* A new scene while a render runs: the job is waited for (it reads the lightmaps and probes a scene replaces), then
+     * nothing renders; a toon outline's shell (owned by the component the scene takes with it) is held by the job. */
+    ed.command("create Cube");
+    ed.command("component Outline");
+    ed.step_frame_headless();
+    ed.command("render");
+    ed.step_frame_headless();
+    CHECK(ed.rendering_for_test());
+    ed.command("newscene");
+    CHECK(!ed.rendering_for_test() && !ed.render_job_running_for_test());
+    ed.step_frame_headless();
+  });
+  test("Render Animation and the camera sequence on workers (round 412): the frames' PNGs are written behind the renders and are all on disk when it finishes; a sequence renders one camera per job; the frames while they run stay short", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.command("benchscene keyed1k");
+    ed.scene().render.engine = 0, ed.scene().render.width = 320, ed.scene().render.height = 180;
+    ed.step_frame_headless();
+    ed.command("renderanim 1 3 24");
+    double longest = 0.0;
+    int frames = 0;
+    for (; frames < 5000 && ed.render_animation_for_test().active; frames++) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      longest = std::max(longest, f.ms());
+    }
+    const auto &ra = ed.render_animation_for_test();
+    std::printf("    Render Animation: %zu frame(s) in %s over %d frames, the longest %.1f ms\n", ra.written.size(), ra.dir.c_str(), frames, longest);
+    CHECK(!ra.active && ra.written.size() == 3);
+    for (const std::string &p : ra.written) CHECK(fs::exists(p));
+    for (int i = 0; i < 3; i++) ed.command("create Camera");
+    ed.command("rendersequence");
+    longest = 0.0, frames = 0;
+    for (; frames < 5000 && ed.sequence_running(); frames++) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      longest = std::max(longest, f.ms());
+    }
+    std::printf("    camera sequence: %d frames, the longest %.1f ms; %s\n", frames, longest, ed.render_status_for_test().c_str());
+    CHECK(!ed.sequence_running() && frames >= 3 && ed.render_status_for_test().find("3 image(s)") != std::string::npos);  // (the stand-in has no camera of its own: the three made)
+  });
+  test("Generate Lighting on a worker (round 412): the lightmaps, the probe volume, a Light Volume and a Reflection Probe baked off the main thread - the tray's label through the phases, the frames short, the results those of the main-thread bake; a cancel keeps the probes it finished and the old lightmaps", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {4, 1, 4}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_sun_mode(ed, 2);
+    GameObject *hall = ed.scene().create("Hall");
+    hall->set_local_position(Vec3(0, 1, 0)), hall->set_local_scale(Vec3(4, 2, 4));
+    LightVolumeComponent *v = hall->add<LightVolumeComponent>();
+    v->voxels_per_unit = 1.0f, v->bake_in_blendity = true;
+    ed.scene().create("Probes")->add<ProbeVolume>()->global = true;
+    GameObject *probe = ed.scene().create("Probe");
+    probe->set_local_position(Vec3(0, 1, 0));
+    probe->add<ReflectionProbeComponent>()->resolution = 16;
+    ed.commit_change("volumes");
+    r35_bake(ed);  // (without workers: the reference)
+    const LightingData ref = ed.lighting_data_for_test();
+    const size_t ref_probes = ed.probes_for_test().probe_count();
+    CHECK(!ref.empty() && ref_probes > 0 && ed.light_volume_bakes_for_test().count(hall->id) && ed.reflection_probe_bakes_for_test().count(probe->id));
+    ed.set_async_jobs_for_test(true);
+    ed.command("bake start");
+    CHECK(ed.baking_for_test() && ed.bake_job_running_for_test());
+    std::set<std::string> labels;
+    bool progressed = false;
+    double longest = 0.0;
+    int frames = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      longest = std::max(longest, f.ms());
+      frames++;
+      for (const Editor::JobView &j : ed.jobs_for_test()) labels.insert(j.label), progressed = progressed || j.progress > 0.0f;
+    }
+    std::string seen;
+    for (const std::string &l : labels) seen += (seen.empty() ? "" : ", ") + l;
+    std::printf("    the bake on a worker: %d frame(s), the longest %.1f ms; the tray: %s%s\n", frames, longest, seen.c_str(), progressed ? " (with progress)" : "");
+    CHECK(!ed.baking_for_test() && frames >= 2 && labels.count("Baking lighting"));
+    const LightingData &ld = ed.lighting_data_for_test();
+    CHECK(ld.pages.size() == ref.pages.size() && ld.entries.size() == ref.entries.size() && ld.scene_key == ref.scene_key);
+    CHECK(!ld.pages.empty() && !ref.pages.empty() && ld.pages[0].texels == ref.pages[0].texels);  // (the same bake: deterministic on the CPU)
+    CHECK(ed.probes_for_test().probe_count() == ref_probes);
+    CHECK(ed.light_volume_bakes_for_test().count(hall->id) && ed.reflection_probe_bakes_for_test().count(probe->id));
+    /* Cancelled a frame in: the tray's entry goes at once, the worker stops at its next slice, the lightmaps stay the old ones. */
+    ed.command("bake start");
+    ed.step_frame_headless();
+    CHECK(ed.baking_for_test());
+    ed.command("bake cancel");
+    CHECK(!ed.baking_for_test());
+    for (int i = 0; i < 20000 && ed.bake_job_running_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(!ed.bake_job_running_for_test() && ed.lighting_data_for_test().scene_key == ref.scene_key && ed.lighting_data_for_test().pages.size() == ref.pages.size());
+    /* A new scene while a bake runs (review 412): the job is cancelled and lands nothing in the new scene - not even the
+     * volumes and probes it finished, whose object ids the new scene reuses. */
+    ed.command("bake start");
+    ed.step_frame_headless();
+    ed.command("newscene");
+    for (int i = 0; i < 20000 && ed.bake_job_running_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && ed.lighting_data_for_test().empty() && ed.light_volume_bakes_for_test().empty() && ed.reflection_probe_bakes_for_test().empty());
+  });
+  test("Bake Textures on a worker (round 412): the images written by the worker, the material and the UVs landed when the mesh is still the one baked, the tray lists it; cancelled, nothing is kept", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("create Cube");
+    const std::string name = strprintf("TexBake%lld", (long long)std::time(nullptr) % 1000000);  // (the scratch project is shared between runs: a name of its own)
+    ed.active_object_for_test()->name = name;
+    ed.command("select " + name);
+    ed.step_frame_headless();
+    ed.set_async_jobs_for_test(true);
+    ed.command("baketex 256");
+    bool listed = false;
+    int frames = 0;
+    for (; frames < 5000 && ed.texbake_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "Bake Textures";
+    }
+    ed.step_frame_headless();
+    GameObject *g = ed.scene().find_by_name(name);
+    const MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+    std::printf("    Bake Textures on a worker: %d frame(s), listed %s, the material %s\n", frames, listed ? "yes" : "no", mr && !mr->materials.empty() && mr->materials[0] ? mr->materials[0]->name.c_str() : "-");
+    CHECK(frames >= 1 && listed && mr && !mr->materials.empty() && mr->materials[0] && mr->materials[0]->name == name + " Baked");
+    CHECK(fs::exists(ed.resolve_asset_path_for_test("Assets/Textures/Baked/" + name + "_albedo.png")));
+    ed.command("baketex 2048");
+    CHECK(ed.texbake_running_for_test());
+    ed.command("jobs cancel Bake Textures");
+    for (int i = 0; i < 5000 && ed.texbake_running_for_test(); i++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    CHECK(!ed.texbake_running_for_test() && mr->materials[0]->name == name + " Baked" && !fs::exists(ed.resolve_asset_path_for_test("Assets/Textures/Baked/" + name + " 2_albedo.png")));
+  });
+  test("every worker in the tray (round 412, ADR 0105): the overlap check is listed while it runs; `jobs` names it", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("benchscene sphere50k");
+    ed.command("select Parity Sphere");
+    ed.overlap_background_from_for_test(100);
+    ed.overlap_worker_delay_for_test(300);
+    ed.command("edit vertex");
+    ed.step_frame_headless();
+    bool listed = false;
+    for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "Overlap check";
+    std::printf("    the overlap check pending: %s, listed: %s\n", ed.overlap_pending_for_test() ? "yes" : "no", listed ? "yes" : "no");
+    CHECK(!ed.overlap_pending_for_test() || listed);
+    ed.command("jobs");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (ed.overlap_pending_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    CHECK(!ed.overlap_pending_for_test());
+  });
+  test("the job system's background pool (round 412, ADR 0106): on the built-in backend a run_background's parallel loops run on workers of their own and the main thread's pool stays free; in_background says where a thread is", [] {
+    JobSystem &js = JobSystem::global();
+    const JobSystem::Backend was = js.backend();
+    js.set_backend(JobSystem::Backend::Builtin);
+    std::mutex m;
+    std::set<std::thread::id> bg_ids, main_ids;
+    bool bg_flag = false;
+    std::atomic<bool> go{false};
+    std::thread t([&] {
+      js.run_background([&] {
+        bg_flag = JobSystem::in_background();
+        go.store(true);
+        js.parallel_for(4000, 1, [&](int64_t a, int64_t b) {
+          const auto t0 = std::chrono::steady_clock::now();
+          while (std::chrono::steady_clock::now() - t0 < std::chrono::microseconds(50)) {}  // (a spin: a sleep is 15 ms on Windows)
+          std::lock_guard<std::mutex> lock(m);
+          bg_ids.insert(std::this_thread::get_id());
+          (void)a, (void)b;
+        });
+      });
+    });
+    while (!go.load()) std::this_thread::yield();
+    js.parallel_for(4000, 1, [&](int64_t a, int64_t b) {
+      const auto t0 = std::chrono::steady_clock::now();
+      while (std::chrono::steady_clock::now() - t0 < std::chrono::microseconds(50)) {}
+      std::lock_guard<std::mutex> lock(m);
+      main_ids.insert(std::this_thread::get_id());
+      (void)a, (void)b;
+    });
+    t.join();
+    js.set_backend(was);
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    std::printf("    %u hardware threads: the background loop ran on %zu thread(s), the main thread's on %zu; in_background there %s, here %s\n", hw, bg_ids.size(), main_ids.size(),
+                bg_flag ? "true" : "false", JobSystem::in_background() ? "true" : "false");
+    CHECK(bg_flag && !JobSystem::in_background());
+    CHECK(hw < 4 || (bg_ids.size() >= 2 && main_ids.size() >= 2));
+    for (const std::thread::id &id : bg_ids) CHECK(!main_ids.count(id));  // (the two pools share no thread)
+  });
+}
+
 /* Round 411 (task 0387, ADR 0105): the responsiveness budget's instruments - the deferred callbacks counted in the
  * frame, `perf status` / `perf mark` / `viewport status`, the honest CPU badge, the worldlike stand-in and the sweep's
  * lists. The measurements themselves are stress rows (responsiveness, operations, world_like). */
@@ -7629,5 +7887,6 @@ void run_editor_tests() {
   tests_round311();
   tests_round409();
   tests_round411();
+  tests_round412();
   coverage_tests();
 }

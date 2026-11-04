@@ -76,7 +76,7 @@ static const SweepCommand kSweepCommands[] = {
   {"import", "", "the files rows"},
   {"insetmode", "insetmode region 0.1", ""},
   {"inspector", "inspector lock", ""},
-  {"jobs", "jobs", ""},
+  {"jobs", "jobs cancel Bake Textures", ""},
   {"join", "join", ""},
   {"keymap", "keymap Maya", ""},
   {"layout", "layout 2 by 3", ""},

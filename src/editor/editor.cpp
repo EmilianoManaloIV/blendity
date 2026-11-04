@@ -78,6 +78,10 @@ bool SceneCamera::update(double now) {
 Editor::Editor() = default;
 Editor::~Editor() {
   livelink_remove_discovery();  // (task 0274: the bridges stop finding a Blendity that is gone)
+  render_job_.reset();     // (round 412: a render on a worker stopped and joined before the tracer and the scene go)
+  bake_job_.reset();       // (a bake the same)
+  texbake_job_.reset();    // (a texture bake the same)
+  render_animation_writes_poll(2);  // (the frames' writes finished)
   sculpt_remesh_.reset();  // (task 0241: a Quad Remesh still working is stopped and joined before the scene goes)
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
@@ -609,8 +613,10 @@ void Editor::frame_body(std::vector<Event> &events) {
   /* Live preview: re-render the preview when anything it depends on changes
    * (at most 4 times a second, never over a full render in progress). */
   if (scene_->render.live_preview && !playing_ && (!rendering_ || render_preview_) && now - live_preview_time_ > 0.25 &&
-      live_preview_hash() != live_preview_hash_)
-    start_final_render(true, false);
+      live_preview_hash() != live_preview_hash_) {
+    if (render_job_ && !render_job_->done.load(std::memory_order_acquire)) render_job_->stop.store(true);  // (round 412: the last preview stops; the next starts when it has)
+    else start_final_render(true, false);
+  }
   step_final_render();
   step_render_sequence();
   step_render_animation();
@@ -684,6 +690,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   sculpt_remesh_poll();  // (task 0241: a finished Quad Remesh lands as a step)
   if (sculpt_remesh_) ui_.redraw = true;  // (frames while it works: the status line and the result's arrival)
   meshmaps_poll();  // (task 0243: finished mesh maps land as files and a record)
+  texbake_poll();   // (round 412: a Bake Textures lands as a material and the UVs)
   bakelight_poll();  // (task 0247: a baked-light layer lands when its worker is done)
   surface_poll();   // (task 0244: a changed surface evaluated on a worker, its images swapped in)
   if (meshmaps_job_) {
@@ -2169,6 +2176,7 @@ void Editor::new_scene() {
   if (playing_) exit_play();
   if (edit_mode_) exit_edit_mode();
   bake_cancel();  // a bake belongs to the scene it started in
+  render_job_wait("a new scene");  // (round 412: a render on a worker reads this scene's shells and lighting)
   scene_ = std::make_unique<Scene>();
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
   build_starter_scene(*scene_);
@@ -2207,6 +2215,7 @@ bool Editor::open_scene(const std::string &path) {
     Log::error("Open scene failed: %s", err.c_str());
     return false;
   }
+  render_job_wait("the scene opened");  // (round 412)
   scene_ = std::move(s);
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
   relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
@@ -2396,52 +2405,124 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
                      "File > Export with Bake Textures, which bakes what it exports", g->name.c_str()), "applymods", "Apply Modifiers");
     return false;
   }
-  const Mesh &source = ev ? *ev : *mf->mesh;
-  auto *mr = g->get<MeshRenderer>();
-  const std::vector<MaterialPtr> mats = mr ? mr->materials : std::vector<MaterialPtr>();
-  TextureBakeSettings s;
-  s.size = std::max(256, std::min(4096, size));
-  s.keep_uvs = keep_uvs;
-  ScopedTimer timer;
-  const TextureBakeResult r = bake_textures(source, g->world_matrix(), mats, s);
-  if (!r.texels) {
-    Log::warn("Bake Textures: %s has no surface to bake", g->name.c_str());
+  if (texbake_job_) {
+    refuse("Bake Textures: a bake is running - the tray's Cancel stops it", "jobs cancel Bake Textures", "Cancel the bake");
     return false;
   }
-  /* New files every time (Blender's Material.001): another object with the same name, or an undo past this bake,
-   * keeps the images its UVs were laid out for. */
+  const Mesh &source = ev ? *ev : *mf->mesh;
+  auto *mr = g->get<MeshRenderer>();
+  /* Round 412 (ADR 0106): the bake on a worker - the mesh copied bare, the materials copied and resolved here (shading
+   * never resolves on a worker), the images written by the worker; texbake_poll lands the material and the UVs. New
+   * files every time (Blender's Material.001): another object with the same name, or an undo past this bake, keeps the
+   * images its UVs were laid out for. */
+  auto job = std::make_unique<TexBakeJob>();
+  job->obj = g->id;
+  job->mesh_uid = mf->mesh->uid.v;
+  job->version = mf->mesh->version, job->deform_version = mf->mesh->deform_version;
+  job->input = mesh_copy_bare(source);
+  job->model = g->world_matrix();
+  if (mr)
+    for (const MaterialPtr &mp : mr->materials) job->materials.push_back(snapshot_material(mp));
+  job->settings.size = std::max(256, std::min(4096, size));
+  job->settings.keep_uvs = keep_uvs;
   std::string name = file_safe(g->name);
   for (int k = 2; fs::exists(resolve_asset_path("Assets/Materials/" + name + " Baked.mat")) ||
                   fs::exists(resolve_asset_path("Assets/Textures/Baked/" + name + "_albedo.png"));
        k++)
     name = file_safe(g->name) + " " + std::to_string(k);
-  const std::string rel = "Assets/Textures/Baked/" + name;
-  const std::string abs = resolve_asset_path(rel);
-  std::string err;
-  if (!write_baked_textures(r, abs, &err)) {
-    Log::error("Bake Textures: %s", err.c_str());
-    return false;
+  job->name = name;
+  job->rel = "Assets/Textures/Baked/" + name;
+  job->abs = resolve_asset_path(job->rel);
+  TexBakeJob *raw = job.get();
+  auto run = [raw] {
+    ScopedTimer timer;
+    JobSystem::global().run_background([raw] {
+      raw->result = bake_textures(*raw->input, raw->model, raw->materials, raw->settings, &raw->cancel, &raw->progress);
+      if (raw->cancel.load()) return;
+      if (!raw->result.texels) raw->why = "no surface to bake";
+      else if (!write_baked_textures(raw->result, raw->abs, &raw->why)) raw->result.texels = 0;
+      else raw->ok = true;
+    });
+    raw->result.ms = timer.ms();
+    raw->done.store(true, std::memory_order_release);
+  };
+  texbake_job_ = std::move(job);
+  if (!jobs_async()) {  // (a headless editor that didn't ask for workers: in this frame, as before)
+    run();
+    texbake_poll();
+    return !texbake_job_ && g->get<MeshRenderer>() && !g->get<MeshRenderer>()->materials.empty() && g->get<MeshRenderer>()->materials[0] &&
+           g->get<MeshRenderer>()->materials[0]->name == name + " Baked";
   }
-  for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(abs + m);
+  raw->thread = std::thread(run);
+  Log::info("Bake Textures: baking %s at %d x %d on a worker (the tray's Cancel stops it)", g->name.c_str(), raw->settings.size, raw->settings.size);
+  ui_.redraw = true;
+  return true;
+}
+
+/* Round 412: a finished Bake Textures lands - the material asset made, the UVs written onto the mesh, the slots set - as
+ * one step when the mesh is still the one it was baked from; dropped, its files removed, with a log line otherwise. */
+void Editor::texbake_poll() {
+  if (!texbake_job_ || !texbake_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<TexBakeJob> job = std::move(texbake_job_);
+  if (job->thread.joinable()) job->thread.join();
+  std::string drop;
+  if (job->cancel.load()) drop = "cancelled";
+  else if (!job->ok) drop = job->why;
+  GameObject *g = drop.empty() ? scene_->find(job->obj) : nullptr;
+  MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  if (drop.empty()) {
+    const bool same = mf && mf->mesh && mf->mesh->uid.v == job->mesh_uid && mf->mesh->version == job->version && mf->mesh->deform_version == job->deform_version;
+    if (!same) drop = "the mesh changed while it baked (a stroke, an undo, another scene)";
+    else if (edit_mode_ || playing_) drop = "the object is in Edit Mode or Play";
+  }
+  if (!drop.empty()) {
+    if (job->ok)  // (the files of a bake that did not land go)
+      for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) std::remove((job->abs + m).c_str());
+    if (drop == "cancelled") Log::info("Bake Textures: cancelled - nothing kept");
+    else Log::warn("Bake Textures: %s - nothing kept", drop.c_str());
+    ui_.redraw = true;
+    return;
+  }
+  const TextureBakeResult &r = job->result;
+  for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(job->abs + m);
+  const std::vector<MaterialPtr> &mats = job->materials;
   const Material *like = !mats.empty() && mats[0] ? mats[0].get() : nullptr;
   const Material *alpha_like = r.alpha_slot >= 0 && r.alpha_slot < (int)mats.size() ? mats[(size_t)r.alpha_slot].get() : nullptr;
-  MaterialPtr baked = create_material_asset(baked_material(name + " Baked", rel, like, alpha_like), "Assets/Materials/" + name + " Baked.mat");
+  MaterialPtr baked = create_material_asset(baked_material(job->name + " Baked", job->rel, like, alpha_like), "Assets/Materials/" + job->name + " Baked.mat");
   if (!baked) {
-    Log::error("Bake Textures: could not write Assets/Materials/%s Baked.mat", name.c_str());
-    return false;
+    Log::error("Bake Textures: could not write Assets/Materials/%s Baked.mat", job->name.c_str());
+    return;
   }
+  commit_undo();
   Mesh &m = *mesh_make_mutable(mf->mesh);
   m.uvs = r.uvs;
   m.touch();
+  MeshRenderer *mr = g->get<MeshRenderer>();
   if (!mr) mr = g->add<MeshRenderer>();
   const size_t slots = std::max<size_t>(1, mr->materials.size());
   mr->materials.assign(slots, baked);
   invalidate_material_textures();
   project_listed_ = -100;
-  Log::info("Baked %s: %d x %d, %zu texels%s, in %.0f ms -> %s_*.png", g->name.c_str(), r.size, r.size, r.texels,
-            r.own_uvs ? " (its own UVs)" : "", timer.ms(), rel.c_str());
+  Log::info("Baked %s: %d x %d, %zu texels%s, in %.0f ms -> %s_*.png", g->name.c_str(), r.size, r.size, r.texels, r.own_uvs ? " (its own UVs)" : "", r.ms,
+            job->rel.c_str());
   mark_changed("Bake Textures");
-  return true;
+  ui_.redraw = true;
+}
+
+/* Round 412 (ADR 0106): a material for a worker - copied, its textures resolved here (a surface's whole images, never
+ * the views' 16 x 16 stand-in) and frozen, so no texture generation bump re-resolves it under the worker's threads. */
+MaterialPtr Editor::snapshot_material(const MaterialPtr &m) {
+  if (!m) return nullptr;
+  ProceduralTextureFinalScope final_outputs;
+  auto c = std::make_shared<Material>(*m);
+  c->freeze_textures();
+  return c;
+}
+
+void Editor::texbake_cancel() {
+  if (!texbake_job_) return;
+  texbake_job_->cancel.store(true);
+  Log::info("Bake Textures: cancelling (it stops at the next rows)");
 }
 
 /* Round 353: a generated image (UV Grid, Color Grid) written once as a PNG beside the exported file and the slot
@@ -2877,6 +2958,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
 
 /* The export itself: `objects` written to `path` as `o` says. */
 std::string Editor::export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path) {
+  ProceduralTextureFinalScope final_outputs;  // (round 412: a surface's whole images in the files, never the views' stand-in)
   fold_edit_shape();  // (round 406: a file holds the basis and the keys)
   std::vector<ExportItem> items;
   std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
@@ -4194,6 +4276,7 @@ void Editor::exit_play() {
   play_ground_ = GroundGrid();  // (Locomotion's: gathered again at the next Play)
   playing_ = false;
   paused_ = false;
+  render_job_wait("Play ended");  // (round 412: a render of the played scene)
   scene_ = std::move(play_backup_);
   stable_ = scene_->clone();
   prune_selection();

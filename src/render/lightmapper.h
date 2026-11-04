@@ -131,8 +131,8 @@ class Lightmapper {
   /* Bakes texels for up to `budget_ms` (at least one batch). True when finished. */
   bool step(double budget_ms);
   bool active() const { return active_; }
-  float progress() const { return total_ ? (float)done_ / (float)total_ : 1.0f; }
-  size_t texel_count() const { return total_; }
+  float progress() const { return total_ ? (float)done_.load(std::memory_order_relaxed) / (float)total_ : 1.0f; }
+  size_t texel_count() const { return total_.load(std::memory_order_relaxed); }
   void cancel();
   double finish_ms() const { return finish_ms_; }  // the filter and dilation of the last bake
   /* After step() returned true: dilated, denoised maps and the objects' entries. */
@@ -152,7 +152,8 @@ class Lightmapper {
   std::vector<BakeLight> lights_;
   std::vector<LightmapTexel> texels_;
   std::vector<Vec3> values_;
-  size_t total_ = 0, done_ = 0;
+  std::atomic<size_t> total_{0};  // (round 412: read by the main thread while a worker bakes)
+  std::atomic<size_t> done_{0};  // (round 412: read by the main thread while a worker bakes)
   std::atomic<uint64_t> rays_{0};
   std::unique_ptr<class PathTracer> pt_;
   std::vector<PTObject> pt_objects_;

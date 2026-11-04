@@ -6428,6 +6428,7 @@ static void test_responsiveness(Report &rep, const Options &o) {
   auto fresh = [&](const char *scene, const char *select = nullptr) {
     auto ed = std::make_unique<Editor>();
     ed->init_headless(1280, 720);
+    ed->set_async_jobs_for_test(true);  // (round 412: renders and bakes on workers, as the windowed editor runs them)
     if (scene && *scene) ed->command(scene);
     if (select) ed->command(std::string("select ") + select);
     ed->step_frame_headless();
@@ -6439,12 +6440,18 @@ static void test_responsiveness(Report &rep, const Options &o) {
   {
     auto ed = fresh("stress 400 Sphere");
     ed->scene().render.engine = 0, ed->scene().render.width = 1280, ed->scene().render.height = 720;
-    stall_row(rep, "F12 rasterized, 400 spheres at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), 100.0);
+    ed->command("window Render");  // (round 412: the window's docking - every view drawn again at a new size - is the sweep's row, not the render's)
+    ed->step_frame_headless();
+    ed->step_frame_headless();
+    stall_row(rep, "F12 rasterized, 400 spheres at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);  // (round 412: a job)
   }
   {
     auto ed = fresh("stress 400 Sphere");
     ed->scene().render.engine = 1, ed->scene().render.samples = o.quick ? 4 : 16, ed->scene().render.width = 640, ed->scene().render.height = 360;
     ed->command("device cpu");
+    ed->command("window Render");
+    ed->step_frame_headless();
+    ed->step_frame_headless();
     stall_row(rep, strprintf("F12 path traced on the CPU, 400 spheres, %d samples at 640 x 360", ed->scene().render.samples),
               run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);
   }
@@ -6475,7 +6482,7 @@ static void test_responsiveness(Report &rep, const Options &o) {
   }
   {
     auto ed = fresh("benchscene worldlikequick", "Part 000");
-    stall_row(rep, "Bake Textures, a textured part at 512", run_stall(*ed, [&] { ed->command("baketex 512"); }, [] { return false; }), budget);  // (synchronous today: the one frame is the measure)
+    stall_row(rep, "Bake Textures, a textured part at 512", run_stall(*ed, [&] { ed->command("baketex 512"); }, [&] { return ed->texbake_running_for_test(); }, 600000.0), budget);  // (round 412: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
@@ -6576,7 +6583,10 @@ static void test_responsiveness(Report &rep, const Options &o) {
     ed->scene().lighting.texels_per_unit = 2, ed->scene().lighting.indirect_samples = o.quick ? 4 : 16;
     stall_row(rep, "Generate Lighting on worldlike (180 parts at 2 texels/m)", run_stall(*ed, [&] { ed->command("bake start"); }, [&] { return ed->baking_for_test(); }, 900000.0), budget);
     ed->scene().render.engine = 0, ed->scene().render.width = 1280, ed->scene().render.height = 720;
-    stall_row(rep, "F12 rasterized, worldlike at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), 100.0);
+    ed->command("window Render");
+    ed->step_frame_headless();
+    ed->step_frame_headless();
+    stall_row(rep, "F12 rasterized, worldlike at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);
   }
   rep.row({"Puppet solve, AutoPhysics, AI inbetweening, MoonRay, Live Link with clients", "-", "-", "-", "-", "not run here (downloads, rigs or clients; stress physics / livelink have their rows)", "-"});
   rep.note("A row OVER its budget is a round 412 / 413 item: the operation goes to a worker with the tray's progress and Cancel, or is split over frames.");

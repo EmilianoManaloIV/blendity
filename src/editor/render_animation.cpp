@@ -12,6 +12,7 @@
 #include <cmath>
 #include <ctime>
 #include <chrono>
+#include <future>
 #include <thread>
 
 namespace bl {
@@ -126,8 +127,8 @@ void Editor::stop_render_animation() {
   if (!ranim_.active) return;
   ranim_.active = false;
   anim_.hold_from = 0.0f;
-  if (rendering_) rendering_ = false;
-  final_pt_.pause();  // (task 0161: the cards stop too)
+  render_job_stop();  // (round 412: the worker stops; the cards with it)
+  render_animation_writes_poll(2);  // (the frames already rendered are on disk when this returns)
   if (ranim_.source == 1) seq_set_preview(false);
   else anim_set_preview(false);
   invalidate_project_listing();
@@ -165,9 +166,22 @@ void Editor::step_render_animation() {
   }
   const std::string path = frame_file(ranim_.dir, k);
   if (ranim_.source == 1) composite_render_card(render_img_, seqr_.frame);  // (round 364: the card at this frame over the render)
-  if (!write_png(path, render_img_.pixels.data(), render_img_.width, render_img_.height, render_img_.width, render_transparent_)) {
-    Log::error("Render Animation: could not write %s; stopped (a gap would end the video there)", path.c_str());
-    return stop_render_animation();
+  /* Round 412 (ADR 0106): the PNG written on a worker (a 1080p frame is 40 ms of encoding), at most two behind; a
+   * headless editor that didn't ask for workers writes it here. */
+  if (!render_animation_writes_poll(ranim_writes_.size() >= 2 ? 1 : 0)) return stop_render_animation();
+  if (!jobs_async()) {
+    if (!write_png(path, render_img_.pixels.data(), render_img_.width, render_img_.height, render_img_.width, render_transparent_)) {
+      Log::error("Render Animation: could not write %s; stopped (a gap would end the video there)", path.c_str());
+      return stop_render_animation();
+    }
+  }
+  else {
+    Image copy = render_img_;
+    const bool transparent = render_transparent_;
+    ranim_writes_.push_back({std::async(std::launch::async, [copy = std::move(copy), path, transparent] {
+                               return write_png(path, copy.pixels.data(), copy.width, copy.height, copy.width, transparent);
+                             }),
+                             path});
   }
   ranim_.written.push_back(path);
   render_status_ = strprintf("Animation frame %d / %d", k, n);
@@ -187,8 +201,27 @@ const char *Editor::render_animation_broken() {
   return nullptr;
 }
 
+/* The frames' writes: finished ones taken (a failure said and false); `mode` 1 waits for the oldest, 2 for all. */
+bool Editor::render_animation_writes_poll(int mode) {
+  bool first = true;
+  while (!ranim_writes_.empty()) {
+    RenderWrite &w = ranim_writes_.front();
+    const bool wait = mode == 2 || (mode == 1 && first);
+    first = false;
+    if (!wait && w.ok.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return true;
+    const bool ok = w.ok.get();
+    const std::string path = w.path;
+    ranim_writes_.pop_front();
+    if (ok) continue;
+    Log::error("Render Animation: could not write %s; stopped (a gap would end the video there)", path.c_str());
+    return false;
+  }
+  return true;
+}
+
 /* All frames written: the pose goes back, and FFmpeg (if there is one) makes the video in the background. */
 void Editor::finish_render_animation() {
+  if (!render_animation_writes_poll(2)) return stop_render_animation();  // (the last frames' writes, before the video reads them)
   const size_t frames = ranim_.written.size();
   std::vector<float> sound;
   const bool wav_written = render_animation_sound(sound);  // (round 365: sound.wav beside the frames, and into the video)

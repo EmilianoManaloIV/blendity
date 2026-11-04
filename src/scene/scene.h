@@ -630,6 +630,12 @@ struct Outline : ComponentBase<Outline> {
    * for the distance (outline_distance_scale). */
   static constexpr int kShellSlots = 9;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones; 6-8: a view-shaped mesh's, one a camera-view role - round 339)
   const Mesh *shell(const Mesh &src, float world_scale, int slot = 0, float thickness_scale = 1.0f) const;
+  /* Round 412: the shell held (a render job keeps it while it draws; a rebuild replaces the slot's, never this one). */
+  std::shared_ptr<const Mesh> shell_held(const Mesh *shell) const {
+    for (const ShellCache &c : shells_)
+      if (c.mesh && c.mesh.get() == shell) return c.mesh;
+    return nullptr;
+  }
   /* The scale of the thickness for an object `distance` metres from the eye, with `px_per_m` pixels per metre at
    * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
    * the fade, then the pixel limits, in 2 % steps. `world_scale`: the object's, for a thickness in its own units.
@@ -1741,6 +1747,17 @@ class GameObject {
    * 2 Edit Mode (enabled and Show in Edit Mode); 3 + 2 x role + (0 or 1) are 0 and 1 seen through a camera, the
    * MeshRenderer's view_weights added to its shape keys - a pair for each camera-view role (round 339, ADR 0094). */
   const Mesh *evaluated_mesh(int kind = 0) const;
+  /* Round 412 (ADR 0106): the same mesh held - a render job keeps it while it draws; an edit meanwhile writes through a
+   * copy (mesh_make_mutable, the head's use_count check above), so what the job reads never changes under it. The base
+   * mesh when nothing is drawn over it. */
+  std::shared_ptr<const Mesh> evaluated_mesh_shared(int kind = 0) const {
+    const Mesh *m = evaluated_mesh(kind);
+    if (!m) return nullptr;
+    const int k = std::max(0, std::min(kind, 8));
+    if (eval_mesh_[k] && eval_mesh_[k].get() == m) return eval_mesh_[k];
+    const MeshFilter *mf = mesh_filter();
+    return mf && mf->mesh.get() == m ? std::shared_ptr<const Mesh>(mf->mesh) : nullptr;
+  }
   /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
    * their settings), without evaluating anything: for caches that only need to know it changed. */
   uint64_t evaluated_key(int kind = 0) const;

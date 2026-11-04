@@ -288,6 +288,12 @@ void procedural_texture_cache_forget(const std::string &asset_path);
 /* Task 0244: an asset evaluated off the main thread. Async on, a request for outputs whose hash moved on returns the
  * cached (older) outputs instead of evaluating - the editor's worker stores the fresh planes with cache_store. */
 void procedural_texture_set_async(const std::string &asset_path, bool on);
+/* Round 412: while one of these is alive on this thread, a texture asked for asynchronously that has no result yet is
+ * evaluated whole (a render's, a bake's or an export's materials), not as the views' 16 x 16 stand-in. */
+struct ProceduralTextureFinalScope {
+  ProceduralTextureFinalScope();
+  ~ProceduralTextureFinalScope();
+};
 uint64_t procedural_texture_cache_hash(ProceduralTexture &t);                 // the hash the cache keys outputs by (Live Shading left out)
 bool procedural_texture_cached(const std::string &asset_path, uint64_t hash);  // the cache holds this hash's outputs
 /* The outputs built from evaluated planes (the six images with their mips, the live snapshot) - on any thread - and

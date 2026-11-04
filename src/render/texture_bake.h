@@ -8,6 +8,7 @@
 #include "../core/math.h"
 #include "../scene/material.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -39,6 +40,7 @@ struct TextureBakeResult {
   bool own_uvs = false;             // the mesh's UVs were kept
   bool any_alpha = false;           // a texel's alpha is below 1 (only see-through surfaces have alpha: Opaque and Glass don't)
   int alpha_slot = -1;              // the first material slot whose surface left that alpha (the baked material takes its surface)
+  double ms = 0.0;                  // (round 412: the bake's time, set by the editor's worker)
 };
 
 /* Whether the mesh's own UVs can be the layout at `size` (in 0..1, no overlap): the texture bake's rule, shared with the mesh maps (task 0243). */
@@ -46,7 +48,8 @@ bool own_uvs_usable(const Mesh &m, int size);
 
 /* Bakes `mesh` placed by `model` with `materials` (slot i -> material; null = the default). Parallel over rows. */
 TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials,
-                                const TextureBakeSettings &settings = TextureBakeSettings());
+                                const TextureBakeSettings &settings = TextureBakeSettings(), const std::atomic<bool> *cancel = nullptr,
+                                std::atomic<float> *progress = nullptr);  // (round 412: on a worker - cancelled: texels 0)
 
 /* The four images as PNGs: <base>_albedo.png, _roughness.png, _metallic.png, _normal.png (base: an absolute path
  * without extension). False (and *error) when one can't be written. */

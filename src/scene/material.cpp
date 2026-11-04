@@ -398,7 +398,22 @@ void Material::reflect_principled_extras(Reflector &r) {
   r.group_end();
 }
 
+void Material::freeze_textures() const {
+  if (textures_frozen_) return;
+  (void)textures();
+  for (int k = 0; k < 4; k++) {
+    if (!resolved_.axis[k]) continue;
+    auto c = std::make_shared<Material>(*resolved_.axis[k]);
+    c->textures_frozen_ = false;
+    c->freeze_textures();
+    resolved_.axis[k] = c;
+    resolved_.axis_tx[k] = &c->resolved_;
+  }
+  textures_frozen_ = true;
+}
+
 const Material::Resolved &Material::textures() const {
+  if (textures_frozen_) return resolved_;  // (round 412: a worker's copy - what it resolved on the main thread, for good)
   size_t gen = g_texture_gen.load();
   auto axis_current = [&] {  // an axis material's sub-materials unchanged since they were resolved
     for (int k = 0; k < 4; k++)

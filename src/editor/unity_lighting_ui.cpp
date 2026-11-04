@@ -404,6 +404,7 @@ void Editor::poll_unity_lighting() {
  * other, so Unity's lightmaps were never saved where a bake already was). */
 void Editor::lighting_reset_for(const char *why) {
   Log::info("Baked lighting cleared for %s", why);
+  render_job_wait(why);  // (round 412: a render on a worker reads the lightmaps and probes about to go)
   if (preview_running_) preview_baker_.cancel();
   preview_running_ = false;
   preview_data_ = LightingData{};

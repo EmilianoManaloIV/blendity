@@ -34,15 +34,19 @@ class JobSystem {
   void parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn);
   /* Runs `fn` (on a thread of the caller's own, such as a background solve) so its parallel loops don't hold up the
    * editor's: with TBB in an arena of its own two threads short of the machine; with the built-in pool (one job at a
-   * time) serially, never taking the pool from the main thread. */
+   * time) on a second pool of its own, two threads short of the machine (round 412, ADR 0106: before, serially), never
+   * taking the main thread's pool. */
   void run_background(const std::function<void()> &fn);
+  /* True on a thread inside run_background (a worker's own thread and the background pool's): what it runs stays off
+   * the main thread's pool. */
+  static bool in_background();
 
   int thread_count() const;
   /* A ceiling on every thread the process runs work on, TBB's included (Embree, OpenImageDenoise, OpenSubdiv share
    * them): 0 = the machine's. Set from Preferences > Performance > CPU Threads, the BLENDITY_THREADS environment
    * variable or `blendity_stress --threads N` (task 0050: a 4-core / 8-thread machine is emulated with 8). */
   void set_thread_limit(int n);
-  int thread_limit() const { return thread_limit_; }
+  int thread_limit() const { return thread_limit_.load(); }
   /* Restrict parallelism (1 = serial), used by profiler toggles & stress tests. */
   void set_max_threads(int n) { max_threads_ = n < 1 ? 1 : n; }
   int max_threads() const { return max_threads_; }
@@ -62,7 +66,7 @@ class JobSystem {
 
   Backend backend_ = Backend::Builtin;
   int requested_threads_ = 0;
-  int thread_limit_ = 0;
+  std::atomic<int> thread_limit_{0};  // (round 412: read by the background pool's threads)
   std::once_flag workers_started_;
   struct TbbState;
   TbbState *tbb_ = nullptr;
@@ -82,7 +86,13 @@ class JobSystem {
   std::atomic<int64_t> remaining_{0};
   std::atomic<int> active_workers_{0};
   int allowed_workers_ = 0;
+  int worker_counter_ = 0;
   std::atomic<bool> busy_{false};
+  /* Round 412: the built-in backend's background pool - the loops a run_background runs, on workers of its own. */
+  bool is_background_ = false;
+  std::shared_ptr<JobSystem> background_;
+  std::mutex background_mutex_;
+  std::shared_ptr<JobSystem> background_pool();
 };
 
 }  // namespace bl

@@ -2,6 +2,40 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 412): rendering and baking never halt the editor
+
+**Asked:** "Rendering, Baking, or doing intensive operations should not halt the program." Pass 16's second round: the
+rendering and baking rows round 411 measured OVER move off the main thread (the plan: rounds 411-420; geometry and
+files are round 413's).
+
+**Changed (task 0388, ADR 0106)**
+- **F12 on a worker:** the main thread takes a snapshot in the starting frame (the meshes held - copy-on-write, so an
+  edit meanwhile writes a copy - the materials copied and resolved, the lights, the world, the shadow map and the
+  realtime lightmaps copied; the lightmaps, probes and GI grid pointed at and left alone while the job holds them)
+  and a worker draws or samples from it. The rasterized picture is bit-identical to the main thread's; the path tracer's
+  build, sample passes, resolves and final denoise all run there, publishing the picture, the status and the stats.
+  Stop lands what it had, denoised; a new scene or Clear Baked Data waits for a running job (logged when over 50 ms).
+  Render Animation writes its PNGs on workers, at most two behind; a camera sequence is one job per camera; the Live
+  Preview stops the last preview and starts the next when it has ended.
+- **Generate Lighting on a worker:** one job through four phases - the lightmaps (layout, texels, filter, dilation),
+  the probe volume (placed, validated, baked), the Light Volumes, the Reflection Probes' faces - with the tray's label
+  and progress following; the results land as one change; a cancel keeps the volumes and probes it finished.
+- **Bake Textures on a worker:** the images written by the worker, the material and the UVs landed when the mesh is
+  still the one baked; cancelled, nothing is kept. A new surface's first images come from the worker too (a 16 x 16
+  stand-in until they land).
+- **The job pool's background pool:** on the dependency-free build a `run_background`'s parallel loops ran serially;
+  they now run on a second pool two threads short of the machine, never on the main thread's.
+- **Every worker in the tray:** the GPU's opening, the overlap check, Unity's model ids and lightmap jobs, a `.blend`
+  read, the Blender bridge's install, the AI inbetween / chore / fine-tuning, AutoPhysics and ragdoll solves, the pose
+  prior's load, the update check and download.
+- Headless editors keep the one-frame behaviour unless they ask (`set_async_jobs_for_test`); the app's headless
+  runner, `tools/bench_world.py`, the stress rows and this round's tests ask.
+- The lesson "Where the Time Goes" gains the workers; `tests_round412`.
+
+**Measured** (`blendity_stress --only responsiveness --quick`, the build with Blender's libraries, this machine): F12 rasterized, 400 spheres 267.1 -> 6.8 ms; F12 path traced, 400 spheres, 4 samples 196.0 -> 2.6 ms; Render Animation, 4 frames 51.9 -> 14.3 ms; the camera sequence, 4 cameras 109.3 -> 13.0 ms; Generate Lighting, 50 cubes 16.1 -> 6.1 ms; Generate Lighting on the stand-in 2376.7 -> 51.0 ms (OVER); F12 rasterized, the stand-in 91.6 -> 4.0 ms; Bake Textures at 512 112.1 -> 4.6 ms; a surface's first evaluation 118.3 -> 42.6 ms.
+
+**Checked:** `tests_round412`; both suites green - with Blender's libraries 15955 checks in 1551 tests, 0 failed; dependency-free 15309 (Windows) and 15315 (Linux, WSL) checks, 0 failed; the audits. The Live Link recorded session was recorded again (one message's place at the sync; the same messages).
+
 ## 2026-11-04 (round 411): the performance suite and the responsiveness budget
 
 **Asked:** "Do a full performance suite on the program. Rendering, Baking, or doing intensive operations should not halt

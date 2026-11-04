@@ -15,6 +15,10 @@
 
 namespace bl {
 
+namespace {
+thread_local bool tl_background = false;  // inside run_background on the built-in pool (and on the background pool's workers): loops go to the background pool
+}
+
 struct JobSystem::TbbState {
 #ifdef BL_WITH_TBB
   std::mutex mutex;
@@ -55,20 +59,26 @@ int JobSystem::thread_count() const {
 #ifdef BL_WITH_TBB
   if (backend_ == Backend::TBB) {
     const int all = tbb::info::default_concurrency();
-    return thread_limit_ > 0 ? std::min(all, thread_limit_) : all;
+    const int limit = thread_limit_.load();
+    return limit > 0 ? std::min(all, limit) : all;
   }
 #endif
   int threads = requested_threads_ > 0 ? requested_threads_ : (int)std::max(1u, std::thread::hardware_concurrency()) - 1;
-  if (thread_limit_ > 0) threads = std::min(threads, thread_limit_ - 1);
+  const int limit = thread_limit_.load();
+  if (limit > 0) threads = std::min(threads, limit - 1);
   return std::max(0, threads) + 1;
 }
 
 void JobSystem::set_thread_limit(int n) {
   thread_limit_ = std::max(0, n);
+  {
+    std::lock_guard<std::mutex> lock(background_mutex_);
+    background_.reset();  // (sized under the old ceiling: the next run_background makes one under the new; a loop still in it keeps it)
+  }
 #ifdef BL_WITH_TBB
   std::lock_guard<std::mutex> lock(tbb_->mutex);
   tbb_->limit.reset();
-  if (thread_limit_ > 0) tbb_->limit = std::make_unique<tbb::global_control>(tbb::global_control::max_allowed_parallelism, (size_t)thread_limit_);
+  if (thread_limit_.load() > 0) tbb_->limit = std::make_unique<tbb::global_control>(tbb::global_control::max_allowed_parallelism, (size_t)thread_limit_.load());
   tbb_->arena.reset();  // an arena sized under the old ceiling
 #endif
 }
@@ -106,12 +116,12 @@ bool JobSystem::run_one_chunk() {
 }
 
 void JobSystem::worker_main() {
+  if (is_background_) tl_background = true;  // (a nested loop from here stays on this pool: inline while it is busy)
   uint64_t seen = 0;
   int index;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    static int counter = 0;
-    index = counter++;
+    index = worker_counter_++;  // (round 412: this pool's own count - a static shared with the background pool had throttled every one of its workers)
   }
   for (;;) {
     {
@@ -135,8 +145,19 @@ void JobSystem::worker_main() {
   }
 }
 
-namespace {
-thread_local bool tl_background = false;  // inside run_background on the built-in pool: loops run serially
+bool JobSystem::in_background() { return tl_background; }
+
+/* Round 412 (ADR 0106): the built-in backend's second pool, two threads short of the machine (as the TBB arena), made
+ * when a run_background first asks and dropped when the thread ceiling changes. Its workers count as background threads,
+ * so a nested loop from one of them comes back here and runs inline (the pool is busy), never on the main thread's pool. */
+std::shared_ptr<JobSystem> JobSystem::background_pool() {
+  std::lock_guard<std::mutex> lock(background_mutex_);
+  if (!background_) {
+    background_ = std::make_shared<JobSystem>(std::max(1, thread_count() - 3));  // (n workers + the background thread = the machine - 2)
+    background_->set_backend(Backend::Builtin);
+    background_->is_background_ = true;
+  }
+  return background_;
 }
 
 void JobSystem::run_background(const std::function<void()> &fn) {
@@ -147,16 +168,17 @@ void JobSystem::run_background(const std::function<void()> &fn) {
     return;
   }
 #endif
+  const bool was = tl_background;
   tl_background = true;
   fn();
-  tl_background = false;
+  tl_background = was;
 }
 
 void JobSystem::parallel_for(int64_t count, int64_t grain, const std::function<void(int64_t, int64_t)> &fn) {
   if (count <= 0) return;
   grain = std::max<int64_t>(1, grain);
-  if (tl_background && backend_ != Backend::TBB) {
-    fn(0, count);
+  if (tl_background && backend_ != Backend::TBB && !is_background_) {
+    background_pool()->parallel_for(count, grain, fn);  // (round 412: the background pool's workers, not the main thread's)
     return;
   }
 #ifdef BL_WITH_TBB

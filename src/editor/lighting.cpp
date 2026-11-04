@@ -5,12 +5,15 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "../render/gpu_device.h"
 #include "../render/pathtracer.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 
 namespace bl {
 
@@ -159,6 +162,7 @@ void Editor::attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it) {
 }
 
 void Editor::load_lighting_data() {
+  render_job_wait("the scene's lighting is replaced");  // (round 412: a render on a worker reads the lightmaps and probes)
   scene_ident_++;  // a new or opened scene: nothing published for the last one shows
   if (preview_running_) preview_baker_.cancel();
   preview_running_ = false;
@@ -232,6 +236,8 @@ void Editor::save_lighting_data() {
 void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) {
   objects.clear();
   lights.clear();
+  std::unordered_map<const Material *, MaterialPtr> copies;
+  std::unordered_map<const Mesh *, std::shared_ptr<const Mesh>> mesh_copies;  // (round 412: parts sharing a mesh share its copy - the bake only reads it)
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     if (auto *mr = g.get<MeshRenderer>())
@@ -239,9 +245,15 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
         if (const Mesh *m = g.evaluated_mesh(1)) {
           BakeObject o;
           o.id = g.id;
-          o.mesh = std::make_shared<Mesh>(*m);  // the bake's own copy: the scene may change while it runs
+          std::shared_ptr<const Mesh> &mc = mesh_copies[m];
+          if (!mc) mc = mesh_copy_bare(*m);  // the bake's own copy, without the caches (round 412: the worker builds its own): the scene may change while it runs
+          o.mesh = mc;
           o.model = g.world_matrix();
-          o.materials = mr->materials;
+          for (const MaterialPtr &mp : mr->materials) {  // (round 412: frozen copies - the worker never reads the scene's own)
+            MaterialPtr &c = copies[mp.get()];
+            if (!c) c = snapshot_material(mp);
+            o.materials.push_back(c);
+          }
           o.scale = mr->scale_in_lightmap;
           o.generate_uvs = mr->generate_lightmap_uvs;
           o.want_lightmap = mr->receive_gi == 0;  // Light Probes: in the scene the light bounces off, no chart
@@ -274,19 +286,25 @@ void Editor::bake_start() {
     refuse("Generate Lighting: Baked Global Illumination is off (Lighting window).", "window Lighting", "Open Lighting");
     return;
   }
-  std::vector<BakeObject> objects;
-  std::vector<BakeLight> lights;
-  collect_bake_scene(objects, lights);
+  if (bake_job_) {  // (a cancelled bake still finishing its slice: waited for, its finished probes kept)
+    std::unique_ptr<BakeJob> old = std::move(bake_job_);
+    old->cancel.store(true);
+    if (old->thread.joinable()) old->thread.join();
+    bake_job_land(*old);
+  }
+  /* Round 412 (ADR 0106): the scene as the bake reads it - the meshes copied, the lights, the world, the probes' box,
+   * the Light Volumes' grids and the Reflection Probes' places - gathered here; the worker bakes it all. */
+  auto job = std::make_unique<BakeJob>();
+  collect_bake_scene(job->objects, job->lights);
   /* Round 362 (the comparison's finding 10): nothing marked had baked "0 objects" without a word of why. */
-  if (objects.empty()) return bake_refuse_empty();
+  if (job->objects.empty()) return bake_refuse_empty();
   if (preview_running_) {  // the real bake replaces the preview
     preview_baker_.cancel();
     preview_running_ = false;
   }
   update_environment();
-  bake_objects_ = objects;  // the probes are baked from the same scene when the lightmaps are done
-  bake_lights_ = lights;
-  BakeSettings s;
+  job->env = env_;
+  BakeSettings &s = job->settings;
   s.texels_per_unit = ls.texels_per_unit;
   s.max_size = ls.max_size;
   s.padding = ls.padding;
@@ -297,35 +315,147 @@ void Editor::bake_start() {
   s.indirect_intensity = ls.indirect_intensity;
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
-  bake_key_ = lightmap_scene_key();
+  job->gpu = bake_gpu_;
+  job->key = bake_key_ = lightmap_scene_key();
+  job->probe_box_ok = probe_volume_box(job->probe_box);
+  job->probe_min_spacing = ls.probe_min_spacing, job->probe_max_spacing = ls.probe_max_spacing;
+  job->indirect_samples = ls.indirect_samples, job->bounces = ls.bounces, job->indirect_intensity = ls.indirect_intensity;
+  bake_gather_volumes(*job);
+  bake_gather_reflection_probes(*job);
+  job->save_dir = lighting_dir();  // (the worker writes the lightmaps and probes beside it when it is done: not the landing frame's work)
+  job->scene_ident = scene_ident_;
   bake_start_ = now_seconds();
-  lv_bake_ = LightVolumeBakeRun{};  // (round 398: its volumes after its probes)
-  baker_.begin(objects, lights, env_, s);
+  BakeJob *raw = job.get();
+  bake_job_ = std::move(job);
   baking_ = true;
-  bake_status_ = strprintf("Baking %zu objects, %zu texels", objects.size(), baker_.texel_count());
-  Log::info("Generate Lighting: %zu objects, %zu texels", objects.size(), baker_.texel_count());
-}
-
-void Editor::bake_cancel() {
-  probe_phase_ = false;
-  probe_pt_.reset();
-  lv_bake_ = LightVolumeBakeRun{};  // (review 398: its tracer held the cancelled bake's meshes)
-  if (rp_bake_.begun) reflection_probe_bakes_changed();  // (review 401: the probes it finished are kept and shown)
-  rp_bake_ = ReflectionProbeBakeRun{};  // (round 401)
-  bake_objects_.clear();
-  bake_lights_.clear();
-  if (!baking_) {
-    baker_.cancel();  // nothing left behind either way
+  bake_status_ = "Baking: laying out the lightmaps...";
+  auto run = [this, raw] {
+    JobSystem::global().run_background([this, raw] { bake_job_run(*raw); });
+    raw->done.store(true, std::memory_order_release);
+  };
+  if (!jobs_async()) {  // (a headless editor that didn't ask for workers: the whole bake now, landed by this frame's step_bake)
+    run();
     return;
   }
-  baker_.cancel();
+  raw->thread = std::thread(run);
+  Log::info("Generate Lighting: %zu objects on a worker (the tray's Cancel stops it)", raw->objects.size());
+}
+
+/* The worker: the lightmaps (the layout, the texels, the filter and dilation), the probe volume (placed, checked for
+ * geometry, baked in slices), the Light Volumes and the Reflection Probes, in that order; its status and progress
+ * published for the tray; a cancel ends it at the next slice. */
+void Editor::bake_job_run(BakeJob &j) {
+  ScopedTimer whole;
+  auto say = [&](const std::string &text) {
+    std::lock_guard<std::mutex> lock(j.mutex);
+    j.status = text;
+  };
+  baker_.begin(j.objects, j.lights, j.env, j.settings);
+  Log::info("Generate Lighting: %zu objects, %zu texels", j.objects.size(), baker_.texel_count());
+  while (!j.cancel.load(std::memory_order_relaxed)) {
+    const bool done = baker_.step(200.0);
+    j.progress.store(baker_.progress());
+    say(strprintf("Baking lighting %.0f%%  (%.1f s)", baker_.progress() * 100.0, whole.ms() / 1000.0));
+    if (done) break;
+  }
+  if (j.cancel.load()) {
+    baker_.cancel();
+    return;
+  }
+  j.lighting = baker_.take_result();
+  j.lighting.scene_key = j.key;
+  /* The probe volume (task 0014): placed from the scene the lightmaps were baked from, checked for geometry, baked. */
+  j.phase.store(1);
+  j.progress.store(-1.0f);
+  if (j.probe_box_ok) {
+    std::vector<AABB> tris;
+    std::vector<PTObject> objs;
+    for (const BakeObject &o : j.objects) {
+      const RenderMesh &rm = o.mesh->render_mesh_tangents();
+      for (size_t k = 0; k < rm.tri_count(); k++) {
+        AABB b;
+        for (int c = 0; c < 3; c++) b.add(o.model.point(rm.positions[rm.indices[k * 3 + c]]));
+        tris.push_back(b);
+      }
+      objs.push_back({&rm, o.model, &o.materials});
+    }
+    probe_place(j.probe_volume, j.probe_box, tris, j.probe_min_spacing, j.probe_max_spacing);
+    if (!j.probe_volume.empty()) {
+      PathTracer pt;
+      PTSettings ps;
+      ps.max_bounces = std::max(0, j.bounces - 1);
+      ps.denoise = false;
+      ps.use_guiding = false;
+      pt.set_settings(ps);
+      std::vector<RenderLight> lights;
+      for (const BakeLight &l : j.lights)
+        if (l.mode != 0) lights.push_back(l.light);
+      pt.build(objs, lights, j.env);
+      say("Baking probes: checking for geometry...");
+      probe_validate(j.probe_volume, pt, 64);
+      const size_t n = j.probe_volume.probe_count();
+      const int psamples = std::max(24, std::min(4096, j.indirect_samples / 4));
+      int gpu = j.gpu;
+      size_t next = 0;
+      while (next < n && !j.cancel.load(std::memory_order_relaxed)) {
+        /* On a GPU about 8M rays a slice (their points go up at once: memory), on the CPU 1,024 probes. */
+        const size_t slice = std::min<size_t>(n - next, gpu >= 0 ? std::max<size_t>(1, ((size_t)8 << 20) / (size_t)psamples) : 1024);
+        std::string gerr;
+        probe_bake(j.probe_volume, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr);
+        if (!gerr.empty()) {
+          Log::warn("Baking probes on the GPU stopped (%s): the CPU bakes the rest", gerr.c_str());
+          gpu = -1;
+        }
+        next += slice;
+        j.progress.store((float)next / (float)std::max<size_t>(1, n));
+        say(strprintf("Baking probes %.0f%%  (%.1f s)", 100.0 * next / std::max<size_t>(1, n), whole.ms() / 1000.0));
+      }
+      if (j.cancel.load()) return;
+      j.probe_volume.scene_key = j.key;  // (the last slice dilated the invalid probes)
+      for (uint8_t v : j.probe_volume.valid) j.probes_valid += v;
+      Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - j.probes_valid, j.probe_volume.bricks.size());
+    }
+  }
+  j.phase.store(2);
+  j.progress.store(-1.0f);
+  bake_volumes_on_worker(j);  // (round 398: the Light Volumes Blendity bakes)
+  if (j.cancel.load()) return;
+  j.phase.store(3);
+  bake_reflection_probes_on_worker(j);  // (round 401: the Reflection Probes, their six faces each)
+  if (!j.cancel.load() && !j.save_dir.empty()) {
+    /* Written into a folder beside the scene's (<name>.baking) and moved over when the bake lands, so a save on the
+     * main thread meanwhile never writes the same files, and a Save As meanwhile leaves nothing in the old folder. */
+    say("Saving the lightmaps...");
+    std::string err;
+    j.saved_tmp = j.save_dir + ".baking";
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(j.saved_tmp), ec);
+    fs::make_dirs(j.saved_tmp);
+    const bool baked_probes = !j.probe_volume.empty() && j.probe_volume.scene_key != 0;
+    j.saved = j.lighting.save(j.saved_tmp, err) && (!baked_probes || j.probe_volume.save(fs::join(j.saved_tmp, "ProbeVolume.bin"), err));
+    if (!j.saved) Log::error("Could not save the baked lighting: %s", err.c_str());
+  }
+  j.ms = whole.ms();
+  j.phase.store(4);
+}
+
+void Editor::bake_cancel(bool discard) {
+  if (bake_job_) {  // (the worker stops at its next slice; step_bake drops what it had, keeping the volumes and reflection probes it finished - unless discarded)
+    bake_job_->cancel.store(true);
+    if (discard) bake_job_->discard = true;
+  }
+  if (!baking_) {
+    if (!bake_job_) baker_.cancel();  // nothing left behind either way
+    return;
+  }
   baking_ = false;
   bake_status_ = "Baking cancelled";
   Log::info("Generate Lighting cancelled");
 }
 
 void Editor::bake_clear() {
-  if (baking_) bake_cancel();
+  bake_cancel(true);  // (a job still finishing lands nothing: the data is being cleared)
+  render_job_wait("Clear Baked Data");  // (round 412: a render on a worker reads the lightmaps and probes about to go)
   light_volume_bakes_.clear();  // (review 398: the volumes' bakes go with the rest)
   livelink_light_volume_bakes_changed();
   reflection_probe_bakes_.clear(), reflection_probe_bakes_changed();  // (round 401)
@@ -345,59 +475,93 @@ void Editor::bake_clear() {
   bake_status_ = "Baked data cleared";
 }
 
-/* A slice of the bake each frame, like the path-traced render; saves when done. */
+/* Each frame: the worker's status; when it is done, its results land as one change (a headless editor that didn't ask
+ * for workers waits for it here, so the bake lands in the frame that started it, as before round 412). */
 void Editor::step_bake() {
-  if (!baking_) return;
-  const double budget = headless_ ? 1e9 : 40.0;
-  if (!probe_phase_) {
-    const bool done = baker_.step(budget);
-    bake_status_ = strprintf("Baking lighting %.0f%%  (%.1f s)", baker_.progress() * 100.0, now_seconds() - bake_start_);
-    if (!done) return;
-    lighting_data_ = baker_.take_result();
-    lighting_data_.scene_key = bake_key_;
-    lighting_from_unity_ = false;  // (round 400: Blendity's own bake in Unity's place)
-    lm_mesh_baked_.clear();
-    for (const BakeObject &o : bake_objects_) lm_mesh_baked_[o.id] = lightmap_mesh_hash(*o.mesh);
-    probe_phase_ = bake_probes_begin();  // then the probes, in slices like the texels
+  if (!bake_job_) {
+    baking_ = false;
+    return;
   }
-  if (probe_phase_) {
-    ScopedTimer t;
-    const LightingSettings &ls = scene_->lighting;
-    const size_t n = probes_.probe_count();
-    do {
-      /* On a GPU, 32,768 probes a slice (their rays at once); on the CPU 1,024. */
-      const int psamples = std::max(24, std::min(4096, ls.indirect_samples / 4));
-      /* On a GPU about 8M rays a slice (their points go up at once: memory), on the CPU 1,024 probes. */
-      const size_t slice = std::min<size_t>(n - probe_bake_next_, bake_gpu_ >= 0 ? std::max<size_t>(1, ((size_t)8 << 20) / (size_t)psamples) : 1024);
-      std::string gerr;
-      probe_bake(probes_, *probe_pt_, bake_lights_, psamples, ls.bounces, probe_bake_next_, slice, ls.indirect_intensity, bake_gpu_, &gerr);
-      if (!gerr.empty()) {
-        Log::warn("Baking probes on the GPU stopped (%s): the CPU bakes the rest", gerr.c_str());
-        bake_gpu_ = -1;
+  BakeJob *j = bake_job_.get();
+  if (!jobs_async() && !j->done.load(std::memory_order_acquire) && j->thread.joinable()) j->thread.join();
+  {
+    std::lock_guard<std::mutex> lock(j->mutex);
+    if (!j->status.empty() && baking_) bake_status_ = j->status;
+  }
+  if (!j->done.load(std::memory_order_acquire)) return;
+  if (render_job_holds_lighting()) return;  // (lands next frame: an F12 render on a worker reads the lightmaps it would replace)
+  std::unique_ptr<BakeJob> job = std::move(bake_job_);
+  if (job->thread.joinable()) job->thread.join();
+  bake_job_land(*job);
+}
+
+/* The results into the scene: the lightmaps and the probe volume (not when cancelled), the Light Volumes and the
+ * Reflection Probes it finished (kept even then - review 401), the stale volume bakes dropped (review 398); saved. */
+void Editor::bake_job_land(BakeJob &j) {
+  const bool cancelled = j.cancel.load();
+  std::error_code ec;
+  if (j.discard || j.scene_ident != scene_ident_) {  // (Clear Baked Data, or another scene since: nothing of it lands - review 412)
+    if (!j.saved_tmp.empty()) std::filesystem::remove_all(std::filesystem::u8path(j.saved_tmp), ec);
+    baking_ = false;
+    ui_.redraw = true;
+    return;
+  }
+  if (!j.probe_bakes.empty()) {
+    for (auto &kv : j.probe_bakes) reflection_probe_bakes_[kv.first] = std::move(kv.second);
+    reflection_probe_bakes_changed();
+  }
+  bool volumes_changed = !j.volume_bakes.empty();
+  for (auto &kv : j.volume_bakes) light_volume_bakes_[kv.first] = std::move(kv.second);
+  if (!cancelled)
+    for (auto it = light_volume_bakes_.begin(); it != light_volume_bakes_.end();) {
+      if (!it->second.from_unity && !j.volume_ids.count(it->first)) {
+        it = light_volume_bakes_.erase(it);
+        volumes_changed = true;
       }
-      probe_bake_next_ += slice;
-    } while (probe_bake_next_ < n && t.ms() < budget);
-    bake_status_ = strprintf("Baking probes %.0f%%  (%.1f s)", 100.0 * probe_bake_next_ / std::max<size_t>(1, n), now_seconds() - bake_start_);
-    if (probe_bake_next_ < n) return;
-    probes_.scene_key = bake_key_;  // (the last slice dilated the invalid probes)
-    probe_phase_ = false;
-    probe_pt_.reset();
-    size_t valid = 0;
-    for (uint8_t v : probes_.valid) valid += v;
-    Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - valid, probes_.bricks.size());
+      else ++it;
+    }
+  if (volumes_changed) livelink_light_volume_bakes_changed();
+  if (cancelled) {
+    baking_ = false;
+    ui_.redraw = true;
+    return;
   }
-  if (light_volume_bake_step(budget)) return;  // (round 398: the Light Volumes Blendity bakes, in slices)
-  if (reflection_probe_bake_step(budget)) return;  // (round 401: the Reflection Probes, their six faces each)
+  lighting_data_ = std::move(j.lighting);
+  lighting_from_unity_ = false;  // (round 400: Blendity's own bake in Unity's place)
+  lm_mesh_baked_.clear();
+  for (const BakeObject &o : j.objects) lm_mesh_baked_[o.id] = lightmap_mesh_hash(*o.mesh);
+  probes_ = std::move(j.probe_volume);
+  probe_live_ready_ = false;
+  probe_live_left_ = 0;
+  probe_live_key_ = probe_layout_key_ = 0;
+  probe_box_key_ = 0;
   baking_ = false;
-  bake_objects_.clear();  // the bake's copies of the meshes
-  bake_lights_.clear();
   lighting_gen_++;
-  const double secs = now_seconds() - bake_start_;
+  const double secs = j.ms / 1000.0;
   bake_status_ = strprintf("Baked %zu lightmap%s in %.1f s", lighting_data_.pages.size(), lighting_data_.pages.size() == 1 ? "" : "s", secs);
   lighting_saved_dir_.clear();
   Log::info("Generate Lighting: done in %.1f s", secs);
+  if (j.saved && j.save_dir == lighting_dir()) {  // (the worker's files moved over: the scene's folder is still the one it was)
+    fs::make_dirs(j.save_dir);
+    bool moved = true;
+    for (const DirEntry &de : fs::list(j.saved_tmp)) {
+      const std::string to = fs::join(j.save_dir, de.name);
+      std::filesystem::remove(std::filesystem::u8path(to), ec);
+      std::filesystem::rename(std::filesystem::u8path(fs::join(j.saved_tmp, de.name)), std::filesystem::u8path(to), ec);
+      if (ec) moved = false;
+    }
+    if (probes_.empty() || probes_.scene_key == 0) std::filesystem::remove(std::filesystem::u8path(fs::join(j.save_dir, "ProbeVolume.bin")), ec);  // an older bake's probes must not come back
+    std::filesystem::remove_all(std::filesystem::u8path(j.saved_tmp), ec);
+    if (moved) {
+      lighting_saved_dir_ = j.save_dir;
+      project_listed_ = -100;
+      Log::info("Saved the baked lighting to %s", j.save_dir.c_str());
+    }
+  }
+  else if (!j.saved_tmp.empty()) std::filesystem::remove_all(std::filesystem::u8path(j.saved_tmp), ec);  // (the scene moved meanwhile: save_lighting_data writes them where it is now)
   if (lighting_dir().empty()) Log::info("Save the scene to keep its lightmaps: they are written next to the scene file.");
-  else save_lighting_data();
+  else save_lighting_data();  // (the volumes' and probes' files; the lightmaps again only if the scene moved meanwhile)
+  ui_.redraw = true;
 }
 
 /* ------------------------------------------------------- probe volumes (task 0014) */
@@ -457,50 +621,11 @@ bool Editor::probe_volume_box(AABB &out) {
   return probe_box_ok_;
 }
 
-/* Generate Lighting's probe phase: places the probes from the scene the lightmaps were baked from, checks
- * which are inside geometry, and builds the tracer; step_bake() then bakes them in slices. False without a
- * Probe Volume. */
-bool Editor::bake_probes_begin() {
-  probes_ = ProbeVolumeData{};
-  probe_live_ready_ = false;
-  probe_live_left_ = 0;
-  probe_live_key_ = probe_layout_key_ = 0;
-  probe_bake_next_ = 0;
-  probe_box_key_ = 0;
-  AABB vol;
-  if (!probe_volume_box(vol)) return false;
-  const LightingSettings &ls = scene_->lighting;
-  std::vector<AABB> tris;
-  std::vector<PTObject> objs;
-  for (const BakeObject &o : bake_objects_) {
-    const RenderMesh &rm = o.mesh->render_mesh_tangents();
-    for (size_t k = 0; k < rm.tri_count(); k++) {
-      AABB b;
-      for (int c = 0; c < 3; c++) b.add(o.model.point(rm.positions[rm.indices[k * 3 + c]]));
-      tris.push_back(b);
-    }
-    objs.push_back({&rm, o.model, &o.materials});
-  }
-  probe_place(probes_, vol, tris, ls.probe_min_spacing, ls.probe_max_spacing);
-  if (probes_.empty()) return false;
-  probe_pt_ = std::make_unique<PathTracer>();
-  PTSettings ps;
-  ps.max_bounces = std::max(0, ls.bounces - 1);
-  ps.denoise = false;
-  ps.use_guiding = false;
-  probe_pt_->set_settings(ps);
-  std::vector<RenderLight> lights;
-  for (const BakeLight &l : bake_lights_)
-    if (l.mode != 0) lights.push_back(l.light);
-  probe_pt_->build(objs, lights, env_);
-  probe_validate(probes_, *probe_pt_, 64);
-  return true;
-}
-
 /* Realtime GI keeps the probes live: once per frame, a slice of them gathers again through the voxel grid
  * whenever the grid, the sun or the world changed. Without a bake the probes are placed here (around the
  * objects' bounds) and are live only. */
 void Editor::update_probes_live() {
+  if (render_job_holds_lighting()) return;  // (round 412: an F12 render on a worker reads the probes: left as they are until it is done)
   const LightingSettings &ls = scene_->lighting;
   const VoxelGIState &vg = vgi_[1].grid.valid() ? vgi_[1] : vgi_[0];
   if (!live_gi_needed() || !vg.grid.valid()) {
@@ -720,6 +845,7 @@ void Editor::lighting_update_step() {
  * a rough bake (half the resolution, 32, then 64, then 256 samples) runs a slice a frame and is
  * shown instead of the real lightmaps; any change starts over. Never saved. */
 void Editor::preview_step() {
+  if (render_job_holds_lighting()) return;  // (round 412: an F12 render on a worker reads the preview's pages: nothing replaces them until it is done)
   const LightingSettings &ls = scene_->lighting;
   if (!ls.preview || baking_ || playing_ || !ls.baked_gi) {
     if (preview_running_) preview_baker_.cancel();

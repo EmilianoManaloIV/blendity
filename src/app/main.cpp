@@ -47,6 +47,7 @@ static int headless(int argc, char **argv) {
   }
   Editor ed;
   ed.init_headless(w, h);
+  ed.set_async_jobs_for_test(true);  // (round 412: renders and bakes on workers, as the windowed editor runs them - `perf wait` steps frames until they land)
   /* Park the virtual mouse outside the window so nothing is hovered. */
   platform::Event park;
   park.type = platform::EventType::MouseMove;

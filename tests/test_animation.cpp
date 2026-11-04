@@ -1023,8 +1023,8 @@ static void round69_tests() {
     CHECK(ed.shadow_map_size_for_test() == 1024);
     ed.command("render");
     r34_steps(ed, 2);
-    std::printf("    Low: views at %.0f %%, their shadow map %d; F12's %d\n", ed.view_scale() * 100.0f, 1024, ed.shadow_map_size_for_test());
-    CHECK(ed.shadow_map_size_for_test() == 2048);  // a render isn't a view: the scene's own setting
+    std::printf("    Low: views at %.0f %%, their shadow map %d; F12's %d\n", ed.view_scale() * 100.0f, 1024, ed.render_shadow_size_for_test());
+    CHECK(ed.render_shadow_size_for_test() == 2048);  // a render isn't a view: the scene's own setting (round 412: the render's map is its job's)
     ed.command("quality high");
     CHECK(ed.view_scale() == 1.0f && ed.shadow_resolution_for_view() == 2048);
     ed.command("quality medium");

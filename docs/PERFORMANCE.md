@@ -204,6 +204,28 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 412 (renders and bakes on workers, ADR 0106; `blendity_stress --only responsiveness --quick`)
+
+The rendering and baking rows against round 411's baseline above: the longest frame while the operation ran. A job's
+frames are the editor's own frames now (the worker's work is off them); the one frame left near the budget is the
+stand-in's bake's start, which gathers 180 parts' copies and the probes' box (round 413 looks at the gathering with the
+geometry rows). The frame counts grow because the work takes frames instead of one stall: the comparison's "frames"
+column reads that as a regression until the baseline is refreshed in round 420.
+
+| Row | Longest frame before (ms) | Longest frame now (ms) | Frames now | In the tray | Budget |
+|---|---|---|---|---|---|
+| F12 rasterized, 400 spheres | 267.1 | 6.8 | 41 | Render | ok |
+| F12 path traced, 400 spheres, 4 samples | 196.0 | 2.6 | 197 | Render | ok |
+| Render Animation, 4 frames | 51.9 | 14.3 | 3 | Rendering animation | ok |
+| the camera sequence, 4 cameras | 109.3 | 13.0 | 43 | Rendering camera sequence | ok |
+| Generate Lighting, 50 cubes | 16.1 | 6.1 | 12 | Baking lighting | ok |
+| Generate Lighting on the stand-in | 2376.7 | 51.0 | 1755 | Baking lighting | OVER |
+| F12 rasterized, the stand-in | 91.6 | 4.0 | 46 | Render | ok |
+| Bake Textures at 512 | 112.1 | 4.6 | 32 | Bake Textures | ok |
+| a surface's first evaluation | 118.3 | 42.6 | 101 | Surface | ok |
+
+1 of these rows still OVER: see the spec.
+
 ### The real projects (round 411, `tools/bench_world.py`, measured locally - the packages are the user's, never committed)
 
 Each step's total and its longest frame: a step with 0 frames ran inside its command with no frame drawn, so the whole

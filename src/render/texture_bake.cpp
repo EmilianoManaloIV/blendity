@@ -86,7 +86,7 @@ namespace {
 }  // namespace
 
 TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials,
-                                const TextureBakeSettings &settings) {
+                                const TextureBakeSettings &settings, const std::atomic<bool> *cancel, std::atomic<float> *progress) {
   TextureBakeResult r;
   const int S = std::max(16, std::min(4096, settings.size));
   const int pad = std::max(0, std::min(64, settings.padding));
@@ -190,7 +190,9 @@ TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::
 
   /* 4. Every covered texel: the material at 1 or 2 x 2 points of it, averaged. */
   std::vector<int> alpha_slot_row((size_t)S, INT_MAX);  // per row: the lowest slot that left alpha below 1
+  std::atomic<int> rows_done{0};  // (round 412: the tray's progress; a cancel ends the rows at once)
   JobSystem::global().parallel_for(S, 4, [&](int64_t ya, int64_t yb) {
+    if (cancel && cancel->load(std::memory_order_relaxed)) return;
     static const float kOne[1][2] = {{0.5f, 0.5f}};
     static const float kFour[4][2] = {{0.25f, 0.25f}, {0.75f, 0.25f}, {0.25f, 0.75f}, {0.75f, 0.75f}};
     const float(*offs)[2] = four ? kFour : kOne;
@@ -281,7 +283,10 @@ TextureBakeResult bake_textures(const Mesh &mesh, const Mat4 &model, const std::
         r.covered[idx] = 1;
         if (alpha < 0.999f) alpha_slot_row[(size_t)y] = std::min(alpha_slot_row[(size_t)y], (int)mi);
       }
+    const int done = rows_done.fetch_add((int)(yb - ya)) + (int)(yb - ya);
+    if (progress) progress->store(0.9f * (float)done / (float)S, std::memory_order_relaxed);  // (the padding is the last tenth)
   });
+  if (cancel && cancel->load(std::memory_order_relaxed)) return TextureBakeResult{};  // (nothing: the caller drops it)
   for (size_t i = 0; i < N; i++) r.texels += r.covered[i];
   const int first = *std::min_element(alpha_slot_row.begin(), alpha_slot_row.end());
   r.alpha_slot = first == INT_MAX ? -1 : first;

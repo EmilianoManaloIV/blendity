@@ -252,7 +252,8 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   covered_.clear();
   owner_.clear();
   out_ = LightingData{};
-  done_ = total_ = 0;
+  total_ = 0;
+  done_ = 0;
   rays_ = 0;
   gpu_texels_ = 0;
   gpu_error_.clear();
@@ -423,12 +424,12 @@ bool Lightmapper::step(double budget_ms) {
     const size_t per = (size_t)std::max<int64_t>(1024, std::min<int64_t>(1 << 20, ((int64_t)1 << 23) / std::max(1, s_.indirect_samples)));
     std::vector<Vec3> origins, normals, ind;
     do {
-      const size_t batch = std::min<size_t>(total_ - done_, per);
+      const size_t batch = std::min<size_t>(total_ - done_.load(), per);
       if (batch == 0) break;
       origins.resize(batch);
       normals.resize(batch);
       for (size_t i = 0; i < batch; i++) {
-        const LightmapTexel &tx = texels_[done_ + i];
+        const LightmapTexel &tx = texels_[done_.load() + i];
         const float eps = 1e-3f + 1e-6f * std::max({std::fabs(tx.position.x), std::fabs(tx.position.y), std::fabs(tx.position.z)});
         origins[i] = tx.position + tx.normal * eps;
         normals[i] = tx.normal;
@@ -444,7 +445,7 @@ bool Lightmapper::step(double budget_ms) {
         Log::warn("Baking on the GPU stopped (%s): the CPU bakes the rest", gpu_error_.c_str());
         break;
       }
-      const size_t base = done_;
+      const size_t base = done_.load();
       JobSystem::global().parallel_for((int64_t)batch, 64, [&](int64_t a, int64_t b) {
         for (int64_t i = a; i < b; i++) {
           const size_t k = base + (size_t)i;
@@ -470,9 +471,9 @@ bool Lightmapper::step(double budget_ms) {
   /* About the same work per batch whatever the sample count, so a frame's budget holds. */
   const size_t per = (size_t)std::max(16, std::min(2048, 2048 * 64 / std::max(1, s_.indirect_samples)));
   do {
-    const size_t batch = std::min<size_t>(total_ - done_, per);
+    const size_t batch = std::min<size_t>(total_ - done_.load(), per);
     if (batch == 0) break;
-    const size_t base = done_;
+    const size_t base = done_.load();
     JobSystem::global().parallel_for((int64_t)batch, 8, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         const size_t k = base + (size_t)i;
@@ -607,7 +608,7 @@ void Lightmapper::finish() {
     }
   }
   active_ = false;
-  done_ = total_;
+  done_ = total_.load();
   finish_ms_ = ft.ms();
 }
 

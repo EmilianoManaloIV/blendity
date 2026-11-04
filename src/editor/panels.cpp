@@ -2314,7 +2314,7 @@ void Editor::draw_profiler_gpu(const FrameProfile &fp, const std::function<void(
   const bool views_on_card = fp.gpu_views > 0 || scene_on_gpu_;  // (a frame whose views were all reused still shows the block)
   if (!views_on_card && !rendering_ && !cam_preview_rendered_) return;
   if (views_on_card) draw_profiler_gpu_views(fp, stat);
-  if (rendering_) draw_profiler_gpu_tracer(strprintf("%s render", key("render.image").c_str()).c_str(), final_pt_.stats(), render_time_ * 1000.0, "the render so far", stat);
+  if (rendering_) draw_profiler_gpu_tracer(strprintf("%s render", key("render.image").c_str()).c_str(), render_stats(), render_time_ * 1000.0, "the render so far", stat);  // (round 412: the worker's published copy)
   if (cam_preview_rendered_) draw_profiler_gpu_tracer("Camera Preview", cam_preview_pt_.stats(), frame_ms_, "the frame", stat);
 }
 
@@ -2636,7 +2636,7 @@ void Editor::draw_render_window(const Recti &r) {
   }
   if (rendering_) {
     Recti pr = lay.row(u.px(6));
-    float t = std::min(1.0f, final_pt_.samples() / (float)std::max(1, scene_->render.samples));
+    float t = std::min(1.0f, render_samples() / (float)std::max(1, scene_->render.samples));
     u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * t), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
@@ -2754,8 +2754,8 @@ void Editor::draw_render_window(const Recti &r) {
     }
     if (devs.empty()) u.label(lay.row(), gpu::compiled_in() ? "No Vulkan GPU found - rendering on the CPU" : "This build has no GPU rendering", u.theme.text_dim);
     else if (!gpu_mode) u.label(lay.row(), "Device is CPU: set it to GPU Compute above to use these", u.theme.text_dim);
-    if (!final_pt_.gpu_error().empty()) u.label(lay.row(), final_pt_.gpu_error(), u.theme.warning);
-    if (!final_pt_.gpu_note().empty()) u.label(lay.row(), "On the CPU: " + final_pt_.gpu_note(), u.theme.warning);  // (round 331: a fog)
+    if (const std::string e = render_gpu_error(); !e.empty()) u.label(lay.row(), e, u.theme.warning);
+    if (const std::string n = render_gpu_note(); !n.empty()) u.label(lay.row(), "On the CPU: " + n, u.theme.warning);  // (round 331: a fog)
   }
   lay.space(u.px(6));
   header("Environment");
