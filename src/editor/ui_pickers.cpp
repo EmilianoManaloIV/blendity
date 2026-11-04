@@ -16,7 +16,9 @@ namespace bl {
 Editor::PathPick Editor::pick_folder(const std::string &title, const std::string &dir, std::string &out) {
   if (headless_ || !window_) return PathPick::Unavailable;
   if (!platform::file_dialogs_available()) return PathPick::Unavailable;
+  ScopedTimer blocked;
   const bool ok = platform::folder_dialog(window_, title, dir, out);
+  picker_ms_ += blocked.ms();
   const int mx = ui_.in.mx, my = ui_.in.my;
   ui_.in = ui::Input{};
   ui_.in.mx = ui_.in.pmx = mx;

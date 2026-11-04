@@ -80,6 +80,8 @@ jobs:
           exit $status
       - name: The books' reference list agrees with itself (task 0386; no TeX needed, no drift check - ADR 0104)
         run: python3 tools/make_books.py --check-cited
+      - name: The inventory sweep's command table is current (round 411)
+        run: python3 tools/sweep_commands.py --check
       - name: Quick stress test
         shell: bash
         timeout-minutes: 20

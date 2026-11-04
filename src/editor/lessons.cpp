@@ -1912,6 +1912,30 @@ The code, the tests, the documentation and the books are written with Anthropic'
 ! lesson:18 | The References lesson: the papers behind the features
 ! cmd:libs | Which of Blender's libraries this build uses, each with its licence in licenses/README.md
 )"},
+    {"Where the Time Goes", "The frame, the jobs, the badge, and the suite that measures them", R"(
+Blendity promises one thing about speed before any other (ADR 0105, round 411): while a job runs - a bake, a render, a remesh, an import - no editor frame takes more than 50 milliseconds, and the views keep their last picture. An operation that can't be split (a Boolean, a save) may take one frame of at most 100 milliseconds; anything longer runs on a worker, listed in the job tray with its progress, time left and Cancel. Unity's editor makes the same promise with its background importers and progress bars; Blender shows a job's progress in its status bar.
+# Reading the frame
+The Profiler window (Window > Profiler) draws the last 240 frames with 60 and 30 fps lines, and breaks the frame into the Scene view, the Game view, the shadow map, the UI and presenting; its GPU block says which view the card drew and why one fell back to the CPU. `perf status` in the Console prints the same in one line: the last frame, the mean of the last 60, the worst of the last 240, the parts, the running jobs, and where the views draw.
+| Part | What it is
+| Scene view | the 3D picture: hashing (did anything change?), gathering (the draw items), the rasterizer or the card
+| Game view | the camera's picture, with its filters (bloom, vignette, grading) over it
+| Deferred | work run at the frame's end: an import's busy step, a dialog opening - counted in the frame since round 411
+| UI, present | the panels and text; the picture handed to the window
+# The CPU badge
+The Scene view's bar shows a CPU badge whenever the views draw on the CPU although the card was wanted - because no GPU could be opened, or because this view holds something the card can't draw yet (a see-through toon material, a Volume, a Principled Subsurface / Sheen / Coat, a picture in linear light with see-through surfaces, textures past the card's buffers). Hover it for the reason; `viewport status` prints it; Edit > Preferences > Viewport Device chooses. Before round 411 the badge showed only when the card was absent, and a refused view hid in the Profiler.
+# Measuring with marks
+A script's stopwatch: `perf mark <name>` prints the time since the last mark, the frames in it and the longest frame - so a headless run (`Blendity --headless-screenshot out.png --cmd "open world.unity" --cmd "perf wait" --cmd "perf mark open"`) reports each step; `perf wait` steps frames until no job, render or bake runs, since a script's lines run with no frame between them. tools/bench_world.py runs a whole VRChat pipeline that way on a real project - import, open, Unity's numbers and lightmaps, a bake, F12, the exports - and the views' frames through --windowed-check.
+# The suite
+blendity_stress --only responsiveness runs every heavy operation headless with the views open and records the longest frame while it ran; --only operations is the inventory sweep: every console verb (one real invocation each), every keymap action and every window on three scenes, ranked by the frame they cost; --only world_like is the Unity-world stand-in (`benchscene worldlike`: 600 parts, 70 lights, 300 textures, see-through toon, glass, fog, the camera's filters). tools/perf_suite.py runs them, compares every row with stress/results/baseline.md and writes docs/PERFORMANCE.md's Pass 16 tables. A measurement is never a unit test's assert (ADR 0056): a slow machine is a note in a row, not a red build.
+> [GEA1] 2.3 Profiling Tools, 10.8 In-Game Profiling - a frame's budget and where it goes
+> [GEA1] 4.3 Explicit Parallelism, 4.8 Some Rules of Thumb for Concurrency - work off the frame on workers
+? A bake is running and the editor stutters at 10 fps. Which promise is broken, and where do you read the number? | ADR 0105's: no frame over 50 ms while a job runs. The Profiler's graph (Window > Profiler) or `perf status` shows the worst frame; the responsiveness stress rows name the operation.
+? The Scene view's bar shows CPU although you have a GPU. What does the tooltip tell you? | Why this view is on the CPU: either no GPU could be opened, or something in view the card can't draw yet (the reason named, e.g. a Volume material); `viewport status` prints the same.
+? You want the time an import takes, step by step, from a script. Which command? | `perf mark <name>` after each step: it prints the milliseconds, the frames and the longest frame since the last mark.
+! cmd:perf status | Print the last frame's parts, the jobs and where the views draw
+! cmd:viewport status | Where the views draw, and whether the CPU badge shows
+! cmd:window Profiler | Open the Profiler
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

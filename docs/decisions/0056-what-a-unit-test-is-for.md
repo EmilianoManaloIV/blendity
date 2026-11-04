@@ -61,3 +61,9 @@ every round, so a test of round 150 could lean on round 34's.
   kind of test.
 - Blender's own split: `tests/gtests` for units, `tests/performance` for the benchmarks it compares across
   revisions (`tests/performance/api`).
+
+## Amendment (round 411, task 0387, ADR 0105)
+Six timing asserts had crept back (`tests/test_gpu.cpp`: the GPU opening under 100 ms, the bake's first GPU gather,
+the worker's poll under 10 ms, a pause under 150 ms, F12's editor frames under 30 ms; `tests/test_livelink.cpp`: a
+tick under 40 ms). They now print their numbers; the measurements are rows of the stress section `responsiveness`,
+compared with the committed baseline by `tools/perf_suite.py`.

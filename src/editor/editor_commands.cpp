@@ -26,7 +26,7 @@
 
 namespace bl {
 
-static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "unity", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "where", "window", "world", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr"};
+static const char *const kConsoleCommands[] = {"board", "paper", "sketch", "sketchguide", "sketchstroke", "sketchcanvas", "sketchlift", "sketchline", "sketchcircle", "sketchbuild", "sketchproject", "sketchtrace", "activecamera", "ai", "aimlight", "alignview", "alltools", "anim", "animemat", "applymods", "armature", "assignmat", "assist", "autopose", "autorig", "autosmooth", "avatar", "bake", "bakedialog", "baketex", "bench", "benchscene", "bevelprofile", "body", "bone", "boolean", "budget", "camera", "camerapreview", "clear", "clearguides", "component", "create", "curve", "customnormals", "delete", "deleteasset", "deletemat", "develop", "device", "dock", "draw", "drawfillet", "drawmode", "drawpoint", "droponsurface", "duplicate", "edit", "editop", "edittool", "engine", "esel", "export", "exportoptions", "facemat", "facenormals", "favorite", "feel", "filter", "filters", "fk", "flatten", "focus", "fps", "fsel", "gpu", "guide", "guides", "guidesfromedges", "hair", "help", "hs", "ik", "import", "insetmode", "inspector", "jobs", "join", "keymap", "layout", "layoutguide", "lesson", "libs", "lighting", "livelink", "loopcuts", "manual", "matdelete", "material", "matset", "meshdeform", "meshmaps", "meshop", "mkfolder", "moonray", "motioncheck", "moveasset", "navbuttons", "newmat", "newscene", "newslotmat", "newtex", "ngon", "origin", "overlaps", "overlay", "paint", "palette", "panel", "pickfocus", "pilot", "play", "points", "position", "preferences", "preview", "probes", "proportional", "pushpull", "quality", "quickmenu", "raster", "redo", "redraw", "references", "refimage", "removeslot", "removeunusedslots", "renameasset", "render", "renderanim", "rendersequence", "report", "research", "rig", "samples", "saverender", "scale", "scatter", "screenshot", "sculpt", "seam", "select", "selectadd", "selectall", "separate", "seq", "set", "set_extrude_individual", "settex", "shading", "shape", "shortcut", "skin", "smat", "smooth", "spring", "stats", "stop", "stress", "strokeobj", "subdivide", "surface", "surfacealign", "tabletmode", "tabs", "texdelete", "texlayer", "texlist", "texture", "theme", "threads", "toast", "tool", "toonstyle", "ui", "undo", "unity", "update", "uv", "uvsel", "uvxf", "vgroup", "viewport", "views", "viewscale", "viewshape", "visemes", "vsel", "walk", "weightpaint", "wheel", "where", "perf", "window", "world", "wpbrush", "wpclean", "wpfalloff", "wpfront", "wpmirror", "wpnormalize", "wpstroke", "zfight", "new", "open", "save", "rotate", "vr"};
 // (The names above: the sketch families dispatched before the chain, then this file's `c == "..."` cases as generated by
 // round 280's patch; regenerate when commands change - nothing checks the list against the dispatcher yet.)
 
@@ -45,11 +45,20 @@ std::string line_rest(const std::string &line, size_t from) {
 }
 }  // namespace
 
+/* Every console verb, sorted and unique (round 411: the sweep's list; help's rows). */
+const std::vector<std::string> &console_command_names() {
+  static const std::vector<std::string> names = [] {
+    std::vector<std::string> n(std::begin(kConsoleCommands), std::end(kConsoleCommands));
+    std::sort(n.begin(), n.end());
+    n.erase(std::unique(n.begin(), n.end()), n.end());
+    return n;
+  }();
+  return names;
+}
+
 /* help's first lines (round 367, finding 13: it listed about 25 of some 200): every command, in rows. */
 void Editor::log_all_commands() {
-  std::vector<std::string> names(std::begin(kConsoleCommands), std::end(kConsoleCommands));
-  std::sort(names.begin(), names.end());
-  names.erase(std::unique(names.begin(), names.end()), names.end());
+  const std::vector<std::string> &names = console_command_names();
   Log::info("All %zu commands (each says how it's used when given too little; the Manual's Console section has them all):", names.size());
   std::string row;
   for (const std::string &n : names) {
@@ -965,6 +974,28 @@ void Editor::run_console_command(const std::string &line) {
   auto arg = [&](size_t i, const std::string &def) { return t.size() > i ? t[i] : def; };
   if (c == "gpu" && arg(1, "") == "list") {  // (task 0169; up here: the chain below is at MSVC's nesting limit)
     gpu_list();
+    return;
+  }
+  if (c == "viewport" && arg(1, "") == "status") {  // viewport status (round 411, ADR 0105): where the views draw, and why not the card
+    Log::info("Views: %s", gpu_view_status().c_str());
+    Log::info("The window: %s", window_device_status(card_present_, gpu_view_ ? 0 : -1, card_reason_).c_str());
+    const std::string badge = cpu_badge_reason();
+    Log::info("CPU badge: %s", badge.empty() ? "not shown" : badge.c_str());
+    return;
+  }
+  if (c == "perf") {  // perf [status] | mark [name] | reset | wait (round 411, ADR 0105)
+    const std::string sub = to_lower(arg(1, "status"));
+    if (sub == "mark") Log::info("%s", perf_mark(t.size() > 2 ? line_rest(line, 2) : std::string()).c_str());
+    else if (sub == "reset") perf_mark(""), Log::info("perf: the mark reset");
+    else if (sub == "wait") {
+      /* perf wait (a script's, headless): steps frames until no job, render or bake runs, so the mark after it holds
+       * the whole step with its frames (the --cmd lines run back to back, with no frame between them). */
+      if (!headless_) { Log::info("perf wait: headless scripts only"); return; }
+      int n = 0;
+      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty()); n++) step_frame_headless();
+      Log::info("perf wait: %d frame(s)", n);
+    }
+    else Log::info("perf: %s", perf_status_text().c_str());
     return;
   }
   if (c == "viewport" && arg(1, "") == "present") {  // viewport present card|system (task 0193)
