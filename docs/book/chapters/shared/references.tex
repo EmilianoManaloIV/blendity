@@ -1,0 +1,16 @@
+% The reference list, by kind. Every entry is cited at least once (tools/make_books.py --check); the page numbers
+% after an entry are where it is cited.
+\chapter{References}
+\label{ch:references}
+Everything used in Blendity, by kind: the papers whose methods became features, the books the Learn tab teaches from,
+the standards and licences, the libraries compiled in or linked, and the manuals of the programs Blendity follows.
+Each entry ends with the pages that cite it. The list is generated from the sources that cite things
+(\code{src/editor/lessons.cpp}, \code{research/FEATURES.md}, \code{licenses/README.md}) and a hand-written list
+(\code{docs/book/refs\_extra.bib}); \code{tools/make\_books.py --check} fails when an entry is never cited or a citation
+has no entry, so the list and the books cannot drift apart.
+
+\printbibliography[keyword=papers, heading=subbibliography, title={Papers, theses and talks}]
+\printbibliography[keyword=books, heading=subbibliography, title={Books}]
+\printbibliography[keyword=standards, heading=subbibliography, title={Standards, specifications and licences}]
+\printbibliography[keyword=software, heading=subbibliography, title={Software and libraries}]
+\printbibliography[keyword=websites, heading=subbibliography, title={Manuals and websites}]

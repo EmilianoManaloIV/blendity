@@ -21,6 +21,11 @@
 #include "../src/scene/unity_scene.h"
 #include "../src/scene/unity_material.h"
 #include "../src/editor/livelink.h"  // (round 402)
+#include "../src/scene/unity_sdk_types.h"  // (round 403)
+#include "../src/render/display.h"  // (round 405)
+#include "../src/image/edit_doc.h"  // (round 405: the saved view)
+#include "../src/scene/unity_anim.h"  // (round 407)
+#include "../src/scene/retarget.h"  // (round 408)
 #include "../src/core/audio_out.h"
 #include "../src/deps/deps.h"
 #include "../src/core/launch.h"
@@ -8968,7 +8973,7 @@ static void tests_round370() {
     ed.scene().for_each([&](GameObject &g) { tri = g.name == "tri" && g.get<EngineComponent>() ? &g : tri; });
     const EngineComponent *sdk = tri ? tri->get<EngineComponent>() : nullptr;
     std::printf("    the placed model: %s, its added component %s\n", tri ? "made" : "missing", sdk ? sdk->type.c_str() : "-");
-    CHECK(tri && sdk && sdk->type == "MonoBehaviour (bbbb0000bbbb0000bbbb0000bbbb0004:542108242)" && sdk->data.find("--- !u!114 &52\r\n") == 0 &&
+    CHECK(tri && sdk && sdk->type == "VRCAvatarDescriptor" &&  /* (round 403: the SDK class named by its fileID) */ sdk->data.find("--- !u!114 &52\r\n") == 0 &&
           sdk->data.find("Name: \"\\u30A2\"\r\n") != std::string::npos);
     /* The rotation override, made whole: 90 degrees about X. */
     GameObject *turned = nullptr;
@@ -9311,6 +9316,1050 @@ inline void setting(int k, Material &m, Light &sun, EnvironmentSettings &env) {
 }
 }  // namespace r402
 
+/* Round 403 (task 0380, ADR 0101): the world's VRChat components, Unity's components as editable data. */
+namespace r403 {
+/* A reflector that sets one float field by its label and records every label it saw. */
+struct SetOne : Reflector {
+  std::string want;
+  float value = 0.0f;
+  std::vector<std::string> seen;
+  bool all_fields() const override { return false; }
+  void field(const char *n, float &v, float, float, float) override {
+    seen.push_back(n);
+    if (want == n) v = value;
+  }
+  void field(const char *n, int &, int, int) override { seen.push_back(n); }
+  void field(const char *n, bool &) override { seen.push_back(n); }
+  void field(const char *n, Vec3 &) override { seen.push_back(n); }
+  void color(const char *n, Vec3 &) override { seen.push_back(n); }
+  void enumeration(const char *n, int &, const char *const *, int) override { seen.push_back(n); }
+  void text(const char *n, std::string &) override { seen.push_back(n); }
+  void mesh(const char *n, MeshPtr &) override { seen.push_back(n); }
+};
+}  // namespace r403
+
+/* Round 408 (task 0385): Humanoid retargeting. A rig of 21 parts named one scheme's way, in a T or an A pose, of a
+ * given scale. */
+static GameObject *r408_rig(Scene &s, const char *root_name, const std::vector<std::string> &n, float scale, bool a_pose) {
+  auto bone = [&](const std::string &name, GameObject *parent, Vec3 pos, Quat rot, float len) {
+    GameObject *g = s.create(name, parent);
+    g->set_local_position(pos * scale), g->set_local_rotation(rot);
+    Bone *b = g->add<Bone>();
+    b->length = len * scale, b->rest_position = pos * scale, b->rest_rotation = rot;
+    return g;
+  };
+  GameObject *root = s.create(root_name);
+  GameObject *rig = s.create(std::string(root_name) + " Armature", root);
+  rig->add<Armature>();
+  const float drop = a_pose ? 40.0f : 0.0f;
+  GameObject *hips = bone(n[0], rig, {0, 1, 0}, Quat(), 0.1f);
+  GameObject *spine = bone(n[1], hips, {0, 0.1f, 0}, Quat(), 0.2f);
+  GameObject *chest = bone(n[2], spine, {0, 0.2f, 0}, Quat(), 0.2f);
+  GameObject *neck = bone(n[3], chest, {0, 0.2f, 0}, Quat(), 0.1f);
+  bone(n[4], neck, {0, 0.1f, 0}, Quat(), 0.2f);
+  for (int side = 0; side < 2; side++) {
+    const float x = side ? -0.1f : 0.1f;
+    const int a = 5 + side * 4, l = 13 + side * 4;
+    GameObject *sh = bone(n[a], chest, {x * 0.5f, 0.15f, 0}, Quat::euler({0, 0, side ? -90.0f : 90.0f}), 0.12f);
+    GameObject *ua = bone(n[a + 1], sh, {0, 0.12f, 0}, Quat::euler({0, 0, side ? -drop : drop}), 0.28f);
+    GameObject *la = bone(n[a + 2], ua, {0, 0.28f, 0}, Quat(), 0.25f);
+    bone(n[a + 3], la, {0, 0.25f, 0}, Quat(), 0.08f);
+    GameObject *up = bone(n[l], hips, {x, 0, 0}, Quat::euler({180, 0, 0}), 0.45f);
+    GameObject *lo = bone(n[l + 1], up, {0, 0.45f, 0}, Quat(), 0.43f);
+    GameObject *ft = bone(n[l + 2], lo, {0, 0.43f, 0}, Quat::euler({-90, 0, 0}), 0.12f);
+    bone(n[l + 3], ft, {0, 0.12f, 0}, Quat(), 0.05f);
+  }
+  return root;
+}
+static const std::vector<std::string> kR408Mixamo = {"mixamorig:Hips", "mixamorig:Spine", "mixamorig:Spine2", "mixamorig:Neck", "mixamorig:Head", "mixamorig:LeftShoulder", "mixamorig:LeftArm",
+                                                     "mixamorig:LeftForeArm", "mixamorig:LeftHand", "mixamorig:RightShoulder", "mixamorig:RightArm", "mixamorig:RightForeArm", "mixamorig:RightHand",
+                                                     "mixamorig:LeftUpLeg", "mixamorig:LeftLeg", "mixamorig:LeftFoot", "mixamorig:LeftToeBase", "mixamorig:RightUpLeg", "mixamorig:RightLeg",
+                                                     "mixamorig:RightFoot", "mixamorig:RightToeBase"};
+static const std::vector<std::string> kR408VRoid = {"J_Bip_C_Hips", "J_Bip_C_Spine", "J_Bip_C_UpperChest", "J_Bip_C_Neck", "J_Bip_C_Head", "J_Bip_L_Shoulder", "J_Bip_L_UpperArm", "J_Bip_L_LowerArm",
+                                                    "J_Bip_L_Hand", "J_Bip_R_Shoulder", "J_Bip_R_UpperArm", "J_Bip_R_LowerArm", "J_Bip_R_Hand", "J_Bip_L_UpperLeg", "J_Bip_L_LowerLeg", "J_Bip_L_Foot",
+                                                    "J_Bip_L_ToeBase", "J_Bip_R_UpperLeg", "J_Bip_R_LowerLeg", "J_Bip_R_Foot", "J_Bip_R_ToeBase"};
+
+static void tests_round408() {
+  test("Humanoid retargeting (round 408): a Mixamo-named T-pose rig's clip (the left arm raised 60 degrees, the head turned, the hips moved and turned) onto a VRoid-named rig twice its size - each part's turn from its rest the same in the rig's space, the hips' move doubled, by the parts not the names", [] {
+    Scene s;
+    GameObject *src = r408_rig(s, "Mixamo", kR408Mixamo, 1.0f, false), *dst = r408_rig(s, "VRoid", kR408VRoid, 2.0f, false);
+    AnimationClip clip;
+    clip.name = "Wave", clip.frame_rate = 30.0f, clip.length = 30.0f;
+    const std::string arm = anim_path(*src, *s.find_by_name("mixamorig:LeftArm")), head = anim_path(*src, *s.find_by_name("mixamorig:Head")), hips = anim_path(*src, *s.find_by_name("mixamorig:Hips"));
+    clip.track(arm, "Rotation", 0).set_key(0, 0.0f), clip.track(arm, "Rotation", 0).set_key(30, 60.0f);
+    clip.track(head, "Rotation", 1).set_key(0, 0.0f), clip.track(head, "Rotation", 1).set_key(30, 45.0f);
+    clip.track(hips, "Position", 0).set_key(0, 0.0f), clip.track(hips, "Position", 0).set_key(30, 0.3f);
+    clip.track(hips, "Position", 1).set_key(0, 1.0f), clip.track(hips, "Position", 1).set_key(30, 0.8f);
+    clip.track(hips, "Rotation", 1).set_key(0, 0.0f), clip.track(hips, "Rotation", 1).set_key(30, 30.0f);
+    AnimationClip out;
+    RetargetResult r;
+    CHECK(retarget_clip(s, clip, *src, *dst, out, r));
+    std::printf("    %d part(s), %d frame(s), hips x %.2f; %zu note(s)%s%s\n", r.parts, r.frames, r.hip_scale, r.notes.size(), r.notes.empty() ? "" : ": ", r.notes.empty() ? "" : r.notes[0].c_str());
+    CHECK(r.parts == 21 && r.frames == 31 && std::fabs(r.hip_scale - 2.0f) < 1e-4f);
+    /* At frame 30: the two rigs' parts turned the same from their rests, in their rigs' spaces. */
+    apply_clip(clip, *src, 30.0f);
+    apply_clip(out, *dst, 30.0f);
+    GameObject *sa = s.find_by_name("Mixamo Armature"), *da = s.find_by_name("VRoid Armature");
+    auto turn = [&](GameObject *arm, const char *name, Quat rest_world) {
+      GameObject *g = s.find_by_name(name);
+      return normalize(normalize(arm->world_rotation().conjugate() * g->world_rotation()) * rest_world.conjugate());
+    };
+    auto rest_world = [&](GameObject *arm, const char *name) {
+      Quat q;
+      for (GameObject *x = s.find_by_name(name); x && x != arm; x = x->parent) q = x->get<Bone>()->rest_rotation * q;
+      return normalize(q);
+    };
+    const Quat ta = turn(sa, "mixamorig:LeftArm", rest_world(sa, "mixamorig:LeftArm")), tb = turn(da, "J_Bip_L_UpperArm", rest_world(da, "J_Bip_L_UpperArm"));
+    const Quat ha = turn(sa, "mixamorig:Head", rest_world(sa, "mixamorig:Head")), hb = turn(da, "J_Bip_C_Head", rest_world(da, "J_Bip_C_Head"));
+    const float arm_gap = std::fabs(std::fabs(ta.x * tb.x + ta.y * tb.y + ta.z * tb.z + ta.w * tb.w) - 1.0f), head_gap = std::fabs(std::fabs(ha.x * hb.x + ha.y * hb.y + ha.z * hb.z + ha.w * hb.w) - 1.0f);
+    const Vec3 sh = sa->world_matrix().inverse().point(s.find_by_name("mixamorig:Hips")->world_position()), dh = da->world_matrix().inverse().point(s.find_by_name("J_Bip_C_Hips")->world_position());
+    std::printf("    arm turn gap %.5f, head turn gap %.5f; hips source (%.2f %.2f %.2f) target (%.2f %.2f %.2f)\n", arm_gap, head_gap, sh.x, sh.y, sh.z, dh.x, dh.y, dh.z);
+    CHECK(arm_gap < 1e-3f && head_gap < 1e-3f);
+    CHECK(length(dh - Vec3(0.6f, 1.6f, 0.0f)) < 1e-3f);  // (the source's hips moved (0.3, -0.2) from (0, 1): the target's twice that from (0, 2))
+    /* The target's own paths, the source's rate and length kept. */
+    CHECK(out.find(anim_path(*dst, *s.find_by_name("J_Bip_L_UpperArm")), "Rotation", 2) && out.frame_rate == 30.0f && out.length == 30.0f && !out.find(arm, "Rotation", 0));
+  });
+  test("Humanoid retargeting across poses (round 408): a T-pose rig's rest clip onto an A-pose rig leaves the A rig's arms where they hang, and the A rig's rest clip onto the T rig leaves the arms horizontal; a lower arm's bend carries across", [] {
+    Scene s;
+    GameObject *t = r408_rig(s, "TPose", kR408Mixamo, 1.0f, false), *a = r408_rig(s, "APose", kR408VRoid, 1.0f, true);
+    AnimationClip rest;
+    rest.frame_rate = 30.0f, rest.length = 1.0f;
+    const std::string la = anim_path(*t, *s.find_by_name("mixamorig:LeftForeArm"));
+    rest.track(la, "Rotation", 0).set_key(0, 0.0f), rest.track(la, "Rotation", 0).set_key(1, 50.0f);  // (the elbow bent 50 degrees)
+    AnimationClip out;
+    RetargetResult r;
+    CHECK(retarget_clip(s, rest, *t, *a, out, r));
+    apply_clip(out, *a, 0.0f);
+    GameObject *ua = s.find_by_name("J_Bip_L_UpperArm");
+    const Vec3 e0 = ua->local().rotation.to_euler();
+    std::printf("    T -> A at the rest frame: the A rig's upper arm local euler (%.1f %.1f %.1f) - its rest (0 0 40); drops T (%.0f %.0f) A (%.0f %.0f)\n", e0.x, e0.y, e0.z, r.arm_drop_src[0], r.arm_drop_src[1], r.arm_drop_dst[0], r.arm_drop_dst[1]);
+    /* Mecanim's semantics: the T-posed clip's rest frame means arms horizontal, so the A rig's arms rise to horizontal (its rest hangs them 40 degrees). */
+    CHECK(std::fabs(e0.z) < 0.5f && std::fabs(e0.x) < 0.5f && std::fabs(e0.y) < 0.5f);
+    const Vec3 la0 = s.find_by_name("J_Bip_L_LowerArm")->local().rotation.to_euler();
+    CHECK(length(la0) < 0.5f);  // (the whole arm turned at its rest: no kink at the elbow - review 408)
+    apply_clip(out, *a, 1.0f);
+    const Vec3 e1 = s.find_by_name("J_Bip_L_LowerArm")->local().rotation.to_euler();
+    std::printf("    the elbow at frame 1: (%.1f %.1f %.1f)\n", e1.x, e1.y, e1.z);
+    CHECK(std::fabs(e1.x - 50.0f) < 0.5f && std::fabs(e1.y) < 0.5f && std::fabs(e1.z) < 0.5f);  // (the elbow's bend carried, and only it)
+    /* And back: the A rig's rest onto the T rig - arms horizontal. */
+    AnimationClip rest_a;
+    rest_a.frame_rate = 30.0f, rest_a.length = 1.0f;
+    rest_a.track(anim_path(*a, *s.find_by_name("J_Bip_C_Head")), "Rotation", 1).set_key(0, 0.0f);
+    AnimationClip back;
+    RetargetResult rb;
+    CHECK(retarget_clip(s, rest_a, *a, *t, back, rb));
+    apply_clip(back, *t, 0.0f);
+    const Vec3 et = s.find_by_name("mixamorig:LeftArm")->local().rotation.to_euler();
+    std::printf("    A -> T at the rest frame: the T rig's upper arm local euler (%.1f %.1f %.1f) - its rest (0 0 0); drops A (%.0f %.0f) T (%.0f %.0f)\n", et.x, et.y, et.z, rb.arm_drop_src[0], rb.arm_drop_src[1], rb.arm_drop_dst[0], rb.arm_drop_dst[1]);
+    /* And the A-posed clip's rest frame means arms hanging 40 degrees: the T rig's arms drop to that (its left arm's drop is +40 about Z in this rig). */
+    CHECK(std::fabs(et.z - 40.0f) < 0.5f && std::fabs(et.x) < 0.5f && std::fabs(et.y) < 0.5f);
+  });
+  test("Humanoid retargeting, the review's cases (round 408): a target armature turned -90 about X keeps a head turn a head turn and the hips' bob a bob; a source whose hips rest at the origin (a BVH's) lands on the target's floor; a spin through 180 degrees keys the nearest turn; the source is left as it stood", [] {
+    Scene s;
+    GameObject *src = r408_rig(s, "Src", kR408Mixamo, 1.0f, false), *dst = r408_rig(s, "Turned", kR408VRoid, 1.0f, false);
+    GameObject *da = s.find_by_name("Turned Armature");
+    da->set_local_rotation(Quat::euler({-90, 0, 0}));  // (a Blender export's armature)
+    AnimationClip clip;
+    clip.frame_rate = 30.0f, clip.length = 30.0f;
+    const std::string head = anim_path(*src, *s.find_by_name("mixamorig:Head")), hips = anim_path(*src, *s.find_by_name("mixamorig:Hips"));
+    clip.track(head, "Rotation", 1).set_key(0, 0.0f), clip.track(head, "Rotation", 1).set_key(30, 45.0f);
+    clip.track(hips, "Position", 1).set_key(0, 1.0f), clip.track(hips, "Position", 1).set_key(30, 0.8f);
+    clip.track(hips, "Rotation", 1).set_key(0, 0.0f), clip.track(hips, "Rotation", 1).set_key(30, 270.0f);  // (a spin past 180)
+    const Vec3 src_hips_before = s.find_by_name("mixamorig:Hips")->local().position;
+    AnimationClip out;
+    RetargetResult r;
+    CHECK(retarget_clip(s, clip, *src, *dst, out, r));
+    CHECK(length(s.find_by_name("mixamorig:Hips")->local().position - src_hips_before) < 1e-6f && length(s.find_by_name("mixamorig:Head")->local().rotation.to_euler()) < 1e-4f);  // (put back)
+    apply_clip(out, *dst, 30.0f);
+    const Vec3 th = s.find_by_name("J_Bip_C_Head")->local().rotation.to_euler();
+    const Vec3 hips_rig = da->world_matrix().inverse().point(s.find_by_name("J_Bip_C_Hips")->world_position());
+    std::printf("    turned target: head local (%.1f %.1f %.1f), hips in the rig (%.2f %.2f %.2f)\n", th.x, th.y, th.z, hips_rig.x, hips_rig.y, hips_rig.z);
+    CHECK(std::fabs(th.y - 45.0f) < 0.5f && std::fabs(th.x) < 0.5f && std::fabs(th.z) < 0.5f);  // (the head still turns about the body's up)
+    CHECK(std::fabs(hips_rig.y - 0.8f) < 1e-3f && std::fabs(hips_rig.x) < 1e-3f && std::fabs(hips_rig.z) < 1e-3f);  // (the bob stays a bob in the rig's own space)
+    const AnimTrack *spin = out.find(anim_path(*dst, *s.find_by_name("J_Bip_C_Hips")), "Rotation", 1);
+    CHECK(spin && std::fabs(spin->keys.back().value - 270.0f) < 1.0f);  // (the nearest turn: 270, not -90)
+    /* A BVH-like source: its hips rest at the origin, its feet 0.9 below. */
+    Scene s2;
+    GameObject *bvh = r408_rig(s2, "Bvh", kR408Mixamo, 1.0f, false), *avatar = r408_rig(s2, "Avatar", kR408VRoid, 1.0f, false);
+    for (GameObject *g : {s2.find_by_name("mixamorig:Hips")}) {
+      g->get<Bone>()->rest_position = Vec3(0.0f), g->set_local_position(Vec3(0.0f));
+    }
+    AnimationClip walk;
+    walk.frame_rate = 30.0f, walk.length = 10.0f;
+    const std::string bh = anim_path(*bvh, *s2.find_by_name("mixamorig:Hips"));
+    walk.track(bh, "Position", 1).set_key(0, 0.0f), walk.track(bh, "Position", 1).set_key(10, 0.05f);  // (a 5 cm bob from the hips' rest at the origin)
+    AnimationClip out2;
+    RetargetResult r2;
+    CHECK(retarget_clip(s2, walk, *bvh, *avatar, out2, r2));
+    std::printf("    BVH-like source: hip scale %.3f (both rigs' hips 1.0 above their feet)\n", r2.hip_scale);
+    apply_clip(out2, *avatar, 0.0f);
+    const Vec3 ah = s2.find_by_name("J_Bip_C_Hips")->local().position;
+    CHECK(std::fabs(r2.hip_scale - 1.0f) < 1e-3f && std::fabs(ah.y - 1.0f) < 1e-3f);  // (on the floor, not 1 m up)
+    apply_clip(out2, *avatar, 10.0f);
+    CHECK(std::fabs(s2.find_by_name("J_Bip_C_Hips")->local().position.y - 1.05f) < 1e-3f);
+    /* A target without shoulders, with a twist bone between the chest and the neck: the chest's turn reaches the arms and the head. */
+    Scene s3;
+    GameObject *src3 = r408_rig(s3, "Src", kR408Mixamo, 1.0f, false);
+    std::vector<std::string> names = kR408VRoid;
+    GameObject *dst3 = r408_rig(s3, "Plain", names, 1.0f, false);
+  });
+  test("Retarget in the editor (round 408): the Animation window's Retarget menu lists the other humanoid rigs; anim retarget makes the target's clip beside the source's, sets it on the target's Animation and opens it there", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.command("newscene");
+    GameObject *src = r408_rig(ed.scene(), "Dancer", kR408Mixamo, 1.0f, false), *dst = r408_rig(ed.scene(), "Avatar", kR408VRoid, 1.2f, true);
+    (void)dst;
+    ed.command("select Dancer");
+    ed.command("layout Animation");
+    ed.command("anim new Dance");
+    ed.command("anim key mixamorig:Spine Rotation 0 0 0");
+    ed.command("anim key mixamorig:Spine Rotation 0 20 25");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti rb;
+    CHECK(ed.button_rect_for_test("anim:Retarget", rb));
+    std::vector<GameObject *> targets = ed.retarget_targets();
+    std::printf("    targets: %zu (%s)\n", targets.size(), targets.empty() ? "" : targets[0]->name.c_str());
+    CHECK(targets.size() == 1 && targets[0]->name == "Avatar");
+    ed.command("anim retarget Avatar");
+    ed.step_frame_headless();
+    GameObject *avatar = ed.scene().find_by_name("Avatar");
+    const Animation *an = avatar ? avatar->get<Animation>() : nullptr;
+    const AnimationClipPtr open = ed.anim_clip_for_test();
+    std::printf("    Avatar plays %s; open clip %s\n", an ? an->clip.c_str() : "nothing", open ? open->asset_path.c_str() : "none");
+    CHECK(an && an->clip.find(" (Avatar)") != std::string::npos && open && open->asset_path == an->clip && !open->tracks.empty());  // (the clip's own name may carry a number from an earlier run)
+    CHECK(open->find("Mixamo Armature", "Rotation", 0) == nullptr);  // (the target's paths, not the source's)
+    const AnimTrack *spine = open->find(anim_path(*avatar, *ed.scene().find_by_name("J_Bip_C_Spine")), "Rotation", 0);
+    CHECK(spine && std::fabs(spine->sample(20.0f) - 25.0f) < 0.5f);  // (the source's 25-degree bend, carried)
+    for (const DirEntry &de : fs::list(resolve_asset_path("Assets/Animations")))  // (this run's files)
+      if (de.name.rfind("Dance", 0) == 0) fs::remove_file(fs::join(resolve_asset_path("Assets/Animations"), de.name));
+    (void)src;
+  });
+}
+
+/* Round 407 (task 0384): Unity .anim files in and out. */
+static const char *kBlendShapePrefixForTest = "MeshRenderer.BlendShape/Smile";
+static const char *kUnityAnimFixture =
+    "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!74 &7400000\nAnimationClip:\n  m_ObjectHideFlags: 0\n  m_Name: Wave\n  serializedVersion: 6\n  m_Legacy: 0\n"
+    "  m_RotationCurves:\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: {x: 0, y: 0, z: 0, w: 1}\n"
+    "        inSlope: {x: 0, y: 0, z: 0, w: 0}\n        outSlope: {x: 0, y: 0, z: 0, w: 0}\n        tangentMode: 0\n        weightedMode: 0\n"
+    "        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n"
+    "      - serializedVersion: 3\n        time: 1\n        value: {x: 0, y: 0.70710677, z: 0, w: 0.70710677}\n        inSlope: {x: 0, y: 0, z: 0, w: 0}\n        outSlope: {x: 0, y: 0, z: 0, w: 0}\n"
+    "        tangentMode: 0\n        weightedMode: 0\n        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334, w: 0.33333334}\n"
+    "      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    path: Arm\n  m_CompressedRotationCurves: []\n  m_EulerCurves: []\n"
+    "  m_PositionCurves:\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: {x: 0, y: 1, z: 0}\n        inSlope: {x: 0, y: 0, z: 0}\n"
+    "        outSlope: {x: 0, y: 0, z: 0}\n        tangentMode: 136\n        weightedMode: 0\n        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n"
+    "      - serializedVersion: 3\n        time: 0.5\n        value: {x: 2, y: 1, z: 0}\n        inSlope: {x: 4, y: 0, z: 0}\n        outSlope: {x: 4, y: 0, z: 0}\n        tangentMode: 136\n        weightedMode: 0\n"
+    "        inWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n        outWeight: {x: 0.33333334, y: 0.33333334, z: 0.33333334}\n      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    path: \n"
+    "  m_ScaleCurves: []\n  m_FloatCurves:\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: 0\n        inSlope: 0\n        outSlope: 0\n        tangentMode: 136\n"
+    "        weightedMode: 0\n        inWeight: 0.33333334\n        outWeight: 0.33333334\n      - serializedVersion: 3\n        time: 0.25\n        value: 100\n        inSlope: Infinity\n        outSlope: Infinity\n        tangentMode: 103\n"
+    "        weightedMode: 0\n        inWeight: 0.33333334\n        outWeight: 0.33333334\n      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    attribute: blendShape.Smile\n    path: Face\n    classID: 137\n"
+    "    script: {fileID: 0}\n    flags: 0\n  - curve:\n      serializedVersion: 2\n      m_Curve:\n      - serializedVersion: 3\n        time: 0\n        value: 0.5\n        inSlope: 0\n        outSlope: 0\n        tangentMode: 136\n        weightedMode: 0\n"
+    "        inWeight: 0.33333334\n        outWeight: 0.33333334\n      m_PreInfinity: 2\n      m_PostInfinity: 2\n      m_RotationOrder: 4\n    attribute: material._Glossiness\n    path: Face\n    classID: 23\n    script: {fileID: 0}\n    flags: 0\n"
+    "  m_PPtrCurves: []\n  m_SampleRate: 60\n  m_WrapMode: 0\n  m_Bounds:\n    m_Center: {x: 0, y: 0, z: 0}\n    m_Extent: {x: 0, y: 0, z: 0}\n  m_ClipBindingConstant:\n    genericBindings: []\n    pptrCurveMapping: []\n"
+    "  m_AnimationClipSettings:\n    serializedVersion: 2\n    m_StartTime: 0\n    m_StopTime: 2\n    m_LoopTime: 1\n  m_EditorCurves: []\n  m_EulerEditorCurves: []\n  m_Events: []\n";
+
+static void tests_round407() {
+  test("A Unity .anim read (round 407): the sample rate as the frame rate, positions by time x rate with their slopes per frame, a quaternion curve as Unity's Euler degrees, a blend shape in 0-100 as 0-1 with a constant key, Active and material floats said", [] {
+    AnimationClip c;
+    std::vector<std::string> notes;
+    std::string why;
+    CHECK(is_unity_anim_text(kUnityAnimFixture) && unity_anim_to_clip(kUnityAnimFixture, c, &notes, &why));
+    std::printf("    %s: %zu tracks, %g fps, length %g, loop %d; %zu note(s)%s%s\n", c.name.c_str(), c.tracks.size(), c.frame_rate, c.length, c.loop, notes.size(), notes.empty() ? "" : ": ", notes.empty() ? "" : notes[0].c_str());
+    CHECK(c.name == "Wave" && c.frame_rate == 60.0f && c.loop && std::fabs(c.length - 120.0f) < 1e-3f && c.unity_yaml);
+    bool lossy = false;
+    AnimationClip again;
+    CHECK(unity_anim_to_clip(kUnityAnimFixture, again, nullptr, &why, &lossy) && lossy);  // (the material curve: the file holds more than the clip)
+    const AnimTrack *px = c.find("", "Position", 0), *py = c.find("", "Position", 1), *ry = c.find("Arm", "Rotation", 1), *sm = c.find("Face", kBlendShapePrefixForTest, 0);
+    CHECK(px && py && ry && sm);
+    if (!px || !py || !ry || !sm) return;
+    CHECK(px->keys.size() == 2 && std::fabs(px->keys[1].frame - 30.0f) < 1e-3f && std::fabs(px->keys[1].value - 2.0f) < 1e-6f && py->keys[1].value == 1.0f);
+    CHECK(std::fabs(px->sample(15.0f) - 1.0f) < 0.2f);  // (the clamped-auto curve through the middle)
+    CHECK(ry->keys.size() == 2 && std::fabs(ry->keys[1].value - 90.0f) < 0.01f && std::fabs(ry->keys[1].frame - 60.0f) < 1e-3f);  // (a quarter turn about Y)
+    /* Unity steps the span before a key whose in slope is infinite: the Smile key at 0.25 s (103, Infinity both sides)
+     * makes the span from frame 0 a step - 0 until frame 15, then 1 (review 407). */
+    CHECK(sm->keys.size() == 2 && std::fabs(sm->keys[1].value - 1.0f) < 1e-6f && std::fabs(sm->keys[1].frame - 15.0f) < 1e-3f && sm->keys[0].interp == AnimConstant && sm->sample(10.0f) == 0.0f);
+    CHECK(notes.size() == 1 && notes[0].find("material value") != std::string::npos);
+  });
+  test("A clip written as a Unity .anim and read again (round 407): positions, a rotation (Euler curves, with their per-axis editor curves), a scale, a blend shape in 0-100, Active, the tangent modes (constant, linear, auto), the rate, length and loop round trip", [] {
+    AnimationClip c;
+    c.name = "Nod", c.frame_rate = 30.0f, c.length = 45.0f, c.loop = false;
+    /* (track() may grow the clip's vector: each key through a fresh call, never two references held at once) */
+    c.track("Head", "Position", 0).set_key(0, 0.0f), c.track("Head", "Position", 0).set_key(15, 0.5f, AnimLinear, false), c.track("Head", "Position", 0).set_key(30, 0.25f);
+    c.track("Head", "Position", 1).set_key(0, 1.0f), c.track("Head", "Position", 1).set_key(15, 1.5f, AnimConstant, false), c.track("Head", "Position", 1).set_key(30, 1.75f);
+    c.track("Head", "Rotation", 0).set_key(0, 0.0f), c.track("Head", "Rotation", 0).set_key(30, 20.0f);
+    c.track("Head", "Rotation", 2).set_key(0, 0.0f), c.track("Head", "Rotation", 2).set_key(30, -35.0f);
+    c.track("Head", "Scale", 1).set_key(0, 1.0f), c.track("Head", "Scale", 1).set_key(30, 1.2f);
+    c.track("Head/Face", "MeshRenderer.BlendShape/Blink", 0).set_key(10, 0.0f), c.track("Head/Face", "MeshRenderer.BlendShape/Blink", 0).set_key(12, 1.0f, AnimConstant, false), c.track("Head/Face", "MeshRenderer.BlendShape/Blink", 0).set_key(20, 1.0f);
+    c.track("Hat", "Active", 0).set_key(0, 1.0f), c.track("Hat", "Active", 0).set_key(20, 0.0f, AnimConstant, false), c.track("Hat", "Active", 0).set_key(40, 0.0f);
+    std::vector<std::string> wnotes;
+    const std::string yaml = clip_to_unity_anim(c, nullptr, &wnotes);
+    CHECK(yaml.rfind("%YAML 1.1", 0) == 0 && yaml.find("--- !u!74 &7400000") != std::string::npos && yaml.find("m_SampleRate: 30") != std::string::npos && yaml.find("m_StopTime: 1.5") != std::string::npos);
+    CHECK(yaml.find("attribute: blendShape.Blink") != std::string::npos && yaml.find("classID: 137") != std::string::npos && yaml.find("attribute: m_IsActive") != std::string::npos && yaml.find("value: 100") != std::string::npos);
+    CHECK(yaml.find("outSlope: Infinity") != std::string::npos && yaml.find("path: Head/Face") != std::string::npos);
+    /* Unity's own layout (review 407): no quaternion curves, the axes as editor curves on the Transform, the Euler ones
+     * in m_EulerEditorCurves; a constant span writes Infinity on both of its keys (the next key's inSlope too); a
+     * linear span its secant on both sides; a blend shape's slopes scaled with its values. */
+    CHECK(yaml.find("m_RotationCurves: []") != std::string::npos && yaml.find("attribute: m_LocalPosition.x") != std::string::npos && yaml.find("attribute: localEulerAnglesRaw.z") != std::string::npos && yaml.find("attribute: m_LocalScale.y") != std::string::npos);
+    CHECK(yaml.find("attribute: localEulerAnglesRaw.z") < yaml.find("m_EulerEditorCurves:") && yaml.find("m_EulerEditorCurves: []") != std::string::npos);  // (in m_EditorCurves, as Unity keeps them)
+    CHECK(yaml.find("inSlope: Infinity") != std::string::npos);
+    const size_t px_editor = yaml.find("attribute: m_LocalPosition.x");
+    const size_t secant_at = yaml.rfind("outSlope: -0.5\n", px_editor);  // (the linear span 15 -> 30: 0.5 -> 0.25 over 15 frames at 30 fps, -0.5 a second, on the frame-15 key)
+    CHECK(secant_at != std::string::npos && secant_at > yaml.find("m_EditorCurves:") && yaml.find("inSlope: -0.5\n", secant_at) != std::string::npos);
+    CHECK(wnotes.size() == 2 && wnotes[0].find("Head Position: an axis without keys") != std::string::npos);  // (z had no track and no object to read; the rotation's y too)
+    AnimationClip back;
+    std::string why;
+    CHECK(unity_anim_to_clip(yaml, back, nullptr, &why));
+    std::printf("    %zu bytes of YAML; back: %zu tracks, %g fps, length %g\n", yaml.size(), back.tracks.size(), back.frame_rate, back.length);
+    CHECK(back.frame_rate == 30.0f && std::fabs(back.length - 45.0f) < 1e-3f && !back.loop && back.name == "Nod");
+    const AnimTrack *bx = back.find("Head", "Position", 0), *by = back.find("Head", "Position", 1), *brx = back.find("Head", "Rotation", 0), *brz = back.find("Head", "Rotation", 2);
+    const AnimTrack *bs = back.find("Head", "Scale", 1), *bb = back.find("Head/Face", "MeshRenderer.BlendShape/Blink", 0), *ba = back.find("Hat", "Active", 0);
+    CHECK(bx && by && brx && brz && bs && bb && ba);
+    if (!bx || !by || !brx || !brz || !bs || !bb || !ba) return;
+    std::printf("    x keys %zu (15 -> %.3f %s), y at 15 = %.3f; rotation back (%.2f, %.2f), scale %.3f\n", bx->keys.size(), bx->keys.size() > 1 ? bx->keys[1].value : -1.0f, bx->keys.size() > 1 && bx->keys[1].interp == AnimLinear ? "linear" : "?",
+                by->sample(15.0f), brx->keys.back().value, brz->keys.back().value, bs->keys.back().value);
+    /* Read back through the editor curves: each axis its own keys - x three, y two - nothing added (review 407). */
+    CHECK(bx->keys.size() == 3 && std::fabs(bx->keys[1].value - 0.5f) < 1e-5f && bx->keys[1].interp == AnimLinear && std::fabs(bx->keys[2].frame - 30.0f) < 1e-3f);
+    CHECK(by->keys.size() == 3 && by->keys[1].interp == AnimConstant && std::fabs(by->sample(20.0f) - 1.5f) < 1e-4f && by->sample(10.0f) > 1.0f && by->sample(10.0f) < 1.5f);
+    /* The same file read by its runtime curves alone (the editor lists dropped): the union's keys, the linear span kept
+     * linear on x, y's constant span kept a step from 15 (the sampled key at 15 is free, not constant). */
+    std::string runtime_only = yaml;
+    const size_t ed0 = runtime_only.find("  m_EditorCurves:"), ed1 = runtime_only.find("  m_HasGenericRootTransform");
+    runtime_only.replace(ed0, ed1 - ed0, "  m_EditorCurves: []\n  m_EulerEditorCurves: []\n");
+    AnimationClip rt;
+    CHECK(unity_anim_to_clip(runtime_only, rt, nullptr, &why));
+    const AnimTrack *rx = rt.find("Head", "Position", 0), *ry = rt.find("Head", "Position", 1);
+    CHECK(rx && ry && rx->keys.size() == 3 && ry->keys.size() == 3 && rx->keys[1].interp == AnimLinear && ry->keys[1].interp == AnimConstant && std::fabs(ry->keys[1].value - 1.5f) < 1e-3f);
+    CHECK(std::fabs(brx->keys.back().value - 20.0f) < 0.01f && std::fabs(brz->keys.back().value + 35.0f) < 0.01f && std::fabs(bs->keys.back().value - 1.2f) < 1e-5f);
+    CHECK(bb->keys.size() == 3 && std::fabs(bb->keys[1].value - 1.0f) < 1e-6f && bb->keys[1].interp == AnimConstant && bb->keys[0].interp != AnimConstant && std::fabs(bb->keys[1].frame - 12.0f) < 1e-3f);
+    CHECK(ba->keys.size() == 3 && ba->keys[1].value == 0.0f && ba->keys[1].interp == AnimConstant && ba->keys[0].interp != AnimConstant && ba->sample(30.0f) == 0.0f);
+    /* A blend shape's slopes written scaled with its values (review 407): keys 0, 0.5, 1 at 0 / 30 / 60 - the middle
+     * key's slope about 50 a second at 30 fps, not 0.5. */
+    AnimationClip ramp;
+    ramp.frame_rate = 30.0f;
+    for (float f : {0.0f, 30.0f, 60.0f}) ramp.track("Face", "MeshRenderer.BlendShape/Smile", 0).set_key(f, f / 60.0f);
+    const std::string ryaml = clip_to_unity_anim(ramp);
+    const size_t mid = ryaml.find("time: 1\n");
+    const size_t slope_at = ryaml.find("inSlope: ", mid);
+    const float slope = slope_at == std::string::npos ? 0.0f : (float)std::atof(ryaml.c_str() + slope_at + 9);
+    std::printf("    blend shape ramp: the middle key's slope %.1f a second\n", slope);
+    CHECK(slope > 40.0f && slope < 60.0f);
+    /* An axis without a track takes the object's value (review 407): a root with Position (3, 4, 5) and only y keyed. */
+    Scene s;
+    GameObject *obj = s.create("Root");
+    obj->set_local_position(Vec3(3.0f, 4.0f, 5.0f));
+    AnimationClip only_y;
+    only_y.track("", "Position", 1).set_key(0, 4.0f), only_y.track("", "Position", 1).set_key(30, 6.0f);
+    const std::string oy = clip_to_unity_anim(only_y, obj);
+    CHECK(oy.find("value: {x: 3, y: 4, z: 5}") != std::string::npos && oy.find("value: {x: 3, y: 6, z: 5}") != std::string::npos);
+  });
+  test("Unity .anim files in the project (round 407): a Unity clip loads as a clip asset; an edit saves to a Blendity copy beside it, the Unity file untouched, and the Animation component playing it keeps the edit through two edits and an undo (one copy); import into Assets/Animations and the Animation window; export anim writes Unity's YAML; a Blendity clip goes into a Unity package converted, with Unity's meta", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    const std::string dir = resolve_asset_path("Assets/Animations");
+    fs::make_dirs(dir);
+    for (const DirEntry &de : fs::list(dir))  // (an earlier run's files: the test project is shared)
+      if (de.name.rfind("R407", 0) == 0) fs::remove_file(fs::join(dir, de.name));
+    fs::remove_file(fs::join(fs::parent(dir), "R407Inside.anim"));
+    CHECK(fs::write_file(fs::join(dir, "R407Wave.anim"), kUnityAnimFixture));
+    const AnimationClipPtr c = clip_asset("Assets/Animations/R407Wave.anim");
+    CHECK(c && c->unity_yaml && c->tracks.size() >= 4);
+    if (!c) return;
+    /* An edit saved: the Unity file untouched, the clip now a Blendity copy beside it (review 407). */
+    c->track("", "Position", 0).set_key(0, 1.0f), c->touch();
+    const size_t saved = save_dirty_clip_assets();
+    std::printf("    saved %zu clip(s): now %s (unity %d)\n", saved, c->asset_path.c_str(), (int)c->unity_yaml);
+    CHECK(saved >= 1);
+    std::string kept;
+    CHECK(fs::read_file(fs::join(dir, "R407Wave.anim"), kept) && kept == kUnityAnimFixture);
+    CHECK(!c->unity_yaml && c->asset_path == "Assets/Animations/R407Wave (Blendity).anim" && fs::exists(resolve_asset_path(c->asset_path)));
+    std::string copy;
+    CHECK(fs::read_file(resolve_asset_path(c->asset_path), copy) && copy.rfind("blendity_anim", 0) == 0 && clip_asset(c->asset_path) == c);
+    CHECK(clip_asset("Assets/Animations/R407Wave.anim") == c);  // (the Unity path follows the clip to its copy)
+    /* Through the editor (review 407): an object plays the Unity clip, two keys are added and one undone - the window keeps
+     * the edits, the component names the copy, exactly one copy exists. */
+    fs::write_file(fs::join(dir, "R407Play.anim"), kUnityAnimFixture);
+    ed.command("newscene");
+    GameObject *player = ed.scene().create("R407Player");
+    player->add<Animation>()->clip = "Assets/Animations/R407Play.anim";
+    ed.command("select R407Player");
+    ed.step_frame_headless();
+    ed.command("anim key . Position 0 10 7");
+    ed.step_frame_headless();
+    ed.command("anim key . Position 0 20 8");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    const AnimationClipPtr played = ed.anim_clip_for_test();
+    const AnimTrack *pt = played ? played->find("", "Position", 0) : nullptr;
+    int copies = 0;
+    for (const DirEntry &de : fs::list(dir)) copies += de.name.rfind("R407Play (Blendity", 0) == 0;
+    std::printf("    played: component %s, clip %s, x keys %zu, copies %d\n", player->get<Animation>()->clip.c_str(), played ? played->asset_path.c_str() : "none", pt ? pt->keys.size() : (size_t)0, copies);
+    CHECK(played && pt && pt->key_at(10.0f) >= 0 && pt->key_at(20.0f) < 0 && copies == 1 && player->get<Animation>()->clip == "Assets/Animations/R407Play (Blendity).anim");
+    std::string play_kept;
+    CHECK(fs::read_file(fs::join(dir, "R407Play.anim"), play_kept) && play_kept == kUnityAnimFixture);
+    ed.command("create Cube");
+    const std::string inside = fs::join(fs::parent(dir), "R407Inside.anim");  // (Assets/R407Inside.anim: inside the project, kept where it is)
+    CHECK(fs::write_file(inside, kUnityAnimFixture));
+    CHECK(ed.import_unity_anim(inside));
+    const AnimationClipPtr open = ed.anim_clip_for_test();
+    std::printf("    imported: open clip %s (%zu tracks)\n", open ? open->asset_path.c_str() : "none", open ? open->tracks.size() : (size_t)0);
+    CHECK(open && open->asset_path.find("R407Inside") != std::string::npos && open->unity_yaml);
+    /* From outside the project: a copy into Assets/Animations, a second one numbered. */
+    const std::string outside = fs::join(fs::parent(fs::parent(dir)), "R407Far.anim");
+    const bool wrote = fs::write_file(outside, kUnityAnimFixture), far1 = wrote && ed.import_unity_anim(outside);
+    std::printf("    far: %s written %d, imported %d, open clip %s\n", outside.c_str(), (int)wrote, (int)far1, ed.anim_clip_for_test() ? ed.anim_clip_for_test()->asset_path.c_str() : "none");
+    CHECK(far1 && ed.anim_clip_for_test() && ed.anim_clip_for_test()->asset_path == "Assets/Animations/R407Far.anim");
+    CHECK(ed.import_unity_anim(outside) && ed.anim_clip_for_test() && ed.anim_clip_for_test()->asset_path == "Assets/Animations/R407Far 2.anim");
+    fs::remove_file(outside);
+    CHECK(ed.export_unity_anim("Exports/R407Out.anim", "Assets/Animations/R407Wave.anim"));
+    std::string text;
+    CHECK(fs::read_file(resolve_asset_path("Exports/R407Out.anim"), text) && is_unity_anim_text(text) && text.find("m_Name: Wave") != std::string::npos);
+    /* A Blendity clip: its own text in the project; Unity's meta for a .anim. */
+    CHECK(unity_anim_meta("abc").find("NativeFormatImporter") != std::string::npos && unity_anim_meta("abc").find("mainObjectFileID: 7400000") != std::string::npos);
+    /* The package export's view of the files: Blendity's clip converted (the dropped tracks counted), Unity's kept. */
+    AnimationClip own;
+    own.track("X", "Position", 0).set_key(0, 1.0f), own.track("X", "Light.Intensity", 0).set_key(0, 2.0f);
+    bool conv = false;
+    int dropped = 0;
+    const std::string data = unity_package_clip_data(save_clip_text(own), "Assets/Animations/Own.anim", &conv, &dropped);
+    CHECK(conv && dropped == 1 && is_unity_anim_text(data) && data.find("m_Name: Own") != std::string::npos);
+    CHECK(unity_package_clip_data(kUnityAnimFixture, "Assets/A.anim", &conv, nullptr) == kUnityAnimFixture && !conv);
+    CHECK(unity_package_clip_data("not a clip", "Assets/A.mat", &conv, nullptr) == "not a clip" && !conv);
+  });
+}
+
+/* Round 406 (task 0383): Unity's BlendShapes foldout and its Animation window layout. */
+static void tests_round406() {
+  test("BlendShapes foldout (round 406): a row a shape under the MeshRenderer, the filter box from eight shapes on hides what doesn't match; rename carries the weight and the clip's track, duplicate copies the delta, New from Mix sums the weighted deltas", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("newscene");  // (the sample scene has a Sphere of its own)
+    ed.command("create Sphere");
+    ed.command("shape add Smile 0.2");
+    ed.command("shape add Blink 0.1");
+    for (int k = 0; k < 6; k++) ed.command(strprintf("shape add Key%d 0.05", k));
+    ed.command("shape set Smile 0.4");
+    ed.command("anim new");
+    ed.command("anim key . MeshRenderer.BlendShape/Smile 0 0 0.4");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti r;
+    CHECK(ed.button_rect_for_test("shape:BlendShapes", r) && ed.button_rect_for_test("shape:Filter", r) && ed.button_rect_for_test("shape:row:Smile", r) && ed.button_rect_for_test("shape:row:Blink", r));
+    CHECK(ed.button_rect_for_test("shape:edit:Smile", r) && ed.button_rect_for_test("shape:Rename", r) && ed.button_rect_for_test("shape:Mix", r));
+    ed.command("shape filter Bli");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    CHECK(!ed.button_rect_for_test("shape:row:Smile", r) && ed.button_rect_for_test("shape:row:Blink", r));
+    ed.command("shape filter");
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    ed.command("shape rename Smile Grin");
+    m = s->mesh_filter()->mesh.get();
+    const MeshRenderer *mr = s->get<MeshRenderer>();
+    const bool track_renamed = ed.anim_clip_for_test() && std::any_of(ed.anim_clip_for_test()->tracks.begin(), ed.anim_clip_for_test()->tracks.end(), [](const AnimTrack &t) { return t.property == "MeshRenderer.BlendShape/Grin"; });
+    std::printf("    renamed: key %d, weight %.2f, track %s\n", m->find_shape("Grin"), mr->shape_weight("Grin"), track_renamed ? "followed" : "not followed");
+    CHECK(m->find_shape("Grin") >= 0 && m->find_shape("Smile") < 0 && std::fabs(mr->shape_weight("Grin") - 0.4f) < 1e-6f && track_renamed);
+    ed.command("shape duplicate Grin");
+    m = s->mesh_filter()->mesh.get();
+    const int g = m->find_shape("Grin"), c = m->find_shape("Grin Copy");
+    CHECK(g >= 0 && c >= 0);
+    if (g < 0 || c < 0) return;
+    CHECK(m->shape_keys[(size_t)c].delta == m->shape_keys[(size_t)g].delta);
+    ed.command("shape set Blink 0.5");
+    ed.command("shape mix Pose");
+    m = s->mesh_filter()->mesh.get();
+    const int p = m->find_shape("Pose"), b = m->find_shape("Blink");
+    CHECK(p >= 0 && b >= 0);
+    if (p < 0 || b < 0) return;
+    const Vec3 want = m->shape_keys[(size_t)g].delta[0] * 0.4f + m->shape_keys[(size_t)b].delta[0] * 0.5f;
+    CHECK(length(m->shape_keys[(size_t)p].delta[0] - want) < 1e-6f);
+  });
+  test("Edit this shape (round 406): the key's delta goes onto the mesh, an edit of a vertex lands in the key when it is folded back - the basis unchanged - and Undo takes it back; leaving Edit Mode folds too", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");  // (the sample scene has a Sphere of its own)
+    ed.command("create Sphere");
+    ed.command("shape add Puff 0.2");
+    ed.step_frame_headless();  // (each change its own undo step: a step commits what the frame changed)
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    CHECK(s && s->mesh_filter() && s->mesh_filter()->mesh && !s->mesh_filter()->mesh->shape_keys.empty());
+    if (!s || !s->mesh_filter() || !s->mesh_filter()->mesh || s->mesh_filter()->mesh->shape_keys.empty()) return;
+    const std::vector<Vec3> basis = s->mesh_filter()->mesh->positions;
+    const Vec3 d0 = s->mesh_filter()->mesh->shape_keys[0].delta[0];
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    CHECK(s->get<MeshRenderer>()->edit_shape == "Puff" && length(m->positions[0] - (basis[0] + d0)) < 1e-6f);
+    /* An edit: vertex 0 moved up by one (what Edit Mode's grab or a sculpt stroke does to the positions). */
+    Mesh &mm = *mesh_make_mutable(s->mesh_filter()->mesh);
+    mm.positions[0] = mm.positions[0] + Vec3(0, 1, 0);
+    mm.touch();
+    ed.command("shape edit off");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    std::printf("    folded: delta[0] (%.3f %.3f %.3f) from (%.3f %.3f %.3f); basis back %s\n", m->shape_keys[0].delta[0].x, m->shape_keys[0].delta[0].y, m->shape_keys[0].delta[0].z, d0.x, d0.y, d0.z,
+                length(m->positions[0] - basis[0]) < 1e-6f ? "yes" : "no");
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && length(m->positions[0] - basis[0]) < 1e-6f && length(m->shape_keys[0].delta[0] - (d0 + Vec3(0, 1, 0))) < 1e-6f);
+    CHECK(length(m->positions[1] - basis[1]) < 1e-6f && length(m->shape_keys[0].delta[1] - s->mesh_filter()->mesh->shape_keys[0].delta[1]) < 1e-6f);
+    ed.command("undo");
+    ed.step_frame_headless();
+    s = ed.scene().find_by_name("Sphere");
+    m = s && s->mesh_filter() ? s->mesh_filter()->mesh.get() : nullptr;
+    CHECK(m && !m->shape_keys.empty() && length(m->shape_keys[0].delta[0] - d0) < 1e-6f);  // (the fold undone: the key as it was)
+    if (!m || m->shape_keys.empty()) return;
+    ed.command("shape edit off");
+    ed.command("shape edit Puff");
+    ed.command("edit");
+    ed.command("edit off");
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && length(s->mesh_filter()->mesh->positions[0] - basis[0]) < 1e-6f);
+  });
+  test("Animation window as Unity's (round 406): a Summary row, an object row per animated path (folded by its arrow), the property rows under it; a blend shape's value field shows 0-100 and typing keys it; the summary's key button keys every track", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R406Box");
+    ed.scene().create("Lid", box);
+    ed.command("select R406Box");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 0 10 0");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.command("anim key Lid Position 2 10 2");
+    GameObject *s = ed.scene().create("Mouth", box);
+    s->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    ed.command("select Mouth");
+    ed.command("shape add Smile 0.2");
+    ed.command("select R406Box");
+    ed.command("anim key Mouth MeshRenderer.BlendShape/Smile 0 10 0.5");
+    ed.command("anim frame 10");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti sum, lid, pos, smile;
+    CHECK(ed.button_rect_for_test("anim_track:Summary", sum) && ed.button_rect_for_test("anim_track:Lid", lid) && ed.button_rect_for_test("anim_track:Lid : Position", pos));
+    CHECK(ed.button_rect_for_test("anim_track:Mouth : MeshRenderer.BlendShape/Smile.x", smile) && sum.y < lid.y && lid.y < pos.y);
+    const auto &vals = ed.anim_row_values_for_test();
+    const auto it = vals.find("Mouth : MeshRenderer.BlendShape/Smile.x");
+    std::printf("    rows: Summary %d, Lid %d, Position %d, Smile %d; Smile's value field %.1f\n", sum.y, lid.y, pos.y, smile.y, it == vals.end() ? -1.0f : it->second);
+    CHECK(it != vals.end() && std::fabs(it->second - 50.0f) < 1e-3f);
+    /* The object row folded by its arrow: its property rows go. */
+    auto ev = [](platform::EventType t, int x, int y) {
+      platform::Event e;
+      e.type = t, e.x = x, e.y = y;
+      return e;
+    };
+    using ET = platform::EventType;
+    auto click = [&](int x, int y) {
+      ed.step_frame_headless({ev(ET::MouseMove, x, y)});
+      ed.step_frame_headless({ev(ET::MouseDown, x, y)});
+      ed.step_frame_headless({ev(ET::MouseUp, x, y)});
+      ed.step_frame_headless();
+    };
+    click(lid.x + 12, lid.y + lid.h / 2);
+    Recti r;
+    CHECK(!ed.button_rect_for_test("anim_track:Lid : Position", r) && ed.button_rect_for_test("anim_track:Lid", r));
+    click(lid.x + 12, lid.y + lid.h / 2);
+    CHECK(ed.button_rect_for_test("anim_track:Lid : Position", r));
+    /* The value field typed: a key at the playhead in 0-1. */
+    ed.command("anim frame 20");
+    CHECK(ed.anim_set_row_value_for_test("Mouth : MeshRenderer.BlendShape/Smile.x", 30.0f));
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *st = nullptr;
+    for (const AnimTrack &t : clip->tracks)
+      if (t.property == "MeshRenderer.BlendShape/Smile") st = &t;
+    CHECK(st && st->key_at(20.0f) >= 0 && std::fabs(st->keys[(size_t)st->key_at(20.0f)].value - 0.3f) < 1e-6f);
+    /* The summary row's key button at frame 30: every track gets a key there. */
+    ed.command("anim frame 30");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    Recti kb;
+    CHECK(ed.button_rect_for_test("anim_key:Summary", kb));
+    click(kb.x + kb.w / 2, kb.y + kb.h / 2);
+    bool all = true;
+    for (const AnimTrack &t : ed.anim_clip_for_test()->tracks) all = all && t.key_at(30.0f) >= 0;
+    CHECK(all);
+  });
+  test("Edit this shape, the hard cases (round 406 review): Ctrl+S folds the open shape before the file is written, removing the key being edited puts the basis back, an exporter sees the folded mesh, Duplicate takes the edit so far", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");
+    ed.command("create Sphere");
+    ed.command("shape add Puff 0.2");
+    ed.command("save Assets/Scenes/R406Save.scene");
+    ed.step_frame_headless();
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const std::vector<Vec3> basis = s->mesh_filter()->mesh->positions;
+    const Vec3 d0 = s->mesh_filter()->mesh->shape_keys[0].delta[0];
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    Mesh &mm = *mesh_make_mutable(s->mesh_filter()->mesh);
+    mm.positions[0] = mm.positions[0] + Vec3(0, 1, 0), mm.touch();
+    /* An exporter's view while the shape is open: the basis as the positions, the key with the edit. */
+    const Mesh folded = shape_edit_folded(*s->mesh_filter()->mesh);
+    CHECK(length(folded.positions[0] - basis[0]) < 1e-6f && length(folded.shape_keys[0].delta[0] - (d0 + Vec3(0, 1, 0))) < 1e-6f && folded.edit_basis.empty());
+    /* What is shown and rendered while the shape is open: the basis plus the key at its weight (the edit so far), the
+     * key skipped from the stored list and taken from the positions instead (re-check 406). */
+    std::vector<Vec3> shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    CHECK(length(shown[0] - basis[0]) < 1e-6f);  // (weight 0: the basis)
+    s->get<MeshRenderer>()->set_shape_weight("Puff", 0.5f);
+    shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    CHECK(length(shown[0] - (basis[0] + (d0 + Vec3(0, 1, 0)) * 0.5f)) < 1e-6f);
+    s->get<MeshRenderer>()->set_shape_weight("Puff", 0.0f);
+    /* Ctrl+S (the keymap's file.save) folds before the file is written. */
+    CHECK(ed.run_action_for_test("file.save"));
+    ed.step_frame_headless();
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    std::printf("    after file.save: edit_shape '%s', positions[0] %s the basis, delta[0].y %.2f\n", s->get<MeshRenderer>()->edit_shape.c_str(), length(m->positions[0] - basis[0]) < 1e-6f ? "=" : "!=", m->shape_keys[0].delta[0].y);
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && m->edit_basis.empty() && length(m->positions[0] - basis[0]) < 1e-6f && length(m->shape_keys[0].delta[0] - (d0 + Vec3(0, 1, 0))) < 1e-6f);
+    ed.command("newscene");
+    ed.command("open Assets/Scenes/R406Save.scene");
+    s = ed.scene().find_by_name("Sphere");
+    CHECK(s && s->get<MeshRenderer>()->edit_shape.empty() && length(s->mesh_filter()->mesh->positions[0] - basis[0]) < 1e-6f);
+    /* Remove the key being edited: the basis comes back, the key goes. */
+    ed.command("select Sphere");
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    ed.command("shape remove Puff");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    CHECK(m->shape_keys.empty() && length(m->positions[0] - basis[0]) < 1e-6f && m->edit_basis.empty());
+    /* Duplicate while open: the copy holds the edit so far (folded first). */
+    ed.command("shape add Puff2 0.2");
+    ed.step_frame_headless();
+    ed.command("shape edit Puff2");
+    ed.step_frame_headless();
+    Mesh &m2 = *mesh_make_mutable(s->mesh_filter()->mesh);
+    m2.positions[0] = m2.positions[0] + Vec3(0, 0, 2), m2.touch();
+    ed.command("shape duplicate Puff2 Copy");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    const int c = m->find_shape("Copy"), o = m->find_shape("Puff2");
+    CHECK(c >= 0 && o >= 0 && s->get<MeshRenderer>()->edit_shape.empty());
+    if (c < 0 || o < 0) return;
+    CHECK(std::fabs(m->shape_keys[(size_t)c].delta[0].z - m->shape_keys[(size_t)o].delta[0].z) < 1e-6f && m->shape_keys[(size_t)c].delta[0].z > 1.9f);
+    /* Set Origin while open: it folds first, so the move lands in the basis and the key keeps its delta. */
+    ed.command("shape edit Puff2");
+    ed.step_frame_headless();
+    const Vec3 dz = s->mesh_filter()->mesh->shape_keys[(size_t)o].delta[0];
+    ed.command("origin bounds");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && m->edit_basis.empty() && length(m->shape_keys[(size_t)m->find_shape("Puff2")].delta[0] - dz) < 1e-6f);
+  });
+  test("Edit Mode and Sculpt show the open key in full (round 406 re-check): a shape opened at weight 0 shows the basis in Object Mode and the whole key once Edit Mode starts; the cage (no renderer) always the whole key", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");
+    ed.command("create Sphere");
+    ed.command("shape add Puff 0.2");
+    ed.step_frame_headless();
+    GameObject *s = ed.scene().find_by_name("Sphere");
+    const std::vector<Vec3> basis = s->mesh_filter()->mesh->positions;
+    const Vec3 d0 = s->mesh_filter()->mesh->shape_keys[0].delta[0];
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    std::vector<Vec3> shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    CHECK(!s->mesh_filter()->mesh->edit_show_full && length(shown[0] - basis[0]) < 1e-6f);  // (Object Mode, weight 0: the basis)
+    std::vector<Vec3> cage = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, nullptr, cage);
+    CHECK(length(cage[0] - (basis[0] + d0)) < 1e-6f);  // (the cage: the whole key)
+    ed.command("edit");
+    ed.step_frame_headless();
+    shown = s->mesh_filter()->mesh->positions;
+    apply_shape_keys(*s->mesh_filter()->mesh, s->get<MeshRenderer>(), shown);
+    std::printf("    Edit Mode: shown[0] - basis = %.3f (the key %.3f)\n", length(shown[0] - basis[0]), length(d0));
+    CHECK(s->mesh_filter()->mesh->edit_show_full && length(shown[0] - (basis[0] + d0)) < 1e-6f);
+    ed.command("edit off");
+    ed.step_frame_headless();
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && !s->mesh_filter()->mesh->edit_show_full);
+  });
+  test("A topology edit while a shape is open (round 406 review): the basis follows the vertices as the keys do, so the fold after it lands right", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("newscene");
+    ed.command("create Cube");
+    ed.command("shape add Puff 0.2");
+    ed.step_frame_headless();
+    GameObject *s = ed.scene().find_by_name("Cube");
+    const size_t nv = s->mesh_filter()->mesh->vert_count();
+    ed.command("shape edit Puff");
+    ed.step_frame_headless();
+    ed.command("select Cube");
+    ed.command("edit");
+    ed.command("selectall");
+    ed.command("subdivide");
+    ed.step_frame_headless();
+    const Mesh *m = s->mesh_filter()->mesh.get();
+    std::printf("    subdivided while open: %zu -> %zu vertices, basis %zu, key %zu\n", nv, m->vert_count(), m->edit_basis.size(), m->shape_keys.empty() ? (size_t)0 : m->shape_keys[0].delta.size());
+    CHECK(m->vert_count() > nv && m->edit_basis.size() == m->vert_count() && !m->shape_keys.empty() && m->shape_keys[0].delta.size() == m->vert_count());
+    ed.command("edit off");
+    ed.step_frame_headless();
+    m = s->mesh_filter()->mesh.get();
+    /* Folded: the key's delta is what the open positions held over the carried basis - about 0.2 along the normal, as
+     * before - and the basis the positions. */
+    float longest = 0.0f;
+    for (const Vec3 &d : m->shape_keys[0].delta) longest = std::max(longest, length(d));
+    CHECK(s->get<MeshRenderer>()->edit_shape.empty() && m->edit_basis.empty() && longest > 0.1f && longest < 0.4f);
+  });
+  test("Rename a shape key inside undo (round 406 review): the clip's track follows and comes back with Undo; the avatar's visemes that name it follow; two objects' tracks apart in the clip share one object row each", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R406R");
+    GameObject *body = ed.scene().create("Body", box), *head = ed.scene().create("Head", box);
+    body->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    (void)head;
+    ed.command("select Body");
+    ed.command("shape add vrc.v_aa 0.1");
+    AvatarDescriptorComponent *d = box->add<AvatarDescriptorComponent>();
+    d->visemes[0] = "vrc.v_aa", d->mouth_open_shape = "vrc.v_aa";
+    ed.command("select R406R");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim key Body Position 0 10 0");
+    ed.command("anim key Head Position 0 10 1");
+    ed.command("anim key Body MeshRenderer.BlendShape/vrc.v_aa 0 10 0.5");
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    Recti b, h, bs;
+    CHECK(ed.button_rect_for_test("anim_track:Body", b) && ed.button_rect_for_test("anim_track:Head", h) && ed.button_rect_for_test("anim_track:Body : MeshRenderer.BlendShape/vrc.v_aa.x", bs));
+    std::printf("    rows: Body %d, its shape track %d, Head %d\n", b.y, bs.y, h.y);
+    CHECK(b.y < bs.y && bs.y < h.y);  // (the shape track under Body, though the clip holds it after Head's)
+    ed.command("select Body");
+    ed.command("shape rename vrc.v_aa vrc.v_ah");
+    ed.step_frame_headless();
+    auto has = [&](const char *prop) {
+      for (const AnimTrack &t : ed.anim_clip_for_test()->tracks)
+        if (t.property == prop) return true;
+      return false;
+    };
+    CHECK(has("MeshRenderer.BlendShape/vrc.v_ah") && !has("MeshRenderer.BlendShape/vrc.v_aa") && d->visemes[0] == "vrc.v_ah" && d->mouth_open_shape == "vrc.v_ah");
+    ed.command("undo");
+    ed.step_frame_headless();
+    body = ed.scene().find_by_name("Body");
+    std::printf("    undone: key %s, track %s\n", body && body->mesh_filter()->mesh->find_shape("vrc.v_aa") >= 0 ? "vrc.v_aa" : "?", has("MeshRenderer.BlendShape/vrc.v_aa") ? "vrc.v_aa" : "renamed still");
+    CHECK(body && body->mesh_filter()->mesh->find_shape("vrc.v_aa") >= 0 && has("MeshRenderer.BlendShape/vrc.v_aa"));
+  });
+  test("Record makes a BlendShape track (round 406): a weight moved while Record is on becomes the shape's track with a key at the playhead", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("create Sphere");
+    ed.command("shape add Smile 0.2");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim preview on");
+    ed.command("anim record on");
+    ed.step_frame_headless();
+    ed.command("shape set Smile 0.7");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *st = nullptr;
+    for (const AnimTrack &t : clip->tracks)
+      if (t.property == "MeshRenderer.BlendShape/Smile") st = &t;
+    std::printf("    Record: %zu track(s), Smile %s\n", clip->tracks.size(), st ? strprintf("keyed at %.0f = %.2f", st->keys[0].frame, st->keys[0].value).c_str() : "no track");
+    CHECK(st && !st->keys.empty() && std::fabs(st->keys[0].value - 0.7f) < 1e-6f);
+    ed.command("anim record off");
+    ed.command("anim preview off");
+  });
+  test("Unity's keys in the Animation window (round 406): K keys every track at the playhead, full stop steps to the next key, comma back", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    GameObject *box = ed.scene().create("R406K");
+    ed.scene().create("Lid", box);
+    ed.command("select R406K");
+    ed.command("layout Animation");
+    ed.command("anim new");
+    ed.command("anim key Lid Position 1 10 1");
+    ed.command("anim key Lid Position 1 30 3");
+    ed.command("anim frame 20");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const AnimEditorState &st = ed.anim_for_test();
+    const int mx = st.sheet.x + st.sheet.w / 2, my = st.sheet.y + st.sheet.h / 2;
+    auto key = [&](int k) {
+      platform::Event m, e;
+      m.type = platform::EventType::MouseMove, m.x = mx, m.y = my;
+      e.type = platform::EventType::KeyDown, e.key = k, e.x = mx, e.y = my;
+      ed.step_frame_headless({m, e});
+      ed.step_frame_headless();
+    };
+    key(platform::KEY_K);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    bool keyed = true;
+    for (const AnimTrack &t : clip->tracks) keyed = keyed && t.key_at(20.0f) >= 0;
+    CHECK(keyed);
+    key(platform::KEY_PERIOD);
+    CHECK(std::fabs(ed.anim_for_test().frame - 30.0f) < 1e-3f);
+    key(platform::KEY_COMMA);
+    key(platform::KEY_COMMA);
+    std::printf("    K keyed %zu track(s); . then , , : frame %.0f\n", clip->tracks.size(), ed.anim_for_test().frame);
+    CHECK(std::fabs(ed.anim_for_test().frame - 10.0f) < 1e-3f);
+  });
+}
+
+/* Round 405 (task 0382): the residuals - Unity's ACES, Unity's indirect specular, three shaders read. */
+static void tests_round405() {
+  test("Unity's ACES (round 405): the full fit's curve - 0.18 grey to about 0.1 (display-linear), 1 to about 0.62, 10 to near white, monotonic - as the view transform the post-processing import picks, after the OpenColorIO views in the list so saved indices keep their view", [] {
+    const Vec3 g18 = tonemap(Vec3(0.18f), ViewTransform::AcesFull, 0.0f), g1 = tonemap(Vec3(1.0f), ViewTransform::AcesFull, 0.0f), g10 = tonemap(Vec3(10.0f), ViewTransform::AcesFull, 0.0f);
+    std::printf("    ACES full fit: 0.18 -> %.3f, 1 -> %.3f, 10 -> %.3f (Blendity's ACES: 0.18 -> %.3f)\n", g18.x, g1.x, g10.x, tonemap(Vec3(0.18f), ViewTransform::ACES, 0.0f).x);
+    CHECK(g18.x > 0.08f && g18.x < 0.14f && g1.x > 0.55f && g1.x < 0.7f && g10.x > 0.95f && g10.x <= 1.0f);  // (scene-referred to display-linear: ACES puts 0.18 at about 0.1, 1 at about 0.62)
+    float last = -1.0f;
+    bool mono = true;
+    for (int k = 0; k <= 64; k++) {
+      const float v = tonemap(Vec3(k / 16.0f), ViewTransform::AcesFull, 0.0f).x;
+      mono = mono && v >= last - 1e-6f, last = v;
+    }
+    CHECK(mono);
+    /* The curve the SIMD display path uses equals the scalar one. */
+    float rgb[24], want[24];
+    for (int i = 0; i < 24; i++) rgb[i] = i * 0.3f, want[i] = tonemap(Vec3(rgb[i]), ViewTransform::AcesFull, 0.5f).x;
+    uint32_t px[8];
+    display::encode_span(rgb, px, 8, ViewTransform::AcesFull, 0.5f);
+    bool same = true;
+    for (int i = 0; i < 8; i++) same = same && std::abs((int)(px[i] >> 16 & 255) - (int)std::lround(linear_to_srgb(want[i * 3]) * 255.0f)) <= 1;
+    CHECK(same);
+    const int idx = view_transform_setting(ViewTransform::AcesFull);
+    CHECK(idx >= 3 && view_transform_from_setting(idx) == ViewTransform::AcesFull && view_transform_from_setting(2) == ViewTransform::ACES);
+    CHECK((size_t)idx < view_transform_names().size() && view_transform_names()[(size_t)idx].find("full fit") != std::string::npos);
+    /* The GPU frame's code: AcesFull is 4 there (3 is an OpenColorIO table; review 405 - the GPU views had read it so). */
+    CHECK(gpu_view_transform_code(ViewTransform::AcesFull) == 4 && gpu_view_transform_code(ViewTransform::ACES) == 2 && gpu_view_transform_code(ViewTransform::OcioView) == 3);
+    /* An edit document saves the enum's value: AcesFull reopens as itself in any build, an OpenColorIO view as Standard. */
+    CHECK(edit::saved_view((int)ViewTransform::AcesFull) == ViewTransform::AcesFull && edit::saved_view(2) == ViewTransform::ACES && edit::saved_view((int)ViewTransform::OcioView) == ViewTransform::Standard);
+  });
+  test("Unity's BRDF weight (round 405) is on for a scene from Unity with no light at all, and off for Blendity's own scene", [] {
+    Editor ed;
+    ed.init_headless(300, 200);
+    std::vector<GameObject *> lights;
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Light>()) lights.push_back(&g); });
+    for (GameObject *g : lights) ed.scene().destroy(g);  // (the sample scene's Point Light: no light at all)
+    CHECK(!ed.make_lighting_for_test().unity_brdf);
+    ed.scene().unity.file = "Assets/Imported/X/S.unity";
+    CHECK(ed.make_lighting_for_test().unity_brdf);
+  });
+  test("Unity's indirect specular (round 405): a rough dielectric wall reflects a probe at grazing angles by its grazing term (smoothness + reflectivity: 0.17 after the surface reduction, where Karis's fit gives 0.03); a dark rough metal's grazing term is 1 by its metallic, not its colour; a smooth metal facing by its colour; the surface reduction by the roughness", [] {
+    const Vec3 f0(0.04f);
+    const Vec3 rough_grazing = unity_indirect_specular(f0, 0.04f, 0.8f, 0.0f), rough_facing = unity_indirect_specular(f0, 0.04f, 0.8f, 1.0f);
+    const Vec3 approx_grazing = env_brdf_approx(f0, 0.8f, 0.0f);
+    std::printf("    rough wall at grazing: Unity %.3f, the approximation %.3f; facing %.4f\n", rough_grazing.x, approx_grazing.x, rough_facing.x);
+    CHECK(rough_grazing.x > approx_grazing.x && std::fabs(rough_grazing.x - 0.24f / (0.64f * 0.64f + 1.0f)) < 1e-4f);
+    CHECK(std::fabs(rough_facing.x - 0.04f / (0.64f * 0.64f + 1.0f)) < 1e-4f);
+    /* Dark steel (albedo 0.3, metallic 1, roughness 0.7): Unity's grazing term is saturate(0.3 + 1) = 1 - by the
+     * reflectivity 1 of a metal, not the colour's 0.3 (review 405). */
+    const Vec3 steel = unity_indirect_specular(Vec3(0.3f), unity_reflectivity(0.5f, 1.0f), 0.7f, 0.0f);
+    CHECK(std::fabs(steel.x - 1.0f / (0.49f * 0.49f + 1.0f)) < 1e-4f);
+    /* The rasterizers' reflectivity: Unity's 0.04 + 0.96 x metallic at Specular 0.5 (re-check 405). */
+    CHECK(std::fabs(unity_reflectivity(0.5f, 0.0f) - 0.04f) < 1e-6f && std::fabs(unity_reflectivity(0.5f, 0.5f) - 0.52f) < 1e-6f && unity_reflectivity(0.5f, 1.0f) == 1.0f);
+    const Vec3 gold(1.0f, 0.8f, 0.3f);
+    const Vec3 metal = unity_indirect_specular(gold, 1.0f, 0.0f, 1.0f);
+    CHECK(std::fabs(metal.x - 1.0f) < 1e-5f && std::fabs(metal.z - 0.3f) < 1e-5f);
+    CHECK(unity_indirect_specular(gold, 1.0f, 0.0f, 0.0f).z > 0.99f);  // (grazing: toward the grazing term, 1 for a smooth metal)
+  });
+  test("Three shaders read as what they draw (round 405): a glass shader is Glass, a candle flicker shader an emissive flame, a mirror shader a mirror; their families named", [] {
+    std::vector<std::string> none;
+    CHECK(unity_shader_family("Glass_NoFog", none) == "Glass" && unity_shader_family("VirtualFoxDesignStudio/GlassShader", none) == "Glass" && unity_shader_family("Unlit/GlassLike", none) == "Unlit");
+    CHECK(unity_shader_family("VirtualFoxDesignStudio/CandleFlicker", none) == "CandleFlicker" && unity_shader_family("Mirror/VRCPlayersOnlyMirror", none) == "Mirror" && unity_shader_family("FX/MirrorReflection", none) == "Mirror");
+    /* A lit shader that mentions one of the words isn't one (review 405): the family goes by the shader's own name. */
+    CHECK(unity_shader_family("Custom/Sunglasses", none) == "Custom/Sunglasses" && unity_shader_family("Unlit/MirroredTexture", none) == "Unlit" && unity_shader_family("Custom/UVMirror", none) == "Custom/UVMirror");
+    CHECK(unity_shader_family("Custom/MirroredUV", none) == "Custom/MirroredUV" && unity_shader_family("VRChat/VRCMirror", none) == "Mirror");
+    auto mat = [](const char *shader, const char *floats, const char *colors) {
+      const std::string yaml = std::string("%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!21 &2100000\nMaterial:\n  m_Name: M\n  m_Shader: {fileID: 4800000, guid: s1, type: 3}\n"
+                                           "  m_SavedProperties:\n    m_TexEnvs: []\n    m_Floats:\n") + floats + "    m_Colors:\n" + colors;
+      Material m;
+      UnityMaterialInfo info;
+      const std::string name = shader;
+      const bool ok = unity_material(yaml, [](const std::string &) { return std::string(); }, [name](const std::string &, int64_t) { return name; }, m, info);
+      return std::make_pair(ok, std::make_pair(m, info));
+    };
+    auto g = mat("Glass_NoFog", "    - _Glossiness: 1\n    - _Metallic: 1\n", "    - _Color: {r: 1, g: 1, b: 1, a: 0}\n");
+    CHECK(g.first && g.second.second.known && g.second.first.surface == (int)MaterialSurface::Glass && std::fabs(g.second.first.ior - 1.5f) < 1e-6f && g.second.first.alpha == 1.0f && g.second.first.metallic == 0.0f);
+    auto c = mat("VirtualFoxDesignStudio/CandleFlicker", "    - _PowerMultiplier: 0.1\n", "    - _EmissionColor: {r: 0.4245283, g: 0.20175602, b: 0, a: 1}\n    - _Color: {r: 1, g: 1, b: 1, a: 1}\n");
+    CHECK(c.first && c.second.second.known && c.second.first.emission_strength > 0.1f && c.second.first.emission.x > 0.99f && c.second.first.emission.z == 0.0f && c.second.first.emission.y < 0.6f);
+    auto mr = mat("Mirror/VRCPlayersOnlyMirror", "    - _Glossiness: 0.5\n    - _Metallic: 0\n", "");
+    CHECK(mr.first && mr.second.second.known && mr.second.first.metallic == 1.0f && mr.second.first.roughness == 0.0f && mr.second.first.base_color.x == 1.0f);
+    std::printf("    glass ior %.2f, candle emission (%.2f %.2f %.2f) x %.2f, mirror metallic %.0f roughness %.0f\n", g.second.first.ior, c.second.first.emission.x, c.second.first.emission.y,
+                c.second.first.emission.z, c.second.first.emission_strength, mr.second.first.metallic, mr.second.first.roughness);
+  });
+}
+
+/* Round 404 (task 0381): the comparison harness's Blendity side. */
+static void tests_round404() {
+  test("The comparison harness's Blendity side (round 404): `render wait` holds a script till the render is done, so the saverender after it saves the whole picture - the PNG and the linear HDR (brighter in sRGB than its own bytes)", [] {
+    using namespace r402;
+    Editor ed;
+    Light *sun = nullptr;
+    Camera *cam = nullptr;
+    GameObject *g = sphere_scene(ed, &sun, &cam);
+    CHECK(g && sun && cam);
+    if (!g || !sun || !cam) return;
+    ed.command("set Render.ResolutionX 96");
+    ed.command("set Render.ResolutionY 96");
+    ed.command("set Render.RenderEngine Path");  // (a linear picture needs the path tracer: the rasterizer keeps none)
+    ed.command("set Render.Samples 8");
+    ed.command("render wait");
+    CHECK(!ed.rendering_for_test());
+    const std::string png = resolve_asset_path("Assets/R404.png"), exr = resolve_asset_path("Assets/R404.hdr");
+    std::error_code ec;
+    std::filesystem::remove(png, ec), std::filesystem::remove(exr, ec);
+    ed.command("saverender " + png);
+    ed.command("saverender " + exr);
+    std::string pb, eb;
+    CHECK(fs::read_file(png, pb) && pb.size() > 100 && fs::read_file(exr, eb) && eb.size() > 100);
+    Bitmap p, e;
+    std::string err;
+    CHECK(decode_image(pb, p, err) && p.width == 96 && p.height == 96);
+    CHECK(decode_image(eb, e, err) && e.width == 96 && e.is_float);
+    /* The sphere's centre: the HDR's linear value is below the PNG's sRGB byte (0.8 linear is 231 sRGB). */
+    const size_t c = (size_t)48 * 96 + 48;
+    const float lin = e.is_float && e.rgbaf.size() > c * 4 ? e.rgbaf[c * 4] : -1.0f;
+    const int srgb = p.rgba8.size() > c * 4 ? p.rgba8[c * 4] : -1;
+    std::printf("    the centre: HDR %.3f linear, PNG %d / 255 (sRGB)\n", lin, srgb);
+    CHECK(lin >= 0.0f && srgb >= 0 && lin * 255.0f < (float)srgb && srgb > 100);
+    std::filesystem::remove(png, ec), std::filesystem::remove(exr, ec);
+  });
+}
+
+static void tests_round403() {
+  test("VRChat's SDK classes by their fileIDs (round 403): Unity's MD4 of the full name gives the ids the files carry - the descriptor, the PhysBone collider, a rotation constraint - and an unknown one is empty", [] {
+    CHECK(unity_script_file_id("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor") == 542108242);
+    CHECK(unity_script_file_id("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBoneCollider") == -1631200402);
+    CHECK(unity_script_file_id("VRC.SDK3.Dynamics.Constraint.Components.VRCRotationConstraint") == 1788371120);
+    CHECK(unity_sdk_class_name(542108242) == "VRCAvatarDescriptor" && unity_sdk_class_name(1661641543) == "VRCPhysBone" && unity_sdk_class_name(12345) == "");
+    size_t n = 0;
+    const char *const *names = unity_sdk_class_names(&n);
+    CHECK(n >= 30 && names);
+    std::printf("    %zu SDK classes: descriptor %d, PhysBone %d (%s)\n", n, unity_script_file_id("VRC.SDK3.Avatars.Components.VRCAvatarDescriptor"),
+                unity_script_file_id("VRC.SDK3.Dynamics.PhysBone.Components.VRCPhysBone"), unity_sdk_class_name(1661641543).c_str());
+  });
+  test("An Engine Component's fields in the Inspector (round 403): a Unity script's document typed by its shape - numbers, text, a vector, a colour, a reference, a nested block, a list - under Unity's names; an edit rewrites that line and no other; a DLL class is named by its fileID on import", [] {
+    using namespace r403;
+    EngineComponent e;
+    e.engine = "Unity", e.type = "AudioSource";
+    e.data = "--- !u!82 &500\nAudioSource:\n  m_ObjectHideFlags: 0\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  serializedVersion: 4\n  OutputAudioMixerGroup: {fileID: 0}\n"
+             "  m_audioClip: {fileID: 8300000, guid: d3a3bb888e8, type: 3}\n  m_PlayOnAwake: 1\n  m_Volume: 0.5\n  m_Pitch: 1\n  Loop: 1\n  Priority: 128\n  MinDistance: 100\n  MaxDistance: 101\n"
+             "  rolloffMode: 1\n  interactText: Use\n  m_Color: {r: 1, g: 0.5, b: 0.25, a: 1}\n  m_Offset: {x: 1, y: 2, z: 3}\n  m_Calls:\n  - {fileID: 1}\n  - {fileID: 2}\n  m_Limits:\n    min: 0\n    max: 10.5\n"
+             "  m_Size: {x: 2, y: 3}\n  m_Bits: 4294967295\n  m_Bytes: 01000000\n  m_Note: 'Line one\n\n    Line two'\n  m_Last: 7\n";
+    const std::string original = e.data;
+    SetOne r;
+    r.want = "Volume", r.value = 0.25f;
+    e.reflect(r);
+    auto saw = [&](const char *n) { return std::find(r.seen.begin(), r.seen.end(), n) != r.seen.end(); };
+    CHECK(saw("Volume") && saw("Play On Awake") && saw("Loop") && saw("Interact Text") && saw("Color") && saw("Offset") && saw("Audio Clip") && saw("Calls") && saw("Limits / Min"));
+    CHECK(!saw("Object Hide Flags") && !saw("Game Object") && !saw("Serialized Version"));
+    CHECK(e.data.find("  m_Volume: 0.25\n") != std::string::npos && e.data.find("  m_Pitch: 1\n") != std::string::npos && e.data.find("  MinDistance: 100\n") != std::string::npos);
+    /* No other line changed. */
+    size_t differ = 0;
+    for (size_t a0 = 0, b0 = 0; a0 < original.size() && b0 < e.data.size();) {
+      const size_t ae = original.find('\n', a0), be = e.data.find('\n', b0);
+      differ += original.substr(a0, ae - a0) != e.data.substr(b0, be - b0);
+      if (ae == std::string::npos || be == std::string::npos) break;
+      a0 = ae + 1, b0 = be + 1;
+    }
+    CHECK(differ == 1);
+    /* A whole number is a float field too (Pitch 1 -> 1.5); a big integer and a zero-led digit string are text; an inline
+     * Vector2 is shown; a wrapped string edited goes with its continuation lines (review 403). */
+    SetOne r3;
+    r3.want = "Pitch", r3.value = 1.5f;
+    e.reflect(r3);
+    CHECK(e.data.find("  m_Pitch: 1.5\n") != std::string::npos && saw("Size") && std::find(r3.seen.begin(), r3.seen.end(), "Last") != r3.seen.end());
+    struct SetText : r403::SetOne {
+      void text(const char *n, std::string &v) override {
+        seen.push_back(n);
+        if (want == n) v = "Hi";
+        if (!std::strcmp(n, "Bits") || !std::strcmp(n, "Bytes")) big = v;
+      }
+      std::string big;
+    } r4;
+    r4.want = "Note";
+    e.reflect(r4);
+    CHECK(e.data.find("  m_Note: Hi\n  m_Last: 7\n") != std::string::npos && e.data.find("Line two") == std::string::npos);
+    CHECK(std::find(r4.seen.begin(), r4.seen.end(), "Bits") != r4.seen.end() && std::find(r4.seen.begin(), r4.seen.end(), "Bytes") != r4.seen.end());
+    /* The edited document goes back whole through Export Unity Package's edits; one a Blendity component holds doesn't. */
+    Scene s;
+    GameObject *g = s.create("Speaker");
+    EngineComponent *ec = g->add<EngineComponent>();
+    ec->engine = "Unity", ec->type = "AudioSource", ec->data = e.data;
+    EngineComponent *owned = g->add<EngineComponent>();
+    owned->engine = "Unity", owned->type = "VRCPhysBone", owned->data = "--- !u!114 &600\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  pull: 0.9\n", owned->native = true;
+    std::vector<UnityEdit> edits;
+    unity_component_edits(*g, 100, edits);
+    CHECK(edits.size() == 1 && edits[0].file_id == 500 && !edits[0].document.empty());
+    int changed = 0;
+    const std::string file = original + "--- !u!114 &600\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  pull: 0.1\n";
+    const std::string out = patch_unity_objects(file, edits, &changed);
+    CHECK(changed == 1 && out.find("  m_Volume: 0.25\n") != std::string::npos && out.find("  pull: 0.1\n") != std::string::npos);
+    CHECK(patch_unity_objects(out, edits, &changed) == out && changed == 0);
+    CHECK(unity_field_label("m_PlayOnAwake") == "Play On Awake" && unity_field_label("interactText") == "Interact Text" && unity_field_label("RespawnHeightY") == "Respawn Height Y");
+    /* A nested block's line. */
+    SetOne r2;
+    r2.want = "Limits / Max", r2.value = 20.0f;
+    e.reflect(r2);
+    CHECK(e.data.find("    max: 20\n") != std::string::npos && e.data.find("    min: 0\n") != std::string::npos);
+    /* Serialising still carries the whole text. */
+    const std::string json = reflect_to_json([&](Reflector &rr) { e.reflect(rr); });
+    CHECK(json.find("m_Volume: 0.25") != std::string::npos);
+    std::printf("    %zu fields shown; Volume rewritten to 0.25, Limits / Max to 20; the rest as written\n", r.seen.size());
+  });
+  test("The world's Scene Descriptor, Pipeline Manager and a Unity LOD Group (round 403): imported from a scene (spawns and the reference camera by name, the SDK's names on the kept components), shown with Unity's names, written back - the lines that differ - and sent over Live Link", [] {
+    const std::string scene =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"
+        "--- !u!1 &100\nGameObject:\n  m_Name: VRCWorld\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 400}\n"
+        "--- !u!4 &400\nTransform:\n  m_GameObject: {fileID: 100}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 0, z: 0}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children:\n  - {fileID: 401}\n  - {fileID: 402}\n  m_Father: {fileID: 0}\n"
+        "--- !u!1 &101\nGameObject:\n  m_Name: Spawn\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 401}\n"
+        "--- !u!4 &401\nTransform:\n  m_GameObject: {fileID: 101}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 1, y: 0, z: 2}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!1 &102\nGameObject:\n  m_Name: Cam\n  m_IsActive: 1\n  m_Component:\n  - component: {fileID: 402}\n  - component: {fileID: 2050}\n"
+        "--- !u!4 &402\nTransform:\n  m_GameObject: {fileID: 102}\n  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}\n  m_LocalPosition: {x: 0, y: 1.6, z: 0}\n  m_LocalScale: {x: 1, y: 1, z: 1}\n  m_Children: []\n  m_Father: {fileID: 400}\n"
+        "--- !u!205 &2050\nLODGroup:\n  m_GameObject: {fileID: 102}\n  m_Enabled: 1\n  m_LODs:\n  - screenRelativeHeight: 0.6\n    renderers: []\n  - screenRelativeHeight: 0.3\n    renderers: []\n  - screenRelativeHeight: 0.05\n    renderers: []\n"
+        "--- !u!114 &1140\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  m_Script: {fileID: -17141911, guid: 661092b4961be7145bfbe56e1e62337b, type: 3}\n  spawns:\n  - {fileID: 401}\n  spawnOrder: 2\n  spawnOrientation: 1\n  ReferenceCamera: {fileID: 402}\n  RespawnHeightY: -100\n  ObjectBehaviourAtRespawnHeight: 0\n  ForbidUserPortals: 0\n  interactThruLayers: 0\n  autoSpatializeAudioSources: 0\n  gravity: {x: 0, y: -9.81, z: 0}\n  capacity: 32\n  unityVersion: 2022.3.22f1\n  DrawDistance: 0\n  DynamicPrefabs: []\n"
+        "--- !u!114 &1141\nMonoBehaviour:\n  m_GameObject: {fileID: 100}\n  m_Enabled: 1\n  m_Script: {fileID: -1427037861, guid: 4ecd63eff847044b68db9453ce219299, type: 3}\n  launchedFromSDKPipeline: 0\n  completedSDKPipeline: 0\n  blueprintId: wrld_1234\n  contentType: 1\n"
+        "--- !u!114 &1142\nMonoBehaviour:\n  m_GameObject: {fileID: 102}\n  m_Enabled: 1\n  m_Script: {fileID: -17141911, guid: 661092b4961be7145bfbe56e1e62337b, type: 3}\n  m_Dummy: 1\n";
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(scene, docs, why));
+    Scene s;
+    UnityImport ctx;
+    ctx.total = std::make_shared<int>(0), ctx.building = std::make_shared<std::set<std::string>>();
+    ctx.source = "Assets/World.unity";
+    build_unity_objects(docs, s, nullptr, ctx);
+    GameObject *world = s.find_by_name("VRCWorld"), *cam = s.find_by_name("Cam");
+    CHECK(world && cam);
+    if (!world || !cam) return;
+    SceneDescriptorComponent *sd = world->get<SceneDescriptorComponent>();
+    CHECK(sd && sd->spawns == "Spawn" && sd->reference_camera == "Cam" && sd->spawn_order == 2 && sd->spawn_orientation == 1 && sd->capacity == 32 && std::fabs(sd->gravity.y + 9.81f) < 1e-5f);
+    const PipelineManagerComponent *pm = world->get<PipelineManagerComponent>();
+    CHECK(pm && pm->blueprint_id == "wrld_1234" && pm->content_type == 1);
+    const LODGroupComponent *lod = cam->get<LODGroupComponent>();
+    CHECK(!lod);  // (review 403: Unity's LOD Group switches authored children - Blendity's decimates its own mesh; it stays data)
+    bool lod_kept = false;
+    for (const auto &c : cam->components)
+      if (const auto *ek = dynamic_cast<const EngineComponent *>(c.get())) lod_kept = lod_kept || ek->type == "LODGroup";
+    CHECK(lod_kept);
+    /* The respawn behaviour as the SDK numbers it: 0 is Respawn. */
+    CHECK(sd->respawn_behaviour == 0 && livelink::avatar_components_message_for_test(s, *world).find("\"respawnBehaviour\":\"Respawn\"") != std::string::npos);
+    /* The descriptor's own kept document is read-only text. */
+    bool owned = false;
+    for (const auto &c : world->components)
+      if (const auto *ek = dynamic_cast<const EngineComponent *>(c.get())) owned = owned || (ek->type == "VRCSceneDescriptor" && ek->native);
+    CHECK(owned);
+    /* The kept documents carry the SDK's names (the fileID of VRC.SDK3.Components.VRCSceneDescriptor). */
+    int named = 0;
+    for (const auto &c : world->components)
+      if (const auto *e = dynamic_cast<const EngineComponent *>(c.get())) named += e->type == "VRCSceneDescriptor" || e->type == "PipelineManager";
+    CHECK(named == 2 && unity_script_file_id("VRC.SDK3.Components.VRCSceneDescriptor") == -17141911);
+    /* Written back: the respawn height and the capacity; nothing else. */
+    sd->respawn_height = -50.0f, sd->capacity = 40;
+    PipelineManagerComponent *pmm = world->get<PipelineManagerComponent>();
+    if (pmm) pmm->blueprint_id = "wrld_5678";
+    std::vector<UnityEdit> edits;
+    unity_component_edits(*world, 100, edits);
+    int changed = 0;
+    const std::string out = patch_unity_objects(scene, edits, &changed);
+    CHECK(changed == 3 && out.find("  RespawnHeightY: -50\n") != std::string::npos && out.find("  capacity: 40\n") != std::string::npos && out.find("  blueprintId: wrld_5678\n") != std::string::npos);
+    CHECK(out.find("  m_Dummy: 1\n") != std::string::npos);  // (the kept documents the components own are not replaced)
+    CHECK(out.find("  spawnOrder: 2\n") != std::string::npos && out.find("  m_Dummy: 1\n") != std::string::npos);
+    const std::string msg = livelink::avatar_components_message_for_test(s, *world);
+    CHECK(msg.find("\"kind\":\"scenedescriptor\"") != std::string::npos && msg.find("\"spawnOrder\":\"Random\"") != std::string::npos && msg.find("\"kind\":\"pipeline\"") != std::string::npos);
+    std::printf("    spawns %s, camera %s, order %d; pipeline %s; the LOD Group kept as data; written back %d change(s)\n", sd->spawns.c_str(), sd->reference_camera.c_str(), sd->spawn_order, pm->blueprint_id.c_str(), changed);
+  });
+}
+
 static void tests_round402() {
   test("lilToon's lighting model against lilToon (round 402): a sphere at eight settings - the two shadows, the border colour, the rim, the backlight, the light limits, monochrome lighting, the emission with HSVG - rendered by the CPU rasterizer and the path tracer against lilToon's own renders (tests/fixtures/liltoon)", [] {
     using namespace r402;
@@ -9643,7 +10692,7 @@ static void tests_round401() {
     const VignetteEffect *v = cf ? cf->find<VignetteEffect>() : nullptr;
     std::printf("    view transform %d, exposure %g; bloom %s (%.4f), grading %s (gamma %.4f), vignette %s; %zu note(s)\n", s.render.view_transform, s.render.exposure, b ? "on" : "-",
                 b ? b->intensity : 0.0f, g ? "on" : "-", g ? g->gamma.x : 0.0f, v ? "on" : "-", notes.size());
-    CHECK(s.render.view_transform == 2 && s.render.exposure == 1.0f && b && std::fabs(b->intensity - (std::exp2(0.15f) - 1.0f)) < 1e-5f && std::fabs(b->scatter - 0.7f) < 1e-6f && g &&
+    CHECK(s.render.view_transform == view_transform_setting(ViewTransform::AcesFull) && s.render.exposure == 1.0f && b && std::fabs(b->intensity - (std::exp2(0.15f) - 1.0f)) < 1e-5f && std::fabs(b->scatter - 0.7f) < 1e-6f && g &&
           std::fabs(g->gamma.x - 1.108626194f) < 1e-5f && v && std::fabs(v->intensity - 0.3f) < 1e-6f && notes.size() == 1);
     unity_post_apply(p, s, *cam, notes);  // (again: the same effects replaced, not doubled)
     int blooms = 0;
@@ -11958,6 +13007,12 @@ void run_assets_tests() {
   tests_round400();
   tests_round401();
   tests_round402();
+  tests_round403();
+  tests_round404();
+  tests_round405();
+  tests_round406();
+  tests_round407();
+  tests_round408();
   tests_round372();
   tests_round373();
   tests_round374();

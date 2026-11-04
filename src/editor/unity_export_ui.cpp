@@ -5,6 +5,7 @@
 // from them) written into their own lines and every other byte as it was, scripts and VRChat's components included.
 // On a worker, a file at a time (review 372: a package of hundreds of megabytes stalled the editor and was held three
 // times over). The project's files are never written over: the package carries the edits.
+#include "../scene/unity_anim.h"  // (round 407)
 #include "editor.h"
 
 #include "../scene/material.h"
@@ -40,7 +41,8 @@ std::map<std::string, Known> known_guids(const std::string &abs_folder) {
 }
 
 /* A new file's .meta: its GUID alone (Unity fills in the importer's settings). */
-std::string fresh_meta(const std::string &guid, bool folder) {
+std::string fresh_meta(const std::string &guid, bool folder, const std::string &ext = "") {
+  if (!folder && ext == ".anim") return unity_anim_meta(guid);  // (round 407: the clip as the asset's main object)
   return "fileFormatVersion: 2\nguid: " + guid + "\n" + (folder ? "folderAsset: yes\nDefaultImporter:\n  externalObjects: {}\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n" : "");
 }
 
@@ -62,6 +64,9 @@ void Editor::ExportJob::run() {
       }
       int n = 0;
       if (!it.edits.empty()) a.data = patch_unity_objects(a.data, it.edits, &n), lines += n;
+      bool conv = false;  // (round 407: Blendity's clip as Unity's)
+      a.data = unity_package_clip_data(a.data, it.pathname, &conv, &dropped_tracks, &zeroed_axes);
+      converted += conv;
       gz.write(unity_asset_entries(a));
       written++;
     }
@@ -166,6 +171,17 @@ void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
       if (vc->kind == 0)
         for (int k = 0; k < 3; k++) e.fields.push_back({axes[1][k], yes(vc->affects[k])}), e.fields.push_back({axes[2][k], yes(vc->affects_rotation[k])});
     }
+    else if (const auto *sd = dynamic_cast<const SceneDescriptorComponent *>(comp.get())) {  // (round 403)
+      e.file_id = unity_fid(sd->unity_id);
+      e.fields = {{"spawnOrder", std::to_string(sd->spawn_order)}, {"spawnOrientation", std::to_string(sd->spawn_orientation)}, {"RespawnHeightY", unity_yaml_num(sd->respawn_height)},
+                  {"ObjectBehaviourAtRespawnHeight", std::to_string(sd->respawn_behaviour)}, {"ForbidUserPortals", yes(sd->forbid_user_portals)},
+                  {"interactThruLayers", std::to_string(sd->interact_thru_layers)}, {"autoSpatializeAudioSources", yes(sd->auto_spatialize)}, {"gravity", unity_yaml_vec3(sd->gravity)},
+                  {"capacity", std::to_string(sd->capacity)}, {"DrawDistance", unity_yaml_num(sd->draw_distance)}, {"m_Enabled", yes(sd->enabled)}};
+    }
+    else if (const auto *pm = dynamic_cast<const PipelineManagerComponent *>(comp.get())) {
+      e.file_id = unity_fid(pm->unity_id);
+      e.fields = {{"blueprintId", pm->blueprint_id.empty() ? std::string() : unity_yaml_string(pm->blueprint_id)}, {"contentType", std::to_string(pm->content_type)}};
+    }
     else if (const auto *an = dynamic_cast<const AnimatorComponent *>(comp.get())) {
       e.file_id = unity_fid(an->unity_id);
       e.fields = {{"m_ApplyRootMotion", yes(an->apply_root_motion)}, {"m_UpdateMode", std::to_string(an->update_mode)}, {"m_CullingMode", std::to_string(an->culling_mode)},
@@ -179,6 +195,15 @@ void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
 
 void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out) {
   avatar_component_edits(g, out);  // (round 402)
+  for (const auto &comp : g.components) {  // (round 403: a kept document edited in the Inspector goes back whole - the ones a Blendity component holds don't)
+    const auto *e = dynamic_cast<const EngineComponent *>(comp.get());
+    if (!e || e->native || e->engine != "Unity" || e->data.empty()) continue;
+    UnityEdit ed;
+    ed.file_id = e->unity_file_id();
+    if (!ed.file_id) continue;
+    ed.document = e->data;
+    out.push_back(ed);
+  }
   if (const Camera *c = g.get<Camera>()) {
     UnityEdit e;
     e.class_id = 20, e.game_object = game_object;
@@ -245,6 +270,7 @@ bool Editor::export_unity_package(const std::string &folder_in, const std::strin
   if (fs::exists(out) && fs::extension(out) != ".unitypackage") return Log::warn("Export Unity Package: %s is another kind of file - not written over", out.c_str()), false;
   auto job = std::make_shared<ExportJob>();
   job->out = out, job->folder = folder_rel;
+  save_dirty_clip_assets();  // (round 407: the clips as edited, not as last saved)
   const std::map<std::string, Known> known = known_guids(abs_folder);
   const auto edits = unity_edits(folder_rel, job->nested, job->copies);
   std::function<void(const std::string &, const std::string &, int)> walk = [&](const std::string &dir, const std::string &unity_dir, int depth) {
@@ -258,7 +284,7 @@ bool Editor::export_unity_package(const std::string &folder_in, const std::strin
       it.guid = k != known.end() ? k->second.guid : stable_unity_guid(folder_rel, it.pathname);
       job->fresh += k == known.end();
       std::string meta;
-      it.meta = fs::read_file(fs::join(fs::join(abs_folder, ".unity-meta"), it.guid + ".meta"), meta) ? meta : fresh_meta(it.guid, it.folder);
+      it.meta = fs::read_file(fs::join(fs::join(abs_folder, ".unity-meta"), it.guid + ".meta"), meta) ? meta : fresh_meta(it.guid, it.folder, fs::extension(de.name));
       const auto e = edits.find(key);
       if (e != edits.end()) it.edits = e->second;
       job->items.push_back(std::move(it));
@@ -281,9 +307,12 @@ void Editor::poll_unity_export() {
   export_last_ = job;
   for (const std::string &p : job->skipped) Log::warn("Export Unity Package: %s left out (couldn't be read)", p.c_str());
   if (!job->why.empty()) return Log::warn("Export Unity Package: %s", job->why.c_str());
-  Log::info("Export Unity Package: %s - %d file(s) and folder(s) under their GUIDs (%d new), %d line(s) of changes in the prefabs and scenes%s%s",
+  Log::info("Export Unity Package: %s - %d file(s) and folder(s) under their GUIDs (%d new), %d line(s) of changes in the prefabs and scenes%s%s%s",
             job->out.c_str(), job->written, job->fresh, job->lines, job->nested ? strprintf("; %d object(s) of nested prefabs left as they were", job->nested).c_str() : "",
-            job->copies ? strprintf("; %d copy(s) of imported objects left out (their originals' edits go)", job->copies).c_str() : "");
+            job->copies ? strprintf("; %d copy(s) of imported objects left out (their originals' edits go)", job->copies).c_str() : "",
+            job->converted ? strprintf("; %d clip(s) written as Unity's .anim%s%s", job->converted, job->dropped_tracks ? strprintf(" (%d track(s) of other properties left out)", job->dropped_tracks).c_str() : "",
+                                       job->zeroed_axes ? strprintf(" (%d position or rotation axis/axes without keys written as 0: key all three, or export anim with the object selected)", job->zeroed_axes).c_str() : "").c_str()
+                           : "");
 }
 
 /* Quitting while an export writes: it stops at its next file (nothing written) and is waited for. */

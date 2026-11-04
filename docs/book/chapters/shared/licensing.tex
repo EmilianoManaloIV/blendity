@@ -1,0 +1,90 @@
+\chapter{Licensing and credit}
+\label{ch:licensing}
+Blendity follows Blender's design closely and is licensed to be compatible with it, with the libraries Blender bundles,
+and with the way it is written: by an AI under a person's direction. This chapter states the licence terms once, the
+reasoning behind them, and who is credited for what.
+
+\section{The terms}
+\begin{rulebox}{The licence, in four lines (\adr{0002}, \adr{0104})}
+\begin{itemize}
+  \item \textbf{The source} is GPL-2.0-or-later \cite{GPLv2}, the same as Blender's \cite{Blender2026}. Every source file
+    carries \code{SPDX-License-Identifier: GPL-2.0-or-later} \cite{SPDX2024}; the full text is the root \code{LICENSE}.
+  \item \textbf{The executables} are distributed under GPL-3.0-or-later \cite{GPLv3}, because they combine that source
+    with Apache-2.0 code \cite{Apache2} (MikkTSpace, the Cycles sky evaluation, and when built with Blender's libraries
+    Embree, OpenImageDenoise, oneTBB, Manifold, Open PGL and others), and Apache-2.0 combines with GPL version 3 but
+    not with version 2 alone \cite{GPLFAQ2026}. This is Blender's own situation.
+  \item \textbf{Your work is yours.} The GPL covers the program, not its output: scenes, meshes, textures, renders,
+    animations and exported files belong to whoever made them.
+  \item \textbf{Third-party notices} ship with every binary (\code{licenses/}), and any new copied code or library adds
+    its row to \code{licenses/README.md} in the same change.
+\end{itemize}
+\end{rulebox}
+
+\section{Why these terms are compatible with Blender's}
+Blender is GPL-2.0-or-later. A program that borrows its design and ports pieces of its source must be under a licence
+the GPL accepts, and ``GPL-2.0-or-later'' for the source keeps the two interchangeable in both directions: code could
+move from Blender's tree into Blendity's and back without a relicensing. The ``or later'' clause is what lets the
+binaries be GPL-3.0-or-later: Blender's own release binaries bundle the same Apache-2.0 libraries and are distributed
+on the same basis.
+
+Three kinds of third-party material are in or near the tree, each handled differently:
+\begin{itemize}
+  \item \textbf{Code copied unmodified from Blender's tree} into \code{extern/}: ufbx and fast\_float (MIT), MikkTSpace
+    (Apache-2.0), the Hosek--Wilkie sky (BSD-3-Clause), QuadriFlow with LEMON and pcg32 (BSD-3-Clause, Boost, Apache-2.0),
+    cuew (a modified Apache-2.0), \code{libc\_compat}. Their licence texts are in \code{licenses/} and
+    \code{extern/README.md} says where each came from.
+  \item \textbf{Code ported, not copied}: \code{src/render/sky.cpp} re-implements the sky radiance evaluation of Cycles'
+    \code{intern/cycles/kernel/svm/sky.h} (Apache-2.0, 2011--2022 Blender Foundation) in Blendity's own functions. The
+    file's header keeps that notice word for word, its SPDX line names both licences (\code{GPL-2.0-or-later AND
+    Apache-2.0}), and the file as a whole is distributed under GPL-3.0-or-later through the ``or later'' clause
+    (\adr{0002}, amended by \adr{0104}).
+  \item \textbf{Code read, not copied}: lilToon's lighting formulas \cite{lilToon2026} are re-implemented from reading
+    its shader (MIT; \adr{0100}); the Unity material converter reads Poiyomi's \cite{Poiyomi2026} and MToon's
+    \cite{MToon2026} property names; the Avatar window follows the CATS plugin's tools \cite{CATS2026}; the physics for
+    animation follows Cascadeur's ideas \cite{Cascadeur2026}. Nothing of their code is in the tree; they are credited
+    in \code{CREDITS.md} and listed in \code{licenses/README.md} under ``read, not copied''.
+\end{itemize}
+
+\textbf{Optional downloads} are never part of a build: Blender's prebuilt libraries (fetched by the installer or by
+Blendity itself, each under its own licence, all GPL-3-compatible), ONNX Runtime \cite{ONNXRuntime2026} and the
+inbetweening network trained on the CMU motion capture database \cite{CMUmocap2026}, and MoonRay \cite{MoonRay2026}
+run as a separate program (\adr{0041}). The Live Link bridges (\code{bridges/}) are Blendity's own code under the same
+GPL-2.0-or-later and run inside Blender, Unity, Godot and Unreal as those programs' plug-in terms allow; they link no
+code of Blendity's into them.
+
+\section{Compatible with an AI-assisted project}
+The code is written with Anthropic's Claude through Claude Code \cite{ClaudeCode2026} from task specifications and
+decision records a person approves, and every change is reviewed by a person before it lands
+(\code{docs/AI\_DISCLOSURE.md}). Three things make that compatible with the GPL and with reuse by others:
+\begin{enumerate}
+  \item \textbf{The outputs are the user's.} Under Anthropic's terms \cite{AnthropicTerms2026} the model's outputs belong
+    to the user who directed them, and the project licenses them to the extent copyright subsists in them: the human
+    selection, direction, review and editing (a purely machine-written passage may carry no copyright of its own, and
+    the licence claims none it does not have). Copyright is held by Emiliano Manalo and contributors; the
+    \code{Co-Authored-By} trailer names the model as attribution, not as a rights holder.
+  \item \textbf{Nothing is claimed that isn't the project's.} Where a method comes from a paper, the paper is cited in
+    the code's comments, in the Learn tab and in \code{research/FEATURES.md}; where code is copied, its licence rides
+    along; where a program's design is followed, it is credited. A reader can tell, for every piece, what was borrowed
+    and under what terms.
+  \item \textbf{The AI is a tool at build time, not in the product.} The editor runs no model except the optional,
+    local AI inbetweening download; there is no telemetry and no cloud, and the one request it makes on its own is the
+    optional daily check of GitHub's releases. A user of the GPL program depends on no service.
+\end{enumerate}
+
+\section{Due credit}
+Blendity stands on the work of others, and \code{CREDITS.md} names them: the Blender Foundation and the Blender authors,
+whose design and source every subsystem follows \cite{Blender2026}; Unity Technologies, whose editor the windows,
+shortcuts, Play mode, Animation window and asset formats follow \cite{UnityManual2026}; Epic Games (Unreal: the keymap
+preset, the editor feel, FBX collision naming, Sequencer) \cite{UnrealDocs2026}; the Godot Engine contributors
+\cite{GodotDocs2026}; Autodesk (Maya and 3ds Max presets) \cite{MayaDocs2026, MaxDocs2026}; Trimble (SketchUp's
+Push/Pull, drawing and inference) \cite{SketchUpHelp2026}; Adobe (Photoshop's brush keys and blend modes, Substance
+Painter's mesh maps and layer stacks, Mixamo's auto-rig) \cite{PhotoshopHelp2026, SubstancePainterDocs2026, Mixamo2026};
+UModeler and Plasticity \cite{UModelerDocs2026, PlasticityDocs2026}; Maxon's ZBrush and Pixologic's Sculptris
+\cite{ZBrushDocs2026, SculptrisDocs2026}; SketchBook \cite{SketchBookDocs2026}, PureRef \cite{PureRef2026} and Krita
+\cite{Krita2026}; VRChat \cite{VRChatCreators2026}, lilToon \cite{lilToon2026}, Poiyomi \cite{Poiyomi2026}, the VRM
+Consortium \cite{MToon2026}, VRoid \cite{VRoid2026}, the MMD community \cite{MMD2026} and the CATS plugin
+\cite{CATS2026}; Nekki's Cascadeur \cite{Cascadeur2026}; DreamWorks' MoonRay \cite{MoonRay2026}; REDSIM's VRC Light
+Volumes \cite{VRCLightVolumes2026}; Carnegie Mellon's motion capture database \cite{CMUmocap2026}; Marschner and
+Shirley \cite{MarschnerShirley2021} and Gregory \cite{Gregory2018vol1, Gregory2018vol2}, whose books the Learn tab
+teaches from; and the authors of every paper in the References chapter. Ideas are borrowed with their names attached;
+code only with its licence.

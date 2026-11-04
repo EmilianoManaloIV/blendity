@@ -2,6 +2,9 @@
 // The Animation window (task 0059, ADR 0029): Unity's dopesheet. The clip of the selected object's Animation
 // component, its tracks down the left, their keys as diamonds along a ruler on the right. Preview poses the scene
 // without an undo step (and puts it back after); Record turns edits of the animated objects into keys at the playhead.
+#include "../scene/body_physics.h"  // (round 408: find_armature)
+#include "../scene/humanoid.h"  // (round 408)
+#include "../scene/retarget.h"  // (round 408)
 #include "editor.h"
 
 #include "../scene/animation.h"
@@ -112,12 +115,17 @@ void Editor::anim_snapshot_shown() {
   anim_.shown_root = root ? root->id : 0;
   anim_.shown_clip = clip.get();
   if (!root) return;
-  for (GameObject *g : subtree(root))
+  for (GameObject *g : subtree(root)) {
     for (const char *prop : {"Position", "Rotation", "Scale"})
       for (int a = 0; a < 3; a++) {
         float v = 0.0f;
         if (read_anim_value(*g, prop, a, v)) anim_.shown[shown_key(g->id, prop, a)] = v;
       }
+    const MeshFilter *mf = g->mesh_filter();  // (round 406: the shape weights, for Record to make their tracks)
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    for (size_t k = 0; mf && mf->mesh && mr && k < mf->mesh->shape_keys.size(); k++)
+      anim_.shown[shown_key(g->id, "MeshRenderer.BlendShape/" + mf->mesh->shape_keys[k].name, 0)] = mr->shape_weight(mf->mesh->shape_keys[k].name);
+  }
   if (!clip) return;
   for (const AnimTrack &t : clip->tracks) {
     GameObject *g = anim_target(*root, t.path);
@@ -305,6 +313,7 @@ void Editor::anim_record_changes() {
     const std::string path = anim_path(*root, *g);
     for (const char *prop : {"Position", "Rotation", "Scale"}) keyed = anim_record_vector(*clip, *g, path, prop, anim_key_frame(g)) || keyed;  // (round 340: on 2s, the drawn frame)
   }
+  anim_record_shape_weights(*clip, *root, keyed);  // (round 406: a weight moved makes its BlendShape track, as Unity's Record)
   for (AnimTrack &t : clip->tracks) {  // the components' numbers already animated
     if (is_transform_property(t.property)) continue;
     GameObject *g = anim_target(*root, t.path);
@@ -320,6 +329,67 @@ void Editor::anim_record_changes() {
     clip->touch();
   }
   anim_snapshot_shown();
+}
+
+/* Round 408 (task 0385): the scene's humanoid rigs apart from the one animated - each a root an Armature sits under. */
+std::vector<GameObject *> Editor::retarget_targets() {
+  std::vector<GameObject *> out;
+  GameObject *root = anim_root();
+  scene_->for_each([&](GameObject &g) {
+    if (!g.get<Armature>() || !humanoid::map(*scene_, g).valid()) return;
+    GameObject *top = rig_root_of(&g);  // (the character's root, as anim_root reads it)
+    if (!top) top = &g;
+    if (top == root || (root && body::find_armature(*root) == &g) || std::find(out.begin(), out.end(), top) != out.end()) return;
+    out.push_back(top);
+  });
+  return out;
+}
+
+bool Editor::retarget_open_clip(GameObject &target_root) {
+  GameObject *root = anim_root();
+  const AnimationClipPtr clip = anim_clip();
+  if (playing_) return refuse("Retarget: not while Play runs", "stop", "Stop Play"), false;
+  if (!root || !clip) return refuse("Retarget: open a clip on the rig it was made for first", "window Animation", "Animation"), false;
+  if (&target_root == root) return Log::warn("Retarget: %s is the clip's own rig", target_root.name.c_str()), false;
+  AnimationClip out;
+  RetargetResult r;
+  if (!retarget_clip(*scene_, *clip, *root, target_root, out, r)) {
+    for (const std::string &n : r.notes) Log::warn("Retarget: %s", n.c_str());
+    return false;
+  }
+  const std::string base = fs::stem(clip->asset_path.empty() ? clip->name : clip->asset_path), who = file_safe(target_root.name);
+  std::string path = fs::join(fs::parent(clip->asset_path.empty() ? std::string("Assets/Animations/x") : clip->asset_path), base + " (" + who + ").anim");
+  for (int k = 2; fs::exists(resolve_asset_path(path)); k++) path = fs::join(fs::parent(path), base + strprintf(" (%s %d).anim", who.c_str(), k));
+  const AnimationClipPtr made = create_clip_asset(path, base + " (" + target_root.name + ")");
+  if (!made) return Log::warn("Retarget: couldn't write %s", path.c_str()), false;
+  const std::string name = made->name;
+  *made = out;
+  made->name = name, made->asset_path = path;
+  made->touch();
+  for (const std::string &n : r.notes) Log::warn("Retarget: %s", n.c_str());
+  Log::info("Retarget: %s plays %s - %d part(s) over %d frame(s), the hips' moves x %.2f (saved as %s)", target_root.name.c_str(), clip->name.c_str(), r.parts, r.frames, r.hip_scale, path.c_str());
+  select(target_root.id);
+  anim_pick_clip(&target_root, path);  // (the target's Animation component made and set, the window on it)
+  mark_changed("Retarget Clip");
+  return true;
+}
+
+/* Round 406: Record on a shape weight that moved since it was shown - the BlendShape track made when missing (the
+ * tracks that exist are keyed with the other components' numbers). */
+void Editor::anim_record_shape_weights(AnimationClip &clip, GameObject &root, bool &keyed) {
+  for (GameObject *g : subtree(&root)) {
+    const MeshFilter *mf = g->mesh_filter();
+    const MeshRenderer *mr = g->get<MeshRenderer>();
+    if (!mf || !mf->mesh || !mr) continue;
+    const std::string path = anim_path(root, *g);
+    for (const ShapeKey &k : mf->mesh->shape_keys) {
+      const std::string prop = "MeshRenderer.BlendShape/" + k.name;
+      const float v = mr->shape_weight(k.name);
+      if (!anim_changed(g->id, prop, 0, v)) continue;
+      clip.track(path, prop, 0).set_key(anim_key_frame(g), v);
+      keyed = true;
+    }
+  }
 }
 
 /* Playback in Preview: the playhead runs at the clip's frame rate and loops at its end. */
@@ -588,13 +658,28 @@ void Editor::draw_anim_toolbar(const Recti &bar, GameObject *root) {
     if (u.record_buttons) u.button_rects["anim:Fit"] = fb;
     if (button(u.px(36), "Fit", false, "The whole clip in view (Home). Ctrl+wheel or a pinch zooms the time, Shift+wheel, two fingers or the middle button pans it.")) anim_view_fit();
   }
-  group(u.px(73 + 79 + 67));  // (Puppet, Dopesheet, Curves)
+  group(u.px(73 + 75 + 79 + 67));  // (Puppet, Retarget, Dopesheet, Curves)
   {  // (tasks 0281-0284: Puppet Posing's tools in one menu - the toolbar is already wider than most windows)
     const Recti pb{x, y, u.px(70), bh};
     const bool any = trails_.show || trails_.onion > 0 || zoe_.on || anim_.smooth;
     if (button(u.px(70), "Puppet", any, "Puppet Posing's tools: motion trails, onion skin, the Zoetrope, Motion Check, the smooth brush,\n"
                                         "Lock in Place, and how far a pose edit reaches."))
       u.open_popup(u.id("anim_puppet"), {pb.x, y + bh, 0, 0});
+  }
+  {  // (round 408: Mecanim's move of a clip between humanoids)
+    const Recti rb{x, y, u.px(72), bh};
+    if (u.record_buttons) u.button_rects["anim:Retarget"] = rb;
+    if (button(u.px(72), "Retarget", false, "Play this clip on another humanoid rig: a clip of that rig's own, by what each body part does (Unity's Humanoid\n"
+                                            "retargeting) - the hips' move scaled to its height, an A pose's arm drop taken out.")) {
+      retarget_targets_ = retarget_targets();  // (found once as the menu opens: the map's analysis isn't a per-frame cost)
+      u.open_popup(u.id("anim_retarget"), {rb.x, y + bh, 0, 0});
+    }
+    u.popup(u.id("anim_retarget"), u.px(240), [this] {
+      if (retarget_targets_.empty()) return ui_.menu_label("No other humanoid rig in the scene");
+      ui_.menu_label("Retarget to");
+      for (GameObject *t : retarget_targets_)
+        if (scene_->find(t->id) && ui_.menu_item(t->name)) retarget_open_clip(*t);
+    });
   }
   if (button(u.px(76), "Dopesheet", !anim_.curves, "The keys as diamonds along the time line (Unity's Dopesheet).")) anim_.curves = false;
   if (button(u.px(64), "Curves", anim_.curves,
@@ -699,9 +784,13 @@ void Editor::draw_anim_add_property(GameObject *root) {
   bool under = false;
   for (GameObject *x = a; x && !under; x = x->parent) under = x == root;
   GameObject *g = under ? a : root;
-  u.popup(u.id("anim_add_prop"), u.px(280), [this, g] {  // (round 335: a search, and the properties by group)
+  if (!root) return;
+  /* Round 406: Unity's tree - the objects under the root, one unfolded (the selected one to begin with), its
+   * components as groups and their properties under them; a search looks through every object. */
+  if (!anim_.prop_object) anim_.prop_object = g ? g->id : root->id;  // (0: not chosen yet; UINT64_MAX: all folded)
+  if (anim_.prop_object != UINT64_MAX && !scene_->find(anim_.prop_object)) anim_.prop_object = g ? g->id : root->id;
+  u.popup(u.id("anim_add_prop"), u.px(300), [this, root] {  // (round 335: a search, and the properties by group)
     auto &u = ui_;
-    if (!g) return;
     const Recti sr = u.popup_row(u.row_h() + u.px(6));
     const ui::Id sid = u.id("anim_prop_search");
     if (!u.editing(sid) && anim_prop_search_.empty()) u.begin_edit(sid, "", false);
@@ -712,15 +801,28 @@ void Editor::draw_anim_add_property(GameObject *root) {
       return u.close_popups();
     }
     const std::string f = to_lower(anim_prop_search_);
-    std::string group;
     int shown = 0;
-    for (const auto &[grp, prop, axes] : anim_properties_of(*g, g == anim_root())) {
-      if (!f.empty() && to_lower(prop).find(f) == std::string::npos && to_lower(grp).find(f) == std::string::npos) continue;
-      if (grp != group) u.menu_label(group = grp);
-      shown++;
-      if (!u.menu_item(g->name + " : " + prop)) continue;
-      u.stop_editing();
-      anim_add_property(g, prop, axes);
+    for (GameObject *o : subtree(root)) {
+      const bool open = !f.empty() || o->id == anim_.prop_object;
+      if (f.empty()) {
+        const Recti orow = u.popup_row(u.row_h() + u.px(2));
+        int depth = 0;
+        for (GameObject *x = o->parent; x && x != root->parent; x = x->parent) depth++;
+        const Recti ob{orow.x + u.px(4) + depth * u.px(10), orow.y, orow.w - u.px(8) - depth * u.px(10), orow.h};
+        if (u.record_buttons) u.button_rects["anim_prop_obj:" + o->name] = ob;
+        if (u.button(ob, (open ? "v " : "> ") + o->name, open)) anim_.prop_object = open ? UINT64_MAX : o->id;
+        u.tooltip("The object's animatable properties (Unity's Add Property tree): click to unfold.");
+      }
+      if (!open) continue;
+      std::string group;
+      for (const auto &[grp, prop, axes] : anim_properties_of(*o, o == root)) {
+        if (!f.empty() && to_lower(prop).find(f) == std::string::npos && to_lower(grp).find(f) == std::string::npos && to_lower(o->name).find(f) == std::string::npos) continue;
+        if (grp != group) u.menu_label(group = f.empty() ? grp : o->name + " > " + grp);
+        shown++;
+        if (!u.menu_item(o->name + " : " + prop)) continue;
+        u.stop_editing();
+        anim_add_property(o, prop, axes);
+      }
     }
     if (!shown) u.menu_label("No property matches");
   });
@@ -849,27 +951,108 @@ void Editor::anim_view_input(const Recti &ruler, const Recti &sheet, float end) 
  * .x / .y / .z rows when expanded; a lone number one row. The Curves view lists every track on its own. */
 std::vector<Editor::AnimRow> Editor::anim_rows(const AnimationClip &clip) const {
   std::vector<AnimRow> rows;
-  for (size_t t = 0; t < clip.tracks.size();) {
-    size_t e = t + 1;
-    if (!anim_.curves)
-      while (e < clip.tracks.size() && clip.tracks[e].path == clip.tracks[t].path && clip.tracks[e].property == clip.tracks[t].property) e++;
-    if (e - t == 1) {
-      rows.push_back({{(int)t}, clip.tracks[t].label(), false, 0});
-      t = e;
-      continue;
+  if (anim_.curves) {  // (the Curves view: a row a track)
+    for (size_t t = 0; t < clip.tracks.size(); t++) rows.push_back({{(int)t}, clip.tracks[t].label(), false, 0});
+    return rows;
+  }
+  /* Round 406: Unity's layout - the summary row, then an object row per path with its property rows under it. */
+  if (!clip.tracks.empty()) {
+    AnimRow s{{}, "Summary", true, 0};
+    for (size_t t = 0; t < clip.tracks.size(); t++) s.tracks.push_back((int)t);
+    s.key = "summary", s.open = true;
+    rows.push_back(s);
+  }
+  /* The paths in the order first seen, each with its tracks wherever the clip holds them (Record and Add Property
+   * append at the end); the properties under a path the same way. */
+  std::vector<std::string> paths;
+  std::map<std::string, std::vector<int>> by_path;
+  for (size_t t = 0; t < clip.tracks.size(); t++) {
+    if (!by_path.count(clip.tracks[t].path)) paths.push_back(clip.tracks[t].path);
+    by_path[clip.tracks[t].path].push_back((int)t);
+  }
+  for (const std::string &path : paths) {
+    const std::vector<int> &ts = by_path[path];
+    const std::string who = path.empty() ? std::string("(root)") : path.substr(path.rfind('/') == std::string::npos ? 0 : path.rfind('/') + 1);
+    AnimRow o{ts, who, true, 0};
+    o.key = "object|" + path, o.open = anim_.folded_objects.count(path) == 0;
+    rows.push_back(o);
+    if (!o.open) continue;
+    std::vector<std::string> props;
+    std::map<std::string, std::vector<int>> by_prop;
+    for (int t : ts) {
+      if (!by_prop.count(clip.tracks[(size_t)t].property)) props.push_back(clip.tracks[(size_t)t].property);
+      by_prop[clip.tracks[(size_t)t].property].push_back(t);
     }
-    const AnimTrack &first = clip.tracks[t];
-    const std::string key = first.path + "|" + first.property;
-    const bool open = anim_.expanded.count(key) != 0;
-    AnimRow g{{}, (first.path.empty() ? std::string("(root)") : first.path) + " : " + first.property, true, 0};
-    for (size_t k = t; k < e; k++) g.tracks.push_back((int)k);
-    g.key = key, g.open = open;
-    rows.push_back(g);
-    if (open)
-      for (size_t k = t; k < e; k++) rows.push_back({{(int)k}, "    ." + std::string(1, "xyz"[std::max(0, std::min(2, clip.tracks[k].axis))]), false, 1});
-    t = e;
+    for (const std::string &prop : props) {
+      const std::vector<int> &ps = by_prop[prop];
+      if (ps.size() == 1) {
+        rows.push_back({{ps[0]}, clip.tracks[(size_t)ps[0]].label(), false, 1});
+        continue;
+      }
+      const std::string key = path + "|" + prop;
+      AnimRow g{ps, (path.empty() ? std::string("(root)") : path) + " : " + prop, true, 1};
+      g.key = key, g.open = anim_.expanded.count(key) != 0;
+      rows.push_back(g);
+      if (!g.open) continue;
+      for (int k : ps) rows.push_back({{k}, "    ." + std::string(1, "xyz"[std::max(0, std::min(2, clip.tracks[(size_t)k].axis))]), false, 2});
+    }
   }
   return rows;
+}
+
+/* A fold arrow clicked: an object row folds (open by default), a property group unfolds (folded by default). */
+void Editor::anim_toggle_row(const AnimRow &row) {
+  if (row.summary()) return;
+  if (row.object()) {
+    const std::string path = row.key.substr(7);
+    if (row.open) anim_.folded_objects.insert(path);
+    else anim_.folded_objects.erase(path);
+    return;
+  }
+  if (row.open) anim_.expanded.erase(row.key);
+  else anim_.expanded.insert(row.key);
+}
+
+/* Round 406: what a single row's value field shows - the live number on the scene while previewing (what Record would
+ * key), else the track at the playhead; a BlendShape in 0-100 as Unity shows it. */
+float Editor::anim_row_value(const AnimationClip &clip, const AnimRow &row, GameObject *root) const {
+  if (row.tracks.size() != 1) return 0.0f;
+  const AnimTrack &t = clip.tracks[(size_t)row.tracks[0]];
+  float v = t.sample(anim_.frame);
+  GameObject *g = root ? anim_target(*root, t.path) : nullptr;
+  if (g && anim_.preview) read_anim_value(*g, t.property, t.axis, v);
+  return t.property.rfind("MeshRenderer.BlendShape/", 0) == 0 ? v * 100.0f : v;
+}
+
+void Editor::anim_set_row_value(const AnimRow &row, float v) {
+  AnimationClipPtr clip = anim_clip();
+  if (!clip || row.tracks.size() != 1 || (size_t)row.tracks[0] >= clip->tracks.size()) return;
+  const size_t track = (size_t)row.tracks[0];
+  const bool shape = clip->tracks[track].property.rfind("MeshRenderer.BlendShape/", 0) == 0;
+  const float value = shape ? v / 100.0f : v;
+  GameObject *root = anim_root();
+  anim_edit_keys("Key Value", [&](AnimationClip &c) {
+    if (track >= c.tracks.size()) return;
+    GameObject *g = root ? anim_target(*root, c.tracks[track].path) : nullptr;
+    c.tracks[track].set_key(anim_key_frame(g), value);
+  });
+}
+
+/* The row's key button (Unity's): every track of the row keyed at the playhead with its current value. */
+void Editor::anim_key_row(const AnimRow &row) {
+  if (playing_) return refuse("Add Key: not while Play runs", "stop", "stop Play");
+  GameObject *root = anim_root();
+  anim_edit_keys("Add Key", [&](AnimationClip &c) {
+    for (int ti : row.tracks) {
+      if (ti < 0 || (size_t)ti >= c.tracks.size()) continue;
+      AnimTrack &t = c.tracks[(size_t)ti];
+      GameObject *g = root ? anim_target(*root, t.path) : nullptr;
+      const float frame = anim_key_frame(g);
+      float v = t.sample(frame);
+      if (g) read_anim_value(*g, t.property, t.axis, v);
+      t.set_key(frame, v);
+    }
+  });
 }
 
 /* The keys a row shows at `frame`: on a group row, each of its tracks' key there. */
@@ -885,9 +1068,10 @@ std::vector<std::pair<int, float>> Editor::anim_row_keys(const AnimationClip &cl
 /* The frames a row has keys on (a group: any of its tracks'). */
 std::vector<float> Editor::anim_row_frames(const AnimationClip &clip, const AnimRow &row) const {
   std::vector<float> fs;
-  for (int t : row.tracks)
-    for (const AnimKey &k : clip.tracks[(size_t)t].keys)
-      if (std::none_of(fs.begin(), fs.end(), [&](float f) { return std::fabs(f - k.frame) < 0.01f; })) fs.push_back(k.frame);
+  for (int t : row.tracks)  // (round 406: sorted and made unique - a summary row holds every key of the clip)
+    for (const AnimKey &k : clip.tracks[(size_t)t].keys) fs.push_back(k.frame);
+  std::sort(fs.begin(), fs.end());
+  fs.erase(std::unique(fs.begin(), fs.end(), [](float a, float b) { return std::fabs(a - b) < 0.01f; }), fs.end());
   std::sort(fs.begin(), fs.end());
   return fs;
 }
@@ -1022,6 +1206,7 @@ void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const R
   auto &u = ui_;
   auto &in = u.in;
   const std::vector<AnimRow> rows = anim_rows(clip);
+  if (u.record_buttons) anim_row_values_for_test_.clear();
   const int fit = std::max(1, list.h / std::max(1, row_h));
   const Recti scroll_area = anim_.curves ? list : body;
   if (u.hovered(scroll_area) && in.wheel_y != 0.0f) anim_.scroll -= (int)in.wheel_y, in.wheel_y = 0.0f;
@@ -1070,20 +1255,37 @@ void Editor::draw_anim_row_name(const AnimationClip &clip, GameObject *root, con
   const bool picked = row.tracks.size() == 1 && std::find(anim_.curve_tracks.begin(), anim_.curve_tracks.end(), t) != anim_.curve_tracks.end();
   if (anim_.curves && picked) u.canvas.fill_rect(lr, u.theme.selection);
   else if (index % 2) u.canvas.fill_rect({body.x, lr.y, anim_.curves ? lr.w : body.w, lr.h}, u.theme.row_alt);
-  const bool missing = t >= 0 && anim_target(*root, clip.tracks[(size_t)t].path) == nullptr;
+  const bool missing = t >= 0 && !row.summary() && !row.object() && anim_target(*root, clip.tracks[(size_t)t].path) == nullptr;
   int x = lr.x + u.px(6) + row.depth * u.px(10);
-  if (row.group) {
+  if (row.group && !row.summary()) {  // (the summary row has nothing to fold)
     const Recti arrow{x, lr.y, u.px(14), lr.h};
     u.draw_icon(row.open ? Icon::ArrowDown : Icon::ArrowRight, {arrow.x, arrow.y + u.px(3), lr.h - u.px(6), lr.h - u.px(6)}, u.theme.text_dim);
-    if (u.hovered({lr.x, lr.y, x + u.px(16) - lr.x, lr.h}) && in.pressed[0]) {
-      if (row.open) anim_.expanded.erase(row.key);
-      else anim_.expanded.insert(row.key);
+    if (!row.summary() && u.hovered({lr.x, lr.y, x + u.px(16) - lr.x, lr.h}) && in.pressed[0]) {
+      anim_toggle_row(row);
       in.pressed[0] = false;
     }
     x += u.px(16);
   }
-  u.label({x, lr.y, lr.right() - x - u.px(2), lr.h}, row.label, missing ? u.theme.warning : u.theme.text);
+  /* Round 406 (Unity's rows): a key button on every row, a value field on a single track's. */
+  const int kw = u.px(18), vw = anim_.curves || row.tracks.size() != 1 ? 0 : u.px(56);
+  const Recti kb{lr.right() - kw - u.px(2), lr.y + u.px(2), kw, lr.h - u.px(4)};
+  const Recti vf{kb.x - vw - u.px(3), lr.y + u.px(1), vw, lr.h - u.px(2)};
+  const int label_right = (vw ? vf.x : kb.x) - u.px(4);
+  u.label({x, lr.y, label_right - x, lr.h}, row.label, missing ? u.theme.warning : row.summary() || row.object() ? u.theme.text_bright : u.theme.text);
   if (u.record_buttons) u.button_rects["anim_track:" + row.label] = lr;  // (tests)
+  if (!anim_.curves) {
+    if (u.record_buttons) u.button_rects["anim_key:" + row.label] = kb;
+    if (u.button(kb, "", false, Icon::Plus)) anim_key_row(row);
+    u.tooltip(row.summary() ? "A key of every track at the playhead (Unity's Add Keyframe)." : row.object() ? "A key of each of this object's tracks at the playhead." : "A key of this track at the playhead with its current value.");
+  }
+  if (vw) {
+    float v = anim_row_value(clip, row, root);
+    if (u.record_buttons) anim_row_values_for_test_[row.label] = v;
+    const float before = v;
+    const bool shape = t >= 0 && clip.tracks[(size_t)t].property.rfind("MeshRenderer.BlendShape/", 0) == 0;
+    if (u.float_field(u.id("anim_val:" + row.label), vf, v, shape ? 0.5f : 0.01f, shape ? 0.0f : -1e30f, shape ? 100.0f : 1e30f, shape ? "%.0f" : "%.3g") && v != before) anim_set_row_value(row, v);
+    u.tooltip(shape ? "The shape's weight at the playhead, 0-100 (Unity's); typing keys it." : "The value at the playhead; typing keys it (Unity's value field).");
+  }
   if (anim_.curves && t >= 0 && u.hovered(lr) && in.pressed[0]) anim_pick_curve(t, in.ctrl());
   (void)sheet;
 }
@@ -1169,6 +1371,11 @@ void Editor::draw_animation_window(const Recti &r) {
   }
   if (in.ctrl() && in.key_pressed[platform::KEY_C]) anim_copy(), in.key_pressed[platform::KEY_C] = false;
   if (in.ctrl() && in.key_pressed[platform::KEY_V]) anim_paste(), in.key_pressed[platform::KEY_V] = false;
+  /* Round 406: Unity's Animation window keys over the sheet - K a key of every track at the playhead, comma / full
+   * stop the previous / next key (Space stays the keymap's Wheel; Unity's Space is on the transport button). */
+  if (in.mods == 0 && in.key_pressed[platform::KEY_K]) anim_key_all(), in.key_pressed[platform::KEY_K] = false;
+  if (in.mods == 0 && in.key_pressed[platform::KEY_COMMA]) anim_step_key(-1), in.key_pressed[platform::KEY_COMMA] = false;
+  if (in.mods == 0 && in.key_pressed[platform::KEY_PERIOD]) anim_step_key(1), in.key_pressed[platform::KEY_PERIOD] = false;
 }
 
 /* ---------------------------------------------------------------- console */
@@ -1333,6 +1540,11 @@ void Editor::anim_command(const std::vector<std::string> &t) {
   const std::string verb = to_lower(arg(1, ""));
   auto on = [&](size_t i) { return to_lower(arg(i, "on")) != "off"; };
   if (verb == "new") return (void)anim_new_clip(anim_root(), arg(2, ""));
+  if (verb == "retarget") {  // anim retarget <target root> (round 408): the open clip onto another rig
+    GameObject *target = scene_->find_by_name(arg(2, ""));
+    if (!target) return Log::warn("anim retarget <object>: no object '%s' (the root of the rig to animate)", arg(2, "").c_str());
+    return (void)retarget_open_clip(*target);
+  }
   if (verb == "frame") return anim_set_frame((float)std::atof(arg(2, "0").c_str()));
   if (trail_command(t)) return;  // (anim trails on|off | onion off|<n> [step]: task 0282)
   if (zoetrope_command(t)) return;  // (anim zoetrope on|off [step]: task 0283)

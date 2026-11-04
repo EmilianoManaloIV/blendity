@@ -2,6 +2,208 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-03 (round 410): the 0.13.0 pre-release
+
+**Asked:** "update the pre release and specific operating system downloads" (the 2026-11-03 refinement round).
+
+**Changed**
+- Version 0.13.0: VERSION, the README's pre-release note, the manual, the installer script's example and the version a
+  build without VERSION reports, ahead of the v0.13.0 tag. `release.yml` builds the Windows, macOS and Linux installers,
+  SHA256SUMS.txt and, new in this release, the two books, and `publish_release.sh` attaches all of them under the fixed
+  names the README's download links use (`releases/latest/download/<name>`).
+
+## 2026-11-03 (round 409): the two books, one reference list, the licensing review, the stack merged
+
+**Asked:** "Add two pdfs to the project. One for architectural documentation so someone can learn how the software
+works (comes with SDLC diagrams and artifacts). One for user documentation so the user can navigate the editor and feel
+comfortable coming from other software. Only write this once for now when I ask; not to edit the documentation for every
+round. Make sure to cite everything that is used in the project (papers, repositories, websites, etc.). There should be
+a reference page and every element (the code, UI, documentation) should be referenced. Due credit should be rewarded.
+Make sure the licensing for this software is compatible with the licensing in Blender and AI assisted projects. Finally,
+update the pre release and specific operating system downloads. Do another test suite for both with and without
+dependencies." Then: "Make sure the papers are acceptable by HCI guidelines." The user chose LaTeX, the PDFs committed in
+`docs/` and attached to the release, version 0.13.0, and the open stack #293-#307 merged first (merged bottom-up into
+main with merge commits, each branch updated and its CI green before its merge).
+
+**Added (task 0386, ADR 0104; ADR 0002 amended)**
+- **`docs/Blendity-Architecture.pdf`** (62 pages): purpose and scope, the context, the layers and the two
+  flows (one frame, one edit), the scene and mesh model, rendering, the editor, bridges and Live Link, the research
+  features, the agentic SDLC with its roles, lifecycle, gates and artifacts, build / test / release, performance, what
+  isn't recreated, licensing and credit; eight TikZ diagrams (context, layers, one edit, the render pipeline, the Live
+  Link sequence, the SDLC, deployment, requirements traceability); the References chapter; Index A (code ->
+  references) and Index B (documents -> references).
+- **`docs/Blendity-User-Guide.pdf`** (68 pages): install and the first start, getting around, coming from
+  Unity / Blender / Maya / 3ds Max / SketchUp / Unreal / Adobe (the feel, the presets side by side, what is where), the
+  stages (reference and blocking, modeling / sculpting / UVs, materials / textures / painting, lighting and rendering,
+  rigging and animation, files and Live Link), the Learn tab and the console, pen / Draw tab / papers / board / VR,
+  troubleshooting, licensing; eight headless figures; the References chapter; Index C (Learn lessons -> references).
+- **One reference list, generated** (`tools/make_books.py --bib`): 181 entries from the lessons' `> ` and `@ `
+  lines, `research/FEATURES.md`, `licenses/README.md` and a hand-written `refs_extra.bib` (the reference books, the
+  programs' manuals, the standards and licences, the papers the architecture's tables name), deduplicated, with
+  biblatex back-references to the citing pages; `--check-cited` (uncited, missing) runs in `build.yml` and `--bib` before the
+  PDFs in `release.yml`'s new `books` job, which attaches them to every release (`publish_release.sh` publishes
+  `*.pdf`); the README links both.
+- **HCI guidelines for the books** (the user's second request): every text colour, link and box title at WCAG 2.1 AA's
+  4.5:1 or more (the palette darkened where it is text: amber 5.4:1, blue 6.7:1, grey 6.4:1, mint 5.2:1); links told
+  apart by form as well as colour; alt text and a describing caption on every figure; the document's language
+  metadata declared, headings as bookmarks; a 152 mm text width (about 80 characters a line) in the editor's
+  DejaVu faces; task-first chapters with numbered steps, worked examples, a troubleshooting chapter and a Learn pointer
+  per chapter (Nielsen's help heuristic, Carroll's minimalist instruction); the guidelines stated in the colophon. PDF
+  structure tags stay off: LaTeX's tagging project does not yet support tcolorbox and titlesec (the build failed with
+  them on); said in the colophon.
+- **Licensing:** `src/render/sky.cpp`'s header names its Apache-2.0 origin (Cycles), the copyright holders and the
+  GPL-3.0-or-later combination; `licenses/README.md` gains "Ported, not copied" (the sky), "Read, not copied" (lilToon
+  MIT, Poiyomi, MToon MIT, CATS MIT, Cascadeur, MoonRay Apache-2.0, the bridges) and "Authorship and copyright";
+  `docs/AI_DISCLOSURE.md` the same statement; **`CREDITS.md`** names the people and products Blendity follows.
+- **The Learn lesson** "The Books and the References" (where the books are, how the list is made, what the licence
+  means, written with an AI under review), with three questions and three Try-it buttons.
+
+**Checked:** `tests_round409` (the PDFs, sources, generated list and CREDITS.md in the tree; every `\cite` of four
+chapters an entry of a `.bib`; the lesson with its questions and known commands); `make_books.py --check`
+(181 references, every one cited); both books built in WSL's TeX Live; both suites green - with Blender's libraries 15,902 checks in 1,543 tests, 0 failed; dependency-free 15,253 (Windows) and 15,259 (Linux, WSL) checks, 0 failed (`tools/run_suites.py`); the audits.
+
+## 2026-11-03 (round 408): Humanoid retargeting like Mecanim
+
+**Asked:** a clip made on one humanoid rig played by another (the 2026-11-03 plan's round 408).
+
+**Added (task 0385, ADR 0103)**
+- **Retarget** in the Animation window (and `anim retarget <object>`): the open clip onto another humanoid rig in the
+  scene, by what each body part does - the 21 parts of the humanoid map found on any naming scheme, each part's turn from
+  its rest given to the target's part, the hips' move scaled to the target's height, an A pose's arm drop reconciled
+  with a T pose as Mecanim reads them (a T-posed clip's rest frame means arms horizontal). The result is the target's
+  own clip, saved beside the source's, set on the target and opened.
+
+**Checked:** `tests_round408` (a Mixamo-named T rig's clip onto a VRoid-named rig twice its size: the parts' turns equal,
+the hips' move doubled, the target's paths; a T rig's rest frame puts an A rig's arms horizontal and an A rig's rest
+hangs a T rig's arms, an elbow's bend carries; the editor's menu and command); the suites, the audits.
+
+## 2026-11-03 (round 407): Unity .anim files in and out
+
+**Asked:** Unity's animation clips as Blendity's and back (the 2026-11-03 plan's round 407).
+
+**Added (task 0384, ADR 0102)**
+- **Unity's .anim read as a clip** (`unity_anim_to_clip`): positions, Euler or quaternion rotations, scales, blend shapes
+  (0-100 to 0-1), Active; the sample rate, length, loop and tangent modes; what Blendity can't carry (material floats,
+  object curves, events) said. A Unity project's clip is never written over: an edit saves to a Blendity copy beside
+  it; `export anim` writes a Unity file on purpose.
+- **A clip written as a Unity .anim** (`clip_to_unity_anim`, `export anim <out.anim> [clip]`): the same mapping back in
+  Unity's own layout (Euler curves with per-axis editor curves, no quaternion curves), blend shapes on the Skinned Mesh
+  Renderer in 0-100, the axes you didn't key filled from the object.
+- **`import <file.anim>`** copies a clip into Assets/Animations and opens it in the Animation window on the selected
+  object; **Export Unity Package** converts Blendity's clips to Unity's on the way out, with Unity's meta.
+
+**The fresh-project flow (end to end):** `tools/unity_e2e.py` runs what a user does - a new project, `import <package>`,
+`open <scene>` (or the avatar prefab), Unity's lightmaps, a render at the comparison stations - and reads the log for
+anything about textures, materials or scripts. It found three things, fixed: Unity's lightmap fetch wrote its file by a
+path relative to the scratch project (none written - the scene stayed dark); the models' parts waiting for Unity's
+numbers needed a button and a second open (now Unity numbers them at once, in the background, and the scene opens again
+by itself; a script's `open` waits and opens again in the same step); a model's missing texture was said every frame
+(now once). Shinano from a fresh project: all four stations pass; SideRail: measured again after the fixes, see the spec.
+
+**Checked:** `tests_round407` (the fixture read with Unity's span rules - a step before an infinite in slope - and the
+lossy flag; the write-and-read round trip: per-axis editor curves read back exact, the runtime curves alone kept linear
+and constant, a blend shape's slopes scaled, an axis without keys filled from the object; the project paths: a Unity clip
+loads, its edit saves to the Blendity copy with the Unity file untouched, import from inside and outside the project with
+numbered copies, export anim, the package export's conversion with the dropped tracks counted, the meta); the suites, the
+audits. The Opus review's fixes: the Unity file never written over (a save had rewritten it without what Blendity doesn't
+carry), constant spans by Unity's rule (either key's infinite slope) both ways, linear spans' secants, blend-shape slopes
+scaled, Unity's layout (no quaternion curves, per-axis editor curves), axes without keys from the object, YAML quoting,
+a NaN sample rate, one note a kind for Humanoid and material curves, the drop and Import dialog routes.
+
+## 2026-11-03 (round 406): Unity's BlendShapes menu and its Animation window layout
+
+**Asked:** "the similar keyframe layout in Unity for objects with blend shapes" - "It's not just the key frames, but the
+blendshape menu in Unity when you're editing or at least adjusting a mesh." (the 2026-11-03 plan's round 406)
+
+**Added (task 0383)**
+- **BlendShapes foldout** on the MeshRenderer: a row a shape - its name, a slider and a number in 0-100 as Unity shows
+  them - a filter box from eight shapes on, the name blue when the open clip animates the shape and red when it has a
+  key at the playhead, a right-click menu (Add Key, Reset to 0, Copy Name); under the rows Add, Remove, Rename,
+  Duplicate and New from Mix (`shape rename|duplicate|mix|filter`).
+- **Edit this shape** (a row's Edit toggle, `shape edit <name>|off`; Blender's active shape key): Edit Mode and Sculpt
+  then shape that key - the basis stays; the edit folds into the key when the toggle goes off, the mode ends or the
+  scene is saved; undo across the toggle keeps the shape open with its basis (both live with the mesh).
+- **The Animation window as Unity's:** a Summary row of every key, an object row per animated path (folded by its
+  arrow), the property rows under it; every row a key button, a single track a value field at the playhead (typing
+  keys it; blend shapes in 0-100); Add Property as a tree of the objects under the root with their components; Record
+  makes a BlendShape track when a weight moves; K keys every track, comma and full stop step the keys.
+
+**Checked:** `tests_round406` (the foldout's rows and filter, rename / duplicate / mix, Edit this shape folding and
+undoing, the window's rows and fold, the value field, the summary's key button, Record's new track, the keys; the
+review's cases: Ctrl+S folds, Remove puts the basis back, an exporter's folded view, Duplicate takes the edit, a
+subdivide while open carries the basis, Rename inside undo and through the visemes, two objects' tracks apart in the
+clip under one row each); the suites, the audits; KLM rows 28-29 (`docs/hci/klm.md`). The Opus review's fixes: every save
+path and every export fold the open shape (Ctrl+S and the auto-save had written it half folded), a topology edit carries
+the basis, Remove / Duplicate / Mix fold first, Rename inside the undo step and through the avatar's visemes, the rows
+grouped per object across the clip, the summary row's cost, the tint rule, the filter, Space left to the Wheel; the evaluated mesh folds the open key itself (in full in Edit Mode and Sculpt), the raw-position tools (Set Origin, Join, Separate, Export, the avatar tools, Reset XForm) fold first.
+
+## 2026-11-03 (round 405): the residuals - Unity's ACES, Unity's indirect specular, three shaders read
+
+**Asked:** the same comparison; the fifth round: round 404's residuals fixed in order of their weight.
+
+**Added (task 0382)**
+- **Unity's ACES** as a view transform ("ACES (full fit, Unity's)": Hill's fit of the RRT + ODT - its curve, no exposure
+  scale), picked by the post-processing import - the fog's tint and the lamps' highlights as Unity's ACES renders them;
+  in the CPU views, F12 and the GPU views alike.
+- **Unity's indirect specular** weighs the reflection probes' and the sky's reflection on a scene from Unity (the Fresnel
+  to the grazing term - smoothness plus the metallic workflow's reflectivity - and the surface reduction): a rough wall
+  catches more of a probe at a grazing angle than Blendity's approximation gave it, as Unity's walls do.
+- **Glass, candle flicker and mirror shaders** read as what they draw (glass, an emissive flame, a mirror) - by the
+  shader's own name, so a lit shader that mentions one isn't taken for it.
+
+- **image_compare.py**: on a nearly black reference (its grid's mean under 8 / 255) the MAE and the grids' means decide -
+  SSIM and the correlation read noise there.
+
+**Checked:** `tests_round405` (the curve in every display kernel and the GPU frame's code for it, the specular's values for
+a dielectric and two metals, the weight on for a Unity scene without lights, the three families and three lit shaders
+that aren't them); SideRail's stations measured again: spawn 7.03 → 3.46, the spawn turned round 2.40 → 1.61, floor 4.71 →
+2.85, ahead 6.25 → 3.00 / 255 - three of four pass the target, the floor on error (its SSIM 0.94 → 0.87 under the darker
+toe, not pinned down); measured before the review's two fixes to the weight (set without a rasterized light; a metal's
+reflectivity by its metallic). The suites, the audits. The Opus review's fixes: the GPU views had read the new view as an
+OpenColorIO table (a black or stale picture), the BRDF weight had been set only by a rasterized light, the grazing term
+had taken a metal's colour for its reflectivity, the docs had the grazing reflection's direction backwards.
+
+## 2026-11-03 (round 404): the comparison - snapshots across the board, the attributes table, the report
+
+**Asked:** "Compare snapshots across the board to get accurate readings using Unity VCC's Shinano and SideRail
+project." The fourth of five rounds: the harness and the measurement.
+
+**Added (task 0381)**
+- **The snapshot harness:** `tools/unity_compare.py` with `bridges/unity/SdkCheck/BlendityCompare.cs` - the same
+  stations rendered by Unity (batch, through the scene's Main Camera with its post-processing; the prefab in the studio
+  rig) and by Blendity's headless mode (the imported scene, Unity's lightmaps, `render wait`), scored per station by
+  `tools/image_compare.py` with side by sides, a report and an exit code against the target. A VCC project is refused
+  unless it is a marked copy.
+- **`render wait`** in the console (its code came with round 402's commit): a headless script's render finished before the
+  `saverender` after it.
+- **`tools/unity_attribute_table.py`:** every component class and script of a project copy with Blendity's standing.
+- **The report** `docs/hci/compare-unity-vrchat-2026-11.md`: Shinano passes at every station (MAE 0.9-2.6 / 255, SSIM
+  0.944-0.989, correlation 1.000); SideRail is near the target at every station (MAE 2.4-7.0, SSIM 0.928-0.937) with
+  the residuals ranked for round 405 (the fog's tint under ACES, grazing probe reflections, three shaders Blendity doesn't
+  read); the attributes of both projects all native or data; the timings.
+
+**Checked:** `tests_round404` (render wait, the PNG and the linear HDR); the harness end to end on both project copies
+(local); the suites, the audits.
+
+## 2026-11-03 (round 403): the world's VRChat attributes, Unity's components as editable data
+
+**Asked:** the same comparison; the third of five rounds: the world's components.
+
+**Added (task 0380, ADR 0101)**
+- **VRC Scene Descriptor and Pipeline Manager** as Blendity components (spawns, order, orientation, reference camera,
+  respawn height and behaviour, portals, interact layers, gravity, capacity, draw distance; blueprint id, content type):
+  imported, shown with Unity's names, written back, sent over Live Link and set on the SDK's components.
+- **Every kept Unity component editable:** an Engine Component's Inspector shows its document's fields typed by their
+  shape (numbers, text, vectors, colours, references, nested blocks, lists) under Unity's names; an edit rewrites that
+  line of the kept text and nothing else. VRChat's SDK classes are named by their fileIDs (Unity's MD4 of the class name):
+  a world's mirrors, pickups, Udon behaviours and the rest read as themselves instead of "MonoBehaviour (guid:id)".
+
+**Checked:** `tests_round403` - the fileID formula against the ids the SDK's files carry, the generic Inspector on a
+12-field document (one edit, one line, no other; a whole-number float, a wrapped string, a big integer as text; the edit
+exported), the world's components imported, written back and sent, the respawn order as the SDK's. The suites, the
+audits; the Opus review's fixes (the generic edit exported, the respawn order, numbers as floats, the LOD Group kept as
+data, the bridge's references).
+
 ## 2026-11-03 (round 402): the avatar as Unity's - lilToon's lighting model, VRChat's avatar components as native
 
 **Asked:** the same comparison; the second of five rounds: the avatar. The user chose lilToon's full lighting model.

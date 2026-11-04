@@ -512,7 +512,7 @@ void raster_world(gpu::RasterFrame &fr, const LightingEnv &env, const Camera *ca
     fr.fog_color[3] = e->fog_density;  // (round 401)
   }
   else fr.sky_disc[3] = 2.0f, fr.sky_band[3] = 0.0f, fr.fog[2] = 0.0f;
-  fr.view_transform = (int)env.view_transform;
+  fr.view_transform = gpu_view_transform_code(env.view_transform);  // (review 405: AcesFull is 4 there, 3 is a table)
   fr.exposure = env.exposure;
   if (cam && cam->clear_flags == 1) {
     fr.background = 0;
@@ -1089,6 +1089,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     if (env.probes->data) gpu_probe_volume(*env.probes->data);
   }
   fr.gi_specular_occlusion = env.gi ? env.gi->params.specular_occlusion : env.rt_specular_occlusion;
+  fr.unity_brdf = env.unity_brdf;  // (round 405)
   fr.want_hdr = want_hdr;
   fr.highlight_bits = std::move(hl_bits);
   fr.slot = slot;

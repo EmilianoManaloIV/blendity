@@ -199,6 +199,35 @@ void read_fake_inner_light(const Props &p, const std::function<std::string(const
   set_tex(m.emission_map, tex_of(p, {"_Emission"}), texture);
 }
 
+/* Round 405: three shader families SideRail wears, read as what they draw. A glass shader is Blendity's Glass surface
+ * (its colour the tint; the alpha ignored - the shader's own); a candle flicker shader an emissive flame (its emission
+ * colour, times ten times its power multiplier, at least once - the script's flicker at rest); a mirror shader a mirror (white, metallic, smooth:
+ * the reflection probes, not the players). */
+void read_glass(const Props &p, Material &m) {
+  m.surface = (int)MaterialSurface::Glass;
+  m.ior = 1.5f;
+  m.alpha = 1.0f;
+  m.roughness = (float)std::clamp(1.0 - prop(p, "_Glossiness", prop(p, "_Smoothness", 1.0)), 0.0, 1.0);
+  m.metallic = 0.0f;
+}
+
+void read_candle(const Props &p, Material &m) {
+  Vec3 e(1.0f, 0.5f, 0.0f);
+  color_of(p, {"_EmissionColor", "_ColorTint"}, e);
+  /* The script scales the flame's brightness by _PowerMultiplier around ten times the colour (its flicker's mean at
+   * power 1); a power under 0.1 keeps the flame at least its colour, so a dim candle stays lit. */
+  const float power = (float)std::max(0.0, prop(p, "_PowerMultiplier", 1.0));
+  const float s = std::max({e.x, e.y, e.z});
+  m.emission = s > 0.0f ? e / s : Vec3(1.0f), m.emission_strength = s * std::max(1.0f, power * 10.0f);
+  m.metallic = 0.0f, m.roughness = 1.0f;
+}
+
+void read_mirror(Material &m) {
+  m.base_color = Vec3(1.0f), m.metallic = 1.0f, m.roughness = 0.0f, m.alpha = 1.0f;
+  m.surface = (int)MaterialSurface::Opaque;
+  m.base_map = TextureRef{};
+}
+
 /* Every other texture the material names (round 399): what Unity loads for it, which Blendity doesn't draw. */
 void read_engine_maps(const Props &p, const std::function<std::string(const std::string &)> &texture, Material &m) {
   m.engine_maps.clear();
@@ -372,7 +401,13 @@ std::string unity_shader_family(const std::string &shader_name, const std::vecto
     return "Filamented";
   }
   if (n.find("fakeinnerlight") != std::string::npos) return "FakeInnerLight";  // (round 400: uniuni's, SideRail's lamps)
+  if (n.find("candleflicker") != std::string::npos) return "CandleFlicker";    // (round 405: VirtualFoxDesignStudio's - an emissive flame)
   if (n.find("unlit") != std::string::npos) return "Unlit";
+  /* Round 405: a shader whose own name (the path's last part) is Mirror... or Glass... - VRChat's mirror shaders
+   * (Mirror/VRCPlayersOnlyMirror, FX/MirrorReflection), Glass_NoFog, GlassShader; not a lit shader that mentions one. */
+  const std::string own = n.substr(n.rfind('/') == std::string::npos ? 0 : n.rfind('/') + 1);
+  if (own == "mirror" || own == "mirrorreflection" || own.find("playersonlymirror") != std::string::npos || own.find("vrcmirror") != std::string::npos) return "Mirror";
+  if (own.rfind("glass", 0) == 0) return "Glass";
   if (n == "standard" || n == "standard (specular setup)") return "Standard";
   if (n == "lit" || n == "simplelit" || n == "simple lit" || n.find("universal render pipeline/lit") != std::string::npos) return "URP Lit";
   /* A shader not in the project (Poiyomi installed apart, say): Standard only when its properties are Standard's -
@@ -507,8 +542,12 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   const bool filamented = info.shader.rfind("Filamented", 0) == 0;
   if (filamented) read_filamented(p, info.shader, texture, m, info);
   if (info.shader == "FakeInnerLight") read_fake_inner_light(p, texture, m);
+  if (info.shader == "Glass") read_glass(p, m);          // (round 405)
+  if (info.shader == "CandleFlicker") read_candle(p, m);
+  if (info.shader == "Mirror") read_mirror(m);
   m.unlit = info.shader == "Unlit";
-  info.known = toon || filamented || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit" || info.shader == "FakeInnerLight";
+  info.known = toon || filamented || info.shader == "Standard" || info.shader == "URP Lit" || info.shader == "Unlit" || info.shader == "FakeInnerLight" ||
+               info.shader == "Glass" || info.shader == "CandleFlicker" || info.shader == "Mirror";
   read_engine_maps(p, texture, m);
   m.touch();
   return true;

@@ -1,0 +1,52 @@
+\chapter{Research features}
+\label{ch:research}
+
+\section{The research folder}
+\code{research/} connects papers to the editor: \code{papers/} is where the user drops them, \code{FEATURES.md} is the
+tracker (paper $\to$ feature $\to$ status $\to$ source file $\to$ test), and \code{src/research/} is where a paper's
+method is implemented in plain C++ with no new dependency and registered with \code{research::register\_feature}, which
+puts it in Learn $>$ References, Mesh $>$ From Papers and the Inspector's MeshFilter tools with its citation. The rule
+is that the paper is cited in the code's comments, in the Learn tab and in the tracker, and that the status says what
+was taken from the paper and what was not.
+
+\section{What the papers became}
+The tracker's rows, with each paper's key in the References chapter (Index A lists them again by source file).
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{>{\raggedright\arraybackslash}p{0.30\textwidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.15\textwidth}}
+\toprule
+Paper & Feature & Status \\
+\midrule
+Taubin 1995 \cite{Taubin1995Signal} & Taubin $\lambda|\mu$ smoothing, the example feature & implemented \\
+Catmull and Clark 1978 \cite{Catmull1978Recursively} & subdivision (the Subdivide tool, the Subdivision Surface modifier) & core \\
+Thiedemann et al.\ 2011 \cite{Thiedemann2011Voxel} & realtime GI: binary voxel columns, the mip-map ray test, one bounce of the sun through a reflective shadow map, sky occlusion (\adr{0011}) & implemented (CPU and GPU) \\
+Chen et al.\ 2013 \cite{Chen2013Sweep} & solids from a few strokes: a box from three lines, a cylinder from two circles, a sweep (\adr{0065}) & implemented \\
+Gryaditskaya et al.\ 2020, H\"ahnlein et al.\ 2022 \cite{Gryaditskaya2020Lifting} & a scaffold of construction lines lifted from the picture plane (\adr{0067}); symmetry and curved lines not taken & experimental, gate met \\
+Igarashi et al.\ 1997 \cite{Igarashi1997Interactive} & pen strokes corrected at the lift: split at corners, fitted, pulled to the guides (\adr{0063}) & implemented \\
+Jacobson, Kavan and Sorkine-Hornung 2013 \cite{Jacobson2013Robust} & DynaMesh's inside test by generalized winding numbers along grid lines (\adr{0076}) & implemented (the grid-line form) \\
+Gibson 1998 \cite{Gibson1998Constrained} & DynaMesh's surface: naive surface nets over the sign grid (where marching cubes \cite{Lorensen1987} would tessellate), then relaxation & implemented \\
+Huang et al.\ 2018 \cite{Huang2018Quadriflow} & Quad Remesh through Blender's patched QuadriFlow on a worker (\adr{0077}) & integrated (library) \\
+Baxter, Wendt and Lin 2004 \cite{Baxter2004Impasto} & the painterly brush's wet mixing: a one-value pickup, not the paper's paint volume (\adr{0083}) & simplified \\
+Abdrashitov et al.\ 2023 \cite{Abdrashitov2023Robust} & automatic weights and weight transfer by inpainting (\adr{0028}) & implemented \\
+Oreshkin et al.\ 2022 \cite{Oreshkin2022Protores} & Puppet Posing's pose prior: a residual network trained with goals hidden; much smaller, positions only (\adr{0087}) & implemented \\
+Okabe and Ito 2008 \cite{Okabe2008Color} & sculpt polygroups in the eight colour-universal colours & implemented \\
+Khronos 2021 \cite{Khronos2021Gltf} & skinned meshes exported with joints, inverse bind matrices and sampled channels & implemented \\
+W3C 2018 \cite{W3C2018Web} & the contrast ratio measuring every theme; the High Contrast theme at 4.5:1 & implemented \\
+Nielsen 1994, Fitts 1954, Card et al.\ 1980, Polson et al.\ 1992, Brooke 1996 \cite{Nielsen1994Enhancing, Fitts1954Information, Card1980Keystroke, Polson1992Cognitive, Brooke1996Sus} & the HCI audits, the KLM table, the cognitive walkthroughs, the study protocol (\adr{0085}) & applied (methods, not algorithms; the study not run) \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Beyond the tracker, the renderers and the solvers cite their sources in the code and in the Learn tab's References
+lesson: the microfacet model and its sampling \cite{Cook1982Reflectance, Walter2007Microfacet, Heitz2018Sampling,
+Schlick1994Inexpensive}, area lights \cite{Karis2013Real, Heitz2018Combining}, the disk mapping and stratification
+\cite{Shirley1997Low, Cranley1976Randomization}, the BVH and the ray--triangle test \cite{Wald2007Fast,
+Moller1997Fast, Duff2017Building}, path guiding \cite{Ruppert2020Robust}, the \`A-Trous denoiser
+\cite{Dammertz2010Edge}, the sky and irradiance maps \cite{Hosek2012Analytic, Ramamoorthi2001Efficient}, colour
+temperature \cite{Kang2002Design}, noise \cite{Perlin2002Improving}, LSCM and ABF++ \cite{Levy2002Least,
+Sheffer2005Abf} with PartUV's part-based search \cite{Wang2025Partuv}, the cotangent Laplacian
+\cite{Meyer2003Discrete}, MikkTSpace \cite{Mikkelsen2008Simulation}, the teapot \cite{Newell1975Utilization}, CCD
+inverse kinematics \cite{Welman1993Inverse}, the spring and strand solvers \cite{Jakobsen2001, Kugelstadt2016,
+Macklin2016, Macklin2019, Daviet2023, Akyurek2025}, toon and anime rendering \cite{Motomura2015, Kajiya1989}, and
+quaternion interpolation \cite{Shoemake1985}.

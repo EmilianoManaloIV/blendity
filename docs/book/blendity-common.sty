@@ -1,0 +1,118 @@
+% SPDX-License-Identifier: GPL-2.0-or-later
+% What the two Blendity books share (task 0386): fonts, colours, the reference list's set-up, the macros the chapters
+% use, the diagram styles. Built with lualatex + biber (tools/make_books.py --pdf).
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{blendity-common}[2026/11/03 Blendity books]
+
+% A4 with a text width of 152 mm: about 80 characters a line in DejaVu Serif, inside the 45-90 that reading guidelines
+% give (the colophon lists the guidelines the books follow).
+\RequirePackage[a4paper, top=24mm, bottom=26mm, inner=30mm, outer=28mm, headheight=14pt]{geometry}
+\RequirePackage{fontspec}
+\setmainfont{DejaVu Serif}[Scale=0.92]
+\setsansfont{DejaVu Sans}[Scale=0.92]
+\setmonofont{DejaVu Sans Mono}[Scale=0.82]
+\RequirePackage{microtype}
+\RequirePackage{xcolor}
+\RequirePackage{graphicx}
+\RequirePackage{array}
+\RequirePackage{longtable}
+\RequirePackage{booktabs}
+\RequirePackage{tabularx}
+\RequirePackage{enumitem}
+\RequirePackage{titlesec}
+\RequirePackage{fancyhdr}
+\RequirePackage{csquotes}
+\RequirePackage{tikz}
+\RequirePackage{listings}
+\RequirePackage[many]{tcolorbox}
+\RequirePackage{float}
+\RequirePackage{caption}
+\RequirePackage[backend=biber, style=numeric, sorting=nyt, backref=true, defernumbers=true, maxbibnames=8, minbibnames=8, giveninits=true, doi=false, isbn=false, urldate=comp]{biblatex}
+\RequirePackage[hidelinks, unicode, pdfusetitle, bookmarksnumbered]{hyperref}
+
+\usetikzlibrary{positioning, arrows.meta, shapes.geometric, shapes.misc, fit, calc, backgrounds, chains, decorations.pathreplacing}
+
+% The editor's own palette (the Emiliano themes: paper, charcoal, amber, the signal colours), darkened where it
+% is used for text, titles or links so every one reads at WCAG 2.1 AA's 4.5:1 or more on white and on the boxes'
+% fills (tools/make_books.py's contrast table: amber 5.4:1, blue 6.7:1, grey 6.4:1, mint 5.2:1, charcoal 14.6:1;
+% white titles on the darkened frames 5.2:1 or more). The lighter originals survive only as fills behind charcoal text.
+\definecolor{blPaper}{HTML}{F1EEE5}
+\definecolor{blCharcoal}{HTML}{292927}
+\definecolor{blAmber}{HTML}{9A5C17}
+\definecolor{blAmberFill}{HTML}{D7882B}
+\definecolor{blMint}{HTML}{2F7A5F}
+\definecolor{blBlue}{HTML}{2B5F8F}
+\definecolor{blRed}{HTML}{C9473E}
+\definecolor{blGrey}{HTML}{5F5F5C}
+\definecolor{blLight}{HTML}{F6F4EE}
+\definecolor{blCode}{HTML}{EFEDE6}
+
+\addbibresource{refs.bib}
+\addbibresource{refs_extra.bib}
+\DefineBibliographyStrings{english}{backrefpage={cited on p\adddot}, backrefpages={cited on pp\adddot}}
+
+% Section titles in the sans face.
+\titleformat{\chapter}[display]{\sffamily\bfseries\huge}{\color{blAmber}\chaptertitlename\ \thechapter}{8pt}{}
+\titlespacing*{\chapter}{0pt}{0pt}{22pt}
+\titleformat{\section}{\sffamily\bfseries\Large}{\thesection}{1em}{}
+\titleformat{\subsection}{\sffamily\bfseries\large}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\sffamily\bfseries}{\thesubsubsection}{1em}{}
+\setcounter{secnumdepth}{2}
+\setcounter{tocdepth}{1}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE]{\sffamily\small\nouppercase{\leftmark}}
+\fancyhead[RO]{\sffamily\small\nouppercase{\rightmark}}
+\fancyfoot[C]{\sffamily\small\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\sffamily\small\thepage}\renewcommand{\headrulewidth}{0pt}}
+
+\setlength{\parskip}{4pt plus 1pt}
+\setlength{\parindent}{0pt}
+\raggedbottom
+\setlength{\emergencystretch}{3em}  % paragraphs full of monospace names break somewhere rather than overflow
+\setlist{nosep, leftmargin=*}
+\captionsetup{font=small, labelfont={sf,bf}}
+
+% --- the macros the chapters use ----------------------------------------------------------------------------------
+\newcommand{\code}[1]{\texttt{#1}}                               % a file, function, flag or command (escape _ and & yourself)
+\newcommand{\key}[1]{\tcbox[on line, boxsep=0pt, left=2pt, right=2pt, top=1pt, bottom=1pt, colback=blLight, colframe=blGrey, boxrule=0.4pt, arc=1.5pt]{\sffamily\footnotesize #1}}
+\newcommand{\menu}[1]{\textsf{#1}}                               % Window > Layouts
+\newcommand{\ui}[1]{\textsf{#1}}                                 % a button, field or window name
+\newcommand{\adr}[1]{ADR~#1}
+\newcommand{\task}[1]{task~#1}
+\newcommand{\rnd}[1]{round~#1}
+\newcommand{\unity}[1]{\textcolor{blBlue}{\textsf{Unity:}} #1}
+\newcommand{\blender}[1]{\textcolor{blAmber}{\textsf{Blender:}} #1}
+
+% A box for what a user coming from another program should know.
+\newtcolorbox{fromnote}[1]{enhanced, breakable, colback=blLight, colframe=blAmber, boxrule=0.6pt, arc=2pt, left=6pt, right=6pt, top=4pt, bottom=4pt, fonttitle=\sffamily\bfseries, title={#1}}
+% A box for a rule, an invariant or a warning.
+\newtcolorbox{rulebox}[1]{enhanced, breakable, colback=blCode, colframe=blCharcoal, boxrule=0.6pt, arc=2pt, left=6pt, right=6pt, top=4pt, bottom=4pt, fonttitle=\sffamily\bfseries, title={#1}}
+% A worked example (the manual's "Example:" blocks).
+\newtcolorbox{example}[1]{enhanced, breakable, colback=white, colframe=blMint, boxrule=0.6pt, arc=2pt, left=6pt, right=6pt, top=4pt, bottom=4pt, fonttitle=\sffamily\bfseries, title={Example: #1}}
+
+\lstset{basicstyle=\ttfamily\small, backgroundcolor=\color{blCode}, frame=none, breaklines=true, columns=fullflexible, keepspaces=true, xleftmargin=6pt, framexleftmargin=6pt, aboveskip=6pt, belowskip=6pt, showstringspaces=false, upquote=true}
+\lstdefinelanguage{console}{morekeywords={}, sensitive=false}
+
+% --- the diagrams' shared styles ---------------------------------------------------------------------------------
+\tikzset{
+  every node/.style={font=\sffamily\small},
+  box/.style={draw=blCharcoal, fill=white, rounded corners=2pt, minimum height=8mm, inner sep=5pt, align=center, line width=0.5pt},
+  layer/.style={box, fill=blLight, minimum width=30mm},
+  ext/.style={box, dashed, fill=blPaper},
+  artifact/.style={box, fill=blCode, font=\sffamily\footnotesize, align=left},
+  gate/.style={diamond, draw=blAmber, fill=white, aspect=2.2, inner sep=1pt, align=center, font=\sffamily\footnotesize, line width=0.6pt},
+  person/.style={box, fill=blAmber!20, draw=blAmber},
+  agent/.style={box, fill=blBlue!12, draw=blBlue},
+  flow/.style={-{Stealth[length=2.2mm]}, line width=0.6pt, draw=blCharcoal},
+  dflow/.style={flow, dashed, draw=blGrey},
+  lbl/.style={font=\sffamily\footnotesize, text=blCharcoal, fill=white, inner sep=1.5pt},
+  note/.style={font=\sffamily\footnotesize, text=blGrey, align=left},
+}
+
+% Links are told apart by form as well as colour (citations in brackets, cross-references as "chapter 3", URLs in
+% monospace), so colour is never the only cue (WCAG 1.4.1); the colour itself reads at 6.7:1.
+\hypersetup{colorlinks=true, linkcolor=blCharcoal, citecolor=blBlue, urlcolor=blBlue, pdflang={en-GB}, pdfdisplaydoctitle=true}
+\urlstyle{tt}

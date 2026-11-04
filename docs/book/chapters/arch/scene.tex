@@ -1,0 +1,70 @@
+\chapter{The scene, meshes, undo and assets}
+\label{ch:scene}
+
+\section{The mesh}
+\code{Mesh} (\code{src/scene/mesh.h}) keeps Blender's layout \cite{Blender2026}: \code{positions}, \code{face\_offsets}
+and \code{corner\_verts}, so a face is a range of corners and n-gons are first-class; per-corner UVs, per-face material
+indices, seams, sharp edges, loose edges, custom normals, vertex groups and shape keys are named attributes beside them
+\cite{MarschnerShirley2021}. The render cache splits corners into render vertices only where their attributes differ
+(\code{build\_render\_vertices}, bit-identical in parallel and serial), builds triangles per face range and MikkTSpace
+tangents \cite{Mikkelsen2008Simulation}; a positions-only change follows the kept topology in place
+(\code{update\_in\_place}, \adr{0034}), with the deforming tail of a modifier stack re-run on a kept mesh (\adr{0022}).
+
+Meshes are shared through \code{MeshPtr} as Blender's implicit sharing does (\adr{0003}). An undo step is a clone of the
+scene that shares unchanged meshes; code that edits a mesh calls \code{mesh\_make\_mutable} first; every change bumps
+\code{Mesh::version}; caches key on pointer + version or on \code{RenderMesh::serial}. Holding a \code{Mesh\&} across an
+operation that may replace the mesh is a bug reviewers look for.
+
+\section{The operators}
+\code{meshops} (\code{src/scene/mesh.cpp}, \code{mesh\_tools.cpp} to \code{mesh\_tools5.cpp}) is the Edit Mode toolbox,
+each a pure function on a mesh and selection vectors: extrude (faces, regions by wedge, edges, vertices), inset
+(individual and region with a continuous limit), bevel with a superellipse profile and clamp overlap, bridge with a
+Hermite tube, loop cut, knife, connect, dissolve (edges, limited, degenerate), collapse, merge (at centre, by distance,
+selected-to-unselected), fill and smart fill, poke, triangulate and tris-to-quads, Catmull--Clark
+\cite{Catmull1978Recursively}, Taubin smoothing \cite{Taubin1995Signal}, spin, slice, follow, shell, draft, radial
+array, fillet, grid, pipe, array, taper, recess, and the SketchUp family: push/pull with its limits, flush steps and
+holes (\adr{0004}), push through, attach face, imprint across faces, repair rings. \code{src/scene/mesh\_internal.h}
+holds the shared topology helpers (face builder, edge-faces table, the \code{annulus} ring builder).
+
+Robustness is a requirement (Q-01), not a hope: the stress suite (\code{stress/stress\_main.cpp}) runs the operators on
+odd meshes (degenerate faces, non-manifold edges, open surfaces, extreme scales, NaN) and counts problems and faces on
+top of each other (\code{overlapping\_faces}, by Sutherland--Hodgman clipping \cite{Sutherland1974}); the counts may not
+rise without an explanation in the CHANGELOG.
+
+\section{Objects and components}
+As in Unity, everything in a scene is a \code{GameObject} with a \code{Transform}; what it does comes from components:
+\code{MeshFilter}, \code{MeshRenderer}, \code{Light}, \code{Camera}, \code{Rigidbody}, \code{Animation},
+\code{Armature}, \code{Bone}, modifiers (\code{SubdivisionSurface}, \code{Mirror}, \code{Array}, \code{Boolean}, \ldots,
+\adr{0022}), \code{CameraFilters} (\adr{0008}), \code{ProbeVolume}, \code{ReflectionProbe}, \code{SpringBone}
+(\adr{0049}), \code{Collider}, \code{LODGroup}, \code{AvatarDescriptor} and VRChat's others (\adr{0100}), and
+\code{EngineComponent} for what another engine's file held that Blendity does not interpret (\adr{0101}). A component
+says what the views read of it (\code{render\_role}), so the scene hash takes one virtual call instead of a
+\code{dynamic\_cast} per type \cite{Gregory2018vol2}.
+
+\section{The Reflector}
+A component describes its fields once, in \code{reflect(Reflector\&)}: name, type, range, help, groups, typed object
+and asset references. That one description draws the Inspector (with essentials first, multi-object editing and
+expressions in fields), writes and reads the scene file (tolerant of unknown fields, so files move between versions),
+hashes the component for change detection, answers the console's \code{set Component.Field value}, keys any field from
+the Animation window (\rnd{335}), and carries fields over Live Link and into Unity's write-back. It is Blender's RNA
+\cite{Blender2026} and Unity's \code{SerializedProperty} in one. Lists of effects or layers (a camera's filter stack, a
+texture's layers) are reflected through a prefix per element, so files, undo and hashing work through the same path.
+
+\section{Scene IO and assets}
+Scenes are a text format (\code{src/scene/scene\_io.cpp}): one line per object and field, materials and textures by
+asset path with values kept as a fallback, lightmaps and probes beside the scene (\adr{0010}). Material assets
+(\code{.mat}) and procedural textures (\code{.ptex}, \adr{0017}) are shared instances written back after each finished
+change; after loading, the file wins. The Project window moves files on disk and retargets every reference (the asset
+library, texture paths, scene files, clips); deletes go to the OS trash; moves and deletes are recorded so an undo that
+brings back an old path follows the file. Imported models (OBJ, FBX through ufbx, glTF, STL, PLY, USD, PMX, VRM, BVH,
+Collada, \code{.blend} through Blender) arrive with materials as \code{.mat} assets, textures found or extracted, skins
+and clips (\adr{0047}); exports share one preparation step (world transform, axes, triangulation, split normals,
+baked textures) and the writers for each format \cite{Khronos2021Gltf, FBXBlender2026, USD2026}.
+
+\section{Undo}
+\code{UndoState} snapshots the scene graph after each finished interaction (\code{commit\_undo}, with a label the
+History window lists); meshes are shared and copied on first write; a sculpt or paint stroke is a lighter delta step of
+the vertices or the 64$\times$64 texture tiles it touched (\adr{0074}, \adr{0081}); the Draw tab's paper and the reference
+board keep histories of their own. Vertex groups and custom normals are mended by position at each commit so a
+topology change does not lose them (\adr{0024}). Undo covers the scene, materials, textures and clips as one step per
+operation (Q-05), and the budget of kept steps is bytes, oldest out (\adr{0026}).

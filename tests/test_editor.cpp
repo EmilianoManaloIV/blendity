@@ -7403,6 +7403,76 @@ static void tests_round280() {
   });
 }
 
+/* Round 409 (task 0386): the books, the reference list and the licensing in the tree, and the Learn lesson that
+ * teaches them. */
+static void tests_round409() {
+  test("the books (task 0386, ADR 0104): the two PDFs, their LaTeX sources, the generated reference list and CREDITS.md are in the tree; every \\cite key of the chapters is an entry of a .bib; the Learn lesson 'The Books and the References' exists with its questions, and each of its Try-it commands is one the console knows", [] {
+    std::string top = fs::current_dir();
+    for (int up = 0; up < 4 && !fs::exists(fs::join(top, "docs/MANUAL.md")); up++) top = fs::parent(top);
+    for (const char *f : {"docs/Blendity-Architecture.pdf", "docs/Blendity-User-Guide.pdf", "docs/book/architecture.tex", "docs/book/user-guide.tex",
+                          "docs/book/refs.bib", "docs/book/refs_extra.bib", "docs/book/generated/code_refs.tex", "docs/book/generated/ui_refs.tex",
+                          "docs/book/generated/docs_refs.tex", "CREDITS.md", "tools/make_books.py"}) {
+      const bool there = fs::exists(fs::join(top, f));
+      if (!there) std::printf("    missing: %s\n", f);
+      CHECK(there);
+    }
+    std::string pdf;
+    CHECK(fs::read_file(fs::join(top, "docs/Blendity-User-Guide.pdf"), pdf) && pdf.size() > 200000 && pdf.compare(0, 5, "%PDF-") == 0);
+    /* Every \cite{a,b} in the chapters names an entry of refs.bib or refs_extra.bib (what make_books.py --check holds too). */
+    std::set<std::string> keys;
+    for (const char *b : {"docs/book/refs.bib", "docs/book/refs_extra.bib"}) {
+      std::string text;
+      CHECK(fs::read_file(fs::join(top, b), text));
+      for (size_t at = text.find("\n@"); at != std::string::npos; at = text.find("\n@", at + 1)) {
+        const size_t open = text.find('{', at), comma = text.find(',', open);
+        if (open != std::string::npos && comma != std::string::npos) keys.insert(text.substr(open + 1, comma - open - 1));
+      }
+    }
+    int cites = 0, missing = 0;
+    for (const char *ch : {"chapters/arch/rendering.tex", "chapters/user/stage-model.tex", "chapters/shared/licensing.tex", "chapters/shared/colophon.tex"}) {
+      std::string text;
+      CHECK(fs::read_file(fs::join(top, fs::join("docs/book", ch)), text));
+      for (size_t at = text.find("\\cite{"); at != std::string::npos; at = text.find("\\cite{", at + 1)) {
+        const size_t close = text.find('}', at);
+        std::istringstream list(text.substr(at + 6, close - at - 6));
+        std::string key;
+        while (std::getline(list, key, ',')) {
+          while (!key.empty() && (key.front() == ' ' || key.front() == '\n' || key.front() == '\r')) key.erase(key.begin());
+          while (!key.empty() && (key.back() == ' ' || key.back() == '\n' || key.back() == '\r')) key.pop_back();
+          cites++;
+          if (!keys.count(key)) std::printf("    no entry for \\cite{%s} in %s\n", key.c_str(), ch), missing++;
+        }
+      }
+    }
+    std::printf("    %zu reference keys; %d citations in four chapters, %d without an entry\n", keys.size(), cites, missing);
+    CHECK(keys.size() > 150 && cites > 40 && missing == 0);
+    /* The lesson. */
+    int at = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "The Books and the References") at = i;
+    CHECK(at >= 0);
+    const std::string body = at >= 0 ? lesson(at).body : "";
+    int questions = 0, buttons = 0;
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    std::istringstream lines(body);
+    std::string line;
+    while (std::getline(lines, line)) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      buttons++;
+      const std::string cmd = line.substr(6, line.find(" | ") - 6);
+      const std::string verb = cmd.substr(0, cmd.find(' '));
+      const bool known = ed.command_suggestions_for_test(verb).size() > 0 && ed.command_suggestions_for_test(verb)[0] == verb;
+      std::printf("    Try it: '%s' -> %s\n", cmd.c_str(), known ? "a known command" : "UNKNOWN");
+      CHECK(known);
+    }
+    CHECK(questions >= 3 && buttons >= 2 && body.find("! lesson:") != std::string::npos);
+    CHECK(body.find("GPL-3.0-or-later") != std::string::npos && body.find("CREDITS.md") != std::string::npos);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -7472,5 +7542,6 @@ void run_editor_tests() {
   tests_round308();
   tests_round310();
   tests_round311();
+  tests_round409();
   coverage_tests();
 }

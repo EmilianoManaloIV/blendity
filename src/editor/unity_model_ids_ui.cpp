@@ -123,6 +123,10 @@ std::string Editor::unity_model_ids_path() const { return fs::join(assets_dir_, 
 void Editor::read_unity_model_ids(bool all, bool wait) {
   if (unity_ids_job_) return Log::warn("Unity model IDs: Unity is already numbering %d model(s)", unity_ids_job_->models);
   if (wait && !headless_) return Log::warn("unity modelids wait: a script's (it holds the editor till Unity is done) - here it runs in the background without it");
+  struct ClearReopen {  // (no job started: nothing to open again)
+    bool &flag, started = false;
+    ~ClearReopen() { if (!started) flag = false; }
+  } clear{unity_ids_auto_reopen_};
   const std::string unity = unity_editor_program();
   if (unity.empty())
     return refuse("Unity model IDs: no Unity found (Unity Hub's, or BLENDITY_UNITY): a model's parts are numbered by the Unity that "
@@ -138,6 +142,7 @@ void Editor::read_unity_model_ids(bool all, bool wait) {
   job->models = (int)job->files.size();
   if (!job->models) return Log::warn("Unity model IDs: no model to number%s", all ? "" : " (import a Unity scene first, or: unity modelids all)");
   unity_ids_job_ = job;
+  clear.started = true;
   if (wait) {
     job->run(unity);
     return poll_unity_model_ids();
@@ -175,9 +180,11 @@ void Editor::poll_unity_model_ids() {
   const std::shared_ptr<UnityIdsJob> job = std::move(unity_ids_job_);
   std::string fresh, old_text;
   fs::read_file(fs::join(job->project, "blendity-model-ids.tsv"), fresh);
-  if (job->code.load() != 0 || fresh.empty())
+  if (job->code.load() != 0 || fresh.empty()) {
+    unity_ids_auto_reopen_ = false;
     return refuse("Unity model IDs: Unity didn't number the models (" + (job->why.empty() ? strprintf("exit %d", job->code.load()) : job->why) +
                   "): its log is " + fs::join(job->project, "blendity-model-ids.log"), "", "");
+  }
   fs::read_file(unity_model_ids_path(), old_text);
   if (!fs::write_file(unity_model_ids_path(), merge_ids(old_text, fresh))) return refuse("Unity model IDs: couldn't write " + unity_model_ids_path(), "", "");
   std::map<std::string, UnityModelIds> parsed;
@@ -188,6 +195,16 @@ void Editor::poll_unity_model_ids() {
   const std::string what = strprintf("Unity numbered %zu model(s)' parts: %s the scene again and their overrides apply", parsed.size(),
                                      unity_ids_last_opened_ ? "open" : "import");
   Log::info("%s", what.c_str());
+  /* e2e 407: the import asked for it - only while that scene is still the one open and untouched since (another scene
+   * opened, or an edit made, in the meantime: the toast's Open Again, as before). */
+  const bool same_scene = scene_ && !scene_->unity.file.empty() && fs::normalize(resolve_asset_path(scene_->unity.file)) == fs::normalize(unity_scene_path(unity_ids_last_import_));
+  const bool untouched = undo_serial_ == unity_ids_reopen_serial_;
+  const bool reopen = unity_ids_auto_reopen_ && unity_ids_last_opened_ && !unity_ids_last_import_.empty() && same_scene && untouched;
+  unity_ids_auto_reopen_ = false;
+  if (reopen) {
+    toast(LogLevel::Info, "Unity numbered the models' parts: the scene opens again with its materials", "", "");
+    return (void)open_unity_scene(unity_scene_path(unity_ids_last_import_));
+  }
   toast(LogLevel::Info, what, again, again.empty() ? "" : unity_ids_last_opened_ ? "Open Again" : "Import Again");
 }
 

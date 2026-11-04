@@ -35,6 +35,10 @@ struct Pipeline {
   Image take(int w, int h);
 };
 
+/* The view a .edit file saved ("view <n>": the enum's value): the built-ins and AcesFull; an OpenColorIO view's number
+ * belongs to one configuration, so it reopens as Standard (round 405). */
+ViewTransform saved_view(int vt);
+
 class Doc {
  public:
   /* A file (PNG, JPEG, TGA, BMP, HDR, EXR; 8-bit files decoded from sRGB to linear) or pixels handed over. */

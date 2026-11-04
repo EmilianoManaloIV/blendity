@@ -187,6 +187,7 @@ struct LightingEnv {
   float rt_specular_occlusion = 0.0f;
   const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
   std::vector<RenderProbe> reflection_probes;  // round 401: Unity's reflection probes with a bake (the specular environment inside their boxes)
+  bool unity_brdf = false;  // round 405: a scene from Unity - the probes' and the sky's reflection weighted as Unity's BRDF does
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
 };

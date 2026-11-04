@@ -1,0 +1,60 @@
+\chapter{Context}
+\label{ch:context}
+
+\begin{figure}[H]
+  \centering
+  \resizebox{\textwidth}{!}{\input{diagrams/context}}
+  \caption{The system context. Solid arrows are data both ways or out; dashed arrows are optional inputs Blendity runs without.}
+  \label{fig:context}
+\end{figure}
+
+\section{The people}
+One artist at a time, at a desk or on a 13-inch 2-in-1, with a keyboard and a mouse, a pen, fingers on the screen, a
+pen display with a dial and express keys, or an OpenXR headset. The HCI work (\adr{0085}) names the artists it designs
+for: people arriving from Unity, Unreal, Blender and Adobe's tools, keyboard-first and pen-first. The one developer is
+the user, working with an AI (chapter~\ref{ch:sdlc}).
+
+\section{The operating system}
+\code{src/platform} is one window and its input on Win32, X11 (with XInput~2 for pens and touch) and Cocoa, plus the
+clipboard, native file dialogs, the trash and DPI, mirroring Blender's GHOST layer \cite{Blender2026}. Everything above
+it is portable C++17 built by \code{build.bat} on Windows (MSVC, found automatically) and \code{build.sh} on Linux and
+macOS, with CMake optional (C-01). Pixels are \code{0xAARRGGBB} so all three can blit without conversion; the editor
+redraws only on input, animation or timers and otherwise sleeps in the OS event wait.
+
+\section{The GPU}
+Any Vulkan 1.2 GPU: the loader is opened at run time (\code{VK\_NO\_PROTOTYPES}), so a machine without one runs on the
+CPU. The GPU does three things, each with a CPU equivalent: the views are drawn by \code{gpu::Raster} with the CPU's
+formulas in GLSL (\adr{0061}); the path tracer runs its kernel as a Vulkan compute shader (hardware ray queries where
+they exist) or, on NVIDIA cards, through OptiX (\adr{0037}, \adr{0054}); and lighting bakes gather on it. CPU and GPUs
+render together, claiming samples from one counter.
+
+\section{Blender's libraries, optional}
+When \code{blender/lib/<platform>} exists beside the project, the build links Blender's own prebuilt libraries
+(Embree, OpenImageDenoise, oneTBB, Eigen, OpenSubdiv, OpenEXR, OpenColorIO, Manifold, meshoptimizer, Open PGL, Jolt,
+Vulkan + shaderc, FFmpeg and others), each behind \code{BL\_WITH\_<NAME>} with a fallback (\adr{0001}, C-02).
+\code{BLENDITY\_NO\_LIBS=1} forces the dependency-free build, which CI tests on every system; the installers ship both
+programs and Blendity hands over to Blendity-full when the libraries load (\adr{0033}). The Console's \code{libs} prints
+what a build has.
+
+\section{Files and other programs}
+A project is a folder with \code{Assets/} inside, as Unity's (\code{BlendityProject} in the home folder unless another is
+opened). Scenes are text (\code{.scene}, Zstandard-compressed when the library is there), materials \code{.mat},
+procedural textures \code{.ptex}, clips \code{.anim}, sequences \code{.seq}, layouts \code{.blendity-ui}. Models move
+through OBJ, FBX, glTF, STL, PLY and USD, verified both ways against Blender 5.2 (R-06), and through Unity's
+\code{.unitypackage}, \code{.prefab}, \code{.unity}, \code{.mat} and \code{.anim}, Godot's \code{.tscn} and Blender's
+\code{.blend} (through the installed Blender). Live Link streams the scene to Blender, Unity, Godot and Unreal on the
+same computer as it changes (chapter~\ref{ch:bridges}).
+
+\section{The network}
+Two uses, both optional and both the user's choice: a once-a-day check of GitHub's releases for a newer build
+(\code{src/core/releases.cpp}; Preferences $>$ Updates), and Live Link's TCP server on 127.0.0.1 (no other computer can
+connect; it is one way out). There is no telemetry and no cloud; the only learned model in the product is the optional,
+local AI inbetweening download (\adr{0046}).
+
+\section{The programs it follows}
+The context has a second ring: the programs whose ideas the editor reproduces, each credited in chapter~\ref{ch:licensing}
+and \code{CREDITS.md}. Unity for the editor's shape, Blender for the data and the tools, SketchUp, UModeler and
+Plasticity for direct modeling, ZBrush and Sculptris for sculpting, Substance Painter for texturing, SketchBook, Photoshop
+and Krita for drawing, Mixamo and the CATS plugin for rigging and avatars, Cascadeur for physics in animation, Premiere
+for the sequencer, Lightroom for the Editing tab, Unity's Mecanim for retargeting. Where Blendity differs from them, the
+user guide says so at the moment it matters.

@@ -542,6 +542,7 @@ static LightingEnv build_env(const Scene &s) {
   env.sky = s.environment.sky;
   env.equator = s.environment.equator;
   env.ground = s.environment.ground;
+  env.unity_brdf = !s.unity.file.empty() && !unity_brdf_off();  // (round 405: lights or none)
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *l = g.get<Light>();
@@ -1413,6 +1414,7 @@ void Editor::enter_edit_mode() {
   }
   edit_mode_ = true;
   edit_obj_ = g->id;
+  show_edit_shape_full(*g);  // (round 406: a shape opened in the Inspector shows in full here)
   const Mesh &m = *g->get<MeshFilter>()->mesh;
   vert_sel_.assign(m.vert_count(), 0);
   face_sel_.assign(m.face_count(), 0);
@@ -1423,6 +1425,7 @@ void Editor::enter_edit_mode() {
 void Editor::exit_edit_mode() {
   edit_mode_ = false;
   edit_obj_ = 0;
+  fold_edit_shape();  // (round 406: the shape being edited takes the edit)
 }
 
 std::vector<uint32_t> Editor::selected_edge_chain(const Mesh &m, Vec3 near) const {

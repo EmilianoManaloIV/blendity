@@ -41,7 +41,9 @@ baseline wrote, and its total of 77.0 s left out row 20: the *Before* column bel
 | 25 | Draw in red | M, P, B (the Console's line), M, 20K (`sketch color D03030`, Enter) | 7.9 | M, P, B (Mesh), P (Draw), P (Pen Colour), P, B (Red) | 5.95 | 0286: Draw > Pen Colour |
 | 26 | Limit a modifier to a vertex group | M, P, B (the field), M, 7K (the group's name, Enter; recalled exactly) | 5.3 | M, P, B (the dropdown), P, B (the group) | 3.75 | 0289: the group dropdown |
 | 27 | Lift the sketch's scaffold to 3D | M, P, B (the Console's line), M, 11K (`sketchlift`, Enter) | 6.1 | M, P, B (Mesh), P (Draw), P, B (Lift the Sketch to 3D) | 4.85 | 0286: Draw > Lift |
+| 28 | Set the Smile shape to 40 | M, P, BB (the BlendShape/Smile field), H, M, 4K (`0.4`, Enter) | 5.2 | M, P, BB (the Smile number in the foldout), H, M, 3K (`40`, Enter) | 5.0 | 0383: the foldout in 0-100 |
+| 29 | Key the Smile shape at 50 at the playhead (its track exists) | M, P, BB (the Inspector's BlendShape field), H, M, 3K (`0.5`, Enter), H, M, P, K (I over the label) | 8.05 | M, P, BB (the row's value field), H, M, 2K (`50`, Enter) | 4.8 | 0383: the value field keys |
 
-**Totals** (19 timed rows, printed by the tool): before **80.9 s**, after **54.65 s** in the Unity preset, about a
-third less; with the Adobe preset rows 4 and 5 fall to 1.95 s each, **50.6 s**. These are model estimates for an
+**Totals** (28 timed rows, printed by the tool; rounds 282-406): before **184.65 s**, after **96.45 s** in the Unity preset, about
+half; with the Adobe preset rows 4 and 5 fall to 1.95 s each. These are model estimates for an
 expert, not measurements of people: the study (`study-protocol.md`, `study-282.md`) is what measures artists.

@@ -18,3 +18,5 @@ tools/posemodel/runs/
 tools/inbetween/__pycache__/
 # Python caches (the Blender bridge's add-on folder is zipped as it is)
 __pycache__/
+docs/book/build/
+docs/book/build-*.out

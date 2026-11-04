@@ -113,6 +113,7 @@ bool Editor::set_sculpt(bool on) {
     sculpt_scene_ = nullptr;
     sculpt_cache_mesh_ = nullptr;
     if (!on) Log::info("Sculpt off");
+    if (!on) fold_edit_shape();  // (round 406: the shape being edited takes the strokes)
   }
   if (!on) return true;
   GameObject *g = active_object();
@@ -133,6 +134,7 @@ bool Editor::set_sculpt(bool on) {
   if (!sculpt_own_mesh(g, mf)) return false;
   sculpt_ = true;
   sculpt_obj_ = g->id;
+  show_edit_shape_full(*g);  // (round 406: a shape opened in the Inspector shows in full while sculpted)
   sculpt_scene_ = scene_.get();
   sculpt_cache_mesh_ = nullptr;
   Log::info("Sculpt on '%s': drag over it (Shift smooths, Alt carves; Esc leaves)", g->name.c_str());

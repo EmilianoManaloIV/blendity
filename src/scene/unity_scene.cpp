@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Unity prefabs and scenes into Blendity's objects (round 370, task 0347): see unity_scene.h.
 #include "unity_scene.h"
+#include "unity_sdk_types.h"
+#include "../render/shading.h"  // (round 405: the view transform's setting)
 #include "unity_material.h"
 
 #include "spring_bones.h"
@@ -592,6 +594,35 @@ void add_vrc_constraint(const UnityDoc &d, GameObject *g, const std::string &typ
   for (int k = 0; k < 3; k++) c->affects_rotation[k] = c->kind == 0 ? b.num(rot_axes[k], 1.0) != 0.0 : c->affects[k];  // (a Parent constraint's rotation part)
 }
 
+/* Round 403: the world's Scene Descriptor and Pipeline Manager, and Unity's LOD Group onto Blendity's. */
+void add_scene_descriptor(const UnityDoc &d, GameObject *g) {
+  if (g->get<SceneDescriptorComponent>()) return;
+  SceneDescriptorComponent *s = g->add<SceneDescriptorComponent>();
+  const YamlNode &b = d.body;
+  s->unity_id = std::to_string(d.file_id);
+  s->enabled = b.num("m_Enabled", 1.0) != 0.0;
+  s->spawn_fids = yaml_fids(b.get("spawns"));
+  auto whole = [&](const char *key, int lo, int hi) {
+    const double v = b.num(key);
+    return std::isfinite(v) ? (int)std::max((double)lo, std::min((double)hi, v)) : 0;  // (review 403: a NaN or a huge number never an INT_MIN)
+  };
+  s->spawn_order = whole("spawnOrder", 0, 3), s->spawn_orientation = whole("spawnOrientation", 0, 2);
+  s->camera_fid = b.file_id("ReferenceCamera");
+  s->respawn_height = std::isfinite(b.num("RespawnHeightY", -100.0)) ? (float)b.num("RespawnHeightY", -100.0) : -100.0f;
+  s->respawn_behaviour = whole("ObjectBehaviourAtRespawnHeight", 0, 1);
+  s->forbid_user_portals = b.num("ForbidUserPortals") != 0.0, s->auto_spatialize = b.num("autoSpatializeAudioSources") != 0.0;
+  s->interact_thru_layers = whole("interactThruLayers", -2147483647, 2147483647), s->capacity = whole("capacity", 0, 100000);
+  s->gravity = yaml_vec3(b.get("gravity"), Vec3(0.0f, -9.81f, 0.0f)), s->draw_distance = std::isfinite(b.num("DrawDistance")) ? (float)b.num("DrawDistance") : 0.0f;
+  s->unity_version = b.str("unityVersion");
+}
+
+void add_pipeline_manager(const UnityDoc &d, GameObject *g) {
+  if (g->get<PipelineManagerComponent>()) return;
+  PipelineManagerComponent *p = g->add<PipelineManagerComponent>();
+  p->unity_id = std::to_string(d.file_id);
+  p->blueprint_id = d.body.str("blueprintId"), p->content_type = d.body.num("contentType") >= 0.5 ? 1 : 0;
+}
+
 void add_animator(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
   if (g->get<AnimatorComponent>()) return;
   AnimatorComponent *a = g->add<AnimatorComponent>();
@@ -636,6 +667,7 @@ void resolve_avatar_refs(const Build &b) {
         vc->target_transform = name_of(vc->target_fid);
         for (auto &s : vc->sources) s.transform = name_of(s.fid);
       }
+      else if (auto *sd = dynamic_cast<SceneDescriptorComponent *>(c.get())) sd->spawns = names_of(sd->spawn_fids), sd->reference_camera = name_of(sd->camera_fid);  // (round 403)
     }
   }
 }
@@ -823,7 +855,8 @@ void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
   const std::string name = !e->script.empty() && ctx.script_name ? ctx.script_name(e->script) : std::string();
   const std::string script_fid = std::to_string(d.body.file_id("m_Script"));  // (a DLL's scripts: one GUID, a fileID each)
   const std::string vrc = d.class_id == 114 ? vrchat_type(d.body) : std::string();
-  e->type = !name.empty() ? name : !vrc.empty() ? vrc : d.class_id == 114 ? "MonoBehaviour (" + e->script + ":" + script_fid + ")" : d.type;
+  const std::string sdk = d.class_id == 114 ? unity_sdk_class_name((int32_t)d.body.file_id("m_Script")) : std::string();  // (round 403: a DLL's class by its fileID)
+  e->type = !name.empty() ? name : !vrc.empty() ? vrc : !sdk.empty() ? sdk : d.class_id == 114 ? "MonoBehaviour (" + e->script + ":" + script_fid + ")" : d.type;  // (its fields first: a test's fake id names nothing)
   if (e->script == kLightVolumeGuid || e->script == kPointLightVolumeGuid)  // (round 397: named without the package's scripts in the project)
     e->type = e->script == kLightVolumeGuid ? "LightVolumeInstance" : "PointLightVolumeInstance";
   e->data = d.header + d.text;  // (the document as written, its header line and line ends unchanged)
@@ -839,17 +872,30 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
     case 215: return add_reflection_probe(d, g, ctx), (void)ctx.reflection_probes++;  // (round 401)
     case 33: return;  // (meshes: before)
     case 137: return add_renderer(d, g, ctx, b);
-    case 95: add_animator(d, g, ctx); return add_engine(d, g, ctx);  // (round 402: shown and written back; the document kept too)
+    case 95: {  // (round 402: shown and written back; the document kept too, read-only)
+      add_animator(d, g, ctx);
+      add_engine(d, g, ctx);
+      static_cast<EngineComponent *>(g->components.back().get())->native = true;
+      return;
+    }
     default:
       if (d.class_id == 114 && vrchat_type(d.body) == "VRCPhysBone" && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty()))
         add_physbone(d, g, ctx, b);  // (and kept below, for Unity; a project's own script with such fields isn't one)
       if (d.class_id == 114 && (!ctx.script_name || ctx.script_name(d.body.guid("m_Script")).empty())) {  // (round 402: the avatar's components as Blendity's)
         const std::string vt = vrchat_type(d.body);
+        const size_t before = g->components.size();
         if (vt == "VRCAvatarDescriptor") add_avatar_descriptor(d, g, ctx);
+        else if (vt == "VRCSceneDescriptor") add_scene_descriptor(d, g);
+        else if (d.body.get("blueprintId") && d.body.get("contentType")) add_pipeline_manager(d, g);  // (round 403)
         else if (vt == "VRCPhysBone") add_physbone_component(d, g);
         else if (vt == "VRCPhysBoneCollider") add_physbone_collider(d, g);
         else if (vt == "VRCContactSender" || vt == "VRCContactReceiver") add_contact(d, g, vt == "VRCContactReceiver");
         else if (vt.size() > 13 && vt.compare(vt.size() - 10, 10, "Constraint") == 0 && vt.rfind("VRC", 0) == 0) add_vrc_constraint(d, g, vt);
+        if (g->components.size() > before) {  // (review 403: the kept text of a document a Blendity component holds is read-only)
+          add_engine(d, g, ctx);
+          static_cast<EngineComponent *>(g->components.back().get())->native = true;
+          return;
+        }
       }
       if (is_script(d, kLightVolumeGuid)) add_light_volume(d, g, ctx), ctx.light_volumes++;  // (round 397: and kept below)
       return add_engine(d, g, ctx);
@@ -885,6 +931,34 @@ bool same3(const YamlNode &b, const char *key, Vec3 v) {
 }
 
 /* A document's line for `key` at the body's indent ("  key: ..."): the new value, the line's own end kept. */
+/* The end of a value that Unity wrapped over several lines (round 403): the lines after `end` that are indented past
+ * `indent` and are neither a key's line nor a list item belong to it (as the parser joins them). */
+size_t wrapped_end(const std::string &doc, size_t end, size_t indent) {
+  auto continuation = [&](const std::string &line) {  // (indented past the key, not a key's line nor a list item)
+    const size_t first = line.find_first_not_of(" \r");
+    if (first == std::string::npos || first <= indent || line[first] == '-') return false;
+    const size_t colon = line.find(": ");
+    const bool key_line = colon != std::string::npos && line.find_first_of(" '\"{[", first) >= colon;  // (a key, not a quoted text with a colon)
+    const std::string trimmed = line.substr(0, line.find_last_not_of(" \r") + 1);
+    return !key_line && !(trimmed.back() == ':' && trimmed.find_first_of(" '\"{[", first) == std::string::npos);
+  };
+  while (end < doc.size()) {
+    const size_t next = doc.find('\n', end + 1);
+    const std::string line = doc.substr(end + 1, (next == std::string::npos ? doc.size() : next) - end - 1);
+    if (line.find_first_not_of(" \r") == std::string::npos) {  // (an empty line: a folded newline when a continuation follows it)
+      if (next == std::string::npos) break;
+      const size_t after = doc.find('\n', next + 1);
+      const std::string peek = doc.substr(next + 1, (after == std::string::npos ? doc.size() : after) - next - 1);
+      if (!continuation(peek)) break;
+      end = next;
+      continue;
+    }
+    if (!continuation(line)) break;
+    end = next == std::string::npos ? doc.size() : next;
+  }
+  return end;
+}
+
 bool replace_line(std::string &doc, const std::string &key, const std::string &value) {
   const std::string head = "\n  " + key + ": ";
   size_t at = doc.find(head);
@@ -892,6 +966,7 @@ bool replace_line(std::string &doc, const std::string &key, const std::string &v
   at += 1;
   size_t end = doc.find('\n', at);
   if (end == std::string::npos) end = doc.size();
+  end = wrapped_end(doc, end, 2);
   const bool cr = end > at && doc[end - 1] == '\r';
   doc.replace(at, end - at, "  " + key + ": " + value + (cr ? "\r" : ""));
   return true;
@@ -933,8 +1008,9 @@ bool replace_nested_line(std::string &doc, const std::string &parent, const std:
     const size_t end = doc.find('\n', line + 1) == std::string::npos ? doc.size() : doc.find('\n', line + 1);
     const std::string head = "    " + child + ": ";
     if (doc.compare(line + 1, head.size(), head) == 0) {
-      const bool cr = end > line + 1 && doc[end - 1] == '\r';
-      doc.replace(line + 1, end - line - 1 - (cr ? 1 : 0), head + value);
+      const size_t wend = wrapped_end(doc, end, 4);
+      const bool cr = wend > line + 1 && doc[wend - 1] == '\r';
+      doc.replace(line + 1, wend - line - 1 - (cr ? 1 : 0), head + value);
       return true;
     }
     line = end == doc.size() ? std::string::npos : end;
@@ -957,6 +1033,12 @@ void apply_field_edits(std::string &doc, const UnityEdit &e, int &changed) {
 }
 
 void apply_edit(std::string &doc, const UnityEdit &e, int &changed) {
+  if (!e.document.empty()) {  // (round 403: a kept document edited here goes back whole - when it differs)
+    std::string want = e.document;
+    if (want.back() != '\n') want += '\n';
+    if (want != doc) doc = want, changed++;
+    return;
+  }
   if (!e.fields.empty()) return apply_field_edits(doc, e, changed);
   const YamlNode b = doc_body(doc);
   if (!e.transform) {
@@ -1051,7 +1133,7 @@ bool unity_post_profile(const std::string &yaml, UnityPostProfile &out) {
 
 void unity_post_apply(const UnityPostProfile &p, Scene &scene, GameObject &camera, std::vector<std::string> &notes) {
   if (p.grading.on) {
-    scene.render.view_transform = p.grading.tonemapper == 2 ? 2 : p.grading.tonemapper == 1 ? 1 : 0;  // (ACES, Neutral as Filmic, None as Standard)
+    scene.render.view_transform = p.grading.tonemapper == 2 ? view_transform_setting(ViewTransform::AcesFull) : p.grading.tonemapper == 1 ? 1 : 0;  // (ACES as Unity's full fit - round 405; Neutral as Filmic, None as Standard)
     scene.render.exposure = p.grading.post_exposure;
   }
   CameraFilters *cf = camera.get<CameraFilters>();
@@ -1113,6 +1195,11 @@ std::string unity_yaml_string(const std::string &s) {
     else out += strprintf("\\u%04X", cp);
   }
   return out + "\"";
+}
+
+bool unity_set_field(std::string &doc, const std::string &key, const std::string &value) {
+  const size_t slash = key.find('/');
+  return slash == std::string::npos ? replace_line(doc, key, value) : replace_nested_line(doc, key.substr(0, slash), key.substr(slash + 1), value);
 }
 
 std::string patch_unity_objects(const std::string &text, const std::vector<UnityEdit> &edits, int *changed) {

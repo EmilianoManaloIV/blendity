@@ -1,0 +1,152 @@
+\chapter{Coming from another program}
+\label{ch:comingfrom}
+
+Blendity has two kinds of users by design: Unity users who expect Unity's navigation, its \key{W} / \key{E} / \key{R}
+tools and an Inspector, and Blender users who expect to model with the keyboard. The rule that resolves the clashes
+(\code{docs/USABILITY.md}) is: \textbf{move the view and pick tools as Unity does; change geometry as Blender does
+(a verb key, the mouse or a typed number, click to confirm, F9 to adjust); settings in the Inspector}. Nothing a Unity
+user already knows changes by default, and everything a Blender user reaches for while modeling works. The first run
+asks where you come from and sets the keys and the feel; \menu{Edit > Preferences > Keymap} starts from any of seven
+presets and rebinds anything; \code{keymap table} in the console prints every action's chords under every preset.
+
+\section{The editor feel}
+\menu{Edit > Editor Feel} switches the keys \emph{and} the Scene view's mouse navigation to another program's:
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{l>{\raggedright\arraybackslash}p{16mm}>{\raggedright\arraybackslash}p{26mm}>{\raggedright\arraybackslash}p{24mm}>{\raggedright\arraybackslash}p{24mm}X}
+\toprule
+Feel & Orbit & Pan & Zoom / dolly & Look + fly & Its own keys \\
+\midrule
+Unity & Alt+LMB & MMB, Alt+Ctrl+LMB & Wheel, Alt+RMB & hold RMB + WASD & the Unity table below \\
+Unreal & Alt+LMB & MMB, LMB+RMB & Wheel, Alt+RMB & hold RMB + WASD & Alt+P play, End drop to floor, Alt+G/H/J/K views \\
+Blender & MMB & Shift+MMB & Wheel, Ctrl+MMB & -- & G/R/S, A, X, Shift+D \\
+Maya & Alt+LMB & Alt+MMB & Wheel, Alt+RMB & -- & Q/W/E/R, F8, F9--F11 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Window names, layouts and the Y-up axis stay Unity's whatever the feel.
+
+\section{From Unity}
+\begin{fromnote}{What carries over}
+Everything on the surface: the windows, Alt-orbit, \key{Q W E R Y}, \key{F} to frame, \key{Ctrl+D} duplicate, \key{Ctrl+P}
+play, \key{Ctrl+Shift+N} empty, \key{Ctrl+1}\ldots\key{9} windows, the Inspector with multi-object editing, drag-and-drop of
+assets, the Project window, Play mode that reverts, the Animation window (dopesheet, Curves, Record, Add Property,
+\key{K} keys every track, comma and full stop step keys), Humanoid retargeting as Mecanim reads a T and an A pose,
+\code{.anim} clips, \code{.unitypackage}, prefabs, scenes and \code{.mat} files read and written, LOD Groups, colliders,
+Light modes (Realtime / Mixed / Baked), Contribute GI, lightmaps and probe volumes, post-processing as Camera Filters.
+\end{fromnote}
+What is new is \textbf{Edit Mode} (\key{Tab}) with Blender's operators (chapter~\ref{ch:model}), the \textbf{Modeling
+Tools} window, \textbf{F9} to adjust the last operation, materials evaluating Blender's Principled BSDF with a layer
+stack of textures instead of a shader graph, two render engines in F12, and the \textbf{Learn} tab. What is not there:
+C\# scripts (Play has a few built-in behaviours and the Sequencer's triggers) and the Animator state machine (the
+Sequencer's tracks and triggers do the job). A Unity scene opened here looks as its Game view does, and Live Link sends
+your work back into a Unity project as you edit (chapter~\ref{ch:files}).
+
+\section{From Blender}
+\begin{fromnote}{What carries over}
+The data and the tools: the mesh with n-gons, per-corner UVs and seams; \key{Tab}, \key{1} / \key{2} / \key{3}, \key{G} and
+the axis keys with typed values, \key{E} extrude, \key{I} inset, \key{Ctrl+B} bevel, \key{Ctrl+R} loop cut, \key{K} knife,
+\key{Alt}+click loops and \key{Ctrl+Alt}+click rings, \key{F9}, \key{O} proportional editing, \key{Shift+N} normals, the
+modifier stack with the same header toggles, the Principled BSDF, LSCM and Smart UV, the Hosek--Wilkie sky, Filmic and
+AgX (with OpenColorIO), Cycles-like path tracing, the Graph Editor's tangent modes, bones and armatures, automatic
+weights, the NLA's idea as sequences, every export format with Blender's options.
+\end{fromnote}
+Pick the \textbf{Blender} preset and feel: middle-mouse orbit, \key{R} rotates and \key{S} scales, \key{A} selects all,
+\key{X} deletes, \key{Shift+D} duplicates, \key{F} fills, \key{M} merges, \key{J} connects, \key{L} selects linked,
+\key{.} frames, \key{Shift+I} keys. Under the Unity preset \key{R} is the Scale tool (Edit $>$ Blender Transform Keys
+moves Scale to \key{T}), \key{E} is the Rotate tool and \key{Ctrl+E} extrudes, \key{Alt+F} fills, \key{Alt+M} merges.
+What is different in kind: windows dock as Unity's and layouts replace workspaces; the Inspector replaces the N panel
+and the redo panel (tool numbers live in F9 or the drag helper, not the Inspector); the axes are Unity's (Y up,
+left-handed: OBJ and FBX mirror X on the way out as Unity's importer does); there is no node editor (chapter~\ref{ch:surface}
+maps Blender's texture and converter nodes to layers), no Python (the console), no \code{.blend} except through your
+installed Blender (\code{import file.blend}), and Live Link sends the scene into Blender live.
+
+\section{From Maya}
+Pick the \textbf{Maya} preset and feel: Alt+LMB orbit, Alt+MMB pan, \key{Q W E R} tools, \key{F8} toggles components
+(Edit Mode), \key{F9} / \key{F10} / \key{F11} vertex / edge / face (so Adjust Last moves to \key{Ctrl+F9} and the Render
+window leaves F11), \key{S} sets a key, \key{B} soft select (proportional editing), \key{Ctrl+Shift+X} Multi-Cut (the
+knife), \key{Ctrl+M} collapse, \key{Z} / \key{Shift+Z} undo and redo. Maya's Outliner is the Hierarchy, the Attribute
+Editor the Inspector, the Hypershade the Materials and Textures windows, the Graph Editor the Animation window's Curves
+view.
+
+\section{From 3ds Max}
+Pick the \textbf{3ds Max} preset: \key{Q W E R}, \key{Z} frames, \key{Tab} enters the editable poly's sub-objects (Edit
+Mode), \key{1} / \key{2} / \key{4} vertex / edge / polygon, \key{Ctrl+V} clones, \key{Shift+E} extrude, \key{Shift+I}
+inset, \key{Ctrl+Shift+C} chamfer (bevel), \key{Alt+C} cut (knife), \key{Ctrl+Shift+E} connect, \key{Ctrl+Alt+C}
+collapse, \key{Ctrl+D} deselects. The modifier stack is the Inspector's modifier list, bottom to top as Blender's.
+
+\section{From SketchUp}
+Pick the \textbf{SketchUp} preset: \key{Space} selects, \key{M} moves, \key{Q} rotates, \key{S} scales, \key{L} line,
+\key{R} rectangle, \key{C} circle, \key{A} arc, \key{Shift+P} polygon, \key{P} Push/Pull, \key{F} offset (inset),
+\key{E} erases, \key{Shift+Z} zoom extents, \key{Shift+Space} the Wheel. The \textbf{Draw} tools draw onto faces or the
+ground with SketchUp's inference (the axes, parallel and perpendicular edges, midpoints, face centres); a closed shape
+on a face is cut into it, ready to \textbf{Push/Pull} with SketchUp's semantics (\adr{0004}, \cite{SketchUpHelp2026}):
+pulled, it extrudes; pushed through, it makes a hole; pushed flush with another face, it merges; \key{Ctrl} keeps the
+original face. Follow Me is \ui{Follow}, the Tape Measure's guides are \ui{Guide} and the \key{X} / \key{Y} / \key{Z}
+construction lines; groups and components are objects and child objects; \textbf{N-gon Mode} treats each flat region
+as one face as SketchUp does.
+
+\section{From Unreal}
+Pick the \textbf{Unreal} preset and feel: Unity's keys with Unreal's on top (\key{Alt+P} plays, \key{Ctrl+W} duplicates
+too, \key{End} drops the selection to the floor, \key{Alt+G/H/J/K} the perspective, front, top and side views, LMB+RMB
+pans). The Outliner is the Hierarchy, the Details panel the Inspector, the Content Browser the Project window, the
+Sequencer is here under the same name (clips, cards, camera cuts, sound), Post Process Volumes are Camera Filters. Live
+Link sends the scene into a level through the Unreal bridge (lights, cameras, LODs and UCX collision as Unreal names
+them), and \ui{Send to Blendity} brings a level back.
+
+\section{From Photoshop, Substance Painter and SketchBook}
+Pick the \textbf{Adobe} preset: Unity's keys with Photoshop's brush keys on top \cite{PhotoshopHelp2026}: \key{B}
+enters Paint Mode (and leaves Sculpt), \key{E} toggles the eraser (or Carve in Sculpt), \key{V} is the Move tool, \key{H}
+the Hand tool, \key{[} / \key{]} the brush size (in every preset), \key{Shift+[} / \key{]} its opacity, \key{Ctrl+T}
+Free Transform, \key{Space} held pans, \key{Ctrl+0} fits. The \textbf{Draw tab} works like SketchBook Pro's canvas
+\cite{SketchBookDocs2026} with Photoshop's 27 blend modes, clipping and layer masks, rectangle and lasso selections
+and Illustrator's shapes and Pen (chapter~\ref{ch:pen}). The \textbf{Textures} window's surfaces are Substance
+Painter's pipeline \cite{SubstancePainterDocs2026}: bake mesh maps, fill layers with mask stacks reading them, smart
+masks and smart materials, a material brush that paints colour, roughness, metallic, height and emission at once, and
+a texture set exported in the glTF, Unity, URP, HDRP, Unreal, Poiyomi or lilToon packing (chapter~\ref{ch:surface}).
+The \textbf{Editing} tab develops a render as Lightroom does. The \textbf{Board} is a PureRef-style reference board
+\cite{PureRef2026}.
+
+\section{The shortcut table}
+The table below is the Unity preset beside Blender's own keys; \code{keymap table} prints every preset.
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{Xll}
+\toprule
+ & Blendity (Unity preset) & Blender \\
+\midrule
+Orbit / Pan / Zoom & Alt+LMB / MMB / Wheel or Alt+RMB & MMB / Shift+MMB / Wheel \\
+Fly & hold RMB + WASD, Q/E, Shift & Shift+` \\
+Frame selection & F & Numpad . \\
+Views, Persp / Iso & the scene gizmo's axes / centre & Numpad 1 / 3 / 7, Numpad 5 \\
+Create objects & right-click in the Hierarchy & Shift+A \\
+View / Move / Rotate / Scale / Transform & Q / W / E / R / Y & -- / G / R / S / Transform tool \\
+Duplicate / Delete / Rename & Ctrl+D / Del / F2 & Shift+D / X / F2 \\
+Play / Pause / Step & Ctrl+P / Ctrl+Shift+P / Ctrl+Alt+P & -- \\
+Edit Mode / vertex / edge / face & Tab / 1 / 2 / 3 & Tab / 1 / 2 / 3 \\
+Grab / rotate / scale (modal) & G, X / Y / Z, a typed value & G / R / S \\
+Extrude / Inset / Bevel & Ctrl+E / I or Ctrl+I / Ctrl+B & E / I / Ctrl+B \\
+Select edge loop / ring & Alt+click / Ctrl+Alt+click & Alt+click / Ctrl+Alt+click \\
+Loop cut / Knife / Connect & Ctrl+R / K / J & Ctrl+R / K / J \\
+Push/Pull (face mode) / Push Through & P / Alt+P & -- \\
+Bridge & Ctrl+Shift+B & Bridge Edge Loops \\
+Fill / Merge at center / Recalculate normals & Alt+F / Alt+M / Shift+N & F / M / Shift+N \\
+Dissolve / Triangulate / Tris to quads & Ctrl+X / Ctrl+T / Alt+J & Ctrl+X / Ctrl+T / Alt+J \\
+Proportional editing & O & O \\
+Adjust Last Operation & F9 & F9 \\
+Set a key / Record / prev, next key & Shift+K / Ctrl+Shift+K / , . & Shift+I / -- / Down, Up \\
+UV Editor / Unwrap & Ctrl+9 / U & UV Editing workspace / U \\
+Render / Render window / Render Animation & F12 / F11 / Ctrl+F12 & F12 / F11 / Ctrl+F12 \\
+Palette / Favorites / the Wheel & Ctrl+K or F3 / Shift+Q / Space & F3 / Q / -- \\
+Learn & F1 & -- \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\begin{fromnote}{Learn}
+\emph{Navigating the Scene View} (the shortcut sheet), \emph{Coordinate Systems and Handedness}, \emph{Edit Mode:
+Modeling Like Blender}, \emph{Customizing the Editor}.
+\end{fromnote}

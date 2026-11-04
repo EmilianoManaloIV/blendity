@@ -1,0 +1,24 @@
+% The Live Link sequence: discovery, connection, the sync, then changes as they happen.
+\begin{tikzpicture}[node distance=4mm]
+  \node[box, fill=blAmber!15, draw=blAmber, minimum width=34mm] (b) {Blendity\\ \footnotesize \code{src/editor/livelink.*}};
+  \node[box, right=100mm of b, minimum width=34mm] (c) {A bridge\\ \footnotesize Blender / Unity / Godot / Unreal};
+  \coordinate (bb) at ($(b.south)+(0,-96mm)$);
+  \coordinate (cb) at ($(c.south)+(0,-96mm)$);
+  \draw[blGrey, line width=0.5pt] (b.south) -- (bb);
+  \draw[blGrey, line width=0.5pt] (c.south) -- (cb);
+  \foreach \y/\dir/\txt in {
+    8/r/{writes \code{\textasciitilde/.blendity/livelink.json}: the port, pid, scene and inbox},
+    19/l/{reads the file every 2 s while not connected; connects to the port (TCP, 127.0.0.1 only)},
+    30/l/{\code{hello}: the app, the bridge's version, its caps (\code{skins})},
+    41/r/{\code{sync} \ldots\ \code{sync\_end}: every object, mesh (a glTF binary), material, light, camera, the world},
+    54/r/{each frame, at most 60 a second: the difference since the last comparison - \code{transform}, \code{pose}, \code{deform}, \code{mesh}, \code{material}, \code{texture}, \code{clip}, \code{delete}, \code{play} \ldots},
+    68/r/{a slow client's queue is coalesced by key (a newer \code{transform} replaces the queued one), never past a \code{mesh} or a \code{delete}},
+    80/l/{Send to Blendity (Blender, Unreal): a snapshot folder into the inbox, imported within a second},
+    91/r/{\code{livelink stop} or exit: the discovery file is removed}}{
+    \ifx\dir r
+      \draw[flow] ($(b.south)+(0,-\y mm)$) -- node[lbl, above, text width=92mm, align=center] {\txt} ($(c.south)+(0,-\y mm)$);
+    \else
+      \draw[flow] ($(c.south)+(0,-\y mm)$) -- node[lbl, above, text width=92mm, align=center] {\txt} ($(b.south)+(0,-\y mm)$);
+    \fi
+  }
+\end{tikzpicture}

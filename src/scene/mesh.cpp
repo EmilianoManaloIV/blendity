@@ -382,7 +382,7 @@ size_t Mesh::edge_count() const {
 }
 
 size_t Mesh::memory_bytes() const {
-  size_t b = positions.capacity() * sizeof(Vec3) + face_offsets.capacity() * 4 + corner_verts.capacity() * 4;
+  size_t b = positions.capacity() * sizeof(Vec3) + face_offsets.capacity() * 4 + corner_verts.capacity() * 4 + edit_basis.capacity() * sizeof(Vec3);
   b += uvs.capacity() * sizeof(Vec2) + face_material.capacity() * 4 + seams.capacity() * 8 + sculpt_mask.capacity() * 4 + face_group.capacity() * 4;
   for (const RenderMesh &c : cache_)
     b += c.positions.capacity() * sizeof(Vec3) * 2 + c.uvs.capacity() * sizeof(Vec2) + c.tangents.capacity() * sizeof(Vec4) +

@@ -59,6 +59,17 @@ surfaces reflect four baked reflection probes.
   nested keys like `m_Shadows/m_Type` inside their mapping. The scene remembers the `.unity` it was opened from
   (`unity` block in the scene file).
 
+## Amended (round 405, task 0382)
+- **Unity's ACES** is a view transform of its own, `ViewTransform::AcesFull` ("ACES (full fit, Unity's)": the curve of
+  Hill's fit of the RRT + ODT, no exposure scale); the PPv2 import picks it in place of Blendity's own ACES. Its saved
+  index follows the OpenColorIO views (3 + their count) so a saved OpenColorIO view keeps its number; the index therefore
+  differs between a build with OpenColorIO and one without - a known limit (a view saved by name would lift it). The GPU
+  frame carries it as code 4 (3 is an OpenColorIO table).
+- **The reflections' weight is per origin:** a scene with a Unity link (lights or none) weighs its probes' and sky's
+  reflection by Unity's BRDF1 (the Fresnel from F0 to smoothness + reflectivity, the surface reduction; the reflectivity
+  the metallic workflow's lerp(0.04, 1, metallic)); Blendity's own scenes keep Karis's approximation.
+  `BLENDITY_UNITY_BRDF=0` turns the weight off, a diagnostic.
+
 ## Consequences
 - An opened Unity scene looks as its Game view does: SideRail's blue exponential fog, black sky and ambient, ACES with
   +1 EV and bloom, and its metal reflecting the rooms Unity baked (once the lightmaps are fetched).

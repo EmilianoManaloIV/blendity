@@ -1,0 +1,67 @@
+\chapter{Files, other programs and Live Link}
+\label{ch:files}
+
+\section{The project}
+The Project window is \code{Assets}: nested folders, drag to move, \key{F2} to rename, \key{Delete} to the Recycle Bin
+or Trash; references to a moved or renamed material, texture or clip keep working. Scenes are text files
+(\code{.scene}); \key{Ctrl+S} saves, \ui{New} or \ui{Open} asks ``Save changes?'' first; the Console's \code{save},
+\code{open} and \code{new} do the same.
+
+\section{Import}
+\menu{File > Import Model} (or drop files on the window): OBJ + MTL, FBX, glTF, STL, PLY and USD text, with their
+materials and textures and, for rigged files, their skeletons, skins, bind poses, shape keys and animations
+(\code{Assets/Animations/<model>/}); MikuMikuDance \code{.pmx} / \code{.pmd} characters rigged, toon-shaded and
+dancing to \code{.vmd}; VRM avatars with their humanoid names, expressions, spring bones and MToon look; BVH motion
+capture; Collada; \code{.blend} through your installed Blender. The \textbf{Import Preview} shows the model first with
+its shading switchable (As Imported, PBR, or a toon style) and an Outline switch; Import writes it, Cancel nothing.
+The texture finder reads the folders around the model and pairs each bare material with the texture set its name is
+likeliest to own.
+
+\section{Export}
+\menu{File > Export}: every mesh format Blender 5.2 exports (OBJ, FBX binary or ASCII, glTF \code{.glb} or
+\code{.gltf}, STL, PLY, USD) with Blender's options (Selected Only, Apply Modifiers, Scale, Up Axis, Triangulate, Keep
+Transforms). glTF and FBX carry a rig, its skin, its clip and the shape keys (visemes, blinks and expressions reach
+Unity, VRChat and Unreal); textures go with the file (procedural, painted and generated maps as PNGs, embedded in a
+\code{.glb}); \ui{Lightmap UVs} adds a second UV set; \ui{Colliders} and \ui{LOD Levels} are named for Unity, Unreal or
+Godot; \ui{Bake Textures} turns procedural materials into images; an export asked for while a remesh or a bind still
+works on what it writes waits for it. Every format was checked both ways against Blender 5.2.
+
+\section{Unity projects, VRChat, Godot, Blender, Unreal}
+\textbf{Unity:} \menu{File > Import Unity Package\ldots} unpacks a \code{.unitypackage} into
+\code{Assets/Imported/<package>/} with Unity's GUIDs kept; a prefab or a \code{.unity} scene comes in with its hierarchy,
+meshes, materials (converted by shader: Standard, URP, lilToon, Poiyomi, MToon, UTS2), lights, cameras, colliders,
+nested prefabs and overrides, and every other component as an Engine Component you can edit under Unity's names;
+\menu{File > Open (Unity Scene)} opens a \code{.unity} as the scene with the look Unity gives it (chapter~\ref{ch:light});
+Unity \code{.anim} clips import and export; \menu{File > Export Unity Package\ldots} writes the work back under the same
+GUIDs. Nothing of Unity's is ever written over: an edit of a Unity clip or material saves to a Blendity copy beside it.
+
+\textbf{VRChat:} the \textbf{Avatar} window (after the CATS plugin \cite{CATS2026}) has Fix Model, Create Visemes,
+Model Options, Pose and Shape tools, Decimation, Bone Root and Bone Merging, Eye Tracking, the Texture Atlas, Merge
+Armatures, Attach Mesh, Translate and Export for VRChat, with a checklist against VRChat's requirements
+\cite{VRChatCreators2026}; the Profiler's \ui{Budget} ranks a scene or avatar against the PC and Quest performance
+ranks; an avatar's VRChat components (the Avatar Descriptor, PhysBones, colliders, contacts, constraints) come in as
+Blendity's and go back through the package or Live Link; a world's Scene Descriptor and Light Volumes too.
+
+\textbf{Godot:} \code{.tscn} scenes come in with their nodes, primitives, materials, lights, cameras and collision
+shapes and go back with the objects' transforms, scripts kept \cite{GodotDocs2026}. \textbf{Blender:} \code{.blend}
+files come in through the installed Blender (\code{blender path} names it); the Blender bridge's \ui{Send to Blendity}
+brings a scene over. \textbf{Unreal:} the bridge sends a level through its FBX exporter with each actor's place and
+Blueprint class.
+
+\section{Live Link}
+Live Link sends the scene to Blender, Unity, Godot or Unreal \emph{as you work}: objects, transforms, meshes (a drag in
+Edit Mode streams while it happens), materials, textures by their pixels, lights, cameras, a rig's poses and skins,
+clips baked as the engine's own, colliders and LODs, the world and the render camera's look, VRChat's components where
+the SDK is there. It starts with Blendity (Preferences $>$ Live Link) and writes where it listens, so a bridge connects
+by itself. To put a bridge in: \menu{Window > Live Link > Install a Bridge} $>$ Blender (found and enabled for you), or
+Unity / Godot / Unreal Project\ldots\ and pick the project's folder (in Unity: Package Manager $>$ Add package from
+disk $>$ the bridge's \code{package.json}). The window lists who is connected. It is one way: edits on the other side
+are not sent back. Work on a copy of a project you care about.
+
+\begin{fromnote}{Where it comes from}
+The formats follow Blender's importers and exporters \cite{Blender2026} and their specifications
+\cite{Khronos2021Gltf, FBXBlender2026, USD2026}; Unity's files follow its manual \cite{UnityManual2026,
+UnityPrefabsandtheYAMLsceneformat, UnityExportingapackage}; VRChat's limits and components follow its creator
+documentation \cite{VRChatCreators2026}; the Avatar window follows CATS \cite{CATS2026}; Godot's format its
+documentation \cite{GodotDocs2026}. Learn: \emph{Assets, Scenes and Files}, \emph{Coordinate Systems and Handedness}.
+\end{fromnote}

@@ -305,7 +305,9 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
   std::vector<Prepared> out;
   for (const ExportItem &it : items) {
     if (!it.mesh || !it.mesh->face_count()) continue;
-    const Mesh &src = *it.mesh;
+    const bool open_shape = !it.mesh->edit_basis.empty();  // (round 406: a shape being edited goes out folded)
+    const Mesh folded = open_shape ? shape_edit_folded(*it.mesh) : Mesh();
+    const Mesh &src = open_shape ? folded : *it.mesh;
     Prepared p;
     p.name = it.name.empty() ? src.name : it.name;
     p.materials = it.materials;

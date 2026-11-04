@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <set>
 #include <cmath>
 #include <cctype>
 
@@ -435,7 +436,10 @@ const Material::Resolved &Material::textures() const {
     }
     std::string err;
     TexturePtr p = texture_load(resolve_asset_path(t.path), !t.non_color, &err);
-    if (!p) Log::warn("Material '%s': %s", name.c_str(), err.c_str());
+    static std::mutex said_mutex;
+    static std::set<std::string> said;  // (e2e 407: once a material and file - a model's missing texture had been said every frame)
+    std::lock_guard<std::mutex> said_lock(said_mutex);
+    if (!p && said.insert(name + "|" + t.path).second) Log::warn("Material '%s': %s", name.c_str(), err.c_str());
     return p;
   };
   if (procedural == (int)Procedural::UVGrid || procedural == (int)Procedural::ColorGrid) slot++;  // (no base map read)

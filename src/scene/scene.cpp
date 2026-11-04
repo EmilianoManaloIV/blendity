@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "scene.h"
+#include "unity_scene.h"  // (round 403: an Engine Component's fields)
+#include "unity_yaml.h"
 #include "subdiv_chain.h"
 #include "../core/json.h"
 #include "animation.h"
@@ -234,6 +236,10 @@ void register_builtin_components() {
                         "VRC SDK's VRCContactSender / VRCContactReceiver; Blender has no counterpart");
   reg<VRCConstraintComponent>("VRChat", "VRChat's Parent, Position, Rotation, Scale, LookAt or Aim Constraint: its sources with weights and offsets, solved here for Parent, Position and Rotation (round 402).",
                               "VRC SDK's VRCParentConstraint and kin; Blender's Child Of / Copy Location / Copy Rotation constraints");
+  reg<SceneDescriptorComponent>("VRChat", "VRChat's Scene Descriptor: the spawns and their order, the reference camera, the respawn height and gravity - Unity's fields, written back and sent over Live Link (round 403).",
+                                "VRC SDK's VRCSceneDescriptor; Blender has no counterpart");
+  reg<PipelineManagerComponent>("VRChat", "VRChat's Pipeline Manager: the blueprint id and the content type (avatar or world), kept and written back (round 403).",
+                                "VRC SDK's PipelineManager; Blender has no counterpart");
   reg<AnimatorComponent>("Scripts", "Unity's Animator: its controller and avatar assets, root motion, update and culling modes - kept, shown, written back (round 402).",
                          "Unity's Animator; Blender's NLA on the armature");
   reg<LightVolumeComponent>("Rendering", "A VRC Light Volume: VRChat's baked-lighting box - its object's scale is the box - sent to Unity as red.sim.lightvolumes' Light Volume; Unity bakes it, or Blendity (round 397).",
@@ -267,7 +273,7 @@ void MeshRenderer::reflect(Reflector &r) {
   /* Shape keys (task 0135): files and hashes keep the weights as a list (whatever order the components come in, a
    * key's exact name); the Inspector and clips get a slider per key of the mesh (BlendShape/<name>). */
   if (r.serializing()) r.weight_list("Shape Weights", shape_weights);
-  const MeshFilter *mf = owner && !r.serializing() ? owner->mesh_filter() : nullptr;
+  const MeshFilter *mf = owner && !r.serializing() && !r.inspector() ? owner->mesh_filter() : nullptr;  // (round 406: the Inspector's BlendShapes foldout draws them)
   const Mesh *mesh = mf && mf->mesh ? mf->mesh.get() : nullptr;
   for (size_t i = 0; mesh && i < mesh->shape_keys.size(); i++) {
     const std::string field = "BlendShape/" + mesh->shape_keys[i].name;
@@ -2023,13 +2029,164 @@ void AnimatorComponent::reflect(Reflector &r) {
 
 std::atomic<int> VRCConstraintComponent::live{0};
 
+/* Round 403 (ADR 0101): Unity's own field names as the Inspector shows them - "m_" dropped, the camel case split. */
+std::string unity_field_label(const std::string &key) {
+  std::string k = key.rfind("m_", 0) == 0 ? key.substr(2) : key.rfind("_", 0) == 0 ? key.substr(1) : key;
+  std::string out;
+  for (size_t i = 0; i < k.size(); i++) {
+    const char c = k[i];
+    if (i == 0) out += (char)std::toupper((unsigned char)c);
+    else if (std::isupper((unsigned char)c) && std::islower((unsigned char)k[i - 1])) out += ' ', out += c;
+    else out += c;
+  }
+  return out;
+}
+
+int64_t EngineComponent::unity_file_id() const {
+  const size_t amp = data.rfind("--- ", 0) == 0 ? data.find('&') : std::string::npos;
+  return amp == std::string::npos || amp > data.find('\n') ? 0 : (int64_t)std::strtoll(data.c_str() + amp + 1, nullptr, 10);
+}
+
+void EngineComponent::reflect_fields(Reflector &r) {
+  if (native) {
+    std::string note = "its fields are on the " + type + " component above; the text goes back to Unity as written";
+    return r.text("Data", note);
+  }
+  /* The parsed document, kept while the text is the same (review 403: the Inspector reads it every frame). */
+  const size_t h = std::hash<std::string>()(data) ^ data.size();
+  if (!parsed_ || parsed_hash_ != h) {
+    auto docs = std::make_shared<std::vector<UnityDoc>>();
+    std::string why;
+    if (!parse_unity_yaml(data, *docs, why)) docs->clear();
+    parsed_ = std::static_pointer_cast<const void>(docs), parsed_hash_ = h;
+  }
+  const auto docs = std::static_pointer_cast<const std::vector<UnityDoc>>(parsed_);
+  if (docs->empty()) {
+    std::string shown = std::to_string(std::count(data.begin(), data.end(), '\n')) + " lines, kept as the engine wrote them";
+    return r.text("Data", shown);
+  }
+  static const char *hidden[] = {"m_ObjectHideFlags", "m_CorrespondingSourceObject", "m_PrefabInstance", "m_PrefabAsset", "m_GameObject", "m_Script",
+                                 "m_EditorClassIdentifier", "m_EditorHideFlags", "m_Name", "serializedVersion"};
+  auto is_hidden = [&](const std::string &key) { return std::find(std::begin(hidden), std::end(hidden), key) != std::end(hidden); };
+  auto label_of = [&](const std::string &key) {
+    std::string l = unity_field_label(key);
+    if (l == "Type" || l == "Engine" || l == "Script" || l == "Data") l += " (Unity)";  // (this component's own fields keep their names)
+    return l;
+  };
+  /* A number as Unity writes one (a whole number is a float written short: every number takes a float field); digits
+   * past what a float holds, or led by zeros, stay text (review 403). */
+  auto number = [](const std::string &s, double *d) {
+    if (s.empty() || s.size() > 15 || (s.size() > 1 && s[0] == '0' && s[1] != '.') || (s.size() > 2 && s[0] == '-' && s[1] == '0' && s[2] != '.')) return false;
+    char *end = nullptr;
+    *d = std::strtod(s.c_str(), &end);
+    return end && *end == 0 && std::isfinite(*d) && std::fabs(*d) < 16777216.0;
+  };
+  bool edited = false;
+  auto scalar = [&](const std::string &label, const YamlNode &v, const std::string &path) {
+    double d = 0.0;
+    if (number(v.value, &d)) {
+      float f = (float)d;
+      const float before = f;
+      r.field(label.c_str(), f, 0.01f);
+      if (f != before) edited = unity_set_field(data, path, unity_yaml_num(f)) || edited;
+    }
+    else {
+      std::string s = v.value;
+      r.text(label.c_str(), s);
+      if (s != v.value) edited = unity_set_field(data, path, unity_yaml_string(s)) || edited;
+    }
+  };
+  int shown = 0;
+  for (const auto &[key, v] : (*docs)[0].body.map) {
+    if (is_hidden(key)) continue;
+    if (++shown > 200) break;
+    const std::string label = label_of(key);
+    if (v.kind == YamlNode::Scalar) scalar(label, v, key);
+    else if (v.kind == YamlNode::Seq) {
+      std::string s = std::to_string(v.seq.size()) + " item(s), kept as written";
+      r.text(label.c_str(), s);
+    }
+    else if (v.kind == YamlNode::Map && v.get("fileID")) {
+      std::string ref = v.get("guid") ? "guid " + v.get("guid")->value + ", fileID " + v.str("fileID") : "fileID " + v.str("fileID");  // (a reference: shown, not edited here)
+      r.text(label.c_str(), ref);
+    }
+    else if (v.kind == YamlNode::Map && v.get("x") && v.get("y") && v.get("z") && !v.get("w")) {
+      Vec3 p((float)v.num("x"), (float)v.num("y"), (float)v.num("z"));
+      const Vec3 before = p;
+      r.field(label.c_str(), p);
+      if (length(p - before) > 0.0f) edited = unity_set_field(data, key, "{x: " + unity_yaml_num(p.x) + ", y: " + unity_yaml_num(p.y) + ", z: " + unity_yaml_num(p.z) + "}") || edited;
+    }
+    else if (v.kind == YamlNode::Map && v.get("r") && v.get("g") && v.get("b")) {
+      Vec3 c((float)v.num("r", 1.0), (float)v.num("g", 1.0), (float)v.num("b", 1.0));
+      float a = (float)v.num("a", 1.0);
+      const Vec3 before = c;
+      const float ab = a;
+      r.color_alpha(label.c_str(), c, (label + " Alpha").c_str(), a);
+      if (length(c - before) > 0.0f || a != ab)
+        edited = unity_set_field(data, key, "{r: " + unity_yaml_num(c.x) + ", g: " + unity_yaml_num(c.y) + ", b: " + unity_yaml_num(c.z) + ", a: " + unity_yaml_num(a) + "}") || edited;
+    }
+    else if (v.kind == YamlNode::Map && v.get("x") && v.get("y")) {  // (a Vector2 / Vector4 / quaternion, written inline: shown)
+      std::string s = "{";
+      for (const auto &[ck, cv] : v.map) s += (s.size() > 1 ? ", " : "") + ck + ": " + cv.value;
+      s += "}";
+      r.text(label.c_str(), s);
+    }
+    else if (v.kind == YamlNode::Map) {
+      for (const auto &[ck, cv] : v.map) {  // (one level in: the block's own scalars)
+        if (cv.kind != YamlNode::Scalar || is_hidden(ck)) continue;
+        if (++shown > 200) break;
+        scalar(label + " / " + label_of(ck), cv, key + "/" + ck);
+      }
+    }
+  }
+  if (edited) parsed_.reset();  // (the text changed: parsed again next frame)
+  if (!shown) {
+    std::string none = "no fields of its own";
+    r.text("Data", none);
+  }
+}
+
+void SceneDescriptorComponent::reflect(Reflector &r) {
+  static const char *orders[] = {"First", "Sequential", "Random", "Demo"};
+  static const char *orientations[] = {"Default", "Align Player With Spawn Point", "Align Room With Spawn Point"};
+  static const char *behaviours[] = {"Respawn", "Destroy"};  // (the SDK's order: Respawn 0 - review 403)
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.text("Spawns", spawns);
+  r.help("The spawn points' objects, their names joined by ';' (none: the descriptor's own object).");
+  r.enumeration("Spawn Order", spawn_order, orders, 4);
+  r.enumeration("Spawn Orientation", spawn_orientation, orientations, 3);
+  r.object("Reference Camera", reference_camera, "Camera");
+  r.field("Respawn Height Y", respawn_height, 0.1f, -100000.0f, 100000.0f);
+  r.enumeration("Object Behaviour At Respawn Height", respawn_behaviour, behaviours, 2);
+  r.field("Forbid User Portals", forbid_user_portals);
+  r.field("Interact Thru Layers", interact_thru_layers, -2147483647, 2147483647);
+  r.field("Auto Spatialize Audio Sources", auto_spatialize);
+  r.field("Gravity", gravity);
+  r.field("Capacity", capacity, 0, 100000);
+  r.field("Draw Distance", draw_distance, 1.0f, 0.0f, 100000.0f);
+  r.text("Unity Version", unity_version);
+}
+
+void PipelineManagerComponent::reflect(Reflector &r) {
+  static const char *types[] = {"Avatar", "World"};
+  if (r.all_fields()) r.text("Unity Id", unity_id);
+  r.text("Blueprint Id", blueprint_id);
+  r.help("VRChat's id of the uploaded avatar or world (avtr_... or wrld_...); empty before the first upload.");
+  r.enumeration("Content Type", content_type, types, 2);
+}
+
 void EngineComponent::reflect(Reflector &r) {
   r.text("Engine", engine);
   r.text("Type", type);
   r.help("What it is in its engine: a script's class or the engine's own component.");
   r.text("Script", script);
   r.help("The script's GUID in the engine's project (empty for the engine's own components).");
-  if (r.all_fields()) return r.text("Data", data);  // (files, undo, hashing: the whole of it)
+  if (r.all_fields()) {  // (files, undo, hashing: the whole of it)
+    r.text("Data", data);
+    r.field("Native", native);
+    return;
+  }
+  if (engine == "Unity") return reflect_fields(r);  // (round 403: its fields, editable)
   std::string shown = std::to_string(std::count(data.begin(), data.end(), '\n')) + " lines, kept as the engine wrote them";  // (review 370: not editable here)
   r.text("Data", shown);
   r.help("Its fields as the engine wrote them - kept as they are for the way back. Blendity doesn't run engine code, and doesn't change this.");
@@ -2910,6 +3067,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     auto h = std::make_shared<Mesh>(*mf->mesh);
     apply_shape_keys(*mf->mesh, shaping, h->positions, view);
     h->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
+    h->edit_basis.clear(), h->edit_shape.clear(), h->edit_show_full = false;  // (round 406: the open edit is folded into it)
     eval_chain_[kind] = nullptr;
     if (chain_sub) {
       const Mesh in = *h;
@@ -2934,6 +3092,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     auto m = std::make_shared<Mesh>(*mf->mesh);
     apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();  // (an evaluated mesh is shaped already: Apply Modifiers must not add the keys again)
+    m->edit_basis.clear(), m->edit_shape.clear(), m->edit_show_full = false;  // (round 406)
     run(*m, 0, components.size());
     m->touch();
     eval_mesh_[kind] = m;
@@ -2977,6 +3136,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m = std::make_shared<Mesh>(*head);
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);
     m->shape_keys.clear();
+    m->edit_basis.clear(), m->edit_shape.clear(), m->edit_show_full = false;  // (round 406)
     run(*m, split, components.size());
     m->touch();
   }

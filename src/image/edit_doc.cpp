@@ -436,6 +436,12 @@ bool Doc::load_stack(const std::string &path, std::string &error) {
   return true;
 }
 
+ViewTransform saved_view(int vt) {
+  if (vt >= 0 && vt <= 2) return (ViewTransform)vt;
+  if (vt == (int)ViewTransform::AcesFull) return ViewTransform::AcesFull;
+  return ViewTransform::Standard;
+}
+
 bool Doc::load(const std::string &path, std::string &error) {
   std::string text;
   if (!fs::read_file(path, text)) {
@@ -460,7 +466,7 @@ bool Doc::load(const std::string &path, std::string &error) {
   if (!open_file(source, error)) return false;
   stack_from_text(rest);
   /* The built-in views only (an OpenColorIO view's number belongs to one configuration). */
-  set_view(vt >= 0 && vt <= 2 ? (ViewTransform)vt : ViewTransform::Standard, std::isfinite(ex) ? ex : 0.0f);
+  set_view(saved_view(vt), std::isfinite(ex) ? ex : 0.0f);
   label_ = path;
   edit_path_ = path;
   return true;

@@ -72,3 +72,41 @@ Not part of any Blendity build; downloaded only when the user asks:
     (mocap.cs.cmu.edu; free to copy, modify and redistribute; "The data used in this project was obtained from
     mocap.cs.cmu.edu. The database was created with funding from NSF EIA-0196217.").
   - The C API's headers are in `extern/onnxruntime/`.
+
+## Ported, not copied
+
+Code re-implemented in Blendity's own functions from a source under another licence keeps that origin's identifier,
+copyright holder and notice in its header (ADR 0002, amended by ADR 0104):
+
+| File | From | License of the origin | How it is distributed |
+|---|---|---|---|
+| `src/render/sky.cpp` (`sky_radiance_internal`, the sky texture's evaluation) | Cycles' `intern/cycles/kernel/svm/sky.h` | Apache-2.0 (`Apache-2.0.txt`; "2011-2022 Blender Foundation", kept word for word in the header, whose SPDX line reads `GPL-2.0-or-later AND Apache-2.0`) | GPL-3.0-or-later through the "or later" clause, like the executables |
+
+## Read, not copied
+
+Programs whose formulas, property names or tools Blendity re-implements from reading them or their documentation.
+Nothing of their code is in the tree, so no licence text ships; the original's licence is stated for the record, and
+`CREDITS.md` names them.
+
+| Program | What Blendity takes | License of the original |
+|---|---|---|
+| [lilToon](https://github.com/lilxyzw/lilToon) (lilxyzw) | its lighting model's formulas (`lil_common_frag.hlsl`), re-implemented in `src/render/shading.cpp` (ADR 0100), and its material property names | MIT |
+| [Poiyomi Toon](https://github.com/poiyomi/PoiyomiToonShader), [UniVRM / MToon](https://github.com/vrm-c/UniVRM), UTS2 | material property names read by the Unity material converter and the texture presets | Poiyomi's own licence; MIT; Unity Companion License |
+| [CATS Blender Plugin](https://github.com/absolute-quantum/cats-blender-plugin) | the Avatar window's tools (Fix Model, visemes, decimation, eye tracking, merging), re-implemented | MIT |
+| [Cascadeur](https://cascadeur.com/) (Nekki) | the ideas behind physics for animation (ADRs 0042-0045, 0087) | proprietary; ideas only |
+| [OpenMoonRay](https://github.com/dreamworksanimation/openmoonray) (DreamWorks) | an optional external renderer run as a program of its own (ADR 0041, `moonray.yml`); never linked, never shipped | Apache-2.0 |
+| The Live Link bridges (`bridges/`) | Blendity's own code under GPL-2.0-or-later, run inside Blender, Unity, Godot and Unreal as their plug-in terms allow; nothing of Blendity's links into them | - |
+
+## Authorship and copyright
+
+Blendity is copyright Emiliano Manalo and contributors. The source, tests, documentation and books are written with
+Anthropic's Claude through Claude Code under a person's direction and review (`docs/AI_DISCLOSURE.md`): the author
+approves every task's specification and decision record before code is written, reviews every pull request and merges
+it. The model's outputs belong to the user who directed them under Anthropic's terms, and the project licenses them
+GPL-2.0-or-later to the extent copyright subsists in them (the human selection, direction, review and editing; a
+purely machine-written passage may carry no copyright of its own, and the licence claims none it does not have); the
+`Co-Authored-By` trailer on every commit is attribution, not a licence grant. No
+third-party code is claimed as the project's own: what is copied is in the tables above with its licence, what is
+followed is credited in `CREDITS.md` and the books' References chapter (`docs/Blendity-Architecture.pdf`,
+`docs/Blendity-User-Guide.pdf`). The AI is a build-time tool, not a run-time dependency: the program depends on no
+service.

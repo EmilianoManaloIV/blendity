@@ -22,3 +22,17 @@ Apache-2.0 is compatible with GPL-3 but not with GPL-2-only.
   ruled out even when Blender could use them.
 - Reviewers check new files for the SPDX header and that `licenses/` is updated with any new third-party
   code.
+
+## Amendment (round 409, task 0386, ADR 0104)
+- Code **ported** from an Apache-2.0 source - the Cycles sky radiance evaluation in `src/render/sky.cpp` - keeps the
+  origin's copyright holder and notice word for word in its header, whose SPDX line names both licences
+  (`GPL-2.0-or-later AND Apache-2.0`); the file is distributed, like every executable, under GPL-3.0-or-later through
+  the "or later" clause. `licenses/README.md` lists it under "ported, not
+  copied".
+- Code **read, not copied** (lilToon's formulas, Poiyomi's and MToon's property names, the CATS plugin's tools,
+  Cascadeur's ideas) is credited in `CREDITS.md` and `licenses/README.md` with the original's licence; no licence text
+  ships, since no code is in the tree.
+- **Authorship:** copyright Emiliano Manalo and contributors; the code is written with Anthropic's Claude under human
+  direction and review, the model's outputs belonging to the user who directed them under Anthropic's terms, licensed
+  GPL-2.0-or-later to the extent copyright subsists in them (the human selection, direction, review and editing); the
+  `Co-Authored-By` trailer is attribution, not a licence grant.

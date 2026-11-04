@@ -301,6 +301,7 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   env.camera_pos = eye;
   env.view_transform = view_transform_from_setting(scene_->render.view_transform);
   env.exposure = scene_->render.exposure;
+  env.unity_brdf = !scene_->unity.file.empty() && !unity_brdf_off();  // (round 405: a Unity scene's reflections weigh as Unity's BRDF does - lights or none)
   if (!use_scene_lights) {
     /* Blender "Studio" style headlight so unlit scenes stay readable. */
     RenderLight head;

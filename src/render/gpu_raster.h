@@ -208,6 +208,7 @@ struct RasterFrame {
   float probe_normal_bias = 0.25f, probe_view_bias = 0.1f;
   bool probe_leak = true, probe_live = false;
   float gi_specular_occlusion = 1.0f;
+  bool unity_brdf = false;  // (round 405: the reflections weighted as Unity's BRDF does)
   bool want_hdr = false;  // task 0197: also the picture in linear light (read_hdr), for a camera's bloom
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
@@ -229,7 +230,7 @@ struct RasterFrame {
   int background = 0;
   uint32_t clear = 0xFF303030u;
   float bg_sky[3] = {0, 0, 0}, bg_horizon[3] = {0, 0, 0}, bg_ground[3] = {0, 0, 0};
-  int view_transform = 0;     // 0 Standard, 1 Filmic, 2 ACES, 3 the LUT given by set_view_lut (an OpenColorIO view)
+  int view_transform = 0;     // 0 Standard, 1 Filmic, 2 ACES, 3 the LUT given by set_view_lut (an OpenColorIO view), 4 ACES full fit (gpu_view_transform_code)
   float exposure = 0.0f;      // stops
   /* The cage set by set_cage_vertices / set_cage_edges, over the picture (task 0100): its edges with this depth bias,
    * its vertices as dots of this radius in pixels (0: no dots). */

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Asset workflow (Unity: drop files into Assets / onto objects;
 // Blender: File > Import, Image Texture node "Open", Material slots > Assign).
+#include "../scene/unity_anim.h"  // (round 407)
 #include "editor.h"
 
 #include "../core/core.h"
@@ -75,6 +76,7 @@ std::vector<MaterialPtr> Editor::scene_materials() {
 
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".unitypackage") return (void)import_unity_package(path);  // (round 369: import <file>.unitypackage)
+  if (fs::extension(path) == ".anim") return (void)import_unity_anim(path);  // (round 407: a Unity AnimationClip, or Blendity's own)
   if (fs::extension(path) == ".prefab" || fs::extension(path) == ".unity") return (void)import_unity_scene(path);  // (round 370)
   if (fs::extension(path) == ".tscn") return (void)import_godot_scene(path);  // (round 373)
   if (fs::extension(path) == ".blend") return (void)import_blend(path);  // (round 374: through Blender)
@@ -533,7 +535,70 @@ std::string Editor::save_imported_clip(GameObject &root, const AnimationClip &cl
   return rel;
 }
 
-/* shape list | add <name> [amount] | set <name> <weight> | remove <name> (task 0135): the selected object's shape keys.
+/* Round 407 (task 0384): a .anim file - Unity's AnimationClip YAML or Blendity's own clip text - copied into
+ * Assets/Animations and opened in the Animation window on the selected object (the clip's paths are Unity's child paths,
+ * which Blendity's tracks use too). What the file holds that Blendity can't carry is said. */
+bool Editor::import_unity_anim(const std::string &path_in) {
+  const std::string src = resolve_asset_path(path_in);  // (an absolute path stays as it is)
+  std::string text;
+  if (!fs::read_file(src, text)) return Log::warn("import: can't read %s", src.c_str()), false;
+  AnimationClip probe;
+  std::vector<std::string> notes;
+  std::string why;
+  const bool unity = is_unity_anim_text(text);
+  bool lossy = false;
+  if (unity ? !unity_anim_to_clip(text, probe, &notes, &why, &lossy) : !load_clip_text(text, probe)) return Log::warn("import: %s is not an animation clip%s%s", src.c_str(), why.empty() ? "" : ": ", why.c_str()), false;
+  std::string rel = make_asset_relative(src);
+  const bool inside = rel.rfind("Assets/", 0) == 0;
+  if (!inside) {  // (a file from elsewhere: a copy in the project, Unity's text kept as it is)
+    rel = "Assets/Animations/" + fs::stem(src) + ".anim";
+    for (int k = 2; fs::exists(resolve_asset_path(rel)); k++) rel = strprintf("Assets/Animations/%s %d.anim", fs::stem(src).c_str(), k);
+    fs::make_dirs(fs::parent(resolve_asset_path(rel)));
+    if (!fs::write_file(resolve_asset_path(rel), text)) return Log::warn("import: can't write %s", rel.c_str()), false;
+  }
+  const AnimationClipPtr clip = clip_asset(rel);
+  if (!clip) return Log::warn("import: %s didn't load as a clip", rel.c_str()), false;
+  GameObject *root = active_object();
+  if (root) anim_pick_clip(root, rel);
+  for (const std::string &n : notes) Log::warn("import %s: %s", fs::filename(rel).c_str(), n.c_str());
+  if (unity) Log::info("%s stays Unity's file%s: edits save to %s beside it; export anim writes a Unity file", fs::filename(rel).c_str(), lossy ? " (it holds more than the clip)" : "", fs::filename(unity_clip_sibling(rel)).c_str());
+  Log::info("%s: %s with %zu track(s) at %g fps%s%s", unity ? "Unity clip" : "Clip", fs::filename(rel).c_str(), clip->tracks.size(), clip->frame_rate, root ? " - in the Animation window on " : "", root ? root->name.c_str() : "");
+  project_listed_ = -100;  // (the Project panel lists again)
+  return true;
+}
+
+/* Round 407 (review): after a save moved a Unity clip's edits to its Blendity copy, the Animation components that name
+ * the Unity file name the copy - in the scene text too, so a saved scene opens with the edits. */
+void Editor::repoint_moved_clips() {
+  bool any = false;
+  scene_->for_each([&](GameObject &g) {
+    Animation *a = g.get<Animation>();
+    if (!a || a->clip.empty()) return;
+    const std::string to = clip_redirect(a->clip);
+    if (to == a->clip || !clip_asset(to)) return;
+    a->clip = to, any = true;
+  });
+  if (!any) return;
+  scene_dirty_ = true;
+  stable_ = scene_->clone();  // (the step just committed holds the new paths too)
+}
+
+/* Round 407: export anim <out.anim> [clip] - the open clip (or the one named) as a Unity AnimationClip file. */
+bool Editor::export_unity_anim(const std::string &out_in, const std::string &clip_path) {
+  const AnimationClipPtr clip = clip_path.empty() ? anim_clip() : clip_asset(clip_path);
+  if (!clip) return Log::warn("export anim: no clip - open one in the Animation window or name its path"), false;
+  std::string out = resolve_asset_path(out_in);
+  if (fs::extension(out) != ".anim") out += ".anim";
+  fs::make_dirs(fs::parent(out));
+  std::vector<std::string> notes;
+  if (!fs::write_file(out, clip_to_unity_anim(*clip, anim_root(), &notes))) return Log::warn("export anim: can't write %s", out.c_str()), false;
+  for (const std::string &n : notes) Log::warn("export anim: %s", n.c_str());
+  Log::info("Unity clip written: %s (%zu track(s); drop it into a Unity project's Assets - a .meta is made on import)", out.c_str(), clip->tracks.size());
+  return true;
+}
+
+/* shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename | duplicate | mix | edit | filter (task 0135,
+ * round 406): the selected object's shape keys.
  * add makes a key pushing every vertex out along its normal by `amount` (0.1 m): an inflate morph to animate. */
 void Editor::shape_command(const std::vector<std::string> &t) {
   GameObject *g = active_object();
@@ -547,13 +612,81 @@ void Editor::shape_command(const std::vector<std::string> &t) {
       Log::info("  %-24s %.3f%s", k.name.c_str(), mr ? mr->shape_weight(k.name) : 0.0f, k.delta.size() == mf->mesh->vert_count() ? "" : " (the mesh was edited since: off)");
     return;
   }
-  if (t.size() < 3) return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  if (sub == "mix") {  // (round 406: Blender's New Shape from Mix - the weighted deltas as one key)
+    fold_edit_shape_of(*g);  // (an open edit counts as its key)
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    std::string nm = t.size() > 2 ? t[2] : "Mix";
+    for (int k = 2; m.find_shape(nm) >= 0; k++) nm = strprintf("%s %d", t.size() > 2 ? t[2].c_str() : "Mix", k);
+    ShapeKey k{nm, std::vector<Vec3>(m.vert_count(), Vec3(0.0f))};
+    for (const ShapeKey &s : m.shape_keys) {
+      const float w = mr ? mr->shape_weight(s.name) : 0.0f;
+      if (w == 0.0f || s.delta.size() != k.delta.size()) continue;
+      for (size_t i = 0; i < k.delta.size(); i++) k.delta[i] = k.delta[i] + s.delta[i] * w;
+    }
+    m.shape_keys.push_back(std::move(k));
+    m.touch();
+    if (!mr) g->add<MeshRenderer>();
+    mark_changed("New Shape from Mix");
+    return Log::info("Shape key '%s': the mix of the weights as one shape", nm.c_str());
+  }
+  if (sub == "filter") {  // (round 406: the foldout's filter box, for scripts and tests)
+    blend_shape_filter_ = t.size() > 2 ? t[2] : "";
+    return;
+  }
+  if (t.size() < 3) return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename <name> <new> | duplicate <name> [new] | mix [name] | edit <name>|off | filter [text]");
   const std::string name = t[2];
+  if (sub == "edit") {  // (round 406: Edit this shape)
+    set_edit_shape(*g, to_lower(name) == "off" ? std::string() : name);
+    return;
+  }
+  if (sub == "rename") {  // (round 406: the key, the weights, the clips' tracks and the visemes follow)
+    if (t.size() < 4) return Log::warn("shape rename <name> <new>");
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    const int i = m.find_shape(name);
+    if (i < 0) return Log::warn("shape: no key '%s'", name.c_str());
+    if (m.find_shape(t[3]) >= 0) return Log::warn("shape: '%s' is there already", t[3].c_str());
+    m.shape_keys[(size_t)i].name = t[3];
+    if (m.edit_shape == name) m.edit_shape = t[3];
+    if (mr) {
+      const float w = mr->shape_weight(name);
+      mr->shape_weights.erase(std::remove_if(mr->shape_weights.begin(), mr->shape_weights.end(), [&](const auto &p) { return p.first == name; }), mr->shape_weights.end());
+      if (w != 0.0f) mr->set_shape_weight(t[3], w);
+      if (mr->edit_shape == name) mr->edit_shape = t[3];
+    }
+    const std::string old_prop = "MeshRenderer.BlendShape/" + name, new_prop = "MeshRenderer.BlendShape/" + t[3];
+    if (anim_clip())  // (the open clip's tracks, inside the undo step)
+      anim_edit_keys("Rename Shape Key", [&](AnimationClip &c) {
+        for (AnimTrack &tr : c.tracks)
+          if (tr.property == old_prop) tr.property = new_prop;
+      });
+    scene_->for_each([&](GameObject &o) {  // (the avatar's visemes and jaw shapes that name the shape on this mesh)
+      AvatarDescriptorComponent *d = o.get<AvatarDescriptorComponent>();
+      if (!d || (!d->viseme_mesh.empty() && d->viseme_mesh != g->name)) return;
+      for (std::string &v : d->visemes) v = v == name ? t[3] : v;
+      if (d->mouth_open_shape == name) d->mouth_open_shape = t[3];
+      if (d->jaw_flap_shape == name) d->jaw_flap_shape = t[3];
+    });
+    m.touch();
+    return mark_changed("Rename Shape Key");
+  }
+  if (sub == "duplicate") {  // (round 406)
+    fold_edit_shape_of(*g);  // (the copy takes the edit so far)
+    Mesh &m = *mesh_make_mutable(mf->mesh);
+    const int i = m.find_shape(name);
+    if (i < 0) return Log::warn("shape: no key '%s'", name.c_str());
+    std::string nm = t.size() > 3 ? t[3] : name + " Copy";
+    for (int k = 2; m.find_shape(nm) >= 0; k++) nm = strprintf("%s %d", t.size() > 3 ? t[3].c_str() : (name + " Copy").c_str(), k);
+    ShapeKey k{nm, m.shape_keys[(size_t)i].delta};
+    m.shape_keys.push_back(std::move(k));
+    m.touch();
+    return mark_changed("Duplicate Shape Key");
+  }
   if (sub == "set") {
     if (!mr) mr = g->add<MeshRenderer>();
     mr->set_shape_weight(name, t.size() > 3 ? (float)std::atof(t[3].c_str()) : 1.0f);
     return mark_changed("Shape Key Weight");
   }
+  if (sub == "remove" && mr && mr->edit_shape == name) fold_edit_shape_of(*g);  // (round 406: the basis back before the key goes)
   Mesh &m = *mesh_make_mutable(mf->mesh);
   if (sub == "remove") {
     const int i = m.find_shape(name);
@@ -562,7 +695,7 @@ void Editor::shape_command(const std::vector<std::string> &t) {
     m.touch();
     return mark_changed("Remove Shape Key");
   }
-  if (sub != "add") return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name>");
+  if (sub != "add") return Log::warn("shape list | add <name> [amount] | set <name> <weight> | remove <name> | rename <name> <new> | duplicate <name> [new] | mix [name] | edit <name>|off | filter [text]");
   if (m.find_shape(name) >= 0) return Log::warn("shape: '%s' is there already", name.c_str());
   const float amount = t.size() > 3 ? (float)std::atof(t[3].c_str()) : 0.1f;
   const std::vector<Vec3> n = meshops::vertex_normals(m);
@@ -572,7 +705,7 @@ void Editor::shape_command(const std::vector<std::string> &t) {
   m.touch();
   if (!mr) g->add<MeshRenderer>();
   mark_changed("Add Shape Key");
-  Log::info("Shape key '%s' on %s: its weight in the Inspector (MeshRenderer > BlendShape/%s), animatable", name.c_str(), g->name.c_str(), name.c_str());
+  Log::info("Shape key '%s' on %s: its weight in the Inspector (MeshRenderer > BlendShapes), animatable as MeshRenderer.BlendShape/%s", name.c_str(), g->name.c_str(), name.c_str());
 }
 
 /* A file in the project's Assets already. */

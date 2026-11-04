@@ -1,0 +1,63 @@
+\chapter{Purpose and scope}
+\label{ch:purpose}
+
+\section{What Blendity is}
+Blendity is a 3D editor written in C++17. Its windows, navigation, shortcuts, gizmos, Inspector and Play mode follow
+the Unity editor \cite{UnityManual2026}; underneath, its meshes, Edit Mode tools, UV unwrapping, Principled materials,
+render engines (an EEVEE-like rasterizer and a Cycles-like path tracer on the CPU and any Vulkan GPU), skins and IK
+follow Blender's design and source code \cite{Blender2026}. It is not a fork: each subsystem is re-implemented, following
+Blender's design, so the editor builds and runs with nothing but a compiler, and the matching Blender source file is
+listed for every module. When Blender's prebuilt libraries are present it links the same ones Blender uses, each behind
+a switch with Blendity's own code as the fallback (\adr{0001}).
+
+It is one process with no plugins and no scripting runtime. Three executables share one static library built from
+\code{src/}: \code{Blendity} (the editor), \code{blendity\_tests} and \code{blendity\_stress}. Everything a tool does is
+reachable from the Console's command line, which is how the tests, the headless mode and the HCI harnesses drive it.
+
+\section{Who it is for}
+The requirements (\code{docs/requirements.md}) name the audience by what they must be able to do: a Unity-style editor
+(R-01) with Blender-equivalent modeling (R-02) and SketchUp / UModeler / Plasticity-style direct modeling (R-03), UVs,
+materials and textures (R-04), rendering with both engines (R-05), file formats matching Blender 5.2 (R-06), every tool
+reachable from menus, panels, rebindable shortcuts and the console (R-07), adjustable operations (R-08), a Learn tab
+(R-09), camera filters (R-10), Unity-like global illumination (R-11, R-12), physics for animation as in Cascadeur
+(R-13), fingers and a pen on a 2-in-1 (R-14), and drawing in perspective with the model built from construction lines
+(R-15). The HCI reports in \code{docs/hci/} measure the editor with artists from Unity, Unreal and Adobe's tools in
+mind, on keyboard, pen and tablet; the later rounds added the VRChat avatar and world pipelines, with the editor
+reading and writing Unity's own project files.
+
+\section{What this book covers}
+Chapters~\ref{ch:context} to \ref{ch:bridges} describe the system: its context, the layers and the two flows that
+organise everything (one frame, one edit), the scene and mesh model, rendering, the editor toolkit, and the bridges to
+other programs. Chapter~\ref{ch:research} lists the research features and where each paper landed. Chapters~\ref{ch:sdlc}
+to \ref{ch:performance} describe how the program is made: the agentic software development lifecycle with its
+artifacts and gates, the build, test and release machinery, and the performance work. Chapter~\ref{ch:scope} says what
+is not recreated. Chapter~\ref{ch:licensing} states the licence and the credits. The References chapter and the two
+indexes close the book.
+
+\section{Conventions}
+\code{Monospace} is a file, a function, a flag or a console command; paths are relative to the \code{blendity/} folder
+unless they start with \code{blender/}, which is Blender's source tree beside the project. \adr{NNNN} is a decision
+record in \code{docs/decisions/}, \task{NNNN} a specification in \code{docs/tasks/}, and \rnd{NNN} an entry of
+\code{CHANGELOG.md} (one entry per round of requests). Numbers quoted here were measured on the machines the CHANGELOG
+names; where a figure is an estimate, the text says so.
+
+\section{The numbers at 0.13.0}
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Source files under \code{src/} (C++, headers, Objective-C++, CUDA) & 380 \\
+Lines in \code{src/} & about 297,000 \\
+Lines of unit tests (\code{tests/}) & about 73,600 \\
+Unit checks / tests, the build with Blender's libraries & 15,902 / 1,543 \\
+Unit checks, the dependency-free build (Windows and Linux) & 15,253 / 15,259 \\
+Test groups (\code{--group}) & 16 \\
+Decision records & 104 \\
+Task specifications & 379 \\
+Rounds in the CHANGELOG & 409 \\
+Learn lessons & 45 \\
+Windows (module registry) & 26 \\
+Keymap presets / editor feels & 7 / 4 \\
+Commits on \code{main} since 2026-10-06 & 436 \\
+\bottomrule
+\end{tabular}
+\end{center}

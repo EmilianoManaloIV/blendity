@@ -438,6 +438,8 @@ struct AnimEditorState {
   float play_from = 0.0f;
   std::vector<std::pair<int, float>> selected;  // (track, key frame)
   std::set<std::string> expanded;  // the dopesheet's unfolded groups ("path|property", task 0069)
+  std::set<std::string> folded_objects;  // round 406: the object rows folded (open by default, as Unity's)
+  uint64_t prop_object = 0;              // round 406: the object unfolded in the Add Property tree
   std::vector<std::pair<uint64_t, Transform>> saved_pose;  // every object's transform before Preview (put back after)
   std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;  // the animated component numbers likewise
   std::unordered_map<std::string, float> shown;  // each animated number as last shown (Record compares with it)
@@ -1362,6 +1364,8 @@ class Editor {
   };
   std::shared_ptr<UnityIdsJob> unity_ids_job_;
   std::set<std::string> unity_ids_waiting_;  // (the models whose parts the last import's overrides named without numbers)
+  bool unity_ids_auto_reopen_ = false;       // (e2e 407: the import started the numbering itself - open the scene again when it's done)
+  uint64_t unity_ids_reopen_serial_ = 0;     // (the undo serial when it started: the scene must be as it was, else only the toast)
   std::string unity_ids_last_import_;
   bool unity_ids_last_opened_ = false;  // (review 395: an opened scene is opened again, not imported on top of itself)
   std::string unity_editor_program() const;
@@ -1422,7 +1426,7 @@ class Editor {
     std::string out, folder, why;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> cancel{false}, done{false};
-    int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0;
+    int written = 0, fresh = 0, lines = 0, nested = 0, copies = 0, converted = 0, dropped_tracks = 0, zeroed_axes = 0;  // (converted, dropped_tracks, zeroed_axes: round 407's clips)
     std::vector<std::string> skipped;
     void run();
     void finish(const std::string &failure);
@@ -1629,6 +1633,15 @@ class Editor {
   bool skin_job_running_for_test() const { return skin_job_ != nullptr; }
   const AutoRigSession &autorig_for_test() const { return autorig_; }
   const AnimEditorState &anim_for_test() const { return anim_; }
+  /* Round 406: the Animation window's rows as drawn - a single row's value field by its label, and typing into it. */
+  const std::map<std::string, float> &anim_row_values_for_test() const { return anim_row_values_for_test_; }
+  bool anim_set_row_value_for_test(const std::string &label, float v) {
+    AnimationClipPtr clip = anim_clip();
+    if (!clip) return false;
+    for (const AnimRow &row : anim_rows(*clip))
+      if (row.label == label) return anim_set_row_value(row, v), true;
+    return false;
+  }
   NavStyle nav_style_for_test() const { return nav_style_; }
   const SceneCamera &scene_camera_for_test() const { return cam_; }
   void set_scene_camera_for_test(const SceneCamera &c) { cam_ = c; }
@@ -1658,6 +1671,15 @@ class Editor {
     return true;
   }
   AnimationClipPtr anim_clip_for_test() { return anim_clip(); }
+  /* Round 407 (task 0384): Unity .anim files in and out (the console's import and export anim; tests). */
+  bool import_unity_anim(const std::string &path);
+  bool export_unity_anim(const std::string &out, const std::string &clip_path);
+  void repoint_moved_clips();  // (the Animation components that name a Unity clip whose edits moved to its Blendity copy)
+  /* Round 408 (task 0385): the open clip retargeted onto another humanoid rig - a clip of the target's own, saved beside
+   * the source's as "<clip> (<target>).anim", set on the target's Animation and opened there. */
+  bool retarget_open_clip(GameObject &target_root);
+  std::vector<GameObject *> retarget_targets();  // (the scene's other objects with a humanoid rig under them)
+  std::vector<GameObject *> retarget_targets_;   // (as listed when the Retarget menu opened)
   const SeqEditorState &seq_for_test() const { return seqr_; }
   SequencePtr seq_for_test_sequence() { return seq_sequence(); }
   bool seq_drop_clip_for_test(const std::string &abs_path, int mx, int my) { return seq_drop_clip(abs_path, mx, my); }
@@ -2722,9 +2744,19 @@ class Editor {
     std::string label;
     bool group = false;
     int depth = 0;  // 1: an axis under its group
-    std::string key;  // a group's "path|property"
+    std::string key;  // a group's "path|property"; round 406: "summary", or an object row's "object|path"
     bool open = false;
+    bool summary() const { return key == "summary"; }
+    bool object() const { return key.rfind("object|", 0) == 0; }
   };
+  /* Round 406 (task 0383): the rows as Unity's Animation window lays them out - a summary row of every key, an object
+   * row per animated path (folded by a click, open by default), the property rows under it. */
+  void anim_toggle_row(const AnimRow &row);
+  float anim_row_value(const AnimationClip &clip, const AnimRow &row, GameObject *root) const;
+  void anim_set_row_value(const AnimRow &row, float v);
+  void anim_key_row(const AnimRow &row);
+  std::map<std::string, float> anim_row_values_for_test_;  // (the value each single row showed, by label; with record_buttons)
+  void anim_record_shape_weights(AnimationClip &clip, GameObject &root, bool &keyed);
   std::vector<AnimRow> anim_rows(const AnimationClip &clip) const;
   std::vector<std::pair<int, float>> anim_row_keys(const AnimationClip &clip, const AnimRow &row, float frame) const;
   std::vector<float> anim_row_frames(const AnimationClip &clip, const AnimRow &row) const;
@@ -2797,7 +2829,8 @@ class Editor {
   /* After an edit (at the undo commit): meshes whose vertex count changed get their groups back from the snapshot
    * before the edit, by position (ADR 0024). */
   void carry_vertex_groups(const Scene &before);
-  void carry_shape_keys(MeshPtr &mesh, const Mesh *before);
+  void carry_shape_keys(MeshPtr &mesh, const Mesh *before, bool shape_open = false);
+  void carry_edit_basis(MeshPtr &mesh, const Mesh &before);  // (round 406: when the object's renderer has a shape open)
   void carry_custom_normals(MeshPtr &mesh, const Mesh *before);  // (task 0149: as shape keys, by position)
   /* Weight Paint mode (task 0046, weight_paint.cpp). */
   bool set_weight_paint(bool on);
@@ -4307,6 +4340,19 @@ class Editor {
   std::vector<std::string> gait_files();
   std::vector<std::string> group_choices(const std::string &current);
   void draw_shape_key_buttons(ui::Layout &lay, GameObject &g);
+  /* Round 406 (task 0383): Unity's BlendShapes foldout - a row a shape (0-100), a filter from 8 on, the clip's tints,
+   * Edit this shape; then the key tools. */
+  void draw_blend_shapes(ui::Layout &lay, GameObject &g);
+  void draw_blend_shape_row(ui::Layout &lay, GameObject &g, MeshRenderer &mr, const std::string &name);
+  void draw_blend_shape_tools(ui::Layout &lay, GameObject &g);
+  bool blend_shapes_open_ = true;
+  std::string blend_shape_filter_, blend_shape_rename_, blend_shape_rename_text_;
+  /* The shape being edited (MeshRenderer::edit_shape, the mesh's edit_basis): opened on one object, folded on every
+   * object that has one open (undo can bring one back). */
+  void set_edit_shape(GameObject &g, const std::string &name);
+  void fold_edit_shape();
+  void fold_edit_shape_of(GameObject &g);
+  void show_edit_shape_full(GameObject &g);  // (entering Edit Mode or Sculpt with a shape open: shown in full)
   int ai_from_ = 0, ai_to_ = 0;  // (the Animation window's span; 0: the keys around the playhead)
   Vec3 light_aim_, guide_point_;
   int guide_axis_ = 0;

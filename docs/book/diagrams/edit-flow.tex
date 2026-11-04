@@ -1,0 +1,23 @@
+% One edit: from a tool to an undo step, through copy-on-write meshes and the Reflector.
+\begin{tikzpicture}[node distance=6mm and 8mm]
+  \node[box] (tool) {A tool, a menu,\\ the console's \code{editop}};
+  \node[box, right=of tool] (edit) {\code{Editor::edit\_tool(op)}};
+  \node[box, right=of edit] (mut) {\code{mesh\_make\_mutable}\\ \footnotesize clones a shared mesh};
+  \node[box, right=of mut] (ops) {\code{meshops::*}\\ \footnotesize a pure function on\\ \footnotesize Mesh + selection};
+  \node[box, below=of ops] (touch) {\code{Mesh::touch()}\\ \footnotesize version++};
+  \node[box, below=of mut] (last) {\code{LastOp}\\ \footnotesize \code{before}, the numbers,\\ \footnotesize the result's version};
+  \node[box, below=of edit] (mark) {\code{mark\_changed}\\ \footnotesize one undo step: a scene clone\\ \footnotesize sharing unchanged meshes};
+  \node[box, below=of tool] (f9) {F9 / the drag helper\\ \footnotesize \code{run\_last\_op}: re-runs from\\ \footnotesize a copy of \code{before}};
+  \node[box, below=12mm of mark, fill=blCode] (caches) {Version-keyed caches\\ \footnotesize render mesh, edge table, overlap check,\\ \footnotesize the views' pictures (\code{scene\_render\_hash})};
+  \node[box, below=12mm of touch, fill=blCode] (refl) {\code{Reflector}\\ \footnotesize one field description drives the\\ \footnotesize Inspector, files, undo and hashing};
+  \draw[flow] (tool) -- (edit);
+  \draw[flow] (edit) -- (mut);
+  \draw[flow] (mut) -- (ops);
+  \draw[flow] (ops) -- (touch);
+  \draw[flow] (ops.south west) -- (last.north east);
+  \draw[flow] (touch) -- (mark);
+  \draw[flow] (mark) -- (f9);
+  \draw[flow, <->] (f9) -- (last);
+  \draw[dflow] (touch) -- (caches);
+  \draw[dflow] (mark) -- (refl);
+\end{tikzpicture}

@@ -21,7 +21,7 @@
 #ifdef BL_VERSION_NUMBER
 #  define BL_VERSION BL_STR(BL_VERSION_NUMBER)
 #else
-#  define BL_VERSION "0.12.0"
+#  define BL_VERSION "0.13.0"
 #endif
 
 namespace bl::releases {

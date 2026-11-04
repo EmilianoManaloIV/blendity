@@ -1,0 +1,20 @@
+% The two render paths and where they meet: the views, F12, the display. Two rows so it reads at page width.
+\begin{tikzpicture}[node distance=5mm and 6mm]
+  \node[box, fill=blMint!12, text width=30mm] (scene) {The scene\\ \footnotesize evaluated meshes, materials, lights, world, camera};
+  \node[box, right=of scene, yshift=12mm, text width=44mm] (raster) {Rasterizer (CPU)\\ \footnotesize \code{render/raster.*}: tile-binned, visibility buffer, deferred PBR, shadow maps, ids, outlines};
+  \node[box, right=of raster, text width=40mm] (gpuv) {GPU views\\ \footnotesize \code{gpu::Raster} (Vulkan): the same formulas in GLSL};
+  \node[box, right=of scene, yshift=-12mm, text width=44mm] (pt) {Path tracer (CPU)\\ \footnotesize \code{render/pathtracer.*}: BVH or Embree, NEE, MIS, GGX VNDF, denoisers};
+  \node[box, right=of pt, text width=40mm] (gpupt) {GPU path tracing\\ \footnotesize \code{gpu\_kernel.h} (GLSL), OptiX; CPU and cards share one sample counter};
+  \node[box, below=16mm of pt, xshift=-6mm, text width=40mm] (gi) {Lighting\\ \footnotesize lightmaps, probe volumes, voxel GI, reflection probes};
+  \node[box, right=of gi, text width=44mm] (cm) {Colour management\\ \footnotesize Standard / Filmic / ACES, OpenColorIO views as LUTs, SIMD display encoding};
+  \node[box, right=of cm, fill=blAmberFill!15, draw=blAmber, text width=44mm] (out) {The picture\\ \footnotesize Scene and Game views, Camera Preview, F12 and the Render window, camera filters, PNG / JPEG / HDR / EXR / MP4};
+  \draw[flow] (scene) -- (raster);
+  \draw[flow] (scene) -- (pt);
+  \draw[flow, <->] (raster) -- (gpuv);
+  \draw[flow, <->] (pt) -- (gpupt);
+  \draw[flow] (gpuv.east) -- ++(4mm,0) |- (gi.east) ;
+  \draw[flow] (gpupt.south) |- (gi.north east);
+  \draw[flow] (gi) -- (cm);
+  \draw[flow] (cm) -- (out);
+  \node[note, below=4mm of gi.south west, anchor=north west, text width=150mm] {A view reuses its picture while a content hash of what it shows is unchanged (\adr{0009}); the Game view and the Camera Preview keep their last picture during a drag (\adr{0039}). Every kernel has a scalar reference the tests compare it with: the AVX2 display encoder, the 8-wide shading, the GPU views, the GPU kernel's samples (the same PCG seeds as the CPU's).};
+\end{tikzpicture}

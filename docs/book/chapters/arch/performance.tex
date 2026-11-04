@@ -1,0 +1,45 @@
+\chapter{Performance and the minimum machine}
+\label{ch:performance}
+
+\section{The budget}
+\code{docs/PERFORMANCE.md} is the record of fifteen passes, each with its limits found, efficiencies applied, design
+choices the numbers confirm, and honest negatives. The rule behind them: the editor stays interactive (Q-04), a frame
+within the budget for ordinary scenes, heavy work off the per-frame path (\adr{0095}); a unit test may print a time but
+never asserts one (\adr{0056}); every measurement names the machine.
+
+\section{The minimum machine}
+A thin laptop such as the HP Envy 13.3-inch 2-in-1: an Intel i7 with 4 cores / 8 threads (i7-1165G7 class), 8~GB of
+RAM shared with Iris~Xe graphics, a 1920$\times$1080 touch screen at 150\,\% (\adr{0026}). It starts on the Low quality
+tier and says so: the views drawn at 67\,\% and scaled up, a 1024 shadow map, 60 fps; editing frames at about 35--40
+fps, orbiting at 60. Medium (85\,\%, 2048, 120 fps) and High (100\,\%, the scene's shadow map, 144 fps) are one click
+away; renders always use the scene's own settings. The GPU is for path tracing, baking and realtime GI; an integrated
+one gets a quarter of the RAM for it. Thread, texture and undo budgets are ceilings the preferences set.
+
+\section{What the passes found}
+\begin{itemize}
+  \item \textbf{Editor frames} (passes 6, 7): the frame fills only its border strips; icons rasterize once per size;
+    folder listings and the material library rebuild only on change; a view reuses its picture while its content hash
+    is unchanged (\adr{0009}); the per-object memo of the scene hash (\adr{0015}).
+  \item \textbf{Viewport and Edit Mode} (passes 10--12): an in-place update of a render mesh around the moved faces
+    only (\adr{0034}), the overlap check on every thread with answers kept by content and a local re-check after moves
+    (\adr{0040}), the operators making one copy of a mesh (\adr{0053}), a selection changing the selection and not the
+    mesh, undo giving back Edit Mode's selection; a 50k-face mesh enters Edit Mode in about a frame; extrude, undo and
+    entering Edit Mode measured against Blender's own frames.
+  \item \textbf{The GPU} (passes 4, 11, 13, 14): the views in one submission (\adr{0051}), the cards working between
+    frames (\adr{0052}), incremental scene uploads, the window presented by the card with changed tiles only
+    (\adr{0061}); OptiX against GPU Compute measured (\adr{0037}).
+  \item \textbf{Rendering} (passes 2, 3): Blender's libraries against Blendity's own code, each measured (Embree's
+    BVH, OIDN, TBB, Eigen's direct solve for LSCM, OpenSubdiv); hand-written SIMD for the display encoder and the
+    rasterizer's setup, chosen at run time by CPUID so the executables still run on older CPUs
+    \cite{Gregory2018vol1}.
+  \item \textbf{Blender 5.2 as the benchmark} (passes 13, 15): every editor feature timed in Blendity and in Blender
+    headless on the same scenes under the same row names (\code{tools/bench\_blender.py}, \code{bench\_table.py}),
+    Blender's viewport, playback and start-up timed beside Blendity's window.
+  \item \textbf{Live Link} (\rnd{382}): a millisecond or two of a frame with four engines connected.
+\end{itemize}
+
+\section{Profiling}
+\code{FrameProfile} records where each frame's time goes (the Scene view and its overlays, the Game view, the preview,
+the shadow map, the UI, the present; the parts inside an Edit Mode drag), shown by the Profiler window, the stress
+suite and the tests; \code{MeshCounts} tallies the mesh caches' work process-wide. The Profiler's Budget ranks a scene
+or avatar against VRChat's PC and Quest performance ranks \cite{VRChatCreators2026}.

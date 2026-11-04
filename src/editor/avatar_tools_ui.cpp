@@ -144,6 +144,7 @@ bool Editor::avatar_arms(GameObject &root, bool t_pose) {
 /* The Model Options' and Pose and Shape tools' verbs; false when `verb` is none of them. Separate and Apply Transforms
  * make their own Undo steps. */
 bool Editor::avatar_tool_command(const std::string &verb, const std::vector<std::string> &t, GameObject &root) {
+  fold_edit_shape();  // (round 406: the tools pose and rebuild positions - an open shape edit folds first)
   const std::string arg = t.size() > 2 ? to_lower(t[2]) : "";
   const std::string name = t.size() > 2 ? avatar_name_arg(t) : avatar_key_field_;
   if (verb == "separate") {

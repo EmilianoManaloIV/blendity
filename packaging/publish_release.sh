@@ -3,8 +3,8 @@
 # Publishes a v* tag's build as a GitHub Release (tasks 0079, 0082), from the release workflow:
 #   packaging/publish_release.sh <tag> <version> <folder with the built files>
 # - The release lists only what a person downloads: the three installers, under names without the version (so the
-#   README's links, releases/latest/download/<name>, always fetch the newest), and SHA256SUMS.txt. The Windows name
-#   keeps the "Blendity-Setup-" start that builds before task 0082 look for.
+#   README's links, releases/latest/download/<name>, always fetch the newest), SHA256SUMS.txt and, since task 0386, the
+#   two books (Blendity-*.pdf). The Windows name keeps the "Blendity-Setup-" start that builds before task 0082 look for.
 # - Everything else - each build's libraries archives and the Linux .tar.gz - goes to one "libraries" release, named
 #   by the build's tag; Blendity's updater finds its own there. Kept: the archives of existing releases (and of the
 #   newest KEEP_PR_BUILDS PR builds, from when merges made releases).
@@ -40,6 +40,7 @@ sort_files() {
         [[ "$n" == *.tar.gz ]] && ext=.tar.gz
         cp "$f" "$extras/blendity-libs-$platform-$TAG$ext" ;;
       *-linux-x86_64.tar.gz) cp "$f" "$extras/blendity-linux-x86_64-$TAG.tar.gz" ;;
+      Blendity-*.pdf) cp "$f" "$out/$n" ;;  # the two books (task 0386), under their fixed names
       *) echo "not published: $n" ;;
     esac
   done

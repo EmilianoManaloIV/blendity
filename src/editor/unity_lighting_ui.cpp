@@ -336,7 +336,7 @@ void Editor::read_unity_lighting_cmd(bool wait) {
                   "binary file - install Unity through Unity Hub and run this again", "", "");
   auto job = std::make_shared<UnityLightingJob>();
   job->scene = unity_lighting_scene_;
-  job->out = unity_lighting_scene_ + ".unity-lighting";
+  job->out = resolve_asset_path(unity_lighting_scene_) + ".unity-lighting";  // (absolute: Unity resolves a relative path against the scratch project - e2e 407)
   const std::string package = package_of(job->scene, project_root_, job->unity_scene);
   if (package.empty()) return refuse("Unity's lightmaps: " + fs::filename(job->scene) + " isn't in an unpacked Unity package (its .unity-guids)", "", "");
   const std::string lighting_folder = job->unity_scene.substr(0, job->unity_scene.size() - fs::extension(job->unity_scene).size()) + "/";

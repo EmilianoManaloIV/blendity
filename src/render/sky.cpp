@@ -1,7 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
-// Sky radiance evaluation ported from Cycles (intern/cycles/kernel/svm/sky.h,
-// SPDX: Apache-2.0, Blender Foundation) on top of the Hosek-Wilkie model in
-// extern/sky (BSD-3-Clause, Lukas Hosek & Alexander Wilkie).
+// SPDX-License-Identifier: GPL-2.0-or-later AND Apache-2.0
+// SPDX-FileCopyrightText: 2026 Emiliano Manalo and contributors
+// SPDX-FileCopyrightText: 2011-2022 Blender Foundation
+//
+// Sky radiance evaluation ported from Cycles (intern/cycles/kernel/svm/sky.h, "SPDX-License-Identifier: Apache-2.0",
+// "SPDX-FileCopyrightText: 2011-2022 Blender Foundation"; the licence text is in licenses/Apache-2.0.txt) on top of the Hosek-Wilkie model in
+// extern/sky (BSD-3-Clause, Lukas Hosek & Alexander Wilkie). The ported functions (sky_radiance_internal and the
+// texture's evaluation loop) keep their Apache-2.0 origin and notice; as Apache-2.0 combines with GPL version 3 and
+// not with version 2 alone, this file - like every Blendity executable - is distributed under GPL-3.0-or-later
+// through the "or later" clause of the licence above (ADR 0002, amended by ADR 0104; licenses/README.md).
 #include "sky.h"
 
 #include "../core/jobs.h"

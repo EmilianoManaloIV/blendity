@@ -116,7 +116,7 @@ Curve make_curve(ViewTransform vt, float exposure) {
   } else if (vt == ViewTransform::ACES) {
     c.scale *= 0.6f;
   }
-  return c;
+  return c;  // (AcesFull: no scale - Unity's ACES takes the scene's light as it is)
 }
 
 inline float curve_scalar(const Curve &c, float x) {
@@ -124,6 +124,7 @@ inline float curve_scalar(const Curve &c, float x) {
   switch (c.vt) {
     case ViewTransform::Filmic: return hable(x) * c.wscale;
     case ViewTransform::ACES: return (x * (2.51f * x + 0.03f)) / (x * (2.43f * x + 0.59f) + 0.14f);
+    case ViewTransform::AcesFull: return (x * (x + 0.0245786f) - 0.000090537f) / (x * (0.983729f * x + 0.4329510f) + 0.238081f);  // (round 405)
     default: return x;
   }
 }
@@ -156,6 +157,11 @@ BL_TARGET_SSE41 inline __m128 curve_sse(const Curve &c, __m128 x) {
   if (c.vt == ViewTransform::ACES) {
     __m128 num = _mm_mul_ps(x, _mm_add_ps(_mm_mul_ps(_mm_set1_ps(2.51f), x), _mm_set1_ps(0.03f)));
     __m128 den = _mm_add_ps(_mm_mul_ps(x, _mm_add_ps(_mm_mul_ps(_mm_set1_ps(2.43f), x), _mm_set1_ps(0.59f))), _mm_set1_ps(0.14f));
+    return _mm_div_ps(num, den);
+  }
+  if (c.vt == ViewTransform::AcesFull) {  // (round 405)
+    __m128 num = _mm_sub_ps(_mm_mul_ps(x, _mm_add_ps(x, _mm_set1_ps(0.0245786f))), _mm_set1_ps(0.000090537f));
+    __m128 den = _mm_add_ps(_mm_mul_ps(x, _mm_add_ps(_mm_mul_ps(_mm_set1_ps(0.983729f), x), _mm_set1_ps(0.4329510f))), _mm_set1_ps(0.238081f));
     return _mm_div_ps(num, den);
   }
   return x;
@@ -196,6 +202,11 @@ BL_TARGET_AVX2 inline __m256 curve_avx2(const Curve &c, __m256 x) {
   if (c.vt == ViewTransform::ACES) {
     __m256 num = _mm256_mul_ps(x, _mm256_fmadd_ps(_mm256_set1_ps(2.51f), x, _mm256_set1_ps(0.03f)));
     __m256 den = _mm256_fmadd_ps(x, _mm256_fmadd_ps(_mm256_set1_ps(2.43f), x, _mm256_set1_ps(0.59f)), _mm256_set1_ps(0.14f));
+    return _mm256_div_ps(num, den);
+  }
+  if (c.vt == ViewTransform::AcesFull) {  // (round 405)
+    __m256 num = _mm256_sub_ps(_mm256_mul_ps(x, _mm256_add_ps(x, _mm256_set1_ps(0.0245786f))), _mm256_set1_ps(0.000090537f));
+    __m256 den = _mm256_fmadd_ps(x, _mm256_fmadd_ps(_mm256_set1_ps(0.983729f), x, _mm256_set1_ps(0.4329510f)), _mm256_set1_ps(0.238081f));
     return _mm256_div_ps(num, den);
   }
   return x;

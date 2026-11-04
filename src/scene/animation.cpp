@@ -3,6 +3,7 @@
 // keys with each key's tangent the average of its two neighbours' slopes, flat at a local peak or dip, and limited so
 // no span overshoots its two keys (Fritsch-Carlson monotone limits).
 #include "animation.h"
+#include "unity_anim.h"  // (round 407)
 
 #include "material.h"
 #include "sequence.h"
@@ -83,9 +84,9 @@ size_t AnimTrack::put_key(const AnimKey &k) {
   return i;
 }
 
-int AnimTrack::key_at(float frame) const {
-  for (size_t i = 0; i < keys.size(); i++)
-    if (std::fabs(keys[i].frame - frame) < 0.01f) return (int)i;
+int AnimTrack::key_at(float frame) const {  // (round 406: by the keys' order - a summary row asks for every frame)
+  auto it = std::lower_bound(keys.begin(), keys.end(), frame - 0.01f, [](const AnimKey &k, float f) { return k.frame < f; });
+  if (it != keys.end() && std::fabs(it->frame - frame) < 0.01f) return (int)(it - keys.begin());
   return -1;
 }
 
@@ -251,7 +252,7 @@ std::string clip_key(std::string p) {
 
 AnimationClipPtr clip_asset(const std::string &path_in) {
   if (path_in.empty()) return nullptr;
-  const std::string path = clip_key(path_in);
+  const std::string path = clip_redirect(path_in);  // (round 407: a Unity clip's edits live in its Blendity copy)
   auto &lib = clip_library();
   if (auto it = lib.find(path); it != lib.end()) return it->second.clip;
   /* A clip that isn't there: looked for again after a second, not on every call of every frame. */
@@ -264,9 +265,14 @@ AnimationClipPtr clip_asset(const std::string &path_in) {
   }
   missing.erase(path);
   auto c = std::make_shared<AnimationClip>();
-  if (!load_clip_text(text, *c)) return nullptr;
+  std::string why;
+  const bool unity = is_unity_anim_text(text);  // (round 407: a Unity .anim as a clip of its own)
+  if (unity ? !unity_anim_to_clip(text, *c, nullptr, &why) : !load_clip_text(text, *c)) {
+    missing[path] = now_seconds();  // (review 407: a file that isn't a clip isn't parsed again every frame)
+    return nullptr;
+  }
   c->asset_path = path;
-  c->name = fs::stem(path);
+  if (!unity || c->name.empty()) c->name = fs::stem(path);
   lib[path] = {c, c->version};
   return c;
 }
@@ -283,14 +289,54 @@ AnimationClipPtr create_clip_asset(const std::string &path_in, const std::string
   return c;
 }
 
+/* Round 407: a clip read from a Unity .anim is not written back over Unity's file (what Blendity can't carry would go
+ * with it): its edits are saved as Blendity's own clip beside it, "<name> (Blendity).anim", and the clip is that file
+ * from then on. The Unity file stays as the project had it; `export anim` writes a Unity file on purpose. */
+std::string unity_clip_sibling(const std::string &path) {
+  const std::string dir = fs::parent(path), stem = fs::stem(path);
+  std::string out = (dir.empty() ? std::string() : dir + "/") + stem + " (Blendity).anim";
+  for (int k = 2; fs::exists(resolve_asset_path(out)); k++) out = (dir.empty() ? std::string() : dir + "/") + stem + strprintf(" (Blendity %d).anim", k);
+  return out;
+}
+
+/* Round 407 (review): where a Unity clip's edits went - clip_asset follows it, so a component, a sequencer card or an
+ * undo text that still names the Unity file finds the edited clip; the editor rewrites the components' paths at its
+ * next commit (clip_redirect). */
+std::unordered_map<std::string, std::string> &clip_redirects() {
+  static std::unordered_map<std::string, std::string> r;
+  return r;
+}
+
+std::string clip_redirect(const std::string &path_in) {
+  std::string path = clip_key(path_in);
+  for (int hops = 0; hops < 16; hops++) {
+    const auto it = clip_redirects().find(path);
+    if (it == clip_redirects().end()) break;
+    path = it->second;
+  }
+  return path;
+}
+
 size_t save_dirty_clip_assets() {
   size_t n = 0;
+  std::vector<std::pair<std::string, std::string>> moved;  // (a Unity clip's key -> its Blendity copy's)
   for (auto &kv : clip_library()) {
     ClipEntry &e = kv.second;
     if (!e.clip || e.clip->version == e.saved_version) continue;
-    if (!fs::write_file(resolve_asset_path(kv.first), save_clip_text(*e.clip))) continue;
+    std::string path = kv.first;
+    if (e.clip->unity_yaml) {
+      path = unity_clip_sibling(kv.first);
+      e.clip->unity_yaml = false, e.clip->asset_path = path;
+      moved.push_back({kv.first, path});
+    }
+    if (!fs::write_file(resolve_asset_path(path), save_clip_text(*e.clip))) continue;
     e.saved_version = e.clip->version;
     n++;
+  }
+  for (const auto &[from, to] : moved) {
+    clip_library()[to] = clip_library()[from];
+    clip_library().erase(from);
+    clip_redirects()[from] = clip_key(to);
   }
   return n;
 }
