@@ -226,6 +226,7 @@ struct FrameProfile {
   uint64_t gpu_approximated = 0;                          // round 414 (ADR 0108): instances the card drew approximately (noted per view) rather than refusing the view
   uint64_t gpu_corner_uploads = 0;                        // round 415 (ADR 0109): corner blocks built and sent to the card (none while nothing changes)
   uint64_t lights_culled = 0;                             // round 415: point and spot lights left out of a view's list (their range sphere outside its frustum)
+  uint64_t filters_on_card = 0;                           // round 416 (ADR 0110): views whose camera filters ran on the card (no read-back)
   /* Round 415 (ADR 0109): the CPU's share of the GPU path - the instances gathered (materials evaluated, textures looked
    * up), the baked-lit triangles' corners, the see-through triangles (transformed, culled, sorted), and the render call
    * (the frame written to the card's buffers, recorded, submitted; the readback and the wait are in ms_gpu_readback). */
@@ -257,7 +258,7 @@ struct FrameProfile {
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
-    gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled;
+    gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
     ms_gpu_instances += o.ms_gpu_instances, ms_gpu_corners += o.ms_gpu_corners, ms_gpu_see += o.ms_gpu_see, ms_gpu_render += o.ms_gpu_render;
     gpu_upload_bytes += o.gpu_upload_bytes;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
@@ -1523,6 +1524,7 @@ class Editor {
   std::string gpu_view_status() const;
   std::string gpu_view_approximations() const;  // round 414 (ADR 0108): what the card drew differently from the CPU in the views it drew ("" none)
   void set_light_cull_for_test(bool on) { light_cull_off_for_test_ = !on; }  // round 415: the view's light cull off, to compare pictures
+  void set_filters_on_card_for_test(bool on) { filters_off_card_for_test_ = !on; }  // round 416: the filters kept on the CPU, to compare pictures
   std::string window_device_status(bool card_present, int card_win, const std::string &card_reason) const;  // (task 0199)
   bool notice_cpu_fallback();  // (true: said now)
   bool notice_in_tests_ = false;
@@ -5918,7 +5920,13 @@ class Editor {
   double picker_ms_ = 0.0;           // round 411: the time a native file dialog blocked this frame (not the frame's own work: taken off the deferred time)
   std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
   std::string gpu_slot_approx_[gpu::Raster::kSlots];  // round 414: per view, what the card drew approximately ("" nothing; the Profiler lists them)
+  bool gpu_slot_filters_cpu_[gpu::Raster::kSlots] = {};  // round 416: per view, its camera filters ran on the CPU over the picture read back
   bool light_cull_off_for_test_ = false;
+  /* Round 416: what render_camera knows about the stack the view is drawn through, for gpu_view_draw - whether its
+   * passes may all run on the card (none the card lacks, no raster stage, the view's own size, no depth of field), the
+   * grain's clock and the pixel scale of the picture. */
+  bool filters_card_ok_ = false, filters_animate_ = false, filters_off_card_for_test_ = false;
+  float filters_time_ = 0.0f, filters_pixel_scale_ = 1.0f;
   std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
   double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
   bool gpu_split_readback_for_test_ = false;  // (task 0160: render and read back as two submissions, for the test)

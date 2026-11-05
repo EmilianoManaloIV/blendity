@@ -204,6 +204,18 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 416 (the filters and lilToon on the card, ADR 0110; `tools/bench_world.py`, `blendity_stress --only world_like --quick`)
+
+The camera's Bloom, Vignette, Color Grading, Chromatic Aberration and Film Grain run on the card over its picture when
+the stack holds only those: the Game view's picture is no longer read back for the CPU's passes, and the card presents
+it. lilToon shades on the card by its own model (within 0.2 / 255 of the CPU).
+
+| Row | Round 415 | Now |
+|---|---|---|
+| SideRail, Scene + Game view (card / system ms) | 34.3 / 36.5 (the filters on the CPU) | 7.8 / 10.4 |
+| Shinano, Scene + Game view | 5.2 / 7.8 | 5.1 / 7.2 |
+| Stand-in, Scene + Game view on the card (frame / GPU path ms) | 23.9 / 10.3 | 7.9 / 6.2 |
+
 ### After round 415 (the CPU's share of a card frame, ADR 0109; `--windowed-check`, `tools/bench_world.py`, `blendity_stress --only world_like --quick`)
 
 The GPU path's CPU share taken apart on SideRail's Scene view (presented by the card, 2560 x 1369): the baked corners

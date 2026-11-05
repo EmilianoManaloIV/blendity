@@ -137,6 +137,78 @@ std::shared_ptr<Texture> texture_capped(const Texture &t, int cap) {
   return c;
 }
 
+/* Round 416 (ADR 0110): the camera's filters as the card runs them, finished for this view - the vignette's aspect,
+ * the grading's exposure gain and flags, the chromatic spread, the grain's cell and clock, the bloom's knee and gain.
+ * Neutral passes are left out, as the CPU's return untouched. Empty when the stack can't run whole on the card: a
+ * grading with exposure writes the linear light back on the CPU for a later bloom or exposed grading to read, which the
+ * card's grade doesn't - such a stack stays the CPU's. */
+std::vector<PostPass> card_post_passes(const FilterStack &filters, const RenderTarget &rt, const LightingEnv &env, bool want_hdr, float pixel_scale, bool animate,
+                                       float time) {
+  std::vector<PostPass> post;
+  auto fin = [](float v, float neutral) { return finite_bits(v) ? v : neutral; };
+  auto sat = [](float v) { return std::max(0.0f, std::min(1.0f, v)); };
+  const float gain = std::exp2(std::max(-30.0f, std::min(30.0f, fin(env.exposure, 0.0f))));
+  bool exposed = false;
+  for (PostPass p : filters.card) {
+    switch (p.kind) {
+      case PostPass::Vignette: {
+        const float in = sat(fin(p.p[0], 0.0f));
+        if (in <= 0.0f) continue;
+        p.p[0] = in, p.p[1] = std::max(0.01f, sat(fin(p.p[1], 0.5f))), p.p[2] = sat(fin(p.p[2], 1.0f)), p.p[3] = (float)rt.width / (float)rt.height;
+        for (int k = 4; k < 7; k++) p.p[k] = sat(fin(p.p[k], 0.0f));
+        break;
+      }
+      case PostPass::ColorGrading: {
+        const float ex = std::exp2(std::max(-16.0f, std::min(16.0f, fin(p.p[0], 0.0f))));
+        const float contrast = std::max(-0.99f, std::min(1.0f, fin(p.p[1], 0.0f))), s = std::max(-1.0f, std::min(1.0f, fin(p.p[2], 0.0f))) + 1.0f;
+        const float temp = std::max(-1.0f, std::min(1.0f, fin(p.p[4], 0.0f))), tint = std::max(-1.0f, std::min(1.0f, fin(p.p[5], 0.0f)));
+        bool lgg = false;
+        for (int k = 0; k < 3; k++) {
+          p.p[8 + k] = std::max(-1.0f, std::min(1.0f, fin(p.p[8 + k], 0.0f)));
+          p.p[12 + k] = std::max(0.05f, std::min(10.0f, fin(p.p[12 + k], 1.0f)));
+          p.p[16 + k] = std::max(0.0f, std::min(10.0f, fin(p.p[16 + k], 1.0f)));
+          lgg = lgg || p.p[8 + k] != 0.0f || p.p[12 + k] != 1.0f || p.p[16 + k] != 1.0f;
+        }
+        if (ex == 1.0f && contrast == 0.0f && s == 1.0f && temp == 0.0f && tint == 0.0f && !lgg) continue;
+        p.p[0] = ex, p.p[1] = contrast, p.p[2] = s, p.p[3] = ex != 1.0f && want_hdr ? 1.0f : 0.0f;
+        p.p[4] = 1.0f + 0.3f * temp, p.p[5] = 1.0f - 0.3f * tint, p.p[6] = 1.0f - 0.3f * temp, p.p[7] = lgg ? 1.0f : 0.0f;
+        if (p.p[3] > 0.5f && exposed) return {};  // (a second exposed grading reads what the first wrote back on the CPU)
+        if (p.p[3] > 0.5f) exposed = true;
+        break;
+      }
+      case PostPass::ChromaticAberration: {
+        const float k = sat(fin(p.p[0], 0.0f));
+        if (k <= 0.0f) continue;
+        p.p[0] = k * 0.02f * (float)std::max(rt.width, rt.height);
+        break;
+      }
+      case PostPass::FilmGrain: {
+        const float in = sat(fin(p.p[0], 0.0f));
+        if (in <= 0.0f) continue;
+        const float scale = finite_bits(pixel_scale) && pixel_scale > 0.0f ? pixel_scale : 1.0f;
+        const float size = std::max(1.0f, std::min(16.0f, fin(p.p[1], 1.0f)));
+        p.p[0] = in, p.p[1] = (float)std::max(1, std::min(64, (int)std::lround(size * scale))), p.p[2] = sat(fin(p.p[2], 0.8f));
+        const uint32_t seed = animate && finite_bits(time) ? (uint32_t)(int64_t)std::floor(std::fmod((double)time, 86400.0) * 24.0) : 0u;  // (apply_film_grain's)
+        std::memcpy(&p.p[3], &seed, sizeof(seed));  // (as its bits: a float can't carry every seed)
+        break;
+      }
+      case PostPass::Bloom: {
+        const float intensity = std::max(0.0f, std::min(100.0f, fin(p.p[0], 0.0f)));
+        if (intensity <= 0.0f) continue;
+        const float threshold = std::max(0.0f, std::min(1e6f, fin(p.p[1], 1.0f)));
+        p.p[0] = intensity, p.p[1] = threshold, p.p[2] = threshold * sat(fin(p.p[2], 0.5f)), p.p[3] = sat(fin(p.p[3], 0.7f)), p.p[4] = std::min(65504.0f, std::max(0.0f, fin(p.p[4], 65000.0f)));  // (the planes are half floats)
+        for (int k = 5; k < 8; k++) p.p[k] = std::max(0.0f, fin(p.p[k], 1.0f));
+        p.p[8] = want_hdr ? gain : 1.0f;
+        if (exposed) return {};  // (a bloom after an exposed grading reads the exposed light on the CPU)
+        break;
+      }
+      default: continue;
+    }
+    post.push_back(p);
+  }
+  return post;
+}
+
 /* Why an object can't be drawn on the GPU yet, or null. */
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
@@ -309,6 +381,14 @@ bool raster_toon_maps(gpu::RasterInstance &in, const Material &m, const std::fun
     in.toon_maps[k] = *maps[k] ? tex(*maps[k]) : -1;
     any = any || *maps[k];
   }
+  if (m.liltoon()) {  // (round 416: lilToon's maps through the toon pass's planes; the matcap read by the lighting pass)
+    const TexturePtr *lm[10] = {&tx.lil_shadow_tex, &tx.lil_shadow2_tex, &tx.lil_strength_mask, &tx.lil_border_mask, &tx.lil_rim_tex,
+                                &tx.lil_backlight_tex, &tx.lil_emission, &tx.lil_matcap_mask, &tx.lil_emission_mask, &tx.lil_matcap};
+    for (int k = 0; k < 10; k++) {
+      in.lil_maps[k] = *lm[k] ? tex(*lm[k]) : -1;
+      any = any || (k != 9 && *lm[k]);
+    }
+  }
   if (!any) return false;
   in.face_forward = m.face_forward;
   in.hatch_scale = finite_bits(m.hatch_scale) && m.hatch_scale > 0.0f ? m.hatch_scale : 1.0f;
@@ -402,6 +482,43 @@ bool live_close_up(const DrawItem &it, const Material &m, float stretch, float n
   return false;
 }
 
+/* Round 416 (ADR 0110): lilToon's settings for the card's LilSet (gpu_raster.cpp: 24 vec4), in the order the shader's
+ * lil_* functions read them - the CPU's shading.cpp model, field for field. */
+void raster_lil(gpu::RasterInstance &in, const Material &m) {
+  /* (The back-face fields - backface_force_shadow, the rim's, backlight's and matcap's back-face masks - go up but
+   * nothing reads them yet: the views' pixel loop turns a back side's normals to the eye and doesn't tell back faces
+   * apart, on the CPU as on the card; the path tracer does.) */
+  const LilToonSettings &l = m.lil;
+  float *p = in.lil_p;
+  auto put = [&](int v, float a, float b, float c, float d) { p[v * 4] = a, p[v * 4 + 1] = b, p[v * 4 + 2] = c, p[v * 4 + 3] = d; };
+  auto f = [](float v, float fallback) { return finite_bits(v) ? v : fallback; };
+  put(0, 1.0f, f(l.light_min, 0.05f), f(l.light_max, 1.0f), f(l.monochrome, 0.0f));
+  put(1, f(l.as_unlit, 0.0f), f(l.shadow_env, 0.0f), l.shadow ? 1.0f : 0.0f, f(l.border, 0.5f));
+  put(2, f(l.blur, 0.1f), f(l.strength, 1.0f), f(l.receive, 0.0f), f(l.main_strength, 0.0f));
+  put(3, f(l.border_range, 0.08f), l.shadow_color.x, l.shadow_color.y, l.shadow_color.z);
+  put(4, l.post_ao ? 1.0f : 0.0f, f(l.border2, 0.15f), f(l.blur2, 0.1f), f(l.receive2, 0.0f));
+  put(5, f(l.shadow2_alpha, 0.0f), l.shadow2_color.x, l.shadow2_color.y, l.shadow2_color.z);
+  put(6, l.border_color.x, l.border_color.y, l.border_color.z, f(l.backface_force_shadow, 0.0f));
+  put(7, l.rim ? 1.0f : 0.0f, l.rim_color.x, l.rim_color.y, l.rim_color.z);
+  put(8, f(l.rim_alpha, 1.0f), f(l.rim_main_strength, 1.0f), f(l.rim_fresnel, 3.5f), f(l.rim_border, 0.5f));
+  put(9, f(l.rim_blur, 0.65f), f(l.rim_enable_lighting, 1.0f), f(l.rim_shadow_mask, 0.5f), f(l.rim_backface_mask, 1.0f));
+  put(10, f(l.rim_dir_strength, 0.0f), f(l.rim_dir_range, 0.0f), f(l.rim_indir_range, 0.0f), f(l.rim_indir_border, 0.5f));
+  put(11, f(l.rim_indir_blur, 0.1f), f(l.rim_indir_alpha, 1.0f), (float)l.rim_blend_mode, l.backlight ? 1.0f : 0.0f);
+  put(12, l.rim_indir_color.x, l.rim_indir_color.y, l.rim_indir_color.z, f(l.backlight_alpha, 1.0f));
+  put(13, l.backlight_color.x, l.backlight_color.y, l.backlight_color.z, f(l.backlight_main_strength, 0.0f));
+  put(14, f(l.backlight_receive_shadow, 1.0f), f(l.backlight_backface_mask, 1.0f), f(l.backlight_border, 0.35f), f(l.backlight_blur, 0.05f));
+  put(15, f(l.backlight_directivity, 5.0f), f(l.backlight_view_strength, 1.0f), l.matcap ? 1.0f : 0.0f, f(l.matcap_alpha, 1.0f));
+  put(16, l.matcap_color.x, l.matcap_color.y, l.matcap_color.z, f(l.matcap_blend, 1.0f));
+  put(17, f(l.matcap_enable_lighting, 1.0f), f(l.matcap_shadow_mask, 0.0f), f(l.matcap_backface_mask, 0.0f), f(l.matcap_main_strength, 0.0f));
+  put(18, (float)l.matcap_blend_mode, l.emission ? 1.0f : 0.0f, f(l.emission_alpha, 1.0f), f(l.emission_blend, 1.0f));
+  put(19, l.emission_color.x, l.emission_color.y, l.emission_color.z, f(l.emission_main_strength, 0.0f));
+  put(20, (float)l.emission_blend_mode, l.reflection ? 1.0f : 0.0f, l.apply_specular ? 1.0f : 0.0f, l.apply_reflection ? 1.0f : 0.0f);
+  put(21, l.specular_toon ? 1.0f : 0.0f, f(l.smoothness, 1.0f), f(l.metallic, 0.0f), f(l.reflectance, 0.04f));
+  put(22, f(l.specular_border, 0.5f), f(l.specular_blur, 0.0f), 0.0f, f(l.gamma, 1.0f));
+  put(23, f(l.hsv.x, 0.0f), f(l.hsv.y, 1.0f), f(l.hsv.z, 1.0f), l.hsvg_neutral() ? 0.0f : 1.0f);
+  in.lil = true;
+}
+
 /* A toon material's settings (ADR 0020), as the lighting pass's shade_toon / toon_rim read them (task 0102). */
 void raster_toon(gpu::RasterInstance &in, const Material &m) {
   /* (A NaN setting: clampf's result on the CPU, where GLSL's clamp of a NaN is undefined.) */
@@ -421,6 +538,7 @@ void raster_toon(gpu::RasterInstance &in, const Material &m) {
   in.toon_rim_side = m.toon_rim_side;
   in.toon_key_light_only = m.toon_key_light_only;
   if (!m.liltoon()) return;
+  raster_lil(in, m);  // (round 416: lilToon's own model on the card; the derived fields below stay for a card whose lilToon table is off)
   /* Round 402 (ADR 0100): a lilToon material in the GPU views through derived toon fields - the 1st shadow's border and
    * blur as the threshold and softness (lilToon's are in N.L x 0.5 + 0.5), its colour as the shadow colour, lilToon's rim
    * (its fresnel's border as a width), one flat ambient; the exact model is the CPU views' and F12's. */
@@ -651,6 +769,7 @@ void Editor::set_viewport_device(int d) {
   gpu_view_reason_.clear();
   for (std::string &r : gpu_slot_reason_) r.clear();
   for (std::string &a : gpu_slot_approx_) a.clear();
+  for (bool &f : gpu_slot_filters_cpu_) f = false;
 }
 
 bool Editor::gpu_view_wanted() const {
@@ -726,6 +845,11 @@ std::string Editor::gpu_view_status() const {
   if (!why.empty()) s += " (a view on the CPU: " + why + ")";
   const std::string approx = gpu_view_approximations();
   if (!approx.empty()) s += " (approximated: " + approx + ")";
+  for (bool f : gpu_slot_filters_cpu_)
+    if (f) {  // (round 416: a stack the card doesn't run whole)
+      s += " (the camera's filters on the CPU: a pass the card doesn't run, a retro stage, an internal size, depth of field or an exposed grading before a bloom)";
+      break;
+    }
   return s;
 }
 
@@ -814,6 +938,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
 bool Editor::gpu_view_refuse(int slot, const std::string &why) {
   gpu_slot_reason_[slot] = gpu_view_reason_ = why;
   gpu_slot_approx_[slot].clear();
+  gpu_slot_filters_cpu_[slot] = false;
   prof_.gpu_fallbacks++;
   return false;
 }
@@ -1362,6 +1487,17 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
   if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
   const bool want_hdr = rt.want_hdr && opt.shade == ShadeMode::Deferred;  // (task 0197: a camera's bloom reads it)
+  /* Round 416 (ADR 0110): the camera's filters on the card, when the stack is one the card runs whole (render_camera
+   * decided; filters_card_ok_) - their settings finished for this view: the vignette's aspect, the grading's exposure
+   * gain and flags, the chromatic spread, the grain's cell and clock, the bloom's knee and gain. Neutral passes are
+   * left out, as the CPU's return untouched. */
+  /* Round 416 (ADR 0110): the camera's filters on the card when the stack is one the card runs whole (render_camera
+   * decided: filters_card_ok_; card_post_passes finishes the settings for this view and says no to a stack it can't). */
+  std::vector<PostPass> post;
+  if (filters && filters_card_ok_ && opt.shade == ShadeMode::Deferred && g->can_draw_post() && !filters->card.empty())
+    post = card_post_passes(*filters, rt, env, want_hdr, filters_pixel_scale_, filters_animate_, filters_time_);
+  const bool post_on_card = !post.empty();
+  const bool filters_on_cpu = filters && !filters->passes.empty() && !post_on_card && !filters_off_card_for_test_;  // (its own note in the status: not an approximation)
   /* (Round 414: the see-through pixels are marked "none" in the card's linear-light plane, as the CPU marks its own.) */
   if (want_hdr && !see.empty() && !g->can_draw_see_through_hdr()) return gpu_view_refuse(slot, "see-through surfaces over a picture kept in linear light (the card's pass couldn't be made)");
   const bool toon_maps = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return (in.flags & gpu::RasterInstance::ToonMaps) != 0; });
@@ -1439,7 +1575,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const bool dof = cam && cam->dof && !cam->orthographic;
   int card_x = 0, card_y = 0;
   /* (Task 0193: the picture stays on the card - unless the CPU works on it afterwards: a camera's depth of field.) */
-  const bool filtered = filters && !filters->passes.empty();  // (task 0197: the CPU's passes work on the picture afterwards)
+  const bool filtered = filters && !filters->passes.empty() && !post_on_card;  // (task 0197: the CPU's passes work on the picture afterwards; round 416: not when the card ran them)
+  fr.post = std::move(post);
   const bool to_card = card_present_ && !dof && !filtered && card_view_at(rt, card_x, card_y);
   uint32_t *color = to_card ? nullptr : contiguous ? rt.color : gpu_color_.data();
   /* Task 0204: the Scene view's depth and ids stay on the card when the card draws its picture and overlays: a click, a
@@ -1455,7 +1592,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   /* Task 0160 (ADR 0051): the frame and its copies out in one submission, one wait (the split path kept for the test
    * that checks the picture is the same). Task 0204: with nothing to copy back the frame is left running on the card
    * while the editor goes on (the present, or the next use of the card, waits for it). */
-  const bool nothing_back = !color && !depth && !ids && !want_hdr;
+  const bool nothing_back = !color && !depth && !ids && !(want_hdr && !post_on_card);  // (round 416: the card's filters read the linear light there; nothing comes back for them)
   if (ok) {
     ScopedTimer render_timer;
     if (gpu_split_readback_for_test_) ok = g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err);
@@ -1491,9 +1628,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   }
   for (int y = 0; !to_card && !contiguous && y < rt.height; y++)
     std::memcpy(rt.color + (size_t)y * rt.stride, &gpu_color_[(size_t)y * rt.width], (size_t)rt.width * 4);
-  if (!read_linear_light(rt, slot, want_hdr, env)) return false;  // (task 0197: after the colour - it encodes it again)
+  if (!read_linear_light(rt, slot, want_hdr && !post_on_card, env)) return false;  // (task 0197: after the colour - it encodes it again; round 416: not when the card's filters used it)
+  rt.filters_on_card = post_on_card;
+  if (post_on_card) prof_.filters_on_card++;
   gpu_slot_reason_[slot].clear();
   gpu_slot_approx_[slot] = approx;  // (round 414)
+  gpu_slot_filters_cpu_[slot] = filters_on_cpu;  // (round 416)
   prof_.gpu_approximated += approximated;
   gpu_view_reason_.clear();
   prof_.gpu_views++;
@@ -1676,7 +1816,8 @@ void Editor::gpu_view_drop() {
   gpu_textures_.clear();
   gpu_corners_.clear();  // (round 415: the blocks went with the card)
   gpu_corner_floats_ = 0;
-  for (std::string &a : gpu_slot_approx_) a.clear();  // (round 414: nothing is approximated on a card that isn't drawing)
+  for (std::string &a : gpu_slot_approx_) a.clear();
+  for (bool &f : gpu_slot_filters_cpu_) f = false;  // (round 414: nothing is approximated on a card that isn't drawing)
   gpu_world_tex_ = nullptr;
   gpu_mesh_bytes_ = 0;
   gpu_cage_v_.clear();

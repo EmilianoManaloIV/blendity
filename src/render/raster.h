@@ -284,6 +284,7 @@ struct RenderTarget {
    * by deferred shading when want_hdr is set, with the view transform and exposure that encoded the
    * colour. A pixel it didn't shade (the sky, see-through surfaces) has x = -1. */
   bool want_hdr = false;
+  bool filters_on_card = false;  // round 416 (ADR 0110): the camera's filters ran on the card over this picture (the CPU's passes are skipped)
   std::vector<Vec3> hdr;
   ViewTransform hdr_view_transform = ViewTransform::Standard;
   float hdr_exposure = 0.0f;

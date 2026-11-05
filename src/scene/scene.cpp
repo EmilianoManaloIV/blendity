@@ -1202,6 +1202,11 @@ void ColorGradingEffect::contribute(FilterStack &s) const {
   p.exposure = exposure, p.contrast = contrast, p.saturation = saturation, p.temperature = temperature, p.tint = tint;
   p.lift = lift, p.gamma = gamma, p.gain = gain;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_color_grading(rt, p); });
+  PostPass c;  // (round 416: the same settings for the card; the view finishes them - the exposure's gain, the flags)
+  c.kind = PostPass::ColorGrading;
+  c.p[0] = exposure, c.p[1] = contrast, c.p[2] = saturation, c.p[4] = temperature, c.p[5] = tint;
+  for (int k = 0; k < 3; k++) c.p[8 + k] = lift[k], c.p[12 + k] = gamma[k], c.p[16 + k] = gain[k];
+  s.card.push_back(c);
 }
 
 void PosterizeEffect::reflect(Reflector &r) {
@@ -1242,6 +1247,10 @@ void VignetteEffect::contribute(FilterStack &s) const {
   VignetteParams p;
   p.intensity = intensity, p.smoothness = smoothness, p.roundness = roundness, p.color = display_color(color);
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_vignette(rt, p); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::Vignette;
+  c.p[0] = intensity, c.p[1] = smoothness, c.p[2] = roundness, c.p[4] = p.color.x, c.p[5] = p.color.y, c.p[6] = p.color.z;
+  s.card.push_back(c);
 }
 
 void ChromaticAberrationEffect::reflect(Reflector &r) {
@@ -1251,6 +1260,10 @@ void ChromaticAberrationEffect::reflect(Reflector &r) {
 void ChromaticAberrationEffect::contribute(FilterStack &s) const {
   const float k = intensity;
   s.passes.push_back([k](RenderTarget &rt, const FilterFrame *) { apply_chromatic_aberration(rt, k); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::ChromaticAberration;
+  c.p[0] = intensity;
+  s.card.push_back(c);
 }
 
 void FilmGrainEffect::reflect(Reflector &r) {
@@ -1264,6 +1277,10 @@ void FilmGrainEffect::contribute(FilterStack &s) const {
   GrainParams p;
   p.intensity = intensity, p.size = size, p.response = response;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_film_grain(rt, p, f); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::FilmGrain;
+  c.p[0] = intensity, c.p[1] = size, c.p[2] = response;
+  s.card.push_back(c);
 }
 
 void LensDistortionEffect::reflect(Reflector &r) {
@@ -1337,6 +1354,10 @@ void BloomEffect::contribute(FilterStack &s) const {
   p.intensity = intensity, p.threshold = threshold, p.soft_knee = soft_knee, p.scatter = scatter, p.clamp = clamp, p.tint = tint;
   s.needs_hdr = true;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_bloom(rt, p); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::Bloom;
+  c.p[0] = intensity, c.p[1] = threshold, c.p[2] = soft_knee, c.p[3] = scatter, c.p[4] = clamp, c.p[5] = tint.x, c.p[6] = tint.y, c.p[7] = tint.z;
+  s.card.push_back(c);
 }
 
 void HalftoneEffect::reflect(Reflector &r) {

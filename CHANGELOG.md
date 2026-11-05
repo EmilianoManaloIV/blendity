@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 416): the Game view's post-processing on the card, lilToon exact on the card
+
+**Asked:** the plan's round 416 - the camera's filters as card passes with no per-frame read-back, and lilToon's own
+formula in the card's toon pass. After round 415 the real world's Game view cost 34 ms a frame: its Bloom, Vignette and
+Color Grading ran on the CPU over the picture read back. Pass 16's sixth round (the plan: rounds 411-420).
+
+**Changed (task 0392, ADR 0110)**
+- **The camera's filters on the card:** Bloom, Vignette, Color Grading, Chromatic Aberration and Film Grain run as
+  full-screen passes over the card's picture and its linear-light plane - camera_filter.cpp's formulas in GLSL - when a
+  stack holds only these at the view's own size with no retro stage and no depth of field; nothing is read back and the
+  card presents the Game view's picture. Any other stack runs on the CPU as before, and `viewport status` says so. The
+  Profiler counts the views whose filters ran on the card.
+- **"Still as shaded" is now within a step:** the bloom and the grading's exposure re-encode from the linear light the
+  pixels whose colour is within a step of its encode (it had to be exact, which misclassified the card's picture under a
+  tonemapping view); both devices use the rule.
+- **lilToon's own model on the card:** the 1st and 2nd shadow with their borders and blur, the border colour, the
+  strength and border masks, the main light clamped and the other lights as ForwardAdd passes, MatCap, the rim's lit
+  and dark sides, the backlight, the stepped or GGX highlight, emission, the environment's reflection and HSVG -
+  shading.cpp's model line for line, its settings in a table an instance and its maps through three more toon planes.
+  Round 402's derived fields stay only for a card without the lilToon pipeline.
+- `tests_round416`; the lesson "Rendering on the GPU" says what runs on the card now.
+
+**Measured:** SideRail's Game view with its Bloom, Vignette and Color Grading 34.3 -> 7.8 ms a frame on the card (presented by
+the card; 80.9 with the view refused in round 413); the stand-in's Scene + Game view 23.9 -> 7.9 (the GPU path 10.3 -> 6.2);
+each filter alone against the CPU's pass exact or within a tenth of a step, the five together 1.7 / 255; lilToon within
+0.2 / 255 of the CPU over the object (docs/PERFORMANCE.md, the spec).
+
+**Checked:** `tests_round416` (the five filters together within 1.5 / 255 of the CPU, each alone against the CPU's pass -
+Vignette, Chromatic Aberration and Film Grain exact -, a CPU-only stack kept on the CPU, lilToon without and with maps
+within 1.5 and 2 / 255); both suites, the audits.
+
 ## 2026-11-04 (round 415): the CPU's share of a card frame
 
 **Asked:** round 411's honest finding on the user's SideRail world - "the card's frame costs the CPU more than the CPU's

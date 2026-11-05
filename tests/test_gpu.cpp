@@ -3280,6 +3280,260 @@ static void tests_round415() {
   });
 }
 
+static void tests_round416() {
+  /* ---------------------------------------------------------------- round 416: the camera's filters on the card (task 0392, ADR 0110) */
+  auto r416_compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      sum += worst, within += worst <= 3;
+    }
+    mean = a.empty() ? 0 : sum / (double)a.size(), within3 = a.empty() ? 0 : (double)within / (double)a.size();
+  };
+  test("gpu views (round 416): a camera's Bloom, Vignette, Color Grading (a stop of exposure), Chromatic Aberration and Film Grain run on the card over its picture - no read-back, the Profiler counts the view - and the Game view is the CPU's within 2.5 / 255 (the grading's exposure path after the bloom: a few borderline pixels take the other path); kept on the CPU for the comparison they match the same", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr hot = make_material("hot", {0.2f, 0.2f, 0.2f});  // (an emissive cube: the bloom has something to glow from)
+    hot->emission = Vec3(6.0f, 4.0f, 2.0f);
+    hot->emission_strength = 1.0f;
+    cube->get<MeshRenderer>()->materials = {hot};
+    ed.command("select Main Camera");
+    for (const char *f : {"Bloom", "Vignette", "Color Grading", "Chromatic Aberration", "Film Grain"}) ed.command(std::string("filter add ") + f);
+    ed.command("set ColorGrading.Exposure 1");  // (a stop: the grading's linear-light path)
+    ed.mark_changed_for_test("filters");
+    auto game = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    };
+    const std::vector<uint32_t> cpu = game(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = game(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    double mean = 0, within3 = 0;
+    r416_compare(cpu, gpu, mean, within3);
+    std::printf("    %s\n    %llu views on the card, %llu on the CPU, %llu with the filters on the card; against the CPU mean %.3f / 255, %.2f %% within 3\n", ed.gpu_view_status().c_str(),
+                (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks),
+                (unsigned long long)(after.filters_on_card - before.filters_on_card), mean, within3 * 100);
+    CHECK(after.gpu_views > before.gpu_views && after.gpu_fallbacks == before.gpu_fallbacks && ed.gpu_view_reason().empty());
+    CHECK(after.filters_on_card > before.filters_on_card);
+    CHECK(mean < 2.5 && within3 >= 0.9);
+    /* The same stack kept on the CPU over the card's picture (as before this round): the two card paths agree too. */
+    ed.set_filters_on_card_for_test(false);
+    ed.mark_changed_for_test("filters on the CPU");
+    const FrameProfile b2 = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu_cpu_filters = game(2);
+    const FrameProfile a2 = ed.frame_profile_totals();
+    ed.set_filters_on_card_for_test(true);
+    double mean2 = 0, within2 = 0;
+    r416_compare(gpu_cpu_filters, gpu, mean2, within2);
+    std::printf("    the card's picture with the filters on the CPU against the card's own: mean %.3f / 255, %.2f %% within 3 (%llu views with the filters on the card)\n", mean2, within2 * 100,
+                (unsigned long long)(a2.filters_on_card - b2.filters_on_card));
+    CHECK(a2.filters_on_card == b2.filters_on_card);
+    CHECK(mean2 < 2.5 && within2 >= 0.9);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 416): a lilToon material shades on the card by lilToon's own model - 1st and 2nd shadow with their borders and blur, the border colour, a rim, a backlight, HSVG on the base, emission - the object within 1.5 / 255 of the CPU's; with a shadow colour map and a rim map too", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    auto lil_case = [&](const char *what, const std::function<void(Material &)> &setup, double bound) {
+      Editor ed;
+      r34_open(ed);
+      ed.command("overlay grid off");
+      GameObject *cube = ed.scene().find_by_name("Cube");
+      CHECK(cube && cube->get<MeshRenderer>());
+      if (!cube || !cube->get<MeshRenderer>()) return;
+      MaterialPtr m = make_material("Lil", {0.85f, 0.6f, 0.55f});
+      m->shading_model = 1;
+      m->lil.on = true;
+      m->lil.shadow = true, m->lil.border = 0.55f, m->lil.blur = 0.15f, m->lil.strength = 0.9f, m->lil.shadow_color = Vec3(0.55f, 0.45f, 0.7f);
+      m->lil.shadow2_alpha = 0.6f, m->lil.border2 = 0.3f, m->lil.blur2 = 0.1f, m->lil.shadow2_color = Vec3(0.35f, 0.3f, 0.5f);
+      m->lil.border_color = Vec3(1.0f, 0.9f, 0.7f), m->lil.border_range = 0.1f;
+      m->lil.rim = true, m->lil.rim_color = Vec3(0.5f, 0.3f, 0.2f), m->lil.rim_fresnel = 3.0f, m->lil.rim_border = 0.5f, m->lil.rim_blur = 0.6f;
+      m->lil.backlight = true, m->lil.backlight_color = Vec3(0.7f, 0.6f, 0.4f);
+      m->lil.emission = true, m->lil.emission_color = Vec3(0.2f, 0.1f, 0.0f), m->lil.emission_blend = 0.5f;
+      m->lil.hsv = Vec3(0.05f, 1.1f, 1.0f), m->lil.gamma = 1.1f;
+      setup(*m);
+      m->touch();
+      cube->get<MeshRenderer>()->materials = {m};
+      ed.mark_changed_for_test("lil");
+      auto scene = [&](int device) {
+        ed.viewport_device_for_test(device);
+        for (int k = 0; k < 2; k++) {
+          cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+          r34_steps(ed, 2);
+        }
+        return r34_crop(ed, ed.scene_view_rect());
+      };
+      const std::vector<uint32_t> cpu = scene(1);
+      const FrameProfile before = ed.frame_profile_totals();
+      const std::vector<uint32_t> gpu = scene(2);
+      const FrameProfile after = ed.frame_profile_totals();
+      cube->active = false;
+      const std::vector<uint32_t> empty = scene(1);
+      double sum = 0;
+      size_t within = 0, pixels = 0;
+      for (size_t i = 0; i < cpu.size() && i < gpu.size() && i < empty.size(); i++) {
+        auto worst = [](uint32_t a, uint32_t b) {
+          int w = 0;
+          for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+          return w;
+        };
+        if (worst(cpu[i], empty[i]) <= 8) continue;
+        const int w = worst(cpu[i], gpu[i]);
+        pixels++, sum += w, within += w <= 3;
+      }
+      const double mean = pixels ? sum / (double)pixels : 0, within3 = pixels ? (double)within / (double)pixels : 0;
+      std::printf("    %s: %llu views on the card, %llu on the CPU; over the object's %zu pixels mean %.3f / 255, %.2f %% within 3 (%s)\n", what, (unsigned long long)(after.gpu_views - before.gpu_views),
+                  (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks), pixels, mean, within3 * 100, ed.gpu_view_status().c_str());
+      CHECK(after.gpu_views > before.gpu_views && after.gpu_fallbacks == before.gpu_fallbacks && ed.gpu_view_reason().empty());
+      CHECK(pixels > 100);
+      CHECK(mean < bound && within3 >= 0.9);
+      ed.viewport_device_for_test(1);
+    };
+    lil_case("lilToon without maps", [](Material &) {}, 1.5);
+    const std::string shadow_png = fs::join(test_dir(), "r416_lil_shadow.png"), rim_png = fs::join(test_dir(), "r416_lil_rim.png");
+    {
+      std::vector<uint32_t> g(64 * 64);
+      for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) g[(size_t)y * 64 + x] = ((x / 16 + y / 16) & 1) ? 0xC0A06080u : 0xC04080A0u;  // (a shadow colour with an alpha)
+      CHECK(write_png(shadow_png, g.data(), 64, 64, 64, true));
+      for (int y = 0; y < 64; y++)
+        for (int x = 0; x < 64; x++) g[(size_t)y * 64 + x] = 0xFF000000u | ((uint32_t)(x * 4) << 16) | ((uint32_t)(y * 4) << 8) | 0x80u;
+      CHECK(write_png(rim_png, g.data(), 64, 64, 64));
+    }
+    lil_case("lilToon with a shadow colour map and a rim map", [&](Material &m) {
+      m.lil.shadow_color_tex.path = shadow_png;
+      m.lil.rim_color_tex.path = rim_png;
+    }, 2.0);
+    std::remove(shadow_png.c_str());
+    std::remove(rim_png.c_str());
+  });
+  test("gpu views (round 416): each card filter alone - Vignette, Color Grading (exposure, contrast, saturation, lift / gamma / gain), Chromatic Aberration, Film Grain, Bloom - against the CPU's pass over the same card picture, within 1.5 / 255 each, the integer passes within a step; a grading with exposure before a bloom keeps the stack on the CPU", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr hot = make_material("hot", {0.2f, 0.2f, 0.2f});
+    hot->emission = Vec3(6.0f, 4.0f, 2.0f);
+    hot->emission_strength = 1.0f;
+    cube->get<MeshRenderer>()->materials = {hot};
+    ed.command("select Main Camera");
+    auto game = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    };
+    struct Case { const char *name; std::vector<const char *> setup; };
+    const Case cases[] = {{"Vignette", {}}, {"Color Grading", {"set ColorGrading.Exposure 1", "set ColorGrading.Contrast 0.3", "set ColorGrading.Saturation 0.4", "set ColorGrading.Temperature 0.2"}},
+                          {"Chromatic Aberration", {"set ChromaticAberration.Intensity 0.5"}}, {"Film Grain", {"set FilmGrain.Intensity 0.6", "set FilmGrain.Size 2"}}, {"Bloom", {}}};
+    for (const Case &c : cases) {
+      ed.command(std::string("filter add ") + c.name);
+      for (const char *s : c.setup) ed.command(s);
+      ed.mark_changed_for_test(c.name);
+      /* The card's picture with the pass on the card, and with the CPU's pass over the same picture. */
+      ed.set_filters_on_card_for_test(true);
+      const FrameProfile before = ed.frame_profile_totals();
+      const std::vector<uint32_t> card = game(2);
+      const FrameProfile after = ed.frame_profile_totals();
+      ed.set_filters_on_card_for_test(false);
+      ed.mark_changed_for_test("cpu pass");
+      const std::vector<uint32_t> cpu_pass = game(2);
+      ed.set_filters_on_card_for_test(true);
+      double mean = 0, within3 = 0;
+      r416_compare(cpu_pass, card, mean, within3);
+      int worst = 0;
+      for (size_t i = 0; i < card.size() && i < cpu_pass.size(); i++)
+        for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((card[i] >> k) & 255) - (int)((cpu_pass[i] >> k) & 255)));
+      std::printf("    %s alone: %llu views with the pass on the card; against the CPU's pass mean %.3f / 255, %.2f %% within 3, the worst %d\n", c.name,
+                  (unsigned long long)(after.filters_on_card - before.filters_on_card), mean, within3 * 100, worst);
+      CHECK(after.filters_on_card > before.filters_on_card);
+      CHECK(mean < 1.5 && within3 >= 0.98);
+      const bool exact_kind = std::string(c.name) == "Vignette" || std::string(c.name) == "Chromatic Aberration" || std::string(c.name) == "Film Grain";
+      if (exact_kind) CHECK(worst <= 1);  // (the integer passes: a step at most, a rounding tie)
+      ed.command("filter remove 0");
+      ed.mark_changed_for_test("filter off");
+    }
+    /* An exposed grading before a bloom: the CPU's grade writes the exposed light back for the bloom to read; the card's
+     * doesn't, so the stack stays the CPU's and still matches. */
+    ed.command("filter add Color Grading");
+    ed.command("set ColorGrading.Exposure 1");
+    ed.command("filter add Bloom");
+    ed.mark_changed_for_test("exposure then bloom");
+    const FrameProfile b3 = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu3 = game(2);
+    const FrameProfile a3 = ed.frame_profile_totals();
+    const std::vector<uint32_t> cpu3 = game(1);
+    double mean3 = 0, within33 = 0;
+    r416_compare(cpu3, gpu3, mean3, within33);
+    std::printf("    Color Grading (exposure 1) then Bloom: %llu views with the filters on the card (%s); against the CPU mean %.3f / 255, %.2f %% within 3\n",
+                (unsigned long long)(a3.filters_on_card - b3.filters_on_card), ed.gpu_view_status().c_str(), mean3, within33 * 100);
+    CHECK(a3.filters_on_card == b3.filters_on_card);
+    CHECK(mean3 < 1.5 && within33 >= 0.98);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 416): a stack with a pass the card doesn't run (Posterize) stays on the CPU over the picture read back, says so in the status, and still matches the CPU", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    ed.command("select Main Camera");
+    ed.command("filter add Vignette");
+    ed.command("filter add Posterize");
+    ed.mark_changed_for_test("filters");
+    auto game = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    };
+    const std::vector<uint32_t> cpu = game(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = game(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    double mean = 0, within3 = 0;
+    r416_compare(cpu, gpu, mean, within3);
+    std::printf("    %s\n    %llu views on the card, %llu with the filters on the card; against the CPU mean %.3f / 255, %.2f %% within 3\n", ed.gpu_view_status().c_str(),
+                (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)(after.filters_on_card - before.filters_on_card), mean, within3 * 100);
+    CHECK(after.gpu_views > before.gpu_views && after.filters_on_card == before.filters_on_card);
+    CHECK(ed.gpu_view_status().find("filters on the CPU") != std::string::npos);
+    CHECK(mean < 1.5 && within3 >= 0.98);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 static void tests_round337() {
   test("gpu views (round 337, the user's black cube): a cube drawn on the card, then given a procedural texture with a normal map and Physical Size 0.15, draws textured - not black from the zero tangents it first went up with (skipped without a GPU)", [] {
     if (!gpu::available()) {
@@ -3363,4 +3617,5 @@ void run_gpu_tests() {
   tests_round337();
   tests_round414();
   tests_round415();
+  tests_round416();
 }

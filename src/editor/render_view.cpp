@@ -1043,18 +1043,30 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
     t = &ft.rt;
   }
   t->want_hdr = fs.needs_hdr;  // bloom reads linear light (only allocated when asked)
+  /* Round 416 (ADR 0110): a stack the card can run whole - every pass has a card version, no raster stage, the view's
+   * own size, no depth of field (the CPU's, before the passes) - runs on the card over its picture; the CPU's passes
+   * are skipped then. */
+  filters_card_ok_ = fs.card.size() == fs.passes.size() && !fs.card.empty() && !scaled && !boxed && !(cam && cam->dof) && fs.vertex_snap <= 0.0f && !fs.affine_uv &&
+                     !fs.tex.active() && !fs.screen_door && !filters_off_card_for_test_;
+  filters_time_ = play_time_, filters_animate_ = animate, filters_pixel_scale_ = t->height / 1080.0f;
+  t->filters_on_card = false;
   render_deferred(r3d, *t, v, pp, eye, game, scene_lights, look, &fs);
+  filters_card_ok_ = false;
   t->want_hdr = false;
-  if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
-  FilterFrame frame;
-  frame.inv_view_proj = (pp * v).inverse();
-  frame.eye = eye;
-  frame.forward = normalize(forward);
-  frame.far_distance = look ? look->far_clip : 1000.0f;
-  frame.pixel_scale = t->height / 1080.0f;
-  frame.time = play_time_;
-  frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
-  for (const FilterPass &pass : fs.passes) pass(*t, &frame);
+  const bool on_card = t->filters_on_card;  // (the card ran the stack over its picture: the CPU's passes are skipped)
+  t->filters_on_card = false;
+  if (!on_card) {
+    if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
+    FilterFrame frame;
+    frame.inv_view_proj = (pp * v).inverse();
+    frame.eye = eye;
+    frame.forward = normalize(forward);
+    frame.far_distance = look ? look->far_clip : 1000.0f;
+    frame.pixel_scale = t->height / 1080.0f;
+    frame.time = play_time_;
+    frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
+    for (const FilterPass &pass : fs.passes) pass(*t, &frame);
+  }
   if (!scaled) return;
   /* Scale up into the view; its depth and ids follow, so picking and overlays still work. */
   if (boxed)
