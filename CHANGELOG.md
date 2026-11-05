@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 417): throughput the suite ranked - the scene file's big meshes, the exporters and importers, the Edit Mode cage
+
+**Asked:** the plan's round 417 - the throughput efficiencies Pass 16's suite ranked behind Blender (save and open of a
+big mesh, PLY / OBJ / STL export, PLY and OBJ import, the frame that enters Edit Mode at 500k faces), each measured
+before and after, the honest negatives kept. Pass 16's seventh round (the plan: rounds 411-420).
+
+**Changed (task 0393, ADR 0111)**
+- **A big mesh in the scene file is one binary chunk** (4096 vertices and corners or more): its arrays as they are in
+  memory, inside the text, with the rest of the file - objects, components, materials, small meshes - text as before.
+  The 500k-face sphere's scene is 32 MB instead of 76; saving and opening it are two to four times faster. A scene saved
+  with such a mesh needs this build or newer to open (the file's header is unchanged); scenes without one are
+  byte-identical. Scene > Compress still compresses the whole file. A text edit of a file (the asset-path retarget)
+  leaves the chunks' bytes alone.
+- **The exporters and importers write and read on every core, without per-element allocation:** the PLY reader decodes
+  a binary file's vertices and faces in parallel and an ASCII file's lines in parallel (the records-across-lines reader
+  kept as the fallback), the exact weld on an open-addressed table; the PLY writer finds split vertices through each
+  vertex's own chain and writes its bytes at once; the STL writer counts triangles first and writes them in place; the
+  OBJ writer formats its lines in pieces on every core and writes one `vt` and one `vn` per distinct value at a vertex
+  (a smooth sphere's file lists its 50k vertex normals, not 200k corner normals - what Blender writes); the OBJ reader
+  maps vertices through a flat table.
+- **The Edit Mode cage on the CPU:** the overlay record is built and replayed on every core; a big overlay batch (the
+  cage's million edges) is drawn in 8-row bands with its band sort counted and filled on every core.
+- `tests_round417`; the lesson "Where the Time Goes" says what the scene file holds and when.
+
+**Measured:** Save a scene: a 500k-face mesh 122.7 -> 26.5 ms (Blender 21.6); Open it: a 500k-face mesh 134.0 -> 33.3 ms (Blender 26.7); the 50k sphere's OBJ 120.8 -> 33.8 ms (Blender 44.7); the 50k sphere's import from OBJ 44.7 -> 24.5 ms (Blender 36.7); the 50k sphere's STL 26.7 -> 11.7 ms (Blender 12.4); the 50k sphere's import from STL 25.5 -> 15.9 ms (Blender 20.5); the 50k sphere's PLY 39.8 -> 12.8 ms (Blender 7.2); the 50k sphere's import from PLY 28.7 -> 10.9 ms (Blender 6.0); Enter Edit Mode 100.4 -> 102.7 ms (Blender 182.0); Select all 27.9 -> 30.9 ms (Blender 23.1); the frame that enters Edit Mode on the 500k sphere with the views on the CPU 137 -> 112 ms in the probe (its overlays 80 -> 55), the responsiveness row still over the 100 ms limit at 116.7 ms (docs/PERFORMANCE.md, the spec).
+
+**Checked:** `tests_round417` (the chunk against the text form bit for bit with every attribute set, a small mesh kept
+text, a cut-short chunk, an out-of-range corner and a chunk longer than the file refused, the retarget leaving the chunk
+alone; the overlay record's order and the replayed picture identical to the one-at-a-time path; PLY binary / ASCII /
+big-endian / extra elements / records across lines / truncated; the OBJ's one `vn` per vertex and its `usemtl` and `s`
+lines exactly at the faces that change over 40,000 faces; STL's n - 2 triangles a face each inside one face; OBJ
+negative indices and a second object); both suites, the audits.
+
 ## 2026-11-04 (round 416): the Game view's post-processing on the card, lilToon exact on the card
 
 **Asked:** the plan's round 416 - the camera's filters as card passes with no per-frame read-back, and lilToon's own

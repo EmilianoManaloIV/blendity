@@ -204,6 +204,26 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 417 (throughput the suite ranked, ADR 0111; `blendity_stress --only parity`, `--only responsiveness`)
+
+A big mesh in the scene file is one binary chunk inside the text; the PLY, OBJ and STL writers and the PLY and OBJ
+readers run on every core without per-element allocation; the Edit Mode cage on the CPU is recorded, sorted and drawn
+on every core. The parity rows (this machine; Blender's from the Pass 15 table):
+
+| Row | Round 416 | Now | Blender 5.2 (Pass 15) | Now against Blender |
+|---|---|---|---|---|
+| Save a scene: a 500k-face mesh | 122.7 ms (76.2 MB) | 26.5 ms (30.6 MB) | 21.6 ms (48.6 MB written) | 1.2x behind |
+| Open it: a 500k-face mesh | 134.0 ms | 33.3 ms | 26.7 ms | 1.2x behind |
+| Export the 50k sphere as OBJ | 120.8 ms (16.2 MB) | 33.8 ms (8.2 MB) | 44.7 ms (7.4 MB) | 1.3x ahead |
+| Import the 50k sphere from OBJ | 44.7 ms | 24.5 ms | 36.7 ms | 1.5x ahead |
+| Export the 50k sphere as STL | 26.7 ms (4.8 MB) | 11.7 ms (4.8 MB) | 12.4 ms (5.0 MB) | 1.1x ahead |
+| Import the 50k sphere from STL | 25.5 ms | 15.9 ms | 20.5 ms | 1.3x ahead |
+| Export the 50k sphere as PLY | 39.8 ms (3.0 MB) | 12.8 ms (3.0 MB) | 7.2 ms (1.9 MB) | 1.8x behind |
+| Import the 50k sphere from PLY | 28.7 ms | 10.9 ms | 6.0 ms | 1.8x behind |
+| Enter Edit Mode (500k faces), caches cold | 100.4 ms | 102.7 ms | 182.0 ms | 1.8x ahead |
+| Select all (500k faces) | 27.9 ms | 30.9 ms | 23.1 ms | 1.3x behind |
+| The responsiveness row: Enter Edit Mode on the 500k sphere, the longest frame | 132-158 ms (OVER) | 116.7 ms | - | ADR 0105's one-frame limit is 100 |
+
 ### After round 416 (the filters and lilToon on the card, ADR 0110; `tools/bench_world.py`, `blendity_stress --only world_like --quick`)
 
 The camera's Bloom, Vignette, Color Grading, Chromatic Aberration and Film Grain run on the card over its picture when

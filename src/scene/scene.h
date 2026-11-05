@@ -2067,6 +2067,15 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
 
 /* ------------------------------------------------------------------- IO */
 std::string save_scene_text(const Scene &scene);
+/* Round 417 (ADR 0111): a mesh with kBinaryMeshFrom or more vertices and corners together is written as one binary chunk
+ * inside the text (its arrays as they are in memory, little-endian), the rest of the file text as before; smaller
+ * meshes stay text. The test switch keeps every mesh text (the two forms are compared). */
+constexpr size_t kBinaryMeshFrom = 4096;
+bool mesh_saved_binary(const Mesh &m);
+void set_scene_text_meshes_for_test(bool text);
+/* The spans [begin, end) of the binary chunks in a scene's text: a text edit of the file (retarget_scene_files) leaves
+ * them alone. */
+std::vector<std::pair<size_t, size_t>> scene_binary_spans(const std::string &text);
 /* Shortest exact text form of a float (std::to_chars where available). */
 void append_float(std::string &s, float v);
 bool load_scene_text(const std::string &text, Scene &scene, std::string &error);
