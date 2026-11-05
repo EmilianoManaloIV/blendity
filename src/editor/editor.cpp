@@ -3393,7 +3393,6 @@ part's mean frame time printed, the window as the card showed it saved to `out`.
 int Editor::windowed_check(int frames, const std::string &out, const std::vector<std::string> &commands) {
   windowed_check_ = true;
   if (dialog_ == Dialog::FirstRunTier) dialog_ = Dialog::None;  // (task 0261: as startup_check)
-  for (const std::string &c : commands) command(c);  // (task 0199: the scene to measure)
   std::vector<Event> events;
   auto step = [&](bool redraw_views, bool every_row = false) {
     events.clear();
@@ -3405,6 +3404,19 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     frame(events);
     return t.ms();
   };
+  /* (Round 414: an open or import runs on a worker since round 413 and lands frames later - the startup's own open of
+   * the last scene too, which had landed after the check's commands and replaced the scene they opened. Settled before
+   * and after each command, as the headless runner settles between its lines; else the frames measured the starter
+   * scene.) */
+  auto settle = [&] {
+    step(false);  // (the frame that starts what the command, or the startup, deferred)
+    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty()); i++) step(false);
+  };
+  settle();
+  for (const std::string &c : commands) {  // (task 0199: the scene to measure)
+    command(c);
+    settle();
+  }
   for (int i = 0; i < frames && running_ && !card_present_; i++) {
     step(false);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

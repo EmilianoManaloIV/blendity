@@ -66,23 +66,31 @@ round 411 - the whole view refused for one see-through toon material):
 | Scene + Game view, views on the card | 36.3 (refused) | 25.2 | 12.67 | GPU (approximated: as above) |
 
 The real projects (`tools/bench_world.py`, the whole pipeline with the bake, then the views' frames through
-`--windowed-check`; round 411's numbers from its run of 2026-11-04 on the same machine; never committed):
+`--windowed-check`; round 411's numbers from its run of 2026-11-04 on the same machine; never committed). The check's
+first numbers this round were the starter scene's - since round 413 the startup's own open of the last scene runs on a
+worker and landed after the check's `open`, replacing SideRail; the check settles before and after each command now,
+as the headless runner does:
 
 | Project, row | Round 411: card / system ms | Now: card / system ms | Status now |
 |---|---|---|---|
-| SideRail, Scene view | 36.33 / 52.79 | 2.78 / 8.23 | GPU |
-| SideRail, Scene view, device CPU | 18.46 / 18.51 | 8.98 / 8.96 | CPU |
-| SideRail, Scene + Game view | 112.45 / 111.51 (the Game view refused: linear light with see-through) | 3.07 / 6.87 | GPU |
-| Shinano, Scene view | 6.67 / 8.56 | 2.93 / 8.09 | GPU |
-| Shinano, Scene view, device CPU | 18.79 / 18.88 | 11.06 / 11.08 | CPU |
-| Shinano, Scene + Game view | 4.83 / 5.79 | 2.15 / 3.80 | GPU |
+| SideRail, Scene view | 36.33 / 52.79 | 43.6 / 55.6 | GPU (approximated: textures over 2048 a side shown at 2048) |
+| SideRail, Scene view, device CPU | 18.46 / 18.51 | 18.75 / 19.03 | CPU |
+| SideRail, Scene + Game view | 112.45 / 111.51 (the Game view refused: linear light with see-through) | 80.87 / 86.84 | GPU (the Game view with its Bloom drawn by the card; its filters on the CPU) |
+| Shinano, Scene view | 6.67 / 8.56 | 7.41 / 11.62 | GPU (approximated: textures over 2048 a side shown at 2048) |
+| Shinano, Scene view, device CPU | 18.79 / 18.88 | 19.27 / 19.09 | CPU |
+| Shinano, Scene + Game view | 4.83 / 5.79 | 5.41 / 7.24 | GPU |
 
-SideRail's Game view with its Bloom over glass draws on the card now (3 ms a frame against 112 refused). The CPU rows
-fell too between the runs (rounds 412-413 moved the lightmaps' and the probes' work and the imports off the frame; the
-round 411 run measured the views right after its bake), so the card-against-CPU comparison is the one to read: the
-card's Scene view 2.8 ms against the CPU's 9.0 on SideRail, 2.9 against 11.1 on Shinano. Real-project frames the
-pipeline still shows OVER: SideRail's Generate Lighting landing frame 841 ms (the lightmaps of 180+ parts published in
-one frame) and Shinano's F12 raster start frame 321 ms (the snapshot of a 70-material avatar): round 418's list.
+SideRail's Game view with its Bloom over glass is drawn by the card now (112 -> 81 ms a frame; still over the budget:
+its filters run on the CPU over the read-back picture - round 416 - and the view's own CPU work below). The honest
+finding stands from round 411 and is round 415's: on the real world the card's frame costs the CPU more than the CPU's
+own - the Scene view 43.6 ms on the card against 18.8 on the CPU. The breakdown: the views' GPU path 35.4 ms of which
+the card's passes are 6.1 and the uploads 0.05 - about 29 ms is the CPU's work inside the GPU path (634 instances
+evaluated every frame, the lightmapped triangles' corners rebuilt every frame, the see-through list sorted); the Game
+view's 61.9 ms GPU path holds 16.7 of passes and 3.9 of uploads. Shinano's avatar draws at 7.4 ms on the card against
+19.3 on the CPU. The approximations themselves cost nothing to speak of (the capped textures: the one note on both).
+Real-project frames the pipeline still shows OVER: SideRail's Generate Lighting landing frame 822 ms (the lightmaps of
+180 parts published in one frame) and Shinano's F12 raster start frame 306 ms (the snapshot of a 70-material avatar):
+round 418's list.
 
 The responsiveness rows (`--sections responsiveness --quick`, the same run) kept round 413's state: Separate 117 ms,
 Enter Edit Mode on the 500k sphere 138, Import the 50k sphere from obj 50.5 and Generate Lighting on the stand-in 57.9

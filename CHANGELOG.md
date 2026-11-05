@@ -24,10 +24,15 @@ see-through toon material, and its Game view for the Bloom over glass. Pass 16's
   `tests_round414`.
 - CI (the macOS job of #311): the Live Link clip-throttle test read the wall clock through a slow runner; its strict
   "owed" check now holds only when the second change came within the quarter-second gap.
+- `--windowed-check` and the headless runner settle the startup's own open of the last scene (on a worker since round
+  413) before their first command: it had landed after the check's `open` and replaced the scene, so the check measured
+  the starter scene; `tools/bench_world.py` reads a status with several approximation notes.
 
 **Measured:** the stand-in's Scene view on the card 25.4 -> 8.5 ms a frame (the whole view had gone to the CPU for one
 see-through toon material), Scene + Game 36.3 -> 25.2; SideRail's Scene + Game view 112 ms with the Game view refused ->
-3.1 on the card, its Scene view 2.8 against the CPU's 9.0; Shinano's 2.9 against 11.1 (docs/PERFORMANCE.md, the spec).
+81 with it drawn by the card (still over: its filters on the CPU, and the CPU's share of the card frame - the Scene view
+43.6 ms on the card against 18.8 on the CPU, 29 of them the CPU's work inside the GPU path: round 415); Shinano's Scene
+view 7.4 against 19.3 (docs/PERFORMANCE.md, the spec).
 The tests: the coat / sheen / subsurface cube 5.5 / 255 from the CPU over its pixels, the toon veil 1.0, the fog cube
 3.6, the bloom-over-glass view 0.06 (the glass 0.94), the 4096 texture 0.40, the stand-in 0 refusals.
 

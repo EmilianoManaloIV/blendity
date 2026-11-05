@@ -209,7 +209,8 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 The card draws the stand-in and the real projects' views instead of refusing them for one material: the Scene view's
 frame on the stand-in 25.4 -> 8.5 ms (the whole view had gone to the CPU for a see-through toon material), Scene + Game
 36.3 -> 25.2 (the camera's filters still run on the CPU over the read-back picture: round 416); SideRail's Scene + Game
-view 112 ms with the Game view refused -> 3.1 on the card. The approximations are listed in the status column.
+view 112 ms with the Game view refused -> 81 with it drawn by the card (still OVER: the filters, and the CPU's share of
+the card frame - round 415). The approximations are listed in the status column.
 
 | Row | Frame ms before | Frame ms now | GPU path ms now | Status now |
 |---|---|---|---|---|
@@ -220,17 +221,19 @@ view 112 ms with the Game view refused -> 3.1 on the card. The approximations ar
 
 | Project, row (`--windowed-check`, the pipeline with its bake first) | Round 411: card / system ms | Now: card / system ms |
 |---|---|---|
-| SideRail, Scene view | 36.33 / 52.79 | 2.78 / 8.23 |
-| SideRail, Scene view, device CPU | 18.46 / 18.51 | 8.98 / 8.96 |
-| SideRail, Scene + Game view | 112.45 / 111.51 (the Game view refused) | 3.07 / 6.87 |
-| Shinano, Scene view | 6.67 / 8.56 | 2.93 / 8.09 |
-| Shinano, Scene view, device CPU | 18.79 / 18.88 | 11.06 / 11.08 |
-| Shinano, Scene + Game view | 4.83 / 5.79 | 2.15 / 3.80 |
+| SideRail, Scene view | 36.33 / 52.79 | 43.6 / 55.6 |
+| SideRail, Scene view, device CPU | 18.46 / 18.51 | 18.75 / 19.03 |
+| SideRail, Scene + Game view | 112.45 / 111.51 (the Game view refused) | 80.87 / 86.84 (on the card) |
+| Shinano, Scene view | 6.67 / 8.56 | 7.41 / 11.62 |
+| Shinano, Scene view, device CPU | 18.79 / 18.88 | 19.27 / 19.09 |
+| Shinano, Scene + Game view | 4.83 / 5.79 | 5.41 / 7.24 |
 
-(The CPU rows fell between the runs too - rounds 412-413 moved work off the frame and round 411's run measured right
-after its bake - so read the card against the CPU within one run: 2.8 against 9.0 ms on SideRail, 2.9 against 11.1 on
-Shinano.) The responsiveness rows kept round 413's state (Separate, Edit Mode on the 500k sphere, the obj import's
-landing and the stand-in's bake OVER).
+The real world's card frame is still slower than its CPU frame (43.6 against 18.8 ms): of the Scene view's 35.4 ms GPU
+path the card's passes are 6.1 and the uploads 0.05 - about 29 ms is the CPU's work inside it (634 instances evaluated
+every frame, the lightmapped corners rebuilt every frame, the see-through list sorted), which is round 415's work. (The
+check's first numbers this round were the starter scene's: the startup's own open, on a worker since round 413, landed
+after the check's `open`; the check settles before and after each command now.) The responsiveness rows kept round
+413's state (Separate, Edit Mode on the 500k sphere, the obj import's landing and the stand-in's bake OVER).
 
 ### After round 413 (geometry and files on workers, ADR 0107; `blendity_stress --only responsiveness --quick`)
 
