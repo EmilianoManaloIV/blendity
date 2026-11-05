@@ -559,6 +559,7 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
 /* What Solid shading draws (submit_scene's items): each shown mesh with its materials, Edit Mode's cage mesh with its face
  * highlight, Weight Paint's mesh in its weight colours. */
 std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
+  prebuild_render_meshes(s, game);  // (round 418)
   std::vector<DrawItem> items;
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;

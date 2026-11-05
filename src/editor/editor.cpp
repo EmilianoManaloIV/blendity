@@ -706,6 +706,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   mesh_job_poll();  // (round 413: a Subdivide or DynaMesh lands as one step)
   eval_jobs_poll();  // (a slow modifier stack's result adopted)
   save_job_poll();
+  shot_job_poll();  // (round 418)
   open_job_poll();
   import_job_poll();
   file_export_poll();
@@ -3490,11 +3491,42 @@ void Editor::screenshot_dialog() {
           case PathPick::Unavailable: path = fs::join(screenshots_dir_, buf); break;
           case PathPick::Chosen: break;
         }
-        if (write_png(path, pixels.data(), w, h, w)) Log::info("Screenshot saved: %s", path.c_str());
-        else Log::error("Could not save screenshot to %s", path.c_str());
-        project_listed_ = -100;
+        shot_job_start(path, pixels, w, h);  // (round 418: encoded and written on a worker - 80 ms in the frame at 1280 x 720)
       },
       2);
+}
+
+void Editor::shot_job_start(const std::string &path, std::vector<uint32_t> pixels, int w, int h) {
+  if (shot_job_) shot_job_poll();
+  if (shot_job_) {  // (one at a time: the earlier one finishes first)
+    if (shot_job_->thread.joinable()) shot_job_->thread.join();
+    shot_job_->done.store(true, std::memory_order_release);
+    shot_job_poll();
+  }
+  auto job = std::make_unique<ShotJob>();
+  job->path = path, job->pixels = std::move(pixels), job->w = w, job->h = h;
+  ShotJob *raw = job.get();
+  auto run = [raw] {
+    raw->ok = write_png(raw->path, raw->pixels.data(), raw->w, raw->h, raw->w);
+    raw->done.store(true, std::memory_order_release);
+  };
+  shot_job_ = std::move(job);
+  if (!jobs_async()) {
+    run();
+    shot_job_poll();
+    return;
+  }
+  raw->thread = std::thread(run);
+  ui_.redraw = true;
+}
+
+void Editor::shot_job_poll() {
+  if (!shot_job_ || !shot_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<ShotJob> job = std::move(shot_job_);
+  if (job->thread.joinable()) job->thread.join();
+  if (job->ok) Log::info("Screenshot saved: %s", job->path.c_str());
+  else Log::error("Could not save screenshot to %s", job->path.c_str());
+  project_listed_ = -100;
 }
 
 void Editor::defer(std::function<void()> fn, int frames) {

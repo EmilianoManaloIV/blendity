@@ -170,8 +170,44 @@ void Editor::apply_camera_flatten(const GameObject &g, DrawItem &it) {
   it.model = flatten_matrix(p, d, keep) * it.model;
 }
 
+/* Round 418: the render meshes a gather would build one after another (10,000 parts freshly separated or imported: 96 ms
+ * inside the frame), built on every core first; each mesh's own build parallelises inside only when it is big. */
+void Editor::prebuild_render_meshes(const Scene &s, bool game) {
+  struct Cold {
+    const Mesh *m;
+    bool plain = false, editing = false;  // the variants wanted (a mesh shared with the Edit Mode object: both)
+  };
+  std::vector<Cold> cold;
+  /* Each mesh once, all its variants in one job: objects share meshes (10,000 cubes are one) and a mesh's caches are
+   * built on one thread (review 418: the plain and the Edit Mode variant of one mesh in two jobs raced). */
+  std::unordered_map<const Mesh *, size_t> at;
+  s.for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    auto *mr = g.get<MeshRenderer>();
+    auto *mf = g.get<MeshFilter>();
+    if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (game ? !mr->show_in_renders : mr->display_as != 0) return;
+    bool editing = !game && edit_mode_ && g.id == edit_obj_;
+    const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
+    if (editing && m != mf->mesh.get()) editing = false;
+    if (!m || m->render_cache_warm(editing)) return;
+    auto [it, fresh] = at.emplace(m, cold.size());
+    if (fresh) cold.push_back({m});
+    (editing ? cold[it->second].editing : cold[it->second].plain) = true;
+  });
+  if (cold.size() < 16) return;
+  JobSystem::global().parallel_for((int64_t)cold.size(), 8, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) {
+      const Cold &c = cold[(size_t)i];
+      if (c.plain) c.m->render_mesh(false);
+      if (c.editing) c.m->render_mesh(true);
+    }
+  });
+}
+
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
   ProfileScope prof{prof_.ms_collect, {}};
+  prebuild_render_meshes(*scene_, game);
   std::vector<DrawItem> items;
   flatten_pivots_.clear();
   view_refs_.clear();

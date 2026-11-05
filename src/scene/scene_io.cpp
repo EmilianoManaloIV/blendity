@@ -1474,6 +1474,41 @@ MaterialPtr material_asset(const std::string &path_in) {
   return m;
 }
 
+void preload_material_assets(const std::vector<std::string> &paths) {
+  auto &lib = asset_library();
+  /* Files this preload couldn't take (a Unity .mat: material_asset's foreign loader runs on the calling thread), so
+   * they aren't read again every frame the window is open (review 418); material_asset still loads them as before. */
+  static std::unordered_set<std::string> skipped;
+  std::vector<std::string> todo;
+  for (const std::string &p : paths) {
+    const std::string path = follow_redirects(asset_key(p));
+    if (path.empty() || lib.find(path) != lib.end()) continue;
+    if (skipped.count(path)) continue;
+    todo.push_back(path);
+  }
+  if (todo.size() < 8) return;  // (a few: material_asset's own path is quick enough)
+  std::vector<MaterialPtr> made(todo.size());
+  JobSystem::global().parallel_for((int64_t)todo.size(), 4, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) {
+      std::string text;
+      if (!fs::read_file(resolve_asset_path(todo[(size_t)i]), text)) continue;
+      auto m = std::make_shared<Material>();
+      m->name = fs::stem(todo[(size_t)i]);
+      if (!load_material_text(text, *m)) continue;  // (not Blendity's text: material_asset tries the foreign loader)
+      m->name = fs::stem(todo[(size_t)i]);  // (as material_asset: the file's name is the material's - a copied file keeps the old one inside)
+      m->asset_path = todo[(size_t)i];
+      made[(size_t)i] = m;
+    }
+  });
+  for (size_t i = 0; i < todo.size(); i++) {
+    if (!made[i]) {
+      skipped.insert(todo[i]);
+      continue;
+    }
+    if (lib.find(todo[i]) == lib.end()) lib[todo[i]] = {made[i], made[i]->version};
+  }
+}
+
 MaterialPtr create_material_asset(const Material &src, const std::string &path_in) {
   const std::string path = asset_key(path_in);
   auto m = std::make_shared<Material>(src);

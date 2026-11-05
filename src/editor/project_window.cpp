@@ -34,15 +34,14 @@ const std::vector<std::string> &Editor::material_asset_paths() {
   if (ui_.time - material_paths_listed_ < 2.0 && material_paths_listed_ > 0) return material_paths_;
   material_paths_listed_ = std::max(1e-3, ui_.time);
   material_paths_.clear();
-  std::function<void(const std::string &, int)> walk = [&](const std::string &dir, int depth) {
-    if (depth > 12) return;
-    for (const DirEntry &de : fs::list(dir)) {
-      const std::string p = fs::join(dir, de.name);
-      if (de.is_dir) walk(p, depth + 1);
-      else if (fs::extension(de.name) == ".mat") material_paths_.push_back(make_asset_relative(p));
-    }
-  };
-  walk(assets_dir_, 0);
+  /* Round 418: Assets' own project-relative path worked out once, each file's as that plus its path inside Assets (two
+   * canonical-path lookups per .mat had been 150 ms for a project of 870 materials, every two seconds the window was
+   * open and for every material looked up by name). */
+  std::string assets_rel = make_asset_relative(assets_dir_);
+  const bool rel_ok = assets_rel != assets_dir_;  // (made relative: the files' paths follow it)
+  std::replace(assets_rel.begin(), assets_rel.end(), '\\', '/');
+  for (const std::string &f : fs::find_files(assets_dir_, ".mat"))
+    material_paths_.push_back(rel_ok ? assets_rel + "/" + f : make_asset_relative(fs::join(assets_dir_, f)));
   for (std::string &p : material_paths_) std::replace(p.begin(), p.end(), '\\', '/');
   std::sort(material_paths_.begin(), material_paths_.end());
   return material_paths_;

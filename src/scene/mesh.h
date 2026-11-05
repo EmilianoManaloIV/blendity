@@ -283,6 +283,7 @@ struct Mesh : MeshCaches {
    * was built - an Edit Mode drag, a deforming modifier - it follows them in place instead (ADR 0034): the same
    * triangles and the same picture as a rebuild, without the cost. */
   const RenderMesh &render_mesh(bool force_flat = false) const;
+  bool render_cache_warm(bool force_flat = false) const;  // (round 418: the next render_mesh returns at once)
   /* Same, plus MikkTSpace tangents for normal mapping (blender/intern/mikktspace). */
   const RenderMesh &render_mesh_tangents(bool force_flat = false) const;
   /* Unique edges, cached per version (wireframe & edit-mode overlays). */

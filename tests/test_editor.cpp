@@ -8028,6 +8028,298 @@ static void tests_round411() {
   });
 }
 
+
+/* ---------------------------------------------------------------- round 418: the sweep's list (task 0394) */
+static void tests_round418() {
+  test("round 418 probe: the sweep's slow rows taken apart (times printed)", [] {
+    auto profile = [](Editor &ed, const char *what) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      const FrameProfile &p = ed.frame_profile_last_for_test();
+      std::printf("    %s: frame %.1f ms (scene %.1f, game %.1f, ui %.1f, hash %.1f, gather %.1f, deferred %.1f, overlays %.1f)\n", what, t.ms(), p.ms_scene3d, p.ms_game, p.ms_ui, p.ms_hash, p.ms_collect, p.ms_deferred, p.ms_overlays);
+    };
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ed.command("window Materials");
+      profile(ed, "Materials window, starter, first frame");
+      profile(ed, "  second frame");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.command("benchscene cubes10k");
+      ed.command("select Cube 0");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      profile(ed, "cubes10k idle");
+      ed.command("window Modeling Tools");
+      profile(ed, "Modeling Tools, cubes10k, first frame");
+      profile(ed, "  second frame");
+      profile(ed, "  third frame");
+      ed.command("window Materials");
+      profile(ed, "Materials window, cubes10k, first frame");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ScopedTimer t;
+      ed.command("deletemat Orange");
+      std::printf("    deletemat Orange: %.1f ms\n", t.ms());
+      profile(ed, "  next frame");
+      ScopedTimer t2;
+      ed.command("device cpu");
+      std::printf("    device cpu: %.1f ms\n", t2.ms());
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.command("benchscene cubes10k");
+      ed.command("selectall");
+      ed.command("join");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ScopedTimer t;
+      ed.command("separate loose");
+      std::printf("    separate loose, 10,000 parts: %.1f ms\n", t.ms());
+      profile(ed, "  next frame");
+      profile(ed, "  frame after");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.set_async_jobs_for_test(true);
+      ed.command("benchscene worldlikequick");
+      ed.command("select Part 000");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ScopedTimer t;
+      ed.run_action_for_test("render.image");
+      std::printf("    F12 on worldlike with workers: the action %.1f ms\n", t.ms());
+      profile(ed, "  next frame");
+      ed.command("stop");
+      ScopedTimer t3;
+      ed.run_action_for_test("render.screenshot");
+      std::printf("    screenshot action %.1f ms\n", t3.ms());
+      profile(ed, "  frame 1");
+      profile(ed, "  frame 2 (the deferred save)");
+      profile(ed, "  frame 3");
+      ScopedTimer t4;
+      ed.command("layout 2 by 3");
+      std::printf("    layout 2 by 3 %.1f ms\n", t4.ms());
+      profile(ed, "  next frame");
+      profile(ed, "  frame after");
+    }
+  });
+  test("sweep rows (round 418): the Scatter panel's source list on 10,000 objects is complete and unique in a few milliseconds; a material asset deleted by its name goes with its slots", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene cubes10k");
+    ed.command("select Cube 0");
+    ed.step_frame_headless();
+    ed.command("window Modeling Tools");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ScopedTimer t;
+    ed.step_frame_headless();
+    const FrameProfile &p = ed.frame_profile_last_for_test();
+    std::printf("    Modeling Tools on 10,000 cubes: a frame %.1f ms (ui %.1f)\n", t.ms(), p.ms_ui);
+    const std::vector<std::string> sources = ed.scatter_source_choices_for_test();
+    std::unordered_set<std::string> uniq(sources.begin(), sources.end());
+    size_t meshes = 0;
+    std::unordered_set<std::string> names;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.mesh_filter() && g.mesh_filter()->mesh && &g != ed.active_object_for_test()) names.insert(g.name);
+    });
+    meshes = names.size();
+    CHECK(uniq.size() == sources.size() && sources.size() == meshes);
+    /* A material asset by its name. */
+    ed.command("newmat R418 Mat");
+    ed.step_frame_headless();
+    const std::string file = fs::join(fs::join(ed.assets_dir_for_test(), "Materials"), "R418 Mat.mat");
+    CHECK(fs::exists(file));
+    GameObject *holder = ed.scene().create("R418 Slot Holder");
+    holder->add<MeshFilter>()->mesh = primitives::cube();
+    MeshRenderer *hr = holder->add<MeshRenderer>();
+    hr->materials = {ed.material_by_name_for_test("R418 Mat")};
+    CHECK(hr->materials[0] != nullptr);
+    ScopedTimer td;
+    ed.command("deletemat R418 Mat");
+    std::printf("    deletemat by name: %.1f ms\n", td.ms());
+    ed.step_frame_headless();
+    CHECK(!fs::exists(file));
+    CHECK(!hr->materials[0]);  // (its slot emptied)
+    bool named = false;
+    for (const MaterialPtr &m : ed.scene_materials_for_test()) named = named || m->name == "R418 Mat";
+    CHECK(!named);
+  });
+  test("sweep rows (round 418): a screenshot's PNG is written on a worker the tray lists, and lands as a file; without workers it lands in the frame", [] {
+    for (bool async : {true, false}) {
+      Editor ed;
+      ed.init_headless(640, 400);
+      ed.set_async_jobs_for_test(async);
+      ed.step_frame_headless();
+      ed.run_action_for_test("render.screenshot");
+      bool listed = false;
+      std::string label;
+      for (int i = 0; i < 40; i++) {
+        ed.step_frame_headless();
+        for (const Editor::JobView &j : ed.jobs_for_test())
+          if (j.label == "Saving screenshot") listed = true;
+        if (!ed.file_jobs_running() && i > 2) break;
+      }
+      std::vector<std::string> pngs;
+      for (const DirEntry &de : fs::list(ed.screenshots_dir_for_test()))
+        if (!de.is_dir && fs::extension(de.name) == ".png") pngs.push_back(de.name);
+      std::printf("    %s: %zu png(s), the tray listed the job: %s\n", async ? "with workers" : "without workers", pngs.size(), listed ? "yes" : "no");
+      CHECK(!pngs.empty());
+      CHECK(async ? listed : !listed);
+      for (const std::string &n : pngs) fs::remove_file(fs::join(ed.screenshots_dir_for_test(), n));
+    }
+  });
+  test("sweep rows (round 418): 10,000 cold render meshes built on every core before the gather are the ones a serial gather builds, and the frame that lands them is one frame", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene cubes10k");
+    ed.command("selectall");
+    ed.command("join");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ScopedTimer t;
+    ed.command("separate loose");
+    const double op = t.ms();
+    ScopedTimer f;
+    ed.step_frame_headless();
+    const FrameProfile &p = ed.frame_profile_last_for_test();
+    std::printf("    separate 10,000 parts: %.1f ms, the frame after %.1f (gather %.1f)\n", op, f.ms(), p.ms_collect);
+    size_t warm = 0, meshes = 0;
+    std::vector<const Mesh *> all;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.mesh_filter() || !g.mesh_filter()->mesh) return;
+      meshes++;
+      warm += g.mesh_filter()->mesh->render_cache_warm();
+      all.push_back(g.mesh_filter()->mesh.get());
+    });
+    CHECK(meshes >= 10000 && warm == meshes);
+    /* The same meshes built again one after another from copies: the same triangles. */
+    bool same = true;
+    for (size_t i = 0; i < all.size() && same; i++) {
+      Mesh copy = *all[i];
+      copy.forget_caches();
+      const RenderMesh &a = all[i]->render_mesh(), &b = copy.render_mesh();
+      same = a.positions == b.positions && a.normals == b.normals && a.indices == b.indices && a.tri_face == b.tri_face && a.tri_material == b.tri_material &&
+             a.uvs.size() == b.uvs.size();
+      for (size_t k = 0; same && k < a.uvs.size(); k++) same = a.uvs[k].x == b.uvs[k].x && a.uvs[k].y == b.uvs[k].y;
+    }
+    CHECK(same);
+  });
+
+  test("sweep rows (review 418): a copied .mat whose stored name is the old one is named by its file whether the Materials window preloaded it or not; a scene material of a name is deleted before an asset of that name", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.step_frame_headless();
+    ed.command("newmat R418 Copy Src");
+    ed.step_frame_headless();
+    const std::string dir = fs::join(ed.assets_dir_for_test(), "Materials");
+    std::string text;
+    CHECK(fs::read_file(fs::join(dir, "R418 Copy Src.mat"), text));
+    for (int i = 0; i < 12; i++) CHECK(fs::write_file(fs::join(dir, strprintf("R418 Copy %02d.mat", i)), text));  // (a copy keeps the old name inside)
+    ed.command("window Materials");
+    ed.step_frame_headless();  // (the window preloads them)
+    MaterialPtr a = ed.material_by_name_for_test("R418 Copy 03");
+    CHECK(a && a->name == "R418 Copy 03");
+    ed.command("deletemat R418 Copy 05");
+    ed.step_frame_headless();
+    CHECK(!fs::exists(fs::join(dir, "R418 Copy 05.mat")));
+    /* A scene material and an asset of one name: the scene's goes first (as before round 418), its slot emptied. */
+    GameObject *g = ed.scene().create("R418 Holder");
+    g->add<MeshFilter>()->mesh = primitives::cube();
+    MeshRenderer *mr = g->add<MeshRenderer>();
+    MaterialPtr scene_mat = make_material("R418 Copy 07", Vec3(0.2f, 0.4f, 0.6f));
+    mr->materials = {scene_mat};
+    ed.step_frame_headless();
+    ed.command("deletemat R418 Copy 07");
+    ed.step_frame_headless();
+    CHECK(mr->materials.size() == 1 && !mr->materials[0]);
+    CHECK(fs::exists(fs::join(dir, "R418 Copy 07.mat")));
+    for (int i = 0; i < 12; i++) fs::remove_file(fs::join(dir, strprintf("R418 Copy %02d.mat", i)));
+    fs::remove_file(fs::join(dir, "R418 Copy Src.mat"));
+  });
+  test("sweep rows (review 418): a mesh shared by the Edit Mode object and twenty others is built once per variant, the same as serial builds", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    MeshPtr shared = primitives::uv_sphere(1.0f, 32, 16);
+    for (int i = 0; i < 21; i++) {
+      GameObject *g = ed.scene().create(strprintf("R418 Shared %02d", i));
+      g->add<MeshFilter>()->mesh = shared;
+      g->add<MeshRenderer>();
+      g->set_local_position({(float)(i % 7) * 2.5f, 0, (float)(i / 7) * 2.5f});
+    }
+    for (int i = 0; i < 30; i++) {  // (cold meshes enough for the prebuild to run)
+      GameObject *g = ed.scene().create(strprintf("R418 Own %02d", i));
+      g->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 12 + i, 8);
+      g->add<MeshRenderer>();
+    }
+    ed.command("select R418 Shared 00");
+    ed.command("edit");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(shared->render_cache_warm(false) && shared->render_cache_warm(true));
+    Mesh copy = *shared;
+    copy.forget_caches();
+    bool same = true;
+    for (bool flat : {false, true}) {
+      const RenderMesh &a = shared->render_mesh(flat), &b = copy.render_mesh(flat);
+      same = same && a.positions == b.positions && a.normals == b.normals && a.indices == b.indices && a.tri_face == b.tri_face && a.tri_material == b.tri_material;
+      same = same && a.uvs.size() == b.uvs.size();
+      for (size_t k = 0; same && k < a.uvs.size(); k++) same = a.uvs[k].x == b.uvs[k].x && a.uvs[k].y == b.uvs[k].y;
+    }
+    CHECK(same);
+    ed.command("edit off");
+  });
+  test("sweep rows (round 418): the Materials window's first frame on a project of many material assets draws its tiles", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.step_frame_headless();
+    for (int i = 0; i < 40; i++) ed.command(strprintf("newmat R418 Tile %02d", i));
+    ed.step_frame_headless();
+    ed.command("window Materials");
+    ed.record_buttons_for_test(true);
+    ScopedTimer t;
+    ed.step_frame_headless();
+    const FrameProfile &p = ed.frame_profile_last_for_test();
+    size_t tiles = 0;
+    for (const auto &kv : ed.ui_for_test().button_rects)
+      if (kv.first.rfind("mat:", 0) == 0) tiles++;
+    std::printf("    the Materials window's first frame %.1f ms (ui %.1f), %zu tiles drawn\n", t.ms(), p.ms_ui, tiles);
+    CHECK(tiles >= 20);  // (the grid shows what fits; the rest scrolls - the new ones sort after the project's own)
+    /* The walk's paths are the ones resolving each file on its own gives. */
+    std::vector<std::string> want;
+    std::function<void(const std::string &)> walk = [&](const std::string &dir) {
+      for (const DirEntry &de : fs::list(dir)) {
+        const std::string p = fs::join(dir, de.name);
+        if (de.is_dir) walk(p);
+        else if (fs::extension(de.name) == ".mat") {
+          std::string r = make_asset_relative(p);
+          std::replace(r.begin(), r.end(), '\\', '/');
+          want.push_back(r);
+        }
+      }
+    };
+    walk(ed.assets_dir_for_test());
+    std::sort(want.begin(), want.end());
+    const std::vector<std::string> got = ed.material_asset_paths_for_test();
+    std::printf("    %zu material paths, the same as resolving each file: %s\n", got.size(), got == want ? "yes" : "no");
+    CHECK(got == want && got.size() >= 40);
+    ScopedTimer td;
+    for (int i = 0; i < 40; i++) ed.command(strprintf("deletemat R418 Tile %02d", i));
+    std::printf("    40 materials deleted by name: %.1f ms\n", td.ms());
+    ed.step_frame_headless();
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -8101,5 +8393,6 @@ void run_editor_tests() {
   tests_round411();
   tests_round412();
   tests_round413();
+  tests_round418();
   coverage_tests();
 }

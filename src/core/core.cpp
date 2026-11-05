@@ -204,6 +204,28 @@ bool make_dirs(const std::string &path) {
   return is_dir(path);
 }
 
+std::vector<std::string> find_files(const std::string &dir, const std::string &ext, int max_depth) {
+  std::vector<std::string> out;
+  std::function<void(const stdfs::path &, const std::string &, int)> walk = [&](const stdfs::path &d, const std::string &rel, int depth) {
+    if (depth > max_depth) return;
+    std::error_code ec;
+    for (stdfs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
+      const std::string name = S(it->path().filename());
+      if (name.empty() || name[0] == '.') continue;
+      std::error_code ec2;
+      const std::string r = rel.empty() ? name : rel + "/" + name;
+      if (it->is_directory(ec2)) {
+        walk(it->path(), r, depth + 1);
+        continue;
+      }
+      if (name.size() > ext.size() && to_lower(name.substr(name.size() - ext.size())) == ext) out.push_back(r);
+    }
+  };
+  walk(P(dir), "", 0);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
 std::vector<DirEntry> list(const std::string &dir) {
   std::vector<DirEntry> out;
   std::error_code ec;

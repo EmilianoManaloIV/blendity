@@ -204,6 +204,28 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 418 (the sweep's list, task 0394; `blendity_stress --only operations`, `--only responsiveness`)
+
+The inventory sweep (every console verb, keymap action and window on the starter scene, the worldlike stand-in and
+10,000 cubes; the longest of the frames around each) before and after:
+
+| Operation | Scene | Before: longest frame ms | After |
+|---|---|---|---|
+| Materials | starter | 525.0 | 39.1 |
+| Materials | worldlike | 35.6 | 41.1 |
+| Materials | cubes10k | 38.2 | 14.4 |
+| device cpu | starter | 192.9 | 0.8 |
+| Modeling Tools | cubes10k | 156.1 | 7.5 |
+| deletemat Orange | starter | 121.5 | 3.7 |
+| render.image | worldlike | 91.5 | 4.1 |
+| render.image | cubes10k | 60.0 | 18.7 |
+| render.screenshot | worldlike | 55.0 | 4.0 |
+| render.screenshot | cubes10k | 52.4 | 6.9 |
+| layout 2 by 3 | worldlike | 56.1 | 54.2 |
+| gpu list | starter | 19.4 | 212.7 |
+
+Over 50 / 100 ms: 9 / 4 before, 2 / 1 after (969 operations). The responsiveness rows: Separate 10,000 loose parts 107-118 -> 102.2 ms; Enter Edit Mode on the 500k sphere 124.3 ms (still over: round 417's finding).
+
 ### After round 417 (throughput the suite ranked, ADR 0111; `blendity_stress --only parity`, `--only responsiveness`)
 
 A big mesh in the scene file is one binary chunk inside the text; the PLY, OBJ and STL writers and the PLY and OBJ

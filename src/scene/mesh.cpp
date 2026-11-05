@@ -1005,6 +1005,12 @@ bool Mesh::retriangulate(RenderMesh &rm, const std::vector<uint32_t> &crv, const
   return true;
 }
 
+bool Mesh::render_cache_warm(bool force_flat) const {
+  const bool has_smooth = any_smooth();
+  const int ci = force_flat && has_smooth ? 1 : 0;
+  return cache_version_[ci] == version && cache_deform_[ci] == deform_version;
+}
+
 const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   const bool has_smooth = any_smooth();
   bool flat = force_flat || !has_smooth;

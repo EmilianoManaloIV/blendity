@@ -1736,7 +1736,7 @@ static void test_gpu_viewport(Report &rep, const Options &o) {
             "shadow map (cached, as in the editor). GPU: the Vulkan path tracer at 1 sample and no bounces (primary hit, sun "
             "light, shadow ray), read back and tone mapped, so it includes upload of the camera, the render, the fence wait, "
             "the read-back and the resolve.");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   const int W = 1920, H = 1080, frames = o.quick ? 4 : 12;
   auto mesh = primitives::ico_sphere(0.5f, 3);
   Scene s = make_grid_scene(256, mesh, 1.3f);
@@ -1861,7 +1861,7 @@ static void test_gpu_gi(Report &rep, const Options &o) {
             "The vgi scene (256 spheres and cubes on a 40 m floor, a 128 grid, the sun's RSM). Points on its surfaces gather 16 rays "
             "each, as realtime lightmap texels do (a probe gathers six times). CPU: every thread; GPU: the points up, the kernel, the "
             "samples back, timed together. The grid, RSM and world upload once (shown apart).");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   CfScene sc;
   auto white = make_material("White", {0.8f, 0.8f, 0.8f});
   auto red = make_material("Red", {0.8f, 0.1f, 0.1f});
@@ -3633,7 +3633,7 @@ static void test_gpu_devices(Report &rep, const Options &o) {
             "The same path-traced frame on every device: the CPU (Embree when built with it), each GPU tracing Blendity's "
             "BVH in a compute shader, each GPU using its ray tracing hardware (VK_KHR_ray_query), and CPU + all GPUs "
             "together. 400 textured spheres on a checker floor, sun + sky, 4 bounces. Samples per second at 1280x720.");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   if (!gpu::available()) return;
   auto sphere = primitives::uv_sphere(0.5f, 32, 16);
   auto floor = primitives::plane(40.0f, 1);
@@ -5450,7 +5450,7 @@ static void test_gpu_raster(Report &rep, const Options &o) {
             "editor). GPU: Vulkan shadow pass (drawn every frame), G-buffer and full-screen lighting (the CPU's formulas), then (A) "
             "colour, depth and ids read back into CPU memory every frame, or (B) shown through a swapchain with the UI canvas's "
             "changed rows uploaded. Both are harder on the GPU than a viewport would be.");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   const int frames = o.quick ? 6 : 30;
   GpuRasterScene sc;
   sc.cpu_frame(1);
@@ -6609,7 +6609,8 @@ static void sweep_one(const std::string &saved, const std::string &select, std::
   {
     Editor ed;
     ed.init_headless(1280, 720);
-    ed.open_scene_for_test(saved);
+    ed.open_scene_for_test(saved);  // (opened in place, before the workers go on: an open on a worker lands frames later)
+    ed.set_async_jobs_for_test(true);  // (round 418: renders on workers, as the windowed editor runs them - the F12 rows had been the whole render)
     if (!select.empty()) ed.command("select " + select);
     ed.step_frame_headless();
     SweepRow r;

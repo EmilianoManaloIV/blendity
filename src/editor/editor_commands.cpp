@@ -1552,9 +1552,10 @@ void Editor::run_console_command(const std::string &line) {
     /* deletemat <name | Assets/Materials/x.mat>: delete a material without asking (slots emptied, the file trashed) */
     const std::string what = t.size() > 1 ? line.substr(line.find(' ') + 1) : std::string();
     MaterialPtr m = what.find(".mat") != std::string::npos ? material_asset(what) : nullptr;
-    if (!m)
-      for (const MaterialPtr &c2 : pickable_materials(nullptr))
+    if (!m)  // (a scene's own material of that name first, as before; then an asset by its file's name - round 418)
+      for (const MaterialPtr &c2 : scene_materials())
         if (c2->name == what) m = c2;
+    if (!m) m = material_by_name(what);
     if (m) delete_material(m);
     else Log::warn("deletemat: no material %s", what.c_str());
   }
@@ -1962,7 +1963,7 @@ void Editor::run_console_command(const std::string &line) {
     for (const deps::Library &l : deps::libraries())
       Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
                 l.enabled ? "" : l.fallback);
-    Log::info("%s", gpu::status().c_str());
+    Log::info("%s", gpu::status(true).c_str());  // (libs reports the card: opened here)
   }
   else if (c == "camera" && t.size() >= 4) {
     cam_.animating = false;  // (a flight under way would carry the view off again)

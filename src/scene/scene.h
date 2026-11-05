@@ -2100,6 +2100,9 @@ std::string export_obj(const std::vector<std::pair<const Mesh *, Mat4>> &meshes)
 std::string save_material_text(Material &m);
 bool load_material_text(const std::string &text, Material &m);
 MaterialPtr material_asset(const std::string &path);  // cached; null when the file is missing
+/* Round 418: the materials of these paths that aren't loaded yet, read and parsed on every core, then put in the cache
+ * (Blendity's own .mat text; a foreign one - Unity's - is left to material_asset, which loads it on the calling thread). */
+void preload_material_assets(const std::vector<std::string> &paths);
 /* Round 371: a material file in another engine's format (a Unity .mat) read through this; the material is `foreign`,
  * and save_dirty_material_assets leaves its file alone. */
 using ForeignMaterialLoader = std::function<bool(const std::string &text, const std::string &path, Material &m)>;

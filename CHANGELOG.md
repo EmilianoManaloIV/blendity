@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-05 (round 418): every operation the sweep ranked
+
+**Asked:** the plan's round 418 - the inventory sweep's list (every console verb, keymap action and window run on three
+scenes) worked from the top: each operation over its budget gets its fix, measured before and after, the honest
+negatives kept. Pass 16's eighth round (the plan: rounds 411-420).
+
+**Changed (task 0394)**
+- **The Materials window opens in one short frame:** its material files are found by a lean walk of Assets, Blendity's
+  own .mat files are read and parsed on every core, and each preview sphere is shaded on every core (it had listed all
+  23,000 files in Assets and read 871 materials and shaded 60 spheres on one thread). The previews a frame draws are
+  held to 20 ms (ADR 0105): the rest show a blank tile and come in over the next frames - a project of 50 textured
+  materials had loaded every image in the window's first frame. A Unity project's .mat files still load one by one.
+- **The Modeling Tools window on a big scene:** the Scatter panel's list of source objects is built through a set; on
+  10,000 objects it had cost 112 ms every frame the window was open.
+- **A material found by its name** loads only the files with that name (`deletemat`, and every verb that takes a
+  material's name): it had read every material file in the project to compare names. `deletemat` still takes a scene
+  material of that name before an asset.
+- **`device cpu` and other status lines don't open the GPU** just to say which cards there are; the card opens when a
+  view, a render, `gpu list` or `libs` asks.
+- **A screenshot's PNG is written on a worker**, listed in the job tray as "Saving screenshot".
+- **New meshes are prepared for drawing on every core:** after Separate, an open or an import, the frame that first
+  draws thousands of new meshes builds them in parallel (10,000 separated parts: 96 ms of one thread before).
+- The sweep's editors run renders on workers, as the window does, so an F12 row measures the frame and not the render.
+- `tests_round418`; the lesson "Where the Time Goes" says how the sweep ranks the operations.
+- The Opus review's fixes: the sweep's scene opened before its workers go on (with workers on, the open had run on a worker and landed inside the measured frames: the worldlike and cubes10k rows had measured the starter scene - round 414's bug, back in the sweep), a preloaded material named by its file as material_asset names it (a copied .mat had kept the old name inside), one prebuild job per mesh with both of its variants (a mesh shared with the Edit Mode object had been queued twice: two threads on one mesh's caches), `deletemat <name>` taking a scene material of that name before an asset as it did before, `libs`, the stress reports and the GPU test opening the card for its status line, the files neither material loader takes remembered so the window doesn't read them every frame, the tests made as strict as their titles (a material in a slot, every prebuilt mesh compared in full, a copied .mat, a mesh shared with the Edit Mode object).
+
+**Measured:** The sweep's operations over 50 ms 9 -> 2 and over 100 ms 4 -> 1; the Materials window 525 -> 39 ms, Modeling Tools on 10,000 cubes 156 -> 8, `deletemat` 122 -> 4, `device cpu` 193 -> 1, a screenshot 55 -> 4; Separate 10,000 loose parts 107-118 -> 102.2 ms (docs/PERFORMANCE.md, the spec).
+
+**Checked:** `tests_round418` (the Scatter list complete and unique on 10,000 objects; a material asset deleted by its
+name with its file; the screenshot's job in the tray and its file, with and without workers; 10,000 prebuilt render
+meshes identical to serial builds; the Materials window's tiles drawn); both suites, the audits.
+
 ## 2026-11-04 (round 417): throughput the suite ranked - the scene file's big meshes, the exporters and importers, the Edit Mode cage
 
 **Asked:** the plan's round 417 - the throughput efficiencies Pass 16's suite ranked behind Blender (save and open of a

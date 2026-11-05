@@ -941,6 +941,10 @@ class Editor {
   std::vector<std::string> scatter_mask_choices_for_test() { return scatter_mask_choices(); }
   const std::string &strokeobj_alpha_for_test() const { return strokeobj_alpha_; }
   const std::string &assets_dir_for_test() const { return assets_dir_; }
+  const std::string &screenshots_dir_for_test() const { return screenshots_dir_; }  // (round 418)
+  std::vector<std::string> material_asset_paths_for_test() { return material_asset_paths(); }  // (round 418)
+  std::vector<MaterialPtr> scene_materials_for_test() { return scene_materials(); }  // (round 418)
+  MaterialPtr material_by_name_for_test(const std::string &n) { return material_by_name(n); }  // (review 418)
   size_t strokeobj_cards_for_test();  // (task 0264; in strokes_tool.cpp, where Strokes is complete)
   SculptBrush &sculpt_brush_mut_for_test() { return sculpt_brush_; }          // (task 0261)
   bool scatter_masked_for_test(GameObject &g, Vec3 p, std::string &why) {
@@ -1993,6 +1997,7 @@ class Editor {
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
    * per metre at one metre; off between views (exports, bakes: the plain thickness). */
   struct OutlineView {
@@ -5579,6 +5584,20 @@ class Editor {
   std::vector<std::unique_ptr<EvalJob>> eval_jobs_;
   void eval_jobs_poll();
   void eval_jobs_wait(uint64_t obj = 0);  // (the running evaluations of `obj` - 0 all - joined and adopted: a caller that needs the mesh now)
+  struct ShotJob {  // (round 418: a screenshot's PNG encoded and written on a worker; the tray shows it)
+    std::vector<uint32_t> pixels;
+    int w = 0, h = 0;
+    std::string path;
+    bool ok = false;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~ShotJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<ShotJob> shot_job_;
+  void shot_job_start(const std::string &path, std::vector<uint32_t> pixels, int w, int h);
+  void shot_job_poll();
   struct SaveJob {
     std::unique_ptr<Scene> clone;
     std::string path;
@@ -6457,7 +6476,7 @@ class Editor {
   bool open_job_running_for_test() const { return open_job_ && !open_job_->done.load(); }
   bool import_job_running_for_test() const { return import_job_ && !import_job_->done.load(); }
   bool file_export_running_for_test() const { return file_export_job_ && !file_export_job_->done.load(); }
-  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_; }  // (the headless runner waits for these between its lines)
+  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_ || shot_job_; }  // (the headless runner waits for these between its lines)
   int render_job_phase_for_test() const { return render_job_ ? render_job_->phase.load() : -1; }
   int render_shadow_size_for_test() const { return render_shadow_res_; }  // (round 412: the F12's map is the job's, not the views' cache's)
   void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }

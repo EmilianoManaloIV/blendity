@@ -106,6 +106,7 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   if (mesh_job_) add(mesh_job_->label, -1.0f, [this] { mesh_job_->cancel.store(true); }, mesh_job_->cancel.load());
   for (const auto &j : eval_jobs_) add("Evaluating " + j->name, -1.0f, nullptr);
   if (save_job_) add("Saving " + fs::filename(save_job_->path), -1.0f, nullptr);
+  if (shot_job_) add("Saving screenshot", -1.0f, nullptr);  // (round 418)
   if (open_job_) add("Opening " + fs::filename(open_job_->path), -1.0f, nullptr);
   if (import_job_) add("Reading " + fs::filename(import_job_->path), -1.0f, nullptr);
   if (file_export_job_) add("Writing " + fs::filename(file_export_job_->path), -1.0f, nullptr);
