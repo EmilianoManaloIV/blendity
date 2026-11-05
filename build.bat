@@ -44,6 +44,7 @@ rem builds the dependency-free versions. BLENDITY_NO_LIBS=1 forces that build;
 rem BLENDITY_LIBDIR points elsewhere.
 if "%BLENDITY_LIBDIR%"=="" set "BLENDITY_LIBDIR=%~dp0..\blender\lib\windows_x64"
 set USE_LIBS=0
+set USE_TRACY=0
 set LIBDEFS=
 set LIBINC=
 set LIBLINK=
@@ -53,6 +54,27 @@ if not exist "%BLENDITY_LIBDIR%\tbb\include" goto libs_done
 set USE_LIBS=1
 set "L=%BLENDITY_LIBDIR%"
 call :lib tbb              BL_WITH_TBB         "tbb\include"                                   "tbb\lib\tbb12.lib"
+rem Round 419 (ADR 0112): the allocator - BLENDITY_ALLOCATOR=tbbmalloc (the default here: oneTBB's scalable allocator
+rem replaces malloc / new process-wide, as Blender's own Windows build does; tbbmalloc_proxy, which needs this build's /MD;
+rem TBB_MALLOC_DISABLE_REPLACEMENT=1 turns it off for a run) or system. BLENDITY_NO_TBBMALLOC=1 = system.
+set "XTRA=%BLENDITY_LIBDIR%\..\..\extra"
+if "%BLENDITY_ALLOCATOR%"=="" set BLENDITY_ALLOCATOR=tbbmalloc
+if /i "%BLENDITY_ALLOCATOR%"=="auto" set BLENDITY_ALLOCATOR=tbbmalloc
+if "%BLENDITY_NO_TBBMALLOC%"=="1" if /i "%BLENDITY_ALLOCATOR%"=="tbbmalloc" set BLENDITY_ALLOCATOR=system
+if /i not "%BLENDITY_ALLOCATOR%"=="tbbmalloc" if /i not "%BLENDITY_ALLOCATOR%"=="system" (
+  echo [blendity] BLENDITY_ALLOCATOR=%BLENDITY_ALLOCATOR%: not an allocator ^(tbbmalloc, system^)
+  exit /b 1
+)
+if /i "%BLENDITY_ALLOCATOR%"=="tbbmalloc" if exist "%BLENDITY_LIBDIR%\tbb\lib\tbbmalloc_proxy.lib" set LIBDEFS=%LIBDEFS% /DBL_WITH_TBBMALLOC
+if /i "%BLENDITY_ALLOCATOR%"=="tbbmalloc" if exist "%BLENDITY_LIBDIR%\tbb\lib\tbbmalloc_proxy.lib" set LIBLINK=!LIBLINK! "%L%\tbb\lib\tbbmalloc_proxy.lib" /INCLUDE:__TBB_malloc_proxy
+rem Tracy (a developer's profiler, BLENDITY_TRACY=1 only; never in a release): its client from ..\blender\extra\tracy
+rem (packaging\fetch_blender_libs.sh --extras), collecting only while a viewer is connected (TRACY_ON_DEMAND).
+if "%BLENDITY_TRACY%"=="1" if exist "%XTRA%\tracy\public\TracyClient.cpp" set USE_TRACY=1
+if "%BLENDITY_TRACY%"=="1" if not "%USE_TRACY%"=="1" echo [blendity] BLENDITY_TRACY=1 but %XTRA%\tracy isn't there ^(packaging\fetch_blender_libs.sh --extras^): built without it
+if "%USE_TRACY%"=="1" set LIBDEFS=%LIBDEFS% /DBL_WITH_TRACY /DTRACY_ENABLE /DTRACY_ON_DEMAND
+if "%USE_TRACY%"=="1" set LIBINC=%LIBINC% /I"%XTRA%\tracy\public"
+if "%USE_TRACY%"=="1" set LIBLINK=!LIBLINK! dbghelp.lib
+
 call :lib embree           BL_WITH_EMBREE      "embree\include"                                "embree\lib\embree4.lib"
 call :lib openimagedenoise BL_WITH_OIDN        "openimagedenoise\include"                      "openimagedenoise\lib\OpenImageDenoise.lib"
 call :lib eigen            BL_WITH_EIGEN       "eigen\include\eigen3"                          ""
@@ -129,7 +151,7 @@ if /i "%CONFIG%"=="debug" (
 ) else (
   set FLAGS=%COMMON% /O2 /Oi /GL /fp:fast %CRT% /DNDEBUG
 )
-if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS%) else if "%BLENDITY_NO_LIBS%"=="1" (echo [blendity] Dependency-free build ^(BLENDITY_NO_LIBS^)) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
+if "%USE_LIBS%"=="1" (echo [blendity] Using Blender libraries from %BLENDITY_LIBDIR%:%LIBDIRS% - the allocator: %BLENDITY_ALLOCATOR%) else if "%BLENDITY_NO_LIBS%"=="1" (echo [blendity] Dependency-free build ^(BLENDITY_NO_LIBS^)) else (echo [blendity] Dependency-free build ^(no blender\lib\windows_x64: bash packaging\fetch_blender_libs.sh windows_x64 fetches them^))
 set OBJ=build\obj_%CONFIG%
 rem The sources in a response file: listed on the command line they passed cmd's 8191-character limit.
 set SRCRSP=%OBJ%\sources.rsp
@@ -141,6 +163,7 @@ set SRCRSP=%OBJ%\sources.rsp
   echo extern\ufbx\ufbx.c
   echo extern\sky\source\sky_hosek.cpp
   if "%USE_OPTIX%"=="1" echo extern\cuew\src\cuew.c
+  if "%USE_TRACY%"=="1" echo "%XTRA%\tracy\public\TracyClient.cpp"
   if "%USE_QUADRIFLOW%"=="1" for %%f in (adjacent-matrix dedge hierarchy loader localsat merge-vertex optimizer parametrizer parametrizer-flip parametrizer-int parametrizer-mesh parametrizer-scale parametrizer-sing subdivide) do echo extern\quadriflow\src\%%f.cpp
   if "%USE_QUADRIFLOW%"=="1" for %%f in (arg_parser base color lp_base lp_skeleton random) do echo extern\quadriflow\3rd\lemon-1.3.1\lemon\%%f.cc
   if "%USE_QUADRIFLOW%"=="1" echo extern\quadriflow\3rd\lemon-1.3.1\lemon\bits\windows.cc
@@ -253,7 +276,7 @@ rem openjph (OpenEXR), dpcpp's SYCL runtime (Embree) and aom (FFmpeg's AV1) are 
 for %%d in (%LIBDIRS% imath openjph dpcpp aom) do (
   if exist "%L%\%%d\bin" (
     for %%f in ("%L%\%%d\bin\*.dll") do (
-      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _sycl eigen_ malloc_proxy" >nul || if %%~zf GTR 4096 copy /y "%%f" dist\windows\ >nul
+      echo %%~nxf| findstr /i /r "_d\. _d_ [0-9]d\.dll loaderd\.dll zerod\.dll v2d\.dll debug _sycl eigen_" >nul || if %%~zf GTR 4096 copy /y "%%f" dist\windows\ >nul
     )
   )
 )

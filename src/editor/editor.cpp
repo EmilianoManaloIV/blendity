@@ -3,6 +3,7 @@
 #include "../scene/unity_scene.h"
 #include "../scene/budget.h"
 #include "editor.h"
+#include "../core/profiling.h"
 #include "../core/hash.h"
 #include "../render/canvas.h"
 #include "../texture/surface.h"
@@ -552,9 +553,13 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
-  in_frame_ = true;
-  frame_body(events);
-  in_frame_ = false;
+  {
+    BL_ZONE("frame");  // (round 419: Tracy's zones in a BLENDITY_TRACY=1 build; nothing otherwise)
+    in_frame_ = true;
+    frame_body(events);
+    in_frame_ = false;
+  }
+  BL_FRAME_MARK();
   if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
 }
 

@@ -3,6 +3,7 @@
 #include "../src/scene/raycast.h"
 #include "../src/scene/stroke_object.h"
 #include "test_common.h"
+#include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
 #include "../src/texture/smart_material.h"
 #include "../src/texture/paint_layer.h"
@@ -8320,6 +8321,48 @@ static void tests_round418() {
   });
 }
 
+/* ---------------------------------------------------------------- round 419: the allocator and the profiler (task 0395, ADR 0112) */
+static void tests_round419() {
+  test("allocator (round 419, ADR 0112): a Windows build with oneTBB's allocator has it replacing the runtime's; blocks of mixed sizes written, read back and freed on other threads", [] {
+    const std::string name = allocator_name();
+    std::printf("    this build's allocator: %s\n", name.c_str());
+#if defined(BL_WITH_TBBMALLOC) && defined(_WIN32)
+    if (!std::getenv("TBB_MALLOC_DISABLE_REPLACEMENT")) CHECK(allocator_replaced());  // (the proxy's own replacement log)
+#elif !defined(BL_WITH_TBBMALLOC)
+    CHECK(!allocator_replaced() && name == "the system's");
+#endif
+    /* 64 jobs each allocate 16,384 blocks of 16 B - 4 KB and write a pattern in each; the blocks are read back and freed
+     * by a later job (another thread, mostly): the allocator's cross-thread path. */
+    const int jobs = 64, per = 16384;
+    std::vector<std::vector<std::pair<char *, size_t>>> made(jobs);
+    JobSystem::global().parallel_for(jobs, 1, [&](int64_t a, int64_t b) {
+      for (int64_t j = a; j < b; j++)
+        for (int i = 0; i < per; i++) {
+          const size_t n = (size_t)(16 + (((uint32_t)i * 2654435761u + (uint32_t)j * 40503u) % 4096u));
+          char *p = new char[n];
+          for (size_t k = 0; k < n; k += 61) p[k] = (char)(i + j + k);
+          made[(size_t)j].push_back({p, n});
+        }
+    });
+    std::atomic<size_t> wrong{0};
+    ScopedTimer t;
+    JobSystem::global().parallel_for(jobs, 1, [&](int64_t a, int64_t b) {
+      for (int64_t j = a; j < b; j++) {
+        auto &list = made[(size_t)((j + jobs / 2) % jobs)];  // (another job's blocks)
+        const int64_t owner = (j + jobs / 2) % jobs;
+        size_t bad = 0;
+        for (size_t i = 0; i < list.size(); i++) {
+          for (size_t k = 0; k < list[i].second; k += 61) bad += list[i].first[k] != (char)(i + owner + k);
+          delete[] list[i].first;
+        }
+        wrong += bad;
+      }
+    });
+    std::printf("    %d blocks read back and freed on other threads: %.1f ms, %zu wrong bytes\n", jobs * per, t.ms(), wrong.load());
+    CHECK(wrong == 0);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -8394,5 +8437,6 @@ void run_editor_tests() {
   tests_round412();
   tests_round413();
   tests_round418();
+  tests_round419();
   coverage_tests();
 }

@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-05 (round 419): a faster allocator on Windows, and Tracy for developers
+
+**Asked:** the plan's round 419 - new dependencies only where the suite shows a 1.3x gain, on Blender's libraries'
+terms (compatible licence, a switch, Blendity's own code as the fallback, only in Blendity-full). The user gave
+permission to download Tracy's client, mimalloc and the others. Pass 16's ninth round (the plan: rounds 411-420).
+
+**Changed (task 0395, ADR 0112)**
+- **The Windows build with Blender's libraries uses oneTBB's allocator** (`tbbmalloc_proxy`, the one Blender links),
+  for every allocation in the process. Measured against the system allocator: 48 of 59 timed suite rows faster, 1.15x
+  on average and 1.3-1.5x on Select Linked on 500k faces, undo of 10,000 objects, duplicate, FBX and STL export and
+  Solidify (the parity section's wall time 2.9x). Its costs: Exit Edit Mode on 500k faces 3 -> 10 ms, the Subdivision
+  modifier 1.3x slower, 30 % more memory for 10,000 cubes. `libs` says which allocator the build has;
+  `BLENDITY_ALLOCATOR=system` builds without it. Linux and macOS, and the dependency-free build, keep the system's.
+- **mimalloc measured faster still but is not used:** linked as a library it replaces memory handling in Blendity's
+  executable only, and memory freed across Blender's DLLs crashed the test suite.
+- **Tracy for developers:** `BLENDITY_TRACY=1` builds with Tracy's client (collecting only while its viewer is
+  connected) and zones at the frame, the views, the gather and the renders; no shipped build has it.
+  `packaging/fetch_blender_libs.sh ... --extras` fetches Tracy 0.11.1 at its pinned commit; its licence is in
+  `licenses/`.
+- KTX / Basis and OpenImageIO are not adopted: no suite row needs them now.
+- `tests_round419`; the lesson "Where the Time Goes" names the allocator.
+
+**Measured:** the whole parity section 54.8 -> 19.1 s; Select Linked on 500k faces 123 -> 84 ms, undo of the delete of
+10,000 objects 47 -> 34, duplicate 10,000 objects 145 -> 108, FBX export 29 -> 21, STL export 13 -> 9 (ADR 0112, the
+spec's full table, with mimalloc's column).
+
+**Checked:** `tests_round419` (the proxy's own log says it replaced the runtime; a million blocks written, read back
+and freed on other threads); a Tracy build compiled and ran the quick parity section; both suites with oneTBB's
+allocator, the audits; the suite with mimalloc crashed (the assets and editor groups) - why it isn't used. The Opus
+review's fixes are in the spec.
+
 ## 2026-11-05 (round 418): every operation the sweep ranked
 
 **Asked:** the plan's round 418 - the inventory sweep's list (every console verb, keymap action and window run on three

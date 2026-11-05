@@ -204,6 +204,24 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 419 (the allocator, ADR 0112; `blendity_stress --only parity`, `--only world_like --quick`, A/B builds)
+
+The build with Blender's libraries with the system allocator, oneTBB's `tbbmalloc_proxy` and mimalloc 2.1.7, each run
+twice in one session (the mean): the parity section's wall time 54.8 s -> 19.1 / 19.0; over 59 timed rows oneTBB's
+geometric mean 1.15x, mimalloc's 1.21x. oneTBB's is the default; mimalloc is not used (its new / delete override
+crashed against Blender's DLLs - ADR 0112). Headline rows:
+
+| Row | System | oneTBB | mimalloc |
+|---|---|---|---|
+| Select linked from one face, 500k faces | 122.7 ms | 83.6 | 65.6 |
+| Undo of the delete, 10,000 objects | 46.8 | 33.9 | 26.4 |
+| Duplicate 10,000 objects | 144.7 | 107.6 | 87.8 |
+| Export the 50k sphere as FBX | 29.1 | 21.0 | 17.0 |
+| Modifier: Bevel on the 50k sphere | 681.1 | 562.8 | 433.0 |
+| Open a scene of 10,000 cubes | 76.5 | 61.6 | 50.5 |
+| Exit Edit Mode, 500k faces | 3.2 | 9.6 | 2.8 |
+| Memory: a 500k-face mesh (MB) | 150.1 | 168.6 | 201.5 |
+
 ### After round 418 (the sweep's list, task 0394; `blendity_stress --only operations`, `--only responsiveness`)
 
 The inventory sweep (every console verb, keymap action and window on the starter scene, the worldlike stand-in and
