@@ -2,6 +2,31 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 413): geometry and files never halt the editor
+
+**Asked:** "Rendering, Baking, or doing intensive operations should not halt the program." Pass 16's third round: the
+geometry and file rows round 411 measured OVER (the plan: rounds 411-420).
+
+**Changed (task 0389, ADR 0107)**
+- **Separate in one pass:** 10,000 loose parts had taken 1,115 s (a copy of the whole mesh per part, a scan of every
+  object per name tried); every part is cut in one pass and the names come from one set.
+- **Subdivide and DynaMesh on a worker:** the mesh copied, the operator run there, the result landed as one step when the
+  mesh is still the one it started from; the tray lists them with Cancel.
+- **Slow modifier stacks on a worker:** a stack predicted slow (a Decimate or a deep Subdivision on a big mesh) that reads
+  no other object is evaluated on a standalone copy of its object; every reader sees what the object had until the result
+  is adopted, with "Evaluating <object>" in the tray. Stacks with a dependency (skins, booleans, mirrors with an object)
+  stay on the main thread.
+- **Save, Open, Import and Export on workers:** a save serializes a clone of the scene; an open parses on a worker and
+  swaps in one frame; an import reads the model (the parse, the textures) off the frame for the plain import, the
+  shading word's and the preview's; an export's texture bakes and writer run off the frame with the meshes held and the
+  materials frozen copies. An open, a new scene and the editor's close wait for a save in flight.
+- Headless editors keep the one-frame behaviour unless they ask (ADR 0106's rule); the lesson "Where the Time Goes"
+  gains the rows; `tests_round413`.
+
+**Measured** (`blendity_stress --only responsiveness --quick`, the build with Blender's libraries, this machine): Decimate on the 500k sphere 881.6 -> 8.6 ms; Subdivide, 2 levels on the 50k sphere 178.5 -> 5.0 ms; DynaMesh at 128 on the 50k sphere 101.8 -> 4.8 ms; Separate 10,000 joined cubes 1115487.9 -> 119.3 ms (OVER); Enter Edit Mode on the 500k sphere 134.8 -> 158.0 ms (OVER); Save the 500k sphere's scene 171.3 -> 3.5 ms; Open the 500k sphere's scene 202.0 -> 1.4 ms; Open the 10,000 cubes' scene 102.5 -> 1.1 ms; Export the 50k sphere as obj 122.8 -> 6.6 ms; Import the 50k sphere from obj 201.6 -> 71.7 ms (OVER); Import the 50k sphere from fbx 109.2 -> 38.3 ms; Import the 50k sphere from glb 114.3 -> 24.4 ms; Export the 50k sphere as usda 122.9 -> 3.5 ms; Import the 50k sphere from usda 182.8 -> 47.8 ms. 3 still over the budget: Separate 10,000 joined cubes, Enter Edit Mode on the 500k sphere, Import the 50k sphere from obj (said in the spec's Not done).
+
+**Checked:** `tests_round413`; both suites green - with Blender's libraries 15978 checks in 1555 tests, 0 failed; dependency-free 15332 (Windows) and 15338 (Linux, WSL) checks, 0 failed; the audits.
+
 ## 2026-11-04 (round 412): rendering and baking never halt the editor
 
 **Asked:** "Rendering, Baking, or doing intensive operations should not halt the program." Pass 16's second round: the

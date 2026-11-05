@@ -27,6 +27,9 @@ std::string Editor::pending_job_on(GameObject &g, const std::vector<std::string>
   if (sculpt_remesh_ && sculpt_remesh_->obj == g.id) return "Quad Remesh";
   if (skin_job_ && skin_job_->object == g.id) return skin_job_->label;
   if (meshmaps_job_ && meshmaps_job_->obj == g.id) return "Mesh Maps";
+  if (mesh_job_ && mesh_job_->obj == g.id) return mesh_job_->label;  // (round 413)
+  for (const auto &j : eval_jobs_)
+    if (j->obj == g.id) return "Evaluating " + j->name;
   if (!surface_job_) return "";
   if (surfaces) return std::find(surfaces->begin(), surfaces->end(), surface_job_->path) != surfaces->end() ? "Surface" : "";
   const ProceduralTexturePtr surface = surface_of(&g, nullptr);
@@ -99,6 +102,13 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   if (surface_job_) add("Surface", -1.0f, nullptr);  // (no Cancel: the stack would be evaluated again at once)
   if (skin_job_) add(skin_job_->label, skin_job_->progress.load(), [this] { skin_job_->cancel = true; }, skin_job_->cancel.load());
   if (texbake_job_) add("Bake Textures", texbake_job_->progress.load(), [this] { texbake_cancel(); }, texbake_job_->cancel.load());  // (round 412)
+  /* Round 413: the mesh operator, the slow stacks, the file jobs. */
+  if (mesh_job_) add(mesh_job_->label, -1.0f, [this] { mesh_job_->cancel.store(true); }, mesh_job_->cancel.load());
+  for (const auto &j : eval_jobs_) add("Evaluating " + j->name, -1.0f, nullptr);
+  if (save_job_) add("Saving " + fs::filename(save_job_->path), -1.0f, nullptr);
+  if (open_job_) add("Opening " + fs::filename(open_job_->path), -1.0f, nullptr);
+  if (import_job_) add("Reading " + fs::filename(import_job_->path), -1.0f, nullptr);
+  if (file_export_job_) add("Writing " + fs::filename(file_export_job_->path), -1.0f, nullptr);
   if (baking_ && bake_job_) {  // (round 412: one job through its phases - the lightmaps with their progress, then the probes, volumes and reflection probes)
     const int phase = bake_job_->phase.load();
     add(phase == 0 ? "Baking lighting" : phase == 1 ? "Baking probes" : phase == 2 ? "Baking Light Volumes" : "Baking reflection probes", bake_job_->progress.load(),

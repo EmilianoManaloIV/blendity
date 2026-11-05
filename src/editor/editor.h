@@ -2892,7 +2892,7 @@ class Editor {
   /* Export > Bake Textures (task 0036): each item baked on a copy (kept alive in `keep`), the images written beside
    * `path`, the copies' materials naming them. */
   void bake_textures_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o,
-                                std::vector<std::shared_ptr<Mesh>> &keep);
+                                std::vector<std::shared_ptr<Mesh>> &keep, std::vector<std::string> *forget_later = nullptr);  // (round 413: on a worker, the cache forgotten when it lands)
   /* Object > Bake Textures (task 0036): the active object's look baked into Assets/Textures/Baked, its mesh on the
    * baked UVs and a "<Object> Baked" material on every slot; one undo step. False when nothing was baked. */
   bool bake_object_textures(int size, bool keep_uvs = false);
@@ -3618,7 +3618,7 @@ class Editor {
   bool export_assign_ = false;
   int boolean_op_ = 0;
   void separate(const std::string &mode);
-  GameObject *spawn_part(GameObject *g, Mesh mesh);
+  GameObject *spawn_part(GameObject *g, Mesh mesh, std::unordered_set<std::string> *names = nullptr, int *next = nullptr);  // (round 413: many parts name themselves from one set)
   void set_origin(int mode, Vec3 world_point = Vec3(0.0f));  // kOriginModes; world_point for "Origin to Point"
   int origin_mode_ = 0;
   bool origin_hover_ = false;  // the Inspector's Origin row is in use: the Scene view previews the new origin
@@ -5531,6 +5531,102 @@ class Editor {
     }
   };
   std::unique_ptr<TexBakeJob> texbake_job_;
+  /* ---- Round 413 (ADR 0107): geometry and files on workers. A mesh operator (Subdivide, DynaMesh) runs on a copy and
+   * lands as one step when the mesh is still the one it started from; a slow modifier stack is evaluated on a standalone
+   * copy of its object (GameObject::slow_eval_hook) and adopted; a save serializes a clone of the scene; an open parses
+   * on a worker and swaps in one frame; an import reads the file on a worker; an export writes on one. ---- */
+  struct MeshOpJob {
+    uint64_t obj = 0, mesh_uid = 0, version = 0, deform_version = 0;
+    std::shared_ptr<Mesh> input, result;
+    std::string label, why;
+    std::function<bool(Mesh &, std::string &)> op;
+    std::function<void(GameObject &)> landed;
+    bool ok = false;
+    std::atomic<bool> done{false}, cancel{false};
+    std::thread thread;
+    ~MeshOpJob() {
+      cancel.store(true);
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<MeshOpJob> mesh_job_;
+  bool mesh_job_start(GameObject &g, const std::string &label, std::function<bool(Mesh &, std::string &)> op, std::function<void(GameObject &)> landed = {});
+  void mesh_job_poll();
+  struct EvalJob {
+    uint64_t obj = 0, key = 0;
+    int kind = 0;
+    std::string name;
+    std::unique_ptr<GameObject> copy;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~EvalJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::vector<std::unique_ptr<EvalJob>> eval_jobs_;
+  void eval_jobs_poll();
+  void eval_jobs_wait(uint64_t obj = 0);  // (the running evaluations of `obj` - 0 all - joined and adopted: a caller that needs the mesh now)
+  struct SaveJob {
+    std::unique_ptr<Scene> clone;
+    std::string path;
+    bool ok = false;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~SaveJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<SaveJob> save_job_;
+  void save_job_start();
+  void save_job_poll();
+  void save_job_wait();
+  void save_landed(const std::string &path);
+  struct OpenJob {
+    std::string path, err;
+    std::unique_ptr<Scene> scene;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~OpenJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<OpenJob> open_job_;
+  void open_job_poll();
+  bool open_scene_landed(const std::string &path, std::unique_ptr<Scene> s);
+  struct ImportJob {
+    std::string path;
+    bool copy_into_assets = false, preview = false, ok = false;
+    int shading = -1;  // (-1: as dropped; else the shading word's index)
+    double started = 0.0;
+    ImportResult result;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~ImportJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<ImportJob> import_job_;
+  bool import_job_start(const std::string &path, bool copy_into_assets, bool preview, int shading);
+  void import_job_poll();
+  void import_landed(ImportJob &j);
+  bool begin_import_preview_with(const std::string &path, bool copy_into_assets, ImportResult &r);
+  struct FileExportJob {
+    std::string path, err;
+    std::vector<ExportItem> items;
+    ExportOptions options;
+    std::vector<std::shared_ptr<Mesh>> keep;
+    std::vector<std::shared_ptr<const Mesh>> held;
+    std::vector<std::string> forget;  // (the texture cache's entries the baked images replace: forgotten when it lands)
+    bool ok = false;
+    std::atomic<bool> done{false};
+    std::thread thread;
+    ~FileExportJob() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<FileExportJob> file_export_job_;
+  void file_export_poll();
+  void export_landed(FileExportJob &j);
   /* Round 412: a material as a worker reads it - a copy, its textures (a surface's whole images, never the views'
    * stand-in) resolved here and frozen. */
   static MaterialPtr snapshot_material(const MaterialPtr &m);
@@ -6302,6 +6398,15 @@ class Editor {
   bool render_job_running_for_test() const { return render_job_ && !render_job_->done.load(); }
   bool bake_job_running_for_test() const { return bake_job_ && !bake_job_->done.load(); }
   bool texbake_running_for_test() const { return texbake_job_ && !texbake_job_->done.load(); }
+  /* Round 413. */
+  bool eval_job_request(const GameObject &g, int kind, uint64_t key);  // (GameObject::slow_eval_hook's: true when a worker is on it)
+  bool eval_jobs_running_for_test() const { return !eval_jobs_.empty(); }
+  bool mesh_job_running_for_test() const { return mesh_job_ && !mesh_job_->done.load(); }
+  bool save_job_running_for_test() const { return save_job_ && !save_job_->done.load(); }
+  bool open_job_running_for_test() const { return open_job_ && !open_job_->done.load(); }
+  bool import_job_running_for_test() const { return import_job_ && !import_job_->done.load(); }
+  bool file_export_running_for_test() const { return file_export_job_ && !file_export_job_->done.load(); }
+  bool file_jobs_running() const { return save_job_ || open_job_ || import_job_ || file_export_job_; }  // (the headless runner waits for these between its lines)
   int render_job_phase_for_test() const { return render_job_ ? render_job_->phase.load() : -1; }
   int render_shadow_size_for_test() const { return render_shadow_res_; }  // (round 412: the F12's map is the job's, not the views' cache's)
   void moonray_offer_pending_for_test(bool on) { mr_offer_pending_ = on; }

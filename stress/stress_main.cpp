@@ -6500,16 +6500,16 @@ static void test_responsiveness(Report &rep, const Options &o) {
   }
   {
     auto ed = fresh("benchscene sphere500k", "Parity Sphere");
-    stall_row(rep, "Decimate modifier on the 500k sphere (its first evaluation)", run_stall(*ed, [&] { ed->command("component DecimateModifier"); }, [] { return false; }), 100.0);
+    stall_row(rep, "Decimate modifier on the 500k sphere (its first evaluation)", run_stall(*ed, [&] { ed->command("component DecimateModifier"); }, [&] { return ed->eval_jobs_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
-    stall_row(rep, "Subdivide, 2 levels on the 50k sphere", run_stall(*ed, [&] { ed->command("subdivide 2"); }, [] { return false; }), 100.0);
+    stall_row(rep, "Subdivide, 2 levels on the 50k sphere", run_stall(*ed, [&] { ed->command("subdivide 2"); }, [&] { return ed->mesh_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
     ed->command("sculpt on");
-    stall_row(rep, "DynaMesh at 128 on the 50k sphere", run_stall(*ed, [&] { ed->command("sculpt dynamesh 128"); }, [] { return false; }), 100.0);
+    stall_row(rep, "DynaMesh at 128 on the 50k sphere", run_stall(*ed, [&] { ed->command("sculpt dynamesh 128"); }, [&] { return ed->mesh_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
@@ -6560,22 +6560,22 @@ static void test_responsiveness(Report &rep, const Options &o) {
   const std::string big = fs::join(tmp, "big.scene"), cubes = fs::join(tmp, "cubes.scene");
   {
     auto ed = fresh("benchscene sphere500k");
-    stall_row(rep, "Save the 500k sphere's scene", run_stall(*ed, [&] { ed->command("save " + big); }, [] { return false; }), 100.0);
+    stall_row(rep, "Save the 500k sphere's scene", run_stall(*ed, [&] { ed->command("save " + big); }, [&] { return ed->save_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
     auto ed2 = fresh("benchscene cubes10k");
-    stall_row(rep, "Save the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("save " + cubes); }, [] { return false; }), 100.0);
+    stall_row(rep, "Save the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("save " + cubes); }, [&] { return ed2->save_job_running_for_test(); }, 600000.0), budget);
   }
   {
     auto ed = fresh("");
-    stall_row(rep, "Open the 500k sphere's scene", run_stall(*ed, [&] { ed->command("open " + big); }, [] { return false; }), 100.0);
+    stall_row(rep, "Open the 500k sphere's scene", run_stall(*ed, [&] { ed->command("open " + big); }, [&] { return ed->open_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker; the swap is the landing frame)
     auto ed2 = fresh("");
-    stall_row(rep, "Open the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("open " + cubes); }, [] { return false; }), 100.0);
+    stall_row(rep, "Open the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("open " + cubes); }, [&] { return ed2->open_job_running_for_test(); }, 600000.0), budget);
   }
   for (const char *fmt : {"obj", "fbx", "glb", "stl", "ply", "usda"}) {
     const std::string path = fs::join(tmp, std::string("sphere50k.") + fmt);
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
-    stall_row(rep, strprintf("Export the 50k sphere as %s", fmt), run_stall(*ed, [&] { ed->command(strprintf("export %s %s", fmt, path.c_str())); }, [] { return false; }), 100.0);
+    stall_row(rep, strprintf("Export the 50k sphere as %s", fmt), run_stall(*ed, [&] { ed->command(strprintf("export %s %s", fmt, path.c_str())); }, [&] { return ed->file_export_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
     auto ed2 = fresh("");
-    stall_row(rep, strprintf("Import the 50k sphere from %s", fmt), run_stall(*ed2, [&] { ed2->command("import " + path + " asis"); }, [] { return false; }), 100.0);
+    stall_row(rep, strprintf("Import the 50k sphere from %s", fmt), run_stall(*ed2, [&] { ed2->command("import " + path + " asis"); }, [&] { return ed2->import_job_running_for_test(); }, 600000.0), budget);
   }
   {
     auto ed = fresh("");

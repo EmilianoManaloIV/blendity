@@ -54,7 +54,10 @@ static int headless(int argc, char **argv) {
   park.x = -100;
   park.y = -100;
   ed.step_frame_headless({park});
-  for (auto &c : cmds) ed.command(c);
+  for (auto &c : cmds) {
+    ed.command(c);
+    for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();  // (round 413: a save, open, import or export lands before the next line - as the line ran whole before)
+  }
   for (auto [x, y, button, mods] : clicks) {
     platform::Event e;
     e.x = x;

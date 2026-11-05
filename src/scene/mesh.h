@@ -627,6 +627,9 @@ void append_mesh(Mesh &dst, const Mesh &src, const Mat4 &xf, const std::vector<i
 size_t drop_unmoving_keys(Mesh &m);
 /* Separate > Selection: a new mesh of the selected faces (the caller deletes them from m). */
 Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel);
+/* Round 413: every part at once - part p the faces with face_part[f] == p, each with only its vertices, its groups and
+ * keys remapped, the seams / sharp / wire edges it keeps: one pass over the mesh, however many parts. */
+std::vector<Mesh> split_by_part(const Mesh &m, const std::vector<int> &face_part, size_t parts);
 /* Separate > By Loose Parts: a part index per face; returns the number of parts. */
 size_t loose_parts(const Mesh &m, std::vector<int> &face_part);
 /* E on vertices / edges (Blender's extrude in vertex and edge select mode):

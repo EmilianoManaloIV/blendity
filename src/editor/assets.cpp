@@ -3,6 +3,7 @@
 // Blender: File > Import, Image Texture node "Open", Material slots > Assign).
 #include "../scene/unity_anim.h"  // (round 407)
 #include "editor.h"
+#include "../core/jobs.h"
 
 #include "../core/core.h"
 #include "../scene/animation.h"
@@ -74,6 +75,8 @@ std::vector<MaterialPtr> Editor::scene_materials() {
   return out;
 }
 
+static bool import_meshes_with_materials(ImportResult &r);  // (below, with the preview)
+
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".unitypackage") return (void)import_unity_package(path);  // (round 369: import <file>.unitypackage)
   if (fs::extension(path) == ".anim") return (void)import_unity_anim(path);  // (round 407: a Unity AnimationClip, or Blendity's own)
@@ -83,6 +86,7 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".blendity-snapshot" || fs::filename(path) == "snapshot.json") return (void)import_snapshot(path);  // (round 374)
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
   if (import_preview_pref_ && (ipv_force_ || !headless_) && begin_import_preview(path, copy_into_assets)) return;  // (task 0152: the dialog first)
+  if (jobs_async()) return (void)import_job_start(path, copy_into_assets, false, -1);  // (round 413: read on a worker)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
@@ -92,11 +96,61 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   finish_import(path, copy_into_assets, r, t, ImportOutline::Keep, 0.0f, false);
 }
 
-static bool import_meshes_with_materials(ImportResult &r);  // (below, with the preview)
+/* Round 413 (ADR 0107): the model read on a worker (the parse, the textures decoded); what follows - the preview, the
+ * shading, the copies into Assets, the objects - runs on the main thread when it lands (import_landed). */
+bool Editor::import_job_start(const std::string &path, bool copy_into_assets, bool preview, int shading) {
+  if (import_job_) {  // (one read at a time: the file waits its turn - a dropped set imports one after the other)
+    ipv_queue_.push_back({path, copy_into_assets});
+    Log::info("Import: %s waits for %s to be read", fs::filename(path).c_str(), fs::filename(import_job_->path).c_str());
+    return true;
+  }
+  auto job = std::make_unique<ImportJob>();
+  job->path = path, job->copy_into_assets = copy_into_assets, job->preview = preview, job->shading = shading;
+  job->started = now_seconds();
+  ImportJob *raw = job.get();
+  raw->thread = std::thread([raw] {
+    JobSystem::global().run_background([raw] { raw->ok = import_model(raw->path, raw->result); });
+    raw->done.store(true, std::memory_order_release);
+  });
+  import_job_ = std::move(job);
+  ui_.redraw = true;
+  return true;
+}
+
+void Editor::import_job_poll() {
+  if (!import_job_ || !import_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<ImportJob> job = std::move(import_job_);
+  if (job->thread.joinable()) job->thread.join();
+  import_landed(*job);
+}
+
+void Editor::import_landed(ImportJob &j) {
+  ScopedTimer t;
+  t.start = j.started;
+  if (!j.ok) Log::error("Import failed (%s): %s", fs::filename(j.path).c_str(), j.result.error.c_str());
+  else if (j.preview) {
+    if (begin_import_preview_with(j.path, j.copy_into_assets, j.result)) return;  // (the dialog: the queue drains when it closes)
+    finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, false);  // (nothing to look at: the plain import)
+  }
+  else if (j.shading >= 0) {
+    import_meshes_with_materials(j.result);
+    std::vector<std::string> originals;
+    for (const MaterialPtr &m : j.result.materials) originals.push_back(m ? save_material_text(*m) : std::string());
+    apply_import_shading(j.result.materials, originals, j.shading);
+    finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, j.shading != 0);
+  }
+  else finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, false);
+  if (ipv_.open || ipv_queue_.empty()) return;
+  const std::pair<std::string, bool> next = ipv_queue_.front();  // (the next file's turn, on every path - a failure too)
+  ipv_queue_.erase(ipv_queue_.begin());
+  import_model_file(next.first, next.second);
+}
+
 
 /* The console's import <file> <shading> (task 0152): the shading applied and the import finished at once, no dialog. */
 void Editor::import_with_shading(const std::string &path, bool copy_into_assets, int shading) {
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion has no materials to shade)
+  if (jobs_async()) return (void)import_job_start(path, copy_into_assets, false, shading);  // (round 413: read on a worker)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
@@ -269,11 +323,17 @@ bool Editor::begin_import_preview(const std::string &path, bool copy_into_assets
     Log::info("Import: %s waits for the preview of %s", fs::filename(path).c_str(), fs::filename(ipv_.path).c_str());
     return true;
   }
+  if (jobs_async()) return import_job_start(path, copy_into_assets, true, -1);  // (round 413: read on a worker; the dialog opens when it lands)
   ImportResult r;
   if (!import_model(path, r)) {
     Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
     return true;
   }
+  return begin_import_preview_with(path, copy_into_assets, r);
+}
+
+/* The preview from a model read: false when there is nothing to look at (a motion-only file) - the plain import then. */
+bool Editor::begin_import_preview_with(const std::string &path, bool copy_into_assets, ImportResult &r) {
   if (!import_meshes_with_materials(r)) return false;  // nothing to look at (a motion-only file): the plain import
   ipv_ = ImportPreview();
   ImportPreview &pv = ipv_;

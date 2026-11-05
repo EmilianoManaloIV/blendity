@@ -16,8 +16,10 @@
 #include <cmath>
 #include <atomic>
 #include <cstring>
+#include <chrono>
 #include <ctime>
 #include <set>
+#include <thread>
 
 namespace bl {
 
@@ -508,6 +510,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
      * modifier's fields change on their own. */
     uint64_t k[3];
     g.evaluated_keys(k);
+    const uint64_t egen = g.eval_generation();  // (round 413: a stack's result adopted from a worker is a new picture)
+    mix(&egen, 8);
     mix(k, sizeof(k));
     /* Settled tangents (ADR 0034): the same mesh drawn a little differently - the views draw again, nothing that
      * keys on the evaluated meshes (a modifier stack's cache) sees a change. */
@@ -1859,6 +1863,13 @@ void Editor::step_final_render() {
 void Editor::render_job_poll() {
   RenderJob *j = render_job_.get();
   if (!j) return;
+  if (j->traced && headless_ && !async_jobs_ && !j->done.load(std::memory_order_acquire)) {
+    /* A headless editor that didn't ask for workers (a test): a frame advances the render by about a slice, as before
+     * round 412 - waited for here, so a test's frame count bounds the render's progress as it did. */
+    const int before = render_samples();
+    ScopedTimer wait;
+    while (wait.ms() < 40.0 && !j->done.load(std::memory_order_acquire) && render_samples() == before) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   if (j->traced) {
     std::lock_guard<std::mutex> lock(j->mutex);
     if (j->img_serial != render_img_serial_) {

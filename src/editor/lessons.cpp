@@ -1932,6 +1932,11 @@ Since round 412 (ADR 0106) a render and a bake never run inside the frame. F12 t
 | F12 path traced | the snapshot | the scene build, every sample pass, the picture after each pass, the denoise
 | Generate Lighting | gathers the scene's copies, the probes' box, the volumes' grids, the probes' places | the layout, the texels, the filter and dilation, the probe volume, the volumes, the six faces of each reflection probe
 | Bake Textures | copies the mesh and its materials | the texels, the padding, the four PNGs
+| Subdivide, DynaMesh | copies the mesh | the operator; the result lands as one step (round 413)
+| a slow modifier stack (a Decimate on a big mesh) | copies the object | the stack; the old mesh shows until it lands - the tray says "Evaluating"
+| Save | clones the scene (copy-on-write) | the text and the file
+| Open, Import | nothing until it lands | the parse and the textures; the swap or the objects in the landing frame
+| Export | copies the items, holds the meshes | the texture bakes and the writer
 `jobs` in the Console lists what runs; `jobs cancel <name>` stops one. The Profiler's GPU block still shows a traced render's devices and times from what the worker publishes.
 # The suite
 blendity_stress --only responsiveness runs every heavy operation headless with the views open and records the longest frame while it ran; --only operations is the inventory sweep: every console verb (one real invocation each), every keymap action and every window on three scenes, ranked by the frame they cost; --only world_like is the Unity-world stand-in (`benchscene worldlike`: 600 parts, 70 lights, 300 textures, see-through toon, glass, fog, the camera's filters). tools/perf_suite.py runs them, compares every row with stress/results/baseline.md and writes docs/PERFORMANCE.md's Pass 16 tables. A measurement is never a unit test's assert (ADR 0056): a slow machine is a note in a row, not a red build.
@@ -1940,6 +1945,7 @@ blendity_stress --only responsiveness runs every heavy operation headless with t
 ? A bake is running and the editor stutters at 10 fps. Which promise is broken, and where do you read the number? | ADR 0105's: no frame over 50 ms while a job runs. The Profiler's graph (Window > Profiler) or `perf status` shows the worst frame; the responsiveness stress rows name the operation.
 ? The Scene view's bar shows CPU although you have a GPU. What does the tooltip tell you? | Why this view is on the CPU: either no GPU could be opened, or something in view the card can't draw yet (the reason named, e.g. a Volume material); `viewport status` prints the same.
 ? You want the time an import takes, step by step, from a script. Which command? | `perf mark <name>` after each step: it prints the milliseconds, the frames and the longest frame since the last mark.
+? You add a Decimate modifier to a 500,000-face mesh. What do you see in the next frame, and why? | The mesh as it was, and "Evaluating <object>" in the tray (round 413, ADR 0107): a stack predicted slow is evaluated on a worker from a copy of the object; the result is adopted when it lands and the views draw it then.
 ? You press F12 on a big scene and keep orbiting the Scene view while it renders. Where is the render being made, and what happens if you edit a mesh meanwhile? | On a worker, from a snapshot taken in the frame the render started (round 412, ADR 0106): the meshes are held, so an edit writes a copy and the render keeps the shape it started from; the picture lands in the Render window when the worker is done.
 ! cmd:render | Render on a worker: the tray lists it while the editor stays responsive
 ! cmd:jobs | List the jobs running and what each can be told

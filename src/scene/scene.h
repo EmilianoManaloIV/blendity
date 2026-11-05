@@ -1764,6 +1764,22 @@ class GameObject {
   /* All three keys in one pass over the components (the same values as three evaluated_key calls). */
   void evaluated_keys(uint64_t out[3]) const;
   const meshops::SubdivChain *eval_chain_for_test(int kind = 0) const { return eval_chain_[std::max(0, std::min(kind, 2))].get(); }  // (task 0239)
+  /* Round 413 (ADR 0107): a slow stack - a Decimate or a deep Subdivision on a big mesh, nothing that reads another
+   * object - evaluated on a worker. The hook (the editor's) is asked when such a stack's key changed; true means a job
+   * is on it and evaluated_mesh returns what it had (the last result, else the base mesh) until adopt_evaluation takes
+   * the worker's caches from a standalone copy of this object. eval_generation moves then: the views draw again. */
+  using SlowEvalHook = std::function<bool(const GameObject &, int kind, uint64_t key)>;
+  static SlowEvalHook slow_eval_hook;
+  /* While one of these is alive on this thread, evaluated_mesh evaluates on the spot whatever the hook would say: a
+   * caller that needs the exact mesh now (Apply Modifiers, an export, a bake). */
+  struct EvaluateNowScope {
+    EvaluateNowScope();
+    ~EvaluateNowScope();
+  };
+  bool evaluation_pending(int kind) const { return eval_pending_[std::max(0, std::min(kind, 8))] != 0; }
+  uint64_t eval_pending_key(int kind) const { return eval_pending_[std::max(0, std::min(kind, 8))]; }  // (the key the last call asked a worker for)
+  void adopt_evaluation(GameObject &from, int kind);
+  uint64_t eval_generation() const { return eval_generation_; }
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
@@ -1787,6 +1803,9 @@ class GameObject {
    * view, F12, the traced Camera Preview), so no view evicts or rewrites a mesh another is drawing or tracing.) */
   mutable std::shared_ptr<Mesh> eval_mesh_[9];
   mutable uint64_t eval_key_[9] = {};
+  mutable uint64_t eval_pending_[9] = {};  // (round 413: the key a worker evaluates for this kind, 0 none)
+  mutable uint64_t eval_shape_key_[9] = {};  // (the key without the base's deform_version the last result was made for: a deform alone follows on the main thread)
+  mutable uint64_t eval_generation_ = 0;
   /* The stack before its deforming tail (ADR 0022): the result of the modifiers up to the last one that
    * isn't deform-only, its key, and the head key eval_mesh_ was deformed from (0: a full evaluation). */
   mutable std::shared_ptr<Mesh> eval_head_[9];
