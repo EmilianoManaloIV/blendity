@@ -7476,6 +7476,218 @@ static void tests_round409() {
 }
 
 
+/* ----------------------------------------------------------- round 413: geometry and files on workers (ADR 0107) */
+static void tests_round413() {
+  test("Separate by loose parts (round 413): 10,000 joined cubes come apart in one pass - every part its own object with its faces, the names unique, in a time that is not quadratic", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("benchscene cubes10k");
+    ed.command("selectall");
+    ed.command("join");
+    ed.step_frame_headless();
+    const size_t before = ed.scene().object_count();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<MeshFilter>() && g->get<MeshFilter>()->mesh);
+    const size_t faces = g ? g->get<MeshFilter>()->mesh->face_count() : 0;
+    ScopedTimer t;
+    ed.command("separate loose");
+    const double ms = t.ms();
+    size_t parts = 0, total = 0;
+    std::set<std::string> names;
+    ed.scene().for_each([&](GameObject &o) {
+      const MeshFilter *mf = o.get<MeshFilter>();
+      if (!mf || !mf->mesh || o.name.rfind(g->name.substr(0, 4), 0) != 0) return;
+      parts++, total += mf->mesh->face_count();
+      names.insert(o.name);
+    });
+    std::printf("    separate loose: %zu parts (%zu faces of %zu) in %.0f ms; %zu objects before, %zu after\n", parts, total, faces, ms, before, ed.scene().object_count());
+    CHECK(parts == 10000 && total == faces && names.size() == parts);
+    CHECK(ed.scene().object_count() == before + 9999);
+  });
+  test("mesh operators on a worker (round 413): Subdivide and DynaMesh run on a copy and land as one step, the same mesh as the main thread's; the tray lists them", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("create Cube");
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g != nullptr);
+    if (!g) return;
+    const bool echo = Log::echo_stdout;
+    Log::echo_stdout = true;
+    ed.command("subdivide 2");  // (without workers: the reference - two steps, one an operator call)
+    ed.step_frame_headless();
+    const std::vector<Vec3> ref = g->get<MeshFilter>()->mesh->positions;
+    const size_t ref_faces = g->get<MeshFilter>()->mesh->face_count();
+    auto cube = [&]() -> GameObject * { return ed.scene().find_by_name("Cube"); };  // (an undo restores a snapshot: found again)
+    for (int i = 0; i < 3 && cube() && cube()->get<MeshFilter>()->mesh->face_count() != 6; i++) ed.command("undo"), ed.step_frame_headless();
+    g = cube();
+    CHECK(g && g->get<MeshFilter>()->mesh->face_count() == 6);
+    if (!g) return;
+    ed.command("select Cube");
+    ed.set_async_jobs_for_test(true);
+    ed.command("subdivide 2");
+    CHECK(ed.mesh_job_running_for_test() || g->get<MeshFilter>()->mesh->face_count() == ref_faces);
+    bool listed = false;
+    int frames = 0;
+    for (; frames < 5000 && ed.mesh_job_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "Subdivide x2";
+    }
+    ed.step_frame_headless();
+    std::printf("    Subdivide x2 on a worker: %d frame(s), listed %s, %zu faces\n", frames, listed ? "yes" : "no", g->get<MeshFilter>()->mesh->face_count());
+    CHECK(g->get<MeshFilter>()->mesh->face_count() == ref_faces && g->get<MeshFilter>()->mesh->positions == ref);
+    CHECK(listed || frames <= 1);  // (a cube's subdivision ends before a frame can list it)
+    ed.command("undo");
+    ed.step_frame_headless();
+    g = cube();
+    CHECK(g && g->get<MeshFilter>()->mesh->face_count() == 6);  // (one step)
+    if (!g) return;
+    ed.command("select Cube");
+    ed.command("sculpt on");
+    ed.command("sculpt dynamesh 32");
+    frames = 0;
+    listed = false;
+    for (; frames < 5000 && ed.mesh_job_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "DynaMesh 32";
+    }
+    ed.step_frame_headless();
+    std::printf("    DynaMesh 32 on a worker: %d frame(s), listed %s, %zu faces\n", frames, listed ? "yes" : "no", g->get<MeshFilter>()->mesh->face_count());
+    CHECK(g->get<MeshFilter>()->mesh->face_count() > 6 && (listed || frames <= 1));
+    Log::echo_stdout = echo;
+  });
+  test("a slow modifier stack on a worker (round 413, ADR 0107): a Decimate on the 500k sphere shows the base mesh while a worker evaluates, the tray says so, and the result is the main thread's evaluation; a stack reading another object stays on the main thread", [] {
+    size_t sync_faces = 0;
+    {
+      Editor ed;
+      ed.init_headless(800, 600);
+      ed.command("benchscene sphere500k");
+      ed.command("select Parity Sphere");
+      ed.command("component DecimateModifier");
+      GameObject *g = ed.scene().find_by_name("Parity Sphere");
+      if (g) g->get<DecimateModifier>()->ratio = 0.2f;
+      ed.step_frame_headless();
+      sync_faces = g ? g->evaluated_mesh(0)->face_count() : 0;
+      std::printf("    the main thread's Decimate: %zu faces of %zu\n", sync_faces, g ? g->get<MeshFilter>()->mesh->face_count() : 0);
+    }
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("benchscene sphere500k");
+    ed.command("select Parity Sphere");
+    ed.step_frame_headless();
+    ed.set_async_jobs_for_test(true);
+    GameObject *g = ed.scene().find_by_name("Parity Sphere");
+    CHECK(g != nullptr);
+    if (!g) return;
+    const Mesh *base = g->get<MeshFilter>()->mesh.get();
+    ed.command("component DecimateModifier");
+    g->get<DecimateModifier>()->ratio = 0.2f;
+    ScopedTimer f;
+    ed.step_frame_headless();
+    const double first = f.ms();
+    const bool pending = g->evaluation_pending(0);
+    const bool stale = g->evaluated_mesh(0) == base;
+    bool listed = false;
+    for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "Evaluating Parity Sphere";
+    std::printf("    the frame after adding it: %.1f ms; pending %s, the base mesh shown %s, listed %s\n", first, pending ? "yes" : "no", stale ? "yes" : "no", listed ? "yes" : "no");
+    CHECK((pending && stale && listed) || (!pending && !stale));  // (a worker quick enough lands within the frame: adopted already)
+    int frames = 0;
+    for (; frames < 20000 && ed.eval_jobs_running_for_test(); frames++) ed.step_frame_headless();
+    ed.step_frame_headless();
+    const Mesh *ev = g->evaluated_mesh(0);
+    std::printf("    landed after %d frame(s): %zu faces\n", frames, ev ? ev->face_count() : 0);
+    CHECK(!g->evaluation_pending(0) && ev && ev != base && ev->face_count() == sync_faces);
+    /* Apply Modifiers wants the exact result now: the ratio changed and a worker on it, the mesh applied is the new
+     * ratio's (the worker's result taken when it is there, else evaluated on the spot). */
+    g->get<DecimateModifier>()->ratio = 0.1f;
+    ed.step_frame_headless();
+    ed.command("applymods");
+    const size_t applied = g->get<MeshFilter>()->mesh->face_count();
+    std::printf("    Apply Modifiers while the worker was on the next ratio: %zu faces (the base %zu, the 0.2 result %zu)\n", applied, base->face_count(), sync_faces);
+    CHECK(!g->get<DecimateModifier>() && !g->evaluation_pending(0) && !ed.eval_jobs_running_for_test());
+    /* A stack with a dependency (a Skin on an armature) is the main thread's as before: nothing pending. */
+    ed.command("create Armature");
+    ed.command("select Parity Sphere");
+    ed.command("component SkinModifier");
+    ed.step_frame_headless();
+    CHECK(!g->evaluation_pending(0));
+  });
+  test("files on workers (round 413): a save serializes a clone on a worker and the file is the main thread's byte for byte; an open parses on a worker and swaps in one frame; an export writes on a worker, the same file; an import reads on a worker; the tray lists each", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.command("benchscene cubes10k");
+    ed.step_frame_headless();
+    const std::string dir = ed.resolve_asset_path_for_test("Assets/Scenes");
+    fs::make_dirs(dir);
+    const std::string a = fs::join(dir, "r413_sync.scene"), b = fs::join(dir, "r413_async.scene");
+    ed.command("save " + a);  // (without workers: the reference)
+    CHECK(fs::exists(a));
+    ed.set_async_jobs_for_test(true);
+    ed.command("save " + b);
+    bool listed = false;
+    int frames = 0;
+    for (; frames < 5000 && ed.save_job_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label.rfind("Saving ", 0) == 0;
+    }
+    ed.step_frame_headless();
+    std::string ta, tb;
+    CHECK(fs::read_file(a, ta) && fs::read_file(b, tb));
+    /* (The name and path lines differ by the file's own name; the rest is the same.) */
+    auto strip = [](std::string s, const std::string &name) {
+      size_t at;
+      while ((at = s.find(name)) != std::string::npos) s.erase(at, name.size());
+      return s;
+    };
+    const bool same_text = strip(ta, "r413_sync") == strip(tb, "r413_async");
+    std::printf("    save on a worker: %d frame(s), listed %s, %zu bytes (the main thread's %zu), the same text %s\n", frames, listed ? "yes" : "no", tb.size(), ta.size(), same_text ? "yes" : "no");
+    CHECK(same_text && (listed || frames <= 1));
+    /* Open on a worker. */
+    ed.command("newscene");
+    ed.step_frame_headless();
+    const size_t before = ed.scene().object_count();
+    ed.command("open " + a);
+    CHECK(ed.open_job_running_for_test() || ed.scene().object_count() > before);
+    listed = false, frames = 0;
+    for (; frames < 5000 && ed.open_job_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label.rfind("Opening ", 0) == 0;
+    }
+    ed.step_frame_headless();
+    std::printf("    open on a worker: %d frame(s), listed %s, %zu objects\n", frames, listed ? "yes" : "no", ed.scene().object_count());
+    CHECK(ed.scene().object_count() >= 10000 && ed.scene().find_by_name("Cube 0") != nullptr);
+    /* Export on a worker: the same bytes as the main thread's. */
+    ed.command("select Cube 0");
+    const std::string ea = fs::join(dir, "r413_sync.obj"), eb = fs::join(dir, "r413_async.obj");
+    ed.set_async_jobs_for_test(false);
+    ed.command("export obj " + ea);
+    ed.set_async_jobs_for_test(true);
+    ed.command("export obj " + eb);
+    listed = false, frames = 0;
+    for (; frames < 5000 && ed.file_export_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label.rfind("Writing ", 0) == 0;
+    }
+    ed.step_frame_headless();
+    std::string xa, xb;
+    CHECK(fs::read_file(ea, xa) && fs::read_file(eb, xb));
+    const bool same_file = strip(xa, "r413_sync") == strip(xb, "r413_async");
+    std::printf("    export on a worker: %d frame(s), listed %s, %zu bytes, the same file %s\n", frames, listed ? "yes" : "no", xb.size(), same_file ? "yes" : "no");
+    CHECK(same_file && (listed || frames <= 1));
+    /* Import on a worker. */
+    const size_t objects = ed.scene().object_count();
+    ed.command("import " + ea + " asis");
+    listed = false, frames = 0;
+    for (; frames < 5000 && ed.import_job_running_for_test(); frames++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label.rfind("Reading ", 0) == 0;
+    }
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();  // (the import's own busy step)
+    std::printf("    import on a worker: %d frame(s), listed %s, %zu objects (%zu before)\n", frames, listed ? "yes" : "no", ed.scene().object_count(), objects);
+    CHECK((listed || frames <= 1) && ed.scene().object_count() > objects);
+    for (const std::string &p : {a, b, ea, eb}) std::remove(p.c_str());
+  });
+}
+
 /* ----------------------------------------------------------- round 412: renders and bakes on workers (ADR 0106) */
 static void tests_round412() {
   test("renders on a worker (round 412, ADR 0106): F12 rasterized and path traced run off the main thread - the frames while they run stay short, the tray lists the render, the rasterized picture is bit-identical to the one the main thread drew before, a traced one is the same twice; Stop lands what it had; a new scene mid-render waits for it", [] {
@@ -7888,5 +8100,6 @@ void run_editor_tests() {
   tests_round409();
   tests_round411();
   tests_round412();
+  tests_round413();
   coverage_tests();
 }

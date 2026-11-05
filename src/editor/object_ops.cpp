@@ -9,6 +9,8 @@
 //             stays out of renders). Solver: Manifold, as Blender's.
 #include "editor.h"
 
+#include <unordered_set>
+
 #include <algorithm>
 
 namespace bl {
@@ -174,9 +176,15 @@ void Editor::boolean_selected(int op, bool apply, uint64_t kept) {
 }
 
 /* A new object beside `g` with the same components and the given mesh. */
-GameObject *Editor::spawn_part(GameObject *g, Mesh mesh) {
+GameObject *Editor::spawn_part(GameObject *g, Mesh mesh, std::unordered_set<std::string> *names, int *next) {
   GameObject *n = scene_->create(g->name, g->parent);
-  make_name_unique(*scene_, n);
+  if (names) {  // (round 413: many parts - the free name from the set, not a scan of every object per try)
+    std::string name = g->name;
+    while (names->count(name)) name = strprintf("%s.%03d", g->name.c_str(), ++*next);
+    names->insert(name);
+    n->name = name;
+  }
+  else make_name_unique(*scene_, n);
   n->set_local(g->local());
   for (auto &c : g->components) {
     if (dynamic_cast<MeshFilter *>(c.get())) n->add<MeshFilter>()->mesh = std::make_shared<Mesh>(std::move(mesh));
@@ -244,15 +252,14 @@ void Editor::separate(const std::string &mode) {
       Log::warn("Separate: '%s' is one %s", g->name.c_str(), mode == "material" ? "material" : mode == "shapekeys" ? "part (every face or none moved by its shape keys)" : "connected piece");
       return;
     }
-    const Mesh src = *mp;
-    for (size_t k = 1; k < parts; k++) {
-      std::vector<uint8_t> sel(src.face_count(), 0);
-      for (size_t f = 0; f < src.face_count(); f++) sel[f] = part[f] == (int)k;
-      made.push_back(spawn_part(g, meshops::extract_faces(src, sel)));
-    }
-    std::vector<uint8_t> keep(src.face_count(), 0);
-    for (size_t f = 0; f < src.face_count(); f++) keep[f] = part[f] == 0;
-    mp = std::make_shared<Mesh>(meshops::extract_faces(src, keep));
+    /* Round 413: every part in one pass over the mesh, the names from one set (10,000 loose parts had taken 1,100 s:
+     * a copy of the whole mesh per part and a scan of every object per name tried). */
+    std::vector<Mesh> pieces = meshops::split_by_part(*mp, part, parts);
+    std::unordered_set<std::string> names;
+    scene_->for_each([&](GameObject &o) { names.insert(o.name); });
+    int next = 0;
+    for (size_t k = 1; k < parts; k++) made.push_back(spawn_part(g, std::move(pieces[k]), &names, &next));
+    mp = std::make_shared<Mesh>(std::move(pieces[0]));
   }
   if (mode == "shapekeys") {  // (each part only the keys that move it: the unkeyed part none - review 358)
     meshops::drop_unmoving_keys(*mesh_make_mutable(mp));

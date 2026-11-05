@@ -234,6 +234,8 @@ void Editor::save_lighting_data() {
 /* What Generate Lighting (and its preview) bakes: the Contribute GI objects, copied (the scene may change
  * while it runs), and the lights with their modes. */
 void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) {
+  eval_jobs_wait();  // (round 413: the workers' finished results taken first)
+  const GameObject::EvaluateNowScope evaluate_now;  // (the stacks' exact results, not what a worker is still making)
   objects.clear();
   lights.clear();
   std::unordered_map<const Material *, MaterialPtr> copies;

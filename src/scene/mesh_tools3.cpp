@@ -121,6 +121,74 @@ Mesh extract_faces(const Mesh &m, const std::vector<uint8_t> &face_sel) {
   return out;
 }
 
+std::vector<Mesh> split_by_part(const Mesh &m, const std::vector<int> &face_part, size_t parts) {
+  std::vector<std::vector<uint32_t>> faces(parts);
+  for (size_t f = 0; f < m.face_count() && f < face_part.size(); f++)
+    if (face_part[f] >= 0 && (size_t)face_part[f] < parts) faces[(size_t)face_part[f]].push_back((uint32_t)f);
+  std::vector<Mesh> out(parts);
+  std::vector<uint32_t> remap(m.vert_count(), UINT32_MAX), touched, local;
+  const bool uv = m.has_uvs();
+  for (size_t p = 0; p < parts; p++) {
+    Mesh &o = out[p];
+    o.name = m.name;
+    o.smooth = m.smooth;
+    o.smooth_angle = m.smooth_angle;
+    o.seams_sharp = m.seams_sharp;
+    touched.clear();
+    auto local_vert = [&](uint32_t v) {
+      if (remap[v] == UINT32_MAX) {
+        remap[v] = (uint32_t)o.positions.size();
+        o.positions.push_back(m.positions[v]);
+        touched.push_back(v);
+      }
+      return remap[v];
+    };
+    for (uint32_t f : faces[p]) {
+      const uint32_t n = m.face_size(f);
+      const uint32_t *v = m.face_verts(f);
+      local.resize(n);
+      for (uint32_t k = 0; k < n; k++) local[k] = local_vert(v[k]);
+      o.add_face(local.data(), n, uv ? m.uvs.data() + m.face_offsets[f] : nullptr, m.material_of(f));
+      if (!m.face_smooth.empty()) {
+        o.face_smooth.resize(o.face_count() - 1, m.smooth ? 1 : 0);
+        o.face_smooth.push_back(m.smooth_of(f) ? 1 : 0);
+      }
+    }
+    if (!m.face_material.empty()) o.face_material.resize(o.face_count(), 0);
+    auto both = [&](uint64_t k) {
+      const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+      return a < remap.size() && b < remap.size() && remap[a] != UINT32_MAX && remap[b] != UINT32_MAX ? Mesh::edge_key(remap[a], remap[b]) : UINT64_MAX;
+    };
+    for (uint64_t k : m.seams)
+      if (const uint64_t e = both(k); e != UINT64_MAX) o.seams.push_back(e);
+    for (uint64_t k : m.sharp_edges)
+      if (const uint64_t e = both(k); e != UINT64_MAX) o.sharp_edges.push_back(e);
+    for (uint64_t k : m.loose_edges)  // (a wire edge inside the part only: one between parts has no part to go to)
+      if (const uint64_t e = both(k); e != UINT64_MAX) o.loose_edges.push_back(e);
+    std::sort(o.seams.begin(), o.seams.end());
+    std::sort(o.sharp_edges.begin(), o.sharp_edges.end());
+    std::sort(o.loose_edges.begin(), o.loose_edges.end());
+    for (const VertexGroup &g : m.vertex_groups) {
+      if (g.weights.size() != m.vert_count()) continue;
+      VertexGroup ng;
+      ng.name = g.name;
+      ng.weights.assign(o.vert_count(), 0.0f);
+      for (uint32_t v : touched) ng.weights[remap[v]] = g.weights[v];
+      o.vertex_groups.push_back(std::move(ng));
+    }
+    for (const ShapeKey &k : m.shape_keys) {
+      if (k.delta.size() != m.vert_count()) continue;
+      ShapeKey nk{k.name, std::vector<Vec3>(o.vert_count(), Vec3(0.0f))};
+      for (uint32_t v : touched) nk.delta[remap[v]] = k.delta[v];
+      o.shape_keys.push_back(std::move(nk));
+    }
+    for (uint32_t v : touched) remap[v] = UINT32_MAX;
+    o.sync_attributes();
+    o.touch();
+  }
+  return out;
+}
+
 size_t loose_parts(const Mesh &m, std::vector<int> &face_part) {
   std::vector<uint32_t> parent(m.vert_count());
   std::iota(parent.begin(), parent.end(), 0u);

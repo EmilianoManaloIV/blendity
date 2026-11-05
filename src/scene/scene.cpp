@@ -2983,6 +2983,43 @@ struct CameraViewEval {
 
 bool evaluating_camera_view() { return g_camera_view_eval; }
 
+GameObject::SlowEvalHook GameObject::slow_eval_hook;
+static thread_local int tl_evaluate_now = 0;
+GameObject::EvaluateNowScope::EvaluateNowScope() { tl_evaluate_now++; }
+GameObject::EvaluateNowScope::~EvaluateNowScope() { tl_evaluate_now--; }
+
+/* Round 413: the worker's result taken - the caches of `from` (a standalone copy of this object with the same base mesh and
+ * components) become this kind's; the pending mark cleared; the generation moved so every view draws it. */
+void GameObject::adopt_evaluation(GameObject &from, int kind) {
+  kind = std::max(0, std::min(kind, 8));
+  eval_mesh_[kind] = std::move(from.eval_mesh_[kind]);
+  eval_key_[kind] = from.eval_key_[kind];
+  eval_head_[kind] = std::move(from.eval_head_[kind]);
+  eval_head_key_[kind] = from.eval_head_key_[kind];
+  eval_head_topo_[kind] = from.eval_head_topo_[kind];
+  eval_chain_[kind] = std::move(from.eval_chain_[kind]);
+  eval_from_[kind] = from.eval_from_[kind];
+  eval_shape_key_[kind] = from.eval_shape_key_[kind];
+  eval_pending_[kind] = 0;
+  eval_generation_++;
+}
+
+/* Round 413: whether a stack is worth a worker - the work it means, from the base mesh's faces and the modifiers that
+ * run (a Decimate the faces, a Subdivision four to a level, the rest a tenth), past 200,000 face-steps - and reads no
+ * other object (a modifier with a dependency hash is left to the main thread: the worker's copy has no scene). */
+static bool evaluation_slow(const Mesh &base, const std::vector<std::unique_ptr<Component>> &components, const std::function<bool(const Component &)> &on) {
+  const double faces = (double)base.face_count();
+  double work = 0.0;
+  for (const auto &c : components) {
+    if (!on(*c)) continue;
+    if (c->modifier_dependency_hash() != 0) return false;
+    if (dynamic_cast<const DecimateModifier *>(c.get())) work += faces;
+    else if (const auto *s = dynamic_cast<const SubdivisionSurface *>(c.get())) work += faces * std::pow(4.0, (double)std::max(0, std::min(6, s->levels)));
+    else work += faces * 0.1;
+  }
+  return work >= 200000.0;
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 8));
   const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
@@ -2997,6 +3034,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   mix(mf->mesh->version);
   uint64_t topo_key = key;  // (ADR 0075: the key without the base's deform_version - what the subdivision chain follows)
   auto tmix = [&](uint64_t v) { topo_key = (topo_key ^ v) * kFnvPrime; };
+  uint64_t shape_key = key;  // (round 413: the key without the deform - a deform alone is the main thread's, the chain following)
+  auto smix = [&](uint64_t v) { shape_key = (shape_key ^ v) * kFnvPrime; };
   mix(mf->mesh->deform_version);  // (ADR 0075: a positions-only change - a sculpt dab - re-evaluates the stack; the views' keys already read it)
   /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
    * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
@@ -3023,6 +3062,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     const uint64_t hc = hash_component(c), hd = c.modifier_dependency_hash();
     mix(hc);
     mix(hd);
+    smix(hc), smix(hd);
     if (i < split) tmix(hc), tmix(hd), head_count++, chain_sub = dynamic_cast<const SubdivisionSurface *>(&c);
     if (i + 1 == split) head_key = key, head_topo_key = topo_key;
   }
@@ -3030,13 +3070,24 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
   if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime, head_topo_key = (head_topo_key ^ shape_hash) * kFnvPrime;
-  if (shaped) mix(shape_hash);
+  if (shaped) mix(shape_hash), smix(shape_hash);
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
   if (!any && !shaped) {  // (nothing drawn over the mesh: the caches go with it - a chain's tables are not kept for nothing)
     eval_mesh_[kind] = nullptr, eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
     return mf->mesh.get();
   }
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
+  /* Round 413 (ADR 0107): a slow stack goes to the editor's worker; what it had stays up meanwhile. Not when only the
+   * base's positions moved since the last result (a dab, a drag: the chain follows them here, ADR 0075), and not inside
+   * an EvaluateNowScope. */
+  const bool deform_only = eval_mesh_[kind] && eval_shape_key_[kind] == shape_key;
+  if (slow_eval_hook && tl_evaluate_now == 0 && kind <= 2 && !deform_only && (eval_pending_[kind] == key || evaluation_slow(*mf->mesh, components, on)) &&
+      slow_eval_hook(*this, kind, key)) {
+    eval_pending_[kind] = key;
+    return eval_mesh_[kind] ? eval_mesh_[kind].get() : mf->mesh.get();
+  }
+  eval_pending_[kind] = 0;
+  eval_shape_key_[kind] = shape_key;
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
       if (on(*components[i])) run_modifier(*components[i], m);

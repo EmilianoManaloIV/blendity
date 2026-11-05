@@ -1358,6 +1358,16 @@ bool Editor::sculpt_dynamesh(int resolution, int smooth) {
   sculpt_end_stroke();
   sculpt_gesture_ = false;
   commit_undo();
+  if (jobs_async())  // (round 413, ADR 0107: on a worker, the old mesh up until it lands as one step)
+    return mesh_job_start(*g, strprintf("DynaMesh %d", resolution), [resolution, smooth](Mesh &m, std::string &why) {
+      Mesh out;
+      meshops::DynaMeshStats st;
+      if (!meshops::dynamesh(m, resolution, smooth, out, &st, &why)) return false;
+      Log::info("DynaMesh %d: %zu vertices / %zu faces -> %zu / %zu quads (a cell of %.4f, %zu cells merged; columns %.1f ms, nets %.1f ms, relax %.1f ms, %.1f ms in all)", resolution,
+                st.verts_in, st.faces_in, st.verts_out, st.faces_out, st.cell, st.filled_cells, st.ms_columns, st.ms_nets, st.ms_smooth, st.ms_total);
+      m = std::move(out);
+      return true;
+    }, [this](GameObject &) { sculpt_cache_mesh_ = nullptr, sculpt_stroke_mesh_ = nullptr; });
   Mesh out;
   meshops::DynaMeshStats st;
   std::string why;

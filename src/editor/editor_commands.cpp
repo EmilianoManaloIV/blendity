@@ -82,6 +82,7 @@ void Editor::save_scene_to(const std::string &path) {
   const std::string old_path = scene_->path, old_name = scene_->name;
   scene_->path = p, scene_->name = fs::stem(p);
   save_scene_cmd(false);
+  if (save_job_) return;  // (round 413: written on a worker - its landing says when it couldn't)
   std::string head;
   if (fs::read_prefix(p, 1, head) && !head.empty()) return;
   scene_->path = old_path, scene_->name = old_name;  // (not written: nothing changed, no empty file left)
@@ -1412,7 +1413,16 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "delete") delete_selected();
   else if (c == "subdivide") {
     int n = std::max(1, std::atoi(arg(1, "1").c_str()));
-    for (int i = 0; i < n; i++) mesh_op("subdivide");
+    std::vector<GameObject *> objs = selected_objects(false);
+    if (jobs_async() && !edit_mode_ && !sculpt_ && objs.size() == 1 && objs[0]->get<MeshFilter>() && objs[0]->get<MeshFilter>()->mesh) {  // (round 413: on a worker)
+      fold_edit_shape();
+      mesh_job_start(*objs[0], n > 1 ? strprintf("Subdivide x%d", n) : std::string("Subdivide"), [n](Mesh &m, std::string &) {
+        for (int i = 0; i < n; i++) m = meshops::subdivide(m, 1, true);
+        return true;
+      });
+    }
+    else
+      for (int i = 0; i < n; i++) mesh_op("subdivide");
   }
   else if (c == "smooth") mesh_op("smooth");
   else if (c == "stats") {

@@ -204,6 +204,30 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 413 (geometry and files on workers, ADR 0107; `blendity_stress --only responsiveness --quick`)
+
+The geometry and file rows against round 411's baseline above. Separate's row is the one pass; the others are jobs
+whose frames are the editor's own (an open's landing frame swaps the scene; an import's lands the objects).
+
+| Row | Longest frame before (ms) | Longest frame now (ms) | Frames now | In the tray | Budget |
+|---|---|---|---|---|---|
+| Decimate on the 500k sphere | 881.6 | 8.6 | 1062 | Evaluating Parity Sphere | ok |
+| Subdivide, 2 levels on the 50k sphere | 178.5 | 5.0 | 52 | Subdivide x2 | ok |
+| DynaMesh at 128 on the 50k sphere | 101.8 | 4.8 | 138 | DynaMesh 128 | ok |
+| Separate 10,000 joined cubes | 1115487.9 | 119.3 | 1 | - | OVER |
+| Enter Edit Mode on the 500k sphere | 134.8 | 158.0 | 1 | Overlap check | OVER |
+| Save the 500k sphere's scene | 171.3 | 3.5 | 151 | Saving big.scene | ok |
+| Open the 500k sphere's scene | 202.0 | 1.4 | 261 | Opening big.scene | ok |
+| Open the 10,000 cubes' scene | 102.5 | 1.1 | 168 | Opening cubes.scene | ok |
+| Export the 50k sphere as obj | 122.8 | 6.6 | 176 | Writing sphere50k.obj | ok |
+| Import the 50k sphere from obj | 201.6 | 71.7 | 145 | Reading sphere50k.obj | OVER |
+| Import the 50k sphere from fbx | 109.2 | 38.3 | 62 | Reading sphere50k.fbx | ok |
+| Import the 50k sphere from glb | 114.3 | 24.4 | 104 | Reading sphere50k.glb | ok |
+| Export the 50k sphere as usda | 122.9 | 3.5 | 174 | Writing sphere50k.usda | ok |
+| Import the 50k sphere from usda | 182.8 | 47.8 | 161 | Reading sphere50k.usda | ok |
+
+3 still over the budget: Separate 10,000 joined cubes, Enter Edit Mode on the 500k sphere, Import the 50k sphere from obj (said in the spec's Not done).
+
 ### After round 412 (renders and bakes on workers, ADR 0106; `blendity_stress --only responsiveness --quick`)
 
 The rendering and baking rows against round 411's baseline above: the longest frame while the operation ran. A job's

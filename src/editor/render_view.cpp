@@ -508,6 +508,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
      * modifier's fields change on their own. */
     uint64_t k[3];
     g.evaluated_keys(k);
+    const uint64_t egen = g.eval_generation();  // (round 413: a stack's result adopted from a worker is a new picture)
+    mix(&egen, 8);
     mix(k, sizeof(k));
     /* Settled tangents (ADR 0034): the same mesh drawn a little differently - the views draw again, nothing that
      * keys on the evaluated meshes (a modifier stack's cache) sees a change. */

@@ -76,8 +76,17 @@ bool SceneCamera::update(double now) {
 /* ===================================================================== */
 
 Editor::Editor() = default;
+static Editor *g_eval_hook_owner = nullptr;  // (round 413: the editor GameObject::slow_eval_hook reaches)
+
 Editor::~Editor() {
   livelink_remove_discovery();  // (task 0274: the bridges stop finding a Blendity that is gone)
+  eval_jobs_.clear();      // (round 413: the workers joined before the scene goes, and before the hook they may read)
+  if (g_eval_hook_owner == this) g_eval_hook_owner = nullptr, GameObject::slow_eval_hook = nullptr;
+  save_job_wait();         // (a save in flight finishes - its file is whole)
+  mesh_job_.reset();
+  open_job_.reset();
+  import_job_.reset();
+  file_export_job_.reset();
   render_job_.reset();     // (round 412: a render on a worker stopped and joined before the tracer and the scene go)
   bake_job_.reset();       // (a bake the same)
   texbake_job_.reset();    // (a texture bake the same)
@@ -153,9 +162,11 @@ void Editor::resolve_project_paths(const std::string &near) {
   project_dir_ = assets_dir_;
 }
 
-static void common_init(Editor *) {
+static void common_init(Editor *e) {
   register_builtin_components();
   research::register_features();
+  g_eval_hook_owner = e;
+  GameObject::slow_eval_hook = [](const GameObject &g, int kind, uint64_t key) { return g_eval_hook_owner && g_eval_hook_owner->eval_job_request(g, kind, key); };
 }
 
 bool Editor::init(int argc, char **argv) {
@@ -401,6 +412,7 @@ int Editor::run() {
 }
 
 void Editor::request_close() {
+  save_job_wait();  // (round 413: a save in flight is whole before the close's own)
   if (board_dirty_) board_save();  // (task 0299: a change in the last second is kept)
   if (paper_dirty_) paper_save();  // (round 324)
   if (playing_) exit_play();  // (task 0254: first, so the auto-save runs on the scene Play restores - the edits made before Play - not on Play's discarded state)
@@ -691,6 +703,12 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (sculpt_remesh_) ui_.redraw = true;  // (frames while it works: the status line and the result's arrival)
   meshmaps_poll();  // (task 0243: finished mesh maps land as files and a record)
   texbake_poll();   // (round 412: a Bake Textures lands as a material and the UVs)
+  mesh_job_poll();  // (round 413: a Subdivide or DynaMesh lands as one step)
+  eval_jobs_poll();  // (a slow modifier stack's result adopted)
+  save_job_poll();
+  open_job_poll();
+  import_job_poll();
+  file_export_poll();
   bakelight_poll();  // (task 0247: a baked-light layer lands when its worker is done)
   surface_poll();   // (task 0244: a changed surface evaluated on a worker, its images swapped in)
   if (meshmaps_job_) {
@@ -2155,6 +2173,7 @@ void Editor::redo() {
 /* ===================================================================== */
 
 void Editor::new_scene() {
+  save_job_wait();  // (round 413: a save in flight lands on the scene it was of)
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -2192,6 +2211,46 @@ void Editor::new_scene() {
 }
 
 bool Editor::open_scene(const std::string &path) {
+  save_job_wait();  // (round 413: a save in flight is whole before the scene goes)
+  if (!jobs_async()) {
+    auto s = std::make_unique<Scene>();
+    std::string err;
+    if (!load_scene(path, *s, err)) {
+      Log::error("Open scene failed: %s", err.c_str());
+      return false;
+    }
+    return open_scene_landed(path, std::move(s));
+  }
+  if (open_job_) {
+    Log::warn("Open: %s is still being read", fs::filename(open_job_->path).c_str());
+    return false;
+  }
+  auto job = std::make_unique<OpenJob>();
+  job->path = path;
+  job->scene = std::make_unique<Scene>();
+  OpenJob *raw = job.get();
+  raw->thread = std::thread([raw] {
+    JobSystem::global().run_background([raw] {
+      if (!load_scene(raw->path, *raw->scene, raw->err)) raw->scene.reset();
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  open_job_ = std::move(job);
+  ui_.redraw = true;
+  return true;
+}
+
+/* Round 413: the worker's scene lands - the modes left, the bake cancelled, the swap - as open_scene did in one go. */
+void Editor::open_job_poll() {
+  if (!open_job_ || !open_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<OpenJob> job = std::move(open_job_);
+  if (job->thread.joinable()) job->thread.join();
+  if (!job->scene) return Log::error("Open scene failed: %s", job->err.c_str());
+  open_scene_landed(job->path, std::move(job->scene));
+}
+
+bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s) {
+  save_job_wait();  // (round 413: a save started while the file loaded lands on the scene it was of)
   export_waits_drop("another scene opened");  // (review 354)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -2209,12 +2268,6 @@ bool Editor::open_scene(const std::string &path) {
   if (playing_) exit_play();
   bake_cancel();  // a bake belongs to the scene it started in
   if (edit_mode_) exit_edit_mode();
-  auto s = std::make_unique<Scene>();
-  std::string err;
-  if (!load_scene(path, *s, err)) {
-    Log::error("Open scene failed: %s", err.c_str());
-    return false;
-  }
   render_job_wait("the scene opened");  // (round 412)
   scene_ = std::move(s);
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
@@ -2265,20 +2318,59 @@ void Editor::save_scene_cmd(bool save_as) {
     });
     return;
   }
-  if (save_scene(*scene_, scene_->path)) {
-    scene_dirty_ = false;
-    project_listed_ = -100;
-    save_dirty_material_assets();
-    paint_flush_images();
-    save_dirty_texture_assets();  // a texture edited since the last undo step goes to its .ptex too
-    Log::info("Saved %s", scene_->path.c_str());
-    save_lighting_data();  // a bake made before the scene had a file, or before Save As
-    run_after_save();  // (task 0254: New or Open that waited for this save)
+  save_job_start();  // (round 413: a clone of the scene serialized and written on a worker; what follows a save runs when it lands)
+}
+
+/* Round 413 (ADR 0107): the scene saved from a clone (copy-on-write: the meshes shared, the materials copied) on a
+ * worker. The scene counts as clean from here - an edit meanwhile marks it again; a failed write marks it back. */
+void Editor::save_job_start() {
+  save_job_wait();  // (one at a time)
+  sculpt_end_stroke();  // (a stroke writes the mesh in place: ended, so the clone shares a mesh nobody writes)
+  auto job = std::make_unique<SaveJob>();
+  job->path = scene_->path;
+  job->clone = scene_->clone();
+  scene_dirty_ = false;
+  SaveJob *raw = job.get();
+  auto run = [raw] {
+    JobSystem::global().run_background([raw] { raw->ok = save_scene(*raw->clone, raw->path); });
+    raw->done.store(true, std::memory_order_release);
+  };
+  save_job_ = std::move(job);
+  if (!jobs_async()) {
+    run();
+    save_job_poll();
+    return;
   }
-  else {
-    after_save_ = nullptr;  // (task 0254: the action that waited is dropped with the failed save)
-    Log::error("Could not write %s", scene_->path.c_str());
-  }
+  raw->thread = std::thread(run);
+  ui_.redraw = true;
+}
+
+void Editor::save_job_poll() {
+  if (!save_job_ || !save_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<SaveJob> job = std::move(save_job_);
+  if (job->thread.joinable()) job->thread.join();
+  if (job->ok) return save_landed(job->path);
+  scene_dirty_ = true;
+  after_save_ = nullptr;  // (task 0254: the action that waited is dropped with the failed save)
+  Log::error("Could not write %s", job->path.c_str());
+}
+
+/* A save in flight finished and landed (another save, an open, a new scene, the editor closing). */
+void Editor::save_job_wait() {
+  if (!save_job_) return;
+  if (save_job_->thread.joinable()) save_job_->thread.join();
+  save_job_->done.store(true, std::memory_order_release);
+  save_job_poll();
+}
+
+void Editor::save_landed(const std::string &path) {
+  project_listed_ = -100;
+  save_dirty_material_assets();
+  paint_flush_images();
+  save_dirty_texture_assets();  // a texture edited since the last undo step goes to its .ptex too
+  Log::info("Saved %s", path.c_str());
+  save_lighting_data();  // a bake made before the scene had a file, or before Save As
+  run_after_save();  // (task 0254: New or Open that waited for this save)
 }
 
 void Editor::import_obj_file(const std::string &path) { import_model_file(path, false); }
@@ -2349,7 +2441,7 @@ static std::string file_safe(std::string s) {
 }
 
 void Editor::bake_textures_for_export(std::vector<ExportItem> &items, const std::string &path, const ExportOptions &o,
-                                      std::vector<std::shared_ptr<Mesh>> &keep) {
+                                      std::vector<std::shared_ptr<Mesh>> &keep, std::vector<std::string> *forget_later) {
   const ExportFormat f = (ExportFormat)o.format;
   if (!o.bake_textures || !o.materials || (f != ExportFormat::OBJ && f != ExportFormat::FBX && f != ExportFormat::GLB && f != ExportFormat::GLTF))
     return;
@@ -2373,7 +2465,10 @@ void Editor::bake_textures_for_export(std::vector<ExportItem> &items, const std:
       Log::error("Bake Textures: %s", err.c_str());
       continue;
     }
-    for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) texture_cache_forget(base + m);
+    for (const char *m : {"_albedo.png", "_roughness.png", "_metallic.png", "_normal.png"}) {
+      if (forget_later) forget_later->push_back(base + m);  // (round 413: the cache is the main thread's)
+      else texture_cache_forget(base + m);
+    }
     auto mesh = std::make_shared<Mesh>(*it.mesh);
     mesh->uvs = r.uvs;
     mesh->touch();
@@ -2517,6 +2612,132 @@ MaterialPtr Editor::snapshot_material(const MaterialPtr &m) {
   auto c = std::make_shared<Material>(*m);
   c->freeze_textures();
   return c;
+}
+
+/* Round 413 (ADR 0107): a mesh operator on a worker - the mesh copied, `op` run on the copy, the result landing as one
+ * step (mesh_job_poll) when the mesh is still the one it started from. One at a time. */
+bool Editor::mesh_job_start(GameObject &g, const std::string &label, std::function<bool(Mesh &, std::string &)> op, std::function<void(GameObject &)> landed) {
+  MeshFilter *mf = g.get<MeshFilter>();
+  if (!mf || !mf->mesh) return false;
+  if (mesh_job_) {
+    refuse(label + ": " + mesh_job_->label + " is still running - the tray's Cancel stops it", "jobs cancel " + mesh_job_->label, "Cancel it");
+    return false;
+  }
+  auto job = std::make_unique<MeshOpJob>();
+  job->obj = g.id;
+  job->mesh_uid = mf->mesh->uid.v;
+  job->version = mf->mesh->version, job->deform_version = mf->mesh->deform_version;
+  job->input = mesh_copy(*mf->mesh);
+  job->label = label;
+  job->op = std::move(op);
+  job->landed = std::move(landed);
+  MeshOpJob *raw = job.get();
+  auto run = [raw] {
+    JobSystem::global().run_background([raw] {
+      raw->result = raw->input;
+      raw->ok = raw->op(*raw->result, raw->why);
+    });
+    raw->done.store(true, std::memory_order_release);
+  };
+  mesh_job_ = std::move(job);
+  if (!jobs_async()) {
+    run();
+    mesh_job_poll();
+    return true;
+  }
+  raw->thread = std::thread(run);
+  Log::info("%s: on a worker (the tray's Cancel stops it)", label.c_str());
+  ui_.redraw = true;
+  return true;
+}
+
+void Editor::mesh_job_poll() {
+  if (!mesh_job_ || !mesh_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<MeshOpJob> job = std::move(mesh_job_);
+  if (job->thread.joinable()) job->thread.join();
+  std::string drop;
+  if (job->cancel.load()) drop = "cancelled";
+  else if (!job->ok) drop = job->why.empty() ? "it failed" : job->why;
+  GameObject *g = drop.empty() ? scene_->find(job->obj) : nullptr;
+  MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  if (drop.empty()) {
+    const bool same = mf && mf->mesh && mf->mesh->uid.v == job->mesh_uid && mf->mesh->version == job->version && mf->mesh->deform_version == job->deform_version;
+    if (!same) drop = "the mesh changed while it ran (a stroke, an undo, another scene)";
+    else if ((edit_mode_ && edit_obj_ == g->id) || playing_) drop = "the object is in Edit Mode or Play";
+  }
+  if (!drop.empty()) {
+    if (drop == "cancelled") Log::info("%s: cancelled - nothing kept", job->label.c_str());
+    else Log::warn("%s: %s - nothing kept", job->label.c_str(), drop.c_str());
+    ui_.redraw = true;
+    return;
+  }
+  commit_undo();
+  job->result->touch();
+  mf->mesh = job->result;
+  if (job->landed) job->landed(*g);
+  mark_changed(job->label);
+  ui_.redraw = true;
+}
+
+/* Round 413 (ADR 0107): GameObject::slow_eval_hook's answer - a slow stack's evaluation on a worker, from a standalone copy
+ * of the object (its base mesh shared copy-on-write, its components cloned). True while a job is on this object and kind:
+ * the editor shows what the object had meanwhile. Headless editors that didn't ask for workers, and the workers
+ * themselves, evaluate on the spot. */
+bool Editor::eval_job_request(const GameObject &g, int kind, uint64_t key) {
+  if (!jobs_async() || JobSystem::in_background() || kind > 2 || !scene_ || g.scene != scene_.get() || sculpt_stroking_) return false;  // (a stroke writes the base mesh in place: the main thread's)
+  for (const auto &j : eval_jobs_)
+    if (j->obj == g.id && j->kind == kind) return true;
+  if (eval_jobs_.size() >= 4) return false;  // (more at once: the main thread, as before)
+  auto job = std::make_unique<EvalJob>();
+  job->obj = g.id, job->kind = kind, job->key = key, job->name = g.name;
+  job->copy = std::make_unique<GameObject>();
+  job->copy->id = g.id;
+  job->copy->name = g.name;
+  for (const auto &c : g.components) job->copy->add_component(c->clone());
+  EvalJob *raw = job.get();
+  raw->thread = std::thread([raw, kind] {
+    JobSystem::global().run_background([raw, kind] {
+      MeshCopyBare bare;  // (the worker's copies of the base mesh without its caches: the main thread may be building them)
+      (void)raw->copy->evaluated_mesh(kind);
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  eval_jobs_.push_back(std::move(job));
+  ui_.redraw = true;
+  return true;
+}
+
+/* The finished evaluations adopted - when the object is still there and its inputs are what the job evaluated (else
+ * the next frame asks again, if the stack is still slow). */
+void Editor::eval_jobs_poll() {
+  for (size_t i = 0; i < eval_jobs_.size();) {
+    EvalJob &j = *eval_jobs_[i];
+    if (!j.done.load(std::memory_order_acquire)) {
+      i++;
+      continue;
+    }
+    if (j.thread.joinable()) j.thread.join();
+    GameObject *g = scene_->find(j.obj);
+    if (g && g->eval_pending_key(j.kind) == j.key) g->adopt_evaluation(*j.copy, j.kind);  // (the object still waits for exactly this key; else the next call asks again)
+    eval_jobs_.erase(eval_jobs_.begin() + (std::ptrdiff_t)i);
+    ui_.redraw = true;
+  }
+}
+
+void Editor::eval_jobs_wait(uint64_t obj) {
+  for (size_t i = 0; i < eval_jobs_.size();) {
+    EvalJob &j = *eval_jobs_[i];
+    if (obj && j.obj != obj) {
+      i++;
+      continue;
+    }
+    if (j.thread.joinable()) j.thread.join();
+    j.done.store(true, std::memory_order_release);
+    GameObject *g = scene_ ? scene_->find(j.obj) : nullptr;
+    if (g && g->eval_pending_key(j.kind) == j.key) g->adopt_evaluation(*j.copy, j.kind);
+    eval_jobs_.erase(eval_jobs_.begin() + (std::ptrdiff_t)i);
+    ui_.redraw = true;
+  }
 }
 
 void Editor::texbake_cancel() {
@@ -2959,12 +3180,18 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
 /* The export itself: `objects` written to `path` as `o` says. */
 std::string Editor::export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path) {
   ProceduralTextureFinalScope final_outputs;  // (round 412: a surface's whole images in the files, never the views' stand-in)
+  eval_jobs_wait();  // (round 413: the workers' finished results taken first)
+  const GameObject::EvaluateNowScope evaluate_now;  // (the stacks' exact results, not what a worker is still making)
+  sculpt_end_stroke();  // (a stroke writes the mesh in place)
   fold_edit_shape();  // (round 406: a file holds the basis and the keys)
   std::vector<ExportItem> items;
   std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
+  std::vector<std::shared_ptr<const Mesh>> held;  // (round 413: the scene's meshes the items point at, held while a worker writes)
   auto add = [&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mf = g.get<MeshFilter>();
+    if (mf && mf->mesh) held.push_back(mf->mesh);
+    if (std::shared_ptr<const Mesh> e = g.evaluated_mesh_shared(0)) held.push_back(e);
     /* Task 0268: a skinned mesh in glTF goes at rest with its rig (the skin is the file's to apply). */
     const bool gltf = o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF;
     const bool rigs = gltf || o.format == (int)ExportFormat::FBX;  // (round 352: FBX carries the rig too)
@@ -3003,6 +3230,7 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
         if (shell->vert_count() == m->vert_count()) oi.skin = it.skin;  // (review 352: the line follows the bones, as the body does)
         oi.world = it.world;
         oi.materials = ol.materials();
+        if (std::shared_ptr<const Mesh> h = ol.shell_held(shell)) held.push_back(h);  // (round 413)
         items.push_back(oi);
       }
     }
@@ -3013,8 +3241,45 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
     return "";
   }
   fs::make_dirs(fs::parent(path));  // (round 353: the images beside the file need its folder before the file is written)
-  std::string err;
   project_listed_ = -100;
+  if (jobs_async()) {  // (round 413, ADR 0107: the texture bakes and the writer on a worker; the meshes held, the materials frozen copies)
+    if (file_export_job_) {  // (one at a time: the last one landed first - a second export is never lost)
+      if (file_export_job_->thread.joinable()) file_export_job_->thread.join();
+      file_export_job_->done.store(true, std::memory_order_release);
+      file_export_poll();
+    }
+    auto job = std::make_unique<FileExportJob>();
+    job->path = path;
+    job->items = std::move(items);
+    job->options = o;
+    if (job->options.bake_textures && job->options.materials) job->options.uvs = true;  // the baked images need the baked UVs
+    job->keep = std::move(keep);
+    job->held = std::move(held);
+    /* Every item's mesh a bare copy of its own (an LOD level's cache entry, a shell, the scene's mesh with its caches the
+     * views build: none of them is read by the worker), the materials frozen copies; the procedural texture assets
+     * written here (their library is the main thread's). */
+    for (ExportItem &it : job->items) {
+      if (it.mesh) {
+        std::shared_ptr<Mesh> bare = mesh_copy_bare(*it.mesh);
+        it.mesh = bare.get();
+        job->keep.push_back(std::move(bare));
+      }
+      for (MaterialPtr &mp : it.materials) mp = snapshot_material(mp);
+    }
+    bake_texture_assets_for_export(job->items, job->path, job->options);
+    FileExportJob *raw = job.get();
+    raw->thread = std::thread([this, raw] {
+      JobSystem::global().run_background([this, raw] {
+        if (raw->options.bake_textures && raw->options.materials) bake_textures_for_export(raw->items, raw->path, raw->options, raw->keep, &raw->forget);
+        raw->ok = export_file(raw->path, raw->items, raw->options, &raw->err);
+      });
+      raw->done.store(true, std::memory_order_release);
+    });
+    file_export_job_ = std::move(job);
+    ui_.redraw = true;
+    return path;
+  }
+  std::string err;
   std::vector<std::shared_ptr<Mesh>> baked_meshes;
   ExportOptions eo = o;
   if (eo.bake_textures && eo.materials) {
@@ -3031,6 +3296,25 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
   if (o.format == (int)ExportFormat::GLB || o.format == (int)ExportFormat::GLTF || o.format == (int)ExportFormat::FBX)
     budget_report(budget_count_items(items), "the file is");  // (round 355: what the file holds against the Budget's target, when one is chosen)
   return path;
+}
+
+/* Round 413: the worker's export landed - said, the Budget's word, the texture cache's replaced entries forgotten. */
+void Editor::file_export_poll() {
+  if (!file_export_job_ || !file_export_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<FileExportJob> job = std::move(file_export_job_);
+  if (job->thread.joinable()) job->thread.join();
+  export_landed(*job);
+}
+
+void Editor::export_landed(FileExportJob &j) {
+  for (const std::string &f : j.forget) texture_cache_forget(f);
+  if (!j.ok) return Log::error("Export failed: %s", j.err.c_str());
+  export_dir_ = fs::parent(j.path);
+  project_listed_ = -100;
+  Log::info("Exported %zu mesh(es) as %s to %s", j.items.size(), export_format_name(j.options.format), j.path.c_str());
+  if (j.options.format == (int)ExportFormat::GLB || j.options.format == (int)ExportFormat::GLTF || j.options.format == (int)ExportFormat::FBX)
+    budget_report(budget_count_items(j.items), "the file is");
+  ui_.redraw = true;
 }
 
 std::string Editor::export_model(const std::string &format_in, bool selection_only) {
@@ -3983,6 +4267,8 @@ void Editor::mesh_op(const std::string &op) {
         Log::warn("Apply Modifiers: '%s' has shape keys (remove them first: shape remove <name>)", g->name.c_str());
         continue;
       }
+      eval_jobs_wait(g->id);  // (round 413: a worker's finished result taken; else evaluated now)
+      const GameObject::EvaluateNowScope now;  // (the exact result, not what a worker is still making)
       const Mesh *ev = g->evaluated_mesh();
       if (ev == mf->mesh.get()) continue;
       mf->mesh = std::make_shared<Mesh>(*ev);
