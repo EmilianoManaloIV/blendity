@@ -204,6 +204,34 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 414 (approximations on the card, ADR 0108; `blendity_stress --only world_like --quick`, `tools/bench_world.py`)
+
+The card draws the stand-in and the real projects' views instead of refusing them for one material: the Scene view's
+frame on the stand-in 25.4 -> 8.5 ms (the whole view had gone to the CPU for a see-through toon material), Scene + Game
+36.3 -> 25.2 (the camera's filters still run on the CPU over the read-back picture: round 416); SideRail's Scene + Game
+view 112 ms with the Game view refused -> 3.1 on the card. The approximations are listed in the status column.
+
+| Row | Frame ms before | Frame ms now | GPU path ms now | Status now |
+|---|---|---|---|---|
+| Scene view, views on the CPU | 25.4 | 25.5 | 0 | CPU |
+| Scene view, views on the card | 25.4 (refused) | 8.5 | 6.06 | GPU (approximated: a see-through toon material without its band edges and painted maps; Subsurface, Sheen and Coat approximated, Anisotropic ignored) |
+| Scene + Game view (Bloom, Vignette, Grading), views on the CPU | 36.6 | 37.2 | 0 | CPU |
+| Scene + Game view, views on the card | 36.3 (refused) | 25.2 | 12.67 | GPU (approximated: as above) |
+
+| Project, row (`--windowed-check`, the pipeline with its bake first) | Round 411: card / system ms | Now: card / system ms |
+|---|---|---|
+| SideRail, Scene view | 36.33 / 52.79 | 2.78 / 8.23 |
+| SideRail, Scene view, device CPU | 18.46 / 18.51 | 8.98 / 8.96 |
+| SideRail, Scene + Game view | 112.45 / 111.51 (the Game view refused) | 3.07 / 6.87 |
+| Shinano, Scene view | 6.67 / 8.56 | 2.93 / 8.09 |
+| Shinano, Scene view, device CPU | 18.79 / 18.88 | 11.06 / 11.08 |
+| Shinano, Scene + Game view | 4.83 / 5.79 | 2.15 / 3.80 |
+
+(The CPU rows fell between the runs too - rounds 412-413 moved work off the frame and round 411's run measured right
+after its bake - so read the card against the CPU within one run: 2.8 against 9.0 ms on SideRail, 2.9 against 11.1 on
+Shinano.) The responsiveness rows kept round 413's state (Separate, Edit Mode on the 500k sphere, the obj import's
+landing and the stand-in's bake OVER).
+
 ### After round 413 (geometry and files on workers, ADR 0107; `blendity_stress --only responsiveness --quick`)
 
 The geometry and file rows against round 411's baseline above. Separate's row is the one pass; the others are jobs

@@ -207,7 +207,7 @@ static void tests_round122_to_round125() {
     CHECK(within3 >= 0.99);
     ed.viewport_device_for_test(1);
   });
-  test("gpu views: a material the card doesn't draw yet (a see-through toon material) sends the view to the CPU, says why, and the picture is then the CPU's exactly", [&] {
+  test("gpu views: a material the card doesn't draw yet (a toon axis material) sends the view to the CPU, says why, and the picture is then the CPU's exactly", [&] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");
       return;
@@ -217,15 +217,15 @@ static void tests_round122_to_round125() {
     GameObject *cube = ed.scene().find_by_name("Cube");
     CHECK(cube != nullptr);
     if (!cube) return;
-    /* (A procedural was the example until task 0101 drew them on the card, an axis material until task 0195.) */
-    MaterialPtr veil = make_material("Toon Veil", {0.8f, 0.8f, 0.8f});
+    /* (A procedural was the example until task 0101 drew them on the card, an axis material until task 0195, a
+     * see-through toon material until round 414 drew it approximately: tests_round414.) */
+    MaterialPtr veil = make_material("Toon Axis", {0.8f, 0.8f, 0.8f});
     veil->shading_model = 1;
-    veil->surface = (int)MaterialSurface::Transparent;
-    veil->alpha = 0.5f;
+    veil->axis_mode = 1;
     cube->get<MeshRenderer>()->materials = {veil};
     const std::vector<uint32_t> cpu = r122_views(ed, 1), gpu = r122_views(ed, 2);
     std::printf("    %s\n", ed.gpu_view_status().c_str());
-    CHECK(ed.gpu_view_reason().find("toon") != std::string::npos);
+    CHECK(ed.gpu_view_reason().find("toon axis") != std::string::npos);
     CHECK(cpu == gpu);
     ed.viewport_device_for_test(1);
   });
@@ -2856,6 +2856,253 @@ static void tests_round225() {
 }
 
 /* ---------------------------------------------------------------- round 337: a normal map on a mesh the card already held */
+static void tests_round414() {
+  /* ---------------------------------------------------------------- round 414: approximations on the card (task 0390, ADR 0108) */
+  /* The Scene view drawn on `device` after a change; the difference against `cpu` over the object's own pixels (those
+   * that differ from the same view with the object hidden): the mean of the worst channel and the share within 3 / 255. */
+  auto r414_scene = [](Editor &ed, GameObject *obj, int device) {
+    ed.viewport_device_for_test(device);
+    for (int k = 0; k < 2; k++) {
+      obj->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  auto r414_compare = [](const std::vector<uint32_t> &cpu, const std::vector<uint32_t> &gpu, const std::vector<uint32_t> &empty, size_t &pixels, double &mean, double &within3) {
+    auto worst = [](uint32_t a, uint32_t b) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)));
+      return w;
+    };
+    double sum = 0;
+    size_t within = 0;
+    pixels = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size() && i < empty.size(); i++) {
+      if (worst(cpu[i], empty[i]) <= 8) continue;
+      const int w = worst(cpu[i], gpu[i]);
+      pixels++, sum += w, within += w <= 3;
+    }
+    mean = pixels ? sum / (double)pixels : 0, within3 = pixels ? (double)within / (double)pixels : 0;
+  };
+  /* One material on the Cube: drawn on the CPU, on the card, and hidden; the card's status and counters. */
+  struct R414 {
+    size_t pixels = 0;
+    double mean = 0, within3 = 0;
+    uint64_t views = 0, fallbacks = 0, approximated = 0;
+    std::string reason, status;
+  };
+  auto r414_case = [&](const MaterialPtr &m, R414 &r) {
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->get<MeshRenderer>()->materials = {m};
+    ed.mark_changed_for_test("material");
+    const std::vector<uint32_t> cpu = r414_scene(ed, cube, 1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = r414_scene(ed, cube, 2);
+    const FrameProfile after = ed.frame_profile_totals();
+    r.views = after.gpu_views - before.gpu_views, r.fallbacks = after.gpu_fallbacks - before.gpu_fallbacks, r.approximated = after.gpu_approximated - before.gpu_approximated;
+    r.reason = ed.gpu_view_reason(), r.status = ed.gpu_view_status();
+    cube->active = false;
+    const std::vector<uint32_t> empty = r414_scene(ed, cube, 1);
+    r414_compare(cpu, gpu, empty, r.pixels, r.mean, r.within3);
+    std::printf("    %s\n    %llu views on the card, %llu on the CPU, %llu instances approximated; over the object's %zu pixels mean %.2f / 255, %.1f %% within 3\n",
+                r.status.c_str(), (unsigned long long)r.views, (unsigned long long)r.fallbacks, (unsigned long long)r.approximated, r.pixels, r.mean, r.within3 * 100);
+    ed.viewport_device_for_test(1);
+  };
+  test("gpu views (round 414): a Principled material with Coat, Sheen and Subsurface stays on the card, drawn approximately - no view refused, the status and the Profiler's counter say what was approximated, the object within 24 / 255 of the CPU's on average", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    MaterialPtr m = make_material("Coated", {0.5f, 0.5f, 0.6f});
+    m->coat = 1.0f, m->sheen = 0.5f, m->subsurface = 0.3f;
+    R414 r;
+    r414_case(m, r);
+    CHECK(r.views > 0 && r.fallbacks == 0 && r.reason.empty());
+    CHECK(r.approximated > 0);
+    CHECK(r.status.find("approximated") != std::string::npos && r.status.find("Coat") != std::string::npos);
+    CHECK(r.pixels > 100);
+    CHECK(r.mean < 24.0);
+  });
+  test("gpu views (round 414): a see-through toon material (a red veil) stays on the card (its band edges and painted maps left out), the object within 16 / 255 of the CPU's on average; the Profiler counts it", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    MaterialPtr veil = make_material("Toon Veil", {0.9f, 0.2f, 0.2f});
+    veil->shading_model = 1;
+    veil->surface = (int)MaterialSurface::Transparent;
+    veil->alpha = 0.7f;
+    R414 r;
+    r414_case(veil, r);
+    CHECK(r.views > 0 && r.fallbacks == 0 && r.reason.empty());
+    CHECK(r.approximated > 0);
+    CHECK(r.status.find("see-through toon") != std::string::npos);
+    CHECK(r.pixels > 100);
+    CHECK(r.mean < 16.0);
+  });
+  test("gpu views (round 414): a Volume (fog) material stays on the card as a tinted shell - the view isn't refused, the fog dims what is behind it as the CPU's does (density 1 against 0), the status says it is approximated, and the fog cube is within 48 / 255 of the CPU's on average", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("shading shaded");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    MaterialPtr fog = make_material_preset("Fog");
+    fog->volume_density = 0.0f, fog->volume_color = Vec3(0.0f);
+    cube->get<MeshRenderer>()->materials = {fog};
+    ed.mark_changed_for_test("Fog");
+    ed.viewport_device_for_test(2);
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    int cx = 0, cy = 0;
+    CHECK(ed.project_to_window(cube->world_position(), cx, cy));
+    auto lum = [&] {
+      const Image &fb = ed.main_fb_for_test();
+      const uint32_t p = fb.pixels[(size_t)cy * fb.width + cx];
+      return 0.2126 * ((p >> 16) & 255) + 0.7152 * ((p >> 8) & 255) + 0.0722 * (p & 255);
+    };
+    const double behind = lum();
+    const FrameProfile before = ed.frame_profile_totals();
+    fog->volume_density = 1.0f;
+    fog->touch();
+    ed.mark_changed_for_test("Thicker");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const FrameProfile after = ed.frame_profile_totals();
+    const double through = lum();
+    std::printf("    %s\n    the cube's middle on the card: %.1f with density 0, %.1f with density 1 (ratio %.3f); %llu views on the card, %llu on the CPU\n", ed.gpu_view_status().c_str(), behind,
+                through, through / std::max(1.0, behind), (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks));
+    CHECK(after.gpu_views > before.gpu_views && after.gpu_fallbacks == before.gpu_fallbacks && ed.gpu_view_reason().empty());
+    CHECK(ed.gpu_view_status().find("Volume") != std::string::npos);
+    CHECK(behind > 20.0 && through < behind * 0.8 && through > behind * 0.05);
+    ed.viewport_device_for_test(1);
+    /* Against the CPU's fog (the view ray's real length through the cube against the shell's mean thickness). */
+    MaterialPtr fog2 = make_material_preset("Fog");
+    fog2->volume_density = 1.0f;
+    R414 r;
+    r414_case(fog2, r);
+    CHECK(r.views > 0 && r.fallbacks == 0 && r.reason.empty());
+    CHECK(r.status.find("Volume") != std::string::npos);
+    CHECK(r.pixels > 100);
+    CHECK(r.mean < 48.0);
+  });
+  test("gpu views (round 414): the Game view with Bloom over a glass cube - a picture kept in linear light with see-through surfaces - draws on the card: the see-through pixels are marked \"none\" in the linear light as the CPU marks them, so the picture matches the CPU's", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    MaterialPtr glass = make_material("Glass", {0.9f, 0.95f, 1.0f});
+    glass->surface = (int)MaterialSurface::Glass;
+    glass->roughness = 0.05f;
+    cube->get<MeshRenderer>()->materials = {glass};
+    ed.command("select Main Camera");
+    ed.command("filter add Bloom");
+    ed.mark_changed_for_test("bloom over glass");
+    auto game = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.window_rect_for_test(WindowKind::Game));
+    };
+    const std::vector<uint32_t> cpu = game(1);
+    const FrameProfile before = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu = game(2);
+    const FrameProfile after = ed.frame_profile_totals();
+    const std::string status = ed.gpu_view_status(), reason = ed.gpu_view_reason();
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size(); i++) {
+      int w = 0;
+      for (int k = 0; k < 24; k += 8) w = std::max(w, std::abs((int)((cpu[i] >> k) & 255) - (int)((gpu[i] >> k) & 255)));
+      sum += w, within += w <= 3;
+    }
+    const double mean = cpu.empty() ? 0 : sum / (double)cpu.size(), within3 = cpu.empty() ? 0 : (double)within / (double)cpu.size();
+    cube->active = false;  // (the glass's own pixels: a missing "none" mark can't hide in the whole view's mean)
+    const std::vector<uint32_t> empty = game(1);
+    size_t pixels = 0;
+    double omean = 0, owithin = 0;
+    r414_compare(cpu, gpu, empty, pixels, omean, owithin);
+    std::printf("    %s\n    %llu views on the card, %llu on the CPU; against the CPU mean %.3f / 255, %.2f %% within 3; over the glass's %zu pixels mean %.3f, %.1f %% within 3\n", status.c_str(),
+                (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks), mean, within3 * 100, pixels, omean, owithin * 100);
+    CHECK(after.gpu_views > before.gpu_views && after.gpu_fallbacks == before.gpu_fallbacks && reason.empty());
+    CHECK(mean < 1.5 && within3 >= 0.98);
+    CHECK(pixels > 100 && omean < 1.5);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 414): a material's texture over 2048 a side goes up from its first level within 2048 (noted as approximated), the view stays on the card and the object matches the CPU's where it is minified", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    const std::string path = fs::join(test_dir(), "r414_wide.png");
+    {
+      const int w = 4096, h = 64;
+      std::vector<uint32_t> g((size_t)w * h);
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) g[(size_t)y * w + x] = ((x / 256 + y / 16) & 1) ? 0xFFE0A040u : 0xFF3060C0u;
+      CHECK(write_png(path, g.data(), w, h, w));
+    }
+    MaterialPtr m = make_material("Wide", {1.0f, 1.0f, 1.0f});
+    m->base_map.path = path;
+    R414 r;
+    r414_case(m, r);
+    std::remove(path.c_str());
+    CHECK(r.views > 0 && r.fallbacks == 0 && r.reason.empty());
+    CHECK(r.status.find("shown at 2048") != std::string::npos);
+    CHECK(r.pixels > 100);
+    CHECK(r.mean < 6.0);
+  });
+  test("gpu views (round 414): the Unity-world stand-in (benchscene worldlikequick) draws its Scene view, then its Game view with the camera's filters, on the card - none refused; the approximations are listed (see-through toon, the cloth's sheen)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(1280, 720);  // (as the stress section's world_like rows drive it)
+    ed.command("benchscene worldlikequick");
+    ed.step_frame_headless();
+    ed.command("viewport device gpu");
+    ed.command("shading shaded");
+    /* The Scene view alone, then the Game view with its filters (headless, the Game window takes the Scene view's place). */
+    auto measure = [&](const char *what, double FrameProfile::*ms) {
+      for (int i = 0; i < 5; i++) ed.step_frame_headless();
+      const FrameProfile before = ed.frame_profile_totals();
+      for (int i = 0; i < 6; i++) {
+        ed.scene_cache_reset_for_test();
+        ed.step_frame_headless();
+      }
+      const FrameProfile after = ed.frame_profile_totals();
+      std::printf("    %s: %llu views on the card, %llu on the CPU, %llu instances approximated; the view %.1f ms a frame, the GPU path %.1f\n    %s\n", what,
+                  (unsigned long long)(after.gpu_views - before.gpu_views), (unsigned long long)(after.gpu_fallbacks - before.gpu_fallbacks),
+                  (unsigned long long)(after.gpu_approximated - before.gpu_approximated), (after.*ms - before.*ms) / 6.0, (after.ms_gpu - before.ms_gpu) / 6.0, ed.gpu_view_status().c_str());
+      CHECK(after.gpu_views >= before.gpu_views + 6 && after.gpu_fallbacks == before.gpu_fallbacks && ed.gpu_view_reason().empty());  // (the view, every frame)
+      CHECK(after.*ms > before.*ms);
+      CHECK(after.gpu_approximated > before.gpu_approximated);
+      CHECK(ed.gpu_view_status().find("a view on the CPU") == std::string::npos);
+      CHECK(ed.gpu_view_status().find("see-through toon") != std::string::npos && ed.gpu_view_status().find("Sheen") != std::string::npos);
+    };
+    measure("the Scene view", &FrameProfile::ms_scene3d);
+    ed.command("window Game");
+    measure("the Game view (Bloom, Vignette, Color Grading)", &FrameProfile::ms_game);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 static void tests_round337() {
   test("gpu views (round 337, the user's black cube): a cube drawn on the card, then given a procedural texture with a normal map and Physical Size 0.15, draws textured - not black from the zero tangents it first went up with (skipped without a GPU)", [] {
     if (!gpu::available()) {
@@ -2937,4 +3184,5 @@ void run_gpu_tests() {
   tests_round224();
   tests_round225();
   tests_round337();
+  tests_round414();
 }

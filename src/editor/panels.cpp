@@ -2331,6 +2331,13 @@ void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function
     const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
     stat(strprintf("%s on the CPU", view), gpu_slot_reason_[k]);
   }
+  for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (round 414, ADR 0108: what the card drew differently from the CPU, per view)
+    if (gpu_slot_approx_[k].empty() || !gpu_view_) continue;
+    const RenderTarget *rt = gpu_slot_rt_[k];
+    const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
+    stat(strprintf("%s approximated on the card", view), gpu_slot_approx_[k]);
+  }
+  if (fp.gpu_approximated) stat("GPU views: instances approximated", strprintf("%llu (F12 stays exact)", (unsigned long long)fp.gpu_approximated));
 }
 
 /* A path tracer's card time: busy and wait inside its submissions, and the busy share of `wall_ms` (the whole render

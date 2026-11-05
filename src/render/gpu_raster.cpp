@@ -1912,6 +1912,8 @@ layout(location = 8) flat in float face_hl;
 #ifdef BL_SEE_IDS
 layout(location = 0) out uint o_id;
 layout(location = 1) out uint o_inst;
+#elif defined(BL_SEE_HDR)
+layout(location = 0) out vec4 o_color;  // round 414: the linear-light plane's "none" mark
 #else
 layout(location = 0, index = 0) out vec4 o_color;
 layout(location = 0, index = 1) out vec4 o_blend;
@@ -1949,11 +1951,15 @@ void main() {
   if (!glass && a < 0.3) discard;
   o_id = I.id.x;
   o_inst = ii;
+#elif defined(BL_SEE_HDR)
+  o_color = vec4(-1.0, 0.0, 0.0, 0.0);  // (drawn over: its linear light no longer holds - the CPU's no_hdr; the bloom decodes the 8-bit picture there)
 #else
   if (face_hl > 0.5) albedo = mix(albedo, vec3(1.0, 0.55, 0.1), 0.45);
   bool solid = shadow.w > 0.5;  // (Solid shading: shade() per pixel, as the CPU's see-through pass in Gouraud mode)
   if (!glass) {
-    vec3 lit = solid ? clamp(solid_shade(albedo, specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, albedo, rough, metallic, specular, emission, I.id.y, vec4(0.0)).rgb;
+    /* (Round 414: a see-through toon surface - its band edges come from the g-buffer's neighbours, which hold other
+     * objects here, so toon_neighbour gives none; its painted maps aren't in the toon planes: F_TOONMAP masked.) */
+    vec3 lit = solid ? clamp(solid_shade(albedo, specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, albedo, rough, metallic, specular, emission, I.id.y & ~F_TOONMAP, vec4(0.0)).rgb;
     o_color = vec4(lit * a, 1.0);
     o_blend = vec4(1.0 - a);
     return;
@@ -1963,7 +1969,7 @@ void main() {
   float f0 = (ior - 1.0) / (ior + 1.0);
   f0 *= f0;
   float nv = clamp(dot(n, V), 0.0, 1.0), F = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
-  vec3 refl = solid ? clamp(solid_shade(vec3(0.0), specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, vec3(0.0), rough, 0.0, f0 / 0.08, emission, I.id.y, vec4(0.0)).rgb;  // (the see-through pass reads no baked light, as the CPU's)
+  vec3 refl = solid ? clamp(solid_shade(vec3(0.0), specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, vec3(0.0), rough, 0.0, f0 / 0.08, emission, I.id.y & ~F_TOONMAP, vec4(0.0)).rgb;  // (the see-through pass reads no baked light, as the CPU's)
   o_color = vec4(refl, 1.0);
   o_blend = vec4(albedo * (1.0 - F), 0.0);
 #endif
@@ -2218,6 +2224,7 @@ class VulkanRaster final : public Raster {
   bool can_draw_toon_maps() const override { return pl_toon_[0] && pl_toon_[1] && pl_toon_[2]; }
   bool can_draw_baked() const override { return pl_baked_[0] && pl_baked_[1] && pl_baked_[2]; }
   bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
+  bool can_draw_see_through_hdr() const override { return pl_see_hdr_ != VK_NULL_HANDLE; }  // (round 414)
   /* Task 0197: the slot's last picture in linear light, rgba per pixel (x -1: none there), read back on its own. */
   bool read_hdr(int slot, float *rgba, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
@@ -2454,6 +2461,10 @@ class VulkanRaster final : public Raster {
       f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_hdr_);
       f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
       f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+      if (!fr.see_through.empty() && can_draw_see_through() && pl_see_hdr_) {  // (round 414: the see-through pixels marked "none", as the CPU marks them)
+        f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_see_hdr_);
+        f_.vkCmdDraw(cmd_, (uint32_t)fr.see_through.size(), 1, 0, 0);
+      }
       f_.vkCmdEndRenderPass(cmd_);
       barrier();
     }
@@ -3033,6 +3044,7 @@ class VulkanRaster final : public Raster {
              pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE,
              pl_ov_line_ = VK_NULL_HANDLE, pl_ov_point_ = VK_NULL_HANDLE, pl_outline_ = VK_NULL_HANDLE,  // (task 0192)
              pl_see_ = VK_NULL_HANDLE, pl_see_ids_ = VK_NULL_HANDLE;  // (task 0195)
+  VkPipeline pl_see_hdr_ = VK_NULL_HANDLE;  // round 414: the see-through triangles' "none" marks in the linear-light plane
   VkPipeline pl_toon_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0196: the toon pass - not culled, back, front
   VkPipeline pl_baked_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0197: the baked pass
   VkPipeline pl_hdr_ = VK_NULL_HANDLE;    // task 0197: the lighting in linear light
@@ -4042,13 +4054,18 @@ class VulkanRaster final : public Raster {
     std::string serr;
     const std::string fs = std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kLightFrag + kLightFns + kLightFrag2 + kSeeCommon;
     VkShaderModule vs = module(std::string(kSeeCommon) + kSeeVert, shaderc_vertex_shader, &serr), cf = module(fs + kSeeFrag, shaderc_fragment_shader, &serr),
-                   idf = module("#define BL_SEE_IDS 1\n" + fs + kSeeFrag, shaderc_fragment_shader, &serr);
+                   idf = module("#define BL_SEE_IDS 1\n" + fs + kSeeFrag, shaderc_fragment_shader, &serr),
+                   hf = module("#define BL_SEE_HDR 1\n" + fs + kSeeFrag, shaderc_fragment_shader, &serr);  // (round 414)
     if (vs && cf && idf) {
       pl_see_ = make_pipeline(rp_light_, vs, cf, 1, false, VK_CULL_MODE_NONE, false, VK_NULL_HANDLE, true);
       pl_see_ids_ = make_pipeline(rp_ids_, vs, idf, 2, false, VK_CULL_MODE_NONE);
     }
+    /* (Round 414: drawn inside the linear-light pass - a pipeline made for rp_hdr_ is compatible with it: the same
+     * one attachment; without it, such views stay the CPU's.) */
+    if (vs && hf && rp_hdr_) pl_see_hdr_ = make_pipeline(rp_hdr_, vs, hf, 1, false, VK_CULL_MODE_NONE);
     if (!can_draw_see_through()) Log::warn("The GPU view can't draw see-through surfaces (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
-    for (VkShaderModule m : {vs, cf, idf})
+    else if (!can_draw_see_through_hdr()) Log::warn("The GPU view can't draw see-through surfaces over a picture kept in linear light (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
+    for (VkShaderModule m : {vs, cf, idf, hf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
   }
   /* Task 0196: the toon pass's pipelines, culled as the g-buffer's (the same vertex shader: the same depth). */
@@ -4100,6 +4117,7 @@ class VulkanRaster final : public Raster {
         {std::string(kLightFns) + kGbufVert, shaderc_vertex_shader},
     };
     if (dual_src_) srcs.push_back({see + kSeeFrag, shaderc_fragment_shader}), srcs.push_back({"#define BL_SEE_IDS 1\n" + see + kSeeFrag, shaderc_fragment_shader});
+    if (dual_src_) srcs.push_back({"#define BL_SEE_HDR 1\n" + see + kSeeFrag, shaderc_fragment_shader});  // (round 414)
     if (geometry_) srcs.push_back({mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
@@ -4254,7 +4272,7 @@ class VulkanRaster final : public Raster {
       for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb, &sl.hdr})
         free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);

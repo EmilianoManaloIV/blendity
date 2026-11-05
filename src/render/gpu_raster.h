@@ -304,6 +304,7 @@ class Raster {
   virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
   virtual bool can_draw_baked() const { return false; }         // task 0197: lightmaps and probes (the baked pass)
   virtual bool can_draw_hdr() const { return false; }           // task 0197: the picture in linear light
+  virtual bool can_draw_see_through_hdr() const { return false; }  // round 414: see-through surfaces over it (their pixels marked "none", as the CPU's)
   /* Task 0197: the slot's last picture in linear light (a frame with want_hdr), rgba a pixel, x -1 where none. */
   virtual bool read_hdr(int slot, float *rgba, std::string *err) { (void)slot, (void)rgba; if (err) *err = "no linear light"; return false; }
   /* Task 0197: the probe volume, packed (the editor's probe_pack), kept until replaced. */

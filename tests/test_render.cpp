@@ -11190,7 +11190,9 @@ static void tests_round330() {
     ed.viewport_device_for_test(2);
     for (int i = 0; i < 4; i++) ed.step_frame_headless();
     std::printf("    the views: %s\n", ed.gpu_view_status().c_str());
-    CHECK(ed.gpu_view_reason().find("Subsurface, Sheen, Coat or Anisotropic") != std::string::npos);
+    /* (Round 414, ADR 0108: drawn on the card approximately and said so; before, the view went to the CPU.) */
+    CHECK(ed.gpu_view_reason().empty());
+    CHECK(ed.gpu_view_status().find("Coat") != std::string::npos);
     ed.viewport_device_for_test(1);
   });
 }
@@ -11273,7 +11275,8 @@ static void tests_round331() {
       ed.viewport_device_for_test(2);
       for (int i = 0; i < 4; i++) ed.step_frame_headless();
       std::printf("    the views: %s\n", ed.gpu_view_status().c_str());
-      CHECK(ed.gpu_view_reason().find("Volume") != std::string::npos);
+      CHECK(ed.gpu_view_reason().empty());  // (round 414, ADR 0108: a tinted shell on the card, noted as approximated)
+      CHECK(ed.gpu_view_status().find("Volume") != std::string::npos);
       ed.viewport_device_for_test(1);
     }
   });

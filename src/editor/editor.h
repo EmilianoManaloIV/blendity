@@ -223,6 +223,7 @@ struct FrameProfile {
   uint64_t gpu_cage_frames = 0, gpu_cage_bytes = 0;      // task 0100: Scene view frames whose cage the card drew; what it sent
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
   uint64_t gpu_overlay_frames = 0;                        // task 0192: Scene view frames whose overlays the card drew
+  uint64_t gpu_approximated = 0;                          // round 414 (ADR 0108): instances the card drew approximately (noted per view) rather than refusing the view
   uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
   uint64_t gpu_cage_vert_builds = 0;                      // task 0205: frames whose cage vertices (and Face mode's dots) were worked out again
   double ms_gpu = 0;
@@ -250,6 +251,7 @@ struct FrameProfile {
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
+    gpu_approximated += o.gpu_approximated;
     gpu_upload_bytes += o.gpu_upload_bytes;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
@@ -1512,6 +1514,7 @@ class Editor {
   int viewport_device() const { return viewport_device_; }
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
+  std::string gpu_view_approximations() const;  // round 414 (ADR 0108): what the card drew differently from the CPU in the views it drew ("" none)
   std::string window_device_status(bool card_present, int card_win, const std::string &card_reason) const;  // (task 0199)
   bool notice_cpu_fallback();  // (true: said now)
   bool notice_in_tests_ = false;
@@ -5868,6 +5871,7 @@ class Editor {
   std::vector<float> gpu_hdr_scratch_;  // (task 0197: the card's linear light, read back, kept between frames)
   void prune_gpu_lightmaps();
   static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
+  static constexpr int kCardMaxTexture = 2048;      // round 414 (ADR 0108): a material's texture goes up from its first level within this (Unity's default import size)
   void gpu_probe_volume(const ProbeVolumeData &d);
   std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;
   uint64_t gpu_probe_key_ = 0;
@@ -5879,6 +5883,7 @@ class Editor {
   std::string gpu_view_reason_;      // why the last view the GPU was wanted for drew on the CPU ("" = it didn't)
   double picker_ms_ = 0.0;           // round 411: the time a native file dialog blocked this frame (not the frame's own work: taken off the deferred time)
   std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
+  std::string gpu_slot_approx_[gpu::Raster::kSlots];  // round 414: per view, what the card drew approximately ("" nothing; the Profiler lists them)
   std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
   double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
   bool gpu_split_readback_for_test_ = false;  // (task 0160: render and read back as two submissions, for the test)
@@ -5904,9 +5909,12 @@ class Editor {
     TexturePtr keep;  // (held while the card has it: its address stays this texture's)
     uint64_t used = 0;
     std::string refused;  // id -1: why the card can't hold it
+    std::string approx;   // round 414: the card holds a smaller copy (the note for the view), "" the texture as it is
   };
   std::unordered_map<const Texture *, GpuTexture> gpu_textures_;
-  int gpu_texture(const TexturePtr &t, std::string &err);
+  /* `approx`: a material's texture (round 414) - capped at kCardMaxTexture a side, and at 64 when the card's buffers
+   * are full - with the note added there; null: the texture as it is (lightmaps, the world's and the probes' maps). */
+  int gpu_texture(const TexturePtr &t, std::string &err, std::string *approx = nullptr);
   const Texture *gpu_world_tex_ = nullptr;  // the world's map the card holds (task 0102)
   void gpu_forget_old_world(const LightingEnv &env);
   bool gpu_view_refuse(int slot, const std::string &why);

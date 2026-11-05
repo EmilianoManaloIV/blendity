@@ -86,7 +86,7 @@ def windowed(exe, project, cmds, out_png, frames=120):
         m = re.search(r"presented by the %s: ([\d.]+) ms a frame over \d+ frames, ([\d.]+) views a frame on the card(; on the CPU: ([^\n]*))?" % who, text)
         if m:
             rows[who] = {"ms": float(m.group(1)), "views_on_card": float(m.group(2)), "cpu_reason": (m.group(4) or "").strip()}
-    m = re.search(r"windowed check: (\d+x\d+), views ([^;]+);", text)
+    m = re.search(r"windowed check: (\d+x\d+), views (.+?); the card", text)  # (the status may hold "; " between its approximation notes, round 414)
     rows["status"] = m.group(2).strip() if m else "?"
     parts = re.search(r"of it \(nested, not to add up\): the Scene view ([\d.]+) \(its overlays ([\d.]+)\), the views' GPU path ([\d.]+) \(the card's passes ([\d.]+); uploads, copies back and the wait ([\d.]+)\), gathering ([\d.]+), hashing ([\d.]+); the UI ([\d.]+), presenting ([\d.]+) ms", text)
     if parts:

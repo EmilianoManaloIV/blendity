@@ -2,6 +2,39 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 414): the Scene view stays on the card for a Unity world
+
+**Asked:** "Use Vrchat world and avatar unity packages to measure performance ... as very real projects" and "Is the
+Scene view drawn by the GPU?" - round 411's baseline found the card refusing SideRail's whole Scene view for one
+see-through toon material, and its Game view for the Bloom over glass. Pass 16's fourth round (the plan: rounds
+411-420).
+
+**Changed (task 0390, ADR 0108)**
+- **Approximations per object instead of refusals per view:** a see-through toon material, a Volume (fog) and a
+  Principled material with Subsurface, Sheen, Coat or Anisotropic no longer send the view to the CPU. The card draws
+  them nearly - the toon veil through the see-through pass without its band edges and painted maps, the fog as a tinted
+  shell at the opacity of the mesh's mean thickness, the extras folded into the base, roughness and specular (Anisotropic
+  ignored) - and says so: `viewport status` and the Profiler list "approximated: ..." per view and count the instances.
+  F12 stays exact.
+- **See-through over a picture kept in linear light** (the Game view's Bloom over glass or a transparent material) draws
+  on the card exactly: the see-through pixels are marked "none" in the card's linear light as the CPU marks its own.
+- **Textures capped, never refused for their size:** a material's texture over 2048 a side goes up from its first level
+  within 2048 (Unity's default import size); one the card's buffers can't hold goes up at 64 x 64; both noted.
+- The lessons "Rendering on the GPU" and "Where the Time Goes" say what the badge and the status mean now;
+  `tests_round414`.
+- CI (the macOS job of #311): the Live Link clip-throttle test read the wall clock through a slow runner; its strict
+  "owed" check now holds only when the second change came within the quarter-second gap.
+
+**Measured:** the stand-in's Scene view on the card 25.4 -> 8.5 ms a frame (the whole view had gone to the CPU for one
+see-through toon material), Scene + Game 36.3 -> 25.2; SideRail's Scene + Game view 112 ms with the Game view refused ->
+3.1 on the card, its Scene view 2.8 against the CPU's 9.0; Shinano's 2.9 against 11.1 (docs/PERFORMANCE.md, the spec).
+The tests: the coat / sheen / subsurface cube 5.5 / 255 from the CPU over its pixels, the toon veil 1.0, the fog cube
+3.6, the bloom-over-glass view 0.06 (the glass 0.94), the 4096 texture 0.40, the stand-in 0 refusals.
+
+**Checked:** `tests_round414` (each approximated kind against the CPU over the object's pixels to a stated distance, the
+bloom-over-glass view exact, the 4096 texture capped, the stand-in with 0 refusals); the two render tests that asserted
+the refusals assert the approximations; both suites, the audits.
+
 ## 2026-11-04 (round 413): geometry and files never halt the editor
 
 **Asked:** "Rendering, Baking, or doing intensive operations should not halt the program." Pass 16's third round: the

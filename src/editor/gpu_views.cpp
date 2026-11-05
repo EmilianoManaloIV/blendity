@@ -46,13 +46,10 @@ std::vector<uint32_t> mesh_slots(const RenderMesh &rm) {
 }
 
 /* Why a material can't be drawn on the GPU yet, or null. Textures, procedurals and Box / Generated mapping are drawn
- * there since task 0101 (ADR 0038). */
+ * there since task 0101 (ADR 0038); a cutout since task 0163, Transparent and Glass since task 0195; since round 414
+ * (ADR 0108) a see-through toon material, a Volume and the Principled extras are drawn approximately and noted per view
+ * (approximation_of) rather than sending the view to the CPU. */
 const char *material_unsupported(const Material &m) {
-  /* (A cutout draws on the card since task 0163, Transparent and Glass since task 0195 - but not toon ones, whose
-   * lighting reads the neighbouring pixels' normals in the g-buffer.) */
-  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout && m.shading_model == 1) return "a see-through toon material";
-  if (m.volume()) return "a Volume (fog) material";  // (round 331)
-  if (m.shading_model == 0 && m.principled_extras()) return "a material with Subsurface, Sheen, Coat or Anisotropic";  // (round 330: the card's g-buffer has no room for them yet)
   const Material::Resolved &tx = m.textures();
   /* (A live procedural texture draws on the card since task 0196, except seen close up: gpu_view_draw's live_close_up.)
    * Axis materials draw on the card since task 0195 - not toon ones (the toon maps aren't read through the parts), nor
@@ -63,6 +60,81 @@ const char *material_unsupported(const Material &m) {
       if ((tx.axis_tx[k] ? *tx.axis_tx[k] : tx.axis[k]->textures()).live[j]) return "a live procedural texture";
   /* (Toon materials' painted maps and the hair highlight draw on the card since task 0196: its toon pass.) */
   return nullptr;
+}
+
+void set3(float *d, Vec3 v);  // (below)
+
+/* Round 414 (ADR 0108): what the card draws differently from the CPU for this material, or null - noted per view in
+ * gpu_view_status and the Profiler. F12 stays exact: it is the CPU's. */
+const char *approximation_of(const Material &m) {
+  if (m.volume()) return "a Volume drawn as a tinted shell";
+  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout && m.shading_model == 1) return "a see-through toon material without its band edges and painted maps";
+  if (m.shading_model == 0 && m.principled_extras()) return "Subsurface, Sheen and Coat approximated, Anisotropic ignored";
+  return nullptr;
+}
+
+/* A note added once to a view's list ("; " between). */
+void add_note(std::string &all, const std::string &note) {
+  if (note.empty() || all.find(note) != std::string::npos) return;
+  all += (all.empty() ? "" : "; ") + note;
+}
+
+/* Round 414: the Principled extras (shading.cpp's principled_extras, round 330) folded into the card's base, roughness
+ * and specular - Subsurface tints the diffuse toward its colour (its wrap left out), Sheen lightens it by a share of
+ * the tint (its grazing Fresnel averaged), Coat adds its Fresnel's share to the specular, sharpens the roughness toward
+ * its own and dims and tints the base under it; Anisotropic is ignored (one roughness). */
+void approximate_extras(gpu::RasterInstance &in, const Material &m, float metallic) {
+  auto unit = [](float v) { return finite_bits(v) ? clampf(v, 0.0f, 1.0f) : 0.0f; };
+  const float ss = unit(m.subsurface), sheen = unit(m.sheen), coat = unit(m.coat);
+  Vec3 albedo(in.albedo_rough[0], in.albedo_rough[1], in.albedo_rough[2]);
+  if (ss > 0.0f) albedo = albedo * lerp(Vec3(1.0f), vmax(Vec3(0.0f), m.subsurface_color), ss);
+  if (sheen > 0.0f) albedo = albedo + vmax(Vec3(0.0f), m.sheen_tint) * (sheen * (1.0f - 0.5f * unit(m.sheen_roughness)) * (1.0f - metallic) * 0.25f);
+  if (coat > 0.0f) {
+    const float ior = finite_bits(m.coat_ior) ? std::max(1.0f, std::min(3.0f, m.coat_ior)) : 1.5f, r0 = (ior - 1.0f) / (ior + 1.0f), f0 = r0 * r0;
+    albedo = albedo * lerp(Vec3(1.0f), vmax(Vec3(0.0f), m.coat_tint), coat) * (1.0f - coat * f0);
+    in.metal_spec[1] += coat * f0 / 0.08f;  // (Principled: F0 = 0.08 x specular)
+    in.albedo_rough[3] += (unit(m.coat_roughness) - in.albedo_rough[3]) * coat * 0.5f;
+  }
+  set3(in.albedo_rough, albedo);
+}
+
+/* Round 414: a Volume (fog) material as a tinted shell - the CPU's fog colour (draw_volume_pixel: its albedo lit by the
+ * sky from every side and each sun's forward term, at g = 0, plus its emission), unlit and Transparent at the opacity of
+ * the mesh's mean thickness through its bounds (1 - exp(-density x thickness)); the CPU dims what is behind by the view
+ * ray's real length through the bounds, cut where something opaque is drawn. Its front faces, as the CPU's. */
+void approximate_volume(gpu::RasterInstance &in, const Material &m, const RenderMesh &rm, const Mat4 &model, const LightingEnv &env) {
+  Vec3 light = (env.sky + env.equator + env.ground) * (1.0f / 3.0f);
+  for (const RenderLight &l : env.lights)
+    if (l.type == RenderLight::Directional) light = light + l.color * (l.intensity * 0.25f);
+  set3(in.albedo_rough, vmax(Vec3(0.0f), vmin(Vec3(1.0f), m.volume_color)) * light);
+  set3(in.emission, m.volume_emission * (finite_bits(m.volume_emission_strength) ? std::max(0.0f, m.volume_emission_strength) : 0.0f));
+  float thick = 1.0f;
+  if (rm.bounds.valid()) {
+    const Vec3 e = rm.bounds.max - rm.bounds.min;
+    thick = (e.x * length(model.dir(Vec3(1, 0, 0))) + e.y * length(model.dir(Vec3(0, 1, 0))) + e.z * length(model.dir(Vec3(0, 0, 1)))) * (1.0f / 3.0f);
+  }
+  if (!finite_bits(thick)) thick = 0.0f;  // (a NaN placement: no fog, as the CPU's !(a > 0.002f))
+  const float density = finite_bits(m.volume_density) ? std::max(0.0f, m.volume_density) : 0.0f;
+  in.metal_spec[2] = -1.0f;
+  in.metal_spec[3] = 1.0f - std::exp(-density * thick);
+  in.textured = false;
+  in.surface = 2;
+  in.flags = (in.flags | gpu::RasterInstance::Unlit) & ~(uint32_t)(gpu::RasterInstance::Toon | gpu::RasterInstance::ToonMaps | gpu::RasterInstance::CastShadows);
+}
+
+/* Round 414: a material's texture for the card when it is larger than `cap` a side - its levels from the first within
+ * the cap (the CPU keeps the whole image: seen closer than one texel a pixel the card's is softer). Null: within it. */
+std::shared_ptr<Texture> texture_capped(const Texture &t, int cap) {
+  if (t.levels.size() < 2 || std::max(t.width, t.height) <= cap) return nullptr;
+  size_t k = 0;
+  while (k + 1 < t.levels.size() && std::max(t.levels[k].w, t.levels[k].h) > cap) k++;
+  auto c = std::make_shared<Texture>();
+  c->srgb = t.srgb;
+  c->is_float = t.is_float;
+  c->width = t.levels[k].w;
+  c->height = t.levels[k].h;
+  c->levels.assign(t.levels.begin() + (ptrdiff_t)k, t.levels.end());
+  return c;
 }
 
 /* Why an object can't be drawn on the GPU yet, or null. */
@@ -418,7 +490,7 @@ bool see_through_key(const Vec4 (&v)[3], bool cull, float facing, float &key) {
 
 /* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
  * for the normal), else evaluated per pixel; the flags as the CPU decides them. */
-gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material &m, const std::function<int(const TexturePtr &)> &tex) {
+gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material &m, const std::function<int(const TexturePtr &)> &tex, const LightingEnv &env) {
   gpu::RasterInstance in;
   std::memcpy(in.model, it.model.m, 64);
   const SurfaceSample s = evaluate_material(m, m.textures(), SurfacePoint{});
@@ -429,13 +501,14 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.metal_spec[2] = m.surface == (int)MaterialSurface::Cutout ? m.alpha_clip : -1.0f;  // (task 0163: the card punches the holes)
   in.metal_spec[3] = m.alpha;
   /* (Task 0195: see-through - Transparent, else Glass, as draw_see_through takes any other value.) */
-  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) in.surface = m.surface == (int)MaterialSurface::Transparent ? 2 : 3, in.ior = m.ior;
+  if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) in.surface = m.surface == (int)MaterialSurface::Transparent || m.volume() ? 2 : 3, in.ior = m.ior;
   set3(in.emission, s.emission);
   if (!material_uniform(m, m.textures())) raster_textured(in, m, *it.mesh, tex);
+  if (m.shading_model == 0 && m.principled_extras()) approximate_extras(in, m, s.metallic);  // (round 414, ADR 0108)
   bool toon_maps = false;
   if (m.shading_model == 1) {
     raster_toon(in, m);
-    toon_maps = raster_toon_maps(in, m, tex);
+    toon_maps = !in.surface && raster_toon_maps(in, m, tex);  // (round 414: a see-through toon surface's maps aren't in the toon planes - neither uploaded nor flagged)
     const TexturePtr &ramp = m.textures().toon_ramp;
     in.toon_ramp = ramp ? tex(ramp) : -1;  // (the ramp needs no UVs: the lighting pass reads it by how lit)
   }
@@ -448,6 +521,7 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   if (it.always_cull) in.flags |= gpu::RasterInstance::AlwaysCull;
   if (m.shading_model == 1) in.flags |= gpu::RasterInstance::Toon;
   if (toon_maps) in.flags |= gpu::RasterInstance::ToonMaps;  // (task 0196)
+  if (m.volume()) approximate_volume(in, m, *it.mesh, it.model, env);  // (round 414, ADR 0108)
   in.mesh = (uint32_t)mesh;
   in.id = it.id;
   return in;
@@ -571,6 +645,7 @@ void Editor::set_viewport_device(int d) {
   gpu_view_error_.clear();
   gpu_view_reason_.clear();
   for (std::string &r : gpu_slot_reason_) r.clear();
+  for (std::string &a : gpu_slot_approx_) a.clear();
 }
 
 bool Editor::gpu_view_wanted() const {
@@ -644,7 +719,20 @@ std::string Editor::gpu_view_status() const {
   for (const std::string &r : gpu_slot_reason_)
     if (!r.empty() && why.find(r) == std::string::npos) why += (why.empty() ? "" : "; ") + r;
   if (!why.empty()) s += " (a view on the CPU: " + why + ")";
+  const std::string approx = gpu_view_approximations();
+  if (!approx.empty()) s += " (approximated: " + approx + ")";
   return s;
+}
+
+std::string Editor::gpu_view_approximations() const {
+  std::string all;
+  for (const std::string &a : gpu_slot_approx_)
+    for (size_t at = 0; at < a.size();) {  // (each view's notes, once each)
+      const size_t end = a.find("; ", at);
+      add_note(all, a.substr(at, end == std::string::npos ? std::string::npos : end - at));
+      at = end == std::string::npos ? a.size() : end + 2;
+    }
+  return all;
 }
 
 const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingEnv &env, const std::vector<DrawItem> &items,
@@ -674,6 +762,7 @@ bool Editor::gpu_view_may_draw(const RenderTarget &rt, const LightingEnv &env, c
   const int slot = gpu_slot(rt);
   const char *why = gpu_view_unsupported(rt, env, items, filters);
   gpu_slot_reason_[slot] = why ? why : "";
+  if (why) gpu_slot_approx_[slot].clear();
   if (!why) return true;
   gpu_view_reason_ = why;
   prof_.gpu_fallbacks++;
@@ -719,6 +808,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
 /* This view on the CPU after all (what it shows can't go to the card), the card kept: the reason for Preferences. */
 bool Editor::gpu_view_refuse(int slot, const std::string &why) {
   gpu_slot_reason_[slot] = gpu_view_reason_ = why;
+  gpu_slot_approx_[slot].clear();
   prof_.gpu_fallbacks++;
   return false;
 }
@@ -739,22 +829,40 @@ void Editor::gpu_forget_old_world(const LightingEnv &env) {
 
 /* Task 0101: a texture on the card, sent once while it is drawn (its mip chain as the CPU built it). -1 and `err`
  * when the card can't hold it. */
-int Editor::gpu_texture(const TexturePtr &t, std::string &err) {
+int Editor::gpu_texture(const TexturePtr &t, std::string &err, std::string *approx) {
   if (!t) return -1;
   auto found = gpu_textures_.find(t.get());
   if (found != gpu_textures_.end()) {
     found->second.used = gpu_calls_;
     if (found->second.id < 0 && err.empty()) err = found->second.refused;
+    if (approx) add_note(*approx, found->second.approx);
     return found->second.id;
   }
-  std::string why;
-  const int id = gpu_view_->add_texture(*t, &why);
+  std::string why, note;
+  int id = -1;
+  if (approx) {
+    /* Round 414 (ADR 0108): a material's texture over kCardMaxTexture a side goes up from its first level within it
+     * (its finer levels are seen only closer than one texel a pixel); one the card's buffers can't hold goes up at
+     * 64 x 64 rather than sending the view to the CPU. Either is noted for the view. */
+    /* (The texture being painted is never capped: a stroke writes its first level only - the mips a capped copy would
+     * come from are stale until the surface is rebuilt - and its rows go up as they are painted.) */
+    std::shared_ptr<Texture> small = t == paint_view_tex_ ? nullptr : texture_capped(*t, kCardMaxTexture);
+    id = gpu_view_->add_texture(small ? *small : *t, &why);
+    if (id >= 0 && small) note = strprintf("textures over %d a side shown at %d", kCardMaxTexture, kCardMaxTexture);
+    if (id < 0 && why.find("storage buffers") != std::string::npos) {
+      std::string why2;
+      if (t != paint_view_tex_ && (small = texture_capped(*t, 64))) id = gpu_view_->add_texture(*small, &why2);
+      if (id >= 0) note = "a texture the card's buffers couldn't hold shown at 64 x 64";
+    }
+  }
+  else id = gpu_view_->add_texture(*t, &why);
   /* Refused (too large): remembered, so it isn't copied and tried again every frame; forgotten with the others. */
-  gpu_textures_[t.get()] = {id, t, gpu_calls_, id < 0 ? (why.empty() ? "a texture the card can't hold" : why) : std::string()};
+  gpu_textures_[t.get()] = {id, t, gpu_calls_, id < 0 ? (why.empty() ? "a texture the card can't hold" : why) : std::string(), id < 0 ? std::string() : note};
   if (id < 0) {
     if (err.empty()) err = gpu_textures_[t.get()].refused;
     return -1;
   }
+  if (approx) add_note(*approx, note);
   prof_.gpu_texture_uploads++;
   return id;
 }
@@ -766,6 +874,11 @@ void Editor::gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1) {
   auto found = gpu_textures_.find(t.get());
   if (found == gpu_textures_.end() || found->second.id < 0) return;
   std::string err;
+  if (!found->second.approx.empty()) {  // (round 414: the card holds a smaller copy - its rows aren't these; the copy goes up again whole)
+    gpu_view_->remove_texture(found->second.id);
+    gpu_textures_.erase(found);
+    return;
+  }
   if (!gpu_view_->update_texture_rows(found->second.id, *t, y0, y1, &err)) {
     gpu_view_->remove_texture(found->second.id);  // (its slot freed; the whole texture goes up again at the next frame)
     gpu_textures_.erase(found);
@@ -925,6 +1038,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const int slot = gpu_slot(rt);
   if (const char *why = gpu_view_unsupported(rt, env, items, filters)) {  // (GI and probes, decided after the first check)
     gpu_slot_reason_[slot] = gpu_view_reason_ = why;
+    gpu_slot_approx_[slot].clear();
     prof_.gpu_fallbacks++;
     return false;
   }
@@ -950,14 +1064,24 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     const Mat4 mvp = vp * it.model;
     const bool cull = !((it.double_sided || !opt.backface_culling) && !it.always_cull);
     const float facing = mirrored(it.model) ? -1.0f : 1.0f;
+    int fog_inside = -1;  // round 414: a Volume whose bounds hold the eye draws its back faces, as the CPU's (its front faces otherwise); decided once per item
     for (uint32_t prim = 0; prim < (uint32_t)rm.tri_count(); prim++) {
       const uint32_t slot = rm.tri_material.size() == rm.tri_count() ? rm.tri_material[prim] : 0;
       const Material &m = *slot_material(it, slot);
       if (m.opaque() || m.surface == (int)MaterialSurface::Cutout) continue;
+      bool back = false;
+      if (m.volume()) {
+        if (fog_inside < 0) {
+          const Vec3 le = it.model.inverse().point(eye);
+          const AABB &b = rm.bounds;
+          fog_inside = b.valid() && le.x > b.min.x && le.y > b.min.y && le.z > b.min.z && le.x < b.max.x && le.y < b.max.y && le.z < b.max.z ? 1 : 0;
+        }
+        back = fog_inside == 1;
+      }
       const uint32_t *tri = &rm.indices[(size_t)prim * 3];
       const Vec4 c[3] = {mvp * Vec4(rm.positions[tri[0]], 1.0f), mvp * Vec4(rm.positions[tri[1]], 1.0f), mvp * Vec4(rm.positions[tri[2]], 1.0f)};
       float key;
-      if (!see_through_key(c, cull, facing, key)) continue;
+      if (!see_through_key(c, cull || m.volume(), back ? -facing : facing, key)) continue;
       uint32_t inst_at = first_inst;
       for (size_t k = 0; k < e.parts.size(); k++)
         if (e.parts[k][0] == slot) inst_at = first_inst + (uint32_t)k;
@@ -988,10 +1112,24 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   };
   bool ok = true;
   std::string tex_err;  // (a texture the card can't hold: this view on the CPU, the card kept)
+  std::string approx;   // round 414 (ADR 0108): what the card draws differently from the CPU in this view
+  uint64_t approximated = 0;  // (the objects and capped textures it noted; counted in the Profiler when the view is drawn)
   auto tex = [&](const TexturePtr &t) { return gpu_texture(t, tex_err); };
+  auto mtex = [&](const TexturePtr &t) {  // (a material's: capped, noted)
+    const size_t before = approx.size();
+    const int id = gpu_texture(t, tex_err, &approx);
+    if (approx.size() != before) approximated++;
+    return id;
+  };
+  auto note_material = [&](const Material &m) {
+    const char *a = approximation_of(m);
+    if (!a) return;
+    add_note(approx, a);
+    approximated++;
+  };
   auto axis_of = [&](size_t i, const DrawItem &it, const Material &m) {
     if (m.axis_mode == 0 || !inst[i].textured) return;
-    raster_axis(inst[i], m, *it.mesh, tex, axis_parts);
+    raster_axis(inst[i], m, *it.mesh, mtex, axis_parts);
     axis_owner.resize(axis_parts.size(), i);
   };
   std::vector<float> corners;  // task 0197: the baked-lit triangles' corners
@@ -1039,7 +1177,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
     const uint32_t first_inst = (uint32_t)inst.size();
     if (e.parts.empty()) {
-      inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), tex));
+      inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
+      note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
       inst.back().highlight = hl;
       inst.back().vertex_colors = vc;
       if (gouraud) solid_instance(inst.back(), it);
@@ -1049,7 +1188,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       continue;
     }
     for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
-      gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), tex);
+      gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), mtex, env);
+      note_material(*slot_material(it, part[0]));
       in.first_index = part[1];
       in.index_count = part[2];
       in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
@@ -1073,7 +1213,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
   if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
   const bool want_hdr = rt.want_hdr && opt.shade == ShadeMode::Deferred;  // (task 0197: a camera's bloom reads it)
-  if (want_hdr && !see.empty()) return gpu_view_refuse(slot, "a picture kept in linear light with see-through surfaces");
+  /* (Round 414: the see-through pixels are marked "none" in the card's linear-light plane, as the CPU marks its own.) */
+  if (want_hdr && !see.empty() && !g->can_draw_see_through_hdr()) return gpu_view_refuse(slot, "see-through surfaces over a picture kept in linear light (the card's pass couldn't be made)");
   const bool toon_maps = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return (in.flags & gpu::RasterInstance::ToonMaps) != 0; });
   const bool baked = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return in.baked; });
   if (baked && env.probes && env.probes->data && env.probes->data->probe_count() > kCardMaxProbes)
@@ -1183,6 +1324,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     Log::warn("The GPU view failed (%s): drawing on the CPU", err.c_str());
     gpu_view_error_ = err;
     gpu_slot_reason_[slot] = gpu_view_reason_ = "a GPU error";
+    gpu_slot_approx_[slot].clear();
     gpu_view_drop();
     prof_.gpu_fallbacks++;
     return false;
@@ -1196,6 +1338,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     std::memcpy(rt.color + (size_t)y * rt.stride, &gpu_color_[(size_t)y * rt.width], (size_t)rt.width * 4);
   if (!read_linear_light(rt, slot, want_hdr, env)) return false;  // (task 0197: after the colour - it encodes it again)
   gpu_slot_reason_[slot].clear();
+  gpu_slot_approx_[slot] = approx;  // (round 414)
+  prof_.gpu_approximated += approximated;
   gpu_view_reason_.clear();
   prof_.gpu_views++;
   if (scene_gpu_call_) scene_on_gpu_ = true;
@@ -1239,6 +1383,7 @@ bool Editor::read_linear_light(RenderTarget &rt, int slot, bool want, const Ligh
     Log::warn("The GPU view couldn't read its linear light back (%s): drawing on the CPU", err.c_str());
     gpu_view_error_ = err;
     gpu_slot_reason_[slot] = gpu_view_reason_ = "a GPU error";
+    gpu_slot_approx_[slot].clear();
     gpu_view_drop();
     prof_.gpu_fallbacks++;
     return false;
@@ -1374,6 +1519,7 @@ void Editor::gpu_view_drop() {
   card_forget_windows();  // (task 0193)
   gpu_meshes_.clear();
   gpu_textures_.clear();
+  for (std::string &a : gpu_slot_approx_) a.clear();  // (round 414: nothing is approximated on a card that isn't drawing)
   gpu_world_tex_ = nullptr;
   gpu_mesh_bytes_ = 0;
   gpu_cage_v_.clear();
