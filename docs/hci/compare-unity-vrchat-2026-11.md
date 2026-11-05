@@ -93,6 +93,21 @@ Canvases, TextMeshPro and particle systems are data by the user's choice (not dr
 Blendity's station times are dominated by import and the lightmap fetch, not by rendering; a comparison that reuses an
 imported scene (the Blendity project keeps it) runs at render speed.
 
+**Navigation (round 420, after Pass 16):** a frame of each editor's views on the same assets - Unity's
+(`tools/unity_frames.py`: the interval between two of the view's actual draws, Unity 2022.3.22f1 on the project copies,
+the scene framed whole) against Blendity's (`tools/bench_world.py`: the whole editor's frame, means).
+
+| View | Unity: median / mean / p95 ms | Blendity: presented by the card / by the system, mean ms |
+|---|---|---|
+| SideRail, Scene view (the whole world in view) | 10.0 / 25.6 / 99.2 | 10.3 / 19.6 |
+| SideRail, Game view (Bloom, Vignette, Color Grading) | 4.5 / 4.8 / 6.6 | 10.4 / 12.5 (with the Scene view) |
+| Shinano, Scene view | 2.1 / 2.2 / 2.9 | 7.0 (round 415's build) |
+| Shinano, Game view | 2.4 / 2.5 / 3.4 | 5.1 / 7.2 (with the Scene view, round 416's build) |
+
+Unity draws SideRail's Game view about twice as fast and Shinano's views two to three times as fast; SideRail's Scene
+view is a draw on the median, with long Unity frames in its mean and p95. docs/PERFORMANCE.md, "Pass 16 in one table",
+has the method and the caveats.
+
 ## SDK checks and HCI
 
 Not run this round: the SDK's control-panel checks on the world (round 404's fixture `vrchat_sdk_world.json`) and the

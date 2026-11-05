@@ -6472,6 +6472,7 @@ class Editor {
   bool eval_job_request(const GameObject &g, int kind, uint64_t key);  // (GameObject::slow_eval_hook's: true when a worker is on it)
   bool eval_jobs_running_for_test() const { return !eval_jobs_.empty(); }
   bool mesh_job_running_for_test() const { return mesh_job_ && !mesh_job_->done.load(); }
+  bool mesh_job_started_for_test() const { return mesh_job_ != nullptr; }  // (round 420: started, landed or not)
   bool save_job_running_for_test() const { return save_job_ && !save_job_->done.load(); }
   bool open_job_running_for_test() const { return open_job_ && !open_job_->done.load(); }
   bool import_job_running_for_test() const { return import_job_ && !import_job_->done.load(); }

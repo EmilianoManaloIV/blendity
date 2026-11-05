@@ -7526,7 +7526,12 @@ static void tests_round413() {
     ed.command("select Cube");
     ed.set_async_jobs_for_test(true);
     ed.command("subdivide 2");
-    CHECK(ed.mesh_job_running_for_test() || g->get<MeshFilter>()->mesh->face_count() == ref_faces);
+    /* (Started: the cube as it was until the result lands - or, on a fast machine, the job already done and landed. A
+     * worker that finished before this line but hasn't been polled yet reads "not running" with the cube unchanged:
+     * the macOS runner of #316 met that.) */
+    const size_t faces_now = g->get<MeshFilter>()->mesh->face_count();
+    CHECK(ed.mesh_job_started_for_test() || faces_now == ref_faces);  // (a worker job, or already landed)
+    CHECK(faces_now == 6 || faces_now == ref_faces);                   // (never a half-made mesh)
     bool listed = false;
     int frames = 0;
     for (; frames < 5000 && ed.mesh_job_running_for_test(); frames++) {
