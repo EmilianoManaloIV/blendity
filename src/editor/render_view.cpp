@@ -241,6 +241,7 @@ DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRe
     if (mp && mp->double_sided) it.double_sided = true;
   it.materials = &mr.materials;
   it.receive_shadows = mr.receive_shadows;
+  it.cast_shadows = mr.cast_shadows;  // (round 415)
   it.id = (uint32_t)g.id;
   return it;
 }
@@ -294,6 +295,32 @@ RenderLight to_render_light(const GameObject &g, const Light &l, bool gamma_inte
   rl.width = l.area_width * length(w.dir({1, 0, 0}));
   rl.height = l.area_height * length(w.dir({0, 1, 0}));
   return rl;
+}
+
+/* Round 415 (ADR 0109): point and spot lights whose range sphere lies wholly outside the view's frustum light nothing
+ * the view shows (every visible point is in the frustum, and a lit point is within the range): left out of the view's
+ * list before the CPU's per-pixel loop and the card's, so the picture is the same to the bit with fewer lights
+ * walked. Suns and area lights stay. Returns how many were left out. */
+static size_t cull_lights_to_view(LightingEnv &env, const Mat4 &vp) {
+  float planes[6][4];
+  for (int k = 0; k < 6; k++) {  // (Gribb-Hartmann: the clip rows; the near plane is the z row alone - z in 0..1, as the renderers clip)
+    const int row = k / 2;
+    const float sign = k % 2 ? -1.0f : 1.0f;
+    for (int c = 0; c < 4; c++) planes[k][c] = k == 4 ? vp.at(2, c) : vp.at(3, c) + sign * vp.at(row, c);
+    const float len = std::sqrt(planes[k][0] * planes[k][0] + planes[k][1] * planes[k][1] + planes[k][2] * planes[k][2]);
+    if (!(len > 1e-20f) || !finite_bits(len)) return 0;  // (a degenerate view: every light kept)
+    for (int c = 0; c < 4; c++) planes[k][c] /= len;
+  }
+  auto outside = [&](const RenderLight &l) {
+    if ((l.type != RenderLight::Point && l.type != RenderLight::Spot) || !(l.range > 0.0f) || !finite_bits(l.range)) return false;
+    const float range = std::max(l.range, 1e-3f);  // (the shaders' floor on the range)
+    for (int k = 0; k < 6; k++)
+      if (planes[k][0] * l.position.x + planes[k][1] * l.position.y + planes[k][2] * l.position.z + planes[k][3] < -range) return true;
+    return false;
+  };
+  const size_t before = env.lights.size();
+  env.lights.erase(std::remove_if(env.lights.begin(), env.lights.end(), outside), env.lights.end());
+  return before - env.lights.size();
 }
 
 LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
@@ -614,11 +641,12 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   uint64_t key = kFnvBasis;
   bool cacheable = true;
   for (const DrawItem &it : items) {
-    bool casts = false;
-    if (!it.materials || it.materials->empty()) casts = true;
-    else
+    bool casts = it.cast_shadows;  // (round 415: the renderer's Shadows Off, as Unity's; then its materials')
+    if (casts && it.materials && !it.materials->empty()) {
+      casts = false;
       for (auto &m : *it.materials)
         if (!m || m->cast_shadows) casts = true;
+    }
     if (!casts) continue;
     caster_ptrs.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
@@ -749,6 +777,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   outline_view_.on = false;
   lod_view_.on = false;
   flatten_view_.on = false;
+  if (!light_cull_off_for_test_) prof_.lights_culled += cull_lights_to_view(env, p * v);  // (round 415, ADR 0109: lights that can't reach the view left out of its loops)
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
   const bool shadows = scene_lights && scene_->render.shadows;
@@ -1392,11 +1421,12 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
       AABB bounds;
       for (size_t i = 0; i < j->items.size(); i++) {
         const DrawItem &it = j->items[i];
-        bool casts = false;
-        if (!it.materials || it.materials->empty()) casts = true;
-        else
+        bool casts = it.cast_shadows;  // (round 415)
+        if (casts && it.materials && !it.materials->empty()) {
+          casts = false;
           for (const MaterialPtr &m : *it.materials)
             if (!m || m->cast_shadows) casts = true;
+        }
         if (!casts) continue;
         j->shadow_casters.push_back((uint32_t)i);
         bounds.add(it.mesh->bounds.transformed(it.model));

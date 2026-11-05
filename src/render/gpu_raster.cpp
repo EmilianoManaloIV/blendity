@@ -2249,6 +2249,58 @@ class VulkanRaster final : public Raster {
   }
   bool can_highlight_faces() const override { return geometry_; }
 
+  int add_corners(const float *data, size_t floats, std::string *err) override {
+    if (!floats || floats % 24) return fail(err, "a corner block that isn't whole triangles"), -1;
+    if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
+    size_t at = corner_used_;
+    int reuse = -1;
+    for (size_t i = 0; i < corner_blocks_.size(); i++)  // (best fit over the freed blocks: the smallest that holds it)
+      if (!corner_blocks_[i].live && corner_blocks_[i].n >= floats && (reuse < 0 || corner_blocks_[i].n < corner_blocks_[(size_t)reuse].n)) reuse = (int)i;
+    if (reuse >= 0) at = corner_blocks_[(size_t)reuse].at;
+    const size_t need = (at + floats) * sizeof(float);
+    if (need > corner_buf_.size) {  // (grown with its contents: the other blocks stay where they are)
+      const VkDeviceSize limit = std::min<VkDeviceSize>(max_storage_, 1ull << 31);
+      if (need > limit) return fail(err, "the baked corners too large for the card's storage buffers"), -1;
+      Buf bigger;
+      if (!make_buffer(bigger, std::max<VkDeviceSize>(need * 2 > limit ? limit : need * 2, 16), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
+        return fail(err, "out of memory for the baked corners"), -1;
+      f_.vkDeviceWaitIdle(dev_);
+      if (corner_used_) std::memcpy(bigger.mapped, corner_buf_.mapped, std::min<size_t>(corner_used_ * sizeof(float), corner_buf_.size));
+      free_buffer(corner_buf_);
+      corner_buf_ = bigger;
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    std::memcpy((uint8_t *)corner_buf_.mapped + at * sizeof(float), data, floats * sizeof(float));
+    if (reuse >= 0) {
+      CornerBlock &b = corner_blocks_[(size_t)reuse];
+      if (b.n > floats) corner_blocks_.push_back({b.at + floats, b.n - floats, false});  // (the rest stays free)
+      b.n = floats, b.live = true;
+    }
+    else {
+      corner_blocks_.push_back({at, floats, true});
+      corner_used_ = at + floats;
+    }
+    corner_blocks_on_ = true;
+    return (int)(at / 24);
+  }
+  void remove_corners(int base, size_t floats) override {
+    const size_t at = (size_t)std::max(0, base) * 24;
+    bool found = false;
+    for (CornerBlock &b : corner_blocks_)
+      if (b.live && b.at == at && b.n == floats) b.live = false, found = true;
+    if (!found) Log::warn("GPU view: a corner block to free that isn't held (base %d, %zu floats)", base, floats);  // (the editor's bookkeeping drifted)
+    /* (Neighbouring free blocks merged, and the tail given back.) */
+    std::sort(corner_blocks_.begin(), corner_blocks_.end(), [](const CornerBlock &x, const CornerBlock &y) { return x.at < y.at; });
+    std::vector<CornerBlock> merged;
+    for (const CornerBlock &b : corner_blocks_) {
+      if (!merged.empty() && !merged.back().live && !b.live && merged.back().at + merged.back().n == b.at) merged.back().n += b.n;
+      else merged.push_back(b);
+    }
+    while (!merged.empty() && !merged.back().live) merged.pop_back();
+    corner_blocks_ = std::move(merged);
+    corner_used_ = corner_blocks_.empty() ? 0 : corner_blocks_.back().at + corner_blocks_.back().n;
+  }
+
   int add_texture(const Texture &t, std::string *err) override {
     if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
     if (t.levels.empty()) {
@@ -3051,6 +3103,15 @@ class VulkanRaster final : public Raster {
   VkRenderPass rp_hdr_ = VK_NULL_HANDLE;
   VkRenderPass rp_baked_ = VK_NULL_HANDLE;
   Buf baked_buf_, corner_buf_, probe_buf_;  // task 0197: the instances' baked light, the triangles' corners, the probe volume
+  /* Round 415: the corner buffer's blocks (in floats), first fit over the freed ones, the buffer grown with its contents
+   * copied; corner_used_ the floats in use up to the last block. */
+  struct CornerBlock {
+    size_t at = 0, n = 0;
+    bool live = false;
+  };
+  std::vector<CornerBlock> corner_blocks_;
+  size_t corner_used_ = 0;
+  bool corner_blocks_on_ = false;  // (a frame whose corners came as blocks: the frame's own array isn't written over them)
   std::vector<float> probe_volume_;          // (set_probe_volume's, written once)
   bool probe_dirty_ = true;
   VkRenderPass rp_toon_ = VK_NULL_HANDLE;
@@ -3695,7 +3756,10 @@ class VulkanRaster final : public Raster {
     if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
-    if (!write_toon_table(err) || !write_baked_table(err) || !write_array(corner_buf_, fr.corners.data(), fr.corners.size() * sizeof(float), err)) return false;
+    if (!write_toon_table(err) || !write_baked_table(err)) return false;
+    /* (Round 415: the corners live in blocks on the card; a frame's own array - a card without blocks - is written over
+     * the buffer only while no block is held.) */
+    if (!corner_blocks_on_ && !write_array(corner_buf_, fr.corners.data(), fr.corners.size() * sizeof(float), err)) return false;
     if (probe_dirty_) {  // (the probe volume: written when the editor sends a new one)
       if (!write_array(probe_buf_, probe_volume_.data(), probe_volume_.size() * sizeof(float), err)) return false;
       probe_dirty_ = false;

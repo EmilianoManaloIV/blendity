@@ -165,6 +165,7 @@ std::vector<uint32_t> card_indices(const RenderMesh &rm, std::vector<std::array<
 
 /* Whether an object casts into the shadow map: as update_shadow_map decides it (any slot that casts, or none set). */
 bool casts_shadows(const DrawItem &it) {
+  if (!it.cast_shadows) return false;  // (round 415: the renderer's Shadows Off)
   if (!it.materials || it.materials->empty()) return true;
   for (const MaterialPtr &m : *it.materials)
     if (!m || m->cast_shadows) return true;
@@ -547,23 +548,27 @@ template <class SeeTri>
 void see_through_to_frame(std::vector<SeeTri> &see, std::vector<gpu::SeeCorner> &out) {
   std::stable_sort(see.begin(), see.end(), [](const SeeTri &a, const SeeTri &b) { return a.key > b.key; });
   out.resize(see.size() * 3);
-  for (size_t i = 0; i < see.size(); i++) {
-    const DrawItem &it = *see[i].it;
-    const RenderMesh &rm = *it.mesh;
-    const uint32_t prim = see[i].prim;
-    const bool hl = it.face_highlight && prim < rm.tri_face.size() && rm.tri_face[prim] < it.face_highlight->size() && (*it.face_highlight)[rm.tri_face[prim]];
-    for (int q = 0; q < 3; q++) {
-      const gpu::RasterVertex rv = raster_vertex(rm, rm.indices[(size_t)prim * 3 + q]);
-      gpu::SeeCorner &c = out[i * 3 + q];
-      std::memcpy(c.p, rv.p, 12);
-      std::memcpy(c.n, rv.n, 12);
-      std::memcpy(c.uv, rv.uv, 8);
-      std::memcpy(c.t, rv.t, 16);
-      c.inst = see[i].inst;
-      c.highlight = hl ? 1.0f : 0.0f;
-      c.pad[0] = c.pad[1] = 0.0f;
+  auto fill = [&](int64_t a, int64_t b) {  // (round 415: the corners filled on every thread after the sort)
+    for (int64_t i = a; i < b; i++) {
+      const DrawItem &it = *see[(size_t)i].it;
+      const RenderMesh &rm = *it.mesh;
+      const uint32_t prim = see[(size_t)i].prim;
+      const bool hl = it.face_highlight && prim < rm.tri_face.size() && rm.tri_face[prim] < it.face_highlight->size() && (*it.face_highlight)[rm.tri_face[prim]];
+      for (int q = 0; q < 3; q++) {
+        const gpu::RasterVertex rv = raster_vertex(rm, rm.indices[(size_t)prim * 3 + q]);
+        gpu::SeeCorner &c = out[(size_t)i * 3 + q];
+        std::memcpy(c.p, rv.p, 12);
+        std::memcpy(c.n, rv.n, 12);
+        std::memcpy(c.uv, rv.uv, 8);
+        std::memcpy(c.t, rv.t, 16);
+        c.inst = see[(size_t)i].inst;
+        c.highlight = hl ? 1.0f : 0.0f;
+        c.pad[0] = c.pad[1] = 0.0f;
+      }
     }
-  }
+  };
+  if (see.size() > 4096) JobSystem::global().parallel_for((int64_t)see.size(), 2048, fill);
+  else fill(0, (int64_t)see.size());
 }
 
 /* The frame's world, background and view transform, as render_deferred and light_finish take them. Without a world
@@ -929,6 +934,19 @@ void Editor::gpu_forget_meshes() {
     if (e.id >= 0) gpu_view_->remove_mesh(e.id);
     gpu_mesh_bytes_ -= e.bytes;
     gpu_meshes_.erase(a.second);
+    gpu_forget_corners(a.second);  // (round 415: its corner blocks with it)
+  }
+  for (auto it = gpu_corners_.begin(); it != gpu_corners_.end();) {  // (round 415: corner blocks not drawn for a while - a lightmap UV set replaced - let go)
+    std::vector<GpuCorners> &blocks = it->second;
+    for (size_t k = 0; k < blocks.size();) {
+      if (gpu_calls_ - blocks[k].used <= 256) {
+        k++;
+        continue;
+      }
+      if (blocks[k].base >= 0) gpu_view_->remove_corners(blocks[k].base, blocks[k].floats), gpu_corner_floats_ -= blocks[k].floats;
+      blocks.erase(blocks.begin() + (ptrdiff_t)k);
+    }
+    it = blocks.empty() ? gpu_corners_.erase(it) : std::next(it);
   }
 }
 
@@ -972,6 +990,85 @@ int Editor::gpu_lightmap(const Lightmap &lm, std::string &err) {
     found = gpu_lightmaps_.find(&lm);
   }
   return gpu_texture(found->second.second, err);
+}
+
+/* Round 415 (ADR 0109): the block of `it`'s baked corners on the card - the mesh's local positions and its lightmap and
+ * realtime UVs, three corners a triangle in the card's triangle order (card_indices' grouping) - found by the mesh and
+ * the UV vectors, built and sent when the mesh's serial or the UVs' addresses or sizes differ from the block's. Its
+ * base in triangles; -1 with `err` set when the card has no room. */
+int Editor::gpu_corners(const DrawItem &it, const GpuMesh &e, bool lm, bool rt, std::string &err) {
+  const RenderMesh &rm = *it.mesh;
+  const void *lm_uv = lm ? (const void *)it.lightmap_uv : nullptr, *rt_uv = rt ? (const void *)it.rt_uv : nullptr;
+  const size_t lm_n = lm ? it.lightmap_uv->size() : 0, rt_n = rt ? it.rt_uv->size() : 0;
+  std::vector<GpuCorners> &blocks = gpu_corners_[&rm];
+  GpuCorners *mine = nullptr;
+  for (GpuCorners &b : blocks)
+    if (b.lm_uv == lm_uv && b.rt_uv == rt_uv) mine = &b;
+  /* The pages' serials: a bake or a realtime publish replaces the UV vectors, and a new vector can take a freed one's
+   * address with the same size - so when the page serial differs the UVs are hashed, and the block stays only when
+   * they are the block's. */
+  const uint64_t page = (lm ? it.lightmap->serial : 0) * 0x9E3779B97F4A7C15ull ^ (rt ? it.rt_bounce->serial : 0) * 0xC2B2AE3D27D4EB4Full;
+  auto uv_hash = [&] {
+    uint64_t h = kFnvBasis;
+    if (lm && lm_n) h = fnv1a(it.lightmap_uv->data(), lm_n * sizeof(Vec2), h);
+    if (rt && rt_n) h = fnv1a(it.rt_uv->data(), rt_n * sizeof(Vec2), h);
+    return h;
+  };
+  if (mine && mine->serial == rm.serial && rm.serial != 0 && mine->lm_n == lm_n && mine->rt_n == rt_n) {
+    if (mine->page_serial != page && uv_hash() == mine->uv_hash) mine->page_serial = page;  // (the same UVs under a new page)
+    if (mine->page_serial == page) {
+      mine->used = gpu_calls_;
+      if (!mine->failed) return mine->base;
+      if (err.empty()) err = "the baked corners the card couldn't hold";
+      return -1;
+    }
+  }
+  std::vector<float> corners;
+  corners.reserve(rm.tri_count() * 24);
+  auto put = [&](size_t t) {
+    for (int k = 0; k < 3; k++) {
+      const Vec3 p = rm.positions[rm.indices[t * 3 + (size_t)k]];
+      const Vec2 a = lm ? (*it.lightmap_uv)[t * 3 + (size_t)k] : Vec2(0.0f, 0.0f), b = rt ? (*it.rt_uv)[t * 3 + (size_t)k] : Vec2(0.0f, 0.0f);
+      corners.insert(corners.end(), {p.x, p.y, p.z, a.x, a.y, b.x, b.y, 0.0f});
+    }
+  };
+  const bool grouped = !e.parts.empty() && rm.tri_material.size() == rm.tri_count();
+  for (size_t t = 0; !grouped && t < rm.tri_count(); t++) put(t);
+  for (size_t p = 0; grouped && p < e.parts.size(); p++)
+    for (size_t t = 0; t < rm.tri_count(); t++)
+      if (rm.tri_material[t] == e.parts[p][0]) put(t);
+  if (mine && mine->base >= 0) {
+    gpu_view_->remove_corners(mine->base, mine->floats);
+    gpu_corner_floats_ -= mine->floats;
+    mine->base = -1;
+  }
+  const bool fresh = !mine;
+  if (fresh) {
+    blocks.push_back({});
+    mine = &blocks.back();
+  }
+  std::string why;
+  const uint64_t hash = uv_hash();
+  const int base = corners.empty() ? -1 : gpu_view_->add_corners(corners.data(), corners.size(), &why);
+  if (base < 0 && !corners.empty()) {  // (remembered under its key: not rebuilt and tried every frame)
+    if (err.empty()) err = why.empty() ? "the baked corners the card couldn't hold" : why;
+    *mine = {-1, 0, rm.serial, gpu_calls_, lm_uv, rt_uv, lm_n, rt_n, page, hash, true};
+    return -1;
+  }
+  *mine = {base, corners.size(), rm.serial, gpu_calls_, lm_uv, rt_uv, lm_n, rt_n, page, hash, false};
+  gpu_corner_floats_ += corners.size();
+  prof_.gpu_corner_uploads++;
+  prof_.gpu_upload_bytes += corners.size() * sizeof(float);
+  return base;
+}
+
+/* Round 415: a mesh's corner blocks let go (the mesh left the card, or the card is dropped). */
+void Editor::gpu_forget_corners(const RenderMesh *rm) {
+  auto found = gpu_corners_.find(rm);
+  if (found == gpu_corners_.end()) return;
+  for (const GpuCorners &b : found->second)
+    if (b.base >= 0 && gpu_view_) gpu_view_->remove_corners(b.base, b.floats), gpu_corner_floats_ -= b.floats;
+  gpu_corners_.erase(found);
 }
 
 /* Task 0197: a texture's copy on the card let go now (a lightmap page replaced). */
@@ -1059,34 +1156,91 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   std::vector<std::pair<gpu::RasterInstance, int>> axis_parts;  // task 0195: axis materials' parts, and their owners
   std::vector<size_t> axis_owner;
   const Mat4 vp = p * v;
-  auto gather_see_through = [&](const DrawItem &it, uint32_t first_inst, const GpuMesh &e) {
+  double ms_corners = 0, ms_see = 0;  // (round 415: the parts of the gathering below, for the Profiler)
+  /* Task 0195 / round 415: a see-through item's job - its triangles (those of its see-through slots, listed once per
+   * mesh and slot mask), its culling, its fog side - listed here; the triangles are transformed and keyed for every job
+   * on every thread after the items (see_through_run), the jobs' results appended in item order. */
+  struct SeeJob {
+    const DrawItem *it;
+    const GpuMesh *e;
+    uint32_t first_inst;
+    uint64_t mask;
+    bool masked, cull, fog_back;
+    float facing;
+    Mat4 mvp;
+  };
+  std::vector<SeeJob> see_jobs;
+  auto gather_see_through = [&](const DrawItem &it, uint32_t first_inst, GpuMesh &e) {
+    ScopedTimer st;
     const RenderMesh &rm = *it.mesh;
-    const Mat4 mvp = vp * it.model;
-    const bool cull = !((it.double_sided || !opt.backface_culling) && !it.always_cull);
-    const float facing = mirrored(it.model) ? -1.0f : 1.0f;
-    int fog_inside = -1;  // round 414: a Volume whose bounds hold the eye draws its back faces, as the CPU's (its front faces otherwise); decided once per item
-    for (uint32_t prim = 0; prim < (uint32_t)rm.tri_count(); prim++) {
-      const uint32_t slot = rm.tri_material.size() == rm.tri_count() ? rm.tri_material[prim] : 0;
-      const Material &m = *slot_material(it, slot);
-      if (m.opaque() || m.surface == (int)MaterialSurface::Cutout) continue;
-      bool back = false;
-      if (m.volume()) {
-        if (fog_inside < 0) {
-          const Vec3 le = it.model.inverse().point(eye);
-          const AABB &b = rm.bounds;
-          fog_inside = b.valid() && le.x > b.min.x && le.y > b.min.y && le.z > b.min.z && le.x < b.max.x && le.y < b.max.y && le.z < b.max.z ? 1 : 0;
-        }
-        back = fog_inside == 1;
-      }
-      const uint32_t *tri = &rm.indices[(size_t)prim * 3];
-      const Vec4 c[3] = {mvp * Vec4(rm.positions[tri[0]], 1.0f), mvp * Vec4(rm.positions[tri[1]], 1.0f), mvp * Vec4(rm.positions[tri[2]], 1.0f)};
-      float key;
-      if (!see_through_key(c, cull || m.volume(), back ? -facing : facing, key)) continue;
-      uint32_t inst_at = first_inst;
-      for (size_t k = 0; k < e.parts.size(); k++)
-        if (e.parts[k][0] == slot) inst_at = first_inst + (uint32_t)k;
-      see.push_back({key, inst_at, prim, &it});
+    if (!e.see_listed || e.see_serial != rm.serial || rm.serial == 0) {  // (the mesh's slot count, walked once per mesh)
+      size_t slots = 1;
+      for (uint16_t s : rm.tri_material) slots = std::max<size_t>(slots, (size_t)s + 1);
+      e.see_slots = (uint32_t)slots, e.see_mask_valid = false, e.see_listed = true, e.see_serial = rm.serial;
     }
+    const size_t slots = e.see_slots;
+    bool masked = slots <= 64;
+    uint64_t mask = 0;
+    bool any_fog = false;  // (a fog's side - its front faces, or its back faces with the eye inside its bounds - decided once per item)
+    for (size_t s = 0; s < slots && s < 64; s++) {
+      const Material &m = *slot_material(it, (uint32_t)s);
+      if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) mask |= 1ull << s;
+      any_fog = any_fog || m.volume();
+    }
+    if (masked && (!e.see_mask_valid || e.see_mask != mask)) {
+      if (e.see_mask_valid && e.see_frame == gpu_calls_) masked = false;  // (another item of this mesh listed its own slots this frame: this one walks every triangle)
+      else {
+        e.see_prims.clear();
+        for (uint32_t prim = 0; prim < (uint32_t)rm.tri_count(); prim++) {
+          const uint32_t slot = rm.tri_material.size() == rm.tri_count() ? rm.tri_material[prim] : 0;
+          if (mask & (1ull << slot)) e.see_prims.push_back(prim);
+        }
+        e.see_mask = mask, e.see_mask_valid = true;
+      }
+    }
+    if (masked) e.see_frame = gpu_calls_;
+    bool fog_back = false;
+    if (any_fog) {
+      const Vec3 le = it.model.inverse().point(eye);
+      const AABB &bb = rm.bounds;
+      fog_back = bb.valid() && le.x > bb.min.x && le.y > bb.min.y && le.z > bb.min.z && le.x < bb.max.x && le.y < bb.max.y && le.z < bb.max.z;
+    }
+    see_jobs.push_back({&it, &e, first_inst, mask, masked, !((it.double_sided || !opt.backface_culling) && !it.always_cull), fog_back,
+                        mirrored(it.model) ? -1.0f : 1.0f, vp * it.model});
+    ms_see += st.ms();
+  };
+  auto see_through_run = [&] {
+    ScopedTimer st;
+    std::vector<std::vector<SeeTri>> per_job(see_jobs.size());
+    auto run = [&](int64_t ja, int64_t jb) {
+      for (int64_t j = ja; j < jb; j++) {
+        const SeeJob &job = see_jobs[(size_t)j];
+        const DrawItem &it = *job.it;
+        const RenderMesh &rm = *it.mesh;
+        const GpuMesh &e = *job.e;
+        std::vector<SeeTri> &out = per_job[(size_t)j];
+        const size_t n = job.masked ? e.see_prims.size() : rm.tri_count();
+        for (size_t pi = 0; pi < n; pi++) {
+          const uint32_t prim = job.masked ? e.see_prims[pi] : (uint32_t)pi;
+          const uint32_t slot = rm.tri_material.size() == rm.tri_count() ? rm.tri_material[prim] : 0;
+          const Material &m = *slot_material(it, slot);
+          if (m.opaque() || m.surface == (int)MaterialSurface::Cutout) continue;
+          const bool back = m.volume() && job.fog_back;
+          const uint32_t *tri = &rm.indices[(size_t)prim * 3];
+          const Vec4 c[3] = {job.mvp * Vec4(rm.positions[tri[0]], 1.0f), job.mvp * Vec4(rm.positions[tri[1]], 1.0f), job.mvp * Vec4(rm.positions[tri[2]], 1.0f)};
+          float key;
+          if (!see_through_key(c, job.cull || m.volume(), back ? -job.facing : job.facing, key)) continue;
+          uint32_t inst_at = job.first_inst;
+          for (size_t k = 0; k < e.parts.size(); k++)
+            if (e.parts[k][0] == slot) inst_at = job.first_inst + (uint32_t)k;
+          out.push_back({key, inst_at, prim, &it});
+        }
+      }
+    };
+    if (see_jobs.size() > 1) JobSystem::global().parallel_for((int64_t)see_jobs.size(), 1, run);
+    else if (!see_jobs.empty()) run(0, 1);
+    for (std::vector<SeeTri> &out : per_job) see.insert(see.end(), out.begin(), out.end());
+    ms_see += st.ms();
   };
   auto highlight_base = [&](const DrawItem &it, const GpuMesh &e) {
     /* One bit per triangle in the card's order: the mesh's own with one material, grouped by slot (card_indices)
@@ -1132,10 +1286,11 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     raster_axis(inst[i], m, *it.mesh, mtex, axis_parts);
     axis_owner.resize(axis_parts.size(), i);
   };
-  std::vector<float> corners;  // task 0197: the baked-lit triangles' corners
+  std::string corner_err;  // round 415: the baked corners' block the card couldn't hold (this view on the CPU, the card kept)
   const VoxelGIFrame *gi = env.gi && env.gi->grid && env.gi->grid->valid() ? env.gi : nullptr;  // (as Renderer3D::flush takes it)
   const bool bounce_onto_lm = gi ? gi->bounce_not_baked : env.rt_bounce_not_baked;
   auto baked_of = [&](const DrawItem &it, const GpuMesh &e, size_t first_inst) {
+    ScopedTimer bt;
     const RenderMesh &rm = *it.mesh;
     const bool lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= rm.tri_count() * 3;
     const bool rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= rm.tri_count() * 3;
@@ -1143,21 +1298,9 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     if (!lm && !rt && !probes) return;
     const int32_t lm_tex = lm ? gpu_lightmap(*it.lightmap, tex_err) : -1;
     const int32_t rb = rt ? gpu_lightmap(*it.rt_bounce, tex_err) : -1, rs = rt ? gpu_lightmap(*it.rt_sky, tex_err) : -1;
-    const int32_t base = lm || rt ? (int32_t)(corners.size() / 24) : -1;
-    if (lm || rt) {  // (the card's order: the mesh's, or grouped by material slot as card_indices groups them)
-      auto put = [&](size_t t) {
-        for (int k = 0; k < 3; k++) {
-          const Vec3 p = rm.positions[rm.indices[t * 3 + (size_t)k]];
-          const Vec2 a = lm ? (*it.lightmap_uv)[t * 3 + (size_t)k] : Vec2(0.0f, 0.0f), b = rt ? (*it.rt_uv)[t * 3 + (size_t)k] : Vec2(0.0f, 0.0f);
-          corners.insert(corners.end(), {p.x, p.y, p.z, a.x, a.y, b.x, b.y, 0.0f});
-        }
-      };
-      const bool grouped = !e.parts.empty() && rm.tri_material.size() == rm.tri_count();
-      for (size_t t = 0; !grouped && t < rm.tri_count(); t++) put(t);
-      for (size_t p = 0; grouped && p < e.parts.size(); p++)
-        for (size_t t = 0; t < rm.tri_count(); t++)
-          if (rm.tri_material[t] == e.parts[p][0]) put(t);
-    }
+    /* (Round 415: the corners' block on the card, built once per mesh and UV set - SideRail's had been rebuilt every
+     * frame, 24 ms of its 32 ms GPU path.) */
+    const int32_t base = lm || rt ? (int32_t)gpu_corners(it, e, lm, rt, corner_err) : -1;
     for (size_t k = first_inst; k < inst.size(); k++) {
       gpu::RasterInstance &in = inst[k];
       in.baked = true;
@@ -1165,7 +1308,9 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       in.corner_base = base < 0 ? -1 : base + (int32_t)(in.first_index / 3);
       in.baked_flags = (probes ? 1u : 0u) | (lm && rt && bounce_onto_lm ? 2u : 0u);
     }
+    ms_corners += bt.ms();
   };
+  ScopedTimer gather_timer;
   for (const DrawItem &it : items) {
     if (!it.mesh || it.mesh->indices.empty()) continue;
     const int mesh = gpu_mesh(*it.mesh, err);
@@ -1205,11 +1350,15 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       }
     if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
   }
+  see_through_run();  // (round 415: the see-through triangles of every item, on every thread)
   for (size_t k = 0; k < axis_parts.size(); k++) {  // (the parts after every drawn instance: no index moves)
     inst[axis_owner[k]].axis_parts[axis_parts[k].second] = (float)inst.size();
     inst.push_back(axis_parts[k].first);
   }
+  prof_.ms_gpu_instances += std::max(0.0, gather_timer.ms() - ms_corners - ms_see);
+  prof_.ms_gpu_corners += ms_corners;
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
+  if (ok && !corner_err.empty()) return gpu_view_refuse(slot, corner_err);
   if (!see.empty() && !g->can_draw_see_through()) return gpu_view_refuse(slot, "see-through surfaces (the card has no dual-source blending)");
   if (!see.empty() && opt.screen_door) return gpu_view_refuse(slot, "see-through surfaces drawn as a screen door");
   const bool want_hdr = rt.want_hdr && opt.shade == ShadeMode::Deferred;  // (task 0197: a camera's bloom reads it)
@@ -1222,8 +1371,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (baked && !g->can_draw_baked()) return gpu_view_refuse(slot, "lightmaps or probes (the card has no geometry shaders)");
   if (toon_maps && !g->can_draw_toon_maps()) return gpu_view_refuse(slot, "toon maps (the card's toon pass couldn't be made)");
   gpu::RasterFrame fr;
-  see_through_to_frame(see, fr.see_through);
-  fr.corners = std::move(corners);  // (task 0197: the baked light's settings)
+  {
+    ScopedTimer sort_timer;
+    see_through_to_frame(see, fr.see_through);
+    ms_see += sort_timer.ms();
+  }
+  prof_.ms_gpu_see += ms_see;
   if (env.probes) {
     fr.probe_normal_bias = env.probes->normal_bias, fr.probe_view_bias = env.probes->view_bias;
     fr.probe_leak = env.probes->leak_reduction, fr.probe_live = env.probes->use_live;
@@ -1304,9 +1457,11 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
    * while the editor goes on (the present, or the next use of the card, waits for it). */
   const bool nothing_back = !color && !depth && !ids && !want_hdr;
   if (ok) {
+    ScopedTimer render_timer;
     if (gpu_split_readback_for_test_) ok = g->render(fr, &err) && g->read_back(slot, color, depth, ids, &err);
     else if (nothing_back) ok = g->render_async(fr, &err);
     else ok = g->render_read(fr, color, depth, ids, &err);
+    prof_.ms_gpu_render += render_timer.ms();
   }
   if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
   if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)
@@ -1519,6 +1674,8 @@ void Editor::gpu_view_drop() {
   card_forget_windows();  // (task 0193)
   gpu_meshes_.clear();
   gpu_textures_.clear();
+  gpu_corners_.clear();  // (round 415: the blocks went with the card)
+  gpu_corner_floats_ = 0;
   for (std::string &a : gpu_slot_approx_) a.clear();  // (round 414: nothing is approximated on a card that isn't drawing)
   gpu_world_tex_ = nullptr;
   gpu_mesh_bytes_ = 0;

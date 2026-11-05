@@ -3103,6 +3103,183 @@ static void tests_round414() {
   });
 }
 
+static void tests_round415() {
+  /* ---------------------------------------------------------------- round 415: the CPU's share of a card frame (task 0391, ADR 0109) */
+  auto r415_compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    double sum = 0;
+    size_t within = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      sum += worst, within += worst <= 3;
+    }
+    mean = a.empty() ? 0 : sum / (double)a.size(), within3 = a.empty() ? 0 : (double)within / (double)a.size();
+  };
+  test("gpu views (round 415): a baked scene's corners go to the card once - blocks sent in the first card frames, none while the frames repeat, none when a lightmapped object moves (Manual lighting: its corners are local), the picture the CPU's within 1 / 255; a scene baked again (new pages, the same or other UVs) still matches", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, true, 2, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.command("lighting mode manual");  // (Automatic drops a moved object's lightmap: the move below must keep it)
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().empty());
+    auto scene = [&](int device, int frames) {
+      ed.viewport_device_for_test(device);
+      for (int i = 0; i < frames; i++) {
+        ed.scene_cache_reset_for_test();
+        r34_steps(ed, 1);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    const std::vector<uint32_t> cpu = scene(1, 2);
+    const FrameProfile first = ed.frame_profile_totals();
+    scene(2, 2);  // (the first card frames: the blocks go up)
+    const FrameProfile p0 = ed.frame_profile_totals();
+    std::printf("    the first card frames: %llu corner blocks sent\n", (unsigned long long)(p0.gpu_corner_uploads - first.gpu_corner_uploads));
+    CHECK(p0.gpu_corner_uploads > first.gpu_corner_uploads);
+    const std::vector<uint32_t> gpu = scene(2, 6);
+    const FrameProfile p1 = ed.frame_profile_totals();
+    double mean = 0, within3 = 0;
+    r415_compare(cpu, gpu, mean, within3);
+    std::printf("    6 repeated frames: %llu corner blocks sent, %llu views on the card; against the CPU mean %.3f / 255, %.2f %% within 3; corners %.2f ms a frame\n",
+                (unsigned long long)(p1.gpu_corner_uploads - p0.gpu_corner_uploads), (unsigned long long)(p1.gpu_views - p0.gpu_views), mean, within3 * 100,
+                (p1.ms_gpu_corners - p0.ms_gpu_corners) / 6.0);
+    CHECK(p1.gpu_views > p0.gpu_views && p1.gpu_corner_uploads == p0.gpu_corner_uploads);
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    /* The lightmapped box moved: its corners are in its own space, so no block is sent. */
+    CHECK(w.box != nullptr);
+    if (!w.box) return;
+    w.box->set_local_position(w.box->local().position + Vec3(0.0f, 0.02f, 0.0f));
+    const FrameProfile p2 = ed.frame_profile_totals();
+    scene(2, 2);
+    const FrameProfile p3 = ed.frame_profile_totals();
+    std::printf("    the box moved: %llu corner blocks sent\n", (unsigned long long)(p3.gpu_corner_uploads - p2.gpu_corner_uploads));
+    CHECK(p3.gpu_corner_uploads == p2.gpu_corner_uploads);
+    CHECK(ed.lighting_data_for_test().entries.count(w.box->id) == 1);  // (its lightmap entry kept after the move: Manual lighting)
+    /* The wall scaled and the scene baked again: the charts pack differently - the new UVs come in new vectors (or at
+     * a reused address): new blocks, and the card still matches the CPU. */
+    CHECK(w.wall != nullptr);
+    if (!w.wall) return;
+    w.wall->set_local_scale({2.5f, 2.5f, 1.0f});  // (a chart of another size: the atlas packs differently)
+    r35_bake(ed);
+    const std::vector<uint32_t> cpu2 = scene(1, 2);
+    const FrameProfile p4 = ed.frame_profile_totals();
+    const std::vector<uint32_t> gpu2 = scene(2, 3);
+    const FrameProfile p5 = ed.frame_profile_totals();
+    double mean2 = 0, within2 = 0;
+    r415_compare(cpu2, gpu2, mean2, within2);
+    std::printf("    baked again with the wall scaled: %llu corner blocks sent; against the CPU mean %.3f / 255, %.2f %% within 3\n",
+                (unsigned long long)(p5.gpu_corner_uploads - p4.gpu_corner_uploads), mean2, within2 * 100);
+    /* (New UVs come as new blocks; the same UVs under a new page - this scene packs the same - keep theirs: either way the card matches.) */
+    CHECK(mean2 < 1.0 && within2 >= 0.99);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 415: a renderer's Cast Shadows off (Unity's Shadows Off) keeps the object out of the shadow map on the CPU and on the card alike - the floor under it lit, the two pictures within 1 / 255", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube && cube->get<MeshRenderer>());
+    if (!cube || !cube->get<MeshRenderer>()) return;
+    GameObject *floor = ed.scene().create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::cube(1.0f);
+    floor->add<MeshRenderer>()->materials = {make_material("Floor", {0.8f, 0.8f, 0.8f})};
+    floor->set_local_position({0.0f, -0.55f, 0.0f});
+    floor->set_local_scale({8.0f, 0.1f, 8.0f});
+    cube->set_local_position({0.0f, 1.0f, 0.0f});
+    ed.command("select Main Camera");
+    auto scene = [&](int device) {
+      ed.viewport_device_for_test(device);
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 1.0f : 1.0001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    const std::vector<uint32_t> shadowed = scene(1);
+    cube->get<MeshRenderer>()->cast_shadows = false;
+    ed.mark_changed_for_test("shadows off");
+    const std::vector<uint32_t> cpu = scene(1);
+    size_t changed = 0;
+    for (size_t i = 0; i < cpu.size() && i < shadowed.size(); i++) changed += (cpu[i] & 0xFFFFFF) != (shadowed[i] & 0xFFFFFF);
+    std::printf("    Shadows Off on the CPU: %zu pixels change (the cube's shadow gone)\n", changed);
+    CHECK(changed > 200);
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: the card's half skipped\n");
+      return;
+    }
+    const std::vector<uint32_t> gpu = scene(2);
+    double mean = 0, within3 = 0;
+    r415_compare(cpu, gpu, mean, within3);
+    std::printf("    on the card: against the CPU mean %.3f / 255, %.2f %% within 3 (%s)\n", mean, within3 * 100, ed.gpu_view_status().c_str());
+    CHECK(ed.gpu_view_reason().empty());
+    CHECK(mean < 1.0 && within3 >= 0.99);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 415: a point light whose range can't reach the view is left out of the view's list - counted in the Profiler - and the picture is the one without it to the bit; one that reaches in stays", [&] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("overlay grid off");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    auto scene = [&] {
+      for (int k = 0; k < 2; k++) {
+        cube->set_local_position({0.0f, k ? 0.5f : 0.5001f, 0.0f});
+        r34_steps(ed, 2);
+      }
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    const std::vector<uint32_t> plain = scene();
+    GameObject *far = ed.scene().create("Far Lamp");
+    Light *l = far->add<Light>();
+    l->type = 1, l->range = 2.0f, l->intensity = 50.0f;
+    far->set_local_position({0.0f, -400.0f, 0.0f});  // (400 m below everything the camera sees: its 2 m sphere outside the frustum; in front at 400 m its icon would show)
+    ed.mark_changed_for_test("far lamp");
+    const FrameProfile p0 = ed.frame_profile_totals();
+    const std::vector<uint32_t> with_far = scene();
+    const FrameProfile p1 = ed.frame_profile_totals();
+    std::printf("    the far lamp: %llu lights left out over the frames; the picture %s the one without it\n", (unsigned long long)(p1.lights_culled - p0.lights_culled),
+                with_far == plain ? "is" : "is NOT");
+    CHECK(p1.lights_culled > p0.lights_culled);
+    CHECK(with_far == plain);
+    /* Near enough to reach: kept, and the picture changes. */
+    far->set_local_position({0.0f, 2.0f, 1.5f});
+    ed.mark_changed_for_test("near lamp");
+    const FrameProfile p2 = ed.frame_profile_totals();
+    const std::vector<uint32_t> with_near = scene();
+    const FrameProfile p3 = ed.frame_profile_totals();
+    size_t changed = 0;
+    for (size_t i = 0; i < plain.size() && i < with_near.size(); i++) changed += (plain[i] & 0xFFFFFF) != (with_near[i] & 0xFFFFFF);
+    std::printf("    the lamp near the cube: %llu left out, %zu pixels change\n", (unsigned long long)(p3.lights_culled - p2.lights_culled), changed);
+    CHECK(p3.lights_culled == p2.lights_culled && changed > 100);
+    /* A ring of lamps around the cube, their spheres crossing the view's side planes, the near plane and lying behind
+     * the camera: the picture with the cull is the picture without it, to the bit, and some were left out. */
+    far->active = false;
+    for (int i = 0; i < 24; i++) {
+      GameObject *g = ed.scene().create("Ring Lamp");
+      Light *rl = g->add<Light>();
+      rl->type = 1, rl->range = 1.5f + (i % 3) * 1.5f, rl->intensity = 6.0f;
+      const float a = (float)i / 24.0f * 6.2831853f;
+      g->set_local_position({std::cos(a) * (3.0f + (i % 2) * 4.0f), 0.3f + (i % 4) * 0.8f, std::sin(a) * (3.0f + (i % 2) * 4.0f)});
+    }
+    ed.mark_changed_for_test("ring");
+    const FrameProfile p4 = ed.frame_profile_totals();
+    const std::vector<uint32_t> culled = scene();
+    const FrameProfile p5 = ed.frame_profile_totals();
+    ed.set_light_cull_for_test(false);
+    ed.mark_changed_for_test("cull off");
+    const std::vector<uint32_t> whole = scene();
+    ed.set_light_cull_for_test(true);
+    std::printf("    24 lamps in a ring: %llu left out over the frames; the picture %s the uncut one\n", (unsigned long long)(p5.lights_culled - p4.lights_culled), culled == whole ? "is" : "is NOT");
+    CHECK(p5.lights_culled > p4.lights_culled);
+    CHECK(culled == whole);
+  });
+}
+
 static void tests_round337() {
   test("gpu views (round 337, the user's black cube): a cube drawn on the card, then given a procedural texture with a normal map and Physical Size 0.15, draws textured - not black from the zero tangents it first went up with (skipped without a GPU)", [] {
     if (!gpu::available()) {
@@ -3185,4 +3362,5 @@ void run_gpu_tests() {
   tests_round225();
   tests_round337();
   tests_round414();
+  tests_round415();
 }

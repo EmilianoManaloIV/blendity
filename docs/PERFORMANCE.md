@@ -204,6 +204,26 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 <!-- /pass16-table -->
 
+### After round 415 (the CPU's share of a card frame, ADR 0109; `--windowed-check`, `tools/bench_world.py`, `blendity_stress --only world_like --quick`)
+
+The GPU path's CPU share taken apart on SideRail's Scene view (presented by the card, 2560 x 1369): the baked corners
+had been rebuilt and sent every frame since task 0197. The card's frame is the cheaper one on the real world now.
+
+| Part of SideRail's Scene view frame | Before (ms) | After (ms) |
+|---|---|---|
+| the frame | 37.1 | 8.3 |
+| the views' GPU path (the card's passes inside it) | 32.1 (1.3) | 3.6 (0.6) |
+| the instances / the baked corners / the see-through triangles / the render call | 0.7 / 23.9 / 3.4 / 2.3 | 0.5 / 0.03 / 1.8 / 0.5 |
+| the CPU's own Scene view | 18.8 | 18.8 |
+
+| Row | Round 414 | Now |
+|---|---|---|
+| SideRail, Scene view (card / system ms) | 43.6 / 55.6 | 9.0 / 12.6 |
+| SideRail, Scene + Game view | 80.9 / 86.8 | 34.3 / 36.5 (the filters on the CPU: round 416) |
+| Shinano, Scene view | 7.4 / 11.6 | 7.0 / 10.7 |
+| Stand-in, Scene view on the card (frame / GPU path ms) | 8.5 / 6.1 | 6.9 / 4.5 |
+| Stand-in, Scene + Game view on the card | 25.2 / 12.7 | 23.9 / 10.3 |
+
 ### After round 414 (approximations on the card, ADR 0108; `blendity_stress --only world_like --quick`, `tools/bench_world.py`)
 
 The card draws the stand-in and the real projects' views instead of refusing them for one material: the Scene view's

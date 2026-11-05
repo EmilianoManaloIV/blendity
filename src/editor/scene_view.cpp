@@ -581,6 +581,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     it.double_sided = mat0.double_sided || editing;
     it.materials = &mr->materials;
     it.receive_shadows = mr->receive_shadows;
+    it.cast_shadows = mr->cast_shadows;  // (round 415)
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     if (!game && weight_paint_ && g.id == wp_obj_) {  // Weight Paint: the mesh being painted, in its weight colours

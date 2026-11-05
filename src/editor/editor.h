@@ -224,6 +224,12 @@ struct FrameProfile {
   uint64_t gpu_texture_uploads = 0;                       // task 0101: textures sent to the card
   uint64_t gpu_overlay_frames = 0;                        // task 0192: Scene view frames whose overlays the card drew
   uint64_t gpu_approximated = 0;                          // round 414 (ADR 0108): instances the card drew approximately (noted per view) rather than refusing the view
+  uint64_t gpu_corner_uploads = 0;                        // round 415 (ADR 0109): corner blocks built and sent to the card (none while nothing changes)
+  uint64_t lights_culled = 0;                             // round 415: point and spot lights left out of a view's list (their range sphere outside its frustum)
+  /* Round 415 (ADR 0109): the CPU's share of the GPU path - the instances gathered (materials evaluated, textures looked
+   * up), the baked-lit triangles' corners, the see-through triangles (transformed, culled, sorted), and the render call
+   * (the frame written to the card's buffers, recorded, submitted; the readback and the wait are in ms_gpu_readback). */
+  double ms_gpu_instances = 0, ms_gpu_corners = 0, ms_gpu_see = 0, ms_gpu_render = 0;  // (ms_gpu_render: the render call whole - and, when the picture is copied back this frame, the fence wait inside it, which ms_gpu_readback also holds; ms_gpu_corners holds the lightmap pages' uploads too)
   uint64_t gpu_face_dot_frames = 0;                       // task 0192: Edit Mode frames whose Face mode dots the card drew
   uint64_t gpu_cage_vert_builds = 0;                      // task 0205: frames whose cage vertices (and Face mode's dots) were worked out again
   double ms_gpu = 0;
@@ -251,7 +257,8 @@ struct FrameProfile {
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
-    gpu_approximated += o.gpu_approximated;
+    gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled;
+    ms_gpu_instances += o.ms_gpu_instances, ms_gpu_corners += o.ms_gpu_corners, ms_gpu_see += o.ms_gpu_see, ms_gpu_render += o.ms_gpu_render;
     gpu_upload_bytes += o.gpu_upload_bytes;
     gpu_mesh_partial += o.gpu_mesh_partial, gpu_partial_bytes += o.gpu_partial_bytes;
     gpu_cage_frames += o.gpu_cage_frames, gpu_cage_bytes += o.gpu_cage_bytes;
@@ -1515,6 +1522,7 @@ class Editor {
   const std::string &gpu_view_reason() const { return gpu_view_reason_; }
   std::string gpu_view_status() const;
   std::string gpu_view_approximations() const;  // round 414 (ADR 0108): what the card drew differently from the CPU in the views it drew ("" none)
+  void set_light_cull_for_test(bool on) { light_cull_off_for_test_ = !on; }  // round 415: the view's light cull off, to compare pictures
   std::string window_device_status(bool card_present, int card_win, const std::string &card_reason) const;  // (task 0199)
   bool notice_cpu_fallback();  // (true: said now)
   bool notice_in_tests_ = false;
@@ -5862,8 +5870,34 @@ class Editor {
     uint64_t bytes = 0;
     float uv_stretch = -1.0f;     // task 0196: its UVs' most stretch (live_close_up_of), -1 not measured
     uint64_t stretch_serial = 0;  // the mesh it was measured on
+    /* Round 415: the triangles of its see-through slots, listed once per (mesh serial, which slots are see-through), so a
+     * frame transforms and sorts only those instead of walking every triangle of a mesh with one glass slot. */
+    std::vector<uint32_t> see_prims;
+    uint64_t see_serial = 0, see_mask = 0;
+    uint32_t see_slots = 1;  // its material slots (the triangles' highest slot + 1), counted once per serial
+    uint64_t see_frame = 0;  // the call the list was made or used in (a second item of the mesh with other slots walks every triangle that frame)
+    bool see_mask_valid = false;  // see_prims lists see_mask's slots (a mesh whose 64 slots are all see-through has the mask ~0: no sentinel)
+    bool see_listed = false;
   };
   const char *live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 &vp, const Mat4 &p, Vec3 eye, int height);
+  /* Round 415 (ADR 0109): a baked-lit object's corners kept on the card - a block per (render mesh, its lightmap UVs, its
+   * realtime UVs), keyed by the mesh's serial and the UV vectors' addresses and sizes; let go with the meshes. */
+  struct GpuCorners {
+    int base = -1;
+    size_t floats = 0;
+    uint64_t serial = 0, used = 0;
+    const void *lm_uv = nullptr, *rt_uv = nullptr;
+    size_t lm_n = 0, rt_n = 0;
+    /* The pages' serials the block was keyed under and the UVs' hash: a bake or a realtime publish replaces the UV
+     * vectors, and a new one can land at a freed one's address - when the page serial differs the UVs are hashed, and
+     * the block stays only when the hash is the block's. `failed`: the card had no room (not tried every frame). */
+    uint64_t page_serial = 0, uv_hash = 0;
+    bool failed = false;
+  };
+  std::unordered_map<const RenderMesh *, std::vector<GpuCorners>> gpu_corners_;
+  int gpu_corners(const DrawItem &it, const GpuMesh &e, bool lm, bool rt, std::string &err);
+  void gpu_forget_corners(const RenderMesh *rm);
+  uint64_t gpu_corner_floats_ = 0;  // what the blocks on the card hold
   /* Task 0197: lightmap pages and the probe volume on the card. */
   int gpu_lightmap(const Lightmap &lm, std::string &err);
   void gpu_forget_texture(const Texture *t);
@@ -5884,6 +5918,7 @@ class Editor {
   double picker_ms_ = 0.0;           // round 411: the time a native file dialog blocked this frame (not the frame's own work: taken off the deferred time)
   std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
   std::string gpu_slot_approx_[gpu::Raster::kSlots];  // round 414: per view, what the card drew approximately ("" nothing; the Profiler lists them)
+  bool light_cull_off_for_test_ = false;
   std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
   double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)
   bool gpu_split_readback_for_test_ = false;  // (task 0160: render and read back as two submissions, for the test)
