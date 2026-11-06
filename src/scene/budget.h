@@ -41,6 +41,9 @@ struct BudgetCounts {
   size_t textures_reading = 0;  // (review 399: engine-only textures not read yet - Texture Memory counts them once they are)
 };
 BudgetCounts budget_count(const std::vector<GameObject *> &objects);
+/* Round 422: a texture file's size from its header (PNG, JPEG, TGA) and whether it can hold alpha; `alpha_known` false
+ * when only its texels can say (a PNG or TGA with an alpha channel). False: not one of these, or cut short. */
+bool budget_texture_header(const std::string &abs, int &w, int &h, bool &alpha, bool &alpha_known);
 
 /* Review 399: a texture only an engine reads is counted once a worker has read it (the editor's recounts never wait);
  * on, a count waits for it - headless runs and tests, whose one count must be whole. */

@@ -19,6 +19,22 @@ the landing frame 24 ms). The synthetic guard (`blendity_stress --only lightmap_
 against a reference with 16x the samples (its own random samples): room 0.031, corridor 0.015, courtyard 0.077; the
 room unfiltered 0.051 / 0.028 / 0.017 at 64 / 256 / 1024 samples, filtered 0.033 / 0.031 / 0.031.
 
+### The cheap wins (round 422)
+| step (bench_world on the user's copies, windowed) | before | after |
+|---|---|---|
+| SideRail: Export Unity Package | 18,658 ms | 3,241 ms |
+| Shinano: Export Unity Package | 7,454 ms | 1,705 ms |
+| Shinano: F12 (raster), total / longest frame | 3,514 / 384 ms | 1,134 / 334 ms |
+| SideRail: Generate Lighting's longest frame (the start) | 1,056 ms | 807 ms |
+| SideRail: the bake's start, headless (cold textures) | 6,083 ms | 728 ms |
+| SideRail: the first `budget pc wait`, headless | 7,034 ms | 992 ms |
+| The 50k sphere's import landing: OBJ / USDA | 69 / 61 ms | 6.9 / 3.4 ms |
+
+The package compressed a megabyte block a core (zlib's deflate joined pigz-style; Blendity's own in the dependency-free
+build), texture sizes from file headers, F12's snapshot skinning only view-shaped items, an import's copies on its
+worker, the bake's materials' files decoded on every core before they're frozen. Open: the bake's start is now its
+largest texture's decode (round 430 moves the freeze to the worker); Shinano's budget decodes its alpha PNGs.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

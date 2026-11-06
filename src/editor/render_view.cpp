@@ -1434,9 +1434,16 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
    * Inspector doesn't pull one from under the worker, and resolved here. */
   std::unordered_map<const std::vector<MaterialPtr> *, std::shared_ptr<std::vector<MaterialPtr>>> lists;
   std::unordered_map<const Material *, MaterialPtr> copies;
-  std::set<uint64_t> ids;
+  std::set<uint64_t> ids, shaped_ids;
+  {
+    std::vector<MaterialPtr> used;  // (round 422: the items' image files decoded on every core before they're frozen)
+    for (const DrawItem &it : j->items)
+      if (it.materials) used.insert(used.end(), it.materials->begin(), it.materials->end());
+    prefetch_material_textures(used);
+  }
   for (DrawItem &it : j->items) {
     ids.insert(it.id);
+    if (it.view_shaped) shaped_ids.insert(it.id);
     if (!it.materials) continue;
     std::shared_ptr<std::vector<MaterialPtr>> &l = lists[it.materials];
     if (!l) {
@@ -1461,6 +1468,9 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     if (!mf || !mf->mesh) continue;
     j->meshes.push_back(mf->mesh);
     if (std::shared_ptr<const Mesh> m = g->evaluated_mesh_shared(1)) j->meshes.push_back(m);
+    /* Round 422: the camera-view slot only for an item drawn view-shaped - asking for it evaluated it, so every
+     * skinned object was skinned again into a slot nothing draws (Shinano's first F12: 393 ms). */
+    if (!shaped_ids.count(id)) continue;
     if (std::shared_ptr<const Mesh> m = g->evaluated_mesh_shared(shaped_kind)) j->meshes.push_back(m);
   }
   if (!traced) {

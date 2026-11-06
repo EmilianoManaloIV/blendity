@@ -236,6 +236,9 @@ struct Material {
     const Resolved *axis_tx[4] = {nullptr, nullptr, nullptr, nullptr};
   };
   const Resolved &textures() const;
+  /* Round 422: the image files textures() would load for this material (path, sRGB) - not procedural or generated
+   * ones, not an axis material's parts. Kept beside textures(): the same maps, the same colour / data choice. */
+  void texture_files(std::vector<std::pair<std::string, bool>> &out) const;
   /* Round 412 (ADR 0106): a worker's copy of a material - resolved here, once, and never again (a texture generation
    * bump while a worker samples would re-resolve under its threads); an axis material's parts copied and frozen too. */
   void freeze_textures() const;
@@ -252,6 +255,8 @@ struct Material {
 using MaterialPtr = std::shared_ptr<Material>;
 
 MaterialPtr make_material(const std::string &name, Vec3 color);
+/* Round 422: the materials' image files (Material::texture_files) decoded on every core into the texture cache. */
+void prefetch_material_textures(const std::vector<MaterialPtr> &materials);
 const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */

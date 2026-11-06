@@ -2,9 +2,11 @@
 #include "material.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "scene.h"
 #include "../texture/procedural_texture.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <set>
@@ -517,6 +519,40 @@ const Material::Resolved &Material::textures() const {
   resolved_version_ = version;
   resolved_cache_gen_ = gen;
   return resolved_;
+}
+
+void Material::texture_files(std::vector<std::pair<std::string, bool>> &out) const {
+  auto add = [&](const TextureRef &t, bool data) {
+    std::string asset;
+    int output = 0;
+    if (t.empty() || starts_with(t.path, "generated:") || split_texture_ref(t.path, asset, output)) return;
+    out.push_back({resolve_asset_path(t.path), !(data || t.non_color)});
+  };
+  if (procedural != (int)Procedural::UVGrid && procedural != (int)Procedural::ColorGrid) add(base_map, false);
+  add(metallic_map, false), add(roughness_map, false), add(normal_map, true), add(emission_map, false);
+  if (shading_model == 1) {
+    add(toon_ramp_map, false), add(shade_map, false), add(toon_shadow_bias_map, true), add(toon_specular_map, true);
+    add(toon_rim_map, true), add(face_shadow_map, true), add(line_map, false), add(hatch_map, true);
+  }
+  if (liltoon()) {
+    add(lil.shadow_color_tex, false), add(lil.shadow2_color_tex, false), add(lil.strength_mask, true), add(lil.border_mask, true);
+    add(lil.rim_color_tex, false), add(lil.backlight_tex, false), add(lil.matcap_tex, false), add(lil.matcap_mask, true);
+    add(lil.emission_map, false), add(lil.emission_blend_mask, true);
+  }
+}
+
+/* Round 422: the materials' image files decoded on every core into the texture cache, so their textures() calls that
+ * follow find them there (a bake's or a render's snapshot froze 23 materials of 4096 maps in 6 s, one file at a time). */
+void prefetch_material_textures(const std::vector<MaterialPtr> &materials) {
+  std::vector<std::pair<std::string, bool>> files;
+  for (const MaterialPtr &m : materials)
+    if (m) m->texture_files(files);
+  std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
+  if (files.size() < 2) return;
+  JobSystem::global().parallel_for((int64_t)files.size(), 1, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) (void)texture_load(files[(size_t)i].first, files[(size_t)i].second);
+  });
 }
 
 MaterialPtr make_material(const std::string &name, Vec3 color) {

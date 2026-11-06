@@ -1980,6 +1980,10 @@ blendity_stress --only responsiveness runs every heavy operation headless with t
 ! cmd:perf status | Print the last frame's parts, the jobs and where the views draw
 ! cmd:viewport status | Where the views draw, and whether the CPU badge shows
 ! cmd:window Profiler | Open the Profiler
+# Pass 17's quick wins: work moved off the frame or split across cores
+Some waits were one job done one piece at a time. An exported Unity package is now compressed a megabyte block per core (zlib with Blender's libraries, joined into one stream as pigz joins them): SideRail's package 18.7 s to 3.2 s. The Budget reads a texture's size and whether it can hold alpha from its file's header instead of decoding it, and only decodes when Unity's own settings depend on its texels. An import copies its model and textures into Assets on its worker, so the frame it lands in only makes the objects: an OBJ's 69 ms frame to 7 ms. Generate Lighting decodes its materials' image files on every core before it freezes them for the worker: SideRail's starting frame 6 s to under a second.
+? Exporting a Unity package used to take 20 seconds on a world and now takes 3. What changed, and is the file any different for Unity? | The compression runs on every core, a block a core, the blocks joined into one stream (pigz's scheme); the package is still one ordinary gzip stream Unity reads as before, a little smaller (zlib's dynamic Huffman codes).
+! cmd:budget pc | Count the scene against VRChat's PC limits (texture sizes from the files' headers)
 )"},
 };
 

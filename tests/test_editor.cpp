@@ -5,6 +5,8 @@
 #include "test_common.h"
 #include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
+#include "../src/scene/budget.h"
+#include "../src/scene/unity_package.h"
 #include "../src/texture/smart_material.h"
 #include "../src/texture/paint_layer.h"
 #include "../src/texture/surface.h"
@@ -8368,6 +8370,153 @@ static void tests_round419() {
   });
 }
 
+/* ---------------------------------------------------------------- round 422: the cheap performance wins (task 0398) */
+static void tests_round422() {
+  test("unity package (round 422): the gzip writer's blocks compressed on every core read back byte for byte - empty, one byte, a block exactly, blocks and a tail, text and noise - and its time printed", [] {
+    uint32_t s = 12345u;
+    auto noise = [&](size_t n) {
+      std::string r(n, '\0');
+      for (char &c : r) s = s * 1664525u + 1013904223u, c = (char)(s >> 24);
+      return r;
+    };
+    std::string text;
+    while (text.size() < ((size_t)40 << 20)) text += "m_LocalPosition: {x: 0.25, y: " + std::to_string(text.size() % 977) + ", z: -1}\n";
+    const std::string big = text.substr(0, (size_t)24 << 20) + noise((size_t)9 << 20) + text.substr(0, (size_t)3 << 20) + "tail";
+    for (const std::string &d : {std::string(), std::string("x"), std::string((size_t)1 << 20, 'a'), noise(((size_t)1 << 20) + 7), big}) {
+      GzipWriter g;
+      ScopedTimer t;
+      for (size_t at = 0; at < d.size(); at += 3000001) g.write(d.substr(at, 3000001));  // (in parts, as the export writes)
+      g.finish();
+      const double ms = t.ms();
+      std::string back, why;
+      const bool ok = gunzip(g.output(), back, why);
+      if (d.size() > 1000000) std::printf("    %.1f MB -> %.1f MB in %.0f ms\n", d.size() / 1048576.0, g.output().size() / 1048576.0, ms);
+      CHECK(ok && back == d);
+    }
+  });
+  test("budget (round 422): a texture's size and whether it can hold alpha read from its header - an opaque PNG, a PNG with alpha, a JPEG, a 24- and a 32-bit TGA; a cut-short file refused", [] {
+    const std::string dir = fs::join(test_dir(), "r422_headers");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(37 * 21, 0xFF336699u);
+    const std::string opaque = fs::join(dir, "opaque.png"), with_alpha = fs::join(dir, "alpha.png"), jpg = fs::join(dir, "photo.jpg");
+    CHECK(write_png(opaque, px.data(), 37, 21, 37, false) && write_png(with_alpha, px.data(), 37, 21, 37, true) && write_jpeg(jpg, px.data(), 37, 21, 37));
+    auto tga = [&](const std::string &name, int depth) {
+      std::string h(18, '\0');
+      h[2] = 2, h[12] = 37, h[14] = 21, h[16] = (char)depth, h[17] = depth == 32 ? 8 : 0;
+      const std::string p = fs::join(dir, name);
+      fs::write_file(p, h + std::string((size_t)37 * 21 * (depth / 8), '\x7f'));
+      return p;
+    };
+    struct Case {
+      std::string path;
+      bool alpha, known;
+    };
+    for (const Case &c : {Case{opaque, false, true}, Case{with_alpha, true, false}, Case{jpg, false, true}, Case{tga("rgb.tga", 24), false, true}, Case{tga("rgba.tga", 32), true, false}}) {
+      int w = 0, h = 0;
+      bool alpha = false, known = false;
+      CHECK(budget_texture_header(c.path, w, h, alpha, known) && w == 37 && h == 21 && alpha == c.alpha && known == c.known);
+    }
+    std::string bytes;
+    fs::read_file(opaque, bytes);
+    const std::string cut = fs::join(dir, "cut.png");
+    fs::write_file(cut, bytes.substr(0, 20));
+    int w = 0, h = 0;
+    bool alpha = false, known = false;
+    CHECK(!budget_texture_header(cut, w, h, alpha, known));
+  });
+  test("budget (round 422): a waiting count counts a drawn map nothing has loaded yet from its file (headless, before a frame) - the same Texture Memory as with it loaded", [] {
+    const std::string dir = fs::join(test_dir(), "r422_budget");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(256 * 128, 0xFF4080C0u);
+    const std::string png = fs::join(dir, "drawn.png");
+    CHECK(write_png(png, px.data(), 256, 128, 256, false));
+    Scene s;
+    GameObject *g = s.create("Box");
+    g->add<MeshFilter>()->mesh = primitives::cube();
+    MaterialPtr m = make_material("Drawn", Vec3(1.0f));
+    m->base_map = TextureRef{png, false};
+    g->add<MeshRenderer>()->materials = {m};
+    const bool was = budget_wait_for_textures();
+    set_budget_wait_for_textures(true);
+    texture_cache_clear();
+    const BudgetCounts cold = budget_count({g});
+    (void)resolve_texture_ref(m->base_map);  // (now loaded, as the views would)
+    const BudgetCounts warm = budget_count({g});
+    set_budget_wait_for_textures(was);
+    const double want = 256.0 * 128.0 * 0.5 * (4.0 / 3.0) / (1024.0 * 1024.0);
+    std::printf("    Texture Memory before a frame %.4f MB, with the map loaded %.4f MB (want %.4f)\n", cold.value[(int)BudgetRow::TextureMB],
+                warm.value[(int)BudgetRow::TextureMB], want);
+    CHECK(cold.textures_reading == 0 && std::fabs(cold.value[(int)BudgetRow::TextureMB] - want) < 1e-6);
+    CHECK(std::fabs(warm.value[(int)BudgetRow::TextureMB] - want) < 1e-6);
+  });
+  test("materials (round 422): texture_files lists exactly the image files textures() loads - every PBR, toon and lilToon map, colour or data - and a prefetch leaves them in the cache", [] {
+    const std::string dir = fs::join(test_dir(), "r422_maps");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(4, 0xFF808080u);
+    int n = 0;
+    auto file = [&]() {
+      const std::string p = fs::join(dir, "map" + std::to_string(n++) + ".png");
+      write_png(p, px.data(), 2, 2, 2, false);
+      return TextureRef{p, false};
+    };
+    Material m;
+    m.shading_model = 1, m.lil.on = true;
+    for (TextureRef *r : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map, &m.toon_ramp_map, &m.shade_map, &m.toon_shadow_bias_map,
+                          &m.toon_specular_map, &m.toon_rim_map, &m.face_shadow_map, &m.line_map, &m.hatch_map, &m.lil.shadow_color_tex, &m.lil.shadow2_color_tex,
+                          &m.lil.strength_mask, &m.lil.border_mask, &m.lil.rim_color_tex, &m.lil.backlight_tex, &m.lil.matcap_tex, &m.lil.matcap_mask, &m.lil.emission_map,
+                          &m.lil.emission_blend_mask})
+      *r = file();
+    m.touch();
+    std::vector<std::pair<std::string, bool>> listed;
+    m.texture_files(listed);
+    const Material::Resolved &r = m.textures();
+    std::vector<std::pair<std::string, bool>> loaded;
+    for (const TexturePtr &t : {r.base, r.metallic, r.roughness, r.normal, r.emission, r.toon_ramp, r.shade, r.toon_bias, r.toon_specular, r.toon_rim_mask, r.face_shadow,
+                                r.line, r.hatch, r.lil_shadow_tex, r.lil_shadow2_tex, r.lil_strength_mask, r.lil_border_mask, r.lil_rim_tex, r.lil_backlight_tex, r.lil_matcap,
+                                r.lil_matcap_mask, r.lil_emission, r.lil_emission_mask})
+      if (t) loaded.push_back({t->path, t->srgb});
+    std::sort(listed.begin(), listed.end()), std::sort(loaded.begin(), loaded.end());
+    CHECK(listed.size() == 23 && listed == loaded);
+    /* A PBR material lists only its own five; the prefetch leaves them cached (the same texture comes back). */
+    Material pbr;
+    pbr.base_map = m.base_map, pbr.normal_map = m.normal_map, pbr.shade_map = m.shade_map;
+    std::vector<std::pair<std::string, bool>> two;
+    pbr.texture_files(two);
+    CHECK(two.size() == 2);
+    texture_cache_clear();
+    auto shared = std::make_shared<Material>(m);
+    prefetch_material_textures({shared});
+    CHECK(texture_cache_size() >= 23);
+  });
+  test("import (round 422): a model imported on a worker lands with its file and its textures already copied into Assets; the landing frame timed", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string src = fs::join(test_dir(), "r422_import");
+    fs::make_dirs(src);
+    std::vector<uint32_t> px(8 * 8, 0xFF2040C0u);
+    CHECK(write_png(fs::join(src, "r422skin.png"), px.data(), 8, 8, 8, false));
+    CHECK(fs::write_file(fs::join(src, "r422box.mtl"), "newmtl Skin\nKd 1 1 1\nmap_Kd r422skin.png\n"));
+    CHECK(fs::write_file(fs::join(src, "r422box.obj"), "mtllib r422box.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl Skin\nf 1/1 2/2 3/3 4/4\n"));
+    ed.set_async_jobs_for_test(true);
+    ed.command("import " + fs::join(src, "r422box.obj") + " pbr");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    double longest = 0;
+    while (!ed.scene().find_by_name("r422box") && std::chrono::steady_clock::now() < deadline) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      longest = std::max(longest, f.ms());
+    }
+    std::printf("    the longest frame while importing: %.1f ms\n", longest);
+    CHECK(ed.scene().find_by_name("r422box") != nullptr);
+    CHECK(fs::exists(resolve_asset_path("Assets/Meshes/r422box.obj")) && fs::exists(resolve_asset_path("Assets/Textures/r422box/r422skin.png")));
+    const MaterialPtr m = material_asset("Assets/Materials/r422box/Skin.mat");
+    CHECK(m && m->base_map.path == "Assets/Textures/r422box/r422skin.png");
+    std::error_code ec;
+    for (const char *p : {"Assets/Meshes/r422box.obj", "Assets/Meshes/r422box.mtl", "Assets/Textures/r422box", "Assets/Materials/r422box"})
+      std::filesystem::remove_all(std::filesystem::u8path(resolve_asset_path(p)), ec);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -8443,5 +8592,6 @@ void run_editor_tests() {
   tests_round413();
   tests_round418();
   tests_round419();
+  tests_round422();
   coverage_tests();
 }
