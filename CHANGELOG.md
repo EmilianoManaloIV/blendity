@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-06 (round 421): measuring Blendity's own bake against Unity's
+
+**Asked:** "How to get better results of light baking, reflection baking, etc. similar to the quality of Unity 3D" -
+Pass 17's plan (rounds 421-434), bake quality first. This round measures before anything changes: every SideRail
+comparison so far had loaded Unity's lightmaps, never Blendity's own bake.
+
+**Changed (task 0397, ADR 0113)**
+- **A Unity scene's bake settings come with it:** the import reads the scene's LightingSettings asset (or its own
+  lightmap settings) - texels per unit, the largest lightmap, padding, samples, bounces, the filter - into the
+  Lighting window; what Blendity doesn't bake yet (Directional mode, Shadowmask / Subtractive, ambient occlusion,
+  Unity's denoiser) is named in the import's notes.
+- **Generate Lighting times its phases** (lightmaps, probes, Light Volumes, reflection probes, saving, the landing
+  frame) in the log.
+- **`tools/unity_compare.py world ... --blendity-bake`** bakes the imported world with Blendity's own Generate
+  Lighting and compares every station with Unity's render.
+- **`blendity_stress --only lightmap_quality`:** three synthetic scenes against a reference with 16x the samples (its own random ones), samples
+  against time with the filter on and off, a box sunk into a floor.
+
+**Found:** on SideRail Blendity's own bake misses the target on 3 of 4 stations (spawn 5.55 / 0.890, floor 7.66 /
+0.692, ahead 4.12 / 0.900 MAE / SSIM; Unity's lightmaps in Blendity: 3 of 4 pass). The baked lamps' pools of light on
+the floor are missing or dim (likely: Baked point and spot lights baked with the realtime falloff curve instead of
+Unity's inverse square), chart edges show as thin bright lines and speckles, the bake took 686 s with nothing on
+the GPU. Blendity's lightmap filter helps below 256 samples and costs accuracy above (relative error 0.017 unfiltered
+at 1024 samples, 0.031 filtered). These set the next rounds' work.
+
+**Checked:** tests_round421; both suites - with Blender's libraries 16234 checks in 1591 tests, 0 failed;
+dependency-free 15493 (Windows) and 15477 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-05 (round 420): Pass 16's write-up, and Unity's editor timed beside Blendity
 
 **Asked:** the plan's round 420 - the suite's tables before and after Pass 16, SideRail and Shinano navigation beside

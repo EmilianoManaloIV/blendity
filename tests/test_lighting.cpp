@@ -5681,6 +5681,142 @@ static void tests_round177() {
   });
 }
 
+/* ---------------------------------------------------------------- round 421: measuring the bake (task 0397, ADR 0113) */
+static void tests_round421() {
+  test("bake settings (round 421): a Unity scene's lightmap settings are read from its LightingSettings asset when it references one, else from the scene's own block", [] {
+    const std::string scene =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!157 &3\nLightmapSettings:\n  m_ObjectHideFlags: 0\n  m_LightmapEditorSettings:\n"
+        "    m_BakeResolution: 20\n    m_AtlasSize: 512\n    m_Padding: 3\n    m_LightmapsBakeMode: 0\n    m_MixedBakeMode: 0\n    m_PVRDirectSampleCount: 16\n"
+        "    m_PVRSampleCount: 300\n    m_PVRBounces: 3\n    m_PVRFilteringMode: 0\n  m_LightingSettings: {fileID: 4890085278179872738, guid: 0123, type: 2}\n";
+    const std::string asset =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!850595691 &4890085278179872738\nLightingSettings:\n  m_Name: Test\n  serializedVersion: 4\n"
+        "  m_BakeResolution: 40\n  m_Padding: 8\n  m_LightmapMaxSize: 2048\n  m_LightmapsBakeMode: 1\n  m_MixedBakeMode: 2\n  m_AO: 1\n  m_BakeBackend: 2\n"
+        "  m_PVRDirectSampleCount: 32\n  m_PVRSampleCount: 1024\n  m_PVREnvironmentSampleCount: 1\n  m_PVRBounces: 2\n  m_PVRFilteringMode: 2\n"
+        "  m_PVRDenoiserTypeIndirect: 1\n";
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(scene, docs, why));
+    UnityBakeSettings own, from_asset;
+    CHECK(unity_bake_settings(docs, "", own));
+    CHECK(own.source == "the scene's own settings" && own.texels == 20.0f && own.max_size == 512 && own.padding == 3 && own.indirect == 300 &&
+          own.direct == 16 && own.bounces == 3 && own.filtering == 0 && own.directional == 0);
+    CHECK(unity_bake_settings(docs, asset, from_asset));
+    CHECK(from_asset.source == "the LightingSettings asset" && from_asset.texels == 40.0f && from_asset.max_size == 2048 && from_asset.padding == 8 &&
+          from_asset.indirect == 1024 && from_asset.environment == 1 && from_asset.directional == 1 && from_asset.mixed == 2 && from_asset.ao &&
+          from_asset.backend == 2 && from_asset.denoiser_indirect == 1);
+    std::vector<UnityDoc> none;
+    UnityBakeSettings n;
+    CHECK(!unity_bake_settings(none, "", n) && !n.read);
+    /* Out of range and malformed: clamped in double before the cast (1e12 samples, a negative padding, NaN bounces). */
+    const std::string wild =
+        "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightmapEditorSettings:\n    m_BakeResolution: 5000\n    m_AtlasSize: 99999\n    m_Padding: -4\n"
+        "    m_PVRSampleCount: 1e12\n    m_PVRBounces: .nan\n";
+    std::vector<UnityDoc> wd;
+    UnityBakeSettings w;
+    CHECK(parse_unity_yaml(wild, wd, why) && unity_bake_settings(wd, "", w));
+    CHECK(w.texels == 1000.0f && w.max_size == 4096 && w.padding == 0 && w.indirect == 65536 && w.bounces >= 0 && w.bounces <= 16);
+    /* A LightingSettings embedded in the scene (referenced by its fileID alone), Baked GI off. */
+    const std::string embedded =
+        "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_GISettings:\n    m_EnableBakedLightmaps: 1\n  m_LightmapEditorSettings:\n    m_BakeResolution: 12\n"
+        "  m_LightingSettings: {fileID: 77}\n--- !u!850595691 &77\nLightingSettings:\n  m_BakeResolution: 33\n  m_EnableBakedLightmaps: 0\n  m_PVRSampleCount: 640\n";
+    std::vector<UnityDoc> ed_docs;
+    UnityBakeSettings e;
+    CHECK(parse_unity_yaml(embedded, ed_docs, why) && unity_bake_settings(ed_docs, "", e));
+    CHECK(e.source == "the scene's embedded LightingSettings" && e.texels == 33.0f && e.indirect == 640 && !e.baked_gi);
+    CHECK(own.baked_gi);  // (no flag: on)
+  });
+  test("bake settings (round 421): opening a Unity scene puts its LightingSettings asset's numbers in the Lighting window, logs them, and notes what isn't baked yet; a missing asset is said", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string dir = resolve_asset_path("Assets/Imported/R421B");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "aaaa4210aaaa4210aaaa4210aaaa0001", gl = "aaaa4210aaaa4210aaaa4210aaaa0002", gone = "aaaa4210aaaa4210aaaa4210aaaa0003";
+    auto scene_text = [](const std::string &guid) {
+      return "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightmapEditorSettings:\n    m_BakeResolution: 10\n    m_PVRSampleCount: 100\n"
+             "  m_LightingSettings: {fileID: 4890085278179872738, guid: " + guid + ", type: 2}\n--- !u!1 &10\nGameObject:\n  m_Name: Thing\n"
+             "--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n";
+    };
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"), scene_text(gl)));
+    CHECK(fs::write_file(fs::join(dir, "Gone.unity"), scene_text(gone)));
+    CHECK(fs::write_file(fs::join(dir, "Lit.lighting"),
+                         "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!850595691 &4890085278179872738\nLightingSettings:\n  m_Name: Lit\n"
+                         "  m_BakeResolution: 25\n  m_Padding: 6\n  m_LightmapMaxSize: 512\n  m_LightmapsBakeMode: 1\n  m_MixedBakeMode: 1\n"
+                         "  m_PVRDirectSampleCount: 24\n  m_PVRSampleCount: 99999\n  m_PVRBounces: 3\n  m_PVRFilteringMode: 0\n  m_PVRDenoiserTypeIndirect: 1\n"));
+    for (const std::string &g : {gs, gl}) CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + g + ".meta"), "fileFormatVersion: 2\nguid: " + g + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\tAssets/Imported/R421B/Lit.unity\n" + gl +
+                                                            "\tAssets/Lit.lighting\tAssets/Imported/R421B/Lit.lighting\n"));
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("open Assets/Imported/R421B/Lit.unity");
+    const LightingSettings &l = ed.scene().lighting;
+    std::printf("    %.0f texels, %d max, padding %d, %d direct, %d indirect, %d bounces, denoise %d\n", l.texels_per_unit, l.max_size, l.padding,
+                l.direct_samples, l.indirect_samples, l.bounces, (int)l.denoise);
+    CHECK(ed.scene().find_by_name("Thing") != nullptr);
+    CHECK(l.texels_per_unit == 25.0f && l.max_size == 512 && l.padding == 6 && l.direct_samples == 24 && l.indirect_samples == 65536 && l.bounces == 3 && !l.denoise);
+    CHECK(ed.scene().unity_bake.read && ed.scene().unity_bake.source == "the LightingSettings asset" && ed.scene().unity_bake.mixed == 1);
+    log.clear();
+    Log::fetch(since, log);
+    bool settings_info = false, unbaked_warn = false, optix = false;
+    for (const LogEntry &e : log) {
+      settings_info = settings_info || (e.level == LogLevel::Info && e.text.find("the lightmap settings came from the LightingSettings asset: 25 texels per unit") != std::string::npos);
+      unbaked_warn = unbaked_warn || (e.text.find("not baked yet from the scene's lightmap settings: Directional mode") != std::string::npos &&
+                                      e.text.find("Subtractive") != std::string::npos);
+      optix = optix || e.text.find("OptiX") != std::string::npos;  // (the filter is off in Unity: no denoiser to name)
+    }
+    CHECK(settings_info && unbaked_warn && !optix);
+    /* The asset's GUID not in the project: the scene's own block, and a note that says so (a fresh editor: the import
+     * left the first one with unsaved changes, and Open would ask first). */
+    Editor ed2;
+    ed2.init_headless(400, 300);
+    const size_t since2 = Log::fetch(0, log);
+    ed2.command("open Assets/Imported/R421B/Gone.unity");
+    CHECK(ed2.scene().lighting.texels_per_unit == 10.0f && ed2.scene().lighting.indirect_samples == 100);
+    log.clear();
+    Log::fetch(since2, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("Lighting Settings asset (" + gone + ") isn't in this project") != std::string::npos;
+    if (!said)
+      for (const LogEntry &e : log) std::printf("    log: %s\n", e.text.c_str());
+    CHECK(said);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("bake phases (round 421): Generate Lighting on a worker times its lightmaps, probes, Light Volumes, reflection probes and saving, and its landing frame", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *floor = ed.scene().create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(6.0f, 4);
+    MeshRenderer *mr = floor->add<MeshRenderer>();
+    mr->contribute_gi = true;
+    GameObject *box = ed.scene().create("Box");
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->set_local_position({0, 0.5f, 0});
+    box->add<MeshRenderer>()->contribute_gi = true;
+    ed.scene().lighting.texels_per_unit = 8.0f;
+    ed.scene().lighting.indirect_samples = 32;
+    ed.commit_change("scene");
+    ed.set_async_jobs_for_test(true);
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    const auto &b = ed.last_bake_times_for_test();
+    std::printf("    lightmaps %.0f ms (%zu texels, filter %.1f ms), probes %.0f, volumes %.0f, reflection probes %.0f, saving %.0f; total %.0f, landing %.1f ms\n",
+                b.phase_ms[0], b.texels, b.finish_ms, b.phase_ms[1], b.phase_ms[2], b.phase_ms[3], b.phase_ms[4], b.total_ms, b.land_ms);
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    CHECK(b.texels > 0 && b.rays > 0 && b.phase_ms[0] > 0 && b.total_ms >= b.phase_ms[0] && b.land_ms > 0);
+    for (double p : b.phase_ms) CHECK(p >= 0.0);  // (every phase reached: -1 is a phase the job never finished)
+    const double total = b.total_ms;
+    /* A cancelled bake lands nothing: the last bake's times stay. */
+    ed.command("bake start");
+    ed.step_frame_headless();
+    ed.command("bake cancel");
+    for (int i = 0; i < 2000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && ed.last_bake_times_for_test().total_ms == total);
+  });
+}
+
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -5695,4 +5831,5 @@ void run_lighting_tests() {
   tests_round164();
   tests_round175();
   tests_round177();
+  tests_round421();
 }

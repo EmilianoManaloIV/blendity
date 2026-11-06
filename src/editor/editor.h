@@ -5510,6 +5510,11 @@ class Editor {
     std::map<uint64_t, ReflectionProbeBake> probe_bakes;
     /* What the tray and the Lighting window read while it runs. */
     std::atomic<int> phase{0};  // 0 the lightmaps, 1 the probe volume, 2 the volumes, 3 the reflection probes, 4 done
+    double phase_ms[5] = {-1, -1, -1, -1, -1};  // (round 421: the lightmaps, the probes, the Light Volumes, the reflection probes, saving; -1 not reached)
+    double lightmap_finish_ms = 0;         // (the lightmaps' filter and dilation, inside phase 0)
+    size_t lightmap_texels = 0;
+    uint64_t lightmap_rays = 0;
+    size_t lightmap_gpu_texels = 0;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> done{false}, cancel{false};
     std::mutex mutex;
@@ -5524,9 +5529,21 @@ class Editor {
   std::unique_ptr<BakeJob> bake_job_;
   void bake_job_run(BakeJob &j);   // (the worker)
   void bake_job_land(BakeJob &j);  // (the main thread: the results into the scene, saved)
+  /* Round 421: the last Generate Lighting's phases (ms): the lightmaps, the probes, the Light Volumes, the reflection
+   * probes, saving, and the frame that landed it; the lightmaps' texels, rays and GPU share. */
+  struct BakeTimes {
+    double phase_ms[5] = {0, 0, 0, 0, 0}, finish_ms = 0, land_ms = 0, total_ms = 0;
+    size_t texels = 0, gpu_texels = 0;
+    uint64_t rays = 0;
+  };
+  BakeTimes last_bake_times_;
+ public:
+  const BakeTimes &last_bake_times_for_test() const { return last_bake_times_; }
+ private:
   void bake_gather_volumes(BakeJob &j);
   void bake_gather_reflection_probes(BakeJob &j);
   void bake_volumes_on_worker(BakeJob &j);
+  void apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::vector<std::string> &notes);  // (round 421)
   void bake_reflection_probes_on_worker(BakeJob &j);
   /* Round 412: Bake Textures on a worker (editor.cpp): the mesh copied bare, the materials copied and resolved, the
    * images written by the worker, the material and the UVs landed by texbake_poll when the mesh is still the one baked. */

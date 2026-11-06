@@ -1840,6 +1840,20 @@ struct EnvironmentSettings;
 
 /* Round 401: the Unity scene file this scene was opened from (project-relative, "" when none): Export Unity Package
  * writes the scene's world, camera and light settings back into it. */
+/* Round 421 (ADR 0113): a Unity scene's lightmap settings as read (unity_bake_settings, unity_scene.h). */
+struct UnityBakeSettings {
+  bool read = false;
+  float texels = 40.0f;
+  int max_size = 1024, padding = 2, direct = 32, indirect = 512, environment = 256, bounces = 2;
+  int filtering = 1;          // m_PVRFilteringMode: 0 None, 1 Auto, 2 Advanced
+  int denoiser_indirect = 0;  // m_PVRDenoiserTypeIndirect: 0 None, 1 OptiX, 2 OpenImageDenoise, 3 Radeon Pro
+  int directional = 1;        // m_LightmapsBakeMode: 0 Non-Directional, 1 Directional
+  int mixed = 0;              // m_MixedBakeMode: 0 Baked Indirect, 1 Subtractive, 2 Shadowmask
+  bool ao = false;
+  int backend = 1;            // m_BakeBackend: 0 Enlighten, 1 Progressive CPU, 2 Progressive GPU
+  bool baked_gi = true;       // m_EnableBakedLightmaps (Baked Global Illumination)
+  std::string source;         // "the LightingSettings asset" / "the scene's embedded LightingSettings" / "the scene's own settings"
+};
 struct UnitySceneLink {
   std::string file;
   int ambient_mode = -1;           // Unity's m_AmbientMode as read (0 Skybox, 1 Trilight, 3 Flat, 4 Custom; -1 none): written back only where Blendity's world still means it (review 401)
@@ -2008,6 +2022,7 @@ class Scene {
    * MainCamera tag): an object id, 0 = none chosen (then "Main Camera" by name, else the first camera). */
   uint64_t active_camera = 0;
   UnitySceneLink unity;  // (round 401)
+  UnityBakeSettings unity_bake;  // (round 421: the Unity scene's lightmap settings as read - kept for the comparison and later rounds; not saved)
   /* The scene's sequence (task 0070, ADR 0030 amended): a .seq whose bars each name a clip and the object it plays
    * on; played in Play by `director` (a Sequencer of the scene's, made at Play's start). */
   std::string sequence;

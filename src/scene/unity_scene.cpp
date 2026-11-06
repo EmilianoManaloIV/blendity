@@ -1531,6 +1531,58 @@ void skybox_world(const UnitySkybox &sb, EnvironmentSettings &env, std::vector<s
   notes.push_back("the skybox's shader (" + sb.shader + ") isn't one Blendity reads: Blendity's sky stays");
 }
 
+namespace {
+/* A number clamped in double before it becomes an int (a malformed 1e12 or a NaN is no undefined cast). */
+int clamped_int(const YamlNode &s, const char *key, double def, double lo, double hi) {
+  const double v = s.num(key, def);
+  return (int)(v >= lo ? (v <= hi ? v : hi) : lo);
+}
+const YamlNode *lighting_settings_doc(const std::vector<UnityDoc> &docs, int64_t file_id) {
+  for (const UnityDoc &d : docs)
+    if (d.body.get("m_BakeResolution") && (file_id == 0 || d.file_id == file_id)) return &d.body;
+  return nullptr;
+}
+}  // namespace
+
+bool unity_bake_settings(const std::vector<UnityDoc> &docs, const std::string &lighting_asset, UnityBakeSettings &out) {
+  const YamlNode *src = nullptr, *legacy = nullptr, *gi = nullptr;
+  std::vector<UnityDoc> asset_docs;
+  if (!lighting_asset.empty()) {
+    std::string why;
+    if (parse_unity_yaml(lighting_asset, asset_docs, why) && (src = lighting_settings_doc(asset_docs, 0))) out.source = "the LightingSettings asset";
+  }
+  for (const UnityDoc &d : docs) {
+    if (d.class_id != 157) continue;
+    legacy = d.body.get("m_LightmapEditorSettings"), gi = d.body.get("m_GISettings");
+    /* A LightingSettings document inside the scene itself: referenced by its fileID, no guid. */
+    const int64_t fid = d.body.file_id("m_LightingSettings");
+    if (!src && fid != 0 && d.body.guid("m_LightingSettings").empty() && (src = lighting_settings_doc(docs, fid)))
+      out.source = "the scene's embedded LightingSettings";
+  }
+  if (!src && legacy) src = legacy, out.source = "the scene's own settings";
+  if (!src) return false;
+  const YamlNode &s = *src;
+  out.read = true;
+  const double texels = s.num("m_BakeResolution", 40.0);
+  out.texels = (float)(texels >= 0.01 ? (texels <= 1000.0 ? texels : 1000.0) : 0.01);
+  out.max_size = clamped_int(s, "m_LightmapMaxSize", s.num("m_AtlasSize", 1024.0), 16, 4096);
+  out.padding = clamped_int(s, "m_Padding", 2.0, 0, 32);
+  out.direct = clamped_int(s, "m_PVRDirectSampleCount", 32.0, 1, 4096);
+  out.indirect = clamped_int(s, "m_PVRSampleCount", 512.0, 1, 65536);
+  out.environment = clamped_int(s, "m_PVREnvironmentSampleCount", 256.0, 1, 65536);
+  out.bounces = clamped_int(s, "m_PVRBounces", 2.0, 0, 16);
+  out.filtering = clamped_int(s, "m_PVRFilteringMode", 1.0, 0, 2);
+  out.denoiser_indirect = clamped_int(s, "m_PVRDenoiserTypeIndirect", 0.0, 0, 3);
+  out.directional = clamped_int(s, "m_LightmapsBakeMode", 1.0, 0, 1);
+  out.mixed = clamped_int(s, "m_MixedBakeMode", 0.0, 0, 2);
+  out.ao = s.num("m_AO", 0.0) != 0.0;
+  out.backend = clamped_int(s, "m_BakeBackend", 1.0, 0, 2);
+  /* Baked GI on or off: the LightingSettings' own flag, else the scene's m_GISettings. */
+  const YamlNode *flag = s.get("m_EnableBakedLightmaps") ? &s : gi;
+  out.baked_gi = !flag || flag->num("m_EnableBakedLightmaps", 1.0) != 0.0;
+  return true;
+}
+
 bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,
                            const std::function<bool(const std::string &guid, UnitySkybox &out)> &skybox, UnitySceneLink *link) {
   const UnityDoc *rs = nullptr;
