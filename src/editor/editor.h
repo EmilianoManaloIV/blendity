@@ -118,6 +118,7 @@ struct ShortcutAction {
 };
 using Keymap = std::unordered_map<std::string, std::vector<KeyChord>>;
 const std::vector<ShortcutAction> &shortcut_actions();
+const std::vector<std::string> &console_command_names();  // (round 411: every console verb, for the inventory sweep)
 constexpr int kKeymapPresetCount = 7;
 extern const char *const kKeymapPresets[kKeymapPresetCount];  // Unity, Unreal, Blender, Maya, 3ds Max, SketchUp, Adobe (task 0261)
 /* The editor's feel (task 0063): another program's keys and Scene view mouse navigation. */
@@ -206,6 +207,9 @@ struct FrameProfile {
   /* Task 0165: an Edit Mode operator's own time - its one mesh copy, the operation, the selection flushed, Auto
    * Smooth's check - inside the command that ran it (not a view's time). */
   double ms_edit_op = 0;
+  /* Round 411 (ADR 0105): the deferred callbacks' time (an import's busy step, a dialog's opening) - run after the
+   * frame's own work but counted in the frame, so a stall there shows in the Profiler and the stress rows. */
+  double ms_deferred = 0;
   double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
@@ -834,6 +838,30 @@ class Editor {
     std::function<void()> now;  // (review 354: a waiting export's Export Now)
   };
   std::vector<JobView> jobs_for_test() { return jobs_running(); }
+  /* Round 411 (ADR 0105): the last frame's time with its deferred work, the last 240 frames, and `perf mark`'s
+   * bookkeeping - what the responsiveness rows and tools/bench_world.py read. */
+  float last_frame_ms() const { return frame_ms_; }
+  const std::vector<float> &frame_history() const { return frame_history_; }
+  std::string perf_status_text() const;
+  std::string perf_mark(const std::string &name);
+  /* The CPU badge's reason (round 411): this window's Scene view refused by the card (its own slot's reason - another
+   * view's refusal, the Game view's bloom over glass say, is the Profiler's to list), else the card absent. Empty: no badge. */
+  const std::string &scene_view_slot_reason() const {
+    static const std::string none;
+    for (int k = 0; k < gpu::Raster::kSlots; k++)
+      if (gpu_slot_rt_[k] == &scene_rt_ && gpu_slot_win_[k] == active_window_) return gpu_slot_reason_[k];
+    return none;
+  }
+  bool cpu_badge_view_refused() const { return gpu_view_wanted() && !scene_view_slot_reason().empty(); }
+  std::string cpu_badge_reason() const {
+    if (!gpu_view_wanted()) return "";
+    if (cpu_badge_view_refused()) return scene_view_slot_reason();
+    if (!gpu_view_ && gpu_view_tried_ && !gpu_view_opening_.valid()) return gpu_view_error_.empty() ? std::string("the GPU couldn't be opened") : gpu_view_error_;
+    return "";
+  }
+  void refuse_scene_view_for_test(const std::string &why) {  // (round 411: the Scene view's slot refused, as gpu_view_refuse leaves it)
+    gpu_slot_rt_[0] = &scene_rt_, gpu_slot_win_[0] = active_window_, gpu_slot_reason_[0] = why;
+  }
   /* Task 0254: the History window's rows (the steps taken; the steps undone, the next one first), the unsaved-changes prompt. */
   struct HistoryRows {
     std::vector<std::string> past, future;
@@ -1456,6 +1484,9 @@ class Editor {
   void planes_always_for_test(bool on) { planes_always_ = on; }
   /* Task 0096: Viewport Device (0 Auto, 1 CPU, 2 GPU) and why the last view the GPU was wanted for drew on the CPU. */
   void viewport_device_for_test(int d) { set_viewport_device(d); }
+  void scene_cache_reset_for_test() { scene_cache_.key = game_cache_.key = 0; }  // (round 411: the views drawn again next frame, as --windowed-check does)
+  void defer_for_test(std::function<void()> fn) { defer(std::move(fn)); }
+  const FrameProfile &frame_profile_last_for_test() const { return prof_last_; }
   void overlap_background_from_for_test(size_t n) { overlap_background_from_ = n; }
   void overlap_worker_delay_for_test(int ms) { overlap_worker_delay_ms_ = ms; }  // (the worker sleeps first: seen pending)
   void overlap_budget_for_test(double ms) { overlap_budget_ms_ = ms; }  // (a huge one: every check below the size on the main thread)
@@ -3667,6 +3698,7 @@ class Editor {
   void assign_material_to_faces(int slot);
   void spawn_stress_grid(int count, const std::string &kind);
   bool bench_scene(const std::string &name);  // (task 0202: the Blender parity scenes, built as tools/bench_blender.py builds them)
+  void build_world_like(bool quick);  // (round 411: the Unity-world stand-in, benchscene worldlike)
   void run_console_command(const std::string &cmd);
   bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();
@@ -3697,6 +3729,9 @@ class Editor {
   float rig_control_scale_ = 1.0f;  // Preferences > Rig Control Size: every control's wire and pick distance, times this (task 0156)
   double frame_start_ = 0;
   float frame_ms_ = 0, ui_ms_ = 0;
+  double perf_mark_t0_ = 0.0;  // (round 411: `perf mark` - since the last mark: the frames and the longest)
+  float perf_mark_worst_ = 0.0f;
+  int perf_mark_frames_ = 0;
   std::vector<float> frame_history_, raster_history_;
   /* Editor frame rate (Preferences > Performance). */
   int max_fps_ = 120;           // 0: unlimited
@@ -5590,6 +5625,7 @@ class Editor {
   bool gpu_view_off_ = false;        // while F12 draws: the CPU (the reference)
   std::string gpu_view_error_;       // why there is no GPU view at all (none here, an error)
   std::string gpu_view_reason_;      // why the last view the GPU was wanted for drew on the CPU ("" = it didn't)
+  double picker_ms_ = 0.0;           // round 411: the time a native file dialog blocked this frame (not the frame's own work: taken off the deferred time)
   std::string gpu_slot_reason_[gpu::Raster::kSlots];  // the same per view (Preferences lists them all)
   std::future<std::unique_ptr<gpu::Raster>> gpu_view_opening_;  // the editor opens it on a worker (headless runs: at once)
   double gpu_view_open_ms_ = 0;      // how long opening took (device, pipelines, shaders)

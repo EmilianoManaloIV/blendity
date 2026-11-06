@@ -7473,6 +7473,91 @@ static void tests_round409() {
   });
 }
 
+/* Round 411 (task 0387, ADR 0105): the responsiveness budget's instruments - the deferred callbacks counted in the
+ * frame, `perf status` / `perf mark` / `viewport status`, the honest CPU badge, the worldlike stand-in and the sweep's
+ * lists. The measurements themselves are stress rows (responsiveness, operations, world_like). */
+static void tests_round411() {
+  test("perf (round 411): a deferred callback's time counts in the frame it ran after (an import's busy step had hidden there); `perf mark` reports the frames and the longest since the last mark; `perf status` names the parts and the jobs; `viewport status` says where the views draw and whether the CPU badge shows", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("perf mark start");
+    ed.defer_for_test([] { std::this_thread::sleep_for(std::chrono::milliseconds(40)); });
+    ed.step_frame_headless();  // (the deferred work runs at this frame's end)
+    const float last = ed.last_frame_ms();
+    const float deferred = (float)ed.frame_profile_last_for_test().ms_deferred;
+    std::printf("    the frame with a 40 ms deferred callback: %.1f ms, of it deferred %.1f; the history's last %.1f\n", last, deferred, ed.frame_history().back());
+    CHECK(deferred >= 35.0f && last >= deferred && ed.frame_history().back() >= 35.0f);
+    ed.step_frame_headless();
+    const std::string mark = ed.perf_mark("two frames");
+    std::printf("    %s\n", mark.c_str());
+    CHECK(mark.find("perf mark two frames:") == 0 && mark.find("over 2 frame(s)") != std::string::npos && mark.find("the longest") != std::string::npos);
+    const std::string status = ed.perf_status_text();
+    std::printf("    %s\n", status.c_str());
+    CHECK(status.find("frame ") == 0 && status.find("deferred") != std::string::npos && status.find("jobs: none") != std::string::npos && status.find("views: ") != std::string::npos);
+    ed.command("perf status");
+    ed.command("perf mark named");
+    ed.command("perf reset");
+    ed.command("viewport status");
+    ed.step_frame_headless();
+    /* The badge: with the views on the CPU by preference there is none; wanting the card with none to open shows it. */
+    ed.viewport_device_for_test(1);
+    CHECK(ed.cpu_badge_reason().empty());
+    ed.viewport_device_for_test(2);
+    for (int i = 0; i < 30 && ed.cpu_badge_reason().empty(); i++) ed.step_frame_headless();
+    std::printf("    the badge wanting the card: '%s'\n", ed.cpu_badge_reason().c_str());
+    CHECK(!ed.cpu_badge_reason().empty() || ed.gpu_view_status().rfind("GPU", 0) == 0);  // (a machine with a card draws there: no badge)
+    /* The Scene view refused by the card (a Volume material, say): the badge names that reason, as a refused view, on any machine. */
+    ed.refuse_scene_view_for_test("a Volume material");
+    CHECK(ed.cpu_badge_view_refused() && ed.cpu_badge_reason() == "a Volume material");
+    ed.refuse_scene_view_for_test("");
+    CHECK(!ed.cpu_badge_view_refused() && ed.cpu_badge_reason() != "a Volume material");
+    ed.viewport_device_for_test(1);
+    CHECK(ed.cpu_badge_reason().empty());  // (the views on the CPU by choice: no badge, whatever a slot says)
+  });
+  test("benchscene worldlike (round 411): the Unity-world stand-in - 600 parts under one root from 40 meshes, 180 of them Contribute GI, 70 lights (a Mixed sun, 7 Mixed spots, 62 Realtime points), 4 reflection probes, 64 textures written once into the scratch project, 30 materials (6 see-through toon, 2 glass, a mirror, a cloth with sheen), fog, the camera's Bloom / Vignette / Color Grading; the sweep's lists are complete", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ScopedTimer t;
+    ed.command("benchscene worldlikequick");
+    ed.step_frame_headless();
+    std::printf("    built in %.0f ms\n", t.ms());
+    GameObject *root = ed.scene().find_by_name("WorldLike");
+    CHECK(root != nullptr);
+    int parts = 0, gi = 0, lights = 0, mixed = 0, probes = 0, toon = 0, glass = 0, sheen = 0, mirror = 0;
+    std::set<const Material *> mats;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.name.rfind("Part ", 0) == 0) {
+        parts++;
+        MeshRenderer *r = g.get<MeshRenderer>();
+        if (r && r->contribute_gi) gi++;
+        if (r) for (const MaterialPtr &m : r->materials) mats.insert(m.get());
+      }
+      if (Light *l = g.get<Light>()) {
+        lights++, mixed += l->mode == 1;
+        if (!g.parent || g.parent->name != "Lights") std::printf("    a light outside the group: %s (parent %s)\n", g.name.c_str(), g.parent ? g.parent->name.c_str() : "-");
+      }
+      if (g.get<ReflectionProbeComponent>()) probes++;
+    });
+    for (const Material *m : mats) toon += m->shading_model == 1 && !m->opaque(), glass += m->surface == (int)MaterialSurface::Glass, sheen += m->sheen > 0.0f, mirror += m->metallic >= 1.0f && m->roughness < 0.1f;
+    std::printf("    parts %d (GI %d), lights %d (Mixed %d), probes %d, materials %zu (see-through toon %d, glass %d, sheen %d, mirror %d), fog %d\n", parts, gi, lights, mixed, probes, mats.size(), toon, glass, sheen, mirror, (int)ed.scene().environment.fog);
+    CHECK(parts == 600 && gi == 180 && lights == 70 && mixed == 8 && probes == 4 && mats.size() == 30 && toon == 6 && glass == 2 && sheen == 1 && mirror == 1 && ed.scene().environment.fog);
+    GameObject *cam = ed.scene().find_by_name("Main Camera");
+    CameraFilters *f = cam ? cam->get<CameraFilters>() : nullptr;
+    CHECK(f && f->effects.size() == 3);
+    /* The textures where the materials point (the project's root, not the Project window's folder): every textured material's file exists. */
+    int pngs = 0, missing = 0;
+    for (const Material *m : mats)
+      if (!m->base_map.path.empty()) pngs++, missing += !fs::exists(ed.resolve_asset_path_for_test(m->base_map.path));
+    std::printf("    textured materials: %d, their files missing: %d\n", pngs, missing);
+    CHECK(pngs == 20 && missing == 0);
+    /* The sweep's lists: every console verb (sorted, unique), the keymap actions, the windows. */
+    const std::vector<std::string> &verbs = console_command_names();
+    CHECK(verbs.size() > 200 && std::is_sorted(verbs.begin(), verbs.end()) && std::adjacent_find(verbs.begin(), verbs.end()) == verbs.end());
+    CHECK(std::find(verbs.begin(), verbs.end(), "perf") != verbs.end() && shortcut_actions().size() > 100 && (int)WindowKind::Count == 26);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -7543,5 +7628,6 @@ void run_editor_tests() {
   tests_round310();
   tests_round311();
   tests_round409();
+  tests_round411();
   coverage_tests();
 }

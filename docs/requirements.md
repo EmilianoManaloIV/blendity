@@ -42,3 +42,9 @@ What Blendity must do and the constraints it works under. Task specs (`docs/task
 | C-03 | Source GPL-2.0-or-later (SPDX header in every file), binaries GPL-3.0-or-later; third-party notices in `licenses/` (ADR 0002). |
 | C-04 | Tooling and tests never touch the user's project files (`Assets/`, `Renders/`, `Screenshots/`); they use a scratch project and trash. |
 | C-05 | Changes reach `main` only through a reviewed pull request with passing CI, merged by the human (ADR 0006). |
+
+## Added in round 411 (ADR 0105)
+
+| ID | Requirement |
+|---|---|
+| Q-06 | Responsiveness: while any job runs, no editor frame over 50 ms and the views keep their last picture; an operation that cannot be split takes one frame of at most 100 ms, else it runs on a worker listed in the job tray with progress and Cancel. Measured by `blendity_stress --only responsiveness` and `tools/perf_suite.py` against `stress/results/baseline.md`. (ADRs 0013, 0021, 0036, 0039, 0040, 0051 and 0052 cite "Q-01 (responsiveness)": they mean this requirement.) |

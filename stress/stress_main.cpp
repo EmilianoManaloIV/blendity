@@ -34,6 +34,7 @@
 #include "../src/scene/animation.h"
 #include "../src/scene/sequence.h"
 #include "../src/scene/physics.h"
+#include "../src/scene/quad_remesh.h"
 #include "../src/scene/scene.h"
 #include "../src/texture/procedural_texture.h"
 #include "../src/scene/uv.h"
@@ -78,12 +79,18 @@ struct Report {
     for (auto &c : head) std::printf("%-26s", c.c_str());
     std::printf("\n");
   }
+  static std::string csv_cell(const std::string &c) {  // (round 411: a cell with a comma or a quote, quoted)
+    if (c.find_first_of(",\"") == std::string::npos) return c;
+    std::string q = "\"";
+    for (char ch : c) q += ch == '"' ? "\"\"" : std::string(1, ch);
+    return q + "\"";
+  }
   void row(const std::vector<std::string> &cells) {
     std::string r = "|";
     for (auto &c : cells) r += " " + c + " |";
     md += r + "\n";
     csv += section;
-    for (auto &c : cells) csv += "," + c;
+    for (auto &c : cells) csv += "," + csv_cell(c);
     csv += "\n";
     for (auto &c : cells) std::printf("%-26s", c.c_str());
     std::printf("\n");
@@ -6358,6 +6365,361 @@ void parity_memory(ParityRows &out, const Options &o) {
 
 }  // namespace
 
+/* ----------------------------------------------------------- round 411: the responsiveness budget (ADR 0105) */
+
+/* One heavy operation driven headless with the views open: the longest frame while it ran, the mean frame, the frames
+ * and the total; whether the job tray listed it. `running` says when it is still going (a job, a flag); the first frame
+ * carries the command itself. */
+struct StallRun {
+  double longest = 0, mean = 0, total = 0;
+  int frames = 0;
+  bool tray = false;
+  std::string label;
+};
+
+template<class Start, class Running>
+static StallRun run_stall(Editor &ed, Start &&start, Running &&running, double timeout_ms = 120000.0) {
+  StallRun r;
+  ScopedTimer whole;
+  double sum = 0;
+  {
+    ScopedTimer f;
+    start();
+    ed.step_frame_headless();
+    r.longest = f.ms();
+    sum += r.longest;
+    r.frames = 1;
+  }
+  auto note_jobs = [&] {
+    if (r.tray) return;
+    for (const Editor::JobView &j : ed.jobs_for_test()) r.tray = true, r.label = j.label;
+  };
+  note_jobs();
+  while (running() && whole.ms() < timeout_ms) {
+    ScopedTimer f;
+    ed.step_frame_headless();
+    const double ms = f.ms();
+    r.longest = std::max(r.longest, ms);
+    sum += ms;
+    r.frames++;
+    note_jobs();
+  }
+  r.total = whole.ms();
+  r.mean = sum / std::max(1, r.frames);
+  return r;
+}
+
+static void stall_row(Report &rep, const std::string &what, const StallRun &r, double budget) {
+  rep.row({what, f1(r.longest), f1(r.mean), f2(r.total / 1000.0), std::to_string(r.frames), r.tray ? r.label : "-",
+           r.longest > budget ? "OVER" : "ok"});
+}
+
+/* Every heavy operation, each in a fresh headless editor on a scratch project: the rows the budget is judged by
+ * (ADR 0105: nothing over 50 ms while a job runs, one frame of at most 100 ms for an operation that can't be split). */
+static void test_responsiveness(Report &rep, const Options &o) {
+  rep.title("Responsiveness", "Round 411 (ADR 0105): every heavy operation run headless with the views open, 1280 x 720: the longest frame while "
+                              "it ran (the budget: 50 ms while a job runs; one frame of at most 100 ms for an operation that can't be split), the mean "
+                              "frame, the total, the frames it took, and the job tray's label when it listed one. Rounds 412 and 413 move the OVER "
+                              "rows onto workers.");
+  rep.table({"operation", "longest frame ms", "mean frame ms", "total s", "frames", "in the tray", "budget"});
+  const double budget = 50.0;
+  const std::string tmp = fs::join(std::getenv("BLENDITY_PROJECT") ? std::getenv("BLENDITY_PROJECT") : ".", "stress_responsiveness");
+  fs::make_dirs(tmp);
+  auto fresh = [&](const char *scene, const char *select = nullptr) {
+    auto ed = std::make_unique<Editor>();
+    ed->init_headless(1280, 720);
+    if (scene && *scene) ed->command(scene);
+    if (select) ed->command(std::string("select ") + select);
+    ed->step_frame_headless();
+    ed->step_frame_headless();
+    return ed;
+  };
+  const int frames10 = o.quick ? 4 : 10;
+  /* Rendering. */
+  {
+    auto ed = fresh("stress 400 Sphere");
+    ed->scene().render.engine = 0, ed->scene().render.width = 1280, ed->scene().render.height = 720;
+    stall_row(rep, "F12 rasterized, 400 spheres at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), 100.0);
+  }
+  {
+    auto ed = fresh("stress 400 Sphere");
+    ed->scene().render.engine = 1, ed->scene().render.samples = o.quick ? 4 : 16, ed->scene().render.width = 640, ed->scene().render.height = 360;
+    ed->command("device cpu");
+    stall_row(rep, strprintf("F12 path traced on the CPU, 400 spheres, %d samples at 640 x 360", ed->scene().render.samples),
+              run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);
+  }
+  {
+    auto ed = fresh("benchscene keyed1k");
+    ed->scene().render.engine = 0, ed->scene().render.width = 640, ed->scene().render.height = 360;
+    stall_row(rep, strprintf("Render Animation, %d frames of 1,000 keyed boxes at 640 x 360", frames10),
+              run_stall(*ed, [&] { ed->command(strprintf("renderanim 1 %d 24", frames10)); }, [&] { return ed->rendering_for_test(); }, 300000.0), budget);
+  }
+  {
+    auto ed = fresh("stress 100 Cube");
+    for (int i = 0; i < 3; i++) ed->command("create Camera");
+    ed->scene().render.engine = 0, ed->scene().render.width = 640, ed->scene().render.height = 360;
+    stall_row(rep, "Render Camera Sequence, 4 cameras at 640 x 360", run_stall(*ed, [&] { ed->command("rendersequence"); }, [&] { return ed->rendering_for_test(); }, 300000.0), budget);
+  }
+  /* Baking. */
+  {
+    auto ed = fresh("stress 50 Cube");
+    ed->command("lighting markstatic");
+    ed->scene().lighting.texels_per_unit = 4, ed->scene().lighting.indirect_samples = o.quick ? 8 : 32;
+    stall_row(rep, "Generate Lighting, 50 cubes at 4 texels/m (lightmaps, then the probes)", run_stall(*ed, [&] { ed->command("bake start"); }, [&] { return ed->baking_for_test(); }, 600000.0), budget);
+  }
+  {
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    stall_row(rep, "Bake Mesh Maps, the 50k sphere at 512", run_stall(*ed, [&] { ed->command("meshmaps 512 4"); }, [&] {
+      for (const Editor::JobView &j : ed->jobs_for_test()) if (j.label == "Mesh Maps") return true;
+      return false; }, 600000.0), budget);
+  }
+  {
+    auto ed = fresh("benchscene worldlikequick", "Part 000");
+    stall_row(rep, "Bake Textures, a textured part at 512", run_stall(*ed, [&] { ed->command("baketex 512"); }, [] { return false; }), budget);  // (synchronous today: the one frame is the measure)
+  }
+  {
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    stall_row(rep, "A surface's first evaluation, the 50k sphere", run_stall(*ed, [&] { ed->command("surface new"); }, [&] {
+      for (const Editor::JobView &j : ed->jobs_for_test()) if (j.label == "Surface") return true;
+      return false; }, 600000.0), budget);
+  }
+  /* Geometry. */
+  {
+    auto ed = fresh("benchscene sphere50k");
+    ed->command("create Cube");
+    ed->command("select Parity Sphere");
+    ed->command("selectadd Cube");
+    stall_row(rep, "Boolean difference, the 50k sphere minus a cube", run_stall(*ed, [&] { ed->command("boolean difference"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene sphere500k", "Parity Sphere");
+    stall_row(rep, "Decimate modifier on the 500k sphere (its first evaluation)", run_stall(*ed, [&] { ed->command("component DecimateModifier"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    stall_row(rep, "Subdivide, 2 levels on the 50k sphere", run_stall(*ed, [&] { ed->command("subdivide 2"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    ed->command("sculpt on");
+    stall_row(rep, "DynaMesh at 128 on the 50k sphere", run_stall(*ed, [&] { ed->command("sculpt dynamesh 128"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    ed->command("sculpt on");
+    if (!meshops::quad_remesh_available()) rep.row({"Quad Remesh to 4,000 faces, the 50k sphere", "-", "-", "-", "-", "not run here (needs Blender's Eigen)", "-"});
+    else
+      stall_row(rep, "Quad Remesh to 4,000 faces, the 50k sphere", run_stall(*ed, [&] { ed->command("sculpt remesh 4000"); }, [&] {
+        for (const Editor::JobView &j : ed->jobs_for_test()) if (j.label == "Quad Remesh") return true;
+        return false; }, 600000.0), budget);
+  }
+  {
+    auto ed = fresh("");
+    ed->command("create Armature");
+    GameObject *arm = ed->scene().find_by_name("Armature");
+    GameObject *g = ed->scene().create("SkinBody");
+    auto mesh = std::make_shared<Mesh>();
+    sw_tube(*mesh, 0.3f, 390, 128);
+    g->add<MeshFilter>()->mesh = mesh;
+    g->add<MeshRenderer>();
+    g->add<SkinModifier>()->object = arm ? arm->name : "Armature";
+    ed->step_frame_headless();
+    stall_row(rep, "Skin bind, automatic weights on a 50k-vertex tube", run_stall(*ed, [&] { ed->command("skin bind SkinBody"); }, [&] { return ed->skin_job_running_for_test(); }, 600000.0), budget);
+  }
+  {
+    auto ed = fresh("benchscene cubes10k");
+    ed->command("selectall");
+    stall_row(rep, "Join 10,000 cubes", run_stall(*ed, [&] { ed->command("join"); }, [] { return false; }), 100.0);
+    stall_row(rep, "Separate the joined cubes by loose parts", run_stall(*ed, [&] { ed->command("separate loose"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    ed->command("component SubdivisionSurface");
+    ed->step_frame_headless();
+    stall_row(rep, "Apply Modifiers, a Subdivision Surface on the 50k sphere", run_stall(*ed, [&] { ed->command("applymods"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene cubes10k");
+    ed->command("selectall");
+    ed->command("delete");
+    ed->step_frame_headless();
+    stall_row(rep, "Undo the delete of 10,000 cubes", run_stall(*ed, [&] { ed->command("undo"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("benchscene sphere500k", "Parity Sphere");
+    stall_row(rep, "Enter Edit Mode on the 500k sphere", run_stall(*ed, [&] { ed->command("edit"); }, [] { return false; }), 100.0);
+  }
+  /* Files. */
+  const std::string big = fs::join(tmp, "big.scene"), cubes = fs::join(tmp, "cubes.scene");
+  {
+    auto ed = fresh("benchscene sphere500k");
+    stall_row(rep, "Save the 500k sphere's scene", run_stall(*ed, [&] { ed->command("save " + big); }, [] { return false; }), 100.0);
+    auto ed2 = fresh("benchscene cubes10k");
+    stall_row(rep, "Save the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("save " + cubes); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("");
+    stall_row(rep, "Open the 500k sphere's scene", run_stall(*ed, [&] { ed->command("open " + big); }, [] { return false; }), 100.0);
+    auto ed2 = fresh("");
+    stall_row(rep, "Open the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("open " + cubes); }, [] { return false; }), 100.0);
+  }
+  for (const char *fmt : {"obj", "fbx", "glb", "stl", "ply", "usda"}) {
+    const std::string path = fs::join(tmp, std::string("sphere50k.") + fmt);
+    auto ed = fresh("benchscene sphere50k", "Parity Sphere");
+    stall_row(rep, strprintf("Export the 50k sphere as %s", fmt), run_stall(*ed, [&] { ed->command(strprintf("export %s %s", fmt, path.c_str())); }, [] { return false; }), 100.0);
+    auto ed2 = fresh("");
+    stall_row(rep, strprintf("Import the 50k sphere from %s", fmt), run_stall(*ed2, [&] { ed2->command("import " + path + " asis"); }, [] { return false; }), 100.0);
+  }
+  {
+    auto ed = fresh("");
+    stall_row(rep, "Build the worldlike stand-in (quick: 64 textures)", run_stall(*ed, [&] { ed->command("benchscene worldlikequick"); }, [] { return false; }), 100.0);
+    ed->scene().lighting.texels_per_unit = 2, ed->scene().lighting.indirect_samples = o.quick ? 4 : 16;
+    stall_row(rep, "Generate Lighting on worldlike (180 parts at 2 texels/m)", run_stall(*ed, [&] { ed->command("bake start"); }, [&] { return ed->baking_for_test(); }, 900000.0), budget);
+    ed->scene().render.engine = 0, ed->scene().render.width = 1280, ed->scene().render.height = 720;
+    stall_row(rep, "F12 rasterized, worldlike at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), 100.0);
+  }
+  rep.row({"Puppet solve, AutoPhysics, AI inbetweening, MoonRay, Live Link with clients", "-", "-", "-", "-", "not run here (downloads, rigs or clients; stress physics / livelink have their rows)", "-"});
+  rep.note("A row OVER its budget is a round 412 / 413 item: the operation goes to a worker with the tray's progress and Cancel, or is split over frames.");
+}
+
+/* ----------------------------------------------------------- round 411: the inventory sweep of every operation */
+
+struct SweepCommand { const char *verb, *line, *why; };
+#include "sweep_commands.inc"
+
+struct SweepRow {
+  std::string name, kind, scene;
+  double op = 0, next = 0, longest = 0;
+};
+
+/* One row: a fresh headless editor (no window, dialog, theme, quality or scale a verb before it set survives; `open`
+ * on a changed scene would only have asked about the unsaved changes), the saved scene opened, the first part selected. */
+static void sweep_one(const std::string &saved, const std::string &select, std::vector<SweepRow> &rows, const std::string &scene_name,
+                      const std::string &kind, const std::string &name, const std::function<void(Editor &)> &run) {
+  {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.open_scene_for_test(saved);
+    if (!select.empty()) ed.command("select " + select);
+    ed.step_frame_headless();
+    SweepRow r;
+    r.name = name, r.kind = kind, r.scene = scene_name;
+    ScopedTimer t;
+    run(ed);
+    r.op = t.ms();
+    ScopedTimer f;
+    ed.step_frame_headless();
+    r.next = f.ms();
+    r.longest = std::max(r.op, r.next);
+    for (int i = 0; i < 2; i++) {
+      ScopedTimer g;
+      ed.step_frame_headless();
+      r.longest = std::max(r.longest, g.ms());
+    }
+    ed.command("stop");
+    rows.push_back(r);
+  }
+  JobSystem::global().set_thread_limit(0);  // (`threads 2` is process-wide: every row starts with all of them)
+}
+
+/* Every console verb (one real invocation each, from stress/sweep_commands.inc), every keymap action and every window,
+ * on three scenes: the operation's time, the frame after it and the longest of three frames; ranked. */
+static void test_operations(Report &rep, const Options &o) {
+  rep.title("Operations", "Round 411 (ADR 0105): the inventory sweep - every console verb (one invocation each, tools/sweep_commands.py), every keymap "
+                          "action and every window, each in a fresh headless editor on one of three saved scenes (the starter scene, its teapot selected; "
+                          "the worldlike stand-in; 10,000 cubes) with the first part selected: the operation's own time, the frame after it, and the "
+                          "longest of the three frames that follow. The table lists "
+                          "the slowest 40 by longest frame and every one over 50 ms; the CSV has them all. A verb an example line can't drive on this "
+                          "scene says so in its usage line and still costs what it costs.");
+  rep.table({"operation", "kind", "scene", "op ms", "next frame ms", "longest ms"});
+  const std::string tmp = fs::join(std::getenv("BLENDITY_PROJECT") ? std::getenv("BLENDITY_PROJECT") : ".", "stress_operations");
+  fs::make_dirs(tmp);
+  struct SceneDef { const char *name, *build, *select; };
+  const SceneDef scenes[] = {{"starter", "", "Utah Teapot"}, {"worldlike", "benchscene worldlikequick", "Part 000"}, {"cubes10k", "benchscene cubes10k", "Cube 0"}};
+  std::vector<SweepRow> rows;
+  int skipped = 0;
+  for (const SceneDef &sd : scenes) {
+    if (o.quick && std::string(sd.name) == "cubes10k") continue;
+    const std::string saved = fs::join(tmp, std::string(sd.name) + ".scene");
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      if (*sd.build) ed.command(sd.build);
+      ed.step_frame_headless();
+      ed.command("save " + saved);
+      ed.step_frame_headless();
+    }
+    for (const SweepCommand &c : kSweepCommands) {
+      if (!*c.line) { skipped++; continue; }
+      const std::string line = c.line;
+      sweep_one(saved, sd.select, rows, sd.name, "command", line, [&](Editor &ed) { ed.command(line); });
+    }
+    for (const ShortcutAction &a : shortcut_actions()) {
+      const std::string id = a.id;
+      if (id.rfind("file.", 0) == 0 || id == "play.toggle" || id.rfind("window.", 0) == 0) continue;  // (files, Play and windows below / elsewhere)
+      sweep_one(saved, sd.select, rows, sd.name, "action", id, [&](Editor &ed) {
+        if (a.context == 1 || a.context == 3) ed.command("edit");
+        ed.run_action_for_test(id);
+      });
+    }
+    for (int k = 0; k < (int)WindowKind::Count; k++) {
+      const std::string title = module_of((WindowKind)k).name;
+      sweep_one(saved, sd.select, rows, sd.name, "window", title, [&](Editor &ed) { ed.command("window " + title); });
+    }
+  }
+  /* The CSV holds every row; the table the slowest 40 and every one over 50 ms. */
+  std::vector<SweepRow> sorted = rows;
+  std::sort(sorted.begin(), sorted.end(), [](const SweepRow &a, const SweepRow &b) { return a.longest > b.longest; });
+  int over50 = 0, over100 = 0;
+  for (const SweepRow &r : rows) over50 += r.longest > 50.0, over100 += r.longest > 100.0;
+  for (size_t i = 0; i < sorted.size(); i++) {
+    const SweepRow &r = sorted[i];
+    if (i < 40 || r.longest > 50.0) rep.row({r.name, r.kind, r.scene, f1(r.op), f1(r.next), f1(r.longest)});
+    else rep.csv += rep.section + "," + Report::csv_cell(r.name) + "," + r.kind + "," + r.scene + "," + f1(r.op) + "," + f1(r.next) + "," + f1(r.longest) + "\n";
+  }
+  rep.note(strprintf("%zu operations run (%d verbs not run here: tools/sweep_commands.py's SKIP list); %d over 50 ms, %d over 100 ms. The over-budget ones are round 418's list.",
+                     rows.size(), skipped / (int)std::max<size_t>(1, sizeof(scenes) / sizeof(scenes[0]) - (o.quick ? 1 : 0)), over50, over100));
+}
+
+/* ----------------------------------------------------------- round 411: the Unity-world stand-in's frames */
+
+static void test_world_like(Report &rep, const Options &o) {
+  rep.title("Unity world (stand-in)", "Round 411: `benchscene worldlike` (600 parts, 180 Contribute GI, 70 lights, 4 reflection probes, 300 textures, see-through "
+                                      "toon, glass, a mirror, cloth, fog, the camera's filters) - a frame of the Scene view and of the Game view with the "
+                                      "views on the CPU and on the card, 1280 x 720, headless; the hashing, gathering and GPU-path parts; the card's refusals. "
+                                      "tools/bench_world.py runs the same rows on a real VRChat world (SideRail) and avatar (Shinano).");
+  rep.table({"row", "frame ms (mean)", "longest ms", "hashing ms", "gathering ms", "gpu path ms", "views"});
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ScopedTimer build;
+  ed.command(o.quick ? "benchscene worldlikequick" : "benchscene worldlike");
+  ed.step_frame_headless();
+  rep.note(strprintf("Built in %.0f ms.", build.ms()));
+  auto measure = [&](const char *row, const char *device) {
+    ed.command(std::string("viewport device ") + device);
+    ed.command("shading shaded");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    const int n = o.quick ? 20 : 60;
+    const FrameProfile p0 = ed.frame_profile_totals();
+    double sum = 0, longest = 0;
+    for (int i = 0; i < n; i++) {
+      ed.scene_cache_reset_for_test();
+      ScopedTimer f;
+      ed.step_frame_headless();
+      sum += f.ms(), longest = std::max(longest, f.ms());
+    }
+    const FrameProfile p1 = ed.frame_profile_totals();
+    rep.row({row, f1(sum / n), f1(longest), f2((p1.ms_hash - p0.ms_hash) / n), f2((p1.ms_collect - p0.ms_collect) / n), f2((p1.ms_gpu - p0.ms_gpu) / n), ed.gpu_view_status()});
+  };
+  measure("Scene view, views on the CPU", "cpu");
+  measure("Scene view, views on the card (or the CPU when refused)", "gpu");
+  ed.command("window Game");
+  ed.step_frame_headless();
+  measure("Scene + Game view (the camera's Bloom, Vignette, Grading), views on the CPU", "cpu");
+  measure("Scene + Game view, views on the card", "gpu");
+  rep.note("perf status: " + ed.perf_status_text());
+}
+
 static void test_blender_parity(Report &rep, const Options &o) {
   rep.title("Blender parity (task 0201)",
             "Every row has a twin in tools/bench_blender.py, under the same name; tools/bench_table.py puts the two side by side "
@@ -6451,7 +6813,8 @@ int main(int argc, char **argv) {
                {"modeling", test_modeling_tools}, {"codecs", test_codecs},      {"physics", test_physics},
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
-               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity}};
+               {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
+               {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
@@ -6459,6 +6822,7 @@ int main(int argc, char **argv) {
     if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
     if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
     if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
+    if ((std::string(t.name) == "operations" || std::string(t.name) == "responsiveness" || std::string(t.name) == "world_like") && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

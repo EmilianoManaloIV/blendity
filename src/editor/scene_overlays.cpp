@@ -63,15 +63,19 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
     if (u.record_buttons) u.button_rects["overlay:RECORD"] = rr;
     x += rw + u.px(10);
   }
-  if (gpu_view_wanted() && !gpu_view_ && gpu_view_tried_ && !gpu_view_opening_.valid() && bar.right() - x > u.px(420)) {
-    /* Task 0269: the views wanted the card and draw on the CPU - said in the bar as long as it lasts, not once in the log. */
+  const std::string badge_reason = cpu_badge_reason();
+  if (!badge_reason.empty() && bar.right() - x > u.px(420)) {
+    /* Task 0269: the views wanted the card and draw on the CPU - said in the bar as long as it lasts, not once in the log.
+     * Round 411 (ADR 0105): a view the card refused (a material or a picture it can't draw) shows the badge too, with
+     * the reason; before, only a card that couldn't be opened did, and the refusal hid in the Profiler. */
+    const bool refused = cpu_badge_view_refused();
     const int cw = u.font.text_width("CPU") + u.px(14);
     const Recti cr{x, bar.y + u.px(3), cw, h};
     u.frame(cr, u.theme.strip, u.theme.warning, u.px(3));
     u.label(cr, "CPU", u.theme.text_bright, ui::Align::Center);
     u.mark_widget(cr);
-    u.tooltip("The views draw on the CPU: " + (gpu_view_error_.empty() ? std::string("the GPU couldn't be opened") : gpu_view_error_) +
-              ". It works, more slowly; Edit > Preferences > Viewport Device chooses (Auto tries the GPU again at the next start).");
+    u.tooltip(refused ? "This view draws on the CPU although the GPU is open: " + badge_reason + ". It works, more slowly; the Profiler lists what the card can't draw yet, and `viewport status` in the Console says the same."
+                      : "The views draw on the CPU: " + badge_reason + ". It works, more slowly; Edit > Preferences > Viewport Device chooses (Auto tries the GPU again at the next start).");
     if (u.record_buttons) u.button_rects["overlay:CPU"] = cr;
     x += cw + u.px(10);
   }

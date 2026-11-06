@@ -3,6 +3,8 @@
 #include "../scene/unity_scene.h"
 #include "../scene/budget.h"
 #include "editor.h"
+#include "../core/hash.h"
+#include "../render/canvas.h"
 #include "../texture/surface.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
@@ -754,7 +756,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   raster_history_.push_back((float)scene_stats_.ms_total);
   if (raster_history_.size() > 240) raster_history_.erase(raster_history_.begin());
   frames_++;
-  /* Deferred work: native dialogs open here, between frames, never inside one. */
+  /* Deferred work: native dialogs open here, between frames, never inside one. Round 411 (ADR 0105): its time counts
+   * in the frame - an import's busy step had run here, after the timer, and never showed in the Profiler. */
   if (!deferred_.empty()) {
     std::vector<Deferred> due;
     for (size_t i = 0; i < deferred_.size();)
@@ -763,9 +766,53 @@ void Editor::frame_body(std::vector<Event> &events) {
         deferred_.erase(deferred_.begin() + (long)i);
       }
       else i++;
+    ScopedTimer deferred_timer;
+    picker_ms_ = 0.0;
     for (Deferred &d : due) d.fn();
     ui_.redraw = true;
+    /* (A native file dialog the user sat in is not the frame's work: its time is taken off, else the Profiler and the
+     * Performance page would report an 8 s stall that never happened.) */
+    const float d_ms = (float)std::max(0.0, deferred_timer.ms() - picker_ms_);
+    picker_ms_ = 0.0;
+    frame_ms_ += d_ms;
+    prof_last_.ms_deferred = d_ms;
+    prof_total_.ms_deferred += d_ms;
+    if (!frame_history_.empty()) frame_history_.back() += d_ms;
   }
+  perf_mark_frames_++;
+  perf_mark_worst_ = std::max(perf_mark_worst_, frame_ms_);
+}
+
+/* Round 411 (ADR 0105): what `perf status` prints - the last frame with its parts, the worst of the last 240, the jobs. */
+std::string Editor::perf_status_text() const {
+  float worst = 0.0f, sum = 0.0f;
+  int n = 0;
+  for (size_t i = frame_history_.size() > 60 ? frame_history_.size() - 60 : 0; i < frame_history_.size(); i++) sum += frame_history_[i], n++;
+  for (float f : frame_history_) worst = std::max(worst, f);
+  const FrameProfile &p = prof_last_;
+  std::string s = strprintf("frame %.1f ms (the last 60: mean %.1f, the last 240: worst %.1f); scene view %.1f, game %.1f, gpu path %.1f, hashing %.1f, gathering %.1f, ui %.1f, present %.1f, deferred %.1f ms",
+                            frame_ms_, n ? sum / n : 0.0f, worst, p.ms_scene3d, p.ms_game, p.ms_gpu, p.ms_hash, p.ms_collect, p.ms_ui, p.ms_present, p.ms_deferred);
+  std::string jobs;
+  for (const JobView &j : const_cast<Editor *>(this)->jobs_running()) jobs += (jobs.empty() ? "" : ", ") + j.label;
+  s += "; jobs: " + (jobs.empty() ? std::string("none") : jobs);
+  s += "; views: " + gpu_view_status();
+  return s;
+}
+
+/* `perf mark <name>`: the time since the last mark, the frames in it and the longest - a script's stopwatch between
+ * its steps (tools/bench_world.py reads these lines from the log). */
+std::string Editor::perf_mark(const std::string &name) {
+  const double now = now_seconds();
+  const double ms = perf_mark_t0_ > 0.0 ? (now - perf_mark_t0_) * 1000.0 : 0.0;
+  /* (No frame between the marks: the whole time was one stall of the main thread - a script's `open` or `export` run
+   * inside its command - so the longest frame is that time.) */
+  const std::string s = perf_mark_frames_ > 0
+                            ? strprintf("perf mark %s: %.1f ms over %d frame(s), the longest %.1f ms", name.empty() ? "(unnamed)" : name.c_str(), ms, perf_mark_frames_, perf_mark_worst_)
+                            : strprintf("perf mark %s: %.1f ms over 0 frame(s), the longest %.1f ms (no frame between the marks: one stall)", name.empty() ? "(unnamed)" : name.c_str(), ms, ms);
+  perf_mark_t0_ = now;
+  perf_mark_frames_ = 0;
+  perf_mark_worst_ = 0.0f;
+  return s;
 }
 
 /* Tab drag & drop between dock areas; a tab dropped outside its window gets a window of its own (from a secondary
@@ -3079,7 +3126,9 @@ Editor::PathPick Editor::pick_save_path(const std::string &title, const std::str
   if (headless_ || !window_) return PathPick::Unavailable;
   if (available < 0) available = platform::file_dialogs_available() ? 1 : 0;
   if (!available) return PathPick::Unavailable;
+  ScopedTimer blocked;
   const bool ok = platform::save_file_dialog(window_, title, suggested, filters, out, filter);
+  picker_ms_ += blocked.ms();
   /* The dialog ate the mouse and keyboard releases: start clean. */
   const int mx = ui_.in.mx, my = ui_.in.my;
   ui_.in = ui::Input{};
@@ -3095,7 +3144,9 @@ Editor::PathPick Editor::pick_open_path(const std::string &title, const std::str
   if (headless_ || !window_) return PathPick::Unavailable;
   if (available < 0) available = platform::file_dialogs_available() ? 1 : 0;
   if (!available) return PathPick::Unavailable;
+  ScopedTimer blocked;
   const bool ok = platform::open_file_dialog(window_, title, dir, filters, out);
+  picker_ms_ += blocked.ms();
   const int mx = ui_.in.mx, my = ui_.in.my;
   ui_.in = ui::Input{};
   ui_.in.mx = ui_.in.pmx = mx;
@@ -3937,7 +3988,104 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
  * - million: ten of the 50k spheres (one shared mesh) in a row 2.5 m apart, about a million triangles;
  * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square;
  * - keyed1k: 1,000 cubes under "Keyed", each keyed on frames 1, 30 and 60 (Position), the clip at frame 1. */
+/* Round 411 (task 0387): the Unity-world stand-in `benchscene worldlike` - what a VRChat world such as SideRail costs the
+ * views, built from Blendity's own primitives so it can be committed: 600 objects from 40 meshes, 180 of them Contribute
+ * GI, 70 lights with ranges (a Mixed sun, 7 Mixed spots, 62 Realtime points), 4 reflection probes, 300 textures of 1024
+ * (64 of 512 for `worldlikequick`) written once into the scratch project, 30 materials (6 see-through toon, 2 glass, a
+ * mirror, a cloth with sheen, the rest textured PBR), fog, and the Main Camera with Bloom, Vignette and Color Grading.
+ * A bake is the stress section's to run (`bake start`), so the scene stays quick to build. */
+void Editor::build_world_like(bool quick) {
+  const int textures = quick ? 64 : 300, tex_size = quick ? 512 : 1024;
+  const std::string dir = fs::join(project_root_, "Assets/Textures/WorldLike");  // (the root: material paths resolve against it, not the Project window's folder)
+  fs::make_dirs(dir);
+  std::vector<std::string> tex_paths;
+  for (int i = 0; i < textures; i++) {
+    const std::string rel = strprintf("Assets/Textures/WorldLike/tex_%03d.png", i);
+    const std::string path = fs::join(project_root_, rel);
+    if (!fs::exists(path)) {  // (a cheap, different pattern per texture: value noise in two tones)
+      std::vector<uint32_t> px((size_t)tex_size * tex_size);
+      const uint32_t a = hash32(i * 7919 + 1), b = hash32(i * 104729 + 7);
+      const int cell = 8 + (i % 5) * 8;
+      for (int y = 0; y < tex_size; y++)
+        for (int x = 0; x < tex_size; x++) {
+          const uint32_t n = hash32((uint32_t)(x / cell) * 73856093u ^ (uint32_t)(y / cell) * 19349663u ^ (uint32_t)i);
+          const float t = (n & 0xFF) / 255.0f;
+          auto ch = [&](int shift) { return (uint32_t)(((a >> shift) & 0xFF) * (1.0f - t) + ((b >> shift) & 0xFF) * t); };
+          px[(size_t)y * tex_size + x] = 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+        }
+      write_png(path, px.data(), tex_size, tex_size, tex_size);
+    }
+    tex_paths.push_back(rel);
+  }
+  /* 40 meshes: boxes, spheres, cylinders and tori of a few resolutions (the kit's walls, props, lamps, rails). */
+  std::vector<MeshPtr> meshes;
+  for (int i = 0; i < 40; i++) {
+    switch (i % 4) {
+      case 0: meshes.push_back(primitives::cube(0.5f + (i % 7) * 0.4f)); break;
+      case 1: meshes.push_back(primitives::uv_sphere(0.3f + (i % 5) * 0.15f, 16 + (i % 3) * 16, 12 + (i % 3) * 8)); break;
+      case 2: meshes.push_back(primitives::cylinder(0.2f + (i % 4) * 0.1f, 1.0f + (i % 3), 12 + (i % 4) * 8)); break;
+      default: meshes.push_back(primitives::torus(0.5f, 0.12f, 24 + (i % 3) * 8, 10)); break;
+    }
+  }
+  /* 30 materials: 20 textured PBR, 6 see-through toon (lilToon-like transparent), 2 glass, a mirror, a cloth with sheen. */
+  std::vector<MaterialPtr> mats;
+  for (int i = 0; i < 30; i++) {
+    MaterialPtr m = make_material(strprintf("WorldLike %d", i), {0.5f + 0.4f * ((i * 37) % 10) / 10.0f, 0.5f + 0.4f * ((i * 53) % 10) / 10.0f, 0.5f + 0.4f * ((i * 71) % 10) / 10.0f});
+    if (i < 20) {
+      m->base_map.path = tex_paths[(size_t)i % tex_paths.size()];
+      m->roughness = 0.3f + 0.05f * (i % 10);
+      if (i % 5 == 0) m->normal_map.path = tex_paths[(size_t)(i + 1) % tex_paths.size()], m->normal_map.non_color = true;
+    }
+    else if (i < 26) m->shading_model = 1, m->surface = (int)MaterialSurface::Transparent, m->alpha = 0.6f;
+    else if (i < 28) m->surface = (int)MaterialSurface::Glass, m->roughness = 0.02f;
+    else if (i == 28) m->metallic = 1.0f, m->roughness = 0.02f;  // (a mirror)
+    else m->sheen = 1.0f, m->roughness = 0.9f;                 // (cloth)
+    mats.push_back(m);
+  }
+  GameObject *root = scene_->create("WorldLike");
+  for (int i = 0; i < 600; i++) {
+    GameObject *g = scene_->create(strprintf("Part %03d", i), root);
+    g->set_local_position({(i % 30 - 15) * 2.2f, (i / 30 % 4) * 1.5f, (i / 120 - 2) * 6.0f});
+    g->add<MeshFilter>()->mesh = meshes[(size_t)i % meshes.size()];
+    MeshRenderer *r = g->add<MeshRenderer>();
+    r->materials = {mats[(size_t)(i * 7) % mats.size()]};
+    if (i % 10 < 3) r->contribute_gi = true;  // (180 of 600)
+    /* Every tenth part also wears a second texture through a second slot, so more of the textures are in use. */
+    if (i % 10 == 9) r->materials.push_back(mats[(size_t)(i * 3) % 20]);
+  }
+  GameObject *lights = scene_->create("Lights", root);
+  for (int i = 0; i < 70; i++) {
+    GameObject *g = scene_->create(strprintf("Light %02d", i), lights);
+    Light *l = g->add<Light>();
+    if (i == 0) l->type = 0, l->mode = 1, l->intensity = 1.5f, g->set_local_rotation(Quat::euler({50.0f, -30.0f, 0.0f}));
+    else if (i < 8) l->type = 2, l->mode = 1, l->range = 12.0f, l->spot_angle = 45.0f, g->set_local_position({(i - 4) * 8.0f, 4.0f, 0.0f}), g->set_local_rotation(Quat::euler({90.0f, 0.0f, 0.0f}));
+    else l->type = 1, l->mode = 0, l->range = 4.0f + (i % 4), l->intensity = 0.6f, g->set_local_position({(i % 20 - 10) * 3.1f, 1.0f + (i % 3), (i / 20 - 1) * 7.0f});
+    l->color = {0.8f + 0.2f * ((i * 3) % 2), 0.7f + 0.3f * ((i * 5) % 2), 0.9f};
+  }
+  for (int i = 0; i < 4; i++) {
+    GameObject *g = scene_->create(strprintf("Reflection Probe %d", i), root);
+    g->set_local_position({(i % 2) * 30.0f - 15.0f, 2.0f, (i / 2) * 12.0f - 6.0f});
+    g->add<ReflectionProbeComponent>()->box_size = {32.0f, 8.0f, 14.0f};
+  }
+  scene_->environment.fog = true;
+  scene_->environment.fog_density = 0.02f;
+  if (GameObject *cam = scene_->find_by_name("Main Camera")) {
+    cam->set_local_position({0.0f, 2.5f, -20.0f});
+    CameraFilters *f = cam->add<CameraFilters>();
+    f->add("Bloom"), f->add("Vignette"), f->add("Color Grading");
+  }
+  Log::info("worldlike: 600 parts from 40 meshes, 180 Contribute GI, 70 lights, 4 reflection probes, %d textures of %d, 30 materials, fog, the camera's filters", textures, tex_size);
+}
+
 bool Editor::bench_scene(const std::string &name) {
+  if (name == "worldlike" || name == "worldlikequick") {  // (round 411: the Unity-world stand-in; the Main Camera kept)
+    new_scene();
+    for (const char *starter : {"Utah Teapot", "Plane", "Point Light"})  // (the stand-in brings its own lights)
+      if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
+    build_world_like(name == "worldlikequick");
+    mark_changed("Bench scene");
+    return true;
+  }
   const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "keyed1k";
   if (!known) return false;
   new_scene();
