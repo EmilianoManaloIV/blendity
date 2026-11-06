@@ -146,7 +146,7 @@ The baseline target is plain x86-64 (Linux builds with Blender's libraries use S
 | Components (`MeshFilter`, `MeshRenderer`, `Light`, `Camera`, `Rigidbody`, …) | Behaviour via composition | Object data-blocks, materials, `blenkernel/intern/rigidbody.cc` | Components |
 | Modifier components (`SubdivisionSurface`, `SmoothModifier`) | Non-destructive stack, cached evaluation | `source/blender/modifiers` | — |
 | `Reflector` | One field description drives the Inspector, file IO and change hashing | RNA (`source/blender/makesrna`) | `SerializedProperty` |
-| `scene/scene_io.cpp` | Text scene format (tolerant of unknown fields), OBJ with axis conversion | `blenloader/intern/writefile.cc`, `io/wavefront_obj` | YAML scenes, model importer |
+| `scene/scene_io.cpp` | Text scene format (tolerant of unknown fields; a mesh of 4096 vertices and corners or more as one binary chunk inside the text since round 417, ADR 0111: `mesh_saved_binary`, `write_mesh_binary` / `read_mesh_binary`, `scene_binary_spans`), OBJ with axis conversion | `blenloader/intern/writefile.cc`, `io/wavefront_obj` | YAML scenes, model importer |
 | `editor/ui.*` | Immediate-mode widgets, popups, menus, tooltips | `editors/interface` | IMGUI (`EditorGUILayout`) |
 | `editor/editor.cpp` dock tree | Tabs, split/merge areas, layout presets | `editors/screen` (areas, workspaces) | Docking, Layouts |
 | `editor/scene_view.cpp` (+ `scene_pick.cpp`, `scene_overlays.cpp`; the console in `editor_commands.cpp`) | Navigation, gizmos, picking, Edit Mode | `editors/space_view3d/view3d_navigate_*.cc`, `view3d_select.cc`, `editors/transform`, `editors/gizmo_library` | Scene view, handles |

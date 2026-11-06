@@ -1171,36 +1171,89 @@ void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
 
 template <class Prepare>
 void Renderer3D::record_many(size_t n, const Prepare &prepare) {
+  /* Round 417: prepared into one array on every core, then the kept ones compacted on every core in order (a chunk's
+   * own stretch each) - no vector per chunk and no second copy (a cage's million lines spent 10 ms on those). */
   constexpr size_t kChunk = 4096;
   const size_t nc = (n + kChunk - 1) / kChunk;
-  std::vector<std::vector<OverlayCmd>> parts(nc);
+  if (nc <= 1) {
+    for (size_t i = 0; i < n; i++) {
+      OverlayCmd cmd;
+      if (!prepare(i, cmd)) continue;
+      if (batching_) overlay_cmds_.push_back(cmd);
+      else draw_overlay(cmd, 0, rt_->height);
+    }
+    return;
+  }
+  std::vector<OverlayCmd> all(n);
+  std::vector<uint8_t> keep(n, 0);
+  std::vector<uint32_t> kept(nc + 1, 0);
+  JobSystem &js = JobSystem::global();
+  js.parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t c = c0; c < c1; c++) {
+      uint32_t count = 0;
+      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++)
+        if (prepare(i, all[i])) keep[i] = 1, count++;
+      kept[(size_t)c + 1] = count;
+    }
+  });
+  for (size_t c = 0; c < nc; c++) kept[c + 1] += kept[c];
+  const size_t total = kept[nc];
+  if (!batching_) {
+    for (size_t i = 0; i < n; i++)
+      if (keep[i]) draw_overlay(all[i], 0, rt_->height);
+    return;
+  }
+  const size_t base = overlay_cmds_.size();
+  overlay_cmds_.resize(base + total);
+  js.parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t c = c0; c < c1; c++) {
+      size_t at = base + kept[(size_t)c];
+      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++)
+        if (keep[i]) overlay_cmds_[at++] = all[i];
+    }
+  });
+}
+
+/* Round 417: many ops recorded on every core in pieces, appended in order (a 500k-face cage's million edges and half a
+ * million dots went through `line` / `point` one at a time: 40 ms of one thread in the frame that enters Edit Mode). */
+template <class Make>
+static void record_ops(Renderer3D::OverlayRecord &r, size_t n, const Make &make) {
+  using Op = Renderer3D::OverlayRecord::Op;
+  constexpr size_t kChunk = 4096;
+  const size_t nc = (n + kChunk - 1) / kChunk;
+  if (nc <= 1) {
+    for (size_t i = 0; i < n; i++) {
+      Op op;
+      if (make(i, op)) r.ops.push_back(op);
+    }
+    return;
+  }
+  std::vector<std::vector<Op>> parts(nc);
   JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
     for (int64_t c = c0; c < c1; c++) {
-      std::vector<OverlayCmd> &out = parts[(size_t)c];
+      std::vector<Op> &out = parts[(size_t)c];
       out.reserve(kChunk);
       for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++) {
-        OverlayCmd cmd;
-        if (prepare(i, cmd)) out.push_back(cmd);
+        Op op;
+        if (make(i, op)) out.push_back(op);
       }
     }
   });
   size_t total = 0;
-  for (const std::vector<OverlayCmd> &part : parts) total += part.size();
-  if (batching_) overlay_cmds_.reserve(overlay_cmds_.size() + total);
-  for (const std::vector<OverlayCmd> &part : parts)
-    for (const OverlayCmd &cmd : part) {
-      if (batching_) overlay_cmds_.push_back(cmd);
-      else draw_overlay(cmd, 0, rt_->height);
-    }
+  for (const std::vector<Op> &part : parts) total += part.size();
+  r.ops.reserve(r.ops.size() + total);
+  for (const std::vector<Op> &part : parts) r.ops.insert(r.ops.end(), part.begin(), part.end());
 }
 
 void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
   if (record_) {
-    for (size_t i = 0; i < n; i++) {
+    record_ops(*record_, n, [&](size_t i, OverlayRecord::Op &op) {
       Vec3 a, b;
       uint32_t color = 0;
-      if (get(i, a, b, color)) line(a, b, color, depth_test, bias);
-    }
+      if (!get(i, a, b, color)) return false;
+      op.kind = OverlayRecord::Op::Line, op.a = a, op.b = b, op.color = color, op.value = bias, op.depth_test = depth_test;
+      return true;
+    });
     return;
   }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
@@ -1212,11 +1265,13 @@ void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &
 
 void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
   if (record_) {
-    for (size_t i = 0; i < n; i++) {
+    record_ops(*record_, n, [&](size_t i, OverlayRecord::Op &op) {
       Vec3 p;
       uint32_t color = 0;
-      if (get(i, p, color)) point(p, r, color, depth_test);
-    }
+      if (!get(i, p, color)) return false;
+      op.kind = OverlayRecord::Op::Point, op.a = p, op.color = color, op.value = r, op.depth_test = depth_test;
+      return true;
+    });
     return;
   }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
@@ -1228,13 +1283,26 @@ void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3
 
 /* What was recorded, drawn here as it would have been (task 0192: the card couldn't take it). */
 void Renderer3D::replay(const OverlayRecord &r) {
-  for (const OverlayRecord::Op &op : r.ops) switch (op.kind) {
-      case OverlayRecord::Op::Line: line(op.a, op.b, op.color, op.depth_test, op.value); break;
-      case OverlayRecord::Op::Point: point(op.a, op.value, op.color, op.depth_test); break;
-      case OverlayRecord::Op::Outline:
-        outline_ids(std::vector<uint32_t>(r.ids.begin() + op.first, r.ids.begin() + op.first + op.count), op.color, (int)op.value);
-        break;
+  /* Round 417: the lines and dots between two outlines projected and clipped on every core (record_many), in order; an
+   * outline in its place. (Replayed one at a time, a million edges' projection was 30 ms of one thread.) */
+  size_t at = 0;
+  while (at < r.ops.size()) {
+    const OverlayRecord::Op &op = r.ops[at];
+    if (op.kind == OverlayRecord::Op::Outline) {
+      outline_ids(std::vector<uint32_t>(r.ids.begin() + op.first, r.ids.begin() + op.first + op.count), op.color, (int)op.value);
+      at++;
+      continue;
     }
+    size_t to = at + 1;
+    while (to < r.ops.size() && r.ops[to].kind != OverlayRecord::Op::Outline) to++;
+    const size_t first = at;
+    record_many(to - at, [&](size_t i, OverlayCmd &cmd) {
+      const OverlayRecord::Op &o = r.ops[first + i];
+      return o.kind == OverlayRecord::Op::Line ? prepare_line(o.a, o.b, o.color, o.depth_test, o.value, cmd)
+                                               : prepare_point(o.a, o.value, o.color, o.depth_test, cmd);
+    });
+    at = to;
+  }
 }
 
 void Renderer3D::begin_overlay_batch() {
@@ -1246,23 +1314,52 @@ void Renderer3D::begin_overlay_batch() {
 void Renderer3D::end_overlay_batch() {
   batching_ = false;
   if (overlay_cmds_.empty() || !rt_ || !rt_->color) return;
-  const int H = rt_->height, band = 32, nb = (H + band - 1) / band;
-  if (overlay_cmds_.size() < 64 || nb < 2 || !opt_.multithreaded) {
+  /* Round 417: a big batch (an Edit Mode cage's million edges) in 8-row bands - four times the slices for the cores, the
+   * busiest band a quarter of what it was - and the band sort's counting and filling on every core, a chunk of
+   * commands each (each chunk fills its own stretch of each band, in command order, so a band's list is in order). */
+  const size_t n = overlay_cmds_.size();
+  const int H = rt_->height, band = n >= 200000 ? 8 : 32, nb = (H + band - 1) / band;
+  if (n < 64 || nb < 2 || !opt_.multithreaded) {
     for (const OverlayCmd &c : overlay_cmds_) draw_overlay(c, 0, H);
     overlay_cmds_.clear();
     return;
   }
-  /* Counting sort of command indices into the bands they touch (in order within each band). */
-  std::vector<uint32_t> offs((size_t)nb + 1, 0);
-  for (const OverlayCmd &c : overlay_cmds_)
-    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) offs[(size_t)b + 1]++;
-  for (int b = 0; b < nb; b++) offs[(size_t)b + 1] += offs[(size_t)b];
-  std::vector<uint32_t> idx(offs[(size_t)nb]), fill(offs.begin(), offs.end() - 1);
-  for (uint32_t i = 0; i < overlay_cmds_.size(); i++) {
-    const OverlayCmd &c = overlay_cmds_[i];
-    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) idx[fill[(size_t)b]++] = i;
+  auto bands_of = [&](const OverlayCmd &c, int &b0, int &b1) {
+    b0 = std::max(0, c.ymin / band);
+    b1 = std::min(nb - 1, std::max(0, c.ymax) / band);
+  };
+  constexpr size_t kChunk = 65536;
+  const size_t nchunks = (n + kChunk - 1) / kChunk;
+  JobSystem &js = JobSystem::global();
+  std::vector<uint32_t> counts(nchunks * (size_t)nb, 0);  // [chunk * nb + band]
+  js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t ch = c0; ch < c1; ch++) {
+      uint32_t *cnt = &counts[(size_t)ch * (size_t)nb];
+      for (size_t i = (size_t)ch * kChunk; i < std::min(n, (size_t)(ch + 1) * kChunk); i++) {
+        int b0, b1;
+        bands_of(overlay_cmds_[i], b0, b1);
+        for (int b = b0; b <= b1; b++) cnt[b]++;
+      }
+    }
+  });
+  std::vector<uint32_t> offs((size_t)nb + 1, 0), start(nchunks * (size_t)nb, 0);
+  for (int b = 0; b < nb; b++) {
+    uint32_t at = offs[(size_t)b];
+    for (size_t ch = 0; ch < nchunks; ch++) start[ch * (size_t)nb + (size_t)b] = at, at += counts[ch * (size_t)nb + (size_t)b];
+    offs[(size_t)b + 1] = at;
   }
-  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+  std::vector<uint32_t> idx(offs[(size_t)nb]);
+  js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t ch = c0; ch < c1; ch++) {
+      uint32_t *fill = &start[(size_t)ch * (size_t)nb];
+      for (size_t i = (size_t)ch * kChunk; i < std::min(n, (size_t)(ch + 1) * kChunk); i++) {
+        int b0, b1;
+        bands_of(overlay_cmds_[i], b0, b1);
+        for (int b = b0; b <= b1; b++) idx[fill[b]++] = (uint32_t)i;
+      }
+    }
+  });
+  js.parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
     for (int64_t b = b0; b < b1; b++)
       for (uint32_t k = offs[(size_t)b]; k < offs[(size_t)b + 1]; k++) draw_overlay(overlay_cmds_[idx[k]], (int)b * band, (int)(b + 1) * band);
   });

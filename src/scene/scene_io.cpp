@@ -12,6 +12,7 @@
 #include "../../extern/fast_float/fast_float.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -166,6 +167,300 @@ template<class Line> void lines_parallel(Out &os, size_t n, const Line &line) {
   os.s.reserve(os.s.size() + bytes);
   for (const Out &o : part) os.s += o.s;
 }
+
+/* Round 417 (ADR 0111): a big mesh's arrays as one binary chunk inside the text - "mesh <id> <name> <smooth> <nv> <nf> bin
+ * <bytes>", the bytes, a newline, then the mesh's remaining text lines (angle, seamsharp) and "end". The chunk: a magic,
+ * a version, a section count, then sections of [tag u32][count u64][a name: u32 length + bytes, for groups and shape
+ * keys][count elements], the elements as the Mesh holds them (little-endian; every platform Blendity builds on is).
+ * A section this reader doesn't know is skipped by its count taken as a byte size: a later writer that adds a section
+ * under version 1 writes that section's count in bytes.
+ * The 500k-face sphere's 76 MB of text (88 ms to format, 48 to write, 66 to read and 71 to parse) is 32 MB copied. */
+namespace binmesh {
+constexpr uint32_t kMagic = 0x68736D62u;  // "bmsh"
+constexpr uint32_t kEnd = 0x626D7368u;    // "hsmb": closes the chunk, so a chunk cut short or shifted is refused
+constexpr uint32_t kVersion = 1;
+constexpr uint32_t tag(const char (&s)[5]) {
+  return (uint32_t)(uint8_t)s[0] | ((uint32_t)(uint8_t)s[1] << 8) | ((uint32_t)(uint8_t)s[2] << 16) | ((uint32_t)(uint8_t)s[3] << 24);
+}
+constexpr uint32_t kPos = tag("pos "), kFaceOff = tag("foff"), kCorners = tag("corn"), kUv = tag("uv  "), kFaceMat = tag("fmat"),
+                   kFaceSmooth = tag("fsmo"), kFaceGroup = tag("fgrp"), kMask = tag("mask"), kSeams = tag("seam"), kSharp = tag("shrp"),
+                   kLoose = tag("wire"), kGroup = tag("vgrp"), kNormals = tag("cnrm"), kShape = tag("skey");
+struct ShapeEntry {
+  uint32_t index;
+  float x, y, z;
+};
+static_assert(sizeof(ShapeEntry) == 16, "a shape key's entry is 16 bytes in the file");
+static_assert(sizeof(Vec3) == 12 && sizeof(Vec2) == 8 && sizeof(float) == 4, "the chunk holds the Mesh's arrays as they are: a layout change needs a chunk version");
+/* (The bytes go out in the platform's order; every platform Blendity builds for is little-endian, and a big-endian
+ * port would swap on read: ADR 0111.) */
+inline bool little_endian() {
+  const uint32_t one = 1;
+  unsigned char b;
+  std::memcpy(&b, &one, 1);
+  return b == 1;
+}
+
+struct Writer {
+  std::string &s;
+  uint32_t sections = 0;
+  template<class T> void put(const T &v) { s.append(reinterpret_cast<const char *>(&v), sizeof(T)); }
+  template<class T> void section(uint32_t t, const std::vector<T> &v, const std::string *name = nullptr) {
+    put(t);
+    put((uint64_t)v.size());
+    if (name) {
+      put((uint32_t)name->size());
+      s.append(*name);
+    }
+    if (!v.empty()) s.append(reinterpret_cast<const char *>(v.data()), v.size() * sizeof(T));
+    sections++;
+  }
+};
+
+struct Reader {
+  const char *p, *e;
+  bool ok = true;
+  template<class T> bool get(T &v) {
+    if ((size_t)(e - p) < sizeof(T)) return ok = false;
+    std::memcpy(&v, p, sizeof(T));
+    p += sizeof(T);
+    return true;
+  }
+  template<class T> bool array(std::vector<T> &out, uint64_t n) {
+    if (n > (uint64_t)(e - p) / sizeof(T)) return ok = false;
+    out.resize((size_t)n);
+    if (n) std::memcpy(out.data(), p, (size_t)n * sizeof(T));
+    p += (size_t)n * sizeof(T);
+    return true;
+  }
+  bool name(std::string &out) {
+    uint32_t len = 0;
+    if (!get(len) || (size_t)(e - p) < len) return ok = false;
+    out.assign(p, len);
+    p += len;
+    return true;
+  }
+  bool skip(uint64_t n, size_t elem) {
+    if (n > (uint64_t)(e - p) / elem) return ok = false;
+    p += (size_t)n * elem;
+    return true;
+  }
+};
+}  // namespace binmesh
+
+}  // namespace
+
+static bool g_text_meshes_for_test = false;
+void set_scene_text_meshes_for_test(bool text) { g_text_meshes_for_test = text; }
+bool mesh_saved_binary(const Mesh &m) { return !g_text_meshes_for_test && m.vert_count() + m.corner_count() >= kBinaryMeshFrom; }
+
+static void write_mesh_binary(Out &os, size_t id, const Mesh &m) {
+  using namespace binmesh;
+  /* The sections to write, their byte count first (the header line carries it), then the bytes straight into the text
+   * (review 417: no 32 MB copy). */
+  const bool groups_on = std::any_of(m.face_group.begin(), m.face_group.end(), [](int32_t g) { return g != 0; });
+  const bool mask_on = m.mask_fits() && std::any_of(m.sculpt_mask.begin(), m.sculpt_mask.end(), [](float v) { return v != 0.0f; });
+  std::vector<std::vector<ShapeEntry>> shapes;
+  for (const ShapeKey &k : m.shape_keys) {
+    if (k.delta.size() != m.vert_count()) continue;
+    std::vector<ShapeEntry> moved;
+    for (size_t i = 0; i < k.delta.size(); i++)
+      if (k.delta[i].x != 0.0f || k.delta[i].y != 0.0f || k.delta[i].z != 0.0f) moved.push_back({(uint32_t)i, k.delta[i].x, k.delta[i].y, k.delta[i].z});
+    shapes.push_back(std::move(moved));
+  }
+  auto section_bytes = [](size_t elements, size_t elem_size, size_t name_len = 0, bool named = false) { return 12 + (named ? 4 + name_len : 0) + elements * elem_size; };
+  size_t bytes = 12 + 4;  // the magic, the version, the count; the end mark
+  bytes += section_bytes(m.positions.size(), 12) + section_bytes(m.face_offsets.size(), 4) + section_bytes(m.corner_verts.size(), 4);
+  if (m.has_uvs()) bytes += section_bytes(m.uvs.size(), 8);
+  if (!m.face_material.empty()) bytes += section_bytes(m.face_material.size(), 4);
+  if (!m.face_smooth.empty()) bytes += section_bytes(m.face_smooth.size(), 1);
+  if (groups_on) bytes += section_bytes(m.face_group.size(), 4);
+  if (mask_on) bytes += section_bytes(m.sculpt_mask.size(), 4);
+  if (!m.seams.empty()) bytes += section_bytes(m.seams.size(), 8);
+  if (!m.sharp_edges.empty()) bytes += section_bytes(m.sharp_edges.size(), 8);
+  if (!m.loose_edges.empty()) bytes += section_bytes(m.loose_edges.size(), 8);
+  for (const VertexGroup &vg : m.vertex_groups)
+    if (vg.weights.size() == m.vert_count()) bytes += section_bytes(vg.weights.size(), 4, vg.name.size(), true);
+  if (m.custom_normals_fit()) bytes += section_bytes(m.custom_normals.size(), 12);
+  for (size_t s = 0, k = 0; k < m.shape_keys.size(); k++) {
+    if (m.shape_keys[k].delta.size() != m.vert_count()) continue;
+    bytes += section_bytes(shapes[s].size(), sizeof(ShapeEntry), m.shape_keys[k].name.size(), true);
+    s++;
+  }
+  os << "mesh " << id << " " << quote(m.name) << " " << (m.smooth ? 1 : 0) << " " << m.vert_count() << " " << m.face_count() << " bin " << bytes
+     << "\n";
+  const size_t start = os.s.size();
+  os.s.reserve(start + bytes + 1);
+  Writer w{os.s};
+  w.put(kMagic);
+  w.put(kVersion);
+  const size_t count_at = os.s.size();
+  w.put((uint32_t)0);
+  w.section(kPos, m.positions);
+  w.section(kFaceOff, m.face_offsets);
+  w.section(kCorners, m.corner_verts);
+  if (m.has_uvs()) w.section(kUv, m.uvs);
+  if (!m.face_material.empty()) w.section(kFaceMat, m.face_material);
+  if (!m.face_smooth.empty()) w.section(kFaceSmooth, m.face_smooth);
+  if (groups_on) w.section(kFaceGroup, m.face_group);
+  if (mask_on) w.section(kMask, m.sculpt_mask);
+  if (!m.seams.empty()) w.section(kSeams, m.seams);
+  if (!m.sharp_edges.empty()) w.section(kSharp, m.sharp_edges);
+  if (!m.loose_edges.empty()) w.section(kLoose, m.loose_edges);
+  for (const VertexGroup &vg : m.vertex_groups)
+    if (vg.weights.size() == m.vert_count()) w.section(kGroup, vg.weights, &vg.name);
+  if (m.custom_normals_fit()) w.section(kNormals, m.custom_normals);
+  for (size_t s = 0, k = 0; k < m.shape_keys.size(); k++) {
+    if (m.shape_keys[k].delta.size() != m.vert_count()) continue;
+    w.section(kShape, shapes[s], &m.shape_keys[k].name);
+    s++;
+  }
+  w.put(kEnd);
+  std::memcpy(&os.s[count_at], &w.sections, sizeof(uint32_t));
+  if (os.s.size() - start != bytes) Log::error("Scene: a mesh chunk's size was counted wrong (%zu written, %zu announced)", os.s.size() - start, bytes);
+  if (!little_endian()) Log::warn("Scene: this build writes mesh chunks in big-endian order; another platform won't read them (ADR 0111)");
+  os.s += '\n';
+  if (m.smooth_angle < 180.0f) os << "angle " << F{m.smooth_angle} << '\n';
+  if (m.seams_sharp) os << "seamsharp 1\n";
+  os << "end\n";
+}
+
+/* The chunk read into the mesh: every section checked as the text lines are (indices in range, sizes as the counts, the
+ * mask and weights clamped, nothing non-finite kept); an unknown section is skipped by its count (a newer file). */
+static bool read_mesh_binary(const char *p, size_t bytes, size_t nv, size_t nf, Mesh &m, std::string &error) {
+  using namespace binmesh;
+  Reader r{p, p + bytes};
+  uint32_t magic = 0, version = 0, sections = 0;
+  if (!r.get(magic) || !r.get(version) || !r.get(sections) || magic != kMagic || version != kVersion) {
+    error = "the mesh's binary chunk has the wrong magic or version";
+    return false;
+  }
+  std::vector<std::string> names;  // (for the "which section" of an error)
+  for (uint32_t s = 0; s < sections && r.ok; s++) {
+    uint32_t t = 0;
+    uint64_t n = 0;
+    if (!r.get(t) || !r.get(n)) break;
+    std::string name;
+    switch (t) {
+      case kPos: r.array(m.positions, n); break;
+      case kFaceOff: r.array(m.face_offsets, n); break;
+      case kCorners: r.array(m.corner_verts, n); break;
+      case kUv: r.array(m.uvs, n); break;
+      case kFaceMat: r.array(m.face_material, n); break;
+      case kFaceSmooth: r.array(m.face_smooth, n); break;
+      case kFaceGroup: r.array(m.face_group, n); break;
+      case kMask: r.array(m.sculpt_mask, n); break;
+      case kSeams: r.array(m.seams, n); break;
+      case kSharp: r.array(m.sharp_edges, n); break;
+      case kLoose: r.array(m.loose_edges, n); break;
+      case kNormals: r.array(m.custom_normals, n); break;
+      case kGroup: {
+        VertexGroup vg;
+        if (m.positions.size() != nv) {  // (the positions come first; a chunk claiming a huge nv doesn't get nv floats a group)
+          r.ok = false;
+          break;
+        }
+        if (!r.name(vg.name) || !r.array(vg.weights, n)) break;
+        for (float &w : vg.weights) w = finite_bits(w) ? std::max(0.0f, std::min(w, 1.0f)) : 0.0f;
+        if (!vg.name.empty() && vg.weights.size() == nv && m.find_group(vg.name) < 0) m.vertex_groups.push_back(std::move(vg));
+        break;
+      }
+      case kShape: {
+        ShapeKey k;
+        std::vector<ShapeEntry> moved;
+        if (m.positions.size() != nv) {
+          r.ok = false;
+          break;
+        }
+        if (!r.name(k.name) || !r.array(moved, n)) break;
+        k.delta.assign(nv, Vec3(0.0f));
+        for (const ShapeEntry &e : moved)
+          if (e.index < nv && finite_bits(e.x) && finite_bits(e.y) && finite_bits(e.z)) k.delta[e.index] = Vec3(e.x, e.y, e.z);
+        if (!k.name.empty() && m.find_shape(k.name) < 0) m.shape_keys.push_back(std::move(k));
+        break;
+      }
+      default: r.skip(n, 1); break;  // (an unknown section: its count is its byte size)
+    }
+  }
+  uint32_t end = 0;
+  if (!r.ok || !r.get(end) || end != kEnd) {
+    error = "the mesh's binary chunk ends early";
+    return false;
+  }
+  if (m.positions.size() != nv || m.face_offsets.size() != nf + 1 || m.face_offsets.empty() || m.face_offsets[0] != 0 ||
+      m.face_offsets.back() != m.corner_verts.size()) {
+    error = "the mesh's binary chunk doesn't match its counts";
+    return false;
+  }
+  /* The corners' vertices and the faces' offsets, checked on every core. */
+  std::atomic<bool> bad{false};
+  JobSystem::global().parallel_for((int64_t)m.corner_verts.size(), 65536, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b && !bad.load(std::memory_order_relaxed); i++)
+      if (m.corner_verts[(size_t)i] >= nv) bad = true;
+  });
+  if (bad) {
+    error = "vertex index out of range";
+    return false;
+  }
+  JobSystem::global().parallel_for((int64_t)nf, 65536, [&](int64_t a, int64_t b) {
+    for (int64_t f = a; f < b && !bad.load(std::memory_order_relaxed); f++)
+      if (m.face_offsets[(size_t)f + 1] < m.face_offsets[(size_t)f]) bad = true;
+  });
+  if (bad) {
+    error = "a face's offsets run backwards";
+    return false;
+  }
+  if (!m.uvs.empty() && m.uvs.size() != m.corner_verts.size()) m.uvs.clear();
+  if (!m.face_material.empty()) {
+    m.face_material.resize(nf, 0);
+    for (int32_t &mi : m.face_material) mi = std::max(0, mi);  // (as the text form: a slot below 0 is 0)
+  }
+  if (!m.face_smooth.empty()) {
+    m.face_smooth.resize(nf, m.smooth ? 1 : 0);
+    for (uint8_t &s : m.face_smooth) s = s ? 1 : 0;
+  }
+  if (!m.face_group.empty()) {
+    m.face_group.resize(nf, 0);
+    for (int32_t &g : m.face_group) g = std::max(-Mesh::kMaxGroup, std::min(g, Mesh::kMaxGroup));
+  }
+  if (!m.sculpt_mask.empty()) {
+    m.sculpt_mask.resize(nv, 0.0f);
+    for (float &v : m.sculpt_mask) v = std::isfinite(v) ? std::max(0.0f, std::min(1.0f, v)) : 0.0f;
+  }
+  auto in_range = [nv](uint64_t k) { return (k >> 32) < nv && (k & 0xFFFFFFFF) < nv; };
+  for (std::vector<uint64_t> *edges : {&m.seams, &m.sharp_edges, &m.loose_edges})
+    edges->erase(std::remove_if(edges->begin(), edges->end(), [&](uint64_t k) { return !in_range(k) || (edges == &m.loose_edges && (k >> 32) == (k & 0xFFFFFFFF)); }),
+                 edges->end());
+  if (m.custom_normals.size() != nv) m.custom_normals.clear();
+  return true;
+}
+
+/* The mesh header line's "bin <bytes>" when it has one. */
+static bool binary_chunk_size(std::string_view line, uint64_t &bytes) {
+  if (line.size() < 12 || line.compare(0, 5, "mesh ") != 0) return false;
+  const std::vector<std::string> t = tokenize(line);
+  if (t.size() < 8 || t[6] != "bin") return false;
+  bytes = std::strtoull(t[7].c_str(), nullptr, 10);
+  return true;
+}
+
+std::vector<std::pair<size_t, size_t>> scene_binary_spans(const std::string &text) {
+  std::vector<std::pair<size_t, size_t>> spans;
+  const char *p = text.data(), *end = p + text.size();
+  while (p < end) {
+    const char *nl = (const char *)std::memchr(p, '\n', (size_t)(end - p));
+    const char *le = nl ? nl : end;
+    std::string_view line(p, (size_t)(le - p));
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    p = nl ? nl + 1 : end;
+    uint64_t bytes = 0;
+    if (!binary_chunk_size(line, bytes) || bytes > (uint64_t)(end - p)) continue;
+    spans.push_back({(size_t)(p - text.data()), (size_t)(p - text.data()) + (size_t)bytes});
+    p += (size_t)bytes;
+  }
+  return spans;
+}
+
+namespace {
 
 struct WriteReflector : Reflector {
   bool all_fields() const override { return true; }
@@ -404,6 +699,10 @@ std::string save_scene_text(const Scene &scene) {
   }
   for (size_t i = 0; i < order.size(); i++) {
     const Mesh &m = *order[i];
+    if (mesh_saved_binary(m)) {  // (round 417, ADR 0111)
+      write_mesh_binary(os, i, m);
+      continue;
+    }
     os << "mesh " << i << " " << quote(m.name) << " " << (m.smooth ? 1 : 0) << " " << m.vert_count() << " "
        << m.face_count() << "\n";
     os.s.reserve(os.s.size() + m.vert_count() * 32 + m.corner_count() * 8);
@@ -779,6 +1078,17 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
       size_t nv = std::strtoull(t[4].c_str(), nullptr, 10), nf = std::strtoull(t[5].c_str(), nullptr, 10);
       m->positions.reserve(nv);
       m->face_offsets.reserve(nf + 1);
+      if (t.size() >= 8 && t[6] == "bin") {  // (round 417, ADR 0111: the arrays as one chunk, then the text lines as before)
+        const uint64_t bytes = std::strtoull(t[7].c_str(), nullptr, 10);
+        std::string why;
+        if (bytes > (uint64_t)(is.end - is.p) || !read_mesh_binary(is.p, (size_t)bytes, nv, nf, *m, why)) {
+          error = strprintf("line %d: %s", lineno, why.empty() ? "the mesh's binary chunk is longer than the file" : why.c_str());
+          return false;
+        }
+        is.p += (size_t)bytes;
+        if (is.p < is.end && *is.p == '\n') is.p++;
+        lineno++;
+      }
       while (is.next(line)) {
         lineno++;
         const char *p = line.data(), *le = line.data() + line.size();
@@ -1523,16 +1833,30 @@ size_t retarget_scene_files(const std::string &dir, const std::string &from_in, 
     bool compressed = false;
     if (!read_scene_file(p, text, compressed, err)) continue;
     /* "from" exactly, or "from/..." for a folder; written quoted by save_scene_text. */
-    const std::string a = quote(from), b = quote(to);
-    const std::string fa = a.substr(0, a.size() - 1) + "/", fb = b.substr(0, b.size() - 1) + "/";
-    const std::string ha = a.substr(0, a.size() - 1) + "#", hb = b.substr(0, b.size() - 1) + "#";  // a texture's output
-    size_t n = 0;
-    for (const auto &rep : {std::make_pair(a, b), std::make_pair(fa, fb), std::make_pair(ha, hb)})
-      for (size_t at = text.find(rep.first); at != std::string::npos; at = text.find(rep.first, at + rep.second.size())) {
-        text.replace(at, rep.first.size(), rep.second);
-        n++;
-      }
+    const std::string a = quote(from), b_ = quote(to);
+    const std::string fa = a.substr(0, a.size() - 1) + "/", fb = b_.substr(0, b_.size() - 1) + "/";
+    const std::string ha = a.substr(0, a.size() - 1) + "#", hb = b_.substr(0, b_.size() - 1) + "#";  // a texture's output
+    /* Round 417: the replacements outside the binary mesh chunks (a path's bytes inside one would be geometry). */
+    const std::vector<std::pair<size_t, size_t>> spans = scene_binary_spans(text);
+    size_t n = 0, done = 0;
+    std::string joined;
+    auto text_part = [&](size_t b, size_t e) {
+      std::string part = text.substr(b, e - b);
+      for (const auto &rep : {std::make_pair(a, b_), std::make_pair(fa, fb), std::make_pair(ha, hb)})
+        for (size_t at = part.find(rep.first); at != std::string::npos; at = part.find(rep.first, at + rep.second.size())) {
+          part.replace(at, rep.first.size(), rep.second);
+          n++;
+        }
+      joined += part;
+    };
+    for (const auto &span : spans) {
+      text_part(done, span.first);
+      joined.append(text, span.first, span.second - span.first);
+      done = span.second;
+    }
+    text_part(done, text.size());
     if (!n) continue;
+    text.swap(joined);
     std::string out = text;
 #ifdef BL_WITH_ZSTD
     if (compressed) {
