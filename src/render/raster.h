@@ -202,6 +202,7 @@ struct DrawItem {
   bool double_sided = false;
   const std::vector<MaterialPtr> *materials = nullptr;  // Deferred mode (null = default material)
   bool receive_shadows = true;
+  bool cast_shadows = true;  // round 415 (ADR 0109): the renderer's Cast Shadows (Unity's Shadows Off): out of the shadow maps on both devices
   const std::vector<uint8_t> *face_highlight = nullptr;  // edit mode: tint selected faces
   /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
   const Lightmap *lightmap = nullptr;

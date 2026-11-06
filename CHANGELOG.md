@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 415): the CPU's share of a card frame
+
+**Asked:** round 411's honest finding on the user's SideRail world - "the card's frame costs the CPU more than the CPU's
+own" (36 ms on the card against 18.5 on the CPU; round 414's corrected run: 43.6 against 18.8). Pass 16's fifth round
+(the plan: rounds 411-420).
+
+**Changed (task 0391, ADR 0109)**
+- **The instruments first:** the GPU path's CPU share in its parts - the instances, the baked corners, the see-through
+  triangles, the render call - in the Profiler and the windowed check's breakdown line. On SideRail the baked corners
+  were 23.9 of the 32.1 ms GPU path: the lightmapped triangles' local positions and UVs rebuilt and sent whole every
+  frame since task 0197.
+- **The baked corners stay on the card:** one block per mesh and lightmap UV set, sent when the mesh or its UVs change,
+  nothing when an object moves; let go with the meshes.
+- **Lights that can't reach the view are left out of its list:** a point or spot light whose range sphere is outside
+  the view's frustum is removed before both devices' per-pixel loops; the picture is the same to the bit, the count is
+  in the Profiler.
+- **A renderer's Cast Shadows is honoured** (Unity's Shadows Off): the object is out of the shadow map on the CPU, in
+  the render job and on the card; before, only its materials' flag counted.
+- **A mesh's see-through triangles are listed once** per mesh and slot mask, and transformed and keyed on every thread,
+  the chunks in triangle order (the stable sort's ties as before).
+- `tests_round415`; the lesson "Where the Time Goes" gains the parts and the lesson "Rendering on the GPU" the blocks.
+
+**Measured:** SideRail's Scene view on the card 37.1 -> 8.3 ms a frame (the GPU path 32.1 -> 3.6: the corners 23.9 ->
+0.03, the see-through triangles 3.4 -> 1.8) against 18.8 on the CPU - the card's frame is the cheaper one on the real
+world now; its Scene + Game view 80.9 -> 34.3 (the Game view's filters on the CPU: round 416); Shinano's Scene view
+7.4 -> 7.0; the stand-in's 8.5 -> 6.9 (docs/PERFORMANCE.md, the spec).
+
+**Checked:** `tests_round415` (the corner blocks sent once and not when a lightmapped object moves, the picture the
+CPU's; Shadows Off on both devices within 1 / 255; a far light left out with the picture identical to the bit, a near
+one kept); both suites, the audits.
+
 ## 2026-11-04 (round 414): the Scene view stays on the card for a Unity world
 
 **Asked:** "Use Vrchat world and avatar unity packages to measure performance ... as very real projects" and "Is the

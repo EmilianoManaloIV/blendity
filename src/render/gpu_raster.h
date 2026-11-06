@@ -204,7 +204,7 @@ struct RasterFrame {
   /* Task 0197: the baked-lit triangles' corners, two vec4 each - (local position, lightmap u), (lightmap v, realtime
    * u, v, 0) - three a triangle, in the card's triangle order; the probe volume's settings; realtime GI's specular
    * occlusion. */
-  std::vector<float> corners;
+  std::vector<float> corners;  // (since round 415 the editor keeps the corners on the card in blocks: add_corners; this stays for a card without them)
   float probe_normal_bias = 0.25f, probe_view_bias = 0.1f;
   bool probe_leak = true, probe_live = false;
   float gi_specular_occlusion = 1.0f;
@@ -313,6 +313,11 @@ class Raster {
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
   virtual bool set_cage_edges(const std::vector<CageEdge> &e, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
+  /* Round 415 (ADR 0109): a block of baked-lit triangles' corners (24 floats a triangle, as RasterFrame::corners held
+   * them) kept on the card: its base in triangles (RasterInstance::corner_base counts from it), -1 when the card has no
+   * room; `remove_corners` frees the block. The frame's own `corners` are sent each frame only where no block is used. */
+  virtual int add_corners(const float *data, size_t floats, std::string *error) { (void)data, (void)floats; if (error) *error = "no corner blocks"; return -1; }
+  virtual void remove_corners(int base, size_t floats) { (void)base, (void)floats; }
   /* Task 0101: a texture's mip chain, as Texture holds it (8-bit texels as stored, or float), kept on the card; the id
    * is RasterInstance::tex's. -1 when it doesn't fit (the error says why). */
   virtual int add_texture(const Texture &t, std::string *error) = 0;
