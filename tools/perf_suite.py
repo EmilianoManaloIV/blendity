@@ -15,7 +15,8 @@ when given, compared with the committed baseline, and written into PERFORMANCE.m
   responsiveness row over its budget is OVER. `--check` exits 1
   on a regression (CI uses it as an annotation first; ADR 0105). `--save-baseline` copies the run's tables into the
   baseline file with the machine's name.
-- `--write` replaces the tables between `<!-- pass16-table -->` and `<!-- /pass16-table -->` in PERFORMANCE.md."""
+- `--write` replaces the tables between `<!-- pass16-after-table -->` and `<!-- /pass16-after-table -->` in PERFORMANCE.md
+  (round 420: the latest run; the `pass16-table` block keeps round 411's baseline, "Before Pass 16")."""
 import argparse, json, os, platform, re, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -119,7 +120,7 @@ def main():
     ap.add_argument("--world", action="append", default=[], help='"<project>|<scene.unity>" or "<project>|prefab=<file.prefab>"')
     ap.add_argument("--baseline", default=os.path.join(ROOT, "stress", "results", "baseline.md"))
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "perf"))
-    ap.add_argument("--write", help="docs/PERFORMANCE.md: replace the pass16-table block")
+    ap.add_argument("--write", help="docs/PERFORMANCE.md: replace the pass16-after-table block (the latest run)")
     ap.add_argument("--save-baseline", action="store_true")
     ap.add_argument("--check", action="store_true", help="exit 1 on a regression or an OVER row")
     a = ap.parse_args()
@@ -161,7 +162,7 @@ def main():
             f.write("# Performance baseline (tools/perf_suite.py --save-baseline)\n\n" + md)
         print("baseline saved:", a.baseline)
     if a.write:
-        write_between_markers(a.write, md, "pass16-table")
+        write_between_markers(a.write, md, "pass16-after-table")
         print("written:", a.write)
     return 1 if (a.check and findings) else 0
 
