@@ -54,6 +54,7 @@ static int headless(int argc, char **argv) {
   park.x = -100;
   park.y = -100;
   ed.step_frame_headless({park});
+  for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();  // (round 414: the startup's own open of the last scene lands before the first line, not after it)
   for (auto &c : cmds) {
     ed.command(c);
     for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();  // (round 413: a save, open, import or export lands before the next line - as the line ran whole before)

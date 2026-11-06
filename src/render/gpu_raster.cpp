@@ -1912,6 +1912,8 @@ layout(location = 8) flat in float face_hl;
 #ifdef BL_SEE_IDS
 layout(location = 0) out uint o_id;
 layout(location = 1) out uint o_inst;
+#elif defined(BL_SEE_HDR)
+layout(location = 0) out vec4 o_color;  // round 414: the linear-light plane's "none" mark
 #else
 layout(location = 0, index = 0) out vec4 o_color;
 layout(location = 0, index = 1) out vec4 o_blend;
@@ -1949,11 +1951,15 @@ void main() {
   if (!glass && a < 0.3) discard;
   o_id = I.id.x;
   o_inst = ii;
+#elif defined(BL_SEE_HDR)
+  o_color = vec4(-1.0, 0.0, 0.0, 0.0);  // (drawn over: its linear light no longer holds - the CPU's no_hdr; the bloom decodes the 8-bit picture there)
 #else
   if (face_hl > 0.5) albedo = mix(albedo, vec3(1.0, 0.55, 0.1), 0.45);
   bool solid = shadow.w > 0.5;  // (Solid shading: shade() per pixel, as the CPU's see-through pass in Gouraud mode)
   if (!glass) {
-    vec3 lit = solid ? clamp(solid_shade(albedo, specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, albedo, rough, metallic, specular, emission, I.id.y, vec4(0.0)).rgb;
+    /* (Round 414: a see-through toon surface - its band edges come from the g-buffer's neighbours, which hold other
+     * objects here, so toon_neighbour gives none; its painted maps aren't in the toon planes: F_TOONMAP masked.) */
+    vec3 lit = solid ? clamp(solid_shade(albedo, specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, albedo, rough, metallic, specular, emission, I.id.y & ~F_TOONMAP, vec4(0.0)).rgb;
     o_color = vec4(lit * a, 1.0);
     o_blend = vec4(1.0 - a);
     return;
@@ -1963,7 +1969,7 @@ void main() {
   float f0 = (ior - 1.0) / (ior + 1.0);
   f0 *= f0;
   float nv = clamp(dot(n, V), 0.0, 1.0), F = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0);
-  vec3 refl = solid ? clamp(solid_shade(vec3(0.0), specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, vec3(0.0), rough, 0.0, f0 / 0.08, emission, I.id.y, vec4(0.0)).rgb;  // (the see-through pass reads no baked light, as the CPU's)
+  vec3 refl = solid ? clamp(solid_shade(vec3(0.0), specular, n, wpos), 0.0, 1.0) : light_pixel(px, ii, wpos, n, g, vec3(0.0), rough, 0.0, f0 / 0.08, emission, I.id.y & ~F_TOONMAP, vec4(0.0)).rgb;  // (the see-through pass reads no baked light, as the CPU's)
   o_color = vec4(refl, 1.0);
   o_blend = vec4(albedo * (1.0 - F), 0.0);
 #endif
@@ -2218,6 +2224,7 @@ class VulkanRaster final : public Raster {
   bool can_draw_toon_maps() const override { return pl_toon_[0] && pl_toon_[1] && pl_toon_[2]; }
   bool can_draw_baked() const override { return pl_baked_[0] && pl_baked_[1] && pl_baked_[2]; }
   bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
+  bool can_draw_see_through_hdr() const override { return pl_see_hdr_ != VK_NULL_HANDLE; }  // (round 414)
   /* Task 0197: the slot's last picture in linear light, rgba per pixel (x -1: none there), read back on its own. */
   bool read_hdr(int slot, float *rgba, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
@@ -2241,6 +2248,58 @@ class VulkanRaster final : public Raster {
     probe_dirty_ = true;
   }
   bool can_highlight_faces() const override { return geometry_; }
+
+  int add_corners(const float *data, size_t floats, std::string *err) override {
+    if (!floats || floats % 24) return fail(err, "a corner block that isn't whole triangles"), -1;
+    if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
+    size_t at = corner_used_;
+    int reuse = -1;
+    for (size_t i = 0; i < corner_blocks_.size(); i++)  // (best fit over the freed blocks: the smallest that holds it)
+      if (!corner_blocks_[i].live && corner_blocks_[i].n >= floats && (reuse < 0 || corner_blocks_[i].n < corner_blocks_[(size_t)reuse].n)) reuse = (int)i;
+    if (reuse >= 0) at = corner_blocks_[(size_t)reuse].at;
+    const size_t need = (at + floats) * sizeof(float);
+    if (need > corner_buf_.size) {  // (grown with its contents: the other blocks stay where they are)
+      const VkDeviceSize limit = std::min<VkDeviceSize>(max_storage_, 1ull << 31);
+      if (need > limit) return fail(err, "the baked corners too large for the card's storage buffers"), -1;
+      Buf bigger;
+      if (!make_buffer(bigger, std::max<VkDeviceSize>(need * 2 > limit ? limit : need * 2, 16), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
+        return fail(err, "out of memory for the baked corners"), -1;
+      f_.vkDeviceWaitIdle(dev_);
+      if (corner_used_) std::memcpy(bigger.mapped, corner_buf_.mapped, std::min<size_t>(corner_used_ * sizeof(float), corner_buf_.size));
+      free_buffer(corner_buf_);
+      corner_buf_ = bigger;
+      for (Slot &sl : slots_) bind_buffers(sl.set);
+    }
+    std::memcpy((uint8_t *)corner_buf_.mapped + at * sizeof(float), data, floats * sizeof(float));
+    if (reuse >= 0) {
+      CornerBlock &b = corner_blocks_[(size_t)reuse];
+      if (b.n > floats) corner_blocks_.push_back({b.at + floats, b.n - floats, false});  // (the rest stays free)
+      b.n = floats, b.live = true;
+    }
+    else {
+      corner_blocks_.push_back({at, floats, true});
+      corner_used_ = at + floats;
+    }
+    corner_blocks_on_ = true;
+    return (int)(at / 24);
+  }
+  void remove_corners(int base, size_t floats) override {
+    const size_t at = (size_t)std::max(0, base) * 24;
+    bool found = false;
+    for (CornerBlock &b : corner_blocks_)
+      if (b.live && b.at == at && b.n == floats) b.live = false, found = true;
+    if (!found) Log::warn("GPU view: a corner block to free that isn't held (base %d, %zu floats)", base, floats);  // (the editor's bookkeeping drifted)
+    /* (Neighbouring free blocks merged, and the tail given back.) */
+    std::sort(corner_blocks_.begin(), corner_blocks_.end(), [](const CornerBlock &x, const CornerBlock &y) { return x.at < y.at; });
+    std::vector<CornerBlock> merged;
+    for (const CornerBlock &b : corner_blocks_) {
+      if (!merged.empty() && !merged.back().live && !b.live && merged.back().at + merged.back().n == b.at) merged.back().n += b.n;
+      else merged.push_back(b);
+    }
+    while (!merged.empty() && !merged.back().live) merged.pop_back();
+    corner_blocks_ = std::move(merged);
+    corner_used_ = corner_blocks_.empty() ? 0 : corner_blocks_.back().at + corner_blocks_.back().n;
+  }
 
   int add_texture(const Texture &t, std::string *err) override {
     if (!settle(err)) return -1;  // (task 0204: a frame left running on the card finishes first)
@@ -2454,6 +2513,10 @@ class VulkanRaster final : public Raster {
       f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_hdr_);
       f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &sl.set, 0, nullptr);
       f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+      if (!fr.see_through.empty() && can_draw_see_through() && pl_see_hdr_) {  // (round 414: the see-through pixels marked "none", as the CPU marks them)
+        f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_see_hdr_);
+        f_.vkCmdDraw(cmd_, (uint32_t)fr.see_through.size(), 1, 0, 0);
+      }
       f_.vkCmdEndRenderPass(cmd_);
       barrier();
     }
@@ -3033,12 +3096,22 @@ class VulkanRaster final : public Raster {
              pl_light_ = VK_NULL_HANDLE, pl_cage_line_ = VK_NULL_HANDLE, pl_cage_point_ = VK_NULL_HANDLE,
              pl_ov_line_ = VK_NULL_HANDLE, pl_ov_point_ = VK_NULL_HANDLE, pl_outline_ = VK_NULL_HANDLE,  // (task 0192)
              pl_see_ = VK_NULL_HANDLE, pl_see_ids_ = VK_NULL_HANDLE;  // (task 0195)
+  VkPipeline pl_see_hdr_ = VK_NULL_HANDLE;  // round 414: the see-through triangles' "none" marks in the linear-light plane
   VkPipeline pl_toon_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0196: the toon pass - not culled, back, front
   VkPipeline pl_baked_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0197: the baked pass
   VkPipeline pl_hdr_ = VK_NULL_HANDLE;    // task 0197: the lighting in linear light
   VkRenderPass rp_hdr_ = VK_NULL_HANDLE;
   VkRenderPass rp_baked_ = VK_NULL_HANDLE;
   Buf baked_buf_, corner_buf_, probe_buf_;  // task 0197: the instances' baked light, the triangles' corners, the probe volume
+  /* Round 415: the corner buffer's blocks (in floats), first fit over the freed ones, the buffer grown with its contents
+   * copied; corner_used_ the floats in use up to the last block. */
+  struct CornerBlock {
+    size_t at = 0, n = 0;
+    bool live = false;
+  };
+  std::vector<CornerBlock> corner_blocks_;
+  size_t corner_used_ = 0;
+  bool corner_blocks_on_ = false;  // (a frame whose corners came as blocks: the frame's own array isn't written over them)
   std::vector<float> probe_volume_;          // (set_probe_volume's, written once)
   bool probe_dirty_ = true;
   VkRenderPass rp_toon_ = VK_NULL_HANDLE;
@@ -3683,7 +3756,10 @@ class VulkanRaster final : public Raster {
     if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
-    if (!write_toon_table(err) || !write_baked_table(err) || !write_array(corner_buf_, fr.corners.data(), fr.corners.size() * sizeof(float), err)) return false;
+    if (!write_toon_table(err) || !write_baked_table(err)) return false;
+    /* (Round 415: the corners live in blocks on the card; a frame's own array - a card without blocks - is written over
+     * the buffer only while no block is held.) */
+    if (!corner_blocks_on_ && !write_array(corner_buf_, fr.corners.data(), fr.corners.size() * sizeof(float), err)) return false;
     if (probe_dirty_) {  // (the probe volume: written when the editor sends a new one)
       if (!write_array(probe_buf_, probe_volume_.data(), probe_volume_.size() * sizeof(float), err)) return false;
       probe_dirty_ = false;
@@ -4042,13 +4118,18 @@ class VulkanRaster final : public Raster {
     std::string serr;
     const std::string fs = std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kLightFrag + kLightFns + kLightFrag2 + kSeeCommon;
     VkShaderModule vs = module(std::string(kSeeCommon) + kSeeVert, shaderc_vertex_shader, &serr), cf = module(fs + kSeeFrag, shaderc_fragment_shader, &serr),
-                   idf = module("#define BL_SEE_IDS 1\n" + fs + kSeeFrag, shaderc_fragment_shader, &serr);
+                   idf = module("#define BL_SEE_IDS 1\n" + fs + kSeeFrag, shaderc_fragment_shader, &serr),
+                   hf = module("#define BL_SEE_HDR 1\n" + fs + kSeeFrag, shaderc_fragment_shader, &serr);  // (round 414)
     if (vs && cf && idf) {
       pl_see_ = make_pipeline(rp_light_, vs, cf, 1, false, VK_CULL_MODE_NONE, false, VK_NULL_HANDLE, true);
       pl_see_ids_ = make_pipeline(rp_ids_, vs, idf, 2, false, VK_CULL_MODE_NONE);
     }
+    /* (Round 414: drawn inside the linear-light pass - a pipeline made for rp_hdr_ is compatible with it: the same
+     * one attachment; without it, such views stay the CPU's.) */
+    if (vs && hf && rp_hdr_) pl_see_hdr_ = make_pipeline(rp_hdr_, vs, hf, 1, false, VK_CULL_MODE_NONE);
     if (!can_draw_see_through()) Log::warn("The GPU view can't draw see-through surfaces (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
-    for (VkShaderModule m : {vs, cf, idf})
+    else if (!can_draw_see_through_hdr()) Log::warn("The GPU view can't draw see-through surfaces over a picture kept in linear light (%s): the CPU draws those views", serr.empty() ? "?" : serr.c_str());
+    for (VkShaderModule m : {vs, cf, idf, hf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
   }
   /* Task 0196: the toon pass's pipelines, culled as the g-buffer's (the same vertex shader: the same depth). */
@@ -4100,6 +4181,7 @@ class VulkanRaster final : public Raster {
         {std::string(kLightFns) + kGbufVert, shaderc_vertex_shader},
     };
     if (dual_src_) srcs.push_back({see + kSeeFrag, shaderc_fragment_shader}), srcs.push_back({"#define BL_SEE_IDS 1\n" + see + kSeeFrag, shaderc_fragment_shader});
+    if (dual_src_) srcs.push_back({"#define BL_SEE_HDR 1\n" + see + kSeeFrag, shaderc_fragment_shader});  // (round 414)
     if (geometry_) srcs.push_back({mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
@@ -4254,7 +4336,7 @@ class VulkanRaster final : public Raster {
       for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb, &sl.hdr})
         free_image(*im);
     }
-    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
+    for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
     for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);

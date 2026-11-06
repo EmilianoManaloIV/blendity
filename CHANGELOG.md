@@ -2,6 +2,75 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-04 (round 415): the CPU's share of a card frame
+
+**Asked:** round 411's honest finding on the user's SideRail world - "the card's frame costs the CPU more than the CPU's
+own" (36 ms on the card against 18.5 on the CPU; round 414's corrected run: 43.6 against 18.8). Pass 16's fifth round
+(the plan: rounds 411-420).
+
+**Changed (task 0391, ADR 0109)**
+- **The instruments first:** the GPU path's CPU share in its parts - the instances, the baked corners, the see-through
+  triangles, the render call - in the Profiler and the windowed check's breakdown line. On SideRail the baked corners
+  were 23.9 of the 32.1 ms GPU path: the lightmapped triangles' local positions and UVs rebuilt and sent whole every
+  frame since task 0197.
+- **The baked corners stay on the card:** one block per mesh and lightmap UV set, sent when the mesh or its UVs change,
+  nothing when an object moves; let go with the meshes.
+- **Lights that can't reach the view are left out of its list:** a point or spot light whose range sphere is outside
+  the view's frustum is removed before both devices' per-pixel loops; the picture is the same to the bit, the count is
+  in the Profiler.
+- **A renderer's Cast Shadows is honoured** (Unity's Shadows Off): the object is out of the shadow map on the CPU, in
+  the render job and on the card; before, only its materials' flag counted.
+- **A mesh's see-through triangles are listed once** per mesh and slot mask, and transformed and keyed on every thread,
+  the chunks in triangle order (the stable sort's ties as before).
+- `tests_round415`; the lesson "Where the Time Goes" gains the parts and the lesson "Rendering on the GPU" the blocks.
+
+**Measured:** SideRail's Scene view on the card 37.1 -> 8.3 ms a frame (the GPU path 32.1 -> 3.6: the corners 23.9 ->
+0.03, the see-through triangles 3.4 -> 1.8) against 18.8 on the CPU - the card's frame is the cheaper one on the real
+world now; its Scene + Game view 80.9 -> 34.3 (the Game view's filters on the CPU: round 416); Shinano's Scene view
+7.4 -> 7.0; the stand-in's 8.5 -> 6.9 (docs/PERFORMANCE.md, the spec).
+
+**Checked:** `tests_round415` (the corner blocks sent once and not when a lightmapped object moves, the picture the
+CPU's; Shadows Off on both devices within 1 / 255; a far light left out with the picture identical to the bit, a near
+one kept); both suites, the audits.
+
+## 2026-11-04 (round 414): the Scene view stays on the card for a Unity world
+
+**Asked:** "Use Vrchat world and avatar unity packages to measure performance ... as very real projects" and "Is the
+Scene view drawn by the GPU?" - round 411's baseline found the card refusing SideRail's whole Scene view for one
+see-through toon material, and its Game view for the Bloom over glass. Pass 16's fourth round (the plan: rounds
+411-420).
+
+**Changed (task 0390, ADR 0108)**
+- **Approximations per object instead of refusals per view:** a see-through toon material, a Volume (fog) and a
+  Principled material with Subsurface, Sheen, Coat or Anisotropic no longer send the view to the CPU. The card draws
+  them nearly - the toon veil through the see-through pass without its band edges and painted maps, the fog as a tinted
+  shell at the opacity of the mesh's mean thickness, the extras folded into the base, roughness and specular (Anisotropic
+  ignored) - and says so: `viewport status` and the Profiler list "approximated: ..." per view and count the instances.
+  F12 stays exact.
+- **See-through over a picture kept in linear light** (the Game view's Bloom over glass or a transparent material) draws
+  on the card exactly: the see-through pixels are marked "none" in the card's linear light as the CPU marks its own.
+- **Textures capped, never refused for their size:** a material's texture over 2048 a side goes up from its first level
+  within 2048 (Unity's default import size); one the card's buffers can't hold goes up at 64 x 64; both noted.
+- The lessons "Rendering on the GPU" and "Where the Time Goes" say what the badge and the status mean now;
+  `tests_round414`.
+- CI (the macOS job of #311): the Live Link clip-throttle test read the wall clock through a slow runner; its strict
+  "owed" check now holds only when the second change came within the quarter-second gap.
+- `--windowed-check` and the headless runner settle the startup's own open of the last scene (on a worker since round
+  413) before their first command: it had landed after the check's `open` and replaced the scene, so the check measured
+  the starter scene; `tools/bench_world.py` reads a status with several approximation notes.
+
+**Measured:** the stand-in's Scene view on the card 25.4 -> 8.5 ms a frame (the whole view had gone to the CPU for one
+see-through toon material), Scene + Game 36.3 -> 25.2; SideRail's Scene + Game view 112 ms with the Game view refused ->
+81 with it drawn by the card (still over: its filters on the CPU, and the CPU's share of the card frame - the Scene view
+43.6 ms on the card against 18.8 on the CPU, 29 of them the CPU's work inside the GPU path: round 415); Shinano's Scene
+view 7.4 against 19.3 (docs/PERFORMANCE.md, the spec).
+The tests: the coat / sheen / subsurface cube 5.5 / 255 from the CPU over its pixels, the toon veil 1.0, the fog cube
+3.6, the bloom-over-glass view 0.06 (the glass 0.94), the 4096 texture 0.40, the stand-in 0 refusals.
+
+**Checked:** `tests_round414` (each approximated kind against the CPU over the object's pixels to a stated distance, the
+bloom-over-glass view exact, the 4096 texture capped, the stand-in with 0 refusals); the two render tests that asserted
+the refusals assert the approximations; both suites, the audits.
+
 ## 2026-11-04 (round 413): geometry and files never halt the editor
 
 **Asked:** "Rendering, Baking, or doing intensive operations should not halt the program." Pass 16's third round: the
