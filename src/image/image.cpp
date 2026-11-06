@@ -1710,6 +1710,13 @@ TexturePtr texture_load(const std::string &path, bool srgb, std::string *error) 
   return t;
 }
 
+TexturePtr texture_cached(const std::string &path, bool srgb) {
+  const int64_t mt = file_mtime(path);
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  const auto it = g_cache.find(path + (srgb ? "|srgb" : "|data"));
+  return it != g_cache.end() && it->second.mtime == mt ? it->second.tex : nullptr;
+}
+
 void texture_cache_clear() {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache.clear();

@@ -238,33 +238,74 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
   const GameObject::EvaluateNowScope evaluate_now;  // (the stacks' exact results, not what a worker is still making)
   objects.clear();
   lights.clear();
-  std::unordered_map<const Material *, MaterialPtr> copies;
-  std::unordered_map<const Mesh *, std::shared_ptr<const Mesh>> mesh_copies;  // (round 412: parts sharing a mesh share its copy - the bake only reads it)
+  /* The parts that contribute and their distinct meshes (round 412: parts sharing a mesh share its copy). */
+  struct Part {
+    GameObject *g;
+    MeshRenderer *mr;
+    size_t mesh;
+  };
+  struct MeshWork {
+    std::shared_ptr<const Mesh> m;  // (held: a later object's evaluation can't free it under the gather - review 422)
+    std::shared_ptr<const Mesh> copy;
+    uint64_t hash = 0;
+  };
+  std::vector<Part> parts;
+  std::vector<MeshWork> meshes;
+  std::unordered_map<const Mesh *, size_t> mesh_index;
+  ScopedTimer pass_t;
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
-    if (auto *mr = g.get<MeshRenderer>())
-      if (mr->enabled && mr->contribute_gi && mr->show_in_renders)
-        if (const Mesh *m = g.evaluated_mesh(1)) {
-          BakeObject o;
-          o.id = g.id;
-          std::shared_ptr<const Mesh> &mc = mesh_copies[m];
-          if (!mc) mc = mesh_copy_bare(*m);  // the bake's own copy, without the caches (round 412: the worker builds its own): the scene may change while it runs
-          o.mesh = mc;
-          o.model = g.world_matrix();
-          for (const MaterialPtr &mp : mr->materials) {  // (round 412: frozen copies - the worker never reads the scene's own)
-            MaterialPtr &c = copies[mp.get()];
-            if (!c) c = snapshot_material(mp);
-            o.materials.push_back(c);
-          }
-          o.scale = mr->scale_in_lightmap;
-          o.generate_uvs = mr->generate_lightmap_uvs;
-          o.want_lightmap = mr->receive_gi == 0;  // Light Probes: in the scene the light bounces off, no chart
-          o.hash = lightmap_hash_of(g, *m);
-          objects.push_back(std::move(o));
-        }
-    if (auto *l = g.get<Light>())
-      if (l->enabled) lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
+    if (auto *l = g.get<Light>(); l && l->enabled) lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
+    auto *mr = g.get<MeshRenderer>();
+    if (!mr || !mr->enabled || !mr->contribute_gi || !mr->show_in_renders) return;
+    const Mesh *raw = g.evaluated_mesh(1);
+    if (!raw) return;
+    std::shared_ptr<const Mesh> m = g.evaluated_mesh_shared(1);
+    if (!m) m = std::shared_ptr<const Mesh>(std::shared_ptr<const Mesh>(), raw);  // (not held, as before round 422: never left out)
+    const auto [it, fresh] = mesh_index.emplace(m.get(), meshes.size());
+    if (fresh) meshes.push_back({std::move(m)});
+    parts.push_back({&g, mr, it->second});
   });
+  /* Round 422: each distinct mesh's work on every core - its render mesh warmed (mesh_hash_of keys its cache by the
+   * render mesh's serial: building them one after another had been SideRail's 6 s starting frame), its lightmap hash
+   * and the bake's own copy (without the caches - the worker builds its own; the scene may change while it runs). */
+  const double eval_ms = pass_t.ms();
+  JobSystem::global().parallel_for((int64_t)meshes.size(), 2, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) {
+      MeshWork &w = meshes[(size_t)i];
+      const uint64_t serial = w.m->render_mesh().serial;
+      const auto known = serial ? lm_mesh_hash_.find(serial) : lm_mesh_hash_.end();  // (only read here: filled below)
+      w.hash = known != lm_mesh_hash_.end() ? known->second : lightmap_mesh_hash(*w.m);
+      w.copy = mesh_copy_bare(*w.m);
+    }
+  });
+  if (lm_mesh_hash_.size() > 8192) lm_mesh_hash_.clear();  // (as mesh_hash_of: old meshes' serials never come back)
+  for (const MeshWork &w : meshes)
+    if (const uint64_t serial = w.m->render_mesh().serial) lm_mesh_hash_[serial] = w.hash;
+  const double mesh_ms = pass_t.ms() - eval_ms;
+  std::vector<MaterialPtr> used;
+  for (const Part &p : parts) used.insert(used.end(), p.mr->materials.begin(), p.mr->materials.end());
+  prefetch_material_textures(used);  // (round 422: their files decoded on every core; freezing them finds them cached)
+  std::unordered_map<const Material *, MaterialPtr> copies;
+  for (const Part &p : parts) {
+    const MeshWork &w = meshes[p.mesh];
+    BakeObject o;
+    o.id = p.g->id;
+    o.mesh = w.copy;
+    o.model = p.g->world_matrix();
+    for (const MaterialPtr &mp : p.mr->materials) {  // (round 412: frozen copies - the worker never reads the scene's own)
+      MaterialPtr &c = copies[mp.get()];
+      if (!c) c = snapshot_material(mp);
+      o.materials.push_back(c);
+    }
+    o.scale = p.mr->scale_in_lightmap;
+    o.generate_uvs = p.mr->generate_lightmap_uvs;
+    o.want_lightmap = p.mr->receive_gi == 0;  // Light Probes: in the scene the light bounces off, no chart
+    o.hash = lightmap_placed_hash(w.hash, o.model);  // (lightmap_hash_of's value, from the hash made above)
+    objects.push_back(std::move(o));
+  }
+  Log::info("Generate Lighting: %zu parts, %zu meshes - evaluated in %.0f ms, warmed, hashed and copied in %.0f ms, %zu materials frozen in %.0f ms",
+            parts.size(), meshes.size(), eval_ms, mesh_ms, copies.size(), pass_t.ms() - eval_ms - mesh_ms);
 }
 
 /* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); -1 the CPU. */
@@ -297,7 +338,15 @@ void Editor::bake_start() {
   /* Round 412 (ADR 0106): the scene as the bake reads it - the meshes copied, the lights, the world, the probes' box,
    * the Light Volumes' grids and the Reflection Probes' places - gathered here; the worker bakes it all. */
   auto job = std::make_unique<BakeJob>();
+  ScopedTimer start_t;
+  double part_ms[5] = {0, 0, 0, 0, 0};  // (round 422: the starting frame's parts - collect, environment, GPU, keys and boxes, volumes and probes)
+  double part_at = 0;
+  auto part = [&](int k) {
+    const double now = start_t.ms();
+    part_ms[k] = now - part_at, part_at = now;
+  };
   collect_bake_scene(job->objects, job->lights);
+  part(0);
   /* Round 362 (the comparison's finding 10): nothing marked had baked "0 objects" without a word of why. */
   if (job->objects.empty()) return bake_refuse_empty();
   if (preview_running_) {  // the real bake replaces the preview
@@ -306,6 +355,7 @@ void Editor::bake_start() {
   }
   update_environment();
   job->env = env_;
+  part(1);
   BakeSettings &s = job->settings;
   s.texels_per_unit = ls.texels_per_unit;
   s.max_size = ls.max_size;
@@ -318,12 +368,18 @@ void Editor::bake_start() {
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
+  part(2);
   job->key = bake_key_ = lightmap_scene_key();
   job->probe_box_ok = probe_volume_box(job->probe_box);
   job->probe_min_spacing = ls.probe_min_spacing, job->probe_max_spacing = ls.probe_max_spacing;
   job->indirect_samples = ls.indirect_samples, job->bounces = ls.bounces, job->indirect_intensity = ls.indirect_intensity;
+  part(3);
   bake_gather_volumes(*job);
   bake_gather_reflection_probes(*job);
+  part(4);
+  last_bake_start_ms_ = start_t.ms();
+  Log::info("Generate Lighting: started in %.0f ms (the scene gathered %.0f, the world %.0f, the device %.0f, keys %.0f, volumes and probes %.0f)",
+            last_bake_start_ms_, part_ms[0], part_ms[1], part_ms[2], part_ms[3], part_ms[4]);
   job->save_dir = lighting_dir();  // (the worker writes the lightmaps and probes beside it when it is done: not the landing frame's work)
   job->scene_ident = scene_ident_;
   bake_start_ = now_seconds();
@@ -373,6 +429,10 @@ void Editor::bake_job_run(BakeJob &j) {
   j.lighting = baker_.take_result();
   j.lighting.scene_key = j.key;
   j.lightmap_finish_ms = baker_.finish_ms(), j.lightmap_texels = baker_.texel_count(), j.lightmap_rays = baker_.rays(), j.lightmap_gpu_texels = baker_.gpu_texels();
+  j.mesh_hashes.assign(j.objects.size(), 0);
+  JobSystem::global().parallel_for((int64_t)j.objects.size(), 4, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) j.mesh_hashes[(size_t)i] = lightmap_mesh_hash(*j.objects[(size_t)i].mesh);
+  });
   phase_done(0);
   /* The probe volume (task 0014): placed from the scene the lightmaps were baked from, checked for geometry, baked. */
   j.phase.store(1);
@@ -560,7 +620,8 @@ void Editor::bake_job_land(BakeJob &j) {
   lighting_data_ = std::move(j.lighting);
   lighting_from_unity_ = false;  // (round 400: Blendity's own bake in Unity's place)
   lm_mesh_baked_.clear();
-  for (const BakeObject &o : j.objects) lm_mesh_baked_[o.id] = lightmap_mesh_hash(*o.mesh);
+  for (size_t i = 0; i < j.objects.size(); i++)
+    lm_mesh_baked_[j.objects[i].id] = i < j.mesh_hashes.size() ? j.mesh_hashes[i] : lightmap_mesh_hash(*j.objects[i].mesh);
   probes_ = std::move(j.probe_volume);
   probe_live_ready_ = false;
   probe_live_left_ = 0;

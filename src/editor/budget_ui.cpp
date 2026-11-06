@@ -179,7 +179,7 @@ void Editor::budget_report(const BudgetCounts &c, const char *what) {
   const std::string rank = budget_rank_name(t, r.rank);
   std::string msg = strprintf("Budget (%s): %s %s%s", t.name, what, rank.c_str(), held.empty() ? "" : (" - held by " + held).c_str());
   if (c.textures_reading)  // (review 399: said, not silently low)
-    msg += strprintf(" (%zu texture(s) only the engine reads still being read: Texture Memory counts them next time)", c.textures_reading);
+    msg += strprintf(" (%zu texture(s) still being read: Texture Memory counts them next time)", c.textures_reading);
   if (r.rank >= (int)t.ranks.size()) Log::warn("%s", msg.c_str());
   else Log::info("%s", msg.c_str());
 }

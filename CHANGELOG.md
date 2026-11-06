@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-06 (round 422): the cheap performance wins
+
+**Asked:** Pass 17's round 422 - the slow spots Pass 16 ranked whose causes were known, fixed early while the
+bake-quality rounds run.
+
+**Changed (task 0398)**
+- **Export Unity Package compresses on every core:** a megabyte block a core - zlib's deflate with Blender's
+  libraries, joined into one ordinary gzip stream as pigz joins them; Blendity's own deflate in the dependency-free
+  build, its matching in parallel. The writer no longer erases a megabyte from the front of its buffer per block.
+- **The Budget reads a texture's size from its file's header** (PNG, JPEG, TGA) and whether it can hold alpha; it
+  decodes only a PNG or TGA with an alpha channel whose Unity size depends on its texels. A map the views haven't
+  loaded (headless, or with the views on the card) is counted this way too - it had been decoded in full. A JPEG the
+  built-in decoder can't read (progressive) now counts at its size instead of nothing.
+- **F12 no longer re-skins every skinned object** into the camera-view slot - only items drawn view-shaped.
+- **An import copies its files on its worker:** the model into Assets/Meshes and its textures into
+  Assets/Textures before the landing frame (not while an import preview is open).
+- **Generate Lighting's starting frame:** the materials' image files decoded on every core before they're frozen
+  for the worker, the meshes warmed, hashed and copied on every core, the mesh hashes for the landing made on the
+  worker; the start's parts in the log.
+
+**Measured:** SideRail's Export Unity Package 18.7 -> 3.2 s, Shinano's 7.5 -> 1.7 s; Shinano's F12 3.5 -> 1.1 s
+(its first frame 384 -> 334 ms); the 50k sphere's OBJ import landing 69 -> 6.9 ms, USDA 61 -> 3.4 ms; SideRail's
+Generate Lighting starting frame 6.1 s -> 0.73 s headless (1,056 -> 807 ms windowed); SideRail's first `budget pc`
+7.0 -> 1.0 s headless (Shinano's 2.3 s: its PNGs with alpha whose Unity size depends on their texels are still decoded).
+
+**Checked:** tests_round422; both suites - with Blender's libraries 16258 checks in 1596 tests, 0 failed; dependency-free 15517
+(Windows) and 15523 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-06 (round 421): measuring Blendity's own bake against Unity's
 
 **Asked:** "How to get better results of light baking, reflection baking, etc. similar to the quality of Unity 3D" -

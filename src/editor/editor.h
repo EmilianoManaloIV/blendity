@@ -3702,8 +3702,19 @@ class Editor {
   void draw_ipv_shading_row();
   void draw_ipv_outline_row();
   void import_with_shading(const std::string &path, bool copy_into_assets, int shading);  // the console's import <file> <shading>
+  /* Round 422: an import's file work - the model copied into Assets/Meshes, its folder under Materials / Textures
+   * chosen, its outside textures copied - done ahead on the import's worker (the landing frame had compared and copied
+   * them: 60-70 ms for an OBJ or USDA with its textures). */
+  struct ImportFiles {
+    bool ready = false;
+    bool again = false;
+    std::string model;
+    std::unordered_map<std::string, std::string> tex_map;
+  };
+  void prepare_import_files(const std::string &path, bool copy_into_assets, const ImportResult &r, ImportFiles &out);
   void finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
-                     bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit = {});  // (round 374: a snapshot's parts, in the same Undo step)
+                     bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit = {},  // (round 374: a snapshot's parts, in the same Undo step)
+                     const ImportFiles *prepared = nullptr);
   /* The draw items a view and the import preview share (task 0152): a mesh's, and its toon outline's hull. */
   DrawItem mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRenderer &mr, bool want_tangents, bool editing);
   bool outline_draw_item(const GameObject &g, const Mesh &m, const DrawItem &it, int slot, float thickness_scale, DrawItem &out);
@@ -5513,6 +5524,7 @@ class Editor {
     double phase_ms[5] = {-1, -1, -1, -1, -1};  // (round 421: the lightmaps, the probes, the Light Volumes, the reflection probes, saving; -1 not reached)
     double lightmap_finish_ms = 0;         // (the lightmaps' filter and dilation, inside phase 0)
     size_t lightmap_texels = 0;
+    std::vector<uint64_t> mesh_hashes;  // (round 422: lightmap_mesh_hash of each of `objects`, on the worker - not in the landing frame)
     uint64_t lightmap_rays = 0;
     size_t lightmap_gpu_texels = 0;
     std::atomic<float> progress{0.0f};
@@ -5537,6 +5549,7 @@ class Editor {
     uint64_t rays = 0;
   };
   BakeTimes last_bake_times_;
+  double last_bake_start_ms_ = 0;  // (round 422: the frame that starts Generate Lighting)
  public:
   const BakeTimes &last_bake_times_for_test() const { return last_bake_times_; }
  private:
@@ -5645,9 +5658,11 @@ class Editor {
   struct ImportJob {
     std::string path;
     bool copy_into_assets = false, preview = false, ok = false;
+    bool prepare = false;  // (round 422: the file copies made on the worker)
     int shading = -1;  // (-1: as dropped; else the shading word's index)
     double started = 0.0;
     ImportResult result;
+    ImportFiles files;  // (round 422: copied on the worker when the import needs no dialog)
     std::atomic<bool> done{false};
     std::thread thread;
     ~ImportJob() {
