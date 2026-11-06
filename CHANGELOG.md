@@ -2,6 +2,61 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-05 (round 420): Pass 16's write-up, and Unity's editor timed beside Blendity
+
+**Asked:** the plan's round 420 - the suite's tables before and after Pass 16, SideRail and Shinano navigation beside
+Unity's editor, the honest negatives, the baseline refreshed, the lessons extended. Pass 16's last round (the plan:
+rounds 411-420).
+
+**Changed (task 0396)**
+- **docs/PERFORMANCE.md opens with "Pass 16 in one table":** responsiveness rows over the budget 21 -> 4, the sweep's
+  operations over 100 ms 4 -> 1, SideRail's Scene view on the card 43.6 -> about 10 ms a frame and its filtered Game
+  view 112 -> 10.4, its Generate Lighting's longest frame 128 s -> 1.2 s, the 500k-face mesh's save and open 141 / 132
+  -> 27 / 33 ms - and the open items, ranked (one parity row, the undo of 10,000 objects, rose and is listed).
+- **Unity's editor timed on the same assets** (`tools/unity_frames.py`, on the project copies, the scene framed
+  whole): SideRail's Scene view is a draw on the median (Unity 10.0 ms, Blendity 10.3 on the card) though Unity's mean
+  and p95 carry long frames (25.6 / 99); Unity draws SideRail's Game view about twice as fast (4.8 against 10.4 with
+  both views) and Shinano's views two to three times as fast (2.2 / 2.5 against 7.0 / 5.1). Blendity's views hold
+  60 fps when the card presents them.
+- The baseline (`stress/results/baseline.md`) refreshed from the final quick suite; the comparison report gets the
+  navigation table; the lessons "Performance and Stress Testing" and "Rendering on the GPU" say what the pass did.
+- CI: round 413's "mesh operators on a worker" test no longer fails when a fast runner's worker finishes before the
+  test's first check (the macOS job of #316).
+
+**Checked:** the quick suite against round 411's baseline (like-for-like regressions listed in the spec); both
+suites, the audits.
+
+## 2026-11-05 (round 419): a faster allocator on Windows, and Tracy for developers
+
+**Asked:** the plan's round 419 - new dependencies only where the suite shows a 1.3x gain, on Blender's libraries'
+terms (compatible licence, a switch, Blendity's own code as the fallback, only in Blendity-full). The user gave
+permission to download Tracy's client, mimalloc and the others. Pass 16's ninth round (the plan: rounds 411-420).
+
+**Changed (task 0395, ADR 0112)**
+- **The Windows build with Blender's libraries uses oneTBB's allocator** (`tbbmalloc_proxy`, the one Blender links),
+  for every allocation in the process. Measured against the system allocator: 48 of 59 timed suite rows faster, 1.15x
+  on average and 1.3-1.5x on Select Linked on 500k faces, undo of 10,000 objects, duplicate, FBX and STL export and
+  Solidify (the parity section's wall time 2.9x). Its costs: Exit Edit Mode on 500k faces 3 -> 10 ms, the Subdivision
+  modifier 1.3x slower, 30 % more memory for 10,000 cubes. `libs` says which allocator the build has;
+  `BLENDITY_ALLOCATOR=system` builds without it. Linux and macOS, and the dependency-free build, keep the system's.
+- **mimalloc measured faster still but is not used:** linked as a library it replaces memory handling in Blendity's
+  executable only, and memory freed across Blender's DLLs crashed the test suite.
+- **Tracy for developers:** `BLENDITY_TRACY=1` builds with Tracy's client (collecting only while its viewer is
+  connected) and zones at the frame, the views, the gather and the renders; no shipped build has it.
+  `packaging/fetch_blender_libs.sh ... --extras` fetches Tracy 0.11.1 at its pinned commit; its licence is in
+  `licenses/`.
+- KTX / Basis and OpenImageIO are not adopted: no suite row needs them now.
+- `tests_round419`; the lesson "Where the Time Goes" names the allocator.
+
+**Measured:** the whole parity section 54.8 -> 19.1 s; Select Linked on 500k faces 123 -> 84 ms, undo of the delete of
+10,000 objects 47 -> 34, duplicate 10,000 objects 145 -> 108, FBX export 29 -> 21, STL export 13 -> 9 (ADR 0112, the
+spec's full table, with mimalloc's column).
+
+**Checked:** `tests_round419` (the proxy's own log says it replaced the runtime; a million blocks written, read back
+and freed on other threads); a Tracy build compiled and ran the quick parity section; both suites with oneTBB's
+allocator, the audits; the suite with mimalloc crashed (the assets and editor groups) - why it isn't used. The Opus
+review's fixes are in the spec.
+
 ## 2026-11-05 (round 418): every operation the sweep ranked
 
 **Asked:** the plan's round 418 - the inventory sweep's list (every console verb, keymap action and window run on three

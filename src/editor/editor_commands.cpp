@@ -3,6 +3,7 @@
 // tool is reachable from (task 0177: moved out of editor.cpp as they were).
 #include "../scene/curve.h"
 #include "editor.h"
+#include "../core/allocator.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
 #include "../render/texture_bake.h"
@@ -1964,6 +1965,7 @@ void Editor::run_console_command(const std::string &line) {
       Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
                 l.enabled ? "" : l.fallback);
     Log::info("%s", gpu::status(true).c_str());  // (libs reports the card: opened here)
+    Log::info("Memory: %s", allocator_name());  // (round 419, ADR 0112)
   }
   else if (c == "camera" && t.size() >= 4) {
     cam_.animating = false;  // (a flight under way would carry the view off again)

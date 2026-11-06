@@ -7,6 +7,7 @@
  * renderer stays the reference: the unit tests pin Auto to it (BLENDITY_VIEWPORT_DEVICE=cpu), and the GPU's own tests
  * compare the two. */
 #include "editor.h"
+#include "../core/profiling.h"
 
 #include "../core/jobs.h"
 #include "../render/colormanagement.h"
@@ -1255,6 +1256,7 @@ const char *Editor::live_close_up_of(const DrawItem &it, GpuMesh &e, const Mat4 
 
 bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, const LightingEnv &env, const std::vector<DrawItem> &items,
                            const Camera *cam, bool scene_lights, const FilterStack *filters, const RasterOptions &opt) {
+  BL_ZONE("gpu_view_draw");
   gpu::Raster *g = gpu_view_.get();
   if (!g) return false;
   const int slot = gpu_slot(rt);

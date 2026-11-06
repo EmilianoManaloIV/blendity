@@ -8,6 +8,7 @@
 //   Edit Mode   : Blender's mesh editing (blender/source/blender/editors/mesh)
 #include "../scene/curve.h"
 #include "editor.h"
+#include "../core/profiling.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -30,6 +31,7 @@ using ui::Icon;
 /* ===================================================================== */
 
 void Editor::draw_scene_view(const Recti &r) {
+  BL_ZONE("scene_view");
   auto &u = ui_;
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};
@@ -2577,6 +2579,7 @@ void Editor::compute_proportional_weights(const Mat4 &world) {
 /* ===================================================================== */
 
 void Editor::draw_game_view(const Recti &r) {
+  BL_ZONE("game_view");
   auto &u = ui_;
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};

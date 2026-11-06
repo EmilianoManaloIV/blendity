@@ -56,6 +56,18 @@ namespace bl::deps {
 
 const std::vector<Library> &libraries() {
   static const std::vector<Library> libs = {
+#ifdef BL_WITH_TBBMALLOC
+      {"oneTBB malloc", true, TBB_VERSION_STRING,
+#else
+      {"oneTBB malloc", false, "",
+#endif
+       "Memory allocator for every allocation (tbbmalloc_proxy, Blender's own)", "the system allocator"},
+#ifdef BL_WITH_TRACY
+      {"Tracy", true, "client",
+#else
+      {"Tracy", false, "",
+#endif
+       "A developer's frame profiler (BLENDITY_TRACY=1 builds only)", "the Profiler window"},
 #ifdef BL_WITH_TBB
       {"oneTBB", true, TBB_VERSION_STRING,
 #else

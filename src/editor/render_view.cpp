@@ -5,6 +5,7 @@
 //   * Rendered viewport + final render: progressive path tracer (Blender: Cycles)
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
+#include "../core/profiling.h"
 #include "../render/dof.h"
 #include "../render/display.h"
 
@@ -206,6 +207,7 @@ void Editor::prebuild_render_meshes(const Scene &s, bool game) {
 }
 
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  BL_ZONE("collect_items");
   ProfileScope prof{prof_.ms_collect, {}};
   prebuild_render_meshes(*scene_, game);
   std::vector<DrawItem> items;
@@ -804,6 +806,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                              bool scene_lights, const Camera *cam, const FilterStack *filters) {
+  BL_ZONE("render_deferred");
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)

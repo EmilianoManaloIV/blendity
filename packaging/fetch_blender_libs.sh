@@ -5,10 +5,16 @@
 # next to this project: ../blender/lib/<platform> (reusing a clone already there) and, when missing,
 # ../blender/release/datafiles/colormanagement. The build scripts then use them by themselves. Needs git with git-lfs
 # (the libraries are LFS files). About 600 MB a platform.
-#   packaging/fetch_blender_libs.sh windows_x64|linux_x64|macos_arm64 [blender folder]
+#   packaging/fetch_blender_libs.sh windows_x64|linux_x64|macos_arm64 [blender folder] [--extras]
+# --extras (round 419, ADR 0112) also fetches the developers' extras pinned in blender-libs.txt (Tracy) into
+# <blender folder>/extra; no release build uses them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-PLAT="${1:?usage: fetch_blender_libs.sh windows_x64|linux_x64|macos_arm64 [blender folder]}"
+EXTRAS=0
+ARGS=()
+for a in "$@"; do if [ "$a" = --extras ]; then EXTRAS=1; else ARGS+=("$a"); fi; done
+set -- "${ARGS[@]}"
+PLAT="${1:?usage: fetch_blender_libs.sh windows_x64|linux_x64|macos_arm64 [blender folder] [--extras]}"
 BL="${2:-../blender}"
 pin() { awk -v n="$1" '$1 == n { print $2 }' packaging/blender-libs.txt; }
 [ -n "$(pin "$PLAT")" ] || { echo "no pinned commit for $PLAT in packaging/blender-libs.txt" >&2; exit 1; }
@@ -48,5 +54,22 @@ if [ ! -f "$CM/config.ocio" ]; then
   sparse_fetch "https://projects.blender.org/blender/blender.git" build/blender-datafiles "$(pin blender)" release/datafiles/colormanagement
   mkdir -p "$BL/release/datafiles"
   cp -R build/blender-datafiles/release/datafiles/colormanagement "$BL/release/datafiles/"
+fi
+# Round 419 (ADR 0112): the developers' extras, only with --extras - a release tag each, its commit checked (a clone at
+# another commit - an older pin - is fetched at the pinned tag again) - into $BL/extra/<name>.
+if [ "$EXTRAS" = 1 ]; then
+  awk '$1 ~ /^extra-/ { print substr($1, 7), $2, $3, $4 }' packaging/blender-libs.txt | while read -r name tag commit url; do
+    dest="$BL/extra/$name"
+    if [ ! -d "$dest/.git" ]; then
+      echo "[fetch] $name $tag"
+      git clone -q --depth 1 --branch "$tag" "$url" "$dest"
+    elif [ "$(git -C "$dest" rev-parse HEAD)" != "$commit" ]; then
+      echo "[fetch] $name $tag (the clone was at another commit)"
+      git -C "$dest" fetch -q --depth 1 origin "refs/tags/$tag:refs/tags/$tag"
+      git -C "$dest" checkout -q -f "$tag"
+    fi
+    got="$(git -C "$dest" rev-parse HEAD)"
+    [ "$got" = "$commit" ] || { echo "[fetch] $name: $got is not the pinned $commit" >&2; exit 1; }
+  done
 fi
 echo "[fetch] done: $(du -sh "$BL/lib/$PLAT" | cut -f1) in $BL/lib/$PLAT"
