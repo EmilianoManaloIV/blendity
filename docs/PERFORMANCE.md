@@ -83,6 +83,10 @@ SideRail at its own settings, now Directional as the scene asks (MAE / SSIM / gr
 0.930). The floor's normal map shows more relief under baked light than Unity's render of it: open (compare the
 direction's length with Unity's own direction maps).
 
+### The directions against Unity's (round 427)
+Unity's own SideRail direction maps: length median 0.117, 90th percentile 0.715; Blendity's 0.865 / 0.976 (round 426),
+0.744 / 0.949 with only the direct light pointing (round 427). Floor 5.11 / 0.794 / 0.975 (was 0.788).
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`
