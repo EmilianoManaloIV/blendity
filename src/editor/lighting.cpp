@@ -90,6 +90,13 @@ uint64_t Editor::lightmap_scene_key() {
 
 /* Only recomputed when something the views draw or the lighting settings changed (the status bar asks
  * every frame). */
+/* Round 426: Directional Mode asks for directions the shown bake doesn't have (one from before round 426, or baked
+ * Non-Directional): out of date, so Auto Generate and Preview bake again. Unity's lightmaps excepted (theirs are folded
+ * in). Kept out of lightmap_scene_key, whose value every saved bake holds. */
+bool Editor::wants_directions() const {
+  return scene_->lighting.directional_mode != 0 && !lighting_data_.empty() && lighting_data_.dir_pages.empty() && !lighting_from_unity_;
+}
+
 bool Editor::lighting_out_of_date() {
   if (lighting_data_.empty()) return false;
   const uint64_t k = scene_render_hash() ^ hash_reflect([this](Reflector &r) { scene_->lighting.reflect(r); }) * 31 ^ lighting_gen_ * 131;
@@ -100,7 +107,7 @@ bool Editor::lighting_out_of_date() {
     ProfileScope prof{prof_.ms_lighting_key, {}};
     prof_.lightmap_key_hashes++;
     ood_key_ = k;
-    ood_ = lighting_data_.scene_key != lightmap_scene_key();
+    ood_ = lighting_data_.scene_key != lightmap_scene_key() || wants_directions();
   }
   return ood_;
 }
@@ -159,6 +166,7 @@ void Editor::attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it) {
   if (lm_stale_live_) return;  // lights or world changed since the bake: live GI until the next one
   it.lightmap = &ld.pages[(size_t)e->second.page];
   it.lightmap_uv = &e->second.tri_uv;
+  if (scene_->lighting.directional_mode != 0 && (size_t)e->second.page < ld.dir_pages.size()) it.lightmap_dir = &ld.dir_pages[(size_t)e->second.page];  // (round 426)
 }
 
 void Editor::load_lighting_data() {
@@ -368,6 +376,7 @@ void Editor::bake_start() {
   s.bounces = ls.bounces;
   s.denoise = ls.denoise;
   s.indirect_intensity = ls.indirect_intensity;
+  s.directional = ls.directional_mode != 0;  // (round 426)
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
@@ -962,7 +971,7 @@ void Editor::preview_step() {
   }
   const uint64_t key = preview_scene_key_;
   const double now = now_seconds();
-  if (!lighting_data_.empty() && lighting_data_.scene_key == key) {
+  if (!lighting_data_.empty() && lighting_data_.scene_key == key && !wants_directions()) {
     /* The real bake is current (Generate Lighting just ran, or nothing changed since): it's shown. */
     if (preview_running_) preview_baker_.cancel();
     preview_running_ = false;
@@ -1005,6 +1014,7 @@ void Editor::preview_step() {
     s.bounces = ls.bounces;
     s.denoise = true;
     s.indirect_intensity = ls.indirect_intensity;
+    s.directional = ls.directional_mode != 0;  // (round 426)
     s.gpu_device = choose_bake_gpu();
     s.use_oidn = false;  // (round 423: the preview finishes on the main thread - OIDN's filter there would be a stall)
     preview_baker_.begin(objects, lights, env_, s);

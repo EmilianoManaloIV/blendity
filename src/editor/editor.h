@@ -1111,6 +1111,7 @@ class Editor {
   }
   bool raycast_scene_for_test(const Ray &ray, Vec3 &hit) { return raycast_scene(ray, hit); }
   void collect_bake_scene_for_test(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) { collect_bake_scene(objects, lights); }
+  void attach_lightmap_for_test(const GameObject &g, const Mesh &m, DrawItem &it) { attach_lightmap(g, m, it); }
   bool vr_tube_for_test() const { return vr_tube_; }
   int vr_colour_for_test() const { return vr_colour_; }
   float vr_brush_for_test() const { return vr_brush_; }
@@ -1430,6 +1431,7 @@ class Editor {
   std::shared_ptr<UnityLightingJob> unity_lighting_job_;
   std::string unity_lighting_scene_;  // (the .unity this scene was opened or imported from: Blendity's copy, absolute)
   uint64_t unity_lighting_under_ = 0;  // (its objects' root when imported; 0 when opened - its objects at the top)
+  bool wants_directions() const;  // round 426
   bool lighting_from_unity_ = false;   // (the baked lighting shown is Unity's: Generate Lighting replaces it)
   void read_unity_lighting_cmd(bool wait);
   void poll_unity_lighting();

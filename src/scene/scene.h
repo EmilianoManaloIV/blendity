@@ -1912,6 +1912,7 @@ struct LightingSettings {
   int padding = 2;                // Lightmap Padding (texels)
   int direct_samples = 32;
   int indirect_samples = 512;  // (round 423: Unity's default Indirect Samples, was 256)
+  int directional_mode = 1;    // round 426: Unity's Directional Mode - 0 Non-Directional, 1 Directional (a direction page per lightmap)
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;

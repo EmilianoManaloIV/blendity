@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 426): directional lightmaps
+
+**Asked:** Pass 17's round 426 - Unity's Directional mode: normal maps under baked light.
+
+**Changed (task 0402, ADR 0114)**
+- **The bake keeps where each texel's light came from** - a direction page beside each lightmap, saved beside it.
+- **Normal-mapped surfaces catch baked light by their bumps**, in both renderers, as Unity's DecodeDirectionalLightmap
+  does; surfaces without a normal map draw exactly as before.
+- **Directional Mode** in the Lighting settings (Directional by default, as Unity's), read from a Unity scene.
+
+**Measured:** SideRail (MAE / SSIM): spawn 4.79 / 0.873, floor 5.13 / 0.788 (was 0.828), ahead 3.96 / 0.908. The floor's normal map shows more relief under the
+baked footlight than Unity's render of it - open: how directional each texel's light is, against Unity's own maps.
+
+**Checked:** tests_round426 and the card's test; both suites - with Blender's libraries 16326 checks in 1604
+tests, 0 failed; dependency-free 15578 (Windows) and 15584 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-06 (round 425): SideRail's lamps light the bake
 
 **Asked:** Pass 17's round 425 - why most of SideRail's Baked lights added nothing to Blendity's bake.

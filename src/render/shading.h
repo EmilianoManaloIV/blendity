@@ -55,6 +55,9 @@ struct SurfacePoint {
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;
+  bool has_lightmap_dir = false;  // round 426: the lightmap's direction page here (LightingData::dir_pages)
+  bool back_side = false;         // round 426: the normals were turned to the eye (the back of a double-sided surface)
+  Vec3 lightmap_dir;
   Vec3 lightmap_add;  // realtime GI's bounce of lights the bake doesn't hold (task 0013), added to it
   /* Probe volumes (task 0014): irradiance / pi from the probes around this point. */
   bool has_probe = false;
@@ -129,6 +132,21 @@ Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit);
 /* The rim light at the silhouette (added once, not per light), on the side the material asks for relative to the
  * key light's direction `key_L` (toward the light), where its mask allows. */
 Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L);
+/* Round 426 (Unity's Directional mode, DecodeDirectionalLightmap): a lightmap texel's light rebalanced for the shaded
+ * (normal-mapped) normal. `a` is where its light came from - the luminance-weighted mean incoming direction. Unity's
+ * half-Lambert, 0.5 dot(n, a) + 0.5, at the shaded normal over the same at the surface's own normal - Unity's
+ * directionality divisor taken where the bake took the texel - so a surface without a normal map keeps its light as
+ * baked, and a bump facing the light gets more of it. `back`: the renderer turned both normals to the eye (the back
+ * of a double-sided surface) - decoded in the front's frame, as the texel was baked (review 426: the back's divisor had
+ * been small, up to 4x light on a bump). 1 when the light came from behind the surface. */
+inline float lightmap_direction_factor(Vec3 shaded_n, Vec3 surface_n, Vec3 a, bool back = false) {
+  if (back) shaded_n = -shaded_n, surface_n = -surface_n;
+  const float den = 0.5f * dot(surface_n, a) + 0.5f;
+  if (!(den > 0.05f)) return 1.0f;
+  const float f = (0.5f * dot(shaded_n, a) + 0.5f) / den;
+  return f < 1e30f ? std::max(0.0f, std::min(4.0f, f)) : 1.0f;  // (as the card clamps: 0 to 4; NaN: 1)
+}
+
 /* The key light (task 0148): the brightest directional light's index, -1 without one; `L` the direction toward it
  * (up when there is none). With Toon Key Light Only, only it bands the tones. */
 struct RenderLight;  // raster.h

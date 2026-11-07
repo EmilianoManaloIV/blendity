@@ -225,6 +225,7 @@ struct DrawItem {
   /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
   const Lightmap *lightmap = nullptr;
   const std::vector<Vec2> *lightmap_uv = nullptr;
+  const Lightmap *lightmap_dir = nullptr;  // round 426: its direction page (same size and UVs), when the bake is directional
   bool use_probes = false;  // takes its indirect light from the probe volume (no lightmap)
   /* Realtime lightmaps (task 0016): voxel GI's bounce and sky share per texel, with their UVs (3 per
    * triangle). Set: the per-pixel GI pass reads these instead of tracing. realtime_lm: the editor wants

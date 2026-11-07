@@ -268,6 +268,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   values_.assign(texels_.size(), Vec3(0.0f));
   gather_.assign(texels_.size(), Vec3(0.0f));
   emitted_.assign(texels_.size(), Vec3(0.0f));
+  dirs_.assign(s_.directional ? texels_.size() : 0, DirSum{});
   total_ = texels_.size();
   for (const BakeLight &l : lights_)
     if (l.mode == 1 || l.mode == 2) out_.light_modes[l.id] = l.mode;
@@ -371,7 +372,15 @@ float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o,
   return baked_shadow_ray(pt, {o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f));
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out) {
+void Lightmapper::DirSum::add(Vec3 light, Vec3 dir) {
+  const float w = 0.2126f * light.x + 0.7152f * light.y + 0.0722f * light.z;
+  if (!(w > 0.0f) || !finite_bits(w) || !finite3(dir)) return;
+  sum += dir * w;
+  weight += w;
+}
+
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out) {
+  DirSum dirs;  // (round 426: where this texel's light comes from)
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
   /* Off the surface a little, scaled to where it is (far from the origin floats are coarse). */
@@ -386,6 +395,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   const int N = indirect ? s_.indirect_samples : 0;  // (no indirect: the GPU gathered it)
   const bool emissive = s_.sample_emissive && pt_->has_mesh_lights();
   const bool gather_sees_emitters = s_.bounces > 0;  // (bounces 0: the gather sees the sky only)
+  const float gather_scale = N ? s_.indirect_intensity / (float)N : 0.0f;
   for (int i = 0; i < N; i++) {
     const float r1 = rnd01(rng), r2 = rnd01(rng);
     const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
@@ -398,7 +408,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       L = env_.radiance(d) * baked_shadow_ray(*pt_, {o, d}, 1e30f);
     }
     else L = pt_->incoming_radiance({o, d}, prng, rays, emissive ? cosn / kPi : 0.0f);
-    if (finite3(L)) sum += L;
+    if (!finite3(L)) continue;
+    sum += L;
+    dirs.add(L * gather_scale, d);
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
   /* Twice the gather's rays (shadow rays are cheap), at most 256; on the GPU path these run on the CPU beside the
@@ -409,6 +421,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     const Vec3 e = emissive_at(o, n, rng, std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64)), gather_sees_emitters, rays) * s_.indirect_intensity;
     value += e;
     if (emitted_out) *emitted_out = finite3(e) ? e : Vec3(0.0f);
+    dirs.add(e, n * (2.0f / 3.0f));  // (the emitters' light: emissive_at doesn't say from where - an even hemisphere's cosine-weighted mean, as the CPU gather's under an even sky)
   }
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
@@ -419,7 +432,10 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (l.type == RenderLight::Directional) {
       const Vec3 L = normalize(-l.direction);
       const float ndl = dot(n, L);
-      if (ndl > 0.0f) value += col * (ndl * baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays));
+      if (!(ndl > 0.0f)) continue;
+      const Vec3 c = col * (ndl * baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays));
+      value += c;
+      dirs.add(c, L);
       continue;
     }
     if (l.type == RenderLight::Area) {
@@ -432,8 +448,10 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
        * a wide light weighs more), the noise kept down by the exact unshadowed term. */
       const float unshadowed = area_light_irradiance(l, o, n);
       if (!(unshadowed > 0.0f)) continue;
+      const Vec3 toward = normalize(l.position - o);  // (round 426: an area light's direction - its centre)
       if (!l.shadows) {  // (round 424: Unity's No Shadows - nothing in the way counts)
         value += col * unshadowed;
+        dirs.add(col * unshadowed, toward);
         continue;
       }
       const int ns = std::max(1, s_.direct_samples);
@@ -454,14 +472,21 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
         wsum += w;
         vsum += w * baked_shadow_ray(*pt_, {o, L}, dist * (1.0f - 1e-4f));
       }
-      if (wsum > 0.0f) value += col * (unshadowed * (vsum / wsum));
+      if (wsum > 0.0f) {
+        value += col * (unshadowed * (vsum / wsum));
+        dirs.add(col * (unshadowed * (vsum / wsum)), toward);
+      }
       else {
         /* A grazing texel whose few samples all fell behind its horizon: one ray to the light's point
          * nearest its normal. */
         float facing;
         const Vec3 L = area_light_specular_dir(l, o, n, facing);
         rays++;
-        if (dot(n, L) > 0.0f && facing > 0.0f) value += col * (unshadowed * baked_shadow_ray(*pt_, {o, L}, 1e30f));
+        if (dot(n, L) > 0.0f && facing > 0.0f) {
+          const Vec3 c = col * (unshadowed * baked_shadow_ray(*pt_, {o, L}, 1e30f));
+          value += c;
+          dirs.add(c, L);
+        }
       }
       continue;
     }
@@ -474,8 +499,11 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (ndl <= 0.0f) continue;
     const float fall = light_falloff(l, t.position, L);
     if (fall <= 0.0f) continue;
-    value += col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays));
+    const Vec3 c = col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays));
+    value += c;
+    dirs.add(c, L);
   }
+  if (dir_out) *dir_out = dirs;
   rays_ += rays;
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);
 }
@@ -518,8 +546,10 @@ bool Lightmapper::step(double budget_ms) {
           Vec3 v = ind[(size_t)i] * s_.indirect_intensity;
           if (!finite3(v)) v = Vec3(0.0f);
           /* (the texel's emitters: denoised with the card's gather, not clamped - round 423) */
-          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k]);
+          DirSum *dk = dirs_.empty() ? nullptr : &dirs_[k];
+          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k], dk);
           gather_[k] = finite3(ind[(size_t)i]) ? ind[(size_t)i] * s_.indirect_intensity : Vec3(0.0f);
+          if (dk) dk->add(gather_[k], texels_[k].normal * (2.0f / 3.0f));  // (the card's gather says no direction: an even hemisphere's mean, as the CPU's gather gives under an even sky - review 426)
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
         }
       });
@@ -544,7 +574,7 @@ bool Lightmapper::step(double budget_ms) {
     JobSystem::global().parallel_for((int64_t)batch, 8, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         const size_t k = base + (size_t)i;
-        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k], &emitted_[k]);
+        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k], &emitted_[k], dirs_.empty() ? nullptr : &dirs_[k]);
       }
     });
     done_ += batch;
@@ -563,6 +593,9 @@ void Lightmapper::cancel() {
   texels_.shrink_to_fit();
   values_.clear();
   values_.shrink_to_fit();
+  gather_.clear(), gather_.shrink_to_fit();  // (review 426: the per-texel parts too)
+  emitted_.clear(), emitted_.shrink_to_fit();
+  dirs_.clear(), dirs_.shrink_to_fit();
   covered_.clear();
   owner_.clear();
   out_ = LightingData{};
@@ -635,6 +668,7 @@ void Lightmapper::finish() {
     if (s_.denoise) denoise_page(lm, gathered[p], emitted[p], normals[p], positions[p], cov, own);
     for (int pass = 0; pass < s_.padding + 2; pass++) dilate_once(lm.texels, cov, W, H);
   }
+  finish_directions();
   active_ = false;
   done_ = total_.load();
   finish_ms_ = ft.ms();
@@ -816,6 +850,34 @@ void Lightmapper::dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have,
   have.swap(grow);
 }
 
+/* Round 426: each page's direction page - a texel's mean direction (its luminance-weighted sum over the weights), grown
+ * into the padding as the colour is (no filter: a thousand rays' mean direction is steady). Its own covered flags,
+ * from the texels (the colour's were grown by its dilation). */
+void Lightmapper::finish_directions() {
+  out_.dir_pages.clear();
+  if (dirs_.empty()) return;
+  out_.dir_pages.resize(out_.pages.size());
+  for (size_t p = 0; p < out_.pages.size(); p++) {
+    Lightmap &d = out_.dir_pages[p];
+    d.width = out_.pages[p].width, d.height = out_.pages[p].height;
+    d.texels.assign((size_t)d.width * d.height, Vec3(0.0f));
+  }
+  std::vector<std::vector<uint8_t>> have(out_.pages.size());
+  for (size_t p = 0; p < out_.pages.size(); p++) have[p].assign(out_.dir_pages[p].texels.size(), 0);
+  for (size_t k = 0; k < texels_.size() && k < dirs_.size(); k++) {
+    const LightmapTexel &tx = texels_[k];
+    const size_t idx = (size_t)tx.y * out_.pages[(size_t)tx.page].width + tx.x;
+    const DirSum &s = dirs_[k];
+    const Vec3 a = s.weight > 0.0f ? s.sum / s.weight : Vec3(0.0f);
+    out_.dir_pages[(size_t)tx.page].texels[idx] = finite3(a) ? a : Vec3(0.0f);
+    have[(size_t)tx.page][idx] = 1;
+  }
+  for (size_t p = 0; p < out_.dir_pages.size(); p++) {
+    Lightmap &d = out_.dir_pages[p];
+    for (int pass = 0; pass < s_.padding + 2; pass++) dilate_once(d.texels, have[p], d.width, d.height);
+  }
+}
+
 LightingData Lightmapper::take_result() {
   LightingData r = std::move(out_);
   out_ = LightingData{};
@@ -824,6 +886,7 @@ LightingData Lightmapper::take_result() {
   values_.clear();
   gather_.clear(), gather_.shrink_to_fit();
   emitted_.clear(), emitted_.shrink_to_fit();
+  dirs_.clear(), dirs_.shrink_to_fit();
   covered_.clear();
   owner_.clear();
   return r;
@@ -839,6 +902,19 @@ bool LightingData::save(const std::string &dir, std::string &error) const {
     for (size_t i = 0; i < lm.texels.size(); i++) rgb[i * 3] = lm.texels[i].x, rgb[i * 3 + 1] = lm.texels[i].y, rgb[i * 3 + 2] = lm.texels[i].z;
     const std::string path = fs::join(dir, strprintf("Lightmap-%zu.hdr", p));
     if (!write_hdr(path, rgb.data(), lm.width, lm.height)) {
+      error = "could not write " + path;
+      return false;
+    }
+  }
+  /* Round 426: the direction pages, encoded 0.5 + 0.5 x the vector (Unity's own encoding; Radiance files hold no
+   * negatives). */
+  for (size_t p = 0; p < dir_pages.size(); p++) {
+    const Lightmap &d = dir_pages[p];
+    std::vector<float> rgb((size_t)d.width * d.height * 3);
+    for (size_t i = 0; i < d.texels.size(); i++)
+      rgb[i * 3] = 0.5f + 0.5f * d.texels[i].x, rgb[i * 3 + 1] = 0.5f + 0.5f * d.texels[i].y, rgb[i * 3 + 2] = 0.5f + 0.5f * d.texels[i].z;
+    const std::string path = fs::join(dir, strprintf("LightmapDir-%zu.hdr", p));
+    if (!write_hdr(path, rgb.data(), d.width, d.height)) {
       error = "could not write " + path;
       return false;
     }
@@ -865,6 +941,7 @@ bool LightingData::save(const std::string &dir, std::string &error) const {
   }
   put64(light_modes.size());
   for (const auto &[id, mode] : light_modes) put64(id), put64((uint64_t)mode);
+  put64(dir_pages.size());  // (round 426: older readers stop before it; a bake without directions says 0, so a folder's old LightmapDir files stay unread)
   return (bool)f;
 }
 
@@ -921,6 +998,7 @@ bool LightingData::load(const std::string &dir, std::string &error) {
     light_modes[id] = (int)get64();
   }
   if (!ok) return error = "truncated " + path, *this = {}, false;
+  const uint64_t ndir = left() >= 8 ? get64() : 0;  // (round 426; a file from before it has none)
   for (size_t p = 0; p < pages.size(); p++) {
     Bitmap bmp;
     std::string err;
@@ -934,7 +1012,28 @@ bool LightingData::load(const std::string &dir, std::string &error) {
     for (size_t i = 0; i < pages[p].texels.size(); i++)
       pages[p].texels[i] = Vec3(bmp.rgbaf[i * 4], bmp.rgbaf[i * 4 + 1], bmp.rgbaf[i * 4 + 2]);
   }
+  if (ok && ndir == pages.size() && ndir > 0) load_dir_pages(dir);
   return true;
+}
+
+/* Round 426: the direction pages beside the colour; any missing or mismatched file leaves the bake non-directional. */
+void LightingData::load_dir_pages(const std::string &dir) {
+  dir_pages.assign(pages.size(), Lightmap{});
+  for (size_t p = 0; p < pages.size(); p++) {
+    Bitmap bmp;
+    std::string err;
+    const std::string hp = fs::join(dir, strprintf("LightmapDir-%zu.hdr", p));
+    if (!load_image(hp, bmp, err) || bmp.width != pages[p].width || bmp.height != pages[p].height || !bmp.is_float) {
+      Log::warn("The baked lighting's direction page %s couldn't be read: the lighting shows without directions", hp.c_str());
+      dir_pages.clear();
+      return;
+    }
+    Lightmap &d = dir_pages[p];
+    d.width = bmp.width, d.height = bmp.height;
+    d.texels.resize((size_t)bmp.width * bmp.height);
+    for (size_t i = 0; i < d.texels.size(); i++)
+      d.texels[i] = Vec3(bmp.rgbaf[i * 4] * 2.0f - 1.0f, bmp.rgbaf[i * 4 + 1] * 2.0f - 1.0f, bmp.rgbaf[i * 4 + 2] * 2.0f - 1.0f);
+  }
 }
 
 }  // namespace bl

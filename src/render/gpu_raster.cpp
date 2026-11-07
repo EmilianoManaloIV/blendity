@@ -2060,6 +2060,28 @@ layout(location = 8) in vec3 gc;
 layout(location = 0) out vec4 o_amb;
 /* Lightmap::sample: bilinear, clamped, texel centres at (i + 0.5) / size (v down: the arena's rows run up). */
 vec3 lightmap_at(int t, vec2 uv) { return tex_sample(t, vec2(uv.x, 1.0 - uv.y), 0.0, 1, 1).rgb; }
+/* The material at this pixel, as the g-buffer pass evaluates it (its footprints: the same holes, the same mapped normal). */
+Surf surface_here(Inst I, vec3 n) {
+  vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
+  if (I.tex2.y != 0) {
+    vec3 ex = dFdxFine(uvw), ey = dFdyFine(uvw);
+    uv = uvw.xy / uvw.z;
+    dux = (uvw.xy + ex.xy) / (uvw.z + ex.z) - uv;
+    duy = (uvw.xy + ey.xy) / (uvw.z + ey.z) - uv;
+  }
+  float fp = max(length(dFdxFine(lp)), length(dFdyFine(lp))), fpw = max(length(dFdxFine(wpos)), length(dFdyFine(wpos)));
+  return evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0, fp, wpos, fpw);
+}
+/* Round 426: lightmap_direction_factor on the CPU (shading.h). */
+float lm_dir_factor(vec3 sn, vec3 n, vec3 a, bool back) {
+  if (back) {
+    sn = -sn;
+    n = -n;
+  }
+  float den = 0.5 * dot(n, a) + 0.5;
+  if (!(den > 0.05)) return 1.0;
+  return clamp((0.5 * dot(sn, a) + 0.5) / den, 0.0, 4.0);
+}
 /* The point's barycentrics in its triangle (the CPU's perspective-correct ones: lp is interpolated so). */
 vec3 bary(vec3 p, vec3 a, vec3 b, vec3 c) {
   vec3 v0 = b - a, v1 = c - a, v2 = p - a;
@@ -2077,19 +2099,12 @@ void main() {
   g = dot(g, g) > 0.0 ? normalize(g) : n;
   if (dot(g, n) < 0.0) g = -g;
   vec3 V = normalize(eye.xyz - wpos);
-  if (dot(g, V) < 0.0) n = -n;  // (the back side: turned to the eye, as the CPU turns it)
-  if (I.metal_spec.z >= 0.0) {  // (a cutout's hole: as the g-buffer pass punched it)
-    vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
-    if (I.tex2.y != 0) {
-      vec3 ex = dFdxFine(uvw), ey = dFdyFine(uvw);
-      uv = uvw.xy / uvw.z;
-      dux = (uvw.xy + ex.xy) / (uvw.z + ex.z) - uv;
-      duy = (uvw.xy + ey.xy) / (uvw.z + ey.z) - uv;
-    }
-    float fp = max(length(dFdxFine(lp)), length(dFdyFine(lp))), fpw = max(length(dFdxFine(wpos)), length(dFdyFine(wpos)));
-    Surf s = evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0, fp, wpos, fpw);  // (the g-buffer pass's footprints: the same holes)
-    if (s.alpha < I.metal_spec.z) discard;
-  }
+  bool back = dot(g, V) < 0.0;
+  if (back) n = -n;  // (the back side: turned to the eye, as the CPU turns it)
+  bool directional = B.b.y >= 0.0 && B.a.x >= 0;  // (round 426: a direction page beside the lightmap)
+  Surf s;
+  if (I.metal_spec.z >= 0.0 || directional) s = surface_here(I, n);
+  if (I.metal_spec.z >= 0.0 && s.alpha < I.metal_spec.z) discard;  // (a cutout's hole: as the g-buffer pass punched it)
   vec4 o = vec4(0.0);
   int flags = int(B.b.x + 0.5);
   bool has_lm = B.a.x >= 0 && B.a.w >= 0, has_rt = B.a.y >= 0 && B.a.z >= 0 && B.a.w >= 0;
@@ -2105,7 +2120,11 @@ void main() {
     b3 = bary(lp, c[0].xyz, c[2].xyz, c[4].xyz);
   }
   vec3 lm = vec3(0.0);
-  if (has_lm) lm = lightmap_at(B.a.x, vec2(c[0].w, c[1].x) * b3.x + vec2(c[2].w, c[3].x) * b3.y + vec2(c[4].w, c[5].x) * b3.z);
+  if (has_lm) {
+    vec2 luv = vec2(c[0].w, c[1].x) * b3.x + vec2(c[2].w, c[3].x) * b3.y + vec2(c[4].w, c[5].x) * b3.z;
+    lm = lightmap_at(B.a.x, luv);
+    if (directional) lm *= lm_dir_factor(s.n, n, lightmap_at(int(B.b.y + 0.5), luv), back);
+  }
   if (has_rt) {
     vec2 ruv = c[1].yz * b3.x + c[3].yz * b3.y + c[5].yz * b3.z;
     float sky = clamp(lightmap_at(B.a.z, ruv).x, 0.0, 1.0);
@@ -4100,7 +4119,7 @@ class VulkanRaster final : public Raster {
       const RasterInstance &s = instances_[i];
       int32_t *d = &t[i * 8];
       d[0] = s.lightmap, d[1] = s.rt_bounce, d[2] = s.rt_sky, d[3] = s.corner_base;
-      const float f[4] = {(float)s.baked_flags, 0.0f, 0.0f, 0.0f};
+      const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, 0.0f, 0.0f};  // (b.y: round 426's direction page, -1 none)
       std::memcpy(d + 4, f, 16);
     }
     return write_array(baked_buf_, t.data(), t.size() * 4, err);

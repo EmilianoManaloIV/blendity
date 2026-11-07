@@ -326,6 +326,10 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Max Lightmap Size", max_size, 16, 4096);
   r.field("Lightmap Padding", padding, 0, 32);
   r.help("Texels kept between charts so they don't bleed into each other.");
+  static const char *dir_modes[] = {"Non-Directional", "Directional"};
+  r.enumeration("Directional Mode", directional_mode, dir_modes, 2);
+  r.help("Unity's Directional Mode. Directional: the bake keeps where each texel's light came from, so a normal map's bumps\n"
+         "catch baked light as they catch realtime light (a second page per lightmap). Non-Directional: the light alone.");
   r.field("Direct Samples", direct_samples, 1, 4096);
   r.help("Shadow rays per texel for each Baked area light.");
   r.field("Indirect Samples", indirect_samples, 1, 65536);

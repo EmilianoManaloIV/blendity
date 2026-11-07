@@ -96,6 +96,7 @@ struct RasterInstance {
    * corners in RasterFrame::corners (-1 none; gl_PrimitiveID counts on from it), flags (1 probe-lit, 2 the realtime
    * bounce onto the lightmap); `baked`: the baked pass draws it. */
   int32_t lightmap = -1, rt_bounce = -1, rt_sky = -1, corner_base = -1;
+  int32_t lightmap_dir = -1;  // round 426: the lightmap's direction page (add_texture's id, -1 none)
   uint32_t baked_flags = 0;
   bool baked = false;
   /* Round 416 (ADR 0110): lilToon's own settings (96 floats, 24 vec4 as the shader's LilSet lays them out - see

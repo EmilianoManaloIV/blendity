@@ -2596,6 +2596,61 @@ static void tests_round216() {
     CHECK(changed > 2000);
     ed.viewport_device_for_test(1);
   });
+  test("gpu views (round 426): directional lightmaps on the card as on the CPU - a normal-mapped floor's bumps catch the baked sun alike; with Directional Mode off its baked light comes out flat (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, true, 2, 1.0f, true);
+    ed.command("overlay grid off");
+    /* Ridges along x: a 64 x 64 normal map (tangent space, 0.5 + 0.5 n) leaning +-0.6 in x. */
+    const std::string dir = resolve_asset_path("Assets/Imported/R426G");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    std::string tga(18, '\0');
+    tga[2] = 2, tga[12] = 64, tga[14] = 64, tga[16] = 24, tga[17] = 0x20;
+    for (int y = 0; y < 64; y++)
+      for (int x = 0; x < 64; x++) {
+        const float lean = 0.6f * std::sin(x * 0.5f);
+        const Vec3 nn = normalize(Vec3(lean, 0.0f, 1.0f));
+        const auto b = [](float v) { return (char)(uint8_t)std::lround((0.5f + 0.5f * v) * 255.0f); };
+        tga += b(nn.z), tga += b(nn.y), tga += b(nn.x);  // (TGA is B, G, R)
+      }
+    CHECK(fs::write_file(fs::join(dir, "ridges.tga"), tga));
+    ed.scene().environment.color = Vec3(0.0f);  // (a black sky: the floor's light comes from the Baked sun, one way)
+    ed.commit_change("world");
+    r35_bake(ed);
+    const std::vector<uint32_t> smooth = view(ed, w.floor_go, 1);
+    MeshRenderer *mr = w.floor_go->get<MeshRenderer>();
+    std::printf("    the floor: %zu material(s), the first %s\n", mr ? mr->materials.size() : 0, mr && !mr->materials.empty() && mr->materials[0] ? mr->materials[0]->name.c_str() : "-");
+    if (mr && !mr->materials.empty() && mr->materials[0]) mr->materials[0]->normal_map.path = "Assets/Imported/R426G/ridges.tga", mr->materials[0]->normal_map.non_color = true, mr->materials[0]->touch();
+    ed.commit_change("material");
+    /* The views load a texture on a worker: frames until the map shows (at most 5 s). */
+    std::vector<uint32_t> bumped;
+    size_t bump_changed = 0;
+    for (int tries = 0; tries < 100 && bump_changed < 1000; tries++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      bumped = view(ed, w.floor_go, 1);
+      bump_changed = 0;
+      for (size_t i = 0; i < smooth.size() && i < bumped.size(); i++) bump_changed += (smooth[i] & 0xFFFFFF) != (bumped[i] & 0xFFFFFF);
+    }
+    std::printf("    the normal map on: %zu pixels of the CPU's picture change\n", bump_changed);
+    CHECK(!ed.lighting_data_for_test().empty() && ed.lighting_data_for_test().dir_pages.size() == ed.lighting_data_for_test().pages.size());
+    check(ed, w.floor_go, "directional");
+    const std::vector<uint32_t> with_dir = view(ed, w.floor_go, 1);
+    ed.scene().lighting.directional_mode = 0;
+    ed.commit_change("lighting");
+    r34_steps(ed, 3);
+    const std::vector<uint32_t> flat = view(ed, w.floor_go, 1);
+    size_t changed = 0;
+    for (size_t i = 0; i < with_dir.size() && i < flat.size(); i++) changed += (with_dir[i] & 0xFFFFFF) != (flat[i] & 0xFFFFFF);
+    std::printf("    Directional Mode off: %zu pixels of the CPU's picture change\n", changed);
+    CHECK(bump_changed > 1000 && changed > 1000);
+    ed.viewport_device_for_test(1);
+    std::filesystem::remove_all(dir, ec);
+  });
   test("gpu views: realtime lightmaps (Receive GI: Lightmaps) on the card as on the CPU; realtime GI's per-pixel light for an object without them stays the CPU's, saying why (skipped without a GPU)", [&] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");

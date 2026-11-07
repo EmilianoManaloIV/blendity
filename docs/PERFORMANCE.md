@@ -77,6 +77,12 @@ At SideRail's own settings (40 texels per unit, 1024 samples): spawn 4.77 / 0.87
 0.533, floor 5.06 / 0.828 / 0.975, ahead 3.95 / 0.910 / 0.930 (round 423: 5.62 / 0.887 / 0.544, 2.06 / 0.853 / 0.630,
 7.82 / 0.679 / 0.583, 4.17 / 0.897 / 0.397). The bake: 692 s, 690 s with the any-hit test first.
 
+### Directional lightmaps (round 426, ADR 0114)
+SideRail at its own settings, now Directional as the scene asks (MAE / SSIM / grid correlation): spawn 4.79 / 0.873 / 0.902, spawn_back
+1.85 / 0.814 / 0.528, floor 5.13 / 0.788 / 0.975, ahead 3.96 / 0.908 / 0.929 (round 425: 4.77 / 0.875 / 0.903, 1.85 / 0.815 / 0.533, 5.06 / 0.828 / 0.975, 3.95 / 0.910 /
+0.930). The floor's normal map shows more relief under baked light than Unity's render of it: open (compare the
+direction's length with Unity's own direction maps).
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

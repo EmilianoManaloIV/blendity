@@ -44,6 +44,7 @@ struct BakeSettings {
   int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
   uint32_t seed = 0;              // round 421: another seed draws other samples (a reference independent of the bake it scores)
   bool use_oidn = true;           // round 423: OIDN's lightmap filter when linked (off: the A-Trous filter - Preview Lighting, which finishes on the main thread)
+  bool directional = true;        // round 426: Unity's Directional mode - a direction page beside each colour page (LightingData::dir_pages)
 };
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
@@ -85,6 +86,11 @@ struct LightingData {
     std::vector<Vec2> tri_uv;    // 3 per render-mesh triangle, in the page (0..1)
   };
   std::vector<Lightmap> pages;
+  /* Round 426 (Unity's Directional mode): beside each page, where its texels' light came from - the luminance-weighted
+   * mean of the incoming directions (a vector: its length says how much one way, 0 from all around). Empty for a
+   * non-directional bake. The renderers rebalance the light for a normal-mapped surface with it
+   * (lightmap_direction_factor, Unity's DecodeDirectionalLightmap). */
+  std::vector<Lightmap> dir_pages;
   std::map<uint64_t, Entry> entries;  // by GameObject id
   /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect).
    * Realtime GI (task 0013) adds what isn't here. */
@@ -94,6 +100,7 @@ struct LightingData {
   /* <dir>/Lightmap-N.hdr (Radiance RGBE, readable without extra libraries) and LightingData.bin. */
   bool save(const std::string &dir, std::string &error) const;
   bool load(const std::string &dir, std::string &error);
+  void load_dir_pages(const std::string &dir);  // (round 426: by load, when the file says the bake had them)
 };
 
 /* A content hash of a mesh (positions, faces, smoothing, sharp edges, per-face materials, UVs: stable
@@ -175,7 +182,16 @@ class Lightmapper {
   LightingData out_;
   std::vector<std::vector<uint8_t>> covered_;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner_;    // per page: the object owning a texel (-1 none)
-  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr);
+  /* Round 426: a texel's incoming directions, summed weighted by the luminance each brought, and the weights' sum. */
+  struct DirSum {
+    Vec3 sum;
+    float weight = 0.0f;
+    void add(Vec3 light, Vec3 dir);
+  };
+  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
+                  DirSum *dir_out = nullptr);
+  std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
+  void finish_directions();
   void denoise_page(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
                     const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own);
   static void dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have, int W, int H);

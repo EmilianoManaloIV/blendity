@@ -1892,8 +1892,10 @@ void Renderer3D::shade_deferred() {
           if (!finite_bits(sp.footprint) || !finite_bits(sp.world_footprint)) sp.footprint = sp.world_footprint = 0.0f, sp.live_textures = false;
         }
         if (T.has_lm) {
-          sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
+          const Vec2 lm_uv = T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z;
+          sp.lightmap = it.lightmap->sample(lm_uv);
           sp.has_lightmap = true;
+          if (it.lightmap_dir) sp.lightmap_dir = it.lightmap_dir->sample(lm_uv), sp.has_lightmap_dir = true;  // (round 426)
         }
         if (T.mat->shading_model == 1) {  // (task 0164: the normal at the next pixel right and below, for the band edges; painted toon materials are not uniform, so the material decides)
           auto wn_at = [&](Vec3 b) { return normalize(T.wn[0] * b.x + T.wn[1] * b.y + T.wn[2] * b.z); };
@@ -1910,6 +1912,7 @@ void Renderer3D::shade_deferred() {
         if (dot(sp.geo_normal, V) < 0) {  // back side of a double-sided surface
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
+          sp.back_side = true;
         }
         if (T.has_rt) {
           /* Realtime lightmap: the texels' gather, read like a baked map (task 0016); also with no GI pass
@@ -2167,6 +2170,13 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
   return col + s.emission;
 }
 
+/* The baked light at a pixel: the lightmap, rebalanced for the shaded normal by its direction page (round 426), plus
+ * realtime GI's bounce of lights the bake doesn't hold. */
+static Vec3 lightmap_light(const SurfaceSample &s, const SurfacePoint &sp) {
+  const float f = sp.has_lightmap_dir ? lightmap_direction_factor(s.normal, sp.normal, sp.lightmap_dir, sp.back_side) : 1.0f;
+  return sp.lightmap * f + sp.lightmap_add;
+}
+
 Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const {
   if (s.lil) return lo;  // (round 402: light_liltoon gave the whole colour)
   Vec3 n = s.normal;
@@ -2174,7 +2184,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
   if (s.toon) {
     /* Toon: the ambient as one flat tone (unless baked light holds more), no reflections, the rim on top. */
     Vec3 amb;
-    if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+    if (sp.has_lightmap) amb = lightmap_light(s, sp);
     else if (sp.has_probe) amb = sp.probe;
     else if (s.toon->toon_flat_ambient) {
       amb = (env.irradiance(Vec3(0, 1, 0)) + env.irradiance(Vec3(0, -1, 0))) * 0.5f;
@@ -2192,7 +2202,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
    * hold), the probe volume, voxel GI per pixel (the sky that gets through plus the bounce), or the sky
    * alone. */
   Vec3 amb;
-  if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+  if (sp.has_lightmap) amb = lightmap_light(s, sp);
   else if (sp.has_probe) amb = sp.probe;  // probe-lit objects match the baked look (and live probes follow changes)
   else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
   else amb = env.irradiance(n);

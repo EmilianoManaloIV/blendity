@@ -5761,11 +5761,12 @@ static void tests_round421() {
     bool settings_info = false, unbaked_warn = false, optix = false;
     for (const LogEntry &e : log) {
       settings_info = settings_info || (e.level == LogLevel::Info && e.text.find("the lightmap settings came from the LightingSettings asset: 25 texels per unit") != std::string::npos);
-      unbaked_warn = unbaked_warn || (e.text.find("not baked yet from the scene's lightmap settings: Directional mode") != std::string::npos &&
-                                      e.text.find("Subtractive") != std::string::npos);
+      unbaked_warn = unbaked_warn || (e.text.find("not baked yet from the scene's lightmap settings:") != std::string::npos && e.text.find("Subtractive") != std::string::npos &&
+                                      e.text.find("Directional mode") == std::string::npos);  // (round 426: Directional mode is baked now)
       optix = optix || e.text.find("OptiX") != std::string::npos;  // (the filter is off in Unity: no denoiser to name)
     }
     CHECK(settings_info && unbaked_warn && !optix);
+    CHECK(l.directional_mode == 1);  // (round 426: the asset's m_LightmapsBakeMode 1, Directional)
     /* The asset's GUID not in the project: the scene's own block, and a note that says so (a fresh editor: the import
      * left the first one with unsaved changes, and Open would ask first). */
     Editor ed2;
@@ -6193,6 +6194,100 @@ static void tests_round425() {
   });
 }
 
+/* ---------------------------------------------------------------- round 426: directional lightmaps (task 0402) */
+static void tests_round426() {
+  test("directional lightmaps (round 426): the bake keeps where each texel's light came from - toward a slanted sun on an open floor; the direction page saved and read back; a non-directional bake has none (an old file's pages left unread); the rebalance leaves an unbumped surface as baked and lights a bump facing the light more, the back of a double-sided surface as its front", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, 0.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    auto bake = [&](bool directional) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 8, bs.bounces = 0, bs.denoise = false, bs.directional = directional;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData d = bake(true), plain = bake(false);
+    CHECK(d.dir_pages.size() == d.pages.size() && plain.dir_pages.empty());
+    const Vec3 to_sun = normalize(Vec3(1.0f, 1.0f, 0.0f));
+    float worst = 1.0f;
+    size_t lit = 0;
+    for (size_t i = 0; !d.dir_pages.empty() && i < d.pages[0].texels.size(); i++) {
+      if (!(d.pages[0].texels[i].y > 1e-3f)) continue;
+      worst = std::min(worst, dot(d.dir_pages[0].texels[i], to_sun));
+      lit++;
+    }
+    std::printf("    %zu lit texels: their light's direction against the sun's, worst cosine %.4f\n", lit, worst);
+    CHECK(lit > 100 && worst > 0.99f);
+    /* Saved and read back (Radiance's 8-bit mantissas: about 1 % of the encoded value). */
+    const std::string dir = resolve_asset_path("Assets/Imported/R426");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::string err;
+    CHECK(d.save(dir, err));
+    LightingData back;
+    CHECK(back.load(dir, err) && back.dir_pages.size() == d.dir_pages.size());
+    float diff = 0.0f;
+    for (size_t i = 0; !back.dir_pages.empty() && i < back.dir_pages[0].texels.size(); i++) diff = std::max(diff, length(back.dir_pages[0].texels[i] - d.dir_pages[0].texels[i]));
+    std::printf("    the direction page read back: worst difference %.4f\n", diff);
+    CHECK(diff < 0.03f);
+    /* A direction file gone: the bake loads, without directions. */
+    std::filesystem::remove(std::filesystem::u8path(fs::join(dir, "LightmapDir-0.hdr")), ec);
+    LightingData no_file;
+    CHECK(no_file.load(dir, err) && no_file.dir_pages.empty() && no_file.pages.size() == d.pages.size());
+    CHECK(d.save(dir, err));
+    CHECK(plain.save(dir, err));  // (the folder's LightmapDir-0.hdr stays: the file says the bake has none)
+    LightingData back_plain;
+    CHECK(back_plain.load(dir, err) && back_plain.dir_pages.empty() && back_plain.pages.size() == plain.pages.size());
+    std::filesystem::remove_all(dir, ec);
+    /* The rebalance (Unity's DecodeDirectionalLightmap with its divisor at the surface's own normal). */
+    const Vec3 up(0, 1, 0), a = to_sun * 0.9f;
+    CHECK(std::fabs(lightmap_direction_factor(up, up, a) - 1.0f) < 1e-6f);
+    const Vec3 toward = normalize(Vec3(0.5f, 1.0f, 0.0f)), away = normalize(Vec3(-0.5f, 1.0f, 0.0f));
+    std::printf("    a bump tilted toward the light %.3f, away %.3f, light from all around (a = 0) %.3f\n", lightmap_direction_factor(toward, up, a),
+                lightmap_direction_factor(away, up, a), lightmap_direction_factor(toward, up, Vec3(0.0f)));
+    CHECK(lightmap_direction_factor(toward, up, a) > 1.05f && lightmap_direction_factor(away, up, a) < 0.95f);
+    CHECK(lightmap_direction_factor(toward, up, Vec3(0.0f)) == 1.0f);
+    /* The back of a double-sided surface: both normals turned to the eye - decoded in the front's frame, so a bump there
+     * gets what it gets on the front (review 426: up to 4x before). */
+    std::printf("    the same bump seen from behind %.3f\n", lightmap_direction_factor(-toward, -up, a, true));
+    CHECK(std::fabs(lightmap_direction_factor(-toward, -up, a, true) - lightmap_direction_factor(toward, up, a)) < 1e-6f);
+    CHECK(lightmap_direction_factor(up, up, -a) == 1.0f);  // (light from behind the surface: no rebalancing)
+  });
+  test("directional lightmaps in the editor (round 426): Generate Lighting bakes the direction pages, a lightmapped object's draw item gets its page, Non-Directional none", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *floor = ed.scene().create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(6.0f, 4);
+    floor->add<MeshRenderer>()->contribute_gi = true;
+    ed.scene().lighting.texels_per_unit = 4.0f;
+    ed.scene().lighting.indirect_samples = 16;
+    CHECK(ed.scene().lighting.directional_mode == 1);  // (Unity's default)
+    ed.commit_change("scene");
+    ed.set_async_jobs_for_test(true);
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    const LightingData &ld = ed.lighting_data_for_test();
+    CHECK(!ld.empty() && ld.dir_pages.size() == ld.pages.size());
+    const Mesh *m = floor->evaluated_mesh(1);
+    DrawItem it;
+    it.mesh = m ? &m->render_mesh() : nullptr;
+    if (m) ed.attach_lightmap_for_test(*floor, *m, it);
+    CHECK(it.lightmap && it.lightmap_dir);
+    ed.scene().lighting.directional_mode = 0;
+    DrawItem it2;
+    it2.mesh = it.mesh;
+    if (m) ed.attach_lightmap_for_test(*floor, *m, it2);
+    CHECK(it2.lightmap && !it2.lightmap_dir);  // (a Unity scene's mode: the round 421 test's import reads it)
+  });
+}
+
 
 void run_lighting_tests() {
   round35_tests();
@@ -6212,4 +6307,5 @@ void run_lighting_tests() {
   tests_round423();
   tests_round424();
   tests_round425();
+  tests_round426();
 }
