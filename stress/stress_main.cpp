@@ -2566,6 +2566,19 @@ static void test_bake(Report &rep, const Options &o) {
                      runs, problems));
 }
 
+/* Round 433: a soak's frame that grew the process by more than 100 MB, printed with that frame's events - what to
+ * replay (the same seed) to find which window or job took the memory. */
+static void report_soak_jump(int frame, const std::vector<platform::Event> &ev, double &prev_mb) {
+  const double mb = (double)sys::working_set_bytes() / 1048576.0;
+  const double grew = mb - prev_mb;
+  prev_mb = mb;
+  if (grew < 100.0 || frame == 0) return;
+  std::printf("soak: frame %d grew the working set by %.0f MB to %.0f MB; its events:", frame, grew, mb);
+  for (const platform::Event &e : ev) std::printf(" [type %d button %d key %d mods %d at %d,%d]", (int)e.type, e.button, e.key, e.mods, e.x, e.y);
+  std::printf("\n");
+  std::fflush(stdout);
+}
+
 static void test_fuzz(Report &rep, const Options &o) {
   rep.title("Editor robustness: random input fuzzing",
             "Random clicks, drags, wheel and key presses across the whole window (monkey testing).");
@@ -2581,10 +2594,32 @@ static void test_fuzz(Report &rep, const Options &o) {
   uint32_t seed = std::getenv("BLENDITY_FUZZ_SEED") ? (uint32_t)std::strtoul(std::getenv("BLENDITY_FUZZ_SEED"), nullptr, 10) : 12345u;
   auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return (int)((seed >> 8) % (uint32_t)n); };
   int frames = o.quick ? 1500 : 6000, events = 0;
+  /* Round 433: BLENDITY_FUZZ_MINUTES=N - a soak: fuzzing for N minutes, the process's memory printed each minute
+   * ("soak: minute M ...") and the growth from the first minute to the last in the report. */
+  const double soak_min = std::getenv("BLENDITY_FUZZ_MINUTES") ? std::atof(std::getenv("BLENDITY_FUZZ_MINUTES")) : 0.0;
+  if (soak_min > 0.0) frames = std::numeric_limits<int>::max();
+  double next_sample = 60000.0, first_mb = 0.0, last_mb = 0.0, step_mb = 0.0;
   int mx = 640, my = 360;
   bool down[3] = {};
   ScopedTimer t;
   for (int f = 0; f < frames; f++) {
+    if (soak_min > 0.0 && t.ms() >= next_sample) {
+      last_mb = (double)sys::working_set_bytes() / 1048576.0;
+      if (first_mb == 0.0) first_mb = last_mb;
+      std::printf("soak: minute %.0f, %d frames, working set %.1f MB, peak %.1f MB, %zu objects (%.1f MB), undo %zu steps %.1f MB, "
+                  "textures %.1f MB\n",
+                  next_sample / 60000.0, f, last_mb, (double)sys::peak_working_set_bytes() / 1048576.0, ed.scene().object_count(),
+                  (double)ed.scene().memory_bytes() / 1048576.0, ed.undo_steps_for_test(), (double)ed.undo_bytes() / 1048576.0,
+                  (double)texture_cache_bytes() / 1048576.0);
+      std::fflush(stdout);
+      next_sample += 60000.0;
+    }
+    if (soak_min > 0.0 && t.ms() >= soak_min * 60000.0) {  // (on time, not at the next whole minute)
+      last_mb = (double)sys::working_set_bytes() / 1048576.0;
+      if (first_mb == 0.0) first_mb = last_mb;
+      frames = f;
+      break;
+    }
     std::vector<platform::Event> ev;
     int k = rnd(4);
     for (int i = 0; i < k; i++) {
@@ -2639,9 +2674,13 @@ static void test_fuzz(Report &rep, const Options &o) {
       std::fflush(stderr);
     }
     ed.step_frame_headless(ev);
+    if (soak_min > 0.0) report_soak_jump(f, ev, step_mb);
   }
-  double avg = t.ms() / frames;
+  double avg = t.ms() / std::max(1, frames);
   Log::echo_stdout = true;
+  if (soak_min > 0.0)
+    rep.note(strprintf("Soak (BLENDITY_FUZZ_MINUTES=%g): the working set %.1f MB after the first minute, %.1f MB at the end (%+.1f MB)", soak_min, first_mb, last_mb,
+                       last_mb - first_mb));
   const uint64_t stale = ed.frame_profile_totals().cache_mismatches;
   rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg),
            strprintf("no crash, %llu stale pictures", (unsigned long long)stale)});
@@ -7152,6 +7191,17 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ep) {
   std::fflush(stderr);
   return EXCEPTION_EXECUTE_HANDLER;
 }
+#  ifdef _DEBUG
+/* Round 433: a debug build's failed assertion (an empty vector's back(), an index out of range) breaks into the handler
+ * above, so the soak's report has the stack where it failed instead of a bare message. */
+static int assert_to_crash(int type, char *message, int *ret) {
+  if (type != _CRT_ASSERT && type != _CRT_ERROR) return FALSE;
+  std::fprintf(stderr, "\n*** assertion: %s", message ? message : "?");
+  *ret = 0;
+  __debugbreak();
+  return TRUE;
+}
+#  endif
 #endif
 
 /* Curved surfaces: Push/Pull and the other modeling tools on meshes whose faces
@@ -7521,6 +7571,9 @@ static void test_curved_surfaces(Report &rep, const Options &o) {
 static void install_crash_handler() {
 #ifdef _WIN32
   SetUnhandledExceptionFilter(crash_handler);
+#  ifdef _DEBUG
+  _CrtSetReportHook2(_CRT_RPTHOOK_INSTALL, assert_to_crash);  // (round 433)
+#  endif
   /* Debug-CRT assertions go to stderr instead of a message box. */
   _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
   _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);

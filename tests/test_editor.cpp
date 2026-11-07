@@ -8370,6 +8370,111 @@ static void tests_round419() {
   });
 }
 
+/* ---------------------------------------------------------------- round 433: what the soak found (task 0409) */
+static void tests_round433() {
+  test("a small list destroyed at once (round 433): an object named twice and a child named with its parent are destroyed once, nothing read after it is freed", [] {
+    Scene s;
+    GameObject *a = s.create("A");
+    GameObject *kid = s.create("Kid", a);
+    GameObject *b = s.create("B");
+    GameObject *keep = s.create("Keep");
+    s.destroy(std::vector<GameObject *>{a, kid, b, b});
+    CHECK(s.object_count() == 1 && s.roots.size() == 1 && s.roots[0] == keep && keep->index_in_scene == 0);
+    s.destroy(std::vector<GameObject *>{});
+    CHECK(s.object_count() == 1);
+  });
+  test("Delete on 50,000 selected cubes (round 433): one pass, all gone, and Undo brings every one back", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("benchscene cubes50k");
+    ed.step_frame_headless();
+    const size_t before = ed.scene().object_count();
+    ed.command("selectall");
+    ScopedTimer t;
+    ed.command("delete");
+    const double ms = t.ms();
+    ed.step_frame_headless();
+    std::printf("    %zu objects deleted in %.1f ms; %zu left\n", before, ms, ed.scene().object_count());
+    CHECK(before >= 50000 && ed.scene().object_count() < before - 49000);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().object_count() == before);
+  });
+  test("many objects destroyed in one pass (round 433): their children go with them, a surviving parent loses only the doomed children, the survivors keep their order and their indices, the active camera resets; 50,000 roots deleted in milliseconds", [] {
+    Scene s;
+    std::vector<GameObject *> roots, doomed;
+    for (int i = 0; i < 100; i++) roots.push_back(s.create(strprintf("R%d", i)));
+    GameObject *kid_of_doomed = s.create("Kid", roots[0]);
+    GameObject *keeper = roots[1];
+    GameObject *keep_kid = s.create("KeepKid", keeper);
+    GameObject *gone_kid = s.create("GoneKid", keeper);
+    s.active_camera = kid_of_doomed->id;
+    for (int i = 0; i < 100; i += 2) doomed.push_back(roots[i]);  // R0, R2, ... (R0 has a child)
+    doomed.push_back(gone_kid);
+    const uint64_t kid_id = kid_of_doomed->id, gone_id = gone_kid->id;
+    s.destroy(doomed);
+    CHECK(s.object_count() == 50 + 1);  // R1, R3, ... and KeepKid
+    CHECK(!s.find(kid_id) && !s.find(gone_id));
+    CHECK(s.active_camera == 0);
+    CHECK(keeper->children.size() == 1 && keeper->children[0] == keep_kid);
+    CHECK(s.roots.size() == 50 && s.roots[0] == roots[1] && s.roots[49] == roots[99]);
+    bool indices = true;
+    for (size_t i = 0; i < s.objects().size(); i++) indices = indices && s.objects()[i]->index_in_scene == i;
+    CHECK(indices);
+    Scene big;
+    std::vector<GameObject *> all;
+    for (int i = 0; i < 50000; i++) all.push_back(big.create("C"));
+    ScopedTimer t;
+    big.destroy(all);
+    std::printf("    50,000 roots destroyed in one pass: %.1f ms\n", t.ms());
+    CHECK(big.object_count() == 0 && big.roots.empty());
+  });
+  test("the soak's finds (round 433): a scroll area dragged to a negative height with no content ends without dividing by zero; the status bar's Undo undoing the last step leaves nothing read from the empty stack", [] {
+    ui::Context u;
+    Image img;
+    img.resize(200, 100);
+    u.begin_frame(&img, 0.0);
+    for (int content : {0, -5, 1})
+      for (int h : {-40, 0, 10}) {
+        const Recti r{10, 10, 100, h};
+        u.begin_scroll((ui::Id)(1000 + (content + 10) * 100 + (h + 50)), r, content);
+        u.end_scroll();  // (had divided by content_h: 0 when nothing was in it and the area's height negative)
+      }
+    u.end_frame();
+    /* The status bar's Undo with one step on the stack: the click empties it; the frame goes on. */
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("create Cube");
+    ed.command("create Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();  // (the steps committed)
+    const size_t made = ed.undo_depth_for_test();
+    while (ed.undo_depth_for_test() > 1) {
+      ed.command("undo");
+      ed.step_frame_headless();
+    }
+    std::printf("    %zu undo steps made, %zu left before the click\n", made, ed.undo_depth_for_test());
+    CHECK(made >= 1 && ed.undo_depth_for_test() == 1);
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &rects = ed.ui_for_test().button_rects;
+    const auto it = rects.find("status:Undo");
+    CHECK(it != rects.end());
+    if (it == rects.end()) return;
+    const Recti b = it->second;
+    auto at = [&](platform::EventType t) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2, e.button = 0;
+      return e;
+    };
+    ed.step_frame_headless({at(platform::EventType::MouseMove)});
+    ed.step_frame_headless({at(platform::EventType::MouseDown)});
+    ed.step_frame_headless({at(platform::EventType::MouseUp)});
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    the status bar's Undo clicked with one step: %zu left, the frames drawn on\n", ed.undo_depth_for_test());
+    CHECK(ed.undo_depth_for_test() == 0);
+  });
+}
+
 /* ---------------------------------------------------------------- round 422: the cheap performance wins (task 0398) */
 static void tests_round422() {
   test("unity package (round 422): the gzip writer's blocks compressed on every core read back byte for byte - empty, one byte, a block exactly, blocks and a tail, text and noise - and its time printed", [] {
@@ -8593,5 +8698,6 @@ void run_editor_tests() {
   tests_round418();
   tests_round419();
   tests_round422();
+  tests_round433();
   coverage_tests();
 }

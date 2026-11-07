@@ -2040,6 +2040,10 @@ class Scene {
 
   GameObject *create(const std::string &name, GameObject *parent = nullptr);
   void destroy(GameObject *go);
+  /* Round 433: many objects (and their children) in one pass - each parent's list and the scene's filtered once
+   * instead of once per object (50,000 roots deleted one by one had been quadratic: 365 ms). The survivors keep
+   * their order; an object named twice, or with its parent, is destroyed once. */
+  void destroy(const std::vector<GameObject *> &list);
   GameObject *find(uint64_t id) const;
   GameObject *find_by_name(const std::string &name) const;
   /* Reparents keeping the world transform (Unity's default, Blender's "Keep Transform"). */

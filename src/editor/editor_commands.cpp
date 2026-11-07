@@ -1237,9 +1237,9 @@ void Editor::run_console_command(const std::string &line) {
     anim_command(split_quoted(line));  // (round 335: a property with spaces quoted - "Material 0.Roughness", "Cast Shadows")
     return;
   }
-  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|keyed1k (task 0202)
+  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike (task 0202; cubes50k round 433)
     if (!bench_scene(to_lower(arg(1, ""))))
-      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|keyed1k: the scenes tools/bench_blender.py --parity-ui builds");
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike: the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
     return;
   }
   if (c == "manual") {

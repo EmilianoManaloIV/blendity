@@ -3326,6 +3326,30 @@ void Scene::destroy(GameObject *go) {
   objects_.pop_back();
 }
 
+static void collect_with_children(GameObject *go, std::unordered_set<GameObject *> &doomed) {
+  if (!go || !doomed.insert(go).second) return;
+  for (GameObject *c : go->children) collect_with_children(c, doomed);
+}
+
+void Scene::destroy(const std::vector<GameObject *> &list) {
+  if (list.empty()) return;
+  std::unordered_set<GameObject *> doomed;
+  doomed.reserve(list.size());
+  for (GameObject *g : list) collect_with_children(g, doomed);  // (a list naming an object twice, or a parent and its child, is safe)
+  const auto is_doomed = [&](GameObject *g) { return doomed.count(g) != 0; };
+  std::unordered_set<GameObject *> parents;  // the surviving parents whose lists lose children
+  for (GameObject *g : doomed) {
+    if (g->id == active_camera) active_camera = 0;
+    by_id_.erase(g->id);
+    if (g->parent && !is_doomed(g->parent)) parents.insert(g->parent);
+  }
+  roots.erase(std::remove_if(roots.begin(), roots.end(), is_doomed), roots.end());
+  for (GameObject *p : parents) p->children.erase(std::remove_if(p->children.begin(), p->children.end(), is_doomed), p->children.end());
+  objects_.erase(std::remove_if(objects_.begin(), objects_.end(), [&](const std::unique_ptr<GameObject> &g) { return is_doomed(g.get()); }),
+                 objects_.end());
+  for (size_t i = 0; i < objects_.size(); i++) objects_[i]->index_in_scene = i;
+}
+
 void Scene::clear() {
   objects_.clear();
   by_id_.clear();

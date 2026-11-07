@@ -2,6 +2,28 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 433): a soak, 50,000 objects, the path tracer on a real world
+
+**Asked:** Pass 17's round 433 - measure what Pass 16 never measured, and list what this machine can't.
+
+**Changed (task 0409)**
+- **A soak:** `BLENDITY_FUZZ_MINUTES=N blendity_stress --only editor_fuzz` fuzzes the editor for N minutes, printing its
+  memory (and the undo history's) each minute and any frame that grew it by more than 100 MB.
+- **Two crashes the soak found, fixed:** a scroll area dragged to a negative height with nothing in it divided by
+  zero; the status bar's Undo read the undone step's name from an empty stack. A debug build's failed assertion now
+  breaks into the crash handler, so a report has the stack.
+- **Deleting many objects at once is no longer quadratic:** 50,000 cubes deleted in 28.6 ms (365 ms in one frame before).
+- **`benchscene cubes50k`.**
+
+**Measured:** 30 minutes of fuzzing, no crash in 194,633 frames; the memory rose once (to 1.3 GB) and stayed flat - working memory, not a leak (its holder is open); 50,000 cubes: the Scene view 100.8 ms a frame on the card (left open: the change counter
+round 431 named); SideRail path traced at 64 samples, 1280 x 720: 90.9 s on the CPU, one 698 ms frame (open). What
+this machine can't measure is listed in docs/tasks/0409 with what each needs.
+
+**Checked:** tests_round433 (the batch destroy, small lists with duplicates and a parent with its child, Delete and
+Undo on 50,000 cubes, scroll areas with negative heights, the status bar's Undo); both suites - with Blender's
+libraries 16375 checks in 1612 tests, 0 failed; dependency-free 15621 (Windows) and 15627 (Linux, WSL), 0 failed;
+the audits; the debug stress build.
+
 ## 2026-11-07 (rounds 431-432): the views measured against Unity's; the suite's comparison fixed and in CI
 
 **Asked:** Pass 17's rounds 431 and 432 - the views against Unity's, the remaining slow rows, the suite's CI step.

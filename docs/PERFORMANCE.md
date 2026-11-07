@@ -116,6 +116,18 @@ Shinano's gathering and hashing re-derive an unchanged scene: caching them safel
 the CPU's first cage frame). `tools/perf_suite.py` now matches rows by section, table and row; CI compares its quick
 stress with a per-runner baseline when one is committed (`--compare`, warnings).
 
+### What Pass 16 didn't measure (round 433)
+- **A 30-minute soak** (`BLENDITY_FUZZ_MINUTES=30 blendity_stress --only editor_fuzz`): no crash in 194,633 frames
+  after two crashes it found were fixed (a divide by zero in a scroll area, the status bar's Undo reading an empty
+  stack). The working set rose once, 238 -> 1,302 MB by minute 4, then flat for 26 minutes: working memory, not a leak
+  (not the scene, the undo history or the textures; its holder is open).
+- **50,000 cubes:** build 61 ms, save 270 ms (19.1 MB), open 633 ms over 621 frames, undo a delete 77 ms; **delete all
+  365 -> 28.6 ms** (deleting many objects was quadratic). The Scene view **100.8 ms a frame on the card**
+  (gathering 23.3, the views' GPU path 32.2), 137.2 on the CPU - open, with Shinano's 3 ms (the change counter).
+- **SideRail path traced** (F12, 1280 x 720, 64 samples): 90.9 s on the CPU (Embree); one 698 ms frame while it ran
+  (open). The rasterized F12: 0.45 s.
+- Not measurable here, with what each needs: docs/tasks/0409.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

@@ -4100,7 +4100,7 @@ void Editor::delete_selected() {
   }
   auto list = selected_objects(true);
   if (list.empty()) return;
-  for (GameObject *g : list) scene_->destroy(g);
+  scene_->destroy(list);  // (round 433: in one pass - 50,000 deleted one by one had been quadratic)
   clear_selection();
   mark_changed("Delete");
 }
@@ -4407,7 +4407,7 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
  * animation under the timings), nothing selected but the sphere (or, for keyed1k, one box, whose parent's clip plays):
  * - sphere50k / sphere500k: one UV sphere of 256 x 196 / 1024 x 490 segments, "Parity Sphere", selected;
  * - million: ten of the 50k spheres (one shared mesh) in a row 2.5 m apart, about a million triangles;
- * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square;
+ * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square (cubes50k: 50,000 - round 433);
  * - keyed1k: 1,000 cubes under "Keyed", each keyed on frames 1, 30 and 60 (Position), the clip at frame 1. */
 /* Round 411 (task 0387): the Unity-world stand-in `benchscene worldlike` - what a VRChat world such as SideRail costs the
  * views, built from Blendity's own primitives so it can be committed: 600 objects from 40 meshes, 180 of them Contribute
@@ -4507,7 +4507,7 @@ bool Editor::bench_scene(const std::string &name) {
     mark_changed("Bench scene");
     return true;
   }
-  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "keyed1k";
+  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "cubes50k" || name == "keyed1k";
   if (!known) return false;
   new_scene();
   for (const char *starter : {"Utah Teapot", "Plane", "Main Camera"})
@@ -4529,9 +4529,10 @@ bool Editor::bench_scene(const std::string &name) {
     MeshPtr sphere = primitives::uv_sphere(1.0f, 256, 196);
     for (int i = 0; i < 10; i++) object(strprintf("Sphere %d", i), sphere, {(i - 4.5f) * 2.5f, 1.0f, 0.0f});
   }
-  else if (name == "cubes10k") {
+  else if (name == "cubes10k" || name == "cubes50k") {  // (round 433: 50,000 - a scene five times Pass 16's biggest)
     MeshPtr cube = primitives::cube();
-    for (int i = 0; i < 10000; i++) object(strprintf("Cube %d", i), cube, {(i % 100 - 50) * 1.6f, 0.0f, (i / 100 - 50) * 1.6f});
+    const int n = name == "cubes50k" ? 50000 : 10000, side = name == "cubes50k" ? 224 : 100;
+    for (int i = 0; i < n; i++) object(strprintf("Cube %d", i), cube, {(i % side - side / 2) * 1.6f, 0.0f, (i / side - side / 2) * 1.6f});
   }
   else {
     GameObject *root = scene_->create("Keyed");
