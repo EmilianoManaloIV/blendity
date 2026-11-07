@@ -335,6 +335,14 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Indirect Samples", indirect_samples, 1, 65536);
   r.help("Rays per texel gathering bounced light and the sky. More is smoother and slower.");
   r.field("Bounces", bounces, 0, 16);
+  static const char *bake_devices[] = {"Render Device", "CPU", "GPU"};
+  r.enumeration("Lightmapper", bake_device, bake_devices, 3);
+  r.help("Where Generate Lighting gathers the bounced light (Unity's Progressive CPU / GPU). Render Device: as Render >\n"
+         "Device. GPU: on the card whenever there is one (a Unity scene baked on Unity's GPU lightmapper asks for it).");
+  r.field("Backface Tolerance", backface_tolerance, 0.01f, 0.0f, 1.0f);
+  r.help("Unity's Backface Tolerance: a texel whose rays meet back faces more often than 1 - this is inside geometry and is\n"
+         "filled from its neighbours (no dark line along a box standing in a floor). Double Sided materials' backs count\n"
+         "as fronts. Lower it - to 0 - when single-sided geometry (a card, a roof of one plane) makes surfaces near it flat.");
   r.field("Denoise", denoise);
   r.field("Indirect Intensity", indirect_intensity, 0.01f, 0.0f, 100.0f);
   r.field("Auto Generate", auto_generate);

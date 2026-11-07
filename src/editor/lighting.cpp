@@ -321,7 +321,9 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
 
 /* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); -1 the CPU. */
 int Editor::choose_bake_gpu() {
-  if (scene_->render.device >= 1 && gpu::available()) {
+  const int want = scene_->lighting.bake_device;  // (round 430: Unity's Lightmapper)
+  const bool on_gpu = want == 2 || (want == 0 && scene_->render.device >= 1);
+  if (on_gpu && gpu::available()) {
     const std::vector<int> g = enabled_gpus();
     if (!g.empty()) return g[0];
   }
@@ -377,6 +379,7 @@ void Editor::bake_start() {
   s.denoise = ls.denoise;
   s.indirect_intensity = ls.indirect_intensity;
   s.directional = ls.directional_mode != 0;  // (round 426)
+  s.backface_tolerance = finite_bits(ls.backface_tolerance) ? std::max(0.0f, std::min(1.0f, ls.backface_tolerance)) : 0.9f;  // (round 430)
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
@@ -1017,6 +1020,7 @@ void Editor::preview_step() {
     s.directional = ls.directional_mode != 0;  // (round 426)
     s.gpu_device = choose_bake_gpu();
     s.use_oidn = false;  // (round 423: the preview finishes on the main thread - OIDN's filter there would be a stall)
+    s.backface_tolerance = 0.0f;  // (round 430: its validity rays would be on the main thread too)
     preview_baker_.begin(objects, lights, env_, s);
     preview_running_ = true;
   }

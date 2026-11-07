@@ -1913,6 +1913,8 @@ struct LightingSettings {
   int direct_samples = 32;
   int indirect_samples = 512;  // (round 423: Unity's default Indirect Samples, was 256)
   int directional_mode = 1;    // round 426: Unity's Directional Mode - 0 Non-Directional, 1 Directional (a direction page per lightmap)
+  int bake_device = 0;         // round 430: Unity's Lightmapper - 0 the Render device's (as before), 1 the CPU, 2 the GPU when there is one
+  float backface_tolerance = 0.9f;  // round 430: Unity's Backface Tolerance (0: every texel kept)
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;

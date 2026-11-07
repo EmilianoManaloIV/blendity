@@ -5768,6 +5768,7 @@ static void tests_round421() {
     }
     CHECK(settings_info && unbaked_warn && !optix);
     CHECK(l.directional_mode == 1);  // (round 426: the asset's m_LightmapsBakeMode 1, Directional)
+    CHECK(l.bake_device == 0);  // (round 430: no m_BakeBackend in the asset - Unity's Progressive CPU: as the Render device)
     /* The asset's GUID not in the project: the scene's own block, and a note that says so (a fresh editor: the import
      * left the first one with unsaved changes, and Open would ask first). */
     Editor ed2;
@@ -6147,6 +6148,7 @@ static void tests_round425() {
       if (card_mat) objs.push_back(bake_object(2, card, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {card_mat}));
       BakeSettings bs;
       bs.texels_per_unit = 8, bs.indirect_samples = 4, bs.bounces = 0, bs.denoise = false;
+      bs.backface_tolerance = 0.0f;  // (round 430: the floor under a single-sided card sees its back face - Unity's advice for such geometry)
       BakeLight bl;
       bl.light = sun, bl.mode = 2, bl.id = 9;
       Lightmapper lm;
@@ -6414,6 +6416,76 @@ static void tests_round429() {
   });
 }
 
+/* ---------------------------------------------------------------- round 430: texel validity and the bake's device (task 0406) */
+static void tests_round430() {
+  test("texel validity (round 430): Unity's Backface Tolerance - a floor's texels under a box sunk into it see back faces and are left out, filled from their valid neighbours (no dark line along the box); tolerance 0 keeps every texel", [] {
+    MeshPtr floor = primitives::plane(4.0f, 40), box = primitives::cube(1.0f);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, box, Mat4::trs({0, 0.25f, 0}, Quat(), {1, 1, 1}), {white})};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(1.0f);
+    auto bake = [&](float tolerance, size_t *invalid) {
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = 32, bs.bounces = 1, bs.denoise = true, bs.backface_tolerance = tolerance;
+      Lightmapper lm;
+      lm.begin(objs, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      if (invalid) *invalid = lm.invalid_texels();
+      return lm.take_result();
+    };
+    size_t with = 0, without = 0;
+    const LightingData kept = bake(0.9f, &with), all = bake(0.0f, &without);
+    /* The box's 1 m footprint at 16 texels a metre: about 256 of the floor's texels are inside it, and the box's own
+     * faces below the floor (its bottom and the lower quarter of its sides, under the floor's back) up to 512 more. */
+    std::printf("    texels inside geometry: %zu with Unity's 0.9 tolerance, %zu with 0\n", with, without);
+    CHECK(with > 180 && with < 900 && without == 0);
+    /* The floor's darkest point on the box's contact line (0.5 m from its centre): with validity it stays
+     * lit from the valid side (the hidden texels no longer bleed their darkness out through the filter). */
+    auto ring_min = [&](const LightingData &d) {
+      const LightingData::Entry &e = d.entries.at(1);
+      const Lightmap &p = d.pages[(size_t)e.page];
+      float m = 1e30f;
+      for (size_t t = 0; t < floor->render_mesh().tri_count(); t++)
+        for (int c = 0; c < 3; c++) {
+          const Vec3 q = floor->render_mesh().positions[floor->render_mesh().indices[t * 3 + (size_t)c]];
+          const float r = std::max(std::fabs(q.x), std::fabs(q.z));
+          if (r < 0.49f || r > 0.56f) continue;  // (the vertices on the contact line, 0.5 m out)
+          m = std::min(m, p.sample(e.tri_uv[t * 3 + (size_t)c]).y);
+        }
+      return m;
+    };
+    const float ring_kept = ring_min(kept), ring_all = ring_min(all);
+    std::printf("    the darkest of the floor just outside the box: %.4f with validity, %.4f without\n", ring_kept, ring_all);
+    CHECK(ring_kept > ring_all * 1.5f);  // (0.52 against 0.19 measured: the dark line along the box gone)
+    /* A single-sided 2 m roof 1 m over the floor (review 430): the floor's texels under it see its back face, are inside
+     * geometry at 0.9, and are filled from their chart - none left black. Its material Double Sided: none inside. */
+    MeshPtr roof = primitives::plane(2.0f, 2);
+    MaterialPtr single = make_material("Single", Vec3(0.8f)), both = make_material("Both", Vec3(0.8f));
+    both->double_sided = true;
+    auto roof_bake = [&](const MaterialPtr &m, size_t *invalid) {
+      const std::vector<BakeObject> o{bake_object(1, floor, Mat4::identity(), {white}), bake_object(3, roof, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {m})};
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = true;
+      Lightmapper lm;
+      lm.begin(o, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      *invalid = lm.invalid_texels();
+      return lm.take_result();
+    };
+    size_t under_single = 0, under_both = 0;
+    const LightingData rs = roof_bake(single, &under_single);
+    roof_bake(both, &under_both);
+    const LightingData::Entry &fe = rs.entries.at(1);
+    const Lightmap &fp = rs.pages[(size_t)fe.page];
+    float floor_min = 1e30f;
+    for (size_t i = 0; i < fe.tri_uv.size(); i++) floor_min = std::min(floor_min, fp.sample(fe.tri_uv[i]).y);
+    std::printf("    a single-sided roof: %zu texels inside geometry, the floor's darkest %.4f; Double Sided: %zu inside\n", under_single, floor_min, under_both);
+    CHECK(under_single > 200 && floor_min > 0.05f && under_both == 0);
+  });
+}
+
 
 void run_lighting_tests() {
   round35_tests();
@@ -6436,4 +6508,5 @@ void run_lighting_tests() {
   tests_round426();
   tests_round428();
   tests_round429();
+  tests_round430();
 }
