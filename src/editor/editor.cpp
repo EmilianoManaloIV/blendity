@@ -230,6 +230,7 @@ bool Editor::init(int argc, char **argv) {
 void Editor::init_headless(int width, int height) {
   common_init(this);
   headless_ = true;
+  scene_hash_check_every_ = 1;  // (round 435, ADR 0115: a headless editor - the tests, the fuzz, the pipelines - checks the kept scene hash every frame; tests write fields past every funnel)
   set_budget_wait_for_textures(true);  // (review 399: a headless count is whole - engine-only textures read before it)
   inspector_essentials_ = false, guides_enabled_ = false;  // (the tests' Inspector shows every field; no guide strip moves the docks)
   resolve_project_paths();
@@ -573,6 +574,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   frame_stamps_.push_back(now);
   while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
   measured_fps_ = (float)frame_stamps_.size();
+  hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   process_events(events);
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
@@ -622,7 +624,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   /* Locomotion's legs on the moved characters (task 0127), then IK after scripts move the targets, before anything
    * draws (task 0048); unchanged inputs cost a hash per chain. */
   if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
-  if (solve_constraints(*scene_)) ui_.redraw = true;
+  if (solve_constraints(*scene_)) ui_.redraw = true, edit_epoch::bump();
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   else if (play_dt > 0.0f) spring::tick(*scene_, play_dt);  // (the simulated clock still runs: the Jiggle modifier reads it; task 0153)
   if (cam_.update(now)) ui_.redraw = true;
@@ -1987,6 +1989,7 @@ void Editor::prune_selection() {
 void Editor::mark_changed(const std::string &label) {
   eye_test_off();  // (round 360: the eye test's pose isn't an edit - kept out of the step)
   scene_dirty_ = true;
+  edit_epoch::bump();  // (round 435, ADR 0115: whatever was edited, the views' scene hash walks again)
   /* Another frame: a change made by a panel drawn after the Scene view (the Inspector's Set Origin > Apply)
    * would otherwise wait for the next input to show, the gizmo still on the old origin (task 0030). Not
    * during a drag: it marks a change every frame, and its own mouse events bring the frames. */

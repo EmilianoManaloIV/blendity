@@ -2682,8 +2682,10 @@ static void test_fuzz(Report &rep, const Options &o) {
     rep.note(strprintf("Soak (BLENDITY_FUZZ_MINUTES=%g): the working set %.1f MB after the first minute, %.1f MB at the end (%+.1f MB)", soak_min, first_mb, last_mb,
                        last_mb - first_mb));
   const uint64_t stale = ed.frame_profile_totals().cache_mismatches;
+  /* Round 435 (ADR 0115): the change counter checked every frame - a miss is a UI path that writes past every funnel. */
+  const uint64_t missed = ed.scene_hash_misses_for_test();
   rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg),
-           strprintf("no crash, %llu stale pictures", (unsigned long long)stale)});
+           strprintf("no crash, %llu stale pictures, %llu changes the counter missed", (unsigned long long)stale, (unsigned long long)missed)});
 }
 
 static void test_memory(Report &rep, const Options &o) {

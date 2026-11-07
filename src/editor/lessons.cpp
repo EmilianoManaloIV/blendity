@@ -2017,6 +2017,12 @@ A short test passes where a long one fails: the soak (round 433) runs the editor
 ? A fuzz crashes in a release build with a divide by zero, but the line it names makes no sense. What do you run next? | The same fuzz (same seed) in a debug build: its checks catch the real fault earlier - here an empty vector's back() - and the assertion hook prints the stack where it failed.
 ! cmd:benchscene cubes50k | Build 50,000 cubes to measure a big scene
 ! cmd:perf status | Print the last frame's parts and the jobs
+# A change counter: knowing nothing changed without looking
+Every view asks each frame whether the scene changed since its last picture, and until round 435 the only way to answer was to look: hash every object - its transform, its materials, its modifiers, its light - and compare. Shinano's views spent a millisecond a frame on that; 50,000 cubes four. Now every path an edit goes through - a move, an object made or deleted, a component added, a mesh or a material changed, an Inspector field, `set`, a clip - adds one to a single counter, and while the counter holds still the views keep the last hash instead of walking the scene. A counter is only as good as the paths that bump it, so it is checked rather than trusted: every eighth frame the scene is walked anyway, and a walk that disagrees with the kept hash is a writer the counter missed - counted in the Profiler's "Scene hashes kept / missed" row, and drawn at once. While the scene changes on its own (Play, a playing clip, a stroke, Live Link) every frame walks.
+? A view keeps its hash while a change counter holds still. A script writes a light's colour straight into the field, past every setter. What does the user see? | The old colour for at most seven frames: the eighth frame's check walks the scene, finds a hash that disagrees, counts a miss and draws the new one. The fix is a bump where that writer writes - not a stale picture for good.
+? Why does the counter make the scene hash cheaper on frames where you only orbit the camera? | The camera isn't part of the scene's hash (the view key adds it separately), so orbiting moves no counter: the scene's hash is kept and only the view's own key changes.
+! cmd:benchscene cubes50k | Build 50,000 cubes, then open the Profiler and watch "Scene hashes kept / missed"
+! cmd:perf status | Print the last frame's parts
 )"},
 };
 

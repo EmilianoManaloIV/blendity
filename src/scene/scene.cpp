@@ -2853,13 +2853,18 @@ Mat4 GameObject::world_matrix_uncached() const {
 }
 
 void GameObject::mark_dirty() {
+  edit_epoch::bump();  // (ADR 0115: the views' scene hash - once for the subtree, not per node: review 435)
+  mark_dirty_tree();
+}
+
+void GameObject::mark_dirty_tree() {
   /* Before the early return: a node already stale since its hash was memoised must still invalidate
    * the memo (ADR 0015), and the memo is only refreshed by a hash, which reads the world matrix. */
   transform_version++;
   /* Invariant: a dirty node's descendants are dirty too, so we can stop early. */
   if (world_dirty_) return;
   world_dirty_ = true;
-  for (GameObject *c : children) c->mark_dirty();
+  for (GameObject *c : children) c->mark_dirty_tree();
 }
 
 Quat GameObject::world_rotation() const {
@@ -2908,6 +2913,7 @@ Component *GameObject::add_component(std::unique_ptr<Component> c) {
       if (std::strcmp(e->type_name(), c->type_name()) == 0) return e.get();
   c->owner = this;
   components.push_back(std::move(c));
+  edit_epoch::bump();  // (ADR 0115)
   return components.back().get();
 }
 
@@ -2915,6 +2921,7 @@ void GameObject::remove_component(Component *c) {
   for (size_t i = 0; i < components.size(); i++)
     if (components[i].get() == c) {
       components.erase(components.begin() + i);
+      edit_epoch::bump();  // (ADR 0115)
       return;
     }
 }
@@ -3042,6 +3049,7 @@ void GameObject::adopt_evaluation(GameObject &from, int kind) {
   eval_shape_key_[kind] = from.eval_shape_key_[kind];
   eval_pending_[kind] = 0;
   eval_generation_++;
+  edit_epoch::bump();  // (ADR 0115: a new picture)
 }
 
 /* Round 413: whether a stack is worth a worker - the work it means, from the base mesh's faces and the modifiers that
@@ -3147,7 +3155,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     }
     const size_t written = eval_chain_[kind]->update(base, *eval_head_[kind]);
     if (written == meshops::SubdivChain::kRefused) return false;  // (not the mesh the chain was built for: rebuilt)
-    if (written) eval_head_[kind]->deform_version++;
+    if (written) eval_head_[kind]->deform_version++, edit_epoch::bump();
     eval_head_key_[kind] = head_key;
     head_followed = true;
     return true;
@@ -3215,7 +3223,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m->positions = head->positions;
     m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);  // (no head: the basis shaped here)
-    m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
+    m->deform_version++, edit_epoch::bump();  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
         m->face_offsets.size() == head->face_offsets.size())
@@ -3298,6 +3306,7 @@ GameObject *Scene::adopt(std::unique_ptr<GameObject> go, uint64_t id) {
   by_id_[id] = raw;
   objects_.push_back(std::move(go));
   next_id_ = std::max(next_id_, id + 1);
+  edit_epoch::bump();  // (ADR 0115: an object made, loaded or cloned)
   return raw;
 }
 
@@ -3313,6 +3322,7 @@ GameObject *Scene::create(const std::string &name, GameObject *parent) {
 
 void Scene::destroy(GameObject *go) {
   if (!go) return;
+  edit_epoch::bump();  // (ADR 0115)
   if (go->id == active_camera) active_camera = 0;  // back to the name rule
   while (!go->children.empty()) destroy(go->children.back());
   auto &list = go->parent ? go->parent->children : roots;
@@ -3333,6 +3343,7 @@ static void collect_with_children(GameObject *go, std::unordered_set<GameObject 
 
 void Scene::destroy(const std::vector<GameObject *> &list) {
   if (list.empty()) return;
+  edit_epoch::bump();  // (ADR 0115)
   std::unordered_set<GameObject *> doomed;
   doomed.reserve(list.size());
   for (GameObject *g : list) collect_with_children(g, doomed);  // (a list naming an object twice, or a parent and its child, is safe)

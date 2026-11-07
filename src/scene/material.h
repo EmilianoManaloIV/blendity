@@ -15,6 +15,7 @@
 // Theory: FoCG ch. 11 "Texture Mapping", GEA Vol. II 12.4 "The Shading Equation".
 #pragma once
 
+#include "../core/edit_epoch.h"
 #include "../core/math.h"
 #include "../image/image.h"
 
@@ -218,7 +219,10 @@ struct Material {
   void reflect_liltoon(Reflector &r);  // (round 402)
   void reflect_principled_extras(Reflector &r);
   void reflect_volume(Reflector &r);
-  void touch() { version++; }
+  void touch() {
+    version++;
+    edit_epoch::bump();  // (ADR 0115)
+  }
 
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {

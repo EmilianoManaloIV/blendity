@@ -502,6 +502,10 @@ struct InspectorReflector : Reflector {
     return last_skipped;
   }
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
+  /* Round 435 (ADR 0115): a field written here is an edit the views' scene hash must see - whoever drew the reflector. */
+  ~InspectorReflector() override {
+    if (changed) edit_epoch::bump();
+  }
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
   Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
@@ -2432,6 +2436,7 @@ void Editor::draw_profiler(const Recti &r) {
     stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
   }
   stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
+  stat("Scene hashes kept / missed", strprintf("%llu / %llu", (unsigned long long)fp.scene_hash_reuses, (unsigned long long)fp.scene_hash_misses));  // (round 435, ADR 0115)
   stat("Edit Mode: operator / mesh writes / overlap check", strprintf("%.2f ms / %.2f ms / %.2f ms", fp.ms_edit_op, fp.ms_edit_apply, fp.ms_overlap));
   stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
   const MeshCounts &mc = mesh_last_;

@@ -8370,6 +8370,112 @@ static void tests_round419() {
   });
 }
 
+/* ---------------------------------------------------------------- round 435: the scene's change counter (task 0411, ADR 0115) */
+/* Idle frames: how many walked the scene and how many kept its hash. */
+static void idle_frames(Editor &ed, int n, uint64_t &walks, uint64_t &kept) {
+  walks = kept = 0;
+  for (int i = 0; i < n; i++) {
+    ed.step_frame_headless();
+    walks += ed.frame_profile_last_for_test().scene_hashes;
+    kept += ed.frame_profile_last_for_test().scene_hash_reuses;
+  }
+}
+
+static void tests_round435() {
+  test("the change counter (round 435, ADR 0115): a transform, an object made, destroyed or reparented, a component added or removed, a mesh or a material touched each move it", [] {
+    Scene s;
+    uint64_t c = edit_epoch::now();
+    auto moved = [&] {
+      const bool m = edit_epoch::now() != c;
+      c = edit_epoch::now();
+      return m;
+    };
+    GameObject *a = s.create("A");
+    CHECK(moved());
+    GameObject *b = s.create("B");
+    moved();
+    a->set_local_position({1, 2, 3});
+    CHECK(moved());
+    s.set_parent(b, a);
+    CHECK(moved());
+    Light *l = a->add<Light>();
+    CHECK(moved());
+    a->remove_component(l);
+    CHECK(moved());
+    auto mesh = std::make_shared<Mesh>();
+    mesh->touch();
+    CHECK(moved());
+    Material mat;
+    mat.touch();
+    CHECK(moved());
+    write_anim_value(*a, "Active", 0, 0.0f);  // (review 435: a clip's, the Sequencer's, the Curve editor's writes)
+    CHECK(moved());
+    s.destroy(b);
+    CHECK(moved());
+    s.destroy(std::vector<GameObject *>{a});
+    CHECK(moved());
+    CHECK(!moved());  // (nothing done: still)
+  });
+  test("idle frames keep the scene hash (round 435): walked once in so many frames, kept in between; a `set` on a light and Undo each walk it again at once", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.command("create Point Light");
+    ed.set_scene_hash_check_every_for_test(8);  // (a window's interval; headless checks every frame)
+    ed.step_frame_headless();
+    uint64_t walks = 0, kept = 0;
+    idle_frames(ed, 32, walks, kept);
+    std::printf("    32 idle frames: %llu walks, %llu kept\n", (unsigned long long)walks, (unsigned long long)kept);
+    CHECK(kept > 0);
+    CHECK(walks <= 32 / 8 + 2);  // (the check every 8th frame, and the first)
+    const uint64_t before = ed.render_hash_for_test();
+    ed.command("set Light.Intensity 7");
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().scene_hashes >= 1);
+    const uint64_t set_to_7 = ed.render_hash_for_test();
+    CHECK(set_to_7 != before);
+    ed.command("undo");  // (the restored scene is a clone - a new serial, so a new hash: walked, not kept)
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().scene_hashes >= 1);
+    CHECK(ed.render_hash_for_test() != set_to_7);
+    CHECK(ed.scene_hash_misses_for_test() == 0);
+  });
+  test("a write past every funnel (round 435): the check walks it on the next due frame, counts a miss and draws the walked hash - the picture is stale at most the check's interval", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Point Light");
+    ed.set_scene_hash_check_every_for_test(1);
+    uint64_t walks = 0, kept = 0;
+    idle_frames(ed, 4, walks, kept);
+    CHECK(ed.scene_hash_misses_for_test() == 0);
+    GameObject *g = ed.active_object_for_test();
+    Light *l = g ? g->get<Light>() : nullptr;
+    CHECK(l != nullptr);
+    if (!l) return;
+    /* (No Inspector, no `set`: nothing told the counter. Within the field's range - the Inspector clamps an
+     * out-of-range value on its next draw, and that is a second write.) */
+    l->intensity = 5.0f;
+    idle_frames(ed, 3, walks, kept);
+    std::printf("    3 frames after the write: %llu walks, %llu kept, %llu missed\n", (unsigned long long)walks, (unsigned long long)kept,
+                (unsigned long long)ed.scene_hash_misses_for_test());
+    CHECK(ed.scene_hash_misses_for_test() == 1);
+    CHECK(walks >= 3);  // (check every frame: each frame walks once)
+  });
+  test("Play, a playing clip, a stroke walk every call (round 435): scripts, physics, tracks and brushes write past the counter", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(!ed.scene_hash_volatile_for_test());
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.scene_hash_volatile_for_test());
+    ed.command("stop");
+    ed.step_frame_headless();
+    CHECK(!ed.scene_hash_volatile_for_test());
+  });
+}
+
 /* ---------------------------------------------------------------- round 433: what the soak found (task 0409) */
 static void tests_round433() {
   test("a small list destroyed at once (round 433): an object named twice and a child named with its parent are destroyed once, nothing read after it is freed", [] {
@@ -8699,5 +8805,6 @@ void run_editor_tests() {
   tests_round419();
   tests_round422();
   tests_round433();
+  tests_round435();
   coverage_tests();
 }

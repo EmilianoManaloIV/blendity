@@ -583,9 +583,12 @@ bool write_anim_value(GameObject &g, const std::string &property, int axis, floa
     t.euler_hint[a] = value;
     t.rotation = Quat::euler(t.euler_hint);
   }
-  else if (property == "Active") return g.active = value >= 0.5f, true;
+  else if (property == "Active") return g.active = value >= 0.5f, edit_epoch::bump(), true;
   else if (property.compare(0, kMaterialPrefix, "Material ") == 0) return material_value(g, property, axis, true, value);
-  else return component_value(g, property, axis, true, value);
+  else {
+    edit_epoch::bump();  // (round 435, ADR 0115: a component's field written past every setter - a light, a shape key, a modifier)
+    return component_value(g, property, axis, true, value);
+  }
   g.set_local(t);
   return true;
 }

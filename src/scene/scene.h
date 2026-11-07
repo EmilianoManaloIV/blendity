@@ -1722,6 +1722,7 @@ class GameObject {
   void set_world_rotation(Quat q);
   void set_world_matrix(const Mat4 &world);
   void mark_dirty();
+  void mark_dirty_tree();  // (mark_dirty without the change counter's bump: its recursion)
   bool active_in_hierarchy() const;
 
   template<class T> T *get() const {

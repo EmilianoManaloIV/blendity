@@ -214,6 +214,7 @@ struct FrameProfile {
   double ms_deferred = 0;
   double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
+  uint64_t scene_hash_reuses = 0, scene_hash_misses = 0;  // round 435 (ADR 0115): scene hashes kept while nothing changed; checks that found a change the counter missed
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
    * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
@@ -256,6 +257,7 @@ struct FrameProfile {
     ms_edit_op += o.ms_edit_op, ms_undo += o.ms_undo;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
+    scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
     gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
@@ -1336,6 +1338,11 @@ class Editor {
     return cf ? camera_flatten_pivot(owner, *cf) : owner.world_position();
   }
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
+  void set_scene_hash_check_every_for_test(int n) { scene_hash_check_every_ = std::max(1, n); }
+  uint64_t scene_hash_misses_for_test() const { return scene_hash_misses_; }
+  uint64_t scene_hash_reuses_for_test() const { return prof_.scene_hash_reuses; }
+  void next_hash_frame_for_test() { hash_frame_++; }
+  bool scene_hash_volatile_for_test() const { return scene_hash_volatile(); }
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
   /* The Textures window last frame: "new", "size", "assign", "output", "add_layer", "layer<i>", "thumb:<name>". */
   Recti confirm_rect_for_test(const std::string &id) const {
@@ -2108,6 +2115,19 @@ class Editor {
   void step_final_render();
   void save_render(const std::string &to = "");
   uint64_t scene_render_hash(bool memo = true);
+  uint64_t scene_render_hash_walk(bool memo);  // (round 435: every object, every time - what the kept hash is checked against)
+  uint64_t scene_hash_tail();                  // (the environment and the editor's generations: cheap, read every call)
+  bool scene_hash_volatile() const;            // (Play, a clip playing, a stroke, Live Link clients: the scene changes behind the counter)
+  /* Round 435 (ADR 0115): the scene hash kept while the change counter, the tail and the scene hold still; walked again
+   * on the first call of every `scene_hash_check_every_`th frame to check the counter missed nothing. */
+  struct SceneHashMemo {
+    const Scene *scene = nullptr;
+    uint64_t serial = 0, epoch = 0, tail = 0, hash = 0, frame = 0, checked = 0;
+    bool valid = false;
+  } scene_hash_memo_;
+  uint64_t hash_frame_ = 1;          // (counts frames for the memo)
+  int scene_hash_check_every_ = 8;   // (1 in the tests and the soak: every frame)
+  uint64_t scene_hash_misses_ = 0;   // (since start: a writer the counter missed)
   uint64_t object_render_hash(GameObject &g, bool memo);
   bool camera_for_render(Mat4 &view, Mat4 &proj, float aspect);
   void draw_grid(Renderer3D &r3d);

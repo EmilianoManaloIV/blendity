@@ -1,5 +1,21 @@
 # Performance, limits and efficiencies
 
+## Pass 18: Pass 17's open items (rounds 435-446)
+
+### The scene's change counter (round 435, ADR 0115)
+Nothing in the scene said "changed", so every view walked every object every frame to find out. Now every edit path
+moves one counter and the views keep the scene hash while it holds still (checked by a walk every 8th frame).
+
+| view (windowed, on the card) | before: frame (hashing) | after: frame (hashing) |
+|---|---|---|
+| Shinano, Scene view | 8.44 ms (0.98) | 6.52 ms (**0.12**) |
+| Shinano, Scene + Game view | 6.17 ms (0.96) | 5.09 ms (**0.12**) |
+| 50,000 cubes, Scene view | 96.4 ms (4.38) | 92.1 ms (**0.55**) |
+
+The hashing is this round's; the frames' other differences are the card's passes and presenting, which vary run to
+run. Gathering (Shinano 1.86, 50,000 cubes 21.9 ms) and the UI are round 436's. The fuzz, checking every frame:
+0 changes the counter missed in 6,000 frames.
+
 ## Pass 17: the bake's quality against Unity's (rounds 421-434)
 
 ### Pass 17 in one table (round 434)

@@ -7,6 +7,7 @@
 // Theory: Fundamentals of Computer Graphics ch. 12.1 "Triangle Meshes".
 #pragma once
 
+#include "../core/edit_epoch.h"
 #include "../core/math.h"
 #include "../render/raster.h"
 
@@ -292,7 +293,10 @@ struct Mesh : MeshCaches {
    * corner on the vertex), kept per topology: what a drag looks edges up in every frame (task 0087). Like the other
    * caches, for the main thread: not safe to call from jobs while the mesh changes. */
   const VertexFaces &vertex_faces() const;
-  void touch() { version++; }
+  void touch() {
+    version++;
+    edit_epoch::bump();  // (ADR 0115: the views' scene hash)
+  }
   /* After a drag (ADR 0034): tangents that followed it the quick way (Lengyel's, while the render mesh moved in
    * place) are made again with MikkTSpace on the next read, as a rebuild would. Changes how the mesh is drawn, not
    * what it is: `version` stays (an F9 adjustment and modifier caches still hold), `looks` moves (the views redraw).

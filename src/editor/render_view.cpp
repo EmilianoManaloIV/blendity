@@ -602,7 +602,45 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   return h;
 }
 
+/* Round 435 (ADR 0115): while nothing an edit goes through has moved the change counter, the scene is the one last
+ * hashed - kept, not walked (Shinano's views walked it 0.98 ms a frame, 50,000 cubes far more). Walked again when the
+ * counter, the scene, the tail (the environment, a bake's or a texture's generation) moves, while the scene changes
+ * behind the counter (Play, a clip, a stroke, Live Link), and on the first call of every `scene_hash_check_every_`th
+ * frame - where a walk that disagrees with the kept hash is a writer the counter missed: counted, warned once, and the
+ * walked hash used. */
 uint64_t Editor::scene_render_hash(bool memo) {
+  if (!memo) return scene_render_hash_walk(false);
+  const uint64_t tail = scene_hash_tail();
+  SceneHashMemo &m = scene_hash_memo_;
+  /* (Outside a frame - a test asking between frames - every call walks. A write made between frames and asked about
+   * only inside the next one is the check's to find: every frame in a headless editor, every 8th in a window.) */
+  const bool same = in_frame_ && m.valid && m.scene == scene_.get() && m.serial == scene_->serial && m.epoch == edit_epoch::now() &&
+                    m.tail == tail && !scene_hash_volatile();
+  const bool check_due = m.frame != hash_frame_ && hash_frame_ - m.checked >= (uint64_t)scene_hash_check_every_;
+  if (same && !check_due) {
+    prof_.scene_hash_reuses++;
+    m.frame = hash_frame_;
+    return m.hash;
+  }
+  const uint64_t epoch = edit_epoch::now();  // (read before the walk: a bump during it walks again next call)
+  const uint64_t h = scene_render_hash_walk(true) ^ tail;
+  if (same && h != m.hash) {
+    prof_.scene_hash_misses++;
+    if (scene_hash_misses_++ == 0) Log::warn("The views' scene hash: a change the counter missed (ADR 0115) - walked and drawn");
+  }
+  m.scene = scene_.get(), m.serial = scene_->serial, m.epoch = epoch, m.tail = tail, m.hash = h;
+  m.frame = m.checked = hash_frame_;
+  m.valid = true;
+  return h;
+}
+
+/* Round 435: the scene changes on its own here - every call walks. */
+bool Editor::scene_hash_volatile() const {
+  if (playing_ || anim_.playing || seqr_.playing || sculpt_stroking_ || paint_stroking_ || paint_2d_stroking_ || wp_stroking_) return true;
+  return livelink_ && livelink_->clients() > 0;
+}
+
+uint64_t Editor::scene_render_hash_walk(bool memo) {
   ProfileScope prof{prof_.ms_hash, {}};
   prof_.scene_hashes++;
   uint64_t h = kFnvBasis;
@@ -612,6 +650,12 @@ uint64_t Editor::scene_render_hash(bool memo) {
     const uint64_t oh = object_render_hash(g, memo);
     mix(&oh, 8);
   });
+  return memo ? h : h ^ scene_hash_tail();
+}
+
+uint64_t Editor::scene_hash_tail() {
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const EnvironmentSettings &es = scene_->environment;
   mix(&es.mode, 4);
   mix(&es.strength, 4);

@@ -372,6 +372,7 @@ bool Mesh::settle() const {
     cache_approx_[ci] = false;
   }
   looks++;
+  edit_epoch::bump();  // (ADR 0115)
   return true;
 }
 

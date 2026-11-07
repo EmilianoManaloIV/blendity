@@ -288,6 +288,7 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
       }
   if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
   reflect(sr);
+  if (sr.done) edit_epoch::bump();  // (round 435, ADR 0115: a field set by name is an edit the views must see)
   if (sr.bad) Log::warn("set %s: '%s' isn't a number (a number, or +=1, *=2 from its own value)", sr.target.c_str(), sr.value.c_str());
   return sr.done && !sr.bad;
 }

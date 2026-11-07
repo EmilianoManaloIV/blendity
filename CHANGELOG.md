@@ -2,6 +2,28 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 435): the scene's change counter
+
+**Asked:** Pass 18's round 435 (the plan: Pass 17's open items) - a scene-wide change counter, so the views stop
+re-deriving an unchanged scene every frame.
+
+**Changed (task 0411, ADR 0115)**
+- **One counter for every edit** (`edit_epoch`): moved by a transform, an object made / destroyed / reparented, a
+  component added or removed, a mesh or material touched, a modifier result adopted, an Inspector or `set` edit, every
+  animated value written (clips, the Sequencer, the Curve editor), constraints that moved something, every recorded edit.
+- **The views' scene hash kept** while it holds still, walked again when it moves, during Play / a playing clip or
+  Sequencer / a stroke / Live Link, and checked by a walk every 8th frame (every frame headless): a disagreement is a counted miss
+  (the Profiler's "Scene hashes kept / missed"), drawn at once.
+- **Hashing:** Shinano's Scene view 0.98 -> 0.12 ms a frame, 50,000 cubes 4.38 -> 0.55 ms.
+- **The fuzz** reports the changes the counter missed: 0 in 6,000 frames, and 0 in a five-minute soak (116,532
+  frames).
+- **The review's finds fixed:** the Sequencer and the Curve editor's key drags wrote animated fields past the counter;
+  a heap stamp in the UV tool had a bump it didn't need; `mark_dirty` bumped once per child.
+- **Learn:** "A change counter: knowing nothing changed without looking", with two questions.
+
+**Checked:** both suites - with Blender's libraries 16400 checks in 1616 tests, 0 failed; dependency-free 15646
+(Windows) and 15652 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 434): Pass 17's write-up
 
 **Asked:** Pass 17's round 434 - the write-up.
