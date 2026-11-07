@@ -2533,7 +2533,9 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     Vec3 v = l.type == RenderLight::Directional ? l.direction : l.position;
     float a[4] = {v.x, v.y, v.z, (float)l.type};
     float b[4] = {l.color.x, l.color.y, l.color.z, l.intensity};
-    float c[4] = {l.range, l.cos_outer, l.cos_inner, l.disk ? 1.0f : 0.0f};
+    /* c.w: an area light's shape (1 a disc); a point or spot light's falloff (2 a bake's legacy curve - round 425). */
+    const float cw = l.type == RenderLight::Area ? (l.disk ? 1.0f : 0.0f) : (l.baked_falloff ? 2.0f : 0.0f);
+    float c[4] = {l.range, l.cos_outer, l.cos_inner, cw};
     float d[4] = {l.direction.x, l.direction.y, l.direction.z, l.width};
     float e[4] = {l.right.x, l.right.y, l.right.z, l.height};
     std::memcpy(g.a, a, 16);

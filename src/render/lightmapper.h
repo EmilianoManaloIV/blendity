@@ -72,6 +72,10 @@ struct BakeLight {
  * every ray alike). Each ray toward a ball stops at the ball's near side along it. One ray when the light has no size;
  * 1 with no ray when it casts no shadow (Unity's No Shadows bakes none either). `rays` counts the rays. */
 float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays);
+/* Round 425: how much of a bake's shadow ray gets through - 0 past an opaque surface, a see-through one's (1 - alpha) on
+ * the way (Unity's lightmapper lets light through a transparent material by its alpha: SideRail's lamps shape their
+ * baked light with see-through "light profile" meshes round the bulb, which had blocked all of it). */
+float baked_shadow_ray(const PathTracer &pt, const Ray &r, float tmax);
 
 /* What a bake produced, and what the renderers read. */
 struct LightingData {

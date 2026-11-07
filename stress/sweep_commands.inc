@@ -153,7 +153,7 @@ static const SweepCommand kSweepCommands[] = {
   {"selectall", "selectall", ""},
   {"separate", "separate loose", ""},
   {"seq", "seq new", ""},
-  {"set", "set World.Fog true", ""},
+  {"set", "set Light.Mode 2", ""},
   {"set_extrude_individual", "set_extrude_individual 1", ""},
   {"settex", "settex Fresh Width 128", ""},
   {"shading", "shading solid", ""},

@@ -97,6 +97,10 @@ struct RenderLight {
   bool shadows = true;
   /* Round 424: the bake's light size - a point or spot light's ball radius (m), a sun's full angle (degrees). */
   float shadow_radius = 0.0f, shadow_angle = 0.0f;
+  /* Round 425: a bake's copy of a Baked or Mixed point or spot light falls off as Unity's built-in pipeline bakes it - the
+   * legacy curve 1 / (1 + 25 (d / Range)^2), windowed to nothing at Range by (1 - (d / Range)^4)^2 - not as the views
+   * draw it. */
+  bool baked_falloff = false;
 };
 
 /* An area light is an emissive plane (task 0155, ADR 0050): a Lambertian emitter of radiance intensity x pi over its
@@ -121,16 +125,28 @@ inline float area_light_area(const RenderLight &l) {
   return finite_bits(a) && a > 1e-4f ? a : 1e-4f;
 }
 
+/* A point or spot light's falloff with distance: the views' curve (1 - d / Range)^2, or a bake's legacy curve (round 425,
+ * RenderLight::baked_falloff). */
+inline float range_falloff(const RenderLight &l, float dist) {
+  const float x = dist / (l.range > 1e-3f ? l.range : 1e-3f);
+  if (!l.baked_falloff) {
+    const float f = 1.0f - x;
+    return f > 0.0f ? f * f : 0.0f;
+  }
+  if (!(x < 1.0f)) return 0.0f;
+  const float w = 1.0f - x * x * x * x;
+  return w * w / (1.0f + 25.0f * x * x);
+}
+
 /* How much of a point, spot or area light reaches p, besides the N.L term:
- * the range falloff (Unity's built-in curve), the spot cone with its soft
+ * the range falloff (range_falloff: the views' curve, or a bake's Unity legacy curve), the spot cone with its soft
  * edge; an area light taken at its centre (area_light_falloff: its facing, the
  * inverse square, the window). L points from p toward the light. */
 inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   if (l.type == RenderLight::Directional) return 1.0f;
   if (l.type == RenderLight::Area) return area_light_area(l) * area_light_falloff(l, l.position, p);
   const float dist = length(l.position - p);
-  float f = 1.0f - dist / (l.range > 1e-3f ? l.range : 1e-3f);
-  f = f > 0.0f ? f * f : 0.0f;
+  float f = range_falloff(l, dist);
   const float c = -(l.direction.x * L.x + l.direction.y * L.y + l.direction.z * L.z);  // toward p, from the light
   if (l.type == RenderLight::Spot) {
     const float d = l.cos_inner - l.cos_outer;

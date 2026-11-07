@@ -61,6 +61,22 @@ them hits something within 5 cm). At 10 texels per unit and 64 samples:
 
 The light lands where Unity's does, 1.7-8x too bright; round 425 works out how Unity's lightmapper treats back faces.
 
+### SideRail's lamps in the bake (round 425)
+The boxed-in lights shine through Unity's "light profile" spheres: their greyscale textures are alpha (Unity's Alpha
+Source, From Gray Scale), and Unity's lightmapper lets light through a transparent material by it. With the alpha read,
+the bake's shadow rays passing see-through surfaces and the legacy falloff (10 texels per unit, 64 samples):
+
+| station: MAE / SSIM / grid correlation | round 424 | round 425 |
+|---|---|---|
+| spawn | 5.61 / 0.876 / 0.494 | 4.71 / 0.877 / 0.866 |
+| spawn_back (dark) | 2.18 / 0.880 / 0.884 | 1.87 / 0.834 / 0.734 |
+| floor | 7.71 / 0.654 / 0.843 | 4.76 / 0.825 / 0.943 |
+| ahead | 4.22 / 0.900 / 0.466 | 3.74 / 0.913 / 0.931 |
+
+At SideRail's own settings (40 texels per unit, 1024 samples): spawn 4.77 / 0.875 / 0.903, spawn_back 1.85 / 0.815 /
+0.533, floor 5.06 / 0.828 / 0.975, ahead 3.95 / 0.910 / 0.930 (round 423: 5.62 / 0.887 / 0.544, 2.06 / 0.853 / 0.630,
+7.82 / 0.679 / 0.583, 4.17 / 0.897 / 0.397). The bake: 692 s, 690 s with the any-hit test first.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

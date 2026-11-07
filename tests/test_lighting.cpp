@@ -6087,6 +6087,112 @@ static void tests_round424() {
   });
 }
 
+/* ---------------------------------------------------------------- round 425: baked light through see-through surfaces (task 0401) */
+static void tests_round425() {
+  test("Unity's Alpha Source (round 425): a texture whose .meta says From Gray Scale loads with its grey as alpha, None as opaque, Input Texture Alpha as decoded; the Budget reads the same field", [] {
+    const std::string dir = resolve_asset_path("Assets/Imported/R425");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    /* A 2 x 1 TGA (32-bit): a white opaque texel and a dark grey one (grey 0x40) of alpha 0x80 - its own alpha and its grey
+     * differ, so each Alpha Source shows. */
+    std::string tga(18, '\0');
+    tga[2] = 2, tga[12] = 2, tga[14] = 1, tga[16] = 32, tga[17] = 0x28;
+    tga += std::string("\xff\xff\xff\xff", 4) + std::string("\x40\x40\x40\x80", 4);
+    auto load_with = [&](const std::string &name, const char *meta) {
+      const std::string p = fs::join(dir, name);
+      CHECK(fs::write_file(p, tga));
+      if (meta) CHECK(fs::write_file(p + ".meta", std::string("fileFormatVersion: 2\nguid: 0000425\nTextureImporter:\n  alphaUsage: ") + meta + "\n"));
+      return texture_load(p, false);
+    };
+    const TexturePtr gray = load_with("gray.tga", "2"), none = load_with("none.tga", "0"), input = load_with("input.tga", "1"), plain = load_with("plain.tga", nullptr);
+    CHECK(gray && none && input && plain);
+    if (gray && none && input && plain) {
+      std::printf("    alpha of the white / dark texels: From Gray Scale %.3f / %.3f, None %.3f / %.3f, Input %.3f / %.3f, no .meta %.3f\n", gray->fetch(0, 0, 0, TexWrap::Extend).w,
+                  gray->fetch(0, 1, 0, TexWrap::Extend).w, none->fetch(0, 0, 0, TexWrap::Extend).w, none->fetch(0, 1, 0, TexWrap::Extend).w, input->fetch(0, 0, 0, TexWrap::Extend).w,
+                  input->fetch(0, 1, 0, TexWrap::Extend).w, plain->fetch(0, 1, 0, TexWrap::Extend).w);
+      CHECK(std::fabs(gray->fetch(0, 0, 0, TexWrap::Extend).w - 1.0f) < 1e-3f && std::fabs(gray->fetch(0, 1, 0, TexWrap::Extend).w - 64.0f / 255.0f) < 2e-3f);
+      CHECK(none->fetch(0, 1, 0, TexWrap::Extend).w == 1.0f);
+      CHECK(std::fabs(input->fetch(0, 1, 0, TexWrap::Extend).w - 128.0f / 255.0f) < 2e-3f && std::fabs(plain->fetch(0, 1, 0, TexWrap::Extend).w - 128.0f / 255.0f) < 2e-3f);
+    }
+    /* The Budget: From Gray Scale has alpha even when the image has none (DXT5 automatic, twice DXT1's bytes). */
+    double with_alpha = 0, without = 0;
+    CHECK(unity_texture_megabytes("Assets/Imported/R425/gray.tga", 1024, 1024, false, with_alpha) && unity_texture_megabytes("Assets/Imported/R425/none.tga", 1024, 1024, false, without));
+    std::printf("    the Budget: From Gray Scale %.3f MB, None %.3f MB\n", with_alpha, without);
+    CHECK(with_alpha > without * 1.9);
+    Bitmap b;
+    b.width = 1, b.height = 1, b.rgba8 = {30, 60, 90, 7};
+    apply_alpha_usage(b, 2);
+    CHECK(b.rgba8[3] == 60);
+    apply_alpha_usage(b, 1);
+    CHECK(b.rgba8[3] == 60);
+    apply_alpha_usage(b, 0);
+    CHECK(b.rgba8[3] == 255);
+    texture_cache_clear();
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("baked light through see-through surfaces and the legacy falloff (round 425): a card of alpha 0.25 lets 3/4 of a Baked light through to the floor as Unity's lightmapper does, an opaque one none; a bake's light falls off as 1 / (1 + 25 (d / Range)^2), windowed; the views' curve unchanged", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), card = primitives::plane(2.0f, 2);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    MaterialPtr veil = make_material("Veil", Vec3(0.0f));
+    veil->surface = (int)MaterialSurface::Transparent, veil->alpha = 0.25f;
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    RenderLight sun;
+    sun.direction = Vec3(0, -1, 0), sun.intensity = 1.0f;
+    auto floor_sum = [&](const MaterialPtr &card_mat) {
+      std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white})};
+      if (card_mat) objs.push_back(bake_object(2, card, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {card_mat}));
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 4, bs.bounces = 0, bs.denoise = false;
+      BakeLight bl;
+      bl.light = sun, bl.mode = 2, bl.id = 9;
+      Lightmapper lm;
+      lm.begin(objs, {bl}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      double s = 0;
+      for (const Vec3 &v : d.pages[(size_t)d.entries.at(1).page].texels) s += v.y;
+      return s;
+    };
+    /* The page holds the card's own texels too (lit alike in every case): the share through is (veiled - opaque) over
+     * (clear - opaque), a clear card being one of alpha 0. */
+    MaterialPtr clear = make_material("Clear", Vec3(0.0f));
+    clear->surface = (int)MaterialSurface::Transparent, clear->alpha = 0.0f;
+    const double through = floor_sum(clear), veiled = floor_sum(veil), blocked = floor_sum(white);
+    const double share = through > blocked ? (veiled - blocked) / (through - blocked) : 0.0;
+    std::printf("    the page's light: under a clear card %.1f, one of alpha 0.25 %.1f, an opaque one %.1f - %.3f of the shadowed light through\n", through, veiled, blocked, share);
+    CHECK(through > blocked * 1.1 && std::fabs(share - 0.75) < 0.02);
+    /* The same through a sized point light's cone of rays (round 424's path). */
+    sun.type = RenderLight::Point, sun.position = Vec3(0, 3, 0), sun.range = 20.0f, sun.intensity = 4.0f, sun.shadow_radius = 0.3f;
+    const double p_through = floor_sum(clear), p_veiled = floor_sum(veil), p_blocked = floor_sum(white);
+    const double p_share = p_through > p_blocked ? (p_veiled - p_blocked) / (p_through - p_blocked) : 0.0;
+    std::printf("    a 0.3 m point light: %.3f of the shadowed light through the card of alpha 0.25\n", p_share);
+    CHECK(p_through > p_blocked * 1.05 && std::fabs(p_share - 0.75) < 0.03);
+    RenderLight pt;
+    pt.type = RenderLight::Point, pt.range = 10.0f;
+    CHECK(std::fabs(range_falloff(pt, 5.0f) - 0.25f) < 1e-6f);  // (the views: (1 - 0.5)^2)
+    pt.baked_falloff = true;
+    const float expect = (1.0f - 0.0625f) * (1.0f - 0.0625f) / (1.0f + 25.0f * 0.25f);
+    std::printf("    at half the Range: the views' curve 0.250, the bake's %.4f\n", range_falloff(pt, 5.0f));
+    CHECK(std::fabs(range_falloff(pt, 5.0f) - expect) < 1e-6f && range_falloff(pt, 0.0f) == 1.0f && range_falloff(pt, 10.0f) == 0.0f && range_falloff(pt, 12.0f) == 0.0f);
+    /* The bake's lights carry it; the views' don't. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Point Light");
+    ed.command("set Light.Mode 2");
+    std::vector<BakeObject> objs;
+    std::vector<BakeLight> lights;
+    ed.collect_bake_scene_for_test(objs, lights);
+    bool baked = false;
+    for (const BakeLight &l : lights) baked = baked || (l.mode == 2 && l.light.baked_falloff);
+    CHECK(baked);
+    GameObject *g = ed.scene().find_by_name("Point Light");
+    if (g && g->get<Light>()) CHECK(!to_render_light(*g, *g->get<Light>()).baked_falloff);
+  });
+}
+
 
 void run_lighting_tests() {
   round35_tests();
@@ -6105,4 +6211,5 @@ void run_lighting_tests() {
   tests_round421();
   tests_round423();
   tests_round424();
+  tests_round425();
 }

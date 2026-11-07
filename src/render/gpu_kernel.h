@@ -910,9 +910,16 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
           centre_fall = area * max(dot(l.d.xyz, dc) / max(sqrt(r2c), 1e-6), 0.0) * wc * wc / max(r2c, 1e-4);
         }
         else {
-          /* As light_falloff on the CPU: range, the spot cone. */
-          float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
-          power *= f * f;
+          /* As light_falloff on the CPU: range (a bake's legacy curve when c.w is 2 - round 425), the spot cone. */
+          float x = length(l.a.xyz - sp.position) / max(1e-3, l.c.x);
+          if (l.c.w > 1.5) {
+            float w = x < 1.0 ? 1.0 - x * x * x * x : 0.0;
+            power *= w * w / (1.0 + 25.0 * x * x);
+          }
+          else {
+            float f = saturate1(1.0 - x);
+            power *= f * f;
+          }
           if (l.a.w > 1.5) {
             float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
             power *= t * t * (3.0 - 2.0 * t);
