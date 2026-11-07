@@ -155,13 +155,13 @@ void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::v
   l.bounces = u.bounces;
   l.denoise = u.filtering != 0;
   l.baked_gi = u.baked_gi;
+  l.directional_mode = u.directional;  // (round 426)
   scene_->unity_bake = u;
   if (!missing_guid.empty())
     notes.push_back("the scene's Lighting Settings asset (" + missing_guid + ") isn't in this project: " + u.source + " used for the bake");
   std::string missing;
   auto add = [&](const std::string &s) { missing += (missing.empty() ? "" : ", ") + s; };
   if (u.backend == 0) add("Enlighten's bake (its settings read as the Progressive Lightmapper's)");
-  if (u.directional) add("Directional mode (baked non-directional)");
   if (u.mixed == 2) add("Shadowmask (Mixed lights baked as Baked Indirect)");
   if (u.mixed == 1) add("Subtractive (Mixed lights baked as Baked Indirect)");
   if (u.ao) add("ambient occlusion");

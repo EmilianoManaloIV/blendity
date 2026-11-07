@@ -1424,6 +1424,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     const bool probes = !lm && !rt && it.use_probes && env.probes && env.probes->data && !env.probes->data->empty();
     if (!lm && !rt && !probes) return;
     const int32_t lm_tex = lm ? gpu_lightmap(*it.lightmap, tex_err) : -1;
+    const int32_t lm_dir = lm && it.lightmap_dir ? gpu_lightmap(*it.lightmap_dir, tex_err) : -1;  // (round 426)
     const int32_t rb = rt ? gpu_lightmap(*it.rt_bounce, tex_err) : -1, rs = rt ? gpu_lightmap(*it.rt_sky, tex_err) : -1;
     /* (Round 415: the corners' block on the card, built once per mesh and UV set - SideRail's had been rebuilt every
      * frame, 24 ms of its 32 ms GPU path.) */
@@ -1432,6 +1433,10 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       gpu::RasterInstance &in = inst[k];
       in.baked = true;
       in.lightmap = lm_tex, in.rt_bounce = rb, in.rt_sky = rs;
+      /* (Round 426: the direction page only where a mapped normal can differ - a normal map or an axis material's
+       * parts; not lilToon, whose ambient takes the plain light on the CPU as here. Elsewhere the factor is 1 and the
+       * baked pass would evaluate the material for nothing.) */
+      in.lightmap_dir = !in.lil && (in.tex[3] >= 0 || in.axis_parts[0] >= 0.0f) ? lm_dir : -1;
       in.corner_base = base < 0 ? -1 : base + (int32_t)(in.first_index / 3);
       in.baked_flags = (probes ? 1u : 0u) | (lm && rt && bounce_onto_lm ? 2u : 0u);
     }
