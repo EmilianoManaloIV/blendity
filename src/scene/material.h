@@ -124,6 +124,9 @@ struct Material {
   float volume_density_at(Vec3 local) const;
   bool principled_extras() const { return subsurface > 0.0f || sheen > 0.0f || coat > 0.0f || anisotropic > 0.0f; }
   float alpha = 1.0f;
+  /* Round 429 (Silent's Filamented, _ExposureOcclusion): reflections fade where the baked light is dark - the occlusion
+   * |baked irradiance| / this, into Lagarde's specular occlusion. 0: off (every other shader). */
+  float exposure_occlusion = 0.0f;
   int surface = 0;          // MaterialSurface
   float alpha_clip = 0.5f;  // Cutout threshold
   float ior = 1.45f;        // Glass index of refraction (Blender's default)

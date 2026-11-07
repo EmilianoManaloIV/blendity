@@ -620,6 +620,7 @@ gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material
   in.metal_spec[1] = s.specular;
   in.metal_spec[2] = m.surface == (int)MaterialSurface::Cutout ? m.alpha_clip : -1.0f;  // (task 0163: the card punches the holes)
   in.metal_spec[3] = m.alpha;
+  in.exposure_occlusion = m.exposure_occlusion;  // (round 429: every material, textured or not - review 429)
   /* (Task 0195: see-through - Transparent, else Glass, as draw_see_through takes any other value.) */
   if (!m.opaque() && m.surface != (int)MaterialSurface::Cutout) in.surface = m.surface == (int)MaterialSurface::Transparent || m.volume() ? 2 : 3, in.ior = m.ior;
   set3(in.emission, s.emission);

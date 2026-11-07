@@ -6391,6 +6391,29 @@ static void tests_round428() {
   });
 }
 
+/* ---------------------------------------------------------------- round 429: Filamented's specular occlusion from the baked light (task 0405) */
+static void tests_round429() {
+  test("baked specular occlusion (round 429): Filamented's to its own numbers - Lagarde's specular occlusion of |baked irradiance| / Exposure Occlusion at the squared roughness, then the multi-bounce by f0; off at 0, none where the baked light is bright", [] {
+    const Vec3 dielectric(0.04f), metal(0.8f);
+    CHECK(baked_specular_occlusion(0.0f, Vec3(0.0f), 0.5f, 0.5f, dielectric).x == 1.0f);  // (off: every shader but Filamented)
+    CHECK(baked_specular_occlusion(0.2f, Vec3(0.5f), 0.5f, 0.5f, dielectric).x == 1.0f);  // (bright: saturated)
+    /* Reference values from Filamented's HLSL (SpecularAO_Lagarde, gtaoMultiBounce, perceptualRoughness^2), computed
+     * apart: nv, baked, Exposure Occlusion, perceptual roughness, f0 -> what the reflection keeps. */
+    struct Case {
+      float nv, baked, eo, pr;
+      Vec3 f0;
+      float want;
+    };
+    const Case cases[] = {{0.5f, 0.05f, 0.2f, 0.3f, dielectric, 0.420316f}, {0.5f, 0.05f, 0.2f, 0.3f, metal, 0.748777f},
+                          {0.2f, 0.02f, 0.2f, 0.6f, dielectric, 0.164152f}, {0.9f, 0.0f, 0.2f, 0.1f, Vec3(0.5f), 0.0f}};
+    for (const Case &c : cases) {
+      const float got = baked_specular_occlusion(c.eo, Vec3(c.baked), c.nv, c.pr, c.f0).x;
+      std::printf("    nv %.1f, |irradiance| %.3f, roughness %.1f, f0 %.2f: keeps %.6f (Filamented %.6f)\n", c.nv, c.baked * 1.7320508f, c.pr, c.f0.x, got, c.want);
+      CHECK(std::fabs(got - c.want) < 1e-4f);
+    }
+  });
+}
+
 
 void run_lighting_tests() {
   round35_tests();
@@ -6412,4 +6435,5 @@ void run_lighting_tests() {
   tests_round425();
   tests_round426();
   tests_round428();
+  tests_round429();
 }

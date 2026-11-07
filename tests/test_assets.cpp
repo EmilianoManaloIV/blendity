@@ -11656,6 +11656,15 @@ static void tests_round395() {
     CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", ao, "    - _Metallic: 0.6\n    - _Glossiness: 0.7\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"),
                          kTex, shader("Silent/Filamented"), metal, info));
     CHECK(info.known && info.shader == "Filamented" && std::fabs(metal.metallic - 0.6f) < 1e-6f && std::fabs(metal.roughness - 0.3f) < 1e-5f && info.notes.size() == 1);
+    CHECK(std::fabs(metal.exposure_occlusion - 0.2f) < 1e-6f);  // (round 429: the shader's default Exposure Occlusion)
+    Material sensitive;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _ExposureOcclusion: 0.5\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex,
+                         shader("Silent/Filamented"), sensitive, info));
+    CHECK(std::fabs(sensitive.exposure_occlusion - 0.5f) < 1e-6f);
+    Material standard;  // (Unity's Standard: no such occlusion)
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _ExposureOcclusion: 0.5\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex,
+                         shader("Standard"), standard, info));
+    CHECK(standard.exposure_occlusion == 0.0f);
     Material rough;
     CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "    - _SpecGlossMap:\n        m_Texture: {fileID: 2800000, guid: rough, type: 3}\n",
                              "    - _Metallic: 0.2\n    - _Glossiness: 0.8\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex, shader("Silent/Filamented (Roughness setup)"), rough, info));

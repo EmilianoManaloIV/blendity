@@ -2208,6 +2208,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
   else amb = env.irradiance(n);
   if (sp.has_gi && !sp.has_lightmap)
     spec = spec * (1.0f + (sp.gi_sky - 1.0f) * (env_.gi ? env_.gi->params.specular_occlusion : env_.rt_specular_occlusion));
+  spec = spec * baked_specular_occlusion(s.exposure_occlusion, amb, nv, s.roughness, f0);  // (round 429: Filamented's - every ambient, as its SH: the lightmap, probes, realtime GI or the sky)
   Vec3 diff = amb * s.albedo * (1.0f - s.metallic);
   return lo + diff + spec + s.emission;
 }

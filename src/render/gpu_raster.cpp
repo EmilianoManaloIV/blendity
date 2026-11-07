@@ -1796,6 +1796,14 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   vec3 spec = probe_specular(P, R, rough) * (gi.z > 0.5 ? unity_indirect_specular(f0, mix(0.08 * specular, 1.0, metallic), rough, nv) : env_brdf_approx(f0, rough, nv));  // (round 401: the reflection probes' box; round 405: Unity's weight)
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
+  float eo = bk[self].b.z;  // (round 429: Filamented's specular occlusion - baked_specular_occlusion on the CPU, every ambient)
+  if (eo > 0.0) {
+    float ao = clamp(length(amb) / eo, 0.0, 1.0);
+    float pr = clamp(rough, 0.045, 1.0), ar = pr * pr;
+    float v = clamp(pow(nv + ao, exp2(-16.0 * ar - 1.0)) - 1.0 + ao, 0.0, 1.0);
+    vec3 a3 = 2.0404 * f0 - 0.3324, b3 = -4.7951 * f0 + 0.6417, c3 = 2.7552 * f0 + 0.6903;
+    spec *= max(vec3(v), ((v * a3 + b3) * v + c3) * v);
+  }
   return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
 }
 )";
@@ -4120,7 +4128,7 @@ class VulkanRaster final : public Raster {
       const RasterInstance &s = instances_[i];
       int32_t *d = &t[i * 8];
       d[0] = s.lightmap, d[1] = s.rt_bounce, d[2] = s.rt_sky, d[3] = s.corner_base;
-      const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, 0.0f, 0.0f};  // (b.y: round 426's direction page, -1 none)
+      const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, s.exposure_occlusion, 0.0f};  // (b.y: round 426's direction page, -1 none; b.z: round 429's exposure occlusion)
       std::memcpy(d + 4, f, 16);
     }
     return write_array(baked_buf_, t.data(), t.size() * 4, err);
