@@ -590,9 +590,16 @@ void Light::reflect(Reflector &r) {
          "Preview Lighting shows it before a bake. The path tracer lights with every mode.");
   static const char *shadow_types[] = {"No Shadows", "Hard Shadows", "Soft Shadows"};
   r.enumeration("Shadow Type", shadows, shadow_types, 3);
-  r.help("Unity's Shadow Type (round 401). No Shadows: the light passes through everything, in the views and the path tracer\n"
-         "alike. Hard and Soft: it casts shadows (the views draw the sun's; the path tracer every light's).");
+  r.help("Unity's Shadow Type (round 401). No Shadows: the light passes through everything - in the views, the path tracer and\n"
+         "the bake alike. Hard and Soft: it casts shadows (the views draw the sun's; the path tracer and the bake every light's).");
   if (all || shadows != 0) r.field("Shadow Strength", shadow_strength, 0.01f, 0.0f, 1.0f);
+  if (all || (shadows == 2 && (type == 1 || type == 2))) r.field("Baked Shadow Radius", shadow_radius, 0.01f, 0.0f, 10.0f);
+  if (all || (shadows == 2 && type == 0)) r.field("Baked Shadow Angle", shadow_angle, 0.1f, 0.0f, 90.0f);
+  if (all || (shadows == 2 && type != 3))
+    r.help("Unity's Baked Shadow Radius (point and spot, metres) and Angle (directional, degrees): the bake takes the light\n"
+           "as a ball, or a disc in the sky, this big, so its baked shadows soften away from what casts them (0: sharp).\n"
+           "Soft Shadows only, as in Unity. Direct Samples in the Lighting window sets how many shadow rays a texel sends.\n"
+           "Area lights are soft by their size.");
   r.field("Indirect Multiplier", bounce_intensity, 0.01f, 0.0f, 8.0f);
   r.help("Unity's Indirect Multiplier: how much of this light's bounced light the bake keeps (0: none bounces).");
   r.texture("Cookie", cookie);

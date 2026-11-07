@@ -302,6 +302,10 @@ struct Light : ComponentBase<Light> {
    * Culling Mask kept as Unity's bits. */
   int shadows = 2;
   float shadow_strength = 1.0f;
+  /* Round 424 (Unity's Baked Shadow Radius / Angle): the size the bake gives a point or spot light (a ball, metres) and
+   * a directional one (a disc in the sky, its full angle in degrees), so its baked shadows soften away from what
+   * casts them. 0: sharp. */
+  float shadow_radius = 0.0f, shadow_angle = 0.0f;
   float bounce_intensity = 1.0f;
   TextureRef cookie;
   float cookie_size = 10.0f;

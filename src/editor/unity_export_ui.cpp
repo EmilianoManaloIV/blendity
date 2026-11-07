@@ -234,6 +234,7 @@ void unity_component_edits(const GameObject &g, int64_t game_object, std::vector
                 {"m_InnerSpotAngle", unity_yaml_num(l->inner_spot_angle)}, {"m_AreaSize", "{x: " + unity_yaml_num(l->area_width) + ", y: " + unity_yaml_num(l->area_height) + "}"},
                 {"m_Lightmapping", l->mode == 2 ? "2" : l->mode == 1 ? "1" : "4"}, {"m_Shadows/m_Type", std::to_string(std::max(0, std::min(2, l->shadows)))},
                 {"m_Shadows/m_Strength", unity_yaml_num(l->shadow_strength)}, {"m_BounceIntensity", unity_yaml_num(l->bounce_intensity)},
+                {"m_ShadowRadius", unity_yaml_num(l->shadow_radius)}, {"m_ShadowAngle", unity_yaml_num(l->shadow_angle)},
                 {"m_UseColorTemperature", l->use_temperature ? "1" : "0"}, {"m_ColorTemperature", unity_yaml_num(l->temperature)}, {"m_Enabled", l->enabled ? "1" : "0"}};
     out.push_back(e);
   }

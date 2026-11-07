@@ -2,6 +2,23 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-06 (round 424): soft baked shadows
+
+**Asked:** Pass 17's round 424 - Unity's Baked Shadow Radius and Angle in the bake; the diagnosis of SideRail's dim
+stations, light by light.
+
+**Changed (task 0400)**
+- **Baked Shadow Radius and Baked Shadow Angle** on lights (the Inspector, Unity's import and export): the bake takes
+  the light as a ball, or a disc in the sky, that big, so its baked shadows soften away from what casts them; the
+  lightmaps send Direct Samples rays over it, the probes 16.
+- **No Shadows is baked:** such a light lights through everything in the lightmaps and probes too, as in Unity.
+- **Found:** 42 of SideRail's 70 Baked lights sit inside their lamps' closed meshes, so Blendity's bake gets no light
+  out of them. Letting shadow rays through back faces puts the light where Unity's is (grid correlation 0.49 -> 0.91
+  at spawn) but 1.7-8x too bright: round 425 works out Unity's rule.
+
+**Checked:** tests_round424; both suites - with Blender's libraries 16278 checks in 1599 tests, 0 failed;
+dependency-free 15537 (Windows) and 15543 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-06 (round 423): the lightmap denoiser and Unity's sample count
 
 **Asked:** Pass 17's round 423 - denoising and sampling: round 421 had found the lightmap filter doubling a long bake's

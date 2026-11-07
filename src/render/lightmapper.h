@@ -65,6 +65,14 @@ struct BakeLight {
   uint64_t id = 0;  // the light's GameObject
 };
 
+/* Round 424 (Unity's Baked Shadow Radius and Angle): how much of a light reaches o past what is in the way - over
+ * `samples` stratified shadow rays into the cone the light fills seen from o (a point or spot light a ball of
+ * shadow_radius round its position, `dist` away along L; a sun a disc of shadow_angle round L, dist 1e30), the share
+ * nothing blocks, each ray weighted by its cosine to the surface normal `n` (none below the horizon; null for a probe:
+ * every ray alike). Each ray toward a ball stops at the ball's near side along it. One ray when the light has no size;
+ * 1 with no ray when it casts no shadow (Unity's No Shadows bakes none either). `rays` counts the rays. */
+float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays);
+
 /* What a bake produced, and what the renderers read. */
 struct LightingData {
   struct Entry {
