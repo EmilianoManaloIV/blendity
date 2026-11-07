@@ -2,6 +2,67 @@
 
 ## Pass 17: the bake's quality against Unity's (rounds 421-434)
 
+### Pass 17 in one table (round 434)
+**The bake against Unity's** - SideRail, Blendity's own Generate Lighting at the scene's own settings, each station
+against Unity's render of the same view (MAE / SSIM / grid correlation; ADR 0113's target MAE <= 4, SSIM >= 0.90, grid
+>= 0.95):
+
+| station | Unity's lightmaps in Blendity | Blendity's bake, round 421 | Blendity's bake, round 430 (final) |
+|---|---|---|---|
+| spawn | 3.46 / 0.921 / 0.989 | 5.55 / 0.890 / 0.539 | **3.71** / 0.812 / 0.899 |
+| spawn_back (dark) | 1.61 / 0.806 / 0.693 | 2.34 / 0.875 / 0.859 | **1.37** / 0.772 / 0.360 |
+| floor | 2.85 / 0.870 / 0.998 | 7.66 / 0.692 / 0.666 | **4.36** / 0.747 / **0.974** |
+| ahead | 3.00 / 0.949 / 0.984 | 4.12 / 0.900 / 0.419 | **3.06** / 0.883 / **0.958** |
+| the bake | (Unity's own, not timed) | 686 s, nothing on the card | **85 s** (the gather on the card, as the scene asks) |
+
+The light now lands where Unity's does (grid correlation 0.42-0.67 -> 0.90-0.97 on the lit stations) and as bright
+(MAE under 4 at three of four, the floor 4.36). **Missed:** SSIM fell at every station (0.81-0.88 at the lit three,
+target 0.90) - Unity's lightmaps in Blendity reach 0.87-0.95, so the gap is the bake's fine structure, not the views:
+the reflections that round 428 turned right way up, the directional strength (Unity's direction maps are much shorter:
+median length 0.12 against 0.74), the chart seams, the exit sign's glow. spawn_back's grid correlation (0.36) is a dark
+view's noise floor.
+
+**The synthetic guard** (`blendity_stress --only lightmap_quality`, relative luminance RMSE against 16x the samples):
+
+| scene | round 421 | round 434 |
+|---|---|---|
+| room (area light) | 0.031 | 0.016 |
+| corridor (8 point lights) | 0.015 | 0.008 |
+| courtyard (sun and sky) | 0.077 | 0.060 |
+| room at 64 / 1024 samples, filtered | 0.033 / 0.031 | 0.021 / 0.014 |
+| a box sunk into a floor: the ring's light against the reference | - | 0.998 (784 texels inside, filled) |
+
+**What Pass 17 built for the bake:** the comparison itself (round 421); a denoiser on the noisy light only (423); soft
+baked shadows (424); light through see-through surfaces and Unity's legacy falloff for baked lights (425 - SideRail's
+lamps had been 1.7-8x off); directional lightmaps (426-427, ADR 0114); reflection probes right way up and
+GGX-prefiltered (428); Filamented's specular occlusion (429); texel validity and the bake on the card (430).
+
+**Performance, before -> after** (this machine; the user's SideRail / Shinano copies through bench_world):
+
+| | before Pass 17 | after |
+|---|---|---|
+| SideRail: Generate Lighting | 686 s | 85 s |
+| SideRail / Shinano: Export Unity Package | 18.7 / 7.5 s | 3.2 / 1.7 s |
+| Shinano: F12 (raster) | 3.5 s | 1.1 s |
+| SideRail: the first `budget pc`, headless | 7.0 s | 1.0 s |
+| SideRail: the bake's start (cold textures) | 6.1 s | 0.73 s |
+| a 50k-face OBJ / USDA import's landing frame | 69 / 61 ms | 6.9 / 3.4 ms |
+| 50,000 cubes: delete all | 365 ms | 28.6 ms |
+| SideRail: the Scene view on the card | 10.3 ms (round 420) | 8.1 ms (Unity's 10.0) |
+| Shinano: the Scene view on the card | 7.0 ms | 7.5 ms (Unity's 2.2) |
+| a 30-minute soak (editor fuzz) | never run | no crash in 194,633 frames (two crashes found and fixed) |
+
+**Open, ranked:**
+1. The views re-derive an unchanged scene every frame (Shinano 2.8 ms, 50,000 cubes 28 ms of gathering and hashing):
+   a scene-wide change counter, its own round and ADR.
+2. The bake's SSIM: directional strength against Unity's divisor, seams (Unity's Stitch Seams), the exit sign's glow.
+3. One 698 ms frame while SideRail path-traces; Enter Edit Mode on 500k, 116 ms (budget 100).
+4. The soak's 1.1-1.3 GB of working memory: its holder (a heap profile per window).
+5. Shadowmask and Subtractive, L2 SH probes and Light Volumes in Blendity's own views, per-island chart packing - planned
+   for Pass 17, not reached.
+6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
+   macOS with Blender's libraries, input latency, a cold shader cache, OptiX / MoonRay, Unity timed per step.
+
 ### The bake measured (round 421, ADR 0113)
 Before Pass 17 every comparison with Unity loaded Unity's lightmaps. Blendity's own Generate Lighting at SideRail's
 own settings (40 texels per unit, 32 direct / 1024 indirect samples, 2 bounces) against Unity's render

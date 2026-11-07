@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 434): Pass 17's write-up
+
+**Asked:** Pass 17's round 434 - the write-up.
+
+**Changed (task 0410)**
+- **docs/PERFORMANCE.md, "Pass 17 in one table":** Blendity's own bake against Unity's on SideRail - the light now where
+  Unity's is and as bright (MAE under 4 at three of four stations, grid correlation 0.90-0.97 on the lit ones), in 85 s
+  instead of 686; its fine structure not yet (SSIM 0.75-0.88, target 0.90). The synthetic guard halved (room 0.031 ->
+  0.016). Every performance row before and after; the open items, ranked.
+- **docs/hci/compare-unity-vrchat-2026-11.md:** Pass 17's section.
+- **Learn, "How good is the bake?":** the result, and a question on MAE against SSIM.
+- **The performance baseline** refreshed from this build.
+
+**Checked:** both suites - with Blender's libraries 16375 checks in 1612 tests, 0 failed; dependency-free 15621 (Windows) and 15627 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 433): a soak, 50,000 objects, the path tracer on a real world
 
 **Asked:** Pass 17's round 433 - measure what Pass 16 never measured, and list what this machine can't.
