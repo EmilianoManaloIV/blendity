@@ -1262,6 +1262,15 @@ class Editor {
   LightingEnv make_lighting_for_test() { return make_lighting(cam_.position(), true, true); }
   bool unity_lights_gamma() const { return scene_->unity.gamma_lights(); }  // (re-check 401: one rule for the views and the bakes)
   void reflection_probe_bakes_changed() { reflection_probe_gen_++, reflection_probe_bakes_dirty_ = true, reflection_probe_maps_.clear(), build_reflection_probe_maps(); }
+  /* Round 428: a bake's probes landed with the maps its worker made; only the others' are built here. */
+  void land_reflection_probe_maps(std::map<uint64_t, TexturePtr> &maps) {
+    reflection_probe_gen_++, reflection_probe_bakes_dirty_ = true;  // (only the landed probes' maps replaced: the others keep theirs - review 428)
+    for (auto &[id, map] : maps) {
+      const auto b = reflection_probe_bakes_.find(id);
+      if (b != reflection_probe_bakes_.end() && map) reflection_probe_maps_[id] = {&b->second, std::move(map)};
+    }
+    build_reflection_probe_maps();
+  }
   void build_reflection_probe_maps();  // (review 401: the renderers' maps made when the bakes arrive, not on the next frame)
   const Environment &env_for_test() const { return env_; }
   void light_volume_bakes_changed_for_test() { lv_bake_gen_++; }
@@ -5522,6 +5531,7 @@ class Editor {
     size_t probes_valid = 0;
     std::map<uint64_t, LightVolumeSH> volume_bakes;
     std::map<uint64_t, ReflectionProbeBake> probe_bakes;
+    std::map<uint64_t, TexturePtr> probe_maps;  // (round 428: each bake's map with its prefiltered levels, made on the worker)
     /* What the tray and the Lighting window read while it runs. */
     std::atomic<int> phase{0};  // 0 the lightmaps, 1 the probe volume, 2 the volumes, 3 the reflection probes, 4 done
     double phase_ms[5] = {-1, -1, -1, -1, -1};  // (round 421: the lightmaps, the probes, the Light Volumes, the reflection probes, saving; -1 not reached)

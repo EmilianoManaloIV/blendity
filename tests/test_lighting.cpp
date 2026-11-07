@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the lighting tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/render/reflection_probe.h"
 
 static void round35_tests() {
   /* ---------------------------------------------------------------- 1: lightmap UVs */
@@ -6288,6 +6289,108 @@ static void tests_round426() {
   });
 }
 
+/* ---------------------------------------------------------------- round 428: reflection probes prefiltered as Unity's (task 0404) */
+/* The prefilter's exact value: every cube texel weighted by what the importance sampler converges to - the lobe's pdf
+ * (D(h) / 4 when N = V) times N.L, by the texel's solid angle. */
+static float r428_exact_prefilter(const ReflectionProbeBake &b, Vec3 n, float rough) {
+  const float a = std::max(1e-3f, rough * rough), a2 = a * a;
+  double sum = 0.0, wsum = 0.0;
+  for (int f = 0; f < 6; f++)
+    for (int y = 0; y < b.size; y++)
+      for (int x = 0; x < b.size; x++) {
+        const float u = ((float)x + 0.5f) / (float)b.size, v = ((float)y + 0.5f) / (float)b.size;
+        const Vec3 l = cube_direction(f, u, v);
+        const float ndl = dot(n, l);
+        if (ndl <= 0.0f) continue;
+        const float su = 2.0f * u - 1.0f, sv = 2.0f * v - 1.0f, r2 = 1.0f + su * su + sv * sv;
+        const float sr = 4.0f / ((float)b.size * (float)b.size) / (r2 * std::sqrt(r2));  // (a cube texel's solid angle)
+        const Vec3 h = normalize(n + l);
+        const float noh = dot(n, h), d = noh * noh * (a2 - 1.0f) + 1.0f, pdf = a2 / (kPi * d * d) * 0.25f;
+        const double w = (double)pdf * ndl * sr;
+        sum += w * b.faces[f][(size_t)y * b.size + x].x;
+        wsum += w;
+      }
+  return wsum > 0.0 ? (float)(sum / wsum) : 0.0f;
+}
+
+static void tests_round428() {
+  test("reflection probes (round 428): the mips prefiltered with GGX for the roughness Unity maps to each (r (1.7 - 0.7 r) x 6): a uniform probe stays uniform at every level, a bright patch spreads wider the rougher with its light kept, and both renderers' lookups take Unity's mapping", [] {
+    CHECK(reflection_probe_lod(0.0f, 11) == 0.0f && std::fabs(reflection_probe_lod(1.0f, 11) - 6.0f) < 1e-6f && reflection_probe_lod(1.0f, 4) == 3.0f);
+    for (float r : {0.1f, 0.35f, 0.6f, 0.9f}) CHECK(std::fabs(reflection_probe_level_roughness(reflection_probe_lod(r, 11)) - r) < 1e-4f);
+    ReflectionProbeBake b;
+    b.size = 128;  // (Unity's default resolution: at 32 a level-4 map is 8 x 4 pixels, too coarse for its lobe)
+    for (auto &f : b.faces) f.assign((size_t)b.size * b.size, Vec3(0.25f, 0.5f, 1.0f));
+    TexturePtr uniform = reflection_probe_texture(b);
+    CHECK(uniform && uniform->levels.size() > 6);
+    float worst = 0.0f;
+    for (int k = 0; uniform && k <= 6; k++)
+      for (const Vec4 &p : uniform->levels[(size_t)k].pxf) worst = std::max(worst, std::fabs(p.y - 0.5f));
+    std::printf("    a uniform probe: the levels 0-6 differ from it by at most %.5f\n", worst);
+    CHECK(worst < 1e-3f);
+    /* A bright square in the middle of +Y (the sky's top), dark elsewhere. */
+    for (auto &f : b.faces) f.assign((size_t)b.size * b.size, Vec3(0.0f));
+    for (int y = 48; y < 80; y++)
+      for (int x = 48; x < 80; x++) b.faces[2][(size_t)y * b.size + x] = Vec3(10.0f);
+    ScopedTimer build_t;
+    TexturePtr t = reflection_probe_texture(b);
+    std::printf("    a 128 probe's map with its prefiltered levels: %.1f ms\n", build_t.ms());
+    CHECK(t != nullptr);
+    if (!t) return;
+    auto level_stats = [&](int k, float &peak, double &total) {
+      const Texture::Level &lv = t->levels[(size_t)k];
+      peak = 0.0f, total = 0.0;
+      for (int y = 0; y < lv.h; y++)
+        for (int x = 0; x < lv.w; x++) {
+          const float v = lv.pxf[(size_t)y * lv.w + x].x;
+          peak = std::max(peak, v);
+          total += v * std::sin(kPi * ((float)y + 0.5f) / (float)lv.h) / ((double)lv.w * lv.h);  // (the sphere's area per row)
+        }
+    };
+    float p1, p3, p5;
+    double t1, t3, t5;
+    level_stats(1, p1, t1), level_stats(3, p3, t3), level_stats(5, p5, t5);
+    std::printf("    a bright patch: the peak %.3f / %.3f / %.3f at levels 1 / 3 / 5, the light over the sphere %.4f / %.4f / %.4f\n", p1, p3, p5, t1, t3, t5);
+    CHECK(p1 > p3 && p3 > p5);
+    /* (Each texel's lobe is normalized by its own N.L weights - the split sum's prefilter, Unity's and Karis's - so the
+     * light over the sphere may drift a little as the lobe widens: within 5 %.) */
+    CHECK(std::fabs(t3 - t1) < t1 * 0.05 && std::fabs(t5 - t1) < t1 * 0.05);
+    /* Near the top the lookups read the patch (round 428 found the rows upside down: the sharp lookup had read the floor's
+     * dark) and the rough one the level prefiltered for its roughness (10 degrees off the pole: the map's top row wraps to
+     * its bottom one in a bilinear read). */
+    RenderProbe rp;
+    rp.map = t;
+    const Vec3 up = normalize(Vec3(0.1763f, 1.0f, 0.0f));
+    const Vec3 sharp = reflection_probe_specular(rp, Vec3(0.0f), up, 0.0f), rough = reflection_probe_specular(rp, Vec3(0.0f), up, 0.5f);
+    const float want = reflection_probe_prefilter(b, up, 0.5f, 1024).x;
+    std::printf("    10 degrees off the top: %.3f at roughness 0, %.3f at 0.5 (the lobe itself %.3f)\n", sharp.x, rough.x, want);
+    CHECK(sharp.x > 9.0f && sharp.x > rough.x && std::fabs(rough.x - want) < want * 0.2f);
+    /* And straight down, the dark below: a reflection toward the floor sees the floor. */
+    CHECK(reflection_probe_specular(rp, Vec3(0.0f), normalize(Vec3(0.1763f, -1.0f, 0.0f)), 0.0f).x < 0.01f);
+    /* A lamp 2 x 2 texels across (review 428): at the rough levels each sample reads the mip its share of the lobe covers,
+     * so the lamp blurs into a smooth blob - every texel near it within 20 % of the exact lobe (every cube texel weighted). */
+    for (auto &f : b.faces) f.assign((size_t)b.size * b.size, Vec3(0.0f));
+    for (int y = 63; y < 65; y++)
+      for (int x = 63; x < 65; x++) b.faces[4][(size_t)y * b.size + x] = Vec3(1000.0f);  // (+Z's middle)
+    TexturePtr lamp = reflection_probe_texture(b);
+    CHECK(lamp != nullptr);
+    if (!lamp) return;
+    float worst_off = 0.0f;
+    for (int k = 4; k <= 6; k++) {
+      const Texture::Level &lv = lamp->levels[(size_t)k];
+      const float rough_k = reflection_probe_level_roughness((float)k);
+      for (int dx = -2; dx <= 2; dx++) {
+        /* Texels along the equator around +Z (u = 0.5 + phi / 2 pi; +Z at phi 0). */
+        const int x = lv.w / 2 + dx, y = lv.h / 2;
+        const Vec3 dir = equirect_to_dir(Vec2(((float)x + 0.5f) / (float)lv.w, 1.0f - ((float)y + 0.5f) / (float)lv.h), 0.0f);
+        const float ref = r428_exact_prefilter(b, dir, rough_k), got = lv.pxf[(size_t)y * lv.w + x].x;
+        if (ref > 0.05f) worst_off = std::max(worst_off, std::fabs(got - ref) / ref);
+      }
+    }
+    std::printf("    a lamp 2 x 2 texels across: levels 4-6 near it within %.1f %% of the exact lobe\n", worst_off * 100.0f);
+    CHECK(worst_off < 0.2f);  // (15 % measured; the worst is a texel at the lobe's tail, where the value is small)
+  });
+}
+
 
 void run_lighting_tests() {
   round35_tests();
@@ -6308,4 +6411,5 @@ void run_lighting_tests() {
   tests_round424();
   tests_round425();
   tests_round426();
+  tests_round428();
 }

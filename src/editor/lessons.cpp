@@ -1411,6 +1411,10 @@ A lightmap holds how much light reached each texel, not where it came from - so 
 ? Brick walls look flat in the baked corridor but bumpy where a realtime light hits them. What do you check? | Directional Mode in the Lighting settings: on Non-Directional the baked light has no direction for the normal map to catch. Set it to Directional and Generate Lighting again.
 ! cmd:set Lighting.DirectionalMode 1; bake | Bake with directions
 ? Why does a floor lit only by bounced light show its bumps less than one under a lamp? | Only the direct light from lamps and the sun gives the baked light a direction, as in Unity: light bounced from everywhere has none, so there is nothing for the bumps to lean toward.
+# Reflection probes: rough metal blurs as in Unity
+A reflection probe's picture of the room is stored with blurrier copies beside it, one per roughness step. Each copy is the reflection a surface of that roughness would see - a GGX highlight lobe wide, the shape Unity's and Blender's shaders use - not just a smaller image, and Blendity reads them by roughness exactly as Unity does (rough 0.5 picks the fourth copy). So polished metal shows a sharp room, brushed metal a soft one, and the same material looks the same here and in VRChat.
+? A polished floor reflects the room sharply but a rough wall's reflection looks blocky. What is it reading? | A blurrier copy of the probe chosen by its roughness. Each copy is a GGX lobe's blur at that roughness; a blocky look means the probe's Resolution is low for the room - raise it on the Reflection Probe and Generate Lighting again.
+! cmd:create Cube; component ReflectionProbe; bake | Give an object a reflection probe and bake its blurred copies
 )"},
     {"Advanced Modeling Tools", "Edge loops, loop cuts and generative modifiers", R"(
 Edge mode (press 2) selects edges. An edge loop is a chain of edges running straight through 4-way vertices, around a cylinder or across a grid. Loops are how modellers add detail: you cut a new loop exactly where a bend needs geometry.
