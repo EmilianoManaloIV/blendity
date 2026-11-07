@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 437): the two freezes
+
+**Asked:** Pass 18's round 437 - Enter Edit Mode on a 500k-face mesh, and the 698 ms frame while SideRail path-traced.
+
+**Changed (task 0413)**
+- **The CPU cage's commands written once:** prepared straight into the batch, not zero-filled and copied twice; an
+  opaque dot's inside written, not blended. Enter Edit Mode on the 500k sphere 115-123 -> 98-110 ms; an Edit Mode
+  frame after it 70 -> 43-54 ms.
+- **The 698 ms frame was the first frame after opening SideRail**, not the path tracer: the textures decoded in it and
+  sent to the card. A warm path-traced F12 never goes over 34 ms.
+- **F12's textures loaded on a worker first** when they aren't cached ("loading N textures"): a cold F12's start on
+  SideRail 861 -> 47 ms.
+- **A `.scene` opened on a worker decodes its textures there:** its first frame draws from the cache.
+- **`perf mark` names its longest frame's parts**; **`jobs async on|off`** runs a headless script's jobs on workers.
+- **Left open:** a Unity scene import's first frame still decodes and uploads its textures (textures that stream in are
+  the fix); Enter Edit Mode's 34 ms render mesh still in the frame.
+- **Learn:** "Finding a frozen frame: which part was it?"
+
+**Checked:** both suites - with Blender's libraries 16,431; dependency-free 15,677 (Windows) and 15,683
+(Linux, WSL), 0 failed; the audits; the fuzz.
+
 ## 2026-11-07 (round 436): the idle frame
 
 **Asked:** Pass 18's round 436 - keep what the views re-derive every frame on the change counter.

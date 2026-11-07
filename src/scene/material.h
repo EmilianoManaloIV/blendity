@@ -264,6 +264,10 @@ using MaterialPtr = std::shared_ptr<Material>;
 MaterialPtr make_material(const std::string &name, Vec3 color);
 /* Round 422: the materials' image files (Material::texture_files) decoded on every core into the texture cache. */
 void prefetch_material_textures(const std::vector<MaterialPtr> &materials);
+/* Round 437: every image file a scene's renderers' materials read, decoded on every core into the texture cache - a
+ * scene's first frame then draws from the cache (SideRail's had decoded 1.2 s of textures in its first frame). */
+struct Scene;
+void prefetch_scene_textures(const Scene &s);
 const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */

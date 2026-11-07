@@ -813,7 +813,10 @@ void Editor::frame_body(std::vector<Event> &events) {
     if (!frame_history_.empty()) frame_history_.back() += d_ms;
   }
   perf_mark_frames_++;
-  perf_mark_worst_ = std::max(perf_mark_worst_, frame_ms_);
+  if (frame_ms_ > perf_mark_worst_) {  // (round 437: with its parts)
+    perf_mark_worst_ = frame_ms_;
+    perf_mark_worst_prof_ = prof_last_;
+  }
 }
 
 /* Round 411 (ADR 0105): what `perf status` prints - the last frame with its parts, the worst of the last 240, the jobs. */
@@ -840,7 +843,8 @@ std::string Editor::perf_mark(const std::string &name) {
   /* (No frame between the marks: the whole time was one stall of the main thread - a script's `open` or `export` run
    * inside its command - so the longest frame is that time.) */
   const std::string s = perf_mark_frames_ > 0
-                            ? strprintf("perf mark %s: %.1f ms over %d frame(s), the longest %.1f ms", name.empty() ? "(unnamed)" : name.c_str(), ms, perf_mark_frames_, perf_mark_worst_)
+                            ? strprintf("perf mark %s: %.1f ms over %d frame(s), the longest %.1f ms", name.empty() ? "(unnamed)" : name.c_str(), ms, perf_mark_frames_, perf_mark_worst_) +
+                                  worst_frame_parts()
                             : strprintf("perf mark %s: %.1f ms over 0 frame(s), the longest %.1f ms (no frame between the marks: one stall)", name.empty() ? "(unnamed)" : name.c_str(), ms, ms);
   perf_mark_t0_ = now;
   perf_mark_frames_ = 0;
@@ -2247,6 +2251,7 @@ bool Editor::open_scene(const std::string &path) {
   raw->thread = std::thread([raw] {
     JobSystem::global().run_background([raw] {
       if (!load_scene(raw->path, *raw->scene, raw->err)) raw->scene.reset();
+      else prefetch_scene_textures(*raw->scene);  // (round 437: decoded here - the first frame draws from the cache)
     });
     raw->done.store(true, std::memory_order_release);
   });

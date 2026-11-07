@@ -8434,6 +8434,103 @@ static void tests_round436() {
   });
 }
 
+/* ---------------------------------------------------------------- round 437: the two freezes (task 0413) */
+static void tests_round437() {
+  test("Enter Edit Mode on the 500k sphere (round 437): the frame that enters and the frames after it, timed; `perf mark` names its longest frame's parts", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.step_frame_headless();
+    ed.command("perf reset");
+    ScopedTimer t;
+    ed.command("edit");
+    ed.step_frame_headless();
+    const double enter = t.ms();
+    const FrameProfile p = ed.frame_profile_last_for_test();
+    ScopedTimer t2;
+    ed.step_frame_headless();
+    const double next = t2.ms();
+    std::printf("    entering: %.1f ms (overlays %.1f, gathering %.1f); the next frame %.1f ms\n", enter, p.ms_overlays, p.ms_collect, next);
+    CHECK(ed.in_edit_mode());
+    const std::string mark = ed.perf_mark_for_test("enter edit");
+    std::printf("    %s\n", mark.c_str());
+    CHECK(mark.find("perf mark enter edit: ") == 0 && mark.find("the longest") != std::string::npos);
+    CHECK(mark.find("Scene view") != std::string::npos);  // (the longest frame was the cage's: over 5 ms of the Scene view)
+  });
+  test("F12's textures loaded first on a worker (round 437): with images not in the cache the render says it is loading them, starts when they land, and finishes; with them cached it starts at once", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    ed.set_async_jobs_for_test(true);
+    ed.command("create Cube");
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    int made = 0;
+    for (const char *name : {"Cube", "Sphere"}) {
+      GameObject *g = ed.scene().find_by_name(name);
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      const std::string tex = fs::join(test_dir(), std::string("r437_") + name + ".png");
+      std::vector<uint32_t> px(64 * 64, made ? 0xFF3060C0u : 0xFFC06030u);
+      CHECK(write_png(tex, px.data(), 64, 64, 64));
+      MaterialPtr m = make_material(std::string("R437 ") + name, {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      mr->materials = {m};
+      made++;
+    }
+    CHECK(made == 2);
+    texture_cache_clear();
+    ed.command("render");
+    const uint64_t prefetched = ed.render_prefetches_for_test();
+    CHECK(prefetched == 1);
+    CHECK(ed.rendering_for_test());
+    CHECK(ed.render_status_for_test().find("loading 2 textures") != std::string::npos);
+    int frames = 0;
+    for (; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    a cold F12: %d frame(s) until it finished, %llu load(s) first\n", frames, (unsigned long long)prefetched);
+    CHECK(!ed.rendering_for_test());
+    ed.command("render");  // (warm: no load first)
+    CHECK(ed.render_prefetches_for_test() == prefetched);
+    for (frames = 0; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    CHECK(!ed.rendering_for_test());
+    /* Review 437: two files that won't decode - one load, then the render runs (they never reach the cache). */
+    for (const char *name : {"Cube", "Sphere"}) {
+      GameObject *g = ed.scene().find_by_name(name);
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (mr && !mr->materials.empty() && mr->materials[0]) mr->materials[0]->base_map.path = fs::join(test_dir(), std::string("r437_missing_") + name + ".png");
+    }
+    const uint64_t loads = ed.render_prefetches_for_test();
+    ed.command("render");
+    for (frames = 0; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    two missing files: %d frame(s), %llu load(s)\n", frames, (unsigned long long)(ed.render_prefetches_for_test() - loads));
+    CHECK(!ed.rendering_for_test());
+    CHECK(ed.render_prefetches_for_test() - loads == 1);
+  });
+  test("a scene's textures decoded before its first frame (round 437): what an open's worker runs fills the texture cache with every renderer's image files", [] {
+    Scene s;
+    std::vector<std::string> files;
+    for (int i = 0; i < 3; i++) {
+      GameObject *g = s.create("Textured " + std::to_string(i));
+      g->add<MeshFilter>()->mesh = primitives::cube();
+      const std::string tex = fs::join(test_dir(), "r437_scene_" + std::to_string(i) + ".png");
+      std::vector<uint32_t> px(32 * 32, 0xFF000000u | (uint32_t)(i * 0x404040));
+      CHECK(write_png(tex, px.data(), 32, 32, 32));
+      MaterialPtr m = make_material("R437 " + std::to_string(i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      g->add<MeshRenderer>()->materials = {m};
+      files.push_back(tex);
+    }
+    texture_cache_clear();
+    int before = 0, after = 0;
+    for (const std::string &f : files) before += texture_cached(f, true) != nullptr;
+    prefetch_scene_textures(s);
+    for (const std::string &f : files) after += texture_cached(f, true) != nullptr;
+    std::printf("    %d of %zu textures cached before, %d after\n", before, files.size(), after);
+    CHECK(before == 0 && after == (int)files.size());
+  });
+}
+
 /* ---------------------------------------------------------------- round 436, review: gathers by other paths */
 static void tests_round436_review() {
   test("a render's gather doesn't feed the Game view (review 436): F12 gathers with the views' outlines, LOD Groups and Camera Flatten off; the Game view after it gathers its own, in verify mode no stale list", [] {
@@ -8889,5 +8986,6 @@ void run_editor_tests() {
   tests_round435();
   tests_round436();
   tests_round436_review();
+  tests_round437();
   coverage_tests();
 }

@@ -1307,7 +1307,7 @@ void Editor::run_console_command(const std::string &line) {
     paint_command(t);
     return;
   }
-  if (c == "jobs") {  // jobs | jobs cancel [label]: the job tray's list (task 0253)
+  if (c == "jobs") {  // jobs | jobs cancel [label] | jobs async on|off: the job tray's list (task 0253; round 437)
     jobs_command(t);
     return;
   }

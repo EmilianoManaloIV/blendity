@@ -215,6 +215,7 @@ struct FrameProfile {
   double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
+  double ms_render_start = 0, ms_render_land = 0;  // round 437: F12's start (the snapshot) and each frame's poll and landing
   double ms_window[32] = {};  // round 436: each docked window's own drawing (WindowKind order; the views' rendering inside theirs)
   uint64_t scene_hash_reuses = 0, scene_hash_misses = 0;  // round 435 (ADR 0115): scene hashes kept while nothing changed; checks that found a change the counter missed
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
@@ -261,6 +262,7 @@ struct FrameProfile {
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
     for (int k = 0; k < 32; k++) ms_window[k] += o.ms_window[k];
+    ms_render_start += o.ms_render_start, ms_render_land += o.ms_render_land;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
     gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
@@ -861,6 +863,26 @@ class Editor {
   const std::vector<float> &frame_history() const { return frame_history_; }
   std::string perf_status_text() const;
   std::string perf_mark(const std::string &name);
+  std::string worst_frame_parts() const;
+  /* Round 437: F12's image files decoded on a worker first when some aren't in the texture cache - the snapshot (which
+   * freezes the materials, reading their textures) then starts in the frame it lands, fast. A cold F12 on SideRail had
+   * decoded 820 ms of textures in one frame. */
+  struct RenderPrefetch {
+    std::thread thread;
+    std::atomic<bool> done{false};
+    bool preview = false, open_window = false;
+    const Scene *scene = nullptr;
+    uint64_t serial = 0;
+    size_t files = 0;
+    ~RenderPrefetch() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<RenderPrefetch> render_prefetch_;
+  bool render_prefetch_start(bool preview, bool open_window);
+  void render_prefetch_poll();
+  uint64_t render_prefetches_ = 0;  // (since start: renders that loaded their textures first)
+  bool render_prefetched_ = false;  // (review 437: the render after a load starts without another - a file that won't decode, or a cache over its budget, would load forever)
   /* The CPU badge's reason (round 411): this window's Scene view refused by the card (its own slot's reason - another
    * view's refusal, the Game view's bloom over glass say, is the Profiler's to list), else the card absent. Empty: no badge. */
   const std::string &scene_view_slot_reason() const {
@@ -1344,6 +1366,8 @@ class Editor {
   void set_scene_hash_check_every_for_test(int n) { scene_hash_check_every_ = std::max(1, n); }
   uint64_t scene_hash_misses_for_test() const { return scene_hash_misses_; }
   uint64_t walks_skipped_for_test() const { return walks_skipped_; }
+  uint64_t render_prefetches_for_test() const { return render_prefetches_; }
+  std::string perf_mark_for_test(const std::string &name) { return perf_mark(name); }
   uint64_t scene_hash_reuses_for_test() const { return prof_.scene_hash_reuses; }
   void next_hash_frame_for_test() { hash_frame_++; }
   bool scene_hash_volatile_for_test() const { return scene_hash_volatile(); }
@@ -3842,6 +3866,7 @@ class Editor {
   float frame_ms_ = 0, ui_ms_ = 0;
   double perf_mark_t0_ = 0.0;  // (round 411: `perf mark` - since the last mark: the frames and the longest)
   float perf_mark_worst_ = 0.0f;
+  FrameProfile perf_mark_worst_prof_;  // (round 437: the longest frame's parts, printed by `perf mark`)
   int perf_mark_frames_ = 0;
   std::vector<float> frame_history_, raster_history_;
   /* Editor frame rate (Preferences > Performance). */

@@ -218,6 +218,73 @@ void Editor::walk_done(WalkMark &m, uint64_t epoch_before) const {
   m.scene = scene_.get(), m.serial = scene_->serial, m.epoch = epoch_before, m.frame = hash_frame_;
 }
 
+/* Round 437: the files a render's materials read and the texture cache doesn't hold, loaded on a worker; the render
+ * shows "preparing" and starts when they land (render_prefetch_poll). Only where jobs run on workers (a window, or a
+ * headless editor that asked) - elsewhere the snapshot decodes them in its frame, on every core, as before. */
+bool Editor::render_prefetch_start(bool preview, bool open_window) {
+  const bool loaded = render_prefetched_;  // (the render its load was for: no second load)
+  render_prefetched_ = false;
+  if (!jobs_async() || render_prefetch_ || loaded) return false;
+  std::vector<MaterialPtr> used;
+  scene_->for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.active_in_hierarchy() ? g.get<MeshRenderer>() : nullptr;
+    if (mr && mr->enabled && mr->show_in_renders) used.insert(used.end(), mr->materials.begin(), mr->materials.end());
+  });
+  std::vector<std::pair<std::string, bool>> files;
+  for (const MaterialPtr &m : used)
+    if (m) m->texture_files(files);
+  std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
+  files.erase(std::remove_if(files.begin(), files.end(), [](const auto &f) { return texture_cached(f.first, f.second) != nullptr; }), files.end());
+  if (files.size() < 2) return false;  // (one file: the snapshot's own decode is as quick)
+  auto pf = std::make_unique<RenderPrefetch>();
+  pf->preview = preview, pf->open_window = open_window, pf->scene = scene_.get(), pf->serial = scene_->serial, pf->files = files.size();
+  RenderPrefetch *raw = pf.get();
+  pf->thread = std::thread([raw, files = std::move(files)] {
+    JobSystem::global().run_background([&] {
+      JobSystem::global().parallel_for((int64_t)files.size(), 1, [&](int64_t a, int64_t b) {
+        for (int64_t i = a; i < b; i++) (void)texture_load(files[(size_t)i].first, files[(size_t)i].second);
+      });
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  render_prefetch_ = std::move(pf);
+  render_prefetches_++;
+  rendering_ = true;
+  render_preview_ = preview;
+  render_status_ = strprintf("%s: loading %zu textures...", preview ? "Preview" : "Render", render_prefetch_->files);
+  ui_.redraw = true;
+  return true;
+}
+
+void Editor::render_prefetch_poll() {
+  if (!render_prefetch_ || !render_prefetch_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<RenderPrefetch> pf = std::move(render_prefetch_);  // (joined as it goes)
+  const bool preview = pf->preview, open_window = pf->open_window;
+  pf.reset();
+  const bool wanted = rendering_;  // (a Stop while the textures loaded: nothing follows)
+  rendering_ = false;
+  if (!wanted) {
+    render_status_ = "Render stopped while its textures loaded";
+    return;
+  }
+  /* (The scene shown now, even if an undo or an open replaced it meanwhile - the render was asked for: review 437.) */
+  render_prefetched_ = true;
+  start_final_render(preview, open_window);
+}
+
+/* Round 437: `perf mark`'s note on its longest frame - the parts over 5 ms, so a stall says where it was. */
+std::string Editor::worst_frame_parts() const {
+  const FrameProfile &p = perf_mark_worst_prof_;
+  const std::pair<const char *, double> parts[] = {{"Scene view", p.ms_scene3d}, {"Game view", p.ms_game}, {"preview", p.ms_preview},
+                                                   {"GPU path", p.ms_gpu}, {"render start", p.ms_render_start}, {"render landing", p.ms_render_land},
+                                                   {"UI", p.ms_ui}, {"undo", p.ms_undo}, {"deferred", p.ms_deferred}, {"present", p.ms_present}};
+  std::string s;
+  for (const auto &[name, ms] : parts)
+    if (ms > 5.0) s += strprintf("%s%s %.1f", s.empty() ? "" : ", ", name, ms);
+  return s.empty() ? std::string() : " (" + s + " ms)";
+}
+
 /* Round 436: the windowed check's line of the docked windows' own times, slowest first (those over 0.05 ms). */
 void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, double frames) {
   std::vector<std::pair<double, int>> t;
@@ -2035,6 +2102,16 @@ void Editor::trace_picture(RenderJob &j, PathTracer &pt) {
 }
 
 void Editor::start_final_render(bool preview, bool open_window) {
+  struct Timed {  // (round 437: the start's time in the frame's profile, whichever way it returns)
+    double &into;
+    ScopedTimer t;
+    ~Timed() { into += t.ms(); }
+  } timed{prof_.ms_render_start, {}};
+  if (render_prefetch_) {  // (round 437: its textures still loading - the render that follows takes this one's flags)
+    render_prefetch_->preview = preview, render_prefetch_->open_window = render_prefetch_->open_window || open_window;
+    return;
+  }
+  if (scene_->render.engine != 2 && render_prefetch_start(preview, open_window)) return;  // (round 437: the textures first, on a worker)
   render_job_wait("a new render");  // (one render at a time: a job still working stops and lands first)
   /* F12 and the Render window's preview draw on the CPU, the reference (the GPU is the interactive views'). */
   struct KeepCpu {
@@ -2098,6 +2175,8 @@ void Editor::render_job_start(std::unique_ptr<RenderJob> job) {
 }
 
 void Editor::step_final_render() {
+  render_prefetch_poll();  // (round 437: a render's textures loaded: its snapshot now)
+  if (render_prefetch_) return;
   if (render_job_ && !rendering_) {  // (a stopped render: its last picture lands once the worker has resolved it)
     if (render_job_->done.load(std::memory_order_acquire)) render_job_finish();
     return;
@@ -2116,6 +2195,7 @@ void Editor::step_final_render() {
 void Editor::render_job_poll() {
   RenderJob *j = render_job_.get();
   if (!j) return;
+  ProfileScope prof{prof_.ms_render_land, {}};  // (round 437)
   if (j->traced && headless_ && !async_jobs_ && !j->done.load(std::memory_order_acquire)) {
     /* A headless editor that didn't ask for workers (a test): a frame advances the render by about a slice, as before
      * round 412 - waited for here, so a test's frame count bounds the render's progress as it did. */

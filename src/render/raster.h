@@ -452,6 +452,9 @@ class Renderer3D {
   void fill_pending_sky();
   /* An overlay prepared for drawing (screen space, clipped). */
   struct OverlayCmd {
+    /* (Round 437: left unset - a cage's million commands are resized into the batch and written once by the prepare,
+     * not zeroed first: 48 MB of zeros a frame.) */
+    OverlayCmd() {}
     float x0, y0, z0, x1, y1, z1;  // line ends, or a point's centre in x0 / y0 / z0 and its radius in x1
     uint32_t color;
     float bias;
@@ -460,6 +463,7 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  std::vector<uint32_t> band_idx_;  // (round 437: end_overlay_batch's band lists, kept between batches - not 7 MB allocated each)
   OverlayRecord *record_ = nullptr;  // (task 0192)
   /* flush() scratch, kept between flushes (cleared, not freed): per item, is it visible, is it big enough
    * for the separate vertex stage, does it have see-through materials; the vertex-stage jobs. */

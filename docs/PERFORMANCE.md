@@ -32,6 +32,19 @@ Open: Shinano's Scene view is 2.1x Unity's (its UI 2.1 ms, overlays 1.1); at 50,
 (12 ms) and render call (12 ms) - one mesh drawn 50,000 times, which instancing would draw once - and the overlay
 commands (13 ms).
 
+### The two freezes (round 437)
+- **Enter Edit Mode on the 500k sphere** (the CPU cage): 115-123 -> **98-110 ms**, an Edit Mode frame 70 -> 43-54 ms.
+  The cage's commands are prepared straight into the batch (not a million-command array zero-filled and copied twice a
+  frame); an opaque dot's inside is written, not blended. At ADR 0105's 100 ms, not safely under: the 34 ms Edit Mode
+  render mesh is still built in the frame.
+- **The 698 ms frame while SideRail path-traced** was the first frame after the open: its textures decoded (1.2 s) and
+  sent to the card (0.57 s) in one frame. A warm path-traced F12: longest frame 34 ms. A cold F12's start now loads its
+  textures on a worker first (861 -> **47 ms**); a `.scene` opened on a worker decodes its textures there.
+- **Open:** a Unity scene import's first frame (textures decoded and uploaded in it) - textures that stream in after the
+  first frame; the card's uploads spread over frames.
+- `perf mark` now names the longest frame's parts (over 5 ms) - "the longest 577.7 ms (Scene view 573.9, GPU path
+  568.5)".
+
 ## Pass 17: the bake's quality against Unity's (rounds 421-434)
 
 ### Pass 17 in one table (round 434)

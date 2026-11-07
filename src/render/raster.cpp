@@ -1104,13 +1104,21 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
   if (c.point) {
     const float r = c.x1;
     const int cx = (int)c.x0, cy = (int)c.y0, ir = (int)std::ceil(r);
+    /* (Round 437: the coverage r + 1/2 - distance needs the square root only on the rim - inside (r - 1/2) it is 1,
+     * past (r + 1/2) nothing; an opaque dot's inside written, not blended. Half a million cage dots a frame.) */
+    const float in = std::max(0.0f, r - 0.5f), in2 = in * in, out2 = (r + 0.5f) * (r + 0.5f);
+    const bool opaque = (c.color >> 24) == 255 && r >= 0.5f;  // (a dot under half a pixel: its centre blended, as before)
     for (int y = std::max(cy - ir, ymin); y <= cy + ir && y < ymax; y++)
-      for (int x = cx - ir; x <= cx + ir; x++) {
-        if (x < 0 || x >= Wi) continue;
-        float dx = x + 0.5f - c.x0, dy = y + 0.5f - c.y0;
-        float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
-        if (a <= 0) continue;
+      for (int x = std::max(cx - ir, 0); x <= cx + ir && x < Wi; x++) {
+        const float dx = x + 0.5f - c.x0, dy = y + 0.5f - c.y0, d2 = dx * dx + dy * dy;
+        if (d2 >= out2) continue;
         uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
+        if (d2 <= in2 && opaque) {
+          d = c.color;
+          continue;
+        }
+        const float a = d2 <= in2 ? 1.0f : saturate(r + 0.5f - std::sqrt(d2));
+        if (a <= 0) continue;
         d = Color::over(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));  // (over: task 0193)
       }
     return;
@@ -1184,34 +1192,34 @@ void Renderer3D::record_many(size_t n, const Prepare &prepare) {
     }
     return;
   }
-  std::vector<OverlayCmd> all(n);
-  std::vector<uint8_t> keep(n, 0);
-  std::vector<uint32_t> kept(nc + 1, 0);
-  JobSystem &js = JobSystem::global();
-  js.parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+  /* Round 437: prepared straight into the batch - each chunk keeps its own commands at the front of its stretch, then
+   * the stretches close up in order (nothing moves while every command is kept, as a cage's mostly are). The batch
+   * isn't zeroed first (OverlayCmd's constructor leaves it unset): Enter Edit Mode on a 500k-face mesh had zeroed and
+   * copied two million-command arrays. */
+  const bool batch = batching_;
+  std::vector<OverlayCmd> direct;  // (not batching: drawn at once, from here)
+  std::vector<OverlayCmd> &into = batch ? overlay_cmds_ : direct;
+  const size_t base = into.size();
+  into.resize(base + n);
+  std::vector<uint32_t> kept(nc, 0);
+  JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
     for (int64_t c = c0; c < c1; c++) {
+      OverlayCmd *out = into.data() + base + (size_t)c * kChunk;
       uint32_t count = 0;
       for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++)
-        if (prepare(i, all[i])) keep[i] = 1, count++;
-      kept[(size_t)c + 1] = count;
+        count += prepare(i, out[count]) ? 1u : 0u;  // (a refused one is written over by the next)
+      kept[(size_t)c] = count;
     }
   });
-  for (size_t c = 0; c < nc; c++) kept[c + 1] += kept[c];
-  const size_t total = kept[nc];
-  if (!batching_) {
-    for (size_t i = 0; i < n; i++)
-      if (keep[i]) draw_overlay(all[i], 0, rt_->height);
-    return;
+  size_t at = base;
+  for (size_t c = 0; c < nc; c++) {
+    const size_t from = base + c * kChunk;
+    if (at != from && kept[c]) std::memmove(into.data() + at, into.data() + from, kept[c] * sizeof(OverlayCmd));
+    at += kept[c];
   }
-  const size_t base = overlay_cmds_.size();
-  overlay_cmds_.resize(base + total);
-  js.parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
-    for (int64_t c = c0; c < c1; c++) {
-      size_t at = base + kept[(size_t)c];
-      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++)
-        if (keep[i]) overlay_cmds_[at++] = all[i];
-    }
-  });
+  into.resize(at);
+  if (batch) return;
+  for (const OverlayCmd &cmd : direct) draw_overlay(cmd, 0, rt_->height);
 }
 
 /* Round 417: many ops recorded on every core in pieces, appended in order (a 500k-face cage's million edges and half a
@@ -1348,7 +1356,8 @@ void Renderer3D::end_overlay_batch() {
     for (size_t ch = 0; ch < nchunks; ch++) start[ch * (size_t)nb + (size_t)b] = at, at += counts[ch * (size_t)nb + (size_t)b];
     offs[(size_t)b + 1] = at;
   }
-  std::vector<uint32_t> idx(offs[(size_t)nb]);
+  band_idx_.resize(offs[(size_t)nb]);  // (round 437: kept between batches)
+  uint32_t *idx = band_idx_.data();
   js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
     for (int64_t ch = c0; ch < c1; ch++) {
       uint32_t *fill = &start[(size_t)ch * (size_t)nb];

@@ -3361,6 +3361,15 @@ void Scene::destroy(const std::vector<GameObject *> &list) {
   for (size_t i = 0; i < objects_.size(); i++) objects_[i]->index_in_scene = i;
 }
 
+void prefetch_scene_textures(const Scene &s) {
+  std::vector<MaterialPtr> used;
+  s.for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    if (mr) used.insert(used.end(), mr->materials.begin(), mr->materials.end());
+  });
+  prefetch_material_textures(used);
+}
+
 void Scene::clear() {
   edit_epoch::bump();  // (round 436: lists kept on the counter hold pointers into the scene)
   objects_.clear();
