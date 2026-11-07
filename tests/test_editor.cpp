@@ -8370,6 +8370,87 @@ static void tests_round419() {
   });
 }
 
+/* ---------------------------------------------------------------- round 436: the idle frame (task 0412) */
+static void tests_round436() {
+  test("the views' draw items kept (round 436): orbiting an unchanged scene gathers nothing; a `set` gathers again; verify mode finds no stale list", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.command("create Cube");
+    ed.command("create Point Light");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    uint64_t kept = 0;
+    for (int i = 0; i < 6; i++) {  // (the editor's camera turns: every frame redraws, the scene holds still)
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 7.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+      kept += ed.frame_profile_last_for_test().items_kept;
+    }
+    ed.set_render_cache_verify(false);
+    for (int i = 0; i < 6; i++) {
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 7.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+      kept += ed.frame_profile_last_for_test().items_kept;
+    }
+    std::printf("    12 orbiting frames: %llu gathers answered from the kept items\n", (unsigned long long)kept);
+    CHECK(kept >= 6);  // (verify mode gathers anyway; outside it every orbit frame keeps the list)
+    ed.command("set Light.Intensity 3");  // (the scene's hash moves: the next orbit gathers)
+    SceneCamera c = ed.scene_camera_for_test();
+    c.yaw += 7.0f;
+    ed.set_scene_camera_for_test(c);
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().items_kept == 0);
+    CHECK(ed.frame_profile_last_for_test().ms_collect > 0.0);
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
+  });
+  test("per-frame walks let go while nothing changed (round 436): procedural shapes, Fit to Mesh, focus tracking, the icon pass skip their walk; a Fit to Mesh ticked by `set` is fitted the next frame", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_scene_hash_check_every_for_test(8);  // (a window's interval; headless walks every frame)
+    ed.command("create Cube");
+    ed.command("component Collider");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const uint64_t s0 = ed.walks_skipped_for_test();
+    for (int i = 0; i < 16; i++) ed.step_frame_headless();
+    const uint64_t skipped = ed.walks_skipped_for_test() - s0;
+    std::printf("    16 idle frames: %llu walks skipped\n", (unsigned long long)skipped);
+    CHECK(skipped >= 16 * 2);  // (at least the shapes' and the colliders' walks, 7 frames in 8)
+    GameObject *g = ed.active_object_for_test();
+    ColliderComponent *c = g ? g->get<ColliderComponent>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->fit = false;
+    c->size = {9, 9, 9};
+    ed.command("set Collider.FitToMesh true");
+    ed.step_frame_headless();
+    CHECK(!c->fit);
+    CHECK(c->size.x < 5.0f);  // (fitted to the unit cube again)
+  });
+}
+
+/* ---------------------------------------------------------------- round 436, review: gathers by other paths */
+static void tests_round436_review() {
+  test("a render's gather doesn't feed the Game view (review 436): F12 gathers with the views' outlines, LOD Groups and Camera Flatten off; the Game view after it gathers its own, in verify mode no stale list", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.command("create Cube");
+    ed.command("create Camera");
+    ed.command("window Game");
+    ed.step_frame_headless();
+    ed.command("render");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
+  });
+}
+
 /* ---------------------------------------------------------------- round 435: the scene's change counter (task 0411, ADR 0115) */
 /* Idle frames: how many walked the scene and how many kept its hash. */
 static void idle_frames(Editor &ed, int n, uint64_t &walks, uint64_t &kept) {
@@ -8806,5 +8887,7 @@ void run_editor_tests() {
   tests_round422();
   tests_round433();
   tests_round435();
+  tests_round436();
+  tests_round436_review();
   coverage_tests();
 }

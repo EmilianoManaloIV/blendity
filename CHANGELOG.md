@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 436): the idle frame
+
+**Asked:** Pass 18's round 436 - keep what the views re-derive every frame on the change counter.
+
+**Changed (task 0412, ADR 0115 amended)**
+- **The views' draw items kept** while the scene's hash and the view's switches hold still (the eye too where an
+  outline's width depends on it): orbiting an unchanged scene gathers nothing.
+- **Four per-frame walks of every object skip while nothing changed:** procedural shapes, colliders' Fit to Mesh, a
+  camera's focus tracking, the Scene view's icon pass - 22 ms of an idle frame at 50,000 objects.
+- **Per-window timing** in the Profiler's frame profile and the windowed check.
+- **Shinano:** Scene view 6.52 -> 4.69 ms (8.44 before round 435), Scene + Game 5.09 -> 2.93 ms (Unity's Game view
+  2.5). **50,000 cubes:** 92.1 -> 61.7 ms a redrawn frame, the idle frame 14.5 -> 5.3 ms.
+- **Left open:** the card's instances (12 ms at 50,000 cubes: one mesh drawn 50,000 times wants instancing), the
+  overlay commands (13 ms there), the UI pass on unchanged frames.
+- **The review's finds fixed:** a render's gather could feed the Game view; a render job's kept gather held no outline
+  shells; `focus` waited for the walk; LOD levels never kept; walks read the counter before they start.
+- **Learn:** "Walks that skip: an idle frame at 50,000 objects".
+
+**Checked:** both suites - with Blender's libraries 16409 checks in 1619 tests, 0 failed; dependency-free 15655 (Windows) and 15661
+(Linux, WSL), 0 failed; the audits; the fuzz (6,000 frames, no stale picture, no change the counter missed).
+
 ## 2026-11-07 (round 435): the scene's change counter
 
 **Asked:** Pass 18's round 435 (the plan: Pass 17's open items) - a scene-wide change counter, so the views stop

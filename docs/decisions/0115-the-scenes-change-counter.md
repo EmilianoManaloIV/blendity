@@ -31,6 +31,14 @@ component were written field by field - by the Inspector, `set`, clips, scripts,
    walked hash drawn. A missed writer is stale for at most seven frames, never for good; the tests and the soak run
    the check every frame and expect no miss.
 
+## Amendment (round 436)
+The counter now also keeps the views' draw items (`collect_items`: keyed by the scene's hash, the view's switches and,
+where an item depends on it, the eye) and lets per-frame walks skip (procedural shapes, Fit to Mesh, focus tracking,
+the icon pass's object list: `WalkMark`, walked every 8th frame anyway). A kept list holds pointers: a write that
+replaces a mesh past every funnel can leave one pointing at a freed mesh until the next check - the same writer that
+was a stale picture is now a possible crash for up to seven frames, so a missed writer matters more; the fuzz and the
+soak check for misses every frame.
+
 ## Consequences
 - Idle frames and frames that only move the camera stop walking the scene (Shinano 0.98 -> ~0 ms; 50,000 cubes
   4.4 -> ~0 ms) - and the counter is what round 436 keeps the views' draw items and the card's instances on.

@@ -16,6 +16,22 @@ The hashing is this round's; the frames' other differences are the card's passes
 run. Gathering (Shinano 1.86, 50,000 cubes 21.9 ms) and the UI are round 436's. The fuzz, checking every frame:
 0 changes the counter missed in 6,000 frames.
 
+### The idle frame (round 436)
+On the counter: the views' draw items kept (orbiting an unchanged scene gathers nothing), and four per-frame walks of
+every object (procedural shapes, Fit to Mesh, focus tracking, the icon pass - 22 ms of an idle frame at 50,000
+objects) skipped while nothing changed. Per-window timing found them.
+
+| view (windowed, on the card) | before round 435 | after round 435 | after round 436 | Unity |
+|---|---|---|---|---|
+| Shinano, Scene view | 8.44 ms | 6.52 | **4.69** | 2.2 |
+| Shinano, Scene + Game view | 6.17 | 5.09 | **2.93** | 2.5 (Game) |
+| 50,000 cubes, Scene view | 96.4 | 92.1 | **61.7** | - |
+| 50,000 cubes, idle frame | not measured | 14.5 | **5.3** | - |
+
+Open: Shinano's Scene view is 2.1x Unity's (its UI 2.1 ms, overlays 1.1); at 50,000 cubes the card's instances
+(12 ms) and render call (12 ms) - one mesh drawn 50,000 times, which instancing would draw once - and the overlay
+commands (13 ms).
+
 ## Pass 17: the bake's quality against Unity's (rounds 421-434)
 
 ### Pass 17 in one table (round 434)

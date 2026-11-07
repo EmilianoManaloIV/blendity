@@ -2023,6 +2023,11 @@ Every view asks each frame whether the scene changed since its last picture, and
 ? Why does the counter make the scene hash cheaper on frames where you only orbit the camera? | The camera isn't part of the scene's hash (the view key adds it separately), so orbiting moves no counter: the scene's hash is kept and only the view's own key changes.
 ! cmd:benchscene cubes50k | Build 50,000 cubes, then open the Profiler and watch "Scene hashes kept / missed"
 ! cmd:perf status | Print the last frame's parts
+# Walks that skip: an idle frame at 50,000 objects
+An editor does small chores every frame: rebuild a procedural shape whose settings changed, fit a collider whose Fit to Mesh was ticked, keep a camera's focus on its target, find the objects that show an icon. Each chore is a walk over every object, and each walk is cheap - until the scene has 50,000 objects, when four of them took 22 ms of a frame in which nothing at all had changed. With the change counter (the lesson before) each walk remembers the counter it last ran at and skips while it holds still; like the scene hash, it walks anyway every eighth frame, so a change the counter missed is late, never lost. The views' draw items are kept the same way: turning the camera around an unchanged scene gathers nothing. Per-window timing - each docked window's own time, in the Profiler's frame and the windowed check - is what showed where the idle frame went.
+? Four chores each walk every object every frame. Why does a scene of 50 objects never show it, and 50,000 does? | The cost grows with the objects, not with what changed: 50 objects make each walk microseconds; 50,000 make each several milliseconds, every frame, even when nothing is edited.
+? A kept list of draw items holds pointers to meshes. What goes wrong if an edit replaces a mesh without moving the counter, and how long can it last? | The kept item points at the replaced (possibly freed) mesh until something moves the counter or the every-eighth-frame check walks the scene and finds the hash changed - at most seven frames in a window, every frame headless.
+! cmd:benchscene cubes50k | Build 50,000 cubes; the idle frame is what the Profiler shows with nothing touched
 )"},
 };
 

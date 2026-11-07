@@ -3362,6 +3362,7 @@ void Scene::destroy(const std::vector<GameObject *> &list) {
 }
 
 void Scene::clear() {
+  edit_epoch::bump();  // (round 436: lists kept on the counter hold pointers into the scene)
   objects_.clear();
   by_id_.clear();
   roots.clear();

@@ -1756,7 +1756,7 @@ void Editor::run_console_command(const std::string &line) {
       cam->focus_track = true;
       cam->focus_point = Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
       if (t.size() > 4) cam->f_stop = std::max(0.1f, (float)std::atof(t[4].c_str()));
-      update_camera_focus();
+      apply_camera_focus();  // (review 436: at once, not on the walk's next due frame)
       mark_changed("Camera Focus");
     }
   }
