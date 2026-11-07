@@ -267,6 +267,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   owner_ = std::move(lay.owner);
   values_.assign(texels_.size(), Vec3(0.0f));
   gather_.assign(texels_.size(), Vec3(0.0f));
+  emitted_.assign(texels_.size(), Vec3(0.0f));
   total_ = texels_.size();
   for (const BakeLight &l : lights_)
     if (l.mode == 1 || l.mode == 2) out_.light_modes[l.id] = l.mode;
@@ -312,7 +313,7 @@ Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool g
   return esum * (1.0f / (kPi * (float)std::max(1, samples)));
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out) {
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out) {
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
   /* Off the surface a little, scaled to where it is (far from the origin floats are coarse). */
@@ -342,10 +343,15 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (finite3(L)) sum += L;
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
-  if (gather_out) *gather_out = value;
   /* Twice the gather's rays (shadow rays are cheap), at most 256; on the GPU path these run on the CPU beside the
    * gathered batch, so 64 is the cap there. */
-  if (emissive) value += emissive_at(o, n, rng, std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64)), gather_sees_emitters, rays) * s_.indirect_intensity;
+  /* The noisy parts the filter denoises (round 423): the gather, and the emitters sampled at the texel (task 0157). */
+  if (gather_out) *gather_out = finite3(value) ? value : Vec3(0.0f);
+  if (emissive) {
+    const Vec3 e = emissive_at(o, n, rng, std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64)), gather_sees_emitters, rays) * s_.indirect_intensity;
+    value += e;
+    if (emitted_out) *emitted_out = finite3(e) ? e : Vec3(0.0f);
+  }
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
   for (const BakeLight &bl : lights_) {
@@ -451,8 +457,9 @@ bool Lightmapper::step(double budget_ms) {
           const size_t k = base + (size_t)i;
           Vec3 v = ind[(size_t)i] * s_.indirect_intensity;
           if (!finite3(v)) v = Vec3(0.0f);
-          gather_[k] = v;
-          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false);
+          /* (the texel's emitters: denoised with the card's gather, not clamped - round 423) */
+          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k]);
+          gather_[k] = finite3(ind[(size_t)i]) ? ind[(size_t)i] * s_.indirect_intensity : Vec3(0.0f);
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
         }
       });
@@ -477,7 +484,7 @@ bool Lightmapper::step(double budget_ms) {
     JobSystem::global().parallel_for((int64_t)batch, 8, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         const size_t k = base + (size_t)i;
-        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k]);
+        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k], &emitted_[k]);
       }
     });
     done_ += batch;
@@ -542,74 +549,211 @@ void Lightmapper::clamp_fireflies(std::vector<Vec3> &src, const std::vector<uint
 
 void Lightmapper::finish() {
   ScopedTimer ft;
+  last_denoiser_.clear();
   /* Into the pages, then (optionally) a filter that keeps to one object's chart and a surface's
    * facing, then dilation into the padding so bilinear reads at chart edges find light, not black. */
-  std::vector<std::vector<Vec3>> normals(out_.pages.size()), gathered(out_.pages.size());
-  for (size_t p = 0; p < out_.pages.size(); p++) normals[p].assign(out_.pages[p].texels.size(), Vec3(0.0f)), gathered[p].assign(out_.pages[p].texels.size(), Vec3(0.0f));
+  const size_t np = out_.pages.size();
+  std::vector<std::vector<Vec3>> normals(np), gathered(np), emitted(np), positions(np);
+  for (size_t p = 0; p < np; p++) {
+    const size_t n = out_.pages[p].texels.size();
+    normals[p].assign(n, Vec3(0.0f)), gathered[p].assign(n, Vec3(0.0f)), emitted[p].assign(n, Vec3(0.0f)), positions[p].assign(n, Vec3(0.0f));
+  }
   for (size_t k = 0; k < texels_.size(); k++) {
     const LightmapTexel &tx = texels_[k];
     const size_t idx = (size_t)tx.y * out_.pages[(size_t)tx.page].width + tx.x;
     out_.pages[(size_t)tx.page].texels[idx] = values_[k];
     normals[(size_t)tx.page][idx] = tx.normal;
+    positions[(size_t)tx.page][idx] = tx.position;
     gathered[(size_t)tx.page][idx] = k < gather_.size() ? gather_[k] : Vec3(0.0f);
+    emitted[(size_t)tx.page][idx] = k < emitted_.size() ? emitted_[k] : Vec3(0.0f);
   }
   for (size_t p = 0; p < out_.pages.size(); p++) {
     Lightmap &lm = out_.pages[p];
     const int W = lm.width, H = lm.height;
     std::vector<uint8_t> &cov = covered_[p];
     const std::vector<int32_t> &own = owner_[p];
-    if (s_.denoise) {
-      /* The gathered part clamped, the direct part put back on top: a firefly is a gather's outlier, a sun spot is not. */
-      std::vector<Vec3> src = gathered[p];
-      clamp_fireflies(src, cov, own, normals[p], W, H);
-      for (size_t i = 0; i < src.size(); i++) src[i] = src[i] + (lm.texels[i] - gathered[p][i]);
-      JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
-        for (int64_t y = y0; y < y1; y++)
-          for (int x = 0; x < W; x++) {
-            const size_t i = (size_t)y * W + x;
-            if (!cov[i]) continue;
-            Vec3 acc(0.0f);
-            float wsum = 0.0f;
-            for (int dy = -2; dy <= 2; dy++)
-              for (int dx = -2; dx <= 2; dx++) {
-                const int xx = x + dx, yy = (int)y + dy;
-                if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-                const size_t j = (size_t)yy * W + xx;
-                if (!cov[j] || own[j] != own[i]) continue;
-                const float nd = dot(normals[p][i], normals[p][j]);
-                if (nd < 0.9f) continue;
-                const float w = std::exp(-(dx * dx + dy * dy) / 4.5f) * nd * nd;
-                acc += src[j] * w;
-                wsum += w;
-              }
-            if (wsum > 0.0f) lm.texels[i] = acc / wsum;
-          }
-      });
-    }
-    for (int pass = 0; pass < s_.padding + 2; pass++) {
-      std::vector<uint8_t> grow = cov;
-      std::vector<Vec3> src = lm.texels;
-      for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++) {
-          const size_t i = (size_t)y * W + x;
-          if (cov[i]) continue;
-          Vec3 acc(0.0f);
-          int n = 0;
-          for (int dy = -1; dy <= 1; dy++)
-            for (int dx = -1; dx <= 1; dx++) {
-              const int xx = x + dx, yy = y + dy;
-              if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
-              const size_t j = (size_t)yy * W + xx;
-              if (cov[j]) acc += src[j], n++;
-            }
-          if (n) lm.texels[i] = acc / (float)n, grow[i] = 1;
-        }
-      cov.swap(grow);
-    }
+    if (s_.denoise) denoise_page(lm, gathered[p], emitted[p], normals[p], positions[p], cov, own);
+    for (int pass = 0; pass < s_.padding + 2; pass++) dilate_once(lm.texels, cov, W, H);
   }
   active_ = false;
   done_ = total_.load();
   finish_ms_ = ft.ms();
+}
+
+namespace {
+bool in_page(int x, int y, int W, int H) { return x >= 0 && y >= 0 && x < W && y < H; }
+Vec3 clamp0(Vec3 v) { return Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z)); }
+
+/* The direct light's radius-1 Gaussian at (x, y): its chart's texels facing within 18 degrees; the texel as it is when
+ * none qualifies (review 423: a texel with a zero normal had come out black - 0 / 0). */
+Vec3 direct_blur_at(const std::vector<Vec3> &direct, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W,
+                    int H, int x, int y) {
+  const size_t i = (size_t)y * W + x;
+  Vec3 acc(0.0f);
+  float wsum = 0.0f;
+  for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++) {
+      if (!in_page(x + dx, y + dy, W, H)) continue;
+      const size_t j = (size_t)(y + dy) * W + (x + dx);
+      if (!cov[j] || own[j] != own[i] || dot(normals[i], normals[j]) < 0.95f) continue;
+      const float w = dx == 0 && dy == 0 ? 1.0f : dx == 0 || dy == 0 ? 0.6065f : 0.3679f;  // (exp(-d^2 / 2))
+      acc += direct[j] * w;
+      wsum += w;
+    }
+  return wsum > 0.0f ? acc / wsum : direct[i];
+}
+
+/* A texel's world size: the nearest of its four neighbours in the same chart (the nearest, not the mean - review 423: at a
+ * UV island's border one neighbour can be far away in the world). `fallback` without one. */
+float texel_world_size(const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, int W, int H, int x, int y,
+                       float fallback) {
+  static const int nb[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  const size_t i = (size_t)y * W + x;
+  float best = 0.0f;
+  for (const auto &d : nb) {
+    if (!in_page(x + d[0], y + d[1], W, H)) continue;
+    const size_t j = (size_t)(y + d[1]) * W + (x + d[0]);
+    if (!cov[j] || own[j] != own[i]) continue;
+    const float dist = length(positions[i] - positions[j]);
+    if (dist > 0.0f && (best == 0.0f || dist < best)) best = dist;
+  }
+  return best > 0.0f ? best : fallback;
+}
+
+/* What one A-Trous pass reads. */
+struct AtrousPage {
+  const std::vector<Vec3> &ind, &normals, &positions;
+  const std::vector<uint8_t> &cov;
+  const std::vector<int32_t> &own;
+  const std::vector<float> &size;
+  int W, H;
+};
+/* One A-Trous tap set at (x, y): the 5 x 5 B3 kernel at `step`, inside a chart, weighted by the facing (nd^4, none past
+ * 37 degrees), the world distance and the relative luminance. The texel as it is when no tap qualifies. */
+Vec3 atrous_at(const AtrousPage &pg, int x, int y, int step, float sigma_c) {
+  static const float kB3[5] = {1.0f / 16, 1.0f / 4, 3.0f / 8, 1.0f / 4, 1.0f / 16};
+  const size_t i = (size_t)y * pg.W + x;
+  const float li = lum_of(pg.ind[i]), sigma_p = 1.5f * pg.size[i] * (float)step;
+  Vec3 acc(0.0f);
+  float wsum = 0.0f;
+  for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++) {
+      const int xx = x + dx * step, yy = y + dy * step;
+      if (!in_page(xx, yy, pg.W, pg.H)) continue;
+      const size_t j = (size_t)yy * pg.W + xx;
+      if (!pg.cov[j] || pg.own[j] != pg.own[i]) continue;
+      const float nd = dot(pg.normals[i], pg.normals[j]);
+      if (nd < 0.8f) continue;
+      const Vec3 dp = pg.positions[i] - pg.positions[j];
+      const float lj = lum_of(pg.ind[j]), dl = li - lj;
+      const float rel = dl * dl / (sigma_c * sigma_c * (li * li + lj * lj + 1e-6f));
+      const float w = kB3[dx + 2] * kB3[dy + 2] * nd * nd * nd * nd * std::exp(-dot(dp, dp) / (sigma_p * sigma_p) - rel);
+      acc += pg.ind[j] * w;
+      wsum += w;
+    }
+  return wsum > 0.0f ? acc / wsum : pg.ind[i];
+}
+
+/* The mean of an uncovered texel's covered 3 x 3 neighbours into `out`; false with none. */
+bool dilate_mean_at(const std::vector<Vec3> &src, const std::vector<uint8_t> &have, int W, int H, int x, int y, Vec3 &out) {
+  Vec3 acc(0.0f);
+  int k = 0;
+  for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++) {
+      if (!in_page(x + dx, y + dy, W, H)) continue;
+      const size_t j = (size_t)(y + dy) * W + (x + dx);
+      if (have[j]) acc += src[j], k++;
+    }
+  if (k) out = acc / (float)k;
+  return k > 0;
+}
+}  // namespace
+
+/* Round 423 (the filter had blurred a long bake: at 1024 samples it doubled the error): only the noisy light is
+ * denoised - the gathered (indirect) light, its fireflies clamped first, and the emitters sampled at the texel (not
+ * clamped: a lamp's contact glow is real). With Blender's libraries OIDN's lightmap filter takes it, each chart grown
+ * into its padding first (the denoiser sees no black border); else an edge-avoiding A-Trous wavelet (Dammertz et al.
+ * 2010) guided by each texel's normal, world position and chart. The Baked lights' direct light, sampled with its own
+ * stratified rays, gets a light radius-1 pass (Unity filters the two apart). */
+void Lightmapper::denoise_page(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
+                               const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own) {
+  const int W = lm.width, H = lm.height;
+  const size_t n = (size_t)W * (size_t)H;
+  std::vector<Vec3> ind = gathered;
+  clamp_fireflies(ind, cov, own, normals, W, H);
+  for (size_t i = 0; i < n; i++) ind[i] += emitted[i];
+  const bool oidn = s_.use_oidn && denoise_oidn(ind, cov, W, H);
+  if (!oidn) atrous(ind, normals, positions, cov, own, W, H);
+  if (last_denoiser_.empty() || !oidn) last_denoiser_ = oidn ? "OpenImageDenoise (RTLightmap)" : "the A-Trous filter";  // (any page on A-Trous says so)
+  std::vector<Vec3> direct(n, Vec3(0.0f));
+  for (size_t i = 0; i < n; i++)
+    if (cov[i]) direct[i] = lm.texels[i] - gathered[i] - emitted[i];
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        if (cov[i]) lm.texels[i] = clamp0(ind[i] + direct_blur_at(direct, cov, own, normals, W, H, x, (int)y));
+      }
+  });
+}
+
+/* OIDN's lightmap filter over the page, each chart grown halfway into its padding first; only the covered texels take
+ * its result. False without OIDN's lightmap filter. */
+bool Lightmapper::denoise_oidn(std::vector<Vec3> &ind, const std::vector<uint8_t> &cov, int W, int H) const {
+  if (!PathTracer::oidn_lightmap_available()) return false;
+  std::vector<Vec3> grown = ind;
+  std::vector<uint8_t> have = cov;
+  /* Half the padding (at least one ring): each chart reaches toward its neighbour's but not into it - RTLightmap
+   * knows no charts. Texels farther out stay black to it. */
+  for (int pass = 0; pass < std::max(1, s_.padding / 2); pass++) dilate_once(grown, have, W, H);
+  if (!PathTracer::oidn_denoise_lightmap(grown, W, H)) return false;
+  for (size_t i = 0; i < ind.size(); i++)
+    if (cov[i]) ind[i] = grown[i];
+  return true;
+}
+
+/* The edge-avoiding A-Trous wavelet: four passes of a 5 x 5 B3 kernel at steps 1, 2, 4, 8 (atrous_at). */
+void Lightmapper::atrous(std::vector<Vec3> &ind, const std::vector<Vec3> &normals, const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov,
+                         const std::vector<int32_t> &own, int W, int H) const {
+  const size_t n = (size_t)W * (size_t)H;
+  /* Each texel's own world size (a chart is clamped to Max Lightmap Size, scaled by Scale In Lightmap or grown to the
+   * smallest chart: not every texel is 1 / texels_per_unit across - review 423). */
+  const float fallback = 1.0f / std::max(0.01f, s_.texels_per_unit);
+  std::vector<float> size(n, fallback);
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++)
+        if (cov[(size_t)y * W + x]) size[(size_t)y * W + x] = texel_world_size(positions, cov, own, W, H, x, (int)y, fallback);
+  });
+  std::vector<Vec3> next(n);
+  for (int it = 0, step = 1; it < 4; it++, step *= 2) {
+    /* Its edge stop follows the noise the gather leaves - a texel's relative error falls as 1 / sqrt(samples): a long bake
+     * is filtered only where neighbours agree that closely (review 423: a fixed 0.6 had blurred a 512-sample bake). */
+    const float sigma_c = std::max(0.04f, std::min(0.8f, 2.0f / std::sqrt((float)std::max(1, s_.indirect_samples)))) / (float)(1 << it);
+    const AtrousPage pg{ind, normals, positions, cov, own, size, W, H};
+    JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++)
+        for (int x = 0; x < W; x++) {
+          const size_t i = (size_t)y * W + x;
+          next[i] = cov[i] ? atrous_at(pg, x, (int)y, step, sigma_c) : ind[i];
+        }
+    });
+    ind.swap(next);
+  }
+}
+
+/* One ring of growth: each uncovered texel next to covered ones takes their mean (the dilation's step). */
+void Lightmapper::dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have, int W, int H) {
+  std::vector<uint8_t> grow = have;
+  const std::vector<Vec3> src = px;
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        if (!have[i] && dilate_mean_at(src, have, W, H, x, (int)y, px[i])) grow[i] = 1;
+      }
+  });
+  have.swap(grow);
 }
 
 LightingData Lightmapper::take_result() {
@@ -618,6 +762,8 @@ LightingData Lightmapper::take_result() {
   pt_.reset();
   texels_.clear();
   values_.clear();
+  gather_.clear(), gather_.shrink_to_fit();
+  emitted_.clear(), emitted_.shrink_to_fit();
   covered_.clear();
   owner_.clear();
   return r;

@@ -5817,6 +5817,132 @@ static void tests_round421() {
 }
 
 
+/* ---------------------------------------------------------------- round 423: the lightmap denoiser (task 0399) */
+static BakeObject bake_object(uint64_t id, MeshPtr mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials) {
+  BakeObject o;
+  o.id = id, o.mesh = mesh, o.model = model, o.materials = materials;
+  return o;
+}
+static void tests_round423() {
+  test("lightmap denoiser (round 423): the noisy part denoised - OIDN's lightmap filter where the OIDN build has it, else the A-Trous filter - closer to a converged bake at 16 and at 512 samples, the direct light kept", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), wall = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}),
+                                 bake_object(2, wall, Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {white})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    Environment env;
+    env.mode = Environment::Gradient;
+    auto bake = [&](int n, bool denoise, uint32_t seed, std::string *which) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = n, bs.denoise = denoise, bs.seed = seed;
+      Lightmapper lm;
+      lm.begin(objs, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      if (which) *which = lm.denoiser();
+      return lm.take_result();
+    };
+    const LightingData ref = bake(2048, false, 1, nullptr), noisy = bake(16, false, 0, nullptr);
+    std::string which;
+    const LightingData filtered = bake(16, true, 0, &which);
+    auto rmse = [&](const LightingData &a) {
+      double s = 0;
+      size_t k = 0;
+      for (size_t p = 0; p < a.pages.size(); p++)
+        for (size_t i = 0; i < a.pages[p].texels.size(); i++) {
+          const float r = ref.pages[p].texels[i].y;
+          if (!(r > 0.0f)) continue;
+          const double d = (double)a.pages[p].texels[i].y - r;
+          s += d * d, k++;
+        }
+      return k ? std::sqrt(s / (double)k) : 1e9;
+    };
+    std::printf("    %s: the error at 16 samples %.4f unfiltered, %.4f filtered\n", which.c_str(), rmse(noisy), rmse(filtered));
+    std::string why;
+    const bool lightmap_oidn = PathTracer::oidn_lightmap_available(&why);
+    if (!lightmap_oidn) std::printf("    (OIDN's lightmap filter: %s)\n", why.c_str());
+    CHECK(which == (lightmap_oidn ? "OpenImageDenoise (RTLightmap)" : "the A-Trous filter"));
+    CHECK(rmse(filtered) < rmse(noisy) * 0.8);
+    /* A long bake: the filter mustn't make it worse (round 421 had found the old one doubling the error at 1024). */
+    const LightingData long_raw = bake(512, false, 0, nullptr), long_filtered = bake(512, true, 0, nullptr);
+    std::printf("    at 512 samples: %.4f unfiltered, %.4f filtered\n", rmse(long_raw), rmse(long_filtered));
+    CHECK(rmse(long_filtered) <= rmse(long_raw) * 1.1 + 1e-4);
+    /* The direct light kept: the sun alone (no bounce, a black sky) - the filter's pass over it moves the mean by under
+     * half a percent (only shadow edges change). */
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto direct_only = [&](bool denoise) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 4, bs.bounces = 0, bs.denoise = denoise;
+      Lightmapper lm;
+      lm.begin(objs, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData d0 = direct_only(false), d1 = direct_only(true);
+    double s0 = 0, s1 = 0;
+    for (size_t p = 0; p < d0.pages.size(); p++)
+      for (size_t i = 0; i < d0.pages[p].texels.size(); i++) s0 += d0.pages[p].texels[i].y, s1 += d1.pages[p].texels[i].y;
+    std::printf("    the sun alone: the summed light %.2f unfiltered, %.2f filtered\n", s0, s1);
+    CHECK(s0 > 0 && std::fabs(s1 - s0) < s0 * 0.005);
+    /* The defaults: Unity's 512 indirect samples. */
+    CHECK(BakeSettings{}.indirect_samples == 512 && LightingSettings{}.indirect_samples == 512);
+  });
+  test("lightmap denoiser (review 423): a shadow edge moves by under a texel - every filtered texel inside its unfiltered 3 x 3 neighbourhood's range; a glowing strip's light near a wall kept (its emitters denoised, not clamped: none lost)", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), card = primitives::plane(1.0f, 2);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, card, Mat4::trs({0, 0.5f, 0}, Quat(), {1, 1, 1}), {white})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.2f, -1.0f, 0.1f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](const std::vector<BakeObject> &o, const std::vector<BakeLight> &l, int bounces, int n, bool denoise) {
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = n, bs.bounces = bounces, bs.denoise = denoise;
+      Lightmapper lm;
+      lm.begin(o, l, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData a = bake(objs, {sun}, 0, 4, false), b = bake(objs, {sun}, 0, 4, true);
+    const LightingData::Entry &e = a.entries.at(1);
+    const Lightmap &pa = a.pages[(size_t)e.page], &pb = b.pages[(size_t)e.page];
+    int outside = 0, edge = 0;
+    for (int y = 1; y + 1 < pa.height; y++)
+      for (int x = 1; x + 1 < pa.width; x++) {
+        float lo = 1e30f, hi = -1e30f;
+        for (int dy = -1; dy <= 1; dy++)
+          for (int dx = -1; dx <= 1; dx++) {
+            const float v = pa.texels[(size_t)(y + dy) * pa.width + x + dx].y;
+            lo = std::min(lo, v), hi = std::max(hi, v);
+          }
+        const float v = pb.texels[(size_t)y * pa.width + x].y;
+        edge += hi - lo > 0.3f;
+        outside += v < lo - 1e-4f || v > hi + 1e-4f;
+      }
+    std::printf("    the card's shadow: %d texels on its edge; %d filtered texels outside their neighbourhood's range\n", edge, outside);
+    CHECK(edge > 20 && outside == 0);
+    /* A glowing strip 3 cm off a wall: its glow on the wall summed with the filter and without. */
+    MeshPtr wall = primitives::plane(2.0f, 4), strip = primitives::plane(0.1f, 1);
+    MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 20.0f;
+    const std::vector<BakeObject> lamp{bake_object(1, wall, Mat4::identity(), {white}), bake_object(2, strip, Mat4::trs({0, 0.03f, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+    const LightingData g0 = bake(lamp, {}, 1, 64, false), g1 = bake(lamp, {}, 1, 64, true);
+    const LightingData::Entry &we = g0.entries.at(1);
+    double s0 = 0, s1 = 0;
+    float peak = 0.0f;
+    for (size_t i = 0; i < g0.pages[(size_t)we.page].texels.size(); i++) {
+      s0 += g0.pages[(size_t)we.page].texels[i].y, s1 += g1.pages[(size_t)we.page].texels[i].y;
+      peak = std::max(peak, g0.pages[(size_t)we.page].texels[i].y);
+    }
+    std::printf("    the strip's glow on the wall: %.2f unfiltered, %.2f filtered (peak texel %.2f)\n", s0, s1, peak);
+    CHECK(s0 > 0 && peak > 0.5f && s1 >= s0 * 0.97 && s1 <= s0 * 1.08);  // (none lost - the clamp had cut the glow; a little more where the filter spreads it into the padding, which the sum counts)
+  });
+}
+
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -5832,4 +5958,5 @@ void run_lighting_tests() {
   tests_round175();
   tests_round177();
   tests_round421();
+  tests_round423();
 }

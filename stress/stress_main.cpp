@@ -6909,7 +6909,7 @@ Leak leak(const Scene &s, const LightingData &d, const LightingData &ref) {
 
 static void test_lightmap_quality(Report &rep, const Options &o) {
   rep.title("Bake quality (round 421, ADR 0113)",
-            "Synthetic scenes baked at the defaults (256 indirect, 32 direct samples, 2 bounces, the filter on) against a reference "
+            "Synthetic scenes baked at round 421's defaults (256 indirect, 32 direct samples, 2 bounces, the filter on - kept so the rows compare; Unity's 512 is the default since round 423) against a reference "
             "of the same scene and layout (16 times the samples - 4 in a quick run -, the filter off, its own random samples); the "
             "error is the luminance RMSE over the covered texels, relative to the reference's mean, and the mean difference (a "
             "filter's bias). Then the samples against time on the room, and the leak under a sunk box. Unity's own bake is compared "
