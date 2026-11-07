@@ -1,5 +1,24 @@
 # Performance, limits and efficiencies
 
+## Pass 17: the bake's quality against Unity's (rounds 421-434)
+
+### The bake measured (round 421, ADR 0113)
+Before Pass 17 every comparison with Unity loaded Unity's lightmaps. Blendity's own Generate Lighting at SideRail's
+own settings (40 texels per unit, 32 direct / 1024 indirect samples, 2 bounces) against Unity's render
+(`tools/unity_compare.py world ... --blendity-bake`; target MAE <= 4, SSIM >= 0.90, grid correlation >= 0.95):
+
+| station | Unity's lightmaps in Blendity | Blendity's own bake |
+|---|---|---|
+| spawn | 3.46 / 0.921 / 0.989 pass | 5.55 / 0.890 / 0.539 miss |
+| spawn_back (dark) | 1.61 / 0.806 / 0.693 pass | 2.34 / 0.875 / 0.859 pass |
+| floor | 2.85 / 0.870 / 0.998 miss | 7.66 / 0.692 / 0.666 miss |
+| ahead | 3.00 / 0.949 / 0.984 pass | 4.12 / 0.900 / 0.419 miss |
+
+The bake: 686 s (lightmaps 647.5 s over 820,031 texels and 5.3 billion rays, none on the GPU; reflection probes 38 s;
+the landing frame 24 ms). The synthetic guard (`blendity_stress --only lightmap_quality`), relative luminance RMSE
+against a reference with 16x the samples (its own random samples): room 0.031, corridor 0.015, courtyard 0.077; the
+room unfiltered 0.051 / 0.028 / 0.017 at 64 / 256 / 1024 samples, filtered 0.033 / 0.031 / 0.031.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

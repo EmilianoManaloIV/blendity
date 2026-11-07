@@ -348,6 +348,12 @@ void Editor::bake_start() {
  * published for the tray; a cancel ends it at the next slice. */
 void Editor::bake_job_run(BakeJob &j) {
   ScopedTimer whole;
+  double phase_start = 0;
+  auto phase_done = [&](int k) {  // (round 421: each phase's time, for the log, the comparison tool and the tests)
+    const double now = whole.ms();
+    j.phase_ms[k] = now - phase_start;
+    phase_start = now;
+  };
   auto say = [&](const std::string &text) {
     std::lock_guard<std::mutex> lock(j.mutex);
     j.status = text;
@@ -366,6 +372,8 @@ void Editor::bake_job_run(BakeJob &j) {
   }
   j.lighting = baker_.take_result();
   j.lighting.scene_key = j.key;
+  j.lightmap_finish_ms = baker_.finish_ms(), j.lightmap_texels = baker_.texel_count(), j.lightmap_rays = baker_.rays(), j.lightmap_gpu_texels = baker_.gpu_texels();
+  phase_done(0);
   /* The probe volume (task 0014): placed from the scene the lightmaps were baked from, checked for geometry, baked. */
   j.phase.store(1);
   j.progress.store(-1.0f);
@@ -418,12 +426,15 @@ void Editor::bake_job_run(BakeJob &j) {
       Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - j.probes_valid, j.probe_volume.bricks.size());
     }
   }
+  phase_done(1);
   j.phase.store(2);
   j.progress.store(-1.0f);
   bake_volumes_on_worker(j);  // (round 398: the Light Volumes Blendity bakes)
   if (j.cancel.load()) return;
+  phase_done(2);
   j.phase.store(3);
   bake_reflection_probes_on_worker(j);  // (round 401: the Reflection Probes, their six faces each)
+  phase_done(3);
   if (!j.cancel.load() && !j.save_dir.empty()) {
     /* Written into a folder beside the scene's (<name>.baking) and moved over when the bake lands, so a save on the
      * main thread meanwhile never writes the same files, and a Save As meanwhile leaves nothing in the old folder. */
@@ -437,7 +448,8 @@ void Editor::bake_job_run(BakeJob &j) {
     j.saved = j.lighting.save(j.saved_tmp, err) && (!baked_probes || j.probe_volume.save(fs::join(j.saved_tmp, "ProbeVolume.bin"), err));
     if (!j.saved) Log::error("Could not save the baked lighting: %s", err.c_str());
   }
-  j.ms = whole.ms();
+  phase_done(4);
+  j.ms = phase_start;  // (the last phase's end: the phases add up to the whole by construction)
   j.phase.store(4);
 }
 
@@ -500,6 +512,23 @@ void Editor::step_bake() {
 /* The results into the scene: the lightmaps and the probe volume (not when cancelled), the Light Volumes and the
  * Reflection Probes it finished (kept even then - review 401), the stale volume bakes dropped (review 398); saved. */
 void Editor::bake_job_land(BakeJob &j) {
+  ScopedTimer land_t;  // (round 421: the frame that lands a bake, timed - with its phases, said once it has landed)
+  struct LandTimer {
+    Editor &ed;
+    BakeJob &j;
+    ScopedTimer &t;
+    ~LandTimer() {
+      if (j.cancel.load() || j.discard || j.scene_ident != ed.scene_ident_) return;  // (nothing landed: the last times stay)
+      BakeTimes &b = ed.last_bake_times_;
+      for (int k = 0; k < 5; k++) b.phase_ms[k] = j.phase_ms[k];
+      b.finish_ms = j.lightmap_finish_ms, b.land_ms = t.ms(), b.total_ms = j.ms;
+      b.texels = j.lightmap_texels, b.gpu_texels = j.lightmap_gpu_texels, b.rays = j.lightmap_rays;
+      Log::info("Generate Lighting phases: lightmaps %.1f s (%zu texels, %.0f Mrays, %zu on the GPU; filter and dilation %.0f ms), probes %.1f s, "
+                "Light Volumes %.1f s, reflection probes %.1f s, saving %.1f s; the landing frame %.0f ms",
+                b.phase_ms[0] / 1000.0, b.texels, b.rays / 1e6, b.gpu_texels, b.finish_ms, b.phase_ms[1] / 1000.0, b.phase_ms[2] / 1000.0,
+                b.phase_ms[3] / 1000.0, b.phase_ms[4] / 1000.0, b.land_ms);
+    }
+  } land_timer{*this, j, land_t};
   const bool cancelled = j.cancel.load();
   std::error_code ec;
   if (j.discard || j.scene_ident != scene_ident_) {  // (Clear Baked Data, or another scene since: nothing of it lands - review 412)

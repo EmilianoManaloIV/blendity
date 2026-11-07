@@ -1390,6 +1390,10 @@ Contribute GI objects get realtime lightmaps (Realtime Resolution, 2 texels per 
 ! cmd:set Lighting.RealtimeGI true; set Lighting.GIResolution 0 | Realtime GI at Half resolution
 ! cmd:lighting update | Update Lighting (Ctrl+Shift+L)
 ! cmd:lighting preview on | Preview Lighting: a rough bake when you stop
+# How good is the bake? (measured against Unity)
+A Unity scene brings its bake settings with it: the import reads its Lighting Settings asset (texels per metre, samples, bounces, padding) into the Lighting window and names in its notes what Blendity doesn't bake yet (Directional mode, Shadowmask and Subtractive, ambient occlusion, Unity's denoiser). Generate Lighting writes how long each part took to the log. On SideRail, Blendity's own bake missed the comparison's target on three of four views where Unity's lightmaps passed: the baked lamps' pools of light came out dim and chart edges show as thin lines. The filter (Denoise) smooths a quick bake but blurs a long one: at 64 indirect samples it lowers the error from 0.051 to 0.033, at 1024 it raises it from 0.017 to 0.031. Pass 17 replaces it with a denoiser guided by the surfaces' colour and normals, as Unity's is.
+? You raised Indirect Samples to 1024 and the bake still looks smeared. What else to try? | Turn Denoise off for a long bake: the filter's blur is bigger than the noise left at 1024 samples (until the guided denoiser replaces it).
+! cmd:set Lighting.Denoise false | Turn the filter off for a long bake
 )"},
     {"Advanced Modeling Tools", "Edge loops, loop cuts and generative modifiers", R"(
 Edge mode (press 2) selects edges. An edge loop is a chain of edges running straight through 4-way vertices, around a cylinder or across a grid. Loops are how modellers add detail: you cut a new loop exactly where a bend needs geometry.

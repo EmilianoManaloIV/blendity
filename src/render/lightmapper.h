@@ -42,6 +42,7 @@ struct BakeSettings {
   float indirect_intensity = 1.0f;
   bool sample_emissive = true;    // task 0157: emissive meshes sampled at each texel (off: found by the hemisphere rays only, the old way)
   int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
+  uint32_t seed = 0;              // round 421: another seed draws other samples (a reference independent of the bake it scores)
 };
 
 /* One object to bake: its world placement and the mesh drawn for renders. */

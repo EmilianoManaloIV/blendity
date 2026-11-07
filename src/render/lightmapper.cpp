@@ -452,7 +452,7 @@ bool Lightmapper::step(double budget_ms) {
           Vec3 v = ind[(size_t)i] * s_.indirect_intensity;
           if (!finite3(v)) v = Vec3(0.0f);
           gather_[k] = v;
-          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u, false);
+          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false);
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
         }
       });
@@ -477,7 +477,7 @@ bool Lightmapper::step(double budget_ms) {
     JobSystem::global().parallel_for((int64_t)batch, 8, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         const size_t k = base + (size_t)i;
-        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u, true, &gather_[k]);
+        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k]);
       }
     });
     done_ += batch;
