@@ -6486,6 +6486,48 @@ static void tests_round430() {
   });
 }
 
+/* ---------------------------------------------------------------- round 438: directional strength (task 0414) */
+static void tests_round438() {
+  test("directional strength (round 438): a direction is saved as long as Unity's - its share raised to 7.25 (SideRail's median 0.744 to Unity's 0.117), the way it points kept; one light alone stays full length; a floor lit by a sun and a bright sky gets a short direction, so a bump tilts its baked light less than with the sun alone", [] {
+    const Vec3 d = normalize(Vec3(1.0f, 2.0f, 0.5f));
+    const Vec3 med = Lightmapper::saved_direction(d * 0.744f), p90 = Lightmapper::saved_direction(d * 0.949f);
+    std::printf("    share 0.744 -> %.3f (Unity's median 0.117), 0.949 -> %.3f (Unity's p90 0.715), 1 -> %.3f\n", length(med), length(p90),
+                length(Lightmapper::saved_direction(d)));
+    CHECK(std::fabs(length(med) - 0.117f) < 0.005f && std::fabs(length(p90) - 0.684f) < 0.01f);
+    CHECK(dot(normalize(med), d) > 0.9999f && std::fabs(length(Lightmapper::saved_direction(d)) - 1.0f) < 1e-5f);
+    CHECK(length(Lightmapper::saved_direction(Vec3(0.0f))) == 0.0f && length(Lightmapper::saved_direction(d * 3.0f)) <= 1.0f + 1e-5f);
+    /* A floor under a slanted sun, with and without a bright sky. */
+    MeshPtr floor = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, 0.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    auto mean_length = [&](Vec3 sky) {
+      Environment env;
+      env.mode = Environment::Color, env.color = sky;
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = true;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData r = lm.take_result();
+      double sum = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; !r.dir_pages.empty() && i < r.pages[0].texels.size(); i++) {
+        if (!(r.pages[0].texels[i].y > 1e-3f)) continue;
+        sum += length(r.dir_pages[0].texels[i]);
+        n++;
+      }
+      return n ? (float)(sum / (double)n) : 0.0f;
+    };
+    const float alone = mean_length(Vec3(0.0f)), with_sky = mean_length(Vec3(0.5f));
+    const Vec3 up(0, 1, 0), toward = normalize(Vec3(0.5f, 1.0f, 0.0f)), to_sun = normalize(Vec3(1.0f, 1.0f, 0.0f));
+    const float tilt_alone = lightmap_direction_factor(toward, up, to_sun * alone), tilt_sky = lightmap_direction_factor(toward, up, to_sun * with_sky);
+    std::printf("    the floor's mean direction length: the sun alone %.3f, with a sky %.3f; a bump toward the sun gets x%.3f and x%.3f\n", alone, with_sky,
+                tilt_alone, tilt_sky);
+    CHECK(alone > 0.97f && with_sky < 0.5f * alone && tilt_sky < tilt_alone && tilt_sky >= 1.0f);
+  });
+}
 
 void run_lighting_tests() {
   round35_tests();
@@ -6509,4 +6551,5 @@ void run_lighting_tests() {
   tests_round428();
   tests_round429();
   tests_round430();
+  tests_round438();
 }

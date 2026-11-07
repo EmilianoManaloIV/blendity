@@ -902,6 +902,12 @@ void Lightmapper::dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have,
   have.swap(grow);
 }
 
+Vec3 Lightmapper::saved_direction(Vec3 mean_direction) {
+  const float len = length(mean_direction);
+  if (!(len > 1e-6f) || !(len < 1e30f)) return Vec3(0.0f);
+  return mean_direction * (std::pow(std::min(1.0f, len), kDirectionPower) / len);
+}
+
 /* Round 426: each page's direction page - a texel's mean direction (its luminance-weighted sum over the weights), grown
  * into the padding as the colour is (no filter: a thousand rays' mean direction is steady). Its own covered flags,
  * from the texels (the colour's were grown by its dilation). */
@@ -921,7 +927,7 @@ void Lightmapper::finish_directions() {
     const size_t idx = (size_t)tx.y * out_.pages[(size_t)tx.page].width + tx.x;
     if (k < invalid_.size() && invalid_[k]) continue;  // (round 430)
     const DirSum &s = dirs_[k];
-    const Vec3 a = s.weight > 0.0f ? s.sum / s.weight : Vec3(0.0f);
+    const Vec3 a = s.weight > 0.0f ? saved_direction(s.sum / s.weight) : Vec3(0.0f);
     out_.dir_pages[(size_t)tx.page].texels[idx] = finite3(a) ? a : Vec3(0.0f);
     have[(size_t)tx.page][idx] = 1;
   }

@@ -210,6 +210,12 @@ to the card (lightmaps 47.8 s, reflection probes 38.4 s). Texel validity (Unity'
 texels inside geometry, filled from their charts. Stations: spawn 3.71 / 0.812 / 0.899, spawn_back 1.37 / 0.772 /
 0.360, floor 4.36 / 0.747 / 0.974, ahead 3.06 / 0.883 / 0.958.
 
+### Directional strength (round 438, ADR 0114 amended)
+A direction's saved length is its direct share raised to 7.25. SideRail's direction lengths over lit texels: median
+0.165, 90th percentile 0.701 (Unity's maps 0.117 / 0.715; round 427's 0.744 / 0.949). Stations: spawn
+3.70 / 0.813 / 0.899, spawn_back 1.37 / 0.772 / 0.360, floor 4.25 / 0.773 / 0.974 (SSIM 0.747 before), ahead
+3.06 / 0.885 / 0.959.
+
 ### The views against Unity's (round 431) and the suite's comparison (round 432)
 | view (ms a frame on the card) | Blendity | Unity |
 |---|---|---|

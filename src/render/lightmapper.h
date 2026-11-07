@@ -193,6 +193,15 @@ class Lightmapper {
     float weight = 0.0f;
     void add(Vec3 light, Vec3 dir);
   };
+ public:
+  /* Round 438 (ADR 0114 amendment): the length a texel's direction is saved with - its directional share (the mean of
+   * where its light came from: 1 when one light lit it, shorter as bounced and sky light share it) raised to
+   * kDirectionPower, so the bake's direction maps are as long as Unity's. Measured on SideRail's own direction maps:
+   * Unity's median length 0.117 (p90 0.715) where the plain share is 0.744 (p90 0.949); 0.744^7.25 = 0.117 and
+   * 0.949^7.25 = 0.684. The length is how strongly the views tilt the baked light by a normal map. */
+  static constexpr float kDirectionPower = 7.25f;
+  static Vec3 saved_direction(Vec3 mean_direction);
+ private:
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
                   DirSum *dir_out = nullptr);
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)

@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 438): directional strength
+
+**Asked:** Pass 18's round 438 - store a baked direction's length as Unity does, checked against Unity's own direction
+maps and SideRail's stations.
+
+**Changed (task 0414, ADR 0114 amended)**
+- **A saved direction's length is its direct share raised to 7.25,** the way it points kept: SideRail's lengths over
+  lit texels went from a median of 0.744 (90th percentile 0.949) to 0.165 (0.701), against Unity's own maps' 0.117
+  (0.715). A normal map now leans the baked light about as much as in Unity's render, not about six times as much.
+- **SideRail's floor station:** SSIM 0.747 -> 0.773, MAE 4.36 -> 4.25; the others unchanged. ADR 0113's SSIM target is
+  still missed at three stations.
+- **Learn:** "How strongly the baked light leans: the direction's length".
+
+**Checked:** both suites - with Blender's libraries 16,435; dependency-free 15,681 (Windows) and 15,687 (Linux, WSL),
+0 failed; the audits; the bake-quality section; SideRail's stations against Unity.
+
 ## 2026-11-07 (round 437): the two freezes
 
 **Asked:** Pass 18's round 437 - Enter Edit Mode on a 500k-face mesh, and the 698 ms frame while SideRail path-traced.

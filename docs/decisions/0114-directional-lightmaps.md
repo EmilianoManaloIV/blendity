@@ -41,3 +41,11 @@ and 0.976, with the direct light alone 0.744 and 0.949.
   onto direction pages, and writing Blendity's direction pages for Unity, are open.
 - The directions are luminance-weighted means, as Unity's: light from two opposite sides cancels (a short vector,
   little rebalancing) instead of being kept apart (that would need SH lightmaps).
+
+## Amendment (round 438)
+The saved direction's length is calibrated to Unity's: the direct share (the round-427 mean's length) raised to 7.25
+(`Lightmapper::kDirectionPower`, applied by `saved_direction` in `finish_directions`). On SideRail the share's median
+0.744 and 90th percentile 0.949 become 0.117 and 0.684, against Unity's own maps' 0.117 and 0.715. The decode is
+unchanged: its divisor at the surface's own normal is Unity's rebalance, so an unbumped surface still keeps its baked
+light exactly; only how far a bump leans changes. Unity's direction maps imported with its lightmaps are read as they
+are.
