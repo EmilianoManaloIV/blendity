@@ -313,6 +313,57 @@ Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool g
   return esum * (1.0f / (kPi * (float)std::max(1, samples)));
 }
 
+namespace {
+/* Point k of a jittered nx x ny grid over [0, 1)^2, the whole grid shifted by (sx, sy) and wrapped (Cranley-Patterson):
+ * the area lights' points and the sized lights' directions. */
+void stratified_point(int k, int nx, int ny, float sx, float sy, uint32_t &rng, float &a, float &b) {
+  a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f);
+  b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f);
+}
+
+/* How far a ray from o along d may go before it reaches a ball of radius r round a centre `dist` away along L (c the
+ * cosine between d and L): the ball's near side along d (review 424: one length for every ray had stopped the cone's
+ * edge rays short of a fixture's wall and sent the near rays into the ball). Negative when o is inside the ball. */
+float ray_reach_to_ball(float dist, float r, float c) {
+  if (dist <= r) return -1.0f;
+  const float disc = r * r - dist * dist * (1.0f - c * c);
+  return std::max(0.0f, dist * c - std::sqrt(std::max(0.0f, disc))) * (1.0f - 1e-4f);
+}
+}  // namespace
+
+/* Round 424: directions spread uniformly over the cone's solid angle (cos from 1 to cos_max) on a stratified grid. */
+float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays) {
+  if (!l.shadows) return 1.0f;
+  const bool sun = l.type == RenderLight::Directional;
+  const float radius = std::max(0.0f, l.shadow_radius);
+  const float half = sun ? 0.5f * std::max(0.0f, std::min(90.0f, l.shadow_angle)) * kDeg2Rad : std::asin(std::min(1.0f, radius / std::max(dist, 1e-4f)));
+  const float one_minus_cos = finite_bits(half) ? 1.0f - std::cos(half) : 0.0f;
+  if (!(one_minus_cos > 0.0f) || samples <= 1 || (!sun && dist <= radius)) {  // (no size, or inside its ball: one ray to the centre)
+    rays++;
+    return pt.occluded({o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f)) ? 0.0f : 1.0f;
+  }
+  Vec3 tu, tv;
+  basis(L, tu, tv);
+  const int nx = std::max(1, (int)std::ceil(std::sqrt((double)samples)));
+  const int ny = std::max(1, (samples + nx - 1) / nx);
+  const float sx = rnd01(rng), sy = rnd01(rng);
+  float wsum = 0.0f, vsum = 0.0f;
+  for (int k = 0; k < samples; k++) {
+    float a, b;
+    stratified_point(k, nx, ny, sx, sy, rng, a, b);
+    const float c = 1.0f - a * one_minus_cos, s = std::sqrt(std::max(0.0f, 1.0f - c * c)), phi = 2.0f * kPi * b;
+    const Vec3 d = normalize(L * c + tu * (s * std::cos(phi)) + tv * (s * std::sin(phi)));
+    const float w = n ? dot(*n, d) : 1.0f;  // (below the horizon: the surface itself, not a shadow - review 424)
+    if (!(w > 0.0f)) continue;
+    rays++;
+    wsum += w;
+    if (!pt.occluded({o, d}, sun ? 1e30f : ray_reach_to_ball(dist, radius, c))) vsum += w;
+  }
+  if (wsum > 0.0f) return vsum / wsum;
+  rays++;  // (the whole cone below the horizon: the centre ray decides)
+  return pt.occluded({o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f)) ? 0.0f : 1.0f;
+}
+
 Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out) {
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
@@ -361,8 +412,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (l.type == RenderLight::Directional) {
       const Vec3 L = normalize(-l.direction);
       const float ndl = dot(n, L);
-      rays++;
-      if (ndl > 0.0f && !pt_->occluded({o, L}, 1e30f)) value += col * ndl;
+      if (ndl > 0.0f) value += col * (ndl * baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays));
       continue;
     }
     if (l.type == RenderLight::Area) {
@@ -375,15 +425,19 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
        * a wide light weighs more), the noise kept down by the exact unshadowed term. */
       const float unshadowed = area_light_irradiance(l, o, n);
       if (!(unshadowed > 0.0f)) continue;
+      if (!l.shadows) {  // (round 424: Unity's No Shadows - nothing in the way counts)
+        value += col * unshadowed;
+        continue;
+      }
       const int ns = std::max(1, s_.direct_samples);
       const int nx = std::max(1, (int)std::ceil(std::sqrt((double)ns)));
       const int ny = std::max(1, (ns + nx - 1) / nx);
       const float sx = rnd01(rng), sy = rnd01(rng);
       float wsum = 0.0f, vsum = 0.0f;
       for (int k = 0; k < ns; k++) {
-        const float a = std::fmod(((k % nx) + rnd01(rng)) / (float)nx + sx, 1.0f) - 0.5f;
-        const float b = std::fmod(((k / nx) + rnd01(rng)) / (float)ny + sy, 1.0f) - 0.5f;
-        const Vec3 q = area_light_point(l, a, b), dvec = q - o;
+        float a, b;
+        stratified_point(k, nx, ny, sx, sy, rng, a, b);
+        const Vec3 q = area_light_point(l, a - 0.5f, b - 0.5f), dvec = q - o;
         const float dist = length(dvec);
         if (!(dist > 1e-5f)) continue;
         const Vec3 L = dvec / dist;
@@ -404,7 +458,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       }
       continue;
     }
-    /* A point or spot light: one shadow ray. */
+    /* A point or spot light: one shadow ray, or a ball's worth with a Baked Shadow Radius (round 424). */
     const Vec3 dvec = l.position - o;
     const float dist = length(dvec);
     if (!(dist > 1e-5f)) continue;
@@ -413,8 +467,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (ndl <= 0.0f) continue;
     const float fall = light_falloff(l, t.position, L);
     if (fall <= 0.0f) continue;
-    rays++;
-    if (!pt_->occluded({o, L}, dist * (1.0f - 1e-4f))) value += col * (ndl * fall);
+    value += col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays));
   }
   rays_ += rays;
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);

@@ -5942,6 +5942,151 @@ static void tests_round423() {
   });
 }
 
+/* ---------------------------------------------------------------- round 424: soft baked shadows (task 0400) */
+static void tests_round424() {
+  test("soft baked shadows (round 424): a Baked Shadow Radius widens a point light's penumbra and an Angle a sun's, the light blocked about the same; No Shadows bakes none; Unity's fields read and passed to the bake", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), card = primitives::plane(0.8f, 2);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    /* A card 1 m over the floor; the light 2 m over the card (a point light) or straight down (a sun). */
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, card, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {white})};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](const RenderLight &l) {
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = 4, bs.bounces = 0, bs.direct_samples = 64, bs.denoise = false;
+      BakeLight bl;
+      bl.light = l, bl.mode = 2, bl.id = 9;
+      Lightmapper lm;
+      lm.begin(objs, {bl}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    /* The floor's texels against the same light with No Shadows: those between 5 % and 95 % lit are the penumbra. */
+    auto penumbra = [&](RenderLight l, double *lit_share) {
+      const LightingData shadowed = bake(l);
+      l.shadows = false;
+      const LightingData open = bake(l);
+      const LightingData::Entry &e = shadowed.entries.at(1);
+      const std::vector<Vec3> &a = shadowed.pages[(size_t)e.page].texels, &b = open.pages[(size_t)e.page].texels;
+      int part = 0;
+      double sa = 0, sb = 0;
+      for (size_t i = 0; i < a.size(); i++) {
+        if (!(b[i].y > 1e-4f)) continue;
+        const float r = a[i].y / b[i].y;
+        part += r > 0.05f && r < 0.95f;
+        sa += a[i].y, sb += b[i].y;
+      }
+      if (lit_share) *lit_share = sb > 0 ? sa / sb : 0;
+      return part;
+    };
+    RenderLight point;
+    point.type = RenderLight::Point, point.position = Vec3(0, 3, 0), point.range = 20.0f, point.intensity = 4.0f;
+    double share0, share1;
+    const int hard = penumbra(point, &share0);
+    point.shadow_radius = 0.4f;
+    const int soft = penumbra(point, &share1);
+    std::printf("    point light: %d penumbra texels sharp, %d with a 0.4 m radius; the floor's share of the open light %.3f / %.3f\n", hard, soft, share0, share1);
+    CHECK(soft > hard * 3 && soft > 20);
+    CHECK(1.0 - share0 > 0.02 && std::fabs((1.0 - share1) - (1.0 - share0)) < (1.0 - share0) * 0.15);  // (the shadow spreads; about as much light is blocked)
+    RenderLight sun;
+    sun.direction = Vec3(0, -1, 0), sun.intensity = 1.0f;
+    const int sun_hard = penumbra(sun, nullptr);
+    sun.shadow_angle = 20.0f;
+    const int sun_soft = penumbra(sun, nullptr);
+    std::printf("    sun: %d penumbra texels sharp, %d at 20 degrees\n", sun_hard, sun_soft);
+    CHECK(sun_soft > sun_hard * 3 && sun_soft > 20);
+    /* No Shadows: the floor's darkest texel (under the card's middle) as lit as with no card at all (Unity bakes no shadow
+     * for it); the two bakes lay their pages out differently, so their darkest lit texels are compared. */
+    point.shadows = false;
+    const LightingData none = bake(point);
+    const std::vector<BakeObject> bare{objs[0]};
+    BakeSettings bs;
+    bs.texels_per_unit = 16, bs.indirect_samples = 4, bs.bounces = 0, bs.direct_samples = 64, bs.denoise = false;
+    BakeLight bl;
+    bl.light = point, bl.mode = 2, bl.id = 9;
+    Lightmapper lm;
+    lm.begin(bare, {bl}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    const LightingData alone = lm.take_result();
+    auto darkest_lit = [](const Lightmap &p) {
+      float m = 1e30f;
+      for (const Vec3 &v : p.texels)
+        if (v.y > 1e-4f) m = std::min(m, v.y);
+      return m;
+    };
+    const float dn = darkest_lit(none.pages[(size_t)none.entries.at(1).page]), da = darkest_lit(alone.pages[(size_t)alone.entries.at(1).page]);
+    std::printf("    No Shadows: the floor's darkest lit texel %.4f, without the card %.4f\n", dn, da);
+    CHECK(da > 0.01f && da < 1e29f && std::fabs(dn - da) < da * 0.02f);
+    /* A bulb a third of its radius off the floor, nothing in the way: the floor as lit as by a sharp light (review 424: the
+     * cone's rays below the floor's horizon had counted as blocked). */
+    const std::vector<BakeObject> floor_only{objs[0]};
+    auto bake_on = [&](const std::vector<BakeObject> &o, const RenderLight &l) {
+      BakeSettings b2;
+      b2.texels_per_unit = 16, b2.indirect_samples = 4, b2.bounces = 0, b2.direct_samples = 64, b2.denoise = false;
+      BakeLight b;
+      b.light = l, b.mode = 2, b.id = 9;
+      Lightmapper m;
+      m.begin(o, {b}, env, b2);
+      while (!m.step(1e9)) {
+      }
+      return m.take_result();
+    };
+    auto floor_sum = [](const LightingData &d) {
+      double s = 0;
+      for (const Vec3 &v : d.pages[(size_t)d.entries.at(1).page].texels) s += v.y;
+      return s;
+    };
+    RenderLight low;
+    low.type = RenderLight::Point, low.position = Vec3(0.3f, 0.1f, 0.2f), low.range = 5.0f, low.intensity = 1.0f;
+    const double sharp_sum = floor_sum(bake_on(floor_only, low));
+    low.shadow_radius = 0.3f;
+    const double ball_sum = floor_sum(bake_on(floor_only, low));
+    std::printf("    a 0.3 m bulb 0.1 m off the floor: the floor's light %.2f, sharp %.2f\n", ball_sum, sharp_sum);
+    CHECK(sharp_sum > 0 && std::fabs(ball_sum - sharp_sum) < sharp_sum * 0.02);
+    /* A light in a closed 20 cm box with a 5 cm radius: the floor gets none (the box's walls lie outside the ball - each
+     * ray stops at the ball's near side along it, the walls are tested). */
+    MeshPtr box = primitives::cube(0.2f);
+    std::vector<BakeObject> boxed{objs[0], bake_object(3, box, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {white})};
+    RenderLight inside;
+    inside.type = RenderLight::Point, inside.position = Vec3(0, 1, 0), inside.range = 5.0f, inside.intensity = 1.0f, inside.shadow_radius = 0.05f;
+    const double boxed_sum = floor_sum(bake_on(boxed, inside)), unboxed_sum = floor_sum(bake_on(floor_only, inside));
+    std::printf("    a 5 cm bulb in a closed 20 cm box: the floor's light %.4f (%.1f without the box)\n", boxed_sum, unboxed_sum);
+    CHECK(unboxed_sum > 1.0 && boxed_sum < unboxed_sum * 1e-4);  // (a ray grazing the cube's edge may slip through a seam without Embree: macOS's CI read 0.0013)
+    /* The bake's light as Unity's LightmapperUtils makes it: the radius with Soft Shadows only. */
+    Light hard_light;
+    hard_light.type = 1, hard_light.shadows = 1, hard_light.shadow_radius = 0.5f;
+    Scene hs;
+    GameObject *hg = hs.create("Hard");
+    CHECK(to_render_light(*hg, hard_light).shadow_radius == 0.0f);  // (Hard Shadows: Unity's bake takes no radius)
+    hard_light.shadows = 2;
+    CHECK(to_render_light(*hg, hard_light).shadow_radius == 0.5f);
+    /* Unity's fields: read from a prefab's Light (clamped to the field's range), given to the bake's light. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string dir = resolve_asset_path("Assets/Imported/R424");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    CHECK(fs::write_file(fs::join(dir, "Lamp.prefab"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: Bulb\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &12\nLight:\n  m_GameObject: {fileID: 10}\n  m_Type: 2\n  m_Intensity: 1\n  m_Shadows:\n    m_Type: 2\n  m_Lightmapping: 2\n  m_ShadowRadius: 0.25\n  m_ShadowAngle: 3\n"
+                         "--- !u!1 &20\nGameObject:\n  m_Name: Sun\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &22\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 1\n  m_Intensity: 1\n  m_Lightmapping: 2\n  m_ShadowAngle: 500\n"));
+    ed.command("import Assets/Imported/R424/Lamp.prefab");
+    GameObject *lamp = ed.scene().find_by_name("Bulb"), *sun_g = ed.scene().find_by_name("Sun");  // (not "Lamp": the prefab's root takes its file's name)
+    const Light *ll = lamp ? lamp->get<Light>() : nullptr, *sl = sun_g ? sun_g->get<Light>() : nullptr;
+    std::printf("    imported: the bulb's radius %.2f (angle %.1f), the sun's angle %.1f (500 in the file)\n", ll ? ll->shadow_radius : -1.0f, ll ? ll->shadow_angle : -1.0f, sl ? sl->shadow_angle : -1.0f);
+    CHECK(ll && std::fabs(ll->shadow_radius - 0.25f) < 1e-6f && std::fabs(ll->shadow_angle - 3.0f) < 1e-6f);
+    CHECK(sl && sl->shadow_angle == 90.0f && sl->shadow_radius == 0.0f);
+    if (lamp && ll) CHECK(to_render_light(*lamp, *ll).shadow_radius == ll->shadow_radius);
+    Light dflt;
+    CHECK(dflt.shadow_radius == 0.0f && dflt.shadow_angle == 0.0f);
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
 
 void run_lighting_tests() {
   round35_tests();
@@ -5959,4 +6104,5 @@ void run_lighting_tests() {
   tests_round177();
   tests_round421();
   tests_round423();
+  tests_round424();
 }

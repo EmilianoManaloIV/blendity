@@ -48,6 +48,19 @@ an edge-avoiding A-Trous filter), so a long bake is no longer blurred; the filte
 SideRail's stations didn't move (spawn 5.62 / 0.887 / 0.544, floor 7.82 / 0.679 / 0.583, ahead 4.17 / 0.897 / 0.397):
 their error is brightness, not noise.
 
+### Soft baked shadows and the per-light diagnosis (round 424)
+SideRail's dim stations, light by light: 42 of its 70 Baked lights are boxed in by their lamps' meshes (every ray out of
+them hits something within 5 cm). At 10 texels per unit and 64 samples:
+
+| station: MAE / SSIM / grid correlation | every surface blocks (now) | back faces let shadow rays through (experiment) |
+|---|---|---|
+| spawn | 5.61 / 0.876 / 0.494 | 7.92 / 0.861 / 0.913 |
+| spawn_back (dark) | 2.18 / 0.880 / 0.884 | 3.37 / 0.850 / 0.897 |
+| floor | 7.71 / 0.654 / 0.843 | 24.77 / 0.616 / 0.891 |
+| ahead | 4.22 / 0.900 / 0.466 | 9.81 / 0.816 / 0.800 |
+
+The light lands where Unity's does, 1.7-8x too bright; round 425 works out how Unity's lightmapper treats back faces.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

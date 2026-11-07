@@ -328,6 +328,7 @@ RenderLight to_render_light(const GameObject &g, const Light &l, bool gamma_inte
   rl.cos_inner = std::cos(inner * kDeg2Rad);
   rl.disk = l.area_shape == 1;
   rl.shadows = l.shadows != 0;  // (round 401: Unity's No Shadows)
+  if (l.shadows == 2) rl.shadow_radius = l.shadow_radius, rl.shadow_angle = l.shadow_angle;  // (round 424: the bake's - Soft Shadows only, as Unity's LightmapperUtils takes them)
   /* The object's scale stretches an area light, as in Blender. */
   const Mat4 &w = g.world_matrix();
   rl.width = l.area_width * length(w.dir({1, 0, 0}));

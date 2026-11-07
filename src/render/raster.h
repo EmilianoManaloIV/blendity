@@ -95,6 +95,8 @@ struct RenderLight {
   float intensity = 1.0f;
   float range = 10.0f;
   bool shadows = true;
+  /* Round 424: the bake's light size - a point or spot light's ball radius (m), a sun's full angle (degrees). */
+  float shadow_radius = 0.0f, shadow_angle = 0.0f;
 };
 
 /* An area light is an emissive plane (task 0155, ADR 0050): a Lambertian emitter of radiance intensity x pi over its

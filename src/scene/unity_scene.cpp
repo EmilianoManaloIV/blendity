@@ -142,6 +142,8 @@ bool light_override(const std::string &prop, double v, GameObject *g) {
   if (prop == "m_Shadows.m_Type") return l->shadows = v >= 0.0 && v <= 2.0 ? (int)v : 2, true;  // (round 401)
   if (prop == "m_Shadows.m_Strength") return l->shadow_strength = (float)std::max(0.0, std::min(1.0, v)), true;
   if (prop == "m_BounceIntensity") return l->bounce_intensity = (float)std::max(0.0, v), true;
+  if (prop == "m_ShadowRadius") return l->shadow_radius = (float)std::max(0.0, std::min(10.0, v)), true;  // (round 424)
+  if (prop == "m_ShadowAngle") return l->shadow_angle = (float)std::max(0.0, std::min(90.0, v)), true;
   if (prop == "m_Color.a") return true;  // (a light's alpha does nothing in Unity either)
   if (prop == "m_Intensity") return l->intensity = (float)v, true;
   if (prop == "m_Range") return l->range = (float)v, true;
@@ -688,6 +690,8 @@ void add_light(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
     l->shadow_strength = (float)std::max(0.0, std::min(1.0, sh->num("m_Strength", 1.0)));
   }
   l->bounce_intensity = (float)std::max(0.0, d.body.num("m_BounceIntensity", 1.0));
+  l->shadow_radius = (float)std::max(0.0, std::min(10.0, d.body.num("m_ShadowRadius", 0.0)));  // (round 424)
+  l->shadow_angle = (float)std::max(0.0, std::min(90.0, d.body.num("m_ShadowAngle", 0.0)));
   l->cookie_size = (float)std::max(0.01, d.body.num("m_CookieSize", 10.0));
   const std::string cookie = d.body.guid("m_Cookie");
   if (!cookie.empty() && d.body.file_id("m_Cookie") && ctx.path_of) l->cookie.path = ctx.path_of(cookie);
