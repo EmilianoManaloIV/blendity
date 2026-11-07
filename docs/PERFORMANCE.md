@@ -104,6 +104,18 @@ to the card (lightmaps 47.8 s, reflection probes 38.4 s). Texel validity (Unity'
 texels inside geometry, filled from their charts. Stations: spawn 3.71 / 0.812 / 0.899, spawn_back 1.37 / 0.772 /
 0.360, floor 4.36 / 0.747 / 0.974, ahead 3.06 / 0.883 / 0.958.
 
+### The views against Unity's (round 431) and the suite's comparison (round 432)
+| view (ms a frame on the card) | Blendity | Unity |
+|---|---|---|
+| Shinano, Scene view | 7.52 (gathering 1.83, hashing 0.98) | 2.2 |
+| SideRail, Scene view | 8.11 | 10.0 |
+| SideRail, Scene + Game view | 10.96 (card passes 4.76, presenting 3.37) | 4.8 (Game alone) |
+
+Shinano's gathering and hashing re-derive an unchanged scene: caching them safely needs a scene-wide change counter
+(open). The only quick-suite responsiveness row over budget: Enter Edit Mode on the 500k sphere, 116 ms (budget 100;
+the CPU's first cage frame). `tools/perf_suite.py` now matches rows by section, table and row; CI compares its quick
+stress with a per-runner baseline when one is committed (`--compare`, warnings).
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (rounds 431-432): the views measured against Unity's; the suite's comparison fixed and in CI
+
+**Asked:** Pass 17's rounds 431 and 432 - the views against Unity's, the remaining slow rows, the suite's CI step.
+
+**Changed (task 0408)**
+- **Measured:** SideRail's Scene view 8.1 ms a frame (Unity's 10.0); Shinano's 7.5 (Unity's 2.2) - nearly 3 ms of it
+  re-deriving an unchanged scene, which needs a scene-wide change counter to cache safely: left open, with the numbers.
+- **The performance suite's comparison** matches rows by section, table and row (a section's second table had been
+  read with the first's header; two rows of one name collided).
+- **CI compares its quick stress** with a per-runner baseline when one is committed - warnings only, for now.
+- **The suite's default sections** take parity, memory, physics, animation and filters too.
+
+**Checked:** tools/test_perf_suite.py; both suites - with Blender's libraries 16361 checks in 1608 tests, 0
+failed; dependency-free 15607 (Windows) and 15613 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 430): no dark lines along contacts; the bake on the card when Unity's scene says so
 
 **Asked:** Pass 17's round 430 - the bake's speed, and the texel validity round 425 deferred.
