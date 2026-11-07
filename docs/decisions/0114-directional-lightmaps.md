@@ -29,6 +29,12 @@ direction maps but folded them into the colour once per texel at the vertex norm
 4. **Files:** `LightmapDir-N.hdr` beside `Lightmap-N.hdr` (encoded 0.5 + 0.5 a), and the direction page count appended
    to `LightingData.bin` (older readers stop before it; a count of 0 leaves a folder's old direction files unread).
 
+## Amendment (round 427)
+Only the direct light carries a direction: the gather's samples, the sampled emitters and the card's gather weigh in
+with none. Measured on SideRail's own Unity direction maps: Unity's directions are short where the light is bounced
+(median length 0.117) and long near a lamp (90th percentile 0.715); with every sample's direction Blendity's were 0.865
+and 0.976, with the direct light alone 0.744 and 0.949.
+
 ## Consequences
 - A bake keeps twice the page memory and files; the bake's own cost is a weighted sum per sample.
 - Unity's imported direction maps are still folded at import (their divisor differs from the decode's); moving them

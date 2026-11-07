@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 427): the bake's directions measured against Unity's
+
+**Asked:** Pass 17's round 427 - and first, round 426's floor (more relief under baked light than Unity's).
+
+**Changed (task 0403, ADR 0114 amended)**
+- **Only the direct light carries a direction** in the bake's direction pages: bounced light and glowing surfaces weigh
+  in pointing nowhere - Unity's own direction maps for SideRail are short where the light is bounced (median length
+  0.117) and long near a lamp; Blendity's had been long everywhere (0.865).
+
+**Measured:** SideRail's floor SSIM 0.788 -> 0.794 (the others unchanged). Open, with findings: the rest of the floor's
+gap (Unity's divisor), spawn's green walkway (the exit sign's baked glow), the wall's seams (round 430). L2 SH probes,
+Light Probe Groups and Light Volumes in the views left for later (little to gain on these lightmapped stations).
+
+**Checked:** both suites - with Blender's libraries 16326 checks in 1604 tests, 0 failed; dependency-free
+15578 (Windows) and 15584 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 426): directional lightmaps
 
 **Asked:** Pass 17's round 426 - Unity's Directional mode: normal maps under baked light.

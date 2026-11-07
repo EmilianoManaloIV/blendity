@@ -410,7 +410,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     else L = pt_->incoming_radiance({o, d}, prng, rays, emissive ? cosn / kPi : 0.0f);
     if (!finite3(L)) continue;
     sum += L;
-    dirs.add(L * gather_scale, d);
+    dirs.add(L * gather_scale, Vec3(0.0f));  // (round 427: the bounced light weighs but points nowhere - Unity's directionality, measured on SideRail's own direction maps)
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
   /* Twice the gather's rays (shadow rays are cheap), at most 256; on the GPU path these run on the CPU beside the
@@ -421,7 +421,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     const Vec3 e = emissive_at(o, n, rng, std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64)), gather_sees_emitters, rays) * s_.indirect_intensity;
     value += e;
     if (emitted_out) *emitted_out = finite3(e) ? e : Vec3(0.0f);
-    dirs.add(e, n * (2.0f / 3.0f));  // (the emitters' light: emissive_at doesn't say from where - an even hemisphere's cosine-weighted mean, as the CPU gather's under an even sky)
+    dirs.add(e, Vec3(0.0f));  // (the emitters' light: as the bounced light, weighed but pointing nowhere - round 427)
   }
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
@@ -549,7 +549,7 @@ bool Lightmapper::step(double budget_ms) {
           DirSum *dk = dirs_.empty() ? nullptr : &dirs_[k];
           v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k], dk);
           gather_[k] = finite3(ind[(size_t)i]) ? ind[(size_t)i] * s_.indirect_intensity : Vec3(0.0f);
-          if (dk) dk->add(gather_[k], texels_[k].normal * (2.0f / 3.0f));  // (the card's gather says no direction: an even hemisphere's mean, as the CPU's gather gives under an even sky - review 426)
+          if (dk) dk->add(gather_[k], Vec3(0.0f));  // (the card's gather: weighed, pointing nowhere, as the CPU's - round 427)
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
         }
       });
