@@ -1743,6 +1743,13 @@ void Editor::dock_draw(DockNode *n) {
 
 void Editor::dock_draw_window(WindowKind k, const Recti &r) {
   ui_.push_id((uint64_t)k * 0x100000001B3ull + 7);
+  ScopedTimer window_timer;  // (round 436: each window's own time, for the Profiler and the windowed check)
+  draw_window_kind(k, r);
+  prof_.ms_window[(int)k & 31] += window_timer.ms();
+  ui_.pop_id();
+}
+
+void Editor::draw_window_kind(WindowKind k, const Recti &r) {
   switch (k) {
     case WindowKind::Scene: draw_scene_view(r); break;
     case WindowKind::Game: draw_game_view(r); break;
@@ -1772,7 +1779,6 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Tools: draw_tools_window(r); break;
     default: break;
   }
-  ui_.pop_id();
 }
 
 DockNode *Editor::dock_find(WindowKind k, DockNode *n) {
@@ -3459,6 +3465,7 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     std::printf("    the CPU's share of the GPU path: the instances %.2f, the baked corners %.2f, the see-through triangles %.2f, the render call %.2f ms (with its wait when the picture comes back)\n",
                 (p1.ms_gpu_instances - p0.ms_gpu_instances) / n, (p1.ms_gpu_corners - p0.ms_gpu_corners) / n, (p1.ms_gpu_see - p0.ms_gpu_see) / n,
                 (p1.ms_gpu_render - p0.ms_gpu_render) / n);
+    print_window_times(p0, p1, n);  // (round 436)
   };
   std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
               card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());
@@ -3581,6 +3588,11 @@ Editor::PathPick Editor::pick_open_path(const std::string &title, const std::str
  * shapes whose mesh was edited by hand (it is an ordinary mesh from then on). */
 void Editor::update_procedural_shapes() {
   if (playing_) return;
+  if (!walk_due(shapes_walk_)) {  // (round 436, ADR 0115: 7 ms a frame at 50,000 objects, for a shape edited once)
+    walks_skipped_++;
+    return;
+  }
+  WalkScope scope{*this, shapes_walk_};
   std::vector<GameObject *> converted;
   scene_->for_each([&](GameObject &g) {
     auto *ps = g.get<ProceduralShape>();

@@ -27,6 +27,11 @@ const Mesh *Editor::lod_for_view(const GameObject &g, const Mesh &m) {
 /* Fit to Mesh ticked (or a collider just added): the collider sized to its mesh, the tick cleared - part of the step
  * that ticked it, never a step of its own (a loaded or undone state asking for it is fitted quietly). */
 void Editor::update_collider_fits() {
+  if (!walk_due(collider_walk_)) {  // (round 436, ADR 0115: 7 ms a frame at 50,000 objects, for a tick set once)
+    walks_skipped_++;
+    return;
+  }
+  WalkScope scope{*this, collider_walk_};
   bool any = false;
   scene_->for_each([&](GameObject &g) {
     ColliderComponent *c = g.get<ColliderComponent>();

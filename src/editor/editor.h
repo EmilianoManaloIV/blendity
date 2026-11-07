@@ -214,6 +214,8 @@ struct FrameProfile {
   double ms_deferred = 0;
   double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
+  uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
+  double ms_window[32] = {};  // round 436: each docked window's own drawing (WindowKind order; the views' rendering inside theirs)
   uint64_t scene_hash_reuses = 0, scene_hash_misses = 0;  // round 435 (ADR 0115): scene hashes kept while nothing changed; checks that found a change the counter missed
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
@@ -257,7 +259,8 @@ struct FrameProfile {
     ms_edit_op += o.ms_edit_op, ms_undo += o.ms_undo;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
-    scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses;
+    scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
+    for (int k = 0; k < 32; k++) ms_window[k] += o.ms_window[k];
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
     gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
@@ -1340,6 +1343,7 @@ class Editor {
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
   void set_scene_hash_check_every_for_test(int n) { scene_hash_check_every_ = std::max(1, n); }
   uint64_t scene_hash_misses_for_test() const { return scene_hash_misses_; }
+  uint64_t walks_skipped_for_test() const { return walks_skipped_; }
   uint64_t scene_hash_reuses_for_test() const { return prof_.scene_hash_reuses; }
   void next_hash_frame_for_test() { hash_frame_++; }
   bool scene_hash_volatile_for_test() const { return scene_hash_volatile(); }
@@ -2016,6 +2020,44 @@ class Editor {
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  /* Round 436: the gather itself; `view_dep` set when an item depends on this view's eye (an outline's width, an LOD
+   * Group's level, a camera-shaped mesh), so the kept list is keyed by the eye too. */
+  std::vector<DrawItem> collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod);
+  uint64_t items_key(bool game, bool want_tangents);
+  uint64_t items_view_key() const;
+  /* Round 436 (ADR 0115): a per-frame walk that only reacts to edits (procedural shapes, colliders' Fit to Mesh, a
+   * camera's focus tracking) skips while the change counter and the scene hold still - walked anyway while the scene
+   * changes behind the counter and every `scene_hash_check_every_`th frame, as the scene hash is checked. */
+  struct WalkMark {
+    const Scene *scene = nullptr;
+    uint64_t serial = 0, epoch = 0, frame = 0;
+  };
+  bool walk_due(const WalkMark &m) const;
+  void walk_done(WalkMark &m, uint64_t epoch_before) const;
+  /* (Taken as a walk starts: the counter read before it - a bump during the walk, its own or a worker's, walks once
+   * more next frame - and recorded whichever way the walk returns.) */
+  struct WalkScope {
+    const Editor &e;
+    WalkMark &m;
+    uint64_t epoch = edit_epoch::now();
+    ~WalkScope() { e.walk_done(m, epoch); }
+  };
+  WalkMark shapes_walk_, collider_walk_, focus_walk_, icon_walk_;
+  void apply_camera_focus();  // (the walk itself: the `focus` command applies it at once)
+  std::vector<GameObject *> icon_objects_;  // (round 436: what the Scene view's icon pass draws for)
+  const std::vector<GameObject *> &scene_icon_objects();
+  uint64_t walks_skipped_ = 0;  // (since start: walks the counter let go)
+  void draw_window_kind(WindowKind k, const Recti &r);  // (round 436: dock_draw_window's switch, timed around it)
+  void print_window_times(const FrameProfile &p0, const FrameProfile &p1, double frames);  // (round 436: the windowed check's slowest windows)
+  /* Round 436 (ADR 0115): each view kind's draw items, kept while the scene's hash and what the gather reads beside
+   * it hold still - [game][tangents]. */
+  struct ItemsCache {
+    uint64_t base = 0, view = 0;
+    bool view_dep = false, valid = false;
+    bool flattening = false;  // (a Camera Flatten or View Angle Shapes was in the scene: the gather filled side tables - never kept)
+    bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
+    std::vector<DrawItem> items;
+  } items_cache_[2][2];
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
    * per metre at one metre; off between views (exports, bakes: the plain thickness). */
