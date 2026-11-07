@@ -49,6 +49,13 @@ jobs:
             tail -5 stress.log | sed 's/^/::error::/'
           fi
           exit $status
+      - name: Performance against this runner's baseline (informative)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        # Round 432 (ADR 0105): the quick stress's tables against stress/results/ci-Windows.md when one is committed (a CI
+        # runner isn't the developer's machine: its own baseline); findings as warnings, never a failure yet.
+        run: python tools/perf_suite.py --compare stress/results/ci/latest.md --baseline stress/results/ci-Windows.md --annotate || true
       - name: Headless screenshot
         run: dist\windows\Blendity.exe --headless-screenshot screenshot-windows.png
       - uses: actions/upload-artifact@v4
@@ -96,6 +103,13 @@ jobs:
             tail -5 stress.log | sed 's/^/::error::/'
           fi
           exit $status
+      - name: Performance against this runner's baseline (informative)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        # Round 432 (ADR 0105): the quick stress's tables against stress/results/ci-Linux.md when one is committed (a CI
+        # runner isn't the developer's machine: its own baseline); findings as warnings, never a failure yet.
+        run: python3 tools/perf_suite.py --compare stress/results/ci/latest.md --baseline stress/results/ci-Linux.md --annotate || true
       - name: Headless screenshot
         run: ./dist/linux/Blendity --headless-screenshot screenshot-linux.png
       - uses: actions/upload-artifact@v4
@@ -137,6 +151,13 @@ jobs:
             tail -5 stress.log | sed 's/^/::error::/'
           fi
           exit $status
+      - name: Performance against this runner's baseline (informative)
+        if: always()
+        continue-on-error: true
+        shell: bash
+        # Round 432 (ADR 0105): the quick stress's tables against stress/results/ci-macOS.md when one is committed (a CI
+        # runner isn't the developer's machine: its own baseline); findings as warnings, never a failure yet.
+        run: python3 tools/perf_suite.py --compare stress/results/ci/latest.md --baseline stress/results/ci-macOS.md --annotate || true
       - name: Headless screenshot
         run: ./dist/macos/Blendity --headless-screenshot screenshot-macos.png
       - name: Zip app bundle
