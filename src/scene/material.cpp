@@ -101,6 +101,11 @@ void Material::reflect(Reflector &r) {
   r.help("Principled 'IOR Level'. 0.5 = 4% reflectance at normal incidence (IOR 1.5).");
   r.texture("Normal Map", normal_map);
   r.field("Normal Strength", normal_strength, 0.01f, 0.0f, 4.0f);
+  if (r.all_fields() || exposure_occlusion > 0.0f) {
+    r.field("Exposure Occlusion", exposure_occlusion, 0.01f, 0.0f, 1.0f);
+    r.help("Filamented's Exposure Occlusion (round 429): reflections fade where the ambient light here (lightmap, probes or\n"
+           "sky) is darker than this - a dark corner doesn't reflect the bright room. 0: off.");
+  }
   r.color("Emission", emission);
   r.field("Emission Strength", emission_strength, 0.05f, 0.0f, 1000.0f);
   r.texture("Emission Map", emission_map);

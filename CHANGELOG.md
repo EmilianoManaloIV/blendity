@@ -2,6 +2,25 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 429): reflections fade in dark corners, as Filamented's
+
+**Asked:** Pass 17's round 429 - taken by round 428's finding: SideRail's panels reflecting the lamps where Unity's
+render stays dark.
+
+**Changed (task 0405)**
+- **Filamented's Exposure Occlusion:** a material from Silent's Filamented keeps its "Lightmap Occlusion Sensitivity";
+  its reflections fade where the baked light (lightmap or probes) is dark, as the shader's specular occlusion does - in
+  both views.
+- The plan's Shadowmask / Subtractive moves to the write-up's open list.
+
+**Measured:** SideRail's MAE: spawn 4.76 -> 3.70, spawn_back 1.84 -> 1.34, floor 5.16 -> 4.29, ahead 3.93 -> 3.14 (spawn and
+ahead under the target of 4), the grid correlation up (ahead 0.948); SSIM down (spawn 0.872 -> 0.810, ahead 0.907 ->
+0.882): the faded reflections took fine structure Unity's render keeps - open.
+
+**Checked:** tests_round429, the Filamented import test, the card's test; both suites - with Blender's libraries
+16357 checks in 1607 tests, 0 failed; dependency-free 15603 (Windows) and 15609 (Linux, WSL), 0
+failed; the audits.
+
 ## 2026-11-07 (round 428): reflection probes prefiltered as Unity's, and right way up
 
 **Asked:** Pass 17's round 428 - reflection probes as Unity's.

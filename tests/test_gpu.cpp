@@ -2651,6 +2651,42 @@ static void tests_round216() {
     ed.viewport_device_for_test(1);
     std::filesystem::remove_all(dir, ec);
   });
+  test("gpu views (round 429): Filamented's specular occlusion on the card as on the CPU - an untextured glossy metal floor over a dim bake keeps less of its reflection, the card's picture darkening as the CPU's (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, true, 2, 1.0f, true);
+    ed.command("overlay grid off");
+    MeshRenderer *mr = w.floor_go->get<MeshRenderer>();
+    Material *m = mr && !mr->materials.empty() ? mr->materials[0].get() : nullptr;
+    CHECK(m != nullptr);
+    if (!m) return;
+    m->metallic = 1.0f, m->roughness = 0.3f, m->touch();
+    ed.scene().environment.strength = 0.3f;  // (a dim bake: the sky low)
+    ed.commit_change("material");
+    r35_bake(ed);
+    view(ed, w.floor_go, 2);  // (the card warmed)
+    const std::vector<uint32_t> open_cpu = view(ed, w.floor_go, 1), open_gpu = view(ed, w.floor_go, 2);
+    m->exposure_occlusion = 1.0f, m->touch();
+    ed.commit_change("material");
+    check(ed, w.floor_go, "exposure occlusion");
+    const std::vector<uint32_t> occ_cpu = view(ed, w.floor_go, 1), occ_gpu = view(ed, w.floor_go, 2);
+    auto sum3 = [](uint32_t p) { return (int)(p & 255) + (int)((p >> 8) & 255) + (int)((p >> 16) & 255); };
+    /* Each device's own darkening, and the two darkenings alike pixel by pixel (the card's had been nothing: an
+     * untextured material's value never reached it - review 429). */
+    size_t changed_cpu = 0, changed_gpu = 0, apart = 0;
+    for (size_t i = 0; i < open_cpu.size() && i < occ_cpu.size() && i < open_gpu.size() && i < occ_gpu.size(); i++) {
+      const int dc = sum3(open_cpu[i]) - sum3(occ_cpu[i]), dg = sum3(open_gpu[i]) - sum3(occ_gpu[i]);
+      changed_cpu += dc > 0, changed_gpu += dg > 0;
+      apart += std::abs(dc - dg) > 9;
+    }
+    std::printf("    Exposure Occlusion 1 on the floor: %zu pixels darker on the CPU, %zu on the card, %zu darkened differently (by more than 3 a channel)\n",
+                changed_cpu, changed_gpu, apart);
+    CHECK(changed_cpu > 1000 && changed_gpu > changed_cpu * 8 / 10 && apart < changed_cpu / 20);
+    ed.viewport_device_for_test(1);
+  });
   test("gpu views: realtime lightmaps (Receive GI: Lightmaps) on the card as on the CPU; realtime GI's per-pixel light for an object without them stays the CPU's, saying why (skipped without a GPU)", [&] {
     if (!gpu::available()) {
       std::printf("    no Vulkan GPU: skipped\n");

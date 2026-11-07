@@ -93,6 +93,11 @@ roughness-to-mip; built on the bake's worker (16 ms a 128 probe). SideRail: spaw
 1.84 / 0.814 / 0.698 (grid 0.533 before), floor 5.16 / 0.764 / 0.974 (SSIM 0.794 before: the panels now reflect the
 lamps; Filamented dims reflections by the lightmap), ahead 3.93 / 0.907 / 0.932.
 
+### Reflections fade in dark corners (round 429)
+Filamented's Exposure Occlusion (Lagarde's specular occlusion of the ambient, multi-bounce by f0). SideRail: spawn
+3.70 / 0.810 / 0.900, spawn_back 1.34 / 0.771 / 0.861, floor 4.29 / 0.750 / 0.974, ahead 3.14 / 0.882 / 0.948 - MAE
+down everywhere (spawn and ahead under 4), SSIM down (open).
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`
