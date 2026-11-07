@@ -87,6 +87,12 @@ direction's length with Unity's own direction maps).
 Unity's own SideRail direction maps: length median 0.117, 90th percentile 0.715; Blendity's 0.865 / 0.976 (round 426),
 0.744 / 0.949 with only the direct light pointing (round 427). Floor 5.11 / 0.794 / 0.975 (was 0.788).
 
+### Reflection probes (round 428)
+Every probe's map had been upside down since round 401 (both views). Fixed, and GGX-prefiltered mips read with Unity's
+roughness-to-mip; built on the bake's worker (16 ms a 128 probe). SideRail: spawn 4.76 / 0.872 / 0.903, spawn_back
+1.84 / 0.814 / 0.698 (grid 0.533 before), floor 5.16 / 0.764 / 0.974 (SSIM 0.794 before: the panels now reflect the
+lamps; Filamented dims reflections by the lightmap), ahead 3.93 / 0.907 / 0.932.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

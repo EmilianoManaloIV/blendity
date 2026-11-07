@@ -2,6 +2,23 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 428): reflection probes prefiltered as Unity's, and right way up
+
+**Asked:** Pass 17's round 428 - reflection probes as Unity's.
+
+**Changed (task 0404)**
+- **Fixed: every reflection probe's map was upside down** (since round 401) in both views - a floor's reflection
+  showed what is below it.
+- **Rough reflections from GGX-prefiltered mips**, each holding the roughness Unity's perceptualRoughnessToMipmapLevel
+  maps to it, read with Unity's mapping on the CPU and the card (was a box blur and a guessed curve).
+- **The prefiltering runs on the bake's worker** (16 ms a 128 probe), not in the landing frame.
+
+**Measured:** SideRail: spawn_back's grid correlation 0.533 -> 0.698; the floor's SSIM 0.794 -> 0.764 - the wall panels
+beside it now reflect the lamps, where the world's shader (Filamented) dims a reflection by the lightmap: next round.
+
+**Checked:** tests_round428; both suites - with Blender's libraries 16340 checks in 1605 tests, 0 failed;
+dependency-free 15592 (Windows) and 15598 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 427): the bake's directions measured against Unity's
 
 **Asked:** Pass 17's round 427 - and first, round 426's floor (more relief under baked light than Unity's).

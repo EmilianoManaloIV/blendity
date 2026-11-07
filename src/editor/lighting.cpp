@@ -612,7 +612,7 @@ void Editor::bake_job_land(BakeJob &j) {
   }
   if (!j.probe_bakes.empty()) {
     for (auto &kv : j.probe_bakes) reflection_probe_bakes_[kv.first] = std::move(kv.second);
-    reflection_probe_bakes_changed();
+    land_reflection_probe_maps(j.probe_maps);
   }
   bool volumes_changed = !j.volume_bakes.empty();
   for (auto &kv : j.volume_bakes) light_volume_bakes_[kv.first] = std::move(kv.second);

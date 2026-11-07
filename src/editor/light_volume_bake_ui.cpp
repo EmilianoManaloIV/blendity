@@ -162,6 +162,7 @@ void Editor::bake_reflection_probes_on_worker(BakeJob &j) {
     if (j.cancel.load()) break;
     bake.from_unity = false;
     j.probe_bakes[p.id] = std::move(bake);
+    j.probe_maps[p.id] = reflection_probe_texture(j.probe_bakes[p.id]);  // (round 428: the GGX levels here, not in the landing frame - 16 ms a 128 probe)
   }
   Log::info("Reflection probes: %zu baked", j.probe_bakes.size());
 }

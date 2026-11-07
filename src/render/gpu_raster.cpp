@@ -1287,7 +1287,8 @@ vec3 probe_sample(int i, vec3 P, vec3 R, float rough) {
     float fa = max(0.0, min(min(rb.x, rb.y), rb.z));
     d = normalize((P - p.pos_type.xyz) + d * fa);
   }
-  return tex_sample(int(p.spot.x), dir_to_equirect(d, 0.0), clamp(rough, 0.0, 1.0) * p.spot.z * 0.85, 0, 2).xyz * p.color.w;
+  float r = isnan(rough) ? 1.0 : clamp(rough, 0.0, 1.0);  // (round 428: Unity's roughness-to-mip, reflection_probe_lod on the CPU - NaN as 1 there too)
+  return tex_sample(int(p.spot.x), dir_to_equirect(d, 0.0), min(r * (1.7 - 0.7 * r) * 6.0, p.spot.z), 0, 2).xyz * p.color.w;
 }
 vec3 probe_specular(vec3 P, vec3 R, float rough) {
   int n = int(gi.y);
