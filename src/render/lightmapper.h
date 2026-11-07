@@ -44,6 +44,11 @@ struct BakeSettings {
   int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
   uint32_t seed = 0;              // round 421: another seed draws other samples (a reference independent of the bake it scores)
   bool use_oidn = true;           // round 423: OIDN's lightmap filter when linked (off: the A-Trous filter - Preview Lighting, which finishes on the main thread)
+  /* Round 430 (Unity's Backface Tolerance): the share of a texel's validity rays that must not meet a back face (a ray to
+   * the sky counts as fine; a Double Sided material's back face as a front one); a texel under it is inside geometry -
+   * left out and filled from its own chart's valid texels. 0: every texel kept (Preview Lighting: the rays would be on the
+   * main thread). */
+  float backface_tolerance = 0.9f;
   bool directional = true;        // round 426: Unity's Directional mode - a direction page beside each colour page (LightingData::dir_pages)
 };
 
@@ -191,6 +196,14 @@ class Lightmapper {
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
                   DirSum *dir_out = nullptr);
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
+  std::vector<uint8_t> invalid_;  // (round 430: per texel, inside geometry - its rays mostly met back faces)
+  size_t invalid_count_ = 0;
+  void validate_texels();
+  void fill_invalid(Lightmap &lm, std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<std::pair<size_t, size_t>> &list) const;
+  bool texel_inside(const LightmapTexel &t, uint32_t k, float limit) const;
+ public:
+  size_t invalid_texels() const { return invalid_count_; }  // (round 430: the last bake's, for the log and the tests)
+ private:
   void finish_directions();
   void denoise_page(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
                     const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own);

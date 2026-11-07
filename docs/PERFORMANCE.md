@@ -98,6 +98,12 @@ Filamented's Exposure Occlusion (Lagarde's specular occlusion of the ambient, mu
 3.70 / 0.810 / 0.900, spawn_back 1.34 / 0.771 / 0.861, floor 4.29 / 0.750 / 0.974, ahead 3.14 / 0.882 / 0.948 - MAE
 down everywhere (spawn and ahead under 4), SSIM down (open).
 
+### The bake on the card, texels inside geometry (round 430)
+SideRail's Generate Lighting **699 s -> 85 s**: its Unity scene asks for the GPU lightmapper, and the gather now goes
+to the card (lightmaps 47.8 s, reflection probes 38.4 s). Texel validity (Unity's Backface Tolerance): 17 % of the
+texels inside geometry, filled from their charts. Stations: spawn 3.71 / 0.812 / 0.899, spawn_back 1.37 / 0.772 /
+0.360, floor 4.36 / 0.747 / 0.974, ahead 3.06 / 0.883 / 0.958.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

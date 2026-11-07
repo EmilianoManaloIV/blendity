@@ -188,6 +188,13 @@ class PathTracer {
     surface_at(h.object, h.tri, h.u, h.v, sp);
     return sp.geo_normal;
   }
+  /* Round 430: a ray along `d` met the hit's back face - its geometry faces along the ray and its material isn't Double
+   * Sided (Unity's Double Sided GI: such back faces count as front ones). */
+  bool hit_back_face(const Hit &h, Vec3 d) const {
+    SurfacePoint sp;
+    const Material *m = surface_at(h.object, h.tri, h.u, h.v, sp);
+    return dot(sp.geo_normal, d) > 0.0f && !(m && m->double_sided);
+  }
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }

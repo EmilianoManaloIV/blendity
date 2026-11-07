@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 430): no dark lines along contacts; the bake on the card when Unity's scene says so
+
+**Asked:** Pass 17's round 430 - the bake's speed, and the texel validity round 425 deferred.
+
+**Changed (task 0406)**
+- **Texels inside geometry are left out** (Unity's Backface Tolerance, 0.9): a floor's texels under a box standing in
+  it no longer bleed their darkness out as a line along the contact - filled from the valid texels beside them.
+- **The Lightmapper setting** (Render Device, CPU, GPU): a Unity scene baked on Unity's GPU lightmapper bakes on the
+  card here too.
+
+**Measured:** SideRail's Generate Lighting 699 s -> 85 s (the gather on the card, as its Unity scene asks); ahead's grid
+correlation 0.958 (its target met for the first time); 17 % of the texels found inside geometry.
+
+**Checked:** tests_round430; both suites - with Blender's libraries 16361 checks in 1608 tests, 0 failed;
+dependency-free 15607 (Windows) and 15613 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 429): reflections fade in dark corners, as Filamented's
 
 **Asked:** Pass 17's round 429 - taken by round 428's finding: SideRail's panels reflecting the lamps where Unity's

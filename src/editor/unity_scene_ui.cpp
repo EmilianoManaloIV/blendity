@@ -156,6 +156,7 @@ void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::v
   l.denoise = u.filtering != 0;
   l.baked_gi = u.baked_gi;
   l.directional_mode = u.directional;  // (round 426)
+  l.bake_device = u.backend == 2 ? 2 : 0;  // (round 430: Unity's Progressive GPU on the card; its CPU or Enlighten as the Render device - never slower than before, review 430)
   scene_->unity_bake = u;
   if (!missing_guid.empty())
     notes.push_back("the scene's Lighting Settings asset (" + missing_guid + ") isn't in this project: " + u.source + " used for the bake");
