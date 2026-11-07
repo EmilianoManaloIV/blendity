@@ -429,6 +429,7 @@ void Editor::bake_job_run(BakeJob &j) {
   j.lighting = baker_.take_result();
   j.lighting.scene_key = j.key;
   j.lightmap_finish_ms = baker_.finish_ms(), j.lightmap_texels = baker_.texel_count(), j.lightmap_rays = baker_.rays(), j.lightmap_gpu_texels = baker_.gpu_texels();
+  j.lightmap_denoiser = baker_.denoiser();
   j.mesh_hashes.assign(j.objects.size(), 0);
   JobSystem::global().parallel_for((int64_t)j.objects.size(), 4, [&](int64_t a, int64_t b) {
     for (int64_t i = a; i < b; i++) j.mesh_hashes[(size_t)i] = lightmap_mesh_hash(*j.objects[(size_t)i].mesh);
@@ -583,10 +584,10 @@ void Editor::bake_job_land(BakeJob &j) {
       for (int k = 0; k < 5; k++) b.phase_ms[k] = j.phase_ms[k];
       b.finish_ms = j.lightmap_finish_ms, b.land_ms = t.ms(), b.total_ms = j.ms;
       b.texels = j.lightmap_texels, b.gpu_texels = j.lightmap_gpu_texels, b.rays = j.lightmap_rays;
-      Log::info("Generate Lighting phases: lightmaps %.1f s (%zu texels, %.0f Mrays, %zu on the GPU; filter and dilation %.0f ms), probes %.1f s, "
+      Log::info("Generate Lighting phases: lightmaps %.1f s (%zu texels, %.0f Mrays, %zu on the GPU; %s and dilation %.0f ms), probes %.1f s, "
                 "Light Volumes %.1f s, reflection probes %.1f s, saving %.1f s; the landing frame %.0f ms",
-                b.phase_ms[0] / 1000.0, b.texels, b.rays / 1e6, b.gpu_texels, b.finish_ms, b.phase_ms[1] / 1000.0, b.phase_ms[2] / 1000.0,
-                b.phase_ms[3] / 1000.0, b.phase_ms[4] / 1000.0, b.land_ms);
+                b.phase_ms[0] / 1000.0, b.texels, b.rays / 1e6, b.gpu_texels, j.lightmap_denoiser.empty() ? "no filter" : j.lightmap_denoiser.c_str(), b.finish_ms,
+                b.phase_ms[1] / 1000.0, b.phase_ms[2] / 1000.0, b.phase_ms[3] / 1000.0, b.phase_ms[4] / 1000.0, b.land_ms);
     }
   } land_timer{*this, j, land_t};
   const bool cancelled = j.cancel.load();
@@ -1002,6 +1003,7 @@ void Editor::preview_step() {
     s.denoise = true;
     s.indirect_intensity = ls.indirect_intensity;
     s.gpu_device = choose_bake_gpu();
+    s.use_oidn = false;  // (round 423: the preview finishes on the main thread - OIDN's filter there would be a stall)
     preview_baker_.begin(objects, lights, env_, s);
     preview_running_ = true;
   }

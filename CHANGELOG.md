@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-06 (round 423): the lightmap denoiser and Unity's sample count
+
+**Asked:** Pass 17's round 423 - denoising and sampling: round 421 had found the lightmap filter doubling a long bake's
+error.
+
+**Changed (task 0399)**
+- **The bake's filter takes the noisy light only:** the gathered (indirect) light and the emitters sampled at each
+  texel; the Baked lights' direct light gets a light radius-1 pass inside its chart, so shadow edges stay put.
+- **OIDN's lightmap filter where the OIDN build has it, else an edge-avoiding A-Trous filter** guided by each texel's
+  normal, position and chart, its strength following the sample count. Blender's OIDN leaves the lightmap filter's
+  weights out, so with Blender's libraries the bake uses the A-Trous filter too; the log names the one that ran.
+  Preview Lighting always uses the A-Trous filter (it finishes on the main thread).
+- **Indirect Samples default 512**, Unity's (was 256).
+- Tried and left out: Unity's inverse-square falloff for Baked lights (SideRail 2.5-12x too bright; no single curve
+  fits every station - round 424 diagnoses the lights one by one).
+
+**Measured:** synthetic relative RMSE - room 0.031 -> 0.019, corridor 0.015 -> 0.008, courtyard 0.077 -> 0.055; the
+room at 1024 samples filtered 0.031 -> 0.017 (the filter no longer hurts a long bake). SideRail's stations about as
+before (spawn 5.62 / 0.887, floor 7.82 / 0.679, ahead 4.17 / 0.897): their error is the lamps' brightness, not noise.
+
+**Checked:** tests_round423; both suites - with Blender's libraries 16265 checks in 1598 tests, 0 failed;
+dependency-free 15524 (Windows) and 15530 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-06 (round 422): the cheap performance wins
 
 **Asked:** Pass 17's round 422 - the slow spots Pass 16 ranked whose causes were known, fixed early while the

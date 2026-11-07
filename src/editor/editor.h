@@ -5488,7 +5488,7 @@ class Editor {
     bool probe_box_ok = false;
     AABB probe_box;
     float probe_min_spacing = 1.0f, probe_max_spacing = 4.0f, indirect_intensity = 1.0f;
-    int indirect_samples = 256, bounces = 2;
+    int indirect_samples = 512, bounces = 2;
     /* The Light Volumes (round 398), each with its grid placed here. */
     struct Volume {
       uint64_t id = 0;
@@ -5525,6 +5525,7 @@ class Editor {
     double lightmap_finish_ms = 0;         // (the lightmaps' filter and dilation, inside phase 0)
     size_t lightmap_texels = 0;
     std::vector<uint64_t> mesh_hashes;  // (round 422: lightmap_mesh_hash of each of `objects`, on the worker - not in the landing frame)
+    std::string lightmap_denoiser;      // (round 423)
     uint64_t lightmap_rays = 0;
     size_t lightmap_gpu_texels = 0;
     std::atomic<float> progress{0.0f};

@@ -1995,6 +1995,67 @@ bool oidn_try_gpu(OidnState &s, int setting, const std::vector<float> &color, co
 }  // namespace
 #endif
 
+namespace {
+std::string &oidn_lightmap_error() {  // (written only by the probe, inside its one-time initialisation)
+  static std::string e;
+  return e;
+}
+thread_local bool t_oidn_probe = false;  // (the probe's own failure isn't a warning: Blender's OIDN has no lightmap weights)
+}  // namespace
+
+bool PathTracer::oidn_lightmap_available(std::string *why) {
+  static const bool ok = [] {
+    std::vector<Vec3> probe(64, Vec3(0.5f));
+    t_oidn_probe = true;
+    const bool r = oidn_denoise_lightmap(probe, 8, 8);
+    t_oidn_probe = false;
+    if (!r) Log::info("OpenImageDenoise's lightmap filter isn't available (%s): bakes use the A-Trous filter", oidn_lightmap_error().c_str());
+    return r;
+  }();
+  if (why) *why = ok ? std::string() : oidn_lightmap_error();
+  return ok;
+}
+
+bool PathTracer::oidn_denoise_lightmap(std::vector<Vec3> &rgb, int w, int h) {
+#ifdef BL_WITH_OIDN
+  if (w <= 0 || h <= 0 || rgb.size() != (size_t)w * (size_t)h) return false;
+  OidnState &s = oidn_state();
+  oidn::DeviceRef device;
+  {
+    /* The lock only to open the device (the views' denoiser takes it every frame - review 423: a bake's page held it
+     * for the whole filter); OIDN serialises work on one device itself. */
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.open_cpu()) return false;
+    device = s.cpu.device;
+  }
+  std::vector<float> in(rgb.size() * 3), out(rgb.size() * 3);
+  for (size_t i = 0; i < rgb.size(); i++) in[i * 3] = rgb[i].x, in[i * 3 + 1] = rgb[i].y, in[i * 3 + 2] = rgb[i].z;
+  oidn::FilterRef f = device.newFilter("RTLightmap");
+  f.setImage("color", in.data(), oidn::Format::Float3, (size_t)w, (size_t)h);
+  f.setImage("output", out.data(), oidn::Format::Float3, (size_t)w, (size_t)h);
+  f.commit();
+  f.execute();
+  const char *msg = nullptr;
+  if (device.getError(msg) != oidn::Error::None) {
+    if (t_oidn_probe) {
+      oidn_lightmap_error() = msg ? msg : "unknown error";
+      return false;
+    }
+    Log::warn("OpenImageDenoise couldn't denoise a %dx%d lightmap: %s", w, h, msg ? msg : "unknown error");
+    return false;
+  }
+  for (size_t i = 0; i < rgb.size(); i++) {
+    const Vec3 v(out[i * 3], out[i * 3 + 1], out[i * 3 + 2]);
+    rgb[i] = std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) ? Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z)) : rgb[i];
+  }
+  return true;
+#else
+  (void)rgb, (void)w, (void)h;
+  if (t_oidn_probe) oidn_lightmap_error() = "built without OpenImageDenoise";
+  return false;
+#endif
+}
+
 bool PathTracer::oidn_available() {
 #ifdef BL_WITH_OIDN
   OidnState &s = oidn_state();

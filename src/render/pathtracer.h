@@ -239,6 +239,12 @@ class PathTracer {
 
   static bool embree_available();
   static bool oidn_available();
+  /* Round 423: a lightmap page's light denoised by OIDN's lightmap filter (RTLightmap, the one Unity's Progressive
+   * Lightmapper runs), in place, on the CPU device. False without OIDN or on its error (the caller filters instead). */
+  static bool oidn_denoise_lightmap(std::vector<Vec3> &rgb, int w, int h);
+  /* Whether this OIDN build can (an 8 x 8 page tried once: Blender's libraries may leave the lightmap filter's trained
+   * weights out); its error kept for the log. */
+  static bool oidn_lightmap_available(std::string *why = nullptr);
   /* Task 0094: OIDN found a GPU and opened it (whatever Denoise Device says); its fallbacks to the CPU so far; a
    * test hook that makes the GPU fail. */
   static bool oidn_gpu_available();

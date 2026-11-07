@@ -35,6 +35,19 @@ build), texture sizes from file headers, F12's snapshot skinning only view-shape
 worker, the bake's materials' files decoded on every core before they're frozen. Open: the bake's start is now its
 largest texture's decode (round 430 moves the freeze to the worker); Shinano's budget decodes its alpha PNGs.
 
+### The lightmap denoiser (round 423)
+| synthetic scene (relative luminance RMSE) | round 421 | round 423 |
+|---|---|---|
+| room (area light) | 0.031 | 0.019 |
+| corridor (8 point lights) | 0.015 | 0.008 |
+| courtyard (sun and sky) | 0.077 | 0.055 |
+| room at 64 / 1024 samples, filtered | 0.033 / 0.031 | 0.023 / 0.017 |
+
+The filter takes only the gathered light (OIDN's lightmap filter where the OIDN build has it - Blender's doesn't - else
+an edge-avoiding A-Trous filter), so a long bake is no longer blurred; the filter costs 505 ms of SideRail's 706 s bake.
+SideRail's stations didn't move (spawn 5.62 / 0.887 / 0.544, floor 7.82 / 0.679 / 0.583, ahead 4.17 / 0.897 / 0.397):
+their error is brightness, not noise.
+
 ## Pass 16: the performance suite, the responsiveness budget (round 411, ADR 0105)
 
 The suite in one command: `py tools/perf_suite.py [--quick] [--ui] [--world "<project>|<scene.unity>"] [--write docs/PERFORMANCE.md]`

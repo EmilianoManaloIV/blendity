@@ -36,13 +36,14 @@ struct BakeSettings {
   int padding = 2;                // texels between charts
   int min_chart = 8;              // a chart's smallest side in texels (realtime lightmaps ask for more: small objects)
   int direct_samples = 32;
-  int indirect_samples = 256;
+  int indirect_samples = 512;  // (round 423: Unity's default, was 256)
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
   bool sample_emissive = true;    // task 0157: emissive meshes sampled at each texel (off: found by the hemisphere rays only, the old way)
   int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
   uint32_t seed = 0;              // round 421: another seed draws other samples (a reference independent of the bake it scores)
+  bool use_oidn = true;           // round 423: OIDN's lightmap filter when linked (off: the A-Trous filter - Preview Lighting, which finishes on the main thread)
 };
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
@@ -136,6 +137,7 @@ class Lightmapper {
   size_t texel_count() const { return total_.load(std::memory_order_relaxed); }
   void cancel();
   double finish_ms() const { return finish_ms_; }  // the filter and dilation of the last bake
+  const std::string &denoiser() const { return last_denoiser_; }  // (round 423: OIDN's lightmap filter or the A-Trous filter; "" when off)
   /* After step() returned true: dilated, denoised maps and the objects' entries. */
   LightingData take_result();
   /* For tests and stress: texels, rays. */
@@ -161,11 +163,19 @@ class Lightmapper {
   LightingData out_;
   std::vector<std::vector<uint8_t>> covered_;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner_;    // per page: the object owning a texel (-1 none)
-  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr);
+  Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr);
+  void denoise_page(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
+                    const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own);
+  static void dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have, int W, int H);
+  bool denoise_oidn(std::vector<Vec3> &ind, const std::vector<uint8_t> &cov, int W, int H) const;
+  void atrous(std::vector<Vec3> &ind, const std::vector<Vec3> &normals, const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov,
+              const std::vector<int32_t> &own, int W, int H) const;
+  std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
-  /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are noise-free and
-   * never clamped), kept beside `values_` for the firefly clamp (task 0157). */
-  std::vector<Vec3> gather_;
+  /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are never clamped),
+   * kept beside `values_` for the firefly clamp (task 0157); the emitters sampled at each texel apart (round 423: they
+   * are denoised with the gather but not clamped - a lamp's contact glow is a real highlight). */
+  std::vector<Vec3> gather_, emitted_;
   void clamp_fireflies(std::vector<Vec3> &src, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W,
                        int H) const;
   size_t gpu_texels_ = 0;

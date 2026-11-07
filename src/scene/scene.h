@@ -1907,7 +1907,7 @@ struct LightingSettings {
   int max_size = 1024;            // Max Lightmap Size
   int padding = 2;                // Lightmap Padding (texels)
   int direct_samples = 32;
-  int indirect_samples = 256;
+  int indirect_samples = 512;  // (round 423: Unity's default Indirect Samples, was 256)
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
