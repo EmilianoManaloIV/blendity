@@ -255,7 +255,10 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
   ScopedTimer pass_t;
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
-    if (auto *l = g.get<Light>(); l && l->enabled) lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
+    if (auto *l = g.get<Light>(); l && l->enabled) {
+      lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
+      lights.back().light.baked_falloff = l->mode != 0;  // (round 425: Unity's built-in pipeline bakes with the legacy falloff)
+    }
     auto *mr = g.get<MeshRenderer>();
     if (!mr || !mr->enabled || !mr->contribute_gi || !mr->show_in_renders) return;
     const Mesh *raw = g.evaluated_mesh(1);

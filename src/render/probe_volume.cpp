@@ -290,7 +290,7 @@ static float probe_light_visibility(const PathTracer &pt, const RenderLight &l, 
   if (l.type != RenderLight::Area) return baked_light_visibility(pt, l, p, nullptr, Ld, dist, 16, rng, rays);
   if (!l.shadows) return 1.0f;
   rays++;
-  return pt.occluded({p, Ld}, dist * (1.0f - 1e-4f)) ? 0.0f : 1.0f;
+  return baked_shadow_ray(pt, {p, Ld}, dist * (1.0f - 1e-4f));
 }
 
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start, size_t count,

@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-06 (round 425): SideRail's lamps light the bake
+
+**Asked:** Pass 17's round 425 - why most of SideRail's Baked lights added nothing to Blendity's bake.
+
+**Changed (task 0401)**
+- **Found:** each lamp's bulb sits inside a "light profile" sphere - a see-through material whose greyscale texture
+  Unity reads as alpha (the .meta's Alpha Source: From Gray Scale), shaping the lamp into a downlight. Blendity read
+  the texture as opaque, and its bake stopped light at any surface.
+- **Unity's Alpha Source is read** for every texture with a Unity .meta: None, Input Texture Alpha, From Gray Scale. The
+  Budget read the field under the wrong name; fixed.
+- **Baked light passes see-through surfaces by their alpha**, as Unity's lightmapper lets it through.
+- **Baked and Mixed point and spot lights bake with Unity's legacy falloff** (1 / (1 + 25 (d / Range)^2), windowed) -
+  the built-in pipeline's - everywhere the bake shades them; the views keep their curve.
+
+**Measured:** SideRail at its own settings, MAE / SSIM / grid correlation: spawn 5.62 / 0.887 / 0.544 -> 4.77 / 0.875 /
+0.903, floor 7.82 / 0.679 / 0.583 -> 5.06 / 0.828 / 0.975, ahead 4.17 / 0.897 / 0.397 -> 3.95 / 0.910 / 0.930 (MAE and
+SSIM met); spawn_back (dark) still passes but its corners came out darker (SSIM 0.853 -> 0.815, grid 0.630 -> 0.533).
+The Budget's counts change for Unity textures with Alpha Source None or From Gray Scale. Open: a Mixed light's views
+keep their curve while its bake uses the legacy one.
+
+**Checked:** tests_round425; both suites - with Blender's libraries 16300 checks in 1601 tests, 0 failed;
+dependency-free 15559 (Windows) and 15565 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-06 (round 424): soft baked shadows
 
 **Asked:** Pass 17's round 424 - Unity's Baked Shadow Radius and Angle in the bake; the diagnosis of SideRail's dim

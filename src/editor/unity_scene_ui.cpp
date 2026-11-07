@@ -152,6 +152,7 @@ void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::v
   l.padding = u.padding;
   l.direct_samples = u.direct;
   l.indirect_samples = u.indirect;
+  if (const char *e = std::getenv("BLENDITY_EXP_BAKE")) l.texels_per_unit = (float)std::atof(e), l.indirect_samples = std::max(1, std::atoi(std::strchr(e, ',') ? std::strchr(e, ',') + 1 : "64"));  // EXPERIMENT
   l.bounces = u.bounces;
   l.denoise = u.filtering != 0;
   l.baked_gi = u.baked_gi;

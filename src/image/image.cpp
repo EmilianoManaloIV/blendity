@@ -5,6 +5,7 @@
 #include "../core/jobs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -1679,6 +1680,28 @@ int64_t file_mtime(const std::string &path) {
 }
 }  // namespace
 
+namespace {
+std::atomic<TextureAlphaRule> g_alpha_rule{nullptr};
+}  // namespace
+
+void texture_set_alpha_rule(TextureAlphaRule rule) { g_alpha_rule.store(rule); }
+
+void apply_alpha_usage(Bitmap &bmp, int alpha_usage) {
+  if (alpha_usage != 0 && alpha_usage != 2) return;
+  const size_t n = (size_t)std::max(0, bmp.width) * (size_t)std::max(0, bmp.height);
+  if (bmp.is_float) {
+    for (size_t i = 0; i < n && i * 4 + 3 < bmp.rgbaf.size(); i++) {
+      float *p = &bmp.rgbaf[i * 4];
+      p[3] = alpha_usage == 0 ? 1.0f : (p[0] + p[1] + p[2]) * (1.0f / 3.0f);
+    }
+    return;
+  }
+  for (size_t i = 0; i < n && i * 4 + 3 < bmp.rgba8.size(); i++) {
+    uint8_t *p = &bmp.rgba8[i * 4];
+    p[3] = alpha_usage == 0 ? 255 : (uint8_t)(((int)p[0] + p[1] + p[2] + 1) / 3);
+  }
+}
+
 TexturePtr texture_load(const std::string &path, bool srgb, std::string *error) {
   std::string key = path + (srgb ? "|srgb" : "|data");
   int64_t mt = file_mtime(path);
@@ -1696,6 +1719,7 @@ TexturePtr texture_load(const std::string &path, bool srgb, std::string *error) 
     if (error) *error = err;
     return nullptr;
   }
+  if (const TextureAlphaRule rule = g_alpha_rule.load()) apply_alpha_usage(bmp, rule(path));  // (round 425: Unity's Alpha Source)
   auto t = std::make_shared<Texture>();
   t->path = path;
   t->name = fs::filename(path);

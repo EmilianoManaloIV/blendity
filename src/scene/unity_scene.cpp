@@ -12,7 +12,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <mutex>
 #include <set>
+#include <unordered_map>
 
 namespace bl {
 
@@ -1353,6 +1356,34 @@ void unity_model_ids_from_meta(const YamlNode &meta, UnityModelIds &out) {
 
 namespace {
 
+/* A folder's .unity-guids text, read once and kept while the file's time stays the same (round 425: every texture load
+ * asks - SideRail's list is 100 KB, read 120 times opening the scene); false when the folder has none. */
+bool unity_guids_text(const std::string &dir, std::string &text) {
+  struct Kept {
+    int64_t mtime = 0;
+    bool present = false;
+    std::string text;
+  };
+  static std::mutex mutex;
+  static std::unordered_map<std::string, Kept> kept;
+  const std::string path = fs::join(dir, ".unity-guids");
+  std::error_code ec;
+  const auto t = std::filesystem::last_write_time(std::filesystem::u8path(path), ec);
+  const int64_t mt = ec ? 0 : (int64_t)t.time_since_epoch().count();
+  std::lock_guard<std::mutex> lock(mutex);
+  auto it = kept.find(dir);
+  if (it == kept.end() || it->second.mtime != mt) {
+    Kept k;
+    k.mtime = mt;
+    k.present = mt != 0 && fs::read_file(path, k.text);
+    if (kept.size() > 4096) kept.clear();
+    it = kept.insert_or_assign(dir, std::move(k)).first;
+  }
+  if (!it->second.present) return false;
+  text = it->second.text;
+  return true;
+}
+
 /* A texture's .meta text: beside it (a Unity project's Assets copied in) or by its GUID in the package folder that lists
  * it (.unity-guids, the folder's .unity-meta). */
 bool texture_meta(const std::string &asset_path, std::string &meta) {
@@ -1362,7 +1393,7 @@ bool texture_meta(const std::string &asset_path, std::string &meta) {
   std::replace(rel.begin(), rel.end(), '\\', '/');
   for (std::string dir = fs::parent(abs); !dir.empty() && dir != fs::parent(dir); dir = fs::parent(dir)) {
     std::string text;
-    if (!fs::read_file(fs::join(dir, ".unity-guids"), text)) continue;
+    if (!unity_guids_text(dir, text)) continue;
     const size_t at = text.find("\t" + rel + "\n");
     if (at == std::string::npos) continue;  // (review 399: a nested package's list - the one above may hold it)
     const size_t start = text.rfind('\n', at) == std::string::npos ? 0 : text.rfind('\n', at) + 1;
@@ -1371,6 +1402,24 @@ bool texture_meta(const std::string &asset_path, std::string &meta) {
   }
   return false;
 }
+
+/* Unity's Alpha Source in a texture's .meta (the YAML calls it alphaUsage; the C# property alphaSource): 0 none,
+ * 1 the image's, 2 its grey; -1 when there's no .meta. */
+int meta_alpha_usage(const std::string &meta_text) {
+  const YamlNode meta = parse_yaml(meta_text);
+  const YamlNode *imp = meta.get("TextureImporter");
+  if (!imp) return -1;
+  return (int)imp->num("alphaUsage", imp->num("alphaSource", 1.0));
+}
+
+/* The texture loader's rule (round 425): a texture from a Unity project takes its alpha as Unity imports it - SideRail's
+ * baked "light profiles" are greyscale PNGs Unity reads as alpha, the shape its lamps' baked light shines through. */
+int unity_texture_alpha_rule(const std::string &path) {
+  std::string text;
+  if (!texture_meta(path, text) || text.find("alphaUsage") == std::string::npos) return -1;
+  return meta_alpha_usage(text);
+}
+const bool g_alpha_rule_set = (texture_set_alpha_rule(&unity_texture_alpha_rule), true);
 
 /* TextureImporterFormat's bytes a texel (crunched as what it unpacks to); 0: automatic or one not listed. */
 double format_bytes(int format) {
@@ -1416,7 +1465,7 @@ bool unity_texture_megabytes(const std::string &asset_path, int width, int heigh
   const double pw = npot_side(width, npot), ph = npot_side(height, npot);  // (review 399: rounded first, then capped)
   const double side = std::max(pw, ph), scale = side > cap && cap > 0 ? cap / side : 1.0;
   const double w = std::max(1.0, std::floor(pw * scale)), h = std::max(1.0, std::floor(ph * scale));
-  const int alpha_source = (int)imp->num("alphaSource", 1.0);  // (0 none, 1 from the image, 2 from its grey)
+  const int alpha_source = (int)imp->num("alphaUsage", imp->num("alphaSource", 1.0));  // (0 none, 1 from the image, 2 from its grey; the YAML's name is alphaUsage - round 425)
   has_alpha = alpha_source == 2 || (alpha_source == 1 && has_alpha);
   const YamlNode *mips = imp->get("mipmaps");
   const bool mipped = (mips ? mips->num("enableMipMap", 1) : imp->num("enableMipMap", 1)) != 0.0;

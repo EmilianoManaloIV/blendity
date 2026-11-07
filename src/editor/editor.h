@@ -1110,6 +1110,7 @@ class Editor {
     paint_end_stroke();
   }
   bool raycast_scene_for_test(const Ray &ray, Vec3 &hit) { return raycast_scene(ray, hit); }
+  void collect_bake_scene_for_test(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) { collect_bake_scene(objects, lights); }
   bool vr_tube_for_test() const { return vr_tube_; }
   int vr_colour_for_test() const { return vr_colour_; }
   float vr_brush_for_test() const { return vr_brush_; }

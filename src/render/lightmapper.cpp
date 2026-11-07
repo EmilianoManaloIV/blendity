@@ -331,6 +331,13 @@ float ray_reach_to_ball(float dist, float r, float c) {
 }
 }  // namespace
 
+float baked_shadow_ray(const PathTracer &pt, const Ray &r, float tmax) {
+  if (!pt.occluded(r, tmax)) return 1.0f;  // (the any-hit test first: only a blocked ray walks its surfaces - review 425)
+  const Vec3 T = pt.transmittance(r, tmax);
+  const float t = (T.x + T.y + T.z) * (1.0f / 3.0f);
+  return finite_bits(t) ? std::max(0.0f, std::min(1.0f, t)) : 0.0f;
+}
+
 /* Round 424: directions spread uniformly over the cone's solid angle (cos from 1 to cos_max) on a stratified grid. */
 float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays) {
   if (!l.shadows) return 1.0f;
@@ -340,7 +347,7 @@ float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o,
   const float one_minus_cos = finite_bits(half) ? 1.0f - std::cos(half) : 0.0f;
   if (!(one_minus_cos > 0.0f) || samples <= 1 || (!sun && dist <= radius)) {  // (no size, or inside its ball: one ray to the centre)
     rays++;
-    return pt.occluded({o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f)) ? 0.0f : 1.0f;
+    return baked_shadow_ray(pt, {o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f));
   }
   Vec3 tu, tv;
   basis(L, tu, tv);
@@ -357,11 +364,11 @@ float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o,
     if (!(w > 0.0f)) continue;
     rays++;
     wsum += w;
-    if (!pt.occluded({o, d}, sun ? 1e30f : ray_reach_to_ball(dist, radius, c))) vsum += w;
+    vsum += w * baked_shadow_ray(pt, {o, d}, sun ? 1e30f : ray_reach_to_ball(dist, radius, c));
   }
   if (wsum > 0.0f) return vsum / wsum;
   rays++;  // (the whole cone below the horizon: the centre ray decides)
-  return pt.occluded({o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f)) ? 0.0f : 1.0f;
+  return baked_shadow_ray(pt, {o, L}, sun ? 1e30f : dist * (1.0f - 1e-4f));
 }
 
 Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out) {
@@ -388,7 +395,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     Vec3 L;
     if (s_.bounces == 0) {
       rays++;
-      L = pt_->occluded({o, d}, 1e30f) ? Vec3(0.0f) : env_.radiance(d);
+      L = env_.radiance(d) * baked_shadow_ray(*pt_, {o, d}, 1e30f);
     }
     else L = pt_->incoming_radiance({o, d}, prng, rays, emissive ? cosn / kPi : 0.0f);
     if (finite3(L)) sum += L;
@@ -445,7 +452,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
         if (!(w > 0.0f) || dot(n, L) <= 0.0f) continue;
         rays++;
         wsum += w;
-        if (!pt_->occluded({o, L}, dist * (1.0f - 1e-4f))) vsum += w;
+        vsum += w * baked_shadow_ray(*pt_, {o, L}, dist * (1.0f - 1e-4f));
       }
       if (wsum > 0.0f) value += col * (unshadowed * (vsum / wsum));
       else {
@@ -454,7 +461,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
         float facing;
         const Vec3 L = area_light_specular_dir(l, o, n, facing);
         rays++;
-        if (dot(n, L) > 0.0f && facing > 0.0f && !pt_->occluded({o, L}, 1e30f)) value += col * unshadowed;
+        if (dot(n, L) > 0.0f && facing > 0.0f) value += col * (unshadowed * baked_shadow_ray(*pt_, {o, L}, 1e30f));
       }
       continue;
     }
