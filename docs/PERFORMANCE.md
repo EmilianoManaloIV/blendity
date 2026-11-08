@@ -93,6 +93,17 @@ under ~40 %: within that, no round and no feature is consistently slower, and Pa
 `BLENDITY_VIEW_OFF=sh,lv,mask` stays for the next attribution, best read with the card's own timestamps
 (docs/tasks/0426).
 
+### Instanced draws (round 448)
+Neighbouring instances of one mesh draw as one call in each pass; 100 cubes of one mesh are 1 call, not 100.
+
+| view (windowed, on the card) | before | after |
+|---|---|---|
+| 50,000 cubes, Scene view | 80.3 / 62.8 ms | 59.5 / 47.5 ms (final build: 46.7, the card's draw 24.8) |
+| Shinano, Scene view | 5.5 ms | 5.3-5.5 ms |
+
+Target under 25 ms **not met**: the CPU's per-frame instance build is now most of the frame (`scene` 40.7 of 46.7 ms);
+keeping it is round 458's (docs/tasks/0424).
+
 ### The scene's change counter (round 435, ADR 0115)
 Nothing in the scene said "changed", so every view walked every object every frame to find out. Now every edit path
 moves one counter and the views keep the scene hash while it holds still (checked by a walk every 8th frame).

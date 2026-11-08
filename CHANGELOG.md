@@ -2,6 +2,18 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 448): instanced draws on the card
+
+**Asked:** Pass 19's round 448 - 50,000 cubes sharing one mesh were 50,000 draw calls a pass on the card; target under 25 ms a frame.
+
+**Changed (task 0424)**
+- **Instanced draws:** neighbouring instances of one mesh (same triangles and pipeline) draw as one instanced call in the shadow, G-buffer, toon and baked passes, each still reading its own colour and place; the mesh's buffers are bound once per mesh. 100 cubes of one mesh: 100 calls -> 1.
+- 50,000 cubes' Scene view 80.3 / 62.8 -> 59.5 / 47.5 ms (together with round 449's overlays).
+- **Not done, moved to round 458:** kept instances - the CPU still builds the 50,000 instances every frame, so the view is 47-60 ms against the target of under 25.
+- **Learn:** "Rendering on the GPU" gains "One call for many (round 448)", with two questions and a Try-it.
+
+**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 451): where the stations' error lives
 
 **Asked:** Pass 19's round 451 - Blendity's bake of SideRail misses ADR 0113's target (SSIM 0.77-0.88) and nobody knows

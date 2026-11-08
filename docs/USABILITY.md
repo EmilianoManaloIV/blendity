@@ -463,6 +463,7 @@ screens themselves.
 | A .blend or an Unreal level couldn't be brought in without exporting by hand. | import <file>.blend reads it through Blender; Send to Blendity in the Blender and Unreal bridges lands in Blendity within a second (round 374). |
 | A Godot project's scenes couldn't be opened here, or their layout changes taken back. | import <file>.tscn brings the nodes in (scripts kept as Engine Components); Export Godot Scene writes the moves into the nodes' own lines (round 373). |
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
+| A scene of 50,000 objects sharing one mesh cost 50,000 draw calls a pass on the card. (round 448) | Neighbouring instances of one mesh draw as one call: the same picture, 100 cubes in 1 call; the CPU's instance build is what is left (round 458). |
 
 ## Still worth doing
 

@@ -3106,6 +3106,7 @@ class VulkanRaster final : public Raster {
 
   RasterTimes times() const override { return times_; }
   uint64_t submits() const override { return submits_; }
+  uint64_t draw_calls() const override { return draw_calls_; }
 
   bool read_back(int slot, uint32_t *color, float *depth, uint32_t *ids, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
@@ -3635,6 +3636,7 @@ class VulkanRaster final : public Raster {
   int pring_ = 0;
   VkQueryPool queries_ = VK_NULL_HANDLE;
   uint64_t submits_ = 0;  // (task 0160: queue submissions, each waited for)
+  uint64_t draw_calls_ = 0;  // (round 448: the instanced passes' draw calls, all frames)
   bool timestamps_ = false;
   float ts_period_ns_ = 1.0f;
   RasterTimes times_;
@@ -4184,26 +4186,58 @@ class VulkanRaster final : public Raster {
     viewport(w, h);
     f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
     VkPipeline bound = VK_NULL_HANDLE;
-    for (size_t i = 0; what != DrawNothing && i < instances_.size(); i++) {
-      const uint32_t fl = instances_[i].flags;
-      if (instances_[i].surface >= 2) continue;  // (task 0195: the see-through pass draws it; it casts no shadow, as on the CPU)
-      if (instances_[i].flags & RasterInstance::AxisPart) continue;  // (task 0195: an axis material's part: read, not drawn)
-      if (what == DrawToon && !(instances_[i].flags & RasterInstance::ToonMaps)) continue;  // (task 0196: the toon pass's own)
-      if (what == DrawBaked && !instances_[i].baked) continue;  // (task 0197: the baked pass's own)
-      /* (A toon outline's hull is culled whatever the view's setting, as the CPU's always_cull.) */
-      const bool culled = what != DrawShadow && ((cull && !(fl & RasterInstance::DoubleSided)) || (fl & RasterInstance::AlwaysCull));
-      const int cv_k = !culled ? 0 : (fl & RasterInstance::Mirrored) ? 2 : 1;  // (not culled, back, front)
-      const VkPipeline gb[3] = {pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_};
-      const VkPipeline pl = what == DrawShadow ? pl_shadow_ : what == DrawToon ? pl_toon_[cv_k] : what == DrawBaked ? pl_baked_[cv_k] : gb[cv_k];
+    int bound_mesh = -1;
+    const size_t n = what == DrawNothing ? 0 : instances_.size();
+    for (size_t i = 0; i < n;) {
+      if (draw_skips(instances_[i], what)) {
+        i++;
+        continue;
+      }
+      const VkPipeline pl = draw_pipeline(instances_[i], what, cull);
+      const size_t run = draw_run(i, what, cull, pl);
       if (pl != bound) f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, bound = pl);
-      const Mesh &m = meshes_[instances_[i].mesh];
-      VkDeviceSize off = 0;
-      f_.vkCmdBindVertexBuffers(cmd_, 0, 1, &m.vb.buf, &off);
-      f_.vkCmdBindIndexBuffer(cmd_, m.ib.buf, 0, VK_INDEX_TYPE_UINT32);
       const RasterInstance &in = instances_[i];  // (render() checked each part lies within its mesh)
-      f_.vkCmdDrawIndexed(cmd_, in.index_count ? in.index_count : m.indices, 1, in.index_count ? in.first_index : 0, 0, (uint32_t)i);
+      const Mesh &m = meshes_[in.mesh];
+      if (in.mesh != bound_mesh) {  // (round 448: the buffers bound once per mesh, not once per instance)
+        VkDeviceSize off = 0;
+        f_.vkCmdBindVertexBuffers(cmd_, 0, 1, &m.vb.buf, &off);
+        f_.vkCmdBindIndexBuffer(cmd_, m.ib.buf, 0, VK_INDEX_TYPE_UINT32);
+        bound_mesh = in.mesh;
+      }
+      f_.vkCmdDrawIndexed(cmd_, in.index_count ? in.index_count : m.indices, (uint32_t)run, in.index_count ? in.first_index : 0, 0, (uint32_t)i);
+      draw_calls_++;
+      i += run;
     }
     f_.vkCmdEndRenderPass(cmd_);
+  }
+  /* (An instance a pass leaves out: the see-through pass's, an axis material's parts, another pass's own.) */
+  static bool draw_skips(const RasterInstance &in, DrawWhat what) {
+    if (in.surface >= 2) return true;  // (task 0195: the see-through pass draws it; it casts no shadow, as on the CPU)
+    if (in.flags & RasterInstance::AxisPart) return true;  // (task 0195: an axis material's part: read, not drawn)
+    if (what == DrawToon && !(in.flags & RasterInstance::ToonMaps)) return true;  // (task 0196: the toon pass's own)
+    return what == DrawBaked && !in.baked;  // (task 0197: the baked pass's own)
+  }
+  VkPipeline draw_pipeline(const RasterInstance &in, DrawWhat what, bool cull) const {
+    const uint32_t fl = in.flags;
+    /* (A toon outline's hull is culled whatever the view's setting, as the CPU's always_cull.) */
+    const bool culled = what != DrawShadow && ((cull && !(fl & RasterInstance::DoubleSided)) || (fl & RasterInstance::AlwaysCull));
+    const int cv_k = !culled ? 0 : (fl & RasterInstance::Mirrored) ? 2 : 1;  // (not culled, back, front)
+    const VkPipeline gb[3] = {pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_};
+    return what == DrawShadow ? pl_shadow_ : what == DrawToon ? pl_toon_[cv_k] : what == DrawBaked ? pl_baked_[cv_k] : gb[cv_k];
+  }
+  /* Round 448: how many instances from i on draw as one instanced call - neighbours with the same mesh, triangles and
+   * pipeline, none left out by this pass. gl_InstanceIndex counts from firstInstance, so each still reads its own
+   * InstGpu: the picture is the same, 50,000 cubes sharing a mesh are one call instead of 50,000. */
+  size_t draw_run(size_t i, DrawWhat what, bool cull, VkPipeline pl) const {
+    const RasterInstance &a = instances_[i];
+    size_t j = i + 1;
+    while (j < instances_.size()) {
+      const RasterInstance &b = instances_[j];
+      if (b.mesh != a.mesh || b.first_index != a.first_index || b.index_count != a.index_count) break;
+      if (draw_skips(b, what) || draw_pipeline(b, what, cull) != pl) break;
+      j++;
+    }
+    return j - i;
   }
 
   /* Task 0101: a textured instance's material, as kMaterialFrag reads it. */

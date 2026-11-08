@@ -371,6 +371,9 @@ class Raster {
   virtual bool render_read(const RasterFrame &frame, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
   /* How many times the queue was submitted to and waited for (tests: a view costs one, plus any uploads). */
   virtual uint64_t submits() const = 0;
+  /* Round 448: draw calls the shadow, G-buffer, toon and baked passes issued so far (neighbouring instances of one mesh
+   * are one instanced call). */
+  virtual uint64_t draw_calls() const { return 0; }
   /* Task 0193 (ADR 0061): presenting windows. attach_window makes a swapchain on an OS window (Win32: `window` is the
    * HWND, `display` unused; X11: the Display* and the Window id) and returns its id (-1: refused, *error says why).
    * present_window shows a frame: the UI canvas's changed rows (all of them when `all`) go up into the window's image of

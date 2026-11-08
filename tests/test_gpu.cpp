@@ -4017,6 +4017,88 @@ static void tests_round443() {
   });
 }
 
+static void tests_round448() {
+  test("round 448: neighbouring instances of one mesh draw as one instanced call, each with its own colour and place; another mesh between them splits the run (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return;
+    }
+    auto upload = [&](const MeshPtr &mp) {
+      const RenderMesh &rm = mp->render_mesh();
+      std::vector<gpu::RasterVertex> vs(rm.positions.size());
+      for (size_t i = 0; i < vs.size(); i++)
+        vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      return g->add_mesh(vs, rm.indices, &err);
+    };
+    const int cube = upload(primitives::cube(0.8f)), other = upload(primitives::cube(0.6f));
+    CHECK(cube >= 0 && other >= 0);
+    const int N = 10;
+    auto colour = [](int k) { return Vec3((k % N) / (float)(N - 1), (k / N) / (float)(N - 1), 0.5f); };
+    auto at = [](int k) { return Vec3(-4.5f + (float)(k % N), -4.5f + (float)(k / N), 0.0f); };
+    auto make = [&](int k, int mesh) {
+      gpu::RasterInstance in;
+      const Mat4 model = Mat4::translate(at(k));
+      std::memcpy(in.model, model.m, 64);
+      const Vec3 c = colour(k);
+      in.albedo_rough[0] = c.x, in.albedo_rough[1] = c.y, in.albedo_rough[2] = c.z;
+      in.flags = gpu::RasterInstance::Unlit;
+      in.mesh = (uint32_t)mesh;
+      in.id = (uint32_t)k + 1;
+      return in;
+    };
+    const int W = 400, H = 400;
+    gpu::RasterFrame fr;
+    fr.width = W, fr.height = H, fr.shadow_size = 0;
+    const Mat4 vp = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 100.0f) * Mat4::look_at({0, 0, 12}, {0, 0, 0}, {0, 1, 0});
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, vp.m, 64);
+    fr.eye[2] = 12;
+    std::vector<uint32_t> px((size_t)W * H);
+    auto draw = [&](const std::vector<gpu::RasterInstance> &inst) {
+      g->set_instances(inst);
+      const uint64_t d0 = g->draw_calls();
+      CHECK(g->render(fr, &err) && g->read_back(0, px.data(), nullptr, nullptr, &err));
+      return g->draw_calls() - d0;
+    };
+    /* Each cube's centre shows its own colour (unlit: the albedo as the view encodes it). */
+    auto centres_ok = [&](const std::vector<gpu::RasterInstance> &inst) {
+      int worst = 0;
+      for (size_t k = 0; k < inst.size(); k++) {
+        const Vec4 c = vp * Vec4(at((int)k).x, at((int)k).y, 0.45f, 1.0f);
+        const int x = (int)((c.x / c.w * 0.5f + 0.5f) * W), y = (int)((0.5f - c.y / c.w * 0.5f) * H);
+        const uint32_t got = px[(size_t)y * W + x];
+        const float want[3] = {inst[k].albedo_rough[2], inst[k].albedo_rough[1], inst[k].albedo_rough[0]};  // (B, G, R from the low byte)
+        for (int ch = 0; ch < 3; ch++) {
+          const float l = want[ch];
+          const int enc = (int)std::lround((l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f) * 255.0f);
+          worst = std::max(worst, std::abs((int)((got >> (8 * ch)) & 255) - enc));
+        }
+      }
+      return worst;
+    };
+    std::vector<gpu::RasterInstance> same;
+    for (int k = 0; k < N * N; k++) same.push_back(make(k, cube));
+    const uint64_t calls_same = draw(same);
+    const int worst_same = centres_ok(same);
+    std::vector<gpu::RasterInstance> split = same;
+    split[50] = make(50, other);  // (a different mesh in the middle: three runs)
+    const uint64_t calls_split = draw(split);
+    const int worst_split = centres_ok(split);
+    std::printf("    100 cubes of one mesh: %llu draw call(s), worst centre %d; one other mesh at 50: %llu call(s), worst %d\n",
+                (unsigned long long)calls_same, worst_same, (unsigned long long)calls_split, worst_split);
+    CHECK(calls_same == 1);   // (the G-buffer pass's one call; no shadow, toon or baked pass here)
+    CHECK(calls_split == 3);  // (0-49, 50, 51-99)
+    CHECK(worst_same <= 2);
+    CHECK(worst_split <= 2);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -4045,4 +4127,5 @@ void run_gpu_tests() {
   tests_round415();
   tests_round416();
   tests_round443();
+  tests_round448();
 }
