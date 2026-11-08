@@ -306,6 +306,7 @@ struct TextureStreamScope {
 bool texture_streaming();
 size_t take_texture_stream_misses(std::vector<std::pair<std::string, bool>> &out);
 void texture_stream_set_failed(const std::vector<std::pair<std::string, bool>> &files, const std::vector<int64_t> &mtimes);
+bool texture_stream_failed(const std::string &path, bool srgb);  // (round 458: a failure that holds - the file as it was when tried)
 bool texture_stream_pending();  // (the views noted files no batch has taken yet)
 uint64_t material_resolve_count();  // (Material::textures() resolves since start: for tests)
 void refresh_material_textures();  // (the generation alone: materials resolve again, the failures stay known)

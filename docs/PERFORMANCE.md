@@ -93,6 +93,23 @@ under ~40 %: within that, no round and no feature is consistently slower, and Pa
 `BLENDITY_VIEW_OFF=sh,lv,mask` stays for the next attribution, best read with the card's own timestamps
 (docs/tasks/0426).
 
+### Kept instances, meshes streamed (round 458)
+Windowed on the card with nothing else building (`tools/dev/views.py`, two runs each, against round 447's build), and
+SideRail's headless open with `perf frames` (the log line "Every mesh is on the card, N ms after the first was left
+waiting"). Instances are kept only in plain scenes (no baked, see-through, volume, highlighted or live-procedural item):
+Shinano and SideRail are baked, so their rows do not move from the instances.
+
+| mark | before | after |
+|---|---|---|
+| 50,000 cubes, Scene view | 47.5 / 62.3 ms | **33.1 / 33.5 ms** (target < 25 ms not met) |
+| 50,000 cubes, the frame's `scene` / the views' `gpu` part (the instance gather inside it) | 39.7 / 54.1, 24.2 / 33.0 ms | 26.1 / 26.0, 11.1 / 11.1 ms (`ms_gpu_instances` < 2 ms: not read on its own in this run) |
+| Shinano, Scene view (baked: nothing kept) | 3.6 / 4.4 ms | 3.8 / 3.9 ms |
+| SideRail, the first frame after the import | 351-366 ms | 101 ms (target < 50 not met: the cold gather's 40 ms and the first item's upload remain; longest drain frame 73 ms) |
+| SideRail, the time until every mesh is on the card | all in the first frame | ~0.7 s over 49 frames (4 ms of first-use work a frame, the corner buffer 64 MB from the start) |
+
+The UI's 2.8 ms (Shinano) is not reduced: an idle frame does not run in a window, so the cost is on frames that redraw for
+a reason (an orbit); the real gain needs per-window redraw (only the Scene view's rect re-run when only the camera moved).
+
 ### Textures stream in (round 447)
 Opening a scene decoded every material's image files in the first frame that drew them. Now the views draw the
 materials' colours, load the files on a worker, and show the maps as batches land. SideRail, headless on the card, two

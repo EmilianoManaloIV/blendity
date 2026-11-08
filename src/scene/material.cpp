@@ -57,6 +57,8 @@ static void warn_texture_once(const std::string &material, const std::string &fi
   if (said.insert(material + "|" + file).second) Log::warn("Material '%s': %s", material.c_str(), why.c_str());
 }
 
+bool texture_stream_failed(const std::string &path, bool srgb) { return stream_failed(path, srgb); }
+
 TextureStreamScope::TextureStreamScope(bool on) : prev(t_stream) { t_stream = on; }
 TextureStreamScope::~TextureStreamScope() { t_stream = prev; }
 bool texture_streaming() { return t_stream; }

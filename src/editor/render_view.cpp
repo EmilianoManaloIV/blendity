@@ -283,10 +283,23 @@ void Editor::texture_stream_poll() {
     refresh_material_textures();
     ui_.redraw = true;
   }
+  /* Round 458: meshes the card's byte budget held back - the views draw again with the next share; the frame no mesh was
+   * left waiting ends the queue (its life printed, for the timing runs). */
+  if (mesh_waiting_) {
+    mesh_waiting_ = false;
+    refresh_material_textures();  // (the views' keys move: the Scene view draws again, its items' instances rebuilt)
+    ui_.redraw = true;
+  }
+  else if (mesh_drain_t0_ >= 0) {
+    mesh_drain_ms_ = (clock_now() - mesh_drain_t0_) * 1000.0;
+    mesh_drain_t0_ = -1;
+    Log::info("Every mesh is on the card, %.0f ms after the first was left waiting", mesh_drain_ms_);
+  }
   std::vector<std::pair<std::string, bool>> files;
   if (tex_stream_) return;  // (what the views note meanwhile waits: the landed batch makes them resolve - and note - again)
   if (!take_texture_stream_misses(files)) return;
-  files.erase(std::remove_if(files.begin(), files.end(), [&](const auto &f) { return texture_cached(f.first, f.second) != nullptr; }), files.end());
+  /* (Round 458: nor a file whose failure holds - a view drawn later, a mesh that waited for the card's budget, can note a file while its batch is in flight, and the batch's failure is published after: it is not tried again.) */
+  files.erase(std::remove_if(files.begin(), files.end(), [&](const auto &f) { return texture_cached(f.first, f.second) != nullptr || texture_stream_failed(f.first, f.second); }), files.end());
   if (files.empty()) refresh_material_textures();  // (the cache held them all: the materials resolve again with them)
   else texture_stream_start(std::move(files));
 }

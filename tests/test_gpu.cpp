@@ -4162,6 +4162,386 @@ static void tests_round449() {
   });
 }
 
+/* ---------------------------------------------------------------- round 458: kept instances, meshes streamed */
+static size_t r458_differ(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  size_t n = 0;
+  for (size_t i = 0; i < a.size() && i < b.size(); i++) n += (a[i] & 0xFFFFFF) != (b[i] & 0xFFFFFF);
+  return n;
+}
+
+/* The Scene view over a field of cubes on the card; the camera nudged every frame so each frame draws. */
+static std::vector<GameObject *> r458_field(Editor &ed, int n) {
+  r34_open(ed);
+  std::vector<GameObject *> cubes;
+  for (int i = 0; i < n; i++) {
+    GameObject *g = create_primitive(ed.scene(), "Cube");
+    g->name = strprintf("K458_%d", i);
+    g->set_local_position({-3.0f + 1.2f * (float)(i % 6), 0.5f, -3.0f + 1.2f * (float)(i / 6)});
+    g->set_local_scale(Vec3(0.5f));
+    g->get<MeshRenderer>()->materials = {make_material(g->name, Vec3(0.6f, 0.6f, 0.7f))};
+    cubes.push_back(g);
+  }
+  ed.mark_changed_for_test("round 458 cubes");
+  ed.command("camera 0 6 9 0 0 0");
+  r34_steps(ed, 3);
+  return cubes;
+}
+
+static void r458_orbit(Editor &ed, int frames) {
+  for (int k = 0; k < frames; k++) {
+    ed.command(k % 2 ? "camera 0 6 9 0 0 0" : "camera 0 6 9.03 0 0 0");
+    r34_steps(ed, 1);
+  }
+}
+
+static void tests_round458() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 458: orbiting over a field of cubes keeps the instance array on every frame after the first - the same picture as a fresh gather (verify mode finds no stale array) - and moving a cube, a material's colour, a lightmap bake or Solid shading gathers it again (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r458_field(ed, 30);
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    uint64_t k0 = ed.instances_kept_for_test(), b0 = ed.instances_built_for_test();
+    r458_orbit(ed, 8);
+    const uint64_t kept = ed.instances_kept_for_test() - k0, built = ed.instances_built_for_test() - b0;
+    const std::vector<uint32_t> pic_kept = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    b0 = ed.instances_built_for_test();
+    ed.set_render_cache_verify(true);
+    r458_orbit(ed, 8);
+    const std::vector<uint32_t> pic_fresh = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t mismatches = Editor::render_cache_mismatches_all() - m0, verified = ed.instances_built_for_test() - b0;
+    ed.set_render_cache_verify(false);
+    const size_t same_view = r458_differ(pic_kept, pic_fresh);
+    std::printf("    %llu of 8 orbit frames kept the instances (%llu gathered); verify mode gathered %llu times: %llu stale, %zu pixels differ\n",
+                (unsigned long long)kept, (unsigned long long)built, (unsigned long long)verified, (unsigned long long)mismatches, same_view);
+    CHECK(kept >= 7);
+    CHECK(verified >= 8);
+    CHECK(mismatches == 0);
+    CHECK(same_view == 0);
+    /* Each change gathers again, once, and then settles. */
+    auto after = [&](const char *what, const std::function<void()> &act) {
+      r458_orbit(ed, 2);
+      const std::vector<uint32_t> before = r34_crop(ed, ed.scene_view_rect());
+      const uint64_t b = ed.instances_built_for_test();
+      act();
+      r34_steps(ed, 1);
+      const uint64_t gathered = ed.instances_built_for_test() - b;
+      const size_t moved = r458_differ(before, r34_crop(ed, ed.scene_view_rect()));
+      const uint64_t k = ed.instances_kept_for_test();
+      r458_orbit(ed, 4);
+      const uint64_t settled = ed.instances_kept_for_test() - k;
+      std::printf("    %s: gathered %llu time(s), %zu pixels changed, then %llu of 4 frames kept\n", what, (unsigned long long)gathered, moved, (unsigned long long)settled);
+      CHECK(gathered >= 1);
+      CHECK(moved > 20);
+      CHECK(settled >= 3);
+    };
+    after("one cube moved", [&] { cubes[7]->set_local_position({0.0f, 1.5f, 0.0f}); });
+    after("a material's colour", [&] {
+      MaterialPtr m = cubes[3]->get<MeshRenderer>()->materials[0];
+      m->base_color = Vec3(0.9f, 0.1f, 0.1f);
+      m->touch();
+    });
+    after("Solid shading", [&] { ed.command("shading solid"); });
+    after("Shaded again", [&] { ed.command("shading shaded"); });
+    CHECK(Editor::render_cache_mismatches_all() - m0 == 0);
+  });
+  test("round 458: a lightmap bake that lands gathers the instances again (a baked frame isn't kept) and shows in the picture (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor458", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Wall458", {0, 1, 0}, {0.2f, 2, 6}, Vec3(0.9f, 0.2f, 0.2f));
+    ed.viewport_device_for_test(2);
+    ed.command("camera 6 4 8 0 1 0");
+    r34_steps(ed, 4);
+    auto orbit = [&](int frames) {
+      for (int k = 0; k < frames; k++) {
+        ed.command(k % 2 ? "camera 6 4 8 0 1 0" : "camera 6 4 8.03 0 1 0");
+        r34_steps(ed, 1);
+      }
+    };
+    uint64_t k0 = ed.instances_kept_for_test();
+    orbit(6);
+    const uint64_t kept_before = ed.instances_kept_for_test() - k0;
+    const std::vector<uint32_t> before = r34_crop(ed, ed.scene_view_rect());
+    r35_bake(ed);
+    orbit(2);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    orbit(4);
+    ed.set_render_cache_verify(false);
+    const uint64_t stale = Editor::render_cache_mismatches_all() - m0;
+    const uint64_t b0 = ed.instances_built_for_test();
+    orbit(6);
+    const uint64_t gathered = ed.instances_built_for_test() - b0;
+    const size_t changed = r458_differ(before, r34_crop(ed, ed.scene_view_rect()));
+    std::printf("    before the bake %llu of 6 orbit frames kept; after it %llu of 6 gathered, %zu pixels changed, %llu stale\n", (unsigned long long)kept_before,
+                (unsigned long long)gathered, changed, (unsigned long long)stale);
+    CHECK(kept_before >= 5);
+    CHECK(gathered >= 6);
+    CHECK(changed > 200);
+    CHECK(stale == 0);
+  });
+  test("round 458: a texture that lands while the views stream refreshes the kept instances - the cubes show it, the array is kept again afterwards, verify mode finds no stale array (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    r34_steps(ed, 3);
+    r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+    r34_steps(ed, 2);
+    std::vector<std::string> files;
+    for (int i = 0; i < 3; i++) {
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      g->set_local_position({-2.0f + 2.0f * (float)i, 0.5f, 0.0f});
+      const std::string tex = fs::join(test_dir(), strprintf("r458_tex_%d.png", i));
+      std::vector<uint32_t> px(256 * 256, 0xFF000000u | (uint32_t)(60 * i) << 16 | 0x30u);
+      CHECK(write_png(tex, px.data(), 256, 256, 256));
+      MaterialPtr m = make_material(strprintf("R458 tex %d", i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      mr->materials = {m};
+      files.push_back(tex);
+    }
+    CHECK(files.size() == 3);
+    texture_cache_clear();
+    ed.mark_changed_for_test("r458 textured cubes");
+    ed.step_frame_headless();
+    const std::vector<uint32_t> first = r34_crop(ed, ed.scene_view_rect());
+    for (int f = 0; f < 4000 && (ed.texture_streaming_for_test() || ed.streamed_files_for_test() < 3); f++) ed.step_frame_headless();
+    for (int k = 0; k < 6; k++) ed.step_frame_headless();
+    const std::vector<uint32_t> landed = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t k0 = ed.instances_kept_for_test();
+    for (int k = 0; k < 6; k++) {
+      ed.command(k % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    const uint64_t kept = ed.instances_kept_for_test() - k0;
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    for (int k = 0; k < 4; k++) {
+      ed.command(k % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    ed.set_render_cache_verify(false);
+    const uint64_t stale = Editor::render_cache_mismatches_all() - m0;
+    const size_t changed = r458_differ(first, landed);
+    std::printf("    the textures landed: %zu pixels of the window changed; %llu of 6 later frames kept; %llu stale\n", changed, (unsigned long long)kept,
+                (unsigned long long)stale);
+    /* The array is kept now: change a texture under it. First the card's copies evicted (the ids asked again answer for a
+     * texture sent anew - the same picture, nothing stale), then a file that is another colour and streams in. */
+    const std::vector<uint32_t> before_evict = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t m1 = Editor::render_cache_mismatches_all();
+    ed.gpu_evict_textures_for_test();
+    ed.set_render_cache_verify(true);
+    ed.command("camera 0 4 7 0 0.5 0");
+    ed.step_frame_headless();
+    ed.command("camera 0 4 7.03 0 0.5 0");
+    ed.step_frame_headless();
+    ed.set_render_cache_verify(false);
+    ed.command("camera 0 4 7 0 0.5 0");
+    ed.step_frame_headless();
+    const size_t evict_diff = r458_differ(before_evict, r34_crop(ed, ed.scene_view_rect()));
+    std::vector<uint32_t> other(256 * 256, 0xFF20D020u);
+    CHECK(write_png(files[0], other.data(), 256, 256, 256));
+    const uint64_t built0 = ed.instances_built_for_test(), streamed0 = ed.streamed_files_for_test();
+    texture_cache_clear();
+    refresh_material_textures();
+    for (int f = 0; f < 4000 && (ed.texture_streaming_for_test() || ed.streamed_files_for_test() <= streamed0 || ed.texture_stream_busy_for_test()); f++) {
+      ed.command(f % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    ed.set_render_cache_verify(true);
+    for (int k = 0; k < 4; k++) {
+      ed.command(k % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    ed.set_render_cache_verify(false);
+    ed.command("camera 0 4 7 0 0.5 0");
+    ed.step_frame_headless();
+    const size_t recoloured = r458_differ(landed, r34_crop(ed, ed.scene_view_rect()));
+    const uint64_t rebuilt = ed.instances_built_for_test() - built0, stale2 = Editor::render_cache_mismatches_all() - m1;
+    std::printf("    the card's copies evicted: %zu pixels changed; a file replaced and streamed in: %zu pixels changed, %llu gathers; %llu stale in all\n", evict_diff,
+                recoloured, (unsigned long long)rebuilt, (unsigned long long)stale2);
+    CHECK(changed > 500);
+    CHECK(kept >= 4);
+    CHECK(stale == 0);
+    CHECK(evict_diff == 0);
+    CHECK(recoloured > 300);
+    CHECK(rebuilt >= 1);
+    CHECK(stale2 == 0);
+  });
+  /* The meshes: a field of distinct spheres, the budget a byte (so one mesh a frame, the first always going up). */
+  auto spheres = [](Editor &ed, int n, std::vector<const RenderMesh *> &meshes) {
+    GameObject *last = nullptr;
+    for (int i = 0; i < n; i++) {
+      GameObject *g = ed.scene().create(strprintf("S458_%d", i));
+      g->add<MeshFilter>()->mesh = primitives::uv_sphere(0.4f, 24, 16);
+      g->add<MeshRenderer>();
+      g->set_local_position({-3.0f + 1.0f * (float)(i % 6), 0.5f, -1.5f + 1.0f * (float)(i / 6)});
+      meshes.push_back(&g->evaluated_mesh(0)->render_mesh());
+      last = g;
+    }
+    ed.mark_changed_for_test("r458 spheres");
+    return last;
+  };
+  test("round 458: a scene of many meshes comes up over several frames under the upload budget - no frame sends more than the budget (and one mesh), the selected object's mesh is on the card in the first frame, every mesh is drawn once the queue drains, and the picture is the one a frame with no budget draws (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+    r34_steps(ed, 2);
+    ed.mesh_budget_for_test(1);
+    std::vector<const RenderMesh *> meshes;
+    GameObject *last = spheres(ed, 18, meshes);
+    CHECK(meshes.size() == 18);
+    ed.command("select S458_17");
+    CHECK(ed.selected_object() == last);
+    ed.step_frame_headless();
+    const size_t queued_first = ed.mesh_queue_for_test();
+    const bool selected_on_card = ed.mesh_on_card_for_test(*meshes.back());
+    size_t on_card_first = 0;
+    for (const RenderMesh *rm : meshes) on_card_first += ed.mesh_on_card_for_test(*rm);
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    size_t on_card = 0;
+    for (const RenderMesh *rm : meshes) on_card += ed.mesh_on_card_for_test(*rm);
+    const std::vector<uint32_t> streamed = r34_crop(ed, ed.scene_view_rect());
+    /* (The picture with every mesh sent in the first frame: a headless editor that didn't ask for workers doesn't stream.) */
+    Editor ref;
+    ref.init_headless(640, 360);
+    ref.set_async_jobs_for_test(true);  // (streaming on, a budget that never binds: only the queue differs from the run above)
+    ref.viewport_device_for_test(2);
+    ref.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ref.step_frame_headless();
+    r34_toolbar_click(ref, 3), r34_park_mouse(ref);  // (the statistics overlay off: its numbers move every frame)
+    r34_steps(ref, 2);
+    ref.mesh_budget_for_test((size_t)1 << 30, 1e9);
+    std::vector<const RenderMesh *> ref_meshes;
+    spheres(ref, 18, ref_meshes);
+    ref.command("select S458_17");
+    ref.step_frame_headless();
+    size_t ref_first = 0;
+    for (const RenderMesh *rm : ref_meshes) ref_first += ref.mesh_on_card_for_test(*rm);
+    for (int k = 0; k < 3; k++) ref.step_frame_headless();
+    const std::vector<uint32_t> whole = r34_crop(ref, ref.scene_view_rect());
+    const size_t differ = r458_differ(streamed, whole);
+    std::printf("    first frame: %zu mesh(es) waiting, %zu on the card, the selected one's %d; all 18 on the card after %d frames (%zu), the most any frame sent %.1f KB; "
+                "drain %.0f ms; with no streaming the first frame had %zu on the card; %zu pixels differ from that picture\n",
+                queued_first, on_card_first, (int)selected_on_card, frames, on_card, (double)ed.mesh_uploaded_frame_bytes_for_test() / 1024.0,
+                ed.mesh_drain_ms_for_test(), ref_first, differ);
+    CHECK(queued_first >= 10);
+    CHECK(selected_on_card);
+    CHECK(on_card_first < 18);
+    CHECK(frames >= 6);
+    CHECK(on_card == 18);
+    CHECK(ed.mesh_queue_for_test() == 0);
+    const size_t one = meshes[0]->positions.size() * sizeof(gpu::RasterVertex) + meshes[0]->indices.size() * 4;
+    CHECK(ed.mesh_uploaded_frame_bytes_for_test() <= 2 * one);  // (a frame sends the first mesh the budget lets by and the selected one, never more)
+    CHECK(ref_first == 18);
+    CHECK(differ == 0);
+  });
+  test("round 458: with a realistic budget no frame sends more than the budget (or a single mesh past it), a mesh bigger than the budget goes up alone, and the edited object's mesh is on the card in the first frame whatever the queue (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    std::vector<const RenderMesh *> meshes;
+    spheres(ed, 18, meshes);
+    const size_t one = meshes[0]->positions.size() * sizeof(gpu::RasterVertex) + meshes[0]->indices.size() * 4;
+    const size_t budget = 2 * one + one / 2;  // (two meshes fit; a third doesn't)
+    ed.mesh_budget_for_test(budget);
+    GameObject *edited = ed.scene().find_by_name("S458_9");
+    CHECK(edited != nullptr);
+    ed.command("select S458_9");
+    ed.command("edit");
+    CHECK(ed.in_edit_mode());
+    ed.step_frame_headless();
+    const Mesh *em = edited ? edited->evaluated_mesh(2) : nullptr;
+    const bool edited_on_card = em && ed.mesh_on_card_for_test(em->render_mesh(true));
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    size_t on_card = 0;
+    for (const RenderMesh *rm : meshes) on_card += ed.mesh_on_card_for_test(*rm);
+    std::printf("    budget %zu bytes (a mesh %zu): the most any frame sent %zu, the edited mesh on the card in frame 1: %d, %zu of 18 plain meshes after %d frames\n", budget, one,
+                (size_t)ed.mesh_uploaded_frame_bytes_for_test(), (int)edited_on_card, on_card, frames);
+    CHECK(edited_on_card);
+    CHECK(ed.mesh_uploaded_frame_bytes_for_test() <= budget + 2 * one);  // (the selected object is urgent twice - its edit mesh in the Scene view, its plain one in the Game view - and may ride on a full frame; the others keep to the budget)
+    CHECK(frames >= 5);
+    CHECK(on_card >= 17);  // (the edited object draws its edit mesh: its plain one never goes up)
+    /* A mesh bigger than the whole budget still goes up, alone in its frame. */
+    ed.mesh_budget_for_test(1);
+    GameObject *big = ed.scene().create("S458_big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(0.4f, 96, 64);
+    big->add<MeshRenderer>();
+    ed.command("edit off");
+    ed.mark_changed_for_test("r458 big");
+    for (int k = 0; k < 30 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test() || !ed.mesh_on_card_for_test(big->evaluated_mesh(0)->render_mesh())); k++) ed.step_frame_headless();
+    CHECK(ed.mesh_on_card_for_test(big->evaluated_mesh(0)->render_mesh()));
+  });
+  test("round 458: the upload budget counts time as well as bytes - with a byte budget that never binds and no time to spend, meshes still queue (one a frame, and the selected one) and all come up (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    ed.mesh_budget_for_test((size_t)1 << 30, 0.0);
+    std::vector<const RenderMesh *> meshes;
+    spheres(ed, 18, meshes);
+    ed.command("select S458_17");
+    ed.step_frame_headless();
+    const size_t queued = ed.mesh_queue_for_test();
+    const bool selected_on_card = ed.mesh_on_card_for_test(*meshes.back());
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    size_t on_card = 0;
+    for (const RenderMesh *rm : meshes) on_card += ed.mesh_on_card_for_test(*rm);
+    const size_t one = meshes[0]->positions.size() * sizeof(gpu::RasterVertex) + meshes[0]->indices.size() * 4;
+    std::printf("    no time to spend: %zu mesh(es) waiting after the first frame, the selected one's on the card %d; %zu of 18 on the card after %d frames, the most any frame sent %zu bytes (a mesh %zu)\n",
+                queued, (int)selected_on_card, on_card, frames, (size_t)ed.mesh_uploaded_frame_bytes_for_test(), one);
+    CHECK(queued >= 10);
+    CHECK(selected_on_card);
+    CHECK(frames >= 8);
+    CHECK(on_card == 18);
+    CHECK(ed.mesh_uploaded_frame_bytes_for_test() <= 2 * one);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -4192,4 +4572,5 @@ void run_gpu_tests() {
   tests_round443();
   tests_round448();
   tests_round449();
+  tests_round458();
 }

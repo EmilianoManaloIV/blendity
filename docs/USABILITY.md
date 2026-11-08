@@ -465,6 +465,7 @@ screens themselves.
 | An export during a Quad Remesh took the old mesh without a word. | The export waits for a job still working on what it writes, shown in the tray; Cancel writes at once with a warning (round 354). |
 | Opening a big imported scene froze the Scene view until every texture was decoded. (round 447) | The views draw the materials' colours at once and the textures stream in from a worker, a batch at a time, under a per-frame budget for the card; a file that won't load is tried once. |
 | Orbiting a scene of 50,000 objects spent 15-20 ms a frame on overlays that had not changed. (round 449) | The overlays only edits change are kept until the selection, a view switch, a bake or the scene changes: 1.7-2.6 ms. |
+| Orbiting 50,000 objects rebuilt the card's whole instance list every frame; opening a big import sent every mesh to the card in the first frame. (round 458) | The instance list is kept while the objects, materials and textures hold still (the card's ids asked again each frame); meshes go up under a per-frame budget, the selected one first, the view asking for more frames until all are there. Baked, see-through and volume frames still build the list each frame. Timings: see PERFORMANCE. |
 | A scene of 50,000 objects sharing one mesh cost 50,000 draw calls a pass on the card. (round 448) | Neighbouring instances of one mesh draw as one call: the same picture, 100 cubes in 1 call; the CPU's instance build is what is left (round 458). |
 
 ## Still worth doing

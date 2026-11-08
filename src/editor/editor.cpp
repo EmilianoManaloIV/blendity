@@ -578,6 +578,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   process_events(events);
   upload_bytes_frame_ = 0;
+  mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
   texture_stream_poll();  // (round 447: what the views found missing, loading on a worker)
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
@@ -3575,6 +3576,8 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     std::printf("    the CPU's share of the GPU path: the instances %.2f, the baked corners %.2f, the see-through triangles %.2f, the render call %.2f ms (with its wait when the picture comes back)\n",
                 (p1.ms_gpu_instances - p0.ms_gpu_instances) / n, (p1.ms_gpu_corners - p0.ms_gpu_corners) / n, (p1.ms_gpu_see - p0.ms_gpu_see) / n,
                 (p1.ms_gpu_render - p0.ms_gpu_render) / n);
+    std::printf("    instance arrays: %llu kept, %llu gathered over the frames; meshes left waiting %llu (queue now %zu)\n", (unsigned long long)(p1.instances_kept - p0.instances_kept),
+                (unsigned long long)(p1.instances_built - p0.instances_built), (unsigned long long)(p1.mesh_deferred - p0.mesh_deferred), mesh_queue_);  // (round 458)
     print_window_times(p0, p1, n);  // (round 436)
   };
   std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),

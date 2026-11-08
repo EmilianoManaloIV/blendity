@@ -2840,7 +2840,11 @@ class VulkanRaster final : public Raster {
       const VkDeviceSize limit = std::min<VkDeviceSize>(max_storage_, 1ull << 31);
       if (need > limit) return fail(err, "the baked corners too large for the card's storage buffers"), -1;
       Buf bigger;
-      if (!make_buffer(bigger, std::max<VkDeviceSize>(need * 2 > limit ? limit : need * 2, 16), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
+      /* (Round 458: at least 64 MB at once - each growth waits for the card to go idle and copies the lot, which a scene's hundred
+       * first-use blocks paid again and again.) */
+      const VkDeviceSize want = std::min<VkDeviceSize>(limit, std::max<VkDeviceSize>(need * 2, 64ull << 20));
+      if (!make_buffer(bigger, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()) &&  // (no room for 64 MB: what the block needs, doubled, as before)
+          !make_buffer(bigger, std::min<VkDeviceSize>(limit, std::max<VkDeviceSize>(need * 2, 16ull << 20)), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props()))
         return fail(err, "out of memory for the baked corners"), -1;
       f_.vkDeviceWaitIdle(dev_);
       if (corner_used_) std::memcpy(bigger.mapped, corner_buf_.mapped, std::min<size_t>(corner_used_ * sizeof(float), corner_buf_.size));
