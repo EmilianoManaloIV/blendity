@@ -9,6 +9,7 @@
 #include "../core/core.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace bl {
@@ -26,6 +27,9 @@ std::string Editor::pending_job_on(GameObject &g, const std::vector<std::string>
   if (sculpt_remesh_ && sculpt_remesh_->obj == g.id) return "Quad Remesh";
   if (skin_job_ && skin_job_->object == g.id) return skin_job_->label;
   if (meshmaps_job_ && meshmaps_job_->obj == g.id) return "Mesh Maps";
+  if (mesh_job_ && mesh_job_->obj == g.id) return mesh_job_->label;  // (round 413)
+  for (const auto &j : eval_jobs_)
+    if (j->obj == g.id) return "Evaluating " + j->name;
   if (!surface_job_) return "";
   if (surfaces) return std::find(surfaces->begin(), surfaces->end(), surface_job_->path) != surfaces->end() ? "Surface" : "";
   const ProceduralTexturePtr surface = surface_of(&g, nullptr);
@@ -97,7 +101,20 @@ std::vector<Editor::JobView> Editor::jobs_running() {
     add("Writing " + fs::filename(export_job_->out), export_job_->progress.load(), [this] { export_job_->cancel.store(true); }, export_job_->cancel.load());
   if (surface_job_) add("Surface", -1.0f, nullptr);  // (no Cancel: the stack would be evaluated again at once)
   if (skin_job_) add(skin_job_->label, skin_job_->progress.load(), [this] { skin_job_->cancel = true; }, skin_job_->cancel.load());
-  if (baking_) add("Baking lighting", probe_phase_ ? -1.0f : baker_.progress(), [this] { bake_cancel(); });  // (one job through both phases)
+  if (texbake_job_) add("Bake Textures", texbake_job_->progress.load(), [this] { texbake_cancel(); }, texbake_job_->cancel.load());  // (round 412)
+  /* Round 413: the mesh operator, the slow stacks, the file jobs. */
+  if (mesh_job_) add(mesh_job_->label, -1.0f, [this] { mesh_job_->cancel.store(true); }, mesh_job_->cancel.load());
+  for (const auto &j : eval_jobs_) add("Evaluating " + j->name, -1.0f, nullptr);
+  if (save_job_) add("Saving " + fs::filename(save_job_->path), -1.0f, nullptr);
+  if (shot_job_) add("Saving screenshot", -1.0f, nullptr);  // (round 418)
+  if (open_job_) add("Opening " + fs::filename(open_job_->path), -1.0f, nullptr);
+  if (import_job_) add("Reading " + fs::filename(import_job_->path), -1.0f, nullptr);
+  if (file_export_job_) add("Writing " + fs::filename(file_export_job_->path), -1.0f, nullptr);
+  if (baking_ && bake_job_) {  // (round 412: one job through its phases - the lightmaps with their progress, then the probes, volumes and reflection probes)
+    const int phase = bake_job_->phase.load();
+    add(phase == 0 ? "Baking lighting" : phase == 1 ? "Baking probes" : phase == 2 ? "Baking Light Volumes" : "Baking reflection probes", bake_job_->progress.load(),
+        [this] { bake_cancel(); }, bake_job_->cancel.load());
+  }
   if (rendering_ && mr_job_) {
     const float p = mr_job_->progress.load();
     add("MoonRay", p > 0.0f ? p : -1.0f, [this] { mr_job_->cancel.store(true); }, mr_job_->cancel.load());
@@ -105,7 +122,29 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   else if (rendering_ && !ranim_.active && !seq_.active) {  // (an animation or a sequence is one job below, not a Render a frame)
     const RenderSettings &rs = scene_->render;
     const int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
-    add(render_preview_ ? "Preview render" : "Render", std::min(1.0f, (float)final_pt_.samples() / (float)target), [this] { render_stop(); });
+    const bool traced = render_job_ && render_job_->traced;
+    add(render_preview_ ? "Preview render" : "Render", traced ? std::min(1.0f, (float)render_samples() / (float)target) : -1.0f, [this] { render_stop(); });
+  }
+  /* Round 412 (ADR 0105: every worker in the tray): the threads that had none. */
+  if (gpu_view_opening_.valid() && gpu_view_opening_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) add("Opening the GPU", -1.0f, nullptr);
+  if (overlap_job_.valid() && overlap_job_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) add("Overlap check", -1.0f, nullptr);
+  if (unity_ids_job_ && unity_ids_job_->code.load() == -1000000) add("Unity: numbering the models' parts", -1.0f, nullptr);
+  if (unity_lighting_job_ && unity_lighting_job_->code.load() == -1000000) add("Unity: reading its lightmaps", -1.0f, nullptr);
+  if (blend_job_ && !blend_job_->done.load()) add("Blender: reading " + fs::filename(blend_job_->blend), -1.0f, nullptr);
+  if (bridge_job_ && !bridge_job_->done.load()) add("Installing the Blender bridge", -1.0f, nullptr);
+  if (ai_.job && !ai_.job->done.load()) add("AI Inbetween", -1.0f, nullptr);
+  if (ai_.chore && !ai_.chore->done.load()) add("AI: " + ai_.chore->what, -1.0f, nullptr);
+  if (ai_.tune && !ai_.tune->done.load()) {
+    const int total = ai_.tune->total.load();
+    add("AI fine-tuning", total > 0 ? (float)ai_.tune->progress.load() / (float)total : -1.0f, [this] { ai_.tune->cancel.store(true); }, ai_.tune->cancel.load());
+  }
+  if (body_.solve && !body_.solve->done.load()) add(body_.solve->kind, -1.0f, [this] { body_.solve->cancel.store(true); }, body_.solve->cancel.load());
+  if (autopose_.prior && !autopose_.prior->done.load()) add("Loading the pose prior", -1.0f, nullptr);
+  if (upd_.check && upd_.check->state.load() == UpdateCheck::Running) add("Checking for updates", -1.0f, nullptr);
+  if (upd_.download && (upd_.download->state.load() == UpdateDownload::Running || upd_.download->state.load() == UpdateDownload::Verifying)) {
+    const uint64_t total = upd_.download->total.load();
+    add(upd_.download->state.load() == UpdateDownload::Verifying ? "Verifying the download" : "Downloading", total ? (float)upd_.download->done.load() / (float)total : -1.0f,
+        [this] { upd_.download->cancel.store(true); }, upd_.download->cancel.load());
   }
   if (ranim_.active) {
     const int n = std::max(1, ranim_.last - ranim_.first + 1);
@@ -223,6 +262,12 @@ bool Editor::jobs_cancel(const std::string &label) {
 
 /* jobs | jobs cancel [label] */
 void Editor::jobs_command(const std::vector<std::string> &t) {
+  /* Round 437: `jobs async on|off` - a headless editor's renders, bakes and loads on workers as a window's are, so a
+   * script measures the frames the window would have (a window's are always on workers). */
+  if (t.size() > 1 && to_lower(t[1]) == "async") {
+    if (t.size() > 2) async_jobs_ = to_lower(t[2]) == "on";
+    return Log::info("jobs async: %s", jobs_async() ? "on (renders, bakes and loads run on workers)" : "off (a headless editor's jobs run in their frame)");
+  }
   const std::vector<JobView> jobs = jobs_running();
   const bool cancel = t.size() > 1 && to_lower(t[1]) == "cancel";
   if (cancel && jobs.empty()) return Log::warn("jobs cancel: nothing is running");
@@ -253,10 +298,13 @@ void Editor::busy(const std::string &label, std::function<void()> fn) {
 /* The final render stopped: what the Render window's Stop did, shared with the tray. */
 void Editor::render_stop() {
   if (!rendering_) return;
-  rendering_ = false;
-  final_pt_.pause();  // (task 0161: the cards stop too)
-  resolve_final_render(true);
-  render_status_ += "  (stopped)";
+  if (!render_job_) {  // (MoonRay's render: its own job has its own Cancel; the window's Stop ends the wait)
+    rendering_ = false;
+    render_status_ += "  (stopped)";
+    return;
+  }
+  render_job_stop();  // (round 412: the worker stops at its next pass, pauses the cards and lands what it had, denoised)
+  render_status_ += "  (stopping)";
 }
 
 }  // namespace bl

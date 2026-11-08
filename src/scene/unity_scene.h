@@ -148,6 +148,15 @@ struct UnitySkybox;
 bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,
                            const std::function<bool(const std::string &guid, UnitySkybox &out)> &skybox = {}, UnitySceneLink *link = nullptr);
 
+/* Round 421 (ADR 0113): a Unity scene's lightmap settings - its LightingSettings asset when it references one (Unity
+ * 2020+, `lighting_asset` its text), else the scene's own m_LightmapEditorSettings - into Blendity's bake settings:
+ * Lightmap Resolution, Max Lightmap Size, Padding, direct and indirect samples, bounces, the filter on or off. What
+ * Blendity doesn't bake yet (Directional mode, Shadowmask / Subtractive, AO, compression, the environment's own sample
+ * count, the denoiser's kind) is kept in `out` for the caller's notes. A LightingSettings document embedded in the
+ * scene (m_LightingSettings by fileID alone) is read too. Numbers are clamped to the Lighting window's ranges. False:
+ * the scene has none. */
+bool unity_bake_settings(const std::vector<UnityDoc> &docs, const std::string &lighting_asset, UnityBakeSettings &out);
+
 /* Round 401: a Post Processing (PPv2) profile as Blendity reads it - each effect's parameters where the profile
  * overrides them (overrideState 1), Unity's defaults otherwise. Tonemapper 0 None, 1 Neutral, 2 ACES. Effects
  * Blendity doesn't draw (ambient occlusion, depth of field, chromatic aberration, grain, auto exposure, motion blur)

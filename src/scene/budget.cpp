@@ -14,9 +14,11 @@
 #include <atomic>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 namespace bl {
@@ -91,7 +93,7 @@ struct EngineTextures {
   std::map<std::string, Entry> by_path;
   int reading = 0;  // (workers at it: at most kReaders - review 399: a world names hundreds)
 };
-constexpr int kReaders = 2;
+const int kReaders = std::max(2, (int)std::thread::hardware_concurrency() / 2);  // (round 422: most reads are a header now: cheap to run wide)
 thread_local size_t t_textures_unread = 0;  // (the count in progress's engine-only textures not read yet)
 
 EngineTextures &engine_textures() {
@@ -105,8 +107,67 @@ int64_t file_version(const std::string &path) {
   return ec ? 0 : (int64_t)t.time_since_epoch().count();
 }
 
-TextureFacts read_texture_facts(const std::string &abs) {
+/* Round 422: a texture's size from its file's header, and whether it can hold alpha at all - PNG's IHDR (its colour
+ * type, a tRNS chunk before the data), JPEG's SOF (never alpha), TGA's header (its depth and alpha bits). `alpha_known`
+ * false: a PNG or TGA that may be less than opaque somewhere (only its texels say). False: none of these, or cut short. */
+bool texture_header(const std::string &abs, int &w, int &h, bool &alpha, bool &alpha_known) {
+  std::ifstream in(std::filesystem::u8path(abs), std::ios::binary);
+  if (!in) return false;
+  std::string b(256 * 1024, '\0');
+  in.read(&b[0], (std::streamsize)b.size());
+  b.resize((size_t)in.gcount());
+  auto u8 = [&](size_t i) { return (uint32_t)(uint8_t)b[i]; };
+  auto be32 = [&](size_t i) { return u8(i) << 24 | u8(i + 1) << 16 | u8(i + 2) << 8 | u8(i + 3); };
+  if (b.size() >= 33 && b.compare(0, 8, "\x89PNG\r\n\x1a\n") == 0 && b.compare(12, 4, "IHDR") == 0) {
+    w = (int)be32(16), h = (int)be32(20);
+    const uint32_t type = u8(25);
+    bool trns = false;
+    for (size_t at = 8; at + 8 <= b.size();) {  // (the chunks before the first IDAT: a tRNS there gives alpha)
+      const uint32_t len = be32(at);
+      const std::string kind = b.substr(at + 4, 4);
+      if (kind == "IDAT" || kind == "IEND") break;
+      trns = trns || kind == "tRNS";
+      at += 12 + (size_t)len;
+    }
+    alpha = type == 4 || type == 6 || trns, alpha_known = !alpha;
+    return w > 0 && h > 0;
+  }
+  if (b.size() >= 4 && u8(0) == 0xFF && u8(1) == 0xD8) {
+    for (size_t at = 2; at + 9 < b.size();) {
+      if (u8(at) != 0xFF) return false;
+      const uint32_t m = u8(at + 1), len = u8(at + 2) << 8 | u8(at + 3);
+      if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+        h = (int)(u8(at + 5) << 8 | u8(at + 6)), w = (int)(u8(at + 7) << 8 | u8(at + 8));
+        alpha = false, alpha_known = true;
+        return w > 0 && h > 0;
+      }
+      at += 2 + (size_t)len;
+    }
+    return false;
+  }
+  const std::string ext = fs::extension(abs);  // (lowercase)
+  if (ext == ".tga" && b.size() >= 18) {
+    w = (int)(u8(12) | u8(13) << 8), h = (int)(u8(14) | u8(15) << 8);
+    const uint32_t depth = u8(16), alpha_bits = u8(17) & 15;
+    alpha = depth == 32 || alpha_bits > 0, alpha_known = !alpha;
+    return w > 0 && h > 0;
+  }
+  return false;
+}
+
+/* The facts: from the header alone when it settles them - or when Unity's settings for the texture give the same size
+ * with alpha and without (its .meta names the format) - else the image decoded and its texels looked at. Round 422:
+ * `budget pc` on a world had decoded every engine texture in full for this (10 s on SideRail). */
+TextureFacts read_texture_facts(const std::string &abs, const std::string &path) {
   TextureFacts f;
+  bool alpha = true, known = false;
+  if (texture_header(abs, f.w, f.h, alpha, known)) {
+    if (known) return f.alpha = alpha, f;
+    double with = 0.0, without = 0.0;
+    if (unity_texture_megabytes(path, f.w, f.h, true, with) && unity_texture_megabytes(path, f.w, f.h, false, without) && with == without)
+      return f.alpha = true, f;  // (the count doesn't depend on it)
+  }
+  f = TextureFacts{};
   Bitmap b;
   std::string why;
   if (!load_image(abs, b, why) || b.width <= 0 || b.height <= 0) return f;
@@ -127,14 +188,14 @@ bool engine_texture_facts(const std::string &path, bool wait, TextureFacts &out)
     if (e.version == version && !e.reading.valid()) return out = e.facts, true;
     if (e.version != version && e.reading.valid()) return false;  // (an older version still being read: next time)
     if (!e.reading.valid() && wait) {  // (a waiting count reads it here: no worker to wait for)
-      e.version = version, e.facts = read_texture_facts(abs);
+      e.version = version, e.facts = read_texture_facts(abs, path);
       return out = e.facts, true;
     }
     if (!e.reading.valid()) {
       if (et.reading >= kReaders) return false;
       et.reading++;
       e.version = version;
-      e.reading = std::async(std::launch::async, read_texture_facts, abs).share();
+      e.reading = std::async(std::launch::async, read_texture_facts, abs, path).share();
     }
     reading = e.reading;
   }
@@ -168,19 +229,27 @@ double texture_bytes_mb(const TextureFacts &f, bool normal_map) {
   return (double)f.w * (double)f.h * bytes * (4.0 / 3.0) / (1024.0 * 1024.0);
 }
 
+/* A map read from its file's facts (its header, or decoded on a worker - engine_texture_facts). */
+double file_texture_mb(const TextureRef &t, bool normal_map, bool wait) {
+  TextureFacts f;
+  if (!engine_texture_facts(t.path, wait, f)) return (void)t_textures_unread++, 0.0;
+  if (f.w <= 0) return 0.0;
+  const double unity = unity_mb_cached(t.path, f);
+  return unity >= 0.0 ? unity : texture_bytes_mb(f, normal_map);
+}
+
 /* A texture's memory on the card: as Unity imports it when it has Unity's settings, else as its automatic compression
  * stores it, a third more for mips - a byte a texel with alpha or for a normal map (DXT5 / BC5), half a byte for an
  * opaque colour map (DXT1). Round 399: Shinano's opaque 4096s had counted twice their size, 133 MB to the SDK's 61.
  * A drawn map is the one Blendity loaded to draw; an engine-only one is read once on a worker. */
 double texture_mb(const TextureRef &t, std::unordered_set<std::string> &seen, bool normal_map = false, bool engine_only = false, bool wait = false) {
   if (t.empty() || !seen.insert(t.path).second) return 0.0;
-  if (engine_only) {
-    TextureFacts f;
-    if (!engine_texture_facts(t.path, wait, f)) return (void)t_textures_unread++, 0.0;
-    if (f.w <= 0) return 0.0;
-    const double unity = unity_mb_cached(t.path, f);
-    return unity >= 0.0 ? unity : texture_bytes_mb(f, normal_map);
-  }
+  if (engine_only) return file_texture_mb(t, normal_map, wait);
+  /* A drawn map: the texture the views loaded when there is one; else its file's facts, as an engine-only map's (round
+   * 422: a count before anything drew - headless, or with the views on the card - decoded every map in full for its
+   * size: SideRail's first `budget pc` 7 s). Procedural and generated maps are made, not read. */
+  const bool file = !texture_ref_is_procedural(t) && t.path.rfind("generated:", 0) != 0;
+  if (file && !texture_cached(resolve_asset_path(t.path), !t.non_color)) return file_texture_mb(t, normal_map, wait);
   const TexturePtr tex = resolve_texture_ref(t);
   if (!tex || tex->width <= 0 || tex->height <= 0) return 0.0;
   const TextureFacts f{tex->width, tex->height, tex->has_alpha};
@@ -251,7 +320,7 @@ void count_object(GameObject &g, BudgetCounts &c, std::unordered_set<std::string
   for (const MaterialPtr &mp : mr->materials) {
     if (!mp) continue;
     for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map})
-      v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map);
+      v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map, false, budget_wait_for_textures());
     for (const TextureRef &t : mp->engine_maps) v[(int)BudgetRow::TextureMB] += texture_mb(t, textures, false, true, budget_wait_for_textures());
   }
 }
@@ -294,7 +363,7 @@ BudgetCounts budget_count_items(const std::vector<ExportItem> &items) {
     for (const MaterialPtr &mp : it.materials) {
       if (!mp) continue;
       for (const TextureRef *t : {&mp->base_map, &mp->normal_map, &mp->metallic_map, &mp->roughness_map, &mp->emission_map})
-        v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map);
+        v[(int)BudgetRow::TextureMB] += texture_mb(*t, textures, t == &mp->normal_map, false, budget_wait_for_textures());
       for (const TextureRef &t : mp->engine_maps) v[(int)BudgetRow::TextureMB] += texture_mb(t, textures, false, true, budget_wait_for_textures());
     }
     if (it.skin) joints.insert(it.skin->joint_ids.begin(), it.skin->joint_ids.end());
@@ -319,5 +388,9 @@ BudgetResult budget_rank(const BudgetTarget &t, const BudgetCounts &c) {
 }
 
 std::string budget_rank_name(const BudgetTarget &t, int rank) { return rank >= 0 && rank < (int)t.ranks.size() ? t.ranks[(size_t)rank].name : t.over; }
+
+bool budget_texture_header(const std::string &abs, int &w, int &h, bool &alpha, bool &alpha_known) {
+  return texture_header(abs, w, h, alpha, alpha_known);
+}
 
 }  // namespace bl

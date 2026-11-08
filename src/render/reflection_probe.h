@@ -6,6 +6,7 @@
 #include "../core/math.h"
 #include "../image/image.h"
 
+#include <array>
 #include <map>
 #include <memory>
 #include <string>
@@ -31,8 +32,34 @@ Vec3 cube_direction(int face, float u, float v);
 void cube_face_uv(Vec3 dir, int &face, float &u, float &v);
 
 /* The faces as one equirectangular texture with mips (4 x size wide, 2 x size high, at most 1024 x 512): what the
- * renderers sample, the level per roughness as the environment map's. */
+ * renderers sample. Round 428: its first kProbeLodSteps mips prefiltered as Unity's reflection probes are - each the
+ * GGX lobe of the roughness that maps to it (reflection_probe_lod) - instead of box-filtered. */
 TexturePtr reflection_probe_texture(const ReflectionProbeBake &b);
+
+/* Unity's mip for a perceptual roughness (UnityStandardConfig's perceptualRoughnessToMipmapLevel: r (1.7 - 0.7 r) x
+ * UNITY_SPECCUBE_LOD_STEPS, 6), capped at the texture's last level; and its inverse, the roughness a mip holds. */
+constexpr int kProbeLodSteps = 6;
+float reflection_probe_lod(float roughness, int levels);
+float reflection_probe_level_roughness(float level);
+/* The GGX-prefiltered radiance around `n` for `roughness` (N = V = R, as Unity's and Karis's split sum): `samples`
+ * importance samples of the lobe weighted by N.L. With `mips` (the cube's own box chain) each sample reads the mip
+ * its share of the lobe covers - filtered importance sampling (Krivanek and Colbert 2008), so a
+ * lamp a few texels wide blurs into the lobe instead of being hit by a few samples (review 428); without, the cube's
+ * texels (the tests' reference, with many samples). The texture's levels; exposed for the tests. Levels past
+ * kProbeLodSteps stay box-filtered: no lookup reaches them. */
+struct ProbeCubeMips;
+Vec3 reflection_probe_prefilter(const ReflectionProbeBake &b, Vec3 n, float roughness, int samples, const ProbeCubeMips *mips = nullptr);
+
+/* The cube's faces halved again and again (a box filter per face): the source the prefilter's samples read by lod - on
+ * the cube, whose texels are nearly the same solid angle everywhere (review 428: box mips of the equirectangular map
+ * over-weight the poles' tiny texels, a bright patch overhead gained a third of its light). */
+struct ProbeCubeMips {
+  std::vector<int> sizes;
+  std::vector<std::array<std::vector<Vec3>, 6>> levels;
+  explicit ProbeCubeMips(const ReflectionProbeBake &b);
+  Vec3 sample(Vec3 dir, float lod) const;
+  float texel_sr() const;  // a level-0 texel's mean solid angle
+};
 
 /* The file beside the lightmaps (ReflectionProbes.bin): each probe object's id, its faces and a checksum. */
 bool save_reflection_probe_bakes(const std::string &path, const std::map<uint64_t, ReflectionProbeBake> &bakes, std::string &error);

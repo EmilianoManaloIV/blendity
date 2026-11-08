@@ -7,6 +7,7 @@
 #include "editor.h"
 #include "../render/shading.h"
 #include "../texture/procedural_texture.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -31,8 +32,22 @@ struct Preview {
 
 /* A small software-shaded sphere: Lambert + Blinn-Phong from the material's
  * colour, metallic, roughness and emission, with its base texture wrapped on. */
-const Preview &material_preview(const Material &m, int size) {
+std::unordered_map<const Material *, Preview> &preview_cache() {
   static std::unordered_map<const Material *, Preview> cache;
+  return cache;
+}
+
+/* Round 418: the preview drawn last for this material at this size, whatever has changed since - or null when there is
+ * none. A grid over its frame's budget shows these (or a blank tile) and draws the rest in the frames after: each
+ * preview resolves its material's textures (images loaded) and shades a sphere, and a project of 50 textured materials
+ * had spent 270 ms on them in the frame that opened the window. */
+const Preview *material_preview_shown(const Material &m, int size) {
+  auto it = preview_cache().find(&m);
+  return it != preview_cache().end() && it->second.size == size && !it->second.px.empty() ? &it->second : nullptr;
+}
+
+const Preview &material_preview(const Material &m, int size) {
+  auto &cache = preview_cache();
   static uint64_t calls = 0;
   calls++;
   /* Entries of materials not drawn for a while go (undo and redo clone every material: new addresses). */
@@ -61,7 +76,10 @@ const Preview &material_preview(const Material &m, int size) {
   const Vec3 H = normalize(L + V);
   const float rough = clampf(m.roughness, 0.03f, 1.0f);
   const float shin = std::max(2.0f, 2.0f / (rough * rough * rough * rough) - 2.0f);
-  for (int y = 0; y < size; y++)
+  /* Round 418: the rows on every core (the Materials window's first frame shaded every preview on one thread: 270 ms
+   * for 60 tiles; the renderer evaluates the same materials from every thread). */
+  JobSystem::global().parallel_for(size, 4, [&](int64_t y0, int64_t y1) {
+  for (int y = (int)y0; y < (int)y1; y++)
     for (int x = 0; x < size; x++) {
       const float nx = (x + 0.5f) / size * 2 - 1, ny = 1 - (y + 0.5f) / size * 2;
       const float r2 = nx * nx + ny * ny;
@@ -81,7 +99,7 @@ const Preview &material_preview(const Material &m, int size) {
       sp.uv = Vec2(0.5f + std::atan2(n.x, n.z) / (2 * kPi), 0.5f - std::asin(clampf(n.y, -1.0f, 1.0f)) / kPi);
       sp.local_bounds.add(Vec3(-1.0f));
       sp.local_bounds.add(Vec3(1.0f));
-      const SurfaceSample ss = evaluate_material(m, m.textures(), sp);
+      const SurfaceSample ss = evaluate_material(m, rt, sp);
       Vec3 albedo = ss.albedo;
       const float ndl = std::max(0.0f, dot(n, L));
       const Vec3 f0 = Vec3(0.04f) * (1 - m.metallic) + albedo * m.metallic;
@@ -96,6 +114,7 @@ const Preview &material_preview(const Material &m, int size) {
       c = c * edge + bg * (1 - edge);
       p.px[(size_t)y * size + x] = Color::from(Vec3(linear_to_srgb(std::min(c.x, 1.0f)), linear_to_srgb(std::min(c.y, 1.0f)), linear_to_srgb(std::min(c.z, 1.0f))));
     }
+  });
   return p;
 }
 
@@ -109,7 +128,10 @@ void blit(ui::Context &u, const Preview &p, Recti r) {
 }  // namespace
 
 MaterialPtr Editor::material_by_name(const std::string &name) {
+  /* Round 418: a material asset's name is its file's stem, so only the files of that name are loaded to look (every
+   * .mat under Assets was read and parsed to compare names: 230 ms a lookup in a project of 870 materials). */
   for (const std::string &path : material_asset_paths()) {
+    if (fs::stem(path) != name) continue;
     MaterialPtr m = material_asset(path);
     if (m && m->name == name) return m;
   }
@@ -170,6 +192,7 @@ void Editor::draw_materials_window(const Recti &r) {
   };
   std::vector<Entry> list;
   std::unordered_set<const Material *> seen;
+  preload_material_assets(material_asset_paths());  // (round 418: the files not loaded yet, read and parsed on every core)
   for (const std::string &path : material_asset_paths())
     if (MaterialPtr m = material_asset(path))
       if (seen.insert(m.get()).second) list.push_back({m, 0});
@@ -236,6 +259,9 @@ void Editor::draw_materials_window(const Recti &r) {
   for (const Entry &e : list) shown.push_back(e.m);
   material_multi_.sync(shown, material_selected_);  // the multi-selection (task 0053)
   const bool asking = material_delete_ || !material_delete_many_.empty();  // a question is up: no new selection or Delete
+  constexpr double kPreviewBudgetMs = 20.0;  // (round 418, ADR 0105: the previews a frame draws; the rest in the frames after)
+  ScopedTimer previews_t;
+  bool previews_left = false;
   for (size_t i = 0; i < list.size(); i++) {
     const int cx = grid.x + pad + (int)(i % (size_t)cols) * (tile + pad);
     const int cy = grid.y + pad + (int)(i / (size_t)cols) * (tile + u.row_h() + pad) - off;
@@ -246,8 +272,16 @@ void Editor::draw_materials_window(const Recti &r) {
     if (u.record_buttons) u.button_rects["mat:" + m->name] = cell;  // (tests click thumbnails)
     const bool hot = u.hovered(cell);
     if (sel || hot) u.canvas.fill_round_rect(cell, u.px(4), sel ? u.theme.selection : u.theme.row_hover);
-    const Preview &p = material_preview(*m, tile - u.px(8));
-    blit(u, p, {cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)});
+    const Recti pic{cx + u.px(4), cy + u.px(4), tile - u.px(8), tile - u.px(8)};
+    if (previews_t.ms() < kPreviewBudgetMs) blit(u, material_preview(*m, tile - u.px(8)), pic);
+    else if (const Preview *shown = material_preview_shown(*m, tile - u.px(8))) {
+      blit(u, *shown, pic);
+      previews_left = true;  // (it may be out of date: drawn again in a later frame)
+    }
+    else {
+      u.canvas.fill_round_rect(pic, u.px(3), u.theme.bar);
+      previews_left = true;
+    }
     u.label({cx, cy + tile, tile, u.row_h()}, m->name, u.theme.text, ui::Align::Center);
     if (!m->asset_path.empty()) u.draw_icon(Icon::File, {cx + u.px(4), cy + u.px(4), u.px(12), u.px(12)}, u.theme.accent);
     u.tooltip(m->name + (m->asset_path.empty() ? "  (scene material)" : "  (" + m->asset_path + ")") +
@@ -265,6 +299,7 @@ void Editor::draw_materials_window(const Recti &r) {
     }
   }
   if (list.empty()) u.label({grid.x, grid.y + u.px(20), grid.w, u.row_h()}, "No materials yet. New Material Asset makes one.", u.theme.text_dim, ui::Align::Center);
+  if (previews_left) u.redraw = true;  // (the next frame draws the next previews)
   u.end_scroll();
   MaterialPtr selm = material_selected_;
   u.popup(u.id("mat_ctx"), u.px(230), [this, selm] {
@@ -363,6 +398,7 @@ size_t Editor::delete_material(const MaterialPtr &m) {
     if (fs::exists(abs)) file = delete_project_entry(abs);
     else forget_material_assets(m->asset_path);
   }
+
   if (material_selected_ == m) material_selected_ = nullptr;
   if (material_delete_ == m) material_delete_ = nullptr;
   mark_changed("Delete Material " + name);

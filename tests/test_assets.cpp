@@ -4280,6 +4280,10 @@ static void tests_round229() {
 /* ---------------------------------------------------------------- round 230: big scenes saved and opened (task 0210) */
 static void tests_round230() {
   test("a scene with a big mesh - its positions, faces and UVs written and read on every core - comes back exactly, writes the same text twice, and a bad vertex deep in its faces is reported at its own line", [] {
+    struct TextMeshes {  // (round 417: this test is the text form's; a mesh this size is a chunk otherwise)
+      TextMeshes() { set_scene_text_meshes_for_test(true); }
+      ~TextMeshes() { set_scene_text_meshes_for_test(false); }
+    } text_meshes;
     Scene s;
     GameObject *g = s.create("Big");
     MeshPtr big = primitives::uv_sphere(1.0f, 512, 256);  // (131k faces: past the blocks' threshold)
@@ -11652,6 +11656,15 @@ static void tests_round395() {
     CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", ao, "    - _Metallic: 0.6\n    - _Glossiness: 0.7\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"),
                          kTex, shader("Silent/Filamented"), metal, info));
     CHECK(info.known && info.shader == "Filamented" && std::fabs(metal.metallic - 0.6f) < 1e-6f && std::fabs(metal.roughness - 0.3f) < 1e-5f && info.notes.size() == 1);
+    CHECK(std::fabs(metal.exposure_occlusion - 0.2f) < 1e-6f);  // (round 429: the shader's default Exposure Occlusion)
+    Material sensitive;
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _ExposureOcclusion: 0.5\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex,
+                         shader("Silent/Filamented"), sensitive, info));
+    CHECK(std::fabs(sensitive.exposure_occlusion - 0.5f) < 1e-6f);
+    Material standard;  // (Unity's Standard: no such occlusion)
+    CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "", "    - _ExposureOcclusion: 0.5\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex,
+                         shader("Standard"), standard, info));
+    CHECK(standard.exposure_occlusion == 0.0f);
     Material rough;
     CHECK(unity_material(mat("{fileID: 4800000, guid: f, type: 3}", "    - _SpecGlossMap:\n        m_Texture: {fileID: 2800000, guid: rough, type: 3}\n",
                              "    - _Metallic: 0.2\n    - _Glossiness: 0.8\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex, shader("Silent/Filamented (Roughness setup)"), rough, info));
@@ -12960,6 +12973,651 @@ static void tests_round332() {
   });
 }
 
+
+/* ---------------------------------------------------------------- round 417: throughput efficiencies (task 0393) */
+static void tests_round417() {
+  test("round 417 probe: where Edit Mode entry on the 500k sphere and the 500k save / open spend their time (times printed)", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    MeshPtr sphere = primitives::uv_sphere(1.0f, 1024, 490);
+    GameObject *g = ed.scene().create("Parity Sphere");
+    g->add<MeshFilter>()->mesh = sphere;
+    g->add<MeshRenderer>();
+    ed.command("select Parity Sphere");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    MeshPtr fresh = std::make_shared<Mesh>(*sphere);
+    fresh->forget_caches();
+    ed.overlap_forget_for_test();
+    g->get<MeshFilter>()->mesh = fresh;
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    MeshPtr probe = std::make_shared<Mesh>(*sphere);
+    probe->forget_caches();
+    { ScopedTimer t; probe->topology_serial(); std::printf("    topology_serial %.1f ms\n", t.ms()); }
+    { ScopedTimer t; probe->edge_cache(); std::printf("    edge_cache %.1f ms (%zu edges)\n", t.ms(), probe->edge_cache().size()); }
+    { ScopedTimer t; probe->render_mesh(); std::printf("    render_mesh %.1f ms\n", t.ms()); }
+    { ScopedTimer t; ed.command("edit vertex"); std::printf("    edit vertex command %.1f ms\n", t.ms()); }
+    for (int i = 0; i < 3; i++) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      const FrameProfile &p = ed.frame_profile_last_for_test();
+      std::printf("    frame %d after entering: %.1f ms (scene view %.1f, overlays %.1f, hashing %.1f, gathering %.1f, ui %.1f)\n", i + 1, t.ms(), p.ms_scene3d, p.ms_overlays, p.ms_hash, p.ms_collect, p.ms_ui);
+    }
+    { ScopedTimer t; ed.run_action_for_test("edit.select_all"); std::printf("    select all action %.1f ms\n", t.ms()); }
+    { ScopedTimer t; ed.step_frame_headless(); std::printf("    frame after select all %.1f ms\n", t.ms()); }
+    ed.command("edit face");
+    for (int i = 0; i < 2; i++) { ScopedTimer t; ed.step_frame_headless(); std::printf("    face mode frame %d: %.1f ms\n", i + 1, t.ms()); }
+    ed.command("edit off");
+    ed.step_frame_headless();
+    /* The 500k save and open, split. */
+    Scene s;
+    GameObject *sg = s.create("Sphere");
+    sg->add<MeshFilter>()->mesh = sphere;
+    sg->add<MeshRenderer>();
+    std::string text;
+    { ScopedTimer t; text = save_scene_text(s); std::printf("    save_scene_text %.1f ms (%zu bytes)\n", t.ms(), text.size()); }
+    const std::string path = fs::join(test_dir(), "r417_probe.scene");
+    { ScopedTimer t; fs::write_file(path, text); std::printf("    write_file %.1f ms\n", t.ms()); }
+    std::string read;
+    { ScopedTimer t; fs::read_file(path, read); std::printf("    read_file %.1f ms\n", t.ms()); }
+    { Scene loaded; std::string err; ScopedTimer t; load_scene_text(read, loaded, err); std::printf("    load_scene_text %.1f ms (%s)\n", t.ms(), err.c_str()); }
+    fs::remove_file(path);
+  });
+  /* The attributes a mesh can carry, all set (the chunk must hold every one). */
+  auto r417_dressed = [](MeshPtr m) {
+    const size_t nv = m->vert_count(), nf = m->face_count();
+    m->face_material.assign(nf, 0);
+    m->face_smooth.assign(nf, 1);
+    m->face_group.assign(nf, 0);
+    for (size_t f = 0; f < nf; f++) m->face_material[f] = (int32_t)(f % 3), m->face_smooth[f] = (uint8_t)(f % 2), m->face_group[f] = f % 5 == 0 ? -2 : (int32_t)(f % 4);
+    m->sculpt_mask.assign(nv, 0.0f);
+    for (size_t v = 0; v < nv; v++) m->sculpt_mask[v] = (float)(v % 7) / 7.0f;
+    m->seams = {Mesh::edge_key(0, 1), Mesh::edge_key(2, 3), Mesh::edge_key(10, 11)};
+    m->sharp_edges = {Mesh::edge_key(4, 5), Mesh::edge_key(6, 7)};
+    m->loose_edges = {Mesh::edge_key(5, (uint32_t)nv - 1)};
+    for (auto *e : {&m->seams, &m->sharp_edges, &m->loose_edges}) std::sort(e->begin(), e->end());
+    for (const char *name : {"Arm", "Leg"}) {
+      VertexGroup g;
+      g.name = name;
+      g.weights.resize(nv);
+      for (size_t v = 0; v < nv; v++) g.weights[v] = (float)((v * (name[0] == 'A' ? 11 : 13)) % 17) / 17.0f;
+      m->vertex_groups.push_back(std::move(g));
+    }
+    m->custom_normals.resize(nv);
+    for (size_t v = 0; v < nv; v++) m->custom_normals[v] = normalize(Vec3(0.1f * (float)(v % 5), 1.0f, 0.1f * (float)(v % 3)));
+    for (const char *name : {"Smile", "Blink"}) {
+      ShapeKey k;
+      k.name = name;
+      k.delta.assign(nv, Vec3(0.0f));
+      for (size_t v = name[0] == 'S' ? 0 : 5; v < nv; v += 13) k.delta[v] = Vec3(0.01f * (float)(v % 9), -0.02f, 0.5f);
+      m->shape_keys.push_back(std::move(k));
+    }
+    m->smooth = true;
+    m->smooth_angle = 42.0f;
+    m->seams_sharp = true;
+    m->touch();
+    return m;
+  };
+  auto r417_same_mesh = [](const Mesh &a, const Mesh &b) {
+    auto same = [](const auto &x, const auto &y) { return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0); };
+    bool ok = same(a.positions, b.positions) && same(a.face_offsets, b.face_offsets) && same(a.corner_verts, b.corner_verts) && same(a.uvs, b.uvs) &&
+              same(a.face_material, b.face_material) && same(a.face_smooth, b.face_smooth) && same(a.face_group, b.face_group) &&
+              same(a.sculpt_mask, b.sculpt_mask) && same(a.seams, b.seams) && same(a.sharp_edges, b.sharp_edges) && same(a.loose_edges, b.loose_edges) &&
+              same(a.custom_normals, b.custom_normals) && a.smooth == b.smooth && a.smooth_angle == b.smooth_angle && a.seams_sharp == b.seams_sharp &&
+              a.vertex_groups.size() == b.vertex_groups.size() && a.shape_keys.size() == b.shape_keys.size();
+    for (size_t i = 0; ok && i < a.vertex_groups.size(); i++) ok = a.vertex_groups[i].name == b.vertex_groups[i].name && same(a.vertex_groups[i].weights, b.vertex_groups[i].weights);
+    for (size_t i = 0; ok && i < a.shape_keys.size(); i++) ok = a.shape_keys[i].name == b.shape_keys[i].name && same(a.shape_keys[i].delta, b.shape_keys[i].delta);
+    return ok;
+  };
+  test("scene file (round 417, ADR 0111): a big mesh's binary chunk loads bit for bit as its text form with every attribute set; a small mesh stays text; the file is under half the text's size; a scene without a big mesh is unchanged", [&] {
+    MeshPtr big = r417_dressed(primitives::uv_sphere(1.0f, 128, 64));
+    CHECK(mesh_saved_binary(*big) && !mesh_saved_binary(*primitives::cube()));
+    Scene s;
+    GameObject *g = s.create("Big");
+    g->add<MeshFilter>()->mesh = big;
+    g->add<MeshRenderer>();
+    GameObject *c = s.create("Cube");
+    c->add<MeshFilter>()->mesh = primitives::cube();
+    c->add<MeshRenderer>();
+    const std::string bin = save_scene_text(s);
+    set_scene_text_meshes_for_test(true);
+    const std::string txt = save_scene_text(s);
+    set_scene_text_meshes_for_test(false);
+    size_t bin_lines = 0;
+    for (size_t at = bin.find(" bin "); at != std::string::npos; at = bin.find(" bin ", at + 5)) bin_lines++;
+    std::printf("    chunk form %zu bytes, text form %zu bytes, %zu chunk(s)\n", bin.size(), txt.size(), bin_lines);
+    CHECK(bin_lines == 1 && txt.find(" bin ") == std::string::npos);
+    CHECK(bin.size() * 2 < txt.size());
+    const std::vector<std::pair<size_t, size_t>> spans = scene_binary_spans(bin);
+    CHECK(spans.size() == 1 && spans[0].second > spans[0].first && bin.compare(spans[0].first, 4, "bmsh") == 0);
+    Scene a, b;
+    std::string ea, eb;
+    CHECK(load_scene_text(bin, a, ea) && load_scene_text(txt, b, eb));
+    if (!ea.empty() || !eb.empty()) std::printf("    errors: '%s' / '%s'\n", ea.c_str(), eb.c_str());
+    const GameObject *ga = a.find_by_name("Big"), *gb = b.find_by_name("Big");
+    CHECK(ga && gb && ga->get<MeshFilter>() && gb->get<MeshFilter>());
+    if (ga && gb) {
+      const Mesh &ma = *ga->get<MeshFilter>()->mesh, &mb = *gb->get<MeshFilter>()->mesh;
+      CHECK(r417_same_mesh(ma, mb));
+      CHECK(r417_same_mesh(ma, *big));
+      CHECK(ma.vertex_groups.size() == 2 && ma.shape_keys.size() == 2 && ma.custom_normals_fit() && ma.mask_fits());
+    }
+    /* A scene with only small meshes: byte-identical whichever way. */
+    Scene small;
+    GameObject *d = small.create("Cube");
+    d->add<MeshFilter>()->mesh = primitives::cube();
+    d->add<MeshRenderer>();
+    const std::string t1 = save_scene_text(small);
+    set_scene_text_meshes_for_test(true);
+    const std::string t2 = save_scene_text(small);
+    set_scene_text_meshes_for_test(false);
+    CHECK(t1 == t2 && t1.find(" bin ") == std::string::npos);
+  });
+  test("scene file (round 417): a chunk cut short, one with a corner past the vertices, and one longer than the file are refused with a reason; a retarget of the file's asset paths leaves the chunk's bytes alone", [&] {
+    MeshPtr big = r417_dressed(primitives::uv_sphere(1.0f, 96, 48));
+    Scene s;
+    GameObject *g = s.create("Big");
+    g->add<MeshFilter>()->mesh = big;
+    MeshRenderer *mr = g->add<MeshRenderer>();
+    MaterialPtr mat = make_material("Skin", Vec3(0.8f, 0.5f, 0.4f));
+    mat->base_map = TextureRef{"Assets/Textures/Old.png", false};
+    mr->materials.push_back(mat);
+    const std::string bin = save_scene_text(s);
+    const std::vector<std::pair<size_t, size_t>> spans = scene_binary_spans(bin);
+    CHECK(spans.size() == 1);
+    if (spans.size() != 1) return;
+    Scene x;
+    std::string err;
+    std::string cut = bin.substr(0, spans[0].second - 100) + bin.substr(spans[0].second);  // (100 bytes of the chunk gone)
+    CHECK(!load_scene_text(cut, x, err) && !err.empty());
+    std::printf("    cut short: %s\n", err.c_str());
+    std::string wrong = bin;
+    const size_t corn = wrong.find("corn", spans[0].first);
+    CHECK(corn != std::string::npos && corn < spans[0].second);
+    if (corn != std::string::npos) {
+      std::memset(&wrong[corn + 12], 0xFF, 4);  // the first corner's vertex: past every vertex
+      err.clear();
+      CHECK(!load_scene_text(wrong, x, err) && err.find("out of range") != std::string::npos);
+      std::printf("    corner out of range: %s\n", err.c_str());
+    }
+    std::string longer = bin;
+    const size_t binat = longer.rfind(" bin ", spans[0].first);
+    const size_t nl = longer.find('\n', binat);
+    longer.replace(binat + 5, nl - binat - 5, "999999999999");
+    err.clear();
+    CHECK(!load_scene_text(longer, x, err) && !err.empty());
+    /* The retarget: the path changes in the material, the chunk's bytes don't, the mesh loads the same. */
+    const std::string dir = fs::join(test_dir(), "r417_retarget");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "big.scene");
+    CHECK(fs::write_file(path, bin));
+    CHECK(retarget_scene_files(dir, "Assets/Textures/Old.png", "Assets/Textures/New.png") == 1);
+    std::string after;
+    CHECK(fs::read_file(path, after));
+    const std::vector<std::pair<size_t, size_t>> spans2 = scene_binary_spans(after);
+    CHECK(spans2.size() == 1 && spans2[0].second - spans2[0].first == spans[0].second - spans[0].first &&
+          after.compare(spans2[0].first, spans2[0].second - spans2[0].first, bin, spans[0].first, spans[0].second - spans[0].first) == 0);
+    CHECK(after.find("Assets/Textures/New.png") != std::string::npos && after.find("Assets/Textures/Old.png") == std::string::npos);
+    Scene y;
+    err.clear();
+    CHECK(load_scene_text(after, y, err));
+    const GameObject *gy = y.find_by_name("Big");
+    CHECK(gy && gy->get<MeshFilter>() && r417_same_mesh(*gy->get<MeshFilter>()->mesh, *big));
+    fs::remove_file(path);
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(dir), ec);
+  });
+  test("overlays (round 417): a record of ten thousand lines and dots is in index order, and replaying it draws the picture the one-at-a-time path draws", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    R34Rng rng{99u};
+    const size_t n = 10000;
+    std::vector<Vec3> a(n), b(n);
+    std::vector<uint32_t> col(n);
+    for (size_t i = 0; i < n; i++) {
+      a[i] = Vec3(rng.range(-3.0f, 3.0f), rng.range(-2.0f, 2.0f), rng.range(-3.0f, 3.0f));
+      b[i] = a[i] + Vec3(rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f));
+      col[i] = 0xFF000000u | (uint32_t)i;
+    }
+    r.begin_overlay_batch();
+    for (size_t i = 0; i < n; i++) r.line(a[i], b[i], col[i], true, 0.0f);
+    for (size_t i = 0; i < n; i++) r.point(a[i], 2.0f, col[i], false);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> serial = img.pixels;
+    img.pixels = base;
+    Renderer3D::OverlayRecord rec;
+    r.record_overlays(&rec);
+    r.lines(n, [&](size_t i, Vec3 &pa, Vec3 &pb, uint32_t &c) { pa = a[i], pb = b[i], c = col[i]; return true; }, true, 0.0f);
+    r.points(n, 2.0f, [&](size_t i, Vec3 &p, uint32_t &c) { p = a[i], c = col[i]; return true; }, false);
+    r.record_overlays(nullptr);
+    CHECK(rec.ops.size() == 2 * n);
+    bool ordered = rec.ops.size() == 2 * n;
+    for (size_t i = 0; ordered && i < n; i++)
+      ordered = rec.ops[i].kind == Renderer3D::OverlayRecord::Op::Line && rec.ops[i].color == col[i] && rec.ops[n + i].kind == Renderer3D::OverlayRecord::Op::Point && rec.ops[n + i].color == col[i];
+    CHECK(ordered);
+    r.begin_overlay_batch();
+    r.replay(rec);
+    r.end_overlay_batch();
+    size_t changed = 0, differ = 0;
+    for (size_t i = 0; i < serial.size(); i++) changed += serial[i] != base[i], differ += serial[i] != img.pixels[i];
+    std::printf("    %zu pixels drawn by the overlays, %zu differ between the two paths\n", changed, differ);
+    CHECK(changed > 500 && differ == 0);
+  });
+  test("overlays (round 437): lines prepared straight into the batch, a third refused off screen, draw what one at a time draws, batched or not; an opaque dot's inside is its colour, its rim blended, outside untouched", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    R34Rng rng{437u};
+    const size_t n = 30000;  // (several chunks of 4096: the stretches close up)
+    std::vector<Vec3> a(n), b(n);
+    std::vector<uint32_t> col(n);
+    for (size_t i = 0; i < n; i++) {
+      const float off = i % 3 == 0 ? 400.0f : 0.0f;  // (a third far off to the side: refused by the clip)
+      a[i] = Vec3(rng.range(-3.0f, 3.0f) + off, rng.range(-2.0f, 2.0f), rng.range(-3.0f, 3.0f));
+      b[i] = a[i] + Vec3(rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f));
+      col[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    }
+    auto get = [&](size_t i, Vec3 &pa, Vec3 &pb, uint32_t &c) { pa = a[i], pb = b[i], c = col[i]; return true; };
+    r.begin_overlay_batch();
+    for (size_t i = 0; i < n; i++) r.line(a[i], b[i], col[i], true, 0.0f);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> one_at_a_time = img.pixels;
+    img.pixels = base;
+    r.begin_overlay_batch();
+    r.lines(n, get, true, 0.0f);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> batched = img.pixels;
+    img.pixels = base;
+    r.lines(n, get, true, 0.0f);  // (not batching: drawn at once)
+    size_t drawn = 0, differ_batch = 0, differ_direct = 0;
+    for (size_t i = 0; i < base.size(); i++)
+      drawn += one_at_a_time[i] != base[i], differ_batch += batched[i] != one_at_a_time[i], differ_direct += img.pixels[i] != one_at_a_time[i];
+    std::printf("    %zu pixels drawn; %zu differ batched, %zu drawn at once\n", drawn, differ_batch, differ_direct);
+    CHECK(drawn > 1000 && differ_batch == 0 && differ_direct == 0);
+    /* An opaque dot, radius 3, centred on a pixel's middle. */
+    img.pixels = base;
+    rt.depth.assign(rt.depth.size(), 1.0f);
+    Vec2 sp;
+    float z;
+    const Vec3 p(0.0f, 0.0f, 0.0f);
+    CHECK(r.project(p, sp, z));
+    r.point(p, 3.0f, 0xFF20C0E0u, false);
+    const int cx = (int)sp.x, cy = (int)sp.y;
+    const uint32_t centre = img.pixels[(size_t)cy * img.width + cx], far = img.pixels[(size_t)cy * img.width + cx + 6];
+    CHECK(centre == 0xFF20C0E0u);
+    CHECK(far == base[(size_t)cy * img.width + cx + 6]);
+  });
+  /* (Each axis's coordinates sorted on their own: a 7-digit file breaks the ties a lexicographic sort would rely on.) */
+  auto r417_close = [](const std::vector<Vec3> &p, const std::vector<Vec3> &q, float eps) {
+    if (p.size() != q.size()) return false;
+    for (int axis = 0; axis < 3; axis++) {
+      std::vector<float> a(p.size()), b(q.size());
+      for (size_t i = 0; i < p.size(); i++) a[i] = p[i][axis], b[i] = q[i][axis];
+      std::sort(a.begin(), a.end()), std::sort(b.begin(), b.end());
+      for (size_t i = 0; i < a.size(); i++)
+        if (std::fabs(a[i] - b[i]) > eps) return false;
+    }
+    return true;
+  };
+  test("PLY (round 417): binary and ASCII exports of a 50k sphere read back with its vertices and faces; big-endian, an extra element and extra properties, records across lines, and a truncated file", [&] {
+    MeshPtr sphere = primitives::uv_sphere(1.0f, 256, 196);
+    ExportItem it;
+    it.name = "Sphere", it.mesh = sphere.get(), it.world = Mat4::identity();
+    for (bool ascii : {false, true}) {
+      ExportOptions o = export_defaults((int)ExportFormat::PLY);
+      o.ascii = ascii;
+      const std::string path = fs::join(test_dir(), ascii ? "r417a.ply" : "r417b.ply");
+      CHECK(fs::write_file(path, export_ply({it}, o)));
+      ImportResult r;
+      ScopedTimer t;
+      const bool ok = import_model(path, r);
+      std::printf("    %s PLY of the 50k sphere imported in %.1f ms\n", ascii ? "ASCII" : "binary", t.ms());
+      CHECK(ok && r.nodes.size() == 1 && r.nodes[0].mesh);
+      if (ok && r.nodes.size() == 1 && r.nodes[0].mesh) {
+        const Mesh &m = *r.nodes[0].mesh;
+        CHECK(m.face_count() == sphere->face_count() && m.vert_count() == sphere->vert_count());
+        CHECK(r417_close(m.positions, sphere->positions, 1e-5f));
+        CHECK(m.has_uvs());
+      }
+      fs::remove_file(path);
+    }
+    /* By hand: a comment, extra vertex properties (colours, normals), an edge element (no lists: stepped over), a face
+     * element with a second list after the indices. Z up in the file: (x, y, z) -> (-x, z, -y). */
+    const std::string head = "ply\nformat ascii 1.0\ncomment made by hand\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n"
+                             "property uchar red\nproperty uchar green\nproperty uchar blue\nproperty float nx\nproperty float ny\nproperty float nz\n"
+                             "element edge 2\nproperty int vertex1\nproperty int vertex2\n"
+                             "element face 2\nproperty list uchar int vertex_index\nproperty list uchar float texcoord\nend_header\n";
+    const std::string body = "0 0 0 255 0 0 0 0 1\n1 0 0 0 255 0 0 0 1\n1 1 0 0 0 255 0 0 1\n0 1 0 9 9 9 0 0 1\n0 1\n1 2\n3 0 1 2 6 0 0 1 0 1 1\n3 0 2 3 6 0 0 1 1 0 1\n";
+    auto import_text = [&](const std::string &text, const char *what, size_t faces, size_t verts) {
+      const std::string path = fs::join(test_dir(), "r417h.ply");
+      CHECK(fs::write_file(path, text));
+      ImportResult r;
+      const bool ok = import_model(path, r);
+      if (!ok) std::printf("    %s: %s\n", what, r.error.c_str());
+      CHECK(ok && r.nodes.size() == 1 && r.nodes[0].mesh && r.nodes[0].mesh->face_count() == faces && r.nodes[0].mesh->vert_count() == verts);
+      if (ok && r.nodes.size() == 1 && r.nodes[0].mesh && verts == 4) {
+        const std::vector<Vec3> want = {{0, 0, 0}, {-1, 0, 0}, {-1, 0, -1}, {0, 0, -1}};
+        CHECK(r417_close(r.nodes[0].mesh->positions, want, 1e-6f));
+      }
+      fs::remove_file(path);
+    };
+    import_text(head + body, "extra elements and properties", 2, 4);
+    import_text(head + "0 0 0 255 0 0\n0 0 1\n1 0 0 0 255 0 0 0 1\n1 1 0 0 0 255 0 0 1 0 1 0 9 9 9\n0 0 1\n0 1\n1 2\n3 0 1 2\n6 0 0 1 0 1 1\n3 0 2 3 6 0 0 1 1 0 1\n", "records across lines", 2, 4);
+    /* Big-endian binary: the same quad as one face. */
+    std::string be = "ply\nformat binary_big_endian 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n";
+    auto put_be_f = [&](float f) {
+      unsigned char b[4];
+      std::memcpy(b, &f, 4);
+      for (int k = 3; k >= 0; k--) be += (char)b[k];
+    };
+    auto put_be_i = [&](int32_t v) {
+      for (int k = 3; k >= 0; k--) be += (char)((uint32_t)v >> (8 * k));
+    };
+    const float quad[4][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    for (auto &v : quad) put_be_f(v[0]), put_be_f(v[1]), put_be_f(v[2]);
+    be += (char)4;
+    for (int32_t i : {0, 1, 2, 3}) put_be_i(i);
+    import_text(be, "big-endian", 1, 4);
+    /* A binary file cut in half has its faces cut: refused. */
+    ExportOptions o = export_defaults((int)ExportFormat::PLY);
+    const std::string whole = export_ply({it}, o);
+    const std::string path = fs::join(test_dir(), "r417t.ply");
+    CHECK(fs::write_file(path, whole.substr(0, whole.size() / 2)));
+    ImportResult rt;
+    const bool ok = import_model(path, rt);
+    CHECK(!ok && !rt.error.empty());
+    std::printf("    truncated: %s\n", rt.error.c_str());
+    fs::remove_file(path);
+  });
+  test("OBJ (round 417): a smooth sphere's file lists one vn per vertex and fewer vt than corners, reads back as the same mesh; a 40,000-face mesh alternating materials and smoothing has its usemtl and s lines exactly where the faces change", [&] {
+    MeshPtr sphere = primitives::uv_sphere(1.37f, 48, 24);
+    ExportItem it;
+    it.name = "Sphere", it.mesh = sphere.get(), it.world = Mat4::identity();
+    ExportOptions o = export_defaults((int)ExportFormat::OBJ);
+    o.normals = true;
+    std::string obj, mtl;
+    export_obj_mtl({it}, "s.mtl", obj, mtl, o);
+    size_t vn = 0, vt = 0, v = 0, f = 0;
+    for (size_t at = 0; at < obj.size();) {
+      const size_t nl = obj.find('\n', at);
+      const std::string_view line(obj.data() + at, (nl == std::string::npos ? obj.size() : nl) - at);
+      vn += line.compare(0, 3, "vn ") == 0, vt += line.compare(0, 3, "vt ") == 0, v += line.compare(0, 2, "v ") == 0, f += line.compare(0, 2, "f ") == 0;
+      at = nl == std::string::npos ? obj.size() : nl + 1;
+    }
+    std::printf("    v %zu, vt %zu, vn %zu, f %zu (vertices %zu, corners %zu)\n", v, vt, vn, f, sphere->vert_count(), sphere->corner_count());
+    CHECK(v == sphere->vert_count() && vn == sphere->vert_count() && vt < sphere->corner_count() && vt >= sphere->vert_count() && f == sphere->face_count());
+    const std::string path = fs::join(test_dir(), "r417.obj");
+    CHECK(fs::write_file(path, obj));
+    ImportResult r;
+    CHECK(import_model(path, r) && r.nodes.size() == 1 && r.nodes[0].mesh);
+    if (r.nodes.size() == 1 && r.nodes[0].mesh) {
+      CHECK(r.nodes[0].mesh->face_count() == sphere->face_count() && r.nodes[0].mesh->vert_count() == sphere->vert_count());
+      CHECK(r417_close(r.nodes[0].mesh->positions, sphere->positions, 1e-5f));
+    }
+    fs::remove_file(path);
+    /* The big alternating mesh: more faces than one piece. */
+    MeshPtr grid = primitives::plane(2.0f, 200);
+    const size_t nf = grid->face_count();
+    CHECK(nf == 40000);
+    grid->face_material.assign(nf, 0);
+    grid->face_smooth.assign(nf, 0);
+    for (size_t k = 0; k < nf; k++) grid->face_material[k] = (int32_t)(k % 3), grid->face_smooth[k] = (uint8_t)((k / 7) % 2);
+    grid->touch();
+    ExportItem gi;
+    gi.name = "Grid", gi.mesh = grid.get(), gi.world = Mat4::identity();
+    for (const char *n : {"A", "B", "C"}) gi.materials.push_back(make_material(n, Vec3(0.5f)));
+    std::string gobj, gmtl;
+    export_obj_mtl({gi}, "g.mtl", gobj, gmtl, o);
+    std::string mat;
+    int s = -1;
+    size_t face = 0, usemtl = 0, slines = 0;
+    bool right = true;
+    for (size_t at = 0; at < gobj.size();) {
+      const size_t nl = gobj.find('\n', at);
+      const std::string line = gobj.substr(at, (nl == std::string::npos ? gobj.size() : nl) - at);
+      at = nl == std::string::npos ? gobj.size() : nl + 1;
+      if (line.compare(0, 7, "usemtl ") == 0) mat = line.substr(7), usemtl++;
+      else if (line == "s 1" || line == "s off") s = line == "s 1", slines++;
+      else if (line.compare(0, 2, "f ") == 0) {
+        const char *want = face % 3 == 0 ? "A" : face % 3 == 1 ? "B" : "C";
+        if (mat != want || s != (int)((face / 7) % 2)) right = false;
+        face++;
+      }
+    }
+    std::printf("    %zu faces, %zu usemtl lines, %zu s lines\n", face, usemtl, slines);
+    CHECK(right && face == nf && usemtl == nf && slines == (nf + 6) / 7);
+  });
+  test("STL (round 417): a mesh of 32,400 quads and an octagon exports n - 2 triangles a face, each inside one face of the mesh, binary and ASCII, and reads back", [&] {
+    MeshPtr m = primitives::plane(2.0f, 180);
+    const uint32_t base = (uint32_t)m->vert_count();
+    std::vector<uint32_t> oct;
+    for (int k = 0; k < 8; k++) oct.push_back(m->add_vert(Vec3(std::cos((float)k * 0.785398f), 1.0f, std::sin((float)k * 0.785398f))));
+    m->add_face(oct.data(), oct.size());
+    m->touch();
+    const size_t ntri = 32400 * 2 + 6;
+    ExportItem it;
+    it.name = "Grid", it.mesh = m.get(), it.world = Mat4::identity();
+    ExportOptions o = export_defaults((int)ExportFormat::STL);
+    const std::string bin = export_stl({it}, o);
+    CHECK(bin.size() == 84 + ntri * 50);
+    uint32_t count = 0;
+    if (bin.size() >= 84) std::memcpy(&count, bin.data() + 80, 4);
+    CHECK(count == ntri);
+    /* Each triangle's three corners lie in one face: the face of each exported position (quantised) found, the sets
+     * intersected. The file is Z up and mirrored: (x, y, z) -> (-x, -z, y). */
+    std::map<std::tuple<int, int, int>, std::vector<uint32_t>> faces_at;
+    auto key = [](Vec3 p) { return std::make_tuple((int)std::lround(p.x * 1e4f), (int)std::lround(p.y * 1e4f), (int)std::lround(p.z * 1e4f)); };
+    for (size_t f = 0; f < m->face_count(); f++)
+      for (uint32_t k = 0; k < m->face_size(f); k++) {
+        const Vec3 p = m->positions[m->face_verts(f)[k]];
+        faces_at[key(Vec3(-p.x, -p.z, p.y))].push_back((uint32_t)f);
+      }
+    bool inside = bin.size() == 84 + ntri * 50;
+    for (size_t i = 0; inside && i < ntri; i++) {
+      float v[12];
+      std::memcpy(v, bin.data() + 84 + i * 50, 48);
+      std::vector<uint32_t> common;
+      for (int c = 0; c < 3 && inside; c++) {
+        auto it2 = faces_at.find(key(Vec3(v[3 + c * 3], v[4 + c * 3], v[5 + c * 3])));
+        if (it2 == faces_at.end()) { inside = false; break; }
+        if (c == 0) common = it2->second;
+        else {
+          std::vector<uint32_t> next;
+          for (uint32_t f : common)
+            if (std::find(it2->second.begin(), it2->second.end(), f) != it2->second.end()) next.push_back(f);
+          common = next;
+        }
+      }
+      inside = inside && !common.empty();
+    }
+    CHECK(inside);
+    for (bool ascii : {false, true}) {
+      o.ascii = ascii;
+      const std::string path = fs::join(test_dir(), "r417.stl");
+      CHECK(fs::write_file(path, ascii ? export_stl({it}, o) : bin));
+      ImportResult r;
+      CHECK(import_model(path, r) && r.nodes.size() == 1 && r.nodes[0].mesh && r.nodes[0].mesh->face_count() == ntri);
+      fs::remove_file(path);
+    }
+  });
+  test("OBJ import (round 417): negative indices, a second object reusing earlier vertices, and per-corner UVs read as before", [] {
+    const std::string text = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\no A\nf 1/1 2/2 3/3 4/4\no B\nf -4/-4 -3/-3 -2/-2\n";
+    const std::string path = fs::join(test_dir(), "r417i.obj");
+    CHECK(fs::write_file(path, text));
+    ImportResult r;
+    CHECK(import_model(path, r) && r.nodes.size() == 2);
+    if (r.nodes.size() == 2) {
+      const Mesh &a = *r.nodes[0].mesh, &b = *r.nodes[1].mesh;
+      CHECK(a.vert_count() == 4 && a.face_count() == 1 && a.has_uvs() && b.vert_count() == 3 && b.face_count() == 1);
+      CHECK(a.uvs.size() == 4 && length(a.positions[a.face_verts(0)[0]] - Vec3(0.0f, 1.0f, 0.0f)) < 1e-6f);  // (reversed, mirrored)
+      CHECK(length(b.positions[0] - Vec3(0.0f, 0.0f, 0.0f)) < 1e-6f || length(b.positions[0] - Vec3(-1.0f, 0.0f, 0.0f)) < 1e-6f);
+    }
+    fs::remove_file(path);
+  });
+  test("scene file (round 417, review): an unknown section is skipped by its byte count, a count past the file is refused, a chunk's groups and shape keys need the positions first", [&] {
+    MeshPtr big = r417_dressed(primitives::uv_sphere(1.0f, 96, 48));
+    Scene s;
+    GameObject *g = s.create("Big");
+    g->add<MeshFilter>()->mesh = big;
+    g->add<MeshRenderer>();
+    const std::string bin = save_scene_text(s);
+    const std::vector<std::pair<size_t, size_t>> spans = scene_binary_spans(bin);
+    CHECK(spans.size() == 1);
+    if (spans.size() != 1) return;
+    auto with_bytes = [&](const std::string &text, size_t span_begin, size_t new_bytes) {  // the header's "bin <n>" rewritten
+      const size_t binat = text.rfind(" bin ", span_begin), nl = text.find('\n', binat);
+      return text.substr(0, binat + 5) + std::to_string(new_bytes) + text.substr(nl);
+    };
+    /* An unknown section ("zzzz", 3 bytes) before the end mark, the section count one more. */
+    std::string unknown = bin;
+    const size_t end_mark = spans[0].second - 4;
+    std::string extra = "zzzz";
+    const uint64_t three = 3;
+    extra.append(reinterpret_cast<const char *>(&three), 8);
+    extra += "abc";
+    unknown.insert(end_mark, extra);
+    uint32_t sections = 0;
+    std::memcpy(&sections, &unknown[spans[0].first + 8], 4);
+    sections++;
+    std::memcpy(&unknown[spans[0].first + 8], &sections, 4);
+    unknown = with_bytes(unknown, spans[0].first, spans[0].second - spans[0].first + extra.size());
+    Scene a;
+    std::string err;
+    CHECK(load_scene_text(unknown, a, err));
+    if (!err.empty()) std::printf("    unknown section: %s\n", err.c_str());
+    const GameObject *ga = a.find_by_name("Big");
+    CHECK(ga && ga->get<MeshFilter>() && r417_same_mesh(*ga->get<MeshFilter>()->mesh, *big));
+    /* The UV section's count set to 2^62: refused, no allocation of it. */
+    std::string huge = bin;
+    const size_t uvat = huge.find("uv  ", spans[0].first);
+    CHECK(uvat != std::string::npos && uvat < spans[0].second);
+    if (uvat != std::string::npos) {
+      const uint64_t n = (uint64_t)1 << 62;
+      std::memcpy(&huge[uvat + 4], &n, 8);
+      Scene b;
+      err.clear();
+      CHECK(!load_scene_text(huge, b, err) && !err.empty());
+      std::printf("    a count of 2^62: %s\n", err.c_str());
+    }
+    /* A group section moved before the positions: refused (the positions must say nv is real first). */
+    std::string moved = bin;
+    const size_t grp = moved.find("vgrp", spans[0].first), pos = spans[0].first + 12;
+    CHECK(grp != std::string::npos && grp < spans[0].second);
+    if (grp != std::string::npos) {
+      uint64_t n = 0;
+      std::memcpy(&n, &moved[grp + 4], 8);
+      uint32_t len = 0;
+      std::memcpy(&len, &moved[grp + 12], 4);
+      const size_t sec_bytes = 12 + 4 + len + n * 4;
+      const std::string sec = moved.substr(grp, sec_bytes);
+      moved.erase(grp, sec_bytes);
+      moved.insert(pos, sec);
+      Scene c;
+      err.clear();
+      CHECK(!load_scene_text(moved, c, err) && !err.empty());
+      std::printf("    a group before the positions: %s\n", err.c_str());
+    }
+  });
+  test("PLY (round 417, review): an ASCII face of 3,000 corners reads in linear time; a vertex with 70 properties and a binary vertex with a list property still read", [&] {
+    std::string ply = "ply\nformat ascii 1.0\nelement vertex 3000\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list ushort uint vertex_indices\nend_header\n";
+    for (int i = 0; i < 3000; i++) ply += strprintf("%g %g 0\n", std::cos(i * 0.0020944), std::sin(i * 0.0020944));
+    ply += "3000";
+    for (int i = 0; i < 3000; i++) ply += " " + std::to_string(i);
+    ply += "\n";
+    const std::string path = fs::join(test_dir(), "r417n.ply");
+    CHECK(fs::write_file(path, ply));
+    ImportResult r;
+    ScopedTimer t;
+    const bool ok = import_model(path, r);
+    std::printf("    a 3,000-corner face: %.1f ms\n", t.ms());
+    CHECK(ok && r.nodes.size() == 1 && r.nodes[0].mesh && r.nodes[0].mesh->face_count() == 1 && r.nodes[0].mesh->face_size(0) == 3000 && r.nodes[0].mesh->vert_count() == 3000);
+    fs::remove_file(path);
+    std::string wide = "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n";
+    for (int k = 0; k < 67; k++) wide += "property float p" + std::to_string(k) + "\n";
+    wide += "element face 1\nproperty list uchar int vertex_indices\nend_header\n";
+    for (const char *v : {"0 0 0", "1 0 0", "1 1 0", "0 1 0"}) {
+      wide += v;
+      for (int k = 0; k < 67; k++) wide += " 7";
+      wide += "\n";
+    }
+    wide += "4 0 1 2 3\n";
+    CHECK(fs::write_file(path, wide));
+    ImportResult rw;
+    CHECK(import_model(path, rw) && rw.nodes.size() == 1 && rw.nodes[0].mesh && rw.nodes[0].mesh->face_count() == 1 && rw.nodes[0].mesh->vert_count() == 4);
+    fs::remove_file(path);
+    std::string lst = "ply\nformat binary_little_endian 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nproperty list uchar float extra\nelement face 1\nproperty list uchar int vertex_indices\nend_header\n";
+    const float quad[4][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    for (auto &v : quad) {
+      lst.append(reinterpret_cast<const char *>(v), 12);
+      lst += (char)2;
+      const float ex[2] = {5.0f, 6.0f};
+      lst.append(reinterpret_cast<const char *>(ex), 8);
+    }
+    lst += (char)4;
+    for (int32_t i : {0, 1, 2, 3}) lst.append(reinterpret_cast<const char *>(&i), 4);
+    CHECK(fs::write_file(path, lst));
+    ImportResult rl;
+    CHECK(import_model(path, rl) && rl.nodes.size() == 1 && rl.nodes[0].mesh && rl.nodes[0].mesh->face_count() == 1 && rl.nodes[0].mesh->vert_count() == 4);
+    if (rl.nodes.size() == 1 && rl.nodes[0].mesh) {
+      const std::vector<Vec3> want = {{0, 0, 0}, {-1, 0, 0}, {-1, 0, -1}, {0, 0, -1}};
+      CHECK(r417_close(rl.nodes[0].mesh->positions, want, 1e-6f));
+    }
+    fs::remove_file(path);
+  });
+  test("PLY and OBJ (round 417, review): two objects in one export - the second's split vertices chain after the first's - read back with both meshes' faces", [&] {
+    MeshPtr a = primitives::uv_sphere(1.0f, 24, 12), b = primitives::cylinder(0.5f, 1.0f, 12);
+    std::vector<ExportItem> items(2);
+    items[0].name = "A", items[0].mesh = a.get(), items[0].world = Mat4::identity();
+    items[1].name = "B", items[1].mesh = b.get(), items[1].world = Mat4::translate({3, 0, 0});
+    for (int f : {(int)ExportFormat::PLY, (int)ExportFormat::OBJ}) {
+      ExportOptions o = export_defaults(f);
+      const std::string path = fs::join(test_dir(), f == (int)ExportFormat::PLY ? "r417two.ply" : "r417two.obj");
+      std::string err;
+      CHECK(export_file(path, items, o, &err));
+      ImportResult r;
+      CHECK(import_model(path, r) && !r.nodes.empty());
+      size_t faces = 0;
+      for (const ImportedNode &n : r.nodes) faces += n.mesh ? n.mesh->face_count() : 0;
+      CHECK(faces == a->face_count() + b->face_count());
+      fs::remove_file(path);
+    }
+  });
+  test("overlays (round 417, review): a batch of 250,000 lines (the 8-row bands) draws the picture the one-at-a-time path draws", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    R34Rng rng{7u};
+    const size_t n = 250000;
+    std::vector<Vec3> a(n), b(n);
+    std::vector<uint32_t> col(n);
+    for (size_t i = 0; i < n; i++) {
+      a[i] = Vec3(rng.range(-3.0f, 3.0f), rng.range(-2.0f, 2.0f), rng.range(-3.0f, 3.0f));
+      b[i] = a[i] + Vec3(rng.range(-0.1f, 0.1f), rng.range(-0.1f, 0.1f), rng.range(-0.1f, 0.1f));
+      col[i] = 0xFF000000u | (uint32_t)(i * 2654435761u);
+    }
+    r.begin_overlay_batch();
+    r.lines(n, [&](size_t i, Vec3 &pa, Vec3 &pb, uint32_t &c) { pa = a[i], pb = b[i], c = col[i]; return true; }, true, 0.0f);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> banded = img.pixels;
+    img.pixels = base;
+    for (size_t i = 0; i < n; i++) r.line(a[i], b[i], col[i], true, 0.0f);
+    size_t changed = 0, differ = 0;
+    for (size_t i = 0; i < banded.size(); i++) changed += banded[i] != base[i], differ += banded[i] != img.pixels[i];
+    std::printf("    %zu pixels drawn by 250,000 lines in 8-row bands, %zu differ from the one-at-a-time path\n", changed, differ);
+    CHECK(changed > 1000 && differ == 0);
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -13018,4 +13676,5 @@ void run_assets_tests() {
   tests_round374();
   tests_round375();
   tests_round391();
+  tests_round417();
 }

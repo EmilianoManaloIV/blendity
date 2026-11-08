@@ -3,6 +3,7 @@
 // Blender: File > Import, Image Texture node "Open", Material slots > Assign).
 #include "../scene/unity_anim.h"  // (round 407)
 #include "editor.h"
+#include "../core/jobs.h"
 
 #include "../core/core.h"
 #include "../scene/animation.h"
@@ -74,6 +75,8 @@ std::vector<MaterialPtr> Editor::scene_materials() {
   return out;
 }
 
+static bool import_meshes_with_materials(ImportResult &r);  // (below, with the preview)
+
 void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".unitypackage") return (void)import_unity_package(path);  // (round 369: import <file>.unitypackage)
   if (fs::extension(path) == ".anim") return (void)import_unity_anim(path);  // (round 407: a Unity AnimationClip, or Blendity's own)
@@ -83,6 +86,7 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   if (fs::extension(path) == ".blendity-snapshot" || fs::filename(path) == "snapshot.json") return (void)import_snapshot(path);  // (round 374)
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion: onto a character)
   if (import_preview_pref_ && (ipv_force_ || !headless_) && begin_import_preview(path, copy_into_assets)) return;  // (task 0152: the dialog first)
+  if (jobs_async()) return (void)import_job_start(path, copy_into_assets, false, -1);  // (round 413: read on a worker)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
@@ -92,11 +96,68 @@ void Editor::import_model_file(const std::string &path, bool copy_into_assets) {
   finish_import(path, copy_into_assets, r, t, ImportOutline::Keep, 0.0f, false);
 }
 
-static bool import_meshes_with_materials(ImportResult &r);  // (below, with the preview)
+/* Round 413 (ADR 0107): the model read on a worker (the parse, the textures decoded); what follows - the preview, the
+ * shading, the copies into Assets, the objects - runs on the main thread when it lands (import_landed). */
+bool Editor::import_job_start(const std::string &path, bool copy_into_assets, bool preview, int shading) {
+  if (import_job_) {  // (one read at a time: the file waits its turn - a dropped set imports one after the other)
+    ipv_queue_.push_back({path, copy_into_assets});
+    Log::info("Import: %s waits for %s to be read", fs::filename(path).c_str(), fs::filename(import_job_->path).c_str());
+    return true;
+  }
+  auto job = std::make_unique<ImportJob>();
+  job->path = path, job->copy_into_assets = copy_into_assets, job->preview = preview, job->shading = shading;
+  /* Review 422: the copies on the worker only when no preview dialog is open - its Import copies on this thread and
+   * could meet the worker's in the same folder. (A preview's own read queues behind this job, so none opens meanwhile.) */
+  job->prepare = !preview && !ipv_.open;
+  job->started = now_seconds();
+  ImportJob *raw = job.get();
+  raw->thread = std::thread([this, raw] {
+    JobSystem::global().run_background([this, raw] {
+      raw->ok = import_model(raw->path, raw->result);
+      /* Round 422: no dialog to wait for - the copies into Assets made here, not in the landing frame. */
+      if (raw->ok && raw->prepare) prepare_import_files(raw->path, raw->copy_into_assets, raw->result, raw->files);
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  import_job_ = std::move(job);
+  ui_.redraw = true;
+  return true;
+}
+
+void Editor::import_job_poll() {
+  if (!import_job_ || !import_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<ImportJob> job = std::move(import_job_);
+  if (job->thread.joinable()) job->thread.join();
+  import_landed(*job);
+}
+
+void Editor::import_landed(ImportJob &j) {
+  ScopedTimer t;
+  t.start = j.started;
+  if (!j.ok) Log::error("Import failed (%s): %s", fs::filename(j.path).c_str(), j.result.error.c_str());
+  else if (j.preview) {
+    if (begin_import_preview_with(j.path, j.copy_into_assets, j.result)) return;  // (the dialog: the queue drains when it closes)
+    finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, false);  // (nothing to look at: the plain import)
+  }
+  else if (j.shading >= 0) {
+    import_meshes_with_materials(j.result);
+    std::vector<std::string> originals;
+    for (const MaterialPtr &m : j.result.materials) originals.push_back(m ? save_material_text(*m) : std::string());
+    apply_import_shading(j.result.materials, originals, j.shading);
+    finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, j.shading != 0, {}, &j.files);
+  }
+  else finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, false, {}, &j.files);
+  if (ipv_.open || ipv_queue_.empty()) return;
+  const std::pair<std::string, bool> next = ipv_queue_.front();  // (the next file's turn, on every path - a failure too)
+  ipv_queue_.erase(ipv_queue_.begin());
+  import_model_file(next.first, next.second);
+}
+
 
 /* The console's import <file> <shading> (task 0152): the shading applied and the import finished at once, no dialog. */
 void Editor::import_with_shading(const std::string &path, bool copy_into_assets, int shading) {
   if (motion_extension_supported(fs::extension(path))) return import_motion_file(path);  // (a motion has no materials to shade)
+  if (jobs_async()) return (void)import_job_start(path, copy_into_assets, false, shading);  // (round 413: read on a worker)
   ScopedTimer t;
   ImportResult r;
   if (!import_model(path, r)) {
@@ -127,19 +188,30 @@ static void import_outlines(const std::vector<GameObject *> &objects, ImportOutl
   }
 }
 
-/* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets,
- * the .mat files, the objects (an Outline on each mesh when `outline_width` is set), the clips. */
-void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
-                           bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit) {
-  /* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
-   * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
-   * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). */
-  std::unordered_map<std::string, std::string> tex_map;
+/* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
+ * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
+ * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). Files only - no
+ * scene, no materials touched: the import's worker runs it (round 422). */
+void Editor::prepare_import_files(const std::string &path, bool copy_into_assets, const ImportResult &r, ImportFiles &out) {
   std::vector<std::string> sources{path};
   if (copy_into_assets || !inside_assets(path)) sources.push_back(copy_model_into_assets(path));
-  const bool again = import_folder_reused(sources, fs::stem(path));
-  const std::string model = import_folder(sources, fs::stem(path));
-  copy_import_textures(r, model, again, tex_map);
+  out.again = import_folder_reused(sources, fs::stem(path));
+  out.model = import_folder(sources, fs::stem(path));
+  out.tex_map.clear();
+  copy_import_textures(r, out.model, out.again, out.tex_map);
+  out.ready = true;
+}
+
+/* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets
+ * (made already on the import's worker when `prepared`), the .mat files, the objects (an Outline on each mesh when
+ * `outline_width` is set), the clips. */
+void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
+                           bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit, const ImportFiles *prepared) {
+  ImportFiles files;
+  if (prepared && prepared->ready) files = *prepared;
+  else prepare_import_files(path, copy_into_assets, r, files);
+  const std::unordered_map<std::string, std::string> &tex_map = files.tex_map;
+  const std::string &model = files.model;
   auto fix = [&](TextureRef &ref) {
     if (ref.empty()) return;
     auto it = tex_map.find(ref.path);
@@ -269,11 +341,17 @@ bool Editor::begin_import_preview(const std::string &path, bool copy_into_assets
     Log::info("Import: %s waits for the preview of %s", fs::filename(path).c_str(), fs::filename(ipv_.path).c_str());
     return true;
   }
+  if (jobs_async()) return import_job_start(path, copy_into_assets, true, -1);  // (round 413: read on a worker; the dialog opens when it lands)
   ImportResult r;
   if (!import_model(path, r)) {
     Log::error("Import failed (%s): %s", fs::filename(path).c_str(), r.error.c_str());
     return true;
   }
+  return begin_import_preview_with(path, copy_into_assets, r);
+}
+
+/* The preview from a model read: false when there is nothing to look at (a motion-only file) - the plain import then. */
+bool Editor::begin_import_preview_with(const std::string &path, bool copy_into_assets, ImportResult &r) {
   if (!import_meshes_with_materials(r)) return false;  // nothing to look at (a motion-only file): the plain import
   ipv_ = ImportPreview();
   ImportPreview &pv = ipv_;

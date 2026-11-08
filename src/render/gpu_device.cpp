@@ -48,7 +48,7 @@ const std::vector<DeviceInfo> &devices() {
   static const std::vector<DeviceInfo> none;
   return none;
 }
-std::string status() { return "GPU rendering: not built (needs Blender's vulkan + shaderc libraries)"; }
+std::string status(bool) { return "GPU rendering: not built (needs Blender's vulkan + shaderc libraries)"; }
 void prewarm(bool, bool) {}
 bool compile_kernels(bool, std::string *) { return false; }
 std::string pipeline_cache_file(int, bool) { return ""; }
@@ -1304,7 +1304,10 @@ const std::vector<DeviceInfo> &devices() {
   return G().infos;
 }
 
-std::string status() {
+std::string status(bool open) {
+  /* Round 418: a status line doesn't open Vulkan (190 ms on the main thread for `device cpu`'s log line); the card
+   * opens when a view, a render, `gpu list` or `libs` asks. */
+  if (!G().tried && !open) return "GPU rendering (Vulkan): not opened yet (a GPU view, a GPU render or `gpu list` opens it)";
   if (!init_global() || G().infos.empty()) return "GPU rendering (Vulkan): " + G().error;
   std::string s = "GPU rendering (Vulkan):";
   for (const DeviceInfo &d : G().infos)

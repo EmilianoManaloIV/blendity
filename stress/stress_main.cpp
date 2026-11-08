@@ -75,6 +75,7 @@ struct Report {
   void table(const std::vector<std::string> &head) {
     std::string h = "|", s = "|";
     for (auto &c : head) { h += " " + c + " |"; s += "---|"; }
+    if (md.size() > 1 && md.back() == '\n' && md[md.size() - 2] != '\n') md += "\n";  // (round 421: a table right after another's rows starts its own)
     md += h + "\n" + s + "\n";
     for (auto &c : head) std::printf("%-26s", c.c_str());
     std::printf("\n");
@@ -1736,7 +1737,7 @@ static void test_gpu_viewport(Report &rep, const Options &o) {
             "shadow map (cached, as in the editor). GPU: the Vulkan path tracer at 1 sample and no bounces (primary hit, sun "
             "light, shadow ray), read back and tone mapped, so it includes upload of the camera, the render, the fence wait, "
             "the read-back and the resolve.");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   const int W = 1920, H = 1080, frames = o.quick ? 4 : 12;
   auto mesh = primitives::ico_sphere(0.5f, 3);
   Scene s = make_grid_scene(256, mesh, 1.3f);
@@ -1861,7 +1862,7 @@ static void test_gpu_gi(Report &rep, const Options &o) {
             "The vgi scene (256 spheres and cubes on a 40 m floor, a 128 grid, the sun's RSM). Points on its surfaces gather 16 rays "
             "each, as realtime lightmap texels do (a probe gathers six times). CPU: every thread; GPU: the points up, the kernel, the "
             "samples back, timed together. The grid, RSM and world upload once (shown apart).");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   CfScene sc;
   auto white = make_material("White", {0.8f, 0.8f, 0.8f});
   auto red = make_material("Red", {0.8f, 0.1f, 0.1f});
@@ -2565,6 +2566,19 @@ static void test_bake(Report &rep, const Options &o) {
                      runs, problems));
 }
 
+/* Round 433: a soak's frame that grew the process by more than 100 MB, printed with that frame's events - what to
+ * replay (the same seed) to find which window or job took the memory. */
+static void report_soak_jump(int frame, const std::vector<platform::Event> &ev, double &prev_mb) {
+  const double mb = (double)sys::working_set_bytes() / 1048576.0;
+  const double grew = mb - prev_mb;
+  prev_mb = mb;
+  if (grew < 100.0 || frame == 0) return;
+  std::printf("soak: frame %d grew the working set by %.0f MB to %.0f MB; its events:", frame, grew, mb);
+  for (const platform::Event &e : ev) std::printf(" [type %d button %d key %d mods %d at %d,%d]", (int)e.type, e.button, e.key, e.mods, e.x, e.y);
+  std::printf("\n");
+  std::fflush(stdout);
+}
+
 static void test_fuzz(Report &rep, const Options &o) {
   rep.title("Editor robustness: random input fuzzing",
             "Random clicks, drags, wheel and key presses across the whole window (monkey testing).");
@@ -2580,10 +2594,32 @@ static void test_fuzz(Report &rep, const Options &o) {
   uint32_t seed = std::getenv("BLENDITY_FUZZ_SEED") ? (uint32_t)std::strtoul(std::getenv("BLENDITY_FUZZ_SEED"), nullptr, 10) : 12345u;
   auto rnd = [&](int n) { seed = seed * 1664525u + 1013904223u; return (int)((seed >> 8) % (uint32_t)n); };
   int frames = o.quick ? 1500 : 6000, events = 0;
+  /* Round 433: BLENDITY_FUZZ_MINUTES=N - a soak: fuzzing for N minutes, the process's memory printed each minute
+   * ("soak: minute M ...") and the growth from the first minute to the last in the report. */
+  const double soak_min = std::getenv("BLENDITY_FUZZ_MINUTES") ? std::atof(std::getenv("BLENDITY_FUZZ_MINUTES")) : 0.0;
+  if (soak_min > 0.0) frames = std::numeric_limits<int>::max();
+  double next_sample = 60000.0, first_mb = 0.0, last_mb = 0.0, step_mb = 0.0;
   int mx = 640, my = 360;
   bool down[3] = {};
   ScopedTimer t;
   for (int f = 0; f < frames; f++) {
+    if (soak_min > 0.0 && t.ms() >= next_sample) {
+      last_mb = (double)sys::working_set_bytes() / 1048576.0;
+      if (first_mb == 0.0) first_mb = last_mb;
+      std::printf("soak: minute %.0f, %d frames, working set %.1f MB, peak %.1f MB, %zu objects (%.1f MB), undo %zu steps %.1f MB, "
+                  "textures %.1f MB\n",
+                  next_sample / 60000.0, f, last_mb, (double)sys::peak_working_set_bytes() / 1048576.0, ed.scene().object_count(),
+                  (double)ed.scene().memory_bytes() / 1048576.0, ed.undo_steps_for_test(), (double)ed.undo_bytes() / 1048576.0,
+                  (double)texture_cache_bytes() / 1048576.0);
+      std::fflush(stdout);
+      next_sample += 60000.0;
+    }
+    if (soak_min > 0.0 && t.ms() >= soak_min * 60000.0) {  // (on time, not at the next whole minute)
+      last_mb = (double)sys::working_set_bytes() / 1048576.0;
+      if (first_mb == 0.0) first_mb = last_mb;
+      frames = f;
+      break;
+    }
     std::vector<platform::Event> ev;
     int k = rnd(4);
     for (int i = 0; i < k; i++) {
@@ -2638,12 +2674,18 @@ static void test_fuzz(Report &rep, const Options &o) {
       std::fflush(stderr);
     }
     ed.step_frame_headless(ev);
+    if (soak_min > 0.0) report_soak_jump(f, ev, step_mb);
   }
-  double avg = t.ms() / frames;
+  double avg = t.ms() / std::max(1, frames);
   Log::echo_stdout = true;
+  if (soak_min > 0.0)
+    rep.note(strprintf("Soak (BLENDITY_FUZZ_MINUTES=%g): the working set %.1f MB after the first minute, %.1f MB at the end (%+.1f MB)", soak_min, first_mb, last_mb,
+                       last_mb - first_mb));
   const uint64_t stale = ed.frame_profile_totals().cache_mismatches;
+  /* Round 435 (ADR 0115): the change counter checked every frame - a miss is a UI path that writes past every funnel. */
+  const uint64_t missed = ed.scene_hash_misses_for_test();
   rep.row({std::to_string(frames), std::to_string(events), std::to_string(ed.scene().object_count()), f2(avg),
-           strprintf("no crash, %llu stale pictures", (unsigned long long)stale)});
+           strprintf("no crash, %llu stale pictures, %llu changes the counter missed", (unsigned long long)stale, (unsigned long long)missed)});
 }
 
 static void test_memory(Report &rep, const Options &o) {
@@ -3633,7 +3675,7 @@ static void test_gpu_devices(Report &rep, const Options &o) {
             "The same path-traced frame on every device: the CPU (Embree when built with it), each GPU tracing Blendity's "
             "BVH in a compute shader, each GPU using its ray tracing hardware (VK_KHR_ray_query), and CPU + all GPUs "
             "together. 400 textured spheres on a checker floor, sun + sky, 4 bounces. Samples per second at 1280x720.");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   if (!gpu::available()) return;
   auto sphere = primitives::uv_sphere(0.5f, 32, 16);
   auto floor = primitives::plane(40.0f, 1);
@@ -5450,7 +5492,7 @@ static void test_gpu_raster(Report &rep, const Options &o) {
             "editor). GPU: Vulkan shadow pass (drawn every frame), G-buffer and full-screen lighting (the CPU's formulas), then (A) "
             "colour, depth and ids read back into CPU memory every frame, or (B) shown through a swapchain with the UI canvas's "
             "changed rows uploaded. Both are harder on the GPU than a viewport would be.");
-  rep.note(gpu::status());
+  rep.note(gpu::status(true));
   const int frames = o.quick ? 6 : 30;
   GpuRasterScene sc;
   sc.cpu_frame(1);
@@ -6428,6 +6470,7 @@ static void test_responsiveness(Report &rep, const Options &o) {
   auto fresh = [&](const char *scene, const char *select = nullptr) {
     auto ed = std::make_unique<Editor>();
     ed->init_headless(1280, 720);
+    ed->set_async_jobs_for_test(true);  // (round 412: renders and bakes on workers, as the windowed editor runs them)
     if (scene && *scene) ed->command(scene);
     if (select) ed->command(std::string("select ") + select);
     ed->step_frame_headless();
@@ -6439,12 +6482,18 @@ static void test_responsiveness(Report &rep, const Options &o) {
   {
     auto ed = fresh("stress 400 Sphere");
     ed->scene().render.engine = 0, ed->scene().render.width = 1280, ed->scene().render.height = 720;
-    stall_row(rep, "F12 rasterized, 400 spheres at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), 100.0);
+    ed->command("window Render");  // (round 412: the window's docking - every view drawn again at a new size - is the sweep's row, not the render's)
+    ed->step_frame_headless();
+    ed->step_frame_headless();
+    stall_row(rep, "F12 rasterized, 400 spheres at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);  // (round 412: a job)
   }
   {
     auto ed = fresh("stress 400 Sphere");
     ed->scene().render.engine = 1, ed->scene().render.samples = o.quick ? 4 : 16, ed->scene().render.width = 640, ed->scene().render.height = 360;
     ed->command("device cpu");
+    ed->command("window Render");
+    ed->step_frame_headless();
+    ed->step_frame_headless();
     stall_row(rep, strprintf("F12 path traced on the CPU, 400 spheres, %d samples at 640 x 360", ed->scene().render.samples),
               run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);
   }
@@ -6475,7 +6524,7 @@ static void test_responsiveness(Report &rep, const Options &o) {
   }
   {
     auto ed = fresh("benchscene worldlikequick", "Part 000");
-    stall_row(rep, "Bake Textures, a textured part at 512", run_stall(*ed, [&] { ed->command("baketex 512"); }, [] { return false; }), budget);  // (synchronous today: the one frame is the measure)
+    stall_row(rep, "Bake Textures, a textured part at 512", run_stall(*ed, [&] { ed->command("baketex 512"); }, [&] { return ed->texbake_running_for_test(); }, 600000.0), budget);  // (round 412: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
@@ -6493,16 +6542,16 @@ static void test_responsiveness(Report &rep, const Options &o) {
   }
   {
     auto ed = fresh("benchscene sphere500k", "Parity Sphere");
-    stall_row(rep, "Decimate modifier on the 500k sphere (its first evaluation)", run_stall(*ed, [&] { ed->command("component DecimateModifier"); }, [] { return false; }), 100.0);
+    stall_row(rep, "Decimate modifier on the 500k sphere (its first evaluation)", run_stall(*ed, [&] { ed->command("component DecimateModifier"); }, [&] { return ed->eval_jobs_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
-    stall_row(rep, "Subdivide, 2 levels on the 50k sphere", run_stall(*ed, [&] { ed->command("subdivide 2"); }, [] { return false; }), 100.0);
+    stall_row(rep, "Subdivide, 2 levels on the 50k sphere", run_stall(*ed, [&] { ed->command("subdivide 2"); }, [&] { return ed->mesh_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
     ed->command("sculpt on");
-    stall_row(rep, "DynaMesh at 128 on the 50k sphere", run_stall(*ed, [&] { ed->command("sculpt dynamesh 128"); }, [] { return false; }), 100.0);
+    stall_row(rep, "DynaMesh at 128 on the 50k sphere", run_stall(*ed, [&] { ed->command("sculpt dynamesh 128"); }, [&] { return ed->mesh_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
   }
   {
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
@@ -6553,22 +6602,22 @@ static void test_responsiveness(Report &rep, const Options &o) {
   const std::string big = fs::join(tmp, "big.scene"), cubes = fs::join(tmp, "cubes.scene");
   {
     auto ed = fresh("benchscene sphere500k");
-    stall_row(rep, "Save the 500k sphere's scene", run_stall(*ed, [&] { ed->command("save " + big); }, [] { return false; }), 100.0);
+    stall_row(rep, "Save the 500k sphere's scene", run_stall(*ed, [&] { ed->command("save " + big); }, [&] { return ed->save_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
     auto ed2 = fresh("benchscene cubes10k");
-    stall_row(rep, "Save the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("save " + cubes); }, [] { return false; }), 100.0);
+    stall_row(rep, "Save the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("save " + cubes); }, [&] { return ed2->save_job_running_for_test(); }, 600000.0), budget);
   }
   {
     auto ed = fresh("");
-    stall_row(rep, "Open the 500k sphere's scene", run_stall(*ed, [&] { ed->command("open " + big); }, [] { return false; }), 100.0);
+    stall_row(rep, "Open the 500k sphere's scene", run_stall(*ed, [&] { ed->command("open " + big); }, [&] { return ed->open_job_running_for_test(); }, 600000.0), budget);  // (round 413: a worker; the swap is the landing frame)
     auto ed2 = fresh("");
-    stall_row(rep, "Open the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("open " + cubes); }, [] { return false; }), 100.0);
+    stall_row(rep, "Open the 10,000 cubes' scene", run_stall(*ed2, [&] { ed2->command("open " + cubes); }, [&] { return ed2->open_job_running_for_test(); }, 600000.0), budget);
   }
   for (const char *fmt : {"obj", "fbx", "glb", "stl", "ply", "usda"}) {
     const std::string path = fs::join(tmp, std::string("sphere50k.") + fmt);
     auto ed = fresh("benchscene sphere50k", "Parity Sphere");
-    stall_row(rep, strprintf("Export the 50k sphere as %s", fmt), run_stall(*ed, [&] { ed->command(strprintf("export %s %s", fmt, path.c_str())); }, [] { return false; }), 100.0);
+    stall_row(rep, strprintf("Export the 50k sphere as %s", fmt), run_stall(*ed, [&] { ed->command(strprintf("export %s %s", fmt, path.c_str())); }, [&] { return ed->file_export_running_for_test(); }, 600000.0), budget);  // (round 413: a worker)
     auto ed2 = fresh("");
-    stall_row(rep, strprintf("Import the 50k sphere from %s", fmt), run_stall(*ed2, [&] { ed2->command("import " + path + " asis"); }, [] { return false; }), 100.0);
+    stall_row(rep, strprintf("Import the 50k sphere from %s", fmt), run_stall(*ed2, [&] { ed2->command("import " + path + " asis"); }, [&] { return ed2->import_job_running_for_test(); }, 600000.0), budget);
   }
   {
     auto ed = fresh("");
@@ -6576,7 +6625,10 @@ static void test_responsiveness(Report &rep, const Options &o) {
     ed->scene().lighting.texels_per_unit = 2, ed->scene().lighting.indirect_samples = o.quick ? 4 : 16;
     stall_row(rep, "Generate Lighting on worldlike (180 parts at 2 texels/m)", run_stall(*ed, [&] { ed->command("bake start"); }, [&] { return ed->baking_for_test(); }, 900000.0), budget);
     ed->scene().render.engine = 0, ed->scene().render.width = 1280, ed->scene().render.height = 720;
-    stall_row(rep, "F12 rasterized, worldlike at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), 100.0);
+    ed->command("window Render");
+    ed->step_frame_headless();
+    ed->step_frame_headless();
+    stall_row(rep, "F12 rasterized, worldlike at 1280 x 720", run_stall(*ed, [&] { ed->command("render"); }, [&] { return ed->rendering_for_test(); }), budget);
   }
   rep.row({"Puppet solve, AutoPhysics, AI inbetweening, MoonRay, Live Link with clients", "-", "-", "-", "-", "not run here (downloads, rigs or clients; stress physics / livelink have their rows)", "-"});
   rep.note("A row OVER its budget is a round 412 / 413 item: the operation goes to a worker with the tray's progress and Cancel, or is split over frames.");
@@ -6599,7 +6651,8 @@ static void sweep_one(const std::string &saved, const std::string &select, std::
   {
     Editor ed;
     ed.init_headless(1280, 720);
-    ed.open_scene_for_test(saved);
+    ed.open_scene_for_test(saved);  // (opened in place, before the workers go on: an open on a worker lands frames later)
+    ed.set_async_jobs_for_test(true);  // (round 418: renders on workers, as the windowed editor runs them - the F12 rows had been the whole render)
     if (!select.empty()) ed.command("select " + select);
     ed.step_frame_headless();
     SweepRow r;
@@ -6679,6 +6732,261 @@ static void test_operations(Report &rep, const Options &o) {
   }
   rep.note(strprintf("%zu operations run (%d verbs not run here: tools/sweep_commands.py's SKIP list); %d over 50 ms, %d over 100 ms. The over-budget ones are round 418's list.",
                      rows.size(), skipped / (int)std::max<size_t>(1, sizeof(scenes) / sizeof(scenes[0]) - (o.quick ? 1 : 0)), over50, over100));
+}
+
+/* ----------------------------------------------------------- round 421: the bake's quality (task 0397, ADR 0113) */
+
+namespace lmq {
+inline float luminance(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+inline std::string f3(double v) { return strprintf("%.3f", v); }
+inline std::string f4(double v) { return strprintf("%.4f", v); }
+/* A wall: primitives::plane (XZ, facing +Y) sized w x h, turned to face `euler` and placed at `at`. */
+BakeObject wall(uint64_t id, Vec3 at, Vec3 euler, float w, float h, const MaterialPtr &m, std::vector<MeshPtr> &keep) {
+  MeshPtr p = primitives::plane(1.0f, 8);
+  keep.push_back(p);
+  const bool about_z = std::fabs(euler.z) > 1.0f;
+  const Vec3 s = about_z ? Vec3(h, 1.0f, w) : Vec3(w, 1.0f, h);  // (the plane's axis that turns upright takes the height)
+  return bake_object(id, p, Mat4::trs(at, Quat::euler(euler), s), {m});
+}
+struct Scene {
+  std::string name;
+  std::vector<MeshPtr> keep;
+  std::vector<BakeObject> objects;
+  std::vector<BakeLight> lights;
+  Environment env;
+  float texels = 20.0f;
+  uint64_t probe_object = 0;  // (the leak scene: the floor whose texels under the box are measured)
+  float probe_half = 0.0f;    // (...and the box's half side, its footprint centred on the origin)
+};
+/* A 4 x 3 x 4 room, red and green side walls, two white boxes, a 1 m area light under the ceiling (Baked). */
+Scene room() {
+  Scene s;
+  s.name = "a room lit by a ceiling area light";
+  const MaterialPtr white = make_material("White", {0.75f, 0.75f, 0.75f}), red = make_material("Red", {0.7f, 0.1f, 0.08f}),
+                    green = make_material("Green", {0.1f, 0.6f, 0.12f});
+  s.objects.push_back(wall(1, {0, 0, 0}, {0, 0, 0}, 4, 4, white, s.keep));          // floor
+  s.objects.push_back(wall(2, {0, 3, 0}, {180, 0, 0}, 4, 4, white, s.keep));        // ceiling
+  s.objects.push_back(wall(3, {0, 1.5f, 2}, {-90, 0, 0}, 4, 3, white, s.keep));     // back
+  s.objects.push_back(wall(4, {0, 1.5f, -2}, {90, 0, 0}, 4, 3, white, s.keep));     // front
+  s.objects.push_back(wall(5, {2, 1.5f, 0}, {0, 0, 90}, 4, 3, green, s.keep));      // right
+  s.objects.push_back(wall(6, {-2, 1.5f, 0}, {0, 0, -90}, 4, 3, red, s.keep));      // left
+  MeshPtr cube = primitives::cube();
+  s.keep.push_back(cube);
+  s.objects.push_back(bake_object(7, cube, Mat4::trs({-0.7f, 0.6f, 0.5f}, Quat::euler({0, 20, 0}), {1.0f, 1.2f, 1.0f}), {white}));
+  s.objects.push_back(bake_object(8, cube, Mat4::trs({0.7f, 0.35f, -0.4f}, Quat::euler({0, -15, 0}), {0.7f, 0.7f, 0.7f}), {white}));
+  BakeLight l;
+  l.light.type = RenderLight::Area;
+  l.light.position = {0, 2.95f, 0};
+  l.light.direction = {0, -1, 0};
+  l.light.right = {1, 0, 0};
+  l.light.width = l.light.height = 1.0f;
+  l.light.intensity = 6.0f;
+  l.light.range = 20.0f;
+  l.mode = 2, l.id = 900;
+  s.lights.push_back(l);
+  s.env.mode = Environment::Color;
+  s.env.color = Vec3(0.0f);
+  return s;
+}
+/* A 12 m corridor, 2.5 m wide and high, eight Baked point lights along it. */
+Scene corridor() {
+  Scene s;
+  s.name = "a corridor lit by 8 point lights";
+  const MaterialPtr white = make_material("White", {0.7f, 0.7f, 0.7f});
+  s.objects.push_back(wall(1, {0, 0, 0}, {0, 0, 0}, 2.5f, 12, white, s.keep));
+  s.objects.push_back(wall(2, {0, 2.5f, 0}, {180, 0, 0}, 2.5f, 12, white, s.keep));
+  s.objects.push_back(wall(3, {1.25f, 1.25f, 0}, {0, 0, 90}, 12, 2.5f, white, s.keep));
+  s.objects.push_back(wall(4, {-1.25f, 1.25f, 0}, {0, 0, -90}, 12, 2.5f, white, s.keep));
+  for (int i = 0; i < 8; i++) {
+    BakeLight l;
+    l.light.type = RenderLight::Point;
+    l.light.position = {(i % 2) ? 0.6f : -0.6f, 2.0f, -5.25f + 1.5f * i};
+    l.light.intensity = 1.5f;
+    l.light.range = 6.0f;
+    l.light.color = (i % 3 == 0) ? Vec3(1.0f, 0.8f, 0.6f) : Vec3(0.9f, 0.95f, 1.0f);
+    l.mode = 2, l.id = 900 + (uint64_t)i;
+    s.lights.push_back(l);
+  }
+  s.env.mode = Environment::Color;
+  s.env.color = Vec3(0.0f);
+  s.texels = 16.0f;
+  return s;
+}
+/* A courtyard open to the sky (the gradient), a Baked sun, a box in the middle. */
+Scene courtyard() {
+  Scene s;
+  s.name = "a courtyard under a sun and the sky";
+  const MaterialPtr stone = make_material("Stone", {0.6f, 0.55f, 0.5f});
+  s.objects.push_back(wall(1, {0, 0, 0}, {0, 0, 0}, 8, 8, stone, s.keep));
+  s.objects.push_back(wall(2, {0, 1.5f, 4}, {-90, 0, 0}, 8, 3, stone, s.keep));
+  s.objects.push_back(wall(3, {0, 1.5f, -4}, {90, 0, 0}, 8, 3, stone, s.keep));
+  s.objects.push_back(wall(4, {4, 1.5f, 0}, {0, 0, 90}, 8, 3, stone, s.keep));
+  s.objects.push_back(wall(5, {-4, 1.5f, 0}, {0, 0, -90}, 8, 3, stone, s.keep));
+  MeshPtr cube = primitives::cube();
+  s.keep.push_back(cube);
+  s.objects.push_back(bake_object(6, cube, Mat4::trs({0.5f, 0.75f, 0.5f}, Quat::euler({0, 30, 0}), {1.5f, 1.5f, 1.5f}), {stone}));
+  BakeLight sun;
+  sun.light.direction = normalize(Vec3(-0.5f, -1.0f, 0.35f));
+  sun.light.intensity = 1.2f;
+  sun.mode = 2, sun.id = 900;
+  s.lights.push_back(sun);
+  s.env.mode = Environment::Gradient;
+  s.texels = 10.0f;
+  return s;
+}
+/* A 1.5 m box sunk 0.5 m into a floor, lit by a sun: the floor's texels under the box should be dark (they are inside
+ * it); any light there is a leak (Unity marks such texels invalid and fills them from outside). */
+Scene leak() {
+  Scene s;
+  s.name = "a box sunk into a floor (leaks)";
+  const MaterialPtr white = make_material("White", {0.7f, 0.7f, 0.7f});
+  s.objects.push_back(wall(1, {0, 0, 0}, {0, 0, 0}, 6, 6, white, s.keep));
+  MeshPtr cube = primitives::cube();
+  s.keep.push_back(cube);
+  s.objects.push_back(bake_object(2, cube, Mat4::trs({0, 0.25f, 0}, Quat(), {1.5f, 1.5f, 1.5f}), {white}));
+  BakeLight sun;
+  sun.light.direction = normalize(Vec3(-0.3f, -1.0f, 0.2f));
+  sun.mode = 2, sun.id = 900;
+  s.lights.push_back(sun);
+  s.env.mode = Environment::Gradient;
+  s.texels = 20.0f;
+  s.probe_object = 1;
+  s.probe_half = 0.75f;
+  return s;
+}
+
+struct Result {
+  LightingData data;
+  double ms = 0.0;
+  uint64_t rays = 0;
+};
+/* seed 1 for the references: their samples independent of the bake they score (seed 0, a bake's own) - with the same
+ * seed the bake's samples would be the first of the reference's, and the error read too low. */
+Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0) {
+  BakeSettings bs;
+  bs.seed = seed;
+  bs.texels_per_unit = s.texels;
+  bs.indirect_samples = indirect;
+  bs.direct_samples = direct;
+  bs.bounces = 2;
+  bs.denoise = denoise;
+  bs.max_size = 1024;
+  Lightmapper lm;
+  Result r;
+  ScopedTimer t;
+  lm.begin(s.objects, s.lights, s.env, bs);
+  while (!lm.step(1e9)) {
+  }
+  r.data = lm.take_result();
+  r.ms = t.ms();
+  r.rays = lm.rays();
+  return r;
+}
+/* Over the texels both bakes hold (the layout is the same for the same scene and resolution - checked: every entry's
+ * page and UVs, so a layout change fails loudly rather than comparing other texels): the RMSE of the luminance, the
+ * relative RMSE (over the reference's mean), and the mean difference (a filter's bias). */
+struct Error {
+  double rmse = 0, rel = 0, bias = 0;
+  size_t texels = 0;
+  bool same_layout = true;
+};
+Error compare(const LightingData &a, const LightingData &ref) {
+  Error e;
+  e.same_layout = a.pages.size() == ref.pages.size() && a.entries.size() == ref.entries.size();
+  for (const auto &kv : a.entries) {
+    const auto it = ref.entries.find(kv.first);
+    if (it == ref.entries.end() || it->second.page != kv.second.page || it->second.tri_uv.size() != kv.second.tri_uv.size()) e.same_layout = false;
+    else
+      for (size_t i = 0; i < kv.second.tri_uv.size() && e.same_layout; i++)
+        e.same_layout = kv.second.tri_uv[i].x == it->second.tri_uv[i].x && kv.second.tri_uv[i].y == it->second.tri_uv[i].y;
+  }
+  if (!e.same_layout) return e;
+  double sum2 = 0, sum = 0, mean = 0;
+  for (size_t p = 0; p < a.pages.size() && p < ref.pages.size(); p++) {
+    const Lightmap &x = a.pages[p], &y = ref.pages[p];
+    if (x.width != y.width || x.height != y.height) continue;
+    for (size_t i = 0; i < x.texels.size(); i++) {
+      const float ly = luminance(y.texels[i]);
+      if (!(ly > 0.0f)) continue;  // (not a covered texel)
+      const double d = (double)luminance(x.texels[i]) - ly;
+      sum2 += d * d, sum += d, mean += ly, e.texels++;
+    }
+  }
+  if (!e.texels) return e;
+  e.rmse = std::sqrt(sum2 / (double)e.texels), e.bias = sum / (double)e.texels;
+  mean /= (double)e.texels;
+  e.rel = mean > 0 ? e.rmse / mean : 0;
+  return e;
+}
+/* The leak scene, over the floor's own texels (the layout's world points): how many lie inside the box (texels no
+ * one sees: Unity marks them invalid), and how the bake's ring just outside the box - 0.8 to 1.0 m from its centre,
+ * seen - compares with the reference's: under 1 is darkness bled out of the hidden texels by the filter and dilation. */
+struct Leak {
+  size_t floor_texels = 0, inside = 0;
+  double ring = -1;  // bake ring mean / reference ring mean
+};
+Leak leak(const Scene &s, const LightingData &d, const LightingData &ref) {
+  Leak r;
+  BakeSettings bs;
+  bs.texels_per_unit = s.texels;
+  bs.max_size = 1024;
+  LightmapLayout lay;
+  lightmap_layout(s.objects, bs, lay);
+  double a = 0, b = 0;
+  for (const LightmapTexel &t : lay.texels) {
+    if (s.objects[t.object].id != s.probe_object || t.page < 0 || (size_t)t.page >= d.pages.size() || (size_t)t.page >= ref.pages.size()) continue;
+    r.floor_texels++;
+    const Vec3 p = t.position;
+    const float m = std::max(std::fabs(p.x), std::fabs(p.z)), h = s.probe_half;
+    if (m < h) r.inside++;
+    if (m < h + 0.05f || m > h + 0.25f) continue;
+    const size_t i = (size_t)t.y * (size_t)d.pages[(size_t)t.page].width + (size_t)t.x;
+    a += luminance(d.pages[(size_t)t.page].texels[i]), b += luminance(ref.pages[(size_t)t.page].texels[i]);
+  }
+  if (b > 0) r.ring = a / b;
+  return r;
+}
+}  // namespace lmq
+
+static void test_lightmap_quality(Report &rep, const Options &o) {
+  rep.title("Bake quality (round 421, ADR 0113)",
+            "Synthetic scenes baked at round 421's defaults (256 indirect, 32 direct samples, 2 bounces, the filter on - kept so the rows compare; Unity's 512 is the default since round 423) against a reference "
+            "of the same scene and layout (16 times the samples - 4 in a quick run -, the filter off, its own random samples); the "
+            "error is the luminance RMSE over the covered texels, relative to the reference's mean, and the mean difference (a "
+            "filter's bias). Then the samples against time on the room, and the leak under a sunk box. Unity's own bake is compared "
+            "on real scenes by tools/unity_compare.py --blendity-bake.");
+  rep.table({"scene", "texels", "bake ms", "relative RMSE", "bias", "reference ms"});
+  const int ref_indirect = o.quick ? 1024 : 4096, ref_direct = o.quick ? 128 : 512;
+  lmq::Result room_ref;
+  const lmq::Scene room = lmq::room();
+  for (const lmq::Scene &s : {room, lmq::corridor(), lmq::courtyard()}) {
+    const lmq::Result ref = lmq::bake(s, ref_indirect, ref_direct, false, 1);
+    const lmq::Result def = lmq::bake(s, 256, 32, true);
+    const lmq::Error e = lmq::compare(def.data, ref.data);
+    if (!e.same_layout) rep.note("**" + s.name + ": the bake's layout differs from the reference's (the layout must be deterministic): no error measured.**");
+    rep.row({s.name, std::to_string(e.texels), f1(def.ms), lmq::f3(e.rel), lmq::f4(e.bias), f1(ref.ms)});
+    if (s.name == room.name) room_ref = ref;
+  }
+  rep.table({"room: indirect samples", "filter", "bake ms", "relative RMSE", "bias"});
+  for (int n : {64, 256, 1024})
+    for (bool f : {false, true}) {
+      const lmq::Result r = lmq::bake(room, n, 32, f);
+      const lmq::Error e = lmq::compare(r.data, room_ref.data);
+      rep.row({std::to_string(n), f ? "on" : "off", f1(r.ms), lmq::f3(e.rel), lmq::f4(e.bias)});
+    }
+  rep.note(strprintf("The reference holds %d indirect samples: against the 1024-sample rows its own noise adds about %.0f %% to the error "
+                     "read (the two noises add), so those rows are an upper bound.", ref_indirect, (std::sqrt(1.0 + 1024.0 / ref_indirect) - 1.0) * 100.0));
+  {
+    const lmq::Scene s = lmq::leak();
+    const lmq::Result ref = lmq::bake(s, ref_indirect, ref_direct, false, 1);
+    const lmq::Result r = lmq::bake(s, 256, 32, true);
+    const lmq::Leak l = lmq::leak(s, r.data, ref.data);
+    rep.table({"a box sunk into a floor", "floor texels", "inside the box", "the ring outside: bake / reference"});
+    rep.row({s.name, std::to_string(l.floor_texels), std::to_string(l.inside), lmq::f3(l.ring)});
+    rep.note(strprintf("%zu of the floor's %zu texels lie inside the sunk box (nobody sees them; Unity marks them invalid and fills them from "
+                       "outside); the visible ring just outside holds %.0f %% of the reference's light (under 100 %%: the hidden texels' "
+                       "darkness bled out by the filter - round 425).", l.inside, l.floor_texels, l.ring * 100.0));
+  }
 }
 
 /* ----------------------------------------------------------- round 411: the Unity-world stand-in's frames */
@@ -6814,7 +7122,8 @@ int main(int argc, char **argv) {
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
                {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
-               {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}};
+               {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like},
+               {"lightmap_quality", test_lightmap_quality}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;
@@ -6822,7 +7131,8 @@ int main(int argc, char **argv) {
     if (std::string(t.name) == "gpu_raster" && o.only != "gpu_raster") continue;  // (a spike with windows: only when asked for)
     if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
     if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
-    if ((std::string(t.name) == "operations" || std::string(t.name) == "responsiveness" || std::string(t.name) == "world_like") && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
+    if ((std::string(t.name) == "operations" || std::string(t.name) == "responsiveness" || std::string(t.name) == "world_like" ||
+         std::string(t.name) == "lightmap_quality") && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);
@@ -6883,6 +7193,17 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS *ep) {
   std::fflush(stderr);
   return EXCEPTION_EXECUTE_HANDLER;
 }
+#  ifdef _DEBUG
+/* Round 433: a debug build's failed assertion (an empty vector's back(), an index out of range) breaks into the handler
+ * above, so the soak's report has the stack where it failed instead of a bare message. */
+static int assert_to_crash(int type, char *message, int *ret) {
+  if (type != _CRT_ASSERT && type != _CRT_ERROR) return FALSE;
+  std::fprintf(stderr, "\n*** assertion: %s", message ? message : "?");
+  *ret = 0;
+  __debugbreak();
+  return TRUE;
+}
+#  endif
 #endif
 
 /* Curved surfaces: Push/Pull and the other modeling tools on meshes whose faces
@@ -7252,6 +7573,9 @@ static void test_curved_surfaces(Report &rep, const Options &o) {
 static void install_crash_handler() {
 #ifdef _WIN32
   SetUnhandledExceptionFilter(crash_handler);
+#  ifdef _DEBUG
+  _CrtSetReportHook2(_CRT_RPTHOOK_INSTALL, assert_to_crash);  // (round 433)
+#  endif
   /* Debug-CRT assertions go to stderr instead of a message box. */
   _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
   _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);

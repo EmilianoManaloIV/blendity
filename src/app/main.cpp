@@ -47,13 +47,18 @@ static int headless(int argc, char **argv) {
   }
   Editor ed;
   ed.init_headless(w, h);
+  ed.set_async_jobs_for_test(true);  // (round 412: renders and bakes on workers, as the windowed editor runs them - `perf wait` steps frames until they land)
   /* Park the virtual mouse outside the window so nothing is hovered. */
   platform::Event park;
   park.type = platform::EventType::MouseMove;
   park.x = -100;
   park.y = -100;
   ed.step_frame_headless({park});
-  for (auto &c : cmds) ed.command(c);
+  for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();  // (round 414: the startup's own open of the last scene lands before the first line, not after it)
+  for (auto &c : cmds) {
+    ed.command(c);
+    for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();  // (round 413: a save, open, import or export lands before the next line - as the line ran whole before)
+  }
   for (auto [x, y, button, mods] : clicks) {
     platform::Event e;
     e.x = x;

@@ -17,6 +17,7 @@
  * don't make each other's images again every frame. Behind BL_WITH_VULKAN; create() fails cleanly without it. */
 #pragma once
 
+#include "camera_filter.h"
 #include "gpu_device.h"
 
 #include <cstdint>
@@ -95,8 +96,16 @@ struct RasterInstance {
    * corners in RasterFrame::corners (-1 none; gl_PrimitiveID counts on from it), flags (1 probe-lit, 2 the realtime
    * bounce onto the lightmap); `baked`: the baked pass draws it. */
   int32_t lightmap = -1, rt_bounce = -1, rt_sky = -1, corner_base = -1;
+  int32_t lightmap_dir = -1;  // round 426: the lightmap's direction page (add_texture's id, -1 none)
+  float exposure_occlusion = 0.0f;  // round 429: Material::exposure_occlusion (BakedRef.b.z)
   uint32_t baked_flags = 0;
   bool baked = false;
+  /* Round 416 (ADR 0110): lilToon's own settings (96 floats, 24 vec4 as the shader's LilSet lays them out - see
+   * gpu_views.cpp's raster_lil) and its maps' texture ids (shadow, 2nd shadow, strength mask, border mask, rim,
+   * backlight, emission, matcap mask, emission mask, matcap; -1 none); `lil` on: the lighting pass shades with them. */
+  bool lil = false;
+  float lil_p[96] = {};
+  int32_t lil_maps[10] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
   /* Task 0102: a toon material's settings (Material's toon_*), as shade_toon, toon_rim and light_finish read them. */
   int toon_bands = 1;
   float toon_softness = 0.02f, toon_threshold = 0.15f, toon_specular_size = 0.0f, toon_specular_smooth = 0.05f;
@@ -204,12 +213,15 @@ struct RasterFrame {
   /* Task 0197: the baked-lit triangles' corners, two vec4 each - (local position, lightmap u), (lightmap v, realtime
    * u, v, 0) - three a triangle, in the card's triangle order; the probe volume's settings; realtime GI's specular
    * occlusion. */
-  std::vector<float> corners;
+  std::vector<float> corners;  // (since round 415 the editor keeps the corners on the card in blocks: add_corners; this stays for a card without them)
   float probe_normal_bias = 0.25f, probe_view_bias = 0.1f;
   bool probe_leak = true, probe_live = false;
   float gi_specular_occlusion = 1.0f;
   bool unity_brdf = false;  // (round 405: the reflections weighted as Unity's BRDF does)
   bool want_hdr = false;  // task 0197: also the picture in linear light (read_hdr), for a camera's bloom
+  /* Round 416 (ADR 0110): the camera's filters run on the card after the lighting (Bloom reads the linear-light plane:
+   * want_hdr), in this order, the picture left in the slot as the CPU's passes would have left it. */
+  std::vector<PostPass> post;
   /* The world's light (Environment Gradient or Color, times its strength). */
   int env_mode = 0;           // 0 gradient (sky / equator / ground), 1 one colour, 2 a Sky or HDRI world's map
   /* Task 0102: a Sky or HDRI world (env_mode 2): its equirectangular map (add_texture's id; -1: none yet, the
@@ -304,6 +316,8 @@ class Raster {
   virtual bool can_draw_toon_maps() const { return false; }     // task 0196: toon materials' painted maps (the toon pass)
   virtual bool can_draw_baked() const { return false; }         // task 0197: lightmaps and probes (the baked pass)
   virtual bool can_draw_hdr() const { return false; }           // task 0197: the picture in linear light
+  virtual bool can_draw_see_through_hdr() const { return false; }  // round 414: see-through surfaces over it (their pixels marked "none", as the CPU's)
+  virtual bool can_draw_post() const { return false; }  // round 416 (ADR 0110): the camera's filters (RasterFrame::post) over the picture
   /* Task 0197: the slot's last picture in linear light (a frame with want_hdr), rgba a pixel, x -1 where none. */
   virtual bool read_hdr(int slot, float *rgba, std::string *err) { (void)slot, (void)rgba; if (err) *err = "no linear light"; return false; }
   /* Task 0197: the probe volume, packed (the editor's probe_pack), kept until replaced. */
@@ -312,6 +326,11 @@ class Raster {
    * those (first, count) ranges of the arrays given, with the next render(). */
   virtual bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
   virtual bool set_cage_edges(const std::vector<CageEdge> &e, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *error) = 0;
+  /* Round 415 (ADR 0109): a block of baked-lit triangles' corners (24 floats a triangle, as RasterFrame::corners held
+   * them) kept on the card: its base in triangles (RasterInstance::corner_base counts from it), -1 when the card has no
+   * room; `remove_corners` frees the block. The frame's own `corners` are sent each frame only where no block is used. */
+  virtual int add_corners(const float *data, size_t floats, std::string *error) { (void)data, (void)floats; if (error) *error = "no corner blocks"; return -1; }
+  virtual void remove_corners(int base, size_t floats) { (void)base, (void)floats; }
   /* Task 0101: a texture's mip chain, as Texture holds it (8-bit texels as stored, or float), kept on the card; the id
    * is RasterInstance::tex's. -1 when it doesn't fit (the error says why). */
   virtual int add_texture(const Texture &t, std::string *error) = 0;

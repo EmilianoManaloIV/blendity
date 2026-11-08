@@ -1506,7 +1506,7 @@ int Context::begin_scroll(Id i, const Recti &r, int content_h) {
     off -= (int)(in.wheel_y * row_h() * 3);
     in.wheel_y = 0;  // consumed
   }
-  bool bar = content_h > r.h;
+  bool bar = r.h > 0 && content_h > r.h;  // (round 433: an area dragged to a negative height draws no bar)
   int bw = px(10);
   if (bar) {
     Recti track{r.right() - bw, r.y, bw, r.h};
@@ -1535,10 +1535,10 @@ void Context::end_scroll() {
   if (scroll_stack_.empty()) return;
   ScrollState s = scroll_stack_.back();
   scroll_stack_.pop_back();
-  if (s.content_h <= s.r.h) return;
+  if (s.r.h <= 0 || s.content_h <= s.r.h) return;  // (round 433's soak: an area dragged to a negative height with nothing in it had divided by 0)
   int bw = px(10);
   int maxoff = s.content_h - s.r.h;
-  int th = std::max(px(24), (int)((int64_t)s.r.h * s.r.h / s.content_h));
+  int th = std::max(px(24), (int)((int64_t)s.r.h * s.r.h / std::max(1, s.content_h)));
   int ty = s.r.y + (int)((int64_t)(s.r.h - th) * s.offset / std::max(1, maxoff));
   canvas.fill_rect({s.r.right() - bw, s.r.y, bw, s.r.h}, theme.scroll_track);
   canvas.fill_round_rect({s.r.right() - bw + px(2), ty, bw - px(4), th}, px(3), active_ == (s.id ^ 0x5C011ull) ? theme.button_hover : theme.scroll_thumb);

@@ -93,6 +93,21 @@ Canvases, TextMeshPro and particle systems are data by the user's choice (not dr
 Blendity's station times are dominated by import and the lightmap fetch, not by rendering; a comparison that reuses an
 imported scene (the Blendity project keeps it) runs at render speed.
 
+**Navigation (round 420, after Pass 16):** a frame of each editor's views on the same assets - Unity's
+(`tools/unity_frames.py`: the interval between two of the view's actual draws, Unity 2022.3.22f1 on the project copies,
+the scene framed whole) against Blendity's (`tools/bench_world.py`: the whole editor's frame, means).
+
+| View | Unity: median / mean / p95 ms | Blendity: presented by the card / by the system, mean ms |
+|---|---|---|
+| SideRail, Scene view (the whole world in view) | 10.0 / 25.6 / 99.2 | 10.3 / 19.6 |
+| SideRail, Game view (Bloom, Vignette, Color Grading) | 4.5 / 4.8 / 6.6 | 10.4 / 12.5 (with the Scene view) |
+| Shinano, Scene view | 2.1 / 2.2 / 2.9 | 7.0 (round 415's build) |
+| Shinano, Game view | 2.4 / 2.5 / 3.4 | 5.1 / 7.2 (with the Scene view, round 416's build) |
+
+Unity draws SideRail's Game view about twice as fast and Shinano's views two to three times as fast; SideRail's Scene
+view is a draw on the median, with long Unity frames in its mean and p95. docs/PERFORMANCE.md, "Pass 16 in one table",
+has the method and the caveats.
+
 ## SDK checks and HCI
 
 Not run this round: the SDK's control-panel checks on the world (round 404's fixture `vrchat_sdk_world.json`) and the
@@ -108,6 +123,28 @@ the residual fixes, so that they measure the finished state once.
   pass the target, the floor misses on SSIM alone (a dark frame's fine texture). What remains is the particle smoke (not
   drawn by the user's choice) and the mirror's players.
 
+## Pass 17 (rounds 421-434, 2026-11-07): Blendity's own bake against Unity's
+
+Every SideRail number above loaded **Unity's** lightmaps. Pass 17 compared Blendity's **own** Generate Lighting, at the
+scene's own settings, with Unity's render of each station (`tools/unity_compare.py world ... --blendity-bake`):
+
+| station (MAE / SSIM / grid correlation) | Unity's lightmaps | Blendity's bake, round 421 | Blendity's bake, final |
+|---|---|---|---|
+| spawn | 3.46 / 0.921 / 0.989 | 5.55 / 0.890 / 0.539 | 3.71 / 0.812 / 0.899 |
+| spawn_back (dark) | 1.61 / 0.806 / 0.693 | 2.34 / 0.875 / 0.859 | 1.37 / 0.772 / 0.360 |
+| floor | 2.85 / 0.870 / 0.998 | 7.66 / 0.692 / 0.666 | 4.36 / 0.747 / 0.974 |
+| ahead | 3.00 / 0.949 / 0.984 | 4.12 / 0.900 / 0.419 | 3.06 / 0.883 / 0.958 |
+
+The bake takes 85 s (686 s at the start; Unity's own was not timed). Brightness and placement now match Unity's (MAE under
+4 at three stations, the light where Unity puts it); fine structure doesn't yet (SSIM 0.75-0.88, target 0.90). What
+closed the gap: SideRail's lamps shine through see-through "light profile" spheres (Unity's Alpha Source, From Gray Scale)
+with Unity's legacy falloff for baked lights; reflection probes had been upside down since round 401; Filamented's
+specular occlusion; texel validity. Details and the open items: docs/PERFORMANCE.md, "Pass 17 in one table".
+
+**Navigation, after round 431** (ms a frame on the card): SideRail's Scene view 8.1 (Unity's median 10.0), its Scene +
+Game view 11.0 (Unity's Game view 4.8); Shinano's Scene view 7.5 (Unity's 2.2) - of it 2.8 ms re-deriving a scene that
+didn't change (a scene-wide change counter, open).
+
 ## Residuals, ranked (after round 405)
 
 1. ~~SideRail's fog tint under ACES / +1 EV~~ - fixed in round 405 (Unity's ACES curve as the view transform).
@@ -117,3 +154,5 @@ the residual fixes, so that they measure the finished state once.
    pinned down; the ACES fit's input and output matrices (the fog's blue a little more saturated than Unity's).
 5. The eye materials' reflection textures (Shinano's face, 2.6).
 6. Particle smoke (not drawn, the user's choice) and the mirror's players - counted, not fixed.
+7. (Pass 17) Blendity's own bake: SSIM under the target at every station (directional strength, seams, the exit sign's
+   glow); Shinano's views 3x Unity's (the change counter).

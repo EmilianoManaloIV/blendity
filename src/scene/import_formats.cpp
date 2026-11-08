@@ -13,6 +13,9 @@
 #include "../core/core.h"
 #include "../core/json.h"
 #include "../../extern/fast_float/fast_float.h"
+#include "../core/jobs.h"
+
+#include <atomic>
 
 #include <algorithm>
 #include <cmath>
@@ -73,10 +76,16 @@ void set_node_trs(ImportedNode &n, Vec3 t, Quat r, Vec3 s) {
 }  // namespace
 
 void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
-  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  /* Round 417: an open-addressed table of the kept vertices (linear probing; a slot holds a kept index) in place of a
+   * map of vectors - no allocation per position (a 50k sphere's weld was a third of its PLY import). */
+  size_t slots = 64;
+  while (slots < 2 * m.vert_count() + 1) slots *= 2;
+  std::vector<uint32_t> table(slots, UINT32_MAX);
+  const size_t mask = slots - 1;
   std::vector<uint32_t> remap(m.vert_count());
   std::vector<Vec3> kept;
   std::vector<uint32_t> first;  // each kept vertex's first original
+  kept.reserve(m.vert_count()), first.reserve(m.vert_count());
   auto bits = [](float f) {
     uint32_t b;
     if (f == 0.0f) f = 0.0f;  // -0 == +0
@@ -85,10 +94,12 @@ void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
   };
   for (size_t i = 0; i < m.vert_count(); i++) {
     const Vec3 p = m.positions[i];
-    const uint64_t h = ((uint64_t)bits(p.x) * 73856093ull) ^ ((uint64_t)bits(p.y) * 19349663ull) ^ ((uint64_t)bits(p.z) * 83492791ull);
-    auto &bucket = grid[h];
+    uint64_t h = ((uint64_t)bits(p.x) * 73856093ull) ^ ((uint64_t)bits(p.y) * 19349663ull) ^ ((uint64_t)bits(p.z) * 83492791ull);
+    h ^= h >> 29, h *= 0x9E3779B97F4A7C15ull, h ^= h >> 32;
+    size_t slot = (size_t)h & mask;
     uint32_t found = UINT32_MAX;
-    for (uint32_t k : bucket) {
+    for (; table[slot] != UINT32_MAX; slot = (slot + 1) & mask) {
+      const uint32_t k = table[slot];
       if (!(kept[k] == p)) continue;
       /* Vertices of a skin weld only with the same weights: lips and eyelids touch but must part. */
       bool same = true;
@@ -106,7 +117,7 @@ void weld_exact(Mesh &m, const std::vector<Vec3> *normals) {
       found = (uint32_t)kept.size();
       kept.push_back(p);
       first.push_back((uint32_t)i);
-      bucket.push_back(found);
+      table[slot] = found;  // (the first empty slot the probe reached)
     }
     remap[i] = found;
   }
@@ -779,28 +790,14 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
     }
   }
   auto type_size = [](Ty t) -> size_t { return t == I8 || t == U8 ? 1 : t == I16 || t == U16 ? 2 : t == F64 ? 8 : 4; };
-  const char *p = data.data() + body, *e = data.data() + data.size();
-  bool bad = false;
-  auto read_value = [&](Ty t) -> double {
-    if (format == 0) {
-      while (p < e && std::isspace((unsigned char)*p)) p++;
-      double v = 0;
-      auto r = fast_float::from_chars(p, e, v);
-      if (r.ec != std::errc()) {
-        bad = true;
-        return 0;
-      }
-      p = r.ptr;
-      return v;
-    }
-    const size_t n = type_size(t);
-    if ((size_t)(e - p) < n) {
-      bad = true;
-      return 0;
-    }
+  /* Round 417: the body read whole - a binary file's vertex records on every core, its faces found in one pass and read
+   * on every core; an ASCII file's lines (one record each, as every writer puts them) parsed on every core; the mesh's
+   * arrays filled directly. (It was read a value at a time through a lambda and a vertex and a face at a time into the
+   * mesh: 29 ms on the 50k sphere for Blender's 6.) A record's scalar from the bytes, by its type: */
+  auto scalar = [&](const char *q, Ty t) -> double {
     unsigned char b[8];
-    std::memcpy(b, p, n);
-    p += n;
+    const size_t n = type_size(t);
+    std::memcpy(b, q, n);
     if (format == 2) std::reverse(b, b + n);
     switch (t) {
       case I8: return (int8_t)b[0];
@@ -813,59 +810,313 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
       default: { float v; std::memcpy(&v, b, 4); return v; }
     }
   };
+  auto skip_ws = [](const char *q, const char *qe) {
+    while (q < qe && std::isspace((unsigned char)*q)) q++;
+    return q;
+  };
+  /* An ASCII number: the pointer after it, or `q` itself when there is none. */
+  auto ascii_number = [&](const char *q, const char *qe, double &v) -> const char * {
+    q = skip_ws(q, qe);
+    auto r = fast_float::from_chars(q, qe, v);
+    return r.ec == std::errc() ? r.ptr : q;
+  };
+  struct Layout {
+    int ix = -1, iy = -1, iz = -1, is = -1, it = -1, ilist = -1;
+    bool lists = false;
+    size_t stride = 0;
+    std::vector<size_t> off;  // (binary, no lists) each property's byte offset in a record
+  };
+  auto layout_of = [&](const Elem &el, bool face) {
+    Layout L;
+    for (size_t k = 0; k < el.props.size(); k++) {
+      const Prop &pr = el.props[k];
+      const std::string &n = pr.name;
+      L.off.push_back(L.stride);
+      if (pr.list) {
+        L.lists = true;
+        if (face && (n == "vertex_indices" || n == "vertex_index")) L.ilist = (int)k;  // (the last such list, as before)
+        continue;
+      }
+      L.stride += type_size(pr.ty);
+      if (n == "x") L.ix = (int)k;
+      else if (n == "y") L.iy = (int)k;
+      else if (n == "z") L.iz = (int)k;
+      else if (n == "s" || n == "u" || n == "texture_u" || n == "texture_s") L.is = (int)k;
+      else if (n == "t" || n == "v" || n == "texture_v" || n == "texture_t") L.it = (int)k;
+    }
+    return L;
+  };
   auto m = std::make_shared<Mesh>();
   m->name = fs::stem(path);
   std::vector<Vec2> vuv;
   bool has_uv = false;
-  for (const Elem &el : elems) {
-    const bool vert = el.name == "vertex", face = el.name == "face";
-    int ix = -1, iy = -1, iz = -1, is = -1, it = -1;
-    for (size_t k = 0; k < el.props.size(); k++) {
-      const std::string &n = el.props[k].name;
-      if (n == "x") ix = (int)k;
-      else if (n == "y") iy = (int)k;
-      else if (n == "z") iz = (int)k;
-      else if (n == "s" || n == "u" || n == "texture_u" || n == "texture_s") is = (int)k;
-      else if (n == "t" || n == "v" || n == "texture_v" || n == "texture_t") it = (int)k;
-    }
-    if (vert) has_uv = is >= 0 && it >= 0;
-    std::vector<double> vals;
-    std::vector<uint32_t> list;
-    for (size_t i = 0; i < el.count && !bad; i++) {
-      vals.assign(el.props.size(), 0.0);
-      list.clear();
-      for (size_t k = 0; k < el.props.size() && !bad; k++) {
-        const Prop &pr = el.props[k];
-        if (pr.list) {
-          const size_t n = (size_t)read_value(pr.count_ty);
-          if (n > 1000000) {
-            bad = true;
-            break;
+  /* A face record as found: where its index list starts and how many it holds; `index(rec, j)` reads one. */
+  struct FaceRec {
+    const char *list = nullptr;
+    uint32_t n = 0;
+  };
+  JobSystem &js = JobSystem::global();
+  auto take_faces = [&](const std::vector<FaceRec> &recs, const std::function<uint32_t(const FaceRec &, uint32_t)> &index) {
+    const size_t nv = m->positions.size(), nrec = recs.size();
+    std::vector<uint8_t> keep(nrec, 0);
+    js.parallel_for((int64_t)nrec, 4096, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) {
+        const FaceRec &r = recs[(size_t)i];
+        bool ok = r.n >= 3;
+        for (uint32_t j = 0; j < r.n && ok; j++) ok = index(r, j) < nv;
+        keep[(size_t)i] = ok;
+      }
+    });
+    std::vector<uint32_t> corner_at(nrec + 1, 0);
+    size_t faces = 0;
+    for (size_t i = 0; i < nrec; i++) corner_at[i + 1] = corner_at[i] + (keep[i] ? recs[i].n : 0), faces += keep[i];
+    const size_t first_face = m->face_count(), first_corner = m->corner_verts.size();
+    m->face_offsets.resize(first_face + faces + 1);
+    m->corner_verts.resize(first_corner + corner_at[nrec]);
+    for (size_t i = 0, f = first_face; i < nrec; i++)
+      if (keep[i]) m->face_offsets[++f] = (uint32_t)(first_corner + corner_at[i + 1]);
+    js.parallel_for((int64_t)nrec, 4096, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) {
+        if (!keep[(size_t)i]) continue;
+        const FaceRec &r = recs[(size_t)i];
+        uint32_t *c = &m->corner_verts[first_corner + corner_at[(size_t)i]];
+        for (uint32_t j = 0; j < r.n; j++) c[r.n - 1 - j] = index(r, j);  // mirrored: the list reversed
+      }
+    });
+  };
+  const char *p = data.data() + body, *e = data.data() + data.size();
+  bool bad = false;
+  if (format != 0) {
+    for (const Elem &el : elems) {
+      const bool vert = el.name == "vertex", face = el.name == "face";
+      const Layout L = layout_of(el, face);
+      if (!L.lists) {
+        if ((size_t)(e - p) / std::max<size_t>(1, L.stride) < el.count) {
+          bad = true;
+          break;
+        }
+        if (vert && L.ix >= 0 && L.iy >= 0 && L.iz >= 0) {
+          has_uv = L.is >= 0 && L.it >= 0;
+          const size_t first = m->positions.size();
+          m->positions.resize(first + el.count);
+          if (has_uv) vuv.resize(first + el.count);
+          const Ty tx = el.props[(size_t)L.ix].ty, ty_ = el.props[(size_t)L.iy].ty, tz = el.props[(size_t)L.iz].ty;
+          const size_t ox = L.off[(size_t)L.ix], oy = L.off[(size_t)L.iy], oz = L.off[(size_t)L.iz];
+          js.parallel_for((int64_t)el.count, 8192, [&](int64_t a, int64_t b) {
+            for (int64_t i = a; i < b; i++) {
+              const char *q = p + (size_t)i * L.stride;
+              m->positions[first + (size_t)i] = from_z_up({(float)scalar(q + ox, tx), (float)scalar(q + oy, ty_), (float)scalar(q + oz, tz)});
+              if (has_uv) vuv[first + (size_t)i] = {(float)scalar(q + L.off[(size_t)L.is], el.props[(size_t)L.is].ty), (float)scalar(q + L.off[(size_t)L.it], el.props[(size_t)L.it].ty)};
+            }
+          });
+        }
+        p += el.count * L.stride;
+        continue;
+      }
+      /* Records with lists: one pass over the bytes finds each record (its lists' counts say how long it is); a vertex
+       * element with a list (rare) still gives its position and UV from the scalars found on the way. */
+      std::vector<FaceRec> recs;
+      if (face) recs.reserve(el.count);
+      const bool vert_here = vert && L.ix >= 0 && L.iy >= 0 && L.iz >= 0;
+      if (vert_here) has_uv = L.is >= 0 && L.it >= 0;
+      for (size_t i = 0; i < el.count && !bad; i++) {
+        FaceRec r;
+        const char *sp[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};  // x y z s t, as met
+        for (size_t k = 0; k < el.props.size() && !bad; k++) {
+          const Prop &pr = el.props[k];
+          if (!pr.list) {
+            if ((size_t)(e - p) < type_size(pr.ty)) { bad = true; break; }
+            if ((int)k == L.ix) sp[0] = p;
+            else if ((int)k == L.iy) sp[1] = p;
+            else if ((int)k == L.iz) sp[2] = p;
+            else if ((int)k == L.is) sp[3] = p;
+            else if ((int)k == L.it) sp[4] = p;
+            p += type_size(pr.ty);
+            continue;
           }
-          const bool wanted = face && (pr.name == "vertex_indices" || pr.name == "vertex_index");
-          if (wanted) list.clear();  // (the last such list, as before)
-          for (size_t j = 0; j < n && !bad; j++) {
-            const uint32_t item = (uint32_t)read_value(pr.ty);
-            if (wanted) list.push_back(item);
+          if ((size_t)(e - p) < type_size(pr.count_ty)) { bad = true; break; }
+          const double cnt = scalar(p, pr.count_ty);
+          p += type_size(pr.count_ty);
+          if (!(cnt >= 0) || cnt > 1000000 || (size_t)(e - p) / type_size(pr.ty) < (size_t)cnt) { bad = true; break; }
+          if ((int)k == L.ilist) r = {p, (uint32_t)cnt};
+          p += (size_t)cnt * type_size(pr.ty);
+        }
+        if (face && !bad) recs.push_back(r);
+        if (vert_here && !bad && sp[0] && sp[1] && sp[2]) {
+          m->positions.push_back(from_z_up({(float)scalar(sp[0], el.props[(size_t)L.ix].ty), (float)scalar(sp[1], el.props[(size_t)L.iy].ty), (float)scalar(sp[2], el.props[(size_t)L.iz].ty)}));
+          if (has_uv && sp[3] && sp[4]) vuv.push_back({(float)scalar(sp[3], el.props[(size_t)L.is].ty), (float)scalar(sp[4], el.props[(size_t)L.it].ty)});
+        }
+      }
+      if (face && L.ilist >= 0 && !recs.empty()) {  // (a file cut short keeps the faces read, as before)
+        const Ty ti = el.props[(size_t)L.ilist].ty;
+        const size_t sz = type_size(ti);
+        take_faces(recs, [&](const FaceRec &r, uint32_t j) {
+          const double v = scalar(r.list + (size_t)j * sz, ti);
+          return v >= 0 && v < 4294967295.0 ? (uint32_t)v : UINT32_MAX;
+        });
+      }
+      if (bad) break;
+    }
+  }
+  else {
+    /* ASCII: the body's lines (empty ones skipped); one record a line when there are enough, else the records read one
+     * number after another as before. */
+    std::vector<std::pair<const char *, const char *>> lines;
+    size_t records = 0;
+    for (const Elem &el : elems) records += el.count;
+    lines.reserve(records);
+    for (const char *q = p; q < e;) {
+      const char *nl = (const char *)std::memchr(q, '\n', (size_t)(e - q));
+      const char *le = nl ? nl : e;
+      const char *a = skip_ws(q, le);
+      if (a < le) lines.push_back({a, le});
+      q = nl ? nl + 1 : e;
+    }
+    bool simple = lines.size() >= records;
+    for (const Elem &el : elems) {
+      const Layout L = layout_of(el, el.name == "face");
+      if (L.lists && !(el.name == "face" && L.ilist >= 0)) simple = false;
+      if (el.props.size() > 64) simple = false;  // (the per-line parse holds 64 values a record)
+    }
+    bool line_failed = false;
+    if (simple) {
+      size_t at = 0;
+      for (const Elem &el : elems) {
+        const bool vert = el.name == "vertex", face = el.name == "face";
+        const Layout L = layout_of(el, face);
+        const size_t first_line = at;
+        at += el.count;
+        std::atomic<bool> fail{false};
+        if (vert && !L.lists && L.ix >= 0 && L.iy >= 0 && L.iz >= 0) {
+          has_uv = L.is >= 0 && L.it >= 0;
+          const size_t first = m->positions.size();
+          m->positions.resize(first + el.count);
+          if (has_uv) vuv.resize(first + el.count);
+          js.parallel_for((int64_t)el.count, 4096, [&](int64_t a, int64_t b) {
+            double vals[64];
+            for (int64_t i = a; i < b; i++) {
+              const char *q = lines[first_line + (size_t)i].first, *qe = lines[first_line + (size_t)i].second;
+              for (size_t k = 0; k < el.props.size() && k < 64; k++) {
+                const char *q2 = ascii_number(q, qe, vals[k]);
+                if (q2 == q) { fail = true; vals[k] = 0; }
+                q = q2;
+              }
+              m->positions[first + (size_t)i] = from_z_up({(float)vals[L.ix], (float)vals[L.iy], (float)vals[L.iz]});
+              if (has_uv) vuv[first + (size_t)i] = {(float)vals[L.is], (float)vals[L.it]};
+            }
+          });
+        }
+        else if (face && L.ilist >= 0) {
+          /* Each line's index list found (the scalars and other lists before it stepped over) and its count taken, then
+           * the indices decoded once into one flat array on every core (review 417: re-parsing a record from its
+           * start for each index was quadratic in a face's corners), then taken in parallel. */
+          std::vector<FaceRec> recs(el.count);
+          std::vector<uint32_t> counts(el.count, 0);
+          js.parallel_for((int64_t)el.count, 4096, [&](int64_t a, int64_t b) {
+            for (int64_t i = a; i < b; i++) {
+              const char *q = lines[first_line + (size_t)i].first, *qe = lines[first_line + (size_t)i].second;
+              FaceRec r;
+              bool ok = true;
+              for (size_t k = 0; k < el.props.size() && ok; k++) {
+                double v = 0;
+                const char *q2 = ascii_number(q, qe, v);
+                if (q2 == q) { ok = false; break; }
+                q = q2;
+                if (!el.props[k].list) continue;
+                if (!(v >= 0) || v > 1000000) { ok = false; break; }
+                if ((int)k == L.ilist) r = {q, (uint32_t)v};
+                for (uint32_t j = 0; j < (uint32_t)v && ok; j++) {  // (stepped over here; decoded below)
+                  double w = 0;
+                  const char *q3 = ascii_number(q, qe, w);
+                  if (q3 == q) ok = false;
+                  q = q3;
+                }
+              }
+              if (!ok) fail = true;
+              recs[(size_t)i] = ok ? r : FaceRec{};
+              counts[(size_t)i] = ok ? r.n : 0;
+            }
+          });
+          std::vector<size_t> at(el.count + 1, 0);
+          for (size_t i = 0; i < el.count; i++) at[i + 1] = at[i] + counts[i];
+          std::vector<uint32_t> flat(at[el.count], UINT32_MAX);
+          js.parallel_for((int64_t)el.count, 4096, [&](int64_t a, int64_t b) {
+            for (int64_t i = a; i < b; i++) {
+              FaceRec &r = recs[(size_t)i];
+              const char *q = r.list;
+              for (uint32_t j = 0; j < r.n; j++) {
+                double v = 0;
+                const char *q2 = ascii_number(q, lines[first_line + (size_t)i].second, v);
+                if (q2 == q) break;
+                q = q2;
+                flat[at[(size_t)i] + j] = v >= 0 && v < 4294967295.0 ? (uint32_t)v : UINT32_MAX;
+              }
+              r.list = r.n ? reinterpret_cast<const char *>(&flat[at[(size_t)i]]) : nullptr;
+            }
+          });
+          take_faces(recs, [&](const FaceRec &r, uint32_t j) {
+            uint32_t v;
+            std::memcpy(&v, r.list + (size_t)j * 4, 4);
+            return v;
+          });
+        }
+        if (fail) line_failed = true;
+      }
+    }
+    if (!simple || line_failed) {
+      /* Records across lines, or a line that didn't hold its record (rare): one number after another, as before. */
+      m->positions.clear();
+      m->face_offsets.assign(1, 0);
+      m->corner_verts.clear();
+      vuv.clear();
+      has_uv = false;
+      bad = false;
+      auto read_value = [&](double &v) {
+        const char *q2 = ascii_number(p, e, v);
+        if (q2 == p) { bad = true; return false; }
+        p = q2;
+        return true;
+      };
+      std::vector<double> vals;
+      std::vector<uint32_t> list;
+      for (const Elem &el : elems) {
+        const bool vert = el.name == "vertex", face = el.name == "face";
+        const Layout L = layout_of(el, face);
+        if (vert) has_uv = L.is >= 0 && L.it >= 0;
+        for (size_t i = 0; i < el.count && !bad; i++) {
+          vals.assign(el.props.size(), 0.0);
+          list.clear();
+          for (size_t k = 0; k < el.props.size() && !bad; k++) {
+            if (!el.props[k].list) { read_value(vals[k]); continue; }
+            double cnt = 0;
+            if (!read_value(cnt) || !(cnt >= 0) || cnt > 1000000) { bad = true; break; }
+            const bool wanted = (int)k == L.ilist;
+            if (wanted) list.clear();
+            for (size_t j = 0; j < (size_t)cnt && !bad; j++) {
+              double item = 0;
+              if (read_value(item) && wanted) list.push_back(item >= 0 && item < 4294967295.0 ? (uint32_t)item : UINT32_MAX);
+            }
+          }
+          if (vert && L.ix >= 0 && L.iy >= 0 && L.iz >= 0) {
+            m->add_vert(from_z_up({(float)vals[(size_t)L.ix], (float)vals[(size_t)L.iy], (float)vals[(size_t)L.iz]}));
+            if (has_uv) vuv.push_back({(float)vals[(size_t)L.is], (float)vals[(size_t)L.it]});
+          }
+          else if (face && list.size() >= 3) {
+            bool valid = true;
+            for (uint32_t v : list) valid = valid && v < m->vert_count();
+            if (!valid) continue;
+            std::reverse(list.begin(), list.end());  // mirrored
+            m->add_face(list.data(), list.size());
           }
         }
-        else vals[k] = read_value(pr.ty);
-      }
-      if (vert && ix >= 0 && iy >= 0 && iz >= 0) {
-        m->add_vert(from_z_up({(float)vals[(size_t)ix], (float)vals[(size_t)iy], (float)vals[(size_t)iz]}));
-        if (has_uv) vuv.push_back({(float)vals[(size_t)is], (float)vals[(size_t)it]});
-      }
-      else if (face && list.size() >= 3) {
-        std::reverse(list.begin(), list.end());  // mirrored
-        bool valid = true;
-        for (uint32_t v : list) valid = valid && v < m->vert_count();
-        if (!valid) continue;
-        std::vector<Vec2> fuv;
-        if (has_uv)
-          for (uint32_t v : list) fuv.push_back(vuv[v]);
-        m->add_face(list.data(), list.size(), has_uv ? fuv.data() : nullptr);
       }
     }
+  }
+  if (has_uv && vuv.size() == m->positions.size() && m->corner_verts.size()) {
+    m->uvs.resize(m->corner_verts.size());
+    js.parallel_for((int64_t)m->corner_verts.size(), 16384, [&](int64_t a, int64_t b) {
+      for (int64_t c = a; c < b; c++) m->uvs[(size_t)c] = vuv[m->corner_verts[(size_t)c]];
+    });
   }
   if (bad && !m->face_count()) {
     out.error = "PLY: the data ends early or is malformed";
@@ -880,6 +1131,7 @@ bool import_ply_file(const std::string &path, ImportResult &out) {
   m->smooth_angle = 30.0f;
   m->sync_attributes();
   m->touch();
+
   ImportedNode node;
   node.name = m->name;
   node.mesh = m;

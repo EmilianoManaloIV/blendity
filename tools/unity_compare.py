@@ -6,6 +6,9 @@
                                       <stations.json> <out dir> [--blendity <Blendity.exe>] [--no-lightmaps] [--engine Rasterized|Path]
     py tools/unity_compare.py avatar <Unity.exe> <project copy> <Assets/.../x.prefab> <Blendity project> <Assets/Imported/.../x.prefab>
                                       <stations.json> <out dir> [--blendity <Blendity.exe>]
+    ... world ... --blendity-bake   (round 421: Blendity's own Generate Lighting, at the Unity scene's lightmap settings, in
+                                     place of Unity's lightmaps - baked once into <scene>_blendity_bake.scene beside the
+                                     imported scene, then every station opens that; the report gives the bake's time)
 
 The Unity project must be a copy: a VCC-managed project (one with `Packages/vpm-manifest.json`) is refused unless it
 carries an empty `BLENDITY_COPY` file at its top; the script is written into the copy's Assets/Editor and left there. The
@@ -58,10 +61,49 @@ def unity_side(unity, project, kind, asset, stations, out):
     return time.time() - t0
 
 
-def blendity_side(exe, project, kind, asset, stations, out, lightmaps, engine):
+def blendity_bake(exe, project, asset, out):
+    """Round 421: Blendity's own bake of the Unity scene (its lightmap settings read on open), saved beside it; returns the
+    saved scene (project-relative), the bake's seconds and its phases line."""
     bl_out = os.path.join(out, "blendity")
-    shutil.rmtree(bl_out, ignore_errors=True)
     os.makedirs(bl_out, exist_ok=True)
+    saved = os.path.splitext(asset)[0] + "_blendity_bake.scene"
+    saved_abs = os.path.join(project, saved)
+    marker = saved_abs + ".from-unity-compare"  # (written beside each bake this tool saves: only those are replaced)
+    if os.path.exists(saved_abs) and not os.path.isfile(marker):
+        sys.exit("refused: %s exists and this tool didn't write it (no %s beside it)" % (saved_abs, os.path.basename(marker)))
+    if os.path.exists(saved_abs):  # (the last run's bake and its lighting folder: never scored as this run's)
+        os.remove(saved_abs)
+        shutil.rmtree(os.path.splitext(saved_abs)[0], ignore_errors=True)
+    env = dict(os.environ, BLENDITY_PROJECT=project)
+    args = [exe, "--headless-screenshot", os.path.join(bl_out, "bake_editor.png"), "--size", "1600x1000", "--frames", "2",
+            "--cmd", "open " + asset, "--cmd", "bake", "--cmd", "perf wait", "--cmd", "save " + saved]
+    log_path = os.path.join(bl_out, "bake.log")
+    t0 = time.time()
+    try:
+        with open(log_path, "w", encoding="utf-8") as log:
+            r = subprocess.run(args, cwd=project, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=4 * 3600)
+    except subprocess.TimeoutExpired:
+        sys.exit("Blendity's bake took over four hours: stopped")
+    text = open(log_path, encoding="utf-8", errors="replace").read()
+    if r.returncode != 0 or "Generate Lighting: done" not in text:
+        sys.exit("Blendity's bake didn't finish (exit %d; see %s)" % (r.returncode, log_path))
+    if not os.path.isfile(saved_abs) or os.path.getmtime(saved_abs) < t0:
+        sys.exit("Blendity's bake finished but %s wasn't saved (see %s)" % (saved_abs, log_path))
+    open(marker, "w").close()
+    m = re.search(r"Generate Lighting: done in ([0-9.]+) s", text)
+    phases = re.search(r"Generate Lighting phases: (.*)", text)
+    settings = re.search(r"the lightmap settings came from (.*)", text)
+    unbaked = re.search(r"not baked yet from the scene's lightmap settings: (.*)", text)
+    said = (settings.group(1).strip() if settings else "") + ("; not baked yet: " + unbaked.group(1).strip() if unbaked else "")
+    return saved, (float(m.group(1)) if m else time.time() - t0), (phases.group(1).strip() if phases else ""), said
+
+
+def blendity_side(exe, project, kind, asset, stations, out, lightmaps, engine, open_asset=None):
+    bl_out = os.path.join(out, "blendity")
+    os.makedirs(bl_out, exist_ok=True)
+    for f in os.listdir(bl_out):  # (review 404: an earlier run's pictures are never scored as this one's - the bake's log stays)
+        if f.endswith((".png", ".exr")) and not f.startswith("bake"):
+            os.remove(os.path.join(bl_out, f))
     env = dict(os.environ, BLENDITY_PROJECT=project)
     times = {}
     for st in stations["stations"]:
@@ -76,8 +118,8 @@ def blendity_side(exe, project, kind, asset, stations, out, lightmaps, engine):
                      "set Camera.FieldOfView %g" % (st.get("fov") or 35), "set World.Strength 1", "set Camera.ClearFlags Solid", "set Camera.Background 0.0395 0.0395 0.0477", "activecamera Camera",
                      "set Render.ResolutionX 900", "set Render.ResolutionY 1200", "set Render.ViewTransform Standard", "set Render.Exposure 0"]
         else:
-            cmds += ["open " + asset]
-            if lightmaps:
+            cmds += ["open " + (open_asset or asset)]
+            if lightmaps and not open_asset:
                 cmds += ["unity lightmaps wait"]
             cmds += ["select Main Camera", "position %g %g %g" % (st["x"], st["y"], st["z"]), "rotate %g %g 0" % (st["pitch"], st["yaw"])]
             if st.get("fov"):
@@ -109,13 +151,15 @@ def main(argv):
     kind, unity, project, asset, bl_project, bl_asset, stations_path, out = argv[:8]
     project, bl_project, out, stations_path = (os.path.abspath(x) for x in (project, bl_project, out, stations_path))  # (review 404: Unity and Blendity run in their projects)
     exe = os.path.join(REPO, "dist", "windows", "Blendity.exe")
-    lightmaps, engine = True, "Rasterized"
+    lightmaps, engine, own_bake = True, "Rasterized", False
     rest = argv[8:]
     while rest:
         if rest[0] == "--blendity" and len(rest) > 1:
             exe, rest = os.path.abspath(rest[1]), rest[2:]
         elif rest[0] == "--no-lightmaps":
             lightmaps, rest = False, rest[1:]
+        elif rest[0] == "--blendity-bake":
+            own_bake, rest = True, rest[1:]
         elif rest[0] == "--engine" and len(rest) > 1 and rest[1] in ("Rasterized", "Path"):
             engine, rest = rest[1], rest[2:]
         else:
@@ -136,7 +180,10 @@ def main(argv):
         if f.endswith((".json", "_side_by_side.png", ".md")):
             os.remove(os.path.join(out, f))
     unity_s = unity_side(unity, project, kind, asset, stations_path, out)
-    bl_times = blendity_side(exe, bl_project, kind, bl_asset, stations, out, lightmaps, engine)
+    bake = None
+    if own_bake and kind == "world":
+        bake = blendity_bake(exe, bl_project, bl_asset, out)
+    bl_times = blendity_side(exe, bl_project, kind, bl_asset, stations, out, lightmaps, engine, open_asset=bake[0] if bake else None)
     rows, results, failed = [], {}, 0
     for st in stations["stations"]:
         name = st["name"]
@@ -160,13 +207,15 @@ def main(argv):
         results[name]["pass"] = passed
         results[name]["blendity_s"] = round(bl_times.get(name, 0), 1)
         rows.append("| %s | %.2f | %.3f | %.3f | %s | %.1f s |" % (name, m.get("mae_all", -1), m.get("ssim", -1), (m.get("grid") or {}).get("correlation", -1), ("pass (dark: MAE and means)" if m.get("dark") else "pass") if passed else "**miss**", bl_times.get(name, 0)))
-    report = ["# Unity against Blendity: %s stations (%s)" % (kind, time.strftime("%Y-%m-%d")), "",
+    lighting = ("Blendity's own bake (Generate Lighting in %.0f s at %s; phases: %s)" % (bake[1], bake[3] or "Blendity's settings", bake[2] or "-")
+                if bake else ("Unity's lightmaps" if lightmaps else "no baked lighting"))
+    report = ["# Unity against Blendity: %s stations (%s)" % (kind, time.strftime("%Y-%m-%d")), "", "Blendity's lighting: " + lighting + ".", "",
               "Unity's side took %.0f s (open + %d renders); Blendity's per station below. Target: MAE <= 4, SSIM >= 0.90, grid correlation >= 0.95." % (unity_s, len(stations["stations"])), "",
               "| station | MAE | SSIM | grid corr | target | Blendity |", "|---|---|---|---|---|---|"] + rows + [""]
     with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(report))
     with open(os.path.join(out, "report.json"), "w", encoding="utf-8") as f:
-        json.dump({"kind": kind, "unity_s": unity_s, "stations": results}, f, indent=1)
+        json.dump({"kind": kind, "unity_s": unity_s, "lighting": lighting, "bake_s": bake[1] if bake else None, "stations": results}, f, indent=1)
     print("\n".join(report))
     return 1 if failed else 0
 

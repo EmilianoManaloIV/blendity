@@ -502,6 +502,10 @@ struct InspectorReflector : Reflector {
     return last_skipped;
   }
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
+  /* Round 435 (ADR 0115): a field written here is an edit the views' scene hash must see - whoever drew the reflector. */
+  ~InspectorReflector() override {
+    if (changed) edit_epoch::bump();
+  }
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
   Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
@@ -2314,7 +2318,7 @@ void Editor::draw_profiler_gpu(const FrameProfile &fp, const std::function<void(
   const bool views_on_card = fp.gpu_views > 0 || scene_on_gpu_;  // (a frame whose views were all reused still shows the block)
   if (!views_on_card && !rendering_ && !cam_preview_rendered_) return;
   if (views_on_card) draw_profiler_gpu_views(fp, stat);
-  if (rendering_) draw_profiler_gpu_tracer(strprintf("%s render", key("render.image").c_str()).c_str(), final_pt_.stats(), render_time_ * 1000.0, "the render so far", stat);
+  if (rendering_) draw_profiler_gpu_tracer(strprintf("%s render", key("render.image").c_str()).c_str(), render_stats(), render_time_ * 1000.0, "the render so far", stat);  // (round 412: the worker's published copy)
   if (cam_preview_rendered_) draw_profiler_gpu_tracer("Camera Preview", cam_preview_pt_.stats(), frame_ms_, "the frame", stat);
 }
 
@@ -2325,12 +2329,23 @@ void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function
   stat("GPU views: busy (shadow / g-buffer / lighting)", stamps ? strprintf("%.2f ms (%.2f / %.2f / %.2f)", busy, fp.ms_gpu_shadow, fp.ms_gpu_gbuffer, fp.ms_gpu_lighting) : std::string("n/a (no timestamps)"));
   stat("GPU views: copies out + fence / wait", strprintf("%.2f ms / %.2f ms", fp.ms_gpu_readback, wait));  // (the wait: the GPU path's rest - gathering, uploads, the CPU's recording)
   stat("GPU busy in the frame", stamps && frame_ms_ > 0.0 ? strprintf("%.0f %% of %.2f ms", 100.0 * busy / frame_ms_, frame_ms_) : std::string("n/a"));
+  stat("GPU views: the CPU's share (instances / corners / see-through / the render call)",  // (round 415, ADR 0109)
+       strprintf("%.2f / %.2f / %.2f / %.2f ms", fp.ms_gpu_instances, fp.ms_gpu_corners, fp.ms_gpu_see, fp.ms_gpu_render));
+  stat("GPU views: corner blocks sent / held; lights left out of the views", strprintf("%llu / %.1f MB; %llu", (unsigned long long)fp.gpu_corner_uploads, (double)gpu_corner_floats_ * 4.0 / 1048576.0, (unsigned long long)fp.lights_culled));
+  if (fp.filters_on_card) stat("GPU views: camera filters run on the card", strprintf("%llu view(s)", (unsigned long long)fp.filters_on_card));  // (round 416, ADR 0110)
   for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (task 0163: why a view drew on the CPU instead; a slot's last view keeps its reason until the device is chosen again)
     if (gpu_slot_reason_[k].empty()) continue;
     const RenderTarget *rt = gpu_slot_rt_[k];
     const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
     stat(strprintf("%s on the CPU", view), gpu_slot_reason_[k]);
   }
+  for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (round 414, ADR 0108: what the card drew differently from the CPU, per view)
+    if (gpu_slot_approx_[k].empty() || !gpu_view_) continue;
+    const RenderTarget *rt = gpu_slot_rt_[k];
+    const char *view = rt == &scene_rt_ ? "Scene view" : rt == &game_rt_ ? "Game view" : rt == &cam_preview_rt_ ? "Camera Preview" : "A view";
+    stat(strprintf("%s approximated on the card", view), gpu_slot_approx_[k]);
+  }
+  if (fp.gpu_approximated) stat("GPU views: instances approximated", strprintf("%llu (F12 stays exact)", (unsigned long long)fp.gpu_approximated));
 }
 
 /* A path tracer's card time: busy and wait inside its submissions, and the busy share of `wall_ms` (the whole render
@@ -2421,6 +2436,7 @@ void Editor::draw_profiler(const Recti &r) {
     stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
   }
   stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
+  stat("Scene hashes kept / missed", strprintf("%llu / %llu", (unsigned long long)fp.scene_hash_reuses, (unsigned long long)fp.scene_hash_misses));  // (round 435, ADR 0115)
   stat("Edit Mode: operator / mesh writes / overlap check", strprintf("%.2f ms / %.2f ms / %.2f ms", fp.ms_edit_op, fp.ms_edit_apply, fp.ms_overlap));
   stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
   const MeshCounts &mc = mesh_last_;
@@ -2636,7 +2652,7 @@ void Editor::draw_render_window(const Recti &r) {
   }
   if (rendering_) {
     Recti pr = lay.row(u.px(6));
-    float t = std::min(1.0f, final_pt_.samples() / (float)std::max(1, scene_->render.samples));
+    float t = std::min(1.0f, render_samples() / (float)std::max(1, scene_->render.samples));
     u.canvas.fill_round_rect(pr, u.px(3), u.theme.well);
     u.canvas.fill_round_rect({pr.x, pr.y, (int)(pr.w * t), pr.h}, u.px(3), u.theme.accent);
     u.redraw = true;
@@ -2754,8 +2770,8 @@ void Editor::draw_render_window(const Recti &r) {
     }
     if (devs.empty()) u.label(lay.row(), gpu::compiled_in() ? "No Vulkan GPU found - rendering on the CPU" : "This build has no GPU rendering", u.theme.text_dim);
     else if (!gpu_mode) u.label(lay.row(), "Device is CPU: set it to GPU Compute above to use these", u.theme.text_dim);
-    if (!final_pt_.gpu_error().empty()) u.label(lay.row(), final_pt_.gpu_error(), u.theme.warning);
-    if (!final_pt_.gpu_note().empty()) u.label(lay.row(), "On the CPU: " + final_pt_.gpu_note(), u.theme.warning);  // (round 331: a fog)
+    if (const std::string e = render_gpu_error(); !e.empty()) u.label(lay.row(), e, u.theme.warning);
+    if (const std::string n = render_gpu_note(); !n.empty()) u.label(lay.row(), "On the CPU: " + n, u.theme.warning);  // (round 331: a fog)
   }
   lay.space(u.px(6));
   header("Environment");
@@ -3787,11 +3803,12 @@ bool Editor::tool_combo_row(ui::Layout &lay, const char *label, const char *key,
  * instances themselves (children of a Scatter object). */
 std::vector<std::string> Editor::scatter_source_choices() const {
   std::vector<std::string> out;
+  std::unordered_set<std::string> seen;  // (round 418: a find per object over the names so far was 112 ms a frame on 10,000 objects)
   const GameObject *target = active_object();
   scene_->for_each([&](GameObject &g) {
     if (&g == target || !g.mesh_filter() || !g.mesh_filter()->mesh) return;
     if (g.parent && g.parent->name.rfind("Scatter", 0) == 0) return;
-    if (std::find(out.begin(), out.end(), g.name) == out.end()) out.push_back(g.name);
+    if (seen.insert(g.name).second) out.push_back(g.name);
   });
   return out;
 }

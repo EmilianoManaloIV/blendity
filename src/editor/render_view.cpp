@@ -5,6 +5,7 @@
 //   * Rendered viewport + final render: progressive path tracer (Blender: Cycles)
 //   * World environment: gradient / Hosek-Wilkie sky / HDRI / colour
 #include "editor.h"
+#include "../core/profiling.h"
 #include "../render/dof.h"
 #include "../render/display.h"
 
@@ -16,7 +17,10 @@
 #include <cmath>
 #include <atomic>
 #include <cstring>
+#include <chrono>
 #include <ctime>
+#include <set>
+#include <thread>
 
 namespace bl {
 
@@ -167,8 +171,220 @@ void Editor::apply_camera_flatten(const GameObject &g, DrawItem &it) {
   it.model = flatten_matrix(p, d, keep) * it.model;
 }
 
+/* Round 418: the render meshes a gather would build one after another (10,000 parts freshly separated or imported: 96 ms
+ * inside the frame), built on every core first; each mesh's own build parallelises inside only when it is big. */
+void Editor::prebuild_render_meshes(const Scene &s, bool game) {
+  struct Cold {
+    const Mesh *m;
+    bool plain = false, editing = false;  // the variants wanted (a mesh shared with the Edit Mode object: both)
+  };
+  std::vector<Cold> cold;
+  /* Each mesh once, all its variants in one job: objects share meshes (10,000 cubes are one) and a mesh's caches are
+   * built on one thread (review 418: the plain and the Edit Mode variant of one mesh in two jobs raced). */
+  std::unordered_map<const Mesh *, size_t> at;
+  s.for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    auto *mr = g.get<MeshRenderer>();
+    auto *mf = g.get<MeshFilter>();
+    if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (game ? !mr->show_in_renders : mr->display_as != 0) return;
+    bool editing = !game && edit_mode_ && g.id == edit_obj_;
+    const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
+    if (editing && m != mf->mesh.get()) editing = false;
+    if (!m || m->render_cache_warm(editing)) return;
+    auto [it, fresh] = at.emplace(m, cold.size());
+    if (fresh) cold.push_back({m});
+    (editing ? cold[it->second].editing : cold[it->second].plain) = true;
+  });
+  if (cold.size() < 16) return;
+  JobSystem::global().parallel_for((int64_t)cold.size(), 8, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) {
+      const Cold &c = cold[(size_t)i];
+      if (c.plain) c.m->render_mesh(false);
+      if (c.editing) c.m->render_mesh(true);
+    }
+  });
+}
+
+/* Round 436 (ADR 0115): whether a per-frame walk has anything to find. */
+bool Editor::walk_due(const WalkMark &m) const {
+  if (m.scene != scene_.get() || m.serial != scene_->serial || m.epoch != edit_epoch::now()) return true;
+  return scene_hash_volatile() || hash_frame_ - m.frame >= (uint64_t)scene_hash_check_every_;
+}
+
+/* After the walk, with the counter as it was before it: what the walk changed itself (a shape rebuilt, a collider
+ * fitted), or a worker's bump meanwhile, walks once more next frame - then it settles. */
+void Editor::walk_done(WalkMark &m, uint64_t epoch_before) const {
+  m.scene = scene_.get(), m.serial = scene_->serial, m.epoch = epoch_before, m.frame = hash_frame_;
+}
+
+/* Round 437: the files a render's materials read and the texture cache doesn't hold, loaded on a worker; the render
+ * shows "preparing" and starts when they land (render_prefetch_poll). Only where jobs run on workers (a window, or a
+ * headless editor that asked) - elsewhere the snapshot decodes them in its frame, on every core, as before. */
+bool Editor::render_prefetch_start(bool preview, bool open_window) {
+  const bool loaded = render_prefetched_;  // (the render its load was for: no second load)
+  render_prefetched_ = false;
+  if (!jobs_async() || render_prefetch_ || loaded) return false;
+  std::vector<MaterialPtr> used;
+  scene_->for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.active_in_hierarchy() ? g.get<MeshRenderer>() : nullptr;
+    if (mr && mr->enabled && mr->show_in_renders) used.insert(used.end(), mr->materials.begin(), mr->materials.end());
+  });
+  std::vector<std::pair<std::string, bool>> files;
+  for (const MaterialPtr &m : used)
+    if (m) m->texture_files(files);
+  std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
+  files.erase(std::remove_if(files.begin(), files.end(), [](const auto &f) { return texture_cached(f.first, f.second) != nullptr; }), files.end());
+  if (files.size() < 2) return false;  // (one file: the snapshot's own decode is as quick)
+  auto pf = std::make_unique<RenderPrefetch>();
+  pf->preview = preview, pf->open_window = open_window, pf->scene = scene_.get(), pf->serial = scene_->serial, pf->files = files.size();
+  RenderPrefetch *raw = pf.get();
+  pf->thread = std::thread([raw, files = std::move(files)] {
+    JobSystem::global().run_background([&] {
+      JobSystem::global().parallel_for((int64_t)files.size(), 1, [&](int64_t a, int64_t b) {
+        for (int64_t i = a; i < b; i++) (void)texture_load(files[(size_t)i].first, files[(size_t)i].second);
+      });
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  render_prefetch_ = std::move(pf);
+  render_prefetches_++;
+  rendering_ = true;
+  render_preview_ = preview;
+  render_status_ = strprintf("%s: loading %zu textures...", preview ? "Preview" : "Render", render_prefetch_->files);
+  ui_.redraw = true;
+  return true;
+}
+
+void Editor::render_prefetch_poll() {
+  if (!render_prefetch_ || !render_prefetch_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<RenderPrefetch> pf = std::move(render_prefetch_);  // (joined as it goes)
+  const bool preview = pf->preview, open_window = pf->open_window;
+  pf.reset();
+  const bool wanted = rendering_;  // (a Stop while the textures loaded: nothing follows)
+  rendering_ = false;
+  if (!wanted) {
+    render_status_ = "Render stopped while its textures loaded";
+    return;
+  }
+  /* (The scene shown now, even if an undo or an open replaced it meanwhile - the render was asked for: review 437.) */
+  render_prefetched_ = true;
+  start_final_render(preview, open_window);
+}
+
+/* Round 437: `perf mark`'s note on its longest frame - the parts over 5 ms, so a stall says where it was. */
+std::string Editor::worst_frame_parts() const {
+  const FrameProfile &p = perf_mark_worst_prof_;
+  const std::pair<const char *, double> parts[] = {{"Scene view", p.ms_scene3d}, {"Game view", p.ms_game}, {"preview", p.ms_preview},
+                                                   {"GPU path", p.ms_gpu}, {"render start", p.ms_render_start}, {"render landing", p.ms_render_land},
+                                                   {"UI", p.ms_ui}, {"undo", p.ms_undo}, {"deferred", p.ms_deferred}, {"present", p.ms_present}};
+  std::string s;
+  for (const auto &[name, ms] : parts)
+    if (ms > 5.0) s += strprintf("%s%s %.1f", s.empty() ? "" : ", ", name, ms);
+  return s.empty() ? std::string() : " (" + s + " ms)";
+}
+
+/* Round 436: the windowed check's line of the docked windows' own times, slowest first (those over 0.05 ms). */
+void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, double frames) {
+  std::vector<std::pair<double, int>> t;
+  for (int k = 0; k < (int)WindowKind::Count && k < 32; k++) {
+    const double ms = (p1.ms_window[k] - p0.ms_window[k]) / frames;
+    if (ms > 0.05) t.push_back({ms, k});
+  }
+  std::sort(t.begin(), t.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  std::string line;
+  for (const auto &[ms, k] : t) line += strprintf("%s%s %.2f", line.empty() ? "" : ", ", window_title((WindowKind)k), ms);
+  std::printf("    the windows' own time: %s ms\n", line.empty() ? "none over 0.05" : line.c_str());
+}
+
+/* Round 436: two gathers of the same view the same (verify mode's check of a kept list): every field a view draws by. */
+static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
+  if (a.mesh != b.mesh || a.id != b.id || a.materials != b.materials || a.lightmap != b.lightmap || a.lightmap_uv != b.lightmap_uv) return false;
+  if (a.lightmap_dir != b.lightmap_dir || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
+  if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
+  if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
+  if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
+  return std::memcmp(a.model.m, b.model.m, sizeof(a.model.m)) == 0;
+}
+
+static bool same_draw_items(const std::vector<DrawItem> &a, const std::vector<DrawItem> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (!same_draw_item(a[i], b[i])) return false;
+  return true;
+}
+
+/* Round 436 (ADR 0115): what a gather reads beside the scene - the view kind, Edit Mode's object and element, the
+ * scene's lights or the headlight, the lighting shown (the bake or its preview) and whether it is stale. */
+uint64_t Editor::items_key(bool game, bool want_tangents) {
+  uint64_t h = scene_render_hash();
+  auto mix = [&](uint64_t v) { h = (h ^ v) * kFnvPrime; };
+  mix((uint64_t)game | (uint64_t)want_tangents << 1 | (uint64_t)edit_mode_ << 2 | (uint64_t)scene_lighting_ << 3 | (uint64_t)lm_stale_live_ << 4 |
+      (uint64_t)lighting_manual() << 5 | (uint64_t)scene_->lighting.baked_gi << 6 | (uint64_t)(int)elem_ << 8);
+  mix(edit_mode_ ? edit_obj_ : 0);
+  /* (Review 436: whether this gather draws outlines by distance, LOD Groups' levels and Camera Flatten - F12 and
+   * MoonRay gather into the Game view's slot with all three off.) */
+  mix((uint64_t)outline_view_.on | (uint64_t)lod_view_.on << 1 | (uint64_t)flatten_view_.on << 2 | (uint64_t)flatten_view_.role << 4);
+  const LightingData &ld = shown_lighting();
+  mix((uint64_t)(uintptr_t)&ld);
+  mix((uint64_t)(uintptr_t)ld.pages.data() ^ (uint64_t)ld.pages.size() << 48);
+  mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32);
+  mix((uint64_t)scene_->lighting.directional_mode);
+  return h;
+}
+
+/* The eye an outline's width and an LOD Group's level read (only when an item did). */
+uint64_t Editor::items_view_key() const {
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
+  const float o[5] = {outline_view_.eye.x, outline_view_.eye.y, outline_view_.eye.z, outline_view_.px_per_m, (float)(outline_view_.on | outline_view_.ortho << 1)};
+  const float l[5] = {lod_view_.eye.x, lod_view_.eye.y, lod_view_.eye.z, lod_view_.half_focal, (float)(lod_view_.on | lod_view_.ortho << 1)};
+  const FlattenView &fv = flatten_view_;  // (a camera-aligned lattice faces it)
+  const float f[14] = {fv.eye.x, fv.eye.y, fv.eye.z, fv.forward.x, fv.forward.y, fv.forward.z, fv.up.x, fv.up.y, fv.up.z, fv.focal,
+                       (float)fv.on, (float)fv.ortho, (float)fv.role, 0.0f};
+  mix(o, sizeof(o));
+  mix(l, sizeof(l));
+  mix(f, sizeof(f));
+  return h;
+}
+
+/* Round 436 (ADR 0115): a view's draw items kept while nothing they are made from changed - the scene's hash (the
+ * change counter keeps that cheap) and items_key's rest; with an item that depends on the eye, the eye too. A scene
+ * with a Camera Flatten or View Angle Shapes gathers every time in a camera's view: the gather fills per-collect side
+ * tables. In verify mode (the render cache's) a kept list is gathered again and compared: a difference is a stale
+ * picture. */
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  /* (Of what is shown: the preview's own staleness while there is one.) */
+  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
+                   (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
+  bool view_dep = false, lod = false;
+  ItemsCache &c = items_cache_[game][want_tangents];
+  const uint64_t base = items_key(game, want_tangents);
+  const uint64_t view = items_view_key();
+  /* (A render job's gather holds the outline shells its items point at - collect_hold_ - so it gathers: review 436.) */
+  const bool hit = c.valid && c.base == base && (!c.view_dep || c.view == view) && !collect_hold_;
+  if (hit && !cache_verify_) {
+    prof_.items_kept++;
+    flatten_pivots_.clear(), view_refs_.clear();  // (as the gather leaves them for a scene without either)
+    flatten_any_ = view_shapes_any_ = false;
+    return c.items;
+  }
+  std::vector<DrawItem> items = collect_items_build(game, want_tangents, view_dep, lod);
+  if (hit && !same_draw_items(items, c.items)) note_render_cache_mismatch();
+  c.base = base, c.view = view, c.view_dep = view_dep;
+  c.flattening = flatten_any_ || view_shapes_any_;
+  c.lod = lod;
+  c.valid = !c.flattening && !c.lod;
+  if (c.valid) c.items = items;
+  else c.items.clear();
+  return items;
+}
+
+std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod) {
+  BL_ZONE("collect_items");
   ProfileScope prof{prof_.ms_collect, {}};
+  prebuild_render_meshes(*scene_, game);
   std::vector<DrawItem> items;
   flatten_pivots_.clear();
   view_refs_.clear();
@@ -179,9 +395,6 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
       flatten_any_ = flatten_any_ || g.find_role(Component::RenderRole::CameraFlatten);
       view_shapes_any_ = view_shapes_any_ || g.find_role(Component::RenderRole::ViewShapes);  // (round 339)
     });
-  /* (Of what is shown: the preview's own staleness while there is one.) */
-  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
-                   (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -194,11 +407,13 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const bool shaped_keys = !editing && set_view_shapes(g, *mr, *mf->mesh);
     const bool view_shaped = shaped_keys || (!editing && view_lattice_on(g, game));  // (round 342: a camera-aligned lattice too)
     const Mesh *m = g.evaluated_mesh(editing ? 2 : (game ? 1 : 0) + (view_shaped ? 3 + 2 * flatten_view_.role : 0));
+    if (game && m && lod_view_.on && g.get<LODGroupComponent>()) lod = true;  // (round 436: its level is the eye's, its mesh a cache's)
     if (game && m) m = lod_for_view(g, *m);  // (round 363: an LOD Group's level for its height on screen; nullptr culled)
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
     it.view_shaped = view_shaped;
+    view_dep = view_dep || view_shaped;
     if (flatten_view_.on && !editing) apply_camera_flatten(g, it);  // (round 334: the Game view and renders only)
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     /* (A view-shaped mesh has the plain one's topology and UVs: its lightmap is the plain mesh's - round 339.) */
@@ -213,6 +428,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const Component *oc = g.find_role(Component::RenderRole::Outline);
     if (!oc || !oc->enabled) return;
     const Outline &ol = *static_cast<const Outline *>(oc);
+    view_dep = view_dep || outline_view_.on;  // (round 436: the line's width is the eye's)
     const float scale = world_scale_of(it.flattened ? it.shade_model : it.model);  // (a flattened object's true size: the line's width)
     const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
     const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale, game ? 1 : 0) : 1.0f;
@@ -238,6 +454,7 @@ DrawItem Editor::mesh_draw_item(const GameObject &g, const Mesh &m, const MeshRe
     if (mp && mp->double_sided) it.double_sided = true;
   it.materials = &mr.materials;
   it.receive_shadows = mr.receive_shadows;
+  it.cast_shadows = mr.cast_shadows;  // (round 415)
   it.id = (uint32_t)g.id;
   return it;
 }
@@ -249,6 +466,7 @@ bool Editor::outline_draw_item(const GameObject &g, const Mesh &m, const DrawIte
   const Outline &ol = *static_cast<const Outline *>(oc);
   const Mesh *shell = ol.shell(m, world_scale_of(it.flattened ? it.shade_model : it.model), slot, thickness_scale);  // (a flattened object's true size: the same shell from any camera)
   if (!shell) return false;
+  if (collect_hold_) collect_hold_->push_back(ol.shell_held(shell));  // (round 412: a render job keeps the shell while it draws)
   o = DrawItem();
   o.mesh = &shell->render_mesh();
   o.model = it.model;
@@ -285,11 +503,38 @@ RenderLight to_render_light(const GameObject &g, const Light &l, bool gamma_inte
   rl.cos_inner = std::cos(inner * kDeg2Rad);
   rl.disk = l.area_shape == 1;
   rl.shadows = l.shadows != 0;  // (round 401: Unity's No Shadows)
+  if (l.shadows == 2) rl.shadow_radius = l.shadow_radius, rl.shadow_angle = l.shadow_angle;  // (round 424: the bake's - Soft Shadows only, as Unity's LightmapperUtils takes them)
   /* The object's scale stretches an area light, as in Blender. */
   const Mat4 &w = g.world_matrix();
   rl.width = l.area_width * length(w.dir({1, 0, 0}));
   rl.height = l.area_height * length(w.dir({0, 1, 0}));
   return rl;
+}
+
+/* Round 415 (ADR 0109): point and spot lights whose range sphere lies wholly outside the view's frustum light nothing
+ * the view shows (every visible point is in the frustum, and a lit point is within the range): left out of the view's
+ * list before the CPU's per-pixel loop and the card's, so the picture is the same to the bit with fewer lights
+ * walked. Suns and area lights stay. Returns how many were left out. */
+static size_t cull_lights_to_view(LightingEnv &env, const Mat4 &vp) {
+  float planes[6][4];
+  for (int k = 0; k < 6; k++) {  // (Gribb-Hartmann: the clip rows; the near plane is the z row alone - z in 0..1, as the renderers clip)
+    const int row = k / 2;
+    const float sign = k % 2 ? -1.0f : 1.0f;
+    for (int c = 0; c < 4; c++) planes[k][c] = k == 4 ? vp.at(2, c) : vp.at(3, c) + sign * vp.at(row, c);
+    const float len = std::sqrt(planes[k][0] * planes[k][0] + planes[k][1] * planes[k][1] + planes[k][2] * planes[k][2]);
+    if (!(len > 1e-20f) || !finite_bits(len)) return 0;  // (a degenerate view: every light kept)
+    for (int c = 0; c < 4; c++) planes[k][c] /= len;
+  }
+  auto outside = [&](const RenderLight &l) {
+    if ((l.type != RenderLight::Point && l.type != RenderLight::Spot) || !(l.range > 0.0f) || !finite_bits(l.range)) return false;
+    const float range = std::max(l.range, 1e-3f);  // (the shaders' floor on the range)
+    for (int k = 0; k < 6; k++)
+      if (planes[k][0] * l.position.x + planes[k][1] * l.position.y + planes[k][2] * l.position.z + planes[k][3] < -range) return true;
+    return false;
+  };
+  const size_t before = env.lights.size();
+  env.lights.erase(std::remove_if(env.lights.begin(), env.lights.end(), outside), env.lights.end());
+  return before - env.lights.size();
 }
 
 LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
@@ -506,6 +751,8 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
      * modifier's fields change on their own. */
     uint64_t k[3];
     g.evaluated_keys(k);
+    const uint64_t egen = g.eval_generation();  // (round 413: a stack's result adopted from a worker is a new picture)
+    mix(&egen, 8);
     mix(k, sizeof(k));
     /* Settled tangents (ADR 0034): the same mesh drawn a little differently - the views draw again, nothing that
      * keys on the evaluated meshes (a modifier stack's cache) sees a change. */
@@ -530,7 +777,45 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   return h;
 }
 
+/* Round 435 (ADR 0115): while nothing an edit goes through has moved the change counter, the scene is the one last
+ * hashed - kept, not walked (Shinano's views walked it 0.98 ms a frame, 50,000 cubes far more). Walked again when the
+ * counter, the scene, the tail (the environment, a bake's or a texture's generation) moves, while the scene changes
+ * behind the counter (Play, a clip, a stroke, Live Link), and on the first call of every `scene_hash_check_every_`th
+ * frame - where a walk that disagrees with the kept hash is a writer the counter missed: counted, warned once, and the
+ * walked hash used. */
 uint64_t Editor::scene_render_hash(bool memo) {
+  if (!memo) return scene_render_hash_walk(false);
+  const uint64_t tail = scene_hash_tail();
+  SceneHashMemo &m = scene_hash_memo_;
+  /* (Outside a frame - a test asking between frames - every call walks. A write made between frames and asked about
+   * only inside the next one is the check's to find: every frame in a headless editor, every 8th in a window.) */
+  const bool same = in_frame_ && m.valid && m.scene == scene_.get() && m.serial == scene_->serial && m.epoch == edit_epoch::now() &&
+                    m.tail == tail && !scene_hash_volatile();
+  const bool check_due = m.frame != hash_frame_ && hash_frame_ - m.checked >= (uint64_t)scene_hash_check_every_;
+  if (same && !check_due) {
+    prof_.scene_hash_reuses++;
+    m.frame = hash_frame_;
+    return m.hash;
+  }
+  const uint64_t epoch = edit_epoch::now();  // (read before the walk: a bump during it walks again next call)
+  const uint64_t h = scene_render_hash_walk(true) ^ tail;
+  if (same && h != m.hash) {
+    prof_.scene_hash_misses++;
+    if (scene_hash_misses_++ == 0) Log::warn("The views' scene hash: a change the counter missed (ADR 0115) - walked and drawn");
+  }
+  m.scene = scene_.get(), m.serial = scene_->serial, m.epoch = epoch, m.tail = tail, m.hash = h;
+  m.frame = m.checked = hash_frame_;
+  m.valid = true;
+  return h;
+}
+
+/* Round 435: the scene changes on its own here - every call walks. */
+bool Editor::scene_hash_volatile() const {
+  if (playing_ || anim_.playing || seqr_.playing || sculpt_stroking_ || paint_stroking_ || paint_2d_stroking_ || wp_stroking_) return true;
+  return livelink_ && livelink_->clients() > 0;
+}
+
+uint64_t Editor::scene_render_hash_walk(bool memo) {
   ProfileScope prof{prof_.ms_hash, {}};
   prof_.scene_hashes++;
   uint64_t h = kFnvBasis;
@@ -540,6 +825,12 @@ uint64_t Editor::scene_render_hash(bool memo) {
     const uint64_t oh = object_render_hash(g, memo);
     mix(&oh, 8);
   });
+  return memo ? h : h ^ scene_hash_tail();
+}
+
+uint64_t Editor::scene_hash_tail() {
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const EnvironmentSettings &es = scene_->environment;
   mix(&es.mode, 4);
   mix(&es.strength, 4);
@@ -608,11 +899,12 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
   uint64_t key = kFnvBasis;
   bool cacheable = true;
   for (const DrawItem &it : items) {
-    bool casts = false;
-    if (!it.materials || it.materials->empty()) casts = true;
-    else
+    bool casts = it.cast_shadows;  // (round 415: the renderer's Shadows Off, as Unity's; then its materials')
+    if (casts && it.materials && !it.materials->empty()) {
+      casts = false;
       for (auto &m : *it.materials)
         if (!m || m->cast_shadows) casts = true;
+    }
     if (!casts) continue;
     caster_ptrs.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
@@ -734,6 +1026,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
 
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                              bool scene_lights, const Camera *cam, const FilterStack *filters) {
+  BL_ZONE("render_deferred");
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
@@ -743,6 +1036,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   outline_view_.on = false;
   lod_view_.on = false;
   flatten_view_.on = false;
+  if (!light_cull_off_for_test_) prof_.lights_culled += cull_lights_to_view(env, p * v);  // (round 415, ADR 0109: lights that can't reach the view left out of its loops)
   /* Task 0096: a view the GPU will draw renders its own shadow map; the CPU only fits its frame. */
   const bool gpu_maybe = gpu_view_may_draw(rt, env, items, filters);
   const bool shadows = scene_lights && scene_->render.shadows;
@@ -1008,18 +1302,30 @@ void Editor::render_camera(Renderer3D &r3d, RenderTarget &rt, FilterTarget &ft, 
     t = &ft.rt;
   }
   t->want_hdr = fs.needs_hdr;  // bloom reads linear light (only allocated when asked)
+  /* Round 416 (ADR 0110): a stack the card can run whole - every pass has a card version, no raster stage, the view's
+   * own size, no depth of field (the CPU's, before the passes) - runs on the card over its picture; the CPU's passes
+   * are skipped then. */
+  filters_card_ok_ = fs.card.size() == fs.passes.size() && !fs.card.empty() && !scaled && !boxed && !(cam && cam->dof) && fs.vertex_snap <= 0.0f && !fs.affine_uv &&
+                     !fs.tex.active() && !fs.screen_door && !filters_off_card_for_test_;
+  filters_time_ = play_time_, filters_animate_ = animate, filters_pixel_scale_ = t->height / 1080.0f;
+  t->filters_on_card = false;
   render_deferred(r3d, *t, v, pp, eye, game, scene_lights, look, &fs);
+  filters_card_ok_ = false;
   t->want_hdr = false;
-  if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
-  FilterFrame frame;
-  frame.inv_view_proj = (pp * v).inverse();
-  frame.eye = eye;
-  frame.forward = normalize(forward);
-  frame.far_distance = look ? look->far_clip : 1000.0f;
-  frame.pixel_scale = t->height / 1080.0f;
-  frame.time = play_time_;
-  frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
-  for (const FilterPass &pass : fs.passes) pass(*t, &frame);
+  const bool on_card = t->filters_on_card;  // (the card ran the stack over its picture: the CPU's passes are skipped)
+  t->filters_on_card = false;
+  if (!on_card) {
+    if (cam) camera_dof(*t, v, pp, eye, forward, cam, a2, cam->vertical_fov_deg(a2));
+    FilterFrame frame;
+    frame.inv_view_proj = (pp * v).inverse();
+    frame.eye = eye;
+    frame.forward = normalize(forward);
+    frame.far_distance = look ? look->far_clip : 1000.0f;
+    frame.pixel_scale = t->height / 1080.0f;
+    frame.time = play_time_;
+    frame.animate = animate;  // only the Game view while playing: F12, previews and piloting stay reproducible
+    for (const FilterPass &pass : fs.passes) pass(*t, &frame);
+  }
   if (!scaled) return;
   /* Scale up into the view; its depth and ids follow, so picking and overlays still work. */
   if (boxed)
@@ -1156,42 +1462,6 @@ static void pt_solid_background(PTSettings &ps, const Camera *cam) {
                     std::exp2(std::max(-16.0f, std::min(16.0f, ps.exposure)));
 }
 
-FilterFrame Editor::trace_filter_frame(PathTracer &pt, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const Camera *cam) {
-  FilterFrame frame;
-  const Mat4 vp = p * v;
-  frame.inv_view_proj = vp.inverse();
-  frame.eye = eye;
-  frame.forward = normalize(forward);
-  frame.far_distance = cam ? cam->far_clip : 1000.0f;
-  frame.pixel_scale = rt.height / 1080.0f;
-  frame.time = play_time_;
-  frame.animate = false;
-  std::vector<float> dist;
-  std::vector<uint32_t> ids;
-  pt.first_hit_planes(dist, ids);
-  const int W = rt.width, H = rt.height;
-  if ((int)dist.size() < W * H) return frame;
-  rt.depth.assign((size_t)W * H, 1.0f);
-  rt.ids = std::move(ids);
-  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
-    for (int64_t y = y0; y < y1; y++)
-      for (int x = 0; x < W; x++) {
-        const size_t i = (size_t)y * W + x;
-        const float t = dist[i];
-        if (!(t < 1e5f)) continue;  // the sky stays at the far plane
-        /* The hit point along this pixel's camera ray, then its z / w through the same projection the
-         * rasterizer would have used. */
-        const float nx = (x + 0.5f) / W * 2.0f - 1.0f, ny = 1.0f - (y + 0.5f) / H * 2.0f;
-        const Vec4 nq = frame.inv_view_proj * Vec4(nx, ny, 0.0f, 1.0f), fq = frame.inv_view_proj * Vec4(nx, ny, 1.0f, 1.0f);
-        if (nq.w == 0.0f || fq.w == 0.0f) continue;
-        const Vec3 pa = nq.xyz() / nq.w, dir = normalize(fq.xyz() / fq.w - pa);  // as the tracer's ray: from the near plane
-        const Vec4 q = vp * Vec4(pa + dir * t, 1.0f);
-        if (q.w != 0.0f) rt.depth[i] = std::max(0.0f, std::min(1.0f, q.z / q.w));
-      }
-  });
-  return frame;
-}
-
 /* ===================================================================== */
 /* Final render (F12)                                                     */
 /* ===================================================================== */
@@ -1274,15 +1544,575 @@ void Editor::camera_dof(RenderTarget &rt, const Mat4 &view, const Mat4 &proj, Ve
 }
 
 void Editor::update_camera_focus() {
+  if (!walk_due(focus_walk_)) {  // (round 436: a component lookup on every object, every frame - 4 ms at 50,000)
+    walks_skipped_++;
+    return;
+  }
+  WalkScope scope{*this, focus_walk_};
+  apply_camera_focus();
+}
+
+void Editor::apply_camera_focus() {
   scene_->for_each([&](GameObject &g) {
     Camera *c = g.get<Camera>();
     if (!c || !c->dof || !c->focus_track) return;
     const float d = dot(c->focus_point - g.world_position(), normalize(g.world_rotation().rotate({0, 0, 1})));
-    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d;
+    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d, edit_epoch::bump();
   });
 }
 
+/* ---- Round 412 (ADR 0106): the picture is made on a worker. The main thread takes the snapshot in the frame the render
+ * starts (render_snapshot), the worker draws or samples from it alone, and the main thread takes what it publishes each
+ * frame (render_job_poll). Headless editors that didn't ask for workers run the same code in the starting frame. ---- */
+
+/* A worker's FilterFrame and depth / id planes from the tracer's first hits (the member below, for the Camera Preview). */
+static FilterFrame trace_frame(PathTracer &pt, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, float far_distance, float time) {
+  FilterFrame frame;
+  const Mat4 vp = p * v;
+  frame.inv_view_proj = vp.inverse();
+  frame.eye = eye;
+  frame.forward = normalize(forward);
+  frame.far_distance = far_distance;
+  frame.pixel_scale = rt.height / 1080.0f;
+  frame.time = time;
+  frame.animate = false;
+  std::vector<float> dist;
+  std::vector<uint32_t> ids;
+  pt.first_hit_planes(dist, ids);
+  const int W = rt.width, H = rt.height;
+  if ((int)dist.size() < W * H) return frame;
+  rt.depth.assign((size_t)W * H, 1.0f);
+  rt.ids = std::move(ids);
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        const float t = dist[i];
+        if (!(t < 1e5f)) continue;  // the sky stays at the far plane
+        /* The hit point along this pixel's camera ray, then its z / w through the same projection the
+         * rasterizer would have used. */
+        const float nx = (x + 0.5f) / W * 2.0f - 1.0f, ny = 1.0f - (y + 0.5f) / H * 2.0f;
+        const Vec4 nq = frame.inv_view_proj * Vec4(nx, ny, 0.0f, 1.0f), fq = frame.inv_view_proj * Vec4(nx, ny, 1.0f, 1.0f);
+        if (nq.w == 0.0f || fq.w == 0.0f) continue;
+        const Vec3 pa = nq.xyz() / nq.w, dir = normalize(fq.xyz() / fq.w - pa);  // as the tracer's ray: from the near plane
+        const Vec4 q = vp * Vec4(pa + dir * t, 1.0f);
+        if (q.w != 0.0f) rt.depth[i] = std::max(0.0f, std::min(1.0f, q.z / q.w));
+      }
+  });
+  return frame;
+}
+
+FilterFrame Editor::trace_filter_frame(PathTracer &pt, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, Vec3 forward, const Camera *cam) {
+  return trace_frame(pt, rt, v, p, eye, forward, cam ? cam->far_clip : 1000.0f, play_time_);
+}
+
+/* A path tracer's linear output (w x h x 3, before exposure) as a target's HDR plane, for bloom. */
+void Editor::fill_hdr_from_linear(RenderTarget &rt, const std::vector<float> &lin, ViewTransform vt, float exposure) {
+  const size_t n = (size_t)rt.width * rt.height;
+  if (lin.size() < n * 3) return;
+  rt.hdr.resize(n);
+  for (size_t i = 0; i < n; i++) rt.hdr[i] = Vec3(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
+  rt.hdr_view_transform = vt;
+  rt.hdr_exposure = exposure;
+}
+
+/* What a worker needs of the editor, taken on the main thread in the frame the render starts: the items as the views
+ * gather them (through the camera's flatten and view shapes), their meshes held, their materials copied and resolved
+ * here (shading never resolves on a worker), the lights and the world, the CPU's shadow map copied, the GI frame and
+ * the realtime lightmaps, the probes; the rasterizer's or the tracer's own settings. */
+std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool traced, int w, int h, const Mat4 &v, const Mat4 &p, Vec3 eye, GameObject *owner,
+                                                         Camera *cam) {
+  const RenderSettings &rs = scene_->render;
+  auto j = std::make_unique<RenderJob>();
+  j->w = w, j->h = h, j->preview = preview, j->traced = traced, j->transparent = rs.transparent, j->denoise = rs.denoise;
+  j->view = v, j->proj = p, j->proj_filtered = p, j->eye = eye;
+  j->forward = owner ? owner->world_rotation().rotate({0, 0, 1}) : cam_.forward();
+  j->far_distance = cam ? cam->far_clip : 1000.0f;
+  j->play_time = play_time_;
+  j->filters = render_filters_;
+  j->filtered = render_filtered_ && (traced || owner);
+  struct FinalRender {  // the quality tier's caps are for the editor's views, not for renders
+    bool &flag;
+    explicit FinalRender(bool &f) : flag(f) { flag = true; }
+    ~FinalRender() { flag = false; }
+  } final_render(final_render_);
+  /* The target the items are gathered for: the outlines' width goes by its height. */
+  j->aa = traced || preview ? 1 : std::max(1, std::min(4, rs.raster_aa));
+  int target_h = h * j->aa;
+  if (j->filtered && !traced) {
+    filter_layout(j->filters, cam ? j->filters.fit : (int)FilterStack::Fill, w, h, j->iw, j->ih, j->dst);
+    j->boxed = j->dst.x != 0 || j->dst.y != 0 || j->dst.w != w || j->dst.h != h;
+    j->scaled = j->iw != w || j->ih != h;
+    const float a2 = j->boxed ? j->dst.w / (float)std::max(1, j->dst.h) : w / (float)h;
+    j->proj_filtered = !j->boxed ? p : cam ? cam->projection(a2) : cam_.proj(a2);
+    target_h = j->ih;
+  }
+  LightingEnv env = make_lighting(eye, true, !traced);  // the path tracer takes every light: it computes true GI
+  if (!traced && cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
+  if (traced) set_flatten_view(v, p, eye, 1);  // (round 334: Camera Flatten toward the render's camera; round 339: F12's own view-shaped meshes)
+  else {
+    outline_view_ = {true, eye, 0.5f * (float)target_h * j->proj_filtered.m[5], p.m[15] == 1.0f};
+    set_flatten_view(v, j->proj_filtered, eye, 0, cam);  // (a filtered camera's own projection, as render_camera passed it)
+  }
+  collect_hold_ = &j->meshes;  // (the outline shells the items point at are held with the meshes)
+  j->items = collect_items(true, true);
+  collect_hold_ = nullptr;
+  outline_view_.on = false;
+  flatten_view_.on = false;
+  /* The meshes held (an edit meanwhile writes through a copy); the materials copied, so a texture swapped in the
+   * Inspector doesn't pull one from under the worker, and resolved here. */
+  std::unordered_map<const std::vector<MaterialPtr> *, std::shared_ptr<std::vector<MaterialPtr>>> lists;
+  std::unordered_map<const Material *, MaterialPtr> copies;
+  std::set<uint64_t> ids, shaped_ids;
+  {
+    std::vector<MaterialPtr> used;  // (round 422: the items' image files decoded on every core before they're frozen)
+    for (const DrawItem &it : j->items)
+      if (it.materials) used.insert(used.end(), it.materials->begin(), it.materials->end());
+    prefetch_material_textures(used);
+  }
+  for (DrawItem &it : j->items) {
+    ids.insert(it.id);
+    if (it.view_shaped) shaped_ids.insert(it.id);
+    if (!it.materials) continue;
+    std::shared_ptr<std::vector<MaterialPtr>> &l = lists[it.materials];
+    if (!l) {
+      l = std::make_shared<std::vector<MaterialPtr>>();
+      for (const MaterialPtr &mp : *it.materials) {
+        if (!mp) {
+          l->push_back(nullptr);
+          continue;
+        }
+        MaterialPtr &c = copies[mp.get()];
+        if (!c) c = snapshot_material(mp);
+        l->push_back(c);
+      }
+      j->material_lists.push_back(l);
+    }
+    it.materials = l.get();
+  }
+  const int shaped_kind = 4 + 2 * (traced ? 1 : 0);  // (round 339: the render's camera-view meshes)
+  for (uint64_t id : ids) {
+    const GameObject *g = scene_->find(id);
+    const MeshFilter *mf = g ? g->mesh_filter() : nullptr;
+    if (!mf || !mf->mesh) continue;
+    j->meshes.push_back(mf->mesh);
+    if (std::shared_ptr<const Mesh> m = g->evaluated_mesh_shared(1)) j->meshes.push_back(m);
+    /* Round 422: the camera-view slot only for an item drawn view-shaped - asking for it evaluated it, so every
+     * skinned object was skinned again into a slot nothing draws (Shinano's first F12: 393 ms). */
+    if (!shaped_ids.count(id)) continue;
+    if (std::shared_ptr<const Mesh> m = g->evaluated_mesh_shared(shaped_kind)) j->meshes.push_back(m);
+  }
+  if (!traced) {
+    /* The sun's shadow map: its casters, frame and resolution decided here as update_shadow_map decides them for a
+     * render (the frame fits the casters exactly), rendered by the worker (400 spheres at the render's resolution were a
+     * 248 ms frame). The views keep their own cached maps. */
+    const int li = rs.shadows ? shadow_sun(env) : -1;
+    if (li >= 0) {
+      AABB bounds;
+      for (size_t i = 0; i < j->items.size(); i++) {
+        const DrawItem &it = j->items[i];
+        bool casts = it.cast_shadows;  // (round 415)
+        if (casts && it.materials && !it.materials->empty()) {
+          casts = false;
+          for (const MaterialPtr &m : *it.materials)
+            if (!m || m->cast_shadows) casts = true;
+        }
+        if (!casts) continue;
+        j->shadow_casters.push_back((uint32_t)i);
+        bounds.add(it.mesh->bounds.transformed(it.model));
+      }
+      if (!j->shadow_casters.empty() && bounds.valid()) {
+        j->shadow_dir = env.lights[(size_t)li].direction;
+        j->shadow_frame = bounds;
+        j->shadow_res = shadow_resolution_for_view();
+        env.shadow_light = li;  // (round 401: a sun without shadows casts none)
+        env.shadow = &j->shadow;
+      }
+    }
+    render_shadow_res_ = env.shadow ? j->shadow_res : 0;
+    /* Realtime GI traces only what the bake doesn't hold (task 0017); Manual (task 0020) keeps the last realtime
+     * lightmaps and live probes up. As render_deferred decides it, the grid and probes left alone while the job runs. */
+    const bool live_gi = live_gi_needed();
+    bool bounce_not_baked = false;
+    if (live_gi) {  // (the grid, voxels and RSM built by the worker in the job's own state: 400 spheres' were a 300 ms frame)
+      const LightingSettings &gls = scene_->lighting;
+      j->want_gi = true;
+      j->gi_n = gls.gi_resolution <= 0 ? 64 : gls.gi_resolution == 1 ? 128 : 256;
+      j->gi_rsm_res = std::max(32, std::min(2048, gls.gi_rsm_resolution));  // (a render: the tier's cap doesn't apply)
+      j->gi_bounce = gls.gi_bounce;
+      j->gi_params = gi_params_for(gls, false);
+      j->gi_lighting_shown = !shown_lighting().empty() && gls.baked_gi;
+      const RenderLight *sun = nullptr;
+      for (const RenderLight &l : env.lights)
+        if (l.type == RenderLight::Directional) {
+          sun = &l;
+          break;
+        }
+      bounce_not_baked = !(sun && j->gi_lighting_shown) || sun->bake_mode == 0;  // (as the frame will say it)
+    }
+    const bool frozen = lighting_frozen();
+    if (frozen && !live_gi) {
+      bounce_not_baked = true;
+      for (const RenderLight &l : env.lights)
+        if (l.type == RenderLight::Directional) {
+          if (!shown_lighting().empty() && scene_->lighting.baked_gi) bounce_not_baked = l.bake_mode == 0;
+          break;
+        }
+      env.rt_bounce_not_baked = bounce_not_baked;
+      const float so = scene_->lighting.gi_specular_occlusion;
+      env.rt_specular_occlusion = finite_bits(so) ? std::max(0.0f, std::min(1.0f, so)) : 1.0f;
+    }
+    if (live_gi || frozen) {
+      j->rtlm = vgi_[1].rtlm.shown;  // (copied: a pass may publish while the worker reads)
+      const RealtimeLightmaps::Published &rl = j->rtlm;
+      if (!rl.empty())
+        for (DrawItem &it : j->items) {
+          if (!it.realtime_lm || !it.mesh) continue;
+          auto e = rl.entries.find(it.id);
+          if (e == rl.entries.end() || e->second.page < 0 || (size_t)e->second.page >= rl.bounce.size()) continue;
+          if (e->second.hash != scene_ident_) continue;
+          if (e->second.tri_uv.size() != it.mesh->tri_count() * 3) continue;
+          it.rt_bounce = &rl.bounce[(size_t)e->second.page];
+          it.rt_sky = &rl.sky[(size_t)e->second.page];
+          it.rt_uv = &e->second.tri_uv;
+          it.use_probes = false;
+        }
+    }
+    const LightingSettings &pls = scene_->lighting;
+    const bool baked_probes = !probes_.empty() && probes_.scene_key != 0 && pls.baked_gi;
+    const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
+    if (baked_probes || live_probes) {
+      j->probe_frame.data = &probes_;
+      j->probe_frame.normal_bias = finite_bits(pls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, pls.probe_normal_bias)) : 0.25f;
+      j->probe_frame.view_bias = finite_bits(pls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, pls.probe_view_bias)) : 0.1f;
+      j->probe_frame.leak_reduction = pls.probe_leak_reduction;
+      j->probe_frame.quad_reuse = probe_quad_reuse_;
+      j->probe_frame.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
+      env.probes = &j->probe_frame;
+      j->holds_lighting = true;
+    }
+    for (const DrawItem &it : j->items)
+      if (it.lightmap) j->holds_lighting = true;
+    j->opt = raster_opt_;
+    j->opt.shade = ShadeMode::Deferred;
+    if (j->filtered) j->filters.apply_raster(j->opt);
+    const Camera *look = cam ? cam : owner ? owner->camera() : nullptr;
+    if (look && look->clear_flags == 1) j->clear_mode = 1, j->clear_color = to_display_pixel(look->background, ViewTransform::Standard, 0.0f);
+    if (cam && cam->dof && !cam->orthographic) {
+      const int th = j->filtered ? j->ih : h * j->aa, tw = j->filtered ? j->iw : w * j->aa;
+      const float aspect = j->filtered && j->boxed ? j->dst.w / (float)std::max(1, j->dst.h) : w / (float)h;
+      DofParams &d = j->dof_params;
+      d.inv_view_proj = (j->proj_filtered * v).inverse();
+      d.eye = eye;
+      d.forward = normalize(j->forward);
+      d.aperture_radius = cam->aperture_radius(aspect);
+      d.focus_distance = std::max(0.01f, cam->focus_distance);
+      d.tan_half_vfov = std::tan(std::max(0.1f, cam->vertical_fov_deg(aspect)) * 0.5f * kDeg2Rad);
+      d.far_distance = cam->far_clip;
+      d.max_radius_px = std::max(4.0f, th * 0.05f);
+      d.samples = tw * th > 600000 ? 48 : 64;
+      j->dof = true;
+    }
+  }
+  else {
+    PTSettings ps = make_pt_settings(rs);
+    if (cam) ps.exposure += cam->exposure_stops();
+    pt_solid_background(ps, cam);
+    if (rs.transparent) {  // Film > Transparent: camera rays that miss add nothing (the world still lights the scene)
+      ps.solid_background = true;
+      ps.background = Vec3(0.0f);
+      ps.transparent_film = true;
+    }
+    int tw = w, th = h;
+    if (j->filtered) {
+      /* Traced at the filters' resolution (fewer samples to wait for), scaled up when shown. */
+      filter_layout(j->filters, w, h, tw, th, j->dst);
+      j->small.resize(tw, th);
+      if ((j->dst.w != w || j->dst.h != h) && cam) j->proj_filtered = cam->projection(j->dst.w / (float)j->dst.h);
+    }
+    retro_for_trace(j->filters, v, j->proj_filtered, tw, th, ps, j->items, render_snapped_);  // (no-op without a filter)
+    j->snapped = render_snapped_;
+    j->ps = ps;
+    j->tw = tw, j->th = th;
+    j->lens = camera_lens(cam, tw / (float)th);
+    j->target = std::max(1, preview ? rs.preview_samples : rs.samples);
+  }
+  j->environment = env_;
+  env.environment = &j->environment;
+  j->env = std::move(env);
+  j->img.resize(w, h);
+  j->back.resize(w, h);
+  return j;
+}
+
+/* The rasterized picture, as render_deferred, camera_dof and the camera's filters drew it on the main thread before
+ * round 412 (the same calls, in the same order: the pixels are the same). */
+void Editor::raster_picture(RenderJob &j) {
+  ScopedTimer t;
+  if (j.want_gi && voxel_gi_build(j.gi_state, j.items, j.env, j.gi_n, j.gi_rsm_res, j.gi_bounce, j.gi_params, j.gi_lighting_shown)) j.env.gi = &j.gi_state.frame;
+  if (j.env.shadow) {  // (the sun's map, from the casters the snapshot picked)
+    std::vector<DrawItem> casters;
+    casters.reserve(j.shadow_casters.size());
+    for (uint32_t i : j.shadow_casters) casters.push_back(j.items[i]);
+    render_shadow_map(j.shadow, casters, j.shadow_dir, j.shadow_frame, j.shadow_res);
+    if (!j.shadow.valid()) j.env.shadow = nullptr, j.env.shadow_light = -1;
+  }
+  Renderer3D r3d;
+  auto draw = [&](RenderTarget &rt, const Mat4 &p, bool override_on, uint32_t override_color) {
+    r3d.begin(&rt, j.view, p, j.env, j.opt);
+    const Mat4 inv = (p * j.view).inverse();
+    if (override_on) {  // a transparent render's black / white pass (task 0035)
+      r3d.clear(override_color);
+      if (!rt.hdr.empty()) std::fill(rt.hdr.begin(), rt.hdr.end(), Vec3(0.0f));  // no light there for bloom in either pass
+    }
+    else if (j.clear_mode == 1) r3d.clear(j.clear_color);
+    else r3d.clear_environment(inv, j.environment, j.env.view_transform, j.env.exposure);
+    for (const DrawItem &it : j.items) r3d.add(it);
+    r3d.flush();
+  };
+  auto once = [&](bool override_on, uint32_t override_color) {
+    if (!j.filtered) {
+      /* Rasterized: supersample then box-filter down (SSAA). */
+      Image big;
+      big.resize(j.w * j.aa, j.h * j.aa);
+      RenderTarget rt;
+      rt.attach(big, {0, 0, big.width, big.height});
+      draw(rt, j.proj, override_on, override_color);
+      if (j.dof) apply_depth_of_field(rt, j.dof_params);
+      const int w = j.w, aa = j.aa;
+      JobSystem::global().parallel_for(j.h, 8, [&](int64_t y0, int64_t y1) {
+        for (int64_t y = y0; y < y1; y++)
+          for (int x = 0; x < w; x++) {
+            uint32_t r = 0, g = 0, b = 0;
+            for (int sy = 0; sy < aa; sy++)
+              for (int sx = 0; sx < aa; sx++) {
+                uint32_t c = big.pixels[(size_t)(y * aa + sy) * big.width + x * aa + sx];
+                r += (c >> 16) & 255;
+                g += (c >> 8) & 255;
+                b += c & 255;
+              }
+            int n = aa * aa;
+            j.img.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
+          }
+      });
+      return;
+    }
+    /* A filtered camera: its own resolution and passes; no supersampling (it would soften the pixels the filter is
+     * there to make). */
+    RenderTarget rt;
+    rt.attach(j.img, {0, 0, j.w, j.h});
+    RenderTarget small_rt;
+    RenderTarget *t = &rt;
+    if (j.scaled) {
+      if (j.small.width != j.iw || j.small.height != j.ih) j.small.resize(j.iw, j.ih);
+      small_rt.attach(j.small, {0, 0, j.iw, j.ih});
+      t = &small_rt;
+    }
+    t->want_hdr = j.filters.needs_hdr;  // bloom reads linear light (only allocated when asked)
+    draw(*t, j.proj_filtered, override_on, override_color);
+    t->want_hdr = false;
+    if (j.dof) apply_depth_of_field(*t, j.dof_params);
+    FilterFrame frame;
+    frame.inv_view_proj = (j.proj_filtered * j.view).inverse();
+    frame.eye = j.eye;
+    frame.forward = normalize(j.forward);
+    frame.far_distance = j.far_distance;
+    frame.pixel_scale = t->height / 1080.0f;
+    frame.time = j.play_time;
+    frame.animate = false;
+    for (const FilterPass &pass : j.filters.passes) pass(*t, &frame);
+    if (!j.scaled) return;
+    if (j.boxed)
+      for (int y = 0; y < rt.height; y++) std::fill(rt.color + (size_t)y * rt.stride, rt.color + (size_t)y * rt.stride + rt.width, 0xFF000000u);
+    upscale_nearest(j.small.pixels.data(), j.iw, j.ih, j.iw, rt.color, rt.stride, j.dst);
+  };
+  if (!j.transparent) once(false, 0);
+  else {
+    /* Drawn over black, then over white; where the two differ the background showed through (task 0035). */
+    once(true, 0xFF000000u);
+    const std::vector<uint32_t> black = j.img.pixels;
+    once(true, 0xFFFFFFFFu);
+    combine_black_white(black.data(), j.img.pixels.data(), j.img.pixels.size());
+  }
+  j.tris = r3d.stats().tris_submitted;
+  j.ms = t.ms();
+}
+
+/* A transparent path-traced render (task 0035): alpha from the share of camera samples that hit something; the colour
+ * (premultiplied: misses add nothing) divided by it before the view transform. */
+void Editor::trace_alpha(RenderJob &j, PathTracer &pt, const std::vector<float> &lin, Image &out, bool keep) {
+  const std::vector<float> cov = pt.coverage();
+  const int w = out.width, h = out.height;
+  if (cov.size() < (size_t)w * h || lin.size() < (size_t)w * h * 3) return;
+  const ViewTransform vt = pt.settings().view_transform;
+  const float ex = pt.settings().exposure;
+  JobSystem::global().parallel_for(h, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < w; x++) {
+        const size_t i = (size_t)y * w + x;
+        const float a = cov[i];
+        const int a8 = (int)std::lround(clampf(a, 0.0f, 1.0f) * 255.0f);
+        if (a8 <= 0) {
+          out.pixels[i] = 0;
+          continue;
+        }
+        const float d = std::max(a, 0.05f);  // (a silhouette's few samples: don't amplify the denoised colour's bleed)
+        const float straight[3] = {lin[i * 3] / d, lin[i * 3 + 1] / d, lin[i * 3 + 2] / d};
+        uint32_t px;
+        display::encode_span(straight, &px, 1, vt, ex);
+        out.pixels[i] = (uint32_t)a8 << 24 | (px & 0xFFFFFF);
+      }
+  });
+  if (keep) j.alpha = cov;
+}
+
+/* The traced picture from what the tracer holds (the worker, between its sample passes and at the end): plain, or
+ * through the camera's filters at their resolution and scaled up, or transparent. `finished`: the denoise once, the
+ * linear light kept for HDR / EXR. */
+void Editor::trace_resolve(RenderJob &j, PathTracer &pt, bool finished, Image &out) {
+  if (!j.filtered) {
+    if (finished) {
+      j.linear = pt.linear_rgb(j.denoise);
+      pt.resolve_rgb(j.linear, out.pixels.data(), out.width);
+      if (j.transparent) trace_alpha(j, pt, j.linear, out, true);
+    }
+    else if (j.transparent) trace_alpha(j, pt, pt.linear_rgb(false), out, false);
+    else pt.resolve(out.pixels.data(), out.width, false);
+    return;
+  }
+  /* Through camera filters: the small image, its passes (with the first hits' depth and ids, so outlines and fog
+   * work), then scaled up. No float result: a retro image is an 8-bit one. */
+  Image &s = j.small;
+  RenderTarget rt;
+  rt.attach(s, {0, 0, s.width, s.height});
+  const std::vector<float> lin = pt.linear_rgb(finished && j.denoise);  // once: the resolve, bloom's plane and the alpha all read it
+  pt.resolve_rgb(lin, s.pixels.data(), s.width);
+  if (j.filters.needs_hdr) Editor::fill_hdr_from_linear(rt, lin, pt.settings().view_transform, pt.settings().exposure);  // (at every resolve: the glow doesn't grow with the samples)
+  FilterFrame frame = trace_frame(pt, rt, j.view, j.proj_filtered, j.eye, j.forward, j.far_distance, j.play_time);
+  std::fill(out.pixels.begin(), out.pixels.end(), 0xFF000000u);
+  if (j.transparent) {
+    /* The picture (straight colour by the coverage) over black and over white, each through the passes; alpha from the
+     * difference, so what a pass draws or moves carries its alpha as in the rasterizer. */
+    const std::vector<float> cov = pt.coverage();
+    const size_t n = (size_t)s.width * s.height;
+    if (cov.size() >= n && lin.size() >= n * 3) {
+      std::vector<uint32_t> over_black(n), over_white(n);
+      const ViewTransform vt = pt.settings().view_transform;
+      const float ex = pt.settings().exposure;
+      for (size_t i = 0; i < n; i++) {
+        const float a = clampf(cov[i], 0.0f, 1.0f), d = std::max(a, 0.05f);
+        const float st[3] = {lin[i * 3] / d, lin[i * 3 + 1] / d, lin[i * 3 + 2] / d};
+        uint32_t px;
+        display::encode_span(st, &px, 1, vt, ex);
+        auto ch = [&](int sh, float bg) { return (uint32_t)std::lround(((px >> sh) & 255) * a + bg * (1.0f - a)); };
+        over_black[i] = 0xFF000000u | ch(16, 0) << 16 | ch(8, 0) << 8 | ch(0, 0);
+        over_white[i] = 0xFF000000u | ch(16, 255) << 16 | ch(8, 255) << 8 | ch(0, 255);
+      }
+      const std::vector<Vec3> hdr = rt.hdr;  // (bloom's light, the same for both: the background has none)
+      s.pixels = over_black;
+      for (const FilterPass &pass : j.filters.passes) pass(rt, &frame);
+      const std::vector<uint32_t> black = s.pixels;
+      s.pixels = over_white;
+      rt.hdr = hdr;
+      for (const FilterPass &pass : j.filters.passes) pass(rt, &frame);
+      combine_black_white(black.data(), s.pixels.data(), n);
+    }
+    upscale_nearest(s.pixels.data(), s.width, s.height, s.width, out.pixels.data(), out.width, j.dst);
+    return;
+  }
+  for (const FilterPass &pass : j.filters.passes) pass(rt, &frame);
+  upscale_nearest(s.pixels.data(), s.width, s.height, s.width, out.pixels.data(), out.width, j.dst);
+}
+
+/* Task 0159: the card's busy share over the whole render ("" on the CPU or without timestamps). */
+static std::string gpu_busy_text(const PTStats &s, double seconds) {
+  if (s.gpu_busy_ms < 0.0 || seconds <= 0.0) return "";
+  const double cards = (double)std::max<size_t>(1, s.gpu_samples.size());  // (the busy is every card's, summed: a share per card)
+  return strprintf("; GPU busy %.0f %% of the render's wall time (%s)", 100.0 * s.gpu_busy_ms / (seconds * 1000.0 * cards), cards > 1 ? "a card's average" : "one card");
+}
+
+/* The worker's status line and numbers, as the Render window and the Profiler show them. */
+void Editor::trace_publish(RenderJob &j, PathTracer &pt, int done, double seconds, bool finished, Image *picture) {
+  std::string split;
+  const PTStats &st = pt.stats();
+  if (!st.gpu_samples.empty()) {
+    split = strprintf("  (CPU %d", st.cpu_samples);
+    for (size_t g = 0; g < st.gpu_samples.size(); g++) split += strprintf(", GPU%zu %d", g + 1, st.gpu_samples[g]);
+    split += ")";
+  }
+  const std::string status = strprintf("%s: sample %d / %d%s  |  %.1f s  |  %.1f samples/s  |  %s%s", j.preview ? "Preview" : "Path tracing", done, j.target,
+                                       split.c_str(), seconds, done / std::max(1e-3, seconds), pt.device_summary().c_str(),
+                                       finished && j.denoise ? strprintf("  |  denoised (%s)", pt.denoise_backend()).c_str() : "");
+  std::lock_guard<std::mutex> lock(j.mutex);
+  j.status = status;
+  j.samples = pt.samples();
+  j.stats = st;
+  j.gpu_error = pt.gpu_error();
+  j.gpu_note = pt.gpu_note();
+  j.device = pt.device_summary();
+  if (picture) {
+    std::swap(j.img.pixels, picture->pixels);
+    j.img_serial++;
+  }
+}
+
+/* The traced picture on the worker: the scene built (the BVH, the cards' upload), the samples until the target or a
+ * stop, the picture resolved after every pass that merged samples, then paused and resolved once more, denoised. */
+void Editor::trace_picture(RenderJob &j, PathTracer &pt) {
+  pt.set_settings(j.ps);  // before build(): it picks the ray backend
+  {
+    std::vector<PTObject> objs;
+    for (const DrawItem &it : j.items) objs.push_back({it.mesh, it.model, it.materials, it.id, it.flattened, it.shade_model});
+    pt.build(objs, j.env.lights, j.environment);
+  }
+  pt.set_camera(j.view, j.proj_filtered, j.tw, j.th, j.lens);
+  j.build_ms = pt.stats().bvh_build_ms;
+  {
+    std::lock_guard<std::mutex> lock(j.mutex);
+    j.status = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", j.preview ? "Preview" : "Path tracing", j.w, j.h, pt.device_summary().c_str(),
+                         pt.stats().triangles, j.build_ms);
+    j.device = pt.device_summary();
+  }
+  j.phase.store(1);
+  ScopedTimer sampling;
+  int done = 0, resolved = -1;
+  while (!j.stop.load(std::memory_order_relaxed)) {
+    if (pt.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
+      sampling = ScopedTimer();
+      resolved = -1;
+      std::lock_guard<std::mutex> lock(j.mutex);
+      j.gpu_adopted = true;
+    }
+    /* The CPU's pass, or with cards at work (task 0161, ADR 0052) a wait: they render between the calls. */
+    done = pt.render(pt.gpu_async() ? 50.0 : 100.0, j.target);
+    if (done >= j.target) break;
+    if (pt.samples() != resolved) {  // (the picture can only change when samples were merged)
+      trace_resolve(j, pt, false, j.back);
+      resolved = pt.samples();
+      trace_publish(j, pt, done, sampling.ms() / 1000.0, false, &j.back);
+    }
+    else trace_publish(j, pt, done, sampling.ms() / 1000.0, false, nullptr);
+  }
+  j.phase.store(2);
+  pt.pause();  // (the cards stop too)
+  trace_resolve(j, pt, true, j.back);
+  j.ms = sampling.ms() / 1000.0;
+  trace_publish(j, pt, pt.samples(), j.ms, true, &j.back);
+  j.phase.store(3);
+}
+
 void Editor::start_final_render(bool preview, bool open_window) {
+  struct Timed {  // (round 437: the start's time in the frame's profile, whichever way it returns)
+    double &into;
+    ScopedTimer t;
+    ~Timed() { into += t.ms(); }
+  } timed{prof_.ms_render_start, {}};
+  if (render_prefetch_) {  // (round 437: its textures still loading - the render that follows takes this one's flags)
+    render_prefetch_->preview = preview, render_prefetch_->open_window = render_prefetch_->open_window || open_window;
+    return;
+  }
+  if (scene_->render.engine != 2 && render_prefetch_start(preview, open_window)) return;  // (round 437: the textures first, on a worker)
+  render_job_wait("a new render");  // (one render at a time: a job still working stops and lands first)
   /* F12 and the Render window's preview draw on the CPU, the reference (the GPU is the interactive views'). */
   struct KeepCpu {
     bool &off;
@@ -1310,273 +2140,161 @@ void Editor::start_final_render(bool preview, bool open_window) {
   render_alpha_lin_.clear();
   render_transparent_ = rs.transparent;
   render_start_ = now_seconds();
-  render_resolved_samples_ = -1;  // (task 0161: the next frame resolves whatever the tracer holds)
   render_has_result_ = true;
   if (open_window) dock_open(WindowKind::Render);
   render_filters_ = camera_filters(cam ? owner : nullptr);
   render_filtered_ = !render_filters_.empty();
   if (rs.engine == 2 && !preview && start_moonray(w, h, v, p, cam, eye)) return;  // (task 0114; else the path tracer)
-  if (rs.engine == 0 && render_filtered_) {
-    /* A filtered camera: its own resolution and passes; no supersampling (it would soften
-     * the pixels the filter is there to make). */
-    RenderTarget rt;
-    rt.attach(render_img_, {0, 0, w, h});
-    Renderer3D r3d;
-    render_with_alpha([&] { render_camera(r3d, rt, render_ft_, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), owner, cam, w / (float)h); });
-    render_time_ = now_seconds() - render_start_;
-    rendering_ = false;
-    int iw, ih;
-    Recti dst;
-    filter_layout(render_filters_, w, h, iw, ih, dst);
-    render_status_ = strprintf("%s %dx%d through camera filters (%dx%d), %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, iw, ih,
-                               render_time_ * 1000.0, r3d.stats().tris_submitted);
-    if (!preview) Log::info("Render finished: %s", render_status_.c_str());
-    return;
-  }
-  if (rs.engine == 0) {
-    /* Rasterized: supersample then box-filter down (SSAA). */
-    int aa = preview ? 1 : std::max(1, std::min(4, rs.raster_aa));
-    Image big;
-    big.resize(w * aa, h * aa);
-    RenderTarget rt;
-    rt.attach(big, {0, 0, big.width, big.height});
-    Renderer3D r3d;
-    render_with_alpha([&] {
-    render_deferred(r3d, rt, v, p, eye, true, true, cam);
-    if (cam && owner) camera_dof(rt, v, p, eye, owner->world_rotation().rotate({0, 0, 1}), cam, w / (float)h, cam->vertical_fov_deg(w / (float)h));
-    JobSystem::global().parallel_for(h, 8, [&](int64_t y0, int64_t y1) {
-      for (int64_t y = y0; y < y1; y++)
-        for (int x = 0; x < w; x++) {
-          uint32_t r = 0, g = 0, b = 0;
-          for (int sy = 0; sy < aa; sy++)
-            for (int sx = 0; sx < aa; sx++) {
-              uint32_t c = big.pixels[(size_t)(y * aa + sy) * big.width + x * aa + sx];
-              r += (c >> 16) & 255;
-              g += (c >> 8) & 255;
-              b += c & 255;
-            }
-          int n = aa * aa;
-          render_img_.pixels[(size_t)y * w + x] = 0xFF000000u | ((r / n) << 16) | ((g / n) << 8) | (b / n);
-        }
-    });
-    });
-    render_time_ = now_seconds() - render_start_;
-    rendering_ = false;
-    render_status_ = strprintf("%s %dx%d, %dx SSAA, %.0f ms (%zu tris)", preview ? "Preview (rasterized)" : "Rasterized", w, h, aa,
-                               render_time_ * 1000.0, r3d.stats().tris_submitted);
-    if (!preview) Log::info("Render finished: %s", render_status_.c_str());
-    return;
-  }
-  LightingEnv env = make_lighting(eye, true, false);  // every light: the path tracer computes true GI
-  set_flatten_view(v, p, eye, 1);  // (round 334: Camera Flatten toward the render's camera; round 339: F12's own view-shaped meshes)
-  std::vector<DrawItem> items = collect_items(true, true);
-  flatten_view_.on = false;
-  PTSettings ps = make_pt_settings(rs);
-  if (cam) ps.exposure += cam->exposure_stops();
-  pt_solid_background(ps, cam);
-  if (rs.transparent) {  // Film > Transparent: camera rays that miss add nothing (the world still lights the scene)
-    ps.solid_background = true;
-    ps.background = Vec3(0.0f);
-    ps.transparent_film = true;
-  }
-  int tw = w, th = h;
-  if (render_filtered_) {
-    /* Traced at the filters' resolution (fewer samples to wait for), scaled up when shown. */
-    filter_layout(render_filters_, w, h, tw, th, render_dst_);
-    render_small_.resize(tw, th);
-    if (render_dst_.w != w || render_dst_.h != h) p = cam->projection(render_dst_.w / (float)render_dst_.h);
-    std::fill(render_img_.pixels.begin(), render_img_.pixels.end(), 0xFF000000u);
-  }
-  retro_for_trace(render_filters_, v, p, tw, th, ps, items, render_snapped_);  // (no-op without a filter)
-  final_pt_.set_settings(ps);  // before build(): it picks the ray backend
-  build_pt(final_pt_, *this, items, env, env_);
-  render_view_ = v;
-  render_proj_ = p;
-  render_eye_ = eye;
-  render_forward_ = owner ? owner->world_rotation().rotate({0, 0, 1}) : cam_.forward();
-  render_far_ = cam ? cam->far_clip : 1000.0f;
-  final_pt_.set_camera(v, p, tw, th, camera_lens(cam, tw / (float)th));
-  rendering_ = true;
-  render_status_ = strprintf("%s %dx%d: %s scene of %zu tris built in %.0f ms", preview ? "Preview" : "Path tracing", w, h, final_pt_.device_summary().c_str(),
-                             final_pt_.stats().triangles,
-                             final_pt_.stats().bvh_build_ms);
-  if (!preview) Log::info("%s", render_status_.c_str());
+  std::unique_ptr<RenderJob> job = render_snapshot(preview, rs.engine != 0, w, h, v, p, eye, owner, cam);
+  render_status_ = job->traced ? strprintf("%s %dx%d: building the scene...", preview ? "Preview" : "Path tracing", w, h)
+                               : strprintf("%s %dx%d...", preview ? "Preview (rasterizing)" : "Rasterizing", w, h);
+  render_job_start(std::move(job));
 }
 
-/* Task 0159: the card's busy share over the whole F12 render ("" on the CPU or without timestamps). */
-std::string Editor::render_gpu_busy_text() const {
-  const PTStats &s = final_pt_.stats();
-  if (s.gpu_busy_ms < 0.0 || render_time_ <= 0.0) return "";
-  const double cards = (double)std::max<size_t>(1, s.gpu_samples.size());  // (the busy is every card's, summed: a share per card)
-  return strprintf("; GPU busy %.0f %% of the render's wall time (%s)", 100.0 * s.gpu_busy_ms / (render_time_ * 1000.0 * cards), cards > 1 ? "a card's average" : "one card");
+/* The job's worker started (or, for a rasterized render in a headless editor that didn't ask for workers, run here:
+ * the render lands in this frame as it did before round 412). */
+void Editor::render_job_start(std::unique_ptr<RenderJob> job) {
+  RenderJob *j = job.get();
+  PathTracer *pt = &final_pt_;
+  render_job_ = std::move(job);
+  render_img_serial_ = 0;
+  rendering_ = true;
+  auto run = [j, pt] {
+    JobSystem::global().run_background([j, pt] {
+      if (j->traced) trace_picture(*j, *pt);
+      else raster_picture(*j);
+    });
+    j->done.store(true, std::memory_order_release);
+  };
+  if (!jobs_async() && !j->traced) {  // (a traced render was always progressive across frames: it keeps its worker)
+    run();
+    render_job_poll();
+    return;
+  }
+  j->thread = std::thread(run);
 }
 
 void Editor::step_final_render() {
+  render_prefetch_poll();  // (round 437: a render's textures loaded: its snapshot now)
+  if (render_prefetch_) return;
+  if (render_job_ && !rendering_) {  // (a stopped render: its last picture lands once the worker has resolved it)
+    if (render_job_->done.load(std::memory_order_acquire)) render_job_finish();
+    return;
+  }
   if (!rendering_) return;
   if (mr_job_ || mr_waiting_render_) return step_moonray_render();
-  const RenderSettings &rs = scene_->render;
-  int target = std::max(1, render_preview_ ? rs.preview_samples : rs.samples);
-  if (final_pt_.adopt_ready_gpus()) {  // its GPU opened (task 0037): the samples restart there
-    render_start_ = now_seconds();
-    render_resolved_samples_ = -1;  // (task 0161: the next frame resolves whatever the tracer holds)
-    render_status_ = strprintf("%s: %s", render_preview_ ? "Preview" : "Path tracing", final_pt_.device_summary().c_str());
-    Log::info("%s", render_status_.c_str());
-  }
-  /* The CPU's slice, or with cards at work (task 0161, ADR 0052) a short wait: they render between frames. */
-  int done = final_pt_.render(final_pt_.gpu_async() ? 4.0 : 40.0, target);
-  render_time_ = now_seconds() - render_start_;
-  bool finished = done >= target;
-  /* Task 0161: the picture can only change when the tracer merged new samples (the cards' sums arrive every merge
-   * interval); a frame that merged nothing keeps the resolved image and stays short. */
-  if (finished || final_pt_.samples() != render_resolved_samples_) {
-    resolve_final_render(finished);
-    render_resolved_samples_ = final_pt_.samples();
-  }
-  /* Samples per second, and how they were shared when several devices render. */
-  std::string split;
-  if (!final_pt_.stats().gpu_samples.empty()) {
-    split = strprintf("  (CPU %d", final_pt_.stats().cpu_samples);
-    for (size_t g = 0; g < final_pt_.stats().gpu_samples.size(); g++) split += strprintf(", GPU%zu %d", g + 1, final_pt_.stats().gpu_samples[g]);
-    split += ")";
-  }
-  render_status_ = strprintf("%s: sample %d / %d%s  |  %.1f s  |  %.1f samples/s  |  %s%s", render_preview_ ? "Preview" : "Path tracing", done,
-                             target, split.c_str(), render_time_, done / std::max(1e-3, render_time_), final_pt_.device_summary().c_str(),
-                             finished && rs.denoise ? strprintf("  |  denoised (%s)", final_pt_.denoise_backend()).c_str() : "");
-  if (finished) {
+  if (!render_job_) {
     rendering_ = false;
-    if (!render_preview_) Log::info("Render finished: %d samples in %.1f s (%s)%s", done, render_time_, final_pt_.device_summary().c_str(), render_gpu_busy_text().c_str());
-  }
-}
-
-/* A path tracer's linear output (w x h x 3, before exposure) as a target's HDR plane, for bloom. */
-void Editor::fill_hdr_from_linear(RenderTarget &rt, const std::vector<float> &lin, ViewTransform vt, float exposure) {
-  const size_t n = (size_t)rt.width * rt.height;
-  if (lin.size() < n * 3) return;
-  rt.hdr.resize(n);
-  for (size_t i = 0; i < n; i++) rt.hdr[i] = Vec3(lin[i * 3], lin[i * 3 + 1], lin[i * 3 + 2]);
-  rt.hdr_view_transform = vt;
-  rt.hdr_exposure = exposure;
-}
-
-void Editor::resolve_final_render(bool finished) {
-  const bool denoise = scene_->render.denoise;
-  if (!render_filtered_) {
-    if (finished) {
-      /* Denoise once and keep the linear result for HDR / EXR saving. */
-      render_linear_ = final_pt_.linear_rgb(denoise);
-      final_pt_.resolve_rgb(render_linear_, render_img_.pixels.data(), render_img_.width);
-      if (render_transparent_) apply_trace_alpha(render_linear_, false);
-    }
-    else if (render_transparent_) apply_trace_alpha(final_pt_.linear_rgb(false), false);
-    else final_pt_.resolve(render_img_.pixels.data(), render_img_.width, false);
     return;
   }
-  /* Through camera filters: the small image, its passes (with the first hits' depth and ids, so outlines and
-   * fog work), then scaled up. No float result: a retro image is an 8-bit one. */
-  Image &s = render_small_;
-  RenderTarget rt;
-  rt.attach(s, {0, 0, s.width, s.height});
-  if (finished) {
-    const std::vector<float> lin = final_pt_.linear_rgb(denoise);
-    final_pt_.resolve_rgb(lin, s.pixels.data(), s.width);
-    if (render_filters_.needs_hdr) fill_hdr_from_linear(rt, lin, final_pt_.settings().view_transform, final_pt_.settings().exposure);
+  render_job_poll();
+}
+
+/* Each frame while a job runs: the published picture (swapped in whole by the worker) and status taken; a GPU it
+ * adopted said; the end landed. */
+void Editor::render_job_poll() {
+  RenderJob *j = render_job_.get();
+  if (!j) return;
+  ProfileScope prof{prof_.ms_render_land, {}};  // (round 437)
+  if (j->traced && headless_ && !async_jobs_ && !j->done.load(std::memory_order_acquire)) {
+    /* A headless editor that didn't ask for workers (a test): a frame advances the render by about a slice, as before
+     * round 412 - waited for here, so a test's frame count bounds the render's progress as it did. */
+    const int before = render_samples();
+    ScopedTimer wait;
+    while (wait.ms() < 40.0 && !j->done.load(std::memory_order_acquire) && render_samples() == before) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  if (j->traced) {
+    std::lock_guard<std::mutex> lock(j->mutex);
+    if (j->img_serial != render_img_serial_) {
+      render_img_.pixels = j->img.pixels;
+      render_img_serial_ = j->img_serial;
+      ui_.redraw = true;
+    }
+    if (!j->status.empty()) render_status_ = j->status;
+    if (j->gpu_adopted) {
+      j->gpu_adopted = false;
+      render_start_ = now_seconds();
+      Log::info("%s", render_status_.c_str());
+    }
+  }
+  else render_status_ = strprintf("%s %dx%d...  %.1f s", j->preview ? "Preview (rasterizing)" : "Rasterizing", j->w, j->h, now_seconds() - render_start_);
+  render_time_ = now_seconds() - render_start_;
+  ui_.redraw = true;
+  if (!j->done.load(std::memory_order_acquire)) return;
+  render_job_finish();
+}
+
+/* The worker done (or stopped and done): its picture, light and alpha are the render's; said. */
+void Editor::render_job_finish() {
+  std::unique_ptr<RenderJob> j = std::move(render_job_);
+  if (!j) return;
+  if (j->thread.joinable()) j->thread.join();
+  if (render_img_.width == j->img.width && render_img_.height == j->img.height) render_img_.pixels = j->img.pixels;
+  else render_img_ = j->img;
+  render_img_serial_ = j->img_serial;
+  render_linear_ = std::move(j->linear);
+  render_alpha_lin_ = std::move(j->alpha);
+  const bool stopped = j->stop.load();
+  rendering_ = false;
+  if (!j->traced) {
+    render_time_ = j->ms / 1000.0;
+    if (j->filtered)
+      render_status_ = strprintf("%s %dx%d through camera filters (%dx%d), %.0f ms (%zu tris)", j->preview ? "Preview (rasterized)" : "Rasterized", j->w, j->h, j->iw, j->ih,
+                                 j->ms, j->tris);
+    else render_status_ = strprintf("%s %dx%d, %dx SSAA, %.0f ms (%zu tris)", j->preview ? "Preview (rasterized)" : "Rasterized", j->w, j->h, j->aa, j->ms, j->tris);
+    if (!j->preview) Log::info("Render finished: %s", render_status_.c_str());
   }
   else {
-    const std::vector<float> lin = final_pt_.linear_rgb(false);  // once: the resolve and bloom's plane both read it
-    final_pt_.resolve_rgb(lin, s.pixels.data(), s.width);
-    if (render_filters_.needs_hdr)  // bloom reads the linear light at every resolve, so the glow doesn't grow with the samples
-      fill_hdr_from_linear(rt, lin, final_pt_.settings().view_transform, final_pt_.settings().exposure);
+    render_time_ = j->ms;
+    render_status_ = j->status;
+    if (stopped) render_status_ += "  (stopped)";
+    else if (!j->preview) Log::info("Render finished: %d samples in %.1f s (%s)%s", j->samples, j->ms, j->device.c_str(), gpu_busy_text(j->stats, j->ms).c_str());
   }
-  FilterFrame frame = trace_filter_frame(final_pt_, rt, render_view_, render_proj_, render_eye_, render_forward_, nullptr);
-  frame.far_distance = render_far_;  // the camera's when the render started (it may have changed since)
-  if (render_transparent_) {
-    /* Transparent (task 0035): the picture (straight colour by the coverage) over black and over white, each through
-     * the passes; alpha from the difference, so what a pass draws or moves (outlines, pixelation, distortion)
-     * carries its alpha as in the rasterizer. */
-    const std::vector<float> lin = final_pt_.linear_rgb(finished && denoise), cov = final_pt_.coverage();
-    const size_t n = (size_t)s.width * s.height;
-    if (cov.size() >= n && lin.size() >= n * 3) {
-      std::vector<uint32_t> over_black(n), over_white(n);
-      const ViewTransform vt = final_pt_.settings().view_transform;
-      const float ex = final_pt_.settings().exposure;
-      for (size_t i = 0; i < n; i++) {
-        const float a = clampf(cov[i], 0.0f, 1.0f), d = std::max(a, 0.05f);
-        const float st[3] = {lin[i * 3] / d, lin[i * 3 + 1] / d, lin[i * 3 + 2] / d};
-        uint32_t px;
-        display::encode_span(st, &px, 1, vt, ex);
-        auto ch = [&](int sh, float bg) { return (uint32_t)std::lround(((px >> sh) & 255) * a + bg * (1.0f - a)); };
-        over_black[i] = 0xFF000000u | ch(16, 0) << 16 | ch(8, 0) << 8 | ch(0, 0);
-        over_white[i] = 0xFF000000u | ch(16, 255) << 16 | ch(8, 255) << 8 | ch(0, 255);
-      }
-      const std::vector<Vec3> hdr = rt.hdr;  // (bloom's light, the same for both: the background has none)
-      s.pixels = over_black;
-      for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
-      const std::vector<uint32_t> black = s.pixels;
-      s.pixels = over_white;
-      rt.hdr = hdr;
-      for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
-      combine_black_white(black.data(), s.pixels.data(), n);
-    }
-    upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
-    return;
-  }
-  for (const FilterPass &pass : render_filters_.passes) pass(rt, &frame);
-  upscale_nearest(s.pixels.data(), s.width, s.height, s.width, render_img_.pixels.data(), render_img_.width, render_dst_);
+  ui_.redraw = true;
 }
 
-/* A transparent rasterized render (Film > Transparent, task 0035): drawn over black, then over white; where the two
- * differ the background showed through. alpha = 1 - (white - black), colour = black / alpha (straight). */
-void Editor::render_with_alpha(const std::function<void()> &once) {
-  struct FinalRender {  // the quality tier's caps are for the editor's views, not for renders
-    bool &flag;
-    explicit FinalRender(bool &f) : flag(f) { flag = true; }
-    ~FinalRender() { flag = false; }
-  } final_render(final_render_);
-  if (!render_transparent_) {
-    once();
-    return;
-  }
-  render_clear_override_on_ = true;
-  render_clear_override_ = 0xFF000000u;
-  once();
-  const std::vector<uint32_t> black = render_img_.pixels;
-  render_clear_override_ = 0xFFFFFFFFu;
-  once();
-  render_clear_override_on_ = false;
-  combine_black_white(black.data(), render_img_.pixels.data(), render_img_.pixels.size());
+/* A running job stopped and waited for - a new render, a scene going, the editor closing, a save that wants the
+ * picture - and its picture landed (a stopped render shows what it had, as the Render window's Stop does). */
+bool Editor::render_job_wait(const char *why) {
+  if (!render_job_) return false;
+  ScopedTimer t;
+  render_job_->stop.store(true);
+  if (render_job_->thread.joinable()) render_job_->thread.join();
+  render_job_->done.store(true, std::memory_order_release);
+  render_job_finish();
+  if (t.ms() > 50.0) Log::info("Waited %.0f ms for the render to stop (%s)", t.ms(), why);
+  return true;
 }
 
-/* A transparent path-traced render (task 0035): alpha from the share of camera samples that hit something; the
- * colour (premultiplied: misses add nothing) divided by it before the view transform. Filtered: the passes ran on the
- * premultiplied picture; its display colour is divided instead, and the alpha scaled up as the picture was. */
-void Editor::apply_trace_alpha(const std::vector<float> &lin, bool filtered) {
-  const std::vector<float> cov = final_pt_.coverage();
-  const int w = render_img_.width, h = render_img_.height;
-  if (!filtered) {
-    if (cov.size() < (size_t)w * h || lin.size() < (size_t)w * h * 3) return;
-    const ViewTransform vt = final_pt_.settings().view_transform;
-    const float ex = final_pt_.settings().exposure;
-    JobSystem::global().parallel_for(h, 16, [&](int64_t y0, int64_t y1) {
-      for (int64_t y = y0; y < y1; y++)
-        for (int x = 0; x < w; x++) {
-          const size_t i = (size_t)y * w + x;
-          const float a = cov[i];
-          const int a8 = (int)std::lround(clampf(a, 0.0f, 1.0f) * 255.0f);
-          if (a8 <= 0) {
-            render_img_.pixels[i] = 0;
-            continue;
-          }
-          const float d = std::max(a, 0.05f);  // (a silhouette's few samples: don't amplify the denoised colour's bleed)
-          const float straight[3] = {lin[i * 3] / d, lin[i * 3 + 1] / d, lin[i * 3 + 2] / d};
-          uint32_t px;
-          display::encode_span(straight, &px, 1, vt, ex);
-          render_img_.pixels[i] = (uint32_t)a8 << 24 | (px & 0xFFFFFF);
-        }
-    });
-    if (render_linear_.size() == (size_t)w * h * 3) render_alpha_lin_ = cov;
-    return;
-  }
-  (void)filtered;  // (a filtered render's alpha comes from its two pass runs, in resolve_final_render)
+/* The job told to stop: the tray's entry goes now; the picture lands at the next poll once the worker has resolved
+ * what it had (a rasterized one finishes its picture; a traced one denoises its samples). */
+void Editor::render_job_stop() {
+  rendering_ = false;
+  if (render_job_) render_job_->stop.store(true);
+}
+
+PTStats Editor::render_stats() {
+  if (!render_job_) return final_pt_.stats();
+  std::lock_guard<std::mutex> lock(render_job_->mutex);
+  return render_job_->stats;
+}
+
+int Editor::render_samples() {
+  if (!render_job_) return final_pt_.samples();
+  std::lock_guard<std::mutex> lock(render_job_->mutex);
+  return render_job_->samples;
+}
+
+std::string Editor::render_gpu_error() {
+  if (!render_job_) return final_pt_.gpu_error();
+  std::lock_guard<std::mutex> lock(render_job_->mutex);
+  return render_job_->gpu_error;
+}
+
+std::string Editor::render_gpu_note() {
+  if (!render_job_) return final_pt_.gpu_note();
+  std::lock_guard<std::mutex> lock(render_job_->mutex);
+  return render_job_->gpu_note;
 }
 
 /* saverender's path (review 367): a folder (a trailing slash, or one that's there) gets the render's own name in it; no
@@ -1592,6 +2310,7 @@ static std::string typed_render_path(const std::string &to, const std::string &o
 }
 
 void Editor::save_render(const std::string &to) {
+  if (render_job_ && !render_job_->traced) render_job_wait("saverender");  // (round 412: a rasterized render still drawing is waited for - a script's `render` then `saverender`)
   if (!render_has_result_ || render_img_.width == 0) {
     Log::warn("Nothing rendered yet - press Render Image (F12) first");
     return;
@@ -1686,11 +2405,23 @@ uint64_t Editor::camera_render_hash(const GameObject *owner, Camera *cam, uint64
 /* The voxel grid and the sun's reflective shadow map for these items, each rebuilt only when what it
  * is drawn from changed: an object's voxels when its mesh or place did (the paper's static / dynamic
  * split), the RSM when the casters, their materials or the sun did. */
-const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, const LightingEnv &env, bool game) {
-  const LightingSettings &ls = scene_->lighting;
-  vgi_updates_++;
-  vgi_last_ = game ? 1 : 0;
-  VoxelGIState &vgi = vgi_[vgi_last_];
+/* The GI settings as a frame takes them; `views`: the tier's ray cap applies (a render takes the setting whole). */
+GiParams Editor::gi_params_for(const LightingSettings &ls, bool views) const {
+  GiParams p;
+  p.rays = views && tier_gi_rays_cap_ > 0 ? std::min(ls.gi_rays, tier_gi_rays_cap_) : ls.gi_rays;
+  p.radius = ls.gi_radius;
+  p.intensity = ls.gi_intensity;
+  p.sky_occlusion = ls.gi_sky_occlusion;
+  p.bounce = ls.gi_bounce;
+  p.downsample = ls.gi_downsample == 0 ? 2 : 4;
+  p.specular_occlusion = ls.gi_specular_occlusion;
+  return p;
+}
+
+/* Round 412 (ADR 0106): the grid, its voxels and the RSM built into `vgi` from the items alone - the views' states on
+ * the main thread, a render job's own on its worker. False when nothing fits. */
+bool Editor::voxel_gi_build(VoxelGIState &vgi, const std::vector<DrawItem> &items, const LightingEnv &env, int n, int rsm_res, bool gi_bounce, const GiParams &p,
+                            bool lighting_shown) {
   auto mix = [](uint64_t &h, const void *p, size_t n) { h = mix_bytes(h, p, n); };
   /* Occluders: what casts a shadow (as the shadow map's casters), but not see-through surfaces. */
   std::vector<const DrawItem *> occ;
@@ -1704,10 +2435,9 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
     occ.push_back(&it);
     bounds.add(it.mesh->bounds.transformed(it.model));
   }
-  const int n = ls.gi_resolution <= 0 ? 64 : ls.gi_resolution == 1 ? 128 : 256;
   VoxelGrid fit;
   voxel_grid_fit(fit, bounds, n, false);  // (its placement: the columns only if it's taken below)
-  if (fit.n <= 0) return nullptr;
+  if (fit.n <= 0) return false;
   /* Keep the grid while the scene still fits it at the same voxel size (dragging the outermost object
    * would otherwise move the grid every 8 voxels and re-voxelize everything). */
   const bool keep = vgi.grid.valid() && vgi.grid.n == fit.n && vgi.grid.voxel == fit.voxel && bounds.min.x >= vgi.grid.origin.x &&
@@ -1753,8 +2483,7 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
       sun = &l;
       break;
     }
-  const int rsm_res = std::max(32, std::min(tier_rsm_cap_ > 0 && !final_render_ ? tier_rsm_cap_ : 2048, ls.gi_rsm_resolution));
-  if (ls.gi_bounce && sun) {
+  if (gi_bounce && sun) {
     uint64_t key = kFnvBasis;
     for (const DrawItem *it : occ) {
       mix(key, &it->mesh->serial, 8);
@@ -1788,20 +2517,24 @@ const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, 
     vgi.rsm = Rsm{};
     vgi.rsm_key = 0;
   }
-  GiParams p;
-  p.rays = tier_gi_rays_cap_ > 0 && !final_render_ ? std::min(ls.gi_rays, tier_gi_rays_cap_) : ls.gi_rays;  // (the views only)
-  p.radius = ls.gi_radius;
-  p.intensity = ls.gi_intensity;
-  p.sky_occlusion = ls.gi_sky_occlusion;
-  p.bounce = ls.gi_bounce;
-  p.downsample = ls.gi_downsample == 0 ? 2 : 4;
-  p.specular_occlusion = ls.gi_specular_occlusion;
   vgi.frame.params = gi_params_sanitized(p);
   vgi.frame.grid = &vgi.grid;
   vgi.frame.rsm = vgi.rsm.valid() ? &vgi.rsm : nullptr;
   /* Lightmapped surfaces add the bounce of a sun the bake doesn't hold (Realtime, or added since). */
   vgi.frame.bounce_not_baked = true;
-  if (sun && !shown_lighting().empty() && ls.baked_gi) vgi.frame.bounce_not_baked = sun->bake_mode == 0;
+  if (sun && lighting_shown) vgi.frame.bounce_not_baked = sun->bake_mode == 0;
+  return true;
+}
+
+const VoxelGIFrame *Editor::update_voxel_gi(const std::vector<DrawItem> &items, const LightingEnv &env, bool game) {
+  const LightingSettings &ls = scene_->lighting;
+  vgi_updates_++;
+  vgi_last_ = game ? 1 : 0;
+  VoxelGIState &vgi = vgi_[vgi_last_];
+  const int n = ls.gi_resolution <= 0 ? 64 : ls.gi_resolution == 1 ? 128 : 256;
+  const int rsm_res = std::max(32, std::min(tier_rsm_cap_ > 0 && !final_render_ ? tier_rsm_cap_ : 2048, ls.gi_rsm_resolution));
+  if (!voxel_gi_build(vgi, items, env, n, rsm_res, ls.gi_bounce, gi_params_for(ls, !final_render_), !shown_lighting().empty() && ls.baked_gi)) return nullptr;
+  auto mix = [](uint64_t &h, const void *p2, size_t n2) { h = mix_bytes(h, p2, n2); };
   /* Realtime lightmaps (task 0016): laid out again when a Contribute GI object's mesh or placement or the
    * resolution changes (unwrapped UVs are kept per object); update_realtime_lightmaps() fills them. */
   const float rres = finite_bits(ls.realtime_resolution) ? std::max(0.0f, std::min(100.0f, ls.realtime_resolution)) : 2.0f;
@@ -2224,8 +2957,7 @@ bool Editor::start_render_sequence(const std::string &dir_in) {
 
 void Editor::stop_render_sequence() {
   if (seq_.active) {
-    if (rendering_) rendering_ = false;
-    final_pt_.pause();  // (task 0161: the cards stop too)
+    render_job_stop();  // (round 412: the worker stops; the cards with it)
     Log::info("Render Camera Sequence stopped after %zu of %zu", seq_.written.size(), seq_.cams.size());
   }
   seq_.active = false;

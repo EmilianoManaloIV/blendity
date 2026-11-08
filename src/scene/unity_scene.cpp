@@ -12,7 +12,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <mutex>
 #include <set>
+#include <unordered_map>
 
 namespace bl {
 
@@ -142,6 +145,8 @@ bool light_override(const std::string &prop, double v, GameObject *g) {
   if (prop == "m_Shadows.m_Type") return l->shadows = v >= 0.0 && v <= 2.0 ? (int)v : 2, true;  // (round 401)
   if (prop == "m_Shadows.m_Strength") return l->shadow_strength = (float)std::max(0.0, std::min(1.0, v)), true;
   if (prop == "m_BounceIntensity") return l->bounce_intensity = (float)std::max(0.0, v), true;
+  if (prop == "m_ShadowRadius") return l->shadow_radius = (float)std::max(0.0, std::min(10.0, v)), true;  // (round 424)
+  if (prop == "m_ShadowAngle") return l->shadow_angle = (float)std::max(0.0, std::min(90.0, v)), true;
   if (prop == "m_Color.a") return true;  // (a light's alpha does nothing in Unity either)
   if (prop == "m_Intensity") return l->intensity = (float)v, true;
   if (prop == "m_Range") return l->range = (float)v, true;
@@ -688,6 +693,8 @@ void add_light(const UnityDoc &d, GameObject *g, const UnityImport &ctx) {
     l->shadow_strength = (float)std::max(0.0, std::min(1.0, sh->num("m_Strength", 1.0)));
   }
   l->bounce_intensity = (float)std::max(0.0, d.body.num("m_BounceIntensity", 1.0));
+  l->shadow_radius = (float)std::max(0.0, std::min(10.0, d.body.num("m_ShadowRadius", 0.0)));  // (round 424)
+  l->shadow_angle = (float)std::max(0.0, std::min(90.0, d.body.num("m_ShadowAngle", 0.0)));
   l->cookie_size = (float)std::max(0.01, d.body.num("m_CookieSize", 10.0));
   const std::string cookie = d.body.guid("m_Cookie");
   if (!cookie.empty() && d.body.file_id("m_Cookie") && ctx.path_of) l->cookie.path = ctx.path_of(cookie);
@@ -1349,6 +1356,34 @@ void unity_model_ids_from_meta(const YamlNode &meta, UnityModelIds &out) {
 
 namespace {
 
+/* A folder's .unity-guids text, read once and kept while the file's time stays the same (round 425: every texture load
+ * asks - SideRail's list is 100 KB, read 120 times opening the scene); false when the folder has none. */
+bool unity_guids_text(const std::string &dir, std::string &text) {
+  struct Kept {
+    int64_t mtime = 0;
+    bool present = false;
+    std::string text;
+  };
+  static std::mutex mutex;
+  static std::unordered_map<std::string, Kept> kept;
+  const std::string path = fs::join(dir, ".unity-guids");
+  std::error_code ec;
+  const auto t = std::filesystem::last_write_time(std::filesystem::u8path(path), ec);
+  const int64_t mt = ec ? 0 : (int64_t)t.time_since_epoch().count();
+  std::lock_guard<std::mutex> lock(mutex);
+  auto it = kept.find(dir);
+  if (it == kept.end() || it->second.mtime != mt) {
+    Kept k;
+    k.mtime = mt;
+    k.present = mt != 0 && fs::read_file(path, k.text);
+    if (kept.size() > 4096) kept.clear();
+    it = kept.insert_or_assign(dir, std::move(k)).first;
+  }
+  if (!it->second.present) return false;
+  text = it->second.text;
+  return true;
+}
+
 /* A texture's .meta text: beside it (a Unity project's Assets copied in) or by its GUID in the package folder that lists
  * it (.unity-guids, the folder's .unity-meta). */
 bool texture_meta(const std::string &asset_path, std::string &meta) {
@@ -1358,7 +1393,7 @@ bool texture_meta(const std::string &asset_path, std::string &meta) {
   std::replace(rel.begin(), rel.end(), '\\', '/');
   for (std::string dir = fs::parent(abs); !dir.empty() && dir != fs::parent(dir); dir = fs::parent(dir)) {
     std::string text;
-    if (!fs::read_file(fs::join(dir, ".unity-guids"), text)) continue;
+    if (!unity_guids_text(dir, text)) continue;
     const size_t at = text.find("\t" + rel + "\n");
     if (at == std::string::npos) continue;  // (review 399: a nested package's list - the one above may hold it)
     const size_t start = text.rfind('\n', at) == std::string::npos ? 0 : text.rfind('\n', at) + 1;
@@ -1367,6 +1402,24 @@ bool texture_meta(const std::string &asset_path, std::string &meta) {
   }
   return false;
 }
+
+/* Unity's Alpha Source in a texture's .meta (the YAML calls it alphaUsage; the C# property alphaSource): 0 none,
+ * 1 the image's, 2 its grey; -1 when there's no .meta. */
+int meta_alpha_usage(const std::string &meta_text) {
+  const YamlNode meta = parse_yaml(meta_text);
+  const YamlNode *imp = meta.get("TextureImporter");
+  if (!imp) return -1;
+  return (int)imp->num("alphaUsage", imp->num("alphaSource", 1.0));
+}
+
+/* The texture loader's rule (round 425): a texture from a Unity project takes its alpha as Unity imports it - SideRail's
+ * baked "light profiles" are greyscale PNGs Unity reads as alpha, the shape its lamps' baked light shines through. */
+int unity_texture_alpha_rule(const std::string &path) {
+  std::string text;
+  if (!texture_meta(path, text) || text.find("alphaUsage") == std::string::npos) return -1;
+  return meta_alpha_usage(text);
+}
+const bool g_alpha_rule_set = (texture_set_alpha_rule(&unity_texture_alpha_rule), true);
 
 /* TextureImporterFormat's bytes a texel (crunched as what it unpacks to); 0: automatic or one not listed. */
 double format_bytes(int format) {
@@ -1412,7 +1465,7 @@ bool unity_texture_megabytes(const std::string &asset_path, int width, int heigh
   const double pw = npot_side(width, npot), ph = npot_side(height, npot);  // (review 399: rounded first, then capped)
   const double side = std::max(pw, ph), scale = side > cap && cap > 0 ? cap / side : 1.0;
   const double w = std::max(1.0, std::floor(pw * scale)), h = std::max(1.0, std::floor(ph * scale));
-  const int alpha_source = (int)imp->num("alphaSource", 1.0);  // (0 none, 1 from the image, 2 from its grey)
+  const int alpha_source = (int)imp->num("alphaUsage", imp->num("alphaSource", 1.0));  // (0 none, 1 from the image, 2 from its grey; the YAML's name is alphaUsage - round 425)
   has_alpha = alpha_source == 2 || (alpha_source == 1 && has_alpha);
   const YamlNode *mips = imp->get("mipmaps");
   const bool mipped = (mips ? mips->num("enableMipMap", 1) : imp->num("enableMipMap", 1)) != 0.0;
@@ -1529,6 +1582,58 @@ void skybox_world(const UnitySkybox &sb, EnvironmentSettings &env, std::vector<s
     return;
   }
   notes.push_back("the skybox's shader (" + sb.shader + ") isn't one Blendity reads: Blendity's sky stays");
+}
+
+namespace {
+/* A number clamped in double before it becomes an int (a malformed 1e12 or a NaN is no undefined cast). */
+int clamped_int(const YamlNode &s, const char *key, double def, double lo, double hi) {
+  const double v = s.num(key, def);
+  return (int)(v >= lo ? (v <= hi ? v : hi) : lo);
+}
+const YamlNode *lighting_settings_doc(const std::vector<UnityDoc> &docs, int64_t file_id) {
+  for (const UnityDoc &d : docs)
+    if (d.body.get("m_BakeResolution") && (file_id == 0 || d.file_id == file_id)) return &d.body;
+  return nullptr;
+}
+}  // namespace
+
+bool unity_bake_settings(const std::vector<UnityDoc> &docs, const std::string &lighting_asset, UnityBakeSettings &out) {
+  const YamlNode *src = nullptr, *legacy = nullptr, *gi = nullptr;
+  std::vector<UnityDoc> asset_docs;
+  if (!lighting_asset.empty()) {
+    std::string why;
+    if (parse_unity_yaml(lighting_asset, asset_docs, why) && (src = lighting_settings_doc(asset_docs, 0))) out.source = "the LightingSettings asset";
+  }
+  for (const UnityDoc &d : docs) {
+    if (d.class_id != 157) continue;
+    legacy = d.body.get("m_LightmapEditorSettings"), gi = d.body.get("m_GISettings");
+    /* A LightingSettings document inside the scene itself: referenced by its fileID, no guid. */
+    const int64_t fid = d.body.file_id("m_LightingSettings");
+    if (!src && fid != 0 && d.body.guid("m_LightingSettings").empty() && (src = lighting_settings_doc(docs, fid)))
+      out.source = "the scene's embedded LightingSettings";
+  }
+  if (!src && legacy) src = legacy, out.source = "the scene's own settings";
+  if (!src) return false;
+  const YamlNode &s = *src;
+  out.read = true;
+  const double texels = s.num("m_BakeResolution", 40.0);
+  out.texels = (float)(texels >= 0.01 ? (texels <= 1000.0 ? texels : 1000.0) : 0.01);
+  out.max_size = clamped_int(s, "m_LightmapMaxSize", s.num("m_AtlasSize", 1024.0), 16, 4096);
+  out.padding = clamped_int(s, "m_Padding", 2.0, 0, 32);
+  out.direct = clamped_int(s, "m_PVRDirectSampleCount", 32.0, 1, 4096);
+  out.indirect = clamped_int(s, "m_PVRSampleCount", 512.0, 1, 65536);
+  out.environment = clamped_int(s, "m_PVREnvironmentSampleCount", 256.0, 1, 65536);
+  out.bounces = clamped_int(s, "m_PVRBounces", 2.0, 0, 16);
+  out.filtering = clamped_int(s, "m_PVRFilteringMode", 1.0, 0, 2);
+  out.denoiser_indirect = clamped_int(s, "m_PVRDenoiserTypeIndirect", 0.0, 0, 3);
+  out.directional = clamped_int(s, "m_LightmapsBakeMode", 1.0, 0, 1);
+  out.mixed = clamped_int(s, "m_MixedBakeMode", 0.0, 0, 2);
+  out.ao = s.num("m_AO", 0.0) != 0.0;
+  out.backend = clamped_int(s, "m_BakeBackend", 1.0, 0, 2);
+  /* Baked GI on or off: the LightingSettings' own flag, else the scene's m_GISettings. */
+  const YamlNode *flag = s.get("m_EnableBakedLightmaps") ? &s : gi;
+  out.baked_gi = !flag || flag->num("m_EnableBakedLightmaps", 1.0) != 0.0;
+  return true;
 }
 
 bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,

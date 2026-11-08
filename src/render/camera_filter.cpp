@@ -275,6 +275,15 @@ const float *srgb_decode_table() {
   return t.data();
 }
 
+/* Round 416 (ADR 0110): a pixel's colour is "still what its linear light encodes" when within a step of it per channel -
+ * exact on the CPU's own picture; on the card's picture (the same view transform on the card, within a step) a 1-off
+ * pixel is still the card's shading, not something drawn over it. The card's passes use the same rule. */
+bool within_step(uint32_t a, uint32_t b) {
+  for (int k = 0; k < 24; k += 8)
+    if (std::abs((int)((a >> k) & 255) - (int)((b >> k) & 255)) > 1) return false;
+  return true;
+}
+
 uint32_t hash3(uint32_t a, uint32_t b, uint32_t c) {
   uint32_t h = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u) * 0x85EBCA77u ^ (c + 0x165667B1u) * 0xC2B2AE3Du;
   h ^= h >> 15;
@@ -316,7 +325,7 @@ void apply_color_grading(RenderTarget &rt, const ColorGradingParams &p) {
         uint32_t *row = rt.color + (size_t)y * rt.stride;
         display::encode_span(&h[0].x, enc.data(), (size_t)W, rt.hdr_view_transform, rt.hdr_exposure);
         for (int x = 0; x < W; x++) {
-          if (h[x].x < 0.0f || (enc[(size_t)x] & 0xFFFFFF) != (row[x] & 0xFFFFFF)) continue;  // unshaded, or drawn over since
+          if (h[x].x < 0.0f || !within_step(enc[(size_t)x], row[x])) continue;  // unshaded, or drawn over since
           h[x] = h[x] * ex;
           done[(size_t)y * W + x] = 1;
         }
@@ -1005,7 +1014,7 @@ void apply_bloom(RenderTarget &rt, const BloomParams &p) {
         const size_t i = (size_t)y * W + x;
         Vec3 c;
         const bool from_hdr = have_hdr && rt.hdr[i].x >= 0.0f;
-        current[i] = from_hdr && ((enc[(size_t)x] ^ row[x]) & 0xFFFFFFu) == 0;
+        current[i] = from_hdr && within_step(enc[(size_t)x], row[x]);
         if (from_hdr) c = rt.hdr[i];
         else {
           const uint32_t px = row[x];

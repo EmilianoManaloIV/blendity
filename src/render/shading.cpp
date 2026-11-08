@@ -78,6 +78,7 @@ SurfaceSample evaluate_material(const Material &m, const Material::Resolved &tx,
   if (m.shading_model == 1) s.toon = &m;  // an axis material's parts shade by the parent's model
   if (m.liltoon()) s.lil = true;          // (round 402)
   if (m.shading_model == 2) s.handpainted = &m, s.unlit = true;  // (task 0247)
+  s.exposure_occlusion = m.exposure_occlusion;  // (round 429)
   return s;
 }
 

@@ -188,6 +188,13 @@ class PathTracer {
     surface_at(h.object, h.tri, h.u, h.v, sp);
     return sp.geo_normal;
   }
+  /* Round 430: a ray along `d` met the hit's back face - its geometry faces along the ray and its material isn't Double
+   * Sided (Unity's Double Sided GI: such back faces count as front ones). */
+  bool hit_back_face(const Hit &h, Vec3 d) const {
+    SurfacePoint sp;
+    const Material *m = surface_at(h.object, h.tri, h.u, h.v, sp);
+    return dot(sp.geo_normal, d) > 0.0f && !(m && m->double_sided);
+  }
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }
@@ -239,6 +246,12 @@ class PathTracer {
 
   static bool embree_available();
   static bool oidn_available();
+  /* Round 423: a lightmap page's light denoised by OIDN's lightmap filter (RTLightmap, the one Unity's Progressive
+   * Lightmapper runs), in place, on the CPU device. False without OIDN or on its error (the caller filters instead). */
+  static bool oidn_denoise_lightmap(std::vector<Vec3> &rgb, int w, int h);
+  /* Whether this OIDN build can (an 8 x 8 page tried once: Blender's libraries may leave the lightmap filter's trained
+   * weights out); its error kept for the log. */
+  static bool oidn_lightmap_available(std::string *why = nullptr);
   /* Task 0094: OIDN found a GPU and opened it (whatever Denoise Device says); its fallbacks to the CPU so far; a
    * test hook that makes the GPU fail. */
   static bool oidn_gpu_available();

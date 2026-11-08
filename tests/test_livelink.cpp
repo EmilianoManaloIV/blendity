@@ -1533,17 +1533,23 @@ static void tests_round379() {
     CHECK(worst < 1e-5);
     (void)drain(ed, cl);
     CHECK(count_of(drain(ed, cl), "clip") == 0);  // (unchanged: nothing)
-    /* A key changed: once; changed again at once: owed, then sent after the gap. */
+    /* A key changed: once; changed again at once: owed, then sent after the gap. (The gap is wall-clock time: on a slow
+     * runner - macOS CI, round 414 - the first change's drain alone can take longer than it, and the second change is then
+     * sent at once, which is the throttle working; the strict check holds when the second change came within the gap.) */
+    const auto first_change = std::chrono::steady_clock::now();
     c->track("A", "Rotation", 0).set_key(20.0f, 45.0f);
     c->touch();
     CHECK(count_of(drain(ed, cl), "clip") == 1);
     c->track("A", "Rotation", 0).set_key(20.0f, 30.0f);
     c->touch();
     const int at_once = count_of(drain(ed, cl), "clip");
+    const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - first_change).count();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     const int later = count_of(drain(ed, cl), "clip");
-    std::printf("    changed twice in a row: %d at once, %d after a quarter second\n", at_once, later);
-    CHECK(at_once == 0 && later == 1);
+    std::printf("    changed twice in a row: %d at once (%.0f ms after the first change), %d after a quarter second\n", at_once, since * 1000.0, later);
+    CHECK(at_once + later == 1);
+    if (since < 0.2) CHECK(at_once == 0 && later == 1);
+    else if (at_once == 1) std::printf("    (a slow run: the second change came after the gap, so it went at once)\n");
     ed.livelink_stop();
     forget_clip_assets("Assets/Animations/r379_clip.anim");
   });

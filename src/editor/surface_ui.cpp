@@ -113,6 +113,7 @@ bool Editor::surface_new(const std::string &name_in) {
   }
   std::string why;
   if (!surface_load_maps(g, *pt, &why, false)) Log::info("Surface: %s (Mesh Map layers read flat grey until then)", why.c_str());  // (part of this one step)
+  if (jobs_async()) procedural_texture_set_async(rel, true);  // (round 412: its first images from the worker; the views show a 16 x 16 stand-in until they land)
   assign_texture_asset(g, rel);
   texture_selected_ = pt;
   texture_paths_listed_ = -100;

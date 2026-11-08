@@ -326,11 +326,23 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Max Lightmap Size", max_size, 16, 4096);
   r.field("Lightmap Padding", padding, 0, 32);
   r.help("Texels kept between charts so they don't bleed into each other.");
+  static const char *dir_modes[] = {"Non-Directional", "Directional"};
+  r.enumeration("Directional Mode", directional_mode, dir_modes, 2);
+  r.help("Unity's Directional Mode. Directional: the bake keeps where each texel's light came from, so a normal map's bumps\n"
+         "catch baked light as they catch realtime light (a second page per lightmap). Non-Directional: the light alone.");
   r.field("Direct Samples", direct_samples, 1, 4096);
   r.help("Shadow rays per texel for each Baked area light.");
   r.field("Indirect Samples", indirect_samples, 1, 65536);
   r.help("Rays per texel gathering bounced light and the sky. More is smoother and slower.");
   r.field("Bounces", bounces, 0, 16);
+  static const char *bake_devices[] = {"Render Device", "CPU", "GPU"};
+  r.enumeration("Lightmapper", bake_device, bake_devices, 3);
+  r.help("Where Generate Lighting gathers the bounced light (Unity's Progressive CPU / GPU). Render Device: as Render >\n"
+         "Device. GPU: on the card whenever there is one (a Unity scene baked on Unity's GPU lightmapper asks for it).");
+  r.field("Backface Tolerance", backface_tolerance, 0.01f, 0.0f, 1.0f);
+  r.help("Unity's Backface Tolerance: a texel whose rays meet back faces more often than 1 - this is inside geometry and is\n"
+         "filled from its neighbours (no dark line along a box standing in a floor). Double Sided materials' backs count\n"
+         "as fronts. Lower it - to 0 - when single-sided geometry (a card, a roof of one plane) makes surfaces near it flat.");
   r.field("Denoise", denoise);
   r.field("Indirect Intensity", indirect_intensity, 0.01f, 0.0f, 100.0f);
   r.field("Auto Generate", auto_generate);
@@ -590,9 +602,16 @@ void Light::reflect(Reflector &r) {
          "Preview Lighting shows it before a bake. The path tracer lights with every mode.");
   static const char *shadow_types[] = {"No Shadows", "Hard Shadows", "Soft Shadows"};
   r.enumeration("Shadow Type", shadows, shadow_types, 3);
-  r.help("Unity's Shadow Type (round 401). No Shadows: the light passes through everything, in the views and the path tracer\n"
-         "alike. Hard and Soft: it casts shadows (the views draw the sun's; the path tracer every light's).");
+  r.help("Unity's Shadow Type (round 401). No Shadows: the light passes through everything - in the views, the path tracer and\n"
+         "the bake alike. Hard and Soft: it casts shadows (the views draw the sun's; the path tracer and the bake every light's).");
   if (all || shadows != 0) r.field("Shadow Strength", shadow_strength, 0.01f, 0.0f, 1.0f);
+  if (all || (shadows == 2 && (type == 1 || type == 2))) r.field("Baked Shadow Radius", shadow_radius, 0.01f, 0.0f, 10.0f);
+  if (all || (shadows == 2 && type == 0)) r.field("Baked Shadow Angle", shadow_angle, 0.1f, 0.0f, 90.0f);
+  if (all || (shadows == 2 && type != 3))
+    r.help("Unity's Baked Shadow Radius (point and spot, metres) and Angle (directional, degrees): the bake takes the light\n"
+           "as a ball, or a disc in the sky, this big, so its baked shadows soften away from what casts them (0: sharp).\n"
+           "Soft Shadows only, as in Unity. Direct Samples in the Lighting window sets how many shadow rays a texel sends.\n"
+           "Area lights are soft by their size.");
   r.field("Indirect Multiplier", bounce_intensity, 0.01f, 0.0f, 8.0f);
   r.help("Unity's Indirect Multiplier: how much of this light's bounced light the bake keeps (0: none bounces).");
   r.texture("Cookie", cookie);
@@ -1202,6 +1221,11 @@ void ColorGradingEffect::contribute(FilterStack &s) const {
   p.exposure = exposure, p.contrast = contrast, p.saturation = saturation, p.temperature = temperature, p.tint = tint;
   p.lift = lift, p.gamma = gamma, p.gain = gain;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_color_grading(rt, p); });
+  PostPass c;  // (round 416: the same settings for the card; the view finishes them - the exposure's gain, the flags)
+  c.kind = PostPass::ColorGrading;
+  c.p[0] = exposure, c.p[1] = contrast, c.p[2] = saturation, c.p[4] = temperature, c.p[5] = tint;
+  for (int k = 0; k < 3; k++) c.p[8 + k] = lift[k], c.p[12 + k] = gamma[k], c.p[16 + k] = gain[k];
+  s.card.push_back(c);
 }
 
 void PosterizeEffect::reflect(Reflector &r) {
@@ -1242,6 +1266,10 @@ void VignetteEffect::contribute(FilterStack &s) const {
   VignetteParams p;
   p.intensity = intensity, p.smoothness = smoothness, p.roundness = roundness, p.color = display_color(color);
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_vignette(rt, p); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::Vignette;
+  c.p[0] = intensity, c.p[1] = smoothness, c.p[2] = roundness, c.p[4] = p.color.x, c.p[5] = p.color.y, c.p[6] = p.color.z;
+  s.card.push_back(c);
 }
 
 void ChromaticAberrationEffect::reflect(Reflector &r) {
@@ -1251,6 +1279,10 @@ void ChromaticAberrationEffect::reflect(Reflector &r) {
 void ChromaticAberrationEffect::contribute(FilterStack &s) const {
   const float k = intensity;
   s.passes.push_back([k](RenderTarget &rt, const FilterFrame *) { apply_chromatic_aberration(rt, k); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::ChromaticAberration;
+  c.p[0] = intensity;
+  s.card.push_back(c);
 }
 
 void FilmGrainEffect::reflect(Reflector &r) {
@@ -1264,6 +1296,10 @@ void FilmGrainEffect::contribute(FilterStack &s) const {
   GrainParams p;
   p.intensity = intensity, p.size = size, p.response = response;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *f) { apply_film_grain(rt, p, f); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::FilmGrain;
+  c.p[0] = intensity, c.p[1] = size, c.p[2] = response;
+  s.card.push_back(c);
 }
 
 void LensDistortionEffect::reflect(Reflector &r) {
@@ -1337,6 +1373,10 @@ void BloomEffect::contribute(FilterStack &s) const {
   p.intensity = intensity, p.threshold = threshold, p.soft_knee = soft_knee, p.scatter = scatter, p.clamp = clamp, p.tint = tint;
   s.needs_hdr = true;
   s.passes.push_back([p](RenderTarget &rt, const FilterFrame *) { apply_bloom(rt, p); });
+  PostPass c;  // (round 416)
+  c.kind = PostPass::Bloom;
+  c.p[0] = intensity, c.p[1] = threshold, c.p[2] = soft_knee, c.p[3] = scatter, c.p[4] = clamp, c.p[5] = tint.x, c.p[6] = tint.y, c.p[7] = tint.z;
+  s.card.push_back(c);
 }
 
 void HalftoneEffect::reflect(Reflector &r) {
@@ -2813,13 +2853,18 @@ Mat4 GameObject::world_matrix_uncached() const {
 }
 
 void GameObject::mark_dirty() {
+  edit_epoch::bump();  // (ADR 0115: the views' scene hash - once for the subtree, not per node: review 435)
+  mark_dirty_tree();
+}
+
+void GameObject::mark_dirty_tree() {
   /* Before the early return: a node already stale since its hash was memoised must still invalidate
    * the memo (ADR 0015), and the memo is only refreshed by a hash, which reads the world matrix. */
   transform_version++;
   /* Invariant: a dirty node's descendants are dirty too, so we can stop early. */
   if (world_dirty_) return;
   world_dirty_ = true;
-  for (GameObject *c : children) c->mark_dirty();
+  for (GameObject *c : children) c->mark_dirty_tree();
 }
 
 Quat GameObject::world_rotation() const {
@@ -2868,6 +2913,7 @@ Component *GameObject::add_component(std::unique_ptr<Component> c) {
       if (std::strcmp(e->type_name(), c->type_name()) == 0) return e.get();
   c->owner = this;
   components.push_back(std::move(c));
+  edit_epoch::bump();  // (ADR 0115)
   return components.back().get();
 }
 
@@ -2875,6 +2921,7 @@ void GameObject::remove_component(Component *c) {
   for (size_t i = 0; i < components.size(); i++)
     if (components[i].get() == c) {
       components.erase(components.begin() + i);
+      edit_epoch::bump();  // (ADR 0115)
       return;
     }
 }
@@ -2983,6 +3030,44 @@ struct CameraViewEval {
 
 bool evaluating_camera_view() { return g_camera_view_eval; }
 
+GameObject::SlowEvalHook GameObject::slow_eval_hook;
+static thread_local int tl_evaluate_now = 0;
+GameObject::EvaluateNowScope::EvaluateNowScope() { tl_evaluate_now++; }
+GameObject::EvaluateNowScope::~EvaluateNowScope() { tl_evaluate_now--; }
+
+/* Round 413: the worker's result taken - the caches of `from` (a standalone copy of this object with the same base mesh and
+ * components) become this kind's; the pending mark cleared; the generation moved so every view draws it. */
+void GameObject::adopt_evaluation(GameObject &from, int kind) {
+  kind = std::max(0, std::min(kind, 8));
+  eval_mesh_[kind] = std::move(from.eval_mesh_[kind]);
+  eval_key_[kind] = from.eval_key_[kind];
+  eval_head_[kind] = std::move(from.eval_head_[kind]);
+  eval_head_key_[kind] = from.eval_head_key_[kind];
+  eval_head_topo_[kind] = from.eval_head_topo_[kind];
+  eval_chain_[kind] = std::move(from.eval_chain_[kind]);
+  eval_from_[kind] = from.eval_from_[kind];
+  eval_shape_key_[kind] = from.eval_shape_key_[kind];
+  eval_pending_[kind] = 0;
+  eval_generation_++;
+  edit_epoch::bump();  // (ADR 0115: a new picture)
+}
+
+/* Round 413: whether a stack is worth a worker - the work it means, from the base mesh's faces and the modifiers that
+ * run (a Decimate the faces, a Subdivision four to a level, the rest a tenth), past 200,000 face-steps - and reads no
+ * other object (a modifier with a dependency hash is left to the main thread: the worker's copy has no scene). */
+static bool evaluation_slow(const Mesh &base, const std::vector<std::unique_ptr<Component>> &components, const std::function<bool(const Component &)> &on) {
+  const double faces = (double)base.face_count();
+  double work = 0.0;
+  for (const auto &c : components) {
+    if (!on(*c)) continue;
+    if (c->modifier_dependency_hash() != 0) return false;
+    if (dynamic_cast<const DecimateModifier *>(c.get())) work += faces;
+    else if (const auto *s = dynamic_cast<const SubdivisionSurface *>(c.get())) work += faces * std::pow(4.0, (double)std::max(0, std::min(6, s->levels)));
+    else work += faces * 0.1;
+  }
+  return work >= 200000.0;
+}
+
 const Mesh *GameObject::evaluated_mesh(int kind) const {
   kind = std::max(0, std::min(kind, 8));
   const int mods = kind >= 3 ? (kind - 3) % 2 : kind;  // (round 339: 3-8 are 0 and 1 through a camera, a pair a camera-view role)
@@ -2997,6 +3082,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   mix(mf->mesh->version);
   uint64_t topo_key = key;  // (ADR 0075: the key without the base's deform_version - what the subdivision chain follows)
   auto tmix = [&](uint64_t v) { topo_key = (topo_key ^ v) * kFnvPrime; };
+  uint64_t shape_key = key;  // (round 413: the key without the deform - a deform alone is the main thread's, the chain following)
+  auto smix = [&](uint64_t v) { shape_key = (shape_key ^ v) * kFnvPrime; };
   mix(mf->mesh->deform_version);  // (ADR 0075: a positions-only change - a sculpt dab - re-evaluates the stack; the views' keys already read it)
   /* Shape keys first (task 0135): the basis with the renderer's keys added, then the modifiers (the skin) on that.
    * Edit Mode's cage (kind 2) shows the basis it edits, as Blender does. */
@@ -3023,6 +3110,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     const uint64_t hc = hash_component(c), hd = c.modifier_dependency_hash();
     mix(hc);
     mix(hd);
+    smix(hc), smix(hd);
     if (i < split) tmix(hc), tmix(hd), head_count++, chain_sub = dynamic_cast<const SubdivisionSurface *>(&c);
     if (i + 1 == split) head_key = key, head_topo_key = topo_key;
   }
@@ -3030,13 +3118,24 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   /* The weights are part of the head when a modifier runs before the tail; otherwise the keys are added on the
    * deform path, so a weight changing frame by frame deforms again rather than copying the mesh. */
   if (shaped && any_head) head_key = (head_key ^ shape_hash) * kFnvPrime, head_topo_key = (head_topo_key ^ shape_hash) * kFnvPrime;
-  if (shaped) mix(shape_hash);
+  if (shaped) mix(shape_hash), smix(shape_hash);
   if (shaped && !any_head) any_tail = true;  // (shaped from the basis's positions again each time, as a deformer is)
   if (!any && !shaped) {  // (nothing drawn over the mesh: the caches go with it - a chain's tables are not kept for nothing)
     eval_mesh_[kind] = nullptr, eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr;
     return mf->mesh.get();
   }
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
+  /* Round 413 (ADR 0107): a slow stack goes to the editor's worker; what it had stays up meanwhile. Not when only the
+   * base's positions moved since the last result (a dab, a drag: the chain follows them here, ADR 0075), and not inside
+   * an EvaluateNowScope. */
+  const bool deform_only = eval_mesh_[kind] && eval_shape_key_[kind] == shape_key;
+  if (slow_eval_hook && tl_evaluate_now == 0 && kind <= 2 && !deform_only && (eval_pending_[kind] == key || evaluation_slow(*mf->mesh, components, on)) &&
+      slow_eval_hook(*this, kind, key)) {
+    eval_pending_[kind] = key;
+    return eval_mesh_[kind] ? eval_mesh_[kind].get() : mf->mesh.get();
+  }
+  eval_pending_[kind] = 0;
+  eval_shape_key_[kind] = shape_key;
   auto run = [&](Mesh &m, size_t from, size_t to) {
     for (size_t i = from; i < to; i++)
       if (on(*components[i])) run_modifier(*components[i], m);
@@ -3056,7 +3155,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     }
     const size_t written = eval_chain_[kind]->update(base, *eval_head_[kind]);
     if (written == meshops::SubdivChain::kRefused) return false;  // (not the mesh the chain was built for: rebuilt)
-    if (written) eval_head_[kind]->deform_version++;
+    if (written) eval_head_[kind]->deform_version++, edit_epoch::bump();
     eval_head_key_[kind] = head_key;
     head_followed = true;
     return true;
@@ -3124,7 +3223,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m->positions = head->positions;
     m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);  // (no head: the basis shaped here)
-    m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
+    m->deform_version++, edit_epoch::bump();  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
         m->face_offsets.size() == head->face_offsets.size())
@@ -3207,6 +3306,7 @@ GameObject *Scene::adopt(std::unique_ptr<GameObject> go, uint64_t id) {
   by_id_[id] = raw;
   objects_.push_back(std::move(go));
   next_id_ = std::max(next_id_, id + 1);
+  edit_epoch::bump();  // (ADR 0115: an object made, loaded or cloned)
   return raw;
 }
 
@@ -3222,6 +3322,7 @@ GameObject *Scene::create(const std::string &name, GameObject *parent) {
 
 void Scene::destroy(GameObject *go) {
   if (!go) return;
+  edit_epoch::bump();  // (ADR 0115)
   if (go->id == active_camera) active_camera = 0;  // back to the name rule
   while (!go->children.empty()) destroy(go->children.back());
   auto &list = go->parent ? go->parent->children : roots;
@@ -3235,7 +3336,42 @@ void Scene::destroy(GameObject *go) {
   objects_.pop_back();
 }
 
+static void collect_with_children(GameObject *go, std::unordered_set<GameObject *> &doomed) {
+  if (!go || !doomed.insert(go).second) return;
+  for (GameObject *c : go->children) collect_with_children(c, doomed);
+}
+
+void Scene::destroy(const std::vector<GameObject *> &list) {
+  if (list.empty()) return;
+  edit_epoch::bump();  // (ADR 0115)
+  std::unordered_set<GameObject *> doomed;
+  doomed.reserve(list.size());
+  for (GameObject *g : list) collect_with_children(g, doomed);  // (a list naming an object twice, or a parent and its child, is safe)
+  const auto is_doomed = [&](GameObject *g) { return doomed.count(g) != 0; };
+  std::unordered_set<GameObject *> parents;  // the surviving parents whose lists lose children
+  for (GameObject *g : doomed) {
+    if (g->id == active_camera) active_camera = 0;
+    by_id_.erase(g->id);
+    if (g->parent && !is_doomed(g->parent)) parents.insert(g->parent);
+  }
+  roots.erase(std::remove_if(roots.begin(), roots.end(), is_doomed), roots.end());
+  for (GameObject *p : parents) p->children.erase(std::remove_if(p->children.begin(), p->children.end(), is_doomed), p->children.end());
+  objects_.erase(std::remove_if(objects_.begin(), objects_.end(), [&](const std::unique_ptr<GameObject> &g) { return is_doomed(g.get()); }),
+                 objects_.end());
+  for (size_t i = 0; i < objects_.size(); i++) objects_[i]->index_in_scene = i;
+}
+
+void prefetch_scene_textures(const Scene &s) {
+  std::vector<MaterialPtr> used;
+  s.for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    if (mr) used.insert(used.end(), mr->materials.begin(), mr->materials.end());
+  });
+  prefetch_material_textures(used);
+}
+
 void Scene::clear() {
+  edit_epoch::bump();  // (round 436: lists kept on the counter hold pointers into the scene)
   objects_.clear();
   by_id_.clear();
   roots.clear();

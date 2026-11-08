@@ -2,6 +2,7 @@
 
 #include "shading.h"
 #include "../core/core.h"
+#include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -70,6 +71,121 @@ Vec3 ReflectionProbeBake::sample(Vec3 dir) const {
   return (a * (1.0f - fx) + b * fx) * (1.0f - fy) + (c * (1.0f - fx) + d * fx) * fy;
 }
 
+namespace {
+/* One sample of the lobe: the cube's texel, or the cube mip whose texel covers the sample's share of the lobe -
+ * 1 / (N pdf), the pdf of l being D(h) / 4 when N = V. */
+Vec3 sample_lobe(const ReflectionProbeBake &b, const ProbeCubeMips *mips, Vec3 l, float noh, float a2, int samples) {
+  if (!mips) return b.sample(l);
+  const float d = noh * noh * (a2 - 1.0f) + 1.0f;
+  const float pdf = a2 / (kPi * d * d) * 0.25f;
+  const float sample_sr = 1.0f / ((float)samples * std::max(pdf, 1e-8f));
+  return mips->sample(l, 0.5f * std::log2(sample_sr / mips->texel_sr()));  // (no +1 bias: box mips on the cube already blur a little past their texel)
+}
+
+/* Bilinear on one level's face, clamped at the face's edge. */
+Vec3 face_bilinear(const std::vector<Vec3> &px, int n, float u, float v) {
+  const float fx = std::max(0.0f, std::min((float)n - 1.0f, u * (float)n - 0.5f)), fy = std::max(0.0f, std::min((float)n - 1.0f, v * (float)n - 0.5f));
+  const int x0 = (int)fx, y0 = (int)fy, x1 = std::min(n - 1, x0 + 1), y1 = std::min(n - 1, y0 + 1);
+  const float tx = fx - (float)x0, ty = fy - (float)y0;
+  const Vec3 top = px[(size_t)y0 * n + x0] * (1.0f - tx) + px[(size_t)y0 * n + x1] * tx;
+  const Vec3 bot = px[(size_t)y1 * n + x0] * (1.0f - tx) + px[(size_t)y1 * n + x1] * tx;
+  return top * (1.0f - ty) + bot * ty;
+}
+}  // namespace
+
+ProbeCubeMips::ProbeCubeMips(const ReflectionProbeBake &b) {
+  sizes.push_back(b.size);
+  levels.emplace_back();
+  for (int f = 0; f < 6; f++) levels[0][(size_t)f] = b.faces[f];
+  while (sizes.back() > 1) {
+    const int n = sizes.back(), h = n / 2;
+    std::array<std::vector<Vec3>, 6> next;
+    const auto &prev = levels.back();
+    for (int f = 0; f < 6; f++) {
+      next[(size_t)f].assign((size_t)h * h, Vec3(0.0f));
+      for (int y = 0; y < h; y++)
+        for (int x = 0; x < h; x++) {
+          const std::vector<Vec3> &p = prev[(size_t)f];
+          next[(size_t)f][(size_t)y * h + x] = (p[(size_t)(2 * y) * n + 2 * x] + p[(size_t)(2 * y) * n + 2 * x + 1] + p[(size_t)(2 * y + 1) * n + 2 * x] + p[(size_t)(2 * y + 1) * n + 2 * x + 1]) * 0.25f;
+        }
+    }
+    sizes.push_back(h);
+    levels.push_back(std::move(next));
+  }
+}
+
+float ProbeCubeMips::texel_sr() const { return 4.0f * kPi / (6.0f * (float)sizes[0] * (float)sizes[0]); }
+
+Vec3 ProbeCubeMips::sample(Vec3 dir, float lod) const {
+  int face;
+  float u, v;
+  cube_face_uv(dir, face, u, v);
+  const float l = std::max(0.0f, std::min((float)sizes.size() - 1.0f, finite_bits(lod) ? lod : 0.0f));
+  const int l0 = (int)l, l1 = std::min((int)sizes.size() - 1, l0 + 1);
+  const float t = l - (float)l0;
+  const Vec3 a = face_bilinear(levels[(size_t)l0][(size_t)face], sizes[(size_t)l0], u, v);
+  if (t <= 0.0f || l1 == l0) return a;
+  return a * (1.0f - t) + face_bilinear(levels[(size_t)l1][(size_t)face], sizes[(size_t)l1], u, v) * t;
+}
+
+namespace {
+}  // namespace
+
+float reflection_probe_lod(float roughness, int levels) {
+  const float r = std::max(0.0f, std::min(1.0f, finite_bits(roughness) ? roughness : 1.0f));
+  return std::min(r * (1.7f - 0.7f * r) * (float)kProbeLodSteps, (float)std::max(0, levels - 1));
+}
+
+float reflection_probe_level_roughness(float level) {
+  /* r (1.7 - 0.7 r) = level / 6, solved for r in 0..1: 0.7 r^2 - 1.7 r + m = 0. */
+  const float m = std::max(0.0f, std::min(1.0f, level / (float)kProbeLodSteps));
+  return (1.7f - std::sqrt(std::max(0.0f, 1.7f * 1.7f - 4.0f * 0.7f * m))) / (2.0f * 0.7f);
+}
+
+Vec3 reflection_probe_prefilter(const ReflectionProbeBake &b, Vec3 n, float roughness, int samples, const ProbeCubeMips *mips) {
+  const float a = std::max(1e-3f, roughness * roughness), a2 = a * a;
+  Vec3 t = std::fabs(n.y) < 0.999f ? normalize(cross(Vec3(0, 1, 0), n)) : Vec3(1, 0, 0);
+  const Vec3 bt = cross(n, t);
+  Vec3 sum(0.0f);
+  float wsum = 0.0f;
+  for (int i = 0; i < samples; i++) {
+    /* Hammersley's point i, GGX's half vector (Karis 2013), the light direction reflected about it. */
+    uint32_t bits = (uint32_t)i;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    const float u = ((float)i + 0.5f) / (float)samples, v = (float)bits * 2.3283064365386963e-10f;
+    const float phi = 2.0f * kPi * u, cos_t = std::sqrt((1.0f - v) / (1.0f + (a2 - 1.0f) * v)), sin_t = std::sqrt(std::max(0.0f, 1.0f - cos_t * cos_t));
+    const Vec3 h = t * (sin_t * std::cos(phi)) + bt * (sin_t * std::sin(phi)) + n * cos_t;
+    const Vec3 l = h * (2.0f * dot(n, h)) - n;
+    const float ndl = dot(n, l);
+    if (ndl <= 0.0f) continue;
+    sum += sample_lobe(b, mips, l, cos_t, a2, samples) * ndl;
+    wsum += ndl;
+  }
+  return wsum > 0.0f ? sum / wsum : b.sample(n);
+}
+
+namespace {
+/* Level k of the texture (k = 1 .. kProbeLodSteps) prefiltered at the roughness it holds (round 428). Sampled from the
+ * cube's own faces; more samples the rougher (fewer texels, a wider lobe). */
+void prefilter_level(const ReflectionProbeBake &b, const ProbeCubeMips &mips, Texture::Level &lv, int k) {
+  const float rough = reflection_probe_level_roughness((float)k);
+  const int samples = k <= 1 ? 64 : k <= 3 ? 128 : 256;
+  lv.pxf.assign((size_t)lv.w * lv.h, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+  JobSystem::global().parallel_for(lv.h, 4, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < lv.w; x++) {
+        const Vec3 d = equirect_to_dir(Vec2(((float)x + 0.5f) / (float)lv.w, 1.0f - ((float)y + 0.5f) / (float)lv.h), 0.0f);  // (row 0 the top, as Texture::sample reads it)
+        const Vec3 c = reflection_probe_prefilter(b, d, rough, samples, &mips);
+        lv.pxf[(size_t)y * lv.w + x] = Vec4(c.x, c.y, c.z, 1.0f);
+      }
+  });
+}
+}  // namespace
+
 TexturePtr reflection_probe_texture(const ReflectionProbeBake &b) {
   std::string why;
   if (!b.valid(why)) return nullptr;
@@ -79,12 +195,16 @@ TexturePtr reflection_probe_texture(const ReflectionProbeBake &b) {
   bmp.rgbaf.resize((size_t)w * h * 4);
   for (int y = 0; y < h; y++)
     for (int x = 0; x < w; x++) {
-      const Vec3 c = b.sample(equirect_to_dir(Vec2(((float)x + 0.5f) / (float)w, ((float)y + 0.5f) / (float)h), 0.0f));
+      /* Row 0 the top: Texture::sample reads v up (round 428 - the rows had run from the bottom, every probe's reflection
+       * upside down on both devices since round 401). */
+      const Vec3 c = b.sample(equirect_to_dir(Vec2(((float)x + 0.5f) / (float)w, 1.0f - ((float)y + 0.5f) / (float)h), 0.0f));
       float *o = &bmp.rgbaf[((size_t)y * w + x) * 4];
       o[0] = c.x, o[1] = c.y, o[2] = c.z, o[3] = 1.0f;
     }
   auto t = std::make_shared<Texture>();
   t->build(bmp, false);
+  const ProbeCubeMips mips(b);  // (the cube's own box chain: the source the prefilter's samples read)
+  for (int k = 1; k <= kProbeLodSteps && k < (int)t->levels.size(); k++) prefilter_level(b, mips, t->levels[(size_t)k], k);
   return t;
 }
 
@@ -189,8 +309,8 @@ int reflection_probe_weights(const std::vector<RenderProbe> &probes, Vec3 at, in
 Vec3 reflection_probe_specular(const RenderProbe &p, Vec3 at, Vec3 R, float roughness) {
   if (!p.map || p.map->levels.empty()) return Vec3(0.0f);
   const Vec3 d = normalize(p.projection ? box_projected_direction(p, at, R) : R);
-  const float maxl = (float)p.map->levels.size() - 1.0f;
-  return p.map->sample(dir_to_equirect(d, 0.0f), std::max(0.0f, std::min(1.0f, roughness)) * maxl * 0.85f, TexWrap::Repeat, TexFilter::Trilinear).xyz() * p.intensity;
+  /* (Round 428: Unity's roughness-to-mip, the levels prefiltered to match.) */
+  return p.map->sample(dir_to_equirect(d, 0.0f), reflection_probe_lod(roughness, (int)p.map->levels.size()), TexWrap::Repeat, TexFilter::Trilinear).xyz() * p.intensity;
 }
 
 }  // namespace bl

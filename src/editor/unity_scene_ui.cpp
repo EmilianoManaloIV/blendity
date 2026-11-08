@@ -130,6 +130,51 @@ bool load_unity_skybox(const std::string &guid, UnitySkybox &out) {
       }, [&](const std::string &g, int64_t fid) { return unity_shader_name(*index, g, fid); }, out);
 }
 
+/* Round 421 (ADR 0113): the scene's lightmap settings (its LightingSettings asset through the project's GUIDs, else its
+ * own) as Generate Lighting's; what Blendity doesn't bake yet said. Unity's numbers kept as they are: a bake here then
+ * spends what Unity's spends, so the two are compared at the same settings. */
+void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::vector<std::string> &notes) {
+  std::string asset_text, missing_guid;
+  for (const UnityDoc &d : docs) {
+    if (d.class_id != 157) continue;
+    const std::string guid = d.body.guid("m_LightingSettings");
+    if (guid.empty()) continue;
+    const std::string assets = resolve_asset_path("Assets");
+    const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets, fs::parent(assets));
+    const auto it = index->find(guid);
+    if (it == index->end() || !fs::read_file(it->second.path, asset_text)) missing_guid = guid;
+  }
+  UnityBakeSettings u;
+  if (!unity_bake_settings(docs, asset_text, u)) return;
+  LightingSettings &l = scene_->lighting;  // (unity_bake_settings clamped every number to the window's ranges)
+  l.texels_per_unit = u.texels;
+  l.max_size = u.max_size;
+  l.padding = u.padding;
+  l.direct_samples = u.direct;
+  l.indirect_samples = u.indirect;
+  l.bounces = u.bounces;
+  l.denoise = u.filtering != 0;
+  l.baked_gi = u.baked_gi;
+  l.directional_mode = u.directional;  // (round 426)
+  l.bake_device = u.backend == 2 ? 2 : 0;  // (round 430: Unity's Progressive GPU on the card; its CPU or Enlighten as the Render device - never slower than before, review 430)
+  scene_->unity_bake = u;
+  if (!missing_guid.empty())
+    notes.push_back("the scene's Lighting Settings asset (" + missing_guid + ") isn't in this project: " + u.source + " used for the bake");
+  std::string missing;
+  auto add = [&](const std::string &s) { missing += (missing.empty() ? "" : ", ") + s; };
+  if (u.backend == 0) add("Enlighten's bake (its settings read as the Progressive Lightmapper's)");
+  if (u.mixed == 2) add("Shadowmask (Mixed lights baked as Baked Indirect)");
+  if (u.mixed == 1) add("Subtractive (Mixed lights baked as Baked Indirect)");
+  if (u.ao) add("ambient occlusion");
+  if (u.filtering == 1) add("Unity's automatic denoiser (Blendity's filter instead)");
+  if (u.filtering == 2 && u.denoiser_indirect != 0)
+    add(u.denoiser_indirect == 1 ? "the OptiX denoiser (Blendity's filter instead)" : "Unity's denoiser (Blendity's filter instead)");
+  /* The settings are information (the log); only what isn't baked yet is a note (a warning). */
+  Log::info("Import Unity: the lightmap settings came from %s: %.0f texels per unit, %d direct and %d indirect samples, %d bounces%s", u.source.c_str(),
+            u.texels, u.direct, u.indirect, u.bounces, u.baked_gi ? "" : "; Baked Global Illumination off");
+  if (!missing.empty()) notes.push_back("not baked yet from the scene's lightmap settings: " + missing);
+}
+
 bool load_unity_material(const std::string &text, const std::string &path, Material &m) {
   if (text.find("--- !u!21 ") == std::string::npos) return false;  // (a Material document: anything else isn't one - no index walked for it)
   const std::string assets = resolve_asset_path("Assets");
@@ -335,6 +380,7 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   if (as_scene && unity_render_settings(docs, scene_->environment, ctx.notes, [&](const std::string &guid, UnitySkybox &sb) { return load_unity_skybox(guid, sb); }, &scene_->unity))
     Log::info("Import Unity: the scene's ambient, skybox and fog came in");
   if (as_scene) scene_->unity.file = make_asset_relative(path);  // (round 401: Export Unity Package writes the world, cameras and lights back into it)
+  if (as_scene) apply_unity_bake_settings(docs, ctx.notes);  // (round 421: Unity's lightmap settings as Generate Lighting's)
   if (as_scene) apply_unity_post_processing(docs, ctx);  // (round 401: the scene's global Post Processing volume as the Main Camera's look)
   int probes = 0, lightmapped = 0;
   for (const UnityDoc &d : docs) probes += d.class_id == 220, lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;

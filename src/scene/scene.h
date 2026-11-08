@@ -302,6 +302,10 @@ struct Light : ComponentBase<Light> {
    * Culling Mask kept as Unity's bits. */
   int shadows = 2;
   float shadow_strength = 1.0f;
+  /* Round 424 (Unity's Baked Shadow Radius / Angle): the size the bake gives a point or spot light (a ball, metres) and
+   * a directional one (a disc in the sky, its full angle in degrees), so its baked shadows soften away from what
+   * casts them. 0: sharp. */
+  float shadow_radius = 0.0f, shadow_angle = 0.0f;
   float bounce_intensity = 1.0f;
   TextureRef cookie;
   float cookie_size = 10.0f;
@@ -630,6 +634,12 @@ struct Outline : ComponentBase<Outline> {
    * for the distance (outline_distance_scale). */
   static constexpr int kShellSlots = 9;  // (4 and 5: the Scene and Game views' distance-scaled shells, apart from the path tracers' plain ones; 6-8: a view-shaped mesh's, one a camera-view role - round 339)
   const Mesh *shell(const Mesh &src, float world_scale, int slot = 0, float thickness_scale = 1.0f) const;
+  /* Round 412: the shell held (a render job keeps it while it draws; a rebuild replaces the slot's, never this one). */
+  std::shared_ptr<const Mesh> shell_held(const Mesh *shell) const {
+    for (const ShellCache &c : shells_)
+      if (c.mesh && c.mesh.get() == shell) return c.mesh;
+    return nullptr;
+  }
   /* The scale of the thickness for an object `distance` metres from the eye, with `px_per_m` pixels per metre at
    * one metre (half the view's height times the projection's focal term; an orthographic view passes distance 1):
    * the fade, then the pixel limits, in 2 % steps. `world_scale`: the object's, for a thickness in its own units.
@@ -1712,6 +1722,7 @@ class GameObject {
   void set_world_rotation(Quat q);
   void set_world_matrix(const Mat4 &world);
   void mark_dirty();
+  void mark_dirty_tree();  // (mark_dirty without the change counter's bump: its recursion)
   bool active_in_hierarchy() const;
 
   template<class T> T *get() const {
@@ -1741,12 +1752,39 @@ class GameObject {
    * 2 Edit Mode (enabled and Show in Edit Mode); 3 + 2 x role + (0 or 1) are 0 and 1 seen through a camera, the
    * MeshRenderer's view_weights added to its shape keys - a pair for each camera-view role (round 339, ADR 0094). */
   const Mesh *evaluated_mesh(int kind = 0) const;
+  /* Round 412 (ADR 0106): the same mesh held - a render job keeps it while it draws; an edit meanwhile writes through a
+   * copy (mesh_make_mutable, the head's use_count check above), so what the job reads never changes under it. The base
+   * mesh when nothing is drawn over it. */
+  std::shared_ptr<const Mesh> evaluated_mesh_shared(int kind = 0) const {
+    const Mesh *m = evaluated_mesh(kind);
+    if (!m) return nullptr;
+    const int k = std::max(0, std::min(kind, 8));
+    if (eval_mesh_[k] && eval_mesh_[k].get() == m) return eval_mesh_[k];
+    const MeshFilter *mf = mesh_filter();
+    return mf && mf->mesh.get() == m ? std::shared_ptr<const Mesh>(mf->mesh) : nullptr;
+  }
   /* What evaluated_mesh(kind) is computed from (the base mesh and version, the modifiers that apply and
    * their settings), without evaluating anything: for caches that only need to know it changed. */
   uint64_t evaluated_key(int kind = 0) const;
   /* All three keys in one pass over the components (the same values as three evaluated_key calls). */
   void evaluated_keys(uint64_t out[3]) const;
   const meshops::SubdivChain *eval_chain_for_test(int kind = 0) const { return eval_chain_[std::max(0, std::min(kind, 2))].get(); }  // (task 0239)
+  /* Round 413 (ADR 0107): a slow stack - a Decimate or a deep Subdivision on a big mesh, nothing that reads another
+   * object - evaluated on a worker. The hook (the editor's) is asked when such a stack's key changed; true means a job
+   * is on it and evaluated_mesh returns what it had (the last result, else the base mesh) until adopt_evaluation takes
+   * the worker's caches from a standalone copy of this object. eval_generation moves then: the views draw again. */
+  using SlowEvalHook = std::function<bool(const GameObject &, int kind, uint64_t key)>;
+  static SlowEvalHook slow_eval_hook;
+  /* While one of these is alive on this thread, evaluated_mesh evaluates on the spot whatever the hook would say: a
+   * caller that needs the exact mesh now (Apply Modifiers, an export, a bake). */
+  struct EvaluateNowScope {
+    EvaluateNowScope();
+    ~EvaluateNowScope();
+  };
+  bool evaluation_pending(int kind) const { return eval_pending_[std::max(0, std::min(kind, 8))] != 0; }
+  uint64_t eval_pending_key(int kind) const { return eval_pending_[std::max(0, std::min(kind, 8))]; }  // (the key the last call asked a worker for)
+  void adopt_evaluation(GameObject &from, int kind);
+  uint64_t eval_generation() const { return eval_generation_; }
   AABB world_bounds() const;
 
   size_t index_in_scene = 0;
@@ -1770,6 +1808,9 @@ class GameObject {
    * view, F12, the traced Camera Preview), so no view evicts or rewrites a mesh another is drawing or tracing.) */
   mutable std::shared_ptr<Mesh> eval_mesh_[9];
   mutable uint64_t eval_key_[9] = {};
+  mutable uint64_t eval_pending_[9] = {};  // (round 413: the key a worker evaluates for this kind, 0 none)
+  mutable uint64_t eval_shape_key_[9] = {};  // (the key without the base's deform_version the last result was made for: a deform alone follows on the main thread)
+  mutable uint64_t eval_generation_ = 0;
   /* The stack before its deforming tail (ADR 0022): the result of the modifiers up to the last one that
    * isn't deform-only, its key, and the head key eval_mesh_ was deformed from (0: a full evaluation). */
   mutable std::shared_ptr<Mesh> eval_head_[9];
@@ -1804,6 +1845,20 @@ struct EnvironmentSettings;
 
 /* Round 401: the Unity scene file this scene was opened from (project-relative, "" when none): Export Unity Package
  * writes the scene's world, camera and light settings back into it. */
+/* Round 421 (ADR 0113): a Unity scene's lightmap settings as read (unity_bake_settings, unity_scene.h). */
+struct UnityBakeSettings {
+  bool read = false;
+  float texels = 40.0f;
+  int max_size = 1024, padding = 2, direct = 32, indirect = 512, environment = 256, bounces = 2;
+  int filtering = 1;          // m_PVRFilteringMode: 0 None, 1 Auto, 2 Advanced
+  int denoiser_indirect = 0;  // m_PVRDenoiserTypeIndirect: 0 None, 1 OptiX, 2 OpenImageDenoise, 3 Radeon Pro
+  int directional = 1;        // m_LightmapsBakeMode: 0 Non-Directional, 1 Directional
+  int mixed = 0;              // m_MixedBakeMode: 0 Baked Indirect, 1 Subtractive, 2 Shadowmask
+  bool ao = false;
+  int backend = 1;            // m_BakeBackend: 0 Enlighten, 1 Progressive CPU, 2 Progressive GPU
+  bool baked_gi = true;       // m_EnableBakedLightmaps (Baked Global Illumination)
+  std::string source;         // "the LightingSettings asset" / "the scene's embedded LightingSettings" / "the scene's own settings"
+};
 struct UnitySceneLink {
   std::string file;
   int ambient_mode = -1;           // Unity's m_AmbientMode as read (0 Skybox, 1 Trilight, 3 Flat, 4 Custom; -1 none): written back only where Blendity's world still means it (review 401)
@@ -1857,7 +1912,10 @@ struct LightingSettings {
   int max_size = 1024;            // Max Lightmap Size
   int padding = 2;                // Lightmap Padding (texels)
   int direct_samples = 32;
-  int indirect_samples = 256;
+  int indirect_samples = 512;  // (round 423: Unity's default Indirect Samples, was 256)
+  int directional_mode = 1;    // round 426: Unity's Directional Mode - 0 Non-Directional, 1 Directional (a direction page per lightmap)
+  int bake_device = 0;         // round 430: Unity's Lightmapper - 0 the Render device's (as before), 1 the CPU, 2 the GPU when there is one
+  float backface_tolerance = 0.9f;  // round 430: Unity's Backface Tolerance (0: every texel kept)
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
@@ -1972,6 +2030,7 @@ class Scene {
    * MainCamera tag): an object id, 0 = none chosen (then "Main Camera" by name, else the first camera). */
   uint64_t active_camera = 0;
   UnitySceneLink unity;  // (round 401)
+  UnityBakeSettings unity_bake;  // (round 421: the Unity scene's lightmap settings as read - kept for the comparison and later rounds; not saved)
   /* The scene's sequence (task 0070, ADR 0030 amended): a .seq whose bars each name a clip and the object it plays
    * on; played in Play by `director` (a Sequencer of the scene's, made at Play's start). */
   std::string sequence;
@@ -1982,6 +2041,10 @@ class Scene {
 
   GameObject *create(const std::string &name, GameObject *parent = nullptr);
   void destroy(GameObject *go);
+  /* Round 433: many objects (and their children) in one pass - each parent's list and the scene's filtered once
+   * instead of once per object (50,000 roots deleted one by one had been quadratic: 365 ms). The survivors keep
+   * their order; an object named twice, or with its parent, is destroyed once. */
+  void destroy(const std::vector<GameObject *> &list);
   GameObject *find(uint64_t id) const;
   GameObject *find_by_name(const std::string &name) const;
   /* Reparents keeping the world transform (Unity's default, Blender's "Keep Transform"). */
@@ -2031,6 +2094,15 @@ GameObject *create_primitive(Scene &scene, const std::string &kind, GameObject *
 
 /* ------------------------------------------------------------------- IO */
 std::string save_scene_text(const Scene &scene);
+/* Round 417 (ADR 0111): a mesh with kBinaryMeshFrom or more vertices and corners together is written as one binary chunk
+ * inside the text (its arrays as they are in memory, little-endian), the rest of the file text as before; smaller
+ * meshes stay text. The test switch keeps every mesh text (the two forms are compared). */
+constexpr size_t kBinaryMeshFrom = 4096;
+bool mesh_saved_binary(const Mesh &m);
+void set_scene_text_meshes_for_test(bool text);
+/* The spans [begin, end) of the binary chunks in a scene's text: a text edit of the file (retarget_scene_files) leaves
+ * them alone. */
+std::vector<std::pair<size_t, size_t>> scene_binary_spans(const std::string &text);
 /* Shortest exact text form of a float (std::to_chars where available). */
 void append_float(std::string &s, float v);
 bool load_scene_text(const std::string &text, Scene &scene, std::string &error);
@@ -2055,6 +2127,9 @@ std::string export_obj(const std::vector<std::pair<const Mesh *, Mat4>> &meshes)
 std::string save_material_text(Material &m);
 bool load_material_text(const std::string &text, Material &m);
 MaterialPtr material_asset(const std::string &path);  // cached; null when the file is missing
+/* Round 418: the materials of these paths that aren't loaded yet, read and parsed on every core, then put in the cache
+ * (Blendity's own .mat text; a foreign one - Unity's - is left to material_asset, which loads it on the calling thread). */
+void preload_material_assets(const std::vector<std::string> &paths);
 /* Round 371: a material file in another engine's format (a Unity .mat) read through this; the material is `foreign`,
  * and save_dirty_material_assets leaves its file alone. */
 using ForeignMaterialLoader = std::function<bool(const std::string &text, const std::string &path, Material &m)>;

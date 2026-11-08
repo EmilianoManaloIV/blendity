@@ -660,6 +660,7 @@ std::mutex g_cache_mutex;
 std::unordered_map<std::string, CachedOutput> g_cache;
 std::set<std::string> g_previews;  // asset paths in preview (under g_cache_mutex)
 std::set<std::string> g_async;     // asset paths a worker evaluates (task 0244): a stale entry is returned, not recomputed
+thread_local int tl_final_depth = 0;  // (round 412: inside a ProceduralTextureFinalScope - no stand-ins)
 const int kPreviewSize = 256;
 
 uint64_t cache_hash(ProceduralTexture &t) {
@@ -684,13 +685,21 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
     if (it != g_cache.end() && it->second.have[0] && !preview && g_async.count(path)) return out = it->second;  // (task 0244: the last result until the worker's lands; a drag's preview is always fresh)
   }
   const std::string key = path + (preview ? "#preview" : "");
+  /* Round 412 (ADR 0106): a texture asked for asynchronously before it has any result gets a 16 x 16 stand-in here -
+   * stored under another hash, so the worker's full evaluation is still wanted and replaces it when it lands - instead
+   * of the main thread evaluating the whole stack (a new surface's first frame: 118 ms at 1024 x 1024). */
+  bool stand_in = false;
+  if (!preview && tl_final_depth == 0) {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    stand_in = g_async.count(path) > 0;
+  }
   /* Evaluated outside the lock (a stack can take a while, and its parallel_for may run other work on this
    * thread); the four outputs and the live snapshot at once, from one evaluation. */
   TexPlanes planes;
   std::vector<LayerAux> aux;
-  t.evaluate(planes, live ? &aux : nullptr, preview ? kPreviewSize : 0);  // (the kept planes only for live shading)
+  t.evaluate(planes, live ? &aux : nullptr, preview ? kPreviewSize : stand_in ? 16 : 0);  // (the kept planes only for live shading)
   CachedOutput fresh;
-  fresh.hash = h;
+  fresh.hash = stand_in ? (h ^ 1) : h;
   for (int k = 0; k < (int)TextureOutput::Count; k++) {
     auto tex = std::make_shared<Texture>();
     tex->name = t.name + "#" + texture_output_name(k);
@@ -714,6 +723,9 @@ LiveTexturePtr procedural_texture_live(ProceduralTexture &t) {
   CachedOutput c;
   return cached_outputs(t, c).live;
 }
+
+ProceduralTextureFinalScope::ProceduralTextureFinalScope() { tl_final_depth++; }
+ProceduralTextureFinalScope::~ProceduralTextureFinalScope() { tl_final_depth--; }
 
 void procedural_texture_set_async(const std::string &asset_path, bool on) {
   std::lock_guard<std::mutex> lock(g_cache_mutex);

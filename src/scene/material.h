@@ -15,6 +15,7 @@
 // Theory: FoCG ch. 11 "Texture Mapping", GEA Vol. II 12.4 "The Shading Equation".
 #pragma once
 
+#include "../core/edit_epoch.h"
 #include "../core/math.h"
 #include "../image/image.h"
 
@@ -124,6 +125,9 @@ struct Material {
   float volume_density_at(Vec3 local) const;
   bool principled_extras() const { return subsurface > 0.0f || sheen > 0.0f || coat > 0.0f || anisotropic > 0.0f; }
   float alpha = 1.0f;
+  /* Round 429 (Silent's Filamented, _ExposureOcclusion): reflections fade where the baked light is dark - the occlusion
+   * |baked irradiance| / this, into Lagarde's specular occlusion. 0: off (every other shader). */
+  float exposure_occlusion = 0.0f;
   int surface = 0;          // MaterialSurface
   float alpha_clip = 0.5f;  // Cutout threshold
   float ior = 1.45f;        // Glass index of refraction (Blender's default)
@@ -215,7 +219,10 @@ struct Material {
   void reflect_liltoon(Reflector &r);  // (round 402)
   void reflect_principled_extras(Reflector &r);
   void reflect_volume(Reflector &r);
-  void touch() { version++; }
+  void touch() {
+    version++;
+    edit_epoch::bump();  // (ADR 0115)
+  }
 
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {
@@ -236,10 +243,18 @@ struct Material {
     const Resolved *axis_tx[4] = {nullptr, nullptr, nullptr, nullptr};
   };
   const Resolved &textures() const;
+  /* Round 422: the image files textures() would load for this material (path, sRGB) - not procedural or generated
+   * ones, not an axis material's parts. Kept beside textures(): the same maps, the same colour / data choice. */
+  void texture_files(std::vector<std::pair<std::string, bool>> &out) const;
+  /* Round 412 (ADR 0106): a worker's copy of a material - resolved here, once, and never again (a texture generation
+   * bump while a worker samples would re-resolve under its threads); an axis material's parts copied and frozen too. */
+  void freeze_textures() const;
+  bool textures_frozen() const { return textures_frozen_; }
 
  private:
   mutable Resolved resolved_;
   mutable uint64_t resolved_version_ = 0;
+  mutable bool textures_frozen_ = false;
   mutable uint64_t axis_versions_[4] = {0, 0, 0, 0};
   mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;
@@ -247,6 +262,12 @@ struct Material {
 using MaterialPtr = std::shared_ptr<Material>;
 
 MaterialPtr make_material(const std::string &name, Vec3 color);
+/* Round 422: the materials' image files (Material::texture_files) decoded on every core into the texture cache. */
+void prefetch_material_textures(const std::vector<MaterialPtr> &materials);
+/* Round 437: every image file a scene's renderers' materials read, decoded on every core into the texture cache - a
+ * scene's first frame then draws from the cache (SideRail's had decoded 1.2 s of textures in its first frame). */
+struct Scene;
+void prefetch_scene_textures(const Scene &s);
 const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */

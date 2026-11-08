@@ -3,6 +3,7 @@
 // tool is reachable from (task 0177: moved out of editor.cpp as they were).
 #include "../scene/curve.h"
 #include "editor.h"
+#include "../core/allocator.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
 #include "../render/texture_bake.h"
@@ -82,6 +83,7 @@ void Editor::save_scene_to(const std::string &path) {
   const std::string old_path = scene_->path, old_name = scene_->name;
   scene_->path = p, scene_->name = fs::stem(p);
   save_scene_cmd(false);
+  if (save_job_) return;  // (round 413: written on a worker - its landing says when it couldn't)
   std::string head;
   if (fs::read_prefix(p, 1, head) && !head.empty()) return;
   scene_->path = old_path, scene_->name = old_name;  // (not written: nothing changed, no empty file left)
@@ -286,6 +288,7 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
       }
   if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
   reflect(sr);
+  if (sr.done) edit_epoch::bump();  // (round 435, ADR 0115: a field set by name is an edit the views must see)
   if (sr.bad) Log::warn("set %s: '%s' isn't a number (a number, or +=1, *=2 from its own value)", sr.target.c_str(), sr.value.c_str());
   return sr.done && !sr.bad;
 }
@@ -1235,9 +1238,9 @@ void Editor::run_console_command(const std::string &line) {
     anim_command(split_quoted(line));  // (round 335: a property with spaces quoted - "Material 0.Roughness", "Cast Shadows")
     return;
   }
-  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|keyed1k (task 0202)
+  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike (task 0202; cubes50k round 433)
     if (!bench_scene(to_lower(arg(1, ""))))
-      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|keyed1k: the scenes tools/bench_blender.py --parity-ui builds");
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike: the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
     return;
   }
   if (c == "manual") {
@@ -1304,7 +1307,7 @@ void Editor::run_console_command(const std::string &line) {
     paint_command(t);
     return;
   }
-  if (c == "jobs") {  // jobs | jobs cancel [label]: the job tray's list (task 0253)
+  if (c == "jobs") {  // jobs | jobs cancel [label] | jobs async on|off: the job tray's list (task 0253; round 437)
     jobs_command(t);
     return;
   }
@@ -1412,7 +1415,16 @@ void Editor::run_console_command(const std::string &line) {
   else if (c == "delete") delete_selected();
   else if (c == "subdivide") {
     int n = std::max(1, std::atoi(arg(1, "1").c_str()));
-    for (int i = 0; i < n; i++) mesh_op("subdivide");
+    std::vector<GameObject *> objs = selected_objects(false);
+    if (jobs_async() && !edit_mode_ && !sculpt_ && objs.size() == 1 && objs[0]->get<MeshFilter>() && objs[0]->get<MeshFilter>()->mesh) {  // (round 413: on a worker)
+      fold_edit_shape();
+      mesh_job_start(*objs[0], n > 1 ? strprintf("Subdivide x%d", n) : std::string("Subdivide"), [n](Mesh &m, std::string &) {
+        for (int i = 0; i < n; i++) m = meshops::subdivide(m, 1, true);
+        return true;
+      });
+    }
+    else
+      for (int i = 0; i < n; i++) mesh_op("subdivide");
   }
   else if (c == "smooth") mesh_op("smooth");
   else if (c == "stats") {
@@ -1542,9 +1554,10 @@ void Editor::run_console_command(const std::string &line) {
     /* deletemat <name | Assets/Materials/x.mat>: delete a material without asking (slots emptied, the file trashed) */
     const std::string what = t.size() > 1 ? line.substr(line.find(' ') + 1) : std::string();
     MaterialPtr m = what.find(".mat") != std::string::npos ? material_asset(what) : nullptr;
-    if (!m)
-      for (const MaterialPtr &c2 : pickable_materials(nullptr))
+    if (!m)  // (a scene's own material of that name first, as before; then an asset by its file's name - round 418)
+      for (const MaterialPtr &c2 : scene_materials())
         if (c2->name == what) m = c2;
+    if (!m) m = material_by_name(what);
     if (m) delete_material(m);
     else Log::warn("deletemat: no material %s", what.c_str());
   }
@@ -1743,7 +1756,7 @@ void Editor::run_console_command(const std::string &line) {
       cam->focus_track = true;
       cam->focus_point = Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
       if (t.size() > 4) cam->f_stop = std::max(0.1f, (float)std::atof(t[4].c_str()));
-      update_camera_focus();
+      apply_camera_focus();  // (review 436: at once, not on the walk's next due frame)
       mark_changed("Camera Focus");
     }
   }
@@ -1952,7 +1965,8 @@ void Editor::run_console_command(const std::string &line) {
     for (const deps::Library &l : deps::libraries())
       Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
                 l.enabled ? "" : l.fallback);
-    Log::info("%s", gpu::status().c_str());
+    Log::info("%s", gpu::status(true).c_str());  // (libs reports the card: opened here)
+    Log::info("Memory: %s", allocator_name());  // (round 419, ADR 0112)
   }
   else if (c == "camera" && t.size() >= 4) {
     cam_.animating = false;  // (a flight under way would carry the view off again)

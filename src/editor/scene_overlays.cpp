@@ -538,10 +538,26 @@ void Editor::draw_wind_gizmo(const GameObject &g, const Wind &w) {
   for (auto &sg : segs) scene_r3d_.line(sg.first, sg.second, kSelectOrange, false);
 }
 
+/* Round 436 (ADR 0115): the objects the icon pass draws something for - a bone, a rig control, control points, an icon
+ * - found by a walk only when the change counter moved (role lookups on every object, every frame: 5 ms at 50,000);
+ * walked anyway as every per-frame walk is (WalkMark). The toggles and the active test stay per frame. */
+const std::vector<GameObject *> &Editor::scene_icon_objects() {
+  if (!walk_due(icon_walk_)) {
+    walks_skipped_++;
+    return icon_objects_;
+  }
+  WalkScope scope{*this, icon_walk_};
+  icon_objects_.clear();
+  scene_->for_each([&](GameObject &g) {
+    if (g.find_role(Component::RenderRole::Bone) || g.get<RigControl>() || g.point_source() || scene_icon_of(g) != Icon::None) icon_objects_.push_back(&g);
+  });
+  return icon_objects_;
+}
+
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
   ik_bones_frame_ = ik_driven_bones();
-  scene_->for_each([&](GameObject &g) {
+  auto one = [&](GameObject &g) {
     /* Each kind on its own overlay layer (task 0146). */
     if (const Component *bc = show_bones_ ? g.find_role(Component::RenderRole::Bone) : nullptr; bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
     if (show_rig_controls_ && RigControl::live.load(std::memory_order_relaxed) && g.active_in_hierarchy())
@@ -643,7 +659,8 @@ void Editor::draw_scene_icons(const Recti &view) {
           scene_r3d_.line(p + q.rotate(fc[i]), p + q.rotate(fc[(i + 1) % 4]), Color::hex(0xF0C040, 200), false);
       }
     }
-  });
+  };
+  for (GameObject *g : scene_icon_objects()) one(*g);  // (round 436: the few with an icon, a bone or points)
 }
 
 bool Editor::project_to_view(const Recti &view, Vec3 p, Vec2 &s) {

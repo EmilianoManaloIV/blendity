@@ -95,6 +95,12 @@ struct RenderLight {
   float intensity = 1.0f;
   float range = 10.0f;
   bool shadows = true;
+  /* Round 424: the bake's light size - a point or spot light's ball radius (m), a sun's full angle (degrees). */
+  float shadow_radius = 0.0f, shadow_angle = 0.0f;
+  /* Round 425: a bake's copy of a Baked or Mixed point or spot light falls off as Unity's built-in pipeline bakes it - the
+   * legacy curve 1 / (1 + 25 (d / Range)^2), windowed to nothing at Range by (1 - (d / Range)^4)^2 - not as the views
+   * draw it. */
+  bool baked_falloff = false;
 };
 
 /* An area light is an emissive plane (task 0155, ADR 0050): a Lambertian emitter of radiance intensity x pi over its
@@ -119,16 +125,28 @@ inline float area_light_area(const RenderLight &l) {
   return finite_bits(a) && a > 1e-4f ? a : 1e-4f;
 }
 
+/* A point or spot light's falloff with distance: the views' curve (1 - d / Range)^2, or a bake's legacy curve (round 425,
+ * RenderLight::baked_falloff). */
+inline float range_falloff(const RenderLight &l, float dist) {
+  const float x = dist / (l.range > 1e-3f ? l.range : 1e-3f);
+  if (!l.baked_falloff) {
+    const float f = 1.0f - x;
+    return f > 0.0f ? f * f : 0.0f;
+  }
+  if (!(x < 1.0f)) return 0.0f;
+  const float w = 1.0f - x * x * x * x;
+  return w * w / (1.0f + 25.0f * x * x);
+}
+
 /* How much of a point, spot or area light reaches p, besides the N.L term:
- * the range falloff (Unity's built-in curve), the spot cone with its soft
+ * the range falloff (range_falloff: the views' curve, or a bake's Unity legacy curve), the spot cone with its soft
  * edge; an area light taken at its centre (area_light_falloff: its facing, the
  * inverse square, the window). L points from p toward the light. */
 inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   if (l.type == RenderLight::Directional) return 1.0f;
   if (l.type == RenderLight::Area) return area_light_area(l) * area_light_falloff(l, l.position, p);
   const float dist = length(l.position - p);
-  float f = 1.0f - dist / (l.range > 1e-3f ? l.range : 1e-3f);
-  f = f > 0.0f ? f * f : 0.0f;
+  float f = range_falloff(l, dist);
   const float c = -(l.direction.x * L.x + l.direction.y * L.y + l.direction.z * L.z);  // toward p, from the light
   if (l.type == RenderLight::Spot) {
     const float d = l.cos_inner - l.cos_outer;
@@ -202,10 +220,12 @@ struct DrawItem {
   bool double_sided = false;
   const std::vector<MaterialPtr> *materials = nullptr;  // Deferred mode (null = default material)
   bool receive_shadows = true;
+  bool cast_shadows = true;  // round 415 (ADR 0109): the renderer's Cast Shadows (Unity's Shadows Off): out of the shadow maps on both devices
   const std::vector<uint8_t> *face_highlight = nullptr;  // edit mode: tint selected faces
   /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
   const Lightmap *lightmap = nullptr;
   const std::vector<Vec2> *lightmap_uv = nullptr;
+  const Lightmap *lightmap_dir = nullptr;  // round 426: its direction page (same size and UVs), when the bake is directional
   bool use_probes = false;  // takes its indirect light from the probe volume (no lightmap)
   /* Realtime lightmaps (task 0016): voxel GI's bounce and sky share per texel, with their UVs (3 per
    * triangle). Set: the per-pixel GI pass reads these instead of tracing. realtime_lm: the editor wants
@@ -283,6 +303,7 @@ struct RenderTarget {
    * by deferred shading when want_hdr is set, with the view transform and exposure that encoded the
    * colour. A pixel it didn't shade (the sky, see-through surfaces) has x = -1. */
   bool want_hdr = false;
+  bool filters_on_card = false;  // round 416 (ADR 0110): the camera's filters ran on the card over this picture (the CPU's passes are skipped)
   std::vector<Vec3> hdr;
   ViewTransform hdr_view_transform = ViewTransform::Standard;
   float hdr_exposure = 0.0f;
@@ -431,6 +452,9 @@ class Renderer3D {
   void fill_pending_sky();
   /* An overlay prepared for drawing (screen space, clipped). */
   struct OverlayCmd {
+    /* (Round 437: left unset - a cage's million commands are resized into the batch and written once by the prepare,
+     * not zeroed first: 48 MB of zeros a frame.) */
+    OverlayCmd() {}
     float x0, y0, z0, x1, y1, z1;  // line ends, or a point's centre in x0 / y0 / z0 and its radius in x1
     uint32_t color;
     float bias;
@@ -439,6 +463,7 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  std::vector<uint32_t> band_idx_;  // (round 437: end_overlay_batch's band lists, kept between batches - not 7 MB allocated each)
   OverlayRecord *record_ = nullptr;  // (task 0192)
   /* flush() scratch, kept between flushes (cleared, not freed): per item, is it visible, is it big enough
    * for the separate vertex stage, does it have see-through materials; the vertex-stage jobs. */

@@ -8,6 +8,7 @@
 //   Edit Mode   : Blender's mesh editing (blender/source/blender/editors/mesh)
 #include "../scene/curve.h"
 #include "editor.h"
+#include "../core/profiling.h"
 
 #include "../core/core.h"
 #include "../core/jobs.h"
@@ -30,6 +31,7 @@ using ui::Icon;
 /* ===================================================================== */
 
 void Editor::draw_scene_view(const Recti &r) {
+  BL_ZONE("scene_view");
   auto &u = ui_;
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};
@@ -559,6 +561,7 @@ void Editor::submit_scene(Renderer3D &r3d, const Scene &s, bool game, LightingEn
 /* What Solid shading draws (submit_scene's items): each shown mesh with its materials, Edit Mode's cage mesh with its face
  * highlight, Weight Paint's mesh in its weight colours. */
 std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
+  prebuild_render_meshes(s, game);  // (round 418)
   std::vector<DrawItem> items;
   s.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
@@ -581,6 +584,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     it.double_sided = mat0.double_sided || editing;
     it.materials = &mr->materials;
     it.receive_shadows = mr->receive_shadows;
+    it.cast_shadows = mr->cast_shadows;  // (round 415)
     it.id = (uint32_t)g.id;
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     if (!game && weight_paint_ && g.id == wp_obj_) {  // Weight Paint: the mesh being painted, in its weight colours
@@ -2575,6 +2579,7 @@ void Editor::compute_proportional_weights(const Mat4 &world) {
 /* ===================================================================== */
 
 void Editor::draw_game_view(const Recti &r) {
+  BL_ZONE("game_view");
   auto &u = ui_;
   int bh = u.row_h() + u.px(4);
   Recti bar{r.x, r.y, r.w, bh};

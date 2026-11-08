@@ -284,6 +284,15 @@ void probe_validate(ProbeVolumeData &d, const PathTracer &pt, int rays) {
   });
 }
 
+/* A Baked light's share reaching a probe at p past what is in the way (round 424): an area light by one ray to its centre,
+ * the others through baked_light_visibility (a sized light's 16 rays). */
+static float probe_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 p, Vec3 Ld, float dist, uint32_t &rng, uint64_t &rays) {
+  if (l.type != RenderLight::Area) return baked_light_visibility(pt, l, p, nullptr, Ld, dist, 16, rng, rays);
+  if (!l.shadows) return 1.0f;
+  rays++;
+  return baked_shadow_ray(pt, {p, Ld}, dist * (1.0f - 1e-4f));
+}
+
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start, size_t count,
                 float indirect_intensity, int gpu_device, std::string *gpu_error) {
   samples = std::max(6, std::min(65536, samples));
@@ -366,10 +375,12 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
           Ld = dv / dist;
           fall = l.type == RenderLight::Area ? 1.0f : light_falloff(l, p, Ld);  // (an area's falloff is in its irradiance)
           if (fall <= 0.0f) continue;
-          dist *= 1.0f - 1e-4f;
         }
-        if (pt.occluded({p, Ld}, dist)) continue;
-        const Vec3 col = l.color * (l.intensity * fall);
+        /* Round 424: a light's baked size softens the probes' shadows as the lightmaps' (16 rays when it has one; an
+         * area light's one ray to its centre, as before); No Shadows blocks nothing. */
+        const float vis = probe_light_visibility(pt, l, p, Ld, dist, rng, rays);
+        if (vis <= 0.0f) continue;
+        const Vec3 col = l.color * (l.intensity * fall * vis);
         /* An area light by its whole surface (task 0030), as the rasterizer and the lightmaps take it. */
         for (int ax = 0; ax < 6; ax++)
           c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_irradiance(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));

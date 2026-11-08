@@ -2,9 +2,11 @@
 #include "material.h"
 
 #include "../core/core.h"
+#include "../core/jobs.h"
 #include "scene.h"
 #include "../texture/procedural_texture.h"
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <set>
@@ -99,6 +101,11 @@ void Material::reflect(Reflector &r) {
   r.help("Principled 'IOR Level'. 0.5 = 4% reflectance at normal incidence (IOR 1.5).");
   r.texture("Normal Map", normal_map);
   r.field("Normal Strength", normal_strength, 0.01f, 0.0f, 4.0f);
+  if (r.all_fields() || exposure_occlusion > 0.0f) {
+    r.field("Exposure Occlusion", exposure_occlusion, 0.01f, 0.0f, 1.0f);
+    r.help("Filamented's Exposure Occlusion (round 429): reflections fade where the ambient light here (lightmap, probes or\n"
+           "sky) is darker than this - a dark corner doesn't reflect the bright room. 0: off.");
+  }
   r.color("Emission", emission);
   r.field("Emission Strength", emission_strength, 0.05f, 0.0f, 1000.0f);
   r.texture("Emission Map", emission_map);
@@ -398,7 +405,22 @@ void Material::reflect_principled_extras(Reflector &r) {
   r.group_end();
 }
 
+void Material::freeze_textures() const {
+  if (textures_frozen_) return;
+  (void)textures();
+  for (int k = 0; k < 4; k++) {
+    if (!resolved_.axis[k]) continue;
+    auto c = std::make_shared<Material>(*resolved_.axis[k]);
+    c->textures_frozen_ = false;
+    c->freeze_textures();
+    resolved_.axis[k] = c;
+    resolved_.axis_tx[k] = &c->resolved_;
+  }
+  textures_frozen_ = true;
+}
+
 const Material::Resolved &Material::textures() const {
+  if (textures_frozen_) return resolved_;  // (round 412: a worker's copy - what it resolved on the main thread, for good)
   size_t gen = g_texture_gen.load();
   auto axis_current = [&] {  // an axis material's sub-materials unchanged since they were resolved
     for (int k = 0; k < 4; k++)
@@ -502,6 +524,40 @@ const Material::Resolved &Material::textures() const {
   resolved_version_ = version;
   resolved_cache_gen_ = gen;
   return resolved_;
+}
+
+void Material::texture_files(std::vector<std::pair<std::string, bool>> &out) const {
+  auto add = [&](const TextureRef &t, bool data) {
+    std::string asset;
+    int output = 0;
+    if (t.empty() || starts_with(t.path, "generated:") || split_texture_ref(t.path, asset, output)) return;
+    out.push_back({resolve_asset_path(t.path), !(data || t.non_color)});
+  };
+  if (procedural != (int)Procedural::UVGrid && procedural != (int)Procedural::ColorGrid) add(base_map, false);
+  add(metallic_map, false), add(roughness_map, false), add(normal_map, true), add(emission_map, false);
+  if (shading_model == 1) {
+    add(toon_ramp_map, false), add(shade_map, false), add(toon_shadow_bias_map, true), add(toon_specular_map, true);
+    add(toon_rim_map, true), add(face_shadow_map, true), add(line_map, false), add(hatch_map, true);
+  }
+  if (liltoon()) {
+    add(lil.shadow_color_tex, false), add(lil.shadow2_color_tex, false), add(lil.strength_mask, true), add(lil.border_mask, true);
+    add(lil.rim_color_tex, false), add(lil.backlight_tex, false), add(lil.matcap_tex, false), add(lil.matcap_mask, true);
+    add(lil.emission_map, false), add(lil.emission_blend_mask, true);
+  }
+}
+
+/* Round 422: the materials' image files decoded on every core into the texture cache, so their textures() calls that
+ * follow find them there (a bake's or a render's snapshot froze 23 materials of 4096 maps in 6 s, one file at a time). */
+void prefetch_material_textures(const std::vector<MaterialPtr> &materials) {
+  std::vector<std::pair<std::string, bool>> files;
+  for (const MaterialPtr &m : materials)
+    if (m) m->texture_files(files);
+  std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
+  if (files.size() < 2) return;
+  JobSystem::global().parallel_for((int64_t)files.size(), 1, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) (void)texture_load(files[(size_t)i].first, files[(size_t)i].second);
+  });
 }
 
 MaterialPtr make_material(const std::string &name, Vec3 color) {
