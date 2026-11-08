@@ -234,20 +234,20 @@ bool export_texture_set(ProceduralTexture &t, const std::string &packing, const 
       const float smooth = 1.0f - p.rough[i];
       if (map == "BaseColor" || map == "Albedo" || map == "BaseMap" || map == "MainTex") {
         r = display::linear_to_srgb8(p.albedo[i].x), g = display::linear_to_srgb8(p.albedo[i].y), b = display::linear_to_srgb8(p.albedo[i].z);
-        if (map != "BaseColor") a = u8(p.alpha_written ? p.alpha[i] : 1.0f);
+        if (map != "BaseColor") a = u8(p.alpha_written ? p.alpha_at(i) : 1.0f);
       }
       else if (map == "Normal" || map == "BumpMap") r = normal.rgba8[i * 4], g = directx ? 255 - normal.rgba8[i * 4 + 1] : normal.rgba8[i * 4 + 1], b = normal.rgba8[i * 4 + 2];  // (Unreal reads DirectX normals: green down)
-      else if (map == "ORM") r = u8(ao[i]), g = u8(p.rough[i]), b = u8(p.metal[i]);
-      else if (map == "MetallicSmoothness") r = g = b = u8(p.metal[i]), a = u8(smooth);
-      else if (map == "MetallicGlossMap") r = g = b = u8(p.metal[i]), a = u8(smooth);  // (URP's: R metal, A smooth; lilToon reads R)
+      else if (map == "ORM") r = u8(ao[i]), g = u8(p.rough[i]), b = u8(p.metal_at(i));
+      else if (map == "MetallicSmoothness") r = g = b = u8(p.metal_at(i)), a = u8(smooth);
+      else if (map == "MetallicGlossMap") r = g = b = u8(p.metal_at(i)), a = u8(smooth);  // (URP's: R metal, A smooth; lilToon reads R)
       else if (map == "SmoothnessTex") r = g = b = u8(smooth);
-      else if (map == "PackedMaps") r = u8(p.metal[i]), g = u8(smooth), b = 255, a = 255;  // (reflections and specular everywhere)
+      else if (map == "PackedMaps") r = u8(p.metal_at(i)), g = u8(smooth), b = 255, a = 255;  // (reflections and specular everywhere)
       else if (map == "OcclusionMap") r = g = b = u8(ao[i]);
-      else if (map == "MaskMap") r = u8(p.metal[i]), g = u8(ao[i]), b = 255, a = u8(smooth);  // (B: the detail mask - full, so a detail map assigned in HDRP shows)
-      else if (map == "Emissive" || map == "Emission" || map == "EmissionMap") r = display::linear_to_srgb8(p.emit[i].x), g = display::linear_to_srgb8(p.emit[i].y), b = display::linear_to_srgb8(p.emit[i].z);
+      else if (map == "MaskMap") r = u8(p.metal_at(i)), g = u8(ao[i]), b = 255, a = u8(smooth);  // (B: the detail mask - full, so a detail map assigned in HDRP shows)
+      else if (map == "Emissive" || map == "Emission" || map == "EmissionMap") r = display::linear_to_srgb8(p.emit_at(i).x), g = display::linear_to_srgb8(p.emit_at(i).y), b = display::linear_to_srgb8(p.emit_at(i).z);
       else if (map == "AO") r = g = b = u8(ao[i]);
       else if (map == "Roughness") r = g = b = u8(p.rough[i]);
-      else if (map == "Metallic") r = g = b = u8(p.metal[i]);
+      else if (map == "Metallic") r = g = b = u8(p.metal_at(i));
       else if (map == "Height") r = g = b = u8(p.height[i]);
       px[i] = a << 24 | r << 16 | g << 8 | b;
     }

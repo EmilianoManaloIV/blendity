@@ -3996,7 +3996,7 @@ static void tests_round392() {
     TexPlanes p;
     pt->evaluate(p);
     const int metal = px ? px[0] : -1, smooth = px ? px[1] : -1;
-    const int want_metal = (int)std::lround(p.metal[0] * 255.0f), want_smooth = (int)std::lround((1.0f - p.rough[0]) * 255.0f);
+    const int want_metal = (int)std::lround(p.metal_at(0) * 255.0f), want_smooth = (int)std::lround((1.0f - p.rough[0]) * 255.0f);
     std::printf("    Poiyomi's packed map: R %d (metallic %d), G %d (smoothness %d), B %d, A %d\n", metal, want_metal, smooth, want_smooth, px ? px[2] : -1, px ? px[3] : -1);
     CHECK(px && std::abs(metal - want_metal) <= 1 && std::abs(smooth - want_smooth) <= 1 && px[2] == 255 && px[3] == 255);
     CHECK(export_texture_set(*pt, "liltoon", dir, files, &why) && files.size() == 5 && fs::exists(fs::join(dir, pt->name + "_SmoothnessTex.png")) &&

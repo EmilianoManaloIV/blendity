@@ -29,12 +29,17 @@ void TexPlanes::reset(int width, int height_) {
   rough.assign(size(), 0.5f);
   mask.assign(size(), 1.0f);
   albedo.assign(size(), Vec3(0.5f));
-  alpha.assign(size(), 1.0f);
   alpha_written = false;
-  metal.assign(size(), 0.0f);
-  emit.assign(size(), Vec3(0.0f));
+  alpha.clear(), metal.clear(), emit.clear();  // (round 456: allocated when a layer needs them)
+  if (eager_all) ensure_planes(PlaneAlpha | PlaneMetal | PlaneEmit);
   rx0 = ry0 = rx1 = ry1 = 0;
   layer_mask = nullptr;
+}
+
+void TexPlanes::ensure_planes(int bits) {
+  if (bits & PlaneAlpha) ensure_alpha();
+  if (bits & PlaneMetal) ensure_metal();
+  if (bits & PlaneEmit) ensure_emit();
 }
 
 TextureLayer::~TextureLayer() = default;
@@ -239,6 +244,7 @@ void TextureLayer::apply(TexPlanes &p, const LayerContext &c) const {
   if (op <= 0.0f) return;
   const bool wa = targets & TargetAlbedo, wh = targets & TargetHeight, wr = targets & TargetRoughness, card = targets & TargetAlpha;
   const bool wm = targets & TargetMetallic, we = targets & TargetEmission;
+  p.ensure_planes(planes_needed());  // (round 456)
   const bool first_card = card && !p.alpha_written;  // (as apply_point: the first card sets the cover plane, the next adds)
   const int rx0 = p.x_begin(), rx1 = p.x_end(), ry0 = p.y_begin(), ry1 = p.y_end();  // (task 0244: the active rect)
   const std::vector<float> *own = p.layer_mask;
@@ -591,7 +597,7 @@ Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
       for (int x = 0; x < p.w; x++) {
         const size_t i = (size_t)y * p.w + x;
         uint8_t *o = &b.rgba8[i * 4];
-        o[3] = which == 0 && alpha_from_cover ? (uint8_t)std::lround(clampf(p.alpha[i], 0.0f, 1.0f) * 255.0f) : (uint8_t)255;
+        o[3] = which == 0 && alpha_from_cover ? (uint8_t)std::lround(clampf(p.alpha_at(i), 0.0f, 1.0f) * 255.0f) : (uint8_t)255;
         switch ((TextureOutput)which) {
           case TextureOutput::Albedo:
             o[0] = display::linear_to_srgb8(p.albedo[i].x);
@@ -612,11 +618,11 @@ Bitmap ProceduralTexture::output(int which, const TexPlanes &p) const {
             break;
           }
           case TextureOutput::Roughness: o[0] = o[1] = o[2] = (uint8_t)clampf(p.rough[i] * 255.0f + 0.5f, 0.0f, 255.0f); break;
-          case TextureOutput::Metallic: o[0] = o[1] = o[2] = (uint8_t)clampf((i < p.metal.size() ? p.metal[i] : 0.0f) * 255.0f + 0.5f, 0.0f, 255.0f); break;
+          case TextureOutput::Metallic: o[0] = o[1] = o[2] = (uint8_t)clampf(p.metal_at(i) * 255.0f + 0.5f, 0.0f, 255.0f); break;
           case TextureOutput::Emission:
-            o[0] = display::linear_to_srgb8(i < p.emit.size() ? p.emit[i].x : 0.0f);
-            o[1] = display::linear_to_srgb8(i < p.emit.size() ? p.emit[i].y : 0.0f);
-            o[2] = display::linear_to_srgb8(i < p.emit.size() ? p.emit[i].z : 0.0f);
+            o[0] = display::linear_to_srgb8(p.emit_at(i).x);
+            o[1] = display::linear_to_srgb8(p.emit_at(i).y);
+            o[2] = display::linear_to_srgb8(p.emit_at(i).z);
             break;
           default: o[0] = o[1] = o[2] = (uint8_t)clampf(p.height[i] * 255.0f + 0.5f, 0.0f, 255.0f); break;
         }
@@ -662,6 +668,12 @@ struct CachedOutput {
   bool have[(int)TextureOutput::Count] = {false, false, false, false, false, false};
   LiveTexturePtr live;
   uint64_t used = 0;  // (task 0421) the cache's clock when it was stored or last answered
+  /* Round 456 (task 0432): an output that is one flat colour (switched off, or Metallic / Emission with no layer writing
+   * them) is not built with the rest: tex[k] stays null and procedural_texture_output makes it from flat[k] at w x h when
+   * something asks - the same image, only when it is used. */
+  std::string key;  // where this entry sits in g_cache
+  int w = 0, h = 0;
+  uint8_t flat[(int)TextureOutput::Count][4] = {};
 };
 uint64_t g_cache_clock = 0;
 std::unordered_map<std::string, uint64_t> g_trimmed;  // (task 0421) asset paths dropped to fit the budget, with the hash they had (under g_cache_mutex)
@@ -681,6 +693,61 @@ uint64_t cache_hash(ProceduralTexture &t) {
   const uint64_t h = t.hash();
   t.live_shading = live;
   return h;
+}
+
+/* Round 456: is output k one flat colour for these planes (no texel of it depends on a layer)? */
+bool output_is_flat(const ProceduralTexture &t, const TexPlanes &p, int k) {
+  if (k >= 1 && k <= 3) return !t.output_on(k);
+  if (k == (int)TextureOutput::Metallic) return p.metal.empty();
+  if (k == (int)TextureOutput::Emission) return p.emit.empty();
+  return false;
+}
+
+/* The six images with their mips from evaluated planes; a flat one is only noted (its colour from a 1 x 1 render of it). */
+void build_outputs(const ProceduralTexture &t, const TexPlanes &planes, CachedOutput &out) {
+  out.w = planes.w;
+  out.h = planes.h;
+  for (int k = 0; k < (int)TextureOutput::Count; k++) {
+    out.have[k] = true;
+    if (output_is_flat(t, planes, k)) {
+      TexPlanes one;
+      one.w = one.h = 1;
+      const Bitmap b = t.output(k, one);
+      std::memcpy(out.flat[k], b.rgba8.data(), 4);
+      continue;
+    }
+    auto tex = std::make_shared<Texture>();
+    tex->name = t.name + "#" + texture_output_name(k);
+    tex->build(t.output(k, planes), k == (int)TextureOutput::Albedo);
+    out.tex[k] = tex;
+  }
+}
+
+/* The image of a flat output (build_outputs noted its colour and size). */
+TexturePtr flat_texture(const ProceduralTexture &t, const CachedOutput &c, int k) {
+  Bitmap b;
+  b.width = c.w;
+  b.height = c.h;
+  b.rgba8.resize((size_t)c.w * c.h * 4);
+  for (size_t i = 0; i < (size_t)c.w * c.h; i++) std::memcpy(&b.rgba8[i * 4], c.flat[k], 4);
+  auto tex = std::make_shared<Texture>();
+  tex->name = t.name + "#" + texture_output_name(k);
+  tex->build(b, k == (int)TextureOutput::Albedo);
+  return tex;
+}
+
+/* A flat output made when asked for, stored in its entry if that is still there (the cache then trims to its budget). */
+TexturePtr make_flat_output(const ProceduralTexture &t, CachedOutput &c, int k) {
+  TexturePtr tex = flat_texture(t, c, k);
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    const auto it = g_cache.find(c.key);
+    if (it == g_cache.end() || it->second.hash != c.hash) return tex;
+    if (it->second.tex[k]) return it->second.tex[k];  // (another thread made it first)
+    it->second.tex[k] = tex;
+  }
+  procedural_texture_cache_trim();
+  return tex;
 }
 
 const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
@@ -713,13 +780,8 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
   t.evaluate(planes, live ? &aux : nullptr, preview ? kPreviewSize : stand_in ? 16 : 0);  // (the kept planes only for live shading)
   CachedOutput fresh;
   fresh.hash = stand_in ? (h ^ 1) : h;
-  for (int k = 0; k < (int)TextureOutput::Count; k++) {
-    auto tex = std::make_shared<Texture>();
-    tex->name = t.name + "#" + texture_output_name(k);
-    tex->build(t.output(k, planes), k == (int)TextureOutput::Albedo);
-    fresh.tex[k] = tex;
-    fresh.have[k] = true;
-  }
+  fresh.key = key;
+  build_outputs(t, planes, fresh);
   if (live) fresh.live = std::make_shared<const LiveTexture>(t, std::move(aux), planes.w, planes.h);
   {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
@@ -733,7 +795,9 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
 
 TexturePtr procedural_texture_output(ProceduralTexture &t, int which) {
   CachedOutput c;
-  return cached_outputs(t, c).tex[std::max(0, std::min((int)TextureOutput::Count - 1, which))];
+  const int k = std::max(0, std::min((int)TextureOutput::Count - 1, which));
+  cached_outputs(t, c);
+  return c.tex[k] ? c.tex[k] : make_flat_output(t, c, k);  // (round 456: a flat output is made when asked for)
 }
 
 LiveTexturePtr procedural_texture_live(ProceduralTexture &t) {
@@ -766,13 +830,11 @@ struct TextureOutputsHandle {
 std::shared_ptr<TextureOutputsHandle> procedural_texture_cache_build(const ProceduralTexture &t, uint64_t hash, TexPlanes &planes, std::vector<LayerAux> aux) {
   auto h = std::make_shared<TextureOutputsHandle>();
   h->out.hash = hash;
-  for (int k = 0; k < (int)TextureOutput::Count; k++) {
-    auto tex = std::make_shared<Texture>();
-    tex->name = t.name + "#" + texture_output_name(k);
-    tex->build(t.output(k, planes), k == (int)TextureOutput::Albedo);
-    h->out.tex[k] = tex;
-    h->out.have[k] = true;
-  }
+  build_outputs(t, planes, h->out);
+  /* Every surface material references the metallic map: made here on the worker, so the main thread's next material resolve
+   * doesn't fill and mip it (85 MB at 4096 x 4096). */
+  const int metallic = (int)TextureOutput::Metallic;
+  if (!h->out.tex[metallic]) h->out.tex[metallic] = flat_texture(t, h->out, metallic);
   if (t.live_shading) h->out.live = std::make_shared<const LiveTexture>(t, std::move(aux), planes.w, planes.h);
   return h;
 }
@@ -782,6 +844,7 @@ void procedural_texture_cache_store(const std::string &asset_path, const std::sh
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache[asset_path] = built->out;
   g_cache[asset_path].used = ++g_cache_clock;
+  g_cache[asset_path].key = asset_path;
   g_trimmed.erase(asset_path);
 }
 
@@ -792,8 +855,29 @@ static size_t cached_output_bytes(const CachedOutput &c) {
   return n;
 }
 
+/* Round 456: the optional planes the enabled layers (groups' children too) read or write. */
+static int layers_planes_needed(const TextureLayerList &layers) {
+  int bits = 0;
+  for (const auto &l : layers) {
+    if (!l->enabled) continue;
+    bits |= l->planes_needed();
+    if (const TextureLayerList *kids = l->children_const()) bits |= layers_planes_needed(*kids);
+  }
+  return bits;
+}
+
 size_t procedural_texture_planes_bytes(const ProceduralTexture &t, bool building) {
-  return (size_t)pow2_size(t.width) * (size_t)pow2_size(t.height) * (building ? 44 + 32 : 44);
+  const size_t texels = (size_t)pow2_size(t.width) * (size_t)pow2_size(t.height);
+  const int bits = layers_planes_needed(t.layers);
+  size_t per = 24;  // height, roughness, mask 4 each; albedo 12
+  if (bits & PlaneAlpha) per += 4;
+  if (bits & PlaneMetal) per += 4;
+  if (bits & PlaneEmit) per += 12;
+  if (!building) return texels * per;
+  /* The images built (an image's mips are 16 / 3 bytes a texel): the albedo, the switched-on normal, roughness and height,
+   * and the metallic and emission ones when a layer writes them; the flat ones wait until asked for. */
+  size_t images = 1 + (t.use_normal ? 1 : 0) + (t.use_roughness ? 1 : 0) + (t.use_height ? 1 : 0) + (bits & PlaneMetal ? 1 : 0) + (bits & PlaneEmit ? 1 : 0);
+  return texels * per + texels * images * 16 / 3;
 }
 
 size_t procedural_texture_cache_bytes() {

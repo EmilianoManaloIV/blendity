@@ -2,6 +2,26 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 456): A running surface's planes
+
+**Asked:** Pass 19's round 456 - the soak's one open memory item: a running 4096 x 4096 surface held 738 MB of planes, and
+its finished images were built even for the maps switched off.
+
+**Changed (task 0432)**
+- **The planes a stack doesn't use aren't allocated:** the cover, metallic and emission planes (4, 4 and 12 bytes a texel)
+  are made when a layer writes or reads them - by its targets, or by `planes_read` (Warp / Tile move the cover with the
+  colour, Math / Map Range / Clamp read Metallic, a Paint layer blends Metallic and Emission). A missing plane reads as
+  its default. A 4096 x 4096 stack without them holds 24 bytes a texel: **738 MB -> 402 MB** (28 bytes, 470 MB, with a
+  metallic layer).
+- **A flat output is made when asked for:** Normal / Roughness / Height switched off, and Emission with no layer writing
+  it, are one flat colour - the cache notes the colour and size and makes the image (the same bytes, size and mips) when
+  the Textures window or an export asks. Metallic, which every surface material reads, is still built on the surface's
+  worker, so a material never makes a 4096 x 4096 image on the main thread (307 ms measured for Emission's). A texture used only for its albedo now holds one image
+  instead of six. `procedural_texture_planes_bytes` follows both.
+- Nothing a consumer sees changed: the planes, the six images and their mips are byte for byte what the full path makes.
+
+**Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 450): The GPU editor frames' drift, attributed
 
 **Asked:** Pass 19's round 450 - Pass 18's baseline read the GPU editor frames 8-18 % slower than Pass 17's end; find the

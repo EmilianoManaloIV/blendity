@@ -193,8 +193,8 @@ GGX-prefiltered (428); Filamented's specular occlusion (429); texel validity and
    a scene-wide change counter, its own round and ADR.
 2. The bake's SSIM: directional strength against Unity's divisor, seams (Unity's Stitch Seams), the exit sign's glow.
 3. One 698 ms frame while SideRail path-traces; Enter Edit Mode on 500k, 116 ms (budget 100).
-4. ~~The soak's 1.1-1.3 GB of working memory~~ - found and bounded in round 445 (below); left: a running 4096 x 4096
-   surface's 738 MB of planes.
+4. ~~The soak's 1.1-1.3 GB of working memory~~ - found and bounded in round 445, the running surface's planes 738 -> 402 MB
+   in round 456 (below).
 5. Shadowmask and Subtractive, L2 SH probes and Light Volumes in Blendity's own views, per-island chart packing - planned
    for Pass 17, not reached.
 6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
@@ -333,6 +333,13 @@ the procedural-texture cache, which had no limit. Before: 570-650 MB of the work
 working set 699 MB, flat); after: the cache counted (448 MB), 51-59 MB in no account, the working set 560 -> 585 MB. The
 cache is bounded (1/32 of the machine's memory, 128-512 MB; least recently used images only it holds are dropped); the
 idle renderers' scratch is freed after 5 s with the total over 96 MB.
+
+### A running surface's planes (round 456, task 0432)
+The planes of a 4096 x 4096 surface evaluating on its worker were **738 MB** (44 bytes a texel). The cover, metallic and
+emission planes (4, 4, 12 bytes) are now made only when a layer writes or reads them: a stack without them holds **402 MB**
+(24 bytes), one with a metallic layer 470 MB. The finished images skip the flat ones - Normal / Roughness / Height switched
+off, Metallic / Emission unwritten - until something asks for them (a surface used for its albedo holds one image, not
+six). Planes, images and mips are byte for byte what the full path makes (unit-tested on six stacks, switches on and off).
 
 ### What Pass 16 didn't measure (round 433)
 - **A 30-minute soak** (`BLENDITY_FUZZ_MINUTES=30 blendity_stress --only editor_fuzz`): no crash in 194,633 frames

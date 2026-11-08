@@ -10560,8 +10560,8 @@ static void tests_round264() {
     t.evaluate(p);
     float metal_min = 1.0f, emit_err = 0.0f, albedo_err = 0.0f;
     for (size_t i = 0; i < p.size(); i++) {
-      metal_min = std::min(metal_min, p.metal[i]);
-      emit_err = std::max(emit_err, length(p.emit[i] - Vec3(1.0f, 0.5f, 0.0f)));
+      metal_min = std::min(metal_min, p.metal_at(i));
+      emit_err = std::max(emit_err, length(p.emit_at(i) - Vec3(1.0f, 0.5f, 0.0f)));
       albedo_err = std::max(albedo_err, length(p.albedo[i] - Vec3(0.5f)));
     }
     const Bitmap mb = t.output((int)TextureOutput::Metallic, p), eb = t.output((int)TextureOutput::Emission, p);
@@ -10626,8 +10626,8 @@ static void tests_round264() {
     TexPlanes pb, pg;
     back.evaluate(pb);
     t.evaluate(pg);
-    const bool same_planes = pb.metal.size() == pg.metal.size() && std::memcmp(pb.metal.data(), pg.metal.data(), pg.metal.size() * sizeof(float)) == 0 &&
-                             std::memcmp(pb.albedo.data(), pg.albedo.data(), pg.albedo.size() * sizeof(Vec3)) == 0 && std::memcmp(pb.emit.data(), pg.emit.data(), pg.emit.size() * sizeof(Vec3)) == 0;
+    auto same_bytes = [](const auto &x, const auto &y) { return x.size() == y.size() && (x.empty() || std::memcmp(x.data(), y.data(), x.size() * sizeof(x[0])) == 0); };  // (a plane no layer wrote is empty: no data() to compare)
+    const bool same_planes = same_bytes(pb.metal, pg.metal) && same_bytes(pb.albedo, pg.albedo) && same_bytes(pb.emit, pg.emit);
     std::printf("    the loaded stack evaluates bit for bit as the saved one %d\n", (int)same_planes);
     CHECK(same_planes);
     std::string asset;
@@ -10754,12 +10754,12 @@ static void tests_round264() {
     const int halo = rect_halo(t, 1, c);
     evaluate_rect(t, 1, 64, 64, 128, 128, rect, anchors);
     auto same_at = [&](size_t i) {
-      return rect.height[i] == full.height[i] && rect.rough[i] == full.rough[i] && rect.metal[i] == full.metal[i] && rect.albedo[i].x == full.albedo[i].x && rect.albedo[i].y == full.albedo[i].y &&
-             rect.albedo[i].z == full.albedo[i].z && rect.emit[i].x == full.emit[i].x;
+      return rect.height[i] == full.height[i] && rect.rough[i] == full.rough[i] && rect.metal_at(i) == full.metal_at(i) && rect.albedo[i].x == full.albedo[i].x && rect.albedo[i].y == full.albedo[i].y &&
+             rect.albedo[i].z == full.albedo[i].z && rect.emit_at(i).x == full.emit_at(i).x;
     };
     auto untouched = [&](size_t i) {
-      return rect.height[i] == below.height[i] && rect.rough[i] == below.rough[i] && rect.albedo[i].x == below.albedo[i].x && rect.mask[i] == below.mask[i] && rect.metal[i] == below.metal[i] &&
-             rect.emit[i].x == below.emit[i].x;
+      return rect.height[i] == below.height[i] && rect.rough[i] == below.rough[i] && rect.albedo[i].x == below.albedo[i].x && rect.mask[i] == below.mask[i] && rect.metal_at(i) == below.metal_at(i) &&
+             rect.emit_at(i).x == below.emit_at(i).x;
     };
     size_t inside_bad = 0, outside_bad = 0, inside = 0, outside = 0;
     for (int y = 0; y < 512; y++)
@@ -10806,8 +10806,8 @@ static void tests_round265() {
     for (int y = 0; y < 64; y++)
       for (int x = 0; x < 64; x++) {
         const size_t i = (size_t)y * 64 + x;
-        if (x < 32) left_err = std::max(left_err, std::max(length(p.albedo[i] - Vec3(1.0f, 0.0f, 0.0f)), std::max(std::fabs(p.metal[i] - 1.0f), std::fabs(p.rough[i] - 0.2f))));
-        else right_err = std::max(right_err, std::max(length(p.albedo[i] - Vec3(0.5f)), std::max(p.metal[i], std::fabs(p.rough[i] - 0.5f))));
+        if (x < 32) left_err = std::max(left_err, std::max(length(p.albedo[i] - Vec3(1.0f, 0.0f, 0.0f)), std::max(std::fabs(p.metal_at(i) - 1.0f), std::fabs(p.rough[i] - 0.2f))));
+        else right_err = std::max(right_err, std::max(length(p.albedo[i] - Vec3(0.5f)), std::max(p.metal_at(i), std::fabs(p.rough[i] - 0.5f))));
       }
     std::printf("    the painted half off by %.4f at most, the unpainted half off by %.4f\n", left_err, right_err);
     CHECK(left_err < 0.01f && right_err < 1e-5f);
@@ -10829,7 +10829,7 @@ static void tests_round265() {
     t.evaluate(pc);
     float keep_err = 0.0f;
     for (int y = 0; y < 64; y++)
-      for (int x = 0; x < 32; x++) keep_err = std::max(keep_err, std::max(pc.metal[(size_t)y * 64 + x], std::fabs(pc.rough[(size_t)y * 64 + x] - 0.5f)));
+      for (int x = 0; x < 32; x++) keep_err = std::max(keep_err, std::max(pc.metal_at((size_t)y * 64 + x), std::fabs(pc.rough[(size_t)y * 64 + x] - 0.5f)));
     std::printf("    with the colour bit alone the Fill's metallic and roughness show through (off by %.4f)\n", keep_err);
     CHECK(keep_err < 1e-5f && length(pc.albedo[0] - Vec3(1.0f, 0.0f, 0.0f)) < 0.01f);
     /* The dilation: a 10 x 10 block grown by two texels on every side, and no farther. */
@@ -10879,7 +10879,7 @@ static void tests_round266() {
     size_t n = 0, edge_n = 0, centre_n = 0;
     for (size_t i = 0; i < p.size(); i++) {
       if (maps->cover[i] < 0.5f) continue;
-      n++, metal_sum += p.metal[i];
+      n++, metal_sum += p.metal_at(i);
       const Vec3 q = maps->position[i];
       int at_bound = 0, inside = 0;
       for (float v : {q.x, q.y, q.z}) at_bound += (v < 0.03f || v > 0.97f) ? 1 : 0, inside += (v > 0.2f && v < 0.8f) ? 1 : 0;
