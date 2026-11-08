@@ -537,6 +537,59 @@ static size_t cull_lights_to_view(LightingEnv &env, const Mat4 &vp) {
   return before - env.lights.size();
 }
 
+/* Round 451 (task 0427): the split's pieces. A black world (made once, never written after): no sky light or reflection. */
+static const Environment &black_environment() {
+  static const Environment black = [] {
+    Environment e;
+    e.mode = Environment::Color, e.color = Vec3(0.0f), e.strength = 0.0f;
+    e.sky = e.equator = e.ground = Vec3(0.0f);
+    e.compute_sh();
+    return e;
+  }();
+  return black;
+}
+
+static void components_direct_only(LightingEnv &env, std::vector<DrawItem> &items) {
+  for (DrawItem &it : items) {
+    it.lightmap = it.lightmap_dir = it.shadowmask = nullptr, it.lightmap_uv = nullptr;
+    it.rt_bounce = it.rt_sky = nullptr, it.rt_uv = nullptr;
+    it.use_probes = false;
+  }
+  env.probes = nullptr, env.light_volumes = nullptr, env.gi = nullptr;
+  env.reflection_probes.clear();
+  env.environment = &black_environment();
+  env.sky = env.equator = env.ground = Vec3(0.0f);
+  /* Review 451: a Baked or Subtractive light is the lightmaps' (light_baked_here skips it only where a lightmap is) -
+   * without them it would shine in realtime and count twice beside `indirect`. */
+  std::vector<RenderLight> kept;
+  int shadow_light = -1;
+  for (size_t i = 0; i < env.lights.size(); i++) {
+    if (env.lights[i].bake_mode == 2 || env.lights[i].bake_mode == 3) continue;
+    if ((int)i == env.shadow_light) shadow_light = (int)kept.size();  // (the shadowed sun keeps its map at its new place)
+    kept.push_back(env.lights[i]);
+  }
+  env.lights = std::move(kept);
+  env.shadow_light = shadow_light;
+  if (shadow_light < 0) env.shadow = nullptr;
+}
+
+std::string apply_render_components(const std::string &spec, LightingEnv &env, std::vector<DrawItem> &items) {
+  std::string applied;
+  for (const std::string &raw : split_list(spec, ',')) {
+    const std::string w = to_lower(raw);
+    if (w == "direct") components_direct_only(env, items);
+    else if (w == "indirect") env.lights.clear(), env.shadow = nullptr, env.shadow_light = -1;
+    else if (w == "noprobes") env.probes = nullptr, env.light_volumes = nullptr;
+    else if (w == "noreflections") env.reflection_probes.clear();
+    else {
+      if (!w.empty()) Log::warn("BLENDITY_RENDER_COMPONENTS: %s isn't direct, indirect, noprobes or noreflections - ignored", w.c_str());
+      continue;
+    }
+    applied += (applied.empty() ? "" : ",") + w;
+  }
+  return applied;
+}
+
 LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
   LightingEnv env;
   const EnvironmentSettings &es = scene_->environment;
@@ -1847,6 +1900,12 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   }
   j->environment = env_;
   env.environment = &j->environment;
+  const char *split = traced ? nullptr : std::getenv("BLENDITY_RENDER_COMPONENTS");  // (round 451: the Unity comparison's split by component)
+  if (split && *split) {
+    const std::string applied = apply_render_components(split, env, j->items);
+    if (env.environment == &black_environment()) j->want_gi = false;  // (direct only: no realtime GI either; the background stays the sky)
+    if (!applied.empty()) Log::info("Render components: %s", applied.c_str());
+  }
   j->env = std::move(env);
   j->img.resize(w, h);
   j->back.resize(w, h);

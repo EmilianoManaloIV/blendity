@@ -11,6 +11,9 @@ Unity's EncodeToEXR(EXRFlags.None) and Blendity's saverender write them). Report
   grid     the mean luminance of each cell of a W x H grid for both, their correlation and the largest cell gap;
   linear   with EXRs: the relative RMS difference of the linear light over the cells whose mean is above a tenth of the
            brightest cell's ("lit" cells).
+--ssim-map writes the local SSIM (8 x 8 windows) as a heat map the picture's size: black-blue where the structure matches,
+red at SSIM 0.5, yellow at 0 or below (round 451, task 0427); the JSON's ssim_worst lists the five worst windows.
+--self-test checks the PNG writer and reader, MAE, SSIM and the SSIM map on made-up pictures (exit 0 when they hold).
 --check passes (exit 0) when MAE <= 4, SSIM >= 0.90 and the grid correlation >= 0.95 (and, with EXRs, the linear RMS
 <= 10%): the acceptance target of the Unity comparison. On a nearly black reference (its grid's mean under 8 / 255) SSIM
 and the correlation read noise, so there the MAE and the grids' means (within 2 / 255) decide. --out writes a side by
@@ -185,25 +188,70 @@ def correlation(a, b):
     return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (n * sa * sb)
 
 
-def ssim(w, h, a, b, win=8):
+def grey(w, h, rgb):
+    return [luminance(rgb, i * 3) for i in range(w * h)]
+
+
+def ssim_of(ga, gb):
+    """The SSIM of two equal lists of grey values (8-bit steps, the usual constants)."""
     c1, c2 = (0.01 * 255) ** 2, (0.03 * 255) ** 2
-    total, n = 0.0, 0
-    for y0 in range(0, h - win + 1, win):
-        for x0 in range(0, w - win + 1, win):
-            ga, gb = [], []
-            for y in range(y0, y0 + win):
-                for x in range(x0, x0 + win):
-                    i = (y * w + x) * 3
-                    ga.append(luminance(a, i))
-                    gb.append(luminance(b, i))
-            m = len(ga)
-            mua, mub = sum(ga) / m, sum(gb) / m
-            va = sum((v - mua) ** 2 for v in ga) / (m - 1)
-            vb = sum((v - mub) ** 2 for v in gb) / (m - 1)
-            cov = sum((p - mua) * (q - mub) for p, q in zip(ga, gb)) / (m - 1)
-            total += ((2 * mua * mub + c1) * (2 * cov + c2)) / ((mua * mua + mub * mub + c1) * (va + vb + c2))
-            n += 1
-    return total / max(1, n)
+    m = len(ga)
+    mua, mub = sum(ga) / m, sum(gb) / m
+    va = sum((v - mua) ** 2 for v in ga) / max(1, m - 1)
+    vb = sum((v - mub) ** 2 for v in gb) / max(1, m - 1)
+    cov = sum((p - mua) * (q - mub) for p, q in zip(ga, gb)) / max(1, m - 1)
+    return ((2 * mua * mub + c1) * (2 * cov + c2)) / ((mua * mua + mub * mub + c1) * (va + vb + c2))
+
+
+def ssim_windows(w, h, ga, gb, win=8, mask=None):
+    """Round 451 (task 0427): the local SSIM of each win x win window of two grey pictures - (columns, rows, values row by
+    row); a window the mask (optional, truthy = covered) leaves partly uncovered is None."""
+    cols, rows = w // win, h // win
+    vals = []
+    for y0 in range(0, rows * win, win):
+        for x0 in range(0, cols * win, win):
+            idx = [y * w + x for y in range(y0, y0 + win) for x in range(x0, x0 + win)]
+            if mask is not None and not all(mask[i] for i in idx):
+                vals.append(None)
+                continue
+            vals.append(ssim_of([ga[i] for i in idx], [gb[i] for i in idx]))
+    return cols, rows, vals
+
+
+def ssim(w, h, a, b, win=8):
+    _, _, vals = ssim_windows(w, h, grey(w, h, a), grey(w, h, b), win)
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / max(1, len(vals))
+
+
+def heat(e):
+    """An error 0..1 as a colour: black-blue (none), red (half), yellow-white (all)."""
+    e = min(1.0, max(0.0, e))
+    return int(min(255, e * 2 * 255)), int(max(0.0, e - 0.5) * 2 * 255), int((1.0 - e) * 90) if e < 0.25 else 0
+
+
+def write_ssim_map(path, w, h, a, b, win=8):
+    """Round 451: the local SSIM as a heat map, the picture's size - each 8 x 8 window coloured by 1 - SSIM (black-blue the
+    same structure, red SSIM 0.5, yellow 0 or below); the edge pixels no whole window covers grey. Returns the windows."""
+    cols, rows, vals = ssim_windows(w, h, grey(w, h, a), grey(w, h, b), win)
+    out = bytearray(w * h * 3)
+    for y in range(h):
+        for x in range(w):
+            cx, cy = x // win, y // win
+            o = (y * w + x) * 3
+            if cx >= cols or cy >= rows or vals[cy * cols + cx] is None:
+                out[o:o + 3] = bytes((64, 64, 64))
+                continue
+            out[o:o + 3] = bytes(heat(1.0 - vals[cy * cols + cx]))
+    write_png(path, w, h, out)
+    return cols, rows, vals
+
+
+def worst_windows(cols, rows, vals, win, n=5):
+    """The n windows of least SSIM: their pixel rectangle and value, worst first."""
+    cells = [(v, i) for i, v in enumerate(vals) if v is not None]
+    cells.sort()
+    return [{"x": (i % cols) * win, "y": (i // cols) * win, "w": win, "h": win, "ssim": round(v, 4)} for v, i in cells[:n]]
 
 
 def compare(a_path, b_path, exr=None, grid=(16, 9)):
@@ -224,7 +272,10 @@ def compare(a_path, b_path, exr=None, grid=(16, 9)):
     mse = sq / (n * 3)
     psnr = 99.0 if mse < 1e-9 else 10.0 * math.log10(255.0 * 255.0 / mse)
     ga, gb = grid_means(w, h, a, grid[0], grid[1]), grid_means(w, h, b, grid[0], grid[1])
-    r = {"width": w, "height": h, "mae": mae, "mae_all": sum(mae) / 3.0, "psnr": psnr, "ssim": ssim(w, h, a, b),
+    cols, rows, wins = ssim_windows(w, h, grey(w, h, a), grey(w, h, b))
+    wvals = [v for v in wins if v is not None]
+    r = {"width": w, "height": h, "mae": mae, "mae_all": sum(mae) / 3.0, "psnr": psnr, "ssim": sum(wvals) / max(1, len(wvals)),
+         "ssim_worst": worst_windows(cols, rows, wins, 8),  # (round 451: where the structure differs most)
          "grid": {"columns": grid[0], "rows": grid[1], "a": ga, "b": gb, "correlation": correlation(ga, gb), "max_gap": max(abs(p - q) for p, q in zip(ga, gb)),
                   "mean_a": sum(ga) / len(ga), "mean_b": sum(gb) / len(gb)}}
     if exr:
@@ -261,12 +312,56 @@ def side_by_side(path, w, h, a, b):
     write_png(path, w * 3, h, out)
 
 
+def self_test():
+    """Round 451: made-up pictures - the same one twice (MAE 0, SSIM 1, a black map), one with a square changed (its
+    windows the worst, the rest 1), the PNG round trip."""
+    import os
+    import tempfile
+    w, h = 64, 48
+    a = bytearray(w * h * 3)
+    for y in range(h):
+        for x in range(w):
+            a[(y * w + x) * 3:(y * w + x) * 3 + 3] = bytes(((x * 4) & 255, (y * 5) & 255, ((x ^ y) * 3) & 255))
+    b = bytearray(a)
+    for y in range(16, 24):
+        for x in range(40, 48):
+            b[(y * w + x) * 3:(y * w + x) * 3 + 3] = bytes((255 - a[(y * w + x) * 3], 30, 200))
+    fails = []
+    with tempfile.TemporaryDirectory() as d:
+        pa, pb, pm = os.path.join(d, "a.png"), os.path.join(d, "b.png"), os.path.join(d, "m.png")
+        write_png(pa, w, h, a)
+        write_png(pb, w, h, b)
+        if read_png(pa) != (w, h, a):
+            fails.append("the PNG round trip changed the picture")
+        same, _ = compare(pa, pa)
+        if same["mae_all"] != 0 or abs(same["ssim"] - 1.0) > 1e-9 or not same["pass"]:
+            fails.append("the same picture twice: MAE %.3f SSIM %.4f" % (same["mae_all"], same["ssim"]))
+        diff, pics = compare(pa, pb)
+        cols, rows, vals = write_ssim_map(pm, *pics)
+        mw, mh, m = read_png(pm)
+        worst = diff["ssim_worst"][0]
+        if (worst["x"], worst["y"]) != (40, 16) or worst["ssim"] > 0.5:
+            fails.append("the changed square isn't the worst window: %s" % worst)
+        if sum(1 for v in vals if v is not None and v < 0.999) != 1:
+            fails.append("windows other than the changed one moved")
+        if (mw, mh) != (w, h) or m[(20 * w + 44) * 3] < 128 or m[(4 * w + 4) * 3] != 0:
+            fails.append("the map doesn't show the square (red there, black elsewhere)")
+        if not (0 < diff["mae_all"] < 10) or diff["ssim"] >= 1.0:
+            fails.append("the changed picture: MAE %.3f SSIM %.4f" % (diff["mae_all"], diff["ssim"]))
+    for f in fails:
+        print("FAIL: " + f)
+    print("image_compare self-test: " + ("%d failed" % len(fails) if fails else "all passed"))
+    return 1 if fails else 0
+
+
 def main(argv):
-    if len(argv) < 3:
+    if len(argv) < 2 or (len(argv) < 3 and argv[1] != "--self-test"):
         print(__doc__)
         return 2
+    if argv[1] == "--self-test":
+        return self_test()
     a, b = argv[1], argv[2]
-    exr, grid, check, out, js = None, (16, 9), False, None, None
+    exr, grid, check, out, js, smap = None, (16, 9), False, None, None, None
     i = 3
     while i < len(argv):
         if argv[i] == "--exr":
@@ -282,6 +377,8 @@ def main(argv):
             out, i = argv[i + 1], i + 2
         elif argv[i] == "--json":
             js, i = argv[i + 1], i + 2
+        elif argv[i] == "--ssim-map":
+            smap, i = argv[i + 1], i + 2
         else:
             print("unknown option " + argv[i])
             return 2
@@ -295,6 +392,9 @@ def main(argv):
           + ("; a nearly black reference: the MAE and the means decide)" if r["dark"] else ")"))
     if out:
         side_by_side(out, *pics)
+    if smap:
+        write_ssim_map(smap, *pics)
+        print("SSIM map: " + smap + "; worst windows " + ", ".join("(%d,%d) %.2f" % (q["x"], q["y"], q["ssim"]) for q in r["ssim_worst"][:3]))
     if js:
         json.dump(r, open(js, "w"), indent=1)
     return 0 if (not check or r["pass"]) else 1

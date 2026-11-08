@@ -751,6 +751,47 @@ bool PathTracer::sample_light(const RenderLight &l, Vec3 from, Vec3 at, uint32_t
   return true;
 }
 
+/* Round 451 (task 0427): the first surface a capture of the lit scene shades - the faces trace() passes without
+ * shading (a fog's, an outline hull's, a Cutout's holes, a Transparent one by its alpha) passed the same way. */
+bool PathTracer::first_surface(const Ray &r, uint32_t &rng, Hit &h, SurfacePoint &sp, SurfaceSample &s, bool cull_back, Ray *past) const {
+  Ray local = r;
+  Ray &ray = past ? *past : local;
+  ray = r;
+  for (int pass = 0; pass < 64; pass++) {
+    h = Hit{};
+    if (!intersect(ray, h)) return false;
+    const Material *mat = surface_at(h.object, h.tri, h.u, h.v, sp);
+    sp.position = ray.origin + ray.dir * h.t;
+    const Vec3 V = -ray.dir;
+    sp.back_side = dot(sp.geo_normal, V) < 0;
+    if (sp.back_side) sp.geo_normal = -sp.geo_normal, sp.normal = -sp.normal;  // (as the rasterizer turns a back side's)
+    if (dot(sp.normal, sp.geo_normal) < 0) sp.normal = -sp.normal;
+    bool pass_through = mat->volume() || mat->outline_hull || (cull_back && sp.back_side && !mat->double_sided);
+    if (!pass_through) {
+      s = evaluate_material(*mat, sp);
+      if (mat->surface == (int)MaterialSurface::Cutout) pass_through = s.alpha < mat->alpha_clip;
+      else if (mat->surface == (int)MaterialSurface::Transparent) pass_through = rnd(rng) >= s.alpha;
+    }
+    if (!pass_through) {
+      if (dot(s.normal, V) < 0) s.normal = normalize(s.normal + sp.geo_normal * (-dot(s.normal, V) + 0.01f));
+      return true;
+    }
+    ray.origin = sp.position + ray.dir * (1e-4f + h.t * 1e-5f);
+  }
+  return false;
+}
+
+Vec3 PathTracer::direct_diffuse(const RenderLight &l, Vec3 p, Vec3 n, Vec3 geo, uint32_t &rng) const {
+  const Vec3 origin = p + geo * 1e-3f;
+  Vec3 dir;
+  float dist = 0.0f, power = 0.0f;
+  if (!sample_light(l, origin, p, rng, dir, dist, power) || !(power > 0.0f)) return Vec3(0.0f);
+  const float nl = dot(n, dir);
+  if (nl <= 0.0f || dot(geo, dir) <= 0.0f) return Vec3(0.0f);
+  const Vec3 Tr = l.shadows ? transmittance({origin, dir}, dist) : Vec3(1.0f);
+  return l.color * Tr * (power * nl / kPi);
+}
+
 /* A free flight through the fogs the ray is in (delta tracking against the sum of their majorants - twice the density
  * where one has noise): no collision before tmax -> false, the ray going on as it was. A collision is with one fog, by
  * its share of the density there: its glow, then each light seen through the fogs (and whatever is in the way) by its
