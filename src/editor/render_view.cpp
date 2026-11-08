@@ -257,6 +257,80 @@ bool Editor::render_prefetch_start(bool preview, bool open_window) {
   return true;
 }
 
+/* Round 447: a landed batch makes every material resolve again (what landed shows; a file that won't decode is
+ * published as failed, so its material resolves as missing for good); the next batch is what the views found missing
+ * meanwhile, less what the cache holds. */
+void Editor::texture_stream_land() {
+  std::vector<std::pair<std::string, bool>> failed;
+  std::vector<int64_t> failed_mtimes;
+  for (size_t i = 0; i < tex_stream_->files.size(); i++) {
+    if (tex_stream_->loaded[i]) continue;
+    failed.push_back(tex_stream_->files[i]);
+    failed_mtimes.push_back(tex_stream_->mtimes[i]);
+  }
+  texture_stream_set_failed(failed, failed_mtimes);
+  streamed_files_ += tex_stream_->files.size();
+  tex_stream_.reset();
+  refresh_material_textures();
+  ui_.redraw = true;
+}
+
+void Editor::texture_stream_poll() {
+  if (tex_stream_ && tex_stream_->scene != scene_.get()) tex_stream_.reset();  // (another scene: cancelled between two files, dropped)
+  if (tex_stream_ && tex_stream_->done.load(std::memory_order_acquire)) texture_stream_land();
+  if (upload_waiting_) {  // (the card's budget ran out last frame: the views draw again with the rest)
+    upload_waiting_ = false;
+    refresh_material_textures();
+    ui_.redraw = true;
+  }
+  /* Round 458: meshes the card's byte budget held back - the views draw again with the next share; the frame no mesh was
+   * left waiting ends the queue (its life printed, for the timing runs). */
+  if (mesh_waiting_) {
+    mesh_waiting_ = false;
+    refresh_material_textures();  // (the views' keys move: the Scene view draws again, its items' instances rebuilt)
+    ui_.redraw = true;
+  }
+  else if (mesh_drain_t0_ >= 0) {
+    mesh_drain_ms_ = (clock_now() - mesh_drain_t0_) * 1000.0;
+    mesh_drain_t0_ = -1;
+    Log::info("Every mesh is on the card, %.0f ms after the first was left waiting", mesh_drain_ms_);
+  }
+  std::vector<std::pair<std::string, bool>> files;
+  if (tex_stream_) return;  // (what the views note meanwhile waits: the landed batch makes them resolve - and note - again)
+  if (!take_texture_stream_misses(files)) return;
+  /* (Round 458: nor a file whose failure holds - a view drawn later, a mesh that waited for the card's budget, can note a file while its batch is in flight, and the batch's failure is published after: it is not tried again.) */
+  files.erase(std::remove_if(files.begin(), files.end(), [&](const auto &f) { return texture_cached(f.first, f.second) != nullptr || texture_stream_failed(f.first, f.second); }), files.end());
+  if (files.empty()) refresh_material_textures();  // (the cache held them all: the materials resolve again with them)
+  else texture_stream_start(std::move(files));
+}
+
+void Editor::texture_stream_run(TextureStream &st) {
+  auto load_one = [&st](int64_t i) {
+    if (st.cancel.load(std::memory_order_relaxed)) return;
+    const auto &f = st.files[(size_t)i];
+    st.loaded[(size_t)i] = texture_load(f.first, f.second) != nullptr;
+  };
+  JobSystem::global().run_background([&] {
+    JobSystem::global().parallel_for((int64_t)st.files.size(), 1, [&](int64_t a, int64_t b) {
+      for (int64_t i = a; i < b; i++) load_one(i);
+    });
+  });
+  st.done.store(true, std::memory_order_release);
+}
+
+void Editor::texture_stream_start(std::vector<std::pair<std::string, bool>> files) {
+  auto st = std::make_unique<TextureStream>();
+  st->files = std::move(files);
+  st->loaded.assign(st->files.size(), 0);
+  st->scene = scene_.get();
+  for (const auto &f : st->files) st->mtimes.push_back(texture_file_mtime(f.first));
+  TextureStream *raw = st.get();
+  st->thread = std::thread([raw] { texture_stream_run(*raw); });
+  tex_stream_ = std::move(st);
+  stream_batches_++;
+  ui_.redraw = true;
+}
+
 void Editor::render_prefetch_poll() {
   if (!render_prefetch_ || !render_prefetch_->done.load(std::memory_order_acquire)) return;
   std::unique_ptr<RenderPrefetch> pf = std::move(render_prefetch_);  // (joined as it goes)
@@ -331,6 +405,8 @@ uint64_t Editor::items_key(bool game, bool want_tangents) {
   mix((uint64_t)(uintptr_t)ld.pages.data() ^ (uint64_t)ld.pages.size() << 48);
   mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32 ^ (uint64_t)ld.mask_pages.size() << 48);  // (round 444: the masks too)
   mix((uint64_t)scene_->lighting.directional_mode);
+  mix((uint64_t)scene_->lighting.shadowmask_mode);  // (round 454)
+  mix((uint64_t)std::hash<float>()(scene_->lighting.shadow_distance));
   return h;
 }
 
@@ -537,6 +613,59 @@ static size_t cull_lights_to_view(LightingEnv &env, const Mat4 &vp) {
   return before - env.lights.size();
 }
 
+/* Round 451 (task 0427): the split's pieces. A black world (made once, never written after): no sky light or reflection. */
+static const Environment &black_environment() {
+  static const Environment black = [] {
+    Environment e;
+    e.mode = Environment::Color, e.color = Vec3(0.0f), e.strength = 0.0f;
+    e.sky = e.equator = e.ground = Vec3(0.0f);
+    e.compute_sh();
+    return e;
+  }();
+  return black;
+}
+
+static void components_direct_only(LightingEnv &env, std::vector<DrawItem> &items) {
+  for (DrawItem &it : items) {
+    it.lightmap = it.lightmap_dir = it.shadowmask = nullptr, it.lightmap_uv = nullptr;
+    it.rt_bounce = it.rt_sky = nullptr, it.rt_uv = nullptr;
+    it.use_probes = false;
+  }
+  env.probes = nullptr, env.light_volumes = nullptr, env.gi = nullptr;
+  env.reflection_probes.clear();
+  env.environment = &black_environment();
+  env.sky = env.equator = env.ground = Vec3(0.0f);
+  /* Review 451: a Baked or Subtractive light is the lightmaps' (light_baked_here skips it only where a lightmap is) -
+   * without them it would shine in realtime and count twice beside `indirect`. */
+  std::vector<RenderLight> kept;
+  int shadow_light = -1;
+  for (size_t i = 0; i < env.lights.size(); i++) {
+    if (env.lights[i].bake_mode == 2 || env.lights[i].bake_mode == 3) continue;
+    if ((int)i == env.shadow_light) shadow_light = (int)kept.size();  // (the shadowed sun keeps its map at its new place)
+    kept.push_back(env.lights[i]);
+  }
+  env.lights = std::move(kept);
+  env.shadow_light = shadow_light;
+  if (shadow_light < 0) env.shadow = nullptr;
+}
+
+std::string apply_render_components(const std::string &spec, LightingEnv &env, std::vector<DrawItem> &items) {
+  std::string applied;
+  for (const std::string &raw : split_list(spec, ',')) {
+    const std::string w = to_lower(raw);
+    if (w == "direct") components_direct_only(env, items);
+    else if (w == "indirect") env.lights.clear(), env.shadow = nullptr, env.shadow_light = -1;
+    else if (w == "noprobes") env.probes = nullptr, env.light_volumes = nullptr;
+    else if (w == "noreflections") env.reflection_probes.clear();
+    else {
+      if (!w.empty()) Log::warn("BLENDITY_RENDER_COMPONENTS: %s isn't direct, indirect, noprobes or noreflections - ignored", w.c_str());
+      continue;
+    }
+    applied += (applied.empty() ? "" : ",") + w;
+  }
+  return applied;
+}
+
 LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized) {
   LightingEnv env;
   const EnvironmentSettings &es = scene_->environment;
@@ -544,6 +673,8 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   env.equator = es.equator;
   env.ground = es.ground;
   env.camera_pos = eye;
+  env.shadowmask_mode = scene_->lighting.shadowmask_mode;  // (round 454: view settings - no rebake)
+  env.shadow_distance = scene_->lighting.shadow_distance;
   env.view_transform = view_transform_from_setting(scene_->render.view_transform);
   env.exposure = scene_->render.exposure;
   env.unity_brdf = !scene_->unity.file.empty() && !unity_brdf_off();  // (round 405: a Unity scene's reflections weigh as Unity's BRDF does - lights or none)
@@ -668,11 +799,13 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   ProbeVolume *pv = nullptr;
   Component *outline = nullptr, *flatten = nullptr, *vshapes = nullptr;
   bool bone = false;
+  const LightProbeGroupComponent *pgroup = nullptr;
   for (auto &c : g.components) switch (c->render_role()) {
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
       case Component::RenderRole::ViewShapes: if (!vshapes) vshapes = c.get(); break;
       case Component::RenderRole::Bone: bone = true; break;
+      case Component::RenderRole::ProbeGroup: if (!pgroup) pgroup = static_cast<const LightProbeGroupComponent *>(c.get()); break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
       case Component::RenderRole::ProbeVolume: if (!pv) pv = static_cast<ProbeVolume *>(c.get()); break;
@@ -701,6 +834,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
       const Mat4 w = g.world_matrix();
       mix(w.m, sizeof(w.m));
+    }
+    if (pgroup) {  // (round 455: a probe moved - or the group - is a new bake: the lighting's out-of-date check re-runs; the Scene view draws them)
+      const Mat4 w = g.world_matrix();
+      const uint64_t key = pgroup->content_key() ^ (uint64_t)pgroup->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+      mix(w.m, sizeof(w.m));
+      mix(&key, 8);
     }
     return h;
   }
@@ -767,6 +906,10 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
     const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
     mix(&ph, 8);
+  }
+  if (pgroup) {  // (round 455: a group on an object that also draws a mesh or a light; the world matrix is hashed above)
+    const uint64_t key = pgroup->content_key() ^ (uint64_t)pgroup->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+    mix(&key, 8);
   }
   if (l && l->enabled) {
     /* Every field of the light (colour temperature, spot angles, area size, shadows...):
@@ -848,6 +991,8 @@ uint64_t Editor::scene_hash_tail() {
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
+  mix(&scene_->lighting.shadowmask_mode, sizeof(int));  // (round 454: Distance Shadowmask redraws without a rebake)
+  mix(&scene_->lighting.shadow_distance, sizeof(float));
   mix(&scene_->lighting.light_volumes_in_views, 1);  // (round 443)
   mix(&lv_bake_gen_, 8);
   mix(&probe_live_gen_, 8);  // live probes changed
@@ -1029,6 +1174,7 @@ const ShadowMap *Editor::update_shadow_map(const std::vector<DrawItem> &items, c
 void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 eye, bool game,
                              bool scene_lights, const Camera *cam, const FilterStack *filters) {
   BL_ZONE("render_deferred");
+  TextureStreamScope stream(streaming_views());  // (round 447: a view frame, the gather, the card check and the draw alike; renders, bakes and exports are outside)
   LightingEnv env = make_lighting(eye, scene_lights);
   if (cam) env.exposure += cam->exposure_stops();  // ISO, shutter and f-stop
   outline_view_ = {true, eye, 0.5f * (float)rt.height * p.m[5], p.m[15] == 1.0f};  // (task 0149: the outlines' width by distance; m[5] is the projection's focal term, m[15] 1 for an orthographic one)
@@ -1089,7 +1235,9 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
   if (scene_lights && (baked_probes || live_probes)) {
     const LightingSettings &ls = pls;
+    update_probe_window();
     probe_frame_.data = &probes_;
+    probe_frame_.sh_window = probe_window_;
     probe_frame_.normal_bias = finite_bits(ls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_normal_bias)) : 0.25f;
     probe_frame_.view_bias = finite_bits(ls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_view_bias)) : 0.1f;
     probe_frame_.leak_reduction = ls.probe_leak_reduction;
@@ -1785,7 +1933,9 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     const bool baked_probes = !probes_.empty() && probes_.scene_key != 0 && pls.baked_gi;
     const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
     if (baked_probes || live_probes) {
+      update_probe_window();
       j->probe_frame.data = &probes_;
+      j->probe_frame.sh_window = probe_window_;
       j->probe_frame.normal_bias = finite_bits(pls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, pls.probe_normal_bias)) : 0.25f;
       j->probe_frame.view_bias = finite_bits(pls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, pls.probe_view_bias)) : 0.1f;
       j->probe_frame.leak_reduction = pls.probe_leak_reduction;
@@ -1847,6 +1997,12 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
   }
   j->environment = env_;
   env.environment = &j->environment;
+  const char *split = traced ? nullptr : std::getenv("BLENDITY_RENDER_COMPONENTS");  // (round 451: the Unity comparison's split by component)
+  if (split && *split) {
+    const std::string applied = apply_render_components(split, env, j->items);
+    if (env.environment == &black_environment()) j->want_gi = false;  // (direct only: no realtime GI either; the background stays the sky)
+    if (!applied.empty()) Log::info("Render components: %s", applied.c_str());
+  }
   j->env = std::move(env);
   j->img.resize(w, h);
   j->back.resize(w, h);

@@ -5,6 +5,7 @@
 // blender/source/blender/io/wavefront_obj.
 #include "scene.h"
 #include "spring_bones.h"
+#include "unity_scene.h"  // (round 455: Light Probe Groups kept as Engine Components)
 #include "../texture/procedural_texture.h"
 
 #include "../core/core.h"
@@ -1376,6 +1377,7 @@ bool load_scene_text(const std::string &text, Scene &scene, std::string &error) 
     const bool valid = l.group >= 0 && (size_t)l.group < fresh.sketch.layers.size() && (size_t)l.group != i && fresh.sketch.layers[(size_t)l.group].is_group;
     if (!valid) l.group = -1;
   }
+  unity_probe_groups_from_engine(fresh);
   scene = std::move(fresh);
   return true;
 }

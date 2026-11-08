@@ -39,6 +39,8 @@ struct UnityModelPart {
 using UnityModelIds = std::map<int64_t, UnityModelPart>;
 /* A model's sub-asset as Unity 2019.3+ numbers it: xxh64 of "Type:<type>-><name><n>" read as signed (n: the name's
  * occurrence, 0 first) - its meshes and materials. (Its nodes' numbers come from Unity: .unity-model-ids.) */
+/* Round 455: Engine Components of Unity Light Probe Groups (an older scene file) get the LightProbeGroupComponent read from their text. */
+int unity_probe_groups_from_engine(Scene &scene);
 int64_t unity_hashed_file_id(const std::string &type, const std::string &name, int occurrence = 0);
 /* What a model's .meta and Unity's constants say without Unity: the root's GameObject, Transform, renderer and filter
  * (the same numbers in every model, the persistent ones and the legacy 100000s) and a legacy table's names
@@ -111,6 +113,7 @@ struct UnityImport {
   int objects = 0, meshes = 0, missing_meshes = 0, lights = 0, cameras = 0, colliders = 0, engine = 0, prefabs = 0, overrides_kept = 0;
   int dropped = 0;  // (components whose object couldn't be found)
   int reflection_probes = 0;  // (round 401)
+  int probe_groups = 0;       // (round 455: Light Probe Groups that came in as objects)
   int overrides_applied = 0, model_overrides_waiting = 0;  // (round 395: overrides on a model's parts whose fileIDs aren't known yet)
   int model_overrides_stale = 0;                           // (round 399: ...or that Unity's own numbers don't have: parts the model no longer has)
   std::shared_ptr<std::set<std::string>> models_numbered = std::make_shared<std::set<std::string>>();  // (round 399: models Unity has numbered - ctx.model adds them; shared down the nesting)
@@ -147,6 +150,16 @@ GameObject *objects_from_model(const ImportResult &r, const std::string &name, S
 struct UnitySkybox;
 bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,
                            const std::function<bool(const std::string &guid, UnitySkybox &out)> &skybox = {}, UnitySceneLink *link = nullptr);
+
+/* Round 459: the Unity project's settings file `name` (GraphicsSettings.asset, ...) for a scene at `scene_path`: the
+ * first ProjectSettings/<name> in a folder above the scene, the walk stopping at the project root (the first folder
+ * holding an Assets folder, whose own ProjectSettings is checked); "" none (a copy holding only Assets). */
+std::string unity_project_settings_file(const std::string &scene_path, const char *name);
+/* Round 459: that project's GraphicsSettings m_LightsUseLinearIntensity: 1 on (intensity linear), 0 off (colour x
+ * intensity in gamma, the built-in pipeline's default), -1 no settings file found, -2 a file without the field (binary
+ * serialized). */
+int unity_lights_linear_intensity(const std::string &scene_path);
+int unity_lights_linear_intensity_text(const std::string &graphics_settings);  // (the file's text: 1, 0, or -1 no field)
 
 /* Round 421 (ADR 0113): a Unity scene's lightmap settings - its LightingSettings asset when it references one (Unity
  * 2020+, `lighting_asset` its text), else the scene's own m_LightmapEditorSettings - into Blendity's bake settings:

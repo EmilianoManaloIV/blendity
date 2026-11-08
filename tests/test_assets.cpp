@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the assets tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/texture/paint_layer.h"
+#include "../src/texture/surface.h"
 #include <chrono>
 #include <thread>
 #include <filesystem>
@@ -13618,6 +13620,207 @@ static void tests_round417() {
   });
 }
 
+/* ---------------------------------------------------------------- round 456: a running surface's planes (task 0432) */
+static void tests_round456() {
+  /* The textures compared: with and without cover / metallic / emission layers, a Group, a Warp over a card, a Math reading Metallic. */
+  auto r456_make = [](int which) {
+    auto t = std::make_shared<ProceduralTexture>();
+    t->name = "R456 " + std::to_string(which);
+    t->width = t->height = 64;
+    switch (which) {
+      case 0: apply_texture_preset(*t, "Bricks"); break;
+      case 1: apply_texture_preset(*t, "Brushed Metal"); break;
+      case 2: apply_texture_preset(*t, "Leaves"); t->alpha_from_cover = true; break;
+      case 3: apply_texture_preset(*t, "Marble"); break;  // a Warp over a Wave: the cover moves with the colour
+      case 4: {  // emission and metallic from Fills, in a Group
+        apply_texture_preset(*t, "Noise");
+        t->add("Group");
+        TextureLayer &g = *t->layers.back();
+        g.children()->push_back(create_texture_layer("Fill"));
+        TextureLayer &f = *g.children()->back();
+        f.targets = TargetEmission | TargetMetallic;
+        break;
+      }
+      case 5: {  // a Math whose second value is the Metallic plane, over a Fill that writes it
+        t->add("Fill");
+        t->layers.back()->targets = TargetMetallic;
+        t->add("Math");
+        r49_set(*t, "L1 With", "3");
+        break;
+      }
+      case 6: {  // a Paint layer with some painted texels (it blends metallic and emission)
+        t->add("Noise");
+        t->add("Paint");
+        PaintImages &im = static_cast<PaintLayer *>(t->layers.back().get())->ensure_images(64);
+        for (size_t i = 0; i < im.size(); i += 3) im.color[i] = 0xFFFF0000u, im.metal[i] = 200, im.cover[i] = 255, im.channels[i] = (uint8_t)((1 << PaintChannels) - 1);
+        break;
+      }
+      case 7: apply_texture_preset(*t, "Leaves"), t->add("Tile"); break;  // a Tile over a card: the cover moves with the colour
+      case 8: t->add("Noise"), t->add("Tile"); break;  // a Tile with no cover plane to move
+      case 9: t->add("Noise"), t->add("Map Range"), r49_set(*t, "L1 Plane", "2"); break;  // Metallic as the plane
+      case 10: t->add("Noise"), t->add("Clamp"), r49_set(*t, "L1 Plane", "2"); break;
+      case 11: {  // a mask effect that reads Metallic
+        t->add("Noise");
+        t->layers.back()->mask_layers.push_back(create_texture_layer("Math"));
+        make_mask_effect(*t->layers.back()->mask_layers.back());
+        r49_set(*t, "L0 M0 Plane", "2");
+        break;
+      }
+      default: {  // a surface with mesh maps: a Blur's dilation over planes no layer wrote
+        auto maps = std::make_shared<SurfaceMaps>();
+        maps->w = maps->h = 64;
+        const size_t n = 64 * 64;
+        maps->cover.assign(n, 0.0f), maps->ao.assign(n, 1.0f), maps->curvature.assign(n, 0.5f), maps->thickness.assign(n, 0.0f);
+        maps->position.assign(n, Vec3(0.0f)), maps->normal.assign(n, Vec3(0.0f, 0.0f, 1.0f));
+        MeshMapsResult rr;
+        rr.size = 64;
+        rr.covered.assign(n, 0);
+        rr.normal.assign(n, 0xFF8080FFu), rr.position.assign(n, 0xFF000000u), rr.curvature.assign(n, 0xFF808080u), rr.ao.assign(n, 0xFFFFFFFFu), rr.thickness.assign(n, 0xFF000000u);
+        for (size_t i = 0; i < n; i++) rr.covered[i] = (i % 64) >= 8 && (i % 64) < 30 && (i / 64) >= 8 && (i / 64) < 40 ? 1 : 0, maps->cover[i] = (float)rr.covered[i];
+        surface_maps_from_bake(rr, 64, *maps);
+        t->surface = true, t->seamless = false, t->maps = maps;
+        t->add("Noise"), t->add("Blur");
+        r49_set(*t, "L1 Radius", "3");
+        break;
+      }
+    }
+    return t;
+  };
+  auto same_bitmap = [](const Bitmap &a, const Bitmap &b) { return a.width == b.width && a.height == b.height && a.rgba8 == b.rgba8; };
+  test("procedural textures (round 456): the planes a layer doesn't write aren't allocated, and the images are byte for byte what the full-plane path makes, with every Normal / Roughness / Height switch on or off", [&] {
+    for (int which = 0; which < 13; which++)
+      for (int sw = 0; sw < 2; sw++) {
+        auto t = r456_make(which);
+        t->use_normal = t->use_roughness = t->use_height = sw == 0;
+        TexPlanes full, lean;
+        full.eager_all = true;
+        t->evaluate(full);
+        t->evaluate(lean);
+        CHECK(full.alpha.size() == full.size() && full.metal.size() == full.size() && full.emit.size() == full.size());
+        CHECK(lean.height == full.height && lean.rough == full.rough && lean.mask == full.mask && lean.albedo == full.albedo && lean.alpha_written == full.alpha_written);
+        bool planes_same = true;
+        for (size_t i = 0; i < full.size() && planes_same; i++)
+          planes_same = lean.alpha_at(i) == full.alpha[i] && lean.metal_at(i) == full.metal[i] && lean.emit_at(i) == full.emit[i];
+        CHECK(planes_same);
+        for (int k = 0; k < (int)TextureOutput::Count; k++) CHECK(same_bitmap(t->output(k, lean), t->output(k, full)));
+        procedural_texture_cache_clear();
+        for (int k = 0; k < (int)TextureOutput::Count; k++) {
+          const TexturePtr got = procedural_texture_output(*t, k);
+          Texture ref;
+          ref.build(t->output(k, full), k == (int)TextureOutput::Albedo);
+          bool same = got && got->levels.size() == ref.levels.size();
+          for (size_t l = 0; same && l < ref.levels.size(); l++) same = got->levels[l].w == ref.levels[l].w && got->levels[l].h == ref.levels[l].h && got->levels[l].px8 == ref.levels[l].px8;
+          CHECK(same);
+        }
+        /* What each stack writes decides the planes: the bricks nothing, the brushed metal metallic, the leaves cover, the Group's Fill both. */
+        if (which == 0) CHECK(lean.alpha.empty() && lean.metal.empty() && lean.emit.empty());
+        if (which == 1) CHECK(lean.alpha.empty() && !lean.metal.empty() && lean.emit.empty());
+        if (which == 2) CHECK(!lean.alpha.empty());
+        if (which == 4) CHECK(!lean.metal.empty() && !lean.emit.empty());
+        if (which == 8 || which == 12) CHECK(lean.alpha.empty() && lean.metal.empty() && lean.emit.empty());  // (a Tile or a Blur makes none)
+        if (which == 6 || which == 9) CHECK(!lean.metal.empty());
+      }
+  });
+  test("procedural textures (round 456): a texture without cover, metallic or emission layers holds fewer bytes in its planes, and procedural_texture_planes_bytes follows what the layers need", [&] {
+    auto bricks = r456_make(0), metal = r456_make(1), card = r456_make(2);
+    for (auto *t : {bricks.get(), metal.get(), card.get()}) t->width = t->height = 128;
+    TexPlanes full, lean_bricks, lean_metal;
+    full.eager_all = true;
+    bricks->evaluate(full);
+    bricks->evaluate(lean_bricks);
+    metal->evaluate(lean_metal);
+    const size_t n = lean_bricks.size();
+    CHECK(lean_bricks.bytes() < full.bytes() && lean_bricks.bytes() == n * 24 && full.bytes() == n * 44);
+    CHECK(lean_metal.bytes() == n * 28);
+    CHECK(procedural_texture_planes_bytes(*bricks, false) == n * 24 && procedural_texture_planes_bytes(*metal, false) == n * 28 && procedural_texture_planes_bytes(*card, false) >= n * 28);
+    const size_t with_images = procedural_texture_planes_bytes(*bricks, true);
+    bricks->use_normal = bricks->use_roughness = bricks->use_height = false;
+    CHECK(procedural_texture_planes_bytes(*bricks, true) < with_images);  // (the switched-off images aren't built)
+  });
+  test("procedural textures (round 456): an output that is switched off, or a Metallic / Emission output no layer writes, is made when something asks for it - the same image, at the same size", [&] {
+    auto t = r456_make(0);
+    t->live_shading = false;  // (the live snapshot is part of an entry's bytes)
+    t->use_normal = t->use_roughness = t->use_height = false;
+    procedural_texture_cache_clear();
+    const TexturePtr albedo = procedural_texture_output(*t, 0);
+    CHECK(albedo && procedural_texture_cache_bytes() == albedo->memory_bytes());  // (only the albedo is built)
+    const TexturePtr normal = procedural_texture_output(*t, 1);
+    CHECK(normal && normal->width == albedo->width && normal->height == albedo->height && normal->levels.size() == albedo->levels.size());
+    CHECK(procedural_texture_cache_bytes() == albedo->memory_bytes() + normal->memory_bytes());
+    CHECK(procedural_texture_output(*t, 1) == normal);  // (kept: the second ask is the same image)
+    const Vec4 flat = normal->sample(Vec2(0.3f, 0.6f), 0.0f, TexWrap::Repeat, TexFilter::Linear);
+    CHECK_NEAR(flat.x, 128.0f / 255.0f, 1e-6);
+    CHECK_NEAR(flat.z, 1.0f, 1e-6);
+    procedural_texture_cache_clear();
+  });
+  test("procedural textures (round 456): a rect evaluation that makes a plane for the first time equals the full-plane evaluation inside its rect", [&] {
+    ProceduralTexture t;
+    t.surface = true, t.seamless = false, t.width = t.height = 128;
+    t.add("Noise");
+    t.add("Fill");  // writes metallic: the plane first appears when the rect pass runs from here
+    t.layers[1]->targets = TargetMetallic;
+    t.add("Noise");
+    r49_set(t, "L2 Scale", "9");
+    t.layers[2]->targets = TargetMetallic;
+    TexPlanes full;
+    full.eager_all = true;
+    t.evaluate(full);
+    TexPlanes rect;
+    std::map<std::string, std::vector<float>> anchors;
+    t.evaluate_below(rect, 1, &anchors);
+    CHECK(rect.metal.empty());
+    evaluate_rect(t, 1, 32, 32, 64, 64, rect, anchors);
+    CHECK(!rect.metal.empty());
+    bool same = true;
+    for (int y = 32; y < 64; y++)
+      for (int x = 32; x < 64; x++) same = same && rect.metal_at((size_t)y * 128 + x) == full.metal[(size_t)y * 128 + x] && rect.height[(size_t)y * 128 + x] == full.height[(size_t)y * 128 + x];
+    CHECK(same);
+  });
+  test("procedural textures (round 456): the main thread's cost of resolving a surface's metallic map after a 4096 x 4096 rebuild (ms printed: before is the flat map made on the main thread, after is the worker's)", [&] {
+    ProceduralTexture t;
+    t.name = "R456 cost";
+    t.asset_path = "Assets/Textures/R456Cost.ptex";
+    t.width = t.height = 4096;
+    t.live_shading = false;
+    t.add("Noise");
+    TexPlanes planes;
+    t.evaluate(planes);
+    procedural_texture_cache_clear();
+    auto built = procedural_texture_cache_build(t, procedural_texture_cache_hash(t), planes, {});
+    procedural_texture_cache_store(t.asset_path, built);
+    ScopedTimer after;
+    const TexturePtr metallic = procedural_texture_output(t, (int)TextureOutput::Metallic);
+    const double after_ms = after.ms();
+    ScopedTimer before;
+    const TexturePtr emission = procedural_texture_output(t, (int)TextureOutput::Emission);  // (still made when asked for: what the metallic map cost before)
+    const double before_ms = before.ms();
+    std::printf("    main-thread resolve of the metallic map: %.1f ms before (made when asked), %.2f ms after (made on the worker)\n", before_ms, after_ms);
+    CHECK(metallic && emission && metallic->width == 4096 && emission->width == 4096);
+    procedural_texture_cache_clear();
+  });
+  test("procedural textures (round 456): a 4096 x 4096 surface's planes, before and after (bytes printed)", [&] {
+    ProceduralTexture t;
+    t.name = "R456 big";
+    t.width = t.height = 4096;
+    t.add("Noise");  // (writes the albedo, height and roughness: none of the optional planes)
+    size_t after = 0;
+    {
+      TexPlanes lean;
+      t.evaluate(lean);
+      after = lean.bytes();
+    }
+    size_t before = 0;
+    {
+      TexPlanes full;
+      full.eager_all = true;  // (what reset allocated before round 456)
+      full.reset(4096, 4096);
+      before = full.bytes();
+    }
+    std::printf("    4096 x 4096 planes: %.0f MB before, %.0f MB after (planes_bytes says %.0f MB)\n", before / 1e6, after / 1e6, procedural_texture_planes_bytes(t, false) / 1e6);
+    CHECK(after < before);
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -13677,4 +13880,5 @@ void run_assets_tests() {
   tests_round375();
   tests_round391();
   tests_round417();
+  tests_round456();
 }

@@ -1,0 +1,45 @@
+# The stack guarantee (the user, 2026-11-08): merging the newest open pull request merges every open pull request
+# below it. Every PR targets main, so this holds when each open PR's head commit is in the newest PR's history.
+# This job goes red on every open PR when one isn't; the fix is `FIX=1 bash tools/dev/stack_check.sh`
+# (it merges the missing branches into the newest PR's branch).
+name: stack
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, closed]
+
+concurrency:
+  group: stack
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  stack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The newest open PR carries every open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+          prs=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --base main --json number,headRefName \
+                --jq 'sort_by(.number) | .[] | "\(.number) \(.headRefName)"')
+          [ -z "$prs" ] && { echo "no open pull requests"; exit 0; }
+          top=$(echo "$prs" | tail -1); top_n=${top%% *}; top_b=${top#* }
+          bad=0
+          while read -r n b; do
+            [ "$n" = "$top_n" ] && continue
+            if git merge-base --is-ancestor "origin/$b" "origin/$top_b"; then
+              echo "#$n ($b): merges with #$top_n"
+            else
+              echo "::error::#$n ($b) is not in #$top_n's history - run FIX=1 bash tools/dev/stack_check.sh"
+              bad=1
+            fi
+          done <<< "$prs"
+          exit $bad

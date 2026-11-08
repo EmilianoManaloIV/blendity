@@ -59,6 +59,27 @@ surfaces reflect four baked reflection probes.
   nested keys like `m_Shadows/m_Type` inside their mapping. The scene remembers the `.unity` it was opened from
   (`unity` block in the scene file).
 
+## Amended (round 459, task 0435, 2026-11-08)
+- **The project's GraphicsSettings decides Lights Gamma when it is found:** opening a Unity scene reads
+  `m_LightsUseLinearIntensity` from the project's `ProjectSettings/GraphicsSettings.asset` (`unity_project_settings_file`:
+  the first one in a folder above the scene, the walk stopping at the project root - the first folder holding an Assets
+  folder - so another project's settings further up are never read); on (1) the lights take colour x intensity linear
+  (`Lights Gamma` off), off (0) in gamma as before. **Gamma stays the default when none is found** - Unity's own
+  default for the built-in pipeline, and what a package or a copy holding only Assets gives no word on; a binary
+  GraphicsSettings (no readable field) is said in the log and also keeps gamma. URP and HDRP force linear intensity
+  whatever the field says; Blendity reads Unity scenes as the built-in pipeline's, so the field is what counts here.
+- **Scenes saved before round 459** keep the Lights Gamma they were saved with; opening one whose project says otherwise
+  logs one line naming `unity lightsgamma off|on`, the saved value left alone. Live Link and `unity lightmaps` don't
+  read the setting again.
+- **A material left mid-stream** (the same round's second fix): a caller outside the views' stream scope - Generate
+  Lighting's freeze, a render - resolves it once more, synchronously on its own thread (the main thread for the freeze),
+  decoding what the stream hadn't yet.
+- **The console override:** `unity lightsgamma [on|off]` sets it for such a copy; `tools/unity_compare.py` passes the Unity
+  project copy's own setting to Blendity's bake and renders.
+- **Why:** SideRail's project has the setting on. Taken in gamma, its lights of intensity 1.5-5 shone 1.4-7x too bright -
+  the lightmap pages 4.85x Unity's light in the side tunnel, 3.20x in the main tunnel (MAE 20.47, SSIM 0.545); taken
+  linear 2.34x / 2.24x (MAE 10.12, SSIM 0.677). The round-401 rule assumed every project left Unity's default.
+
 ## Amended (round 405, task 0382)
 - **Unity's ACES** is a view transform of its own, `ViewTransform::AcesFull` ("ACES (full fit, Unity's)": the curve of
   Hill's fit of the RRT + ODT, no exposure scale); the PPv2 import picks it in place of Blendity's own ACES. Its saved

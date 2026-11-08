@@ -23,6 +23,7 @@ namespace bl {
 
 class PathTracer;
 struct BakeLight;
+struct Environment;
 
 struct ProbeCube {
   std::array<Vec3, 6> bounce{};  // +X -X +Y -Y +Z -Z: irradiance / pi from geometry
@@ -58,6 +59,18 @@ struct ProbeVolumeData {
    * probe; when present it replaces the cubes' bounce for baked shading (the sky shares stay the cubes'). Empty: the
    * cubes alone (an old file, a live update). */
   std::vector<ProbeSH> sh;
+  /* Round 453: the SH hold the sky's light too (the bake added the rays that left); baked shading then takes no sky share
+   * from the cubes. False for data from before it, whose SH hold only the light from geometry. */
+  bool sky_in_sh = false;
+  /* Round 453: the world's irradiance / pi at the six axes when the SH were baked (Environment::irradiance): a changed
+   * sky then adds (its light now - baked_sky_at(n)) x the probe's sky share to the SH's, so it relights without a
+   * re-bake and an unchanged one adds nothing. Not kept (false): the SH's sky stays as baked, as the first 453 files. */
+  bool has_baked_sky = false;
+  std::array<Vec3, 6> baked_sky{};
+  /* The sky's change since the bake at normal n, like with like: the n-squared blend of (the world's irradiance now at each
+   * axis - the one baked there). Both sides are blends of the same six axes, so an unchanged sky is exactly zero (the
+   * true irradiance at an off-axis n is not the blend of the axes'). Zero without a baked sky. */
+  Vec3 sky_change(const Environment &now, Vec3 n) const;
   size_t unity_tetra_inside = 0;  // (round 442: of a volume made from Unity's probes, those inside their tetrahedra)
   std::vector<uint8_t> live_ok;
   uint64_t scene_key = 0;          // the bake's (as the lightmaps')
@@ -67,7 +80,8 @@ struct ProbeVolumeData {
   /* Trilinear over the brick's valid probes at p (already biased), each cube evaluated at n. False if p
    * is outside or no valid probe is near. `hint` (optional, per caller and thread): the brick the last
    * sample used; a point inside it skips the octree (neighbouring pixels mostly share a brick). */
-  bool sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction = true, int *hint = nullptr) const;
+  bool sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction = true, int *hint = nullptr,
+              const Environment *sky_now = nullptr, const std::array<float, 3> *window = nullptr) const;  // (round 455: `window` - the SH's bands scaled, ProbeFrame::sh_window; null none) (round 453: `sky_now` - the world as shaded now - relights SH that hold the sky; null: they stay as baked)
   bool save(const std::string &path, std::string &error) const;
   bool load(const std::string &path, std::string &error);
 };
@@ -85,7 +99,14 @@ void probe_validate(ProbeVolumeData &d, const PathTracer &pt, int rays);
  * lights' direct light, into each probe's baked cube; `count` probes from `start` (the editor bakes in
  * slices); the slice that finishes the last probe also dilates (probe_dilate). `indirect_intensity` as the lightmaps'. */
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start = 0,
-                size_t count = SIZE_MAX, float indirect_intensity = 1.0f, int gpu_device = -1, std::string *gpu_error = nullptr);
+                size_t count = SIZE_MAX, float indirect_intensity = 1.0f, int gpu_device = -1, std::string *gpu_error = nullptr,
+                const Environment *env = nullptr);  // (round 453: `env` - the world the probes' SH are baked under - is kept for a sky change)
+/* Round 455 (ADR 0119): a volume over probes placed by hand (a Light Probe Group's, Unity's lighting file's), as Unity
+ * interpolates them: a grid placed round the points, each of its probes taking the four of the tetrahedron it lies in by
+ * barycentric weights, or the nearest four outside the points' hull. `sh` (or empty, the cubes alone) and `cubes` are one
+ * per point, in the world's axes; the sky fields (sky_in_sh and the baked sky) are the caller's. */
+void probe_volume_from_points(const std::vector<Vec3> &points, const std::vector<ProbeSH> &sh, const std::vector<ProbeCube> &cubes,
+                              ProbeVolumeData &out);
 /* Invalid probes take their valid neighbours' light. */
 void probe_dilate(ProbeVolumeData &d);
 /* Realtime: up to `budget` probes from `start`, with voxel GI (six hemisphere gathers); returns the
@@ -106,6 +127,9 @@ struct ProbeFrame {
   /* One sample per 2 x 2 pixels on the same triangle (probe light changes slowly over a surface): a
    * quarter of the cost. Off: every pixel samples (the reference the tests compare against). */
   bool quad_reuse = true;
+  /* Round 455 (ADR 0119): the window the SH are evaluated under (window_factors; 1, 1, 1 none). Carried by value in the frame,
+   * so a render job keeps its own while the main thread sets the next. */
+  std::array<float, 3> sh_window = {1.0f, 1.0f, 1.0f};
 };
 
 }  // namespace bl

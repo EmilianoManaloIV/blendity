@@ -1223,7 +1223,7 @@ struct PlaneCopy {
   PlaneCopy(const TexPlanes &p, bool wh, bool wr, bool wa) {
     if (wh) h = p.height;
     if (wr) r = p.rough;
-    if (wa) a = p.albedo, al = p.alpha;  // (the cover moves with the colour, task 0150)
+    if (wa) a = p.albedo, al = p.alpha;  // (the cover moves with the colour, task 0150; round 456: an absent cover plane is all ones and stays so)
   }
 };
 
@@ -1248,7 +1248,8 @@ struct WarpLayer : TextureLayerBase<WarpLayer> {
       const size_t j = (size_t)p.wrap_y((int)std::lround(y + dy * p.h)) * p.w + p.wrap_x((int)std::lround(x + dx * p.w));
       if (wh) p.height[i] = lerpf(p.height[i], src.h[j], k);
       if (wr) p.rough[i] = lerpf(p.rough[i], src.r[j], k);
-      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k), p.alpha[i] = lerpf(p.alpha[i], src.al[j], k);
+      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k);
+      if (wa && !src.al.empty()) p.alpha[i] = lerpf(p.alpha[i], src.al[j], k);
     });
   }
   /* At a point: the layers below read at the pushed point itself (the planes take the nearest texel). */
@@ -1282,7 +1283,8 @@ struct TileLayer : TextureLayerBase<TileLayer> {
       const size_t j = (size_t)p.wrap_y((int)std::floor((y + 0.5f) * ny)) * p.w + p.wrap_x((int)std::floor((x + 0.5f) * nx));
       if (wh) p.height[i] = lerpf(p.height[i], src.h[j], k);
       if (wr) p.rough[i] = lerpf(p.rough[i], src.r[j], k);
-      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k), p.alpha[i] = lerpf(p.alpha[i], src.al[j], k);
+      if (wa) p.albedo[i] = lerp(p.albedo[i], src.a[j], k);
+      if (wa && !src.al.empty()) p.alpha[i] = lerpf(p.alpha[i], src.al[j], k);
     });
   }
   bool remap(float &u, float &v, const LayerContext &) const override {
@@ -1481,6 +1483,7 @@ struct MapRangeLayer : TextureLayerBase<MapRangeLayer> {
     if (clamp) t = clampf(t, 0.0f, 1.0f);
     return fin(to_min, 0.0f) + t * (fin(to_max, 1.0f) - fin(to_min, 0.0f));
   }
+  int planes_read() const override { return cnt(plane, 0, 4) == 2 ? PlaneMetal : 0; }  // (round 456)
   void apply(TexPlanes &p, const LayerContext &) const override { convert_plane(*this, p, cnt(plane, 0, 4), [&](float v, size_t) { return map(v); }); }
   void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override { convert_point(*this, p, cnt(plane, 0, 4), [&](float v) { return map(v); }); }
 };
@@ -1497,6 +1500,7 @@ struct ClampLayer : TextureLayerBase<ClampLayer> {
   }
   bool is_generator() const override { return false; }
   float c(float v) const { return std::min(std::max(v, fin(lo, 0.0f)), fin(hi, 1.0f)); }  // (Min above Max gives Max, as Blender's)
+  int planes_read() const override { return cnt(plane, 0, 4) == 2 ? PlaneMetal : 0; }  // (round 456)
   void apply(TexPlanes &p, const LayerContext &) const override { convert_plane(*this, p, cnt(plane, 0, 4), [&](float v, size_t) { return c(v); }); }
   void apply_point(TexPoint &p, float, float, const LayerContext &, const LayerAux *) const override { convert_point(*this, p, cnt(plane, 0, 4), [&](float v) { return c(v); }); }
 };
@@ -1561,6 +1565,7 @@ struct MathLayer : TextureLayerBase<MathLayer> {
       default: return fin(value, 0.5f);
     }
   }
+  int planes_read() const override { return cnt(plane, 0, 4) == 2 || operand == 3 ? PlaneMetal : 0; }  // (round 456: Metallic as the plane or the second value)
   void apply(TexPlanes &p, const LayerContext &) const override {
     const int o = cnt(op, 0, kMathOpCount - 1);
     convert_plane(*this, p, cnt(plane, 0, 4), [&](float v, size_t i) { return fin(math_op(o, v, b_at(p, i), fin(smooth, 0.1f)), 0.0f); });

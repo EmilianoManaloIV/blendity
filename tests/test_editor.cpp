@@ -3996,7 +3996,7 @@ static void tests_round392() {
     TexPlanes p;
     pt->evaluate(p);
     const int metal = px ? px[0] : -1, smooth = px ? px[1] : -1;
-    const int want_metal = (int)std::lround(p.metal[0] * 255.0f), want_smooth = (int)std::lround((1.0f - p.rough[0]) * 255.0f);
+    const int want_metal = (int)std::lround(p.metal_at(0) * 255.0f), want_smooth = (int)std::lround((1.0f - p.rough[0]) * 255.0f);
     std::printf("    Poiyomi's packed map: R %d (metallic %d), G %d (smoothness %d), B %d, A %d\n", metal, want_metal, smooth, want_smooth, px ? px[2] : -1, px ? px[3] : -1);
     CHECK(px && std::abs(metal - want_metal) <= 1 && std::abs(smooth - want_smooth) <= 1 && px[2] == 255 && px[3] == 255);
     CHECK(export_texture_set(*pt, "liltoon", dir, files, &why) && files.size() == 5 && fs::exists(fs::join(dir, pt->name + "_SmoothnessTex.png")) &&
@@ -9095,6 +9095,373 @@ static void tests_round422() {
   });
 }
 
+/* ---------------------------------------------------------------- round 447: textures stream in */
+static void tests_round447() {
+  test("textures stream in (round 447): inside a stream scope a material's uncached image resolves as missing and is noted, not decoded; once loaded it resolves; outside the scope it loads as before", [] {
+    const std::string tex = fs::join(test_dir(), "r447_stream.png");
+    std::vector<uint32_t> px(32 * 32, 0xFF2080E0u);
+    CHECK(write_png(tex, px.data(), 32, 32, 32));
+    MaterialPtr m = make_material("R447", {0.5f, 0.5f, 0.5f});
+    m->base_map.path = tex;
+    texture_cache_clear();
+    std::vector<std::pair<std::string, bool>> misses;
+    (void)take_texture_stream_misses(misses);  // (whatever an earlier test left)
+    bool null_in_scope = false, still_missing = false;
+    {
+      TextureStreamScope on(true);
+      null_in_scope = m->textures().base == nullptr;
+      still_missing = m->textures().base == nullptr;  // (resolved again: still not in the cache)
+    }
+    const size_t noted = take_texture_stream_misses(misses);
+    const bool right_file = noted == 1 && misses[0].first.find("r447_stream.png") != std::string::npos && misses[0].second;
+    const bool cached_before = texture_cached(misses.empty() ? tex : misses[0].first, true) != nullptr;
+    for (const auto &f : misses) (void)texture_load(f.first, f.second);  // (the worker's part)
+    invalidate_material_textures();
+    bool there = false;
+    {
+      TextureStreamScope on(true);
+      there = m->textures().base != nullptr;
+    }
+    const size_t noted_after = take_texture_stream_misses(misses);
+    MaterialPtr m2 = make_material("R447 b", {0.5f, 0.5f, 0.5f});
+    m2->base_map.path = tex;
+    texture_cache_clear();
+    const bool outside_loads = m2->textures().base != nullptr;  // (no scope: decoded in the call, as before)
+    std::printf("    in the scope: missing %d (again %d), %zu noted, cached before the load %d; after it: %d, %zu noted; outside: %d\n",
+                (int)null_in_scope, (int)still_missing, noted, (int)cached_before, (int)there, noted_after, (int)outside_loads);
+    CHECK(null_in_scope && still_missing);
+    CHECK(right_file);
+    CHECK(!cached_before);
+    CHECK(there);
+    CHECK(noted_after == 0);
+    CHECK(outside_loads);
+  });
+  test("textures stream in (round 447): a file the stream failed on resolves as missing - no more notes, one cached resolve - until the file changes, and then it is tried again", [] {
+    const std::string gone = fs::join(test_dir(), "r447_gone.png");
+    std::remove(gone.c_str());
+    MaterialPtr m = make_material("R447 gone", {0.5f, 0.5f, 0.5f});
+    m->base_map.path = gone;
+    std::vector<std::pair<std::string, bool>> misses;
+    (void)take_texture_stream_misses(misses);
+    invalidate_material_textures();
+    {
+      TextureStreamScope on(true);
+      (void)m->textures();
+    }
+    const size_t first = take_texture_stream_misses(misses);
+    texture_stream_set_failed(misses, std::vector<int64_t>(misses.size(), texture_file_mtime(gone)));
+    refresh_material_textures();
+    const Material::Resolved *r1 = nullptr, *r2 = nullptr;
+    const uint64_t resolves0 = material_resolve_count();
+    {
+      TextureStreamScope on(true);
+      r1 = &m->textures();
+      r2 = &m->textures();
+    }
+    const uint64_t resolves = material_resolve_count() - resolves0;
+    const size_t after_failed = take_texture_stream_misses(misses);
+    invalidate_material_textures();  // (a paint stroke's every frame: the failure holds)
+    {
+      TextureStreamScope on(true);
+      (void)m->textures();
+    }
+    const size_t after_invalidate = take_texture_stream_misses(misses);
+    std::vector<uint32_t> px(8 * 8, 0xFF2080E0u);
+    CHECK(write_png(gone, px.data(), 8, 8, 8));  // (the file is made: its mtime differs)
+    invalidate_material_textures();
+    {
+      TextureStreamScope on(true);
+      (void)m->textures();
+    }
+    const size_t retried = take_texture_stream_misses(misses);
+    std::printf("    noted %zu; once failed: %zu note(s), %llu resolve(s) for two calls, same object %d; after an invalidate: %zu; the file made: %zu\n", first,
+                after_failed, (unsigned long long)resolves, (int)(r1 == r2), after_invalidate, retried);
+    CHECK(first == 1);
+    CHECK(after_failed == 0);
+    CHECK(resolves == 1);
+    CHECK(r1 == r2);
+    CHECK(after_invalidate == 0);
+    CHECK(retried == 1);
+  });
+  test("textures stream in (round 447): while a file is loading, a material resolves once a generation - two textures() calls give the same resolved object and resolve once (the CPU's workers call it in parallel); a landed batch resolves it again", [] {
+    const std::string tex = fs::join(test_dir(), "r447_once.png");
+    std::vector<uint32_t> px(16 * 16, 0xFF2080E0u);
+    CHECK(write_png(tex, px.data(), 16, 16, 16));
+    MaterialPtr m = make_material("R447 once", {0.5f, 0.5f, 0.5f});
+    m->base_map.path = tex;
+    texture_cache_clear();
+    std::vector<std::pair<std::string, bool>> misses;
+    (void)take_texture_stream_misses(misses);
+    invalidate_material_textures();
+    const Material::Resolved *a = nullptr, *b = nullptr;
+    const uint64_t r0 = material_resolve_count();
+    {
+      TextureStreamScope on(true);
+      a = &m->textures();
+      b = &m->textures();
+    }
+    const uint64_t resolves = material_resolve_count() - r0;
+    const bool missing = a->base == nullptr;
+    const size_t noted = take_texture_stream_misses(misses);
+    for (const auto &f : misses) (void)texture_load(f.first, f.second);  // (the worker's part)
+    refresh_material_textures();
+    bool landed = false;
+    {
+      TextureStreamScope on(true);
+      landed = m->textures().base != nullptr;
+    }
+    std::printf("    two calls while loading: %llu resolve(s), same object %d, map missing %d, %zu noted; after the batch landed: map %d\n",
+                (unsigned long long)resolves, (int)(a == b), (int)missing, noted, (int)landed);
+    CHECK(a == b);
+    CHECK(resolves == 1);
+    CHECK(missing && noted == 1);
+    CHECK(landed);
+  });
+  test("perf frames N (round 447): a headless script steps that many frames; perf wait also waits for the views' textures to stream in (skipped without a GPU for the second half)", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    const uint64_t before = ed.frame_profile_totals().frames;
+    ed.command("perf frames 3");
+    CHECK(ed.frame_profile_totals().frames - before == 3);
+    ed.command("perf frames 0");
+    CHECK(ed.frame_profile_totals().frames - before == 3);
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: wait half skipped\n");
+      return;
+    }
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+    CHECK(mr != nullptr);
+    if (!mr) return;
+    const std::string tex = fs::join(test_dir(), "r447_wait.png");
+    std::vector<uint32_t> px(256 * 256, 0xFF2080E0u);
+    CHECK(write_png(tex, px.data(), 256, 256, 256));
+    MaterialPtr m = make_material("R447 wait", {0.8f, 0.8f, 0.8f});
+    m->base_map.path = tex;
+    mr->materials = {m};
+    texture_cache_clear();
+    ed.mark_changed_for_test("waited texture");
+    ed.command("perf frames 2");
+    ed.command("perf wait");
+    const bool cached = texture_cached(tex, true) != nullptr;
+    std::printf("    after perf wait: the texture is cached %d\n", (int)cached);
+    CHECK(cached);
+  });
+  test("textures stream in (round 447): a headless editor that asked for workers draws its first frame on the card without decoding a new scene's images in it, loads them on a worker and then draws them; a file that won't decode is tried once (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(320, 180);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    std::vector<std::string> made;
+    for (int i = 0; i < 6; i++) {
+      ed.command(i % 2 ? "create Sphere" : "create Cube");
+      GameObject *g = ed.selected_object();
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      g->set_local_position({-3.0f + 1.2f * i, 0.5f, 0.0f});
+      const std::string tex = fs::join(test_dir(), strprintf("r447_view_%d.png", i));
+      std::vector<uint32_t> px(512 * 512, 0xFF000000u | (uint32_t)(40 * i) << 8 | 0xC0u);
+      CHECK(write_png(tex, px.data(), 512, 512, 512));
+      MaterialPtr m = make_material(strprintf("R447 view %d", i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = i == 5 ? fs::join(test_dir(), "r447_missing.png") : tex;
+      mr->materials = {m};
+      made.push_back(tex);
+    }
+    CHECK(made.size() == 6);
+    texture_cache_clear();
+    ed.mark_changed_for_test("streamed textures");
+    ScopedTimer first;
+    ed.step_frame_headless();
+    const double first_ms = first.ms();
+    const bool decoded_in_frame = texture_cached(made[0], true) != nullptr || texture_cached(made[4], true) != nullptr;  // (the poll runs before the views draw: nothing is loading yet)
+    int frames = 1;
+    bool loading = false;
+    for (; frames < 4 && !loading; frames++) {
+      ed.step_frame_headless();
+      loading = ed.texture_streaming_for_test() || ed.streamed_files_for_test() > 0;
+    }
+    for (; frames < 4000 && (ed.texture_streaming_for_test() || ed.streamed_files_for_test() < 6); frames++) ed.step_frame_headless();
+    for (int k = 0; k < 4; k++) ed.step_frame_headless();
+    const uint64_t streamed = ed.streamed_files_for_test();
+    const bool all_cached = texture_cached(made[0], true) && texture_cached(made[4], true);
+    for (int k = 0; k < 30; k++) ed.step_frame_headless();  // (the missing file: not tried again)
+    std::printf("    first frame %.1f ms, images decoded in it %d, a stream started by the next frames %d; %llu file(s) streamed in %d frame(s); five cached %d; "
+                "after 30 more frames %llu\n",
+                first_ms, (int)decoded_in_frame, (int)loading, (unsigned long long)streamed, frames, (int)all_cached, (unsigned long long)ed.streamed_files_for_test());
+    CHECK(!decoded_in_frame);
+    CHECK(loading);
+    CHECK(streamed == 6);  // (five images and the one that won't decode, tried once)
+    CHECK(all_cached);
+    CHECK(ed.streamed_files_for_test() == 6);
+  });
+}
+
+/* ---------------------------------------------------------------- round 455: Light Probe Groups in the Scene view, Remove Ringing (task 0431) */
+static void tests_round455() {
+  /* A group of four probes in a plus, at the world's (0, 1, 0), the camera above it. */
+  auto make_group = [](Editor &ed, const char *name, Vec3 at, std::vector<Vec3> probes) {
+    ed.command("create Light Probe Group");
+    GameObject *g = ed.scene().find_by_name("Light Probe Group");
+    if (!g) return (GameObject *)nullptr;
+    g->name = name;
+    g->probe_group()->positions = probes;
+    g->set_world_position(at);
+    ed.mark_changed_for_test("R455 group");
+    return g;
+  };
+  const std::vector<Vec3> plus = {Vec3(-3, 0, 0), Vec3(0, 0, -3), Vec3(3, 0, 0), Vec3(0, 0, 3)};
+  test("Light Probe Groups in the Scene view (round 455): select the group, click a probe's dot, drag the gizmo's X arrow - only that probe moves, along local X - and Ctrl+Z restores it; Add Probe, Select All and Delete Selected change the count, each with undo", [plus, make_group] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("camera 0 20 6 0 1 0");
+    GameObject *g = make_group(ed, "Probes", Vec3(0, 1, 0), plus);
+    CHECK(g && g->probe_group());
+    if (!g || !g->probe_group()) return;
+    ed.command("select Probes");
+    ed.command("tool move");
+    r34_steps(ed, 4);
+    LightProbeGroupComponent *pg = g->probe_group();
+    const std::vector<Vec3> before = pg->positions;
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point(before[2]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{2});
+    r34_gizmo_drag_x(ed, g->world_matrix().point(before[2]), 60);
+    r34_steps(ed, 2);
+    g = ed.scene().find_by_name("Probes");
+    pg = g ? g->probe_group() : nullptr;
+    CHECK(pg && pg->positions.size() == 4);
+    if (!pg || pg->positions.size() != 4) return;
+    const Vec3 moved = pg->positions[2];
+    std::printf("    probe 2 moved by (%.3f %.3f %.3f)\n", moved.x - before[2].x, moved.y - before[2].y, moved.z - before[2].z);
+    CHECK(moved.x > before[2].x + 0.05f && std::fabs(moved.y - before[2].y) < 1e-4f && std::fabs(moved.z - before[2].z) < 1e-4f);
+    for (size_t i : {0u, 1u, 3u}) CHECK(pg->positions[i].x == before[i].x && pg->positions[i].y == before[i].y && pg->positions[i].z == before[i].z);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    g = ed.scene().find_by_name("Probes");
+    pg = g ? g->probe_group() : nullptr;
+    CHECK(pg && pg->positions.size() == 4 && pg->positions[2].x == before[2].x && pg->positions[2].y == before[2].y && pg->positions[2].z == before[2].z);
+    if (!pg) return;
+    /* The Inspector's buttons, by real clicks. */
+    auto click = [&](const char *label) {
+      r34_steps(ed, 2);
+      Recti b;
+      if (!ed.button_rect_for_test(label, b)) {
+        std::printf("    no button '%s'\n", label);
+        return false;
+      }
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      r34_steps(ed, 2);
+      return true;
+    };
+    auto count = [&] {
+      GameObject *o = ed.scene().find_by_name("Probes");
+      return o && o->probe_group() ? o->probe_group()->positions.size() : (size_t)0;
+    };
+    CHECK(click("Add Probe") && count() == 5);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    CHECK(count() == 4);
+    CHECK(click("Select All") && ed.points_selected_for_test().size() == 4);
+    CHECK(click("Delete Selected") && count() == 0);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    CHECK(count() == 4);
+    /* One probe selected by a click, then Delete Selected removes that one. */
+    CHECK(ed.project_to_window(ed.scene().find_by_name("Probes")->world_matrix().point(before[0]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{0});
+    CHECK(click("Delete Selected") && count() == 3);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    CHECK(count() == 4);
+  });
+  test("Light Probe Groups in the Scene view (round 455): the probes of every group are dots (more in the view while the layer is on), a click on a probe of a group that isn't selected selects that group and the probe, and the Points layer off hides and unpicks them", [plus, make_group] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("camera 0 80 18 0 1 0");
+    GameObject *a = make_group(ed, "GroupA", Vec3(0, 1, 0), plus);
+    GameObject *b = make_group(ed, "GroupB", Vec3(0, 1, -6), {Vec3(-2, 0, 0), Vec3(2, 0, 0)});
+    CHECK(a && b);
+    if (!a || !b) return;
+    ed.command("select GroupA");
+    r34_steps(ed, 4);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(b->world_matrix().point(b->probe_group()->positions[1]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    std::printf("    after the click: active %s, points %zu\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "none", ed.points_selected_for_test().size());
+    CHECK(ed.active_object_for_test() == b && ed.points_selected_for_test() == std::vector<int>{1});
+    /* The `points` command works for groups: add, move, select, delete. */
+    ed.command("points add GroupB 0 0 5");
+    CHECK(b->probe_group()->positions.size() == 3 && b->probe_group()->positions[2].z == 5.0f);
+    ed.command("points move GroupB 2 1 2 3");
+    CHECK(b->probe_group()->positions[2].x == 1.0f && b->probe_group()->positions[2].y == 2.0f && b->probe_group()->positions[2].z == 3.0f);
+    ed.command("points select GroupB 0 1");
+    CHECK(ed.points_selected_for_test() == (std::vector<int>{0, 1}));
+    /* A group under its default name, which has spaces: quoted. */
+    ed.command("create Light Probe Group");
+    GameObject *dflt = ed.scene().find_by_name("Light Probe Group");
+    CHECK(dflt && dflt->probe_group() && dflt->probe_group()->positions.size() == 8);
+    ed.command("points add \"Light Probe Group\" 1 2 3");
+    dflt = ed.scene().find_by_name("Light Probe Group");
+    CHECK(dflt && dflt->probe_group()->positions.size() == 9 && dflt->probe_group()->positions[8].z == 3.0f);
+    ed.command("points delete GroupB 2");
+    CHECK(b->probe_group()->positions.size() == 2);
+    /* A disabled group's dots are not picked. */
+    ed.command("select GroupA");
+    r34_steps(ed, 2);
+    b->probe_group()->enabled = false;
+    ed.mark_changed_for_test("R455 off");
+    r34_steps(ed, 2);
+    CHECK(ed.project_to_window(b->world_matrix().point(b->probe_group()->positions[1]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.active_object_for_test() != b);
+  });
+  test("Remove Ringing (round 455): a bright Baked lamp beside a probe-lit sphere - Off, then Lanczos - redraws the Scene view without a re-bake (the lighting stays current); Off again is the first picture exactly", [] {
+    Editor ed;
+    r35_open(ed);
+    ed.command("camera 0 20 8 0 1 0");
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *ball = r35_add(ed, "Sphere", "Ball", {0, 1.2f, 0}, {1.6f, 1.6f, 1.6f}, Vec3(0.8f), false);
+    GameObject *lamp = r35_add(ed, "Sphere", "Lamp", {1.5f, 2.2f, 0.5f}, {0.15f, 0.15f, 0.15f}, Vec3(1.0f), false);
+    Light *l = lamp->add<Light>();
+    l->type = 1, l->mode = 2, l->range = 8.0f, l->intensity = 40.0f, l->shadows = false;
+    GameObject *vol = ed.scene().create("Probes");
+    vol->add<ProbeVolume>();
+    ed.commit_change("r455 setup");
+    (void)ball;
+    r35_bake(ed);
+    CHECK(!ed.probes_for_test().empty() && !ed.lighting_out_of_date_for_test());
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> off = r35_scene_view(ed);
+    ed.command("set Lighting.ProbeRemoveRinging 2");
+    ed.command("set Lighting.ProbeRingingWidth 4");
+    CHECK(ed.scene().lighting.probe_dering == 2 && ed.scene().lighting.probe_dering_width == 4.0f);
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> lanczos = r35_scene_view(ed);
+    const size_t differ = r35_diff_count(off, lanczos, 0);
+    std::printf("    Lanczos changed %zu of %zu pixels; lighting out of date: %d; window %.3f %.3f\n", differ, off.size(), (int)ed.lighting_out_of_date_for_test(),
+                (double)ed.probe_window_for_test()[1], (double)ed.probe_window_for_test()[2]);
+    CHECK(differ > 50 && !ed.lighting_out_of_date_for_test());
+    CHECK(std::fabs(ed.probe_window_for_test()[1] - 0.900f) < 0.001f && std::fabs(ed.probe_window_for_test()[2] - 0.637f) < 0.001f);
+    ed.command("set Lighting.ProbeRemoveRinging 0");
+    r34_steps(ed, 4);
+    CHECK(r35_diff_count(off, r35_scene_view(ed), 0) == 0 && ed.probe_window_for_test()[1] == 1.0f && ed.probe_window_for_test()[2] == 1.0f);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -9177,5 +9544,7 @@ void run_editor_tests() {
   tests_round436_review();
   tests_round437();
   tests_round445();
+  tests_round447();
+  tests_round455();
   coverage_tests();
 }

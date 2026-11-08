@@ -39,11 +39,18 @@ struct ProbeSH {
     basis(dir, y);
     for (int k = 0; k < 9; k++) c[(size_t)k] += col * (y[k] * band(k) * kPi);
   }
-  Vec3 eval(Vec3 n) const {
+  /* The band of coefficient k (0, 1 or 2): which of a window's three factors scales it. */
+  static int band_of(int k) { return k == 0 ? 0 : k < 4 ? 1 : 2; }
+  /* The sum before the clamp, bands 1 and 2 scaled by `win` (round 455, ADR 0119: window_factors; 1, 1, 1 is none). */
+  Vec3 eval_raw(Vec3 n, const std::array<float, 3> &win = {1.0f, 1.0f, 1.0f}) const {
     float y[9];
     basis(n, y);
     Vec3 o(0.0f);
-    for (int k = 0; k < 9; k++) o += c[(size_t)k] * y[k];
+    for (int k = 0; k < 9; k++) o += c[(size_t)k] * (y[k] * win[(size_t)band_of(k)]);
+    return o;
+  }
+  Vec3 eval(Vec3 n, const std::array<float, 3> &win = {1.0f, 1.0f, 1.0f}) const {
+    const Vec3 o = eval_raw(n, win);
     return Vec3(std::max(0.0f, o.x), std::max(0.0f, o.y), std::max(0.0f, o.z));
   }
   ProbeSH &operator+=(const ProbeSH &o) {
@@ -56,6 +63,20 @@ struct ProbeSH {
     return r;
   }
 };
+
+/* Round 455 (ADR 0119): the window that tames L2's ringing (Sloan, "Stupid Spherical Harmonics Tricks"): band 0 kept, bands 1
+ * and 2 times h1, h2. kind 1 Hanning h_l = (1 + cos(pi l / w)) / 2, kind 2 Lanczos h_l = sin(pi l / w) / (pi l / w); w is the
+ * window's width in bands (3 to 16; w = 4: 1, 0.854, 0.5 and 1, 0.900, 0.637). Any other kind, or a width that is not a
+ * number, gives no window. */
+inline std::array<float, 3> window_factors(int kind, float w) {
+  std::array<float, 3> h = {1.0f, 1.0f, 1.0f};
+  if ((kind != 1 && kind != 2) || !(w >= 1.0f && w <= 64.0f)) return h;
+  for (int l = 1; l <= 2; l++) {
+    const float a = kPi * (float)l / w;
+    h[(size_t)l] = kind == 1 ? (1.0f + std::cos(a)) * 0.5f : std::sin(a) / a;
+  }
+  return h;
+}
 
 /* Round 442: the 26 directions Unity's probes are read along (the cube's 6 faces, 12 edges, 8 corners, in this order -
  * the editor script writes them the same way): enough to fit the nine coefficients of each colour exactly. */

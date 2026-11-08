@@ -180,12 +180,15 @@ void surface_maps_from_bake(const MeshMapsResult &r, int size, SurfaceMaps &out)
 void dilate_uncovered(TexPlanes &p, const SurfaceMaps &m) {
   if (m.empty() || m.nearest.size() != p.size() || m.w != p.w || m.h != p.h) return;
   const int x0 = p.x_begin(), x1 = p.x_end(), y0 = p.y_begin(), y1 = p.y_end();
+  const bool metal = p.metal.size() == p.size(), emit = p.emit.size() == p.size();  // (round 456: planes no layer wrote aren't there)
   JobSystem::global().parallel_for(y1 - y0, 16, [&](int64_t a, int64_t b) {
     for (int64_t y = y0 + a; y < y0 + b; y++)
       for (int x = x0; x < x1; x++) {
         const size_t i = (size_t)y * p.w + x, j = (size_t)m.nearest[i];
         if (j == i) continue;
-        p.height[i] = p.height[j], p.rough[i] = p.rough[j], p.albedo[i] = p.albedo[j], p.metal[i] = p.metal[j], p.emit[i] = p.emit[j];
+        p.height[i] = p.height[j], p.rough[i] = p.rough[j], p.albedo[i] = p.albedo[j];
+        if (metal) p.metal[i] = p.metal[j];
+        if (emit) p.emit[i] = p.emit[j];
       }
   });
 }
@@ -220,6 +223,7 @@ void evaluate_own_mask(const TextureLayer &l, const TexPlanes &p, const LayerCon
     std::unique_ptr<TextureLayer> eff = e->clone();
     make_mask_effect(*eff);
     eff->mask_layers.clear();  // (an effect's own mask is not a thing here: one level)
+    mp.ensure_planes(eff->planes_needed());  // (round 456: a Math reading Metallic needs the plane)
     eff->apply(mp, mc);
   }
   own = mp.height;
@@ -258,6 +262,7 @@ void apply_layer_range(const TextureLayerList &layers, size_t from, size_t to, T
     p.layer_mask = masked ? &own : nullptr;
     if (c.maps && !c.maps->empty() && l.halo_texels(c) > 0) dilate_uncovered(p, *c.maps);  // (a filter about to read past the borders)
     if (aux && i < aux->size() && l.needs_aux()) l.make_aux(p, lc, (*aux)[i]);
+    p.ensure_planes(l.planes_needed());  // (round 456: the optional planes this layer reads or writes)
     l.apply(p, lc);
     p.layer_mask = nullptr;
     if (!l.name.empty()) anchors.emplace(l.name, masked ? own : std::vector<float>());  // (the first of a name wins; an empty plane means all ones)

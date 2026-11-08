@@ -7,6 +7,8 @@
 #include "../image/image.h"
 #include "../scene/mesh.h"
 #include "../scene/uv.h"
+#include "canvas.h"
+#include "light_pick.h"
 #include "pathtracer.h"
 
 #include <algorithm>
@@ -484,6 +486,18 @@ void Lightmapper::stitch_seams(Lightmap &lm, const std::vector<std::pair<uint32_
     }
 }
 
+std::vector<RenderLight> bounce_lights(const std::vector<BakeLight> &lights) {
+  std::vector<RenderLight> out;
+  for (const BakeLight &l : lights) {
+    if (l.mode == 0) continue;
+    RenderLight rl = l.light;
+    rl.intensity *= finite_bits(l.indirect) ? std::max(0.0f, std::min(100.0f, l.indirect)) : 1.0f;  // (as Indirect Intensity: 0..100)
+    if (!(rl.intensity > 0.0f)) continue;  // (a light bounced at 0 is no light for the path tracer to pick)
+    out.push_back(rl);
+  }
+  return out;
+}
+
 void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vector<BakeLight> &lights, const Environment &env,
                         const BakeSettings &settings) {
   s_ = settings;
@@ -509,6 +523,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
       mp = dark;
     }
   lights_ = lights;
+  assign_mask_channels();  // (round 444; round 454: before the point lights are counted - a Mixed light past the fourth channel is Baked)
   point_lights_ = 0;
   for (const BakeLight &l : lights_) point_lights_ += bakes_direct(l) && l.light.type != RenderLight::Directional && l.light.type != RenderLight::Area;
   env_ = env;
@@ -536,7 +551,6 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   emitted_.assign(texels_.size(), Vec3(0.0f));
   dirs_.assign(s_.directional ? texels_.size() : 0, DirSum{});
   total_ = texels_.size();
-  assign_mask_channels();  // (round 444)
   for (size_t i = 0; i < lights_.size(); i++) {
     const BakeLight &l = lights_[i];
     if (l.mode == 2) out_.light_modes[l.id] = 2;
@@ -544,15 +558,13 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
     const int ch = i < mask_channel_.size() ? mask_channel_[i] : -1;
     out_.light_modes[l.id] = s_.lighting_mode == 2 ? 3 : ch >= 0 ? 4 + ch : 1;  // (round 444)
   }
-  masks_.assign(std::any_of(mask_channel_.begin(), mask_channel_.end(), [](int c) { return c >= 0; }) ? texels_.size() : 0, Vec3(1.0f));
+  masks_.assign(std::any_of(mask_channel_.begin(), mask_channel_.end(), [](int c) { return c >= 0; }) ? texels_.size() : 0, Vec4(1.0f, 1.0f, 1.0f, 1.0f));
 
   /* 4. The scene the rays see: the static objects, the Baked and Mixed lights, the world. */
   pt_ = std::make_unique<PathTracer>();
   pt_objects_.clear();
   for (const BakeObject &o : objects_) pt_objects_.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
-  std::vector<RenderLight> pt_lights;
-  for (const BakeLight &l : lights_)
-    if (l.mode != 0) pt_lights.push_back(l.light);
+  const std::vector<RenderLight> pt_lights = bounce_lights(lights_);  // (round 452: at their Indirect Multipliers)
   PTSettings ps;
   /* The gather's own hit is the first bounce (its direct light comes by next-event estimation): the
    * path tracer adds the rest. Bounces 0 = the sky, the Baked lights' direct light and (task 0157) the emissive
@@ -729,26 +741,45 @@ int subtractive_split(std::vector<BakeLight> &lights) {
   return main;
 }
 
-/* Round 444: the Mixed lights' channels in a Shadowmask bake - the suns first, then by intensity, kMaskChannels of them
- * (Unity gives each texel up to four overlapping lights; here the page's three colours, the whole scene). */
-void Lightmapper::assign_mask_channels() {
-  mask_channel_.assign(lights_.size(), -1);
-  if (s_.lighting_mode != 1) return;
+/* Round 444: the Mixed lights in a Shadowmask bake, in channel order - the suns first, then by intensity. */
+static std::vector<size_t> mask_light_order(const std::vector<BakeLight> &lights) {
   std::vector<size_t> mixed;
-  for (size_t i = 0; i < lights_.size(); i++)
-    if (lights_[i].mode == 1) mixed.push_back(i);
+  for (size_t i = 0; i < lights.size(); i++)
+    if (lights[i].mode == 1) mixed.push_back(i);
   auto weight = [&](size_t i) {
-    const RenderLight &l = lights_[i].light;
+    const RenderLight &l = lights[i].light;
     return (l.type == RenderLight::Directional ? 1e30f : 0.0f) + l.intensity * (0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z);
   };
   std::stable_sort(mixed.begin(), mixed.end(), [&](size_t a, size_t b) { return weight(a) > weight(b); });
-  for (size_t k = 0; k < mixed.size() && k < (size_t)kMaskChannels; k++) mask_channel_[mixed[k]] = (int)k;
+  return mixed;
+}
+
+/* Round 454 (review): Unity's fallback for the Mixed lights past the mask's four - they become Baked. Done on the bake's
+ * shared list (like subtractive_split), so the probes and Light Volumes bake their direct light too. Returns how many. */
+size_t shadowmask_split(std::vector<BakeLight> &lights, bool log) {
+  const std::vector<size_t> mixed = mask_light_order(lights);
+  if (mixed.size() <= (size_t)Lightmapper::kMaskChannels) return 0;
+  for (size_t k = Lightmapper::kMaskChannels; k < mixed.size(); k++) lights[mixed[k]].mode = 2;
+  const size_t n = mixed.size() - (size_t)Lightmapper::kMaskChannels;
+  if (log) Log::info("Generate Lighting: Shadowmask holds %d Mixed lights; the other %zu are baked as Baked lights", Lightmapper::kMaskChannels, n);
+  return n;
+}
+
+/* Round 444: the Mixed lights' channels in a Shadowmask bake (Unity gives each texel up to four overlapping lights; here
+ * the page's four channels, the whole scene). Round 454: the split above has made the rest Baked already; this is its
+ * safety net for a caller that didn't. */
+void Lightmapper::assign_mask_channels() {
+  mask_channel_.assign(lights_.size(), -1);
+  if (s_.lighting_mode != 1) return;
+  shadowmask_split(lights_, false);
+  const std::vector<size_t> mixed = mask_light_order(lights_);
+  for (size_t k = 0; k < mixed.size(); k++) mask_channel_[mixed[k]] = (int)k;
 }
 
 /* Round 444: a texel's shadowmask - each channel's light seen past the static scene (its soft shadow too), 1 where the
  * light doesn't reach (out of range: nothing to shadow), 0 behind the surface. */
-Vec3 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const {
-  Vec3 m(1.0f);
+Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const {
+  Vec4 m(1.0f, 1.0f, 1.0f, 1.0f);
   for (size_t i = 0; i < lights_.size() && i < mask_channel_.size(); i++) {
     const int ch = mask_channel_[i];
     if (ch < 0) continue;
@@ -771,7 +802,7 @@ Vec3 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, u
   return m;
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec3 *mask_out) {
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec4 *mask_out) {
   DirSum dirs;  // (round 426: where this texel's light comes from)
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
@@ -828,24 +859,10 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   /* Round 441: with many point and spot lights (SideRail has 71), each one's unshadowed light here is estimated first,
    * and each is kept with the probability min(1, 8 x its share of their sum), its light divided by that (Russian
    * roulette: unbiased). About 8 lights' shadow rays a texel in expectation, the bright near ones always. */
-  thread_local std::vector<float> point_est;
-  float point_sum = 0.0f;
+  thread_local LightPick pk;  // (round 453: the picking shared with the probes, light_pick.h)
   Vec3 picked(0.0f);
-  const bool pick = s_.pick_lights && point_lights_ > kPickLightsOver;
-  if (pick) {
-    point_est.assign(lights_.size(), 0.0f);
-    for (size_t li = 0; li < lights_.size(); li++) {
-      const BakeLight &bl = lights_[li];
-      if (!bakes_direct(bl) || bl.light.type == RenderLight::Directional || bl.light.type == RenderLight::Area) continue;
-      const Vec3 dvec = bl.light.position - o;
-      const float dist = length(dvec);
-      if (!(dist > 1e-5f)) continue;
-      const float ndl = dot(n, dvec / dist), fall = ndl > 0.0f ? light_falloff(bl.light, t.position, dvec / dist) : 0.0f;
-      const float e = std::max(0.0f, ndl) * fall * (0.2126f * bl.light.color.x + 0.7152f * bl.light.color.y + 0.0722f * bl.light.color.z) * bl.light.intensity;
-      point_est[li] = e > 0.0f && e < 1e30f ? e : 0.0f;
-      point_sum += point_est[li];
-    }
-  }
+  const bool pick = s_.pick_lights && point_lights_ > kLightPickOver;
+  if (pick) light_pick_estimate(pk, lights_, o, &n, t.position, [&](const BakeLight &bl) { return bakes_direct(bl); });
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
   if (mask_out && !masks_.empty()) *mask_out = shadowmask_at(t, o, rng, rays);  // (round 444)
@@ -925,7 +942,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (fall <= 0.0f) continue;
     float keep = 1.0f;
     if (pick) {
-      keep = std::min(1.0f, kPickRays * point_est[(size_t)(&bl - &lights_[0])] / std::max(1e-30f, point_sum));
+      keep = light_pick_keep(pk, (size_t)(&bl - &lights_[0]));
       if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
     }
     const Vec3 c = col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays) / keep);
@@ -1345,18 +1362,29 @@ void Lightmapper::finish_masks() {
     Lightmap &d = out_.mask_pages[p];
     d.width = out_.pages[p].width, d.height = out_.pages[p].height;
     d.texels.assign((size_t)d.width * d.height, Vec3(1.0f));
+    d.alpha.assign(d.texels.size(), 1.0f);
     have[p].assign(d.texels.size(), 0);
   }
   for (size_t k = 0; k < texels_.size() && k < masks_.size(); k++) {
     const LightmapTexel &tx = texels_[k];
     const size_t idx = (size_t)tx.y * out_.pages[(size_t)tx.page].width + tx.x;
     if (k < invalid_.size() && invalid_[k]) continue;  // (review 444: inside geometry - filled from its neighbours, never a leak of 1)
-    out_.mask_pages[(size_t)tx.page].texels[idx] = masks_[k];
+    Lightmap &d = out_.mask_pages[(size_t)tx.page];
+    d.texels[idx] = masks_[k].xyz();
+    d.alpha[idx] = masks_[k].w;
     have[(size_t)tx.page][idx] = 1;
   }
   for (size_t p = 0; p < out_.mask_pages.size(); p++) {
     Lightmap &d = out_.mask_pages[p];
-    for (int pass = 0; pass < s_.padding + 2; pass++) dilate_once(d.texels, have[p], d.width, d.height);
+    /* The fourth channel grown the same way (dilate_once works on colours: it rides in x, with its own copy of the flags). */
+    std::vector<Vec3> a(d.alpha.size());
+    for (size_t i = 0; i < a.size(); i++) a[i] = Vec3(d.alpha[i], 0.0f, 0.0f);
+    std::vector<uint8_t> have_a = have[p];
+    for (int pass = 0; pass < s_.padding + 2; pass++) {
+      dilate_once(d.texels, have[p], d.width, d.height);
+      dilate_once(a, have_a, d.width, d.height);
+    }
+    for (size_t i = 0; i < a.size(); i++) d.alpha[i] = a[i].x;
   }
 }
 
@@ -1443,13 +1471,21 @@ bool LightingData::save(const std::string &dir, std::string &error) const {
       return false;
     }
   }
-  /* Round 444: the shadowmask pages (0..1 per channel). */
+  /* Round 444: the shadowmask pages (0..1 per channel). Round 454 (ADR 0118): RGBA8 PNGs - Unity's own mask format, four
+   * lights, 8 bits as the card holds them. A folder's old 3-channel ShadowMask-N.hdr goes: the loader would take the
+   * PNG first, but a stale file left behind would answer a later bake that saves no masks. */
+  for (size_t p = 0; fs::remove_file(fs::join(dir, strprintf("ShadowMask-%zu.hdr", p))); p++) {}
+  for (size_t p = mask_pages.size(); fs::remove_file(fs::join(dir, strprintf("ShadowMask-%zu.png", p))); p++) {}  // (an earlier bake's pages past this one's)
   for (size_t p = 0; p < mask_pages.size(); p++) {
     const Lightmap &d = mask_pages[p];
-    std::vector<float> rgb((size_t)d.width * d.height * 3);
-    for (size_t i = 0; i < d.texels.size(); i++) rgb[i * 3] = d.texels[i].x, rgb[i * 3 + 1] = d.texels[i].y, rgb[i * 3 + 2] = d.texels[i].z;
-    const std::string mp = fs::join(dir, strprintf("ShadowMask-%zu.hdr", p));
-    if (!write_hdr(mp, rgb.data(), d.width, d.height)) {
+    auto q = [](float v) { return (uint32_t)std::max(0, std::min(255, (int)(v * 255.0f + 0.5f))); };
+    std::vector<uint32_t> px(d.texels.size());
+    for (size_t i = 0; i < px.size(); i++) {
+      const float a = i < d.alpha.size() ? d.alpha[i] : 1.0f;
+      px[i] = (q(a) << 24) | (q(d.texels[i].x) << 16) | (q(d.texels[i].y) << 8) | q(d.texels[i].z);
+    }
+    const std::string mp = fs::join(dir, strprintf("ShadowMask-%zu.png", p));
+    if (!write_png(mp, px.data(), d.width, d.height, d.width, true)) {
       error = "could not write " + mp;
       return false;
     }
@@ -1551,6 +1587,11 @@ bool LightingData::load(const std::string &dir, std::string &error) {
   }
   if (ok && ndir == pages.size() && ndir > 0) load_dir_pages(dir);
   if (ok && nmask == pages.size() && nmask > 0) load_mask_pages(dir);
+  /* Round 454 (review): modes 4-7 name a mask channel; with no mask pages (a file missing or unread, an old bake) their lights
+   * shadow in realtime alone, as Mixed lights do - not as lights whose mask is white. */
+  if (mask_pages.empty())
+    for (auto &kv : light_modes)
+      if (kv.second >= 4 && kv.second <= 7) kv.second = 1;
   return true;
 }
 
@@ -1560,16 +1601,32 @@ void LightingData::load_mask_pages(const std::string &dir) {
   for (size_t p = 0; p < pages.size(); p++) {
     Bitmap bmp;
     std::string err;
+    /* Round 454: ShadowMask-N.png (RGBA8, four lights), else a round 444 bake's 3-channel .hdr (its fourth channel 1: that
+     * bake used modes 4-6 only). */
+    const std::string pp = fs::join(dir, strprintf("ShadowMask-%zu.png", p));
     const std::string hp = fs::join(dir, strprintf("ShadowMask-%zu.hdr", p));
-    if (!load_image(hp, bmp, err) || bmp.width != pages[p].width || bmp.height != pages[p].height || !bmp.is_float) {
-      Log::warn("The baked lighting's shadowmask page %s couldn't be read: its lights shadow in realtime", hp.c_str());
+    const bool png = fs::exists(pp);
+    const std::string &path = png ? pp : hp;
+    const bool read = load_image(path, bmp, err) && bmp.width == pages[p].width && bmp.height == pages[p].height && bmp.is_float == !png;
+    if (!read) {
+      Log::warn("The baked lighting's shadowmask page %s couldn't be read: its lights shadow in realtime", path.c_str());
       mask_pages.clear();
       return;
     }
     Lightmap &d = mask_pages[p];
     d.width = bmp.width, d.height = bmp.height;
-    d.texels.resize((size_t)bmp.width * bmp.height);
-    for (size_t i = 0; i < d.texels.size(); i++) d.texels[i] = Vec3(bmp.rgbaf[i * 4], bmp.rgbaf[i * 4 + 1], bmp.rgbaf[i * 4 + 2]);
+    const size_t n = (size_t)bmp.width * bmp.height;
+    d.texels.resize(n);
+    d.alpha.assign(n, 1.0f);
+    for (size_t i = 0; i < n; i++) {
+      if (!png) {
+        d.texels[i] = Vec3(bmp.rgbaf[i * 4], bmp.rgbaf[i * 4 + 1], bmp.rgbaf[i * 4 + 2]);
+        continue;
+      }
+      const uint8_t *c = &bmp.rgba8[i * 4];
+      d.texels[i] = Vec3(c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f);
+      d.alpha[i] = c[3] / 255.0f;
+    }
   }
 }
 

@@ -263,6 +263,9 @@ struct Material {
   mutable uint64_t axis_versions_[4] = {0, 0, 0, 0};
   mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;
+  /* Round 459: resolved in a view's stream scope with a file left for the stream (that map null). Good for the
+   * views until the batch lands; a caller outside the scope - a bake's frozen copy, a render - resolves again. */
+  mutable bool resolved_stream_missed_ = false;
 };
 using MaterialPtr = std::shared_ptr<Material>;
 
@@ -291,6 +294,25 @@ void set_asset_root(const std::string &dir);
 const std::string &asset_root();
 std::string resolve_asset_path(const std::string &path);
 std::string make_asset_relative(const std::string &abs_path);
+/* Round 447: textures stream in. While a TextureStreamScope is on (this thread; the editor's views), a material's image
+ * file not yet in the texture cache resolves as missing - the material shows its colours, as without the map - and the
+ * file is noted instead of decoded in the frame; take_texture_stream_misses hands the notes to a worker, which loads
+ * them, and refresh_material_textures makes every material resolve again with what landed (a material resolves once a
+ * generation, as ever: the renderers call textures() before shading in parallel). A file the stream failed on
+ * (texture_stream_set_failed, with the file's mtime when it was tried) resolves as missing as outside the scope, until
+ * the file's mtime changes. Renders, bakes and exports never stream. */
+struct TextureStreamScope {
+  bool prev;
+  explicit TextureStreamScope(bool on);
+  ~TextureStreamScope();
+};
+bool texture_streaming();
+size_t take_texture_stream_misses(std::vector<std::pair<std::string, bool>> &out);
+void texture_stream_set_failed(const std::vector<std::pair<std::string, bool>> &files, const std::vector<int64_t> &mtimes);
+bool texture_stream_failed(const std::string &path, bool srgb);  // (round 458: a failure that holds - the file as it was when tried)
+bool texture_stream_pending();  // (the views noted files no batch has taken yet)
+uint64_t material_resolve_count();  // (Material::textures() resolves since start: for tests)
+void refresh_material_textures();  // (the generation alone: materials resolve again, the failures stay known)
 /* Bumps a generation counter so materials re-resolve their textures. */
 void invalidate_material_textures();
 /* Bumped by invalidate_material_textures (an image reloaded, a procedural texture edited): the views'

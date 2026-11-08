@@ -11,6 +11,7 @@
 #include "../scene/material.h"
 #include "../scene/unity_package.h"
 #include "../scene/unity_scene.h"
+#include "../scene/unity_yaml.h"
 #include "../core/core.h"
 
 #include <set>
@@ -40,9 +41,30 @@ std::map<std::string, Known> known_guids(const std::string &abs_folder) {
   return out;
 }
 
+/* Round 454 (ADR 0118): a Shadowmask bake's page (ShadowMask-N.png, RGBA8 - four lights) imported as Unity reads its own:
+ * texture type Shadowmask (11), linear, no mips, uncompressed. */
+std::string shadowmask_meta(const std::string &guid) {
+  return "fileFormatVersion: 2\nguid: " + guid + "\nTextureImporter:\n  internalIDToNameTable: []\n  externalObjects: {}\n  serializedVersion: 12\n"
+         "  mipmaps:\n    mipMapMode: 0\n    enableMipMap: 0\n    sRGBTexture: 0\n    linearTexture: 0\n    fadeOut: 0\n    borderMipMap: 0\n"
+         "    mipMapsPreserveCoverage: 0\n    alphaTestReferenceValue: 0.5\n    mipMapFadeDistanceStart: 1\n    mipMapFadeDistanceEnd: 3\n"
+         "  bumpmap:\n    convertToNormalMap: 0\n    externalNormalMap: 0\n    heightScale: 0.25\n    normalMapFilter: 0\n"
+         "  isReadable: 0\n  streamingMipmaps: 0\n  streamingMipmapsPriority: 0\n  vTOnly: 0\n  ignoreMasterTextureLimit: 0\n"
+         "  grayScaleToAlpha: 0\n  generateCubemap: 6\n  cubemapConvolution: 0\n  seamlessCubemap: 0\n  textureFormat: 1\n  maxTextureSize: 16384\n"
+         "  textureSettings:\n    serializedVersion: 2\n    filterMode: 1\n    aniso: 1\n    mipBias: 0\n    wrapU: 1\n    wrapV: 1\n    wrapW: 1\n"
+         "  nPOTScale: 0\n  lightmap: 0\n  compressionQuality: 50\n  spriteMode: 0\n  alphaUsage: 1\n  alphaIsTransparency: 0\n"
+         "  spriteTessellationDetail: -1\n  textureType: 11\n  textureShape: 1\n  singleChannelComponent: 0\n  flipbookRows: 1\n  flipbookColumns: 1\n"
+         "  maxTextureSizeSet: 0\n  compressionQualitySet: 0\n  textureFormatSet: 0\n  ignorePngGamma: 0\n  applyGammaDecoding: 0\n"
+         "  platformSettings:\n  - serializedVersion: 3\n    buildTarget: DefaultTexturePlatform\n    maxTextureSize: 16384\n    resizeAlgorithm: 0\n"
+         "    textureFormat: -1\n    textureCompression: 0\n    compressionQuality: 50\n    crunchedCompression: 0\n    allowsAlphaSplitting: 0\n    overridden: 0\n"
+         "    androidETC2FallbackOverride: 0\n    forceMaximumCompressionQuality_BC6H_BC7: 0\n"
+         "  spriteSheet:\n    serializedVersion: 2\n    sprites: []\n    outline: []\n    physicsShape: []\n    bones: []\n    spriteID: \n    internalID: 0\n    vertices: []\n    indices: \n    edges: []\n    weights: []\n"
+         "  spritePackingTag: \n  pSDRemoveMatte: 0\n  pSDShowRemoveMatteOption: 0\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n";
+}
+
 /* A new file's .meta: its GUID alone (Unity fills in the importer's settings). */
-std::string fresh_meta(const std::string &guid, bool folder, const std::string &ext = "") {
+std::string fresh_meta(const std::string &guid, bool folder, const std::string &ext = "", const std::string &name = "", bool bake_beside = false) {
   if (!folder && ext == ".anim") return unity_anim_meta(guid);  // (round 407: the clip as the asset's main object)
+  if (!folder && ext == ".png" && name.rfind("ShadowMask-", 0) == 0 && bake_beside) return shadowmask_meta(guid);  // (round 454: a bake's page - LightingData.bin beside it)
   return "fileFormatVersion: 2\nguid: " + guid + "\n" + (folder ? "folderAsset: yes\nDefaultImporter:\n  externalObjects: {}\n  userData: \n  assetBundleName: \n  assetBundleVariant: \n" : "");
 }
 
@@ -106,6 +128,18 @@ std::map<std::string, std::vector<UnityEdit>> Editor::unity_edits(const std::str
   });
   /* Round 401: the scene's world settings into the .unity it came from. */
   if (!scene_->unity.file.empty() && scene_->unity.file.rfind(folder_rel + "/", 0) == 0) out[scene_->unity.file].push_back(unity_world_edit(scene_->environment, scene_->unity));
+  /* Round 454 (ADR 0118): the Lighting Mode into the settings the import read it from - a LightingSettings document in the
+   * scene, or the scene's own LightmapSettings (a LightingSettings asset is another file: left as it is). */
+  const UnityBakeSettings &ub = scene_->unity_bake;
+  const bool embedded = ub.source == "the scene's embedded LightingSettings", own = ub.source == "the scene's own settings";
+  if (!scene_->unity.file.empty() && scene_->unity.file.rfind(folder_rel + "/", 0) == 0 && ub.read && (embedded || own)) {
+    const int lm = scene_->lighting.lighting_mode;  // (Blendity: 0 Baked Indirect, 1 Shadowmask, 2 Subtractive; Unity's m_MixedBakeMode: 0, 2, 1)
+    UnityEdit e;
+    if (embedded) e.file_id = ub.settings_doc;  // (the document the import read, not every LightingSettings in the file)
+    else e.class_id = 157;
+    e.fields = {{embedded ? "m_MixedBakeMode" : "m_LightmapEditorSettings/m_MixedBakeMode", lm == 1 ? "2" : lm == 2 ? "1" : "0"}};
+    out[scene_->unity.file].push_back(e);
+  }
   return out;
 }
 
@@ -193,10 +227,28 @@ void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
 }
 }  // namespace
 
+namespace {
+/* Round 455 (ADR 0119): a Light Probe Group's document is written back as Unity had it; one whose probes were moved (or added,
+ * removed) here is not written back - said, so a moved probe isn't thought to have gone. */
+void warn_probe_group_moved(const GameObject &g, const EngineComponent &e) {
+  const LightProbeGroupComponent *pg = g.probe_group();
+  std::vector<UnityDoc> docs;
+  std::string why;
+  if (!pg || !parse_unity_yaml(e.data, docs, why) || docs.empty()) return;
+  std::vector<Vec3> was;
+  if (const YamlNode *src = docs[0].body.get("m_SourcePositions"))
+    for (const YamlNode &n : src->seq) was.push_back(Vec3((float)n.num("x", 0.0), (float)n.num("y", 0.0), (float)n.num("z", 0.0)));
+  bool same = was.size() == pg->positions.size();
+  for (size_t i = 0; same && i < was.size(); i++) same = was[i].x == pg->positions[i].x && was[i].y == pg->positions[i].y && was[i].z == pg->positions[i].z;
+  if (!same) Log::warn("Export: Light Probe Group '%s' has probes moved in Blendity; Unity's own document is written back unchanged (its probes are not)", g.name.c_str());
+}
+}  // namespace
+
 void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out) {
   avatar_component_edits(g, out);  // (round 402)
   for (const auto &comp : g.components) {  // (round 403: a kept document edited in the Inspector goes back whole - the ones a Blendity component holds don't)
     const auto *e = dynamic_cast<const EngineComponent *>(comp.get());
+    if (e && e->native && e->engine == "Unity" && e->type == "LightProbeGroup") warn_probe_group_moved(g, *e);  // (round 455: the document goes back as it was)
     if (!e || e->native || e->engine != "Unity" || e->data.empty()) continue;
     UnityEdit ed;
     ed.file_id = e->unity_file_id();
@@ -285,7 +337,7 @@ bool Editor::export_unity_package(const std::string &folder_in, const std::strin
       it.guid = k != known.end() ? k->second.guid : stable_unity_guid(folder_rel, it.pathname);
       job->fresh += k == known.end();
       std::string meta;
-      it.meta = fs::read_file(fs::join(fs::join(abs_folder, ".unity-meta"), it.guid + ".meta"), meta) ? meta : fresh_meta(it.guid, it.folder, fs::extension(de.name));
+      it.meta = fs::read_file(fs::join(fs::join(abs_folder, ".unity-meta"), it.guid + ".meta"), meta) ? meta : fresh_meta(it.guid, it.folder, fs::extension(de.name), de.name, fs::exists(fs::join(dir, "LightingData.bin")));
       const auto e = edits.find(key);
       if (e != edits.end()) it.edits = e->second;
       job->items.push_back(std::move(it));

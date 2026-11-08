@@ -6,6 +6,8 @@
 #include "../src/render/probe_sh.h"
 #include "../src/render/tetrahedra.h"
 #include "../src/render/unity_lightmaps.h"
+#include "../src/scene/unity_scene.h"
+#include "../src/render/light_pick.h"
 #include <set>
 #include <tuple>
 
@@ -7039,6 +7041,1243 @@ static void tests_round444() {
   });
 }
 
+static void tests_round451() {
+  test("Reflection probes from the lit scene (round 451): a probe over a lightmapped floor reads the lightmap x the floor's albedo - not a path trace of the raw geometry (no lights, a black world: that is black) - the sky stays path-traced, and a Realtime sun the maps don't hold adds its direct light", [] {
+    MeshPtr floor = primitives::plane(6.0f, 2);
+    const std::vector<MaterialPtr> white = {make_material("White", Vec3(0.8f))};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::identity(), &white}};
+    PathTracer pt;
+    PTSettings ps;
+    ps.denoise = false;
+    pt.set_settings(ps);
+    pt.build(objs, {}, env);
+    LightingData ld;
+    Lightmap page;
+    page.width = page.height = 4;
+    page.texels.assign(16, Vec3(0.5f, 0.25f, 0.125f));
+    ld.pages.push_back(page);
+    LightingData::Entry e;
+    e.page = 0;
+    e.tri_uv.assign(floor->render_mesh_tangents().tri_count() * 3, Vec2(0.5f, 0.5f));
+    ld.entries[1] = e;
+    const std::vector<uint64_t> ids = {1};
+    ProbeLitCapture cap;
+    cap.pt = &pt, cap.lighting = &ld, cap.object_ids = &ids, cap.samples = 2;
+    std::vector<Vec3> down, up;
+    const float lit_down = reflection_probe_capture_lit(cap, Vec3(0, 1, 0), 8, 0.05f, 3, down);
+    const float lit_up = reflection_probe_capture_lit(cap, Vec3(0, 1, 0), 8, 0.05f, 2, up);
+    Vec3 mean_down(0.0f), mean_up(0.0f);
+    for (const Vec3 &c : down) mean_down += c / (float)down.size();
+    for (const Vec3 &c : up) mean_up += c / (float)up.size();
+    std::printf("    down: (%.3f %.3f %.3f), %.0f%% lightmapped; up (the sky): (%.3f %.3f %.3f), %.0f%%\n", mean_down.x, mean_down.y, mean_down.z, lit_down * 100.0f, mean_up.x,
+                mean_up.y, mean_up.z, lit_up * 100.0f);
+    CHECK(down.size() == 64 && lit_down > 0.99f && std::fabs(mean_down.x - 0.4f) < 0.01f && std::fabs(mean_down.y - 0.2f) < 0.01f && std::fabs(mean_down.z - 0.1f) < 0.01f);
+    CHECK(lit_up < 0.01f && mean_up.x < 1e-4f);
+    uint32_t rng = 1;
+    uint64_t rays = 0;
+    CHECK(pt.incoming_radiance({Vec3(0, 1, 0), Vec3(0, -1, 0)}, rng, rays).x < 1e-4f);  // (the raw geometry's path: no light at all)
+    /* A Realtime sun straight down, the maps empty: its direct light x albedo. */
+    page.texels.assign(16, Vec3(0.0f));
+    ld.pages[0] = page;
+    RenderLight sun;
+    sun.type = RenderLight::Directional, sun.direction = Vec3(0, -1, 0), sun.intensity = 1.0f;
+    const std::vector<RenderLight> direct = {sun};
+    cap.lights = &direct;
+    reflection_probe_capture_lit(cap, Vec3(0, 1, 0), 8, 0.05f, 3, down);
+    mean_down = Vec3(0.0f);
+    for (const Vec3 &c : down) mean_down += c / (float)down.size();
+    std::printf("    a Realtime sun on an empty lightmap: (%.3f %.3f %.3f)\n", mean_down.x, mean_down.y, mean_down.z);
+    CHECK(std::fabs(mean_down.x - 0.8f) < 0.02f && std::fabs(mean_down.z - 0.8f) < 0.02f);
+  });
+  test("Reflection probes from the lit scene (round 451): Generate Lighting with a Baked sun - the probe above the floor sees the floor as its lightmap x albedo; `lighting save` writes the shown lightmaps with objects.json naming the floor", [] {
+    Editor ed;
+    r35_open(ed);
+    GameObject *floor_go = r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_sun_mode(ed, 2);
+    GameObject *probe = ed.scene().create("Probe");
+    probe->set_local_position({0, 0.5f, 0});
+    probe->add<ReflectionProbeComponent>()->resolution = 16;
+    ed.commit_change("probe");
+    r35_bake(ed);
+    const auto &bakes = ed.reflection_probe_bakes_for_test();
+    const auto it = bakes.find(probe->id);
+    Vec3 lm;
+    const Mesh *fm = floor_go->evaluated_mesh(1);
+    const bool sampled = fm && r35_sample(ed.lighting_data_for_test(), floor_go->id, *fm, floor_go->world_matrix(), {0, 0, 0}, lm);
+    CHECK(it != bakes.end() && sampled);
+    if (it == bakes.end() || !sampled) return;
+    const Vec3 seen = it->second.sample(Vec3(0, -1, 0)), want = lm * 0.8f;
+    std::printf("    the probe looking down (%.3f %.3f %.3f), the floor's lightmap x albedo (%.3f %.3f %.3f)\n", seen.x, seen.y, seen.z, want.x, want.y, want.z);
+    CHECK(want.y > 0.05f && std::fabs(seen.y - want.y) < 0.1f * want.y + 0.01f);
+    const std::string dir = fs::join(scratch_project(), "R451Lighting");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    ed.command("lighting save " + dir);
+    std::filesystem::remove(std::filesystem::u8path(fs::join(dir, "objects.json")), ec);
+    ed.command("lighting save " + dir);  // (review 451: a folder with a bake in it is refused without `overwrite`)
+    CHECK(!fs::exists(fs::join(dir, "objects.json")));
+    ed.command("lighting save " + dir + " overwrite");
+    std::string objects;
+    CHECK(fs::exists(fs::join(dir, "LightingData.bin")) && fs::exists(fs::join(dir, "Lightmap-0.hdr")) && fs::read_file(fs::join(dir, "objects.json"), objects));
+    std::printf("    objects.json: %.120s\n", objects.c_str());
+    CHECK(objects.find("\"path\":\"Floor\"") != std::string::npos && objects.find(std::to_string(floor_go->id)) != std::string::npos && objects.find("\"source\":\"blendity\"") != std::string::npos);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("The render split by component (round 451, BLENDITY_RENDER_COMPONENTS): noreflections drops only the reflection probes, noprobes the probe volume and Light Volumes, indirect the realtime lights, direct the lightmaps, probes and the sky; an unknown word applies nothing", [] {
+    Lightmap page;
+    std::vector<Vec2> uv(3, Vec2(0.5f, 0.5f));
+    ProbeFrame pf;
+    LightVolumeFrame lv;
+    auto fresh = [&](LightingEnv &env, std::vector<DrawItem> &items) {
+      env = LightingEnv{};
+      env.lights.resize(2);
+      env.reflection_probes.resize(1);
+      env.probes = &pf, env.light_volumes = &lv;
+      items.assign(1, DrawItem{});
+      items[0].lightmap = &page, items[0].lightmap_uv = &uv, items[0].use_probes = true;
+    };
+    LightingEnv env;
+    std::vector<DrawItem> items;
+    fresh(env, items);
+    CHECK(apply_render_components("noreflections", env, items) == "noreflections" && env.reflection_probes.empty() && env.lights.size() == 2 && env.probes && items[0].lightmap);
+    fresh(env, items);
+    CHECK(apply_render_components("noprobes", env, items) == "noprobes" && !env.probes && !env.light_volumes && env.reflection_probes.size() == 1);
+    fresh(env, items);
+    CHECK(apply_render_components(" Indirect , noreflections", env, items) == "indirect,noreflections" && env.lights.empty() && env.reflection_probes.empty() && items[0].lightmap);
+    fresh(env, items);
+    CHECK(apply_render_components("direct", env, items) == "direct" && env.lights.size() == 2 && !items[0].lightmap && !items[0].use_probes && !env.probes && env.environment &&
+          env.environment->irradiance(Vec3(0, 1, 0)).y == 0.0f && env.sky.y == 0.0f);
+    fresh(env, items);
+    CHECK(apply_render_components("everything", env, items).empty() && env.lights.size() == 2 && items[0].lightmap);
+  });
+  test("Reflection probes from the lit scene (review 451): a single-sided floor seen from below is culled as the views cull it (the sky behind it shows); a double-sided one seen from behind takes its lightmap with the direction page decoded in the front's frame, as the views do", [] {
+    MeshPtr floor = primitives::plane(6.0f, 2);
+    MaterialPtr one = make_material("One", Vec3(0.8f)), two = make_material("Two", Vec3(0.8f));
+    two->double_sided = true;
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.05f, 0.1f, 0.2f);
+    LightingData ld;
+    Lightmap page, dir;
+    page.width = page.height = dir.width = dir.height = 4;
+    page.texels.assign(16, Vec3(0.5f));
+    dir.texels.assign(16, Vec3(0.0f, 0.9f, 0.0f));  // (the light came from above the floor)
+    ld.pages.push_back(page);
+    ld.dir_pages.push_back(dir);
+    LightingData::Entry e;
+    e.page = 0;
+    e.tri_uv.assign(floor->render_mesh_tangents().tri_count() * 3, Vec2(0.5f, 0.5f));
+    ld.entries[1] = e;
+    const std::vector<uint64_t> ids = {1};
+    auto look_up_from_below = [&](const MaterialPtr &m, float &lit) {
+      const std::vector<MaterialPtr> mats = {m};
+      std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::identity(), &mats}};
+      PathTracer pt;
+      PTSettings ps;
+      ps.denoise = false;
+      pt.set_settings(ps);
+      pt.build(objs, {}, env);
+      ProbeLitCapture cap;
+      cap.pt = &pt, cap.lighting = &ld, cap.object_ids = &ids, cap.samples = 1;
+      std::vector<Vec3> face;
+      lit = reflection_probe_capture_lit(cap, Vec3(0, -1, 0), 4, 0.05f, 2, face);
+      Vec3 mean(0.0f);
+      for (const Vec3 &c : face) mean += c / (float)face.size();
+      return mean;
+    };
+    float lit_one = 0.0f, lit_two = 0.0f;
+    const Vec3 single = look_up_from_below(one, lit_one), both = look_up_from_below(two, lit_two);
+    std::printf("    single-sided from below: (%.3f %.3f %.3f), %.0f%% lightmapped; double-sided: (%.3f %.3f %.3f), %.0f%%\n", single.x, single.y, single.z, lit_one * 100.0f, both.x,
+                both.y, both.z, lit_two * 100.0f);
+    CHECK(lit_one < 0.01f && std::fabs(single.z - 0.2f) < 0.01f);
+    CHECK(lit_two > 0.99f && std::fabs(both.x - 0.4f) < 0.01f);  // (decoded as the front: factor 1 - not the back's divisor)
+  });
+  test("The render split (review 451): `direct` keeps only the realtime lights - a Baked sun and a Subtractive light go with the lightmaps (no double count beside `indirect`), a Realtime point light stays, the shadowed light keeps its map at its new place", [] {
+    ShadowMap map;
+    LightingEnv env;
+    env.lights.resize(3);
+    env.lights[0].type = RenderLight::Directional, env.lights[0].bake_mode = 2;
+    env.lights[1].type = RenderLight::Point, env.lights[1].bake_mode = 0;
+    env.lights[2].type = RenderLight::Directional, env.lights[2].bake_mode = 3;
+    env.shadow = &map, env.shadow_light = 0;
+    std::vector<DrawItem> items(1);
+    CHECK(apply_render_components("direct", env, items) == "direct" && env.lights.size() == 1 && env.lights[0].type == RenderLight::Point && !env.shadow && env.shadow_light == -1);
+    env.lights.resize(2);
+    env.lights[0].type = RenderLight::Directional, env.lights[0].bake_mode = 2;
+    env.lights[1].type = RenderLight::Directional, env.lights[1].bake_mode = 0;
+    env.shadow = &map, env.shadow_light = 1;
+    CHECK(apply_render_components("direct", env, items) == "direct" && env.lights.size() == 1 && env.shadow == &map && env.shadow_light == 0);
+  });
+}
+
+
+
+/* ---------------------------------------------------------------- round 452: Unity's Indirect Multiplier (task 0428) */
+static void tests_round452() {
+  test("Indirect Multiplier (round 452): a Baked sun's light bounced off a wall onto a floor in its shadow scales with the light's Indirect Multiplier (0, 0.5, 1, 3) while the lit floor's direct light stays; the lights a bake bounces carry it, a Realtime light none", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), wall = primitives::plane(4.0f, 8), roof = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    /* A floor, a wall standing at its +x edge facing it, and a roof over the floor's -x half: the sun lights the wall and
+     * the floor's +x half; the -x half under the roof gets only what the wall and the lit floor bounce. */
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}),
+                                       bake_object(2, wall, Mat4::trs({2.0f, 2.0f, 0}, Quat::euler({0, 0, 90}), {1, 1, 1}), {white}),
+                                       bake_object(3, roof, Mat4::trs({-1.0f, 1.2f, 0}, Quat::euler({180, 0, 0}), {0.5f, 1, 1}), {white})};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](float indirect) {
+      BakeLight sun;
+      sun.light.direction = normalize(Vec3(0.6f, -1.0f, 0.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9, sun.indirect = indirect;
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 256, bs.bounces = 2, bs.denoise = false, bs.directional = false;
+      Lightmapper lm;
+      lm.begin(objs, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    /* The floor's mean light in the roof's shadow (-1 < x < 0.4) and in the sun (x > 1): each triangle's lightmap texel at its
+     * centre (the plane's own x, the model is the identity). */
+    auto floor_means = [&](const LightingData &d, double &shade, double &sun) {
+      const LightingData::Entry &e = d.entries.at(1);
+      const Lightmap &pg = d.pages[(size_t)e.page];
+      const RenderMesh &rm = floor->render_mesh();
+      double s0 = 0, s1 = 0;
+      int n0 = 0, n1 = 0;
+      for (size_t k = 0; k < rm.tri_count() && k * 3 + 2 < e.tri_uv.size(); k++) {
+        float cx = 0;
+        Vec2 uv(0, 0);
+        for (int c = 0; c < 3; c++) cx += rm.positions[rm.indices[k * 3 + c]].x / 3.0f, uv = uv + e.tri_uv[k * 3 + c] * (1.0f / 3.0f);
+        const int x = std::min(pg.width - 1, std::max(0, (int)(uv.x * pg.width))), y = std::min(pg.height - 1, std::max(0, (int)(uv.y * pg.height)));
+        const float t = pg.texels[(size_t)y * pg.width + x].y;
+        if (cx > -1.0f && cx < 0.4f) s0 += t, n0++;  // (the roof, -2..0 at 1.2 high, shades the floor from -1.28 to 0.72 for this sun)
+        if (cx > 1.0f) s1 += t, n1++;
+      }
+      shade = n0 ? s0 / n0 : 0, sun = n1 ? s1 / n1 : 0;
+    };
+    double sh0, su0, sh5, su5, sh1, su1, sh3, su3;
+    floor_means(bake(0.0f), sh0, su0);
+    floor_means(bake(0.5f), sh5, su5);
+    floor_means(bake(1.0f), sh1, su1);
+    floor_means(bake(3.0f), sh3, su3);
+    std::printf("    under the roof: x0 %.4f, x0.5 %.4f, x1 %.4f, x3 %.4f; in the sun: %.4f %.4f %.4f %.4f\n", sh0, sh5, sh1, sh3, su0, su5, su1, su3);
+    CHECK(sh1 > 0.01 && sh0 < 0.02 * sh1);  // (no bounced light at 0)
+    CHECK(std::fabs(sh5 - 0.5 * sh1) < 0.08 * sh1);
+    CHECK(std::fabs(sh3 - 3.0 * sh1) < 0.1 * 3.0 * sh1);
+    CHECK(std::fabs(su0 - su1) < su1 * 0.25 && su0 > 0.5 * su1);  // (the sunlit half mostly direct)
+    /* What the lightmapper, the probes and the Light Volumes all trace: the bounce list. */
+    BakeLight lamp;
+    lamp.light.type = RenderLight::Point, lamp.light.position = Vec3(0, 3, 0), lamp.light.intensity = 2.0f, lamp.light.range = 10.0f, lamp.mode = 2;
+    lamp.indirect = 0.25f;
+    const std::vector<RenderLight> bl = bounce_lights({lamp});
+    CHECK(bl.size() == 1 && std::fabs(bl[0].intensity - 0.5f) < 1e-6f);
+    lamp.indirect = std::nanf("");  // (a bad number is the default 1)
+    CHECK(bounce_lights({lamp}).size() == 1 && std::fabs(bounce_lights({lamp})[0].intensity - 2.0f) < 1e-6f);
+    lamp.indirect = 1000.0f;  // (clamped to 100, as Indirect Intensity)
+    CHECK(bounce_lights({lamp}).size() == 1 && std::fabs(bounce_lights({lamp})[0].intensity - 200.0f) < 1e-3f);
+    lamp.indirect = 0.0f;  // (a light bounced at 0 is left out of the path tracer's lights)
+    CHECK(bounce_lights({lamp}).empty());
+    lamp.indirect = 1.0f;
+    lamp.mode = 0;  // (a Realtime light bounces nothing in a bake)
+    CHECK(bounce_lights({lamp}).empty());
+  });
+}
+
+/* ---------------------------------------------------------------- round 453: probes see the sky and pick lights (task 0429) */
+static void tests_round453() {
+  test("probes see the sky (round 453): a probe in the open under a Gradient world holds the sky's own light in its SH - bright above, the ground below, each within a few percent of the world's true irradiance - and takes no second sky share; saved, read back; an older file (no flag) keeps the cubes' share", [] {
+    P37Pt s;
+    s.add(primitives::plane(2.0f, 2), Mat4::translate({0, -50.0f, 0}), Vec3(0.0f));  // (far away: nothing but the world around the probe)
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = Vec3(1.0f, 0.8f, 0.6f), env.equator = Vec3(0.3f), env.ground = Vec3(0.05f);
+    s.build({}, env);
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-1.0f), Vec3(1.0f)), s.tri_boxes(), 1.0f, 1.0f);
+    probe_validate(d, s.pt, 32);
+    probe_bake(d, s.pt, {}, 512, 1, 0, SIZE_MAX, 1.0f, -1, nullptr, &env);
+    /* The truth: the world's irradiance on a surface facing n, integrated over many directions. */
+    auto truth = [&](Vec3 n) {
+      Vec3 acc(0.0f);
+      const int N = 8192;
+      for (int i = 0; i < N; i++) {
+        const float z = 1.0f - 2.0f * (i + 0.5f) / N, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+        const Vec3 w(r * std::cos(phi), z, r * std::sin(phi));
+        const float c = dot(w, n);
+        if (c > 0.0f) acc += env.radiance(w) * c;
+      }
+      return acc * (4.0f * kPi / N) / kPi;  // (irradiance / pi: the diffuse light the views multiply albedo by)
+    };
+    Vec3 up, down;
+    // (the sky now passed is the one the probes were baked under: a second sky share would show at once)
+    d.sample(Vec3(0.0f), Vec3(0, 1, 0), env.irradiance(Vec3(0, 1, 0)), false, up, false, nullptr, &env);
+    d.sample(Vec3(0.0f), Vec3(0, -1, 0), env.irradiance(Vec3(0, -1, 0)), false, down, false, nullptr, &env);
+    const Vec3 tu = truth(Vec3(0, 1, 0)), td = truth(Vec3(0, -1, 0));
+    std::printf("    up %.3f %.3f %.3f (truth %.3f %.3f %.3f); down %.3f (truth %.3f); sky in the SH %d\n", up.x, up.y, up.z, tu.x, tu.y, tu.z, down.x, td.x,
+                (int)d.sky_in_sh);
+    CHECK(d.sky_in_sh);
+    CHECK(std::fabs(up.x - tu.x) < 0.06f * tu.x && std::fabs(up.z - tu.z) < 0.06f * tu.z);
+    CHECK(std::fabs(down.x - td.x) < 0.02f + 0.1f * td.x);
+    CHECK(up.x > 2.0f * down.x);
+    const std::string path = resolve_asset_path("Assets/Imported/r453_probes.bin");
+    std::string err;
+    CHECK(d.save(path, err));
+    ProbeVolumeData back;
+    CHECK(back.load(path, err) && back.sky_in_sh && back.has_baked_sky && back.baked_sky[2].x > 0.5f);
+    std::string bytes_with_flag, bytes_old;
+    /* An older file: the same bytes without the trailing flag and the baked sky - read as SH from geometry only, the cubes'
+     * sky share kept. */
+    {
+      std::ifstream in(path, std::ios::binary);
+      const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      bytes_with_flag = bytes.substr(0, bytes.size() - sizeof(Vec3) * 6);
+      bytes_old = bytes.substr(0, bytes_with_flag.size() - 1);
+    }
+    /* The first 453 files: the flag byte, no baked-sky floats - the SH hold the sky, the sky stays as baked. */
+    {
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      out.write(bytes_with_flag.data(), (std::streamsize)bytes_with_flag.size());
+    }
+    ProbeVolumeData flag_only;
+    CHECK(flag_only.load(path, err) && flag_only.sky_in_sh && !flag_only.has_baked_sky);
+    {
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      out.write(bytes_old.data(), (std::streamsize)bytes_old.size());
+    }
+    ProbeVolumeData old;
+    CHECK(old.load(path, err) && !old.sky_in_sh && !old.has_baked_sky && old.sh.size() == d.sh.size());
+    std::remove(path.c_str());
+  });
+  test("probes pick among many lights (round 453): forty Baked point lights in one spot light a probe grid as one light forty times as bright - the same on average (unbiased), in less time", [] {
+    P37Pt s;
+    s.add(primitives::plane(2.0f, 2), Mat4::translate({0, -50.0f, 0}), Vec3(0.0f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    s.build({}, env);
+    auto lamp = [](float intensity, uint64_t id) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(0.3f, 2.5f, -0.2f), l.light.range = 20.0f, l.light.intensity = intensity;
+      l.light.shadows = false, l.mode = 2, l.id = id;
+      return l;
+    };
+    std::vector<BakeLight> many, one = {lamp(40.0f, 1)};
+    for (int i = 0; i < 40; i++) many.push_back(lamp(1.0f, 100 + (uint64_t)i));
+    auto bake = [&](const std::vector<BakeLight> &lights, double &ms) {
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-2.0f), Vec3(2.0f)), s.tri_boxes(), 0.5f, 0.5f);
+      probe_validate(d, s.pt, 16);
+      ScopedTimer t;
+      probe_bake(d, s.pt, lights, 16, 0);
+      ms = t.ms();
+      return d;
+    };
+    double ms_one = 0, ms_many = 0;
+    const ProbeVolumeData a = bake(one, ms_one), b = bake(many, ms_many);
+    double sa = 0, sb = 0;
+    size_t n = 0;
+    for (size_t i = 0; i < a.sh.size() && i < b.sh.size(); i++) {
+      if (!a.valid[i]) continue;
+      sa += a.sh[i].c[0].x, sb += b.sh[i].c[0].x, n++;
+    }
+    const double ratio = sa > 0 ? sb / sa : 0;
+    std::printf("    %zu probes: forty lights / one light, mean SH L0 ratio %.3f; baked in %.1f ms (one light %.1f ms)\n", n, ratio, ms_many, ms_one);
+    CHECK(n > 50);
+    CHECK(std::fabs(ratio - 1.0) < 0.05);
+  });
+  test("a changed sky relights baked probes (round 453): after a bake under one Gradient sky, shading under a brighter one - no re-bake - is close to a re-bake under it on and off the axes; the same sky adds exactly nothing at any normal; a black world takes light away but never below 0; a probe without the baked sky takes no change", [] {
+    P37Pt s;
+    s.add(primitives::plane(2.0f, 2), Mat4::translate({0, -50.0f, 0}), Vec3(0.0f));
+    auto gradient = [](float k) {
+      Environment env;
+      env.mode = Environment::Gradient;
+      env.sky = Vec3(1.0f, 0.8f, 0.6f) * k, env.equator = Vec3(0.3f) * k, env.ground = Vec3(0.05f) * k;
+      return env;
+    };
+    auto bake = [&](const Environment &env) {
+      s.build({}, env);
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-1.0f), Vec3(1.0f)), s.tri_boxes(), 1.0f, 1.0f);
+      probe_validate(d, s.pt, 32);
+      probe_bake(d, s.pt, {}, 512, 1, 0, SIZE_MAX, 1.0f, -1, nullptr, &env);
+      return d;
+    };
+    const Environment e1 = gradient(1.0f), e2 = gradient(2.5f), black = gradient(0.0f);
+    const ProbeVolumeData d1 = bake(e1), d2 = bake(e2);
+    CHECK(d1.sky_in_sh && d1.has_baked_sky);
+    ProbeVolumeData plain = d1;
+    plain.has_baked_sky = false;
+    const Vec3 normals[] = {Vec3(0, 1, 0), Vec3(0, -1, 0), Vec3(1, 0, 0), normalize(Vec3(0.6f, 0.5f, 0.62f)), normalize(Vec3(-0.4f, 0.8f, 0.3f)),
+                            normalize(Vec3(0.3f, -0.5f, -0.7f))};
+    for (const Vec3 n : normals) {
+      Vec3 same, moved, rebaked, bare, dark;
+      d1.sample(Vec3(0.0f), n, e1.irradiance(n), false, same, false, nullptr, &e1);
+      d1.sample(Vec3(0.0f), n, e2.irradiance(n), false, moved, false, nullptr, &e2);
+      d2.sample(Vec3(0.0f), n, e2.irradiance(n), false, rebaked, false, nullptr, &e2);
+      plain.sample(Vec3(0.0f), n, e2.irradiance(n), false, bare, false, nullptr, &e2);
+      d1.sample(Vec3(0.0f), n, black.irradiance(n), false, dark, false, nullptr, &black);
+      std::printf("    n (%.2f %.2f %.2f): baked under sky 1 %.3f, shaded under 2.5 %.3f, re-baked under 2.5 %.3f; the world black %.3f\n", n.x, n.y, n.z, same.x,
+                  moved.x, rebaked.x, dark.x);
+      /* The unchanged sky adds nothing: the SH as baked (the plain copy, which takes no change, is the reference). */
+      Vec3 ref;
+      plain.sample(Vec3(0.0f), n, e1.irradiance(n), false, ref, false, nullptr, &e1);
+      CHECK(std::fabs(same.x - ref.x) < 1e-4f && std::fabs(same.y - ref.y) < 1e-4f && std::fabs(same.z - ref.z) < 1e-4f);
+      /* The weight is the six-axis blend, which is blurrier between the axes than the re-bake's SH (ADR 0116's amendment):
+       * off the axes the miss reaches 15 % (1.35 against 1.60 at the diagonal), so 18 % is the bound, not a tight fit. */
+      CHECK(std::fabs(moved.x - rebaked.x) < 0.18f * rebaked.x + 0.02f);
+      CHECK(std::fabs(bare.x - same.x) < 1e-5f);  // (no baked sky: the SH as baked)
+      CHECK(dark.x >= 0.0f && dark.y >= 0.0f && dark.z >= 0.0f);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- round 454: four mask lights, Distance Shadowmask (task 0430) */
+static void tests_round454() {
+  /* A mask page's four channels at a point on a mesh (identity-placed), through its entry's UVs as the renderers read them. */
+  auto mask_at = [](const LightingData &ld, uint64_t id, const Mesh &m, Vec3 p, Vec4 &out) {
+    auto e = ld.entries.find(id);
+    if (e == ld.entries.end() || (size_t)e->second.page >= ld.mask_pages.size()) return false;
+    const RenderMesh &rm = m.render_mesh();
+    for (size_t t = 0; t < rm.tri_count() && e->second.tri_uv.size() == rm.tri_count() * 3; t++) {
+      const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+      const Vec3 n = cross(b - a, c - a);
+      const float area2 = dot(n, n);
+      if (!(area2 > 1e-12f) || std::fabs(dot(p - a, n)) / std::sqrt(area2) > 0.02f) continue;
+      const float w1 = dot(cross(p - a, c - a), n) / area2, w2 = dot(cross(b - a, p - a), n) / area2, w0 = 1.0f - w1 - w2;
+      if (w0 < -1e-3f || w1 < -1e-3f || w2 < -1e-3f) continue;
+      out = ld.mask_pages[(size_t)e->second.page].sample4(e->second.tri_uv[t * 3] * w0 + e->second.tri_uv[t * 3 + 1] * w1 + e->second.tri_uv[t * 3 + 2] * w2);
+      return true;
+    }
+    return false;
+  };
+  test("Four mask lights (round 454): four Mixed lamps over four boxes in a Shadowmask bake are recorded as modes 4-7 and each channel is dark under its own box and clear in the open; a fifth Mixed lamp is baked as a Baked light", [&] {
+    MeshPtr floor = primitives::plane(16.0f, 16), box = primitives::cube(1.0f);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    const float xs[4] = {-6.0f, -2.0f, 2.0f, 6.0f};
+    std::vector<BakeLight> lamps(5);
+    for (int i = 0; i < 5; i++) {
+      lamps[(size_t)i].light.type = RenderLight::Point, lamps[(size_t)i].light.range = 100.0f;
+      lamps[(size_t)i].light.position = i < 4 ? Vec3(xs[i], 4.0f, 0.0f) : Vec3(0.0f, 4.0f, -6.0f);
+      lamps[(size_t)i].light.intensity = i < 4 ? 8.0f - (float)i : 1.0f;  // (the brightest first: channels 0-3 in this order; the weakest has none left)
+      lamps[(size_t)i].mode = 1, lamps[(size_t)i].id = 11 + (uint64_t)i;
+    }
+    BakeSettings bs;
+    bs.texels_per_unit = 6, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.lighting_mode = 1;
+    std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white})};
+    for (int i = 0; i < 4; i++) {
+      BakeObject b = bake_object(2 + (uint64_t)i, box, Mat4::translate(Vec3(xs[i], 1.5f, 0.0f)), {white});
+      b.want_lightmap = false;
+      objs.push_back(b);
+    }
+    Lightmapper lm;
+    lm.begin(objs, lamps, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    const LightingData ld = lm.take_result();
+    std::printf("    the lamps' modes: %d %d %d %d, the fifth %d\n", ld.light_modes.at(11), ld.light_modes.at(12), ld.light_modes.at(13), ld.light_modes.at(14), ld.light_modes.at(15));
+    CHECK(ld.light_modes.at(11) == 4 && ld.light_modes.at(12) == 5 && ld.light_modes.at(13) == 6 && ld.light_modes.at(14) == 7 && ld.light_modes.at(15) == 2);
+    CHECK(ld.mask_pages.size() == ld.pages.size());
+    /* The shared list the probes and Light Volumes bake from: the same split (the suns first, then by intensity), before any
+     * Lightmapper sees it - a fifth Mixed light is Baked for every baker, not only for the lightmaps. */
+    std::vector<BakeLight> shared(6);
+    for (size_t i = 0; i < shared.size(); i++) {
+      shared[i].mode = 1, shared[i].id = 40 + i;
+      shared[i].light.type = i == 0 ? RenderLight::Directional : RenderLight::Point;
+      shared[i].light.intensity = i == 0 ? 1.0f : 6.0f - (float)i;  // (the sun 1, then 5 4 3 2 1)
+    }
+    CHECK(shadowmask_split(shared, false) == 2);
+    CHECK(shared[0].mode == 1 && shared[1].mode == 1 && shared[2].mode == 1 && shared[3].mode == 1 && shared[4].mode == 2 && shared[5].mode == 2);
+    CHECK(shadowmask_split(shared, false) == 0);  // (nothing past four any more)
+    Vec4 open(0, 0, 0, 0);
+    CHECK(mask_at(ld, 1, *floor, Vec3(0.0f, 0.0f, 6.0f), open));
+    for (int c = 0; c < 4; c++) {
+      Vec4 under(1, 1, 1, 1);
+      CHECK(mask_at(ld, 1, *floor, Vec3(xs[c], 0.0f, 0.0f), under));
+      std::printf("    channel %d: %.3f under its box, %.3f in the open\n", c, under[c], open[c]);
+      CHECK(under[c] < 0.05f && open[c] > 0.95f);
+    }
+  });
+  test("A Shadowmask bake's masks on disk (round 454): four channels saved as ShadowMask-N.png and read back within 1/255; a round 444 bake's 3-channel .hdr still loads (the fourth channel clear); a folder with neither keeps the masks out; saving over old .hdr masks removes them", [] {
+    const std::string dir = fs::join(test_dir(), "r454_masks");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    LightingData ld;
+    for (int p = 0; p < 2; p++) {
+      Lightmap page, mask;
+      page.width = mask.width = 8, page.height = mask.height = 4 + 4 * p;
+      page.texels.assign((size_t)page.width * page.height, Vec3(0.5f));
+      mask.texels.resize(page.texels.size());
+      mask.alpha.resize(page.texels.size());
+      for (size_t i = 0; i < mask.texels.size(); i++) {
+        const float t = (float)i / (float)mask.texels.size();
+        mask.texels[i] = Vec3(t, 1.0f - t, std::fmod(t * 7.0f, 1.0f));
+        mask.alpha[i] = std::fmod(t * 3.0f + 0.31f, 1.0f);
+      }
+      ld.pages.push_back(page), ld.mask_pages.push_back(mask);
+    }
+    LightingData::Entry e;
+    e.page = 0;
+    ld.entries[1] = e;
+    ld.light_modes[7] = 7;
+    /* Old masks in the folder: a round 444 .hdr for each page. */
+    for (int p = 0; p < 2; p++) {
+      const std::vector<float> rgb((size_t)ld.pages[(size_t)p].texels.size() * 3, 0.5f);
+      CHECK(write_hdr(fs::join(dir, strprintf("ShadowMask-%d.hdr", p)), rgb.data(), ld.pages[(size_t)p].width, ld.pages[(size_t)p].height));
+    }
+    std::string err;
+    CHECK(ld.save(dir, err));
+    CHECK(fs::exists(fs::join(dir, "ShadowMask-0.png")) && fs::exists(fs::join(dir, "ShadowMask-1.png")));
+    CHECK(!fs::exists(fs::join(dir, "ShadowMask-0.hdr")) && !fs::exists(fs::join(dir, "ShadowMask-1.hdr")));
+    LightingData back;
+    CHECK(back.load(dir, err) && back.mask_pages.size() == 2 && back.light_modes.at(7) == 7);
+    float worst = 0.0f;
+    for (size_t p = 0; p < back.mask_pages.size(); p++)
+      for (size_t i = 0; i < ld.mask_pages[p].texels.size() && back.mask_pages[p].alpha.size() == ld.mask_pages[p].alpha.size(); i++) {
+        const Vec3 a = ld.mask_pages[p].texels[i], b = back.mask_pages[p].texels[i];
+        worst = std::max({worst, std::fabs(a.x - b.x), std::fabs(a.y - b.y), std::fabs(a.z - b.z), std::fabs(ld.mask_pages[p].alpha[i] - back.mask_pages[p].alpha[i])});
+      }
+    std::printf("    the PNG pages read back: worst difference %.5f (1/255 is %.5f)\n", worst, 1.0f / 255.0f);
+    CHECK(worst <= 1.0f / 255.0f);
+    /* A round 444 folder: the .hdr pages (three channels), no PNG. */
+    for (int p = 0; p < 2; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.png", p)).c_str());
+    const float levels[3] = {0.0f, 0.5f, 1.0f};
+    for (int p = 0; p < 2; p++) {
+      const Lightmap &pg = ld.pages[(size_t)p];
+      std::vector<float> rgb(pg.texels.size() * 3);
+      for (size_t i = 0; i < pg.texels.size(); i++) rgb[i * 3] = levels[i % 3], rgb[i * 3 + 1] = levels[(i + 1) % 3], rgb[i * 3 + 2] = levels[(i + 2) % 3];
+      CHECK(write_hdr(fs::join(dir, strprintf("ShadowMask-%d.hdr", p)), rgb.data(), pg.width, pg.height));
+    }
+    LightingData old;
+    CHECK(old.load(dir, err) && old.mask_pages.size() == 2);
+    bool same = old.mask_pages.size() == 2;
+    for (size_t p = 0; same && p < 2; p++)
+      for (size_t i = 0; i < old.mask_pages[p].texels.size(); i++) {
+        const Vec3 t = old.mask_pages[p].texels[i];
+        same = same && std::fabs(t.x - levels[i % 3]) < 0.01f && std::fabs(t.y - levels[(i + 1) % 3]) < 0.01f && std::fabs(t.z - levels[(i + 2) % 3]) < 0.01f &&
+               old.mask_pages[p].sample4(Vec2(0.5f, 0.5f)).w == 1.0f && old.mask_pages[p].alpha[i] == 1.0f;
+      }
+    CHECK(same);
+    /* Neither file: the colour pages load, the masks stay out. */
+    for (int p = 0; p < 2; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.hdr", p)).c_str());
+    LightingData none;
+    CHECK(none.load(dir, err) && none.pages.size() == 2 && none.mask_pages.empty());
+    CHECK(none.light_modes.at(7) == 1);  // (a channel with no mask: the light shadows in realtime alone, not against a white mask)
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Distance Shadowmask (round 454): the key light's realtime shadow within 0.9 of the Shadow Distance, the mask beyond it, a fade between; plain Shadowmask is the darker of the two at every distance; a Mixed light without a realtime map keeps the mask", [] {
+    LightingEnv env;
+    env.shadowmask_mode = 1, env.shadow_distance = 100.0f;
+    const float near_v = shadowmask_visibility(env, true, 0.0f, 1.0f, 50.0f), far_v = shadowmask_visibility(env, true, 0.0f, 1.0f, 120.0f);
+    const float mid = shadowmask_visibility(env, true, 0.0f, 1.0f, 95.0f), edge = shadowmask_visibility(env, true, 0.0f, 1.0f, 90.0f);
+    std::printf("    realtime 0 / mask 1: %.2f at 0.5 D, %.2f at 0.9 D, %.2f at 0.95 D, %.2f at 1.2 D\n", near_v, edge, mid, far_v);
+    /* (The fade's edge to within a float step: 0.9f x D is not 90 exactly, and macOS's arm64 build fuses the multiply-add, so
+     * the edge came out 2.4e-7 there - the check is the blend's shape, not bit equality.) */
+    CHECK(near_v == 0.0f && edge < 1e-5f && std::fabs(mid - 0.5f) < 1e-4f && far_v == 1.0f);
+    CHECK(shadowmask_visibility(env, true, 1.0f, 0.0f, 50.0f) == 1.0f && shadowmask_visibility(env, true, 1.0f, 0.0f, 120.0f) == 0.0f);  // (a moving caster's shadow near, the mask's beyond)
+    CHECK(shadowmask_visibility(env, false, 1.0f, 0.25f, 120.0f) == 0.25f && shadowmask_visibility(env, false, 0.0f, 0.75f, 20.0f) == 0.0f);  // (no map: min)
+    env.shadowmask_mode = 0;
+    for (float d : {10.0f, 95.0f, 500.0f}) CHECK(shadowmask_visibility(env, true, 0.0f, 1.0f, d) == 0.0f && shadowmask_visibility(env, true, 1.0f, 0.25f, d) == 0.25f);
+    CHECK(light_mask_channel(4) == 0 && light_mask_channel(7) == 3 && light_mask_channel(8) == -1 && light_mask_channel(3) == -1);
+  });
+  test("Distance Shadowmask in the Game view (round 454): a ball moved after the bake shadows the floor within the Shadow Distance and not beyond it, as plain Shadowmask shadows it everywhere; changing the mode or the distance redraws without a bake; set Lighting.ShadowmaskMode and ShadowDistance work", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.viewport_device_for_test(1);
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    const uint64_t page_serial = ed.lighting_data_for_test().pages.empty() ? 0 : ed.lighting_data_for_test().pages[0].serial;
+    auto game = [&] {
+      r34_steps(ed, 3);
+      return r35_game(ed);
+    };
+    ed.command("set Lighting.ShadowmaskMode 0");
+    const std::vector<uint32_t> plain = game();
+    ed.command("set Lighting.ShadowmaskMode 1");
+    ed.command("set Lighting.ShadowDistance 1000");
+    const std::vector<uint32_t> within = game();
+    ed.command("set Lighting.ShadowDistance 0.1");  // (the field's smallest: every floor point is beyond it)
+    const std::vector<uint32_t> beyond = game();
+    CHECK(ed.scene().lighting.shadowmask_mode == 1 && std::fabs(ed.scene().lighting.shadow_distance - 0.1f) < 1e-6f);
+    ed.command("set Lighting.ShadowmaskMode 0");
+    const std::vector<uint32_t> plain_again = game();
+    const size_t near_diff = r35_diff_count(plain, within, 12), far_diff = r35_diff_count(plain, beyond, 12);
+    std::printf("    pixels differing from plain Shadowmask: %zu within the distance, %zu beyond it; plain again %zu\n", near_diff, far_diff, r35_diff_count(plain, plain_again, 0));
+    CHECK(far_diff > 150 && near_diff * 4 < far_diff);
+    CHECK(r35_diff_count(plain, plain_again, 0) == 0);  // (nothing else in the picture moved)
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().pages.empty() && ed.lighting_data_for_test().pages[0].serial == page_serial);  // (no rebake)
+  });
+  test("Distance Shadowmask without its masks (round 454): a saved Shadowmask bake whose ShadowMask pages are gone loads with its lights in realtime alone - the baked pages and modes of lights with no mask, the picture the same inside and beyond the Shadow Distance (no white mask to blend toward)", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.viewport_device_for_test(1);
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    const std::string scene = "Assets/Scenes/R454M.scene";
+    ed.command("save " + scene);
+    const std::string dir = ed.lighting_dir_for_test();
+    CHECK(!dir.empty() && fs::exists(fs::join(dir, "ShadowMask-0.png")));
+    for (int p = 0; p < 8; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.png", p)).c_str());
+    ed.command("open " + scene);
+    const LightingData &ld = ed.lighting_data_for_test();
+    bool masked = false;
+    for (const auto &kv : ld.light_modes) masked = masked || (kv.second >= 4 && kv.second <= 7);
+    CHECK(!ld.pages.empty() && ld.mask_pages.empty() && !masked);
+    ed.command("set Lighting.ShadowmaskMode 1");
+    auto game = [&](const char *d) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      r34_steps(ed, 3);
+      return r35_game(ed);
+    };
+    const std::vector<uint32_t> within = game("1000"), beyond = game("0.1");
+    const size_t diff = r35_diff_count(within, beyond, 6);
+    std::printf("    no masks: %zu pixels differ between inside and beyond the distance\n", diff);
+    CHECK(diff < 20);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::remove(resolve_asset_path(scene).c_str());
+  });
+  test("Unity's shadowmasks in the lightmaps file (round 454): version 4 written and read back with the mask pages, the lights' channels and the Quality settings; a version 3 file reads as before; the project's QualitySettings.asset read at its current level", [] {
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/S/Lightmap-0_comp_light.exr", p.width = 2, p.height = 2;
+    p.rgb.assign(12, 0x3800);
+    p.mask_width = 2, p.mask_height = 1;
+    p.mask = {255, 0, 128, 64, 0, 255, 0, 255};
+    u.pages.push_back(p);
+    u.lights.push_back({"Lamp[0]", 2, 1, 2});
+    u.lights.push_back({"Sun[0]", 1, 1, -1});
+    u.lights.push_back({"Spare[0]", 2, 1, -1, true});
+    u.shadowmask_mode = 0, u.shadow_distance = 40.0f;
+    const std::string bytes = write_unity_lighting(u);
+    UnityLighting back;
+    std::string why;
+    CHECK(read_unity_lighting(bytes, back, why));
+    CHECK(back.pages.size() == 1 && back.pages[0].mask == p.mask && back.pages[0].mask_width == 2 && back.lights.size() == 3 && back.lights[0].mask_channel == 2 &&
+          back.lights[1].mask_channel == -1 && !back.lights[1].overflow && back.lights[2].overflow && back.shadowmask_mode == 0 && back.shadow_distance == 40.0f);
+    Lightmap mp;
+    CHECK(unity_mask_page(back.pages[0], mp) && mp.width == 2 && mp.height == 1 && std::fabs(mp.texels[0].z - 128.0f / 255.0f) < 1e-5f && std::fabs(mp.alpha[0] - 64.0f / 255.0f) < 1e-5f);
+    /* Version 3: the same file without its tail (16 bytes: no masks, no channels, the two settings), the version turned back. */
+    UnityLighting plain = u;
+    plain.pages[0].mask.clear(), plain.pages[0].mask_width = plain.pages[0].mask_height = 0, plain.lights[0].mask_channel = -1, plain.lights[2].overflow = false, plain.shadowmask_mode = -1, plain.shadow_distance = -1.0f;
+    std::string v3 = write_unity_lighting(plain);
+    v3.resize(v3.size() - 4 - 16);
+    const int32_t three = 3;
+    std::memcpy(&v3[8], &three, 4);
+    const uint32_t sum = unity_lighting_hash(v3);
+    v3.append((const char *)&sum, 4);
+    UnityLighting old;
+    CHECK(read_unity_lighting(v3, old, why) && old.pages.size() == 1 && old.pages[0].mask.empty() && old.lights[0].mask_channel == -1 && old.shadowmask_mode == -1 && old.shadow_distance < 0.0f);
+    std::string broken = bytes;
+    broken[broken.size() / 2] ^= 0x55;
+    CHECK(!read_unity_lighting(broken, back, why));
+    const std::string quality =
+        "QualitySettings:\n  m_ObjectHideFlags: 0\n  serializedVersion: 5\n  m_CurrentQuality: 1\n  m_QualitySettings:\n"
+        "  - serializedVersion: 2\n    name: Low\n    shadowmaskMode: 0\n    shadowDistance: 20\n"
+        "  - serializedVersion: 2\n    name: Medium\n    shadowmaskMode: 1\n    shadowDistance: 75.5\n";
+    int mode = -1;
+    float dist = -1.0f;
+    CHECK(unity_quality_shadowmask(quality, mode, dist) && mode == 1 && std::fabs(dist - 75.5f) < 1e-4f && !unity_quality_shadowmask("nothing here\n", mode, dist));
+    const std::string proj = fs::join(test_dir(), "r454_project");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets/Scenes"));
+    fs::make_dirs(fs::join(proj, "ProjectSettings"));
+    CHECK(fs::write_file(fs::join(proj, "Assets/Scenes/Lit.unity"), "x") && unity_find_quality_settings(fs::join(proj, "Assets/Scenes/Lit.unity")).empty());
+    CHECK(fs::write_file(fs::join(proj, "ProjectSettings/QualitySettings.asset"), quality) && unity_find_quality_settings(fs::join(proj, "Assets/Scenes/Lit.unity")) == quality);  // (the project the scene stands in)
+    /* Blendity's own project (an Assets folder, no ProjectSettings) under a folder that has some: not that one's. */
+    fs::make_dirs(fs::join(proj, "Inner/Assets/Imported/Pkg"));
+    CHECK(fs::write_file(fs::join(proj, "Inner/Assets/Imported/Pkg/Lit.unity"), "x") && unity_find_quality_settings(fs::join(proj, "Inner/Assets/Imported/Pkg/Lit.unity")).empty());
+    std::filesystem::remove_all(proj, ec);
+  });
+  test("Unity's shadowmasks and channels in the editor (round 454): a Shadowmask scene's mask pages come in with the lightmaps (rows flipped), each Mixed lamp takes mode 4 + its channel, the project's Shadowmask Mode and Shadow Distance come from the file (Unity's defaults, Distance Shadowmask and 150 m, before it); a mask of another size leaves the masks out; an exported package carries the mask PNG as a Shadowmask texture and the Lighting Mode as m_MixedBakeMode", [] {
+    const std::string rel = "Assets/Imported/R454U";
+    const std::string dir = resolve_asset_path(rel), pkg = fs::join(test_dir(), "R454U.unitypackage");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4540eeee4540eeee4540eeee0001";
+    auto lamp = [](int id, const char *name, int x) {
+      const std::string n = std::to_string(id);
+      return "--- !u!1 &" + n + "0\nGameObject:\n  m_Name: " + name + "\n--- !u!4 &" + n + "1\nTransform:\n  m_GameObject: {fileID: " + n + "0}\n  m_LocalPosition: {x: " + std::to_string(x) +
+             ", y: 3, z: 0}\n  m_Father: {fileID: 0}\n--- !u!108 &" + n + "2\nLight:\n  m_GameObject: {fileID: " + n + "0}\n  m_Type: 2\n  m_Lightmapping: 1\n  m_Intensity: 1\n";
+    };
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"),
+                         "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightingSettings: {fileID: 4}\n--- !u!850595691 &4\nLightingSettings:\n  m_BakeResolution: 40\n  m_MixedBakeMode: 0\n"
+                         "--- !u!1 &10\nGameObject:\n  m_Name: Floor\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n" + lamp(20, "LampA", -3) + lamp(30, "LampB", 0) + lamp(40, "LampC", 3) + lamp(50, "LampD", 6)));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\t" + rel + "/Lit.unity\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("open " + rel + "/Lit.unity");
+    GameObject *floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->evaluated_mesh(1) && ed.scene().find_by_name("LampA"));
+    if (!floor || !floor->evaluated_mesh(1)) return;
+    std::printf("    the import's defaults: Shadowmask Mode %d, Shadow Distance %.0f\n", ed.scene().lighting.shadowmask_mode, ed.scene().lighting.shadow_distance);
+    CHECK(ed.scene().lighting.shadowmask_mode == 1 && ed.scene().lighting.shadow_distance == 150.0f);
+    const RenderMesh &rm = floor->evaluated_mesh(1)->render_mesh();
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/Lit/Lightmap-0_comp_light.exr", p.width = p.height = 8;
+    p.rgb.assign((size_t)8 * 8 * 3, 0x3800);
+    p.mask_width = p.mask_height = 8;
+    p.mask.resize((size_t)8 * 8 * 4);
+    for (int y = 0; y < 8; y++)  // (Unity's rows run up: its row 0 is the bottom)
+      for (int x = 0; x < 8; x++) {
+        uint8_t *c = &p.mask[((size_t)y * 8 + (size_t)x) * 4];
+        c[0] = y == 0 ? 255 : 0, c[1] = y == 7 ? 255 : 0, c[2] = (uint8_t)(x * 30), c[3] = 64;
+      }
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    for (size_t i = 0; i < rm.positions.size(); i++) m.positions.push_back(rm.positions[i]), m.uv.push_back(Vec2(rm.positions[i].x + 0.5f, rm.positions[i].z + 0.5f));
+    m.indices = rm.indices;
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.world = Mat4::identity();
+    u.renderers.push_back(r);
+    u.lights = {{"LampA[0]", 2, 1, 3}, {"LampB[0]", 2, 1, 0}, {"LampC[0]", 2, 1, -1, true}, {"LampD[0]", 2, 1, -1}};  // (C: Unity baked it as Baked; D: no channel, as a lamp added since)
+    u.shadowmask_mode = 0, u.shadow_distance = 40.0f;
+    const std::string file = fs::join(dir, "Lit.unity.unity-lighting");
+    ed.scene().unity_bake.mixed = 2;  // (the scene's Lighting Mode Shadowmask, as its LightingSettings said it)
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    CHECK(ed.apply_unity_lighting(file));
+    const LightingData &ld = ed.lighting_data_for_test();
+    GameObject *a = ed.scene().find_by_name("LampA"), *b = ed.scene().find_by_name("LampB"), *c = ed.scene().find_by_name("LampC");
+    GameObject *d = ed.scene().find_by_name("LampD");
+    CHECK(d && ld.light_modes.count(d->id) && ld.light_modes.at(d->id) == 1);  // (no channel and not baked as Baked: still Mixed)
+    CHECK(a && b && c && ld.light_modes.count(a->id) && ld.light_modes.count(b->id) && ld.light_modes.count(c->id));
+    if (!a || !b || !c || !ld.light_modes.count(c->id)) return;
+    std::printf("    the lamps' modes: %d %d %d; %zu mask page(s)\n", ld.light_modes.at(a->id), ld.light_modes.at(b->id), ld.light_modes.at(c->id), ld.mask_pages.size());
+    CHECK(ld.light_modes.at(a->id) == 7 && ld.light_modes.at(b->id) == 4 && ld.light_modes.at(c->id) == 2);  // (LampC: Mixed with no channel while others have one - past Unity's four: Baked)
+    CHECK(ld.mask_pages.size() == 1 && ld.mask_pages[0].width == 8 && ld.mask_pages[0].height == 8);
+    if (ld.mask_pages.size() == 1 && ld.mask_pages[0].width == 8) {
+      const Lightmap &mp = ld.mask_pages[0];
+      CHECK(mp.texels[7 * 8 + 3].x == 1.0f && mp.texels[3].x == 0.0f && mp.texels[3].y == 1.0f);  // (Unity's bottom row is Blendity's last)
+      CHECK(std::fabs(mp.alpha[5] - 64.0f / 255.0f) < 1e-5f && std::fabs(mp.texels[7 * 8 + 4].z - 120.0f / 255.0f) < 1e-5f);
+    }
+    /* A mask that isn't its lightmap's size: refused for this bake, the lamps stay Mixed. */
+    u.pages[0].mask_width = u.pages[0].mask_height = 4;
+    u.pages[0].mask.resize((size_t)4 * 4 * 4);
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    CHECK(ed.apply_unity_lighting(file) && ed.lighting_data_for_test().mask_pages.empty() && ed.lighting_data_for_test().light_modes.at(a->id) == 1);
+    /* The file's Quality values stay in the file: a re-apply never reverts the Inspector's own. */
+    ed.scene().lighting.shadowmask_mode = 1, ed.scene().lighting.shadow_distance = 77.0f;
+    CHECK(fs::write_file(file, write_unity_lighting(u)) && ed.apply_unity_lighting(file) && ed.scene().lighting.shadowmask_mode == 1 && ed.scene().lighting.shadow_distance == 77.0f);
+    /* The package back to Unity: a bake's mask PNG as a Shadowmask texture, the Lighting Mode in the scene's settings. */
+    ed.scene().lighting.lighting_mode = 1;
+    const uint32_t px[4] = {0xFF0000FFu, 0x80FF0000u, 0xFF00FF00u, 0x00FFFFFFu};
+    CHECK(write_png(fs::join(dir, "ShadowMask-0.png"), px, 2, 2, 2, true) && write_png(fs::join(dir, "Other.png"), px, 2, 2, 2, true));
+    CHECK(fs::write_file(fs::join(dir, "LightingData.bin"), "a bake's index"));  // (the mask is a bake's page only beside it)
+    ed.command("export unitypackage " + rel + " " + pkg);
+    std::string bytes, why;
+    std::vector<UnityAsset> assets;
+    CHECK(fs::read_file(pkg, bytes) && read_unity_package(bytes, assets, why));
+    const UnityAsset *mask = nullptr, *scene = nullptr;
+    for (const UnityAsset &asset : assets) {
+      mask = fs::filename(asset.pathname) == "ShadowMask-0.png" ? &asset : mask;
+      scene = fs::filename(asset.pathname) == "Lit.unity" ? &asset : scene;
+    }
+    CHECK(mask && scene);
+    if (mask) {
+      std::printf("    the mask's .meta: %s%s%s\n", mask->meta.find("textureType: 11") != std::string::npos ? "type 11 " : "", mask->meta.find("sRGBTexture: 0") != std::string::npos ? "linear " : "",
+                  mask->meta.find("textureCompression: 0") != std::string::npos ? "uncompressed" : "");
+      CHECK(mask->meta.find("guid: " + mask->guid) != std::string::npos && mask->meta.find("TextureImporter:") != std::string::npos && mask->meta.find("sRGBTexture: 0") != std::string::npos &&
+            mask->meta.find("textureCompression: 0") != std::string::npos && mask->meta.find("textureType: 11") != std::string::npos);
+    }
+    CHECK(scene && scene->data.find("m_MixedBakeMode: 2") != std::string::npos);
+    std::remove(pkg.c_str());
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
+/* ---------------------------------------------------------------- round 459: a bake after a streamed frame; a Unity project's lights at linear intensity (task 0435) */
+static void tests_round459() {
+  test("bake after a streamed frame (round 459): a material a view resolved while its image was still streaming (map missing, noted) resolves again with the map for a caller outside the stream scope - Generate Lighting's frozen copy bakes the texture, not the bare colour; the views keep their stand-in until the batch lands", [] {
+    const std::string tex = fs::join(test_dir(), "r459_dark.png");
+    std::vector<uint32_t> px(16 * 16, 0xFF101010u);  // (a dark map on a white material: bounced as white, SideRail's tunnels were lit 1.2-2.5x)
+    CHECK(write_png(tex, px.data(), 16, 16, 16));
+    std::vector<std::pair<std::string, bool>> misses;
+    MaterialPtr m = make_material("R459", Vec3(1.0f));
+    m->base_map.path = tex;
+    texture_cache_clear();
+    (void)take_texture_stream_misses(misses);
+    bool view_missing = false, view_again_missing = false;
+    {
+      TextureStreamScope on(true);  // (a view frame: the image isn't cached yet)
+      view_missing = m->textures().base == nullptr;
+    }
+    (void)take_texture_stream_misses(misses);
+    auto frozen = std::make_shared<Material>(*m);  // (what Editor::snapshot_material does for a bake)
+    frozen->freeze_textures();
+    const bool frozen_has_map = frozen->textures().base != nullptr;
+    const bool outside_has_map = m->textures().base != nullptr;  // (a render outside the scope)
+    {
+      TextureStreamScope on(true);  // (resolved in full now: the view keeps it)
+      view_again_missing = m->textures().base == nullptr;
+    }
+    std::printf("    the view's resolve: missing %d; the bake's frozen copy has the map %d, a render %d; the view after %d\n", (int)view_missing,
+                (int)frozen_has_map, (int)outside_has_map, (int)!view_again_missing);
+    CHECK(view_missing);
+    CHECK(frozen_has_map);
+    CHECK(outside_has_map);
+    CHECK(!view_again_missing);
+    /* Through the editor: a cube whose material a view resolved mid-stream, then Generate Lighting's gather. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Cube");
+    GameObject *g = ed.scene().find_by_name("Cube");
+    CHECK(g && g->get<MeshRenderer>());
+    if (!g || !g->get<MeshRenderer>()) return;
+    MaterialPtr cm = make_material("R459 cube", Vec3(1.0f));
+    cm->base_map.path = tex;
+    g->get<MeshRenderer>()->materials = {cm};
+    g->get<MeshRenderer>()->contribute_gi = true;  // (Contribute GI: in Generate Lighting's scene)
+    texture_cache_clear();
+    {
+      TextureStreamScope on(true);
+      CHECK(cm->textures().base == nullptr);
+    }
+    (void)take_texture_stream_misses(misses);
+    std::vector<BakeObject> objs;
+    std::vector<BakeLight> lights;
+    ed.collect_bake_scene_for_test(objs, lights);
+    bool baked_with_map = false;
+    for (const BakeObject &o : objs)
+      for (const MaterialPtr &bm : o.materials) baked_with_map = baked_with_map || (bm && bm->textures_frozen() && bm->textures().base != nullptr);
+    std::printf("    Generate Lighting's copy of the cube's material (%zu objects gathered) has its map: %d\n", objs.size(), (int)baked_with_map);
+    CHECK(!objs.empty());
+    CHECK(baked_with_map);
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(tex), ec);
+  });
+  test("lights at linear intensity (round 459): a Unity scene whose project has GraphicsSettings m_LightsUseLinearIntensity 1 opens with Lights Gamma off - an intensity-2 Baked point light bakes at 2, not 2^2.2 = 4.59; `unity lightsgamma on|off` switches it for a copy without ProjectSettings; a project without the settings keeps Unity's default (gamma)", [] {
+    CHECK(unity_lights_linear_intensity_text("GraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n  m_LightsUseColorTemperature: 1\n") == 1);
+    CHECK(unity_lights_linear_intensity_text("GraphicsSettings:\n  m_LightsUseLinearIntensity: 0\n") == 0);
+    CHECK(unity_lights_linear_intensity_text("GraphicsSettings:\n  m_AlwaysIncludedShaders: []\n") == -1);
+    const char *scene_text = "%YAML 1.1\n--- !u!1 &20\nGameObject:\n  m_Name: Lamp\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+                             "--- !u!108 &22\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 2\n  m_Intensity: 2\n  m_Range: 5\n  m_Color: {r: 1, g: 1, b: 1, a: 1}\n  m_Lightmapping: 2\n";
+    const std::string root = resolve_asset_path("Assets/Imported/R459");
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(root), ec);
+    fs::make_dirs(fs::join(root, "Linear/ProjectSettings"));
+    fs::make_dirs(fs::join(root, "Linear/Assets"));
+    fs::make_dirs(fs::join(root, "Bare/Assets"));
+    CHECK(fs::write_file(fs::join(root, "Linear/ProjectSettings/GraphicsSettings.asset"), "%YAML 1.1\n--- !u!30 &1\nGraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n"));
+    CHECK(fs::write_file(fs::join(root, "Linear/Assets/Lamp.unity"), scene_text));
+    CHECK(fs::write_file(fs::join(root, "Bare/Assets/Lamp.unity"), scene_text));
+    CHECK(unity_lights_linear_intensity("Assets/Imported/R459/Linear/Assets/Lamp.unity") == 1);
+    CHECK(unity_lights_linear_intensity("Assets/Imported/R459/Bare/Assets/Lamp.unity") == -1);
+    /* The bake's light: its colour x intensity's luminance. */
+    auto baked = [](Editor &ed) {
+      std::vector<BakeObject> objs;
+      std::vector<BakeLight> lights;
+      ed.collect_bake_scene_for_test(objs, lights);
+      for (const BakeLight &l : lights)
+        if (l.mode == 2) return light_pick_luma(l.light);
+      return -1.0f;
+    };
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("open Assets/Imported/R459/Linear/Assets/Lamp.unity");
+    const bool linear_off = !ed.scene().unity.lights_gamma;
+    const float linear = baked(ed);
+    ed.command("unity lightsgamma on");
+    const float gamma = baked(ed);
+    ed.command("unity lightsgamma off");
+    const float back = baked(ed);
+    Editor bare;
+    bare.init_headless(400, 300);
+    bare.command("open Assets/Imported/R459/Bare/Assets/Lamp.unity");
+    const bool bare_gamma = bare.scene().unity.lights_gamma;
+    const float bare_light = baked(bare);
+    std::printf("    with the project's settings: Lights Gamma off %d, the bake's light %.3f; switched on %.3f, off again %.3f; no project settings: gamma %d, %.3f\n",
+                (int)linear_off, linear, gamma, back, (int)bare_gamma, bare_light);
+    CHECK(linear_off);
+    CHECK(std::fabs(linear - 2.0f) < 1e-3f);
+    CHECK(std::fabs(gamma - std::pow(2.0f, 2.2f)) < 0.05f);  // (Unity's built-in default: 2 in gamma, about 4.6 in linear light)
+    CHECK(std::fabs(back - 2.0f) < 1e-3f);
+    CHECK(bare_gamma && std::fabs(bare_light - gamma) < 1e-3f);
+    /* Review 459: the walk stops at the project root - a ProjectSettings above a copy holding only Assets is another
+     * project's; a binary GraphicsSettings (no readable field) is told apart from none. */
+    fs::make_dirs(fs::join(root, "Outer/ProjectSettings"));
+    fs::make_dirs(fs::join(root, "Outer/Copy/Assets"));
+    fs::make_dirs(fs::join(root, "Bin/ProjectSettings"));
+    fs::make_dirs(fs::join(root, "Bin/Assets"));
+    CHECK(fs::write_file(fs::join(root, "Outer/ProjectSettings/GraphicsSettings.asset"), "GraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n"));
+    CHECK(fs::write_file(fs::join(root, "Outer/Copy/Assets/Lamp.unity"), scene_text));
+    CHECK(fs::write_file(fs::join(root, "Bin/ProjectSettings/GraphicsSettings.asset"), std::string("\x00\x01\x02 binary", 10)));
+    CHECK(fs::write_file(fs::join(root, "Bin/Assets/Lamp.unity"), scene_text));
+    const int outer = unity_lights_linear_intensity("Assets/Imported/R459/Outer/Copy/Assets/Lamp.unity");
+    const int binary = unity_lights_linear_intensity("Assets/Imported/R459/Bin/Assets/Lamp.unity");
+    /* A scene saved with Lights Gamma on from the linear project (as every scene saved before round 459): opening it says
+     * how to light it as Unity does, and leaves the saved value. */
+    ed.command("unity lightsgamma on");
+    ed.command("save Assets/Imported/R459/Linear/Assets/Saved.scene");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("open Assets/Imported/R459/Linear/Assets/Saved.scene");
+    log.clear();
+    Log::fetch(since, log);
+    bool told = false;
+    for (const LogEntry &e : log) told = told || e.text.find("unity lightsgamma off") != std::string::npos;
+    std::printf("    a ProjectSettings above a bare copy: %d (-1: not read); a binary one: %d; the old saved scene told %d, kept gamma %d\n", outer, binary,
+                (int)told, (int)ed.scene().unity.lights_gamma);
+    CHECK(outer == -1);
+    CHECK(binary == -2);
+    CHECK(told && ed.scene().unity.lights_gamma);
+    std::filesystem::remove_all(std::filesystem::u8path(root), ec);
+  });
+}
+
+/* ---------------------------------------------------------------- round 455: SH deringing, Light Probe Groups as objects (task 0431) */
+static void tests_round455() {
+  test("probe SH deringing (round 455): the window's factors are Hanning (1, 0.854, 0.5) and Lanczos (1, 0.900, 0.637) at w = 4, none when Off; one lamp of 20 over a uniform sky of 1 rings to 0.21 when Off and no lower than 0.5 under either window, with 2.25 behind (truth 1.0) down to 0.98 under Lanczos; the average over the sphere never moves", [] {
+    const auto off = window_factors(0, 4.0f), han = window_factors(1, 4.0f), lan = window_factors(2, 4.0f);
+    std::printf("    w=4: Hanning %.3f %.3f %.3f, Lanczos %.3f %.3f %.3f\n", han[0], han[1], han[2], lan[0], lan[1], lan[2]);
+    CHECK(off[0] == 1.0f && off[1] == 1.0f && off[2] == 1.0f);
+    CHECK(han[0] == 1.0f && lan[0] == 1.0f);  // (band 0 is never scaled)
+    CHECK(std::fabs(han[1] - 0.854f) < 0.001f && std::fabs(han[2] - 0.5f) < 1e-5f);
+    CHECK(std::fabs(lan[1] - 0.900f) < 0.001f && std::fabs(lan[2] - 0.637f) < 0.001f);
+    const auto bad = window_factors(1, std::nanf(""));
+    CHECK(bad[1] == 1.0f && bad[2] == 1.0f);  // (not a number: no window)
+    ProbeSH sh;
+    sh.add_direct(Vec3(0, 1, 0), Vec3(20.0f));
+    sh.c[0] += Vec3(1.0f / 0.282095f);  // (a uniform sky of radiance 1: irradiance / pi = 1 everywhere)
+    auto darkest = [&](const std::array<float, 3> &w) {
+      float lo = 1e9f;
+      for (int i = 0; i <= 2000; i++) {
+        const float t = -1.0f + 2.0f * (float)i / 2000.0f;  // n.l along the lamp's axis
+        lo = std::min(lo, sh.eval_raw(Vec3(std::sqrt(1.0f - t * t), t, 0), w).x);
+      }
+      return lo;
+    };
+    const float behind_off = sh.eval_raw(Vec3(0, -1, 0)).x, behind_lan = sh.eval_raw(Vec3(0, -1, 0), lan).x, peak_off = sh.eval_raw(Vec3(0, 1, 0)).x,
+                peak_lan = sh.eval_raw(Vec3(0, 1, 0), lan).x, peak_han = sh.eval_raw(Vec3(0, 1, 0), han).x;
+    std::printf("    darkest: Off %.3f, Hanning %.3f, Lanczos %.3f; behind (truth 1.0): Off %.3f, Lanczos %.3f; the peak (truth 21): Off %.2f, Hanning %.2f, Lanczos %.2f\n", darkest(off),
+                darkest(han), darkest(lan), behind_off, behind_lan, peak_off, peak_han, peak_lan);
+    CHECK(std::fabs(darkest(off) - 0.21f) < 0.01f);
+    CHECK(darkest(han) >= 0.5f && darkest(lan) >= 0.5f && std::fabs(darkest(han) - 0.55f) < 0.01f && std::fabs(darkest(lan) - 0.62f) < 0.02f);
+    CHECK(std::fabs(behind_off - 2.25f) < 0.01f && std::fabs(behind_lan - 0.98f) < 0.02f);
+    CHECK(peak_lan < peak_off && peak_han < peak_lan);  // (the price: the lamp's peak drops)
+    /* The mean over the sphere is band 0 alone: windowing leaves it where it was (the unclamped sums). */
+    double m_off = 0, m_lan = 0;
+    const int N = 4096;
+    for (int i = 0; i < N; i++) {
+      const float z = 1.0f - 2.0f * (i + 0.5f) / N, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+      const Vec3 n(r * std::cos(phi), z, r * std::sin(phi));
+      m_off += sh.eval_raw(n).x, m_lan += sh.eval_raw(n, lan).x;
+    }
+    CHECK(std::fabs(m_off / N - m_lan / N) < 0.005);
+  });
+  test("probe SH deringing in the views' sampling (round 455): a baked probe sampled with the window on gives the windowed SH, Off gives round 454's value exactly", [] {
+    ProbeVolumeData d;
+    probe_place(d, AABB{Vec3(-1.0f), Vec3(1.0f)}, {}, 1.0f, 1.0f);
+    CHECK(!d.empty());
+    if (d.empty()) return;
+    const size_t n = d.probe_count();
+    d.baked.assign(n, ProbeCube{}), d.live.assign(n, ProbeCube{}), d.live_ok.assign(n, 0), d.valid.assign(n, 1);
+    ProbeSH one;
+    one.add_direct(Vec3(0, 1, 0), Vec3(20.0f));
+    d.sh.assign(n, one);
+    d.scene_key = 1;
+    const Vec3 back(0, -1, 0);
+    Vec3 plain, windowed;
+    CHECK(d.sample(Vec3(0.0f), back, Vec3(0.0f), false, plain, false));
+    const auto lan = window_factors(2, 4.0f);
+    CHECK(d.sample(Vec3(0.0f), back, Vec3(0.0f), false, windowed, false, nullptr, nullptr, &lan));
+    const float expect_plain = one.eval(back).x, expect_win = one.eval(back, lan).x;
+    std::printf("    behind a lamp of 20: Off %.4f, Lanczos %.4f\n", plain.x, windowed.x);
+    CHECK(plain.x == expect_plain && std::fabs(windowed.x - expect_win) < 1e-5f && windowed.x < plain.x);
+  });
+  test("light probe groups (round 455): a new group has Unity's eight probes at a 1 m cube's corners; its probes survive save / load, clone and undo exactly; the Inspector shows a count, not a row a probe", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("create Light Probe Group");
+    GameObject *g = ed.scene().find_by_name("Light Probe Group");
+    CHECK(g && g->probe_group() && g->point_source() == g->probe_group());
+    if (!g || !g->probe_group()) return;
+    LightProbeGroupComponent *pg = g->probe_group();
+    bool corners = pg->positions.size() == 8;
+    for (const Vec3 &p : pg->positions) corners = corners && std::fabs(std::fabs(p.x) - 0.5f) < 1e-6f && std::fabs(std::fabs(p.y) - 0.5f) < 1e-6f && std::fabs(std::fabs(p.z) - 0.5f) < 1e-6f;
+    CHECK(corners);
+    g->name = "Probes";
+    const std::vector<Vec3> odd = {Vec3(0.1f, 1.0f / 3.0f, -7.123456f), Vec3(1e-7f, 123456.78f, 0.7f), Vec3(-2.5f, 3.14159265f, 1e5f)};
+    pg->positions = odd;
+    ed.mark_changed_for_test("R455 probes");
+    r34_steps(ed, 3);
+    auto same = [&](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+      if (a.size() != b.size()) return false;
+      for (size_t i = 0; i < a.size(); i++)
+        if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].z != b[i].z) return false;
+      return true;
+    };
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *bg = back.find_by_name("Probes");
+    CHECK(bg && bg->probe_group() && same(bg->probe_group()->positions, odd));
+    CHECK(same(static_cast<LightProbeGroupComponent *>(pg->clone().get())->positions, odd));
+    /* A group with none at all reads back with none (not Unity's eight). */
+    pg->positions.clear();
+    Scene empty_back;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), empty_back, err));
+    CHECK(empty_back.find_by_name("Probes") && empty_back.find_by_name("Probes")->probe_group() && empty_back.find_by_name("Probes")->probe_group()->positions.empty());
+    pg->positions = odd;
+    /* The Inspector: a count and buttons. */
+    r34_steps(ed, 3);
+    const std::vector<std::string> labels = ed.button_labels_for_test();
+    auto has = [&](const std::string &l) { return std::find(labels.begin(), labels.end(), l) != labels.end(); };
+    std::printf("    the Inspector: %s, Add Probe %d\n", has("shown:Probes: 3") ? "\"Probes: 3\"" : "no count", (int)has("Add Probe"));
+    CHECK(has("shown:Probes: 3") && has("Add Probe") && has("Select All"));
+    size_t rows = 0;
+    for (const std::string &l : labels) rows += l.find("Position") != std::string::npos || l.find("field:P0") != std::string::npos;
+    CHECK(rows == 0);  // (no row a probe)
+    /* Undo restores the probes. */
+    pg->positions.push_back(Vec3(9, 9, 9));
+    ed.mark_changed_for_test("R455 more");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Probes");
+    CHECK(u && u->probe_group() && same(u->probe_group()->positions, odd));
+  });
+  test("Unity's Light Probe Group imports as an object (round 455): three m_SourcePositions under a moved, scaled Transform come in as a LightProbeGroup with those local positions and the right world positions, its document kept for the export; an older scene file's Engine Component gains the probes on load", [] {
+    const std::string rel = "Assets/Imported/R455G";
+    const std::string dir = resolve_asset_path(rel);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4550eeee4550eeee4550eeee0001";
+    CHECK(fs::write_file(fs::join(dir, "Probes.unity"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: ProbeGroup\n"
+                         "--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalPosition: {x: 2, y: 0, z: 0}\n  m_LocalScale: {x: 2, y: 2, z: 2}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!220 &12\nLightProbeGroup:\n  m_GameObject: {fileID: 10}\n  m_Enabled: 1\n  m_SourcePositions:\n  - {x: 1, y: 0, z: 0}\n  - {x: 0, y: 1, z: 0}\n  - {x: 0, y: 0, z: 1}\n  m_Dering: 0\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Probes.unity\t" + rel + "/Probes.unity\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("open " + rel + "/Probes.unity");
+    GameObject *g = ed.scene().find_by_name("ProbeGroup");
+    CHECK(g && g->probe_group());
+    if (!g || !g->probe_group()) return;
+    const std::vector<Vec3> &p = g->probe_group()->positions;
+    CHECK(p.size() == 3 && p[0].x == 1.0f && p[1].y == 1.0f && p[2].z == 1.0f);
+    const Vec3 w0 = g->world_matrix().point(p[0]), w1 = g->world_matrix().point(p[1]), w2 = g->world_matrix().point(p[2]);
+    std::printf("    world positions (%.1f %.1f %.1f) (%.1f %.1f %.1f) (%.1f %.1f %.1f)\n", w0.x, w0.y, w0.z, w1.x, w1.y, w1.z, w2.x, w2.y, w2.z);
+    CHECK(std::fabs(w0.x - 4.0f) < 1e-5f && std::fabs(w1.x - 2.0f) < 1e-5f && std::fabs(w1.y - 2.0f) < 1e-5f && std::fabs(w2.z - 2.0f) < 1e-5f);
+    /* The document is kept, read-only, for the export to write back unchanged. */
+    const EngineComponent *kept = g->get<EngineComponent>();
+    CHECK(kept && kept->native && kept->type == "LightProbeGroup" && kept->data.find("m_SourcePositions") != std::string::npos && g->probe_group()->enabled);
+    /* A scene saved before this round holds only the Engine Component: loading it gives the probes too. */
+    Scene old;
+    GameObject *og = old.create("OldGroup");
+    EngineComponent *oe = og->add<EngineComponent>();
+    oe->engine = "Unity", oe->type = "LightProbeGroup", oe->data = kept ? kept->data : std::string();
+    Scene loaded;
+    std::string lerr;
+    CHECK(load_scene_text(save_scene_text(old), loaded, lerr));
+    GameObject *lg = loaded.find_by_name("OldGroup");
+    CHECK(lg && lg->probe_group() && lg->probe_group()->positions.size() == 3 && lg->probe_group()->positions[1].y == 1.0f);
+    CHECK(lg && lg->get<EngineComponent>() && lg->get<EngineComponent>()->data == oe->data);
+    Scene again;
+    CHECK(load_scene_text(save_scene_text(loaded), again, lerr) && again.find_by_name("OldGroup") && again.find_by_name("OldGroup")->probe_group()->positions.size() == 3);
+    size_t groups = 0;
+    for (const auto &c : again.find_by_name("OldGroup")->components) groups += std::string(c->type_name()) == "LightProbeGroup";
+    CHECK(groups == 1);
+    /* Deleted since: it stays deleted on reload. */
+    GameObject *dg = loaded.find_by_name("OldGroup");
+    for (size_t i = 0; dg && i < dg->components.size(); i++)
+      if (dg->components[i]->render_role() == Component::RenderRole::ProbeGroup) dg->components.erase(dg->components.begin() + (long)i--);
+    Scene gone;
+    CHECK(load_scene_text(save_scene_text(loaded), gone, lerr) && gone.find_by_name("OldGroup") && !gone.find_by_name("OldGroup")->probe_group());
+    CHECK(ed.probe_group_points_for_test().size() == 3);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("a volume over placed probes (round 455): the grid's probes take their tetrahedron's four by barycentric weights - checked against Tetrahedra directly - and a grid probe on a placed one holds exactly its SH and cube, sky shares and all", [] {
+    std::vector<Vec3> at;
+    std::vector<ProbeSH> sh;
+    std::vector<ProbeCube> cubes;
+    for (int k = 0; k < 8; k++) {
+      at.push_back(Vec3(k & 1 ? 0.5f : -0.5f, 1.0f + (k & 2 ? 0.5f : -0.5f), k & 4 ? 0.5f : -0.5f));
+      ProbeSH s;
+      s.c[0] = Vec3((float)k + 1.0f, 0.5f * (float)k, 1.0f), s.c[3] = Vec3(0.1f * (float)k);
+      sh.push_back(s);
+      ProbeCube c;
+      for (size_t j = 0; j < 6; j++) c.bounce[j] = Vec3((float)k), c.sky[j] = 0.1f * (float)k;
+      cubes.push_back(c);
+    }
+    ProbeVolumeData d;
+    probe_volume_from_points(at, sh, cubes, d);
+    const size_t n = d.probe_count();
+    std::printf("    %zu placed probes: a grid of %zu probes, %zu inside the tetrahedra\n", at.size(), n, d.unity_tetra_inside);
+    CHECK(n > 8 && d.sh.size() == n && d.baked.size() == n && d.valid.size() == n && d.live_ok.size() == n && d.unity_tetra_inside > 0);
+    Tetrahedra tets;
+    CHECK(tets.build(at));
+    int checked = 0, on_probe = 0;
+    float worst = 0.0f;
+    int hint = -1;
+    for (size_t i = 0; i < n; i++) {
+      int t = -1;
+      float w[4];
+      if (tets.locate(d.position[i], t, w, hint)) {
+        hint = t;
+        ProbeSH want;
+        float sky = 0.0f;
+        for (int c = 0; c < 4; c++) want += sh[(size_t)tets.tets[(size_t)t][(size_t)c]] * w[c], sky += cubes[(size_t)tets.tets[(size_t)t][(size_t)c]].sky[0] * w[c];
+        worst = std::max(worst, std::fabs(d.sh[i].c[0].x - want.c[0].x) + std::fabs(d.sh[i].c[3].x - want.c[3].x) + std::fabs(d.baked[i].sky[0] - sky));
+        checked++;
+      }
+      for (size_t k = 0; k < at.size(); k++)
+        if (length(d.position[i] - at[k]) < 1e-4f) {
+          on_probe++;
+          worst = std::max(worst, std::fabs(d.sh[i].c[0].x - sh[k].c[0].x) + std::fabs(d.baked[i].bounce[2].x - cubes[k].bounce[2].x));
+        }
+    }
+    std::printf("    %d grid probes checked against the tetrahedra, %d on a placed probe, worst difference %.2g\n", checked, on_probe, (double)worst);
+    CHECK(checked > 8 && worst < 1e-3f);
+    CHECK(on_probe >= 1);
+    /* What the views read at each placed probe (trilinear over the grid): its own light, within a thousandth - the grid has a
+     * probe on each of these corners, so the weights fall on it. */
+    float sample_worst = 0.0f;
+    const Vec3 face = normalize(Vec3(1, 1, 0));
+    for (size_t k = 0; k < at.size(); k++) {
+      Vec3 got;
+      CHECK(d.sample(at[k], face, Vec3(0.0f), false, got, false));
+      sample_worst = std::max(sample_worst, std::fabs(got.x - sh[k].eval(face).x));
+    }
+    std::printf("    sample() at each placed probe: worst difference from its SH %.2g\n", (double)sample_worst);
+    CHECK(sample_worst < 1e-3f);
+    ProbeVolumeData none;
+    probe_volume_from_points({}, {}, {}, none);
+    CHECK(none.empty());
+  });
+  test("Generate Lighting bakes at a Light Probe Group's probes (round 455): a group of 8 probes beside a red emissive wall and no Probe Volume bakes a volume over them, red where the wall is; moving the group 2 m and baking again moves the volume and its red with it; a probe moved is out of date and undone is current; a scene without a group keeps its key", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *wall = r35_add(ed, "Cube", "Wall", {4.0f, 1.5f, 0}, {0.2f, 3.0f, 6.0f}, Vec3(0.8f));
+    wall->get<MeshRenderer>()->materials[0]->emission = Vec3(1.0f, 0.05f, 0.05f);
+    wall->get<MeshRenderer>()->materials[0]->emission_strength = 6.0f;
+    ed.commit_change("r455 scene");
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.probes_for_test().empty());  // (no Probe Volume, no group: no probes)
+    const uint64_t key_plain = ed.lighting_data_for_test().scene_key;
+    ed.command("create Light Probe Group");
+    GameObject *grp = ed.scene().find_by_name("Light Probe Group");
+    CHECK(grp && grp->probe_group());
+    if (!grp || !grp->probe_group()) return;
+    grp->name = "Probes";
+    grp->set_world_position(Vec3(0.0f, 1.0f, 0.0f));
+    ed.commit_change("r455 group");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());  // (a group was added: the bake is no longer this scene's)
+    r35_bake(ed);
+    const ProbeVolumeData &d1 = ed.probes_for_test();
+    CHECK(!ed.lighting_out_of_date_for_test() && !d1.empty() && d1.scene_key == ed.lighting_data_for_test().scene_key && d1.sh.size() == d1.probe_count());
+    if (d1.empty()) return;
+    AABB box1;
+    for (const Vec3 &p : d1.position) box1.add(p);
+    Vec3 red1(0.0f);
+    CHECK(d1.sample(Vec3(0.4f, 1.0f, 0.0f), Vec3(1, 0, 0), ed.env_for_test().irradiance(Vec3(1, 0, 0)), false, red1, false, nullptr, &ed.env_for_test()));
+    std::printf("    volume of %zu grid probes from x %.2f to %.2f; light facing the wall (%.3f %.3f %.3f)\n", d1.probe_count(), box1.min.x, box1.max.x, red1.x, red1.y, red1.z);
+    CHECK(red1.x > 1.5f * red1.y && red1.x > 1.5f * red1.z);
+    /* Moving a probe by the console: out of date; undo: current again. */
+    ed.command("points move Probes 0 -0.5 -0.5 -0.9");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    /* The group 2 m toward the wall: the next bake's volume moves with it and sees more of the wall. */
+    ed.scene().find_by_name("Probes")->set_world_position(Vec3(2.0f, 1.0f, 0.0f));
+    ed.commit_change("r455 moved");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());
+    r35_bake(ed);
+    const ProbeVolumeData &d2 = ed.probes_for_test();
+    AABB box2;
+    for (const Vec3 &p : d2.position) box2.add(p);
+    Vec3 red2(0.0f);
+    CHECK(!d2.empty() && d2.sample(Vec3(2.4f, 1.0f, 0.0f), Vec3(1, 0, 0), ed.env_for_test().irradiance(Vec3(1, 0, 0)), false, red2, false, nullptr, &ed.env_for_test()));
+    std::printf("    moved: x %.2f to %.2f (was %.2f to %.2f); light facing the wall %.3f (was %.3f)\n", box2.min.x, box2.max.x, box1.min.x, box1.max.x, red2.x, red1.x);
+    CHECK(std::fabs((box2.min.x - box1.min.x) - 2.0f) < 0.3f && red2.x > red1.x);
+    /* Without the group, back to the key a round 454 bake holds. */
+    ed.scene().find_by_name("Probes")->active = false;
+    ed.commit_change("r455 off");
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().scene_key == key_plain && ed.probes_for_test().empty());
+  });
+  test("Unity's own probes stay as Unity baked them (round 455): with Remove Ringing on, a volume from Unity's lighting file is read through no window, and Generate Lighting's own probes - in the place of Unity's - take it", [] {
+    const std::string rel = "Assets/Imported/R455U";
+    const std::string dir = resolve_asset_path(rel);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4551eeee4551eeee4551eeee0001";
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"),
+                         "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightingSettings: {fileID: 4}\n--- !u!850595691 &4\nLightingSettings:\n  m_BakeResolution: 40\n  m_MixedBakeMode: 0\n"
+                         "--- !u!1 &10\nGameObject:\n  m_Name: Floor\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\t" + rel + "/Lit.unity\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("open " + rel + "/Lit.unity");
+    GameObject *floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->evaluated_mesh(1));
+    if (!floor || !floor->evaluated_mesh(1)) return;
+    const RenderMesh &rm = floor->evaluated_mesh(1)->render_mesh();
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/Lit/Lightmap-0_comp_light.exr", p.width = p.height = 8;
+    p.rgb.assign((size_t)8 * 8 * 3, 0x3800);
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    for (size_t i = 0; i < rm.positions.size(); i++) m.positions.push_back(rm.positions[i]), m.uv.push_back(Vec2(rm.positions[i].x + 0.5f, rm.positions[i].z + 0.5f));
+    m.indices = rm.indices;
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.world = Mat4::identity();
+    u.renderers.push_back(r);
+    for (int k = 0; k < 5; k++) {
+      UnityLighting::Probe pr;
+      pr.position = Vec3(k & 1 ? 1.0f : -1.0f, 1.0f + (k & 2 ? 1.0f : 0.0f), k & 4 ? 1.0f : -1.0f);
+      pr.seen.assign(26, Vec3(0.4f + 0.1f * (float)k));
+      u.probes.push_back(pr);
+    }
+    const std::string file = fs::join(dir, "Lit.unity.unity-lighting");
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    CHECK(ed.apply_unity_lighting(file));
+    ed.scene().lighting.probe_dering = 2;
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::printf("    Unity's probes: %zu, window %.3f %.3f %.3f with Lanczos on\n", ed.probes_for_test().sh.size(), (double)ed.probe_window_for_test()[0],
+                (double)ed.probe_window_for_test()[1], (double)ed.probe_window_for_test()[2]);
+    CHECK(!ed.probes_for_test().sh.empty() && ed.probe_window_for_test()[1] == 1.0f && ed.probe_window_for_test()[2] == 1.0f);
+    /* Generate Lighting's own probes (a group's, here) in Unity's place: windowed. */
+    ed.command("create Light Probe Group");
+    floor->get<MeshRenderer>()->contribute_gi = true;  // (an import without static flags: nothing to bake otherwise)
+    ed.commit_change("r455 floor");
+    ed.command("bake start");
+    CHECK(ed.baking_for_test());
+    for (int i = 0; i < 200 && ed.baking_for_test(); i++) ed.step_frame_headless();
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && !ed.probes_for_test().empty());
+    std::printf("    after Generate Lighting: %zu probes, window %.3f %.3f, key %llu\n", ed.probes_for_test().probe_count(), (double)ed.probe_window_for_test()[1], (double)ed.probe_window_for_test()[2], (unsigned long long)ed.probes_for_test().scene_key);
+    CHECK(std::fabs(ed.probe_window_for_test()[1] - 0.900f) < 0.001f && std::fabs(ed.probe_window_for_test()[2] - 0.637f) < 0.001f);
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -7067,4 +8306,10 @@ void run_lighting_tests() {
   tests_round441();
   tests_round442();
   tests_round444();
+  tests_round451();
+  tests_round452();
+  tests_round453();
+  tests_round454();
+  tests_round459();
+  tests_round455();
 }

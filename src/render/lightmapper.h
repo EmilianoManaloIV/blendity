@@ -69,6 +69,9 @@ struct BakeLight;
  * records it as 3: in the lightmaps, realtime on moving objects); every other Mixed light becomes Baked (in the lightmaps
  * and the probes, as Unity's Subtractive bakes them). Returns the main light's index or -1. */
 int subtractive_split(std::vector<BakeLight> &lights);
+/* Round 454 (review): in a Shadowmask bake the Mixed lights past the mask's four (the suns first, then by intensity) become
+ * Baked on the shared list, so every baker holds their direct light. Returns how many; logs once with `log`. */
+size_t shadowmask_split(std::vector<BakeLight> &lights, bool log = true);
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
 struct BakeObject {
@@ -87,7 +90,12 @@ struct BakeLight {
   RenderLight light;
   int mode = 0;
   uint64_t id = 0;  // the light's GameObject
+  /* Round 452: Unity's Indirect Multiplier (m_BounceIntensity) - how much of this light the bake bounces: the light the
+   * gathers' rays find (lightmaps, probes, Light Volumes) is scaled by it; its direct light is not. */
+  float indirect = 1.0f;
 };
+/* Round 452: the lights a bake's path tracer bounces - the Baked and Mixed ones, each at its Indirect Multiplier. */
+std::vector<RenderLight> bounce_lights(const std::vector<BakeLight> &lights);
 
 /* Round 424 (Unity's Baked Shadow Radius and Angle): how much of a light reaches o past what is in the way - over
  * `samples` stratified shadow rays into the cone the light fills seen from o (a point or spot light a ball of
@@ -115,11 +123,12 @@ struct LightingData {
    * (lightmap_direction_factor, Unity's DecodeDirectionalLightmap). */
   std::vector<Lightmap> dir_pages;
   /* Round 444: beside each page in a Shadowmask bake, the Mixed lights' visibility from the static scene, one channel a
-   * light (light_modes says which: 4 + channel). Empty otherwise. */
+   * light (light_modes says which: 4 + channel). Empty otherwise. Round 454: four channels (the colours and Lightmap::alpha),
+   * saved as ShadowMask-N.png. */
   std::vector<Lightmap> mask_pages;
   std::map<uint64_t, Entry> entries;  // by GameObject id
   /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect; round 444: 3 a
-   * Subtractive Mixed light - direct and indirect in the lightmaps, realtime elsewhere; 4-6 a Shadowmask Mixed light and
+   * Subtractive Mixed light - direct and indirect in the lightmaps, realtime elsewhere; 4-7 a Shadowmask Mixed light and
    * its mask channel).
    * Realtime GI (task 0013) adds what isn't here. */
   std::map<uint64_t, int> light_modes;
@@ -234,7 +243,7 @@ class Lightmapper {
   static Vec3 saved_direction(Vec3 mean_direction);
  private:
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
-                  DirSum *dir_out = nullptr, Vec3 *mask_out = nullptr);
+                  DirSum *dir_out = nullptr, Vec4 *mask_out = nullptr);
   void assign_mask_channels();  // (round 444)
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
   std::vector<uint8_t> invalid_;  // (round 430: per texel, inside geometry - its rays mostly met back faces)
@@ -247,12 +256,12 @@ class Lightmapper {
  private:
   void finish_directions();
   void finish_masks();                   // (round 444)
-  std::vector<Vec3> masks_;              // (round 444: per texel, in a Shadowmask bake)
+  std::vector<Vec4> masks_;              // (round 444: per texel, in a Shadowmask bake; round 454: four channels)
   std::vector<int> mask_channel_;        // (round 444: per light, its mask channel or -1)
   bool bakes_direct(const BakeLight &bl) const { return bl.mode == 2 || (bl.mode == 1 && s_.lighting_mode == 2); }
-  Vec3 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
+  Vec4 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
  public:
-  static constexpr int kMaskChannels = 3;  // (a page's three colours: Unity keeps four)
+  static constexpr int kMaskChannels = 4;  // (round 454: Unity's four lights a texel; round 444 held three)
  private:
   std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams_;  // (round 440: the layout's seam pairs, per page)
   double seam_step_before_ = 0.0, seam_step_after_ = 0.0;
@@ -272,11 +281,9 @@ class Lightmapper {
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
   Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &rays) const;  // round 441
-  size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kPickLightsOver each texel picks among them)
+  size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kLightPickOver (light_pick.h) each texel picks among them)
  public:
-  static constexpr size_t kPickLightsOver = 8;
-  static constexpr float kPickRays = 8.0f;
-  static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)  // (the shadow-ray budget per texel the picking aims at, in expectation)
+  static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)
  private:
   /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are never clamped),
    * kept beside `values_` for the firefly clamp (task 0157); the emitters sampled at each texel apart (round 423: they

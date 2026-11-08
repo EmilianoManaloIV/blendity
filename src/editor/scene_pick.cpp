@@ -20,7 +20,8 @@ using ui::Icon;
 bool Editor::point_pick(const Recti &view, int mx, int my, int mode) {
   GameObject *g = active_object();
   const Component *pc = g && is_selected(g->id) ? g->point_source() : nullptr;
-  if (!pc || edit_mode_ || !show_points_) return false;  // (the layer off: not drawn, not picked - task 0146)
+  if (edit_mode_ || !show_points_) return false;  // (the layer off: not drawn, not picked - task 0146)
+  if (!pc) return probe_group_pick(view, mx, my, mode);
   int hit = -1;
   float best = (float)ui_.px(9);
   for (int i = 0; i < pc->control_point_count(); i++) {
@@ -30,13 +31,40 @@ bool Editor::point_pick(const Recti &view, int mx, int my, int mode) {
     const float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
     if (d < best) best = d, hit = (int)i;
   }
-  if (hit < 0) return false;
+  if (hit < 0) return probe_group_pick(view, mx, my, mode);
   if (pt_obj_ != g->id) pt_sel_.clear();
   pt_obj_ = g->id;
   auto it = std::find(pt_sel_.begin(), pt_sel_.end(), hit);
   if (mode == SEL_REPLACE) pt_sel_ = {hit};
   else if (it != pt_sel_.end()) pt_sel_.erase(it);
   else pt_sel_.push_back(hit);
+  return true;
+}
+
+/* Round 455 (ADR 0119): a click on a probe of a Light Probe Group that isn't the selected object selects that group (and the
+ * probe): the dots are drawn for every group, and a click on one should reach it. The nearest probe on screen wins. */
+bool Editor::probe_group_pick(const Recti &view, int mx, int my, int mode) {
+  GameObject *best_obj = nullptr;
+  int hit = -1;
+  float best = (float)ui_.px(9);
+  scene_->for_each([&](GameObject &g) {
+    const LightProbeGroupComponent *pg = g.active_in_hierarchy() ? g.probe_group() : nullptr;
+    if (!pg || !pg->enabled || (g.id == active_ && is_selected(g.id))) return;
+    const Mat4 &w = g.world_matrix();
+    const size_t count = pg->positions.size(), step = std::max<size_t>(1, count / 50000);  // (the dots' thinning: what is drawn is what is picked)
+    for (size_t k = 0; k < count; k += step) {
+      const int i = (int)k;
+      Vec2 sp;
+      float z;
+      if (!scene_r3d_.project(w.point(pg->positions[(size_t)i]), sp, z)) continue;
+      const float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
+      if (d < best) best = d, hit = i, best_obj = &g;
+    }
+  });
+  if (!best_obj) return false;
+  select(best_obj->id, mode == SEL_REPLACE ? SEL_REPLACE : SEL_ADD);
+  pt_obj_ = best_obj->id;
+  pt_sel_ = {hit};
   return true;
 }
 

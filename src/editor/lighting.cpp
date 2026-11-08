@@ -86,6 +86,13 @@ uint64_t Editor::lightmap_scene_key() {
   mix((uint64_t)ls.bounces);
   mix(ls.denoise);
   mixf(&ls.indirect_intensity, 1);
+  /* Round 455: Light Probe Groups' probes in the world, only when there are some - a scene without a group keeps the key
+   * its saved bakes hold. */
+  const std::vector<Vec3> group_points = probe_group_points();
+  if (!group_points.empty()) {
+    mix(group_points.size());
+    mixf(&group_points[0].x, group_points.size() * 3);
+  }
   return h ? h : 1;
 }
 
@@ -96,6 +103,29 @@ uint64_t Editor::lightmap_scene_key() {
  * in). Kept out of lightmap_scene_key, whose value every saved bake holds. */
 bool Editor::wants_directions() const {
   return scene_->lighting.directional_mode != 0 && !lighting_data_.empty() && lighting_data_.dir_pages.empty() && !lighting_from_unity_;
+}
+
+/* Round 455 (ADR 0119): the probes of every enabled Light Probe Group in an active object, in the world, in the scene's order. */
+std::vector<Vec3> Editor::probe_group_points() {
+  std::vector<Vec3> out;
+  scene_->for_each([&](GameObject &g) {
+    const LightProbeGroupComponent *pg = g.active_in_hierarchy() ? g.probe_group() : nullptr;
+    if (!pg || !pg->enabled) return;
+    const Mat4 &w = g.world_matrix();
+    for (const Vec3 &p : pg->positions) {
+      const Vec3 q = w.point(p);
+      if (finite_bits(q.x) && finite_bits(q.y) && finite_bits(q.z)) out.push_back(q);
+    }
+  });
+  return out;
+}
+
+/* Round 455 (ADR 0119): the window the baked probes' SH are evaluated under, from Remove Ringing and its width. Unity's own
+ * probes (a volume made from its lighting file) are shown as Unity baked them: it applied its Remove Ringing then. */
+void Editor::update_probe_window() {
+  const LightingSettings &ls = scene_->lighting;
+  const float w = finite_bits(ls.probe_dering_width) ? std::max(3.0f, std::min(16.0f, ls.probe_dering_width)) : 4.0f;
+  probe_window_ = lighting_from_unity_ ? std::array<float, 3>{1.0f, 1.0f, 1.0f} : window_factors(ls.probe_dering, w);
 }
 
 bool Editor::lighting_out_of_date() {
@@ -267,6 +297,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
     if (!g.active_in_hierarchy()) return;
     if (auto *l = g.get<Light>(); l && l->enabled) {
       lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
+      lights.back().indirect = l->bounce_intensity;  // (round 452: Unity's Indirect Multiplier)
       lights.back().light.baked_falloff = l->mode != 0;  // (round 425: Unity's built-in pipeline bakes with the legacy falloff)
     }
     auto *mr = g.get<MeshRenderer>();
@@ -362,6 +393,7 @@ void Editor::bake_start() {
   };
   collect_bake_scene(job->objects, job->lights);
   if (scene_->lighting.lighting_mode == 2) subtractive_split(job->lights);  // (round 444: Unity's Subtractive split)
+  if (scene_->lighting.lighting_mode == 1) shadowmask_split(job->lights);  // (round 454: a fifth Mixed light is Baked for every baker)
   part(0);
   /* Round 362 (the comparison's finding 10): nothing marked had baked "0 objects" without a word of why. */
   if (job->objects.empty()) return bake_refuse_empty();
@@ -390,6 +422,8 @@ void Editor::bake_start() {
   part(2);
   job->key = bake_key_ = lightmap_scene_key();
   job->probe_box_ok = probe_volume_box(job->probe_box);
+  job->group_points = probe_group_points();  // (round 455, ADR 0119: hand-placed probes replace the grid)
+  if (!job->group_points.empty() && job->probe_box_ok) Log::info("Generate Lighting: Light Probe Groups bake the probes; the Probe Volume component is ignored");
   job->probe_min_spacing = ls.probe_min_spacing, job->probe_max_spacing = ls.probe_max_spacing;
   job->indirect_samples = ls.indirect_samples, job->bounces = ls.bounces, job->indirect_intensity = ls.indirect_intensity;
   part(3);
@@ -457,7 +491,8 @@ void Editor::bake_job_run(BakeJob &j) {
   /* The probe volume (task 0014): placed from the scene the lightmaps were baked from, checked for geometry, baked. */
   j.phase.store(1);
   j.progress.store(-1.0f);
-  if (j.probe_box_ok) {
+  const bool grouped = !j.group_points.empty();
+  if (j.probe_box_ok || grouped) {
     std::vector<AABB> tris;
     std::vector<PTObject> objs;
     for (const BakeObject &o : j.objects) {
@@ -469,21 +504,28 @@ void Editor::bake_job_run(BakeJob &j) {
       }
       objs.push_back({&rm, o.model, &o.materials});
     }
-    probe_place(j.probe_volume, j.probe_box, tris, j.probe_min_spacing, j.probe_max_spacing);
-    if (!j.probe_volume.empty()) {
+    /* Round 455: with Light Probe Groups the probes are theirs, where they were put (Unity moves none); baked as a list,
+     * then a grid over their tetrahedra (probe_volume_from_points) is what the views read. */
+    ProbeVolumeData placed;
+    ProbeVolumeData &pv = grouped ? placed : j.probe_volume;
+    if (grouped) {
+      pv.position = j.group_points;
+      pv.valid.assign(pv.position.size(), 1);
+      pv.baked.assign(pv.position.size(), ProbeCube{});
+    }
+    else probe_place(pv, j.probe_box, tris, j.probe_min_spacing, j.probe_max_spacing);
+    if (pv.probe_count() > 0) {
       PathTracer pt;
       PTSettings ps;
       ps.max_bounces = std::max(0, j.bounces - 1);
       ps.denoise = false;
       ps.use_guiding = false;
       pt.set_settings(ps);
-      std::vector<RenderLight> lights;
-      for (const BakeLight &l : j.lights)
-        if (l.mode != 0) lights.push_back(l.light);
+      const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
       pt.build(objs, lights, j.env);
       say("Baking probes: checking for geometry...");
-      probe_validate(j.probe_volume, pt, 64);
-      const size_t n = j.probe_volume.probe_count();
+      if (!grouped) probe_validate(pv, pt, 64);
+      const size_t n = pv.probe_count();
       const int psamples = std::max(24, std::min(4096, j.indirect_samples / 4));
       int gpu = j.gpu;
       size_t next = 0;
@@ -491,7 +533,7 @@ void Editor::bake_job_run(BakeJob &j) {
         /* On a GPU about 8M rays a slice (their points go up at once: memory), on the CPU 1,024 probes. */
         const size_t slice = std::min<size_t>(n - next, gpu >= 0 ? std::max<size_t>(1, ((size_t)8 << 20) / (size_t)psamples) : 1024);
         std::string gerr;
-        probe_bake(j.probe_volume, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr);
+        probe_bake(pv, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr, &j.env);
         if (!gerr.empty()) {
           Log::warn("Baking probes on the GPU stopped (%s): the CPU bakes the rest", gerr.c_str());
           gpu = -1;
@@ -501,9 +543,15 @@ void Editor::bake_job_run(BakeJob &j) {
         say(strprintf("Baking probes %.0f%%  (%.1f s)", 100.0 * next / std::max<size_t>(1, n), whole.ms() / 1000.0));
       }
       if (j.cancel.load()) return;
+      if (grouped) {
+        probe_volume_from_points(pv.position, pv.sh, pv.baked, j.probe_volume);
+        j.probe_volume.sky_in_sh = pv.sky_in_sh, j.probe_volume.has_baked_sky = pv.has_baked_sky, j.probe_volume.baked_sky = pv.baked_sky;
+      }
       j.probe_volume.scene_key = j.key;  // (the last slice dilated the invalid probes)
       for (uint8_t v : j.probe_volume.valid) j.probes_valid += v;
-      Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - j.probes_valid, j.probe_volume.bricks.size());
+      const size_t total = j.probe_volume.probe_count();
+      if (grouped) Log::info("Probe volume: %zu placed probes baked, %zu grid probes over their tetrahedra, %zu bricks", n, total, j.probe_volume.bricks.size());
+      else Log::info("Probe volume: %zu probes (%zu inside geometry), %zu bricks", n, n - j.probes_valid, j.probe_volume.bricks.size());
     }
   }
   phase_done(1);
@@ -1011,6 +1059,7 @@ void Editor::preview_step() {
     std::vector<BakeLight> lights;
     collect_bake_scene(objects, lights);
     if (scene_->lighting.lighting_mode == 2) subtractive_split(lights);  // (round 444)
+    if (scene_->lighting.lighting_mode == 1) shadowmask_split(lights, false);  // (round 454: logged once, by the bake)
     update_environment();
     BakeSettings s;
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)

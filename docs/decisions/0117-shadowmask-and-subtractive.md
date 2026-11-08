@@ -41,4 +41,6 @@ Subtractive) was baked as Baked Indirect and said so. And Blendity's views cast 
 - lilToon surfaces don't apply the mask (both renderers alike); a Unity Shadowmask scene's own mask textures aren't
   imported (its Mixed lights shadow in realtime).
 - More than three Mixed lights in a Shadowmask bake: the rest shadow only in realtime (as Unity's beyond four).
+  *Corrected 2026-11-08 (round 454, ADR 0118): Unity's lights over the limit become Baked, not realtime, and the limit is
+  four; Blendity now bakes a fifth Mixed light as a Baked light, with a note in the bake's log.*
 - Exporting the masks to Unity is left open.

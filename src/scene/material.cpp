@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <map>
 #include <set>
 #include <cmath>
 #include <cctype>
@@ -20,7 +21,59 @@ static std::atomic<size_t> g_texture_gen{1};
 
 void set_asset_root(const std::string &dir) { g_asset_root = dir; }
 const std::string &asset_root() { return g_asset_root; }
+
+static thread_local bool t_stream = false;
+static std::mutex g_stream_mutex;
+static std::set<std::pair<std::string, bool>> g_stream_misses;
+static std::map<std::pair<std::string, bool>, int64_t> g_stream_failed;  // (file -> its mtime when the stream tried it)
+static std::atomic<uint64_t> g_resolves{0};
+uint64_t material_resolve_count() { return g_resolves.load(); }
+
+void refresh_material_textures() { g_texture_gen++; }
 void invalidate_material_textures() { g_texture_gen++; }
+
+void texture_stream_set_failed(const std::vector<std::pair<std::string, bool>> &files, const std::vector<int64_t> &mtimes) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  for (size_t i = 0; i < files.size() && i < mtimes.size(); i++) g_stream_failed[files[i]] = mtimes[i];
+}
+
+/* A failure holds while the file is as it was when tried: fixed, replaced or newly created, it streams again. */
+static bool stream_failed(const std::string &path, bool srgb) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  const auto it = g_stream_failed.find({path, srgb});
+  return it != g_stream_failed.end() && it->second == texture_file_mtime(path);
+}
+
+bool texture_stream_pending() {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  return !g_stream_misses.empty();
+}
+
+/* e2e 407: a missing texture said once a material and file - a model's had been said every frame. */
+static void warn_texture_once(const std::string &material, const std::string &file, const std::string &why) {
+  static std::mutex said_mutex;
+  static std::set<std::string> said;
+  std::lock_guard<std::mutex> lock(said_mutex);
+  if (said.insert(material + "|" + file).second) Log::warn("Material '%s': %s", material.c_str(), why.c_str());
+}
+
+bool texture_stream_failed(const std::string &path, bool srgb) { return stream_failed(path, srgb); }
+
+TextureStreamScope::TextureStreamScope(bool on) : prev(t_stream) { t_stream = on; }
+TextureStreamScope::~TextureStreamScope() { t_stream = prev; }
+bool texture_streaming() { return t_stream; }
+
+static void note_stream_miss(const std::string &path, bool srgb) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  g_stream_misses.insert({path, srgb});
+}
+
+size_t take_texture_stream_misses(std::vector<std::pair<std::string, bool>> &out) {
+  std::lock_guard<std::mutex> lock(g_stream_mutex);
+  out.assign(g_stream_misses.begin(), g_stream_misses.end());
+  g_stream_misses.clear();
+  return out.size();
+}
 size_t material_textures_generation() { return g_texture_gen.load(); }
 
 std::string resolve_asset_path(const std::string &path) {
@@ -427,7 +480,10 @@ const Material::Resolved &Material::textures() const {
       if (resolved_.axis[k] && resolved_.axis[k]->version != axis_versions_[k]) return false;
     return true;
   };
-  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
+  /* Round 459: a view's resolve that left files for the stream isn't one for a caller outside the scope - Generate
+   * Lighting had frozen SideRail's materials without their maps (their base colours bounced: the tunnels 1.2-2.5x). */
+  auto current = [&] { return resolved_version_ == version && resolved_cache_gen_ == gen && axis_current() && (t_stream || !resolved_stream_missed_); };
+  if (current()) return resolved_;
   /* Resolving replaces the shared pointers, which frees textures another thread may be
    * sampling: the renderers call this on one thread before shading in parallel (sanitizer
    * finding, task 0004); the lock keeps two first callers from resolving at once. Re-entrant:
@@ -435,8 +491,10 @@ const Material::Resolved &Material::textures() const {
    * material on this same thread. */
   static std::recursive_mutex m;
   std::lock_guard<std::recursive_mutex> lock(m);
-  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
+  if (current()) return resolved_;
+  bool stream_missed = false;
   int slot = 0;  // which slot load() is resolving (the live snapshots follow the same order)
+  g_resolves++;
   for (auto &l : resolved_.live) l = nullptr;
   auto load = [&](const TextureRef &t) -> TexturePtr {
     const int s = slot++;
@@ -457,11 +515,19 @@ const Material::Resolved &Material::textures() const {
       return nullptr;
     }
     std::string err;
+    if (t_stream) {  // (round 447: what the cache holds now; the rest noted for the stream, not decoded here)
+      const std::string path = resolve_asset_path(t.path);
+      if (TexturePtr c = texture_cached(path, !t.non_color)) return c;
+      if (stream_failed(path, !t.non_color)) {  // (the stream tried it: missing for good, resolved and cached as outside)
+        warn_texture_once(name, t.path, "cannot load " + path);
+        return nullptr;
+      }
+      note_stream_miss(path, !t.non_color);
+      stream_missed = true;
+      return nullptr;
+    }
     TexturePtr p = texture_load(resolve_asset_path(t.path), !t.non_color, &err);
-    static std::mutex said_mutex;
-    static std::set<std::string> said;  // (e2e 407: once a material and file - a model's missing texture had been said every frame)
-    std::lock_guard<std::mutex> said_lock(said_mutex);
-    if (!p && said.insert(name + "|" + t.path).second) Log::warn("Material '%s': %s", name.c_str(), err.c_str());
+    if (!p) warn_texture_once(name, t.path, err);
     return p;
   };
   if (procedural == (int)Procedural::UVGrid || procedural == (int)Procedural::ColorGrid) slot++;  // (no base map read)
@@ -517,12 +583,14 @@ const Material::Resolved &Material::textures() const {
       if (sub.get() == this || sub->resolving_) continue;
       resolved_.axis[k] = sub;
       resolved_.axis_tx[k] = &sub->textures();
+      stream_missed = stream_missed || sub->resolved_stream_missed_;  // (review 459: a part left mid-stream is this one's too)
       axis_versions_[k] = sub->version;
     }
     resolving_ = false;
   }
   resolved_version_ = version;
-  resolved_cache_gen_ = gen;
+  resolved_stream_missed_ = stream_missed;
+  resolved_cache_gen_ = gen;  // (a file left for the stream: the landed batch bumps the generation, and this resolves again)
   return resolved_;
 }
 

@@ -60,18 +60,21 @@ struct RenderMesh {
 struct Lightmap {
   int width = 0, height = 0;
   std::vector<Vec3> texels;
+  /* Round 454: a mask page's fourth channel (Unity's shadowmask holds four lights); empty = 1 everywhere, as on every
+   * colour page. */
+  std::vector<float> alpha;
   /* Task 0197: which page this is - a new number for every page made, copied or moved into (the GPU views keep their
    * copy by it: pages are published whole, never written after they are shown). */
   uint64_t serial = next_serial();
   Lightmap() = default;
-  Lightmap(const Lightmap &o) : width(o.width), height(o.height), texels(o.texels) {}
-  Lightmap(Lightmap &&o) noexcept : width(o.width), height(o.height), texels(std::move(o.texels)) {}
+  Lightmap(const Lightmap &o) : width(o.width), height(o.height), texels(o.texels), alpha(o.alpha) {}
+  Lightmap(Lightmap &&o) noexcept : width(o.width), height(o.height), texels(std::move(o.texels)), alpha(std::move(o.alpha)) {}
   Lightmap &operator=(const Lightmap &o) {
-    width = o.width, height = o.height, texels = o.texels, serial = next_serial();
+    width = o.width, height = o.height, texels = o.texels, alpha = o.alpha, serial = next_serial();
     return *this;
   }
   Lightmap &operator=(Lightmap &&o) noexcept {
-    width = o.width, height = o.height, texels = std::move(o.texels), serial = next_serial();
+    width = o.width, height = o.height, texels = std::move(o.texels), alpha = std::move(o.alpha), serial = next_serial();
     return *this;
   }
   static uint64_t next_serial() {
@@ -80,6 +83,8 @@ struct Lightmap {
   }
   /* Bilinear, clamped at the edges; texel centres at ((i + 0.5) / width, (j + 0.5) / height). */
   Vec3 sample(Vec2 uv) const;
+  /* Round 454: the same with the fourth channel (a mask page's); 1 where the page holds none. */
+  Vec4 sample4(Vec2 uv) const;
 };
 
 /* Round 444 (ADR 0117): whether a light's direct light is in a surface's baked light already. */
@@ -90,14 +95,14 @@ inline bool light_baked_here(int bake_mode, bool lightmapped, bool probe_baked) 
 /* Round 444: Unity's default Realtime Shadow Color (Lighting > Subtractive): what a moving object's shadow darkens a
  * Subtractive lightmap toward. */
 constexpr Vec3 kSubtractiveShadowColor{0.42f, 0.478f, 0.627f};
-/* Round 444: a Shadowmask Mixed light's mask channel (bake_mode 4-6), -1 otherwise. */
-inline int light_mask_channel(int bake_mode) { return bake_mode >= 4 && bake_mode <= 6 ? bake_mode - 4 : -1; }
+/* Round 444: a Shadowmask Mixed light's mask channel (bake_mode 4-7 since round 454: Unity's four), -1 otherwise. */
+inline int light_mask_channel(int bake_mode) { return bake_mode >= 4 && bake_mode <= 7 ? bake_mode - 4 : -1; }
 
 struct RenderLight {
   enum Type { Directional = 0, Point = 1, Spot = 2, Area = 3 } type = Directional;
   /* What the bake holds of it: 0 Realtime (nothing), 1 Mixed (its bounce), 2 Baked (in the lightmaps and baked probes:
    * skipped where they light), round 444: 3 a Subtractive Mixed light (in the lightmaps: skipped on lightmapped
-   * surfaces only), 4-6 a Shadowmask Mixed light (realtime, its shadow on lightmapped surfaces from mask channel 0-2). */
+   * surfaces only), 4-7 a Shadowmask Mixed light (realtime, its shadow on lightmapped surfaces from mask channel 0-3). */
   int bake_mode = 0;
   Vec3 direction{0, -1, 0};  // the way the light points (directional, spot, area)
   Vec3 right{1, 0, 0};       // area: the rectangle's width direction (height = cross(direction, right))
@@ -213,6 +218,10 @@ struct LightingEnv {
   const Environment *environment = nullptr;
   const ShadowMap *shadow = nullptr;  // for lights[shadow_light]
   int shadow_light = -1;
+  /* Round 454 (ADR 0118): Unity's Shadowmask Mode - 0 Shadowmask, 1 Distance Shadowmask (the key light's realtime shadow
+   * within shadow_distance metres of the camera, its mask beyond, a fade over the last tenth). */
+  int shadowmask_mode = 0;
+  float shadow_distance = 150.0f;
   const VoxelGIFrame *gi = nullptr;   // voxel GI (task 0013): null = off
   /* Realtime lightmaps read without a GI pass this frame (task 0020, Manual): whether the shown bake lacks
    * the sun's bounce (lightmapped surfaces add the maps'), and the specular occlusion setting. */
@@ -225,6 +234,12 @@ struct LightingEnv {
   ViewTransform view_transform = ViewTransform::Standard;
   float exposure = 0.0f;
 };
+
+/* Round 454 (ADR 0118): a Shadowmask light's visibility on a lightmapped point from its realtime shadow and its baked mask:
+ * the darker of the two; under Distance Shadowmask, for the light with a realtime map (`has_map`), the realtime shadow
+ * within 0.9 x Shadow Distance of the camera, the mask beyond the distance, a linear fade between. The card's
+ * mask_combine is the same rule. */
+float shadowmask_visibility(const LightingEnv &env, bool has_map, float realtime, float mask, float camera_distance);
 
 struct DrawItem {
   const RenderMesh *mesh = nullptr;

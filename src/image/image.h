@@ -106,6 +106,7 @@ TexturePtr texture_load(const std::string &path, bool srgb, std::string *error =
 void texture_cache_clear();
 /* Round 422: the cached texture for a file, if one is loaded and current - never loading it (null otherwise). */
 TexturePtr texture_cached(const std::string &path, bool srgb);
+int64_t texture_file_mtime(const std::string &path);  // (0 when the file isn't there)
 /* Round 425: where a texture's alpha comes from, by its import settings - Unity's Alpha Source (the .meta's alphaUsage):
  * 0 none (alpha 1), 1 the image's own (as decoded), 2 its grey (the mean of R, G and B). A rule the scene layer sets
  * (the Unity import's .meta lookup); none set, or -1 from it: the image's own. Applied as each file is loaded. */

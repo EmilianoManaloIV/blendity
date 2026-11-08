@@ -6,6 +6,7 @@
 #include "../core/jobs.h"
 #include "../image/image.h"
 #include "../scene/scene.h"
+#include "../scene/unity_scene.h"  // (unity_project_settings_file)
 
 #include <algorithm>
 #include <cmath>
@@ -70,48 +71,6 @@ struct Reader {
   Vec3 vec3() {
     const float x = real(), y = real(), z = real();
     return Vec3(x, y, z);
-  }
-};
-
-/* Points in 3D for their nearest few (review 400: a cell search had stalled where Unity's probes were sparse). */
-struct KdTree {
-  std::vector<Vec3> pts;
-  std::vector<uint32_t> order;
-  void build(std::vector<Vec3> p) {
-    pts = std::move(p);
-    order.resize(pts.size());
-    for (uint32_t i = 0; i < order.size(); i++) order[i] = i;
-    split(0, order.size(), 0);
-  }
-  void split(size_t lo, size_t hi, int axis) {
-    if (hi - lo < 2) return;
-    const size_t mid = (lo + hi) / 2;
-    std::nth_element(order.begin() + (long)lo, order.begin() + (long)mid, order.begin() + (long)hi,
-                     [&](uint32_t a, uint32_t b) { return pts[a][axis] < pts[b][axis]; });
-    split(lo, mid, (axis + 1) % 3), split(mid + 1, hi, (axis + 1) % 3);
-  }
-  /* The `k` nearest to q, nearest first (squared distance, index). */
-  void nearest(Vec3 q, size_t k, std::vector<std::pair<float, uint32_t>> &best) const {
-    best.clear();
-    search(0, order.size(), 0, q, k, best);
-  }
-  void search(size_t lo, size_t hi, int axis, Vec3 q, size_t k, std::vector<std::pair<float, uint32_t>> &best) const {
-    if (lo >= hi || !k) return;
-    const size_t mid = (lo + hi) / 2;
-    const uint32_t i = order[mid];
-    const float d = length_sq(pts[i] - q);
-    if (best.size() < k || d < best.back().first) {
-      best.insert(std::upper_bound(best.begin(), best.end(), std::make_pair(d, i)), std::make_pair(d, i));
-      if (best.size() > k) best.pop_back();
-    }
-    const float gap = q[axis] - pts[i][axis];
-    const int next = (axis + 1) % 3;
-    if (gap < 0.0f) search(lo, mid, next, q, k, best);
-    else search(mid + 1, hi, next, q, k, best);
-    if (best.size() < k || gap * gap < best.back().first) {
-      if (gap < 0.0f) search(mid + 1, hi, next, q, k, best);
-      else search(lo, mid, next, q, k, best);
-    }
   }
 };
 
@@ -303,6 +262,30 @@ void match_renderer(const UnityLighting &u, const UnityLighting::Renderer &r, co
 
 }  // namespace
 
+/* Round 454 (version 4): the shadowmask pages, the lights' channels, the Quality settings. */
+static void read_masks(Reader &r, UnityLighting &out) {
+  const size_t nm = r.count(8);
+  if (nm != 0 && nm != out.pages.size()) r.ok = false;
+  for (size_t i = 0; r.ok && i < nm; i++) {
+    UnityLighting::Page &p = out.pages[i];
+    p.mask_width = r.get<int32_t>(), p.mask_height = r.get<int32_t>();
+    const bool size_ok = p.mask_width >= 0 && p.mask_height >= 0 && p.mask_width <= 16384 && p.mask_height <= 16384;
+    const size_t n = size_ok ? (size_t)p.mask_width * (size_t)p.mask_height * 4 : 0;
+    if (!size_ok || n > r.end - std::min(r.at, r.end)) r.ok = false;
+    if (r.ok) p.mask.assign((const uint8_t *)r.b.data() + r.at, (const uint8_t *)r.b.data() + r.at + n), r.at += n;
+  }
+  const size_t nl = r.count(4);
+  if (nl != 0 && nl != out.lights.size()) r.ok = false;
+  for (size_t i = 0; r.ok && i < nl; i++) {
+    const int32_t c = r.get<int32_t>();
+    out.lights[i].mask_channel = c >= 0 && c < 4 ? c : -1;
+    out.lights[i].overflow = c == -2;
+  }
+  out.shadowmask_mode = r.get<int32_t>();
+  out.shadow_distance = r.real();
+  if (out.shadowmask_mode < -1 || out.shadowmask_mode > 1) out.shadowmask_mode = -1;
+}
+
 bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::string &why) {
   out = UnityLighting{};
   if (bytes.size() < 24 || std::memcmp(bytes.data(), kMagic, 8) != 0) return why = "not a .unity-lighting file", false;
@@ -311,7 +294,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
   if (sum != fnv1a32(bytes.data(), bytes.size() - 4)) return why = "its checksum doesn't match (a changed or cut file)", false;
   Reader r{bytes, 8, bytes.size() - 4};
   const int32_t version = r.get<int32_t>();
-  if (version < 1 || version > 3) return why = "a version Blendity doesn't read", false;
+  if (version < 1 || version > 4) return why = "a version Blendity doesn't read", false;
   r.get<int32_t>();
   out.lightmaps_mode = r.get<int32_t>();
   out.lighting_data = r.str();
@@ -377,6 +360,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
     out.probes[i].seen.resize(26);
     for (Vec3 &v : out.probes[i].seen) v = r.vec3();
   }
+  if (version >= 4) read_masks(r, out);  // (round 454)
   if (!r.ok || r.at != r.end) return out = UnityLighting{}, why = "a broken .unity-lighting file", false;
   return true;
 }
@@ -384,7 +368,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
 std::string write_unity_lighting(const UnityLighting &u) {
   Writer w;
   w.b.append(kMagic, 8);
-  w.put<int32_t>(3), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2; round 442: 3)
+  w.put<int32_t>(4), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2; round 442: 3; round 454: 4)
   w.str(u.lighting_data), w.put<uint32_t>(u.lighting_data_hash);
   w.put<int32_t>((int32_t)u.pages.size());
   for (const auto &p : u.pages) {
@@ -427,6 +411,21 @@ std::string write_unity_lighting(const UnityLighting &u) {
   w.put<int32_t>(seen ? (int32_t)u.probes.size() : 0);
   for (const auto &p : u.probes)
     for (size_t j = 0; seen && j < 26; j++) w.vec3(p.seen[j]);
+  /* Round 454 (version 4): the masks, the lights' channels, the Quality settings. */
+  bool masks = false;
+  for (const auto &p : u.pages) masks = masks || !p.mask.empty();
+  w.put<int32_t>(masks ? (int32_t)u.pages.size() : 0);
+  for (const auto &p : u.pages) {
+    if (!masks) break;
+    w.put<int32_t>(p.mask_width), w.put<int32_t>(p.mask_height);
+    w.b.append((const char *)p.mask.data(), p.mask.size());
+  }
+  bool channels = false;
+  for (const auto &l : u.lights) channels = channels || l.mask_channel >= 0 || l.overflow;
+  w.put<int32_t>(channels ? (int32_t)u.lights.size() : 0);
+  for (const auto &l : u.lights)
+    if (channels) w.put<int32_t>(l.overflow ? -2 : l.mask_channel);
+  w.put<int32_t>(u.shadowmask_mode), w.put(u.shadow_distance);
   w.put<uint32_t>(fnv1a32(w.b.data(), w.b.size()));
   return w.b;
 }
@@ -508,6 +507,56 @@ bool unity_lightmap_page(const UnityLighting::Page &page, float scale, Lightmap 
       out.texels[y * w + x] = finite3(c) ? c * scale : Vec3(0.0f);  // (an inf or NaN half: no light, not a broken picture)
     }
   return true;
+}
+
+bool unity_mask_page(const UnityLighting::Page &page, Lightmap &out) {
+  const size_t w = (size_t)std::max(0, page.mask_width), h = (size_t)std::max(0, page.mask_height);
+  if (!w || !h || page.mask.size() != w * h * 4) return false;
+  out.width = page.mask_width, out.height = page.mask_height;
+  out.texels.resize(w * h);
+  out.alpha.resize(w * h);
+  for (size_t y = 0; y < h; y++)
+    for (size_t x = 0; x < w; x++) {
+      const uint8_t *s = &page.mask[((h - 1 - y) * w + x) * 4];  // (Unity's rows run up; Blendity's down)
+      out.texels[y * w + x] = Vec3(s[0] / 255.0f, s[1] / 255.0f, s[2] / 255.0f);
+      out.alpha[y * w + x] = s[3] / 255.0f;
+    }
+  return true;
+}
+
+/* ProjectSettings/QualitySettings.asset: "m_CurrentQuality: N", then m_QualitySettings' entries ("  - serializedVersion: ...")
+ * each with its own shadowmaskMode and shadowDistance lines. */
+bool unity_quality_shadowmask(const std::string &text, int &mode, float &distance) {
+  int current = 0, entry = -1;
+  std::vector<std::pair<int, float>> levels;
+  size_t at = 0;
+  auto number = [](const std::string &line, size_t colon) { return std::atof(line.c_str() + colon + 1); };
+  while (at < text.size()) {
+    size_t end = text.find('\n', at);
+    if (end == std::string::npos) end = text.size();
+    const std::string line = text.substr(at, end - at);
+    at = end + 1;
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const std::string key = line.substr(0, colon);
+    if (key == "  m_CurrentQuality") current = (int)number(line, colon);
+    else if (key == "  - serializedVersion") levels.emplace_back(-1, -1.0f), entry++;
+    else if (entry >= 0 && key == "    shadowmaskMode") levels[(size_t)entry].first = (int)number(line, colon);
+    else if (entry >= 0 && key == "    shadowDistance") levels[(size_t)entry].second = (float)number(line, colon);
+  }
+  if (levels.empty()) return false;
+  const std::pair<int, float> &q = levels[(size_t)std::max(0, std::min((int)levels.size() - 1, current))];
+  if (q.first < 0 || q.first > 1 || !(q.second >= 0.0f) || !(q.second < 1e7f)) return false;
+  mode = q.first, distance = q.second;
+  return true;
+}
+
+/* Round 459 made the walk scene-side (unity_project_settings_file: up to the project's root, its own ProjectSettings first);
+ * this reads the QualitySettings.asset it finds. */
+std::string unity_find_quality_settings(const std::string &scene_path) {
+  std::string text;
+  const std::string file = unity_project_settings_file(scene_path, "QualitySettings.asset");
+  return !file.empty() && fs::read_file(file, text) ? text : std::string();
 }
 
 namespace {
@@ -621,76 +670,21 @@ std::vector<ProbeSH> unity_probe_sh(const UnityLighting &u, const Mat4 &placemen
   return out;
 }
 
-namespace {
-/* One of Unity's probes, weighted, into a volume probe's cube (Unity's axes) and SH (Blendity's). */
-void add_probe(const UnityLighting &u, const std::vector<ProbeSH> &sh, uint32_t k, float w, ProbeCube &cube, ProbeSH &out) {
-  if (k >= u.probes.size()) return;
-  for (int j = 0; j < 6; j++) cube.bounce[(size_t)j] = cube.bounce[(size_t)j] + u.probes[k].axes[(size_t)j] * w;
-  if (k < sh.size()) out += sh[k] * w;
-}
-}  // namespace
-
 void unity_probe_volume(const UnityLighting &u, ProbeVolumeData &out, const Mat4 &placement) {
   out = ProbeVolumeData{};
   const Mat4 to_unity = placement.inverse();
   if (u.probes.empty()) return;
   std::vector<Vec3> at;
-  AABB box;
-  for (const auto &p : u.probes) at.push_back(placement.point(p.position)), box.add(at.back());
-  KdTree tree;
-  tree.build(at);
-  /* Their spacing: the median of each one's nearest neighbour (of at most 2,000 sampled). */
-  std::vector<float> gaps;
-  std::vector<std::pair<float, uint32_t>> near;
-  const size_t step = std::max<size_t>(1, at.size() / 2000);
-  for (size_t i = 0; i < at.size(); i += step) {
-    tree.nearest(at[i], 2, near);
-    if (near.size() == 2) gaps.push_back(std::sqrt(near[1].first));
-  }
-  std::sort(gaps.begin(), gaps.end());
-  const float spacing = gaps.empty() || gaps[gaps.size() / 2] <= 1e-4f ? 1.0f : gaps[gaps.size() / 2];
-  box.min = box.min - Vec3(spacing), box.max = box.max + Vec3(spacing);
-  std::vector<AABB> marks;
-  for (Vec3 p : at) {
-    AABB b;
-    b.add(p);
-    marks.push_back(b);
-  }
-  probe_place(out, box, marks, spacing * 0.5f, spacing * 2.0f, 200000);
-  const size_t n = out.position.size();
-  out.valid.assign(n, 1);
-  out.baked.assign(n, ProbeCube{});
+  for (const auto &p : u.probes) at.push_back(placement.point(p.position));
   /* Round 442 (ADR 0116): each of Unity's probes as L2 SH in Blendity's axes (fitted along the 26 directions, turned by
-   * the placement), and the volume's probes interpolated over the tetrahedra of Unity's (its Light Probe Groups'), as
-   * Unity interpolates them; outside their hull, from the nearest four. */
-  const std::vector<ProbeSH> unity_sh = unity_probe_sh(u, placement);
-  if (!unity_sh.empty()) out.sh.assign(n, ProbeSH{});
-  Tetrahedra tets;
-  const bool tetra = tets.build(at);
-  int hint = -1;
-  size_t inside = 0;
-  for (size_t i = 0; i < n; i++) {
-    ProbeCube cube;
-    ProbeSH sh;
-    int t = -1;
-    float w4[4];
-    if (tetra && tets.locate(out.position[i], t, w4, hint)) {
-      hint = t;
-      inside++;
-      for (int c = 0; c < 4; c++) add_probe(u, unity_sh, (uint32_t)tets.tets[(size_t)t][(size_t)c], w4[c], cube, sh);
-    }
-    else {
-      tree.nearest(out.position[i], 4, near);
-      float total = 0.0f;
-      for (const auto &[d2, k] : near) total += 1.0f / (d2 + 1e-6f);
-      for (const auto &[d2, k] : near) add_probe(u, unity_sh, k, total > 0.0f ? (1.0f / (d2 + 1e-6f)) / total : 0.0f, cube, sh);
-    }
-    out.baked[i] = turned(cube, to_unity);
-    if (!out.sh.empty()) out.sh[i] = sh;
-  }
-  out.unity_tetra_inside = inside;
+   * the placement); the volume's probes over the tetrahedra of Unity's, as Unity interpolates them (round 455: the shared
+   * probe_volume_from_points). Its cubes are in Unity's axes: turned after, which is linear. */
+  std::vector<ProbeCube> cubes(u.probes.size());
+  for (size_t k = 0; k < cubes.size(); k++)
+    for (int j = 0; j < 6; j++) cubes[k].bounce[(size_t)j] = u.probes[k].axes[(size_t)j];
+  probe_volume_from_points(at, unity_probe_sh(u, placement), cubes, out);
+  for (ProbeCube &c : out.baked) c = turned(c, to_unity);
   out.live = out.baked;
-  out.live_ok.assign(n, 1);
 }
 
 }  // namespace bl

@@ -986,7 +986,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("CPU badge: %s", badge.empty() ? "not shown" : badge.c_str());
     return;
   }
-  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | memory (round 411, ADR 0105; memory: task 0421)
+  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | frames N | memory (round 411, ADR 0105; memory: task 0421)
     const std::string sub = to_lower(arg(1, "status"));
     if (sub == "mark") Log::info("%s", perf_mark(t.size() > 2 ? line_rest(line, 2) : std::string()).c_str());
     else if (sub == "reset") perf_mark(""), Log::info("perf: the mark reset");
@@ -996,8 +996,14 @@ void Editor::run_console_command(const std::string &line) {
        * the whole step with its frames (the --cmd lines run back to back, with no frame between them). */
       if (!headless_) { Log::info("perf wait: headless scripts only"); return; }
       int n = 0;
-      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty()); n++) step_frame_headless();
+      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty() || texture_stream_busy()); n++) step_frame_headless();  // (round 447: the views' textures streaming in too)
       Log::info("perf wait: %d frame(s)", n);
+    }
+    else if (sub == "frames") {  // perf frames N (a script's, headless): N frames, whatever runs
+      if (!headless_) { Log::info("perf frames: headless scripts only"); return; }
+      const int n = std::max(0, std::min(1000000, std::atoi(arg(2, "1").c_str())));
+      for (int i = 0; i < n; i++) step_frame_headless();
+      Log::info("perf frames: %d frame(s)", n);
     }
     else Log::info("perf: %s", perf_status_text().c_str());
     return;
@@ -1205,6 +1211,15 @@ void Editor::run_console_command(const std::string &line) {
     return read_unity_model_ids(std::find(t.begin(), t.end(), "all") != t.end(), std::find(t.begin(), t.end(), "wait") != t.end());
   if (c == "unity" && t.size() > 1 && t[1] == "lightmaps")  // unity lightmaps [wait] (round 400: Unity's baked lighting for this scene)
     return read_unity_lighting_cmd(std::find(t.begin(), t.end(), "wait") != t.end());
+  if (c == "unity" && t.size() > 1 && t[1] == "lightsgamma") {  // unity lightsgamma [on|off] (round 459: a copy without ProjectSettings - its project's lightsUseLinearIntensity off / on)
+    if (t.size() > 2 && (t[2] == "on" || t[2] == "off")) {
+      scene_->unity.lights_gamma = t[2] == "on";
+      mark_changed("Lights Gamma");
+      ui_.redraw = true;
+    }
+    return Log::info("Lights Gamma: %s (Unity's lightsUseLinearIntensity %s)%s", scene_->unity.lights_gamma ? "on" : "off", scene_->unity.lights_gamma ? "off" : "on",
+                     scene_->unity.file.empty() ? " - the scene isn't from Unity: its lights aren't affected" : "");
+  }
   if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
   if (c == "import" && (to_lower(fs::extension(line_rest(line, 1))) == ".prefab" || to_lower(fs::extension(line_rest(line, 1))) == ".unity"))
     return import_model_file(line_rest(line, 1), true);  // (round 370: a Unity prefab or scene - by the path's own extension, review 370)
@@ -2036,10 +2051,18 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "saverender") save_render(line_rest(line, 1));  // (round 367: a path, or ask)
   else if (c == "lighting") {
-    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) */
+    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) |
+     * lighting save <dir> [overwrite] (round 451: the shown lightmaps and which object is which, for the Unity comparison's
+     * page compare; a relative folder is the project's; a folder that holds a bake already needs `overwrite`) */
     const std::string sub = to_lower(arg(1, "update"));
     if (sub == "update") lighting_update();
     else if (sub == "markstatic") mark_static_meshes();
+    else if (sub == "save") {
+      const bool overwrite = t.size() > 3 && to_lower(t.back()) == "overwrite";
+      std::string dir = t.size() > 2 ? line_rest(line, 2) : std::string();
+      if (overwrite) dir = trim_overwrite_word(dir);
+      save_shown_lighting(dir, overwrite);
+    }
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
       mark_changed("Preview Lighting");
@@ -2049,7 +2072,7 @@ void Editor::run_console_command(const std::string &line) {
       scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
       mark_changed("Lighting Updates");
     }
-    else Log::warn("lighting: update | preview on|off | mode manual|automatic");
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] (a relative folder is the project's)");
   }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));
@@ -2228,7 +2251,7 @@ void Editor::run_console_command(const std::string &line) {
     }
     if (changed) mark_changed("Guides");
   }
-  else if (c == "curve" || c == "points") points_command(t);  // its own function: this chain is near the compiler's nesting limit
+  else if (c == "curve" || c == "points") points_command(split_quoted(line));  // its own function: this chain is near the compiler's nesting limit
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;

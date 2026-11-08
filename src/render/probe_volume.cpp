@@ -5,7 +5,9 @@
 #include "../core/core.h"
 #include "../core/jobs.h"
 #include "lightmapper.h"
+#include "light_pick.h"
 #include "pathtracer.h"
+#include "tetrahedra.h"
 #include "voxel_gi_gpu.h"
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -168,7 +170,15 @@ int ProbeVolumeData::find_brick(Vec3 p) const {
   return -1;
 }
 
-bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction, int *hint) const {
+Vec3 ProbeVolumeData::sky_change(const Environment &now, Vec3 n) const {
+  if (!has_baked_sky) return Vec3(0.0f);
+  const int ax = n.x >= 0 ? 0 : 1, ay = n.y >= 0 ? 2 : 3, az = n.z >= 0 ? 4 : 5;
+  return (now.irradiance(kAxes[ax]) - baked_sky[(size_t)ax]) * (n.x * n.x) + (now.irradiance(kAxes[ay]) - baked_sky[(size_t)ay]) * (n.y * n.y) +
+         (now.irradiance(kAxes[az]) - baked_sky[(size_t)az]) * (n.z * n.z);
+}
+
+bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction, int *hint,
+                             const Environment *sky_now, const std::array<float, 3> *window) const {
   int b = -1;
   if (hint && *hint >= 0 && (size_t)*hint < bricks.size()) {
     /* Half-open, as the octree splits ([min, mid) and [mid, max)): a point inside is in no other brick. */
@@ -200,13 +210,22 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
   const float nx2 = n.x * n.x, ny2 = n.y * n.y, nz2 = n.z * n.z;
   const ProbeCube *cubes = use_live ? live.data() : baked.data();
   /* A corner's light from geometry along n: its SH where the bake kept them (round 442), else its cube's axes. */
+  const std::array<float, 3> win = window ? *window : std::array<float, 3>{1.0f, 1.0f, 1.0f};
   auto bounce_of = [&](uint32_t i, const ProbeCube &cube) {
     const bool baked_here = !use_live || !live_ok[i];
-    if (baked_here && i < sh.size()) return sh[i].eval(n);
+    if (baked_here && i < sh.size()) return sh[i].eval(n, win);
     return cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2;
   };
-  Vec3 acc(0.0f);
-  float sky_acc = 0.0f, wsum = 0.0f;
+  /* (Round 453: a corner shaded from SH that hold the sky takes only the change in the sky since the bake - the whole of it
+   * would count twice; the SH from a bake that did not keep the sky it saw take none.) */
+  const Vec3 sh_sky = sky_in_sh && sky_now ? sky_change(*sky_now, n) : Vec3(0.0f);
+  auto sky_share = [&](uint32_t i, const ProbeCube &cube) {
+    const bool baked_here = !use_live || !live_ok[i];
+    const float share = cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2;
+    return share * (sky_in_sh && baked_here && i < sh.size() ? sh_sky : sky_irradiance);
+  };
+  Vec3 acc(0.0f), sky_acc(0.0f);
+  float wsum = 0.0f;
   int nvalid = 0;
   uint32_t corner[8];
   for (int c = 0; c < 8; c++) {
@@ -226,7 +245,7 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
     }
     const ProbeCube &cube = use_live && !live_ok[i] ? baked[i] : cubes[i];
     acc += bounce_of(i, cube) * w;
-    sky_acc += (cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2) * w;
+    sky_acc += sky_share(i, cube) * w;
     wsum += w;
   }
   if (wsum < 1e-3f) {
@@ -234,18 +253,91 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
      * averaged, rather than nothing. No valid corner at all: nothing to give. */
     if (nvalid == 0) return false;
     acc = Vec3(0.0f);
-    sky_acc = 0.0f;
+    sky_acc = Vec3(0.0f);
     for (int k = 0; k < nvalid; k++) {
       const uint32_t i = corner[k];
       const ProbeCube &cube = use_live && !live_ok[i] ? baked[i] : cubes[i];
       acc += bounce_of(i, cube);
-      sky_acc += cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2;
+      sky_acc += sky_share(i, cube);
     }
     wsum = (float)nvalid;
   }
   const float inv = 1.0f / wsum;
-  out = acc * inv + sky_irradiance * (sky_acc * inv);
-  return finite3(out);
+  out = (acc + sky_acc) * inv;
+  if (!finite3(out)) return false;
+  out = vmax(out, Vec3(0.0f));  // (a sky darker than the bake's must not take more than the SH hold)
+  return true;
+}
+
+/* ------------------------------------------------------------- a volume over placed points (round 455, ADR 0119) */
+
+namespace {
+/* One placed probe, weighted, into a grid probe's cube and SH. */
+void add_point_probe(const std::vector<ProbeSH> &sh, const std::vector<ProbeCube> &cubes, uint32_t k, float w, ProbeCube &cube, ProbeSH &out) {
+  if (k >= cubes.size()) return;
+  for (size_t j = 0; j < 6; j++) cube.bounce[j] = cube.bounce[j] + cubes[k].bounce[j] * w, cube.sky[j] += cubes[k].sky[j] * w;
+  if (k < sh.size()) out += sh[k] * w;
+}
+}  // namespace
+
+void probe_volume_from_points(const std::vector<Vec3> &at, const std::vector<ProbeSH> &sh, const std::vector<ProbeCube> &cubes, ProbeVolumeData &out) {
+  out = ProbeVolumeData{};
+  if (at.empty() || cubes.size() != at.size()) return;
+  AABB box;
+  for (const Vec3 &p : at) box.add(p);
+  KdTree tree;
+  tree.build(at);
+  /* Their spacing: the median of each one's nearest neighbour (of at most 2,000 sampled). */
+  std::vector<float> gaps;
+  std::vector<std::pair<float, uint32_t>> near;
+  const size_t step = std::max<size_t>(1, at.size() / 2000);
+  for (size_t i = 0; i < at.size(); i += step) {
+    tree.nearest(at[i], 2, near);
+    if (near.size() == 2) gaps.push_back(std::sqrt(near[1].first));
+  }
+  std::sort(gaps.begin(), gaps.end());
+  const float spacing = gaps.empty() || gaps[gaps.size() / 2] <= 1e-4f ? 1.0f : gaps[gaps.size() / 2];
+  box.min = box.min - Vec3(spacing), box.max = box.max + Vec3(spacing);
+  std::vector<AABB> marks;
+  for (Vec3 p : at) {
+    AABB b;
+    b.add(p);
+    marks.push_back(b);
+  }
+  probe_place(out, box, marks, spacing * 0.5f, spacing * 2.0f, 200000);
+  const size_t n = out.position.size();
+  out.valid.assign(n, 1);
+  out.baked.assign(n, ProbeCube{});
+  if (sh.size() == at.size()) out.sh.assign(n, ProbeSH{});
+  /* Round 442 (ADR 0116): the volume's probes interpolated over the tetrahedra of the points, as Unity interpolates its
+   * Light Probe Groups; outside their hull, from the nearest four. */
+  Tetrahedra tets;
+  const bool tetra = tets.build(at);
+  if (!tetra && at.size() > Tetrahedra::kMaxPoints) Log::info("Probe volume: %zu placed probes are past the %zu a tetrahedralisation takes - each grid probe takes the nearest four", at.size(), Tetrahedra::kMaxPoints);
+  int hint = -1;
+  size_t inside = 0;
+  for (size_t i = 0; i < n; i++) {
+    ProbeCube cube;
+    ProbeSH acc;
+    int t = -1;
+    float w4[4];
+    if (tetra && tets.locate(out.position[i], t, w4, hint)) {
+      hint = t;
+      inside++;
+      for (int c = 0; c < 4; c++) add_point_probe(sh, cubes, (uint32_t)tets.tets[(size_t)t][(size_t)c], w4[c], cube, acc);
+    }
+    else {
+      tree.nearest(out.position[i], 4, near);
+      float total = 0.0f;
+      for (const auto &[d2, k] : near) total += 1.0f / (d2 + 1e-6f);
+      for (const auto &[d2, k] : near) add_point_probe(sh, cubes, k, total > 0.0f ? (1.0f / (d2 + 1e-6f)) / total : 0.0f, cube, acc);
+    }
+    out.baked[i] = cube;
+    if (!out.sh.empty()) out.sh[i] = acc;
+  }
+  out.unity_tetra_inside = inside;
+  out.live = out.baked;
+  out.live_ok.assign(n, 1);
 }
 
 /* ------------------------------------------------------------- baking */
@@ -300,7 +392,7 @@ static float probe_light_visibility(const PathTracer &pt, const RenderLight &l, 
 }
 
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start, size_t count,
-                float indirect_intensity, int gpu_device, std::string *gpu_error) {
+                float indirect_intensity, int gpu_device, std::string *gpu_error, const Environment *env) {
   samples = std::max(6, std::min(65536, samples));
   const float ii = finite_bits(indirect_intensity) ? std::max(0.0f, std::min(100.0f, indirect_intensity)) : 1.0f;
   const size_t n = d.position.size();
@@ -330,6 +422,11 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
   }
   const bool on_gpu = !g_out.empty();
   if (d.sh.size() != n) d.sh.assign(n, ProbeSH{});  // (round 442)
+  /* Round 453: with many Baked point and spot lights, each probe picks among them (light_pick.h) - SideRail's 71 lights
+   * had been 71 x 16 shadow rays a probe. */
+  size_t point_lights = 0;
+  for (const BakeLight &bl : lights) point_lights += bl.mode == 2 && bl.light.type != RenderLight::Directional && bl.light.type != RenderLight::Area;
+  const bool pick = point_lights > kLightPickOver;
   JobSystem::global().parallel_for((int64_t)count, 16, [&](int64_t a, int64_t b) {
     for (int64_t i = (int64_t)start + a; i < (int64_t)start + b; i++) {
       ProbeCube &c = d.baked[(size_t)i];
@@ -342,6 +439,8 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
       std::array<float, 6> wsum{};
       uint64_t rays = 0;
       const size_t g0 = g_first[(size_t)(i - (int64_t)start)];
+      thread_local LightPick pk;
+      if (pick) light_pick_estimate(pk, lights, p, nullptr, p, [](const BakeLight &bl) { return bl.mode == 2; });
       for (int k = 0; k < samples; k++) {
         const Vec3 dir = sphere_dir(k, samples, rnd01(rng) * 6.2831853f);
         bool hit;
@@ -368,6 +467,13 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
           else c.sky[ax] += w;
         }
         if (hit) sh.add_radiance(dir, L * ii, 4.0f * kPi / (float)samples);  // (round 442: the even spread's share of the sphere)
+        /* Round 453: a ray that leaves sees the sky itself - its radiance in that direction goes into the SH (a bright sun
+         * side, a dark ground, an HDRI's window), as Unity's probes bake the environment. The cube keeps the share it
+         * saw (the live probes and the dots' colours), but baked shading takes the sky from the SH alone (sky_in_sh). */
+        if (!hit && env) {
+          const Vec3 Ls = env->radiance(dir);  // (a ray known to miss: the world's own light, no second trace)
+          if (finite3(Ls)) sh.add_radiance(dir, Ls, 4.0f * kPi / (float)samples);
+        }
       }
       for (int ax = 0; ax < 6; ax++)
         if (wsum[ax] > 0.0f) c.bounce[ax] = c.bounce[ax] * (ii / wsum[ax]), c.sky[ax] /= wsum[ax];
@@ -375,6 +481,11 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
       for (const BakeLight &bl : lights) {
         if (bl.mode != 2) continue;
         const RenderLight &l = bl.light;
+        float keep = 1.0f;  // (round 453: picked among many point and spot lights, its light divided by the chance)
+        if (pick && l.type != RenderLight::Directional && l.type != RenderLight::Area) {
+          keep = light_pick_keep(pk, (size_t)(&bl - &lights[0]));
+          if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
+        }
         Vec3 Ld;
         float dist = 1e30f, fall = 1.0f;
         if (l.type == RenderLight::Directional) Ld = normalize(-l.direction);
@@ -390,7 +501,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
          * area light's one ray to its centre, as before); No Shadows blocks nothing. */
         const float vis = probe_light_visibility(pt, l, p, Ld, dist, rng, rays);
         if (vis <= 0.0f) continue;
-        const Vec3 col = l.color * (l.intensity * fall * vis);
+        const Vec3 col = l.color * (l.intensity * fall * vis / keep);
         /* An area light by its whole surface (task 0030), as the rasterizer and the lightmaps take it. */
         for (int ax = 0; ax < 6; ax++)
           c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_irradiance(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));
@@ -399,6 +510,15 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
       }
     }
   });
+  /* Only a caller that gave the world (the lighting bake) gets the sky in the SH; one that wants the cubes alone (the Light
+   * Volumes) leaves them as they were. */
+  d.sky_in_sh = env != nullptr;  // (round 453)
+  d.has_baked_sky = false;
+  if (env) {
+    static const Vec3 kDir[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (int ax = 0; ax < 6; ax++) d.baked_sky[(size_t)ax] = env->irradiance(kDir[ax]);
+    d.has_baked_sky = true;
+  }
   if (start + count == n) probe_dilate(d);
 }
 
@@ -545,6 +665,9 @@ bool ProbeVolumeData::save(const std::string &path, std::string &error) const {
   put(baked.data(), baked.size() * sizeof(ProbeCube));
   put64(sh.size() == baked.size() ? sh.size() : 0);
   if (sh.size() == baked.size()) put(sh.data(), sh.size() * sizeof(ProbeSH));
+  const uint8_t sky_byte = sky_in_sh ? 1 : 0;  // (round 453: older readers stop before it)
+  put(&sky_byte, 1);
+  if (sky_in_sh && has_baked_sky) put(baked_sky.data(), sizeof(Vec3) * 6);  // (round 453: the sky the SH were baked under)
   return (bool)f;
 }
 
@@ -590,6 +713,15 @@ bool ProbeVolumeData::load(const std::string &path, std::string &error) {
     const uint64_t ns = get64();
     if (ns != 0 && ns != np) ok = false;
     vec(sh, ns);
+    if (ok && left() >= 1) {  // (round 453: files from before it end here - their SH hold no sky)
+      uint8_t sky_byte = 0;
+      get(&sky_byte, 1);
+      sky_in_sh = sky_byte != 0;
+      if (sky_in_sh && ok && left() >= sizeof(Vec3) * 6) {  // (the first 453 files end at the byte: no baked sky)
+        get(baked_sky.data(), sizeof(Vec3) * 6);
+        has_baked_sky = true;
+      }
+    }
   }
   if (!ok || (uint64_t)tn[0] * tn[1] * tn[2] != roots.size() || bricks.size() * 64 != position.size()) {
     *this = ProbeVolumeData{};

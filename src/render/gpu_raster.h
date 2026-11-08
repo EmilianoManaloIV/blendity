@@ -201,6 +201,7 @@ struct RasterFrame {
   float shadow_bias = 0.002f;
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
+  float shadowmask_distance = 0.0f;  // round 454 (ADR 0118): Distance Shadowmask's Shadow Distance in metres; 0 = plain Shadowmask
   std::vector<RasterLight> lights;
   std::vector<RasterProbe> probes;  // (round 401: the reflection probes with a bake)
   std::vector<uint32_t> highlight_bits;  // task 0166: a bit per triangle of the highlighted meshes (see RasterInstance::highlight)
@@ -371,6 +372,9 @@ class Raster {
   virtual bool render_read(const RasterFrame &frame, uint32_t *color, float *depth, uint32_t *ids, std::string *error) = 0;
   /* How many times the queue was submitted to and waited for (tests: a view costs one, plus any uploads). */
   virtual uint64_t submits() const = 0;
+  /* Round 448: draw calls the shadow, G-buffer, toon and baked passes issued so far (neighbouring instances of one mesh
+   * are one instanced call). */
+  virtual uint64_t draw_calls() const { return 0; }
   /* Task 0193 (ADR 0061): presenting windows. attach_window makes a swapchain on an OS window (Win32: `window` is the
    * HWND, `display` unused; X11: the Display* and the Window id) and returns its id (-1: refused, *error says why).
    * present_window shows a frame: the UI canvas's changed rows (all of them when `all`) go up into the window's image of
@@ -395,5 +399,12 @@ class Raster {
                             std::string *error) = 0;
   virtual const DeviceInfo &info() const = 0;
 };
+
+/* Round 450: BLENDITY_VIEW_OFF=sh,lv,mask (any of them, comma-separated) compiles the views' shaders without round
+ * 442's SH probes, round 443's Light Volumes or round 444's Shadowmask / Subtractive work - a diagnostic for
+ * attributing the views' cost per feature (as BLENDITY_UNITY_BRDF=0). view_off_defines_from turns a value into the
+ * shader defines (unknown words ignored); view_off_defines reads the environment once. */
+std::string view_off_defines_from(const char *spec);
+const std::string &view_off_defines();
 
 }  // namespace bl::gpu

@@ -43,6 +43,21 @@ struct TexPlanes {
   int y_end() const { return has_rect() ? ry1 : h; }
   /* The layer being applied's own mask (its mask stack evaluated), one weight per texel; null: none. Transient. */
   const std::vector<float> *layer_mask = nullptr;
+  /* Round 456 (task 0432): the cover, metallic and emission planes are allocated when a layer writes or reads them (the
+   * evaluation asks for each layer from its targets and planes_read). A missing plane reads as its default (cover 1,
+   * metallic 0, emission black): use alpha_at / metal_at / emit_at. eager_all allocates all three in reset (the
+   * full-plane path the tests compare against). */
+  bool eager_all = false;
+  void ensure_alpha() { if (alpha.size() != size()) alpha.assign(size(), 1.0f); }
+  void ensure_metal() { if (metal.size() != size()) metal.assign(size(), 0.0f); }
+  void ensure_emit() { if (emit.size() != size()) emit.assign(size(), Vec3(0.0f)); }
+  void ensure_planes(int bits);  // PlaneBits
+  float alpha_at(size_t i) const { return i < alpha.size() ? alpha[i] : 1.0f; }
+  float metal_at(size_t i) const { return i < metal.size() ? metal[i] : 0.0f; }
+  Vec3 emit_at(size_t i) const { return i < emit.size() ? emit[i] : Vec3(0.0f); }
+  size_t bytes() const {
+    return (height.capacity() + rough.capacity() + mask.capacity() + alpha.capacity() + metal.capacity()) * sizeof(float) + (albedo.capacity() + emit.capacity()) * sizeof(Vec3);
+  }
   void reset(int width, int height_);
   size_t size() const { return (size_t)w * h; }
   /* Wrapped texel reads (every generator is periodic in the tile; filters that read neighbours wrap too). */
@@ -104,6 +119,7 @@ enum class LayerBlend { Normal = 0, Multiply, Add, Screen, Overlay, HeightMax, H
                         /* round 330: Blender's Mix node's modes */ Darken, Lighten, Difference, Exclusion, Subtract, Divide, ColorDodge, ColorBurn,
                         SoftLight, LinearLight, Hue, Saturation, Color, Value, Count };
 enum LayerTarget { TargetAlbedo = 1, TargetHeight = 2, TargetRoughness = 4, TargetMask = 8, TargetAlpha = 16, TargetMetallic = 32, TargetEmission = 64 };  // (Alpha: a card's cover into the cover plane, task 0150; Metallic / Emission: task 0244)
+enum PlaneBits { PlaneAlpha = 1, PlaneMetal = 2, PlaneEmit = 4 };  // (round 456: the optional TexPlanes)
 
 struct TextureLayer;
 using TextureLayerList = std::vector<std::unique_ptr<TextureLayer>>;
@@ -135,6 +151,13 @@ struct TextureLayer {
    * grows the edited rect by it. A Warp or Tile reads anywhere. */
   virtual int halo_texels(const LayerContext &) const { return 0; }
   virtual bool reads_anywhere() const { return false; }
+  /* Round 456: the optional planes (PlaneBits) this layer reads or writes beyond what its targets say (Warp and Tile move the
+   * cover with the colour, a Math reads Metallic as an operand, a Paint layer blends them all); the evaluation allocates
+   * them before the layer is applied. */
+  virtual int planes_read() const { return 0; }
+  int planes_needed() const {
+    return planes_read() | (targets & TargetAlpha ? PlaneAlpha : 0) | (targets & TargetMetallic ? PlaneMetal : 0) | (targets & TargetEmission ? PlaneEmit : 0);
+  }
   /* A group's sub-stack (null for every other layer). */
   virtual TextureLayerList *children() { return nullptr; }
   const TextureLayerList *children_const() const { return const_cast<TextureLayer *>(this)->children(); }  // (children() mutates nothing: a Group's list)
@@ -308,8 +331,10 @@ void procedural_texture_cache_store(const std::string &asset_path, const std::sh
  * leaves a dropped surface alone until something asks for it again. The budget defaults to 1/32 of the machine's memory
  * between 128 and 512 MB. */
 size_t procedural_texture_cache_bytes();
-/* What evaluating a texture holds: its planes at the size it is evaluated (44 bytes a texel: height, roughness, mask,
- * alpha, metal 4 each, albedo and emission 12 each), and with `building` its six images with their mips (about 32). */
+/* What evaluating a texture holds: its planes at the size it is evaluated (24 bytes a texel: height, roughness, mask 4 each,
+ * albedo 12; round 456: plus alpha 4, metal 4, emission 12 only when a layer reads or writes them), and with `building` its
+ * images with their mips (about 5.3 each: the albedo, the switched-on normal / roughness / height, and the metallic and
+ * emission ones when a layer writes them - a flat output is made when something asks for it). */
 size_t procedural_texture_planes_bytes(const ProceduralTexture &t, bool building);
 size_t procedural_texture_cache_budget();
 void procedural_texture_cache_set_budget(size_t bytes);  // 0: back to the default

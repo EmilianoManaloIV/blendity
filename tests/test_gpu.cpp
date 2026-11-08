@@ -1149,6 +1149,18 @@ static void tests_round126_to_round127() {
       CHECK(worst <= 2);
     }
   });
+  /* ---------------------------------------------------------------- round 450: the views' features switched off (task 0426) */
+  test("round 450: BLENDITY_VIEW_OFF's words become the shader defines - each alone, all three, unknown words and spaces ignored, nothing when unset", [&] {
+    CHECK(gpu::view_off_defines_from(nullptr).empty());
+    CHECK(gpu::view_off_defines_from("").empty());
+    CHECK(gpu::view_off_defines_from("sh") == "#define BL_NO_SH 1\n");
+    CHECK(gpu::view_off_defines_from("lv") == "#define BL_NO_LV 1\n");
+    CHECK(gpu::view_off_defines_from("mask") == "#define BL_NO_MASK 1\n");
+    CHECK(gpu::view_off_defines_from("mask,sh,lv") == "#define BL_NO_SH 1\n#define BL_NO_LV 1\n#define BL_NO_MASK 1\n");
+    CHECK(gpu::view_off_defines_from("shadow,lvs,masks").empty());  // (whole words only)
+    CHECK(gpu::view_off_defines_from("sh, lv").find("BL_NO_LV") == std::string::npos);  // (no spaces: " lv" is not "lv")
+    std::printf("    this run's switch: \"%s\"\n", std::getenv("BLENDITY_VIEW_OFF") ? std::getenv("BLENDITY_VIEW_OFF") : "");
+  });
   /* ---------------------------------------------------------------- round 127: Sky / HDRI worlds and toon on the GPU (task 0102) */
   /* As r126_case, with the scene's world set by `world` and the object given its own components by `extra`; also the
    * whole view's difference (the background is the world too). */
@@ -2586,6 +2598,233 @@ static void tests_round444_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 454: four mask lights and Distance Shadowmask on the card (task 0430) */
+static void tests_round454_gpu() {
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  struct Stats {
+    double mean = 0, within3 = 0;
+  };
+  auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+    Stats s;
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += d, ok += d <= 3;
+    }
+    s.mean = n ? sum / (double)n : 0.0, s.within3 = n ? (double)ok / (double)n : 0.0;
+    return s;
+  };
+  struct Pair {
+    std::vector<uint32_t> cpu, gpu;
+    bool on_gpu = false;
+  };
+  auto both = [&](Editor &ed, GameObject *g) {
+    view(ed, g, 2);  // (the first frames on the card upload the pages and make the planes: warm both first)
+    view(ed, g, 1);
+    Pair p;
+    p.cpu = view(ed, g, 1);
+    p.gpu = view(ed, g, 2);
+    p.on_gpu = ed.scene_on_gpu_for_test();  // (read now: the CPU's frames after it)
+    return p;
+  };
+  test("gpu views (round 454): four Mixed lamps in a Shadowmask bake on the card as on the CPU - every lamp's baked shadow shows on both, the pictures agree to a tenth of a level, and a lightmap without a mask draws as before (the baked pass's mask attachment is white there); BLENDITY_VIEW_OFF=mask draws without the masks (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, false);
+    ed.command("overlay grid off");
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    ed.scene().environment.color = Vec3(0.02f);
+    GameObject *lamps[4];
+    const Vec3 spots[4] = {Vec3(-4.0f, 0.5f, -2.5f), Vec3(-4.0f, 0.5f, 2.5f), Vec3(-1.0f, 0.5f, -2.5f), Vec3(-1.0f, 0.5f, 2.5f)};
+    for (int i = 0; i < 4; i++) {
+      r35_add(ed, "Cube", strprintf("Box %d", i).c_str(), spots[i], {1, 1, 1}, Vec3(0.8f));
+      lamps[i] = ed.scene().create(strprintf("Lamp %d", i));
+      Light *L = lamps[i]->add<Light>();
+      L->type = 1, L->mode = 1, L->intensity = 4.0f - 0.4f * (float)i, L->range = 12.0f;
+      lamps[i]->set_local_position(spots[i] + Vec3(1.4f, 2.4f, 0.0f));
+    }
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("lamps");
+    r35_bake(ed);
+    bool channels = ed.lighting_data_for_test().mask_pages.size() == ed.lighting_data_for_test().pages.size() && !ed.lighting_data_for_test().mask_pages.empty();
+    for (int i = 0; i < 4; i++) channels = channels && ed.lighting_data_for_test().light_modes.count(lamps[i]->id) && ed.lighting_data_for_test().light_modes.at(lamps[i]->id) == 4 + i;
+    CHECK(channels);
+    const char *off = std::getenv("BLENDITY_VIEW_OFF");
+    const bool mask_off = off && (std::string(",") + off + ",").find(",mask,") != std::string::npos;
+    const Pair all = both(ed, w.ball);
+    const Stats s = compare(all.cpu, all.gpu);
+    std::printf("    four lamps, Shadowmask: the card against the CPU, mean %.3f / 255, %.3f %% within 3 (the view on the card: %s)%s\n", s.mean, s.within3 * 100.0, all.on_gpu ? "yes" : "no",
+                mask_off ? "; BLENDITY_VIEW_OFF=mask: the card draws without the masks" : "");
+    CHECK(all.on_gpu);
+    if (!mask_off) CHECK(s.mean <= 0.1 && s.within3 >= 0.999);
+    /* Each lamp alone: its shadow in the Shadowmask bake's picture, none in Baked Indirect's (the same lamp, no mask). */
+    std::vector<Pair> shadowed;
+    for (int only = 0; only < 4; only++) {
+      for (int i = 0; i < 4; i++) lamps[i]->get<Light>()->enabled = i == only;
+      ed.commit_change("one lamp");
+      shadowed.push_back(both(ed, w.ball));
+    }
+    ed.scene().lighting.lighting_mode = 0;
+    for (int i = 0; i < 4; i++) lamps[i]->get<Light>()->enabled = true;
+    ed.commit_change("baked indirect");
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().mask_pages.empty());
+    for (int only = 0; only < 4; only++) {
+      for (int i = 0; i < 4; i++) lamps[i]->get<Light>()->enabled = i == only;
+      ed.commit_change("one lamp");
+      const Pair plain = both(ed, w.ball);
+      const Stats ps = compare(plain.cpu, plain.gpu);
+      const size_t cpu_shadow = r35_diff_count(shadowed[(size_t)only].cpu, plain.cpu, 6), gpu_shadow = r35_diff_count(shadowed[(size_t)only].gpu, plain.gpu, 6);
+      std::printf("    lamp %d alone: its shadow changes %zu pixels on the CPU, %zu on the card; without a mask the card agrees with the CPU to %.3f / 255 (%.3f %% within 3)\n", only, cpu_shadow,
+                  gpu_shadow, ps.mean, ps.within3 * 100.0);
+      CHECK(plain.on_gpu && ps.mean <= 0.1 && ps.within3 >= 0.999);  // (a lightmap without a mask: as before)
+      if (!mask_off) CHECK(cpu_shadow > 100 && gpu_shadow > 100);
+    }
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 454): Distance Shadowmask on the card as on the CPU - a ball that moved after the bake shadows the floor within the Shadow Distance (the card's too) and not beyond it, the fade between, the card agreeing with the CPU at each (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    const char *off = std::getenv("BLENDITY_VIEW_OFF");
+    const bool mask_off = off && (std::string(",") + off + ",").find(",mask,") != std::string::npos;
+    ed.command("set Lighting.ShadowmaskMode 0");
+    const Pair plain = both(ed, w.ball);
+    ed.command("set Lighting.ShadowmaskMode 1");
+    std::vector<Pair> at;
+    for (const char *d : {"1000", "0.1", "14"}) {  // (within; beyond; the camera's own distance to the floor, in the fade)
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      at.push_back(both(ed, w.ball));
+      const Stats s = compare(at.back().cpu, at.back().gpu);
+      std::printf("    Shadow Distance %s: the card against the CPU, mean %.3f / 255, %.3f %% within 3 (on the card: %s)\n", d, s.mean, s.within3 * 100.0, at.back().on_gpu ? "yes" : "no");
+      CHECK(at.back().on_gpu);
+      if (!mask_off) CHECK(s.mean <= 0.3 && s.within3 >= 0.995);
+    }
+    const size_t cpu_within = r35_diff_count(plain.cpu, at[0].cpu, 12), cpu_beyond = r35_diff_count(plain.cpu, at[1].cpu, 12);
+    const size_t gpu_within = r35_diff_count(plain.gpu, at[0].gpu, 12), gpu_beyond = r35_diff_count(plain.gpu, at[1].gpu, 12);
+    std::printf("    against plain Shadowmask: within the distance %zu / %zu pixels (CPU / card), beyond it %zu / %zu\n", cpu_within, gpu_within, cpu_beyond, gpu_beyond);
+    if (!mask_off) CHECK(cpu_beyond > 150 && gpu_beyond > 150 && cpu_within * 4 < cpu_beyond && gpu_within * 4 < gpu_beyond);
+    /* The fade band lies strictly between near and far: over the pixels the two distances disagree on, a Shadow Distance is found
+     * (on the CPU's frames) whose picture is part-way, and the card draws the same part-way picture there. */
+    auto luma = [](uint32_t c) { return (int)((c >> 16) & 255) + (int)((c >> 8) & 255) + (int)(c & 255); };
+    std::vector<size_t> shadow;  // (the pixels the realtime shadow decides)
+    for (size_t i = 0; i < at[0].cpu.size() && i < at[1].cpu.size(); i++)
+      if (std::abs(luma(at[0].cpu[i]) - luma(at[1].cpu[i])) > 12) shadow.push_back(i);
+    auto share = [&](const std::vector<uint32_t> &px) {  // 0 = the near picture, 1 = the far one, over those pixels
+      double sum = 0;
+      for (size_t i : shadow) sum += (double)(luma(px[i]) - luma(at[0].cpu[i])) / (double)(luma(at[1].cpu[i]) - luma(at[0].cpu[i]));
+      return shadow.empty() ? 0.0 : sum / (double)shadow.size();
+    };
+    const char *band = nullptr;
+    for (const char *d : {"3", "4", "5", "6", "7", "8", "9", "10", "12", "14", "17", "20", "25"}) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      const double f = share(view(ed, w.ball, 1));
+      if (f > 0.15 && f < 0.85) {
+        band = d;
+        break;
+      }
+    }
+    CHECK(shadow.size() > 100 && band);
+    if (band && !mask_off) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + band);
+      const Pair fade = both(ed, w.ball);
+      const Stats fs = compare(fade.cpu, fade.gpu);
+      std::printf("    the fade band at Shadow Distance %s: %.2f of the way to the mask on the CPU, %.2f on the card; the card against the CPU %.3f / 255\n", band, share(fade.cpu), share(fade.gpu), fs.mean);
+      CHECK(fade.on_gpu && share(fade.gpu) > 0.1 && share(fade.gpu) < 0.9 && fs.mean <= 0.3 && fs.within3 >= 0.995);
+    }
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 454): a lightmapped object without a mask page beside ones with - under Distance Shadowmask beyond the distance it keeps its realtime shadow, on the card as on the CPU (the baked plane's w says whether a mask is there; skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.scene().lighting.max_size = 64;  // (small pages: the objects land on several)
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    const size_t pages = ed.lighting_data_for_test().pages.size();
+    CHECK(pages >= 2 && ed.lighting_data_for_test().mask_pages.size() == pages);
+    if (pages < 2) return;
+    ed.lighting_data_mut_for_test().mask_pages.pop_back();  // (the last page's objects have a channel in the modes and no page)
+    ed.command("set Lighting.ShadowmaskMode 1");
+    ed.command("set Lighting.ShadowDistance 0.1");
+    const Pair far = both(ed, w.ball);
+    const Stats s = compare(far.cpu, far.gpu);
+    ed.command("set Lighting.ShadowDistance 1000");
+    const Pair near = both(ed, w.ball);
+    const size_t cpu_changed = r35_diff_count(far.cpu, near.cpu, 12), gpu_changed = r35_diff_count(far.gpu, near.gpu, 12);
+    std::printf("    %zu pages, the last without a mask: beyond the distance the card against the CPU %.3f / 255 (%.3f %% within 3); near against far changes %zu / %zu pixels (CPU / card)\n", pages, s.mean,
+                s.within3 * 100.0, cpu_changed, gpu_changed);
+    CHECK(far.on_gpu && s.mean <= 0.3 && s.within3 >= 0.995);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 454): Distance Shadowmask when the masks fail to load - the saved bake's ShadowMask pages deleted, the lights in realtime alone, the same picture inside and beyond the Shadow Distance, on the card and the CPU alike (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    const std::string scene = "Assets/Scenes/R454G.scene";
+    ed.command("save " + scene);
+    const std::string dir = ed.lighting_dir_for_test();
+    for (int p = 0; p < 8; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.png", p)).c_str());
+    ed.command("open " + scene);
+    CHECK(!ed.lighting_data_for_test().pages.empty() && ed.lighting_data_for_test().mask_pages.empty());
+    GameObject *ball = ed.scene().find_by_name("Ball");
+    CHECK(ball != nullptr);
+    if (!ball) return;
+    ed.command("set Lighting.ShadowmaskMode 1");
+    std::vector<Pair> at;
+    for (const char *d : {"1000", "0.1"}) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      at.push_back(both(ed, ball));
+      const Stats s = compare(at.back().cpu, at.back().gpu);
+      std::printf("    no masks, Shadow Distance %s: the card against the CPU, mean %.3f / 255, %.3f %% within 3\n", d, s.mean, s.within3 * 100.0);
+      CHECK(at.back().on_gpu && s.mean <= 0.3 && s.within3 >= 0.995);
+    }
+    const size_t cpu_diff = r35_diff_count(at[0].cpu, at[1].cpu, 6), gpu_diff = r35_diff_count(at[0].gpu, at[1].gpu, 6);
+    std::printf("    inside against beyond the distance: %zu pixels on the CPU, %zu on the card\n", cpu_diff, gpu_diff);
+    CHECK(cpu_diff < 20 && gpu_diff < 20);
+    ed.viewport_device_for_test(1);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::remove(resolve_asset_path(scene).c_str());
+  });
+}
+
 /* ---------------------------------------------------------------- round 216: baked light on the card (task 0197) */
 static void tests_round216() {
   /* The Scene view drawn again on `device` (the ball nudged and back); its pixels. */
@@ -4005,6 +4244,596 @@ static void tests_round443() {
   });
 }
 
+static void tests_round448() {
+  test("round 448: neighbouring instances of one mesh draw as one instanced call, each with its own colour and place; another mesh between them splits the run (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    std::string err;
+    std::unique_ptr<gpu::Raster> g = gpu::Raster::create(0, &err);
+    if (!g) {
+      std::printf("    skipped: %s\n", err.c_str());
+      return;
+    }
+    auto upload = [&](const MeshPtr &mp) {
+      const RenderMesh &rm = mp->render_mesh();
+      std::vector<gpu::RasterVertex> vs(rm.positions.size());
+      for (size_t i = 0; i < vs.size(); i++)
+        vs[i] = {{rm.positions[i].x, rm.positions[i].y, rm.positions[i].z}, {rm.normals[i].x, rm.normals[i].y, rm.normals[i].z}};
+      return g->add_mesh(vs, rm.indices, &err);
+    };
+    const int cube = upload(primitives::cube(0.8f)), other = upload(primitives::cube(0.6f));
+    CHECK(cube >= 0 && other >= 0);
+    const int N = 10;
+    auto colour = [](int k) { return Vec3((k % N) / (float)(N - 1), (k / N) / (float)(N - 1), 0.5f); };
+    auto at = [](int k) { return Vec3(-4.5f + (float)(k % N), -4.5f + (float)(k / N), 0.0f); };
+    auto make = [&](int k, int mesh) {
+      gpu::RasterInstance in;
+      const Mat4 model = Mat4::translate(at(k));
+      std::memcpy(in.model, model.m, 64);
+      const Vec3 c = colour(k);
+      in.albedo_rough[0] = c.x, in.albedo_rough[1] = c.y, in.albedo_rough[2] = c.z;
+      in.flags = gpu::RasterInstance::Unlit;
+      in.mesh = (uint32_t)mesh;
+      in.id = (uint32_t)k + 1;
+      return in;
+    };
+    const int W = 400, H = 400;
+    gpu::RasterFrame fr;
+    fr.width = W, fr.height = H, fr.shadow_size = 0;
+    const Mat4 vp = Mat4::perspective(50 * kDeg2Rad, 1.0f, 0.1f, 100.0f) * Mat4::look_at({0, 0, 12}, {0, 0, 0}, {0, 1, 0});
+    std::memcpy(fr.view_proj, vp.m, 64);
+    std::memcpy(fr.sun_view_proj, vp.m, 64);
+    fr.eye[2] = 12;
+    std::vector<uint32_t> px((size_t)W * H);
+    auto draw = [&](const std::vector<gpu::RasterInstance> &inst) {
+      g->set_instances(inst);
+      const uint64_t d0 = g->draw_calls();
+      CHECK(g->render(fr, &err) && g->read_back(0, px.data(), nullptr, nullptr, &err));
+      return g->draw_calls() - d0;
+    };
+    /* Each cube's centre shows its own colour (unlit: the albedo as the view encodes it). */
+    auto centres_ok = [&](const std::vector<gpu::RasterInstance> &inst) {
+      int worst = 0;
+      for (size_t k = 0; k < inst.size(); k++) {
+        const Vec4 c = vp * Vec4(at((int)k).x, at((int)k).y, 0.45f, 1.0f);
+        const int x = (int)((c.x / c.w * 0.5f + 0.5f) * W), y = (int)((0.5f - c.y / c.w * 0.5f) * H);
+        const uint32_t got = px[(size_t)y * W + x];
+        const float want[3] = {inst[k].albedo_rough[2], inst[k].albedo_rough[1], inst[k].albedo_rough[0]};  // (B, G, R from the low byte)
+        for (int ch = 0; ch < 3; ch++) {
+          const float l = want[ch];
+          const int enc = (int)std::lround((l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f) * 255.0f);
+          worst = std::max(worst, std::abs((int)((got >> (8 * ch)) & 255) - enc));
+        }
+      }
+      return worst;
+    };
+    std::vector<gpu::RasterInstance> same;
+    for (int k = 0; k < N * N; k++) same.push_back(make(k, cube));
+    const uint64_t calls_same = draw(same);
+    const int worst_same = centres_ok(same);
+    std::vector<gpu::RasterInstance> split = same;
+    split[50] = make(50, other);  // (a different mesh in the middle: three runs)
+    const uint64_t calls_split = draw(split);
+    const int worst_split = centres_ok(split);
+    std::printf("    100 cubes of one mesh: %llu draw call(s), worst centre %d; one other mesh at 50: %llu call(s), worst %d\n",
+                (unsigned long long)calls_same, worst_same, (unsigned long long)calls_split, worst_split);
+    CHECK(calls_same == 1);   // (the G-buffer pass's one call; no shadow, toon or baked pass here)
+    CHECK(calls_split == 3);  // (0-49, 50, 51-99)
+    CHECK(worst_same <= 2);
+    CHECK(worst_split <= 2);
+  });
+}
+
+static void tests_round449() {
+  auto open = [](Editor &ed) {
+    r34_open(ed);
+    GameObject *wire = ed.scene().create("Wired");
+    wire->add<MeshFilter>()->mesh = primitives::uv_sphere(0.8f, 24, 16);
+    wire->add<MeshRenderer>()->show_wireframe = true;
+    wire->set_local_position({2.0f, 1.0f, 0.0f});
+    ed.mark_changed_for_test("Wired");
+    ed.command("select Cube");
+    ed.command("camera 0 4 6 0 1 0");
+    r34_steps(ed, 3);
+    return wire;
+  };
+  test("round 449: the Scene view's static overlays are kept while only the camera moves - the same picture as recorded fresh (verify mode finds no stale record) - and recorded again when the selection or an object changes (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *wire = open(ed);
+    ed.set_scene_hash_check_every_for_test(8);  // (after the open, which headless-inits; a window's interval; a headless editor walks every frame, so nothing would be kept)
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 3);
+    auto orbit = [&](int frames) {  // (the camera nudged every frame: the grid moves, nothing else)
+      for (int k = 0; k < frames; k++) {
+        ed.command(k % 2 ? "camera 0 4 6 0 1 0" : "camera 0 4 6.02 0 1 0");
+        r34_steps(ed, 1);
+      }
+    };
+    const uint64_t k0 = ed.overlays_kept_for_test();
+    orbit(8);
+    const uint64_t kept = ed.overlays_kept_for_test() - k0;
+    const std::vector<uint32_t> pic_kept = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    orbit(8);
+    const std::vector<uint32_t> pic_fresh = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t mismatches = Editor::render_cache_mismatches_all() - m0;
+    ed.set_render_cache_verify(false);
+    auto differ = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      size_t n = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) n += (a[i] & 0xFFFFFF) != (b[i] & 0xFFFFFF);
+      return n;
+    };
+    const size_t same_view = differ(pic_kept, pic_fresh);
+    ed.command("select Wired");  // (the outline moves to the sphere: the key changes)
+    orbit(2);
+    const size_t after_select = differ(pic_fresh, r34_crop(ed, ed.scene_view_rect()));
+    const std::vector<uint32_t> before_move = r34_crop(ed, ed.scene_view_rect());
+    wire->set_local_position({0.5f, 1.0f, 0.5f});  // (its wireframe moves: the counter moves)
+    orbit(2);
+    const size_t after_move = differ(before_move, r34_crop(ed, ed.scene_view_rect()));
+    std::printf("    kept in %llu of 8 orbit frames; verify mode: %llu stale record(s), %zu pixels differ from the kept picture; the selection "
+                "changed: %zu pixels; the sphere moved: %zu pixels\n",
+                (unsigned long long)kept, (unsigned long long)mismatches, same_view, after_select, after_move);
+    CHECK(kept >= 5);  // (every 8th frame walks anyway, as the scene hash is checked)
+    CHECK(mismatches == 0);
+    CHECK(same_view == 0);
+    CHECK(after_select > 100);
+    CHECK(after_move > 100);
+  });
+}
+
+/* ---------------------------------------------------------------- round 458: kept instances, meshes streamed */
+static size_t r458_differ(const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+  size_t n = 0;
+  for (size_t i = 0; i < a.size() && i < b.size(); i++) n += (a[i] & 0xFFFFFF) != (b[i] & 0xFFFFFF);
+  return n;
+}
+
+/* The Scene view over a field of cubes on the card; the camera nudged every frame so each frame draws. */
+static std::vector<GameObject *> r458_field(Editor &ed, int n) {
+  r34_open(ed);
+  std::vector<GameObject *> cubes;
+  for (int i = 0; i < n; i++) {
+    GameObject *g = create_primitive(ed.scene(), "Cube");
+    g->name = strprintf("K458_%d", i);
+    g->set_local_position({-3.0f + 1.2f * (float)(i % 6), 0.5f, -3.0f + 1.2f * (float)(i / 6)});
+    g->set_local_scale(Vec3(0.5f));
+    g->get<MeshRenderer>()->materials = {make_material(g->name, Vec3(0.6f, 0.6f, 0.7f))};
+    cubes.push_back(g);
+  }
+  ed.mark_changed_for_test("round 458 cubes");
+  ed.command("camera 0 6 9 0 0 0");
+  r34_steps(ed, 3);
+  return cubes;
+}
+
+static void r458_orbit(Editor &ed, int frames) {
+  for (int k = 0; k < frames; k++) {
+    ed.command(k % 2 ? "camera 0 6 9 0 0 0" : "camera 0 6 9.03 0 0 0");
+    r34_steps(ed, 1);
+  }
+}
+
+static void tests_round458() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 458: orbiting over a field of cubes keeps the instance array on every frame after the first - the same picture as a fresh gather (verify mode finds no stale array) - and moving a cube, a material's colour, a lightmap bake or Solid shading gathers it again (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r458_field(ed, 30);
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 3);
+    CHECK(ed.scene_on_gpu_for_test());
+    uint64_t k0 = ed.instances_kept_for_test(), b0 = ed.instances_built_for_test();
+    r458_orbit(ed, 8);
+    const uint64_t kept = ed.instances_kept_for_test() - k0, built = ed.instances_built_for_test() - b0;
+    const std::vector<uint32_t> pic_kept = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    b0 = ed.instances_built_for_test();
+    ed.set_render_cache_verify(true);
+    r458_orbit(ed, 8);
+    const std::vector<uint32_t> pic_fresh = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t mismatches = Editor::render_cache_mismatches_all() - m0, verified = ed.instances_built_for_test() - b0;
+    ed.set_render_cache_verify(false);
+    const size_t same_view = r458_differ(pic_kept, pic_fresh);
+    std::printf("    %llu of 8 orbit frames kept the instances (%llu gathered); verify mode gathered %llu times: %llu stale, %zu pixels differ\n",
+                (unsigned long long)kept, (unsigned long long)built, (unsigned long long)verified, (unsigned long long)mismatches, same_view);
+    CHECK(kept >= 7);
+    CHECK(verified >= 8);
+    CHECK(mismatches == 0);
+    CHECK(same_view == 0);
+    /* Each change gathers again, once, and then settles. */
+    auto after = [&](const char *what, const std::function<void()> &act) {
+      r458_orbit(ed, 2);
+      const std::vector<uint32_t> before = r34_crop(ed, ed.scene_view_rect());
+      const uint64_t b = ed.instances_built_for_test();
+      act();
+      r34_steps(ed, 1);
+      const uint64_t gathered = ed.instances_built_for_test() - b;
+      const size_t moved = r458_differ(before, r34_crop(ed, ed.scene_view_rect()));
+      const uint64_t k = ed.instances_kept_for_test();
+      r458_orbit(ed, 4);
+      const uint64_t settled = ed.instances_kept_for_test() - k;
+      std::printf("    %s: gathered %llu time(s), %zu pixels changed, then %llu of 4 frames kept\n", what, (unsigned long long)gathered, moved, (unsigned long long)settled);
+      CHECK(gathered >= 1);
+      CHECK(moved > 20);
+      CHECK(settled >= 3);
+    };
+    after("one cube moved", [&] { cubes[7]->set_local_position({0.0f, 1.5f, 0.0f}); });
+    after("a material's colour", [&] {
+      MaterialPtr m = cubes[3]->get<MeshRenderer>()->materials[0];
+      m->base_color = Vec3(0.9f, 0.1f, 0.1f);
+      m->touch();
+    });
+    after("Solid shading", [&] { ed.command("shading solid"); });
+    after("Shaded again", [&] { ed.command("shading shaded"); });
+    CHECK(Editor::render_cache_mismatches_all() - m0 == 0);
+  });
+  test("round 458: a lightmap bake that lands gathers the instances again (a baked frame isn't kept) and shows in the picture (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor458", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_add(ed, "Cube", "Wall458", {0, 1, 0}, {0.2f, 2, 6}, Vec3(0.9f, 0.2f, 0.2f));
+    ed.viewport_device_for_test(2);
+    ed.command("camera 6 4 8 0 1 0");
+    r34_steps(ed, 4);
+    auto orbit = [&](int frames) {
+      for (int k = 0; k < frames; k++) {
+        ed.command(k % 2 ? "camera 6 4 8 0 1 0" : "camera 6 4 8.03 0 1 0");
+        r34_steps(ed, 1);
+      }
+    };
+    uint64_t k0 = ed.instances_kept_for_test();
+    orbit(6);
+    const uint64_t kept_before = ed.instances_kept_for_test() - k0;
+    const std::vector<uint32_t> before = r34_crop(ed, ed.scene_view_rect());
+    r35_bake(ed);
+    orbit(2);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    orbit(4);
+    ed.set_render_cache_verify(false);
+    const uint64_t stale = Editor::render_cache_mismatches_all() - m0;
+    const uint64_t b0 = ed.instances_built_for_test();
+    orbit(6);
+    const uint64_t gathered = ed.instances_built_for_test() - b0;
+    const size_t changed = r458_differ(before, r34_crop(ed, ed.scene_view_rect()));
+    std::printf("    before the bake %llu of 6 orbit frames kept; after it %llu of 6 gathered, %zu pixels changed, %llu stale\n", (unsigned long long)kept_before,
+                (unsigned long long)gathered, changed, (unsigned long long)stale);
+    CHECK(kept_before >= 5);
+    CHECK(gathered >= 6);
+    CHECK(changed > 200);
+    CHECK(stale == 0);
+  });
+  test("round 458: a texture that lands while the views stream refreshes the kept instances - the cubes show it, the array is kept again afterwards, verify mode finds no stale array (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    r34_steps(ed, 3);
+    r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+    r34_steps(ed, 2);
+    std::vector<std::string> files;
+    for (int i = 0; i < 3; i++) {
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      g->set_local_position({-2.0f + 2.0f * (float)i, 0.5f, 0.0f});
+      const std::string tex = fs::join(test_dir(), strprintf("r458_tex_%d.png", i));
+      std::vector<uint32_t> px(256 * 256, 0xFF000000u | (uint32_t)(60 * i) << 16 | 0x30u);
+      CHECK(write_png(tex, px.data(), 256, 256, 256));
+      MaterialPtr m = make_material(strprintf("R458 tex %d", i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      mr->materials = {m};
+      files.push_back(tex);
+    }
+    CHECK(files.size() == 3);
+    texture_cache_clear();
+    ed.mark_changed_for_test("r458 textured cubes");
+    ed.step_frame_headless();
+    const std::vector<uint32_t> first = r34_crop(ed, ed.scene_view_rect());
+    for (int f = 0; f < 4000 && (ed.texture_streaming_for_test() || ed.streamed_files_for_test() < 3); f++) ed.step_frame_headless();
+    for (int k = 0; k < 6; k++) ed.step_frame_headless();
+    const std::vector<uint32_t> landed = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t k0 = ed.instances_kept_for_test();
+    for (int k = 0; k < 6; k++) {
+      ed.command(k % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    const uint64_t kept = ed.instances_kept_for_test() - k0;
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    for (int k = 0; k < 4; k++) {
+      ed.command(k % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    ed.set_render_cache_verify(false);
+    const uint64_t stale = Editor::render_cache_mismatches_all() - m0;
+    const size_t changed = r458_differ(first, landed);
+    std::printf("    the textures landed: %zu pixels of the window changed; %llu of 6 later frames kept; %llu stale\n", changed, (unsigned long long)kept,
+                (unsigned long long)stale);
+    /* The array is kept now: change a texture under it. First the card's copies evicted (the ids asked again answer for a
+     * texture sent anew - the same picture, nothing stale), then a file that is another colour and streams in. */
+    const std::vector<uint32_t> before_evict = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t m1 = Editor::render_cache_mismatches_all();
+    ed.gpu_evict_textures_for_test();
+    ed.set_render_cache_verify(true);
+    ed.command("camera 0 4 7 0 0.5 0");
+    ed.step_frame_headless();
+    ed.command("camera 0 4 7.03 0 0.5 0");
+    ed.step_frame_headless();
+    ed.set_render_cache_verify(false);
+    ed.command("camera 0 4 7 0 0.5 0");
+    ed.step_frame_headless();
+    const size_t evict_diff = r458_differ(before_evict, r34_crop(ed, ed.scene_view_rect()));
+    std::vector<uint32_t> other(256 * 256, 0xFF20D020u);
+    CHECK(write_png(files[0], other.data(), 256, 256, 256));
+    const uint64_t built0 = ed.instances_built_for_test(), streamed0 = ed.streamed_files_for_test();
+    texture_cache_clear();
+    refresh_material_textures();
+    for (int f = 0; f < 4000 && (ed.texture_streaming_for_test() || ed.streamed_files_for_test() <= streamed0 || ed.texture_stream_busy_for_test()); f++) {
+      ed.command(f % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    ed.set_render_cache_verify(true);
+    for (int k = 0; k < 4; k++) {
+      ed.command(k % 2 ? "camera 0 4 7 0 0.5 0" : "camera 0 4 7.03 0 0.5 0");
+      ed.step_frame_headless();
+    }
+    ed.set_render_cache_verify(false);
+    ed.command("camera 0 4 7 0 0.5 0");
+    ed.step_frame_headless();
+    const size_t recoloured = r458_differ(landed, r34_crop(ed, ed.scene_view_rect()));
+    const uint64_t rebuilt = ed.instances_built_for_test() - built0, stale2 = Editor::render_cache_mismatches_all() - m1;
+    std::printf("    the card's copies evicted: %zu pixels changed; a file replaced and streamed in: %zu pixels changed, %llu gathers; %llu stale in all\n", evict_diff,
+                recoloured, (unsigned long long)rebuilt, (unsigned long long)stale2);
+    CHECK(changed > 500);
+    CHECK(kept >= 4);
+    CHECK(stale == 0);
+    CHECK(evict_diff == 0);
+    CHECK(recoloured > 300);
+    CHECK(rebuilt >= 1);
+    CHECK(stale2 == 0);
+  });
+  /* The meshes: a field of distinct spheres, the budget a byte (so one mesh a frame, the first always going up). */
+  auto spheres = [](Editor &ed, int n, std::vector<const RenderMesh *> &meshes) {
+    GameObject *last = nullptr;
+    for (int i = 0; i < n; i++) {
+      GameObject *g = ed.scene().create(strprintf("S458_%d", i));
+      g->add<MeshFilter>()->mesh = primitives::uv_sphere(0.4f, 24, 16);
+      g->add<MeshRenderer>();
+      g->set_local_position({-3.0f + 1.0f * (float)(i % 6), 0.5f, -1.5f + 1.0f * (float)(i / 6)});
+      meshes.push_back(&g->evaluated_mesh(0)->render_mesh());
+      last = g;
+    }
+    ed.mark_changed_for_test("r458 spheres");
+    return last;
+  };
+  test("round 458: a scene of many meshes comes up over several frames under the upload budget - no frame sends more than the budget (and one mesh), the selected object's mesh is on the card in the first frame, every mesh is drawn once the queue drains, and the picture is the one a frame with no budget draws (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    r34_toolbar_click(ed, 3), r34_park_mouse(ed);  // (the statistics overlay off: its numbers move every frame)
+    r34_steps(ed, 2);
+    ed.mesh_budget_for_test(1);
+    std::vector<const RenderMesh *> meshes;
+    GameObject *last = spheres(ed, 18, meshes);
+    CHECK(meshes.size() == 18);
+    ed.command("select S458_17");
+    CHECK(ed.selected_object() == last);
+    ed.step_frame_headless();
+    const size_t queued_first = ed.mesh_queue_for_test();
+    const bool selected_on_card = ed.mesh_on_card_for_test(*meshes.back());
+    size_t on_card_first = 0;
+    for (const RenderMesh *rm : meshes) on_card_first += ed.mesh_on_card_for_test(*rm);
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    size_t on_card = 0;
+    for (const RenderMesh *rm : meshes) on_card += ed.mesh_on_card_for_test(*rm);
+    const std::vector<uint32_t> streamed = r34_crop(ed, ed.scene_view_rect());
+    /* (The picture with every mesh sent in the first frame: a headless editor that didn't ask for workers doesn't stream.) */
+    Editor ref;
+    ref.init_headless(640, 360);
+    ref.set_async_jobs_for_test(true);  // (streaming on, a budget that never binds: only the queue differs from the run above)
+    ref.viewport_device_for_test(2);
+    ref.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ref.step_frame_headless();
+    r34_toolbar_click(ref, 3), r34_park_mouse(ref);  // (the statistics overlay off: its numbers move every frame)
+    r34_steps(ref, 2);
+    ref.mesh_budget_for_test((size_t)1 << 30, 1e9);
+    std::vector<const RenderMesh *> ref_meshes;
+    spheres(ref, 18, ref_meshes);
+    ref.command("select S458_17");
+    ref.step_frame_headless();
+    size_t ref_first = 0;
+    for (const RenderMesh *rm : ref_meshes) ref_first += ref.mesh_on_card_for_test(*rm);
+    for (int k = 0; k < 3; k++) ref.step_frame_headless();
+    const std::vector<uint32_t> whole = r34_crop(ref, ref.scene_view_rect());
+    const size_t differ = r458_differ(streamed, whole);
+    std::printf("    first frame: %zu mesh(es) waiting, %zu on the card, the selected one's %d; all 18 on the card after %d frames (%zu), the most any frame sent %.1f KB; "
+                "drain %.0f ms; with no streaming the first frame had %zu on the card; %zu pixels differ from that picture\n",
+                queued_first, on_card_first, (int)selected_on_card, frames, on_card, (double)ed.mesh_uploaded_frame_bytes_for_test() / 1024.0,
+                ed.mesh_drain_ms_for_test(), ref_first, differ);
+    CHECK(queued_first >= 10);
+    CHECK(selected_on_card);
+    CHECK(on_card_first < 18);
+    CHECK(frames >= 6);
+    CHECK(on_card == 18);
+    CHECK(ed.mesh_queue_for_test() == 0);
+    const size_t one = meshes[0]->positions.size() * sizeof(gpu::RasterVertex) + meshes[0]->indices.size() * 4;
+    CHECK(ed.mesh_uploaded_frame_bytes_for_test() <= 2 * one);  // (a frame sends the first mesh the budget lets by and the selected one, never more)
+    CHECK(ref_first == 18);
+    CHECK(differ == 0);
+  });
+  test("round 458: with a realistic budget no frame sends more than the budget (or a single mesh past it), a mesh bigger than the budget goes up alone, and the edited object's mesh is on the card in the first frame whatever the queue (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    std::vector<const RenderMesh *> meshes;
+    spheres(ed, 18, meshes);
+    const size_t one = meshes[0]->positions.size() * sizeof(gpu::RasterVertex) + meshes[0]->indices.size() * 4;
+    const size_t budget = 2 * one + one / 2;  // (two meshes fit; a third doesn't)
+    ed.mesh_budget_for_test(budget);
+    GameObject *edited = ed.scene().find_by_name("S458_9");
+    CHECK(edited != nullptr);
+    ed.command("select S458_9");
+    ed.command("edit");
+    CHECK(ed.in_edit_mode());
+    ed.step_frame_headless();
+    const Mesh *em = edited ? edited->evaluated_mesh(2) : nullptr;
+    const bool edited_on_card = em && ed.mesh_on_card_for_test(em->render_mesh(true));
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    size_t on_card = 0;
+    for (const RenderMesh *rm : meshes) on_card += ed.mesh_on_card_for_test(*rm);
+    std::printf("    budget %zu bytes (a mesh %zu): the most any frame sent %zu, the edited mesh on the card in frame 1: %d, %zu of 18 plain meshes after %d frames\n", budget, one,
+                (size_t)ed.mesh_uploaded_frame_bytes_for_test(), (int)edited_on_card, on_card, frames);
+    CHECK(edited_on_card);
+    CHECK(ed.mesh_uploaded_frame_bytes_for_test() <= budget + 2 * one);  // (the selected object is urgent twice - its edit mesh in the Scene view, its plain one in the Game view - and may ride on a full frame; the others keep to the budget)
+    CHECK(frames >= 5);
+    CHECK(on_card >= 17);  // (the edited object draws its edit mesh: its plain one never goes up)
+    /* A mesh bigger than the whole budget still goes up, alone in its frame. */
+    ed.mesh_budget_for_test(1);
+    GameObject *big = ed.scene().create("S458_big");
+    big->add<MeshFilter>()->mesh = primitives::uv_sphere(0.4f, 96, 64);
+    big->add<MeshRenderer>();
+    ed.command("edit off");
+    ed.mark_changed_for_test("r458 big");
+    for (int k = 0; k < 30 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test() || !ed.mesh_on_card_for_test(big->evaluated_mesh(0)->render_mesh())); k++) ed.step_frame_headless();
+    CHECK(ed.mesh_on_card_for_test(big->evaluated_mesh(0)->render_mesh()));
+  });
+  test("round 458: the upload budget counts time as well as bytes - with a byte budget that never binds and no time to spend, meshes still queue (one a frame, and the selected one) and all come up (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    ed.mesh_budget_for_test((size_t)1 << 30, 0.0);
+    std::vector<const RenderMesh *> meshes;
+    spheres(ed, 18, meshes);
+    ed.command("select S458_17");
+    ed.step_frame_headless();
+    const size_t queued = ed.mesh_queue_for_test();
+    const bool selected_on_card = ed.mesh_on_card_for_test(*meshes.back());
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    size_t on_card = 0;
+    for (const RenderMesh *rm : meshes) on_card += ed.mesh_on_card_for_test(*rm);
+    const size_t one = meshes[0]->positions.size() * sizeof(gpu::RasterVertex) + meshes[0]->indices.size() * 4;
+    std::printf("    no time to spend: %zu mesh(es) waiting after the first frame, the selected one's on the card %d; %zu of 18 on the card after %d frames, the most any frame sent %zu bytes (a mesh %zu)\n",
+                queued, (int)selected_on_card, on_card, frames, (size_t)ed.mesh_uploaded_frame_bytes_for_test(), one);
+    CHECK(queued >= 10);
+    CHECK(selected_on_card);
+    CHECK(frames >= 8);
+    CHECK(on_card == 18);
+    CHECK(ed.mesh_uploaded_frame_bytes_for_test() <= 2 * one);
+  });
+}
+
+/* ---------------------------------------------------------------- round 455: probe SH deringing on the card (task 0431) */
+static void tests_round455_gpu() {
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += d, ok += d <= 3;
+    }
+    mean = n ? sum / (double)n : 0.0, within3 = n ? (double)ok / (double)n : 0.0;
+  };
+  test("gpu views (round 455): a probe-lit ball beside a bright Baked lamp under Lanczos on the card as on the CPU - the card's picture the CPU's to a tenth of a level, Off and Lanczos each redraw both views without a re-bake, and Off again is the first picture on both (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, true, 2, 1.0f, false);
+    ed.command("overlay grid off");
+    GameObject *lamp = ed.scene().create("Lamp");
+    Light *L = lamp->add<Light>();
+    L->type = 1, L->mode = 2, L->intensity = 40.0f, L->range = 8.0f, L->shadows = false;
+    lamp->set_local_position(Vec3(1.8f, 1.6f, 0.6f));
+    ed.commit_change("lamp");
+    r35_bake(ed);
+    CHECK(!ed.probes_for_test().empty() && !ed.lighting_out_of_date_for_test());
+    auto both = [&](double &mean, double &within3, std::vector<uint32_t> &cpu_out, std::vector<uint32_t> &gpu_out) {
+      view(ed, w.ball, 2);
+      view(ed, w.ball, 1);
+      cpu_out = view(ed, w.ball, 1);
+      gpu_out = view(ed, w.ball, 2);
+      const bool on_gpu = ed.scene_on_gpu_for_test();
+      compare(cpu_out, gpu_out, mean, within3);
+      return on_gpu;
+    };
+    std::vector<uint32_t> off_cpu, off_gpu, lan_cpu, lan_gpu, again_cpu, again_gpu;
+    double mean = 0, within3 = 0;
+    CHECK(both(mean, within3, off_cpu, off_gpu));
+    std::printf("    Off: the card against the CPU, mean %.3f / 255, %.3f %% within 3\n", mean, within3 * 100.0);
+    CHECK(mean <= 0.1 && within3 >= 0.999);
+    ed.command("set Lighting.ProbeRemoveRinging 2");
+    ed.command("set Lighting.ProbeRingingWidth 4");
+    const bool on_gpu = both(mean, within3, lan_cpu, lan_gpu);
+    const size_t cpu_moved = r35_diff_count(off_cpu, lan_cpu, 0), gpu_moved = r35_diff_count(off_gpu, lan_gpu, 0);
+    std::printf("    Lanczos: the card against the CPU, mean %.3f / 255, %.3f %% within 3; the picture changes %zu pixels on the CPU, %zu on the card; out of date %d\n", mean,
+                within3 * 100.0, cpu_moved, gpu_moved, (int)ed.lighting_out_of_date_for_test());
+    CHECK(on_gpu && mean <= 0.1 && within3 >= 0.999);
+    CHECK(cpu_moved > 50 && gpu_moved > 50 && !ed.lighting_out_of_date_for_test());
+    ed.command("set Lighting.ProbeRemoveRinging 0");
+    both(mean, within3, again_cpu, again_gpu);
+    CHECK(r35_diff_count(off_cpu, again_cpu, 0) == 0 && r35_diff_count(off_gpu, again_gpu, 0) == 0);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -4033,4 +4862,9 @@ void run_gpu_tests() {
   tests_round415();
   tests_round416();
   tests_round443();
+  tests_round448();
+  tests_round449();
+  tests_round458();
+  tests_round454_gpu();
+  tests_round455_gpu();
 }

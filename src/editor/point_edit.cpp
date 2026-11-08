@@ -232,6 +232,51 @@ bool Editor::point_loop_cut_at(const Recti &view, int mx, int my) {
   return false;
 }
 
+/* Round 455 (ADR 0119): a probe added to a Light Probe Group at `at` (the group's space; default the centre of its
+ * probes, or its origin without any), selected. */
+bool Editor::probe_group_add(GameObject *g, const Vec3 *at) {
+  LightProbeGroupComponent *pg = g ? g->probe_group() : nullptr;
+  if (!pg) return false;
+  Vec3 p(0.0f);
+  if (at) p = *at;
+  else if (!pg->positions.empty()) {
+    for (const Vec3 &q : pg->positions) p += q;
+    p = p / (float)pg->positions.size();
+  }
+  if (!finite_bits(p.x) || !finite_bits(p.y) || !finite_bits(p.z)) return false;
+  pg->positions.push_back(p);
+  pt_obj_ = g->id;
+  pt_sel_ = {(int)pg->positions.size() - 1};
+  mark_changed("Add Light Probe");
+  return true;
+}
+
+/* The probes at `idx` removed (out-of-range and repeated indices ignored); the selection cleared. False when none went. */
+bool Editor::probe_group_delete(GameObject *g, std::vector<int> idx) {
+  LightProbeGroupComponent *pg = g ? g->probe_group() : nullptr;
+  if (!pg) return false;
+  std::sort(idx.begin(), idx.end());
+  idx.erase(std::unique(idx.begin(), idx.end()), idx.end());
+  bool any = false;
+  for (auto it = idx.rbegin(); it != idx.rend(); ++it) {
+    if (*it < 0 || *it >= (int)pg->positions.size()) continue;
+    pg->positions.erase(pg->positions.begin() + *it);
+    any = true;
+  }
+  if (!any) return false;
+  pt_sel_.clear();
+  mark_changed("Delete Light Probes");
+  return true;
+}
+
+void Editor::probe_group_select_all(GameObject *g) {
+  const LightProbeGroupComponent *pg = g ? g->probe_group() : nullptr;
+  if (!pg) return;
+  pt_obj_ = g->id;
+  pt_sel_.clear();
+  for (int i = 0; i < (int)pg->positions.size(); i++) pt_sel_.push_back(i);
+}
+
 /* Edit Mode's keys on a curve's or lattice's points, outside Edit Mode (handle_shortcuts asks first). */
 bool Editor::point_shortcut(const std::string &id) {
   if (edit_mode_) return false;

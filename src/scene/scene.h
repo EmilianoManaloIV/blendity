@@ -37,6 +37,7 @@ struct FilterEffect;
 struct Curve;
 struct Transform;
 struct Lattice;
+struct LightProbeGroupComponent;
 struct CurvePath;
 using FilterEffectList = std::vector<std::unique_ptr<FilterEffect>>;
 struct TextureLayer;  // texture/procedural_texture.h
@@ -193,7 +194,7 @@ struct Component {
   virtual bool unique() const { return true; }
   /* What the views read of a component, so the render hash (ADR 0009 / 0015) and the camera lookup
    * find it with a virtual call instead of a dynamic_cast per component type. */
-  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes };
+  enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes, ProbeGroup };
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
@@ -1742,7 +1743,8 @@ class GameObject {
   Camera *camera() const { return static_cast<Camera *>(find_role(Component::RenderRole::Camera)); }
   Curve *curve() const;  // scene.cpp (Curve is declared further down)
   Lattice *lattice() const;
-  Component *point_source() const;  // the component whose control points the Scene view edits (a curve, a lattice)
+  Component *point_source() const;  // the component whose control points the Scene view edits (a curve, a lattice, a light probe group)
+  LightProbeGroupComponent *probe_group() const;  // (round 455)
   Component *add_component(std::unique_ptr<Component> c);
   template<class T> T *add() { return static_cast<T *>(add_component(std::make_unique<T>())); }
   void remove_component(Component *c);
@@ -1857,6 +1859,7 @@ struct UnityBakeSettings {
   bool ao = false;
   int backend = 1;            // m_BakeBackend: 0 Enlighten, 1 Progressive CPU, 2 Progressive GPU
   bool baked_gi = true;       // m_EnableBakedLightmaps (Baked Global Illumination)
+  int64_t settings_doc = 0;   // round 454: the fileID of the embedded LightingSettings document the settings came from (0: none)
   std::string source;         // "the LightingSettings asset" / "the scene's embedded LightingSettings" / "the scene's own settings"
 };
 struct UnitySceneLink {
@@ -1908,6 +1911,11 @@ int default_lighting_update_mode();
 struct LightingSettings {
   bool baked_gi = true;           // Baked Global Illumination
   int lighting_mode = 0;          // 0 Baked Indirect, 1 Shadowmask, 2 Subtractive (round 444, ADR 0117)
+  /* Round 454 (ADR 0118): Unity's Shadowmask Mode and Shadow Distance (QualitySettings there, project-wide; here with the
+   * scene's lighting). View settings - the bake is the same for both modes. 0 Shadowmask, 1 Distance Shadowmask: the
+   * key Mixed light's realtime shadow within shadow_distance metres of the camera, its mask beyond. */
+  int shadowmask_mode = 0;
+  float shadow_distance = 150.0f;
   float texels_per_unit = 40.0f;  // Lightmap Resolution
   int max_size = 1024;            // Max Lightmap Size
   int padding = 2;                // Lightmap Padding (texels)
@@ -1946,6 +1954,10 @@ struct LightingSettings {
   float probe_view_bias = 0.1f;
   bool probe_leak_reduction = true; // APV's normal-based leak reduction
   bool show_probes = false;         // draw them in the Scene view
+  /* Round 455 (ADR 0119): Remove Ringing - the window the views evaluate the baked probes' SH under, so a bright lamp leaves
+   * no dark ring and no light spot behind (0 Off, 1 Hanning, 2 Lanczos; Unity's default is Off). A view setting: no re-bake. */
+  int probe_dering = 0;
+  float probe_dering_width = 4.0f;  // the window's width in bands, 3 to 16
   bool light_volumes_in_views = true;  // (round 443, task 0419: the views light dynamic objects from baked VRC Light Volumes, as VRChat does)
   void reflect(Reflector &r);
 };
@@ -1959,6 +1971,25 @@ struct ProbeVolume : ComponentBase<ProbeVolume> {
   Vec3 size{20.0f, 10.0f, 20.0f};
   void reflect(Reflector &r) override;
 };
+
+/* Round 455 (ADR 0119): Unity's Light Probe Group as an object. Probes at positions in the object's space (Unity's
+ * m_SourcePositions); a new group has Unity's default eight, the corners of a 1 m cube. Generate Lighting bakes the scene's
+ * enabled groups' probes instead of the automatic grid. The Scene view edits the probes as control points. */
+struct LightProbeGroupComponent : ComponentBase<LightProbeGroupComponent> {
+  static constexpr const char *kName = "LightProbeGroup";
+  std::vector<Vec3> positions;
+  LightProbeGroupComponent();
+  /* Files, undo and hashes carry the probes as one text field ("x y z; x y z; ..."): the Inspector shows a count. */
+  void reflect(Reflector &r) override;
+  RenderRole render_role() const override { return RenderRole::ProbeGroup; }
+  int control_point_count() const override { return (int)positions.size(); }
+  Vec3 control_point(int i) const override { return positions[(size_t)i]; }
+  void set_control_point(int i, Vec3 p) override;
+  /* The probes' hash, for the render hash and the bake's key: straight from the positions. */
+  uint64_t content_key() const;
+};
+std::string probe_positions_to_text(const std::vector<Vec3> &positions);
+void probe_positions_from_text(const std::string &text, std::vector<Vec3> &positions);
 
 /* Blender: Render + Output properties. Unity: Quality / Recorder settings. */
 struct RenderSettings {

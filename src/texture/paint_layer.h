@@ -48,6 +48,7 @@ struct PaintLayer : TextureLayerBase<PaintLayer> {
   PaintLayer() { targets = TargetAlbedo | TargetHeight | TargetRoughness | TargetMetallic | TargetEmission; }
   void reflect(Reflector &r) override;
   bool is_generator() const override { return false; }
+  int planes_read() const override { return PlaneMetal | PlaneEmit; }  // (round 456: blend_texel takes both planes' texels)
   void apply(TexPlanes &p, const LayerContext &c) const override;
   void apply_point(TexPoint &p, float u, float v, const LayerContext &c, const LayerAux *aux) const override;
   /* The images, loaded from `base` on first use, or fresh at `size` when there is no file. */

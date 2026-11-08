@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_set>
 
 namespace bl {
 
@@ -274,13 +275,15 @@ gpu::RasterLight raster_light(const RenderLight &l) {
 /* Task 0197: the probe volume packed for the card (gpu::Raster::set_probe_volume, read by kProbeFns): a header of
  * four vec4 (round 442: pv[3].x the SH's start), then the octree's nodes (two each), the bricks (two each), the probes (thirteen each: position and
  * flags, the baked cube's six axes, the live one's), the roots four to a vec4. */
-std::vector<float> probe_pack(const ProbeVolumeData &d) {
+std::vector<float> probe_pack(const ProbeVolumeData &d, const std::array<float, 3> &window) {
   const size_t nn = d.nodes.size(), nb = d.bricks.size(), np = d.position.size(), nr = d.roots.size();
   /* Round 442: a fourth header row (pv[3].x: where each probe's 7 rows of SH start, 0 with none). */
   const bool with_sh = d.sh.size() == np && np > 0;
   const size_t node_at = 4, brick_at = node_at + nn * 2, probe_at = brick_at + nb * 2, root_at = probe_at + np * 13;
   const size_t sh_at = root_at + (nr + 3) / 4;
-  std::vector<float> o((sh_at + (with_sh ? np * 7 : 0)) * 4, 0.0f);
+  const bool with_sky = with_sh && d.sky_in_sh && d.has_baked_sky;  // (round 453: six vec4 after the SH, pv[3].z)
+  const size_t bsky_at = sh_at + (with_sh ? np * 7 : 0);
+  std::vector<float> o((bsky_at + (with_sky ? 6 : 0)) * 4, 0.0f);
   auto put = [&](size_t v, float a, float b, float c, float e) { o[v * 4] = a, o[v * 4 + 1] = b, o[v * 4 + 2] = c, o[v * 4 + 3] = e; };
   auto bits = [](int64_t i) {  // (an index as its int32's bits: exact past 2^24, read with floatBitsToInt)
     const int32_t v = (int32_t)i;
@@ -313,11 +316,13 @@ std::vector<float> probe_pack(const ProbeVolumeData &d) {
     }
   }
   for (size_t i = 0; i < nr; i++) o[root_at * 4 + i] = bits(d.roots[i]);
-  put(3, bits(with_sh ? (int64_t)sh_at : 0), 0.0f, 0.0f, 0.0f);
+  put(3, bits(with_sh ? (int64_t)sh_at : 0), with_sh && d.sky_in_sh ? 1.0f : 0.0f, bits(with_sky ? (int64_t)bsky_at : 0), 0.0f);  // (round 453: pv[3].y, .z)
+  for (size_t k = 0; with_sky && k < 6; k++) put(bsky_at + k, d.baked_sky[k].x, d.baked_sky[k].y, d.baked_sky[k].z, 0.0f);
   for (size_t i = 0; with_sh && i < np; i++)
     for (int k = 0; k < 9; k++) {
       const size_t f = (sh_at + i * 7) * 4 + (size_t)k * 3;  // (27 floats in 7 rows: coefficient k's rgb at 3k)
-      o[f] = d.sh[i].c[(size_t)k].x, o[f + 1] = d.sh[i].c[(size_t)k].y, o[f + 2] = d.sh[i].c[(size_t)k].z;
+      const float h = window[(size_t)ProbeSH::band_of(k)];  // (round 455: the window folded in, so the shader is unchanged)
+      o[f] = d.sh[i].c[(size_t)k].x * h, o[f + 1] = d.sh[i].c[(size_t)k].y * h, o[f + 2] = d.sh[i].c[(size_t)k].z * h;
     }
   return o;
 }
@@ -620,7 +625,7 @@ bool see_through_key(const Vec4 (&v)[3], bool cull, float facing, float &key) {
 /* An object (one material's part of it) as the GPU draws it: a plain material sampled once (the same everywhere but
  * for the normal), else evaluated per pixel; the flags as the CPU decides them. */
 gpu::RasterInstance raster_instance(const DrawItem &it, int mesh, const Material &m, const std::function<int(const TexturePtr &)> &tex, const LightingEnv &env) {
-  gpu::RasterInstance in;
+  gpu::RasterInstance in = gpu::RasterInstance();  // (value-initialised: the padding zero, so verify mode can compare two arrays byte for byte)
   std::memcpy(in.model, it.model.m, 64);
   const SurfaceSample s = evaluate_material(m, m.textures(), SurfacePoint{});
   set3(in.albedo_rough, s.albedo);
@@ -768,6 +773,72 @@ bool raster_view_lut(gpu::Raster &g, gpu::RasterFrame &fr, ViewTransform vt, std
 /* What the meshes on the card may take before the least recently drawn leave: a quarter of the card, at most 1 GB. */
 uint64_t gpu_mesh_budget(const gpu::DeviceInfo &d) { return std::min<uint64_t>(1ull << 30, (d.memory_mb ? d.memory_mb : 2048) << 18); }
 
+/* Round 458: everything raster_instance, raster_axis, solid_instance and gpu_view_draw's gather read besides the card's
+ * own ids (those are asked again by Editor::instance_keep_valid): each item's fields (placement, flags, colours, the
+ * pointers to its mesh, materials, lightmaps and highlight), the mesh's serial and whether it has tangents / UVs, each
+ * material's version (an axis material's parts too) and the textures' generation, the shade mode, and the lighting
+ * the baked path would read (whether the probes or Light Volumes could light an object). 50,000 cubes are about a
+ * megabyte of words: the words of an item are summed with a multiplier each (they pipeline) and one step chains the
+ * items, so the order matters. Not adversarial: a hash for noticing change, verified by the render cache's verify mode. */
+uint64_t instances_key(const std::vector<DrawItem> &items, const LightingEnv &env, const RasterOptions &opt) {
+  constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ull, kPrime = 0x100000001B3ull;
+  uint64_t h = 0xcbf29ce484222325ull;
+  auto chain = [&](uint64_t s) {
+    h = (h ^ s) * kPrime;
+    h ^= h >> 29;
+  };
+  const bool probes = (env.probes && env.probes->data && !env.probes->data->empty()) || env.light_volumes;
+  chain((uint64_t)opt.shade | (uint64_t)probes << 8 | (uint64_t)items.size() << 16);
+  chain((uint64_t)material_textures_generation());
+  chain(default_material()->version);
+  auto materials_key = [](const std::vector<MaterialPtr> *mv) {
+    if (!mv) return (uint64_t)0;
+    uint64_t s = mv->size();
+    for (const MaterialPtr &mp : *mv) {
+      s = (s ^ (uint64_t)(uintptr_t)mp.get()) * kPrime;
+      s = (s ^ (mp ? mp->version : 0)) * kPrime;
+      if (!mp || mp->axis_mode == 0) continue;
+      for (const MaterialPtr &part : mp->textures().axis) {  // (an axis material's parts as resolved)
+        s = (s ^ (uint64_t)(uintptr_t)part.get()) * kPrime;
+        s = (s ^ (part ? part->version : 0)) * kPrime;
+      }
+    }
+    return s;
+  };
+  const std::vector<MaterialPtr> *last_materials = nullptr;
+  uint64_t last_sum = 0;
+  for (const DrawItem &it : items) {
+    if (it.materials != last_materials || !last_materials) {  // (items of one renderer share a list: its content once)
+      last_materials = it.materials;
+      last_sum = materials_key(it.materials);
+    }
+    uint64_t w[24];
+    std::memcpy(w, it.model.m, 64);
+    const RenderMesh *rm = it.mesh;
+    w[8] = (uint64_t)(uintptr_t)rm;
+    w[9] = rm ? rm->serial ^ (uint64_t)(rm->tangents.empty() ? 0 : 1) << 60 ^ (uint64_t)(rm->uvs.empty() ? 0 : 1) << 61 : 0;
+    w[10] = (uint64_t)it.id | (uint64_t)it.unlit << 32 | (uint64_t)it.double_sided << 33 | (uint64_t)it.receive_shadows << 34 |
+            (uint64_t)it.cast_shadows << 35 | (uint64_t)it.use_probes << 36 | (uint64_t)it.always_cull << 37 | (uint64_t)it.realtime_lm << 38;
+    float f[4] = {it.albedo.x, it.albedo.y, it.albedo.z, it.specular};
+    std::memcpy(&w[11], f, 16);
+    w[13] = (uint64_t)(uintptr_t)it.materials;
+    w[14] = last_sum;
+    w[15] = (uint64_t)(uintptr_t)it.face_highlight;
+    w[16] = (uint64_t)(uintptr_t)it.lightmap;
+    w[17] = (uint64_t)(uintptr_t)it.lightmap_uv ^ (it.lightmap_uv ? (uint64_t)it.lightmap_uv->size() << 48 : 0);
+    w[18] = (uint64_t)(uintptr_t)it.lightmap_dir;
+    w[19] = (uint64_t)(uintptr_t)it.shadowmask;
+    w[20] = (uint64_t)(uintptr_t)it.rt_bounce;
+    w[21] = (uint64_t)(uintptr_t)it.rt_sky;
+    w[22] = (uint64_t)(uintptr_t)it.rt_uv ^ (it.rt_uv ? (uint64_t)it.rt_uv->size() << 48 : 0);
+    w[23] = (uint64_t)(uintptr_t)it.vertex_colors;
+    uint64_t s = 0;
+    for (uint64_t k = 0; k < 24; k++) s += (w[k] ^ (0x5BD1E995ull * (k + 1))) * (kGolden * (2 * k + 1));
+    chain(s);
+  }
+  return h;
+}
+
 }  // namespace
 
 void Editor::set_viewport_device(int d) {
@@ -911,9 +982,10 @@ bool Editor::gpu_view_may_draw(const RenderTarget &rt, const LightingEnv &env, c
 
 /* A mesh on the card: kept while its serial stays; a new one of the same size (an Edit Mode drag moves it in place,
  * splitting quads again) updates it, another size replaces it. */
-int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
+int Editor::gpu_mesh(const RenderMesh &rm, std::string &err, uint64_t owner) {
   GpuMesh &e = gpu_meshes_[&rm];
   e.used = gpu_calls_;
+  mesh_deferred_now_ = false;
   /* Round 337: a mesh first drawn without a normal map went up with zero tangents; its tangents are added to the same
    * render mesh (the serial kept) when a normal map comes, so they are part of the key - the card's zero tangents
    * normalized to NaN and drew the object black (a texture's Physical Size moved a cube from the CPU to the card). */
@@ -921,9 +993,28 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   if (e.id >= 0 && rm.serial != 0 && e.serial == rm.serial && e.tangents == tangents) return e.id;
   if (e.tangents == tangents && gpu_mesh_moved(e, rm, err)) return e.id;
   err.clear();  // (a refused partial update falls back to the whole mesh)
+  /* Round 458: while the views stream, a frame sends at most mesh_budget_ bytes of meshes new to the card (as gpu_texture's
+   * budget); the rest wait, their items left out of this frame, and the view asks for another. A mesh the card has
+   * already is only ever updated (never held back: it would draw stale), and the selected or edited object's is never
+   * deferred. Judged by the mesh's own size first: only a frame's first mesh may take it past the budget, so a single
+   * huge mesh still goes up (alone) and can't wait forever. */
+  const size_t estimate = rm.positions.size() * sizeof(gpu::RasterVertex) + rm.indices.size() * 4;
+  const bool over = e.id < 0 && texture_streaming() && mesh_bytes_frame_ > 0 && (mesh_bytes_frame_ + estimate > mesh_budget_ || mesh_ms_frame_ > mesh_budget_ms_);
+  if (over && owner != 0 && !is_selected(owner) && !(edit_mode_ && owner == edit_obj_)) {
+    if (e.queued_at != hash_frame_) mesh_queue_++, prof_.mesh_deferred++;
+    e.queued_at = hash_frame_;
+    if (mesh_drain_t0_ < 0) mesh_drain_t0_ = clock_now();
+    mesh_waiting_ = true;
+    mesh_deferred_now_ = true;
+    return -1;
+  }
+  ScopedTimer add_timer;  // (the vertices and indices built count too)
   const std::vector<gpu::RasterVertex> v = raster_vertices(rm);
   const std::vector<uint32_t> indices = card_indices(rm, e.parts);
-  prof_.gpu_upload_bytes += (uint64_t)v.size() * sizeof(gpu::RasterVertex) + (uint64_t)rm.indices.size() * 4;
+  const uint64_t sent = (uint64_t)v.size() * sizeof(gpu::RasterVertex) + (uint64_t)rm.indices.size() * 4;
+  prof_.gpu_upload_bytes += sent;
+  mesh_bytes_frame_ += (size_t)sent;
+  mesh_bytes_frame_max_ = std::max(mesh_bytes_frame_max_, mesh_bytes_frame_);
   if (e.id >= 0 && e.vertices == rm.positions.size() && e.indices == rm.indices.size() && gpu_view_->update_mesh(e.id, v, &indices, &err)) {
     prof_.gpu_mesh_updates++;
     e.serial = rm.serial;
@@ -935,6 +1026,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
     gpu_mesh_bytes_ -= e.bytes;
   }
   e.id = gpu_view_->add_mesh(v, indices, &err);
+  mesh_ms_frame_ += add_timer.ms();  // (round 458: first uses cost time, not only bytes - the budget counts both)
   e.serial = rm.serial;
   e.tangents = tangents;
   e.vertices = (uint32_t)rm.positions.size();
@@ -943,6 +1035,29 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err) {
   gpu_mesh_bytes_ += e.bytes;
   prof_.gpu_mesh_uploads++;
   return e.id;
+}
+
+/* Round 458: whether a slot's kept instance array stands for this frame - the key (what the items and materials are) is
+ * the same, and the card still answers with the ids it holds: every mesh and material texture is asked for again, as a
+ * gather does (which also marks them drawn, so the card doesn't let them go), and a texture that landed since, a mesh
+ * that was uploaded under another id or left the card shows as a changed id. */
+bool Editor::instance_keep_valid(InstanceKeep &k, uint64_t key) {
+  if (!k.valid || k.key != key || k.card != gpu_view_.get()) return false;
+  /* (A mesh is looked up, never uploaded here - the upload budget is the gather's: one the card let go or holds under
+   * another serial, id or tangents makes the array stale, and the gather sends it under the budget.) */
+  for (const auto &[rm, id] : k.meshes) {
+    const auto found = gpu_meshes_.find(rm);
+    if (found == gpu_meshes_.end()) return false;
+    GpuMesh &e = found->second;
+    if (e.id != id || rm->serial == 0 || e.serial != rm->serial || e.tangents != !rm->tangents.empty()) return false;
+    e.used = gpu_calls_;
+  }
+  std::string tex_err, approx;
+  for (const auto &[weak, id] : k.textures) {
+    const TexturePtr t = weak.lock();
+    if (!t || gpu_texture(t, tex_err, &approx) != id) return false;
+  }
+  return tex_err.empty();
 }
 
 /* This view on the CPU after all (what it shows can't go to the card), the card kept: the reason for Preferences. */
@@ -979,6 +1094,12 @@ int Editor::gpu_texture(const TexturePtr &t, std::string &err, std::string *appr
     if (approx) add_note(*approx, found->second.approx);
     return found->second.id;
   }
+  /* Round 447: while the views stream, a frame sends at most kStreamUploadBudget bytes; the rest go up next frame (shown
+   * meanwhile without their map), so a big import's hundreds of textures don't land in one frame. */
+  if (approx && texture_streaming() && upload_bytes_frame_ >= kStreamUploadBudget) {  // (material maps only: a lightmap or the sky isn't deferred)
+    upload_waiting_ = true;
+    return -1;
+  }
   std::string why, note;
   int id = -1;
   if (approx) {
@@ -1005,6 +1126,7 @@ int Editor::gpu_texture(const TexturePtr &t, std::string &err, std::string *appr
   }
   if (approx) add_note(*approx, note);
   prof_.gpu_texture_uploads++;
+  if (approx) upload_bytes_frame_ += t->memory_bytes();
   return id;
 }
 
@@ -1115,15 +1237,20 @@ int Editor::gpu_lightmap(const Lightmap &lm, std::string &err) {
   }
   if (gpu_lightmaps_.size() > 256) prune_gpu_lightmaps();
   if (found == gpu_lightmaps_.end()) {
+    ScopedTimer page_timer;  // (round 458: a page converted and sent is a first use for the frame's upload budget)
     auto t = std::make_shared<Texture>();
     t->srgb = false, t->is_float = true, t->width = lm.width, t->height = lm.height;
     Texture::Level l;
     l.w = lm.width, l.h = lm.height;
     l.pxf.resize(lm.texels.size());
-    for (size_t i = 0; i < lm.texels.size(); i++) l.pxf[i] = Vec4(lm.texels[i], 1.0f);
+    const bool has_alpha = lm.alpha.size() == lm.texels.size();  // (round 454: a shadowmask page's fourth light)
+    for (size_t i = 0; i < lm.texels.size(); i++) l.pxf[i] = Vec4(lm.texels[i], has_alpha ? lm.alpha[i] : 1.0f);
     t->levels.push_back(std::move(l));
     gpu_lightmaps_[&lm] = {lm.serial, t};
     found = gpu_lightmaps_.find(&lm);
+    const int id = gpu_texture(found->second.second, err);
+    mesh_ms_frame_ += page_timer.ms();
+    return id;
   }
   return gpu_texture(found->second.second, err);
 }
@@ -1159,6 +1286,11 @@ int Editor::gpu_corners(const DrawItem &it, const GpuMesh &e, bool lm, bool rt, 
       return -1;
     }
   }
+  struct BuiltTime {  // (round 458: a block built and sent is a first use: its time counts against the frame's upload budget)
+    double &sum;
+    ScopedTimer t;
+    ~BuiltTime() { sum += t.ms(); }
+  } built_time{mesh_ms_frame_, {}};
   std::vector<float> corners;
   corners.reserve(rm.tri_count() * 24);
   auto put = [&](size_t t) {
@@ -1226,10 +1358,16 @@ void Editor::gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *
   uint64_t key = d ? ((((uint64_t)(uintptr_t)d * 31 ^ d->scene_key) * 1099511628211ull ^ d->probe_count()) * 1099511628211ull ^ probe_live_gen_) *
                          1099511628211ull ^ lighting_gen_
                    : 0;
+  if (d)  // (round 455: the window is folded into the packed SH)
+    for (float h : probe_window_) {
+      uint32_t hb;
+      std::memcpy(&hb, &h, 4);
+      key = (key * 1099511628211ull) ^ hb;
+    }
   key = (key * 1099511628211ull) ^ (lv ? lv->signature() ^ lv_bake_gen_ : 0);  // (round 443: the Light Volumes ride in the same buffer)
   if (key == gpu_probe_key_) return;
   gpu_probe_key_ = key;
-  std::vector<float> packed = d ? probe_pack(*d) : std::vector<float>(16, 0.0f);  // (no probe volume: a header the card reads as empty - round 442: four rows)
+  std::vector<float> packed = d ? probe_pack(*d, probe_window_) : std::vector<float>(16, 0.0f);  // (no probe volume: a header the card reads as empty - round 442: four rows)
   const std::vector<float> volumes = lv ? light_volume_pack(*lv, kCardMaxProbes) : std::vector<float>();
   if (!volumes.empty()) {
     const int32_t at = (int32_t)(packed.size() / 4);
@@ -1289,7 +1427,6 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   gpu_calls_++;
   std::string err;
   std::vector<gpu::RasterInstance> inst;
-  inst.reserve(items.size());
   std::vector<uint32_t> hl_bits;  // task 0166: Edit Mode's face highlight, a bit a triangle of the edited mesh
   const bool gouraud = opt.shade == ShadeMode::Gouraud;  // task 0195: Solid shading
   std::vector<float> vcols;
@@ -1415,17 +1552,25 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   std::string approx;   // round 414 (ADR 0108): what the card draws differently from the CPU in this view
   uint64_t approximated = 0;  // (the objects and capped textures it noted; counted in the Profiler when the view is drawn)
   auto tex = [&](const TexturePtr &t) { return gpu_texture(t, tex_err); };
+  /* Round 458: what this gather may leave kept for the next frame (see InstanceKeep), and the card ids it was made from. */
+  bool keepable = true;
+  std::vector<std::pair<TexturePtr, int>> tex_deps;
+  std::unordered_set<const Texture *> tex_dep_seen;
   auto mtex = [&](const TexturePtr &t) {  // (a material's: capped, noted)
     const size_t before = approx.size();
     const int id = gpu_texture(t, tex_err, &approx);
     if (approx.size() != before) approximated++;
+    if (id < 0) keepable = false;  // (deferred by the upload budget or refused: not final)
+    else if (t && tex_dep_seen.insert(t.get()).second) tex_deps.push_back({t, id});
     return id;
   };
   auto note_material = [&](const Material &m) {
     const char *a = approximation_of(m);
-    if (!a) return;
-    add_note(approx, a);
-    approximated++;
+    if (a) add_note(approx, a), approximated++;
+    if (m.volume()) keepable = false;  // (approximate_volume reads the frame's lighting)
+    const Material::Resolved &tx = m.textures();
+    for (int k = 0; k < 5; k++)
+      if (tx.live[k]) keepable = false;  // (a live procedural texture's close-up check is the eye's)
   };
   auto axis_of = [&](size_t i, const DrawItem &it, const Material &m) {
     if (m.axis_mode == 0 || !inst[i].textured) return;
@@ -1464,51 +1609,114 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     ms_corners += bt.ms();
   };
   ScopedTimer gather_timer;
-  for (const DrawItem &it : items) {
-    if (!it.mesh || it.mesh->indices.empty()) continue;
-    const int mesh = gpu_mesh(*it.mesh, err);
-    ok = ok && mesh >= 0;
-    if (mesh < 0) continue;
-    GpuMesh &e = gpu_meshes_[it.mesh];
-    if (const char *why = live_close_up_of(it, e, vp, p, eye, rt.height)) return gpu_view_refuse(slot, why);
-    const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
-    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
-    const uint32_t first_inst = (uint32_t)inst.size();
-    if (e.parts.empty()) {
-      inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
-      note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
-      inst.back().highlight = hl;
-      inst.back().vertex_colors = vc;
-      if (gouraud) solid_instance(inst.back(), it);
-      axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
-      if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
-      if (inst.back().surface) gather_see_through(it, first_inst, e);
-      continue;
-    }
-    for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
-      gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), mtex, env);
-      note_material(*slot_material(it, part[0]));
-      in.first_index = part[1];
-      in.index_count = part[2];
-      in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
-      in.vertex_colors = vc;
-      if (gouraud) solid_instance(in, it);
-      inst.push_back(in);
-      axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
-    }
-    for (size_t k = first_inst; k < inst.size(); k++)
-      if (inst[k].surface) {
-        gather_see_through(it, first_inst, e);
-        break;
+  const char *close_up_why = nullptr;
+  auto gather = [&] {
+    for (const DrawItem &it : items) {
+      if (!it.mesh || it.mesh->indices.empty()) continue;
+      const int mesh = gpu_mesh(*it.mesh, err, it.id);
+      if (mesh < 0 && mesh_deferred_now_) {  // (round 458: left for a later frame's budget: not drawn now, not a refusal)
+        keepable = false;
+        continue;
       }
-    if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
+      ok = ok && mesh >= 0;
+      if (mesh < 0) continue;
+      GpuMesh &e = gpu_meshes_[it.mesh];
+      if (const char *why = live_close_up_of(it, e, vp, p, eye, rt.height)) {
+        close_up_why = why;
+        return;
+      }
+      if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's colours, a mesh made anew every frame)
+      if (it.materials && keepable)  // (live_close_up_of looks at every material of the item, used or not: its answer is the eye's)
+        for (const MaterialPtr &mp : *it.materials)
+          for (int k = 0; mp && k < 5; k++)
+            if (mp->textures().live[k]) keepable = false;
+      const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
+      const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
+      const uint32_t first_inst = (uint32_t)inst.size();
+      if (e.parts.empty()) {
+        inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
+        note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
+        inst.back().highlight = hl;
+        inst.back().vertex_colors = vc;
+        if (gouraud) solid_instance(inst.back(), it);
+        axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
+        if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
+        if (inst.back().surface) gather_see_through(it, first_inst, e);
+        continue;
+      }
+      for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
+        gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), mtex, env);
+        note_material(*slot_material(it, part[0]));
+        in.first_index = part[1];
+        in.index_count = part[2];
+        in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
+        in.vertex_colors = vc;
+        if (gouraud) solid_instance(in, it);
+        inst.push_back(in);
+        axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
+      }
+      for (size_t k = first_inst; k < inst.size(); k++)
+        if (inst[k].surface) {
+          gather_see_through(it, first_inst, e);
+          break;
+        }
+      if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
+    }
+    see_through_run();  // (round 415: the see-through triangles of every item, on every thread)
+    for (size_t k = 0; k < axis_parts.size(); k++) {  // (the parts after every drawn instance: no index moves)
+      inst[axis_owner[k]].axis_parts[axis_parts[k].second] = (float)inst.size();
+      inst.push_back(axis_parts[k].first);
+    }
+  };
+  /* Round 458: the instance array of the last frame, when what it was made from is what this frame has. In verify mode
+   * (the render cache's) the array is gathered anyway and compared: a difference is a stale picture. */
+  InstanceKeep &keep = instance_keep_[slot];
+  /* (The key is hashed only where it can be compared - a slot holding an array - or stored after a gather that could be kept:
+   * a scene of baked or see-through frames pays nothing for it.) */
+  uint64_t inst_key = 0;
+  bool have_key = false;
+  if (keep.valid) inst_key = instances_key(items, env, opt), have_key = true;
+  const bool kept_ok = have_key && instance_keep_valid(keep, inst_key);
+  const std::vector<gpu::RasterInstance> *insts = &inst;
+  bool toon_maps = false, baked = false;
+  if (kept_ok && !cache_verify_) {
+    insts = &keep.inst;
+    approx = keep.approx, approximated = keep.approximated, toon_maps = keep.toon_maps;
+    instances_kept_++, prof_.instances_kept++;
+    prof_.ms_gpu_instances += gather_timer.ms();  // (the key and the ids asked again: all of this frame's instance work)
   }
-  see_through_run();  // (round 415: the see-through triangles of every item, on every thread)
-  for (size_t k = 0; k < axis_parts.size(); k++) {  // (the parts after every drawn instance: no index moves)
-    inst[axis_owner[k]].axis_parts[axis_parts[k].second] = (float)inst.size();
-    inst.push_back(axis_parts[k].first);
+  else {
+    inst.reserve(items.size());
+    gather();
+    if (close_up_why) return gpu_view_refuse(slot, close_up_why);
+    instances_built_++, prof_.instances_built++;
+    bool surface = false;
+    for (const gpu::RasterInstance &in : inst) {
+      toon_maps = toon_maps || (in.flags & gpu::RasterInstance::ToonMaps) != 0;
+      baked = baked || in.baked;
+      surface = surface || in.surface != 0;
+    }
+    /* (Byte for byte: raster_instance value-initialises each instance, so the padding is zero and a copy carries it along -
+     * the instances are plain data. A compiler that left padding alone would show here as a false stale count.) */
+    if (kept_ok && (inst.size() != keep.inst.size() || std::memcmp(inst.data(), keep.inst.data(), inst.size() * sizeof(gpu::RasterInstance)) != 0))
+      note_render_cache_mismatch();  // (verify mode: the kept array was stale)
+    keep.valid = false;
+    if (ok && keepable && !baked && !surface && see_jobs.empty() && tex_err.empty() && corner_err.empty() && hl_bits.empty() && vcols.empty()) {
+      if (!have_key) inst_key = instances_key(items, env, opt);
+      keep.card = g, keep.key = inst_key, keep.valid = true;
+      keep.approx = approx, keep.approximated = approximated, keep.toon_maps = toon_maps;
+      keep.textures.clear();
+      for (const auto &[t, id] : tex_deps) keep.textures.emplace_back(std::weak_ptr<const Texture>(t), id);  // (weakly: a kept array doesn't hold a dropped texture alive)
+      keep.meshes.clear();
+      std::unordered_set<const RenderMesh *> seen;
+      for (const DrawItem &it : items)
+        if (it.mesh && !it.mesh->indices.empty() && seen.insert(it.mesh).second) keep.meshes.push_back({it.mesh, gpu_meshes_[it.mesh].id});
+      keep.inst = std::move(inst);  // (this frame goes on with the kept one; a refusal later in it leaves the keep whole)
+      insts = &keep.inst;
+      if (card_instances_ == insts) card_instances_ = nullptr;  // (new contents at the old address: the card's copy is the old ones)
+    }
+    prof_.ms_gpu_instances += std::max(0.0, gather_timer.ms() - ms_corners - ms_see);
   }
-  prof_.ms_gpu_instances += std::max(0.0, gather_timer.ms() - ms_corners - ms_see);
   prof_.ms_gpu_corners += ms_corners;
   if (ok && !tex_err.empty()) return gpu_view_refuse(slot, tex_err);
   if (ok && !corner_err.empty()) return gpu_view_refuse(slot, corner_err);
@@ -1528,8 +1736,6 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const bool filters_on_cpu = filters && !filters->passes.empty() && !post_on_card && !filters_off_card_for_test_;  // (its own note in the status: not an approximation)
   /* (Round 414: the see-through pixels are marked "none" in the card's linear-light plane, as the CPU marks its own.) */
   if (want_hdr && !see.empty() && !g->can_draw_see_through_hdr()) return gpu_view_refuse(slot, "see-through surfaces over a picture kept in linear light (the card's pass couldn't be made)");
-  const bool toon_maps = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return (in.flags & gpu::RasterInstance::ToonMaps) != 0; });
-  const bool baked = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return in.baked; });
   if (baked && env.probes && env.probes->data && env.probes->data->probe_count() > kCardMaxProbes)
     return gpu_view_refuse(slot, "a probe volume of more than 262,144 probes");
   if (baked && env.light_volumes && env.light_volumes->voxels() > kCardMaxProbes)
@@ -1565,6 +1771,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     fr.shadow_fast = env.shadow->fast;
   }
   fr.cull_backfaces = opt.backface_culling;
+  fr.shadowmask_distance = env.shadowmask_mode == 1 ? std::max(env.shadow_distance, 1e-3f) : 0.0f;  // (round 454)
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
   raster_world(fr, env, cam, scene_lights);
   if (render_clear_override_on_) fr.background = 0, fr.clear = render_clear_override_;  // (a transparent render's black / white pass: task 0195)
@@ -1596,7 +1803,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   /* Task 0192: the Scene view's overlays with its picture, when the card draws at the view's full size. */
   const bool overlays = scene_full_call_ && scene_overlays_recorded_ && g->can_draw_overlays() && !overlays_off_gpu_for_test_;
   if (overlays) overlays_to_frame(fr);
-  g->set_instances(inst);
+  /* (Round 458: a kept array the card already holds - this slot's, set by its last frame and not replaced by another
+   * view's since - isn't copied into it again.) */
+  if (insts != card_instances_ || insts == &inst) {
+    g->set_instances(*insts);
+    card_instances_ = insts == &inst ? nullptr : insts;
+  }
   /* The picture, and the planes later work reads: depth for picking and overlays, and for a camera's depth of field
    * when it has one; ids for picking (not in a view nobody picks in: task 0092). The colour comes straight into the
    * canvas when its rows are contiguous there, else through a buffer of the view's own size. */
@@ -1844,6 +2056,8 @@ void Editor::gpu_view_drop() {
   card_forget_windows();  // (task 0193)
   gpu_meshes_.clear();
   gpu_textures_.clear();
+  for (InstanceKeep &k : instance_keep_) k.valid = false;  // (round 458: their card ids went with it)
+  card_instances_ = nullptr;
   gpu_corners_.clear();  // (round 415: the blocks went with the card)
   gpu_corner_floats_ = 0;
   for (std::string &a : gpu_slot_approx_) a.clear();

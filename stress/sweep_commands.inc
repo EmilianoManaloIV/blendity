@@ -112,7 +112,7 @@ static const SweepCommand kSweepCommands[] = {
   {"palette", "palette run create cube", ""},
   {"panel", "panel new Favs", ""},
   {"paper", "paper new", ""},
-  {"perf", "perf reset", ""},
+  {"perf", "perf wait", ""},
   {"pickfocus", "pickfocus", ""},
   {"pilot", "pilot", ""},
   {"play", "play", ""},

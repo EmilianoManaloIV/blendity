@@ -33,3 +33,34 @@ nearest four.
 - L2 rings: a lamp leaves 1/16 of its light behind a surface facing away (Unity's probes do the same); no windowing.
 - Light Probe Groups aren't objects in Blendity: their probes arrive with Unity's lighting file; moving them needs Unity.
 - Tetrahedralising is O(n^2) in the points (capped at 20,000; past that, the nearest four).
+
+## Superseded in part (round 453, 2026-11-08)
+Decision 1's "the sky shares stay the cube's" no longer holds for baked probes:
+- **The sky lives in the SH.** `probe_bake`, given the world (`Environment`), adds the world's radiance in the direction
+  of every ray that leaves the scene to the probe's SH (`ProbeVolumeData::sky_in_sh`), so a gradient or HDRI sky has a
+  direction in a probe, as Unity's probes hold the environment. Baked shading then takes no whole sky share from the
+  cube (it would count twice); the cubes keep their shares for the live probes and the dots. A caller that gives no
+  world (the Light Volume bake, which reads only the cubes) leaves the SH without the sky and `sky_in_sh` false.
+- **The live relight is kept (ADR 0012).** The probes store the world's irradiance / pi at the six axes they were baked
+  under (`has_baked_sky`, `baked_sky`). Shading adds `sky_change(now, n)` x the cube's sky share: the n-squared blend of
+  (the world's irradiance now at each axis - the baked one there), both sides blends of the same six axes, so an
+  unchanged sky adds exactly nothing; the result is clamped at 0 (a darker sky cannot take more than the SH hold).
+  `sample` takes the current `Environment` for it; without one the SH stay as baked.
+- **Known error:** the weight is the cube's sky-visibility share, not the SH's direction, and the six-axis blend is the
+  ambient cube's own approximation: a 2.5x brighter Gradient came within about 10 % of a re-bake on the axes (up 2.36
+  against 2.14, side 0.82 against 0.92) and 15 % off them (1.35 against 1.60 at (0.6, 0.5, 0.62)); it is never negative. The miss grows with the sky's top-to-side contrast and with the size of
+  the change (about 30 % for a 2.5x change of a sky with a black horizon); an unchanged sky is exact, and a re-bake
+  removes it.
+- **File format:** after the SH, one byte (`sky_in_sh`), then - only with a baked sky - 72 bytes (six `Vec3`). Files
+  that end before the byte (before round 453) or at it load with no baked sky.
+- **The card:** `pv[3].y` the flag, `pv[3].z` where the six baked-sky vec4 start (after the SH rows, 0 none);
+  `probe_sample` evaluates the same like-for-like change with the shader's `irradiance` at the three axes facing n.
+
+## Superseded in part (round 455, 2026-11-08)
+Two of the consequences above no longer hold (ADR 0119):
+- **"No windowing"** - Lighting > Probe Remove Ringing (Hanning or Lanczos, width 3-16) windows the SH's bands 1 and 2 at
+  evaluation, on the CPU and (folded into the packed rows) on the card. Off is the default and the picture of rounds
+  442-454; Unity's own probes are shown unwindowed.
+- **"Light Probe Groups aren't objects in Blendity"** - `LightProbeGroupComponent` is a component with positions in object
+  space, edited in the Scene view and imported from Unity; Generate Lighting bakes at the groups' probes and fills the
+  grid from their tetrahedra (`probe_volume_from_points`, the second half of `unity_probe_volume`, now shared).
