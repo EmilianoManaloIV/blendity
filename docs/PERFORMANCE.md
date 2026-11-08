@@ -216,6 +216,12 @@ A direction's saved length is its direct share raised to 7.25. SideRail's direct
 3.70 / 0.813 / 0.899, spawn_back 1.37 / 0.772 / 0.360, floor 4.25 / 0.773 / 0.974 (SSIM 0.747 before), ahead
 3.06 / 0.885 / 0.959.
 
+### Emitters, charts and seams, sampling (rounds 439-441)
+- A floor under a small unlit sign: error at 16 samples 0.020 -> 0.0003. A floor under an HDRI's bright patch: 4.46 ->
+  0.10. 40 lamps: the same light from 49k shadow rays instead of 224k.
+- 60 objects on 128-texel pages: 33 pages of island charts against 45 of squares; a sphere's seam step 1.85 % -> 0.24 %.
+- SideRail against Unity: spawn 3.69 / 0.809 / 0.898, spawn_back (dark) 1.43 / 0.777 / 0.129, floor 4.25 / 0.771 / 0.974, ahead 3.06 / 0.884 / 0.958 (MAE / SSIM / grid; round 438: 3.70 / 0.813, 1.37 / 0.772, 4.25 / 0.773, 3.06 / 0.885) - flat within run-to-run noise: ADR 0113's SSIM target still missed at three stations. The bake 91 s (lightmaps 52.3 s on the card, the filter 2.1 s).
+
 ### The views against Unity's (round 431) and the suite's comparison (round 432)
 | view (ms a frame on the card) | Blendity | Unity |
 |---|---|---|

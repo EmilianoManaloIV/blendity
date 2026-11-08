@@ -62,6 +62,7 @@ uint64_t Editor::lightmap_scene_key() {
           mixf(&mp->base_color.x, 3);
           mixf(&mp->emission.x, 3);
           mixf(&mp->emission_strength, 1);
+          mix((uint64_t)(int64_t)mp->gi_flags);  // (round 439: Unity's Global Illumination decides whether the emission bakes)
           mixf(&mp->metallic, 1);
         }
     }
