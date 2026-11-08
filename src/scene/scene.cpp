@@ -318,9 +318,12 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Baked Global Illumination", baked_gi);
   r.help("Generate Lighting bakes the lights set to Baked or Mixed, the sky and their bounces into lightmaps for\n"
          "objects marked Contribute GI (Unity: Lighting > Mixed Lighting > Baked Global Illumination).");
-  static const char *modes[] = {"Baked Indirect"};
-  r.enumeration("Lighting Mode", lighting_mode, modes, 1);
-  r.help("Baked Indirect: Mixed lights keep their realtime light and shadows; only their bounced light is baked.");
+  static const char *modes[] = {"Baked Indirect", "Shadowmask", "Subtractive"};
+  r.enumeration("Lighting Mode", lighting_mode, modes, 3);
+  r.help("What Generate Lighting keeps of the Mixed lights (Unity's Lighting Mode). Baked Indirect: their realtime light\n"
+         "and shadows, only their bounced light baked. Shadowmask: realtime light, but their shadows from static objects\n"
+         "baked into a mask (up to 3 lights). Subtractive: their direct light baked into the lightmaps too; moving\n"
+         "objects still get it in realtime.");
   r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
   r.help("Texels per unit (metre) of surface (Unity's default is 40; 80 shows a small emissive object's glow in detail).");
   r.field("Max Lightmap Size", max_size, 16, 4096);

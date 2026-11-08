@@ -2566,14 +2566,29 @@ static void test_bake(Report &rep, const Options &o) {
                      runs, problems));
 }
 
-/* Round 433: a soak's frame that grew the process by more than 100 MB, printed with that frame's events - what to
+/* Round 445 (task 0421): each subsystem's bytes, "name 12.3 MB, ...", and what the process holds that no account names. */
+static std::string soak_accounts(const Editor &ed) {
+  std::string s;
+  double named = 0.0;
+  for (const Editor::MemoryAccount &a : ed.memory_accounts()) {
+    const double mb = (double)a.bytes / 1048576.0;
+    named += mb;
+    s += strprintf("%s%s %.1f MB", s.empty() ? "" : ", ", a.name, mb);
+  }
+  const double ws = (double)sys::working_set_bytes() / 1048576.0;
+  return s + strprintf(", unaccounted %.1f MB", ws - named);
+}
+
+/* Round 433: a soak's frame that grew the process by more than 20 MB (round 445: was 100), printed with that frame's events - what to
  * replay (the same seed) to find which window or job took the memory. */
-static void report_soak_jump(int frame, const std::vector<platform::Event> &ev, double &prev_mb) {
+static void report_soak_jump(Editor &ed, int frame, const std::vector<platform::Event> &ev, double &prev_mb) {
   const double mb = (double)sys::working_set_bytes() / 1048576.0;
   const double grew = mb - prev_mb;
   prev_mb = mb;
-  if (grew < 100.0 || frame == 0) return;
-  std::printf("soak: frame %d grew the working set by %.0f MB to %.0f MB; its events:", frame, grew, mb);
+  if (grew < 20.0 || frame == 0) return;
+  std::printf("soak: frame %d grew the working set by %.0f MB to %.0f MB (%s); edit mode %d; jobs:", frame, grew, mb, soak_accounts(ed).c_str(), (int)ed.in_edit_mode());
+  for (const Editor::JobView &j : ed.jobs_for_test()) std::printf(" [%s]", j.label.c_str());
+  std::printf("; %s; its events:", ed.perf_status_text().c_str());
   for (const platform::Event &e : ev) std::printf(" [type %d button %d key %d mods %d at %d,%d]", (int)e.type, e.button, e.key, e.mods, e.x, e.y);
   std::printf("\n");
   std::fflush(stdout);
@@ -2599,6 +2614,7 @@ static void test_fuzz(Report &rep, const Options &o) {
   const double soak_min = std::getenv("BLENDITY_FUZZ_MINUTES") ? std::atof(std::getenv("BLENDITY_FUZZ_MINUTES")) : 0.0;
   if (soak_min > 0.0) frames = std::numeric_limits<int>::max();
   double next_sample = 60000.0, first_mb = 0.0, last_mb = 0.0, step_mb = 0.0;
+  std::string soak_end;  // (round 445: what each subsystem held when the soak ended)
   int mx = 640, my = 360;
   bool down[3] = {};
   ScopedTimer t;
@@ -2611,12 +2627,14 @@ static void test_fuzz(Report &rep, const Options &o) {
                   next_sample / 60000.0, f, last_mb, (double)sys::peak_working_set_bytes() / 1048576.0, ed.scene().object_count(),
                   (double)ed.scene().memory_bytes() / 1048576.0, ed.undo_steps_for_test(), (double)ed.undo_bytes() / 1048576.0,
                   (double)texture_cache_bytes() / 1048576.0);
+      std::printf("soak: minute %.0f holds: %s\n", next_sample / 60000.0, soak_accounts(ed).c_str());
       std::fflush(stdout);
       next_sample += 60000.0;
     }
     if (soak_min > 0.0 && t.ms() >= soak_min * 60000.0) {  // (on time, not at the next whole minute)
       last_mb = (double)sys::working_set_bytes() / 1048576.0;
       if (first_mb == 0.0) first_mb = last_mb;
+      soak_end = soak_accounts(ed);
       frames = f;
       break;
     }
@@ -2674,13 +2692,14 @@ static void test_fuzz(Report &rep, const Options &o) {
       std::fflush(stderr);
     }
     ed.step_frame_headless(ev);
-    if (soak_min > 0.0) report_soak_jump(f, ev, step_mb);
+    if (soak_min > 0.0) report_soak_jump(ed, f, ev, step_mb);
   }
   double avg = t.ms() / std::max(1, frames);
   Log::echo_stdout = true;
   if (soak_min > 0.0)
     rep.note(strprintf("Soak (BLENDITY_FUZZ_MINUTES=%g): the working set %.1f MB after the first minute, %.1f MB at the end (%+.1f MB)", soak_min, first_mb, last_mb,
                        last_mb - first_mb));
+  if (soak_min > 0.0) rep.note("Soak holds at the end (round 445): " + soak_end);
   const uint64_t stale = ed.frame_profile_totals().cache_mismatches;
   /* Round 435 (ADR 0115): the change counter checked every frame - a miss is a UI path that writes past every funnel. */
   const uint64_t missed = ed.scene_hash_misses_for_test();

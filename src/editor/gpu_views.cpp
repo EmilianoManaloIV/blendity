@@ -272,12 +272,15 @@ gpu::RasterLight raster_light(const RenderLight &l) {
 }
 
 /* Task 0197: the probe volume packed for the card (gpu::Raster::set_probe_volume, read by kProbeFns): a header of
- * three vec4, then the octree's nodes (two each), the bricks (two each), the probes (thirteen each: position and
+ * four vec4 (round 442: pv[3].x the SH's start), then the octree's nodes (two each), the bricks (two each), the probes (thirteen each: position and
  * flags, the baked cube's six axes, the live one's), the roots four to a vec4. */
 std::vector<float> probe_pack(const ProbeVolumeData &d) {
   const size_t nn = d.nodes.size(), nb = d.bricks.size(), np = d.position.size(), nr = d.roots.size();
-  const size_t node_at = 3, brick_at = node_at + nn * 2, probe_at = brick_at + nb * 2, root_at = probe_at + np * 13;
-  std::vector<float> o((root_at + (nr + 3) / 4) * 4, 0.0f);
+  /* Round 442: a fourth header row (pv[3].x: where each probe's 7 rows of SH start, 0 with none). */
+  const bool with_sh = d.sh.size() == np && np > 0;
+  const size_t node_at = 4, brick_at = node_at + nn * 2, probe_at = brick_at + nb * 2, root_at = probe_at + np * 13;
+  const size_t sh_at = root_at + (nr + 3) / 4;
+  std::vector<float> o((sh_at + (with_sh ? np * 7 : 0)) * 4, 0.0f);
   auto put = [&](size_t v, float a, float b, float c, float e) { o[v * 4] = a, o[v * 4 + 1] = b, o[v * 4 + 2] = c, o[v * 4 + 3] = e; };
   auto bits = [](int64_t i) {  // (an index as its int32's bits: exact past 2^24, read with floatBitsToInt)
     const int32_t v = (int32_t)i;
@@ -310,6 +313,12 @@ std::vector<float> probe_pack(const ProbeVolumeData &d) {
     }
   }
   for (size_t i = 0; i < nr; i++) o[root_at * 4 + i] = bits(d.roots[i]);
+  put(3, bits(with_sh ? (int64_t)sh_at : 0), 0.0f, 0.0f, 0.0f);
+  for (size_t i = 0; with_sh && i < np; i++)
+    for (int k = 0; k < 9; k++) {
+      const size_t f = (sh_at + i * 7) * 4 + (size_t)k * 3;  // (27 floats in 7 rows: coefficient k's rgb at 3k)
+      o[f] = d.sh[i].c[(size_t)k].x, o[f + 1] = d.sh[i].c[(size_t)k].y, o[f + 2] = d.sh[i].c[(size_t)k].z;
+    }
   return o;
 }
 
@@ -1220,7 +1229,7 @@ void Editor::gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *
   key = (key * 1099511628211ull) ^ (lv ? lv->signature() ^ lv_bake_gen_ : 0);  // (round 443: the Light Volumes ride in the same buffer)
   if (key == gpu_probe_key_) return;
   gpu_probe_key_ = key;
-  std::vector<float> packed = d ? probe_pack(*d) : std::vector<float>(12, 0.0f);  // (no probe volume: a header the card reads as empty)
+  std::vector<float> packed = d ? probe_pack(*d) : std::vector<float>(16, 0.0f);  // (no probe volume: a header the card reads as empty - round 442: four rows)
   const std::vector<float> volumes = lv ? light_volume_pack(*lv, kCardMaxProbes) : std::vector<float>();
   if (!volumes.empty()) {
     const int32_t at = (int32_t)(packed.size() / 4);
@@ -1435,6 +1444,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     if (!lm && !rt && !probes) return;
     const int32_t lm_tex = lm ? gpu_lightmap(*it.lightmap, tex_err) : -1;
     const int32_t lm_dir = lm && it.lightmap_dir ? gpu_lightmap(*it.lightmap_dir, tex_err) : -1;  // (round 426)
+    const int32_t lm_mask = lm && it.shadowmask ? gpu_lightmap(*it.shadowmask, tex_err) : -1;   // (round 444)
     const int32_t rb = rt ? gpu_lightmap(*it.rt_bounce, tex_err) : -1, rs = rt ? gpu_lightmap(*it.rt_sky, tex_err) : -1;
     /* (Round 415: the corners' block on the card, built once per mesh and UV set - SideRail's had been rebuilt every
      * frame, 24 ms of its 32 ms GPU path.) */
@@ -1447,6 +1457,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
        * parts; not lilToon, whose ambient takes the plain light on the CPU as here. Elsewhere the factor is 1 and the
        * baked pass would evaluate the material for nothing.) */
       in.lightmap_dir = !in.lil && (in.tex[3] >= 0 || in.axis_parts[0] >= 0.0f) ? lm_dir : -1;
+      in.shadowmask = lm_mask;
       in.corner_base = base < 0 ? -1 : base + (int32_t)(in.first_index / 3);
       in.baked_flags = (probes ? 1u : 0u) | (lm && rt && bounce_onto_lm ? 2u : 0u);
     }

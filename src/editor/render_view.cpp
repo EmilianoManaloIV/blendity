@@ -301,7 +301,7 @@ void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, 
 /* Round 436: two gathers of the same view the same (verify mode's check of a kept list): every field a view draws by. */
 static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
   if (a.mesh != b.mesh || a.id != b.id || a.materials != b.materials || a.lightmap != b.lightmap || a.lightmap_uv != b.lightmap_uv) return false;
-  if (a.lightmap_dir != b.lightmap_dir || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
+  if (a.lightmap_dir != b.lightmap_dir || a.shadowmask != b.shadowmask || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
   if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
   if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
   if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
@@ -329,7 +329,7 @@ uint64_t Editor::items_key(bool game, bool want_tangents) {
   const LightingData &ld = shown_lighting();
   mix((uint64_t)(uintptr_t)&ld);
   mix((uint64_t)(uintptr_t)ld.pages.data() ^ (uint64_t)ld.pages.size() << 48);
-  mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32);
+  mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32 ^ (uint64_t)ld.mask_pages.size() << 48);  // (round 444: the masks too)
   mix((uint64_t)scene_->lighting.directional_mode);
   return h;
 }

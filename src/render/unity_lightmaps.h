@@ -19,6 +19,8 @@
 //                          float4 scale-offset (x, y scale; z, w offset), float16 local-to-world (column-major)
 //   int32 lights; each: string path, int32 type (Unity's LightType), int32 bake (Unity's LightmapBakeType)
 //   int32 probes; each: float3 position, float3 x 6: the probe as Unity's shading reads it along +X -X +Y -Y +Z -Z
+//   (version 2: the reflection probes; version 3, last: int32 probes again (0 or the same count), each float3 x 26 - the
+//   probe along probe_fit_directions' 26 directions, fitted to L2 SH on reading)
 // Positions and directions are Unity's, which an imported Unity scene's are in Blendity too (round 395: its objects where
 // Unity has them); a UV's v runs up (Blendity's lightmaps run down).
 #pragma once
@@ -67,6 +69,8 @@ struct UnityLighting {
   struct Probe {
     Vec3 position;
     std::array<Vec3, 6> axes{};
+    /* Round 442 (version 3): Unity's shading along probe_fit_directions' 26 directions (empty from older files). */
+    std::vector<Vec3> seen;
   };
   /* Round 401 (version 2): a ReflectionProbe's baked cubemap - six faces +X -X +Y -Y +Z -Z, size x size half RGB each,
    * top row first as Cubemap.GetPixels gives them (checked against Unity: review 401); size 0 when it has no bake. */
@@ -129,8 +133,11 @@ bool unity_lightmap_page(const UnityLighting::Page &page, float scale, Lightmap 
  * neighbours'. Returns the texels changed. */
 size_t unity_lightmap_directions(Scene &scene, const UnityLighting &u, LightingData &ld, const Mat4 &placement = Mat4::identity());
 
-/* Unity's baked probes as Blendity's probe volume: probes placed over theirs (finer near them), each from its nearest
+/* Unity's baked probes as Blendity's probe volume: probes placed over theirs (finer near them); round 442: each from the
+ * tetrahedron of Unity's probes around it (their Light Probe Groups), outside them from its nearest
  * four of Unity's (by inverse squared distance). Empty when there are none. */
 void unity_probe_volume(const UnityLighting &u, ProbeVolumeData &out, const Mat4 &placement = Mat4::identity());
+/* Round 442: Unity's probes as L2 SH in Blendity's axes (empty when the file predates version 3). */
+std::vector<ProbeSH> unity_probe_sh(const UnityLighting &u, const Mat4 &placement = Mat4::identity());
 
 }  // namespace bl

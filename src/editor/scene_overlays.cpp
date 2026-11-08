@@ -310,7 +310,8 @@ void Editor::render_overlays(const Recti &) {
     const Vec3 up(0, 1, 0), sky = env_.irradiance(up);
     for (size_t i = 0; i < n; i += step) {
       const bool live = probe_frame_.use_live && probes_.live_ok[i];
-      const Vec3 c = (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky);
+      const Vec3 c = live || i >= probes_.sh.size() ? (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky)
+                                                   : probes_.sh[i].eval(up) + sky * probes_.baked[i].sky[2];  // (round 442: the SH where baked)
       const uint32_t col = probes_.valid[i] ? to_display_pixel(c, ViewTransform::Standard, 0.0f) : Color::hex(0xFF3030);
       scene_r3d_.point(probes_.position[i], std::max(1.5f, (float)ui_.px(2.5f)), col, true);
     }

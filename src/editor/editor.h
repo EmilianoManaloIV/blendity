@@ -1481,6 +1481,7 @@ class Editor {
   void read_unity_lighting_cmd(bool wait);
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
+  void unity_subtractive_modes(LightingData &ld) const;  // (round 444)
   void apply_unity_post_processing(const std::vector<UnityDoc> &docs, UnityImport &ctx);  // (round 401)
   int apply_unity_reflection_probes(const UnityLighting &u, const GameObject *under);  // (round 401)
   void lighting_reset_for(const char *why);
@@ -4206,8 +4207,24 @@ class Editor {
   }
   size_t undo_steps_for_test() const { return undo_.size(); }
   size_t undo_bytes() const;
+  /* Task 0421: what each subsystem holds in memory, by name and bytes (the soak prints it): the scene, the undo history,
+   * the texture cache, the renderers' scratch, the views' planes and pictures, the shadow maps, the path tracers. */
+  struct MemoryAccount { const char *name; size_t bytes; };
+  std::vector<MemoryAccount> memory_accounts() const;
+  std::string memory_text() const;  // `perf memory`: the accounts and the process's working set, one line
+  size_t scratch_bytes() const;                       // the renderers' scratch alone
+  size_t surface_job_planes_bytes() const;            // a surface evaluating on its worker: the planes it holds
+  size_t trim_scratch(size_t keep);                   // frees every renderer's scratch when it exceeds `keep`; the bytes freed
+  void trim_idle_memory();                            // (every frame) an idle renderer's scratch, over the budget, is given back
 
  private:
+  /* (Task 0421) Each renderer's draws (flushes and overlay batches) as last seen and when that changed: a renderer idle for kScratchHoldSeconds
+   * gives its scratch back when the total is over the budget; one in use (an orbit in Edit Mode) keeps it. */
+  struct ScratchWatch { uint64_t seen = ~(uint64_t)0; double since = 0.0; };
+  ScratchWatch scratch_watch_[6];
+  Renderer3D *scratch_renderer(int i);
+  static constexpr size_t kScratchBudget = (size_t)96 << 20;
+  static constexpr double kScratchHoldSeconds = 5.0;
   bool pending_change_ = false;
   EditSelection edit_sel_before_;  // Edit Mode's selection before the pending change (task 0167: the undo step's)
   EditSelection edit_selection() const;
@@ -4703,7 +4720,7 @@ class Editor {
   /* Task 0244: a surface evaluated off the main thread (ADR 0080). */
   struct SurfaceJob {
     std::thread thread;
-    std::atomic<bool> done{false}, cancel{false};
+    std::atomic<bool> done{false}, cancel{false}, building{false};  // (building: the images are being made from the planes - task 0421)
     std::string path;
     uint64_t hash = 0;
     ProceduralTexture copy;
@@ -6065,7 +6082,7 @@ class Editor {
   bool read_linear_light(RenderTarget &rt, int slot, bool want, const LightingEnv &env);
   std::vector<float> gpu_hdr_scratch_;  // (task 0197: the card's linear light, read back, kept between frames)
   void prune_gpu_lightmaps();
-  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
+  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed, 84 MB with round 442's SH - a buffer every card binds whole)
   static constexpr int kCardMaxTexture = 2048;      // round 414 (ADR 0108): a material's texture goes up from its first level within this (Unity's default import size)
   void gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *lv);  // (round 443: with the Light Volumes)
   std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;

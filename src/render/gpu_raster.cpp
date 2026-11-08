@@ -1169,6 +1169,25 @@ vec3 solid_shade(vec3 albedo, float specular, vec3 n, vec3 wp) {
 )";
 
 const char *kLightFrag2 = R"(
+/* Round 444 (ADR 0117): a light's bake_mode (spot.w) against the pixel's ambient kind - 2 Baked: in lightmaps and baked
+ * probes; 3 a Subtractive Mixed light: in lightmaps only; 4-6 a Shadowmask Mixed light, its channel in the mask the baked
+ * pass packed beside the kind (light_baked_here / light_mask_channel on the CPU). */
+bool light_skip(float bm, int kind) {
+  if (bm > 1.5 && bm < 2.5) return kind == 1 || kind == 2;
+  return bm > 2.5 && bm < 3.5 && kind == 1;
+}
+vec3 light_smask(vec4 A, int kind) {
+  if (kind != 1) return vec3(1.0);
+  float f = floor((A.w - 4.0) * 524288.0 + 0.5);
+  if (f < 262144.0) return vec3(1.0);  // (a lightmap without a mask)
+  f -= 262144.0;
+  return vec3(mod(f, 64.0), mod(floor(f / 64.0), 64.0), floor(f / 4096.0)) / 63.0;
+}
+float light_mask(float bm, int kind, vec3 m) {
+  if (!(bm > 3.5) || kind != 1) return 1.0;
+  int c = int(bm - 3.5);
+  return c == 0 ? m.x : c == 1 ? m.y : m.z;
+}
 float lit_at(int sx, int sy, float z, int size) {
   ivec2 s = clamp(ivec2(sx, sy), ivec2(0), ivec2(size - 1));
   return z <= texelFetch(g_shadow, s, 0).r ? 1.0 : 0.0;
@@ -1578,11 +1597,10 @@ vec3 lil_pixel(uint self, ivec2 px, uint flags, vec3 P, vec3 n, vec3 geo, vec3 a
   LilSet S = lil[self];
   LilMaps LM = lmap[self];
   LilPx X = lil_px(px, flags, LM.c.z > 0);
-  bool baked_here = kind == 1 || kind == 2;
   vec3 key_color = vec3(0.0);
   if (key >= 0) {
     Light kl = lights[key];
-    if (!(baked_here && kl.spot.w > 1.5) && kl.color.w > 0.0) key_color = kl.color.rgb * kl.color.w;
+    if (!light_skip(kl.spot.w, kind) && kl.color.w > 0.0) key_color = kl.color.rgb * kl.color.w;
   }
   vec3 L = lil_light_direction(keyL, lil_lum(key_color));
   vec3 sh_max, sh_min;
@@ -1599,7 +1617,7 @@ vec3 lil_pixel(uint self, ivec2 px, uint flags, vec3 P, vec3 n, vec3 geo, vec3 a
   for (int li = 0; li < count; li++) {
     if (li == key) continue;
     Light l = lights[li];
-    if ((baked_here && l.spot.w > 1.5) || !(l.color.w > 0.0)) continue;
+    if (light_skip(l.spot.w, kind) || !(l.color.w > 0.0)) continue;
     vec3 Lk;
     float fall = 1.0;
     if (int(l.pos_type.w) == 0) Lk = -l.dir_range.xyz;
@@ -1708,7 +1726,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
    * share, 4 live probes; 0 the sky alone); Baked lights are in a lightmap or baked probes already. */
   int kind = int(A.w * 0.25 + 1e-3);
   float gsky = A.w - float(kind) * 4.0;
-  bool skip_baked = kind == 1 || kind == 2;
+  vec3 smask = light_smask(A, kind);  // (round 444)
   vec3 V = normalize(eye.xyz - P);
   bool flipped = dot(geo, V) < 0.0;
   if (flipped) {  // the back side of a double-sided surface (as the CPU turns both normals)
@@ -1741,7 +1759,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     ToonPx T = toon_px(px, flags);
     for (int li = 0; li < count; li++) {
       Light l = lights[li];
-      if (skip_baked && l.spot.w > 1.5) continue;
+      if (light_skip(l.spot.w, kind)) continue;
       vec3 L;
       float fall = 1.0;
       if (int(l.pos_type.w) == 0) L = -l.dir_range.xyz;
@@ -1756,6 +1774,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
       float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
       if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
+      vis = min(vis, light_mask(l.spot.w, kind, smask));  // (round 444)
       float face = li == key ? T.t2.y : -1.0;  // (task 0196: the face shadow map's lit term for the key light - no cast shadow on it)
       float lit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * min(fall, 1.0);
       bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
@@ -1768,11 +1787,16 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     else amb = kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
     return display(fog_apply(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission, P));
   }
+  float sub_vis = 1.0;  // (round 444: the main Subtractive light's realtime shadow on a lightmapped pixel - subtractive_vis on the CPU)
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
-    if (skip_baked && l.spot.w > 1.5) continue;
+    if (light_skip(l.spot.w, kind)) {
+      if (l.spot.w > 2.5 && l.spot.w < 3.5 && kind == 1 && li == shadow_light && receive)
+        sub_vis = min(sub_vis, shadow_lookup(P + geo * 0.01, dot(geo, int(l.pos_type.w) == 0 ? -l.dir_range.xyz : normalize(l.pos_type.xyz - P))));
+      continue;
+    }
     vec3 L;
-    float atten = l.color.w * PI;
+    float atten = l.color.w * PI * light_mask(l.spot.w, kind, smask);  // (round 444: a Shadowmask light's baked shadow - the area light's too)
     if (int(l.pos_type.w) == 3) {  // (task 0163: an area light, from its whole surface)
       if (atten > 0.0) lo += area_light_lo(l, P, n, V, albedo, rough, metallic, specular, atten);
       continue;
@@ -1795,6 +1819,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   vec3 R = n * (2.0 * dot(n, V)) - V;
   vec3 spec = probe_specular(P, R, rough) * (gi.z > 0.5 ? unity_indirect_specular(f0, mix(0.08 * specular, 1.0, metallic), rough, nv) : env_brdf_approx(f0, rough, nv));  // (round 401: the reflection probes' box; round 405: Unity's weight)
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
+  if (sub_vis < 1.0) amb *= mix(vec3(0.42, 0.478, 0.627), vec3(1.0), sub_vis);  // (round 444: Unity's default Realtime Shadow Color)
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
   float eo = bk[self].b.z;  // (round 429: Filamented's specular occlusion - baked_specular_occlusion on the CPU, every ambient)
   if (eo > 0.0) {
@@ -1812,7 +1837,8 @@ const char *kProbeFns = R"(
 /* Task 0197: the probe volume (ProbeVolumeData::find_brick and sample, probe_volume.cpp), packed by the editor
  * (probe_pack): pv[0] origin, top cell; pv[1] top cells (x, y, z), nodes' start; pv[2] bricks', probes', roots' starts.
  * A node: (min, first child), (max, brick); a brick: (min, spacing), (first probe); a probe: (position, valid + 2 x
- * live ok), its baked cube's six axes (bounce, sky share), its live cube's; the roots four to a vec4. */
+ * live ok), its baked cube's six axes (bounce, sky share), its live cube's; the roots four to a vec4. Round 442: pv[3].x
+ * the start of each probe's L2 SH (7 rows: 27 floats, coefficient k's rgb at 3k), 0 with none. */
 int probe_brick(vec3 p) {
   if (pv.length() < 3) return -1;
   vec4 h0 = pv[0];
@@ -1839,9 +1865,19 @@ int probe_brick(vec3 p) {
   return -1;
 }
 /* A probe's cube at the axes facing n, weighted by n squared: (bounce, sky share). */
-vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2) {
+vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2, vec3 n) {
   int base = floatBitsToInt(pv[2].y) + i * 13 + (live ? 7 : 1);
-  return pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
+  vec4 cube = pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
+  int sh_at = floatBitsToInt(pv[3].x);
+  if (live || sh_at <= 0) return cube;
+  /* Round 442: the baked light from geometry as L2 SH (ProbeSH::eval), the sky share kept from the cube. */
+  float y[9] = float[9](0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x, 1.092548 * n.x * n.y, 1.092548 * n.y * n.z,
+                        0.315392 * (3.0 * n.z * n.z - 1.0), 1.092548 * n.x * n.z, 0.546274 * (n.x * n.x - n.y * n.y));
+  int r0 = sh_at + i * 7;  // (27 floats in 7 rows: coefficient k's rgb at floats 3k..3k+2)
+  vec4 q0 = pv[r0], q1 = pv[r0 + 1], q2 = pv[r0 + 2], q3 = pv[r0 + 3], q4 = pv[r0 + 4], q5 = pv[r0 + 5], q6 = pv[r0 + 6];
+  vec3 b = q0.xyz * y[0] + vec3(q0.w, q1.xy) * y[1] + vec3(q1.zw, q2.x) * y[2] + q2.yzw * y[3] + q3.xyz * y[4] + vec3(q3.w, q4.xy) * y[5] +
+           vec3(q4.zw, q5.x) * y[6] + q5.yzw * y[7] + q6.xyz * y[8];
+  return vec4(max(b, vec3(0.0)), cube.w);
 }
 bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out vec3 o) {
   o = vec3(0.0);
@@ -1881,7 +1917,7 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
         w *= max(1e-4, f * f * f);
       }
     }
-    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2);
+    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
     acc += cb.rgb * w;
     sky += cb.w * w;
     wsum += w;
@@ -1892,7 +1928,7 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
     sky = 0.0;
     for (int k = 0; k < nvalid; k++) {
       int fl = floatBitsToInt(pv[floatBitsToInt(pv[2].y) + valid_i[k] * 13].w);
-      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2);
+      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
       acc += cb.rgb;
       sky += cb.w;
     }
@@ -2175,18 +2211,23 @@ void main() {
     b3 = bary(lp, c[0].xyz, c[2].xyz, c[4].xyz);
   }
   vec3 lm = vec3(0.0);
+  float mcode = 0.0;  // (round 444: the shadowmask's three channels, 6 bits each, in the plane's w beside the kind)
   if (has_lm) {
     vec2 luv = vec2(c[0].w, c[1].x) * b3.x + vec2(c[2].w, c[3].x) * b3.y + vec2(c[4].w, c[5].x) * b3.z;
     lm = lightmap_at(B.a.x, luv);
     if (directional) lm *= lm_dir_factor(s.n, n, lightmap_at(int(B.b.y + 0.5), luv), back);
+    if (B.b.w > -0.5) {
+      vec3 m = clamp(lightmap_at(int(B.b.w + 0.5), luv), 0.0, 1.0);
+      mcode = (floor(m.r * 63.0 + 0.5) + floor(m.g * 63.0 + 0.5) * 64.0 + floor(m.b * 63.0 + 0.5) * 4096.0 + 262144.0) / 524288.0;
+    }
   }
   if (has_rt) {
     vec2 ruv = c[1].yz * b3.x + c[3].yz * b3.y + c[5].yz * b3.z;
     float sky = clamp(lightmap_at(B.a.z, ruv).x, 0.0, 1.0);
     vec3 bounce = lightmap_at(B.a.y, ruv);
-    o = has_lm ? vec4(lm + ((flags & 2) != 0 ? bounce : vec3(0.0)), 4.0) : vec4(bounce, 12.0 + sky);
+    o = has_lm ? vec4(lm + ((flags & 2) != 0 ? bounce : vec3(0.0)), 4.0 + mcode) : vec4(bounce, 12.0 + sky);
   }
-  else if (has_lm) o = vec4(lm, 4.0);
+  else if (has_lm) o = vec4(lm, 4.0 + mcode);
   else if ((flags & 1) != 0) {
     vec3 pr, lv;
     float cover;
@@ -4180,7 +4221,7 @@ class VulkanRaster final : public Raster {
       const RasterInstance &s = instances_[i];
       int32_t *d = &t[i * 8];
       d[0] = s.lightmap, d[1] = s.rt_bounce, d[2] = s.rt_sky, d[3] = s.corner_base;
-      const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, s.exposure_occlusion, 0.0f};  // (b.y: round 426's direction page, -1 none; b.z: round 429's exposure occlusion)
+      const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, s.exposure_occlusion, (float)s.shadowmask};  // (b.y: round 426's direction page, b.w: round 444's shadowmask page, -1 none; -1 none; b.z: round 429's exposure occlusion)
       std::memcpy(d + 4, f, 16);
     }
     return write_array(baked_buf_, t.data(), t.size() * 4, err);
