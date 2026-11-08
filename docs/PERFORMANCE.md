@@ -1,5 +1,165 @@
 # Performance, limits and efficiencies
 
+## Pass 19: Pass 18's open items (rounds 447-459)
+
+### Pass 19 in one table (round 457)
+This machine (AMD Ryzen, RTX 4070 SUPER, Windows 11), the build with Blender's libraries; before is Pass 18's end
+(round 446 / 444), after is the pass's last build (round 459), with nothing else running. The pass built the plan's
+rounds 447-456 and two the plan did not have: 458 (the halves of 447-449 left unbuilt) and 459 (found while chasing 452's
+result).
+
+**The views against Unity's** (windowed, ms a frame on the card; `tools/dev/views.py`):
+
+| view | Pass 18's end | after Pass 19 | Unity |
+|---|---|---|---|
+| 50,000 cubes, Scene view | 61.3 | **33.1 / 33.5** (round 458's build, two runs; 47-62 before it; target < 25 not met) | - |
+| Shinano, Scene view | 4.64 | **3.8 / 3.9** (round 458's build, two runs; round 449's build read 5.3-5.5 in an earlier session: the spread of one machine; target <= 3.3 not met) | 2.2 |
+| Shinano's static overlays | 1.15 | **0.19** (round 449's build) | - |
+| 50,000 cubes' overlays | 14.8-19.8 | **1.7-2.6** (round 449's builds) | - |
+| Shinano's UI | 2.0-2.8 | 2.8 (3.2 in round 449's final build): not reduced | - |
+
+The UI's reuse was dropped (round 458): an idle frame does not run in a window, so the cost sits on frames that redraw for
+a reason (an orbit), and replaying the draw list gained nothing in a real window. The gain needs a per-window redraw (only
+the Scene view's rect re-run when only the camera moved). Instances are kept only in plain scenes (no baked, see-through,
+volume, highlighted or live-procedural item): Shinano and SideRail keep nothing of them. The Scene + Game view and the
+50,000 cubes' idle frame were not re-measured.
+
+**The freezes:**
+
+| | Pass 18's end | after Pass 19 | budget |
+|---|---|---|---|
+| SideRail, the first frame after the import | 698 ms | 366 ms (round 447: the files off the frame) -> **101 ms** (round 458: meshes streamed; 351 ms was its re-measure of the build before it) | 50 ms (not met) |
+| SideRail, until every texture shows | in the first frame | 1.35 s over ~425 frames, no frame waits for a file; the longest frame while they land 69-77 ms | 50 ms (over) |
+| SideRail, until every mesh is on the card | in the first frame | ~0.7 s over 49 frames, 4 ms of first-use work a frame; the longest drain frame 73 ms | 50 ms (over) |
+| Enter Edit Mode on the 500k sphere | 96.3 ms | 96.5 ms (114.4 in a second run; "The baseline" below) | 100 ms |
+
+What remains in the 101 ms first frame is the cold instance gather (40 ms) and the first item's upload.
+
+**The bake against ADR 0113** (SideRail, Blendity's own Generate Lighting; MAE / SSIM / grid correlation; target
+MAE <= 4, SSIM >= 0.90, grid >= 0.95):
+
+| station | Pass 18's end (round 444) | rounds 452 + 453 | after rounds 455 + 459 |
+|---|---|---|---|
+| spawn | 3.69 / 0.809 / 0.898 | 3.21 / 0.903 / 0.922 | **3.57** / 0.843 / 0.869 |
+| spawn_back (dark) | 1.43 / 0.777 / 0.129 | 1.05 / 0.895 / 0.768 | **1.30** / 0.791 / 0.669 |
+| floor | 4.25 / 0.771 / 0.974 | 4.99 / 0.879 / 0.956 | **3.35** / 0.818 / **0.961** |
+| ahead | 3.06 / 0.884 / 0.958 | 3.17 / 0.939 / 0.876 | **2.32** / **0.933** / 0.948 |
+| the bake | 74 s | 36 s | not timed in the chain |
+
+| lightmap pages against Unity's (`unity_compare.py pages`) | side tunnel | main tunnel | all pages MAE / SSIM |
+|---|---|---|---|
+| round 451 (the first measurement) | 4.06x Unity's light | 2.15x | 18.27 / 0.592 |
+| rounds 452-453 (the Indirect Multiplier) | 4.85x | 3.20x | 20.47 / 0.545 |
+| **round 459 (lights at the project's linear intensity)** | **2.34x** | **2.24x** | **10.12 / 0.677** |
+| round 459, multipliers forced to 1 (a measurement) | 1.83x | 1.80x | 8.77 / 0.724 |
+
+ADR 0113's target is **still not met**: MAE is under 4 at all four stations for the first time, but SSIM is under 0.90 at
+three (spawn 0.843, spawn_back 0.791, floor 0.818) and the grid correlation under 0.95 at three (only the floor, 0.961, passes). What the pass learned:
+- Round 451's split said the whole error lives in the lightmaps (probes and reflections 0), and the pages put the
+  excess at the side tunnel (2.3-2.6x Unity's light) and the main tunnel (1.15-1.25x).
+- Round 452 applied Unity's per-light Indirect Multiplier and the pages got *worse* (4.06x -> 4.85x): SideRail's 20
+  FootLights bounce at 3 (`m_BounceIntensity`), which exposed the real fault rather than causing it.
+- Round 459 found the fault: SideRail's project has `m_LightsUseLinearIntensity: 1` and Blendity took every Unity
+  light's colour x intensity in gamma. Read at the project's setting (ADR 0099 amended), the side tunnel 4.85x -> 2.34x,
+  the pages' MAE 20.47 -> 10.12, SSIM 0.545 -> 0.677; the big surfaces now sit at Unity's light (the service tunnel's
+  floors 1.0x, the low tables 1.03x).
+- Rounds 453 (the sky in the probes, shared light picking), 454 (four mask lights, Distance Shadowmask, masks exported),
+  455 (SH deringing, Light Probe Groups as objects) are right on their own scenes and cannot change SideRail: it has no
+  light probes and no Mixed lights.
+- The station SSIM fell at three stations (from rounds 452-453's intermediate 0.88-0.90 to 0.79-0.84; every station is above Pass 18's end,
+  0.77-0.88) while the MAE and the pages improved: open.
+
+**The drift (round 450):** none found. Built at every Pass 18 round boundary and timed in turn, no build and no switch
+(`BLENDITY_VIEW_OFF=sh,lv,mask`) was consistently slower; one binary's medians spread up to 1.7x in a session (the Sky
+world 7.0-12.1 ms), so wall time per frame cannot see a difference under ~40 %. Pass 18's +8-18 % was inside it.
+
+**The soak (round 456):** a running 4096 x 4096 surface's planes **738 -> 403 MB** (44 -> 24 bytes a texel when no layer
+writes cover, metallic or emission; 28 with a metallic layer), and a texture used only for its albedo holds one image
+instead of six. The soak's whole working set (Pass 18's end 521 MB at minute 1) was not re-run.
+
+**The baseline** (`stress/results/baseline.md`, refreshed from round 459's build, 15 sections, `tools/perf_suite.py`) against round 446's: the full run found 14 rows over 20 %, most of them one longest frame under ADR 0105's 50 ms (the imports' 50k-sphere obj / fbx / stl / ply 3.8 / 4.2 / 0.9 / 4.3 -> 8.0 / 6.8 / 4.1 / 6.0 ms, the filters' Pixelate, Chromatic Aberration and Lens Distortion) and the world stand-in's views (5.6 -> 9.3 ms, Scene + Game 10.8 -> 14.6). Run alone (the precedent of rounds 434 and 446, kept in the baseline) the stand-in is **5.5 / 10.3 ms** (5.6 / 10.8 before): flat. The GPU editor frames are within the spread of round 446's: moving an object 4.41 -> 4.59 ms (+4 %), playing 5.40 -> 3.73, the Sky world 8.00 -> 7.27, the Gradient world 7.68 -> 7.19, glass in shaded shading 16.14 -> 13.00 (one binary spreads up to 1.7x here: round 450). Rows to read twice:
+- Enter Edit Mode on the 500k sphere: 96.5 ms in the full run, 114.4 ms (OVER the 100 ms budget) in the second.
+- **Bake Textures' longest frame 7.2 -> 44.6 ms and 29.5 ms** in the two runs - twice, so not noise; under the budget, not attributed to a round (open item 9).
+- **The Materials window's next frame 39.5 -> 66.8 ms** (the Operations section; over 50 ms): not attributed.
+- **Generate Lighting on the worldlike stand-in 2.96 s over 1,949 frames -> 0.40 s over 243** (the same 180 parts at 2 texels/m): seven times faster, **unexplained** - the rounds' specs name no change to this stress scene; the likeliest candidates are the bake's GPU gather and its texel validity (430, Pass 17) and round 440's island charts, none of them confirmed here. Likewise the SideRail bake's 74 s at Pass 18's end -> 36 s at round 451's first measurement, before any Pass 19 bake round: its cause is not attributed (the same code, a quieter machine, or both).
+- Quad Remesh to 4,000 faces 2.38 -> 3.58 s (3,602 frames, longest frame 2.7 ms): not attributed.
+(Undo of the 10,000 cubes' delete is not over 20 %: 23.3 -> 24.9 ms.)
+
+**What Pass 19 built:** 447 textures stream in after an import; 448 instanced draws; 449 the static overlays kept; 450 the
+drift, attributed; 451 the stations' error split, the reflection probes captured from the lit scene; 452 Unity's Indirect
+Multiplier; 453 the sky in the probes, shared light picking (ADR 0116 amended); 454 four mask lights, Distance Shadowmask,
+masks exported and imported (ADR 0118); 455 SH deringing, Light Probe Groups as objects (ADR 0119); 456 a running
+surface's planes; 458 kept instances and meshes streamed; 459 lights at the project's linear intensity (ADR 0099
+amended).
+
+**Per-round wall time** (rounds started -> published, from the pass's time log): the 12 built rounds took 15.0 h
+(22:00 on 11-07 to 13:00 on 11-08), **1.25 h a round** against Pass 17's ~1.3 and Pass 18's ~1.6. The write-up (457) is excluded from Pass 19's 12 and was included in Pass 18's, which flatters Pass 19 slightly. The pace was not even:
+nine rounds were published by 05:10 (7.2 h, 0.8 h a round); the last three (454's macOS-only failure and republish, and 455
+with 459, whose investigation was 2.2 h) took the other 7.8 h. Taking out the 3.8 h between the last chain finishing and
+the last publish - the log does not say what filled it beyond the macOS fix and the owner's rule that every pull request
+targets main - it is 0.94 h a round. The changes that were meant to help: chains batched (five chains for 12 rounds, 16-21
+min each (the 447-449 chain is not timed in the log), against one per round: about 2 h saved by estimate), the review before the chain (it found should-fix items in
+every round it ran on, including a card crash in 458, so the chains ran green), and agents in worktrees (below). One
+conclusion: 1.25 h against ~1.3 and ~1.6 is within what the pass's mix explains (one pass, rounds of different size, 447-449
+counted although 458 finished their halves), not a measured gain.
+
+**Parallel agents** (447, 448, 449 and 453 were also drafted in a worktree, C:/blwt448, so five units in all; the owner's pending decision on CLAUDE.md's "Run agents one after another; don't fan out"; the line
+is unchanged). Work that ran as an agent in its own worktree beside main-tree rounds, against the sequential rounds:
+
+| round | where | wall time | review found |
+|---|---|---|---|
+| 451 | agent, own worktree, beside 450 and 456 | agent 31 min; review 10 min after; fixes 20 min; into the tree 75 min after the start | seven fixes (the `direct` component and Baked lights, back faces in the probe capture, Mixed light falloff, cancel, `lighting save`, the page compare's infinities, `--components` with the path tracer) |
+| 456 | agent, own worktree, beside 450 and 451 | agent 29 min; review 4 min after; fixes 25 min; into the tree 65 min after the start | should-fix items (not itemised in the log) |
+| 452 + 453 | one agent, own worktree, beside 458 | agent 46 min (two rounds); review 02:25; re-review approved 02:48 (1.8 h before the batch's chain with 458) | changes requested, then approved |
+| 459's investigation | agent, side worktree, beside 454 and 455 | 2.2 h (05:20-07:30); found the linear-intensity fault | its fix went through the main tree's review (review fixes are in its spec) |
+| 450 (main tree, for contrast) | the main session | 22:02 to review 22:58: 56 min (a 10-min A/B timing inside) | not logged |
+| 454 (sequential) | the main tree | spec 05:05 -> chain done 06:50: 1.75 h | three should-fix items |
+| 455 (sequential) | the main tree | spec 06:05 -> chain done 09:11: 3.1 h (the implementer started 07:10) | no blockers |
+| 458 (agent in the main tree beside 452/453's worktree) | main tree | 02:00 -> chain done 04:55: 2.9 h | a card crash; the UI replay dropped |
+
+What the data says, with its limits: the worktree units (451, 456, 452-453, 459's investigation) produced finished, reviewed work in 65-75 minutes (451,
+456), 49 minutes for two rounds (452-453) and 2.2 hours for an open investigation (459) while the main session worked on
+other rounds, so by estimate about 4-5 of the pass's 15 hours were overlap. There were **no merge conflicts** and no
+round was found to need redoing because of another running beside it (not checked beyond the log); the costs were machine
+contention - round 454's chain went red in both Windows suites on a livelink timing check while 459's agent was baking
+SideRail in C:/blwtside (green when run alone), and round 450's A/B drift timing (22:35-22:45) overlapped the fix windows
+of 451 and 456, which may be part of the 1.7x spread that round measured - the merging itself (14 min for 451, 7 for 456, the bake merge before
+the 458 + 452 + 453 chain), the patch tooling (`split_rounds.py`, `segments.sh`), and attention, since each agent needed
+its own board line and review. Token cost per agent was not logged, so no cost comparison is possible. Every one of these
+rounds was file-disjoint from the rounds beside it (451: tools and the reflection probe; 456: the texture code; 452-453: the
+lightmapper and probe files while 458 held the views; 459: `lights_gamma` and `unity_scene`), which is what the research
+supports: Perry, Siy & Votta (2001, "Parallel changes in large-scale software development: an observational case study",
+ACM TOSEM 10(3)) found concurrent changes to the *same* files cost faults and conflicts, so the safety condition is
+disjoint files. That the overlap is *worth it* rests only on this pass's small sample (five units, one machine, rounds
+chosen for being self-contained, so a selection effect); it does not show the rule would pay on rounds that share files.
+
+**Open, ranked** (for Pass 20):
+1. The UI's per-window redraw: Shinano's UI is 2.8 ms of its 3.8-3.9 ms (Unity's 2.2); only the Scene view's rect needs
+   re-running when only the camera moved.
+2. Kept instances for baked and see-through scenes (Shinano, SideRail keep none), and the 50,000 cubes' remaining 33 ms
+   (the frame's `scene` 26 ms, 11 of it the views' card part).
+3. Double-buffered uploads and the cold gather, to bring the first frame after a big import under 50 ms (101 ms now; the
+   texture and mesh streams' longest frames 69-77 ms).
+4. The bounce is too strong with Unity's own Indirect Multipliers (SideRail's FootLights at 3): 10.12 / 0.677 against
+   8.77 / 0.724 with them at 1.
+5. The stations' SSIM fell from rounds 452-453's intermediate 0.88-0.90 to 0.79-0.84 at spawn, spawn_back and floor while MAE
+   and the pages improved - why (every station is still above Pass 18's end: 0.77-0.88).
+6. Round 452's unbuilt ideas: per-component filtering (direct / indirect / AO with their own filter and radius, read
+   from Unity's LightingSettings), Unity's per-renderer Stitch Seams, charts sized per island by Scale In Lightmap.
+7. Writing Light Probe Groups (and probes moved in Blendity) back to Unity: an export writes the original document.
+8. The path-traced reflection-probe fallback (no lightmaps) still bounces the lights without the Indirect Multiplier.
+9. The refreshed baseline's unexplained rows: Bake Textures' longest frame 7.2 -> 29.5-44.6 ms, the Materials window's next
+   frame 39.5 -> 66.8 ms (over 50), the worldlike Generate Lighting 2.96 s -> 0.40 s (faster, why), Quad Remesh 2.38 -> 3.58 s,
+   the SideRail bake's 74 -> 36 s.
+10. Enter Edit Mode on the 500k sphere: 96.5 / 114.4 ms against the 100 ms budget (the Edit Mode render mesh is still built in
+    the frame).
+11. Not re-measured in Pass 19: the soak's whole working set, the Scene + Game view, the 50,000 cubes' idle frame, round
+    453's guard probe row (courtyard error against a reference).
+12. ADR 0099's amendment (lights read at the project's linear intensity) awaits the owner's confirmation.
+13. Not measurable on this machine (docs/tasks/0409; Pass 18's item 6, carried): 4K windows, the laptop, VR / Quest, AMD /
+   Intel cards, Linux / macOS with Blender's libraries, input latency, a cold shader cache, OptiX / MoonRay, Unity timed
+   per step.
+
 ## Pass 18: Pass 17's open items (rounds 435-446)
 
 ### Pass 18 in one table (round 446)

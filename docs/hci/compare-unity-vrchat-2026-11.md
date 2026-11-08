@@ -158,6 +158,28 @@ importance sampling and light picking are right on synthetic scenes and flat her
 Lighting window offers that it lacked - Shadowmask and Subtractive, L2 probes interpolated over Unity's tetrahedra - and
 draws VRChat's Light Volumes in its own views, as the headset does. Details: docs/PERFORMANCE.md, "Pass 18 in one table".
 
+## Pass 19 (rounds 447-459, 2026-11-08): the views kept, the bake's lights corrected
+
+**Navigation** (ms a frame on the card): Shinano's Scene view 4.6 -> **3.8-3.9** (Unity's 2.2; 1.7x, was 2.1x) - its
+static overlays are recorded once (1.15 -> 0.19 ms), but its UI (2.8 ms) is still drawn every frame that redraws, so
+the 1.5x target was missed. A scene of 50,000 cubes 61 -> **33** ms (instanced draws, kept overlays, kept instances;
+under 25 not reached). Scenes that are baked or see-through (Shinano, SideRail) keep nothing of the instances. Opening a
+big Unity scene no longer waits for its files: the first frame after SideRail's import 698 -> 366 (round 447) -> **101** ms (round 458; 351 ms was
+its re-measure of the build before it); textures and meshes stream in over about a second, and the 50 ms budget is not met by
+the first frame. The views' numbers are round 458's build (50,000 cubes, Shinano) and round 449's (overlays).
+
+**Blendity's own bake against Unity's** (SideRail, MAE / SSIM / grid): the first diagnostics (round 451) put the whole
+error in the lightmaps - not the probes, not the reflections. The cause of SideRail being too bright was not a missing
+feature: its project asks for linear light intensity and Blendity had taken every Unity light in gamma (an intensity of
+2 shone 4.6). Read right (round 459), the side tunnel's light fell from 4.85x to 2.34x Unity's, all lightmap pages'
+MAE 20.47 -> 10.12 (SSIM 0.545 -> 0.677); the stations: spawn 3.57 / 0.843 / 0.869, spawn_back 1.30 / 0.791 / 0.669,
+floor 3.35 / 0.818 / 0.961, ahead 2.32 / 0.933 / 0.948. **Every MAE is under 4 for the first time**; SSIM is under 0.90
+at three stations (every station is above Pass 18's end, 0.77-0.88; it fell from rounds 452-453's intermediate 0.88-0.94), and
+the grid correlation under 0.95 at three, so ADR 0113's target is still missed, now on structure rather than brightness. Blendity also now reads Unity's per-light Indirect Multiplier (the
+bounce is too strong with SideRail's FootLights at 3: open), puts the sky into probes, bakes four Shadowmask lights with
+Distance Shadowmask and writes the masks to a Unity package, windows ringing out of probes and makes Light Probe Groups
+objects. Details: docs/PERFORMANCE.md, "Pass 19 in one table".
+
 ## Residuals, ranked (after round 405)
 
 1. ~~SideRail's fog tint under ACES / +1 EV~~ - fixed in round 405 (Unity's ACES curve as the view transform).
@@ -172,3 +194,7 @@ draws VRChat's Light Volumes in its own views, as the headset does. Details: doc
 8. (Pass 18) Directional strength, seams and the exit sign done: SSIM still 0.77-0.88 (Unity's denoiser and filtering,
    chart placement, the reflection probes' content - not pinned down); Shinano's Scene view 2.1x Unity's (its UI and
    overlays).
+9. (Pass 19) Lights read at the project's linear intensity: every station's MAE under 4, but SSIM 0.79-0.84 at three
+   stations (fell from 0.88-0.90 at round 452-453) - not pinned down; the bounce too strong with Unity's multipliers
+   (the side tunnel 2.34x Unity's light, 1.83x with the multipliers at 1); Shinano's Scene view 1.7x Unity's (its UI,
+   which a per-window redraw would cut).

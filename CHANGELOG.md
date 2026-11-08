@@ -2,6 +2,29 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 457): Pass 19's write-up
+
+**Asked:** Pass 19's round 457 - the pass in one table, the comparison with Unity, the lesson, the baseline, the per-round
+wall time against Passes 17 and 18, and the parallel-agents data for the owner's pending decision (CLAUDE.md is unchanged).
+
+**Changed (task 0433)**
+- **docs/PERFORMANCE.md, "Pass 19 in one table":** 50,000 cubes 61 -> 33 ms (< 25 not met), Shinano's Scene view 4.6 ->
+  3.8-3.9 ms (Unity's 2.2), SideRail's first frame after an import 698 -> 366 (447) -> 101 ms (458) (< 50 not met); SideRail's bake
+  against ADR 0113 - every station's MAE under 4 for the first time, SSIM under 0.90 at three, so the target is still
+  missed; the lightmap pages' side tunnel 4.06x -> 2.34x Unity's light; the drift (none found) and the soak (a running
+  surface's planes 738 -> 403 MB); the open items ranked for Pass 20.
+- **Per-round wall time:** 12 built rounds in 15.0 h = 1.25 h a round (Pass 17 ~1.3, Pass 18 ~1.6); the first nine 0.8 h.
+  The write-up says the gain is within what one pass's mix explains.
+- **Parallel agents:** the data (five worktree units, no conflicts in the log, machine contention noted, about 4-5 of 15 h overlap by estimate, review findings
+  alike in both kinds, token cost not logged); the safety side (file-disjoint) is Perry, Siy & Votta 2001, the "worth it"
+  side is a small sample. The owner decides; CLAUDE.md untouched.
+- **docs/hci/compare-unity-vrchat-2026-11.md:** a Pass 19 section and residual 9.
+- **stress/results/baseline.md** refreshed from round 459's build: the GPU editor frames within the spread of round 446's; Enter Edit
+  Mode on 500k 96.5 ms (114.4 in a second run); Bake Textures' longest frame 7.2 -> 29.5-44.6 ms, the Materials window's frame 39.5 -> 66.8 ms and the worldlike bake 2.96 -> 0.40 s unexplained (open).
+- **Learn:** "How good is the bake?" gains Pass 19's result and a question.
+
+**Checked:** both suites - with Blender's libraries 17,695 (1 failed: OpenPGL's stochastic "path guiding learns and stays unbiased", test_render.cpp:286; run again alone it passes - guided 0.0286 against 0.0284, 2 checks, 0 failed); dependency-free 16,781 (Windows), 0 failed; 16,787 (Linux, WSL; 1 failed: the load-sensitive Live Link timing check, test_livelink.cpp:2204, under another session's builds; run again alone 366 checks, 0 failed); the audits.
+
 ## 2026-11-08 (round 459): lights at the project's linear intensity
 
 **Asked:** why round 452 made SideRail's lightmap pages brighter and further from Unity's (side tunnel 4.07x -> 4.87x Unity's light, main tunnel 2.20x -> 3.28x, MAE 18.27 -> 20.47, SSIM 0.592 -> 0.545); fix what is wrong.
