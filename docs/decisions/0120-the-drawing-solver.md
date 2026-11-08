@@ -45,8 +45,11 @@ automatic after drawing and also available as a command.
 ## Consequences
 - Drawing on the teapot works; refusals become specific (missed the mesh, self-crossing, past the silhouette) and are
   counted in their own stress row, which must fall, never rise.
-- A small triangle BVH is added for the projection queries (or an existing one reused), built per commit; its cost is
-  a stress row (ADR 0056), not an assertion.
+- No BVH was needed for the teapot (round 461: linear scans, about 10 ms a commit on 2,048 faces). The cost on big
+  meshes is a stress row (ADR 0056, a teapot of about 51k faces), not an assertion; there the cut's per-node whole-mesh
+  rebuild dominates, so batching the splits comes before a BVH.
+- Decision 2's resampling applies to Closest mode only: along the view the sheet between two outline points is exact.
+- Decision 3's gate is "the first face's smooth patch isn't flat and the shape doesn't lie over faces in its plane".
 - Draw results can now differ from before on flat faces only where they previously left duplicates or T-junctions
   (round 462); stress overlap counts must not rise.
 - Not done: projecting the live preview line onto the surface while drawing; curves as projection targets; the

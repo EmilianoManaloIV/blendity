@@ -44,6 +44,10 @@ already exists.
     1e-4-sized mesh a rectangle bigger than its face is imprinted.
   - Push Through's Boolean fallback (`mesh_tools.cpp` ~1540+, builds with Manifold) gives its new faces UVs from the
     faces they cut, like the other Push Through paths since round 460.
+  - From round 461's stress: one projected cut (a small circle seen at an angle over the rounded box's flat-to-bevel seam,
+    `curved` section) leaves two faces on top of each other - the overlap guard must roll it back; find the cause.
+  - From round 461's review: a projected cut on a 51k-face mesh takes about 0.4 s because `split_edge` /
+    `split_face_path` rebuild the whole mesh per crossing - batch them if the after-draw cleanup adds to that.
 - Out: re-triangulating or remeshing; welding across separate objects; fixing inside-out normals (Recalculate Normals
   stays its own command); Unity bridge changes.
 

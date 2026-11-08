@@ -9663,6 +9663,643 @@ static void tests_round460_engineer() {
   });
 }
 
+/* ---- Round 461 (task 0437): Draw on a curved surface, Tab and drawproject ---- */
+static void tests_round461() {
+  test("draw on the teapot: a circle drawn on its body is projected onto the surface and selected; Tab mid-shape switches the projection and keeps Edit Mode", [] {
+    auto key = [](int k, int down) {
+      platform::Event e;
+      e.type = down ? platform::EventType::KeyDown : platform::EventType::KeyUp;
+      e.key = k;
+      return e;
+    };
+    auto mouse = [](int x, int y) {
+      platform::Event e;
+      e.type = platform::EventType::MouseMove;
+      e.x = x;
+      e.y = y;
+      return e;
+    };
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Teapot");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 0, 0});
+    /* Look at the body from the front. */
+    SceneCamera cam = ed.scene_camera_for_test();
+    cam.pivot = {0, 0.5f, 0};
+    cam.yaw = 0.0f;
+    cam.pitch = 0.0f;
+    cam.distance = 4.0f;
+    cam.ortho = false;
+    cam.animating = false;
+    ed.set_scene_camera_for_test(cam);
+    ed.command("edit face");
+    ed.command("drawproject view");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);
+    ed.command("draw circle");
+    const Mesh before = *g->get<MeshFilter>()->mesh;
+    /* The centre and a point on the rim, on the body as the camera sees it. */
+    const Vec3 fwd = ed.scene_camera_for_test().forward(), eye = ed.scene_camera_for_test().position();
+    auto on_body = [&](Vec3 aim) {
+      const RenderMesh &rm = before.render_mesh(true);
+      const Ray r{eye, normalize(aim - eye)};
+      float best = 1e30f;
+      for (size_t t = 0; t < rm.tri_count(); t++) {
+        const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+        if (d > 0 && d < best) best = d;
+      }
+      return r.origin + r.dir * best;
+    };
+    const Vec3 c = on_body({0, 0.5f, 0}), rim = on_body({0.15f, 0.5f, 0});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", c.x, c.y, c.z));
+    /* Tab with a point placed: the projection turns to Closest and back, Edit Mode stays. */
+    const Recti r = ed.scene_view_rect();
+    ed.step_frame_headless({mouse(r.x + r.w / 2, r.y + r.h / 2)});
+    ed.step_frame_headless({key(platform::KEY_TAB, 1)});
+    ed.step_frame_headless({key(platform::KEY_TAB, 0)});
+    CHECK(ed.in_edit_mode());
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+    ed.step_frame_headless({key(platform::KEY_TAB, 1)});
+    ed.step_frame_headless({key(platform::KEY_TAB, 0)});
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", rim.x, rim.y, rim.z));
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    float worst = 0.0f;
+    for (size_t v = before.vert_count(); v < m.vert_count(); v++) {
+      const RenderMesh &rm = before.render_mesh(true);
+      float d = 1e30f;
+      for (size_t t = 0; t < rm.tri_count(); t++) {
+        const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], cc = rm.positions[rm.indices[t * 3 + 2]];
+        const Vec3 n = normalize(cross(b - a, cc - a));
+        const Vec3 q = m.positions[v] - n * dot(m.positions[v] - a, n);
+        const Vec3 w0 = cross(b - a, q - a), w1 = cross(cc - b, q - b), w2 = cross(a - cc, q - cc);
+        if (dot(w0, n) >= -1e-6f && dot(w1, n) >= -1e-6f && dot(w2, n) >= -1e-6f) d = std::min(d, std::fabs(dot(m.positions[v] - a, n)));
+      }
+      worst = std::max(worst, d);
+    }
+    size_t selected = 0;
+    for (size_t f = 0; f < m.face_count(); f++) selected += f < ed.face_sel_for_test().size() && ed.face_sel_for_test()[f] ? 1 : 0;
+    std::printf("    teapot draw: %zu -> %zu faces, %zu new vertices, %zu selected, furthest off the surface %.2e\n", before.face_count(), m.face_count(),
+                m.vert_count() - before.vert_count(), selected, worst);
+    CHECK(m.face_count() > before.face_count());
+    CHECK(worst <= 1e-4f * length(before.bounds().extent()));
+    CHECK(selected > 1);
+    /* Tab with no point placed leaves Edit Mode as before. */
+    ed.step_frame_headless({key(platform::KEY_TAB, 1)});
+    ed.step_frame_headless({key(platform::KEY_TAB, 0)});
+    CHECK(!ed.in_edit_mode());
+    ed.command("drawproject closest");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+  });
+}
+
+
+/* ---- Round 461 (task 0437), the test engineer's tests: Draw on curved surfaces through real events ---- */
+static platform::Event r461x_key(int k, bool down, int mods = 0) {
+  platform::Event e;
+  e.type = down ? platform::EventType::KeyDown : platform::EventType::KeyUp;
+  e.key = k;
+  e.mods = mods;
+  return e;
+}
+static platform::Event r461x_mouse(int x, int y) {
+  platform::Event e;
+  e.type = platform::EventType::MouseMove;
+  e.x = x;
+  e.y = y;
+  return e;
+}
+
+/* How far p is from the surface of m (triangulated). */
+static float r461x_off_surface(const Mesh &m, Vec3 p) {
+  const RenderMesh &rm = m.render_mesh(true);
+  float best = 1e30f;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    const Vec3 n = cross(b - a, c - a);
+    if (length(n) < 1e-20f) continue;
+    const Vec3 nn = normalize(n);
+    const Vec3 q = p - nn * dot(p - a, nn);
+    const bool inside = dot(cross(b - a, q - a), nn) >= -1e-6f && dot(cross(c - b, q - b), nn) >= -1e-6f && dot(cross(a - c, q - c), nn) >= -1e-6f;
+    if (inside) best = std::min(best, std::fabs(dot(p - a, nn)));
+  }
+  return best;
+}
+
+static bool r461x_same_mesh(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && a.corner_verts == b.corner_verts && a.face_offsets == b.face_offsets && a.uvs.size() == b.uvs.size() &&
+         (a.uvs.empty() || std::memcmp(a.uvs.data(), b.uvs.data(), a.uvs.size() * sizeof(Vec2)) == 0) &&
+         (a.positions.empty() || std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0);
+}
+
+/* A mesh's faces as sorted text, so two meshes with the same faces in another order or numbering compare equal. */
+static std::vector<std::string> r461x_canon(const Mesh &m) {
+  std::vector<std::string> out;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    std::vector<std::string> c;
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const Vec3 p = m.positions[m.face_verts(f)[k]];
+      c.push_back(strprintf("(%.5f %.5f %.5f)", (double)p.x, (double)p.y, (double)p.z));
+    }
+    std::sort(c.begin(), c.end());
+    std::string s;
+    for (const std::string &x : c) s += x;
+    out.push_back(s);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+struct R461xDraw {
+  bool edited = false;
+  size_t faces0 = 0, faces1 = 0, selected = 0;
+  float worst = 0;
+  bool manifold_kept = false, still_editing = false;
+  Mesh before, after;
+};
+
+/* A circle drawn on the teapot's body with the real Draw tool: centre click, then a rim click `radius` to the camera's right. */
+static R461xDraw r461x_teapot_circle(Editor &ed, GameObject *g, float yaw, float pitch, bool ortho, const char *mode, float radius) {
+  R461xDraw out;
+  g->set_world_position({0, 0, 0});
+  SceneCamera cam = ed.scene_camera_for_test();
+  cam.pivot = {0, 0.5f, 0};
+  cam.yaw = yaw;
+  cam.pitch = pitch;
+  cam.distance = 4.0f;
+  cam.ortho = ortho;
+  cam.animating = false;
+  ed.set_scene_camera_for_test(cam);
+  ed.command("edit face");
+  ed.command(strprintf("drawproject %s", mode));
+  ed.command("draw circle");
+  ed.step_frame_headless();  // (a frame commits what came before - the create and the mode change - as undo steps of their own)
+  out.before = *g->get<MeshFilter>()->mesh;
+  const SceneCamera &c = ed.scene_camera_for_test();
+  const Vec3 fwd = c.forward(), eye = c.position(), right = c.right();
+  auto on_body = [&](Vec3 aim) {
+    const RenderMesh &rm = out.before.render_mesh(true);
+    const Ray r{eye, normalize(aim - eye)};
+    float best = 1e30f;
+    for (size_t t = 0; t < rm.tri_count(); t++) {
+      const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      if (d > 0 && d < best) best = d;
+    }
+    return r.origin + r.dir * best;
+  };
+  (void)fwd;
+  /* Level: the middle of the body. From above the aim is lowered so that the view line meets the body at mid height, not the shoulder or the lid. */
+  const Vec3 aim0 = pitch > 1.0f ? Vec3(0, 0.45f - 0.5f * std::tan(pitch * 3.14159265f / 180.0f), 0) : Vec3(0, 0.55f, 0);
+  const Vec3 centre = on_body(aim0), rim = on_body(aim0 + right * radius);
+  ed.command(strprintf("drawpoint %.6f %.6f %.6f", (double)centre.x, (double)centre.y, (double)centre.z));
+  ed.command(strprintf("drawpoint %.6f %.6f %.6f", (double)rim.x, (double)rim.y, (double)rim.z));
+  out.after = *g->get<MeshFilter>()->mesh;
+  out.faces0 = out.before.face_count();
+  out.faces1 = out.after.face_count();
+  out.edited = out.faces1 > out.faces0;
+  for (size_t v = out.before.vert_count(); v < out.after.vert_count(); v++) out.worst = std::max(out.worst, r461x_off_surface(out.before, out.after.positions[v]));
+  for (size_t f = 0; f < out.after.face_count(); f++) out.selected += f < ed.face_sel_for_test().size() && ed.face_sel_for_test()[f] ? 1 : 0;
+  out.manifold_kept = closed_manifold(out.after) == closed_manifold(out.before);
+  out.still_editing = ed.in_edit_mode();
+  return out;
+}
+
+static void tests_round461_engineer() {
+  test("draw on the teapot with real clicks (engineer): a circle a quarter of the teapot's height wide, from the front and at 45 degrees, in View and Closest mode, perspective and orthographic, is cut into the surface and selected", [] {
+    struct View {
+      const char *name;
+      float yaw, pitch;
+      bool ortho;
+    };
+    const View views[] = {{"front", 0, 0, false}, {"front ortho", 0, 0, true}, {"yaw 45", 45, 0, false}, {"yaw 45 ortho", 45, 0, true}, {"yaw -45", -45, 0, false}, {"pitch 45", 0, 45, false}};
+    for (const View &v : views)
+      for (const char *mode : {"view", "closest"}) {
+        Editor ed;
+        ed.init_headless(1000, 700);
+        ed.step_frame_headless();
+        ed.command("create Teapot");
+        GameObject *g = ed.selected_object();
+        CHECK(g != nullptr);
+        if (!g) return;
+        const R461xDraw r = r461x_teapot_circle(ed, g, v.yaw, v.pitch, v.ortho, mode, 0.3f);
+        const float size = length(r.before.bounds().extent());
+        std::printf("    %s, %s: %zu -> %zu faces, %zu selected, furthest off the surface %.2e\n", v.name, mode, r.faces0, r.faces1, r.selected, (double)r.worst);
+        CHECK(r.edited);
+        CHECK(r.still_editing);
+        CHECK(r.manifold_kept);
+        CHECK(r.worst <= 1e-4f * size);
+        CHECK(r.selected > 1);
+        CHECK(r.selected < r.faces1 / 2);
+        CHECK(ed.draw_project_mode() == (std::string(mode) == "view" ? meshops::ProjectMode::View : meshops::ProjectMode::Closest));
+      }
+  });
+
+  test("draw on the teapot (engineer): the drawing is one undo step - Undo (command and Ctrl+Z) restores the mesh bit for bit, Redo brings the drawing back", [] {
+    for (int via_key = 0; via_key < 2; via_key++) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      ed.command("create Teapot");
+      GameObject *g = ed.selected_object();
+      CHECK(g != nullptr);
+      if (!g) return;
+      const R461xDraw r = r461x_teapot_circle(ed, g, 0, 0, false, "view", 0.3f);
+      CHECK(r.edited);
+      if (!r.edited) return;
+      /* (An undo rebuilds the scene's objects: the object is looked up again by name, after a frame.) */
+      const std::string name = g->name;
+      auto cur = [&]() -> const Mesh * {
+        GameObject *o = ed.scene().find_by_name(name);
+        return o && o->get<MeshFilter>() && o->get<MeshFilter>()->mesh ? o->get<MeshFilter>()->mesh.get() : nullptr;
+      };
+      if (via_key) {
+        ed.step_frame_headless({r461x_key(platform::KEY_Z, true, platform::MOD_CTRL)});
+        ed.step_frame_headless({r461x_key(platform::KEY_Z, false)});
+      }
+      else
+        ed.command("undo");
+      ed.step_frame_headless();
+      const Mesh *undone = cur();
+      std::printf("    %s: %zu faces after undo (was %zu, drawn %zu)%s\n", via_key ? "Ctrl+Z" : "undo", undone ? undone->face_count() : (size_t)0, r.faces0, r.faces1, undone ? "" : " - THE TEAPOT IS GONE");
+      CHECK(undone != nullptr);
+      if (!undone) continue;
+      CHECK(r461x_same_mesh(*undone, r.before));  // one step back is the mesh before the draw
+      const Mesh copy = *undone;
+      ed.command("redo");
+      ed.step_frame_headless();
+      CHECK(cur() && r461x_same_mesh(*cur(), r.after));
+      (void)copy;
+    }
+  });
+
+  test("draw on the teapot (engineer): the new faces of a drawn circle have UVs - none all-zero - and the faces it didn't touch keep theirs bit for bit", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Teapot");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>()->mesh->has_uvs());
+    if (!g) return;
+    const R461xDraw r = r461x_teapot_circle(ed, g, 0, 0, false, "view", 0.3f);
+    CHECK(r.edited);
+    if (!r.edited || !r.before.has_uvs()) return;
+    CHECK(r.after.has_uvs());
+    auto key = [](const Mesh &m, size_t f) {
+      std::vector<uint32_t> k;
+      for (uint32_t c = 0; c < m.face_size(f); c++)
+        for (float x : {m.positions[m.face_verts(f)[c]].x, m.positions[m.face_verts(f)[c]].y, m.positions[m.face_verts(f)[c]].z}) {
+          uint32_t b;
+          std::memcpy(&b, &x, 4);
+          k.push_back(b);
+        }
+      return k;
+    };
+    std::map<std::vector<uint32_t>, std::vector<Vec2>> old;
+    for (size_t f = 0; f < r.before.face_count(); f++) old[key(r.before, f)].assign(r.before.uvs.begin() + r.before.face_offsets[f], r.before.uvs.begin() + r.before.face_offsets[f + 1]);
+    size_t fresh = 0, zero = 0, changed = 0;
+    for (size_t f = 0; f < r.after.face_count(); f++) {
+      const auto it = old.find(key(r.after, f));
+      if (it != old.end()) {
+        changed += std::memcmp(it->second.data(), &r.after.uvs[r.after.face_offsets[f]], it->second.size() * sizeof(Vec2)) != 0 ? 1 : 0;
+        continue;
+      }
+      fresh++;
+      bool all_zero = true;
+      for (uint32_t c = 0; c < r.after.face_size(f); c++) all_zero = all_zero && r.after.uvs[r.after.face_offsets[f] + c].x == 0.0f && r.after.uvs[r.after.face_offsets[f] + c].y == 0.0f;
+      zero += all_zero ? 1 : 0;
+    }
+    std::printf("    %zu new faces, %zu with all-zero UVs, %zu untouched faces with changed UVs\n", fresh, zero, changed);
+    CHECK(fresh > 1 && zero == 0 && changed == 0);
+  });
+
+  test("draw on the teapot (engineer): Tab mid-shape switches View and Closest and is consumed in every keymap preset; Tab with no point placed keeps its meaning; the hint is swallowed by nothing else", [] {
+    for (const char *preset : {"Unity", "Blender", "Maya"}) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      ed.command("create Teapot");
+      GameObject *g = ed.selected_object();
+      CHECK(g != nullptr);
+      if (!g) return;
+      ed.command(strprintf("keymap %s", preset));
+      const bool tab_is_edit_toggle = ed.shortcut_text("mode.edit_toggle") == "Tab";
+      g->set_world_position({0, 0, 0});
+      SceneCamera cam = ed.scene_camera_for_test();
+      cam.pivot = {0, 0.5f, 0};
+      cam.yaw = 0, cam.pitch = 0, cam.distance = 4.0f, cam.animating = false;
+      ed.set_scene_camera_for_test(cam);
+      ed.command("edit face");
+      ed.command("drawproject view");
+      ed.command("draw circle");
+      const Recti vr = ed.scene_view_rect();
+      ed.step_frame_headless({r461x_mouse(vr.x + vr.w / 2, vr.y + vr.h / 2)});
+      /* No point placed: Tab means what the preset says. */
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, true)});
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, false)});
+      std::printf("    %s: Tab with no point placed -> edit mode %d (Tab is the toggle: %d), projection %s\n", preset, ed.in_edit_mode() ? 1 : 0, tab_is_edit_toggle ? 1 : 0,
+                  ed.draw_project_mode() == meshops::ProjectMode::View ? "View" : "Closest");
+      CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);  // nothing was in progress: no switch
+      if (tab_is_edit_toggle) CHECK(!ed.in_edit_mode());
+      if (!ed.in_edit_mode()) {
+        ed.command("edit face");
+        ed.command("draw circle");
+      }
+      /* A point placed: Tab switches, edit mode stays. */
+      const SceneCamera &c = ed.scene_camera_for_test();
+      Vec3 centre;
+      {
+        const Mesh &m = *g->get<MeshFilter>()->mesh;
+        const RenderMesh &rm = m.render_mesh(true);
+        const Ray r{c.position(), normalize(Vec3(0, 0.55f, 0) - c.position())};
+        float best = 1e30f;
+        for (size_t t = 0; t < rm.tri_count(); t++) {
+          const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+          if (d > 0 && d < best) best = d;
+        }
+        centre = r.origin + r.dir * best;
+      }
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", (double)centre.x, (double)centre.y, (double)centre.z));
+      ed.step_frame_headless({r461x_mouse(vr.x + vr.w / 2 + 3, vr.y + vr.h / 2)});
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, true)});
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, false)});
+      const bool first_in_edit = ed.in_edit_mode();
+      const bool first_closest = ed.draw_project_mode() == meshops::ProjectMode::Closest;
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, true)});
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, false)});
+      std::printf("    %s: Tab mid-shape -> still editing %d, Closest %d; second Tab -> %s, editing %d\n", preset, first_in_edit ? 1 : 0, first_closest ? 1 : 0,
+                  ed.draw_project_mode() == meshops::ProjectMode::View ? "View" : "Closest", ed.in_edit_mode() ? 1 : 0);
+      CHECK(first_in_edit);
+      CHECK(first_closest);
+      CHECK(ed.in_edit_mode());
+      CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);
+      /* A held Tab (key repeat) is one switch each press; releasing does nothing. */
+      ed.step_frame_headless({r461x_key(platform::KEY_TAB, false)});
+      CHECK(ed.draw_project_mode() == meshops::ProjectMode::View && ed.in_edit_mode());
+    }
+  });
+
+  test("draw on the teapot (engineer): Tab after the shape is finished or cancelled is an ordinary Tab again, and the chosen projection is kept for the next shape", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Teapot");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    ed.command("keymap Blender");
+    const R461xDraw r = r461x_teapot_circle(ed, g, 0, 0, false, "view", 0.3f);
+    CHECK(r.edited);
+    /* The shape is committed; no point is pending. Switch with the command, Tab leaves Edit Mode. */
+    ed.command("drawproject closest");
+    const Recti vr = ed.scene_view_rect();
+    ed.step_frame_headless({r461x_mouse(vr.x + vr.w / 2, vr.y + vr.h / 2)});
+    ed.step_frame_headless({r461x_key(platform::KEY_TAB, true)});
+    ed.step_frame_headless({r461x_key(platform::KEY_TAB, false)});
+    std::printf("    Tab after the shape: edit mode %d, projection %s\n", ed.in_edit_mode() ? 1 : 0, ed.draw_project_mode() == meshops::ProjectMode::Closest ? "Closest" : "View");
+    CHECK(!ed.in_edit_mode());
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+  });
+
+  test("drawproject (engineer): view and closest set the mode in any case; a bad word or none leaves it as it was", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);  // the default
+    ed.command("drawproject CLOSEST");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+    ed.command("drawproject bogus");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+    ed.command("drawproject");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+    ed.command("drawproject View");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);
+    ed.command("drawproject bogus");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::View);
+    ed.command("drawproject closest extra words");
+    CHECK(ed.draw_project_mode() == meshops::ProjectMode::Closest);
+  });
+
+  test("flat drawing is unchanged (engineer): a rectangle on a cube's top face and one across a flat grid give the faces imprint_loop and imprint_loop_across give", [] {
+    /* A cube's top face. */
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      CHECK(g != nullptr);
+      if (!g) return;
+      g->set_world_position({0, 0, 0});
+      const Mesh was = *g->get<MeshFilter>()->mesh;
+      size_t top = SIZE_MAX;
+      for (size_t f = 0; f < was.face_count(); f++)
+        if (was.face_normal(f).y > 0.9f) top = f;
+      CHECK(top != SIZE_MAX);
+      if (top == SIZE_MAX) return;
+      const float y = was.face_center(top).y;
+      ed.command("edit face");
+      ed.command("draw rectangle");
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", -0.2, (double)y, -0.15));
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", 0.2, (double)y, 0.15));
+      Mesh want = was;
+      const std::vector<Vec3> loop = {{-0.2f, y, -0.15f}, {0.2f, y, -0.15f}, {0.2f, y, 0.15f}, {-0.2f, y, 0.15f}};
+      CHECK(meshops::imprint_loop(want, top, loop) >= 0);
+      const Mesh &got = *g->get<MeshFilter>()->mesh;
+      std::printf("    cube: %zu faces drawn, %zu expected, %zu vertices drawn, %zu expected\n", got.face_count(), want.face_count(), got.vert_count(), want.vert_count());
+      CHECK(got.face_count() == want.face_count() && got.vert_count() == want.vert_count());
+      CHECK(r461x_canon(got) == r461x_canon(want));
+    }
+    /* A flat grid: the rectangle spans several cells. */
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      ed.command("create Plane");
+      GameObject *g = ed.selected_object();
+      CHECK(g != nullptr);
+      if (!g) return;
+      g->set_world_position({0, 0, 0});
+      const Mesh was = *g->get<MeshFilter>()->mesh;
+      ed.command("edit face");
+      ed.command("draw rectangle");
+      ed.command("drawpoint -1.3 0 -0.7");
+      ed.command("drawpoint 2.2 0 1.6");
+      Mesh want = was;
+      const std::vector<Vec3> loop = {{-1.3f, 0, -0.7f}, {2.2f, 0, -0.7f}, {2.2f, 0, 1.6f}, {-1.3f, 0, 1.6f}};
+      std::vector<size_t> inner;
+      CHECK(meshops::imprint_loop_across(want, loop, Vec3(0, 1, 0), &inner) >= 0);
+      const Mesh &got = *g->get<MeshFilter>()->mesh;
+      std::printf("    grid: %zu faces drawn, %zu expected (%zu faces inside), %zu vertices drawn, %zu expected\n", got.face_count(), want.face_count(), inner.size(), got.vert_count(), want.vert_count());
+      CHECK(got.face_count() == want.face_count() && got.vert_count() == want.vert_count());
+      CHECK(r461x_canon(got) == r461x_canon(want));
+    }
+  });
+
+  test("draw on the teapot (engineer): a circle half off the teapot's side can't be projected and is drawn as before - the teapot's own vertices and faces stay put", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Teapot");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 0, 0});
+    SceneCamera cam = ed.scene_camera_for_test();
+    cam.pivot = {0, 0.5f, 0};
+    cam.yaw = 0, cam.pitch = 0, cam.distance = 4.0f, cam.ortho = true, cam.animating = false;
+    ed.set_scene_camera_for_test(cam);
+    ed.command("edit face");
+    ed.command("drawproject view");
+    ed.command("draw circle");
+    const Mesh before = *g->get<MeshFilter>()->mesh;
+    const Vec3 lo = before.bounds().min;
+    /* A centre on the body near the left limb, a rim that goes past the silhouette. */
+    const Vec3 eye = ed.scene_camera_for_test().position(), right = ed.scene_camera_for_test().right();
+    auto on_body = [&](Vec3 aim) {
+      const RenderMesh &rm = before.render_mesh(true);
+      const Ray r{eye, normalize(ed.scene_camera_for_test().forward())};
+      const Ray ro{aim - r.dir * 4.0f, r.dir};
+      float best = 1e30f;
+      for (size_t t = 0; t < rm.tri_count(); t++) {
+        const float d = ray_triangle(ro, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+        if (d > 0 && d < best) best = d;
+      }
+      return best < 1e29f ? ro.origin + ro.dir * best : aim;
+    };
+    (void)right;
+    const float cx = 0.0f;
+    const Vec3 centre = on_body({cx, 0.45f, 0});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", (double)centre.x, (double)centre.y, (double)centre.z));
+    const Vec3 rim = on_body({cx + 3.0f * std::fabs(lo.x), 0.45f, 0});  // far past the side: misses the surface
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", (double)rim.x, (double)rim.y, (double)rim.z));
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    bool kept = after.positions.size() >= before.positions.size();
+    for (size_t v = 0; kept && v < before.positions.size(); v++) kept = std::memcmp(&after.positions[v], &before.positions[v], sizeof(Vec3)) == 0;
+    bool in_range = true;
+    for (uint32_t c : after.corner_verts) in_range = in_range && c < after.vert_count();
+    std::printf("    half-off circle: %zu -> %zu faces, %zu -> %zu vertices\n", before.face_count(), after.face_count(), before.vert_count(), after.vert_count());
+    CHECK(kept);
+    CHECK(in_range);
+    CHECK(ed.in_edit_mode());
+  });
+}
+
+/* ---- Round 461's review: real clicks through draw_hit, the hint line, the flat gate ---- */
+static void tests_round461_review() {
+  test("draw on the teapot with the mouse (review): a circle clicked on the body follows the surface and is cut onto it; the hint line names the projection, Tab changes it", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    ed.command("create Teapot");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    g->set_world_position({0, 0, 0});
+    SceneCamera cam = ed.scene_camera_for_test();
+    cam.pivot = {0, 0.5f, 0};
+    cam.yaw = 0.0f;
+    cam.pitch = 0.0f;
+    cam.distance = 4.0f;
+    cam.ortho = false;
+    cam.animating = false;
+    ed.set_scene_camera_for_test(cam);
+    ed.command("edit face");
+    ed.command("drawproject view");
+    ed.command("draw circle");
+    r34_steps(ed, 2);
+    const Mesh before = *g->get<MeshFilter>()->mesh;
+    const Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    r34_click(ed, cx, cy);  // the centre, on the body under the pivot
+    CHECK(ed.draw_project_hint() == "Project: View (Tab)");
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, cx + 30, cy)});
+    platform::Event tab;
+    tab.type = platform::EventType::KeyDown;
+    tab.key = platform::KEY_TAB;
+    ed.step_frame_headless({tab});
+    tab.type = platform::EventType::KeyUp;
+    ed.step_frame_headless({tab});
+    CHECK(ed.draw_project_hint() == "Project: Closest (Tab)");
+    CHECK(ed.in_edit_mode());
+    r34_click(ed, cx + 30, cy);  // the rim: the click goes through draw_hit, which follows the body
+    r34_steps(ed, 2);
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    float worst = 0.0f;
+    const RenderMesh &rm = before.render_mesh(true);
+    for (size_t v = before.vert_count(); v < m.vert_count(); v++) {
+      float d = 1e30f;
+      for (size_t t = 0; t < rm.tri_count(); t++) {
+        const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+        const Vec3 n = normalize(cross(b - a, c - a));
+        const Vec3 q = m.positions[v] - n * dot(m.positions[v] - a, n);
+        if (dot(cross(b - a, q - a), n) >= -1e-6f && dot(cross(c - b, q - b), n) >= -1e-6f && dot(cross(a - c, q - c), n) >= -1e-6f)
+          d = std::min(d, std::fabs(dot(m.positions[v] - a, n)));
+      }
+      worst = std::max(worst, d);
+    }
+    size_t selected = 0;
+    for (size_t f = 0; f < m.face_count() && f < ed.face_sel_for_test().size(); f++) selected += ed.face_sel_for_test()[f] ? 1 : 0;
+    std::printf("    clicked circle: %zu -> %zu faces, %zu new vertices, %zu selected, furthest off %.2e\n", before.face_count(), m.face_count(),
+                m.vert_count() - before.vert_count(), selected, worst);
+    CHECK(m.face_count() > before.face_count());
+    CHECK(worst <= 1e-4f * length(before.bounds().extent()));
+    CHECK(selected > 1);
+  });
+  test("draw on a bevelled box's flat top (review): the top shares a smooth patch with the bevels, but a shape across its flat faces takes the exact flat path", [] {
+    Mesh boxed = *primitives::cube(1.0f);
+    meshops::bevel_modifier(boxed, 0.15f, 4, -1.0f);
+    /* The flat top cut into a grid, so the rectangle crosses several faces: the projection would cut it too (it isn't
+     * refused as staying inside one face), and only the flat gate keeps the exact flat path. */
+    {
+      std::vector<uint8_t> top_sel(boxed.face_count(), 0);
+      for (size_t f = 0; f < boxed.face_count(); f++) top_sel[f] = boxed.face_normal(f).y > 0.9999f ? 1 : 0;
+      meshops::grid_faces(boxed, top_sel, 4, 4);
+    }
+    {
+      Editor ed;
+      ed.init_headless(800, 600);
+      ed.step_frame_headless();
+      ed.command("create Cube");
+      GameObject *g = ed.selected_object();
+      CHECK(g != nullptr);
+      if (!g) return;
+      g->set_world_position({0, 0, 0});
+      g->get<MeshFilter>()->mesh = std::make_shared<Mesh>(boxed);
+      ed.command("edit face");
+      ed.command("draw rectangle");
+      /* Inside the flat top (it spans -0.35..0.35 after the 0.15 bevel). */
+      const float y = boxed.bounds().max.y;
+      std::vector<LogEntry> skipped;
+      const size_t log0 = Log::fetch(0, skipped);
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", -0.2f, y, -0.2f));
+      ed.command(strprintf("drawpoint %.6f %.6f %.6f", 0.2f, y, 0.2f));
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      /* Which path drew it, from the Draw's own message: the flat path says "across N faces", the projection "onto the
+       * surface". (Positions can't tell: the Draw's rectangle corners come out of its plane axes a bit off -0.2 / 0.2.) */
+      std::vector<LogEntry> said;
+      Log::fetch(log0, said);
+      bool flat_path = false, projected = false;
+      for (const LogEntry &e : said) {
+        flat_path = flat_path || e.text.find("Drew a rectangle across") != std::string::npos;
+        projected = projected || e.text.find("onto the surface") != std::string::npos;
+      }
+      /* The flat path's result: the same shape imprinted directly. */
+      Mesh want = boxed;
+      const std::vector<Vec3> sq = {{-0.2f, y, -0.2f}, {0.2f, y, -0.2f}, {0.2f, y, 0.2f}, {-0.2f, y, 0.2f}};
+      meshops::imprint_loop_across(want, sq, Vec3(0, 1, 0));
+      std::printf("    bevelled box's gridded top: %zu faces drawn, %zu by imprint_loop_across (%zu before)\n", m.face_count(), want.face_count(),
+                  boxed.face_count());
+      std::printf("      drawn by the flat path %d, projected %d\n", (int)flat_path, (int)projected);
+      CHECK(want.face_count() > boxed.face_count() + 4);
+      CHECK(flat_path && !projected);
+      CHECK(m.face_count() == want.face_count() && m.vert_count() == want.vert_count());
+    }
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -9749,5 +10386,8 @@ void run_editor_tests() {
   tests_round455();
   tests_round460();
   tests_round460_engineer();
+  tests_round461();
+  tests_round461_engineer();
+  tests_round461_review();
   coverage_tests();
 }

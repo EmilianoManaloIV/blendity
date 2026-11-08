@@ -317,8 +317,8 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     }
   }
   if (!h.ok) return h;
-  /* After the first point the shape stays in its plane. */
-  if (draw_.has_plane && !h.snap.ok) {
+  /* After the first point the shape stays in its plane - on a curved patch, on the surface under the mouse (task 0437). */
+  if (draw_.has_plane && !h.snap.ok && !(draw_.curved && h.face >= 0)) {
     float t;
     if (ray_plane(ray, draw_.plane_p, draw_.plane_n, t)) {
       h.world = ray.origin + ray.dir * t;
@@ -509,6 +509,55 @@ std::vector<Vec3> Editor::draw_outline(Vec3 cursor, bool final_point, bool &clos
   return out;
 }
 
+/* Neighbouring faces turning by less than this are one smooth patch a shape is projected onto (task 0437): a
+ * teapot's facets meet at a few degrees, a cube's faces at 90. */
+static constexpr float kDrawPatchAngle = 40.0f;
+
+std::string Editor::draw_project_hint() const {
+  return std::string("Project: ") + (draw_project_ == meshops::ProjectMode::View ? "View" : "Closest") + " (Tab)";
+}
+
+/* Every point of the shape lies over a face in the first face's plane: the exact flat path holds it, whatever the patch
+ * around it is (a bevelled box's flat top shares a smooth patch with its bevels). */
+static bool draw_over_flat_faces(const Mesh &m, size_t face, const std::vector<Vec3> &pts) {
+  const Vec3 n = normalize(m.face_normal(face)), p0 = m.positions[m.face_verts(face)[0]];
+  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  std::vector<size_t> flat;
+  for (size_t f = 0; f < m.face_count(); f++)
+    if (dot(normalize(m.face_normal(f)), n) > 0.9999f && std::fabs(dot(m.positions[m.face_verts(f)[0]] - p0, n)) < eps) flat.push_back(f);
+  for (const Vec3 &p : pts) {
+    if (std::fabs(dot(p - p0, n)) >= eps) return false;
+    const bool over = std::any_of(flat.begin(), flat.end(), [&](size_t f) { return meshops::point_in_face(m, f, p, eps); });
+    if (!over) return false;
+  }
+  return true;
+}
+
+/* Task 0437: a shape started on a curved patch, projected onto it (meshops::imprint_projected). False - the mesh
+ * unchanged - when the patch is flat or the shape lies over flat faces (the exact flat path keeps it) or the projection
+ * refuses (the reason logged, unless the shape just stays inside one face). */
+bool Editor::draw_try_projected(Mesh &m, const std::vector<Vec3> &pts, bool closed, const Mat4 &inv, std::string &what) {
+  if (!draw_.curved || draw_.face < 0 || (size_t)draw_.face >= m.face_count() || pts.size() < 2) return false;
+  if (draw_over_flat_faces(m, (size_t)draw_.face, pts)) return false;
+  const std::vector<uint8_t> patch = meshops::smooth_patch(m, (size_t)draw_.face, kDrawPatchAngle);
+  meshops::ProjectView view;
+  view.dir = normalize(inv.dir(cam_.forward()));
+  view.perspective = !cam_.ortho;
+  view.eye = inv.point(cam_.position());
+  std::vector<size_t> inner;
+  std::string err;
+  const bool shut = closed && pts.size() >= 3;
+  if (!meshops::imprint_projected(m, pts, shut, draw_project_, view, &inner, &err, &patch)) {
+    if (err != meshops::kProjectInsideOneFace) Log::warn("Draw: couldn't project the shape onto the surface (%s) - drawn flat instead", err.c_str());
+    return false;
+  }
+  face_sel_.assign(m.face_count(), 0);
+  for (size_t f : inner) face_sel_[f] = 1;
+  const char *mode = draw_project_ == meshops::ProjectMode::View ? "along the view" : "to the closest point";
+  what = shut ? strprintf("onto the surface %s, %zu faces inside (Push/Pull them with P)", mode, inner.size()) : strprintf("cut into the surface %s", mode);
+  return true;
+}
+
 void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   GameObject *g = edit_object();
   if (!g || outline_w.size() < 2) return;
@@ -522,6 +571,23 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   /* Drop repeated points (double clicks). */
   pts.erase(std::unique(pts.begin(), pts.end(), [](const Vec3 &a, const Vec3 &b) { return length(a - b) < 1e-6f; }), pts.end());
   if (closed && pts.size() > 2 && length(pts.front() - pts.back()) < 1e-6f) pts.pop_back();
+  /* On a curved patch the shape is projected onto the surface and cut into it (task 0437); when that refuses, the
+   * flat path below runs as it always did. */
+  {
+    std::string projected;
+    const size_t nv_before = m.vert_count();
+    if (draw_try_projected(m, pts, closed, inv, projected)) {
+      vert_sel_.assign(m.vert_count(), 0);
+      for (size_t v = nv_before; v < m.vert_count(); v++) vert_sel_[v] = 1;
+      m.sync_attributes();
+      m.touch();
+      if (elem_ == EditElement::Face) sync_vert_face_selection(true);
+      else if (elem_ == EditElement::Edge) edges_from_verts();
+      mark_changed(std::string("Draw ") + kDrawShapes[draw_.shape]);
+      Log::info("Drew a %s %s", to_lower(kDrawShapes[draw_.shape]).c_str(), projected.c_str());
+      return;
+    }
+  }
   /* Closed but not flat (the plane turned with X / Y / Z on the way): a loop of wire edges. */
   bool wire_loop = false;
   if (closed && pts.size() >= 4) {
@@ -814,6 +880,13 @@ bool Editor::draw_update(const Recti &view) {
       draw_axis_guide(view, a);
     }
   }
+  /* Tab while a shape is in progress: project along the view or to the closest point (task 0437). Consumed, so it
+   * doesn't leave Edit Mode as well; with no point placed Tab keeps its meaning. */
+  if (!draw_.pts.empty() && in.key_pressed[platform::KEY_TAB] && !u.wants_keyboard()) {
+    in.key_pressed[platform::KEY_TAB] = false;
+    draw_project_ = draw_project_ == meshops::ProjectMode::View ? meshops::ProjectMode::Closest : meshops::ProjectMode::View;
+    Log::info("Draw: project %s", draw_project_ == meshops::ProjectMode::View ? "along the view" : "to the closest point");
+  }
   /* Enter finishes an open polyline (Esc cancels the shape and ends the tool). */
   if (in.key_pressed[platform::KEY_ENTER]) {
     if (draw_.shape == 0 && draw_.pts.size() >= 2) {
@@ -883,6 +956,13 @@ void Editor::draw_add(Vec3 world, int face, int action) {
       draw_space_plane(sp, draw_.plane_n);
     }
     draw_.has_plane = true;
+    draw_.curved = false;
+    if (face >= 0 && (size_t)face < m.face_count()) {
+      /* A smooth patch that isn't flat (a teapot's body): the shape will be projected onto it (task 0437). */
+      const std::vector<uint8_t> patch = meshops::smooth_patch(m, (size_t)face, kDrawPatchAngle);
+      const Vec3 n0 = m.face_normal((size_t)face);
+      for (size_t f = 0; f < patch.size() && !draw_.curved; f++) draw_.curved = patch[f] && dot(m.face_normal(f), n0) < 0.9999f;
+    }
     /* The plane's axes follow the geometry, not the world: the face's longest
      * edge, else the object's own X (or Z) laid into the plane. */
     const Vec3 n = draw_.plane_n;
@@ -972,6 +1052,23 @@ void Editor::draw_add(Vec3 world, int face, int action) {
   }
 }
 
+/* The face whose render triangles come within reach of p (-1 none): a point on a bent quad, off its own plane. */
+static int nearest_face_within(const Mesh &m, Vec3 p, float reach) {
+  const RenderMesh &rm = m.render_mesh(true);
+  int face = -1;
+  float best = reach;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    const Vec3 n = cross(b - a, c - a);
+    if (length(n) < 1e-20f) continue;
+    const Vec3 nn = normalize(n), q = p - nn * dot(p - a, nn);
+    const bool inside = dot(cross(b - a, q - a), n) >= 0 && dot(cross(c - b, q - b), n) >= 0 && dot(cross(a - c, q - c), n) >= 0;
+    const float d = std::fabs(dot(p - a, nn));
+    if (inside && d < best) best = d, face = (int)rm.tri_face[t];
+  }
+  return face;
+}
+
 /* A scripted click at a world point (the `drawpoint` command): the face it lies on, found geometrically. */
 void Editor::draw_point(Vec3 world, const std::string &mode) {
   if (mode == "close") return draw_add(world, -1, 1);
@@ -1000,6 +1097,7 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
           const float facing = dot(normalize(m.face_normal(f)), to_cam);
           if (facing > best) best = facing, face = (int)f;
         }
+      if (face < 0) face = nearest_face_within(m, p, 1e-3f * std::max(1.0f, length(m.bounds().extent())));
     }
   draw_add(world, face, 0);
 }
@@ -1082,7 +1180,7 @@ void Editor::draw_preview(const Recti &view) {
     default: what = "click two points the guide runs through"; break;
   }
   if (draw_uniform_ && draw_.shape == 1) what += " (square)";
-  const std::string hint = std::string("Draw ") + kDrawShapes[draw_.shape] + ": " + what + "  |  Ctrl grid, Shift axis, Esc done";
+  const std::string hint = std::string("Draw ") + kDrawShapes[draw_.shape] + ": " + what + "  |  " + draw_project_hint() + "  |  Ctrl grid, Shift axis, Esc done";
   const int hw = u.font.text_width(hint) + u.px(16);
   Recti hb{view.x + (view.w - hw) / 2, view.bottom() - u.row_h() - u.px(10), hw, u.row_h()};
   u.canvas.fill_round_rect(hb, u.px(3), Color::hex(0x202020, 220));

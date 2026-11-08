@@ -1,6 +1,6 @@
 # 0437: Draw projects onto curved surfaces (round 461)
 
-- **Status:** approved (2026-11-08)
+- **Status:** done (round 461)
 - **Requirements:** R-02 (modeling: SketchUp / Plasticity drawing)
 - **Decisions:** ADR 0120 (the drawing solver), decisions 2-4; supersedes ADR 0066's "not done: strokes projected onto
   curved surfaces" and the matching open items of ADR 0064, tasks 0224 and 0226
@@ -90,6 +90,29 @@ added as a floating face facing the camera (`draw_tool.cpp:567`) or as wires off
 - Headless: in a scratch project, the teapot with a checker material, `drawproject view`, a circle through `drawpoint`,
   `--headless-screenshot`: the cut follows the surface and the texture is unbroken.
 - `py tools/test_coverage_map.py --check`.
+
+## As built (amended at implementation and review)
+- **No triangle BVH (yet).** The samples are cast with linear scans over the render triangles. Measured: about 10 ms a
+  commit on the 2,048-face teapot; the stress section `curved` prints a row for a teapot of about 51k faces (one draw
+  of each kind). The larger cost on big meshes is not the scans but the cut: `split_edge` and `split_face_path` rebuild
+  every face once per node, so a fixed-size shape costs about faces^1.5. Batching the splits into one rebuild (and an
+  edge-to-face map for the piece lookups) is the follow-up if that row shows a commit over a frame budget; a BVH alone
+  would not fix it.
+- **View mode is not resampled.** The sheet through two outline points and the view (or the eye) is exactly the
+  projection of the segment between them, so the walk is exact as drawn; only Closest mode, whose sheet approximates
+  the closest-point curve, is resampled.
+- **The gate.** Projection runs when the first face's smooth patch (`meshops::smooth_patch`, neighbours within 40
+  degrees) isn't flat **and** the shape doesn't lie over faces in the first face's plane; a shape over flat faces (a
+  bevelled box's flat top shares a patch with its bevels) keeps the exact flat path. A shape inside one face falls back
+  to the flat path without a warning.
+- **Closest mode halves a stuck segment**: its sheet only approximates the closest-point curve, and rounding left the walk without a crossing ahead on four teapot circles on Linux (not Windows); such a segment is split at its midpoint, moved onto the surface, up to four times. Along the view a stuck walk is a real refusal.
+- **The inner side** is a vote over every face beside the cut (is its centre inside the outline, seen along the view or
+  the average normal), the smaller side on a tie.
+- **Push/Pull on the projected region** (the open question): the teapot circle's faces pull out and push in by 0.05
+  with the mesh staying closed and no faces newly on top of each other (`tests_round461_review`); the existing curved
+  Push/Pull path holds, nothing new was needed.
+- **Found in testing and fixed:** a figure eight touching itself at one of its own points, and non-finite points, are
+  refused; a point found by Closest further from the surface than the mesh is big is refused (it wasn't drawn on it).
 
 ## Risks and edge cases
 - A sample landing exactly on a vertex or an edge: snap to it (eps 1e-5 x size) rather than splitting a sliver.

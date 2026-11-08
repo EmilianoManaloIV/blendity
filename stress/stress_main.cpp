@@ -7225,6 +7225,151 @@ static int assert_to_crash(int type, char *message, int *ret) {
 #  endif
 #endif
 
+/* Round 461 (task 0437): shapes projected onto the curved meshes (meshops::imprint_projected), along the view and to
+ * the closest point, from several directions and at two sizes. Refusals are their own row (they must fall, never rise);
+ * a cut must leave a valid mesh, closed if it was, with every new vertex on the old surface. */
+static float curved_surface_distance(const Mesh &base, Vec3 p) {
+  const RenderMesh &rm = base.render_mesh(true);
+  float best = 1e30f;
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+    /* The closest point of the triangle: inside it, else on one of its sides. */
+    const Vec3 n = cross(b - a, c - a);
+    if (length(n) < 1e-20f) continue;
+    const Vec3 nn = normalize(n), q = p - nn * dot(p - a, nn);
+    const bool inside = dot(cross(b - a, q - a), n) >= 0 && dot(cross(c - b, q - b), n) >= 0 && dot(cross(a - c, q - c), n) >= 0;
+    float d = inside ? std::fabs(dot(p - a, nn)) : 1e30f;
+    for (const auto &e : {std::make_pair(a, b), std::make_pair(b, c), std::make_pair(c, a)}) d = std::min(d, length(closest_on_segment(p, e.first, e.second) - p));
+    best = std::min(best, d);
+  }
+  return best;
+}
+
+/* One projected circle on a curved mesh and what came of it. */
+struct ProjectedDraw {
+  bool skipped = false, ok = false;
+  std::string err, bad;
+  float off = 0.0f;    // the furthest new vertex from the old surface, over the mesh's size
+  bool overlaps = false;  // faces newly on top of each other
+  double ms = 0;
+};
+
+/* kind: 0 along the view (orthographic), 1 to the closest point, 2 along the view in perspective. The circle faces the
+ * view in front of the mesh; Closest gets it just off the surface where the view meets it. */
+static ProjectedDraw curved_projected_draw(const Mesh &base, Vec3 d, float frac, int kind, size_t ov0, bool count_overlaps) {
+  using namespace ppstress;
+  ProjectedDraw r;
+  AABB bb;
+  for (Vec3 p : base.positions) bb.add(p);
+  const float s = std::max(1e-6f, length(bb.max - bb.min));
+  const Vec3 mid = (bb.min + bb.max) * 0.5f;
+  const Vec3 ax = normalize(cross(std::fabs(d.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), d)), ay = cross(d, ax);
+  Vec3 c = mid - d * s;
+  if (kind == 1) {
+    const RenderMesh &rm = base.render_mesh(true);
+    const Ray ray{mid - d * 2.0f * s, d};
+    float best = 1e30f;
+    for (size_t t = 0; t < rm.tri_count(); t++) {
+      const float h = ray_triangle(ray, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      if (h > 0 && h < best) best = h;
+    }
+    r.skipped = best > 1e29f;
+    if (r.skipped) return r;
+    c = ray.origin + d * (best - 0.01f * s);
+  }
+  std::vector<Vec3> circle;
+  for (int i = 0; i < 20; i++) {
+    const float a = 2.0f * kPi * (float)i / 20.0f;
+    circle.push_back(c + (ax * std::cos(a) + ay * std::sin(a)) * (frac * s));
+  }
+  meshops::ProjectView view;
+  view.dir = d;
+  view.perspective = kind == 2;
+  view.eye = mid - d * 3.0f * s;
+  Mesh m = base;
+  ScopedTimer t;
+  r.ok = meshops::imprint_projected(m, circle, true, kind == 1 ? meshops::ProjectMode::Closest : meshops::ProjectMode::View, view, nullptr, &r.err);
+  r.ms = t.ms();
+  if (!r.ok) return r;
+  r.bad = invalid(m);
+  if (r.bad.empty() && closed_manifold(base) && !closed_manifold(m)) r.bad = "a closed mesh came out open";
+  if (r.bad.empty() && degenerate_faces(m, s) > degenerate_faces(base, s)) r.bad = "new zero-area faces";
+  for (size_t v = base.vert_count(); v < m.vert_count(); v++) r.off = std::max(r.off, curved_surface_distance(base, m.positions[v]) / s);
+  r.overlaps = count_overlaps && meshops::overlapping_faces(m, 1e-3f * s) > ov0;
+  return r;
+}
+
+template <class Curved>
+static void curved_projected_draws(Report &rep, const Options &o, const std::vector<Curved> &meshes) {
+  rep.table({"mesh (projected draw)", "draws", "cut", "curved draws refused", "problems", "new overlaps", "furthest off the surface / size", "max ms"});
+  static const char *const kKinds[] = {"view", "closest", "view, perspective"};
+  size_t total = 0, total_refused = 0, total_problems = 0, total_overlaps = 0;
+  float total_off = 0.0f;
+  std::map<std::string, int> reasons;
+  std::vector<std::string> examples;
+  const float r2 = std::sqrt(0.5f);
+  std::vector<Vec3> dirs = {{0, 0, -1}, {-r2, 0, -r2}, {0, -r2, -r2}};
+  if (!o.quick) dirs.push_back({r2, -0.5f, -0.5f});
+  for (const Curved &cv : meshes) {
+    const Mesh &base = cv.mesh;
+    AABB bb;
+    for (Vec3 p : base.positions) bb.add(p);
+    const bool count_overlaps = base.face_count() < 2000;
+    const size_t ov0 = count_overlaps ? meshops::overlapping_faces(base, 1e-3f * length(bb.max - bb.min)) : 0;
+    size_t draws = 0, cut = 0, refused = 0, problems = 0, overlaps = 0;
+    float off = 0.0f;
+    double max_ms = 0;
+    for (Vec3 d : dirs)
+      for (float frac : {0.08f, 0.2f})
+        for (int kind = 0; kind < 3; kind++) {
+          const ProjectedDraw r = curved_projected_draw(base, normalize(d), frac, kind, ov0, count_overlaps);
+          if (r.skipped) continue;
+          const Vec3 n = normalize(d);
+          const std::string what = strprintf("%s, view (%.2f %.2f %.2f), radius %.0f%%, %s", cv.name.c_str(), n.x, n.y, n.z, frac * 100, kKinds[kind]);
+          draws++;
+          max_ms = std::max(max_ms, r.ms);
+          if (!r.ok) {
+            refused++;
+            reasons[r.err]++;
+            if (examples.size() < 60) examples.push_back(what + ": " + r.err);
+            continue;
+          }
+          cut++;
+          off = std::max(off, r.off);
+          overlaps += r.overlaps ? 1 : 0;
+          if (r.overlaps) examples.push_back(what + ": faces newly on top of each other");
+          if (r.bad.empty()) continue;
+          problems++;
+          reasons["problem: " + r.bad]++;
+          examples.push_back(what + ": " + r.bad);
+        }
+    total += draws;
+    total_refused += refused;
+    total_problems += problems;
+    total_overlaps += overlaps;
+    total_off = std::max(total_off, off);
+    rep.row({cv.name, num((double)draws), num((double)cut), num((double)refused), num((double)problems), num((double)overlaps), strprintf("%.1e", off),
+             f2(max_ms)});
+  }
+  /* The cost on a big mesh (ADR 0056: printed, never asserted): the teapot at about 51k faces, one draw of each kind. */
+  {
+    const Mesh big = *primitives::teapot(1.2f, 40);
+    double worst = 0;
+    size_t big_cut = 0;
+    for (int kind = 0; kind < 3; kind++) {
+      const ProjectedDraw r = curved_projected_draw(big, Vec3(0, 0, -1), 0.08f, kind, 0, false);
+      worst = std::max(worst, r.ms);
+      big_cut += r.ok ? 1 : 0;
+    }
+    rep.row({strprintf("Utah teapot, %zu faces (cost)", big.face_count()), "3", num((double)big_cut), num((double)(3 - big_cut)), "-", "-", "-", f2(worst)});
+  }
+  rep.note(strprintf("%zu projected draws on curved meshes, %zu refused, %zu problems, %zu with faces newly on top of each other, furthest new vertex "
+                     "%.1e of the size off the surface",
+                     total, total_refused, total_problems, total_overlaps, total_off));
+  for (auto &[why, n] : reasons) rep.note(strprintf("projected draw %d x: %s", n, why.c_str()));
+  for (const std::string &e : examples) rep.note("projected draw: " + e);
+}
+
 /* Curved surfaces: Push/Pull and the other modeling tools on meshes whose faces
  * all lean against each other (spheres, a torus, Catmull-Clark and bevelled
  * boxes, a bumpy blob, the Utah teapot, a cut-open hemisphere). Regions there are
@@ -7587,6 +7732,7 @@ static void test_curved_surfaces(Report &rep, const Options &o) {
   for (const std::string &e : examples) rep.note(e);
   for (auto &[type, n] : overlap_types) rep.note(strprintf("faces on top of each other %d x after: %s", n, type.c_str()));
   for (const std::string &e : overlap_examples) rep.note("overlap: " + e);
+  curved_projected_draws(rep, o, meshes);
 }
 
 static void install_crash_handler() {

@@ -813,6 +813,29 @@ Vec3 face_area_center(const Mesh &m, size_t f);
  * faces it encloses; returns one of them, or -1 when no face in the plane is touched. */
 long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop, Vec3 normal, std::vector<size_t> *inner_faces = nullptr,
                          std::string *error = nullptr);
+/* Task 0437 (ADR 0120): a drawn outline projected onto the surface and cut into it (Blender's Knife
+ * Project), for curved meshes where no plane holds the shape (mesh_project.cpp). View: each point
+ * goes to the first front-facing face along the view (from `eye` when perspective, else along
+ * `dir`); Closest: to the nearest point of the surface. Crossed edges are split (UVs follow) and the
+ * cut is chained through each face; new vertices lie on the old faces, which are not moved. A closed
+ * outline puts the faces it encloses in `inner`. False, the mesh unchanged and `error` saying why,
+ * when part of the outline misses the surface, the projected outline crosses itself, the cut
+ * wraps past what the view sees or jumps a gap, or a closed cut doesn't separate the surface. */
+enum class ProjectMode { View, Closest };
+/* imprint_projected's refusal for a shape that never reaches an edge: the flat path handles it, so Draw stays quiet. */
+constexpr const char *kProjectInsideOneFace = "the shape stays inside one face";
+struct ProjectView {
+  Vec3 dir{0, 0, -1};  // into the scene
+  bool perspective = false;
+  Vec3 eye{0.0f};
+};
+/* allowed (optional, per face): the faces the shape may land on and cut through (the smooth patch it
+ * was started on); a point or a cut reaching another face refuses. */
+bool imprint_projected(Mesh &m, const std::vector<Vec3> &outline, bool closed, ProjectMode mode, const ProjectView &view,
+                       std::vector<size_t> *inner = nullptr, std::string *error = nullptr, const std::vector<uint8_t> *allowed = nullptr);
+/* The faces reachable from `face` across edges where neighbouring faces turn by less than angle_deg
+ * (a smooth patch: a teapot's body, a cylinder's side; a cube's face alone). */
+std::vector<uint8_t> smooth_patch(const Mesh &m, size_t face, float angle_deg);
 }  // namespace meshops
 
 }  // namespace bl

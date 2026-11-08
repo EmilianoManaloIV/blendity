@@ -2,6 +2,34 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 461): Draw projects onto curved surfaces
+
+**Asked:** Pass 20's round B (the drawing solver) - a shape drawn over a curved mesh (the Utah teapot) lands on the
+surface you see and becomes edges and faces of it, along the view or to the closest point, as Plasticity draws.
+
+**Changed (task 0437, ADR 0120)**
+- **`meshops::imprint_projected`** (`mesh_project.cpp`), Blender's Knife Project for the Draw tools: each outline point
+  goes to the first front-facing face along the view (or the closest point of the surface); the sheet between two
+  neighbouring points is followed face to face, every crossed edge split (UVs follow) and the cut chained through each
+  face, bent quads included. New vertices lie on the old faces, which never move; a closed shape selects the faces it
+  encloses. It refuses - the mesh unchanged, the reason in the log - when part of the shape misses the surface, crosses
+  itself, wraps past what the view sees, or runs over a sharp edge off the patch it was started on.
+- **Draw:** a shape started on a smooth patch that isn't flat (neighbouring faces within 40 degrees: the teapot's body,
+  a cylinder's side) is projected; flat patches keep the exact flat path, and a refused projection falls back to it.
+  After the first click the points follow the surface under the mouse there.
+- **Tab** while a shape is in progress switches View / Closest (the hint line says which; with no point placed Tab
+  leaves Edit Mode as before); console `drawproject view|closest`.
+- `drawpoint` on a bent quad finds its face (the face's own plane missed such points).
+- **Learn:** "Drawing onto faces" gains a part on curved surfaces, a Try-it and two questions.
+
+**Also (testing and review):** a figure eight touching itself at one of its own points, non-finite points and a Closest point further from the surface than the mesh is big are refused; a shape over faces in the first face's plane keeps the exact flat path even on a smooth patch (a bevelled box's top); the inner side is a vote over every face beside the cut; `imprint_projected` split into steps. No triangle BVH: about 10 ms a commit on the teapot; the stress section prints a 51k-face row, where the cut's per-node rebuild (not the scans) would be the next thing to batch. Push/Pull on a projected teapot region pulls out and pushes in, closed.
+
+**Not done:** one projected cut in 154 (a small circle seen at an angle over the rounded box's flat-to-bevel seam) leaves two faces on top of each other; round 462's overlap guard after a Draw rolls such a draw back, and the cause is a follow-up. A commit on a 51k-face teapot takes about 0.4 s (the cut rebuilds the mesh once per crossing; batching that is the follow-up).
+
+**Workflow (the user, 2026-11-08):** CLAUDE.md gains workflow step 6 - every PR targets `main`; merging a stack's top PR merges every PR below it, one stack per pass; `bash tools/dev/stack_check.sh` after every publish and push (the `stack` CI job runs the same check).
+
+**Checked:** both suites - with Blender's libraries 20,206; dependency-free 19,292 (Windows) and 19,298 (Linux, WSL), 0 failed; the audits; stress on Linux - `curved` 5,036 / 3 / 68, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 (the same as main); the new projected-draw block 236 draws, 82 refused, 0 problems, 1 with faces on top of each other (see Not done), every new vertex within 1.7e-6 of the size of the old surface; the 51k-face teapot about 0.4 s a commit.
+
 ## 2026-11-08 (round 460): UVs evaluated, not invented
 
 **Asked:** Pass 20's round 460 - drawing on a textured face, cutting it with a line or Push/Pulling what was drawn
