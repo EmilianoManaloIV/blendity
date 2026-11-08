@@ -301,7 +301,7 @@ void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, 
 /* Round 436: two gathers of the same view the same (verify mode's check of a kept list): every field a view draws by. */
 static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
   if (a.mesh != b.mesh || a.id != b.id || a.materials != b.materials || a.lightmap != b.lightmap || a.lightmap_uv != b.lightmap_uv) return false;
-  if (a.lightmap_dir != b.lightmap_dir || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
+  if (a.lightmap_dir != b.lightmap_dir || a.shadowmask != b.shadowmask || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
   if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
   if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
   if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
@@ -329,7 +329,7 @@ uint64_t Editor::items_key(bool game, bool want_tangents) {
   const LightingData &ld = shown_lighting();
   mix((uint64_t)(uintptr_t)&ld);
   mix((uint64_t)(uintptr_t)ld.pages.data() ^ (uint64_t)ld.pages.size() << 48);
-  mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32);
+  mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32 ^ (uint64_t)ld.mask_pages.size() << 48);  // (round 444: the masks too)
   mix((uint64_t)scene_->lighting.directional_mode);
   return h;
 }
@@ -848,6 +848,8 @@ uint64_t Editor::scene_hash_tail() {
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
+  mix(&scene_->lighting.light_volumes_in_views, 1);  // (round 443)
+  mix(&lv_bake_gen_, 8);
   mix(&probe_live_gen_, 8);  // live probes changed
   for (const VoxelGIState &st : vgi_) mix(&st.rtlm.generation, 8);  // realtime lightmaps published
   return h;
@@ -1096,6 +1098,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
     env.probes = &probe_frame_;
   }
+  if (scene_lights && pls.baked_gi) env.light_volumes = light_volume_frame();  // (round 443, task 0419: dynamic objects take a baked Light Volume's light where it holds them)
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
@@ -1789,6 +1792,11 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
       j->probe_frame.quad_reuse = probe_quad_reuse_;
       j->probe_frame.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
       env.probes = &j->probe_frame;
+      j->holds_lighting = true;
+    }
+    if (const LightVolumeFrame *lv = pls.baked_gi ? light_volume_frame() : nullptr) {  // (round 443: the render's own copy; the voxels are shared)
+      j->light_volumes = *lv;
+      env.light_volumes = &j->light_volumes;
       j->holds_lighting = true;
     }
     for (const DrawItem &it : j->items)

@@ -330,6 +330,7 @@ void Editor::surface_poll() {
     if (job->thread.joinable()) job->thread.join();
     if (!job->cancel.load(std::memory_order_relaxed)) {
       procedural_texture_cache_store(job->path, job->built);
+      procedural_texture_cache_trim();  // (task 0421: over its budget, the least recently used images only the cache holds go)
       surface_sync_emission(job->copy);  // (a layer started or stopped writing emission since the material was assigned)
       invalidate_material_textures();
       ui_.redraw = true;
@@ -350,6 +351,7 @@ void Editor::surface_poll() {
       }
     }
     const uint64_t h = procedural_texture_cache_hash(*t);
+    if (procedural_texture_trimmed(t->asset_path, h)) continue;  // (task 0421: dropped to fit the budget as it is now; an edit or a request brings it back)
     if (procedural_texture_cached(t->asset_path, h)) continue;
     procedural_texture_set_async(t->asset_path, true);
     auto job = std::make_unique<SurfaceJob>();
@@ -362,6 +364,7 @@ void Editor::surface_poll() {
         TexPlanes planes;
         std::vector<LayerAux> aux;
         raw->copy.evaluate(planes, raw->copy.live_shading ? &aux : nullptr);
+        raw->building.store(true, std::memory_order_relaxed);
         if (!raw->cancel.load(std::memory_order_relaxed)) raw->built = procedural_texture_cache_build(raw->copy, raw->hash, planes, std::move(aux));
       });
       raw->done.store(true, std::memory_order_release);

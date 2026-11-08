@@ -144,6 +144,7 @@ class PathTracer {
    * and glass surfaces and an outline's back faces are looked through; cutout holes too. */
   void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
+  size_t memory_bytes() const;  // (task 0421) the sample planes, the bottom-level trees and the object list, by capacity
 
   /* Adds samples for up to `budget_ms` (at least one full sample pass).
    * Returns the number of completed samples per pixel. With GPUs (task 0161, ADR 0052) the cards work on their

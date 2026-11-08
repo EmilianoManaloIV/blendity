@@ -56,6 +56,8 @@ struct SurfacePoint {
   bool has_lightmap = false;
   Vec3 lightmap;
   bool has_lightmap_dir = false;  // round 426: the lightmap's direction page here (LightingData::dir_pages)
+  Vec3 shadowmask{1.0f, 1.0f, 1.0f};  // round 444: the Shadowmask lights' baked visibility here, channels 0-2
+  bool has_shadowmask = false;
   bool back_side = false;         // round 426: the normals were turned to the eye (the back of a double-sided surface)
   Vec3 lightmap_dir;
   Vec3 lightmap_add;  // realtime GI's bounce of lights the bake doesn't hold (task 0013), added to it

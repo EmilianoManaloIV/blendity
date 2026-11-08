@@ -2,6 +2,7 @@
 #include "raster.h"
 #include "voxel_gi.h"
 #include "probe_volume.h"
+#include "light_volume_bake.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -552,7 +553,21 @@ static const Material *item_material(const DrawItem &it, uint32_t prim) {
   return default_material().get();
 }
 
+/* Task 0419: a point without a lightmap in a baked VRC Light Volume takes the volume's light as its ambient (as VRChat's
+ * shader does, at the surface point, unbiased); where the volume is blending out at its edge the probe volume's light, or
+ * the sky's where there is none, takes the rest. The volume holds the Baked lights' direct light, as baked probes do. */
+static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, const Environment &env) {
+  Vec3 light;
+  float cover = 0.0f;
+  if (!lv.sample(sp.position, sp.normal, light, cover)) return;
+  const Vec3 rest = sp.has_probe ? sp.probe : env.irradiance(sp.normal);
+  sp.probe = light + rest * (1.0f - cover);
+  sp.probe_baked = cover >= 0.5f || (sp.has_probe && sp.probe_baked);
+  sp.has_probe = true;
+}
+
 void Renderer3D::flush() {
+  uses_++;  // (task 0421)
   ScopedTimer total;
   JobSystem &js = JobSystem::global();
   int saved_threads = js.max_threads();
@@ -1313,7 +1328,33 @@ void Renderer3D::replay(const OverlayRecord &r) {
   }
 }
 
+/* (Task 0421) The scratch kept between frames, by capacity. */
+size_t Renderer3D::scratch_bytes() const {
+  size_t n = items_.capacity() * sizeof(DrawItem) + overlay_cmds_.capacity() * sizeof(OverlayCmd) + band_idx_.capacity() * sizeof(uint32_t) +
+             visible_.capacity() + big_.capacity() + see_through_.capacity() + vjobs_.capacity() * sizeof(VJob) +
+             (gi_lo_.capacity() + gi_blur_.capacity()) * sizeof(GiTexel) + normal_mats_.capacity() * sizeof(Mat4);
+  for (const auto &v : clip_pos_) n += v.capacity() * sizeof(Vec4);
+  for (const auto &v : screen_pos_) n += v.capacity() * sizeof(Vec4);
+  for (const auto &v : colors_) n += v.capacity() * sizeof(Vec3);
+  for (const Chunk &c : chunks_)
+    n += c.ranges.capacity() * sizeof(ChunkRange) + c.tris.capacity() * sizeof(ScreenTri) + (c.tile_offsets.capacity() + c.tile_tris.capacity()) * sizeof(uint32_t);
+  return n;
+}
+
+size_t Renderer3D::trim_scratch(size_t keep) {
+  if (batching_) return 0;
+  const size_t had = scratch_bytes();
+  if (had <= keep) return 0;
+  auto free_all = [](auto &v) { std::decay_t<decltype(v)>().swap(v); };
+  free_all(items_), free_all(overlay_cmds_), free_all(band_idx_), free_all(visible_), free_all(big_), free_all(see_through_);
+  free_all(vjobs_), free_all(gi_lo_), free_all(gi_blur_), free_all(normal_mats_);
+  free_all(clip_pos_), free_all(screen_pos_), free_all(colors_), free_all(chunks_);
+  active_chunks_ = 0;
+  return had - scratch_bytes();
+}
+
 void Renderer3D::begin_overlay_batch() {
+  uses_++;  // (task 0421)
   batching_ = true;
   overlay_cmds_.clear();
 }
@@ -1708,7 +1749,7 @@ void Renderer3D::shade_deferred() {
     }
     T.item = &it;
 #ifdef BL_RASTER_X86
-    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
+    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes) && !(env_.light_volumes && it.use_probes);  // (task 0419: a Light Volume lights it per pixel)
     if (T.fast) {
       SurfaceSample fs = T.surface;
       if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)
@@ -1905,6 +1946,7 @@ void Renderer3D::shade_deferred() {
           sp.lightmap = it.lightmap->sample(lm_uv);
           sp.has_lightmap = true;
           if (it.lightmap_dir) sp.lightmap_dir = it.lightmap_dir->sample(lm_uv), sp.has_lightmap_dir = true;  // (round 426)
+          if (it.shadowmask) sp.shadowmask = it.shadowmask->sample(lm_uv), sp.has_shadowmask = true;  // (round 444)
         }
         if (T.mat->shading_model == 1) {  // (task 0164: the normal at the next pixel right and below, for the band edges; painted toon materials are not uniform, so the material decides)
           auto wn_at = [&](Vec3 b) { return normalize(T.wn[0] * b.x + T.wn[1] * b.y + T.wn[2] * b.z); };
@@ -1975,6 +2017,7 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
+        if (!sp.has_lightmap && env_.light_volumes && it.use_probes) light_volume_ambient(sp, *env_.light_volumes, env);  // (task 0419)
         SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
         if (T.uniform) {
           s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
@@ -2020,9 +2063,15 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   if (s.lil) return light_liltoon(s, sp, V, it, env);  // (round 402)
   Vec3 n = s.normal;
   Vec3 lo(0.0f);
+  float subtractive_shadow = 1.0f;  // (round 444: the main Subtractive light's realtime shadow on this lightmapped point)
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
-    if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
+    if (light_baked_here(l.bake_mode, sp.has_lightmap, sp.probe_baked)) {  // a Baked light is in the lightmap (or baked probes) already (round 444: a Subtractive Mixed one in the lightmap)
+      if (l.bake_mode == 3 && sp.has_lightmap) subtractive_shadow = std::min(subtractive_shadow, subtractive_vis(l, (int)li, sp, it));
+      continue;
+    }
+    const int mask_ch = sp.has_shadowmask ? light_mask_channel(l.bake_mode) : -1;  // (round 444: a Shadowmask light's baked shadow here)
+    const float mask_vis = mask_ch >= 0 ? std::max(0.0f, std::min(1.0f, sp.shadowmask[mask_ch])) : 1.0f;
     if (s.toon) {
       /* Toon (ADR 0020): N.L x the shadow x the falloff (range, spot cone, an area's facing), in tones; the dark side
        * takes the shadow colour. As the path tracers' light sampling. With Key Light Only (task 0148) the brightest
@@ -2043,6 +2092,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
         vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
       /* The face shadow map (task 0149) gives the key light's lit term instead of N.L. */
       const float face = (int)li == toon_key_ ? toon_face_lit(*s.toon, s, it.local_key) : -1.0f;
+      vis = std::min(vis, mask_vis);  // (round 444)
       const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * vis) * std::min(fall, 1.0f);  // (the map is the face's shadow: no cast shadow on top)
       const int key = s.toon->toon_key_light_only ? toon_key_ : -1;
       lo += (key >= 0 && (int)li != key ? toon_fill(s, lit) : shade_toon(s, n, V, L, lit)) * l.color * l.intensity;
@@ -2070,7 +2120,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
       const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(q - sp.position))));
       Vec3 dpart, spart;
       brdf_eval_parts(s, n, V, Lr, dpart, spart);
-      lo += (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color * atten;
+      lo += (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color * (atten * mask_vis);
       continue;
     }
     if (l.type == RenderLight::Directional) L = -l.direction;
@@ -2085,8 +2135,14 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     float vis = 1.0f;
     if ((int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
       vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
+    vis = std::min(vis, mask_vis);  // (round 444: the baked shadow from static objects; a realtime one from moving ones on top)
     if (vis <= 0) continue;
     lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
+  }
+  if (subtractive_shadow < 1.0f) {  // (round 444: Unity's Subtractive - the baked light darkened toward the shadow colour)
+    SurfacePoint shadowed = sp;
+    shadowed.lightmap = sp.lightmap * lerp(kSubtractiveShadowColor, Vec3(1.0f), subtractive_shadow);
+    return light_finish(s, shadowed, V, lo, env);
   }
   return light_finish(s, sp, V, lo, env);
 }
@@ -2132,12 +2188,11 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
     if ((int)li != env_.shadow_light || !env_.shadow || !it.receive_shadows || dot(n, L) <= 0.0f) return 1.0f;
     return env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
   };
-  const bool baked_here = sp.has_lightmap || sp.probe_baked;
   /* The main light: the key light (the brightest sun) unless the bake holds it; its direction blended with the ambient's
    * gradient as lilToon's lilGetLightDirection. */
   Vec3 key_color(0.0f), key_L = toon_key_L_;
   const RenderLight *key = toon_key_ >= 0 && toon_key_ < (int)env_.lights.size() ? &env_.lights[toon_key_] : nullptr;
-  if (key && !(baked_here && key->bake_mode == 2) && key->intensity > 0.0f) key_color = key->color * key->intensity;
+  if (key && !light_baked_here(key->bake_mode, sp.has_lightmap, sp.probe_baked) && key->intensity > 0.0f) key_color = key->color * key->intensity;
   const Vec3 L = lil_light_direction(env, key_L, 0.2126f * key_color.x + 0.7152f * key_color.y + 0.0722f * key_color.z);
   /* The ambient as lilToon's SH: the baked light where there is some (no direction in it), else the sky along L. */
   Vec3 sh_max, sh_min;
@@ -2154,7 +2209,7 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
   /* The other lights, as lilToon's ForwardAdd passes: each through the shadow model with its own colour, added. */
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
-    if ((int)li == toon_key_ || (baked_here && l.bake_mode == 2) || !(l.intensity > 0.0f)) continue;
+    if ((int)li == toon_key_ || light_baked_here(l.bake_mode, sp.has_lightmap, sp.probe_baked) || !(l.intensity > 0.0f)) continue;
     Vec3 Lk;
     float fall = 1.0f;
     if (l.type == RenderLight::Directional) Lk = -l.direction;
@@ -2177,6 +2232,14 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
     col = col + reflection_specular(env_.reflection_probes, env, sp.position, R, pr) * env_brdf_approx(f0, pr, std::max(dot(n, V), 1e-4f));
   }
   return col + s.emission;
+}
+
+/* Round 444: a Subtractive light's realtime shadow at a lightmapped point (1 lit), from the shadow map where it is the
+ * shadowed light. */
+float Renderer3D::subtractive_vis(const RenderLight &l, int li, const SurfacePoint &sp, const DrawItem &it) const {
+  if (li != env_.shadow_light || !env_.shadow || !it.receive_shadows) return 1.0f;
+  const Vec3 L = l.type == RenderLight::Directional ? -l.direction : normalize(l.position - sp.position);
+  return env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
 }
 
 /* The baked light at a pixel: the lightmap, rebalanced for the shaded normal by its direction page (round 426), plus

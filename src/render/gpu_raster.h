@@ -97,6 +97,7 @@ struct RasterInstance {
    * bounce onto the lightmap); `baked`: the baked pass draws it. */
   int32_t lightmap = -1, rt_bounce = -1, rt_sky = -1, corner_base = -1;
   int32_t lightmap_dir = -1;  // round 426: the lightmap's direction page (add_texture's id, -1 none)
+  int32_t shadowmask = -1;    // round 444: its shadowmask page (add_texture's id, -1 none; BakedRef.b.w)
   float exposure_occlusion = 0.0f;  // round 429: Material::exposure_occlusion (BakedRef.b.z)
   uint32_t baked_flags = 0;
   bool baked = false;

@@ -59,7 +59,16 @@ struct BakeSettings {
   bool sample_env = true;
   /* Round 441: with more than 8 Baked point and spot lights, each texel picks among them by their light there. */
   bool pick_lights = true;
+  /* Round 444 (ADR 0117): Unity's Lighting Mode - 0 Baked Indirect, 1 Shadowmask (the Mixed lights' shadows from the
+   * static scene in a mask, up to kMaskChannels lights), 2 Subtractive (their direct light in the lightmaps too). */
+  int lighting_mode = 0;
 };
+
+struct BakeLight;
+/* Round 444 (review): Unity's Subtractive split - the main directional Mixed light (the brightest) stays Mixed (the bake
+ * records it as 3: in the lightmaps, realtime on moving objects); every other Mixed light becomes Baked (in the lightmaps
+ * and the probes, as Unity's Subtractive bakes them). Returns the main light's index or -1. */
+int subtractive_split(std::vector<BakeLight> &lights);
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
 struct BakeObject {
@@ -105,8 +114,13 @@ struct LightingData {
    * non-directional bake. The renderers rebalance the light for a normal-mapped surface with it
    * (lightmap_direction_factor, Unity's DecodeDirectionalLightmap). */
   std::vector<Lightmap> dir_pages;
+  /* Round 444: beside each page in a Shadowmask bake, the Mixed lights' visibility from the static scene, one channel a
+   * light (light_modes says which: 4 + channel). Empty otherwise. */
+  std::vector<Lightmap> mask_pages;
   std::map<uint64_t, Entry> entries;  // by GameObject id
-  /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect).
+  /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect; round 444: 3 a
+   * Subtractive Mixed light - direct and indirect in the lightmaps, realtime elsewhere; 4-6 a Shadowmask Mixed light and
+   * its mask channel).
    * Realtime GI (task 0013) adds what isn't here. */
   std::map<uint64_t, int> light_modes;
   uint64_t scene_key = 0;  // lightmap_scene_key() when baked: a different one is "out of date"
@@ -115,6 +129,7 @@ struct LightingData {
   bool save(const std::string &dir, std::string &error) const;
   bool load(const std::string &dir, std::string &error);
   void load_dir_pages(const std::string &dir);  // (round 426: by load, when the file says the bake had them)
+  void load_mask_pages(const std::string &dir);  // (round 444)
 };
 
 /* A content hash of a mesh (positions, faces, smoothing, sharp edges, per-face materials, UVs: stable
@@ -219,7 +234,8 @@ class Lightmapper {
   static Vec3 saved_direction(Vec3 mean_direction);
  private:
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
-                  DirSum *dir_out = nullptr);
+                  DirSum *dir_out = nullptr, Vec3 *mask_out = nullptr);
+  void assign_mask_channels();  // (round 444)
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
   std::vector<uint8_t> invalid_;  // (round 430: per texel, inside geometry - its rays mostly met back faces)
   size_t invalid_count_ = 0;
@@ -230,6 +246,14 @@ class Lightmapper {
   size_t invalid_texels() const { return invalid_count_; }  // (round 430: the last bake's, for the log and the tests)
  private:
   void finish_directions();
+  void finish_masks();                   // (round 444)
+  std::vector<Vec3> masks_;              // (round 444: per texel, in a Shadowmask bake)
+  std::vector<int> mask_channel_;        // (round 444: per light, its mask channel or -1)
+  bool bakes_direct(const BakeLight &bl) const { return bl.mode == 2 || (bl.mode == 1 && s_.lighting_mode == 2); }
+  Vec3 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
+ public:
+  static constexpr int kMaskChannels = 3;  // (a page's three colours: Unity keeps four)
+ private:
   std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams_;  // (round 440: the layout's seam pairs, per page)
   double seam_step_before_ = 0.0, seam_step_after_ = 0.0;
  public:

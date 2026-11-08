@@ -35,7 +35,7 @@ static const SweepCommand kSweepCommands[] = {
   {"create", "create Cube", ""},
   {"curve", "curve select Path 0", ""},
   {"customnormals", "customnormals clear", ""},
-  {"delete", "delete", ""},
+  {"delete", "delete Cube", ""},
   {"deleteasset", "", "deletes a project file"},
   {"deletemat", "deletemat Orange", ""},
   {"develop", "develop undo", ""},

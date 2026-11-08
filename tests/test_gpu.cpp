@@ -2532,6 +2532,60 @@ static void tests_round214() {
   });
 }
 
+/* ---------------------------------------------------------------- round 444: Shadowmask on the card (task 0420) */
+static void tests_round444_gpu() {
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  test("gpu views (round 444): Shadowmask on the card as on the CPU - a Mixed lamp's baked shadow from a box on the floor, packed beside the baked pass's kind; the picture differs from Baked Indirect's, where the lamp has no shadow (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    GameObject *lamp = ed.scene().create("Lamp");
+    Light *L = lamp->add<Light>();
+    L->type = 1, L->mode = 1, L->intensity = 3.0f, L->range = 12.0f;
+    lamp->set_local_position({-1.5f, 2.6f, 1.4f});
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("lamp");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    view(ed, w.ball, 2);
+    view(ed, w.ball, 1);
+    const std::vector<uint32_t> cpu = view(ed, w.ball, 1), gpu = view(ed, w.ball, 2);
+    const bool on_gpu = ed.scene_on_gpu_for_test();  // (read now: the views after it draw on the CPU)
+    size_t n = 0, ok = 0;
+    double total = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((cpu[i] >> k) & 255) - (int)((gpu[i] >> k) & 255)));
+      n++, total += d, ok += d <= 3;
+    }
+    const double mean = n ? total / (double)n : 0.0, within3 = n ? (double)ok / (double)n : 0.0;
+    ed.scene().lighting.lighting_mode = 0;
+    ed.commit_change("lighting");
+    r35_bake(ed);
+    const std::vector<uint32_t> indirect = view(ed, w.ball, 1);
+    size_t changed = 0;
+    for (size_t i = 0; i < cpu.size() && i < indirect.size(); i++) changed += (cpu[i] & 0xFFFFFF) != (indirect[i] & 0xFFFFFF);
+    std::printf("    Shadowmask: the card against the CPU, mean %.3f / 255, %.2f %% within 3; Baked Indirect changes %zu pixels of the CPU's picture\n", mean,
+                within3 * 100.0, changed);
+    std::printf("    the Shadowmask view on the card: %s\n", on_gpu ? "yes" : "no");
+    CHECK(on_gpu && mean < 1.0 && within3 >= 0.99 && changed > 500);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 /* ---------------------------------------------------------------- round 216: baked light on the card (task 0197) */
 static void tests_round216() {
   /* The Scene view drawn again on `device` (the ball nudged and back); its pixels. */
@@ -3683,6 +3737,274 @@ static void tests_round337() {
   });
 }
 
+/* ---------------------------------------------------------------- round 443: Light Volumes in the views (task 0419) */
+
+/* A volume's bake of `res` voxels with `l0` everywhere and, where `grade` is set, L0's red growing along x. */
+static std::shared_ptr<LightVolumeSH> r443_bake(int rx, int ry, int rz, Vec3 l0, Vec3 l1r = Vec3(0.0f), bool grade = false) {
+  auto sh = std::make_shared<LightVolumeSH>();
+  sh->res[0] = rx, sh->res[1] = ry, sh->res[2] = rz;
+  const size_t n = sh->count();
+  sh->l0.assign(n, l0), sh->l1r.assign(n, l1r), sh->l1g.assign(n, Vec3(0.0f)), sh->l1b.assign(n, Vec3(0.0f)), sh->validity.assign(n, 0.0f);
+  if (grade)
+    for (size_t i = 0; i < n; i++) sh->l0[i].x = (float)(i % (size_t)rx);
+  return sh;
+}
+
+/* A frame of one volume: a box of `size` about `at`, `blend` metres at its edges. */
+static LightVolumeInstance r443_instance(std::shared_ptr<const LightVolumeSH> sh, Vec3 at, Vec3 size, float blend) {
+  LightVolumeInstance in;
+  in.sh = std::move(sh);
+  in.inv_world = Mat4::trs(at, Quat(), size).inverse();
+  for (int a = 0; a < 3; a++) in.edge[a] = 1.0f / std::max(blend / size[a], 1e-6f);
+  return in;
+}
+
+static void tests_round443() {
+  test("light volumes in the views (round 443): a volume's light is L0 + L1 . n over the trilinear voxels - the middle of a graded 2 x 2 x 2 grid halfway between its columns, L1 added along the normal, never below 0 - 0 weight outside the box, 1 inside past its blend, partial in it, and two volumes share the weight inner first", [] {
+    LightVolumeFrame f;
+    f.volumes.push_back(r443_instance(r443_bake(2, 2, 2, Vec3(0.0f, 0.5f, 0.25f), Vec3(0.0f, 0.2f, 0.0f), true), Vec3(0.0f), Vec3(2.0f), 0.0f));
+    Vec3 light;
+    float cover = 0.0f;
+    CHECK(f.sample(Vec3(0.0f), Vec3(0, 1, 0), light, cover));
+    std::printf("    the middle, normal up: %.3f %.3f %.3f, cover %.2f\n", light.x, light.y, light.z, cover);
+    CHECK(std::fabs(light.x - (0.5f + 0.2f)) < 1e-4f && std::fabs(light.y - 0.5f) < 1e-4f && std::fabs(light.z - 0.25f) < 1e-4f && cover == 1.0f);  // (L1 r . up = 0.2 on the red)
+    /* L1 down takes it away (the red: 0.5 - 0.2), and a strong L1 against the normal clamps at 0. */
+    CHECK(f.sample(Vec3(0.0f), Vec3(0, -1, 0), light, cover) && std::fabs(light.x - 0.3f) < 1e-4f);
+    f.volumes[0].sh = r443_bake(2, 2, 2, Vec3(0.1f), Vec3(0.0f, 0.5f, 0.0f));
+    CHECK(f.sample(Vec3(0.0f), Vec3(0, -1, 0), light, cover) && light.x == 0.0f && light.y > 0.0f);
+    /* Along x the red runs 0 .. 1 over the two columns (voxel centres at a quarter and three quarters of the box: x = -0.5 and 0.5 in a box of 2). */
+    f.volumes[0].sh = r443_bake(2, 2, 2, Vec3(0.0f), Vec3(0.0f), true);
+    CHECK(f.sample(Vec3(-0.5f, 0, 0), Vec3(0, 1, 0), light, cover) && std::fabs(light.x - 0.0f) < 1e-4f);
+    CHECK(f.sample(Vec3(0.5f, 0, 0), Vec3(0, 1, 0), light, cover) && std::fabs(light.x - 1.0f) < 1e-4f);
+    CHECK(f.sample(Vec3(0.0f), Vec3(0, 1, 0), light, cover) && std::fabs(light.x - 0.5f) < 1e-4f);
+    /* The box: outside nothing, on a face with no blend nothing (the mask is 0 there), inside all of it. */
+    CHECK(!f.sample(Vec3(1.5f, 0, 0), Vec3(0, 1, 0), light, cover) && cover == 0.0f);
+    CHECK(f.sample(Vec3(0.9f, 0, 0), Vec3(0, 1, 0), light, cover) && cover == 1.0f);
+    /* A blend of 0.5 m: halfway into it the volume has half the weight, the rest left for the probes. */
+    f.volumes[0] = r443_instance(r443_bake(2, 2, 2, Vec3(1.0f)), Vec3(0.0f), Vec3(2.0f), 0.5f);
+    CHECK(f.sample(Vec3(0.75f, 0, 0), Vec3(0, 1, 0), light, cover));
+    std::printf("    0.25 m into a 0.5 m blend: cover %.3f, light %.3f\n", cover, light.x);
+    CHECK(std::fabs(cover - 0.5f) < 1e-3f && std::fabs(light.x - 0.5f) < 1e-3f);
+    /* Two: the small inner one takes its weight first, the big one the rest; a tint multiplies, additive adds on top. */
+    f.volumes.clear();
+    LightVolumeInstance inner = r443_instance(r443_bake(1, 1, 1, Vec3(1.0f)), Vec3(0.0f), Vec3(1.0f), 0.5f);
+    LightVolumeInstance outer = r443_instance(r443_bake(1, 1, 1, Vec3(0.2f)), Vec3(0.0f), Vec3(4.0f), 0.0f);
+    outer.tint = Vec3(2.0f);
+    f.volumes = {inner, outer};
+    CHECK(f.sample(Vec3(0.375f, 0, 0), Vec3(0, 1, 0), light, cover));  // (inner's mask 0.25: 0.25 * 1 + 0.75 * 0.2 * 2)
+    std::printf("    inner at a quarter, outer behind it tinted 2: %.3f, cover %.2f\n", light.x, cover);
+    CHECK(std::fabs(light.x - (0.25f + 0.75f * 0.4f)) < 1e-3f && std::fabs(cover - 1.0f) < 1e-4f);
+    f.volumes[1].additive = true;
+    CHECK(f.sample(Vec3(0.375f, 0, 0), Vec3(0, 1, 0), light, cover) && std::fabs(cover - 0.25f) < 1e-3f && std::fabs(light.x - (0.25f + 0.4f)) < 1e-3f);
+    /* Review 443: deep inside the inner volume (it took all the weight) a larger Additive one still adds its light. */
+    CHECK(f.sample(Vec3(0.0f), Vec3(0, 1, 0), light, cover) && std::fabs(light.x - (1.0f + 0.4f)) < 1e-3f && std::fabs(cover - 1.0f) < 1e-4f);
+    /* The turn: a box turned a quarter about z since its bake sees the world normal turned back - L1 r y 0.5 reads the x axis. */
+    LightVolumeInstance turned = r443_instance(r443_bake(1, 1, 1, Vec3(1.0f), Vec3(0.0f, 0.5f, 0.0f)), Vec3(0.0f), Vec3(2.0f), 0.0f);
+    turned.turn = Mat4::rotate(Quat::axis_angle(Vec3(0, 0, 1), kPi * 0.5f));
+    f.volumes = {turned};
+    CHECK(f.sample(Vec3(0.0f), Vec3(1, 0, 0), light, cover) && std::fabs(light.x - 1.5f) < 1e-4f);
+    CHECK(f.sample(Vec3(0.0f), Vec3(0, 1, 0), light, cover) && std::fabs(light.x - 1.0f) < 1e-4f);
+    /* Its card copy: nine header vec4s a volume and four a voxel, behind the count - and nothing past the cap. */
+    const std::vector<float> packed = light_volume_pack(f, 100);
+    CHECK(packed.size() == (size_t)(1 + 9 + 4) * 4 && light_volume_pack(f, 0).empty());  // (one volume of one voxel)
+  });
+
+  /* A dynamic ball over a baked probe volume with a VRC Light Volume of its own around it (its bake put in by hand: a
+   * red, rather than the probes' grey) - the Scene view's picture of it. */
+  struct R443World {
+    P37World w;
+    GameObject *volume = nullptr;
+  };
+  auto world = [](Editor &ed, Vec3 volume_at, float blend, Vec3 l0, bool probes = true) {
+    R443World r;
+    r.w = p37_world(ed, probes, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    r35_bake(ed);
+    r.volume = ed.scene().create("Hall");
+    r.volume->set_local_position(volume_at), r.volume->set_local_scale(Vec3(6.0f, 4.0f, 6.0f));
+    LightVolumeComponent *v = r.volume->add<LightVolumeComponent>();
+    v->voxels_per_unit = 1.0f, v->smooth_blending = blend, v->bake = false;
+    ed.light_volume_bakes_for_test()[r.volume->id] = *r443_bake(6, 4, 6, l0);
+    ed.light_volume_bakes_changed_for_test();
+    ed.commit_change("light volume");
+    r34_steps(ed, 2);
+    return r;
+  };
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  test("light volumes in the views (round 443): a dynamic ball inside a baked Light Volume takes its light (red here) where the probe volume gave grey, outside the box it takes the probes' again, with Light Volumes in Views off it takes them everywhere; lightmapped objects are untouched (the Game view, on the CPU)", [&] {
+    Editor ed;
+    ed.viewport_device_for_test(1);
+    P37World w0 = p37_world(ed, true, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    r35_bake(ed);
+    auto game = [&] {  // (the ball nudged and back, so the view draws again; the Game view has no overlays: the volume's box isn't drawn in it)
+      const Vec3 at = w0.ball->world_position();
+      for (int k = 0; k < 2; k++) {
+        w0.ball->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+        r34_steps(ed, 2);
+      }
+      return r35_game(ed);
+    };
+    const std::vector<uint32_t> probes = game();
+    GameObject *hall = ed.scene().create("Hall");
+    hall->set_local_position(Vec3(1.0f, 1.0f, 0.0f)), hall->set_local_scale(Vec3(6.0f, 4.0f, 6.0f));
+    LightVolumeComponent *v = hall->add<LightVolumeComponent>();
+    v->voxels_per_unit = 1.0f, v->smooth_blending = 0.25f, v->bake = false;
+    ed.light_volume_bakes_for_test()[hall->id] = *r443_bake(6, 4, 6, Vec3(2.0f, 0.1f, 0.1f));
+    ed.light_volume_bakes_changed_for_test();
+    ed.commit_change("light volume");
+    CHECK(ed.light_volume_frame_for_test() != nullptr && ed.light_volume_frame_for_test()->volumes.size() == 1);
+    const std::vector<uint32_t> inside = game();
+    const double redder = p37_redder(inside, probes);
+    std::printf("    the ball in the volume: %.0f redder over the picture, %zu pixels differ\n", redder, r35_diff_count(inside, probes));
+    CHECK(redder > 1000.0 && r35_diff_count(inside, probes) > 200);
+    /* The box moved away from the ball: the probes again, exactly. */
+    hall->set_local_position(Vec3(60.0f, 1.0f, 0.0f));
+    ed.commit_change("light volume moved");
+    CHECK(r35_diff_count(game(), probes) == 0);
+    hall->set_local_position(Vec3(1.0f, 1.0f, 0.0f));
+    ed.commit_change("light volume back");
+    CHECK(r35_diff_count(game(), inside) == 0);
+    /* The setting off, as the console sets it: the probes again, exactly - and on again, the volume's. */
+    ed.command("set Lighting.LightVolumesInViews false");
+    CHECK(!ed.scene().lighting.light_volumes_in_views && ed.light_volume_frame_for_test() == nullptr);
+    CHECK(r35_diff_count(game(), probes) == 0);
+    ed.command("set Lighting.LightVolumesInViews true");
+    CHECK(ed.scene().lighting.light_volumes_in_views && ed.light_volume_frame_for_test() != nullptr);
+    CHECK(r35_diff_count(game(), inside) == 0);
+    /* Baked GI off: the volumes are left out as the baked probes are - the picture is the same with the setting on and off. */
+    ed.scene().lighting.baked_gi = false;
+    ed.commit_change("baked gi off");
+    const std::vector<uint32_t> no_gi_on = game();
+    ed.command("set Lighting.LightVolumesInViews false");
+    CHECK(r35_diff_count(game(), no_gi_on) == 0);
+    ed.command("set Lighting.LightVolumesInViews true");
+    ed.scene().lighting.baked_gi = true;
+    ed.commit_change("baked gi on");
+    /* Lightmapped objects don't sample it: with the ball gone the picture is the same with the volume on and off. */
+    w0.ball->active = false;
+    ed.commit_change("ball hidden");
+    const std::vector<uint32_t> bare_on = game();
+    ed.command("set Lighting.LightVolumesInViews false");
+    const std::vector<uint32_t> bare_off = game();
+    std::printf("    without the ball: %zu pixels differ with the volume on and off\n", r35_diff_count(bare_on, bare_off));
+    CHECK(r35_diff_count(bare_on, bare_off) == 0);
+    ed.command("set Lighting.LightVolumesInViews true");
+    /* A volume whose grid no longer matches its box (resized since the bake) is left out until it is baked again. */
+    hall->set_local_scale(Vec3(9.0f, 4.0f, 6.0f));
+    ed.commit_change("light volume resized");
+    CHECK(ed.light_volume_frame_for_test() == nullptr);
+  });
+  test("light volumes in the views (round 443): a volume turned since its bake turns its light with it, more than 32 volumes keep the smallest 32, a NaN colour is no light, and Baked GI off leaves the volumes out", [&] {
+    Editor ed;
+    r35_open(ed);
+    GameObject *hall = ed.scene().create("Hall");
+    hall->set_local_position(Vec3(0.0f, 1.0f, 0.0f)), hall->set_local_scale(Vec3(2.0f, 2.0f, 2.0f));
+    LightVolumeComponent *v = hall->add<LightVolumeComponent>();
+    v->voxels_per_unit = 1.0f, v->smooth_blending = 0.0f, v->bake = false;
+    LightVolumeSH bake = *r443_bake(2, 2, 2, Vec3(1.0f), Vec3(0.0f, 0.5f, 0.0f));  // (rotation: identity, as baked)
+    ed.light_volume_bakes_for_test()[hall->id] = bake;
+    ed.light_volume_bakes_changed_for_test();
+    ed.commit_change("volume");
+    Vec3 light;
+    float cover = 0.0f;
+    const LightVolumeFrame *f = ed.light_volume_frame_for_test();
+    CHECK(f && f->sample(Vec3(0, 1, 0), Vec3(0, 1, 0), light, cover) && std::fabs(light.x - 1.5f) < 1e-4f);
+    /* Turned a quarter about z: the pattern turns with the box, so the world's +x now reads the baked +y. */
+    hall->set_local_rotation(Quat::axis_angle(Vec3(0, 0, 1), kPi * 0.5f));
+    ed.commit_change("volume turned");
+    f = ed.light_volume_frame_for_test();
+    CHECK(f && f->sample(Vec3(0, 1, 0), Vec3(1, 0, 0), light, cover) && std::fabs(light.x - 0.5f) < 1e-3f);  // (the baked +y turned to world -x: +x reads -0.5)
+    CHECK(f && f->sample(Vec3(0, 1, 0), Vec3(-1, 0, 0), light, cover) && std::fabs(light.x - 1.5f) < 1e-3f);
+    /* A NaN colour or an infinite intensity is a plain white, not a NaN picture. */
+    v->color = Vec3(std::nanf(""), 1.0f, 1.0f);
+    v->intensity = INFINITY;
+    ed.commit_change("volume colour");
+    f = ed.light_volume_frame_for_test();
+    CHECK(f && f->sample(Vec3(0, 1, 0), Vec3(-1, 0, 0), light, cover) && std::isfinite(light.x) && std::isfinite(light.y) && std::isfinite(light.z));
+    v->color = Vec3(1.0f), v->intensity = 1.0f;
+    hall->set_local_rotation(Quat());
+    /* Forty volumes: 32 stay, the smallest first. */
+    for (int k = 0; k < 40; k++) {
+      GameObject *g = ed.scene().create("V" + std::to_string(k));
+      g->set_local_position(Vec3((float)k * 5.0f + 10.0f, 1.0f, 0.0f)), g->set_local_scale(Vec3(1.0f + 0.01f * (float)k, 1.0f, 1.0f));
+      LightVolumeComponent *c = g->add<LightVolumeComponent>();
+      c->voxels_per_unit = 1.0f, c->bake = false;
+      ed.light_volume_bakes_for_test()[g->id] = *r443_bake(1, 1, 1, Vec3(1.0f));
+    }
+    ed.light_volume_bakes_changed_for_test();
+    ed.commit_change("forty volumes");
+    f = ed.light_volume_frame_for_test();
+    std::printf("    41 volumes in the scene: %zu in the frame\n", f ? f->volumes.size() : 0);
+    CHECK(f && f->volumes.size() == (size_t)LightVolumeComponent::kMaxVolumes);
+    size_t halls = 0;
+    for (const LightVolumeInstance &in : f->volumes) halls += std::fabs(in.inv_world.m[0] - 0.5f) < 1e-3f;  // (the 2 m hall: bigger than every thin one)
+    CHECK(halls == 0);
+  });
+  /* The card as the CPU: the same scene drawn by both. */
+  auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int worst = 0;
+      for (int k = 0; k < 24; k += 8) worst = std::max(worst, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += worst, ok += worst <= 3;
+    }
+    mean = n ? sum / (double)n : 0, within3 = n ? (double)ok / (double)n : 0;
+  };
+  test("gpu views (round 443): Light Volumes on the card as on the CPU - the ball in a volume's middle, and the ball across a volume's blended edge (half volume, half probes), the card's picture the CPU's to within a level or two; the card's picture changes with the setting (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    static const char *const kCase[4] = {"the middle", "the blended edge", "no probe volume", "an Additive volume around a covering one"};
+    for (int edge = 0; edge < 4; edge++) {
+      Editor ed;
+      /* (The edge: the box's +x face at x = 1 where the ball sits, a metre of blend inside it. Case 2: no probe volume in the scene,
+       * the card's empty header. Case 3: a larger Additive volume beyond a regular one that covers the ball.) */
+      R443World r = world(ed, edge == 1 ? Vec3(-2.0f, 1.0f, 0.0f) : Vec3(1.0f, 1.0f, 0.0f), edge == 1 ? 1.0f : 0.25f, Vec3(1.5f, 0.2f, 0.1f), edge != 2);
+      if (edge == 3) {
+        GameObject *add = ed.scene().create("Add");
+        add->set_local_position(Vec3(1.0f, 1.0f, 0.0f)), add->set_local_scale(Vec3(12.0f, 8.0f, 12.0f));
+        LightVolumeComponent *av = add->add<LightVolumeComponent>();
+        av->voxels_per_unit = 1.0f, av->smooth_blending = 0.25f, av->bake = false, av->additive = true;
+        ed.light_volume_bakes_for_test()[add->id] = *r443_bake(12, 8, 12, Vec3(0.0f, 0.8f, 0.0f));
+        ed.light_volume_bakes_changed_for_test();
+        ed.commit_change("additive volume");
+        r34_steps(ed, 2);
+        Vec3 light;
+        float cover = 0.0f;
+        CHECK(ed.light_volume_frame_for_test() && ed.light_volume_frame_for_test()->sample(r.w.ball->world_position(), Vec3(0, 1, 0), light, cover) && light.y > 0.85f);  // (0.2 + 0.8)
+      }
+      view(ed, r.w.ball, 2);
+      view(ed, r.w.ball, 1);
+      const std::vector<uint32_t> cpu = view(ed, r.w.ball, 1);
+      const std::vector<uint32_t> gpu = view(ed, r.w.ball, 2);
+      double mean = 0, within3 = 0;
+      compare(cpu, gpu, mean, within3);
+      std::printf("    %s: the Scene view on the card %s (%s); mean %.3f / 255, %.2f %% within 3\n", kCase[edge], ed.scene_on_gpu_for_test() ? "yes" : "no",
+                  ed.gpu_view_status().c_str(), mean, within3 * 100);
+      CHECK(ed.scene_on_gpu_for_test());
+      CHECK(mean < 1.0 && within3 >= 0.99);
+      ed.scene().lighting.light_volumes_in_views = false;
+      ed.commit_change("light volumes off");
+      const std::vector<uint32_t> without = view(ed, r.w.ball, 2);
+      const size_t changed = r35_diff_count(gpu, without, 3);
+      std::printf("    %s: the setting off changes %zu pixels of the card's picture\n", kCase[edge], changed);
+      CHECK(changed > 200);
+      ed.viewport_device_for_test(1);
+    }
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -3701,6 +4023,7 @@ void run_gpu_tests() {
   tests_round212();
   tests_round214();
   tests_round216();
+  tests_round444_gpu();
   tests_round217();
   tests_round219();
   tests_round224();
@@ -3709,4 +4032,5 @@ void run_gpu_tests() {
   tests_round414();
   tests_round415();
   tests_round416();
+  tests_round443();
 }

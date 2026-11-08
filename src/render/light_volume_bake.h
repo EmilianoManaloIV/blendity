@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,5 +62,43 @@ bool load_light_volume_bakes(const std::string &path, std::map<uint64_t, LightVo
  * RGBAHalf - TextureFormat 17 or GraphicsFormat 48 - image data as hex) unpacked to SH in Unity's axes (its L1 stored
  * times 1.65). False when they aren't three RGBAHalf textures of one size. */
 bool light_volume_from_textures(const std::string &tex0, const std::string &tex1, const std::string &tex2, LightVolumeSH &out, std::string &why);
+
+/* Round 443 (task 0419): the baked volumes sampled by the views, as VRChat's Light Volumes shader samples them. One
+ * volume as the shader gets it: its box (world to the unit cube about the object), the blend at its edges, its colour
+ * times intensity, and the baked L1's turn if the box was rotated since the bake. */
+struct LightVolumeInstance {
+  std::shared_ptr<const LightVolumeSH> sh;
+  Mat4 inv_world;                 // world -> the object's unit cube (-0.5 .. 0.5 on each axis)
+  Vec3 edge{1e6f, 1e6f, 1e6f};    // 1 / the Smooth Blending, in the cube's own units (the package's invLocalEdgeSmooth)
+  Vec3 tint{1.0f, 1.0f, 1.0f};    // Color x Intensity
+  Mat4 turn;                      // the world normal in the baked axes (identity unless the box turned)
+  bool additive = false;          // adds on top of the others instead of taking a share of the weight
+  /* The volume's own light at p for the normal n (L0 + L1 . n over the trilinear voxels, never below 0, times tint),
+   * and its edge weight 0..1 (LV_BoundsMask: 0 outside the box, 1 deeper in than the blend). */
+  float mask(Vec3 p) const;
+  Vec3 eval(Vec3 p, Vec3 n) const;
+};
+
+struct LightVolumeFrame {
+  std::vector<LightVolumeInstance> volumes;  // smallest box first (the package's order: an inner volume wins)
+  bool empty() const { return volumes.empty(); }
+  size_t voxels() const {
+    size_t n = 0;
+    for (const LightVolumeInstance &v : volumes) n += v.sh ? v.sh->count() : 0;
+    return n;
+  }
+  /* The volumes' light at p for n: `light` is each volume's share added up (the non-additive ones in order, each taking
+   * its mask of what the others left, additive ones on top), `cover` the share of the weight they took (1: p is inside
+   * a volume deeper than its blend - the probes take the rest, 1 - cover). False when no volume holds p. */
+  bool sample(Vec3 p, Vec3 n, Vec3 &light, float &cover) const;
+  /* A hash of what the card's copy depends on: the boxes, their blends and tints, and the voxels' identity. */
+  uint64_t signature() const;
+};
+
+/* The frame for the card (kProbeFns' lv_*): vec4s, the first the volume count, then per volume nine of header (the
+ * inverse world's three rows, the edge and additive, the grid and where its voxels start, the tint, the normal's three
+ * rows), then each volume's voxels four vec4 apiece (L0, L1 r, g, b). Indices count vec4s from the first; at most
+ * `max_voxels` voxels in all, else empty. */
+std::vector<float> light_volume_pack(const LightVolumeFrame &f, size_t max_voxels);
 
 }  // namespace bl

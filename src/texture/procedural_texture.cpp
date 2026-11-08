@@ -485,6 +485,12 @@ Vec3 texture_blend_color(int mode, Vec3 below, Vec3 v) { return blend_color(mode
 /* Live textures (task 0031)                                              */
 /* ===================================================================== */
 
+size_t LiveTexture::memory_bytes() const {
+  size_t n = 0;
+  for (const LayerAux &a : aux_) n += (a.a.capacity() + a.b.capacity()) * sizeof(float) + a.c.capacity() * sizeof(Vec3);
+  return n;
+}
+
 LiveTexture::LiveTexture(const ProceduralTexture &t, std::vector<LayerAux> aux, int w, int h)
     : tex_(t), aux_(std::move(aux)), w_(w), h_(h) {
   ctx_ = tex_.context(w, h);
@@ -655,7 +661,12 @@ struct CachedOutput {
   TexturePtr tex[(int)TextureOutput::Count];
   bool have[(int)TextureOutput::Count] = {false, false, false, false, false, false};
   LiveTexturePtr live;
+  uint64_t used = 0;  // (task 0421) the cache's clock when it was stored or last answered
 };
+uint64_t g_cache_clock = 0;
+std::unordered_map<std::string, uint64_t> g_trimmed;  // (task 0421) asset paths dropped to fit the budget, with the hash they had (under g_cache_mutex)
+const size_t kPreviewSuffix = 8;  // strlen("#preview")
+size_t g_cache_budget = 0;        // 0: the default
 std::mutex g_cache_mutex;
 std::unordered_map<std::string, CachedOutput> g_cache;
 std::set<std::string> g_previews;  // asset paths in preview (under g_cache_mutex)
@@ -681,6 +692,8 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
     std::lock_guard<std::mutex> lock(g_cache_mutex);
     preview = g_previews.count(path) > 0;
     auto it = g_cache.find(path + (preview ? "#preview" : ""));
+    g_trimmed.erase(path);  // (task 0421: asked for again)
+    if (it != g_cache.end()) it->second.used = ++g_cache_clock;
     if (it != g_cache.end() && it->second.hash == h && it->second.have[0] && (!live || it->second.live)) return out = it->second;
     if (it != g_cache.end() && it->second.have[0] && !preview && g_async.count(path)) return out = it->second;  // (task 0244: the last result until the worker's lands; a drag's preview is always fresh)
   }
@@ -708,8 +721,12 @@ const CachedOutput &cached_outputs(ProceduralTexture &t, CachedOutput &out) {
     fresh.have[k] = true;
   }
   if (live) fresh.live = std::make_shared<const LiveTexture>(t, std::move(aux), planes.w, planes.h);
-  std::lock_guard<std::mutex> lock(g_cache_mutex);
-  g_cache[key] = fresh;
+  {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    fresh.used = ++g_cache_clock;
+    g_cache[key] = fresh;
+  }
+  procedural_texture_cache_trim();  // (task 0421: over its budget after this store; `fresh` is in use, so it stays)
   return out = fresh;
 }
 }  // namespace
@@ -764,8 +781,76 @@ void procedural_texture_cache_store(const std::string &asset_path, const std::sh
   if (!built) return;
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache[asset_path] = built->out;
+  g_cache[asset_path].used = ++g_cache_clock;
+  g_trimmed.erase(asset_path);
 }
 
+static size_t cached_output_bytes(const CachedOutput &c) {
+  size_t n = c.live ? c.live->memory_bytes() : 0;
+  for (const TexturePtr &t : c.tex)
+    if (t) n += t->memory_bytes();
+  return n;
+}
+
+size_t procedural_texture_planes_bytes(const ProceduralTexture &t, bool building) {
+  return (size_t)pow2_size(t.width) * (size_t)pow2_size(t.height) * (building ? 44 + 32 : 44);
+}
+
+size_t procedural_texture_cache_bytes() {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  size_t n = 0;
+  for (const auto &kv : g_cache) n += cached_output_bytes(kv.second);
+  return n;
+}
+
+size_t procedural_texture_cache_budget() {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  if (g_cache_budget) return g_cache_budget;
+  const uint64_t ram = sys::physical_memory_bytes();
+  return (size_t)std::max<uint64_t>((uint64_t)128 << 20, std::min<uint64_t>(ram ? ram / 32 : (uint64_t)256 << 20, (uint64_t)512 << 20));
+}
+
+void procedural_texture_cache_set_budget(size_t bytes) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  g_cache_budget = bytes;
+}
+
+/* Only the cache holds these images: nothing shades with them, so dropping them costs a re-evaluation when something asks. */
+static bool cached_output_unshared(const CachedOutput &c) {
+  for (const TexturePtr &t : c.tex)
+    if (t && t.use_count() > 1) return false;
+  return !c.live || c.live.use_count() <= 1;
+}
+
+/* The budget is for what can be dropped: entries in use are pinned and not counted against it, so a few big surfaces in use
+ * don't empty every unused one (each would then evaluate again, in the frame something asks). */
+size_t procedural_texture_cache_trim() {
+  const size_t budget = procedural_texture_cache_budget();
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  size_t total = 0, freed = 0;
+  for (const auto &kv : g_cache)
+    if (cached_output_unshared(kv.second)) total += cached_output_bytes(kv.second);
+  while (total > budget) {
+    auto oldest = g_cache.end();
+    for (auto it = g_cache.begin(); it != g_cache.end(); ++it)
+      if (cached_output_unshared(it->second) && (oldest == g_cache.end() || it->second.used < oldest->second.used)) oldest = it;
+    if (oldest == g_cache.end()) break;  // (everything left is in use)
+    const size_t n = cached_output_bytes(oldest->second);
+    const std::string &key = oldest->first;
+    const bool preview = key.size() > kPreviewSuffix && key.compare(key.size() - kPreviewSuffix, kPreviewSuffix, "#preview") == 0;
+    if (!preview) g_trimmed[key] = oldest->second.hash;  // (a dropped drag preview says nothing of the full images)
+    g_cache.erase(oldest);
+    total -= std::min(total, n);
+    freed += n;
+  }
+  return freed;
+}
+
+bool procedural_texture_trimmed(const std::string &asset_path, uint64_t hash) {
+  std::lock_guard<std::mutex> lock(g_cache_mutex);
+  const auto it = g_trimmed.find(asset_path);
+  return it != g_trimmed.end() && it->second == hash;
+}
 
 void procedural_texture_set_preview(const std::string &asset_path, bool on) {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
@@ -776,6 +861,7 @@ void procedural_texture_cache_forget(const std::string &asset_path) {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache.erase(asset_path);
   g_cache.erase(asset_path + "#preview");
+  g_trimmed.erase(asset_path);
 }
 
 void procedural_texture_clear_previews() {
@@ -790,6 +876,7 @@ bool procedural_texture_preview() {
 void procedural_texture_cache_clear() {
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   g_cache.clear();
+  g_trimmed.clear();
 }
 
 /* ===================================================================== */

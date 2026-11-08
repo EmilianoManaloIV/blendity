@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Unity's baked lighting in Blendity (round 400, task 0377): see unity_lightmaps.h.
 #include "unity_lightmaps.h"
+#include "tetrahedra.h"
 
 #include "../core/jobs.h"
 #include "../image/image.h"
@@ -310,7 +311,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
   if (sum != fnv1a32(bytes.data(), bytes.size() - 4)) return why = "its checksum doesn't match (a changed or cut file)", false;
   Reader r{bytes, 8, bytes.size() - 4};
   const int32_t version = r.get<int32_t>();
-  if (version != 1 && version != 2) return why = "a version Blendity doesn't read", false;
+  if (version < 1 || version > 3) return why = "a version Blendity doesn't read", false;
   r.get<int32_t>();
   out.lightmaps_mode = r.get<int32_t>();
   out.lighting_data = r.str();
@@ -370,6 +371,12 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
     }
     out.reflection_probes.push_back(std::move(p));
   }
+  const size_t ns = version >= 3 ? r.count(26 * 12) : 0;  // (round 442: the probes along 26 directions)
+  if (ns != 0 && ns != out.probes.size()) r.ok = false;
+  for (size_t i = 0; r.ok && i < ns; i++) {
+    out.probes[i].seen.resize(26);
+    for (Vec3 &v : out.probes[i].seen) v = r.vec3();
+  }
   if (!r.ok || r.at != r.end) return out = UnityLighting{}, why = "a broken .unity-lighting file", false;
   return true;
 }
@@ -377,7 +384,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
 std::string write_unity_lighting(const UnityLighting &u) {
   Writer w;
   w.b.append(kMagic, 8);
-  w.put<int32_t>(2), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2)
+  w.put<int32_t>(3), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2; round 442: 3)
   w.str(u.lighting_data), w.put<uint32_t>(u.lighting_data_hash);
   w.put<int32_t>((int32_t)u.pages.size());
   for (const auto &p : u.pages) {
@@ -415,6 +422,11 @@ std::string write_unity_lighting(const UnityLighting &u) {
     w.put<int32_t>(p.projection ? 1 : 0), w.put(p.intensity), w.put<int32_t>(p.importance), w.put<int32_t>(p.size);
     for (int f = 0; f < 6; f++) w.b.append((const char *)p.faces[f].data(), p.faces[f].size() * 2);
   }
+  bool seen = !u.probes.empty();
+  for (const auto &p : u.probes) seen = seen && p.seen.size() == 26;
+  w.put<int32_t>(seen ? (int32_t)u.probes.size() : 0);
+  for (const auto &p : u.probes)
+    for (size_t j = 0; seen && j < 26; j++) w.vec3(p.seen[j]);
   w.put<uint32_t>(fnv1a32(w.b.data(), w.b.size()));
   return w.b;
 }
@@ -592,6 +604,32 @@ static ProbeCube turned(const ProbeCube &unity, const Mat4 &to_unity) {
   return out;
 }
 
+/* Round 442: Unity's probes as L2 SH in Blendity's axes - fitted along the 26 directions turned by the placement (the
+ * coefficients come out in Blendity's frame); empty when the file has no version 3 directions. */
+std::vector<ProbeSH> unity_probe_sh(const UnityLighting &u, const Mat4 &placement) {
+  std::vector<ProbeSH> out;
+  for (const auto &p : u.probes)
+    if (p.seen.size() != 26) return out;
+  Vec3 dirs[26];
+  probe_fit_directions(dirs);
+  for (Vec3 &d : dirs) d = normalize(placement.dir(d));
+  ProbeShFit fit;
+  fit.init(dirs);
+  if (!fit.ok) return out;
+  out.reserve(u.probes.size());
+  for (const auto &p : u.probes) out.push_back(fit.fit(p.seen.data()));
+  return out;
+}
+
+namespace {
+/* One of Unity's probes, weighted, into a volume probe's cube (Unity's axes) and SH (Blendity's). */
+void add_probe(const UnityLighting &u, const std::vector<ProbeSH> &sh, uint32_t k, float w, ProbeCube &cube, ProbeSH &out) {
+  if (k >= u.probes.size()) return;
+  for (int j = 0; j < 6; j++) cube.bounce[(size_t)j] = cube.bounce[(size_t)j] + u.probes[k].axes[(size_t)j] * w;
+  if (k < sh.size()) out += sh[k] * w;
+}
+}  // namespace
+
 void unity_probe_volume(const UnityLighting &u, ProbeVolumeData &out, const Mat4 &placement) {
   out = ProbeVolumeData{};
   const Mat4 to_unity = placement.inverse();
@@ -622,19 +660,35 @@ void unity_probe_volume(const UnityLighting &u, ProbeVolumeData &out, const Mat4
   const size_t n = out.position.size();
   out.valid.assign(n, 1);
   out.baked.assign(n, ProbeCube{});
+  /* Round 442 (ADR 0116): each of Unity's probes as L2 SH in Blendity's axes (fitted along the 26 directions, turned by
+   * the placement), and the volume's probes interpolated over the tetrahedra of Unity's (its Light Probe Groups'), as
+   * Unity interpolates them; outside their hull, from the nearest four. */
+  const std::vector<ProbeSH> unity_sh = unity_probe_sh(u, placement);
+  if (!unity_sh.empty()) out.sh.assign(n, ProbeSH{});
+  Tetrahedra tets;
+  const bool tetra = tets.build(at);
+  int hint = -1;
+  size_t inside = 0;
   for (size_t i = 0; i < n; i++) {
-    tree.nearest(out.position[i], 4, near);
-    float total = 0.0f;
     ProbeCube cube;
-    for (const auto &[d2, k] : near) {
-      const float wgt = 1.0f / (d2 + 1e-6f);
-      const auto &a = u.probes[k].axes;
-      for (int j = 0; j < 6; j++) cube.bounce[(size_t)j] = cube.bounce[(size_t)j] + a[(size_t)j] * wgt;
-      total += wgt;
+    ProbeSH sh;
+    int t = -1;
+    float w4[4];
+    if (tetra && tets.locate(out.position[i], t, w4, hint)) {
+      hint = t;
+      inside++;
+      for (int c = 0; c < 4; c++) add_probe(u, unity_sh, (uint32_t)tets.tets[(size_t)t][(size_t)c], w4[c], cube, sh);
     }
-    for (Vec3 &c : cube.bounce) c = total > 0.0f ? c * (1.0f / total) : c;
+    else {
+      tree.nearest(out.position[i], 4, near);
+      float total = 0.0f;
+      for (const auto &[d2, k] : near) total += 1.0f / (d2 + 1e-6f);
+      for (const auto &[d2, k] : near) add_probe(u, unity_sh, k, total > 0.0f ? (1.0f / (d2 + 1e-6f)) / total : 0.0f, cube, sh);
+    }
     out.baked[i] = turned(cube, to_unity);
+    if (!out.sh.empty()) out.sh[i] = sh;
   }
+  out.unity_tetra_inside = inside;
   out.live = out.baked;
   out.live_ok.assign(n, 1);
 }
