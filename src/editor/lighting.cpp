@@ -490,7 +490,7 @@ void Editor::bake_job_run(BakeJob &j) {
         /* On a GPU about 8M rays a slice (their points go up at once: memory), on the CPU 1,024 probes. */
         const size_t slice = std::min<size_t>(n - next, gpu >= 0 ? std::max<size_t>(1, ((size_t)8 << 20) / (size_t)psamples) : 1024);
         std::string gerr;
-        probe_bake(j.probe_volume, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr);
+        probe_bake(j.probe_volume, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr, &j.env);
         if (!gerr.empty()) {
           Log::warn("Baking probes on the GPU stopped (%s): the CPU bakes the rest", gerr.c_str());
           gpu = -1;

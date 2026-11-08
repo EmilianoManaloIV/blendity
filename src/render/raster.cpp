@@ -2008,7 +2008,7 @@ void Renderer3D::shade_deferred() {
           const int64_t qy = y & ~(int64_t)1;
           if (!pf.quad_reuse || pq.stamp != probe_stamp || pq.y != qy || pq.ref != ref) {
             const Vec3 q = sp.position + sp.normal * pf.normal_bias + V * pf.view_bias;
-            pq.ok = pf.data->sample(q, sp.normal, env.irradiance(sp.normal), pf.use_live, pq.irr, pf.leak_reduction, &probe_hint);
+            pq.ok = pf.data->sample(q, sp.normal, env.irradiance(sp.normal), pf.use_live, pq.irr, pf.leak_reduction, &probe_hint, &env);
             pq.ref = ref, pq.stamp = probe_stamp, pq.y = qy;
           }
           if (pq.ok) {

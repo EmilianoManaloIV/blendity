@@ -2,6 +2,19 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 453): probes see the sky and pick lights
+
+**Asked:** Pass 19's round 453 - a probe's light held no sky of its own (the sky came at shading time by a flat share), and SideRail's 71 Baked point lights were 71 shadow rays a probe.
+
+**Changed (task 0429)**
+- **Probes see the sky:** the bake adds the world's own light in the direction of every ray that leaves the scene to the probe's SH (a Gradient's bright top and dark ground, an HDRI's window), saved as one trailing byte in the probe file (`sky_in_sh`; a file from before loads as before). Baked shading of such a probe takes no second sky share from the cubes - on the CPU, on the card (`pv[3].y`) and in the dots. Realtime GI's live probes are unchanged.
+- **Shared light picking:** round 441's picking of lights among many Baked point and spot lights moved to `render/light_pick.h`, used by the lightmapper's texels and by the probe bake (a probe takes light from every side).
+- **A changed sky still relights without a re-bake:** the probes keep the world's irradiance at six axes they were baked under (trailing floats after the flag; a file without them keeps its SH's sky as baked), and shading adds (the sky now - the baked sky) x the probe's sky share - on the CPU, the card (`pv[3].z`) and the dots. An unchanged sky adds nothing, so the sky is never counted twice.
+- **Learn:** "Where the error lives" gains "Probes see the sky", with two questions and a Try-it.
+- Not measured: the chain's bake-quality section has no probe row (its courtyard's lightmap error 0.060, as before), and SideRail has no light probes (its probe phase 0.0 s), so neither the guard nor the stations can show this round; the stations under round 452 were measured on the three rounds together.
+
+**Checked:** both suites - with Blender's libraries 17,422; dependency-free 16,555 (Windows) and 16,561 (Linux, WSL), 0 failed; the audits (one chain over rounds 458, 452 and 453 together).
+
 ## 2026-11-08 (round 452): Unity's Indirect Multiplier
 
 **Asked:** Pass 19's round 452 - round 451 found SideRail's error entirely in the lightmaps (the side tunnel's charts 2.3-2.6x Unity's light, the main tunnel's 1.15-1.25x); Unity's per-light Indirect Multiplier was imported and unused.

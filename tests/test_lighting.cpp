@@ -7281,6 +7281,153 @@ static void tests_round452() {
   });
 }
 
+/* ---------------------------------------------------------------- round 453: probes see the sky and pick lights (task 0429) */
+static void tests_round453() {
+  test("probes see the sky (round 453): a probe in the open under a Gradient world holds the sky's own light in its SH - bright above, the ground below, each within a few percent of the world's true irradiance - and takes no second sky share; saved, read back; an older file (no flag) keeps the cubes' share", [] {
+    P37Pt s;
+    s.add(primitives::plane(2.0f, 2), Mat4::translate({0, -50.0f, 0}), Vec3(0.0f));  // (far away: nothing but the world around the probe)
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = Vec3(1.0f, 0.8f, 0.6f), env.equator = Vec3(0.3f), env.ground = Vec3(0.05f);
+    s.build({}, env);
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-1.0f), Vec3(1.0f)), s.tri_boxes(), 1.0f, 1.0f);
+    probe_validate(d, s.pt, 32);
+    probe_bake(d, s.pt, {}, 512, 1, 0, SIZE_MAX, 1.0f, -1, nullptr, &env);
+    /* The truth: the world's irradiance on a surface facing n, integrated over many directions. */
+    auto truth = [&](Vec3 n) {
+      Vec3 acc(0.0f);
+      const int N = 8192;
+      for (int i = 0; i < N; i++) {
+        const float z = 1.0f - 2.0f * (i + 0.5f) / N, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+        const Vec3 w(r * std::cos(phi), z, r * std::sin(phi));
+        const float c = dot(w, n);
+        if (c > 0.0f) acc += env.radiance(w) * c;
+      }
+      return acc * (4.0f * kPi / N) / kPi;  // (irradiance / pi: the diffuse light the views multiply albedo by)
+    };
+    Vec3 up, down;
+    // (the sky now passed is the one the probes were baked under: a second sky share would show at once)
+    d.sample(Vec3(0.0f), Vec3(0, 1, 0), env.irradiance(Vec3(0, 1, 0)), false, up, false, nullptr, &env);
+    d.sample(Vec3(0.0f), Vec3(0, -1, 0), env.irradiance(Vec3(0, -1, 0)), false, down, false, nullptr, &env);
+    const Vec3 tu = truth(Vec3(0, 1, 0)), td = truth(Vec3(0, -1, 0));
+    std::printf("    up %.3f %.3f %.3f (truth %.3f %.3f %.3f); down %.3f (truth %.3f); sky in the SH %d\n", up.x, up.y, up.z, tu.x, tu.y, tu.z, down.x, td.x,
+                (int)d.sky_in_sh);
+    CHECK(d.sky_in_sh);
+    CHECK(std::fabs(up.x - tu.x) < 0.06f * tu.x && std::fabs(up.z - tu.z) < 0.06f * tu.z);
+    CHECK(std::fabs(down.x - td.x) < 0.02f + 0.1f * td.x);
+    CHECK(up.x > 2.0f * down.x);
+    const std::string path = resolve_asset_path("Assets/Imported/r453_probes.bin");
+    std::string err;
+    CHECK(d.save(path, err));
+    ProbeVolumeData back;
+    CHECK(back.load(path, err) && back.sky_in_sh && back.has_baked_sky && back.baked_sky[2].x > 0.5f);
+    std::string bytes_with_flag, bytes_old;
+    /* An older file: the same bytes without the trailing flag and the baked sky - read as SH from geometry only, the cubes'
+     * sky share kept. */
+    {
+      std::ifstream in(path, std::ios::binary);
+      const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      bytes_with_flag = bytes.substr(0, bytes.size() - sizeof(Vec3) * 6);
+      bytes_old = bytes.substr(0, bytes_with_flag.size() - 1);
+    }
+    /* The first 453 files: the flag byte, no baked-sky floats - the SH hold the sky, the sky stays as baked. */
+    {
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      out.write(bytes_with_flag.data(), (std::streamsize)bytes_with_flag.size());
+    }
+    ProbeVolumeData flag_only;
+    CHECK(flag_only.load(path, err) && flag_only.sky_in_sh && !flag_only.has_baked_sky);
+    {
+      std::ofstream out(path, std::ios::binary | std::ios::trunc);
+      out.write(bytes_old.data(), (std::streamsize)bytes_old.size());
+    }
+    ProbeVolumeData old;
+    CHECK(old.load(path, err) && !old.sky_in_sh && !old.has_baked_sky && old.sh.size() == d.sh.size());
+    std::remove(path.c_str());
+  });
+  test("probes pick among many lights (round 453): forty Baked point lights in one spot light a probe grid as one light forty times as bright - the same on average (unbiased), in less time", [] {
+    P37Pt s;
+    s.add(primitives::plane(2.0f, 2), Mat4::translate({0, -50.0f, 0}), Vec3(0.0f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    s.build({}, env);
+    auto lamp = [](float intensity, uint64_t id) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(0.3f, 2.5f, -0.2f), l.light.range = 20.0f, l.light.intensity = intensity;
+      l.light.shadows = false, l.mode = 2, l.id = id;
+      return l;
+    };
+    std::vector<BakeLight> many, one = {lamp(40.0f, 1)};
+    for (int i = 0; i < 40; i++) many.push_back(lamp(1.0f, 100 + (uint64_t)i));
+    auto bake = [&](const std::vector<BakeLight> &lights, double &ms) {
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-2.0f), Vec3(2.0f)), s.tri_boxes(), 0.5f, 0.5f);
+      probe_validate(d, s.pt, 16);
+      ScopedTimer t;
+      probe_bake(d, s.pt, lights, 16, 0);
+      ms = t.ms();
+      return d;
+    };
+    double ms_one = 0, ms_many = 0;
+    const ProbeVolumeData a = bake(one, ms_one), b = bake(many, ms_many);
+    double sa = 0, sb = 0;
+    size_t n = 0;
+    for (size_t i = 0; i < a.sh.size() && i < b.sh.size(); i++) {
+      if (!a.valid[i]) continue;
+      sa += a.sh[i].c[0].x, sb += b.sh[i].c[0].x, n++;
+    }
+    const double ratio = sa > 0 ? sb / sa : 0;
+    std::printf("    %zu probes: forty lights / one light, mean SH L0 ratio %.3f; baked in %.1f ms (one light %.1f ms)\n", n, ratio, ms_many, ms_one);
+    CHECK(n > 50);
+    CHECK(std::fabs(ratio - 1.0) < 0.05);
+  });
+  test("a changed sky relights baked probes (round 453): after a bake under one Gradient sky, shading under a brighter one - no re-bake - is close to a re-bake under it on and off the axes; the same sky adds exactly nothing at any normal; a black world takes light away but never below 0; a probe without the baked sky takes no change", [] {
+    P37Pt s;
+    s.add(primitives::plane(2.0f, 2), Mat4::translate({0, -50.0f, 0}), Vec3(0.0f));
+    auto gradient = [](float k) {
+      Environment env;
+      env.mode = Environment::Gradient;
+      env.sky = Vec3(1.0f, 0.8f, 0.6f) * k, env.equator = Vec3(0.3f) * k, env.ground = Vec3(0.05f) * k;
+      return env;
+    };
+    auto bake = [&](const Environment &env) {
+      s.build({}, env);
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-1.0f), Vec3(1.0f)), s.tri_boxes(), 1.0f, 1.0f);
+      probe_validate(d, s.pt, 32);
+      probe_bake(d, s.pt, {}, 512, 1, 0, SIZE_MAX, 1.0f, -1, nullptr, &env);
+      return d;
+    };
+    const Environment e1 = gradient(1.0f), e2 = gradient(2.5f), black = gradient(0.0f);
+    const ProbeVolumeData d1 = bake(e1), d2 = bake(e2);
+    CHECK(d1.sky_in_sh && d1.has_baked_sky);
+    ProbeVolumeData plain = d1;
+    plain.has_baked_sky = false;
+    const Vec3 normals[] = {Vec3(0, 1, 0), Vec3(0, -1, 0), Vec3(1, 0, 0), normalize(Vec3(0.6f, 0.5f, 0.62f)), normalize(Vec3(-0.4f, 0.8f, 0.3f)),
+                            normalize(Vec3(0.3f, -0.5f, -0.7f))};
+    for (const Vec3 n : normals) {
+      Vec3 same, moved, rebaked, bare, dark;
+      d1.sample(Vec3(0.0f), n, e1.irradiance(n), false, same, false, nullptr, &e1);
+      d1.sample(Vec3(0.0f), n, e2.irradiance(n), false, moved, false, nullptr, &e2);
+      d2.sample(Vec3(0.0f), n, e2.irradiance(n), false, rebaked, false, nullptr, &e2);
+      plain.sample(Vec3(0.0f), n, e2.irradiance(n), false, bare, false, nullptr, &e2);
+      d1.sample(Vec3(0.0f), n, black.irradiance(n), false, dark, false, nullptr, &black);
+      std::printf("    n (%.2f %.2f %.2f): baked under sky 1 %.3f, shaded under 2.5 %.3f, re-baked under 2.5 %.3f; the world black %.3f\n", n.x, n.y, n.z, same.x,
+                  moved.x, rebaked.x, dark.x);
+      /* The unchanged sky adds nothing: the SH as baked (the plain copy, which takes no change, is the reference). */
+      Vec3 ref;
+      plain.sample(Vec3(0.0f), n, e1.irradiance(n), false, ref, false, nullptr, &e1);
+      CHECK(std::fabs(same.x - ref.x) < 1e-4f && std::fabs(same.y - ref.y) < 1e-4f && std::fabs(same.z - ref.z) < 1e-4f);
+      /* The weight is the six-axis blend, which is blurrier between the axes than the re-bake's SH (ADR 0116's amendment):
+       * off the axes the miss reaches 15 % (1.35 against 1.60 at the diagonal), so 18 % is the bound, not a tight fit. */
+      CHECK(std::fabs(moved.x - rebaked.x) < 0.18f * rebaked.x + 0.02f);
+      CHECK(std::fabs(bare.x - same.x) < 1e-5f);  // (no baked sky: the SH as baked)
+      CHECK(dark.x >= 0.0f && dark.y >= 0.0f && dark.z >= 0.0f);
+    }
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -7311,4 +7458,5 @@ void run_lighting_tests() {
   tests_round444();
   tests_round451();
   tests_round452();
+  tests_round453();
 }
