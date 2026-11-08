@@ -3,6 +3,9 @@
 #include "test_common.h"
 #include "../src/render/reflection_probe.h"
 #include "../src/scene/unity_material.h"
+#include "../src/render/probe_sh.h"
+#include "../src/render/tetrahedra.h"
+#include "../src/render/unity_lightmaps.h"
 #include <set>
 #include <tuple>
 
@@ -6811,6 +6814,173 @@ static void tests_round441() {
     CHECK(lit > 1000 && rel < 0.08);
   });
 }
+/* ---------------------------------------------------------------- round 442: L2 SH probes, Light Probe Groups (task 0418) */
+static void tests_round442() {
+  test("L2 SH probes (round 442): a lamp's light as nine coefficients - 1.06 toward it, a sixteenth behind (L2's ringing, as Unity's); light from all around gives 1 everywhere; the 26-direction fit gives back the coefficients exactly; a sun-lit probe volume's SH follows N.L far closer than the ambient cube between its axes; saved and read back", [] {
+    ProbeSH lamp;
+    lamp.add_direct(Vec3(0, 1, 0), Vec3(1.0f));
+    std::printf("    a lamp from above: toward it %.3f, sideways %.3f, behind %.3f\n", lamp.eval(Vec3(0, 1, 0)).x, lamp.eval(Vec3(1, 0, 0)).x, lamp.eval(Vec3(0, -1, 0)).x);
+    /* (behind it L2 leaves 1/16: the clamped cosine's bands 1/4 - 1/2 + 5/16, as Unity's own probes) */
+    CHECK(std::fabs(lamp.eval(Vec3(0, 1, 0)).x - 1.0625f) < 1e-3f && std::fabs(lamp.eval(Vec3(0, -1, 0)).x - 0.0625f) < 1e-3f && lamp.eval(Vec3(1, 0, 0)).x < 0.15f);
+    ProbeSH all;
+    const int N = 4096;
+    for (int i = 0; i < N; i++) {
+      const float z = 1.0f - 2.0f * (i + 0.5f) / N, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+      all.add_radiance(Vec3(r * std::cos(phi), z, r * std::sin(phi)), Vec3(1.0f), 4.0f * kPi / N);
+    }
+    std::printf("    light from all around: %.4f up, %.4f down\n", all.eval(Vec3(0, 1, 0)).x, all.eval(Vec3(0, -1, 0)).x);
+    CHECK(std::fabs(all.eval(Vec3(0, 1, 0)).x - 1.0f) < 0.01f && std::fabs(all.eval(Vec3(0, -1, 0)).x - 1.0f) < 0.01f);
+    /* The fit: values along the 26 directions back to the coefficients (positive enough that nothing is clamped). */
+    ProbeSH truth;
+    for (int k = 0; k < 9; k++) truth.c[(size_t)k] = k == 0 ? Vec3(10.0f) : Vec3(0.1f * (k % 4) - 0.15f, 0.05f * k, -0.02f * k);  // (a large constant: nothing clamped)
+    Vec3 dirs[26], seen[26];
+    probe_fit_directions(dirs);
+    for (int j = 0; j < 26; j++) seen[j] = truth.eval(dirs[j]);
+    ProbeShFit fit;
+    fit.init(dirs);
+    const ProbeSH got = fit.fit(seen);
+    float worst = 0.0f;
+    for (int k = 0; k < 9; k++) worst = std::max(worst, length(got.c[(size_t)k] - truth.c[(size_t)k]));
+    std::printf("    the 26-direction fit: worst coefficient error %.2e\n", worst);
+    CHECK(fit.ok && worst < 1e-4f);
+    /* A probe volume in the open under a slanted sun: SH against the cube, against the true col x max(0, N.L). */
+    P37Pt s;
+    s.add(primitives::plane(40.0f, 2), Mat4::translate({0, -20.0f, 0}), Vec3(0.0f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    s.build({}, env);
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, -1.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 3;
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-1.0f), Vec3(1.0f)), s.tri_boxes(), 1.0f, 1.0f);
+    probe_validate(d, s.pt, 32);
+    probe_bake(d, s.pt, {sun}, 32, 1);
+    CHECK(d.sh.size() == d.position.size() && !d.sh.empty());
+    double e_sh = 0.0, e_cube = 0.0;
+    const Vec3 L = normalize(Vec3(1, 1, 1));
+    for (int i = 0; i < 200; i++) {
+      const float z = 1.0f - 2.0f * (i + 0.5f) / 200, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+      const Vec3 n(r * std::cos(phi), z, r * std::sin(phi));
+      const float truth_v = std::max(0.0f, dot(n, L));
+      Vec3 with_sh, with_cube;
+      d.sample(Vec3(0.0f), n, Vec3(0.0f), false, with_sh, false);
+      e_sh += std::fabs(with_sh.x - truth_v);
+      ProbeVolumeData cube_only = d;
+      cube_only.sh.clear();
+      cube_only.sample(Vec3(0.0f), n, Vec3(0.0f), false, with_cube, false);
+      e_cube += std::fabs(with_cube.x - truth_v);
+    }
+    std::printf("    a sun-lit probe, mean error over 200 normals: SH %.4f, ambient cube %.4f\n", e_sh / 200, e_cube / 200);
+    CHECK(e_sh < 0.6 * e_cube);
+    /* Saved and read back. */
+    const std::string path = resolve_asset_path("Assets/Imported/r442_probes.bin");
+    std::string err;
+    CHECK(d.save(path, err));
+    ProbeVolumeData back;
+    CHECK(back.load(path, err) && back.sh.size() == d.sh.size() && length(back.sh[5].c[0] - d.sh[5].c[0]) == 0.0f);
+    std::remove(path.c_str());
+  });
+  test("Light Probe Groups (round 442): Unity's probes' points tetrahedralised - a linear light reproduced exactly inside, nothing found outside; Unity's probes read along 26 directions (version 3) and fitted; a volume from them interpolated over their tetrahedra", [] {
+    std::vector<Vec3> pts;
+    uint32_t r = 12345u;
+    auto rnd = [&] {
+      r ^= r << 13, r ^= r >> 17, r ^= r << 5;
+      return (float)(r >> 8) / 16777216.0f;
+    };
+    for (int x = 0; x < 5; x++)  // (a Light Probe Group's grid: many points on one sphere - the degenerate case)
+      for (int y = 0; y < 4; y++)
+        for (int z = 0; z < 5; z++) pts.push_back(Vec3((float)x, (float)y, (float)z));
+    for (int i = 0; i < 60; i++) pts.push_back(Vec3(rnd() * 4.0f, rnd() * 3.0f, rnd() * 4.0f));
+    Tetrahedra T;
+    CHECK(T.build(pts));
+    auto f = [](Vec3 p) { return 2.0f * p.x - 0.5f * p.y + 0.25f * p.z + 1.0f; };
+    float worst = 0.0f;
+    int found = 0, hint = -1;
+    for (int i = 0; i < 400; i++) {
+      const Vec3 q(0.1f + rnd() * 3.8f, 0.1f + rnd() * 2.8f, 0.1f + rnd() * 3.8f);
+      int t;
+      float w[4];
+      if (!T.locate(q, t, w, hint)) continue;
+      hint = t, found++;
+      float v = 0.0f;
+      for (int c = 0; c < 4; c++) v += w[c] * f(T.points[(size_t)T.tets[(size_t)t][(size_t)c]]);
+      worst = std::max(worst, std::fabs(v - f(q)));
+    }
+    int t_out;
+    float w_out[4];
+    std::printf("    %zu points, %zu tetrahedra: %d of 400 inside found, a linear light's worst error %.2e\n", T.points.size(), T.tets.size(), found, worst);
+    CHECK(found == 400 && worst < 1e-3f && !T.locate(Vec3(20, 20, 20), t_out, w_out));
+    /* Review 442: a group at one height has no volume - refused (the nearest four instead), not a mesh of slivers. */
+    std::vector<Vec3> flat;
+    for (int x = 0; x < 10; x++)
+      for (int z = 0; z < 10; z++) flat.push_back(Vec3((float)x, 1.5f, (float)z));
+    Tetrahedra F;
+    CHECK(!F.build(flat));
+    /* The grid turned (a placement's rotation): still exact inside. */
+    const Quat turn = Quat::axis_angle(normalize(Vec3(0.3f, 1.0f, 0.2f)), 0.7f);
+    std::vector<Vec3> turned_pts;
+    for (Vec3 q : pts) turned_pts.push_back(turn.rotate(q));
+    Tetrahedra TT;
+    CHECK(TT.build(turned_pts));
+    float worst_t = 0.0f;
+    int found_t = 0;
+    for (int i = 0; i < 200; i++) {
+      const Vec3 q = turn.rotate(Vec3(0.2f + rnd() * 3.6f, 0.2f + rnd() * 2.6f, 0.2f + rnd() * 3.6f));
+      int t;
+      float w[4];
+      if (!TT.locate(q, t, w)) continue;
+      found_t++;
+      float v = 0.0f;
+      for (int c = 0; c < 4; c++) v += w[c] * f(TT.points[(size_t)TT.tets[(size_t)t][(size_t)c]]);
+      worst_t = std::max(worst_t, std::fabs(v - f(q)));
+    }
+    std::printf("    a flat group refused; the grid turned: %d of 200 found, worst %.2e\n", found_t, worst_t);
+    CHECK(found_t == 200 && worst_t < 1e-3f);
+    /* The build at its cap, timed (review 442: O(n^2) on the main thread when Unity's lighting is applied). */
+    std::vector<Vec3> many;
+    for (size_t i = 0; i < Tetrahedra::kMaxPoints; i++) many.push_back(Vec3(rnd() * 40.0f, rnd() * 10.0f, rnd() * 40.0f));
+    ScopedTimer bt;
+    Tetrahedra M;
+    const bool built_many = M.build(many);
+    const double build_ms = bt.ms();
+    ScopedTimer lt;
+    int hint_m = -1, found_m = 0;
+    for (int i = 0; i < 20000; i++) {
+      int t;
+      float w[4];
+      if (M.locate(Vec3(1.0f + rnd() * 38.0f, 0.5f + rnd() * 9.0f, 1.0f + rnd() * 38.0f), t, w, hint_m)) hint_m = t, found_m++;
+    }
+    std::printf("    %zu points: built in %.0f ms (%zu tetrahedra); 20,000 walks in %.1f ms, %d inside\n", many.size(), build_ms, M.tets.size(), lt.ms(), found_m);
+    CHECK(built_many && found_m > 15000);
+    /* Unity's probes on that grid, each lit from above by a different amount (version 3: 26 directions). */
+    UnityLighting u;
+    Vec3 dirs[26];
+    probe_fit_directions(dirs);
+    for (int i = 0; i < 100; i++) {
+      UnityLighting::Probe p;
+      p.position = pts[(size_t)i];
+      ProbeSH sh;
+      sh.add_direct(Vec3(0, 1, 0), Vec3(0.5f + 0.1f * p.position.x));
+      sh.c[0] += Vec3(0.2f);  // (an ambient floor: nothing clamped)
+      for (int j = 0; j < 6; j++) p.axes[(size_t)j] = sh.eval(dirs[j]);
+      for (int j = 0; j < 26; j++) p.seen.push_back(sh.eval(dirs[j]));
+      u.probes.push_back(p);
+    }
+    std::string why;
+    UnityLighting back;
+    CHECK(read_unity_lighting(write_unity_lighting(u), back, why) && back.probes.size() == 100 && back.probes[7].seen.size() == 26);
+    ProbeVolumeData vol;
+    unity_probe_volume(back, vol);
+    CHECK(vol.sh.size() == vol.position.size() && vol.unity_tetra_inside > 0);
+    Vec3 up, mid;
+    vol.sample(Vec3(2.0f, 1.5f, 2.0f), Vec3(0, 1, 0), Vec3(0.0f), false, up, false);
+    const float expect = (0.5f + 0.1f * 2.0f) * 1.0625f + 0.2f * 0.282095f;
+    std::printf("    a volume from Unity's probes: %zu of %zu inside their tetrahedra; light from above at x = 2: %.3f (Unity's own %.3f)\n", vol.unity_tetra_inside,
+                vol.position.size(), up.x, expect);
+    CHECK(std::fabs(up.x - expect) < 0.03f);
+    (void)mid;
+  });
+}
 
 void run_lighting_tests() {
   round35_tests();
@@ -6838,4 +7008,5 @@ void run_lighting_tests() {
   tests_round439();
   tests_round440();
   tests_round441();
+  tests_round442();
 }

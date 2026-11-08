@@ -145,7 +145,7 @@ public static class BlendityLightmaps {
             EditorSceneManager.OpenScene(Arg("-blendityScene"), OpenSceneMode.Single);
             var o = new Out();
             o.w.Write(Encoding.ASCII.GetBytes("BLULIGHT"));
-            o.w.Write(2);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes)
+            o.w.Write(3);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes; round 442: 3 - the probes along 26 directions last)
             o.w.Write(-1);  // (the lightmap encoding: not public in 2022.3 - the EXR itself is linear)
             o.w.Write((int)LightmapSettings.lightmapsMode);
             /* Which bake: the LightingData.asset's path and its bytes' FNV-1a 32 (Blendity refuses the file once Unity bakes again). */
@@ -259,6 +259,21 @@ public static class BlendityLightmaps {
                     Color[] px = cube.GetPixels(f, 0);
                     foreach (Color c in px) { o.w.Write(Mathf.FloatToHalf(c.r)); o.w.Write(Mathf.FloatToHalf(c.g)); o.w.Write(Mathf.FloatToHalf(c.b)); }
                 }
+            }
+            /* Round 442 (version 3): each probe along 26 directions - the cube's faces, edges and corners, in Blendity's
+             * order (probe_fit_directions) - enough for Blendity to fit Unity's nine coefficients per colour exactly. */
+            var fit = new List<Vector3>(axes);
+            float[] sg = { 1f, -1f };
+            for (int e = 0; e < 3; e++)
+                foreach (float a in sg) foreach (float b in sg)
+                    fit.Add((e == 0 ? new Vector3(a, b, 0) : e == 1 ? new Vector3(a, 0, b) : new Vector3(0, a, b)).normalized);
+            foreach (float a in sg) foreach (float b in sg) foreach (float d in sg) fit.Add(new Vector3(a, b, d).normalized);
+            Vector3[] fitDirs = fit.ToArray();
+            var seen26 = new Color[26];
+            o.w.Write(n);
+            for (int i = 0; i < n; i++) {
+                sh[i].Evaluate(fitDirs, seen26);
+                foreach (Color c in seen26) { o.w.Write(c.r); o.w.Write(c.g); o.w.Write(c.b); }
             }
             File.WriteAllBytes(outPath, o.Done());
             code = 0;

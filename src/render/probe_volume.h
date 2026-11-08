@@ -10,6 +10,7 @@
 // tracer; with Realtime GI on, voxel GI (task 0013) keeps a live copy current.
 #pragma once
 
+#include "probe_sh.h"
 #include "shading.h"
 #include "voxel_gi.h"
 
@@ -53,6 +54,11 @@ struct ProbeVolumeData {
   std::vector<Vec3> position;      // after the virtual offset
   std::vector<uint8_t> valid;      // 0: inside geometry, filled from its neighbours
   std::vector<ProbeCube> baked, live;
+  /* Round 442 (ADR 0116): the baked light from geometry and the lamps as L2 SH (irradiance / pi, convolved), one per
+   * probe; when present it replaces the cubes' bounce for baked shading (the sky shares stay the cubes'). Empty: the
+   * cubes alone (an old file, a live update). */
+  std::vector<ProbeSH> sh;
+  size_t unity_tetra_inside = 0;  // (round 442: of a volume made from Unity's probes, those inside their tetrahedra)
   std::vector<uint8_t> live_ok;
   uint64_t scene_key = 0;          // the bake's (as the lightmaps')
   bool empty() const { return bricks.empty(); }

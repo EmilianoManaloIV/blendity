@@ -6081,7 +6081,7 @@ class Editor {
   bool read_linear_light(RenderTarget &rt, int slot, bool want, const LightingEnv &env);
   std::vector<float> gpu_hdr_scratch_;  // (task 0197: the card's linear light, read back, kept between frames)
   void prune_gpu_lightmaps();
-  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
+  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed, 84 MB with round 442's SH - a buffer every card binds whole)
   static constexpr int kCardMaxTexture = 2048;      // round 414 (ADR 0108): a material's texture goes up from its first level within this (Unity's default import size)
   void gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *lv);  // (round 443: with the Light Volumes)
   std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;

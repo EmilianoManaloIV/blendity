@@ -1812,7 +1812,8 @@ const char *kProbeFns = R"(
 /* Task 0197: the probe volume (ProbeVolumeData::find_brick and sample, probe_volume.cpp), packed by the editor
  * (probe_pack): pv[0] origin, top cell; pv[1] top cells (x, y, z), nodes' start; pv[2] bricks', probes', roots' starts.
  * A node: (min, first child), (max, brick); a brick: (min, spacing), (first probe); a probe: (position, valid + 2 x
- * live ok), its baked cube's six axes (bounce, sky share), its live cube's; the roots four to a vec4. */
+ * live ok), its baked cube's six axes (bounce, sky share), its live cube's; the roots four to a vec4. Round 442: pv[3].x
+ * the start of each probe's L2 SH (7 rows: 27 floats, coefficient k's rgb at 3k), 0 with none. */
 int probe_brick(vec3 p) {
   if (pv.length() < 3) return -1;
   vec4 h0 = pv[0];
@@ -1839,9 +1840,19 @@ int probe_brick(vec3 p) {
   return -1;
 }
 /* A probe's cube at the axes facing n, weighted by n squared: (bounce, sky share). */
-vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2) {
+vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2, vec3 n) {
   int base = floatBitsToInt(pv[2].y) + i * 13 + (live ? 7 : 1);
-  return pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
+  vec4 cube = pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
+  int sh_at = floatBitsToInt(pv[3].x);
+  if (live || sh_at <= 0) return cube;
+  /* Round 442: the baked light from geometry as L2 SH (ProbeSH::eval), the sky share kept from the cube. */
+  float y[9] = float[9](0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x, 1.092548 * n.x * n.y, 1.092548 * n.y * n.z,
+                        0.315392 * (3.0 * n.z * n.z - 1.0), 1.092548 * n.x * n.z, 0.546274 * (n.x * n.x - n.y * n.y));
+  int r0 = sh_at + i * 7;  // (27 floats in 7 rows: coefficient k's rgb at floats 3k..3k+2)
+  vec4 q0 = pv[r0], q1 = pv[r0 + 1], q2 = pv[r0 + 2], q3 = pv[r0 + 3], q4 = pv[r0 + 4], q5 = pv[r0 + 5], q6 = pv[r0 + 6];
+  vec3 b = q0.xyz * y[0] + vec3(q0.w, q1.xy) * y[1] + vec3(q1.zw, q2.x) * y[2] + q2.yzw * y[3] + q3.xyz * y[4] + vec3(q3.w, q4.xy) * y[5] +
+           vec3(q4.zw, q5.x) * y[6] + q5.yzw * y[7] + q6.xyz * y[8];
+  return vec4(max(b, vec3(0.0)), cube.w);
 }
 bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out vec3 o) {
   o = vec3(0.0);
@@ -1881,7 +1892,7 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
         w *= max(1e-4, f * f * f);
       }
     }
-    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2);
+    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
     acc += cb.rgb * w;
     sky += cb.w * w;
     wsum += w;
@@ -1892,7 +1903,7 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
     sky = 0.0;
     for (int k = 0; k < nvalid; k++) {
       int fl = floatBitsToInt(pv[floatBitsToInt(pv[2].y) + valid_i[k] * 13].w);
-      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2);
+      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
       acc += cb.rgb;
       sky += cb.w;
     }

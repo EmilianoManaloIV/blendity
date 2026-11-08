@@ -199,6 +199,12 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
   const int ax = n.x >= 0 ? 0 : 1, ay = n.y >= 0 ? 2 : 3, az = n.z >= 0 ? 4 : 5;
   const float nx2 = n.x * n.x, ny2 = n.y * n.y, nz2 = n.z * n.z;
   const ProbeCube *cubes = use_live ? live.data() : baked.data();
+  /* A corner's light from geometry along n: its SH where the bake kept them (round 442), else its cube's axes. */
+  auto bounce_of = [&](uint32_t i, const ProbeCube &cube) {
+    const bool baked_here = !use_live || !live_ok[i];
+    if (baked_here && i < sh.size()) return sh[i].eval(n);
+    return cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2;
+  };
   Vec3 acc(0.0f);
   float sky_acc = 0.0f, wsum = 0.0f;
   int nvalid = 0;
@@ -219,7 +225,7 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
       }
     }
     const ProbeCube &cube = use_live && !live_ok[i] ? baked[i] : cubes[i];
-    acc += (cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2) * w;
+    acc += bounce_of(i, cube) * w;
     sky_acc += (cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2) * w;
     wsum += w;
   }
@@ -232,7 +238,7 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
     for (int k = 0; k < nvalid; k++) {
       const uint32_t i = corner[k];
       const ProbeCube &cube = use_live && !live_ok[i] ? baked[i] : cubes[i];
-      acc += cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2;
+      acc += bounce_of(i, cube);
       sky_acc += cube.sky[ax] * nx2 + cube.sky[ay] * ny2 + cube.sky[az] * nz2;
     }
     wsum = (float)nvalid;
@@ -323,10 +329,13 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
     }
   }
   const bool on_gpu = !g_out.empty();
+  if (d.sh.size() != n) d.sh.assign(n, ProbeSH{});  // (round 442)
   JobSystem::global().parallel_for((int64_t)count, 16, [&](int64_t a, int64_t b) {
     for (int64_t i = (int64_t)start + a; i < (int64_t)start + b; i++) {
       ProbeCube &c = d.baked[(size_t)i];
+      ProbeSH &sh = d.sh[(size_t)i];
       c = ProbeCube{};
+      sh = ProbeSH{};
       if (!d.valid[(size_t)i]) continue;
       const Vec3 p = d.position[(size_t)i];
       uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u);
@@ -358,6 +367,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
           if (hit) c.bounce[ax] += L * w;
           else c.sky[ax] += w;
         }
+        if (hit) sh.add_radiance(dir, L * ii, 4.0f * kPi / (float)samples);  // (round 442: the even spread's share of the sphere)
       }
       for (int ax = 0; ax < 6; ax++)
         if (wsum[ax] > 0.0f) c.bounce[ax] = c.bounce[ax] * (ii / wsum[ax]), c.sky[ax] /= wsum[ax];
@@ -384,11 +394,32 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
         /* An area light by its whole surface (task 0030), as the rasterizer and the lightmaps take it. */
         for (int ax = 0; ax < 6; ax++)
           c.bounce[ax] += col * (l.type == RenderLight::Area ? area_light_irradiance(l, p, kAxes[ax]) : std::max(0.0f, dot(kAxes[ax], Ld)));
+        /* (round 442: a lamp as light from its direction; an area light by what it gives a surface facing it) */
+        sh.add_direct(Ld, l.type == RenderLight::Area ? col * area_light_irradiance(l, p, Ld) : col);
       }
     }
   });
   if (start + count == n) probe_dilate(d);
 }
+
+namespace {
+/* Round 442: an invalid probe's SH, the mean of its valid neighbours' in the brick (as its cube). */
+ProbeSH dilated_sh(const ProbeVolumeData &d, const ProbeBrick &br, int x, int y, int z) {
+  ProbeSH acc;
+  int cnt = 0;
+  for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+      for (int dx = -1; dx <= 1; dx++) {
+        const int xx = x + dx, yy = y + dy, zz = z + dz;
+        if (xx < 0 || yy < 0 || zz < 0 || xx > 3 || yy > 3 || zz > 3) continue;
+        const uint32_t j = br.first + xx + 4 * yy + 16 * zz;
+        if (!d.valid[j]) continue;
+        acc += d.sh[j];
+        cnt++;
+      }
+  return cnt ? acc * (1.0f / (float)cnt) : acc;
+}
+}  // namespace
 
 void probe_dilate(ProbeVolumeData &d) {
   /* Invalid probes take their valid neighbours' light (dilation) so samples near walls don't go dark. */
@@ -414,6 +445,7 @@ void probe_dilate(ProbeVolumeData &d) {
           if (cnt)
             for (int ax = 0; ax < 6; ax++) acc.bounce[ax] = acc.bounce[ax] / (float)cnt, acc.sky[ax] /= (float)cnt;
           d.baked[i] = acc;
+          if (d.sh.size() == d.baked.size()) d.sh[i] = dilated_sh(d, br, x, y, z);  // (round 442)
         }
 }
 
@@ -495,7 +527,7 @@ bool ProbeVolumeData::save(const std::string &path, std::string &error) const {
   if (!f) return error = "could not write " + path, false;
   auto put = [&](const void *p, size_t sz) { f.write((const char *)p, (std::streamsize)sz); };
   auto put64 = [&](uint64_t v) { put(&v, 8); };
-  put("BLPROBE1", 8);
+  put("BLPROBE2", 8);  // (round 442: the SH after the cubes; BLPROBE1 files still read)
   put64(scene_key);
   put(&box, sizeof(AABB));
   put(&origin, sizeof(Vec3));
@@ -511,6 +543,8 @@ bool ProbeVolumeData::save(const std::string &path, std::string &error) const {
   put(position.data(), position.size() * sizeof(Vec3));
   put(valid.data(), valid.size());
   put(baked.data(), baked.size() * sizeof(ProbeCube));
+  put64(sh.size() == baked.size() ? sh.size() : 0);
+  if (sh.size() == baked.size()) put(sh.data(), sh.size() * sizeof(ProbeSH));
   return (bool)f;
 }
 
@@ -531,7 +565,8 @@ bool ProbeVolumeData::load(const std::string &path, std::string &error) {
   };
   char magic[8];
   get(magic, 8);
-  if (!ok || std::memcmp(magic, "BLPROBE1", 8) != 0) return error = path + " is not probe data", false;
+  const bool v2 = ok && std::memcmp(magic, "BLPROBE2", 8) == 0;
+  if (!ok || (!v2 && std::memcmp(magic, "BLPROBE1", 8) != 0)) return error = path + " is not probe data", false;
   scene_key = get64();
   get(&box, sizeof(AABB));
   get(&origin, sizeof(Vec3));
@@ -551,6 +586,11 @@ bool ProbeVolumeData::load(const std::string &path, std::string &error) {
   vec(position, np);
   vec(valid, np);
   vec(baked, np);
+  if (v2) {
+    const uint64_t ns = get64();
+    if (ns != 0 && ns != np) ok = false;
+    vec(sh, ns);
+  }
   if (!ok || (uint64_t)tn[0] * tn[1] * tn[2] != roots.size() || bricks.size() * 64 != position.size()) {
     *this = ProbeVolumeData{};
     return error = "damaged " + path, false;

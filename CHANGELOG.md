@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 442): L2 SH probes and Light Probe Groups
+
+**Asked:** Pass 18's round 442 - probes as L2 spherical harmonics, and Unity's Light Probe Groups interpolated over
+their tetrahedra.
+
+**Changed (task 0418, ADR 0116)**
+- **Probes keep L2 SH** (nine coefficients a colour) beside the ambient cube, baked from the same rays and lamps; baked
+  probe light shades from them on the CPU and the card. A sun-lit probe's light against N.L: mean error 0.132 -> 0.023.
+- **Unity's probes** come along 26 directions (the lighting file's version 3), fitted to L2, and are interpolated over
+  the tetrahedra of their positions (Light Probe Groups), as Unity does - an older lighting file's probes too (their
+  cubes), so a Unity scene's probe light can change a little where it was taken from the nearest four.
+- **Learn:** "Light probes: nine numbers a colour, and tetrahedra".
+
+**Checked:** one chain with round 444 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed (round 444's card test first read its view's device after a CPU view - fixed); the audits.
+
 ## 2026-11-07 (round 445): the soak's memory
 
 **Asked:** Pass 18's round 445 - the soak's 1.1-1.3 GB of working memory: what holds it, by subsystem, and a bound.
