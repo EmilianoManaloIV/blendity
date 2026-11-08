@@ -147,7 +147,7 @@ everything):
   strands and moves in the wind (and is rigged from its own mesh in one step), soft tissue that trails the body's
   acceleration and keeps its volume, texture baking.
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps (denoised where they're noisy, soft
-  shadows from Unity's Baked Shadow Radius and Angle, directional as Unity's), probe volumes and voxel realtime GI; baked VRC Light Volumes light moving objects in the views as VRChat does;
+  shadows from Unity's Baked Shadow Radius and Angle, directional as Unity's), probe volumes and voxel realtime GI; baked VRC Light Volumes light moving objects in the views as VRChat does; a light's Indirect Multiplier scales the light the bake bounces (round 452);
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
   the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour

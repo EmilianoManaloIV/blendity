@@ -97,9 +97,7 @@ void Editor::bake_volumes_on_worker(BakeJob &j) {
   ScopedTimer t;
   std::vector<PTObject> objs;
   for (const BakeObject &o : j.objects) objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
-  std::vector<RenderLight> lights;
-  for (const BakeLight &l : j.lights)
-    if (l.mode != 0) lights.push_back(l.light);
+  const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
   PathTracer pt;
   PTSettings ps;
   ps.max_bounces = std::max(0, j.bounces - 1);

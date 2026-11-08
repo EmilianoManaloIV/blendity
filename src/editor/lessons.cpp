@@ -1472,6 +1472,12 @@ Unity bakes a reflection probe by photographing the finished, lightmapped room. 
 ? A metal railing reflects a slightly brighter room than the lightmapped walls around it show. What did round 451 change about that? | The reflection probe is now captured from the baked lightmaps, as Unity does it, instead of path-tracing the raw geometry - so the reflected room is the same room the lightmaps light. Generate Lighting again to recapture it.
 ? The comparison renders a view with reflection probes off and its error against Unity's falls. What does that say? | Blendity's reflections add error at that view: look at the probes' content or their blending first, not the lightmaps.
 ! cmd:create Cube; component ReflectionProbe; bake | Bake a reflection probe: with lightmaps it is captured from the lit scene
+# Indirect Multiplier: how much of a light bounces
+A light's Indirect Multiplier (Unity's setting of the same name, read from a Unity scene) says how much of the light a bake bounces. The light's own direct light is unchanged; what the bake's rays find when they hit a lit surface - for the lightmaps, the probes and the Light Volumes alike - is that light times the multiplier. At 0 a Baked sun lights only what it reaches directly and leaves the shade black; at 3 the shade beside a lit wall is three times as bright. Only Baked and Mixed lights are bounced; a Realtime light is not part of a bake. Generate Lighting again after changing it.
+> docs/tasks/0428-indirect-multiplier.md: Built
+? A Baked lamp lights the floor under it but the room around it stays dark, though its walls are white. Which of its settings would brighten the room without making the floor under it brighter? | Its Indirect Multiplier: it scales only the light the walls and floor bounce, not the lamp's direct light.
+? You raise a lamp's Indirect Multiplier and nothing changes in the Scene view. Why? | The multiplier is applied while the bake bounces the light, so the lightmaps and probes keep the old bounce until Generate Lighting runs again.
+! cmd:bake | Bake with a light's Indirect Multiplier in the Inspector at 0, then at 3, and compare the shade
 )"},
     {"Advanced Modeling Tools", "Edge loops, loop cuts and generative modifiers", R"(
 Edge mode (press 2) selects edges. An edge loop is a chain of edges running straight through 4-way vertices, around a cylinder or across a grid. Loops are how modellers add detail: you cut a new loop exactly where a bend needs geometry.

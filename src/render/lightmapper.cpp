@@ -484,6 +484,18 @@ void Lightmapper::stitch_seams(Lightmap &lm, const std::vector<std::pair<uint32_
     }
 }
 
+std::vector<RenderLight> bounce_lights(const std::vector<BakeLight> &lights) {
+  std::vector<RenderLight> out;
+  for (const BakeLight &l : lights) {
+    if (l.mode == 0) continue;
+    RenderLight rl = l.light;
+    rl.intensity *= finite_bits(l.indirect) ? std::max(0.0f, std::min(100.0f, l.indirect)) : 1.0f;  // (as Indirect Intensity: 0..100)
+    if (!(rl.intensity > 0.0f)) continue;  // (a light bounced at 0 is no light for the path tracer to pick)
+    out.push_back(rl);
+  }
+  return out;
+}
+
 void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vector<BakeLight> &lights, const Environment &env,
                         const BakeSettings &settings) {
   s_ = settings;
@@ -550,9 +562,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   pt_ = std::make_unique<PathTracer>();
   pt_objects_.clear();
   for (const BakeObject &o : objects_) pt_objects_.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
-  std::vector<RenderLight> pt_lights;
-  for (const BakeLight &l : lights_)
-    if (l.mode != 0) pt_lights.push_back(l.light);
+  const std::vector<RenderLight> pt_lights = bounce_lights(lights_);  // (round 452: at their Indirect Multipliers)
   PTSettings ps;
   /* The gather's own hit is the first bounce (its direct light comes by next-event estimation): the
    * path tracer adds the rest. Bounces 0 = the sky, the Baked lights' direct light and (task 0157) the emissive

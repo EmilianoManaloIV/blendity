@@ -7210,6 +7210,77 @@ static void tests_round451() {
 }
 
 
+
+/* ---------------------------------------------------------------- round 452: Unity's Indirect Multiplier (task 0428) */
+static void tests_round452() {
+  test("Indirect Multiplier (round 452): a Baked sun's light bounced off a wall onto a floor in its shadow scales with the light's Indirect Multiplier (0, 0.5, 1, 3) while the lit floor's direct light stays; the lights a bake bounces carry it, a Realtime light none", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), wall = primitives::plane(4.0f, 8), roof = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    /* A floor, a wall standing at its +x edge facing it, and a roof over the floor's -x half: the sun lights the wall and
+     * the floor's +x half; the -x half under the roof gets only what the wall and the lit floor bounce. */
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}),
+                                       bake_object(2, wall, Mat4::trs({2.0f, 2.0f, 0}, Quat::euler({0, 0, 90}), {1, 1, 1}), {white}),
+                                       bake_object(3, roof, Mat4::trs({-1.0f, 1.2f, 0}, Quat::euler({180, 0, 0}), {0.5f, 1, 1}), {white})};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](float indirect) {
+      BakeLight sun;
+      sun.light.direction = normalize(Vec3(0.6f, -1.0f, 0.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9, sun.indirect = indirect;
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 256, bs.bounces = 2, bs.denoise = false, bs.directional = false;
+      Lightmapper lm;
+      lm.begin(objs, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    /* The floor's mean light in the roof's shadow (-1 < x < 0.4) and in the sun (x > 1): each triangle's lightmap texel at its
+     * centre (the plane's own x, the model is the identity). */
+    auto floor_means = [&](const LightingData &d, double &shade, double &sun) {
+      const LightingData::Entry &e = d.entries.at(1);
+      const Lightmap &pg = d.pages[(size_t)e.page];
+      const RenderMesh &rm = floor->render_mesh();
+      double s0 = 0, s1 = 0;
+      int n0 = 0, n1 = 0;
+      for (size_t k = 0; k < rm.tri_count() && k * 3 + 2 < e.tri_uv.size(); k++) {
+        float cx = 0;
+        Vec2 uv(0, 0);
+        for (int c = 0; c < 3; c++) cx += rm.positions[rm.indices[k * 3 + c]].x / 3.0f, uv = uv + e.tri_uv[k * 3 + c] * (1.0f / 3.0f);
+        const int x = std::min(pg.width - 1, std::max(0, (int)(uv.x * pg.width))), y = std::min(pg.height - 1, std::max(0, (int)(uv.y * pg.height)));
+        const float t = pg.texels[(size_t)y * pg.width + x].y;
+        if (cx > -1.0f && cx < 0.4f) s0 += t, n0++;  // (the roof, -2..0 at 1.2 high, shades the floor from -1.28 to 0.72 for this sun)
+        if (cx > 1.0f) s1 += t, n1++;
+      }
+      shade = n0 ? s0 / n0 : 0, sun = n1 ? s1 / n1 : 0;
+    };
+    double sh0, su0, sh5, su5, sh1, su1, sh3, su3;
+    floor_means(bake(0.0f), sh0, su0);
+    floor_means(bake(0.5f), sh5, su5);
+    floor_means(bake(1.0f), sh1, su1);
+    floor_means(bake(3.0f), sh3, su3);
+    std::printf("    under the roof: x0 %.4f, x0.5 %.4f, x1 %.4f, x3 %.4f; in the sun: %.4f %.4f %.4f %.4f\n", sh0, sh5, sh1, sh3, su0, su5, su1, su3);
+    CHECK(sh1 > 0.01 && sh0 < 0.02 * sh1);  // (no bounced light at 0)
+    CHECK(std::fabs(sh5 - 0.5 * sh1) < 0.08 * sh1);
+    CHECK(std::fabs(sh3 - 3.0 * sh1) < 0.1 * 3.0 * sh1);
+    CHECK(std::fabs(su0 - su1) < su1 * 0.25 && su0 > 0.5 * su1);  // (the sunlit half mostly direct)
+    /* What the lightmapper, the probes and the Light Volumes all trace: the bounce list. */
+    BakeLight lamp;
+    lamp.light.type = RenderLight::Point, lamp.light.position = Vec3(0, 3, 0), lamp.light.intensity = 2.0f, lamp.light.range = 10.0f, lamp.mode = 2;
+    lamp.indirect = 0.25f;
+    const std::vector<RenderLight> bl = bounce_lights({lamp});
+    CHECK(bl.size() == 1 && std::fabs(bl[0].intensity - 0.5f) < 1e-6f);
+    lamp.indirect = std::nanf("");  // (a bad number is the default 1)
+    CHECK(bounce_lights({lamp}).size() == 1 && std::fabs(bounce_lights({lamp})[0].intensity - 2.0f) < 1e-6f);
+    lamp.indirect = 1000.0f;  // (clamped to 100, as Indirect Intensity)
+    CHECK(bounce_lights({lamp}).size() == 1 && std::fabs(bounce_lights({lamp})[0].intensity - 200.0f) < 1e-3f);
+    lamp.indirect = 0.0f;  // (a light bounced at 0 is left out of the path tracer's lights)
+    CHECK(bounce_lights({lamp}).empty());
+    lamp.indirect = 1.0f;
+    lamp.mode = 0;  // (a Realtime light bounces nothing in a bake)
+    CHECK(bounce_lights({lamp}).empty());
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -7239,4 +7310,5 @@ void run_lighting_tests() {
   tests_round442();
   tests_round444();
   tests_round451();
+  tests_round452();
 }

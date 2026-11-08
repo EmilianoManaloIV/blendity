@@ -2,6 +2,19 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 452): Unity's Indirect Multiplier
+
+**Asked:** Pass 19's round 452 - round 451 found SideRail's error entirely in the lightmaps (the side tunnel's charts 2.3-2.6x Unity's light, the main tunnel's 1.15-1.25x); Unity's per-light Indirect Multiplier was imported and unused.
+
+**Changed (task 0428)**
+- **Indirect Multiplier:** a light's `bounce_intensity` (Unity's `m_BounceIntensity`) scales the light the bake's path tracer bounces - for the lightmaps, the probes and the Light Volumes (`BakeLight::indirect`, `bounce_lights()`); the light's direct light is unchanged, a Realtime light bounces nothing. A scene whose multipliers are all 1 bakes as before.
+- **`tools/unity_compare.py`:** the lightmap-pages table was hidden when the compare ran (its own `skipped` is a list of objects, read as a skip); only a text `skipped` is one now.
+- **Not built, carried to the write-up's open list:** per-component filtering (direct / indirect / AO), per-renderer Stitch Seams, charts sized per island by Scale In Lightmap.
+- **Learn:** "Where the error lives" gains "Indirect Multiplier: how much of a light bounces", with two questions and a Try-it.
+- SideRail's four stations against ADR 0113, measured once on rounds 458, 452 and 453 together: spawn 3.21 / 0.903 / 0.922, spawn_back (dark) 1.05 / 0.895 / 0.768, floor 4.99 / 0.879 / 0.956, ahead 3.17 / 0.939 / 0.876 (MAE / SSIM / grid; round 451: 3.69 / 0.809 / 0.897, 1.43 / 0.776 / 0.113, 4.19 / 0.772 / 0.974, 3.03 / 0.883 / 0.958). SSIM rose at every station (spawn and ahead now over 0.90); MAE fell at spawn but rose at the floor (4.99, over 4); grid correlation fell at the floor and ahead. Of the three rounds only this one changes SideRail's bake (round 453's probes: SideRail has none; round 458 draws). ADR 0113's target is still missed at three stations. Round 451's page diagnostics run again on the same tree (`tools/unity_compare.py ... --components --pages`, C:/blcmp458/diag): **the side tunnel did not come down - its charts got brighter.** Weighted by chart area they hold 4.87x Unity's light (round 451: 4.07x; median 3.02x, was 2.79x), the main tunnel's 2.20x -> 3.28x; over all pages MAE 18.27 -> 20.47, SSIM 0.592 -> 0.545. The big side-tunnel walls and floors moved little (2.3-2.5x -> 2.3-2.6x), the entrance sofas about doubled (2x -> 4x), the main tunnel's wall 1.14x -> 2.34x. The components still put the whole error in the lightmaps (dropping probes or reflections moves nothing). Why the bounce rose (SideRail's multipliers were not inspected) is open for the next round.
+
+**Checked:** both suites - with Blender's libraries 17,422; dependency-free 16,555 (Windows) and 16,561 (Linux, WSL), 0 failed; the audits (one chain over rounds 458, 452 and 453 together).
+
 ## 2026-11-08 (round 458): kept instances, meshes streamed
 
 **Asked:** Pass 19's round 458 - the halves rounds 447-449 left: the CPU built the card's instance array on every frame (50,000 cubes 47-60 ms), a big import's meshes all went up in the first frame (SideRail 366 ms), and the UI's cost on idle frames.

@@ -87,7 +87,12 @@ struct BakeLight {
   RenderLight light;
   int mode = 0;
   uint64_t id = 0;  // the light's GameObject
+  /* Round 452: Unity's Indirect Multiplier (m_BounceIntensity) - how much of this light the bake bounces: the light the
+   * gathers' rays find (lightmaps, probes, Light Volumes) is scaled by it; its direct light is not. */
+  float indirect = 1.0f;
 };
+/* Round 452: the lights a bake's path tracer bounces - the Baked and Mixed ones, each at its Indirect Multiplier. */
+std::vector<RenderLight> bounce_lights(const std::vector<BakeLight> &lights);
 
 /* Round 424 (Unity's Baked Shadow Radius and Angle): how much of a light reaches o past what is in the way - over
  * `samples` stratified shadow rays into the cone the light fills seen from o (a point or spot light a ball of

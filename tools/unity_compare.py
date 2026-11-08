@@ -661,7 +661,7 @@ def run_pages(exe, project, asset, bake, out):
 
 
 def page_lines(s):
-    if not s or "skipped" in s:
+    if not s or isinstance(s.get("skipped"), str):  # (round 452: a run's own "skipped" is a list of objects, not a skip)
         return ["## Lightmap pages", "", "Skipped: %s." % (s or {}).get("skipped", "-"), ""]
     lines = ["## Lightmap pages, object by object (pages/pages.md)", "",
              "%d objects in both; by chart area MAE %.2f, SSIM %.3f. The worst ten:" % (s["objects"], s["mae"], s["ssim"]), "",

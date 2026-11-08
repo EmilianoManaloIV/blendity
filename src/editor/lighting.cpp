@@ -267,6 +267,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
     if (!g.active_in_hierarchy()) return;
     if (auto *l = g.get<Light>(); l && l->enabled) {
       lights.push_back({to_render_light(g, *l, unity_lights_gamma()), l->mode, g.id});  // (re-check 401: the bakes as the views)
+      lights.back().indirect = l->bounce_intensity;  // (round 452: Unity's Indirect Multiplier)
       lights.back().light.baked_falloff = l->mode != 0;  // (round 425: Unity's built-in pipeline bakes with the legacy falloff)
     }
     auto *mr = g.get<MeshRenderer>();
@@ -477,9 +478,7 @@ void Editor::bake_job_run(BakeJob &j) {
       ps.denoise = false;
       ps.use_guiding = false;
       pt.set_settings(ps);
-      std::vector<RenderLight> lights;
-      for (const BakeLight &l : j.lights)
-        if (l.mode != 0) lights.push_back(l.light);
+      const std::vector<RenderLight> lights = bounce_lights(j.lights);  // (round 452: at their Indirect Multipliers)
       pt.build(objs, lights, j.env);
       say("Baking probes: checking for geometry...");
       probe_validate(j.probe_volume, pt, 64);

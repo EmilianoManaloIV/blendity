@@ -93,6 +93,23 @@ under ~40 %: within that, no round and no feature is consistently slower, and Pa
 `BLENDITY_VIEW_OFF=sh,lv,mask` stays for the next attribution, best read with the card's own timestamps
 (docs/tasks/0426).
 
+### SideRail after the Indirect Multiplier (rounds 452-453)
+Measured once on rounds 458, 452 and 453 together (only round 452 changes SideRail's bake: it has no light probes for
+round 453). MAE / SSIM / grid correlation against Unity; ADR 0113's target MAE <= 4, SSIM >= 0.90, grid >= 0.95:
+
+| station | round 451 | round 452-453 |
+|---|---|---|
+| spawn | 3.69 / 0.809 / 0.897 | 3.21 / **0.903** / 0.922 |
+| spawn_back (dark) | 1.43 / 0.776 / 0.113 | 1.05 / 0.895 / 0.768 |
+| floor | 4.19 / 0.772 / 0.974 | 4.99 / 0.879 / 0.956 |
+| ahead | 3.03 / 0.883 / 0.958 | 3.17 / **0.939** / 0.876 |
+| the bake | 36 s | 36 s |
+
+SSIM rose everywhere (over 0.90 at spawn and ahead), but the floor's MAE rose past 4 and the grid correlation fell at the
+floor and ahead: the target is still missed at three stations. The lightmap pages object by object (`--pages`) went the
+wrong way: the side tunnel's charts hold 4.87x Unity's light by area (round 451: 4.07x), the main tunnel's 3.28x (2.20x),
+all pages MAE 18.27 -> 20.47, SSIM 0.592 -> 0.545. The error is still all in the lightmaps; why the bounce rose is open.
+
 ### Kept instances, meshes streamed (round 458)
 Windowed on the card with nothing else building (`tools/dev/views.py`, two runs each, against round 447's build), and
 SideRail's headless open with `perf frames` (the log line "Every mesh is on the card, N ms after the first was left
