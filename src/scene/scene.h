@@ -1946,6 +1946,7 @@ struct LightingSettings {
   float probe_view_bias = 0.1f;
   bool probe_leak_reduction = true; // APV's normal-based leak reduction
   bool show_probes = false;         // draw them in the Scene view
+  bool light_volumes_in_views = true;  // (round 443, task 0419: the views light dynamic objects from baked VRC Light Volumes, as VRChat does)
   void reflect(Reflector &r);
 };
 

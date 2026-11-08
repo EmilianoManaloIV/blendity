@@ -187,6 +187,7 @@ Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing
 struct VoxelGIFrame;  // voxel_gi.h
 struct Rsm;
 struct ProbeFrame;  // probe_volume.h
+struct LightVolumeFrame;  // light_volume_bake.h
 
 struct LightingEnv {
   Vec3 sky{0.45f, 0.52f, 0.62f};
@@ -204,6 +205,7 @@ struct LightingEnv {
   bool rt_bounce_not_baked = false;
   float rt_specular_occlusion = 0.0f;
   const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
+  const LightVolumeFrame *light_volumes = nullptr;  // round 443 (task 0419): baked VRC Light Volumes - an object without a lightmap takes their light where they hold it; null = none
   std::vector<RenderProbe> reflection_probes;  // round 401: Unity's reflection probes with a bake (the specular environment inside their boxes)
   bool unity_brdf = false;  // round 405: a scene from Unity - the probes' and the sky's reflection weighted as Unity's BRDF does
   ViewTransform view_transform = ViewTransform::Standard;

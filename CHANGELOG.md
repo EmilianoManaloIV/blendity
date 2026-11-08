@@ -2,6 +2,27 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 443): Light Volumes in the views
+
+**Asked:** Pass 18's round 443 - both renderers sample the baked VRC Light Volumes on dynamic objects as VRChat does, so
+the view matches the headset; a toggle for it.
+
+**Changed (task 0419)**
+- **A dynamic object inside a baked Light Volume takes the volume's light** in the Scene and Game views and renders, on
+  the CPU and on the card: trilinear over the voxels, L0 + L1 . n for the shaded normal (the L1 turned with the box if it
+  rotated since the bake), times the volume's Color and Intensity, blended at the box edge by the package's bounds
+  mask over Smooth Blending; the smaller of two boxes wins, an Additive one adds. What the volumes leave goes to the
+  probe volume (or the sky). Lightmapped objects are untouched.
+- **The card** reads the volumes from the probe volume's buffer (`lv_sample`, the CPU's function line for line); more
+  than 262,144 voxels of volumes goes to the CPU, said.
+- **Light Volumes in Views** (Lighting window, `set Lighting.LightVolumesInViews`): on by default, effective where the
+  scene has baked volumes. The Scene view's bar has no lighting menu, so it is a Lighting setting.
+- **Left open:** the package's per-volume Exposure / Shadows / Highlights and its non-linear L1 option.
+- **Learn:** "VRC Light Volumes: seen in Blendity's views".
+
+**Checked:** both suites - with Blender's libraries 16,542 (one chain with round 445); dependency-free 15,767 (Windows) and 15,773
+(Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-07 (round 441): sampling
 
 **Asked:** Pass 18's round 441 - sample the sky by its light, and pick among many lamps.
@@ -3532,7 +3553,6 @@ rounds (task 0296 now, the brushes and puck in 0297, the Wheel and Learn in 0298
 - **Left as they are, and noted in the spec:**
   - Build's pixel tolerances are in the picture's pixels, so they follow the pad's zoom.
   - Under the SketchUp keys, the Wheel is Shift+Space and Space is the View tool, so there a middle-drag pans the pad.
-
 
 ## 2026-10-29 (round 318): freehand strokes aren't pulled onto the perspective guide; the Draw tab's pen and guides; every bridge followed a live Blendity
 

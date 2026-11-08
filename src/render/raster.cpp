@@ -2,6 +2,7 @@
 #include "raster.h"
 #include "voxel_gi.h"
 #include "probe_volume.h"
+#include "light_volume_bake.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -550,6 +551,19 @@ static const Material *item_material(const DrawItem &it, uint32_t prim) {
     if (mp) return mp.get();
   }
   return default_material().get();
+}
+
+/* Task 0419: a point without a lightmap in a baked VRC Light Volume takes the volume's light as its ambient (as VRChat's
+ * shader does, at the surface point, unbiased); where the volume is blending out at its edge the probe volume's light, or
+ * the sky's where there is none, takes the rest. The volume holds the Baked lights' direct light, as baked probes do. */
+static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, const Environment &env) {
+  Vec3 light;
+  float cover = 0.0f;
+  if (!lv.sample(sp.position, sp.normal, light, cover)) return;
+  const Vec3 rest = sp.has_probe ? sp.probe : env.irradiance(sp.normal);
+  sp.probe = light + rest * (1.0f - cover);
+  sp.probe_baked = cover >= 0.5f || (sp.has_probe && sp.probe_baked);
+  sp.has_probe = true;
 }
 
 void Renderer3D::flush() {
@@ -1708,7 +1722,7 @@ void Renderer3D::shade_deferred() {
     }
     T.item = &it;
 #ifdef BL_RASTER_X86
-    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
+    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes) && !(env_.light_volumes && it.use_probes);  // (task 0419: a Light Volume lights it per pixel)
     if (T.fast) {
       SurfaceSample fs = T.surface;
       if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)
@@ -1975,6 +1989,7 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
+        if (!sp.has_lightmap && env_.light_volumes && it.use_probes) light_volume_ambient(sp, *env_.light_volumes, env);  // (task 0419)
         SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
         if (T.uniform) {
           s.normal = sp.normal;  // (evaluate_material's own: the point's normal)

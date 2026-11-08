@@ -848,6 +848,8 @@ uint64_t Editor::scene_hash_tail() {
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
+  mix(&scene_->lighting.light_volumes_in_views, 1);  // (round 443)
+  mix(&lv_bake_gen_, 8);
   mix(&probe_live_gen_, 8);  // live probes changed
   for (const VoxelGIState &st : vgi_) mix(&st.rtlm.generation, 8);  // realtime lightmaps published
   return h;
@@ -1096,6 +1098,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
     env.probes = &probe_frame_;
   }
+  if (scene_lights && pls.baked_gi) env.light_volumes = light_volume_frame();  // (round 443, task 0419: dynamic objects take a baked Light Volume's light where it holds them)
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
@@ -1789,6 +1792,11 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
       j->probe_frame.quad_reuse = probe_quad_reuse_;
       j->probe_frame.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
       env.probes = &j->probe_frame;
+      j->holds_lighting = true;
+    }
+    if (const LightVolumeFrame *lv = pls.baked_gi ? light_volume_frame() : nullptr) {  // (round 443: the render's own copy; the voxels are shared)
+      j->light_volumes = *lv;
+      env.light_volumes = &j->light_volumes;
       j->holds_lighting = true;
     }
     for (const DrawItem &it : j->items)

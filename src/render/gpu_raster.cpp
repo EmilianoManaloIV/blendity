@@ -1901,6 +1901,52 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
   o = acc / wsum + sky_irr * (sky / wsum);
   return !any(isnan(o)) && !any(isinf(o));
 }
+
+/* Round 443 (task 0419): the baked VRC Light Volumes (LightVolumeFrame::sample, light_volume_bake.cpp), packed after the
+ * probe volume by light_volume_pack: pv[2].w the section's start (0 none); there, the count, then per volume nine vec4
+ * (the inverse world's rows, the edge blend and additive, the grid and its voxels' start, the tint, the normal's rows),
+ * then four vec4 a voxel (L0, L1 r, g, b). Each volume's weight is LV_BoundsMask; the light is L0 + L1 . n of the
+ * trilinear voxels; `cover` is the share of the weight the volumes took (the probes take the rest). */
+bool lv_sample(vec3 p, vec3 n, out vec3 light, out float cover) {
+  light = vec3(0.0);
+  cover = 0.0;
+  if (pv.length() < 3) return false;
+  int base = floatBitsToInt(pv[2].w);
+  if (base <= 0 || base >= pv.length()) return false;
+  int count = min(floatBitsToInt(pv[base].x), 32);
+  float left = 1.0;
+  bool any_in = false;
+  for (int k = 0; k < count; k++) {
+    int h = base + 1 + k * 9;
+    vec3 local = vec3(dot(pv[h].xyz, p) + pv[h].w, dot(pv[h + 1].xyz, p) + pv[h + 1].w, dot(pv[h + 2].xyz, p) + pv[h + 2].w);
+    vec4 e = pv[h + 3];
+    vec3 fade = clamp(min((local + 0.5) * e.xyz, (0.5 - local) * e.xyz), 0.0, 1.0);
+    float m = fade.x * fade.y * fade.z;
+    if (!(m > 0.0)) continue;
+    any_in = true;
+    ivec4 g = floatBitsToInt(pv[h + 4]);
+    vec3 f = clamp(clamp(local + 0.5, 0.0, 1.0) * vec3(g.xyz) - 0.5, vec3(0.0), vec3(g.xyz - 1));
+    ivec3 i0 = min(ivec3(f), g.xyz - 1), i1 = min(i0 + 1, g.xyz - 1);
+    vec3 t = f - vec3(i0);
+    vec3 l0 = vec3(0.0), l1r = vec3(0.0), l1g = vec3(0.0), l1b = vec3(0.0);
+    for (int c = 0; c < 8; c++) {
+      ivec3 q = ivec3((c & 1) != 0 ? i1.x : i0.x, (c & 2) != 0 ? i1.y : i0.y, (c & 4) != 0 ? i1.z : i0.z);
+      float w = ((c & 1) != 0 ? t.x : 1.0 - t.x) * ((c & 2) != 0 ? t.y : 1.0 - t.y) * ((c & 4) != 0 ? t.z : 1.0 - t.z);
+      int v = base + g.w + 4 * (q.x + g.x * (q.y + g.y * q.z));
+      l0 += pv[v].xyz * w, l1r += pv[v + 1].xyz * w, l1g += pv[v + 2].xyz * w, l1b += pv[v + 3].xyz * w;
+    }
+    vec3 nn = vec3(dot(pv[h + 6].xyz, n), dot(pv[h + 7].xyz, n), dot(pv[h + 8].xyz, n));
+    vec3 c = max(vec3(l0.r + dot(l1r, nn), l0.g + dot(l1g, nn), l0.b + dot(l1b, nn)), vec3(0.0)) * pv[h + 5].xyz;
+    if (e.w > 0.5) {
+      light += c * m;
+      continue;
+    }
+    light += c * (m * left);
+    left *= 1.0 - m;  // (no break at 0: a larger Additive volume still adds its light - review 443)
+  }
+  cover = 1.0 - left;
+  return any_in;
+}
 )";
 
 /* The lighting pass: the g-buffer's pixel lit (Solid shading's colour as it is), the background where nothing was drawn. */
@@ -2142,8 +2188,14 @@ void main() {
   }
   else if (has_lm) o = vec4(lm, 4.0);
   else if ((flags & 1) != 0) {
-    vec3 pr;
-    if (probe_sample(wpos + n * probe.x + V * probe.y, n, irradiance(n), probe.w > 0.5, probe.z > 0.5, pr)) o = vec4(pr, probe.w > 0.5 ? 16.0 : 8.0);
+    vec3 pr, lv;
+    float cover;
+    bool has_probe = probe_sample(wpos + n * probe.x + V * probe.y, n, irradiance(n), probe.w > 0.5, probe.z > 0.5, pr);
+    if (has_probe) o = vec4(pr, probe.w > 0.5 ? 16.0 : 8.0);
+    if (lv_sample(wpos, n, lv, cover)) {  // (round 443: a Light Volume's light where it holds the point, the probes' or the sky's in what it leaves)
+      bool baked = cover >= 0.5 || (has_probe && probe.w <= 0.5);
+      o = vec4(lv + (has_probe ? pr : irradiance(n)) * (1.0 - cover), baked ? 8.0 : 16.0);
+    }
   }
   o_amb = o;
 }

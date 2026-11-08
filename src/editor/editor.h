@@ -1285,6 +1285,7 @@ class Editor {
   /* Probe volumes (task 0014). */
   const ProbeVolumeData &probes_for_test() const { return probes_; }
   std::map<uint64_t, LightVolumeSH> &light_volume_bakes_for_test() { return light_volume_bakes_; }  // (round 398)
+  const LightVolumeFrame *light_volume_frame_for_test() { return light_volume_frame(); }  // (round 443)
   std::map<uint64_t, ReflectionProbeBake> &reflection_probe_bakes_for_test() { return reflection_probe_bakes_; }  // (round 401)
   LightingEnv make_lighting_for_test() { return make_lighting(cam_.position(), true, true); }
   bool unity_lights_gamma() const { return scene_->unity.gamma_lights(); }  // (re-check 401: one rule for the views and the bakes)
@@ -5815,6 +5816,11 @@ class Editor {
   void draw_reflection_probes();
   uint64_t lv_bake_gen_ = 1;                   // (Live Link sends a volume's bake again when this moves)
   void livelink_light_volume_bakes_changed() { lv_bake_gen_++, light_volume_bakes_dirty_ = true; }
+  /* Round 443 (task 0419, light_volume_bake_ui.cpp): the baked volumes the views sample (null when off or none). */
+  LightVolumeFrame lv_frame_;
+  std::map<uint64_t, std::shared_ptr<const LightVolumeSH>> lv_shared_;  // (the bakes' copies in Blendity's axes, made once per bake)
+  uint64_t lv_shared_gen_ = 0;
+  const LightVolumeFrame *light_volume_frame();
   bool light_volume_bakes_dirty_ = false;  // (saved with the scene since it last changed)
   void load_light_volume_bakes(const std::string &dir);
   void save_light_volume_bakes(const std::string &dir);
@@ -5912,6 +5918,7 @@ class Editor {
     int shadow_res = 0;
     RealtimeLightmaps::Published rtlm;
     ProbeFrame probe_frame;
+    LightVolumeFrame light_volumes;  // (round 443: a copy of the views' frame - the volumes' voxels are shared)
     /* Realtime GI for the render: its grid, voxels and RSM built by the worker into a state of the job's own. */
     VoxelGIState gi_state;
     bool want_gi = false, gi_bounce = false, gi_lighting_shown = false;
@@ -6060,7 +6067,7 @@ class Editor {
   void prune_gpu_lightmaps();
   static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
   static constexpr int kCardMaxTexture = 2048;      // round 414 (ADR 0108): a material's texture goes up from its first level within this (Unity's default import size)
-  void gpu_probe_volume(const ProbeVolumeData &d);
+  void gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *lv);  // (round 443: with the Light Volumes)
   std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;
   uint64_t gpu_probe_key_ = 0;
   int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU

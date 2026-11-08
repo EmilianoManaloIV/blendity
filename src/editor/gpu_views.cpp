@@ -1213,12 +1213,21 @@ void Editor::prune_gpu_lightmaps() {
 }
 
 /* Task 0197: the probe volume to the card when it changed (another bake, more probes, a live update). */
-void Editor::gpu_probe_volume(const ProbeVolumeData &d) {
-  const uint64_t key = ((((uint64_t)(uintptr_t)&d * 31 ^ d.scene_key) * 1099511628211ull ^ d.probe_count()) * 1099511628211ull ^ probe_live_gen_) *
-                           1099511628211ull ^ lighting_gen_;
+void Editor::gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *lv) {
+  uint64_t key = d ? ((((uint64_t)(uintptr_t)d * 31 ^ d->scene_key) * 1099511628211ull ^ d->probe_count()) * 1099511628211ull ^ probe_live_gen_) *
+                         1099511628211ull ^ lighting_gen_
+                   : 0;
+  key = (key * 1099511628211ull) ^ (lv ? lv->signature() ^ lv_bake_gen_ : 0);  // (round 443: the Light Volumes ride in the same buffer)
   if (key == gpu_probe_key_) return;
   gpu_probe_key_ = key;
-  gpu_view_->set_probe_volume(probe_pack(d));
+  std::vector<float> packed = d ? probe_pack(*d) : std::vector<float>(12, 0.0f);  // (no probe volume: a header the card reads as empty)
+  const std::vector<float> volumes = lv ? light_volume_pack(*lv, kCardMaxProbes) : std::vector<float>();
+  if (!volumes.empty()) {
+    const int32_t at = (int32_t)(packed.size() / 4);
+    std::memcpy(&packed[2 * 4 + 3], &at, 4);  // (the third header vec4's w: where the volumes start)
+    packed.insert(packed.end(), volumes.begin(), volumes.end());
+  }
+  gpu_view_->set_probe_volume(std::move(packed));
 }
 
 /* Task 0196: why an item's live procedural textures need the CPU in this view (seen close up), or null. */
@@ -1422,7 +1431,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     const RenderMesh &rm = *it.mesh;
     const bool lm = it.lightmap && it.lightmap_uv && it.lightmap_uv->size() >= rm.tri_count() * 3;
     const bool rt = it.rt_bounce && it.rt_sky && it.rt_uv && it.rt_uv->size() >= rm.tri_count() * 3;
-    const bool probes = !lm && !rt && it.use_probes && env.probes && env.probes->data && !env.probes->data->empty();
+    const bool probes = !lm && !rt && it.use_probes && ((env.probes && env.probes->data && !env.probes->data->empty()) || env.light_volumes);  // (round 443: or a Light Volume's)
     if (!lm && !rt && !probes) return;
     const int32_t lm_tex = lm ? gpu_lightmap(*it.lightmap, tex_err) : -1;
     const int32_t lm_dir = lm && it.lightmap_dir ? gpu_lightmap(*it.lightmap_dir, tex_err) : -1;  // (round 426)
@@ -1512,6 +1521,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const bool baked = std::any_of(inst.begin(), inst.end(), [](const gpu::RasterInstance &in) { return in.baked; });
   if (baked && env.probes && env.probes->data && env.probes->data->probe_count() > kCardMaxProbes)
     return gpu_view_refuse(slot, "a probe volume of more than 262,144 probes");
+  if (baked && env.light_volumes && env.light_volumes->voxels() > kCardMaxProbes)
+    return gpu_view_refuse(slot, "Light Volumes of more than 262,144 voxels");  // (round 443)
   if (baked && !g->can_draw_baked()) return gpu_view_refuse(slot, "lightmaps or probes (the card has no geometry shaders)");
   if (toon_maps && !g->can_draw_toon_maps()) return gpu_view_refuse(slot, "toon maps (the card's toon pass couldn't be made)");
   gpu::RasterFrame fr;
@@ -1524,8 +1535,8 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   if (env.probes) {
     fr.probe_normal_bias = env.probes->normal_bias, fr.probe_view_bias = env.probes->view_bias;
     fr.probe_leak = env.probes->leak_reduction, fr.probe_live = env.probes->use_live;
-    if (env.probes->data) gpu_probe_volume(*env.probes->data);
   }
+  if ((env.probes && env.probes->data) || env.light_volumes) gpu_probe_volume(env.probes ? env.probes->data : nullptr, env.light_volumes);  // (review 443: not only when this view is baked - the buffer is shared by every view's slot)
   fr.gi_specular_occlusion = env.gi ? env.gi->params.specular_occlusion : env.rt_specular_occlusion;
   fr.unity_brdf = env.unity_brdf;  // (round 405)
   fr.want_hdr = want_hdr;

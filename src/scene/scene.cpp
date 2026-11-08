@@ -387,6 +387,9 @@ void LightingSettings::reflect(Reflector &r) {
   r.help("Probes behind the surface being shaded (the other side of a thin wall) count for almost nothing\n"
          "(Unity APV: Leak Reduction Mode).");
   r.field("Show Probes", show_probes);
+  r.field("Light Volumes in Views", light_volumes_in_views);
+  r.help("Objects without a lightmap take their ambient light from the baked VRC Light Volumes that hold them (VRChat's own\n"
+         "evaluation: trilinear L0 + L1 . n, blended at the box edges), in the Scene and Game views and renders. Off: the probe volume.");
 }
 
 void ProbeVolume::reflect(Reflector &r) {
