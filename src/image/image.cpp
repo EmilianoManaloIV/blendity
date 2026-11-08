@@ -1734,11 +1734,15 @@ TexturePtr texture_load(const std::string &path, bool srgb, std::string *error) 
   return t;
 }
 
+int64_t texture_file_mtime(const std::string &path) { return file_mtime(path); }
+
 TexturePtr texture_cached(const std::string &path, bool srgb) {
   const int64_t mt = file_mtime(path);
   std::lock_guard<std::mutex> lock(g_cache_mutex);
   const auto it = g_cache.find(path + (srgb ? "|srgb" : "|data"));
-  return it != g_cache.end() && it->second.mtime == mt ? it->second.tex : nullptr;
+  if (it == g_cache.end() || it->second.mtime != mt) return nullptr;
+  it->second.used = ++g_cache_clock;  // (round 447: asked for is used - a streamed texture isn't the first the budget drops)
+  return it->second.tex;
 }
 
 void texture_cache_clear() {

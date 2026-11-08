@@ -986,7 +986,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("CPU badge: %s", badge.empty() ? "not shown" : badge.c_str());
     return;
   }
-  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | memory (round 411, ADR 0105; memory: task 0421)
+  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | frames N | memory (round 411, ADR 0105; memory: task 0421)
     const std::string sub = to_lower(arg(1, "status"));
     if (sub == "mark") Log::info("%s", perf_mark(t.size() > 2 ? line_rest(line, 2) : std::string()).c_str());
     else if (sub == "reset") perf_mark(""), Log::info("perf: the mark reset");
@@ -996,8 +996,14 @@ void Editor::run_console_command(const std::string &line) {
        * the whole step with its frames (the --cmd lines run back to back, with no frame between them). */
       if (!headless_) { Log::info("perf wait: headless scripts only"); return; }
       int n = 0;
-      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty()); n++) step_frame_headless();
+      for (; n < 1000000 && (rendering_ || baking_ || !jobs_running().empty() || texture_stream_busy()); n++) step_frame_headless();  // (round 447: the views' textures streaming in too)
       Log::info("perf wait: %d frame(s)", n);
+    }
+    else if (sub == "frames") {  // perf frames N (a script's, headless): N frames, whatever runs
+      if (!headless_) { Log::info("perf frames: headless scripts only"); return; }
+      const int n = std::max(0, std::min(1000000, std::atoi(arg(2, "1").c_str())));
+      for (int i = 0; i < n; i++) step_frame_headless();
+      Log::info("perf frames: %d frame(s)", n);
     }
     else Log::info("perf: %s", perf_status_text().c_str());
     return;

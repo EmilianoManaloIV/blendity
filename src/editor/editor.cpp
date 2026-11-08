@@ -577,6 +577,8 @@ void Editor::frame_body(std::vector<Event> &events) {
   measured_fps_ = (float)frame_stamps_.size();
   hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   process_events(events);
+  upload_bytes_frame_ = 0;
+  texture_stream_poll();  // (round 447: what the views found missing, loading on a worker)
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
   if (texture_touch_pending_ && !any_button_down()) {
@@ -3533,7 +3535,7 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
    * scene.) */
   auto settle = [&] {
     step(false);  // (the frame that starts what the command, or the startup, deferred)
-    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty()); i++) step(false);
+    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty() || texture_stream_busy()); i++) step(false);
   };
   settle();
   for (const std::string &c : commands) {  // (task 0199: the scene to measure)

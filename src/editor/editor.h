@@ -888,6 +888,34 @@ class Editor {
     }
   };
   std::unique_ptr<RenderPrefetch> render_prefetch_;
+  /* Round 447: the views' missing image files (TextureStreamScope) loaded on a worker, batch by batch; the textures
+   * go to the card under a per-frame byte budget (gpu_texture). Only where jobs run on workers (a window, or a headless
+   * editor that asked), as round 437's prefetch. */
+  struct TextureStream {
+    std::thread thread;
+    std::atomic<bool> done{false};
+    std::atomic<bool> cancel{false};  // (checked per file: a shutdown or a scene switch doesn't wait for the batch)
+    const Scene *scene = nullptr;     // (the scene it was for: another one drops it)
+    std::vector<std::pair<std::string, bool>> files;
+    std::vector<int64_t> mtimes;  // (each file's mtime before its load: a failure holds while the file is as it was)
+    std::vector<char> loaded;     // (per file: it decoded; the rest are published as failed)
+    ~TextureStream() {
+      cancel.store(true);
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<TextureStream> tex_stream_;
+  bool stream_textures_ = true;
+  uint64_t streamed_files_ = 0, stream_batches_ = 0;
+  size_t upload_bytes_frame_ = 0;
+  bool upload_waiting_ = false;
+  static constexpr size_t kStreamUploadBudget = 48u << 20;  // (bytes a frame to the card while streaming: ~10 ms at PCIe speeds)
+  bool streaming_views() const { return stream_textures_ && jobs_async(); }
+  void texture_stream_poll();
+  void texture_stream_land();
+  bool texture_stream_busy() const { return tex_stream_ || upload_waiting_ || texture_stream_pending(); }  // (a headless script's `perf wait`, a windowed check's settle)
+  static void texture_stream_run(TextureStream &st);
+  void texture_stream_start(std::vector<std::pair<std::string, bool>> files);
   bool render_prefetch_start(bool preview, bool open_window);
   void render_prefetch_poll();
   uint64_t render_prefetches_ = 0;  // (since start: renders that loaded their textures first)
@@ -6654,6 +6682,9 @@ class Editor {
   const std::string &render_status_for_test() const { return render_status_; }
   void stop_render_for_test() { render_stop(); }  // (the Render window's Stop)
   void set_async_jobs_for_test(bool on) { async_jobs_ = on; }  // (round 412: a headless editor's renders and bakes on workers, as the windowed one's)
+  void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
+  bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }
+  uint64_t streamed_files_for_test() const { return streamed_files_; }
   bool render_job_running_for_test() const { return render_job_ && !render_job_->done.load(); }
   bool bake_job_running_for_test() const { return bake_job_ && !bake_job_->done.load(); }
   bool texbake_running_for_test() const { return texbake_job_ && !texbake_job_->done.load(); }

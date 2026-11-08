@@ -93,6 +93,21 @@ under ~40 %: within that, no round and no feature is consistently slower, and Pa
 `BLENDITY_VIEW_OFF=sh,lv,mask` stays for the next attribution, best read with the card's own timestamps
 (docs/tasks/0426).
 
+### Textures stream in (round 447)
+Opening a scene decoded every material's image files in the first frame that drew them. Now the views draw the
+materials' colours, load the files on a worker, and show the maps as batches land. SideRail, headless on the card, two
+runs each (the before build has no `perf frames`: its `perf wait` returned at once and its first frame, decodes and all,
+falls inside the final screenshot, so it has no mark):
+
+| mark | before | after |
+|---|---|---|
+| the `open` command's own stall | 806 / 778 ms | 771 / 852 ms |
+| the first frame | not markable | 366 / 367 ms (the meshes up: GPU path 320 ms) |
+| the next 5 frames | - | 35.4 / 33.8 ms, longest 8.6 / 10.1 ms |
+| until the textures are in | - | 1347 / 1344 ms over 425 / 422 frames, longest 77 / 69 ms |
+
+The open's own stall is the scene's parse and did not move; no frame waits for a file any more (docs/tasks/0423).
+
 ### Instanced draws (round 448)
 Neighbouring instances of one mesh draw as one call in each pass; 100 cubes of one mesh are 1 call, not 100.
 
