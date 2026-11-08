@@ -7570,7 +7570,9 @@ static void tests_round454() {
     const float near_v = shadowmask_visibility(env, true, 0.0f, 1.0f, 50.0f), far_v = shadowmask_visibility(env, true, 0.0f, 1.0f, 120.0f);
     const float mid = shadowmask_visibility(env, true, 0.0f, 1.0f, 95.0f), edge = shadowmask_visibility(env, true, 0.0f, 1.0f, 90.0f);
     std::printf("    realtime 0 / mask 1: %.2f at 0.5 D, %.2f at 0.9 D, %.2f at 0.95 D, %.2f at 1.2 D\n", near_v, edge, mid, far_v);
-    CHECK(near_v == 0.0f && edge == 0.0f && std::fabs(mid - 0.5f) < 1e-4f && far_v == 1.0f);
+    /* (The fade's edge to within a float step: 0.9f x D is not 90 exactly, and macOS's arm64 build fuses the multiply-add, so
+     * the edge came out 2.4e-7 there - the check is the blend's shape, not bit equality.) */
+    CHECK(near_v == 0.0f && edge < 1e-5f && std::fabs(mid - 0.5f) < 1e-4f && far_v == 1.0f);
     CHECK(shadowmask_visibility(env, true, 1.0f, 0.0f, 50.0f) == 1.0f && shadowmask_visibility(env, true, 1.0f, 0.0f, 120.0f) == 0.0f);  // (a moving caster's shadow near, the mask's beyond)
     CHECK(shadowmask_visibility(env, false, 1.0f, 0.25f, 120.0f) == 0.25f && shadowmask_visibility(env, false, 0.0f, 0.75f, 20.0f) == 0.0f);  // (no map: min)
     env.shadowmask_mode = 0;
