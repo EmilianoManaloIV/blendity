@@ -246,6 +246,8 @@ void read_engine_maps(const Props &p, const std::function<std::string(const std:
  * over the dielectric 4%) and the base mixed toward it. Cloth: the specular colour is the sheen's. The occlusion map
  * has no slot in Blendity: said. */
 void read_filamented(const Props &p, const std::string &family, const std::function<std::string(const std::string &)> &texture, Material &m, UnityMaterialInfo &info) {
+  /* Round 429: its Exposure Occlusion (reflections fade where the baked light is dark; the shader's default 0.2). */
+  m.exposure_occlusion = (float)std::clamp(prop(p, "_ExposureOcclusion", 0.2), 0.0, 1.0);  // (its Range(0, 1))
   const TexEnv *spec_map = tex_of(p, {"_SpecGlossMap"});
   Vec3 spec(0.04f);
   const bool has_spec = color_of(p, {"_SpecColor"}, spec);
@@ -537,6 +539,10 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   const std::string name = mat->body.str("m_Name");
   if (!name.empty()) m.name = name;
   read_base(p, mat->body, texture, m);
+  {
+    const std::string flags = mat->body.str("m_LightmapFlags");  // (round 439: Unity's Global Illumination)
+    m.gi_flags = flags.empty() ? -1 : std::atoi(flags.c_str());
+  }
   const bool toon = info.shader == "lilToon" || info.shader == "Poiyomi" || info.shader == "MToon" || info.shader == "UTS2";
   if (toon) read_toon(p, info.shader, texture, m, info);
   const bool filamented = info.shader.rfind("Filamented", 0) == 0;

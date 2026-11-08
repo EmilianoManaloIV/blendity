@@ -172,6 +172,7 @@ void PathTracer::build(const std::vector<PTObject> &objects, const std::vector<R
   lights_ = lights;
   toon_key_ = toon_key_light(lights_, &toon_key_L_);
   env_ = env;
+  build_env_dist();
   normal_mats_.clear();
   local_keys_.clear();
   inv_models_.clear();
@@ -815,6 +816,17 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
   reset();
 }
 
+size_t PathTracer::memory_bytes() const {
+  size_t n = (accum_.capacity() + albedo_.capacity() + normal_.capacity() + cpu_accum_.capacity() + cpu_albedo_.capacity() + cpu_normal_.capacity()) * sizeof(Vec3) +
+             (depth_.capacity() + cpu_depth_.capacity() + cpu_cov_.capacity() + cov_.capacity() + centre_dist_.capacity() + cpu_last_dist_.capacity() +
+              last_dist_.capacity()) * sizeof(float) +
+             (cpu_ids_.capacity() + ids_.capacity() + centre_ids_.capacity()) * sizeof(uint32_t) + objects_.capacity() * sizeof(PTObject) +
+             tlas_.capacity() * sizeof(Node) + instances_.capacity() * sizeof(Instance);
+  for (const auto &kv : blas_cache_)
+    if (kv.second) n += kv.second->tris.capacity() * sizeof(Tri) + kv.second->prim.capacity() * sizeof(uint32_t) + kv.second->nodes.capacity() * sizeof(Node);
+  return n;
+}
+
 void PathTracer::reset() {
   pause();
   for (auto &g : gpus_) {  // (task 0161: the host copies of the sums go with them)
@@ -945,15 +957,37 @@ void PathTracer::retro_affine_uv(uint32_t object, uint32_t prim, Vec2 s, Surface
   sp.uv = rm.uvs[tri[0]] * (1.0f - b1 - b2) + rm.uvs[tri[1]] * b1 + rm.uvs[tri[2]] * b2;
 }
 
+namespace {
+/* Round 439: a texture's mean luminance - its last mip level, the box-filtered mean in linear space; 1 without one. */
+float texture_mean_luminance(const TexturePtr &t) {
+  if (!t || t->levels.empty()) return 1.0f;
+  const Vec4 c = t->fetch((int)t->levels.size() - 1, 0, 0, TexWrap::Repeat);
+  const float l = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+  return l >= 0.0f && l < 1e30f ? l : 1.0f;
+}
+}  // namespace
+
+/* Round 439 (task 0415): the light a material sends, for picking emitters by power - its emission (colour x strength x
+ * its map's mean, where it has one) plus, for an Unlit material, its colour (x its base map's mean): an unlit surface
+ * shows its colour whatever lights it, so the integrator already counted it as light where a path met it, and Unity's
+ * bake takes it as an emitter too (SideRail's exit sign). */
+float PathTracer::emitter_luminance(const Material &m) {
+  float lum = 0.0f;
+  if (m.emission_strength > 0.0f) lum += luminance(m.emission) * m.emission_strength * (m.emission_map.empty() ? 1.0f : texture_mean_luminance(m.textures().emission));
+  if (m.unlit) lum += luminance(m.base_color) * (m.base_map.empty() || m.procedural ? 1.0f : texture_mean_luminance(m.textures().base));
+  return lum > 0.0f && lum < 1e30f ? lum : 0.0f;
+}
+
 /* Emissive triangles become lights, picked in proportion to their power
  * (Cycles: mesh lights in the light tree). Emission is two-sided here, as in
- * the rest of the integrator. */
+ * the rest of the integrator. Since round 439 Unlit materials too, and an emission map counts by its mean. */
 void PathTracer::collect_mesh_lights() {
   mesh_lights_.clear();
   light_cdf_.clear();
   light_of_.clear();
   light_power_ = 0.0f;
   if (!settings_.sample_mesh_lights) return;
+  std::unordered_map<const Material *, float> lum_of;  // (each material's once: a texture's mean per material, not per triangle)
   for (size_t o = 0; o < objects_.size(); o++) {
     const PTObject &ob = objects_[o];
     if (!ob.mesh || !ob.materials || ob.materials->empty()) continue;
@@ -961,21 +995,96 @@ void PathTracer::collect_mesh_lights() {
     for (uint32_t t = 0; t < (uint32_t)rm.tri_count(); t++) {
       int slot = rm.tri_material.empty() ? 0 : rm.tri_material[t];
       const MaterialPtr &mp = (*ob.materials)[(size_t)std::min(slot, (int)ob.materials->size() - 1)];
-      if (!mp || mp->emission_strength <= 0.0f || mp->unlit) continue;
-      /* Importance estimate: an emission texture is taken as white. */
-      float lum = mp->emission_map.empty() ? luminance(mp->emission) : 1.0f;
+      if (!mp || (mp->emission_strength <= 0.0f && !mp->unlit)) continue;
+      auto found = lum_of.find(mp.get());
+      if (found == lum_of.end()) found = lum_of.emplace(mp.get(), emitter_luminance(*mp)).first;
+      const float lum = found->second;
       if (lum <= 0.0f) continue;
       Vec3 a = ob.model.point(rm.positions[rm.indices[t * 3]]), b = ob.model.point(rm.positions[rm.indices[t * 3 + 1]]),
            c = ob.model.point(rm.positions[rm.indices[t * 3 + 2]]);
       float area = 0.5f * length(cross(b - a, c - a));
       if (area <= 1e-12f) continue;
-      float power = lum * mp->emission_strength * area;
+      float power = lum * area;
       light_of_[((uint64_t)o << 32) | t] = (uint32_t)mesh_lights_.size();
       mesh_lights_.push_back({(uint32_t)o, t, area, power});
       light_power_ += power;
       light_cdf_.push_back(light_power_);
     }
   }
+}
+
+namespace {
+constexpr int kEnvGridW = 256, kEnvGridH = 128;  // (cells of 1.4 degrees)
+constexpr int kEnvSuper = 4;                      // (4 x 4 directions per cell: a half-degree sun is met)
+/* A cell's mean luminance x its solid angle's sin theta, from kEnvSuper^2 directions spread over it. */
+float env_cell_weight(const Environment &env, int i, int j) {
+  float sum = 0.0f;
+  for (int b = 0; b < kEnvSuper; b++) {
+    const float th = (j + (b + 0.5f) / kEnvSuper) * kPi / kEnvGridH, st = std::sin(th), ct = std::cos(th);
+    for (int a = 0; a < kEnvSuper; a++) {
+      const float ph = (i + (a + 0.5f) / kEnvSuper) * 2.0f * kPi / kEnvGridW;
+      const float lum = luminance(env.radiance(Vec3(st * std::cos(ph), ct, st * std::sin(ph))));
+      sum += lum > 0.0f && lum < 1e30f ? lum * st : 0.0f;
+    }
+  }
+  return sum / (float)(kEnvSuper * kEnvSuper);
+}
+}  // namespace
+
+void PathTracer::build_env_dist() {
+  const bool sampled = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) && env_.map;
+  uint64_t key = sampled ? (uint64_t)(uintptr_t)env_.map.get() : 0;
+  for (float f : {env_.rotation, env_.strength, (float)env_.mode, env_.disc_cos, env_.band_width, env_.sun_dir.x, env_.sun_dir.y, env_.sun_dir.z})
+    key = mix_float(key, f);
+  if (sampled && key == env_key_ && env_w_) return;  // (the same world: the grid kept - a render's every build would redo it)
+  env_key_ = key;
+  env_w_ = env_h_ = 0;
+  env_cdf_.clear(), env_cell_.clear();
+  if (!sampled) return;
+  const int w = kEnvGridW, h = kEnvGridH;
+  std::vector<float> weight((size_t)w * h);
+  double total = 0.0;
+  for (int j = 0; j < h; j++)
+    for (int i = 0; i < w; i++) {
+      const float v = env_cell_weight(env_, i, j);
+      weight[(size_t)j * w + i] = v;
+      total += v;
+    }
+  if (!(total > 0.0)) return;
+  env_cdf_.resize(weight.size());
+  env_cell_.resize(weight.size());
+  double run = 0.0;
+  for (size_t k = 0; k < weight.size(); k++) {
+    env_cell_[k] = (float)(weight[k] / total);
+    run += weight[k] / total;
+    env_cdf_[k] = (float)run;
+  }
+  env_cdf_.back() = 1.0f;
+  env_w_ = w, env_h_ = h;
+}
+
+bool PathTracer::sample_env(uint32_t &rng, Vec3 &dir, float &pdf) const {
+  if (!env_w_) return false;
+  const float r = rnd(rng);
+  const size_t k = std::min<size_t>(std::upper_bound(env_cdf_.begin(), env_cdf_.end(), r) - env_cdf_.begin(), env_cdf_.size() - 1);
+  const int i = (int)(k % (size_t)env_w_), j = (int)(k / (size_t)env_w_);
+  const float dth = kPi / env_h_, dph = 2.0f * kPi / env_w_;
+  const float th = (j + rnd(rng)) * dth, ph = (i + rnd(rng)) * dph, st = std::sin(th);
+  if (!(st > 1e-6f) || !(env_cell_[k] > 0.0f)) return false;
+  dir = Vec3(st * std::cos(ph), std::cos(th), st * std::sin(ph));
+  pdf = env_cell_[k] / (dth * dph * st);  // (uniform in angle within the cell: the solid angle's sin theta in the pdf)
+  return pdf > 0.0f && pdf < 1e30f;
+}
+
+float PathTracer::env_pdf(Vec3 dir) const {
+  if (!env_w_) return 0.0f;
+  const float th = std::acos(std::max(-1.0f, std::min(1.0f, dir.y)));
+  float ph = std::atan2(dir.z, dir.x);
+  if (ph < 0.0f) ph += 2.0f * kPi;
+  const int j = std::min(env_h_ - 1, std::max(0, (int)(th / kPi * env_h_))), i = std::min(env_w_ - 1, std::max(0, (int)(ph / (2.0f * kPi) * env_w_)));
+  const float st = std::sin(th);
+  if (!(st > 1e-6f)) return 0.0f;
+  return env_cell_[(size_t)j * env_w_ + i] / ((kPi / env_h_) * (2.0f * kPi / env_w_) * st);
 }
 
 /* Solid-angle pdf of picking the point at distance `dist` on light `li` seen
@@ -1002,7 +1111,7 @@ bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir
   if (!(pdf > 0.0f) || dot(n, dir) <= 0.0f) return false;
   const SurfaceSample ls = evaluate_material(*lmat, lp);
   if (lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip) return false;  // (a hole: the gather passes through it too)
-  Le = ls.emission * (lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
+  Le = emitted(ls) * (lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
   return std::isfinite(Le.x) && std::isfinite(Le.y) && std::isfinite(Le.z);
 }
 
@@ -1042,7 +1151,14 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       continue;
     }
     if (!hit_any) {
-      const Vec3 Le = env_.radiance(ray.dir);
+      Vec3 Le = env_.radiance(ray.dir);
+      /* Round 441: weighted against the world's own sampling where this vertex did it (a bake's first segment: where
+       * the texel did). */
+      float w_env = 1.0f;
+      if (env_w_ && last_pdf > 0.0f && (bounce > 0 || bake_mis_env_)) {
+        const float pe = env_pdf(ray.dir);
+        w_env = last_pdf * last_pdf / (last_pdf * last_pdf + pe * pe);
+      }
 #ifdef BL_WITH_OPENPGL
       if (record) {
         /* The environment as a far-away virtual vertex (GUIDING_MAX_LIGHT_DISTANCE). */
@@ -1051,10 +1167,11 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
         openpgl::cpp::SetNormal(&bg, pgl_v(Vec3(0, 0, 1)));
         openpgl::cpp::SetDirectionOut(&bg, pgl_v(-ray.dir));
         openpgl::cpp::SetDirectContribution(&bg, pgl_v(Le));
-        openpgl::cpp::SetMiWeight(&bg, 1.0f);
+        openpgl::cpp::SetMiWeight(&bg, w_env);  // (review 441: the world's NEE records the rest)
         guide->segments.AddSegment(bg);
       }
 #endif
+      Le = Le * w_env;
       Vec3 c = beta * Le;
       if (bounce > 0 && clamp > 0) {
         float m = std::max({c.x, c.y, c.z});
@@ -1164,7 +1281,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     /* Emission found by BSDF sampling, weighted against mesh-light sampling
      * (power heuristic; camera rays see it unweighted). */
     float w_emit = 1.0f;
-    if (last_pdf > 0.0f && !mesh_lights_.empty() && luminance(s.emission) > 0.0f) {
+    if (last_pdf > 0.0f && !mesh_lights_.empty() && luminance(emitted(s)) > 0.0f && (bounce > 0 || bake_mis_emitters_)) {
       auto it = light_of_.find(((uint64_t)h.object << 32) | h.tri);
       if (it != light_of_.end()) {
         float pl = mesh_light_pdf(it->second, since_scatter + h.t, cos_hit);  // (the whole way from the scatter, not the last segment)
@@ -1189,7 +1306,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     }
 #endif
     if (s.unlit) {
-      add(beta * s.albedo);
+      add(beta * s.albedo * w_emit);  // (round 439: weighted as emission is - an Unlit surface is sampled as a light too)
       break;
     }
     if (mat->surface == (int)MaterialSurface::Glass) {
@@ -1360,13 +1477,32 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
           if (std::max({Tr.x, Tr.y, Tr.z}) > 0.0f) {
             const SurfaceSample ls = evaluate_material(*lmat, lp);
             const bool hole = lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip;  // (as sample_mesh_light: a cutout's hole emits nothing)
-            const Vec3 Le = ls.emission * Tr * (hole ? 0.0f : lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
+            const Vec3 Le = emitted(ls) * Tr * (hole ? 0.0f : lmat->surface == (int)MaterialSurface::Transparent ? saturate(ls.alpha) : 1.0f);
             float pb = sampling_pdf(dir);
-            float w = pl * pl / (pl * pl + pb * pb);
+            /* (review 441: at the last vertex no BSDF ray follows to find this emitter, so the light sampled here counts in
+             * full - MIS would drop part of it) */
+            float w = bounce == settings_.max_bounces ? 1.0f : pl * pl / (pl * pl + pb * pb);
             const Vec3 Lo = bsdf(dir) * Le * (w / pl);
             add(beta * Lo);
             record_nee(Lo);
           }
+        }
+      }
+    }
+    /* Round 441: next-event estimation of the world - a direction by its light, weighted against the BSDF's (power
+     * heuristic); the BSDF's own ray to the sky is weighted the other way where it escapes. */
+    if (env_w_) {
+      Vec3 edir;
+      float pe = 0.0f;
+      if (sample_env(rng, edir, pe) && dot(n, edir) > 0.0f && dot(sp.geo_normal, edir) > 0.0f) {
+        rays++;
+        const Vec3 Tr = transmittance({origin, edir}, 1e30f, &media);
+        if (std::max({Tr.x, Tr.y, Tr.z}) > 0.0f) {
+          const float pb = sampling_pdf(edir);
+          const float w = bounce == settings_.max_bounces ? 1.0f : pe * pe / (pe * pe + pb * pb);  // (the last vertex: in full, as the emitters)
+          const Vec3 Lo = bsdf(edir) * env_.radiance(edir) * Tr * (w / pe);
+          add(beta * Lo);
+          record_nee(Lo);
         }
       }
     }
@@ -1995,6 +2131,67 @@ bool oidn_try_gpu(OidnState &s, int setting, const std::vector<float> &color, co
 }  // namespace
 #endif
 
+namespace {
+std::string &oidn_lightmap_error() {  // (written only by the probe, inside its one-time initialisation)
+  static std::string e;
+  return e;
+}
+thread_local bool t_oidn_probe = false;  // (the probe's own failure isn't a warning: Blender's OIDN has no lightmap weights)
+}  // namespace
+
+bool PathTracer::oidn_lightmap_available(std::string *why) {
+  static const bool ok = [] {
+    std::vector<Vec3> probe(64, Vec3(0.5f));
+    t_oidn_probe = true;
+    const bool r = oidn_denoise_lightmap(probe, 8, 8);
+    t_oidn_probe = false;
+    if (!r) Log::info("OpenImageDenoise's lightmap filter isn't available (%s): bakes use the A-Trous filter", oidn_lightmap_error().c_str());
+    return r;
+  }();
+  if (why) *why = ok ? std::string() : oidn_lightmap_error();
+  return ok;
+}
+
+bool PathTracer::oidn_denoise_lightmap(std::vector<Vec3> &rgb, int w, int h) {
+#ifdef BL_WITH_OIDN
+  if (w <= 0 || h <= 0 || rgb.size() != (size_t)w * (size_t)h) return false;
+  OidnState &s = oidn_state();
+  oidn::DeviceRef device;
+  {
+    /* The lock only to open the device (the views' denoiser takes it every frame - review 423: a bake's page held it
+     * for the whole filter); OIDN serialises work on one device itself. */
+    std::lock_guard<std::mutex> lock(s.mutex);
+    if (!s.open_cpu()) return false;
+    device = s.cpu.device;
+  }
+  std::vector<float> in(rgb.size() * 3), out(rgb.size() * 3);
+  for (size_t i = 0; i < rgb.size(); i++) in[i * 3] = rgb[i].x, in[i * 3 + 1] = rgb[i].y, in[i * 3 + 2] = rgb[i].z;
+  oidn::FilterRef f = device.newFilter("RTLightmap");
+  f.setImage("color", in.data(), oidn::Format::Float3, (size_t)w, (size_t)h);
+  f.setImage("output", out.data(), oidn::Format::Float3, (size_t)w, (size_t)h);
+  f.commit();
+  f.execute();
+  const char *msg = nullptr;
+  if (device.getError(msg) != oidn::Error::None) {
+    if (t_oidn_probe) {
+      oidn_lightmap_error() = msg ? msg : "unknown error";
+      return false;
+    }
+    Log::warn("OpenImageDenoise couldn't denoise a %dx%d lightmap: %s", w, h, msg ? msg : "unknown error");
+    return false;
+  }
+  for (size_t i = 0; i < rgb.size(); i++) {
+    const Vec3 v(out[i * 3], out[i * 3 + 1], out[i * 3 + 2]);
+    rgb[i] = std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) ? Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z)) : rgb[i];
+  }
+  return true;
+#else
+  (void)rgb, (void)w, (void)h;
+  if (t_oidn_probe) oidn_lightmap_error() = "built without OpenImageDenoise";
+  return false;
+#endif
+}
+
 bool PathTracer::oidn_available() {
 #ifdef BL_WITH_OIDN
   OidnState &s = oidn_state();
@@ -2472,7 +2669,9 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
     Vec3 v = l.type == RenderLight::Directional ? l.direction : l.position;
     float a[4] = {v.x, v.y, v.z, (float)l.type};
     float b[4] = {l.color.x, l.color.y, l.color.z, l.intensity};
-    float c[4] = {l.range, l.cos_outer, l.cos_inner, l.disk ? 1.0f : 0.0f};
+    /* c.w: an area light's shape (1 a disc); a point or spot light's falloff (2 a bake's legacy curve - round 425). */
+    const float cw = l.type == RenderLight::Area ? (l.disk ? 1.0f : 0.0f) : (l.baked_falloff ? 2.0f : 0.0f);
+    float c[4] = {l.range, l.cos_outer, l.cos_inner, cw};
     float d[4] = {l.direction.x, l.direction.y, l.direction.z, l.width};
     float e[4] = {l.right.x, l.right.y, l.right.z, l.height};
     std::memcpy(g.a, a, 16);

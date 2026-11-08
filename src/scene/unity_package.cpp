@@ -4,6 +4,13 @@
 
 #include "../image/image.h"
 #include "../core/core.h"
+#include "../core/jobs.h"
+
+#include <stdexcept>
+
+#ifdef BL_WITH_LIBPNG
+#  include <zlib.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -260,6 +267,9 @@ uint32_t crc32(const std::string &data, uint32_t running) {
     }
     return t;
   }();
+#ifdef BL_WITH_LIBPNG
+  if (data.size() < ((size_t)1 << 30)) return (uint32_t)::crc32(running, (const Bytef *)data.data(), (uInt)data.size());  // (zlib's: sliced, 8x faster)
+#endif
   uint32_t crc = running ^ 0xFFFFFFFFu;
   for (unsigned char b : data) crc = table[(crc ^ b) & 255] ^ (crc >> 8);
   return crc ^ 0xFFFFFFFFu;
@@ -381,20 +391,120 @@ void put_stored(BitWriter &w, const std::string &d, bool last) {
 
 }  // namespace
 
+/* Round 422: the blocks of a batch compressed on every core. With Blender's libraries each 1 MB block is zlib's raw
+ * deflate (level 6, dynamic Huffman) primed with the 32 KB before it as its dictionary and ended by a sync flush, so the
+ * blocks join into one stream byte by byte (pigz's scheme); the last ends the stream. Without them the blocks' LZ77
+ * matching runs in parallel and their fixed-code bits are written in order into the one bit stream, as before. The
+ * pending bytes are consumed from an offset (erasing a megabyte from the front each block had been quadratic). */
 struct GzipWriter::Impl {
+  static constexpr size_t kBlock = (size_t)1 << 20, kBatch = 16;  // (16 blocks a batch: 16 MB in flight at most)
   BitWriter w;
   std::string pending;
+  size_t at = 0;  // (pending's bytes before this are compressed)
   uint32_t crc = 0;
   uint64_t size = 0;
   bool finished = false;
-  /* One block: fixed codes or stored, whichever is fewer bits. */
-  void block(const std::string &d, bool last) {
-    uint64_t cost = 0;
-    const std::vector<Token> tokens = tokenize(d, cost);
+  /* One block, serial: fixed codes or stored, whichever is fewer bits. */
+  void put_block(const std::string &d, const std::vector<Token> &tokens, uint64_t cost, bool last) {
     const uint64_t stored = (uint64_t)d.size() * 8 + 40 * ((d.size() + 65534) / 65535 + 1);
     if (cost + 3 >= stored || d.empty()) return put_stored(w, d, last);
     w.bits(last ? 1 : 0, 1), w.bits(1, 2);
     put_tokens(w, tokens);
+  }
+#ifdef BL_WITH_LIBPNG
+  /* [begin, end) of pending as one raw deflate piece, its dictionary the 32 KB before begin. */
+  /* (Empty on any failure - out of memory too: a worker mustn't throw - review 422.) */
+  static std::string deflate_piece(const std::string &all, size_t begin, size_t end, bool last) noexcept {
+    struct Stream {
+      z_stream z{};
+      bool open = false;
+      ~Stream() {
+        if (open) deflateEnd(&z);
+      }
+    } s;
+    try {
+      std::string out;
+      if (deflateInit2(&s.z, 6, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) return {};
+      s.open = true;
+      const size_t dict = std::min<size_t>(begin, 32768);
+      if (dict && deflateSetDictionary(&s.z, (const Bytef *)all.data() + begin - dict, (uInt)dict) != Z_OK) return {};
+      out.resize(deflateBound(&s.z, (uLong)(end - begin)) + 64);
+      s.z.next_in = (Bytef *)all.data() + begin, s.z.avail_in = (uInt)(end - begin);
+      s.z.next_out = (Bytef *)out.data(), s.z.avail_out = (uInt)out.size();
+      const int r = deflate(&s.z, last ? Z_FINISH : Z_SYNC_FLUSH);
+      /* A sync flush is whole only with room left over (zlib's bound doesn't cover it). */
+      const bool ok = last ? r == Z_STREAM_END : r == Z_OK && s.z.avail_in == 0 && s.z.avail_out > 0;
+      if (!ok) return {};
+      out.resize(out.size() - s.z.avail_out);
+      return out;
+    } catch (...) {
+      return {};
+    }
+  }
+#endif
+  /* The whole blocks in pending from `at` (all of it, the last block final, when `last`), a batch at a time. */
+  void flush(bool last) {
+    while (flush_batch(last)) {
+    }
+  }
+  /* At most kBatch blocks (review 422: one 300 MB write had made one 300-piece batch); true when more wait. */
+  bool flush_batch(bool last) {
+    const size_t avail = pending.size() - at;
+    size_t n = avail / kBlock;
+    if (last) n = (avail + kBlock - 1) / kBlock;
+    else if (n * kBlock == avail && n > 0) n--;  // (a full last block waits: it may be the final one)
+    if (n == 0 && !last) return false;
+    if (n == 0) n = 1;  // (an empty stream's final block)
+    const bool more = n > kBatch;
+    if (more) n = kBatch, last = false;  // (the final block is in a later batch)
+    auto range = [&](size_t i, size_t &b, size_t &e) { b = at + i * kBlock, e = std::min(pending.size(), b + kBlock); };
+#ifdef BL_WITH_LIBPNG
+    std::vector<std::string> pieces(n);
+    JobSystem::global().parallel_for((int64_t)n, 1, [&](int64_t a, int64_t z) {
+      for (int64_t i = a; i < z; i++) {
+        size_t b, e;
+        range((size_t)i, b, e);
+        pieces[(size_t)i] = deflate_piece(pending, b, e, last && (size_t)i + 1 == n);
+      }
+    });
+    for (const std::string &p : pieces)
+      if (p.empty()) throw std::runtime_error("zlib couldn't compress the package");  // (out of memory: the export says so)
+    for (const std::string &p : pieces) w.out += p;  // (each piece ends on a byte: the bit writer holds nothing here)
+    at += std::min(avail, n * kBlock);
+    compact();
+    return more;
+#else
+    std::vector<std::vector<Token>> tokens(n);
+    std::vector<uint64_t> cost(n, 0);
+    std::atomic<bool> failed{false};
+    JobSystem::global().parallel_for((int64_t)n, 1, [&](int64_t a, int64_t z) {
+      for (int64_t i = a; i < z; i++) {
+        size_t b, e;
+        range((size_t)i, b, e);
+        try {
+          tokens[(size_t)i] = tokenize(pending.substr(b, e - b), cost[(size_t)i]);
+        } catch (...) {  // (a worker mustn't throw: out of memory is said by the caller - review 422)
+          failed.store(true);
+        }
+      }
+    });
+    if (failed.load()) throw std::runtime_error("out of memory compressing the package");
+    for (size_t i = 0; i < n; i++) {
+      size_t b, e;
+      range(i, b, e);
+      put_block(pending.substr(b, e - b), tokens[i], cost[i], last && i + 1 == n);
+    }
+    at += std::min(avail, n * kBlock);
+    compact();
+    return more;
+#endif
+  }
+  /* Drop what's compressed, keeping the 32 KB before `at` (the next piece's dictionary). */
+  void compact() {
+    const size_t keep = std::min<size_t>(at, 32768);
+    if (at - keep < kBlock * kBatch) return;  // (not worth moving yet)
+    pending.erase(0, at - keep);
+    at = keep;
   }
 };
 
@@ -407,19 +517,15 @@ void GzipWriter::write(const std::string &data) {
   Impl &g = *impl_;
   g.crc = crc32(data, g.crc), g.size += data.size();
   g.pending += data;
-  const size_t kBlock = 1 << 20;
-  while (g.pending.size() > kBlock) {  // (full blocks out; the rest waits - the last block is the final one)
-    g.block(g.pending.substr(0, kBlock), false);
-    g.pending.erase(0, kBlock);
-  }
+  if (g.pending.size() - g.at > Impl::kBlock * Impl::kBatch) g.flush(false);
 }
 
 void GzipWriter::finish() {
   Impl &g = *impl_;
   if (g.finished) return;
   g.finished = true;
-  g.block(g.pending, true);
-  g.pending.clear();
+  g.flush(true);
+  g.pending.clear(), g.at = 0;
   g.w.align();
   for (int k = 0; k < 4; k++) g.w.out += (char)(g.crc >> (8 * k) & 255);
   for (int k = 0; k < 4; k++) g.w.out += (char)(g.size >> (8 * k) & 255);

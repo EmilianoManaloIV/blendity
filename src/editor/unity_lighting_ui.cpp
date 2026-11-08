@@ -145,7 +145,7 @@ public static class BlendityLightmaps {
             EditorSceneManager.OpenScene(Arg("-blendityScene"), OpenSceneMode.Single);
             var o = new Out();
             o.w.Write(Encoding.ASCII.GetBytes("BLULIGHT"));
-            o.w.Write(2);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes)
+            o.w.Write(3);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes; round 442: 3 - the probes along 26 directions last)
             o.w.Write(-1);  // (the lightmap encoding: not public in 2022.3 - the EXR itself is linear)
             o.w.Write((int)LightmapSettings.lightmapsMode);
             /* Which bake: the LightingData.asset's path and its bytes' FNV-1a 32 (Blendity refuses the file once Unity bakes again). */
@@ -259,6 +259,21 @@ public static class BlendityLightmaps {
                     Color[] px = cube.GetPixels(f, 0);
                     foreach (Color c in px) { o.w.Write(Mathf.FloatToHalf(c.r)); o.w.Write(Mathf.FloatToHalf(c.g)); o.w.Write(Mathf.FloatToHalf(c.b)); }
                 }
+            }
+            /* Round 442 (version 3): each probe along 26 directions - the cube's faces, edges and corners, in Blendity's
+             * order (probe_fit_directions) - enough for Blendity to fit Unity's nine coefficients per colour exactly. */
+            var fit = new List<Vector3>(axes);
+            float[] sg = { 1f, -1f };
+            for (int e = 0; e < 3; e++)
+                foreach (float a in sg) foreach (float b in sg)
+                    fit.Add((e == 0 ? new Vector3(a, b, 0) : e == 1 ? new Vector3(a, 0, b) : new Vector3(0, a, b)).normalized);
+            foreach (float a in sg) foreach (float b in sg) foreach (float d in sg) fit.Add(new Vector3(a, b, d).normalized);
+            Vector3[] fitDirs = fit.ToArray();
+            var seen26 = new Color[26];
+            o.w.Write(n);
+            for (int i = 0; i < n; i++) {
+                sh[i].Evaluate(fitDirs, seen26);
+                foreach (Color c in seen26) { o.w.Write(c.r); o.w.Write(c.g); o.w.Write(c.b); }
             }
             File.WriteAllBytes(outPath, o.Done());
             code = 0;
@@ -422,6 +437,22 @@ void Editor::lighting_reset_for(const char *why) {
 /* The file's lighting as the scene's baked lighting: lightmap pages from Unity's images, each matched object's UVs,
  * the lights' modes, Unity's probes as the probe volume - all keyed to the scene as it is now, so it shows as baked
  * and an object changed later loses only its own. Realtime GI goes off (Unity's scenes for VRChat bake). */
+/* Round 444: Unity's Subtractive lightmaps (and probes) hold their Mixed lights: the main directional one (the
+ * brightest) recorded as 3 - realtime on moving objects -, the others as Baked (2). */
+void Editor::unity_subtractive_modes(LightingData &ld) const {
+  uint64_t main = 0;
+  float best = -1.0f;
+  for (const auto &[id, mode] : ld.light_modes) {
+    const GameObject *g = mode == 1 ? scene_->find(id) : nullptr;
+    const Light *l = g ? g->get<Light>() : nullptr;
+    if (!l || l->type != 0) continue;
+    const float w = l->intensity * (0.2126f * l->color.x + 0.7152f * l->color.y + 0.0722f * l->color.z);
+    if (w > best) best = w, main = id;
+  }
+  for (auto &[id, mode] : ld.light_modes)
+    if (mode == 1) mode = id == main ? 3 : 2;
+}
+
 bool Editor::apply_unity_lighting(const std::string &file) {
   const double started = now_seconds();
   std::string bytes, why;
@@ -468,6 +499,7 @@ bool Editor::apply_unity_lighting(const std::string &file) {
     const auto b = bake_of.find(unity_lighting_path(g, under));
     if (b != bake_of.end() && (b->second == 1 || b->second == 2)) ld.light_modes[g.id] = b->second;
   });
+  if (scene_->unity_bake.mixed == 1) unity_subtractive_modes(ld);  // (round 444: Unity's Subtractive lightmaps hold their Mixed lights)
   lighting_reset_for("Unity's lightmaps");
   scene_->lighting.baked_gi = true, scene_->lighting.realtime_gi = false;
   lighting_data_ = std::move(ld);

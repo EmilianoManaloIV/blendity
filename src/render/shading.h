@@ -55,6 +55,11 @@ struct SurfacePoint {
   /* Baked lighting at this point (rasterizer only): replaces the sky's irradiance in the diffuse term. */
   bool has_lightmap = false;
   Vec3 lightmap;
+  bool has_lightmap_dir = false;  // round 426: the lightmap's direction page here (LightingData::dir_pages)
+  Vec3 shadowmask{1.0f, 1.0f, 1.0f};  // round 444: the Shadowmask lights' baked visibility here, channels 0-2
+  bool has_shadowmask = false;
+  bool back_side = false;         // round 426: the normals were turned to the eye (the back of a double-sided surface)
+  Vec3 lightmap_dir;
   Vec3 lightmap_add;  // realtime GI's bounce of lights the bake doesn't hold (task 0013), added to it
   /* Probe volumes (task 0014): irradiance / pi from the probes around this point. */
   bool has_probe = false;
@@ -70,6 +75,7 @@ struct SurfacePoint {
 struct SurfaceSample {
   Vec3 albedo{0.8f, 0.8f, 0.8f};
   float metallic = 0, roughness = 0.5f, specular = 0.5f, alpha = 1;
+  float exposure_occlusion = 0.0f;  // round 429: Material::exposure_occlusion
   Vec3 emission;
   Vec3 normal;  // after normal mapping
   bool unlit = false;
@@ -129,6 +135,39 @@ Vec3 shade_toon(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 L, float lit);
 /* The rim light at the silhouette (added once, not per light), on the side the material asks for relative to the
  * key light's direction `key_L` (toward the light), where its mask allows. */
 Vec3 toon_rim(const SurfaceSample &s, Vec3 n, Vec3 V, Vec3 key_L);
+/* Round 426 (Unity's Directional mode, DecodeDirectionalLightmap): a lightmap texel's light rebalanced for the shaded
+ * (normal-mapped) normal. `a` is where its light came from - the luminance-weighted mean incoming direction. Unity's
+ * half-Lambert, 0.5 dot(n, a) + 0.5, at the shaded normal over the same at the surface's own normal - Unity's
+ * directionality divisor taken where the bake took the texel - so a surface without a normal map keeps its light as
+ * baked, and a bump facing the light gets more of it. `back`: the renderer turned both normals to the eye (the back
+ * of a double-sided surface) - decoded in the front's frame, as the texel was baked (review 426: the back's divisor had
+ * been small, up to 4x light on a bump). 1 when the light came from behind the surface. */
+inline float lightmap_direction_factor(Vec3 shaded_n, Vec3 surface_n, Vec3 a, bool back = false) {
+  if (back) shaded_n = -shaded_n, surface_n = -surface_n;
+  const float den = 0.5f * dot(surface_n, a) + 0.5f;
+  if (!(den > 0.05f)) return 1.0f;
+  const float f = (0.5f * dot(shaded_n, a) + 0.5f) / den;
+  return f < 1e30f ? std::max(0.0f, std::min(4.0f, f)) : 1.0f;  // (as the card clamps: 0 to 4; NaN: 1)
+}
+
+/* Round 429 (Filamented's specular occlusion from the baked light), per colour: Lagarde and de Rousiers 2014's specular
+ * occlusion saturate(pow(NoV + ao, exp2(-16 a - 1)) - 1 + ao) - a Filamented's roughness, the perceptual one squared
+ * (perceptual no lower than its 0.045) - with ao = saturate(|baked irradiance| / exposure_occlusion)
+ * (IrradianceToExposureOcclusion), then Jimenez et al. 2016's multi-bounce by the specular colour f0 (gtaoMultiBounce:
+ * Filamented builds with MULTI_BOUNCE_AMBIENT_OCCLUSION, so a metal keeps more of its reflection). 1 when off. */
+inline Vec3 baked_specular_occlusion(float exposure_occlusion, Vec3 baked, float nv, float perceptual_roughness, Vec3 f0) {
+  if (!(exposure_occlusion > 0.0f)) return Vec3(1.0f);
+  const float ao = std::max(0.0f, std::min(1.0f, length(baked) / exposure_occlusion));
+  const float pr = std::max(0.045f, std::min(1.0f, perceptual_roughness)), r = pr * pr;
+  const float so_raw = std::pow(std::max(0.0f, nv) + ao, std::exp2(-16.0f * r - 1.0f)) - 1.0f + ao;
+  const float v = so_raw >= 0.0f ? std::min(1.0f, so_raw) : 0.0f;
+  auto bounce = [v](float c) {
+    const float a = 2.0404f * c - 0.3324f, b = -4.7951f * c + 0.6417f, cc = 2.7552f * c + 0.6903f;
+    return std::max(v, ((v * a + b) * v + cc) * v);
+  };
+  return Vec3(bounce(f0.x), bounce(f0.y), bounce(f0.z));
+}
+
 /* The key light (task 0148): the brightest directional light's index, -1 without one; `L` the direction toward it
  * (up when there is none). With Toon Key Light Only, only it bands the tones. */
 struct RenderLight;  // raster.h

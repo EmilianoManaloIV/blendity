@@ -123,6 +123,41 @@ the residual fixes, so that they measure the finished state once.
   pass the target, the floor misses on SSIM alone (a dark frame's fine texture). What remains is the particle smoke (not
   drawn by the user's choice) and the mirror's players.
 
+## Pass 17 (rounds 421-434, 2026-11-07): Blendity's own bake against Unity's
+
+Every SideRail number above loaded **Unity's** lightmaps. Pass 17 compared Blendity's **own** Generate Lighting, at the
+scene's own settings, with Unity's render of each station (`tools/unity_compare.py world ... --blendity-bake`):
+
+| station (MAE / SSIM / grid correlation) | Unity's lightmaps | Blendity's bake, round 421 | Blendity's bake, final |
+|---|---|---|---|
+| spawn | 3.46 / 0.921 / 0.989 | 5.55 / 0.890 / 0.539 | 3.71 / 0.812 / 0.899 |
+| spawn_back (dark) | 1.61 / 0.806 / 0.693 | 2.34 / 0.875 / 0.859 | 1.37 / 0.772 / 0.360 |
+| floor | 2.85 / 0.870 / 0.998 | 7.66 / 0.692 / 0.666 | 4.36 / 0.747 / 0.974 |
+| ahead | 3.00 / 0.949 / 0.984 | 4.12 / 0.900 / 0.419 | 3.06 / 0.883 / 0.958 |
+
+The bake takes 85 s (686 s at the start; Unity's own was not timed). Brightness and placement now match Unity's (MAE under
+4 at three stations, the light where Unity puts it); fine structure doesn't yet (SSIM 0.75-0.88, target 0.90). What
+closed the gap: SideRail's lamps shine through see-through "light profile" spheres (Unity's Alpha Source, From Gray Scale)
+with Unity's legacy falloff for baked lights; reflection probes had been upside down since round 401; Filamented's
+specular occlusion; texel validity. Details and the open items: docs/PERFORMANCE.md, "Pass 17 in one table".
+
+**Navigation, after round 431** (ms a frame on the card): SideRail's Scene view 8.1 (Unity's median 10.0), its Scene +
+Game view 11.0 (Unity's Game view 4.8); Shinano's Scene view 7.5 (Unity's 2.2) - of it 2.8 ms re-deriving a scene that
+didn't change (a scene-wide change counter, open).
+
+## Pass 18 (rounds 435-446, 2026-11-08): the views, the bake's remaining features
+
+**Navigation** (ms a frame on the card): Shinano's Scene view 7.5 -> **4.6** (Unity's 2.2), its Scene + Game view 6.2 ->
+**2.8** (Unity's Game view 2.5) - a scene-wide change counter stopped every view re-deriving an unchanged scene. Enter
+Edit Mode on the 500k sphere 116 -> 96 ms.
+
+**Blendity's own bake against Unity's** (SideRail, MAE / SSIM / grid): spawn 3.69 / 0.809 / 0.898, spawn_back 1.43 /
+0.777 / 0.129, floor 4.25 / 0.771 / 0.974, ahead 3.06 / 0.884 / 0.958, in 74 s. Of Pass 18's bake rounds only the
+directional strength moved a station (the floor's SSIM 0.747 -> 0.771); emitters, island charts, seams, the sky's
+importance sampling and light picking are right on synthetic scenes and flat here. Blendity now has what Unity's
+Lighting window offers that it lacked - Shadowmask and Subtractive, L2 probes interpolated over Unity's tetrahedra - and
+draws VRChat's Light Volumes in its own views, as the headset does. Details: docs/PERFORMANCE.md, "Pass 18 in one table".
+
 ## Residuals, ranked (after round 405)
 
 1. ~~SideRail's fog tint under ACES / +1 EV~~ - fixed in round 405 (Unity's ACES curve as the view transform).
@@ -132,3 +167,8 @@ the residual fixes, so that they measure the finished state once.
    pinned down; the ACES fit's input and output matrices (the fog's blue a little more saturated than Unity's).
 5. The eye materials' reflection textures (Shinano's face, 2.6).
 6. Particle smoke (not drawn, the user's choice) and the mirror's players - counted, not fixed.
+7. (Pass 17) Blendity's own bake: SSIM under the target at every station (directional strength, seams, the exit sign's
+   glow); Shinano's views 3x Unity's (the change counter).
+8. (Pass 18) Directional strength, seams and the exit sign done: SSIM still 0.77-0.88 (Unity's denoiser and filtering,
+   chart placement, the reflection probes' content - not pinned down); Shinano's Scene view 2.1x Unity's (its UI and
+   overlays).

@@ -329,9 +329,13 @@ void Editor::draw_statusbar_hint(const Recti &r) {
   int x = r.x;
   if (!undo_.empty() && r.w > u.px(140)) {
     const Recti undo_r{x, r.y + u.px(1), u.px(50), r.h - u.px(2)};
+    /* The label before the button: a click undoes the last step, which can leave the stack empty (round 433's soak:
+     * back() on the emptied vector - undefined; the debug build's assertion caught it). */
+    const std::string label = undo_.back().label;
+    if (u.record_buttons) u.button_rects["status:Undo"] = undo_r;
     if (u.button(undo_r, "Undo")) undo();
-    u.tooltip("Undo " + undo_.back().label + " (" + key("edit.undo") + ").");
-    const std::string last = "Last: " + undo_.back().label;
+    u.tooltip("Undo " + label + " (" + key("edit.undo") + ").");
+    const std::string last = "Last: " + label;
     const int lw = std::min(u.font.text_width(last), r.w / 4);
     const Recti last_r{undo_r.right() + u.px(6), r.y, lw, r.h};
     u.canvas.text_ellipsis(u.font, last_r.x, r.y + (r.h - u.font.line_height()) / 2, lw, last, u.theme.text_dim);

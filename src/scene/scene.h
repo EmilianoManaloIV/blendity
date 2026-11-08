@@ -302,6 +302,10 @@ struct Light : ComponentBase<Light> {
    * Culling Mask kept as Unity's bits. */
   int shadows = 2;
   float shadow_strength = 1.0f;
+  /* Round 424 (Unity's Baked Shadow Radius / Angle): the size the bake gives a point or spot light (a ball, metres) and
+   * a directional one (a disc in the sky, its full angle in degrees), so its baked shadows soften away from what
+   * casts them. 0: sharp. */
+  float shadow_radius = 0.0f, shadow_angle = 0.0f;
   float bounce_intensity = 1.0f;
   TextureRef cookie;
   float cookie_size = 10.0f;
@@ -1718,6 +1722,7 @@ class GameObject {
   void set_world_rotation(Quat q);
   void set_world_matrix(const Mat4 &world);
   void mark_dirty();
+  void mark_dirty_tree();  // (mark_dirty without the change counter's bump: its recursion)
   bool active_in_hierarchy() const;
 
   template<class T> T *get() const {
@@ -1840,6 +1845,20 @@ struct EnvironmentSettings;
 
 /* Round 401: the Unity scene file this scene was opened from (project-relative, "" when none): Export Unity Package
  * writes the scene's world, camera and light settings back into it. */
+/* Round 421 (ADR 0113): a Unity scene's lightmap settings as read (unity_bake_settings, unity_scene.h). */
+struct UnityBakeSettings {
+  bool read = false;
+  float texels = 40.0f;
+  int max_size = 1024, padding = 2, direct = 32, indirect = 512, environment = 256, bounces = 2;
+  int filtering = 1;          // m_PVRFilteringMode: 0 None, 1 Auto, 2 Advanced
+  int denoiser_indirect = 0;  // m_PVRDenoiserTypeIndirect: 0 None, 1 OptiX, 2 OpenImageDenoise, 3 Radeon Pro
+  int directional = 1;        // m_LightmapsBakeMode: 0 Non-Directional, 1 Directional
+  int mixed = 0;              // m_MixedBakeMode: 0 Baked Indirect, 1 Subtractive, 2 Shadowmask
+  bool ao = false;
+  int backend = 1;            // m_BakeBackend: 0 Enlighten, 1 Progressive CPU, 2 Progressive GPU
+  bool baked_gi = true;       // m_EnableBakedLightmaps (Baked Global Illumination)
+  std::string source;         // "the LightingSettings asset" / "the scene's embedded LightingSettings" / "the scene's own settings"
+};
 struct UnitySceneLink {
   std::string file;
   int ambient_mode = -1;           // Unity's m_AmbientMode as read (0 Skybox, 1 Trilight, 3 Flat, 4 Custom; -1 none): written back only where Blendity's world still means it (review 401)
@@ -1888,12 +1907,15 @@ int default_lighting_update_mode();
 
 struct LightingSettings {
   bool baked_gi = true;           // Baked Global Illumination
-  int lighting_mode = 0;          // 0 Baked Indirect
+  int lighting_mode = 0;          // 0 Baked Indirect, 1 Shadowmask, 2 Subtractive (round 444, ADR 0117)
   float texels_per_unit = 40.0f;  // Lightmap Resolution
   int max_size = 1024;            // Max Lightmap Size
   int padding = 2;                // Lightmap Padding (texels)
   int direct_samples = 32;
-  int indirect_samples = 256;
+  int indirect_samples = 512;  // (round 423: Unity's default Indirect Samples, was 256)
+  int directional_mode = 1;    // round 426: Unity's Directional Mode - 0 Non-Directional, 1 Directional (a direction page per lightmap)
+  int bake_device = 0;         // round 430: Unity's Lightmapper - 0 the Render device's (as before), 1 the CPU, 2 the GPU when there is one
+  float backface_tolerance = 0.9f;  // round 430: Unity's Backface Tolerance (0: every texel kept)
   int bounces = 2;
   bool denoise = true;
   float indirect_intensity = 1.0f;
@@ -1924,6 +1946,7 @@ struct LightingSettings {
   float probe_view_bias = 0.1f;
   bool probe_leak_reduction = true; // APV's normal-based leak reduction
   bool show_probes = false;         // draw them in the Scene view
+  bool light_volumes_in_views = true;  // (round 443, task 0419: the views light dynamic objects from baked VRC Light Volumes, as VRChat does)
   void reflect(Reflector &r);
 };
 
@@ -2008,6 +2031,7 @@ class Scene {
    * MainCamera tag): an object id, 0 = none chosen (then "Main Camera" by name, else the first camera). */
   uint64_t active_camera = 0;
   UnitySceneLink unity;  // (round 401)
+  UnityBakeSettings unity_bake;  // (round 421: the Unity scene's lightmap settings as read - kept for the comparison and later rounds; not saved)
   /* The scene's sequence (task 0070, ADR 0030 amended): a .seq whose bars each name a clip and the object it plays
    * on; played in Play by `director` (a Sequencer of the scene's, made at Play's start). */
   std::string sequence;
@@ -2018,6 +2042,10 @@ class Scene {
 
   GameObject *create(const std::string &name, GameObject *parent = nullptr);
   void destroy(GameObject *go);
+  /* Round 433: many objects (and their children) in one pass - each parent's list and the scene's filtered once
+   * instead of once per object (50,000 roots deleted one by one had been quadratic: 365 ms). The survivors keep
+   * their order; an object named twice, or with its parent, is destroyed once. */
+  void destroy(const std::vector<GameObject *> &list);
   GameObject *find(uint64_t id) const;
   GameObject *find_by_name(const std::string &name) const;
   /* Reparents keeping the world transform (Unity's default, Blender's "Keep Transform"). */

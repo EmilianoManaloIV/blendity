@@ -2,6 +2,470 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 446): Pass 18's write-up
+
+**Asked:** Pass 18's round 446 - the pass in one table, the comparison with Unity, the lessons, the baseline; and the
+workflow's scripts kept in the repository.
+
+**Changed (task 0422)**
+- **docs/PERFORMANCE.md, "Pass 18 in one table":** Shinano's Scene view 7.5 -> 4.6 ms (Unity's 2.2), 50,000 cubes 101 ->
+  61 ms, Enter Edit Mode on 500k 116 -> 96 ms; SideRail's bake against Unity's - the floor's SSIM 0.747 -> 0.771, ADR
+  0113's target still missed; the open items ranked.
+- **docs/hci/compare-unity-vrchat-2026-11.md:** a Pass 18 section.
+- **stress/results/baseline.md** refreshed from this build.
+- **tools/dev/:** the round workflow's scripts (chain, publish, copy, patch helper), with a README.
+- **Learn:** "How good is the bake?" gains Pass 18's result and a question.
+
+**Checked:** both suites - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-08 (round 444): Shadowmask and Subtractive
+
+**Asked:** Pass 18's round 444 - Unity's other two Lighting Modes, read from Unity scenes instead of noted.
+
+**Changed (task 0420, ADR 0117)**
+- **Shadowmask:** Mixed lights keep their realtime light, their shadows from the static scene baked into a mask (three
+  lights), on the CPU and the card - a Mixed lamp's shadow, which no view drew before.
+- **Subtractive, as Unity splits it:** the main directional Mixed light baked into the lightmaps and realtime on moving
+  objects (their shadow darkening the lightmap toward Unity's shadow colour); the other Mixed lights baked fully. Unity's
+  own Subtractive lightmaps (SideRail's) no longer get their Mixed lights again in realtime.
+- **Unity's `m_MixedBakeMode`** sets the scene's Lighting Mode.
+- **Learn:** "Mixed lights: Baked Indirect, Shadowmask, Subtractive".
+
+**Checked:** one chain with round 442 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits; the bake-quality section unchanged (room 0.016, corridor 0.008, courtyard 0.060). SideRail has no Mixed lights (10 Baked, 1 Realtime), so its stations are round 441's: spawn 3.69 / 0.809, floor 4.25 / 0.771, ahead 3.06 / 0.884 (MAE / SSIM); the bake 74 s.
+
+## 2026-11-08 (round 442): L2 SH probes and Light Probe Groups
+
+**Asked:** Pass 18's round 442 - probes as L2 spherical harmonics, and Unity's Light Probe Groups interpolated over
+their tetrahedra.
+
+**Changed (task 0418, ADR 0116)**
+- **Probes keep L2 SH** (nine coefficients a colour) beside the ambient cube, baked from the same rays and lamps; baked
+  probe light shades from them on the CPU and the card. A sun-lit probe's light against N.L: mean error 0.132 -> 0.023.
+- **Unity's probes** come along 26 directions (the lighting file's version 3), fitted to L2, and are interpolated over
+  the tetrahedra of their positions (Light Probe Groups), as Unity does - an older lighting file's probes too (their
+  cubes), so a Unity scene's probe light can change a little where it was taken from the nearest four.
+- **Learn:** "Light probes: nine numbers a colour, and tetrahedra".
+
+**Checked:** one chain with round 444 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed (round 444's card test first read its view's device after a CPU view - fixed); the audits.
+
+## 2026-11-07 (round 445): the soak's memory
+
+**Asked:** Pass 18's round 445 - the soak's 1.1-1.3 GB of working memory: what holds it, by subsystem, and a bound.
+
+**Changed (task 0421)**
+- **Memory by subsystem:** `Editor::memory_accounts()` and `perf memory` - the scene, undo history, image cache,
+  renderers' scratch, views' planes and pictures, shadow maps, lightmaps, voxel GI, path tracers, the procedural-texture
+  cache and a running surface's planes, with the bytes no account names. The soak prints them every minute and on every
+  frame that grows the process by 20 MB (was 100), with the jobs running and the frame's parts.
+- **The holder:** a 4096 x 4096 procedural surface - 738 MB of planes on its worker while it evaluates, then 448 MB of
+  images (six with their mips) in a procedural-texture cache that had no limit and was not in the image cache's count.
+  Not the scene, the undo history or the textures.
+- **Bounded:** that cache has a budget (1/32 of the machine's memory, 128-512 MB): over it, the least recently used
+  images only the cache holds are dropped (in-use ones pinned), and a dropped surface isn't evaluated again until it is
+  edited or something asks. The renderers' scratch (152 MB after Edit Mode on the 500k sphere) is freed from a renderer
+  that has drawn nothing for 5 seconds, with the total over 96 MB.
+- **Left open:** the planes of a running 4096 x 4096 surface (738 MB, a worker's working memory) and six images for every
+  surface whether its outputs are on.
+- **Learn:** "Who holds the memory? Count it by subsystem"
+
+**Checked:** one chain with round 443 - with Blender's libraries 16,542; dependency-free 15,767 (Windows) and 15,773 (Linux, WSL), 0 failed; the audits. The soak (seed 4242): the working set 699 -> 521 MB at minute 1, flat to the end.
+
+## 2026-11-07 (round 443): Light Volumes in the views
+
+**Asked:** Pass 18's round 443 - both renderers sample the baked VRC Light Volumes on dynamic objects as VRChat does, so
+the view matches the headset; a toggle for it.
+
+**Changed (task 0419)**
+- **A dynamic object inside a baked Light Volume takes the volume's light** in the Scene and Game views and renders, on
+  the CPU and on the card: trilinear over the voxels, L0 + L1 . n for the shaded normal (the L1 turned with the box if it
+  rotated since the bake), times the volume's Color and Intensity, blended at the box edge by the package's bounds
+  mask over Smooth Blending; the smaller of two boxes wins, an Additive one adds. What the volumes leave goes to the
+  probe volume (or the sky). Lightmapped objects are untouched.
+- **The card** reads the volumes from the probe volume's buffer (`lv_sample`, the CPU's function line for line); more
+  than 262,144 voxels of volumes goes to the CPU, said.
+- **Light Volumes in Views** (Lighting window, `set Lighting.LightVolumesInViews`): on by default, effective where the
+  scene has baked volumes. The Scene view's bar has no lighting menu, so it is a Lighting setting.
+- **Left open:** the package's per-volume Exposure / Shadows / Highlights and its non-linear L1 option.
+- **Learn:** "VRC Light Volumes: seen in Blendity's views".
+
+**Checked:** both suites - with Blender's libraries 16,542 (one chain with round 445); dependency-free 15,767 (Windows) and 15,773
+(Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 441): sampling
+
+**Asked:** Pass 18's round 441 - sample the sky by its light, and pick among many lamps.
+
+**Changed (task 0417)**
+- **The sky and HDRIs sampled by their light** at each texel and path vertex: a floor under a bright HDRI patch, error at
+  16 samples 4.46 -> 0.10.
+- **Light picking past 8 lamps:** 40 lamps along a hall give the same light from 49k shadow rays instead of 224k.
+- SideRail against Unity after rounds 439-441: spawn 3.69 / 0.809 / 0.898, spawn_back (dark) 1.43 / 0.777 / 0.129, floor 4.25 / 0.771 / 0.974, ahead 3.06 / 0.884 / 0.958 (MAE / SSIM / grid; round 438: 3.70 / 0.813, 1.37 / 0.772, 4.25 / 0.773, 3.06 / 0.885) - flat within run-to-run noise: ADR 0113's SSIM target still missed at three stations. The bake 91 s (lightmaps 52.3 s on the card, the filter 2.1 s).
+- **Learn:** "Bright skies and many lamps: where the bake aims its rays".
+
+**Checked:** rounds 439-441 in one chain - both suites, with Blender's libraries 16,452; dependency-free
+15,698 (Windows) and 15,704 (Linux, WSL), 0 failed; the audits; the bake-quality section; SideRail against Unity.
+
+## 2026-11-07 (round 440): charts and seams
+
+**Asked:** Pass 18's round 440 - pack each UV island on its own, and stitch the seams (Unity's Stitch Seams).
+
+**Changed (task 0416)**
+- **Island charts:** each UV island packed on its own, an object's islands on one page - 60 objects on 128-texel pages
+  take 33 pages instead of 45.
+- **Stitch Seams:** texels across a seam on a smooth surface pulled together - a sphere's step 1.85 % -> 0.24 %; a
+  cube's hard corners left alone. The realtime lightmaps keep their squares.
+- **Learn:** "Seams in the lightmap, and packing it tighter".
+
+**Checked:** with rounds 439 and 441 (one chain): see round 441 (both suites, Linux, the audits, SideRail).
+
+## 2026-11-07 (round 439): emitters
+
+**Asked:** Pass 18's round 439 - glowing and unlit surfaces as lights in the bake, as Unity's.
+
+**Changed (task 0415)**
+- **Unlit materials are emitters:** sampled at each texel and path vertex, weighted against the paths that meet them -
+  a floor under a small unlit sign: error at 16 samples 0.020 -> 0.0003, the same light on average.
+- **An emission map counts by its mean** when emitters are picked, not as white.
+- **Unity's Global Illumination on materials** (`m_LightmapFlags`): only Baked emission lights the bake, as in Unity.
+- **Learn:** "Glowing signs in the bake: emitters".
+
+**Checked:** with rounds 440-441 (one chain): see round 441 (both suites, Linux, the audits, SideRail).
+
+## 2026-11-07 (round 438): directional strength
+
+**Asked:** Pass 18's round 438 - store a baked direction's length as Unity does, checked against Unity's own direction
+maps and SideRail's stations.
+
+**Changed (task 0414, ADR 0114 amended)**
+- **A saved direction's length is its direct share raised to 7.25,** the way it points kept: SideRail's lengths over
+  lit texels went from a median of 0.744 (90th percentile 0.949) to 0.165 (0.701), against Unity's own maps' 0.117
+  (0.715). A normal map now leans the baked light about as much as in Unity's render, not about six times as much.
+- **SideRail's floor station:** SSIM 0.747 -> 0.773, MAE 4.36 -> 4.25; the others unchanged. ADR 0113's SSIM target is
+  still missed at three stations.
+- **Learn:** "How strongly the baked light leans: the direction's length".
+
+**Checked:** both suites - with Blender's libraries 16,435; dependency-free 15,681 (Windows) and 15,687 (Linux, WSL),
+0 failed; the audits; the bake-quality section; SideRail's stations against Unity.
+
+## 2026-11-07 (round 437): the two freezes
+
+**Asked:** Pass 18's round 437 - Enter Edit Mode on a 500k-face mesh, and the 698 ms frame while SideRail path-traced.
+
+**Changed (task 0413)**
+- **The CPU cage's commands written once:** prepared straight into the batch, not zero-filled and copied twice; an
+  opaque dot's inside written, not blended. Enter Edit Mode on the 500k sphere 115-123 -> 98-110 ms; an Edit Mode
+  frame after it 70 -> 43-54 ms.
+- **The 698 ms frame was the first frame after opening SideRail**, not the path tracer: the textures decoded in it and
+  sent to the card. A warm path-traced F12 never goes over 34 ms.
+- **F12's textures loaded on a worker first** when they aren't cached ("loading N textures"): a cold F12's start on
+  SideRail 861 -> 47 ms.
+- **A `.scene` opened on a worker decodes its textures there:** its first frame draws from the cache.
+- **`perf mark` names its longest frame's parts**; **`jobs async on|off`** runs a headless script's jobs on workers.
+- **Left open:** a Unity scene import's first frame still decodes and uploads its textures (textures that stream in are
+  the fix); Enter Edit Mode's 34 ms render mesh still in the frame.
+- **Learn:** "Finding a frozen frame: which part was it?"
+
+**Checked:** both suites - with Blender's libraries 16,431; dependency-free 15,677 (Windows) and 15,683
+(Linux, WSL), 0 failed; the audits; the fuzz.
+
+## 2026-11-07 (round 436): the idle frame
+
+**Asked:** Pass 18's round 436 - keep what the views re-derive every frame on the change counter.
+
+**Changed (task 0412, ADR 0115 amended)**
+- **The views' draw items kept** while the scene's hash and the view's switches hold still (the eye too where an
+  outline's width depends on it): orbiting an unchanged scene gathers nothing.
+- **Four per-frame walks of every object skip while nothing changed:** procedural shapes, colliders' Fit to Mesh, a
+  camera's focus tracking, the Scene view's icon pass - 22 ms of an idle frame at 50,000 objects.
+- **Per-window timing** in the Profiler's frame profile and the windowed check.
+- **Shinano:** Scene view 6.52 -> 4.69 ms (8.44 before round 435), Scene + Game 5.09 -> 2.93 ms (Unity's Game view
+  2.5). **50,000 cubes:** 92.1 -> 61.7 ms a redrawn frame, the idle frame 14.5 -> 5.3 ms.
+- **Left open:** the card's instances (12 ms at 50,000 cubes: one mesh drawn 50,000 times wants instancing), the
+  overlay commands (13 ms there), the UI pass on unchanged frames.
+- **The review's finds fixed:** a render's gather could feed the Game view; a render job's kept gather held no outline
+  shells; `focus` waited for the walk; LOD levels never kept; walks read the counter before they start.
+- **Learn:** "Walks that skip: an idle frame at 50,000 objects".
+
+**Checked:** both suites - with Blender's libraries 16409 checks in 1619 tests, 0 failed; dependency-free 15655 (Windows) and 15661
+(Linux, WSL), 0 failed; the audits; the fuzz (6,000 frames, no stale picture, no change the counter missed).
+
+## 2026-11-07 (round 435): the scene's change counter
+
+**Asked:** Pass 18's round 435 (the plan: Pass 17's open items) - a scene-wide change counter, so the views stop
+re-deriving an unchanged scene every frame.
+
+**Changed (task 0411, ADR 0115)**
+- **One counter for every edit** (`edit_epoch`): moved by a transform, an object made / destroyed / reparented, a
+  component added or removed, a mesh or material touched, a modifier result adopted, an Inspector or `set` edit, every
+  animated value written (clips, the Sequencer, the Curve editor), constraints that moved something, every recorded edit.
+- **The views' scene hash kept** while it holds still, walked again when it moves, during Play / a playing clip or
+  Sequencer / a stroke / Live Link, and checked by a walk every 8th frame (every frame headless): a disagreement is a counted miss
+  (the Profiler's "Scene hashes kept / missed"), drawn at once.
+- **Hashing:** Shinano's Scene view 0.98 -> 0.12 ms a frame, 50,000 cubes 4.38 -> 0.55 ms.
+- **The fuzz** reports the changes the counter missed: 0 in 6,000 frames, and 0 in a five-minute soak (116,532
+  frames).
+- **The review's finds fixed:** the Sequencer and the Curve editor's key drags wrote animated fields past the counter;
+  a heap stamp in the UV tool had a bump it didn't need; `mark_dirty` bumped once per child.
+- **Learn:** "A change counter: knowing nothing changed without looking", with two questions.
+
+**Checked:** both suites - with Blender's libraries 16400 checks in 1616 tests, 0 failed; dependency-free 15646
+(Windows) and 15652 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 434): Pass 17's write-up
+
+**Asked:** Pass 17's round 434 - the write-up.
+
+**Changed (task 0410)**
+- **docs/PERFORMANCE.md, "Pass 17 in one table":** Blendity's own bake against Unity's on SideRail - the light now where
+  Unity's is and as bright (MAE under 4 at three of four stations, grid correlation 0.90-0.97 on the lit ones), in 85 s
+  instead of 686; its fine structure not yet (SSIM 0.75-0.88, target 0.90). The synthetic guard halved (room 0.031 ->
+  0.016). Every performance row before and after; the open items, ranked.
+- **docs/hci/compare-unity-vrchat-2026-11.md:** Pass 17's section.
+- **Learn, "How good is the bake?":** the result, and a question on MAE against SSIM.
+- **The performance baseline** refreshed from this build.
+
+**Checked:** both suites - with Blender's libraries 16375 checks in 1612 tests, 0 failed; dependency-free 15621 (Windows) and 15627 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 433): a soak, 50,000 objects, the path tracer on a real world
+
+**Asked:** Pass 17's round 433 - measure what Pass 16 never measured, and list what this machine can't.
+
+**Changed (task 0409)**
+- **A soak:** `BLENDITY_FUZZ_MINUTES=N blendity_stress --only editor_fuzz` fuzzes the editor for N minutes, printing its
+  memory (and the undo history's) each minute and any frame that grew it by more than 100 MB.
+- **Two crashes the soak found, fixed:** a scroll area dragged to a negative height with nothing in it divided by
+  zero; the status bar's Undo read the undone step's name from an empty stack. A debug build's failed assertion now
+  breaks into the crash handler, so a report has the stack.
+- **Deleting many objects at once is no longer quadratic:** 50,000 cubes deleted in 28.6 ms (365 ms in one frame before).
+- **`benchscene cubes50k`.**
+
+**Measured:** 30 minutes of fuzzing, no crash in 194,633 frames; the memory rose once (to 1.3 GB) and stayed flat - working memory, not a leak (its holder is open); 50,000 cubes: the Scene view 100.8 ms a frame on the card (left open: the change counter
+round 431 named); SideRail path traced at 64 samples, 1280 x 720: 90.9 s on the CPU, one 698 ms frame (open). What
+this machine can't measure is listed in docs/tasks/0409 with what each needs.
+
+**Checked:** tests_round433 (the batch destroy, small lists with duplicates and a parent with its child, Delete and
+Undo on 50,000 cubes, scroll areas with negative heights, the status bar's Undo); both suites - with Blender's
+libraries 16375 checks in 1612 tests, 0 failed; dependency-free 15621 (Windows) and 15627 (Linux, WSL), 0 failed;
+the audits; the debug stress build.
+
+## 2026-11-07 (rounds 431-432): the views measured against Unity's; the suite's comparison fixed and in CI
+
+**Asked:** Pass 17's rounds 431 and 432 - the views against Unity's, the remaining slow rows, the suite's CI step.
+
+**Changed (task 0408)**
+- **Measured:** SideRail's Scene view 8.1 ms a frame (Unity's 10.0); Shinano's 7.5 (Unity's 2.2) - nearly 3 ms of it
+  re-deriving an unchanged scene, which needs a scene-wide change counter to cache safely: left open, with the numbers.
+- **The performance suite's comparison** matches rows by section, table and row (a section's second table had been
+  read with the first's header; two rows of one name collided).
+- **CI compares its quick stress** with a per-runner baseline when one is committed - warnings only, for now.
+- **The suite's default sections** take parity, memory, physics, animation and filters too.
+
+**Checked:** tools/test_perf_suite.py; both suites - with Blender's libraries 16361 checks in 1608 tests, 0
+failed; dependency-free 15607 (Windows) and 15613 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 430): no dark lines along contacts; the bake on the card when Unity's scene says so
+
+**Asked:** Pass 17's round 430 - the bake's speed, and the texel validity round 425 deferred.
+
+**Changed (task 0406)**
+- **Texels inside geometry are left out** (Unity's Backface Tolerance, 0.9): a floor's texels under a box standing in
+  it no longer bleed their darkness out as a line along the contact - filled from the valid texels beside them.
+- **The Lightmapper setting** (Render Device, CPU, GPU): a Unity scene baked on Unity's GPU lightmapper bakes on the
+  card here too.
+
+**Measured:** SideRail's Generate Lighting 699 s -> 85 s (the gather on the card, as its Unity scene asks); ahead's grid
+correlation 0.958 (its target met for the first time); 17 % of the texels found inside geometry.
+
+**Checked:** tests_round430; both suites - with Blender's libraries 16361 checks in 1608 tests, 0 failed;
+dependency-free 15607 (Windows) and 15613 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 429): reflections fade in dark corners, as Filamented's
+
+**Asked:** Pass 17's round 429 - taken by round 428's finding: SideRail's panels reflecting the lamps where Unity's
+render stays dark.
+
+**Changed (task 0405)**
+- **Filamented's Exposure Occlusion:** a material from Silent's Filamented keeps its "Lightmap Occlusion Sensitivity";
+  its reflections fade where the baked light (lightmap or probes) is dark, as the shader's specular occlusion does - in
+  both views.
+- The plan's Shadowmask / Subtractive moves to the write-up's open list.
+
+**Measured:** SideRail's MAE: spawn 4.76 -> 3.70, spawn_back 1.84 -> 1.34, floor 5.16 -> 4.29, ahead 3.93 -> 3.14 (spawn and
+ahead under the target of 4), the grid correlation up (ahead 0.948); SSIM down (spawn 0.872 -> 0.810, ahead 0.907 ->
+0.882): the faded reflections took fine structure Unity's render keeps - open.
+
+**Checked:** tests_round429, the Filamented import test, the card's test; both suites - with Blender's libraries
+16357 checks in 1607 tests, 0 failed; dependency-free 15603 (Windows) and 15609 (Linux, WSL), 0
+failed; the audits.
+
+## 2026-11-07 (round 428): reflection probes prefiltered as Unity's, and right way up
+
+**Asked:** Pass 17's round 428 - reflection probes as Unity's.
+
+**Changed (task 0404)**
+- **Fixed: every reflection probe's map was upside down** (since round 401) in both views - a floor's reflection
+  showed what is below it.
+- **Rough reflections from GGX-prefiltered mips**, each holding the roughness Unity's perceptualRoughnessToMipmapLevel
+  maps to it, read with Unity's mapping on the CPU and the card (was a box blur and a guessed curve).
+- **The prefiltering runs on the bake's worker** (16 ms a 128 probe), not in the landing frame.
+
+**Measured:** SideRail: spawn_back's grid correlation 0.533 -> 0.698; the floor's SSIM 0.794 -> 0.764 - the wall panels
+beside it now reflect the lamps, where the world's shader (Filamented) dims a reflection by the lightmap: next round.
+
+**Checked:** tests_round428; both suites - with Blender's libraries 16340 checks in 1605 tests, 0 failed;
+dependency-free 15592 (Windows) and 15598 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 427): the bake's directions measured against Unity's
+
+**Asked:** Pass 17's round 427 - and first, round 426's floor (more relief under baked light than Unity's).
+
+**Changed (task 0403, ADR 0114 amended)**
+- **Only the direct light carries a direction** in the bake's direction pages: bounced light and glowing surfaces weigh
+  in pointing nowhere - Unity's own direction maps for SideRail are short where the light is bounced (median length
+  0.117) and long near a lamp; Blendity's had been long everywhere (0.865).
+
+**Measured:** SideRail's floor SSIM 0.788 -> 0.794 (the others unchanged). Open, with findings: the rest of the floor's
+gap (Unity's divisor), spawn's green walkway (the exit sign's baked glow), the wall's seams (round 430). L2 SH probes,
+Light Probe Groups and Light Volumes in the views left for later (little to gain on these lightmapped stations).
+
+**Checked:** both suites - with Blender's libraries 16326 checks in 1604 tests, 0 failed; dependency-free
+15578 (Windows) and 15584 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-07 (round 426): directional lightmaps
+
+**Asked:** Pass 17's round 426 - Unity's Directional mode: normal maps under baked light.
+
+**Changed (task 0402, ADR 0114)**
+- **The bake keeps where each texel's light came from** - a direction page beside each lightmap, saved beside it.
+- **Normal-mapped surfaces catch baked light by their bumps**, in both renderers, as Unity's DecodeDirectionalLightmap
+  does; surfaces without a normal map draw exactly as before.
+- **Directional Mode** in the Lighting settings (Directional by default, as Unity's), read from a Unity scene.
+
+**Measured:** SideRail (MAE / SSIM): spawn 4.79 / 0.873, floor 5.13 / 0.788 (was 0.828), ahead 3.96 / 0.908. The floor's normal map shows more relief under the
+baked footlight than Unity's render of it - open: how directional each texel's light is, against Unity's own maps.
+
+**Checked:** tests_round426 and the card's test; both suites - with Blender's libraries 16326 checks in 1604
+tests, 0 failed; dependency-free 15578 (Windows) and 15584 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-06 (round 425): SideRail's lamps light the bake
+
+**Asked:** Pass 17's round 425 - why most of SideRail's Baked lights added nothing to Blendity's bake.
+
+**Changed (task 0401)**
+- **Found:** each lamp's bulb sits inside a "light profile" sphere - a see-through material whose greyscale texture
+  Unity reads as alpha (the .meta's Alpha Source: From Gray Scale), shaping the lamp into a downlight. Blendity read
+  the texture as opaque, and its bake stopped light at any surface.
+- **Unity's Alpha Source is read** for every texture with a Unity .meta: None, Input Texture Alpha, From Gray Scale. The
+  Budget read the field under the wrong name; fixed.
+- **Baked light passes see-through surfaces by their alpha**, as Unity's lightmapper lets it through.
+- **Baked and Mixed point and spot lights bake with Unity's legacy falloff** (1 / (1 + 25 (d / Range)^2), windowed) -
+  the built-in pipeline's - everywhere the bake shades them; the views keep their curve.
+
+**Measured:** SideRail at its own settings, MAE / SSIM / grid correlation: spawn 5.62 / 0.887 / 0.544 -> 4.77 / 0.875 /
+0.903, floor 7.82 / 0.679 / 0.583 -> 5.06 / 0.828 / 0.975, ahead 4.17 / 0.897 / 0.397 -> 3.95 / 0.910 / 0.930 (MAE and
+SSIM met); spawn_back (dark) still passes but its corners came out darker (SSIM 0.853 -> 0.815, grid 0.630 -> 0.533).
+The Budget's counts change for Unity textures with Alpha Source None or From Gray Scale. Open: a Mixed light's views
+keep their curve while its bake uses the legacy one.
+
+**Checked:** tests_round425; both suites - with Blender's libraries 16300 checks in 1601 tests, 0 failed;
+dependency-free 15559 (Windows) and 15565 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-06 (round 424): soft baked shadows
+
+**Asked:** Pass 17's round 424 - Unity's Baked Shadow Radius and Angle in the bake; the diagnosis of SideRail's dim
+stations, light by light.
+
+**Changed (task 0400)**
+- **Baked Shadow Radius and Baked Shadow Angle** on lights (the Inspector, Unity's import and export): the bake takes
+  the light as a ball, or a disc in the sky, that big, so its baked shadows soften away from what casts them; the
+  lightmaps send Direct Samples rays over it, the probes 16.
+- **No Shadows is baked:** such a light lights through everything in the lightmaps and probes too, as in Unity.
+- **Found:** 42 of SideRail's 70 Baked lights sit inside their lamps' closed meshes, so Blendity's bake gets no light
+  out of them. Letting shadow rays through back faces puts the light where Unity's is (grid correlation 0.49 -> 0.91
+  at spawn) but 1.7-8x too bright: round 425 works out Unity's rule.
+
+**Checked:** tests_round424; both suites - with Blender's libraries 16278 checks in 1599 tests, 0 failed;
+dependency-free 15537 (Windows) and 15543 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-06 (round 423): the lightmap denoiser and Unity's sample count
+
+**Asked:** Pass 17's round 423 - denoising and sampling: round 421 had found the lightmap filter doubling a long bake's
+error.
+
+**Changed (task 0399)**
+- **The bake's filter takes the noisy light only:** the gathered (indirect) light and the emitters sampled at each
+  texel; the Baked lights' direct light gets a light radius-1 pass inside its chart, so shadow edges stay put.
+- **OIDN's lightmap filter where the OIDN build has it, else an edge-avoiding A-Trous filter** guided by each texel's
+  normal, position and chart, its strength following the sample count. Blender's OIDN leaves the lightmap filter's
+  weights out, so with Blender's libraries the bake uses the A-Trous filter too; the log names the one that ran.
+  Preview Lighting always uses the A-Trous filter (it finishes on the main thread).
+- **Indirect Samples default 512**, Unity's (was 256).
+- Tried and left out: Unity's inverse-square falloff for Baked lights (SideRail 2.5-12x too bright; no single curve
+  fits every station - round 424 diagnoses the lights one by one).
+
+**Measured:** synthetic relative RMSE - room 0.031 -> 0.019, corridor 0.015 -> 0.008, courtyard 0.077 -> 0.055; the
+room at 1024 samples filtered 0.031 -> 0.017 (the filter no longer hurts a long bake). SideRail's stations about as
+before (spawn 5.62 / 0.887, floor 7.82 / 0.679, ahead 4.17 / 0.897): their error is the lamps' brightness, not noise.
+
+**Checked:** tests_round423; both suites - with Blender's libraries 16265 checks in 1598 tests, 0 failed;
+dependency-free 15524 (Windows) and 15530 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-06 (round 422): the cheap performance wins
+
+**Asked:** Pass 17's round 422 - the slow spots Pass 16 ranked whose causes were known, fixed early while the
+bake-quality rounds run.
+
+**Changed (task 0398)**
+- **Export Unity Package compresses on every core:** a megabyte block a core - zlib's deflate with Blender's
+  libraries, joined into one ordinary gzip stream as pigz joins them; Blendity's own deflate in the dependency-free
+  build, its matching in parallel. The writer no longer erases a megabyte from the front of its buffer per block.
+- **The Budget reads a texture's size from its file's header** (PNG, JPEG, TGA) and whether it can hold alpha; it
+  decodes only a PNG or TGA with an alpha channel whose Unity size depends on its texels. A map the views haven't
+  loaded (headless, or with the views on the card) is counted this way too - it had been decoded in full. A JPEG the
+  built-in decoder can't read (progressive) now counts at its size instead of nothing.
+- **F12 no longer re-skins every skinned object** into the camera-view slot - only items drawn view-shaped.
+- **An import copies its files on its worker:** the model into Assets/Meshes and its textures into
+  Assets/Textures before the landing frame (not while an import preview is open).
+- **Generate Lighting's starting frame:** the materials' image files decoded on every core before they're frozen
+  for the worker, the meshes warmed, hashed and copied on every core, the mesh hashes for the landing made on the
+  worker; the start's parts in the log.
+
+**Measured:** SideRail's Export Unity Package 18.7 -> 3.2 s, Shinano's 7.5 -> 1.7 s; Shinano's F12 3.5 -> 1.1 s
+(its first frame 384 -> 334 ms); the 50k sphere's OBJ import landing 69 -> 6.9 ms, USDA 61 -> 3.4 ms; SideRail's
+Generate Lighting starting frame 6.1 s -> 0.73 s headless (1,056 -> 807 ms windowed); SideRail's first `budget pc`
+7.0 -> 1.0 s headless (Shinano's 2.3 s: its PNGs with alpha whose Unity size depends on their texels are still decoded).
+
+**Checked:** tests_round422; both suites - with Blender's libraries 16258 checks in 1596 tests, 0 failed; dependency-free 15517
+(Windows) and 15523 (Linux, WSL), 0 failed; the audits.
+
+## 2026-11-06 (round 421): measuring Blendity's own bake against Unity's
+
+**Asked:** "How to get better results of light baking, reflection baking, etc. similar to the quality of Unity 3D" -
+Pass 17's plan (rounds 421-434), bake quality first. This round measures before anything changes: every SideRail
+comparison so far had loaded Unity's lightmaps, never Blendity's own bake.
+
+**Changed (task 0397, ADR 0113)**
+- **A Unity scene's bake settings come with it:** the import reads the scene's LightingSettings asset (or its own
+  lightmap settings) - texels per unit, the largest lightmap, padding, samples, bounces, the filter - into the
+  Lighting window; what Blendity doesn't bake yet (Directional mode, Shadowmask / Subtractive, ambient occlusion,
+  Unity's denoiser) is named in the import's notes.
+- **Generate Lighting times its phases** (lightmaps, probes, Light Volumes, reflection probes, saving, the landing
+  frame) in the log.
+- **`tools/unity_compare.py world ... --blendity-bake`** bakes the imported world with Blendity's own Generate
+  Lighting and compares every station with Unity's render.
+- **`blendity_stress --only lightmap_quality`:** three synthetic scenes against a reference with 16x the samples (its own random ones), samples
+  against time with the filter on and off, a box sunk into a floor.
+
+**Found:** on SideRail Blendity's own bake misses the target on 3 of 4 stations (spawn 5.55 / 0.890, floor 7.66 /
+0.692, ahead 4.12 / 0.900 MAE / SSIM; Unity's lightmaps in Blendity: 3 of 4 pass). The baked lamps' pools of light on
+the floor are missing or dim (likely: Baked point and spot lights baked with the realtime falloff curve instead of
+Unity's inverse square), chart edges show as thin bright lines and speckles, the bake took 686 s with nothing on
+the GPU. Blendity's lightmap filter helps below 256 samples and costs accuracy above (relative error 0.017 unfiltered
+at 1024 samples, 0.031 filtered). These set the next rounds' work.
+
+**Checked:** tests_round421; both suites - with Blender's libraries 16234 checks in 1591 tests, 0 failed;
+dependency-free 15493 (Windows) and 15477 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-05 (round 420): Pass 16's write-up, and Unity's editor timed beside Blendity
 
 **Asked:** the plan's round 420 - the suite's tables before and after Pass 16, SideRail and Shinano navigation beside
@@ -3157,7 +3621,6 @@ rounds (task 0296 now, the brushes and puck in 0297, the Wheel and Learn in 0298
 - **Left as they are, and noted in the spec:**
   - Build's pixel tolerances are in the picture's pixels, so they follow the pad's zoom.
   - Under the SketchUp keys, the Wheel is Shift+Space and Space is the View tool, so there a middle-drag pans the pad.
-
 
 ## 2026-10-29 (round 318): freehand strokes aren't pulled onto the perspective guide; the Draw tab's pen and guides; every bridge followed a live Blendity
 
