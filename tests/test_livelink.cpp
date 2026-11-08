@@ -2259,7 +2259,19 @@ static void tests_round382() {
     const uint64_t sent = ed.livelink_for_test()->stats().textures - before;
     std::printf("    %d dabs over 2 s with 4 clients: %llu texture sends; the tick %.2f ms on average, %.2f ms at most\n", frames, (unsigned long long)sent, total / frames,
                 worst);
-    CHECK(sent >= 4 && sent <= 12 && total / frames < 8.0 && worst < 40.0);  // (about 4 a second: what each dab's new texture costs the tick)
+    /* A sanitizer build checks every load and store: CI's worst tick there was 69 ms - its budget is four times. */
+#if defined(__SANITIZE_ADDRESS__)
+    const double slow = 4.0;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    const double slow = 4.0;
+#else
+    const double slow = 1.0;
+#endif
+#else
+    const double slow = 1.0;
+#endif
+    CHECK(sent >= 4 && sent <= 12 && total / frames < 8.0 * slow && worst < 40.0 * slow);  // (about 4 a second: what each dab's new texture costs the tick)
     ed.livelink_stop();
   });
   test("the lesson's Try-it (round 382): window Live Link - what Live Link sent, and how long it took", [] {
