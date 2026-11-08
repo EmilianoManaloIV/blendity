@@ -2,6 +2,20 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 447): textures stream in
+
+**Asked:** Pass 19's round 447 - opening a big imported scene (SideRail) stalls the first Scene view frame for as long as every texture takes to decode: no frame should wait for a file.
+
+**Changed (task 0423)**
+- **Textures stream in:** in the Scene, Game and Camera Preview views (not renders, bakes or exports) a material's image file that is not in the texture cache shows the material's colours and is loaded on a worker, one batch at a time; when a batch lands the materials resolve again and the maps appear. Only where jobs run on workers (a window; a headless editor with `jobs async on`). A scene switch cancels the batch.
+- **A file that won't decode** is tried once and its material shows it missing (the warning once per material and file) until the file changes - a paint stroke's every-frame invalidation does not retry it.
+- **The card's budget:** while streaming, a frame sends at most 48 MB of material maps to the card; the rest go up in the next frames.
+- **`perf frames N`** (headless): steps N frames; `perf wait` also waits for the stream (and the windowed check's settle).
+- **Learn:** "Importing models: their materials made for you" gains "Textures stream in (round 447)", with two questions and a Try-it.
+- On SideRail the `open` command's own stall is unchanged (0.8 s); no frame then waits for the textures: the first frame is 366 ms (the meshes going up), the next five 34-35 ms in all, the longest frame while the textures land 69-77 ms, all in after 1.35 s.
+
+**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 449): the Scene view's static overlays kept
 
 **Asked:** Pass 19's round 449 - the Scene view recorded every overlay every frame; 50,000 cubes spent 15-20 ms on them.

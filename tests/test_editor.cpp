@@ -9095,6 +9095,214 @@ static void tests_round422() {
   });
 }
 
+/* ---------------------------------------------------------------- round 447: textures stream in */
+static void tests_round447() {
+  test("textures stream in (round 447): inside a stream scope a material's uncached image resolves as missing and is noted, not decoded; once loaded it resolves; outside the scope it loads as before", [] {
+    const std::string tex = fs::join(test_dir(), "r447_stream.png");
+    std::vector<uint32_t> px(32 * 32, 0xFF2080E0u);
+    CHECK(write_png(tex, px.data(), 32, 32, 32));
+    MaterialPtr m = make_material("R447", {0.5f, 0.5f, 0.5f});
+    m->base_map.path = tex;
+    texture_cache_clear();
+    std::vector<std::pair<std::string, bool>> misses;
+    (void)take_texture_stream_misses(misses);  // (whatever an earlier test left)
+    bool null_in_scope = false, still_missing = false;
+    {
+      TextureStreamScope on(true);
+      null_in_scope = m->textures().base == nullptr;
+      still_missing = m->textures().base == nullptr;  // (resolved again: still not in the cache)
+    }
+    const size_t noted = take_texture_stream_misses(misses);
+    const bool right_file = noted == 1 && misses[0].first.find("r447_stream.png") != std::string::npos && misses[0].second;
+    const bool cached_before = texture_cached(misses.empty() ? tex : misses[0].first, true) != nullptr;
+    for (const auto &f : misses) (void)texture_load(f.first, f.second);  // (the worker's part)
+    invalidate_material_textures();
+    bool there = false;
+    {
+      TextureStreamScope on(true);
+      there = m->textures().base != nullptr;
+    }
+    const size_t noted_after = take_texture_stream_misses(misses);
+    MaterialPtr m2 = make_material("R447 b", {0.5f, 0.5f, 0.5f});
+    m2->base_map.path = tex;
+    texture_cache_clear();
+    const bool outside_loads = m2->textures().base != nullptr;  // (no scope: decoded in the call, as before)
+    std::printf("    in the scope: missing %d (again %d), %zu noted, cached before the load %d; after it: %d, %zu noted; outside: %d\n",
+                (int)null_in_scope, (int)still_missing, noted, (int)cached_before, (int)there, noted_after, (int)outside_loads);
+    CHECK(null_in_scope && still_missing);
+    CHECK(right_file);
+    CHECK(!cached_before);
+    CHECK(there);
+    CHECK(noted_after == 0);
+    CHECK(outside_loads);
+  });
+  test("textures stream in (round 447): a file the stream failed on resolves as missing - no more notes, one cached resolve - until the file changes, and then it is tried again", [] {
+    const std::string gone = fs::join(test_dir(), "r447_gone.png");
+    std::remove(gone.c_str());
+    MaterialPtr m = make_material("R447 gone", {0.5f, 0.5f, 0.5f});
+    m->base_map.path = gone;
+    std::vector<std::pair<std::string, bool>> misses;
+    (void)take_texture_stream_misses(misses);
+    invalidate_material_textures();
+    {
+      TextureStreamScope on(true);
+      (void)m->textures();
+    }
+    const size_t first = take_texture_stream_misses(misses);
+    texture_stream_set_failed(misses, std::vector<int64_t>(misses.size(), texture_file_mtime(gone)));
+    refresh_material_textures();
+    const Material::Resolved *r1 = nullptr, *r2 = nullptr;
+    const uint64_t resolves0 = material_resolve_count();
+    {
+      TextureStreamScope on(true);
+      r1 = &m->textures();
+      r2 = &m->textures();
+    }
+    const uint64_t resolves = material_resolve_count() - resolves0;
+    const size_t after_failed = take_texture_stream_misses(misses);
+    invalidate_material_textures();  // (a paint stroke's every frame: the failure holds)
+    {
+      TextureStreamScope on(true);
+      (void)m->textures();
+    }
+    const size_t after_invalidate = take_texture_stream_misses(misses);
+    std::vector<uint32_t> px(8 * 8, 0xFF2080E0u);
+    CHECK(write_png(gone, px.data(), 8, 8, 8));  // (the file is made: its mtime differs)
+    invalidate_material_textures();
+    {
+      TextureStreamScope on(true);
+      (void)m->textures();
+    }
+    const size_t retried = take_texture_stream_misses(misses);
+    std::printf("    noted %zu; once failed: %zu note(s), %llu resolve(s) for two calls, same object %d; after an invalidate: %zu; the file made: %zu\n", first,
+                after_failed, (unsigned long long)resolves, (int)(r1 == r2), after_invalidate, retried);
+    CHECK(first == 1);
+    CHECK(after_failed == 0);
+    CHECK(resolves == 1);
+    CHECK(r1 == r2);
+    CHECK(after_invalidate == 0);
+    CHECK(retried == 1);
+  });
+  test("textures stream in (round 447): while a file is loading, a material resolves once a generation - two textures() calls give the same resolved object and resolve once (the CPU's workers call it in parallel); a landed batch resolves it again", [] {
+    const std::string tex = fs::join(test_dir(), "r447_once.png");
+    std::vector<uint32_t> px(16 * 16, 0xFF2080E0u);
+    CHECK(write_png(tex, px.data(), 16, 16, 16));
+    MaterialPtr m = make_material("R447 once", {0.5f, 0.5f, 0.5f});
+    m->base_map.path = tex;
+    texture_cache_clear();
+    std::vector<std::pair<std::string, bool>> misses;
+    (void)take_texture_stream_misses(misses);
+    invalidate_material_textures();
+    const Material::Resolved *a = nullptr, *b = nullptr;
+    const uint64_t r0 = material_resolve_count();
+    {
+      TextureStreamScope on(true);
+      a = &m->textures();
+      b = &m->textures();
+    }
+    const uint64_t resolves = material_resolve_count() - r0;
+    const bool missing = a->base == nullptr;
+    const size_t noted = take_texture_stream_misses(misses);
+    for (const auto &f : misses) (void)texture_load(f.first, f.second);  // (the worker's part)
+    refresh_material_textures();
+    bool landed = false;
+    {
+      TextureStreamScope on(true);
+      landed = m->textures().base != nullptr;
+    }
+    std::printf("    two calls while loading: %llu resolve(s), same object %d, map missing %d, %zu noted; after the batch landed: map %d\n",
+                (unsigned long long)resolves, (int)(a == b), (int)missing, noted, (int)landed);
+    CHECK(a == b);
+    CHECK(resolves == 1);
+    CHECK(missing && noted == 1);
+    CHECK(landed);
+  });
+  test("perf frames N (round 447): a headless script steps that many frames; perf wait also waits for the views' textures to stream in (skipped without a GPU for the second half)", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    const uint64_t before = ed.frame_profile_totals().frames;
+    ed.command("perf frames 3");
+    CHECK(ed.frame_profile_totals().frames - before == 3);
+    ed.command("perf frames 0");
+    CHECK(ed.frame_profile_totals().frames - before == 3);
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: wait half skipped\n");
+      return;
+    }
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("create Cube");
+    GameObject *g = ed.selected_object();
+    MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+    CHECK(mr != nullptr);
+    if (!mr) return;
+    const std::string tex = fs::join(test_dir(), "r447_wait.png");
+    std::vector<uint32_t> px(256 * 256, 0xFF2080E0u);
+    CHECK(write_png(tex, px.data(), 256, 256, 256));
+    MaterialPtr m = make_material("R447 wait", {0.8f, 0.8f, 0.8f});
+    m->base_map.path = tex;
+    mr->materials = {m};
+    texture_cache_clear();
+    ed.mark_changed_for_test("waited texture");
+    ed.command("perf frames 2");
+    ed.command("perf wait");
+    const bool cached = texture_cached(tex, true) != nullptr;
+    std::printf("    after perf wait: the texture is cached %d\n", (int)cached);
+    CHECK(cached);
+  });
+  test("textures stream in (round 447): a headless editor that asked for workers draws its first frame on the card without decoding a new scene's images in it, loads them on a worker and then draws them; a file that won't decode is tried once (skipped without a GPU)", [] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(320, 180);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    std::vector<std::string> made;
+    for (int i = 0; i < 6; i++) {
+      ed.command(i % 2 ? "create Sphere" : "create Cube");
+      GameObject *g = ed.selected_object();
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      g->set_local_position({-3.0f + 1.2f * i, 0.5f, 0.0f});
+      const std::string tex = fs::join(test_dir(), strprintf("r447_view_%d.png", i));
+      std::vector<uint32_t> px(512 * 512, 0xFF000000u | (uint32_t)(40 * i) << 8 | 0xC0u);
+      CHECK(write_png(tex, px.data(), 512, 512, 512));
+      MaterialPtr m = make_material(strprintf("R447 view %d", i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = i == 5 ? fs::join(test_dir(), "r447_missing.png") : tex;
+      mr->materials = {m};
+      made.push_back(tex);
+    }
+    CHECK(made.size() == 6);
+    texture_cache_clear();
+    ed.mark_changed_for_test("streamed textures");
+    ScopedTimer first;
+    ed.step_frame_headless();
+    const double first_ms = first.ms();
+    const bool decoded_in_frame = texture_cached(made[0], true) != nullptr || texture_cached(made[4], true) != nullptr;  // (the poll runs before the views draw: nothing is loading yet)
+    int frames = 1;
+    bool loading = false;
+    for (; frames < 4 && !loading; frames++) {
+      ed.step_frame_headless();
+      loading = ed.texture_streaming_for_test() || ed.streamed_files_for_test() > 0;
+    }
+    for (; frames < 4000 && (ed.texture_streaming_for_test() || ed.streamed_files_for_test() < 6); frames++) ed.step_frame_headless();
+    for (int k = 0; k < 4; k++) ed.step_frame_headless();
+    const uint64_t streamed = ed.streamed_files_for_test();
+    const bool all_cached = texture_cached(made[0], true) && texture_cached(made[4], true);
+    for (int k = 0; k < 30; k++) ed.step_frame_headless();  // (the missing file: not tried again)
+    std::printf("    first frame %.1f ms, images decoded in it %d, a stream started by the next frames %d; %llu file(s) streamed in %d frame(s); five cached %d; "
+                "after 30 more frames %llu\n",
+                first_ms, (int)decoded_in_frame, (int)loading, (unsigned long long)streamed, frames, (int)all_cached, (unsigned long long)ed.streamed_files_for_test());
+    CHECK(!decoded_in_frame);
+    CHECK(loading);
+    CHECK(streamed == 6);  // (five images and the one that won't decode, tried once)
+    CHECK(all_cached);
+    CHECK(ed.streamed_files_for_test() == 6);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -9177,5 +9385,6 @@ void run_editor_tests() {
   tests_round436_review();
   tests_round437();
   tests_round445();
+  tests_round447();
   coverage_tests();
 }

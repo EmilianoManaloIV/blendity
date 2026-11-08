@@ -692,6 +692,7 @@ void Editor::render_scene_view(const Recti &view) {
 }
 
 void Editor::render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p) {
+  TextureStreamScope stream(streaming_views());  // (round 447: the Scene view's frame)
   LightingEnv env = build_env(*scene_);
   env.camera_pos = cam_.position();
   if (!scene_lighting_) {

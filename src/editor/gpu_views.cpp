@@ -979,6 +979,12 @@ int Editor::gpu_texture(const TexturePtr &t, std::string &err, std::string *appr
     if (approx) add_note(*approx, found->second.approx);
     return found->second.id;
   }
+  /* Round 447: while the views stream, a frame sends at most kStreamUploadBudget bytes; the rest go up next frame (shown
+   * meanwhile without their map), so a big import's hundreds of textures don't land in one frame. */
+  if (approx && texture_streaming() && upload_bytes_frame_ >= kStreamUploadBudget) {  // (material maps only: a lightmap or the sky isn't deferred)
+    upload_waiting_ = true;
+    return -1;
+  }
   std::string why, note;
   int id = -1;
   if (approx) {
@@ -1005,6 +1011,7 @@ int Editor::gpu_texture(const TexturePtr &t, std::string &err, std::string *appr
   }
   if (approx) add_note(*approx, note);
   prof_.gpu_texture_uploads++;
+  if (approx) upload_bytes_frame_ += t->memory_bytes();
   return id;
 }
 
