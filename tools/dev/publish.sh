@@ -1,6 +1,7 @@
 #!/bin/bash
 # A round's pull request (tools/dev/README.md): commits the libraries clone's tree on its local branch, then the
-# blendity/ subtree onto BASE on GitHub as BRANCH, and opens the pull request.
+# blendity/ subtree onto BASE on GitHub as BRANCH, and opens the pull request against main (the user, 2026-11-08: every PR
+# targets main; BASE only picks the parent commit). Run tools/dev/stack_check.sh afterwards.
 # Usage: BRANCH=task/NNNN-x BASE=task/MMMM-y MSG=commit.txt PR=pr.md TITLE="..." bash tools/dev/publish.sh
 set -e
 M=${BL_MAIN:-C:/Users/trick/Downloads/blender-main/blendity}
@@ -13,4 +14,4 @@ T=$(git rev-parse HEAD:blendity)
 git fetch -q origin "$BASE"
 C=$(git commit-tree "$T" -p "origin/$BASE" -F "$MSG")
 git push -q origin "$C:refs/heads/$BRANCH"
-gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body-file "$PR"
+gh pr create --base main --head "$BRANCH" --title "$TITLE" --body-file "$PR"

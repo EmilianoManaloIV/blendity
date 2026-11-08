@@ -6,6 +6,7 @@
 #include "../src/render/probe_sh.h"
 #include "../src/render/tetrahedra.h"
 #include "../src/render/unity_lightmaps.h"
+#include "../src/scene/unity_scene.h"
 #include <set>
 #include <tuple>
 
@@ -7797,6 +7798,346 @@ static void tests_round454() {
   });
 }
 
+/* ---------------------------------------------------------------- round 455: SH deringing, Light Probe Groups as objects (task 0431) */
+static void tests_round455() {
+  test("probe SH deringing (round 455): the window's factors are Hanning (1, 0.854, 0.5) and Lanczos (1, 0.900, 0.637) at w = 4, none when Off; one lamp of 20 over a uniform sky of 1 rings to 0.21 when Off and no lower than 0.5 under either window, with 2.25 behind (truth 1.0) down to 0.98 under Lanczos; the average over the sphere never moves", [] {
+    const auto off = window_factors(0, 4.0f), han = window_factors(1, 4.0f), lan = window_factors(2, 4.0f);
+    std::printf("    w=4: Hanning %.3f %.3f %.3f, Lanczos %.3f %.3f %.3f\n", han[0], han[1], han[2], lan[0], lan[1], lan[2]);
+    CHECK(off[0] == 1.0f && off[1] == 1.0f && off[2] == 1.0f);
+    CHECK(han[0] == 1.0f && lan[0] == 1.0f);  // (band 0 is never scaled)
+    CHECK(std::fabs(han[1] - 0.854f) < 0.001f && std::fabs(han[2] - 0.5f) < 1e-5f);
+    CHECK(std::fabs(lan[1] - 0.900f) < 0.001f && std::fabs(lan[2] - 0.637f) < 0.001f);
+    const auto bad = window_factors(1, std::nanf(""));
+    CHECK(bad[1] == 1.0f && bad[2] == 1.0f);  // (not a number: no window)
+    ProbeSH sh;
+    sh.add_direct(Vec3(0, 1, 0), Vec3(20.0f));
+    sh.c[0] += Vec3(1.0f / 0.282095f);  // (a uniform sky of radiance 1: irradiance / pi = 1 everywhere)
+    auto darkest = [&](const std::array<float, 3> &w) {
+      float lo = 1e9f;
+      for (int i = 0; i <= 2000; i++) {
+        const float t = -1.0f + 2.0f * (float)i / 2000.0f;  // n.l along the lamp's axis
+        lo = std::min(lo, sh.eval_raw(Vec3(std::sqrt(1.0f - t * t), t, 0), w).x);
+      }
+      return lo;
+    };
+    const float behind_off = sh.eval_raw(Vec3(0, -1, 0)).x, behind_lan = sh.eval_raw(Vec3(0, -1, 0), lan).x, peak_off = sh.eval_raw(Vec3(0, 1, 0)).x,
+                peak_lan = sh.eval_raw(Vec3(0, 1, 0), lan).x, peak_han = sh.eval_raw(Vec3(0, 1, 0), han).x;
+    std::printf("    darkest: Off %.3f, Hanning %.3f, Lanczos %.3f; behind (truth 1.0): Off %.3f, Lanczos %.3f; the peak (truth 21): Off %.2f, Hanning %.2f, Lanczos %.2f\n", darkest(off),
+                darkest(han), darkest(lan), behind_off, behind_lan, peak_off, peak_han, peak_lan);
+    CHECK(std::fabs(darkest(off) - 0.21f) < 0.01f);
+    CHECK(darkest(han) >= 0.5f && darkest(lan) >= 0.5f && std::fabs(darkest(han) - 0.55f) < 0.01f && std::fabs(darkest(lan) - 0.62f) < 0.02f);
+    CHECK(std::fabs(behind_off - 2.25f) < 0.01f && std::fabs(behind_lan - 0.98f) < 0.02f);
+    CHECK(peak_lan < peak_off && peak_han < peak_lan);  // (the price: the lamp's peak drops)
+    /* The mean over the sphere is band 0 alone: windowing leaves it where it was (the unclamped sums). */
+    double m_off = 0, m_lan = 0;
+    const int N = 4096;
+    for (int i = 0; i < N; i++) {
+      const float z = 1.0f - 2.0f * (i + 0.5f) / N, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+      const Vec3 n(r * std::cos(phi), z, r * std::sin(phi));
+      m_off += sh.eval_raw(n).x, m_lan += sh.eval_raw(n, lan).x;
+    }
+    CHECK(std::fabs(m_off / N - m_lan / N) < 0.005);
+  });
+  test("probe SH deringing in the views' sampling (round 455): a baked probe sampled with the window on gives the windowed SH, Off gives round 454's value exactly", [] {
+    ProbeVolumeData d;
+    probe_place(d, AABB{Vec3(-1.0f), Vec3(1.0f)}, {}, 1.0f, 1.0f);
+    CHECK(!d.empty());
+    if (d.empty()) return;
+    const size_t n = d.probe_count();
+    d.baked.assign(n, ProbeCube{}), d.live.assign(n, ProbeCube{}), d.live_ok.assign(n, 0), d.valid.assign(n, 1);
+    ProbeSH one;
+    one.add_direct(Vec3(0, 1, 0), Vec3(20.0f));
+    d.sh.assign(n, one);
+    d.scene_key = 1;
+    const Vec3 back(0, -1, 0);
+    Vec3 plain, windowed;
+    CHECK(d.sample(Vec3(0.0f), back, Vec3(0.0f), false, plain, false));
+    const auto lan = window_factors(2, 4.0f);
+    CHECK(d.sample(Vec3(0.0f), back, Vec3(0.0f), false, windowed, false, nullptr, nullptr, &lan));
+    const float expect_plain = one.eval(back).x, expect_win = one.eval(back, lan).x;
+    std::printf("    behind a lamp of 20: Off %.4f, Lanczos %.4f\n", plain.x, windowed.x);
+    CHECK(plain.x == expect_plain && std::fabs(windowed.x - expect_win) < 1e-5f && windowed.x < plain.x);
+  });
+  test("light probe groups (round 455): a new group has Unity's eight probes at a 1 m cube's corners; its probes survive save / load, clone and undo exactly; the Inspector shows a count, not a row a probe", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("create Light Probe Group");
+    GameObject *g = ed.scene().find_by_name("Light Probe Group");
+    CHECK(g && g->probe_group() && g->point_source() == g->probe_group());
+    if (!g || !g->probe_group()) return;
+    LightProbeGroupComponent *pg = g->probe_group();
+    bool corners = pg->positions.size() == 8;
+    for (const Vec3 &p : pg->positions) corners = corners && std::fabs(std::fabs(p.x) - 0.5f) < 1e-6f && std::fabs(std::fabs(p.y) - 0.5f) < 1e-6f && std::fabs(std::fabs(p.z) - 0.5f) < 1e-6f;
+    CHECK(corners);
+    g->name = "Probes";
+    const std::vector<Vec3> odd = {Vec3(0.1f, 1.0f / 3.0f, -7.123456f), Vec3(1e-7f, 123456.78f, 0.7f), Vec3(-2.5f, 3.14159265f, 1e5f)};
+    pg->positions = odd;
+    ed.mark_changed_for_test("R455 probes");
+    r34_steps(ed, 3);
+    auto same = [&](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+      if (a.size() != b.size()) return false;
+      for (size_t i = 0; i < a.size(); i++)
+        if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].z != b[i].z) return false;
+      return true;
+    };
+    Scene back;
+    std::string err;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), back, err));
+    GameObject *bg = back.find_by_name("Probes");
+    CHECK(bg && bg->probe_group() && same(bg->probe_group()->positions, odd));
+    CHECK(same(static_cast<LightProbeGroupComponent *>(pg->clone().get())->positions, odd));
+    /* A group with none at all reads back with none (not Unity's eight). */
+    pg->positions.clear();
+    Scene empty_back;
+    CHECK(load_scene_text(save_scene_text(ed.scene()), empty_back, err));
+    CHECK(empty_back.find_by_name("Probes") && empty_back.find_by_name("Probes")->probe_group() && empty_back.find_by_name("Probes")->probe_group()->positions.empty());
+    pg->positions = odd;
+    /* The Inspector: a count and buttons. */
+    r34_steps(ed, 3);
+    const std::vector<std::string> labels = ed.button_labels_for_test();
+    auto has = [&](const std::string &l) { return std::find(labels.begin(), labels.end(), l) != labels.end(); };
+    std::printf("    the Inspector: %s, Add Probe %d\n", has("shown:Probes: 3") ? "\"Probes: 3\"" : "no count", (int)has("Add Probe"));
+    CHECK(has("shown:Probes: 3") && has("Add Probe") && has("Select All"));
+    size_t rows = 0;
+    for (const std::string &l : labels) rows += l.find("Position") != std::string::npos || l.find("field:P0") != std::string::npos;
+    CHECK(rows == 0);  // (no row a probe)
+    /* Undo restores the probes. */
+    pg->positions.push_back(Vec3(9, 9, 9));
+    ed.mark_changed_for_test("R455 more");
+    ed.command("undo");
+    r34_steps(ed, 2);
+    GameObject *u = ed.scene().find_by_name("Probes");
+    CHECK(u && u->probe_group() && same(u->probe_group()->positions, odd));
+  });
+  test("Unity's Light Probe Group imports as an object (round 455): three m_SourcePositions under a moved, scaled Transform come in as a LightProbeGroup with those local positions and the right world positions, its document kept for the export; an older scene file's Engine Component gains the probes on load", [] {
+    const std::string rel = "Assets/Imported/R455G";
+    const std::string dir = resolve_asset_path(rel);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4550eeee4550eeee4550eeee0001";
+    CHECK(fs::write_file(fs::join(dir, "Probes.unity"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: ProbeGroup\n"
+                         "--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_LocalPosition: {x: 2, y: 0, z: 0}\n  m_LocalScale: {x: 2, y: 2, z: 2}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!220 &12\nLightProbeGroup:\n  m_GameObject: {fileID: 10}\n  m_Enabled: 1\n  m_SourcePositions:\n  - {x: 1, y: 0, z: 0}\n  - {x: 0, y: 1, z: 0}\n  - {x: 0, y: 0, z: 1}\n  m_Dering: 0\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Probes.unity\t" + rel + "/Probes.unity\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("open " + rel + "/Probes.unity");
+    GameObject *g = ed.scene().find_by_name("ProbeGroup");
+    CHECK(g && g->probe_group());
+    if (!g || !g->probe_group()) return;
+    const std::vector<Vec3> &p = g->probe_group()->positions;
+    CHECK(p.size() == 3 && p[0].x == 1.0f && p[1].y == 1.0f && p[2].z == 1.0f);
+    const Vec3 w0 = g->world_matrix().point(p[0]), w1 = g->world_matrix().point(p[1]), w2 = g->world_matrix().point(p[2]);
+    std::printf("    world positions (%.1f %.1f %.1f) (%.1f %.1f %.1f) (%.1f %.1f %.1f)\n", w0.x, w0.y, w0.z, w1.x, w1.y, w1.z, w2.x, w2.y, w2.z);
+    CHECK(std::fabs(w0.x - 4.0f) < 1e-5f && std::fabs(w1.x - 2.0f) < 1e-5f && std::fabs(w1.y - 2.0f) < 1e-5f && std::fabs(w2.z - 2.0f) < 1e-5f);
+    /* The document is kept, read-only, for the export to write back unchanged. */
+    const EngineComponent *kept = g->get<EngineComponent>();
+    CHECK(kept && kept->native && kept->type == "LightProbeGroup" && kept->data.find("m_SourcePositions") != std::string::npos && g->probe_group()->enabled);
+    /* A scene saved before this round holds only the Engine Component: loading it gives the probes too. */
+    Scene old;
+    GameObject *og = old.create("OldGroup");
+    EngineComponent *oe = og->add<EngineComponent>();
+    oe->engine = "Unity", oe->type = "LightProbeGroup", oe->data = kept ? kept->data : std::string();
+    Scene loaded;
+    std::string lerr;
+    CHECK(load_scene_text(save_scene_text(old), loaded, lerr));
+    GameObject *lg = loaded.find_by_name("OldGroup");
+    CHECK(lg && lg->probe_group() && lg->probe_group()->positions.size() == 3 && lg->probe_group()->positions[1].y == 1.0f);
+    CHECK(lg && lg->get<EngineComponent>() && lg->get<EngineComponent>()->data == oe->data);
+    Scene again;
+    CHECK(load_scene_text(save_scene_text(loaded), again, lerr) && again.find_by_name("OldGroup") && again.find_by_name("OldGroup")->probe_group()->positions.size() == 3);
+    size_t groups = 0;
+    for (const auto &c : again.find_by_name("OldGroup")->components) groups += std::string(c->type_name()) == "LightProbeGroup";
+    CHECK(groups == 1);
+    /* Deleted since: it stays deleted on reload. */
+    GameObject *dg = loaded.find_by_name("OldGroup");
+    for (size_t i = 0; dg && i < dg->components.size(); i++)
+      if (dg->components[i]->render_role() == Component::RenderRole::ProbeGroup) dg->components.erase(dg->components.begin() + (long)i--);
+    Scene gone;
+    CHECK(load_scene_text(save_scene_text(loaded), gone, lerr) && gone.find_by_name("OldGroup") && !gone.find_by_name("OldGroup")->probe_group());
+    CHECK(ed.probe_group_points_for_test().size() == 3);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("a volume over placed probes (round 455): the grid's probes take their tetrahedron's four by barycentric weights - checked against Tetrahedra directly - and a grid probe on a placed one holds exactly its SH and cube, sky shares and all", [] {
+    std::vector<Vec3> at;
+    std::vector<ProbeSH> sh;
+    std::vector<ProbeCube> cubes;
+    for (int k = 0; k < 8; k++) {
+      at.push_back(Vec3(k & 1 ? 0.5f : -0.5f, 1.0f + (k & 2 ? 0.5f : -0.5f), k & 4 ? 0.5f : -0.5f));
+      ProbeSH s;
+      s.c[0] = Vec3((float)k + 1.0f, 0.5f * (float)k, 1.0f), s.c[3] = Vec3(0.1f * (float)k);
+      sh.push_back(s);
+      ProbeCube c;
+      for (size_t j = 0; j < 6; j++) c.bounce[j] = Vec3((float)k), c.sky[j] = 0.1f * (float)k;
+      cubes.push_back(c);
+    }
+    ProbeVolumeData d;
+    probe_volume_from_points(at, sh, cubes, d);
+    const size_t n = d.probe_count();
+    std::printf("    %zu placed probes: a grid of %zu probes, %zu inside the tetrahedra\n", at.size(), n, d.unity_tetra_inside);
+    CHECK(n > 8 && d.sh.size() == n && d.baked.size() == n && d.valid.size() == n && d.live_ok.size() == n && d.unity_tetra_inside > 0);
+    Tetrahedra tets;
+    CHECK(tets.build(at));
+    int checked = 0, on_probe = 0;
+    float worst = 0.0f;
+    int hint = -1;
+    for (size_t i = 0; i < n; i++) {
+      int t = -1;
+      float w[4];
+      if (tets.locate(d.position[i], t, w, hint)) {
+        hint = t;
+        ProbeSH want;
+        float sky = 0.0f;
+        for (int c = 0; c < 4; c++) want += sh[(size_t)tets.tets[(size_t)t][(size_t)c]] * w[c], sky += cubes[(size_t)tets.tets[(size_t)t][(size_t)c]].sky[0] * w[c];
+        worst = std::max(worst, std::fabs(d.sh[i].c[0].x - want.c[0].x) + std::fabs(d.sh[i].c[3].x - want.c[3].x) + std::fabs(d.baked[i].sky[0] - sky));
+        checked++;
+      }
+      for (size_t k = 0; k < at.size(); k++)
+        if (length(d.position[i] - at[k]) < 1e-4f) {
+          on_probe++;
+          worst = std::max(worst, std::fabs(d.sh[i].c[0].x - sh[k].c[0].x) + std::fabs(d.baked[i].bounce[2].x - cubes[k].bounce[2].x));
+        }
+    }
+    std::printf("    %d grid probes checked against the tetrahedra, %d on a placed probe, worst difference %.2g\n", checked, on_probe, (double)worst);
+    CHECK(checked > 8 && worst < 1e-3f);
+    CHECK(on_probe >= 1);
+    /* What the views read at each placed probe (trilinear over the grid): its own light, within a thousandth - the grid has a
+     * probe on each of these corners, so the weights fall on it. */
+    float sample_worst = 0.0f;
+    const Vec3 face = normalize(Vec3(1, 1, 0));
+    for (size_t k = 0; k < at.size(); k++) {
+      Vec3 got;
+      CHECK(d.sample(at[k], face, Vec3(0.0f), false, got, false));
+      sample_worst = std::max(sample_worst, std::fabs(got.x - sh[k].eval(face).x));
+    }
+    std::printf("    sample() at each placed probe: worst difference from its SH %.2g\n", (double)sample_worst);
+    CHECK(sample_worst < 1e-3f);
+    ProbeVolumeData none;
+    probe_volume_from_points({}, {}, {}, none);
+    CHECK(none.empty());
+  });
+  test("Generate Lighting bakes at a Light Probe Group's probes (round 455): a group of 8 probes beside a red emissive wall and no Probe Volume bakes a volume over them, red where the wall is; moving the group 2 m and baking again moves the volume and its red with it; a probe moved is out of date and undone is current; a scene without a group keeps its key", [] {
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *wall = r35_add(ed, "Cube", "Wall", {4.0f, 1.5f, 0}, {0.2f, 3.0f, 6.0f}, Vec3(0.8f));
+    wall->get<MeshRenderer>()->materials[0]->emission = Vec3(1.0f, 0.05f, 0.05f);
+    wall->get<MeshRenderer>()->materials[0]->emission_strength = 6.0f;
+    ed.commit_change("r455 scene");
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.probes_for_test().empty());  // (no Probe Volume, no group: no probes)
+    const uint64_t key_plain = ed.lighting_data_for_test().scene_key;
+    ed.command("create Light Probe Group");
+    GameObject *grp = ed.scene().find_by_name("Light Probe Group");
+    CHECK(grp && grp->probe_group());
+    if (!grp || !grp->probe_group()) return;
+    grp->name = "Probes";
+    grp->set_world_position(Vec3(0.0f, 1.0f, 0.0f));
+    ed.commit_change("r455 group");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());  // (a group was added: the bake is no longer this scene's)
+    r35_bake(ed);
+    const ProbeVolumeData &d1 = ed.probes_for_test();
+    CHECK(!ed.lighting_out_of_date_for_test() && !d1.empty() && d1.scene_key == ed.lighting_data_for_test().scene_key && d1.sh.size() == d1.probe_count());
+    if (d1.empty()) return;
+    AABB box1;
+    for (const Vec3 &p : d1.position) box1.add(p);
+    Vec3 red1(0.0f);
+    CHECK(d1.sample(Vec3(0.4f, 1.0f, 0.0f), Vec3(1, 0, 0), ed.env_for_test().irradiance(Vec3(1, 0, 0)), false, red1, false, nullptr, &ed.env_for_test()));
+    std::printf("    volume of %zu grid probes from x %.2f to %.2f; light facing the wall (%.3f %.3f %.3f)\n", d1.probe_count(), box1.min.x, box1.max.x, red1.x, red1.y, red1.z);
+    CHECK(red1.x > 1.5f * red1.y && red1.x > 1.5f * red1.z);
+    /* Moving a probe by the console: out of date; undo: current again. */
+    ed.command("points move Probes 0 -0.5 -0.5 -0.9");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    /* The group 2 m toward the wall: the next bake's volume moves with it and sees more of the wall. */
+    ed.scene().find_by_name("Probes")->set_world_position(Vec3(2.0f, 1.0f, 0.0f));
+    ed.commit_change("r455 moved");
+    r34_steps(ed, 3);
+    CHECK(ed.lighting_out_of_date_for_test());
+    r35_bake(ed);
+    const ProbeVolumeData &d2 = ed.probes_for_test();
+    AABB box2;
+    for (const Vec3 &p : d2.position) box2.add(p);
+    Vec3 red2(0.0f);
+    CHECK(!d2.empty() && d2.sample(Vec3(2.4f, 1.0f, 0.0f), Vec3(1, 0, 0), ed.env_for_test().irradiance(Vec3(1, 0, 0)), false, red2, false, nullptr, &ed.env_for_test()));
+    std::printf("    moved: x %.2f to %.2f (was %.2f to %.2f); light facing the wall %.3f (was %.3f)\n", box2.min.x, box2.max.x, box1.min.x, box1.max.x, red2.x, red1.x);
+    CHECK(std::fabs((box2.min.x - box1.min.x) - 2.0f) < 0.3f && red2.x > red1.x);
+    /* Without the group, back to the key a round 454 bake holds. */
+    ed.scene().find_by_name("Probes")->active = false;
+    ed.commit_change("r455 off");
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().scene_key == key_plain && ed.probes_for_test().empty());
+  });
+  test("Unity's own probes stay as Unity baked them (round 455): with Remove Ringing on, a volume from Unity's lighting file is read through no window, and Generate Lighting's own probes - in the place of Unity's - take it", [] {
+    const std::string rel = "Assets/Imported/R455U";
+    const std::string dir = resolve_asset_path(rel);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4551eeee4551eeee4551eeee0001";
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"),
+                         "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightingSettings: {fileID: 4}\n--- !u!850595691 &4\nLightingSettings:\n  m_BakeResolution: 40\n  m_MixedBakeMode: 0\n"
+                         "--- !u!1 &10\nGameObject:\n  m_Name: Floor\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\t" + rel + "/Lit.unity\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("open " + rel + "/Lit.unity");
+    GameObject *floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->evaluated_mesh(1));
+    if (!floor || !floor->evaluated_mesh(1)) return;
+    const RenderMesh &rm = floor->evaluated_mesh(1)->render_mesh();
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/Lit/Lightmap-0_comp_light.exr", p.width = p.height = 8;
+    p.rgb.assign((size_t)8 * 8 * 3, 0x3800);
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    for (size_t i = 0; i < rm.positions.size(); i++) m.positions.push_back(rm.positions[i]), m.uv.push_back(Vec2(rm.positions[i].x + 0.5f, rm.positions[i].z + 0.5f));
+    m.indices = rm.indices;
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.world = Mat4::identity();
+    u.renderers.push_back(r);
+    for (int k = 0; k < 5; k++) {
+      UnityLighting::Probe pr;
+      pr.position = Vec3(k & 1 ? 1.0f : -1.0f, 1.0f + (k & 2 ? 1.0f : 0.0f), k & 4 ? 1.0f : -1.0f);
+      pr.seen.assign(26, Vec3(0.4f + 0.1f * (float)k));
+      u.probes.push_back(pr);
+    }
+    const std::string file = fs::join(dir, "Lit.unity.unity-lighting");
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    CHECK(ed.apply_unity_lighting(file));
+    ed.scene().lighting.probe_dering = 2;
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::printf("    Unity's probes: %zu, window %.3f %.3f %.3f with Lanczos on\n", ed.probes_for_test().sh.size(), (double)ed.probe_window_for_test()[0],
+                (double)ed.probe_window_for_test()[1], (double)ed.probe_window_for_test()[2]);
+    CHECK(!ed.probes_for_test().sh.empty() && ed.probe_window_for_test()[1] == 1.0f && ed.probe_window_for_test()[2] == 1.0f);
+    /* Generate Lighting's own probes (a group's, here) in Unity's place: windowed. */
+    ed.command("create Light Probe Group");
+    floor->get<MeshRenderer>()->contribute_gi = true;  // (an import without static flags: nothing to bake otherwise)
+    ed.commit_change("r455 floor");
+    ed.command("bake start");
+    CHECK(ed.baking_for_test());
+    for (int i = 0; i < 200 && ed.baking_for_test(); i++) ed.step_frame_headless();
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && !ed.probes_for_test().empty());
+    std::printf("    after Generate Lighting: %zu probes, window %.3f %.3f, key %llu\n", ed.probes_for_test().probe_count(), (double)ed.probe_window_for_test()[1], (double)ed.probe_window_for_test()[2], (unsigned long long)ed.probes_for_test().scene_key);
+    CHECK(std::fabs(ed.probe_window_for_test()[1] - 0.900f) < 0.001f && std::fabs(ed.probe_window_for_test()[2] - 0.637f) < 0.001f);
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -7829,4 +8170,5 @@ void run_lighting_tests() {
   tests_round452();
   tests_round453();
   tests_round454();
+  tests_round455();
 }

@@ -2242,7 +2242,7 @@ void Editor::run_console_command(const std::string &line) {
     }
     if (changed) mark_changed("Guides");
   }
-  else if (c == "curve" || c == "points") points_command(t);  // its own function: this chain is near the compiler's nesting limit
+  else if (c == "curve" || c == "points") points_command(split_quoted(line));  // its own function: this chain is near the compiler's nesting limit
   else if (c == "activecamera") {
     /* activecamera <object name> | none: the scene's Active Camera; no argument prints it. */
     std::string name;

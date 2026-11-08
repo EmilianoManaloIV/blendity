@@ -9303,6 +9303,165 @@ static void tests_round447() {
   });
 }
 
+/* ---------------------------------------------------------------- round 455: Light Probe Groups in the Scene view, Remove Ringing (task 0431) */
+static void tests_round455() {
+  /* A group of four probes in a plus, at the world's (0, 1, 0), the camera above it. */
+  auto make_group = [](Editor &ed, const char *name, Vec3 at, std::vector<Vec3> probes) {
+    ed.command("create Light Probe Group");
+    GameObject *g = ed.scene().find_by_name("Light Probe Group");
+    if (!g) return (GameObject *)nullptr;
+    g->name = name;
+    g->probe_group()->positions = probes;
+    g->set_world_position(at);
+    ed.mark_changed_for_test("R455 group");
+    return g;
+  };
+  const std::vector<Vec3> plus = {Vec3(-3, 0, 0), Vec3(0, 0, -3), Vec3(3, 0, 0), Vec3(0, 0, 3)};
+  test("Light Probe Groups in the Scene view (round 455): select the group, click a probe's dot, drag the gizmo's X arrow - only that probe moves, along local X - and Ctrl+Z restores it; Add Probe, Select All and Delete Selected change the count, each with undo", [plus, make_group] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("camera 0 20 6 0 1 0");
+    GameObject *g = make_group(ed, "Probes", Vec3(0, 1, 0), plus);
+    CHECK(g && g->probe_group());
+    if (!g || !g->probe_group()) return;
+    ed.command("select Probes");
+    ed.command("tool move");
+    r34_steps(ed, 4);
+    LightProbeGroupComponent *pg = g->probe_group();
+    const std::vector<Vec3> before = pg->positions;
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(g->world_matrix().point(before[2]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{2});
+    r34_gizmo_drag_x(ed, g->world_matrix().point(before[2]), 60);
+    r34_steps(ed, 2);
+    g = ed.scene().find_by_name("Probes");
+    pg = g ? g->probe_group() : nullptr;
+    CHECK(pg && pg->positions.size() == 4);
+    if (!pg || pg->positions.size() != 4) return;
+    const Vec3 moved = pg->positions[2];
+    std::printf("    probe 2 moved by (%.3f %.3f %.3f)\n", moved.x - before[2].x, moved.y - before[2].y, moved.z - before[2].z);
+    CHECK(moved.x > before[2].x + 0.05f && std::fabs(moved.y - before[2].y) < 1e-4f && std::fabs(moved.z - before[2].z) < 1e-4f);
+    for (size_t i : {0u, 1u, 3u}) CHECK(pg->positions[i].x == before[i].x && pg->positions[i].y == before[i].y && pg->positions[i].z == before[i].z);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    g = ed.scene().find_by_name("Probes");
+    pg = g ? g->probe_group() : nullptr;
+    CHECK(pg && pg->positions.size() == 4 && pg->positions[2].x == before[2].x && pg->positions[2].y == before[2].y && pg->positions[2].z == before[2].z);
+    if (!pg) return;
+    /* The Inspector's buttons, by real clicks. */
+    auto click = [&](const char *label) {
+      r34_steps(ed, 2);
+      Recti b;
+      if (!ed.button_rect_for_test(label, b)) {
+        std::printf("    no button '%s'\n", label);
+        return false;
+      }
+      r34_click(ed, b.x + b.w / 2, b.y + b.h / 2);
+      r34_steps(ed, 2);
+      return true;
+    };
+    auto count = [&] {
+      GameObject *o = ed.scene().find_by_name("Probes");
+      return o && o->probe_group() ? o->probe_group()->positions.size() : (size_t)0;
+    };
+    CHECK(click("Add Probe") && count() == 5);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    CHECK(count() == 4);
+    CHECK(click("Select All") && ed.points_selected_for_test().size() == 4);
+    CHECK(click("Delete Selected") && count() == 0);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    CHECK(count() == 4);
+    /* One probe selected by a click, then Delete Selected removes that one. */
+    CHECK(ed.project_to_window(ed.scene().find_by_name("Probes")->world_matrix().point(before[0]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.points_selected_for_test() == std::vector<int>{0});
+    CHECK(click("Delete Selected") && count() == 3);
+    ed.step_frame_headless({key_ev(platform::KEY_Z, platform::MOD_CTRL)});
+    r34_steps(ed, 2);
+    CHECK(count() == 4);
+  });
+  test("Light Probe Groups in the Scene view (round 455): the probes of every group are dots (more in the view while the layer is on), a click on a probe of a group that isn't selected selects that group and the probe, and the Points layer off hides and unpicks them", [plus, make_group] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("camera 0 80 18 0 1 0");
+    GameObject *a = make_group(ed, "GroupA", Vec3(0, 1, 0), plus);
+    GameObject *b = make_group(ed, "GroupB", Vec3(0, 1, -6), {Vec3(-2, 0, 0), Vec3(2, 0, 0)});
+    CHECK(a && b);
+    if (!a || !b) return;
+    ed.command("select GroupA");
+    r34_steps(ed, 4);
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window(b->world_matrix().point(b->probe_group()->positions[1]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    std::printf("    after the click: active %s, points %zu\n", ed.active_object_for_test() ? ed.active_object_for_test()->name.c_str() : "none", ed.points_selected_for_test().size());
+    CHECK(ed.active_object_for_test() == b && ed.points_selected_for_test() == std::vector<int>{1});
+    /* The `points` command works for groups: add, move, select, delete. */
+    ed.command("points add GroupB 0 0 5");
+    CHECK(b->probe_group()->positions.size() == 3 && b->probe_group()->positions[2].z == 5.0f);
+    ed.command("points move GroupB 2 1 2 3");
+    CHECK(b->probe_group()->positions[2].x == 1.0f && b->probe_group()->positions[2].y == 2.0f && b->probe_group()->positions[2].z == 3.0f);
+    ed.command("points select GroupB 0 1");
+    CHECK(ed.points_selected_for_test() == (std::vector<int>{0, 1}));
+    /* A group under its default name, which has spaces: quoted. */
+    ed.command("create Light Probe Group");
+    GameObject *dflt = ed.scene().find_by_name("Light Probe Group");
+    CHECK(dflt && dflt->probe_group() && dflt->probe_group()->positions.size() == 8);
+    ed.command("points add \"Light Probe Group\" 1 2 3");
+    dflt = ed.scene().find_by_name("Light Probe Group");
+    CHECK(dflt && dflt->probe_group()->positions.size() == 9 && dflt->probe_group()->positions[8].z == 3.0f);
+    ed.command("points delete GroupB 2");
+    CHECK(b->probe_group()->positions.size() == 2);
+    /* A disabled group's dots are not picked. */
+    ed.command("select GroupA");
+    r34_steps(ed, 2);
+    b->probe_group()->enabled = false;
+    ed.mark_changed_for_test("R455 off");
+    r34_steps(ed, 2);
+    CHECK(ed.project_to_window(b->world_matrix().point(b->probe_group()->positions[1]), x, y));
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    CHECK(ed.active_object_for_test() != b);
+  });
+  test("Remove Ringing (round 455): a bright Baked lamp beside a probe-lit sphere - Off, then Lanczos - redraws the Scene view without a re-bake (the lighting stays current); Off again is the first picture exactly", [] {
+    Editor ed;
+    r35_open(ed);
+    ed.command("camera 0 20 8 0 1 0");
+    r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *ball = r35_add(ed, "Sphere", "Ball", {0, 1.2f, 0}, {1.6f, 1.6f, 1.6f}, Vec3(0.8f), false);
+    GameObject *lamp = r35_add(ed, "Sphere", "Lamp", {1.5f, 2.2f, 0.5f}, {0.15f, 0.15f, 0.15f}, Vec3(1.0f), false);
+    Light *l = lamp->add<Light>();
+    l->type = 1, l->mode = 2, l->range = 8.0f, l->intensity = 40.0f, l->shadows = false;
+    GameObject *vol = ed.scene().create("Probes");
+    vol->add<ProbeVolume>();
+    ed.commit_change("r455 setup");
+    (void)ball;
+    r35_bake(ed);
+    CHECK(!ed.probes_for_test().empty() && !ed.lighting_out_of_date_for_test());
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> off = r35_scene_view(ed);
+    ed.command("set Lighting.ProbeRemoveRinging 2");
+    ed.command("set Lighting.ProbeRingingWidth 4");
+    CHECK(ed.scene().lighting.probe_dering == 2 && ed.scene().lighting.probe_dering_width == 4.0f);
+    r34_steps(ed, 4);
+    const std::vector<uint32_t> lanczos = r35_scene_view(ed);
+    const size_t differ = r35_diff_count(off, lanczos, 0);
+    std::printf("    Lanczos changed %zu of %zu pixels; lighting out of date: %d; window %.3f %.3f\n", differ, off.size(), (int)ed.lighting_out_of_date_for_test(),
+                (double)ed.probe_window_for_test()[1], (double)ed.probe_window_for_test()[2]);
+    CHECK(differ > 50 && !ed.lighting_out_of_date_for_test());
+    CHECK(std::fabs(ed.probe_window_for_test()[1] - 0.900f) < 0.001f && std::fabs(ed.probe_window_for_test()[2] - 0.637f) < 0.001f);
+    ed.command("set Lighting.ProbeRemoveRinging 0");
+    r34_steps(ed, 4);
+    CHECK(r35_diff_count(off, r35_scene_view(ed), 0) == 0 && ed.probe_window_for_test()[1] == 1.0f && ed.probe_window_for_test()[2] == 1.0f);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -9386,5 +9545,6 @@ void run_editor_tests() {
   tests_round437();
   tests_round445();
   tests_round447();
+  tests_round455();
   coverage_tests();
 }

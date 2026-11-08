@@ -763,6 +763,19 @@ void add_reflection_probe(const UnityDoc &d, GameObject *g, const UnityImport &c
   if (!custom.empty() && d.body.file_id("m_CustomBakedTexture") && ctx.path_of) p->custom_cubemap.path = ctx.path_of(custom);
 }
 
+/* Round 455 (ADR 0119): a Light Probe Group's m_SourcePositions, in the object's space, as an object's component. */
+void add_probe_group(const UnityDoc &d, GameObject *g) {
+  LightProbeGroupComponent *p = g->add<LightProbeGroupComponent>();
+  p->positions.clear();
+  p->enabled = d.body.num("m_Enabled", 1.0) != 0.0;
+  const YamlNode *src = d.body.get("m_SourcePositions");
+  if (!src) return;
+  for (const YamlNode &n : src->seq) {
+    const Vec3 v((float)n.num("x", 0.0), (float)n.num("y", 0.0), (float)n.num("z", 0.0));
+    if (std::isfinite(v.x + v.y + v.z)) p->positions.push_back(v);
+  }
+}
+
 void add_engine(const UnityDoc &d, GameObject *g, UnityImport &ctx);
 
 void add_collider(const UnityDoc &d, GameObject *g, UnityImport &ctx) {
@@ -877,6 +890,13 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
     case 20: return add_camera(d, g), (void)ctx.cameras++;
     case 64: case 65: case 135: case 136: return add_collider(d, g, ctx), (void)ctx.colliders++;
     case 215: return add_reflection_probe(d, g, ctx), (void)ctx.reflection_probes++;  // (round 401)
+    case 220: {  // (round 455: an object here, its bake Generate Lighting's; the document kept too, read-only, for the export to write back)
+      add_probe_group(d, g);
+      ctx.probe_groups++;
+      add_engine(d, g, ctx);
+      static_cast<EngineComponent *>(g->components.back().get())->native = true;
+      return;
+    }
     case 33: return;  // (meshes: before)
     case 137: return add_renderer(d, g, ctx, b);
     case 95: {  // (round 402: shown and written back; the document kept too, read-only)
@@ -912,6 +932,28 @@ void add_component(const UnityDoc &d, GameObject *g, UnityImport &ctx, Build &b)
 bool structural(const UnityDoc &d) { return d.class_id == 1 || is_transform(d) || d.class_id == 1001 || d.stripped; }
 
 }  // namespace
+/* Round 455: a scene saved before Light Probe Groups were objects holds each as a Unity Engine Component with the
+ * document's text; each gets the component read from m_SourcePositions (the document stays, now read-only, for the export). */
+int unity_probe_groups_from_engine(Scene &scene) {
+  int made = 0;
+  scene.for_each([&](GameObject &g) {
+    if (g.probe_group()) return;
+    for (auto &c : g.components) {
+      auto *e = dynamic_cast<EngineComponent *>(c.get());
+      if (!e || e->engine != "Unity" || e->type != "LightProbeGroup" || e->native) continue;  // (native: converted already - a group deleted since stays deleted)
+      std::vector<UnityDoc> docs;
+      std::string why;
+      if (!parse_unity_yaml(e->data, docs, why) || docs.empty()) continue;
+      add_probe_group(docs[0], &g);
+      e->native = true;
+      made++;
+      break;
+    }
+  });
+  return made;
+}
+
+
 
 namespace {
 /* The shortest text that reads back as the same float (Unity's own way: 0.1, not 0.100000001). */

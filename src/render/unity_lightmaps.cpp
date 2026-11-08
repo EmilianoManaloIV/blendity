@@ -73,48 +73,6 @@ struct Reader {
   }
 };
 
-/* Points in 3D for their nearest few (review 400: a cell search had stalled where Unity's probes were sparse). */
-struct KdTree {
-  std::vector<Vec3> pts;
-  std::vector<uint32_t> order;
-  void build(std::vector<Vec3> p) {
-    pts = std::move(p);
-    order.resize(pts.size());
-    for (uint32_t i = 0; i < order.size(); i++) order[i] = i;
-    split(0, order.size(), 0);
-  }
-  void split(size_t lo, size_t hi, int axis) {
-    if (hi - lo < 2) return;
-    const size_t mid = (lo + hi) / 2;
-    std::nth_element(order.begin() + (long)lo, order.begin() + (long)mid, order.begin() + (long)hi,
-                     [&](uint32_t a, uint32_t b) { return pts[a][axis] < pts[b][axis]; });
-    split(lo, mid, (axis + 1) % 3), split(mid + 1, hi, (axis + 1) % 3);
-  }
-  /* The `k` nearest to q, nearest first (squared distance, index). */
-  void nearest(Vec3 q, size_t k, std::vector<std::pair<float, uint32_t>> &best) const {
-    best.clear();
-    search(0, order.size(), 0, q, k, best);
-  }
-  void search(size_t lo, size_t hi, int axis, Vec3 q, size_t k, std::vector<std::pair<float, uint32_t>> &best) const {
-    if (lo >= hi || !k) return;
-    const size_t mid = (lo + hi) / 2;
-    const uint32_t i = order[mid];
-    const float d = length_sq(pts[i] - q);
-    if (best.size() < k || d < best.back().first) {
-      best.insert(std::upper_bound(best.begin(), best.end(), std::make_pair(d, i)), std::make_pair(d, i));
-      if (best.size() > k) best.pop_back();
-    }
-    const float gap = q[axis] - pts[i][axis];
-    const int next = (axis + 1) % 3;
-    if (gap < 0.0f) search(lo, mid, next, q, k, best);
-    else search(mid + 1, hi, next, q, k, best);
-    if (best.size() < k || gap * gap < best.back().first) {
-      if (gap < 0.0f) search(mid + 1, hi, next, q, k, best);
-      else search(lo, mid, next, q, k, best);
-    }
-  }
-};
-
 struct Writer {
   std::string b;
   template <class T> void put(T v) { b.append((const char *)&v, sizeof(T)); }
@@ -711,76 +669,21 @@ std::vector<ProbeSH> unity_probe_sh(const UnityLighting &u, const Mat4 &placemen
   return out;
 }
 
-namespace {
-/* One of Unity's probes, weighted, into a volume probe's cube (Unity's axes) and SH (Blendity's). */
-void add_probe(const UnityLighting &u, const std::vector<ProbeSH> &sh, uint32_t k, float w, ProbeCube &cube, ProbeSH &out) {
-  if (k >= u.probes.size()) return;
-  for (int j = 0; j < 6; j++) cube.bounce[(size_t)j] = cube.bounce[(size_t)j] + u.probes[k].axes[(size_t)j] * w;
-  if (k < sh.size()) out += sh[k] * w;
-}
-}  // namespace
-
 void unity_probe_volume(const UnityLighting &u, ProbeVolumeData &out, const Mat4 &placement) {
   out = ProbeVolumeData{};
   const Mat4 to_unity = placement.inverse();
   if (u.probes.empty()) return;
   std::vector<Vec3> at;
-  AABB box;
-  for (const auto &p : u.probes) at.push_back(placement.point(p.position)), box.add(at.back());
-  KdTree tree;
-  tree.build(at);
-  /* Their spacing: the median of each one's nearest neighbour (of at most 2,000 sampled). */
-  std::vector<float> gaps;
-  std::vector<std::pair<float, uint32_t>> near;
-  const size_t step = std::max<size_t>(1, at.size() / 2000);
-  for (size_t i = 0; i < at.size(); i += step) {
-    tree.nearest(at[i], 2, near);
-    if (near.size() == 2) gaps.push_back(std::sqrt(near[1].first));
-  }
-  std::sort(gaps.begin(), gaps.end());
-  const float spacing = gaps.empty() || gaps[gaps.size() / 2] <= 1e-4f ? 1.0f : gaps[gaps.size() / 2];
-  box.min = box.min - Vec3(spacing), box.max = box.max + Vec3(spacing);
-  std::vector<AABB> marks;
-  for (Vec3 p : at) {
-    AABB b;
-    b.add(p);
-    marks.push_back(b);
-  }
-  probe_place(out, box, marks, spacing * 0.5f, spacing * 2.0f, 200000);
-  const size_t n = out.position.size();
-  out.valid.assign(n, 1);
-  out.baked.assign(n, ProbeCube{});
+  for (const auto &p : u.probes) at.push_back(placement.point(p.position));
   /* Round 442 (ADR 0116): each of Unity's probes as L2 SH in Blendity's axes (fitted along the 26 directions, turned by
-   * the placement), and the volume's probes interpolated over the tetrahedra of Unity's (its Light Probe Groups'), as
-   * Unity interpolates them; outside their hull, from the nearest four. */
-  const std::vector<ProbeSH> unity_sh = unity_probe_sh(u, placement);
-  if (!unity_sh.empty()) out.sh.assign(n, ProbeSH{});
-  Tetrahedra tets;
-  const bool tetra = tets.build(at);
-  int hint = -1;
-  size_t inside = 0;
-  for (size_t i = 0; i < n; i++) {
-    ProbeCube cube;
-    ProbeSH sh;
-    int t = -1;
-    float w4[4];
-    if (tetra && tets.locate(out.position[i], t, w4, hint)) {
-      hint = t;
-      inside++;
-      for (int c = 0; c < 4; c++) add_probe(u, unity_sh, (uint32_t)tets.tets[(size_t)t][(size_t)c], w4[c], cube, sh);
-    }
-    else {
-      tree.nearest(out.position[i], 4, near);
-      float total = 0.0f;
-      for (const auto &[d2, k] : near) total += 1.0f / (d2 + 1e-6f);
-      for (const auto &[d2, k] : near) add_probe(u, unity_sh, k, total > 0.0f ? (1.0f / (d2 + 1e-6f)) / total : 0.0f, cube, sh);
-    }
-    out.baked[i] = turned(cube, to_unity);
-    if (!out.sh.empty()) out.sh[i] = sh;
-  }
-  out.unity_tetra_inside = inside;
+   * the placement); the volume's probes over the tetrahedra of Unity's, as Unity interpolates them (round 455: the shared
+   * probe_volume_from_points). Its cubes are in Unity's axes: turned after, which is linear. */
+  std::vector<ProbeCube> cubes(u.probes.size());
+  for (size_t k = 0; k < cubes.size(); k++)
+    for (int j = 0; j < 6; j++) cubes[k].bounce[(size_t)j] = u.probes[k].axes[(size_t)j];
+  probe_volume_from_points(at, unity_probe_sh(u, placement), cubes, out);
+  for (ProbeCube &c : out.baked) c = turned(c, to_unity);
   out.live = out.baked;
-  out.live_ok.assign(n, 1);
 }
 
 }  // namespace bl

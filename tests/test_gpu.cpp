@@ -4769,6 +4769,71 @@ static void tests_round458() {
   });
 }
 
+/* ---------------------------------------------------------------- round 455: probe SH deringing on the card (task 0431) */
+static void tests_round455_gpu() {
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b, double &mean, double &within3) {
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += d, ok += d <= 3;
+    }
+    mean = n ? sum / (double)n : 0.0, within3 = n ? (double)ok / (double)n : 0.0;
+  };
+  test("gpu views (round 455): a probe-lit ball beside a bright Baked lamp under Lanczos on the card as on the CPU - the card's picture the CPU's to a tenth of a level, Off and Lanczos each redraw both views without a re-bake, and Off again is the first picture on both (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, true, 2, 1.0f, false);
+    ed.command("overlay grid off");
+    GameObject *lamp = ed.scene().create("Lamp");
+    Light *L = lamp->add<Light>();
+    L->type = 1, L->mode = 2, L->intensity = 40.0f, L->range = 8.0f, L->shadows = false;
+    lamp->set_local_position(Vec3(1.8f, 1.6f, 0.6f));
+    ed.commit_change("lamp");
+    r35_bake(ed);
+    CHECK(!ed.probes_for_test().empty() && !ed.lighting_out_of_date_for_test());
+    auto both = [&](double &mean, double &within3, std::vector<uint32_t> &cpu_out, std::vector<uint32_t> &gpu_out) {
+      view(ed, w.ball, 2);
+      view(ed, w.ball, 1);
+      cpu_out = view(ed, w.ball, 1);
+      gpu_out = view(ed, w.ball, 2);
+      const bool on_gpu = ed.scene_on_gpu_for_test();
+      compare(cpu_out, gpu_out, mean, within3);
+      return on_gpu;
+    };
+    std::vector<uint32_t> off_cpu, off_gpu, lan_cpu, lan_gpu, again_cpu, again_gpu;
+    double mean = 0, within3 = 0;
+    CHECK(both(mean, within3, off_cpu, off_gpu));
+    std::printf("    Off: the card against the CPU, mean %.3f / 255, %.3f %% within 3\n", mean, within3 * 100.0);
+    CHECK(mean <= 0.1 && within3 >= 0.999);
+    ed.command("set Lighting.ProbeRemoveRinging 2");
+    ed.command("set Lighting.ProbeRingingWidth 4");
+    const bool on_gpu = both(mean, within3, lan_cpu, lan_gpu);
+    const size_t cpu_moved = r35_diff_count(off_cpu, lan_cpu, 0), gpu_moved = r35_diff_count(off_gpu, lan_gpu, 0);
+    std::printf("    Lanczos: the card against the CPU, mean %.3f / 255, %.3f %% within 3; the picture changes %zu pixels on the CPU, %zu on the card; out of date %d\n", mean,
+                within3 * 100.0, cpu_moved, gpu_moved, (int)ed.lighting_out_of_date_for_test());
+    CHECK(on_gpu && mean <= 0.1 && within3 >= 0.999);
+    CHECK(cpu_moved > 50 && gpu_moved > 50 && !ed.lighting_out_of_date_for_test());
+    ed.command("set Lighting.ProbeRemoveRinging 0");
+    both(mean, within3, again_cpu, again_gpu);
+    CHECK(r35_diff_count(off_cpu, again_cpu, 0) == 0 && r35_diff_count(off_gpu, again_gpu, 0) == 0);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -4801,4 +4866,5 @@ void run_gpu_tests() {
   tests_round449();
   tests_round458();
   tests_round454_gpu();
+  tests_round455_gpu();
 }

@@ -1091,6 +1091,7 @@ void Editor::draw_menubar(const Recti &r) {
         if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light");
         if (ui_.menu_item("Spot Light", nullptr, false, true, Icon::Light)) create_object("Spot Light");
         if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light");
+        if (ui_.menu_item("Light Probe Group", nullptr, false, true, Icon::Light)) create_object("Light Probe Group");
       });
       if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera");
     }
@@ -4044,7 +4045,7 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 /* The kind as create knows it, matched without case ("sphere", "point light"); "" when there's none. */
 std::string Editor::known_create_kind(const std::string &kind) {
   static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
-                                       "Directional Light", "Point Light", "Spot Light", "Area Light", "Camera", "Armature", "Lattice"};
+                                       "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice"};
   for (const char *k : kKinds)
     if (to_lower(kind) == to_lower(k)) return k;
   for (const char *prefix : {"Curve:", "Shape:"})  // (review 367: "curve: path" too; the rest is matched where it's made)
@@ -4099,6 +4100,16 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     select(bone->id);
     mark_changed("Create Armature");
     return root;
+  }
+  if (kind == "Light Probe Group") {
+    /* Unity's GameObject > Light > Light Probe Group: eight probes at a 1 m cube's corners, where the view is looking. */
+    GameObject *g = scene_->create(unique_object_name("Light Probe Group"), parent);
+    g->add<LightProbeGroupComponent>();
+    if (!parent) g->set_world_position(cam_.pivot);
+    if (parent) expanded_.insert(parent->id);
+    select(g->id);
+    mark_changed("Create Light Probe Group");
+    return g;
   }
   if (kind == "Lattice") {
     /* Blender's Add > Lattice (2 x 2 x 2, B-Spline), fitted round the selected mesh, which gets a Lattice modifier
@@ -4181,7 +4192,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   }
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
     Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
-              "Spot / Area Light, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>", kind.c_str());
+              "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>", kind.c_str());
     return nullptr;
   }
   const std::string name = unique_object_name(kind == "Empty" ? "GameObject" : kind);  // (finding 8: Unity's "Sphere (1)")
@@ -4226,6 +4237,7 @@ void Editor::delete_selected() {
     mark_changed("Delete Curve Points");
     return;
   }
+  if (co && co->probe_group() && probe_group_delete(co, pts)) return;  // (round 455: a Light Probe Group's selected probes)
   auto list = selected_objects(true);
   if (list.empty()) return;
   scene_->destroy(list);  // (round 433: in one pass - 50,000 deleted one by one had been quadratic)
@@ -5336,6 +5348,7 @@ void Editor::points_command(const std::vector<std::string> &t) {
   GameObject *g = scene_->find_by_name(arg(2, ""));
   Component *pc = g ? g->point_source() : nullptr;
   Curve *cv = g ? g->curve() : nullptr;
+  LightProbeGroupComponent *pgroup = g ? g->probe_group() : nullptr;
   /* Task 0054: extrude | cut | merge <object> <index...> (a curve's), close <object>, lattice <object> <u|v|w> <+1|-1>. */
   if (verb == "extrude" || verb == "cut" || verb == "merge" || verb == "close" || verb == "lattice") {
     std::vector<int> idx;
@@ -5366,8 +5379,14 @@ void Editor::points_command(const std::vector<std::string> &t) {
     Log::warn("%s: add | move | delete | select | extrude | cut | merge | close | lattice <object> ...", t[0].c_str());
     return;
   }
-  if (!pc || ((verb == "add" || verb == "delete") && !cv)) {
-    Log::warn("%s: no %s named '%s'", t[0].c_str(), verb == "add" || verb == "delete" ? "Curve object" : "Curve or Lattice object", arg(2, "").c_str());
+  if (!pc || ((verb == "add" || verb == "delete") && !cv && !pgroup)) {
+    Log::warn("%s: no %s named '%s'", t[0].c_str(), verb == "add" || verb == "delete" ? "Curve or Light Probe Group object" : "Curve, Lattice or Light Probe Group object", arg(2, "").c_str());
+    return;
+  }
+  if (verb == "add" && pgroup) {
+    const Vec3 at(num(3), num(4), num(5));
+    if (t.size() > 5) probe_group_add(g, &at);
+    else probe_group_add(g);  // (no numbers: the middle of the probes)
     return;
   }
   if (verb == "add") {
@@ -5398,6 +5417,7 @@ void Editor::points_command(const std::vector<std::string> &t) {
     pc->set_control_point(i, Vec3(num(4), num(5), num(6)));
     mark_changed("Move Point");
   }
+  else if (pgroup) probe_group_delete(g, {i});
   else {
     cv->points.erase(cv->points.begin() + i);
     pt_sel_.clear();

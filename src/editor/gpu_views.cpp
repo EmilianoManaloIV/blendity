@@ -275,7 +275,7 @@ gpu::RasterLight raster_light(const RenderLight &l) {
 /* Task 0197: the probe volume packed for the card (gpu::Raster::set_probe_volume, read by kProbeFns): a header of
  * four vec4 (round 442: pv[3].x the SH's start), then the octree's nodes (two each), the bricks (two each), the probes (thirteen each: position and
  * flags, the baked cube's six axes, the live one's), the roots four to a vec4. */
-std::vector<float> probe_pack(const ProbeVolumeData &d) {
+std::vector<float> probe_pack(const ProbeVolumeData &d, const std::array<float, 3> &window) {
   const size_t nn = d.nodes.size(), nb = d.bricks.size(), np = d.position.size(), nr = d.roots.size();
   /* Round 442: a fourth header row (pv[3].x: where each probe's 7 rows of SH start, 0 with none). */
   const bool with_sh = d.sh.size() == np && np > 0;
@@ -321,7 +321,8 @@ std::vector<float> probe_pack(const ProbeVolumeData &d) {
   for (size_t i = 0; with_sh && i < np; i++)
     for (int k = 0; k < 9; k++) {
       const size_t f = (sh_at + i * 7) * 4 + (size_t)k * 3;  // (27 floats in 7 rows: coefficient k's rgb at 3k)
-      o[f] = d.sh[i].c[(size_t)k].x, o[f + 1] = d.sh[i].c[(size_t)k].y, o[f + 2] = d.sh[i].c[(size_t)k].z;
+      const float h = window[(size_t)ProbeSH::band_of(k)];  // (round 455: the window folded in, so the shader is unchanged)
+      o[f] = d.sh[i].c[(size_t)k].x * h, o[f + 1] = d.sh[i].c[(size_t)k].y * h, o[f + 2] = d.sh[i].c[(size_t)k].z * h;
     }
   return o;
 }
@@ -1357,10 +1358,16 @@ void Editor::gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *
   uint64_t key = d ? ((((uint64_t)(uintptr_t)d * 31 ^ d->scene_key) * 1099511628211ull ^ d->probe_count()) * 1099511628211ull ^ probe_live_gen_) *
                          1099511628211ull ^ lighting_gen_
                    : 0;
+  if (d)  // (round 455: the window is folded into the packed SH)
+    for (float h : probe_window_) {
+      uint32_t hb;
+      std::memcpy(&hb, &h, 4);
+      key = (key * 1099511628211ull) ^ hb;
+    }
   key = (key * 1099511628211ull) ^ (lv ? lv->signature() ^ lv_bake_gen_ : 0);  // (round 443: the Light Volumes ride in the same buffer)
   if (key == gpu_probe_key_) return;
   gpu_probe_key_ = key;
-  std::vector<float> packed = d ? probe_pack(*d) : std::vector<float>(16, 0.0f);  // (no probe volume: a header the card reads as empty - round 442: four rows)
+  std::vector<float> packed = d ? probe_pack(*d, probe_window_) : std::vector<float>(16, 0.0f);  // (no probe volume: a header the card reads as empty - round 442: four rows)
   const std::vector<float> volumes = lv ? light_volume_pack(*lv, kCardMaxProbes) : std::vector<float>();
   if (!volumes.empty()) {
     const int32_t at = (int32_t)(packed.size() / 4);

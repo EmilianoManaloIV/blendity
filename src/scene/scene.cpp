@@ -196,6 +196,11 @@ void register_builtin_components() {
                    "Light probes placed automatically (dense near geometry): objects without a lightmap take their indirect "
                    "light from them. Baked by Generate Lighting, kept live by Realtime GI.",
                    "Unity: Adaptive Probe Volume; Blender EEVEE: Irradiance Volume");
+  reg<LightProbeGroupComponent>("Rendering",
+                                "Light probes at the points you place (Unity's Light Probe Group): Generate Lighting bakes them instead of the "
+                                "automatic grid, and objects without a lightmap take their indirect light from them. Click a probe to move it "
+                                "with the gizmo.",
+                                "Unity: Light Probe Group; Blender EEVEE: Irradiance Volume (placed by hand)");
   reg<Camera>("Rendering", "Renders the Game view.", "Camera object (the active scene camera)");
   reg<CameraFilters>("Rendering",
                      "A stack of filters on this camera, applied top to bottom: Retro Console looks (PS1, N64, Saturn, DOS) and more. "
@@ -398,10 +403,69 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Probe Leak Reduction", probe_leak_reduction);
   r.help("Probes behind the surface being shaded (the other side of a thin wall) count for almost nothing\n"
          "(Unity APV: Leak Reduction Mode).");
+  static const char *dering[] = {"Off", "Hanning", "Lanczos"};
+  r.enumeration("Probe Remove Ringing", probe_dering, dering, 3);
+  r.help("A bright lamp leaves a dark ring and a light spot on the far side of a probe-lit object (the SH hold only three bands).\n"
+         "A window softens the upper bands: Hanning or Lanczos (Sloan's Stupid SH Tricks). A view setting: no re-bake, and\n"
+         "Unity's own probes are shown as Unity baked them. Off is Unity's default.");
+  r.field("Probe Ringing Width", probe_dering_width, 0.1f, 3.0f, 16.0f);
+  r.help("The window's width: a smaller one removes more ringing and blurs the lamp's light more (3 to 16, default 4).");
   r.field("Show Probes", show_probes);
   r.field("Light Volumes in Views", light_volumes_in_views);
   r.help("Objects without a lightmap take their ambient light from the baked VRC Light Volumes that hold them (VRChat's own\n"
          "evaluation: trilinear L0 + L1 . n, blended at the box edges), in the Scene and Game views and renders. Off: the probe volume.");
+}
+
+/* ---- round 455 (ADR 0119): a Light Probe Group's probes as text ---- */
+
+std::string probe_positions_to_text(const std::vector<Vec3> &positions) {
+  std::string s;
+  s.reserve(positions.size() * 32);
+  for (const Vec3 &p : positions) {
+    if (!s.empty()) s += "; ";
+    append_float(s, p.x), s += ' ', append_float(s, p.y), s += ' ', append_float(s, p.z);
+  }
+  return s;
+}
+
+void probe_positions_from_text(const std::string &text, std::vector<Vec3> &positions) {
+  std::vector<Vec3> out;
+  const char *p = text.c_str(), *end = p + text.size();
+  while (p < end) {
+    char *next = nullptr;
+    float v[3];
+    int got = 0;
+    for (; got < 3; got++) {
+      v[got] = std::strtof(p, &next);
+      if (next == p) break;
+      p = next;
+    }
+    if (got == 3 && std::isfinite(v[0] + v[1] + v[2])) out.push_back(Vec3(v[0], v[1], v[2]));
+    while (p < end && *p != ';') p++;  // (a damaged item is skipped to the next)
+    if (p < end) p++;
+  }
+  positions = std::move(out);
+}
+
+LightProbeGroupComponent::LightProbeGroupComponent() {
+  for (int k = 0; k < 8; k++) positions.push_back(Vec3(k & 1 ? 0.5f : -0.5f, k & 2 ? 0.5f : -0.5f, k & 4 ? 0.5f : -0.5f));
+}
+
+void LightProbeGroupComponent::set_control_point(int i, Vec3 p) {
+  if (i >= 0 && i < (int)positions.size() && std::isfinite(p.x + p.y + p.z)) positions[(size_t)i] = p;
+}
+
+uint64_t LightProbeGroupComponent::content_key() const {
+  uint64_t h = kFnvBasis ^ positions.size();
+  return positions.empty() ? h : mix_bytes(h, positions.data(), positions.size() * sizeof(Vec3));
+}
+
+void LightProbeGroupComponent::reflect(Reflector &r) {
+  if (!r.serializing()) return;  // (the Inspector draws a count and buttons instead of a row a probe)
+  std::string s = probe_positions_to_text(positions);
+  const std::string before = s;
+  r.text("Positions", s);
+  if (s != before) probe_positions_from_text(s, positions);
 }
 
 void ProbeVolume::reflect(Reflector &r) {
@@ -3263,9 +3327,12 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
 
 Curve *GameObject::curve() const { return static_cast<Curve *>(find_role(Component::RenderRole::Curve)); }
 Lattice *GameObject::lattice() const { return static_cast<Lattice *>(find_role(Component::RenderRole::Lattice)); }
+LightProbeGroupComponent *GameObject::probe_group() const { return static_cast<LightProbeGroupComponent *>(find_role(Component::RenderRole::ProbeGroup)); }
 Component *GameObject::point_source() const {
-  for (auto &c : components)
-    if (c->render_role() == Component::RenderRole::Curve || c->render_role() == Component::RenderRole::Lattice) return c.get();
+  for (auto &c : components) {
+    const Component::RenderRole role = c->render_role();
+    if (role == Component::RenderRole::Curve || role == Component::RenderRole::Lattice || role == Component::RenderRole::ProbeGroup) return c.get();
+  }
   return nullptr;
 }
 

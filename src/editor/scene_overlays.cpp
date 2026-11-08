@@ -376,12 +376,13 @@ void Editor::render_static_overlays() {
   /* Probe volume (Lighting > Show Probes): each probe a dot in the light it holds (seen from above),
    * the ones inside geometry red. */
   if (scene_->lighting.show_probes && !probes_.empty()) {
+    update_probe_window();
     const size_t n = probes_.probe_count(), step = std::max<size_t>(1, n / 50000);
     const Vec3 up(0, 1, 0), sky = env_.irradiance(up);
     for (size_t i = 0; i < n; i += step) {
       const bool live = probe_frame_.use_live && probes_.live_ok[i];
       const Vec3 c = live || i >= probes_.sh.size() ? (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky)
-                                                   : vmax(probes_.sh[i].eval(up) + (probes_.sky_in_sh ? probes_.sky_change(env_, up) : sky) * probes_.baked[i].sky[2], Vec3(0.0f));  // (round 442: the SH where baked; round 453: the sky in them)
+                                                   : vmax(probes_.sh[i].eval(up, probe_window_) + (probes_.sky_in_sh ? probes_.sky_change(env_, up) : sky) * probes_.baked[i].sky[2], Vec3(0.0f));  // (round 442: the SH where baked; round 453: the sky in them)
       const uint32_t col = probes_.valid[i] ? to_display_pixel(c, ViewTransform::Standard, 0.0f) : Color::hex(0xFF3030);
       scene_r3d_.point(probes_.position[i], std::max(1.5f, (float)ui_.px(2.5f)), col, true);
     }
@@ -557,10 +558,20 @@ void Editor::draw_lattice(const GameObject &g, const Lattice &l) {
   }
 }
 
+/* Round 455 (ADR 0119): a Light Probe Group's probes, small yellow dots in the world (grey when the group is off): every
+ * group's, selected or not, at most 50,000 a group. The active group's are drawn again as control points to click. */
+void Editor::draw_probe_group(const GameObject &g, const LightProbeGroupComponent &pg) {
+  const Mat4 &w = g.world_matrix();
+  const size_t n = pg.positions.size(), step = std::max<size_t>(1, n / 50000);
+  const uint32_t col = pg.enabled ? Color::hex(0xFFD93A) : Color::hex(0x908C70);
+  const float size = std::max(1.5f, (float)ui_.px(2.5f));
+  for (size_t i = 0; i < n; i += step) scene_r3d_.point(w.point(pg.positions[i]), size, col, true);
+}
+
 /* The active curve's or lattice's points: selected ones orange, the rest white; the first one larger (a curve's start). */
 void Editor::draw_control_points(const Recti &view, const GameObject &g, const Component &pc) {
   auto &u = ui_;
-  for (int i = 0; i < pc.control_point_count(); i++) {
+  for (int i = 0, n = std::min(pc.control_point_count(), 50000); i < n; i++) {  // (round 455: a probe group can hold many)
     Vec2 sp;
     float z;
     if (!scene_r3d_.project(g.world_matrix().point(pc.control_point(i)), sp, z)) continue;
@@ -638,6 +649,7 @@ void Editor::draw_scene_icons(const Recti &view) {
     if (const Component *pc = show_points_ ? g.point_source() : nullptr; pc && g.active_in_hierarchy()) {
       if (const Curve *cv = g.curve()) draw_curve(g, *cv);
       if (const Lattice *lt = g.lattice()) draw_lattice(g, *lt);
+      if (const LightProbeGroupComponent *pg = g.probe_group()) draw_probe_group(g, *pg);
       if (g.id == active_ && !edit_mode_) draw_control_points(view, g, *pc);
     }
     if (!show_icons_) return;

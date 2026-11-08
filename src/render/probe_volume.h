@@ -81,7 +81,7 @@ struct ProbeVolumeData {
    * is outside or no valid probe is near. `hint` (optional, per caller and thread): the brick the last
    * sample used; a point inside it skips the octree (neighbouring pixels mostly share a brick). */
   bool sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction = true, int *hint = nullptr,
-              const Environment *sky_now = nullptr) const;  // (round 453: `sky_now` - the world as shaded now - relights SH that hold the sky; null: they stay as baked)
+              const Environment *sky_now = nullptr, const std::array<float, 3> *window = nullptr) const;  // (round 455: `window` - the SH's bands scaled, ProbeFrame::sh_window; null none) (round 453: `sky_now` - the world as shaded now - relights SH that hold the sky; null: they stay as baked)
   bool save(const std::string &path, std::string &error) const;
   bool load(const std::string &path, std::string &error);
 };
@@ -101,6 +101,12 @@ void probe_validate(ProbeVolumeData &d, const PathTracer &pt, int rays);
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start = 0,
                 size_t count = SIZE_MAX, float indirect_intensity = 1.0f, int gpu_device = -1, std::string *gpu_error = nullptr,
                 const Environment *env = nullptr);  // (round 453: `env` - the world the probes' SH are baked under - is kept for a sky change)
+/* Round 455 (ADR 0119): a volume over probes placed by hand (a Light Probe Group's, Unity's lighting file's), as Unity
+ * interpolates them: a grid placed round the points, each of its probes taking the four of the tetrahedron it lies in by
+ * barycentric weights, or the nearest four outside the points' hull. `sh` (or empty, the cubes alone) and `cubes` are one
+ * per point, in the world's axes; the sky fields (sky_in_sh and the baked sky) are the caller's. */
+void probe_volume_from_points(const std::vector<Vec3> &points, const std::vector<ProbeSH> &sh, const std::vector<ProbeCube> &cubes,
+                              ProbeVolumeData &out);
 /* Invalid probes take their valid neighbours' light. */
 void probe_dilate(ProbeVolumeData &d);
 /* Realtime: up to `budget` probes from `start`, with voxel GI (six hemisphere gathers); returns the
@@ -121,6 +127,9 @@ struct ProbeFrame {
   /* One sample per 2 x 2 pixels on the same triangle (probe light changes slowly over a surface): a
    * quarter of the cost. Off: every pixel samples (the reference the tests compare against). */
   bool quad_reuse = true;
+  /* Round 455 (ADR 0119): the window the SH are evaluated under (window_factors; 1, 1, 1 none). Carried by value in the frame,
+   * so a render job keeps its own while the main thread sets the next. */
+  std::array<float, 3> sh_window = {1.0f, 1.0f, 1.0f};
 };
 
 }  // namespace bl

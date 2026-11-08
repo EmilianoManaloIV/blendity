@@ -65,6 +65,7 @@ void Editor::draw_hierarchy(const Recti &r) {
       if (ui_.menu_item("Point Light", nullptr, false, true, Icon::Light)) create_object("Point Light", child);
       if (ui_.menu_item("Spot Light", nullptr, false, true, Icon::Light)) create_object("Spot Light", child);
       if (ui_.menu_item("Area Light", nullptr, false, true, Icon::Light)) create_object("Area Light", child);
+      if (ui_.menu_item("Light Probe Group", nullptr, false, true, Icon::Light)) create_object("Light Probe Group", child);
     });
     if (u.menu_item("Camera", nullptr, false, true, Icon::Camera)) create_object("Camera", child);
     u.submenu("Curve", u.px(170), [this, child] {
@@ -1803,6 +1804,7 @@ void Editor::draw_inspector(const Recti &r) {
           }
       }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
+      if (auto *pg = dynamic_cast<LightProbeGroupComponent *>(c)) draw_probe_group_extras(*g, *pg, lay);  // (round 455)
       if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
       if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
         const Recti row = lay.row(u.row_h() + u.px(2));
@@ -3564,6 +3566,36 @@ bool Editor::object_field_picked(ui::Id id, std::string &v) {
 
 /* Round 339: View Angle Shapes' live line - where the Game camera is as its reference sees it and what the rows give
  * there - and a row added at that angle. */
+/* Round 455 (ADR 0119): a Light Probe Group's Inspector - a count (not a row a probe) and the buttons that change it; the
+ * probes themselves are moved in the Scene view (click one, drag the gizmo). */
+void Editor::draw_probe_group_extras(GameObject &g, LightProbeGroupComponent &pg, ui::Layout &lay) {
+  auto &u = ui_;
+  const int selected = pt_obj_ == g.id ? (int)pt_sel_.size() : 0;
+  Recti row = lay.row(u.row_h() + u.px(2));
+  const std::string line = strprintf("Probes: %zu%s", pg.positions.size(), selected ? strprintf(" (%d selected)", selected).c_str() : "");
+  u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, line, u.theme.text_dim);
+  if (u.record_buttons) u.button_rects["shown:" + line] = row;  // (tests read the line)
+  row = lay.row(u.row_h() + u.px(2));
+  const int bw = (row.w - u.px(16)) / 3;
+  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Add Probe")) probe_group_add(&g);
+  u.tooltip("A probe at the middle of the group's probes (then move it with the gizmo).");
+  if (u.button_enabled({row.x + u.px(8) + bw, row.y, bw, row.h}, "Delete Selected", selected > 0, "Click probes in the Scene view first (Shift adds).")) {
+    std::vector<int> idx = pt_sel_;
+    probe_group_delete(&g, idx);
+  }
+  u.tooltip("Remove the selected probes.");
+  if (u.button({row.x + u.px(12) + bw * 2, row.y, bw, row.h}, "Select All")) probe_group_select_all(&g);
+  u.tooltip("Select every probe of this group, to move them together.");
+  row = lay.row(u.row_h() + u.px(2));
+  if (!pg.enabled) {
+    u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Off: its probes are grey, can't be clicked in the Scene view, and aren't baked.", u.theme.warning);
+    row = lay.row(u.row_h() + u.px(2));
+  }
+  const char *note = lighting_from_unity_ ? "Unity's lightmaps are shown: Generate Lighting bakes these probes in their place."
+                                          : "Generate Lighting bakes at these probes instead of the automatic grid.";
+  u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, note, u.theme.text_dim);
+}
+
 void Editor::draw_view_shapes_extras(GameObject &g, ViewAngleShapes &vs, ui::Layout &lay) {
   auto &u = ui_;
   GameObject *cam_obj = nullptr;

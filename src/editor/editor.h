@@ -1357,6 +1357,8 @@ class Editor {
   uint64_t rsm_renders_for_test() const { return vgi_[0].rsm_renders + vgi_[1].rsm_renders; }
   /* Probe volumes (task 0014). */
   const ProbeVolumeData &probes_for_test() const { return probes_; }
+  const std::array<float, 3> &probe_window_for_test() const { return probe_window_; }
+  std::vector<Vec3> probe_group_points_for_test() { return probe_group_points(); }  // (round 455)
   std::map<uint64_t, LightVolumeSH> &light_volume_bakes_for_test() { return light_volume_bakes_; }  // (round 398)
   const LightVolumeFrame *light_volume_frame_for_test() { return light_volume_frame(); }  // (round 443)
   std::map<uint64_t, ReflectionProbeBake> &reflection_probe_bakes_for_test() { return reflection_probe_bakes_; }  // (round 401)
@@ -3064,7 +3066,14 @@ class Editor {
   bool skin_job_held_ = false;  // (tests: a finished bind waits to land until released)
   std::string skin_transfer_source_;    // the Rigging window's Transfer From field
   void draw_control_points(const Recti &view, const GameObject &g, const Component &pc);
+  void draw_probe_group(const GameObject &g, const LightProbeGroupComponent &pg);  // (round 455)
   bool point_pick(const Recti &view, int mx, int my, int mode);
+  bool probe_group_pick(const Recti &view, int mx, int my, int mode);  // (round 455: a click on another group's probe selects that group and the probe)
+  /* Round 455 (ADR 0119): Light Probe Groups' probes, edited as control points (point_edit.cpp). */
+  bool probe_group_add(GameObject *g, const Vec3 *at = nullptr);
+  bool probe_group_delete(GameObject *g, std::vector<int> idx);
+  void probe_group_select_all(GameObject *g);
+  void draw_probe_group_extras(GameObject &g, LightProbeGroupComponent &pg, ui::Layout &lay);
   GameObject *point_target(std::vector<int> &points);
   void points_command(const std::vector<std::string> &t);  // the console's `points` (and `curve`)
   /* Bind (or unbind) a Mesh Deform modifier as one undo step; a refusal is logged and shown in the Inspector. */
@@ -5686,6 +5695,9 @@ class Editor {
   /* ---- probe volumes (lighting.cpp, task 0014) ---- */
   ProbeVolumeData probes_;
   ProbeFrame probe_frame_;
+  std::vector<Vec3> probe_group_points();  // (round 455: every enabled, active Light Probe Group's probes, in the world)
+  std::array<float, 3> probe_window_ = {1.0f, 1.0f, 1.0f};  // (round 455: main thread only; frames copy it)
+  void update_probe_window();  // (round 455: probes_.sh_window from the Lighting settings; none for Unity's own probes)
   size_t probe_cursor_ = 0, probe_live_left_ = 0;
   /* ---- Round 412 (ADR 0106): Generate Lighting on a worker. The job carries the scene as collect_bake_scene copies
    * it, the probes' box, the Light Volumes' grids and the Reflection Probes' places gathered on the main thread when
@@ -5701,6 +5713,7 @@ class Editor {
     /* The probe volume (task 0014). */
     bool probe_box_ok = false;
     AABB probe_box;
+    std::vector<Vec3> group_points;  // (round 455: the Light Probe Groups' probes in the world: bake there instead of a grid)
     float probe_min_spacing = 1.0f, probe_max_spacing = 4.0f, indirect_intensity = 1.0f;
     int indirect_samples = 512, bounces = 2;
     /* The Light Volumes (round 398), each with its grid placed here. */

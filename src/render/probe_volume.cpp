@@ -7,6 +7,7 @@
 #include "lightmapper.h"
 #include "light_pick.h"
 #include "pathtracer.h"
+#include "tetrahedra.h"
 #include "voxel_gi_gpu.h"
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -177,7 +178,7 @@ Vec3 ProbeVolumeData::sky_change(const Environment &now, Vec3 n) const {
 }
 
 bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live, Vec3 &out, bool leak_reduction, int *hint,
-                             const Environment *sky_now) const {
+                             const Environment *sky_now, const std::array<float, 3> *window) const {
   int b = -1;
   if (hint && *hint >= 0 && (size_t)*hint < bricks.size()) {
     /* Half-open, as the octree splits ([min, mid) and [mid, max)): a point inside is in no other brick. */
@@ -209,9 +210,10 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
   const float nx2 = n.x * n.x, ny2 = n.y * n.y, nz2 = n.z * n.z;
   const ProbeCube *cubes = use_live ? live.data() : baked.data();
   /* A corner's light from geometry along n: its SH where the bake kept them (round 442), else its cube's axes. */
+  const std::array<float, 3> win = window ? *window : std::array<float, 3>{1.0f, 1.0f, 1.0f};
   auto bounce_of = [&](uint32_t i, const ProbeCube &cube) {
     const bool baked_here = !use_live || !live_ok[i];
-    if (baked_here && i < sh.size()) return sh[i].eval(n);
+    if (baked_here && i < sh.size()) return sh[i].eval(n, win);
     return cube.bounce[ax] * nx2 + cube.bounce[ay] * ny2 + cube.bounce[az] * nz2;
   };
   /* (Round 453: a corner shaded from SH that hold the sky takes only the change in the sky since the bake - the whole of it
@@ -265,6 +267,77 @@ bool ProbeVolumeData::sample(Vec3 p, Vec3 n, Vec3 sky_irradiance, bool use_live,
   if (!finite3(out)) return false;
   out = vmax(out, Vec3(0.0f));  // (a sky darker than the bake's must not take more than the SH hold)
   return true;
+}
+
+/* ------------------------------------------------------------- a volume over placed points (round 455, ADR 0119) */
+
+namespace {
+/* One placed probe, weighted, into a grid probe's cube and SH. */
+void add_point_probe(const std::vector<ProbeSH> &sh, const std::vector<ProbeCube> &cubes, uint32_t k, float w, ProbeCube &cube, ProbeSH &out) {
+  if (k >= cubes.size()) return;
+  for (size_t j = 0; j < 6; j++) cube.bounce[j] = cube.bounce[j] + cubes[k].bounce[j] * w, cube.sky[j] += cubes[k].sky[j] * w;
+  if (k < sh.size()) out += sh[k] * w;
+}
+}  // namespace
+
+void probe_volume_from_points(const std::vector<Vec3> &at, const std::vector<ProbeSH> &sh, const std::vector<ProbeCube> &cubes, ProbeVolumeData &out) {
+  out = ProbeVolumeData{};
+  if (at.empty() || cubes.size() != at.size()) return;
+  AABB box;
+  for (const Vec3 &p : at) box.add(p);
+  KdTree tree;
+  tree.build(at);
+  /* Their spacing: the median of each one's nearest neighbour (of at most 2,000 sampled). */
+  std::vector<float> gaps;
+  std::vector<std::pair<float, uint32_t>> near;
+  const size_t step = std::max<size_t>(1, at.size() / 2000);
+  for (size_t i = 0; i < at.size(); i += step) {
+    tree.nearest(at[i], 2, near);
+    if (near.size() == 2) gaps.push_back(std::sqrt(near[1].first));
+  }
+  std::sort(gaps.begin(), gaps.end());
+  const float spacing = gaps.empty() || gaps[gaps.size() / 2] <= 1e-4f ? 1.0f : gaps[gaps.size() / 2];
+  box.min = box.min - Vec3(spacing), box.max = box.max + Vec3(spacing);
+  std::vector<AABB> marks;
+  for (Vec3 p : at) {
+    AABB b;
+    b.add(p);
+    marks.push_back(b);
+  }
+  probe_place(out, box, marks, spacing * 0.5f, spacing * 2.0f, 200000);
+  const size_t n = out.position.size();
+  out.valid.assign(n, 1);
+  out.baked.assign(n, ProbeCube{});
+  if (sh.size() == at.size()) out.sh.assign(n, ProbeSH{});
+  /* Round 442 (ADR 0116): the volume's probes interpolated over the tetrahedra of the points, as Unity interpolates its
+   * Light Probe Groups; outside their hull, from the nearest four. */
+  Tetrahedra tets;
+  const bool tetra = tets.build(at);
+  if (!tetra && at.size() > Tetrahedra::kMaxPoints) Log::info("Probe volume: %zu placed probes are past the %zu a tetrahedralisation takes - each grid probe takes the nearest four", at.size(), Tetrahedra::kMaxPoints);
+  int hint = -1;
+  size_t inside = 0;
+  for (size_t i = 0; i < n; i++) {
+    ProbeCube cube;
+    ProbeSH acc;
+    int t = -1;
+    float w4[4];
+    if (tetra && tets.locate(out.position[i], t, w4, hint)) {
+      hint = t;
+      inside++;
+      for (int c = 0; c < 4; c++) add_point_probe(sh, cubes, (uint32_t)tets.tets[(size_t)t][(size_t)c], w4[c], cube, acc);
+    }
+    else {
+      tree.nearest(out.position[i], 4, near);
+      float total = 0.0f;
+      for (const auto &[d2, k] : near) total += 1.0f / (d2 + 1e-6f);
+      for (const auto &[d2, k] : near) add_point_probe(sh, cubes, k, total > 0.0f ? (1.0f / (d2 + 1e-6f)) / total : 0.0f, cube, acc);
+    }
+    out.baked[i] = cube;
+    if (!out.sh.empty()) out.sh[i] = acc;
+  }
+  out.unity_tetra_inside = inside;
+  out.live = out.baked;
+  out.live_ok.assign(n, 1);
 }
 
 /* ------------------------------------------------------------- baking */

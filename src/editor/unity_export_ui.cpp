@@ -11,6 +11,7 @@
 #include "../scene/material.h"
 #include "../scene/unity_package.h"
 #include "../scene/unity_scene.h"
+#include "../scene/unity_yaml.h"
 #include "../core/core.h"
 
 #include <set>
@@ -226,10 +227,28 @@ void avatar_component_edits(const GameObject &g, std::vector<UnityEdit> &out) {
 }
 }  // namespace
 
+namespace {
+/* Round 455 (ADR 0119): a Light Probe Group's document is written back as Unity had it; one whose probes were moved (or added,
+ * removed) here is not written back - said, so a moved probe isn't thought to have gone. */
+void warn_probe_group_moved(const GameObject &g, const EngineComponent &e) {
+  const LightProbeGroupComponent *pg = g.probe_group();
+  std::vector<UnityDoc> docs;
+  std::string why;
+  if (!pg || !parse_unity_yaml(e.data, docs, why) || docs.empty()) return;
+  std::vector<Vec3> was;
+  if (const YamlNode *src = docs[0].body.get("m_SourcePositions"))
+    for (const YamlNode &n : src->seq) was.push_back(Vec3((float)n.num("x", 0.0), (float)n.num("y", 0.0), (float)n.num("z", 0.0)));
+  bool same = was.size() == pg->positions.size();
+  for (size_t i = 0; same && i < was.size(); i++) same = was[i].x == pg->positions[i].x && was[i].y == pg->positions[i].y && was[i].z == pg->positions[i].z;
+  if (!same) Log::warn("Export: Light Probe Group '%s' has probes moved in Blendity; Unity's own document is written back unchanged (its probes are not)", g.name.c_str());
+}
+}  // namespace
+
 void unity_component_edits(const GameObject &g, int64_t game_object, std::vector<UnityEdit> &out) {
   avatar_component_edits(g, out);  // (round 402)
   for (const auto &comp : g.components) {  // (round 403: a kept document edited in the Inspector goes back whole - the ones a Blendity component holds don't)
     const auto *e = dynamic_cast<const EngineComponent *>(comp.get());
+    if (e && e->native && e->engine == "Unity" && e->type == "LightProbeGroup") warn_probe_group_moved(g, *e);  // (round 455: the document goes back as it was)
     if (!e || e->native || e->engine != "Unity" || e->data.empty()) continue;
     UnityEdit ed;
     ed.file_id = e->unity_file_id();

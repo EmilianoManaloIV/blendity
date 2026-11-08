@@ -55,3 +55,12 @@ Decision 1's "the sky shares stay the cube's" no longer holds for baked probes:
   that end before the byte (before round 453) or at it load with no baked sky.
 - **The card:** `pv[3].y` the flag, `pv[3].z` where the six baked-sky vec4 start (after the SH rows, 0 none);
   `probe_sample` evaluates the same like-for-like change with the shader's `irradiance` at the three axes facing n.
+
+## Superseded in part (round 455, 2026-11-08)
+Two of the consequences above no longer hold (ADR 0119):
+- **"No windowing"** - Lighting > Probe Remove Ringing (Hanning or Lanczos, width 3-16) windows the SH's bands 1 and 2 at
+  evaluation, on the CPU and (folded into the packed rows) on the card. Off is the default and the picture of rounds
+  442-454; Unity's own probes are shown unwindowed.
+- **"Light Probe Groups aren't objects in Blendity"** - `LightProbeGroupComponent` is a component with positions in object
+  space, edited in the Scene view and imported from Unity; Generate Lighting bakes at the groups' probes and fills the
+  grid from their tetrahedra (`probe_volume_from_points`, the second half of `unity_probe_volume`, now shared).

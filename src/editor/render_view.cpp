@@ -799,11 +799,13 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   ProbeVolume *pv = nullptr;
   Component *outline = nullptr, *flatten = nullptr, *vshapes = nullptr;
   bool bone = false;
+  const LightProbeGroupComponent *pgroup = nullptr;
   for (auto &c : g.components) switch (c->render_role()) {
       case Component::RenderRole::Outline: if (!outline) outline = c.get(); break;
       case Component::RenderRole::CameraFlatten: if (!flatten) flatten = c.get(); break;
       case Component::RenderRole::ViewShapes: if (!vshapes) vshapes = c.get(); break;
       case Component::RenderRole::Bone: bone = true; break;
+      case Component::RenderRole::ProbeGroup: if (!pgroup) pgroup = static_cast<const LightProbeGroupComponent *>(c.get()); break;
       case Component::RenderRole::MeshRenderer: if (!mr) mr = static_cast<MeshRenderer *>(c.get()); break;
       case Component::RenderRole::Light: if (!l) l = static_cast<Light *>(c.get()); break;
       case Component::RenderRole::ProbeVolume: if (!pv) pv = static_cast<ProbeVolume *>(c.get()); break;
@@ -832,6 +834,12 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
     if (bone) {  // (the Scene view draws bones: a pose that moves only them - no skin - is a new picture: task 0281)
       const Mat4 w = g.world_matrix();
       mix(w.m, sizeof(w.m));
+    }
+    if (pgroup) {  // (round 455: a probe moved - or the group - is a new bake: the lighting's out-of-date check re-runs; the Scene view draws them)
+      const Mat4 w = g.world_matrix();
+      const uint64_t key = pgroup->content_key() ^ (uint64_t)pgroup->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+      mix(w.m, sizeof(w.m));
+      mix(&key, 8);
     }
     return h;
   }
@@ -898,6 +906,10 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   if (pv) {  // where the probes go (the volume box, remembered between frames, keys on this)
     const uint64_t ph = hash_component(*pv) ^ (uint64_t)pv->enabled << 63;
     mix(&ph, 8);
+  }
+  if (pgroup) {  // (round 455: a group on an object that also draws a mesh or a light; the world matrix is hashed above)
+    const uint64_t key = pgroup->content_key() ^ (uint64_t)pgroup->enabled << 63 ^ (uint64_t)g.active_in_hierarchy() << 62;
+    mix(&key, 8);
   }
   if (l && l->enabled) {
     /* Every field of the light (colour temperature, spot angles, area size, shadows...):
@@ -1223,7 +1235,9 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
   const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
   if (scene_lights && (baked_probes || live_probes)) {
     const LightingSettings &ls = pls;
+    update_probe_window();
     probe_frame_.data = &probes_;
+    probe_frame_.sh_window = probe_window_;
     probe_frame_.normal_bias = finite_bits(ls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_normal_bias)) : 0.25f;
     probe_frame_.view_bias = finite_bits(ls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, ls.probe_view_bias)) : 0.1f;
     probe_frame_.leak_reduction = ls.probe_leak_reduction;
@@ -1919,7 +1933,9 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
     const bool baked_probes = !probes_.empty() && probes_.scene_key != 0 && pls.baked_gi;
     const bool live_probes = !probes_.empty() && (live_gi || frozen) && probe_live_ready_;
     if (baked_probes || live_probes) {
+      update_probe_window();
       j->probe_frame.data = &probes_;
+      j->probe_frame.sh_window = probe_window_;
       j->probe_frame.normal_bias = finite_bits(pls.probe_normal_bias) ? std::max(0.0f, std::min(10.0f, pls.probe_normal_bias)) : 0.25f;
       j->probe_frame.view_bias = finite_bits(pls.probe_view_bias) ? std::max(0.0f, std::min(10.0f, pls.probe_view_bias)) : 0.1f;
       j->probe_frame.leak_reduction = pls.probe_leak_reduction;
