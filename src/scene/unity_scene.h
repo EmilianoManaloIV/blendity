@@ -151,6 +151,16 @@ struct UnitySkybox;
 bool unity_render_settings(const std::vector<UnityDoc> &docs, EnvironmentSettings &env, std::vector<std::string> &notes,
                            const std::function<bool(const std::string &guid, UnitySkybox &out)> &skybox = {}, UnitySceneLink *link = nullptr);
 
+/* Round 459: the Unity project's settings file `name` (GraphicsSettings.asset, ...) for a scene at `scene_path`: the
+ * first ProjectSettings/<name> in a folder above the scene, the walk stopping at the project root (the first folder
+ * holding an Assets folder, whose own ProjectSettings is checked); "" none (a copy holding only Assets). */
+std::string unity_project_settings_file(const std::string &scene_path, const char *name);
+/* Round 459: that project's GraphicsSettings m_LightsUseLinearIntensity: 1 on (intensity linear), 0 off (colour x
+ * intensity in gamma, the built-in pipeline's default), -1 no settings file found, -2 a file without the field (binary
+ * serialized). */
+int unity_lights_linear_intensity(const std::string &scene_path);
+int unity_lights_linear_intensity_text(const std::string &graphics_settings);  // (the file's text: 1, 0, or -1 no field)
+
 /* Round 421 (ADR 0113): a Unity scene's lightmap settings - its LightingSettings asset when it references one (Unity
  * 2020+, `lighting_asset` its text), else the scene's own m_LightmapEditorSettings - into Blendity's bake settings:
  * Lightmap Resolution, Max Lightmap Size, Padding, direct and indirect samples, bounces, the filter on or off. What

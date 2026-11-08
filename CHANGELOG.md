@@ -2,6 +2,25 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 459): lights at the project's linear intensity
+
+**Asked:** why round 452 made SideRail's lightmap pages brighter and further from Unity's (side tunnel 4.07x -> 4.87x Unity's light, main tunnel 2.20x -> 3.28x, MAE 18.27 -> 20.47, SSIM 0.592 -> 0.545); fix what is wrong.
+
+**Fixed (task 0435)**
+- **Found by bisect:** the bake is deterministic (two runs, bit-identical pages); with round 452's multipliers forced to 1 the pages are round 451's exactly - the change is Unity's own data (SideRail's 20 FootLights bounce at 3). Round 453's light picking changed nothing. Lights split by group showed the side tunnel's excess mostly direct light, and the cause: **SideRail's project lights at linear intensity** (GraphicsSettings `m_LightsUseLinearIntensity: 1`) while Blendity took every Unity scene's colour x intensity in gamma - a lamp of intensity 2 shone 4.6, of 5 shone 34.5.
+- **A bake after a streamed frame:** since round 447 a material a view resolved while its image was still streaming kept that resolve until the batch landed, and Generate Lighting's frozen copy (or a render) reused it - baking the bare colour without the map. Such a resolve now holds only inside the views' stream scope (an axis material's too, when one of its parts was left mid-stream); a caller outside it - the bake's freeze, a render - resolves once again, synchronously on its own thread. (SideRail's headless bake was not affected: bit-identical with and without.)
+
+**Changed**
+- Opening a Unity scene reads `m_LightsUseLinearIntensity` from its project's `ProjectSettings/GraphicsSettings.asset` (`unity_project_settings_file`: the walk up from the scene stops at the project root, the first folder holding an Assets folder) and sets Lights Gamma from it; with none found the lights stay in gamma (Unity's default), and a binary GraphicsSettings is said in the log. **ADR 0099 amended** - to be confirmed at review.
+- **Scenes saved before this round keep Lights Gamma on:** opening a saved scene whose Unity project says otherwise logs one line naming `unity lightsgamma off` (or `on`); the saved value is not changed. Live Link and `unity lightmaps` don't read the setting again.
+- `tools/unity_compare.py` passes the Unity project copy's setting to Blendity's bake and renders (Blendity's copy holds only Assets).
+
+**Added**
+- Console: `unity lightsgamma [on|off]` - shows or sets it for a copy without ProjectSettings.
+- **Learn:** "Light intensity: linear or gamma", a question and a Try-it.
+
+**Checked:** SideRail's pages (`unity_compare.py pages`, Unity's pages unchanged): side tunnel 4.85x -> 2.34x, main tunnel 3.20x -> 2.24x, MAE 20.47 -> 10.12, SSIM 0.545 -> 0.677; the service tunnel's floors and low tables now 1.0x Unity's light. Still open: the bounce is too strong with Unity's multipliers (10.12 / 0.677 against 8.77 / 0.724 with them forced to 1). The chain's own page compare (`--pages`, this build) gives the same pages: MAE 10.12, SSIM 0.677. SideRail's stations in that chain: spawn 3.57 / 0.843 / 0.869, spawn_back (dark) 1.30 / 0.791 / 0.669, floor 3.35 / 0.818 / 0.961, ahead 2.32 / 0.933 / 0.948 (MAE / SSIM / grid; round 458's chain: 3.21 / 0.903 / 0.922, 1.05 / 0.895 / 0.768, 4.99 / 0.879 / 0.956, 3.17 / 0.939 / 0.876). Every station's MAE is now under 4 (the floor 4.99 -> 3.35) and ahead's grid correlation rose (0.876 -> 0.948), but **SSIM fell** at spawn (0.903 -> 0.843), spawn_back and the floor (0.879 -> 0.818), and spawn's grid correlation fell: ADR 0113's target is still missed at three stations, now on SSIM. Of the two rounds in that chain only this one changes SideRail's bake (round 455's groups and window don't apply: SideRail uses Unity's probes). Why the stations' SSIM fell while their MAE and the pages improved is open. The bake-quality section as before (room 0.016, corridor 0.008, courtyard 0.060). Both suites - with Blender's libraries 17,695; dependency-free 16,781 (Windows) and 16,787 (Linux, WSL), 0 failed; the audits (one chain over rounds 455 and 459 together).
+
 ## 2026-11-08 (round 455): SH deringing, Light Probe Groups as objects
 
 **Asked:** Pass 19's round 455 - a bright lamp left a dark ring and a light spot behind a probe-lit object (L2 ringing, ADR 0116 "no windowing"), and Light Probe Groups were not objects: their probes arrived only with Unity's lighting file and moving them needed Unity.

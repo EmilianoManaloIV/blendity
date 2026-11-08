@@ -388,11 +388,18 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
   if (as_scene && unity_render_settings(docs, scene_->environment, ctx.notes, [&](const std::string &guid, UnitySkybox &sb) { return load_unity_skybox(guid, sb); }, &scene_->unity))
     Log::info("Import Unity: the scene's ambient, skybox and fog came in");
   if (as_scene) scene_->unity.file = make_asset_relative(path);  // (round 401: Export Unity Package writes the world, cameras and lights back into it)
+  const int linear = as_scene ? unity_lights_linear_intensity(path) : -1;  // (round 459: the project's own setting)
+  if (linear >= 0) {
+    scene_->unity.lights_gamma = linear == 0;
+    Log::info("Import Unity: the project's lights take their intensity %s (GraphicsSettings)", linear ? "linear" : "in gamma");
+  }
+  if (linear == -2)
+    Log::info("Import Unity: the project's GraphicsSettings has no Lights Use Linear Intensity Blendity can read (binary?) - lights in gamma; `unity lightsgamma off` if it is on");
   if (as_scene) apply_unity_bake_settings(docs, ctx.notes);  // (round 421: Unity's lightmap settings as Generate Lighting's)
   if (as_scene) apply_unity_post_processing(docs, ctx);  // (round 401: the scene's global Post Processing volume as the Main Camera's look)
-  int probes = 0, lightmapped = 0;
-  for (const UnityDoc &d : docs) probes += d.class_id == 220, lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;
-  if (probes) ctx.notes.push_back(std::to_string(probes) + " light probe group(s) kept as Unity's (their baked probes come with Unity's lightmaps)");
+  int lightmapped = 0;
+  for (const UnityDoc &d : docs) lightmapped += d.class_id == 157 && d.body.file_id("m_LightingDataAsset") != 0;
+  if (ctx.probe_groups) ctx.notes.push_back(std::to_string(ctx.probe_groups) + " light probe group(s) came in as objects (Generate Lighting bakes at their probes; Unity's own bake comes with its lightmaps)");
   if (ctx.reflection_probes) ctx.notes.push_back(std::to_string(ctx.reflection_probes) + " reflection probe(s) came in (their bakes come with Unity's lightmaps, or Generate Lighting's)");  // (round 401)
   if (lightmapped && !fs::exists(path + ".unity-lighting"))  // (round 400: fetched once by Unity, shown after)
     ctx.notes.push_back("the scene's baked lightmaps are Unity's: Lighting > Use Unity's Lightmaps (or: unity lightmaps) has Unity read them - written back unchanged");

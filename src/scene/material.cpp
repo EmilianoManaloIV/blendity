@@ -480,7 +480,10 @@ const Material::Resolved &Material::textures() const {
       if (resolved_.axis[k] && resolved_.axis[k]->version != axis_versions_[k]) return false;
     return true;
   };
-  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
+  /* Round 459: a view's resolve that left files for the stream isn't one for a caller outside the scope - Generate
+   * Lighting had frozen SideRail's materials without their maps (their base colours bounced: the tunnels 1.2-2.5x). */
+  auto current = [&] { return resolved_version_ == version && resolved_cache_gen_ == gen && axis_current() && (t_stream || !resolved_stream_missed_); };
+  if (current()) return resolved_;
   /* Resolving replaces the shared pointers, which frees textures another thread may be
    * sampling: the renderers call this on one thread before shading in parallel (sanitizer
    * finding, task 0004); the lock keeps two first callers from resolving at once. Re-entrant:
@@ -488,7 +491,8 @@ const Material::Resolved &Material::textures() const {
    * material on this same thread. */
   static std::recursive_mutex m;
   std::lock_guard<std::recursive_mutex> lock(m);
-  if (resolved_version_ == version && resolved_cache_gen_ == gen && axis_current()) return resolved_;
+  if (current()) return resolved_;
+  bool stream_missed = false;
   int slot = 0;  // which slot load() is resolving (the live snapshots follow the same order)
   g_resolves++;
   for (auto &l : resolved_.live) l = nullptr;
@@ -519,6 +523,7 @@ const Material::Resolved &Material::textures() const {
         return nullptr;
       }
       note_stream_miss(path, !t.non_color);
+      stream_missed = true;
       return nullptr;
     }
     TexturePtr p = texture_load(resolve_asset_path(t.path), !t.non_color, &err);
@@ -578,11 +583,13 @@ const Material::Resolved &Material::textures() const {
       if (sub.get() == this || sub->resolving_) continue;
       resolved_.axis[k] = sub;
       resolved_.axis_tx[k] = &sub->textures();
+      stream_missed = stream_missed || sub->resolved_stream_missed_;  // (review 459: a part left mid-stream is this one's too)
       axis_versions_[k] = sub->version;
     }
     resolving_ = false;
   }
   resolved_version_ = version;
+  resolved_stream_missed_ = stream_missed;
   resolved_cache_gen_ = gen;  // (a file left for the stream: the landed batch bumps the generation, and this resolves again)
   return resolved_;
 }

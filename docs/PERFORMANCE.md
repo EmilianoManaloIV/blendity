@@ -93,6 +93,39 @@ under ~40 %: within that, no round and no feature is consistently slower, and Pa
 `BLENDITY_VIEW_OFF=sh,lv,mask` stays for the next attribution, best read with the card's own timestamps
 (docs/tasks/0426).
 
+### SideRail's lightmap pages after round 459 (lights at the project's linear intensity)
+Blendity's bake of SideRail against Unity's lightmaps object by object (`unity_compare.py pages`; the bake is
+deterministic - two runs of one build give the same pages bit for bit). Light ratio = Blendity's light over Unity's,
+weighted by chart area:
+
+| bake | side tunnel | main tunnel | all pages MAE / SSIM |
+|---|---|---|---|
+| round 451 | 4.06x | 2.15x | 18.27 / 0.592 |
+| rounds 452-453 (Indirect Multiplier) | 4.85x | 3.20x | 20.47 / 0.545 |
+| round 452's multipliers forced to 1 (bisect) | 4.06x | 2.15x | 18.27 / 0.592 |
+| **round 459 (lights linear)** | **2.34x** | **2.24x** | **10.12 / 0.677** |
+| round 459, multipliers forced to 1 (measurement) | 1.83x | 1.80x | 8.77 / 0.724 |
+| round 459 in the chain over rounds 455 + 459 (`--pages`) | 2.34x | 2.30x (lamps left out) | 10.12 / 0.677 |
+
+The stations in that chain (MAE / SSIM / grid correlation; ADR 0113's target MAE <= 4, SSIM >= 0.90, grid >= 0.95):
+
+| station | round 458's chain (rounds 452-453) | rounds 455 + 459 |
+|---|---|---|
+| spawn | 3.21 / 0.903 / 0.922 | **3.57** / 0.843 / 0.869 |
+| spawn_back (dark) | 1.05 / 0.895 / 0.768 | 1.30 / 0.791 / 0.669 |
+| floor | 4.99 / 0.879 / 0.956 | **3.35** / 0.818 / 0.961 |
+| ahead | 3.17 / 0.939 / 0.876 | **2.32** / 0.933 / 0.948 |
+
+Every MAE is now under 4, but SSIM fell at spawn, spawn_back and the floor: the target is still missed, now on SSIM.
+Only round 459 changes SideRail's bake (round 455's groups and window don't apply: it uses Unity's probes). Open: why
+the stations' SSIM fell while their MAE and the pages improved.
+
+The big surfaces now sit near Unity's light (the service tunnel's floors 1.0x, the low tables 1.03x, its walls
+1.25-1.37x; the bar counter 6.6x -> 1.8x). Still open: the bounce is too strong with Unity's multipliers (SideRail's 20
+FootLights bounce at 3). The same round's material fix costs one synchronous re-resolve on the main thread for a
+material Generate Lighting freezes (or a render reads) while the views still stream its image: the decode the stream
+hadn't done yet, done once there instead (none for SideRail's headless bake).
+
 ### SideRail after the Indirect Multiplier (rounds 452-453)
 Measured once on rounds 458, 452 and 453 together (only round 452 changes SideRail's bake: it has no light probes for
 round 453). MAE / SSIM / grid correlation against Unity; ADR 0113's target MAE <= 4, SSIM >= 0.90, grid >= 0.95:

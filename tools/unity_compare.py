@@ -76,6 +76,20 @@ def unity_side(unity, project, kind, asset, stations, out):
     return time.time() - t0
 
 
+LIGHTS_CMDS = []  # (round 459: set from the Unity project copy's GraphicsSettings - see unity_lights_cmds)
+
+
+def unity_lights_cmds(unity_project):
+    """Round 459: Blendity's project holds only Assets, so the Unity copy's m_LightsUseLinearIntensity is passed on - its
+    Baked lights' intensity linear (`unity lightsgamma off`) or in gamma (`on`, Unity's default); [] when unknown."""
+    try:
+        text = open(os.path.join(unity_project, "ProjectSettings", "GraphicsSettings.asset"), encoding="utf-8", errors="replace").read()
+    except OSError:
+        return []
+    m = re.search(r"m_LightsUseLinearIntensity:\s*(\d+)", text)
+    return [] if not m else ["unity lightsgamma " + ("off" if m.group(1) != "0" else "on")]
+
+
 def blendity_bake(exe, project, asset, out):
     """Round 421: Blendity's own bake of the Unity scene (its lightmap settings read on open), saved beside it; returns the
     saved scene (project-relative), the bake's seconds and its phases line."""
@@ -91,7 +105,9 @@ def blendity_bake(exe, project, asset, out):
         shutil.rmtree(os.path.splitext(saved_abs)[0], ignore_errors=True)
     env = dict(os.environ, BLENDITY_PROJECT=project)
     args = [exe, "--headless-screenshot", os.path.join(bl_out, "bake_editor.png"), "--size", "1600x1000", "--frames", "2",
-            "--cmd", "open " + asset, "--cmd", "bake", "--cmd", "perf wait", "--cmd", "save " + saved]
+            "--cmd", "open " + asset]
+    for c in LIGHTS_CMDS + ["bake", "perf wait", "save " + saved]:  # (round 459: the lights as the Unity project takes them)
+        args += ["--cmd", c]
     log_path = os.path.join(bl_out, "bake.log")
     t0 = time.time()
     try:
@@ -139,6 +155,8 @@ def blendity_side(exe, project, kind, asset, stations, out, lightmaps, engine, o
                      "set Render.ResolutionX 900", "set Render.ResolutionY 1200", "set Render.ViewTransform Standard", "set Render.Exposure 0"]
         else:
             cmds += ["open " + (open_asset or asset)]
+            if not open_asset:
+                cmds += LIGHTS_CMDS  # (round 459; a saved bake carries it)
             if lightmaps and not open_asset:
                 cmds += ["unity lightmaps wait"]
             cmds += ["select Main Camera", "position %g %g %g" % (st["x"], st["y"], st["z"]), "rotate %g %g 0" % (st["pitch"], st["yaw"])]
@@ -538,6 +556,17 @@ def self_test():
     black = object_scores(1, 1, [0.0, 0.0, 0.0], [0.5, 0.5, 0.5], [True])  # (review 451: Unity's chart black - no ratio, never inf)
     if black["ratio"] is not None or ratio_text(black["ratio"]) != "-" or "Infinity" in json.dumps(black):
         fails.append("a black Unity chart gave the ratio %s" % black["ratio"])
+    with tempfile.TemporaryDirectory() as d:  # (review 459: the Unity copy's Lights Use Linear Intensity passed on)
+        got = {}
+        for name, text in (("on", "GraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n"), ("off", "GraphicsSettings:\n  m_LightsUseLinearIntensity: 0\n"),
+                           ("nofield", "GraphicsSettings:\n  m_AlwaysIncludedShaders: []\n"), ("nofile", None)):
+            os.makedirs(os.path.join(d, name, "ProjectSettings"))
+            if text is not None:
+                with open(os.path.join(d, name, "ProjectSettings", "GraphicsSettings.asset"), "w", encoding="utf-8") as f:
+                    f.write(text)
+            got[name] = unity_lights_cmds(os.path.join(d, name))
+        if got != {"on": ["unity lightsgamma off"], "off": ["unity lightsgamma on"], "nofield": [], "nofile": []}:
+            fails.append("the lights' intensity setting passed on as %s" % got)
     r = image_compare.self_test()
     for f in fails:
         print("FAIL: " + f)
@@ -591,6 +620,7 @@ def main(argv):
     for f in os.listdir(out):
         if f.endswith((".json", "_side_by_side.png", "_ssim.png", ".md")):
             os.remove(os.path.join(out, f))
+    LIGHTS_CMDS[:] = unity_lights_cmds(project) if kind == "world" else []
     unity_s = unity_side(unity, project, kind, asset, stations_path, out)
     bake = None
     if own_bake and kind == "world":

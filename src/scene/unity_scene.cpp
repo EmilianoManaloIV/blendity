@@ -1445,6 +1445,38 @@ bool texture_meta(const std::string &asset_path, std::string &meta) {
   return false;
 }
 
+}  // namespace
+
+int unity_lights_linear_intensity_text(const std::string &graphics_settings) {
+  const size_t at = graphics_settings.find("m_LightsUseLinearIntensity:");
+  if (at == std::string::npos) return -1;
+  return std::atoi(graphics_settings.c_str() + at + 27) != 0 ? 1 : 0;
+}
+
+/* The walk stops at the project root - the first folder holding an Assets folder (its own ProjectSettings checked
+ * first): a ProjectSettings further up belongs to some other project on the machine (review 459). */
+std::string unity_project_settings_file(const std::string &scene_path, const char *name) {
+  const std::string abs = resolve_asset_path(scene_path);
+  for (std::string dir = fs::parent(abs); !dir.empty() && dir != fs::parent(dir); dir = fs::parent(dir)) {
+    const std::string f = fs::join(fs::join(dir, "ProjectSettings"), name);
+    if (fs::exists(f)) return f;
+    if (fs::is_dir(fs::join(dir, "Assets"))) break;
+  }
+  return "";
+}
+
+/* Round 459: SideRail's project bakes its lights at linear intensity - taken in gamma (the default Blendity had assumed
+ * for every Unity scene) its lights of intensity 2-5 were 2.3-7x too bright, its lightmap pages 2-5x Unity's. */
+int unity_lights_linear_intensity(const std::string &scene_path) {
+  const std::string f = unity_project_settings_file(scene_path, "GraphicsSettings.asset");
+  std::string text;
+  if (f.empty() || !fs::read_file(f, text)) return -1;
+  const int v = unity_lights_linear_intensity_text(text);
+  return v >= 0 ? v : -2;  // (a binary-serialized file, or one without the field)
+}
+
+namespace {
+
 /* Unity's Alpha Source in a texture's .meta (the YAML calls it alphaUsage; the C# property alphaSource): 0 none,
  * 1 the image's, 2 its grey; -1 when there's no .meta. */
 int meta_alpha_usage(const std::string &meta_text) {

@@ -2407,6 +2407,11 @@ bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s
   scene_dirty_ = false;
   note_recent_scene(path);
   Log::info("Opened %s (%zu objects)", fs::filename(path).c_str(), scene_->object_count());
+  /* Round 459 (review): a scene saved from a Unity scene before round 459 kept Lights Gamma on whatever its project says;
+   * said once here, the saved value left as it is. */
+  if (const int linear = scene_->unity.file.empty() ? -1 : unity_lights_linear_intensity(scene_->unity.file); linear >= 0 && (linear == 0) != scene_->unity.lights_gamma)
+    Log::warn("Lights Gamma is %s but %s's Unity project takes light intensity %s: `unity lightsgamma %s` to light it as Unity does", scene_->unity.lights_gamma ? "on" : "off",
+              fs::filename(scene_->unity.file).c_str(), linear ? "linear" : "in gamma", linear ? "off" : "on");
   if (livelink_discovery_) livelink_write_discovery();  // (task 0274: the bridges show the scene open now)
   return true;
 }

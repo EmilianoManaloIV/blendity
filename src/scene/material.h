@@ -263,6 +263,9 @@ struct Material {
   mutable uint64_t axis_versions_[4] = {0, 0, 0, 0};
   mutable bool resolving_ = false;  // in textures() (an axis part naming a material mid-resolve is refused: no cycles)
   mutable size_t resolved_cache_gen_ = 0;
+  /* Round 459: resolved in a view's stream scope with a file left for the stream (that map null). Good for the
+   * views until the batch lands; a caller outside the scope - a bake's frozen copy, a render - resolves again. */
+  mutable bool resolved_stream_missed_ = false;
 };
 using MaterialPtr = std::shared_ptr<Material>;
 

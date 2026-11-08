@@ -7,6 +7,7 @@
 #include "../src/render/tetrahedra.h"
 #include "../src/render/unity_lightmaps.h"
 #include "../src/scene/unity_scene.h"
+#include "../src/render/light_pick.h"
 #include <set>
 #include <tuple>
 
@@ -7798,6 +7799,145 @@ static void tests_round454() {
   });
 }
 
+/* ---------------------------------------------------------------- round 459: a bake after a streamed frame; a Unity project's lights at linear intensity (task 0435) */
+static void tests_round459() {
+  test("bake after a streamed frame (round 459): a material a view resolved while its image was still streaming (map missing, noted) resolves again with the map for a caller outside the stream scope - Generate Lighting's frozen copy bakes the texture, not the bare colour; the views keep their stand-in until the batch lands", [] {
+    const std::string tex = fs::join(test_dir(), "r459_dark.png");
+    std::vector<uint32_t> px(16 * 16, 0xFF101010u);  // (a dark map on a white material: bounced as white, SideRail's tunnels were lit 1.2-2.5x)
+    CHECK(write_png(tex, px.data(), 16, 16, 16));
+    std::vector<std::pair<std::string, bool>> misses;
+    MaterialPtr m = make_material("R459", Vec3(1.0f));
+    m->base_map.path = tex;
+    texture_cache_clear();
+    (void)take_texture_stream_misses(misses);
+    bool view_missing = false, view_again_missing = false;
+    {
+      TextureStreamScope on(true);  // (a view frame: the image isn't cached yet)
+      view_missing = m->textures().base == nullptr;
+    }
+    (void)take_texture_stream_misses(misses);
+    auto frozen = std::make_shared<Material>(*m);  // (what Editor::snapshot_material does for a bake)
+    frozen->freeze_textures();
+    const bool frozen_has_map = frozen->textures().base != nullptr;
+    const bool outside_has_map = m->textures().base != nullptr;  // (a render outside the scope)
+    {
+      TextureStreamScope on(true);  // (resolved in full now: the view keeps it)
+      view_again_missing = m->textures().base == nullptr;
+    }
+    std::printf("    the view's resolve: missing %d; the bake's frozen copy has the map %d, a render %d; the view after %d\n", (int)view_missing,
+                (int)frozen_has_map, (int)outside_has_map, (int)!view_again_missing);
+    CHECK(view_missing);
+    CHECK(frozen_has_map);
+    CHECK(outside_has_map);
+    CHECK(!view_again_missing);
+    /* Through the editor: a cube whose material a view resolved mid-stream, then Generate Lighting's gather. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Cube");
+    GameObject *g = ed.scene().find_by_name("Cube");
+    CHECK(g && g->get<MeshRenderer>());
+    if (!g || !g->get<MeshRenderer>()) return;
+    MaterialPtr cm = make_material("R459 cube", Vec3(1.0f));
+    cm->base_map.path = tex;
+    g->get<MeshRenderer>()->materials = {cm};
+    g->get<MeshRenderer>()->contribute_gi = true;  // (Contribute GI: in Generate Lighting's scene)
+    texture_cache_clear();
+    {
+      TextureStreamScope on(true);
+      CHECK(cm->textures().base == nullptr);
+    }
+    (void)take_texture_stream_misses(misses);
+    std::vector<BakeObject> objs;
+    std::vector<BakeLight> lights;
+    ed.collect_bake_scene_for_test(objs, lights);
+    bool baked_with_map = false;
+    for (const BakeObject &o : objs)
+      for (const MaterialPtr &bm : o.materials) baked_with_map = baked_with_map || (bm && bm->textures_frozen() && bm->textures().base != nullptr);
+    std::printf("    Generate Lighting's copy of the cube's material (%zu objects gathered) has its map: %d\n", objs.size(), (int)baked_with_map);
+    CHECK(!objs.empty());
+    CHECK(baked_with_map);
+    std::error_code ec;
+    std::filesystem::remove(std::filesystem::u8path(tex), ec);
+  });
+  test("lights at linear intensity (round 459): a Unity scene whose project has GraphicsSettings m_LightsUseLinearIntensity 1 opens with Lights Gamma off - an intensity-2 Baked point light bakes at 2, not 2^2.2 = 4.59; `unity lightsgamma on|off` switches it for a copy without ProjectSettings; a project without the settings keeps Unity's default (gamma)", [] {
+    CHECK(unity_lights_linear_intensity_text("GraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n  m_LightsUseColorTemperature: 1\n") == 1);
+    CHECK(unity_lights_linear_intensity_text("GraphicsSettings:\n  m_LightsUseLinearIntensity: 0\n") == 0);
+    CHECK(unity_lights_linear_intensity_text("GraphicsSettings:\n  m_AlwaysIncludedShaders: []\n") == -1);
+    const char *scene_text = "%YAML 1.1\n--- !u!1 &20\nGameObject:\n  m_Name: Lamp\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+                             "--- !u!108 &22\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 2\n  m_Intensity: 2\n  m_Range: 5\n  m_Color: {r: 1, g: 1, b: 1, a: 1}\n  m_Lightmapping: 2\n";
+    const std::string root = resolve_asset_path("Assets/Imported/R459");
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(root), ec);
+    fs::make_dirs(fs::join(root, "Linear/ProjectSettings"));
+    fs::make_dirs(fs::join(root, "Linear/Assets"));
+    fs::make_dirs(fs::join(root, "Bare/Assets"));
+    CHECK(fs::write_file(fs::join(root, "Linear/ProjectSettings/GraphicsSettings.asset"), "%YAML 1.1\n--- !u!30 &1\nGraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n"));
+    CHECK(fs::write_file(fs::join(root, "Linear/Assets/Lamp.unity"), scene_text));
+    CHECK(fs::write_file(fs::join(root, "Bare/Assets/Lamp.unity"), scene_text));
+    CHECK(unity_lights_linear_intensity("Assets/Imported/R459/Linear/Assets/Lamp.unity") == 1);
+    CHECK(unity_lights_linear_intensity("Assets/Imported/R459/Bare/Assets/Lamp.unity") == -1);
+    /* The bake's light: its colour x intensity's luminance. */
+    auto baked = [](Editor &ed) {
+      std::vector<BakeObject> objs;
+      std::vector<BakeLight> lights;
+      ed.collect_bake_scene_for_test(objs, lights);
+      for (const BakeLight &l : lights)
+        if (l.mode == 2) return light_pick_luma(l.light);
+      return -1.0f;
+    };
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("open Assets/Imported/R459/Linear/Assets/Lamp.unity");
+    const bool linear_off = !ed.scene().unity.lights_gamma;
+    const float linear = baked(ed);
+    ed.command("unity lightsgamma on");
+    const float gamma = baked(ed);
+    ed.command("unity lightsgamma off");
+    const float back = baked(ed);
+    Editor bare;
+    bare.init_headless(400, 300);
+    bare.command("open Assets/Imported/R459/Bare/Assets/Lamp.unity");
+    const bool bare_gamma = bare.scene().unity.lights_gamma;
+    const float bare_light = baked(bare);
+    std::printf("    with the project's settings: Lights Gamma off %d, the bake's light %.3f; switched on %.3f, off again %.3f; no project settings: gamma %d, %.3f\n",
+                (int)linear_off, linear, gamma, back, (int)bare_gamma, bare_light);
+    CHECK(linear_off);
+    CHECK(std::fabs(linear - 2.0f) < 1e-3f);
+    CHECK(std::fabs(gamma - std::pow(2.0f, 2.2f)) < 0.05f);  // (Unity's built-in default: 2 in gamma, about 4.6 in linear light)
+    CHECK(std::fabs(back - 2.0f) < 1e-3f);
+    CHECK(bare_gamma && std::fabs(bare_light - gamma) < 1e-3f);
+    /* Review 459: the walk stops at the project root - a ProjectSettings above a copy holding only Assets is another
+     * project's; a binary GraphicsSettings (no readable field) is told apart from none. */
+    fs::make_dirs(fs::join(root, "Outer/ProjectSettings"));
+    fs::make_dirs(fs::join(root, "Outer/Copy/Assets"));
+    fs::make_dirs(fs::join(root, "Bin/ProjectSettings"));
+    fs::make_dirs(fs::join(root, "Bin/Assets"));
+    CHECK(fs::write_file(fs::join(root, "Outer/ProjectSettings/GraphicsSettings.asset"), "GraphicsSettings:\n  m_LightsUseLinearIntensity: 1\n"));
+    CHECK(fs::write_file(fs::join(root, "Outer/Copy/Assets/Lamp.unity"), scene_text));
+    CHECK(fs::write_file(fs::join(root, "Bin/ProjectSettings/GraphicsSettings.asset"), std::string("\x00\x01\x02 binary", 10)));
+    CHECK(fs::write_file(fs::join(root, "Bin/Assets/Lamp.unity"), scene_text));
+    const int outer = unity_lights_linear_intensity("Assets/Imported/R459/Outer/Copy/Assets/Lamp.unity");
+    const int binary = unity_lights_linear_intensity("Assets/Imported/R459/Bin/Assets/Lamp.unity");
+    /* A scene saved with Lights Gamma on from the linear project (as every scene saved before round 459): opening it says
+     * how to light it as Unity does, and leaves the saved value. */
+    ed.command("unity lightsgamma on");
+    ed.command("save Assets/Imported/R459/Linear/Assets/Saved.scene");
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("open Assets/Imported/R459/Linear/Assets/Saved.scene");
+    log.clear();
+    Log::fetch(since, log);
+    bool told = false;
+    for (const LogEntry &e : log) told = told || e.text.find("unity lightsgamma off") != std::string::npos;
+    std::printf("    a ProjectSettings above a bare copy: %d (-1: not read); a binary one: %d; the old saved scene told %d, kept gamma %d\n", outer, binary,
+                (int)told, (int)ed.scene().unity.lights_gamma);
+    CHECK(outer == -1);
+    CHECK(binary == -2);
+    CHECK(told && ed.scene().unity.lights_gamma);
+    std::filesystem::remove_all(std::filesystem::u8path(root), ec);
+  });
+}
+
 /* ---------------------------------------------------------------- round 455: SH deringing, Light Probe Groups as objects (task 0431) */
 static void tests_round455() {
   test("probe SH deringing (round 455): the window's factors are Hanning (1, 0.854, 0.5) and Lanczos (1, 0.900, 0.637) at w = 4, none when Off; one lamp of 20 over a uniform sky of 1 rings to 0.21 when Off and no lower than 0.5 under either window, with 2.25 behind (truth 1.0) down to 0.98 under Lanczos; the average over the sphere never moves", [] {
@@ -8170,5 +8310,6 @@ void run_lighting_tests() {
   tests_round452();
   tests_round453();
   tests_round454();
+  tests_round459();
   tests_round455();
 }

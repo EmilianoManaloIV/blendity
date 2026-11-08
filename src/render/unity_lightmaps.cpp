@@ -6,6 +6,7 @@
 #include "../core/jobs.h"
 #include "../image/image.h"
 #include "../scene/scene.h"
+#include "../scene/unity_scene.h"  // (unity_project_settings_file)
 
 #include <algorithm>
 #include <cmath>
@@ -550,12 +551,12 @@ bool unity_quality_shadowmask(const std::string &text, int &mode, float &distanc
   return true;
 }
 
+/* Round 459 made the walk scene-side (unity_project_settings_file: up to the project's root, its own ProjectSettings first);
+ * this reads the QualitySettings.asset it finds. */
 std::string unity_find_quality_settings(const std::string &scene_path) {
   std::string text;
-  for (std::string dir = fs::parent(scene_path); !dir.empty() && dir != fs::parent(dir); dir = fs::parent(dir))
-    if (fs::read_file(fs::join(fs::join(dir, "ProjectSettings"), "QualitySettings.asset"), text)) return text;
-    else if (fs::is_dir(fs::join(dir, "Assets"))) break;  // (the project's root: what is above it is no part of it)
-  return "";
+  const std::string file = unity_project_settings_file(scene_path, "QualitySettings.asset");
+  return !file.empty() && fs::read_file(file, text) ? text : std::string();
 }
 
 namespace {

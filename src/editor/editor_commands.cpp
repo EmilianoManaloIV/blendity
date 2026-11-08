@@ -1211,6 +1211,15 @@ void Editor::run_console_command(const std::string &line) {
     return read_unity_model_ids(std::find(t.begin(), t.end(), "all") != t.end(), std::find(t.begin(), t.end(), "wait") != t.end());
   if (c == "unity" && t.size() > 1 && t[1] == "lightmaps")  // unity lightmaps [wait] (round 400: Unity's baked lighting for this scene)
     return read_unity_lighting_cmd(std::find(t.begin(), t.end(), "wait") != t.end());
+  if (c == "unity" && t.size() > 1 && t[1] == "lightsgamma") {  // unity lightsgamma [on|off] (round 459: a copy without ProjectSettings - its project's lightsUseLinearIntensity off / on)
+    if (t.size() > 2 && (t[2] == "on" || t[2] == "off")) {
+      scene_->unity.lights_gamma = t[2] == "on";
+      mark_changed("Lights Gamma");
+      ui_.redraw = true;
+    }
+    return Log::info("Lights Gamma: %s (Unity's lightsUseLinearIntensity %s)%s", scene_->unity.lights_gamma ? "on" : "off", scene_->unity.lights_gamma ? "off" : "on",
+                     scene_->unity.file.empty() ? " - the scene isn't from Unity: its lights aren't affected" : "");
+  }
   if (c == "ai") return ai_command(t);              // ai status | install | remove | check | span | style | variation | apply (tasks 0129-0130)
   if (c == "import" && (to_lower(fs::extension(line_rest(line, 1))) == ".prefab" || to_lower(fs::extension(line_rest(line, 1))) == ".unity"))
     return import_model_file(line_rest(line, 1), true);  // (round 370: a Unity prefab or scene - by the path's own extension, review 370)
