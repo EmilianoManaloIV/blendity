@@ -5765,14 +5765,14 @@ static void tests_round421() {
     CHECK(ed.scene().unity_bake.read && ed.scene().unity_bake.source == "the LightingSettings asset" && ed.scene().unity_bake.mixed == 1);
     log.clear();
     Log::fetch(since, log);
-    bool settings_info = false, unbaked_warn = false, optix = false;
+    bool settings_info = false, subtractive_unbaked = false, optix = false;
     for (const LogEntry &e : log) {
       settings_info = settings_info || (e.level == LogLevel::Info && e.text.find("the lightmap settings came from the LightingSettings asset: 25 texels per unit") != std::string::npos);
-      unbaked_warn = unbaked_warn || (e.text.find("not baked yet from the scene's lightmap settings:") != std::string::npos && e.text.find("Subtractive") != std::string::npos &&
-                                      e.text.find("Directional mode") == std::string::npos);  // (round 426: Directional mode is baked now)
+      subtractive_unbaked = subtractive_unbaked || (e.text.find("not baked yet") != std::string::npos && e.text.find("Subtractive") != std::string::npos);
       optix = optix || e.text.find("OptiX") != std::string::npos;  // (the filter is off in Unity: no denoiser to name)
     }
-    CHECK(settings_info && unbaked_warn && !optix);
+    /* (Round 444: Subtractive is baked now - the scene's Lighting Mode, not a note; round 426's Directional mode too.) */
+    CHECK(settings_info && !subtractive_unbaked && !optix && l.lighting_mode == 2);
     CHECK(l.directional_mode == 1);  // (round 426: the asset's m_LightmapsBakeMode 1, Directional)
     CHECK(l.bake_device == 0);  // (round 430: no m_BakeBackend in the asset - Unity's Progressive CPU: as the Render device)
     /* The asset's GUID not in the project: the scene's own block, and a note that says so (a fresh editor: the import
@@ -6981,6 +6981,63 @@ static void tests_round442() {
     (void)mid;
   });
 }
+/* ---------------------------------------------------------------- round 444: Shadowmask and Subtractive (task 0420) */
+static void tests_round444() {
+  test("Shadowmask and Subtractive (round 444): a Mixed lamp over a box - Baked Indirect bakes only its bounce; Shadowmask keeps a mask of its shadow from the box (dark under it, clear in the open) and marks the lamp's channel; Subtractive bakes its direct light into the lightmap; the renderers' rule for each; the masks saved and read back", [] {
+    CHECK(light_baked_here(2, true, false) && light_baked_here(2, false, true) && light_baked_here(3, true, false) && !light_baked_here(3, false, true));
+    CHECK(!light_baked_here(1, true, true) && !light_baked_here(5, true, true) && light_mask_channel(5) == 1 && light_mask_channel(3) == -1 && light_mask_channel(2) == -1);
+    MeshPtr floor = primitives::plane(6.0f, 8), box = primitives::cube(1.0f);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    BakeLight lamp;
+    lamp.light.type = RenderLight::Point, lamp.light.position = Vec3(0.0f, 4.0f, 0.0f), lamp.light.intensity = 8.0f, lamp.light.range = 100.0f;
+    lamp.mode = 1, lamp.id = 7;
+    auto bake = [&](int mode) {
+      BakeSettings bs;
+      bs.texels_per_unit = 6, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.lighting_mode = mode;
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), b = bake_object(2, box, Mat4::translate(Vec3(0.0f, 1.5f, 0.0f)), {white});
+      b.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, b}, {lamp}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData indirect = bake(0), mask = bake(1), sub = bake(2);
+    auto sum = [](const LightingData &d) {
+      double s = 0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    float lo = 1.0f, hi = 0.0f;
+    for (const Vec3 &m : mask.mask_pages.empty() ? std::vector<Vec3>{} : mask.mask_pages[0].texels) lo = std::min(lo, m.x), hi = std::max(hi, m.x);
+    std::printf("    the lamp's mode in the bake: %d / %d / %d; the mask from %.3f (under the box) to %.3f; the floor's light %.1f indirect, %.1f Subtractive\n",
+                indirect.light_modes.at(7), mask.light_modes.at(7), sub.light_modes.at(7), lo, hi, sum(indirect), sum(sub));
+    CHECK(indirect.light_modes.at(7) == 1 && indirect.mask_pages.empty() && mask.light_modes.at(7) == 4 && mask.mask_pages.size() == mask.pages.size());
+    CHECK(lo < 0.05f && hi > 0.95f && sub.light_modes.at(7) == 3 && sub.mask_pages.empty() && sum(sub) > 3.0 * sum(indirect));
+    const std::string dir = resolve_asset_path("Assets/Imported/R444");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::string err;
+    CHECK(mask.save(dir, err));
+    LightingData back;
+    CHECK(back.load(dir, err) && back.mask_pages.size() == mask.mask_pages.size() && back.light_modes.at(7) == 4);
+    float diff = 0.0f;
+    for (size_t i = 0; !back.mask_pages.empty() && i < back.mask_pages[0].texels.size(); i++) diff = std::max(diff, std::fabs(back.mask_pages[0].texels[i].x - mask.mask_pages[0].texels[i].x));
+    std::printf("    the mask read back: worst difference %.4f\n", diff);
+    CHECK(diff < 0.01f);
+    std::filesystem::remove_all(dir, ec);
+    /* Unity's Subtractive split: the brightest Mixed sun stays Mixed, every other Mixed light becomes Baked. */
+    std::vector<BakeLight> set(3);
+    set[0].light.type = RenderLight::Point, set[0].mode = 1;
+    set[1].light.type = RenderLight::Directional, set[1].light.intensity = 0.5f, set[1].mode = 1;
+    set[2].light.type = RenderLight::Directional, set[2].light.intensity = 2.0f, set[2].mode = 1;
+    const int main_light = subtractive_split(set);
+    std::printf("    Subtractive's split: the main light %d; the modes %d %d %d\n", main_light, set[0].mode, set[1].mode, set[2].mode);
+    CHECK(main_light == 2 && set[0].mode == 2 && set[1].mode == 2 && set[2].mode == 1);
+  });
+}
 
 void run_lighting_tests() {
   round35_tests();
@@ -7009,4 +7066,5 @@ void run_lighting_tests() {
   tests_round440();
   tests_round441();
   tests_round442();
+  tests_round444();
 }

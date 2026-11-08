@@ -2532,6 +2532,60 @@ static void tests_round214() {
   });
 }
 
+/* ---------------------------------------------------------------- round 444: Shadowmask on the card (task 0420) */
+static void tests_round444_gpu() {
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  test("gpu views (round 444): Shadowmask on the card as on the CPU - a Mixed lamp's baked shadow from a box on the floor, packed beside the baked pass's kind; the picture differs from Baked Indirect's, where the lamp has no shadow (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    GameObject *lamp = ed.scene().create("Lamp");
+    Light *L = lamp->add<Light>();
+    L->type = 1, L->mode = 1, L->intensity = 3.0f, L->range = 12.0f;
+    lamp->set_local_position({-1.5f, 2.6f, 1.4f});
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("lamp");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    view(ed, w.ball, 2);
+    view(ed, w.ball, 1);
+    const std::vector<uint32_t> cpu = view(ed, w.ball, 1), gpu = view(ed, w.ball, 2);
+    const bool on_gpu = ed.scene_on_gpu_for_test();  // (read now: the views after it draw on the CPU)
+    size_t n = 0, ok = 0;
+    double total = 0;
+    for (size_t i = 0; i < cpu.size() && i < gpu.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((cpu[i] >> k) & 255) - (int)((gpu[i] >> k) & 255)));
+      n++, total += d, ok += d <= 3;
+    }
+    const double mean = n ? total / (double)n : 0.0, within3 = n ? (double)ok / (double)n : 0.0;
+    ed.scene().lighting.lighting_mode = 0;
+    ed.commit_change("lighting");
+    r35_bake(ed);
+    const std::vector<uint32_t> indirect = view(ed, w.ball, 1);
+    size_t changed = 0;
+    for (size_t i = 0; i < cpu.size() && i < indirect.size(); i++) changed += (cpu[i] & 0xFFFFFF) != (indirect[i] & 0xFFFFFF);
+    std::printf("    Shadowmask: the card against the CPU, mean %.3f / 255, %.2f %% within 3; Baked Indirect changes %zu pixels of the CPU's picture\n", mean,
+                within3 * 100.0, changed);
+    std::printf("    the Shadowmask view on the card: %s\n", on_gpu ? "yes" : "no");
+    CHECK(on_gpu && mean < 1.0 && within3 >= 0.99 && changed > 500);
+    ed.viewport_device_for_test(1);
+  });
+}
+
 /* ---------------------------------------------------------------- round 216: baked light on the card (task 0197) */
 static void tests_round216() {
   /* The Scene view drawn again on `device` (the ball nudged and back); its pixels. */
@@ -3969,6 +4023,7 @@ void run_gpu_tests() {
   tests_round212();
   tests_round214();
   tests_round216();
+  tests_round444_gpu();
   tests_round217();
   tests_round219();
   tests_round224();

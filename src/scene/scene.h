@@ -1907,7 +1907,7 @@ int default_lighting_update_mode();
 
 struct LightingSettings {
   bool baked_gi = true;           // Baked Global Illumination
-  int lighting_mode = 0;          // 0 Baked Indirect
+  int lighting_mode = 0;          // 0 Baked Indirect, 1 Shadowmask, 2 Subtractive (round 444, ADR 0117)
   float texels_per_unit = 40.0f;  // Lightmap Resolution
   int max_size = 1024;            // Max Lightmap Size
   int padding = 2;                // Lightmap Padding (texels)

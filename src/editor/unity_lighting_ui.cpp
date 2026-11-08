@@ -437,6 +437,22 @@ void Editor::lighting_reset_for(const char *why) {
 /* The file's lighting as the scene's baked lighting: lightmap pages from Unity's images, each matched object's UVs,
  * the lights' modes, Unity's probes as the probe volume - all keyed to the scene as it is now, so it shows as baked
  * and an object changed later loses only its own. Realtime GI goes off (Unity's scenes for VRChat bake). */
+/* Round 444: Unity's Subtractive lightmaps (and probes) hold their Mixed lights: the main directional one (the
+ * brightest) recorded as 3 - realtime on moving objects -, the others as Baked (2). */
+void Editor::unity_subtractive_modes(LightingData &ld) const {
+  uint64_t main = 0;
+  float best = -1.0f;
+  for (const auto &[id, mode] : ld.light_modes) {
+    const GameObject *g = mode == 1 ? scene_->find(id) : nullptr;
+    const Light *l = g ? g->get<Light>() : nullptr;
+    if (!l || l->type != 0) continue;
+    const float w = l->intensity * (0.2126f * l->color.x + 0.7152f * l->color.y + 0.0722f * l->color.z);
+    if (w > best) best = w, main = id;
+  }
+  for (auto &[id, mode] : ld.light_modes)
+    if (mode == 1) mode = id == main ? 3 : 2;
+}
+
 bool Editor::apply_unity_lighting(const std::string &file) {
   const double started = now_seconds();
   std::string bytes, why;
@@ -483,6 +499,7 @@ bool Editor::apply_unity_lighting(const std::string &file) {
     const auto b = bake_of.find(unity_lighting_path(g, under));
     if (b != bake_of.end() && (b->second == 1 || b->second == 2)) ld.light_modes[g.id] = b->second;
   });
+  if (scene_->unity_bake.mixed == 1) unity_subtractive_modes(ld);  // (round 444: Unity's Subtractive lightmaps hold their Mixed lights)
   lighting_reset_for("Unity's lightmaps");
   scene_->lighting.baked_gi = true, scene_->lighting.realtime_gi = false;
   lighting_data_ = std::move(ld);

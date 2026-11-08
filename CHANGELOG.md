@@ -2,6 +2,21 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 444): Shadowmask and Subtractive
+
+**Asked:** Pass 18's round 444 - Unity's other two Lighting Modes, read from Unity scenes instead of noted.
+
+**Changed (task 0420, ADR 0117)**
+- **Shadowmask:** Mixed lights keep their realtime light, their shadows from the static scene baked into a mask (three
+  lights), on the CPU and the card - a Mixed lamp's shadow, which no view drew before.
+- **Subtractive, as Unity splits it:** the main directional Mixed light baked into the lightmaps and realtime on moving
+  objects (their shadow darkening the lightmap toward Unity's shadow colour); the other Mixed lights baked fully. Unity's
+  own Subtractive lightmaps (SideRail's) no longer get their Mixed lights again in realtime.
+- **Unity's `m_MixedBakeMode`** sets the scene's Lighting Mode.
+- **Learn:** "Mixed lights: Baked Indirect, Shadowmask, Subtractive".
+
+**Checked:** one chain with round 442 - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits; the bake-quality section unchanged (room 0.016, corridor 0.008, courtyard 0.060). SideRail has no Mixed lights (10 Baked, 1 Realtime), so its stations are round 441's: spawn 3.69 / 0.809, floor 4.25 / 0.771, ahead 3.06 / 0.884 (MAE / SSIM); the bake 74 s.
+
 ## 2026-11-08 (round 442): L2 SH probes and Light Probe Groups
 
 **Asked:** Pass 18's round 442 - probes as L2 spherical harmonics, and Unity's Light Probe Groups interpolated over

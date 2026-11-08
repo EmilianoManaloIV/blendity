@@ -510,7 +510,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
     }
   lights_ = lights;
   point_lights_ = 0;
-  for (const BakeLight &l : lights_) point_lights_ += l.mode == 2 && l.light.type != RenderLight::Directional && l.light.type != RenderLight::Area;
+  for (const BakeLight &l : lights_) point_lights_ += bakes_direct(l) && l.light.type != RenderLight::Directional && l.light.type != RenderLight::Area;
   env_ = env;
   texels_.clear();
   values_.clear();
@@ -536,8 +536,15 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   emitted_.assign(texels_.size(), Vec3(0.0f));
   dirs_.assign(s_.directional ? texels_.size() : 0, DirSum{});
   total_ = texels_.size();
-  for (const BakeLight &l : lights_)
-    if (l.mode == 1 || l.mode == 2) out_.light_modes[l.id] = l.mode;
+  assign_mask_channels();  // (round 444)
+  for (size_t i = 0; i < lights_.size(); i++) {
+    const BakeLight &l = lights_[i];
+    if (l.mode == 2) out_.light_modes[l.id] = 2;
+    if (l.mode != 1) continue;
+    const int ch = i < mask_channel_.size() ? mask_channel_[i] : -1;
+    out_.light_modes[l.id] = s_.lighting_mode == 2 ? 3 : ch >= 0 ? 4 + ch : 1;  // (round 444)
+  }
+  masks_.assign(std::any_of(mask_channel_.begin(), mask_channel_.end(), [](int c) { return c >= 0; }) ? texels_.size() : 0, Vec3(1.0f));
 
   /* 4. The scene the rays see: the static objects, the Baked and Mixed lights, the world. */
   pt_ = std::make_unique<PathTracer>();
@@ -708,7 +715,63 @@ void Lightmapper::DirSum::add(Vec3 light, Vec3 dir) {
   weight += w;
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out) {
+int subtractive_split(std::vector<BakeLight> &lights) {
+  int main = -1;
+  float best = -1.0f;
+  for (size_t i = 0; i < lights.size(); i++) {
+    const RenderLight &l = lights[i].light;
+    if (lights[i].mode != 1 || l.type != RenderLight::Directional) continue;
+    const float w = l.intensity * (0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z);
+    if (w > best) best = w, main = (int)i;
+  }
+  for (size_t i = 0; i < lights.size(); i++)
+    if (lights[i].mode == 1 && (int)i != main) lights[i].mode = 2;
+  return main;
+}
+
+/* Round 444: the Mixed lights' channels in a Shadowmask bake - the suns first, then by intensity, kMaskChannels of them
+ * (Unity gives each texel up to four overlapping lights; here the page's three colours, the whole scene). */
+void Lightmapper::assign_mask_channels() {
+  mask_channel_.assign(lights_.size(), -1);
+  if (s_.lighting_mode != 1) return;
+  std::vector<size_t> mixed;
+  for (size_t i = 0; i < lights_.size(); i++)
+    if (lights_[i].mode == 1) mixed.push_back(i);
+  auto weight = [&](size_t i) {
+    const RenderLight &l = lights_[i].light;
+    return (l.type == RenderLight::Directional ? 1e30f : 0.0f) + l.intensity * (0.2126f * l.color.x + 0.7152f * l.color.y + 0.0722f * l.color.z);
+  };
+  std::stable_sort(mixed.begin(), mixed.end(), [&](size_t a, size_t b) { return weight(a) > weight(b); });
+  for (size_t k = 0; k < mixed.size() && k < (size_t)kMaskChannels; k++) mask_channel_[mixed[k]] = (int)k;
+}
+
+/* Round 444: a texel's shadowmask - each channel's light seen past the static scene (its soft shadow too), 1 where the
+ * light doesn't reach (out of range: nothing to shadow), 0 behind the surface. */
+Vec3 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const {
+  Vec3 m(1.0f);
+  for (size_t i = 0; i < lights_.size() && i < mask_channel_.size(); i++) {
+    const int ch = mask_channel_[i];
+    if (ch < 0) continue;
+    const RenderLight &l = lights_[i].light;
+    Vec3 L = normalize(-l.direction);
+    float dist = 1e30f;
+    if (l.type != RenderLight::Directional) {
+      const Vec3 d = l.position - o;
+      dist = length(d);
+      if (!(dist > 1e-5f)) continue;
+      L = d / dist;
+      if (!(light_falloff(l, t.position, L) > 0.0f)) continue;
+    }
+    if (!(dot(t.normal, L) > 0.0f)) {
+      m[ch] = 0.0f;
+      continue;
+    }
+    m[ch] = baked_light_visibility(*pt_, l, o, &t.normal, L, dist, s_.direct_samples, rng, rays);
+  }
+  return m;
+}
+
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec3 *mask_out) {
   DirSum dirs;  // (round 426: where this texel's light comes from)
   uint32_t rng = hash32(seed);
   const Vec3 n = t.normal;
@@ -773,7 +836,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     point_est.assign(lights_.size(), 0.0f);
     for (size_t li = 0; li < lights_.size(); li++) {
       const BakeLight &bl = lights_[li];
-      if (bl.mode != 2 || bl.light.type == RenderLight::Directional || bl.light.type == RenderLight::Area) continue;
+      if (!bakes_direct(bl) || bl.light.type == RenderLight::Directional || bl.light.type == RenderLight::Area) continue;
       const Vec3 dvec = bl.light.position - o;
       const float dist = length(dvec);
       if (!(dist > 1e-5f)) continue;
@@ -785,8 +848,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   }
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
+  if (mask_out && !masks_.empty()) *mask_out = shadowmask_at(t, o, rng, rays);  // (round 444)
   for (const BakeLight &bl : lights_) {
-    if (bl.mode != 2) continue;
+    if (!bakes_direct(bl)) continue;  // (round 444: a Subtractive Mixed light's direct light too)
     const RenderLight &l = bl.light;
     const Vec3 col = l.color * l.intensity;
     if (l.type == RenderLight::Directional) {
@@ -914,7 +978,7 @@ bool Lightmapper::step(double budget_ms) {
           if (!finite3(v)) v = Vec3(0.0f);
           /* (the texel's emitters: denoised with the card's gather, not clamped - round 423) */
           DirSum *dk = dirs_.empty() ? nullptr : &dirs_[k];
-          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k], dk);
+          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k], dk, masks_.empty() ? nullptr : &masks_[k]);
           gather_[k] = finite3(ind[(size_t)i]) ? ind[(size_t)i] * s_.indirect_intensity : Vec3(0.0f);
           if (dk) dk->add(gather_[k], Vec3(0.0f));  // (the card's gather: weighed, pointing nowhere, as the CPU's - round 427)
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
@@ -942,7 +1006,8 @@ bool Lightmapper::step(double budget_ms) {
       for (int64_t i = a; i < b; i++) {
         const size_t k = base + (size_t)i;
         if (k < invalid_.size() && invalid_[k]) continue;  // (round 430: inside geometry - filled from its chart, not gathered)
-        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k], &emitted_[k], dirs_.empty() ? nullptr : &dirs_[k]);
+        values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k], &emitted_[k], dirs_.empty() ? nullptr : &dirs_[k],
+                                masks_.empty() ? nullptr : &masks_[k]);
       }
     });
     done_ += batch;
@@ -964,6 +1029,7 @@ void Lightmapper::cancel() {
   gather_.clear(), gather_.shrink_to_fit();  // (review 426: the per-texel parts too)
   emitted_.clear(), emitted_.shrink_to_fit();
   dirs_.clear(), dirs_.shrink_to_fit();
+  masks_.clear(), masks_.shrink_to_fit(), mask_channel_.clear();  // (review 444)
   invalid_.clear(), invalid_.shrink_to_fit();
   covered_.clear();
   owner_.clear();
@@ -1052,6 +1118,7 @@ void Lightmapper::finish() {
     for (int pass = 0; pass < s_.padding + 2; pass++) dilate_once(lm.texels, covered_[p], lm.width, lm.height);
   }
   finish_directions();
+  finish_masks();  // (round 444)
   active_ = false;
   done_ = total_.load();
   finish_ms_ = ft.ms();
@@ -1268,6 +1335,31 @@ void Lightmapper::finish_directions() {
   }
 }
 
+/* Round 444: each page's shadowmask page in a Shadowmask bake - the texels' masks, grown into the padding as the colour is. */
+void Lightmapper::finish_masks() {
+  out_.mask_pages.clear();
+  if (masks_.empty()) return;
+  out_.mask_pages.resize(out_.pages.size());
+  std::vector<std::vector<uint8_t>> have(out_.pages.size());
+  for (size_t p = 0; p < out_.pages.size(); p++) {
+    Lightmap &d = out_.mask_pages[p];
+    d.width = out_.pages[p].width, d.height = out_.pages[p].height;
+    d.texels.assign((size_t)d.width * d.height, Vec3(1.0f));
+    have[p].assign(d.texels.size(), 0);
+  }
+  for (size_t k = 0; k < texels_.size() && k < masks_.size(); k++) {
+    const LightmapTexel &tx = texels_[k];
+    const size_t idx = (size_t)tx.y * out_.pages[(size_t)tx.page].width + tx.x;
+    if (k < invalid_.size() && invalid_[k]) continue;  // (review 444: inside geometry - filled from its neighbours, never a leak of 1)
+    out_.mask_pages[(size_t)tx.page].texels[idx] = masks_[k];
+    have[(size_t)tx.page][idx] = 1;
+  }
+  for (size_t p = 0; p < out_.mask_pages.size(); p++) {
+    Lightmap &d = out_.mask_pages[p];
+    for (int pass = 0; pass < s_.padding + 2; pass++) dilate_once(d.texels, have[p], d.width, d.height);
+  }
+}
+
 namespace {
 /* The mean of a texel's covered 3 x 3 neighbours of the same chart into `out`; false with none. */
 bool chart_mean_at(const std::vector<Vec3> &src, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, int W, int H, size_t idx, Vec3 &out) {
@@ -1317,6 +1409,7 @@ LightingData Lightmapper::take_result() {
   gather_.clear(), gather_.shrink_to_fit();
   emitted_.clear(), emitted_.shrink_to_fit();
   dirs_.clear(), dirs_.shrink_to_fit();
+  masks_.clear(), masks_.shrink_to_fit(), mask_channel_.clear();  // (review 444)
   invalid_.clear(), invalid_.shrink_to_fit();
   covered_.clear();
   owner_.clear();
@@ -1350,6 +1443,17 @@ bool LightingData::save(const std::string &dir, std::string &error) const {
       return false;
     }
   }
+  /* Round 444: the shadowmask pages (0..1 per channel). */
+  for (size_t p = 0; p < mask_pages.size(); p++) {
+    const Lightmap &d = mask_pages[p];
+    std::vector<float> rgb((size_t)d.width * d.height * 3);
+    for (size_t i = 0; i < d.texels.size(); i++) rgb[i * 3] = d.texels[i].x, rgb[i * 3 + 1] = d.texels[i].y, rgb[i * 3 + 2] = d.texels[i].z;
+    const std::string mp = fs::join(dir, strprintf("ShadowMask-%zu.hdr", p));
+    if (!write_hdr(mp, rgb.data(), d.width, d.height)) {
+      error = "could not write " + mp;
+      return false;
+    }
+  }
   const std::string path = fs::join(dir, "LightingData.bin");
   std::ofstream f(path, std::ios::binary);
   if (!f) {
@@ -1373,6 +1477,7 @@ bool LightingData::save(const std::string &dir, std::string &error) const {
   put64(light_modes.size());
   for (const auto &[id, mode] : light_modes) put64(id), put64((uint64_t)mode);
   put64(dir_pages.size());  // (round 426: older readers stop before it; a bake without directions says 0, so a folder's old LightmapDir files stay unread)
+  put64(mask_pages.size());  // (round 444: the same way for the shadowmask pages)
   return (bool)f;
 }
 
@@ -1430,6 +1535,7 @@ bool LightingData::load(const std::string &dir, std::string &error) {
   }
   if (!ok) return error = "truncated " + path, *this = {}, false;
   const uint64_t ndir = left() >= 8 ? get64() : 0;  // (round 426; a file from before it has none)
+  const uint64_t nmask = left() >= 8 ? get64() : 0;  // (round 444)
   for (size_t p = 0; p < pages.size(); p++) {
     Bitmap bmp;
     std::string err;
@@ -1444,7 +1550,27 @@ bool LightingData::load(const std::string &dir, std::string &error) {
       pages[p].texels[i] = Vec3(bmp.rgbaf[i * 4], bmp.rgbaf[i * 4 + 1], bmp.rgbaf[i * 4 + 2]);
   }
   if (ok && ndir == pages.size() && ndir > 0) load_dir_pages(dir);
+  if (ok && nmask == pages.size() && nmask > 0) load_mask_pages(dir);
   return true;
+}
+
+/* Round 444: the shadowmask pages; any missing or mismatched file leaves the masks out (the lights then shadow in realtime). */
+void LightingData::load_mask_pages(const std::string &dir) {
+  mask_pages.assign(pages.size(), Lightmap{});
+  for (size_t p = 0; p < pages.size(); p++) {
+    Bitmap bmp;
+    std::string err;
+    const std::string hp = fs::join(dir, strprintf("ShadowMask-%zu.hdr", p));
+    if (!load_image(hp, bmp, err) || bmp.width != pages[p].width || bmp.height != pages[p].height || !bmp.is_float) {
+      Log::warn("The baked lighting's shadowmask page %s couldn't be read: its lights shadow in realtime", hp.c_str());
+      mask_pages.clear();
+      return;
+    }
+    Lightmap &d = mask_pages[p];
+    d.width = bmp.width, d.height = bmp.height;
+    d.texels.resize((size_t)bmp.width * bmp.height);
+    for (size_t i = 0; i < d.texels.size(); i++) d.texels[i] = Vec3(bmp.rgbaf[i * 4], bmp.rgbaf[i * 4 + 1], bmp.rgbaf[i * 4 + 2]);
+  }
 }
 
 /* Round 426: the direction pages beside the colour; any missing or mismatched file leaves the bake non-directional. */

@@ -2153,7 +2153,7 @@ static size_t lightmap_pages_bytes(const std::vector<Lightmap> &pages) {
 }
 
 static size_t lighting_data_bytes(const LightingData &d) {
-  size_t n = lightmap_pages_bytes(d.pages) + lightmap_pages_bytes(d.dir_pages);
+  size_t n = lightmap_pages_bytes(d.pages) + lightmap_pages_bytes(d.dir_pages) + lightmap_pages_bytes(d.mask_pages);  // (round 444)
   for (const auto &kv : d.entries) n += kv.second.tri_uv.capacity() * sizeof(Vec2);
   return n;
 }

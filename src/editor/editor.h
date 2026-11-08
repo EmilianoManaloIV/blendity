@@ -1481,6 +1481,7 @@ class Editor {
   void read_unity_lighting_cmd(bool wait);
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
+  void unity_subtractive_modes(LightingData &ld) const;  // (round 444)
   void apply_unity_post_processing(const std::vector<UnityDoc> &docs, UnityImport &ctx);  // (round 401)
   int apply_unity_reflection_probes(const UnityLighting &u, const GameObject *under);  // (round 401)
   void lighting_reset_for(const char *why);
