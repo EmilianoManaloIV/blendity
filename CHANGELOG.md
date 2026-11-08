@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 446): Pass 18's write-up
+
+**Asked:** Pass 18's round 446 - the pass in one table, the comparison with Unity, the lessons, the baseline; and the
+workflow's scripts kept in the repository.
+
+**Changed (task 0422)**
+- **docs/PERFORMANCE.md, "Pass 18 in one table":** Shinano's Scene view 7.5 -> 4.6 ms (Unity's 2.2), 50,000 cubes 101 ->
+  61 ms, Enter Edit Mode on 500k 116 -> 96 ms; SideRail's bake against Unity's - the floor's SSIM 0.747 -> 0.771, ADR
+  0113's target still missed; the open items ranked.
+- **docs/hci/compare-unity-vrchat-2026-11.md:** a Pass 18 section.
+- **stress/results/baseline.md** refreshed from this build.
+- **tools/dev/:** the round workflow's scripts (chain, publish, copy, patch helper), with a README.
+- **Learn:** "How good is the bake?" gains Pass 18's result and a question.
+
+**Checked:** both suites - with Blender's libraries 16,822; dependency-free 16,041 (Windows) and 16,047 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 444): Shadowmask and Subtractive
 
 **Asked:** Pass 18's round 444 - Unity's other two Lighting Modes, read from Unity scenes instead of noted.

@@ -1,0 +1,6 @@
+{"stations": [
+ {"name": "spawn", "x": 5.883, "y": 1.6, "z": 4.805, "yaw": -90, "pitch": 0, "fov": 0},
+ {"name": "spawn_back", "x": 5.883, "y": 1.6, "z": 4.805, "yaw": 90, "pitch": 0, "fov": 0},
+ {"name": "floor", "x": 5.883, "y": 1.6, "z": 4.805, "yaw": -90, "pitch": 50, "fov": 0},
+ {"name": "ahead", "x": 0.0, "y": 1.6, "z": 4.805, "yaw": -90, "pitch": 0, "fov": 0}
+]}

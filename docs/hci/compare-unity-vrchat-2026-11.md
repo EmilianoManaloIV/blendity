@@ -145,6 +145,19 @@ specular occlusion; texel validity. Details and the open items: docs/PERFORMANCE
 Game view 11.0 (Unity's Game view 4.8); Shinano's Scene view 7.5 (Unity's 2.2) - of it 2.8 ms re-deriving a scene that
 didn't change (a scene-wide change counter, open).
 
+## Pass 18 (rounds 435-446, 2026-11-08): the views, the bake's remaining features
+
+**Navigation** (ms a frame on the card): Shinano's Scene view 7.5 -> **4.6** (Unity's 2.2), its Scene + Game view 6.2 ->
+**2.8** (Unity's Game view 2.5) - a scene-wide change counter stopped every view re-deriving an unchanged scene. Enter
+Edit Mode on the 500k sphere 116 -> 96 ms.
+
+**Blendity's own bake against Unity's** (SideRail, MAE / SSIM / grid): spawn 3.69 / 0.809 / 0.898, spawn_back 1.43 /
+0.777 / 0.129, floor 4.25 / 0.771 / 0.974, ahead 3.06 / 0.884 / 0.958, in 74 s. Of Pass 18's bake rounds only the
+directional strength moved a station (the floor's SSIM 0.747 -> 0.771); emitters, island charts, seams, the sky's
+importance sampling and light picking are right on synthetic scenes and flat here. Blendity now has what Unity's
+Lighting window offers that it lacked - Shadowmask and Subtractive, L2 probes interpolated over Unity's tetrahedra - and
+draws VRChat's Light Volumes in its own views, as the headset does. Details: docs/PERFORMANCE.md, "Pass 18 in one table".
+
 ## Residuals, ranked (after round 405)
 
 1. ~~SideRail's fog tint under ACES / +1 EV~~ - fixed in round 405 (Unity's ACES curve as the view transform).
@@ -156,3 +169,6 @@ didn't change (a scene-wide change counter, open).
 6. Particle smoke (not drawn, the user's choice) and the mirror's players - counted, not fixed.
 7. (Pass 17) Blendity's own bake: SSIM under the target at every station (directional strength, seams, the exit sign's
    glow); Shinano's views 3x Unity's (the change counter).
+8. (Pass 18) Directional strength, seams and the exit sign done: SSIM still 0.77-0.88 (Unity's denoiser and filtering,
+   chart placement, the reflection probes' content - not pinned down); Shinano's Scene view 2.1x Unity's (its UI and
+   overlays).
