@@ -1149,6 +1149,18 @@ static void tests_round126_to_round127() {
       CHECK(worst <= 2);
     }
   });
+  /* ---------------------------------------------------------------- round 450: the views' features switched off (task 0426) */
+  test("round 450: BLENDITY_VIEW_OFF's words become the shader defines - each alone, all three, unknown words and spaces ignored, nothing when unset", [&] {
+    CHECK(gpu::view_off_defines_from(nullptr).empty());
+    CHECK(gpu::view_off_defines_from("").empty());
+    CHECK(gpu::view_off_defines_from("sh") == "#define BL_NO_SH 1\n");
+    CHECK(gpu::view_off_defines_from("lv") == "#define BL_NO_LV 1\n");
+    CHECK(gpu::view_off_defines_from("mask") == "#define BL_NO_MASK 1\n");
+    CHECK(gpu::view_off_defines_from("mask,sh,lv") == "#define BL_NO_SH 1\n#define BL_NO_LV 1\n#define BL_NO_MASK 1\n");
+    CHECK(gpu::view_off_defines_from("shadow,lvs,masks").empty());  // (whole words only)
+    CHECK(gpu::view_off_defines_from("sh, lv").find("BL_NO_LV") == std::string::npos);  // (no spaces: " lv" is not "lv")
+    std::printf("    this run's switch: \"%s\"\n", std::getenv("BLENDITY_VIEW_OFF") ? std::getenv("BLENDITY_VIEW_OFF") : "");
+  });
   /* ---------------------------------------------------------------- round 127: Sky / HDRI worlds and toon on the GPU (task 0102) */
   /* As r126_case, with the scene's world set by `world` and the object given its own components by `extra`; also the
    * whole view's difference (the background is the world too). */

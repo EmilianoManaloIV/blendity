@@ -75,6 +75,24 @@ Responsiveness: three longest frames up (Bake Mesh Maps 5.9 -> 8.1, Bake Texture
 6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
    macOS with Blender's libraries, input latency, a cold shader cache, OptiX / MoonRay, Unity timed per step.
 
+### The GPU frames' drift, attributed (round 450)
+Pass 18's baseline read four GPU editor-frame rows 8-18 % over Pass 17's end. Built at each Pass 18 round boundary and
+timed three times each in turn with nothing else running (`--only editor_render`, median ms / frame):
+
+| build | moving an object | playing | Sky world | Gradient world |
+|---|---|---|---|---|
+| round 434 (Pass 17's end) | 4.82 | 4.85 | 7.10 | 7.28 |
+| round 441 | 4.74 | 5.02 | 7.30 | 7.62 |
+| round 446 (Pass 18's end) | 5.12 | 4.54 | 6.85 | 6.81 |
+| round 450 | 4.49 | 3.96 | 6.07 | 5.80 |
+| round 450, SH / Light Volumes / Shadowmask compiled out | 4.42 | 5.52 | 7.39 | 6.29 |
+
+The last row is warm runs (a variant's first run compiles its shaders cold). The same binary's medians spread by up to
+1.7x within a session here (round 434 run five times: the Sky world 7.0-12.1 ms), so wall time per frame cannot resolve
+under ~40 %: within that, no round and no feature is consistently slower, and Pass 18's +8-18 % was inside the spread.
+`BLENDITY_VIEW_OFF=sh,lv,mask` stays for the next attribution, best read with the card's own timestamps
+(docs/tasks/0426).
+
 ### The scene's change counter (round 435, ADR 0115)
 Nothing in the scene said "changed", so every view walked every object every frame to find out. Now every edit path
 moves one counter and the views keep the scene hash while it holds still (checked by a walk every 8th frame).

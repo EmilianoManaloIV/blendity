@@ -396,4 +396,11 @@ class Raster {
   virtual const DeviceInfo &info() const = 0;
 };
 
+/* Round 450: BLENDITY_VIEW_OFF=sh,lv,mask (any of them, comma-separated) compiles the views' shaders without round
+ * 442's SH probes, round 443's Light Volumes or round 444's Shadowmask / Subtractive work - a diagnostic for
+ * attributing the views' cost per feature (as BLENDITY_UNITY_BRDF=0). view_off_defines_from turns a value into the
+ * shader defines (unknown words ignored); view_off_defines reads the environment once. */
+std::string view_off_defines_from(const char *spec);
+const std::string &view_off_defines();
+
 }  // namespace bl::gpu

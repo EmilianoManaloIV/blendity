@@ -2,6 +2,22 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 450): The GPU editor frames' drift, attributed
+
+**Asked:** Pass 19's round 450 - Pass 18's baseline read the GPU editor frames 8-18 % slower than Pass 17's end; find the
+round or the feature, and gate what costs.
+
+**Changed (task 0426)**
+- **`BLENDITY_VIEW_OFF=sh,lv,mask`:** compiles the views' shaders without the SH probes, the Light Volumes or the
+  Shadowmask / Subtractive work - a diagnostic, like `BLENDITY_UNITY_BRDF=0`.
+- **Measured:** the stress tool built at each of Pass 18's round boundaries and timed three times each in turn, plus
+  this build with each switch (warm): no build or switch consistently slower, this build at or under Pass 17's end on
+  every GPU row. One binary's medians spread up to 1.7x within a session here, so the test can't resolve under ~40 % -
+  Pass 18's +8-18 % was inside that. No gating needed.
+- **Learn:** "Rendering on the GPU" gains "Which feature costs the card time?".
+
+**Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 446): Pass 18's write-up
 
 **Asked:** Pass 18's round 446 - the pass in one table, the comparison with Unity, the lessons, the baseline; and the

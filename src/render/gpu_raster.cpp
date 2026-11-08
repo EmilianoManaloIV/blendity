@@ -66,6 +66,21 @@ RasterMatch raster_match(const uint32_t *cpu_color, const uint32_t *cpu_ids, con
   return m;
 }
 
+std::string view_off_defines_from(const char *spec) {
+  std::string d;
+  if (!spec) return d;
+  const std::string s = std::string(",") + spec + ",";
+  if (s.find(",sh,") != std::string::npos) d += "#define BL_NO_SH 1\n";
+  if (s.find(",lv,") != std::string::npos) d += "#define BL_NO_LV 1\n";
+  if (s.find(",mask,") != std::string::npos) d += "#define BL_NO_MASK 1\n";
+  return d;
+}
+
+const std::string &view_off_defines() {
+  static const std::string defs = view_off_defines_from(std::getenv("BLENDITY_VIEW_OFF"));
+  return defs;
+}
+
 #if !defined(BL_WITH_VULKAN)
 
 std::unique_ptr<Raster> Raster::create(int, std::string *error) {
@@ -118,6 +133,8 @@ struct Fns {
 };
 
 /* ---------------------------------------------------------------- shaders */
+
+/* (Round 450: view_off_defines - BLENDITY_VIEW_OFF's defines - go after kCommon, which opens with the #version.) */
 
 /* Shared by every stage: the frame's constants and the instances. */
 const char *kCommon = R"(
@@ -1177,6 +1194,9 @@ bool light_skip(float bm, int kind) {
   return bm > 2.5 && bm < 3.5 && kind == 1;
 }
 vec3 light_smask(vec4 A, int kind) {
+#ifdef BL_NO_MASK
+  return vec3(1.0);
+#endif
   if (kind != 1) return vec3(1.0);
   float f = floor((A.w - 4.0) * 524288.0 + 0.5);
   if (f < 262144.0) return vec3(1.0);  // (a lightmap without a mask)
@@ -1184,6 +1204,9 @@ vec3 light_smask(vec4 A, int kind) {
   return vec3(mod(f, 64.0), mod(floor(f / 64.0), 64.0), floor(f / 4096.0)) / 63.0;
 }
 float light_mask(float bm, int kind, vec3 m) {
+#ifdef BL_NO_MASK
+  return 1.0;
+#endif
   if (!(bm > 3.5) || kind != 1) return 1.0;
   int c = int(bm - 3.5);
   return c == 0 ? m.x : c == 1 ? m.y : m.z;
@@ -1791,8 +1814,10 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
     if (light_skip(l.spot.w, kind)) {
+#ifndef BL_NO_MASK
       if (l.spot.w > 2.5 && l.spot.w < 3.5 && kind == 1 && li == shadow_light && receive)
         sub_vis = min(sub_vis, shadow_lookup(P + geo * 0.01, dot(geo, int(l.pos_type.w) == 0 ? -l.dir_range.xyz : normalize(l.pos_type.xyz - P))));
+#endif
       continue;
     }
     vec3 L;
@@ -1869,6 +1894,9 @@ vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, 
   int base = floatBitsToInt(pv[2].y) + i * 13 + (live ? 7 : 1);
   vec4 cube = pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
   int sh_at = floatBitsToInt(pv[3].x);
+#ifdef BL_NO_SH
+  sh_at = 0;
+#endif
   if (live || sh_at <= 0) return cube;
   /* Round 442: the baked light from geometry as L2 SH (ProbeSH::eval), the sky share kept from the cube. */
   float y[9] = float[9](0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x, 1.092548 * n.x * n.y, 1.092548 * n.y * n.z,
@@ -1946,6 +1974,9 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
 bool lv_sample(vec3 p, vec3 n, out vec3 light, out float cover) {
   light = vec3(0.0);
   cover = 0.0;
+#ifdef BL_NO_LV
+  return false;
+#endif
   if (pv.length() < 3) return false;
   int base = floatBitsToInt(pv[2].w);
   if (base <= 0 || base >= pv.length()) return false;
@@ -4612,7 +4643,7 @@ class VulkanRaster final : public Raster {
   }
 
   VkShaderModule module(const std::string &body, shaderc_shader_kind kind, std::string *err) {
-    const std::vector<uint32_t> spv = vk::compile(std::string(kCommon) + body, kind, err);
+    const std::vector<uint32_t> spv = vk::compile(std::string(kCommon) + view_off_defines() + body, kind, err);
     if (spv.empty()) return VK_NULL_HANDLE;
     VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smi.codeSize = spv.size() * 4;
@@ -4977,7 +5008,7 @@ class VulkanRaster final : public Raster {
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         std::string e;
-        vk::compile(std::string(kCommon) + srcs[(size_t)i].first, srcs[(size_t)i].second, &e);
+        vk::compile(std::string(kCommon) + view_off_defines() + srcs[(size_t)i].first, srcs[(size_t)i].second, &e);
       }
     });
   }
