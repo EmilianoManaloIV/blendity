@@ -281,7 +281,9 @@ std::vector<float> probe_pack(const ProbeVolumeData &d) {
   const bool with_sh = d.sh.size() == np && np > 0;
   const size_t node_at = 4, brick_at = node_at + nn * 2, probe_at = brick_at + nb * 2, root_at = probe_at + np * 13;
   const size_t sh_at = root_at + (nr + 3) / 4;
-  std::vector<float> o((sh_at + (with_sh ? np * 7 : 0)) * 4, 0.0f);
+  const bool with_sky = with_sh && d.sky_in_sh && d.has_baked_sky;  // (round 453: six vec4 after the SH, pv[3].z)
+  const size_t bsky_at = sh_at + (with_sh ? np * 7 : 0);
+  std::vector<float> o((bsky_at + (with_sky ? 6 : 0)) * 4, 0.0f);
   auto put = [&](size_t v, float a, float b, float c, float e) { o[v * 4] = a, o[v * 4 + 1] = b, o[v * 4 + 2] = c, o[v * 4 + 3] = e; };
   auto bits = [](int64_t i) {  // (an index as its int32's bits: exact past 2^24, read with floatBitsToInt)
     const int32_t v = (int32_t)i;
@@ -314,7 +316,8 @@ std::vector<float> probe_pack(const ProbeVolumeData &d) {
     }
   }
   for (size_t i = 0; i < nr; i++) o[root_at * 4 + i] = bits(d.roots[i]);
-  put(3, bits(with_sh ? (int64_t)sh_at : 0), 0.0f, 0.0f, 0.0f);
+  put(3, bits(with_sh ? (int64_t)sh_at : 0), with_sh && d.sky_in_sh ? 1.0f : 0.0f, bits(with_sky ? (int64_t)bsky_at : 0), 0.0f);  // (round 453: pv[3].y, .z)
+  for (size_t k = 0; with_sky && k < 6; k++) put(bsky_at + k, d.baked_sky[k].x, d.baked_sky[k].y, d.baked_sky[k].z, 0.0f);
   for (size_t i = 0; with_sh && i < np; i++)
     for (int k = 0; k < 9; k++) {
       const size_t f = (sh_at + i * 7) * 4 + (size_t)k * 3;  // (27 floats in 7 rows: coefficient k's rgb at 3k)

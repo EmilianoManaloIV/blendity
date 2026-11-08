@@ -7,6 +7,7 @@
 #include "../image/image.h"
 #include "../scene/mesh.h"
 #include "../scene/uv.h"
+#include "light_pick.h"
 #include "pathtracer.h"
 
 #include <algorithm>
@@ -838,24 +839,10 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   /* Round 441: with many point and spot lights (SideRail has 71), each one's unshadowed light here is estimated first,
    * and each is kept with the probability min(1, 8 x its share of their sum), its light divided by that (Russian
    * roulette: unbiased). About 8 lights' shadow rays a texel in expectation, the bright near ones always. */
-  thread_local std::vector<float> point_est;
-  float point_sum = 0.0f;
+  thread_local LightPick pk;  // (round 453: the picking shared with the probes, light_pick.h)
   Vec3 picked(0.0f);
-  const bool pick = s_.pick_lights && point_lights_ > kPickLightsOver;
-  if (pick) {
-    point_est.assign(lights_.size(), 0.0f);
-    for (size_t li = 0; li < lights_.size(); li++) {
-      const BakeLight &bl = lights_[li];
-      if (!bakes_direct(bl) || bl.light.type == RenderLight::Directional || bl.light.type == RenderLight::Area) continue;
-      const Vec3 dvec = bl.light.position - o;
-      const float dist = length(dvec);
-      if (!(dist > 1e-5f)) continue;
-      const float ndl = dot(n, dvec / dist), fall = ndl > 0.0f ? light_falloff(bl.light, t.position, dvec / dist) : 0.0f;
-      const float e = std::max(0.0f, ndl) * fall * (0.2126f * bl.light.color.x + 0.7152f * bl.light.color.y + 0.0722f * bl.light.color.z) * bl.light.intensity;
-      point_est[li] = e > 0.0f && e < 1e30f ? e : 0.0f;
-      point_sum += point_est[li];
-    }
-  }
+  const bool pick = s_.pick_lights && point_lights_ > kLightPickOver;
+  if (pick) light_pick_estimate(pk, lights_, o, &n, t.position, [&](const BakeLight &bl) { return bakes_direct(bl); });
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
   if (mask_out && !masks_.empty()) *mask_out = shadowmask_at(t, o, rng, rays);  // (round 444)
@@ -935,7 +922,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (fall <= 0.0f) continue;
     float keep = 1.0f;
     if (pick) {
-      keep = std::min(1.0f, kPickRays * point_est[(size_t)(&bl - &lights_[0])] / std::max(1e-30f, point_sum));
+      keep = light_pick_keep(pk, (size_t)(&bl - &lights_[0]));
       if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
     }
     const Vec3 c = col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays) / keep);

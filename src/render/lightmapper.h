@@ -277,11 +277,9 @@ class Lightmapper {
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
   Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &rays) const;  // round 441
-  size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kPickLightsOver each texel picks among them)
+  size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kLightPickOver (light_pick.h) each texel picks among them)
  public:
-  static constexpr size_t kPickLightsOver = 8;
-  static constexpr float kPickRays = 8.0f;
-  static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)  // (the shadow-ray budget per texel the picking aims at, in expectation)
+  static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)
  private:
   /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are never clamped),
    * kept beside `values_` for the firefly clamp (task 0157); the emitters sampled at each texel apart (round 423: they

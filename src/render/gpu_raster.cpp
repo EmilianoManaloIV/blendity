@@ -1889,15 +1889,17 @@ int probe_brick(vec3 p) {
   }
   return -1;
 }
-/* A probe's cube at the axes facing n, weighted by n squared: (bounce, sky share). */
-vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2, vec3 n) {
+/* A probe's cube at the axes facing n, weighted by n squared: its bounce, and in `skyc` its sky share times the sky light it
+ * takes (round 453: `sh_sky` where its SH hold the sky - only the change since the bake - else `sky_irr`). */
+vec3 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2, vec3 n, vec3 sky_irr, vec3 sh_sky, out vec3 skyc) {
   int base = floatBitsToInt(pv[2].y) + i * 13 + (live ? 7 : 1);
   vec4 cube = pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
   int sh_at = floatBitsToInt(pv[3].x);
 #ifdef BL_NO_SH
   sh_at = 0;
 #endif
-  if (live || sh_at <= 0) return cube;
+  skyc = cube.w * sky_irr;
+  if (live || sh_at <= 0) return cube.rgb;
   /* Round 442: the baked light from geometry as L2 SH (ProbeSH::eval), the sky share kept from the cube. */
   float y[9] = float[9](0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x, 1.092548 * n.x * n.y, 1.092548 * n.y * n.z,
                         0.315392 * (3.0 * n.z * n.z - 1.0), 1.092548 * n.x * n.z, 0.546274 * (n.x * n.x - n.y * n.y));
@@ -1905,7 +1907,8 @@ vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, 
   vec4 q0 = pv[r0], q1 = pv[r0 + 1], q2 = pv[r0 + 2], q3 = pv[r0 + 3], q4 = pv[r0 + 4], q5 = pv[r0 + 5], q6 = pv[r0 + 6];
   vec3 b = q0.xyz * y[0] + vec3(q0.w, q1.xy) * y[1] + vec3(q1.zw, q2.x) * y[2] + q2.yzw * y[3] + q3.xyz * y[4] + vec3(q3.w, q4.xy) * y[5] +
            vec3(q4.zw, q5.x) * y[6] + q5.yzw * y[7] + q6.xyz * y[8];
-  return vec4(max(b, vec3(0.0)), cube.w);
+  skyc = cube.w * sh_sky;  // (round 453: SH that hold the sky take only its change since the bake)
+  return max(b, vec3(0.0));
 }
 bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out vec3 o) {
   o = vec3(0.0);
@@ -1926,8 +1929,19 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
   int ax = n.x >= 0.0 ? 0 : 1, ay = n.y >= 0.0 ? 2 : 3, az = n.z >= 0.0 ? 4 : 5;
   float nx2 = n.x * n.x, ny2 = n.y * n.y, nz2 = n.z * n.z;
   const int corner[8] = int[8](0, 1, 4, 5, 16, 17, 20, 21);
-  vec3 acc = vec3(0.0);
-  float sky = 0.0, wsum = 0.0;
+  vec3 acc = vec3(0.0), sky = vec3(0.0);
+  float wsum = 0.0;
+  /* Round 453: SH that hold the sky take the sky now less the sky they were baked with (pv[3].z: where its six axes
+   * start, 0 none - then nothing), the cube's sky-visibility share as weight; SH from before it take the whole share. */
+  vec3 sh_sky = sky_irr;
+  if (pv[3].y > 0.5) {
+    int bs = floatBitsToInt(pv[3].z);
+    sh_sky = vec3(0.0);
+    /* like with like: the n-squared blend of (the world's irradiance now at each axis - the baked one there) */
+    if (bs > 0)
+      sh_sky = (irradiance(vec3(ax == 0 ? 1.0 : -1.0, 0.0, 0.0)) - pv[bs + ax].xyz) * nx2 + (irradiance(vec3(0.0, ay == 2 ? 1.0 : -1.0, 0.0)) - pv[bs + ay].xyz) * ny2 +
+               (irradiance(vec3(0.0, 0.0, az == 4 ? 1.0 : -1.0)) - pv[bs + az].xyz) * nz2;
+  }
   int nvalid = 0;
   int valid_i[8];
   for (int c = 0; c < 8; c++) {
@@ -1945,25 +1959,27 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
         w *= max(1e-4, f * f * f);
       }
     }
-    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
-    acc += cb.rgb * w;
-    sky += cb.w * w;
+    vec3 skyc;
+    acc += probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n, sky_irr, sh_sky, skyc) * w;
+    sky += skyc * w;
     wsum += w;
   }
   if (wsum < 1e-3) {
     if (nvalid == 0) return false;
     acc = vec3(0.0);
-    sky = 0.0;
+    sky = vec3(0.0);
     for (int k = 0; k < nvalid; k++) {
       int fl = floatBitsToInt(pv[floatBitsToInt(pv[2].y) + valid_i[k] * 13].w);
-      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
-      acc += cb.rgb;
-      sky += cb.w;
+      vec3 skyc;
+      acc += probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n, sky_irr, sh_sky, skyc);
+      sky += skyc;
     }
     wsum = float(nvalid);
   }
-  o = acc / wsum + sky_irr * (sky / wsum);
-  return !any(isnan(o)) && !any(isinf(o));
+  o = (acc + sky) / wsum;
+  if (any(isnan(o)) || any(isinf(o))) return false;  // (checked before the clamp, as the CPU: GLSL's max may turn NaN into 0)
+  o = max(o, vec3(0.0));  // (a sky darker than the bake's must not take more than the SH hold)
+  return true;
 }
 
 /* Round 443 (task 0419): the baked VRC Light Volumes (LightVolumeFrame::sample, light_volume_bake.cpp), packed after the

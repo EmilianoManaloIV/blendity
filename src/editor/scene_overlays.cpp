@@ -381,7 +381,7 @@ void Editor::render_static_overlays() {
     for (size_t i = 0; i < n; i += step) {
       const bool live = probe_frame_.use_live && probes_.live_ok[i];
       const Vec3 c = live || i >= probes_.sh.size() ? (live ? probes_.live[i] : probes_.baked[i]).eval(up, sky)
-                                                   : probes_.sh[i].eval(up) + sky * probes_.baked[i].sky[2];  // (round 442: the SH where baked)
+                                                   : vmax(probes_.sh[i].eval(up) + (probes_.sky_in_sh ? probes_.sky_change(env_, up) : sky) * probes_.baked[i].sky[2], Vec3(0.0f));  // (round 442: the SH where baked; round 453: the sky in them)
       const uint32_t col = probes_.valid[i] ? to_display_pixel(c, ViewTransform::Standard, 0.0f) : Color::hex(0xFF3030);
       scene_r3d_.point(probes_.position[i], std::max(1.5f, (float)ui_.px(2.5f)), col, true);
     }
