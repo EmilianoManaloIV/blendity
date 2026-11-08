@@ -1,10 +1,13 @@
 #include "reflection_probe.h"
 
+#include "lightmapper.h"
+#include "pathtracer.h"
 #include "shading.h"
 #include "../core/core.h"
 #include "../core/jobs.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -311,6 +314,85 @@ Vec3 reflection_probe_specular(const RenderProbe &p, Vec3 at, Vec3 R, float roug
   const Vec3 d = normalize(p.projection ? box_projected_direction(p, at, R) : R);
   /* (Round 428: Unity's roughness-to-mip, the levels prefiltered to match.) */
   return p.map->sample(dir_to_equirect(d, 0.0f), reflection_probe_lod(roughness, (int)p.map->levels.size()), TexWrap::Repeat, TexFilter::Trilinear).xyz() * p.intensity;
+}
+
+/* ===================================================================== */
+/* Round 451 (task 0427): the probes captured from the lit scene          */
+/* ===================================================================== */
+
+namespace {
+
+/* The page and the lightmap UV at a hit, when its object was baked into the lightmaps. */
+const Lightmap *lit_capture_lightmap(const ProbeLitCapture &c, const PathTracer::Hit &h, Vec2 &uv, const Lightmap **dir) {
+  if (!c.lighting || !c.object_ids || h.object >= c.object_ids->size()) return nullptr;
+  const auto e = c.lighting->entries.find((*c.object_ids)[h.object]);
+  if (e == c.lighting->entries.end() || e->second.page < 0 || (size_t)e->second.page >= c.lighting->pages.size()) return nullptr;
+  const std::vector<Vec2> &t = e->second.tri_uv;
+  if ((size_t)h.tri * 3 + 2 >= t.size()) return nullptr;
+  const float w = 1.0f - h.u - h.v;
+  uv = t[(size_t)h.tri * 3] * w + t[(size_t)h.tri * 3 + 1] * h.u + t[(size_t)h.tri * 3 + 2] * h.v;
+  const size_t page = (size_t)e->second.page;
+  *dir = page < c.lighting->dir_pages.size() ? &c.lighting->dir_pages[page] : nullptr;
+  return &c.lighting->pages[page];
+}
+
+/* What one ray sees: a lightmapped surface shaded from its lightmap (the views' rule: lightmap x albedo x (1 - metallic),
+ * rebalanced by the direction page), the lights the maps don't hold added directly, its emission; anything else the
+ * path tracer's full path. `lit` says which. */
+Vec3 lit_capture_ray(const ProbeLitCapture &c, const Ray &ray, uint32_t &rng, uint64_t &rays, bool &lit) {
+  PathTracer::Hit h;
+  SurfacePoint sp;
+  SurfaceSample s;
+  lit = false;
+  Vec2 uv;
+  const Lightmap *dir = nullptr;
+  Ray past;
+  const Lightmap *page = c.pt->first_surface(ray, rng, h, sp, s, true, &past) ? lit_capture_lightmap(c, h, uv, &dir) : nullptr;
+  if (!page) return c.pt->incoming_radiance(past, rng, rays);  // (the sky, a moving object: as before - from past the culled faces)
+  lit = true;
+  if (s.unlit) return s.emission + s.albedo;
+  const float f = dir ? lightmap_direction_factor(s.normal, sp.normal, dir->sample(uv), sp.back_side) : 1.0f;  // (review 451: a back side decoded in the front's frame, as the views)
+  Vec3 light = page->sample(uv) * f;
+  if (c.lights)
+    for (const RenderLight &l : *c.lights) light += c.pt->direct_diffuse(l, sp.position, s.normal, sp.geo_normal, rng);
+  const Vec3 col = light * s.albedo * (1.0f - s.metallic) + s.emission;
+  return std::isfinite(col.x) && std::isfinite(col.y) && std::isfinite(col.z) ? vmax(col, Vec3(0.0f)) : Vec3(0.0f);
+}
+
+float jitter(uint32_t &rng) {
+  rng = rng * 1664525u + 1013904223u;
+  return (float)(rng >> 8) * (1.0f / 16777216.0f);
+}
+
+}  // namespace
+
+float reflection_probe_capture_lit(const ProbeLitCapture &c, Vec3 eye, int size, float near_clip, int face, std::vector<Vec3> &out) {
+  auto cancelled = [&] { return c.cancel && c.cancel->load(std::memory_order_relaxed); };
+  out.assign((size_t)std::max(0, size) * (size_t)std::max(0, size), Vec3(0.0f));
+  if (!c.pt || size <= 0 || face < 0 || face > 5) return 0.0f;
+  const Vec3 fwd = cube_direction(face, 0.5f, 0.5f);
+  const int spp = std::max(1, std::min(256, c.samples));
+  std::atomic<uint64_t> lit_rays{0};
+  auto pixel = [&](int x, int y, uint64_t &rays, uint64_t &lit_here) {
+    uint32_t rng = ((uint32_t)face * 7919u + (uint32_t)y) * 104729u + (uint32_t)x * 2654435761u + 1u;
+    Vec3 sum(0.0f);
+    for (int k = 0; k < spp; k++) {
+      const float jx = spp == 1 ? 0.5f : jitter(rng), jy = spp == 1 ? 0.5f : jitter(rng);
+      const Vec3 d = cube_direction(face, ((float)x + jx) / (float)size, ((float)y + jy) / (float)size);
+      const Ray ray{eye + d * (near_clip / std::max(dot(d, fwd), 0.5f)), d};  // (from the near plane, as the camera's)
+      bool lit = false;
+      sum += lit_capture_ray(c, ray, rng, rays, lit);
+      lit_here += lit ? 1 : 0;
+    }
+    out[(size_t)y * (size_t)size + (size_t)x] = sum / (float)spp;
+  };
+  JobSystem::global().parallel_for(size, 1, [&](int64_t y0, int64_t y1) {
+    uint64_t rays = 0, lit_here = 0;
+    for (int64_t y = y0; y < y1 && !cancelled(); y++)  // (review 451: a cancel stops a face within a row)
+      for (int x = 0; x < size; x++) pixel(x, (int)y, rays, lit_here);
+    lit_rays += lit_here;
+  });
+  return (float)lit_rays.load() / (float)std::max<size_t>(1, out.size() * (size_t)spp);
 }
 
 }  // namespace bl

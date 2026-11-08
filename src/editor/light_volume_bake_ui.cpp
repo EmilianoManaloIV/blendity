@@ -9,7 +9,11 @@
 #include "../render/light_volume_bake.h"
 #include "../render/pathtracer.h"
 #include "../render/probe_volume.h"
+#include "../render/reflection_probe.h"
 #include "../core/core.h"
+#include "../core/json.h"
+
+#include <filesystem>
 
 namespace bl {
 
@@ -28,6 +32,36 @@ void validate_slice(ProbeVolumeData &d, const PathTracer &pt, size_t from, size_
   part.valid.assign(count, 1);
   probe_validate(part, pt, 64);
   for (size_t k = 0; k < count; k++) d.valid[from + k] = part.valid[k] && part.position[k] == d.position[from + k] ? 1 : 0;
+}
+
+/* A face as before round 451 (and without lightmaps): the path tracer's camera at the probe, raw geometry path-traced. */
+void path_traced_face(PathTracer &pt, Vec3 eye, int size, float near_clip, float far_clip, int face, int samples, const std::atomic<bool> &cancel,
+                      std::vector<Vec3> &out) {
+  static const Vec3 kFwd[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+  static const Vec3 kUp[6] = {{0, 1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}};
+  pt.set_camera(Mat4::look_at(eye, eye + kFwd[face], kUp[face]), Mat4::perspective(kPi * 0.5f, 1.0f, near_clip, far_clip), size, size);
+  pt.reset();
+  while (pt.samples() < samples && !cancel.load(std::memory_order_relaxed)) pt.render(200.0, samples);
+  const std::vector<float> rgb = pt.linear_rgb(false);
+  out.assign((size_t)size * size, Vec3(0.0f));
+  for (size_t i = 0; i < out.size() && i * 3 + 2 < rgb.size(); i++) {
+    const Vec3 v(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+    out[i] = std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) ? vmax(v, Vec3(0.0f)) : Vec3(0.0f);
+  }
+}
+
+/* Round 451: the lights the lightmaps don't hold - Realtime ones, Mixed ones (Baked Indirect bakes only their bounce),
+ * Shadowmask ones - which Unity's capture of the lit scene shines directly; Baked and Subtractive ones are in the maps. */
+std::vector<RenderLight> lights_not_in_lightmaps(const std::vector<BakeLight> &lights, const LightingData &ld) {
+  std::vector<RenderLight> out;
+  for (const BakeLight &l : lights) {
+    const auto m = ld.light_modes.find(l.id);
+    const bool in_maps = m != ld.light_modes.end() && (m->second == 2 || m->second == 3);
+    if (in_maps) continue;
+    out.push_back(l.light);
+    out.back().baked_falloff = false;  // (review 451: shone in realtime, it falls off as the views draw it, not as baked)
+  }
+  return out;
 }
 
 }  // namespace
@@ -121,11 +155,15 @@ void Editor::bake_gather_reflection_probes(BakeJob &j) {
   j.probe_samples = std::max(16, std::min(1024, scene_->lighting.indirect_samples / 8));
 }
 
+/* Round 451 (task 0427): with the lightmaps just baked, the faces are captured from the lit scene as Unity captures
+ * its probes - static surfaces from their lightmaps plus the lights the maps don't hold (reflection_probe_capture_lit) -
+ * so a probe shows the room the views show; without lightmaps, path-traced as before. */
 void Editor::bake_reflection_probes_on_worker(BakeJob &j) {
   if (j.probes.empty()) return;
   ScopedTimer t;
   std::vector<PTObject> objs;
-  for (const BakeObject &o : j.objects) objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials});
+  std::vector<uint64_t> ids;
+  for (const BakeObject &o : j.objects) objs.push_back({&o.mesh->render_mesh_tangents(), o.model, &o.materials}), ids.push_back(o.id);
   std::vector<RenderLight> lights;
   for (const BakeLight &l : j.lights) lights.push_back(l.light);
   PathTracer pt;
@@ -135,36 +173,68 @@ void Editor::bake_reflection_probes_on_worker(BakeJob &j) {
   ps.use_guiding = false;
   pt.set_settings(ps);
   pt.build(objs, lights, j.env);
-  static const Vec3 kFwd[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-  static const Vec3 kUp[6] = {{0, 1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}};
+  const bool from_lightmaps = !j.lighting.empty();
+  const std::vector<RenderLight> direct = lights_not_in_lightmaps(j.lights, j.lighting);
+  ProbeLitCapture cap;
+  cap.pt = &pt, cap.lighting = &j.lighting, cap.object_ids = &ids, cap.lights = &direct, cap.cancel = &j.cancel;
+  cap.samples = std::max(4, std::min(64, j.probe_samples / 4));  // (a lightmap lookup a ray, not a path: a few jittered rays a texel smooth the edges)
+  double lit_share = 0.0;
+  int lit_faces = 0;
   for (size_t at = 0; at < j.probes.size() && !j.cancel.load(std::memory_order_relaxed); at++) {
     const BakeJob::Probe &p = j.probes[at];
     ReflectionProbeBake bake;
     bake.size = p.size;
     for (int face = 0; face < 6 && !j.cancel.load(std::memory_order_relaxed); face++) {
-      pt.set_camera(Mat4::look_at(p.eye, p.eye + kFwd[face], kUp[face]), Mat4::perspective(kPi * 0.5f, 1.0f, p.near_clip, p.far_clip), p.size, p.size);
-      pt.reset();
-      while (pt.samples() < j.probe_samples && !j.cancel.load(std::memory_order_relaxed)) pt.render(200.0, j.probe_samples);
+      if (from_lightmaps) lit_share += reflection_probe_capture_lit(cap, p.eye, p.size, p.near_clip, face, bake.faces[face]), lit_faces++;
+      else path_traced_face(pt, p.eye, p.size, p.near_clip, p.far_clip, face, j.probe_samples, j.cancel, bake.faces[face]);
       {
         std::lock_guard<std::mutex> lock(j.mutex);
         j.status = strprintf("Baking reflection probe %zu of %zu, face %d  (%.1f s)", at + 1, j.probes.size(), face + 1, t.ms() / 1000.0);
       }
       j.progress.store(((float)at + (face + 1) / 6.0f) / (float)j.probes.size());
-      if (j.cancel.load()) break;
-      const std::vector<float> rgb = pt.linear_rgb(false);
-      std::vector<Vec3> &out = bake.faces[face];
-      out.assign((size_t)p.size * p.size, Vec3(0.0f));
-      for (size_t i = 0; i < out.size() && i * 3 + 2 < rgb.size(); i++) {
-        const Vec3 v(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
-        out[i] = std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z) ? vmax(v, Vec3(0.0f)) : Vec3(0.0f);
-      }
     }
     if (j.cancel.load()) break;
     bake.from_unity = false;
     j.probe_bakes[p.id] = std::move(bake);
     j.probe_maps[p.id] = reflection_probe_texture(j.probe_bakes[p.id]);  // (round 428: the GGX levels here, not in the landing frame - 16 ms a 128 probe)
   }
-  Log::info("Reflection probes: %zu baked", j.probe_bakes.size());
+  if (from_lightmaps)
+    Log::info("Reflection probes: %zu baked from the lightmapped scene (%.0f%% of their rays on lightmapped surfaces, %zu lights added directly)", j.probe_bakes.size(),
+              100.0 * lit_share / std::max(1, lit_faces), direct.size());
+  else Log::info("Reflection probes: %zu baked (path-traced: no lightmaps)", j.probe_bakes.size());
+}
+
+/* Round 451 (task 0427): `lighting save <dir>` - the shown lightmaps as a bake's folder plus objects.json (each entry's
+ * object by id and hierarchy path), for tools/unity_compare.py's page compare. */
+std::string trim_overwrite_word(const std::string &s) {
+  const size_t end = s.find_last_not_of(" \t");
+  const size_t cut = end == std::string::npos ? std::string::npos : s.find_last_of(" \t", end);
+  if (cut == std::string::npos) return std::string();
+  const size_t keep = s.find_last_not_of(" \t", cut);
+  return keep == std::string::npos ? std::string() : s.substr(0, keep + 1);
+}
+
+void Editor::save_shown_lighting(const std::string &folder, bool overwrite) {
+  if (folder.empty()) return Log::warn("lighting save: give a folder (a relative one is the project's)");
+  const std::filesystem::path p = std::filesystem::u8path(folder);
+  const std::string dir = p.is_absolute() ? folder : fs::join(project_root_, folder);  // (review 451: not the process's working folder)
+  const LightingData &ld = shown_lighting();
+  if (ld.empty()) return refuse("lighting save: no lightmaps are shown (Generate Lighting, or `unity lightmaps`, first)", "", "");
+  if (fs::exists(fs::join(dir, "LightingData.bin")) && !overwrite)
+    return refuse("lighting save: " + dir + " holds lightmaps already - add `overwrite` to replace them", "", "");
+  std::string err;
+  if (!ld.save(dir, err)) return Log::error("lighting save: %s", err.c_str());
+  JsonWriter w;
+  w.obj().key("source").str(lighting_from_unity_ ? "unity" : "blendity").key("objects").arr();
+  for (const auto &[id, e] : ld.entries) {
+    const GameObject *g = scene_->find(id);
+    std::string path = g ? g->name : std::string();
+    for (const GameObject *p = g ? g->parent : nullptr; p; p = p->parent) path = p->name + "/" + path;
+    w.obj().key("id").str(std::to_string(id)).key("path").str(path).key("page").integer(e.page).key("tris").integer((int64_t)(e.tri_uv.size() / 3)).end();
+  }
+  w.end().end();
+  if (!fs::write_file(fs::join(dir, "objects.json"), w.out)) return Log::error("lighting save: could not write objects.json in %s", dir.c_str());
+  Log::info("lighting save: %zu page(s), %zu object(s) (%s's lightmaps) in %s", ld.pages.size(), ld.entries.size(), lighting_from_unity_ ? "Unity" : "Blendity", dir.c_str());
 }
 
 void Editor::load_light_volume_bakes(const std::string &dir) {

@@ -7039,6 +7039,177 @@ static void tests_round444() {
   });
 }
 
+static void tests_round451() {
+  test("Reflection probes from the lit scene (round 451): a probe over a lightmapped floor reads the lightmap x the floor's albedo - not a path trace of the raw geometry (no lights, a black world: that is black) - the sky stays path-traced, and a Realtime sun the maps don't hold adds its direct light", [] {
+    MeshPtr floor = primitives::plane(6.0f, 2);
+    const std::vector<MaterialPtr> white = {make_material("White", Vec3(0.8f))};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::identity(), &white}};
+    PathTracer pt;
+    PTSettings ps;
+    ps.denoise = false;
+    pt.set_settings(ps);
+    pt.build(objs, {}, env);
+    LightingData ld;
+    Lightmap page;
+    page.width = page.height = 4;
+    page.texels.assign(16, Vec3(0.5f, 0.25f, 0.125f));
+    ld.pages.push_back(page);
+    LightingData::Entry e;
+    e.page = 0;
+    e.tri_uv.assign(floor->render_mesh_tangents().tri_count() * 3, Vec2(0.5f, 0.5f));
+    ld.entries[1] = e;
+    const std::vector<uint64_t> ids = {1};
+    ProbeLitCapture cap;
+    cap.pt = &pt, cap.lighting = &ld, cap.object_ids = &ids, cap.samples = 2;
+    std::vector<Vec3> down, up;
+    const float lit_down = reflection_probe_capture_lit(cap, Vec3(0, 1, 0), 8, 0.05f, 3, down);
+    const float lit_up = reflection_probe_capture_lit(cap, Vec3(0, 1, 0), 8, 0.05f, 2, up);
+    Vec3 mean_down(0.0f), mean_up(0.0f);
+    for (const Vec3 &c : down) mean_down += c / (float)down.size();
+    for (const Vec3 &c : up) mean_up += c / (float)up.size();
+    std::printf("    down: (%.3f %.3f %.3f), %.0f%% lightmapped; up (the sky): (%.3f %.3f %.3f), %.0f%%\n", mean_down.x, mean_down.y, mean_down.z, lit_down * 100.0f, mean_up.x,
+                mean_up.y, mean_up.z, lit_up * 100.0f);
+    CHECK(down.size() == 64 && lit_down > 0.99f && std::fabs(mean_down.x - 0.4f) < 0.01f && std::fabs(mean_down.y - 0.2f) < 0.01f && std::fabs(mean_down.z - 0.1f) < 0.01f);
+    CHECK(lit_up < 0.01f && mean_up.x < 1e-4f);
+    uint32_t rng = 1;
+    uint64_t rays = 0;
+    CHECK(pt.incoming_radiance({Vec3(0, 1, 0), Vec3(0, -1, 0)}, rng, rays).x < 1e-4f);  // (the raw geometry's path: no light at all)
+    /* A Realtime sun straight down, the maps empty: its direct light x albedo. */
+    page.texels.assign(16, Vec3(0.0f));
+    ld.pages[0] = page;
+    RenderLight sun;
+    sun.type = RenderLight::Directional, sun.direction = Vec3(0, -1, 0), sun.intensity = 1.0f;
+    const std::vector<RenderLight> direct = {sun};
+    cap.lights = &direct;
+    reflection_probe_capture_lit(cap, Vec3(0, 1, 0), 8, 0.05f, 3, down);
+    mean_down = Vec3(0.0f);
+    for (const Vec3 &c : down) mean_down += c / (float)down.size();
+    std::printf("    a Realtime sun on an empty lightmap: (%.3f %.3f %.3f)\n", mean_down.x, mean_down.y, mean_down.z);
+    CHECK(std::fabs(mean_down.x - 0.8f) < 0.02f && std::fabs(mean_down.z - 0.8f) < 0.02f);
+  });
+  test("Reflection probes from the lit scene (round 451): Generate Lighting with a Baked sun - the probe above the floor sees the floor as its lightmap x albedo; `lighting save` writes the shown lightmaps with objects.json naming the floor", [] {
+    Editor ed;
+    r35_open(ed);
+    GameObject *floor_go = r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    r35_sun_mode(ed, 2);
+    GameObject *probe = ed.scene().create("Probe");
+    probe->set_local_position({0, 0.5f, 0});
+    probe->add<ReflectionProbeComponent>()->resolution = 16;
+    ed.commit_change("probe");
+    r35_bake(ed);
+    const auto &bakes = ed.reflection_probe_bakes_for_test();
+    const auto it = bakes.find(probe->id);
+    Vec3 lm;
+    const Mesh *fm = floor_go->evaluated_mesh(1);
+    const bool sampled = fm && r35_sample(ed.lighting_data_for_test(), floor_go->id, *fm, floor_go->world_matrix(), {0, 0, 0}, lm);
+    CHECK(it != bakes.end() && sampled);
+    if (it == bakes.end() || !sampled) return;
+    const Vec3 seen = it->second.sample(Vec3(0, -1, 0)), want = lm * 0.8f;
+    std::printf("    the probe looking down (%.3f %.3f %.3f), the floor's lightmap x albedo (%.3f %.3f %.3f)\n", seen.x, seen.y, seen.z, want.x, want.y, want.z);
+    CHECK(want.y > 0.05f && std::fabs(seen.y - want.y) < 0.1f * want.y + 0.01f);
+    const std::string dir = fs::join(scratch_project(), "R451Lighting");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    ed.command("lighting save " + dir);
+    std::filesystem::remove(std::filesystem::u8path(fs::join(dir, "objects.json")), ec);
+    ed.command("lighting save " + dir);  // (review 451: a folder with a bake in it is refused without `overwrite`)
+    CHECK(!fs::exists(fs::join(dir, "objects.json")));
+    ed.command("lighting save " + dir + " overwrite");
+    std::string objects;
+    CHECK(fs::exists(fs::join(dir, "LightingData.bin")) && fs::exists(fs::join(dir, "Lightmap-0.hdr")) && fs::read_file(fs::join(dir, "objects.json"), objects));
+    std::printf("    objects.json: %.120s\n", objects.c_str());
+    CHECK(objects.find("\"path\":\"Floor\"") != std::string::npos && objects.find(std::to_string(floor_go->id)) != std::string::npos && objects.find("\"source\":\"blendity\"") != std::string::npos);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("The render split by component (round 451, BLENDITY_RENDER_COMPONENTS): noreflections drops only the reflection probes, noprobes the probe volume and Light Volumes, indirect the realtime lights, direct the lightmaps, probes and the sky; an unknown word applies nothing", [] {
+    Lightmap page;
+    std::vector<Vec2> uv(3, Vec2(0.5f, 0.5f));
+    ProbeFrame pf;
+    LightVolumeFrame lv;
+    auto fresh = [&](LightingEnv &env, std::vector<DrawItem> &items) {
+      env = LightingEnv{};
+      env.lights.resize(2);
+      env.reflection_probes.resize(1);
+      env.probes = &pf, env.light_volumes = &lv;
+      items.assign(1, DrawItem{});
+      items[0].lightmap = &page, items[0].lightmap_uv = &uv, items[0].use_probes = true;
+    };
+    LightingEnv env;
+    std::vector<DrawItem> items;
+    fresh(env, items);
+    CHECK(apply_render_components("noreflections", env, items) == "noreflections" && env.reflection_probes.empty() && env.lights.size() == 2 && env.probes && items[0].lightmap);
+    fresh(env, items);
+    CHECK(apply_render_components("noprobes", env, items) == "noprobes" && !env.probes && !env.light_volumes && env.reflection_probes.size() == 1);
+    fresh(env, items);
+    CHECK(apply_render_components(" Indirect , noreflections", env, items) == "indirect,noreflections" && env.lights.empty() && env.reflection_probes.empty() && items[0].lightmap);
+    fresh(env, items);
+    CHECK(apply_render_components("direct", env, items) == "direct" && env.lights.size() == 2 && !items[0].lightmap && !items[0].use_probes && !env.probes && env.environment &&
+          env.environment->irradiance(Vec3(0, 1, 0)).y == 0.0f && env.sky.y == 0.0f);
+    fresh(env, items);
+    CHECK(apply_render_components("everything", env, items).empty() && env.lights.size() == 2 && items[0].lightmap);
+  });
+  test("Reflection probes from the lit scene (review 451): a single-sided floor seen from below is culled as the views cull it (the sky behind it shows); a double-sided one seen from behind takes its lightmap with the direction page decoded in the front's frame, as the views do", [] {
+    MeshPtr floor = primitives::plane(6.0f, 2);
+    MaterialPtr one = make_material("One", Vec3(0.8f)), two = make_material("Two", Vec3(0.8f));
+    two->double_sided = true;
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.05f, 0.1f, 0.2f);
+    LightingData ld;
+    Lightmap page, dir;
+    page.width = page.height = dir.width = dir.height = 4;
+    page.texels.assign(16, Vec3(0.5f));
+    dir.texels.assign(16, Vec3(0.0f, 0.9f, 0.0f));  // (the light came from above the floor)
+    ld.pages.push_back(page);
+    ld.dir_pages.push_back(dir);
+    LightingData::Entry e;
+    e.page = 0;
+    e.tri_uv.assign(floor->render_mesh_tangents().tri_count() * 3, Vec2(0.5f, 0.5f));
+    ld.entries[1] = e;
+    const std::vector<uint64_t> ids = {1};
+    auto look_up_from_below = [&](const MaterialPtr &m, float &lit) {
+      const std::vector<MaterialPtr> mats = {m};
+      std::vector<PTObject> objs = {{&floor->render_mesh_tangents(), Mat4::identity(), &mats}};
+      PathTracer pt;
+      PTSettings ps;
+      ps.denoise = false;
+      pt.set_settings(ps);
+      pt.build(objs, {}, env);
+      ProbeLitCapture cap;
+      cap.pt = &pt, cap.lighting = &ld, cap.object_ids = &ids, cap.samples = 1;
+      std::vector<Vec3> face;
+      lit = reflection_probe_capture_lit(cap, Vec3(0, -1, 0), 4, 0.05f, 2, face);
+      Vec3 mean(0.0f);
+      for (const Vec3 &c : face) mean += c / (float)face.size();
+      return mean;
+    };
+    float lit_one = 0.0f, lit_two = 0.0f;
+    const Vec3 single = look_up_from_below(one, lit_one), both = look_up_from_below(two, lit_two);
+    std::printf("    single-sided from below: (%.3f %.3f %.3f), %.0f%% lightmapped; double-sided: (%.3f %.3f %.3f), %.0f%%\n", single.x, single.y, single.z, lit_one * 100.0f, both.x,
+                both.y, both.z, lit_two * 100.0f);
+    CHECK(lit_one < 0.01f && std::fabs(single.z - 0.2f) < 0.01f);
+    CHECK(lit_two > 0.99f && std::fabs(both.x - 0.4f) < 0.01f);  // (decoded as the front: factor 1 - not the back's divisor)
+  });
+  test("The render split (review 451): `direct` keeps only the realtime lights - a Baked sun and a Subtractive light go with the lightmaps (no double count beside `indirect`), a Realtime point light stays, the shadowed light keeps its map at its new place", [] {
+    ShadowMap map;
+    LightingEnv env;
+    env.lights.resize(3);
+    env.lights[0].type = RenderLight::Directional, env.lights[0].bake_mode = 2;
+    env.lights[1].type = RenderLight::Point, env.lights[1].bake_mode = 0;
+    env.lights[2].type = RenderLight::Directional, env.lights[2].bake_mode = 3;
+    env.shadow = &map, env.shadow_light = 0;
+    std::vector<DrawItem> items(1);
+    CHECK(apply_render_components("direct", env, items) == "direct" && env.lights.size() == 1 && env.lights[0].type == RenderLight::Point && !env.shadow && env.shadow_light == -1);
+    env.lights.resize(2);
+    env.lights[0].type = RenderLight::Directional, env.lights[0].bake_mode = 2;
+    env.lights[1].type = RenderLight::Directional, env.lights[1].bake_mode = 0;
+    env.shadow = &map, env.shadow_light = 1;
+    CHECK(apply_render_components("direct", env, items) == "direct" && env.lights.size() == 1 && env.shadow == &map && env.shadow_light == 0);
+  });
+}
+
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -7067,4 +7238,5 @@ void run_lighting_tests() {
   tests_round441();
   tests_round442();
   tests_round444();
+  tests_round451();
 }

@@ -7,6 +7,7 @@
 #include "../image/image.h"
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -64,6 +65,26 @@ struct ProbeCubeMips {
 /* The file beside the lightmaps (ReflectionProbes.bin): each probe object's id, its faces and a checksum. */
 bool save_reflection_probe_bakes(const std::string &path, const std::map<uint64_t, ReflectionProbeBake> &bakes, std::string &error);
 bool load_reflection_probe_bakes(const std::string &path, std::map<uint64_t, ReflectionProbeBake> &bakes, std::string &error);
+
+/* Round 451 (task 0427): a probe's face captured from the finished, lightmapped scene, as Unity bakes its reflection
+ * probes (it renders the lit scene, it doesn't path-trace raw geometry): a static surface with a lightmap shows its
+ * lightmap x albedo, plus the direct light of the lights the lightmaps don't hold (Realtime, Mixed, Shadowmask), plus its
+ * emission; a surface without one (a moving object) and the sky are path-traced as before. `object_ids` is the GameObject
+ * id of each object `pt` was built with, in its order; `lights` the lights to add directly. */
+class PathTracer;
+struct LightingData;
+struct RenderLight;
+struct ProbeLitCapture {
+  const PathTracer *pt = nullptr;
+  const LightingData *lighting = nullptr;
+  const std::vector<uint64_t> *object_ids = nullptr;
+  const std::vector<RenderLight> *lights = nullptr;
+  int samples = 4;  // rays a pixel (jittered)
+  const std::atomic<bool> *cancel = nullptr;  // (set: checked every row - the face's rest left black)
+};
+/* One face (0..5, as ReflectionProbeBake's) size x size, the near clip `near_clip` from `eye`; returns the share of the
+ * face's rays that met a lightmapped surface. */
+float reflection_probe_capture_lit(const ProbeLitCapture &c, Vec3 eye, int size, float near_clip, int face, std::vector<Vec3> &out);
 
 /* A probe as the renderers see it: its box in world space (axis-aligned, as Unity's), its settings, its map. */
 struct RenderProbe {

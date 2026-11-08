@@ -694,6 +694,15 @@ struct UndoState {
 /* A camera's composition guides as screen lines over its frame, Blender's construction (task 0033). */
 std::vector<std::pair<Vec2, Vec2>> camera_guide_lines(const Camera &c, const Recti &frame);
 
+/* Round 451 (task 0427): a comparison's split of F12's rasterized render by Blendity's lighting components (the Unity
+ * comparison sets BLENDITY_RENDER_COMPONENTS for one render per component): comma-separated `direct` (the realtime
+ * lights' direct light alone - no lightmaps, probes, Light Volumes, reflection probes or sky), `indirect` (the realtime
+ * lights off), `noprobes` (the probe volume and the Light Volumes off), `noreflections` (the reflection probes off).
+ * Returns the words it applied ("" for none). */
+std::string apply_render_components(const std::string &spec, LightingEnv &env, std::vector<DrawItem> &items);
+/* `lighting save <dir> overwrite`: the folder without its last word. */
+std::string trim_overwrite_word(const std::string &s);
+
 class Editor {
  public:
   Editor();
@@ -1479,6 +1488,10 @@ class Editor {
   bool wants_directions() const;  // round 426
   bool lighting_from_unity_ = false;   // (the baked lighting shown is Unity's: Generate Lighting replaces it)
   void read_unity_lighting_cmd(bool wait);
+  /* Round 451 (task 0427): `lighting save <dir>` - the shown lightmaps (Blendity's bake or Unity's) written as a bake's
+   * folder is (LightingData.bin, Lightmap-N.hdr) plus objects.json: each entry's object id, hierarchy path and triangle
+   * count, so tools/unity_compare.py can pair Blendity's pages with Unity's object by object. */
+  void save_shown_lighting(const std::string &dir, bool overwrite = false);  // (review 451: a relative folder is the project's; a bake there needs `overwrite`)
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
   void unity_subtractive_modes(LightingData &ld) const;  // (round 444)

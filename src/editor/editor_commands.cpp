@@ -2036,10 +2036,18 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "saverender") save_render(line_rest(line, 1));  // (round 367: a path, or ask)
   else if (c == "lighting") {
-    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) */
+    /* lighting update | lighting preview on|off | lighting mode manual|automatic (task 0020) | lighting markstatic (round 362) |
+     * lighting save <dir> [overwrite] (round 451: the shown lightmaps and which object is which, for the Unity comparison's
+     * page compare; a relative folder is the project's; a folder that holds a bake already needs `overwrite`) */
     const std::string sub = to_lower(arg(1, "update"));
     if (sub == "update") lighting_update();
     else if (sub == "markstatic") mark_static_meshes();
+    else if (sub == "save") {
+      const bool overwrite = t.size() > 3 && to_lower(t.back()) == "overwrite";
+      std::string dir = t.size() > 2 ? line_rest(line, 2) : std::string();
+      if (overwrite) dir = trim_overwrite_word(dir);
+      save_shown_lighting(dir, overwrite);
+    }
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
       mark_changed("Preview Lighting");
@@ -2049,7 +2057,7 @@ void Editor::run_console_command(const std::string &line) {
       scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
       mark_changed("Lighting Updates");
     }
-    else Log::warn("lighting: update | preview on|off | mode manual|automatic");
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] (a relative folder is the project's)");
   }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));

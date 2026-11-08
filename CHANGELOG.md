@@ -2,6 +2,35 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 451): where the stations' error lives
+
+**Asked:** Pass 19's round 451 - Blendity's bake of SideRail misses ADR 0113's target (SSIM 0.77-0.88) and nobody knows
+which part carries the error: diagnostics that say where, and one known difference fixed (the reflection probes).
+
+**Changed (task 0427)**
+- **Reflection probes from the lit scene:** when Generate Lighting has just baked lightmaps, each probe face is captured
+  from them as Unity captures its probes - a static surface shows its lightmap x albedo (the direction page applied),
+  plus the direct light of the lights the maps don't hold (Realtime, Mixed, Shadowmask) and its emission; moving
+  objects and the sky stay path-traced, and without lightmaps the bake path-traces as before. The log says which.
+- **`tools/image_compare.py --ssim-map <png>`:** the local SSIM (8 x 8 windows) as a heat map; the JSON's `ssim_worst`
+  lists the five worst windows; `--self-test`.
+- **`tools/unity_compare.py`:** `<station>_ssim.png` beside every side by side; `--components` renders each station
+  again with `BLENDITY_RENDER_COMPONENTS` = direct / indirect / noprobes / noreflections (F12's rasterizer) and reports
+  each one's MAE / SSIM against Unity's and its change from the full render; `--pages` (with `--blendity-bake`) compares
+  Blendity's lightmap pages with Unity's object by object - each chart resampled over Blendity's lightmap UVs, MAE / SSIM
+  / light ratio per object, worst first, the worst charts as pictures; `pages <unity dir> <blendity dir> <out>` runs it
+  alone; `--self-test`. The existing command lines are unchanged.
+- **`lighting save <folder> [overwrite]`:** the shown lightmaps (Blendity's or Unity's) as a bake's folder plus
+  objects.json; a relative folder is the project's, an existing bake there is replaced only with `overwrite`.
+- **Review fixes:** `direct` leaves out Baked and Subtractive lights (they are the lightmaps'); the probe capture culls
+  single-sided back faces and decodes a double-sided back's directions as the views do; Mixed lights in the capture fall
+  off as the views draw them; a cancel stops a face mid-way.
+- **Learn:** "How good is the bake?" gains the section "Where the error lives: probes from the lit scene, and the
+  comparison's diagnostics", with two questions and a Try-it.
+
+**Checked:** both suites - with Blender's libraries 17,271; dependency-free 16,490 (Windows) and 16,496 (Linux, WSL), 0 failed; the audits; `py tools/image_compare.py --self-test` and `py tools/unity_compare.py --self-test` pass. Not
+measured here: the SideRail stations with the new probes and the diagnostics (the owner's session runs Unity).
+
 ## 2026-11-08 (round 456): A running surface's planes
 
 **Asked:** Pass 19's round 456 - the soak's one open memory item: a running 4096 x 4096 surface held 738 MB of planes, and

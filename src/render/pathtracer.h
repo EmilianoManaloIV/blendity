@@ -196,6 +196,15 @@ class PathTracer {
     const Material *m = surface_at(h.object, h.tri, h.u, h.v, sp);
     return dot(sp.geo_normal, d) > 0.0f && !(m && m->double_sided);
   }
+  /* Round 451 (task 0427): the surface a ray meets first, as a capture of the lit scene shades it (the reflection
+   * probes' bake from the lightmaps) - see-through faces passed (a Volume's, an outline hull's, a Cutout's holes, a
+   * Transparent one by its alpha), the material evaluated, the normals turned toward the ray (sp.back_side says they
+   * were, as the rasterizer's). `cull_back`: a single-sided face seen from behind is passed too, as the views cull it
+   * (review 451). False on a miss. `past` (optional): the ray moved past the faces it passed, for a caller that traces on. */
+  bool first_surface(const Ray &r, uint32_t &rng, Hit &h, SurfacePoint &sp, SurfaceSample &s, bool cull_back = false, Ray *past = nullptr) const;
+  /* Round 451: one sample of the light `l` reaching a Lambert surface at p (shading normal n, true normal geo): the
+   * radiance it scatters toward any eye per unit albedo - colour x power x N.L / pi through the shadow ray. */
+  Vec3 direct_diffuse(const RenderLight &l, Vec3 p, Vec3 n, Vec3 geo, uint32_t &rng) const;
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }
