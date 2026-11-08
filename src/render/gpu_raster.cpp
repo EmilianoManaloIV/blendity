@@ -99,7 +99,7 @@ namespace {
   X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass)        \
   X(vkCmdBindPipeline) X(vkCmdBindDescriptorSets) X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdDrawIndexed)      \
   X(vkCmdDraw) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdCopyBuffer) X(vkCmdCopyImageToBuffer)                           \
-  X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) X(vkCmdPipelineBarrier) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool)          \
+  X(vkCmdCopyBufferToImage) X(vkCmdCopyImage) X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCmdWriteTimestamp) X(vkCmdResetQueryPool)          \
   X(vkCreateQueryPool) X(vkDestroyQueryPool) X(vkGetQueryPoolResults) X(vkQueueSubmit) X(vkCreateFence) X(vkDestroyFence)    \
   X(vkWaitForFences) X(vkResetFences) X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkDeviceWaitIdle)
 #define BL_RV_SWAPCHAIN(X)                                                                                                  \
@@ -174,6 +174,13 @@ const uint F_TOONMAP = 1024u;  // task 0196: a toon object with painted maps (th
  * the face's forward axis; the hatching's scale, lines in the shadow only, the face shadow's softness, the hair. */
 struct ToonMaps { ivec4 a; ivec4 b; vec4 c; };
 layout(std430, set = 0, binding = 24) readonly buffer ToonTable { ToonMaps tmap[]; };
+/* Round 416 (ADR 0110): lilToon's settings an instance (24 vec4; l[0].x on - gpu_views.cpp's raster_lil lays them out)
+ * and its maps' texture ids: a = shadow, 2nd shadow, strength mask, border mask; b = rim, backlight, emission, matcap
+ * mask; c = emission mask, matcap, any map in the planes, 0. */
+struct LilSet { vec4 l[24]; };
+layout(std430, set = 0, binding = 32) readonly buffer LilTable { LilSet lil[]; };
+struct LilMaps { ivec4 a; ivec4 b; ivec4 c; };
+layout(std430, set = 0, binding = 33) readonly buffer LilMapTable { LilMaps lmap[]; };
 /* Task 0197: an instance's baked light - its lightmap, realtime bounce and sky (texture ids, -1 none), its first
  * triangle's corners in cn[] (-1 none); flags (1 probe-lit, 2 the realtime bounce onto its lightmap). */
 struct BakedRef { ivec4 a; vec4 b; };
@@ -250,6 +257,19 @@ layout(std430, set = 0, binding = 12) readonly buffer TexF { vec4 texf[]; };
 layout(std430, set = 0, binding = 13) readonly buffer TexInfos { TexInfo texinfo[]; };
 layout(std430, set = 0, binding = 14) readonly buffer TexLevels { TexLevel texlevel[]; };
 float srgb_dec(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+/* lilToon's HSVG on the base colour (shading.cpp's lil_tone, round 416 on the card). */
+vec3 lil_tone(vec3 c, vec3 hsvg, float gamma) {
+  c = vec3(pow(abs(c.r), gamma), pow(abs(c.g), gamma), pow(abs(c.b), gamma));
+  vec4 p = c.b > c.g ? vec4(c.b, c.g, -1.0, 2.0 / 3.0) : vec4(c.g, c.b, 0.0, -1.0 / 3.0);
+  vec4 q = p.x > c.r ? vec4(p.x, p.y, p.w, c.r) : vec4(c.r, p.y, p.z, p.x);
+  float d = q.x - min(q.w, q.y), e = 1.0e-10;
+  vec3 hsv = vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+  hsv = vec3(hsv.x + hsvg.x, clamp(hsv.y * hsvg.y, 0.0, 1.0), clamp(hsv.z * hsvg.z, 0.0, 1.0));
+  vec3 k = vec3(1.0, 2.0 / 3.0, 1.0 / 3.0);
+  vec3 o;
+  for (int i = 0; i < 3; i++) o[i] = hsv.z - hsv.z * hsv.y + hsv.z * hsv.y * clamp(abs(fract(hsv.x + k[i]) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+  return o;
+}
 /* (GLSL leaves % of a negative number open; glslang emits OpSMod, the sign of the divisor: never negative here.) */
 int wrap_coord(int v, int n, int w) {  // TexWrap: 0 Repeat, 1 Extend, 2 Clip, 3 Mirror
   if (w == 0) { v %= n; return v < 0 ? v + n : v; }
@@ -561,6 +581,7 @@ void main() {
     emission = I.metal_spec.z >= 0.0 ? solid_shade(albedo, I.metal_spec.y, ns, wpos) : solid;  // (it.specular: Solid's own)
     flags |= F_RAW;
   }
+  if (I.tex2.w != 0 && lil[ii].l[0].x > 0.5 && lil[ii].l[23].w > 0.5) albedo = lil_tone(albedo, lil[ii].l[23].xyz, lil[ii].l[22].w);  // (round 416: lilToon's HSVG; a uniform material's base came toned from the CPU)
   o_normal = vec4(n, rough);
   o_albedo = vec4(albedo, metallic);
   o_geo = vec4(g, specular);
@@ -825,6 +846,9 @@ layout(set = 0, binding = 15) uniform usampler2D g_inst;
 layout(set = 0, binding = 25) uniform sampler2D g_toon0;  // task 0196: the toon pass's planes
 layout(set = 0, binding = 26) uniform sampler2D g_toon1;
 layout(set = 0, binding = 27) uniform sampler2D g_toon2;
+layout(set = 0, binding = 34) uniform sampler2D g_lil0;  // round 416: lilToon's rim, backlight and emission maps at the pixel
+layout(set = 0, binding = 35) uniform sampler2D g_lil1;
+layout(set = 0, binding = 36) uniform sampler2D g_lil2;
 )";
 
 /* Task 0197: the baked pass's plane (the lighting pass reads it). */
@@ -1145,6 +1169,25 @@ vec3 solid_shade(vec3 albedo, float specular, vec3 n, vec3 wp) {
 )";
 
 const char *kLightFrag2 = R"(
+/* Round 444 (ADR 0117): a light's bake_mode (spot.w) against the pixel's ambient kind - 2 Baked: in lightmaps and baked
+ * probes; 3 a Subtractive Mixed light: in lightmaps only; 4-6 a Shadowmask Mixed light, its channel in the mask the baked
+ * pass packed beside the kind (light_baked_here / light_mask_channel on the CPU). */
+bool light_skip(float bm, int kind) {
+  if (bm > 1.5 && bm < 2.5) return kind == 1 || kind == 2;
+  return bm > 2.5 && bm < 3.5 && kind == 1;
+}
+vec3 light_smask(vec4 A, int kind) {
+  if (kind != 1) return vec3(1.0);
+  float f = floor((A.w - 4.0) * 524288.0 + 0.5);
+  if (f < 262144.0) return vec3(1.0);  // (a lightmap without a mask)
+  f -= 262144.0;
+  return vec3(mod(f, 64.0), mod(floor(f / 64.0), 64.0), floor(f / 4096.0)) / 63.0;
+}
+float light_mask(float bm, int kind, vec3 m) {
+  if (!(bm > 3.5) || kind != 1) return 1.0;
+  int c = int(bm - 3.5);
+  return c == 0 ? m.x : c == 1 ? m.y : m.z;
+}
 float lit_at(int sx, int sy, float z, int size) {
   ivec2 s = clamp(ivec2(sx, sy), ivec2(0), ivec2(size - 1));
   return z <= texelFetch(g_shadow, s, 0).r ? 1.0 : 0.0;
@@ -1263,7 +1306,8 @@ vec3 probe_sample(int i, vec3 P, vec3 R, float rough) {
     float fa = max(0.0, min(min(rb.x, rb.y), rb.z));
     d = normalize((P - p.pos_type.xyz) + d * fa);
   }
-  return tex_sample(int(p.spot.x), dir_to_equirect(d, 0.0), clamp(rough, 0.0, 1.0) * p.spot.z * 0.85, 0, 2).xyz * p.color.w;
+  float r = isnan(rough) ? 1.0 : clamp(rough, 0.0, 1.0);  // (round 428: Unity's roughness-to-mip, reflection_probe_lod on the CPU - NaN as 1 there too)
+  return tex_sample(int(p.spot.x), dir_to_equirect(d, 0.0), min(r * (1.7 - 0.7 * r) * 6.0, p.spot.z), 0, 2).xyz * p.color.w;
 }
 vec3 probe_specular(vec3 P, vec3 R, float rough) {
   int n = int(gi.y);
@@ -1385,6 +1429,220 @@ vec3 env_brdf_approx(vec3 f0, float r, float nv) {
   float a004 = min(rx * rx, exp2(-9.28 * nv)) * rx + ry;
   return f0 * (-1.04 * a004 + rz) + vec3(1.04 * a004 + rw);
 }
+/* ---- lilToon on the card (round 416, ADR 0110): shading.cpp's lil_* line for line. S: the instance's settings (LilSet),
+ * X: its maps' values at the pixel (LilPx). ---- */
+struct LilPx { vec4 sh1, sh2, masks, rim, back, emi; };  // (the shadow colour map, the 2nd's, (strength, border x, border y, matcap mask), rim, backlight, emission rgb + its alpha x mask)
+LilPx lil_px(ivec2 px, uint flags, bool maps) {
+  LilPx X;
+  X.sh1 = vec4(0.0), X.sh2 = vec4(0.0), X.masks = vec4(1.0), X.rim = vec4(1.0), X.back = vec4(1.0), X.emi = vec4(1.0);
+  if (!maps || (flags & F_TOONMAP) == 0u) return X;
+  X.sh1 = texelFetch(g_toon0, px, 0);
+  X.sh2 = texelFetch(g_toon1, px, 0);
+  X.masks = texelFetch(g_toon2, px, 0);
+  X.rim = texelFetch(g_lil0, px, 0);
+  X.back = texelFetch(g_lil1, px, 0);
+  X.emi = texelFetch(g_lil2, px, 0);
+  return X;
+}
+float lil_step4(float v, float border, float blur, float range) {
+  float lo = clamp(border - blur * 0.5 - range, 0.0, 1.0), hi = clamp(border + blur * 0.5, 0.0, 1.0);
+  float d = clamp(hi - lo, 0.0, 1.0);
+  if (!(d > 1e-6)) return v >= lo ? 1.0 : 0.0;
+  return clamp((v - lo) / d, 0.0, 1.0);
+}
+float lil_step(float v, float border, float blur) { return lil_step4(v, border, blur, 0.0); }
+vec3 lil_blend(vec3 dst, vec3 src, vec3 a, int mode) {
+  vec3 ad = dst + src, mu = dst * src;
+  vec3 o = mode == 0 ? src : mode == 1 ? ad : mode == 2 ? max(ad - mu, dst) : mu;
+  return mix(dst, o, a);
+}
+float lil_lum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+float lil_gray(vec3 c) { return (c.r + c.g + c.b) / 3.0; }
+void lil_sh(vec3 dir, out vec3 shmax, out vec3 shmin) {
+  float len = length(dir);
+  vec3 d = len > 1e-6 ? dir / len : vec3(0.0, 1.0, 0.0);
+  vec3 a = irradiance(d), b = irradiance(-d);
+  vec3 mean = (a + b) * 0.5, half_ = (a - b) * (0.5 * 0.666666);
+  shmax = max(mean + half_, vec3(0.0));
+  shmin = max(mean - half_, vec3(0.0));
+}
+vec3 lil_light_direction(vec3 keyL, float key_lum) {
+  vec3 grad = vec3(1.0, 0.0, 0.0) * ((lil_lum(irradiance(vec3(1.0, 0.0, 0.0))) - lil_lum(irradiance(vec3(-1.0, 0.0, 0.0)))) * 0.5) +
+              vec3(0.0, 1.0, 0.0) * ((lil_lum(irradiance(vec3(0.0, 1.0, 0.0))) - lil_lum(irradiance(vec3(0.0, -1.0, 0.0)))) * 0.5) +
+              vec3(0.0, 0.0, 1.0) * ((lil_lum(irradiance(vec3(0.0, 0.0, 1.0))) - lil_lum(irradiance(vec3(0.0, 0.0, -1.0)))) * 0.5);
+  vec3 L = keyL * max(0.0, key_lum) + grad;
+  float len = length(L);
+  return len > 1e-6 && !isnan(len) && !isinf(len) ? L / len : vec3(0.0, 1.0, 0.0);
+}
+float lil_clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }  // (clampf: a min above the max gives the min)
+vec3 lil_main_light(LilSet S, vec3 key_color, vec3 sh_max) {
+  vec3 c = key_color + sh_max;
+  c = vec3(lil_clampf(c.r, S.l[0].y, S.l[0].z), lil_clampf(c.g, S.l[0].y, S.l[0].z), lil_clampf(c.b, S.l[0].y, S.l[0].z));
+  c = mix(c, vec3(lil_gray(c)), clamp(S.l[0].w, 0.0, 1.0));
+  return mix(c, vec3(1.0), clamp(S.l[1].x, 0.0, 1.0));
+}
+vec3 lil_add_light(LilSet S, vec3 color) {
+  vec3 c = min(color, vec3(S.l[0].z));
+  c = mix(c, vec3(lil_gray(c)), clamp(S.l[0].w, 0.0, 1.0));
+  return c * (1.0 - clamp(S.l[1].x, 0.0, 1.0));
+}
+vec3 lil_shade(LilSet S, LilPx X, vec3 albedo, vec3 n, vec3 L, float vis, vec3 light, vec3 indirect_light, bool main_, inout float shadowmix) {
+  if (S.l[1].z < 0.5) { if (main_) shadowmix = 1.0; return albedo * light; }
+  float cast_ = clamp(vis, 0.0, 1.0);
+  float ln1 = clamp(dot(L, n) * 0.5 + 0.5, 0.0, 1.0), ln2 = ln1;
+  ln1 *= mix(1.0, cast_, clamp(S.l[2].z, 0.0, 1.0));
+  ln2 *= mix(1.0, cast_, clamp(S.l[4].w, 0.0, 1.0));
+  float ao1 = clamp(X.masks.y, 0.0, 1.0), ao2 = clamp(X.masks.z, 0.0, 1.0);
+  bool post_ao = S.l[4].x > 0.5;
+  if (!post_ao) { ln1 *= ao1; ln2 *= ao2; }
+  float x = lil_step(ln1, S.l[1].w, S.l[2].x), y = lil_step(ln2, S.l[4].y, S.l[4].z), w = lil_step4(ln1, S.l[1].w, S.l[2].x, S.l[3].x);
+  if (post_ao) { x *= ao1; y *= ao2; w *= ao1; }
+  if (main_) shadowmix = x;
+  x = mix(1.0, x, clamp(S.l[2].y, 0.0, 1.0) * clamp(X.masks.x, 0.0, 1.0));
+  vec3 indirect = mix(albedo, X.sh1.rgb, clamp(X.sh1.a, 0.0, 1.0)) * S.l[3].yzw;
+  vec3 c2 = mix(albedo, X.sh2.rgb, clamp(X.sh2.a, 0.0, 1.0)) * S.l[5].yzw;
+  float a2 = clamp(S.l[5].x, 0.0, 1.0);
+  y = a2 - y * a2;
+  indirect = mix(indirect, c2, y);
+  indirect = mix(indirect, indirect * albedo, clamp(S.l[2].w, 0.0, 1.0));
+  vec3 direct = albedo * light;
+  indirect = indirect * light;
+  if (main_) {
+    vec3 e = clamp(indirect_light * clamp(S.l[1].y, 0.0, 1.0), 0.0, 1.0);
+    indirect = mix(indirect, albedo, e);
+  }
+  indirect = min(indirect, direct);
+  indirect = lil_blend(indirect, direct, S.l[6].xyz * w, 0);
+  return mix(indirect, direct, x);
+}
+vec2 lil_matcap_uv(vec3 n, vec3 V) {
+  vec3 nv = normalize(V);
+  vec3 bit = vec3(0.0, 1.0, 0.0) - nv * nv.y;
+  float bl = length(bit);
+  bit = bl > 1e-4 ? bit / bl : vec3(1.0, 0.0, 0.0);
+  vec3 tan_ = cross(nv, bit);
+  return vec2(dot(tan_, n) * 0.5 + 0.5, 1.0 - (dot(bit, n) * 0.5 + 0.5));
+}
+vec3 lil_finish(LilSet S, LilPx X, int matcap_tex, vec3 col, vec3 albedo, vec3 n, vec3 V, vec3 L, float vis, float shadowmix, vec3 light) {
+  if (S.l[15].z > 0.5 && matcap_tex >= 0) {
+    vec4 t = tex_sample(matcap_tex, lil_matcap_uv(n, V), 0.0, 1, 1);  // (Extend, Linear)
+    vec3 mc = S.l[16].xyz * t.rgb;
+    float a = S.l[15].w * t.a;
+    mc = mix(mc, mc * light, clamp(S.l[17].x, 0.0, 1.0));
+    a = mix(a, a * shadowmix, clamp(S.l[17].y, 0.0, 1.0));
+    mc = mix(mc, mc * albedo, clamp(S.l[17].w, 0.0, 1.0));
+    col = lil_blend(col, mc, vec3(X.masks.w) * (clamp(S.l[16].w, 0.0, 1.0) * a), int(S.l[18].x + 0.5));
+  }
+  if (S.l[7].x > 0.5) {
+    vec3 rc = S.l[7].yzw * X.rim.rgb, ric = S.l[12].xyz * X.rim.rgb;
+    float ra = S.l[8].x * X.rim.a, ria = S.l[11].y * X.rim.a;
+    rc = mix(rc, rc * albedo, clamp(S.l[8].y, 0.0, 1.0));
+    float nvabs = abs(dot(n, V));
+    float ln_raw = dot(L, n) * 0.5 + 0.5;
+    float ln_dir = clamp((ln_raw + S.l[10].y) / (1.0 + S.l[10].y), 0.0, 1.0);
+    float ln_indir = clamp((1.0 - ln_raw + S.l[10].z) / (1.0 + S.l[10].z), 0.0, 1.0);
+    float rim = pow(clamp(1.0 - nvabs, 0.0, 1.0), max(0.01, S.l[8].z));
+    float rd = mix(rim, rim * ln_dir, clamp(S.l[10].x, 0.0, 1.0)), ri = rim * ln_indir * clamp(S.l[10].x, 0.0, 1.0);
+    rd = lil_step(rd, S.l[8].w, S.l[9].x);
+    ri = lil_step(ri, S.l[10].w, S.l[11].x);
+    rd = mix(rd, rd * shadowmix, clamp(S.l[9].z, 0.0, 1.0));
+    ri = mix(ri, ri * shadowmix, clamp(S.l[9].z, 0.0, 1.0));
+    vec3 mul = vec3(1.0 - clamp(S.l[9].y, 0.0, 1.0)) + light * clamp(S.l[9].y, 0.0, 1.0);
+    int mode = int(S.l[11].z + 0.5);
+    col = lil_blend(col, rc * mul, vec3(rd * ra), mode);
+    col = lil_blend(col, ric * mul, vec3(ri * ria), mode);
+  }
+  if (S.l[11].w > 0.5) {
+    vec3 bc = S.l[13].xyz * X.back.rgb;
+    float ba = S.l[12].w * X.back.a;
+    float hl = dot(V, L);
+    float factor = pow(clamp(-hl * 0.5 + 0.5, 0.0, 1.0), max(0.0, S.l[15].x));
+    float ln = dot(normalize(V * -clamp(S.l[15].y, 0.0, 1.0) + L), n) * 0.5 + 0.5;
+    if (S.l[14].x > 0.0) ln *= clamp(vis, 0.0, 1.0);
+    ln = lil_step(ln, S.l[14].z, S.l[14].w);
+    float b = clamp(factor * ln, 0.0, 1.0);
+    bc = mix(bc, bc * albedo, clamp(S.l[13].w, 0.0, 1.0));
+    col = col + bc * light * (b * ba);
+  }
+  if (S.l[20].y > 0.5 && S.l[20].z > 0.5) {
+    float metallic = clamp(S.l[21].z, 0.0, 1.0);
+    col = col - col * metallic;
+    vec3 spec = mix(vec3(clamp(S.l[21].w, 0.0, 1.0)), albedo, metallic);
+    float pr = max(1e-3, 1.0 - clamp(S.l[21].y, 0.0, 1.0)), rough = pr * pr;
+    vec3 H = normalize(V + L);
+    float nh = clamp(dot(n, H), 0.0, 1.0);
+    vec3 term;
+    if (S.l[21].x > 0.5) term = vec3(lil_step(pow(nh, 1.0 / rough), S.l[22].x, S.l[22].y));
+    else {
+      float nl = clamp(dot(n, L), 0.0, 1.0), nvv = clamp(dot(n, V), 0.0, 1.0), lh = clamp(dot(L, H), 0.0, 1.0), a2 = rough * rough;
+      float d = nh * nh * (a2 - 1.0) + 1.0, D = a2 / (3.14159265358979 * d * d + 1e-7);
+      float vis_t = 0.5 / (nl * sqrt(nvv * nvv * (1.0 - a2) + a2) + nvv * sqrt(nl * nl * (1.0 - a2) + a2) + 1e-5);
+      vec3 F = spec + (vec3(1.0) - spec) * pow(1.0 - lh, 5.0);
+      term = F * max(0.0, D * vis_t * nl * 3.14159265358979) * (shadowmix * clamp(vis, 0.0, 1.0));
+    }
+    col = col + light * term;
+  }
+  if (S.l[18].y > 0.5) {
+    vec3 ec = S.l[19].xyz * X.emi.rgb;
+    float blend = clamp(S.l[18].w, 0.0, 1.0) * S.l[18].z * X.emi.a;
+    ec = mix(ec, ec * albedo, clamp(S.l[19].w, 0.0, 1.0));
+    col = lil_blend(col, ec, vec3(blend), int(S.l[20].x + 0.5));
+  }
+  return col;
+}
+/* Renderer3D::light_liltoon: the key light's direction blended with the ambient's gradient, the ambient as lilToon's SH
+ * (the baked light where there is some), the main light clamped, the other lights as ForwardAdd passes, then the
+ * finish and the environment's reflection. */
+vec3 lil_pixel(uint self, ivec2 px, uint flags, vec3 P, vec3 n, vec3 geo, vec3 albedo, vec3 V, vec4 A, int kind, float gsky, int key, vec3 keyL, int count, int shadow_light, bool receive) {
+  LilSet S = lil[self];
+  LilMaps LM = lmap[self];
+  LilPx X = lil_px(px, flags, LM.c.z > 0);
+  vec3 key_color = vec3(0.0);
+  if (key >= 0) {
+    Light kl = lights[key];
+    if (!light_skip(kl.spot.w, kind) && kl.color.w > 0.0) key_color = kl.color.rgb * kl.color.w;
+  }
+  vec3 L = lil_light_direction(keyL, lil_lum(key_color));
+  vec3 sh_max, sh_min;
+  if (kind == 1 || kind == 2 || kind == 4) sh_max = sh_min = A.rgb;
+  else {
+    lil_sh(L, sh_max, sh_min);
+    if (kind == 3) { sh_max = sh_max * gsky + A.rgb; sh_min = sh_min * gsky + A.rgb; }
+  }
+  vec3 light = lil_main_light(S, key_color, sh_max);
+  float vis = 1.0;
+  if (key_color.r + key_color.g + key_color.b > 0.0 && key == shadow_light && receive && dot(n, L) > 0.0) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
+  float shadowmix = 1.0;
+  vec3 col = lil_shade(S, X, albedo, n, L, vis, light, sh_min, true, shadowmix);
+  for (int li = 0; li < count; li++) {
+    if (li == key) continue;
+    Light l = lights[li];
+    if (light_skip(l.spot.w, kind) || !(l.color.w > 0.0)) continue;
+    vec3 Lk;
+    float fall = 1.0;
+    if (int(l.pos_type.w) == 0) Lk = -l.dir_range.xyz;
+    else {
+      vec3 dd = l.pos_type.xyz - P;
+      float dist = length(dd);
+      Lk = dist > 1e-6 ? dd / dist : vec3(0.0, 1.0, 0.0);
+      fall = falloff(l, P, Lk);
+    }
+    if (!(fall > 0.0)) continue;
+    float sv = 1.0;
+    if (li == shadow_light && receive && dot(n, Lk) > 0.0) sv = shadow_lookup(P + geo * 0.01, dot(geo, Lk));
+    vec3 lc = lil_add_light(S, l.color.rgb * (l.color.w * min(fall, 1.0)));
+    float unused = 0.0;
+    col = col + lil_shade(S, X, albedo, n, Lk, sv, lc, vec3(0.0), false, unused);
+  }
+  col = lil_finish(S, X, LM.c.y, col, albedo, n, V, L, vis, shadowmix, light);
+  if (S.l[20].y > 0.5 && S.l[20].w > 0.5) {
+    float metallic = clamp(S.l[21].z, 0.0, 1.0), pr = max(1e-3, 1.0 - clamp(S.l[21].y, 0.0, 1.0));
+    vec3 f0 = mix(vec3(clamp(S.l[21].w, 0.0, 1.0)), albedo, metallic);
+    vec3 R = n * (2.0 * dot(n, V)) - V;
+    col = col + probe_specular(P, R, pr) * env_brdf_approx(f0, pr, max(dot(n, V), 1e-4));
+  }
+  return col;
+}
 float hable(float x) {
   const float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
   return ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F;
@@ -1468,7 +1726,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
    * share, 4 live probes; 0 the sky alone); Baked lights are in a lightmap or baked probes already. */
   int kind = int(A.w * 0.25 + 1e-3);
   float gsky = A.w - float(kind) * 4.0;
-  bool skip_baked = kind == 1 || kind == 2;
+  vec3 smask = light_smask(A, kind);  // (round 444)
   vec3 V = normalize(eye.xyz - P);
   bool flipped = dot(geo, V) < 0.0;
   if (flipped) {  // the back side of a double-sided surface (as the CPU turns both normals)
@@ -1496,10 +1754,12 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     uint my_inst = self;
     vec3 n_dx = toon_neighbour(px + ivec2(1, 0), my_inst, flipped, n);
     vec3 n_dy = toon_neighbour(px + ivec2(0, 1), my_inst, flipped, n);
+    if (lil[self].l[0].x > 0.5)  // (round 416, ADR 0110: lilToon's own model)
+      return display(fog_apply(lil_pixel(self, px, flags, P, n, geo, albedo, V, A, kind, gsky, key, keyL, count, shadow_light, receive) + emission, P));
     ToonPx T = toon_px(px, flags);
     for (int li = 0; li < count; li++) {
       Light l = lights[li];
-      if (skip_baked && l.spot.w > 1.5) continue;
+      if (light_skip(l.spot.w, kind)) continue;
       vec3 L;
       float fall = 1.0;
       if (int(l.pos_type.w) == 0) L = -l.dir_range.xyz;
@@ -1514,6 +1774,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
       float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
       if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
+      vis = min(vis, light_mask(l.spot.w, kind, smask));  // (round 444)
       float face = li == key ? T.t2.y : -1.0;  // (task 0196: the face shadow map's lit term for the key light - no cast shadow on it)
       float lit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * min(fall, 1.0);
       bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
@@ -1526,11 +1787,16 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     else amb = kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
     return display(fog_apply(lo + amb * albedo + toon_rim(I, n, V, keyL) * clamp(T.t2.x, 0.0, 1.0) + emission, P));
   }
+  float sub_vis = 1.0;  // (round 444: the main Subtractive light's realtime shadow on a lightmapped pixel - subtractive_vis on the CPU)
   for (int li = 0; li < count; li++) {
     Light l = lights[li];
-    if (skip_baked && l.spot.w > 1.5) continue;
+    if (light_skip(l.spot.w, kind)) {
+      if (l.spot.w > 2.5 && l.spot.w < 3.5 && kind == 1 && li == shadow_light && receive)
+        sub_vis = min(sub_vis, shadow_lookup(P + geo * 0.01, dot(geo, int(l.pos_type.w) == 0 ? -l.dir_range.xyz : normalize(l.pos_type.xyz - P))));
+      continue;
+    }
     vec3 L;
-    float atten = l.color.w * PI;
+    float atten = l.color.w * PI * light_mask(l.spot.w, kind, smask);  // (round 444: a Shadowmask light's baked shadow - the area light's too)
     if (int(l.pos_type.w) == 3) {  // (task 0163: an area light, from its whole surface)
       if (atten > 0.0) lo += area_light_lo(l, P, n, V, albedo, rough, metallic, specular, atten);
       continue;
@@ -1553,7 +1819,16 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
   vec3 R = n * (2.0 * dot(n, V)) - V;
   vec3 spec = probe_specular(P, R, rough) * (gi.z > 0.5 ? unity_indirect_specular(f0, mix(0.08 * specular, 1.0, metallic), rough, nv) : env_brdf_approx(f0, rough, nv));  // (round 401: the reflection probes' box; round 405: Unity's weight)
   vec3 amb = kind == 1 || kind == 2 || kind == 4 ? A.rgb : kind == 3 ? irradiance(n) * gsky + A.rgb : irradiance(n);
+  if (sub_vis < 1.0) amb *= mix(vec3(0.42, 0.478, 0.627), vec3(1.0), sub_vis);  // (round 444: Unity's default Realtime Shadow Color)
   if (kind == 3) spec *= 1.0 + (gsky - 1.0) * gi.x;  // (realtime GI's sky share occludes the reflection, not over a lightmap)
+  float eo = bk[self].b.z;  // (round 429: Filamented's specular occlusion - baked_specular_occlusion on the CPU, every ambient)
+  if (eo > 0.0) {
+    float ao = clamp(length(amb) / eo, 0.0, 1.0);
+    float pr = clamp(rough, 0.045, 1.0), ar = pr * pr;
+    float v = clamp(pow(nv + ao, exp2(-16.0 * ar - 1.0)) - 1.0 + ao, 0.0, 1.0);
+    vec3 a3 = 2.0404 * f0 - 0.3324, b3 = -4.7951 * f0 + 0.6417, c3 = 2.7552 * f0 + 0.6903;
+    spec *= max(vec3(v), ((v * a3 + b3) * v + c3) * v);
+  }
   return display(fog_apply(lo + amb * albedo * (1.0 - metallic) + spec + emission, P));
 }
 )";
@@ -1562,7 +1837,8 @@ const char *kProbeFns = R"(
 /* Task 0197: the probe volume (ProbeVolumeData::find_brick and sample, probe_volume.cpp), packed by the editor
  * (probe_pack): pv[0] origin, top cell; pv[1] top cells (x, y, z), nodes' start; pv[2] bricks', probes', roots' starts.
  * A node: (min, first child), (max, brick); a brick: (min, spacing), (first probe); a probe: (position, valid + 2 x
- * live ok), its baked cube's six axes (bounce, sky share), its live cube's; the roots four to a vec4. */
+ * live ok), its baked cube's six axes (bounce, sky share), its live cube's; the roots four to a vec4. Round 442: pv[3].x
+ * the start of each probe's L2 SH (7 rows: 27 floats, coefficient k's rgb at 3k), 0 with none. */
 int probe_brick(vec3 p) {
   if (pv.length() < 3) return -1;
   vec4 h0 = pv[0];
@@ -1589,9 +1865,19 @@ int probe_brick(vec3 p) {
   return -1;
 }
 /* A probe's cube at the axes facing n, weighted by n squared: (bounce, sky share). */
-vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2) {
+vec4 probe_cube(int i, bool live, int ax, int ay, int az, float nx2, float ny2, float nz2, vec3 n) {
   int base = floatBitsToInt(pv[2].y) + i * 13 + (live ? 7 : 1);
-  return pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
+  vec4 cube = pv[base + ax] * nx2 + pv[base + ay] * ny2 + pv[base + az] * nz2;
+  int sh_at = floatBitsToInt(pv[3].x);
+  if (live || sh_at <= 0) return cube;
+  /* Round 442: the baked light from geometry as L2 SH (ProbeSH::eval), the sky share kept from the cube. */
+  float y[9] = float[9](0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x, 1.092548 * n.x * n.y, 1.092548 * n.y * n.z,
+                        0.315392 * (3.0 * n.z * n.z - 1.0), 1.092548 * n.x * n.z, 0.546274 * (n.x * n.x - n.y * n.y));
+  int r0 = sh_at + i * 7;  // (27 floats in 7 rows: coefficient k's rgb at floats 3k..3k+2)
+  vec4 q0 = pv[r0], q1 = pv[r0 + 1], q2 = pv[r0 + 2], q3 = pv[r0 + 3], q4 = pv[r0 + 4], q5 = pv[r0 + 5], q6 = pv[r0 + 6];
+  vec3 b = q0.xyz * y[0] + vec3(q0.w, q1.xy) * y[1] + vec3(q1.zw, q2.x) * y[2] + q2.yzw * y[3] + q3.xyz * y[4] + vec3(q3.w, q4.xy) * y[5] +
+           vec3(q4.zw, q5.x) * y[6] + q5.yzw * y[7] + q6.xyz * y[8];
+  return vec4(max(b, vec3(0.0)), cube.w);
 }
 bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out vec3 o) {
   o = vec3(0.0);
@@ -1631,7 +1917,7 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
         w *= max(1e-4, f * f * f);
       }
     }
-    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2);
+    vec4 cb = probe_cube(i, use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
     acc += cb.rgb * w;
     sky += cb.w * w;
     wsum += w;
@@ -1642,7 +1928,7 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
     sky = 0.0;
     for (int k = 0; k < nvalid; k++) {
       int fl = floatBitsToInt(pv[floatBitsToInt(pv[2].y) + valid_i[k] * 13].w);
-      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2);
+      vec4 cb = probe_cube(valid_i[k], use_live && (fl & 2) != 0, ax, ay, az, nx2, ny2, nz2, n);
       acc += cb.rgb;
       sky += cb.w;
     }
@@ -1650,6 +1936,52 @@ bool probe_sample(vec3 p, vec3 n, vec3 sky_irr, bool use_live, bool leak, out ve
   }
   o = acc / wsum + sky_irr * (sky / wsum);
   return !any(isnan(o)) && !any(isinf(o));
+}
+
+/* Round 443 (task 0419): the baked VRC Light Volumes (LightVolumeFrame::sample, light_volume_bake.cpp), packed after the
+ * probe volume by light_volume_pack: pv[2].w the section's start (0 none); there, the count, then per volume nine vec4
+ * (the inverse world's rows, the edge blend and additive, the grid and its voxels' start, the tint, the normal's rows),
+ * then four vec4 a voxel (L0, L1 r, g, b). Each volume's weight is LV_BoundsMask; the light is L0 + L1 . n of the
+ * trilinear voxels; `cover` is the share of the weight the volumes took (the probes take the rest). */
+bool lv_sample(vec3 p, vec3 n, out vec3 light, out float cover) {
+  light = vec3(0.0);
+  cover = 0.0;
+  if (pv.length() < 3) return false;
+  int base = floatBitsToInt(pv[2].w);
+  if (base <= 0 || base >= pv.length()) return false;
+  int count = min(floatBitsToInt(pv[base].x), 32);
+  float left = 1.0;
+  bool any_in = false;
+  for (int k = 0; k < count; k++) {
+    int h = base + 1 + k * 9;
+    vec3 local = vec3(dot(pv[h].xyz, p) + pv[h].w, dot(pv[h + 1].xyz, p) + pv[h + 1].w, dot(pv[h + 2].xyz, p) + pv[h + 2].w);
+    vec4 e = pv[h + 3];
+    vec3 fade = clamp(min((local + 0.5) * e.xyz, (0.5 - local) * e.xyz), 0.0, 1.0);
+    float m = fade.x * fade.y * fade.z;
+    if (!(m > 0.0)) continue;
+    any_in = true;
+    ivec4 g = floatBitsToInt(pv[h + 4]);
+    vec3 f = clamp(clamp(local + 0.5, 0.0, 1.0) * vec3(g.xyz) - 0.5, vec3(0.0), vec3(g.xyz - 1));
+    ivec3 i0 = min(ivec3(f), g.xyz - 1), i1 = min(i0 + 1, g.xyz - 1);
+    vec3 t = f - vec3(i0);
+    vec3 l0 = vec3(0.0), l1r = vec3(0.0), l1g = vec3(0.0), l1b = vec3(0.0);
+    for (int c = 0; c < 8; c++) {
+      ivec3 q = ivec3((c & 1) != 0 ? i1.x : i0.x, (c & 2) != 0 ? i1.y : i0.y, (c & 4) != 0 ? i1.z : i0.z);
+      float w = ((c & 1) != 0 ? t.x : 1.0 - t.x) * ((c & 2) != 0 ? t.y : 1.0 - t.y) * ((c & 4) != 0 ? t.z : 1.0 - t.z);
+      int v = base + g.w + 4 * (q.x + g.x * (q.y + g.y * q.z));
+      l0 += pv[v].xyz * w, l1r += pv[v + 1].xyz * w, l1g += pv[v + 2].xyz * w, l1b += pv[v + 3].xyz * w;
+    }
+    vec3 nn = vec3(dot(pv[h + 6].xyz, n), dot(pv[h + 7].xyz, n), dot(pv[h + 8].xyz, n));
+    vec3 c = max(vec3(l0.r + dot(l1r, nn), l0.g + dot(l1g, nn), l0.b + dot(l1b, nn)), vec3(0.0)) * pv[h + 5].xyz;
+    if (e.w > 0.5) {
+      light += c * m;
+      continue;
+    }
+    light += c * (m * left);
+    left *= 1.0 - m;  // (no break at 0: a larger Additive volume still adds its light - review 443)
+  }
+  cover = 1.0 - left;
+  return any_in;
 }
 )";
 
@@ -1696,6 +2028,9 @@ layout(location = 8) in vec3 gc;
 layout(location = 0) out vec4 o_t0;
 layout(location = 1) out vec4 o_t1;
 layout(location = 2) out vec4 o_t2;
+layout(location = 3) out vec4 o_t3;  // round 416: lilToon's rim map
+layout(location = 4) out vec4 o_t4;  // its backlight map
+layout(location = 5) out vec4 o_t5;  // its emission map, the alpha times its mask
 /* toon_face_lit (shading.cpp): the face map's threshold against the key light's angle round the face's up axis. */
 float face_lit(ToonMaps T, float sdf, float mirror, vec3 lk) {
   vec3 fwd = vec3(0.0, 0.0, 1.0), right = vec3(1.0, 0.0, 0.0);
@@ -1742,6 +2077,25 @@ void main() {
   if (I.metal_spec.z >= 0.0) {  // (a cutout's hole: as the g-buffer pass punched it)
     Surf s = evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0, fp, wpos, 0.0);
     if (s.alpha < I.metal_spec.z) discard;
+  }
+  o_t3 = vec4(1.0), o_t4 = vec4(1.0), o_t5 = vec4(1.0);
+  LilMaps LM = lmap[ii];
+  if (LM.c.z > 0) {  // (round 416: lilToon's maps in the planes, in place of the generic toon maps it doesn't read)
+    o_t0 = LM.a.x >= 0 ? sample_at(I, M, LM.a.x) : vec4(0.0);
+    o_t1 = LM.a.y >= 0 ? sample_at(I, M, LM.a.y) : vec4(0.0);
+    vec4 masks = vec4(1.0);
+    if (LM.a.z >= 0) masks.x = sample_at(I, M, LM.a.z).x;
+    if (LM.a.w >= 0) masks.yz = sample_at(I, M, LM.a.w).xy;
+    if (LM.b.w >= 0) masks.w = sample_at(I, M, LM.b.w).x;
+    if (isnan(masks.x) || isinf(masks.x)) masks.x = 1.0;
+    o_t2 = masks;
+    if (LM.b.x >= 0) o_t3 = sample_at(I, M, LM.b.x);
+    if (LM.b.y >= 0) o_t4 = sample_at(I, M, LM.b.y);
+    vec4 em = LM.b.z >= 0 ? sample_at(I, M, LM.b.z) : vec4(1.0);
+    float emask = LM.c.x >= 0 ? sample_at(I, M, LM.c.x).x : 1.0;
+    if (isnan(emask) || isinf(emask)) emask = 1.0;
+    o_t5 = vec4(em.rgb, em.a * emask);
+    return;
   }
   vec4 t0 = vec4(-1.0, -1.0, -1.0, 0.5), t1 = vec4(1.0), t2 = vec4(1.0, -1.0, 4.0, 0.0);
   if (T.a.x >= 0) t0.rgb = sample_at(I, M, T.a.x).rgb;
@@ -1797,6 +2151,28 @@ layout(location = 8) in vec3 gc;
 layout(location = 0) out vec4 o_amb;
 /* Lightmap::sample: bilinear, clamped, texel centres at (i + 0.5) / size (v down: the arena's rows run up). */
 vec3 lightmap_at(int t, vec2 uv) { return tex_sample(t, vec2(uv.x, 1.0 - uv.y), 0.0, 1, 1).rgb; }
+/* The material at this pixel, as the g-buffer pass evaluates it (its footprints: the same holes, the same mapped normal). */
+Surf surface_here(Inst I, vec3 n) {
+  vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
+  if (I.tex2.y != 0) {
+    vec3 ex = dFdxFine(uvw), ey = dFdyFine(uvw);
+    uv = uvw.xy / uvw.z;
+    dux = (uvw.xy + ex.xy) / (uvw.z + ex.z) - uv;
+    duy = (uvw.xy + ey.xy) / (uvw.z + ey.z) - uv;
+  }
+  float fp = max(length(dFdxFine(lp)), length(dFdyFine(lp))), fpw = max(length(dFdxFine(wpos)), length(dFdyFine(wpos)));
+  return evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0, fp, wpos, fpw);
+}
+/* Round 426: lightmap_direction_factor on the CPU (shading.h). */
+float lm_dir_factor(vec3 sn, vec3 n, vec3 a, bool back) {
+  if (back) {
+    sn = -sn;
+    n = -n;
+  }
+  float den = 0.5 * dot(n, a) + 0.5;
+  if (!(den > 0.05)) return 1.0;
+  return clamp((0.5 * dot(sn, a) + 0.5) / den, 0.0, 4.0);
+}
 /* The point's barycentrics in its triangle (the CPU's perspective-correct ones: lp is interpolated so). */
 vec3 bary(vec3 p, vec3 a, vec3 b, vec3 c) {
   vec3 v0 = b - a, v1 = c - a, v2 = p - a;
@@ -1814,19 +2190,12 @@ void main() {
   g = dot(g, g) > 0.0 ? normalize(g) : n;
   if (dot(g, n) < 0.0) g = -g;
   vec3 V = normalize(eye.xyz - wpos);
-  if (dot(g, V) < 0.0) n = -n;  // (the back side: turned to the eye, as the CPU turns it)
-  if (I.metal_spec.z >= 0.0) {  // (a cutout's hole: as the g-buffer pass punched it)
-    vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
-    if (I.tex2.y != 0) {
-      vec3 ex = dFdxFine(uvw), ey = dFdyFine(uvw);
-      uv = uvw.xy / uvw.z;
-      dux = (uvw.xy + ex.xy) / (uvw.z + ex.z) - uv;
-      duy = (uvw.xy + ey.xy) / (uvw.z + ey.z) - uv;
-    }
-    float fp = max(length(dFdxFine(lp)), length(dFdyFine(lp))), fpw = max(length(dFdxFine(wpos)), length(dFdyFine(wpos)));
-    Surf s = evaluate(I, n, uv, dux, duy, lp, normalize(ln), vec4(normalize(wt), tw), I.tex2.z != 0, fp, wpos, fpw);  // (the g-buffer pass's footprints: the same holes)
-    if (s.alpha < I.metal_spec.z) discard;
-  }
+  bool back = dot(g, V) < 0.0;
+  if (back) n = -n;  // (the back side: turned to the eye, as the CPU turns it)
+  bool directional = B.b.y >= 0.0 && B.a.x >= 0;  // (round 426: a direction page beside the lightmap)
+  Surf s;
+  if (I.metal_spec.z >= 0.0 || directional) s = surface_here(I, n);
+  if (I.metal_spec.z >= 0.0 && s.alpha < I.metal_spec.z) discard;  // (a cutout's hole: as the g-buffer pass punched it)
   vec4 o = vec4(0.0);
   int flags = int(B.b.x + 0.5);
   bool has_lm = B.a.x >= 0 && B.a.w >= 0, has_rt = B.a.y >= 0 && B.a.z >= 0 && B.a.w >= 0;
@@ -1842,17 +2211,32 @@ void main() {
     b3 = bary(lp, c[0].xyz, c[2].xyz, c[4].xyz);
   }
   vec3 lm = vec3(0.0);
-  if (has_lm) lm = lightmap_at(B.a.x, vec2(c[0].w, c[1].x) * b3.x + vec2(c[2].w, c[3].x) * b3.y + vec2(c[4].w, c[5].x) * b3.z);
+  float mcode = 0.0;  // (round 444: the shadowmask's three channels, 6 bits each, in the plane's w beside the kind)
+  if (has_lm) {
+    vec2 luv = vec2(c[0].w, c[1].x) * b3.x + vec2(c[2].w, c[3].x) * b3.y + vec2(c[4].w, c[5].x) * b3.z;
+    lm = lightmap_at(B.a.x, luv);
+    if (directional) lm *= lm_dir_factor(s.n, n, lightmap_at(int(B.b.y + 0.5), luv), back);
+    if (B.b.w > -0.5) {
+      vec3 m = clamp(lightmap_at(int(B.b.w + 0.5), luv), 0.0, 1.0);
+      mcode = (floor(m.r * 63.0 + 0.5) + floor(m.g * 63.0 + 0.5) * 64.0 + floor(m.b * 63.0 + 0.5) * 4096.0 + 262144.0) / 524288.0;
+    }
+  }
   if (has_rt) {
     vec2 ruv = c[1].yz * b3.x + c[3].yz * b3.y + c[5].yz * b3.z;
     float sky = clamp(lightmap_at(B.a.z, ruv).x, 0.0, 1.0);
     vec3 bounce = lightmap_at(B.a.y, ruv);
-    o = has_lm ? vec4(lm + ((flags & 2) != 0 ? bounce : vec3(0.0)), 4.0) : vec4(bounce, 12.0 + sky);
+    o = has_lm ? vec4(lm + ((flags & 2) != 0 ? bounce : vec3(0.0)), 4.0 + mcode) : vec4(bounce, 12.0 + sky);
   }
-  else if (has_lm) o = vec4(lm, 4.0);
+  else if (has_lm) o = vec4(lm, 4.0 + mcode);
   else if ((flags & 1) != 0) {
-    vec3 pr;
-    if (probe_sample(wpos + n * probe.x + V * probe.y, n, irradiance(n), probe.w > 0.5, probe.z > 0.5, pr)) o = vec4(pr, probe.w > 0.5 ? 16.0 : 8.0);
+    vec3 pr, lv;
+    float cover;
+    bool has_probe = probe_sample(wpos + n * probe.x + V * probe.y, n, irradiance(n), probe.w > 0.5, probe.z > 0.5, pr);
+    if (has_probe) o = vec4(pr, probe.w > 0.5 ? 16.0 : 8.0);
+    if (lv_sample(wpos, n, lv, cover)) {  // (round 443: a Light Volume's light where it holds the point, the probes' or the sky's in what it leaves)
+      bool baked = cover >= 0.5 || (has_probe && probe.w <= 0.5);
+      o = vec4(lv + (has_probe ? pr : irradiance(n)) * (1.0 - cover), baked ? 8.0 : 16.0);
+    }
   }
   o_amb = o;
 }
@@ -1944,6 +2328,7 @@ void main() {
     if (shadow.w < 0.5) specular = s.spec;  // (Solid shading keeps the object's, as shade() takes it)
   }
   if (hidden) discard;  // (behind what the g-buffer holds: the CPU's z >= depth)
+  if (I.tex2.w != 0 && lil[ii].l[0].x > 0.5 && lil[ii].l[23].w > 0.5) albedo = lil_tone(albedo, lil[ii].l[23].xyz, lil[ii].l[22].w);  // (round 416: lilToon's HSVG; a uniform material's base came toned from the CPU)
   float a = clamp(alpha, 0.0, 1.0);
   bool glass = I.toon5.z == 3;
   if (!glass && a <= 0.002) discard;
@@ -1976,6 +2361,160 @@ void main() {
 }
 )";
 
+
+/* Round 416 (ADR 0110): the camera's filters over the picture - camera_filter.cpp's formulas, a full-screen pass each.
+ * p_src: the picture so far (8-bit) or the bloom pyramid's level above; p_hdr: the linear-light plane; p_aux: the
+ * pyramid's other level or the glow. pc.a-e: the pass's settings (see record_post). */
+const char *kPostFrag = R"(
+layout(set = 1, binding = 0) uniform sampler2D p_src;
+layout(set = 1, binding = 1) uniform sampler2D p_hdr;
+layout(set = 1, binding = 2) uniform sampler2D p_aux;
+layout(push_constant) uniform Post { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; } pc;
+layout(location = 0) out vec4 o_color;
+ivec2 clamp_to(sampler2D s, ivec2 q) { return clamp(q, ivec2(0), textureSize(s, 0) - 1); }
+vec3 src8(ivec2 q) { return texelFetch(p_src, clamp_to(p_src, q), 0).rgb; }
+float byte_of(float c) { return floor(c * 255.0 + 0.5); }
+vec3 bytes_of(vec3 c) { return vec3(byte_of(c.r), byte_of(c.g), byte_of(c.b)); }
+vec3 lin8(vec3 c) { return vec3(srgb_dec(c.r), srgb_dec(c.g), srgb_dec(c.b)); }  // (the CPU's srgb_decode_table on the byte)
+vec3 enc8(vec3 c) { return vec3(srgb(max(c.r, 0.0)), srgb(max(c.g, 0.0)), srgb(max(c.b, 0.0))); }  // (linear_to_srgb8: the attachment rounds)
+/* The pixel's colour is still what its linear light encodes (nothing drew over it): within a step, since the card's
+ * encode and the CPU's agree to a step. */
+bool current_at(ivec2 q, vec3 col8, out vec3 h) {
+  vec4 hv = texelFetch(p_hdr, clamp_to(p_hdr, q), 0);
+  h = hv.rgb;
+  if (hv.x < 0.0) return false;
+  vec3 e = floor(display(hv.rgb).rgb * 255.0 + 0.5);
+  return all(lessThanEqual(abs(e - col8 * 255.0), vec3(1.001)));  // (camera_filter.cpp's within_step)
+}
+/* A float plane read bilinear at a pixel-space point (centres at + 0.5), clamped - camera_filter.cpp's Plane::bilinear. */
+vec3 plane_at(sampler2D s, int x, int y) { return texelFetch(s, clamp_to(s, ivec2(x, y)), 0).rgb; }
+vec3 plane_bilinear(sampler2D s, float fx, float fy) {
+  fx -= 0.5, fy -= 0.5;
+  int x0 = int(floor(fx)), y0 = int(floor(fy));
+  float tx = fx - float(x0), ty = fy - float(y0);
+  return (plane_at(s, x0, y0) * (1.0 - tx) + plane_at(s, x0 + 1, y0) * tx) * (1.0 - ty) + (plane_at(s, x0, y0 + 1) * (1.0 - tx) + plane_at(s, x0 + 1, y0 + 1) * tx) * ty;
+}
+/* hash3 (camera_filter.cpp): the film grain's pattern. */
+uint grain_hash(uint a, uint b, uint c) {
+  uint h = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u) * 0x85EBCA77u ^ (c + 0x165667B1u) * 0xC2B2AE3Du;
+  h ^= h >> 15; h *= 0x2C1B3C6Du; h ^= h >> 12; h *= 0x297A2D39u;
+  return h ^ (h >> 15);
+}
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec2 size = vec2(textureSize(p_src, 0));
+#if defined(BL_POST_VIGNETTE)
+  /* a: intensity, smoothness, roundness, aspect; b: the colour (display, 0..1). */
+  vec3 col = src8(q);
+  float sm = max(0.01, min(1.0, pc.a.y)), rd = clamp(pc.a.z, 0.0, 1.0);
+  float ax = 1.0 + (pc.a.w - 1.0) * rd, corner = sqrt(ax * ax + 1.0);
+  float dx = ((float(q.x) + 0.5) / size.x * 2.0 - 1.0) * ax, dy = (float(q.y) + 0.5) / size.y * 2.0 - 1.0;
+  float r = sqrt(dx * dx + dy * dy) / corner;
+  float t = clamp((r - (1.0 - sm)) / sm, 0.0, 1.0);
+  t = t * t * (3.0 - 2.0 * t) * pc.a.x;
+  if (t <= 0.0) { o_color = vec4(col, 1.0); return; }
+  vec3 p8 = bytes_of(col), c8 = bytes_of(pc.b.rgb);
+  o_color = vec4(clamp(floor(p8 + (c8 - p8) * t + 0.5), 0.0, 255.0) / 255.0, 1.0);
+#elif defined(BL_POST_GRADE)
+  /* a: exposure gain, contrast, saturation + 1, the linear-light path on (exposure not 1); b: white balance, lift / gamma / gain on; c lift, d gamma, e gain. */
+  vec3 col = src8(q);
+  vec3 h;
+  bool thr = pc.a.w > 0.5 && current_at(q, col, h);
+  if (thr) col = floor(display(h * pc.a.x).rgb * 255.0 + 0.5) / 255.0;  // (re-encoded through the view transform, as the CPU's 8-bit row)
+  vec3 c = lin8(col) * pc.b.rgb * (thr ? 1.0 : pc.a.x);
+  if (pc.a.y != 0.0) c = vec3(c.r > 0.0 ? 0.18 * pow(c.r / 0.18, 1.0 + pc.a.y) : 0.0, c.g > 0.0 ? 0.18 * pow(c.g / 0.18, 1.0 + pc.a.y) : 0.0, c.b > 0.0 ? 0.18 * pow(c.b / 0.18, 1.0 + pc.a.y) : 0.0);
+  if (pc.a.z != 1.0) { float y = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b; c = vec3(y) + (c - vec3(y)) * pc.a.z; }
+  if (pc.b.w > 0.5) {
+    vec3 v = max(c, vec3(0.0));
+    v = pc.e.rgb * (v + pc.c.rgb * (vec3(1.0) - v));
+    c = vec3(v.r > 0.0 ? pow(v.r, 1.0 / pc.d.r) : 0.0, v.g > 0.0 ? pow(v.g, 1.0 / pc.d.g) : 0.0, v.b > 0.0 ? pow(v.b, 1.0 / pc.d.b) : 0.0);
+  }
+  o_color = vec4(enc8(c), 1.0);
+#elif defined(BL_POST_CHROMA)
+  /* a: the spread in pixels. Red lands outward and blue inward, more toward the edges; the channels read bilinear from the picture as it was. */
+  vec3 col = src8(q);
+  float W = size.x, H = size.y;
+  float cx = float(q.x) + 0.5, cy = float(q.y) + 0.5, dx = (cx / W - 0.5) * pc.a.x, dy = (cy / H - 0.5) * pc.a.x;
+  float rr, bb;
+  {
+    float fx = clamp(cx + dx, -1.0, W) - 0.5, fy = clamp(cy + dy, -1.0, H) - 0.5;
+    int x0 = int(floor(fx)), y0 = int(floor(fy));
+    float tx = fx - float(x0), ty = fy - float(y0);
+    rr = (byte_of(src8(ivec2(x0, y0)).r) * (1.0 - tx) + byte_of(src8(ivec2(x0 + 1, y0)).r) * tx) * (1.0 - ty) + (byte_of(src8(ivec2(x0, y0 + 1)).r) * (1.0 - tx) + byte_of(src8(ivec2(x0 + 1, y0 + 1)).r) * tx) * ty;
+  }
+  {
+    float fx = clamp(cx - dx, -1.0, W) - 0.5, fy = clamp(cy - dy, -1.0, H) - 0.5;
+    int x0 = int(floor(fx)), y0 = int(floor(fy));
+    float tx = fx - float(x0), ty = fy - float(y0);
+    bb = (byte_of(src8(ivec2(x0, y0)).b) * (1.0 - tx) + byte_of(src8(ivec2(x0 + 1, y0)).b) * tx) * (1.0 - ty) + (byte_of(src8(ivec2(x0, y0 + 1)).b) * (1.0 - tx) + byte_of(src8(ivec2(x0 + 1, y0 + 1)).b) * tx) * ty;
+  }
+  o_color = vec4(clamp(floor(rr + 0.5), 0.0, 255.0) / 255.0, col.g, clamp(floor(bb + 0.5), 0.0, 255.0) / 255.0, 1.0);
+#elif defined(BL_POST_GRAIN)
+  /* a: intensity, the cell in pixels, response, the seed. */
+  vec3 p8 = bytes_of(src8(q));
+  float l = (0.2126 * p8.r + 0.7152 * p8.g + 0.0722 * p8.b) / 255.0;
+  float w = 1.0 + (4.0 * l * (1.0 - l) - 1.0) * pc.a.z;
+  int cell = max(1, int(pc.a.y));
+  float n = float(grain_hash(uint(q.x / cell), uint(q.y / cell), floatBitsToUint(pc.a.w)) & 0xFFFFu) / 65535.0 - 0.5;  // (the seed travels as its bits)
+  float d = n * pc.a.x * 96.0 * w;
+  o_color = vec4(clamp(floor(p8 + d + 0.5), 0.0, 255.0) / 255.0, 1.0);
+#elif defined(BL_POST_BRIGHT)
+  /* a: threshold, knee, cap, the exposure's gain. The linear light before exposure (the plane where it is lit, else the
+   * picture decoded) through the bright pass with the soft knee. */
+  vec3 col = src8(q);
+  vec4 hv = texelFetch(p_hdr, clamp_to(p_hdr, q), 0);
+  vec3 c = hv.x >= 0.0 ? hv.rgb : lin8(col) / pc.a.w;
+  c = vec3(isnan(c.r) || isinf(c.r) ? 0.0 : max(c.r, 0.0), isnan(c.g) || isinf(c.g) ? 0.0 : max(c.g, 0.0), isnan(c.b) || isinf(c.b) ? 0.0 : max(c.b, 0.0));  // (the CPU zeroes light that isn't finite)
+  float b = max(c.r, max(c.g, c.b));
+  if (b <= pc.a.x - pc.a.y) { o_color = vec4(0.0, 0.0, 0.0, 1.0); return; }
+  float soft = max(0.0, min(2.0 * pc.a.y, b - pc.a.x + pc.a.y));
+  soft = soft * soft / (4.0 * pc.a.y + 1e-5);
+  float k = max(soft, b - pc.a.x) / max(b, 1e-5);
+  c = min(c * max(k, 0.0), vec3(pc.a.z));
+  o_color = vec4(c, 1.0);
+#elif defined(BL_POST_BASE)
+  /* The pyramid's base at the reference size: area-averaged where the picture is larger, bilinear where smaller. */
+  int W = int(pc.a.x), H = int(pc.a.y), bw = int(pc.a.z), bh = int(pc.a.w);
+  vec3 c = vec3(0.0);
+  if (W > bw || H > bh) {  // (the box in whole texels, exactly: floor and ceiling of x W / bw as integers)
+    int ax = (q.x * W) / bw, bx = max(ax + 1, min(W, ((q.x + 1) * W + bw - 1) / bw)), ay = (q.y * H) / bh, by = max(ay + 1, min(H, ((q.y + 1) * H + bh - 1) / bh));
+    for (int yy = ay; yy < by; yy++)
+      for (int xx = ax; xx < bx; xx++) c += plane_at(p_src, xx, yy);
+    c /= float((bx - ax) * (by - ay));
+  }
+  else c = plane_bilinear(p_src, (float(2 * q.x + 1) * float(W)) / (2.0 * float(bw)), (float(2 * q.y + 1) * float(H)) / (2.0 * float(bh)));
+  o_color = vec4(c, 1.0);
+#elif defined(BL_POST_DOWN)
+  /* Half the size with the 13-tap filter (downsample13). */
+  float cx = (float(q.x) + 0.5) * 2.0, cy = (float(q.y) + 0.5) * 2.0;
+  vec3 a = plane_bilinear(p_src, cx - 2.0, cy - 2.0), b = plane_bilinear(p_src, cx, cy - 2.0), c = plane_bilinear(p_src, cx + 2.0, cy - 2.0);
+  vec3 d = plane_bilinear(p_src, cx - 1.0, cy - 1.0), e = plane_bilinear(p_src, cx + 1.0, cy - 1.0);
+  vec3 f = plane_bilinear(p_src, cx - 2.0, cy), g = plane_bilinear(p_src, cx, cy), h = plane_bilinear(p_src, cx + 2.0, cy);
+  vec3 i = plane_bilinear(p_src, cx - 1.0, cy + 1.0), j = plane_bilinear(p_src, cx + 1.0, cy + 1.0);
+  vec3 k = plane_bilinear(p_src, cx - 2.0, cy + 2.0), l = plane_bilinear(p_src, cx, cy + 2.0), m = plane_bilinear(p_src, cx + 2.0, cy + 2.0);
+  o_color = vec4((d + e + i + j) * 0.125 + (a + b + f + g) * 0.03125 + (b + c + g + h) * 0.03125 + (f + g + k + l) * 0.03125 + (g + h + l + m) * 0.03125, 1.0);
+#elif defined(BL_POST_UP)
+  /* Back up the pyramid: this level (p_src) mixed with the tent-filtered level below (p_aux) by Scatter. a: scatter, the level below's scale x, y. */
+  float fx = (float(q.x) + 0.5) * pc.a.y, fy = (float(q.y) + 0.5) * pc.a.z;
+  vec3 tent = (plane_bilinear(p_aux, fx - 0.5, fy - 0.5) + plane_bilinear(p_aux, fx + 0.5, fy - 0.5) + plane_bilinear(p_aux, fx - 0.5, fy + 0.5) + plane_bilinear(p_aux, fx + 0.5, fy + 0.5)) * 0.25;
+  vec3 high = plane_at(p_src, q.x, q.y);
+  o_color = vec4(high + (tent - high) * pc.a.x, 1.0);
+#elif defined(BL_POST_ADD)
+  /* The glow (p_aux, the pyramid's base) added: a pixel still as shaded is encoded again from its linear light; one an
+   * earlier pass changed takes the glow in display light; one the glow doesn't reach keeps its value. a: the glow's
+   * scale x, y, intensity, the exposure's gain; b: the tint. */
+  vec3 col = src8(q);
+  vec3 add = plane_bilinear(p_aux, (float(q.x) + 0.5) * pc.a.x, (float(q.y) + 0.5) * pc.a.y) * pc.b.rgb * pc.a.z;
+  if (!(add.r > 1e-6 || add.g > 1e-6 || add.b > 1e-6)) { o_color = vec4(col, 1.0); return; }
+  vec3 h;
+  if (current_at(q, col, h)) o_color = vec4(display(h + add).rgb, 1.0);
+  else o_color = vec4(enc8(lin8(col) + add * pc.a.w), 1.0);
+#else
+  o_color = vec4(src8(q), 1.0);
+#endif
+}
+)";
+
 /* ---------------------------------------------------------------- the device */
 
 struct Buf {
@@ -2001,12 +2540,19 @@ struct Slot {
   Img shadow, normal, albedo, geo, emit, ids, inst, depth, color;
   VkFramebuffer fb_shadow = VK_NULL_HANDLE, fb_gbuf = VK_NULL_HANDLE, fb_light = VK_NULL_HANDLE;
   VkFramebuffer fb_ids = VK_NULL_HANDLE;  // task 0195: the see-through pass's ids and instances
-  Img toon[3];                            // task 0196: the toon pass's planes (made when first needed: most views have no toon maps)
+  Img toon[6];                            // task 0196: the toon pass's planes (made when first needed: most views have no toon maps); round 416: three more for lilToon's maps
   VkFramebuffer fb_toon = VK_NULL_HANDLE;
   Img amb;                                // task 0197: the baked pass's plane (made when first needed)
   VkFramebuffer fb_baked = VK_NULL_HANDLE;
   Img hdr;                                // task 0197: the picture in linear light (made when first needed)
   VkFramebuffer fb_hdr = VK_NULL_HANDLE;
+  /* Round 416: the filters' images (made when first needed) - the picture's other half of a ping-pong, the bloom's
+   * bright plane and its pyramid, two of each level; their framebuffers; the passes' descriptor sets, one a pass. */
+  Img post, bright, mips[2][12];
+  int mip_levels = 0;
+  VkFramebuffer fb_post = VK_NULL_HANDLE, fb_bright = VK_NULL_HANDLE, fb_mips[2][12] = {};
+  std::vector<VkDescriptorSet> post_sets;
+  size_t post_sets_used = 0;
   VkDescriptorSet set = VK_NULL_HANDLE;
 };
 
@@ -2117,7 +2663,7 @@ class VulkanRaster final : public Raster {
     if (!make_buffer(ubo_, sizeof(FrameUbo), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(inst_buf_, 1024 * sizeof(InstGpu), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     if (!make_buffer(hl_buf_, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
-    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_})  // (tasks 0192, 0195-0197)
+    for (Buf *b : {&ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_})  // (tasks 0192, 0195-0197; round 416)
       if (!make_buffer(*b, 4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host_props())) return fail(err, "out of memory");
     /* (A placeholder until a view needs one: the set must always hold a buffer there.) */
     /* (Placeholders until something needs them: the sets must always hold a buffer. SRC too: a tiny texture fits the
@@ -2225,6 +2771,7 @@ class VulkanRaster final : public Raster {
   bool can_draw_baked() const override { return pl_baked_[0] && pl_baked_[1] && pl_baked_[2]; }
   bool can_draw_hdr() const override { return pl_hdr_ != VK_NULL_HANDLE; }
   bool can_draw_see_through_hdr() const override { return pl_see_hdr_ != VK_NULL_HANDLE; }  // (round 414)
+  bool can_draw_post() const override { return post_ok_; }  // (round 416)
   /* Task 0197: the slot's last picture in linear light, rgba per pixel (x -1: none there), read back on its own. */
   bool read_hdr(int slot, float *rgba, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
@@ -2466,6 +3013,7 @@ class VulkanRaster final : public Raster {
     const bool baked = can_draw_baked() && std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return in.baked; });
     if (baked && !baked_targets(sl, err)) return false;
     if (fr.want_hdr && (!can_draw_hdr() || !hdr_targets(sl, err))) return fail(err, err && !err->empty() ? *err : "no linear-light pass");
+    if (!fr.post.empty() && !post_ok_) return fail(err, "no filter passes on the card");
     for (const RasterInstance &in : instances_)
       if ((uint64_t)in.first_index + in.index_count > meshes_[in.mesh].indices) return fail(err, "an instance's part past its mesh");
     for (const RasterInstance &in : instances_)
@@ -2481,7 +3029,7 @@ class VulkanRaster final : public Raster {
     draw_pass(rp_gbuf_, sl.fb_gbuf, fr.width, fr.height, sl.set, 7, DrawGbuffer, fr.cull_backfaces);
     barrier();
     if (toon) {  // (task 0196: the toon objects' painted maps, at the pixels they won)
-      draw_pass(rp_toon_, sl.fb_toon, fr.width, fr.height, sl.set, 4, DrawToon, fr.cull_backfaces);
+      draw_pass(rp_toon_, sl.fb_toon, fr.width, fr.height, sl.set, 7, DrawToon, fr.cull_backfaces);  // (round 416: six planes and the depth)
       barrier();
     }
     if (baked) {  // (task 0197: the baked-lit objects' ambient source, at the pixels they won)
@@ -2520,6 +3068,7 @@ class VulkanRaster final : public Raster {
       f_.vkCmdEndRenderPass(cmd_);
       barrier();
     }
+    if (!fr.post.empty() && post_ok_ && !record_post(fr, sl, err)) return false;  // (round 416: the camera's filters over the picture)
     stamp(3);
     return true;
   }
@@ -3101,8 +3650,18 @@ class VulkanRaster final : public Raster {
   VkPipeline pl_baked_[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};  // task 0197: the baked pass
   VkPipeline pl_hdr_ = VK_NULL_HANDLE;    // task 0197: the lighting in linear light
   VkRenderPass rp_hdr_ = VK_NULL_HANDLE;
+  /* Round 416: the filters' passes - a pipeline a kind, the float planes' render pass, the passes' own set layout (set
+   * 1: the pass's images) with the frame's set 0, and push constants for the settings. */
+  enum PostKind { PostVignette = 0, PostGrade, PostChroma, PostGrain, PostBright, PostBase, PostDown, PostUp, PostAdd, PostKinds };
+  VkPipeline pl_post_[PostKinds] = {};
+  VkRenderPass rp_post16_ = VK_NULL_HANDLE;
+  VkDescriptorSetLayout post_set_layout_ = VK_NULL_HANDLE;
+  VkPipelineLayout post_layout_ = VK_NULL_HANDLE;
+  VkDescriptorPool post_pool_ = VK_NULL_HANDLE;
+  bool post_ok_ = false;
   VkRenderPass rp_baked_ = VK_NULL_HANDLE;
   Buf baked_buf_, corner_buf_, probe_buf_;  // task 0197: the instances' baked light, the triangles' corners, the probe volume
+  Buf lil_buf_, lilmap_buf_;  // round 416: lilToon's settings an instance, its maps' ids
   /* Round 415: the corner buffer's blocks (in floats), first fit over the freed ones, the buffer grown with its contents
    * copied; corner_used_ the floats in use up to the last block. */
   struct CornerBlock {
@@ -3662,12 +4221,30 @@ class VulkanRaster final : public Raster {
       const RasterInstance &s = instances_[i];
       int32_t *d = &t[i * 8];
       d[0] = s.lightmap, d[1] = s.rt_bounce, d[2] = s.rt_sky, d[3] = s.corner_base;
-      const float f[4] = {(float)s.baked_flags, 0.0f, 0.0f, 0.0f};
+      const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, s.exposure_occlusion, (float)s.shadowmask};  // (b.y: round 426's direction page, b.w: round 444's shadowmask page, -1 none; -1 none; b.z: round 429's exposure occlusion)
       std::memcpy(d + 4, f, 16);
     }
     return write_array(baked_buf_, t.data(), t.size() * 4, err);
   }
   /* Task 0196: each instance's toon maps (ToonMaps), in the instances' order. */
+  /* Round 416: lilToon's tables - the settings (24 vec4 an instance; zeros, off, for the others) and the maps' ids. */
+  bool write_lil_tables(std::string *err) {
+    std::vector<float> l(instances_.size() * 96, 0.0f);
+    std::vector<int32_t> m(instances_.size() * 12, -1);
+    for (size_t i = 0; i < instances_.size(); i++) {
+      const RasterInstance &s = instances_[i];
+      if (!s.lil) { for (int k = 0; k < 12; k++) m[i * 12 + k] = k == 10 || k == 11 ? 0 : -1; continue; }
+      std::memcpy(&l[i * 96], s.lil_p, 96 * sizeof(float));
+      bool any = false;
+      for (int k = 0; k < 10; k++) {
+        m[i * 12 + k] = s.lil_maps[k];
+        any = any || (k != 9 && s.lil_maps[k] >= 0);  // (the matcap is read by the lighting pass, not through the planes)
+      }
+      m[i * 12 + 10] = any ? 1 : 0;
+      m[i * 12 + 11] = 0;
+    }
+    return write_array(lil_buf_, l.data(), l.size() * 4, err) && write_array(lilmap_buf_, m.data(), m.size() * 4, err);
+  }
   bool write_toon_table(std::string *err) {
     std::vector<int32_t> t(instances_.size() * 12, 0);
     for (size_t i = 0; i < instances_.size(); i++) {
@@ -3756,7 +4333,7 @@ class VulkanRaster final : public Raster {
     if (!fit_array(light_buf_, (size_t)(nl + np) * 24 * sizeof(float), err)) return false;
     if (!write_array(vcol_buf_, fr.vertex_colors.data(), fr.vertex_colors.size() * sizeof(float), err)) return false;
     if (!write_array(see_buf_, fr.see_through.data(), fr.see_through.size() * sizeof(SeeCorner), err)) return false;
-    if (!write_toon_table(err) || !write_baked_table(err)) return false;
+    if (!write_toon_table(err) || !write_baked_table(err) || !write_lil_tables(err)) return false;
     /* (Round 415: the corners live in blocks on the card; a frame's own array - a card without blocks - is written over
      * the buffer only while no block is held.) */
     if (!corner_blocks_on_ && !write_array(corner_buf_, fr.corners.data(), fr.corners.size() * sizeof(float), err)) return false;
@@ -3846,6 +4423,10 @@ class VulkanRaster final : public Raster {
     for (uint32_t i = 25; i <= 27; i++)  // task 0196: the toon pass's planes
       b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // task 0197: the baked plane
+    for (uint32_t i = 32; i <= 33; i++)  // round 416: lilToon's settings and its maps' ids
+      b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    for (uint32_t i = 34; i <= 36; i++)  // round 416: lilToon's planes
+      b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 28; i <= 30; i++)  // task 0197: the baked table, the corners, the probe volume
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
@@ -3861,9 +4442,15 @@ class VulkanRaster final : public Raster {
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &set_layout_;
     f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &layout_);
-    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 19 * kSlots},
-                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 11 * kSlots}};
+    uint32_t n_uniform = 0, n_storage = 0, n_sampler = 0;  // (round 416: counted from the layout - a binding added without the pool had left every view on the CPU on a driver that enforces pool sizes)
+    for (const VkDescriptorSetLayoutBinding &x : b) {
+      if (x.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) n_uniform += x.descriptorCount;
+      else if (x.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) n_storage += x.descriptorCount;
+      else n_sampler += x.descriptorCount;
+    }
+    VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, n_uniform * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, n_storage * kSlots},
+                                  {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, n_sampler * kSlots}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = kSlots;
     dpi.poolSizeCount = 3;
@@ -3890,7 +4477,8 @@ class VulkanRaster final : public Raster {
     const VkDescriptorBufferInfo lb2[7] = {{light_buf_.buf, 0, VK_WHOLE_SIZE}, {vcol_buf_.buf, 0, VK_WHOLE_SIZE}, {see_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {toon_buf_.buf, 0, VK_WHOLE_SIZE}, {baked_buf_.buf, 0, VK_WHOLE_SIZE}, {corner_buf_.buf, 0, VK_WHOLE_SIZE},
                                            {probe_buf_.buf, 0, VK_WHOLE_SIZE}};
-    VkWriteDescriptorSet w[20];
+    const VkDescriptorBufferInfo lil2[2] = {{lil_buf_.buf, 0, VK_WHOLE_SIZE}, {lilmap_buf_.buf, 0, VK_WHOLE_SIZE}};  // (round 416: bindings 32, 33)
+    VkWriteDescriptorSet w[22];
     for (VkWriteDescriptorSet &x : w) x = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     for (VkWriteDescriptorSet &x : w) x.dstSet = set;
     for (int i = 3; i < 9; i++) {
@@ -3927,24 +4515,31 @@ class VulkanRaster final : public Raster {
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
       w[i].pBufferInfo = &lb2[i - 13];
     }
-    f_.vkUpdateDescriptorSets(dev_, 20, w, 0, nullptr);
+    for (int i = 20; i < 22; i++) {  // (round 416: bindings 32, 33)
+      w[i].dstBinding = (uint32_t)(32 + i - 20);
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      w[i].pBufferInfo = &lil2[i - 20];
+    }
+    f_.vkUpdateDescriptorSets(dev_, 22, w, 0, nullptr);
   }
   void bind_images(Slot &sl) {
     const bool toon = sl.fb_toon != VK_NULL_HANDLE, baked = sl.fb_baked != VK_NULL_HANDLE;
-    const Img *im[11] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst,
-                         toon ? &sl.toon[0] : &sl.normal, toon ? &sl.toon[1] : &sl.normal, toon ? &sl.toon[2] : &sl.normal, baked ? &sl.amb : &sl.normal};
-    VkDescriptorImageInfo ii[11];
-    VkWriteDescriptorSet w[11];
-    for (int i = 0; i < 11; i++) {
+    const Img *im[14] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst,
+                         toon ? &sl.toon[0] : &sl.normal, toon ? &sl.toon[1] : &sl.normal, toon ? &sl.toon[2] : &sl.normal, baked ? &sl.amb : &sl.normal,
+                         toon ? &sl.toon[3] : &sl.normal, toon ? &sl.toon[4] : &sl.normal, toon ? &sl.toon[5] : &sl.normal};  // (round 416: lilToon's planes, 34-36)
+    VkDescriptorImageInfo ii[14];
+    VkWriteDescriptorSet w[14];
+    for (int i = 0; i < 14; i++) {
       ii[i] = {sampler_, im[i]->view, VK_IMAGE_LAYOUT_GENERAL};
       w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       w[i].dstSet = sl.set;
-      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : i == 6 ? 15 : i < 10 ? 25 + (i - 7) : 31);  // (the instances' plane: binding 15, task 0102; the toon planes 25-27, task 0196; the baked plane 31, task 0197)
+      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : i == 6 ? 15 : i < 10 ? 25 + (i - 7) : i == 10 ? 31 : 34 + (i - 11));  // (the instances' plane: binding 15, task 0102; the toon planes 25-27, task 0196; the baked plane 31, task 0197)
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       w[i].pImageInfo = &ii[i];
     }
-    f_.vkUpdateDescriptorSets(dev_, 11, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 14, w, 0, nullptr);
   }
 
   /* Render passes whose attachments end in GENERAL: read by the next pass and copied out without other moves. */
@@ -4008,9 +4603,10 @@ class VulkanRaster final : public Raster {
                          true, false);
     rp_light_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, true);
     rp_ids_ = make_pass({VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT}, false, false, true);  // (task 0195)
-    rp_toon_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}, true, false, false, true);  // (task 0196)
+    rp_toon_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}, true, false, false, true);  // (task 0196)
     rp_baked_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, true, false, false, true);  // (task 0197)
     rp_hdr_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, false, true);
+    rp_post16_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT}, false, true);  // (round 416: the bloom's planes)
     rp_light_load_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, false, true);
     return rp_shadow_ && rp_gbuf_ && rp_light_ && rp_ids_ && rp_light_load_ && rp_toon_ && rp_baked_ && rp_hdr_ ? true : fail(err, "could not make the render passes");
   }
@@ -4138,7 +4734,7 @@ class VulkanRaster final : public Raster {
     VkShaderModule tf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kToonFrag, shaderc_fragment_shader, &terr);
     if (tf) {
       const VkCullModeFlags cull[3] = {VK_CULL_MODE_NONE, VK_CULL_MODE_BACK_BIT, VK_CULL_MODE_FRONT_BIT};
-      for (int k = 0; k < 3; k++) pl_toon_[k] = make_pipeline(rp_toon_, gv, tf, 3, true, cull[k], false, VK_NULL_HANDLE, false, true);
+      for (int k = 0; k < 3; k++) pl_toon_[k] = make_pipeline(rp_toon_, gv, tf, 6, true, cull[k], false, VK_NULL_HANDLE, false, true);  // (round 416: six planes)
       f_.vkDestroyShaderModule(dev_, tf, nullptr);
     }
     if (!can_draw_toon_maps()) Log::warn("The GPU view can't draw toon maps (%s): the CPU draws those views", terr.empty() ? "?" : terr.c_str());
@@ -4167,6 +4763,198 @@ class VulkanRaster final : public Raster {
     }
     if (!can_draw_hdr()) Log::warn("The GPU view can't keep the picture in linear light (%s): the CPU draws those views", herr.empty() ? "?" : herr.c_str());
   }
+  /* Round 416 (ADR 0110): the filters' passes - the set layout (the pass's three images), the pipeline layout (the
+   * frame's set and it, with the settings as push constants), a pipeline a kind; without them the CPU runs the filters
+   * over the picture read back, as before. */
+  void make_post_pipelines(VkShaderModule fv) {
+    std::vector<VkDescriptorSetLayoutBinding> b;
+    for (uint32_t i = 0; i < 3; i++) b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    dli.bindingCount = (uint32_t)b.size();
+    dli.pBindings = b.data();
+    if (f_.vkCreateDescriptorSetLayout(dev_, &dli, nullptr, &post_set_layout_) != VK_SUCCESS) return;
+    VkDescriptorSetLayout sets[2] = {set_layout_, post_set_layout_};
+    VkPushConstantRange pcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 80};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 2;
+    pli.pSetLayouts = sets;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pcr;
+    if (f_.vkCreatePipelineLayout(dev_, &pli, nullptr, &post_layout_) != VK_SUCCESS) return;
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * 64 * kSlots};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpi.maxSets = 64 * kSlots;
+    dpi.poolSizeCount = 1;
+    dpi.pPoolSizes = &ps;
+    if (f_.vkCreateDescriptorPool(dev_, &dpi, nullptr, &post_pool_) != VK_SUCCESS) return;
+    const char *defs[PostKinds] = {"#define BL_POST_VIGNETTE 1\n", "#define BL_POST_GRADE 1\n", "#define BL_POST_CHROMA 1\n", "#define BL_POST_GRAIN 1\n",
+                                   "#define BL_POST_BRIGHT 1\n", "#define BL_POST_BASE 1\n", "#define BL_POST_DOWN 1\n", "#define BL_POST_UP 1\n", "#define BL_POST_ADD 1\n"};
+    const std::string prefix = std::string(kMaterialFrag) + kLightFrag + kAmbPlane + kLightFns + kLightFrag2;
+    std::string perr;
+    bool all = rp_post16_ != VK_NULL_HANDLE;
+    for (int k = 0; k < PostKinds && all; k++) {
+      VkShaderModule pf = module(defs[k] + prefix + kPostFrag, shaderc_fragment_shader, &perr);
+      const bool planes = k >= PostBright && k <= PostUp;  // (the bloom's float planes; the rest write the 8-bit picture)
+      if (pf) pl_post_[k] = make_pipeline(planes ? rp_post16_ : rp_light_, fv, pf, 1, false, VK_CULL_MODE_NONE, false, post_layout_);
+      if (pf) f_.vkDestroyShaderModule(dev_, pf, nullptr);
+      all = all && pl_post_[k] != VK_NULL_HANDLE;
+    }
+    post_ok_ = all;
+    if (!post_ok_) Log::warn("The GPU view can't run the camera filters (%s): the CPU runs them over the picture read back", perr.empty() ? "?" : perr.c_str());
+  }
+  /* The images the filters need for this slot's size (made once per size, freed with the slot's targets). */
+  bool post_targets(Slot &sl, bool bloom, std::string *err) {
+    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (!sl.post.img) {
+      if (!make_image(sl.post, sl.color.w, sl.color.h, VK_FORMAT_B8G8R8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the filters' picture");
+      sl.fb_post = framebuffer(rp_light_, {sl.post.view}, sl.color.w, sl.color.h);
+      if (!sl.fb_post) return fail(err, "could not make the filters' framebuffer");
+    }
+    if (!bloom || (sl.fb_bright && sl.mip_levels > 0)) return true;
+    const VkImageUsageFlags fatt = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    auto undone = [&](const char *why) { free_post(sl); return fail(err, why); };  // (nothing half-made is kept: the next frame tries again whole)
+    if (!make_image(sl.bright, sl.color.w, sl.color.h, VK_FORMAT_R16G16B16A16_SFLOAT, fatt, VK_IMAGE_ASPECT_COLOR_BIT)) return undone("out of memory for the bloom's plane");
+    sl.fb_bright = framebuffer(rp_post16_, {sl.bright.view}, sl.color.w, sl.color.h);
+    if (!sl.fb_bright) return undone("could not make the bloom's framebuffer");
+    /* The pyramid from a 540-row base (camera_filter.cpp's reference size), halved while both sides stay above 2. */
+    const int bh = 540, bw = std::max(135, std::min(2160, (int)std::lround(540.0 * sl.color.w / sl.color.h)));
+    int lw = bw, lh = bh;
+    sl.mip_levels = 0;
+    for (int lv = 0; lv < 12; lv++) {
+      for (int side = 0; side < 2; side++) {
+        if (!make_image(sl.mips[side][lv], lw, lh, VK_FORMAT_R16G16B16A16_SFLOAT, fatt, VK_IMAGE_ASPECT_COLOR_BIT)) return undone("out of memory for the bloom's pyramid");
+        sl.fb_mips[side][lv] = framebuffer(rp_post16_, {sl.mips[side][lv].view}, lw, lh);
+        if (!sl.fb_mips[side][lv]) return undone("could not make the bloom's framebuffers");
+      }
+      sl.mip_levels = lv + 1;
+      if (!(lw > 2 && lh > 2)) break;
+      lw = (lw + 1) / 2, lh = (lh + 1) / 2;
+    }
+    return true;
+  }
+  void free_post(Slot &sl) {
+    for (VkFramebuffer fb : {sl.fb_post, sl.fb_bright})
+      if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
+    sl.fb_post = sl.fb_bright = VK_NULL_HANDLE;
+    free_image(sl.post);
+    free_image(sl.bright);
+    for (int side = 0; side < 2; side++)
+      for (int lv = 0; lv < 12; lv++) {
+        if (sl.fb_mips[side][lv]) f_.vkDestroyFramebuffer(dev_, sl.fb_mips[side][lv], nullptr);
+        sl.fb_mips[side][lv] = VK_NULL_HANDLE;
+        free_image(sl.mips[side][lv]);
+      }
+    sl.mip_levels = 0;
+  }
+  /* A pass's set: the next of the slot's (allocated as needed), written with the three images. */
+  VkDescriptorSet post_set(Slot &sl, const Img &src, const Img &hdr, const Img &aux) {
+    if (sl.post_sets_used == sl.post_sets.size()) {
+      VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+      dai.descriptorPool = post_pool_;
+      dai.descriptorSetCount = 1;
+      dai.pSetLayouts = &post_set_layout_;
+      VkDescriptorSet s = VK_NULL_HANDLE;
+      if (f_.vkAllocateDescriptorSets(dev_, &dai, &s) != VK_SUCCESS) return VK_NULL_HANDLE;
+      sl.post_sets.push_back(s);
+    }
+    VkDescriptorSet s = sl.post_sets[sl.post_sets_used++];
+    const Img *im[3] = {&src, &hdr, &aux};
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet w[3];
+    for (int i = 0; i < 3; i++) {
+      ii[i] = {sampler_, im[i]->view, VK_IMAGE_LAYOUT_GENERAL};
+      w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      w[i].dstSet = s;
+      w[i].dstBinding = (uint32_t)i;
+      w[i].descriptorCount = 1;
+      w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      w[i].pImageInfo = &ii[i];
+    }
+    f_.vkUpdateDescriptorSets(dev_, 3, w, 0, nullptr);
+    return s;
+  }
+  /* One full-screen pass of the filters into `fb` (w x h) with the kind's pipeline, the pass's images and settings. */
+  bool post_pass(Slot &sl, PostKind kind, VkRenderPass rp, VkFramebuffer fb, int w, int h, const Img &src, const Img &hdr, const Img &aux, const float *push) {
+    VkDescriptorSet s = post_set(sl, src, hdr, aux);
+    if (!s) return false;
+    VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rb.renderPass = rp;
+    rb.framebuffer = fb;
+    rb.renderArea = {{0, 0}, {(uint32_t)w, (uint32_t)h}};
+    f_.vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
+    viewport(w, h);
+    f_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl_post_[kind]);
+    VkDescriptorSet sets[2] = {sl.set, s};
+    f_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout_, 0, 2, sets, 0, nullptr);
+    f_.vkCmdPushConstants(cmd_, post_layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 80, push);
+    f_.vkCmdDraw(cmd_, 3, 1, 0, 0);
+    f_.vkCmdEndRenderPass(cmd_);
+    barrier();
+    return true;
+  }
+  /* The frame's filters (RasterFrame::post) over the slot's picture, in order, ping-pong between the picture and the
+   * filters' image, the result copied back into the picture when it ended in the other; the bloom through its planes. */
+  bool record_post(const RasterFrame &fr, Slot &sl, std::string *err) {
+    const bool bloom = std::any_of(fr.post.begin(), fr.post.end(), [](const PostPass &p) { return p.kind == PostPass::Bloom; });
+    if (!post_targets(sl, bloom, err)) return false;
+    sl.post_sets_used = 0;
+    const int W = sl.color.w, H = sl.color.h;
+    const Img &hdr = sl.hdr.img ? sl.hdr : sl.normal;  // (a stack without bloom or an exposed grading has no linear-light plane: no pass reads it; a plane that is never the target stands in)
+    Img *cur = &sl.color, *other = &sl.post;
+    VkFramebuffer fb_of[2] = {sl.fb_light, sl.fb_post};
+    auto fb_for = [&](const Img *im) { return im == &sl.color ? fb_of[0] : fb_of[1]; };
+    float push[20];
+    for (const PostPass &p : fr.post) {
+      std::memset(push, 0, sizeof(push));
+      switch (p.kind) {
+        case PostPass::Vignette:
+        case PostPass::ColorGrading:
+        case PostPass::ChromaticAberration:
+        case PostPass::FilmGrain: {
+          std::memcpy(push, p.p, sizeof(push));
+          const PostKind kind = p.kind == PostPass::Vignette ? PostVignette : p.kind == PostPass::ColorGrading ? PostGrade : p.kind == PostPass::ChromaticAberration ? PostChroma : PostGrain;
+          if (!post_pass(sl, kind, rp_light_, fb_for(other), W, H, *cur, hdr, *cur, push)) return fail(err, "the filters' descriptor sets");
+          std::swap(cur, other);
+          break;
+        }
+        case PostPass::Bloom: {
+          /* p: intensity, threshold, knee, scatter, cap, tint rgb, the exposure's gain. */
+          const float intensity = p.p[0], threshold = p.p[1], knee = p.p[2], scatter = p.p[3], cap = p.p[4], gain = p.p[8];
+          push[0] = threshold, push[1] = knee, push[2] = cap, push[3] = gain;
+          if (!post_pass(sl, PostBright, rp_post16_, sl.fb_bright, W, H, *cur, hdr, *cur, push)) return fail(err, "the filters' descriptor sets");
+          const int L = sl.mip_levels;
+          const Img &base = sl.mips[0][0];
+          push[0] = (float)W, push[1] = (float)H, push[2] = (float)base.w, push[3] = (float)base.h;
+          if (!post_pass(sl, PostBase, rp_post16_, sl.fb_mips[0][0], base.w, base.h, sl.bright, hdr, sl.bright, push)) return fail(err, "the filters' descriptor sets");
+          for (int lv = 1; lv < L; lv++)
+            if (!post_pass(sl, PostDown, rp_post16_, sl.fb_mips[0][lv], sl.mips[0][lv].w, sl.mips[0][lv].h, sl.mips[0][lv - 1], hdr, sl.mips[0][lv - 1], push)) return fail(err, "the filters' descriptor sets");
+          /* Up: B[lv] = A[lv] mixed with the tent of the level below (A's top, else B's). */
+          for (int lv = L - 2; lv >= 0; lv--) {
+            const Img &low = lv == L - 2 ? sl.mips[0][lv + 1] : sl.mips[1][lv + 1], &high = sl.mips[0][lv];
+            push[0] = scatter, push[1] = (float)low.w / high.w, push[2] = (float)low.h / high.h;
+            if (!post_pass(sl, PostUp, rp_post16_, sl.fb_mips[1][lv], high.w, high.h, high, hdr, low, push)) return fail(err, "the filters' descriptor sets");
+          }
+          const Img &glow = L >= 2 ? sl.mips[1][0] : sl.mips[0][0];
+          push[0] = (float)glow.w / W, push[1] = (float)glow.h / H, push[2] = intensity, push[3] = gain;
+          push[4] = p.p[5], push[5] = p.p[6], push[6] = p.p[7], push[7] = 0.0f;
+          if (!post_pass(sl, PostAdd, rp_light_, fb_for(other), W, H, *cur, hdr, glow, push)) return fail(err, "the filters' descriptor sets");
+          std::swap(cur, other);
+          break;
+        }
+        default: break;
+      }
+    }
+    if (cur != &sl.color) {  // (the result into the picture: the copies out and the present read it there)
+      VkImageCopy c{};
+      c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+      c.extent = {(uint32_t)W, (uint32_t)H, 1};
+      f_.vkCmdCopyImage(cmd_, cur->img, VK_IMAGE_LAYOUT_GENERAL, sl.color.img, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+      barrier();
+    }
+    return true;
+  }
+
   /* Task 0198: the heavy shaders compiled at once, on every thread, before the pipelines ask for them one by one (they
    * then come from the compile's memory cache). The same sources as below: one that drifts only costs its own compile. */
   void compile_ahead() {
@@ -4182,6 +4970,9 @@ class VulkanRaster final : public Raster {
     };
     if (dual_src_) srcs.push_back({see + kSeeFrag, shaderc_fragment_shader}), srcs.push_back({"#define BL_SEE_IDS 1\n" + see + kSeeFrag, shaderc_fragment_shader});
     if (dual_src_) srcs.push_back({"#define BL_SEE_HDR 1\n" + see + kSeeFrag, shaderc_fragment_shader});  // (round 414)
+    for (const char *d : {"#define BL_POST_VIGNETTE 1\n", "#define BL_POST_GRADE 1\n", "#define BL_POST_CHROMA 1\n", "#define BL_POST_GRAIN 1\n", "#define BL_POST_BRIGHT 1\n",
+                          "#define BL_POST_BASE 1\n", "#define BL_POST_DOWN 1\n", "#define BL_POST_UP 1\n", "#define BL_POST_ADD 1\n"})  // (round 416: the filters' passes)
+      srcs.push_back({std::string(d) + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kPostFrag, shaderc_fragment_shader});
     if (geometry_) srcs.push_back({mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
@@ -4231,6 +5022,7 @@ class VulkanRaster final : public Raster {
       make_toon_pipelines(gv);
       make_baked_pipelines(gv);
       make_hdr_pipeline(fv);
+      make_post_pipelines(fv);
     }
     for (VkShaderModule m : {sv, gv, gf, fv, lf})
       if (m) f_.vkDestroyShaderModule(dev_, m, nullptr);
@@ -4244,7 +5036,7 @@ class VulkanRaster final : public Raster {
     const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     for (Img &im : sl.toon)
       if (!make_image(im, sl.color.w, sl.color.h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the toon maps");
-    sl.fb_toon = framebuffer(rp_toon_, {sl.toon[0].view, sl.toon[1].view, sl.toon[2].view, sl.depth.view}, sl.color.w, sl.color.h);
+    sl.fb_toon = framebuffer(rp_toon_, {sl.toon[0].view, sl.toon[1].view, sl.toon[2].view, sl.toon[3].view, sl.toon[4].view, sl.toon[5].view, sl.depth.view}, sl.color.w, sl.color.h);
     if (!sl.fb_toon) return fail(err, "could not make the toon maps' framebuffer");
     bind_images(sl);
     return true;
@@ -4252,7 +5044,7 @@ class VulkanRaster final : public Raster {
   /* Task 0197: the slot's linear-light plane and its framebuffer, made the first time a frame wants them. */
   bool hdr_targets(Slot &sl, std::string *err) {
     if (sl.fb_hdr) return true;
-    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;  // (round 416: the filters' passes read it)
     if (!make_image(sl.hdr, sl.color.w, sl.color.h, VK_FORMAT_R32G32B32A32_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the linear picture");
     sl.fb_hdr = framebuffer(rp_hdr_, {sl.hdr.view}, sl.color.w, sl.color.h);
     return sl.fb_hdr ? true : fail(err, "could not make the linear picture's framebuffer");
@@ -4273,7 +5065,7 @@ class VulkanRaster final : public Raster {
     const bool view_ok = sl.color.w == w && sl.color.h == h, shadow_ok = sl.shadow.img && (shadow <= 0 || sl.shadow.w == shadow);
     if (view_ok && shadow_ok) return true;
     f_.vkDeviceWaitIdle(dev_);
-    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;  // (round 416: the filters' result is copied into the picture)
     const VkImageUsageFlags dep = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (!shadow_ok) {
       if (sl.fb_shadow) f_.vkDestroyFramebuffer(dev_, sl.fb_shadow, nullptr);
@@ -4286,7 +5078,8 @@ class VulkanRaster final : public Raster {
       for (VkFramebuffer fb : {sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
       sl.fb_toon = sl.fb_baked = sl.fb_hdr = VK_NULL_HANDLE;
-      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb, &sl.hdr})
+      free_post(sl);  // (round 416: the filters' images are the picture's size)
+      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.hdr})
         free_image(*im);
       const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
@@ -4331,18 +5124,24 @@ class VulkanRaster final : public Raster {
     if (compose_layout_) f_.vkDestroyPipelineLayout(dev_, compose_layout_, nullptr);
     if (compose_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, compose_set_layout_, nullptr);
     for (Slot &sl : slots_) {
+      free_post(sl);  // (round 416)
       for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.amb, &sl.hdr})
+      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.hdr})
         free_image(*im);
     }
     for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})
       if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
-    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_})
+    for (VkPipeline p : pl_post_)  // (round 416)
+      if (p) f_.vkDestroyPipeline(dev_, p, nullptr);
+    if (post_pool_) f_.vkDestroyDescriptorPool(dev_, post_pool_, nullptr);
+    if (post_layout_) f_.vkDestroyPipelineLayout(dev_, post_layout_, nullptr);
+    if (post_set_layout_) f_.vkDestroyDescriptorSetLayout(dev_, post_set_layout_, nullptr);
+    for (VkRenderPass rp : {rp_shadow_, rp_gbuf_, rp_light_, rp_ids_, rp_light_load_, rp_toon_, rp_baked_, rp_hdr_, rp_post16_})
       if (rp) f_.vkDestroyRenderPass(dev_, rp, nullptr);
     for (Mesh &m : meshes_) free_mesh(m);
     for (Buf *b : {&ubo_, &inst_buf_, &staging_, &readback_, &lut_buf_, &cage_v_, &cage_e_, &pend_staging_, &tex8_, &texf_,
-                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_})
+                   &texinfo_buf_, &texlevel_buf_, &hl_buf_, &ov_lines_, &ov_points_, &ov_outlines_, &light_buf_, &vcol_buf_, &see_buf_, &toon_buf_, &baked_buf_, &corner_buf_, &probe_buf_, &lil_buf_, &lilmap_buf_})
       free_buffer(*b);
     if (sampler_) f_.vkDestroySampler(dev_, sampler_, nullptr);
     if (dpool_) f_.vkDestroyDescriptorPool(dev_, dpool_, nullptr);

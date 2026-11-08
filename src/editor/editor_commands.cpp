@@ -3,6 +3,7 @@
 // tool is reachable from (task 0177: moved out of editor.cpp as they were).
 #include "../scene/curve.h"
 #include "editor.h"
+#include "../core/allocator.h"
 #include "learn.h"
 #include "../texture/procedural_texture.h"
 #include "../render/texture_bake.h"
@@ -287,6 +288,7 @@ static bool set_field_on(SetFieldReflector &sr, const std::function<void(Reflect
       }
   if (sr.target.empty() || field_key(sr.target) == "effects") return false;  // the stack's types: use the filter command
   reflect(sr);
+  if (sr.done) edit_epoch::bump();  // (round 435, ADR 0115: a field set by name is an edit the views must see)
   if (sr.bad) Log::warn("set %s: '%s' isn't a number (a number, or +=1, *=2 from its own value)", sr.target.c_str(), sr.value.c_str());
   return sr.done && !sr.bad;
 }
@@ -984,10 +986,11 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("CPU badge: %s", badge.empty() ? "not shown" : badge.c_str());
     return;
   }
-  if (c == "perf") {  // perf [status] | mark [name] | reset | wait (round 411, ADR 0105)
+  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | memory (round 411, ADR 0105; memory: task 0421)
     const std::string sub = to_lower(arg(1, "status"));
     if (sub == "mark") Log::info("%s", perf_mark(t.size() > 2 ? line_rest(line, 2) : std::string()).c_str());
     else if (sub == "reset") perf_mark(""), Log::info("perf: the mark reset");
+    else if (sub == "memory") Log::info("perf memory: %s", memory_text().c_str());  // (task 0421)
     else if (sub == "wait") {
       /* perf wait (a script's, headless): steps frames until no job, render or bake runs, so the mark after it holds
        * the whole step with its frames (the --cmd lines run back to back, with no frame between them). */
@@ -1236,9 +1239,9 @@ void Editor::run_console_command(const std::string &line) {
     anim_command(split_quoted(line));  // (round 335: a property with spaces quoted - "Material 0.Roughness", "Cast Shadows")
     return;
   }
-  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|keyed1k (task 0202)
+  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike (task 0202; cubes50k round 433)
     if (!bench_scene(to_lower(arg(1, ""))))
-      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|keyed1k: the scenes tools/bench_blender.py --parity-ui builds");
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike: the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
     return;
   }
   if (c == "manual") {
@@ -1305,7 +1308,7 @@ void Editor::run_console_command(const std::string &line) {
     paint_command(t);
     return;
   }
-  if (c == "jobs") {  // jobs | jobs cancel [label]: the job tray's list (task 0253)
+  if (c == "jobs") {  // jobs | jobs cancel [label] | jobs async on|off: the job tray's list (task 0253; round 437)
     jobs_command(t);
     return;
   }
@@ -1552,9 +1555,10 @@ void Editor::run_console_command(const std::string &line) {
     /* deletemat <name | Assets/Materials/x.mat>: delete a material without asking (slots emptied, the file trashed) */
     const std::string what = t.size() > 1 ? line.substr(line.find(' ') + 1) : std::string();
     MaterialPtr m = what.find(".mat") != std::string::npos ? material_asset(what) : nullptr;
-    if (!m)
-      for (const MaterialPtr &c2 : pickable_materials(nullptr))
+    if (!m)  // (a scene's own material of that name first, as before; then an asset by its file's name - round 418)
+      for (const MaterialPtr &c2 : scene_materials())
         if (c2->name == what) m = c2;
+    if (!m) m = material_by_name(what);
     if (m) delete_material(m);
     else Log::warn("deletemat: no material %s", what.c_str());
   }
@@ -1753,7 +1757,7 @@ void Editor::run_console_command(const std::string &line) {
       cam->focus_track = true;
       cam->focus_point = Vec3((float)std::atof(arg(1, "0").c_str()), (float)std::atof(arg(2, "0").c_str()), (float)std::atof(arg(3, "0").c_str()));
       if (t.size() > 4) cam->f_stop = std::max(0.1f, (float)std::atof(t[4].c_str()));
-      update_camera_focus();
+      apply_camera_focus();  // (review 436: at once, not on the walk's next due frame)
       mark_changed("Camera Focus");
     }
   }
@@ -1962,7 +1966,8 @@ void Editor::run_console_command(const std::string &line) {
     for (const deps::Library &l : deps::libraries())
       Log::info("%-18s %-10s %s%s", l.name, l.enabled ? l.version.c_str() : "-", l.enabled ? l.used_for : "not built in; using ",
                 l.enabled ? "" : l.fallback);
-    Log::info("%s", gpu::status().c_str());
+    Log::info("%s", gpu::status(true).c_str());  // (libs reports the card: opened here)
+    Log::info("Memory: %s", allocator_name());  // (round 419, ADR 0112)
   }
   else if (c == "camera" && t.size() >= 4) {
     cam_.animating = false;  // (a flight under way would carry the view off again)

@@ -144,6 +144,7 @@ class PathTracer {
    * and glass surfaces and an outline's back faces are looked through; cutout holes too. */
   void first_hit_planes(std::vector<float> &distance, std::vector<uint32_t> &ids);
   void reset();
+  size_t memory_bytes() const;  // (task 0421) the sample planes, the bottom-level trees and the object list, by capacity
 
   /* Adds samples for up to `budget_ms` (at least one full sample pass).
    * Returns the number of completed samples per pixel. With GPUs (task 0161, ADR 0052) the cards work on their
@@ -188,6 +189,13 @@ class PathTracer {
     surface_at(h.object, h.tri, h.u, h.v, sp);
     return sp.geo_normal;
   }
+  /* Round 430: a ray along `d` met the hit's back face - its geometry faces along the ray and its material isn't Double
+   * Sided (Unity's Double Sided GI: such back faces count as front ones). */
+  bool hit_back_face(const Hit &h, Vec3 d) const {
+    SurfacePoint sp;
+    const Material *m = surface_at(h.object, h.tri, h.u, h.v, sp);
+    return dot(sp.geo_normal, d) > 0.0f && !(m && m->double_sided);
+  }
   /* The radiance arriving along -r.dir at r.origin: the full path (lights, emission, the world, every
    * bounce up to max_bounces), as a camera ray would see it. Thread-safe; the lightmapper's gather. */
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays) const { return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false); }
@@ -201,6 +209,15 @@ class PathTracer {
    * distance, the emitted radiance and the solid-angle pdf (the texel's next-event estimation of emissive meshes,
    * task 0157). False when there are none or the point is behind the surface or the emitter. */
   bool has_mesh_lights() const { return !mesh_lights_.empty(); }
+  /* Round 441 (task 0417): the world sampled by its light - a sky or HDRI map's brightness over a 256 x 128 grid of
+   * directions (each cell's radiance x its solid angle), one cell by that and a direction inside it. Gradients and flat
+   * colours aren't sampled this way (the cosine gather is already right for them). */
+  bool has_env_dist() const { return env_w_ > 0; }
+  bool sample_env(uint32_t &rng, Vec3 &dir, float &pdf) const;
+  float env_pdf(Vec3 dir) const;  // the solid-angle pdf sample_env draws `dir` with
+  /* Round 441: which lights a bake's own sampling at the texel covers, so the gather's first hit is weighted against them
+   * (MIS) and nothing counts twice: emitters (task 0157, the default) and the world. */
+  void set_bake_mis(bool emitters, bool env) { bake_mis_emitters_ = emitters, bake_mis_env_ = env; }
   bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f) const;  // light_u in [0,1): the emitter choice given (stratified), else random
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
@@ -239,6 +256,12 @@ class PathTracer {
 
   static bool embree_available();
   static bool oidn_available();
+  /* Round 423: a lightmap page's light denoised by OIDN's lightmap filter (RTLightmap, the one Unity's Progressive
+   * Lightmapper runs), in place, on the CPU device. False without OIDN or on its error (the caller filters instead). */
+  static bool oidn_denoise_lightmap(std::vector<Vec3> &rgb, int w, int h);
+  /* Whether this OIDN build can (an 8 x 8 page tried once: Blender's libraries may leave the lightmap filter's trained
+   * weights out); its error kept for the log. */
+  static bool oidn_lightmap_available(std::string *why = nullptr);
   /* Task 0094: OIDN found a GPU and opened it (whatever Denoise Device says); its fallbacks to the CPU so far; a
    * test hook that makes the GPU fail. */
   static bool oidn_gpu_available();
@@ -298,10 +321,21 @@ class PathTracer {
     float area, power;
   };
   std::vector<MeshLight> mesh_lights_;
+  int env_w_ = 0, env_h_ = 0;  // (round 441: the world's grid; 0 when not sampled)
+  uint64_t env_key_ = 0;       // (the world the grid was built for)
+  std::vector<float> env_cdf_, env_cell_;  // cumulative and per-cell probabilities
+  bool bake_mis_emitters_ = true, bake_mis_env_ = false;
+  void build_env_dist();
   std::vector<float> light_cdf_;  // cumulative power
   float light_power_ = 0.0f;
   std::unordered_map<uint64_t, uint32_t> light_of_;  // (object << 32 | triangle) -> mesh light
   void collect_mesh_lights();
+ public:
+  /* Round 439: the light a material sends, for picking emitters by power (its emission, and an Unlit one's colour). */
+  static float emitter_luminance(const Material &m);
+  /* What a sampled emitter point sends: its emission, plus its colour when Unlit (round 439). */
+  static Vec3 emitted(const SurfaceSample &s) { return s.unlit ? s.emission + s.albedo : s.emission; }
+ private:
   float mesh_light_pdf(uint32_t light, float dist, float cos_light) const;
   const Material *surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const;
   std::vector<float> denoised_oidn() const;

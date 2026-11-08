@@ -629,6 +629,7 @@ Generate Lighting bakes on the GPU too.
 |---|---|---|
 | Lightmap Resolution | Texels per metre (Unity's default is 40) | Lower for big scenes, higher for sharp contact shadows |
 | Indirect Samples | Rays per texel | Raise if lightmaps look noisy |
+| Directional Mode | Directional keeps each texel's light direction, so normal maps catch baked light (Unity's default) | Non-Directional to halve the lightmaps' memory when nothing is bumpy |
 | Bounces | How many times light bounces | 2 usually; 3 or 4 for interiors |
 | GI Resolution | Half or Quarter of the screen, for objects without a realtime lightmap | Half for a cleaner Scene view |
 | Realtime Resolution | Realtime lightmaps' texels per metre (2, as Unity) | Higher for small rooms; 0 traces everything per pixel |

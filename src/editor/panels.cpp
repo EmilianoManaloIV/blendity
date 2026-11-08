@@ -502,6 +502,10 @@ struct InspectorReflector : Reflector {
     return last_skipped;
   }
   InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
+  /* Round 435 (ADR 0115): a field written here is an edit the views' scene hash must see - whoever drew the reflector. */
+  ~InspectorReflector() override {
+    if (changed) edit_epoch::bump();
+  }
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
   Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
@@ -2328,6 +2332,7 @@ void Editor::draw_profiler_gpu_views(const FrameProfile &fp, const std::function
   stat("GPU views: the CPU's share (instances / corners / see-through / the render call)",  // (round 415, ADR 0109)
        strprintf("%.2f / %.2f / %.2f / %.2f ms", fp.ms_gpu_instances, fp.ms_gpu_corners, fp.ms_gpu_see, fp.ms_gpu_render));
   stat("GPU views: corner blocks sent / held; lights left out of the views", strprintf("%llu / %.1f MB; %llu", (unsigned long long)fp.gpu_corner_uploads, (double)gpu_corner_floats_ * 4.0 / 1048576.0, (unsigned long long)fp.lights_culled));
+  if (fp.filters_on_card) stat("GPU views: camera filters run on the card", strprintf("%llu view(s)", (unsigned long long)fp.filters_on_card));  // (round 416, ADR 0110)
   for (int k = 0; k < gpu::Raster::kSlots; k++) {  // (task 0163: why a view drew on the CPU instead; a slot's last view keeps its reason until the device is chosen again)
     if (gpu_slot_reason_[k].empty()) continue;
     const RenderTarget *rt = gpu_slot_rt_[k];
@@ -2431,6 +2436,7 @@ void Editor::draw_profiler(const Recti &r) {
     stat("Between frames (last second)", strprintf("%.1f ms on average, 95%% within %.1f ms", mean, gaps[p95]));
   }
   stat("Draw items / scene hashes", strprintf("%.2f ms / %.2f ms (%llu)", fp.ms_collect, fp.ms_hash, (unsigned long long)fp.scene_hashes));
+  stat("Scene hashes kept / missed", strprintf("%llu / %llu", (unsigned long long)fp.scene_hash_reuses, (unsigned long long)fp.scene_hash_misses));  // (round 435, ADR 0115)
   stat("Edit Mode: operator / mesh writes / overlap check", strprintf("%.2f ms / %.2f ms / %.2f ms", fp.ms_edit_op, fp.ms_edit_apply, fp.ms_overlap));
   stat("Lighting key / snapping", strprintf("%.2f ms (%llu) / %.2f ms", fp.ms_lighting_key, (unsigned long long)fp.lightmap_key_hashes, fp.ms_snap_pick));
   const MeshCounts &mc = mesh_last_;
@@ -3797,11 +3803,12 @@ bool Editor::tool_combo_row(ui::Layout &lay, const char *label, const char *key,
  * instances themselves (children of a Scatter object). */
 std::vector<std::string> Editor::scatter_source_choices() const {
   std::vector<std::string> out;
+  std::unordered_set<std::string> seen;  // (round 418: a find per object over the names so far was 112 ms a frame on 10,000 objects)
   const GameObject *target = active_object();
   scene_->for_each([&](GameObject &g) {
     if (&g == target || !g.mesh_filter() || !g.mesh_filter()->mesh) return;
     if (g.parent && g.parent->name.rfind("Scatter", 0) == 0) return;
-    if (std::find(out.begin(), out.end(), g.name) == out.end()) out.push_back(g.name);
+    if (seen.insert(g.name).second) out.push_back(g.name);
   });
   return out;
 }

@@ -7,6 +7,7 @@
 // Theory: Fundamentals of Computer Graphics ch. 12.1 "Triangle Meshes".
 #pragma once
 
+#include "../core/edit_epoch.h"
 #include "../core/math.h"
 #include "../render/raster.h"
 
@@ -283,6 +284,7 @@ struct Mesh : MeshCaches {
    * was built - an Edit Mode drag, a deforming modifier - it follows them in place instead (ADR 0034): the same
    * triangles and the same picture as a rebuild, without the cost. */
   const RenderMesh &render_mesh(bool force_flat = false) const;
+  bool render_cache_warm(bool force_flat = false) const;  // (round 418: the next render_mesh returns at once)
   /* Same, plus MikkTSpace tangents for normal mapping (blender/intern/mikktspace). */
   const RenderMesh &render_mesh_tangents(bool force_flat = false) const;
   /* Unique edges, cached per version (wireframe & edit-mode overlays). */
@@ -291,7 +293,10 @@ struct Mesh : MeshCaches {
    * corner on the vertex), kept per topology: what a drag looks edges up in every frame (task 0087). Like the other
    * caches, for the main thread: not safe to call from jobs while the mesh changes. */
   const VertexFaces &vertex_faces() const;
-  void touch() { version++; }
+  void touch() {
+    version++;
+    edit_epoch::bump();  // (ADR 0115: the views' scene hash)
+  }
   /* After a drag (ADR 0034): tangents that followed it the quick way (Lengyel's, while the render mesh moved in
    * place) are made again with MikkTSpace on the next read, as a rebuild would. Changes how the mesh is drawn, not
    * what it is: `version` stays (an F9 adjustment and modifier caches still hold), `looks` moves (the views redraw).

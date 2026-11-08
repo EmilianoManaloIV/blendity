@@ -8,6 +8,7 @@
 #include "spring_bones.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
@@ -191,7 +192,31 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
   std::vector<Vec3> v;
   std::vector<Vec2> vt;
   ImportedNode *node = nullptr;
-  std::unordered_map<uint32_t, uint32_t> remap;  // global vertex -> local
+  /* Round 417: the global-to-local vertex map as a flat table (UINT32_MAX: not yet in this node) with the entries it
+   * set listed, so a new node clears only those; the integers parsed in place (it was a hash map looked up and a
+   * strtol per corner: 45 ms on the 50k sphere for Blender's 37). */
+  std::vector<uint32_t> remap;  // global vertex -> local
+  std::vector<uint32_t> remapped;
+  auto clear_remap = [&] {
+    for (uint32_t g : remapped) remap[g] = UINT32_MAX;
+    remapped.clear();
+  };
+  auto parse_int = [](const char *a, const char *le, long &v) {
+    const char *q = a;
+    bool neg = false;
+    if (q < le && (*q == '-' || *q == '+')) neg = *q == '-', q++;
+    long long n = 0;
+    const char *d = q;
+    int digits = 0;
+    while (q < le && *q >= '0' && *q <= '9') {
+      if (++digits <= 18) n = n * 10 + (*q - '0');
+      else n = (long long)LONG_MAX;  // (past 18 digits: out of any file's range, refused below as strtol's LONG_MAX was)
+      q++;
+    }
+    n = std::min<long long>(n, (long long)LONG_MAX);
+    v = (long)(neg ? -n : n);
+    return q > d ? q : a;
+  };
   std::unordered_map<std::string, int> slot_of;  // material name -> slot in node
   int cur_slot = 0;
   bool smooth = false;
@@ -207,7 +232,7 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
     node->mesh = std::make_shared<Mesh>();
     node->mesh->name = name;
     node->mesh->smooth = smooth;
-    remap.clear();
+    clear_remap();
     slot_of.clear();
     cur_slot = 0;
   };
@@ -259,14 +284,16 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
       fuv.clear();
       face_has_uv = true;
       const char *a = q + 2;
+      if (remap.size() < v.size()) remap.resize(v.size(), UINT32_MAX);
       while (true) {
         a = skip_ws(a, le);
         if (a >= le || *a == '\r') break;
-        long vi = std::strtol(a, nullptr, 10);
+        long vi = 0;
+        parse_int(a, le, vi);
         const char *slash = a;
         while (slash < le && *slash != '/' && *slash != ' ' && *slash != '\t' && *slash != '\r') slash++;
         long ti = 0;
-        if (slash < le && *slash == '/' && slash + 1 < le && slash[1] != '/') ti = std::strtol(slash + 1, nullptr, 10);
+        if (slash < le && *slash == '/' && slash + 1 < le && slash[1] != '/') parse_int(slash + 1, le, ti);
         while (a < le && *a != ' ' && *a != '\t' && *a != '\r') a++;
         if (vi < 0) vi = (long)v.size() + vi + 1;
         if (ti < 0) ti = (long)vt.size() + ti + 1;
@@ -275,9 +302,11 @@ bool import_obj_file(const std::string &path, ImportResult &out) {
           return false;
         }
         uint32_t g = (uint32_t)(vi - 1);
-        auto it = remap.find(g);
-        if (it == remap.end()) it = remap.emplace(g, node->mesh->add_vert(v[g])).first;
-        fv.push_back(it->second);
+        if (remap[g] == UINT32_MAX) {
+          remap[g] = node->mesh->add_vert(v[g]);
+          remapped.push_back(g);
+        }
+        fv.push_back(remap[g]);
         if (ti > 0 && ti <= (long)vt.size()) fuv.push_back(vt[ti - 1]);
         else face_has_uv = false;
       }

@@ -37,6 +37,8 @@ if [ "$OS" = "Darwin" ]; then LIBPLAT=macos_arm64; SOEXT=dylib; else LIBPLAT=lin
 LIBDIR="${BLENDITY_LIBDIR:-../blender/lib/$LIBPLAT}"
 USE_LIBS=0
 USE_QUADRIFLOW=0
+EXTRA_C_SRC=""
+CEXTRA=""
 LIBFLAGS=""
 LIBLINK=""
 LIBDIRS=""
@@ -90,6 +92,32 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   [ -d "$LIBDIR/vulkan/include" ] && addlib shaderc BL_WITH_VULKAN "shaderc/include vulkan/include" "shaderc/lib/libshaderc_combined.a"
   # Static libraries (manifold, openpgl) use TBB: list it again after them.
   LIBLINK="$LIBLINK $LIBDIR/tbb/lib/libtbb.$SOEXT"
+  # Round 419 (ADR 0112): the allocator - BLENDITY_ALLOCATOR=system (the default on Linux and macOS: oneTBB's
+  # allocator was measured on Windows only, and Blender never uses it on macOS) or tbbmalloc (Linux: oneTBB's scalable
+  # allocator replaces malloc / new process-wide, as Blender's Linux build does; linked though nothing names it).
+  XTRA="$LIBDIR/../../extra"
+  ALLOC="${BLENDITY_ALLOCATOR:-system}"
+  [ "$ALLOC" = auto ] && ALLOC=system
+  [ "${BLENDITY_NO_TBBMALLOC:-0}" = 1 ] && ALLOC=system
+  case "$ALLOC" in
+    system) ;;
+    tbbmalloc)
+      if [ "$OS" = "Darwin" ]; then echo "[blendity] BLENDITY_ALLOCATOR=tbbmalloc: not on macOS (Blender doesn't use it there)"; exit 1; fi
+      if [ -f "$LIBDIR/tbb/lib/libtbbmalloc_proxy.$SOEXT" ]; then
+        LIBFLAGS="$LIBFLAGS -DBL_WITH_TBBMALLOC"
+        LIBLINK="-Wl,--push-state,--no-as-needed $LIBDIR/tbb/lib/libtbbmalloc_proxy.$SOEXT -Wl,--pop-state $LIBLINK"
+      fi ;;
+    *) echo "[blendity] BLENDITY_ALLOCATOR=$ALLOC: not an allocator (system, tbbmalloc)"; exit 1 ;;
+  esac
+  # Tracy (a developer's profiler: BLENDITY_TRACY=1 only, never in a release; packaging/fetch_blender_libs.sh --extras).
+  if [ "${BLENDITY_TRACY:-0}" = 1 ] && [ ! -f "$XTRA/tracy/public/TracyClient.cpp" ]; then
+    echo "[blendity] BLENDITY_TRACY=1 but $XTRA/tracy isn't there (packaging/fetch_blender_libs.sh --extras): built without it"
+  fi
+  if [ "${BLENDITY_TRACY:-0}" = 1 ] && [ -f "$XTRA/tracy/public/TracyClient.cpp" ]; then
+    LIBFLAGS="$LIBFLAGS -DBL_WITH_TRACY -DTRACY_ENABLE -DTRACY_ON_DEMAND -isystem $XTRA/tracy/public"
+    EXTRA_C_SRC="$EXTRA_C_SRC $XTRA/tracy/public/TracyClient.cpp"
+    LIBLINK="$LIBLINK -lpthread -ldl"
+  fi
   # ABI settings the libraries were built with (blender/build_files/build_environment/cmake).
   # (Jolt only enables JPH_FLOATING_POINT_EXCEPTIONS_ENABLED for MSVC builds; a
   # mismatch makes its version check abort at start-up - see JoltConfig.cmake.)
@@ -103,7 +131,7 @@ if [ -z "${BLENDITY_NO_LIBS:-}" ] && [ -d "$LIBDIR/tbb/include" ]; then
   [ "$OS" = "Darwin" ] && LIBS="${LIBS/\$ORIGIN/@executable_path}"
   # Transitive runtime libraries for the linker (OpenEXR -> OpenJPH, Embree -> SYCL runtime).
   [ "$OS" = "Darwin" ] || LIBS="$LIBS -Wl,-rpath-link,$LIBDIR/openjph/lib:$LIBDIR/dpcpp/lib:$LIBDIR/tbb/lib:$LIBDIR/imath/lib"
-  echo "[blendity] Using Blender libraries from $LIBDIR:$LIBDIRS"
+  echo "[blendity] Using Blender libraries from $LIBDIR:$LIBDIRS - the allocator: $ALLOC"
 else
   echo "[blendity] Dependency-free build (no $LIBDIR: bash packaging/fetch_blender_libs.sh $LIBPLAT fetches them)"
 fi
@@ -153,6 +181,7 @@ LIB_SRC="$(ls src/core/*.cpp src/image/*.cpp src/render/*.cpp src/scene/*.cpp sr
 # Blender's libc_compat: the -ffast-math math symbols newer glibc dropped that its prebuilt static codecs (FFmpeg's
 # x265) still call (Linux only; empty elsewhere).
 [ "$USE_LIBS" = 1 ] && [ "$OS" != "Darwin" ] && LIB_SRC="$LIB_SRC extern/libc_compat/libc_compat.c"
+LIB_SRC="$LIB_SRC $EXTRA_C_SRC"  # (round 419: Tracy's client, when asked for)
 
 compile() {  # src -> object path (only rebuilds when the source or any header is newer)
   local src="$1"
@@ -164,13 +193,13 @@ compile() {  # src -> object path (only rebuilds when the source or any header i
     case "$src" in *.mm) extra="-fobjc-arc" ;; esac
     echo "  compiling $src"
     case "$src" in
-      *.c) ${CC:-cc} -O2 -Iextern/cuew/include -c "$src" -o "$obj" ;;  # ufbx is C99 (cuew too, task 0169)
+      *.c) ${CC:-cc} -O2 -Iextern/cuew/include $CEXTRA -c "$src" -o "$obj" ;;  # ufbx is C99 (cuew too, task 0169)
       *) $CXX $FLAGS $extra -c "$src" -o "$obj" ;;
     esac
   fi
 }
 export -f compile
-export CXX FLAGS OBJ
+export CXX FLAGS OBJ CEXTRA
 
 echo "[blendity] Compiling ($CONFIG, $OS, $JOBS jobs)..."
 TEST_SRC="$(ls tests/*.cpp)"

@@ -146,7 +146,8 @@ everything):
   import preview with the shading switchable before anything lands in the project, hair that keeps its curl, parts into
   strands and moves in the wind (and is rigged from its own mesh in one step), soft tissue that trails the body's
   acceleration and keeps its volume, texture baking.
-- **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps, probe volumes and voxel realtime GI;
+- **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps (denoised where they're noisy, soft
+  shadows from Unity's Baked Shadow Radius and Angle, directional as Unity's), probe volumes and voxel realtime GI; baked VRC Light Volumes light moving objects in the views as VRChat does;
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
   the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
@@ -301,8 +302,11 @@ They land in `../blender/lib/<platform>` (Blender's own layout, from `projects.b
 add Embree, OpenImageDenoise, oneTBB, Eigen,
 OpenSubdiv, OpenEXR, OpenColorIO, Manifold, Open PGL, Jolt, Vulkan + shaderc, FFmpeg and others; each has a built-in fallback,
 and `BLENDITY_NO_LIBS=1` (CMake: `-DBLENDITY_NO_LIBS=ON`) forces the dependency-free build. Type `libs` in the Console to see what's active.
+On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_ALLOCATOR=system` builds without it;
+Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
+`packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (16045 unit checks in 1564 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (16822 unit checks in 1642 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

@@ -106,6 +106,7 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   if (mesh_job_) add(mesh_job_->label, -1.0f, [this] { mesh_job_->cancel.store(true); }, mesh_job_->cancel.load());
   for (const auto &j : eval_jobs_) add("Evaluating " + j->name, -1.0f, nullptr);
   if (save_job_) add("Saving " + fs::filename(save_job_->path), -1.0f, nullptr);
+  if (shot_job_) add("Saving screenshot", -1.0f, nullptr);  // (round 418)
   if (open_job_) add("Opening " + fs::filename(open_job_->path), -1.0f, nullptr);
   if (import_job_) add("Reading " + fs::filename(import_job_->path), -1.0f, nullptr);
   if (file_export_job_) add("Writing " + fs::filename(file_export_job_->path), -1.0f, nullptr);
@@ -261,6 +262,12 @@ bool Editor::jobs_cancel(const std::string &label) {
 
 /* jobs | jobs cancel [label] */
 void Editor::jobs_command(const std::vector<std::string> &t) {
+  /* Round 437: `jobs async on|off` - a headless editor's renders, bakes and loads on workers as a window's are, so a
+   * script measures the frames the window would have (a window's are always on workers). */
+  if (t.size() > 1 && to_lower(t[1]) == "async") {
+    if (t.size() > 2) async_jobs_ = to_lower(t[2]) == "on";
+    return Log::info("jobs async: %s", jobs_async() ? "on (renders, bakes and loads run on workers)" : "off (a headless editor's jobs run in their frame)");
+  }
   const std::vector<JobView> jobs = jobs_running();
   const bool cancel = t.size() > 1 && to_lower(t[1]) == "cancel";
   if (cancel && jobs.empty()) return Log::warn("jobs cancel: nothing is running");

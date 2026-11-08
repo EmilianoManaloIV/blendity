@@ -35,6 +35,16 @@ struct FilterFrame {
 
 using FilterPass = std::function<void(RenderTarget &, const FilterFrame *)>;
 
+/* Round 416 (ADR 0110): a pass the card can run itself over its picture (gpu::Raster, RasterFrame::post) - the same
+ * settings the CPU's pass takes, as the kinds the card has. A stack whose passes are all of these (FilterStack::card
+ * as long as its passes) runs on the card when its picture is the card's and no raster stage, no internal resolution
+ * and no depth of field is in the way; else the CPU's passes run over the picture read back, as before. */
+struct PostPass {
+  enum Kind { None = 0, Bloom = 1, Vignette = 2, ColorGrading = 3, ChromaticAberration = 4, FilmGrain = 5 };
+  int kind = None;
+  float p[20] = {};
+};
+
 struct FilterStack {
   /* Raster stage. */
   float vertex_snap = 0.0f;
@@ -47,6 +57,9 @@ struct FilterStack {
   enum Fit { Fill = 0, Letterbox = 1 };
   int width = 0, height = 0, fit = Fill;
   std::vector<FilterPass> passes;
+  /* Round 416: the passes as the card runs them, in the passes' order - one for each pass that has a card version, so
+   * a stack with fewer card passes than passes runs whole on the CPU over the picture read back. */
+  std::vector<PostPass> card;
 
   bool empty() const { return vertex_snap <= 0.0f && !affine_uv && !tex.active() && !screen_door && height <= 0 && passes.empty(); }
   void apply_raster(RasterOptions &o) const {

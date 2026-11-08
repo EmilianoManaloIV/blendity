@@ -106,10 +106,17 @@ bool Editor::import_job_start(const std::string &path, bool copy_into_assets, bo
   }
   auto job = std::make_unique<ImportJob>();
   job->path = path, job->copy_into_assets = copy_into_assets, job->preview = preview, job->shading = shading;
+  /* Review 422: the copies on the worker only when no preview dialog is open - its Import copies on this thread and
+   * could meet the worker's in the same folder. (A preview's own read queues behind this job, so none opens meanwhile.) */
+  job->prepare = !preview && !ipv_.open;
   job->started = now_seconds();
   ImportJob *raw = job.get();
-  raw->thread = std::thread([raw] {
-    JobSystem::global().run_background([raw] { raw->ok = import_model(raw->path, raw->result); });
+  raw->thread = std::thread([this, raw] {
+    JobSystem::global().run_background([this, raw] {
+      raw->ok = import_model(raw->path, raw->result);
+      /* Round 422: no dialog to wait for - the copies into Assets made here, not in the landing frame. */
+      if (raw->ok && raw->prepare) prepare_import_files(raw->path, raw->copy_into_assets, raw->result, raw->files);
+    });
     raw->done.store(true, std::memory_order_release);
   });
   import_job_ = std::move(job);
@@ -137,9 +144,9 @@ void Editor::import_landed(ImportJob &j) {
     std::vector<std::string> originals;
     for (const MaterialPtr &m : j.result.materials) originals.push_back(m ? save_material_text(*m) : std::string());
     apply_import_shading(j.result.materials, originals, j.shading);
-    finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, j.shading != 0);
+    finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, j.shading != 0, {}, &j.files);
   }
-  else finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, false);
+  else finish_import(j.path, j.copy_into_assets, j.result, t, ImportOutline::Keep, 0.0f, false, {}, &j.files);
   if (ipv_.open || ipv_queue_.empty()) return;
   const std::pair<std::string, bool> next = ipv_queue_.front();  // (the next file's turn, on every path - a failure too)
   ipv_queue_.erase(ipv_queue_.begin());
@@ -181,19 +188,30 @@ static void import_outlines(const std::vector<GameObject *> &objects, ImportOutl
   }
 }
 
-/* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets,
- * the .mat files, the objects (an Outline on each mesh when `outline_width` is set), the clips. */
-void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
-                           bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit) {
-  /* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
-   * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
-   * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). */
-  std::unordered_map<std::string, std::string> tex_map;
+/* Unity copies imported files into Assets: the model into Assets/Meshes (when it comes from outside the project, or
+ * dropped), its textures into Assets/Textures/<model> (any not in the project yet: embedded ones, ones beside a model
+ * elsewhere), and its materials into Assets/Materials/<model>, pointing at the copies (task 0134). Files only - no
+ * scene, no materials touched: the import's worker runs it (round 422). */
+void Editor::prepare_import_files(const std::string &path, bool copy_into_assets, const ImportResult &r, ImportFiles &out) {
   std::vector<std::string> sources{path};
   if (copy_into_assets || !inside_assets(path)) sources.push_back(copy_model_into_assets(path));
-  const bool again = import_folder_reused(sources, fs::stem(path));
-  const std::string model = import_folder(sources, fs::stem(path));
-  copy_import_textures(r, model, again, tex_map);
+  out.again = import_folder_reused(sources, fs::stem(path));
+  out.model = import_folder(sources, fs::stem(path));
+  out.tex_map.clear();
+  copy_import_textures(r, out.model, out.again, out.tex_map);
+  out.ready = true;
+}
+
+/* The rest of an import once the model is read (and, from the preview, its materials chosen): the copies into Assets
+ * (made already on the import's worker when `prepared`), the .mat files, the objects (an Outline on each mesh when
+ * `outline_width` is set), the clips. */
+void Editor::finish_import(const std::string &path, bool copy_into_assets, ImportResult &r, ScopedTimer &t, ImportOutline outline, float outline_width,
+                           bool rewrite_materials, const std::function<void(GameObject *root)> &before_commit, const ImportFiles *prepared) {
+  ImportFiles files;
+  if (prepared && prepared->ready) files = *prepared;
+  else prepare_import_files(path, copy_into_assets, r, files);
+  const std::unordered_map<std::string, std::string> &tex_map = files.tex_map;
+  const std::string &model = files.model;
   auto fix = [&](TextureRef &ref) {
     if (ref.empty()) return;
     auto it = tex_map.find(ref.path);

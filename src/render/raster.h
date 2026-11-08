@@ -82,9 +82,23 @@ struct Lightmap {
   Vec3 sample(Vec2 uv) const;
 };
 
+/* Round 444 (ADR 0117): whether a light's direct light is in a surface's baked light already. */
+inline bool light_baked_here(int bake_mode, bool lightmapped, bool probe_baked) {
+  if (bake_mode == 2) return lightmapped || probe_baked;
+  return bake_mode == 3 && lightmapped;
+}
+/* Round 444: Unity's default Realtime Shadow Color (Lighting > Subtractive): what a moving object's shadow darkens a
+ * Subtractive lightmap toward. */
+constexpr Vec3 kSubtractiveShadowColor{0.42f, 0.478f, 0.627f};
+/* Round 444: a Shadowmask Mixed light's mask channel (bake_mode 4-6), -1 otherwise. */
+inline int light_mask_channel(int bake_mode) { return bake_mode >= 4 && bake_mode <= 6 ? bake_mode - 4 : -1; }
+
 struct RenderLight {
   enum Type { Directional = 0, Point = 1, Spot = 2, Area = 3 } type = Directional;
-  int bake_mode = 0;  // Unity's Light Mode: 0 Realtime, 1 Mixed, 2 Baked (in the lightmaps: skipped on lightmapped surfaces)
+  /* What the bake holds of it: 0 Realtime (nothing), 1 Mixed (its bounce), 2 Baked (in the lightmaps and baked probes:
+   * skipped where they light), round 444: 3 a Subtractive Mixed light (in the lightmaps: skipped on lightmapped
+   * surfaces only), 4-6 a Shadowmask Mixed light (realtime, its shadow on lightmapped surfaces from mask channel 0-2). */
+  int bake_mode = 0;
   Vec3 direction{0, -1, 0};  // the way the light points (directional, spot, area)
   Vec3 right{1, 0, 0};       // area: the rectangle's width direction (height = cross(direction, right))
   float cos_outer = 0.0f, cos_inner = 0.0f;  // spot cone (cosines of the half angles)
@@ -95,6 +109,12 @@ struct RenderLight {
   float intensity = 1.0f;
   float range = 10.0f;
   bool shadows = true;
+  /* Round 424: the bake's light size - a point or spot light's ball radius (m), a sun's full angle (degrees). */
+  float shadow_radius = 0.0f, shadow_angle = 0.0f;
+  /* Round 425: a bake's copy of a Baked or Mixed point or spot light falls off as Unity's built-in pipeline bakes it - the
+   * legacy curve 1 / (1 + 25 (d / Range)^2), windowed to nothing at Range by (1 - (d / Range)^4)^2 - not as the views
+   * draw it. */
+  bool baked_falloff = false;
 };
 
 /* An area light is an emissive plane (task 0155, ADR 0050): a Lambertian emitter of radiance intensity x pi over its
@@ -119,16 +139,28 @@ inline float area_light_area(const RenderLight &l) {
   return finite_bits(a) && a > 1e-4f ? a : 1e-4f;
 }
 
+/* A point or spot light's falloff with distance: the views' curve (1 - d / Range)^2, or a bake's legacy curve (round 425,
+ * RenderLight::baked_falloff). */
+inline float range_falloff(const RenderLight &l, float dist) {
+  const float x = dist / (l.range > 1e-3f ? l.range : 1e-3f);
+  if (!l.baked_falloff) {
+    const float f = 1.0f - x;
+    return f > 0.0f ? f * f : 0.0f;
+  }
+  if (!(x < 1.0f)) return 0.0f;
+  const float w = 1.0f - x * x * x * x;
+  return w * w / (1.0f + 25.0f * x * x);
+}
+
 /* How much of a point, spot or area light reaches p, besides the N.L term:
- * the range falloff (Unity's built-in curve), the spot cone with its soft
+ * the range falloff (range_falloff: the views' curve, or a bake's Unity legacy curve), the spot cone with its soft
  * edge; an area light taken at its centre (area_light_falloff: its facing, the
  * inverse square, the window). L points from p toward the light. */
 inline float light_falloff(const RenderLight &l, Vec3 p, Vec3 L) {
   if (l.type == RenderLight::Directional) return 1.0f;
   if (l.type == RenderLight::Area) return area_light_area(l) * area_light_falloff(l, l.position, p);
   const float dist = length(l.position - p);
-  float f = 1.0f - dist / (l.range > 1e-3f ? l.range : 1e-3f);
-  f = f > 0.0f ? f * f : 0.0f;
+  float f = range_falloff(l, dist);
   const float c = -(l.direction.x * L.x + l.direction.y * L.y + l.direction.z * L.z);  // toward p, from the light
   if (l.type == RenderLight::Spot) {
     const float d = l.cos_inner - l.cos_outer;
@@ -169,6 +201,7 @@ Vec3 area_light_specular_dir(const RenderLight &l, Vec3 p, Vec3 R, float &facing
 struct VoxelGIFrame;  // voxel_gi.h
 struct Rsm;
 struct ProbeFrame;  // probe_volume.h
+struct LightVolumeFrame;  // light_volume_bake.h
 
 struct LightingEnv {
   Vec3 sky{0.45f, 0.52f, 0.62f};
@@ -186,6 +219,7 @@ struct LightingEnv {
   bool rt_bounce_not_baked = false;
   float rt_specular_occlusion = 0.0f;
   const ProbeFrame *probes = nullptr; // probe volumes (task 0014): null = none
+  const LightVolumeFrame *light_volumes = nullptr;  // round 443 (task 0419): baked VRC Light Volumes - an object without a lightmap takes their light where they hold it; null = none
   std::vector<RenderProbe> reflection_probes;  // round 401: Unity's reflection probes with a bake (the specular environment inside their boxes)
   bool unity_brdf = false;  // round 405: a scene from Unity - the probes' and the sky's reflection weighted as Unity's BRDF does
   ViewTransform view_transform = ViewTransform::Standard;
@@ -207,6 +241,8 @@ struct DrawItem {
   /* Baked lighting: its page and the lightmap UVs, 3 per render-mesh triangle (null = not lightmapped). */
   const Lightmap *lightmap = nullptr;
   const std::vector<Vec2> *lightmap_uv = nullptr;
+  const Lightmap *lightmap_dir = nullptr;  // round 426: its direction page (same size and UVs), when the bake is directional
+  const Lightmap *shadowmask = nullptr;    // round 444: its shadowmask page (same size and UVs), in a Shadowmask bake
   bool use_probes = false;  // takes its indirect light from the probe volume (no lightmap)
   /* Realtime lightmaps (task 0016): voxel GI's bounce and sky share per texel, with their UVs (3 per
    * triangle). Set: the per-pixel GI pass reads these instead of tracing. realtime_lm: the editor wants
@@ -284,6 +320,7 @@ struct RenderTarget {
    * by deferred shading when want_hdr is set, with the view transform and exposure that encoded the
    * colour. A pixel it didn't shade (the sky, see-through surfaces) has x = -1. */
   bool want_hdr = false;
+  bool filters_on_card = false;  // round 416 (ADR 0110): the camera's filters ran on the card over this picture (the CPU's passes are skipped)
   std::vector<Vec3> hdr;
   ViewTransform hdr_view_transform = ViewTransform::Standard;
   float hdr_exposure = 0.0f;
@@ -291,6 +328,10 @@ struct RenderTarget {
   /* Depth alone (a shadow map): no colour and no ids plane - nothing picks in it (task 0085). */
   void make_depth_only(int w, int h);
   void resize_planes(bool with_ids = true);
+  /* (Task 0421) What the planes hold, by capacity - the colour is the image's, not counted. */
+  size_t plane_bytes() const {
+    return depth.capacity() * sizeof(float) + (ids.capacity() + vis.capacity()) * sizeof(uint32_t) + hdr.capacity() * sizeof(Vec3);
+  }
   uint32_t id_at(int x, int y) const {
     return (x >= 0 && y >= 0 && x < width && y < height && !ids.empty()) ? ids[(size_t)y * width + x] : 0;
   }
@@ -375,6 +416,12 @@ class Renderer3D {
     stats_.tris_submitted = tris;
   }
   RenderTarget *target() const { return rt_; }
+  /* (Task 0421) The scratch this renderer keeps between frames (capacities: cleared, not freed), and giving it back:
+   * trim_scratch(keep) frees all of it when it exceeds `keep` bytes - between frames only (it does nothing inside an
+   * overlay batch) - and returns what it freed. */
+  size_t scratch_bytes() const;
+  size_t trim_scratch(size_t keep);
+  uint64_t use_count() const { return uses_; }  // (flushes and overlay batches: the editor trims a renderer that has drawn none for a while)
 
  private:
   struct ScreenTri {
@@ -410,10 +457,12 @@ class Renderer3D {
   float draw_volume_pixel(const DrawItem &it, const Mat4 &inv, const Material &mat, Vec3 eye, Vec3 front, bool from_eye, int x, int y, float behind_z, const Environment &env);  // (its cover, 0..1)
   /* light_surface after its lights' loop (`lo`): reflections, ambient, emission (the 8-wide shader's per-pixel end). */
   Vec3 light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const;
+  float subtractive_vis(const RenderLight &l, int li, const SurfacePoint &sp, const DrawItem &it) const;  // (round 444)
   /* 8 pixels of a row on one plain-material triangle, lit at once (task 0091; x86 with AVX2): appended in order. */
   void shade_run8(const Shade8Tri &t, const SurfaceSample &surface, int x, int64_t y, Vec3 eye, const Environment &env,
                   std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const;
 
+  uint64_t uses_ = 0;
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
   LightingEnv env_;
@@ -432,6 +481,9 @@ class Renderer3D {
   void fill_pending_sky();
   /* An overlay prepared for drawing (screen space, clipped). */
   struct OverlayCmd {
+    /* (Round 437: left unset - a cage's million commands are resized into the batch and written once by the prepare,
+     * not zeroed first: 48 MB of zeros a frame.) */
+    OverlayCmd() {}
     float x0, y0, z0, x1, y1, z1;  // line ends, or a point's centre in x0 / y0 / z0 and its radius in x1
     uint32_t color;
     float bias;
@@ -440,6 +492,7 @@ class Renderer3D {
   };
   bool batching_ = false;
   std::vector<OverlayCmd> overlay_cmds_;
+  std::vector<uint32_t> band_idx_;  // (round 437: end_overlay_batch's band lists, kept between batches - not 7 MB allocated each)
   OverlayRecord *record_ = nullptr;  // (task 0192)
   /* flush() scratch, kept between flushes (cleared, not freed): per item, is it visible, is it big enough
    * for the separate vertex stage, does it have see-through materials; the vertex-stage jobs. */

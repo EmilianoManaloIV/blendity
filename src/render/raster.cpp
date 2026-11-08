@@ -2,6 +2,7 @@
 #include "raster.h"
 #include "voxel_gi.h"
 #include "probe_volume.h"
+#include "light_volume_bake.h"
 
 #include "../core/core.h"
 #include "../core/cpu.h"
@@ -552,7 +553,21 @@ static const Material *item_material(const DrawItem &it, uint32_t prim) {
   return default_material().get();
 }
 
+/* Task 0419: a point without a lightmap in a baked VRC Light Volume takes the volume's light as its ambient (as VRChat's
+ * shader does, at the surface point, unbiased); where the volume is blending out at its edge the probe volume's light, or
+ * the sky's where there is none, takes the rest. The volume holds the Baked lights' direct light, as baked probes do. */
+static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, const Environment &env) {
+  Vec3 light;
+  float cover = 0.0f;
+  if (!lv.sample(sp.position, sp.normal, light, cover)) return;
+  const Vec3 rest = sp.has_probe ? sp.probe : env.irradiance(sp.normal);
+  sp.probe = light + rest * (1.0f - cover);
+  sp.probe_baked = cover >= 0.5f || (sp.has_probe && sp.probe_baked);
+  sp.has_probe = true;
+}
+
 void Renderer3D::flush() {
+  uses_++;  // (task 0421)
   ScopedTimer total;
   JobSystem &js = JobSystem::global();
   int saved_threads = js.max_threads();
@@ -1104,13 +1119,21 @@ void Renderer3D::draw_overlay(const OverlayCmd &c, int ymin, int ymax) {
   if (c.point) {
     const float r = c.x1;
     const int cx = (int)c.x0, cy = (int)c.y0, ir = (int)std::ceil(r);
+    /* (Round 437: the coverage r + 1/2 - distance needs the square root only on the rim - inside (r - 1/2) it is 1,
+     * past (r + 1/2) nothing; an opaque dot's inside written, not blended. Half a million cage dots a frame.) */
+    const float in = std::max(0.0f, r - 0.5f), in2 = in * in, out2 = (r + 0.5f) * (r + 0.5f);
+    const bool opaque = (c.color >> 24) == 255 && r >= 0.5f;  // (a dot under half a pixel: its centre blended, as before)
     for (int y = std::max(cy - ir, ymin); y <= cy + ir && y < ymax; y++)
-      for (int x = cx - ir; x <= cx + ir; x++) {
-        if (x < 0 || x >= Wi) continue;
-        float dx = x + 0.5f - c.x0, dy = y + 0.5f - c.y0;
-        float a = saturate(r + 0.5f - std::sqrt(dx * dx + dy * dy));
-        if (a <= 0) continue;
+      for (int x = std::max(cx - ir, 0); x <= cx + ir && x < Wi; x++) {
+        const float dx = x + 0.5f - c.x0, dy = y + 0.5f - c.y0, d2 = dx * dx + dy * dy;
+        if (d2 >= out2) continue;
         uint32_t &d = rt_->color[(size_t)y * rt_->stride + x];
+        if (d2 <= in2 && opaque) {
+          d = c.color;
+          continue;
+        }
+        const float a = d2 <= in2 ? 1.0f : saturate(r + 0.5f - std::sqrt(d2));
+        if (a <= 0) continue;
         d = Color::over(d, Color::with_alpha(c.color, a * ((c.color >> 24) / 255.0f)));  // (over: task 0193)
       }
     return;
@@ -1171,36 +1194,89 @@ void Renderer3D::point(Vec3 p, float r, uint32_t color, bool depth_test) {
 
 template <class Prepare>
 void Renderer3D::record_many(size_t n, const Prepare &prepare) {
+  /* Round 417: prepared into one array on every core, then the kept ones compacted on every core in order (a chunk's
+   * own stretch each) - no vector per chunk and no second copy (a cage's million lines spent 10 ms on those). */
   constexpr size_t kChunk = 4096;
   const size_t nc = (n + kChunk - 1) / kChunk;
-  std::vector<std::vector<OverlayCmd>> parts(nc);
+  if (nc <= 1) {
+    for (size_t i = 0; i < n; i++) {
+      OverlayCmd cmd;
+      if (!prepare(i, cmd)) continue;
+      if (batching_) overlay_cmds_.push_back(cmd);
+      else draw_overlay(cmd, 0, rt_->height);
+    }
+    return;
+  }
+  /* Round 437: prepared straight into the batch - each chunk keeps its own commands at the front of its stretch, then
+   * the stretches close up in order (nothing moves while every command is kept, as a cage's mostly are). The batch
+   * isn't zeroed first (OverlayCmd's constructor leaves it unset): Enter Edit Mode on a 500k-face mesh had zeroed and
+   * copied two million-command arrays. */
+  const bool batch = batching_;
+  std::vector<OverlayCmd> direct;  // (not batching: drawn at once, from here)
+  std::vector<OverlayCmd> &into = batch ? overlay_cmds_ : direct;
+  const size_t base = into.size();
+  into.resize(base + n);
+  std::vector<uint32_t> kept(nc, 0);
   JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
     for (int64_t c = c0; c < c1; c++) {
-      std::vector<OverlayCmd> &out = parts[(size_t)c];
+      OverlayCmd *out = into.data() + base + (size_t)c * kChunk;
+      uint32_t count = 0;
+      for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++)
+        count += prepare(i, out[count]) ? 1u : 0u;  // (a refused one is written over by the next)
+      kept[(size_t)c] = count;
+    }
+  });
+  size_t at = base;
+  for (size_t c = 0; c < nc; c++) {
+    const size_t from = base + c * kChunk;
+    if (at != from && kept[c]) std::memmove(into.data() + at, into.data() + from, kept[c] * sizeof(OverlayCmd));
+    at += kept[c];
+  }
+  into.resize(at);
+  if (batch) return;
+  for (const OverlayCmd &cmd : direct) draw_overlay(cmd, 0, rt_->height);
+}
+
+/* Round 417: many ops recorded on every core in pieces, appended in order (a 500k-face cage's million edges and half a
+ * million dots went through `line` / `point` one at a time: 40 ms of one thread in the frame that enters Edit Mode). */
+template <class Make>
+static void record_ops(Renderer3D::OverlayRecord &r, size_t n, const Make &make) {
+  using Op = Renderer3D::OverlayRecord::Op;
+  constexpr size_t kChunk = 4096;
+  const size_t nc = (n + kChunk - 1) / kChunk;
+  if (nc <= 1) {
+    for (size_t i = 0; i < n; i++) {
+      Op op;
+      if (make(i, op)) r.ops.push_back(op);
+    }
+    return;
+  }
+  std::vector<std::vector<Op>> parts(nc);
+  JobSystem::global().parallel_for((int64_t)nc, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t c = c0; c < c1; c++) {
+      std::vector<Op> &out = parts[(size_t)c];
       out.reserve(kChunk);
       for (size_t i = (size_t)c * kChunk; i < std::min(n, (size_t)(c + 1) * kChunk); i++) {
-        OverlayCmd cmd;
-        if (prepare(i, cmd)) out.push_back(cmd);
+        Op op;
+        if (make(i, op)) out.push_back(op);
       }
     }
   });
   size_t total = 0;
-  for (const std::vector<OverlayCmd> &part : parts) total += part.size();
-  if (batching_) overlay_cmds_.reserve(overlay_cmds_.size() + total);
-  for (const std::vector<OverlayCmd> &part : parts)
-    for (const OverlayCmd &cmd : part) {
-      if (batching_) overlay_cmds_.push_back(cmd);
-      else draw_overlay(cmd, 0, rt_->height);
-    }
+  for (const std::vector<Op> &part : parts) total += part.size();
+  r.ops.reserve(r.ops.size() + total);
+  for (const std::vector<Op> &part : parts) r.ops.insert(r.ops.end(), part.begin(), part.end());
 }
 
 void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &, uint32_t &)> &get, bool depth_test, float bias) {
   if (record_) {
-    for (size_t i = 0; i < n; i++) {
+    record_ops(*record_, n, [&](size_t i, OverlayRecord::Op &op) {
       Vec3 a, b;
       uint32_t color = 0;
-      if (get(i, a, b, color)) line(a, b, color, depth_test, bias);
-    }
+      if (!get(i, a, b, color)) return false;
+      op.kind = OverlayRecord::Op::Line, op.a = a, op.b = b, op.color = color, op.value = bias, op.depth_test = depth_test;
+      return true;
+    });
     return;
   }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
@@ -1212,11 +1288,13 @@ void Renderer3D::lines(size_t n, const std::function<bool(size_t, Vec3 &, Vec3 &
 
 void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3 &, uint32_t &)> &get, bool depth_test) {
   if (record_) {
-    for (size_t i = 0; i < n; i++) {
+    record_ops(*record_, n, [&](size_t i, OverlayRecord::Op &op) {
       Vec3 p;
       uint32_t color = 0;
-      if (get(i, p, color)) point(p, r, color, depth_test);
-    }
+      if (!get(i, p, color)) return false;
+      op.kind = OverlayRecord::Op::Point, op.a = p, op.color = color, op.value = r, op.depth_test = depth_test;
+      return true;
+    });
     return;
   }
   record_many(n, [&](size_t i, OverlayCmd &cmd) {
@@ -1228,16 +1306,55 @@ void Renderer3D::points(size_t n, float r, const std::function<bool(size_t, Vec3
 
 /* What was recorded, drawn here as it would have been (task 0192: the card couldn't take it). */
 void Renderer3D::replay(const OverlayRecord &r) {
-  for (const OverlayRecord::Op &op : r.ops) switch (op.kind) {
-      case OverlayRecord::Op::Line: line(op.a, op.b, op.color, op.depth_test, op.value); break;
-      case OverlayRecord::Op::Point: point(op.a, op.value, op.color, op.depth_test); break;
-      case OverlayRecord::Op::Outline:
-        outline_ids(std::vector<uint32_t>(r.ids.begin() + op.first, r.ids.begin() + op.first + op.count), op.color, (int)op.value);
-        break;
+  /* Round 417: the lines and dots between two outlines projected and clipped on every core (record_many), in order; an
+   * outline in its place. (Replayed one at a time, a million edges' projection was 30 ms of one thread.) */
+  size_t at = 0;
+  while (at < r.ops.size()) {
+    const OverlayRecord::Op &op = r.ops[at];
+    if (op.kind == OverlayRecord::Op::Outline) {
+      outline_ids(std::vector<uint32_t>(r.ids.begin() + op.first, r.ids.begin() + op.first + op.count), op.color, (int)op.value);
+      at++;
+      continue;
     }
+    size_t to = at + 1;
+    while (to < r.ops.size() && r.ops[to].kind != OverlayRecord::Op::Outline) to++;
+    const size_t first = at;
+    record_many(to - at, [&](size_t i, OverlayCmd &cmd) {
+      const OverlayRecord::Op &o = r.ops[first + i];
+      return o.kind == OverlayRecord::Op::Line ? prepare_line(o.a, o.b, o.color, o.depth_test, o.value, cmd)
+                                               : prepare_point(o.a, o.value, o.color, o.depth_test, cmd);
+    });
+    at = to;
+  }
+}
+
+/* (Task 0421) The scratch kept between frames, by capacity. */
+size_t Renderer3D::scratch_bytes() const {
+  size_t n = items_.capacity() * sizeof(DrawItem) + overlay_cmds_.capacity() * sizeof(OverlayCmd) + band_idx_.capacity() * sizeof(uint32_t) +
+             visible_.capacity() + big_.capacity() + see_through_.capacity() + vjobs_.capacity() * sizeof(VJob) +
+             (gi_lo_.capacity() + gi_blur_.capacity()) * sizeof(GiTexel) + normal_mats_.capacity() * sizeof(Mat4);
+  for (const auto &v : clip_pos_) n += v.capacity() * sizeof(Vec4);
+  for (const auto &v : screen_pos_) n += v.capacity() * sizeof(Vec4);
+  for (const auto &v : colors_) n += v.capacity() * sizeof(Vec3);
+  for (const Chunk &c : chunks_)
+    n += c.ranges.capacity() * sizeof(ChunkRange) + c.tris.capacity() * sizeof(ScreenTri) + (c.tile_offsets.capacity() + c.tile_tris.capacity()) * sizeof(uint32_t);
+  return n;
+}
+
+size_t Renderer3D::trim_scratch(size_t keep) {
+  if (batching_) return 0;
+  const size_t had = scratch_bytes();
+  if (had <= keep) return 0;
+  auto free_all = [](auto &v) { std::decay_t<decltype(v)>().swap(v); };
+  free_all(items_), free_all(overlay_cmds_), free_all(band_idx_), free_all(visible_), free_all(big_), free_all(see_through_);
+  free_all(vjobs_), free_all(gi_lo_), free_all(gi_blur_), free_all(normal_mats_);
+  free_all(clip_pos_), free_all(screen_pos_), free_all(colors_), free_all(chunks_);
+  active_chunks_ = 0;
+  return had - scratch_bytes();
 }
 
 void Renderer3D::begin_overlay_batch() {
+  uses_++;  // (task 0421)
   batching_ = true;
   overlay_cmds_.clear();
 }
@@ -1246,23 +1363,53 @@ void Renderer3D::begin_overlay_batch() {
 void Renderer3D::end_overlay_batch() {
   batching_ = false;
   if (overlay_cmds_.empty() || !rt_ || !rt_->color) return;
-  const int H = rt_->height, band = 32, nb = (H + band - 1) / band;
-  if (overlay_cmds_.size() < 64 || nb < 2 || !opt_.multithreaded) {
+  /* Round 417: a big batch (an Edit Mode cage's million edges) in 8-row bands - four times the slices for the cores, the
+   * busiest band a quarter of what it was - and the band sort's counting and filling on every core, a chunk of
+   * commands each (each chunk fills its own stretch of each band, in command order, so a band's list is in order). */
+  const size_t n = overlay_cmds_.size();
+  const int H = rt_->height, band = n >= 200000 ? 8 : 32, nb = (H + band - 1) / band;
+  if (n < 64 || nb < 2 || !opt_.multithreaded) {
     for (const OverlayCmd &c : overlay_cmds_) draw_overlay(c, 0, H);
     overlay_cmds_.clear();
     return;
   }
-  /* Counting sort of command indices into the bands they touch (in order within each band). */
-  std::vector<uint32_t> offs((size_t)nb + 1, 0);
-  for (const OverlayCmd &c : overlay_cmds_)
-    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) offs[(size_t)b + 1]++;
-  for (int b = 0; b < nb; b++) offs[(size_t)b + 1] += offs[(size_t)b];
-  std::vector<uint32_t> idx(offs[(size_t)nb]), fill(offs.begin(), offs.end() - 1);
-  for (uint32_t i = 0; i < overlay_cmds_.size(); i++) {
-    const OverlayCmd &c = overlay_cmds_[i];
-    for (int b = std::max(0, c.ymin / band); b <= std::min(nb - 1, std::max(0, c.ymax) / band); b++) idx[fill[(size_t)b]++] = i;
+  auto bands_of = [&](const OverlayCmd &c, int &b0, int &b1) {
+    b0 = std::max(0, c.ymin / band);
+    b1 = std::min(nb - 1, std::max(0, c.ymax) / band);
+  };
+  constexpr size_t kChunk = 65536;
+  const size_t nchunks = (n + kChunk - 1) / kChunk;
+  JobSystem &js = JobSystem::global();
+  std::vector<uint32_t> counts(nchunks * (size_t)nb, 0);  // [chunk * nb + band]
+  js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t ch = c0; ch < c1; ch++) {
+      uint32_t *cnt = &counts[(size_t)ch * (size_t)nb];
+      for (size_t i = (size_t)ch * kChunk; i < std::min(n, (size_t)(ch + 1) * kChunk); i++) {
+        int b0, b1;
+        bands_of(overlay_cmds_[i], b0, b1);
+        for (int b = b0; b <= b1; b++) cnt[b]++;
+      }
+    }
+  });
+  std::vector<uint32_t> offs((size_t)nb + 1, 0), start(nchunks * (size_t)nb, 0);
+  for (int b = 0; b < nb; b++) {
+    uint32_t at = offs[(size_t)b];
+    for (size_t ch = 0; ch < nchunks; ch++) start[ch * (size_t)nb + (size_t)b] = at, at += counts[ch * (size_t)nb + (size_t)b];
+    offs[(size_t)b + 1] = at;
   }
-  JobSystem::global().parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
+  band_idx_.resize(offs[(size_t)nb]);  // (round 437: kept between batches)
+  uint32_t *idx = band_idx_.data();
+  js.parallel_for((int64_t)nchunks, 1, [&](int64_t c0, int64_t c1) {
+    for (int64_t ch = c0; ch < c1; ch++) {
+      uint32_t *fill = &start[(size_t)ch * (size_t)nb];
+      for (size_t i = (size_t)ch * kChunk; i < std::min(n, (size_t)(ch + 1) * kChunk); i++) {
+        int b0, b1;
+        bands_of(overlay_cmds_[i], b0, b1);
+        for (int b = b0; b <= b1; b++) idx[fill[b]++] = (uint32_t)i;
+      }
+    }
+  });
+  js.parallel_for(nb, 1, [&](int64_t b0, int64_t b1) {
     for (int64_t b = b0; b < b1; b++)
       for (uint32_t k = offs[(size_t)b]; k < offs[(size_t)b + 1]; k++) draw_overlay(overlay_cmds_[idx[k]], (int)b * band, (int)(b + 1) * band);
   });
@@ -1602,7 +1749,7 @@ void Renderer3D::shade_deferred() {
     }
     T.item = &it;
 #ifdef BL_RASTER_X86
-    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes);
+    T.fast = T.uniform && !T.surface.unlit && !T.surface.toon && !T.surface.extras && !T.has_lm && !T.has_rt && !(env_.probes && env_.probes->data && it.use_probes) && !(env_.light_volumes && it.use_probes);  // (task 0419: a Light Volume lights it per pixel)
     if (T.fast) {
       SurfaceSample fs = T.surface;
       if (T.highlighted) fs.albedo = lerp(fs.albedo, it.highlight_color, 0.45f);  // (as the pixel loop applies it)
@@ -1795,8 +1942,11 @@ void Renderer3D::shade_deferred() {
           if (!finite_bits(sp.footprint) || !finite_bits(sp.world_footprint)) sp.footprint = sp.world_footprint = 0.0f, sp.live_textures = false;
         }
         if (T.has_lm) {
-          sp.lightmap = it.lightmap->sample(T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z);
+          const Vec2 lm_uv = T.lm_uv[0] * B.x + T.lm_uv[1] * B.y + T.lm_uv[2] * B.z;
+          sp.lightmap = it.lightmap->sample(lm_uv);
           sp.has_lightmap = true;
+          if (it.lightmap_dir) sp.lightmap_dir = it.lightmap_dir->sample(lm_uv), sp.has_lightmap_dir = true;  // (round 426)
+          if (it.shadowmask) sp.shadowmask = it.shadowmask->sample(lm_uv), sp.has_shadowmask = true;  // (round 444)
         }
         if (T.mat->shading_model == 1) {  // (task 0164: the normal at the next pixel right and below, for the band edges; painted toon materials are not uniform, so the material decides)
           auto wn_at = [&](Vec3 b) { return normalize(T.wn[0] * b.x + T.wn[1] * b.y + T.wn[2] * b.z); };
@@ -1813,6 +1963,7 @@ void Renderer3D::shade_deferred() {
         if (dot(sp.geo_normal, V) < 0) {  // back side of a double-sided surface
           sp.normal = -sp.normal;
           sp.geo_normal = -sp.geo_normal;
+          sp.back_side = true;
         }
         if (T.has_rt) {
           /* Realtime lightmap: the texels' gather, read like a baked map (task 0016); also with no GI pass
@@ -1866,6 +2017,7 @@ void Renderer3D::shade_deferred() {
             sp.probe = pq.irr;
           }
         }
+        if (!sp.has_lightmap && env_.light_volumes && it.use_probes) light_volume_ambient(sp, *env_.light_volumes, env);  // (task 0419)
         SurfaceSample s = T.uniform ? T.surface : evaluate_material(*T.mat, *T.tex, sp);
         if (T.uniform) {
           s.normal = sp.normal;  // (evaluate_material's own: the point's normal)
@@ -1911,9 +2063,15 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
   if (s.lil) return light_liltoon(s, sp, V, it, env);  // (round 402)
   Vec3 n = s.normal;
   Vec3 lo(0.0f);
+  float subtractive_shadow = 1.0f;  // (round 444: the main Subtractive light's realtime shadow on this lightmapped point)
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
-    if ((sp.has_lightmap || sp.probe_baked) && l.bake_mode == 2) continue;  // a Baked light is in the lightmap (or baked probes) already
+    if (light_baked_here(l.bake_mode, sp.has_lightmap, sp.probe_baked)) {  // a Baked light is in the lightmap (or baked probes) already (round 444: a Subtractive Mixed one in the lightmap)
+      if (l.bake_mode == 3 && sp.has_lightmap) subtractive_shadow = std::min(subtractive_shadow, subtractive_vis(l, (int)li, sp, it));
+      continue;
+    }
+    const int mask_ch = sp.has_shadowmask ? light_mask_channel(l.bake_mode) : -1;  // (round 444: a Shadowmask light's baked shadow here)
+    const float mask_vis = mask_ch >= 0 ? std::max(0.0f, std::min(1.0f, sp.shadowmask[mask_ch])) : 1.0f;
     if (s.toon) {
       /* Toon (ADR 0020): N.L x the shadow x the falloff (range, spot cone, an area's facing), in tones; the dark side
        * takes the shadow colour. As the path tracers' light sampling. With Key Light Only (task 0148) the brightest
@@ -1934,6 +2092,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
         vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
       /* The face shadow map (task 0149) gives the key light's lit term instead of N.L. */
       const float face = (int)li == toon_key_ ? toon_face_lit(*s.toon, s, it.local_key) : -1.0f;
+      vis = std::min(vis, mask_vis);  // (round 444)
       const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * vis) * std::min(fall, 1.0f);  // (the map is the face's shadow: no cast shadow on top)
       const int key = s.toon->toon_key_light_only ? toon_key_ : -1;
       lo += (key >= 0 && (int)li != key ? toon_fill(s, lit) : shade_toon(s, n, V, L, lit)) * l.color * l.intensity;
@@ -1961,7 +2120,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
       const float a2 = std::min(1.0f, a + radius / (2.0f * std::max(1e-3f, length(q - sp.position))));
       Vec3 dpart, spart;
       brdf_eval_parts(s, n, V, Lr, dpart, spart);
-      lo += (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color * atten;
+      lo += (dpart * dcos + spart * (cfall * (a / a2) * (a / a2))) * l.color * (atten * mask_vis);
       continue;
     }
     if (l.type == RenderLight::Directional) L = -l.direction;
@@ -1976,8 +2135,14 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     float vis = 1.0f;
     if ((int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
       vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
+    vis = std::min(vis, mask_vis);  // (round 444: the baked shadow from static objects; a realtime one from moving ones on top)
     if (vis <= 0) continue;
     lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
+  }
+  if (subtractive_shadow < 1.0f) {  // (round 444: Unity's Subtractive - the baked light darkened toward the shadow colour)
+    SurfacePoint shadowed = sp;
+    shadowed.lightmap = sp.lightmap * lerp(kSubtractiveShadowColor, Vec3(1.0f), subtractive_shadow);
+    return light_finish(s, shadowed, V, lo, env);
   }
   return light_finish(s, sp, V, lo, env);
 }
@@ -2023,12 +2188,11 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
     if ((int)li != env_.shadow_light || !env_.shadow || !it.receive_shadows || dot(n, L) <= 0.0f) return 1.0f;
     return env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
   };
-  const bool baked_here = sp.has_lightmap || sp.probe_baked;
   /* The main light: the key light (the brightest sun) unless the bake holds it; its direction blended with the ambient's
    * gradient as lilToon's lilGetLightDirection. */
   Vec3 key_color(0.0f), key_L = toon_key_L_;
   const RenderLight *key = toon_key_ >= 0 && toon_key_ < (int)env_.lights.size() ? &env_.lights[toon_key_] : nullptr;
-  if (key && !(baked_here && key->bake_mode == 2) && key->intensity > 0.0f) key_color = key->color * key->intensity;
+  if (key && !light_baked_here(key->bake_mode, sp.has_lightmap, sp.probe_baked) && key->intensity > 0.0f) key_color = key->color * key->intensity;
   const Vec3 L = lil_light_direction(env, key_L, 0.2126f * key_color.x + 0.7152f * key_color.y + 0.0722f * key_color.z);
   /* The ambient as lilToon's SH: the baked light where there is some (no direction in it), else the sky along L. */
   Vec3 sh_max, sh_min;
@@ -2045,7 +2209,7 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
   /* The other lights, as lilToon's ForwardAdd passes: each through the shadow model with its own colour, added. */
   for (size_t li = 0; li < env_.lights.size(); li++) {
     const RenderLight &l = env_.lights[li];
-    if ((int)li == toon_key_ || (baked_here && l.bake_mode == 2) || !(l.intensity > 0.0f)) continue;
+    if ((int)li == toon_key_ || light_baked_here(l.bake_mode, sp.has_lightmap, sp.probe_baked) || !(l.intensity > 0.0f)) continue;
     Vec3 Lk;
     float fall = 1.0f;
     if (l.type == RenderLight::Directional) Lk = -l.direction;
@@ -2070,6 +2234,21 @@ Vec3 Renderer3D::light_liltoon(const SurfaceSample &s, const SurfacePoint &sp, V
   return col + s.emission;
 }
 
+/* Round 444: a Subtractive light's realtime shadow at a lightmapped point (1 lit), from the shadow map where it is the
+ * shadowed light. */
+float Renderer3D::subtractive_vis(const RenderLight &l, int li, const SurfacePoint &sp, const DrawItem &it) const {
+  if (li != env_.shadow_light || !env_.shadow || !it.receive_shadows) return 1.0f;
+  const Vec3 L = l.type == RenderLight::Directional ? -l.direction : normalize(l.position - sp.position);
+  return env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
+}
+
+/* The baked light at a pixel: the lightmap, rebalanced for the shaded normal by its direction page (round 426), plus
+ * realtime GI's bounce of lights the bake doesn't hold. */
+static Vec3 lightmap_light(const SurfaceSample &s, const SurfacePoint &sp) {
+  const float f = sp.has_lightmap_dir ? lightmap_direction_factor(s.normal, sp.normal, sp.lightmap_dir, sp.back_side) : 1.0f;
+  return sp.lightmap * f + sp.lightmap_add;
+}
+
 Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, Vec3 lo, const Environment &env) const {
   if (s.lil) return lo;  // (round 402: light_liltoon gave the whole colour)
   Vec3 n = s.normal;
@@ -2077,7 +2256,7 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
   if (s.toon) {
     /* Toon: the ambient as one flat tone (unless baked light holds more), no reflections, the rim on top. */
     Vec3 amb;
-    if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+    if (sp.has_lightmap) amb = lightmap_light(s, sp);
     else if (sp.has_probe) amb = sp.probe;
     else if (s.toon->toon_flat_ambient) {
       amb = (env.irradiance(Vec3(0, 1, 0)) + env.irradiance(Vec3(0, -1, 0))) * 0.5f;
@@ -2095,12 +2274,13 @@ Vec3 Renderer3D::light_finish(const SurfaceSample &s, const SurfacePoint &sp, Ve
    * hold), the probe volume, voxel GI per pixel (the sky that gets through plus the bounce), or the sky
    * alone. */
   Vec3 amb;
-  if (sp.has_lightmap) amb = sp.lightmap + sp.lightmap_add;
+  if (sp.has_lightmap) amb = lightmap_light(s, sp);
   else if (sp.has_probe) amb = sp.probe;  // probe-lit objects match the baked look (and live probes follow changes)
   else if (sp.has_gi) amb = env.irradiance(n) * sp.gi_sky + sp.gi_bounce;
   else amb = env.irradiance(n);
   if (sp.has_gi && !sp.has_lightmap)
     spec = spec * (1.0f + (sp.gi_sky - 1.0f) * (env_.gi ? env_.gi->params.specular_occlusion : env_.rt_specular_occlusion));
+  spec = spec * baked_specular_occlusion(s.exposure_occlusion, amb, nv, s.roughness, f0);  // (round 429: Filamented's - every ambient, as its SH: the lightmap, probes, realtime GI or the sky)
   Vec3 diff = amb * s.albedo * (1.0f - s.metallic);
   return lo + diff + spec + s.emission;
 }

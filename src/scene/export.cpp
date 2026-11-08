@@ -7,6 +7,8 @@
 #include "../render/lightmapper.h"
 #include "scene.h"
 
+#include "../core/jobs.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -145,15 +147,103 @@ std::string image_file(const TextureRef &t) {
 
 /* "%.7g" (task 0209: by to_chars, which prints what printf does - a million calls of the formatter were most of an OBJ
  * export's time). */
-std::string num(double v) {
-  if (std::fabs(v) < 1e-12) return "0";
+void append_num(std::string &s, double v) {  // (round 417: in place, no temporary - the writers' inner loops)
+  if (std::fabs(v) < 1e-12) {
+    s += '0';
+    return;
+  }
 #if defined(__cpp_lib_to_chars) || (defined(_MSC_VER) && _MSC_VER >= 1924)
   char b[32];
   const auto r = std::to_chars(b, b + sizeof(b), v, std::chars_format::general, 7);
-  return std::string(b, r.ptr);
+  s.append(b, (size_t)(r.ptr - b));
 #else
-  return strprintf("%.7g", v);  // (Apple's libc++ has no floating to_chars)
+  s += strprintf("%.7g", v);  // (Apple's libc++ has no floating to_chars)
 #endif
+}
+void append_uint(std::string &s, uint64_t v) {
+  char b[24];
+  const auto r = std::to_chars(b, b + sizeof(b), v);
+  s.append(b, (size_t)(r.ptr - b));
+}
+std::string num(double v) {
+  std::string s;
+  append_num(s, v);
+  return s;
+}
+
+/* Round 417: a text writer's lines built in pieces on every core and joined in order (the same text one thread
+ * writes); a corner attribute (an OBJ's UVs and normals) written once per distinct value at a vertex, found through
+ * the vertex's own chain of values (bitwise equal: a smooth sphere's 200k corner normals are its 50k vertex normals). */
+template<class Line> static void append_lines_parallel(std::string &out, size_t n, size_t bytes_hint, const Line &line) {
+  constexpr size_t kPiece = 16384;
+  if (n < 2 * kPiece) {
+    out.reserve(out.size() + n * bytes_hint);
+    for (size_t i = 0; i < n; i++) line(out, i);
+    return;
+  }
+  const size_t pieces = (n + kPiece - 1) / kPiece;
+  std::vector<std::string> part(pieces);
+  JobSystem::global().parallel_for((int64_t)pieces, 1, [&](int64_t a, int64_t b) {
+    for (int64_t k = a; k < b; k++) {
+      part[(size_t)k].reserve(kPiece * bytes_hint);
+      for (size_t i = (size_t)k * kPiece; i < std::min(n, (size_t)(k + 1) * kPiece); i++) line(part[(size_t)k], i);
+    }
+  });
+  size_t bytes = 0;
+  for (const std::string &s : part) bytes += s.size();
+  out.reserve(out.size() + bytes);
+  for (const std::string &s : part) out += s;
+}
+/* The chains of distinct values at each vertex: a value is found by walking its vertex's chain (a bitwise compare);
+ * a vertex whose chain grows past kHashFrom entries (review 417: a fan's apex with thousands of flat normals made the
+ * walk quadratic) has its values in a hash as well, keyed by the vertex and the value's bytes. */
+struct SplitChains {
+  static constexpr uint32_t kHashFrom = 16;
+  size_t bytes;
+  std::vector<uint32_t> first, next, len;
+  std::unordered_map<uint64_t, uint32_t> hashed;  // (vertex, hash of the bytes) -> a split with those bytes
+  explicit SplitChains(size_t value_bytes, size_t verts) : bytes(value_bytes), first(verts, UINT32_MAX), len(verts, 0) {}
+  uint64_t key(uint32_t v, const void *val) const { return ((uint64_t)v << 32) ^ (uint64_t)(uint32_t)fnv1a(val, bytes); }
+  /* The split holding `val` at vertex `v`, or UINT32_MAX; `value_of(k)` gives a split's bytes. */
+  template<class ValueOf> uint32_t find(uint32_t v, const void *val, const ValueOf &value_of) const {
+    if (len[v] >= kHashFrom) {
+      auto it = hashed.find(key(v, val));
+      if (it == hashed.end()) return UINT32_MAX;
+      if (std::memcmp(value_of(it->second), val, bytes) == 0) return it->second;
+    }
+    for (uint32_t k = first[v]; k != UINT32_MAX; k = next[k])
+      if (std::memcmp(value_of(k), val, bytes) == 0) return k;
+    return UINT32_MAX;
+  }
+  /* A new split `k` (already appended by the caller; its id may count earlier objects' splits) chained at vertex `v`. */
+  template<class ValueOf> void add(uint32_t v, uint32_t k, const void *val, const ValueOf &value_of) {
+    if (next.size() <= k) next.resize((size_t)k + 1, UINT32_MAX);
+    next[k] = first[v];
+    first[v] = k;
+    if (++len[v] == kHashFrom)
+      for (uint32_t j = first[v]; j != UINT32_MAX; j = next[j]) hashed.emplace(key(v, value_of(j)), j);
+    else if (len[v] > kHashFrom) hashed.emplace(key(v, val), k);
+  }
+};
+template<class T> static void dedupe_corner_values(const Mesh &m, const std::vector<T> &per_corner, std::vector<T> &unique, std::vector<uint32_t> &index_of) {
+  const size_t nc = m.corner_verts.size();
+  index_of.resize(nc);
+  SplitChains chains(sizeof(T), m.vert_count());
+  unique.clear();
+  unique.reserve(m.vert_count() + nc / 8);
+  chains.next.reserve(m.vert_count() + nc / 8);
+  auto value_of = [&](uint32_t k) -> const void * { return &unique[k]; };
+  for (size_t c = 0; c < nc && c < per_corner.size(); c++) {
+    const uint32_t v = m.corner_verts[c];
+    const T &val = per_corner[c];
+    uint32_t k = chains.find(v, &val, value_of);
+    if (k == UINT32_MAX) {
+      k = (uint32_t)unique.size();
+      unique.push_back(val);
+      chains.add(v, k, &val, value_of);
+    }
+    index_of[c] = k;
+  }
 }
 
 /* Our left-handed Y-up into a right-handed file: Y up mirrors X; Z up then
@@ -359,7 +449,8 @@ std::vector<Prepared> prepare(const std::vector<ExportItem> &items, const Export
         std::reverse(m.corner_verts.begin() + m.face_offsets[f], m.corner_verts.begin() + m.face_offsets[f + 1]);
         if (uv) std::reverse(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
       }
-    p.normals = split_normals(m);
+    /* (Round 417: an STL writes each triangle's own normal - the split normals, a third of its export, aren't needed.) */
+    if (o.format != (int)ExportFormat::STL) p.normals = split_normals(m);
     if (o.lightmap_uvs && !it.outline) p.uv2 = lightmap_uvs(m, true, kLightmapRes, kLightmapPadding);  // (round 353: on the mesh as written, its corners)
     if (!p.uv2.empty() && !(o.uvs && m.has_uvs()))
       Log::info("Export: %s has no UVs - its lightmap UVs go as its first set (UV0), so its textures follow them", p.name.c_str());
@@ -553,40 +644,61 @@ void export_obj_mtl(const std::vector<ExportItem> &items, const std::string &mtl
     for (char &ch : oname)
       if (ch == ' ') ch = '_';
     obj += "o " + oname + "\n";
-    for (const Vec3 &v : m.positions) obj += "v " + num(v.x) + " " + num(v.y) + " " + num(v.z) + "\n";
+    /* Round 417: the vertex, UV and normal lines on every core; the UVs and normals once per distinct value at a vertex
+     * (a 50k sphere's OBJ was 112 ms and 16 MB for Blender's 45 and 7). */
+    append_lines_parallel(obj, m.positions.size(), 40, [&](std::string &out, size_t i) {
+      const Vec3 &v = m.positions[i];
+      out += "v ", append_num(out, v.x), out += ' ', append_num(out, v.y), out += ' ', append_num(out, v.z), out += '\n';
+    });
     const bool uv = o.uvs && m.has_uvs();
+    std::vector<Vec2> vt;
+    std::vector<Vec3> vn;
+    std::vector<uint32_t> vt_of, vn_of;
+    if (uv) dedupe_corner_values(m, m.uvs, vt, vt_of);
+    if (o.normals) dedupe_corner_values(m, p.normals, vn, vn_of);
     if (uv)
-      for (const Vec2 &t : m.uvs) obj += "vt " + num(t.x) + " " + num(t.y) + "\n";
+      append_lines_parallel(obj, vt.size(), 28, [&](std::string &out, size_t i) {
+        out += "vt ", append_num(out, vt[i].x), out += ' ', append_num(out, vt[i].y), out += '\n';
+      });
     if (o.normals)
-      for (const Vec3 &n : p.normals) obj += "vn " + num(n.x) + " " + num(n.y) + " " + num(n.z) + "\n";
-    int cur_mat = -2, cur_smooth = -1;
-    for (size_t f = 0; f < m.face_count(); f++) {
-      const int slot = m.material_of(f);
-      if (o.materials && slot != cur_mat) {
-        cur_mat = slot;
+      append_lines_parallel(obj, vn.size(), 40, [&](std::string &out, size_t i) {
+        out += "vn ", append_num(out, vn[i].x), out += ' ', append_num(out, vn[i].y), out += ' ', append_num(out, vn[i].z), out += '\n';
+      });
+    /* The materials in the order the faces first use them (the MTL is written in that order), then the face lines on
+     * every core: each knows the material and smoothing of the face before it, so it writes the same usemtl / s lines
+     * one thread would. */
+    std::unordered_map<int, std::string> name_of;
+    if (o.materials)
+      for (size_t f = 0; f < m.face_count(); f++) {
+        const int slot = m.material_of(f);
+        if (name_of.count(slot)) continue;
         const MaterialPtr &mp = slot_material(p, slot);
         if (!mp && !wrote_default) {
           mtl += "\nnewmtl Default\nKd 0.8 0.8 0.8\nd 1\nillum 2\n";
           wrote_default = true;
         }
-        obj += "usemtl " + mtl_name(mp) + "\n";
+        name_of[slot] = mtl_name(mp);
       }
-      const int s = m.smooth_of(f) ? 1 : 0;
-      if (s != cur_smooth) {
-        cur_smooth = s;
-        obj += s ? "s 1\n" : "s off\n";
-      }
-      obj += "f";
+    const bool normals = o.normals;
+    append_lines_parallel(obj, m.face_count(), 48, [&](std::string &out, size_t f) {
+      const int slot = m.material_of(f), prev_slot = f ? m.material_of(f - 1) : -2;
+      if (o.materials && slot != prev_slot) out += "usemtl " + name_of.find(slot)->second + "\n";
+      const int s = m.smooth_of(f) ? 1 : 0, prev_s = f ? (m.smooth_of(f - 1) ? 1 : 0) : -1;
+      if (s != prev_s) out += s ? "s 1\n" : "s off\n";
+      out += 'f';
       for (uint32_t c = m.face_offsets[f]; c < m.face_offsets[f + 1]; c++) {
-        obj += " " + std::to_string(vbase + m.corner_verts[c]);
-        if (uv || o.normals) obj += "/" + (uv ? std::to_string(tbase + c) : std::string());
-        if (o.normals) obj += "/" + std::to_string(nbase + c);
+        out += ' ', append_uint(out, vbase + m.corner_verts[c]);
+        if (uv || normals) {
+          out += '/';
+          if (uv) append_uint(out, tbase + vt_of[c]);
+        }
+        if (normals) out += '/', append_uint(out, nbase + vn_of[c]);
       }
-      obj += "\n";
-    }
+      out += '\n';
+    });
     vbase += m.vert_count();
-    if (uv) tbase += m.uvs.size();
-    if (o.normals) nbase += p.normals.size();
+    if (uv) tbase += vt.size();
+    if (o.normals) nbase += vn.size();
   }
 }
 
@@ -1318,50 +1430,86 @@ std::string export_fbx(const std::vector<ExportItem> &items, const ExportOptions
 /* STL                                                                    */
 /* ===================================================================== */
 
+/* Round 417: each face's triangles counted first (a face of n corners gives n - 2), then found and written on every
+ * core straight into the output at their places (a 50k sphere's 100k triangles were pushed one at a time, then written a
+ * float at a time: 27 ms for Blender's 12). */
 std::string export_stl(const std::vector<ExportItem> &items, const ExportOptions &o) {
   std::vector<Prepared> prepared = prepare(items, o, o.up_axis);
   struct Tri { Vec3 n, a, b, c; };
-  std::vector<Tri> tris;
-  std::vector<uint32_t> local;
-  for (Prepared &p : prepared) {
+  struct Range { const Prepared *p; size_t first_face, faces, first_tri; };
+  std::vector<Range> ranges;
+  std::vector<size_t> tri_at;  // per face over all meshes: its first triangle
+  size_t ntri = 0;
+  for (const Prepared &p : prepared) {
     const Mesh &m = p.mesh;
+    ranges.push_back({&p, tri_at.size(), m.face_count(), ntri});
     for (size_t f = 0; f < m.face_count(); f++) {
-      meshops::triangulate_face_local(m, f, local);
-      for (size_t k = 0; k + 2 < local.size(); k += 3) {
-        const uint32_t base = m.face_offsets[f];
-        Tri t;
-        t.a = m.positions[m.corner_verts[base + local[k]]];
-        t.b = m.positions[m.corner_verts[base + local[k + 1]]];
-        t.c = m.positions[m.corner_verts[base + local[k + 2]]];
-        Vec3 n = cross(t.b - t.a, t.c - t.a);
-        t.n = length(n) > 0 ? n / length(n) : Vec3(0.0f);
-        tris.push_back(t);
-      }
+      tri_at.push_back(ntri);
+      ntri += m.face_size(f) >= 3 ? m.face_size(f) - 2 : 0;
     }
+  }
+  std::vector<Tri> tris(ntri);
+  for (const Range &r : ranges) {
+    const Mesh &m = r.p->mesh;
+    JobSystem::global().parallel_for((int64_t)r.faces, 2048, [&](int64_t f0, int64_t f1) {
+      std::vector<uint32_t> local;
+      for (int64_t f = f0; f < f1; f++) {
+        if (m.face_size((size_t)f) < 3) continue;
+        meshops::triangulate_face_local(m, (size_t)f, local);
+        const uint32_t base = m.face_offsets[(size_t)f];
+        size_t at = tri_at[r.first_face + (size_t)f];
+        for (size_t k = 0; k + 2 < local.size() && at < tris.size(); k += 3, at++) {
+          Tri &t = tris[at];
+          t.a = m.positions[m.corner_verts[base + local[k]]];
+          t.b = m.positions[m.corner_verts[base + local[k + 1]]];
+          t.c = m.positions[m.corner_verts[base + local[k + 2]]];
+          const Vec3 n = cross(t.b - t.a, t.c - t.a);
+          t.n = length(n) > 0 ? n / length(n) : Vec3(0.0f);
+        }
+      }
+    });
   }
   std::string s;
   if (o.ascii) {
+    /* The text in pieces on every core, joined in order. */
+    constexpr size_t kPiece = 8192;
+    const size_t pieces = (ntri + kPiece - 1) / kPiece;
+    std::vector<std::string> part(pieces);
+    JobSystem::global().parallel_for((int64_t)pieces, 1, [&](int64_t a, int64_t b) {
+      for (int64_t k = a; k < b; k++) {
+        std::string &out = part[(size_t)k];
+        out.reserve(kPiece * 160);
+        auto vec = [&](Vec3 v) { append_num(out, v.x), out += ' ', append_num(out, v.y), out += ' ', append_num(out, v.z); };
+        for (size_t i = (size_t)k * kPiece; i < std::min(ntri, (size_t)(k + 1) * kPiece); i++) {
+          const Tri &t = tris[i];
+          out += " facet normal ", vec(t.n), out += "\n  outer loop\n   vertex ", vec(t.a), out += "\n   vertex ", vec(t.b), out += "\n   vertex ", vec(t.c);
+          out += "\n  endloop\n endfacet\n";
+        }
+      }
+    });
+    size_t bytes = 0;
+    for (const std::string &p : part) bytes += p.size();
+    s.reserve(bytes + 64);
     s = "solid Blendity\n";
-    auto vec = [&](Vec3 v) { return num(v.x) + " " + num(v.y) + " " + num(v.z); };
-    for (const Tri &t : tris)
-      s += " facet normal " + vec(t.n) + "\n  outer loop\n   vertex " + vec(t.a) + "\n   vertex " + vec(t.b) + "\n   vertex " + vec(t.c) +
-           "\n  endloop\n endfacet\n";
+    for (const std::string &p : part) s += p;
     s += "endsolid Blendity\n";
     return s;
   }
   std::string header = "Binary STL exported by Blendity";
   header.resize(80, ' ');
   s = header;
-  s.reserve(84 + tris.size() * 50);
-  put<uint32_t>(s, (uint32_t)tris.size());
-  for (const Tri &t : tris) {
-    for (Vec3 v : {t.n, t.a, t.b, t.c}) {
-      put<float>(s, v.x);
-      put<float>(s, v.y);
-      put<float>(s, v.z);
+  put<uint32_t>(s, (uint32_t)ntri);
+  s.resize(84 + ntri * 50);
+  char *base = &s[84];
+  JobSystem::global().parallel_for((int64_t)ntri, 4096, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) {
+      const Tri &t = tris[(size_t)i];
+      char *q = base + (size_t)i * 50;
+      const float v[12] = {t.n.x, t.n.y, t.n.z, t.a.x, t.a.y, t.a.z, t.b.x, t.b.y, t.b.z, t.c.x, t.c.y, t.c.z};
+      std::memcpy(q, v, 48);
+      q[48] = q[49] = 0;
     }
-    put<uint16_t>(s, 0);
-  }
+  });
   return s;
 }
 
@@ -1369,59 +1517,90 @@ std::string export_stl(const std::vector<ExportItem> &items, const ExportOptions
 /* Stanford PLY                                                           */
 /* ===================================================================== */
 
+/* Round 417: the split vertices found through each mesh vertex's own chain of splits (a bitwise compare of the normal
+ * and UV; no hashing of 40-byte keys), the faces in flat lists, the bytes reserved and appended at once (a 50k sphere's
+ * export was 40 ms for Blender's 7). */
 std::string export_ply(const std::vector<ExportItem> &items, const ExportOptions &o) {
   std::vector<Prepared> prepared = prepare(items, o, o.up_axis);
   /* PLY holds one mesh: everything merged, split where normals or UVs differ. */
   bool uvs = o.uvs;
   for (const Prepared &p : prepared) uvs = uvs && p.mesh.has_uvs();
-  SplitVerts sv;
-  std::vector<std::vector<uint32_t>> faces;
+  struct PlyVert { float v[8]; };  // x y z [nx ny nz] [s t]: the properties' order
+  const int stride = 3 + (o.normals ? 3 : 0) + (uvs ? 2 : 0);
+  std::vector<PlyVert> verts;
+  std::vector<uint8_t> face_n;
+  std::vector<uint32_t> face_v;
+  size_t total_corners = 0, total_faces = 0;
+  for (const Prepared &p : prepared) total_corners += p.mesh.corner_count(), total_faces += p.mesh.face_count();
+  verts.reserve(total_corners / 2 + 16), face_n.reserve(total_faces), face_v.reserve(total_corners);
   std::vector<uint32_t> local;
   for (const Prepared &p : prepared) {
-    sv.index.clear();  // objects never share vertices
     const Mesh &m = p.mesh;
+    SplitChains chains(sizeof(float) * (size_t)stride, m.vert_count());  // objects never share vertices
+    auto value_of = [&](uint32_t k) -> const void * { return verts[k].v; };
+    auto add = [&](uint32_t corner) -> uint32_t {
+      const uint32_t v = m.corner_verts[corner];
+      PlyVert pv{};
+      int n = 0;
+      pv.v[n++] = m.positions[v].x, pv.v[n++] = m.positions[v].y, pv.v[n++] = m.positions[v].z;
+      if (o.normals) pv.v[n++] = p.normals[corner].x, pv.v[n++] = p.normals[corner].y, pv.v[n++] = p.normals[corner].z;
+      if (uvs) pv.v[n++] = m.uvs[corner].x, pv.v[n++] = m.uvs[corner].y;
+      const uint32_t found = chains.find(v, pv.v, value_of);
+      if (found != UINT32_MAX) return found;
+      const uint32_t id = (uint32_t)verts.size();
+      verts.push_back(pv);
+      chains.add(v, id, pv.v, value_of);
+      return id;
+    };
     for (size_t f = 0; f < m.face_count(); f++) {
       const uint32_t base = m.face_offsets[f];
       if (m.face_size(f) <= 255) {
-        std::vector<uint32_t> face;
-        for (uint32_t c = base; c < m.face_offsets[f + 1]; c++) face.push_back(sv.add(p, c, o.normals, uvs));
-        faces.push_back(std::move(face));
+        face_n.push_back((uint8_t)m.face_size(f));
+        for (uint32_t c = base; c < m.face_offsets[f + 1]; c++) face_v.push_back(add(c));
         continue;
       }
       meshops::triangulate_face_local(m, f, local);  // a PLY face lists at most 255 corners
-      for (size_t k = 0; k + 2 < local.size(); k += 3)
-        faces.push_back({sv.add(p, base + local[k], o.normals, uvs), sv.add(p, base + local[k + 1], o.normals, uvs),
-                         sv.add(p, base + local[k + 2], o.normals, uvs)});
+      for (size_t k = 0; k + 2 < local.size(); k += 3) {
+        face_n.push_back(3);
+        face_v.push_back(add(base + local[k])), face_v.push_back(add(base + local[k + 1])), face_v.push_back(add(base + local[k + 2]));
+      }
     }
   }
   std::string s = "ply\nformat " + std::string(o.ascii ? "ascii" : "binary_little_endian") + " 1.0\ncomment Exported by Blendity\n";
-  s += "element vertex " + std::to_string(sv.pos.size()) + "\nproperty float x\nproperty float y\nproperty float z\n";
+  s += "element vertex " + std::to_string(verts.size()) + "\nproperty float x\nproperty float y\nproperty float z\n";
   if (o.normals) s += "property float nx\nproperty float ny\nproperty float nz\n";
   if (uvs) s += "property float s\nproperty float t\n";
-  s += "element face " + std::to_string(faces.size()) + "\nproperty list uchar uint vertex_indices\nend_header\n";
-  for (size_t i = 0; i < sv.pos.size(); i++) {
-    float vals[8];
-    int n = 0;
-    vals[n++] = sv.pos[i].x, vals[n++] = sv.pos[i].y, vals[n++] = sv.pos[i].z;
-    if (o.normals) vals[n++] = sv.nrm[i].x, vals[n++] = sv.nrm[i].y, vals[n++] = sv.nrm[i].z;
-    if (uvs) vals[n++] = sv.uv[i].x, vals[n++] = sv.uv[i].y;
-    if (o.ascii) {
-      for (int k = 0; k < n; k++) s += (k ? " " : "") + num(vals[k]);
-      s += "\n";
+  s += "element face " + std::to_string(face_n.size()) + "\nproperty list uchar uint vertex_indices\nend_header\n";
+  if (o.ascii) {
+    s.reserve(s.size() + verts.size() * (size_t)stride * 12 + face_v.size() * 8 + face_n.size() * 4);
+    for (const PlyVert &pv : verts) {
+      for (int k = 0; k < stride; k++) {
+        if (k) s += ' ';
+        append_num(s, pv.v[k]);
+      }
+      s += '\n';
     }
-    else
-      for (int k = 0; k < n; k++) put<float>(s, vals[k]);
+    size_t at = 0;
+    for (uint8_t n : face_n) {
+      append_uint(s, n);
+      for (uint8_t k = 0; k < n; k++) s += ' ', append_uint(s, face_v[at++]);
+      s += '\n';
+    }
+    return s;
   }
-  for (const auto &f : faces) {
-    if (o.ascii) {
-      s += std::to_string(f.size());
-      for (uint32_t v : f) s += " " + std::to_string(v);
-      s += "\n";
-    }
-    else {
-      put<uint8_t>(s, (uint8_t)f.size());
-      for (uint32_t v : f) put<uint32_t>(s, v);
-    }
+  const size_t head = s.size();
+  s.resize(head + verts.size() * (size_t)stride * 4 + face_n.size() + face_v.size() * 4);
+  char *q = &s[head];
+  JobSystem::global().parallel_for((int64_t)verts.size(), 8192, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++) std::memcpy(q + (size_t)i * (size_t)stride * 4, verts[(size_t)i].v, (size_t)stride * 4);
+  });
+  q += verts.size() * (size_t)stride * 4;
+  size_t at = 0;
+  for (uint8_t n : face_n) {
+    *q++ = (char)n;
+    std::memcpy(q, &face_v[at], (size_t)n * 4);
+    q += (size_t)n * 4;
+    at += n;
   }
   return s;
 }

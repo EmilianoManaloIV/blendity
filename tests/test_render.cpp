@@ -366,7 +366,7 @@ static void render_tests() {
     CHECK_NEAR(centre(glass).y, 1.0f, 0.05f);
   });
   test("gpu: every device (software BVH and ray tracing hardware) and CPU+GPU match the CPU", [] {
-    std::printf("    %s\n", gpu::status().c_str());
+    std::printf("    %s\n", gpu::status(true).c_str());
     if (!gpu::available()) return;  // no Vulkan GPU on this machine: nothing to compare
     auto plane = primitives::plane(6.0f, 1);
     auto sphere = primitives::uv_sphere(0.5f, 32, 16);

@@ -30,7 +30,7 @@ struct DeviceInfo {
 bool compiled_in();                    // built with Blender's vulkan + shaderc libraries
 bool available();                      // compiled in, a Vulkan loader found and at least one GPU
 const std::vector<DeviceInfo> &devices();  // enumerated once per run
-std::string status();                  // one line for the Console / libs command
+std::string status(bool open = false);  // one line for the Console / libs command (round 418: `open` opens Vulkan to list the cards; else a card not opened yet says so)
 /* Compiles the kernel in the background (once per run, cached on disk), so
  * the first GPU render doesn't stall the editor; with open_devices (the
  * interactive editor) it also opens a renderer for each GPU (take_renderer). */

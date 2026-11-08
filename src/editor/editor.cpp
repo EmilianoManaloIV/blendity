@@ -3,6 +3,7 @@
 #include "../scene/unity_scene.h"
 #include "../scene/budget.h"
 #include "editor.h"
+#include "../core/profiling.h"
 #include "../core/hash.h"
 #include "../render/canvas.h"
 #include "../texture/surface.h"
@@ -229,6 +230,7 @@ bool Editor::init(int argc, char **argv) {
 void Editor::init_headless(int width, int height) {
   common_init(this);
   headless_ = true;
+  scene_hash_check_every_ = 1;  // (round 435, ADR 0115: a headless editor - the tests, the fuzz, the pipelines - checks the kept scene hash every frame; tests write fields past every funnel)
   set_budget_wait_for_textures(true);  // (review 399: a headless count is whole - engine-only textures read before it)
   inspector_essentials_ = false, guides_enabled_ = false;  // (the tests' Inspector shows every field; no guide strip moves the docks)
   resolve_project_paths();
@@ -552,9 +554,14 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
-  in_frame_ = true;
-  frame_body(events);
-  in_frame_ = false;
+  {
+    BL_ZONE("frame");  // (round 419: Tracy's zones in a BLENDITY_TRACY=1 build; nothing otherwise)
+    in_frame_ = true;
+    frame_body(events);
+    in_frame_ = false;
+  }
+  BL_FRAME_MARK();
+  trim_idle_memory();  // (task 0421)
   if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
 }
 
@@ -568,6 +575,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   frame_stamps_.push_back(now);
   while (!frame_stamps_.empty() && frame_stamps_.front() < now - 1.0) frame_stamps_.erase(frame_stamps_.begin());
   measured_fps_ = (float)frame_stamps_.size();
+  hash_frame_++;  // (round 435: the kept scene hash is checked once in so many frames)
   process_events(events);
   update_procedural_shapes();
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
@@ -617,7 +625,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   /* Locomotion's legs on the moved characters (task 0127), then IK after scripts move the targets, before anything
    * draws (task 0048); unchanged inputs cost a hash per chain. */
   if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
-  if (solve_constraints(*scene_)) ui_.redraw = true;
+  if (solve_constraints(*scene_)) ui_.redraw = true, edit_epoch::bump();
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   else if (play_dt > 0.0f) spring::tick(*scene_, play_dt);  // (the simulated clock still runs: the Jiggle modifier reads it; task 0153)
   if (cam_.update(now)) ui_.redraw = true;
@@ -706,6 +714,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   mesh_job_poll();  // (round 413: a Subdivide or DynaMesh lands as one step)
   eval_jobs_poll();  // (a slow modifier stack's result adopted)
   save_job_poll();
+  shot_job_poll();  // (round 418)
   open_job_poll();
   import_job_poll();
   file_export_poll();
@@ -805,7 +814,10 @@ void Editor::frame_body(std::vector<Event> &events) {
     if (!frame_history_.empty()) frame_history_.back() += d_ms;
   }
   perf_mark_frames_++;
-  perf_mark_worst_ = std::max(perf_mark_worst_, frame_ms_);
+  if (frame_ms_ > perf_mark_worst_) {  // (round 437: with its parts)
+    perf_mark_worst_ = frame_ms_;
+    perf_mark_worst_prof_ = prof_last_;
+  }
 }
 
 /* Round 411 (ADR 0105): what `perf status` prints - the last frame with its parts, the worst of the last 240, the jobs. */
@@ -832,7 +844,8 @@ std::string Editor::perf_mark(const std::string &name) {
   /* (No frame between the marks: the whole time was one stall of the main thread - a script's `open` or `export` run
    * inside its command - so the longest frame is that time.) */
   const std::string s = perf_mark_frames_ > 0
-                            ? strprintf("perf mark %s: %.1f ms over %d frame(s), the longest %.1f ms", name.empty() ? "(unnamed)" : name.c_str(), ms, perf_mark_frames_, perf_mark_worst_)
+                            ? strprintf("perf mark %s: %.1f ms over %d frame(s), the longest %.1f ms", name.empty() ? "(unnamed)" : name.c_str(), ms, perf_mark_frames_, perf_mark_worst_) +
+                                  worst_frame_parts()
                             : strprintf("perf mark %s: %.1f ms over 0 frame(s), the longest %.1f ms (no frame between the marks: one stall)", name.empty() ? "(unnamed)" : name.c_str(), ms, ms);
   perf_mark_t0_ = now;
   perf_mark_frames_ = 0;
@@ -1735,6 +1748,13 @@ void Editor::dock_draw(DockNode *n) {
 
 void Editor::dock_draw_window(WindowKind k, const Recti &r) {
   ui_.push_id((uint64_t)k * 0x100000001B3ull + 7);
+  ScopedTimer window_timer;  // (round 436: each window's own time, for the Profiler and the windowed check)
+  draw_window_kind(k, r);
+  prof_.ms_window[(int)k & 31] += window_timer.ms();
+  ui_.pop_id();
+}
+
+void Editor::draw_window_kind(WindowKind k, const Recti &r) {
   switch (k) {
     case WindowKind::Scene: draw_scene_view(r); break;
     case WindowKind::Game: draw_game_view(r); break;
@@ -1764,7 +1784,6 @@ void Editor::dock_draw_window(WindowKind k, const Recti &r) {
     case WindowKind::Tools: draw_tools_window(r); break;
     default: break;
   }
-  ui_.pop_id();
 }
 
 DockNode *Editor::dock_find(WindowKind k, DockNode *n) {
@@ -1981,6 +2000,7 @@ void Editor::prune_selection() {
 void Editor::mark_changed(const std::string &label) {
   eye_test_off();  // (round 360: the eye test's pose isn't an edit - kept out of the step)
   scene_dirty_ = true;
+  edit_epoch::bump();  // (round 435, ADR 0115: whatever was edited, the views' scene hash walks again)
   /* Another frame: a change made by a panel drawn after the Scene view (the Inspector's Set Origin > Apply)
    * would otherwise wait for the next input to show, the gizmo still on the old origin (task 0030). Not
    * during a drag: it marks a change every frame, and its own mouse events bring the frames. */
@@ -2085,6 +2105,108 @@ size_t Editor::undo_budget() const {
   if (undo_budget_) return undo_budget_;
   const uint64_t ram = sys::physical_memory_bytes();
   return (size_t)std::min<uint64_t>(ram ? ram / 8 : (uint64_t)1 << 30, (uint64_t)2 << 30);
+}
+
+/* (Task 0421) The renderers' scratch, summed. */
+size_t Editor::scratch_bytes() const {
+  return scene_r3d_.scratch_bytes() + game_r3d_.scratch_bytes() + draw_r3d_.scratch_bytes() + ipv_r3d_.scratch_bytes() + vr_r3d_.scratch_bytes() +
+         cam_preview_r3d_.scratch_bytes();
+}
+
+size_t Editor::trim_scratch(size_t keep) {
+  if (scratch_bytes() <= keep) return 0;
+  return scene_r3d_.trim_scratch(0) + game_r3d_.trim_scratch(0) + draw_r3d_.trim_scratch(0) + ipv_r3d_.trim_scratch(0) + vr_r3d_.trim_scratch(0) +
+         cam_preview_r3d_.trim_scratch(0);
+}
+
+Renderer3D *Editor::scratch_renderer(int i) {
+  Renderer3D *all[6] = {&scene_r3d_, &game_r3d_, &draw_r3d_, &ipv_r3d_, &vr_r3d_, &cam_preview_r3d_};
+  return all[i];
+}
+
+/* Every frame: with the renderers' scratch over its budget, a renderer that has drawn nothing for kScratchHoldSeconds
+ * gives its scratch back (one that is drawing keeps it: an orbit would allocate it again every few seconds). */
+void Editor::trim_idle_memory() {
+  const double now = clock_now();
+  for (int i = 0; i < 6; i++) {
+    ScratchWatch &w = scratch_watch_[i];
+    const uint64_t b = scratch_renderer(i)->use_count();
+    if (b == w.seen) continue;
+    w.seen = b;
+    w.since = now;
+  }
+  if (scratch_bytes() <= kScratchBudget) return;
+  for (int i = 0; i < 6; i++)
+    if (now - scratch_watch_[i].since >= kScratchHoldSeconds) scratch_renderer(i)->trim_scratch(0);
+}
+
+/* A surface evaluating on its worker holds its planes (738 MB at 4096 x 4096) and, while it builds them, its images too. */
+size_t Editor::surface_job_planes_bytes() const {
+  if (!surface_job_ || surface_job_->done.load(std::memory_order_relaxed)) return 0;
+  return procedural_texture_planes_bytes(surface_job_->copy, surface_job_->building.load(std::memory_order_relaxed));
+}
+
+static size_t lightmap_pages_bytes(const std::vector<Lightmap> &pages) {
+  size_t n = 0;
+  for (const Lightmap &p : pages) n += p.texels.capacity() * sizeof(Vec3);
+  return n;
+}
+
+static size_t lighting_data_bytes(const LightingData &d) {
+  size_t n = lightmap_pages_bytes(d.pages) + lightmap_pages_bytes(d.dir_pages) + lightmap_pages_bytes(d.mask_pages);  // (round 444)
+  for (const auto &kv : d.entries) n += kv.second.tri_uv.capacity() * sizeof(Vec2);
+  return n;
+}
+
+static size_t realtime_lightmaps_bytes(const RealtimeLightmaps &r) {
+  size_t n = lightmap_pages_bytes(r.shown.bounce) + lightmap_pages_bytes(r.shown.sky) + r.bounce.capacity() * sizeof(Vec3) + r.sky.capacity() * sizeof(float) +
+             r.ok.capacity();
+  for (const auto &kv : r.shown.entries) n += kv.second.tri_uv.capacity() * sizeof(Vec2);
+  return n;
+}
+
+std::vector<Editor::MemoryAccount> Editor::memory_accounts() const {
+  size_t planes = 0, pictures = 0, shadows = 0;
+  for (const RenderTarget *rt : {&scene_rt_, &game_rt_, &pilot_rt_, &draw_rt_, &pad_rt_, &cam_preview_rt_, &ipv_rt_, &vr_rt_, &scene_vs_.rt, &game_vs_.rt, &preview_vs_.rt})
+    planes += rt->plane_bytes();
+  for (const ViewCache *c : {&scene_cache_, &game_cache_, &draw_cache_}) pictures += c->img.pixels.capacity() * sizeof(uint32_t);
+  for (const auto &kv : window_caches_) pictures += (kv.second.scene.img.pixels.capacity() + kv.second.game.img.pixels.capacity()) * sizeof(uint32_t);
+  for (const Image *im : {&render_img_, &scene_vs_.img, &game_vs_.img, &preview_vs_.img}) pictures += im->pixels.capacity() * sizeof(uint32_t);
+  pictures += (render_linear_.capacity() + cam_preview_lin_.capacity() + render_alpha_lin_.capacity()) * sizeof(float);
+  for (const ShadowEntry &e : shadow_cache_) shadows += e.map.depth.capacity() * sizeof(float);
+  for (const ShadowLayer &l : shadow_static_) shadows += l.map.depth.capacity() * sizeof(float);
+  size_t gi = 0, lightmaps = lighting_data_bytes(lighting_data_) + lighting_data_bytes(preview_data_);
+  for (const VoxelGIState &v : vgi_) {
+    for (const auto &lv : v.grid.levels) gi += lv.capacity() * sizeof(VoxelColumn);
+    for (const auto &kv : v.objects) gi += kv.second.spans.capacity() * sizeof(VoxelSpan);
+    gi += (v.rsm.position.capacity() + v.rsm.normal.capacity() + v.rsm.flux.capacity()) * sizeof(Vec3);
+    lightmaps += realtime_lightmaps_bytes(v.rtlm);
+  }
+  /* final_pt_ is the F12 worker's while a render job exists (it builds and resizes it): not read then. */
+  const size_t final_pt = render_job_ ? 0 : final_pt_.memory_bytes();
+  return {{"scene", scene_ ? scene_->memory_bytes() : 0},
+          {"undo", undo_bytes()},
+          {"textures", texture_cache_bytes()},
+          {"raster scratch", scratch_bytes()},
+          {"view planes", planes},
+          {"view pictures", pictures},
+          {"shadow maps", shadows},
+          {"procedural textures", procedural_texture_cache_bytes()},
+          {"surface job planes", surface_job_planes_bytes()},
+          {"voxel GI", gi},
+          {"lightmaps", lightmaps},
+          {"path tracers", final_pt + cam_preview_pt_.memory_bytes()}};
+}
+
+std::string Editor::memory_text() const {
+  std::string s;
+  double named = 0.0;
+  for (const MemoryAccount &a : memory_accounts()) {
+    named += (double)a.bytes;
+    s += strprintf("%s%s %s", s.empty() ? "" : ", ", a.name, format_bytes(a.bytes).c_str());
+  }
+  const double ws = (double)sys::working_set_bytes();
+  return s + strprintf("; the process holds %s, %s of it in no account", format_bytes((size_t)ws).c_str(), format_bytes((size_t)std::max(0.0, ws - named)).c_str());
 }
 
 size_t Editor::undo_bytes() const {
@@ -2232,6 +2354,7 @@ bool Editor::open_scene(const std::string &path) {
   raw->thread = std::thread([raw] {
     JobSystem::global().run_background([raw] {
       if (!load_scene(raw->path, *raw->scene, raw->err)) raw->scene.reset();
+      else prefetch_scene_textures(*raw->scene);  // (round 437: decoded here - the first frame draws from the cache)
     });
     raw->done.store(true, std::memory_order_release);
   });
@@ -3450,6 +3573,7 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     std::printf("    the CPU's share of the GPU path: the instances %.2f, the baked corners %.2f, the see-through triangles %.2f, the render call %.2f ms (with its wait when the picture comes back)\n",
                 (p1.ms_gpu_instances - p0.ms_gpu_instances) / n, (p1.ms_gpu_corners - p0.ms_gpu_corners) / n, (p1.ms_gpu_see - p0.ms_gpu_see) / n,
                 (p1.ms_gpu_render - p0.ms_gpu_render) / n);
+    print_window_times(p0, p1, n);  // (round 436)
   };
   std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
               card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());
@@ -3490,11 +3614,42 @@ void Editor::screenshot_dialog() {
           case PathPick::Unavailable: path = fs::join(screenshots_dir_, buf); break;
           case PathPick::Chosen: break;
         }
-        if (write_png(path, pixels.data(), w, h, w)) Log::info("Screenshot saved: %s", path.c_str());
-        else Log::error("Could not save screenshot to %s", path.c_str());
-        project_listed_ = -100;
+        shot_job_start(path, pixels, w, h);  // (round 418: encoded and written on a worker - 80 ms in the frame at 1280 x 720)
       },
       2);
+}
+
+void Editor::shot_job_start(const std::string &path, std::vector<uint32_t> pixels, int w, int h) {
+  if (shot_job_) shot_job_poll();
+  if (shot_job_) {  // (one at a time: the earlier one finishes first)
+    if (shot_job_->thread.joinable()) shot_job_->thread.join();
+    shot_job_->done.store(true, std::memory_order_release);
+    shot_job_poll();
+  }
+  auto job = std::make_unique<ShotJob>();
+  job->path = path, job->pixels = std::move(pixels), job->w = w, job->h = h;
+  ShotJob *raw = job.get();
+  auto run = [raw] {
+    raw->ok = write_png(raw->path, raw->pixels.data(), raw->w, raw->h, raw->w);
+    raw->done.store(true, std::memory_order_release);
+  };
+  shot_job_ = std::move(job);
+  if (!jobs_async()) {
+    run();
+    shot_job_poll();
+    return;
+  }
+  raw->thread = std::thread(run);
+  ui_.redraw = true;
+}
+
+void Editor::shot_job_poll() {
+  if (!shot_job_ || !shot_job_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<ShotJob> job = std::move(shot_job_);
+  if (job->thread.joinable()) job->thread.join();
+  if (job->ok) Log::info("Screenshot saved: %s", job->path.c_str());
+  else Log::error("Could not save screenshot to %s", job->path.c_str());
+  project_listed_ = -100;
 }
 
 void Editor::defer(std::function<void()> fn, int frames) {
@@ -3541,6 +3696,11 @@ Editor::PathPick Editor::pick_open_path(const std::string &title, const std::str
  * shapes whose mesh was edited by hand (it is an ordinary mesh from then on). */
 void Editor::update_procedural_shapes() {
   if (playing_) return;
+  if (!walk_due(shapes_walk_)) {  // (round 436, ADR 0115: 7 ms a frame at 50,000 objects, for a shape edited once)
+    walks_skipped_++;
+    return;
+  }
+  WalkScope scope{*this, shapes_walk_};
   std::vector<GameObject *> converted;
   scene_->for_each([&](GameObject &g) {
     auto *ps = g.get<ProceduralShape>();
@@ -4063,7 +4223,7 @@ void Editor::delete_selected() {
   }
   auto list = selected_objects(true);
   if (list.empty()) return;
-  for (GameObject *g : list) scene_->destroy(g);
+  scene_->destroy(list);  // (round 433: in one pass - 50,000 deleted one by one had been quadratic)
   clear_selection();
   mark_changed("Delete");
 }
@@ -4370,7 +4530,7 @@ void Editor::spawn_stress_grid(int count, const std::string &kind) {
  * animation under the timings), nothing selected but the sphere (or, for keyed1k, one box, whose parent's clip plays):
  * - sphere50k / sphere500k: one UV sphere of 256 x 196 / 1024 x 490 segments, "Parity Sphere", selected;
  * - million: ten of the 50k spheres (one shared mesh) in a row 2.5 m apart, about a million triangles;
- * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square;
+ * - cubes10k: 10,000 cubes sharing one mesh, 1.6 m apart in a square (cubes50k: 50,000 - round 433);
  * - keyed1k: 1,000 cubes under "Keyed", each keyed on frames 1, 30 and 60 (Position), the clip at frame 1. */
 /* Round 411 (task 0387): the Unity-world stand-in `benchscene worldlike` - what a VRChat world such as SideRail costs the
  * views, built from Blendity's own primitives so it can be committed: 600 objects from 40 meshes, 180 of them Contribute
@@ -4470,7 +4630,7 @@ bool Editor::bench_scene(const std::string &name) {
     mark_changed("Bench scene");
     return true;
   }
-  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "keyed1k";
+  const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "cubes50k" || name == "keyed1k";
   if (!known) return false;
   new_scene();
   for (const char *starter : {"Utah Teapot", "Plane", "Main Camera"})
@@ -4492,9 +4652,10 @@ bool Editor::bench_scene(const std::string &name) {
     MeshPtr sphere = primitives::uv_sphere(1.0f, 256, 196);
     for (int i = 0; i < 10; i++) object(strprintf("Sphere %d", i), sphere, {(i - 4.5f) * 2.5f, 1.0f, 0.0f});
   }
-  else if (name == "cubes10k") {
+  else if (name == "cubes10k" || name == "cubes50k") {  // (round 433: 50,000 - a scene five times Pass 16's biggest)
     MeshPtr cube = primitives::cube();
-    for (int i = 0; i < 10000; i++) object(strprintf("Cube %d", i), cube, {(i % 100 - 50) * 1.6f, 0.0f, (i / 100 - 50) * 1.6f});
+    const int n = name == "cubes50k" ? 50000 : 10000, side = name == "cubes50k" ? 224 : 100;
+    for (int i = 0; i < n; i++) object(strprintf("Cube %d", i), cube, {(i % side - side / 2) * 1.6f, 0.0f, (i / side - side / 2) * 1.6f});
   }
   else {
     GameObject *root = scene_->create("Keyed");

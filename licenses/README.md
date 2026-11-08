@@ -23,7 +23,7 @@ When `blender/lib/<platform>` exists next to this project, the build scripts lin
 |---|---|---|---|
 | [Embree](https://github.com/RenderKit/embree) | 4.4.1 | path tracer ray casting | Apache-2.0 (`Apache-2.0.txt`) |
 | [OpenImageDenoise](https://www.openimagedenoise.org/) | 2.5.0 | path tracer denoising | Apache-2.0 |
-| [oneTBB](https://github.com/uxlfoundation/oneTBB) | 2022.3.0 | job system | Apache-2.0 |
+| [oneTBB](https://github.com/uxlfoundation/oneTBB) | 2022.3.0 | job system; since round 419 (ADR 0112) also the memory allocator of the Windows build (`tbbmalloc_proxy`, as Blender's own build uses it) | Apache-2.0 |
 | [Eigen](http://eigen.tuxfamily.org) | (commit 8a1083e) | LSCM sparse solver (header-only) | MPL-2.0 (`MPL-2.0.txt`) |
 | [OpenSubdiv](https://graphics.pixar.com/opensubdiv) | 3.7.0 | optional Catmull-Clark backend | TOST-1.0, Apache-2.0 based (`TOST-1.0.txt`) |
 | [OpenEXR](https://github.com/AcademySoftwareFoundation/openexr) + [Imath](https://github.com/AcademySoftwareFoundation/Imath) | 3.4.10 / 3.2.2 | EXR read/write | BSD-3-Clause (`BSD-3-Clause.txt`) |
@@ -49,6 +49,16 @@ When `blender/lib/<platform>` exists next to this project, the build scripts lin
 | [LAME](https://lame.sourceforge.io/) | 3.100 | MP3, inside FFmpeg | LGPL-2.0-or-later |
 
 All of these are permissive, weak-copyleft or GPL-2.0-or-later licenses that are compatible with GPL-3.0. MPL-2.0 (Eigen) only asks that changes to Eigen's own files stay available; Blendity doesn't modify them. A binary build that includes them is therefore also distributed under GPL-3.0-or-later, as Blender's is.
+
+## Fetched for developers (optional, round 419, ADR 0112)
+
+A library Blender does not ship as a prebuilt package, fetched only by `packaging/fetch_blender_libs.sh ... --extras`
+at a pinned release (its commit checked, `packaging/blender-libs.txt`) into `../blender/extra/<name>`, and compiled
+in only when a developer asks (`BLENDITY_TRACY=1`): no default or released build has it.
+
+| Library | Version | Used for | License |
+|---|---|---|---|
+| [Tracy](https://github.com/wolfpld/tracy) client | 0.11.1 | a developer's frame profiler (`BLENDITY_TRACY=1` builds only; never in a release) | BSD-3-Clause (`tracy-BSD-3-Clause.txt`) |
 
 ## What this means for the executables
 

@@ -712,9 +712,15 @@ float mesh_light_pdf(uint li, float dist, float cos_light) {
   return cos_light > 1e-6 ? (l.power / P.settings.w) * dist * dist / (l.area * cos_light) : 0.0;
 }
 int find_mesh_light(uint obj, uint prim) {
-  /* Linear search is fine: the CPU keeps a hash map, emitters are few. */
-  for (int i = 0; i < P.counts.y; i++)
-    if (mlights[i].obj == obj && mlights[i].prim == prim) return i;
+  /* Round 439: a binary search - the emitters are in (object, triangle) order (collect_mesh_lights), and with Unlit
+   * surfaces there can be many. */
+  int lo = 0, hi = P.counts.y - 1;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    uint mo = mlights[mid].obj, mp = mlights[mid].prim;
+    if (mo == obj && mp == prim) return mid;
+    if (mo < obj || (mo == obj && mp < prim)) lo = mid + 1; else hi = mid - 1;
+  }
   return -1;
 }
 )GLSL",
@@ -796,7 +802,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     }
     vec3 c0 = vec3(0.0);
     float w_emit = 1.0;
-    if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.emission) > 0.0) {
+    if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.unlit ? s.emission + s.albedo : s.emission) > 0.0) {
       int li = find_mesh_light(h.obj, h.prim);
       if (li >= 0) { float pl = mesh_light_pdf(uint(li), since_scatter + h.t, cos_hit); w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl); }
     }
@@ -804,7 +810,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c0.x, max(c0.y, c0.z)); if (mx > clamp_ind) c0 *= clamp_ind / mx; }
     L += c0;
     if (s.unlit) {
-      vec3 c = beta * s.albedo;
+      vec3 c = beta * s.albedo * w_emit;  // (round 439: an Unlit surface is sampled as a light too)
       if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
       L += c;
       break;
@@ -910,9 +916,16 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
           centre_fall = area * max(dot(l.d.xyz, dc) / max(sqrt(r2c), 1e-6), 0.0) * wc * wc / max(r2c, 1e-4);
         }
         else {
-          /* As light_falloff on the CPU: range, the spot cone. */
-          float f = saturate1(1.0 - length(l.a.xyz - sp.position) / max(1e-3, l.c.x));
-          power *= f * f;
+          /* As light_falloff on the CPU: range (a bake's legacy curve when c.w is 2 - round 425), the spot cone. */
+          float x = length(l.a.xyz - sp.position) / max(1e-3, l.c.x);
+          if (l.c.w > 1.5) {
+            float w = x < 1.0 ? 1.0 - x * x * x * x : 0.0;
+            power *= w * w / (1.0 + 25.0 * x * x);
+          }
+          else {
+            float f = saturate1(1.0 - x);
+            power *= f * f;
+          }
           if (l.a.w > 1.5) {
             float t = l.c.z - l.c.y > 1e-6 ? saturate1((c - l.c.y) / (l.c.z - l.c.y)) : (c >= l.c.y ? 1.0 : 0.0);
             power *= t * t * (3.0 - 2.0 * t);
@@ -956,11 +969,13 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
         if (pl > 0.0 && dot(n, dir) > 0.0 && dot(sp.geo_normal, dir) > 0.0) {
           vec3 Tr = transmittance(origin, dir, dist * (1.0 - 1e-4));
           if (max(Tr.x, max(Tr.y, Tr.z)) > 0.0) {
-            vec3 Le = evaluate_material(lmat, lp).emission * Tr;
+            Sample les = evaluate_material(lmat, lp);
+            vec3 Le = (les.unlit ? les.emission + les.albedo : les.emission) * Tr;
+            if (lmat.tex1.w == 1 && les.alpha < lmat.tiling.w) Le = vec3(0.0); else if (lmat.tex1.w == 2) Le *= clamp(les.alpha, 0.0, 1.0);  // (review 439: a cutout's hole, a transparent emitter - as the CPU)
             float nl = dot(n, dir);
             vec3 hh = normalize(V + dir);
             float pb = coat_pdf(p_spec * ggx_D(ga2, max(dot(n, hh), 0.0)) * ggx_G1(ga2, nv) / (4.0 * nv) + (1.0 - p_spec) * (nl / PI), n, V, dir, nv);
-            float w = pl * pl / (pl * pl + pb * pb);
+            float w = bounce == P.size.z ? 1.0 : pl * pl / (pl * pl + pb * pb);  // (review 441: the last vertex in full)
             vec3 c = beta * bsdf_any(toon, s, n, V, dir) * Le * (w / pl);
             if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c.x, max(c.y, c.z)); if (mx > clamp_ind) c *= clamp_ind / mx; }
             L += c;

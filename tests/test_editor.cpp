@@ -3,7 +3,10 @@
 #include "../src/scene/raycast.h"
 #include "../src/scene/stroke_object.h"
 #include "test_common.h"
+#include "../src/core/allocator.h"
 #include "../src/render/canvas.h"
+#include "../src/scene/budget.h"
+#include "../src/scene/unity_package.h"
 #include "../src/texture/smart_material.h"
 #include "../src/texture/paint_layer.h"
 #include "../src/texture/surface.h"
@@ -7525,7 +7528,12 @@ static void tests_round413() {
     ed.command("select Cube");
     ed.set_async_jobs_for_test(true);
     ed.command("subdivide 2");
-    CHECK(ed.mesh_job_running_for_test() || g->get<MeshFilter>()->mesh->face_count() == ref_faces);
+    /* (Started: the cube as it was until the result lands - or, on a fast machine, the job already done and landed. A
+     * worker that finished before this line but hasn't been polled yet reads "not running" with the cube unchanged:
+     * the macOS runner of #316 met that.) */
+    const size_t faces_now = g->get<MeshFilter>()->mesh->face_count();
+    CHECK(ed.mesh_job_started_for_test() || faces_now == ref_faces);  // (a worker job, or already landed)
+    CHECK(faces_now == 6 || faces_now == ref_faces);                   // (never a half-made mesh)
     bool listed = false;
     int frames = 0;
     for (; frames < 5000 && ed.mesh_job_running_for_test(); frames++) {
@@ -8028,6 +8036,1065 @@ static void tests_round411() {
   });
 }
 
+
+/* ---------------------------------------------------------------- round 418: the sweep's list (task 0394) */
+static void tests_round418() {
+  test("round 418 probe: the sweep's slow rows taken apart (times printed)", [] {
+    auto profile = [](Editor &ed, const char *what) {
+      ScopedTimer t;
+      ed.step_frame_headless();
+      const FrameProfile &p = ed.frame_profile_last_for_test();
+      std::printf("    %s: frame %.1f ms (scene %.1f, game %.1f, ui %.1f, hash %.1f, gather %.1f, deferred %.1f, overlays %.1f)\n", what, t.ms(), p.ms_scene3d, p.ms_game, p.ms_ui, p.ms_hash, p.ms_collect, p.ms_deferred, p.ms_overlays);
+    };
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ed.command("window Materials");
+      profile(ed, "Materials window, starter, first frame");
+      profile(ed, "  second frame");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.command("benchscene cubes10k");
+      ed.command("select Cube 0");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      profile(ed, "cubes10k idle");
+      ed.command("window Modeling Tools");
+      profile(ed, "Modeling Tools, cubes10k, first frame");
+      profile(ed, "  second frame");
+      profile(ed, "  third frame");
+      ed.command("window Materials");
+      profile(ed, "Materials window, cubes10k, first frame");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ScopedTimer t;
+      ed.command("deletemat Orange");
+      std::printf("    deletemat Orange: %.1f ms\n", t.ms());
+      profile(ed, "  next frame");
+      ScopedTimer t2;
+      ed.command("device cpu");
+      std::printf("    device cpu: %.1f ms\n", t2.ms());
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.command("benchscene cubes10k");
+      ed.command("selectall");
+      ed.command("join");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ScopedTimer t;
+      ed.command("separate loose");
+      std::printf("    separate loose, 10,000 parts: %.1f ms\n", t.ms());
+      profile(ed, "  next frame");
+      profile(ed, "  frame after");
+    }
+    {
+      Editor ed;
+      ed.init_headless(1280, 720);
+      ed.set_async_jobs_for_test(true);
+      ed.command("benchscene worldlikequick");
+      ed.command("select Part 000");
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      ScopedTimer t;
+      ed.run_action_for_test("render.image");
+      std::printf("    F12 on worldlike with workers: the action %.1f ms\n", t.ms());
+      profile(ed, "  next frame");
+      ed.command("stop");
+      ScopedTimer t3;
+      ed.run_action_for_test("render.screenshot");
+      std::printf("    screenshot action %.1f ms\n", t3.ms());
+      profile(ed, "  frame 1");
+      profile(ed, "  frame 2 (the deferred save)");
+      profile(ed, "  frame 3");
+      ScopedTimer t4;
+      ed.command("layout 2 by 3");
+      std::printf("    layout 2 by 3 %.1f ms\n", t4.ms());
+      profile(ed, "  next frame");
+      profile(ed, "  frame after");
+    }
+  });
+  test("sweep rows (round 418): the Scatter panel's source list on 10,000 objects is complete and unique in a few milliseconds; a material asset deleted by its name goes with its slots", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene cubes10k");
+    ed.command("select Cube 0");
+    ed.step_frame_headless();
+    ed.command("window Modeling Tools");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ScopedTimer t;
+    ed.step_frame_headless();
+    const FrameProfile &p = ed.frame_profile_last_for_test();
+    std::printf("    Modeling Tools on 10,000 cubes: a frame %.1f ms (ui %.1f)\n", t.ms(), p.ms_ui);
+    const std::vector<std::string> sources = ed.scatter_source_choices_for_test();
+    std::unordered_set<std::string> uniq(sources.begin(), sources.end());
+    size_t meshes = 0;
+    std::unordered_set<std::string> names;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.mesh_filter() && g.mesh_filter()->mesh && &g != ed.active_object_for_test()) names.insert(g.name);
+    });
+    meshes = names.size();
+    CHECK(uniq.size() == sources.size() && sources.size() == meshes);
+    /* A material asset by its name. */
+    ed.command("newmat R418 Mat");
+    ed.step_frame_headless();
+    const std::string file = fs::join(fs::join(ed.assets_dir_for_test(), "Materials"), "R418 Mat.mat");
+    CHECK(fs::exists(file));
+    GameObject *holder = ed.scene().create("R418 Slot Holder");
+    holder->add<MeshFilter>()->mesh = primitives::cube();
+    MeshRenderer *hr = holder->add<MeshRenderer>();
+    hr->materials = {ed.material_by_name_for_test("R418 Mat")};
+    CHECK(hr->materials[0] != nullptr);
+    ScopedTimer td;
+    ed.command("deletemat R418 Mat");
+    std::printf("    deletemat by name: %.1f ms\n", td.ms());
+    ed.step_frame_headless();
+    CHECK(!fs::exists(file));
+    CHECK(!hr->materials[0]);  // (its slot emptied)
+    bool named = false;
+    for (const MaterialPtr &m : ed.scene_materials_for_test()) named = named || m->name == "R418 Mat";
+    CHECK(!named);
+  });
+  test("sweep rows (round 418): a screenshot's PNG is written on a worker the tray lists, and lands as a file; without workers it lands in the frame", [] {
+    for (bool async : {true, false}) {
+      Editor ed;
+      ed.init_headless(640, 400);
+      ed.set_async_jobs_for_test(async);
+      ed.step_frame_headless();
+      ed.run_action_for_test("render.screenshot");
+      bool listed = false;
+      std::string label;
+      for (int i = 0; i < 40; i++) {
+        ed.step_frame_headless();
+        for (const Editor::JobView &j : ed.jobs_for_test())
+          if (j.label == "Saving screenshot") listed = true;
+        if (!ed.file_jobs_running() && i > 2) break;
+      }
+      std::vector<std::string> pngs;
+      for (const DirEntry &de : fs::list(ed.screenshots_dir_for_test()))
+        if (!de.is_dir && fs::extension(de.name) == ".png") pngs.push_back(de.name);
+      std::printf("    %s: %zu png(s), the tray listed the job: %s\n", async ? "with workers" : "without workers", pngs.size(), listed ? "yes" : "no");
+      CHECK(!pngs.empty());
+      CHECK(async ? listed : !listed);
+      for (const std::string &n : pngs) fs::remove_file(fs::join(ed.screenshots_dir_for_test(), n));
+    }
+  });
+  test("sweep rows (round 418): 10,000 cold render meshes built on every core before the gather are the ones a serial gather builds, and the frame that lands them is one frame", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene cubes10k");
+    ed.command("selectall");
+    ed.command("join");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ScopedTimer t;
+    ed.command("separate loose");
+    const double op = t.ms();
+    ScopedTimer f;
+    ed.step_frame_headless();
+    const FrameProfile &p = ed.frame_profile_last_for_test();
+    std::printf("    separate 10,000 parts: %.1f ms, the frame after %.1f (gather %.1f)\n", op, f.ms(), p.ms_collect);
+    size_t warm = 0, meshes = 0;
+    std::vector<const Mesh *> all;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.mesh_filter() || !g.mesh_filter()->mesh) return;
+      meshes++;
+      warm += g.mesh_filter()->mesh->render_cache_warm();
+      all.push_back(g.mesh_filter()->mesh.get());
+    });
+    CHECK(meshes >= 10000 && warm == meshes);
+    /* The same meshes built again one after another from copies: the same triangles. */
+    bool same = true;
+    for (size_t i = 0; i < all.size() && same; i++) {
+      Mesh copy = *all[i];
+      copy.forget_caches();
+      const RenderMesh &a = all[i]->render_mesh(), &b = copy.render_mesh();
+      same = a.positions == b.positions && a.normals == b.normals && a.indices == b.indices && a.tri_face == b.tri_face && a.tri_material == b.tri_material &&
+             a.uvs.size() == b.uvs.size();
+      for (size_t k = 0; same && k < a.uvs.size(); k++) same = a.uvs[k].x == b.uvs[k].x && a.uvs[k].y == b.uvs[k].y;
+    }
+    CHECK(same);
+  });
+
+  test("sweep rows (review 418): a copied .mat whose stored name is the old one is named by its file whether the Materials window preloaded it or not; a scene material of a name is deleted before an asset of that name", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.step_frame_headless();
+    ed.command("newmat R418 Copy Src");
+    ed.step_frame_headless();
+    const std::string dir = fs::join(ed.assets_dir_for_test(), "Materials");
+    std::string text;
+    CHECK(fs::read_file(fs::join(dir, "R418 Copy Src.mat"), text));
+    for (int i = 0; i < 12; i++) CHECK(fs::write_file(fs::join(dir, strprintf("R418 Copy %02d.mat", i)), text));  // (a copy keeps the old name inside)
+    ed.command("window Materials");
+    ed.step_frame_headless();  // (the window preloads them)
+    MaterialPtr a = ed.material_by_name_for_test("R418 Copy 03");
+    CHECK(a && a->name == "R418 Copy 03");
+    ed.command("deletemat R418 Copy 05");
+    ed.step_frame_headless();
+    CHECK(!fs::exists(fs::join(dir, "R418 Copy 05.mat")));
+    /* A scene material and an asset of one name: the scene's goes first (as before round 418), its slot emptied. */
+    GameObject *g = ed.scene().create("R418 Holder");
+    g->add<MeshFilter>()->mesh = primitives::cube();
+    MeshRenderer *mr = g->add<MeshRenderer>();
+    MaterialPtr scene_mat = make_material("R418 Copy 07", Vec3(0.2f, 0.4f, 0.6f));
+    mr->materials = {scene_mat};
+    ed.step_frame_headless();
+    ed.command("deletemat R418 Copy 07");
+    ed.step_frame_headless();
+    CHECK(mr->materials.size() == 1 && !mr->materials[0]);
+    CHECK(fs::exists(fs::join(dir, "R418 Copy 07.mat")));
+    for (int i = 0; i < 12; i++) fs::remove_file(fs::join(dir, strprintf("R418 Copy %02d.mat", i)));
+    fs::remove_file(fs::join(dir, "R418 Copy Src.mat"));
+  });
+  test("sweep rows (review 418): a mesh shared by the Edit Mode object and twenty others is built once per variant, the same as serial builds", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    MeshPtr shared = primitives::uv_sphere(1.0f, 32, 16);
+    for (int i = 0; i < 21; i++) {
+      GameObject *g = ed.scene().create(strprintf("R418 Shared %02d", i));
+      g->add<MeshFilter>()->mesh = shared;
+      g->add<MeshRenderer>();
+      g->set_local_position({(float)(i % 7) * 2.5f, 0, (float)(i / 7) * 2.5f});
+    }
+    for (int i = 0; i < 30; i++) {  // (cold meshes enough for the prebuild to run)
+      GameObject *g = ed.scene().create(strprintf("R418 Own %02d", i));
+      g->add<MeshFilter>()->mesh = primitives::uv_sphere(0.5f, 12 + i, 8);
+      g->add<MeshRenderer>();
+    }
+    ed.command("select R418 Shared 00");
+    ed.command("edit");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(shared->render_cache_warm(false) && shared->render_cache_warm(true));
+    Mesh copy = *shared;
+    copy.forget_caches();
+    bool same = true;
+    for (bool flat : {false, true}) {
+      const RenderMesh &a = shared->render_mesh(flat), &b = copy.render_mesh(flat);
+      same = same && a.positions == b.positions && a.normals == b.normals && a.indices == b.indices && a.tri_face == b.tri_face && a.tri_material == b.tri_material;
+      same = same && a.uvs.size() == b.uvs.size();
+      for (size_t k = 0; same && k < a.uvs.size(); k++) same = a.uvs[k].x == b.uvs[k].x && a.uvs[k].y == b.uvs[k].y;
+    }
+    CHECK(same);
+    ed.command("edit off");
+  });
+  test("sweep rows (round 418): the Materials window's first frame on a project of many material assets draws its tiles", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.step_frame_headless();
+    for (int i = 0; i < 40; i++) ed.command(strprintf("newmat R418 Tile %02d", i));
+    ed.step_frame_headless();
+    ed.command("window Materials");
+    ed.record_buttons_for_test(true);
+    ScopedTimer t;
+    ed.step_frame_headless();
+    const FrameProfile &p = ed.frame_profile_last_for_test();
+    size_t tiles = 0;
+    for (const auto &kv : ed.ui_for_test().button_rects)
+      if (kv.first.rfind("mat:", 0) == 0) tiles++;
+    std::printf("    the Materials window's first frame %.1f ms (ui %.1f), %zu tiles drawn\n", t.ms(), p.ms_ui, tiles);
+    CHECK(tiles >= 20);  // (the grid shows what fits; the rest scrolls - the new ones sort after the project's own)
+    /* The walk's paths are the ones resolving each file on its own gives. */
+    std::vector<std::string> want;
+    std::function<void(const std::string &)> walk = [&](const std::string &dir) {
+      for (const DirEntry &de : fs::list(dir)) {
+        const std::string p = fs::join(dir, de.name);
+        if (de.is_dir) walk(p);
+        else if (fs::extension(de.name) == ".mat") {
+          std::string r = make_asset_relative(p);
+          std::replace(r.begin(), r.end(), '\\', '/');
+          want.push_back(r);
+        }
+      }
+    };
+    walk(ed.assets_dir_for_test());
+    std::sort(want.begin(), want.end());
+    const std::vector<std::string> got = ed.material_asset_paths_for_test();
+    std::printf("    %zu material paths, the same as resolving each file: %s\n", got.size(), got == want ? "yes" : "no");
+    CHECK(got == want && got.size() >= 40);
+    ScopedTimer td;
+    for (int i = 0; i < 40; i++) ed.command(strprintf("deletemat R418 Tile %02d", i));
+    std::printf("    40 materials deleted by name: %.1f ms\n", td.ms());
+    ed.step_frame_headless();
+  });
+}
+
+/* ---------------------------------------------------------------- round 419: the allocator and the profiler (task 0395, ADR 0112) */
+static void tests_round419() {
+  test("allocator (round 419, ADR 0112): a Windows build with oneTBB's allocator has it replacing the runtime's; blocks of mixed sizes written, read back and freed on other threads", [] {
+    const std::string name = allocator_name();
+    std::printf("    this build's allocator: %s\n", name.c_str());
+#if defined(BL_WITH_TBBMALLOC) && defined(_WIN32)
+    if (!std::getenv("TBB_MALLOC_DISABLE_REPLACEMENT")) CHECK(allocator_replaced());  // (the proxy's own replacement log)
+#elif !defined(BL_WITH_TBBMALLOC)
+    CHECK(!allocator_replaced() && name == "the system's");
+#endif
+    /* 64 jobs each allocate 16,384 blocks of 16 B - 4 KB and write a pattern in each; the blocks are read back and freed
+     * by a later job (another thread, mostly): the allocator's cross-thread path. */
+    const int jobs = 64, per = 16384;
+    std::vector<std::vector<std::pair<char *, size_t>>> made(jobs);
+    JobSystem::global().parallel_for(jobs, 1, [&](int64_t a, int64_t b) {
+      for (int64_t j = a; j < b; j++)
+        for (int i = 0; i < per; i++) {
+          const size_t n = (size_t)(16 + (((uint32_t)i * 2654435761u + (uint32_t)j * 40503u) % 4096u));
+          char *p = new char[n];
+          for (size_t k = 0; k < n; k += 61) p[k] = (char)(i + j + k);
+          made[(size_t)j].push_back({p, n});
+        }
+    });
+    std::atomic<size_t> wrong{0};
+    ScopedTimer t;
+    JobSystem::global().parallel_for(jobs, 1, [&](int64_t a, int64_t b) {
+      for (int64_t j = a; j < b; j++) {
+        auto &list = made[(size_t)((j + jobs / 2) % jobs)];  // (another job's blocks)
+        const int64_t owner = (j + jobs / 2) % jobs;
+        size_t bad = 0;
+        for (size_t i = 0; i < list.size(); i++) {
+          for (size_t k = 0; k < list[i].second; k += 61) bad += list[i].first[k] != (char)(i + owner + k);
+          delete[] list[i].first;
+        }
+        wrong += bad;
+      }
+    });
+    std::printf("    %d blocks read back and freed on other threads: %.1f ms, %zu wrong bytes\n", jobs * per, t.ms(), wrong.load());
+    CHECK(wrong == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 436: the idle frame (task 0412) */
+static void tests_round436() {
+  test("the views' draw items kept (round 436): orbiting an unchanged scene gathers nothing; a `set` gathers again; verify mode finds no stale list", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.command("create Cube");
+    ed.command("create Point Light");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    uint64_t kept = 0;
+    for (int i = 0; i < 6; i++) {  // (the editor's camera turns: every frame redraws, the scene holds still)
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 7.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+      kept += ed.frame_profile_last_for_test().items_kept;
+    }
+    ed.set_render_cache_verify(false);
+    for (int i = 0; i < 6; i++) {
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 7.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+      kept += ed.frame_profile_last_for_test().items_kept;
+    }
+    std::printf("    12 orbiting frames: %llu gathers answered from the kept items\n", (unsigned long long)kept);
+    CHECK(kept >= 6);  // (verify mode gathers anyway; outside it every orbit frame keeps the list)
+    ed.command("set Light.Intensity 3");  // (the scene's hash moves: the next orbit gathers)
+    SceneCamera c = ed.scene_camera_for_test();
+    c.yaw += 7.0f;
+    ed.set_scene_camera_for_test(c);
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().items_kept == 0);
+    CHECK(ed.frame_profile_last_for_test().ms_collect > 0.0);
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
+  });
+  test("per-frame walks let go while nothing changed (round 436): procedural shapes, Fit to Mesh, focus tracking, the icon pass skip their walk; a Fit to Mesh ticked by `set` is fitted the next frame", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_scene_hash_check_every_for_test(8);  // (a window's interval; headless walks every frame)
+    ed.command("create Cube");
+    ed.command("component Collider");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const uint64_t s0 = ed.walks_skipped_for_test();
+    for (int i = 0; i < 16; i++) ed.step_frame_headless();
+    const uint64_t skipped = ed.walks_skipped_for_test() - s0;
+    std::printf("    16 idle frames: %llu walks skipped\n", (unsigned long long)skipped);
+    CHECK(skipped >= 16 * 2);  // (at least the shapes' and the colliders' walks, 7 frames in 8)
+    GameObject *g = ed.active_object_for_test();
+    ColliderComponent *c = g ? g->get<ColliderComponent>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->fit = false;
+    c->size = {9, 9, 9};
+    ed.command("set Collider.FitToMesh true");
+    ed.step_frame_headless();
+    CHECK(!c->fit);
+    CHECK(c->size.x < 5.0f);  // (fitted to the unit cube again)
+  });
+}
+
+/* ---------------------------------------------------------------- round 445: the soak's memory (task 0421) */
+static void tests_round445() {
+  test("memory accounts (round 445): every subsystem named, the bytes added up, `perf memory` says them", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    const std::vector<Editor::MemoryAccount> a = ed.memory_accounts();
+    size_t sum = 0;
+    bool scene = false, textures = false, procedural = false, scratch = false;
+    for (const Editor::MemoryAccount &m : a) {
+      std::printf("    %s: %.2f MB\n", m.name, (double)m.bytes / 1048576.0);
+      sum += m.bytes;
+      scene |= std::string(m.name) == "scene", textures |= std::string(m.name) == "textures";
+      procedural |= std::string(m.name) == "procedural textures", scratch |= std::string(m.name) == "raster scratch";
+    }
+    CHECK(scene && textures && procedural && scratch);
+    CHECK(sum > 0);
+    const std::string text = ed.memory_text();
+    std::printf("    %s\n", text.c_str());
+    CHECK(text.find("raster scratch") != std::string::npos && text.find("in no account") != std::string::npos);
+  });
+  test("the renderers' scratch (round 445): a big Edit Mode frame leaves it kept; trim_scratch frees it, the next frame draws; the idle trim waits its seconds", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.command("edit");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const size_t kept = ed.scratch_bytes();
+    std::printf("    kept after the frames: %.1f MB\n", (double)kept / 1048576.0);
+    CHECK(kept > 0);
+    CHECK(ed.trim_scratch(kept + 1) == 0);  // (under the limit: nothing freed)
+    const size_t freed = ed.trim_scratch(0);
+    std::printf("    freed: %.1f MB, left %.1f MB\n", (double)freed / 1048576.0, (double)ed.scratch_bytes() / 1048576.0);
+    CHECK(freed == kept && ed.scratch_bytes() == 0);
+    ed.command("redraw");
+    ed.step_frame_headless();
+    CHECK(ed.in_edit_mode());
+    std::printf("    after a redraw: %.1f MB kept again\n", (double)ed.scratch_bytes() / 1048576.0);  // (a frame that needs it asks again)
+  });
+  test("the surface cache's budget (round 445): over it, the least recently used images only the cache holds are dropped and the surface poll leaves them; images in use stay", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr a = ed.new_texture_asset_for_test("Noise"), b = ed.new_texture_asset_for_test("Tiles");
+    CHECK(a && b);
+    if (!a || !b) return;
+    a->width = a->height = b->width = b->height = 512;
+    a->touch();
+    b->touch();
+    procedural_texture_cache_clear();
+    TexturePtr held = procedural_texture_output(*b, 0);  // (b's albedo is in use: something shades with it)
+    procedural_texture_output(*a, 0);
+    const size_t had = procedural_texture_cache_bytes();
+    std::printf("    the cache holds %.1f MB (default budget %.0f MB)\n", (double)had / 1048576.0, (double)procedural_texture_cache_budget() / 1048576.0);
+    CHECK(had > 0);
+    procedural_texture_cache_set_budget(1);
+    const size_t freed = procedural_texture_cache_trim();
+    std::printf("    freed %.1f MB at a budget of 1 byte; left %.1f MB\n", (double)freed / 1048576.0, (double)procedural_texture_cache_bytes() / 1048576.0);
+    CHECK(freed > 0);
+    CHECK(procedural_texture_trimmed(a->asset_path, procedural_texture_cache_hash(*a)));
+    CHECK(!procedural_texture_trimmed(b->asset_path, procedural_texture_cache_hash(*b)));  // (in use)
+    CHECK(procedural_texture_cache_bytes() > 0);
+    procedural_texture_output(*a, 0);  // (asked for again: it comes back, and is no longer "dropped")
+    CHECK(!procedural_texture_trimmed(a->asset_path, procedural_texture_cache_hash(*a)));
+    procedural_texture_cache_set_budget(0);
+    held.reset();
+    procedural_texture_cache_clear();
+    CHECK(procedural_texture_cache_bytes() == 0);
+  });
+  test("the surface cache's budget (round 445): images in use are pinned and not counted against it - a big one in use doesn't empty the unused ones; a dropped drag preview doesn't flag the full images", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr a = ed.new_texture_asset_for_test("Noise"), b = ed.new_texture_asset_for_test("Tiles");
+    CHECK(a && b);
+    if (!a || !b) return;
+    a->width = a->height = b->width = b->height = 512;
+    a->touch();
+    b->touch();
+    procedural_texture_cache_clear();
+    TexturePtr held = procedural_texture_output(*b, 0);  // (b in use)
+    procedural_texture_output(*a, 0);
+    const size_t one = procedural_texture_cache_bytes() / 2;  // (about one entry's bytes)
+    procedural_texture_cache_set_budget(one * 2);  // (room for the unused one beside the pinned one)
+    CHECK(procedural_texture_cache_trim() == 0);
+    CHECK(!procedural_texture_trimmed(a->asset_path, procedural_texture_cache_hash(*a)));
+    procedural_texture_set_preview(a->asset_path, true);
+    a->touch();
+    procedural_texture_output(*a, 0);  // (a's 256 preview is cached beside its full images)
+    procedural_texture_cache_set_budget(1);
+    procedural_texture_cache_trim();
+    procedural_texture_clear_previews();
+    procedural_texture_cache_set_budget(0);
+    held.reset();
+    procedural_texture_cache_clear();
+    CHECK(!procedural_texture_trimmed(a->asset_path, 0));  // (clear forgets what was dropped)
+  });
+  test("the idle trim (round 445, a fake clock): the renderers' scratch is kept while a renderer is drawing, and an idle one gives it back after the hold", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.set_clock_for_test(100.0);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.command("edit");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const size_t kept = ed.scratch_bytes();
+    std::printf("    kept after the frames: %.1f MB\n", (double)kept / 1048576.0);
+    CHECK(kept > 96u * 1048576u);  // (over the budget)
+    for (int i = 0; i < 4; i++) {  // (6 s of frames with the camera orbiting: the Scene view draws every one)
+      ed.set_clock_for_test(102.0 + i * 1.5);
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 5.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+    }
+    const size_t drawing = ed.scratch_bytes();
+    std::printf("    after 6 s of drawing frames: %.1f MB\n", (double)drawing / 1048576.0);
+    CHECK(drawing > 96u * 1048576u);
+    ed.command("edit off");  // (out of Edit Mode: the frames after it are answered from the views' pictures)
+    CHECK(!ed.in_edit_mode());
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ed.set_clock_for_test(110.0);
+    ed.step_frame_headless();
+    CHECK(ed.scratch_bytes() > 96u * 1048576u);  // (2 s idle: kept)
+    ed.set_clock_for_test(120.0);
+    ed.step_frame_headless();
+    std::printf("    after 12 s idle: %.1f MB (the last frame: scene view %.2f ms, overlays %.2f ms)\n", (double)ed.scratch_bytes() / 1048576.0, ed.frame_profile_last_for_test().ms_scene3d, ed.frame_profile_last_for_test().ms_overlays);
+    CHECK(ed.scratch_bytes() < 96u * 1048576u);
+  });
+  test("a dropped surface and the poll (round 445): after its images are dropped the poll does not queue it again; an edit or a request does", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.command("surface new DroppedSurface");
+    ProceduralTexturePtr pt;
+    auto land = [&] {
+      for (int i = 0; i < 4000 && (i < 3 || ed.surface_busy_for_test()); i++) {
+        ed.step_frame_headless();
+        if (ed.surface_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    };
+    land();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<MeshRenderer>() && !g->get<MeshRenderer>()->materials.empty() && g->get<MeshRenderer>()->materials[0]);
+    if (!g || !g->get<MeshRenderer>() || g->get<MeshRenderer>()->materials.empty() || !g->get<MeshRenderer>()->materials[0]) return;
+    std::string asset;
+    int out = -1;
+    CHECK(split_texture_ref(g->get<MeshRenderer>()->materials[0]->base_map.path, asset, out));
+    pt = texture_asset(asset);
+    CHECK(pt && pt->surface);
+    if (!pt) return;
+    uint64_t h = procedural_texture_cache_hash(*pt);
+    CHECK(procedural_texture_cached(asset, h));
+    ed.command("surface add Noise");  // (a fresh stack: its images land, and the material holds them)
+    land();
+    h = procedural_texture_cache_hash(*pt);
+    CHECK(procedural_texture_cached(asset, h));
+    procedural_texture_cache_set_budget(1);
+    ed.command("delete Cube");  // (nothing shades with the surface now)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const size_t freed = procedural_texture_cache_trim();
+    const bool dropped = procedural_texture_trimmed(asset, h);
+    std::printf("    freed %.1f MB; the surface's images dropped %d\n", (double)freed / 1048576.0, (int)dropped);
+    CHECK(dropped);
+    if (dropped) {
+      for (int i = 0; i < 10; i++) ed.step_frame_headless();
+      CHECK(!ed.surface_busy_for_test() && !procedural_texture_cached(asset, h));  // (not queued again)
+      pt->layers[1]->opacity = 0.25f;  // (an edit: its hash moves on)
+      pt->touch();
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      const bool queued = ed.surface_busy_for_test() || procedural_texture_cached(asset, procedural_texture_cache_hash(*pt));
+      std::printf("    queued again after an edit: %d\n", (int)queued);
+      CHECK(queued);
+      land();
+    }
+    procedural_texture_cache_set_budget(0);
+    procedural_texture_cache_clear();
+  });
+}
+
+/* ---------------------------------------------------------------- round 437: the two freezes (task 0413) */
+static void tests_round437() {
+  test("Enter Edit Mode on the 500k sphere (round 437): the frame that enters and the frames after it, timed; `perf mark` names its longest frame's parts", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.step_frame_headless();
+    ed.command("perf reset");
+    ScopedTimer t;
+    ed.command("edit");
+    ed.step_frame_headless();
+    const double enter = t.ms();
+    const FrameProfile p = ed.frame_profile_last_for_test();
+    ScopedTimer t2;
+    ed.step_frame_headless();
+    const double next = t2.ms();
+    std::printf("    entering: %.1f ms (overlays %.1f, gathering %.1f); the next frame %.1f ms\n", enter, p.ms_overlays, p.ms_collect, next);
+    CHECK(ed.in_edit_mode());
+    const std::string mark = ed.perf_mark_for_test("enter edit");
+    std::printf("    %s\n", mark.c_str());
+    CHECK(mark.find("perf mark enter edit: ") == 0 && mark.find("the longest") != std::string::npos);
+    CHECK(mark.find("Scene view") != std::string::npos);  // (the longest frame was the cage's: over 5 ms of the Scene view)
+  });
+  test("F12's textures loaded first on a worker (round 437): with images not in the cache the render says it is loading them, starts when they land, and finishes; with them cached it starts at once", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    ed.set_async_jobs_for_test(true);
+    ed.command("create Cube");
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    int made = 0;
+    for (const char *name : {"Cube", "Sphere"}) {
+      GameObject *g = ed.scene().find_by_name(name);
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      const std::string tex = fs::join(test_dir(), std::string("r437_") + name + ".png");
+      std::vector<uint32_t> px(64 * 64, made ? 0xFF3060C0u : 0xFFC06030u);
+      CHECK(write_png(tex, px.data(), 64, 64, 64));
+      MaterialPtr m = make_material(std::string("R437 ") + name, {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      mr->materials = {m};
+      made++;
+    }
+    CHECK(made == 2);
+    texture_cache_clear();
+    ed.command("render");
+    const uint64_t prefetched = ed.render_prefetches_for_test();
+    CHECK(prefetched == 1);
+    CHECK(ed.rendering_for_test());
+    CHECK(ed.render_status_for_test().find("loading 2 textures") != std::string::npos);
+    int frames = 0;
+    for (; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    a cold F12: %d frame(s) until it finished, %llu load(s) first\n", frames, (unsigned long long)prefetched);
+    CHECK(!ed.rendering_for_test());
+    ed.command("render");  // (warm: no load first)
+    CHECK(ed.render_prefetches_for_test() == prefetched);
+    for (frames = 0; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    CHECK(!ed.rendering_for_test());
+    /* Review 437: two files that won't decode - one load, then the render runs (they never reach the cache). */
+    for (const char *name : {"Cube", "Sphere"}) {
+      GameObject *g = ed.scene().find_by_name(name);
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (mr && !mr->materials.empty() && mr->materials[0]) mr->materials[0]->base_map.path = fs::join(test_dir(), std::string("r437_missing_") + name + ".png");
+    }
+    const uint64_t loads = ed.render_prefetches_for_test();
+    ed.command("render");
+    for (frames = 0; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    two missing files: %d frame(s), %llu load(s)\n", frames, (unsigned long long)(ed.render_prefetches_for_test() - loads));
+    CHECK(!ed.rendering_for_test());
+    CHECK(ed.render_prefetches_for_test() - loads == 1);
+  });
+  test("a scene's textures decoded before its first frame (round 437): what an open's worker runs fills the texture cache with every renderer's image files", [] {
+    Scene s;
+    std::vector<std::string> files;
+    for (int i = 0; i < 3; i++) {
+      GameObject *g = s.create("Textured " + std::to_string(i));
+      g->add<MeshFilter>()->mesh = primitives::cube();
+      const std::string tex = fs::join(test_dir(), "r437_scene_" + std::to_string(i) + ".png");
+      std::vector<uint32_t> px(32 * 32, 0xFF000000u | (uint32_t)(i * 0x404040));
+      CHECK(write_png(tex, px.data(), 32, 32, 32));
+      MaterialPtr m = make_material("R437 " + std::to_string(i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      g->add<MeshRenderer>()->materials = {m};
+      files.push_back(tex);
+    }
+    texture_cache_clear();
+    int before = 0, after = 0;
+    for (const std::string &f : files) before += texture_cached(f, true) != nullptr;
+    prefetch_scene_textures(s);
+    for (const std::string &f : files) after += texture_cached(f, true) != nullptr;
+    std::printf("    %d of %zu textures cached before, %d after\n", before, files.size(), after);
+    CHECK(before == 0 && after == (int)files.size());
+  });
+}
+
+/* ---------------------------------------------------------------- round 436, review: gathers by other paths */
+static void tests_round436_review() {
+  test("a render's gather doesn't feed the Game view (review 436): F12 gathers with the views' outlines, LOD Groups and Camera Flatten off; the Game view after it gathers its own, in verify mode no stale list", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.command("create Cube");
+    ed.command("create Camera");
+    ed.command("window Game");
+    ed.step_frame_headless();
+    ed.command("render");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 435: the scene's change counter (task 0411, ADR 0115) */
+/* Idle frames: how many walked the scene and how many kept its hash. */
+static void idle_frames(Editor &ed, int n, uint64_t &walks, uint64_t &kept) {
+  walks = kept = 0;
+  for (int i = 0; i < n; i++) {
+    ed.step_frame_headless();
+    walks += ed.frame_profile_last_for_test().scene_hashes;
+    kept += ed.frame_profile_last_for_test().scene_hash_reuses;
+  }
+}
+
+static void tests_round435() {
+  test("the change counter (round 435, ADR 0115): a transform, an object made, destroyed or reparented, a component added or removed, a mesh or a material touched each move it", [] {
+    Scene s;
+    uint64_t c = edit_epoch::now();
+    auto moved = [&] {
+      const bool m = edit_epoch::now() != c;
+      c = edit_epoch::now();
+      return m;
+    };
+    GameObject *a = s.create("A");
+    CHECK(moved());
+    GameObject *b = s.create("B");
+    moved();
+    a->set_local_position({1, 2, 3});
+    CHECK(moved());
+    s.set_parent(b, a);
+    CHECK(moved());
+    Light *l = a->add<Light>();
+    CHECK(moved());
+    a->remove_component(l);
+    CHECK(moved());
+    auto mesh = std::make_shared<Mesh>();
+    mesh->touch();
+    CHECK(moved());
+    Material mat;
+    mat.touch();
+    CHECK(moved());
+    write_anim_value(*a, "Active", 0, 0.0f);  // (review 435: a clip's, the Sequencer's, the Curve editor's writes)
+    CHECK(moved());
+    s.destroy(b);
+    CHECK(moved());
+    s.destroy(std::vector<GameObject *>{a});
+    CHECK(moved());
+    CHECK(!moved());  // (nothing done: still)
+  });
+  test("idle frames keep the scene hash (round 435): walked once in so many frames, kept in between; a `set` on a light and Undo each walk it again at once", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.command("create Point Light");
+    ed.set_scene_hash_check_every_for_test(8);  // (a window's interval; headless checks every frame)
+    ed.step_frame_headless();
+    uint64_t walks = 0, kept = 0;
+    idle_frames(ed, 32, walks, kept);
+    std::printf("    32 idle frames: %llu walks, %llu kept\n", (unsigned long long)walks, (unsigned long long)kept);
+    CHECK(kept > 0);
+    CHECK(walks <= 32 / 8 + 2);  // (the check every 8th frame, and the first)
+    const uint64_t before = ed.render_hash_for_test();
+    ed.command("set Light.Intensity 7");
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().scene_hashes >= 1);
+    const uint64_t set_to_7 = ed.render_hash_for_test();
+    CHECK(set_to_7 != before);
+    ed.command("undo");  // (the restored scene is a clone - a new serial, so a new hash: walked, not kept)
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().scene_hashes >= 1);
+    CHECK(ed.render_hash_for_test() != set_to_7);
+    CHECK(ed.scene_hash_misses_for_test() == 0);
+  });
+  test("a write past every funnel (round 435): the check walks it on the next due frame, counts a miss and draws the walked hash - the picture is stale at most the check's interval", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Point Light");
+    ed.set_scene_hash_check_every_for_test(1);
+    uint64_t walks = 0, kept = 0;
+    idle_frames(ed, 4, walks, kept);
+    CHECK(ed.scene_hash_misses_for_test() == 0);
+    GameObject *g = ed.active_object_for_test();
+    Light *l = g ? g->get<Light>() : nullptr;
+    CHECK(l != nullptr);
+    if (!l) return;
+    /* (No Inspector, no `set`: nothing told the counter. Within the field's range - the Inspector clamps an
+     * out-of-range value on its next draw, and that is a second write.) */
+    l->intensity = 5.0f;
+    idle_frames(ed, 3, walks, kept);
+    std::printf("    3 frames after the write: %llu walks, %llu kept, %llu missed\n", (unsigned long long)walks, (unsigned long long)kept,
+                (unsigned long long)ed.scene_hash_misses_for_test());
+    CHECK(ed.scene_hash_misses_for_test() == 1);
+    CHECK(walks >= 3);  // (check every frame: each frame walks once)
+  });
+  test("Play, a playing clip, a stroke walk every call (round 435): scripts, physics, tracks and brushes write past the counter", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(!ed.scene_hash_volatile_for_test());
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.scene_hash_volatile_for_test());
+    ed.command("stop");
+    ed.step_frame_headless();
+    CHECK(!ed.scene_hash_volatile_for_test());
+  });
+}
+
+/* ---------------------------------------------------------------- round 433: what the soak found (task 0409) */
+static void tests_round433() {
+  test("a small list destroyed at once (round 433): an object named twice and a child named with its parent are destroyed once, nothing read after it is freed", [] {
+    Scene s;
+    GameObject *a = s.create("A");
+    GameObject *kid = s.create("Kid", a);
+    GameObject *b = s.create("B");
+    GameObject *keep = s.create("Keep");
+    s.destroy(std::vector<GameObject *>{a, kid, b, b});
+    CHECK(s.object_count() == 1 && s.roots.size() == 1 && s.roots[0] == keep && keep->index_in_scene == 0);
+    s.destroy(std::vector<GameObject *>{});
+    CHECK(s.object_count() == 1);
+  });
+  test("Delete on 50,000 selected cubes (round 433): one pass, all gone, and Undo brings every one back", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("benchscene cubes50k");
+    ed.step_frame_headless();
+    const size_t before = ed.scene().object_count();
+    ed.command("selectall");
+    ScopedTimer t;
+    ed.command("delete");
+    const double ms = t.ms();
+    ed.step_frame_headless();
+    std::printf("    %zu objects deleted in %.1f ms; %zu left\n", before, ms, ed.scene().object_count());
+    CHECK(before >= 50000 && ed.scene().object_count() < before - 49000);
+    ed.command("undo");
+    ed.step_frame_headless();
+    CHECK(ed.scene().object_count() == before);
+  });
+  test("many objects destroyed in one pass (round 433): their children go with them, a surviving parent loses only the doomed children, the survivors keep their order and their indices, the active camera resets; 50,000 roots deleted in milliseconds", [] {
+    Scene s;
+    std::vector<GameObject *> roots, doomed;
+    for (int i = 0; i < 100; i++) roots.push_back(s.create(strprintf("R%d", i)));
+    GameObject *kid_of_doomed = s.create("Kid", roots[0]);
+    GameObject *keeper = roots[1];
+    GameObject *keep_kid = s.create("KeepKid", keeper);
+    GameObject *gone_kid = s.create("GoneKid", keeper);
+    s.active_camera = kid_of_doomed->id;
+    for (int i = 0; i < 100; i += 2) doomed.push_back(roots[i]);  // R0, R2, ... (R0 has a child)
+    doomed.push_back(gone_kid);
+    const uint64_t kid_id = kid_of_doomed->id, gone_id = gone_kid->id;
+    s.destroy(doomed);
+    CHECK(s.object_count() == 50 + 1);  // R1, R3, ... and KeepKid
+    CHECK(!s.find(kid_id) && !s.find(gone_id));
+    CHECK(s.active_camera == 0);
+    CHECK(keeper->children.size() == 1 && keeper->children[0] == keep_kid);
+    CHECK(s.roots.size() == 50 && s.roots[0] == roots[1] && s.roots[49] == roots[99]);
+    bool indices = true;
+    for (size_t i = 0; i < s.objects().size(); i++) indices = indices && s.objects()[i]->index_in_scene == i;
+    CHECK(indices);
+    Scene big;
+    std::vector<GameObject *> all;
+    for (int i = 0; i < 50000; i++) all.push_back(big.create("C"));
+    ScopedTimer t;
+    big.destroy(all);
+    std::printf("    50,000 roots destroyed in one pass: %.1f ms\n", t.ms());
+    CHECK(big.object_count() == 0 && big.roots.empty());
+  });
+  test("the soak's finds (round 433): a scroll area dragged to a negative height with no content ends without dividing by zero; the status bar's Undo undoing the last step leaves nothing read from the empty stack", [] {
+    ui::Context u;
+    Image img;
+    img.resize(200, 100);
+    u.begin_frame(&img, 0.0);
+    for (int content : {0, -5, 1})
+      for (int h : {-40, 0, 10}) {
+        const Recti r{10, 10, 100, h};
+        u.begin_scroll((ui::Id)(1000 + (content + 10) * 100 + (h + 50)), r, content);
+        u.end_scroll();  // (had divided by content_h: 0 when nothing was in it and the area's height negative)
+      }
+    u.end_frame();
+    /* The status bar's Undo with one step on the stack: the click empties it; the frame goes on. */
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("create Cube");
+    ed.command("create Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();  // (the steps committed)
+    const size_t made = ed.undo_depth_for_test();
+    while (ed.undo_depth_for_test() > 1) {
+      ed.command("undo");
+      ed.step_frame_headless();
+    }
+    std::printf("    %zu undo steps made, %zu left before the click\n", made, ed.undo_depth_for_test());
+    CHECK(made >= 1 && ed.undo_depth_for_test() == 1);
+    ed.record_buttons_for_test(true);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &rects = ed.ui_for_test().button_rects;
+    const auto it = rects.find("status:Undo");
+    CHECK(it != rects.end());
+    if (it == rects.end()) return;
+    const Recti b = it->second;
+    auto at = [&](platform::EventType t) {
+      platform::Event e;
+      e.type = t, e.x = b.x + b.w / 2, e.y = b.y + b.h / 2, e.button = 0;
+      return e;
+    };
+    ed.step_frame_headless({at(platform::EventType::MouseMove)});
+    ed.step_frame_headless({at(platform::EventType::MouseDown)});
+    ed.step_frame_headless({at(platform::EventType::MouseUp)});
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    the status bar's Undo clicked with one step: %zu left, the frames drawn on\n", ed.undo_depth_for_test());
+    CHECK(ed.undo_depth_for_test() == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 422: the cheap performance wins (task 0398) */
+static void tests_round422() {
+  test("unity package (round 422): the gzip writer's blocks compressed on every core read back byte for byte - empty, one byte, a block exactly, blocks and a tail, text and noise - and its time printed", [] {
+    uint32_t s = 12345u;
+    auto noise = [&](size_t n) {
+      std::string r(n, '\0');
+      for (char &c : r) s = s * 1664525u + 1013904223u, c = (char)(s >> 24);
+      return r;
+    };
+    std::string text;
+    while (text.size() < ((size_t)40 << 20)) text += "m_LocalPosition: {x: 0.25, y: " + std::to_string(text.size() % 977) + ", z: -1}\n";
+    const std::string big = text.substr(0, (size_t)24 << 20) + noise((size_t)9 << 20) + text.substr(0, (size_t)3 << 20) + "tail";
+    for (const std::string &d : {std::string(), std::string("x"), std::string((size_t)1 << 20, 'a'), noise(((size_t)1 << 20) + 7), big}) {
+      GzipWriter g;
+      ScopedTimer t;
+      for (size_t at = 0; at < d.size(); at += 3000001) g.write(d.substr(at, 3000001));  // (in parts, as the export writes)
+      g.finish();
+      const double ms = t.ms();
+      std::string back, why;
+      const bool ok = gunzip(g.output(), back, why);
+      if (d.size() > 1000000) std::printf("    %.1f MB -> %.1f MB in %.0f ms\n", d.size() / 1048576.0, g.output().size() / 1048576.0, ms);
+      CHECK(ok && back == d);
+    }
+  });
+  test("budget (round 422): a texture's size and whether it can hold alpha read from its header - an opaque PNG, a PNG with alpha, a JPEG, a 24- and a 32-bit TGA; a cut-short file refused", [] {
+    const std::string dir = fs::join(test_dir(), "r422_headers");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(37 * 21, 0xFF336699u);
+    const std::string opaque = fs::join(dir, "opaque.png"), with_alpha = fs::join(dir, "alpha.png"), jpg = fs::join(dir, "photo.jpg");
+    CHECK(write_png(opaque, px.data(), 37, 21, 37, false) && write_png(with_alpha, px.data(), 37, 21, 37, true) && write_jpeg(jpg, px.data(), 37, 21, 37));
+    auto tga = [&](const std::string &name, int depth) {
+      std::string h(18, '\0');
+      h[2] = 2, h[12] = 37, h[14] = 21, h[16] = (char)depth, h[17] = depth == 32 ? 8 : 0;
+      const std::string p = fs::join(dir, name);
+      fs::write_file(p, h + std::string((size_t)37 * 21 * (depth / 8), '\x7f'));
+      return p;
+    };
+    struct Case {
+      std::string path;
+      bool alpha, known;
+    };
+    for (const Case &c : {Case{opaque, false, true}, Case{with_alpha, true, false}, Case{jpg, false, true}, Case{tga("rgb.tga", 24), false, true}, Case{tga("rgba.tga", 32), true, false}}) {
+      int w = 0, h = 0;
+      bool alpha = false, known = false;
+      CHECK(budget_texture_header(c.path, w, h, alpha, known) && w == 37 && h == 21 && alpha == c.alpha && known == c.known);
+    }
+    std::string bytes;
+    fs::read_file(opaque, bytes);
+    const std::string cut = fs::join(dir, "cut.png");
+    fs::write_file(cut, bytes.substr(0, 20));
+    int w = 0, h = 0;
+    bool alpha = false, known = false;
+    CHECK(!budget_texture_header(cut, w, h, alpha, known));
+  });
+  test("budget (round 422): a waiting count counts a drawn map nothing has loaded yet from its file (headless, before a frame) - the same Texture Memory as with it loaded", [] {
+    const std::string dir = fs::join(test_dir(), "r422_budget");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(256 * 128, 0xFF4080C0u);
+    const std::string png = fs::join(dir, "drawn.png");
+    CHECK(write_png(png, px.data(), 256, 128, 256, false));
+    Scene s;
+    GameObject *g = s.create("Box");
+    g->add<MeshFilter>()->mesh = primitives::cube();
+    MaterialPtr m = make_material("Drawn", Vec3(1.0f));
+    m->base_map = TextureRef{png, false};
+    g->add<MeshRenderer>()->materials = {m};
+    const bool was = budget_wait_for_textures();
+    set_budget_wait_for_textures(true);
+    texture_cache_clear();
+    const BudgetCounts cold = budget_count({g});
+    (void)resolve_texture_ref(m->base_map);  // (now loaded, as the views would)
+    const BudgetCounts warm = budget_count({g});
+    set_budget_wait_for_textures(was);
+    const double want = 256.0 * 128.0 * 0.5 * (4.0 / 3.0) / (1024.0 * 1024.0);
+    std::printf("    Texture Memory before a frame %.4f MB, with the map loaded %.4f MB (want %.4f)\n", cold.value[(int)BudgetRow::TextureMB],
+                warm.value[(int)BudgetRow::TextureMB], want);
+    CHECK(cold.textures_reading == 0 && std::fabs(cold.value[(int)BudgetRow::TextureMB] - want) < 1e-6);
+    CHECK(std::fabs(warm.value[(int)BudgetRow::TextureMB] - want) < 1e-6);
+  });
+  test("materials (round 422): texture_files lists exactly the image files textures() loads - every PBR, toon and lilToon map, colour or data - and a prefetch leaves them in the cache", [] {
+    const std::string dir = fs::join(test_dir(), "r422_maps");
+    fs::make_dirs(dir);
+    std::vector<uint32_t> px(4, 0xFF808080u);
+    int n = 0;
+    auto file = [&]() {
+      const std::string p = fs::join(dir, "map" + std::to_string(n++) + ".png");
+      write_png(p, px.data(), 2, 2, 2, false);
+      return TextureRef{p, false};
+    };
+    Material m;
+    m.shading_model = 1, m.lil.on = true;
+    for (TextureRef *r : {&m.base_map, &m.metallic_map, &m.roughness_map, &m.normal_map, &m.emission_map, &m.toon_ramp_map, &m.shade_map, &m.toon_shadow_bias_map,
+                          &m.toon_specular_map, &m.toon_rim_map, &m.face_shadow_map, &m.line_map, &m.hatch_map, &m.lil.shadow_color_tex, &m.lil.shadow2_color_tex,
+                          &m.lil.strength_mask, &m.lil.border_mask, &m.lil.rim_color_tex, &m.lil.backlight_tex, &m.lil.matcap_tex, &m.lil.matcap_mask, &m.lil.emission_map,
+                          &m.lil.emission_blend_mask})
+      *r = file();
+    m.touch();
+    std::vector<std::pair<std::string, bool>> listed;
+    m.texture_files(listed);
+    const Material::Resolved &r = m.textures();
+    std::vector<std::pair<std::string, bool>> loaded;
+    for (const TexturePtr &t : {r.base, r.metallic, r.roughness, r.normal, r.emission, r.toon_ramp, r.shade, r.toon_bias, r.toon_specular, r.toon_rim_mask, r.face_shadow,
+                                r.line, r.hatch, r.lil_shadow_tex, r.lil_shadow2_tex, r.lil_strength_mask, r.lil_border_mask, r.lil_rim_tex, r.lil_backlight_tex, r.lil_matcap,
+                                r.lil_matcap_mask, r.lil_emission, r.lil_emission_mask})
+      if (t) loaded.push_back({t->path, t->srgb});
+    std::sort(listed.begin(), listed.end()), std::sort(loaded.begin(), loaded.end());
+    CHECK(listed.size() == 23 && listed == loaded);
+    /* A PBR material lists only its own five; the prefetch leaves them cached (the same texture comes back). */
+    Material pbr;
+    pbr.base_map = m.base_map, pbr.normal_map = m.normal_map, pbr.shade_map = m.shade_map;
+    std::vector<std::pair<std::string, bool>> two;
+    pbr.texture_files(two);
+    CHECK(two.size() == 2);
+    texture_cache_clear();
+    auto shared = std::make_shared<Material>(m);
+    prefetch_material_textures({shared});
+    CHECK(texture_cache_size() >= 23);
+  });
+  test("import (round 422): a model imported on a worker lands with its file and its textures already copied into Assets; the landing frame timed", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string src = fs::join(test_dir(), "r422_import");
+    fs::make_dirs(src);
+    std::vector<uint32_t> px(8 * 8, 0xFF2040C0u);
+    CHECK(write_png(fs::join(src, "r422skin.png"), px.data(), 8, 8, 8, false));
+    CHECK(fs::write_file(fs::join(src, "r422box.mtl"), "newmtl Skin\nKd 1 1 1\nmap_Kd r422skin.png\n"));
+    CHECK(fs::write_file(fs::join(src, "r422box.obj"), "mtllib r422box.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nusemtl Skin\nf 1/1 2/2 3/3 4/4\n"));
+    ed.set_async_jobs_for_test(true);
+    ed.command("import " + fs::join(src, "r422box.obj") + " pbr");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    double longest = 0;
+    while (!ed.scene().find_by_name("r422box") && std::chrono::steady_clock::now() < deadline) {
+      ScopedTimer f;
+      ed.step_frame_headless();
+      longest = std::max(longest, f.ms());
+    }
+    std::printf("    the longest frame while importing: %.1f ms\n", longest);
+    CHECK(ed.scene().find_by_name("r422box") != nullptr);
+    CHECK(fs::exists(resolve_asset_path("Assets/Meshes/r422box.obj")) && fs::exists(resolve_asset_path("Assets/Textures/r422box/r422skin.png")));
+    const MaterialPtr m = material_asset("Assets/Materials/r422box/Skin.mat");
+    CHECK(m && m->base_map.path == "Assets/Textures/r422box/r422skin.png");
+    std::error_code ec;
+    for (const char *p : {"Assets/Meshes/r422box.obj", "Assets/Meshes/r422box.mtl", "Assets/Textures/r422box", "Assets/Materials/r422box"})
+      std::filesystem::remove_all(std::filesystem::u8path(resolve_asset_path(p)), ec);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -8101,5 +9168,14 @@ void run_editor_tests() {
   tests_round411();
   tests_round412();
   tests_round413();
+  tests_round418();
+  tests_round419();
+  tests_round422();
+  tests_round433();
+  tests_round435();
+  tests_round436();
+  tests_round436_review();
+  tests_round437();
+  tests_round445();
   coverage_tests();
 }

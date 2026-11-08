@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // blendity_tests: the lighting tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
+#include "../src/render/reflection_probe.h"
+#include "../src/scene/unity_material.h"
+#include "../src/render/probe_sh.h"
+#include "../src/render/tetrahedra.h"
+#include "../src/render/unity_lightmaps.h"
+#include <set>
+#include <tuple>
 
 static void round35_tests() {
   /* ---------------------------------------------------------------- 1: lightmap UVs */
@@ -5681,6 +5688,1357 @@ static void tests_round177() {
   });
 }
 
+/* ---------------------------------------------------------------- round 421: measuring the bake (task 0397, ADR 0113) */
+static void tests_round421() {
+  test("bake settings (round 421): a Unity scene's lightmap settings are read from its LightingSettings asset when it references one, else from the scene's own block", [] {
+    const std::string scene =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!157 &3\nLightmapSettings:\n  m_ObjectHideFlags: 0\n  m_LightmapEditorSettings:\n"
+        "    m_BakeResolution: 20\n    m_AtlasSize: 512\n    m_Padding: 3\n    m_LightmapsBakeMode: 0\n    m_MixedBakeMode: 0\n    m_PVRDirectSampleCount: 16\n"
+        "    m_PVRSampleCount: 300\n    m_PVRBounces: 3\n    m_PVRFilteringMode: 0\n  m_LightingSettings: {fileID: 4890085278179872738, guid: 0123, type: 2}\n";
+    const std::string asset =
+        "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!850595691 &4890085278179872738\nLightingSettings:\n  m_Name: Test\n  serializedVersion: 4\n"
+        "  m_BakeResolution: 40\n  m_Padding: 8\n  m_LightmapMaxSize: 2048\n  m_LightmapsBakeMode: 1\n  m_MixedBakeMode: 2\n  m_AO: 1\n  m_BakeBackend: 2\n"
+        "  m_PVRDirectSampleCount: 32\n  m_PVRSampleCount: 1024\n  m_PVREnvironmentSampleCount: 1\n  m_PVRBounces: 2\n  m_PVRFilteringMode: 2\n"
+        "  m_PVRDenoiserTypeIndirect: 1\n";
+    std::vector<UnityDoc> docs;
+    std::string why;
+    CHECK(parse_unity_yaml(scene, docs, why));
+    UnityBakeSettings own, from_asset;
+    CHECK(unity_bake_settings(docs, "", own));
+    CHECK(own.source == "the scene's own settings" && own.texels == 20.0f && own.max_size == 512 && own.padding == 3 && own.indirect == 300 &&
+          own.direct == 16 && own.bounces == 3 && own.filtering == 0 && own.directional == 0);
+    CHECK(unity_bake_settings(docs, asset, from_asset));
+    CHECK(from_asset.source == "the LightingSettings asset" && from_asset.texels == 40.0f && from_asset.max_size == 2048 && from_asset.padding == 8 &&
+          from_asset.indirect == 1024 && from_asset.environment == 1 && from_asset.directional == 1 && from_asset.mixed == 2 && from_asset.ao &&
+          from_asset.backend == 2 && from_asset.denoiser_indirect == 1);
+    std::vector<UnityDoc> none;
+    UnityBakeSettings n;
+    CHECK(!unity_bake_settings(none, "", n) && !n.read);
+    /* Out of range and malformed: clamped in double before the cast (1e12 samples, a negative padding, NaN bounces). */
+    const std::string wild =
+        "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightmapEditorSettings:\n    m_BakeResolution: 5000\n    m_AtlasSize: 99999\n    m_Padding: -4\n"
+        "    m_PVRSampleCount: 1e12\n    m_PVRBounces: .nan\n";
+    std::vector<UnityDoc> wd;
+    UnityBakeSettings w;
+    CHECK(parse_unity_yaml(wild, wd, why) && unity_bake_settings(wd, "", w));
+    CHECK(w.texels == 1000.0f && w.max_size == 4096 && w.padding == 0 && w.indirect == 65536 && w.bounces >= 0 && w.bounces <= 16);
+    /* A LightingSettings embedded in the scene (referenced by its fileID alone), Baked GI off. */
+    const std::string embedded =
+        "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_GISettings:\n    m_EnableBakedLightmaps: 1\n  m_LightmapEditorSettings:\n    m_BakeResolution: 12\n"
+        "  m_LightingSettings: {fileID: 77}\n--- !u!850595691 &77\nLightingSettings:\n  m_BakeResolution: 33\n  m_EnableBakedLightmaps: 0\n  m_PVRSampleCount: 640\n";
+    std::vector<UnityDoc> ed_docs;
+    UnityBakeSettings e;
+    CHECK(parse_unity_yaml(embedded, ed_docs, why) && unity_bake_settings(ed_docs, "", e));
+    CHECK(e.source == "the scene's embedded LightingSettings" && e.texels == 33.0f && e.indirect == 640 && !e.baked_gi);
+    CHECK(own.baked_gi);  // (no flag: on)
+  });
+  test("bake settings (round 421): opening a Unity scene puts its LightingSettings asset's numbers in the Lighting window, logs them, and notes what isn't baked yet; a missing asset is said", [] {
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string dir = resolve_asset_path("Assets/Imported/R421B");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "aaaa4210aaaa4210aaaa4210aaaa0001", gl = "aaaa4210aaaa4210aaaa4210aaaa0002", gone = "aaaa4210aaaa4210aaaa4210aaaa0003";
+    auto scene_text = [](const std::string &guid) {
+      return "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightmapEditorSettings:\n    m_BakeResolution: 10\n    m_PVRSampleCount: 100\n"
+             "  m_LightingSettings: {fileID: 4890085278179872738, guid: " + guid + ", type: 2}\n--- !u!1 &10\nGameObject:\n  m_Name: Thing\n"
+             "--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n";
+    };
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"), scene_text(gl)));
+    CHECK(fs::write_file(fs::join(dir, "Gone.unity"), scene_text(gone)));
+    CHECK(fs::write_file(fs::join(dir, "Lit.lighting"),
+                         "%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n--- !u!850595691 &4890085278179872738\nLightingSettings:\n  m_Name: Lit\n"
+                         "  m_BakeResolution: 25\n  m_Padding: 6\n  m_LightmapMaxSize: 512\n  m_LightmapsBakeMode: 1\n  m_MixedBakeMode: 1\n"
+                         "  m_PVRDirectSampleCount: 24\n  m_PVRSampleCount: 99999\n  m_PVRBounces: 3\n  m_PVRFilteringMode: 0\n  m_PVRDenoiserTypeIndirect: 1\n"));
+    for (const std::string &g : {gs, gl}) CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + g + ".meta"), "fileFormatVersion: 2\nguid: " + g + "\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\tAssets/Imported/R421B/Lit.unity\n" + gl +
+                                                            "\tAssets/Lit.lighting\tAssets/Imported/R421B/Lit.lighting\n"));
+    std::vector<LogEntry> log;
+    const size_t since = Log::fetch(0, log);
+    ed.command("open Assets/Imported/R421B/Lit.unity");
+    const LightingSettings &l = ed.scene().lighting;
+    std::printf("    %.0f texels, %d max, padding %d, %d direct, %d indirect, %d bounces, denoise %d\n", l.texels_per_unit, l.max_size, l.padding,
+                l.direct_samples, l.indirect_samples, l.bounces, (int)l.denoise);
+    CHECK(ed.scene().find_by_name("Thing") != nullptr);
+    CHECK(l.texels_per_unit == 25.0f && l.max_size == 512 && l.padding == 6 && l.direct_samples == 24 && l.indirect_samples == 65536 && l.bounces == 3 && !l.denoise);
+    CHECK(ed.scene().unity_bake.read && ed.scene().unity_bake.source == "the LightingSettings asset" && ed.scene().unity_bake.mixed == 1);
+    log.clear();
+    Log::fetch(since, log);
+    bool settings_info = false, subtractive_unbaked = false, optix = false;
+    for (const LogEntry &e : log) {
+      settings_info = settings_info || (e.level == LogLevel::Info && e.text.find("the lightmap settings came from the LightingSettings asset: 25 texels per unit") != std::string::npos);
+      subtractive_unbaked = subtractive_unbaked || (e.text.find("not baked yet") != std::string::npos && e.text.find("Subtractive") != std::string::npos);
+      optix = optix || e.text.find("OptiX") != std::string::npos;  // (the filter is off in Unity: no denoiser to name)
+    }
+    /* (Round 444: Subtractive is baked now - the scene's Lighting Mode, not a note; round 426's Directional mode too.) */
+    CHECK(settings_info && !subtractive_unbaked && !optix && l.lighting_mode == 2);
+    CHECK(l.directional_mode == 1);  // (round 426: the asset's m_LightmapsBakeMode 1, Directional)
+    CHECK(l.bake_device == 0);  // (round 430: no m_BakeBackend in the asset - Unity's Progressive CPU: as the Render device)
+    /* The asset's GUID not in the project: the scene's own block, and a note that says so (a fresh editor: the import
+     * left the first one with unsaved changes, and Open would ask first). */
+    Editor ed2;
+    ed2.init_headless(400, 300);
+    const size_t since2 = Log::fetch(0, log);
+    ed2.command("open Assets/Imported/R421B/Gone.unity");
+    CHECK(ed2.scene().lighting.texels_per_unit == 10.0f && ed2.scene().lighting.indirect_samples == 100);
+    log.clear();
+    Log::fetch(since2, log);
+    bool said = false;
+    for (const LogEntry &e : log) said = said || e.text.find("Lighting Settings asset (" + gone + ") isn't in this project") != std::string::npos;
+    if (!said)
+      for (const LogEntry &e : log) std::printf("    log: %s\n", e.text.c_str());
+    CHECK(said);
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("bake phases (round 421): Generate Lighting on a worker times its lightmaps, probes, Light Volumes, reflection probes and saving, and its landing frame", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *floor = ed.scene().create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(6.0f, 4);
+    MeshRenderer *mr = floor->add<MeshRenderer>();
+    mr->contribute_gi = true;
+    GameObject *box = ed.scene().create("Box");
+    box->add<MeshFilter>()->mesh = primitives::cube();
+    box->set_local_position({0, 0.5f, 0});
+    box->add<MeshRenderer>()->contribute_gi = true;
+    ed.scene().lighting.texels_per_unit = 8.0f;
+    ed.scene().lighting.indirect_samples = 32;
+    ed.commit_change("scene");
+    ed.set_async_jobs_for_test(true);
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    const auto &b = ed.last_bake_times_for_test();
+    std::printf("    lightmaps %.0f ms (%zu texels, filter %.1f ms), probes %.0f, volumes %.0f, reflection probes %.0f, saving %.0f; total %.0f, landing %.1f ms\n",
+                b.phase_ms[0], b.texels, b.finish_ms, b.phase_ms[1], b.phase_ms[2], b.phase_ms[3], b.phase_ms[4], b.total_ms, b.land_ms);
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().empty());
+    CHECK(b.texels > 0 && b.rays > 0 && b.phase_ms[0] > 0 && b.total_ms >= b.phase_ms[0] && b.land_ms > 0);
+    for (double p : b.phase_ms) CHECK(p >= 0.0);  // (every phase reached: -1 is a phase the job never finished)
+    const double total = b.total_ms;
+    /* A cancelled bake lands nothing: the last bake's times stay. */
+    ed.command("bake start");
+    ed.step_frame_headless();
+    ed.command("bake cancel");
+    for (int i = 0; i < 2000 && ed.baking_for_test(); i++) ed.step_frame_headless();
+    CHECK(!ed.baking_for_test() && ed.last_bake_times_for_test().total_ms == total);
+  });
+}
+
+
+/* ---------------------------------------------------------------- round 423: the lightmap denoiser (task 0399) */
+static BakeObject bake_object(uint64_t id, MeshPtr mesh, const Mat4 &model, const std::vector<MaterialPtr> &materials) {
+  BakeObject o;
+  o.id = id, o.mesh = mesh, o.model = model, o.materials = materials;
+  return o;
+}
+static void tests_round423() {
+  test("lightmap denoiser (round 423): the noisy part denoised - OIDN's lightmap filter where the OIDN build has it, else the A-Trous filter - closer to a converged bake at 16 and at 512 samples, the direct light kept", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), wall = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}),
+                                 bake_object(2, wall, Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {white})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    Environment env;
+    env.mode = Environment::Gradient;
+    auto bake = [&](int n, bool denoise, uint32_t seed, std::string *which) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = n, bs.denoise = denoise, bs.seed = seed;
+      Lightmapper lm;
+      lm.begin(objs, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      if (which) *which = lm.denoiser();
+      return lm.take_result();
+    };
+    const LightingData ref = bake(2048, false, 1, nullptr), noisy = bake(16, false, 0, nullptr);
+    std::string which;
+    const LightingData filtered = bake(16, true, 0, &which);
+    auto rmse = [&](const LightingData &a) {
+      double s = 0;
+      size_t k = 0;
+      for (size_t p = 0; p < a.pages.size(); p++)
+        for (size_t i = 0; i < a.pages[p].texels.size(); i++) {
+          const float r = ref.pages[p].texels[i].y;
+          if (!(r > 0.0f)) continue;
+          const double d = (double)a.pages[p].texels[i].y - r;
+          s += d * d, k++;
+        }
+      return k ? std::sqrt(s / (double)k) : 1e9;
+    };
+    std::printf("    %s: the error at 16 samples %.4f unfiltered, %.4f filtered\n", which.c_str(), rmse(noisy), rmse(filtered));
+    std::string why;
+    const bool lightmap_oidn = PathTracer::oidn_lightmap_available(&why);
+    if (!lightmap_oidn) std::printf("    (OIDN's lightmap filter: %s)\n", why.c_str());
+    CHECK(which == (lightmap_oidn ? "OpenImageDenoise (RTLightmap)" : "the A-Trous filter"));
+    CHECK(rmse(filtered) < rmse(noisy) * 0.8);
+    /* A long bake: the filter mustn't make it worse (round 421 had found the old one doubling the error at 1024). */
+    const LightingData long_raw = bake(512, false, 0, nullptr), long_filtered = bake(512, true, 0, nullptr);
+    std::printf("    at 512 samples: %.4f unfiltered, %.4f filtered\n", rmse(long_raw), rmse(long_filtered));
+    CHECK(rmse(long_filtered) <= rmse(long_raw) * 1.1 + 1e-4);
+    /* The direct light kept: the sun alone (no bounce, a black sky) - the filter's pass over it moves the mean by under
+     * half a percent (only shadow edges change). */
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto direct_only = [&](bool denoise) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 4, bs.bounces = 0, bs.denoise = denoise;
+      Lightmapper lm;
+      lm.begin(objs, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData d0 = direct_only(false), d1 = direct_only(true);
+    double s0 = 0, s1 = 0;
+    for (size_t p = 0; p < d0.pages.size(); p++)
+      for (size_t i = 0; i < d0.pages[p].texels.size(); i++) s0 += d0.pages[p].texels[i].y, s1 += d1.pages[p].texels[i].y;
+    std::printf("    the sun alone: the summed light %.2f unfiltered, %.2f filtered\n", s0, s1);
+    CHECK(s0 > 0 && std::fabs(s1 - s0) < s0 * 0.005);
+    /* The defaults: Unity's 512 indirect samples. */
+    CHECK(BakeSettings{}.indirect_samples == 512 && LightingSettings{}.indirect_samples == 512);
+  });
+  test("lightmap denoiser (review 423): a shadow edge moves by under a texel - every filtered texel inside its unfiltered 3 x 3 neighbourhood's range; a glowing strip's light near a wall kept (its emitters denoised, not clamped: none lost)", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), card = primitives::plane(1.0f, 2);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, card, Mat4::trs({0, 0.5f, 0}, Quat(), {1, 1, 1}), {white})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.2f, -1.0f, 0.1f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](const std::vector<BakeObject> &o, const std::vector<BakeLight> &l, int bounces, int n, bool denoise) {
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = n, bs.bounces = bounces, bs.denoise = denoise;
+      Lightmapper lm;
+      lm.begin(o, l, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData a = bake(objs, {sun}, 0, 4, false), b = bake(objs, {sun}, 0, 4, true);
+    const LightingData::Entry &e = a.entries.at(1);
+    const Lightmap &pa = a.pages[(size_t)e.page], &pb = b.pages[(size_t)e.page];
+    int outside = 0, edge = 0;
+    for (int y = 1; y + 1 < pa.height; y++)
+      for (int x = 1; x + 1 < pa.width; x++) {
+        float lo = 1e30f, hi = -1e30f;
+        for (int dy = -1; dy <= 1; dy++)
+          for (int dx = -1; dx <= 1; dx++) {
+            const float v = pa.texels[(size_t)(y + dy) * pa.width + x + dx].y;
+            lo = std::min(lo, v), hi = std::max(hi, v);
+          }
+        const float v = pb.texels[(size_t)y * pa.width + x].y;
+        edge += hi - lo > 0.3f;
+        outside += v < lo - 1e-4f || v > hi + 1e-4f;
+      }
+    std::printf("    the card's shadow: %d texels on its edge; %d filtered texels outside their neighbourhood's range\n", edge, outside);
+    CHECK(edge > 20 && outside == 0);
+    /* A glowing strip 3 cm off a wall: its glow on the wall summed with the filter and without. */
+    MeshPtr wall = primitives::plane(2.0f, 4), strip = primitives::plane(0.1f, 1);
+    MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 20.0f;
+    const std::vector<BakeObject> lamp{bake_object(1, wall, Mat4::identity(), {white}), bake_object(2, strip, Mat4::trs({0, 0.03f, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+    const LightingData g0 = bake(lamp, {}, 1, 64, false), g1 = bake(lamp, {}, 1, 64, true);
+    const LightingData::Entry &we = g0.entries.at(1);
+    double s0 = 0, s1 = 0;
+    float peak = 0.0f;
+    for (size_t i = 0; i < g0.pages[(size_t)we.page].texels.size(); i++) {
+      s0 += g0.pages[(size_t)we.page].texels[i].y, s1 += g1.pages[(size_t)we.page].texels[i].y;
+      peak = std::max(peak, g0.pages[(size_t)we.page].texels[i].y);
+    }
+    std::printf("    the strip's glow on the wall: %.2f unfiltered, %.2f filtered (peak texel %.2f)\n", s0, s1, peak);
+    CHECK(s0 > 0 && peak > 0.5f && s1 >= s0 * 0.97 && s1 <= s0 * 1.08);  // (none lost - the clamp had cut the glow; a little more where the filter spreads it into the padding, which the sum counts)
+  });
+}
+
+/* ---------------------------------------------------------------- round 424: soft baked shadows (task 0400) */
+static void tests_round424() {
+  test("soft baked shadows (round 424): a Baked Shadow Radius widens a point light's penumbra and an Angle a sun's, the light blocked about the same; No Shadows bakes none; Unity's fields read and passed to the bake", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), card = primitives::plane(0.8f, 2);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    /* A card 1 m over the floor; the light 2 m over the card (a point light) or straight down (a sun). */
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, card, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {white})};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](const RenderLight &l) {
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = 4, bs.bounces = 0, bs.direct_samples = 64, bs.denoise = false;
+      BakeLight bl;
+      bl.light = l, bl.mode = 2, bl.id = 9;
+      Lightmapper lm;
+      lm.begin(objs, {bl}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    /* The floor's texels against the same light with No Shadows: those between 5 % and 95 % lit are the penumbra. */
+    auto penumbra = [&](RenderLight l, double *lit_share) {
+      const LightingData shadowed = bake(l);
+      l.shadows = false;
+      const LightingData open = bake(l);
+      const LightingData::Entry &e = shadowed.entries.at(1);
+      const std::vector<Vec3> &a = shadowed.pages[(size_t)e.page].texels, &b = open.pages[(size_t)e.page].texels;
+      int part = 0;
+      double sa = 0, sb = 0;
+      for (size_t i = 0; i < a.size(); i++) {
+        if (!(b[i].y > 1e-4f)) continue;
+        const float r = a[i].y / b[i].y;
+        part += r > 0.05f && r < 0.95f;
+        sa += a[i].y, sb += b[i].y;
+      }
+      if (lit_share) *lit_share = sb > 0 ? sa / sb : 0;
+      return part;
+    };
+    RenderLight point;
+    point.type = RenderLight::Point, point.position = Vec3(0, 3, 0), point.range = 20.0f, point.intensity = 4.0f;
+    double share0, share1;
+    const int hard = penumbra(point, &share0);
+    point.shadow_radius = 0.4f;
+    const int soft = penumbra(point, &share1);
+    std::printf("    point light: %d penumbra texels sharp, %d with a 0.4 m radius; the floor's share of the open light %.3f / %.3f\n", hard, soft, share0, share1);
+    CHECK(soft > hard * 3 && soft > 20);
+    CHECK(1.0 - share0 > 0.02 && std::fabs((1.0 - share1) - (1.0 - share0)) < (1.0 - share0) * 0.15);  // (the shadow spreads; about as much light is blocked)
+    RenderLight sun;
+    sun.direction = Vec3(0, -1, 0), sun.intensity = 1.0f;
+    const int sun_hard = penumbra(sun, nullptr);
+    sun.shadow_angle = 20.0f;
+    const int sun_soft = penumbra(sun, nullptr);
+    std::printf("    sun: %d penumbra texels sharp, %d at 20 degrees\n", sun_hard, sun_soft);
+    CHECK(sun_soft > sun_hard * 3 && sun_soft > 20);
+    /* No Shadows: the floor's darkest texel (under the card's middle) as lit as with no card at all (Unity bakes no shadow
+     * for it); the two bakes lay their pages out differently, so their darkest lit texels are compared. */
+    point.shadows = false;
+    const LightingData none = bake(point);
+    const std::vector<BakeObject> bare{objs[0]};
+    BakeSettings bs;
+    bs.texels_per_unit = 16, bs.indirect_samples = 4, bs.bounces = 0, bs.direct_samples = 64, bs.denoise = false;
+    BakeLight bl;
+    bl.light = point, bl.mode = 2, bl.id = 9;
+    Lightmapper lm;
+    lm.begin(bare, {bl}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    const LightingData alone = lm.take_result();
+    auto darkest_lit = [](const Lightmap &p) {
+      float m = 1e30f;
+      for (const Vec3 &v : p.texels)
+        if (v.y > 1e-4f) m = std::min(m, v.y);
+      return m;
+    };
+    const float dn = darkest_lit(none.pages[(size_t)none.entries.at(1).page]), da = darkest_lit(alone.pages[(size_t)alone.entries.at(1).page]);
+    std::printf("    No Shadows: the floor's darkest lit texel %.4f, without the card %.4f\n", dn, da);
+    CHECK(da > 0.01f && da < 1e29f && std::fabs(dn - da) < da * 0.02f);
+    /* A bulb a third of its radius off the floor, nothing in the way: the floor as lit as by a sharp light (review 424: the
+     * cone's rays below the floor's horizon had counted as blocked). */
+    const std::vector<BakeObject> floor_only{objs[0]};
+    auto bake_on = [&](const std::vector<BakeObject> &o, const RenderLight &l) {
+      BakeSettings b2;
+      b2.texels_per_unit = 16, b2.indirect_samples = 4, b2.bounces = 0, b2.direct_samples = 64, b2.denoise = false;
+      BakeLight b;
+      b.light = l, b.mode = 2, b.id = 9;
+      Lightmapper m;
+      m.begin(o, {b}, env, b2);
+      while (!m.step(1e9)) {
+      }
+      return m.take_result();
+    };
+    auto floor_sum = [](const LightingData &d) {
+      double s = 0;
+      for (const Vec3 &v : d.pages[(size_t)d.entries.at(1).page].texels) s += v.y;
+      return s;
+    };
+    RenderLight low;
+    low.type = RenderLight::Point, low.position = Vec3(0.3f, 0.1f, 0.2f), low.range = 5.0f, low.intensity = 1.0f;
+    const double sharp_sum = floor_sum(bake_on(floor_only, low));
+    low.shadow_radius = 0.3f;
+    const double ball_sum = floor_sum(bake_on(floor_only, low));
+    std::printf("    a 0.3 m bulb 0.1 m off the floor: the floor's light %.2f, sharp %.2f\n", ball_sum, sharp_sum);
+    CHECK(sharp_sum > 0 && std::fabs(ball_sum - sharp_sum) < sharp_sum * 0.02);
+    /* A light in a closed 20 cm box with a 5 cm radius: the floor gets none (the box's walls lie outside the ball - each
+     * ray stops at the ball's near side along it, the walls are tested). */
+    MeshPtr box = primitives::cube(0.2f);
+    std::vector<BakeObject> boxed{objs[0], bake_object(3, box, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {white})};
+    RenderLight inside;
+    inside.type = RenderLight::Point, inside.position = Vec3(0, 1, 0), inside.range = 5.0f, inside.intensity = 1.0f, inside.shadow_radius = 0.05f;
+    const double boxed_sum = floor_sum(bake_on(boxed, inside)), unboxed_sum = floor_sum(bake_on(floor_only, inside));
+    std::printf("    a 5 cm bulb in a closed 20 cm box: the floor's light %.4f (%.1f without the box)\n", boxed_sum, unboxed_sum);
+    CHECK(unboxed_sum > 1.0 && boxed_sum < unboxed_sum * 1e-4);  // (a ray grazing the cube's edge may slip through a seam without Embree: macOS's CI read 0.0013)
+    /* The bake's light as Unity's LightmapperUtils makes it: the radius with Soft Shadows only. */
+    Light hard_light;
+    hard_light.type = 1, hard_light.shadows = 1, hard_light.shadow_radius = 0.5f;
+    Scene hs;
+    GameObject *hg = hs.create("Hard");
+    CHECK(to_render_light(*hg, hard_light).shadow_radius == 0.0f);  // (Hard Shadows: Unity's bake takes no radius)
+    hard_light.shadows = 2;
+    CHECK(to_render_light(*hg, hard_light).shadow_radius == 0.5f);
+    /* Unity's fields: read from a prefab's Light (clamped to the field's range), given to the bake's light. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    const std::string dir = resolve_asset_path("Assets/Imported/R424");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    CHECK(fs::write_file(fs::join(dir, "Lamp.prefab"),
+                         "%YAML 1.1\n--- !u!1 &10\nGameObject:\n  m_Name: Bulb\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &12\nLight:\n  m_GameObject: {fileID: 10}\n  m_Type: 2\n  m_Intensity: 1\n  m_Shadows:\n    m_Type: 2\n  m_Lightmapping: 2\n  m_ShadowRadius: 0.25\n  m_ShadowAngle: 3\n"
+                         "--- !u!1 &20\nGameObject:\n  m_Name: Sun\n--- !u!4 &21\nTransform:\n  m_GameObject: {fileID: 20}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!108 &22\nLight:\n  m_GameObject: {fileID: 20}\n  m_Type: 1\n  m_Intensity: 1\n  m_Lightmapping: 2\n  m_ShadowAngle: 500\n"));
+    ed.command("import Assets/Imported/R424/Lamp.prefab");
+    GameObject *lamp = ed.scene().find_by_name("Bulb"), *sun_g = ed.scene().find_by_name("Sun");  // (not "Lamp": the prefab's root takes its file's name)
+    const Light *ll = lamp ? lamp->get<Light>() : nullptr, *sl = sun_g ? sun_g->get<Light>() : nullptr;
+    std::printf("    imported: the bulb's radius %.2f (angle %.1f), the sun's angle %.1f (500 in the file)\n", ll ? ll->shadow_radius : -1.0f, ll ? ll->shadow_angle : -1.0f, sl ? sl->shadow_angle : -1.0f);
+    CHECK(ll && std::fabs(ll->shadow_radius - 0.25f) < 1e-6f && std::fabs(ll->shadow_angle - 3.0f) < 1e-6f);
+    CHECK(sl && sl->shadow_angle == 90.0f && sl->shadow_radius == 0.0f);
+    if (lamp && ll) CHECK(to_render_light(*lamp, *ll).shadow_radius == ll->shadow_radius);
+    Light dflt;
+    CHECK(dflt.shadow_radius == 0.0f && dflt.shadow_angle == 0.0f);
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
+/* ---------------------------------------------------------------- round 425: baked light through see-through surfaces (task 0401) */
+static void tests_round425() {
+  test("Unity's Alpha Source (round 425): a texture whose .meta says From Gray Scale loads with its grey as alpha, None as opaque, Input Texture Alpha as decoded; the Budget reads the same field", [] {
+    const std::string dir = resolve_asset_path("Assets/Imported/R425");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    /* A 2 x 1 TGA (32-bit): a white opaque texel and a dark grey one (grey 0x40) of alpha 0x80 - its own alpha and its grey
+     * differ, so each Alpha Source shows. */
+    std::string tga(18, '\0');
+    tga[2] = 2, tga[12] = 2, tga[14] = 1, tga[16] = 32, tga[17] = 0x28;
+    tga += std::string("\xff\xff\xff\xff", 4) + std::string("\x40\x40\x40\x80", 4);
+    auto load_with = [&](const std::string &name, const char *meta) {
+      const std::string p = fs::join(dir, name);
+      CHECK(fs::write_file(p, tga));
+      if (meta) CHECK(fs::write_file(p + ".meta", std::string("fileFormatVersion: 2\nguid: 0000425\nTextureImporter:\n  alphaUsage: ") + meta + "\n"));
+      return texture_load(p, false);
+    };
+    const TexturePtr gray = load_with("gray.tga", "2"), none = load_with("none.tga", "0"), input = load_with("input.tga", "1"), plain = load_with("plain.tga", nullptr);
+    CHECK(gray && none && input && plain);
+    if (gray && none && input && plain) {
+      std::printf("    alpha of the white / dark texels: From Gray Scale %.3f / %.3f, None %.3f / %.3f, Input %.3f / %.3f, no .meta %.3f\n", gray->fetch(0, 0, 0, TexWrap::Extend).w,
+                  gray->fetch(0, 1, 0, TexWrap::Extend).w, none->fetch(0, 0, 0, TexWrap::Extend).w, none->fetch(0, 1, 0, TexWrap::Extend).w, input->fetch(0, 0, 0, TexWrap::Extend).w,
+                  input->fetch(0, 1, 0, TexWrap::Extend).w, plain->fetch(0, 1, 0, TexWrap::Extend).w);
+      CHECK(std::fabs(gray->fetch(0, 0, 0, TexWrap::Extend).w - 1.0f) < 1e-3f && std::fabs(gray->fetch(0, 1, 0, TexWrap::Extend).w - 64.0f / 255.0f) < 2e-3f);
+      CHECK(none->fetch(0, 1, 0, TexWrap::Extend).w == 1.0f);
+      CHECK(std::fabs(input->fetch(0, 1, 0, TexWrap::Extend).w - 128.0f / 255.0f) < 2e-3f && std::fabs(plain->fetch(0, 1, 0, TexWrap::Extend).w - 128.0f / 255.0f) < 2e-3f);
+    }
+    /* The Budget: From Gray Scale has alpha even when the image has none (DXT5 automatic, twice DXT1's bytes). */
+    double with_alpha = 0, without = 0;
+    CHECK(unity_texture_megabytes("Assets/Imported/R425/gray.tga", 1024, 1024, false, with_alpha) && unity_texture_megabytes("Assets/Imported/R425/none.tga", 1024, 1024, false, without));
+    std::printf("    the Budget: From Gray Scale %.3f MB, None %.3f MB\n", with_alpha, without);
+    CHECK(with_alpha > without * 1.9);
+    Bitmap b;
+    b.width = 1, b.height = 1, b.rgba8 = {30, 60, 90, 7};
+    apply_alpha_usage(b, 2);
+    CHECK(b.rgba8[3] == 60);
+    apply_alpha_usage(b, 1);
+    CHECK(b.rgba8[3] == 60);
+    apply_alpha_usage(b, 0);
+    CHECK(b.rgba8[3] == 255);
+    texture_cache_clear();
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("baked light through see-through surfaces and the legacy falloff (round 425): a card of alpha 0.25 lets 3/4 of a Baked light through to the floor as Unity's lightmapper does, an opaque one none; a bake's light falls off as 1 / (1 + 25 (d / Range)^2), windowed; the views' curve unchanged", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8), card = primitives::plane(2.0f, 2);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    MaterialPtr veil = make_material("Veil", Vec3(0.0f));
+    veil->surface = (int)MaterialSurface::Transparent, veil->alpha = 0.25f;
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    RenderLight sun;
+    sun.direction = Vec3(0, -1, 0), sun.intensity = 1.0f;
+    auto floor_sum = [&](const MaterialPtr &card_mat) {
+      std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white})};
+      if (card_mat) objs.push_back(bake_object(2, card, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {card_mat}));
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 4, bs.bounces = 0, bs.denoise = false;
+      bs.backface_tolerance = 0.0f;  // (round 430: the floor under a single-sided card sees its back face - Unity's advice for such geometry)
+      BakeLight bl;
+      bl.light = sun, bl.mode = 2, bl.id = 9;
+      Lightmapper lm;
+      lm.begin(objs, {bl}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      double s = 0;
+      for (const Vec3 &v : d.pages[(size_t)d.entries.at(1).page].texels) s += v.y;
+      return s;
+    };
+    /* The page holds the card's own texels too (lit alike in every case): the share through is (veiled - opaque) over
+     * (clear - opaque), a clear card being one of alpha 0. */
+    MaterialPtr clear = make_material("Clear", Vec3(0.0f));
+    clear->surface = (int)MaterialSurface::Transparent, clear->alpha = 0.0f;
+    const double through = floor_sum(clear), veiled = floor_sum(veil), blocked = floor_sum(white);
+    const double share = through > blocked ? (veiled - blocked) / (through - blocked) : 0.0;
+    std::printf("    the page's light: under a clear card %.1f, one of alpha 0.25 %.1f, an opaque one %.1f - %.3f of the shadowed light through\n", through, veiled, blocked, share);
+    CHECK(through > blocked * 1.1 && std::fabs(share - 0.75) < 0.02);
+    /* The same through a sized point light's cone of rays (round 424's path). */
+    sun.type = RenderLight::Point, sun.position = Vec3(0, 3, 0), sun.range = 20.0f, sun.intensity = 4.0f, sun.shadow_radius = 0.3f;
+    const double p_through = floor_sum(clear), p_veiled = floor_sum(veil), p_blocked = floor_sum(white);
+    const double p_share = p_through > p_blocked ? (p_veiled - p_blocked) / (p_through - p_blocked) : 0.0;
+    std::printf("    a 0.3 m point light: %.3f of the shadowed light through the card of alpha 0.25\n", p_share);
+    CHECK(p_through > p_blocked * 1.05 && std::fabs(p_share - 0.75) < 0.03);
+    RenderLight pt;
+    pt.type = RenderLight::Point, pt.range = 10.0f;
+    CHECK(std::fabs(range_falloff(pt, 5.0f) - 0.25f) < 1e-6f);  // (the views: (1 - 0.5)^2)
+    pt.baked_falloff = true;
+    const float expect = (1.0f - 0.0625f) * (1.0f - 0.0625f) / (1.0f + 25.0f * 0.25f);
+    std::printf("    at half the Range: the views' curve 0.250, the bake's %.4f\n", range_falloff(pt, 5.0f));
+    CHECK(std::fabs(range_falloff(pt, 5.0f) - expect) < 1e-6f && range_falloff(pt, 0.0f) == 1.0f && range_falloff(pt, 10.0f) == 0.0f && range_falloff(pt, 12.0f) == 0.0f);
+    /* The bake's lights carry it; the views' don't. */
+    Editor ed;
+    ed.init_headless(400, 300);
+    ed.command("create Point Light");
+    ed.command("set Light.Mode 2");
+    std::vector<BakeObject> objs;
+    std::vector<BakeLight> lights;
+    ed.collect_bake_scene_for_test(objs, lights);
+    bool baked = false;
+    for (const BakeLight &l : lights) baked = baked || (l.mode == 2 && l.light.baked_falloff);
+    CHECK(baked);
+    GameObject *g = ed.scene().find_by_name("Point Light");
+    if (g && g->get<Light>()) CHECK(!to_render_light(*g, *g->get<Light>()).baked_falloff);
+  });
+}
+
+/* ---------------------------------------------------------------- round 426: directional lightmaps (task 0402) */
+static void tests_round426() {
+  test("directional lightmaps (round 426): the bake keeps where each texel's light came from - toward a slanted sun on an open floor; the direction page saved and read back; a non-directional bake has none (an old file's pages left unread); the rebalance leaves an unbumped surface as baked and lights a bump facing the light more, the back of a double-sided surface as its front", [] {
+    MeshPtr floor = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, 0.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    auto bake = [&](bool directional) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 8, bs.bounces = 0, bs.denoise = false, bs.directional = directional;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData d = bake(true), plain = bake(false);
+    CHECK(d.dir_pages.size() == d.pages.size() && plain.dir_pages.empty());
+    const Vec3 to_sun = normalize(Vec3(1.0f, 1.0f, 0.0f));
+    float worst = 1.0f;
+    size_t lit = 0;
+    for (size_t i = 0; !d.dir_pages.empty() && i < d.pages[0].texels.size(); i++) {
+      if (!(d.pages[0].texels[i].y > 1e-3f)) continue;
+      worst = std::min(worst, dot(d.dir_pages[0].texels[i], to_sun));
+      lit++;
+    }
+    std::printf("    %zu lit texels: their light's direction against the sun's, worst cosine %.4f\n", lit, worst);
+    CHECK(lit > 100 && worst > 0.99f);
+    /* Saved and read back (Radiance's 8-bit mantissas: about 1 % of the encoded value). */
+    const std::string dir = resolve_asset_path("Assets/Imported/R426");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::string err;
+    CHECK(d.save(dir, err));
+    LightingData back;
+    CHECK(back.load(dir, err) && back.dir_pages.size() == d.dir_pages.size());
+    float diff = 0.0f;
+    for (size_t i = 0; !back.dir_pages.empty() && i < back.dir_pages[0].texels.size(); i++) diff = std::max(diff, length(back.dir_pages[0].texels[i] - d.dir_pages[0].texels[i]));
+    std::printf("    the direction page read back: worst difference %.4f\n", diff);
+    CHECK(diff < 0.03f);
+    /* A direction file gone: the bake loads, without directions. */
+    std::filesystem::remove(std::filesystem::u8path(fs::join(dir, "LightmapDir-0.hdr")), ec);
+    LightingData no_file;
+    CHECK(no_file.load(dir, err) && no_file.dir_pages.empty() && no_file.pages.size() == d.pages.size());
+    CHECK(d.save(dir, err));
+    CHECK(plain.save(dir, err));  // (the folder's LightmapDir-0.hdr stays: the file says the bake has none)
+    LightingData back_plain;
+    CHECK(back_plain.load(dir, err) && back_plain.dir_pages.empty() && back_plain.pages.size() == plain.pages.size());
+    std::filesystem::remove_all(dir, ec);
+    /* The rebalance (Unity's DecodeDirectionalLightmap with its divisor at the surface's own normal). */
+    const Vec3 up(0, 1, 0), a = to_sun * 0.9f;
+    CHECK(std::fabs(lightmap_direction_factor(up, up, a) - 1.0f) < 1e-6f);
+    const Vec3 toward = normalize(Vec3(0.5f, 1.0f, 0.0f)), away = normalize(Vec3(-0.5f, 1.0f, 0.0f));
+    std::printf("    a bump tilted toward the light %.3f, away %.3f, light from all around (a = 0) %.3f\n", lightmap_direction_factor(toward, up, a),
+                lightmap_direction_factor(away, up, a), lightmap_direction_factor(toward, up, Vec3(0.0f)));
+    CHECK(lightmap_direction_factor(toward, up, a) > 1.05f && lightmap_direction_factor(away, up, a) < 0.95f);
+    CHECK(lightmap_direction_factor(toward, up, Vec3(0.0f)) == 1.0f);
+    /* The back of a double-sided surface: both normals turned to the eye - decoded in the front's frame, so a bump there
+     * gets what it gets on the front (review 426: up to 4x before). */
+    std::printf("    the same bump seen from behind %.3f\n", lightmap_direction_factor(-toward, -up, a, true));
+    CHECK(std::fabs(lightmap_direction_factor(-toward, -up, a, true) - lightmap_direction_factor(toward, up, a)) < 1e-6f);
+    CHECK(lightmap_direction_factor(up, up, -a) == 1.0f);  // (light from behind the surface: no rebalancing)
+  });
+  test("directional lightmaps in the editor (round 426): Generate Lighting bakes the direction pages, a lightmapped object's draw item gets its page, Non-Directional none", [] {
+    Editor ed;
+    ed.init_headless(640, 400);
+    GameObject *floor = ed.scene().create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::plane(6.0f, 4);
+    floor->add<MeshRenderer>()->contribute_gi = true;
+    ed.scene().lighting.texels_per_unit = 4.0f;
+    ed.scene().lighting.indirect_samples = 16;
+    CHECK(ed.scene().lighting.directional_mode == 1);  // (Unity's default)
+    ed.commit_change("scene");
+    ed.set_async_jobs_for_test(true);
+    ed.command("bake start");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    while (ed.baking_for_test() && std::chrono::steady_clock::now() < deadline) ed.step_frame_headless();
+    const LightingData &ld = ed.lighting_data_for_test();
+    CHECK(!ld.empty() && ld.dir_pages.size() == ld.pages.size());
+    const Mesh *m = floor->evaluated_mesh(1);
+    DrawItem it;
+    it.mesh = m ? &m->render_mesh() : nullptr;
+    if (m) ed.attach_lightmap_for_test(*floor, *m, it);
+    CHECK(it.lightmap && it.lightmap_dir);
+    ed.scene().lighting.directional_mode = 0;
+    DrawItem it2;
+    it2.mesh = it.mesh;
+    if (m) ed.attach_lightmap_for_test(*floor, *m, it2);
+    CHECK(it2.lightmap && !it2.lightmap_dir);  // (a Unity scene's mode: the round 421 test's import reads it)
+  });
+}
+
+/* ---------------------------------------------------------------- round 428: reflection probes prefiltered as Unity's (task 0404) */
+/* The prefilter's exact value: every cube texel weighted by what the importance sampler converges to - the lobe's pdf
+ * (D(h) / 4 when N = V) times N.L, by the texel's solid angle. */
+static float r428_exact_prefilter(const ReflectionProbeBake &b, Vec3 n, float rough) {
+  const float a = std::max(1e-3f, rough * rough), a2 = a * a;
+  double sum = 0.0, wsum = 0.0;
+  for (int f = 0; f < 6; f++)
+    for (int y = 0; y < b.size; y++)
+      for (int x = 0; x < b.size; x++) {
+        const float u = ((float)x + 0.5f) / (float)b.size, v = ((float)y + 0.5f) / (float)b.size;
+        const Vec3 l = cube_direction(f, u, v);
+        const float ndl = dot(n, l);
+        if (ndl <= 0.0f) continue;
+        const float su = 2.0f * u - 1.0f, sv = 2.0f * v - 1.0f, r2 = 1.0f + su * su + sv * sv;
+        const float sr = 4.0f / ((float)b.size * (float)b.size) / (r2 * std::sqrt(r2));  // (a cube texel's solid angle)
+        const Vec3 h = normalize(n + l);
+        const float noh = dot(n, h), d = noh * noh * (a2 - 1.0f) + 1.0f, pdf = a2 / (kPi * d * d) * 0.25f;
+        const double w = (double)pdf * ndl * sr;
+        sum += w * b.faces[f][(size_t)y * b.size + x].x;
+        wsum += w;
+      }
+  return wsum > 0.0 ? (float)(sum / wsum) : 0.0f;
+}
+
+static void tests_round428() {
+  test("reflection probes (round 428): the mips prefiltered with GGX for the roughness Unity maps to each (r (1.7 - 0.7 r) x 6): a uniform probe stays uniform at every level, a bright patch spreads wider the rougher with its light kept, and both renderers' lookups take Unity's mapping", [] {
+    CHECK(reflection_probe_lod(0.0f, 11) == 0.0f && std::fabs(reflection_probe_lod(1.0f, 11) - 6.0f) < 1e-6f && reflection_probe_lod(1.0f, 4) == 3.0f);
+    for (float r : {0.1f, 0.35f, 0.6f, 0.9f}) CHECK(std::fabs(reflection_probe_level_roughness(reflection_probe_lod(r, 11)) - r) < 1e-4f);
+    ReflectionProbeBake b;
+    b.size = 128;  // (Unity's default resolution: at 32 a level-4 map is 8 x 4 pixels, too coarse for its lobe)
+    for (auto &f : b.faces) f.assign((size_t)b.size * b.size, Vec3(0.25f, 0.5f, 1.0f));
+    TexturePtr uniform = reflection_probe_texture(b);
+    CHECK(uniform && uniform->levels.size() > 6);
+    float worst = 0.0f;
+    for (int k = 0; uniform && k <= 6; k++)
+      for (const Vec4 &p : uniform->levels[(size_t)k].pxf) worst = std::max(worst, std::fabs(p.y - 0.5f));
+    std::printf("    a uniform probe: the levels 0-6 differ from it by at most %.5f\n", worst);
+    CHECK(worst < 1e-3f);
+    /* A bright square in the middle of +Y (the sky's top), dark elsewhere. */
+    for (auto &f : b.faces) f.assign((size_t)b.size * b.size, Vec3(0.0f));
+    for (int y = 48; y < 80; y++)
+      for (int x = 48; x < 80; x++) b.faces[2][(size_t)y * b.size + x] = Vec3(10.0f);
+    ScopedTimer build_t;
+    TexturePtr t = reflection_probe_texture(b);
+    std::printf("    a 128 probe's map with its prefiltered levels: %.1f ms\n", build_t.ms());
+    CHECK(t != nullptr);
+    if (!t) return;
+    auto level_stats = [&](int k, float &peak, double &total) {
+      const Texture::Level &lv = t->levels[(size_t)k];
+      peak = 0.0f, total = 0.0;
+      for (int y = 0; y < lv.h; y++)
+        for (int x = 0; x < lv.w; x++) {
+          const float v = lv.pxf[(size_t)y * lv.w + x].x;
+          peak = std::max(peak, v);
+          total += v * std::sin(kPi * ((float)y + 0.5f) / (float)lv.h) / ((double)lv.w * lv.h);  // (the sphere's area per row)
+        }
+    };
+    float p1, p3, p5;
+    double t1, t3, t5;
+    level_stats(1, p1, t1), level_stats(3, p3, t3), level_stats(5, p5, t5);
+    std::printf("    a bright patch: the peak %.3f / %.3f / %.3f at levels 1 / 3 / 5, the light over the sphere %.4f / %.4f / %.4f\n", p1, p3, p5, t1, t3, t5);
+    CHECK(p1 > p3 && p3 > p5);
+    /* (Each texel's lobe is normalized by its own N.L weights - the split sum's prefilter, Unity's and Karis's - so the
+     * light over the sphere may drift a little as the lobe widens: within 5 %.) */
+    CHECK(std::fabs(t3 - t1) < t1 * 0.05 && std::fabs(t5 - t1) < t1 * 0.05);
+    /* Near the top the lookups read the patch (round 428 found the rows upside down: the sharp lookup had read the floor's
+     * dark) and the rough one the level prefiltered for its roughness (10 degrees off the pole: the map's top row wraps to
+     * its bottom one in a bilinear read). */
+    RenderProbe rp;
+    rp.map = t;
+    const Vec3 up = normalize(Vec3(0.1763f, 1.0f, 0.0f));
+    const Vec3 sharp = reflection_probe_specular(rp, Vec3(0.0f), up, 0.0f), rough = reflection_probe_specular(rp, Vec3(0.0f), up, 0.5f);
+    const float want = reflection_probe_prefilter(b, up, 0.5f, 1024).x;
+    std::printf("    10 degrees off the top: %.3f at roughness 0, %.3f at 0.5 (the lobe itself %.3f)\n", sharp.x, rough.x, want);
+    CHECK(sharp.x > 9.0f && sharp.x > rough.x && std::fabs(rough.x - want) < want * 0.2f);
+    /* And straight down, the dark below: a reflection toward the floor sees the floor. */
+    CHECK(reflection_probe_specular(rp, Vec3(0.0f), normalize(Vec3(0.1763f, -1.0f, 0.0f)), 0.0f).x < 0.01f);
+    /* A lamp 2 x 2 texels across (review 428): at the rough levels each sample reads the mip its share of the lobe covers,
+     * so the lamp blurs into a smooth blob - every texel near it within 20 % of the exact lobe (every cube texel weighted). */
+    for (auto &f : b.faces) f.assign((size_t)b.size * b.size, Vec3(0.0f));
+    for (int y = 63; y < 65; y++)
+      for (int x = 63; x < 65; x++) b.faces[4][(size_t)y * b.size + x] = Vec3(1000.0f);  // (+Z's middle)
+    TexturePtr lamp = reflection_probe_texture(b);
+    CHECK(lamp != nullptr);
+    if (!lamp) return;
+    float worst_off = 0.0f;
+    for (int k = 4; k <= 6; k++) {
+      const Texture::Level &lv = lamp->levels[(size_t)k];
+      const float rough_k = reflection_probe_level_roughness((float)k);
+      for (int dx = -2; dx <= 2; dx++) {
+        /* Texels along the equator around +Z (u = 0.5 + phi / 2 pi; +Z at phi 0). */
+        const int x = lv.w / 2 + dx, y = lv.h / 2;
+        const Vec3 dir = equirect_to_dir(Vec2(((float)x + 0.5f) / (float)lv.w, 1.0f - ((float)y + 0.5f) / (float)lv.h), 0.0f);
+        const float ref = r428_exact_prefilter(b, dir, rough_k), got = lv.pxf[(size_t)y * lv.w + x].x;
+        if (ref > 0.05f) worst_off = std::max(worst_off, std::fabs(got - ref) / ref);
+      }
+    }
+    std::printf("    a lamp 2 x 2 texels across: levels 4-6 near it within %.1f %% of the exact lobe\n", worst_off * 100.0f);
+    CHECK(worst_off < 0.2f);  // (15 % measured; the worst is a texel at the lobe's tail, where the value is small)
+  });
+}
+
+/* ---------------------------------------------------------------- round 429: Filamented's specular occlusion from the baked light (task 0405) */
+static void tests_round429() {
+  test("baked specular occlusion (round 429): Filamented's to its own numbers - Lagarde's specular occlusion of |baked irradiance| / Exposure Occlusion at the squared roughness, then the multi-bounce by f0; off at 0, none where the baked light is bright", [] {
+    const Vec3 dielectric(0.04f), metal(0.8f);
+    CHECK(baked_specular_occlusion(0.0f, Vec3(0.0f), 0.5f, 0.5f, dielectric).x == 1.0f);  // (off: every shader but Filamented)
+    CHECK(baked_specular_occlusion(0.2f, Vec3(0.5f), 0.5f, 0.5f, dielectric).x == 1.0f);  // (bright: saturated)
+    /* Reference values from Filamented's HLSL (SpecularAO_Lagarde, gtaoMultiBounce, perceptualRoughness^2), computed
+     * apart: nv, baked, Exposure Occlusion, perceptual roughness, f0 -> what the reflection keeps. */
+    struct Case {
+      float nv, baked, eo, pr;
+      Vec3 f0;
+      float want;
+    };
+    const Case cases[] = {{0.5f, 0.05f, 0.2f, 0.3f, dielectric, 0.420316f}, {0.5f, 0.05f, 0.2f, 0.3f, metal, 0.748777f},
+                          {0.2f, 0.02f, 0.2f, 0.6f, dielectric, 0.164152f}, {0.9f, 0.0f, 0.2f, 0.1f, Vec3(0.5f), 0.0f}};
+    for (const Case &c : cases) {
+      const float got = baked_specular_occlusion(c.eo, Vec3(c.baked), c.nv, c.pr, c.f0).x;
+      std::printf("    nv %.1f, |irradiance| %.3f, roughness %.1f, f0 %.2f: keeps %.6f (Filamented %.6f)\n", c.nv, c.baked * 1.7320508f, c.pr, c.f0.x, got, c.want);
+      CHECK(std::fabs(got - c.want) < 1e-4f);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- round 430: texel validity and the bake's device (task 0406) */
+static void tests_round430() {
+  test("texel validity (round 430): Unity's Backface Tolerance - a floor's texels under a box sunk into it see back faces and are left out, filled from their valid neighbours (no dark line along the box); tolerance 0 keeps every texel", [] {
+    MeshPtr floor = primitives::plane(4.0f, 40), box = primitives::cube(1.0f);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    const std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, box, Mat4::trs({0, 0.25f, 0}, Quat(), {1, 1, 1}), {white})};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(1.0f);
+    auto bake = [&](float tolerance, size_t *invalid) {
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = 32, bs.bounces = 1, bs.denoise = true, bs.backface_tolerance = tolerance;
+      Lightmapper lm;
+      lm.begin(objs, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      if (invalid) *invalid = lm.invalid_texels();
+      return lm.take_result();
+    };
+    size_t with = 0, without = 0;
+    const LightingData kept = bake(0.9f, &with), all = bake(0.0f, &without);
+    /* The box's 1 m footprint at 16 texels a metre: about 256 of the floor's texels are inside it, and the box's own
+     * faces below the floor (its bottom and the lower quarter of its sides, under the floor's back) up to 512 more. */
+    std::printf("    texels inside geometry: %zu with Unity's 0.9 tolerance, %zu with 0\n", with, without);
+    CHECK(with > 180 && with < 900 && without == 0);
+    /* The floor's darkest point on the box's contact line (0.5 m from its centre): with validity it stays
+     * lit from the valid side (the hidden texels no longer bleed their darkness out through the filter). */
+    auto ring_min = [&](const LightingData &d) {
+      const LightingData::Entry &e = d.entries.at(1);
+      const Lightmap &p = d.pages[(size_t)e.page];
+      float m = 1e30f;
+      for (size_t t = 0; t < floor->render_mesh().tri_count(); t++)
+        for (int c = 0; c < 3; c++) {
+          const Vec3 q = floor->render_mesh().positions[floor->render_mesh().indices[t * 3 + (size_t)c]];
+          const float r = std::max(std::fabs(q.x), std::fabs(q.z));
+          if (r < 0.49f || r > 0.56f) continue;  // (the vertices on the contact line, 0.5 m out)
+          m = std::min(m, p.sample(e.tri_uv[t * 3 + (size_t)c]).y);
+        }
+      return m;
+    };
+    const float ring_kept = ring_min(kept), ring_all = ring_min(all);
+    std::printf("    the darkest of the floor just outside the box: %.4f with validity, %.4f without\n", ring_kept, ring_all);
+    CHECK(ring_kept > ring_all * 1.5f);  // (0.52 against 0.19 measured: the dark line along the box gone)
+    /* A single-sided 2 m roof 1 m over the floor (review 430): the floor's texels under it see its back face, are inside
+     * geometry at 0.9, and are filled from their chart - none left black. Its material Double Sided: none inside. */
+    MeshPtr roof = primitives::plane(2.0f, 2);
+    MaterialPtr single = make_material("Single", Vec3(0.8f)), both = make_material("Both", Vec3(0.8f));
+    both->double_sided = true;
+    auto roof_bake = [&](const MaterialPtr &m, size_t *invalid) {
+      const std::vector<BakeObject> o{bake_object(1, floor, Mat4::identity(), {white}), bake_object(3, roof, Mat4::trs({0, 1, 0}, Quat(), {1, 1, 1}), {m})};
+      BakeSettings bs;
+      bs.texels_per_unit = 16, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = true;
+      Lightmapper lm;
+      lm.begin(o, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      *invalid = lm.invalid_texels();
+      return lm.take_result();
+    };
+    size_t under_single = 0, under_both = 0;
+    const LightingData rs = roof_bake(single, &under_single);
+    roof_bake(both, &under_both);
+    const LightingData::Entry &fe = rs.entries.at(1);
+    const Lightmap &fp = rs.pages[(size_t)fe.page];
+    float floor_min = 1e30f;
+    for (size_t i = 0; i < fe.tri_uv.size(); i++) floor_min = std::min(floor_min, fp.sample(fe.tri_uv[i]).y);
+    std::printf("    a single-sided roof: %zu texels inside geometry, the floor's darkest %.4f; Double Sided: %zu inside\n", under_single, floor_min, under_both);
+    CHECK(under_single > 200 && floor_min > 0.05f && under_both == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 438: directional strength (task 0414) */
+static void tests_round438() {
+  test("directional strength (round 438): a direction is saved as long as Unity's - its share raised to 7.25 (SideRail's median 0.744 to Unity's 0.117), the way it points kept; one light alone stays full length; a floor lit by a sun and a bright sky gets a short direction, so a bump tilts its baked light less than with the sun alone", [] {
+    const Vec3 d = normalize(Vec3(1.0f, 2.0f, 0.5f));
+    const Vec3 med = Lightmapper::saved_direction(d * 0.744f), p90 = Lightmapper::saved_direction(d * 0.949f);
+    std::printf("    share 0.744 -> %.3f (Unity's median 0.117), 0.949 -> %.3f (Unity's p90 0.715), 1 -> %.3f\n", length(med), length(p90),
+                length(Lightmapper::saved_direction(d)));
+    CHECK(std::fabs(length(med) - 0.117f) < 0.005f && std::fabs(length(p90) - 0.684f) < 0.01f);
+    CHECK(dot(normalize(med), d) > 0.9999f && std::fabs(length(Lightmapper::saved_direction(d)) - 1.0f) < 1e-5f);
+    CHECK(length(Lightmapper::saved_direction(Vec3(0.0f))) == 0.0f && length(Lightmapper::saved_direction(d * 3.0f)) <= 1.0f + 1e-5f);
+    /* A floor under a slanted sun, with and without a bright sky. */
+    MeshPtr floor = primitives::plane(4.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, 0.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    auto mean_length = [&](Vec3 sky) {
+      Environment env;
+      env.mode = Environment::Color, env.color = sky;
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = true;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, {sun}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData r = lm.take_result();
+      double sum = 0.0;
+      size_t n = 0;
+      for (size_t i = 0; !r.dir_pages.empty() && i < r.pages[0].texels.size(); i++) {
+        if (!(r.pages[0].texels[i].y > 1e-3f)) continue;
+        sum += length(r.dir_pages[0].texels[i]);
+        n++;
+      }
+      return n ? (float)(sum / (double)n) : 0.0f;
+    };
+    const float alone = mean_length(Vec3(0.0f)), with_sky = mean_length(Vec3(0.5f));
+    const Vec3 up(0, 1, 0), toward = normalize(Vec3(0.5f, 1.0f, 0.0f)), to_sun = normalize(Vec3(1.0f, 1.0f, 0.0f));
+    const float tilt_alone = lightmap_direction_factor(toward, up, to_sun * alone), tilt_sky = lightmap_direction_factor(toward, up, to_sun * with_sky);
+    std::printf("    the floor's mean direction length: the sun alone %.3f, with a sky %.3f; a bump toward the sun gets x%.3f and x%.3f\n", alone, with_sky,
+                tilt_alone, tilt_sky);
+    CHECK(alone > 0.97f && with_sky < 0.5f * alone && tilt_sky < tilt_alone && tilt_sky >= 1.0f);
+  });
+}
+/* ---------------------------------------------------------------- round 439: emitters (task 0415) */
+static void tests_round439() {
+  test("emitters (round 439): an Unlit material sends its colour as light and is picked by it - the bake samples a small unlit sign at each texel, so a floor under it is far less noisy at 16 samples than when only the gather finds it, and the same on average; an emission map counts by its mean, not as white", [] {
+    MaterialPtr sign = make_material("Exit sign", Vec3(0.2f, 1.0f, 0.3f));
+    sign->unlit = true;
+    MaterialPtr glow = make_material("Glow", Vec3(0.5f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 2.0f;
+    MaterialPtr plain = make_material("Plain", Vec3(0.5f));
+    std::printf("    emitter luminance: the unlit sign %.3f (its colour's), an emission of 2 %.3f, a plain grey %.3f\n", PathTracer::emitter_luminance(*sign),
+                PathTracer::emitter_luminance(*glow), PathTracer::emitter_luminance(*plain));
+    CHECK(std::fabs(PathTracer::emitter_luminance(*sign) - (0.2126f * 0.2f + 0.7152f + 0.0722f * 0.3f)) < 1e-4f);
+    CHECK(std::fabs(PathTracer::emitter_luminance(*glow) - 2.0f) < 1e-4f && PathTracer::emitter_luminance(*plain) == 0.0f);
+    /* A floor in the dark, a small unlit sign half a metre above it. */
+    MeshPtr floor = primitives::plane(2.0f, 4), panel = primitives::plane(0.3f, 1);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](bool sample, int samples, uint32_t seed) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.sample_emissive = sample, bs.seed = seed;
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), p = bake_object(2, panel, Mat4::translate(Vec3(0.0f, 0.5f, 0.0f)), {sign});
+      p.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, p}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData ref = bake(true, 1024, 7), ref_off = bake(false, 1024, 8), noisy = bake(false, 16, 1), sampled = bake(true, 16, 1);
+    auto floor_texels = [](const LightingData &d) {
+      std::vector<float> v;
+      const LightingData::Entry &e = d.entries.at(1);
+      const Lightmap &pg = d.pages[(size_t)e.page];
+      for (size_t i = 0; i < e.tri_uv.size(); i++) {
+        const Vec3 c = pg.sample(e.tri_uv[i]);
+        v.push_back(0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z);
+      }
+      return v;
+    };
+    const std::vector<float> r = floor_texels(ref), a = floor_texels(noisy), b = floor_texels(sampled), ro = floor_texels(ref_off);
+    double sum_on = 0.0, sum_off = 0.0;
+    for (size_t i = 0; i < r.size() && i < ro.size(); i++) sum_on += r[i], sum_off += ro[i];
+    std::printf("    1024 samples: the floor's light %.4f with the sign sampled, %.4f found by the gather alone\n", sum_on, sum_off);
+    CHECK(std::fabs(sum_on - sum_off) / sum_off < 0.03);
+    double ea = 0.0, eb = 0.0, mr = 0.0, mb = 0.0;
+    for (size_t i = 0; i < r.size() && i < a.size() && i < b.size(); i++) {
+      ea += (a[i] - r[i]) * (a[i] - r[i]), eb += (b[i] - r[i]) * (b[i] - r[i]);
+      mr += r[i], mb += b[i];
+    }
+    const double n = (double)std::max<size_t>(1, r.size());
+    std::printf("    the floor at 16 samples against 1024: error %.4f with only the gather, %.4f with the sign sampled; mean %.4f against %.4f\n", std::sqrt(ea / n),
+                std::sqrt(eb / n), mb / n, mr / n);
+    CHECK(mr / n > 1e-3 && eb < 0.5 * ea && std::fabs(mb - mr) / mr < 0.1);
+  });
+  test("emitters (round 439): a Unity material's Global Illumination decides whether its emission lights the bake - Baked does, Realtime and None don't (Unity's m_LightmapFlags, read on import); a Blendity material's always does", [] {
+    std::string yaml = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Lamp\n  m_ShaderKeywords: _EMISSION\n  m_LightmapFlags: 1\n  m_SavedProperties:\n    m_Colors:\n    - _EmissionColor: {r: 1, g: 1, b: 1, a: 1}\n";
+    Material m;
+    UnityMaterialInfo info;
+    CHECK(unity_material(yaml, [](const std::string &) { return std::string(); }, [](const std::string &, int64_t) { return std::string("Standard"); }, m, info));
+    std::printf("    a Realtime lamp material: flags %d, bakes %d; Blendity's own: %d\n", m.gi_flags, (int)m.emission_bakes(), (int)Material().emission_bakes());
+    CHECK(m.gi_flags == 1 && !m.emission_bakes() && Material().emission_bakes());
+    MeshPtr floor = primitives::plane(2.0f, 4), panel = primitives::plane(0.5f, 1);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto floor_light = [&](int flags) {
+      MaterialPtr lamp = make_material("Lamp", Vec3(0.5f));
+      lamp->emission = Vec3(1.0f), lamp->emission_strength = 4.0f, lamp->gi_flags = flags;
+      BakeSettings bs;
+      bs.texels_per_unit = 4, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = false;
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), p = bake_object(2, panel, Mat4::translate(Vec3(0.0f, 0.5f, 0.0f)), {lamp});
+      p.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, p}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      double s = 0.0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    const double baked = floor_light(2), realtime = floor_light(1), none = floor_light(4), own = floor_light(-1);
+    std::printf("    the floor's light: Baked %.3f, Realtime %.3f, None %.3f, Blendity's %.3f\n", baked, realtime, none, own);
+    CHECK(baked > 1.0 && realtime == 0.0 && none == 0.0 && own > 1.0);
+  });
+}
+/* ---------------------------------------------------------------- round 440: charts and seams (task 0416) */
+static void tests_round440() {
+  test("charts and seams (round 440): each UV island packed on its own across the atlas - more charts than objects, the pages filled at least as well as one square per object; seams on a smooth sphere stitched (the step across them shrinks), none across a cube's hard corners", [] {
+    std::vector<BakeObject> objs;
+    for (int i = 0; i < 12; i++) {
+      BakeObject o = bake_object((uint64_t)(i + 1), i % 2 ? primitives::uv_sphere(0.3f + 0.05f * i, 16, 8) : primitives::cube(0.4f + 0.1f * i),
+                                 Mat4::translate(Vec3(2.0f * i, 0.0f, 0.0f)), {make_material("White", Vec3(0.8f))});
+      objs.push_back(o);
+    }
+    BakeSettings bs;
+    bs.texels_per_unit = 16;
+    LightmapLayout squares, islands;
+    bs.island_charts = false;
+    lightmap_layout(objs, bs, squares);
+    bs.island_charts = true;
+    lightmap_layout(objs, bs, islands);
+    size_t sphere_pairs = 0, cube_pairs = 0;
+    for (const auto &page : islands.seams) sphere_pairs += page.size();
+    std::printf("    12 objects: %zu squares fill %.3f of %zu page(s); %zu island charts fill %.3f of %zu page(s); %zu seam pairs\n", squares.charts,
+                lightmap_layout_fill(squares), squares.data.pages.size(), islands.charts, lightmap_layout_fill(islands), islands.data.pages.size(), sphere_pairs);
+    /* (5 % slack: island boxes carry their own margins, so on a page that doesn't shrink the fill can dip a little) */
+    CHECK(islands.charts > squares.charts && lightmap_layout_fill(islands) >= 0.95 * lightmap_layout_fill(squares));
+    /* Many objects on small pages: every object's islands on one page, no texel claimed twice, pages about as many as
+     * with squares (review 440: a page per split object, overlaps). */
+    std::vector<BakeObject> many;
+    for (int i = 0; i < 60; i++)
+      many.push_back(bake_object((uint64_t)(i + 1), i % 3 ? primitives::uv_sphere(0.3f + 0.02f * i, 16, 8) : primitives::cube(0.5f + 0.03f * i),
+                                 Mat4::translate(Vec3(2.0f * i, 0.0f, 0.0f)), {make_material("White", Vec3(0.8f))}));
+    BakeSettings small = bs;
+    small.max_size = 128;
+    LightmapLayout sq_pages, is_pages;
+    small.island_charts = false;
+    lightmap_layout(many, small, sq_pages);
+    small.island_charts = true;
+    lightmap_layout(many, small, is_pages);
+    std::set<std::tuple<int, int, int>> claimed;
+    size_t twice = 0, outside = 0;
+    for (const LightmapTexel &t : is_pages.texels) {
+      twice += !claimed.insert({t.page, t.x, t.y}).second;
+      outside += t.x < 0 || t.y < 0 || t.x >= 128 || t.y >= 128;
+    }
+    std::printf("    60 objects on 128-texel pages: %zu pages of squares, %zu of islands; texels claimed twice %zu, outside a page %zu\n", sq_pages.data.pages.size(),
+                is_pages.data.pages.size(), twice, outside);
+    CHECK(is_pages.data.pages.size() <= sq_pages.data.pages.size() + 1 && twice == 0 && outside == 0);
+    /* A floor with its own UVs filling the page at the page's size: its island's box plus margins is wider than the page -
+     * it packs as its square (review 440: written past the page). */
+    BakeObject own = bake_object(1, primitives::plane(30.0f, 4), Mat4::identity(), {make_material("White", Vec3(0.8f))});
+    own.generate_uvs = false;
+    BakeSettings big = bs;
+    big.max_size = 64, big.texels_per_unit = 40;
+    LightmapLayout own_lay;
+    lightmap_layout({own}, big, own_lay);
+    size_t own_outside = 0;
+    for (const LightmapTexel &t : own_lay.texels) own_outside += t.x < 0 || t.y < 0 || t.x >= 64 || t.y >= 64;
+    std::printf("    a floor's own UVs at the page's size: %zu page(s), %zu texels, %zu outside\n", own_lay.data.pages.size(), own_lay.texels.size(), own_outside);
+    CHECK(own_lay.data.pages.size() == 1 && own_lay.texels.size() > 3000 && own_outside == 0);
+    CHECK(squares.texels.size() > 0 && islands.texels.size() > 0);
+    /* A cube alone: its UV seams all lie on hard edges - nothing to stitch. */
+    LightmapLayout cube_only;
+    lightmap_layout({bake_object(1, primitives::cube(1.0f), Mat4::identity(), {make_material("White", Vec3(0.8f))})}, bs, cube_only);
+    for (const auto &page : cube_only.seams) cube_pairs += page.size();
+    CHECK(cube_pairs == 0);
+    /* A sphere under a sun and a sky: the step across its seams before and after stitching. */
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.3f);
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, -0.3f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    auto bake = [&](bool stitch, double &before, double &after) {
+      BakeSettings b2;
+      b2.texels_per_unit = 24, b2.indirect_samples = 16, b2.bounces = 1, b2.denoise = false, b2.directional = false, b2.stitch_seams = stitch;
+      Lightmapper lm;
+      lm.begin({bake_object(1, primitives::uv_sphere(0.5f, 24, 12), Mat4::identity(), {make_material("White", Vec3(0.8f))})}, {sun}, env, b2);
+      while (!lm.step(1e9)) {
+      }
+      before = lm.seam_step_before(), after = lm.seam_step_after();
+    };
+    double b_on = 0, a_on = 0, b_off = 0, a_off = 0;
+    bake(true, b_on, a_on);
+    bake(false, b_off, a_off);
+    std::printf("    a sphere's seams: the step %.4f -> %.4f stitched; Stitch Seams off finds none (%.4f)\n", b_on, a_on, a_off);
+    CHECK(b_on > 0.0 && a_on < 0.5 * b_on && a_off == 0.0 && b_off == 0.0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 441: sampling (task 0417) */
+static void tests_round441() {
+  test("sampling (round 441): a bright patch in an HDRI sky sampled by its light - a floor under it far less noisy at 16 samples, and the same on average with the sampling on or off; 40 point lights picked by their light per texel - the same light on average from far fewer shadow rays", [] {
+    Bitmap b;
+    b.width = 64, b.height = 32, b.is_float = true;
+    b.rgbaf.assign((size_t)64 * 32 * 4, 0.05f);
+    for (int y = 6; y < 8; y++)
+      for (int x = 20; x < 22; x++)
+        for (int c = 0; c < 3; c++) b.rgbaf[((size_t)y * 64 + x) * 4 + c] = 400.0f;  // (a small, very bright patch high in the sky)
+    for (size_t i = 3; i < b.rgbaf.size(); i += 4) b.rgbaf[i] = 1.0f;
+    auto tex = std::make_shared<Texture>();
+    tex->build(b, false);
+    Environment env;
+    env.mode = Environment::Hdri, env.map = tex;
+    MeshPtr floor = primitives::plane(2.0f, 4);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    auto floor_values = [&](bool sample_env, int samples, uint32_t seed) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.sample_env = sample_env, bs.seed = seed;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      std::vector<float> v;
+      for (const Vec3 &c : d.pages[0].texels) v.push_back(c.y);
+      return v;
+    };
+    const std::vector<float> ref = floor_values(true, 2048, 7), ref_off = floor_values(false, 8192, 8), off = floor_values(false, 16, 1), on = floor_values(true, 16, 1);
+    double e_off = 0, e_on = 0, m_ref = 0, m_ref_off = 0, m_on = 0;
+    for (size_t i = 0; i < ref.size(); i++) {
+      e_off += (off[i] - ref[i]) * (off[i] - ref[i]), e_on += (on[i] - ref[i]) * (on[i] - ref[i]);
+      m_ref += ref[i], m_ref_off += ref_off[i], m_on += on[i];
+    }
+    const double n = (double)std::max<size_t>(1, ref.size());
+    std::printf("    an HDRI's bright patch: error at 16 samples %.4f found by the gather, %.4f sampled; the mean %.4f (8192 off %.4f, 16 on %.4f)\n", std::sqrt(e_off / n),
+                std::sqrt(e_on / n), m_ref / n, m_ref_off / n, m_on / n);
+    CHECK(e_on < 0.25 * e_off && std::fabs(m_ref_off - m_ref) / m_ref < 0.05 && std::fabs(m_on - m_ref) / m_ref < 0.05);
+    /* A wall beside the floor at Bounces 1: the sky the wall sends to the floor is found at the path's last vertex - the
+     * world's sampling there counts in full, so on and off agree (review 441). */
+    MeshPtr wall = primitives::plane(2.0f, 4);
+    const Mat4 upright = Mat4::trs(Vec3(0.0f, 1.0f, -1.0f), Quat::axis_angle(Vec3(1, 0, 0), kPi * 0.5f), Vec3(1.0f));
+    auto with_wall = [&](bool sample_env) {
+      BakeSettings bs;
+      bs.texels_per_unit = 6, bs.indirect_samples = sample_env ? 1024 : 8192, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.sample_env = sample_env, bs.seed = 3;  // (the gather alone needs 8x the samples to settle within the check)
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), w = bake_object(2, wall, upright, {white});
+      w.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, w}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      double s = 0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    const double wall_on = with_wall(true), wall_off = with_wall(false);
+    std::printf("    a wall beside the floor (Bounces 1): the floor's light %.2f sampled, %.2f by the gather alone\n", wall_on, wall_off);
+    CHECK(std::fabs(wall_on - wall_off) / wall_off < 0.05);
+    /* Forty lamps along a 40 m floor. */
+    MeshPtr hall = primitives::plane(40.0f, 40);
+    std::vector<BakeLight> lamps;
+    for (int i = 0; i < 40; i++) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(-19.5f + i, 1.0f, 0.0f), l.light.intensity = 2.0f, l.light.range = 1e4f;
+      l.mode = 2, l.id = (uint64_t)(100 + i);
+      lamps.push_back(l);
+    }
+    Environment dark;
+    dark.mode = Environment::Color, dark.color = Vec3(0.0f);
+    auto hall_light = [&](bool pick, uint64_t &rays) {
+      BakeSettings bs;
+      bs.texels_per_unit = 2, bs.indirect_samples = 1, bs.bounces = 0, bs.denoise = false, bs.directional = false, bs.pick_lights = pick;
+      Lightmapper lm;
+      lm.begin({bake_object(1, hall, Mat4::identity(), {white})}, lamps, dark, bs);
+      while (!lm.step(1e9)) {
+      }
+      rays = lm.rays();
+      const LightingData d = lm.take_result();
+      double s = 0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    uint64_t rays_all = 0, rays_pick = 0;
+    const double all = hall_light(false, rays_all), picked = hall_light(true, rays_pick);
+    std::printf("    40 lamps: the floor's light %.1f from %llu rays, picked %.1f from %llu rays\n", all, (unsigned long long)rays_all, picked, (unsigned long long)rays_pick);
+    CHECK(all > 0.0 && std::fabs(picked - all) / all < 0.03 && rays_pick < rays_all / 2);
+    /* Per texel, with the filter on: the picking's noise goes with the denoised part (review 441: it had been left
+     * unfiltered in the direct light). */
+    auto hall_texels = [&](bool pick) {
+      BakeSettings bs;
+      bs.texels_per_unit = 2, bs.indirect_samples = 1, bs.bounces = 0, bs.denoise = true, bs.directional = false, bs.pick_lights = pick;
+      Lightmapper lm;
+      lm.begin({bake_object(1, hall, Mat4::identity(), {white})}, lamps, dark, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result().pages[0].texels;
+    };
+    const std::vector<Vec3> every = hall_texels(false), chosen = hall_texels(true);
+    double err = 0.0, mean = 0.0;
+    size_t lit = 0;
+    for (size_t i = 0; i < every.size() && i < chosen.size(); i++) {
+      if (!(every[i].y > 1e-3f)) continue;
+      err += (chosen[i].y - every[i].y) * (chosen[i].y - every[i].y), mean += every[i].y, lit++;
+    }
+    const double rel = lit ? std::sqrt(err / (double)lit) / (mean / (double)lit) : 1.0;
+    std::printf("    the picked hall per texel, filtered: relative error %.3f against every lamp traced\n", rel);
+    CHECK(lit > 1000 && rel < 0.08);
+  });
+}
+/* ---------------------------------------------------------------- round 442: L2 SH probes, Light Probe Groups (task 0418) */
+static void tests_round442() {
+  test("L2 SH probes (round 442): a lamp's light as nine coefficients - 1.06 toward it, a sixteenth behind (L2's ringing, as Unity's); light from all around gives 1 everywhere; the 26-direction fit gives back the coefficients exactly; a sun-lit probe volume's SH follows N.L far closer than the ambient cube between its axes; saved and read back", [] {
+    ProbeSH lamp;
+    lamp.add_direct(Vec3(0, 1, 0), Vec3(1.0f));
+    std::printf("    a lamp from above: toward it %.3f, sideways %.3f, behind %.3f\n", lamp.eval(Vec3(0, 1, 0)).x, lamp.eval(Vec3(1, 0, 0)).x, lamp.eval(Vec3(0, -1, 0)).x);
+    /* (behind it L2 leaves 1/16: the clamped cosine's bands 1/4 - 1/2 + 5/16, as Unity's own probes) */
+    CHECK(std::fabs(lamp.eval(Vec3(0, 1, 0)).x - 1.0625f) < 1e-3f && std::fabs(lamp.eval(Vec3(0, -1, 0)).x - 0.0625f) < 1e-3f && lamp.eval(Vec3(1, 0, 0)).x < 0.15f);
+    ProbeSH all;
+    const int N = 4096;
+    for (int i = 0; i < N; i++) {
+      const float z = 1.0f - 2.0f * (i + 0.5f) / N, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+      all.add_radiance(Vec3(r * std::cos(phi), z, r * std::sin(phi)), Vec3(1.0f), 4.0f * kPi / N);
+    }
+    std::printf("    light from all around: %.4f up, %.4f down\n", all.eval(Vec3(0, 1, 0)).x, all.eval(Vec3(0, -1, 0)).x);
+    CHECK(std::fabs(all.eval(Vec3(0, 1, 0)).x - 1.0f) < 0.01f && std::fabs(all.eval(Vec3(0, -1, 0)).x - 1.0f) < 0.01f);
+    /* The fit: values along the 26 directions back to the coefficients (positive enough that nothing is clamped). */
+    ProbeSH truth;
+    for (int k = 0; k < 9; k++) truth.c[(size_t)k] = k == 0 ? Vec3(10.0f) : Vec3(0.1f * (k % 4) - 0.15f, 0.05f * k, -0.02f * k);  // (a large constant: nothing clamped)
+    Vec3 dirs[26], seen[26];
+    probe_fit_directions(dirs);
+    for (int j = 0; j < 26; j++) seen[j] = truth.eval(dirs[j]);
+    ProbeShFit fit;
+    fit.init(dirs);
+    const ProbeSH got = fit.fit(seen);
+    float worst = 0.0f;
+    for (int k = 0; k < 9; k++) worst = std::max(worst, length(got.c[(size_t)k] - truth.c[(size_t)k]));
+    std::printf("    the 26-direction fit: worst coefficient error %.2e\n", worst);
+    CHECK(fit.ok && worst < 1e-4f);
+    /* A probe volume in the open under a slanted sun: SH against the cube, against the true col x max(0, N.L). */
+    P37Pt s;
+    s.add(primitives::plane(40.0f, 2), Mat4::translate({0, -20.0f, 0}), Vec3(0.0f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    s.build({}, env);
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, -1.0f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 3;
+    ProbeVolumeData d;
+    probe_place(d, p37_box(Vec3(-1.0f), Vec3(1.0f)), s.tri_boxes(), 1.0f, 1.0f);
+    probe_validate(d, s.pt, 32);
+    probe_bake(d, s.pt, {sun}, 32, 1);
+    CHECK(d.sh.size() == d.position.size() && !d.sh.empty());
+    double e_sh = 0.0, e_cube = 0.0;
+    const Vec3 L = normalize(Vec3(1, 1, 1));
+    for (int i = 0; i < 200; i++) {
+      const float z = 1.0f - 2.0f * (i + 0.5f) / 200, r = std::sqrt(std::max(0.0f, 1.0f - z * z)), phi = i * 2.39996323f;
+      const Vec3 n(r * std::cos(phi), z, r * std::sin(phi));
+      const float truth_v = std::max(0.0f, dot(n, L));
+      Vec3 with_sh, with_cube;
+      d.sample(Vec3(0.0f), n, Vec3(0.0f), false, with_sh, false);
+      e_sh += std::fabs(with_sh.x - truth_v);
+      ProbeVolumeData cube_only = d;
+      cube_only.sh.clear();
+      cube_only.sample(Vec3(0.0f), n, Vec3(0.0f), false, with_cube, false);
+      e_cube += std::fabs(with_cube.x - truth_v);
+    }
+    std::printf("    a sun-lit probe, mean error over 200 normals: SH %.4f, ambient cube %.4f\n", e_sh / 200, e_cube / 200);
+    CHECK(e_sh < 0.6 * e_cube);
+    /* Saved and read back. */
+    const std::string path = resolve_asset_path("Assets/Imported/r442_probes.bin");
+    std::string err;
+    CHECK(d.save(path, err));
+    ProbeVolumeData back;
+    CHECK(back.load(path, err) && back.sh.size() == d.sh.size() && length(back.sh[5].c[0] - d.sh[5].c[0]) == 0.0f);
+    std::remove(path.c_str());
+  });
+  test("Light Probe Groups (round 442): Unity's probes' points tetrahedralised - a linear light reproduced exactly inside, nothing found outside; Unity's probes read along 26 directions (version 3) and fitted; a volume from them interpolated over their tetrahedra", [] {
+    std::vector<Vec3> pts;
+    uint32_t r = 12345u;
+    auto rnd = [&] {
+      r ^= r << 13, r ^= r >> 17, r ^= r << 5;
+      return (float)(r >> 8) / 16777216.0f;
+    };
+    for (int x = 0; x < 5; x++)  // (a Light Probe Group's grid: many points on one sphere - the degenerate case)
+      for (int y = 0; y < 4; y++)
+        for (int z = 0; z < 5; z++) pts.push_back(Vec3((float)x, (float)y, (float)z));
+    for (int i = 0; i < 60; i++) pts.push_back(Vec3(rnd() * 4.0f, rnd() * 3.0f, rnd() * 4.0f));
+    Tetrahedra T;
+    CHECK(T.build(pts));
+    auto f = [](Vec3 p) { return 2.0f * p.x - 0.5f * p.y + 0.25f * p.z + 1.0f; };
+    float worst = 0.0f;
+    int found = 0, hint = -1;
+    for (int i = 0; i < 400; i++) {
+      const Vec3 q(0.1f + rnd() * 3.8f, 0.1f + rnd() * 2.8f, 0.1f + rnd() * 3.8f);
+      int t;
+      float w[4];
+      if (!T.locate(q, t, w, hint)) continue;
+      hint = t, found++;
+      float v = 0.0f;
+      for (int c = 0; c < 4; c++) v += w[c] * f(T.points[(size_t)T.tets[(size_t)t][(size_t)c]]);
+      worst = std::max(worst, std::fabs(v - f(q)));
+    }
+    int t_out;
+    float w_out[4];
+    std::printf("    %zu points, %zu tetrahedra: %d of 400 inside found, a linear light's worst error %.2e\n", T.points.size(), T.tets.size(), found, worst);
+    CHECK(found == 400 && worst < 1e-3f && !T.locate(Vec3(20, 20, 20), t_out, w_out));
+    /* Review 442: a group at one height has no volume - refused (the nearest four instead), not a mesh of slivers. */
+    std::vector<Vec3> flat;
+    for (int x = 0; x < 10; x++)
+      for (int z = 0; z < 10; z++) flat.push_back(Vec3((float)x, 1.5f, (float)z));
+    Tetrahedra F;
+    CHECK(!F.build(flat));
+    /* The grid turned (a placement's rotation): still exact inside. */
+    const Quat turn = Quat::axis_angle(normalize(Vec3(0.3f, 1.0f, 0.2f)), 0.7f);
+    std::vector<Vec3> turned_pts;
+    for (Vec3 q : pts) turned_pts.push_back(turn.rotate(q));
+    Tetrahedra TT;
+    CHECK(TT.build(turned_pts));
+    float worst_t = 0.0f;
+    int found_t = 0;
+    for (int i = 0; i < 200; i++) {
+      const Vec3 q = turn.rotate(Vec3(0.2f + rnd() * 3.6f, 0.2f + rnd() * 2.6f, 0.2f + rnd() * 3.6f));
+      int t;
+      float w[4];
+      if (!TT.locate(q, t, w)) continue;
+      found_t++;
+      float v = 0.0f;
+      for (int c = 0; c < 4; c++) v += w[c] * f(TT.points[(size_t)TT.tets[(size_t)t][(size_t)c]]);
+      worst_t = std::max(worst_t, std::fabs(v - f(q)));
+    }
+    std::printf("    a flat group refused; the grid turned: %d of 200 found, worst %.2e\n", found_t, worst_t);
+    CHECK(found_t == 200 && worst_t < 1e-3f);
+    /* The build at its cap, timed (review 442: O(n^2) on the main thread when Unity's lighting is applied). */
+    std::vector<Vec3> many;
+    for (size_t i = 0; i < Tetrahedra::kMaxPoints; i++) many.push_back(Vec3(rnd() * 40.0f, rnd() * 10.0f, rnd() * 40.0f));
+    ScopedTimer bt;
+    Tetrahedra M;
+    const bool built_many = M.build(many);
+    const double build_ms = bt.ms();
+    ScopedTimer lt;
+    int hint_m = -1, found_m = 0;
+    for (int i = 0; i < 20000; i++) {
+      int t;
+      float w[4];
+      if (M.locate(Vec3(1.0f + rnd() * 38.0f, 0.5f + rnd() * 9.0f, 1.0f + rnd() * 38.0f), t, w, hint_m)) hint_m = t, found_m++;
+    }
+    std::printf("    %zu points: built in %.0f ms (%zu tetrahedra); 20,000 walks in %.1f ms, %d inside\n", many.size(), build_ms, M.tets.size(), lt.ms(), found_m);
+    CHECK(built_many && found_m > 15000);
+    /* Unity's probes on that grid, each lit from above by a different amount (version 3: 26 directions). */
+    UnityLighting u;
+    Vec3 dirs[26];
+    probe_fit_directions(dirs);
+    for (int i = 0; i < 100; i++) {
+      UnityLighting::Probe p;
+      p.position = pts[(size_t)i];
+      ProbeSH sh;
+      sh.add_direct(Vec3(0, 1, 0), Vec3(0.5f + 0.1f * p.position.x));
+      sh.c[0] += Vec3(0.2f);  // (an ambient floor: nothing clamped)
+      for (int j = 0; j < 6; j++) p.axes[(size_t)j] = sh.eval(dirs[j]);
+      for (int j = 0; j < 26; j++) p.seen.push_back(sh.eval(dirs[j]));
+      u.probes.push_back(p);
+    }
+    std::string why;
+    UnityLighting back;
+    CHECK(read_unity_lighting(write_unity_lighting(u), back, why) && back.probes.size() == 100 && back.probes[7].seen.size() == 26);
+    ProbeVolumeData vol;
+    unity_probe_volume(back, vol);
+    CHECK(vol.sh.size() == vol.position.size() && vol.unity_tetra_inside > 0);
+    Vec3 up, mid;
+    vol.sample(Vec3(2.0f, 1.5f, 2.0f), Vec3(0, 1, 0), Vec3(0.0f), false, up, false);
+    const float expect = (0.5f + 0.1f * 2.0f) * 1.0625f + 0.2f * 0.282095f;
+    std::printf("    a volume from Unity's probes: %zu of %zu inside their tetrahedra; light from above at x = 2: %.3f (Unity's own %.3f)\n", vol.unity_tetra_inside,
+                vol.position.size(), up.x, expect);
+    CHECK(std::fabs(up.x - expect) < 0.03f);
+    (void)mid;
+  });
+}
+/* ---------------------------------------------------------------- round 444: Shadowmask and Subtractive (task 0420) */
+static void tests_round444() {
+  test("Shadowmask and Subtractive (round 444): a Mixed lamp over a box - Baked Indirect bakes only its bounce; Shadowmask keeps a mask of its shadow from the box (dark under it, clear in the open) and marks the lamp's channel; Subtractive bakes its direct light into the lightmap; the renderers' rule for each; the masks saved and read back", [] {
+    CHECK(light_baked_here(2, true, false) && light_baked_here(2, false, true) && light_baked_here(3, true, false) && !light_baked_here(3, false, true));
+    CHECK(!light_baked_here(1, true, true) && !light_baked_here(5, true, true) && light_mask_channel(5) == 1 && light_mask_channel(3) == -1 && light_mask_channel(2) == -1);
+    MeshPtr floor = primitives::plane(6.0f, 8), box = primitives::cube(1.0f);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    BakeLight lamp;
+    lamp.light.type = RenderLight::Point, lamp.light.position = Vec3(0.0f, 4.0f, 0.0f), lamp.light.intensity = 8.0f, lamp.light.range = 100.0f;
+    lamp.mode = 1, lamp.id = 7;
+    auto bake = [&](int mode) {
+      BakeSettings bs;
+      bs.texels_per_unit = 6, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.lighting_mode = mode;
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), b = bake_object(2, box, Mat4::translate(Vec3(0.0f, 1.5f, 0.0f)), {white});
+      b.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, b}, {lamp}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData indirect = bake(0), mask = bake(1), sub = bake(2);
+    auto sum = [](const LightingData &d) {
+      double s = 0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    float lo = 1.0f, hi = 0.0f;
+    for (const Vec3 &m : mask.mask_pages.empty() ? std::vector<Vec3>{} : mask.mask_pages[0].texels) lo = std::min(lo, m.x), hi = std::max(hi, m.x);
+    std::printf("    the lamp's mode in the bake: %d / %d / %d; the mask from %.3f (under the box) to %.3f; the floor's light %.1f indirect, %.1f Subtractive\n",
+                indirect.light_modes.at(7), mask.light_modes.at(7), sub.light_modes.at(7), lo, hi, sum(indirect), sum(sub));
+    CHECK(indirect.light_modes.at(7) == 1 && indirect.mask_pages.empty() && mask.light_modes.at(7) == 4 && mask.mask_pages.size() == mask.pages.size());
+    CHECK(lo < 0.05f && hi > 0.95f && sub.light_modes.at(7) == 3 && sub.mask_pages.empty() && sum(sub) > 3.0 * sum(indirect));
+    const std::string dir = resolve_asset_path("Assets/Imported/R444");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::string err;
+    CHECK(mask.save(dir, err));
+    LightingData back;
+    CHECK(back.load(dir, err) && back.mask_pages.size() == mask.mask_pages.size() && back.light_modes.at(7) == 4);
+    float diff = 0.0f;
+    for (size_t i = 0; !back.mask_pages.empty() && i < back.mask_pages[0].texels.size(); i++) diff = std::max(diff, std::fabs(back.mask_pages[0].texels[i].x - mask.mask_pages[0].texels[i].x));
+    std::printf("    the mask read back: worst difference %.4f\n", diff);
+    CHECK(diff < 0.01f);
+    std::filesystem::remove_all(dir, ec);
+    /* Unity's Subtractive split: the brightest Mixed sun stays Mixed, every other Mixed light becomes Baked. */
+    std::vector<BakeLight> set(3);
+    set[0].light.type = RenderLight::Point, set[0].mode = 1;
+    set[1].light.type = RenderLight::Directional, set[1].light.intensity = 0.5f, set[1].mode = 1;
+    set[2].light.type = RenderLight::Directional, set[2].light.intensity = 2.0f, set[2].mode = 1;
+    const int main_light = subtractive_split(set);
+    std::printf("    Subtractive's split: the main light %d; the modes %d %d %d\n", main_light, set[0].mode, set[1].mode, set[2].mode);
+    CHECK(main_light == 2 && set[0].mode == 2 && set[1].mode == 2 && set[2].mode == 1);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -5695,4 +7053,18 @@ void run_lighting_tests() {
   tests_round164();
   tests_round175();
   tests_round177();
+  tests_round421();
+  tests_round423();
+  tests_round424();
+  tests_round425();
+  tests_round426();
+  tests_round428();
+  tests_round429();
+  tests_round430();
+  tests_round438();
+  tests_round439();
+  tests_round440();
+  tests_round441();
+  tests_round442();
+  tests_round444();
 }
