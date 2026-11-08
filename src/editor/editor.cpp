@@ -561,6 +561,7 @@ void Editor::frame(std::vector<Event> &events) {
     in_frame_ = false;
   }
   BL_FRAME_MARK();
+  trim_idle_memory();  // (task 0421)
   if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
 }
 
@@ -2104,6 +2105,108 @@ size_t Editor::undo_budget() const {
   if (undo_budget_) return undo_budget_;
   const uint64_t ram = sys::physical_memory_bytes();
   return (size_t)std::min<uint64_t>(ram ? ram / 8 : (uint64_t)1 << 30, (uint64_t)2 << 30);
+}
+
+/* (Task 0421) The renderers' scratch, summed. */
+size_t Editor::scratch_bytes() const {
+  return scene_r3d_.scratch_bytes() + game_r3d_.scratch_bytes() + draw_r3d_.scratch_bytes() + ipv_r3d_.scratch_bytes() + vr_r3d_.scratch_bytes() +
+         cam_preview_r3d_.scratch_bytes();
+}
+
+size_t Editor::trim_scratch(size_t keep) {
+  if (scratch_bytes() <= keep) return 0;
+  return scene_r3d_.trim_scratch(0) + game_r3d_.trim_scratch(0) + draw_r3d_.trim_scratch(0) + ipv_r3d_.trim_scratch(0) + vr_r3d_.trim_scratch(0) +
+         cam_preview_r3d_.trim_scratch(0);
+}
+
+Renderer3D *Editor::scratch_renderer(int i) {
+  Renderer3D *all[6] = {&scene_r3d_, &game_r3d_, &draw_r3d_, &ipv_r3d_, &vr_r3d_, &cam_preview_r3d_};
+  return all[i];
+}
+
+/* Every frame: with the renderers' scratch over its budget, a renderer that has drawn nothing for kScratchHoldSeconds
+ * gives its scratch back (one that is drawing keeps it: an orbit would allocate it again every few seconds). */
+void Editor::trim_idle_memory() {
+  const double now = clock_now();
+  for (int i = 0; i < 6; i++) {
+    ScratchWatch &w = scratch_watch_[i];
+    const uint64_t b = scratch_renderer(i)->use_count();
+    if (b == w.seen) continue;
+    w.seen = b;
+    w.since = now;
+  }
+  if (scratch_bytes() <= kScratchBudget) return;
+  for (int i = 0; i < 6; i++)
+    if (now - scratch_watch_[i].since >= kScratchHoldSeconds) scratch_renderer(i)->trim_scratch(0);
+}
+
+/* A surface evaluating on its worker holds its planes (738 MB at 4096 x 4096) and, while it builds them, its images too. */
+size_t Editor::surface_job_planes_bytes() const {
+  if (!surface_job_ || surface_job_->done.load(std::memory_order_relaxed)) return 0;
+  return procedural_texture_planes_bytes(surface_job_->copy, surface_job_->building.load(std::memory_order_relaxed));
+}
+
+static size_t lightmap_pages_bytes(const std::vector<Lightmap> &pages) {
+  size_t n = 0;
+  for (const Lightmap &p : pages) n += p.texels.capacity() * sizeof(Vec3);
+  return n;
+}
+
+static size_t lighting_data_bytes(const LightingData &d) {
+  size_t n = lightmap_pages_bytes(d.pages) + lightmap_pages_bytes(d.dir_pages);
+  for (const auto &kv : d.entries) n += kv.second.tri_uv.capacity() * sizeof(Vec2);
+  return n;
+}
+
+static size_t realtime_lightmaps_bytes(const RealtimeLightmaps &r) {
+  size_t n = lightmap_pages_bytes(r.shown.bounce) + lightmap_pages_bytes(r.shown.sky) + r.bounce.capacity() * sizeof(Vec3) + r.sky.capacity() * sizeof(float) +
+             r.ok.capacity();
+  for (const auto &kv : r.shown.entries) n += kv.second.tri_uv.capacity() * sizeof(Vec2);
+  return n;
+}
+
+std::vector<Editor::MemoryAccount> Editor::memory_accounts() const {
+  size_t planes = 0, pictures = 0, shadows = 0;
+  for (const RenderTarget *rt : {&scene_rt_, &game_rt_, &pilot_rt_, &draw_rt_, &pad_rt_, &cam_preview_rt_, &ipv_rt_, &vr_rt_, &scene_vs_.rt, &game_vs_.rt, &preview_vs_.rt})
+    planes += rt->plane_bytes();
+  for (const ViewCache *c : {&scene_cache_, &game_cache_, &draw_cache_}) pictures += c->img.pixels.capacity() * sizeof(uint32_t);
+  for (const auto &kv : window_caches_) pictures += (kv.second.scene.img.pixels.capacity() + kv.second.game.img.pixels.capacity()) * sizeof(uint32_t);
+  for (const Image *im : {&render_img_, &scene_vs_.img, &game_vs_.img, &preview_vs_.img}) pictures += im->pixels.capacity() * sizeof(uint32_t);
+  pictures += (render_linear_.capacity() + cam_preview_lin_.capacity() + render_alpha_lin_.capacity()) * sizeof(float);
+  for (const ShadowEntry &e : shadow_cache_) shadows += e.map.depth.capacity() * sizeof(float);
+  for (const ShadowLayer &l : shadow_static_) shadows += l.map.depth.capacity() * sizeof(float);
+  size_t gi = 0, lightmaps = lighting_data_bytes(lighting_data_) + lighting_data_bytes(preview_data_);
+  for (const VoxelGIState &v : vgi_) {
+    for (const auto &lv : v.grid.levels) gi += lv.capacity() * sizeof(VoxelColumn);
+    for (const auto &kv : v.objects) gi += kv.second.spans.capacity() * sizeof(VoxelSpan);
+    gi += (v.rsm.position.capacity() + v.rsm.normal.capacity() + v.rsm.flux.capacity()) * sizeof(Vec3);
+    lightmaps += realtime_lightmaps_bytes(v.rtlm);
+  }
+  /* final_pt_ is the F12 worker's while a render job exists (it builds and resizes it): not read then. */
+  const size_t final_pt = render_job_ ? 0 : final_pt_.memory_bytes();
+  return {{"scene", scene_ ? scene_->memory_bytes() : 0},
+          {"undo", undo_bytes()},
+          {"textures", texture_cache_bytes()},
+          {"raster scratch", scratch_bytes()},
+          {"view planes", planes},
+          {"view pictures", pictures},
+          {"shadow maps", shadows},
+          {"procedural textures", procedural_texture_cache_bytes()},
+          {"surface job planes", surface_job_planes_bytes()},
+          {"voxel GI", gi},
+          {"lightmaps", lightmaps},
+          {"path tracers", final_pt + cam_preview_pt_.memory_bytes()}};
+}
+
+std::string Editor::memory_text() const {
+  std::string s;
+  double named = 0.0;
+  for (const MemoryAccount &a : memory_accounts()) {
+    named += (double)a.bytes;
+    s += strprintf("%s%s %s", s.empty() ? "" : ", ", a.name, format_bytes(a.bytes).c_str());
+  }
+  const double ws = (double)sys::working_set_bytes();
+  return s + strprintf("; the process holds %s, %s of it in no account", format_bytes((size_t)ws).c_str(), format_bytes((size_t)std::max(0.0, ws - named)).c_str());
 }
 
 size_t Editor::undo_bytes() const {

@@ -567,6 +567,7 @@ static void light_volume_ambient(SurfacePoint &sp, const LightVolumeFrame &lv, c
 }
 
 void Renderer3D::flush() {
+  uses_++;  // (task 0421)
   ScopedTimer total;
   JobSystem &js = JobSystem::global();
   int saved_threads = js.max_threads();
@@ -1327,7 +1328,33 @@ void Renderer3D::replay(const OverlayRecord &r) {
   }
 }
 
+/* (Task 0421) The scratch kept between frames, by capacity. */
+size_t Renderer3D::scratch_bytes() const {
+  size_t n = items_.capacity() * sizeof(DrawItem) + overlay_cmds_.capacity() * sizeof(OverlayCmd) + band_idx_.capacity() * sizeof(uint32_t) +
+             visible_.capacity() + big_.capacity() + see_through_.capacity() + vjobs_.capacity() * sizeof(VJob) +
+             (gi_lo_.capacity() + gi_blur_.capacity()) * sizeof(GiTexel) + normal_mats_.capacity() * sizeof(Mat4);
+  for (const auto &v : clip_pos_) n += v.capacity() * sizeof(Vec4);
+  for (const auto &v : screen_pos_) n += v.capacity() * sizeof(Vec4);
+  for (const auto &v : colors_) n += v.capacity() * sizeof(Vec3);
+  for (const Chunk &c : chunks_)
+    n += c.ranges.capacity() * sizeof(ChunkRange) + c.tris.capacity() * sizeof(ScreenTri) + (c.tile_offsets.capacity() + c.tile_tris.capacity()) * sizeof(uint32_t);
+  return n;
+}
+
+size_t Renderer3D::trim_scratch(size_t keep) {
+  if (batching_) return 0;
+  const size_t had = scratch_bytes();
+  if (had <= keep) return 0;
+  auto free_all = [](auto &v) { std::decay_t<decltype(v)>().swap(v); };
+  free_all(items_), free_all(overlay_cmds_), free_all(band_idx_), free_all(visible_), free_all(big_), free_all(see_through_);
+  free_all(vjobs_), free_all(gi_lo_), free_all(gi_blur_), free_all(normal_mats_);
+  free_all(clip_pos_), free_all(screen_pos_), free_all(colors_), free_all(chunks_);
+  active_chunks_ = 0;
+  return had - scratch_bytes();
+}
+
 void Renderer3D::begin_overlay_batch() {
+  uses_++;  // (task 0421)
   batching_ = true;
   overlay_cmds_.clear();
 }

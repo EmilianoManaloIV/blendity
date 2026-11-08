@@ -248,6 +248,7 @@ class LiveTexture {
   Vec3 normal(float u, float v, const float *height_here = nullptr) const;
   int width() const { return w_; }
   int height() const { return h_; }
+  size_t memory_bytes() const;  // (task 0421) the kept planes of its layers
   uint64_t hash() const { return hash_; }
   bool output_on(int which) const { return tex_.output_on(which); }  // the texture's Normal / Roughness / Height Map switches
   bool alpha_from_cover() const { return tex_.alpha_from_cover; }       // (task 0150: the albedo's alpha is the cover plane)
@@ -301,6 +302,19 @@ bool procedural_texture_cached(const std::string &asset_path, uint64_t hash);  /
 struct TextureOutputsHandle;
 std::shared_ptr<TextureOutputsHandle> procedural_texture_cache_build(const ProceduralTexture &t, uint64_t hash, TexPlanes &planes, std::vector<LayerAux> aux);
 void procedural_texture_cache_store(const std::string &asset_path, const std::shared_ptr<TextureOutputsHandle> &built);
+/* Task 0421: what the cache holds (the images with their mips, the live snapshots) - the soak's 1.1-1.3 GB: a 4096 x 4096
+ * surface keeps six images and its planes, and the cache had no bound. Over its budget, trim drops the least recently
+ * used entries that only the cache holds (no material, view or window has their images), and the editor's surface poll
+ * leaves a dropped surface alone until something asks for it again. The budget defaults to 1/32 of the machine's memory
+ * between 128 and 512 MB. */
+size_t procedural_texture_cache_bytes();
+/* What evaluating a texture holds: its planes at the size it is evaluated (44 bytes a texel: height, roughness, mask,
+ * alpha, metal 4 each, albedo and emission 12 each), and with `building` its six images with their mips (about 32). */
+size_t procedural_texture_planes_bytes(const ProceduralTexture &t, bool building);
+size_t procedural_texture_cache_budget();
+void procedural_texture_cache_set_budget(size_t bytes);  // 0: back to the default
+size_t procedural_texture_cache_trim();                  // the bytes dropped
+bool procedural_texture_trimmed(const std::string &asset_path, uint64_t hash);  // dropped at this hash to fit the budget and not asked for since
 
 /* Presets the Textures window and `newtex` start from: "Bricks", "Wood Floor", "Tatami", "Tiles", "Noise". */
 /* The presets by theme (round 327): Basics, Architecture, Floors & Wood, Nature, Sky & Weather, Metal & Fabric, Stone. */

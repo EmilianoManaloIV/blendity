@@ -816,6 +816,17 @@ void PathTracer::set_camera(const Mat4 &view, const Mat4 &proj, int width, int h
   reset();
 }
 
+size_t PathTracer::memory_bytes() const {
+  size_t n = (accum_.capacity() + albedo_.capacity() + normal_.capacity() + cpu_accum_.capacity() + cpu_albedo_.capacity() + cpu_normal_.capacity()) * sizeof(Vec3) +
+             (depth_.capacity() + cpu_depth_.capacity() + cpu_cov_.capacity() + cov_.capacity() + centre_dist_.capacity() + cpu_last_dist_.capacity() +
+              last_dist_.capacity()) * sizeof(float) +
+             (cpu_ids_.capacity() + ids_.capacity() + centre_ids_.capacity()) * sizeof(uint32_t) + objects_.capacity() * sizeof(PTObject) +
+             tlas_.capacity() * sizeof(Node) + instances_.capacity() * sizeof(Instance);
+  for (const auto &kv : blas_cache_)
+    if (kv.second) n += kv.second->tris.capacity() * sizeof(Tri) + kv.second->prim.capacity() * sizeof(uint32_t) + kv.second->nodes.capacity() * sizeof(Node);
+  return n;
+}
+
 void PathTracer::reset() {
   pause();
   for (auto &g : gpus_) {  // (task 0161: the host copies of the sums go with them)

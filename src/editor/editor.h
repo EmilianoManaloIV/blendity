@@ -4206,8 +4206,24 @@ class Editor {
   }
   size_t undo_steps_for_test() const { return undo_.size(); }
   size_t undo_bytes() const;
+  /* Task 0421: what each subsystem holds in memory, by name and bytes (the soak prints it): the scene, the undo history,
+   * the texture cache, the renderers' scratch, the views' planes and pictures, the shadow maps, the path tracers. */
+  struct MemoryAccount { const char *name; size_t bytes; };
+  std::vector<MemoryAccount> memory_accounts() const;
+  std::string memory_text() const;  // `perf memory`: the accounts and the process's working set, one line
+  size_t scratch_bytes() const;                       // the renderers' scratch alone
+  size_t surface_job_planes_bytes() const;            // a surface evaluating on its worker: the planes it holds
+  size_t trim_scratch(size_t keep);                   // frees every renderer's scratch when it exceeds `keep`; the bytes freed
+  void trim_idle_memory();                            // (every frame) an idle renderer's scratch, over the budget, is given back
 
  private:
+  /* (Task 0421) Each renderer's draws (flushes and overlay batches) as last seen and when that changed: a renderer idle for kScratchHoldSeconds
+   * gives its scratch back when the total is over the budget; one in use (an orbit in Edit Mode) keeps it. */
+  struct ScratchWatch { uint64_t seen = ~(uint64_t)0; double since = 0.0; };
+  ScratchWatch scratch_watch_[6];
+  Renderer3D *scratch_renderer(int i);
+  static constexpr size_t kScratchBudget = (size_t)96 << 20;
+  static constexpr double kScratchHoldSeconds = 5.0;
   bool pending_change_ = false;
   EditSelection edit_sel_before_;  // Edit Mode's selection before the pending change (task 0167: the undo step's)
   EditSelection edit_selection() const;
@@ -4703,7 +4719,7 @@ class Editor {
   /* Task 0244: a surface evaluated off the main thread (ADR 0080). */
   struct SurfaceJob {
     std::thread thread;
-    std::atomic<bool> done{false}, cancel{false};
+    std::atomic<bool> done{false}, cancel{false}, building{false};  // (building: the images are being made from the planes - task 0421)
     std::string path;
     uint64_t hash = 0;
     ProceduralTexture copy;

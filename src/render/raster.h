@@ -313,6 +313,10 @@ struct RenderTarget {
   /* Depth alone (a shadow map): no colour and no ids plane - nothing picks in it (task 0085). */
   void make_depth_only(int w, int h);
   void resize_planes(bool with_ids = true);
+  /* (Task 0421) What the planes hold, by capacity - the colour is the image's, not counted. */
+  size_t plane_bytes() const {
+    return depth.capacity() * sizeof(float) + (ids.capacity() + vis.capacity()) * sizeof(uint32_t) + hdr.capacity() * sizeof(Vec3);
+  }
   uint32_t id_at(int x, int y) const {
     return (x >= 0 && y >= 0 && x < width && y < height && !ids.empty()) ? ids[(size_t)y * width + x] : 0;
   }
@@ -397,6 +401,12 @@ class Renderer3D {
     stats_.tris_submitted = tris;
   }
   RenderTarget *target() const { return rt_; }
+  /* (Task 0421) The scratch this renderer keeps between frames (capacities: cleared, not freed), and giving it back:
+   * trim_scratch(keep) frees all of it when it exceeds `keep` bytes - between frames only (it does nothing inside an
+   * overlay batch) - and returns what it freed. */
+  size_t scratch_bytes() const;
+  size_t trim_scratch(size_t keep);
+  uint64_t use_count() const { return uses_; }  // (flushes and overlay batches: the editor trims a renderer that has drawn none for a while)
 
  private:
   struct ScreenTri {
@@ -436,6 +446,7 @@ class Renderer3D {
   void shade_run8(const Shade8Tri &t, const SurfaceSample &surface, int x, int64_t y, Vec3 eye, const Environment &env,
                   std::vector<Vec3> &row_hdr, std::vector<int> &row_x) const;
 
+  uint64_t uses_ = 0;
   RenderTarget *rt_ = nullptr;
   Mat4 view_, proj_, vp_, inv_vp_;
   LightingEnv env_;

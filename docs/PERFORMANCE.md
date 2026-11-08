@@ -102,7 +102,8 @@ GGX-prefiltered (428); Filamented's specular occlusion (429); texel validity and
    a scene-wide change counter, its own round and ADR.
 2. The bake's SSIM: directional strength against Unity's divisor, seams (Unity's Stitch Seams), the exit sign's glow.
 3. One 698 ms frame while SideRail path-traces; Enter Edit Mode on 500k, 116 ms (budget 100).
-4. The soak's 1.1-1.3 GB of working memory: its holder (a heap profile per window).
+4. ~~The soak's 1.1-1.3 GB of working memory~~ - found and bounded in round 445 (below); left: a running 4096 x 4096
+   surface's 738 MB of planes.
 5. Shadowmask and Subtractive, L2 SH probes and Light Volumes in Blendity's own views, per-island chart packing - planned
    for Pass 17, not reached.
 6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
@@ -233,6 +234,14 @@ Shinano's gathering and hashing re-derive an unchanged scene: caching them safel
 (open). The only quick-suite responsiveness row over budget: Enter Edit Mode on the 500k sphere, 116 ms (budget 100;
 the CPU's first cage frame). `tools/perf_suite.py` now matches rows by section, table and row; CI compares its quick
 stress with a per-runner baseline when one is committed (`--compare`, warnings).
+
+### The soak's memory (round 445, task 0421)
+`perf memory` and the soak's `holds:` lines name each subsystem's bytes. The 1.1-1.3 GB was a 4096 x 4096 procedural
+surface (`BLENDITY_FUZZ_SEED=4242`): **738 MB** of planes on its worker while it evaluates, then **448 MB** of images in
+the procedural-texture cache, which had no limit. Before: 570-650 MB of the working set in no account at minute 1 (the
+working set 699 MB, flat); after: the cache counted (448 MB), 51-59 MB in no account, the working set 560 -> 585 MB. The
+cache is bounded (1/32 of the machine's memory, 128-512 MB; least recently used images only it holds are dropped); the
+idle renderers' scratch is freed after 5 s with the total over 96 MB.
 
 ### What Pass 16 didn't measure (round 433)
 - **A 30-minute soak** (`BLENDITY_FUZZ_MINUTES=30 blendity_stress --only editor_fuzz`): no crash in 194,633 frames

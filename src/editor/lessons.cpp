@@ -2056,6 +2056,11 @@ A frame that freezes the editor for 700 ms is easy to see and hard to place. Rou
 ? Decoding a scene's textures inside its import, instead of in the first frame after it, was tried and kept out. Why? | The import itself holds the main thread: the textures made it 773 -> 1,624 ms. The worst frame went from 1.76 s to 1.62 s - the stall moved instead of going away. Decoding off the main thread (an open's worker, F12's worker) is what removes it.
 ! cmd:perf reset | Start a mark; do something; then `perf mark` names its longest frame's parts
 ! cmd:jobs async on | A headless script's jobs on workers, as the window runs them
+# Who holds the memory? Count it by subsystem
+A soak that ends at 1.3 GB says the editor is big, not who made it big. Round 445 gave every cache a byte count and made `perf memory` print them next to what the process holds: the scene, the undo history, the texture cache, the renderers' scratch, the views' planes and pictures, the shadow maps, the lightmaps, the path tracers, the procedural textures - and the bytes no account names. The soak's report prints the same line every minute and on every frame that grows the process by 20 MB. The holder was none of the usual suspects: a 4096 x 4096 procedural surface evaluated on a worker held 738 MB of planes while it ran, and the finished images (six of them with their mips, 448 MB) sat in a cache that had no limit. That cache now has a budget, and drops the least recently used images that only it holds. Count first; the guess (the undo history, the textures) was wrong.
+? A soak's memory is flat after minute 4 at 1.3 GB. Why is that not yet a leak, and what would make you call it one? | A leak keeps growing with the work; flat means something holds a fixed amount - here a cache with no limit and the images of the biggest surface. It is a leak if the number keeps rising while the scene and its caches stay the same size.
+? The cache now drops only images that nothing else holds. Why not simply drop the oldest? | An image a material shades with is in use: dropping it from the cache would not free it, and the next frame would evaluate it again. Only an image the cache alone holds frees memory when dropped and costs nothing until something asks.
+! cmd:perf memory | One line: each subsystem's bytes, the process's working set, and what no account names
 )"},
 };
 

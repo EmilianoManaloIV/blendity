@@ -986,10 +986,11 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("CPU badge: %s", badge.empty() ? "not shown" : badge.c_str());
     return;
   }
-  if (c == "perf") {  // perf [status] | mark [name] | reset | wait (round 411, ADR 0105)
+  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | memory (round 411, ADR 0105; memory: task 0421)
     const std::string sub = to_lower(arg(1, "status"));
     if (sub == "mark") Log::info("%s", perf_mark(t.size() > 2 ? line_rest(line, 2) : std::string()).c_str());
     else if (sub == "reset") perf_mark(""), Log::info("perf: the mark reset");
+    else if (sub == "memory") Log::info("perf memory: %s", memory_text().c_str());  // (task 0421)
     else if (sub == "wait") {
       /* perf wait (a script's, headless): steps frames until no job, render or bake runs, so the mark after it holds
        * the whole step with its frames (the --cmd lines run back to back, with no frame between them). */
