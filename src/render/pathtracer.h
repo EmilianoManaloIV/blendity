@@ -208,6 +208,15 @@ class PathTracer {
    * distance, the emitted radiance and the solid-angle pdf (the texel's next-event estimation of emissive meshes,
    * task 0157). False when there are none or the point is behind the surface or the emitter. */
   bool has_mesh_lights() const { return !mesh_lights_.empty(); }
+  /* Round 441 (task 0417): the world sampled by its light - a sky or HDRI map's brightness over a 256 x 128 grid of
+   * directions (each cell's radiance x its solid angle), one cell by that and a direction inside it. Gradients and flat
+   * colours aren't sampled this way (the cosine gather is already right for them). */
+  bool has_env_dist() const { return env_w_ > 0; }
+  bool sample_env(uint32_t &rng, Vec3 &dir, float &pdf) const;
+  float env_pdf(Vec3 dir) const;  // the solid-angle pdf sample_env draws `dir` with
+  /* Round 441: which lights a bake's own sampling at the texel covers, so the gather's first hit is weighted against them
+   * (MIS) and nothing counts twice: emitters (task 0157, the default) and the world. */
+  void set_bake_mis(bool emitters, bool env) { bake_mis_emitters_ = emitters, bake_mis_env_ = env; }
   bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f) const;  // light_u in [0,1): the emitter choice given (stratified), else random
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
@@ -311,10 +320,21 @@ class PathTracer {
     float area, power;
   };
   std::vector<MeshLight> mesh_lights_;
+  int env_w_ = 0, env_h_ = 0;  // (round 441: the world's grid; 0 when not sampled)
+  uint64_t env_key_ = 0;       // (the world the grid was built for)
+  std::vector<float> env_cdf_, env_cell_;  // cumulative and per-cell probabilities
+  bool bake_mis_emitters_ = true, bake_mis_env_ = false;
+  void build_env_dist();
   std::vector<float> light_cdf_;  // cumulative power
   float light_power_ = 0.0f;
   std::unordered_map<uint64_t, uint32_t> light_of_;  // (object << 32 | triangle) -> mesh light
   void collect_mesh_lights();
+ public:
+  /* Round 439: the light a material sends, for picking emitters by power (its emission, and an Unlit one's colour). */
+  static float emitter_luminance(const Material &m);
+  /* What a sampled emitter point sends: its emission, plus its colour when Unlit (round 439). */
+  static Vec3 emitted(const SurfaceSample &s) { return s.unlit ? s.emission + s.albedo : s.emission; }
+ private:
   float mesh_light_pdf(uint32_t light, float dist, float cos_light) const;
   const Material *surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const;
   std::vector<float> denoised_oidn() const;

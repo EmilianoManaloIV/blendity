@@ -2,6 +2,9 @@
 // blendity_tests: the lighting tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include "../src/render/reflection_probe.h"
+#include "../src/scene/unity_material.h"
+#include <set>
+#include <tuple>
 
 static void round35_tests() {
   /* ---------------------------------------------------------------- 1: lightmap UVs */
@@ -6528,6 +6531,286 @@ static void tests_round438() {
     CHECK(alone > 0.97f && with_sky < 0.5f * alone && tilt_sky < tilt_alone && tilt_sky >= 1.0f);
   });
 }
+/* ---------------------------------------------------------------- round 439: emitters (task 0415) */
+static void tests_round439() {
+  test("emitters (round 439): an Unlit material sends its colour as light and is picked by it - the bake samples a small unlit sign at each texel, so a floor under it is far less noisy at 16 samples than when only the gather finds it, and the same on average; an emission map counts by its mean, not as white", [] {
+    MaterialPtr sign = make_material("Exit sign", Vec3(0.2f, 1.0f, 0.3f));
+    sign->unlit = true;
+    MaterialPtr glow = make_material("Glow", Vec3(0.5f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 2.0f;
+    MaterialPtr plain = make_material("Plain", Vec3(0.5f));
+    std::printf("    emitter luminance: the unlit sign %.3f (its colour's), an emission of 2 %.3f, a plain grey %.3f\n", PathTracer::emitter_luminance(*sign),
+                PathTracer::emitter_luminance(*glow), PathTracer::emitter_luminance(*plain));
+    CHECK(std::fabs(PathTracer::emitter_luminance(*sign) - (0.2126f * 0.2f + 0.7152f + 0.0722f * 0.3f)) < 1e-4f);
+    CHECK(std::fabs(PathTracer::emitter_luminance(*glow) - 2.0f) < 1e-4f && PathTracer::emitter_luminance(*plain) == 0.0f);
+    /* A floor in the dark, a small unlit sign half a metre above it. */
+    MeshPtr floor = primitives::plane(2.0f, 4), panel = primitives::plane(0.3f, 1);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto bake = [&](bool sample, int samples, uint32_t seed) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.sample_emissive = sample, bs.seed = seed;
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), p = bake_object(2, panel, Mat4::translate(Vec3(0.0f, 0.5f, 0.0f)), {sign});
+      p.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, p}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result();
+    };
+    const LightingData ref = bake(true, 1024, 7), ref_off = bake(false, 1024, 8), noisy = bake(false, 16, 1), sampled = bake(true, 16, 1);
+    auto floor_texels = [](const LightingData &d) {
+      std::vector<float> v;
+      const LightingData::Entry &e = d.entries.at(1);
+      const Lightmap &pg = d.pages[(size_t)e.page];
+      for (size_t i = 0; i < e.tri_uv.size(); i++) {
+        const Vec3 c = pg.sample(e.tri_uv[i]);
+        v.push_back(0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z);
+      }
+      return v;
+    };
+    const std::vector<float> r = floor_texels(ref), a = floor_texels(noisy), b = floor_texels(sampled), ro = floor_texels(ref_off);
+    double sum_on = 0.0, sum_off = 0.0;
+    for (size_t i = 0; i < r.size() && i < ro.size(); i++) sum_on += r[i], sum_off += ro[i];
+    std::printf("    1024 samples: the floor's light %.4f with the sign sampled, %.4f found by the gather alone\n", sum_on, sum_off);
+    CHECK(std::fabs(sum_on - sum_off) / sum_off < 0.03);
+    double ea = 0.0, eb = 0.0, mr = 0.0, mb = 0.0;
+    for (size_t i = 0; i < r.size() && i < a.size() && i < b.size(); i++) {
+      ea += (a[i] - r[i]) * (a[i] - r[i]), eb += (b[i] - r[i]) * (b[i] - r[i]);
+      mr += r[i], mb += b[i];
+    }
+    const double n = (double)std::max<size_t>(1, r.size());
+    std::printf("    the floor at 16 samples against 1024: error %.4f with only the gather, %.4f with the sign sampled; mean %.4f against %.4f\n", std::sqrt(ea / n),
+                std::sqrt(eb / n), mb / n, mr / n);
+    CHECK(mr / n > 1e-3 && eb < 0.5 * ea && std::fabs(mb - mr) / mr < 0.1);
+  });
+  test("emitters (round 439): a Unity material's Global Illumination decides whether its emission lights the bake - Baked does, Realtime and None don't (Unity's m_LightmapFlags, read on import); a Blendity material's always does", [] {
+    std::string yaml = "%YAML 1.1\n--- !u!21 &2100000\nMaterial:\n  m_Name: Lamp\n  m_ShaderKeywords: _EMISSION\n  m_LightmapFlags: 1\n  m_SavedProperties:\n    m_Colors:\n    - _EmissionColor: {r: 1, g: 1, b: 1, a: 1}\n";
+    Material m;
+    UnityMaterialInfo info;
+    CHECK(unity_material(yaml, [](const std::string &) { return std::string(); }, [](const std::string &, int64_t) { return std::string("Standard"); }, m, info));
+    std::printf("    a Realtime lamp material: flags %d, bakes %d; Blendity's own: %d\n", m.gi_flags, (int)m.emission_bakes(), (int)Material().emission_bakes());
+    CHECK(m.gi_flags == 1 && !m.emission_bakes() && Material().emission_bakes());
+    MeshPtr floor = primitives::plane(2.0f, 4), panel = primitives::plane(0.5f, 1);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto floor_light = [&](int flags) {
+      MaterialPtr lamp = make_material("Lamp", Vec3(0.5f));
+      lamp->emission = Vec3(1.0f), lamp->emission_strength = 4.0f, lamp->gi_flags = flags;
+      BakeSettings bs;
+      bs.texels_per_unit = 4, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = false;
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), p = bake_object(2, panel, Mat4::translate(Vec3(0.0f, 0.5f, 0.0f)), {lamp});
+      p.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, p}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      double s = 0.0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    const double baked = floor_light(2), realtime = floor_light(1), none = floor_light(4), own = floor_light(-1);
+    std::printf("    the floor's light: Baked %.3f, Realtime %.3f, None %.3f, Blendity's %.3f\n", baked, realtime, none, own);
+    CHECK(baked > 1.0 && realtime == 0.0 && none == 0.0 && own > 1.0);
+  });
+}
+/* ---------------------------------------------------------------- round 440: charts and seams (task 0416) */
+static void tests_round440() {
+  test("charts and seams (round 440): each UV island packed on its own across the atlas - more charts than objects, the pages filled at least as well as one square per object; seams on a smooth sphere stitched (the step across them shrinks), none across a cube's hard corners", [] {
+    std::vector<BakeObject> objs;
+    for (int i = 0; i < 12; i++) {
+      BakeObject o = bake_object((uint64_t)(i + 1), i % 2 ? primitives::uv_sphere(0.3f + 0.05f * i, 16, 8) : primitives::cube(0.4f + 0.1f * i),
+                                 Mat4::translate(Vec3(2.0f * i, 0.0f, 0.0f)), {make_material("White", Vec3(0.8f))});
+      objs.push_back(o);
+    }
+    BakeSettings bs;
+    bs.texels_per_unit = 16;
+    LightmapLayout squares, islands;
+    bs.island_charts = false;
+    lightmap_layout(objs, bs, squares);
+    bs.island_charts = true;
+    lightmap_layout(objs, bs, islands);
+    size_t sphere_pairs = 0, cube_pairs = 0;
+    for (const auto &page : islands.seams) sphere_pairs += page.size();
+    std::printf("    12 objects: %zu squares fill %.3f of %zu page(s); %zu island charts fill %.3f of %zu page(s); %zu seam pairs\n", squares.charts,
+                lightmap_layout_fill(squares), squares.data.pages.size(), islands.charts, lightmap_layout_fill(islands), islands.data.pages.size(), sphere_pairs);
+    /* (5 % slack: island boxes carry their own margins, so on a page that doesn't shrink the fill can dip a little) */
+    CHECK(islands.charts > squares.charts && lightmap_layout_fill(islands) >= 0.95 * lightmap_layout_fill(squares));
+    /* Many objects on small pages: every object's islands on one page, no texel claimed twice, pages about as many as
+     * with squares (review 440: a page per split object, overlaps). */
+    std::vector<BakeObject> many;
+    for (int i = 0; i < 60; i++)
+      many.push_back(bake_object((uint64_t)(i + 1), i % 3 ? primitives::uv_sphere(0.3f + 0.02f * i, 16, 8) : primitives::cube(0.5f + 0.03f * i),
+                                 Mat4::translate(Vec3(2.0f * i, 0.0f, 0.0f)), {make_material("White", Vec3(0.8f))}));
+    BakeSettings small = bs;
+    small.max_size = 128;
+    LightmapLayout sq_pages, is_pages;
+    small.island_charts = false;
+    lightmap_layout(many, small, sq_pages);
+    small.island_charts = true;
+    lightmap_layout(many, small, is_pages);
+    std::set<std::tuple<int, int, int>> claimed;
+    size_t twice = 0, outside = 0;
+    for (const LightmapTexel &t : is_pages.texels) {
+      twice += !claimed.insert({t.page, t.x, t.y}).second;
+      outside += t.x < 0 || t.y < 0 || t.x >= 128 || t.y >= 128;
+    }
+    std::printf("    60 objects on 128-texel pages: %zu pages of squares, %zu of islands; texels claimed twice %zu, outside a page %zu\n", sq_pages.data.pages.size(),
+                is_pages.data.pages.size(), twice, outside);
+    CHECK(is_pages.data.pages.size() <= sq_pages.data.pages.size() + 1 && twice == 0 && outside == 0);
+    /* A floor with its own UVs filling the page at the page's size: its island's box plus margins is wider than the page -
+     * it packs as its square (review 440: written past the page). */
+    BakeObject own = bake_object(1, primitives::plane(30.0f, 4), Mat4::identity(), {make_material("White", Vec3(0.8f))});
+    own.generate_uvs = false;
+    BakeSettings big = bs;
+    big.max_size = 64, big.texels_per_unit = 40;
+    LightmapLayout own_lay;
+    lightmap_layout({own}, big, own_lay);
+    size_t own_outside = 0;
+    for (const LightmapTexel &t : own_lay.texels) own_outside += t.x < 0 || t.y < 0 || t.x >= 64 || t.y >= 64;
+    std::printf("    a floor's own UVs at the page's size: %zu page(s), %zu texels, %zu outside\n", own_lay.data.pages.size(), own_lay.texels.size(), own_outside);
+    CHECK(own_lay.data.pages.size() == 1 && own_lay.texels.size() > 3000 && own_outside == 0);
+    CHECK(squares.texels.size() > 0 && islands.texels.size() > 0);
+    /* A cube alone: its UV seams all lie on hard edges - nothing to stitch. */
+    LightmapLayout cube_only;
+    lightmap_layout({bake_object(1, primitives::cube(1.0f), Mat4::identity(), {make_material("White", Vec3(0.8f))})}, bs, cube_only);
+    for (const auto &page : cube_only.seams) cube_pairs += page.size();
+    CHECK(cube_pairs == 0);
+    /* A sphere under a sun and a sky: the step across its seams before and after stitching. */
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.3f);
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(-1.0f, -1.0f, -0.3f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    auto bake = [&](bool stitch, double &before, double &after) {
+      BakeSettings b2;
+      b2.texels_per_unit = 24, b2.indirect_samples = 16, b2.bounces = 1, b2.denoise = false, b2.directional = false, b2.stitch_seams = stitch;
+      Lightmapper lm;
+      lm.begin({bake_object(1, primitives::uv_sphere(0.5f, 24, 12), Mat4::identity(), {make_material("White", Vec3(0.8f))})}, {sun}, env, b2);
+      while (!lm.step(1e9)) {
+      }
+      before = lm.seam_step_before(), after = lm.seam_step_after();
+    };
+    double b_on = 0, a_on = 0, b_off = 0, a_off = 0;
+    bake(true, b_on, a_on);
+    bake(false, b_off, a_off);
+    std::printf("    a sphere's seams: the step %.4f -> %.4f stitched; Stitch Seams off finds none (%.4f)\n", b_on, a_on, a_off);
+    CHECK(b_on > 0.0 && a_on < 0.5 * b_on && a_off == 0.0 && b_off == 0.0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 441: sampling (task 0417) */
+static void tests_round441() {
+  test("sampling (round 441): a bright patch in an HDRI sky sampled by its light - a floor under it far less noisy at 16 samples, and the same on average with the sampling on or off; 40 point lights picked by their light per texel - the same light on average from far fewer shadow rays", [] {
+    Bitmap b;
+    b.width = 64, b.height = 32, b.is_float = true;
+    b.rgbaf.assign((size_t)64 * 32 * 4, 0.05f);
+    for (int y = 6; y < 8; y++)
+      for (int x = 20; x < 22; x++)
+        for (int c = 0; c < 3; c++) b.rgbaf[((size_t)y * 64 + x) * 4 + c] = 400.0f;  // (a small, very bright patch high in the sky)
+    for (size_t i = 3; i < b.rgbaf.size(); i += 4) b.rgbaf[i] = 1.0f;
+    auto tex = std::make_shared<Texture>();
+    tex->build(b, false);
+    Environment env;
+    env.mode = Environment::Hdri, env.map = tex;
+    MeshPtr floor = primitives::plane(2.0f, 4);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    auto floor_values = [&](bool sample_env, int samples, uint32_t seed) {
+      BakeSettings bs;
+      bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.sample_env = sample_env, bs.seed = seed;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      std::vector<float> v;
+      for (const Vec3 &c : d.pages[0].texels) v.push_back(c.y);
+      return v;
+    };
+    const std::vector<float> ref = floor_values(true, 2048, 7), ref_off = floor_values(false, 8192, 8), off = floor_values(false, 16, 1), on = floor_values(true, 16, 1);
+    double e_off = 0, e_on = 0, m_ref = 0, m_ref_off = 0, m_on = 0;
+    for (size_t i = 0; i < ref.size(); i++) {
+      e_off += (off[i] - ref[i]) * (off[i] - ref[i]), e_on += (on[i] - ref[i]) * (on[i] - ref[i]);
+      m_ref += ref[i], m_ref_off += ref_off[i], m_on += on[i];
+    }
+    const double n = (double)std::max<size_t>(1, ref.size());
+    std::printf("    an HDRI's bright patch: error at 16 samples %.4f found by the gather, %.4f sampled; the mean %.4f (8192 off %.4f, 16 on %.4f)\n", std::sqrt(e_off / n),
+                std::sqrt(e_on / n), m_ref / n, m_ref_off / n, m_on / n);
+    CHECK(e_on < 0.25 * e_off && std::fabs(m_ref_off - m_ref) / m_ref < 0.05 && std::fabs(m_on - m_ref) / m_ref < 0.05);
+    /* A wall beside the floor at Bounces 1: the sky the wall sends to the floor is found at the path's last vertex - the
+     * world's sampling there counts in full, so on and off agree (review 441). */
+    MeshPtr wall = primitives::plane(2.0f, 4);
+    const Mat4 upright = Mat4::trs(Vec3(0.0f, 1.0f, -1.0f), Quat::axis_angle(Vec3(1, 0, 0), kPi * 0.5f), Vec3(1.0f));
+    auto with_wall = [&](bool sample_env) {
+      BakeSettings bs;
+      bs.texels_per_unit = 6, bs.indirect_samples = sample_env ? 1024 : 8192, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.sample_env = sample_env, bs.seed = 3;  // (the gather alone needs 8x the samples to settle within the check)
+      BakeObject f = bake_object(1, floor, Mat4::identity(), {white}), w = bake_object(2, wall, upright, {white});
+      w.want_lightmap = false;
+      Lightmapper lm;
+      lm.begin({f, w}, {}, env, bs);
+      while (!lm.step(1e9)) {
+      }
+      const LightingData d = lm.take_result();
+      double s = 0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    const double wall_on = with_wall(true), wall_off = with_wall(false);
+    std::printf("    a wall beside the floor (Bounces 1): the floor's light %.2f sampled, %.2f by the gather alone\n", wall_on, wall_off);
+    CHECK(std::fabs(wall_on - wall_off) / wall_off < 0.05);
+    /* Forty lamps along a 40 m floor. */
+    MeshPtr hall = primitives::plane(40.0f, 40);
+    std::vector<BakeLight> lamps;
+    for (int i = 0; i < 40; i++) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(-19.5f + i, 1.0f, 0.0f), l.light.intensity = 2.0f, l.light.range = 1e4f;
+      l.mode = 2, l.id = (uint64_t)(100 + i);
+      lamps.push_back(l);
+    }
+    Environment dark;
+    dark.mode = Environment::Color, dark.color = Vec3(0.0f);
+    auto hall_light = [&](bool pick, uint64_t &rays) {
+      BakeSettings bs;
+      bs.texels_per_unit = 2, bs.indirect_samples = 1, bs.bounces = 0, bs.denoise = false, bs.directional = false, bs.pick_lights = pick;
+      Lightmapper lm;
+      lm.begin({bake_object(1, hall, Mat4::identity(), {white})}, lamps, dark, bs);
+      while (!lm.step(1e9)) {
+      }
+      rays = lm.rays();
+      const LightingData d = lm.take_result();
+      double s = 0;
+      for (const Vec3 &c : d.pages[0].texels) s += c.y;
+      return s;
+    };
+    uint64_t rays_all = 0, rays_pick = 0;
+    const double all = hall_light(false, rays_all), picked = hall_light(true, rays_pick);
+    std::printf("    40 lamps: the floor's light %.1f from %llu rays, picked %.1f from %llu rays\n", all, (unsigned long long)rays_all, picked, (unsigned long long)rays_pick);
+    CHECK(all > 0.0 && std::fabs(picked - all) / all < 0.03 && rays_pick < rays_all / 2);
+    /* Per texel, with the filter on: the picking's noise goes with the denoised part (review 441: it had been left
+     * unfiltered in the direct light). */
+    auto hall_texels = [&](bool pick) {
+      BakeSettings bs;
+      bs.texels_per_unit = 2, bs.indirect_samples = 1, bs.bounces = 0, bs.denoise = true, bs.directional = false, bs.pick_lights = pick;
+      Lightmapper lm;
+      lm.begin({bake_object(1, hall, Mat4::identity(), {white})}, lamps, dark, bs);
+      while (!lm.step(1e9)) {
+      }
+      return lm.take_result().pages[0].texels;
+    };
+    const std::vector<Vec3> every = hall_texels(false), chosen = hall_texels(true);
+    double err = 0.0, mean = 0.0;
+    size_t lit = 0;
+    for (size_t i = 0; i < every.size() && i < chosen.size(); i++) {
+      if (!(every[i].y > 1e-3f)) continue;
+      err += (chosen[i].y - every[i].y) * (chosen[i].y - every[i].y), mean += every[i].y, lit++;
+    }
+    const double rel = lit ? std::sqrt(err / (double)lit) / (mean / (double)lit) : 1.0;
+    std::printf("    the picked hall per texel, filtered: relative error %.3f against every lamp traced\n", rel);
+    CHECK(lit > 1000 && rel < 0.08);
+  });
+}
 
 void run_lighting_tests() {
   round35_tests();
@@ -6552,4 +6835,7 @@ void run_lighting_tests() {
   tests_round429();
   tests_round430();
   tests_round438();
+  tests_round439();
+  tests_round440();
+  tests_round441();
 }

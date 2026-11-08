@@ -2,6 +2,46 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-07 (round 441): sampling
+
+**Asked:** Pass 18's round 441 - sample the sky by its light, and pick among many lamps.
+
+**Changed (task 0417)**
+- **The sky and HDRIs sampled by their light** at each texel and path vertex: a floor under a bright HDRI patch, error at
+  16 samples 4.46 -> 0.10.
+- **Light picking past 8 lamps:** 40 lamps along a hall give the same light from 49k shadow rays instead of 224k.
+- SideRail against Unity after rounds 439-441: spawn 3.69 / 0.809 / 0.898, spawn_back (dark) 1.43 / 0.777 / 0.129, floor 4.25 / 0.771 / 0.974, ahead 3.06 / 0.884 / 0.958 (MAE / SSIM / grid; round 438: 3.70 / 0.813, 1.37 / 0.772, 4.25 / 0.773, 3.06 / 0.885) - flat within run-to-run noise: ADR 0113's SSIM target still missed at three stations. The bake 91 s (lightmaps 52.3 s on the card, the filter 2.1 s).
+- **Learn:** "Bright skies and many lamps: where the bake aims its rays".
+
+**Checked:** rounds 439-441 in one chain - both suites, with Blender's libraries 16,452; dependency-free
+15,698 (Windows) and 15,704 (Linux, WSL), 0 failed; the audits; the bake-quality section; SideRail against Unity.
+
+## 2026-11-07 (round 440): charts and seams
+
+**Asked:** Pass 18's round 440 - pack each UV island on its own, and stitch the seams (Unity's Stitch Seams).
+
+**Changed (task 0416)**
+- **Island charts:** each UV island packed on its own, an object's islands on one page - 60 objects on 128-texel pages
+  take 33 pages instead of 45.
+- **Stitch Seams:** texels across a seam on a smooth surface pulled together - a sphere's step 1.85 % -> 0.24 %; a
+  cube's hard corners left alone. The realtime lightmaps keep their squares.
+- **Learn:** "Seams in the lightmap, and packing it tighter".
+
+**Checked:** with rounds 439 and 441 (one chain): see round 441 (both suites, Linux, the audits, SideRail).
+
+## 2026-11-07 (round 439): emitters
+
+**Asked:** Pass 18's round 439 - glowing and unlit surfaces as lights in the bake, as Unity's.
+
+**Changed (task 0415)**
+- **Unlit materials are emitters:** sampled at each texel and path vertex, weighted against the paths that meet them -
+  a floor under a small unlit sign: error at 16 samples 0.020 -> 0.0003, the same light on average.
+- **An emission map counts by its mean** when emitters are picked, not as white.
+- **Unity's Global Illumination on materials** (`m_LightmapFlags`): only Baked emission lights the bake, as in Unity.
+- **Learn:** "Glowing signs in the bake: emitters".
+
+**Checked:** with rounds 440-441 (one chain): see round 441 (both suites, Linux, the audits, SideRail).
+
 ## 2026-11-07 (round 438): directional strength
 
 **Asked:** Pass 18's round 438 - store a baked direction's length as Unity does, checked against Unity's own direction

@@ -134,6 +134,11 @@ struct Material {
   bool opaque() const { return surface == (int)MaterialSurface::Opaque; }
   Vec3 emission{1.0f, 1.0f, 1.0f};
   float emission_strength = 0.0f;
+  /* Round 439: Unity's Global Illumination on the material (m_LightmapFlags: 1 Realtime, 2 Baked, 4 None) - its emission
+   * lights the bake only with Baked (2) set, as Unity's baked lightmaps; -1: not from Unity (emission bakes). Read on
+   * import from the .mat, not saved. */
+  int gi_flags = -1;
+  bool emission_bakes() const { return gi_flags < 0 || (gi_flags & 2) != 0; }
   float normal_strength = 1.0f;
   TextureRef base_map, metallic_map, roughness_map, normal_map, emission_map;
   /* Round 399: a converted Unity material's other textures (lilToon's masks, matcaps, second layers): not drawn, but in

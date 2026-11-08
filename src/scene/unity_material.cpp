@@ -539,6 +539,10 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   const std::string name = mat->body.str("m_Name");
   if (!name.empty()) m.name = name;
   read_base(p, mat->body, texture, m);
+  {
+    const std::string flags = mat->body.str("m_LightmapFlags");  // (round 439: Unity's Global Illumination)
+    m.gi_flags = flags.empty() ? -1 : std::atoi(flags.c_str());
+  }
   const bool toon = info.shader == "lilToon" || info.shader == "Poiyomi" || info.shader == "MToon" || info.shader == "UTS2";
   if (toon) read_toon(p, info.shader, texture, m, info);
   const bool filamented = info.shader.rfind("Filamented", 0) == 0;

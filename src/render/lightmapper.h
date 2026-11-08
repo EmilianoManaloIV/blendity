@@ -50,6 +50,15 @@ struct BakeSettings {
    * main thread). */
   float backface_tolerance = 0.9f;
   bool directional = true;        // round 426: Unity's Directional mode - a direction page beside each colour page (LightingData::dir_pages)
+  /* Round 440: each UV island packed on its own across the atlas (off: one square per object, the old way). */
+  bool island_charts = true;
+  /* Round 440 (Unity's Stitch Seams): the texels on both sides of a UV seam - an edge two faces share in the mesh but not
+   * in the lightmap - blended toward each other, so the seam doesn't show as a step. */
+  bool stitch_seams = true;
+  /* Round 441: the sky or HDRI sampled by its light at each texel (off: found by the cosine gather alone). */
+  bool sample_env = true;
+  /* Round 441: with more than 8 Baked point and spot lights, each texel picks among them by their light there. */
+  bool pick_lights = true;
 };
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
@@ -136,7 +145,14 @@ struct LightmapLayout {
   std::vector<LightmapTexel> texels;
   std::vector<std::vector<uint8_t>> covered;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner;    // per page: the object owning a texel (-1 none)
+  /* Round 440: per page, the pairs of texels on the two sides of a UV seam at the same point of the surface. */
+  std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams;
+  size_t charts = 0;  // the rectangles packed (islands, or objects with island_charts off)
 };
+/* Round 440: the share of the pages' texels that charts cover (the atlas's fill), for the log and the tests. */
+double lightmap_layout_fill(const LightmapLayout &lay);
+/* Round 440: the mean step across the seams (|a - b| over |a| + |b|, over the pairs), 0 with none. */
+double lightmap_seam_step(const std::vector<Lightmap> &pages, const std::vector<std::vector<std::pair<uint32_t, uint32_t>>> &seams);
 struct LightmapUvCache {
   struct Entry {
     uint64_t key = 0;
@@ -214,6 +230,15 @@ class Lightmapper {
   size_t invalid_texels() const { return invalid_count_; }  // (round 430: the last bake's, for the log and the tests)
  private:
   void finish_directions();
+  std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams_;  // (round 440: the layout's seam pairs, per page)
+  double seam_step_before_ = 0.0, seam_step_after_ = 0.0;
+ public:
+  double seam_step_before() const { return seam_step_before_; }  // (round 440: the last bake's, for the log and the tests)
+  double seam_step_after() const { return seam_step_after_; }
+  /* Round 440: Unity's Stitch Seams - each pair of texels across a seam pulled toward their mean, a few rounds (a texel on
+   * several seams settles between them). */
+  static void stitch_seams(Lightmap &lm, const std::vector<std::pair<uint32_t, uint32_t>> &pairs);
+ private:
   void denoise_page(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
                     const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own);
   static void dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have, int W, int H);
@@ -222,6 +247,13 @@ class Lightmapper {
               const std::vector<int32_t> &own, int W, int H) const;
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
+  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &rays) const;  // round 441
+  size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kPickLightsOver each texel picks among them)
+ public:
+  static constexpr size_t kPickLightsOver = 8;
+  static constexpr float kPickRays = 8.0f;
+  static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)  // (the shadow-ray budget per texel the picking aims at, in expectation)
+ private:
   /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are never clamped),
    * kept beside `values_` for the firefly clamp (task 0157); the emitters sampled at each texel apart (round 423: they
    * are denoised with the gather but not clamped - a lamp's contact glow is a real highlight). */
