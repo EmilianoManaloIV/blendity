@@ -405,6 +405,8 @@ uint64_t Editor::items_key(bool game, bool want_tangents) {
   mix((uint64_t)(uintptr_t)ld.pages.data() ^ (uint64_t)ld.pages.size() << 48);
   mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32 ^ (uint64_t)ld.mask_pages.size() << 48);  // (round 444: the masks too)
   mix((uint64_t)scene_->lighting.directional_mode);
+  mix((uint64_t)scene_->lighting.shadowmask_mode);  // (round 454)
+  mix((uint64_t)std::hash<float>()(scene_->lighting.shadow_distance));
   return h;
 }
 
@@ -671,6 +673,8 @@ LightingEnv Editor::make_lighting(Vec3 eye, bool use_scene_lights, bool rasteriz
   env.equator = es.equator;
   env.ground = es.ground;
   env.camera_pos = eye;
+  env.shadowmask_mode = scene_->lighting.shadowmask_mode;  // (round 454: view settings - no rebake)
+  env.shadow_distance = scene_->lighting.shadow_distance;
   env.view_transform = view_transform_from_setting(scene_->render.view_transform);
   env.exposure = scene_->render.exposure;
   env.unity_brdf = !scene_->unity.file.empty() && !unity_brdf_off();  // (round 405: a Unity scene's reflections weigh as Unity's BRDF does - lights or none)
@@ -975,6 +979,8 @@ uint64_t Editor::scene_hash_tail() {
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
+  mix(&scene_->lighting.shadowmask_mode, sizeof(int));  // (round 454: Distance Shadowmask redraws without a rebake)
+  mix(&scene_->lighting.shadow_distance, sizeof(float));
   mix(&scene_->lighting.light_volumes_in_views, 1);  // (round 443)
   mix(&lv_bake_gen_, 8);
   mix(&probe_live_gen_, 8);  // live probes changed

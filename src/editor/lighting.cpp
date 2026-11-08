@@ -363,6 +363,7 @@ void Editor::bake_start() {
   };
   collect_bake_scene(job->objects, job->lights);
   if (scene_->lighting.lighting_mode == 2) subtractive_split(job->lights);  // (round 444: Unity's Subtractive split)
+  if (scene_->lighting.lighting_mode == 1) shadowmask_split(job->lights);  // (round 454: a fifth Mixed light is Baked for every baker)
   part(0);
   /* Round 362 (the comparison's finding 10): nothing marked had baked "0 objects" without a word of why. */
   if (job->objects.empty()) return bake_refuse_empty();
@@ -1010,6 +1011,7 @@ void Editor::preview_step() {
     std::vector<BakeLight> lights;
     collect_bake_scene(objects, lights);
     if (scene_->lighting.lighting_mode == 2) subtractive_split(lights);  // (round 444)
+    if (scene_->lighting.lighting_mode == 1) shadowmask_split(lights, false);  // (round 454: logged once, by the bake)
     update_environment();
     BakeSettings s;
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)

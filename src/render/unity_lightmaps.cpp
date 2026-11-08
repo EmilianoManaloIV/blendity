@@ -303,6 +303,30 @@ void match_renderer(const UnityLighting &u, const UnityLighting::Renderer &r, co
 
 }  // namespace
 
+/* Round 454 (version 4): the shadowmask pages, the lights' channels, the Quality settings. */
+static void read_masks(Reader &r, UnityLighting &out) {
+  const size_t nm = r.count(8);
+  if (nm != 0 && nm != out.pages.size()) r.ok = false;
+  for (size_t i = 0; r.ok && i < nm; i++) {
+    UnityLighting::Page &p = out.pages[i];
+    p.mask_width = r.get<int32_t>(), p.mask_height = r.get<int32_t>();
+    const bool size_ok = p.mask_width >= 0 && p.mask_height >= 0 && p.mask_width <= 16384 && p.mask_height <= 16384;
+    const size_t n = size_ok ? (size_t)p.mask_width * (size_t)p.mask_height * 4 : 0;
+    if (!size_ok || n > r.end - std::min(r.at, r.end)) r.ok = false;
+    if (r.ok) p.mask.assign((const uint8_t *)r.b.data() + r.at, (const uint8_t *)r.b.data() + r.at + n), r.at += n;
+  }
+  const size_t nl = r.count(4);
+  if (nl != 0 && nl != out.lights.size()) r.ok = false;
+  for (size_t i = 0; r.ok && i < nl; i++) {
+    const int32_t c = r.get<int32_t>();
+    out.lights[i].mask_channel = c >= 0 && c < 4 ? c : -1;
+    out.lights[i].overflow = c == -2;
+  }
+  out.shadowmask_mode = r.get<int32_t>();
+  out.shadow_distance = r.real();
+  if (out.shadowmask_mode < -1 || out.shadowmask_mode > 1) out.shadowmask_mode = -1;
+}
+
 bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::string &why) {
   out = UnityLighting{};
   if (bytes.size() < 24 || std::memcmp(bytes.data(), kMagic, 8) != 0) return why = "not a .unity-lighting file", false;
@@ -311,7 +335,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
   if (sum != fnv1a32(bytes.data(), bytes.size() - 4)) return why = "its checksum doesn't match (a changed or cut file)", false;
   Reader r{bytes, 8, bytes.size() - 4};
   const int32_t version = r.get<int32_t>();
-  if (version < 1 || version > 3) return why = "a version Blendity doesn't read", false;
+  if (version < 1 || version > 4) return why = "a version Blendity doesn't read", false;
   r.get<int32_t>();
   out.lightmaps_mode = r.get<int32_t>();
   out.lighting_data = r.str();
@@ -377,6 +401,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
     out.probes[i].seen.resize(26);
     for (Vec3 &v : out.probes[i].seen) v = r.vec3();
   }
+  if (version >= 4) read_masks(r, out);  // (round 454)
   if (!r.ok || r.at != r.end) return out = UnityLighting{}, why = "a broken .unity-lighting file", false;
   return true;
 }
@@ -384,7 +409,7 @@ bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::stri
 std::string write_unity_lighting(const UnityLighting &u) {
   Writer w;
   w.b.append(kMagic, 8);
-  w.put<int32_t>(3), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2; round 442: 3)
+  w.put<int32_t>(4), w.put<int32_t>(-1), w.put<int32_t>(u.lightmaps_mode);  // (round 401: version 2; round 442: 3; round 454: 4)
   w.str(u.lighting_data), w.put<uint32_t>(u.lighting_data_hash);
   w.put<int32_t>((int32_t)u.pages.size());
   for (const auto &p : u.pages) {
@@ -427,6 +452,21 @@ std::string write_unity_lighting(const UnityLighting &u) {
   w.put<int32_t>(seen ? (int32_t)u.probes.size() : 0);
   for (const auto &p : u.probes)
     for (size_t j = 0; seen && j < 26; j++) w.vec3(p.seen[j]);
+  /* Round 454 (version 4): the masks, the lights' channels, the Quality settings. */
+  bool masks = false;
+  for (const auto &p : u.pages) masks = masks || !p.mask.empty();
+  w.put<int32_t>(masks ? (int32_t)u.pages.size() : 0);
+  for (const auto &p : u.pages) {
+    if (!masks) break;
+    w.put<int32_t>(p.mask_width), w.put<int32_t>(p.mask_height);
+    w.b.append((const char *)p.mask.data(), p.mask.size());
+  }
+  bool channels = false;
+  for (const auto &l : u.lights) channels = channels || l.mask_channel >= 0 || l.overflow;
+  w.put<int32_t>(channels ? (int32_t)u.lights.size() : 0);
+  for (const auto &l : u.lights)
+    if (channels) w.put<int32_t>(l.overflow ? -2 : l.mask_channel);
+  w.put<int32_t>(u.shadowmask_mode), w.put(u.shadow_distance);
   w.put<uint32_t>(fnv1a32(w.b.data(), w.b.size()));
   return w.b;
 }
@@ -508,6 +548,56 @@ bool unity_lightmap_page(const UnityLighting::Page &page, float scale, Lightmap 
       out.texels[y * w + x] = finite3(c) ? c * scale : Vec3(0.0f);  // (an inf or NaN half: no light, not a broken picture)
     }
   return true;
+}
+
+bool unity_mask_page(const UnityLighting::Page &page, Lightmap &out) {
+  const size_t w = (size_t)std::max(0, page.mask_width), h = (size_t)std::max(0, page.mask_height);
+  if (!w || !h || page.mask.size() != w * h * 4) return false;
+  out.width = page.mask_width, out.height = page.mask_height;
+  out.texels.resize(w * h);
+  out.alpha.resize(w * h);
+  for (size_t y = 0; y < h; y++)
+    for (size_t x = 0; x < w; x++) {
+      const uint8_t *s = &page.mask[((h - 1 - y) * w + x) * 4];  // (Unity's rows run up; Blendity's down)
+      out.texels[y * w + x] = Vec3(s[0] / 255.0f, s[1] / 255.0f, s[2] / 255.0f);
+      out.alpha[y * w + x] = s[3] / 255.0f;
+    }
+  return true;
+}
+
+/* ProjectSettings/QualitySettings.asset: "m_CurrentQuality: N", then m_QualitySettings' entries ("  - serializedVersion: ...")
+ * each with its own shadowmaskMode and shadowDistance lines. */
+bool unity_quality_shadowmask(const std::string &text, int &mode, float &distance) {
+  int current = 0, entry = -1;
+  std::vector<std::pair<int, float>> levels;
+  size_t at = 0;
+  auto number = [](const std::string &line, size_t colon) { return std::atof(line.c_str() + colon + 1); };
+  while (at < text.size()) {
+    size_t end = text.find('\n', at);
+    if (end == std::string::npos) end = text.size();
+    const std::string line = text.substr(at, end - at);
+    at = end + 1;
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const std::string key = line.substr(0, colon);
+    if (key == "  m_CurrentQuality") current = (int)number(line, colon);
+    else if (key == "  - serializedVersion") levels.emplace_back(-1, -1.0f), entry++;
+    else if (entry >= 0 && key == "    shadowmaskMode") levels[(size_t)entry].first = (int)number(line, colon);
+    else if (entry >= 0 && key == "    shadowDistance") levels[(size_t)entry].second = (float)number(line, colon);
+  }
+  if (levels.empty()) return false;
+  const std::pair<int, float> &q = levels[(size_t)std::max(0, std::min((int)levels.size() - 1, current))];
+  if (q.first < 0 || q.first > 1 || !(q.second >= 0.0f) || !(q.second < 1e7f)) return false;
+  mode = q.first, distance = q.second;
+  return true;
+}
+
+std::string unity_find_quality_settings(const std::string &scene_path) {
+  std::string text;
+  for (std::string dir = fs::parent(scene_path); !dir.empty() && dir != fs::parent(dir); dir = fs::parent(dir))
+    if (fs::read_file(fs::join(fs::join(dir, "ProjectSettings"), "QualitySettings.asset"), text)) return text;
+    else if (fs::is_dir(fs::join(dir, "Assets"))) break;  // (the project's root: what is above it is no part of it)
+  return "";
 }
 
 namespace {

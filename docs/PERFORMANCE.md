@@ -70,8 +70,8 @@ Responsiveness: three longest frames up (Bake Mesh Maps 5.9 -> 8.1, Bake Texture
 3. Shinano's Scene view at 2.1x Unity's (its UI 2.0 ms, overlays 1.1); 50,000 cubes' instances, render call (instancing)
    and overlay commands (14 ms).
 4. The GPU editor frames' 8-18 % drift (above): attribute it per round.
-5. Four Shadowmask lights per texel, Distance Shadowmask, exporting the masks; SH deringing; Light Probe Groups as
-   objects; a running surface's planes.
+5. ~~Four Shadowmask lights per texel, Distance Shadowmask, exporting the masks~~ - built in round 454 (ADR 0118); SH
+   deringing; Light Probe Groups as objects; a running surface's planes.
 6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
    macOS with Blender's libraries, input latency, a cold shader cache, OptiX / MoonRay, Unity timed per step.
 
@@ -397,6 +397,12 @@ Shinano's gathering and hashing re-derive an unchanged scene: caching them safel
 (open). The only quick-suite responsiveness row over budget: Enter Edit Mode on the 500k sphere, 116 ms (budget 100;
 the CPU's first cage frame). `tools/perf_suite.py` now matches rows by section, table and row; CI compares its quick
 stress with a per-runner baseline when one is committed (`--compare`, warnings).
+
+### The baked pass's mask (round 454, task 0430)
+The shadowmask has its own RGBA8 attachment beside the baked pass's 32-bit plane (the six-bit code in the plane's w could
+not hold four 8-bit channels): **4 bytes a pixel per view slot** - 8.3 MB at 1920 x 1080, 33.2 MB at 3840 x 2160 - made
+with the baked plane the first frame a view draws a lightmap or probe, freed with it on a resize. A mask page on the CPU
+is 16 bytes a texel (the colours and `Lightmap::alpha`; 12 before) and on the card a float texture as every page.
 
 ### The soak's memory (round 445, task 0421)
 `perf memory` and the soak's `holds:` lines name each subsystem's bytes. The 1.1-1.3 GB was a 4096 x 4096 procedural

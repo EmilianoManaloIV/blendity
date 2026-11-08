@@ -1242,7 +1242,8 @@ int Editor::gpu_lightmap(const Lightmap &lm, std::string &err) {
     Texture::Level l;
     l.w = lm.width, l.h = lm.height;
     l.pxf.resize(lm.texels.size());
-    for (size_t i = 0; i < lm.texels.size(); i++) l.pxf[i] = Vec4(lm.texels[i], 1.0f);
+    const bool has_alpha = lm.alpha.size() == lm.texels.size();  // (round 454: a shadowmask page's fourth light)
+    for (size_t i = 0; i < lm.texels.size(); i++) l.pxf[i] = Vec4(lm.texels[i], has_alpha ? lm.alpha[i] : 1.0f);
     t->levels.push_back(std::move(l));
     gpu_lightmaps_[&lm] = {lm.serial, t};
     found = gpu_lightmaps_.find(&lm);
@@ -1763,6 +1764,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     fr.shadow_fast = env.shadow->fast;
   }
   fr.cull_backfaces = opt.backface_culling;
+  fr.shadowmask_distance = env.shadowmask_mode == 1 ? std::max(env.shadow_distance, 1e-3f) : 0.0f;  // (round 454)
   for (const RenderLight &l : env.lights) fr.lights.push_back(raster_light(l));
   raster_world(fr, env, cam, scene_lights);
   if (render_clear_override_on_) fr.background = 0, fr.clear = render_clear_override_;  // (a transparent render's black / white pass: task 0195)

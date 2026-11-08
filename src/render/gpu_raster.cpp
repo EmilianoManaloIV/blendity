@@ -1186,30 +1186,50 @@ vec3 solid_shade(vec3 albedo, float specular, vec3 n, vec3 wp) {
 )";
 
 const char *kLightFrag2 = R"(
+#ifndef BL_BAKED_PASS
+layout(set = 0, binding = 37) uniform sampler2D g_mask;  // round 454 (ADR 0118): the baked pass's shadowmask, four lights in RGBA8 (white where none)
+#endif
 /* Round 444 (ADR 0117): a light's bake_mode (spot.w) against the pixel's ambient kind - 2 Baked: in lightmaps and baked
- * probes; 3 a Subtractive Mixed light: in lightmaps only; 4-6 a Shadowmask Mixed light, its channel in the mask the baked
- * pass packed beside the kind (light_baked_here / light_mask_channel on the CPU). */
+ * probes; 3 a Subtractive Mixed light: in lightmaps only; 4-7 a Shadowmask Mixed light, its channel in the mask the baked
+ * pass wrote to its own attachment (round 454; light_baked_here / light_mask_channel on the CPU). */
 bool light_skip(float bm, int kind) {
   if (bm > 1.5 && bm < 2.5) return kind == 1 || kind == 2;
   return bm > 2.5 && bm < 3.5 && kind == 1;
 }
-vec3 light_smask(vec4 A, int kind) {
+vec4 light_smask(ivec2 px, int kind) {
 #ifdef BL_NO_MASK
-  return vec3(1.0);
+  return vec4(1.0);
 #endif
-  if (kind != 1) return vec3(1.0);
-  float f = floor((A.w - 4.0) * 524288.0 + 0.5);
-  if (f < 262144.0) return vec3(1.0);  // (a lightmap without a mask)
-  f -= 262144.0;
-  return vec3(mod(f, 64.0), mod(floor(f / 64.0), 64.0), floor(f / 4096.0)) / 63.0;
+#ifdef BL_BAKED_PASS
+  return vec4(1.0);  // (the baked pass writes the mask; its module never lights a pixel, and the attachment can't be sampled in its own pass)
+#else
+  return kind == 1 ? texelFetch(g_mask, px, 0) : vec4(1.0);  // (a lightmap without a mask: the baked pass wrote white)
+#endif
 }
-float light_mask(float bm, int kind, vec3 m) {
+float light_mask(float bm, int kind, vec4 m) {
 #ifdef BL_NO_MASK
   return 1.0;
 #endif
   if (!(bm > 3.5) || kind != 1) return 1.0;
   int c = int(bm - 3.5);
-  return c == 0 ? m.x : c == 1 ? m.y : m.z;
+  return c == 0 ? m.x : c == 1 ? m.y : c == 2 ? m.z : m.w;
+}
+/* Round 454: whether the light is a Shadowmask light with a realtime map here, on a pixel whose object has a mask page - the
+ * baked plane's w is 4.5 then, 4.0 without (the CPU's mask_has_map, which needs sp.has_shadowmask). */
+bool light_mask_map(float bm, int kind, int li, int shadow_light, bool has_mask) {
+#ifdef BL_NO_MASK
+  return false;
+#endif
+  return bm > 3.5 && kind == 1 && has_mask && li == shadow_light;
+}
+/* Round 454 (ADR 0118): shadowmask_visibility on the CPU - the darker of the realtime shadow and the mask; Distance
+ * Shadowmask (gi.w the Shadow Distance, 0 off), for the light with a map: the realtime shadow within 0.9 D of the
+ * camera, the mask beyond D, a linear fade between. */
+float mask_combine(float realtime, float mask, bool has_map, float cam_dist) {
+  if (!has_map || !(gi.w > 0.0)) return min(realtime, mask);
+  float D = max(gi.w, 1e-3);
+  float f = clamp((cam_dist - 0.9 * D) / (0.1 * D), 0.0, 1.0);
+  return realtime + (mask - realtime) * f;
 }
 float lit_at(int sx, int sy, float z, int size) {
   ivec2 s = clamp(ivec2(sx, sy), ivec2(0), ivec2(size - 1));
@@ -1749,7 +1769,8 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
    * share, 4 live probes; 0 the sky alone); Baked lights are in a lightmap or baked probes already. */
   int kind = int(A.w * 0.25 + 1e-3);
   float gsky = A.w - float(kind) * 4.0;
-  vec3 smask = light_smask(A, kind);  // (round 444)
+  bool has_mask = kind == 1 && gsky > 0.25;  // (round 454 review: the baked pass's w says whether the object has a mask page)
+  vec4 smask = light_smask(px, kind);  // (round 444; round 454: read from the baked pass's mask attachment)
   vec3 V = normalize(eye.xyz - P);
   bool flipped = dot(geo, V) < 0.0;
   if (flipped) {  // the back side of a double-sided surface (as the CPU turns both normals)
@@ -1797,7 +1818,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
       float wrap = clamp(I.toon3.z, 0.0, 1.0);  // task 0148: light wrap on N.L, so the terminator moves
       if (wrap > 0.0) ndl = (ndl + wrap) / (1.0 + wrap);
       if (ndl > 0.0 && li == shadow_light && receive) vis = shadow_lookup(P + geo * 0.01, dot(geo, L));
-      vis = min(vis, light_mask(l.spot.w, kind, smask));  // (round 444)
+      vis = mask_combine(vis, light_mask(l.spot.w, kind, smask), light_mask_map(l.spot.w, kind, li, shadow_light, has_mask), length(P - eye.xyz));  // (round 444; round 454: Distance Shadowmask)
       float face = li == key ? T.t2.y : -1.0;  // (task 0196: the face shadow map's lit term for the key light - no cast shadow on it)
       float lit = (face >= 0.0 ? face : max(ndl, 0.0) * vis) * min(fall, 1.0);
       bool fill = I.toon3.w > 0.5 && key >= 0 && li != key;
@@ -1821,8 +1842,10 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
       continue;
     }
     vec3 L;
-    float atten = l.color.w * PI * light_mask(l.spot.w, kind, smask);  // (round 444: a Shadowmask light's baked shadow - the area light's too)
-    if (int(l.pos_type.w) == 3) {  // (task 0163: an area light, from its whole surface)
+    float mask_vis = light_mask(l.spot.w, kind, smask);  // (round 444: a Shadowmask light's baked shadow)
+    float atten = l.color.w * PI;
+    if (int(l.pos_type.w) == 3) {  // (task 0163: an area light, from its whole surface - the mask alone, as the CPU)
+      atten *= mask_vis;
       if (atten > 0.0) lo += area_light_lo(l, P, n, V, albedo, rough, metallic, specular, atten);
       continue;
     }
@@ -1836,6 +1859,7 @@ vec4 light_pixel(ivec2 px, uint self, vec3 P, vec3 n, vec3 geo, vec3 albedo, flo
     float ndl = dot(n, L);
     if (ndl <= 0.0 || atten <= 0.0) continue;
     float vis = li == shadow_light && receive ? shadow_lookup(P + geo * 0.01, dot(geo, L)) : 1.0;
+    vis = mask_combine(vis, mask_vis, light_mask_map(l.spot.w, kind, li, shadow_light, has_mask), length(P - eye.xyz));  // (round 454: the darker of the two, as the CPU; was their product)
     if (vis <= 0.0) continue;
     lo += brdf_eval(albedo, rough, metallic, specular, n, V, L) * l.color.rgb * (atten * vis);
   }
@@ -2196,8 +2220,10 @@ layout(location = 6) in vec3 wt;
 layout(location = 7) flat in float tw;
 layout(location = 8) in vec3 gc;
 layout(location = 0) out vec4 o_amb;
+layout(location = 1) out vec4 o_mask;  // round 454 (ADR 0118): the shadowmask's four lights (1 where there is none - always written)
 /* Lightmap::sample: bilinear, clamped, texel centres at (i + 0.5) / size (v down: the arena's rows run up). */
-vec3 lightmap_at(int t, vec2 uv) { return tex_sample(t, vec2(uv.x, 1.0 - uv.y), 0.0, 1, 1).rgb; }
+vec4 lightmap4_at(int t, vec2 uv) { return tex_sample(t, vec2(uv.x, 1.0 - uv.y), 0.0, 1, 1); }
+vec3 lightmap_at(int t, vec2 uv) { return lightmap4_at(t, uv).rgb; }
 /* The material at this pixel, as the g-buffer pass evaluates it (its footprints: the same holes, the same mapped normal). */
 Surf surface_here(Inst I, vec3 n) {
   vec2 uv = vec2(0.0), dux = vec2(0.0), duy = vec2(0.0);
@@ -2230,6 +2256,7 @@ vec3 bary(vec3 p, vec3 a, vec3 b, vec3 c) {
   return vec3(1.0 - v - w, v, w);
 }
 void main() {
+  o_mask = vec4(1.0);
   Inst I = inst[ii];
   BakedRef B = bk[ii];
   vec3 n = normalize(wn);
@@ -2244,6 +2271,7 @@ void main() {
   if (I.metal_spec.z >= 0.0 || directional) s = surface_here(I, n);
   if (I.metal_spec.z >= 0.0 && s.alpha < I.metal_spec.z) discard;  // (a cutout's hole: as the g-buffer pass punched it)
   vec4 o = vec4(0.0);
+  float mflag = 0.0;  // (round 454 review: 0.5 in the w when the object has a mask page - the lighting pass reads it as "a mask is here")
   int flags = int(B.b.x + 0.5);
   bool has_lm = B.a.x >= 0 && B.a.w >= 0, has_rt = B.a.y >= 0 && B.a.z >= 0 && B.a.w >= 0;
   vec3 b3 = vec3(1.0, 0.0, 0.0);
@@ -2258,23 +2286,21 @@ void main() {
     b3 = bary(lp, c[0].xyz, c[2].xyz, c[4].xyz);
   }
   vec3 lm = vec3(0.0);
-  float mcode = 0.0;  // (round 444: the shadowmask's three channels, 6 bits each, in the plane's w beside the kind)
   if (has_lm) {
     vec2 luv = vec2(c[0].w, c[1].x) * b3.x + vec2(c[2].w, c[3].x) * b3.y + vec2(c[4].w, c[5].x) * b3.z;
     lm = lightmap_at(B.a.x, luv);
     if (directional) lm *= lm_dir_factor(s.n, n, lightmap_at(int(B.b.y + 0.5), luv), back);
-    if (B.b.w > -0.5) {
-      vec3 m = clamp(lightmap_at(int(B.b.w + 0.5), luv), 0.0, 1.0);
-      mcode = (floor(m.r * 63.0 + 0.5) + floor(m.g * 63.0 + 0.5) * 64.0 + floor(m.b * 63.0 + 0.5) * 4096.0 + 262144.0) / 524288.0;
-    }
+#ifndef BL_NO_MASK
+    if (B.b.w > -0.5) o_mask = clamp(lightmap4_at(int(B.b.w + 0.5), luv), 0.0, 1.0), mflag = 0.5;  // (round 454: round 444 packed three of these in the w)
+#endif
   }
   if (has_rt) {
     vec2 ruv = c[1].yz * b3.x + c[3].yz * b3.y + c[5].yz * b3.z;
     float sky = clamp(lightmap_at(B.a.z, ruv).x, 0.0, 1.0);
     vec3 bounce = lightmap_at(B.a.y, ruv);
-    o = has_lm ? vec4(lm + ((flags & 2) != 0 ? bounce : vec3(0.0)), 4.0 + mcode) : vec4(bounce, 12.0 + sky);
+    o = has_lm ? vec4(lm + ((flags & 2) != 0 ? bounce : vec3(0.0)), 4.0 + mflag) : vec4(bounce, 12.0 + sky);
   }
-  else if (has_lm) o = vec4(lm, 4.0 + mcode);
+  else if (has_lm) o = vec4(lm, 4.0 + mflag);
   else if ((flags & 1) != 0) {
     vec3 pr, lv;
     float cover;
@@ -2590,6 +2616,7 @@ struct Slot {
   Img toon[6];                            // task 0196: the toon pass's planes (made when first needed: most views have no toon maps); round 416: three more for lilToon's maps
   VkFramebuffer fb_toon = VK_NULL_HANDLE;
   Img amb;                                // task 0197: the baked pass's plane (made when first needed)
+  Img mask;                               // round 454: the baked pass's shadowmask plane, RGBA8 beside it (4 bytes a pixel)
   VkFramebuffer fb_baked = VK_NULL_HANDLE;
   Img hdr;                                // task 0197: the picture in linear light (made when first needed)
   VkFramebuffer fb_hdr = VK_NULL_HANDLE;
@@ -3084,7 +3111,7 @@ class VulkanRaster final : public Raster {
       barrier();
     }
     if (baked) {  // (task 0197: the baked-lit objects' ambient source, at the pixels they won)
-      draw_pass(rp_baked_, sl.fb_baked, fr.width, fr.height, sl.set, 2, DrawBaked, fr.cull_backfaces);
+      draw_pass(rp_baked_, sl.fb_baked, fr.width, fr.height, sl.set, 3, DrawBaked, fr.cull_backfaces);
       barrier();
     }
     stamp(2);
@@ -4194,6 +4221,8 @@ class VulkanRaster final : public Raster {
     VkClearValue cv[7];
     std::memset(cv, 0, sizeof(cv));
     cv[clears - 1].depthStencil = {1.0f, 0};
+    if (what == DrawBaked)  // (round 454: the shadowmask plane's "no mask": white, so a lightmap without one casts no baked shadow)
+      for (int k = 0; k < 4; k++) cv[1].color.float32[k] = 1.0f;
     if (what == DrawGbuffer)  // (task 0195: the instances plane's "nothing here", which the outline pass reads)
       for (int k = 0; k < 4; k++) cv[5].color.uint32[k] = 0xFFFFFFFFu;
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -4442,7 +4471,7 @@ class VulkanRaster final : public Raster {
     u.env[3] = fr.exposure;
     u.bg[0] = (float)fr.background;
     u.probe[0] = fr.probe_normal_bias, u.probe[1] = fr.probe_view_bias, u.probe[2] = fr.probe_leak ? 1.0f : 0.0f, u.probe[3] = fr.probe_live ? 1.0f : 0.0f;
-    u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = (float)np, u.gi[2] = fr.unity_brdf ? 1.0f : 0.0f, u.gi[3] = 0.0f;  // (task 0197; round 401: gi.y the probes; round 405: gi.z Unity's BRDF)
+    u.gi[0] = fr.gi_specular_occlusion, u.gi[1] = (float)np, u.gi[2] = fr.unity_brdf ? 1.0f : 0.0f, u.gi[3] = fr.shadowmask_distance;  // (task 0197; round 401: gi.y the probes; round 405: gi.z Unity's BRDF)
     for (int k = 0; k < 4; k++) u.sky_disc[k] = fr.sky_disc[k], u.sky_disc_color[k] = fr.sky_disc_color[k], u.sky_band[k] = fr.sky_band[k], u.fog[k] = fr.fog[k], u.fog_color[k] = fr.fog_color[k], u.fog_far[k] = fr.fog_far[k];  // (task 0248)
     u.cage[0] = fr.cage_bias;
     u.cage[1] = fr.cage_point_radius;
@@ -4512,6 +4541,7 @@ class VulkanRaster final : public Raster {
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     for (uint32_t i = 34; i <= 36; i++)  // round 416: lilToon's planes
       b.push_back({i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+    b.push_back({37, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // round 454: the baked pass's shadowmask plane
     for (uint32_t i = 28; i <= 30; i++)  // task 0197: the baked table, the corners, the probe volume
       b.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
     b.push_back({16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});  // the face highlight's bits (task 0166)
@@ -4610,21 +4640,22 @@ class VulkanRaster final : public Raster {
   }
   void bind_images(Slot &sl) {
     const bool toon = sl.fb_toon != VK_NULL_HANDLE, baked = sl.fb_baked != VK_NULL_HANDLE;
-    const Img *im[14] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst,
+    const Img *im[15] = {&sl.normal, &sl.albedo, &sl.depth, &sl.shadow, &sl.geo, &sl.emit, &sl.inst,
                          toon ? &sl.toon[0] : &sl.normal, toon ? &sl.toon[1] : &sl.normal, toon ? &sl.toon[2] : &sl.normal, baked ? &sl.amb : &sl.normal,
-                         toon ? &sl.toon[3] : &sl.normal, toon ? &sl.toon[4] : &sl.normal, toon ? &sl.toon[5] : &sl.normal};  // (round 416: lilToon's planes, 34-36)
-    VkDescriptorImageInfo ii[14];
-    VkWriteDescriptorSet w[14];
-    for (int i = 0; i < 14; i++) {
+                         toon ? &sl.toon[3] : &sl.normal, toon ? &sl.toon[4] : &sl.normal, toon ? &sl.toon[5] : &sl.normal,
+                         baked ? &sl.mask : &sl.normal};  // (round 416: lilToon's planes, 34-36; round 454: the shadowmask plane, 37)
+    VkDescriptorImageInfo ii[15];
+    VkWriteDescriptorSet w[15];
+    for (int i = 0; i < 15; i++) {
       ii[i] = {sampler_, im[i]->view, VK_IMAGE_LAYOUT_GENERAL};
       w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
       w[i].dstSet = sl.set;
-      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : i == 6 ? 15 : i < 10 ? 25 + (i - 7) : i == 10 ? 31 : 34 + (i - 11));  // (the instances' plane: binding 15, task 0102; the toon planes 25-27, task 0196; the baked plane 31, task 0197)
+      w[i].dstBinding = (uint32_t)(i < 6 ? 2 + i : i == 6 ? 15 : i < 10 ? 25 + (i - 7) : i == 10 ? 31 : i == 14 ? 37 : 34 + (i - 11));  // (the instances' plane: binding 15, task 0102; the toon planes 25-27, task 0196; the baked plane 31, task 0197)
       w[i].descriptorCount = 1;
       w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
       w[i].pImageInfo = &ii[i];
     }
-    f_.vkUpdateDescriptorSets(dev_, 14, w, 0, nullptr);
+    f_.vkUpdateDescriptorSets(dev_, 15, w, 0, nullptr);
   }
 
   /* Render passes whose attachments end in GENERAL: read by the next pass and copied out without other moves. */
@@ -4689,7 +4720,7 @@ class VulkanRaster final : public Raster {
     rp_light_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, true);
     rp_ids_ = make_pass({VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT}, false, false, true);  // (task 0195)
     rp_toon_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}, true, false, false, true);  // (task 0196)
-    rp_baked_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, true, false, false, true);  // (task 0197)
+    rp_baked_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM}, true, false, false, true);  // (task 0197; round 454: the shadowmask beside the plane)
     rp_hdr_ = make_pass({VK_FORMAT_R32G32B32A32_SFLOAT}, false, true);
     rp_post16_ = make_pass({VK_FORMAT_R16G16B16A16_SFLOAT}, false, true);  // (round 416: the bloom's planes)
     rp_light_load_ = make_pass({VK_FORMAT_B8G8R8A8_UNORM}, false, false, true);
@@ -4828,11 +4859,11 @@ class VulkanRaster final : public Raster {
   void make_baked_pipelines(VkShaderModule gv) {
     if (!geometry_) return;
     std::string berr;
-    VkShaderModule bf = module(std::string(kMaterialFrag) + kGlslProcedurals + kMaterialEval + kLightFrag + kLightFns + kLightFrag2 + kProbeFns + kBakedFrag,
+    VkShaderModule bf = module(std::string("#define BL_BAKED_PASS 1\n") + kMaterialFrag + kGlslProcedurals + kMaterialEval + kLightFrag + kLightFns + kLightFrag2 + kProbeFns + kBakedFrag,
                                shaderc_fragment_shader, &berr);
     if (bf) {
       const VkCullModeFlags cull[3] = {VK_CULL_MODE_NONE, VK_CULL_MODE_BACK_BIT, VK_CULL_MODE_FRONT_BIT};
-      for (int k = 0; k < 3; k++) pl_baked_[k] = make_pipeline(rp_baked_, gv, bf, 1, true, cull[k], false, VK_NULL_HANDLE, false, true);
+      for (int k = 0; k < 3; k++) pl_baked_[k] = make_pipeline(rp_baked_, gv, bf, 2, true, cull[k], false, VK_NULL_HANDLE, false, true);
       f_.vkDestroyShaderModule(dev_, bf, nullptr);
     }
     if (!can_draw_baked()) Log::warn("The GPU view can't draw lightmaps or probes (%s): the CPU draws those views", berr.empty() ? "?" : berr.c_str());
@@ -5058,7 +5089,7 @@ class VulkanRaster final : public Raster {
     for (const char *d : {"#define BL_POST_VIGNETTE 1\n", "#define BL_POST_GRADE 1\n", "#define BL_POST_CHROMA 1\n", "#define BL_POST_GRAIN 1\n", "#define BL_POST_BRIGHT 1\n",
                           "#define BL_POST_BASE 1\n", "#define BL_POST_DOWN 1\n", "#define BL_POST_UP 1\n", "#define BL_POST_ADD 1\n"})  // (round 416: the filters' passes)
       srcs.push_back({std::string(d) + kMaterialFrag + kLightFrag + kAmbPlane + kLightFns + kLightFrag2 + kPostFrag, shaderc_fragment_shader});
-    if (geometry_) srcs.push_back({mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
+    if (geometry_) srcs.push_back({std::string("#define BL_BAKED_PASS 1\n") + mat + light + kProbeFns + kBakedFrag, shaderc_fragment_shader});  // (as their pipelines are made: only on such cards)
     JobSystem::global().parallel_for((int64_t)srcs.size(), 1, [&](int64_t a, int64_t b) {
       for (int64_t i = a; i < b; i++) {
         std::string e;
@@ -5138,9 +5169,11 @@ class VulkanRaster final : public Raster {
   bool baked_targets(Slot &sl, std::string *err) {
     if (sl.fb_baked) return true;
     const VkImageUsageFlags att = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    /* (A failure frees what was made: the next frame asks again, and a plane made twice would leak the first.) */
     if (!make_image(sl.amb, sl.color.w, sl.color.h, VK_FORMAT_R32G32B32A32_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT)) return fail(err, "out of memory for the baked light");
-    sl.fb_baked = framebuffer(rp_baked_, {sl.amb.view, sl.depth.view}, sl.color.w, sl.color.h);
-    if (!sl.fb_baked) return fail(err, "could not make the baked light's framebuffer");
+    if (!make_image(sl.mask, sl.color.w, sl.color.h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT)) return free_image(sl.amb), fail(err, "out of memory for the baked shadowmask");
+    sl.fb_baked = framebuffer(rp_baked_, {sl.amb.view, sl.mask.view, sl.depth.view}, sl.color.w, sl.color.h);
+    if (!sl.fb_baked) return free_image(sl.amb), free_image(sl.mask), fail(err, "could not make the baked light's framebuffer");
     bind_images(sl);
     return true;
   }
@@ -5164,7 +5197,7 @@ class VulkanRaster final : public Raster {
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
       sl.fb_toon = sl.fb_baked = sl.fb_hdr = VK_NULL_HANDLE;
       free_post(sl);  // (round 416: the filters' images are the picture's size)
-      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.hdr})
+      for (Img *im : {&sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
       const bool ok = make_image(sl.normal, w, h, VK_FORMAT_R16G16B16A16_SFLOAT, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
                       make_image(sl.albedo, w, h, VK_FORMAT_R8G8B8A8_UNORM, att, VK_IMAGE_ASPECT_COLOR_BIT) &&
@@ -5212,7 +5245,7 @@ class VulkanRaster final : public Raster {
       free_post(sl);  // (round 416)
       for (VkFramebuffer fb : {sl.fb_shadow, sl.fb_gbuf, sl.fb_light, sl.fb_ids, sl.fb_toon, sl.fb_baked, sl.fb_hdr})
         if (fb) f_.vkDestroyFramebuffer(dev_, fb, nullptr);
-      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.hdr})
+      for (Img *im : {&sl.shadow, &sl.normal, &sl.albedo, &sl.geo, &sl.emit, &sl.ids, &sl.inst, &sl.depth, &sl.color, &sl.toon[0], &sl.toon[1], &sl.toon[2], &sl.toon[3], &sl.toon[4], &sl.toon[5], &sl.amb, &sl.mask, &sl.hdr})
         free_image(*im);
     }
     for (VkPipeline p : {pl_shadow_, pl_gbuf_, pl_gbuf_cull_, pl_gbuf_cull_front_, pl_light_, pl_cage_line_, pl_cage_point_, pl_ov_line_, pl_ov_point_, pl_outline_, pl_see_, pl_see_ids_, pl_see_hdr_, pl_toon_[0], pl_toon_[1], pl_toon_[2], pl_baked_[0], pl_baked_[1], pl_baked_[2], pl_hdr_})

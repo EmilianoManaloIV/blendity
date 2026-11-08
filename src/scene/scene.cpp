@@ -322,8 +322,17 @@ void LightingSettings::reflect(Reflector &r) {
   r.enumeration("Lighting Mode", lighting_mode, modes, 3);
   r.help("What Generate Lighting keeps of the Mixed lights (Unity's Lighting Mode). Baked Indirect: their realtime light\n"
          "and shadows, only their bounced light baked. Shadowmask: realtime light, but their shadows from static objects\n"
-         "baked into a mask (up to 3 lights). Subtractive: their direct light baked into the lightmaps too; moving\n"
-         "objects still get it in realtime.");
+         "baked into a mask (up to 4 lights; a fifth is baked as Baked). Subtractive: their direct light baked into the\n"
+         "lightmaps too; moving objects still get it in realtime.");
+  if (lighting_mode == 1 || r.all_fields()) {
+    static const char *mask_modes[] = {"Shadowmask", "Distance Shadowmask"};
+    r.enumeration("Shadowmask Mode", shadowmask_mode, mask_modes, 2);
+    r.help("Unity's Shadowmask Mode (a Quality setting there). Shadowmask: a Mixed light's baked shadows and its realtime\n"
+           "shadow together at every distance. Distance Shadowmask: its realtime shadow near the camera (moving objects\n"
+           "shadow too), the baked mask beyond the Shadow Distance, a fade over the last tenth. Needs no new bake.");
+    r.field("Shadow Distance", shadow_distance, 1.0f, 0.1f, 100000.0f);
+    r.help("Metres from the camera within which Distance Shadowmask draws the realtime shadow (Unity's default is 150).");
+  }
   r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
   r.help("Texels per unit (metre) of surface (Unity's default is 40; 80 shows a small emissive object's glow in detail).");
   r.field("Max Lightmap Size", max_size, 16, 4096);

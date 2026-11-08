@@ -19,8 +19,11 @@
 //                          float4 scale-offset (x, y scale; z, w offset), float16 local-to-world (column-major)
 //   int32 lights; each: string path, int32 type (Unity's LightType), int32 bake (Unity's LightmapBakeType)
 //   int32 probes; each: float3 position, float3 x 6: the probe as Unity's shading reads it along +X -X +Y -Y +Z -Z
-//   (version 2: the reflection probes; version 3, last: int32 probes again (0 or the same count), each float3 x 26 - the
-//   probe along probe_fit_directions' 26 directions, fitted to L2 SH on reading)
+//   (version 2: the reflection probes; version 3: int32 probes again (0 or the same count), each float3 x 26 - the
+//   probe along probe_fit_directions' 26 directions, fitted to L2 SH on reading; version 4, last (round 454, ADR 0118):
+//   int32 mask pages (0 or the page count), each int32 width, int32 height, uint8 rgba[...] bottom row first - Unity's
+//   LightmapData.shadowMask, 0 x 0 for a page without one; int32 light channels (0 or the light count), each int32
+//   bakingOutput.occlusionMaskChannel (-1 none, -2 a Mixed light baked as Baked); int32 QualitySettings.shadowmaskMode (-1 not known), float shadowDistance)
 // Positions and directions are Unity's, which an imported Unity scene's are in Blendity too (round 395: its objects where
 // Unity has them); a UV's v runs up (Blendity's lightmaps run down).
 #pragma once
@@ -47,6 +50,8 @@ struct UnityLighting {
     std::vector<uint16_t> rgb;  // (half floats, 3 a texel, bottom row first)
     int dir_width = 0, dir_height = 0;
     std::vector<uint8_t> dir;  // (Unity's directional lightmap: rgba a texel, bottom row first)
+    int mask_width = 0, mask_height = 0;  // (round 454, version 4: Unity's shadowmask, four lights an rgba texel, bottom row first; 0 x 0 none)
+    std::vector<uint8_t> mask;
   };
   struct MeshData {
     std::string key;
@@ -65,6 +70,8 @@ struct UnityLighting {
   struct LightInfo {
     std::string path;
     int type = 0, bake = 4;  // (Unity: Spot 0, Directional 1, Point 2, Rectangle 3; Mixed 1, Baked 2, Realtime 4)
+    int mask_channel = -1;   // (round 454, version 4: bakingOutput.occlusionMaskChannel, 0-3; -1 none or not known)
+    bool overflow = false;   // (a Mixed light Unity baked as Baked, past its four channels: file value -2)
   };
   struct Probe {
     Vec3 position;
@@ -91,6 +98,10 @@ struct UnityLighting {
   std::vector<LightInfo> lights;
   std::vector<Probe> probes;
   std::vector<ReflectionProbe> reflection_probes;  // (round 401)
+  /* Round 454 (version 4): the project's QualitySettings - Shadowmask Mode (0 Shadowmask, 1 Distance Shadowmask; -1 not known)
+   * and Shadow Distance (metres; < 0 not known). */
+  int shadowmask_mode = -1;
+  float shadow_distance = -1.0f;
 };
 
 bool read_unity_lighting(const std::string &bytes, UnityLighting &out, std::string &why);
@@ -125,6 +136,14 @@ constexpr float kUnityLightmapScale = 1.0f;
 
 /* A page as Blendity's texels: linear, row 0 the image's top (Blendity's lightmap v runs down). */
 bool unity_lightmap_page(const UnityLighting::Page &page, float scale, Lightmap &out);
+/* Round 454: a page's shadowmask as a mask page (the four lights, rows flipped like the colour page's); false with none. */
+bool unity_mask_page(const UnityLighting::Page &page, Lightmap &out);
+/* Round 454: the project's ProjectSettings/QualitySettings.asset - the current quality level's shadowmaskMode and
+ * shadowDistance; false when the text holds none. */
+bool unity_quality_shadowmask(const std::string &text, int &mode, float &distance);
+/* Round 454 (review): the QualitySettings.asset text of the Unity project a scene file stands in (the nearest folder above it
+ * holding ProjectSettings/QualitySettings.asset); "" when none does. */
+std::string unity_find_quality_settings(const std::string &scene_path);
 
 /* Unity's Directional lightmaps (its default) shade by the surface's normal against the light's dominant direction:
  * colour x (dot(n, dir - 0.5) + 0.5) / max(1e-4, dir.w), per pixel, as UnityCG's DecodeDirectionalLightmap. A lightmap texel

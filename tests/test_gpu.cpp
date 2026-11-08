@@ -2598,6 +2598,233 @@ static void tests_round444_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 454: four mask lights and Distance Shadowmask on the card (task 0430) */
+static void tests_round454_gpu() {
+  auto view = [](Editor &ed, GameObject *g, int device) {
+    ed.viewport_device_for_test(device);
+    const Vec3 at = g->world_position();
+    for (int k = 0; k < 2; k++) {
+      g->set_local_position(at + Vec3(0.0f, k ? 0.0f : 1e-4f, 0.0f));
+      r34_steps(ed, 2);
+    }
+    return r34_crop(ed, ed.scene_view_rect());
+  };
+  struct Stats {
+    double mean = 0, within3 = 0;
+  };
+  auto compare = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+    Stats s;
+    size_t n = 0, ok = 0;
+    double sum = 0;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+      int d = 0;
+      for (int k = 0; k < 24; k += 8) d = std::max(d, std::abs((int)((a[i] >> k) & 255) - (int)((b[i] >> k) & 255)));
+      n++, sum += d, ok += d <= 3;
+    }
+    s.mean = n ? sum / (double)n : 0.0, s.within3 = n ? (double)ok / (double)n : 0.0;
+    return s;
+  };
+  struct Pair {
+    std::vector<uint32_t> cpu, gpu;
+    bool on_gpu = false;
+  };
+  auto both = [&](Editor &ed, GameObject *g) {
+    view(ed, g, 2);  // (the first frames on the card upload the pages and make the planes: warm both first)
+    view(ed, g, 1);
+    Pair p;
+    p.cpu = view(ed, g, 1);
+    p.gpu = view(ed, g, 2);
+    p.on_gpu = ed.scene_on_gpu_for_test();  // (read now: the CPU's frames after it)
+    return p;
+  };
+  test("gpu views (round 454): four Mixed lamps in a Shadowmask bake on the card as on the CPU - every lamp's baked shadow shows on both, the pictures agree to a tenth of a level, and a lightmap without a mask draws as before (the baked pass's mask attachment is white there); BLENDITY_VIEW_OFF=mask draws without the masks (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, false);
+    ed.command("overlay grid off");
+    ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+    ed.scene().environment.color = Vec3(0.02f);
+    GameObject *lamps[4];
+    const Vec3 spots[4] = {Vec3(-4.0f, 0.5f, -2.5f), Vec3(-4.0f, 0.5f, 2.5f), Vec3(-1.0f, 0.5f, -2.5f), Vec3(-1.0f, 0.5f, 2.5f)};
+    for (int i = 0; i < 4; i++) {
+      r35_add(ed, "Cube", strprintf("Box %d", i).c_str(), spots[i], {1, 1, 1}, Vec3(0.8f));
+      lamps[i] = ed.scene().create(strprintf("Lamp %d", i));
+      Light *L = lamps[i]->add<Light>();
+      L->type = 1, L->mode = 1, L->intensity = 4.0f - 0.4f * (float)i, L->range = 12.0f;
+      lamps[i]->set_local_position(spots[i] + Vec3(1.4f, 2.4f, 0.0f));
+    }
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("lamps");
+    r35_bake(ed);
+    bool channels = ed.lighting_data_for_test().mask_pages.size() == ed.lighting_data_for_test().pages.size() && !ed.lighting_data_for_test().mask_pages.empty();
+    for (int i = 0; i < 4; i++) channels = channels && ed.lighting_data_for_test().light_modes.count(lamps[i]->id) && ed.lighting_data_for_test().light_modes.at(lamps[i]->id) == 4 + i;
+    CHECK(channels);
+    const char *off = std::getenv("BLENDITY_VIEW_OFF");
+    const bool mask_off = off && (std::string(",") + off + ",").find(",mask,") != std::string::npos;
+    const Pair all = both(ed, w.ball);
+    const Stats s = compare(all.cpu, all.gpu);
+    std::printf("    four lamps, Shadowmask: the card against the CPU, mean %.3f / 255, %.3f %% within 3 (the view on the card: %s)%s\n", s.mean, s.within3 * 100.0, all.on_gpu ? "yes" : "no",
+                mask_off ? "; BLENDITY_VIEW_OFF=mask: the card draws without the masks" : "");
+    CHECK(all.on_gpu);
+    if (!mask_off) CHECK(s.mean <= 0.1 && s.within3 >= 0.999);
+    /* Each lamp alone: its shadow in the Shadowmask bake's picture, none in Baked Indirect's (the same lamp, no mask). */
+    std::vector<Pair> shadowed;
+    for (int only = 0; only < 4; only++) {
+      for (int i = 0; i < 4; i++) lamps[i]->get<Light>()->enabled = i == only;
+      ed.commit_change("one lamp");
+      shadowed.push_back(both(ed, w.ball));
+    }
+    ed.scene().lighting.lighting_mode = 0;
+    for (int i = 0; i < 4; i++) lamps[i]->get<Light>()->enabled = true;
+    ed.commit_change("baked indirect");
+    r35_bake(ed);
+    CHECK(ed.lighting_data_for_test().mask_pages.empty());
+    for (int only = 0; only < 4; only++) {
+      for (int i = 0; i < 4; i++) lamps[i]->get<Light>()->enabled = i == only;
+      ed.commit_change("one lamp");
+      const Pair plain = both(ed, w.ball);
+      const Stats ps = compare(plain.cpu, plain.gpu);
+      const size_t cpu_shadow = r35_diff_count(shadowed[(size_t)only].cpu, plain.cpu, 6), gpu_shadow = r35_diff_count(shadowed[(size_t)only].gpu, plain.gpu, 6);
+      std::printf("    lamp %d alone: its shadow changes %zu pixels on the CPU, %zu on the card; without a mask the card agrees with the CPU to %.3f / 255 (%.3f %% within 3)\n", only, cpu_shadow,
+                  gpu_shadow, ps.mean, ps.within3 * 100.0);
+      CHECK(plain.on_gpu && ps.mean <= 0.1 && ps.within3 >= 0.999);  // (a lightmap without a mask: as before)
+      if (!mask_off) CHECK(cpu_shadow > 100 && gpu_shadow > 100);
+    }
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 454): Distance Shadowmask on the card as on the CPU - a ball that moved after the bake shadows the floor within the Shadow Distance (the card's too) and not beyond it, the fade between, the card agreeing with the CPU at each (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    const char *off = std::getenv("BLENDITY_VIEW_OFF");
+    const bool mask_off = off && (std::string(",") + off + ",").find(",mask,") != std::string::npos;
+    ed.command("set Lighting.ShadowmaskMode 0");
+    const Pair plain = both(ed, w.ball);
+    ed.command("set Lighting.ShadowmaskMode 1");
+    std::vector<Pair> at;
+    for (const char *d : {"1000", "0.1", "14"}) {  // (within; beyond; the camera's own distance to the floor, in the fade)
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      at.push_back(both(ed, w.ball));
+      const Stats s = compare(at.back().cpu, at.back().gpu);
+      std::printf("    Shadow Distance %s: the card against the CPU, mean %.3f / 255, %.3f %% within 3 (on the card: %s)\n", d, s.mean, s.within3 * 100.0, at.back().on_gpu ? "yes" : "no");
+      CHECK(at.back().on_gpu);
+      if (!mask_off) CHECK(s.mean <= 0.3 && s.within3 >= 0.995);
+    }
+    const size_t cpu_within = r35_diff_count(plain.cpu, at[0].cpu, 12), cpu_beyond = r35_diff_count(plain.cpu, at[1].cpu, 12);
+    const size_t gpu_within = r35_diff_count(plain.gpu, at[0].gpu, 12), gpu_beyond = r35_diff_count(plain.gpu, at[1].gpu, 12);
+    std::printf("    against plain Shadowmask: within the distance %zu / %zu pixels (CPU / card), beyond it %zu / %zu\n", cpu_within, gpu_within, cpu_beyond, gpu_beyond);
+    if (!mask_off) CHECK(cpu_beyond > 150 && gpu_beyond > 150 && cpu_within * 4 < cpu_beyond && gpu_within * 4 < gpu_beyond);
+    /* The fade band lies strictly between near and far: over the pixels the two distances disagree on, a Shadow Distance is found
+     * (on the CPU's frames) whose picture is part-way, and the card draws the same part-way picture there. */
+    auto luma = [](uint32_t c) { return (int)((c >> 16) & 255) + (int)((c >> 8) & 255) + (int)(c & 255); };
+    std::vector<size_t> shadow;  // (the pixels the realtime shadow decides)
+    for (size_t i = 0; i < at[0].cpu.size() && i < at[1].cpu.size(); i++)
+      if (std::abs(luma(at[0].cpu[i]) - luma(at[1].cpu[i])) > 12) shadow.push_back(i);
+    auto share = [&](const std::vector<uint32_t> &px) {  // 0 = the near picture, 1 = the far one, over those pixels
+      double sum = 0;
+      for (size_t i : shadow) sum += (double)(luma(px[i]) - luma(at[0].cpu[i])) / (double)(luma(at[1].cpu[i]) - luma(at[0].cpu[i]));
+      return shadow.empty() ? 0.0 : sum / (double)shadow.size();
+    };
+    const char *band = nullptr;
+    for (const char *d : {"3", "4", "5", "6", "7", "8", "9", "10", "12", "14", "17", "20", "25"}) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      const double f = share(view(ed, w.ball, 1));
+      if (f > 0.15 && f < 0.85) {
+        band = d;
+        break;
+      }
+    }
+    CHECK(shadow.size() > 100 && band);
+    if (band && !mask_off) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + band);
+      const Pair fade = both(ed, w.ball);
+      const Stats fs = compare(fade.cpu, fade.gpu);
+      std::printf("    the fade band at Shadow Distance %s: %.2f of the way to the mask on the CPU, %.2f on the card; the card against the CPU %.3f / 255\n", band, share(fade.cpu), share(fade.gpu), fs.mean);
+      CHECK(fade.on_gpu && share(fade.gpu) > 0.1 && share(fade.gpu) < 0.9 && fs.mean <= 0.3 && fs.within3 >= 0.995);
+    }
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 454): a lightmapped object without a mask page beside ones with - under Distance Shadowmask beyond the distance it keeps its realtime shadow, on the card as on the CPU (the baked plane's w says whether a mask is there; skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.scene().lighting.max_size = 64;  // (small pages: the objects land on several)
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    const size_t pages = ed.lighting_data_for_test().pages.size();
+    CHECK(pages >= 2 && ed.lighting_data_for_test().mask_pages.size() == pages);
+    if (pages < 2) return;
+    ed.lighting_data_mut_for_test().mask_pages.pop_back();  // (the last page's objects have a channel in the modes and no page)
+    ed.command("set Lighting.ShadowmaskMode 1");
+    ed.command("set Lighting.ShadowDistance 0.1");
+    const Pair far = both(ed, w.ball);
+    const Stats s = compare(far.cpu, far.gpu);
+    ed.command("set Lighting.ShadowDistance 1000");
+    const Pair near = both(ed, w.ball);
+    const size_t cpu_changed = r35_diff_count(far.cpu, near.cpu, 12), gpu_changed = r35_diff_count(far.gpu, near.gpu, 12);
+    std::printf("    %zu pages, the last without a mask: beyond the distance the card against the CPU %.3f / 255 (%.3f %% within 3); near against far changes %zu / %zu pixels (CPU / card)\n", pages, s.mean,
+                s.within3 * 100.0, cpu_changed, gpu_changed);
+    CHECK(far.on_gpu && s.mean <= 0.3 && s.within3 >= 0.995);
+    ed.viewport_device_for_test(1);
+  });
+  test("gpu views (round 454): Distance Shadowmask when the masks fail to load - the saved bake's ShadowMask pages deleted, the lights in realtime alone, the same picture inside and beyond the Shadow Distance, on the card and the CPU alike (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.command("overlay grid off");
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    const std::string scene = "Assets/Scenes/R454G.scene";
+    ed.command("save " + scene);
+    const std::string dir = ed.lighting_dir_for_test();
+    for (int p = 0; p < 8; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.png", p)).c_str());
+    ed.command("open " + scene);
+    CHECK(!ed.lighting_data_for_test().pages.empty() && ed.lighting_data_for_test().mask_pages.empty());
+    GameObject *ball = ed.scene().find_by_name("Ball");
+    CHECK(ball != nullptr);
+    if (!ball) return;
+    ed.command("set Lighting.ShadowmaskMode 1");
+    std::vector<Pair> at;
+    for (const char *d : {"1000", "0.1"}) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      at.push_back(both(ed, ball));
+      const Stats s = compare(at.back().cpu, at.back().gpu);
+      std::printf("    no masks, Shadow Distance %s: the card against the CPU, mean %.3f / 255, %.3f %% within 3\n", d, s.mean, s.within3 * 100.0);
+      CHECK(at.back().on_gpu && s.mean <= 0.3 && s.within3 >= 0.995);
+    }
+    const size_t cpu_diff = r35_diff_count(at[0].cpu, at[1].cpu, 6), gpu_diff = r35_diff_count(at[0].gpu, at[1].gpu, 6);
+    std::printf("    inside against beyond the distance: %zu pixels on the CPU, %zu on the card\n", cpu_diff, gpu_diff);
+    CHECK(cpu_diff < 20 && gpu_diff < 20);
+    ed.viewport_device_for_test(1);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::remove(resolve_asset_path(scene).c_str());
+  });
+}
+
 /* ---------------------------------------------------------------- round 216: baked light on the card (task 0197) */
 static void tests_round216() {
   /* The Scene view drawn again on `device` (the ball nudged and back); its pixels. */
@@ -4573,4 +4800,5 @@ void run_gpu_tests() {
   tests_round448();
   tests_round449();
   tests_round458();
+  tests_round454_gpu();
 }

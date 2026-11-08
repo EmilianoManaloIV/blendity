@@ -2151,7 +2151,7 @@ size_t Editor::surface_job_planes_bytes() const {
 
 static size_t lightmap_pages_bytes(const std::vector<Lightmap> &pages) {
   size_t n = 0;
-  for (const Lightmap &p : pages) n += p.texels.capacity() * sizeof(Vec3);
+  for (const Lightmap &p : pages) n += p.texels.capacity() * sizeof(Vec3) + p.alpha.capacity() * sizeof(float);  // (round 454: a shadowmask page's fourth light)
   return n;
 }
 

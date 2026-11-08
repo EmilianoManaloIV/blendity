@@ -201,6 +201,7 @@ struct RasterFrame {
   float shadow_bias = 0.002f;
   bool shadow_fast = false;   // the Low tier's 2 x 2 bilinear lookup instead of 3 x 3
   bool cull_backfaces = true; // (double-sided instances never are)
+  float shadowmask_distance = 0.0f;  // round 454 (ADR 0118): Distance Shadowmask's Shadow Distance in metres; 0 = plain Shadowmask
   std::vector<RasterLight> lights;
   std::vector<RasterProbe> probes;  // (round 401: the reflection probes with a bake)
   std::vector<uint32_t> highlight_bits;  // task 0166: a bit per triangle of the highlighted meshes (see RasterInstance::highlight)

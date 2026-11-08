@@ -1610,7 +1610,7 @@ bool unity_bake_settings(const std::vector<UnityDoc> &docs, const std::string &l
     /* A LightingSettings document inside the scene itself: referenced by its fileID, no guid. */
     const int64_t fid = d.body.file_id("m_LightingSettings");
     if (!src && fid != 0 && d.body.guid("m_LightingSettings").empty() && (src = lighting_settings_doc(docs, fid)))
-      out.source = "the scene's embedded LightingSettings";
+      out.source = "the scene's embedded LightingSettings", out.settings_doc = fid;
   }
   if (!src && legacy) src = legacy, out.source = "the scene's own settings";
   if (!src) return false;

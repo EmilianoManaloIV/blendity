@@ -9,6 +9,7 @@
 #include "../scene/material.h"
 #include "../scene/unity_material.h"
 #include "../scene/unity_scene.h"
+#include "../render/unity_lightmaps.h"
 #include "../core/core.h"
 
 #include <algorithm>
@@ -157,6 +158,14 @@ void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::v
   l.baked_gi = u.baked_gi;
   l.directional_mode = u.directional;  // (round 426)
   l.lighting_mode = u.mixed == 1 ? 2 : u.mixed == 2 ? 1 : 0;  // (round 444: Unity's m_MixedBakeMode - 1 Subtractive, 2 Shadowmask)
+  /* Round 454 (ADR 0118): Shadowmask Mode and Shadow Distance are QualitySettings in Unity, not the scene's: the project's
+   * ProjectSettings when it is here, else Unity's defaults (Distance Shadowmask, 150 m). The editor script's file, read
+   * later, replaces them with the running project's. */
+  l.shadowmask_mode = 1, l.shadow_distance = 150.0f;
+  const std::string quality = scene_->unity.file.empty() ? std::string() : unity_find_quality_settings(resolve_asset_path(scene_->unity.file));
+  int q_mode = 0;
+  float q_distance = 0.0f;
+  if (!quality.empty() && unity_quality_shadowmask(quality, q_mode, q_distance)) l.shadowmask_mode = q_mode, l.shadow_distance = std::max(0.1f, q_distance);
   l.bake_device = u.backend == 2 ? 2 : 0;  // (round 430: Unity's Progressive GPU on the card; its CPU or Enlighten as the Render device - never slower than before, review 430)
   scene_->unity_bake = u;
   if (!missing_guid.empty())

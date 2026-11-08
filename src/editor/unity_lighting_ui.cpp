@@ -145,7 +145,7 @@ public static class BlendityLightmaps {
             EditorSceneManager.OpenScene(Arg("-blendityScene"), OpenSceneMode.Single);
             var o = new Out();
             o.w.Write(Encoding.ASCII.GetBytes("BLULIGHT"));
-            o.w.Write(3);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes; round 442: 3 - the probes along 26 directions last)
+            o.w.Write(4);  // version (round 401: 2 - the reflection probes' cubemaps after the light probes; round 442: 3 - the probes along 26 directions; round 454: 4 - the shadowmasks, the lights' channels and the Quality settings last)
             o.w.Write(-1);  // (the lightmap encoding: not public in 2022.3 - the EXR itself is linear)
             o.w.Write((int)LightmapSettings.lightmapsMode);
             /* Which bake: the LightingData.asset's path and its bytes' FNV-1a 32 (Blendity refuses the file once Unity bakes again). */
@@ -275,6 +275,26 @@ public static class BlendityLightmaps {
                 sh[i].Evaluate(fitDirs, seen26);
                 foreach (Color c in seen26) { o.w.Write(c.r); o.w.Write(c.g); o.w.Write(c.b); }
             }
+            /* Round 454 (version 4): each page's shadowMask (RGBA, bottom row first; 0 x 0 for a page without one), each light's
+             * bakingOutput.occlusionMaskChannel (-1: none), and the running project's Shadowmask Mode (0 Shadowmask, 1 Distance
+             * Shadowmask) and Shadow Distance. */
+            bool anyMask = false;
+            foreach (LightmapData m in maps) anyMask = anyMask || m.shadowMask != null;
+            o.w.Write(anyMask ? maps.Length : 0);
+            if (anyMask)
+                foreach (LightmapData m in maps) WriteDirections(o, m.shadowMask != null ? AssetDatabase.GetAssetPath(m.shadowMask) : "");
+            o.w.Write(lights.Count);
+            /* -2: a Mixed light Unity baked as Baked (past its four channels: bakingOutput says Baked); -1: no channel (a light added
+             * since the bake also has none - it stays Mixed). */
+            foreach (Light l in lights) {
+                bool overflow = l.lightmapBakeType == LightmapBakeType.Mixed && l.bakingOutput.isBaked && l.bakingOutput.lightmapBakeType == LightmapBakeType.Baked;
+                o.w.Write(overflow ? -2 : l.bakingOutput.occlusionMaskChannel);
+            }
+            /* The scratch project's own Quality settings are Unity's defaults, not the user's: written only when Blendity copied the
+             * user's QualitySettings.asset into it (-blendityQuality 1), else -1 (not known). */
+            bool quality = Arg("-blendityQuality") == "1";
+            o.w.Write(quality ? (int)QualitySettings.shadowmaskMode : -1);
+            o.w.Write(quality ? QualitySettings.shadowDistance : -1f);
             File.WriteAllBytes(outPath, o.Done());
             code = 0;
         } catch (Exception e) {
@@ -351,6 +371,7 @@ void Editor::read_unity_lighting_cmd(bool wait) {
                   "binary file - install Unity through Unity Hub and run this again", "", "");
   auto job = std::make_shared<UnityLightingJob>();
   job->scene = unity_lighting_scene_;
+  job->quality = unity_find_quality_settings(resolve_asset_path(unity_lighting_scene_));  // (round 454: the user's Shadowmask Mode and Shadow Distance)
   job->out = resolve_asset_path(unity_lighting_scene_) + ".unity-lighting";  // (absolute: Unity resolves a relative path against the scratch project - e2e 407)
   const std::string package = package_of(job->scene, project_root_, job->unity_scene);
   if (package.empty()) return refuse("Unity's lightmaps: " + fs::filename(job->scene) + " isn't in an unpacked Unity package (its .unity-guids)", "", "");
@@ -384,6 +405,7 @@ void Editor::UnityLightingJob::run(const std::string &unity) {
   std::filesystem::remove_all(std::filesystem::u8path(fs::join(project, "Assets")), ec);
   fs::make_dirs(fs::join(project, "Assets/Editor"));
   fs::write_file(fs::join(project, "Assets/Editor/BlendityLightmaps.cs"), kLightmapScript);
+  if (!quality.empty()) fs::write_file(fs::join(fs::join(project, "ProjectSettings"), "QualitySettings.asset"), quality);  // (round 454)
   for (const File &f : files) {
     const std::string to = fs::join(project, f.unity);
     fs::make_dirs(fs::parent(to));
@@ -393,7 +415,7 @@ void Editor::UnityLightingJob::run(const std::string &unity) {
   fs::remove_file(fresh);
   fs::remove_file(fresh + ".error.txt");  // (an earlier run's exception isn't this run's reason)
   const int ran = sys::run_program({unity, "-batchmode", "-projectPath", project, "-executeMethod", "BlendityLightmaps.Run", "-blendityScene", unity_scene,
-                                    "-blendityOut", fresh, "-quit", "-logFile", log}, 3600);
+                                    "-blendityOut", fresh, "-blendityQuality", quality.empty() ? "0" : "1", "-quit", "-logFile", log}, 3600);
   ec.clear();
   if (ran == 0 && fs::exists(fresh)) std::filesystem::rename(std::filesystem::u8path(fresh), std::filesystem::u8path(out), ec);
   if (ec) why = "couldn't put " + fs::filename(out) + " in place: " + ec.message();
@@ -453,6 +475,42 @@ void Editor::unity_subtractive_modes(LightingData &ld) const {
     if (mode == 1) mode = id == main ? 3 : 2;
 }
 
+/* Round 454 (ADR 0118): a Shadowmask scene's Unity masks as the bake's mask pages and each Mixed light's channel as its
+ * mode (4 + channel; a shared channel stays shared). A mask page whose size differs from its lightmap's leaves the masks
+ * out of this bake, said. */
+void Editor::unity_shadowmasks(const UnityLighting &u, const GameObject *under, const std::vector<bool> &page_ok, LightingData &ld) {
+  bool any = false;
+  for (const UnityLighting::Page &p : u.pages) any = any || !p.mask.empty();
+  if (!any) return;
+  std::vector<Lightmap> masks(ld.pages.size());
+  for (size_t i = 0; i < u.pages.size() && i < masks.size(); i++) {
+    const UnityLighting::Page &p = u.pages[i];
+    if (p.mask.empty() || (i < page_ok.size() && !page_ok[i])) {  // (a lightmap without a mask, or without its texels - those objects are left out anyway: nothing in shadow)
+      masks[i].width = masks[i].height = 1, masks[i].texels = {Vec3(1.0f)}, masks[i].alpha = {1.0f};
+      continue;
+    }
+    if (!unity_mask_page(p, masks[i]) || masks[i].width != ld.pages[i].width || masks[i].height != ld.pages[i].height) {
+      Log::warn("Unity's lightmaps: the shadowmask of %s isn't the size of its lightmap - the masks left out of this bake (its Mixed lights shadow in realtime)", p.color.c_str());
+      return;
+    }
+  }
+  std::map<std::string, int> channel_of;
+  for (const UnityLighting::LightInfo &l : u.lights)
+    if (l.bake == 1) channel_of[l.path] = l.overflow ? -2 : l.mask_channel;
+  bool any_channel = false;
+  for (const auto &kv : channel_of) any_channel = any_channel || kv.second >= 0;
+  if (!any_channel) return;
+  scene_->for_each([&](GameObject &g) {
+    if (!g.get<Light>() || (under && !scene_->is_ancestor(under, &g))) return;
+    const auto c = channel_of.find(unity_lighting_path(g, under));
+    const auto m = ld.light_modes.find(g.id);
+    if (c == channel_of.end() || m == ld.light_modes.end() || m->second != 1) return;
+    if (c->second >= 0) m->second = 4 + c->second;
+    else if (c->second == -2) m->second = 2;  // (Unity baked it as Baked, past its four channels; a light with no channel for another reason - added since - stays Mixed)
+  });
+  ld.mask_pages = std::move(masks);
+}
+
 bool Editor::apply_unity_lighting(const std::string &file) {
   const double started = now_seconds();
   std::string bytes, why;
@@ -500,6 +558,7 @@ bool Editor::apply_unity_lighting(const std::string &file) {
     if (b != bake_of.end() && (b->second == 1 || b->second == 2)) ld.light_modes[g.id] = b->second;
   });
   if (scene_->unity_bake.mixed == 1) unity_subtractive_modes(ld);  // (round 444: Unity's Subtractive lightmaps hold their Mixed lights)
+  if (scene_->unity_bake.mixed == 2) unity_shadowmasks(u, under, page_ok, ld);  // (round 454: and a Shadowmask's masks and channels)
   lighting_reset_for("Unity's lightmaps");
   scene_->lighting.baked_gi = true, scene_->lighting.realtime_gi = false;
   lighting_data_ = std::move(ld);

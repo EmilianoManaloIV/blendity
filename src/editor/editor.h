@@ -1328,6 +1328,7 @@ class Editor {
   /* Baked lighting (task 0012). */
   bool baking_for_test() const { return baking_; }
   const LightingData &lighting_data_for_test() const { return lighting_data_; }
+  LightingData &lighting_data_mut_for_test() { lighting_gen_++; return lighting_data_; }  // (round 454: a test drops a mask page)
   bool lighting_out_of_date_for_test() { return lighting_out_of_date(); }
   bool live_gi_needed_for_test(std::string *why = nullptr) { return live_gi_needed(why); }
   uint64_t vgi_updates_for_test() const { return vgi_updates_; }
@@ -1542,6 +1543,7 @@ class Editor {
     };
     std::atomic<int> code{-1000000};  // (running till then)
     std::string project, why, scene, unity_scene, out;
+    std::string quality;  // (round 454: the user's QualitySettings.asset, when known - copied into the scratch project)
     std::vector<File> files;
     void run(const std::string &unity);
   };
@@ -1558,6 +1560,7 @@ class Editor {
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
   void unity_subtractive_modes(LightingData &ld) const;  // (round 444)
+  void unity_shadowmasks(const UnityLighting &u, const GameObject *under, const std::vector<bool> &page_ok, LightingData &ld);  // (round 454)
   void apply_unity_post_processing(const std::vector<UnityDoc> &docs, UnityImport &ctx);  // (round 401)
   int apply_unity_reflection_probes(const UnityLighting &u, const GameObject *under);  // (round 401)
   void lighting_reset_for(const char *why);

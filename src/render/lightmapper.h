@@ -69,6 +69,9 @@ struct BakeLight;
  * records it as 3: in the lightmaps, realtime on moving objects); every other Mixed light becomes Baked (in the lightmaps
  * and the probes, as Unity's Subtractive bakes them). Returns the main light's index or -1. */
 int subtractive_split(std::vector<BakeLight> &lights);
+/* Round 454 (review): in a Shadowmask bake the Mixed lights past the mask's four (the suns first, then by intensity) become
+ * Baked on the shared list, so every baker holds their direct light. Returns how many; logs once with `log`. */
+size_t shadowmask_split(std::vector<BakeLight> &lights, bool log = true);
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
 struct BakeObject {
@@ -120,11 +123,12 @@ struct LightingData {
    * (lightmap_direction_factor, Unity's DecodeDirectionalLightmap). */
   std::vector<Lightmap> dir_pages;
   /* Round 444: beside each page in a Shadowmask bake, the Mixed lights' visibility from the static scene, one channel a
-   * light (light_modes says which: 4 + channel). Empty otherwise. */
+   * light (light_modes says which: 4 + channel). Empty otherwise. Round 454: four channels (the colours and Lightmap::alpha),
+   * saved as ShadowMask-N.png. */
   std::vector<Lightmap> mask_pages;
   std::map<uint64_t, Entry> entries;  // by GameObject id
   /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect; round 444: 3 a
-   * Subtractive Mixed light - direct and indirect in the lightmaps, realtime elsewhere; 4-6 a Shadowmask Mixed light and
+   * Subtractive Mixed light - direct and indirect in the lightmaps, realtime elsewhere; 4-7 a Shadowmask Mixed light and
    * its mask channel).
    * Realtime GI (task 0013) adds what isn't here. */
   std::map<uint64_t, int> light_modes;
@@ -239,7 +243,7 @@ class Lightmapper {
   static Vec3 saved_direction(Vec3 mean_direction);
  private:
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
-                  DirSum *dir_out = nullptr, Vec3 *mask_out = nullptr);
+                  DirSum *dir_out = nullptr, Vec4 *mask_out = nullptr);
   void assign_mask_channels();  // (round 444)
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
   std::vector<uint8_t> invalid_;  // (round 430: per texel, inside geometry - its rays mostly met back faces)
@@ -252,12 +256,12 @@ class Lightmapper {
  private:
   void finish_directions();
   void finish_masks();                   // (round 444)
-  std::vector<Vec3> masks_;              // (round 444: per texel, in a Shadowmask bake)
+  std::vector<Vec4> masks_;              // (round 444: per texel, in a Shadowmask bake; round 454: four channels)
   std::vector<int> mask_channel_;        // (round 444: per light, its mask channel or -1)
   bool bakes_direct(const BakeLight &bl) const { return bl.mode == 2 || (bl.mode == 1 && s_.lighting_mode == 2); }
-  Vec3 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
+  Vec4 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
  public:
-  static constexpr int kMaskChannels = 3;  // (a page's three colours: Unity keeps four)
+  static constexpr int kMaskChannels = 4;  // (round 454: Unity's four lights a texel; round 444 held three)
  private:
   std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams_;  // (round 440: the layout's seam pairs, per page)
   double seam_step_before_ = 0.0, seam_step_after_ = 0.0;

@@ -954,6 +954,21 @@ void Renderer3D::flush() {
   js.set_max_threads(saved_threads);
 }
 
+Vec4 Lightmap::sample4(Vec2 uv) const {
+  if (width <= 0 || height <= 0 || texels.size() < (size_t)width * height) return Vec4(0, 0, 0, 0);
+  if (alpha.size() < (size_t)width * height) return Vec4(sample(uv), 1.0f);
+  float fx = uv.x * width - 0.5f, fy = uv.y * height - 0.5f;
+  if (!(fx == fx)) fx = 0.0f;
+  if (!(fy == fy)) fy = 0.0f;
+  fx = std::max(0.0f, std::min((float)(width - 1), fx));
+  fy = std::max(0.0f, std::min((float)(height - 1), fy));
+  const int x0 = (int)fx, y0 = (int)fy, x1 = std::min(width - 1, x0 + 1), y1 = std::min(height - 1, y0 + 1);
+  const float tx = fx - x0, ty = fy - y0;
+  auto at = [&](int x, int y) { return alpha[(size_t)y * width + x]; };
+  const float a = (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) + (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+  return Vec4(sample(uv), a);
+}
+
 Vec3 Lightmap::sample(Vec2 uv) const {
   if (width <= 0 || height <= 0 || texels.size() < (size_t)width * height) return Vec3(0.0f);
   float fx = uv.x * width - 0.5f, fy = uv.y * height - 0.5f;
@@ -1946,7 +1961,7 @@ void Renderer3D::shade_deferred() {
           sp.lightmap = it.lightmap->sample(lm_uv);
           sp.has_lightmap = true;
           if (it.lightmap_dir) sp.lightmap_dir = it.lightmap_dir->sample(lm_uv), sp.has_lightmap_dir = true;  // (round 426)
-          if (it.shadowmask) sp.shadowmask = it.shadowmask->sample(lm_uv), sp.has_shadowmask = true;  // (round 444)
+          if (it.shadowmask) sp.shadowmask = it.shadowmask->sample4(lm_uv), sp.has_shadowmask = true;  // (round 444)
         }
         if (T.mat->shading_model == 1) {  // (task 0164: the normal at the next pixel right and below, for the band edges; painted toon materials are not uniform, so the material decides)
           auto wn_at = [&](Vec3 b) { return normalize(T.wn[0] * b.x + T.wn[1] * b.y + T.wn[2] * b.z); };
@@ -2051,6 +2066,16 @@ void Renderer3D::shade_deferred() {
   stats_.pixels_simd = simd_pixels.load();
 }
 
+/* Round 454 (ADR 0118): a Shadowmask light's visibility on a lightmapped point from its realtime shadow and its mask.
+ * Shadowmask: the darker of the two. Distance Shadowmask, for the light with a realtime map: the realtime shadow within
+ * 0.9 D of the camera, the mask beyond D, a linear fade between; the other Mixed lights keep the mask at every distance. */
+float shadowmask_visibility(const LightingEnv &env, bool has_map, float realtime, float mask, float camera_distance) {
+  if (env.shadowmask_mode != 1 || !has_map) return std::min(realtime, mask);
+  const float D = std::max(1e-3f, env.shadow_distance);
+  const float f = std::max(0.0f, std::min(1.0f, (camera_distance - 0.9f * D) / (0.1f * D)));
+  return realtime + (mask - realtime) * f;
+}
+
 Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, Vec3 V, const DrawItem &it, const Environment &env) const {
   if (s.unlit && s.handpainted) {  // (task 0247: the colour as painted, a rim at grazing angles, a highlight where the roughness is low)
     const Material &m = *s.handpainted;
@@ -2072,6 +2097,8 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     }
     const int mask_ch = sp.has_shadowmask ? light_mask_channel(l.bake_mode) : -1;  // (round 444: a Shadowmask light's baked shadow here)
     const float mask_vis = mask_ch >= 0 ? std::max(0.0f, std::min(1.0f, sp.shadowmask[mask_ch])) : 1.0f;
+    const bool mask_has_map = mask_ch >= 0 && (int)li == env_.shadow_light && env_.shadow;
+    const float cam_dist = mask_has_map && env_.shadowmask_mode == 1 ? length(sp.position - env_.camera_pos) : 0.0f;
     if (s.toon) {
       /* Toon (ADR 0020): N.L x the shadow x the falloff (range, spot cone, an area's facing), in tones; the dark side
        * takes the shadow colour. As the path tracers' light sampling. With Key Light Only (task 0148) the brightest
@@ -2092,7 +2119,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
         vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
       /* The face shadow map (task 0149) gives the key light's lit term instead of N.L. */
       const float face = (int)li == toon_key_ ? toon_face_lit(*s.toon, s, it.local_key) : -1.0f;
-      vis = std::min(vis, mask_vis);  // (round 444)
+      vis = shadowmask_visibility(env_, mask_has_map, vis, mask_vis, cam_dist);  // (round 444; Distance Shadowmask: round 454)
       const float lit = (face >= 0.0f ? face : std::max(ndl, 0.0f) * vis) * std::min(fall, 1.0f);  // (the map is the face's shadow: no cast shadow on top)
       const int key = s.toon->toon_key_light_only ? toon_key_ : -1;
       lo += (key >= 0 && (int)li != key ? toon_fill(s, lit) : shade_toon(s, n, V, L, lit)) * l.color * l.intensity;
@@ -2135,7 +2162,7 @@ Vec3 Renderer3D::light_surface(const SurfaceSample &s, const SurfacePoint &sp, V
     float vis = 1.0f;
     if ((int)li == env_.shadow_light && env_.shadow && it.receive_shadows)
       vis = env_.shadow->lookup(sp.position + sp.geo_normal * 0.01f, dot(sp.geo_normal, L));
-    vis = std::min(vis, mask_vis);  // (round 444: the baked shadow from static objects; a realtime one from moving ones on top)
+    vis = shadowmask_visibility(env_, mask_has_map, vis, mask_vis, cam_dist);  // (round 444: the baked shadow from static objects; a realtime one from moving ones on top; round 454: Distance Shadowmask)
     if (vis <= 0) continue;
     lo += brdf_eval(s, n, V, L) * l.color * (atten * vis);
   }

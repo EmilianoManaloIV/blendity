@@ -1857,6 +1857,7 @@ struct UnityBakeSettings {
   bool ao = false;
   int backend = 1;            // m_BakeBackend: 0 Enlighten, 1 Progressive CPU, 2 Progressive GPU
   bool baked_gi = true;       // m_EnableBakedLightmaps (Baked Global Illumination)
+  int64_t settings_doc = 0;   // round 454: the fileID of the embedded LightingSettings document the settings came from (0: none)
   std::string source;         // "the LightingSettings asset" / "the scene's embedded LightingSettings" / "the scene's own settings"
 };
 struct UnitySceneLink {
@@ -1908,6 +1909,11 @@ int default_lighting_update_mode();
 struct LightingSettings {
   bool baked_gi = true;           // Baked Global Illumination
   int lighting_mode = 0;          // 0 Baked Indirect, 1 Shadowmask, 2 Subtractive (round 444, ADR 0117)
+  /* Round 454 (ADR 0118): Unity's Shadowmask Mode and Shadow Distance (QualitySettings there, project-wide; here with the
+   * scene's lighting). View settings - the bake is the same for both modes. 0 Shadowmask, 1 Distance Shadowmask: the
+   * key Mixed light's realtime shadow within shadow_distance metres of the camera, its mask beyond. */
+  int shadowmask_mode = 0;
+  float shadow_distance = 150.0f;
   float texels_per_unit = 40.0f;  // Lightmap Resolution
   int max_size = 1024;            // Max Lightmap Size
   int padding = 2;                // Lightmap Padding (texels)

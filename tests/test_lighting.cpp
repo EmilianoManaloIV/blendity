@@ -7428,6 +7428,373 @@ static void tests_round453() {
   });
 }
 
+/* ---------------------------------------------------------------- round 454: four mask lights, Distance Shadowmask (task 0430) */
+static void tests_round454() {
+  /* A mask page's four channels at a point on a mesh (identity-placed), through its entry's UVs as the renderers read them. */
+  auto mask_at = [](const LightingData &ld, uint64_t id, const Mesh &m, Vec3 p, Vec4 &out) {
+    auto e = ld.entries.find(id);
+    if (e == ld.entries.end() || (size_t)e->second.page >= ld.mask_pages.size()) return false;
+    const RenderMesh &rm = m.render_mesh();
+    for (size_t t = 0; t < rm.tri_count() && e->second.tri_uv.size() == rm.tri_count() * 3; t++) {
+      const Vec3 a = rm.positions[rm.indices[t * 3]], b = rm.positions[rm.indices[t * 3 + 1]], c = rm.positions[rm.indices[t * 3 + 2]];
+      const Vec3 n = cross(b - a, c - a);
+      const float area2 = dot(n, n);
+      if (!(area2 > 1e-12f) || std::fabs(dot(p - a, n)) / std::sqrt(area2) > 0.02f) continue;
+      const float w1 = dot(cross(p - a, c - a), n) / area2, w2 = dot(cross(b - a, p - a), n) / area2, w0 = 1.0f - w1 - w2;
+      if (w0 < -1e-3f || w1 < -1e-3f || w2 < -1e-3f) continue;
+      out = ld.mask_pages[(size_t)e->second.page].sample4(e->second.tri_uv[t * 3] * w0 + e->second.tri_uv[t * 3 + 1] * w1 + e->second.tri_uv[t * 3 + 2] * w2);
+      return true;
+    }
+    return false;
+  };
+  test("Four mask lights (round 454): four Mixed lamps over four boxes in a Shadowmask bake are recorded as modes 4-7 and each channel is dark under its own box and clear in the open; a fifth Mixed lamp is baked as a Baked light", [&] {
+    MeshPtr floor = primitives::plane(16.0f, 16), box = primitives::cube(1.0f);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    const float xs[4] = {-6.0f, -2.0f, 2.0f, 6.0f};
+    std::vector<BakeLight> lamps(5);
+    for (int i = 0; i < 5; i++) {
+      lamps[(size_t)i].light.type = RenderLight::Point, lamps[(size_t)i].light.range = 100.0f;
+      lamps[(size_t)i].light.position = i < 4 ? Vec3(xs[i], 4.0f, 0.0f) : Vec3(0.0f, 4.0f, -6.0f);
+      lamps[(size_t)i].light.intensity = i < 4 ? 8.0f - (float)i : 1.0f;  // (the brightest first: channels 0-3 in this order; the weakest has none left)
+      lamps[(size_t)i].mode = 1, lamps[(size_t)i].id = 11 + (uint64_t)i;
+    }
+    BakeSettings bs;
+    bs.texels_per_unit = 6, bs.indirect_samples = 16, bs.bounces = 1, bs.denoise = false, bs.directional = false, bs.lighting_mode = 1;
+    std::vector<BakeObject> objs{bake_object(1, floor, Mat4::identity(), {white})};
+    for (int i = 0; i < 4; i++) {
+      BakeObject b = bake_object(2 + (uint64_t)i, box, Mat4::translate(Vec3(xs[i], 1.5f, 0.0f)), {white});
+      b.want_lightmap = false;
+      objs.push_back(b);
+    }
+    Lightmapper lm;
+    lm.begin(objs, lamps, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    const LightingData ld = lm.take_result();
+    std::printf("    the lamps' modes: %d %d %d %d, the fifth %d\n", ld.light_modes.at(11), ld.light_modes.at(12), ld.light_modes.at(13), ld.light_modes.at(14), ld.light_modes.at(15));
+    CHECK(ld.light_modes.at(11) == 4 && ld.light_modes.at(12) == 5 && ld.light_modes.at(13) == 6 && ld.light_modes.at(14) == 7 && ld.light_modes.at(15) == 2);
+    CHECK(ld.mask_pages.size() == ld.pages.size());
+    /* The shared list the probes and Light Volumes bake from: the same split (the suns first, then by intensity), before any
+     * Lightmapper sees it - a fifth Mixed light is Baked for every baker, not only for the lightmaps. */
+    std::vector<BakeLight> shared(6);
+    for (size_t i = 0; i < shared.size(); i++) {
+      shared[i].mode = 1, shared[i].id = 40 + i;
+      shared[i].light.type = i == 0 ? RenderLight::Directional : RenderLight::Point;
+      shared[i].light.intensity = i == 0 ? 1.0f : 6.0f - (float)i;  // (the sun 1, then 5 4 3 2 1)
+    }
+    CHECK(shadowmask_split(shared, false) == 2);
+    CHECK(shared[0].mode == 1 && shared[1].mode == 1 && shared[2].mode == 1 && shared[3].mode == 1 && shared[4].mode == 2 && shared[5].mode == 2);
+    CHECK(shadowmask_split(shared, false) == 0);  // (nothing past four any more)
+    Vec4 open(0, 0, 0, 0);
+    CHECK(mask_at(ld, 1, *floor, Vec3(0.0f, 0.0f, 6.0f), open));
+    for (int c = 0; c < 4; c++) {
+      Vec4 under(1, 1, 1, 1);
+      CHECK(mask_at(ld, 1, *floor, Vec3(xs[c], 0.0f, 0.0f), under));
+      std::printf("    channel %d: %.3f under its box, %.3f in the open\n", c, under[c], open[c]);
+      CHECK(under[c] < 0.05f && open[c] > 0.95f);
+    }
+  });
+  test("A Shadowmask bake's masks on disk (round 454): four channels saved as ShadowMask-N.png and read back within 1/255; a round 444 bake's 3-channel .hdr still loads (the fourth channel clear); a folder with neither keeps the masks out; saving over old .hdr masks removes them", [] {
+    const std::string dir = fs::join(test_dir(), "r454_masks");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    LightingData ld;
+    for (int p = 0; p < 2; p++) {
+      Lightmap page, mask;
+      page.width = mask.width = 8, page.height = mask.height = 4 + 4 * p;
+      page.texels.assign((size_t)page.width * page.height, Vec3(0.5f));
+      mask.texels.resize(page.texels.size());
+      mask.alpha.resize(page.texels.size());
+      for (size_t i = 0; i < mask.texels.size(); i++) {
+        const float t = (float)i / (float)mask.texels.size();
+        mask.texels[i] = Vec3(t, 1.0f - t, std::fmod(t * 7.0f, 1.0f));
+        mask.alpha[i] = std::fmod(t * 3.0f + 0.31f, 1.0f);
+      }
+      ld.pages.push_back(page), ld.mask_pages.push_back(mask);
+    }
+    LightingData::Entry e;
+    e.page = 0;
+    ld.entries[1] = e;
+    ld.light_modes[7] = 7;
+    /* Old masks in the folder: a round 444 .hdr for each page. */
+    for (int p = 0; p < 2; p++) {
+      const std::vector<float> rgb((size_t)ld.pages[(size_t)p].texels.size() * 3, 0.5f);
+      CHECK(write_hdr(fs::join(dir, strprintf("ShadowMask-%d.hdr", p)), rgb.data(), ld.pages[(size_t)p].width, ld.pages[(size_t)p].height));
+    }
+    std::string err;
+    CHECK(ld.save(dir, err));
+    CHECK(fs::exists(fs::join(dir, "ShadowMask-0.png")) && fs::exists(fs::join(dir, "ShadowMask-1.png")));
+    CHECK(!fs::exists(fs::join(dir, "ShadowMask-0.hdr")) && !fs::exists(fs::join(dir, "ShadowMask-1.hdr")));
+    LightingData back;
+    CHECK(back.load(dir, err) && back.mask_pages.size() == 2 && back.light_modes.at(7) == 7);
+    float worst = 0.0f;
+    for (size_t p = 0; p < back.mask_pages.size(); p++)
+      for (size_t i = 0; i < ld.mask_pages[p].texels.size() && back.mask_pages[p].alpha.size() == ld.mask_pages[p].alpha.size(); i++) {
+        const Vec3 a = ld.mask_pages[p].texels[i], b = back.mask_pages[p].texels[i];
+        worst = std::max({worst, std::fabs(a.x - b.x), std::fabs(a.y - b.y), std::fabs(a.z - b.z), std::fabs(ld.mask_pages[p].alpha[i] - back.mask_pages[p].alpha[i])});
+      }
+    std::printf("    the PNG pages read back: worst difference %.5f (1/255 is %.5f)\n", worst, 1.0f / 255.0f);
+    CHECK(worst <= 1.0f / 255.0f);
+    /* A round 444 folder: the .hdr pages (three channels), no PNG. */
+    for (int p = 0; p < 2; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.png", p)).c_str());
+    const float levels[3] = {0.0f, 0.5f, 1.0f};
+    for (int p = 0; p < 2; p++) {
+      const Lightmap &pg = ld.pages[(size_t)p];
+      std::vector<float> rgb(pg.texels.size() * 3);
+      for (size_t i = 0; i < pg.texels.size(); i++) rgb[i * 3] = levels[i % 3], rgb[i * 3 + 1] = levels[(i + 1) % 3], rgb[i * 3 + 2] = levels[(i + 2) % 3];
+      CHECK(write_hdr(fs::join(dir, strprintf("ShadowMask-%d.hdr", p)), rgb.data(), pg.width, pg.height));
+    }
+    LightingData old;
+    CHECK(old.load(dir, err) && old.mask_pages.size() == 2);
+    bool same = old.mask_pages.size() == 2;
+    for (size_t p = 0; same && p < 2; p++)
+      for (size_t i = 0; i < old.mask_pages[p].texels.size(); i++) {
+        const Vec3 t = old.mask_pages[p].texels[i];
+        same = same && std::fabs(t.x - levels[i % 3]) < 0.01f && std::fabs(t.y - levels[(i + 1) % 3]) < 0.01f && std::fabs(t.z - levels[(i + 2) % 3]) < 0.01f &&
+               old.mask_pages[p].sample4(Vec2(0.5f, 0.5f)).w == 1.0f && old.mask_pages[p].alpha[i] == 1.0f;
+      }
+    CHECK(same);
+    /* Neither file: the colour pages load, the masks stay out. */
+    for (int p = 0; p < 2; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.hdr", p)).c_str());
+    LightingData none;
+    CHECK(none.load(dir, err) && none.pages.size() == 2 && none.mask_pages.empty());
+    CHECK(none.light_modes.at(7) == 1);  // (a channel with no mask: the light shadows in realtime alone, not against a white mask)
+    std::filesystem::remove_all(dir, ec);
+  });
+  test("Distance Shadowmask (round 454): the key light's realtime shadow within 0.9 of the Shadow Distance, the mask beyond it, a fade between; plain Shadowmask is the darker of the two at every distance; a Mixed light without a realtime map keeps the mask", [] {
+    LightingEnv env;
+    env.shadowmask_mode = 1, env.shadow_distance = 100.0f;
+    const float near_v = shadowmask_visibility(env, true, 0.0f, 1.0f, 50.0f), far_v = shadowmask_visibility(env, true, 0.0f, 1.0f, 120.0f);
+    const float mid = shadowmask_visibility(env, true, 0.0f, 1.0f, 95.0f), edge = shadowmask_visibility(env, true, 0.0f, 1.0f, 90.0f);
+    std::printf("    realtime 0 / mask 1: %.2f at 0.5 D, %.2f at 0.9 D, %.2f at 0.95 D, %.2f at 1.2 D\n", near_v, edge, mid, far_v);
+    CHECK(near_v == 0.0f && edge == 0.0f && std::fabs(mid - 0.5f) < 1e-4f && far_v == 1.0f);
+    CHECK(shadowmask_visibility(env, true, 1.0f, 0.0f, 50.0f) == 1.0f && shadowmask_visibility(env, true, 1.0f, 0.0f, 120.0f) == 0.0f);  // (a moving caster's shadow near, the mask's beyond)
+    CHECK(shadowmask_visibility(env, false, 1.0f, 0.25f, 120.0f) == 0.25f && shadowmask_visibility(env, false, 0.0f, 0.75f, 20.0f) == 0.0f);  // (no map: min)
+    env.shadowmask_mode = 0;
+    for (float d : {10.0f, 95.0f, 500.0f}) CHECK(shadowmask_visibility(env, true, 0.0f, 1.0f, d) == 0.0f && shadowmask_visibility(env, true, 1.0f, 0.25f, d) == 0.25f);
+    CHECK(light_mask_channel(4) == 0 && light_mask_channel(7) == 3 && light_mask_channel(8) == -1 && light_mask_channel(3) == -1);
+  });
+  test("Distance Shadowmask in the Game view (round 454): a ball moved after the bake shadows the floor within the Shadow Distance and not beyond it, as plain Shadowmask shadows it everywhere; changing the mode or the distance redraws without a bake; set Lighting.ShadowmaskMode and ShadowDistance work", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.viewport_device_for_test(1);
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    const uint64_t page_serial = ed.lighting_data_for_test().pages.empty() ? 0 : ed.lighting_data_for_test().pages[0].serial;
+    auto game = [&] {
+      r34_steps(ed, 3);
+      return r35_game(ed);
+    };
+    ed.command("set Lighting.ShadowmaskMode 0");
+    const std::vector<uint32_t> plain = game();
+    ed.command("set Lighting.ShadowmaskMode 1");
+    ed.command("set Lighting.ShadowDistance 1000");
+    const std::vector<uint32_t> within = game();
+    ed.command("set Lighting.ShadowDistance 0.1");  // (the field's smallest: every floor point is beyond it)
+    const std::vector<uint32_t> beyond = game();
+    CHECK(ed.scene().lighting.shadowmask_mode == 1 && std::fabs(ed.scene().lighting.shadow_distance - 0.1f) < 1e-6f);
+    ed.command("set Lighting.ShadowmaskMode 0");
+    const std::vector<uint32_t> plain_again = game();
+    const size_t near_diff = r35_diff_count(plain, within, 12), far_diff = r35_diff_count(plain, beyond, 12);
+    std::printf("    pixels differing from plain Shadowmask: %zu within the distance, %zu beyond it; plain again %zu\n", near_diff, far_diff, r35_diff_count(plain, plain_again, 0));
+    CHECK(far_diff > 150 && near_diff * 4 < far_diff);
+    CHECK(r35_diff_count(plain, plain_again, 0) == 0);  // (nothing else in the picture moved)
+    CHECK(!ed.baking_for_test() && !ed.lighting_data_for_test().pages.empty() && ed.lighting_data_for_test().pages[0].serial == page_serial);  // (no rebake)
+  });
+  test("Distance Shadowmask without its masks (round 454): a saved Shadowmask bake whose ShadowMask pages are gone loads with its lights in realtime alone - the baked pages and modes of lights with no mask, the picture the same inside and beyond the Shadow Distance (no white mask to blend toward)", [] {
+    Editor ed;
+    P37World w = p37_world(ed, false, 1, 1.0f, true);
+    ed.viewport_device_for_test(1);
+    ed.scene().environment.color = Vec3(0.02f);
+    ed.scene().lighting.lighting_mode = 1;
+    ed.commit_change("shadowmask");
+    r35_bake(ed);
+    CHECK(!ed.lighting_data_for_test().mask_pages.empty());
+    const std::string scene = "Assets/Scenes/R454M.scene";
+    ed.command("save " + scene);
+    const std::string dir = ed.lighting_dir_for_test();
+    CHECK(!dir.empty() && fs::exists(fs::join(dir, "ShadowMask-0.png")));
+    for (int p = 0; p < 8; p++) std::remove(fs::join(dir, strprintf("ShadowMask-%d.png", p)).c_str());
+    ed.command("open " + scene);
+    const LightingData &ld = ed.lighting_data_for_test();
+    bool masked = false;
+    for (const auto &kv : ld.light_modes) masked = masked || (kv.second >= 4 && kv.second <= 7);
+    CHECK(!ld.pages.empty() && ld.mask_pages.empty() && !masked);
+    ed.command("set Lighting.ShadowmaskMode 1");
+    auto game = [&](const char *d) {
+      ed.command(std::string("set Lighting.ShadowDistance ") + d);
+      r34_steps(ed, 3);
+      return r35_game(ed);
+    };
+    const std::vector<uint32_t> within = game("1000"), beyond = game("0.1");
+    const size_t diff = r35_diff_count(within, beyond, 6);
+    std::printf("    no masks: %zu pixels differ between inside and beyond the distance\n", diff);
+    CHECK(diff < 20);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::remove(resolve_asset_path(scene).c_str());
+  });
+  test("Unity's shadowmasks in the lightmaps file (round 454): version 4 written and read back with the mask pages, the lights' channels and the Quality settings; a version 3 file reads as before; the project's QualitySettings.asset read at its current level", [] {
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/S/Lightmap-0_comp_light.exr", p.width = 2, p.height = 2;
+    p.rgb.assign(12, 0x3800);
+    p.mask_width = 2, p.mask_height = 1;
+    p.mask = {255, 0, 128, 64, 0, 255, 0, 255};
+    u.pages.push_back(p);
+    u.lights.push_back({"Lamp[0]", 2, 1, 2});
+    u.lights.push_back({"Sun[0]", 1, 1, -1});
+    u.lights.push_back({"Spare[0]", 2, 1, -1, true});
+    u.shadowmask_mode = 0, u.shadow_distance = 40.0f;
+    const std::string bytes = write_unity_lighting(u);
+    UnityLighting back;
+    std::string why;
+    CHECK(read_unity_lighting(bytes, back, why));
+    CHECK(back.pages.size() == 1 && back.pages[0].mask == p.mask && back.pages[0].mask_width == 2 && back.lights.size() == 3 && back.lights[0].mask_channel == 2 &&
+          back.lights[1].mask_channel == -1 && !back.lights[1].overflow && back.lights[2].overflow && back.shadowmask_mode == 0 && back.shadow_distance == 40.0f);
+    Lightmap mp;
+    CHECK(unity_mask_page(back.pages[0], mp) && mp.width == 2 && mp.height == 1 && std::fabs(mp.texels[0].z - 128.0f / 255.0f) < 1e-5f && std::fabs(mp.alpha[0] - 64.0f / 255.0f) < 1e-5f);
+    /* Version 3: the same file without its tail (16 bytes: no masks, no channels, the two settings), the version turned back. */
+    UnityLighting plain = u;
+    plain.pages[0].mask.clear(), plain.pages[0].mask_width = plain.pages[0].mask_height = 0, plain.lights[0].mask_channel = -1, plain.lights[2].overflow = false, plain.shadowmask_mode = -1, plain.shadow_distance = -1.0f;
+    std::string v3 = write_unity_lighting(plain);
+    v3.resize(v3.size() - 4 - 16);
+    const int32_t three = 3;
+    std::memcpy(&v3[8], &three, 4);
+    const uint32_t sum = unity_lighting_hash(v3);
+    v3.append((const char *)&sum, 4);
+    UnityLighting old;
+    CHECK(read_unity_lighting(v3, old, why) && old.pages.size() == 1 && old.pages[0].mask.empty() && old.lights[0].mask_channel == -1 && old.shadowmask_mode == -1 && old.shadow_distance < 0.0f);
+    std::string broken = bytes;
+    broken[broken.size() / 2] ^= 0x55;
+    CHECK(!read_unity_lighting(broken, back, why));
+    const std::string quality =
+        "QualitySettings:\n  m_ObjectHideFlags: 0\n  serializedVersion: 5\n  m_CurrentQuality: 1\n  m_QualitySettings:\n"
+        "  - serializedVersion: 2\n    name: Low\n    shadowmaskMode: 0\n    shadowDistance: 20\n"
+        "  - serializedVersion: 2\n    name: Medium\n    shadowmaskMode: 1\n    shadowDistance: 75.5\n";
+    int mode = -1;
+    float dist = -1.0f;
+    CHECK(unity_quality_shadowmask(quality, mode, dist) && mode == 1 && std::fabs(dist - 75.5f) < 1e-4f && !unity_quality_shadowmask("nothing here\n", mode, dist));
+    const std::string proj = fs::join(test_dir(), "r454_project");
+    std::error_code ec;
+    std::filesystem::remove_all(proj, ec);
+    fs::make_dirs(fs::join(proj, "Assets/Scenes"));
+    fs::make_dirs(fs::join(proj, "ProjectSettings"));
+    CHECK(fs::write_file(fs::join(proj, "Assets/Scenes/Lit.unity"), "x") && unity_find_quality_settings(fs::join(proj, "Assets/Scenes/Lit.unity")).empty());
+    CHECK(fs::write_file(fs::join(proj, "ProjectSettings/QualitySettings.asset"), quality) && unity_find_quality_settings(fs::join(proj, "Assets/Scenes/Lit.unity")) == quality);  // (the project the scene stands in)
+    /* Blendity's own project (an Assets folder, no ProjectSettings) under a folder that has some: not that one's. */
+    fs::make_dirs(fs::join(proj, "Inner/Assets/Imported/Pkg"));
+    CHECK(fs::write_file(fs::join(proj, "Inner/Assets/Imported/Pkg/Lit.unity"), "x") && unity_find_quality_settings(fs::join(proj, "Inner/Assets/Imported/Pkg/Lit.unity")).empty());
+    std::filesystem::remove_all(proj, ec);
+  });
+  test("Unity's shadowmasks and channels in the editor (round 454): a Shadowmask scene's mask pages come in with the lightmaps (rows flipped), each Mixed lamp takes mode 4 + its channel, the project's Shadowmask Mode and Shadow Distance come from the file (Unity's defaults, Distance Shadowmask and 150 m, before it); a mask of another size leaves the masks out; an exported package carries the mask PNG as a Shadowmask texture and the Lighting Mode as m_MixedBakeMode", [] {
+    const std::string rel = "Assets/Imported/R454U";
+    const std::string dir = resolve_asset_path(rel), pkg = fs::join(test_dir(), "R454U.unitypackage");
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(fs::join(dir, ".unity-meta"));
+    const std::string gs = "eeee4540eeee4540eeee4540eeee0001";
+    auto lamp = [](int id, const char *name, int x) {
+      const std::string n = std::to_string(id);
+      return "--- !u!1 &" + n + "0\nGameObject:\n  m_Name: " + name + "\n--- !u!4 &" + n + "1\nTransform:\n  m_GameObject: {fileID: " + n + "0}\n  m_LocalPosition: {x: " + std::to_string(x) +
+             ", y: 3, z: 0}\n  m_Father: {fileID: 0}\n--- !u!108 &" + n + "2\nLight:\n  m_GameObject: {fileID: " + n + "0}\n  m_Type: 2\n  m_Lightmapping: 1\n  m_Intensity: 1\n";
+    };
+    CHECK(fs::write_file(fs::join(dir, "Lit.unity"),
+                         "%YAML 1.1\n--- !u!157 &3\nLightmapSettings:\n  m_LightingSettings: {fileID: 4}\n--- !u!850595691 &4\nLightingSettings:\n  m_BakeResolution: 40\n  m_MixedBakeMode: 0\n"
+                         "--- !u!1 &10\nGameObject:\n  m_Name: Floor\n--- !u!4 &11\nTransform:\n  m_GameObject: {fileID: 10}\n  m_Father: {fileID: 0}\n"
+                         "--- !u!33 &12\nMeshFilter:\n  m_GameObject: {fileID: 10}\n  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+                         "--- !u!23 &13\nMeshRenderer:\n  m_GameObject: {fileID: 10}\n" + lamp(20, "LampA", -3) + lamp(30, "LampB", 0) + lamp(40, "LampC", 3) + lamp(50, "LampD", 6)));
+    CHECK(fs::write_file(fs::join(dir, ".unity-guids"), gs + "\tAssets/Lit.unity\t" + rel + "/Lit.unity\n"));
+    CHECK(fs::write_file(fs::join(dir, ".unity-meta/" + gs + ".meta"), "fileFormatVersion: 2\nguid: " + gs + "\n"));
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("open " + rel + "/Lit.unity");
+    GameObject *floor = ed.scene().find_by_name("Floor");
+    CHECK(floor && floor->evaluated_mesh(1) && ed.scene().find_by_name("LampA"));
+    if (!floor || !floor->evaluated_mesh(1)) return;
+    std::printf("    the import's defaults: Shadowmask Mode %d, Shadow Distance %.0f\n", ed.scene().lighting.shadowmask_mode, ed.scene().lighting.shadow_distance);
+    CHECK(ed.scene().lighting.shadowmask_mode == 1 && ed.scene().lighting.shadow_distance == 150.0f);
+    const RenderMesh &rm = floor->evaluated_mesh(1)->render_mesh();
+    UnityLighting u;
+    UnityLighting::Page p;
+    p.color = "Assets/Lit/Lightmap-0_comp_light.exr", p.width = p.height = 8;
+    p.rgb.assign((size_t)8 * 8 * 3, 0x3800);
+    p.mask_width = p.mask_height = 8;
+    p.mask.resize((size_t)8 * 8 * 4);
+    for (int y = 0; y < 8; y++)  // (Unity's rows run up: its row 0 is the bottom)
+      for (int x = 0; x < 8; x++) {
+        uint8_t *c = &p.mask[((size_t)y * 8 + (size_t)x) * 4];
+        c[0] = y == 0 ? 255 : 0, c[1] = y == 7 ? 255 : 0, c[2] = (uint8_t)(x * 30), c[3] = 64;
+      }
+    u.pages.push_back(p);
+    UnityLighting::MeshData m;
+    for (size_t i = 0; i < rm.positions.size(); i++) m.positions.push_back(rm.positions[i]), m.uv.push_back(Vec2(rm.positions[i].x + 0.5f, rm.positions[i].z + 0.5f));
+    m.indices = rm.indices;
+    u.meshes.push_back(m);
+    UnityLighting::Renderer r;
+    r.path = "Floor[0]", r.mesh = 0, r.lightmap = 0, r.world = Mat4::identity();
+    u.renderers.push_back(r);
+    u.lights = {{"LampA[0]", 2, 1, 3}, {"LampB[0]", 2, 1, 0}, {"LampC[0]", 2, 1, -1, true}, {"LampD[0]", 2, 1, -1}};  // (C: Unity baked it as Baked; D: no channel, as a lamp added since)
+    u.shadowmask_mode = 0, u.shadow_distance = 40.0f;
+    const std::string file = fs::join(dir, "Lit.unity.unity-lighting");
+    ed.scene().unity_bake.mixed = 2;  // (the scene's Lighting Mode Shadowmask, as its LightingSettings said it)
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    CHECK(ed.apply_unity_lighting(file));
+    const LightingData &ld = ed.lighting_data_for_test();
+    GameObject *a = ed.scene().find_by_name("LampA"), *b = ed.scene().find_by_name("LampB"), *c = ed.scene().find_by_name("LampC");
+    GameObject *d = ed.scene().find_by_name("LampD");
+    CHECK(d && ld.light_modes.count(d->id) && ld.light_modes.at(d->id) == 1);  // (no channel and not baked as Baked: still Mixed)
+    CHECK(a && b && c && ld.light_modes.count(a->id) && ld.light_modes.count(b->id) && ld.light_modes.count(c->id));
+    if (!a || !b || !c || !ld.light_modes.count(c->id)) return;
+    std::printf("    the lamps' modes: %d %d %d; %zu mask page(s)\n", ld.light_modes.at(a->id), ld.light_modes.at(b->id), ld.light_modes.at(c->id), ld.mask_pages.size());
+    CHECK(ld.light_modes.at(a->id) == 7 && ld.light_modes.at(b->id) == 4 && ld.light_modes.at(c->id) == 2);  // (LampC: Mixed with no channel while others have one - past Unity's four: Baked)
+    CHECK(ld.mask_pages.size() == 1 && ld.mask_pages[0].width == 8 && ld.mask_pages[0].height == 8);
+    if (ld.mask_pages.size() == 1 && ld.mask_pages[0].width == 8) {
+      const Lightmap &mp = ld.mask_pages[0];
+      CHECK(mp.texels[7 * 8 + 3].x == 1.0f && mp.texels[3].x == 0.0f && mp.texels[3].y == 1.0f);  // (Unity's bottom row is Blendity's last)
+      CHECK(std::fabs(mp.alpha[5] - 64.0f / 255.0f) < 1e-5f && std::fabs(mp.texels[7 * 8 + 4].z - 120.0f / 255.0f) < 1e-5f);
+    }
+    /* A mask that isn't its lightmap's size: refused for this bake, the lamps stay Mixed. */
+    u.pages[0].mask_width = u.pages[0].mask_height = 4;
+    u.pages[0].mask.resize((size_t)4 * 4 * 4);
+    CHECK(fs::write_file(file, write_unity_lighting(u)));
+    CHECK(ed.apply_unity_lighting(file) && ed.lighting_data_for_test().mask_pages.empty() && ed.lighting_data_for_test().light_modes.at(a->id) == 1);
+    /* The file's Quality values stay in the file: a re-apply never reverts the Inspector's own. */
+    ed.scene().lighting.shadowmask_mode = 1, ed.scene().lighting.shadow_distance = 77.0f;
+    CHECK(fs::write_file(file, write_unity_lighting(u)) && ed.apply_unity_lighting(file) && ed.scene().lighting.shadowmask_mode == 1 && ed.scene().lighting.shadow_distance == 77.0f);
+    /* The package back to Unity: a bake's mask PNG as a Shadowmask texture, the Lighting Mode in the scene's settings. */
+    ed.scene().lighting.lighting_mode = 1;
+    const uint32_t px[4] = {0xFF0000FFu, 0x80FF0000u, 0xFF00FF00u, 0x00FFFFFFu};
+    CHECK(write_png(fs::join(dir, "ShadowMask-0.png"), px, 2, 2, 2, true) && write_png(fs::join(dir, "Other.png"), px, 2, 2, 2, true));
+    CHECK(fs::write_file(fs::join(dir, "LightingData.bin"), "a bake's index"));  // (the mask is a bake's page only beside it)
+    ed.command("export unitypackage " + rel + " " + pkg);
+    std::string bytes, why;
+    std::vector<UnityAsset> assets;
+    CHECK(fs::read_file(pkg, bytes) && read_unity_package(bytes, assets, why));
+    const UnityAsset *mask = nullptr, *scene = nullptr;
+    for (const UnityAsset &asset : assets) {
+      mask = fs::filename(asset.pathname) == "ShadowMask-0.png" ? &asset : mask;
+      scene = fs::filename(asset.pathname) == "Lit.unity" ? &asset : scene;
+    }
+    CHECK(mask && scene);
+    if (mask) {
+      std::printf("    the mask's .meta: %s%s%s\n", mask->meta.find("textureType: 11") != std::string::npos ? "type 11 " : "", mask->meta.find("sRGBTexture: 0") != std::string::npos ? "linear " : "",
+                  mask->meta.find("textureCompression: 0") != std::string::npos ? "uncompressed" : "");
+      CHECK(mask->meta.find("guid: " + mask->guid) != std::string::npos && mask->meta.find("TextureImporter:") != std::string::npos && mask->meta.find("sRGBTexture: 0") != std::string::npos &&
+            mask->meta.find("textureCompression: 0") != std::string::npos && mask->meta.find("textureType: 11") != std::string::npos);
+    }
+    CHECK(scene && scene->data.find("m_MixedBakeMode: 2") != std::string::npos);
+    std::remove(pkg.c_str());
+    std::filesystem::remove_all(dir, ec);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -7459,4 +7826,5 @@ void run_lighting_tests() {
   tests_round451();
   tests_round452();
   tests_round453();
+  tests_round454();
 }
