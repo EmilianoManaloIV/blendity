@@ -1665,6 +1665,11 @@ The card's passes used to issue one draw call per object: 50,000 cubes sharing o
 ? Why can a different mesh in the middle of a row of cubes cost more calls? | An instanced call draws one mesh many times, so the run of cubes before it, the other mesh and the run after it are three calls.
 ? Does instancing change what the picture looks like? | No: each instance reads its own colour, material and place - the tests compare the card's picture with the CPU's pixel by pixel.
 ! cmd:viewport device gpu; benchscene cubes10k | 10,000 cubes sharing one mesh on the card (the Profiler's GPU block shows the frame)
+# The overlays that wait for an edit (round 449)
+The Scene view's overlays - collider wires, Light Volume boxes, reflection probe marks, wireframes, the selection outline - used to be recorded again every frame, though only an edit changes them while you orbit. Since round 449 they are recorded once and kept: as long as the selection, the view's switches, the bakes and the scene's change counter hold still, the same record is drawn again (the grid and what moves by itself - trails, handles, footprints - are still recorded each frame). The scene is checked for a change nothing announced every 8th frame, as the scene hash is. On 50,000 cubes the overlays went from 15-20 ms to under 3; verify mode records fresh and compares, and counts a difference as a stale picture.
+? You orbit a scene and nothing in it changes. Which overlays are recorded again each frame? | Only what moves by itself - the grid, trails, the puppet's handles, footprints; the wireframes, colliders and outline are drawn from the kept record.
+? Why is a bake part of the kept record's key? | A landed or cleared bake changes the Light Volume dots and the reflection probe marks, so the record made before it would be stale.
+! cmd:viewport device gpu; benchscene cubes10k; overlay grid on | Orbit 10,000 cubes: the overlays cost little while nothing is edited
 )"},
     {"Points, Lines, N-gons and Booleans", "Building from a vertex, SketchUp faces, combining solids", R"(
 Blender can start a model from a single vertex. Ctrl+E (Blender's E) on a vertex grows an edge: a "wire" or loose edge that no face uses yet. Ctrl+E on that edge grows a face. Blendity keeps those wire edges in the mesh (Mesh::loose_edges), saves them, and lets the Screw modifier sweep them into a solid.

@@ -260,12 +260,82 @@ void Editor::draw_grid(Renderer3D &r3d) {
 }
 
 void Editor::render_overlays(const Recti &) {
+  render_dynamic_overlays();
+  if (overlays_recording_) render_static_overlays_kept();
+  else render_static_overlays();  // (drawn straight into the picture: nothing to keep)
+}
+
+void Editor::render_dynamic_overlays() {
   if (overlays_extra_for_test_) overlays_extra_for_test_(scene_r3d_);  // (a test's own lines, dots and outlines first)
   draw_body_overlay();  // (the center of mass over the clip, when shown: task 0115)
   draw_trails();  // (task 0282: the trails and the onion skin, sampled a few frames at a time)
   if (autopose_.on) draw_puppet_handles();  // (task 0281)
   if (show_footprints_) draw_footprint_soles();  // (task 0126)
   draw_ai_overlay();       // (task 0130)
+}
+
+/* Round 449: what the static half's picture depends on besides the scene (the counter covers that): the selection,
+ * the shading and outline switches, Edit Mode's object, the dots' size on this screen. */
+uint64_t Editor::static_overlays_key() const {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  for (uint64_t id : selection_) mix(id);
+  mix(selection_.size());
+  mix((uint64_t)shading_);
+  mix((uint64_t)show_outline_ | (uint64_t)edit_mode_ << 1);
+  mix((uint64_t)edit_obj_);
+  mix(lv_bake_gen_);  // (a landed or cleared bake redraws the Light Volumes' dots and the reflection probes' marks)
+  mix(reflection_probe_gen_);
+  mix((uint64_t)ui_.px(2.0f) | (uint64_t)ui_.px(1.5f) << 16 | (uint64_t)ui_.px(2.5f) << 32);
+  return h;
+}
+
+static bool same_overlay_op(const Renderer3D::OverlayRecord::Op &a, const Renderer3D::OverlayRecord::Op &b) {
+  return a.kind == b.kind && a.a.x == b.a.x && a.a.y == b.a.y && a.a.z == b.a.z && a.b.x == b.b.x && a.b.y == b.b.y && a.b.z == b.b.z &&
+         a.color == b.color && a.value == b.value && a.depth_test == b.depth_test && a.first == b.first && a.count == b.count;
+}
+
+static bool same_overlays(const Renderer3D::OverlayRecord &a, const Renderer3D::OverlayRecord &b) {
+  if (a.ops.size() != b.ops.size() || a.ids != b.ids) return false;
+  for (size_t i = 0; i < a.ops.size(); i++)
+    if (!same_overlay_op(a.ops[i], b.ops[i])) return false;
+  return true;
+}
+
+/* (A kept record after what this frame recorded so far: its outlines' ids move along.) */
+static void append_overlays(Renderer3D::OverlayRecord &to, const Renderer3D::OverlayRecord &from) {
+  const uint32_t base = (uint32_t)to.ids.size();
+  to.ids.insert(to.ids.end(), from.ids.begin(), from.ids.end());
+  const size_t first = to.ops.size();
+  to.ops.insert(to.ops.end(), from.ops.begin(), from.ops.end());
+  for (size_t i = first; i < to.ops.size(); i++)
+    if (to.ops[i].kind == Renderer3D::OverlayRecord::Op::Outline) to.ops[i].first += base;
+}
+
+void Editor::render_static_overlays_kept() {
+  OverlayKeep &k = overlay_keep_;
+  const uint64_t key = static_overlays_key();
+  /* (The probes' dots take their colours from the live probes and the sky: not kept while shown.) */
+  const bool hit = k.valid && k.key == key && !walk_due(k.mark) && !scene_->lighting.show_probes;
+  if (hit && !cache_verify_) {
+    append_overlays(scene_overlays_, k.rec);
+    overlays_kept_++;
+    return;
+  }
+  const uint64_t before = edit_epoch::now();
+  Renderer3D::OverlayRecord fresh;
+  scene_r3d_.record_overlays(&fresh);
+  render_static_overlays();
+  scene_r3d_.record_overlays(&scene_overlays_);
+  if (hit && !same_overlays(fresh, k.rec)) note_render_cache_mismatch();
+  append_overlays(scene_overlays_, fresh);
+  k.rec = std::move(fresh);
+  k.key = key;
+  k.valid = true;
+  walk_done(k.mark, before);
+}
+
+void Editor::render_static_overlays() {
   draw_colliders();        // (round 362: Unity's green collider wires)
   draw_light_volumes();    // (round 397: VRC Light Volumes' boxes)
   draw_reflection_probes();  // (round 401)
@@ -349,8 +419,10 @@ void Editor::record_scene_overlays(const Recti &view, bool on) {
   if (!on) return;
   ScopedTimer t;
   scene_r3d_.record_overlays(&scene_overlays_);
+  overlays_recording_ = true;
   if (show_grid_) draw_grid(scene_r3d_);
   render_overlays(view);
+  overlays_recording_ = false;
   scene_r3d_.record_overlays(nullptr);
   prof_.ms_overlays += t.ms();
 }

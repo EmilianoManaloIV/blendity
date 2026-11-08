@@ -104,6 +104,18 @@ Neighbouring instances of one mesh draw as one call in each pass; 100 cubes of o
 Target under 25 ms **not met**: the CPU's per-frame instance build is now most of the frame (`scene` 40.7 of 46.7 ms);
 keeping it is round 458's (docs/tasks/0424).
 
+### The Scene view's static overlays kept (round 449)
+The overlays only edits change are recorded once and kept while nothing they read moves (the key, the change counter,
+a check every 8th frame).
+
+| view | overlays before | overlays after |
+|---|---|---|
+| 50,000 cubes, Scene view | 19.8 / 14.8 ms | 2.6 / 1.8 ms (final build: 1.69) |
+| Shinano, Scene view | 1.15 ms | 0.19 ms |
+
+Shinano's Scene view stays 5.3-5.5 ms against the target of <= 3.3: its UI is 2.8 ms (3.2 in the final build's run).
+Reusing the UI is round 458's (docs/tasks/0425).
+
 ### The scene's change counter (round 435, ADR 0115)
 Nothing in the scene said "changed", so every view walked every object every frame to find out. Now every edit path
 moves one counter and the views keep the scene hash while it holds still (checked by a walk every 8th frame).

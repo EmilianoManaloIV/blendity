@@ -2,6 +2,18 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 449): the Scene view's static overlays kept
+
+**Asked:** Pass 19's round 449 - the Scene view recorded every overlay every frame; 50,000 cubes spent 15-20 ms on them.
+
+**Changed (task 0425)**
+- **Kept overlays:** the overlays that only edits change (colliders, Light Volumes, reflection probes, wireframes, the probes' dots, the selection outline) are recorded once and kept while the selection, the view's switches, the bake generations and the scene's change counter hold still (checked every 8th frame; every frame in verify mode, which records fresh and counts a difference as a stale picture); what moves by itself (trails, handles, footprints, the centre of mass) is recorded every frame.
+- 50,000 cubes' overlays 19.8 / 14.8 -> 2.6 / 1.8 ms; Shinano's 1.15 -> 0.19 ms.
+- **Not done, moved to round 458:** the UI's reuse - Shinano's Scene view is 5.3-5.5 ms against the target of 3.3 (its UI is 2.8 ms).
+- **Learn:** "Rendering on the GPU" gains "The overlays that wait for an edit (round 449)", with two questions and a Try-it.
+
+**Checked:** both suites - with Blender's libraries 17,319; dependency-free 16,511 (Windows) and 16,517 (Linux, WSL), 0 failed; the audits.
+
 ## 2026-11-08 (round 448): instanced draws on the card
 
 **Asked:** Pass 19's round 448 - 50,000 cubes sharing one mesh were 50,000 draw calls a pass on the card; target under 25 ms a frame.

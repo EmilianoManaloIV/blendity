@@ -1066,6 +1066,7 @@ class Editor {
   }
   const std::string &card_reason_for_test() const { return card_reason_; }
   void overlays_extra_for_test(std::function<void(Renderer3D &)> fn) { overlays_extra_for_test_ = std::move(fn); }
+  uint64_t overlays_kept_for_test() const { return overlays_kept_; }  // (round 449)
   uint64_t scene_render_hash_for_test() { return scene_render_hash(); }
   bool gizmo_dragging_for_test() const { return drag_ == Drag::Gizmo; }
   bool typed_axis_move_for_test(Vec3 axis, Vec3 &delta) { return typed_axis_move(axis, delta); }
@@ -2044,6 +2045,16 @@ class Editor {
   void render_scene_view(const Recti &r);
   void render_solid(RenderTarget &rt, const Mat4 &v, const Mat4 &p);
   void render_overlays(const Recti &r);
+  /* Round 449: render_overlays in two halves - what moves by itself (trails, the puppet's handles, footprints, the AI
+   * overlay, the centre of mass, a test's own) recorded every frame, and what only edits change (colliders, Light
+   * Volumes, reflection probes, wireframes, the probes' dots, the selection outline) kept while the change counter,
+   * the selection and the view's switches hold still (a WalkMark: checked every 8th frame, every frame in verify mode). */
+  void render_dynamic_overlays();
+  void render_static_overlays();
+  void render_static_overlays_kept();
+  uint64_t static_overlays_key() const;
+  bool overlays_recording_ = false;  // (record_scene_overlays is recording: the kept half can be appended)
+  uint64_t overlays_kept_ = 0;       // (since start: frames whose static overlays were kept)
   /* Task 0192 (ADR 0061): the Scene view's overlays recorded before its picture, for the card to draw with it. */
   void record_scene_overlays(const Recti &view, bool on);
   void draw_scene_overlays(const Recti &view);
@@ -2082,6 +2093,14 @@ class Editor {
     ~WalkScope() { e.walk_done(m, epoch); }
   };
   WalkMark shapes_walk_, collider_walk_, focus_walk_, icon_walk_;
+  /* (Round 449: render_static_overlays_kept's record and what it was made from.) */
+  struct OverlayKeep {
+    WalkMark mark;
+    uint64_t key = 0;
+    bool valid = false;
+    Renderer3D::OverlayRecord rec;
+  };
+  OverlayKeep overlay_keep_;
   void apply_camera_focus();  // (the walk itself: the `focus` command applies it at once)
   std::vector<GameObject *> icon_objects_;  // (round 436: what the Scene view's icon pass draws for)
   const std::vector<GameObject *> &scene_icon_objects();

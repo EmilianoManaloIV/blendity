@@ -4099,6 +4099,69 @@ static void tests_round448() {
   });
 }
 
+static void tests_round449() {
+  auto open = [](Editor &ed) {
+    r34_open(ed);
+    GameObject *wire = ed.scene().create("Wired");
+    wire->add<MeshFilter>()->mesh = primitives::uv_sphere(0.8f, 24, 16);
+    wire->add<MeshRenderer>()->show_wireframe = true;
+    wire->set_local_position({2.0f, 1.0f, 0.0f});
+    ed.mark_changed_for_test("Wired");
+    ed.command("select Cube");
+    ed.command("camera 0 4 6 0 1 0");
+    r34_steps(ed, 3);
+    return wire;
+  };
+  test("round 449: the Scene view's static overlays are kept while only the camera moves - the same picture as recorded fresh (verify mode finds no stale record) - and recorded again when the selection or an object changes (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    GameObject *wire = open(ed);
+    ed.set_scene_hash_check_every_for_test(8);  // (after the open, which headless-inits; a window's interval; a headless editor walks every frame, so nothing would be kept)
+    ed.viewport_device_for_test(2);
+    r34_steps(ed, 3);
+    auto orbit = [&](int frames) {  // (the camera nudged every frame: the grid moves, nothing else)
+      for (int k = 0; k < frames; k++) {
+        ed.command(k % 2 ? "camera 0 4 6 0 1 0" : "camera 0 4 6.02 0 1 0");
+        r34_steps(ed, 1);
+      }
+    };
+    const uint64_t k0 = ed.overlays_kept_for_test();
+    orbit(8);
+    const uint64_t kept = ed.overlays_kept_for_test() - k0;
+    const std::vector<uint32_t> pic_kept = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    orbit(8);
+    const std::vector<uint32_t> pic_fresh = r34_crop(ed, ed.scene_view_rect());
+    const uint64_t mismatches = Editor::render_cache_mismatches_all() - m0;
+    ed.set_render_cache_verify(false);
+    auto differ = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      size_t n = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) n += (a[i] & 0xFFFFFF) != (b[i] & 0xFFFFFF);
+      return n;
+    };
+    const size_t same_view = differ(pic_kept, pic_fresh);
+    ed.command("select Wired");  // (the outline moves to the sphere: the key changes)
+    orbit(2);
+    const size_t after_select = differ(pic_fresh, r34_crop(ed, ed.scene_view_rect()));
+    const std::vector<uint32_t> before_move = r34_crop(ed, ed.scene_view_rect());
+    wire->set_local_position({0.5f, 1.0f, 0.5f});  // (its wireframe moves: the counter moves)
+    orbit(2);
+    const size_t after_move = differ(before_move, r34_crop(ed, ed.scene_view_rect()));
+    std::printf("    kept in %llu of 8 orbit frames; verify mode: %llu stale record(s), %zu pixels differ from the kept picture; the selection "
+                "changed: %zu pixels; the sphere moved: %zu pixels\n",
+                (unsigned long long)kept, (unsigned long long)mismatches, same_view, after_select, after_move);
+    CHECK(kept >= 5);  // (every 8th frame walks anyway, as the scene hash is checked)
+    CHECK(mismatches == 0);
+    CHECK(same_view == 0);
+    CHECK(after_select > 100);
+    CHECK(after_move > 100);
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -4128,4 +4191,5 @@ void run_gpu_tests() {
   tests_round416();
   tests_round443();
   tests_round448();
+  tests_round449();
 }
