@@ -2,6 +2,37 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 460): UVs evaluated, not invented
+
+**Asked:** Pass 20's round 460 - drawing on a textured face, cutting it with a line or Push/Pulling what was drawn
+left the texture where it was: a new corner's UV was (0,0) or a copy of its neighbour's, so a checker broke wherever
+you drew.
+
+**Changed (task 0436, ADR 0120 decision 1)**
+- **`meshops::face_uv_at(m, face, p)`** (`mesh_tools3.cpp`, declared in `mesh.h`): the UV a point has in a face -
+  barycentric in a triangle, bilinear-inverse in a convex planar quad, mean-value coordinates (Floater 2003) in any
+  other n-gon, concave ones too. A point off the face is moved onto its outline; a face whose UV outline folds or has
+  no area answers the nearest corner's UV; never NaN. Beside it `face_uv_affine` (the affine map fitted to a face,
+  for corners outside it), `uv_texel_density` and `project_face_uvs` (planar box projection).
+- **Used where corners are made from a face:** `split_face_path`'s interior points, `imprint_loop` (ring and inner
+  face, so `imprint_loop_across` too), `attach_face` (the arc continues the face's fitted mapping), `dissolve_line_faces`
+  (the threaded corners read off the face across the edge), and the free face Draw adds (box projection at the
+  mesh's average texel density instead of all-zero UVs).
+- **Push/Pull:** a wall's UVs continue the region face's edge UVs along its length and run the pulled distance across at
+  its texel density (the strip Extrude writes); the corners a stretched or shrunk neighbour moves take their UVs from
+  that neighbour's own mapping instead of keeping the old ones. Faces an operator only copies keep their UVs bit for
+  bit; a mesh without UVs gets none.
+
+**Also (review):** Push Through's tube and the ring it cuts in the far face (one exit face), the tube through several coplanar exit faces, and Push/Pull's Joined ring (`fuse_contacts`), now get UVs the same way (the far face's mapping for the ring, the region face's edge strip for the tube); a wall strip's direction comes from the sign of the face's UV area, so concave faces are right; `uv_texel_density` counts only triangles with UV area; `project_face_uvs` maps +X faces as the cube primitive does.
+
+**Not done:** the wall strip is mirrored like Extrude's (a follow-up for both); Push Through's Boolean fallback (Manifold builds, several non-coplanar exit faces) still makes zero UVs (round 462); `imprint_loop_across` accepts NaN outlines, and `imprint_loop` has a scale-absolute tolerance - both move to round 462.
+
+**Learn:** "Drawing onto faces" gains a question and a Try-it (checker material, draw a rectangle, Push/Pull).
+
+**Workflow:** the stack check is per pass now (the user, 2026-11-08: one stack per pass): `tools/dev/stack_check.sh` groups the open PRs sharing commits not on main into stacks and wants exactly one top in each (`FIX=1` merges a stack's stray heads into its newest PR); the `stack` CI job just runs it.
+
+**Checked:** both suites - with Blender's libraries 17,806; dependency-free 16,908 (Windows) and 16,914 (Linux, WSL), 0 failed (the libraries build's gpu group passes once its scratch copy has the colour-management data); the audits; stress `curved` 5,036 operations / 3 problems / 68 overlaps, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 - the same as main's on Linux.
+
 ## 2026-11-08 (round 457): Pass 19's write-up
 
 **Asked:** Pass 19's round 457 - the pass in one table, the comparison with Unity, the lesson, the baseline, the per-round

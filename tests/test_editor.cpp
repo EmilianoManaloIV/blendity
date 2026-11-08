@@ -9462,6 +9462,207 @@ static void tests_round455() {
   });
 }
 
+/* ------------------------------------------------ round 460: UVs evaluated, not invented (task 0436) */
+static void tests_round460() {
+  test("Draw on a textured plane (round 460): a rectangle drawn on a face keeps the other faces' UVs and the texture where it was - the ring and the inner face have UVs read off the face, none all-zero", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>()->mesh->has_uvs());
+    const Mesh was = *g->get<MeshFilter>()->mesh;
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    const Vec3 a = g->world_matrix().point({0.1f, 0, 0.1f}), b = g->world_matrix().point({0.9f, 0, 0.8f});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", a.x, a.y, a.z));
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", b.x, b.y, b.z));
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.has_uvs() && m.face_count() > was.face_count());
+    /* Every corner's UV is what the plane's own mapping gives at that point (the plane is mapped flat). */
+    size_t off = 0, zero = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool all_zero = true;
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const Vec3 p = m.positions[m.face_verts(f)[k]];
+        const Vec2 t = m.uvs[m.face_offsets[f] + k];
+        all_zero = all_zero && t.x == 0.0f && t.y == 0.0f;
+        /* The plane's UVs are position / size + 0.5 on X and Z (size 10 for the default plane, or whatever it is). */
+        const float size = std::max(1e-3f, 2.0f * std::fabs(was.positions[0].x));
+        off += (std::fabs(t.x - (p.x / size + 0.5f)) > 1e-3f || std::fabs(t.y - (p.z / size + 0.5f)) > 1e-3f) ? 1 : 0;
+      }
+      zero += all_zero ? 1 : 0;
+    }
+    std::printf("    drawn on a plane: %zu faces, %zu corners off the plane's mapping, %zu all-zero faces\n", m.face_count(), off, zero);
+    CHECK(off == 0 && zero == 0);
+  });
+}
+
+/* Test engineer's round 460 additions (task 0436). A face is known by its corner positions, so it can be found again after
+ * an operator renumbered the mesh. */
+using R460eSnap = std::map<std::vector<uint32_t>, std::vector<Vec2>>;
+static R460eSnap r460e_snap(const Mesh &m) {
+  R460eSnap s;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    std::vector<uint32_t> key;
+    for (uint32_t c = 0; c < m.face_size(f); c++)
+      for (float x : {m.positions[m.face_verts(f)[c]].x, m.positions[m.face_verts(f)[c]].y, m.positions[m.face_verts(f)[c]].z}) {
+        uint32_t b;
+        std::memcpy(&b, &x, 4);
+        key.push_back(b);
+      }
+    s[key].assign(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+  }
+  return s;
+}
+/* Old faces (found in `before`) whose UV bits differ in `m`, and faces in `m` that `before` did not have. */
+static size_t r460e_changed(const R460eSnap &before, const Mesh &m, size_t *fresh) {
+  size_t changed = 0;
+  *fresh = 0;
+  const R460eSnap now = r460e_snap(m);
+  for (const auto &kv : now) {
+    const auto it = before.find(kv.first);
+    if (it == before.end()) {
+      (*fresh)++;
+      continue;
+    }
+    if (it->second.size() != kv.second.size() || std::memcmp(it->second.data(), kv.second.data(), kv.second.size() * sizeof(Vec2)) != 0) changed++;
+  }
+  return changed;
+}
+static bool r460e_bits_equal(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && a.uvs.size() == b.uvs.size() &&
+         std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0 &&
+         (a.uvs.empty() || std::memcmp(a.uvs.data(), b.uvs.data(), a.uvs.size() * sizeof(Vec2)) == 0);
+}
+
+static void tests_round460_engineer() {
+  test("a free drawn face (round 460, engineer): a rectangle drawn beside a textured plane, on no face, becomes a separate face with UVs of its own (not all (0,0), not flat) and the plane's faces keep their UVs", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>()->mesh->has_uvs());
+    if (!g) return;
+    const Mesh was = *g->get<MeshFilter>()->mesh;
+    const float half = std::max(1.0f, std::fabs(was.positions[0].x));
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    const Vec3 a = g->world_matrix().point({3.0f * half, 0, 0}), b = g->world_matrix().point({3.0f * half + 2.0f, 0, 1.5f});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", a.x, a.y, a.z));
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", b.x, b.y, b.z));
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.face_count() == was.face_count() + 1);
+    CHECK(m.has_uvs() && m.uvs.size() == m.corner_verts.size());
+    if (m.face_count() != was.face_count() + 1 || !m.has_uvs()) return;
+    CHECK(std::memcmp(m.uvs.data(), was.uvs.data(), was.uvs.size() * sizeof(Vec2)) == 0);  // the plane's own corners
+    const size_t f = m.face_count() - 1;
+    bool all_zero = true;
+    for (uint32_t k = 0; k < m.face_size(f); k++) all_zero = all_zero && m.uvs[m.face_offsets[f] + k].x == 0.0f && m.uvs[m.face_offsets[f] + k].y == 0.0f;
+    const Vec2 t0 = m.uvs[m.face_offsets[f]], d1 = m.uvs[m.face_offsets[f] + 1] - t0, d2 = m.uvs[m.face_offsets[f] + 2] - t0;
+    const float area = std::fabs(d1.x * d2.y - d1.y * d2.x);
+    std::printf("    free face: %u corners, all-zero %d, UV area of its first triangle %g\n", m.face_size(f), all_zero ? 1 : 0, (double)area);
+    CHECK(!all_zero && area > 1e-6f);
+  });
+
+  test("a free drawn face on a mesh without UVs (round 460, engineer): drawing beside it adds a face and still no UV layer", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    mesh_make_mutable(g->get<MeshFilter>()->mesh)->uvs.clear();
+    const size_t faces0 = g->get<MeshFilter>()->mesh->face_count();
+    const float half = std::max(1.0f, std::fabs(g->get<MeshFilter>()->mesh->positions[0].x));
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    const Vec3 a = g->world_matrix().point({3.0f * half, 0, 0}), b = g->world_matrix().point({3.0f * half + 2.0f, 0, 1.5f});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", a.x, a.y, a.z));
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", b.x, b.y, b.z));
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.face_count() == faces0 + 1);
+    CHECK(m.uvs.empty());
+  });
+
+  test("Push/Pull a drawn rectangle, F9 and undo (round 460, engineer): untouched faces keep their UV bits through the pull and through F9 re-runs, a re-run with the first distance gives the first run's bits, undo restores the drawn state's bits and redo the pulled state's", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>()->mesh->has_uvs());
+    if (!g) return;
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    const Vec3 a = g->world_matrix().point({0.1f, 0, 0.1f}), b = g->world_matrix().point({0.9f, 0, 0.8f});
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", a.x, a.y, a.z));
+    ed.command(strprintf("drawpoint %.6f %.6f %.6f", b.x, b.y, b.z));
+    ed.step_frame_headless();
+    const Mesh drawn = *g->get<MeshFilter>()->mesh;
+    const R460eSnap s0 = r460e_snap(drawn);
+    CHECK(drawn.has_uvs() && drawn.face_count() > 1);
+    /* P, type the distance, Enter: real events, as a user does it. */
+    auto key_at = [&](platform::EventType t, int x, int y, int key) {
+      platform::Event e;
+      e.type = t;
+      e.x = x;
+      e.y = y;
+      e.key = key;
+      return e;
+    };
+    const Recti r = ed.scene_view_rect();
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    ed.step_frame_headless({key_at(platform::EventType::MouseMove, cx, cy, 0)});
+    ed.step_frame_headless({key_at(platform::EventType::KeyDown, cx, cy, platform::KEY_P)});
+    ed.step_frame_headless({key_at(platform::EventType::KeyUp, cx, cy, platform::KEY_P)});
+    for (char ch : std::string("0.5")) {
+      platform::Event t;
+      t.type = platform::EventType::Text;
+      t.codepoint = (uint32_t)ch;
+      t.x = cx;
+      t.y = cy;
+      ed.step_frame_headless({t});
+    }
+    ed.step_frame_headless({key_at(platform::EventType::KeyDown, cx, cy, platform::KEY_ENTER)});
+    ed.step_frame_headless({key_at(platform::EventType::KeyUp, cx, cy, platform::KEY_ENTER)});
+    const Mesh pulled = *g->get<MeshFilter>()->mesh;
+    size_t fresh = 0;
+    const size_t changed1 = r460e_changed(s0, pulled, &fresh);
+    std::printf("    pulled 0.5: %zu faces (was %zu), %zu old faces changed, %zu new\n", pulled.face_count(), drawn.face_count(), changed1, fresh);
+    CHECK(pulled.face_count() > drawn.face_count() && changed1 == 0 && pulled.has_uvs());
+    ed.command("redo amount 0.9");
+    const Mesh other = *g->get<MeshFilter>()->mesh;
+    CHECK(r460e_changed(s0, other, &fresh) == 0 && other.has_uvs());
+    ed.command("redo amount 0.5");
+    const Mesh again = *g->get<MeshFilter>()->mesh;
+    CHECK(r460e_bits_equal(pulled, again));  // F9 starts from `before`: the same distance gives the same bits
+    /* Undo until the drawn state is back (F9's adjustment may be a step of its own), then redo. */
+    /* (An undo rebuilds the scene's objects: look the object up again each time.) */
+    const std::string name = g->name;
+    auto cur = [&]() -> const Mesh & { return *ed.scene().find_by_name(name)->get<MeshFilter>()->mesh; };
+    for (int i = 0; i < 8 && cur().face_count() != drawn.face_count(); i++) {
+      ed.command("undo");
+      ed.step_frame_headless();
+      std::printf("    undo %d: %zu faces\n", i + 1, cur().face_count());
+    }
+    const Mesh undone = cur();
+    size_t fr2 = 0;
+    std::printf("    after undo: %zu faces (drawn state %zu), positions equal %d, uvs equal %d, old faces changed %zu\n", undone.face_count(), drawn.face_count(),
+                undone.positions.size() == drawn.positions.size() ? 1 : 0, r460e_bits_equal(drawn, undone) ? 1 : 0, r460e_changed(s0, undone, &fr2));
+    fr2 = 0;
+    CHECK(undone.face_count() == drawn.face_count() && r460e_bits_equal(drawn, undone) && r460e_changed(s0, undone, &fr2) == 0 && fr2 == 0);
+    for (int i = 0; i < 4 && cur().face_count() == drawn.face_count(); i++) {
+      ed.command("redo");
+      ed.step_frame_headless();
+    }
+    CHECK(cur().face_count() == pulled.face_count());
+    CHECK(r460e_bits_equal(again, cur()));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -9546,5 +9747,7 @@ void run_editor_tests() {
   tests_round445();
   tests_round447();
   tests_round455();
+  tests_round460();
+  tests_round460_engineer();
   coverage_tests();
 }

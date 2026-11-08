@@ -565,6 +565,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
       if (draw_.face >= 0) Log::warn("Draw: %s - added it as a separate face", err.c_str());
       /* A new face, facing the camera's side of its plane. */
       std::vector<uint32_t> loop;
+      const float density = meshops::uv_texel_density(m);  // before the face is added with its zero UVs
       for (const Vec3 &p : pts) loop.push_back(m.add_vert(p));
       m.add_face(loop.data(), loop.size());
       const Vec3 to_cam = inv.dir(cam_.position() - g->world_matrix().point(pts[0]));
@@ -573,6 +574,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
         s.back() = 1;
         meshops::flip_faces(m, s);
       }
+      meshops::project_face_uvs(m, m.face_count() - 1, density);  // textured like the rest, not all (0,0)
       face_sel_.assign(m.face_count(), 0);
       face_sel_.back() = 1;
       what = "as a new face";

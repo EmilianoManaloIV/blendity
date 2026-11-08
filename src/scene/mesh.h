@@ -546,6 +546,7 @@ bool fuse_contacts(Mesh &m, std::vector<uint8_t> &face_sel);
  * out of it, and joined to the opening by a tube. Several exit faces use the
  * Boolean solver when available. */
 bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *error = nullptr);
+size_t push_through_flat_exit_count();  // how many went through the several-coplanar-exit-faces path (tests)
 /* SketchUp's Push/Pull on one face region, by `distance` along its normal
  * (negative pushes in):
  *  - sides whose neighbouring face lies in the moved wall's plane stretch
@@ -659,6 +660,34 @@ void screw(Mesh &m, float angle_deg, int steps, float screw_offset, int axis, in
 /* Inserts a vertex at lerp(a, b, t) into every face along edge a-b (UVs, seams
  * and sharp marks follow). t at either end returns that end. */
 uint32_t split_edge(Mesh &m, uint32_t a, uint32_t b, float t);
+/* The UV a new corner at p would need to lie in `face` without moving the texture (task 0436, ADR 0120): barycentric in
+ * a triangle, bilinear-inverse in a convex planar quad, mean-value coordinates (Floater 2003) in any other n-gon (concave
+ * ones too), all in the face's plane. A point off the face is moved onto its outline first. A face whose UV outline folds
+ * or has no area (or whose own shape has none) answers the nearest corner's UV, so no UV is invented across a fold. Finite
+ * for any finite stored UVs and any p (a NaN p answers a corner); (0,0) when the mesh has no UVs. */
+Vec2 face_uv_at(const Mesh &m, size_t face, Vec3 p);
+/* The affine map from space to UV fitted to a face's corners (least squares for n-gons): for corners that lie outside the
+ * face (attach_face's arc, a stretched neighbour's moved corner), where face_uv_at would clamp. ok is false when the face
+ * is degenerate, has no UV extent, or the map misses a corner by more than 5% of the face's UV size (curved or folded
+ * charts). attach_face and the corners a stretched Push/Pull neighbour gains then fall back to face_uv_at (the outline
+ * clamp); corners of a neighbour that merely slide keep their old UVs. */
+struct UvAffine {
+  Vec3 origin;
+  Vec2 uv0;
+  Vec3 gu, gv;  // the change of u / v per unit of distance, in the face's plane
+  bool ok = false;
+  Vec2 at(Vec3 p) const {
+    const Vec3 d = p - origin;
+    return Vec2(uv0.x + dot(d, gu), uv0.y + dot(d, gv));
+  }
+};
+UvAffine face_uv_affine(const Mesh &m, size_t face);
+/* The mesh's average texel density (UV length per unit of length: sqrt of UV area over surface area) over the faces that
+ * have UV area; skip_face leaves one out (a face just added with zero UVs). 1 when no face has any. */
+float uv_texel_density(const Mesh &m, size_t skip_face = SIZE_MAX);
+/* Gives a face planar box-projected UVs: the two axes of the plane the face leans to most, scaled by density, anchored at
+ * the origin so faces drawn side by side line up. Needs the mesh's UVs to exist (does nothing otherwise). */
+void project_face_uvs(Mesh &m, size_t face, float density);
 /* Splits face f along a new edge between two of its corners (not neighbours). */
 bool split_face(Mesh &m, size_t f, uint32_t va, uint32_t vb);
 /* The connected faces lying in face f's plane (SketchUp treats them as one face). */

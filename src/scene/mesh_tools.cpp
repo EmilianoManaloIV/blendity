@@ -1112,6 +1112,81 @@ void build_tube(Mesh &m, std::vector<uint32_t> A, std::vector<uint32_t> B, int s
     }
 }
 
+/* UVs for faces cut out of other faces (task 0436). The table maps a vertex to its UV: the corners of the host faces
+ * keep theirs, and each point in `inner` (new, lying on one of the hosts) is read off the host it lies in. */
+static std::unordered_map<uint32_t, Vec2> ring_uv_table(const Mesh &m, const std::vector<uint32_t> &hosts, const std::vector<uint32_t> &inner) {
+  std::unordered_map<uint32_t, Vec2> uv_of;
+  if (!m.has_uvs() || hosts.empty()) return uv_of;
+  for (uint32_t h : hosts)
+    for (uint32_t k = 0; k < m.face_size(h); k++) uv_of.emplace(m.face_verts(h)[k], m.uvs[m.face_offsets[h] + k]);
+  const float eps = 1e-3f * mesh_scale(m);
+  for (uint32_t v : inner) {
+    if (uv_of.count(v)) continue;
+    const Vec3 p = m.positions[v];
+    uint32_t host = hosts[0];
+    for (uint32_t h : hosts)
+      if (point_in_face(m, h, p, eps)) {
+        host = h;
+        break;
+      }
+    uv_of[v] = face_uv_at(m, host, p);
+  }
+  return uv_of;
+}
+
+/* The corner UVs of the faces from `first` on, read off a vertex -> UV table (a vertex that isn't in it keeps what it
+ * has). */
+static void set_uvs_from_vertices(Mesh &m, size_t first, const std::unordered_map<uint32_t, Vec2> &uv_of) {
+  if (!m.has_uvs()) return;
+  for (size_t f = first; f < m.face_count(); f++)
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const auto it = uv_of.find(m.face_verts(f)[k]);
+      if (it != uv_of.end()) m.uvs[m.face_offsets[f] + k] = it->second;
+    }
+}
+
+/* The region face on edge a-b (UINT32_MAX when none). */
+static uint32_t region_face_on(const EdgeFaces &ef, const std::vector<uint8_t> &in_region, uint32_t a, uint32_t b) {
+  for (uint32_t g : ef.at(a, b))
+    if (g < in_region.size() && in_region[g]) return g;
+  return UINT32_MAX;
+}
+
+/* A wall's four corner UVs (a, b, b', a'): the region face's UVs along the edge a-b, and across it the travel of each
+ * corner along the normal (signed) at the face's texel density - the strip extrude_faces writes for its side walls.
+ * near_* is where the strip starts (a tube's later segments), far_* where it ends. The strip runs to the side of the
+ * edge that leaves the face's UV area, found from the sign of that area (so concave faces are right too); it is mirrored
+ * like Extrude's, which is a follow-up for both. Zero density (a face with no UVs of its own) gives a flat strip,
+ * never NaN. */
+static void wall_uvs(const Mesh &m, size_t region_face, uint32_t a, uint32_t b, float near_a, float near_b, float far_a, float far_b, Vec2 out[4]) {
+  const uint32_t n = m.face_size(region_face), base = m.face_offsets[region_face];
+  int ia = -1, ib = -1;
+  double area = 0;
+  for (uint32_t k = 0; k < n; k++) {
+    const uint32_t v = m.face_verts(region_face)[k];
+    const Vec2 t0 = m.uvs[base + k], t1 = m.uvs[base + (k + 1) % n];
+    area += (double)t0.x * t1.y - (double)t0.y * t1.x;
+    if (v == a) ia = (int)k;
+    if (v == b) ib = (int)k;
+  }
+  const Vec2 ta = ia >= 0 ? m.uvs[base + (uint32_t)ia] : Vec2(0.0f, 0.0f), tb = ib >= 0 ? m.uvs[base + (uint32_t)ib] : Vec2(0.0f, 0.0f);
+  const Vec2 d = tb - ta;
+  const float l = length(d), len3 = length(m.positions[b] - m.positions[a]);
+  Vec2 across(0.0f, 0.0f);
+  if (ia >= 0 && ib >= 0 && l > 1e-8f && len3 > 1e-12f && std::fabs(area) > 0.0) {
+    /* With the face's winding and a positive UV area the interior is left of the edge; the edge a-b runs against the
+     * winding when b doesn't follow a. */
+    const bool with_winding = (uint32_t)ib == ((uint32_t)ia + 1) % n;
+    const bool interior_left = with_winding == (area > 0);
+    const Vec2 left = Vec2(-d.y, d.x) / l;
+    across = (interior_left ? left * -1.0f : left) * (l / len3);
+  }
+  out[0] = ta + across * near_a;
+  out[1] = tb + across * near_b;
+  out[2] = tb + across * far_b;
+  out[3] = ta + across * far_a;
+}
+
 /* If region R (one boundary loop) lies on another face T of the mesh, facing
  * it, merge them: the prism the extrusion made becomes part of the solid. */
 bool try_fuse(Mesh &m, const std::vector<uint32_t> &region_faces, const std::vector<uint32_t> &loop, Vec3 nR,
@@ -1157,8 +1232,16 @@ bool try_fuse(Mesh &m, const std::vector<uint32_t> &region_faces, const std::vec
       }
       for (uint32_t &v : m.corner_verts) v = target[v];
     }
-    else if (l_in_t) annulus(m, tl, loop, nT, m.material_of(t), made);   // a hole in T where the prism lands
-    else annulus(m, loop, tl, nR, m.material_of(region_faces[0]), made);  // the cap shrinks to a ring around T
+    else {
+      /* The ring is cut from T (a hole where the prism lands) or from the region (the cap shrinks to a ring around T):
+       * its corners keep their UVs, the other loop's points are read off the face they lie on. */
+      const size_t first = m.face_count();
+      const std::unordered_map<uint32_t, Vec2> uv_of =
+          l_in_t ? ring_uv_table(m, {(uint32_t)t}, loop) : ring_uv_table(m, region_faces, tl);
+      if (l_in_t) annulus(m, tl, loop, nT, m.material_of(t), made);
+      else annulus(m, loop, tl, nR, m.material_of(region_faces[0]), made);
+      set_uvs_from_vertices(m, first, uv_of);
+    }
     return true;
   }
   return false;
@@ -1244,6 +1327,9 @@ bool bridge(Mesh &m, std::vector<uint8_t> &vert_sel, std::vector<uint8_t> &face_
   m.touch();
   return true;
 }
+/* How many Push Throughs went through push_through_flat_exit (a test reads it to know which path ran). */
+static size_t g_flat_exit_count = 0;
+size_t push_through_flat_exit_count() { return g_flat_exit_count; }
 
 /* Push Through whose rays leave through several faces lying in one plane. hits: where each
  * outline corner's ray leaves (on the surface). False, with m untouched, when the
@@ -1312,6 +1398,7 @@ static bool push_through_flat_exit(Mesh &m, std::vector<uint8_t> &face_sel, cons
     std::sort(c.begin(), c.end());
     if (region_corners.count(c)) drop[f] = 1;
   }
+  const std::vector<uint8_t> in_region = drop;  // the region's faces (split_edge below keeps the numbers)
   for (size_t f : inner) drop[f] = 1;
   /* The front outline gets a corner opposite each new back one (the sides map linearly). */
   std::vector<uint32_t> front, rear;
@@ -1339,11 +1426,22 @@ static bool push_through_flat_exit(Mesh &m, std::vector<uint8_t> &face_sel, cons
   }
   /* The tube, wound like push_through_raw's. */
   std::vector<uint32_t> made;
+  const bool has_uv = m.has_uvs();
+  const EdgeFaces ef(m);  // after the splits: the region's faces carry the new front corners
   for (size_t i = 0; i < k; i++) {
-    uint32_t q[4] = {front[i], front[(i + 1) % k], rear[(i + 1) % k], rear[i]};
-    m.add_face(q, 4, nullptr, mat);
+    const size_t j = (i + 1) % k;
+    uint32_t q[4] = {front[i], front[j], rear[j], rear[i]};
+    /* The walls continue the region face's edge UVs, as the single-exit tube's do. */
+    Vec2 t[4];
+    const uint32_t g = has_uv ? region_face_on(ef, in_region, front[i], front[j]) : UINT32_MAX;
+    if (g != UINT32_MAX) {
+      const float ti = dot(m.positions[rear[i]] - m.positions[front[i]], r.normal), tj = dot(m.positions[rear[j]] - m.positions[front[j]], r.normal);
+      wall_uvs(m, g, front[i], front[j], 0.0f, 0.0f, ti, tj, t);
+    }
+    m.add_face(q, 4, g != UINT32_MAX ? t : nullptr, mat);
     made.push_back((uint32_t)m.face_count() - 1);
   }
+  g_flat_exit_count++;
   drop.resize(m.face_count(), 0);
   face_sel = drop_and_select(m, drop, made);
   remove_loose_verts(m);
@@ -1419,13 +1517,28 @@ static bool push_through_raw(Mesh &m, std::vector<uint8_t> &face_sel, int segmen
     }
     rings.push_back(L2);
     const size_t n = L.size();
+    /* UVs: the tube's walls continue the region face's edge UVs, the ring on T follows T's own mapping. */
+    const bool has_uv = m.has_uvs();
+    std::vector<uint32_t> side_face(n, UINT32_MAX);
+    if (has_uv) {
+      const EdgeFaces ef(m);
+      for (size_t i = 0; i < n; i++) side_face[i] = region_face_on(ef, in_region, L[i], L[(i + 1) % n]);
+    }
+    auto travel = [&](int s, size_t i) { return dot(m.positions[rings[(size_t)s][i]] - m.positions[L[i]], r.normal); };
     for (int s = 0; s < segments; s++)
       for (size_t i = 0; i < n; i++) {
-        uint32_t q[4] = {rings[s][i], rings[s][(i + 1) % n], rings[s + 1][(i + 1) % n], rings[s + 1][i]};
-        m.add_face(q, 4, nullptr, mat);
+        const size_t j = (i + 1) % n;
+        uint32_t q[4] = {rings[s][i], rings[s][j], rings[s + 1][j], rings[s + 1][i]};
+        Vec2 t[4];
+        if (side_face[i] != UINT32_MAX) wall_uvs(m, side_face[i], L[i], L[j], travel(s, i), travel(s, j), travel(s + 1, i), travel(s + 1, j), t);
+        m.add_face(q, 4, side_face[i] != UINT32_MAX ? t : nullptr, mat);
         made.push_back((uint32_t)m.face_count() - 1);
       }
-    annulus(m, face_loop(m, T), L2, m.face_normal(T), m.material_of(T), made);
+    const std::vector<uint32_t> T_loop = face_loop(m, T);
+    const std::unordered_map<uint32_t, Vec2> uv_of = ring_uv_table(m, {T}, L2);
+    const size_t ring_first = m.face_count();
+    annulus(m, T_loop, L2, m.face_normal(T), m.material_of(T), made);
+    set_uvs_from_vertices(m, ring_first, uv_of);
     std::vector<uint8_t> drop(m.face_count(), 0);
     for (uint32_t f : r.faces) drop[f] = 1;
     drop[T] = 1;
@@ -1854,6 +1967,10 @@ static size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float
       if (vv[i] == eb) start = i;
     std::vector<uint32_t> path;
     for (uint32_t k = 1; k + 1 < vn; k++) path.push_back(vv[(start + k) % vn]);
+    /* They join the face across the edge, so their UVs are read off it (they lie on its outline). */
+    std::vector<Vec2> path_uv;
+    if (m.has_uvs() && across != SIZE_MAX)
+      for (uint32_t p : path) path_uv.push_back(face_uv_at(m, across, m.positions[p]));
     FaceBuilder fb(m);
     std::vector<uint8_t> sel;
     for (size_t g = 0; g < m.face_count(); g++) {
@@ -1865,9 +1982,9 @@ static size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float
         loop.push_back(v[i]);
         if (fb.has_uv) uv.push_back(m.uvs[b0 + i]);
         if (g == across && i == at)
-          for (uint32_t p : path) {
-            loop.push_back(p);
-            if (fb.has_uv) uv.push_back(m.uvs[b0 + i]);
+          for (size_t k = 0; k < path.size(); k++) {
+            loop.push_back(path[k]);
+            if (fb.has_uv) uv.push_back(path_uv[k]);
           }
       }
       fb.add(loop.data(), loop.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(g), m.smooth_of(g));
@@ -1952,6 +2069,52 @@ PushPullLimits push_pull_limits(const Mesh &m, const std::vector<uint8_t> &face_
     lim.contact_face = up.face[0];
   }
   return lim;
+}
+
+/* Texture upkeep for Push/Pull (task 0436). A neighbour whose corners slide with the region is stretched or shrunk,
+ * so its moved corners take their UVs from the neighbour's own mapping (the affine map fitted to its corners before
+ * the move): the texel density stays and the texture doesn't smear. Fits come first, the move, then the update. */
+struct NeighbourFit {
+  uint32_t face;
+  UvAffine fit;
+};
+
+static std::vector<NeighbourFit> neighbour_fits(const Mesh &m, const std::vector<uint8_t> &in_region, const std::unordered_set<uint32_t> &moving) {
+  std::vector<NeighbourFit> out;
+  if (!m.has_uvs()) return out;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (in_region[f]) continue;
+    bool touched = false;
+    for (uint32_t k = 0; k < m.face_size(f) && !touched; k++) touched = moving.count(m.face_verts(f)[k]) > 0;
+    if (!touched) continue;
+    const UvAffine fit = face_uv_affine(m, f);
+    if (fit.ok) out.push_back({(uint32_t)f, fit});
+  }
+  return out;
+}
+
+static void restretch_uvs(Mesh &m, const std::vector<NeighbourFit> &fits, const std::unordered_set<uint32_t> &moving) {
+  for (const NeighbourFit &nf : fits)
+    for (uint32_t k = 0; k < m.face_size(nf.face); k++) {
+      const uint32_t v = m.face_verts(nf.face)[k];
+      if (moving.count(v)) m.uvs[m.face_offsets[nf.face] + k] = nf.fit.at(m.positions[v]);
+    }
+}
+
+/* The strip of a pulled side wall (a, b, b', a'), UVs from the region face it leaves. */
+static void side_wall_uvs(const Mesh &m, const EdgeFaces &ef, const std::vector<uint8_t> &in_region, Vec3 normal, uint32_t a, uint32_t b, uint32_t a2,
+                          uint32_t b2, Vec2 out[4]) {
+  const uint32_t g = region_face_on(ef, in_region, a, b);
+  if (g == UINT32_MAX) return;
+  const float travel_a = dot(m.positions[a2] - m.positions[a], normal), travel_b = dot(m.positions[b2] - m.positions[b], normal);
+  wall_uvs(m, g, a, b, 0.0f, 0.0f, travel_a, travel_b, out);
+}
+
+/* UVs for the two corners a stretched neighbour gains: its mapping carries on across the strip the region left. The
+ * fit is taken once a face (fit / have_fit), from its corners as they were; a degenerate one is read off the face. */
+static void extended_corner_uvs(const Mesh &m, size_t f, UvAffine &fit, bool &have_fit, uint32_t v1, uint32_t v2, std::vector<Vec2> &uv) {
+  if (!have_fit) fit = face_uv_affine(m, f), have_fit = true;
+  for (uint32_t w : {v1, v2}) uv.push_back(fit.ok ? fit.at(m.positions[w]) : face_uv_at(m, f, m.positions[w]));
 }
 
 static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bool merge_coplanar, PushPullResult *result, std::string *err,
@@ -2190,7 +2353,9 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
         which.push_back(v);
         to.push_back(p);
       }
+      const std::vector<NeighbourFit> fits = neighbour_fits(m, in_region, region_verts);
       for (size_t i = 0; i < which.size(); i++) m.positions[which[i]] = to[i];
+      restretch_uvs(m, fits, region_verts);
       if (result) *result = PushPullResult::Moved;
       m.touch();
       return true;
@@ -2221,7 +2386,9 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
       std::unordered_set<uint32_t> rv;
       for (uint32_t f : r.faces)
         for (uint32_t i = 0; i < m.face_size(f); i++) rv.insert(m.face_verts(f)[i]);
+      const std::vector<NeighbourFit> fits = neighbour_fits(m, in_region, rv);
       for (uint32_t v : rv) m.positions[v] += dvec;
+      restretch_uvs(m, fits, rv);
       m.touch();
       const size_t keep_faces = m.face_count();
       remap_selection(face_sel, tidy_new_geometry(m, old_positions, weld), m.face_count());
@@ -2243,7 +2410,7 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
    * face, which stretches or shrinks (SketchUp merges coplanar faces). */
   const std::vector<uint32_t> &L = r.loops[0];
   std::unordered_map<uint64_t, std::pair<uint32_t, uint32_t>> insert;  // directed edge in the neighbour -> (b', a')
-  struct Wall { uint32_t v[4]; int mat; };
+  struct Wall { uint32_t v[4]; int mat; Vec2 t[4]; };
   std::vector<Wall> walls;
   std::unordered_set<uint32_t> touched;
   struct Side {
@@ -2295,7 +2462,9 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
     }
     else {
       int mat = m.material_of(N != UINT32_MAX ? N : r.faces[0]);
-      walls.push_back({{a, b, newv[b], newv[a]}, mat});
+      Wall w{{a, b, newv[b], newv[a]}, mat, {}};
+      if (m.has_uvs()) side_wall_uvs(m, ef, in_region, r.normal, a, b, newv[a], newv[b], w.t);
+      walls.push_back(w);
     }
   }
   FaceBuilder fb(m);
@@ -2308,6 +2477,8 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
     verts.clear();
     uv.clear();
     bool t = false;
+    UvAffine fit;
+    bool have_fit = false;
     for (uint32_t i = 0; i < n; i++) {
       uint32_t a = v[i], c = v[(i + 1) % n];
       verts.push_back(in_region[f] ? newv[a] : a);
@@ -2317,17 +2488,14 @@ static bool push_pull_impl(Mesh &m, std::vector<uint8_t> &face_sel, float distan
       if (it == insert.end()) continue;
       verts.push_back(it->second.first);
       verts.push_back(it->second.second);
-      if (fb.has_uv) {
-        uv.push_back(m.uvs[b0 + i]);
-        uv.push_back(m.uvs[b0 + (i + 1) % n]);
-      }
+      if (fb.has_uv) extended_corner_uvs(m, f, fit, have_fit, it->second.first, it->second.second, uv);
       t = true;
     }
     fb.add(verts.data(), verts.size(), fb.has_uv ? uv.data() : nullptr, m.material_of(f), m.smooth_of(f));
     was_touched.push_back(t);
   }
   for (const Wall &w : walls) {
-    fb.add(w.v, 4, nullptr, w.mat);
+    fb.add(w.v, 4, fb.has_uv ? w.t : nullptr, w.mat);
     was_touched.push_back(0);
   }
   fb.commit(m);
@@ -2824,12 +2992,17 @@ long imprint_loop(Mesh &m, size_t face, const std::vector<Vec3> &pts_in, std::st
   }
   const int mat = m.material_of(face);
   const bool smooth = m.smooth_of(face);
+  /* The ring and the inner face are cut from this face: its corners keep their UVs and the new points take theirs
+   * from where they lie in it, so the texture stays put. */
   std::vector<uint32_t> inner;
   for (const Vec3 &p : pts) inner.push_back(m.add_vert(p));
+  const std::unordered_map<uint32_t, Vec2> uv_of = ring_uv_table(m, {(uint32_t)face}, inner);
+  const size_t first_new = m.face_count();
   std::vector<uint32_t> made;
   annulus(m, outer, inner, n, mat, made);
   if (dot(loop_newell(m, inner), n) < 0) std::reverse(inner.begin(), inner.end());
   m.add_face(inner.data(), inner.size(), nullptr, mat);
+  set_uvs_from_vertices(m, first_new, uv_of);
   if (!m.face_smooth.empty())
     for (size_t f = m.face_count() - made.size() - 1; f < m.face_count(); f++) m.face_smooth[f] = smooth ? 1 : 0;
   /* The old face goes; everything after it moves down one. */
@@ -2881,11 +3054,26 @@ long attach_face(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vector<
     const uint32_t a = loop[(size_t)((start - s + n) % n)], b = loop[(size_t)((start - s - 1 + 2 * n) % n)];
     if (uses[Mesh::edge_key(a, b)] != 1) return -1;
   }
+  /* The corners shared with f keep their UVs there; the arc lies outside f, so its points continue f's mapping
+   * (the affine map fitted to f's corners) instead of being clamped to f's outline. */
+  const bool has_uv = m.has_uvs();
+  const uint32_t base = m.face_offsets[f];
+  auto corner_uv = [&](int k) { return m.uvs[base + (uint32_t)((k % n + n) % n)]; };
+  std::vector<Vec2> ft;
+  UvAffine fit;
+  if (has_uv) fit = face_uv_affine(m, f);
   fv.push_back(from);
-  for (const Vec3 &p : mid) fv.push_back(m.add_vert(p));
-  for (int s = 0; s < steps; s++) fv.push_back(loop[(size_t)((start - s + n) % n)]);  // to, then back along f
+  if (has_uv) ft.push_back(corner_uv(from == va ? ia : ib));
+  for (const Vec3 &p : mid) {
+    fv.push_back(m.add_vert(p));
+    if (has_uv) ft.push_back(fit.ok ? fit.at(p) : face_uv_at(m, f, p));
+  }
+  for (int s = 0; s < steps; s++) {  // to, then back along f
+    fv.push_back(loop[(size_t)((start - s + n) % n)]);
+    if (has_uv) ft.push_back(corner_uv(start - s));
+  }
   (void)to;
-  m.add_face(fv.data(), fv.size(), nullptr, m.material_of(f));
+  m.add_face(fv.data(), fv.size(), has_uv ? ft.data() : nullptr, m.material_of(f));
   if (!m.face_smooth.empty()) m.face_smooth.back() = m.smooth_of(f) ? 1 : 0;
   m.touch();
   return (long)m.face_count() - 1;

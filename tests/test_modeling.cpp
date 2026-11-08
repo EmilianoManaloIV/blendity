@@ -8446,6 +8446,824 @@ static void tests_round262() {
   });
 }
 
+/* ------------------------------------------------ round 460: UVs evaluated, not invented (task 0436) */
+
+/* A face is known by where its corners are, so it can be found again after an operator renumbered the mesh. */
+using R460Key = std::vector<uint32_t>;
+static R460Key r460_key(const Mesh &m, size_t f) {
+  R460Key k;
+  for (uint32_t c = 0; c < m.face_size(f); c++) {
+    const Vec3 p = m.positions[m.face_verts(f)[c]];
+    for (float x : {p.x, p.y, p.z}) {
+      uint32_t b;
+      std::memcpy(&b, &x, 4);
+      k.push_back(b);
+    }
+  }
+  return k;
+}
+static std::map<R460Key, std::vector<Vec2>> r460_snapshot(const Mesh &m) {
+  std::map<R460Key, std::vector<Vec2>> s;
+  for (size_t f = 0; f < m.face_count(); f++)
+    s[r460_key(m, f)].assign(m.uvs.begin() + m.face_offsets[f], m.uvs.begin() + m.face_offsets[f + 1]);
+  return s;
+}
+/* Faces `after` shares with `before` (same corners): their UVs must be the same bits. Returns the faces that are new, and
+ * counts the ones whose UVs changed. */
+static std::vector<size_t> r460_new_faces(const std::map<R460Key, std::vector<Vec2>> &before, const Mesh &after, size_t &changed) {
+  std::vector<size_t> fresh;
+  changed = 0;
+  for (size_t f = 0; f < after.face_count(); f++) {
+    const auto it = before.find(r460_key(after, f));
+    if (it == before.end()) {
+      fresh.push_back(f);
+      continue;
+    }
+    if (std::memcmp(it->second.data(), &after.uvs[after.face_offsets[f]], it->second.size() * sizeof(Vec2)) != 0) changed++;
+  }
+  return fresh;
+}
+static double r460_density(const Mesh &m, size_t f) {  // UV area over surface area of a face
+  const uint32_t n = m.face_size(f), b = m.face_offsets[f];
+  double a3 = 0, auv = 0;
+  for (uint32_t i = 1; i + 1 < n; i++) {
+    const Vec3 o = m.positions[m.face_verts(f)[0]];
+    a3 += 0.5 * length(cross(m.positions[m.face_verts(f)[i]] - o, m.positions[m.face_verts(f)[i + 1]] - o));
+    const Vec2 d1 = m.uvs[b + i] - m.uvs[b], d2 = m.uvs[b + i + 1] - m.uvs[b];
+    auv += 0.5 * std::fabs((double)d1.x * d2.y - (double)d1.y * d2.x);
+  }
+  return a3 > 0 ? auv / a3 : 0.0;
+}
+static bool r460_all_zero(const Mesh &m, size_t f) {
+  for (uint32_t c = 0; c < m.face_size(f); c++)
+    if (m.uvs[m.face_offsets[f] + c].x != 0.0f || m.uvs[m.face_offsets[f] + c].y != 0.0f) return false;
+  return true;
+}
+
+static void tests_round460() {
+  test("UVs read off a face (round 460): a triangle, a trapezoid and an L-shaped n-gon give the corner values at the corners and the mapped value inside; a point outside, a folded chart and NaN stay finite", [] {
+    Mesh tri;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(4, 0, 0), Vec3(0, 0, 2)}) tri.add_vert(p);
+    const Vec2 tt[3] = {{0.1f, 0.2f}, {0.9f, 0.3f}, {0.2f, 0.8f}};
+    const uint32_t tv[3] = {0, 1, 2};
+    tri.add_face(tv, 3, tt, 0);
+    for (int i = 0; i < 3; i++) {
+      const Vec2 got = meshops::face_uv_at(tri, 0, tri.positions[i]);
+      CHECK_NEAR(got.x, tt[i].x, 1e-5);
+      CHECK_NEAR(got.y, tt[i].y, 1e-5);
+    }
+    const Vec2 mid = meshops::face_uv_at(tri, 0, Vec3(1, 0, 0.5f));  // barycentric (0.5, 0.25, 0.25)
+    CHECK_NEAR(mid.x, 0.5f * 0.1f + 0.25f * 0.9f + 0.25f * 0.2f, 1e-5);
+    CHECK_NEAR(mid.y, 0.5f * 0.2f + 0.25f * 0.3f + 0.25f * 0.8f, 1e-5);
+
+    /* A trapezoid with the unit square as its UVs: the bilinear inverse, not a barycentric guess. */
+    Mesh quad;
+    const Vec3 qp[4] = {{0, 0, 0}, {4, 0, 0}, {3, 0, 2}, {1, 0, 2}};
+    for (Vec3 p : qp) quad.add_vert(p);
+    const Vec2 qt[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    const uint32_t qv[4] = {0, 1, 2, 3};
+    quad.add_face(qv, 4, qt, 0);
+    for (Vec2 st : {Vec2(0.3f, 0.6f), Vec2(0.9f, 0.1f), Vec2(0.5f, 0.5f)}) {
+      const Vec3 a = lerp(qp[0], qp[1], st.x), b = lerp(qp[3], qp[2], st.x);
+      const Vec2 got = meshops::face_uv_at(quad, 0, lerp(a, b, st.y));
+      CHECK_NEAR(got.x, st.x, 1e-5);
+      CHECK_NEAR(got.y, st.y, 1e-5);
+    }
+
+    /* An L-shaped hexagon (concave) with UVs = position / 2: mean-value coordinates reproduce that exactly. */
+    Mesh ell;
+    const float lx[6] = {0, 2, 2, 1, 1, 0}, lz[6] = {0, 0, 1, 1, 2, 2};
+    Vec2 lt[6];
+    uint32_t lv[6];
+    for (int i = 0; i < 6; i++) {
+      lv[i] = ell.add_vert(Vec3(lx[i], 0, lz[i]));
+      lt[i] = Vec2(lx[i] * 0.5f, lz[i] * 0.5f);
+    }
+    ell.add_face(lv, 6, lt, 0);
+    for (Vec2 q : {Vec2(0.5f, 1.5f), Vec2(1.5f, 0.5f), Vec2(0.5f, 0.5f), Vec2(1.0f, 1.5f)}) {
+      const Vec2 got = meshops::face_uv_at(ell, 0, Vec3(q.x, 0, q.y));
+      CHECK_NEAR(got.x, q.x * 0.5f, 1e-4);
+      CHECK_NEAR(got.y, q.y * 0.5f, 1e-4);
+    }
+    /* Outside (in the notch), and NaN: finite and inside the UV bounds. */
+    for (Vec3 p : {Vec3(1.8f, 0, 1.8f), Vec3(-3, 4, 9), Vec3(NAN, 0, 0), Vec3(0, INFINITY, 0)}) {
+      const Vec2 got = meshops::face_uv_at(ell, 0, p);
+      CHECK(finite_bits(got.x) && finite_bits(got.y) && got.x >= 0.0f && got.x <= 1.0f && got.y >= 0.0f && got.y <= 1.0f);
+    }
+    /* A chart with no area (every corner on one UV): the nearest corner's UV, no invented value. */
+    Mesh flat;
+    for (Vec3 p : qp) flat.add_vert(p);
+    const Vec2 ft[4] = {{0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}, {0.5f, 0.5f}};
+    flat.add_face(qv, 4, ft, 0);
+    CHECK(meshops::face_uv_at(flat, 0, Vec3(2, 0, 1)).x == 0.5f);
+    /* Folded: a bow-tie chart on a quad, so the nearest corner answers. */
+    Mesh fold;
+    for (Vec3 p : qp) fold.add_vert(p);
+    const Vec2 fo[4] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
+    fold.add_face(qv, 4, fo, 0);
+    const Vec2 near_corner = meshops::face_uv_at(fold, 0, Vec3(0.1f, 0, 0.05f));
+    CHECK(near_corner.x == 0.0f && near_corner.y == 0.0f);
+    /* Degenerate face (collinear corners) and a mesh without UVs. */
+    Mesh line;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(2, 0, 0)}) line.add_vert(p);
+    const Vec2 lnt[3] = {{0, 0}, {1, 0}, {2, 0}};
+    const uint32_t lnv[3] = {0, 1, 2};
+    line.add_face(lnv, 3, lnt, 0);
+    const Vec2 gl = meshops::face_uv_at(line, 0, Vec3(1.2f, 0, 0));
+    CHECK(finite_bits(gl.x) && finite_bits(gl.y));
+    Mesh bare = *primitives::cube();
+    bare.uvs.clear();
+    const Vec2 gb = meshops::face_uv_at(bare, 0, Vec3(0, 0, 0));
+    CHECK(gb.x == 0.0f && gb.y == 0.0f && bare.uvs.empty());
+  });
+  test("drawing on a textured plane (round 460): a rectangle, a circle across faces, a cut and an arc leave every other face's UVs bit for bit, give the new faces the texel density of their host and no all-zero UVs", [] {
+    const MeshPtr base = primitives::plane(10.0f, 4);
+    CHECK(base->has_uvs());
+    auto run = [&](const char *what, auto op) {
+      Mesh m = *base;
+      const auto before = r460_snapshot(m);
+      const double host = r460_density(m, 5);
+      op(m);
+      size_t changed = 0;
+      const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+      size_t zero = 0, off = 0;
+      for (size_t f : fresh) {
+        zero += r460_all_zero(m, f) ? 1 : 0;
+        off += std::fabs(r460_density(m, f) - host) > 0.05 * host ? 1 : 0;
+      }
+      std::printf("    %s: %zu new faces, %zu untouched faces changed, %zu all-zero, %zu off the host's density by over 5%%\n", what, fresh.size(), changed, zero, off);
+      CHECK(!fresh.empty() && changed == 0 && zero == 0 && off == 0 && m.has_uvs());
+    };
+    run("rectangle", [](Mesh &m) {
+      const Vec3 c = m.face_center(5);
+      CHECK(meshops::imprint_loop(m, 5, {c + Vec3(-0.5f, 0, -0.4f), c + Vec3(0.6f, 0, -0.4f), c + Vec3(0.6f, 0, 0.7f), c + Vec3(-0.5f, 0, 0.7f)}) >= 0);
+    });
+    run("circle across faces", [](Mesh &m) {
+      std::vector<Vec3> ring;
+      for (int i = 0; i < 24; i++) ring.push_back(Vec3(2.0f * std::cos(i * kPi / 12.0f), 0, 2.0f * std::sin(i * kPi / 12.0f)));
+      std::vector<size_t> inside;
+      CHECK(meshops::imprint_loop_across(m, ring, Vec3(0, 1, 0), &inside) >= 0);
+    });
+    run("cut with a bend", [](Mesh &m) {
+      const uint32_t *v = m.face_verts(5);
+      const Vec3 c = m.face_center(5);
+      const Vec3 bend = c + (m.positions[v[1]] - c) * 0.3f;
+      CHECK(meshops::split_face_path(m, 5, v[0], v[2], {bend}));
+    });
+    run("arc on the border", [](Mesh &m) {
+      /* A border face's open edge, and a point outside it. */
+      std::unordered_map<uint64_t, int> uses;
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t k = 0; k < m.face_size(f); k++) uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+      const size_t f = 0;
+      bool done = false;
+      for (uint32_t k = 0; k < m.face_size(f) && !done; k++) {
+        const uint32_t a = m.face_verts(f)[k], b = m.face_verts(f)[(k + 1) % m.face_size(f)];
+        if (uses[Mesh::edge_key(a, b)] != 1) continue;
+        const Vec3 mid = (m.positions[a] + m.positions[b]) * 0.5f, out = normalize(mid - m.face_center(f));
+        done = true;
+        CHECK(meshops::attach_face(m, f, a, b, {mid + out * 1.0f}) >= 0);
+      }
+      CHECK(done);
+    });
+  });
+  test("Push/Pull on a textured mesh (round 460): the walls of a pulled rectangle carry the face's texel density; faces away from it keep their UVs; a pushed-down box top leaves the side faces' texture density", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    const double host = r460_density(m, 5);
+    const Vec3 c = m.face_center(5);
+    const long inner = meshops::imprint_loop(m, 5, {c + Vec3(-0.5f, 0, -0.4f), c + Vec3(0.6f, 0, -0.4f), c + Vec3(0.6f, 0, 0.7f), c + Vec3(-0.5f, 0, 0.7f)});
+    CHECK(inner >= 0);
+    const auto imprinted = r460_snapshot(m);
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[(size_t)inner] = 1;
+    meshops::PushPullResult res = meshops::PushPullResult::Moved;
+    CHECK(meshops::push_pull(m, sel, 0.8f, true, &res));
+    size_t changed = 0;
+    const std::vector<size_t> fresh = r460_new_faces(imprinted, m, changed);
+    size_t walls = 0, zero = 0, off = 0;
+    for (size_t f : fresh) {
+      zero += r460_all_zero(m, f) ? 1 : 0;
+      if (m.face_size(f) != 4) continue;
+      walls++;
+      off += std::fabs(r460_density(m, f) - host) > 0.05 * host ? 1 : 0;
+    }
+    std::printf("    pulled rectangle: %zu new faces (%zu quads), %zu untouched faces changed, %zu all-zero, %zu walls off the host's density\n", fresh.size(), walls, changed, zero, off);
+    CHECK(res == meshops::PushPullResult::Extruded && walls >= 4 && changed == 0 && zero == 0 && off == 0);
+    /* A box's top pushed down: the sides shrink, their texture goes with them (same density), nothing smears. */
+    Mesh box = *primitives::cube(2.0f);
+    CHECK(box.has_uvs());
+    std::vector<double> dens;
+    for (size_t f = 0; f < box.face_count(); f++) dens.push_back(r460_density(box, f));
+    std::vector<uint8_t> top(box.face_count(), 0);
+    for (size_t f = 0; f < box.face_count(); f++)
+      if (box.face_normal(f).y > 0.9f) top[f] = 1;
+    CHECK(meshops::push_pull(box, top, -0.5f, true, &res));
+    size_t drifted = 0, sides = 0;
+    for (size_t f = 0; f < box.face_count(); f++) {
+      if (std::fabs(box.face_normal(f).y) > 0.1f) continue;
+      sides++;
+      drifted += std::fabs(r460_density(box, f) - dens[0]) > 0.05 * dens[0] ? 1 : 0;
+    }
+    std::printf("    pushed box top: %zu side faces, %zu with a texel density off by over 5%%\n", sides, drifted);
+    CHECK(sides == 4 && drifted == 0);
+  });
+  test("drawing on the teapot (round 460): a shape drawn on a spout-side face and pulled leaves every other face's UVs bit for bit; the new faces have UVs of the host's texel density (within 5%)", [] {
+    Mesh m = *primitives::teapot();
+    CHECK(m.has_uvs());
+    /* A flat-ish quad of the body: the one nearest the middle height with the biggest area. */
+    size_t host = SIZE_MAX;
+    float best = 0.0f;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (m.face_size(f) != 4) continue;
+      const float a = length(m.face_normal(f));
+      if (a > best && std::fabs(m.face_center(f).y - 0.6f) < 0.3f && r460_density(m, f) > 0.0) best = a, host = f;
+    }
+    CHECK(host != SIZE_MAX);
+    const double hd = r460_density(m, host);
+    const auto before = r460_snapshot(m);
+    const Vec3 c = m.face_center(host);
+    std::vector<Vec3> shape;
+    for (uint32_t k = 0; k < 4; k++) shape.push_back(c + (m.positions[m.face_verts(host)[k]] - c) * 0.5f);
+    const long inner = meshops::imprint_loop(m, host, shape);
+    CHECK(inner >= 0);
+    size_t changed = 0;
+    std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+    size_t zero = 0, off = 0;
+    for (size_t f : fresh) {
+      zero += r460_all_zero(m, f) ? 1 : 0;
+      off += std::fabs(r460_density(m, f) - hd) > 0.05 * hd ? 1 : 0;
+    }
+    std::printf("    teapot, imprinted: %zu new faces, %zu untouched faces changed, %zu all-zero, %zu off the host's density by over 5%%\n", fresh.size(), changed, zero, off);
+    CHECK(!fresh.empty() && changed == 0 && zero == 0 && off == 0);
+    const auto imprinted = r460_snapshot(m);
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[(size_t)inner] = 1;
+    if (meshops::push_pull(m, sel, 0.05f, true)) {
+      fresh = r460_new_faces(imprinted, m, changed);
+      zero = 0;
+      for (size_t f : fresh) zero += r460_all_zero(m, f) ? 1 : 0;
+      std::printf("    teapot, pulled: %zu new or moved faces, %zu untouched faces changed, %zu all-zero\n", fresh.size(), changed, zero);
+      CHECK(changed == 0 && zero == 0);
+    }
+  });
+  test("UVs stay absent (round 460): drawing on and pulling a mesh without UVs creates no UV layer; a drawn free face on a mesh with UVs gets non-degenerate UVs", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    m.uvs.clear();
+    const Vec3 c = m.face_center(5);
+    const long inner = meshops::imprint_loop(m, 5, {c + Vec3(-0.5f, 0, -0.4f), c + Vec3(0.6f, 0, -0.4f), c + Vec3(0.6f, 0, 0.7f), c + Vec3(-0.5f, 0, 0.7f)});
+    CHECK(inner >= 0 && m.uvs.empty());
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[(size_t)inner] = 1;
+    CHECK(meshops::push_pull(m, sel, 0.5f, true));
+    CHECK(m.uvs.empty());
+    Mesh t = *primitives::plane(10.0f, 4);
+    const float density = meshops::uv_texel_density(t);
+    const uint32_t loop[4] = {t.add_vert({20, 0, 0}), t.add_vert({22, 0, 0}), t.add_vert({22, 0, 2}), t.add_vert({20, 0, 2})};
+    t.add_face(loop, 4);
+    const size_t added = t.face_count() - 1;
+    CHECK(r460_all_zero(t, added));
+    meshops::project_face_uvs(t, added, density);
+    CHECK(!r460_all_zero(t, added));
+    CHECK_NEAR(r460_density(t, added), (double)density * density, 1e-4);
+  });
+}
+
+/* ------------------------------------------------ round 460, test engineer: UVs evaluated, not invented (task 0436) */
+
+/* How far a face's corner UVs are from the flat mapping that face `rf` of `ref` defines (the affine map through its first
+ * three corners). Only meaningful when `m`'s face lies in the same plane. */
+static double r460e_affine_err(const Mesh &ref, size_t rf, const Mesh &m, size_t f) {
+  const uint32_t *rv = ref.face_verts(rf);
+  const uint32_t rb = ref.face_offsets[rf];
+  const Vec3 p0 = ref.positions[rv[0]], e1 = ref.positions[rv[1]] - p0, e2 = ref.positions[rv[2]] - p0;
+  const double a11 = dot(e1, e1), a12 = dot(e1, e2), a22 = dot(e2, e2), det = a11 * a22 - a12 * a12;
+  if (!(std::fabs(det) > 0)) return 1e30;
+  const Vec2 t0 = ref.uvs[rb], d1 = ref.uvs[rb + 1] - t0, d2 = ref.uvs[rb + 2] - t0;
+  double worst = 0;
+  for (uint32_t k = 0; k < m.face_size(f); k++) {
+    const Vec3 q = m.positions[m.face_verts(f)[k]] - p0;
+    const double b1 = dot(q, e1), b2 = dot(q, e2);
+    const double a = (b1 * a22 - b2 * a12) / det, b = (a11 * b2 - a12 * b1) / det;
+    const Vec2 want(t0.x + (float)(a * d1.x + b * d2.x), t0.y + (float)(a * d1.y + b * d2.y));
+    const Vec2 got = m.uvs[m.face_offsets[f] + k];
+    worst = std::max(worst, (double)std::max(std::fabs(got.x - want.x), std::fabs(got.y - want.y)));
+  }
+  return worst;
+}
+static bool r460e_uvs_sane(const Mesh &m) {  // one finite UV a corner
+  if (m.uvs.size() != m.corner_verts.size()) return false;
+  for (const Vec2 &t : m.uvs)
+    if (!finite_bits(t.x) || !finite_bits(t.y)) return false;
+  return true;
+}
+static std::vector<Vec3> r460e_rect(Vec3 c, float hx, float hz) {
+  return {c + Vec3(-hx, 0, -hz), c + Vec3(hx, 0, -hz), c + Vec3(hx, 0, hz), c + Vec3(-hx, 0, hz)};
+}
+static size_t r460e_top_face(const Mesh &m) {
+  for (size_t f = 0; f < m.face_count(); f++)
+    if (m.face_normal(f).y > 0.9f) return f;
+  return SIZE_MAX;
+}
+
+static void tests_round460_engineer() {
+  test("push_through textured (round 460): a hole pushed through a cube leaves the other faces' UVs bit for bit, gives the tunnel walls and the ring on the far face UVs (none all-zero), and the ring follows the far face's own mapping", [] {
+    Mesh m = *primitives::cube(2.0f);
+    CHECK(m.has_uvs());
+    const Mesh was = m;
+    size_t bottom = SIZE_MAX;
+    for (size_t f = 0; f < was.face_count(); f++)
+      if (was.face_normal(f).y < -0.9f) bottom = f;
+    const size_t top = r460e_top_face(m);
+    CHECK(top != SIZE_MAX && bottom != SIZE_MAX);
+    const long inner = meshops::imprint_loop(m, top, r460e_rect(m.face_center(top), 0.4f, 0.4f));
+    CHECK(inner >= 0);
+    const auto before = r460_snapshot(m);
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[(size_t)inner] = 1;
+    std::string err;
+    CHECK(meshops::push_through(m, sel, 1, &err));
+    size_t changed = 0;
+    const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+    size_t zero = 0, ring = 0, off = 0;
+    for (size_t f : fresh) {
+      zero += r460_all_zero(m, f) ? 1 : 0;
+      bool on_bottom = true;
+      for (uint32_t k = 0; k < m.face_size(f); k++) on_bottom = on_bottom && m.positions[m.face_verts(f)[k]].y < -0.99f;
+      if (!on_bottom) continue;
+      ring++;
+      off += r460e_affine_err(was, bottom, m, f) > 1e-4 ? 1 : 0;
+    }
+    std::printf("    push_through on a cube: %zu new faces (%zu in the bottom's ring), %zu all-zero UVs, %zu old faces changed, %zu ring faces off the bottom's mapping\n", fresh.size(), ring, zero, changed, off);
+    CHECK(r460e_uvs_sane(m));
+    CHECK(!fresh.empty() && ring > 0 && zero == 0 && changed == 0 && off == 0);
+  });
+
+  test("push_through across the faces of an earlier hole (round 460): a second window pushed through a box whose far side already has a hole leaves through several coplanar faces; its tube walls have UVs (none all-zero) and the other faces' UVs are bit for bit", [] {
+    Mesh base = *primitives::cube(2.0f);
+    const size_t top0 = r460e_top_face(base);
+    std::vector<uint8_t> sel0(base.face_count(), 0);
+    const long first = meshops::imprint_loop(base, top0, r460e_rect(base.face_center(top0), 0.4f, 0.4f));
+    CHECK(first >= 0);
+    sel0.assign(base.face_count(), 0);
+    sel0[(size_t)first] = 1;
+    CHECK(meshops::push_through(base, sel0, 1));
+    /* Second windows on the top's ring, around its corners and edge middles: some leave through two of the far ring's faces. */
+    size_t flat_runs = 0, tried = 0, bad = 0;
+    for (Vec2 c : {Vec2(0.7f, 0.7f), Vec2(-0.7f, 0.7f), Vec2(0.7f, -0.7f), Vec2(-0.7f, -0.7f), Vec2(0.7f, 0.0f), Vec2(0.0f, 0.7f), Vec2(0.55f, 0.55f), Vec2(0.8f, 0.8f)}) {
+      Mesh m = base;
+      std::vector<size_t> inside;
+      if (meshops::imprint_loop_across(m, r460e_rect(Vec3(c.x, 1.0f, c.y), 0.12f, 0.12f), Vec3(0, 1, 0), &inside) < 0 || inside.empty()) continue;
+      const auto before = r460_snapshot(m);
+      std::vector<uint8_t> sel(m.face_count(), 0);
+      for (size_t f : inside) sel[f] = 1;
+      tried++;
+      const size_t runs = meshops::push_through_flat_exit_count();
+      if (!meshops::push_through(m, sel, 1)) continue;
+      if (meshops::push_through_flat_exit_count() == runs) continue;  // a single exit face: the other path
+      flat_runs++;
+      size_t changed = 0;
+      const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+      size_t zero = 0;
+      for (size_t f : fresh) zero += r460_all_zero(m, f) ? 1 : 0;
+      std::printf("    second window at (%.2f, %.2f): flat-exit path, %zu new faces, %zu all-zero, %zu old faces changed\n", c.x, c.y, fresh.size(), zero, changed);
+      bad += (zero != 0 || changed != 0 || fresh.empty() || !r460e_uvs_sane(m)) ? 1 : 0;
+    }
+    std::printf("    %zu second windows tried, %zu went through push_through_flat_exit\n", tried, flat_runs);
+    CHECK(flat_runs > 0 && bad == 0);
+  });
+
+  test("a pulled L (round 460): every wall of a pulled L-shaped face starts its UV strip at the face's edge UVs and runs away from the face's UV area, the notch edges included", [] {
+    Mesh m;
+    const float lx[6] = {0, 3, 3, 1, 1, 0}, lz[6] = {0, 0, 1, 1, 3, 3};
+    Vec2 lt[6];
+    uint32_t lv[6];
+    for (int i = 0; i < 6; i++) {
+      lv[i] = m.add_vert(Vec3(lx[i], 0, lz[i]));
+      lt[i] = Vec2(lx[i], lz[i]);
+    }
+    m.add_face(lv, 6, lt, 0);
+    auto in_l = [&](Vec2 q) {  // even-odd in UV (UV = position on this face)
+      bool in = false;
+      for (int a = 0, b = 5; a < 6; b = a++)
+        if ((lz[a] > q.y) != (lz[b] > q.y) && q.x < (lx[b] - lx[a]) * (q.y - lz[a]) / (lz[b] - lz[a]) + lx[a]) in = !in;
+      return in;
+    };
+    std::vector<uint8_t> sel(1, 1);
+    CHECK(meshops::push_pull(m, sel, 0.5f, true));
+    size_t walls = 0, inside = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (m.face_size(f) != 4) continue;
+      Vec2 far_mid(0.0f, 0.0f);
+      int far_n = 0;
+      for (uint32_t k = 0; k < 4; k++)
+        if (std::fabs(m.positions[m.face_verts(f)[k]].y) > 0.25f) far_mid += m.uvs[m.face_offsets[f] + k], far_n++;
+      if (far_n != 2 || m.face_normal(f).y > 0.5f || m.face_normal(f).y < -0.5f) continue;
+      walls++;
+      /* The strip's far edge, half a unit from the outline: inside the L's UV area only if the strip ran the wrong way. */
+      inside += in_l(far_mid / 2.0f) ? 1 : 0;
+    }
+    std::printf("    pulled L: %zu walls, %zu with their strip running into the face's UV area\n", walls, inside);
+    CHECK(walls == 6 && inside == 0);
+  });
+
+  test("a UV seam next to the cut (round 460, engineer): a rectangle drawn across a plane whose right half is shifted 0.3 in U keeps every other face's UVs, and each piece takes its own half's chart", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (m.face_center(f).x > 0)
+        for (uint32_t k = 0; k < m.face_size(f); k++) m.uvs[m.face_offsets[f] + k].x += 0.3f;
+    const Mesh was = m;
+    const auto before = r460_snapshot(m);
+    std::vector<size_t> inside;
+    CHECK(meshops::imprint_loop_across(m, r460e_rect(Vec3(0, 0, 0), 1.0f, 1.0f), Vec3(0, 1, 0), &inside) >= 0);
+    size_t changed = 0;
+    const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+    size_t wrong_chart = 0;
+    for (size_t f : fresh) {
+      const float cx = m.face_center(f).x;
+      size_t ref = SIZE_MAX;
+      for (size_t g = 0; g < was.face_count() && ref == SIZE_MAX; g++)
+        if ((was.face_center(g).x > 0) == (cx > 0)) ref = g;
+      if (ref != SIZE_MAX && r460e_affine_err(was, ref, m, f) > 1e-3) wrong_chart++;
+    }
+    std::printf("    seam: %zu new faces, %zu untouched changed, %zu in the wrong half's chart\n", fresh.size(), changed, wrong_chart);
+    CHECK(!fresh.empty() && changed == 0 && wrong_chart == 0);
+  });
+
+  test("a mirrored UV chart (round 460, engineer): a rectangle imprinted on a plane whose U runs backwards keeps the mirror - the new corners follow the host's mapping", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    for (Vec2 &t : m.uvs) t.x = 1.0f - t.x;
+    const Mesh was = m;
+    const auto before = r460_snapshot(m);
+    const long inner = meshops::imprint_loop(m, 5, r460e_rect(m.face_center(5), 0.5f, 0.4f));
+    CHECK(inner >= 0);
+    size_t changed = 0;
+    const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+    double worst = 0;
+    for (size_t f : fresh) worst = std::max(worst, r460e_affine_err(was, 5, m, f));
+    std::printf("    mirrored: %zu new faces, worst corner off the mirrored mapping %.2e\n", fresh.size(), worst);
+    CHECK(!fresh.empty() && changed == 0 && worst < 1e-4);
+  });
+
+  test("a concave host (round 460, engineer): a rectangle drawn inside one leg of an L-shaped n-gon gets UVs = the face's own mapping; the L itself is gone, nothing else changes", [] {
+    Mesh m;
+    const float lx[6] = {0, 2, 2, 1, 1, 0}, lz[6] = {0, 0, 1, 1, 2, 2};
+    Vec2 lt[6];
+    uint32_t lv[6];
+    for (int i = 0; i < 6; i++) {
+      lv[i] = m.add_vert(Vec3(lx[i], 0, lz[i]));
+      lt[i] = Vec2(lx[i] * 0.5f, lz[i] * 0.5f);
+    }
+    m.add_face(lv, 6, lt, 0);
+    const long inner = meshops::imprint_loop(m, 0, {Vec3(0.2f, 0, 0.2f), Vec3(0.8f, 0, 0.2f), Vec3(0.8f, 0, 0.8f), Vec3(0.2f, 0, 0.8f)});
+    CHECK(inner >= 0);
+    double worst = 0;
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const Vec3 p = m.positions[m.face_verts(f)[k]];
+        const Vec2 t = m.uvs[m.face_offsets[f] + k];
+        worst = std::max(worst, (double)std::max(std::fabs(t.x - p.x * 0.5f), std::fabs(t.y - p.z * 0.5f)));
+      }
+    CHECK(worst < 1e-4);
+  });
+
+  test("degenerate hosts (round 460, engineer): a zero-area quad, a collinear triangle and a NaN outline leave every UV finite and the layer the right size; none of them hangs", [] {
+    Mesh line;
+    for (int i = 0; i < 4; i++) line.add_vert(Vec3((float)i, 0, 0));
+    const Vec2 lt[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    const uint32_t lv[4] = {0, 1, 2, 3};
+    line.add_face(lv, 4, lt, 0);
+    const Vec2 got = meshops::face_uv_at(line, 0, Vec3(1.5f, 0, 0));
+    CHECK(finite_bits(got.x) && finite_bits(got.y));
+    const long a = meshops::imprint_loop(line, 0, r460e_rect(Vec3(1.5f, 0, 0), 0.1f, 0.1f));
+    std::printf("    imprint on a zero-area quad: returned %ld\n", a);
+    CHECK(r460e_uvs_sane(line));
+    Mesh tri;
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(3, 0, 0)}) tri.add_vert(p);
+    const Vec2 tt[3] = {{0, 0}, {1, 0}, {3, 0}};
+    const uint32_t tv[3] = {0, 1, 2};
+    tri.add_face(tv, 3, tt, 0);
+    meshops::split_face_path(tri, 0, 0, 2, {Vec3(1, 0, 0.0f)});
+    CHECK(r460e_uvs_sane(tri));
+    Mesh p = *primitives::plane(10.0f, 4);
+    const size_t faces0 = p.face_count();
+    const long n1 = meshops::imprint_loop(p, 5, {Vec3(NAN, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1)});
+    std::vector<size_t> inside;
+    const long n2 = meshops::imprint_loop_across(p, {Vec3(0, 0, 0), Vec3(NAN, 0, 1), Vec3(1, 0, 1), Vec3(1, 0, 0)}, Vec3(0, 1, 0), &inside);
+    std::printf("    NaN outlines: imprint_loop %ld, imprint_loop_across %ld, faces %zu -> %zu\n", n1, n2, faces0, p.face_count());
+    CHECK(r460e_uvs_sane(p));
+  });
+
+  test("huge and tiny planes (round 460, engineer): a rectangle imprinted on a 1e5 and on a 1e-4 plane leaves untouched faces bit for bit, no all-zero new face, and the host's texel density within 5%", [] {
+    for (float size : {1.0e5f, 1.0e-4f}) {
+      Mesh m = *primitives::plane(size, 4);
+      const auto before = r460_snapshot(m);
+      const double host = r460_density(m, 5);
+      const Vec3 c = m.face_center(5);
+      const long inner = meshops::imprint_loop(m, 5, r460e_rect(c, 0.05f * size, 0.04f * size));
+      size_t changed = 0;
+      const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+      size_t zero = 0, off = 0;
+      for (size_t f : fresh) {
+        zero += r460_all_zero(m, f) ? 1 : 0;
+        off += std::fabs(r460_density(m, f) - host) > 0.05 * host ? 1 : 0;
+      }
+      std::printf("    plane %g: inner %ld, %zu new faces, %zu changed, %zu all-zero, %zu off density\n", (double)size, inner, fresh.size(), changed, zero, off);
+      CHECK(inner >= 0 && !fresh.empty() && changed == 0 && zero == 0 && off == 0 && r460e_uvs_sane(m));
+    }
+  });
+
+  test("stretch stays put (round 460): on a plane whose texture is stretched 3x in U, every corner of the faces from an imprint and from a circle across faces lies on the host's own (stretched) mapping, and no old face changes", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    for (Vec2 &t : m.uvs) t.x *= 3.0f;
+    const Mesh was = m;
+    Mesh a = m, b = m;
+    const auto before = r460_snapshot(m);
+    CHECK(meshops::imprint_loop(a, 5, r460e_rect(a.face_center(5), 0.5f, 0.4f)) >= 0);
+    std::vector<Vec3> ring;
+    for (int i = 0; i < 24; i++) ring.push_back(Vec3(2.0f * std::cos(i * kPi / 12.0f), 0, 2.0f * std::sin(i * kPi / 12.0f)));
+    std::vector<size_t> inside;
+    CHECK(meshops::imprint_loop_across(b, ring, Vec3(0, 1, 0), &inside) >= 0);
+    for (const Mesh *r : {&a, &b}) {
+      size_t changed = 0, bad = 0;
+      const std::vector<size_t> fresh = r460_new_faces(before, *r, changed);
+      double worst = 0;
+      for (size_t f : fresh) {
+        const double err = r460e_affine_err(was, 5, *r, f);  // the plane is one affine map, so face 5's is every face's
+        worst = std::max(worst, err);
+        bad += err > 1e-4 ? 1 : 0;
+      }
+      std::printf("    stretch: %zu new faces, worst corner %.2e off the host's mapping, %zu old faces changed\n", fresh.size(), worst, changed);
+      CHECK(!fresh.empty() && bad == 0 && changed == 0);
+    }
+  });
+
+  /* The teapot's quads are warped patches, not planes. face_uv_at's contract is the face's plane (the Newell normal
+   * through corner 0): a new corner's UV is the bilinear inverse of the quad flattened into that plane. The test solves
+   * that independently (Newton on the 2D bilinear map) and asserts it at 1e-5. How far that is from the warped 3D patch's
+   * own bilinear mapping is printed, not asserted: imprint_loop flattens the shape into the same plane, so a new corner
+   * lies a little off the patch. (A quad that is not convex once flattened is read by mean-value coordinates, a different
+   * contract; those are counted and skipped. The 5% texel-density check for planar hosts is in the U-stretched plane test.) */
+  test("the teapot's curved quads (round 460): imprinting a shrunk copy of a sample of its quads leaves other faces bit for bit, no all-zero new face, and every new corner's UV is the bilinear inverse in the host's plane through corner 0", [] {
+    const Mesh t = *primitives::teapot(1.2f, 8);
+    CHECK(t.has_uvs());
+    const auto before = r460_snapshot(t);
+    /* The host quad flattened: Newell normal, an in-plane frame at corner 0, the 2D corners. */
+    struct Flat {
+      Vec3 u, w;
+      double x[4], y[4];
+      Vec2 uv[4];
+    };
+    auto flatten = [&](size_t h) {
+      Flat fl;
+      const uint32_t *v = t.face_verts(h);
+      Vec3 P[4], nrm(0.0f);
+      for (int k = 0; k < 4; k++) P[k] = t.positions[v[k]], fl.uv[k] = t.uvs[t.face_offsets[h] + k];
+      for (int k = 0; k < 4; k++) {
+        const Vec3 a = P[k], b = P[(k + 1) % 4];
+        nrm += Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+      }
+      nrm = normalize(nrm);
+      const Vec3 e = P[1] - P[0];
+      fl.u = normalize(e - nrm * dot(e, nrm));
+      fl.w = cross(nrm, fl.u);
+      for (int k = 0; k < 4; k++) fl.x[k] = dot(P[k] - P[0], fl.u), fl.y[k] = dot(P[k] - P[0], fl.w);
+      return fl;
+    };
+    auto convex = [](const Flat &fl) {
+      int pos = 0;
+      for (int k = 0; k < 4; k++) {
+        const int a = (k + 1) % 4, b = (k + 2) % 4;
+        pos += ((fl.x[a] - fl.x[k]) * (fl.y[b] - fl.y[a]) - (fl.y[a] - fl.y[k]) * (fl.x[b] - fl.x[a])) > 0 ? 1 : 0;
+      }
+      return pos == 4 || pos == 0;
+    };
+    /* The bilinear inverse of the flattened quad at (px, py): Newton on P(s,t) = (1-s)(1-t)P0 + s(1-t)P1 + st P2 + (1-s)t P3. */
+    auto reference = [&](const Flat &fl, double px, double py) {
+      double s = 0.5, u = 0.5;
+      for (int it = 0; it < 50; it++) {
+        const double w0 = (1 - s) * (1 - u), w1 = s * (1 - u), w2 = s * u, w3 = (1 - s) * u;
+        const double rx = w0 * fl.x[0] + w1 * fl.x[1] + w2 * fl.x[2] + w3 * fl.x[3] - px, ry = w0 * fl.y[0] + w1 * fl.y[1] + w2 * fl.y[2] + w3 * fl.y[3] - py;
+        const double sx = (1 - u) * (fl.x[1] - fl.x[0]) + u * (fl.x[2] - fl.x[3]), sy = (1 - u) * (fl.y[1] - fl.y[0]) + u * (fl.y[2] - fl.y[3]);
+        const double ux = (1 - s) * (fl.x[3] - fl.x[0]) + s * (fl.x[2] - fl.x[1]), uy = (1 - s) * (fl.y[3] - fl.y[0]) + s * (fl.y[2] - fl.y[1]);
+        const double det = sx * uy - sy * ux;
+        if (!(std::fabs(det) > 1e-18)) break;
+        s -= (rx * uy - ry * ux) / det;
+        u -= (sx * ry - sy * rx) / det;
+      }
+      const double w[4] = {(1 - s) * (1 - u), s * (1 - u), s * u, (1 - s) * u};
+      return Vec2((float)(w[0] * fl.uv[0].x + w[1] * fl.uv[1].x + w[2] * fl.uv[2].x + w[3] * fl.uv[3].x),
+                  (float)(w[0] * fl.uv[0].y + w[1] * fl.uv[1].y + w[2] * fl.uv[2].y + w[3] * fl.uv[3].y));
+    };
+    /* The warped 3D patch's own bilinear mapping (nearest point by Gauss-Newton): printed only. */
+    auto patch_uv = [&](size_t h, Vec3 q) {
+      const uint32_t *v = t.face_verts(h);
+      Vec3 P[4];
+      Vec2 T[4];
+      for (int k = 0; k < 4; k++) P[k] = t.positions[v[k]], T[k] = t.uvs[t.face_offsets[h] + k];
+      double s = 0.5, u = 0.5;
+      for (int it = 0; it < 60; it++) {
+        const Vec3 pt = P[0] * (float)((1 - s) * (1 - u)) + P[1] * (float)(s * (1 - u)) + P[2] * (float)(s * u) + P[3] * (float)((1 - s) * u);
+        const Vec3 ps = (P[1] - P[0]) * (float)(1 - u) + (P[2] - P[3]) * (float)u, pu = (P[3] - P[0]) * (float)(1 - s) + (P[2] - P[1]) * (float)s;
+        const Vec3 r = pt - q;
+        const double a = dot(ps, ps), b = dot(ps, pu), c2 = dot(pu, pu), det = a * c2 - b * b;
+        if (!(std::fabs(det) > 1e-18)) break;
+        const double rs = dot(ps, r), ru = dot(pu, r);
+        s = std::min(1.0, std::max(0.0, s - (c2 * rs - b * ru) / det));
+        u = std::min(1.0, std::max(0.0, u - (a * ru - b * rs) / det));
+      }
+      const double w[4] = {(1 - s) * (1 - u), s * (1 - u), s * u, (1 - s) * u};
+      return Vec2((float)(w[0] * T[0].x + w[1] * T[1].x + w[2] * T[2].x + w[3] * T[3].x), (float)(w[0] * T[0].y + w[1] * T[1].y + w[2] * T[2].y + w[3] * T[3].y));
+    };
+    size_t tried = 0, done = 0, skipped = 0, bad_changed = 0, bad_zero = 0, bad_ref = 0;
+    double worst_ref = 0.0, worst_patch = 0.0;
+    for (size_t h = 0; h < t.face_count(); h += 23) {
+      if (t.face_size(h) != 4 || !(r460_density(t, h) > 0.0) || !(length(t.face_normal(h)) > 1e-6f)) continue;
+      tried++;
+      const Flat fl = flatten(h);
+      if (!convex(fl)) {
+        skipped++;
+        continue;
+      }
+      Mesh m = t;
+      const Vec3 c = m.face_center(h);
+      std::vector<Vec3> shape;
+      for (uint32_t k = 0; k < 4; k++) shape.push_back(c + (m.positions[m.face_verts(h)[k]] - c) * 0.5f);
+      if (meshops::imprint_loop(m, h, shape) < 0) continue;
+      done++;
+      size_t changed = 0;
+      const std::vector<size_t> fresh = r460_new_faces(before, m, changed);
+      bad_changed += changed;
+      const Vec3 p0 = t.positions[t.face_verts(h)[0]];
+      for (size_t f : fresh) {
+        bad_zero += r460_all_zero(m, f) ? 1 : 0;
+        for (uint32_t k = 0; k < m.face_size(f); k++) {
+          const Vec3 p = m.positions[m.face_verts(f)[k]];
+          const Vec2 got = m.uvs[m.face_offsets[f] + k], want = reference(fl, dot(p - p0, fl.u), dot(p - p0, fl.w)), patch = patch_uv(h, p);
+          const double err = std::max(std::fabs((double)got.x - want.x), std::fabs((double)got.y - want.y));
+          worst_ref = std::max(worst_ref, err);
+          worst_patch = std::max(worst_patch, (double)std::max(std::fabs(got.x - patch.x), std::fabs(got.y - patch.y)));
+          bad_ref += err > 1e-5 ? 1 : 0;
+        }
+      }
+    }
+    std::printf("    teapot: %zu quads tried, %zu imprinted, %zu skipped (not convex flattened); %zu old faces changed, %zu all-zero\n", tried, done, skipped, bad_changed, bad_zero);
+    std::printf("    teapot: worst corner UV %.2e from the plane reference (asserted under 1e-5), %.2e from the warped patch's own mapping (printed)\n", worst_ref, worst_patch);
+    CHECK(done > 0 && bad_changed == 0 && bad_zero == 0 && bad_ref == 0);
+  });
+
+  test("a cut and an attached face on the teapot (round 460, engineer): split_face_path and attach_face leave every other face's UVs bit for bit and give no all-zero face", [] {
+    const Mesh t = *primitives::teapot(1.2f, 8);
+    const auto before = r460_snapshot(t);
+    size_t cuts = 0, attached = 0, changed_total = 0, zero_total = 0;
+    for (size_t h = 0; h < t.face_count() && cuts < 6; h += 31) {
+      if (t.face_size(h) != 4 || !(r460_density(t, h) > 0.0)) continue;
+      Mesh m = t;
+      const uint32_t *v = m.face_verts(h);
+      const Vec3 c = m.face_center(h);
+      if (!meshops::split_face_path(m, h, v[0], v[2], {c + (m.positions[v[1]] - c) * 0.3f})) continue;
+      cuts++;
+      size_t changed = 0;
+      for (size_t f : r460_new_faces(before, m, changed)) zero_total += r460_all_zero(m, f) ? 1 : 0;
+      changed_total += changed;
+    }
+    std::unordered_map<uint64_t, int> uses;
+    for (size_t f = 0; f < t.face_count(); f++)
+      for (uint32_t k = 0; k < t.face_size(f); k++) uses[Mesh::edge_key(t.face_verts(f)[k], t.face_verts(f)[(k + 1) % t.face_size(f)])]++;
+    for (size_t f = 0; f < t.face_count() && attached < 3; f++)
+      for (uint32_t k = 0; k < t.face_size(f); k++) {
+        const uint32_t a = t.face_verts(f)[k], b = t.face_verts(f)[(k + 1) % t.face_size(f)];
+        if (uses[Mesh::edge_key(a, b)] != 1 || a == b) continue;
+        Mesh m = t;
+        const Vec3 mid = (m.positions[a] + m.positions[b]) * 0.5f;
+        if (meshops::attach_face(m, f, a, b, {mid + normalize(mid - m.face_center(f)) * 0.2f}) < 0) continue;
+        attached++;
+        size_t changed = 0;
+        for (size_t g : r460_new_faces(before, m, changed)) zero_total += r460_all_zero(m, g) ? 1 : 0;
+        changed_total += changed;
+        break;
+      }
+    std::printf("    teapot: %zu cuts, %zu attached faces (open edges: %s), %zu old faces changed, %zu all-zero new faces\n", cuts, attached,
+                attached ? "found" : "none - attach_face not exercised", changed_total, zero_total);
+    CHECK(cuts > 0 && changed_total == 0 && zero_total == 0);
+  });
+
+  test("Push/Pull a wall of a pulled block (round 460, engineer): the block's top stretches over the moved corners and keeps the plane's texel density, the wall strips follow, nothing is all-zero, faces away from the block keep their UVs", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    const double host = r460_density(m, 5);
+    const long inner = meshops::imprint_loop(m, 5, r460e_rect(m.face_center(5), 0.5f, 0.4f));
+    CHECK(inner >= 0);
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    if (inner >= 0) sel[(size_t)inner] = 1;
+    CHECK(meshops::push_pull(m, sel, 0.8f, true));
+    size_t wall = SIZE_MAX;
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (m.face_normal(f).x > 0.9f && m.face_center(f).y > 0.1f) wall = f;
+    CHECK(wall != SIZE_MAX);
+    if (wall == SIZE_MAX) return;
+    const auto before = r460_snapshot(m);
+    std::vector<uint8_t> s2(m.face_count(), 0);
+    s2[wall] = 1;
+    for (float d : {0.4f, -0.3f}) {
+      Mesh w = m;
+      std::vector<uint8_t> s = s2;
+      CHECK(meshops::push_pull(w, s, d, true));
+      size_t changed = 0;
+      const std::vector<size_t> fresh = r460_new_faces(before, w, changed);
+      size_t zero = 0, off = 0;
+      for (size_t f : fresh) {
+        zero += r460_all_zero(w, f) ? 1 : 0;
+        off += std::fabs(r460_density(w, f) - host) > 0.05 * host ? 1 : 0;
+      }
+      std::printf("    wall pushed %+.1f: %zu new or moved faces, %zu untouched changed, %zu all-zero, %zu off the plane's density\n", (double)d, fresh.size(),
+                  changed, zero, off);
+      CHECK(!fresh.empty() && changed == 0 && zero == 0 && off == 0 && r460e_uvs_sane(w));
+    }
+  });
+
+  test("pull then push back flat (round 460, engineer): a block pulled 0.8 and pushed back to the plane (F9-style round trip through the dissolve) leaves finite UVs, no all-zero face and the plane's density everywhere", [] {
+    Mesh m = *primitives::plane(10.0f, 4);
+    const double host = r460_density(m, 5);
+    const long inner = meshops::imprint_loop(m, 5, r460e_rect(m.face_center(5), 0.5f, 0.4f));
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    if (inner >= 0) sel[(size_t)inner] = 1;
+    CHECK(inner >= 0 && meshops::push_pull(m, sel, 0.8f, true));
+    std::vector<uint8_t> top(m.face_count(), 0);
+    for (size_t f = 0; f < m.face_count(); f++)
+      if (m.face_normal(f).y > 0.9f && m.face_center(f).y > 0.5f) top[f] = 1;
+    CHECK(meshops::push_pull(m, top, -0.8f, true));
+    size_t zero = 0, off = 0, flat = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (!(r460_density(m, f) > 0.0) && length(m.face_normal(f)) < 1e-9f) continue;  // a collapsed sliver has no density
+      zero += r460_all_zero(m, f) ? 1 : 0;
+      off += std::fabs(r460_density(m, f) - host) > 0.05 * host && length(m.face_normal(f)) > 1e-6f ? 1 : 0;
+      flat++;
+    }
+    std::printf("    round trip: %zu faces, %zu all-zero, %zu off the plane's density\n", flat, zero, off);
+    CHECK(r460e_uvs_sane(m) && zero == 0 && off == 0);
+  });
+
+  test("no UV layer appears (round 460, engineer): on a mesh without UVs, imprint_loop_across, split_face_path, attach_face, a pulled block, a wall push, the round trip and push_through all leave it without UVs", [] {
+    Mesh base = *primitives::plane(10.0f, 4);
+    base.uvs.clear();
+    CHECK(!base.has_uvs());
+    {
+      Mesh m = base;
+      std::vector<size_t> inside;
+      CHECK(meshops::imprint_loop_across(m, r460e_rect(Vec3(0, 0, 0), 1.0f, 1.0f), Vec3(0, 1, 0), &inside) >= 0);
+      CHECK(m.uvs.empty());
+    }
+    {
+      Mesh m = base;
+      const uint32_t *v = m.face_verts(5);
+      CHECK(meshops::split_face_path(m, 5, v[0], v[2], {m.face_center(5) + Vec3(0.2f, 0, 0)}));
+      CHECK(m.uvs.empty());
+    }
+    {
+      Mesh m = base;
+      std::unordered_map<uint64_t, int> uses;
+      for (size_t f = 0; f < m.face_count(); f++)
+        for (uint32_t k = 0; k < m.face_size(f); k++) uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+      bool done = false;
+      for (uint32_t k = 0; k < 4 && !done; k++) {
+        const uint32_t a = m.face_verts(0)[k], b = m.face_verts(0)[(k + 1) % 4];
+        if (uses[Mesh::edge_key(a, b)] != 1) continue;
+        const Vec3 mid = (m.positions[a] + m.positions[b]) * 0.5f;
+        done = true;
+        CHECK(meshops::attach_face(m, 0, a, b, {mid + normalize(mid - m.face_center(0))}) >= 0);
+      }
+      CHECK(done && m.uvs.empty());
+    }
+    {
+      Mesh m = base;
+      const long inner = meshops::imprint_loop(m, 5, r460e_rect(m.face_center(5), 0.5f, 0.4f));
+      std::vector<uint8_t> sel(m.face_count(), 0);
+      if (inner >= 0) sel[(size_t)inner] = 1;
+      CHECK(inner >= 0 && meshops::push_pull(m, sel, 0.8f, true) && m.uvs.empty());
+      size_t wall = SIZE_MAX;
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (m.face_normal(f).x > 0.9f && m.face_center(f).y > 0.1f) wall = f;
+      std::vector<uint8_t> s2(m.face_count(), 0);
+      if (wall != SIZE_MAX) s2[wall] = 1;
+      CHECK(wall != SIZE_MAX && meshops::push_pull(m, s2, 0.4f, true) && m.uvs.empty());
+      std::vector<uint8_t> top(m.face_count(), 0);
+      for (size_t f = 0; f < m.face_count(); f++)
+        if (m.face_normal(f).y > 0.9f && m.face_center(f).y > 0.5f) top[f] = 1;
+      meshops::push_pull(m, top, -0.8f, true);
+      CHECK(m.uvs.empty());
+    }
+    {
+      Mesh m = *primitives::cube(2.0f);
+      m.uvs.clear();
+      const size_t top = r460e_top_face(m);
+      const long inner = meshops::imprint_loop(m, top, r460e_rect(m.face_center(top), 0.4f, 0.4f));
+      std::vector<uint8_t> sel(m.face_count(), 0);
+      if (inner >= 0) sel[(size_t)inner] = 1;
+      meshops::push_through(m, sel, 1);
+      CHECK(inner >= 0 && m.uvs.empty());
+    }
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -8487,4 +9305,6 @@ void run_modeling_tests() {
   tests_round260();
   tests_round261();
   tests_round262();
+  tests_round460();
+  tests_round460_engineer();
 }

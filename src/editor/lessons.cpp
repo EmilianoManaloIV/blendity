@@ -1732,8 +1732,10 @@ Join (Ctrl+J) puts several meshes into one object; they still don't touch. A Boo
 SketchUp and UModeler build models by drawing: a rectangle drawn on a face splits off a new face you can Push/Pull, a line across a face cuts it in two, and a profile pushed along a path (Follow) makes mouldings and pipes. Blendity's Draw tools do the same, snapping to corners (green), midpoints (cyan), edges (red) and faces (blue). Draw a polyline on the ground for a path, select a face and use Follow; or draw half a vase outline and Spin it.
 @ blender/source/blender/editors/mesh/editmesh_bisect.cc
 ? You draw a rectangle inside the top face of a cube. How many faces does the cube have now, and why? | 10: the top face becomes a ring of 4 faces around the new inner face, because a face here can't have a hole in it.
+? You draw a rectangle on a face that has a checker texture and pull it up with Push/Pull. Where do the corners of the new faces get their UVs, and why does the checker stay where it was? | They are read off the face they lie in (barycentric in a triangle, bilinear in a quad, mean-value coordinates in other n-gons), and the walls get Extrude's strip at the face's texel density - nothing is invented, so the squares keep their size.
 ! cmd:create Shape: Stairs | Create parametric Stairs (change Steps in the Inspector)
 ! cmd:select Cube; edit face; draw rectangle | Draw a rectangle onto the Cube (click two corners on a face, then press P to Push/Pull it)
+! cmd:create Plane; texture uvgrid; edit face; draw rectangle | A checker-textured Plane: draw a rectangle on it, then press P and pull - the squares stay the same size on the walls
 ! cmd:select Sphere; selectadd Cube; boolean difference modifier | Cut the Sphere out of the Cube as a live Boolean modifier
 ! cmd:create Shape: Box; edit face; ngon on | A Box in Edit Mode with N-gon Mode on
 )"},
