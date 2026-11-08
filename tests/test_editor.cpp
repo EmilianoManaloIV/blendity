@@ -8370,6 +8370,479 @@ static void tests_round419() {
   });
 }
 
+/* ---------------------------------------------------------------- round 436: the idle frame (task 0412) */
+static void tests_round436() {
+  test("the views' draw items kept (round 436): orbiting an unchanged scene gathers nothing; a `set` gathers again; verify mode finds no stale list", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.command("create Cube");
+    ed.command("create Point Light");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    uint64_t kept = 0;
+    for (int i = 0; i < 6; i++) {  // (the editor's camera turns: every frame redraws, the scene holds still)
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 7.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+      kept += ed.frame_profile_last_for_test().items_kept;
+    }
+    ed.set_render_cache_verify(false);
+    for (int i = 0; i < 6; i++) {
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 7.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+      kept += ed.frame_profile_last_for_test().items_kept;
+    }
+    std::printf("    12 orbiting frames: %llu gathers answered from the kept items\n", (unsigned long long)kept);
+    CHECK(kept >= 6);  // (verify mode gathers anyway; outside it every orbit frame keeps the list)
+    ed.command("set Light.Intensity 3");  // (the scene's hash moves: the next orbit gathers)
+    SceneCamera c = ed.scene_camera_for_test();
+    c.yaw += 7.0f;
+    ed.set_scene_camera_for_test(c);
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().items_kept == 0);
+    CHECK(ed.frame_profile_last_for_test().ms_collect > 0.0);
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
+  });
+  test("per-frame walks let go while nothing changed (round 436): procedural shapes, Fit to Mesh, focus tracking, the icon pass skip their walk; a Fit to Mesh ticked by `set` is fitted the next frame", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_scene_hash_check_every_for_test(8);  // (a window's interval; headless walks every frame)
+    ed.command("create Cube");
+    ed.command("component Collider");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const uint64_t s0 = ed.walks_skipped_for_test();
+    for (int i = 0; i < 16; i++) ed.step_frame_headless();
+    const uint64_t skipped = ed.walks_skipped_for_test() - s0;
+    std::printf("    16 idle frames: %llu walks skipped\n", (unsigned long long)skipped);
+    CHECK(skipped >= 16 * 2);  // (at least the shapes' and the colliders' walks, 7 frames in 8)
+    GameObject *g = ed.active_object_for_test();
+    ColliderComponent *c = g ? g->get<ColliderComponent>() : nullptr;
+    CHECK(c != nullptr);
+    if (!c) return;
+    c->fit = false;
+    c->size = {9, 9, 9};
+    ed.command("set Collider.FitToMesh true");
+    ed.step_frame_headless();
+    CHECK(!c->fit);
+    CHECK(c->size.x < 5.0f);  // (fitted to the unit cube again)
+  });
+}
+
+/* ---------------------------------------------------------------- round 445: the soak's memory (task 0421) */
+static void tests_round445() {
+  test("memory accounts (round 445): every subsystem named, the bytes added up, `perf memory` says them", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    const std::vector<Editor::MemoryAccount> a = ed.memory_accounts();
+    size_t sum = 0;
+    bool scene = false, textures = false, procedural = false, scratch = false;
+    for (const Editor::MemoryAccount &m : a) {
+      std::printf("    %s: %.2f MB\n", m.name, (double)m.bytes / 1048576.0);
+      sum += m.bytes;
+      scene |= std::string(m.name) == "scene", textures |= std::string(m.name) == "textures";
+      procedural |= std::string(m.name) == "procedural textures", scratch |= std::string(m.name) == "raster scratch";
+    }
+    CHECK(scene && textures && procedural && scratch);
+    CHECK(sum > 0);
+    const std::string text = ed.memory_text();
+    std::printf("    %s\n", text.c_str());
+    CHECK(text.find("raster scratch") != std::string::npos && text.find("in no account") != std::string::npos);
+  });
+  test("the renderers' scratch (round 445): a big Edit Mode frame leaves it kept; trim_scratch frees it, the next frame draws; the idle trim waits its seconds", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.command("edit");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const size_t kept = ed.scratch_bytes();
+    std::printf("    kept after the frames: %.1f MB\n", (double)kept / 1048576.0);
+    CHECK(kept > 0);
+    CHECK(ed.trim_scratch(kept + 1) == 0);  // (under the limit: nothing freed)
+    const size_t freed = ed.trim_scratch(0);
+    std::printf("    freed: %.1f MB, left %.1f MB\n", (double)freed / 1048576.0, (double)ed.scratch_bytes() / 1048576.0);
+    CHECK(freed == kept && ed.scratch_bytes() == 0);
+    ed.command("redraw");
+    ed.step_frame_headless();
+    CHECK(ed.in_edit_mode());
+    std::printf("    after a redraw: %.1f MB kept again\n", (double)ed.scratch_bytes() / 1048576.0);  // (a frame that needs it asks again)
+  });
+  test("the surface cache's budget (round 445): over it, the least recently used images only the cache holds are dropped and the surface poll leaves them; images in use stay", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr a = ed.new_texture_asset_for_test("Noise"), b = ed.new_texture_asset_for_test("Tiles");
+    CHECK(a && b);
+    if (!a || !b) return;
+    a->width = a->height = b->width = b->height = 512;
+    a->touch();
+    b->touch();
+    procedural_texture_cache_clear();
+    TexturePtr held = procedural_texture_output(*b, 0);  // (b's albedo is in use: something shades with it)
+    procedural_texture_output(*a, 0);
+    const size_t had = procedural_texture_cache_bytes();
+    std::printf("    the cache holds %.1f MB (default budget %.0f MB)\n", (double)had / 1048576.0, (double)procedural_texture_cache_budget() / 1048576.0);
+    CHECK(had > 0);
+    procedural_texture_cache_set_budget(1);
+    const size_t freed = procedural_texture_cache_trim();
+    std::printf("    freed %.1f MB at a budget of 1 byte; left %.1f MB\n", (double)freed / 1048576.0, (double)procedural_texture_cache_bytes() / 1048576.0);
+    CHECK(freed > 0);
+    CHECK(procedural_texture_trimmed(a->asset_path, procedural_texture_cache_hash(*a)));
+    CHECK(!procedural_texture_trimmed(b->asset_path, procedural_texture_cache_hash(*b)));  // (in use)
+    CHECK(procedural_texture_cache_bytes() > 0);
+    procedural_texture_output(*a, 0);  // (asked for again: it comes back, and is no longer "dropped")
+    CHECK(!procedural_texture_trimmed(a->asset_path, procedural_texture_cache_hash(*a)));
+    procedural_texture_cache_set_budget(0);
+    held.reset();
+    procedural_texture_cache_clear();
+    CHECK(procedural_texture_cache_bytes() == 0);
+  });
+  test("the surface cache's budget (round 445): images in use are pinned and not counted against it - a big one in use doesn't empty the unused ones; a dropped drag preview doesn't flag the full images", [] {
+    Editor ed;
+    ed.init_headless(800, 600);
+    ed.step_frame_headless();
+    ProceduralTexturePtr a = ed.new_texture_asset_for_test("Noise"), b = ed.new_texture_asset_for_test("Tiles");
+    CHECK(a && b);
+    if (!a || !b) return;
+    a->width = a->height = b->width = b->height = 512;
+    a->touch();
+    b->touch();
+    procedural_texture_cache_clear();
+    TexturePtr held = procedural_texture_output(*b, 0);  // (b in use)
+    procedural_texture_output(*a, 0);
+    const size_t one = procedural_texture_cache_bytes() / 2;  // (about one entry's bytes)
+    procedural_texture_cache_set_budget(one * 2);  // (room for the unused one beside the pinned one)
+    CHECK(procedural_texture_cache_trim() == 0);
+    CHECK(!procedural_texture_trimmed(a->asset_path, procedural_texture_cache_hash(*a)));
+    procedural_texture_set_preview(a->asset_path, true);
+    a->touch();
+    procedural_texture_output(*a, 0);  // (a's 256 preview is cached beside its full images)
+    procedural_texture_cache_set_budget(1);
+    procedural_texture_cache_trim();
+    procedural_texture_clear_previews();
+    procedural_texture_cache_set_budget(0);
+    held.reset();
+    procedural_texture_cache_clear();
+    CHECK(!procedural_texture_trimmed(a->asset_path, 0));  // (clear forgets what was dropped)
+  });
+  test("the idle trim (round 445, a fake clock): the renderers' scratch is kept while a renderer is drawing, and an idle one gives it back after the hold", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.set_clock_for_test(100.0);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.command("edit");
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    const size_t kept = ed.scratch_bytes();
+    std::printf("    kept after the frames: %.1f MB\n", (double)kept / 1048576.0);
+    CHECK(kept > 96u * 1048576u);  // (over the budget)
+    for (int i = 0; i < 4; i++) {  // (6 s of frames with the camera orbiting: the Scene view draws every one)
+      ed.set_clock_for_test(102.0 + i * 1.5);
+      SceneCamera c = ed.scene_camera_for_test();
+      c.yaw += 5.0f;
+      ed.set_scene_camera_for_test(c);
+      ed.step_frame_headless();
+    }
+    const size_t drawing = ed.scratch_bytes();
+    std::printf("    after 6 s of drawing frames: %.1f MB\n", (double)drawing / 1048576.0);
+    CHECK(drawing > 96u * 1048576u);
+    ed.command("edit off");  // (out of Edit Mode: the frames after it are answered from the views' pictures)
+    CHECK(!ed.in_edit_mode());
+    ed.step_frame_headless();
+    ed.step_frame_headless();
+    ed.set_clock_for_test(110.0);
+    ed.step_frame_headless();
+    CHECK(ed.scratch_bytes() > 96u * 1048576u);  // (2 s idle: kept)
+    ed.set_clock_for_test(120.0);
+    ed.step_frame_headless();
+    std::printf("    after 12 s idle: %.1f MB (the last frame: scene view %.2f ms, overlays %.2f ms)\n", (double)ed.scratch_bytes() / 1048576.0, ed.frame_profile_last_for_test().ms_scene3d, ed.frame_profile_last_for_test().ms_overlays);
+    CHECK(ed.scratch_bytes() < 96u * 1048576u);
+  });
+  test("a dropped surface and the poll (round 445): after its images are dropped the poll does not queue it again; an edit or a request does", [] {
+    Editor ed;
+    ed.init_headless(1400, 900);
+    ed.set_clock_for_test(100.0);
+    ed.command("select Cube");
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    ed.command("surface new DroppedSurface");
+    ProceduralTexturePtr pt;
+    auto land = [&] {
+      for (int i = 0; i < 4000 && (i < 3 || ed.surface_busy_for_test()); i++) {
+        ed.step_frame_headless();
+        if (ed.surface_busy_for_test()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    };
+    land();
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<MeshRenderer>() && !g->get<MeshRenderer>()->materials.empty() && g->get<MeshRenderer>()->materials[0]);
+    if (!g || !g->get<MeshRenderer>() || g->get<MeshRenderer>()->materials.empty() || !g->get<MeshRenderer>()->materials[0]) return;
+    std::string asset;
+    int out = -1;
+    CHECK(split_texture_ref(g->get<MeshRenderer>()->materials[0]->base_map.path, asset, out));
+    pt = texture_asset(asset);
+    CHECK(pt && pt->surface);
+    if (!pt) return;
+    uint64_t h = procedural_texture_cache_hash(*pt);
+    CHECK(procedural_texture_cached(asset, h));
+    ed.command("surface add Noise");  // (a fresh stack: its images land, and the material holds them)
+    land();
+    h = procedural_texture_cache_hash(*pt);
+    CHECK(procedural_texture_cached(asset, h));
+    procedural_texture_cache_set_budget(1);
+    ed.command("delete Cube");  // (nothing shades with the surface now)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const size_t freed = procedural_texture_cache_trim();
+    const bool dropped = procedural_texture_trimmed(asset, h);
+    std::printf("    freed %.1f MB; the surface's images dropped %d\n", (double)freed / 1048576.0, (int)dropped);
+    CHECK(dropped);
+    if (dropped) {
+      for (int i = 0; i < 10; i++) ed.step_frame_headless();
+      CHECK(!ed.surface_busy_for_test() && !procedural_texture_cached(asset, h));  // (not queued again)
+      pt->layers[1]->opacity = 0.25f;  // (an edit: its hash moves on)
+      pt->touch();
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      const bool queued = ed.surface_busy_for_test() || procedural_texture_cached(asset, procedural_texture_cache_hash(*pt));
+      std::printf("    queued again after an edit: %d\n", (int)queued);
+      CHECK(queued);
+      land();
+    }
+    procedural_texture_cache_set_budget(0);
+    procedural_texture_cache_clear();
+  });
+}
+
+/* ---------------------------------------------------------------- round 437: the two freezes (task 0413) */
+static void tests_round437() {
+  test("Enter Edit Mode on the 500k sphere (round 437): the frame that enters and the frames after it, timed; `perf mark` names its longest frame's parts", [] {
+    Editor ed;
+    ed.init_headless(1280, 720);
+    ed.command("benchscene sphere500k");
+    ed.step_frame_headless();
+    ed.command("select Parity Sphere");
+    ed.step_frame_headless();
+    ed.command("perf reset");
+    ScopedTimer t;
+    ed.command("edit");
+    ed.step_frame_headless();
+    const double enter = t.ms();
+    const FrameProfile p = ed.frame_profile_last_for_test();
+    ScopedTimer t2;
+    ed.step_frame_headless();
+    const double next = t2.ms();
+    std::printf("    entering: %.1f ms (overlays %.1f, gathering %.1f); the next frame %.1f ms\n", enter, p.ms_overlays, p.ms_collect, next);
+    CHECK(ed.in_edit_mode());
+    const std::string mark = ed.perf_mark_for_test("enter edit");
+    std::printf("    %s\n", mark.c_str());
+    CHECK(mark.find("perf mark enter edit: ") == 0 && mark.find("the longest") != std::string::npos);
+    CHECK(mark.find("Scene view") != std::string::npos);  // (the longest frame was the cage's: over 5 ms of the Scene view)
+  });
+  test("F12's textures loaded first on a worker (round 437): with images not in the cache the render says it is loading them, starts when they land, and finishes; with them cached it starts at once", [] {
+    Editor ed;
+    ed.init_headless(320, 180);
+    ed.set_async_jobs_for_test(true);
+    ed.command("create Cube");
+    ed.command("create Sphere");
+    ed.step_frame_headless();
+    int made = 0;
+    for (const char *name : {"Cube", "Sphere"}) {
+      GameObject *g = ed.scene().find_by_name(name);
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (!mr) continue;
+      const std::string tex = fs::join(test_dir(), std::string("r437_") + name + ".png");
+      std::vector<uint32_t> px(64 * 64, made ? 0xFF3060C0u : 0xFFC06030u);
+      CHECK(write_png(tex, px.data(), 64, 64, 64));
+      MaterialPtr m = make_material(std::string("R437 ") + name, {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      mr->materials = {m};
+      made++;
+    }
+    CHECK(made == 2);
+    texture_cache_clear();
+    ed.command("render");
+    const uint64_t prefetched = ed.render_prefetches_for_test();
+    CHECK(prefetched == 1);
+    CHECK(ed.rendering_for_test());
+    CHECK(ed.render_status_for_test().find("loading 2 textures") != std::string::npos);
+    int frames = 0;
+    for (; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    a cold F12: %d frame(s) until it finished, %llu load(s) first\n", frames, (unsigned long long)prefetched);
+    CHECK(!ed.rendering_for_test());
+    ed.command("render");  // (warm: no load first)
+    CHECK(ed.render_prefetches_for_test() == prefetched);
+    for (frames = 0; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    CHECK(!ed.rendering_for_test());
+    /* Review 437: two files that won't decode - one load, then the render runs (they never reach the cache). */
+    for (const char *name : {"Cube", "Sphere"}) {
+      GameObject *g = ed.scene().find_by_name(name);
+      MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+      if (mr && !mr->materials.empty() && mr->materials[0]) mr->materials[0]->base_map.path = fs::join(test_dir(), std::string("r437_missing_") + name + ".png");
+    }
+    const uint64_t loads = ed.render_prefetches_for_test();
+    ed.command("render");
+    for (frames = 0; frames < 20000 && ed.rendering_for_test(); frames++) ed.step_frame_headless();
+    std::printf("    two missing files: %d frame(s), %llu load(s)\n", frames, (unsigned long long)(ed.render_prefetches_for_test() - loads));
+    CHECK(!ed.rendering_for_test());
+    CHECK(ed.render_prefetches_for_test() - loads == 1);
+  });
+  test("a scene's textures decoded before its first frame (round 437): what an open's worker runs fills the texture cache with every renderer's image files", [] {
+    Scene s;
+    std::vector<std::string> files;
+    for (int i = 0; i < 3; i++) {
+      GameObject *g = s.create("Textured " + std::to_string(i));
+      g->add<MeshFilter>()->mesh = primitives::cube();
+      const std::string tex = fs::join(test_dir(), "r437_scene_" + std::to_string(i) + ".png");
+      std::vector<uint32_t> px(32 * 32, 0xFF000000u | (uint32_t)(i * 0x404040));
+      CHECK(write_png(tex, px.data(), 32, 32, 32));
+      MaterialPtr m = make_material("R437 " + std::to_string(i), {0.8f, 0.8f, 0.8f});
+      m->base_map.path = tex;
+      g->add<MeshRenderer>()->materials = {m};
+      files.push_back(tex);
+    }
+    texture_cache_clear();
+    int before = 0, after = 0;
+    for (const std::string &f : files) before += texture_cached(f, true) != nullptr;
+    prefetch_scene_textures(s);
+    for (const std::string &f : files) after += texture_cached(f, true) != nullptr;
+    std::printf("    %d of %zu textures cached before, %d after\n", before, files.size(), after);
+    CHECK(before == 0 && after == (int)files.size());
+  });
+}
+
+/* ---------------------------------------------------------------- round 436, review: gathers by other paths */
+static void tests_round436_review() {
+  test("a render's gather doesn't feed the Game view (review 436): F12 gathers with the views' outlines, LOD Groups and Camera Flatten off; the Game view after it gathers its own, in verify mode no stale list", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_render_cache_verify(true);
+    const uint64_t stale0 = Editor::render_cache_mismatches_all();
+    ed.command("create Cube");
+    ed.command("create Camera");
+    ed.command("window Game");
+    ed.step_frame_headless();
+    ed.command("render");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(Editor::render_cache_mismatches_all() == stale0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 435: the scene's change counter (task 0411, ADR 0115) */
+/* Idle frames: how many walked the scene and how many kept its hash. */
+static void idle_frames(Editor &ed, int n, uint64_t &walks, uint64_t &kept) {
+  walks = kept = 0;
+  for (int i = 0; i < n; i++) {
+    ed.step_frame_headless();
+    walks += ed.frame_profile_last_for_test().scene_hashes;
+    kept += ed.frame_profile_last_for_test().scene_hash_reuses;
+  }
+}
+
+static void tests_round435() {
+  test("the change counter (round 435, ADR 0115): a transform, an object made, destroyed or reparented, a component added or removed, a mesh or a material touched each move it", [] {
+    Scene s;
+    uint64_t c = edit_epoch::now();
+    auto moved = [&] {
+      const bool m = edit_epoch::now() != c;
+      c = edit_epoch::now();
+      return m;
+    };
+    GameObject *a = s.create("A");
+    CHECK(moved());
+    GameObject *b = s.create("B");
+    moved();
+    a->set_local_position({1, 2, 3});
+    CHECK(moved());
+    s.set_parent(b, a);
+    CHECK(moved());
+    Light *l = a->add<Light>();
+    CHECK(moved());
+    a->remove_component(l);
+    CHECK(moved());
+    auto mesh = std::make_shared<Mesh>();
+    mesh->touch();
+    CHECK(moved());
+    Material mat;
+    mat.touch();
+    CHECK(moved());
+    write_anim_value(*a, "Active", 0, 0.0f);  // (review 435: a clip's, the Sequencer's, the Curve editor's writes)
+    CHECK(moved());
+    s.destroy(b);
+    CHECK(moved());
+    s.destroy(std::vector<GameObject *>{a});
+    CHECK(moved());
+    CHECK(!moved());  // (nothing done: still)
+  });
+  test("idle frames keep the scene hash (round 435): walked once in so many frames, kept in between; a `set` on a light and Undo each walk it again at once", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.command("create Point Light");
+    ed.set_scene_hash_check_every_for_test(8);  // (a window's interval; headless checks every frame)
+    ed.step_frame_headless();
+    uint64_t walks = 0, kept = 0;
+    idle_frames(ed, 32, walks, kept);
+    std::printf("    32 idle frames: %llu walks, %llu kept\n", (unsigned long long)walks, (unsigned long long)kept);
+    CHECK(kept > 0);
+    CHECK(walks <= 32 / 8 + 2);  // (the check every 8th frame, and the first)
+    const uint64_t before = ed.render_hash_for_test();
+    ed.command("set Light.Intensity 7");
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().scene_hashes >= 1);
+    const uint64_t set_to_7 = ed.render_hash_for_test();
+    CHECK(set_to_7 != before);
+    ed.command("undo");  // (the restored scene is a clone - a new serial, so a new hash: walked, not kept)
+    ed.step_frame_headless();
+    CHECK(ed.frame_profile_last_for_test().scene_hashes >= 1);
+    CHECK(ed.render_hash_for_test() != set_to_7);
+    CHECK(ed.scene_hash_misses_for_test() == 0);
+  });
+  test("a write past every funnel (round 435): the check walks it on the next due frame, counts a miss and draws the walked hash - the picture is stale at most the check's interval", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Point Light");
+    ed.set_scene_hash_check_every_for_test(1);
+    uint64_t walks = 0, kept = 0;
+    idle_frames(ed, 4, walks, kept);
+    CHECK(ed.scene_hash_misses_for_test() == 0);
+    GameObject *g = ed.active_object_for_test();
+    Light *l = g ? g->get<Light>() : nullptr;
+    CHECK(l != nullptr);
+    if (!l) return;
+    /* (No Inspector, no `set`: nothing told the counter. Within the field's range - the Inspector clamps an
+     * out-of-range value on its next draw, and that is a second write.) */
+    l->intensity = 5.0f;
+    idle_frames(ed, 3, walks, kept);
+    std::printf("    3 frames after the write: %llu walks, %llu kept, %llu missed\n", (unsigned long long)walks, (unsigned long long)kept,
+                (unsigned long long)ed.scene_hash_misses_for_test());
+    CHECK(ed.scene_hash_misses_for_test() == 1);
+    CHECK(walks >= 3);  // (check every frame: each frame walks once)
+  });
+  test("Play, a playing clip, a stroke walk every call (round 435): scripts, physics, tracks and brushes write past the counter", [] {
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.command("create Cube");
+    ed.step_frame_headless();
+    CHECK(!ed.scene_hash_volatile_for_test());
+    ed.command("play");
+    ed.step_frame_headless();
+    CHECK(ed.scene_hash_volatile_for_test());
+    ed.command("stop");
+    ed.step_frame_headless();
+    CHECK(!ed.scene_hash_volatile_for_test());
+  });
+}
+
 /* ---------------------------------------------------------------- round 433: what the soak found (task 0409) */
 static void tests_round433() {
   test("a small list destroyed at once (round 433): an object named twice and a child named with its parent are destroyed once, nothing read after it is freed", [] {
@@ -8699,5 +9172,10 @@ void run_editor_tests() {
   tests_round419();
   tests_round422();
   tests_round433();
+  tests_round435();
+  tests_round436();
+  tests_round436_review();
+  tests_round437();
+  tests_round445();
   coverage_tests();
 }

@@ -50,7 +50,25 @@ struct BakeSettings {
    * main thread). */
   float backface_tolerance = 0.9f;
   bool directional = true;        // round 426: Unity's Directional mode - a direction page beside each colour page (LightingData::dir_pages)
+  /* Round 440: each UV island packed on its own across the atlas (off: one square per object, the old way). */
+  bool island_charts = true;
+  /* Round 440 (Unity's Stitch Seams): the texels on both sides of a UV seam - an edge two faces share in the mesh but not
+   * in the lightmap - blended toward each other, so the seam doesn't show as a step. */
+  bool stitch_seams = true;
+  /* Round 441: the sky or HDRI sampled by its light at each texel (off: found by the cosine gather alone). */
+  bool sample_env = true;
+  /* Round 441: with more than 8 Baked point and spot lights, each texel picks among them by their light there. */
+  bool pick_lights = true;
+  /* Round 444 (ADR 0117): Unity's Lighting Mode - 0 Baked Indirect, 1 Shadowmask (the Mixed lights' shadows from the
+   * static scene in a mask, up to kMaskChannels lights), 2 Subtractive (their direct light in the lightmaps too). */
+  int lighting_mode = 0;
 };
+
+struct BakeLight;
+/* Round 444 (review): Unity's Subtractive split - the main directional Mixed light (the brightest) stays Mixed (the bake
+ * records it as 3: in the lightmaps, realtime on moving objects); every other Mixed light becomes Baked (in the lightmaps
+ * and the probes, as Unity's Subtractive bakes them). Returns the main light's index or -1. */
+int subtractive_split(std::vector<BakeLight> &lights);
 
 /* One object to bake: its world placement and the mesh drawn for renders. */
 struct BakeObject {
@@ -96,8 +114,13 @@ struct LightingData {
    * non-directional bake. The renderers rebalance the light for a normal-mapped surface with it
    * (lightmap_direction_factor, Unity's DecodeDirectionalLightmap). */
   std::vector<Lightmap> dir_pages;
+  /* Round 444: beside each page in a Shadowmask bake, the Mixed lights' visibility from the static scene, one channel a
+   * light (light_modes says which: 4 + channel). Empty otherwise. */
+  std::vector<Lightmap> mask_pages;
   std::map<uint64_t, Entry> entries;  // by GameObject id
-  /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect).
+  /* Which lights are in the maps: id -> mode (1 Mixed: indirect only, 2 Baked: direct and indirect; round 444: 3 a
+   * Subtractive Mixed light - direct and indirect in the lightmaps, realtime elsewhere; 4-6 a Shadowmask Mixed light and
+   * its mask channel).
    * Realtime GI (task 0013) adds what isn't here. */
   std::map<uint64_t, int> light_modes;
   uint64_t scene_key = 0;  // lightmap_scene_key() when baked: a different one is "out of date"
@@ -106,6 +129,7 @@ struct LightingData {
   bool save(const std::string &dir, std::string &error) const;
   bool load(const std::string &dir, std::string &error);
   void load_dir_pages(const std::string &dir);  // (round 426: by load, when the file says the bake had them)
+  void load_mask_pages(const std::string &dir);  // (round 444)
 };
 
 /* A content hash of a mesh (positions, faces, smoothing, sharp edges, per-face materials, UVs: stable
@@ -136,7 +160,14 @@ struct LightmapLayout {
   std::vector<LightmapTexel> texels;
   std::vector<std::vector<uint8_t>> covered;  // per page: which texels a chart covers
   std::vector<std::vector<int32_t>> owner;    // per page: the object owning a texel (-1 none)
+  /* Round 440: per page, the pairs of texels on the two sides of a UV seam at the same point of the surface. */
+  std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams;
+  size_t charts = 0;  // the rectangles packed (islands, or objects with island_charts off)
 };
+/* Round 440: the share of the pages' texels that charts cover (the atlas's fill), for the log and the tests. */
+double lightmap_layout_fill(const LightmapLayout &lay);
+/* Round 440: the mean step across the seams (|a - b| over |a| + |b|, over the pairs), 0 with none. */
+double lightmap_seam_step(const std::vector<Lightmap> &pages, const std::vector<std::vector<std::pair<uint32_t, uint32_t>>> &seams);
 struct LightmapUvCache {
   struct Entry {
     uint64_t key = 0;
@@ -193,8 +224,18 @@ class Lightmapper {
     float weight = 0.0f;
     void add(Vec3 light, Vec3 dir);
   };
+ public:
+  /* Round 438 (ADR 0114 amendment): the length a texel's direction is saved with - its directional share (the mean of
+   * where its light came from: 1 when one light lit it, shorter as bounced and sky light share it) raised to
+   * kDirectionPower, so the bake's direction maps are as long as Unity's. Measured on SideRail's own direction maps:
+   * Unity's median length 0.117 (p90 0.715) where the plain share is 0.744 (p90 0.949); 0.744^7.25 = 0.117 and
+   * 0.949^7.25 = 0.684. The length is how strongly the views tilt the baked light by a normal map. */
+  static constexpr float kDirectionPower = 7.25f;
+  static Vec3 saved_direction(Vec3 mean_direction);
+ private:
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
-                  DirSum *dir_out = nullptr);
+                  DirSum *dir_out = nullptr, Vec3 *mask_out = nullptr);
+  void assign_mask_channels();  // (round 444)
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
   std::vector<uint8_t> invalid_;  // (round 430: per texel, inside geometry - its rays mostly met back faces)
   size_t invalid_count_ = 0;
@@ -205,6 +246,23 @@ class Lightmapper {
   size_t invalid_texels() const { return invalid_count_; }  // (round 430: the last bake's, for the log and the tests)
  private:
   void finish_directions();
+  void finish_masks();                   // (round 444)
+  std::vector<Vec3> masks_;              // (round 444: per texel, in a Shadowmask bake)
+  std::vector<int> mask_channel_;        // (round 444: per light, its mask channel or -1)
+  bool bakes_direct(const BakeLight &bl) const { return bl.mode == 2 || (bl.mode == 1 && s_.lighting_mode == 2); }
+  Vec3 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
+ public:
+  static constexpr int kMaskChannels = 3;  // (a page's three colours: Unity keeps four)
+ private:
+  std::vector<std::vector<std::pair<uint32_t, uint32_t>>> seams_;  // (round 440: the layout's seam pairs, per page)
+  double seam_step_before_ = 0.0, seam_step_after_ = 0.0;
+ public:
+  double seam_step_before() const { return seam_step_before_; }  // (round 440: the last bake's, for the log and the tests)
+  double seam_step_after() const { return seam_step_after_; }
+  /* Round 440: Unity's Stitch Seams - each pair of texels across a seam pulled toward their mean, a few rounds (a texel on
+   * several seams settles between them). */
+  static void stitch_seams(Lightmap &lm, const std::vector<std::pair<uint32_t, uint32_t>> &pairs);
+ private:
   void denoise_page(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
                     const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own);
   static void dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have, int W, int H);
@@ -213,6 +271,13 @@ class Lightmapper {
               const std::vector<int32_t> &own, int W, int H) const;
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
+  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &rays) const;  // round 441
+  size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kPickLightsOver each texel picks among them)
+ public:
+  static constexpr size_t kPickLightsOver = 8;
+  static constexpr float kPickRays = 8.0f;
+  static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)  // (the shadow-ray budget per texel the picking aims at, in expectation)
+ private:
   /* The texels' hemisphere-gather part alone (the direct terms - lights and emitters sampled - are never clamped),
    * kept beside `values_` for the firefly clamp (task 0157); the emitters sampled at each texel apart (round 423: they
    * are denoised with the gather but not clamped - a lamp's contact glow is a real highlight). */

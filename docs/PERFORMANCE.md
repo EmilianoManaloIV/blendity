@@ -1,5 +1,123 @@
 # Performance, limits and efficiencies
 
+## Pass 18: Pass 17's open items (rounds 435-446)
+
+### Pass 18 in one table (round 446)
+This machine (AMD Ryzen, RTX 4070 SUPER, Windows 11), the build with Blender's libraries; before is Pass 17's end
+(round 434), after is round 444's build, measured with nothing else running.
+
+**The views against Unity's** (windowed, ms a frame on the card; `tools/dev/views.py`):
+
+| view | Pass 17's end | after Pass 18 | Unity |
+|---|---|---|---|
+| Shinano, Scene view | 7.52 (hashing 0.98) | **4.64** (hashing 0.12) | 2.2 |
+| Shinano, Scene + Game view | 6.17 | **2.79** | 2.5 (Game) |
+| 50,000 cubes, Scene view | 100.8 | **61.3** | - |
+| 50,000 cubes, an idle frame | not measured | **5.3** (round 436) | - |
+
+**The freezes:**
+
+| | Pass 17's end | after Pass 18 | budget |
+|---|---|---|---|
+| Enter Edit Mode on the 500k sphere | 116-117 ms | **96.3 ms** | 100 ms |
+| A cold path-traced F12's start (SideRail) | 861 ms | **47 ms** (textures loaded on a worker) | 50 ms |
+| The first frame after SideRail's import | 698 ms | 698 ms (open: the textures decoded and sent in it) | 50 ms |
+
+**The bake against Unity's** (SideRail, Blendity's own Generate Lighting; MAE / SSIM / grid correlation; ADR 0113's
+target MAE <= 4, SSIM >= 0.90, grid >= 0.95):
+
+| station | Pass 17's end (round 430) | after Pass 18 (round 444) |
+|---|---|---|
+| spawn | 3.71 / 0.812 / 0.899 | 3.69 / 0.809 / 0.898 |
+| spawn_back (dark) | 1.37 / 0.772 / 0.360 | 1.43 / 0.777 / 0.129 |
+| floor | 4.36 / 0.747 / 0.974 | **4.25 / 0.771** / 0.974 |
+| ahead | 3.06 / 0.883 / 0.958 | 3.06 / 0.884 / 0.958 |
+| the bake | 85 s | 74 s |
+
+ADR 0113's target is **still not met**: MAE at three of four stations, SSIM at none. Only the directional strength
+(round 438) moved the stations (the floor's SSIM 0.747 -> 0.773). Emitters, island charts and seams, the sky's
+importance sampling and light picking (439-441) measured right on the synthetic guard and left SideRail flat. SideRail
+has no Mixed lights and its lighting file predates L2 probes, so Shadowmask / Subtractive (444) and the probes (442)
+can't change it. What still separates the stations from Unity's lightmaps (SSIM 0.87-0.95 there) is open: Unity's
+denoiser and texel filtering, chart placement within a page, and the reflection probes' content.
+
+**The synthetic guard** (`blendity_stress --only lightmap_quality`, relative RMSE): room 0.016, corridor 0.008,
+courtyard 0.060 - as at round 434 (the rounds' own scenes: an unlit sign 0.020 -> 0.0003, an HDRI's bright patch 4.46 ->
+0.10, 40 lamps the same light from 49k shadow rays instead of 224k, a sphere's seam step 1.85 % -> 0.24 %, a probe's
+error against N.L 0.132 -> 0.023).
+
+**The soak:** the working set 699 -> **521 MB** at minute 1 (seed 4242), the procedural-texture cache bounded; left, a
+running 4096 x 4096 surface's 738 MB of planes.
+
+**What Pass 18 built:** a scene-wide change counter (435, ADR 0115); the idle frame (436); the Edit Mode cage and a cold
+F12's start (437); directional strength (438); emitters (439); island charts and seams (440); the sky's importance
+sampling and light picking (441); L2 SH probes and tetrahedral interpolation of Unity's probes (442, ADR 0116); VRChat
+Light Volumes in Blendity's views (443); Shadowmask and Subtractive (444, ADR 0117); the soak's memory accounts and
+bound (445).
+
+**The baseline** (`stress/results/baseline.md`, refreshed from this build, 15 sections) against round 434's: in the full
+run the world stand-in's views (5.5 -> 10.9 ms) and four GPU editor-frame rows (+26-34 %) were over 20 %; run alone, the
+stand-in is 5.6 / 10.8 ms (5.5 / 9.5 before) and the GPU editor frames +8-18 % (playing 4.57 -> 5.40, the Sky scene
+6.89 -> 8.00; glass in shaded shading flat) - under 20 %, a drift not attributed to one round (the views' shaders gained
+Light Volumes, SH probes and the mask in 442-444). The baseline keeps the standalone runs for those two sections.
+Responsiveness: three longest frames up (Bake Mesh Maps 5.9 -> 8.1, Bake Textures 5.9 -> 7.2, F12 of the stand-in 4.2 ->
+5.3 ms) and the 50k-sphere FBX / PLY imports' 1.0 -> 4.2 ms, all far under ADR 0105's 50 ms.
+
+**Open, ranked:**
+1. The bake's SSIM at SideRail (above); Unity's per-renderer Stitch Seams and Scale In Lightmap per island; the probes
+   don't sample the sky or pick lights.
+2. The first frame after a big Unity import (698 ms): textures that stream in after it.
+3. Shinano's Scene view at 2.1x Unity's (its UI 2.0 ms, overlays 1.1); 50,000 cubes' instances, render call (instancing)
+   and overlay commands (14 ms).
+4. The GPU editor frames' 8-18 % drift (above): attribute it per round.
+5. Four Shadowmask lights per texel, Distance Shadowmask, exporting the masks; SH deringing; Light Probe Groups as
+   objects; a running surface's planes.
+6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
+   macOS with Blender's libraries, input latency, a cold shader cache, OptiX / MoonRay, Unity timed per step.
+
+### The scene's change counter (round 435, ADR 0115)
+Nothing in the scene said "changed", so every view walked every object every frame to find out. Now every edit path
+moves one counter and the views keep the scene hash while it holds still (checked by a walk every 8th frame).
+
+| view (windowed, on the card) | before: frame (hashing) | after: frame (hashing) |
+|---|---|---|
+| Shinano, Scene view | 8.44 ms (0.98) | 6.52 ms (**0.12**) |
+| Shinano, Scene + Game view | 6.17 ms (0.96) | 5.09 ms (**0.12**) |
+| 50,000 cubes, Scene view | 96.4 ms (4.38) | 92.1 ms (**0.55**) |
+
+The hashing is this round's; the frames' other differences are the card's passes and presenting, which vary run to
+run. Gathering (Shinano 1.86, 50,000 cubes 21.9 ms) and the UI are round 436's. The fuzz, checking every frame:
+0 changes the counter missed in 6,000 frames.
+
+### The idle frame (round 436)
+On the counter: the views' draw items kept (orbiting an unchanged scene gathers nothing), and four per-frame walks of
+every object (procedural shapes, Fit to Mesh, focus tracking, the icon pass - 22 ms of an idle frame at 50,000
+objects) skipped while nothing changed. Per-window timing found them.
+
+| view (windowed, on the card) | before round 435 | after round 435 | after round 436 | Unity |
+|---|---|---|---|---|
+| Shinano, Scene view | 8.44 ms | 6.52 | **4.69** | 2.2 |
+| Shinano, Scene + Game view | 6.17 | 5.09 | **2.93** | 2.5 (Game) |
+| 50,000 cubes, Scene view | 96.4 | 92.1 | **61.7** | - |
+| 50,000 cubes, idle frame | not measured | 14.5 | **5.3** | - |
+
+Open: Shinano's Scene view is 2.1x Unity's (its UI 2.1 ms, overlays 1.1); at 50,000 cubes the card's instances
+(12 ms) and render call (12 ms) - one mesh drawn 50,000 times, which instancing would draw once - and the overlay
+commands (13 ms).
+
+### The two freezes (round 437)
+- **Enter Edit Mode on the 500k sphere** (the CPU cage): 115-123 -> **98-110 ms**, an Edit Mode frame 70 -> 43-54 ms.
+  The cage's commands are prepared straight into the batch (not a million-command array zero-filled and copied twice a
+  frame); an opaque dot's inside is written, not blended. At ADR 0105's 100 ms, not safely under: the 34 ms Edit Mode
+  render mesh is still built in the frame.
+- **The 698 ms frame while SideRail path-traced** was the first frame after the open: its textures decoded (1.2 s) and
+  sent to the card (0.57 s) in one frame. A warm path-traced F12: longest frame 34 ms. A cold F12's start now loads its
+  textures on a worker first (861 -> **47 ms**); a `.scene` opened on a worker decodes its textures there.
+- **Open:** a Unity scene import's first frame (textures decoded and uploaded in it) - textures that stream in after the
+  first frame; the card's uploads spread over frames.
+- `perf mark` now names the longest frame's parts (over 5 ms) - "the longest 577.7 ms (Scene view 573.9, GPU path
+  568.5)".
+
 ## Pass 17: the bake's quality against Unity's (rounds 421-434)
 
 ### Pass 17 in one table (round 434)
@@ -57,7 +175,8 @@ GGX-prefiltered (428); Filamented's specular occlusion (429); texel validity and
    a scene-wide change counter, its own round and ADR.
 2. The bake's SSIM: directional strength against Unity's divisor, seams (Unity's Stitch Seams), the exit sign's glow.
 3. One 698 ms frame while SideRail path-traces; Enter Edit Mode on 500k, 116 ms (budget 100).
-4. The soak's 1.1-1.3 GB of working memory: its holder (a heap profile per window).
+4. ~~The soak's 1.1-1.3 GB of working memory~~ - found and bounded in round 445 (below); left: a running 4096 x 4096
+   surface's 738 MB of planes.
 5. Shadowmask and Subtractive, L2 SH probes and Light Volumes in Blendity's own views, per-island chart packing - planned
    for Pass 17, not reached.
 6. Not measurable on this machine (docs/tasks/0409): 4K windows, the laptop, VR / Quest, AMD / Intel cards, Linux /
@@ -165,6 +284,18 @@ to the card (lightmaps 47.8 s, reflection probes 38.4 s). Texel validity (Unity'
 texels inside geometry, filled from their charts. Stations: spawn 3.71 / 0.812 / 0.899, spawn_back 1.37 / 0.772 /
 0.360, floor 4.36 / 0.747 / 0.974, ahead 3.06 / 0.883 / 0.958.
 
+### Directional strength (round 438, ADR 0114 amended)
+A direction's saved length is its direct share raised to 7.25. SideRail's direction lengths over lit texels: median
+0.165, 90th percentile 0.701 (Unity's maps 0.117 / 0.715; round 427's 0.744 / 0.949). Stations: spawn
+3.70 / 0.813 / 0.899, spawn_back 1.37 / 0.772 / 0.360, floor 4.25 / 0.773 / 0.974 (SSIM 0.747 before), ahead
+3.06 / 0.885 / 0.959.
+
+### Emitters, charts and seams, sampling (rounds 439-441)
+- A floor under a small unlit sign: error at 16 samples 0.020 -> 0.0003. A floor under an HDRI's bright patch: 4.46 ->
+  0.10. 40 lamps: the same light from 49k shadow rays instead of 224k.
+- 60 objects on 128-texel pages: 33 pages of island charts against 45 of squares; a sphere's seam step 1.85 % -> 0.24 %.
+- SideRail against Unity: spawn 3.69 / 0.809 / 0.898, spawn_back (dark) 1.43 / 0.777 / 0.129, floor 4.25 / 0.771 / 0.974, ahead 3.06 / 0.884 / 0.958 (MAE / SSIM / grid; round 438: 3.70 / 0.813, 1.37 / 0.772, 4.25 / 0.773, 3.06 / 0.885) - flat within run-to-run noise: ADR 0113's SSIM target still missed at three stations. The bake 91 s (lightmaps 52.3 s on the card, the filter 2.1 s).
+
 ### The views against Unity's (round 431) and the suite's comparison (round 432)
 | view (ms a frame on the card) | Blendity | Unity |
 |---|---|---|
@@ -176,6 +307,14 @@ Shinano's gathering and hashing re-derive an unchanged scene: caching them safel
 (open). The only quick-suite responsiveness row over budget: Enter Edit Mode on the 500k sphere, 116 ms (budget 100;
 the CPU's first cage frame). `tools/perf_suite.py` now matches rows by section, table and row; CI compares its quick
 stress with a per-runner baseline when one is committed (`--compare`, warnings).
+
+### The soak's memory (round 445, task 0421)
+`perf memory` and the soak's `holds:` lines name each subsystem's bytes. The 1.1-1.3 GB was a 4096 x 4096 procedural
+surface (`BLENDITY_FUZZ_SEED=4242`): **738 MB** of planes on its worker while it evaluates, then **448 MB** of images in
+the procedural-texture cache, which had no limit. Before: 570-650 MB of the working set in no account at minute 1 (the
+working set 699 MB, flat); after: the cache counted (448 MB), 51-59 MB in no account, the working set 560 -> 585 MB. The
+cache is bounded (1/32 of the machine's memory, 128-512 MB; least recently used images only it holds are dropped); the
+idle renderers' scratch is freed after 5 s with the total over 96 MB.
 
 ### What Pass 16 didn't measure (round 433)
 - **A 30-minute soak** (`BLENDITY_FUZZ_MINUTES=30 blendity_stress --only editor_fuzz`): no crash in 194,633 frames

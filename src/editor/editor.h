@@ -214,6 +214,10 @@ struct FrameProfile {
   double ms_deferred = 0;
   double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
+  uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
+  double ms_render_start = 0, ms_render_land = 0;  // round 437: F12's start (the snapshot) and each frame's poll and landing
+  double ms_window[32] = {};  // round 436: each docked window's own drawing (WindowKind order; the views' rendering inside theirs)
+  uint64_t scene_hash_reuses = 0, scene_hash_misses = 0;  // round 435 (ADR 0115): scene hashes kept while nothing changed; checks that found a change the counter missed
   uint64_t overlap_reused = 0, overlap_local = 0, overlap_background = 0;  // task 0108: checks skipped, done locally, on a worker
   /* Task 0096: views drawn on the GPU, views the GPU was wanted for but couldn't draw (the CPU did), meshes sent to it
    * whole and updated in place, and the GPU path's time (render and read-back, inside the views' times). */
@@ -256,6 +260,9 @@ struct FrameProfile {
     ms_edit_op += o.ms_edit_op, ms_undo += o.ms_undo;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
+    scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
+    for (int k = 0; k < 32; k++) ms_window[k] += o.ms_window[k];
+    ms_render_start += o.ms_render_start, ms_render_land += o.ms_render_land;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
     gpu_views += o.gpu_views, gpu_fallbacks += o.gpu_fallbacks, gpu_mesh_uploads += o.gpu_mesh_uploads, gpu_mesh_updates += o.gpu_mesh_updates;
     gpu_approximated += o.gpu_approximated, gpu_corner_uploads += o.gpu_corner_uploads, lights_culled += o.lights_culled, filters_on_card += o.filters_on_card;
@@ -856,6 +863,26 @@ class Editor {
   const std::vector<float> &frame_history() const { return frame_history_; }
   std::string perf_status_text() const;
   std::string perf_mark(const std::string &name);
+  std::string worst_frame_parts() const;
+  /* Round 437: F12's image files decoded on a worker first when some aren't in the texture cache - the snapshot (which
+   * freezes the materials, reading their textures) then starts in the frame it lands, fast. A cold F12 on SideRail had
+   * decoded 820 ms of textures in one frame. */
+  struct RenderPrefetch {
+    std::thread thread;
+    std::atomic<bool> done{false};
+    bool preview = false, open_window = false;
+    const Scene *scene = nullptr;
+    uint64_t serial = 0;
+    size_t files = 0;
+    ~RenderPrefetch() {
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::unique_ptr<RenderPrefetch> render_prefetch_;
+  bool render_prefetch_start(bool preview, bool open_window);
+  void render_prefetch_poll();
+  uint64_t render_prefetches_ = 0;  // (since start: renders that loaded their textures first)
+  bool render_prefetched_ = false;  // (review 437: the render after a load starts without another - a file that won't decode, or a cache over its budget, would load forever)
   /* The CPU badge's reason (round 411): this window's Scene view refused by the card (its own slot's reason - another
    * view's refusal, the Game view's bloom over glass say, is the Profiler's to list), else the card absent. Empty: no badge. */
   const std::string &scene_view_slot_reason() const {
@@ -1258,6 +1285,7 @@ class Editor {
   /* Probe volumes (task 0014). */
   const ProbeVolumeData &probes_for_test() const { return probes_; }
   std::map<uint64_t, LightVolumeSH> &light_volume_bakes_for_test() { return light_volume_bakes_; }  // (round 398)
+  const LightVolumeFrame *light_volume_frame_for_test() { return light_volume_frame(); }  // (round 443)
   std::map<uint64_t, ReflectionProbeBake> &reflection_probe_bakes_for_test() { return reflection_probe_bakes_; }  // (round 401)
   LightingEnv make_lighting_for_test() { return make_lighting(cam_.position(), true, true); }
   bool unity_lights_gamma() const { return scene_->unity.gamma_lights(); }  // (re-check 401: one rule for the views and the bakes)
@@ -1336,6 +1364,14 @@ class Editor {
     return cf ? camera_flatten_pivot(owner, *cf) : owner.world_position();
   }
   uint64_t render_hash_uncached_for_test() { return scene_render_hash(false); }  // from scratch, no memo (ADR 0015)
+  void set_scene_hash_check_every_for_test(int n) { scene_hash_check_every_ = std::max(1, n); }
+  uint64_t scene_hash_misses_for_test() const { return scene_hash_misses_; }
+  uint64_t walks_skipped_for_test() const { return walks_skipped_; }
+  uint64_t render_prefetches_for_test() const { return render_prefetches_; }
+  std::string perf_mark_for_test(const std::string &name) { return perf_mark(name); }
+  uint64_t scene_hash_reuses_for_test() const { return prof_.scene_hash_reuses; }
+  void next_hash_frame_for_test() { hash_frame_++; }
+  bool scene_hash_volatile_for_test() const { return scene_hash_volatile(); }
   const RasterStats &scene_stats_for_test() const { return scene_stats_; }
   /* The Textures window last frame: "new", "size", "assign", "output", "add_layer", "layer<i>", "thumb:<name>". */
   Recti confirm_rect_for_test(const std::string &id) const {
@@ -1445,6 +1481,7 @@ class Editor {
   void read_unity_lighting_cmd(bool wait);
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
+  void unity_subtractive_modes(LightingData &ld) const;  // (round 444)
   void apply_unity_post_processing(const std::vector<UnityDoc> &docs, UnityImport &ctx);  // (round 401)
   int apply_unity_reflection_probes(const UnityLighting &u, const GameObject *under);  // (round 401)
   void lighting_reset_for(const char *why);
@@ -2009,6 +2046,44 @@ class Editor {
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
   std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  /* Round 436: the gather itself; `view_dep` set when an item depends on this view's eye (an outline's width, an LOD
+   * Group's level, a camera-shaped mesh), so the kept list is keyed by the eye too. */
+  std::vector<DrawItem> collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod);
+  uint64_t items_key(bool game, bool want_tangents);
+  uint64_t items_view_key() const;
+  /* Round 436 (ADR 0115): a per-frame walk that only reacts to edits (procedural shapes, colliders' Fit to Mesh, a
+   * camera's focus tracking) skips while the change counter and the scene hold still - walked anyway while the scene
+   * changes behind the counter and every `scene_hash_check_every_`th frame, as the scene hash is checked. */
+  struct WalkMark {
+    const Scene *scene = nullptr;
+    uint64_t serial = 0, epoch = 0, frame = 0;
+  };
+  bool walk_due(const WalkMark &m) const;
+  void walk_done(WalkMark &m, uint64_t epoch_before) const;
+  /* (Taken as a walk starts: the counter read before it - a bump during the walk, its own or a worker's, walks once
+   * more next frame - and recorded whichever way the walk returns.) */
+  struct WalkScope {
+    const Editor &e;
+    WalkMark &m;
+    uint64_t epoch = edit_epoch::now();
+    ~WalkScope() { e.walk_done(m, epoch); }
+  };
+  WalkMark shapes_walk_, collider_walk_, focus_walk_, icon_walk_;
+  void apply_camera_focus();  // (the walk itself: the `focus` command applies it at once)
+  std::vector<GameObject *> icon_objects_;  // (round 436: what the Scene view's icon pass draws for)
+  const std::vector<GameObject *> &scene_icon_objects();
+  uint64_t walks_skipped_ = 0;  // (since start: walks the counter let go)
+  void draw_window_kind(WindowKind k, const Recti &r);  // (round 436: dock_draw_window's switch, timed around it)
+  void print_window_times(const FrameProfile &p0, const FrameProfile &p1, double frames);  // (round 436: the windowed check's slowest windows)
+  /* Round 436 (ADR 0115): each view kind's draw items, kept while the scene's hash and what the gather reads beside
+   * it hold still - [game][tangents]. */
+  struct ItemsCache {
+    uint64_t base = 0, view = 0;
+    bool view_dep = false, valid = false;
+    bool flattening = false;  // (a Camera Flatten or View Angle Shapes was in the scene: the gather filled side tables - never kept)
+    bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
+    std::vector<DrawItem> items;
+  } items_cache_[2][2];
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
    * per metre at one metre; off between views (exports, bakes: the plain thickness). */
@@ -2108,6 +2183,19 @@ class Editor {
   void step_final_render();
   void save_render(const std::string &to = "");
   uint64_t scene_render_hash(bool memo = true);
+  uint64_t scene_render_hash_walk(bool memo);  // (round 435: every object, every time - what the kept hash is checked against)
+  uint64_t scene_hash_tail();                  // (the environment and the editor's generations: cheap, read every call)
+  bool scene_hash_volatile() const;            // (Play, a clip playing, a stroke, Live Link clients: the scene changes behind the counter)
+  /* Round 435 (ADR 0115): the scene hash kept while the change counter, the tail and the scene hold still; walked again
+   * on the first call of every `scene_hash_check_every_`th frame to check the counter missed nothing. */
+  struct SceneHashMemo {
+    const Scene *scene = nullptr;
+    uint64_t serial = 0, epoch = 0, tail = 0, hash = 0, frame = 0, checked = 0;
+    bool valid = false;
+  } scene_hash_memo_;
+  uint64_t hash_frame_ = 1;          // (counts frames for the memo)
+  int scene_hash_check_every_ = 8;   // (1 in the tests and the soak: every frame)
+  uint64_t scene_hash_misses_ = 0;   // (since start: a writer the counter missed)
   uint64_t object_render_hash(GameObject &g, bool memo);
   bool camera_for_render(Mat4 &view, Mat4 &proj, float aspect);
   void draw_grid(Renderer3D &r3d);
@@ -3780,6 +3868,7 @@ class Editor {
   float frame_ms_ = 0, ui_ms_ = 0;
   double perf_mark_t0_ = 0.0;  // (round 411: `perf mark` - since the last mark: the frames and the longest)
   float perf_mark_worst_ = 0.0f;
+  FrameProfile perf_mark_worst_prof_;  // (round 437: the longest frame's parts, printed by `perf mark`)
   int perf_mark_frames_ = 0;
   std::vector<float> frame_history_, raster_history_;
   /* Editor frame rate (Preferences > Performance). */
@@ -4118,8 +4207,24 @@ class Editor {
   }
   size_t undo_steps_for_test() const { return undo_.size(); }
   size_t undo_bytes() const;
+  /* Task 0421: what each subsystem holds in memory, by name and bytes (the soak prints it): the scene, the undo history,
+   * the texture cache, the renderers' scratch, the views' planes and pictures, the shadow maps, the path tracers. */
+  struct MemoryAccount { const char *name; size_t bytes; };
+  std::vector<MemoryAccount> memory_accounts() const;
+  std::string memory_text() const;  // `perf memory`: the accounts and the process's working set, one line
+  size_t scratch_bytes() const;                       // the renderers' scratch alone
+  size_t surface_job_planes_bytes() const;            // a surface evaluating on its worker: the planes it holds
+  size_t trim_scratch(size_t keep);                   // frees every renderer's scratch when it exceeds `keep`; the bytes freed
+  void trim_idle_memory();                            // (every frame) an idle renderer's scratch, over the budget, is given back
 
  private:
+  /* (Task 0421) Each renderer's draws (flushes and overlay batches) as last seen and when that changed: a renderer idle for kScratchHoldSeconds
+   * gives its scratch back when the total is over the budget; one in use (an orbit in Edit Mode) keeps it. */
+  struct ScratchWatch { uint64_t seen = ~(uint64_t)0; double since = 0.0; };
+  ScratchWatch scratch_watch_[6];
+  Renderer3D *scratch_renderer(int i);
+  static constexpr size_t kScratchBudget = (size_t)96 << 20;
+  static constexpr double kScratchHoldSeconds = 5.0;
   bool pending_change_ = false;
   EditSelection edit_sel_before_;  // Edit Mode's selection before the pending change (task 0167: the undo step's)
   EditSelection edit_selection() const;
@@ -4615,7 +4720,7 @@ class Editor {
   /* Task 0244: a surface evaluated off the main thread (ADR 0080). */
   struct SurfaceJob {
     std::thread thread;
-    std::atomic<bool> done{false}, cancel{false};
+    std::atomic<bool> done{false}, cancel{false}, building{false};  // (building: the images are being made from the planes - task 0421)
     std::string path;
     uint64_t hash = 0;
     ProceduralTexture copy;
@@ -5728,6 +5833,11 @@ class Editor {
   void draw_reflection_probes();
   uint64_t lv_bake_gen_ = 1;                   // (Live Link sends a volume's bake again when this moves)
   void livelink_light_volume_bakes_changed() { lv_bake_gen_++, light_volume_bakes_dirty_ = true; }
+  /* Round 443 (task 0419, light_volume_bake_ui.cpp): the baked volumes the views sample (null when off or none). */
+  LightVolumeFrame lv_frame_;
+  std::map<uint64_t, std::shared_ptr<const LightVolumeSH>> lv_shared_;  // (the bakes' copies in Blendity's axes, made once per bake)
+  uint64_t lv_shared_gen_ = 0;
+  const LightVolumeFrame *light_volume_frame();
   bool light_volume_bakes_dirty_ = false;  // (saved with the scene since it last changed)
   void load_light_volume_bakes(const std::string &dir);
   void save_light_volume_bakes(const std::string &dir);
@@ -5825,6 +5935,7 @@ class Editor {
     int shadow_res = 0;
     RealtimeLightmaps::Published rtlm;
     ProbeFrame probe_frame;
+    LightVolumeFrame light_volumes;  // (round 443: a copy of the views' frame - the volumes' voxels are shared)
     /* Realtime GI for the render: its grid, voxels and RSM built by the worker into a state of the job's own. */
     VoxelGIState gi_state;
     bool want_gi = false, gi_bounce = false, gi_lighting_shown = false;
@@ -5971,9 +6082,9 @@ class Editor {
   bool read_linear_light(RenderTarget &rt, int slot, bool want, const LightingEnv &env);
   std::vector<float> gpu_hdr_scratch_;  // (task 0197: the card's linear light, read back, kept between frames)
   void prune_gpu_lightmaps();
-  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed - a buffer every card binds whole)
+  static constexpr size_t kCardMaxProbes = 262144;  // (task 0197: 54 MB packed, 84 MB with round 442's SH - a buffer every card binds whole)
   static constexpr int kCardMaxTexture = 2048;      // round 414 (ADR 0108): a material's texture goes up from its first level within this (Unity's default import size)
-  void gpu_probe_volume(const ProbeVolumeData &d);
+  void gpu_probe_volume(const ProbeVolumeData *d, const LightVolumeFrame *lv);  // (round 443: with the Light Volumes)
   std::unordered_map<const Lightmap *, std::pair<uint64_t, std::shared_ptr<Texture>>> gpu_lightmaps_;
   uint64_t gpu_probe_key_ = 0;
   int viewport_device_ = 0;          // Preferences > Viewport Device: 0 Auto, 1 CPU, 2 GPU

@@ -206,7 +206,182 @@ void Editor::prebuild_render_meshes(const Scene &s, bool game) {
   });
 }
 
+/* Round 436 (ADR 0115): whether a per-frame walk has anything to find. */
+bool Editor::walk_due(const WalkMark &m) const {
+  if (m.scene != scene_.get() || m.serial != scene_->serial || m.epoch != edit_epoch::now()) return true;
+  return scene_hash_volatile() || hash_frame_ - m.frame >= (uint64_t)scene_hash_check_every_;
+}
+
+/* After the walk, with the counter as it was before it: what the walk changed itself (a shape rebuilt, a collider
+ * fitted), or a worker's bump meanwhile, walks once more next frame - then it settles. */
+void Editor::walk_done(WalkMark &m, uint64_t epoch_before) const {
+  m.scene = scene_.get(), m.serial = scene_->serial, m.epoch = epoch_before, m.frame = hash_frame_;
+}
+
+/* Round 437: the files a render's materials read and the texture cache doesn't hold, loaded on a worker; the render
+ * shows "preparing" and starts when they land (render_prefetch_poll). Only where jobs run on workers (a window, or a
+ * headless editor that asked) - elsewhere the snapshot decodes them in its frame, on every core, as before. */
+bool Editor::render_prefetch_start(bool preview, bool open_window) {
+  const bool loaded = render_prefetched_;  // (the render its load was for: no second load)
+  render_prefetched_ = false;
+  if (!jobs_async() || render_prefetch_ || loaded) return false;
+  std::vector<MaterialPtr> used;
+  scene_->for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.active_in_hierarchy() ? g.get<MeshRenderer>() : nullptr;
+    if (mr && mr->enabled && mr->show_in_renders) used.insert(used.end(), mr->materials.begin(), mr->materials.end());
+  });
+  std::vector<std::pair<std::string, bool>> files;
+  for (const MaterialPtr &m : used)
+    if (m) m->texture_files(files);
+  std::sort(files.begin(), files.end());
+  files.erase(std::unique(files.begin(), files.end()), files.end());
+  files.erase(std::remove_if(files.begin(), files.end(), [](const auto &f) { return texture_cached(f.first, f.second) != nullptr; }), files.end());
+  if (files.size() < 2) return false;  // (one file: the snapshot's own decode is as quick)
+  auto pf = std::make_unique<RenderPrefetch>();
+  pf->preview = preview, pf->open_window = open_window, pf->scene = scene_.get(), pf->serial = scene_->serial, pf->files = files.size();
+  RenderPrefetch *raw = pf.get();
+  pf->thread = std::thread([raw, files = std::move(files)] {
+    JobSystem::global().run_background([&] {
+      JobSystem::global().parallel_for((int64_t)files.size(), 1, [&](int64_t a, int64_t b) {
+        for (int64_t i = a; i < b; i++) (void)texture_load(files[(size_t)i].first, files[(size_t)i].second);
+      });
+    });
+    raw->done.store(true, std::memory_order_release);
+  });
+  render_prefetch_ = std::move(pf);
+  render_prefetches_++;
+  rendering_ = true;
+  render_preview_ = preview;
+  render_status_ = strprintf("%s: loading %zu textures...", preview ? "Preview" : "Render", render_prefetch_->files);
+  ui_.redraw = true;
+  return true;
+}
+
+void Editor::render_prefetch_poll() {
+  if (!render_prefetch_ || !render_prefetch_->done.load(std::memory_order_acquire)) return;
+  std::unique_ptr<RenderPrefetch> pf = std::move(render_prefetch_);  // (joined as it goes)
+  const bool preview = pf->preview, open_window = pf->open_window;
+  pf.reset();
+  const bool wanted = rendering_;  // (a Stop while the textures loaded: nothing follows)
+  rendering_ = false;
+  if (!wanted) {
+    render_status_ = "Render stopped while its textures loaded";
+    return;
+  }
+  /* (The scene shown now, even if an undo or an open replaced it meanwhile - the render was asked for: review 437.) */
+  render_prefetched_ = true;
+  start_final_render(preview, open_window);
+}
+
+/* Round 437: `perf mark`'s note on its longest frame - the parts over 5 ms, so a stall says where it was. */
+std::string Editor::worst_frame_parts() const {
+  const FrameProfile &p = perf_mark_worst_prof_;
+  const std::pair<const char *, double> parts[] = {{"Scene view", p.ms_scene3d}, {"Game view", p.ms_game}, {"preview", p.ms_preview},
+                                                   {"GPU path", p.ms_gpu}, {"render start", p.ms_render_start}, {"render landing", p.ms_render_land},
+                                                   {"UI", p.ms_ui}, {"undo", p.ms_undo}, {"deferred", p.ms_deferred}, {"present", p.ms_present}};
+  std::string s;
+  for (const auto &[name, ms] : parts)
+    if (ms > 5.0) s += strprintf("%s%s %.1f", s.empty() ? "" : ", ", name, ms);
+  return s.empty() ? std::string() : " (" + s + " ms)";
+}
+
+/* Round 436: the windowed check's line of the docked windows' own times, slowest first (those over 0.05 ms). */
+void Editor::print_window_times(const FrameProfile &p0, const FrameProfile &p1, double frames) {
+  std::vector<std::pair<double, int>> t;
+  for (int k = 0; k < (int)WindowKind::Count && k < 32; k++) {
+    const double ms = (p1.ms_window[k] - p0.ms_window[k]) / frames;
+    if (ms > 0.05) t.push_back({ms, k});
+  }
+  std::sort(t.begin(), t.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+  std::string line;
+  for (const auto &[ms, k] : t) line += strprintf("%s%s %.2f", line.empty() ? "" : ", ", window_title((WindowKind)k), ms);
+  std::printf("    the windows' own time: %s ms\n", line.empty() ? "none over 0.05" : line.c_str());
+}
+
+/* Round 436: two gathers of the same view the same (verify mode's check of a kept list): every field a view draws by. */
+static bool same_draw_item(const DrawItem &a, const DrawItem &b) {
+  if (a.mesh != b.mesh || a.id != b.id || a.materials != b.materials || a.lightmap != b.lightmap || a.lightmap_uv != b.lightmap_uv) return false;
+  if (a.lightmap_dir != b.lightmap_dir || a.shadowmask != b.shadowmask || a.face_highlight != b.face_highlight || a.vertex_colors != b.vertex_colors) return false;
+  if (a.unlit != b.unlit || a.double_sided != b.double_sided || a.receive_shadows != b.receive_shadows || a.cast_shadows != b.cast_shadows) return false;
+  if (a.use_probes != b.use_probes || a.realtime_lm != b.realtime_lm || a.always_cull != b.always_cull || a.flattened != b.flattened) return false;
+  if (a.view_shaped != b.view_shaped || std::memcmp(&a.albedo, &b.albedo, sizeof(Vec3)) != 0 || a.specular != b.specular) return false;
+  return std::memcmp(a.model.m, b.model.m, sizeof(a.model.m)) == 0;
+}
+
+static bool same_draw_items(const std::vector<DrawItem> &a, const std::vector<DrawItem> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (!same_draw_item(a[i], b[i])) return false;
+  return true;
+}
+
+/* Round 436 (ADR 0115): what a gather reads beside the scene - the view kind, Edit Mode's object and element, the
+ * scene's lights or the headlight, the lighting shown (the bake or its preview) and whether it is stale. */
+uint64_t Editor::items_key(bool game, bool want_tangents) {
+  uint64_t h = scene_render_hash();
+  auto mix = [&](uint64_t v) { h = (h ^ v) * kFnvPrime; };
+  mix((uint64_t)game | (uint64_t)want_tangents << 1 | (uint64_t)edit_mode_ << 2 | (uint64_t)scene_lighting_ << 3 | (uint64_t)lm_stale_live_ << 4 |
+      (uint64_t)lighting_manual() << 5 | (uint64_t)scene_->lighting.baked_gi << 6 | (uint64_t)(int)elem_ << 8);
+  mix(edit_mode_ ? edit_obj_ : 0);
+  /* (Review 436: whether this gather draws outlines by distance, LOD Groups' levels and Camera Flatten - F12 and
+   * MoonRay gather into the Game view's slot with all three off.) */
+  mix((uint64_t)outline_view_.on | (uint64_t)lod_view_.on << 1 | (uint64_t)flatten_view_.on << 2 | (uint64_t)flatten_view_.role << 4);
+  const LightingData &ld = shown_lighting();
+  mix((uint64_t)(uintptr_t)&ld);
+  mix((uint64_t)(uintptr_t)ld.pages.data() ^ (uint64_t)ld.pages.size() << 48);
+  mix((uint64_t)ld.entries.size() ^ (uint64_t)ld.dir_pages.size() << 32 ^ (uint64_t)ld.mask_pages.size() << 48);  // (round 444: the masks too)
+  mix((uint64_t)scene_->lighting.directional_mode);
+  return h;
+}
+
+/* The eye an outline's width and an LOD Group's level read (only when an item did). */
+uint64_t Editor::items_view_key() const {
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
+  const float o[5] = {outline_view_.eye.x, outline_view_.eye.y, outline_view_.eye.z, outline_view_.px_per_m, (float)(outline_view_.on | outline_view_.ortho << 1)};
+  const float l[5] = {lod_view_.eye.x, lod_view_.eye.y, lod_view_.eye.z, lod_view_.half_focal, (float)(lod_view_.on | lod_view_.ortho << 1)};
+  const FlattenView &fv = flatten_view_;  // (a camera-aligned lattice faces it)
+  const float f[14] = {fv.eye.x, fv.eye.y, fv.eye.z, fv.forward.x, fv.forward.y, fv.forward.z, fv.up.x, fv.up.y, fv.up.z, fv.focal,
+                       (float)fv.on, (float)fv.ortho, (float)fv.role, 0.0f};
+  mix(o, sizeof(o));
+  mix(l, sizeof(l));
+  mix(f, sizeof(f));
+  return h;
+}
+
+/* Round 436 (ADR 0115): a view's draw items kept while nothing they are made from changed - the scene's hash (the
+ * change counter keeps that cheap) and items_key's rest; with an item that depends on the eye, the eye too. A scene
+ * with a Camera Flatten or View Angle Shapes gathers every time in a camera's view: the gather fills per-collect side
+ * tables. In verify mode (the render cache's) a kept list is gathered again and compared: a difference is a stale
+ * picture. */
 std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
+  /* (Of what is shown: the preview's own staleness while there is one.) */
+  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
+                   (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
+  bool view_dep = false, lod = false;
+  ItemsCache &c = items_cache_[game][want_tangents];
+  const uint64_t base = items_key(game, want_tangents);
+  const uint64_t view = items_view_key();
+  /* (A render job's gather holds the outline shells its items point at - collect_hold_ - so it gathers: review 436.) */
+  const bool hit = c.valid && c.base == base && (!c.view_dep || c.view == view) && !collect_hold_;
+  if (hit && !cache_verify_) {
+    prof_.items_kept++;
+    flatten_pivots_.clear(), view_refs_.clear();  // (as the gather leaves them for a scene without either)
+    flatten_any_ = view_shapes_any_ = false;
+    return c.items;
+  }
+  std::vector<DrawItem> items = collect_items_build(game, want_tangents, view_dep, lod);
+  if (hit && !same_draw_items(items, c.items)) note_render_cache_mismatch();
+  c.base = base, c.view = view, c.view_dep = view_dep;
+  c.flattening = flatten_any_ || view_shapes_any_;
+  c.lod = lod;
+  c.valid = !c.flattening && !c.lod;
+  if (c.valid) c.items = items;
+  else c.items.clear();
+  return items;
+}
+
+std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod) {
   BL_ZONE("collect_items");
   ProfileScope prof{prof_.ms_collect, {}};
   prebuild_render_meshes(*scene_, game);
@@ -220,9 +395,6 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
       flatten_any_ = flatten_any_ || g.find_role(Component::RenderRole::CameraFlatten);
       view_shapes_any_ = view_shapes_any_ || g.find_role(Component::RenderRole::ViewShapes);  // (round 339)
     });
-  /* (Of what is shown: the preview's own staleness while there is one.) */
-  lm_stale_live_ = scene_->lighting.realtime_gi && !lighting_manual() &&
-                   (!preview_data_.empty() ? preview_data_.scene_key != preview_scene_key_ : !lighting_data_.empty() && lighting_out_of_date());
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
@@ -235,11 +407,13 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const bool shaped_keys = !editing && set_view_shapes(g, *mr, *mf->mesh);
     const bool view_shaped = shaped_keys || (!editing && view_lattice_on(g, game));  // (round 342: a camera-aligned lattice too)
     const Mesh *m = g.evaluated_mesh(editing ? 2 : (game ? 1 : 0) + (view_shaped ? 3 + 2 * flatten_view_.role : 0));
+    if (game && m && lod_view_.on && g.get<LODGroupComponent>()) lod = true;  // (round 436: its level is the eye's, its mesh a cache's)
     if (game && m) m = lod_for_view(g, *m);  // (round 363: an LOD Group's level for its height on screen; nullptr culled)
     if (editing && m != mf->mesh.get()) editing = false;  // a modifier result: shade it normally
     if (!m) return;
     DrawItem it = mesh_draw_item(g, *m, *mr, want_tangents, editing);
     it.view_shaped = view_shaped;
+    view_dep = view_dep || view_shaped;
     if (flatten_view_.on && !editing) apply_camera_flatten(g, it);  // (round 334: the Game view and renders only)
     if (editing && elem_ == EditElement::Face) it.face_highlight = &face_sel_;
     /* (A view-shaped mesh has the plain one's topology and UVs: its lightmap is the plain mesh's - round 339.) */
@@ -254,6 +428,7 @@ std::vector<DrawItem> Editor::collect_items(bool game, bool want_tangents) {
     const Component *oc = g.find_role(Component::RenderRole::Outline);
     if (!oc || !oc->enabled) return;
     const Outline &ol = *static_cast<const Outline *>(oc);
+    view_dep = view_dep || outline_view_.on;  // (round 436: the line's width is the eye's)
     const float scale = world_scale_of(it.flattened ? it.shade_model : it.model);  // (a flattened object's true size: the line's width)
     const float dist = outline_view_.ortho ? 1.0f : length(g.world_bounds().center() - outline_view_.eye);
     const float tscale = outline_view_.on ? ol.outline_distance_scale(dist, outline_view_.px_per_m, scale, game ? 1 : 0) : 1.0f;
@@ -602,7 +777,45 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   return h;
 }
 
+/* Round 435 (ADR 0115): while nothing an edit goes through has moved the change counter, the scene is the one last
+ * hashed - kept, not walked (Shinano's views walked it 0.98 ms a frame, 50,000 cubes far more). Walked again when the
+ * counter, the scene, the tail (the environment, a bake's or a texture's generation) moves, while the scene changes
+ * behind the counter (Play, a clip, a stroke, Live Link), and on the first call of every `scene_hash_check_every_`th
+ * frame - where a walk that disagrees with the kept hash is a writer the counter missed: counted, warned once, and the
+ * walked hash used. */
 uint64_t Editor::scene_render_hash(bool memo) {
+  if (!memo) return scene_render_hash_walk(false);
+  const uint64_t tail = scene_hash_tail();
+  SceneHashMemo &m = scene_hash_memo_;
+  /* (Outside a frame - a test asking between frames - every call walks. A write made between frames and asked about
+   * only inside the next one is the check's to find: every frame in a headless editor, every 8th in a window.) */
+  const bool same = in_frame_ && m.valid && m.scene == scene_.get() && m.serial == scene_->serial && m.epoch == edit_epoch::now() &&
+                    m.tail == tail && !scene_hash_volatile();
+  const bool check_due = m.frame != hash_frame_ && hash_frame_ - m.checked >= (uint64_t)scene_hash_check_every_;
+  if (same && !check_due) {
+    prof_.scene_hash_reuses++;
+    m.frame = hash_frame_;
+    return m.hash;
+  }
+  const uint64_t epoch = edit_epoch::now();  // (read before the walk: a bump during it walks again next call)
+  const uint64_t h = scene_render_hash_walk(true) ^ tail;
+  if (same && h != m.hash) {
+    prof_.scene_hash_misses++;
+    if (scene_hash_misses_++ == 0) Log::warn("The views' scene hash: a change the counter missed (ADR 0115) - walked and drawn");
+  }
+  m.scene = scene_.get(), m.serial = scene_->serial, m.epoch = epoch, m.tail = tail, m.hash = h;
+  m.frame = m.checked = hash_frame_;
+  m.valid = true;
+  return h;
+}
+
+/* Round 435: the scene changes on its own here - every call walks. */
+bool Editor::scene_hash_volatile() const {
+  if (playing_ || anim_.playing || seqr_.playing || sculpt_stroking_ || paint_stroking_ || paint_2d_stroking_ || wp_stroking_) return true;
+  return livelink_ && livelink_->clients() > 0;
+}
+
+uint64_t Editor::scene_render_hash_walk(bool memo) {
   ProfileScope prof{prof_.ms_hash, {}};
   prof_.scene_hashes++;
   uint64_t h = kFnvBasis;
@@ -612,6 +825,12 @@ uint64_t Editor::scene_render_hash(bool memo) {
     const uint64_t oh = object_render_hash(g, memo);
     mix(&oh, 8);
   });
+  return memo ? h : h ^ scene_hash_tail();
+}
+
+uint64_t Editor::scene_hash_tail() {
+  uint64_t h = kFnvBasis;
+  auto mix = [&](const void *p, size_t n) { h = mix_bytes(h, p, n); };
   const EnvironmentSettings &es = scene_->environment;
   mix(&es.mode, 4);
   mix(&es.strength, 4);
@@ -629,6 +848,8 @@ uint64_t Editor::scene_render_hash(bool memo) {
   const uint64_t tex_gen = material_textures_generation();  // a texture reloaded or a procedural texture edited
   mix(&tex_gen, 8);
   mix(&scene_->lighting.baked_gi, 1);
+  mix(&scene_->lighting.light_volumes_in_views, 1);  // (round 443)
+  mix(&lv_bake_gen_, 8);
   mix(&probe_live_gen_, 8);  // live probes changed
   for (const VoxelGIState &st : vgi_) mix(&st.rtlm.generation, 8);  // realtime lightmaps published
   return h;
@@ -877,6 +1098,7 @@ void Editor::render_deferred(Renderer3D &r3d, RenderTarget &rt, const Mat4 &v, c
     probe_frame_.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
     env.probes = &probe_frame_;
   }
+  if (scene_lights && pls.baked_gi) env.light_volumes = light_volume_frame();  // (round 443, task 0419: dynamic objects take a baked Light Volume's light where it holds them)
   RasterOptions opt = raster_opt_;
   opt.shade = ShadeMode::Deferred;
   if (filters) filters->apply_raster(opt);
@@ -1325,11 +1547,20 @@ void Editor::camera_dof(RenderTarget &rt, const Mat4 &view, const Mat4 &proj, Ve
 }
 
 void Editor::update_camera_focus() {
+  if (!walk_due(focus_walk_)) {  // (round 436: a component lookup on every object, every frame - 4 ms at 50,000)
+    walks_skipped_++;
+    return;
+  }
+  WalkScope scope{*this, focus_walk_};
+  apply_camera_focus();
+}
+
+void Editor::apply_camera_focus() {
   scene_->for_each([&](GameObject &g) {
     Camera *c = g.get<Camera>();
     if (!c || !c->dof || !c->focus_track) return;
     const float d = dot(c->focus_point - g.world_position(), normalize(g.world_rotation().rotate({0, 0, 1})));
-    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d;
+    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d, edit_epoch::bump();
   });
 }
 
@@ -1561,6 +1792,11 @@ std::unique_ptr<Editor::RenderJob> Editor::render_snapshot(bool preview, bool tr
       j->probe_frame.quad_reuse = probe_quad_reuse_;
       j->probe_frame.use_live = live_probes && (!baked_probes || lm_stale_live_ || bounce_not_baked);
       env.probes = &j->probe_frame;
+      j->holds_lighting = true;
+    }
+    if (const LightVolumeFrame *lv = pls.baked_gi ? light_volume_frame() : nullptr) {  // (round 443: the render's own copy; the voxels are shared)
+      j->light_volumes = *lv;
+      env.light_volumes = &j->light_volumes;
       j->holds_lighting = true;
     }
     for (const DrawItem &it : j->items)
@@ -1874,6 +2110,16 @@ void Editor::trace_picture(RenderJob &j, PathTracer &pt) {
 }
 
 void Editor::start_final_render(bool preview, bool open_window) {
+  struct Timed {  // (round 437: the start's time in the frame's profile, whichever way it returns)
+    double &into;
+    ScopedTimer t;
+    ~Timed() { into += t.ms(); }
+  } timed{prof_.ms_render_start, {}};
+  if (render_prefetch_) {  // (round 437: its textures still loading - the render that follows takes this one's flags)
+    render_prefetch_->preview = preview, render_prefetch_->open_window = render_prefetch_->open_window || open_window;
+    return;
+  }
+  if (scene_->render.engine != 2 && render_prefetch_start(preview, open_window)) return;  // (round 437: the textures first, on a worker)
   render_job_wait("a new render");  // (one render at a time: a job still working stops and lands first)
   /* F12 and the Render window's preview draw on the CPU, the reference (the GPU is the interactive views'). */
   struct KeepCpu {
@@ -1937,6 +2183,8 @@ void Editor::render_job_start(std::unique_ptr<RenderJob> job) {
 }
 
 void Editor::step_final_render() {
+  render_prefetch_poll();  // (round 437: a render's textures loaded: its snapshot now)
+  if (render_prefetch_) return;
   if (render_job_ && !rendering_) {  // (a stopped render: its last picture lands once the worker has resolved it)
     if (render_job_->done.load(std::memory_order_acquire)) render_job_finish();
     return;
@@ -1955,6 +2203,7 @@ void Editor::step_final_render() {
 void Editor::render_job_poll() {
   RenderJob *j = render_job_.get();
   if (!j) return;
+  ProfileScope prof{prof_.ms_render_land, {}};  // (round 437)
   if (j->traced && headless_ && !async_jobs_ && !j->done.load(std::memory_order_acquire)) {
     /* A headless editor that didn't ask for workers (a test): a frame advances the render by about a slice, as before
      * round 412 - waited for here, so a test's frame count bounds the render's progress as it did. */

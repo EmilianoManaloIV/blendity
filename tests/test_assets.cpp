@@ -13207,6 +13207,53 @@ static void tests_round417() {
     std::printf("    %zu pixels drawn by the overlays, %zu differ between the two paths\n", changed, differ);
     CHECK(changed > 500 && differ == 0);
   });
+  test("overlays (round 437): lines prepared straight into the batch, a third refused off screen, draw what one at a time draws, batched or not; an opaque dot's inside is its colour, its rim blended, outside untouched", [] {
+    const R34Raster rs(300, 200);
+    Image img;
+    RenderTarget rt;
+    Renderer3D r;
+    rs.render(img, rt, r);
+    const std::vector<uint32_t> base = img.pixels;
+    R34Rng rng{437u};
+    const size_t n = 30000;  // (several chunks of 4096: the stretches close up)
+    std::vector<Vec3> a(n), b(n);
+    std::vector<uint32_t> col(n);
+    for (size_t i = 0; i < n; i++) {
+      const float off = i % 3 == 0 ? 400.0f : 0.0f;  // (a third far off to the side: refused by the clip)
+      a[i] = Vec3(rng.range(-3.0f, 3.0f) + off, rng.range(-2.0f, 2.0f), rng.range(-3.0f, 3.0f));
+      b[i] = a[i] + Vec3(rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f), rng.range(-0.5f, 0.5f));
+      col[i] = 0xFF000000u | (uint32_t)(i * 2654435761u >> 8);
+    }
+    auto get = [&](size_t i, Vec3 &pa, Vec3 &pb, uint32_t &c) { pa = a[i], pb = b[i], c = col[i]; return true; };
+    r.begin_overlay_batch();
+    for (size_t i = 0; i < n; i++) r.line(a[i], b[i], col[i], true, 0.0f);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> one_at_a_time = img.pixels;
+    img.pixels = base;
+    r.begin_overlay_batch();
+    r.lines(n, get, true, 0.0f);
+    r.end_overlay_batch();
+    const std::vector<uint32_t> batched = img.pixels;
+    img.pixels = base;
+    r.lines(n, get, true, 0.0f);  // (not batching: drawn at once)
+    size_t drawn = 0, differ_batch = 0, differ_direct = 0;
+    for (size_t i = 0; i < base.size(); i++)
+      drawn += one_at_a_time[i] != base[i], differ_batch += batched[i] != one_at_a_time[i], differ_direct += img.pixels[i] != one_at_a_time[i];
+    std::printf("    %zu pixels drawn; %zu differ batched, %zu drawn at once\n", drawn, differ_batch, differ_direct);
+    CHECK(drawn > 1000 && differ_batch == 0 && differ_direct == 0);
+    /* An opaque dot, radius 3, centred on a pixel's middle. */
+    img.pixels = base;
+    rt.depth.assign(rt.depth.size(), 1.0f);
+    Vec2 sp;
+    float z;
+    const Vec3 p(0.0f, 0.0f, 0.0f);
+    CHECK(r.project(p, sp, z));
+    r.point(p, 3.0f, 0xFF20C0E0u, false);
+    const int cx = (int)sp.x, cy = (int)sp.y;
+    const uint32_t centre = img.pixels[(size_t)cy * img.width + cx], far = img.pixels[(size_t)cy * img.width + cx + 6];
+    CHECK(centre == 0xFF20C0E0u);
+    CHECK(far == base[(size_t)cy * img.width + cx + 6]);
+  });
   /* (Each axis's coordinates sorted on their own: a 7-digit file breaks the ties a lexicographic sort would rely on.) */
   auto r417_close = [](const std::vector<Vec3> &p, const std::vector<Vec3> &q, float eps) {
     if (p.size() != q.size()) return false;

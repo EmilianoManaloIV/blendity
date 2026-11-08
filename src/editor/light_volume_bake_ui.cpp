@@ -209,4 +209,51 @@ void Editor::save_light_volume_bakes(const std::string &dir) {
   if (!bl::save_light_volume_bakes(path, light_volume_bakes_, err)) Log::error("Could not save the Light Volume bakes: %s", err.c_str());
 }
 
+/* Round 443 (task 0419): the baked volumes as the views sample them - each enabled, active Light Volume that has a bake
+ * of its grid, its box from the object's transform (the unit cube about it), the Smooth Blending in the cube's units,
+ * Color x Intensity, the baked L1's turn if the object turned since the bake; the smallest box first, as the package
+ * orders them. The bakes' copies are shared (made once per bake: the views and a render's worker hold them without
+ * copying). Null with the setting off, or when no volume has a bake. */
+const LightVolumeFrame *Editor::light_volume_frame() {
+  if (!scene_->lighting.light_volumes_in_views || light_volume_bakes_.empty()) return nullptr;
+  if (lv_shared_gen_ != lv_bake_gen_) {
+    lv_shared_.clear();
+    for (const auto &[id, sh] : light_volume_bakes_)
+      lv_shared_[id] = std::make_shared<const LightVolumeSH>(sh.unity_axes ? light_volume_from_unity(sh) : sh);  // (Unity's own bake read back: its X mirrored)
+    lv_shared_gen_ = lv_bake_gen_;
+  }
+  lv_frame_.volumes.clear();
+  std::vector<float> size;
+  for (const auto &[id, sh] : lv_shared_) {
+    const GameObject *g = scene_->find(id);
+    const LightVolumeComponent *v = g ? g->get<LightVolumeComponent>() : nullptr;
+    if (!v || !v->enabled || !g->active_in_hierarchy()) continue;
+    int res[3];
+    light_volume_resolution(*g, *v, res);
+    if (sh->res[0] != res[0] || sh->res[1] != res[1] || sh->res[2] != res[2]) continue;  // (its grid changed since: stale until baked again)
+    const Mat4 &w = g->world_matrix();
+    const float scale[3] = {length(w.column(0)), length(w.column(1)), length(w.column(2))};
+    if (!(scale[0] > 1e-6f && scale[1] > 1e-6f && scale[2] > 1e-6f)) continue;
+    LightVolumeInstance in;
+    in.sh = sh;
+    in.inv_world = w.inverse();
+    for (int a = 0; a < 3; a++) in.edge[a] = 1.0f / std::max(v->smooth_blending / scale[a], 1e-6f);
+    const Vec3 tint = v->color * std::max(v->intensity, 0.0f);
+    in.tint = finite_bits(tint.x) && finite_bits(tint.y) && finite_bits(tint.z) ? tint : Vec3(1.0f);  // (review 443: a NaN or infinite colour is no light)
+    in.additive = v->additive;
+    const LightVolumeSH &baked = light_volume_bakes_.at(id);
+    if (!baked.from_unity) in.turn = Mat4::rotate(normalize(baked.rotation * g->world_rotation().conjugate()));  // (the L1 is in world axes as baked: turned with the box)
+    lv_frame_.volumes.push_back(std::move(in));
+    size.push_back(scale[0] * scale[1] * scale[2]);
+  }
+  std::vector<size_t> order(size.size());
+  for (size_t i = 0; i < order.size(); i++) order[i] = i;
+  std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return size[a] < size[b]; });
+  std::vector<LightVolumeInstance> sorted;
+  for (size_t i : order) sorted.push_back(std::move(lv_frame_.volumes[i]));
+  if (sorted.size() > (size_t)LightVolumeComponent::kMaxVolumes) sorted.resize((size_t)LightVolumeComponent::kMaxVolumes);  // (the smallest 32: as the card's shader and the package)
+  lv_frame_.volumes = std::move(sorted);
+  return lv_frame_.empty() ? nullptr : &lv_frame_;
+}
+
 }  // namespace bl

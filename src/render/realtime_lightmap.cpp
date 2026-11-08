@@ -23,6 +23,10 @@ void realtime_lightmap_layout(RealtimeLightmaps &rl, const std::vector<BakeObjec
   /* At 2 texels per metre a small object would get a texel or two per UV island: patchy. A chart is at
    * least 24 texels across (about 300 texels of surface), whatever the object's size. */
   s.min_chart = 24;
+  /* Round 440's island charts and seams are for bakes: the realtime atlas is laid out while objects move (squares and
+   * their UV cache keep that cheap), and it never stitches. */
+  s.island_charts = false;
+  s.stitch_seams = false;
   std::vector<BakeObject> want;
   for (const BakeObject &o : objects)
     if (o.mesh && o.mesh->face_count() > 0 && o.want_lightmap) want.push_back(o);

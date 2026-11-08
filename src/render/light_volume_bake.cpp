@@ -7,6 +7,7 @@
 #include "../core/core.h"
 #include "../scene/unity_package.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -237,6 +238,127 @@ bool light_volume_from_textures(const std::string &tex0, const std::string &tex1
     out.l1b[i] = Vec3(b[2], c[2], c[3]) * s;
   }
   return out.valid(why);
+}
+
+/* ---------------------------------------------------------------- round 443 (task 0419): sampling in the views */
+
+namespace {
+
+float saturate01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
+
+/* The package's LV_BoundsMask: the nearest face's distance in blend units on each axis, saturated, multiplied. */
+float bounds_mask(Vec3 local, Vec3 edge) {
+  float m = 1.0f;
+  for (int a = 0; a < 3; a++) {
+    const float lo = (local[a] + 0.5f) * edge[a], hi = (0.5f - local[a]) * edge[a];
+    m *= saturate01(std::min(lo, hi));
+  }
+  return m;
+}
+
+/* One voxel's SH as a trilinear blend of the eight around a texture coordinate (texel centres at (i + 0.5) / res, the
+ * edge voxels held beyond them: the 3D texture's clamped, linear sampler). */
+struct Voxel {
+  Vec3 l0, l1r, l1g, l1b;
+};
+
+Voxel trilinear(const LightVolumeSH &sh, Vec3 uvw) {
+  int i0[3], i1[3];
+  float t[3];
+  for (int a = 0; a < 3; a++) {
+    const float f = std::min(std::max(uvw[a] * (float)sh.res[a] - 0.5f, 0.0f), (float)(sh.res[a] - 1));
+    i0[a] = std::min((int)f, sh.res[a] - 1), i1[a] = std::min(i0[a] + 1, sh.res[a] - 1), t[a] = f - (float)i0[a];
+  }
+  Voxel out{Vec3(0.0f), Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)};
+  for (int c = 0; c < 8; c++) {
+    const int x = c & 1 ? i1[0] : i0[0], y = c & 2 ? i1[1] : i0[1], z = c & 4 ? i1[2] : i0[2];
+    const float w = (c & 1 ? t[0] : 1.0f - t[0]) * (c & 2 ? t[1] : 1.0f - t[1]) * (c & 4 ? t[2] : 1.0f - t[2]);
+    const size_t i = index_of(sh.res, x, y, z);
+    out.l0 = out.l0 + sh.l0[i] * w, out.l1r = out.l1r + sh.l1r[i] * w, out.l1g = out.l1g + sh.l1g[i] * w, out.l1b = out.l1b + sh.l1b[i] * w;
+  }
+  return out;
+}
+
+}  // namespace
+
+float LightVolumeInstance::mask(Vec3 p) const { return bounds_mask(inv_world.point(p), edge); }
+
+Vec3 LightVolumeInstance::eval(Vec3 p, Vec3 n) const {
+  if (!sh || sh->count() == 0) return Vec3(0.0f);
+  const Vec3 local = inv_world.point(p);
+  const Vec3 uvw = local + Vec3(0.5f);
+  const Voxel v = trilinear(*sh, Vec3(saturate01(uvw.x), saturate01(uvw.y), saturate01(uvw.z)));
+  const Vec3 m = turn.dir(n);
+  const Vec3 c(v.l0.x + dot(v.l1r, m), v.l0.y + dot(v.l1g, m), v.l0.z + dot(v.l1b, m));  // (L0 + L1 . n: LightVolumeEvaluate)
+  return Vec3(std::max(c.x, 0.0f), std::max(c.y, 0.0f), std::max(c.z, 0.0f)) * tint;
+}
+
+bool LightVolumeFrame::sample(Vec3 p, Vec3 n, Vec3 &light, float &cover) const {
+  light = Vec3(0.0f);
+  float left = 1.0f;
+  bool any = false;
+  for (const LightVolumeInstance &v : volumes) {
+    const float m = v.mask(p);
+    if (!(m > 0.0f)) continue;
+    any = true;
+    if (v.additive) {
+      light = light + v.eval(p, n) * m;
+      continue;
+    }
+    light = light + v.eval(p, n) * (m * left);
+    left *= 1.0f - m;  // (no break at 0: a larger Additive volume still adds its light - review 443)
+  }
+  cover = 1.0f - left;
+  return any;
+}
+
+uint64_t LightVolumeFrame::signature() const {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](const void *d, size_t n) {
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)d)[i]) * 1099511628211ull;
+  };
+  for (const LightVolumeInstance &v : volumes) {
+    const LightVolumeSH *s = v.sh.get();
+    const uint8_t add = v.additive;
+    mix(v.inv_world.m, sizeof(v.inv_world.m)), mix(v.turn.m, sizeof(v.turn.m)), mix(&v.edge, sizeof(Vec3)), mix(&v.tint, sizeof(Vec3)), mix(&add, 1);
+    mix(&s, sizeof(s));
+  }
+  return h;
+}
+
+std::vector<float> light_volume_pack(const LightVolumeFrame &f, size_t max_voxels) {
+  size_t voxels = 0;
+  for (const LightVolumeInstance &v : f.volumes) voxels += v.sh ? v.sh->count() : 0;
+  if (f.volumes.empty() || voxels > max_voxels) return {};
+  const size_t head = 1 + f.volumes.size() * 9;
+  std::vector<float> o((head + voxels * 4) * 4, 0.0f);
+  auto put = [&](size_t at, float a, float b, float c, float d) { o[at * 4] = a, o[at * 4 + 1] = b, o[at * 4 + 2] = c, o[at * 4 + 3] = d; };
+  auto bits = [](int32_t i) {
+    float x;
+    std::memcpy(&x, &i, 4);
+    return x;
+  };
+  put(0, bits((int32_t)f.volumes.size()), 0, 0, 0);
+  size_t next = head;
+  for (size_t k = 0; k < f.volumes.size(); k++) {
+    const LightVolumeInstance &v = f.volumes[k];
+    const size_t at = 1 + k * 9;
+    for (int r = 0; r < 3; r++) {
+      put(at + (size_t)r, v.inv_world.m[r], v.inv_world.m[4 + r], v.inv_world.m[8 + r], v.inv_world.m[12 + r]);
+      put(at + 6 + (size_t)r, v.turn.m[r], v.turn.m[4 + r], v.turn.m[8 + r], 0.0f);
+    }
+    put(at + 3, v.edge.x, v.edge.y, v.edge.z, v.additive ? 1.0f : 0.0f);
+    put(at + 5, v.tint.x, v.tint.y, v.tint.z, 0.0f);
+    const LightVolumeSH &s = *v.sh;
+    put(at + 4, bits(s.res[0]), bits(s.res[1]), bits(s.res[2]), bits((int32_t)next));
+    for (size_t i = 0; i < s.count(); i++, next += 4) {
+      put(next, s.l0[i].x, s.l0[i].y, s.l0[i].z, 0.0f);
+      put(next + 1, s.l1r[i].x, s.l1r[i].y, s.l1r[i].z, 0.0f);
+      put(next + 2, s.l1g[i].x, s.l1g[i].y, s.l1g[i].z, 0.0f);
+      put(next + 3, s.l1b[i].x, s.l1b[i].y, s.l1b[i].z, 0.0f);
+    }
+  }
+  return o;
 }
 
 }  // namespace bl

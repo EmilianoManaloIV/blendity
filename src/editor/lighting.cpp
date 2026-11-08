@@ -62,6 +62,7 @@ uint64_t Editor::lightmap_scene_key() {
           mixf(&mp->base_color.x, 3);
           mixf(&mp->emission.x, 3);
           mixf(&mp->emission_strength, 1);
+          mix((uint64_t)(int64_t)mp->gi_flags);  // (round 439: Unity's Global Illumination decides whether the emission bakes)
           mixf(&mp->metallic, 1);
         }
     }
@@ -167,6 +168,7 @@ void Editor::attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it) {
   it.lightmap = &ld.pages[(size_t)e->second.page];
   it.lightmap_uv = &e->second.tri_uv;
   if (scene_->lighting.directional_mode != 0 && (size_t)e->second.page < ld.dir_pages.size()) it.lightmap_dir = &ld.dir_pages[(size_t)e->second.page];  // (round 426)
+  if ((size_t)e->second.page < ld.mask_pages.size()) it.shadowmask = &ld.mask_pages[(size_t)e->second.page];  // (round 444)
 }
 
 void Editor::load_lighting_data() {
@@ -359,6 +361,7 @@ void Editor::bake_start() {
     part_ms[k] = now - part_at, part_at = now;
   };
   collect_bake_scene(job->objects, job->lights);
+  if (scene_->lighting.lighting_mode == 2) subtractive_split(job->lights);  // (round 444: Unity's Subtractive split)
   part(0);
   /* Round 362 (the comparison's finding 10): nothing marked had baked "0 objects" without a word of why. */
   if (job->objects.empty()) return bake_refuse_empty();
@@ -379,6 +382,7 @@ void Editor::bake_start() {
   s.denoise = ls.denoise;
   s.indirect_intensity = ls.indirect_intensity;
   s.directional = ls.directional_mode != 0;  // (round 426)
+  s.lighting_mode = ls.lighting_mode;  // (round 444)
   s.backface_tolerance = finite_bits(ls.backface_tolerance) ? std::max(0.0f, std::min(1.0f, ls.backface_tolerance)) : 0.9f;  // (round 430)
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
@@ -1006,6 +1010,7 @@ void Editor::preview_step() {
     std::vector<BakeObject> objects;
     std::vector<BakeLight> lights;
     collect_bake_scene(objects, lights);
+    if (scene_->lighting.lighting_mode == 2) subtractive_split(lights);  // (round 444)
     update_environment();
     BakeSettings s;
     s.texels_per_unit = std::max(2.0f, (finite_bits(ls.texels_per_unit) ? ls.texels_per_unit : 40.0f) * 0.5f);  // (half the density: a quarter showed blocks, task 0157)
@@ -1018,6 +1023,7 @@ void Editor::preview_step() {
     s.denoise = true;
     s.indirect_intensity = ls.indirect_intensity;
     s.directional = ls.directional_mode != 0;  // (round 426)
+    s.lighting_mode = ls.lighting_mode;  // (round 444)
     s.gpu_device = choose_bake_gpu();
     s.use_oidn = false;  // (round 423: the preview finishes on the main thread - OIDN's filter there would be a stall)
     s.backface_tolerance = 0.0f;  // (round 430: its validity rays would be on the main thread too)

@@ -15,6 +15,7 @@
 // Theory: FoCG ch. 11 "Texture Mapping", GEA Vol. II 12.4 "The Shading Equation".
 #pragma once
 
+#include "../core/edit_epoch.h"
 #include "../core/math.h"
 #include "../image/image.h"
 
@@ -133,6 +134,11 @@ struct Material {
   bool opaque() const { return surface == (int)MaterialSurface::Opaque; }
   Vec3 emission{1.0f, 1.0f, 1.0f};
   float emission_strength = 0.0f;
+  /* Round 439: Unity's Global Illumination on the material (m_LightmapFlags: 1 Realtime, 2 Baked, 4 None) - its emission
+   * lights the bake only with Baked (2) set, as Unity's baked lightmaps; -1: not from Unity (emission bakes). Read on
+   * import from the .mat, not saved. */
+  int gi_flags = -1;
+  bool emission_bakes() const { return gi_flags < 0 || (gi_flags & 2) != 0; }
   float normal_strength = 1.0f;
   TextureRef base_map, metallic_map, roughness_map, normal_map, emission_map;
   /* Round 399: a converted Unity material's other textures (lilToon's masks, matcaps, second layers): not drawn, but in
@@ -218,7 +224,10 @@ struct Material {
   void reflect_liltoon(Reflector &r);  // (round 402)
   void reflect_principled_extras(Reflector &r);
   void reflect_volume(Reflector &r);
-  void touch() { version++; }
+  void touch() {
+    version++;
+    edit_epoch::bump();  // (ADR 0115)
+  }
 
   /* Resolved textures (cached; reloaded when the path or file changes). */
   struct Resolved {
@@ -260,6 +269,10 @@ using MaterialPtr = std::shared_ptr<Material>;
 MaterialPtr make_material(const std::string &name, Vec3 color);
 /* Round 422: the materials' image files (Material::texture_files) decoded on every core into the texture cache. */
 void prefetch_material_textures(const std::vector<MaterialPtr> &materials);
+/* Round 437: every image file a scene's renderers' materials read, decoded on every core into the texture cache - a
+ * scene's first frame then draws from the cache (SideRail's had decoded 1.2 s of textures in its first frame). */
+struct Scene;
+void prefetch_scene_textures(const Scene &s);
 const MaterialPtr &default_material();  // Unity's "Default-Material" (grey)
 /* Ready-made material types: "Solid", "Transparent", "Cutout", "Glass",
  * "Frosted Glass", "Metal", "Emissive", "Unlit". Unknown names give Solid. */

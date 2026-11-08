@@ -318,9 +318,12 @@ void LightingSettings::reflect(Reflector &r) {
   r.field("Baked Global Illumination", baked_gi);
   r.help("Generate Lighting bakes the lights set to Baked or Mixed, the sky and their bounces into lightmaps for\n"
          "objects marked Contribute GI (Unity: Lighting > Mixed Lighting > Baked Global Illumination).");
-  static const char *modes[] = {"Baked Indirect"};
-  r.enumeration("Lighting Mode", lighting_mode, modes, 1);
-  r.help("Baked Indirect: Mixed lights keep their realtime light and shadows; only their bounced light is baked.");
+  static const char *modes[] = {"Baked Indirect", "Shadowmask", "Subtractive"};
+  r.enumeration("Lighting Mode", lighting_mode, modes, 3);
+  r.help("What Generate Lighting keeps of the Mixed lights (Unity's Lighting Mode). Baked Indirect: their realtime light\n"
+         "and shadows, only their bounced light baked. Shadowmask: realtime light, but their shadows from static objects\n"
+         "baked into a mask (up to 3 lights). Subtractive: their direct light baked into the lightmaps too; moving\n"
+         "objects still get it in realtime.");
   r.field("Lightmap Resolution", texels_per_unit, 0.5f, 0.01f, 1000.0f);
   r.help("Texels per unit (metre) of surface (Unity's default is 40; 80 shows a small emissive object's glow in detail).");
   r.field("Max Lightmap Size", max_size, 16, 4096);
@@ -387,6 +390,9 @@ void LightingSettings::reflect(Reflector &r) {
   r.help("Probes behind the surface being shaded (the other side of a thin wall) count for almost nothing\n"
          "(Unity APV: Leak Reduction Mode).");
   r.field("Show Probes", show_probes);
+  r.field("Light Volumes in Views", light_volumes_in_views);
+  r.help("Objects without a lightmap take their ambient light from the baked VRC Light Volumes that hold them (VRChat's own\n"
+         "evaluation: trilinear L0 + L1 . n, blended at the box edges), in the Scene and Game views and renders. Off: the probe volume.");
 }
 
 void ProbeVolume::reflect(Reflector &r) {
@@ -2853,13 +2859,18 @@ Mat4 GameObject::world_matrix_uncached() const {
 }
 
 void GameObject::mark_dirty() {
+  edit_epoch::bump();  // (ADR 0115: the views' scene hash - once for the subtree, not per node: review 435)
+  mark_dirty_tree();
+}
+
+void GameObject::mark_dirty_tree() {
   /* Before the early return: a node already stale since its hash was memoised must still invalidate
    * the memo (ADR 0015), and the memo is only refreshed by a hash, which reads the world matrix. */
   transform_version++;
   /* Invariant: a dirty node's descendants are dirty too, so we can stop early. */
   if (world_dirty_) return;
   world_dirty_ = true;
-  for (GameObject *c : children) c->mark_dirty();
+  for (GameObject *c : children) c->mark_dirty_tree();
 }
 
 Quat GameObject::world_rotation() const {
@@ -2908,6 +2919,7 @@ Component *GameObject::add_component(std::unique_ptr<Component> c) {
       if (std::strcmp(e->type_name(), c->type_name()) == 0) return e.get();
   c->owner = this;
   components.push_back(std::move(c));
+  edit_epoch::bump();  // (ADR 0115)
   return components.back().get();
 }
 
@@ -2915,6 +2927,7 @@ void GameObject::remove_component(Component *c) {
   for (size_t i = 0; i < components.size(); i++)
     if (components[i].get() == c) {
       components.erase(components.begin() + i);
+      edit_epoch::bump();  // (ADR 0115)
       return;
     }
 }
@@ -3042,6 +3055,7 @@ void GameObject::adopt_evaluation(GameObject &from, int kind) {
   eval_shape_key_[kind] = from.eval_shape_key_[kind];
   eval_pending_[kind] = 0;
   eval_generation_++;
+  edit_epoch::bump();  // (ADR 0115: a new picture)
 }
 
 /* Round 413: whether a stack is worth a worker - the work it means, from the base mesh's faces and the modifiers that
@@ -3147,7 +3161,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     }
     const size_t written = eval_chain_[kind]->update(base, *eval_head_[kind]);
     if (written == meshops::SubdivChain::kRefused) return false;  // (not the mesh the chain was built for: rebuilt)
-    if (written) eval_head_[kind]->deform_version++;
+    if (written) eval_head_[kind]->deform_version++, edit_epoch::bump();
     eval_head_key_[kind] = head_key;
     head_followed = true;
     return true;
@@ -3215,7 +3229,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     m->positions = head->positions;
     m->custom_normals = head->custom_normals;  // (task 0149: a normal modifier starts from the head's, not its own last result)
     if (!any_head) apply_shape_keys(*mf->mesh, shaping, m->positions, view);  // (no head: the basis shaped here)
-    m->deform_version++;  // before the tail runs: a deformer reading render_mesh() must not get last frame's
+    m->deform_version++, edit_epoch::bump();  // before the tail runs: a deformer reading render_mesh() must not get last frame's
     run(*m, split, components.size());
     if (m->positions.size() == head->positions.size() && m->corner_verts.size() == head->corner_verts.size() &&
         m->face_offsets.size() == head->face_offsets.size())
@@ -3298,6 +3312,7 @@ GameObject *Scene::adopt(std::unique_ptr<GameObject> go, uint64_t id) {
   by_id_[id] = raw;
   objects_.push_back(std::move(go));
   next_id_ = std::max(next_id_, id + 1);
+  edit_epoch::bump();  // (ADR 0115: an object made, loaded or cloned)
   return raw;
 }
 
@@ -3313,6 +3328,7 @@ GameObject *Scene::create(const std::string &name, GameObject *parent) {
 
 void Scene::destroy(GameObject *go) {
   if (!go) return;
+  edit_epoch::bump();  // (ADR 0115)
   if (go->id == active_camera) active_camera = 0;  // back to the name rule
   while (!go->children.empty()) destroy(go->children.back());
   auto &list = go->parent ? go->parent->children : roots;
@@ -3333,6 +3349,7 @@ static void collect_with_children(GameObject *go, std::unordered_set<GameObject 
 
 void Scene::destroy(const std::vector<GameObject *> &list) {
   if (list.empty()) return;
+  edit_epoch::bump();  // (ADR 0115)
   std::unordered_set<GameObject *> doomed;
   doomed.reserve(list.size());
   for (GameObject *g : list) collect_with_children(g, doomed);  // (a list naming an object twice, or a parent and its child, is safe)
@@ -3350,7 +3367,17 @@ void Scene::destroy(const std::vector<GameObject *> &list) {
   for (size_t i = 0; i < objects_.size(); i++) objects_[i]->index_in_scene = i;
 }
 
+void prefetch_scene_textures(const Scene &s) {
+  std::vector<MaterialPtr> used;
+  s.for_each([&](GameObject &g) {
+    const MeshRenderer *mr = g.get<MeshRenderer>();
+    if (mr) used.insert(used.end(), mr->materials.begin(), mr->materials.end());
+  });
+  prefetch_material_textures(used);
+}
+
 void Scene::clear() {
+  edit_epoch::bump();  // (round 436: lists kept on the counter hold pointers into the scene)
   objects_.clear();
   by_id_.clear();
   roots.clear();
