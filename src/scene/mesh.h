@@ -546,6 +546,7 @@ bool fuse_contacts(Mesh &m, std::vector<uint8_t> &face_sel);
  * out of it, and joined to the opening by a tube. Several exit faces use the
  * Boolean solver when available. */
 bool push_through(Mesh &m, std::vector<uint8_t> &face_sel, int segments, std::string *error = nullptr);
+size_t push_through_flat_exit_count();  // how many went through the several-coplanar-exit-faces path (tests)
 /* SketchUp's Push/Pull on one face region, by `distance` along its normal
  * (negative pushes in):
  *  - sides whose neighbouring face lies in the moved wall's plane stretch
@@ -659,6 +660,34 @@ void screw(Mesh &m, float angle_deg, int steps, float screw_offset, int axis, in
 /* Inserts a vertex at lerp(a, b, t) into every face along edge a-b (UVs, seams
  * and sharp marks follow). t at either end returns that end. */
 uint32_t split_edge(Mesh &m, uint32_t a, uint32_t b, float t);
+/* The UV a new corner at p would need to lie in `face` without moving the texture (task 0436, ADR 0120): barycentric in
+ * a triangle, bilinear-inverse in a convex planar quad, mean-value coordinates (Floater 2003) in any other n-gon (concave
+ * ones too), all in the face's plane. A point off the face is moved onto its outline first. A face whose UV outline folds
+ * or has no area (or whose own shape has none) answers the nearest corner's UV, so no UV is invented across a fold. Finite
+ * for any finite stored UVs and any p (a NaN p answers a corner); (0,0) when the mesh has no UVs. */
+Vec2 face_uv_at(const Mesh &m, size_t face, Vec3 p);
+/* The affine map from space to UV fitted to a face's corners (least squares for n-gons): for corners that lie outside the
+ * face (attach_face's arc, a stretched neighbour's moved corner), where face_uv_at would clamp. ok is false when the face
+ * is degenerate, has no UV extent, or the map misses a corner by more than 5% of the face's UV size (curved or folded
+ * charts). attach_face and the corners a stretched Push/Pull neighbour gains then fall back to face_uv_at (the outline
+ * clamp); corners of a neighbour that merely slide keep their old UVs. */
+struct UvAffine {
+  Vec3 origin;
+  Vec2 uv0;
+  Vec3 gu, gv;  // the change of u / v per unit of distance, in the face's plane
+  bool ok = false;
+  Vec2 at(Vec3 p) const {
+    const Vec3 d = p - origin;
+    return Vec2(uv0.x + dot(d, gu), uv0.y + dot(d, gv));
+  }
+};
+UvAffine face_uv_affine(const Mesh &m, size_t face);
+/* The mesh's average texel density (UV length per unit of length: sqrt of UV area over surface area) over the faces that
+ * have UV area; skip_face leaves one out (a face just added with zero UVs). 1 when no face has any. */
+float uv_texel_density(const Mesh &m, size_t skip_face = SIZE_MAX);
+/* Gives a face planar box-projected UVs: the two axes of the plane the face leans to most, scaled by density, anchored at
+ * the origin so faces drawn side by side line up. Needs the mesh's UVs to exist (does nothing otherwise). */
+void project_face_uvs(Mesh &m, size_t face, float density);
 /* Splits face f along a new edge between two of its corners (not neighbours). */
 bool split_face(Mesh &m, size_t f, uint32_t va, uint32_t vb);
 /* The connected faces lying in face f's plane (SketchUp treats them as one face). */
@@ -784,6 +813,29 @@ Vec3 face_area_center(const Mesh &m, size_t f);
  * faces it encloses; returns one of them, or -1 when no face in the plane is touched. */
 long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop, Vec3 normal, std::vector<size_t> *inner_faces = nullptr,
                          std::string *error = nullptr);
+/* Task 0437 (ADR 0120): a drawn outline projected onto the surface and cut into it (Blender's Knife
+ * Project), for curved meshes where no plane holds the shape (mesh_project.cpp). View: each point
+ * goes to the first front-facing face along the view (from `eye` when perspective, else along
+ * `dir`); Closest: to the nearest point of the surface. Crossed edges are split (UVs follow) and the
+ * cut is chained through each face; new vertices lie on the old faces, which are not moved. A closed
+ * outline puts the faces it encloses in `inner`. False, the mesh unchanged and `error` saying why,
+ * when part of the outline misses the surface, the projected outline crosses itself, the cut
+ * wraps past what the view sees or jumps a gap, or a closed cut doesn't separate the surface. */
+enum class ProjectMode { View, Closest };
+/* imprint_projected's refusal for a shape that never reaches an edge: the flat path handles it, so Draw stays quiet. */
+constexpr const char *kProjectInsideOneFace = "the shape stays inside one face";
+struct ProjectView {
+  Vec3 dir{0, 0, -1};  // into the scene
+  bool perspective = false;
+  Vec3 eye{0.0f};
+};
+/* allowed (optional, per face): the faces the shape may land on and cut through (the smooth patch it
+ * was started on); a point or a cut reaching another face refuses. */
+bool imprint_projected(Mesh &m, const std::vector<Vec3> &outline, bool closed, ProjectMode mode, const ProjectView &view,
+                       std::vector<size_t> *inner = nullptr, std::string *error = nullptr, const std::vector<uint8_t> *allowed = nullptr);
+/* The faces reachable from `face` across edges where neighbouring faces turn by less than angle_deg
+ * (a smooth patch: a teapot's body, a cylinder's side; a cube's face alone). */
+std::vector<uint8_t> smooth_patch(const Mesh &m, size_t face, float angle_deg);
 }  // namespace meshops
 
 }  // namespace bl

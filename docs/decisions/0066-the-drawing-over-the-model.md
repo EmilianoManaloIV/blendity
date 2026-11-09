@@ -36,5 +36,7 @@ face should become the face's edge when the artist says so.
 - The construction and the model share one geometry: what the hand draws on the ground is measured on the ground,
   and a line across a face is the cut it means.
 - Nothing is guessed: a stroke becomes a cut or a curve only when asked, and stays a stroke otherwise.
-- Not done: a layer's view with roll (the camera has none); strokes projected onto curved surfaces (the face's
-  plane is used); a knife cut through several faces; the overlay for unselected objects.
+- Superseded in part (ADR 0120, round 461): Draw shapes are now projected onto curved surfaces (`imprint_projected`);
+  the sketch pad's strokes keep the path below.
+- Not done: a layer's view with roll (the camera has none); the sketch pad's strokes projected onto curved surfaces
+  (the face's plane is used); a knife cut through several faces; the overlay for unselected objects.

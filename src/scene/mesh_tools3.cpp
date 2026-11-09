@@ -526,7 +526,7 @@ size_t seams_from_sharp(Mesh &m, float angle_deg, const std::vector<uint8_t> *fa
 
 /* A cut through face f from corner va to corner vb along new interior points
  * (the knife / polyline with bends). Both halves keep the face's material,
- * shading and (interpolated-free) UVs of the corners they keep. */
+ * shading and UVs of the corners they keep; the new points' UVs are read off f (face_uv_at). */
 bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vector<Vec3> &interior) {
   if (interior.empty()) return split_face(m, f, va, vb);
   if (f >= m.face_count() || va == vb) return false;
@@ -538,7 +538,11 @@ bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vec
   }
   if (ia < 0 || ib < 0) return false;
   std::vector<uint32_t> mid;
-  for (const Vec3 &p : interior) mid.push_back(m.add_vert(p));
+  std::vector<Vec2> mid_uv;  // read off the face being cut, so the texture stays where it was
+  for (const Vec3 &p : interior) {
+    mid.push_back(m.add_vert(p));
+    if (m.has_uvs()) mid_uv.push_back(face_uv_at(m, f, p));
+  }
   const std::vector<uint32_t> corners(m.face_verts(f), m.face_verts(f) + n);
   const uint32_t base = m.face_offsets[f];
   FaceBuilder fb(m);
@@ -561,12 +565,12 @@ bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vec
       if (half == 0)
         for (size_t i = mid.size(); i-- > 0;) {
           fv.push_back(mid[i]);
-          if (fb.has_uv) ft.push_back(ft.back());
+          if (fb.has_uv) ft.push_back(mid_uv[i]);
         }
       else
-        for (uint32_t v : mid) {
-          fv.push_back(v);
-          if (fb.has_uv) ft.push_back(ft.back());
+        for (size_t i = 0; i < mid.size(); i++) {
+          fv.push_back(mid[i]);
+          if (fb.has_uv) ft.push_back(mid_uv[i]);
         }
       if (fv.size() >= 3) fb.add(fv.data(), fv.size(), fb.has_uv ? ft.data() : nullptr, m.material_of(f), m.smooth_of(f));
     }
@@ -574,6 +578,300 @@ bool split_face_path(Mesh &m, size_t f, uint32_t va, uint32_t vb, const std::vec
   fb.commit(m);
   m.touch();
   return true;
+}
+
+/* ------------------------------------------- UVs read off a face (task 0436) */
+
+namespace {
+
+struct P2 {
+  double x, y;
+};
+P2 operator-(P2 a, P2 b) { return {a.x - b.x, a.y - b.y}; }
+double cross2(P2 a, P2 b) { return a.x * b.y - a.y * b.x; }
+double dot2(P2 a, P2 b) { return a.x * b.x + a.y * b.y; }
+
+/* A face's corners in its own plane (the Newell normal's), with their UVs. */
+struct FaceFrame {
+  std::vector<P2> q;
+  std::vector<Vec2> t;
+  std::vector<Vec3> p;
+  Vec3 origin, u, w;
+  double scale = 0.0;  // the plane outline's extent
+  bool ok = false;     // a usable plane: finite corners and a normal
+  P2 flat(Vec3 x) const {
+    const Vec3 d = x - origin;
+    return {(double)dot(d, u), (double)dot(d, w)};
+  }
+};
+
+FaceFrame face_frame(const Mesh &m, size_t face) {
+  FaceFrame fr;
+  const uint32_t n = m.face_size(face), base = m.face_offsets[face];
+  Vec3 nrm(0.0f);
+  fr.origin = m.positions[m.face_verts(face)[0]];
+  for (uint32_t k = 0; k < n; k++) {
+    const Vec3 a = m.positions[m.face_verts(face)[k]], b = m.positions[m.face_verts(face)[(k + 1) % n]];
+    if (!finite_bits(a.x) || !finite_bits(a.y) || !finite_bits(a.z)) return fr;
+    fr.p.push_back(a);
+    fr.t.push_back(m.uvs[base + k]);
+    nrm += Vec3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y));
+  }
+  const float nl = length(nrm);
+  if (!(nl > 1e-30f) || !finite_bits(nl)) return fr;
+  nrm = nrm / nl;
+  fr.u = normalize(cross(std::fabs(nrm.y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0), nrm));
+  fr.w = cross(nrm, fr.u);
+  for (const Vec3 &a : fr.p) {
+    fr.q.push_back(fr.flat(a));
+    fr.scale = std::max(fr.scale, std::max(std::fabs(fr.q.back().x), std::fabs(fr.q.back().y)));
+  }
+  fr.ok = fr.scale > 0.0;
+  return fr;
+}
+
+Vec2 nearest_corner_uv(const FaceFrame &fr, Vec3 p) {
+  size_t best = 0;
+  float bd = 3.4e38f;
+  for (size_t i = 0; i < fr.p.size(); i++) {
+    const float d = length_sq(fr.p[i] - p);
+    if (d < bd) bd = d, best = i;
+  }
+  return fr.t[best];
+}
+
+/* The UV outline has no area, or a triangle of its fan turns the other way to the same triangle in space (a fold). */
+bool chart_folded(const FaceFrame &fr) {
+  const size_t n = fr.q.size();
+  double apos = 0, auv = 0, spos = 0, suv = 0;
+  for (size_t i = 1; i + 1 < n; i++) {
+    const double tp = cross2(fr.q[i] - fr.q[0], fr.q[i + 1] - fr.q[0]) * 0.5;
+    const double tu = cross2(P2{fr.t[i].x - fr.t[0].x, fr.t[i].y - fr.t[0].y}, P2{fr.t[i + 1].x - fr.t[0].x, fr.t[i + 1].y - fr.t[0].y}) * 0.5;
+    apos += tp, auv += tu, spos += std::fabs(tp), suv += std::fabs(tu);
+  }
+  if (!(std::fabs(apos) > 1e-20) || !(suv > 0.0) || !(std::fabs(auv) > 1e-9 * suv)) return true;
+  const double mirror = (apos < 0) == (auv < 0) ? 1.0 : -1.0;  // a mirrored chart is consistent, not folded
+  for (size_t i = 1; i + 1 < n; i++) {
+    const double tp = cross2(fr.q[i] - fr.q[0], fr.q[i + 1] - fr.q[0]) * 0.5;
+    const double tu = cross2(P2{fr.t[i].x - fr.t[0].x, fr.t[i].y - fr.t[0].y}, P2{fr.t[i + 1].x - fr.t[0].x, fr.t[i + 1].y - fr.t[0].y}) * 0.5;
+    if (std::fabs(tp) < 1e-12 * spos || std::fabs(tu) < 1e-9 * suv) continue;
+    if (tp * tu * mirror < 0) return true;
+  }
+  return false;
+}
+
+bool inside_flat(const FaceFrame &fr, P2 pt) {
+  bool in = false;
+  const size_t n = fr.q.size();
+  for (size_t a = 0, b = n - 1; a < n; b = a++)
+    if ((fr.q[a].y > pt.y) != (fr.q[b].y > pt.y) && pt.x < (fr.q[b].x - fr.q[a].x) * (pt.y - fr.q[a].y) / (fr.q[b].y - fr.q[a].y) + fr.q[a].x) in = !in;
+  return in;
+}
+
+/* A point outside the outline moves to the nearest point on it. */
+P2 clamp_to_outline(const FaceFrame &fr, P2 pt) {
+  if (inside_flat(fr, pt)) return pt;
+  const size_t n = fr.q.size();
+  P2 best = fr.q[0];
+  double bd = 1e300;
+  for (size_t i = 0; i < n; i++) {
+    const P2 a = fr.q[i], e = fr.q[(i + 1) % n] - a;
+    const double l2 = dot2(e, e);
+    const double s = l2 > 0 ? std::min(1.0, std::max(0.0, dot2(pt - a, e) / l2)) : 0.0;
+    const P2 c{a.x + e.x * s, a.y + e.y * s};
+    const double d = dot2(pt - c, pt - c);
+    if (d < bd) bd = d, best = c;
+  }
+  return best;
+}
+
+Vec2 lerp_uv(Vec2 a, Vec2 b, double s) { return Vec2((float)(a.x + (b.x - a.x) * s), (float)(a.y + (b.y - a.y) * s)); }
+
+Vec2 triangle_uv(const FaceFrame &fr, P2 pt, bool *ok) {
+  const double den = cross2(fr.q[1] - fr.q[0], fr.q[2] - fr.q[0]);
+  *ok = std::fabs(den) > 1e-20;
+  if (!*ok) return fr.t[0];
+  const double b1 = cross2(pt - fr.q[0], fr.q[2] - fr.q[0]) / den, b2 = cross2(fr.q[1] - fr.q[0], pt - fr.q[0]) / den, b0 = 1.0 - b1 - b2;
+  return Vec2((float)(b0 * fr.t[0].x + b1 * fr.t[1].x + b2 * fr.t[2].x), (float)(b0 * fr.t[0].y + b1 * fr.t[1].y + b2 * fr.t[2].y));
+}
+
+bool quad_convex(const FaceFrame &fr) {
+  int pos = 0, neg = 0;
+  for (size_t i = 0; i < 4; i++) {
+    const double c = cross2(fr.q[(i + 1) % 4] - fr.q[i], fr.q[(i + 2) % 4] - fr.q[(i + 1) % 4]);
+    (c > 0 ? pos : neg)++;
+  }
+  return pos == 4 || neg == 4;
+}
+
+/* The point's (s, t) in the quad (s along corner 0 -> 1, t along 0 -> 3), by the bilinear map's inverse. */
+Vec2 quad_uv(const FaceFrame &fr, P2 pt, bool *ok) {
+  const P2 e = fr.q[1] - fr.q[0], f = fr.q[3] - fr.q[0], h = pt - fr.q[0];
+  const P2 g{fr.q[0].x - fr.q[1].x + fr.q[2].x - fr.q[3].x, fr.q[0].y - fr.q[1].y + fr.q[2].y - fr.q[3].y};
+  const double k2 = cross2(g, f), k1 = cross2(e, f) + cross2(h, g), k0 = cross2(h, e);
+  const double tol = 1e-6;
+  double tt = 0;
+  *ok = true;
+  if (std::fabs(k2) < 1e-12 * fr.scale * fr.scale) {
+    if (std::fabs(k1) < 1e-30) *ok = false;
+    else tt = -k0 / k1;
+  }
+  else {
+    const double disc = k1 * k1 - 4.0 * k0 * k2;
+    if (disc < 0) *ok = false;
+    else {
+      const double r = std::sqrt(disc), t1 = (-k1 - r) / (2.0 * k2), t2 = (-k1 + r) / (2.0 * k2);
+      tt = (t1 >= -tol && t1 <= 1.0 + tol) ? t1 : t2;
+    }
+  }
+  if (!*ok || !(tt >= -tol && tt <= 1.0 + tol)) {
+    *ok = false;
+    return fr.t[0];
+  }
+  const double dx = e.x + g.x * tt, dy = e.y + g.y * tt;
+  const double s = std::fabs(dx) > std::fabs(dy) ? (h.x - f.x * tt) / dx : (h.y - f.y * tt) / dy;
+  if (!finite_bits(s) || s < -tol || s > 1.0 + tol) {
+    *ok = false;
+    return fr.t[0];
+  }
+  const double ss = std::min(1.0, std::max(0.0, s)), t = std::min(1.0, std::max(0.0, tt));
+  auto at = [&](float Vec2::*c) {
+    return (1 - ss) * (1 - t) * (double)(fr.t[0].*c) + ss * (1 - t) * (double)(fr.t[1].*c) + ss * t * (double)(fr.t[2].*c) + (1 - ss) * t * (double)(fr.t[3].*c);
+  };
+  return Vec2((float)at(&Vec2::x), (float)at(&Vec2::y));
+}
+
+/* Mean-value coordinates of a point inside the outline. */
+Vec2 mean_value_uv(const FaceFrame &fr, P2 pt, bool *ok) {
+  const size_t n = fr.q.size();
+  std::vector<P2> s(n);
+  std::vector<double> r(n);
+  const double eps = 1e-9 * fr.scale;
+  for (size_t i = 0; i < n; i++) {
+    s[i] = fr.q[i] - pt;
+    r[i] = std::sqrt(dot2(s[i], s[i]));
+    if (r[i] < eps) {  // on a corner
+      *ok = true;
+      return fr.t[i];
+    }
+  }
+  std::vector<double> tn(n);
+  for (size_t i = 0; i < n; i++) {
+    const size_t j = (i + 1) % n;
+    const double cr = cross2(s[i], s[j]), dt = dot2(s[i], s[j]);
+    if (std::fabs(cr) <= 1e-9 * r[i] * r[j] && dt < 0) {  // on the edge
+      *ok = true;
+      return lerp_uv(fr.t[i], fr.t[j], r[i] / (r[i] + r[j]));
+    }
+    tn[i] = cr / (r[i] * r[j] + dt);  // tan of half the angle at the point
+  }
+  double sum = 0, u = 0, v = 0;
+  for (size_t i = 0; i < n; i++) {
+    const double w = (tn[(i + n - 1) % n] + tn[i]) / r[i];
+    sum += w, u += w * fr.t[i].x, v += w * fr.t[i].y;
+  }
+  *ok = sum > 1e-30 && finite_bits(u) && finite_bits(v);
+  return *ok ? Vec2((float)(u / sum), (float)(v / sum)) : fr.t[0];
+}
+
+}  // namespace
+
+Vec2 face_uv_at(const Mesh &m, size_t face, Vec3 p) {
+  if (face >= m.face_count() || !m.has_uvs() || m.face_size(face) < 3) return Vec2(0.0f, 0.0f);
+  const FaceFrame fr = face_frame(m, face);
+  if (fr.p.empty()) return m.uvs[m.face_offsets[face]];
+  if (!fr.ok || !finite_bits(p.x) || !finite_bits(p.y) || !finite_bits(p.z) || chart_folded(fr)) return nearest_corner_uv(fr, finite_bits(p.x + p.y + p.z) ? p : fr.p[0]);
+  const P2 pt = clamp_to_outline(fr, fr.flat(p));
+  bool ok = false;
+  Vec2 uv(0.0f, 0.0f);
+  if (fr.q.size() == 3) uv = triangle_uv(fr, pt, &ok);
+  else if (fr.q.size() == 4 && quad_convex(fr)) uv = quad_uv(fr, pt, &ok);
+  if (!ok) uv = mean_value_uv(fr, pt, &ok);
+  if (!ok) return nearest_corner_uv(fr, p);
+  /* Inside the UV bounds always (mean values over a concave outline can reach a little past the hull). */
+  Vec2 lo = fr.t[0], hi = fr.t[0];
+  for (const Vec2 &t : fr.t) lo = Vec2(std::min(lo.x, t.x), std::min(lo.y, t.y)), hi = Vec2(std::max(hi.x, t.x), std::max(hi.y, t.y));
+  return Vec2(clampf(uv.x, lo.x, hi.x), clampf(uv.y, lo.y, hi.y));
+}
+
+UvAffine face_uv_affine(const Mesh &m, size_t face) {
+  UvAffine out;
+  if (face >= m.face_count() || !m.has_uvs() || m.face_size(face) < 3) return out;
+  const FaceFrame fr = face_frame(m, face);
+  if (!fr.ok) return out;
+  const size_t n = fr.q.size();
+  P2 qc{0, 0};
+  double uc = 0, vc = 0;
+  for (size_t i = 0; i < n; i++) {
+    qc.x += fr.q[i].x, qc.y += fr.q[i].y;
+    uc += fr.t[i].x, vc += fr.t[i].y;
+  }
+  qc = {qc.x / (double)n, qc.y / (double)n};
+  uc /= (double)n, vc /= (double)n;
+  double sxx = 0, sxy = 0, syy = 0, xu = 0, yu = 0, xv = 0, yv = 0;
+  for (size_t i = 0; i < n; i++) {
+    const P2 d = fr.q[i] - qc;
+    const double du = fr.t[i].x - uc, dv = fr.t[i].y - vc;
+    sxx += d.x * d.x, sxy += d.x * d.y, syy += d.y * d.y;
+    xu += d.x * du, yu += d.y * du, xv += d.x * dv, yv += d.y * dv;
+  }
+  const double det = sxx * syy - sxy * sxy;
+  if (!(det > 1e-12 * (sxx + syy) * (sxx + syy))) return out;  // the corners lie on a line
+  const double gux = (xu * syy - yu * sxy) / det, guy = (yu * sxx - xu * sxy) / det;
+  const double gvx = (xv * syy - yv * sxy) / det, gvy = (yv * sxx - xv * sxy) / det;
+  out.gu = fr.u * (float)gux + fr.w * (float)guy;
+  out.gv = fr.u * (float)gvx + fr.w * (float)gvy;
+  out.origin = fr.origin + fr.u * (float)qc.x + fr.w * (float)qc.y;
+  out.uv0 = Vec2((float)uc, (float)vc);
+  /* How well it fits: a curved or folded chart is not one affine map. */
+  Vec2 lo = fr.t[0], hi = fr.t[0];
+  for (const Vec2 &t : fr.t) lo = Vec2(std::min(lo.x, t.x), std::min(lo.y, t.y)), hi = Vec2(std::max(hi.x, t.x), std::max(hi.y, t.y));
+  const double extent = std::max(hi.x - lo.x, hi.y - lo.y);
+  if (!(extent > 0.0)) return out;
+  double worst = 0;
+  for (size_t i = 0; i < n; i++) {
+    const Vec2 e = out.at(fr.p[i]) - fr.t[i];
+    worst = std::max(worst, (double)std::max(std::fabs(e.x), std::fabs(e.y)));
+  }
+  out.ok = worst <= 0.05 * extent && finite_bits(worst);
+  return out;
+}
+
+float uv_texel_density(const Mesh &m, size_t skip_face) {
+  if (!m.has_uvs()) return 1.0f;
+  double a3 = 0, auv = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (f == skip_face) continue;
+    const uint32_t n = m.face_size(f), b = m.face_offsets[f];
+    const Vec3 o = m.positions[m.face_verts(f)[0]];
+    const Vec2 t0 = m.uvs[b];
+    for (uint32_t i = 1; i + 1 < n; i++) {
+      const Vec3 c = cross(m.positions[m.face_verts(f)[i]] - o, m.positions[m.face_verts(f)[i + 1]] - o);
+      const Vec2 d1 = m.uvs[b + i] - t0, d2 = m.uvs[b + i + 1] - t0;
+      const double uv_area = 0.5 * std::fabs((double)d1.x * d2.y - (double)d1.y * d2.x);
+      if (!(uv_area > 0.0)) continue;  // a triangle with no UV area says nothing about the density
+      a3 += 0.5 * (double)length(c);
+      auv += uv_area;
+    }
+  }
+  if (!(a3 > 0) || !(auv > 0)) return 1.0f;
+  const double d = std::sqrt(auv / a3);
+  return finite_bits(d) ? (float)d : 1.0f;
+}
+
+void project_face_uvs(Mesh &m, size_t face, float density) {
+  if (face >= m.face_count() || !m.has_uvs() || !finite_bits(density) || !(density > 0.0f)) return;
+  const Vec3 nrm = m.face_normal(face);
+  const float ax = std::fabs(nrm.x), ay = std::fabs(nrm.y), az = std::fabs(nrm.z);
+  const int axis = ax >= ay && ax >= az ? 0 : (ay >= az ? 1 : 2);
+  const float sign = (axis == 0 ? nrm.x : axis == 1 ? nrm.y : nrm.z) < 0 ? -1.0f : 1.0f;
+  for (uint32_t k = 0; k < m.face_size(face); k++) {
+    const Vec3 p = m.positions[m.face_verts(face)[k]];
+    Vec2 t = axis == 0 ? Vec2(-p.z, p.y) : axis == 1 ? Vec2(p.x, p.z) : Vec2(p.x, p.y);
+    t.x *= sign;  // the far side of an axis is not mirrored; +X is (-z, y) as on the cube primitive
+    m.uvs[m.face_offsets[face] + k] = t * density;
+  }
+  m.touch();
 }
 
 }  // namespace bl::meshops

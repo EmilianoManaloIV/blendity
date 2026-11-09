@@ -1,45 +1,70 @@
 #!/bin/bash
-# The stack guarantee (the user, 2026-11-08): merging the newest open pull request merges every open pull request
-# below it. Every PR targets main, so that holds exactly when each open PR's head commit is in the newest PR's
-# history. This lists the ones that aren't; with FIX=1 it merges them into the newest PR's branch (a merge commit,
-# pushed) so the guarantee holds again. Run it after every publish and every push to a PR branch.
-# Usage: bash tools/dev/stack_check.sh          (check only; exit 1 when a PR is missing)
+# The stack guarantee (the user, 2026-11-08): merging the top pull request of a stack merges every pull request below
+# it. Several stacks may be open at once (one per pass, the user 2026-11-08): open PRs that share commits not yet on
+# main form one stack, and each stack must have exactly one top - a PR whose history holds every other PR of its stack.
+# This lists each stack and any PR its top lacks; with FIX=1 it merges the stack's other heads into its newest PR's
+# branch (a merge commit, pushed) so the guarantee holds again. Run it after every publish and every push to a PR
+# branch; the `stack` CI job runs it too (CI=1: check only).
+# Usage: bash tools/dev/stack_check.sh          (check only; exit 1 when a stack has more than one top)
 #        FIX=1 bash tools/dev/stack_check.sh    (also repair)
 set -e
 REPO=${REPO:-EmilianoManaloIV/blendity}
 GH=gh
 command -v gh >/dev/null 2>&1 || GH="/c/Program Files/GitHub CLI/gh.exe"
-cd "${BL_MAIN:-C:/Users/trick/Downloads/blender-main}"
-git fetch -q origin
+cd "${BL_MAIN:-$(git rev-parse --show-toplevel)}"
+git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
 
-PRS=$("$GH" pr list --repo "$REPO" --state open --base main --json number,headRefName --jq 'sort_by(.number) | .[] | "\(.number) \(.headRefName)"')
-[ -z "$PRS" ] && { echo "no open pull requests"; exit 0; }
-TOP=$(echo "$PRS" | tail -1)
-TOP_N=${TOP%% *}
-TOP_B=${TOP#* }
+mapfile -t ROWS < <("$GH" pr list --repo "$REPO" --state open --base main --json number,headRefName \
+                     --jq 'sort_by(.number) | .[] | "\(.number) \(.headRefName)"')
+[ ${#ROWS[@]} -eq 0 ] && { echo "no open pull requests"; exit 0; }
+N=(); B=()
+for r in "${ROWS[@]}"; do N+=("${r%% *}"); B+=("${r#* }"); done
+COUNT=${#N[@]}
 
-missing=""
-while read -r n b; do
-  [ "$n" = "$TOP_N" ] && continue
-  if git merge-base --is-ancestor "origin/$b" "origin/$TOP_B"; then
-    echo "#$n ($b): merges with #$TOP_N"
+# Group: two PRs are in one stack when their merge base is not on main (they share unmerged commits).
+G=(); for ((i = 0; i < COUNT; i++)); do G[i]=$i; done
+find() { local x=$1; while [ "${G[x]}" != "$x" ]; do x=${G[x]}; done; echo "$x"; }
+for ((i = 0; i < COUNT; i++)); do
+  for ((j = i + 1; j < COUNT; j++)); do
+    mb=$(git merge-base "origin/${B[i]}" "origin/${B[j]}" 2>/dev/null) || continue
+    git merge-base --is-ancestor "$mb" origin/main && continue
+    a=$(find $i); b=$(find $j); [ "$a" != "$b" ] && G[b]=$a
+  done
+done
+
+fail=0
+for ((root = 0; root < COUNT; root++)); do
+  [ "$(find $root)" != "$root" ] && continue
+  members=(); for ((i = 0; i < COUNT; i++)); do [ "$(find $i)" = "$root" ] && members+=($i); done
+  tops=()
+  for i in "${members[@]}"; do
+    inside=0
+    for j in "${members[@]}"; do
+      [ "$i" = "$j" ] && continue
+      git merge-base --is-ancestor "origin/${B[i]}" "origin/${B[j]}" && { inside=1; break; }
+    done
+    [ $inside = 0 ] && tops+=($i)
+  done
+  list=""; for i in "${members[@]}"; do list="$list #${N[i]}"; done
+  if [ ${#tops[@]} -eq 1 ]; then
+    echo "stack:$list -> OK: merging #${N[${tops[0]}]} merges all of it"
     continue
   fi
-  echo "#$n ($b): NOT in #$TOP_N's history"
-  missing="$missing $b"
-done <<< "$PRS"
+  newest=${members[-1]}
+  echo "stack:$list -> FAIL: no single top (tops:$(for t in "${tops[@]}"; do printf ' #%s' "${N[t]}"; done))"
+  if [ "$FIX" != "1" ] || [ -n "$CI" ]; then fail=1; continue; fi
+  T=$(mktemp -d)
+  git worktree add -q --detach "$T" "origin/${B[newest]}"
+  for t in "${tops[@]}"; do
+    [ "$t" = "$newest" ] && continue
+    git -C "$T" merge --no-ff --no-edit -m "Merge ${B[t]} so #${N[newest]} carries every PR of its stack
 
-[ -z "$missing" ] && { echo "OK: merging #$TOP_N merges every open PR"; exit 0; }
-[ "$FIX" != "1" ] && { echo "FAIL: run FIX=1 bash tools/dev/stack_check.sh"; exit 1; }
-
-T=$(mktemp -d)
-git worktree add -q --detach "$T" "origin/$TOP_B"
-for b in $missing; do
-  git -C "$T" merge --no-ff --no-edit -m "Merge $b so #$TOP_N carries every open PR
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" "origin/$b" || {
-    echo "CONFLICT merging $b - resolve by hand in $T"; exit 1; }
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" "origin/${B[t]}" || {
+      echo "CONFLICT merging ${B[t]} - resolve by hand in $T"; exit 1; }
+  done
+  git -C "$T" push -q origin "HEAD:refs/heads/${B[newest]}"
+  git worktree remove --force "$T"
+  echo "FIXED: #${N[newest]} now carries its whole stack"
 done
-git -C "$T" push -q origin "HEAD:refs/heads/$TOP_B"
-git worktree remove --force "$T"
-echo "FIXED: #$TOP_N now carries every open PR"
+[ $fail = 1 ] && echo "run FIX=1 bash tools/dev/stack_check.sh"
+exit $fail
