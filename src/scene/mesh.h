@@ -729,10 +729,17 @@ struct SolveReport {
  * (scope vertices among themselves), fix_t_junctions, doubled faces (same corners: one stays; opposite ways: both go), faces
  * flattened onto a line, the UV-safe coplanar merge at angle_deg on the scope's faces (those with every corner in it). */
 SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, float angle_deg);
-/* The cleanup after a Draw commit (ADR 0120 decision 5): tidy_new_geometry at eps, fix_t_junctions on the new vertices and the
- * old ones lying on new edges, then a UV-safe limited dissolve on the faces those two changed, never across an edge the draw
- * made. `before` is the mesh as it was; selection (faces) follows. Returns the number of vertices welded plus edges split. */
+/* The cleanup after a Draw commit (ADR 0120 decision 5), costing what the draw added, not the mesh: the new vertices weld onto
+ * old ones and each other within eps (a wire's end follows its vertex), faces the shape flattened onto an old edge are
+ * dropped (their corners threaded into the face across), and a vertex joins an edge it lies on (a new vertex any edge; an old
+ * vertex only an edge the draw made, never one along an old edge), looking at the faces around the new vertices only. Nothing
+ * is merged: every line the draw or the user made stays. `before` is the mesh as it was; the face selection follows.
+ * Returns the vertices welded plus edges split. */
 size_t cleanup_after_draw(Mesh &m, const Mesh &before, std::vector<uint8_t> &face_sel, float eps);
+/* How much more area lies on top of other faces (z-fighting pairs, plane_dist apart at most) after a draw than before,
+ * counting only pairs with a face the draw added or changed (after) or removed or changed (before): a cell grid finds the
+ * faces beside them and only those are compared, so the cost follows the draw, not the mesh. The guard of Draw. */
+double draw_overlap_gain(const Mesh &before, const Mesh &after, float plane_dist);
 /* The vertices of m at a place `old` had none (bit for bit): what an operator added, whatever the renumbering. */
 std::vector<uint8_t> vertices_not_in(const Mesh &m, const std::vector<Vec3> &old);
 /* Blender: Select > Select Sharp Edges (faces meeting at more than angle_deg; edges

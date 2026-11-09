@@ -2375,9 +2375,10 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
        "or in the whole mesh when nothing is selected. Blender: Mesh > Clean Up > Delete Loose.", ALL},
       {"solve_mesh", "Solve Mesh", "", "Clean the selection (the whole mesh when nothing is selected): weld doubled vertices, join T-junctions, drop doubled\n"
-       "faces and faces flattened onto a line, merge flat faces where the texture is continuous. The toast counts what\n"
-       "is left on top of each other. Adjust Last Operation: the weld distance and the merge angle. Draw runs the same\n"
-       "steps on what it draws. Blender: Mesh > Clean Up.", ALL},
+       "faces (a double-sided card, two faces back to back, goes too: both selected, or the whole mesh) and faces flattened\n"
+       "onto a line, merge flat faces where the texture is continuous. The toast counts what is left on top of each other.\n"
+       "Adjust Last Operation: the weld distance and the merge angle. Draw runs the weld and the T-junctions on what it\n"
+       "draws (not the merge). Blender: Mesh > Clean Up.", ALL},
       {"recalc_normals", "Recalculate Normals", "mesh.recalc_normals", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
       {"shrink_fatten", "Shrink/Fatten", "mesh.shrink_fatten", "Move the selected vertices along their normals (Adjust Last Operation sets the distance). Blender: Alt+S.", ALL},
       {"to_sphere", "To Sphere", "mesh.to_sphere", "Pull the selected vertices onto a sphere around their centre (Adjust Last Operation sets how far). Blender: Shift+Alt+S.", ALL},
@@ -2800,7 +2801,7 @@ void Editor::run_solve_mesh(Mesh &m, LastOp &L) {
   face_sel_.assign(m.face_count(), 0);
   sync_vert_face_selection(false);
   const size_t left = r.overlap_faces + r.overlap_vertices + r.overlap_edges;
-  const std::string text = strprintf("Solve Mesh: welded %zu, joined %zu T-junctions, dropped %zu doubled + %zu flat faces, merged %zu; left: %zu faces / %zu vertices / %zu edges on top of each other",
+  const std::string text = strprintf("Solve Mesh: welded %zu, joined %zu T-junctions, dropped %zu doubled or back-to-back + %zu flat faces, merged %zu; left: %zu faces / %zu vertices / %zu edges on top of each other",
                         r.welded, r.t_junctions, r.duplicate_faces, r.line_faces, r.merged, r.overlap_faces, r.overlap_vertices, r.overlap_edges);
   if (left) Log::warn("%s", text.c_str());
   else {
@@ -3086,7 +3087,7 @@ void Editor::draw_last_op_panel(const Recti &view) {
     u.tooltip("When the extruded face ends on another face of the mesh, join them\n(the touching area becomes an opening, like Bridge).");
   }
   else if (L.op == "solve_mesh") {
-    fl("Weld Distance", L.amount, 0.0001f, 0.0f, 1000.0f);
+    fl("Weld Distance", L.amount, std::max(1e-9f, 0.25f * meshops::relative_eps(*L.before, 1e-4f)), 0.0f, 1000.0f);  // (a step of a quarter of its default: the mesh decides)
     u.tooltip("Vertices closer than this weld, vertices this close to an edge join it. Starts at 1e-4 of the mesh's size.");
     fl("Merge Angle", L.amount2, 0.1f, 0.0f, 90.0f);
     u.tooltip("Flat faces meeting at less than this (degrees) merge, where the texture is continuous.");

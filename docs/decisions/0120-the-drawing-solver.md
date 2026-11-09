@@ -42,13 +42,17 @@ automatic after drawing and also available as a command.
 6. **Solve Mesh** applies the same steps to existing geometry as one `LastOp` operator (`editop solve_mesh`), its
    tolerances in F9 / the drag helper, scoped to the selection or the whole mesh.
 
-Amended at implementation (round 462): the after-draw dissolve merges only faces the weld or the T-junction fix changed,
-never across an edge the draw made and never the drawn faces (merging every coplanar touched pair would erase the shape:
-its inner face and its ring are coplanar with continuous UVs); line faces left by a shape along an old edge are dissolved
-too; the snap is the weld after the commit, not a snap before it; the drawing tolerances are relative to the mesh
-(`relative_eps`, the half bounding diagonal as `mesh_scale`); the overlap guard counts on meshes under 20,000 faces.
-Solve Mesh on the whole mesh merges every flat, UV-continuous region (a deliberately subdivided plane loses its grid; the
-selection scopes it).
+Amended at implementation (round 462, and after its review): Draw's cleanup welds the new vertices (a local weld, the
+cost following the draw), drops the faces a shape flattened onto an old edge and joins T-junctions among the faces around
+the new vertices - and merges nothing: a UV-safe dissolve across edges the draw's weld or join changed erased the user's
+earlier lines (two touching rectangles became one face when a third was drawn along them), so only Solve Mesh keeps the
+coplanar merge. A new vertex joins any edge it lies on; an old vertex joins only an edge the draw made, never a piece of an
+old edge the draw split (a separate shell's corner stays unjoined). A wire follows the vertex it was welded to. The snap is
+the weld after the commit, not a snap before it; the drawing tolerances are relative to the mesh (`relative_eps`, the half
+bounding diagonal as `mesh_scale`). The overlap guard measures the area lying on another face before and after, only where
+the draw added, changed or removed faces (a cell grid finds the faces beside them), so it costs what the draw costs on any
+mesh size. Solve Mesh on the whole mesh merges every flat, UV-continuous region (a deliberately subdivided plane loses its
+grid; the selection scopes it, and with a selection an edge whose faces are all outside it is never joined to).
 
 ## Consequences
 - Drawing on the teapot works; refusals become specific (missed the mesh, self-crossing, past the silhouette) and are

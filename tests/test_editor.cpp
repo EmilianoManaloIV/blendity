@@ -10591,7 +10591,7 @@ static void tests_round462_engineer() {
     }
   });
 
-  test("(engineer) a circle drawn over the same stacked faces is refused too, and a rectangle on the clean half of that mesh is drawn after the refusal", [] {
+  test("(engineer) a circle drawn over stacked faces is drawn (it adds no overlap), and so is a rectangle beside them afterwards", [] {
     Editor ed;
     ed.init_headless(900, 600);
     ed.step_frame_headless();
@@ -10623,7 +10623,6 @@ static void tests_round462_engineer() {
     ed.command("drawpoint 0.9 0 0.9");
     ed.step_frame_headless();
     std::printf("    then a rectangle at the corner: %zu faces\n", g->get<MeshFilter>()->mesh->face_count());
-    /* FAILS (round 462 as built): see the control below - splitting a face that is already part of a stacked pair adds overlap pairs, so the guard refuses a draw far from the stack. */
     CHECK(g->get<MeshFilter>()->mesh->face_count() > before.face_count());
     /* Control: the same rectangle on a fresh copy of the stacked mesh, no refusal before it. */
     Editor ed2;
@@ -10887,6 +10886,39 @@ static void tests_round462_engineer() {
   });
 }
 
+/* ---- Round 462's code review ---- */
+static void tests_round462_review() {
+  test("a rectangle drawn on a 19,600-face YZ wall is drawn at once, the guard looking beside it only (the time of the draw is printed, not asserted)", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    Mesh wall;
+    const int n = 140;
+    for (int j = 0; j <= n; j++)
+      for (int i = 0; i <= n; i++) wall.add_vert({0, (float)j, (float)i});
+    for (int j = 0; j < n; j++)
+      for (int i = 0; i < n; i++) {
+        const uint32_t v[4] = {(uint32_t)(j * (n + 1) + i), (uint32_t)((j + 1) * (n + 1) + i), (uint32_t)((j + 1) * (n + 1) + i + 1), (uint32_t)(j * (n + 1) + i + 1)};
+        wall.add_face(v, 4);
+      }
+    GameObject *g = r462x_object(ed, "YZWall", wall);
+    ed.command("edit face");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const size_t faces0 = g->get<MeshFilter>()->mesh->face_count();
+    ed.command("draw rectangle");
+    ed.command("drawpoint 0 70.3 70.3");
+    const auto t0 = std::chrono::steady_clock::now();
+    ed.command("drawpoint 0 70.7 70.8");
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    std::printf("    a rectangle on the %zu-face YZ wall: %.1f ms for the commit with its cleanup and guard, %zu -> %zu faces\n", faces0, ms, faces0, m.face_count());
+    CHECK(faces0 == 19600);
+    CHECK(m.face_count() > faces0);
+    CHECK(!r462x_has_toast(ed, "on top of each other"));
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -10978,5 +11010,6 @@ void run_editor_tests() {
   tests_round461_review();
   tests_round462();
   tests_round462_engineer();
+  tests_round462_review();
   coverage_tests();
 }

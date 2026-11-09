@@ -447,6 +447,30 @@ static void keep_uv_kinks(const Mesh &m, std::vector<uint8_t> &keep) {
   }
 }
 
+/* Takes out of `edges` the ones a guard keeps: the protected, a seam, a marked sharp edge, or one with a change of UVs across it. */
+static void drop_guarded_edges(const Mesh &m, const DissolveGuard &guard, std::unordered_set<uint64_t> &edges) {
+  std::unordered_map<uint64_t, std::vector<uint32_t>> faces_of;
+  if (guard.uv_safe && m.has_uvs())
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const uint64_t key = Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]);
+        if (edges.count(key)) faces_of[key].push_back((uint32_t)f);
+      }
+  for (auto it = edges.begin(); it != edges.end();) {
+    const uint64_t key = *it;
+    const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFF);
+    bool keep = guard.protect && guard.protect->count(key);
+    if (guard.uv_safe && !keep) {
+      keep = m.is_seam(a, b) || m.is_sharp(a, b);
+      const auto fs = faces_of.find(key);
+      Vec2 u0, u1, v0, v1;
+      if (!keep && fs != faces_of.end() && fs->second.size() == 2)
+        keep = !edge_corner_uvs(m, fs->second[0], a, b, u0, u1) || !edge_corner_uvs(m, fs->second[1], a, b, v0, v1) || !uv_close(u0, v0) || !uv_close(u1, v1);
+    }
+    it = keep ? edges.erase(it) : std::next(it);
+  }
+}
+
 size_t dissolve_limited(Mesh &m, float angle_deg, const std::vector<uint8_t> *face_mask, const DissolveGuard *guard) {
   size_t removed = 0;
   auto masked = [&](size_t f) { return !face_mask || (f < face_mask->size() && (*face_mask)[f]); };
@@ -470,29 +494,7 @@ size_t dissolve_limited(Mesh &m, float angle_deg, const std::vector<uint8_t> *fa
   /* 1. Edges between coplanar faces go: their faces merge into n-gons. */
   {
     std::unordered_set<uint64_t> edges = coplanar_edges(m, angle_deg);
-    if (guard && !edges.empty()) {
-      /* Not the protected ones, nor a seam, a marked sharp edge or a change of UVs across it. */
-      std::unordered_map<uint64_t, std::vector<uint32_t>> faces_of;
-      if (guard->uv_safe && m.has_uvs())
-        for (size_t f = 0; f < m.face_count(); f++)
-          for (uint32_t k = 0; k < m.face_size(f); k++) {
-            const uint64_t key = Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)]);
-            if (edges.count(key)) faces_of[key].push_back((uint32_t)f);
-          }
-      for (auto it = edges.begin(); it != edges.end();) {
-        const uint64_t key = *it;
-        const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFF);
-        bool keep = guard->protect && guard->protect->count(key);
-        if (guard->uv_safe && !keep) {
-          keep = m.is_seam(a, b) || m.is_sharp(a, b);
-          const auto fs = faces_of.find(key);
-          Vec2 u0, u1, v0, v1;
-          if (!keep && fs != faces_of.end() && fs->second.size() == 2)
-            keep = !edge_corner_uvs(m, fs->second[0], a, b, u0, u1) || !edge_corner_uvs(m, fs->second[1], a, b, v0, v1) || !uv_close(u0, v0) || !uv_close(u1, v1);
-        }
-        it = keep ? edges.erase(it) : std::next(it);
-      }
-    }
+    if (guard && !edges.empty()) drop_guarded_edges(m, *guard, edges);
     if (face_mask) {
       /* Only edges with a masked face on both sides. */
       std::unordered_map<uint64_t, int> in;

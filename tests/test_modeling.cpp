@@ -10710,7 +10710,6 @@ static void tests_round462_engineer() {
     std::vector<uint8_t> scope(m.vert_count(), 0);
     for (size_t v = 0; v < a_verts; v++) scope[v] = 1;
     meshops::solve_mesh(m, scope, 1e-3f, 1.0f);
-    /* FAILS (round 462 as built): solve_mesh keys its scope by position (mesh_cleanup.cpp in_scope), so the second cube's corners, at the first cube's places, count as selected and weld / get their shared face dropped. */
     CHECK(m.vert_count() == was.vert_count() && m.face_count() == was.face_count());
     bool same = m.vert_count() == was.vert_count();
     for (size_t v = a_verts; same && v < was.vert_count(); v++) same = std::memcmp(&m.positions[v], &was.positions[v], sizeof(Vec3)) == 0;
@@ -10845,6 +10844,155 @@ static void tests_round462_engineer() {
   });
 }
 
+/* ---- Round 462's code review: the cleanup keeps the user's lines, stays local, follows wires and keeps shells apart ---- */
+
+/* Two quads side by side in the XZ plane, (0..1) and (1..2) by (0..1), sharing the line x = 1, planar UVs (u = x, v = z). */
+static Mesh r462r_two_rectangles() {
+  Mesh m;
+  const uint32_t v[6] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({0, 0, 1}), m.add_vert({1, 0, 1}), m.add_vert({2, 0, 1})};
+  const uint32_t a[4] = {v[0], v[3], v[4], v[1]}, b[4] = {v[1], v[4], v[5], v[2]};
+  const Vec2 ta[4] = {{0, 0}, {0, 1}, {1, 1}, {1, 0}}, tb[4] = {{1, 0}, {1, 1}, {2, 1}, {2, 0}};
+  m.add_face(a, 4, ta);
+  m.add_face(b, 4, tb);
+  return m;
+}
+
+static size_t r462r_faces_with(const Mesh &m, Vec3 p, Vec3 q) {
+  size_t n = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    bool has_p = false, has_q = false;
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const Vec3 c = m.positions[m.face_verts(f)[k]];
+      has_p = has_p || length(c - p) < 1e-5f;
+      has_q = has_q || length(c - q) < 1e-5f;
+    }
+    n += has_p && has_q ? 1 : 0;
+  }
+  return n;
+}
+
+static void tests_round462_review() {
+  test("cleanup after a draw keeps the user's earlier lines: a rectangle drawn along two touching rectangles joins their corners and leaves the line between them", [] {
+    const Mesh before = r462r_two_rectangles();
+    Mesh m = before;
+    /* A free rectangle below both, its top side along their lower sides: new corners, two of them on the others' edges. */
+    const uint32_t d[4] = {m.add_vert({0.5f, 0, -1}), m.add_vert({1.5f, 0, -1}), m.add_vert({1.5f, 0, 0}), m.add_vert({0.5f, 0, 0})};
+    const Vec2 td[4] = {{0.5f, -1}, {1.5f, -1}, {1.5f, 0}, {0.5f, 0}};
+    m.add_face(d, 4, td);
+    std::vector<uint8_t> sel = {0, 0, 1};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    std::printf("    two rectangles and a third: %zu faces, sizes", m.face_count());
+    for (size_t f = 0; f < m.face_count(); f++) std::printf(" %u", m.face_size(f));
+    std::printf("\n");
+    CHECK(m.face_count() == 3);
+    CHECK(r462r_faces_with(m, {1, 0, 0}, {1, 0, 1}) == 2);  // the line between the first two still has a face each side
+    for (size_t f = 0; f < 2; f++) CHECK(m.face_size(f) == 5);  // each gained the third's corner on its lower side
+    CHECK(sel.size() == 3 && sel[2] == 1 && sel[0] == 0 && sel[1] == 0);
+    CHECK(meshops::overlapping_vertices(m).empty() && meshops::overlapping_edges(m).empty());
+    Mesh again = m;
+    CHECK(meshops::fix_t_junctions(again, {}, 1e-3f) == 0);
+  });
+  test("cleanup after a draw: a wire on a welded new corner follows the corner it was welded to, and no vertex is left orphaned", [] {
+    Mesh before;
+    const uint32_t q[4] = {before.add_vert({0, 0, 0}), before.add_vert({1, 0, 0}), before.add_vert({1, 0, 1}), before.add_vert({0, 0, 1})};
+    before.add_face(q, 4);
+    Mesh m = before;
+    const uint32_t w0 = m.add_vert({1, 0, 1}), w1 = m.add_vert({3, 0, 3}), w2 = m.add_vert({1, 0, 1});
+    m.add_loose_edge(w0, w1);
+    m.add_loose_edge(w2, w0);  // both ends weld to one corner: the wire has nothing left
+    std::vector<uint8_t> sel(1, 0);
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    CHECK(m.vert_count() == 5);
+    CHECK(m.loose_edges.size() == 1);
+    if (m.loose_edges.size() != 1) return;
+    const uint32_t a = (uint32_t)(m.loose_edges[0] >> 32), b = (uint32_t)(m.loose_edges[0] & 0xFFFFFFFF);
+    CHECK(a < m.vert_count() && b < m.vert_count());
+    if (a >= m.vert_count() || b >= m.vert_count()) return;
+    const Vec3 pa = m.positions[a], pb = m.positions[b];
+    const bool corner_a = length(pa - Vec3(1, 0, 1)) < 1e-6f, corner_b = length(pb - Vec3(1, 0, 1)) < 1e-6f;
+    CHECK(corner_a != corner_b);                                       // one end on the old corner ...
+    CHECK(length((corner_a ? pb : pa) - Vec3(3, 0, 3)) < 1e-6f);        // ... the other where the wire ends
+    CHECK((corner_a ? a : b) < 4);                                      // and that end is the old vertex, not an orphan beside it
+  });
+  test("cleanup after a draw never stitches a separate shell: its corner on a piece of an old edge the draw split stays unjoined", [] {
+    Mesh before;
+    const uint32_t a[4] = {before.add_vert({0, 0, 0}), before.add_vert({2, 0, 0}), before.add_vert({2, 0, 2}), before.add_vert({0, 0, 2})};
+    before.add_face(a, 4);
+    const uint32_t b[3] = {before.add_vert({1, 0, 0}), before.add_vert({1, 0, -1}), before.add_vert({2, 0, -1})};  // another shell, its corner on A's edge
+    before.add_face(b, 3);
+    /* The draw cut A in two from the middle of its lower side to the middle of its upper: two new vertices. */
+    Mesh m;
+    for (const Vec3 &p : before.positions) m.add_vert(p);
+    const uint32_t lo = m.add_vert({0.5f, 0, 0}), hi = m.add_vert({0.5f, 0, 2});
+    const uint32_t left[4] = {a[0], lo, hi, a[3]}, right[4] = {lo, a[1], a[2], hi};
+    m.add_face(left, 4);
+    m.add_face(right, 4);
+    m.add_face(b, 3);
+    std::vector<uint8_t> sel = {1, 1, 0};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    bool joined = false;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool has_b0 = false;
+      for (uint32_t k = 0; k < m.face_size(f); k++) has_b0 = has_b0 || length(m.positions[m.face_verts(f)[k]] - Vec3(1, 0, 0)) < 1e-6f;
+      if (has_b0 && m.face_size(f) != 3) joined = true;
+    }
+    CHECK(!joined);
+    CHECK(m.face_count() == 3);
+  });
+  test("solve mesh on a selection joins no T-junction on an edge whose faces are all outside it: a plain quad beside the selected, subdivided one stays untouched", [] {
+    Mesh m;
+    const uint32_t a0[4] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({1, 0, 0.5f}), m.add_vert({0, 0, 0.5f})};
+    const uint32_t mid = 2;
+    m.add_face(a0, 4);
+    const uint32_t top[4] = {a0[3], mid, m.add_vert({1, 0, 1}), m.add_vert({0, 0, 1})};
+    m.add_face(top, 4);
+    const uint32_t b[4] = {m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({2, 0, 1}), m.add_vert({1, 0, 1})};  // beside it, its own vertices
+    m.add_face(b, 4);
+    m.set_seam(3, 2, true);  // (the two selected quads stay two: this test is about the join)
+    const Mesh was = m;
+    std::vector<uint8_t> scope(m.vert_count(), 0);
+    for (uint32_t v = 0; v < 6; v++) scope[v] = 1;  // A's, the middle one of its right side included
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-3f, 1.0f);
+    CHECK(r.t_junctions == 0);
+    CHECK(m.vert_count() == was.vert_count() && m.face_count() == was.face_count());
+    size_t sizes4 = 0;
+    for (size_t f = 0; f < m.face_count(); f++) sizes4 += m.face_size(f) == 4 ? 1 : 0;
+    CHECK(sizes4 == 3);  // the plain quad kept its four corners
+    /* With everything selected the touching shells are one job: the weld and the joins happen. */
+    Mesh whole = was;
+    std::vector<uint8_t> none;
+    meshops::solve_mesh(whole, none, 1e-3f, 1.0f);
+    CHECK(whole.vert_count() < was.vert_count());
+  });
+  test("the draw guard is local: the overlap area a draw adds is measured beside the draw, on a 19,600-face YZ wall as on a small mesh (the time is printed, not asserted)", [] {
+    Mesh wall;
+    const int n = 140;
+    for (int j = 0; j <= n; j++)
+      for (int i = 0; i <= n; i++) wall.add_vert({0, (float)j, (float)i});
+    for (int j = 0; j < n; j++)
+      for (int i = 0; i < n; i++) {
+        const uint32_t v[4] = {(uint32_t)(j * (n + 1) + i), (uint32_t)((j + 1) * (n + 1) + i), (uint32_t)((j + 1) * (n + 1) + i + 1), (uint32_t)(j * (n + 1) + i + 1)};
+        wall.add_face(v, 4);
+      }
+    CHECK(wall.face_count() == 19600);
+    Mesh after = wall;
+    /* A free face lying on the wall, half over four cells. */
+    const uint32_t f[4] = {after.add_vert({0, 70.5f, 70.5f}), after.add_vert({0, 71.5f, 70.5f}), after.add_vert({0, 71.5f, 71.5f}), after.add_vert({0, 70.5f, 71.5f})};
+    if (after.face_normal(0).x > 0) after.add_face(f, 4);
+    else {
+      const uint32_t r[4] = {f[3], f[2], f[1], f[0]};
+      after.add_face(r, 4);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const double gain = meshops::draw_overlap_gain(wall, after, meshops::relative_eps(after));
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const double none = meshops::draw_overlap_gain(wall, wall, meshops::relative_eps(wall));
+    std::printf("    the guard on a 19,600-face YZ wall: %.1f ms, the free face adds %.4f of area (1 expected), an unchanged mesh %.4f\n", ms, gain, none);
+    CHECK(std::fabs(gain - 1.0) < 1e-3);
+    CHECK(std::fabs(none) < 1e-9);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -10893,4 +11041,5 @@ void run_modeling_tests() {
   tests_round461_review();
   tests_round462();
   tests_round462_engineer();
+  tests_round462_review();
 }

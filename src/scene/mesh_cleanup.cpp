@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Cleanup after drawing, and Solve Mesh (task 0438, ADR 0120 decisions 5-6): the weld, the T-junction fix, doubled faces and
-// the UV-safe coplanar merge that Draw runs on what it made and Solve Mesh runs on a mesh that exists.
+// Cleanup after drawing, and Solve Mesh (task 0438, ADR 0120 decisions 5-6): the weld, the T-junction fix and faces flattened
+// onto a line that Draw runs on what it made (at a cost that follows the draw), the overlap guard's local measure, and Solve
+// Mesh, which adds doubled faces and the UV-safe coplanar merge for a mesh that exists.
 #include "mesh.h"
 #include "mesh_internal.h"
 
@@ -10,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -99,16 +101,19 @@ struct EdgeGrid {
   static int64_t cell_of(float x, float cs) { return (int64_t)std::floor(std::clamp((double)x / cs, -1e9, 1e9)); }
   static uint64_t key(int64_t x, int64_t y, int64_t z) { return ((uint64_t)(x & 0x1FFFFF) << 42) | ((uint64_t)(y & 0x1FFFFF) << 21) | (uint64_t)(z & 0x1FFFFF); }
 
-  EdgeGrid(const Mesh &m, const std::vector<uint8_t> &ok, float eps) {
+  /* face_mask (optional): only the edges of those faces. */
+  EdgeGrid(const Mesh &m, const std::vector<uint8_t> &ok, float eps, const std::vector<uint8_t> *face_mask = nullptr) {
     std::unordered_set<uint64_t> seen;
     double total = 0;
-    for (size_t f = 0; f < m.face_count(); f++)
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (face_mask && !(f < face_mask->size() && (*face_mask)[f])) continue;
       for (uint32_t k = 0; k < m.face_size(f); k++) {
         const uint32_t a = m.face_verts(f)[k], b = m.face_verts(f)[(k + 1) % m.face_size(f)];
         if (a == b || !ok[a] || !ok[b] || !seen.insert(Mesh::edge_key(a, b)).second) continue;
         edges.push_back({std::min(a, b), std::max(a, b)});
         total += length(m.positions[a] - m.positions[b]);
       }
+    }
     if (edges.empty()) return;
     cs = std::max((float)(total / (double)edges.size()), eps * 8.0f);
     for (uint32_t i = 0; i < edges.size(); i++) {
@@ -137,26 +142,44 @@ struct EdgeGrid {
 /* Whether `accept` (when given) lets vertex v join edge a-b. */
 using JoinFilter = std::function<bool(uint32_t v, uint32_t a, uint32_t b)>;
 
-size_t fix_t_junctions_filtered(Mesh &m, const std::vector<uint32_t> &verts, float eps, const JoinFilter *accept) {
+/* accept: which joins are allowed; face_mask: only the edges of those faces are looked at (and only their corners count as
+ * vertices in use); edge_scope: an edge qualifies only while one of its faces is marked there. */
+struct TJOptions {
+  const JoinFilter *accept = nullptr;
+  const std::vector<uint8_t> *face_mask = nullptr, *edge_scope = nullptr;
+};
+
+size_t fix_t_junctions_filtered(Mesh &m, const std::vector<uint32_t> &verts, float eps, const TJOptions &opt = TJOptions()) {
   if (!(eps > 0.0f) || !std::isfinite(eps) || m.face_count() == 0) return 0;
   const size_t nv = m.vert_count();
   std::vector<uint8_t> ok(nv, 0);  // in use by a face or a wire, and a real position
-  for (uint32_t c : m.corner_verts)
-    if (c < nv) ok[c] = 1;
-  for (uint64_t key : m.loose_edges) {
-    const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFF);
-    if (a < nv && b < nv) ok[a] = ok[b] = 1;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (opt.face_mask && !(f < opt.face_mask->size() && (*opt.face_mask)[f])) continue;
+    for (uint32_t k = 0; k < m.face_size(f); k++)
+      if (m.face_verts(f)[k] < nv) ok[m.face_verts(f)[k]] = 1;
   }
+  if (!opt.face_mask)  // (a local look counts the faces' corners only)
+    for (uint64_t key : m.loose_edges) {
+      const uint32_t a = (uint32_t)(key >> 32), b = (uint32_t)(key & 0xFFFFFFFF);
+      if (a < nv && b < nv) ok[a] = ok[b] = 1;
+    }
   for (size_t v = 0; v < nv; v++)
     if (!finite3(m.positions[v])) ok[v] = 0;
-  const EdgeGrid grid(m, ok, eps);
+  const EdgeGrid grid(m, ok, eps, opt.face_mask);
   if (grid.edges.empty()) return 0;
   std::vector<uint32_t> cand = verts;
   if (cand.empty())
-    for (uint32_t v = 0; v < nv; v++) cand.push_back(v);
+    for (uint32_t v = 0; v < nv; v++)
+      if (ok[v]) cand.push_back(v);
   std::sort(cand.begin(), cand.end());
   cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
   const EdgeFaces ef(m);
+  auto out_of_scope = [&](uint32_t a, uint32_t b) {  // none of the edge's faces is in the scope
+    if (!opt.edge_scope) return false;
+    for (uint32_t g : ef.at(a, b))
+      if (g < opt.edge_scope->size() && (*opt.edge_scope)[g]) return false;
+    return true;
+  };
   auto in_faces_of_edge = [&](uint32_t v, uint32_t a, uint32_t b) {
     for (uint32_t g : ef.at(a, b))
       for (uint32_t k = 0; k < m.face_size(g); k++)
@@ -176,7 +199,8 @@ size_t fix_t_junctions_filtered(Mesh &m, const std::vector<uint32_t> &verts, flo
       if (t * len <= eps || (1.0f - t) * len <= eps) return;  // at an end: the weld's business, not a T-junction
       if (length(a + d * t - p) > eps) return;
       if (in_faces_of_edge(v, e.a, e.b)) return;
-      if (accept && !(*accept)(v, e.a, e.b)) return;
+      if (out_of_scope(e.a, e.b)) return;
+      if (opt.accept && !(*opt.accept)(v, e.a, e.b)) return;
       splits[Mesh::edge_key(e.a, e.b)].push_back({t, v});
     });
   }
@@ -239,6 +263,278 @@ size_t drop_duplicate_faces(Mesh &m, const std::vector<uint8_t> &in_scope) {
   return removed;
 }
 
+/* The weld's map for what a draw added: each new vertex goes to the lowest old vertex within eps, else to the lowest new one
+ * before it that does (chained), else stays. Old vertices are never welded to each other, so deliberately unwelded geometry
+ * elsewhere stays. The cost follows the new vertices: a grid of them only, and one pass over the old vertices that looks the
+ * cell up in the set of cells beside a new vertex. */
+std::vector<uint32_t> weld_map_for_new(const Mesh &m, const std::vector<uint8_t> &is_new, float eps, bool &any) {
+  const size_t nv = m.vert_count();
+  std::vector<uint32_t> to(nv);
+  for (uint32_t v = 0; v < nv; v++) to[v] = v;
+  any = false;
+  std::vector<uint32_t> added;
+  for (uint32_t v = 0; v < nv; v++)
+    if (is_new[v] && finite3(m.positions[v])) added.push_back(v);
+  if (added.empty()) return to;
+  auto cell = [&](Vec3 p, int dx, int dy, int dz) {
+    return EdgeGrid::key(EdgeGrid::cell_of(p.x, eps) + dx, EdgeGrid::cell_of(p.y, eps) + dy, EdgeGrid::cell_of(p.z, eps) + dz);
+  };
+  std::unordered_map<uint64_t, std::vector<uint32_t>> new_cells;
+  std::unordered_set<uint64_t> beside;  // the cells within one of a new vertex's
+  for (uint32_t v : added) {
+    new_cells[cell(m.positions[v], 0, 0, 0)].push_back(v);
+    for (int dx = -1; dx <= 1; dx++)
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++) beside.insert(cell(m.positions[v], dx, dy, dz));
+  }
+  auto each_near_new = [&](Vec3 p, auto &&fn) {
+    for (int dx = -1; dx <= 1; dx++)
+      for (int dy = -1; dy <= 1; dy++)
+        for (int dz = -1; dz <= 1; dz++) {
+          const auto it = new_cells.find(cell(p, dx, dy, dz));
+          if (it == new_cells.end()) continue;
+          for (uint32_t v : it->second) fn(v);
+        }
+  };
+  std::vector<uint32_t> old_for(nv, UINT32_MAX);
+  for (uint32_t u = 0; u < nv; u++) {
+    if (is_new[u] || !finite3(m.positions[u]) || !beside.count(cell(m.positions[u], 0, 0, 0))) continue;
+    each_near_new(m.positions[u], [&](uint32_t v) {
+      if (old_for[v] == UINT32_MAX && length(m.positions[u] - m.positions[v]) <= eps) old_for[v] = u;
+    });
+  }
+  for (uint32_t v : added) {  // ascending
+    if (old_for[v] != UINT32_MAX) {
+      to[v] = old_for[v];
+      any = true;
+      continue;
+    }
+    uint32_t best = UINT32_MAX;
+    each_near_new(m.positions[v], [&](uint32_t u) {
+      if (u < v && length(m.positions[u] - m.positions[v]) <= eps && (best == UINT32_MAX || u < best)) best = u;
+    });
+    if (best == UINT32_MAX) continue;
+    to[v] = to[best];
+    any = true;
+  }
+  return to;
+}
+
+/* The faces that use a welded vertex rebuilt through the map: repeated corners, a spike (out and straight back) and faces left
+ * with fewer than three corners go, and a face on the same corners as another facing the other way cancels with it. Faces
+ * without a welded corner are copied as they are. Returns the face remap (old -> new, UINT32_MAX removed). */
+std::vector<uint32_t> weld_faces_local(Mesh &m, const std::vector<uint32_t> &to) {
+  const size_t nf = m.face_count();
+  const bool has_uv = m.has_uvs();
+  std::unordered_map<uint32_t, std::vector<uint32_t>> loops;
+  std::unordered_map<uint32_t, std::vector<Vec2>> luvs;
+  for (uint32_t f = 0; f < nf; f++) {
+    bool hit = false;
+    for (uint32_t k = 0; k < m.face_size(f) && !hit; k++) hit = to[m.face_verts(f)[k]] != m.face_verts(f)[k];
+    if (!hit) continue;
+    std::vector<uint32_t> &lp = loops[f];
+    std::vector<Vec2> &lt = luvs[f];
+    const uint32_t b0 = m.face_offsets[f];
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const uint32_t v = to[m.face_verts(f)[k]];
+      if (!lp.empty() && lp.back() == v) continue;
+      lp.push_back(v);
+      if (has_uv) lt.push_back(m.uvs[b0 + k]);
+    }
+    while (lp.size() > 1 && lp.front() == lp.back()) {
+      lp.pop_back();
+      if (has_uv) lt.pop_back();
+    }
+    for (bool again = true; again && lp.size() >= 3;) {  // out and straight back (a b a): both corners go
+      again = false;
+      const size_t n = lp.size();
+      for (size_t i = 0; i < n && !again; i++) {
+        const size_t prev = (i + n - 1) % n, next = (i + 1) % n;
+        if (lp[prev] != lp[next]) continue;
+        const size_t first = std::min(i, next), second = std::max(i, next);
+        lp.erase(lp.begin() + (long)second);
+        lp.erase(lp.begin() + (long)first);
+        if (has_uv) {
+          lt.erase(lt.begin() + (long)second);
+          lt.erase(lt.begin() + (long)first);
+        }
+        again = true;
+      }
+    }
+  }
+  std::vector<uint32_t> remap(nf);
+  if (loops.empty()) {
+    for (uint32_t f = 0; f < nf; f++) remap[f] = f;
+    return remap;
+  }
+  /* Twins: the faces at a rebuilt face's first corner, by their final corners. */
+  std::unordered_map<uint32_t, std::vector<uint32_t>> at;
+  for (const auto &kv : loops)
+    if (kv.second.size() >= 3) at[kv.second[0]];
+  auto final_corner = [&](uint32_t f, uint32_t k) {
+    const auto it = loops.find(f);
+    return it != loops.end() ? it->second[k] : m.face_verts(f)[k];
+  };
+  auto final_size = [&](uint32_t f) {
+    const auto it = loops.find(f);
+    return it != loops.end() ? (uint32_t)it->second.size() : m.face_size(f);
+  };
+  for (uint32_t f = 0; f < nf; f++)
+    for (uint32_t k = 0; k < final_size(f); k++) {
+      const auto it = at.find(final_corner(f, k));
+      if (it != at.end()) it->second.push_back(f);
+    }
+  std::vector<uint8_t> drop(nf, 0);
+  for (const auto &kv : loops) {
+    const uint32_t f = kv.first, n = final_size(f);
+    if (n < 3 || drop[f]) continue;
+    for (uint32_t g : at[final_corner(f, 0)]) {
+      if (g == f || drop[g] || final_size(g) != n) continue;
+      uint32_t start = 0;
+      while (start < n && final_corner(g, start) != final_corner(f, 0)) start++;
+      bool reversed = start < n;
+      for (uint32_t k = 0; reversed && k < n; k++) reversed = final_corner(f, k) == final_corner(g, (start + n - k) % n);
+      if (reversed) drop[f] = drop[g] = 1;
+      if (drop[f]) break;
+    }
+  }
+  FaceBuilder fb(m);
+  for (uint32_t f = 0; f < nf; f++) {
+    remap[f] = UINT32_MAX;
+    if (drop[f]) continue;
+    const auto it = loops.find(f);
+    if (it == loops.end()) {
+      remap[f] = (uint32_t)(fb.offs.size() - 1);
+      fb.add(m.face_verts(f), m.face_size(f), fb.has_uv ? &m.uvs[m.face_offsets[f]] : nullptr, m.material_of(f), m.smooth_of(f));
+      continue;
+    }
+    if (it->second.size() < 3) continue;
+    remap[f] = (uint32_t)(fb.offs.size() - 1);
+    fb.add(it->second.data(), it->second.size(), fb.has_uv ? luvs[f].data() : nullptr, m.material_of(f), m.smooth_of(f));
+  }
+  fb.commit(m);
+  return remap;
+}
+
+/* An edge mark list (seams, sharp edges, wires) through the weld: a wire on a welded corner follows it, and one left with the
+ * same corner at both ends goes. */
+void remap_edge_keys(std::vector<uint64_t> &keys, const std::vector<uint32_t> &to) {
+  std::vector<uint64_t> out;
+  for (uint64_t k : keys) {
+    const uint32_t a = (uint32_t)(k >> 32), b = (uint32_t)(k & 0xFFFFFFFF);
+    const uint32_t x = a < to.size() ? to[a] : a, y = b < to.size() ? to[b] : b;
+    if (x != y) out.push_back(Mesh::edge_key(x, y));
+  }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+  keys = std::move(out);
+}
+
+/* The sorted signatures of a mesh's faces. */
+std::vector<uint64_t> sorted_signatures(const Mesh &m) {
+  std::vector<uint64_t> s(m.face_count());
+  for (size_t f = 0; f < s.size(); f++) s[f] = face_signature(m, f);
+  std::sort(s.begin(), s.end());
+  return s;
+}
+
+/* The area where faces in `focus` lie on top of others (or each other), measured on a small mesh of the focus faces and the
+ * faces beside them (found on a cell grid of the focus faces' boxes), not on the whole mesh. */
+double local_overlap_area(const Mesh &m, const std::vector<uint8_t> &focus, float plane_dist) {
+  struct Box {
+    Vec3 lo, hi;
+  };
+  auto box_of = [&](size_t f) {
+    Box b{Vec3(std::numeric_limits<float>::max()), Vec3(-std::numeric_limits<float>::max())};
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const Vec3 p = m.positions[m.face_verts(f)[k]];
+      b.lo = Vec3(std::min(b.lo.x, p.x) - plane_dist, std::min(b.lo.y, p.y) - plane_dist, std::min(b.lo.z, p.z) - plane_dist);
+      b.hi = Vec3(std::max(b.hi.x, p.x) + plane_dist, std::max(b.hi.y, p.y) + plane_dist, std::max(b.hi.z, p.z) + plane_dist);
+    }
+    return b;
+  };
+  auto meet = [](const Box &a, const Box &b) {
+    return a.lo.x <= b.hi.x && b.lo.x <= a.hi.x && a.lo.y <= b.hi.y && b.lo.y <= a.hi.y && a.lo.z <= b.hi.z && b.lo.z <= a.hi.z;
+  };
+  std::vector<uint32_t> fo;
+  std::vector<Box> fb;
+  Box all{Vec3(std::numeric_limits<float>::max()), Vec3(-std::numeric_limits<float>::max())};
+  double span = 0;
+  for (uint32_t f = 0; f < focus.size() && f < m.face_count(); f++) {
+    if (!focus[f] || m.face_size(f) < 3) continue;
+    const Box b = box_of(f);
+    if (!finite3(b.lo) || !finite3(b.hi)) continue;
+    fo.push_back(f);
+    fb.push_back(b);
+    all.lo = Vec3(std::min(all.lo.x, b.lo.x), std::min(all.lo.y, b.lo.y), std::min(all.lo.z, b.lo.z));
+    all.hi = Vec3(std::max(all.hi.x, b.hi.x), std::max(all.hi.y, b.hi.y), std::max(all.hi.z, b.hi.z));
+    span += std::max({b.hi.x - b.lo.x, b.hi.y - b.lo.y, b.hi.z - b.lo.z});
+  }
+  if (fo.empty()) return 0.0;
+  const float cs = std::max((float)(span / (double)fo.size()), std::max(plane_dist * 4.0f, 1e-12f));
+  std::unordered_map<uint64_t, std::vector<uint32_t>> grid;
+  std::vector<uint32_t> big;  // boxes over many cells: tried against every query
+  auto range = [&](const Box &b, int64_t r[6]) {
+    r[0] = EdgeGrid::cell_of(b.lo.x, cs), r[1] = EdgeGrid::cell_of(b.hi.x, cs);
+    r[2] = EdgeGrid::cell_of(b.lo.y, cs), r[3] = EdgeGrid::cell_of(b.hi.y, cs);
+    r[4] = EdgeGrid::cell_of(b.lo.z, cs), r[5] = EdgeGrid::cell_of(b.hi.z, cs);
+    return (double)(r[1] - r[0] + 1) * (double)(r[3] - r[2] + 1) * (double)(r[5] - r[4] + 1);
+  };
+  for (uint32_t i = 0; i < fo.size(); i++) {
+    int64_t r[6];
+    if (range(fb[i], r) > 64.0) {
+      big.push_back(i);
+      continue;
+    }
+    for (int64_t x = r[0]; x <= r[1]; x++)
+      for (int64_t y = r[2]; y <= r[3]; y++)
+        for (int64_t z = r[4]; z <= r[5]; z++) grid[EdgeGrid::key(x, y, z)].push_back(i);
+  }
+  std::vector<uint8_t> is_focus(m.face_count(), 0);
+  for (uint32_t f : fo) is_focus[f] = 1;
+  std::vector<uint32_t> beside;
+  for (uint32_t f = 0; f < m.face_count(); f++) {
+    if (is_focus[f] || m.face_size(f) < 3) continue;
+    const Box b = box_of(f);
+    if (!meet(b, all)) continue;
+    bool hit = false;
+    for (uint32_t i : big) hit = hit || meet(b, fb[i]);
+    int64_t r[6];
+    if (!hit && range(b, r) > 64.0) {
+      for (uint32_t i = 0; i < fo.size() && !hit; i++) hit = meet(b, fb[i]);
+    }
+    else if (!hit) {
+      for (int64_t x = r[0]; x <= r[1] && !hit; x++)
+        for (int64_t y = r[2]; y <= r[3] && !hit; y++)
+          for (int64_t z = r[4]; z <= r[5] && !hit; z++) {
+            const auto it = grid.find(EdgeGrid::key(x, y, z));
+            if (it == grid.end()) continue;
+            for (uint32_t i : it->second) hit = hit || meet(b, fb[i]);
+          }
+    }
+    if (hit) beside.push_back(f);
+  }
+  Mesh mini;
+  std::unordered_map<uint32_t, uint32_t> vid;
+  std::vector<int> group;
+  auto add = [&](uint32_t f, int g) {
+    std::vector<uint32_t> loop;
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const uint32_t v = m.face_verts(f)[k];
+      const auto it = vid.find(v);
+      if (it != vid.end()) loop.push_back(it->second);
+      else loop.push_back(vid[v] = mini.add_vert(m.positions[v]));
+    }
+    mini.add_face(loop.data(), loop.size());
+    group.push_back(g);
+  };
+  for (uint32_t f : fo) add(f, 0);
+  for (uint32_t f : beside) add(f, -1);  // not compared to each other: only pairs with a focus face count
+  double area = 0;
+  for (const ZFightPair &p : zfight_pairs(mini, plane_dist, &group)) area += p.area;
+  return area;
+}
+
 }  // namespace
 
 float relative_eps(const Mesh &m, float rel) {
@@ -257,7 +553,7 @@ float relative_eps(const Mesh &m, float rel) {
   return eps > 0.0f ? eps : 1e-12f;
 }
 
-size_t fix_t_junctions(Mesh &m, const std::vector<uint32_t> &verts, float eps) { return fix_t_junctions_filtered(m, verts, eps, nullptr); }
+size_t fix_t_junctions(Mesh &m, const std::vector<uint32_t> &verts, float eps) { return fix_t_junctions_filtered(m, verts, eps); }
 
 SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, float angle_deg) {
   SolveReport r;
@@ -315,7 +611,11 @@ SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, fl
     const std::vector<uint8_t> sv = whole ? std::vector<uint8_t>() : scope_verts();
     for (uint32_t v = 0; v < sv.size(); v++)
       if (sv[v]) verts.push_back(v);
-    if (whole || !verts.empty()) r.t_junctions = fix_t_junctions(m, verts, weld_dist);
+    /* With a selection, an edge whose faces are all outside it is left alone (a separate shell's edge, an old crack). */
+    const std::vector<uint8_t> in_scope = whole ? std::vector<uint8_t>() : scope_faces();
+    TJOptions opt;
+    if (!whole) opt.edge_scope = &in_scope;
+    if (whole || !verts.empty()) r.t_junctions = fix_t_junctions_filtered(m, verts, weld_dist, opt);
   }
   /* 3. Doubled faces. */
   r.duplicate_faces = drop_duplicate_faces(m, whole ? std::vector<uint8_t>() : scope_faces());
@@ -330,7 +630,6 @@ SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, fl
   DissolveGuard guard;
   guard.uv_safe = true;
   r.merged = dissolve_limited(m, angle_deg, whole ? nullptr : &faces, &guard);
-  /* The scope in the result's numbering. */
   /* The selection in the result's numbering: every vertex at a selected place (the welded ones included). */
   std::vector<uint8_t> out(m.vert_count(), 0);
   for (uint32_t v = 0; v < m.vert_count() && !whole; v++) out[v] = places.count(pos_hash(m.positions[v])) ? 1 : 0;
@@ -354,69 +653,130 @@ std::vector<uint8_t> vertices_not_in(const Mesh &m, const std::vector<Vec3> &old
 size_t cleanup_after_draw(Mesh &m, const Mesh &before, std::vector<uint8_t> &face_sel, float eps) {
   if (!(eps > 0.0f) || !std::isfinite(eps)) return 0;
   face_sel.resize(m.face_count(), 0);
-  /* What was there before the cleanup (the draw's result) and before the draw. */
-  std::unordered_map<uint64_t, int> drawn;
-  for (size_t f = 0; f < m.face_count(); f++) drawn[face_signature(m, f)]++;
-  std::unordered_set<uint64_t> had_places;
-  for (const Vec3 &p : before.positions) had_places.insert(pos_hash(p));
-  const std::unordered_set<uint64_t> had_edges = edge_places(before);
-  const size_t verts0 = m.vert_count();
-  /* 1. Weld the new vertices onto what was there. */
-  remap_selection(face_sel, tidy_new_geometry(m, before.positions, eps), m.face_count());
-  const size_t welded = verts0 > m.vert_count() ? verts0 - m.vert_count() : 0;
+  const size_t nb = before.vert_count(), nv = m.vert_count();
+  /* What a draw adds goes after the vertices that were there: those keep their numbers and places, so "new" is an index. When
+   * an operator renumbered them, new is a place `before` had none of. */
+  const bool stable = nv >= nb && (nb == 0 || std::memcmp(m.positions.data(), before.positions.data(), nb * sizeof(Vec3)) == 0);
+  std::vector<uint8_t> is_new(nv, 0);
+  if (stable) std::fill(is_new.begin() + (long)nb, is_new.end(), (uint8_t)1);
+  else is_new = vertices_not_in(m, before.positions);
+  /* Whether an edge between two old vertices was an edge before the draw. */
+  std::unique_ptr<EdgeFaces> ef_before;
+  if (stable) ef_before = std::make_unique<EdgeFaces>(before);
+  std::unordered_set<uint64_t> had_edges;
+  bool had_built = false;
+  auto old_edge = [&](uint32_t a, uint32_t b) {
+    if (a >= nv || b >= nv || is_new[a] || is_new[b]) return false;
+    if (stable) return ef_before->at(a, b).n > 0 || std::binary_search(before.loose_edges.begin(), before.loose_edges.end(), Mesh::edge_key(a, b));
+    if (!had_built) had_edges = edge_places(before), had_built = true;
+    return had_edges.count(edge_pair_key(m.positions[a], m.positions[b])) > 0;
+  };
+  /* 1. Weld the new vertices onto what was there; wires follow. */
+  bool any_weld = false;
+  const std::vector<uint32_t> to = weld_map_for_new(m, is_new, eps, any_weld);
+  if (any_weld) {
+    remap_selection(face_sel, weld_faces_local(m, to), m.face_count());
+    remap_edge_keys(m.loose_edges, to);
+    remap_edge_keys(m.seams, to);
+    remap_edge_keys(m.sharp_edges, to);
+  }
+  size_t welded = 0;
+  for (uint32_t v = 0; v < nv; v++) welded += to[v] != v;
   /* Faces the draw flattened onto a line (a shape's side along an edge of the face it was drawn on) go, their corners
-   * threaded into the face across: only faces with a vertex the draw made - the "old" positions handed on are the vertices
-   * that were there, and a far-away stand-in for the new ones - never a sliver that was there before. */
+   * threaded into the face across: only faces with a vertex the draw made (the "old" positions handed on are the vertices
+   * that were there, and a far-away stand-in for the new ones), never a sliver that was there before. */
   {
-    const std::vector<uint8_t> added = vertices_not_in(m, before.positions);
     std::vector<Vec3> stale = m.positions;
     for (size_t v = 0; v < stale.size(); v++)
-      if (added[v]) stale[v] += Vec3(1e30f);
+      if (is_new[v]) stale[v] += Vec3(1e30f);
     dissolve_line_faces(m, face_sel, eps, stale);
   }
-  /* 2. T-junctions: a new vertex on an old edge, or an old vertex on an edge the draw made. */
-  const JoinFilter joins = [&](uint32_t v, uint32_t a, uint32_t b) {
-    return !had_places.count(pos_hash(m.positions[v])) || !had_edges.count(edge_pair_key(m.positions[a], m.positions[b]));
-  };
-  const size_t split = fix_t_junctions_filtered(m, {}, eps, &joins);
-  /* 3. The faces the steps above changed merge where flat and unbroken - never across an edge the draw made, never the
-   * faces the draw selected (the shape itself). */
-  std::vector<uint8_t> mask(m.face_count(), 0);
-  bool any = false;
-  for (size_t f = 0; f < m.face_count(); f++) {
-    const auto it = drawn.find(face_signature(m, f));
-    if (it != drawn.end() && it->second > 0) {
-      it->second--;
-      continue;
-    }
-    mask[f] = !face_sel[f];
-    any = any || mask[f];
+  /* 2. T-junctions, among the faces around what was drawn. */
+  size_t split = 0;
+  Vec3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
+  bool any_new = false;
+  for (uint32_t v = 0; v < nv; v++) {
+    if (!is_new[v] || to[v] != v || !finite3(m.positions[v])) continue;
+    any_new = true;
+    lo = Vec3(std::min(lo.x, m.positions[v].x), std::min(lo.y, m.positions[v].y), std::min(lo.z, m.positions[v].z));
+    hi = Vec3(std::max(hi.x, m.positions[v].x), std::max(hi.y, m.positions[v].y), std::max(hi.z, m.positions[v].z));
   }
-  if (!any) return welded + split;
-  std::unordered_set<uint64_t> protect;
-  for (size_t f = 0; f < m.face_count(); f++)
-    for (uint32_t k = 0; k < m.face_size(f); k++) {
-      const uint32_t a = m.face_verts(f)[k], b = m.face_verts(f)[(k + 1) % m.face_size(f)];
-      if (!had_edges.count(edge_pair_key(m.positions[a], m.positions[b]))) protect.insert(Mesh::edge_key(a, b));
+  if (any_new) {
+    lo -= Vec3(2.0f * eps);
+    hi += Vec3(2.0f * eps);
+    std::vector<uint8_t> near_faces(m.face_count(), 0);
+    std::vector<uint32_t> cands;
+    std::vector<uint8_t> listed(nv, 0);
+    for (uint32_t f = 0; f < m.face_count(); f++) {
+      Vec3 flo(std::numeric_limits<float>::max()), fhi(-std::numeric_limits<float>::max());
+      for (uint32_t k = 0; k < m.face_size(f); k++) {
+        const Vec3 p = m.positions[m.face_verts(f)[k]];
+        flo = Vec3(std::min(flo.x, p.x), std::min(flo.y, p.y), std::min(flo.z, p.z));
+        fhi = Vec3(std::max(fhi.x, p.x), std::max(fhi.y, p.y), std::max(fhi.z, p.z));
+      }
+      if (flo.x > hi.x || fhi.x < lo.x || flo.y > hi.y || fhi.y < lo.y || flo.z > hi.z || fhi.z < lo.z) continue;
+      near_faces[f] = 1;
+      for (uint32_t k = 0; k < m.face_size(f); k++)
+        if (!listed[m.face_verts(f)[k]]) listed[m.face_verts(f)[k]] = 1, cands.push_back(m.face_verts(f)[k]);
     }
-  std::unordered_map<uint64_t, int> selected;  // the selection follows the renumbering by where its faces are
-  for (size_t f = 0; f < m.face_count(); f++)
-    if (face_sel[f]) selected[face_signature(m, f)]++;
-  DissolveGuard guard;
-  guard.uv_safe = true;
-  guard.protect = &protect;
-  const size_t merged = dissolve_limited(m, 1.0f, &mask, &guard);
-  if (merged) {
-    face_sel.assign(m.face_count(), 0);
-    for (size_t f = 0; f < m.face_count(); f++) {
-      const auto it = selected.find(face_signature(m, f));
-      if (it != selected.end() && it->second > 0) {
-        it->second--;
-        face_sel[f] = 1;
+    /* The pieces of an old edge a new vertex was put on (a cut that began at its middle) are old edges still: the walk goes
+     * from a new vertex along its face to the old vertices at both ends and, when they are an old edge in a line with it, marks
+     * the pieces. A corner of a separate shell lying on such a piece is not joined to it. */
+    std::unordered_set<uint64_t> along_old;
+    for (uint32_t f = 0; f < m.face_count(); f++) {
+      if (!near_faces[f]) continue;
+      const uint32_t n = m.face_size(f);
+      for (uint32_t k = 0; k < n; k++) {
+        if (!is_new[m.face_verts(f)[k]]) continue;
+        std::vector<uint32_t> chain = {m.face_verts(f)[k]};
+        uint32_t i = k;
+        for (uint32_t s = 0; s < n && is_new[chain.front()]; s++) {  // back to an old vertex
+          i = (i + n - 1) % n;
+          chain.insert(chain.begin(), m.face_verts(f)[i]);
+        }
+        i = k;
+        for (uint32_t s = 0; s < n && is_new[chain.back()]; s++) {  // forward to one
+          i = (i + 1) % n;
+          chain.push_back(m.face_verts(f)[i]);
+        }
+        const uint32_t p = chain.front(), q = chain.back();
+        if (is_new[p] || is_new[q] || p == q || !old_edge(p, q)) continue;
+        const Vec3 a = m.positions[p], d = m.positions[q] - a;
+        const float l2 = dot(d, d);
+        bool straight = l2 > 0.0f;
+        for (uint32_t c : chain) {
+          const float t = straight ? clampf(dot(m.positions[c] - a, d) / l2, 0.0f, 1.0f) : 0.0f;
+          straight = straight && length(a + d * t - m.positions[c]) <= eps;
+        }
+        if (!straight) continue;
+        for (size_t c = 0; c + 1 < chain.size(); c++) along_old.insert(Mesh::edge_key(chain[c], chain[c + 1]));
       }
     }
+    const JoinFilter joins = [&](uint32_t v, uint32_t a, uint32_t b) {
+      if (is_new[v]) return true;
+      if (along_old.count(Mesh::edge_key(a, b))) return false;
+      return is_new[a] || is_new[b] || !old_edge(a, b);  // an old vertex joins only an edge the draw made
+    };
+    TJOptions opts;
+    opts.accept = &joins;
+    opts.face_mask = &near_faces;
+    split = fix_t_junctions_filtered(m, cands, eps, opts);
   }
-  return welded + split + merged;
+  if (any_weld) remove_loose_verts(m);  // the welded-away vertices
+  return welded + split;
+}
+
+double draw_overlap_gain(const Mesh &before, const Mesh &after, float plane_dist) {
+  if (!(plane_dist > 0.0f)) plane_dist = relative_eps(after);
+  const std::vector<uint64_t> was = sorted_signatures(before), now = sorted_signatures(after);
+  auto focus_of = [](const Mesh &m, const std::vector<uint64_t> &other) {
+    std::vector<uint8_t> focus(m.face_count(), 0);
+    for (size_t f = 0; f < focus.size(); f++) focus[f] = std::binary_search(other.begin(), other.end(), face_signature(m, f)) ? 0 : 1;
+    return focus;
+  };
+  const double added = local_overlap_area(after, focus_of(after, was), plane_dist);
+  const double removed = local_overlap_area(before, focus_of(before, now), plane_dist);
+  return added - removed;
 }
 
 }  // namespace bl::meshops

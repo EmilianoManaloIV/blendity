@@ -572,31 +572,21 @@ static float draw_weld_eps(const Mesh &m, const std::vector<Vec3> &pts) {
   return eps;
 }
 
-/* The overlap check is a pair search over the faces: skipped on meshes this big (as Push Through's guard is). */
-static constexpr size_t kDrawGuardFaces = 20000;
-
-/* How much of the mesh lies on top of itself: the area the z-fighting pairs share. A count of pairs would rise when a
- * draw merely splits a face that already overlaps another (two pieces over it instead of one); the area doesn't. */
-static double draw_overlap_area(const Mesh &m) {
-  double a = 0;
-  for (const meshops::ZFightPair &p : meshops::zfight_pairs(m)) a += p.area;
-  return a;
-}
-
+/* Draw's overlap guard: the area lying on top of other faces after the commit against before it, counted only where the
+ * draw added, changed or removed faces (meshops::draw_overlap_gain: a grid finds the faces beside those, so the cost follows
+ * the draw, not the mesh). An area, not a count of pairs: splitting a face that already overlaps another makes more pairs and
+ * no more overlap. */
 std::string Editor::draw_tidy(Mesh &m, const Mesh &before, const std::vector<Vec3> &pts) {
-  const bool check = before.face_count() < kDrawGuardFaces;
-  const double overlaps_before = check ? draw_overlap_area(before) : 0.0;
   meshops::cleanup_after_draw(m, before, face_sel_, draw_weld_eps(m, pts));
   m.sync_attributes();
   m.touch();
   const std::vector<uint8_t> added = meshops::vertices_not_in(m, before.positions);
   vert_sel_.assign(added.begin(), added.end());
   face_sel_.resize(m.face_count(), 0);
-  if (!check) return "";
-  const double overlaps_after = draw_overlap_area(m);
   const float size = std::max(1e-6f, length(m.bounds().extent()));
-  if (overlaps_after <= overlaps_before + 1e-6 * (double)size * (double)size) return "";
-  return strprintf("it would leave faces on top of each other (%.3g more area lying on another face)", overlaps_after - overlaps_before);
+  const double gain = meshops::draw_overlap_gain(before, m, meshops::relative_eps(m));
+  if (gain <= 1e-6 * (double)size * (double)size) return "";
+  return strprintf("it would leave faces on top of each other (%.3g more area lying on another face)", gain);
 }
 
 void Editor::draw_roll_back(MeshPtr &mp, const MeshPtr &before, const std::vector<uint8_t> &vsel, const std::vector<uint8_t> &fsel, const std::string &why) {

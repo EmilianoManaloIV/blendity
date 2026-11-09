@@ -1,6 +1,6 @@
 # 0438: Cleanup after drawing, and Solve Mesh (round 462)
 
-- **Status:** in review (round 462; the stress runs and the Linux build are pending, see As built)
+- **Status:** in review (round 462, after its code review; the stress runs and the Linux build are pending, see As built)
 - **Requirements:** R-02 (modeling), R-04 (UVs)
 - **Decisions:** ADR 0120 (the drawing solver), decisions 5-6
 - **Model:** implementer (Sonnet)
@@ -110,20 +110,25 @@ already exists.
   `mesh_internal.h`).
 - **A joined T-junction inserts the existing vertex** into the edge's faces (one batched `apply_edge_splits`) instead of
   `split_edge` + weld: same result, one rebuild, no extra vertex.
-- **The after-draw dissolve is narrow by design.** Merging every coplanar pair of touched faces would undo the drawing
-  itself (the shape's inner face and its ring are coplanar, same UVs). `cleanup_after_draw` therefore also runs
-  `dissolve_line_faces` (faces the shape flattened onto an old edge, needed for criterion 1), and the UV-safe
-  `dissolve_limited` (`DissolveGuard`: `uv_safe`, `protect`) only on faces the weld / T-junction steps changed, never across
-  an edge the draw made and never on the selected (drawn) faces. Most draws therefore change nothing there.
+- **Draw's cleanup merges nothing** (review of round 462). The first version ran a UV-safe `dissolve_limited` on the faces
+  the weld and the T-junction fix changed; it erased the user's earlier lines (two touching rectangles with continuous UVs
+  became one face when a third was drawn along them). `cleanup_after_draw` is now: a local weld (a grid of the new vertices and
+  one pass over the old, not `tidy_new_geometry`, so the cost follows the draw), `dissolve_line_faces` on faces with a new
+  vertex (criterion 1), and T-junctions among the faces around the new vertices (a new vertex joins any edge it lies on; an
+  old vertex only an edge the draw made, never a piece of an old edge the draw split; Solve Mesh with a selection skips an
+  edge whose faces are all outside it). Wires, seams and sharp marks follow a welded vertex. Solve Mesh keeps the merge.
+- **The guard is local and by area** (`meshops::draw_overlap_gain`): the area lying on another face after the commit minus
+  before it, counted only for faces the draw added or changed (after) and removed or changed (before), the faces beside
+  them found on a cell grid; no face cap. Measured on a 19,600-face YZ wall and in the `curved` stress rows (cut, cleanup and
+  guard in their own columns).
 - **Draw's weld tolerance** is Push/Pull's (5e-4 of the mesh size) but at most a tenth of the shape's shortest side.
 - **Snapping before adding** (spec 1) is done by the weld and T-junction passes after the commit, not before.
 - **`relative_eps`** measures the half bounding diagonal (what `mesh_scale` and `bounds().extent()` are), so meshes of
   size >= 1 get exactly the old tolerances. Also changed: `mesh_project.cpp`, `mesh_tools5.cpp`, Push Through's flat exit.
 - **`imprint_loop` hung on a NaN point** (the inside test is true for NaN); it and `imprint_loop_across` now refuse a
   non-finite outline.
-- **The guard** counts `overlapping_faces` before / after (meshes under 20,000 faces, so the 51k teapot pays nothing) and
-  rolls back in place (the mesh object stays; the commit keeps one bare copy of the mesh, as `imprint_projected` already did).
+- **The guard** rolls back in place (the mesh object stays; the commit keeps one bare copy of the mesh, as `imprint_projected` already did).
   Solve Mesh has F9 fields only, no drag helper. `redo amount2` sets the merge angle from the console.
 - **Stress:** `curved`'s projected-draw rows now run Draw's cleanup on each cut and print "doubles after drawing"
   (with the raw count). Not yet run (a hold on builds); the cause of the one overlapping cut is not yet found.
-- **Not run:** Linux build, the Boolean fallback's UVs (no Manifold here), the stress sections.
+- **Not run:** Linux build, the stress sections, the Boolean fallback's UV code (it runs in no build here).

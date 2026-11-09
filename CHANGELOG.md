@@ -9,13 +9,14 @@ T-junctions, no faces on top of each other, flat regions merged only where the t
 command does the same to a mesh that exists.
 
 **Changed (task 0438, ADR 0120 decisions 5-6)**
-- **After every Draw commit** (flat and projected path, `Editor::draw_tidy`): new vertices weld onto existing ones at
-  Push/Pull's tolerance (`meshops::tidy_new_geometry`, now public; never more than a tenth of the shape's shortest
-  side), faces the shape flattened onto an old edge go (`dissolve_line_faces`, their corners threaded into the face across),
-  a corner on another face's edge joins it (`meshops::fix_t_junctions`), and the faces those steps changed merge where
-  flat and unbroken (`dissolve_limited` with the new `DissolveGuard`: same UVs at both ends, no seam or sharp mark, same
-  material, never across an edge the draw made). A draw that would leave more faces on top of each other (meshes under
-  20,000 faces) is rolled back - the mesh in place and the selection as before - with a warning (a toast) saying why.
+- **After every Draw commit** (flat and projected path, `Editor::draw_tidy`): the new vertices weld onto existing ones at
+  Push/Pull's tolerance (never more than a tenth of the shape's shortest side; a local weld whose cost follows the draw, wires
+  and marks following), faces the shape flattened onto an old edge go (`dissolve_line_faces`, their corners threaded into the
+  face across) and a corner on another face's edge joins it (`meshops::fix_t_junctions`, among the faces around the new
+  vertices; an old vertex never joins a piece of an old edge, so a separate shell stays apart). Nothing is merged: the
+  lines you drew before stay. A draw that would leave more area lying on top of other faces is rolled back - the mesh in
+  place and the selection as before - with a warning (a toast) saying why; the guard measures only beside what the draw
+  changed (`meshops::draw_overlap_gain`), so it costs the same on a 19,600-face wall as on a quad.
 - **`meshops::fix_t_junctions(m, verts, eps)`** (`mesh_cleanup.cpp`): a vertex strictly inside an edge of faces it isn't
   in, within eps, is inserted into every face on that edge (one batched rebuild, UVs interpolated per face, seams and
   marks following); candidates from a cell grid, not all pairs; NaN positions skipped.
@@ -30,7 +31,7 @@ command does the same to a mesh that exists.
   its walls UVs read off the faces they cut (Manifold builds only).
 - **Learn:** a "Solve Mesh" section (Try-it, two questions) and a line and a question in "Drawing onto faces".
 
-**Not done:** the stress runs and the cause of the one projected cut that leaves faces on top of each other were held back (a bake was being timed); the Boolean fallback's UVs could not run here (no Manifold in the dependency-free build): the test skips
+**Not done:** the stress runs and the cause of the one projected cut that leaves faces on top of each other were held back (a bake was being timed); the Boolean fallback's UV code runs in no build here (no Manifold in the dependency-free build): the test skips
 there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interface).
 
 **Also (testing):** the after-draw overlap guard compares the area lying on another face, not the number of such pairs (a draw that only split a face already in a pair was refused); Solve Mesh on a selection no longer welds an unselected shell touching it (its scope is the selection's faces, not their places).
