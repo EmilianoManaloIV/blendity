@@ -2,6 +2,38 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-09 (round 466): a denoiser driven by measured noise
+
+**Asked (Pass 21, task 0442, ADR 0122):** the bake's filter assumed how noisy each texel was (a formula of the sample
+count) - blotches larger than that survived as "edges", quiet areas were blurred for nothing, the lights kept by chance
+skipped the clamp, and the direct light got a radius-1 blur that smeared sharp shadows. Filter each texel by its own
+measured noise, at the same bake time.
+
+**Added**
+- **Each texel's variance, measured while baking** (`bake_texel`'s `var_out`): the gather's, the emitters' and the sky's
+  from their own samples (running sums, nothing stored); a light kept by chance from its estimate, est^2 (1/p - 1), for
+  every candidate; the direct lights' shadow-ray visibility, v (1 - v) / k; on the card, the gather's samples' mean
+  square (`gpu_gather`'s `sq`, the accumulator's spare channel - the PTX regenerated). With Sobol the gather's measured
+  variance is scaled down (its stratified mean beats its spread); under 16 samples the gather's is floored.
+- **The variance-guided A-Trous** (`svgf_atrous`, after SVGF): five passes at steps 1-16, a tap's weight by the facing, the
+  world distance and the luminance difference over 4 of the texel's own standard deviations (its variance blurred 3 x 3),
+  the variance filtered along; a page stops when its mean relative noise is under 0.5 %. The indirect light (gather, sky,
+  emitters, lights kept by chance) and the direct light are filtered apart, each by its own noise: a texel with none - a
+  sun shadow decided by one ray - passes unchanged.
+- **The firefly clamp gated by the noise, on the gather:** a texel past 8 times its neighbours' mean is brought down only
+  when the excess is within 4 of its own deviations (a lucky ray; a steady glow stays). The emitters and the lights kept
+  by chance are not clamped - cutting their rare large values biased the mean - the filter spreads them instead.
+- OIDN's lightmap filter stays first where linked; `lighting denoiser variance|atrous` (a measurement setting) bakes with
+  round 423's filter for comparison. Learn: the filter's paragraph, two questions, Try-its 10-11.
+
+**Results**
+- `lightmap_quality` (full run, round 465 -> 466, same samples): relative RMSE room 0.016 -> 0.013, corridor 0.006 ->
+  0.004, tunnel 0.127 -> 0.103, courtyard 0.059 -> 0.007 (its sun shadows no longer blurred); grain room 0.0139 -> 0.0084,
+  tunnel 0.101 -> 0.062; bias corridor 0.0022 -> -0.0003.
+- **SideRail on the card (chain 466, nothing else running): grain 0.513 -> 0.382 (-26 %), blotch 0.273 -> 0.251 (-8 %)** - task 0442's further -50 % is **not met**; over Pass 21 (round 463's baseline -> 466) grain 5.455 -> 0.382 (-93 %), blotch 1.242 -> 0.251 (-80 %), at the same 39 s. The filter and dilation take 2,255 ms (round 423's 2,070 ms; the spec's 2 s budget is missed by 0.26 s - five indirect passes took 3.4 s, so four, and a square root a tap went). The stations improve: floor MAE / SSIM 3.35 / 0.817 -> 3.04 / 0.844, ahead 2.29 / 0.934 -> 2.25 / 0.936 (passes), side_bar_high 6.75 / 0.853 -> 6.64 / 0.863, side_tunnel_eye 6.10 / 0.876 -> 5.97 / 0.885; the owner's two views lose most of their floor speckle and sofa spots, a few remain.
+
+**Checked:** the suites - Windows dependency-free 20,128 checks, 0 failed; with Blender's libraries 21,041 (the four worktree `gpu` picture comparisons, as before; the card's mean-square variance test passes there - 2.672e-4 against 2.637e-4 across points); Linux 20,134, 0 failed. `tests_round466` (15 tests: grain falls 5.7-41x through the filter, a noiseless page unchanged, a contact shadow's edge, a colour bleed and a lamp's glow kept, fireflies, the measured variance against 24 seeds' spread 0.93-0.98x and the 40 chance-kept lamps' 0.96x, the Sobol scale, robustness, `lighting denoiser`). Stress `lightmap_quality` (full run): relative RMSE room 0.013, corridor 0.004, tunnel 0.103, courtyard 0.007; bias at most 0.0007. Review: changes needed (the Sobol scale on random parts, a page-wide stop, the time, AC1 untested, an asymmetric edge-stop that darkened gradients) then approved.
+
 ## 2026-11-09 (round 465): samples spread evenly - Owen-scrambled Sobol
 
 **Asked (Pass 21, task 0441):** the bake's random numbers were plain xorshift: a texel's 512 gather directions clump in

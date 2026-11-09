@@ -1133,7 +1133,7 @@ void main() {
    * once, not twice (task 0157: the software-BVH variant had reached SPIR-V's id bound, 4,194,303, and a second copy
    * no longer fit; one copy leaves room). Baking (task 0018): one point per invocation, its origin in Aux [0, n) and
    * its normal (mode 1: cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
-   * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
+   * arriving there adds up in Accum; w counts the paths whose first ray hit something (mode 2; mode 1 sums the squared luminance - round 466). */
   const bool bake = P.env_i.z != 0;
   int i = px.y * W + px.x;
   if (bake && i >= P.env_i.w) return;
@@ -1193,7 +1193,7 @@ void main() {
     vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, !bake);
     if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
     if (bake) {
-      sum += vec4(c, dot(nrm, nrm) > 0.25 ? 1.0 : 0.0);
+      sum += vec4(c, P.env_i.z == 1 ? luminance(c) * luminance(c) : (dot(nrm, nrm) > 0.25 ? 1.0 : 0.0));  // (w: mode 1 the squared luminance - round 466's variance; mode 2 a hit)
       continue;
     }
     csum += c;

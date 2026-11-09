@@ -2160,6 +2160,11 @@ Spreading the samples (round 465): plain random numbers clump. A texel's 512 dir
 ? Why does each texel scramble the sequence with its own seed instead of every texel using the same points? | Identical points in neighbouring texels would repeat one pattern of error across the wall - a fixed structure the filter cannot tell from detail. A different scramble per texel turns it into unstructured noise the filter removes.
 ! cmd:lighting sampler random; bake | 8. Bake with plain random numbers, wait for it, then save and measure as in steps 2-5 and compare with the sobol bake's grain
 ! cmd:lighting sampler sobol | 9. Back to Sobol (the default)
+The filter (round 466) is told how noisy each texel is. While baking, every texel keeps the spread of its own samples - the gather's rays, the emitter and sky samples, the lights it kept by chance - and the filter averages a texel with its chart neighbours only as far as their difference could be that noise: a noisy dark corner is smoothed, a contact shadow or a sharp sun shadow (no noise at all: one ray decided it) stays as it is. A firefly - a texel far brighter than its neighbours, by about as much as its own noise allows - is brought down; a lamp's steady glow is bright too, but far above its noise, and stays. `lighting denoiser atrous` bakes with the old filter for comparison.
+? A sun shadow's edge on a courtyard floor: why does the new filter keep it sharp where the old one blurred it? | The shadow ray decided each texel's sun light exactly (fully lit or not), so its measured noise is zero; the filter only mixes texels whose difference could be noise, and here none could. The old filter blurred all the direct light by one texel whatever its noise.
+? A texel is ten times brighter than its neighbours. When is it brought down, and when does it stay? | It is brought down when that excess is within a few of its own measured deviations - a lucky ray that found a bright lamp. It stays when the excess is far above its noise - a steady glow that every sample saw.
+! cmd:lighting denoiser atrous; bake | 10. Bake with the old A-Trous filter, wait for it, then save and measure as in steps 2-5
+! cmd:lighting denoiser variance | 11. Back to the filter guided by measured noise (the default)
 )"},
 };
 

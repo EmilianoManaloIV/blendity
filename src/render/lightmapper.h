@@ -63,6 +63,9 @@ struct BakeSettings {
   /* Round 464 (ADR 0121): emissive triangles picked by a light tree - by what each can give the texel - rather than by
    * their share of the scene's power (off only for comparisons: `lighting tree off`). */
   bool light_tree = true;
+  /* Round 466 (ADR 0122): 1 the filter guided by each texel's measured noise; 0 the round 423 A-Trous (for comparison:
+   * `lighting denoiser atrous`). */
+  int denoiser = 1;
   /* Round 465 (task 0441): a texel's samples from an Owen-scrambled Sobol sequence (sampler.h), which fills the hemisphere
    * evenly whatever the count, rather than plain random numbers (`lighting sampler random`: for comparisons; both are unbiased). */
   bool sobol = true;
@@ -284,8 +287,11 @@ class Lightmapper {
   static constexpr float kDirectionPower = 7.25f;
   static Vec3 saved_direction(Vec3 mean_direction);
  private:
+  /* var_out (round 466, ADR 0122): the variance of this texel's estimate in luminance - x the indirect part (gather, sky,
+   * emitters, lights kept by chance), y the direct part, z the gather's own (the firefly clamp's gate) - measured from its
+   * own samples, for the filter. */
   Vec3 bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect = true, Vec3 *gather_out = nullptr, Vec3 *emitted_out = nullptr,
-                  DirSum *dir_out = nullptr, Vec4 *mask_out = nullptr);
+                  DirSum *dir_out = nullptr, Vec4 *mask_out = nullptr, Vec3 *var_out = nullptr);
   void assign_mask_channels();  // (round 444)
   std::vector<DirSum> dirs_;  // (round 426: per texel, when the bake is directional)
   std::vector<uint8_t> invalid_;  // (round 430: per texel, inside geometry - its rays mostly met back faces)
@@ -318,13 +324,23 @@ class Lightmapper {
                     const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own);
   static void dilate_once(std::vector<Vec3> &px, std::vector<uint8_t> &have, int W, int H);
   bool denoise_oidn(std::vector<Vec3> &ind, const std::vector<uint8_t> &cov, int W, int H) const;
+  /* Round 466 (ADR 0122): the denoiser guided by each texel's measured noise, and its parts. */
+  void denoise_page_variance(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
+                             const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &var);
+  void svgf_atrous(std::vector<Vec3> &img, std::vector<float> &var, const std::vector<Vec3> &normals, const std::vector<Vec3> &positions,
+                   const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<float> &size, int W, int H, int passes) const;
+  void svgf_pass(std::vector<Vec3> &img, std::vector<float> &var, std::vector<float> &pre, std::vector<Vec3> &next, std::vector<float> &nvar,
+                 const std::vector<Vec3> &normals, const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own,
+                 const std::vector<float> &size, int W, int H, int step, size_t &noisy) const;
+  void clamp_fireflies_var(std::vector<Vec3> &src, const std::vector<float> &var, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own,
+                           const std::vector<Vec3> &normals, int W, int H) const;
   void atrous(std::vector<Vec3> &ind, const std::vector<Vec3> &normals, const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov,
               const std::vector<int32_t> &own, int W, int H) const;
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   /* gather_ratio: the gather's rays for each of these samples (round 464: MIS with the counts; 0 when the gather can't
    * meet what these sample). */
-  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const;  // task 0157 (round 465: smp the texel's Sobol streams, null: random)
-  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const;  // round 441
+  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp, float *var_out = nullptr) const;  // task 0157 (round 465: smp the texel's Sobol streams, null: random)
+  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp, float *var_out = nullptr) const;  // round 441 (var_out: round 466, the mean's variance)
   /* Round 464: on the GPU path, the card's gather rays for each of the texel's own emitter samples (bake_texel's 64 on
    * the CPU) - the card weighs its first emissive hits with it, as emissive_at does; 0 when no emitters are sampled. */
   float gpu_first_hit_ratio() const;
@@ -336,6 +352,10 @@ class Lightmapper {
    * kept beside `values_` for the firefly clamp (task 0157); the emitters sampled at each texel apart (round 423: they
    * are denoised with the gather but not clamped - a lamp's contact glow is a real highlight). */
   std::vector<Vec3> gather_, emitted_;
+  std::vector<Vec3> var_;  // round 466 (ADR 0122): each texel's measured variance - x indirect, y direct, z the gather's (bake_texel's var_out)
+ public:
+  const std::vector<Vec3> &variance_for_test() const { return var_; }  // (round 466: the measured variance until take_result)
+ private:
   void clamp_fireflies(std::vector<Vec3> &src, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W,
                        int H) const;
   size_t gpu_texels_ = 0;

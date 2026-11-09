@@ -3026,7 +3026,8 @@ bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &no
 }
 
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol) const {
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol,
+                            std::vector<float> *sq) const {
   std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
   out.clear();
   if (hit) hit->clear();
@@ -3067,6 +3068,7 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
   }
   out.resize(origins.size());
   if (hit) hit->resize(origins.size());
+  if (sq) sq->assign(origins.size(), 0.0f);
   /* In chunks of points (the buffers), and of samples (no single submission long enough for the driver
    * to give up on it). */
   const size_t chunk = (size_t)1 << 20;
@@ -3107,7 +3109,8 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
     const float inv = 1.0f / (float)samples;
     for (size_t i = 0; i < n; i++) {
       out[first + i] = Vec3(acc[i * 4], acc[i * 4 + 1], acc[i * 4 + 2]) * inv;
-      if (hit) (*hit)[first + i] = acc[i * 4 + 3] * inv;
+      if (hit && mode == 2) (*hit)[first + i] = acc[i * 4 + 3] * inv;  // (mode 2: the share of samples that hit; mode 1's w is review 466's squares)
+      if (sq && mode == 1) (*sq)[first + i] = acc[i * 4 + 3] * inv;  // (mode 1, round 466: the mean squared luminance)
     }
   }
   return true;

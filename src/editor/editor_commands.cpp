@@ -2079,6 +2079,16 @@ void Editor::run_console_command(const std::string &line) {
         Log::info("lighting seed: %u%s", bake_seed_, bake_seed_ ? " (the next bake draws other samples; `lighting seed 0` restores the normal bake)" : "");
       }
     }
+    else if (sub == "denoiser") {
+      /* lighting denoiser variance|atrous (round 466, ADR 0122): the next bake's filter - guided by each texel's measured
+       * noise (the default) or round 423's A-Trous, for comparing the two; not saved, not in the scene's key. */
+      const std::string w = to_lower(arg(2, "variance"));
+      if (w != "variance" && w != "atrous") Log::warn("lighting denoiser: say variance or atrous - it stays %s", bake_variance_denoiser_ ? "variance" : "atrous");
+      else {
+        bake_variance_denoiser_ = w == "variance";
+        Log::info("lighting denoiser: %s (the next bake's filter)", w.c_str());
+      }
+    }
     else if (sub == "tree") {
       /* lighting tree on|off (round 464, ADR 0121): the next bake picks emissive triangles by a light tree (on, the default)
        * or by their share of the scene's power - for comparing the two; not saved, not in the scene's key. */

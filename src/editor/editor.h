@@ -5683,6 +5683,7 @@ class Editor {
   bool gi_gpu_failed_ = false;
   int gi_gpu_device_seen_ = 0;
   bool bake_sobol_ = true;       // round 465 (`lighting sampler sobol|random`): a texel's samples from Owen-scrambled Sobol - a comparison switch, not saved
+  bool bake_variance_denoiser_ = true;  // round 466 (`lighting denoiser variance|atrous`): the filter guided by measured noise - a comparison switch, not saved
   bool bake_light_tree_ = true;  // round 464 (`lighting tree on|off`): emitters picked by a light tree - a comparison switch, not saved
   uint32_t bake_seed_ = 0;  // round 463 (`lighting seed <n>`): a measurement setting - not saved, not in the scene key; 0 the normal bake
   int bake_gpu_ = -1;  // task 0018: the GPU Generate Lighting gathers on (Render > Device: GPU Compute), -1 the CPU

@@ -81,6 +81,32 @@ inline void basis(Vec3 n, Vec3 &t, Vec3 &b) {
   b = cross(n, t);
 }
 inline bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
+/* Round 466 (ADR 0122): the variance of a mean of n samples from their running sums (no samples kept). Samples that
+ * gave nothing still count in n. */
+struct MeanVar {
+  double s1 = 0.0, s2 = 0.0;
+  void add(float y) {
+    if (!finite_bits(y)) return;
+    s1 += y, s2 += (double)y * y;
+  }
+  float of_mean(int n) const {
+    if (n <= 1) return 0.0f;
+    /* (the samples' variance with n - 1: n alone read (n-1)/n of it - 0.75 at 4 samples; test-engineer, round 466) */
+    const double m = s1 / n, v = std::max(0.0, (s2 - n * m * m) / (n - 1));
+    return (float)(v / n);
+  }
+};
+inline float lum3(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+/* Owen-scrambled Sobol samples are stratified: their mean beats what their spread says (round 465 measured 0.62 of
+ * random's error at 16 samples, 0.35 at 512), so a Sobol-sampled part's measured variance is scaled by (2 n^-0.25)^2,
+ * at most 1 - n its own sample count. Random parts (the lights kept by chance) keep theirs. */
+inline float qmc_scale(bool sobol, int n) { return sobol ? std::min(1.0f, 4.0f / std::sqrt((float)std::max(1, n))) : 1.0f; }
+/* A light's share v seen by k stratified shadow rays: (full light)^2 v (1 - v) / k - an upper bound (stratification only
+ * lowers it); 0 for one ray or a light wholly seen or hidden. */
+inline float visibility_var(float full, float v, int k) {
+  if (k <= 1 || !(v > 0.0f && v < 1.0f) || !finite_bits(full)) return 0.0f;
+  return full * full * v * (1.0f - v) / (float)k;
+}
 }  // namespace
 
 namespace {
@@ -549,6 +575,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   values_.assign(texels_.size(), Vec3(0.0f));
   gather_.assign(texels_.size(), Vec3(0.0f));
   emitted_.assign(texels_.size(), Vec3(0.0f));
+  var_.assign(texels_.size(), Vec3(0.0f));
   dirs_.assign(s_.directional ? texels_.size() : 0, DirSum{});
   total_ = texels_.size();
   for (size_t i = 0; i < lights_.size(); i++) {
@@ -626,8 +653,10 @@ bool Lightmapper::texel_inside(const LightmapTexel &t, uint32_t k, float limit) 
 /* Emissive meshes sampled at the texel (task 0157): one emitter point a sample, weighted against the hemisphere
  * gather that may hit the same emitter (the power heuristic, both ways), so a small bright object lights its
  * surroundings smoothly instead of where a hemisphere ray chanced on it. The mean is irradiance / pi, as the gather's. */
-Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const {
+Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp,
+                              float *var_out) const {
   Vec3 esum(0.0f);
+  MeanVar mv;  // (round 466: each sample's luminance, for the mean's variance)
   const float shift = smp ? 0.0f : rnd01(rng);  // (the emitter choice stratified over the samples: a lamp's triangles taken in turn, shifted at random per texel)
   /* Round 464: every sample here is from (o, n): the light tree works out each node's split once for the texel. */
   thread_local LightTree::Cache tree_cache;  // (8 bytes x 2 a node a worker thread, kept for the next bake: at most ~16 MB at the 2^20-emitter cap)
@@ -649,15 +678,20 @@ Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float 
      * these samples (0: it doesn't see emitters), so its pdf counts that many times (Veach 1997, 9.13). */
     const float cosn = dot(n, dir), pb = gather_ratio * cosn / kPi;
     const float w = pl * pl / (pl * pl + pb * pb);
-    esum += Le * Tr * (cosn * w / pl);
+    const Vec3 term = Le * Tr * (cosn * w / pl);
+    esum += term;
+    mv.add(lum3(term) / kPi);
   }
+  if (var_out) *var_out = mv.of_mean(std::max(1, samples));
   return esum * (1.0f / (kPi * (float)std::max(1, samples)));
 }
 
 /* Round 441: the world sampled at the texel by its light (PathTracer::sample_env), weighted against the cosine gather
  * that may escape to the same sky (the power heuristic, both ways). The mean is irradiance / pi, as the gather's. */
-Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const {
+Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp,
+                         float *var_out) const {
   Vec3 esum(0.0f);
+  MeanVar mv;
   for (int k = 0; k < samples; k++) {
     Vec3 dir;
     float pe = 0.0f;
@@ -673,8 +707,11 @@ Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gathe
     const float vis = baked_shadow_ray(*pt_, {o, dir}, 1e30f);
     if (!(vis > 0.0f)) continue;
     const float pb = gather_ratio * cosn / kPi;  // (round 464: with the sample counts, as emissive_at)
-    esum += env_.radiance(dir) * (vis * cosn * pe / (pe * pe + pb * pb));
+    const Vec3 term = env_.radiance(dir) * (vis * cosn * pe / (pe * pe + pb * pb));
+    esum += term;
+    mv.add(lum3(term) / kPi);
   }
+  if (var_out) *var_out = mv.of_mean(std::max(1, samples));
   return esum * (1.0f / (kPi * (float)std::max(1, samples)));
 }
 
@@ -820,8 +857,11 @@ Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, u
   return m;
 }
 
-Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec4 *mask_out) {
+Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec4 *mask_out,
+                              Vec3 *var_out) {
   DirSum dirs;  // (round 426: where this texel's light comes from)
+  MeanVar gather_mv;           // (round 466: the gather's samples, for its mean's variance)
+  float var_ind = 0.0f, var_dir = 0.0f, var_gather = 0.0f;
   uint32_t rng = hash32(seed);
   TexelSampler texel_smp;  // (round 465: this texel's Sobol streams, scrambled by its own seed - and so by `lighting seed`; null: random, as before)
   texel_smp.seed = sampler::hash(seed ^ 0x5bd1e995u);
@@ -873,11 +913,16 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     }
     if (!finite3(L)) continue;
     sum += L;
+    gather_mv.add(lum3(L));
     dirs.add(L * gather_scale, Vec3(0.0f));  // (round 427: the bounced light weighs but points nowhere - Unity's directionality, measured on SideRail's own direction maps)
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
+  var_gather = gather_mv.of_mean(N) * s_.indirect_intensity * s_.indirect_intensity * qmc_scale(s_.sobol, N);
+  var_ind += var_gather;
   if (env_mis) {
-    const Vec3 e = env_at(o, n, rng, n_env, first.env_ratio, rays, smp) * s_.indirect_intensity;
+    float ve = 0.0f;
+    const Vec3 e = env_at(o, n, rng, n_env, first.env_ratio, rays, smp, &ve) * s_.indirect_intensity;
+    var_ind += ve * s_.indirect_intensity * s_.indirect_intensity * qmc_scale(s_.sobol, n_env);
     value += e;
     dirs.add(e, Vec3(0.0f));  // (the sky's light: as the gather's, weighed but pointing nowhere - round 427)
   }
@@ -886,7 +931,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   /* The noisy parts the filter denoises (round 423): the gather, and the emitters sampled at the texel (task 0157). */
   if (gather_out) *gather_out = finite3(value) ? value : Vec3(0.0f);
   if (emissive) {
-    const Vec3 e = emissive_at(o, n, rng, n_emit, gather_sees_emitters ? first.emit_ratio : 0.0f, rays, smp) * s_.indirect_intensity;
+    float vm = 0.0f;
+    const Vec3 e = emissive_at(o, n, rng, n_emit, gather_sees_emitters ? first.emit_ratio : 0.0f, rays, smp, &vm) * s_.indirect_intensity;
+    var_ind += vm * s_.indirect_intensity * s_.indirect_intensity * qmc_scale(s_.sobol, n_emit);
     value += e;
     if (emitted_out) *emitted_out = finite3(e) ? e : Vec3(0.0f);
     dirs.add(e, Vec3(0.0f));  // (the emitters' light: as the bounced light, weighed but pointing nowhere - round 427)
@@ -909,7 +956,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       const Vec3 L = normalize(-l.direction);
       const float ndl = dot(n, L);
       if (!(ndl > 0.0f)) continue;
-      const Vec3 c = col * (ndl * baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays, smp));
+      const float vis = baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays, smp);
+      const Vec3 c = col * (ndl * vis);
+      var_dir += visibility_var(lum3(col) * ndl, vis, s_.direct_samples);
       value += c;
       dirs.add(c, L);
       continue;
@@ -952,6 +1001,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       }
       if (wsum > 0.0f) {
         value += col * (unshadowed * (vsum / wsum));
+        var_dir += visibility_var(lum3(col) * unshadowed, vsum / wsum, ns);
         dirs.add(col * (unshadowed * (vsum / wsum)), toward);
       }
       else {
@@ -979,10 +1029,17 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (fall <= 0.0f) continue;
     float keep = 1.0f;
     if (pick) {
-      keep = light_pick_keep(pk, (size_t)(&bl - &lights_[0]));
+      const size_t li = (size_t)(&bl - &lights_[0]);
+      keep = light_pick_keep(pk, li);
+      /* (round 466: kept by chance with probability p, its light divided by p: the variance est^2 (1/p - 1) from its
+       * unshadowed estimate - counted whether or not this texel kept it, so a texel that kept none still reports the noise
+       * it carries) */
+      if (keep > 0.0f && keep < 1.0f) var_ind += pk.est[li] * pk.est[li] * (1.0f / keep - 1.0f);
       if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
     }
-    const Vec3 c = col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays, smp) / keep);
+    const float vis = baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays, smp);
+    const Vec3 c = col * (ndl * fall * vis / keep);
+    if (keep >= 1.0f) var_dir += visibility_var(lum3(col) * ndl * fall, vis, s_.direct_samples);
     value += c;
     dirs.add(c, L);
     if (keep < 1.0f) picked += c;  // (review 441: a light kept by chance is noise - it goes with the emitters' part, denoised, never clamped)
@@ -990,6 +1047,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   if (emitted_out && finite3(picked)) *emitted_out += picked;
   if (dir_out) *dir_out = dirs;
   rays_ += rays;
+  if (var_out) *var_out = Vec3(finite_bits(var_ind) ? var_ind : 0.0f, finite_bits(var_dir) ? var_dir : 0.0f, finite_bits(var_gather) ? var_gather : 0.0f);
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);
 }
 
@@ -1008,6 +1066,7 @@ bool Lightmapper::step(double budget_ms) {
   if (s_.gpu_device >= 0 && gpu_error_.empty() && s_.bounces > 0) {
     const size_t per = (size_t)std::max<int64_t>(1024, std::min<int64_t>(1 << 20, ((int64_t)1 << 23) / std::max(1, s_.indirect_samples)));
     std::vector<Vec3> origins, normals, ind;
+    std::vector<float> ind_sq;  // (round 466: each point's samples' mean squared luminance)
     do {
       const size_t batch = std::min<size_t>(total_ - done_.load(), per);
       if (batch == 0) break;
@@ -1020,7 +1079,7 @@ bool Lightmapper::step(double budget_ms) {
         normals[i] = tx.normal;
       }
       std::string err;
-      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed, s_.sobol) ||
+      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed, s_.sobol, &ind_sq) ||
           ind.size() != batch) {
         if (pt_->gpu_gather_waiting()) {
           gpu_waiting = true;
@@ -1038,8 +1097,15 @@ bool Lightmapper::step(double budget_ms) {
           if (!finite3(v)) v = Vec3(0.0f);
           /* (the texel's emitters: denoised with the card's gather, not clamped - round 423) */
           DirSum *dk = dirs_.empty() ? nullptr : &dirs_[k];
-          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k], dk, masks_.empty() ? nullptr : &masks_[k]);
+          v += bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, false, nullptr, &emitted_[k], dk, masks_.empty() ? nullptr : &masks_[k],
+                          &var_[k]);
           gather_[k] = finite3(ind[(size_t)i]) ? ind[(size_t)i] * s_.indirect_intensity : Vec3(0.0f);
+          /* (round 466: the card's gather - its samples' mean square less the squared mean, over the samples) */
+          const float l = lum3(ind[(size_t)i]), msq = (size_t)i < ind_sq.size() ? ind_sq[(size_t)i] : l * l;
+          const int ns = std::max(2, s_.indirect_samples);  // (n - 1, as MeanVar: the samples' variance unbiased)
+          const float vg = std::max(0.0f, msq - l * l) * ((float)ns / (float)(ns - 1)) / (float)ns * s_.indirect_intensity * s_.indirect_intensity *
+                           qmc_scale(s_.sobol, s_.indirect_samples);
+          if (finite_bits(vg)) var_[k].x += vg, var_[k].z += vg;
           if (dk) dk->add(gather_[k], Vec3(0.0f));  // (the card's gather: weighed, pointing nowhere, as the CPU's - round 427)
           values_[k] = Vec3(std::max(0.0f, v.x), std::max(0.0f, v.y), std::max(0.0f, v.z));
         }
@@ -1067,7 +1133,7 @@ bool Lightmapper::step(double budget_ms) {
         const size_t k = base + (size_t)i;
         if (k < invalid_.size() && invalid_[k]) continue;  // (round 430: inside geometry - filled from its chart, not gathered)
         values_[k] = bake_texel(texels_[k], (uint32_t)k * 2654435761u + 12345u + s_.seed * 0x85EBCA6Bu, true, &gather_[k], &emitted_[k], dirs_.empty() ? nullptr : &dirs_[k],
-                                masks_.empty() ? nullptr : &masks_[k]);
+                                masks_.empty() ? nullptr : &masks_[k], &var_[k]);
       }
     });
     done_ += batch;
@@ -1088,6 +1154,7 @@ void Lightmapper::cancel() {
   values_.shrink_to_fit();
   gather_.clear(), gather_.shrink_to_fit();  // (review 426: the per-texel parts too)
   emitted_.clear(), emitted_.shrink_to_fit();
+  var_.clear(), var_.shrink_to_fit();
   dirs_.clear(), dirs_.shrink_to_fit();
   masks_.clear(), masks_.shrink_to_fit(), mask_channel_.clear();  // (review 444)
   invalid_.clear(), invalid_.shrink_to_fit();
@@ -1142,8 +1209,10 @@ void Lightmapper::finish() {
    * facing, then dilation into the padding so bilinear reads at chart edges find light, not black. */
   const size_t np = out_.pages.size();
   std::vector<std::vector<Vec3>> normals(np), gathered(np), emitted(np), positions(np);
+  std::vector<std::vector<Vec3>> var_pages(np);  // (round 466: each texel's measured variance, for the filter)
   for (size_t p = 0; p < np; p++) {
     const size_t n = out_.pages[p].texels.size();
+    var_pages[p].assign(n, Vec3(0.0f));
     normals[p].assign(n, Vec3(0.0f)), gathered[p].assign(n, Vec3(0.0f)), emitted[p].assign(n, Vec3(0.0f)), positions[p].assign(n, Vec3(0.0f));
   }
   std::vector<std::vector<std::pair<size_t, size_t>>> invalid_at(np);  // (round 430: per page, (texel index, bake index))
@@ -1160,12 +1229,14 @@ void Lightmapper::finish() {
     positions[(size_t)tx.page][idx] = tx.position;
     gathered[(size_t)tx.page][idx] = k < gather_.size() ? gather_[k] : Vec3(0.0f);
     emitted[(size_t)tx.page][idx] = k < emitted_.size() ? emitted_[k] : Vec3(0.0f);
+    var_pages[(size_t)tx.page][idx] = k < var_.size() ? var_[k] : Vec3(0.0f);
   }
   for (size_t p = 0; p < out_.pages.size(); p++) {
     Lightmap &lm = out_.pages[p];
     std::vector<uint8_t> &cov = covered_[p];
     const std::vector<int32_t> &own = owner_[p];
-    if (s_.denoise) denoise_page(lm, gathered[p], emitted[p], normals[p], positions[p], cov, own);
+    if (s_.denoise && s_.denoiser == 1) denoise_page_variance(lm, gathered[p], emitted[p], normals[p], positions[p], cov, own, var_pages[p]);
+    else if (s_.denoise) denoise_page(lm, gathered[p], emitted[p], normals[p], positions[p], cov, own);
     if (!invalid_at[p].empty()) fill_invalid(lm, cov, own, invalid_at[p]);
   }
   /* Round 440: the seams stitched before the dilation grows the charts into their margins. */
@@ -1314,6 +1385,193 @@ bool Lightmapper::denoise_oidn(std::vector<Vec3> &ind, const std::vector<uint8_t
   for (size_t i = 0; i < ind.size(); i++)
     if (cov[i]) ind[i] = grown[i];
   return true;
+}
+
+/* ------------------------------------------------------------ round 466: the filter guided by measured noise (ADR 0122) */
+namespace {
+constexpr float kSvgfSigmaL = 4.0f;    // the luminance edge-stop in standard deviations of the two texels' noise (SVGF's default)
+constexpr float kSvgfQuiet = 0.005f;   // a texel whose relative noise is under this is left as it is
+constexpr float kFireflyOver = 8.0f;   // a texel past this many times its neighbours' mean may be a firefly...
+constexpr float kFireflyNoise = 4.0f;  // ...when that excess is within this many of its own standard deviations
+
+struct SvgfPage {
+  const std::vector<Vec3> &img, &normals, &positions;
+  const std::vector<float> &var, &pre, &sd;  // the variance, its 3 x 3 blur, and that blur's square root
+  const std::vector<uint8_t> &cov;
+  const std::vector<int32_t> &own;
+  const std::vector<float> &size;
+  int W, H;
+};
+
+/* The 3 x 3 mean of a texel's variance over its chart (one texel's own estimate is noisy itself - SVGF blurs it too). */
+float variance_blur_at(const std::vector<float> &var, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, int W, int H, int x, int y) {
+  const size_t i = (size_t)y * W + x;
+  float s = 0.0f;
+  int k = 0;
+  for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++) {
+      if (!in_page(x + dx, y + dy, W, H)) continue;
+      const size_t j = (size_t)(y + dy) * W + (x + dx);
+      if (!cov[j] || own[j] != own[i]) continue;
+      s += var[j], k++;
+    }
+  return k ? s / (float)k : var[i];
+}
+
+/* A texel still worth filtering: its noise (blurred) above kSvgfQuiet of its light. */
+bool texel_noisy(const SvgfPage &pg, size_t i) {
+  return pg.cov[i] && pg.sd[i] > kSvgfQuiet * std::max(1e-4f, lum_of(pg.img[i]));
+}
+
+/* One pass's taps at (x, y): the B3 kernel at `step` in the chart, by the facing, the world distance, and the luminance
+ * difference over the two texels' noise together (review 466: symmetric - a texel's own sigma alone let bright noisy
+ * texels take in dim quiet ones but not the other way, darkening light gradients). The light and the variance (by the
+ * squared weights) out. */
+void svgf_at(const SvgfPage &pg, int x, int y, int step, Vec3 &out, float &var_out) {
+  static const float kB3[5] = {1.0f / 16, 1.0f / 4, 3.0f / 8, 1.0f / 4, 1.0f / 16};
+  const size_t i = (size_t)y * pg.W + x;
+  const float li = lum_of(pg.img[i]), sigma_p = 1.5f * pg.size[i] * (float)step;
+  Vec3 acc(0.0f);
+  float wsum = 0.0f, vsum = 0.0f;
+  for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++) {
+      const int xx = x + dx * step, yy = y + dy * step;
+      if (!in_page(xx, yy, pg.W, pg.H)) continue;
+      const size_t j = (size_t)yy * pg.W + xx;
+      if (!pg.cov[j] || pg.own[j] != pg.own[i]) continue;
+      const float nd = dot(pg.normals[i], pg.normals[j]);
+      if (nd < 0.8f) continue;
+      const Vec3 dp = pg.positions[i] - pg.positions[j];
+      const float sigma_l = kSvgfSigmaL * 0.5f * (pg.sd[i] + pg.sd[j]) + 1e-6f;  // (the two deviations' mean: symmetric, no sqrt a tap)
+      const float e = dot(dp, dp) / (sigma_p * sigma_p) + std::fabs(li - lum_of(pg.img[j])) / sigma_l;
+      if (e > 12.0f) continue;  // (a weight under 6e-6: not worth the exp)
+      const float nd4 = nd * nd * nd * nd, nd32 = nd4 * nd4 * nd4 * nd4 * nd4 * nd4 * nd4 * nd4;
+      const float w = kB3[dx + 2] * kB3[dy + 2] * nd32 * std::exp(-e);
+      acc += pg.img[j] * w;
+      wsum += w;
+      vsum += w * w * pg.var[j];
+    }
+  if (!(wsum > 0.0f)) {
+    out = pg.img[i], var_out = pg.var[i];
+    return;
+  }
+  out = acc / wsum, var_out = vsum / (wsum * wsum);
+}
+
+/* One row of a pass: each noisy texel filtered, the rest copied; the count of noisy texels back. */
+size_t svgf_row(const SvgfPage &pg, int y, int step, std::vector<Vec3> &next, std::vector<float> &nvar) {
+  size_t noisy = 0;
+  for (int x = 0; x < pg.W; x++) {
+    const size_t i = (size_t)y * pg.W + x;
+    next[i] = pg.img[i], nvar[i] = pg.var[i];
+    if (!texel_noisy(pg, i)) continue;
+    noisy++;
+    svgf_at(pg, x, y, step, next[i], nvar[i]);
+  }
+  return noisy;
+}
+}  // namespace
+
+/* Round 466 (ADR 0122): a texel past kFireflyOver times its chart neighbours' mean is brought down to that only when the
+ * excess is within kFireflyNoise of its own measured standard deviations - a lucky ray. A lamp's glow is bright too, but
+ * steady: its excess is many of its (small) deviations, and it stays. `var` is the gather's own variance (review 466:
+ * the emitters' and the chance-kept lights' noise would let a steady gather glow pass the gate). */
+void Lightmapper::clamp_fireflies_var(std::vector<Vec3> &src, const std::vector<float> &var, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own,
+                                      const std::vector<Vec3> &normals, int W, int H) const {
+  const std::vector<Vec3> in = src;
+  JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++) {
+        const size_t i = (size_t)y * W + x;
+        if (!cov[i]) continue;
+        const float mean = neighbour_mean_lum(in, cov, own, normals, W, H, x, (int)y);
+        if (mean < 0.0f) continue;
+        const float lum = lum_of(in[i]), limit = kFireflyOver * mean + 1e-3f;
+        if (lum <= limit || lum - mean > kFireflyNoise * std::sqrt(std::max(0.0f, var[i]))) continue;
+        src[i] = in[i] * (limit / lum);
+      }
+  });
+}
+
+/* One pass at `step`: the variance blurred 3 x 3, then each noisy texel filtered (svgf_row); `noisy` counts them. */
+void Lightmapper::svgf_pass(std::vector<Vec3> &img, std::vector<float> &var, std::vector<float> &pre, std::vector<Vec3> &next, std::vector<float> &nvar,
+                            const std::vector<Vec3> &normals, const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov,
+                            const std::vector<int32_t> &own, const std::vector<float> &size, int W, int H, int step, size_t &noisy) const {
+  std::vector<float> sd(pre.size(), 0.0f);
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++)
+        if (cov[(size_t)y * W + x]) {
+          const size_t i = (size_t)y * W + x;
+          pre[i] = variance_blur_at(var, cov, own, W, H, x, (int)y);
+          sd[i] = std::sqrt(std::max(0.0f, pre[i]));
+        }
+  });
+  const SvgfPage pg{img, normals, positions, var, pre, sd, cov, own, size, W, H};
+  std::atomic<size_t> count{0};
+  JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
+    size_t local = 0;
+    for (int64_t y = y0; y < y1; y++) local += svgf_row(pg, (int)y, step, next, nvar);
+    count += local;
+  });
+  noisy = count.load();
+}
+
+/* Round 466 (ADR 0122): an edge-avoiding A-Trous whose luminance edge-stop is the texels' own measured noise (SVGF,
+ * Schied et al. 2017): up to `passes` passes at steps 1, 2, 4, ..., the variance blurred 3 x 3 before each and filtered
+ * along with the light, so the edge-stop tightens as the noise goes. Each texel is left alone once its own relative
+ * noise is under kSvgfQuiet (review 466: a page-wide mean let one noisy corner go unfiltered), and a page stops when
+ * almost none is left. A texel with no measured noise passes unchanged (a hard shadow from one ray, a fully lit wall). */
+void Lightmapper::svgf_atrous(std::vector<Vec3> &img, std::vector<float> &var, const std::vector<Vec3> &normals, const std::vector<Vec3> &positions,
+                              const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<float> &size, int W, int H,
+                              int passes) const {
+  const size_t n = (size_t)W * (size_t)H;
+  std::vector<float> pre(n, 0.0f), nvar(n, 0.0f);
+  std::vector<Vec3> next(n);
+  for (int it = 0, step = 1; it < passes; it++, step *= 2) {
+    size_t noisy = 0;
+    svgf_pass(img, var, pre, next, nvar, normals, positions, cov, own, size, W, H, step, noisy);
+    img.swap(next);
+    var.swap(nvar);
+    if (noisy == 0) break;  // (review 466: a small noisy patch - a penumbra - keeps its passes; quiet texels cost only a copy)
+  }
+}
+
+/* Round 466 (ADR 0122): all the indirect light (the gather, the sky, the emitters, the lights kept by chance) filtered by
+ * its measured noise - or by OIDN's lightmap filter where linked - after the gather's fireflies are clamped; the direct
+ * light filtered by its own (its noise is local - penumbrae - so three passes). Under 16 samples the gather's measured
+ * variance is floored at the old formula's: one texel's estimate of its own noise is unreliable there. */
+void Lightmapper::denoise_page_variance(Lightmap &lm, const std::vector<Vec3> &gathered, const std::vector<Vec3> &emitted, const std::vector<Vec3> &normals,
+                                        const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own,
+                                        const std::vector<Vec3> &var) {
+  const int W = lm.width, H = lm.height;
+  const size_t n = (size_t)W * (size_t)H;
+  const float fallback = 1.0f / std::max(0.01f, s_.texels_per_unit);
+  std::vector<float> size(n, fallback);  // (each texel's world size, once for both parts)
+  JobSystem::global().parallel_for(H, 16, [&](int64_t y0, int64_t y1) {
+    for (int64_t y = y0; y < y1; y++)
+      for (int x = 0; x < W; x++)
+        if (cov[(size_t)y * W + x]) size[(size_t)y * W + x] = texel_world_size(positions, cov, own, W, H, x, (int)y, fallback);
+  });
+  std::vector<Vec3> ind(n), direct(n, Vec3(0.0f)), gath = gathered;
+  std::vector<float> vi(n, 0.0f), vd(n, 0.0f), vg(n, 0.0f);
+  const float floor_rel = s_.indirect_samples < 16 ? 4.0f / (float)std::max(1, s_.indirect_samples) : 0.0f;  // ((2 / sqrt(n))^2)
+  for (size_t i = 0; i < n; i++) {
+    if (!cov[i]) continue;
+    direct[i] = lm.texels[i] - gathered[i] - emitted[i];
+    const float lg = lum_of(gathered[i]), floor_g = floor_rel * lg * lg;  // (the floor for the gather alone)
+    vi[i] = var[i].x + std::max(0.0f, floor_g - var[i].z), vd[i] = var[i].y, vg[i] = std::max(var[i].z, floor_g);
+  }
+  /* Only the gather is clamped (as round 423's): the emitters and the lights kept by chance are unbiased only with their
+   * rare large values kept - the filter spreads them by their measured noise instead of cutting them. */
+  clamp_fireflies_var(gath, vg, cov, own, normals, W, H);
+  for (size_t i = 0; i < n; i++) ind[i] = gath[i] + emitted[i];
+  const bool oidn = s_.use_oidn && denoise_oidn(ind, cov, W, H);
+  if (!oidn) svgf_atrous(ind, vi, normals, positions, cov, own, size, W, H, 4);  // (steps 1-8, as round 423's: SideRail's filter 3.4 s at five)
+  if (last_denoiser_.empty() || !oidn) last_denoiser_ = oidn ? "OpenImageDenoise (RTLightmap)" : "the variance-guided A-Trous filter";
+  svgf_atrous(direct, vd, normals, positions, cov, own, size, W, H, 3);
+  for (size_t i = 0; i < n; i++)
+    if (cov[i]) lm.texels[i] = clamp0(ind[i] + direct[i]);
 }
 
 /* The edge-avoiding A-Trous wavelet: four passes of a 5 x 5 B3 kernel at steps 1, 2, 4, 8 (atrous_at). */
@@ -1486,6 +1744,7 @@ LightingData Lightmapper::take_result() {
   values_.clear();
   gather_.clear(), gather_.shrink_to_fit();
   emitted_.clear(), emitted_.shrink_to_fit();
+  var_.clear(), var_.shrink_to_fit();
   dirs_.clear(), dirs_.shrink_to_fit();
   masks_.clear(), masks_.shrink_to_fit(), mask_channel_.clear();  // (review 444)
   invalid_.clear(), invalid_.shrink_to_fit();

@@ -256,7 +256,8 @@ class PathTracer {
    * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't.
    * Round 463: `seed` (0: as before) moves every point's random sequence to another one - the noise measurement's second bake. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
-                  std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0, bool sobol = true) const;  // sobol (round 465): mode 1's first directions from the Owen-scrambled Sobol sequence, else random  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
+                  std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0, bool sobol = true,
+                  std::vector<float> *sq = nullptr) const;  // sq (round 466): mode 1 - each point's samples' mean squared luminance, for the bake's variance  // sobol (round 465): mode 1's first directions from the Owen-scrambled Sobol sequence, else random  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
   /* Round 331: the fogs a path is in - a Volume material's object, entered by a front face, left by a back face. Fogs
    * inside fogs add up (their densities sum where they overlap), up to four deep. */
   struct Medium {

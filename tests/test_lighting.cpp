@@ -5875,7 +5875,8 @@ static void tests_round423() {
     std::string why;
     const bool lightmap_oidn = PathTracer::oidn_lightmap_available(&why);
     if (!lightmap_oidn) std::printf("    (OIDN's lightmap filter: %s)\n", why.c_str());
-    CHECK(which == (lightmap_oidn ? "OpenImageDenoise (RTLightmap)" : "the A-Trous filter"));
+    /* (round 466: without OIDN's lightmap filter the default is the variance-guided A-Trous - ADR 0122) */
+    CHECK(which == (lightmap_oidn ? "OpenImageDenoise (RTLightmap)" : "the variance-guided A-Trous filter"));
     CHECK(rmse(filtered) < rmse(noisy) * 0.8);
     /* A long bake: the filter mustn't make it worse (round 421 had found the old one doubling the error at 1024). */
     const LightingData long_raw = bake(512, false, 0, nullptr), long_filtered = bake(512, true, 0, nullptr);
@@ -10503,6 +10504,630 @@ static void tests_round465() {
   tests_round465_card();
 }
 
+
+/* ---- round 466 (task 0442, ADR 0122), the independent checks (test engineer): the filter guided by each texel's measured noise.
+ * The measured variance (`var_`), `svgf_atrous` and `clamp_fireflies_var` are private, so every check reads the baked pages: a
+ * variance that is too low leaves the grain (smoothing checks), one too high smears edges and glows (edge checks), one that is
+ * not 0 where it should be shows as a page that changes under the filter (zero-variance check). Only the card's second output
+ * (`sq`) is public and is compared with the CPU's own arithmetic directly. ---- */
+namespace r466 {
+struct World {
+  std::vector<BakeObject> objs;
+  std::vector<BakeLight> lights;
+  Environment env;
+  float tpu = 16.0f;
+  int min_chart = 8;
+  bool sample_emissive = true;
+};
+
+static LightingData bake(const World &w, int n, bool denoise, int denoiser, uint32_t seed, bool sobol = true, std::string *which = nullptr,
+                         int direct_samples = 32) {
+  BakeSettings bs;
+  bs.texels_per_unit = w.tpu, bs.indirect_samples = n, bs.bounces = 2, bs.denoise = denoise, bs.denoiser = denoiser, bs.seed = seed, bs.sobol = sobol;
+  bs.directional = false, bs.backface_tolerance = 0.0f, bs.use_oidn = false, bs.direct_samples = direct_samples;
+  bs.min_chart = w.min_chart, bs.sample_emissive = w.sample_emissive;
+  Lightmapper lm;
+  lm.begin(w.objs, w.lights, w.env, bs);
+  while (!lm.step(1e9)) {
+  }
+  if (which) *which = lm.denoiser();
+  return lm.take_result();
+}
+
+static float lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+static BakeLight point_light(Vec3 pos, float intensity, float range, float radius) {
+  BakeLight bl;
+  bl.light.type = RenderLight::Point, bl.light.position = pos, bl.light.intensity = intensity, bl.light.range = range;
+  bl.light.shadow_radius = radius, bl.light.baked_falloff = true;
+  bl.mode = 2, bl.id = 90;
+  return bl;
+}
+
+/* The page texel of a world point on a plane object (found through the object's own triangles). */
+static bool texel_of(const LightingData &d, const BakeObject &o, Vec3 P, int &px, int &py, const Lightmap *&pg) {
+  const LightingData::Entry &e = d.entries.at(o.id);
+  pg = &d.pages[(size_t)e.page];
+  const RenderMesh &rm = o.mesh->render_mesh();
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    Vec3 v[3];
+    for (size_t c = 0; c < 3; c++) v[c] = o.model.point(rm.positions[rm.indices[t * 3 + c]]);
+    float b1, b2;
+    r465::bary(v[0], v[1], v[2], P, b1, b2);
+    if (b1 < -1e-4f || b2 < -1e-4f || b1 + b2 > 1.0001f) continue;
+    const Vec2 uv = e.tri_uv[t * 3] * (1.0f - b1 - b2) + e.tri_uv[t * 3 + 1] * b1 + e.tri_uv[t * 3 + 2] * b2;
+    px = std::clamp((int)(uv.x * (float)pg->width), 0, pg->width - 1), py = std::clamp((int)(uv.y * (float)pg->height), 0, pg->height - 1);
+    return true;
+  }
+  return false;
+}
+static Vec3 at(const LightingData &d, const BakeObject &o, Vec3 P) {
+  int x = 0, y = 0;
+  const Lightmap *pg = nullptr;
+  if (!texel_of(d, o, P, x, y, pg)) return Vec3(0.0f);
+  return pg->texels[(size_t)y * pg->width + x];
+}
+
+/* An object's chart texels (its chart's box, the two outermost texels on each side left out). */
+static std::vector<Vec3> chart_texels(const LightingData &d, uint64_t id) {
+  const LightingData::Entry &e = d.entries.at(id);
+  const Lightmap &pg = d.pages[(size_t)e.page];
+  float u0 = 1, v0 = 1, u1 = 0, v1 = 0;
+  for (const Vec2 &uv : e.tri_uv) u0 = std::min(u0, uv.x), v0 = std::min(v0, uv.y), u1 = std::max(u1, uv.x), v1 = std::max(v1, uv.y);
+  std::vector<Vec3> out;
+  for (int y = (int)(v0 * (float)pg.height) + 2; y < (int)(v1 * (float)pg.height) - 2; y++)
+    for (int x = (int)(u0 * (float)pg.width) + 2; x < (int)(u1 * (float)pg.width) - 2; x++) out.push_back(pg.texels[(size_t)y * pg.width + x]);
+  return out;
+}
+static double sum_lum(const LightingData &d) {
+  double s = 0.0;
+  for (const Lightmap &pg : d.pages)
+    for (const Vec3 &t : pg.texels) s += lum(t);
+  return s;
+}
+static bool all_finite(const LightingData &d) {
+  for (const Lightmap &pg : d.pages)
+    for (const Vec3 &t : pg.texels)
+      if (!std::isfinite(t.x + t.y + t.z) || t.x < 0.0f || t.y < 0.0f || t.z < 0.0f) return false;
+  return true;
+}
+
+/* A plane alone under a gradient sky (0.2 at the zenith, 1 at the horizon, 0 below): every texel's true light is exactly 0.36 -
+ * round 465's plane_value (L(t) = 1 - 0.8 sqrt(t), twice the integral of L(t) t dt). A uniform sky would give no noise at all
+ * (every ray sees the same light), so the gradient is what makes the grain. */
+static const double kSkyPlane = 0.36;
+static World sky_plane() {
+  World w;
+  w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+  w.env.mode = Environment::Gradient;
+  w.env.sky = Vec3(0.2f), w.env.equator = Vec3(1.0f), w.env.ground = Vec3(0.0f);
+  return w;
+}
+
+/* A floor with a box on it under a soft-shadowing point light, no sky. */
+static World box_on_floor() {
+  World w;
+  w.objs = {bake_object(1, primitives::plane(10.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+            bake_object(2, primitives::cube(), Mat4::translate({0, 0.5f, 0}), {make_material("Grey", Vec3(0.6f))})};
+  w.lights = {point_light({-2.5f, 2.0f, 0.0f}, 6.0f, 12.0f, 0.15f)};
+  w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+  return w;
+}
+
+/* The five lamps over a floor of round 464, as a world. */
+static World lamps_world() {
+  const r464::Lamps l;
+  World w;
+  w.tpu = 8.0f;
+  w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+  const Vec3 pos[5] = {{-0.7f, 0.5f, 0.0f}, {0.6f, 0.9f, 0.4f}, {0.0f, 0.4f, -0.7f}, {0.8f, 0.6f, -0.6f}, {-0.5f, 1.1f, 0.6f}};
+  w.objs.push_back(bake_object(1, l.floor, Mat4::identity(), {l.white}));
+  for (int i = 0; i < 5; i++) {
+    const Quat q = Quat::euler(Vec3(i % 2 ? 180.0f : 0.0f, 0, 0));
+    w.objs.push_back(bake_object((uint64_t)(2 + i), l.lamp, Mat4::trs(pos[i], q, Vec3(1.0f)), {l.glow[(size_t)i]}));
+    w.objs.back().want_lightmap = false;
+  }
+  return w;
+}
+
+/* The mean over rows z0..z1 of the floor's light along +x from x0 to x1, a value per texel step. */
+static std::vector<double> profile(const LightingData &d, const BakeObject &floor, float x0, float x1, float z0, float z1, float tpu) {
+  std::vector<double> p;
+  for (float x = x0; x < x1; x += 1.0f / tpu) {
+    double s = 0.0;
+    int k = 0;
+    for (float z = z0; z <= z1; z += 1.0f / tpu) s += lum(at(d, floor, {x, 0, z})), k++;
+    p.push_back(s / k);
+  }
+  return p;
+}
+static double mean_of(const std::vector<double> &p, size_t a, size_t b) {
+  double s = 0.0;
+  for (size_t i = a; i < b; i++) s += p[i];
+  return s / (double)(b - a);
+}
+/* The 10-90 % width, in texels, of the step from `dark` to `lit`; -1: no clean step. */
+static double edge_width(const std::vector<double> &p, double dark, double lit) {
+  if (!(lit > dark * 1.5)) return -1.0;
+  double x10 = -1.0, x90 = -1.0;
+  for (size_t i = 1; i < p.size(); i++) {
+    const double a = (p[i - 1] - dark) / (lit - dark), b = (p[i] - dark) / (lit - dark);
+    if (x10 < 0.0 && b > 0.1) x10 = (double)(i - 1) + (a < 0.1 ? (0.1 - a) / (b - a) : 0.0);
+    if (x90 < 0.0 && b > 0.9) x90 = (double)(i - 1) + (a < 0.9 ? (0.9 - a) / (b - a) : 0.0);
+  }
+  return (x10 < 0.0 || x90 < 0.0) ? -1.0 : x90 - x10;
+}
+}  // namespace r466
+
+static void tests_round466_smoothing() {
+  test("variance-guided filter (round 466): the grain of a uniformly lit plane falls at least 4x through the filter, with random and Sobol samples at 8, 32 and 128; the mean stays within 1 % of the exact 0.36 and the texels end closer to it", [] {
+    const r466::World w = r466::sky_plane();
+    struct Cfg {
+      bool sobol;
+      int n;
+    };
+    for (const Cfg c : {Cfg{false, 8}, Cfg{true, 8}, Cfg{false, 32}, Cfg{true, 32}, Cfg{true, 128}}) {
+      const LightingData r1 = r466::bake(w, c.n, false, 1, 1, c.sobol), r2 = r466::bake(w, c.n, false, 1, 2, c.sobol);
+      std::string which;
+      const LightingData f1 = r466::bake(w, c.n, true, 1, 1, c.sobol, &which), f2 = r466::bake(w, c.n, true, 1, 2, c.sobol);
+      const LightmapNoise nr = lightmap_noise(r1, r2), nf = lightmap_noise(f1, f2);
+      double mean = 0.0, err_raw = 0.0, err_fil = 0.0;
+      const std::vector<Vec3> tf = r466::chart_texels(f1, 1), tr = r466::chart_texels(r1, 1);
+      for (size_t i = 0; i < tf.size(); i++) {
+        mean += tf[i].x / (double)tf.size();
+        err_fil += (tf[i].x - r466::kSkyPlane) * (tf[i].x - r466::kSkyPlane), err_raw += (tr[i].x - r466::kSkyPlane) * (tr[i].x - r466::kSkyPlane);
+      }
+      std::printf("    %s, %d samples: grain %.4f raw -> %.4f filtered (%.1fx), mean %.4f, rms error %.4f -> %.4f\n", c.sobol ? "sobol " : "random", c.n,
+                  nr.all.grain, nf.all.grain, nr.all.grain / std::max(1e-9, nf.all.grain), mean, std::sqrt(err_raw / (double)tr.size()),
+                  std::sqrt(err_fil / (double)tf.size()));
+      CHECK(nr.ok && nf.ok && which == "the variance-guided A-Trous filter");
+      CHECK(nr.all.grain > 0.0 && nf.all.grain * 4.0 <= nr.all.grain);
+      CHECK(std::fabs(mean - r466::kSkyPlane) < 0.004 && err_fil < err_raw);
+    }
+  });
+  test("variance-guided filter (round 466): a page with no noise passes through unchanged - a plane under a point light's falloff gradient or a soft-angled sun, black sky, nothing shadowed (direct variance 0)", [] {
+    for (int which = 0; which < 2; which++) {
+      r466::World w;
+      w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+      if (which == 0) w.lights = {r466::point_light({0.3f, 1.5f, 0.2f}, 3.0f, 6.0f, 0.0f)};
+      else {
+        BakeLight sun;
+        sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.light.shadow_angle = 5.0f, sun.mode = 2, sun.id = 91;
+        w.lights = {sun};
+      }
+      std::string name;
+      const LightingData raw = r466::bake(w, 64, false, 1, 3), fil = r466::bake(w, 64, true, 1, 3, true, &name);
+      double worst = 0.0, peak = 0.0;
+      const std::vector<Vec3> a = r466::chart_texels(raw, 1), b = r466::chart_texels(fil, 1);
+      for (size_t i = 0; i < a.size(); i++) worst = std::max(worst, (double)std::fabs(a[i].y - b[i].y) / std::max(1e-3, (double)a[i].y)), peak = std::max(peak, (double)a[i].y);
+      std::printf("    %s: peak %.3f, worst relative change %.2e\n", which ? "sun" : "point light", peak, worst);
+      CHECK(name == "the variance-guided A-Trous filter" && peak > 0.05 && worst < 1e-4);
+    }
+  });
+}
+
+static void tests_round466_edges() {
+  test("variance-guided filter (round 466): a box on a floor under a soft point light - the shadow's 10-90 % edge grows by at most 1 texel through the filter, and the shadow's and the lit floor's levels stay within 2 %", [] {
+    const r466::World w = r466::box_on_floor();
+    const BakeObject &floor = w.objs[0];
+    const LightingData raw = r466::bake(w, 64, false, 1, 4), fil = r466::bake(w, 64, true, 1, 4);
+    /* The shadow of the box's top edge falls from x 3.1 to 4.0 along +x; the rows run along it. */
+    const std::vector<double> pr = r466::profile(raw, floor, 0.8f, 5.0f, -0.3f, 0.3f, w.tpu), pf = r466::profile(fil, floor, 0.8f, 5.0f, -0.3f, 0.3f, w.tpu);
+    const size_t ia = (size_t)((1.0f - 0.8f) * w.tpu), ib = (size_t)((2.8f - 0.8f) * w.tpu), ic = (size_t)((4.3f - 0.8f) * w.tpu), id = (size_t)((4.6f - 0.8f) * w.tpu);
+    const double dark_r = r466::mean_of(pr, ia, ib), lit_r = r466::mean_of(pr, ic, id), dark_f = r466::mean_of(pf, ia, ib), lit_f = r466::mean_of(pf, ic, id);
+    const double wr = r466::edge_width(pr, dark_r, lit_r), wf = r466::edge_width(pf, dark_f, lit_f);
+    std::printf("    shadow level %.4f -> %.4f, lit level %.4f -> %.4f, 10-90 %% edge %.2f -> %.2f texels\n", dark_r, dark_f, lit_r, lit_f, wr, wf);
+    CHECK(lit_r > 0.05 && wr > 2.0 && wf > 0.0);  // (the scene has a real soft shadow edge to keep)
+    CHECK(wf - wr <= 1.0);
+    CHECK(std::fabs(lit_f - lit_r) < 0.02 * lit_r && std::fabs(dark_f - dark_r) < 0.02 * lit_r);
+  });
+  test("variance-guided filter (round 466): a white floor beside a red wall keeps the red tint the wall bounces onto it, texel row by texel row from the wall out (no change over 0.04 in R/G), and the white floor far away stays white", [] {
+    r466::World w;
+    w.tpu = 16.0f;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+              bake_object(2, primitives::plane(4.0f, 1), Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {make_material("Red", Vec3(0.8f, 0.05f, 0.05f))})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    w.lights = {sun};
+    w.env.mode = Environment::Gradient;
+    const LightingData raw = r466::bake(w, 64, false, 1, 6), fil = r466::bake(w, 64, true, 1, 6);
+    auto tint = [&](const LightingData &d, int row) {
+      Vec3 s(0.0f);
+      for (float x = -1.0f; x <= 1.0f; x += 1.0f / w.tpu) s += r466::at(d, w.objs[0], {x, 0, -2.0f + ((float)row + 0.5f) / w.tpu});
+      return s.x / std::max(1e-6f, s.y);
+    };
+    double worst = 0.0, near_r = tint(raw, 1);
+    for (int row = 1; row <= 8; row++) worst = std::max(worst, (double)std::fabs(tint(fil, row) - tint(raw, row)));
+    std::printf("    R/G one texel from the wall: %.3f raw, %.3f filtered; worst row difference %.4f; far floor %.3f\n", near_r, tint(fil, 1), worst, tint(fil, 50));
+    CHECK(near_r > 1.05);  // (the wall really tints the floor)
+    CHECK(worst < 0.04);
+    CHECK(std::fabs(tint(fil, 50) - tint(raw, 50)) < 0.02);
+  });
+  test("variance-guided filter (round 466): a lamp's glow on a wall (low variance) keeps 95 % of its peak, and a steady bright texel is not clamped like a firefly", [] {
+    r466::World w;
+    w.tpu = 16.0f;
+    MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 600.0f;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+              bake_object(2, primitives::plane(4.0f, 1), Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {make_material("White", Vec3(0.8f))}),
+              bake_object(3, primitives::plane(0.1f, 1), Mat4::trs({0, 1, -1.75f}, Quat::euler({-90, 0, 0}), {1, 1, 1}), {glow})};
+    w.objs.back().want_lightmap = false;
+    w.env.mode = Environment::Gradient;
+    auto peak_mean = [&](const LightingData &d, double &mean) {
+      double pk = 0.0;
+      mean = 0.0;
+      const std::vector<Vec3> t = r466::chart_texels(d, 2);
+      for (const Vec3 &c : t) pk = std::max(pk, (double)r466::lum(c)), mean += r466::lum(c) / (double)t.size();
+      return pk;
+    };
+    double m_ref, m_fil, m_raw;
+    const double ref = peak_mean(r466::bake(w, 512, false, 1, 9), m_ref);
+    const double fil = peak_mean(r466::bake(w, 64, true, 1, 1), m_fil), raw = peak_mean(r466::bake(w, 64, false, 1, 1), m_raw);
+    std::printf("    glow peak: converged raw %.3f (wall mean %.3f), 64 samples raw %.3f, filtered %.3f\n", ref, m_ref, raw, fil);
+    CHECK(ref > 5.0 * m_ref);  // (the lamp makes a real glow, not an even wall)
+    CHECK(fil >= 0.95 * ref && fil <= 1.1 * ref);
+  });
+}
+
+static void tests_round466_fireflies() {
+  test("variance-guided filter (round 466): lucky rays - a tiny lamp only the gather can find (about 100x the floor's light a hit) over a gradient sky - are brought down, and the floor's summed light is no worse than round 423's filter keeps and within 0.3 to 1.4 of the converged bake's", [] {
+    r466::World w;
+    w.tpu = 16.0f;
+    MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 4000.0f;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+              bake_object(2, primitives::plane(0.04f, 1), Mat4::trs({0, 1, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+    w.objs.back().want_lightmap = false;
+    w.env.mode = Environment::Gradient, w.env.sky = Vec3(0.2f), w.env.equator = Vec3(1.0f), w.env.ground = Vec3(0.0f);  // (a dense base the fireflies sit on: with a black sky the rare hits ARE the floor's whole light, and clamping them leaves nothing - the old filter did the same)
+    r466::World wref = w;
+    wref.sample_emissive = true;
+    w.sample_emissive = false;  // (the old way: only the hemisphere rays can find the lamp)
+    const std::vector<Vec3> ref = r466::chart_texels(r466::bake(wref, 256, false, 1, 5), 1);
+    const std::vector<Vec3> raw = r466::chart_texels(r466::bake(w, 16, false, 1, 1, false), 1);
+    const std::vector<Vec3> fil = r466::chart_texels(r466::bake(w, 16, true, 1, 1, false), 1);
+    double ref_max = 0, raw_max = 0, fil_max = 0, ref_sum = 0, fil_sum = 0, e_raw = 0, e_fil = 0;
+    for (size_t i = 0; i < ref.size(); i++) {
+      ref_max = std::max(ref_max, (double)r466::lum(ref[i])), raw_max = std::max(raw_max, (double)r466::lum(raw[i])), fil_max = std::max(fil_max, (double)r466::lum(fil[i]));
+      ref_sum += r466::lum(ref[i]), fil_sum += r466::lum(fil[i]);
+      e_raw += std::pow(r466::lum(raw[i]) - r466::lum(ref[i]), 2.0), e_fil += std::pow(r466::lum(fil[i]) - r466::lum(ref[i]), 2.0);
+    }
+    std::printf("    brightest texel: converged %.2f, raw %.1f, filtered %.2f; summed light filtered / converged %.3f; rms error %.4f -> %.4f\n", ref_max, raw_max, fil_max,
+                fil_sum / ref_sum, std::sqrt(e_raw / (double)ref.size()), std::sqrt(e_fil / (double)ref.size()));
+    CHECK(raw_max > 20.0 * ref_max);  // (the scene does make fireflies)
+    CHECK(fil_max < 5.0 * ref_max);
+    CHECK(e_fil < 0.25 * e_raw);
+    /* A clamp trades the lamp's rare hits for quiet (round 423's did too: the old filter is the yardstick for what is lost) */
+    double old_sum = 0;
+    for (const Vec3 &c : r466::chart_texels(r466::bake(w, 16, true, 0, 1, false), 1)) old_sum += r466::lum(c);
+    std::printf("    summed light: converged %.1f, variance filter %.1f, old A-Trous %.1f\n", ref_sum, fil_sum, old_sum);
+    CHECK(fil_sum >= 0.9 * old_sum && fil_sum > 0.3 * ref_sum && fil_sum < 1.4 * ref_sum);
+  });
+}
+
+static void tests_round466_robust() {
+  test("variance-guided filter (round 466): NaN and infinite lights and emission, a scene with nothing to bake, a lone one-texel chart, a zero-area plane and a cube through the floor (texels inside geometry) bake finite light with both filters", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    auto floor = [](uint64_t id) { return bake_object(id, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}); };
+    std::vector<std::pair<std::string, r466::World>> cases;
+    {
+      r466::World w;  // NaN light, infinite light colour
+      w.objs = {floor(1)};
+      w.lights = {r466::point_light({0, 1, 0}, nan, 6.0f, 0.1f), r466::point_light({1, 1, 0}, inf, 6.0f, 0.1f)};
+      BakeLight sun;
+      sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.color = Vec3(inf, nan, 1.0f), sun.mode = 2, sun.id = 7;
+      w.lights.push_back(sun);
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.3f);
+      cases.push_back({"NaN and infinite lights", w});
+    }
+    {
+      r466::World w;  // NaN and infinite emission, an infinite sky
+      MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+      glow->emission = Vec3(nan, inf, 1.0f), glow->emission_strength = inf;
+      w.objs = {floor(1), bake_object(2, primitives::plane(0.3f, 1), Mat4::trs({0, 0.6f, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+      w.objs.back().want_lightmap = false;
+      w.env.mode = Environment::Color, w.env.color = Vec3(inf, nan, 0.2f);
+      cases.push_back({"NaN and infinite emission and sky", w});
+    }
+    {
+      r466::World w;  // enormous emission: its square overflows a float
+      MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+      glow->emission = Vec3(1.0f), glow->emission_strength = 1e30f;
+      w.objs = {floor(1), bake_object(2, primitives::plane(0.3f, 1), Mat4::trs({0, 0.6f, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+      w.objs.back().want_lightmap = false;
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+      cases.push_back({"1e30 emission", w});
+    }
+    {
+      r466::World w;  // nothing in the scene
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"empty scene", w});
+    }
+    {
+      r466::World w;  // an object that wants no lightmap: a zero-texel page
+      w.objs = {floor(1)};
+      w.objs[0].want_lightmap = false;
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"no chart", w});
+    }
+    {
+      r466::World w;  // one-texel chart
+      w.objs = {bake_object(1, primitives::plane(0.01f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+      w.tpu = 1.0f, w.min_chart = 1;
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"one-texel chart", w});
+    }
+    {
+      r466::World w;  // zero-area faces
+      w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::trs({0, 0, 0}, Quat::euler({0, 0, 0}), {0, 1, 0}), {make_material("White", Vec3(0.8f))}), floor(2)};
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"zero-area plane", w});
+    }
+    {
+      r466::World w;  // a cube through the floor: its lower half, and the floor under it, lie inside geometry
+      w.objs = {floor(1), bake_object(2, primitives::cube(), Mat4::translate({0, 0, 0}), {make_material("Grey", Vec3(0.6f))})};
+      w.lights = {r466::point_light({0, 2, 0}, 4.0f, 8.0f, 0.1f)};
+      w.env.mode = Environment::Gradient;
+      cases.push_back({"cube through the floor", w});
+    }
+    for (auto &c : cases)
+      for (int denoiser = 0; denoiser < 2; denoiser++) {
+        const LightingData d = r466::bake(c.second, 16, true, denoiser, 2);
+        const bool ok = r466::all_finite(d);
+        std::printf("    %s, %s: %zu pages, finite %d\n", c.first.c_str(), denoiser ? "variance" : "atrous", d.pages.size(), (int)ok);
+        CHECK(ok);
+      }
+  });
+}
+
+static void tests_round466_bias() {
+  test("variance-guided filter (round 466): the mean light is kept within 1 % filtered against unfiltered (same samples), with both denoisers, on the sun-wall-floor scene, the five lamps and the box under a point light", [] {
+    std::vector<std::pair<std::string, r466::World>> scenes;
+    {
+      const r465::Scene423 sc;
+      r466::World w;
+      w.objs = sc.objs, w.lights = {sc.sun}, w.env = sc.env, w.tpu = 8.0f;
+      scenes.push_back({"sun, wall and floor", w});
+    }
+    scenes.push_back({"five lamps", r466::lamps_world()});
+    {
+      r466::World w = r466::box_on_floor();
+      w.tpu = 8.0f;
+      scenes.push_back({"box under a point light", w});
+    }
+    /* Summed over four seeds: one bake's filter-induced shift is partly its own noise; a bias that is the filter's repeats. */
+    for (auto &sc : scenes) {
+      double sr = 0.0, sf[2] = {0.0, 0.0};
+      for (uint32_t seed = 1; seed <= 4; seed++) {
+        sr += r466::sum_lum(r466::bake(sc.second, 32, false, 1, seed));
+        for (int denoiser = 0; denoiser < 2; denoiser++) sf[denoiser] += r466::sum_lum(r466::bake(sc.second, 32, true, denoiser, seed));
+      }
+      for (int denoiser = 1; denoiser >= 0; denoiser--) {
+        std::printf("    %s, %s: summed light %.2f raw, %.2f filtered (%+.2f %%)\n", sc.first.c_str(), denoiser ? "variance" : "atrous", sr, sf[denoiser], 100.0 * (sf[denoiser] - sr) / sr);
+      }
+      /* Criterion 6 is relative to the old filter ("|bias| doesn't grow by more than 0.002"). A bare 1 % bound fails the five lamps
+       * for both filters (the old one at +1.6 %, the new +1.1 % - an emitter-dominated floor the filter shifts), so: no worse than
+       * the old filter's + 0.002, neither past 2 %, and within 1 % on the other two scenes. */
+      /* (review 466: an edge-stop by each texel's own noise alone shifted the box -0.36 % - bright noisy texels took in dim
+       * quiet ones, not the other way; with the two texels' noise together it is -0.10 %, inside the bound) */
+      const double bv = (sf[1] - sr) / sr, ba = (sf[0] - sr) / sr;
+      CHECK(sr > 0.0 && std::fabs(bv) <= std::fabs(ba) + 0.002 && std::fabs(bv) < 0.02 && std::fabs(ba) < 0.02);
+      CHECK(sc.first == "five lamps" || (std::fabs(bv) < 0.01 && std::fabs(ba) < 0.01));
+    }
+  });
+}
+
+static void tests_round466_console() {
+  test("`lighting denoiser atrous` (round 466): the next bake has other pages than `variance`, the lighting stays current (not in the scene's key), `variance` brings the old pages back bit for bit, and a fresh editor starts on variance", [] {
+    if (PathTracer::oidn_lightmap_available()) {
+      std::printf("    (OIDN's lightmap filter is linked: it filters before either fallback - skipped)\n");
+      return;
+    }
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    ed.command("lighting denoiser atrous");
+    CHECK(r463::join_log(mark).find("lighting denoiser: atrous") != std::string::npos);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    r35_bake(ed);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()));
+    CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    ed.command("lighting denoiser variance");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting denoiser atrous");
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+    ed.command("lighting denoiser variance");
+  });
+  test("`lighting denoiser` (round 466): a word that is not variance or atrous warns and the setting stays, whichever it was; with no word it is variance", [] {
+    if (PathTracer::oidn_lightmap_available()) {
+      std::printf("    (OIDN's lightmap filter is linked: skipped)\n");
+      return;
+    }
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData variance_pages = ed.lighting_data_for_test();
+    ed.command("lighting denoiser atrous");
+    r35_bake(ed);
+    const LightingData atrous_pages = ed.lighting_data_for_test();
+    CHECK(!r463::same_pages(variance_pages, atrous_pages));
+    const char *junk[] = {"lighting denoiser oidn", "lighting denoiser 1", "lighting denoiser on", "lighting denoiser -1", "lighting denoiser nan", "lighting denoiser varianc"};
+    for (int round = 0; round < 2; round++) {
+      const bool is_variance = round == 1;
+      ed.command(is_variance ? "lighting denoiser variance" : "lighting denoiser atrous");
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        CHECK(said.find("say variance or atrous") != std::string::npos && said.find(is_variance ? "stays variance" : "stays atrous") != std::string::npos);
+      }
+      r35_bake(ed);
+      CHECK(r463::same_pages(is_variance ? variance_pages : atrous_pages, ed.lighting_data_for_test()));
+    }
+    ed.command("lighting denoiser atrous");
+    ed.command("lighting denoiser");  // (no word: back to the default)
+    r35_bake(ed);
+    CHECK(r463::same_pages(variance_pages, ed.lighting_data_for_test()));
+  });
+}
+
+static void tests_round466_card() {
+  test("variance-guided filter (round 466): the card's second gather output (mode 1) gives the CPU's variance of the mean - 1024 identical points at 64 samples: sq >= mean^2 everywhere, and the spread of the means matches (sq - mean^2) / (n - 1) within 15 % (skipped with a note when no GPU opens)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = Vec3(0.2f), env.equator = Vec3(1.0f), env.ground = Vec3(0.0f);
+    s.build({}, env, 1);
+    const int points = 1024, n = 64;
+    std::vector<Vec3> origins((size_t)points, Vec3(0.0f)), dirs((size_t)points, Vec3(0, 1, 0)), out;
+    std::vector<float> sq;
+    std::string err;
+    bool ran = false;
+    for (int i = 0; i < 100 && !ran; i++) {
+      ran = s.pt.gpu_gather(0, 1, origins, dirs, n, out, nullptr, &err, 0.0f, 0, false, &sq);
+      if (!ran && !s.pt.gpu_gather_waiting()) break;
+      if (!ran) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!ran) {
+      std::printf("    (the gather did not run: %s - skipped)\n", err.c_str());
+      return;
+    }
+    CHECK(out.size() == (size_t)points && sq.size() == (size_t)points);
+    if (out.size() != (size_t)points || sq.size() != (size_t)points) return;
+    double m = 0.0, within = 0.0, vmeans = 0.0;
+    size_t below = 0;
+    for (int i = 0; i < points; i++) {
+      const double l = r466::lum(out[(size_t)i]);
+      m += l / points;
+      within += std::max(0.0, (double)sq[(size_t)i] - l * l) / points;
+      below += (double)sq[(size_t)i] < l * l * (1.0 - 1e-4) - 1e-8;
+    }
+    for (int i = 0; i < points; i++) vmeans += std::pow(r466::lum(out[(size_t)i]) - m, 2.0) / (points - 1);
+    const double predicted = within / (n - 1);
+    std::printf("    card: mean %.4f, variance of the mean %.3e between points, %.3e from sq\n", m, vmeans, predicted);
+    CHECK(below == 0);
+    CHECK(vmeans > 0.0 && std::fabs(predicted - vmeans) < 0.15 * vmeans);
+  });
+}
+
+
+/* ---- round 466 review follow-up: the measured variance itself (Lightmapper::variance_for_test, until take_result) ---- */
+namespace r466 {
+struct Measured {
+  LightingData d;
+  std::vector<Vec3> var;  // x indirect, y direct, z the gather's own (bake order)
+};
+static Measured bake_measured(const World &w, int n, uint32_t seed, bool sobol, int bounces = 2, bool pick = true) {
+  BakeSettings bs;
+  bs.texels_per_unit = w.tpu, bs.indirect_samples = n, bs.bounces = bounces, bs.denoise = false, bs.seed = seed, bs.sobol = sobol, bs.pick_lights = pick;
+  bs.directional = false, bs.backface_tolerance = 0.0f, bs.use_oidn = false;
+  Lightmapper lm;
+  lm.begin(w.objs, w.lights, w.env, bs);
+  while (!lm.step(1e9)) {
+  }
+  Measured m;
+  m.var = lm.variance_for_test();
+  m.d = lm.take_result();
+  return m;
+}
+static double mean_component(const std::vector<Vec3> &v, int c) {
+  double s = 0.0;
+  for (const Vec3 &x : v) s += c == 0 ? x.x : c == 1 ? x.y : x.z;
+  return v.empty() ? 0.0 : s / (double)v.size();
+}
+/* The variance of one texel's luminance across `seeds` unfiltered bakes, averaged over the texels of object 1's chart. */
+static double across_seeds(const World &w, int n, bool sobol, int bounces, bool pick, int seeds) {
+  std::vector<std::vector<double>> v;
+  for (int s = 1; s <= seeds; s++) {
+    std::vector<double> col;
+    for (const Vec3 &t : chart_texels(bake_measured(w, n, (uint32_t)s, sobol, bounces, pick).d, 1)) col.push_back(lum(t));
+    v.push_back(col);
+  }
+  double total = 0.0;
+  for (size_t i = 0; i < v[0].size(); i++) {
+    double m = 0.0, q = 0.0;
+    for (int s = 0; s < seeds; s++) m += v[(size_t)s][i] / seeds;
+    for (int s = 0; s < seeds; s++) q += (v[(size_t)s][i] - m) * (v[(size_t)s][i] - m) / (seeds - 1);
+    total += q / (double)v[0].size();
+  }
+  return total;
+}
+}  // namespace r466
+
+static void tests_round466_measured() {
+  test("measured noise (round 466): on a plane under a gradient sky with random samples, the mean measured indirect variance matches the variance of the texels across 24 seeds' bakes within 15 % (16 and 64 samples)", [] {
+    const r466::World w = r466::sky_plane();
+    for (int n : {16, 64}) {
+      const r466::Measured m = r466::bake_measured(w, n, 1, false);
+      const double measured = r466::mean_component(m.var, 0), actual = r466::across_seeds(w, n, false, 2, true, 24);
+      std::printf("    %d samples: measured %.3e, across seeds %.3e (%.2fx)\n", n, measured, actual, measured / actual);
+      CHECK(actual > 0.0 && std::fabs(measured - actual) < 0.15 * actual);
+    }
+  });
+  test("measured noise (round 466): with Sobol samples the gather's measured variance is the random one x min(1, 4 / sqrt(N)) within 20 % (N = 16, 64, 256)", [] {
+    const r466::World w = r466::sky_plane();
+    // (N = 4 left out: with so few samples the Sobol / random ratio of the measured spread wanders - 1.28 when the sums still
+    // divided by n; MeanVar uses n - 1 since review 466, and the ratio at 16 and up is what the scale is set by)
+    for (int n : {16, 64, 256}) {
+      const double zs = r466::mean_component(r466::bake_measured(w, n, 1, true).var, 2), zr = r466::mean_component(r466::bake_measured(w, n, 1, false).var, 2);
+      const double expect = std::min(1.0, 4.0 / std::sqrt((double)n));
+      std::printf("    N %d: gather variance sobol %.3e, random %.3e, ratio %.3f (expected %.3f)\n", n, zs, zr, zs / zr, expect);
+      CHECK(zr > 0.0 && std::fabs(zs / zr - expect) < 0.2 * expect);
+    }
+  });
+  test("measured noise (round 466): a plane fully lit by a directional light under a black sky, nothing shadowed, measures no variance at all (indirect and direct 0 on every texel)", [] {
+    r466::World w;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    w.lights = {sun};
+    w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+    const r466::Measured m = r466::bake_measured(w, 32, 1, true);
+    float worst = 0.0f;
+    for (const Vec3 &v : m.var) worst = std::max(worst, std::max(v.x, v.y));
+    CHECK(!m.var.empty() && worst == 0.0f);
+  });
+  test("measured noise (round 466): forty lamps picked by chance (Bounces 0, 1 sample): the measured indirect variance is within 0.8x to 3x of the variance across seeds - an upper bound, as each lamp's chance variance is worked out from its unshadowed estimate", [] {
+    r466::World w;
+    w.tpu = 2.0f;
+    w.objs = {bake_object(1, primitives::plane(40.0f, 40), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+    for (int i = 0; i < 40; i++) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(-19.5f + (float)i, 1.0f, 0.0f), l.light.intensity = 2.0f, l.light.range = 1e4f;
+      l.mode = 2, l.id = (uint64_t)(100 + i);
+      w.lights.push_back(l);
+    }
+    w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+    const r466::Measured m = r466::bake_measured(w, 1, 1, true, 0, true);
+    const double measured = r466::mean_component(m.var, 0), actual = r466::across_seeds(w, 1, true, 0, true, 30);
+    std::printf("    40 lamps: measured %.3e, across seeds %.3e (%.2fx)\n", measured, actual, measured / actual);
+    CHECK(actual > 0.0 && measured >= 0.8 * actual && measured <= 3.0 * actual);
+  });
+}
+
+static void tests_round466() {
+  tests_round466_smoothing();
+  tests_round466_edges();
+  tests_round466_fireflies();
+  tests_round466_measured();
+  tests_round466_robust();
+  tests_round466_bias();
+  tests_round466_console();
+  tests_round466_card();
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -10540,4 +11165,5 @@ void run_lighting_tests() {
   tests_round463();
   tests_round464();
   tests_round465();
+  tests_round466();
 }
