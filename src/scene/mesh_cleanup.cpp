@@ -321,7 +321,8 @@ std::vector<uint32_t> weld_map_for_new(const Mesh &m, const std::vector<uint8_t>
 }
 
 /* The faces that use a welded vertex rebuilt through the map: repeated corners, a spike (out and straight back) and faces left
- * with fewer than three corners go, and a face on the same corners as another facing the other way cancels with it. Faces
+ * with fewer than three corners go, and a face on the same corners as another facing the other way cancels with it (both go: as
+ * Push/Pull's tidy_new_geometry does, a new wall lying on an old face makes a solid's inner wall, which isn't there). Faces
  * without a welded corner are copied as they are. Returns the face remap (old -> new, UINT32_MAX removed). */
 std::vector<uint32_t> weld_faces_local(Mesh &m, const std::vector<uint32_t> &to) {
   const size_t nf = m.face_count();
@@ -428,6 +429,46 @@ void remap_edge_keys(std::vector<uint64_t> &keys, const std::vector<uint32_t> &t
   std::sort(out.begin(), out.end());
   out.erase(std::unique(out.begin(), out.end()), out.end());
   keys = std::move(out);
+}
+
+/* Takes out the vertices in `drop` (the ones a weld emptied) and nothing else: a stray vertex elsewhere that is the user's stays.
+ * The faces must not use them any more. Wires, seams, sharp marks, vertex groups and shape keys follow the new numbering. */
+void remove_vertices(Mesh &m, const std::vector<uint8_t> &drop) {
+  std::vector<uint32_t> remap(m.vert_count(), UINT32_MAX);
+  std::vector<Vec3> np;
+  np.reserve(m.vert_count());
+  for (size_t i = 0; i < m.vert_count(); i++)
+    if (!drop[i]) {
+      remap[i] = (uint32_t)np.size();
+      np.push_back(m.positions[i]);
+    }
+  for (uint32_t &v : m.corner_verts) v = remap[v];
+  for (VertexGroup &g : m.vertex_groups) {
+    if (g.weights.size() != remap.size()) continue;
+    std::vector<float> w(np.size(), 0.0f);
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) w[remap[i]] = g.weights[i];
+    g.weights = std::move(w);
+  }
+  for (ShapeKey &k : m.shape_keys) {
+    if (k.delta.size() != remap.size()) continue;
+    std::vector<Vec3> d(np.size(), Vec3(0.0f));
+    for (size_t i = 0; i < remap.size(); i++)
+      if (remap[i] != UINT32_MAX) d[remap[i]] = k.delta[i];
+    k.delta = std::move(d);
+  }
+  m.positions = std::move(np);
+  for (std::vector<uint64_t> *edges : {&m.seams, &m.sharp_edges, &m.loose_edges}) {
+    std::vector<uint64_t> out;
+    for (uint64_t k : *edges) {
+      const uint32_t a = remap[(size_t)(k >> 32)], b = remap[(size_t)(k & 0xFFFFFFFF)];
+      if (a != UINT32_MAX && b != UINT32_MAX && a != b) out.push_back(Mesh::edge_key(a, b));
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    *edges = std::move(out);
+  }
+  m.touch();
 }
 
 /* The sorted signatures of a mesh's faces. */
@@ -679,6 +720,7 @@ size_t cleanup_after_draw(Mesh &m, const Mesh &before, std::vector<uint8_t> &fac
     remap_edge_keys(m.loose_edges, to);
     remap_edge_keys(m.seams, to);
     remap_edge_keys(m.sharp_edges, to);
+    m.prune_loose_edges();  // a wire that now runs along a face's edge is that edge
   }
   size_t welded = 0;
   for (uint32_t v = 0; v < nv; v++) welded += to[v] != v;
@@ -696,7 +738,7 @@ size_t cleanup_after_draw(Mesh &m, const Mesh &before, std::vector<uint8_t> &fac
   Vec3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
   bool any_new = false;
   for (uint32_t v = 0; v < nv; v++) {
-    if (!is_new[v] || to[v] != v || !finite3(m.positions[v])) continue;
+    if (!is_new[v] || !finite3(m.positions[v])) continue;  // (welded ones too: a gap filled between old corners is drawn geometry)
     any_new = true;
     lo = Vec3(std::min(lo.x, m.positions[v].x), std::min(lo.y, m.positions[v].y), std::min(lo.z, m.positions[v].z));
     hi = Vec3(std::max(hi.x, m.positions[v].x), std::max(hi.y, m.positions[v].y), std::max(hi.z, m.positions[v].z));
@@ -762,16 +804,26 @@ size_t cleanup_after_draw(Mesh &m, const Mesh &before, std::vector<uint8_t> &fac
     opts.face_mask = &near_faces;
     split = fix_t_junctions_filtered(m, cands, eps, opts);
   }
-  if (any_weld) remove_loose_verts(m);  // the welded-away vertices
+  if (any_weld) {  // the welded-away vertices, no others
+    std::vector<uint8_t> gone(nv, 0);
+    for (uint32_t v = 0; v < nv; v++) gone[v] = to[v] != v;
+    remove_vertices(m, gone);
+  }
   return welded + split;
 }
 
 double draw_overlap_gain(const Mesh &before, const Mesh &after, float plane_dist) {
   if (!(plane_dist > 0.0f)) plane_dist = relative_eps(after);
   const std::vector<uint64_t> was = sorted_signatures(before), now = sorted_signatures(after);
+  /* The faces of m beyond the copies `other` has of the same signature: an exact duplicate is a face the draw added. */
   auto focus_of = [](const Mesh &m, const std::vector<uint64_t> &other) {
     std::vector<uint8_t> focus(m.face_count(), 0);
-    for (size_t f = 0; f < focus.size(); f++) focus[f] = std::binary_search(other.begin(), other.end(), face_signature(m, f)) ? 0 : 1;
+    std::unordered_map<uint64_t, size_t> seen;
+    for (size_t f = 0; f < focus.size(); f++) {
+      const uint64_t sig = face_signature(m, f);
+      const auto range = std::equal_range(other.begin(), other.end(), sig);
+      focus[f] = ++seen[sig] > (size_t)(range.second - range.first) ? 1 : 0;
+    }
     return focus;
   };
   const double added = local_overlap_area(after, focus_of(after, was), plane_dist);

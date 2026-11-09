@@ -10872,6 +10872,30 @@ static size_t r462r_faces_with(const Mesh &m, Vec3 p, Vec3 q) {
 }
 
 static void tests_round462_review() {
+  test("the draw guard measures an exact duplicate face (same places, same winding) as overlap, and the cleanup keeps a lone vertex of the user's far from a draw that welds", [] {
+    Mesh one;
+    const uint32_t q[4] = {one.add_vert({0, 0, 0}), one.add_vert({1, 0, 0}), one.add_vert({1, 0, 1}), one.add_vert({0, 0, 1})};
+    one.add_face(q, 4);
+    Mesh two = one;
+    two.add_face(q, 4);
+    const double gain = meshops::draw_overlap_gain(one, two, meshops::relative_eps(two));
+    std::printf("    a quad and the same quad again: the guard sees %.3f of area\n", gain);
+    CHECK(gain > 0.5);
+    CHECK(std::fabs(meshops::draw_overlap_gain(two, two, meshops::relative_eps(two))) < 1e-9);
+    /* A lone vertex far away survives a draw that welds. */
+    Mesh before = one;
+    const uint32_t lone = before.add_vert({50, 0, 50});
+    Mesh m = before;
+    const uint32_t d[4] = {m.add_vert({1, 0, 1}), m.add_vert({2, 0, 1}), m.add_vert({2, 0, 2}), m.add_vert({1, 0, 2})};  // its first corner on the quad's
+    m.add_face(d, 4);
+    std::vector<uint8_t> sel = {0, 1};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    bool kept = false;
+    for (const Vec3 &p : m.positions) kept = kept || length(p - Vec3(50, 0, 50)) < 1e-6f;
+    (void)lone;
+    CHECK(kept);
+    CHECK(m.vert_count() == 8);  // 4 + the lone one + 3 new corners (the fourth welded)
+  });
   test("cleanup after a draw keeps the user's earlier lines: a rectangle drawn along two touching rectangles joins their corners and leaves the line between them", [] {
     const Mesh before = r462r_two_rectangles();
     Mesh m = before;

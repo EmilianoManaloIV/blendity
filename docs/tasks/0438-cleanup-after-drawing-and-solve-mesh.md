@@ -117,6 +117,10 @@ already exists.
   vertex (criterion 1), and T-junctions among the faces around the new vertices (a new vertex joins any edge it lies on; an
   old vertex only an edge the draw made, never a piece of an old edge the draw split; Solve Mesh with a selection skips an
   edge whose faces are all outside it). Wires, seams and sharp marks follow a welded vertex. Solve Mesh keeps the merge.
+- **Twins cancel in the weld**: `weld_faces_local` removes both of two faces on the same corners facing opposite ways, as
+  Push/Pull's `tidy_new_geometry` does (a new wall on an old face is a solid's inner wall). Only the welded-away vertices are
+  compacted afterwards, so a stray vertex of the user's elsewhere stays; a wire that comes to lie on a face edge is pruned; the
+  T-junction step starts from every vertex the draw added, welded or not (a gap filled between old corners).
 - **The guard is local and by area** (`meshops::draw_overlap_gain`): the area lying on another face after the commit minus
   before it, counted only for faces the draw added or changed (after) and removed or changed (before), the faces beside
   them found on a cell grid; no face cap. Measured on a 19,600-face YZ wall and in the `curved` stress rows (cut, cleanup and

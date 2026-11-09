@@ -10888,6 +10888,35 @@ static void tests_round462_engineer() {
 
 /* ---- Round 462's code review ---- */
 static void tests_round462_review() {
+  test("a rectangle drawn to fill a gap between existing corners leaves no T-junction on its edge: every corner welds onto an old vertex, the corner in the middle of a side still joins it", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    Mesh m;
+    const uint32_t v[6] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({0, 0, 1}), m.add_vert({1, 0, 1}), m.add_vert({2, 0, 1})};
+    const uint32_t r1[4] = {v[0], v[3], v[4], v[1]}, r2[4] = {v[1], v[4], v[5], v[2]};
+    m.add_face(r1, 4);
+    m.add_face(r2, 4);
+    const uint32_t b[4] = {m.add_vert({0, 0, -2}), m.add_vert({2, 0, -2}), m.add_vert({2, 0, -1}), m.add_vert({0, 0, -1})};
+    const uint32_t br[4] = {b[3], b[2], b[1], b[0]};  // facing up like the others
+    m.add_face(br, 4);
+    GameObject *g = r462x_object(ed, "Gap", m);
+    ed.command("edit face");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const size_t faces0 = g->get<MeshFilter>()->mesh->face_count();
+    ed.command("draw rectangle");
+    ed.command("drawpoint 0 0 -1");
+    ed.command("drawpoint 2 0 0");
+    ed.step_frame_headless();
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    Mesh copy = after;
+    std::printf("    a gap filled between old corners: %zu -> %zu faces, T-junctions left %zu, doubled vertices %zu\n", faces0, after.face_count(),
+                meshops::fix_t_junctions(copy, {}, meshops::relative_eps(after)), meshops::overlapping_vertices(after).size());
+    CHECK(after.face_count() > faces0);
+    Mesh again = after;
+    CHECK(meshops::fix_t_junctions(again, {}, meshops::relative_eps(after)) == 0);
+    CHECK(meshops::overlapping_vertices(after).empty());
+  });
   test("a rectangle drawn on a 19,600-face YZ wall is drawn at once, the guard looking beside it only (the time of the draw is printed, not asserted)", [] {
     Editor ed;
     ed.init_headless(900, 600);
