@@ -42,6 +42,14 @@ automatic after drawing and also available as a command.
 6. **Solve Mesh** applies the same steps to existing geometry as one `LastOp` operator (`editop solve_mesh`), its
    tolerances in F9 / the drag helper, scoped to the selection or the whole mesh.
 
+Amended at implementation (round 462): the after-draw dissolve merges only faces the weld or the T-junction fix changed,
+never across an edge the draw made and never the drawn faces (merging every coplanar touched pair would erase the shape:
+its inner face and its ring are coplanar with continuous UVs); line faces left by a shape along an old edge are dissolved
+too; the snap is the weld after the commit, not a snap before it; the drawing tolerances are relative to the mesh
+(`relative_eps`, the half bounding diagonal as `mesh_scale`); the overlap guard counts on meshes under 20,000 faces.
+Solve Mesh on the whole mesh merges every flat, UV-continuous region (a deliberately subdivided plane loses its grid; the
+selection scopes it).
+
 ## Consequences
 - Drawing on the teapot works; refusals become specific (missed the mesh, self-crossing, past the silhouette) and are
   counted in their own stress row, which must fall, never rise.
