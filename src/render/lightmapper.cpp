@@ -977,7 +977,7 @@ bool Lightmapper::step(double budget_ms) {
         normals[i] = tx.normal;
       }
       std::string err;
-      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, s_.sample_emissive && pt_->has_mesh_lights()) ||
+      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, s_.sample_emissive && pt_->has_mesh_lights(), s_.seed) ||
           ind.size() != batch) {
         if (pt_->gpu_gather_waiting()) {
           gpu_waiting = true;
@@ -1648,6 +1648,190 @@ void LightingData::load_dir_pages(const std::string &dir) {
     for (size_t i = 0; i < d.texels.size(); i++)
       d.texels[i] = Vec3(bmp.rgbaf[i * 4] * 2.0f - 1.0f, bmp.rgbaf[i * 4 + 1] * 2.0f - 1.0f, bmp.rgbaf[i * 4 + 2] * 2.0f - 1.0f);
   }
+}
+
+/* ------------------------------------------------- round 463: a bake's noise */
+namespace {
+/* "" when the two bakes' charts line up texel for texel, else why not. */
+std::string noise_layout_mismatch(const LightingData &a, const LightingData &b) {
+  if (a.pages.empty() || b.pages.empty()) return "a bake has no pages";
+  if (a.pages.size() != b.pages.size()) return strprintf("the page counts differ (%zu and %zu)", a.pages.size(), b.pages.size());
+  for (size_t p = 0; p < a.pages.size(); p++) {
+    const Lightmap &x = a.pages[p], &y = b.pages[p];
+    if (x.width != y.width || x.height != y.height) return strprintf("page %zu is %dx%d and %dx%d", p, x.width, x.height, y.width, y.height);
+    if (x.texels.size() != (size_t)x.width * x.height || y.texels.size() != x.texels.size()) return strprintf("page %zu holds no full image", p);
+  }
+  if (a.entries.size() != b.entries.size()) return strprintf("the object counts differ (%zu and %zu)", a.entries.size(), b.entries.size());
+  for (const auto &[id, e] : a.entries) {
+    const auto it = b.entries.find(id);
+    if (it == b.entries.end()) return "an object is in one bake only";
+    const LightingData::Entry &f = it->second;
+    if (e.page != f.page || e.tri_uv.size() != f.tri_uv.size()) return "an object's chart differs";
+    /* Compared as bits: a NaN UV (a broken file) is the same in both bakes, and NaN != NaN would refuse them - GCC keeps that
+     * compare, MSVC's /fp:fast folds it (Linux chain, round 463). */
+    if (!e.tri_uv.empty() && std::memcmp(e.tri_uv.data(), f.tri_uv.data(), e.tri_uv.size() * sizeof(Vec2)) != 0) return "an object's chart is placed differently";
+  }
+  return std::string();
+}
+
+/* One triangle's covered texels (the layout's centre test) given to entry `me` where no entry has them yet. UVs that are not numbers or
+ * far outside the page (a broken file) cover nothing. */
+void claim_triangle(const LightingData::Entry &e, size_t t, int W, int H, int32_t me, std::vector<int32_t> &o) {
+  Vec2 px[3];
+  for (int k = 0; k < 3; k++) {
+    const Vec2 uv = e.tri_uv[t + (size_t)k];
+    if (!(uv.x >= -1.0f && uv.x <= 2.0f && uv.y >= -1.0f && uv.y <= 2.0f)) return;  // (also NaN)
+    px[k] = Vec2(uv.x * W, uv.y * H);
+  }
+  const float area2 = (px[1].x - px[0].x) * (px[2].y - px[0].y) - (px[2].x - px[0].x) * (px[1].y - px[0].y);
+  if (!(std::fabs(area2) > 1e-12f)) return;
+  const int x0 = (int)std::max(0.0f, std::floor(std::min({px[0].x, px[1].x, px[2].x})));
+  const int x1 = (int)std::min((float)(W - 1), std::ceil(std::max({px[0].x, px[1].x, px[2].x})));
+  const int y0 = (int)std::max(0.0f, std::floor(std::min({px[0].y, px[1].y, px[2].y})));
+  const int y1 = (int)std::min((float)(H - 1), std::ceil(std::max({px[0].y, px[1].y, px[2].y})));
+  for (int y = y0; y <= y1; y++)
+    for (int x = x0; x <= x1; x++) {
+      const float cx = x + 0.5f, cy = y + 0.5f;
+      const float b0 = ((px[1].x - cx) * (px[2].y - cy) - (px[2].x - cx) * (px[1].y - cy)) / area2;
+      const float b1 = ((px[2].x - cx) * (px[0].y - cy) - (px[0].x - cx) * (px[2].y - cy)) / area2;
+      if (b0 < -1e-4f || b1 < -1e-4f || 1.0f - b0 - b1 < -1e-4f) continue;
+      int32_t &slot = o[(size_t)y * W + x];
+      if (slot < 0) slot = me;
+    }
+}
+
+/* The texels each entry's triangles cover on its page, tagged with the entry's number in `a.entries`' order; -1 uncovered.
+ * Overlapping charts: the first keeps the texel. */
+std::vector<std::vector<int32_t>> noise_owners(const LightingData &d) {
+  std::vector<std::vector<int32_t>> own(d.pages.size());
+  for (size_t p = 0; p < d.pages.size(); p++) own[p].assign(d.pages[p].texels.size(), -1);
+  int32_t number = 0;
+  for (const auto &[id, e] : d.entries) {
+    const int32_t me = number++;
+    if (e.page < 0 || (size_t)e.page >= d.pages.size()) continue;
+    const Lightmap &pg = d.pages[(size_t)e.page];
+    for (size_t t = 0; t + 2 < e.tri_uv.size(); t += 3) claim_triangle(e, t, pg.width, pg.height, me, own[(size_t)e.page]);
+  }
+  return own;
+}
+
+struct NoiseAcc {
+  double dd = 0.0, sm = 0.0, lum = 0.0;
+  size_t n = 0;
+  void add(double d, double smooth, double l) { dd += d * d, sm += smooth * smooth, lum += l, n++; }
+  LightmapNoise::Part part() const {
+    LightmapNoise::Part p;
+    p.texels = n;
+    const double mean = n ? lum / (double)n : 0.0;
+    p.mean_light = mean;
+    p.dark = !(mean > 1e-4);
+    if (p.dark) return p;
+    p.grain = std::sqrt(dd / (double)n / 2.0) / mean;
+    p.blotch = std::sqrt(sm / (double)n / 2.0) / mean;
+    return p;
+  }
+};
+
+/* The mean of d over the 7 x 7 texels round (x, y) that are valid and in the same chart (the texel itself is one). */
+float noise_smoothed(const std::vector<float> &d, const std::vector<uint8_t> &good, const std::vector<int32_t> &own, int W, int H, int x, int y) {
+  const int32_t me = own[(size_t)y * W + x];
+  double sum = 0.0;
+  int n = 0;
+  for (int yy = std::max(0, y - 3); yy <= std::min(H - 1, y + 3); yy++)
+    for (int xx = std::max(0, x - 3); xx <= std::min(W - 1, x + 3); xx++) {
+      const size_t j = (size_t)yy * W + xx;
+      if (!good[j] || own[j] != me) continue;
+      sum += d[j], n++;
+    }
+  return n ? (float)(sum / n) : 0.0f;
+}
+
+/* The object's chart as a box over its page: |a - b| in each texel it owns (the rest 0). */
+void noise_picture(const LightingData &a, const std::vector<std::vector<int32_t>> &own, const std::vector<std::vector<float>> &diffs, LightmapNoise::Object &o) {
+  int number = 0;
+  for (const auto &[id, e] : a.entries) {
+    if (id == o.id) break;
+    number++;
+  }
+  const Lightmap &pg = a.pages[(size_t)o.page];
+  const std::vector<int32_t> &ow = own[(size_t)o.page];
+  int x0 = pg.width, y0 = pg.height, x1 = -1, y1 = -1;
+  for (int y = 0; y < pg.height; y++)
+    for (int x = 0; x < pg.width; x++) {
+      if (ow[(size_t)y * pg.width + x] != number) continue;
+      x0 = std::min(x0, x), x1 = std::max(x1, x), y0 = std::min(y0, y), y1 = std::max(y1, y);
+    }
+  if (x1 < x0) return;
+  o.x0 = x0, o.y0 = y0, o.w = x1 - x0 + 1, o.h = y1 - y0 + 1;
+  o.diff.assign((size_t)o.w * o.h, 0.0f);
+  for (int y = y0; y <= y1; y++)
+    for (int x = x0; x <= x1; x++) {
+      const size_t i = (size_t)y * pg.width + x;
+      if (ow[i] == number) o.diff[(size_t)(y - y0) * o.w + (x - x0)] = std::fabs(diffs[(size_t)o.page][i]);
+    }
+}
+
+void noise_smooth_row(const std::vector<float> &d, const std::vector<uint8_t> &good, const std::vector<int32_t> &own, int W, int H, int y, std::vector<float> &sm) {
+  for (int x = 0; x < W; x++)
+    if (good[(size_t)y * W + x]) sm[(size_t)y * W + x] = noise_smoothed(d, good, own, W, H, x, y);
+}
+}  // namespace
+
+LightmapNoise lightmap_noise(const LightingData &a, const LightingData &b, const std::vector<std::vector<uint8_t>> *invalid) {
+  LightmapNoise out;
+  out.error = noise_layout_mismatch(a, b);
+  if (!out.error.empty()) return out;
+  const std::vector<std::vector<int32_t>> own = noise_owners(a);
+  std::vector<NoiseAcc> objects(a.entries.size());
+  std::vector<std::vector<float>> diffs;  // (per page: a - b where both are good, for the worst objects' pictures)
+  diffs.reserve(a.pages.size());
+  NoiseAcc total;
+  for (size_t p = 0; p < a.pages.size(); p++) {
+    const int W = a.pages[p].width, H = a.pages[p].height;
+    const size_t n = (size_t)W * H;
+    const std::vector<uint8_t> *bad = invalid && p < invalid->size() && (*invalid)[p].size() == n ? &(*invalid)[p] : nullptr;
+    diffs.emplace_back(n, 0.0f);
+    std::vector<float> &d = diffs.back();
+    std::vector<float> mean(n, 0.0f);
+    std::vector<uint8_t> good(n, 0);
+    size_t skipped = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (own[p][i] < 0 || (bad && (*bad)[i])) continue;
+      const float la = lum_of(a.pages[p].texels[i]), lb = lum_of(b.pages[p].texels[i]);
+      if (!(la >= 0.0f) || !(lb >= 0.0f) || !std::isfinite(la) || !std::isfinite(lb)) {
+        skipped++;
+        continue;
+      }
+      d[i] = la - lb, mean[i] = 0.5f * (la + lb), good[i] = 1;
+    }
+    out.skipped += skipped;
+    std::vector<float> sm(n, 0.0f);
+    JobSystem::global().parallel_for((int64_t)H, 4, [&](int64_t y0, int64_t y1) {
+      for (int64_t y = y0; y < y1; y++) noise_smooth_row(d, good, own[p], W, H, (int)y, sm);
+    });
+    NoiseAcc page;
+    for (size_t i = 0; i < n; i++) {
+      if (!good[i]) continue;
+      page.add(d[i], sm[i], mean[i]);
+      objects[(size_t)own[p][i]].add(d[i], sm[i], mean[i]);
+    }
+    total.dd += page.dd, total.sm += page.sm, total.lum += page.lum, total.n += page.n;
+    out.pages.push_back(page.part());
+  }
+  out.all = total.part();
+  size_t k = 0;
+  for (const auto &[id, e] : a.entries) {
+    LightmapNoise::Object o;
+    static_cast<LightmapNoise::Part &>(o) = objects[k++].part();
+    o.id = id, o.page = e.page;
+    if (o.dark || o.texels < 16) continue;
+    out.worst.push_back(o);
+  }
+  std::sort(out.worst.begin(), out.worst.end(), [](const LightmapNoise::Object &x, const LightmapNoise::Object &y) { return x.blotch > y.blotch; });
+  if (out.worst.size() > 5) out.worst.resize(5);
+  for (LightmapNoise::Object &o : out.worst) noise_picture(a, own, diffs, o);
+  out.ok = true;
+  return out;
 }
 
 }  // namespace bl

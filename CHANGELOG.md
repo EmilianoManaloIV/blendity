@@ -2,6 +2,48 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 463): a bake's noise, measured
+
+**Asked:** SideRail's full bake (2 pages at 2048 px, 806,641 texels, 50.3 s) leaves blotchy noise on the side tunnel's walls and
+floor and nothing measured it: `lightmap_quality` needs a reference 16 times longer, and the stations against Unity mix noise
+with bias. One number for a bake's noise, without a reference, so rounds 464-466 can each show their gain at the same bake time.
+
+**Added (task 0439)**
+- **`lightmap_noise(a, b)`** (`src/render/lightmapper.{h,cpp}`): two bakes of one scene at different seeds (the layout is
+  deterministic, so the texels line up). Over the covered, valid texels, **grain** = sqrt(mean((a - b)^2) / 2) / mean((a + b) / 2)
+  is one bake's per-texel noise relative to its light; **blotch** is the same with (a - b) first averaged over each texel's 7 x 7
+  neighbours in its own chart - what a filter leaves. Per page, and the five objects with the most blotch; a different layout is
+  refused with the reason; NaN or negative texels are left out and counted; a page with no light is "dark". It cannot see bias.
+- **`lighting seed <n>`** (a measurement setting: not saved, not in `lightmap_scene_key`, so the other seed's bake leaves the
+  lighting current; the log names a seed when it isn't 0) reaches the CPU texels, the card's gather (`PathTracer::gpu_gather`
+  takes a seed: it moves every point's random stream) and the probe bake (`probe_bake`'s `seed`). `lighting noise <A> <B>` prints the
+  numbers of two `lighting save` folders and writes `noise.json` inside folder B (and `noise_worst_N.png`, the worst objects' |a - b|, there).
+- **`tools/unity_compare.py ... --blendity-bake --pages --noise`**: the scene opened once and baked at seeds 0 and 1, both saved, `lighting noise` between them (`pages/blendity_seed1/noise.json`), in report.md / report.json (and `--self-test`); `tools/dev/chain.sh`'s SIDERAIL stage passes `--pages --noise`.
+- **`lightmap_quality`**: the scene `tunnel_lamps` (a 24 m bent tunnel, 20 small emissive lamps, 10 Baked point lights of range 2, black
+  sky) and the columns grain and blotch for all four scenes (a second bake at seed 1). The old scenes' bake and reference are the same code.
+- **What the number is not (deviations from the spec):** saved pages are RGBE (8-bit mantissa, no negatives), a grain floor of roughly
+  0.1-0.2 % per texel (0.0027 in memory against 0.00284 from saved folders); `lighting noise`, the comparison tool and the stress columns
+  pass no invalid mask, so they count inside-geometry texels; the 7 x 7 window's chart is an object's entry, not a UV island, and near a
+  chart's edge it holds fewer texels (charts 1-3 texels wide read white noise as about s / 4.6); the Light Volume bake ignores the seed;
+  the card's stream shifts by 2^21-2^22 points (about 2^21 distinct streams).
+- **Learn:** "A bake's noise, measured", its Try-it in five steps the user clicks after each bake has finished.
+- **Baseline (SideRail on the card, today's main, its LightingSettings: 1024 indirect samples, 820,031 texels):** bake 39 s (lightmaps
+  35.5 s, the A-Trous filter 2.3 s); grain 5.46 (page 0 0.41, page 1 17.5), blotch 1.24 (0.10 / 3.99) - page 1 carried by rare very
+  bright texels (emitter samples and chance-kept lights skip the clamp: the spots on the sofas and floor). Stations MAE / SSIM: spawn
+  3.57 / 0.843, spawn_back 1.30 / 0.791, floor 3.35 / 0.818, ahead 2.32 / 0.933 (Pass 19's, unchanged), and two new stations at the
+  owner's views of the side tunnel (`tools/dev/siderail_stations.json`, matched by eye to their screenshots): side_bar_high 6.73 / 0.854,
+  side_tunnel_eye 6.06 / 0.876. docs/PERFORMANCE.md's "Pass 21" table starts there.
+
+**Checked:** the suites - Windows dependency-free 16,936 checks, Windows with Blender's libraries 17,839, Linux 16,942; after the chain's
+two test fixes (the card's seed test sampled a uniform sky, so no seed could change it; Linux kept NaN != NaN in the layout compare, now a
+bit compare) `--group lighting` again in all three (5,575 / 5,608 with the card's seed test run / 5,577), 0 failed. The libraries
+build's `gpu` group fails four picture comparisons (test_gpu.cpp:887, 2226, 4821) and the slow-open test (:52) in a worktree build - the
+same in Pass 20's worktree build (C:/blwtlib), while the main clone's binary passes: the build setting, not this round (open item); the new group `tests_round463` (18 tests in three functions - 5 of the measure, 7 edges, 6 console and seed: one seed grain 0 and blotch 0, seeds 0 and 1 above 0; a synthetic page of
+light 1 plus noise 0.1 reads grain 0.1004 and blotch 0.0144 against a seventh 0.0143, smooth noise within 2 %; refusals, invalid, NaN and
+dark; `lighting seed 3` leaves the lighting current and seed 0 returns the pages bit for bit; `lighting noise` on two folders). Stress: `lightmap_quality` - the old three scenes' RMSE and bias unchanged (0.016 / 0.008 / 0.060),
+`tunnel_lamps` 0.154 / 0.0002, grain and blotch above; the audits (coverage, HCI, KLM, Unity meta, citations, the command sweep
+regenerated for the two new commands, perf suite).
+
 ## 2026-11-08 (round 457): Pass 19's write-up
 
 **Asked:** Pass 19's round 457 - the pass in one table, the comparison with Unity, the lesson, the baseline, the per-round

@@ -6831,6 +6831,48 @@ Scene corridor() {
   s.texels = 16.0f;
   return s;
 }
+/* Round 463 (task 0439): a 24 m tunnel, 3 m wide and high - 16 m straight, then an L-bend and 8 m more (the bend's far end the
+ * second leg's cap) - lit by 20 small emissive lamps along the foot of the walls and 10 Baked point lights of range 2 under
+ * the ceiling, a black sky: many small sources, some hidden round the corner - SideRail's side tunnel in little. */
+Scene tunnel_lamps() {
+  Scene s;
+  s.name = "a bent tunnel lit by lamps";
+  const MaterialPtr white = make_material("White", {0.7f, 0.7f, 0.7f}), lamp = make_material("Lamp", {0.2f, 0.2f, 0.2f});
+  lamp->emission = Vec3(1.0f, 0.85f, 0.6f);
+  lamp->emission_strength = 6.0f;
+  uint64_t id = 1;
+  auto add = [&](Vec3 at, Vec3 euler, float w, float h) { s.objects.push_back(wall(id++, at, euler, w, h, white, s.keep)); };
+  add({0, 0, 8}, {0, 0, 0}, 3, 16);                // floors: the first leg (z 0..16, x -1.5..1.5), the second (x 1.5..9.5, z 13..16)
+  add({5.5f, 0, 14.5f}, {0, 0, 0}, 8, 3);
+  add({0, 3, 8}, {180, 0, 0}, 3, 16);              // ceilings
+  add({5.5f, 3, 14.5f}, {180, 0, 0}, 8, 3);
+  add({-1.5f, 1.5f, 8}, {0, 0, -90}, 16, 3);       // the first leg's left wall
+  add({1.5f, 1.5f, 6.5f}, {0, 0, 90}, 13, 3);      // its right wall, to where the second leg opens
+  add({5.5f, 1.5f, 13}, {90, 0, 0}, 8, 3);         // the second leg's near wall
+  add({4, 1.5f, 16}, {-90, 0, 0}, 11, 3);          // the far wall of both
+  add({9.5f, 1.5f, 14.5f}, {0, 0, 90}, 3, 3);      // the second leg's cap
+  add({0, 1.5f, 0}, {90, 0, 0}, 3, 3);             // the first leg's start
+  MeshPtr cube = primitives::cube();
+  s.keep.push_back(cube);
+  auto lamp_at = [&](Vec3 at) { s.objects.push_back(bake_object(id++, cube, Mat4::trs(at, Quat(), {0.12f, 0.12f, 0.12f}), {lamp})); };
+  for (int i = 0; i < 8; i++) lamp_at({-1.44f, 0.06f, 1.0f + 1.8f * (float)i});  // 20 lamps: 8 on the left wall's foot,
+  for (int i = 0; i < 6; i++) lamp_at({1.44f, 0.06f, 1.5f + 2.0f * (float)i});   // 6 on the right wall's,
+  for (int i = 0; i < 6; i++) lamp_at({2.5f + 1.2f * (float)i, 0.06f, 15.94f});  // 6 along the second leg's far wall
+  for (int i = 0; i < 10; i++) {
+    BakeLight l;
+    l.light.type = RenderLight::Point;
+    l.light.position = i < 6 ? Vec3((i % 2) ? 0.5f : -0.5f, 2.8f, 2.0f + 2.3f * (float)i) : Vec3(3.0f + 2.0f * (float)(i - 6), 2.8f, 14.5f);
+    l.light.intensity = 1.5f;
+    l.light.range = 2.0f;
+    l.light.color = (i % 3 == 0) ? Vec3(1.0f, 0.8f, 0.6f) : Vec3(0.9f, 0.95f, 1.0f);
+    l.mode = 2, l.id = 900 + (uint64_t)i;
+    s.lights.push_back(l);
+  }
+  s.env.mode = Environment::Color;
+  s.env.color = Vec3(0.0f);
+  s.texels = 16.0f;
+  return s;
+}
 /* A courtyard open to the sky (the gradient), a Baked sun, a box in the middle. */
 Scene courtyard() {
   Scene s;
@@ -6972,18 +7014,21 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
             "Synthetic scenes baked at round 421's defaults (256 indirect, 32 direct samples, 2 bounces, the filter on - kept so the rows compare; Unity's 512 is the default since round 423) against a reference "
             "of the same scene and layout (16 times the samples - 4 in a quick run -, the filter off, its own random samples); the "
             "error is the luminance RMSE over the covered texels, relative to the reference's mean, and the mean difference (a "
-            "filter's bias). Then the samples against time on the room, and the leak under a sunk box. Unity's own bake is compared "
+            "filter's bias; round 463: and the bake's own grain and blotch, from a second bake at seed 1 - no reference needed, no bias seen). Then the samples against time on the room, and the leak under a sunk box. Unity's own bake is compared "
             "on real scenes by tools/unity_compare.py --blendity-bake.");
-  rep.table({"scene", "texels", "bake ms", "relative RMSE", "bias", "reference ms"});
+  rep.table({"scene", "texels", "bake ms", "relative RMSE", "bias", "grain", "blotch", "reference ms"});
   const int ref_indirect = o.quick ? 1024 : 4096, ref_direct = o.quick ? 128 : 512;
   lmq::Result room_ref;
   const lmq::Scene room = lmq::room();
-  for (const lmq::Scene &s : {room, lmq::corridor(), lmq::courtyard()}) {
+  for (const lmq::Scene &s : {room, lmq::corridor(), lmq::tunnel_lamps(), lmq::courtyard()}) {
     const lmq::Result ref = lmq::bake(s, ref_indirect, ref_direct, false, 1);
     const lmq::Result def = lmq::bake(s, 256, 32, true);
     const lmq::Error e = lmq::compare(def.data, ref.data);
     if (!e.same_layout) rep.note("**" + s.name + ": the bake's layout differs from the reference's (the layout must be deterministic): no error measured.**");
-    rep.row({s.name, std::to_string(e.texels), f1(def.ms), lmq::f3(e.rel), lmq::f4(e.bias), f1(ref.ms)});
+    /* Round 463: the grain and blotch from a second bake of the same settings at seed 1 (no reference needed). */
+    const lmq::Result again = lmq::bake(s, 256, 32, true, 1);
+    const LightmapNoise nz = lightmap_noise(def.data, again.data);
+    rep.row({s.name, std::to_string(e.texels), f1(def.ms), lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-", f1(ref.ms)});
     if (s.name == room.name) room_ref = ref;
   }
   rep.table({"room: indirect samples", "filter", "bake ms", "relative RMSE", "bias"});

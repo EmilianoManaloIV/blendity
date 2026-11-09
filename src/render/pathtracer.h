@@ -232,9 +232,10 @@ class PathTracer {
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
    * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
    * cosine gather), mode 2: along dirs[i]. `hit` (optional) gets the share of paths whose first ray hit
-   * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't. */
+   * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't.
+   * Round 463: `seed` (0: as before) moves every point's random sequence to another one - the noise measurement's second bake. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
-                  std::vector<float> *hit, std::string *error, bool mis_first_hit = false) const;
+                  std::vector<float> *hit, std::string *error, bool mis_first_hit = false, uint32_t seed = 0) const;
   /* Round 331: the fogs a path is in - a Volume material's object, entered by a front face, left by a back face. Fogs
    * inside fogs add up (their densities sum where they overlap), up to four deep. */
   struct Medium {

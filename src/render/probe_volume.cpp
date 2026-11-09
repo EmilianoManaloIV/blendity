@@ -392,7 +392,7 @@ static float probe_light_visibility(const PathTracer &pt, const RenderLight &l, 
 }
 
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start, size_t count,
-                float indirect_intensity, int gpu_device, std::string *gpu_error, const Environment *env) {
+                float indirect_intensity, int gpu_device, std::string *gpu_error, const Environment *env, uint32_t seed) {
   samples = std::max(6, std::min(65536, samples));
   const float ii = finite_bits(indirect_intensity) ? std::max(0.0f, std::min(100.0f, indirect_intensity)) : 1.0f;
   const size_t n = d.position.size();
@@ -408,14 +408,14 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
       const size_t i = start + k;
       if (!d.valid[i]) continue;
       g_first[k] = origins.size();
-      uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u);
+      uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u + seed * 0x85EBCA6Bu);
       for (int s = 0; s < samples; s++) {
         origins.push_back(d.position[i]);
         dirs.push_back(sphere_dir(s, samples, rnd01(rng) * 6.2831853f));
       }
     }
     std::string err;
-    if (!pt.gpu_gather(gpu_device, 2, origins, dirs, 1, g_out, &g_hit, &err) || g_out.size() != origins.size()) {
+    if (!pt.gpu_gather(gpu_device, 2, origins, dirs, 1, g_out, &g_hit, &err, false, seed) || g_out.size() != origins.size()) {
       if (gpu_error && !pt.gpu_gather_waiting()) *gpu_error = err.empty() ? "the GPU gather failed" : err;  // still opening: the CPU this time
       g_out.clear();
     }
@@ -435,7 +435,7 @@ void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<Bake
       sh = ProbeSH{};
       if (!d.valid[(size_t)i]) continue;
       const Vec3 p = d.position[(size_t)i];
-      uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u);
+      uint32_t rng = hash32((uint32_t)i * 2654435761u + 7u + seed * 0x85EBCA6Bu);
       std::array<float, 6> wsum{};
       uint64_t rays = 0;
       const size_t g0 = g_first[(size_t)(i - (int64_t)start)];

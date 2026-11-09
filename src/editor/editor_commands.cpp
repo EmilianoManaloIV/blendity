@@ -2061,7 +2061,27 @@ void Editor::run_console_command(const std::string &line) {
       const bool overwrite = t.size() > 3 && to_lower(t.back()) == "overwrite";
       std::string dir = t.size() > 2 ? line_rest(line, 2) : std::string();
       if (overwrite) dir = trim_overwrite_word(dir);
+      if (dir.size() >= 2 && dir.front() == '"' && dir.back() == '"') dir = dir.substr(1, dir.size() - 2);  // (round 463: a folder with spaces in "quotes")
       save_shown_lighting(dir, overwrite);
+    }
+    else if (sub == "seed") {
+      /* lighting seed <n> (round 463): the next Generate Lighting draws other samples - a measurement setting, not saved and not in
+       * the scene's key; 0 the normal bake. lighting noise <folder A> <folder B>: grain and blotch of two saved bakes. */
+      /* Digits only, at most 2^32 - 1: strtoul read "-1" as 4294967295 and "1.5x" as 1 (test-engineer, round 463). A refused
+       * value leaves the seed as it was. */
+      const std::string word = arg(2, "0");
+      const bool digits = !word.empty() && word.size() <= 10 && word.find_first_not_of("0123456789") == std::string::npos;
+      const unsigned long long v = digits ? std::stoull(word) : 0ull;
+      if (!digits || v > 0xFFFFFFFFull)
+        Log::warn("lighting seed: '%s' is not a whole number from 0 to 4294967295 - the seed stays %u", word.c_str(), bake_seed_);
+      else {
+        bake_seed_ = (uint32_t)v;
+        Log::info("lighting seed: %u%s", bake_seed_, bake_seed_ ? " (the next bake draws other samples; `lighting seed 0` restores the normal bake)" : "");
+      }
+    }
+    else if (sub == "noise") {  // (a folder with spaces in "quotes")
+      const std::vector<std::string> f = split_quoted(line_rest(line, 2));
+      lighting_noise_command(f.size() > 0 ? f[0] : std::string(), f.size() > 1 ? f[1] : std::string());
     }
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
@@ -2072,7 +2092,7 @@ void Editor::run_console_command(const std::string &line) {
       scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
       mark_changed("Lighting Updates");
     }
-    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] (a relative folder is the project's)");
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] | seed <n> | noise <folder A> <folder B> (a relative folder is the project's)");
   }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));

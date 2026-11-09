@@ -8,6 +8,7 @@
 #include "../src/render/unity_lightmaps.h"
 #include "../src/scene/unity_scene.h"
 #include "../src/render/light_pick.h"
+#include <random>
 #include <set>
 #include <tuple>
 
@@ -8278,6 +8279,546 @@ static void tests_round455() {
   });
 }
 
+/* ---- round 463 (task 0439): a bake's noise, measured ---- */
+namespace r463 {
+/* One page of w x h texels, one chart over all of it (two triangles), the luminance `fill(x, y)` gives. */
+template <class F>
+static LightingData page_of(int w, int h, F fill) {
+  LightingData d;
+  Lightmap lm;
+  lm.width = w, lm.height = h;
+  lm.texels.resize((size_t)w * h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) lm.texels[(size_t)y * w + x] = Vec3(fill(x, y));
+  d.pages.push_back(lm);
+  LightingData::Entry e;
+  e.page = 0;
+  e.tri_uv = {Vec2(0, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0, 0), Vec2(1, 1), Vec2(0, 1)};
+  d.entries[7] = e;
+  return d;
+}
+
+/* A coarse random grid sampled bilinearly: noise whose 7 x 7 average is itself (a blotch, not grain). */
+struct SmoothNoise {
+  int cell = 24, n = 0;
+  std::vector<float> v;
+  SmoothNoise(int size, float sd, uint32_t seed) {
+    n = size / cell + 2;
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> g(0.0f, sd);
+    for (int i = 0; i < n * n; i++) v.push_back(g(rng));
+  }
+  float at(int x, int y) const {
+    const float fx = (float)x / (float)cell, fy = (float)y / (float)cell;
+    const int ix = (int)fx, iy = (int)fy;
+    const float tx = fx - (float)ix, ty = fy - (float)iy;
+    auto c = [&](int a, int b) { return v[(size_t)(b * n + a)]; };
+    return (c(ix, iy) * (1 - tx) + c(ix + 1, iy) * tx) * (1 - ty) + (c(ix, iy + 1) * (1 - tx) + c(ix + 1, iy + 1) * tx) * ty;
+  }
+};
+
+static std::string join_log(size_t since) {
+  std::vector<LogEntry> out;
+  Log::fetch(since, out);
+  std::string all;
+  for (const LogEntry &e : out) all += e.text + "\n";
+  return all;
+}
+static size_t log_mark() {
+  std::vector<LogEntry> out;
+  return Log::fetch(0, out);
+}
+
+static bool same_pages(const LightingData &a, const LightingData &b) {
+  if (a.pages.size() != b.pages.size()) return false;
+  for (size_t p = 0; p < a.pages.size(); p++)
+    if (a.pages[p].texels.size() != b.pages[p].texels.size() ||
+        std::memcmp(a.pages[p].texels.data(), b.pages[p].texels.data(), a.pages[p].texels.size() * sizeof(Vec3)) != 0)
+      return false;
+  return true;
+}
+
+/* A floor with a box on it: the box's shadow and bounce give the gather something to be noisy about. */
+static void scene(Editor &ed) {
+  r35_open(ed);
+  r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+  r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+  ed.commit_change("r463 scene");
+}
+
+static void bake_at(Editor &ed, int seed) {
+  ed.command("lighting seed " + std::to_string(seed));
+  r35_bake(ed);
+}
+}  // namespace r463
+
+/* ---- round 463, the independent checks (test engineer): edges of lightmap_noise, the console's refusals, the seed on the other streams ---- */
+namespace r463 {
+/* Charts as blocks of a page; every block is its own chart (two triangles). */
+struct Block {
+  int x, y, w, h;
+  uint64_t id;
+  int page = 0;
+};
+static LightingData blocks_of(int W, int H, int pages, const std::vector<Block> &bs, float fill) {
+  LightingData d;
+  for (int p = 0; p < pages; p++) {
+    Lightmap lm;
+    lm.width = W, lm.height = H;
+    lm.texels.assign((size_t)W * H, Vec3(fill));
+    d.pages.push_back(lm);
+  }
+  for (const Block &b : bs) {
+    LightingData::Entry e;
+    e.page = b.page;
+    const float x0 = (float)b.x / (float)W, x1 = (float)(b.x + b.w) / (float)W, y0 = (float)b.y / (float)H, y1 = (float)(b.y + b.h) / (float)H;
+    e.tri_uv = {Vec2(x0, y0), Vec2(x1, y0), Vec2(x1, y1), Vec2(x0, y0), Vec2(x1, y1), Vec2(x0, y1)};
+    d.entries[b.id] = e;
+  }
+  return d;
+}
+static void paint(LightingData &d, const Block &b, float v) {
+  Lightmap &lm = d.pages[(size_t)b.page];
+  for (int y = b.y; y < b.y + b.h; y++)
+    for (int x = b.x; x < b.x + b.w; x++) lm.texels[(size_t)y * lm.width + x] = Vec3(v);
+}
+static LightingData scaled(const LightingData &d, float k) {
+  LightingData o = d;
+  for (Lightmap &lm : o.pages)
+    for (Vec3 &t : lm.texels) t = t * k;
+  return o;
+}
+static bool finite_noise(const LightmapNoise &n) {
+  bool ok = std::isfinite(n.all.grain) && std::isfinite(n.all.blotch);
+  for (const LightmapNoise::Part &p : n.pages) ok = ok && std::isfinite(p.grain) && std::isfinite(p.blotch);
+  for (const LightmapNoise::Object &o : n.worst) ok = ok && std::isfinite(o.grain) && std::isfinite(o.blotch);
+  return ok;
+}
+static LightingData noisy_page(int N, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::normal_distribution<float> g(0.0f, 0.1f);
+  return page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+}
+}  // namespace r463
+
+static void tests_round463_edges() {
+  test("A bake's noise (round 463): an empty lighting, a bake with no pages, and bakes with different page counts are refused with a reason, never read", [] {
+    const LightingData empty;
+    const LightmapNoise e = lightmap_noise(empty, empty);
+    CHECK(!e.ok && !e.error.empty() && e.pages.empty() && e.worst.empty());
+    const LightingData one = r463::page_of(16, 16, [](int, int) { return 1.0f; });
+    CHECK(!lightmap_noise(empty, one).ok && !lightmap_noise(one, empty).ok);
+    LightingData two = one;
+    two.pages.push_back(two.pages[0]);
+    const LightmapNoise c = lightmap_noise(one, two);
+    std::printf("    page counts: \"%s\"\n", c.error.c_str());
+    CHECK(!c.ok && !c.error.empty());
+    CHECK(!lightmap_noise(two, one).ok);
+    /* A page whose texel array doesn't match its size must not be indexed. */
+    LightingData torn = one;
+    torn.pages[0].texels.resize(10);
+    CHECK(!lightmap_noise(torn, torn).ok && !lightmap_noise(one, torn).ok);
+  });
+  test("A bake's noise (round 463): every texel invalid, a wrong-sized invalid mask, a chart off the page and an object on a missing page read as no measurement, never NaN", [] {
+    const int N = 24;
+    const LightingData a = r463::noisy_page(N, 1), b = r463::noisy_page(N, 2);
+    std::vector<std::vector<uint8_t>> all_bad(1, std::vector<uint8_t>((size_t)N * N, 1));
+    const LightmapNoise n = lightmap_noise(a, b, &all_bad);
+    CHECK(n.ok && n.all.texels == 0 && n.all.dark && r463::finite_noise(n) && n.all.grain == 0.0 && n.worst.empty());
+    std::vector<std::vector<uint8_t>> short_mask(1, std::vector<uint8_t>(5, 1));
+    const LightmapNoise s = lightmap_noise(a, b, &short_mask);
+    CHECK(s.ok && s.all.texels == (size_t)N * N);
+    LightingData off = r463::page_of(N, N, [](int, int) { return 1.0f; });
+    off.entries[7].tri_uv = {Vec2(2, 2), Vec2(3, 2), Vec2(3, 3), Vec2(-3, -3), Vec2(-2, -3), Vec2(-2, -2), Vec2(0.5f, 0.5f), Vec2(0.5f, 0.5f), Vec2(0.5f, 0.5f)};
+    const LightmapNoise o = lightmap_noise(off, off);
+    CHECK(o.ok && o.all.texels == 0 && r463::finite_noise(o));
+    LightingData lost = r463::page_of(N, N, [](int, int) { return 1.0f; });
+    lost.entries[7].page = 5;
+    const LightmapNoise l = lightmap_noise(lost, lost);
+    CHECK(l.ok && l.all.texels == 0 && r463::finite_noise(l));
+  });
+  test("A bake's noise (round 463): one-texel and one-texel-wide charts at the page's corner and edges are read inside their bounds, and charts under 16 texels stay out of the worst list", [] {
+    using r463::Block;
+    const int W = 32, H = 32;
+    const std::vector<Block> bs = {{0, 0, 1, 1, 1}, {W - 1, 0, 1, H, 2}, {5, H - 1, 20, 1, 3}, {8, 8, 12, 12, 4}};
+    LightingData a = r463::blocks_of(W, H, 1, bs, 1.0f), b = a;
+    for (const Block &k : bs) r463::paint(b, k, 1.5f);
+    r463::paint(a, bs[3], 0.5f);
+    const LightmapNoise n = lightmap_noise(a, b);
+    CHECK(n.ok && r463::finite_noise(n));
+    CHECK(n.all.texels == (size_t)(1 + H + 20 + 144));
+    CHECK(n.worst.size() == 3);  // ids 2 (32 texels), 3 (20) and 4 (144); the one-texel chart is out
+    for (const LightmapNoise::Object &o : n.worst) {
+      CHECK(o.texels >= 16 && o.id != 1);
+      /* a constant difference survives any averaging inside the chart: blotch equals grain */
+      CHECK(std::fabs(o.blotch - o.grain) < 1e-6 * std::max(1.0, o.grain));
+    }
+  });
+  test("A bake's noise (round 463): a quiet chart beside a loud one is not smeared by it, and the worst objects come ordered, at most five, the loudest first", [] {
+    using r463::Block;
+    const int W = 32, H = 24;
+    std::vector<Block> bs;
+    const float delta[8] = {0.10f, 0.80f, 0.30f, 0.05f, 0.60f, 0.20f, 0.90f, 0.40f};
+    for (int i = 0; i < 8; i++) bs.push_back({(i % 4) * 8, (i / 4) * 8, 8, 8, (uint64_t)(10 + i)});
+    bs.push_back({0, 16, 3, 3, 99});  // 9 texels: under 16, left out even with the biggest difference
+    LightingData a = r463::blocks_of(W, H, 1, bs, 1.0f), b = a;
+    for (int i = 0; i < 8; i++) r463::paint(b, bs[(size_t)i], 1.0f + delta[i]);
+    r463::paint(b, bs[8], 9.0f);
+    const LightmapNoise n = lightmap_noise(a, b);
+    CHECK(n.ok && n.worst.size() == 5);
+    for (size_t i = 1; i < n.worst.size(); i++) CHECK(n.worst[i - 1].blotch >= n.worst[i].blotch);
+    const uint64_t want[5] = {16, 11, 14, 17, 12};  // deltas .90 .80 .60 .40 .30
+    for (size_t i = 0; i < n.worst.size() && i < 5; i++) CHECK(n.worst[i].id == want[i]);
+    for (const LightmapNoise::Object &o : n.worst) {
+      const double d = (double)delta[o.id - 10];
+      const double exact = d / std::sqrt(2.0) / (1.0 + d / 2.0);
+      CHECK(std::fabs(o.blotch - exact) < 1e-4 && std::fabs(o.grain - exact) < 1e-4);
+    }
+  });
+  test("A bake's noise (round 463): swapping the two bakes reads the same numbers, and lighting 4 times dimmer, 2 times or 1000 times brighter reads the same relative grain and blotch", [] {
+    const int N = 64;
+    const LightingData a = r463::noisy_page(N, 11), b = r463::noisy_page(N, 12);
+    const LightmapNoise ab = lightmap_noise(a, b), ba = lightmap_noise(b, a);
+    CHECK(ab.ok && ba.ok && ab.all.grain > 0.0);
+    CHECK(std::fabs(ab.all.grain - ba.all.grain) < 1e-9 * ab.all.grain && std::fabs(ab.all.blotch - ba.all.blotch) < 1e-9 * ab.all.blotch);
+    const float ks[3] = {2.0f, 0.25f, 1000.0f};
+    for (float k : ks) {
+      const LightmapNoise s = lightmap_noise(r463::scaled(a, k), r463::scaled(b, k));
+      std::printf("    x%g: grain %.6f (was %.6f), blotch %.6f (was %.6f)\n", k, s.all.grain, ab.all.grain, s.all.blotch, ab.all.blotch);
+      CHECK(s.ok && std::fabs(s.all.grain - ab.all.grain) < 1e-4 * ab.all.grain && std::fabs(s.all.blotch - ab.all.blotch) < 1e-4 * ab.all.blotch);
+    }
+    /* one bake 1.5 times the other is a bias, and does read as a difference */
+    CHECK(lightmap_noise(a, r463::scaled(a, 1.5f)).all.grain > 0.1);
+  });
+  test("A bake's noise (round 463): lights of 1e30 stay finite and scale-free, infinities are left out and counted in either bake, and two pages read separately (a quiet one beside a noisy one)", [] {
+    const int N = 32;
+    LightingData a = r463::noisy_page(N, 21), b = r463::noisy_page(N, 22);
+    const LightmapNoise ref = lightmap_noise(a, b);
+    const LightmapNoise huge = lightmap_noise(r463::scaled(a, 1e30f), r463::scaled(b, 1e30f));
+    std::printf("    1e30: grain %.5f (at 1: %.5f)\n", huge.all.grain, ref.all.grain);
+    CHECK(huge.ok && r463::finite_noise(huge) && std::fabs(huge.all.grain - ref.all.grain) < 1e-3 * ref.all.grain);
+    LightingData inf = b;
+    const float big = std::numeric_limits<float>::infinity();
+    inf.pages[0].texels[0] = Vec3(big);
+    inf.pages[0].texels[1] = Vec3(-big);
+    inf.pages[0].texels[2] = Vec3(big, 0.0f, 0.0f);
+    const LightmapNoise i = lightmap_noise(a, inf);
+    CHECK(i.ok && i.skipped == 3 && r463::finite_noise(i) && i.all.texels == (size_t)N * N - 3);
+    const LightmapNoise j = lightmap_noise(inf, a);
+    CHECK(j.ok && j.skipped == 3 && j.all.texels == i.all.texels);
+    using r463::Block;
+    const std::vector<Block> bs = {{0, 0, 16, 16, 1, 0}, {0, 0, 16, 16, 2, 1}};
+    LightingData p = r463::blocks_of(16, 16, 2, bs, 1.0f), q = p;
+    std::mt19937 rng(3);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    for (Vec3 &t : q.pages[0].texels) t = Vec3(1.0f + g(rng));
+    const LightmapNoise two = lightmap_noise(p, q);
+    CHECK(two.ok && two.pages.size() == 2 && two.pages[0].grain > 0.02 && two.pages[1].grain == 0.0 && two.pages[1].blotch == 0.0);
+    CHECK(two.all.grain < two.pages[0].grain && two.all.grain > 0.0 && two.all.texels == 512);
+  });
+  test("A bake's noise (round 463): a page with no light reads 'dark' beside a lit, noisy page, and the all-pages number still reads", [] {
+    using r463::Block;
+    const std::vector<Block> bs = {{0, 0, 16, 16, 1, 0}, {0, 0, 16, 16, 2, 1}};
+    LightingData p = r463::blocks_of(16, 16, 2, bs, 0.0f), q = p;
+    std::mt19937 rng(8);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    for (Vec3 &t : p.pages[0].texels) t = Vec3(1.0f + g(rng));
+    for (Vec3 &t : q.pages[0].texels) t = Vec3(1.0f + g(rng));
+    const LightmapNoise n = lightmap_noise(p, q);
+    CHECK(n.ok && n.pages.size() == 2 && !n.pages[0].dark && n.pages[1].dark && n.pages[1].grain == 0.0);
+    CHECK(!n.all.dark && n.all.grain > 0.0 && r463::finite_noise(n));
+  });
+}
+
+static void tests_round463_console() {
+  test("`lighting seed` (round 463): a word, a negative or a malformed number is refused with a warning and the seed set before stays (the next bake is seed 7's, bit for bit)", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 7);
+    const LightingData base = ed.lighting_data_for_test();
+    const char *junk[] = {"lighting seed abc", "lighting seed -1", "lighting seed -5", "lighting seed 1.5x", "lighting seed 99999999999999999999", "lighting seed nan"};
+    for (const char *cmd : junk) {
+      ed.command("lighting seed 7");
+      const size_t mark = r463::log_mark();
+      ed.command(cmd);
+      const std::string said = r463::join_log(mark);
+      CHECK(said.find("is not a whole number") != std::string::npos && said.find("the seed stays 7") != std::string::npos);
+      r35_bake(ed);
+      const bool same = r463::same_pages(base, ed.lighting_data_for_test());
+      std::printf("    \"%s\": next bake %s seed 7's; log: %.90s\n", cmd, same ? "is" : "is NOT", said.c_str());
+      CHECK(same);
+      CHECK(!ed.lighting_out_of_date_for_test());
+    }
+    ed.command("lighting seed 0");
+  });
+  test("`lighting seed` (round 463): with no number the old pages come back, and a seed is not part of the scene's key", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 0);
+    const LightingData base = ed.lighting_data_for_test();
+    ed.command("lighting seed 7");
+    r35_bake(ed);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()) && ed.lighting_data_for_test().scene_key == base.scene_key);
+    ed.command("lighting seed");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting seed 0");
+  });
+  test("`lighting noise` (round 463): missing folders, one missing folder and an empty folder are refused with a message and write no noise.json", [] {
+    Editor ed;
+    r463::scene(ed);
+    const std::string good = fs::join(scratch_project(), "R463G"), none = fs::join(scratch_project(), "R463None"), empty = fs::join(scratch_project(), "R463Empty");
+    std::error_code ec;
+    for (const std::string &d : {good, none, empty}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+    std::filesystem::create_directories(std::filesystem::u8path(empty), ec);
+    r463::bake_at(ed, 0);
+    ed.command("lighting save " + good);
+    ed.command("lighting seed 0");
+    const std::pair<std::string, std::string> cases[] = {{none, none}, {good, none}, {none, good}, {good, empty}, {empty, good}, {empty, empty}};
+    for (const auto &c : cases) {
+      const size_t mark = r463::log_mark();
+      ed.command("lighting noise " + c.first + " " + c.second);
+      CHECK(!r463::join_log(mark).empty());
+      CHECK(!fs::exists(fs::join(none, "noise.json")) && !fs::exists(fs::join(empty, "noise.json")));
+    }
+    CHECK(!fs::exists(fs::join(good, "noise.json")));
+    ed.command("lighting noise");
+    for (const std::string &d : {good, none, empty}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+  });
+  test("`lighting noise` (round 463): a folder against itself reads grain 0 and blotch 0 and writes noise.json; a relative folder is the project's", [] {
+    Editor ed;
+    r463::scene(ed);
+    const std::string da = fs::join(scratch_project(), "R463Rel");
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(da), ec);
+    r463::bake_at(ed, 0);
+    ed.command("lighting save R463Rel");
+    const size_t mark = r463::log_mark();
+    ed.command("lighting noise R463Rel R463Rel");
+    const std::string said = r463::join_log(mark);
+    std::string json;
+    CHECK(fs::read_file(fs::join(da, "noise.json"), json));
+    std::printf("    %.160s\n", said.c_str());
+    CHECK(said.find("grain 0.0000  blotch 0.0000") != std::string::npos);
+    CHECK(json.find("\"pages\"") != std::string::npos && json.find("\"skipped\"") != std::string::npos);
+    std::filesystem::remove_all(std::filesystem::u8path(da), ec);
+  });
+  test("The bake's seed (round 463): probes baked at seed 1 differ from seed 0's, seed 0 is the default call bit for bit, and one seed repeats", [] {
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::identity(), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.5f);
+    s.build({}, env);
+    auto bake = [&](bool give_seed, uint32_t seed) {
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-2.0f), Vec3(2.0f)), s.tri_boxes(), 1.0f, 1.0f);
+      probe_validate(d, s.pt, 64);
+      if (give_seed) probe_bake(d, s.pt, {}, 24, 2, 0, SIZE_MAX, 1.0f, -1, nullptr, &env, seed);
+      else probe_bake(d, s.pt, {}, 24, 2, 0, SIZE_MAX, 1.0f, -1, nullptr, &env);
+      return d;
+    };
+    auto same = [](const ProbeVolumeData &x, const ProbeVolumeData &y) {
+      if (x.baked.size() != y.baked.size()) return false;
+      for (size_t i = 0; i < x.baked.size(); i++)
+        for (size_t ax = 0; ax < 6; ax++)
+          if (x.baked[i].bounce[ax].x != y.baked[i].bounce[ax].x || x.baked[i].bounce[ax].y != y.baked[i].bounce[ax].y || x.baked[i].sky[ax] != y.baked[i].sky[ax])
+            return false;
+      return true;
+    };
+    const ProbeVolumeData plain = bake(false, 0), zero = bake(true, 0), one = bake(true, 1), one_again = bake(true, 1);
+    CHECK(plain.baked.size() > 8);
+    CHECK(same(plain, zero));
+    CHECK(!same(plain, one));
+    CHECK(same(one, one_again));
+  });
+  test("The bake's seed (round 463): the card's gather draws other samples at another seed (skipped with a note when no GPU opens), seed 0 is the old call, one seed repeats", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::identity(), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.6f);
+    s.build({}, env);
+    /* On the floor beside the cube, facing up: each point sees part cube, part sky, so its 8 samples depend on the random
+     * numbers (above the cube, facing up, every sample met the same uniform sky and no seed could change it - chain 463). */
+    std::vector<Vec3> origins(64, Vec3(0.75f, -0.99f, 0.0f)), dirs(64, Vec3(0, 1, 0));
+    auto gather = [&](bool give, uint32_t seed, std::vector<Vec3> &out) {
+      std::string err;
+      for (int i = 0; i < 100; i++) {
+        const bool ok = give ? s.pt.gpu_gather(0, 1, origins, dirs, 8, out, nullptr, &err, false, seed) : s.pt.gpu_gather(0, 1, origins, dirs, 8, out, nullptr, &err);
+        if (ok) return true;
+        if (!s.pt.gpu_gather_waiting()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      std::printf("    (the gather did not run: %s - skipped)\n", err.c_str());
+      return false;
+    };
+    std::vector<Vec3> plain, zero, one, one_again;
+    if (!gather(false, 0, plain)) return;
+    CHECK(gather(true, 0, zero) && gather(true, 1, one) && gather(true, 1, one_again));
+    CHECK(plain.size() == 64 && zero.size() == 64 && one.size() == 64);
+    auto eq = [](const std::vector<Vec3> &x, const std::vector<Vec3> &y) { return x.size() == y.size() && std::memcmp(x.data(), y.data(), x.size() * sizeof(Vec3)) == 0; };
+    CHECK(eq(plain, zero));
+    CHECK(!eq(plain, one));
+    CHECK(eq(one, one_again));
+  });
+}
+
+static void tests_round463() {
+  test("A bake's noise (round 463): two bakes of one scene at one seed read grain 0 and blotch 0; at seeds 0 and 1 both are above 0, the blotch under the grain", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 0);
+    const LightingData first = ed.lighting_data_for_test();
+    r463::bake_at(ed, 0);
+    const LightmapNoise same = lightmap_noise(first, ed.lighting_data_for_test());
+    CHECK(same.ok && same.all.texels > 100 && same.all.grain == 0.0 && same.all.blotch == 0.0);
+    r463::bake_at(ed, 1);
+    const LightmapNoise diff = lightmap_noise(first, ed.lighting_data_for_test());
+    std::printf("    seed 0 vs 1: %zu texels, grain %.4f, blotch %.4f; the worst object has blotch %.4f\n", diff.all.texels, diff.all.grain, diff.all.blotch,
+                diff.worst.empty() ? 0.0 : diff.worst[0].blotch);
+    CHECK(diff.ok && diff.all.grain > 0.0 && diff.all.blotch > 0.0 && diff.all.blotch < diff.all.grain);
+    CHECK(!diff.pages.empty() && diff.pages.size() == first.pages.size() && !diff.worst.empty() && diff.worst.size() <= 5);
+    ed.command("lighting seed 0");
+  });
+  test("A bake's noise (round 463): on a page of light 1 plus independent noise of 0.1 a texel, the grain reads 0.1 and the blotch about a seventh of it; on noise already smooth over many texels the blotch keeps all of it", [] {
+    const int N = 128;
+    std::mt19937 rng(463);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    const LightingData a = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    const LightingData b = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    const LightmapNoise white = lightmap_noise(a, b);
+    std::printf("    white noise 0.1: grain %.4f, blotch %.4f (a seventh: %.4f)\n", white.all.grain, white.all.blotch, 0.1 / 7.0);
+    CHECK(white.ok && std::fabs(white.all.grain - 0.1) < 0.005);
+    CHECK(white.all.blotch > 0.1 / 7.0 * 0.85 && white.all.blotch < 0.1 / 7.0 * 1.15);
+    /* Smooth noise: what the 7 x 7 average of the difference should read is the difference's own spread. */
+    const r463::SmoothNoise na(N, 0.2f, 1), nb(N, 0.2f, 2);
+    const LightingData sa = r463::page_of(N, N, [&](int x, int y) { return 1.0f + na.at(x, y); });
+    const LightingData sb = r463::page_of(N, N, [&](int x, int y) { return 1.0f + nb.at(x, y); });
+    double d2 = 0.0, mean = 0.0;
+    for (int y = 0; y < N; y++)
+      for (int x = 0; x < N; x++) {
+        const double fa = 1.0 + na.at(x, y), fb = 1.0 + nb.at(x, y);
+        d2 += (fa - fb) * (fa - fb), mean += 0.5 * (fa + fb);
+      }
+    const double want = std::sqrt(d2 / (N * N) / 2.0) / (mean / (N * N));
+    const LightmapNoise smooth = lightmap_noise(sa, sb);
+    std::printf("    smooth noise: blotch %.4f, the difference's own spread %.4f, grain %.4f\n", smooth.all.blotch, want, smooth.all.grain);
+    CHECK(smooth.ok && std::fabs(smooth.all.blotch - want) < 0.1 * want && std::fabs(smooth.all.grain - want) < 0.02 * want);
+  });
+  test("A bake's noise (round 463): bakes laid out differently are refused with the reason; texels inside geometry are left out; NaN and negative texels are left out and counted", [] {
+    const int N = 64;
+    std::mt19937 rng(5);
+    std::normal_distribution<float> g(0.0f, 0.05f);
+    LightingData a = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    LightingData b = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    const LightmapNoise clean = lightmap_noise(a, b);
+    CHECK(clean.ok && clean.skipped == 0 && clean.all.texels == (size_t)N * N);
+    /* Other pages, other charts. */
+    LightingData small = r463::page_of(32, 32, [](int, int) { return 1.0f; });
+    const LightmapNoise bad_size = lightmap_noise(a, small);
+    CHECK(!bad_size.ok && !bad_size.error.empty() && bad_size.pages.empty());
+    LightingData moved = b;
+    moved.entries[7].tri_uv[0] = Vec2(0.1f, 0.0f);
+    const LightmapNoise bad_chart = lightmap_noise(a, moved);
+    std::printf("    refused: \"%s\" and \"%s\"\n", bad_size.error.c_str(), bad_chart.error.c_str());
+    CHECK(!bad_chart.ok && !bad_chart.error.empty());
+    LightingData extra = b;
+    extra.entries[8] = extra.entries[7];
+    CHECK(!lightmap_noise(a, extra).ok);
+    /* A broken chart (UVs that are not numbers or far off the page) covers nothing and breaks nothing. */
+    LightingData nan_a = a, nan_b = b;
+    nan_a.entries[7].tri_uv[0] = nan_b.entries[7].tri_uv[0] = Vec2(std::nanf(""), 0.0f);
+    nan_a.entries[7].tri_uv[4] = nan_b.entries[7].tri_uv[4] = Vec2(1.0e30f, 1.0f);
+    CHECK(lightmap_noise(nan_a, nan_b).ok);
+    /* Inside geometry: a wild block marked invalid changes nothing. */
+    LightingData wild = b;
+    std::vector<std::vector<uint8_t>> invalid(1, std::vector<uint8_t>((size_t)N * N, 0));
+    for (int y = 0; y < 10; y++)
+      for (int x = 0; x < 10; x++) wild.pages[0].texels[(size_t)y * N + x] = Vec3(50.0f), invalid[0][(size_t)y * N + x] = 1;
+    const LightmapNoise masked = lightmap_noise(a, wild, &invalid);
+    const LightmapNoise unmasked = lightmap_noise(a, wild);
+    CHECK(masked.ok && masked.all.texels == (size_t)N * N - 100 && unmasked.all.grain > 5.0 * clean.all.grain);
+    /* NaN and negative: counted, and the rest reads as before. */
+    LightingData holes = b;
+    holes.pages[0].texels[3] = Vec3(std::nanf(""));
+    holes.pages[0].texels[N + 9] = Vec3(-1.0f);
+    holes.pages[0].texels[N * 5 + 5] = Vec3(1.0f, std::nanf(""), 1.0f);
+    const LightmapNoise nan = lightmap_noise(a, holes);
+    std::printf("    3 bad texels: %zu left out, grain %.4f (clean %.4f)\n", nan.skipped, nan.all.grain, clean.all.grain);
+    CHECK(nan.ok && nan.skipped == 3 && nan.all.texels == (size_t)N * N - 3 && std::fabs(nan.all.grain - clean.all.grain) < 0.05 * clean.all.grain);
+    /* A page with no light: "dark", no relative number. */
+    const LightingData black_a = r463::page_of(N, N, [](int, int) { return 0.0f; }), black_b = r463::page_of(N, N, [](int, int) { return 0.0f; });
+    const LightmapNoise dark = lightmap_noise(black_a, black_b);
+    CHECK(dark.ok && dark.all.dark && dark.pages.size() == 1 && dark.pages[0].dark && dark.all.grain == 0.0);
+  });
+  test("`lighting seed 3` (round 463): the next Generate Lighting says its seed, leaves the lighting current and draws other samples; `lighting seed 0` brings the old pages back bit for bit", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 0);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    r463::bake_at(ed, 3);
+    const std::string said = r463::join_log(mark);
+    CHECK(said.find("Generate Lighting: seed 3") != std::string::npos);  // (not the console's echo "> lighting seed 3")
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.lighting_data_for_test().scene_key == base.scene_key);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()));
+    const size_t mark0 = r463::log_mark();
+    r463::bake_at(ed, 0);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    CHECK(r463::join_log(mark0).find("Generate Lighting: seed") == std::string::npos);  // (the log names a seed only when it isn't 0)
+  });
+  test("`lighting noise <A> <B>` (round 463): two saved bakes at seeds 0 and 1 print their grain and blotch and write noise.json inside folder B; a bake of another scene is refused and writes nothing", [] {
+    Editor ed;
+    r463::scene(ed);
+    const std::string da = fs::join(scratch_project(), "R463A"), db = fs::join(scratch_project(), "R463B"), dc = fs::join(scratch_project(), "R463C");
+    std::error_code ec;
+    for (const std::string &d : {da, db, dc}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+    r463::bake_at(ed, 0);
+    ed.command("lighting save " + da);
+    r463::bake_at(ed, 1);
+    ed.command("lighting save " + db);
+    ed.command("lighting seed 0");
+    const size_t mark = r463::log_mark();
+    ed.command("lighting noise " + da + " " + db);
+    const std::string said = r463::join_log(mark);
+    std::string json;
+    CHECK(fs::read_file(fs::join(db, "noise.json"), json));
+    std::printf("    %.200s\n    noise.json: %.160s\n", said.c_str(), json.c_str());
+    CHECK(said.find("lighting noise: all pages grain") != std::string::npos && said.find("page 0") != std::string::npos);
+    CHECK(json.find("\"grain\"") != std::string::npos && json.find("\"blotch\"") != std::string::npos && json.find("\"worst\"") != std::string::npos);
+    CHECK(fs::exists(fs::join(db, "noise_worst_1.png")));  // (the worst object's |a - b| as a picture)
+    /* Another scene's layout. */
+    r35_add(ed, "Sphere", "Ball", {3, 1, 0}, {1, 1, 1}, Vec3(0.5f));
+    ed.commit_change("r463 ball");
+    r463::bake_at(ed, 1);
+    ed.command("lighting seed 0");
+    ed.command("lighting save " + dc);
+    ed.command("lighting noise " + da + " " + dc);
+    CHECK(!fs::exists(fs::join(dc, "noise.json")));
+    ed.command("lighting noise " + da);  // (one folder: a hint, nothing written)
+    /* A folder with a space in its name, in quotes (the comparison tool's paths). */
+    const std::string ds = fs::join(scratch_project(), "R463 spaced");
+    std::filesystem::remove_all(std::filesystem::u8path(ds), ec);
+    ed.command("lighting save \"" + ds + "\"");
+    CHECK(fs::exists(fs::join(ds, "LightingData.bin")));
+    const size_t mark_q = r463::log_mark();
+    ed.command("lighting noise \"" + ds + "\" \"" + ds + "\"");
+    CHECK(r463::join_log(mark_q).find("lighting noise: all pages grain") != std::string::npos);
+    std::filesystem::remove_all(std::filesystem::u8path(ds), ec);
+    for (const std::string &d : {da, db, dc}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+  });
+  tests_round463_edges();
+  tests_round463_console();
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -8312,4 +8853,5 @@ void run_lighting_tests() {
   tests_round454();
   tests_round459();
   tests_round455();
+  tests_round463();
 }

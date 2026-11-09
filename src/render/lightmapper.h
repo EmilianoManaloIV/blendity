@@ -177,6 +177,40 @@ struct LightmapLayout {
 double lightmap_layout_fill(const LightmapLayout &lay);
 /* Round 440: the mean step across the seams (|a - b| over |a| + |b|, over the pairs), 0 with none. */
 double lightmap_seam_step(const std::vector<Lightmap> &pages, const std::vector<std::vector<std::pair<uint32_t, uint32_t>>> &seams);
+/* Round 463 (task 0439): how noisy a bake is, from two bakes of one scene at different seeds (the layout is deterministic, so
+ * the texels line up). Over the covered, valid texels, with a and b their luminance:
+ *   grain   = sqrt(mean((a - b)^2) / 2) / mean((a + b) / 2)      one bake's per-texel noise relative to its mean light
+ *   blotch  = the same with (a - b) first averaged over the texel's 7 x 7 neighbours in its own chart (what a filter leaves)
+ * It sees no bias: what both seeds share cancels.
+ * What the numbers are made of, and what they are not:
+ *  - the window's "chart" is an object's entry (all its UV islands), not one island; near a chart's edge the window holds fewer texels,
+ *    so on charts 1 to 3 texels wide white noise reads about s / 4.6 rather than s / 7;
+ *  - saved pages are RGBE (8-bit mantissa, no negative values): a bake read back from `lighting save` carries a grain floor of roughly
+ *    0.1 to 0.2 % per texel (measured on a test scene: 0.0027 in memory, 0.00284 from the saved folders);
+ *  - texels inside geometry are left out only through `invalid`; the saved data doesn't hold that mask, so `lighting noise`, the
+ *    comparison tool and the stress columns count them (they are filled from their chart: noise all the same). */
+struct LightmapNoise {
+  struct Part {
+    double grain = 0.0, blotch = 0.0, mean_light = 0.0;
+    size_t texels = 0;
+    bool dark = false;  // (a mean under 1e-4: a relative number says nothing - left 0)
+  };
+  struct Object : Part {
+    uint64_t id = 0;
+    int page = 0;
+    /* Its chart's box on the page and |a - b| in each texel it owns (0 elsewhere), for `lighting noise`'s pictures. */
+    int x0 = 0, y0 = 0, w = 0, h = 0;
+    std::vector<float> diff;
+  };
+  bool ok = false;
+  std::string error;       // why not (a different layout)
+  Part all;
+  std::vector<Part> pages;
+  std::vector<Object> worst;  // the five objects with the highest blotch, the worst first (those under 16 texels left out)
+  size_t skipped = 0;      // texels left out for a NaN or negative value in either bake
+};
+/* `invalid` (optional, per page, width x height, non-zero: inside geometry) leaves those texels out as the bake does. */
+LightmapNoise lightmap_noise(const LightingData &a, const LightingData &b, const std::vector<std::vector<uint8_t>> *invalid = nullptr);
 struct LightmapUvCache {
   struct Entry {
     uint64_t key = 0;

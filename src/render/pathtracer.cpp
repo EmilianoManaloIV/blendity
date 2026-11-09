@@ -2940,7 +2940,7 @@ bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &no
 }
 
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, bool mis_first_hit) const {
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, bool mis_first_hit, uint32_t seed) const {
   std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
   out.clear();
   if (hit) hit->clear();
@@ -2994,7 +2994,11 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
     p.env_i[2] = mode;
     p.env_i[3] = (int32_t)n;
     p.misc[1] = mis_first_hit ? 1.0f : 0.0f;  // (task 0157: the gather's first emissive hit weighted against the texel's own emitter sampling)
-    p.cam_pos[3] = (float)first;  // each point's own random sequence, whatever the batch (exact below 2^24)
+    /* each point's own random sequence, whatever the batch (exact below 2^24); a seed (not 0) shifts the whole range by 2^21 to 2^22
+     * points (bit 21 set, so no seed lands on or near seed 0's range), so a texel draws the stream another texel drew at seed 0
+     * (the kernel hashes the point's index and nothing else of it). Only about 2^21 distinct GPU streams exist this way. */
+    const size_t shift = seed ? (size_t)(((seed * 0x9E3779B1u) >> 10) | (1u << 21)) : 0;
+    p.cam_pos[3] = (float)(first + shift);
     bake_gpu_->set_params(p);
     const size_t cells = (size_t)W * H;
     pts.assign(cells * 8, 0.0f);

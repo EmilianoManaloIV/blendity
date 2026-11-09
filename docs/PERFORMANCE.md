@@ -1,5 +1,23 @@
 # Performance, limits and efficiencies
 
+## Pass 21: SideRail's bake, measured by its noise (rounds 463-466)
+
+Round 463 adds the measure (`lightmap_noise`, `lighting noise`, `unity_compare.py --noise`, the `lightmap_quality` columns grain and
+blotch); rounds 464-466 each add a row at the same bake time. The baseline is SideRail at today's main on the card (every texel
+gathered there), Lighting Mode Subtractive, at its LightingSettings asset (40 texels a unit, 32 direct and 1024 indirect samples, 2
+bounces): 2 pages of 2048 px, 820,031 texels, 881 M rays, the A-Trous filter. Chain 463 (17:08-17:15, nothing else building). The
+first four stations are Pass 19's; `side_bar_high` and `side_tunnel_eye` are the owner's two views of the side tunnel (matched by eye
+to their screenshots of 2026-11-08), where the blotches are.
+
+| round | change | bake s (lightmaps s) | grain (page 0 / 1) | blotch (page 0 / 1) | MAE / SSIM: spawn, spawn_back, floor, ahead | side_bar_high | side_tunnel_eye |
+|---|---|---|---|---|---|---|---|
+| 463 | baseline (no change to the bake) | 39 (35.5; filter 2.3) | 5.46 (0.41 / 17.5) | 1.24 (0.10 / 3.99) | 3.57/0.843, 1.30/0.791, 3.35/0.818, 2.32/0.933 | 6.73 / 0.854 | 6.06 / 0.876 |
+
+Page 1's grain is carried by rare very bright texels - the sparse dots of `noise_worst_*.png`: emitter samples and lights kept by
+chance, which skip today's firefly clamp - the spots on the side tunnel's sofas and floor in the two views. `lightmap_quality`
+(round 421's settings): room grain 0.0102 / blotch 0.0036, corridor 0.0049 / 0.0015, courtyard 0.0083 / 0.0025, and the new
+`tunnel_lamps` 0.1329 / 0.0274 (relative RMSE 0.154 against its 16x reference, bake 2,218 ms).
+
 ## Pass 19: Pass 18's open items (rounds 447-459)
 
 ### Pass 19 in one table (round 457)
