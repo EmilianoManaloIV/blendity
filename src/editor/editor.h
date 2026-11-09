@@ -1826,6 +1826,7 @@ class Editor {
   NavStyle nav_style_for_test() const { return nav_style_; }
   const SceneCamera &scene_camera_for_test() const { return cam_; }
   void set_scene_camera_for_test(const SceneCamera &c) { cam_ = c; }
+  meshops::ProjectMode draw_project_mode() const { return draw_project_; }  // (task 0437's tests)
   struct SketchSeg {  // (task 0225: a line stroke on a scene canvas as a world segment)
     Vec3 a, b;
     size_t stroke;
@@ -5494,8 +5495,14 @@ class Editor {
     Vec3 guide_dir;        // the direction the last inference locked to (drawn as a guide)
     bool guide = false;
     bool bent = false;     // the plane turned mid-polyline (X / Y / Z): a 3D path, kept as wire edges
+    bool curved = false;   // the first face's smooth patch isn't flat: points follow the surface, the shape is projected (task 0437)
   } draw_;
+  /* Task 0437: how a shape on a curved surface is projected - along the view, or to the closest point (Tab while drawing,
+   * drawproject view|closest). Not saved. */
+  meshops::ProjectMode draw_project_ = meshops::ProjectMode::View;
+  bool draw_try_projected(Mesh &m, const std::vector<Vec3> &pts, bool closed, const Mat4 &inv, std::string &what);
  public:
+  std::string draw_project_hint() const;  // the hint line's "Project: View (Tab)" part (task 0437)
   /* Task 0266: Adjust Last outside Edit Mode's operators (editor/adjust_last.cpp) - an added primitive, a UV operator, a
    * Draw shape - run again from before with the panel's numbers, amending the same undo step. */
   struct ObjLastOp {

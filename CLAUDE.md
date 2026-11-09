@@ -82,6 +82,12 @@ non-trivial.
 5. **Merge**: push a branch, open a PR (template in `.github/`), CI must pass. **The human reviews and
    merges on GitHub**, unless the user asks an agent to merge: then only after CI passes on all four jobs,
    with a merge commit (`gh pr merge N --merge`), never squash or rebase of a stack.
+6. **Every PR targets `main`** (`--base main`), never another PR's branch (the user, 2026-11-08). A round's
+   commit may build on the previous round's, but its PR's base is `main`. **Guarantee:** merging the top PR
+   of a stack merges every PR below it (GitHub marks them merged; use a merge commit). Several stacks may be
+   open at once, one per pass; each must have exactly one top. After every publish and every push to a PR
+   branch run `bash tools/dev/stack_check.sh` (`FIX=1` merges a stack's stray heads into its newest PR);
+   the `stack` CI job runs the same check. The body's "Merging this also merges" line names the PRs it carries.
 
 Run agents one after another; don't fan out. For a one-line fix, implement in the main session and still
 run the reviewer.

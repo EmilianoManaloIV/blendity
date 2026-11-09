@@ -45,6 +45,7 @@ static const SweepCommand kSweepCommands[] = {
   {"drawfillet", "drawfillet 0", ""},
   {"drawmode", "drawmode perp off", ""},
   {"drawpoint", "drawpoint 3 0 3", ""},
+  {"drawproject", "drawproject view", ""},
   {"droponsurface", "droponsurface 450 300", ""},
   {"duplicate", "duplicate", ""},
   {"edit", "edit on", ""},

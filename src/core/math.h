@@ -371,6 +371,24 @@ inline float ray_triangle(const Ray &r, Vec3 a, Vec3 b, Vec3 c) {
   return t > 0.0f ? t : -1.0f;
 }
 
+/* Moller-Trumbore with a little slack at the sides (task 0437): a ray exactly along an edge two triangles share can
+ * miss both through rounding - the plain test above did on a UV sphere's equator, and on the teapot under macOS's fused
+ * multiply-adds - where a click or a projected point must land somewhere. Two-sided; t or -1. */
+inline float ray_triangle_tolerant(const Ray &r, Vec3 a, Vec3 b, Vec3 c) {
+  const Vec3 e1 = b - a, e2 = c - a, p = cross(r.dir, e2);
+  const float det = dot(e1, p);
+  if (std::fabs(det) < 1e-20f) return -1.0f;
+  const float inv = 1.0f / det, tol = 1e-5f;
+  const Vec3 s = r.origin - a;
+  const float u = dot(s, p) * inv;
+  if (u < -tol || u > 1.0f + tol) return -1.0f;
+  const Vec3 q = cross(s, e1);
+  const float v = dot(r.dir, q) * inv;
+  if (v < -tol || u + v > 1.0f + tol) return -1.0f;
+  const float t = dot(e2, q) * inv;
+  return t > 0.0f ? t : -1.0f;
+}
+
 /* The point of segment ab nearest p (task 0177: one copy; the skin weights, the spring bones and the gizmos had their own). */
 inline Vec3 closest_on_segment(Vec3 p, Vec3 a, Vec3 b) {
   const Vec3 ab = b - a;
