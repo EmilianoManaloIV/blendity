@@ -575,9 +575,17 @@ static float draw_weld_eps(const Mesh &m, const std::vector<Vec3> &pts) {
 /* The overlap check is a pair search over the faces: skipped on meshes this big (as Push Through's guard is). */
 static constexpr size_t kDrawGuardFaces = 20000;
 
+/* How much of the mesh lies on top of itself: the area the z-fighting pairs share. A count of pairs would rise when a
+ * draw merely splits a face that already overlaps another (two pieces over it instead of one); the area doesn't. */
+static double draw_overlap_area(const Mesh &m) {
+  double a = 0;
+  for (const meshops::ZFightPair &p : meshops::zfight_pairs(m)) a += p.area;
+  return a;
+}
+
 std::string Editor::draw_tidy(Mesh &m, const Mesh &before, const std::vector<Vec3> &pts) {
   const bool check = before.face_count() < kDrawGuardFaces;
-  const size_t overlaps_before = check ? meshops::overlapping_faces(before) : 0;
+  const double overlaps_before = check ? draw_overlap_area(before) : 0.0;
   meshops::cleanup_after_draw(m, before, face_sel_, draw_weld_eps(m, pts));
   m.sync_attributes();
   m.touch();
@@ -585,9 +593,10 @@ std::string Editor::draw_tidy(Mesh &m, const Mesh &before, const std::vector<Vec
   vert_sel_.assign(added.begin(), added.end());
   face_sel_.resize(m.face_count(), 0);
   if (!check) return "";
-  const size_t overlaps_after = meshops::overlapping_faces(m);
-  if (overlaps_after <= overlaps_before) return "";
-  return strprintf("it would leave %zu more faces on top of each other", overlaps_after - overlaps_before);
+  const double overlaps_after = draw_overlap_area(m);
+  const float size = std::max(1e-6f, length(m.bounds().extent()));
+  if (overlaps_after <= overlaps_before + 1e-6 * (double)size * (double)size) return "";
+  return strprintf("it would leave faces on top of each other (%.3g more area lying on another face)", overlaps_after - overlaps_before);
 }
 
 void Editor::draw_roll_back(MeshPtr &mp, const MeshPtr &before, const std::vector<uint8_t> &vsel, const std::vector<uint8_t> &fsel, const std::string &why) {

@@ -10422,9 +10422,12 @@ static void tests_round462() {
     const size_t overlaps = meshops::overlapping_faces(before);
     CHECK(overlaps == 1);
     const std::vector<uint8_t> fsel_before = ed.face_sel_for_test();
+    /* Started on the ground beside the plane (no face under the first click), the rectangle becomes a face of its own,
+     * part of it lying on the plane: new area on top of another face. (Round 462's guard compares that area - cutting
+     * faces that already overlap adds none, so a rectangle drawn over the doubled face would be allowed.) */
     ed.command("draw rectangle");
-    ed.command("drawpoint -0.2 0 -0.2");
-    ed.command("drawpoint 0.2 0 0.2");
+    ed.command("drawpoint 1.6 0 1.6");
+    ed.command("drawpoint 0.6 0 0.6");
     ed.step_frame_headless();
     const Mesh &after = *g->get<MeshFilter>()->mesh;
     std::printf("    draw over a doubled face: %zu -> %zu faces, overlapping %zu -> %zu\n", before.face_count(), after.face_count(), overlaps, meshops::overlapping_faces(after));
@@ -10506,6 +10509,381 @@ static void tests_round462() {
     CHECK(m.vert_count() == planted.vert_count() && m.face_count() == planted.face_count());
     ed.command("redo amount2 5");
     CHECK(g->get<MeshFilter>()->mesh->vert_count() == planted.vert_count());
+  });
+}
+
+
+/* ---- Round 462 (task 0438), the test engineer's independent checks ---- */
+
+/* A cube with a doubled vertex, a doubled face and a T-junction at scale s (the same as tests_round462's, scaled). */
+static Mesh r462x_planted(float s) {
+  Mesh m;
+  for (int i = 0; i < 8; i++) m.add_vert({((i & 1) ? 0.5f : -0.5f) * s, ((i & 2) ? 0.5f : -0.5f) * s, ((i & 4) ? 0.5f : -0.5f) * s});
+  m.add_vert({0.0f, -0.5f * s, -0.5f * s});
+  m.add_vert({(-0.5f + 1e-5f) * s, 0.5f * s, 0.5f * s});
+  std::vector<std::vector<uint32_t>> faces = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 8, 1, 5, 4}, {2, 9, 7, 3}};
+  faces.push_back(faces[2]);
+  for (size_t f = 0; f < faces.size(); f++) {
+    std::vector<Vec2> t;
+    for (size_t k = 0; k < faces[f].size(); k++) t.push_back({0.3f * (float)f + (k == 1 || k == 2 ? 0.25f : 0.0f), 0.7f + (k >= 2 ? 0.2f : 0.0f)});
+    m.add_face(faces[f].data(), faces[f].size(), t.data(), 0);
+  }
+  return m;
+}
+
+static GameObject *r462x_object(Editor &ed, const char *name, const Mesh &m) {
+  GameObject *g = ed.scene().create(name);
+  g->add<MeshFilter>()->mesh = std::make_shared<Mesh>(m);
+  g->add<MeshRenderer>();
+  ed.mark_changed_for_test(name);
+  ed.command(strprintf("select %s", name));
+  return g;
+}
+
+static bool r462x_has_toast(Editor &ed, const char *text) {
+  for (const auto &t : ed.toasts_for_test())
+    if (t.text.find(text) != std::string::npos) return true;
+  return false;
+}
+
+static void tests_round462_engineer() {
+  test("(engineer) a draw refused for faces on top of each other leaves mesh and selection as before in vertex, edge and face mode, says why in a toast and the log, and does not count as an edit", [] {
+    const char *modes[] = {"vertex", "edge", "face"};
+    for (const char *mode : modes) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      Mesh base = *primitives::plane(2.0f, 1);
+      const uint32_t b[4] = {base.add_vert({-0.5f, 0, -0.5f}), base.add_vert({-0.5f, 0, 0.5f}), base.add_vert({0.5f, 0, 0.5f}), base.add_vert({0.5f, 0, -0.5f})};
+      if (base.face_normal(0).y > 0) base.add_face(b, 4);
+      else {
+        const uint32_t r[4] = {b[3], b[2], b[1], b[0]};
+        base.add_face(r, 4);
+      }
+      base.sync_attributes();
+      GameObject *g = r462x_object(ed, "Stacked", base);
+      ed.command(strprintf("edit %s", mode));
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const Mesh before = *g->get<MeshFilter>()->mesh;
+      CHECK(meshops::overlapping_faces(before) == 1);
+      const std::vector<uint8_t> vs = ed.vert_sel_for_test(), fs = ed.face_sel_for_test();
+      std::vector<LogEntry> skipped;
+      const size_t log0 = Log::fetch(0, skipped);
+      ed.clear_toasts_for_test();
+      /* Started beside the plane, the rectangle is a face of its own partly lying on it (new overlapping area): refused. */
+      ed.command("draw rectangle");
+      ed.command("drawpoint 1.6 0 1.6");
+      ed.command("drawpoint 0.6 0 0.6");
+      ed.step_frame_headless();
+      const Mesh &after = *g->get<MeshFilter>()->mesh;
+      std::vector<LogEntry> said;
+      Log::fetch(log0, said);
+      bool logged = false;
+      for (const LogEntry &e : said) logged = logged || e.text.find("on top of each other") != std::string::npos;
+      std::printf("    %s mode: %zu -> %zu faces, rolled back %d, toast %d, log %d\n", mode, before.face_count(), after.face_count(), (int)r461x_same_mesh(before, after),
+                  (int)r462x_has_toast(ed, "on top of each other"), (int)logged);
+      CHECK(r461x_same_mesh(before, after));
+      CHECK(after.face_offsets == before.face_offsets);
+      CHECK(ed.vert_sel_for_test() == vs && ed.face_sel_for_test() == fs);
+      CHECK(r462x_has_toast(ed, "on top of each other"));
+      CHECK(logged);
+      CHECK(ed.in_edit_mode());
+    }
+  });
+
+  test("(engineer) a circle drawn over the same stacked faces is refused too, and a rectangle on the clean half of that mesh is drawn after the refusal", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    Mesh base = *primitives::plane(2.0f, 1);
+    const uint32_t b[4] = {base.add_vert({-0.5f, 0, -0.5f}), base.add_vert({-0.5f, 0, 0.5f}), base.add_vert({0.5f, 0, 0.5f}), base.add_vert({0.5f, 0, -0.5f})};
+    if (base.face_normal(0).y > 0) base.add_face(b, 4);
+    else {
+      const uint32_t r[4] = {b[3], b[2], b[1], b[0]};
+      base.add_face(r, 4);
+    }
+    base.sync_attributes();
+    GameObject *g = r462x_object(ed, "Stacked2", base);
+    ed.command("edit face");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Mesh before = *g->get<MeshFilter>()->mesh;
+    ed.command("draw circle");
+    ed.command("drawpoint 0 0 0");
+    ed.command("drawpoint 0.3 0 0");
+    ed.step_frame_headless();
+    const bool refused = r461x_same_mesh(before, *g->get<MeshFilter>()->mesh);
+    std::printf("    circle over stacked faces: %zu -> %zu faces, refused %d\n", before.face_count(), g->get<MeshFilter>()->mesh->face_count(), (int)refused);
+    /* Changed in round 462's testing: the guard compares the area lying on another face, not the count of such pairs.
+     * The circle cuts both stacked faces (the pieces still cover the same 1.0), adding no overlap, so it is drawn; a
+     * pair count rose here and refused it, and refused any draw that merely split a face in an existing pair. */
+    CHECK(!refused);
+    /* The tool stays usable: a rectangle outside the stacked part (the big face only) is drawn. */
+    ed.command("draw rectangle");
+    ed.command("drawpoint 0.7 0 0.7");
+    ed.command("drawpoint 0.9 0 0.9");
+    ed.step_frame_headless();
+    std::printf("    then a rectangle at the corner: %zu faces\n", g->get<MeshFilter>()->mesh->face_count());
+    /* FAILS (round 462 as built): see the control below - splitting a face that is already part of a stacked pair adds overlap pairs, so the guard refuses a draw far from the stack. */
+    CHECK(g->get<MeshFilter>()->mesh->face_count() > before.face_count());
+    /* Control: the same rectangle on a fresh copy of the stacked mesh, no refusal before it. */
+    Editor ed2;
+    ed2.init_headless(900, 600);
+    ed2.step_frame_headless();
+    GameObject *h = r462x_object(ed2, "Stacked3", before);
+    ed2.command("edit face");
+    for (int i = 0; i < 3; i++) ed2.step_frame_headless();
+    ed2.command("draw rectangle");
+    ed2.command("drawpoint 0.7 0 0.7");
+    ed2.command("drawpoint 0.9 0 0.9");
+    ed2.step_frame_headless();
+    std::printf("    control, no earlier refusal: %zu faces; rolled back toast %d\n", h->get<MeshFilter>()->mesh->face_count(), (int)r462x_has_toast(ed2, "on top of each other"));
+    CHECK(h->get<MeshFilter>()->mesh->face_count() > before.face_count());
+    /* Why: the same imprint by hand, counting the faces on top of each other before, after the imprint and after Draw's cleanup. */
+    Mesh by_hand = before;
+    const size_t o0 = meshops::overlapping_faces(by_hand);
+    std::vector<size_t> inner;
+    meshops::imprint_loop_across(by_hand, {{0.7f, 0, 0.7f}, {0.9f, 0, 0.7f}, {0.9f, 0, 0.9f}, {0.7f, 0, 0.9f}}, {0, 1, 0}, &inner);
+    const size_t o1 = meshops::overlapping_faces(by_hand);
+    std::vector<uint8_t> sel(by_hand.face_count(), 0);
+    meshops::cleanup_after_draw(by_hand, before, sel, meshops::relative_eps(by_hand, 5e-4f));
+    std::printf("    overlapping faces by hand: %zu before, %zu after the imprint, %zu after the cleanup (%zu -> %zu faces)\n", o0, o1, meshops::overlapping_faces(by_hand),
+                before.face_count(), by_hand.face_count());
+  });
+
+  test("(engineer) drawing a rectangle across a UV seam or a material border between two faces never joins the faces across it", [] {
+    for (int variant = 0; variant < 2; variant++) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.step_frame_headless();
+      Mesh base = *primitives::plane(2.0f, 2);
+      base.face_material.assign(base.face_count(), 0);
+      for (size_t f = 0; f < base.face_count(); f++) {
+        if (base.face_center(f).x < 0.0f) continue;
+        if (variant == 0)
+          for (uint32_t k = 0; k < base.face_size(f); k++) base.uvs[base.face_offsets[f] + k].x += 0.37f;
+        else
+          base.face_material[f] = 1;
+      }
+      GameObject *g = r462x_object(ed, "Seamed", base);
+      ed.command("edit face");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      ed.command("draw rectangle");
+      ed.command("drawpoint -0.5 0 -0.5");
+      ed.command("drawpoint 0.5 0 0.5");
+      ed.step_frame_headless();
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      size_t straddle = 0, wrong_material = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        float lo = 1e30f, hi = -1e30f;
+        for (uint32_t k = 0; k < m.face_size(f); k++) {
+          lo = std::min(lo, m.positions[m.face_verts(f)[k]].x);
+          hi = std::max(hi, m.positions[m.face_verts(f)[k]].x);
+        }
+        straddle += lo < -1e-4f && hi > 1e-4f ? 1 : 0;
+        if (variant == 1) wrong_material += m.material_of(f) != (hi > 1e-4f ? 1 : 0) ? 1 : 0;
+      }
+      std::printf("    %s: %zu -> %zu faces, %zu straddle the middle, %zu in the wrong material\n", variant ? "material border" : "UV seam", base.face_count(), m.face_count(), straddle,
+                  wrong_material);
+      CHECK(m.face_count() > base.face_count());
+      CHECK(straddle == 0 && wrong_material == 0);
+      CHECK(meshops::overlapping_vertices(m).empty() && meshops::overlapping_edges(m).empty());
+    }
+  });
+
+  test("(engineer) solve mesh in the editor on a planted cube at 1e-4 and 1e5 scale, with nothing selected in face mode, picks a weld distance of 1e-4 of the size and closes the mesh", [] {
+    for (float s : {1e-4f, 1e5f}) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      GameObject *g = r462x_object(ed, "ScaledPlant", r462x_planted(s));
+      ed.command("edit face");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      ed.command("editop solve_mesh");
+      ed.step_frame_headless();
+      const Mesh &m = *g->get<MeshFilter>()->mesh;
+      std::printf("    scale %.0e: %zu faces, %zu vertices, closed %d, weld distance %.3g\n", (double)s, m.face_count(), m.vert_count(), (int)closed_manifold(m),
+                  (double)ed.last_op_amount_for_test());
+      CHECK(closed_manifold(m) && m.face_count() == 6 && m.vert_count() == 9);
+      CHECK(ed.last_op_amount_for_test() > 1e-5f * s && ed.last_op_amount_for_test() < 1e-3f * s);
+    }
+  });
+
+  test("(engineer) solve mesh with only the doubled vertex pair selected welds that pair and leaves the doubled face and the T-junction; the selection survives", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    GameObject *g = r462x_object(ed, "PartPlant", r462x_planted(1.0f));
+    ed.command("edit vertex");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("vsel 6 9");
+    ed.step_frame_headless();
+    ed.command("editop solve_mesh");
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    size_t selected = 0;
+    for (uint8_t s : ed.vert_sel_for_test()) selected += s ? 1 : 0;
+    std::printf("    pair only: %zu faces, %zu vertices, %zu selected\n", m.face_count(), m.vert_count(), selected);
+    CHECK(m.vert_count() == 9);
+    CHECK(m.face_count() == 7);  // the doubled face stays: not all its corners were selected
+    CHECK(ed.vert_sel_for_test().size() == m.vert_count());
+    CHECK(selected == 1);  // the two welded into one
+  });
+
+  test("(engineer) solve mesh in the editor with a NaN vertex in the mesh finishes and leaves a valid mesh and a finite weld distance", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    Mesh bad = r462x_planted(1.0f);
+    bad.add_vert({std::nanf(""), 0, 0});
+    GameObject *g = r462x_object(ed, "NaNPlant", bad);
+    ed.command("edit vertex");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("editop solve_mesh");
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(std::isfinite(ed.last_op_amount_for_test()) && ed.last_op_amount_for_test() > 0.0f);
+    CHECK(m.corner_verts.size() > 0);
+    for (uint32_t c : m.corner_verts) CHECK(c < m.vert_count());
+    ed.command("redo amount 0.001");  // F9 with another distance is safe as well
+    CHECK(g->get<MeshFilter>()->mesh->face_count() >= 5);
+  });
+
+  test("(engineer) Ctrl+Z after Solve Mesh and two F9 re-runs restores the planted mesh bit for bit in one step; a second Ctrl+Z goes on to the step before", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const Mesh planted = r462x_planted(1.0f);
+    r462x_object(ed, "UndoPlant", planted);
+    ed.command("edit vertex");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("editop solve_mesh");
+    ed.step_frame_headless();
+    ed.command("redo amount 0.000001");
+    ed.command("redo amount 0.002");
+    ed.step_frame_headless();
+    ed.step_frame_headless({r461x_key(platform::KEY_Z, true, platform::MOD_CTRL)});
+    ed.step_frame_headless({r461x_key(platform::KEY_Z, false)});
+    ed.step_frame_headless();
+    const GameObject *back = ed.scene().find_by_name("UndoPlant");
+    CHECK(back != nullptr);
+    if (!back) return;
+    const Mesh &m = *back->get<MeshFilter>()->mesh;
+    std::printf("    after Ctrl+Z: %zu faces, %zu vertices (planted %zu / %zu)\n", m.face_count(), m.vert_count(), planted.face_count(), planted.vert_count());
+    CHECK(r461x_same_mesh(planted, m));
+  });
+
+  test("(engineer) a circle drawn on the teapot, then cleaned: closed stays closed, no new doubled vertices or faces on top of each other, no all-zero or non-finite UVs added", [] {
+    for (const char *mode : {"view", "closest"}) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.step_frame_headless();
+      ed.command("create Teapot");
+      GameObject *g = ed.selected_object();
+      CHECK(g != nullptr);
+      if (!g) return;
+      const R461xDraw r = r461x_teapot_circle(ed, g, 0, 0, false, mode, 0.3f);
+      CHECK(r.edited);
+      if (!r.edited) continue;
+      const size_t dv0 = meshops::overlapping_vertices(r.before).size(), dv1 = meshops::overlapping_vertices(r.after).size();
+      const size_t of0 = meshops::overlapping_faces(r.before), of1 = meshops::overlapping_faces(r.after);
+      auto zero_faces = [](const Mesh &m) {
+        size_t n = 0;
+        for (size_t f = 0; f < m.face_count(); f++) {
+          bool all0 = true;
+          for (uint32_t k = 0; k < m.face_size(f); k++) all0 = all0 && m.uvs[m.face_offsets[f] + k].x == 0.0f && m.uvs[m.face_offsets[f] + k].y == 0.0f;
+          n += all0 ? 1 : 0;
+        }
+        return n;
+      };
+      bool finite = true;
+      for (const Vec2 &t : r.after.uvs) finite = finite && std::isfinite(t.x) && std::isfinite(t.y);
+      std::printf("    teapot %s: %zu -> %zu faces, doubled vertices %zu -> %zu, overlapping faces %zu -> %zu, all-zero UV faces %zu -> %zu\n", mode, r.faces0, r.faces1, dv0, dv1, of0,
+                  of1, r.before.has_uvs() ? zero_faces(r.before) : 0, r.after.has_uvs() ? zero_faces(r.after) : 0);
+      CHECK(r.manifold_kept);
+      CHECK(dv1 <= dv0);
+      CHECK(of1 <= of0);
+      CHECK(finite);
+      if (r.before.has_uvs()) CHECK(r.after.has_uvs() && zero_faces(r.after) <= zero_faces(r.before));
+      CHECK(r.worst <= 1e-4f * length(r.before.bounds().extent()));
+    }
+  });
+
+  test("(engineer) a circle drawn in Closest mode with its centre on an existing vertex of a sphere adds no doubled vertex and keeps the sphere closed", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const MeshPtr sphere = primitives::uv_sphere(0.5f, 24, 16);
+    GameObject *g = r462x_object(ed, "Ball", *sphere);
+    const Mesh &was = *sphere;
+    CHECK(closed_manifold(was));
+    /* A vertex on the equator and one two columns on. */
+    uint32_t centre = 0, rim = 0;
+    float best_c = 1e30f, best_r = 1e30f;
+    for (uint32_t v = 0; v < was.vert_count(); v++) {
+      const Vec3 p = was.positions[v];
+      const float dc = length(p - Vec3(0.5f, 0, 0)), dr = length(p - Vec3(std::cos(0.5236f) * 0.5f, 0, std::sin(0.5236f) * 0.5f));
+      if (dc < best_c) best_c = dc, centre = v;
+      if (dr < best_r) best_r = dr, rim = v;
+    }
+    ed.command("edit face");
+    ed.command("drawproject closest");
+    ed.command("draw circle");
+    ed.step_frame_headless();
+    const Vec3 c = was.positions[centre], rm = was.positions[rim];
+    ed.command(strprintf("drawpoint %.7f %.7f %.7f", (double)c.x, (double)c.y, (double)c.z));
+    ed.command(strprintf("drawpoint %.7f %.7f %.7f", (double)rm.x, (double)rm.y, (double)rm.z));
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    const size_t dv0 = meshops::overlapping_vertices(was).size(), dv1 = meshops::overlapping_vertices(m).size();
+    std::printf("    sphere: %zu -> %zu faces, doubled vertices %zu -> %zu, closed %d, overlapping faces %zu\n", was.face_count(), m.face_count(), dv0, dv1, (int)closed_manifold(m),
+                meshops::overlapping_faces(m));
+    CHECK(dv1 <= dv0);
+    CHECK(closed_manifold(m));
+    CHECK(meshops::overlapping_faces(m) == meshops::overlapping_faces(was));
+  });
+
+  test("(engineer) a rectangle drawn on a 22500-face plane (the overlap guard is skipped there) lands exactly on existing vertices without doubling any", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    const Mesh big = *primitives::plane(2.0f, 150);
+    CHECK(big.face_count() >= 20000);
+    GameObject *g = r462x_object(ed, "BigPlane", big);
+    ed.command("edit face");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const size_t fa = 11000, fb = 11000 + 4 + 150 * 4;
+    Vec3 lo = big.positions[big.face_verts(fa)[0]], hi = big.positions[big.face_verts(fb)[0]];
+    for (uint32_t k = 0; k < 4; k++) {
+      const Vec3 p = big.positions[big.face_verts(fa)[k]], q = big.positions[big.face_verts(fb)[k]];
+      lo = Vec3(std::min(lo.x, p.x), lo.y, std::min(lo.z, p.z));
+      hi = Vec3(std::max(hi.x, q.x), hi.y, std::max(hi.z, q.z));
+    }
+    if (hi.x < lo.x) std::swap(hi.x, lo.x);
+    if (hi.z < lo.z) std::swap(hi.z, lo.z);
+    ed.command("draw rectangle");
+    ed.command(strprintf("drawpoint %.9g %.9g %.9g", (double)lo.x, (double)lo.y, (double)lo.z));
+    ed.command(strprintf("drawpoint %.9g %.9g %.9g", (double)hi.x, (double)hi.y, (double)hi.z));
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    std::printf("    big plane: %zu -> %zu faces, %zu -> %zu vertices\n", big.face_count(), m.face_count(), big.vert_count(), m.vert_count());
+    CHECK(m.face_count() >= big.face_count());
+    CHECK(meshops::overlapping_vertices(m).empty() && meshops::overlapping_edges(m).empty());
+    CHECK(meshops::overlapping_faces(m) == 0);
+    bool in_range = true;
+    for (uint32_t c : m.corner_verts) in_range = in_range && c < m.vert_count();
+    CHECK(in_range);
+    /* The same again with the corners a third of a cell inside the grid lines: the draw now cuts real cells. */
+    const size_t faces1 = m.face_count();
+    const float cell = 2.0f / 150.0f;
+    ed.command("draw rectangle");
+    ed.command(strprintf("drawpoint %.9g %.9g %.9g", (double)(lo.x + 0.37f * cell), (double)lo.y, (double)(lo.z + 0.37f * cell)));
+    ed.command(strprintf("drawpoint %.9g %.9g %.9g", (double)(hi.x - 0.21f * cell), (double)hi.y, (double)(hi.z - 0.21f * cell)));
+    ed.step_frame_headless();
+    const Mesh &m2 = *g->get<MeshFilter>()->mesh;
+    std::printf("    big plane, off the grid lines: %zu -> %zu faces\n", faces1, m2.face_count());
+    CHECK(m2.face_count() > 22500);
+    CHECK(meshops::overlapping_vertices(m2).empty() && meshops::overlapping_edges(m2).empty());
+    CHECK(meshops::overlapping_faces(m2) == 0);
   });
 }
 
@@ -10599,5 +10977,6 @@ void run_editor_tests() {
   tests_round461_engineer();
   tests_round461_review();
   tests_round462();
+  tests_round462_engineer();
   coverage_tests();
 }

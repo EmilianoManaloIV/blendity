@@ -33,6 +33,8 @@ command does the same to a mesh that exists.
 **Not done:** the stress runs and the cause of the one projected cut that leaves faces on top of each other were held back (a bake was being timed); the Boolean fallback's UVs could not run here (no Manifold in the dependency-free build): the test skips
 there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interface).
 
+**Also (testing):** the after-draw overlap guard compares the area lying on another face, not the number of such pairs (a draw that only split a face already in a pair was refused); Solve Mesh on a selection no longer welds an unselected shell touching it (its scope is the selection's faces, not their places).
+
 **Checked:** both suites - CHECKS_462; the audits; stress `curved`, `pushpull`, `modifiers_ngon`, `editor` - STRESS_462.
 
 ## 2026-11-08 (round 461): Draw projects onto curved surfaces

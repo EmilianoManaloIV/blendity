@@ -50,6 +50,14 @@ uint64_t face_signature(const Mesh &m, size_t f) {
   return mix64(sum ^ (x * 31u) ^ n);
 }
 
+/* A face as its corners' places and which way it faces: a face and its opposite-facing twin on the same corners (a
+ * second shell touching the first) are different faces. */
+uint64_t oriented_signature(const Mesh &m, size_t f) {
+  const Vec3 n = m.face_normal(f);
+  const int64_t q[3] = {(int64_t)std::lround(n.x * 4.0f), (int64_t)std::lround(n.y * 4.0f), (int64_t)std::lround(n.z * 4.0f)};
+  return mix64(face_signature(m, f) ^ mix64((uint64_t)(q[0] * 81 + q[1] * 9 + q[2] + 1000)));
+}
+
 uint64_t edge_pair_key(Vec3 a, Vec3 b) { return mix64(pos_hash(a)) + mix64(pos_hash(b)); }
 
 /* Every edge of the mesh's faces and wires, by the places of its ends. */
@@ -258,32 +266,55 @@ SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, fl
   angle_deg = std::clamp(angle_deg, 0.0f, 90.0f);
   scope.resize(m.vert_count(), 0);
   const bool whole = std::find(scope.begin(), scope.end(), (uint8_t)1) == scope.end();
-  /* The scope by place: the passes renumber vertices and faces, the places stay. */
-  std::unordered_set<uint64_t> places;
-  if (!whole)
+  /* The scope as places and faces: the passes renumber vertices and faces, the places stay. A place alone isn't enough:
+   * an unselected vertex can sit exactly on a selected one (a second shell touching the first), so the scope's faces are
+   * kept by their corners' places and facing, and a vertex counts only while no face outside the scope uses it. */
+  std::unordered_set<uint64_t> places, outside;  // the selection's places; faces outside it, as they stand
+  if (!whole) {
     for (size_t v = 0; v < m.vert_count(); v++)
       if (scope[v]) places.insert(pos_hash(m.positions[v]));
-  auto in_scope = [&](uint32_t v) { return whole || places.count(pos_hash(m.positions[v])) > 0; };
-  auto scope_verts = [&]() {
-    std::vector<uint8_t> s(m.vert_count(), 0);
-    for (uint32_t v = 0; v < m.vert_count(); v++) s[v] = finite3(m.positions[v]) && in_scope(v);
-    return s;
-  };
-  auto scope_faces = [&]() {  // faces with every corner in the scope
+    /* The weld below moves only selected vertices, so a face outside the selection keeps its corners' places: kept
+     * by them and its facing, it stays outside even where it lies on the selection's places. */
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool all = m.face_size(f) > 0;
+      for (uint32_t k = 0; k < m.face_size(f) && all; k++) all = scope[m.face_verts(f)[k]] != 0;
+      if (!all) outside.insert(oriented_signature(m, f));
+    }
+  }
+  auto scope_faces = [&]() {  // every corner at a selected place, and not a face that was outside
     std::vector<uint8_t> s(m.face_count(), 1);
     if (whole) return s;
-    for (size_t f = 0; f < m.face_count(); f++)
-      for (uint32_t k = 0; k < m.face_size(f) && s[f]; k++) s[f] = in_scope(m.face_verts(f)[k]);
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool all = !outside.count(oriented_signature(m, f));
+      for (uint32_t k = 0; k < m.face_size(f) && all; k++) all = places.count(pos_hash(m.positions[m.face_verts(f)[k]])) > 0;
+      s[f] = all ? 1 : 0;
+    }
     return s;
   };
+  auto scope_verts = [&]() {
+    std::vector<uint8_t> s(m.vert_count(), 0);
+    for (uint32_t v = 0; v < m.vert_count(); v++) s[v] = finite3(m.positions[v]) && (whole || places.count(pos_hash(m.positions[v])));
+    if (whole) return s;
+    const std::vector<uint8_t> inside = scope_faces();
+    for (size_t f = 0; f < m.face_count(); f++) {
+      if (inside[f]) continue;
+      for (uint32_t k = 0; k < m.face_size(f); k++) s[m.face_verts(f)[k]] = 0;  // used outside the scope
+    }
+    return s;
+  };
+
   /* 1. Weld: the scope's vertices among themselves. */
-  if (weld_dist > 0.0f) r.welded = merge_by_distance_selected(m, weld_dist, scope_verts(), false);
+  if (weld_dist > 0.0f) {
+    std::vector<uint8_t> first(m.vert_count(), 0);
+    for (uint32_t v = 0; v < m.vert_count(); v++) first[v] = finite3(m.positions[v]) && (whole || scope[v]);
+    r.welded = merge_by_distance_selected(m, weld_dist, first, false);
+  }
   /* 2. T-junctions at the scope's vertices. */
   if (weld_dist > 0.0f) {
     std::vector<uint32_t> verts;
-    if (!whole)
-      for (uint32_t v = 0; v < m.vert_count(); v++)
-        if (in_scope(v)) verts.push_back(v);
+    const std::vector<uint8_t> sv = whole ? std::vector<uint8_t>() : scope_verts();
+    for (uint32_t v = 0; v < sv.size(); v++)
+      if (sv[v]) verts.push_back(v);
     if (whole || !verts.empty()) r.t_junctions = fix_t_junctions(m, verts, weld_dist);
   }
   /* 3. Doubled faces. */
@@ -300,7 +331,10 @@ SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, fl
   guard.uv_safe = true;
   r.merged = dissolve_limited(m, angle_deg, whole ? nullptr : &faces, &guard);
   /* The scope in the result's numbering. */
-  scope = whole ? std::vector<uint8_t>(m.vert_count(), 0) : scope_verts();
+  /* The selection in the result's numbering: every vertex at a selected place (the welded ones included). */
+  std::vector<uint8_t> out(m.vert_count(), 0);
+  for (uint32_t v = 0; v < m.vert_count() && !whole; v++) out[v] = places.count(pos_hash(m.positions[v])) ? 1 : 0;
+  scope = out;
   r.overlap_faces = overlapping_faces(m);
   r.overlap_vertices = overlapping_vertices(m).size();
   r.overlap_edges = overlapping_edges(m).size();

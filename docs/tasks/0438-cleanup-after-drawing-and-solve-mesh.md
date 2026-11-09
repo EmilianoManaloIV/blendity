@@ -96,6 +96,14 @@ already exists.
   cleanup.
 
 ## As built
+- **The overlap guard compares area, not pairs** (changed in testing): the area the z-fighting pairs share (`zfight_pairs`)
+  before and after the draw. A pair count rose whenever a draw merely split a face already lying on another (two pieces
+  over it instead of one) and refused harmless draws; the shared area doesn't rise then. A draw that adds a face lying on
+  another (a shape started off the mesh, partly over a face) is rolled back.
+- **Solve Mesh's scope is the selection's faces, not its places** (fixed in testing): an unselected vertex can sit
+  exactly on a selected one (a second shell touching the first). The weld runs on the selected vertices as given; the
+  later passes take as in scope the faces whose corners all sit at selected places, minus the faces that were outside
+  the selection before (kept by their corners' places and facing), and a vertex only while no outside face uses it.
 - **New file `src/scene/mesh_cleanup.cpp`** holds `fix_t_junctions`, `relative_eps`, `cleanup_after_draw`, `solve_mesh` and
   `vertices_not_in` (not `mesh_tools3.cpp`: they share `apply_edge_splits`, now external, from `mesh_tools.cpp`).
   `tidy_new_geometry`, `dissolve_line_faces` and `remap_selection` left the anonymous namespace (declared in `mesh.h` /
