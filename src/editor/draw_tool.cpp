@@ -217,7 +217,7 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     float best = 1e30f;
     int under = -1;
     for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      const float d = ray_triangle_tolerant(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
       if (d > 0 && d < best) best = d, under = (int)rm.tri_face[t];
     }
     if (under >= 0 && (size_t)under < m.face_count()) {
@@ -294,7 +294,7 @@ Editor::DrawHit Editor::draw_hit(const Recti &view, int mx, int my) {
     const RenderMesh &rm = m.render_mesh(true);
     float best = 1e30f;
     for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      const float d = ray_triangle_tolerant(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
       if (d > 0 && d < best) best = d, h.face = (int)rm.tri_face[t];
     }
     if (h.face >= 0) {
@@ -924,7 +924,7 @@ bool Editor::draw_update(const Recti &view) {
     const RenderMesh &rm = m.render_mesh(true);
     float best = 1e30f;
     for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      const float d = ray_triangle_tolerant(lr, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
       if (d > 0 && d < best) best = d, face = (int)rm.tri_face[t];
     }
   }

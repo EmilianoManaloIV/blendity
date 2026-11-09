@@ -24,6 +24,8 @@ surface you see and becomes edges and faces of it, along the view or to the clos
 
 **Also (testing and review):** a figure eight touching itself at one of its own points, non-finite points and a Closest point further from the surface than the mesh is big are refused; a shape over faces in the first face's plane keeps the exact flat path even on a smooth patch (a bevelled box's top); the inner side is a vote over every face beside the cut; `imprint_projected` split into steps. No triangle BVH: about 10 ms a commit on the teapot; the stress section prints a 51k-face row, where the cut's per-node rebuild (not the scans) would be the next thing to batch. Push/Pull on a projected teapot region pulls out and pushes in, closed.
 
+**Also (macOS CI):** a ray exactly along an edge two triangles share could miss both through rounding (macOS's fused multiply-adds missed the teapot that way): `ray_triangle_tolerant` (core) is used by the projection and by Draw's click picking, so a click on an edge always lands.
+
 **Not done:** one projected cut in 154 (a small circle seen at an angle over the rounded box's flat-to-bevel seam) leaves two faces on top of each other; round 462's overlap guard after a Draw rolls such a draw back, and the cause is a follow-up. A commit on a 51k-face teapot takes about 0.4 s (the cut rebuilds the mesh once per crossing; batching that is the follow-up).
 
 **Workflow (the user, 2026-11-08):** CLAUDE.md gains workflow step 6 - every PR targets `main`; merging a stack's top PR merges every PR below it, one stack per pass; `bash tools/dev/stack_check.sh` after every publish and push (the `stack` CI job runs the same check).

@@ -81,23 +81,6 @@ struct Hit {
   uint32_t face = kNone;
 };
 
-/* Moller-Trumbore with a little slack at the sides: a ray exactly along an edge shared by two triangles can miss both
- * through rounding (a circle's point on a UV sphere's equator), and a projected point must land somewhere. */
-float ray_triangle_tolerant(const Ray &r, Vec3 a, Vec3 b, Vec3 c) {
-  const Vec3 e1 = b - a, e2 = c - a, p = cross(r.dir, e2);
-  const float det = dot(e1, p);
-  if (std::fabs(det) < 1e-20f) return -1.0f;
-  const float inv = 1.0f / det, tol = 1e-5f;
-  const Vec3 s = r.origin - a;
-  const float u = dot(s, p) * inv;
-  if (u < -tol || u > 1.0f + tol) return -1.0f;
-  const Vec3 q = cross(s, e1);
-  const float v = dot(r.dir, q) * inv;
-  if (v < -tol || u + v > 1.0f + tol) return -1.0f;
-  const float t = dot(e2, q) * inv;
-  return t > 0.0f ? t : -1.0f;
-}
-
 /* The first front-facing triangle along the view through p. */
 Hit cast_view(const Mesh &m, const RenderMesh &rm, Vec3 p, const ProjectView &view, float reach) {
   Ray r;

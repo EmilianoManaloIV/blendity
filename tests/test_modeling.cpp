@@ -9340,7 +9340,7 @@ static void tests_round461() {
         const Ray r{body - cs.dir * 3.0f, normalize(cs.dir)};
         float best = 1e30f;
         for (size_t t = 0; t < rm.tri_count(); t++) {
-          const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+          const float d = ray_triangle_tolerant(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
           if (d > 0 && d < best) best = d;
         }
         if (cs.mode == meshops::ProjectMode::Closest) on = r.origin + r.dir * (best - 0.01f);
@@ -9468,7 +9468,7 @@ static bool r461e_first_hit(const Mesh &m, Vec3 origin, Vec3 dir, Vec3 &out) {
   float best = 1e30f;
   for (size_t t = 0; t < rm.tri_count(); t++) {
     if (dot(m.face_normal(rm.tri_face[t]), r.dir) >= 0) continue;
-    const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+    const float d = ray_triangle_tolerant(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
     if (d > 0 && d < best) best = d;
   }
   out = r.origin + r.dir * best;
