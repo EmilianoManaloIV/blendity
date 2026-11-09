@@ -9708,7 +9708,7 @@ static void tests_round461() {
       const Ray r{eye, normalize(aim - eye)};
       float best = 1e30f;
       for (size_t t = 0; t < rm.tri_count(); t++) {
-        const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+        const float d = ray_triangle_tolerant(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
         if (d > 0 && d < best) best = d;
       }
       return r.origin + r.dir * best;
@@ -9845,7 +9845,7 @@ static R461xDraw r461x_teapot_circle(Editor &ed, GameObject *g, float yaw, float
     const Ray r{eye, normalize(aim - eye)};
     float best = 1e30f;
     for (size_t t = 0; t < rm.tri_count(); t++) {
-      const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+      const float d = ray_triangle_tolerant(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
       if (d > 0 && d < best) best = d;
     }
     return r.origin + r.dir * best;
@@ -10016,7 +10016,7 @@ static void tests_round461_engineer() {
         const Ray r{c.position(), normalize(Vec3(0, 0.55f, 0) - c.position())};
         float best = 1e30f;
         for (size_t t = 0; t < rm.tri_count(); t++) {
-          const float d = ray_triangle(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+          const float d = ray_triangle_tolerant(r, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
           if (d > 0 && d < best) best = d;
         }
         centre = r.origin + r.dir * best;
@@ -10164,7 +10164,7 @@ static void tests_round461_engineer() {
       const Ray ro{aim - r.dir * 4.0f, r.dir};
       float best = 1e30f;
       for (size_t t = 0; t < rm.tri_count(); t++) {
-        const float d = ray_triangle(ro, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
+        const float d = ray_triangle_tolerant(ro, rm.positions[rm.indices[t * 3]], rm.positions[rm.indices[t * 3 + 1]], rm.positions[rm.indices[t * 3 + 2]]);
         if (d > 0 && d < best) best = d;
       }
       return best < 1e29f ? ro.origin + ro.dir * best : aim;
