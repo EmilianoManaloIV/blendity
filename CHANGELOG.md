@@ -181,6 +181,7 @@ light 1 plus noise 0.1 reads grain 0.1004 and blotch 0.0144 against a seventh 0.
 dark; `lighting seed 3` leaves the lighting current and seed 0 returns the pages bit for bit; `lighting noise` on two folders). Stress: `lightmap_quality` - the old three scenes' RMSE and bias unchanged (0.016 / 0.008 / 0.060),
 `tunnel_lamps` 0.154 / 0.0002, grain and blotch above; the audits (coverage, HCI, KLM, Unity meta, citations, the command sweep
 regenerated for the two new commands, perf suite).
+
 ## 2026-11-08 (round 461): Draw projects onto curved surfaces
 
 **Asked:** Pass 20's round B (the drawing solver) - a shape drawn over a curved mesh (the Utah teapot) lands on the
