@@ -2089,6 +2089,16 @@ void Editor::run_console_command(const std::string &line) {
         Log::info("lighting tree: %s (the next bake picks emitters %s)", w.c_str(), bake_light_tree_ ? "by what each can give the texel" : "by their share of the scene's power");
       }
     }
+    else if (sub == "sampler") {
+      /* lighting sampler sobol|random (round 465, task 0441): the next bake's samples from an Owen-scrambled Sobol sequence (the
+       * default) or plain random numbers - for comparing the two; not saved, not in the scene's key (both are unbiased). */
+      const std::string w = to_lower(arg(2, "sobol"));
+      if (w != "sobol" && w != "random") Log::warn("lighting sampler: say sobol or random - the sampler stays %s", bake_sobol_ ? "sobol" : "random");
+      else {
+        bake_sobol_ = w == "sobol";
+        Log::info("lighting sampler: %s (the next bake draws its samples %s)", w.c_str(), bake_sobol_ ? "from an Owen-scrambled Sobol sequence, evenly spread" : "as plain random numbers");
+      }
+    }
     else if (sub == "noise") {  // (a folder with spaces in "quotes")
       const std::vector<std::string> f = split_quoted(line_rest(line, 2));
       lighting_noise_command(f.size() > 0 ? f[0] : std::string(), f.size() > 1 ? f[1] : std::string());

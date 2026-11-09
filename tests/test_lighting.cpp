@@ -8,6 +8,7 @@
 #include "../src/render/unity_lightmaps.h"
 #include "../src/scene/unity_scene.h"
 #include "../src/render/light_pick.h"
+#include "../src/render/sampler.h"
 #include <random>
 #include <set>
 #include <tuple>
@@ -8887,12 +8888,12 @@ struct Lamps {
       glow.back()->emission = Vec3(1.0f), glow.back()->emission_strength = strength[i];
     }
   }
-  LightingData bake(bool tree, bool sample, int samples, uint32_t seed, int gpu, size_t *gpu_texels = nullptr) const {
+  LightingData bake(bool tree, bool sample, int samples, uint32_t seed, int gpu, size_t *gpu_texels = nullptr, bool sobol = true) const {
     Environment env;
     env.mode = Environment::Color, env.color = Vec3(0.0f);
     BakeSettings bs;
     bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 2, bs.denoise = false, bs.directional = false;
-    bs.sample_emissive = sample, bs.light_tree = tree, bs.seed = seed, bs.gpu_device = gpu;
+    bs.sample_emissive = sample, bs.light_tree = tree, bs.seed = seed, bs.gpu_device = gpu, bs.sobol = sobol;
     const Vec3 pos[5] = {{-0.7f, 0.5f, 0.0f}, {0.6f, 0.9f, 0.4f}, {0.0f, 0.4f, -0.7f}, {0.8f, 0.6f, -0.6f}, {-0.5f, 1.1f, 0.6f}};
     std::vector<BakeObject> objs;
     objs.push_back(bake_object(1, floor, Mat4::identity(), {white}));
@@ -9693,6 +9694,815 @@ static void tests_round464() {
   tests_round464_console();
 }
 
+/* ---- round 465 (task 0441): a texel's samples from Owen-scrambled Sobol ---- */
+namespace r465 {
+/* Points per elementary interval 2^-a x 2^-b of the first 2^k points of dimensions (d0, d1): true when every one holds exactly one. */
+static bool is_net(uint32_t seed, uint32_t d0, uint32_t d1, int k) {
+  const uint32_t n = 1u << k;
+  std::vector<float> x(n), y(n);
+  for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(i, d0, seed), y[i] = sampler::sobol_burley(i, d1, seed);
+  for (int a = 0; a <= k; a++) {
+    const int b = k - a;
+    std::vector<int> count((size_t)n, 0);
+    for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << b | (uint32_t)(y[i] * (float)(1u << b)))]++;
+    for (int c : count)
+      if (c != 1) return false;
+  }
+  return true;
+}
+
+static double correlation(const std::vector<float> &a, const std::vector<float> &b) {
+  double ma = 0, mb = 0;
+  for (size_t i = 0; i < a.size(); i++) ma += a[i], mb += b[i];
+  ma /= (double)a.size(), mb /= (double)a.size();
+  double sab = 0, saa = 0, sbb = 0;
+  for (size_t i = 0; i < a.size(); i++) sab += (a[i] - ma) * (b[i] - mb), saa += (a[i] - ma) * (a[i] - ma), sbb += (b[i] - mb) * (b[i] - mb);
+  return sab / std::sqrt(saa * sbb);
+}
+
+/* The mean and the spread between seeds of the luminance texels of a lone plane under a gradient sky (a lit plane's value is
+ * its irradiance / pi, which for this sky is 2 x the integral of L(t) t dt, t the cosine to the zenith). Sky 0.2, equator 1 in
+ * red: L(t) = 1 - 0.8 sqrt(t), so the value is 1 - 0.64 = 0.36 exactly. */
+static double plane_value(uint32_t seed, bool sobol, int samples) {
+  Environment env;
+  env.mode = Environment::Gradient;
+  env.sky = Vec3(0.2f, 0.0f, 0.0f), env.equator = Vec3(1.0f, 0.0f, 0.0f), env.ground = Vec3(0.0f);
+  BakeSettings bs;
+  bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 2, bs.denoise = false, bs.directional = false, bs.seed = seed, bs.sobol = sobol;
+  bs.backface_tolerance = 0.0f;
+  std::vector<BakeObject> objs{bake_object(1, primitives::plane(2.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+  Lightmapper lm;
+  lm.begin(objs, {}, env, bs);
+  while (!lm.step(1e9)) {
+  }
+  const LightingData d = lm.take_result();
+  const LightingData::Entry &e = d.entries.at(1);
+  const Lightmap &pg = d.pages[(size_t)e.page];
+  double sum = 0.0;
+  size_t n = 0;
+  for (const Vec3 &t : pg.texels)
+    if (t.x > 0.0f) sum += t.x, n++;
+  return n ? sum / (double)n : 0.0;
+}
+}  // namespace r465
+
+static void tests_round465_sampler() {
+  test("sobol sampler (round 465): after scrambling, the first 2^k points (k = 4 to 10) of dimensions (0, 1) hold one point in every elementary interval of area 2^-k (every shape), for several seeds, and so do a texel's gather and emitter streams", [] {
+    for (uint32_t seed : {0u, 1u, 12345u, 0xdeadbeefu})
+      for (int k = 4; k <= 10; k++) CHECK(r465::is_net(seed, 0, 1, k));
+    sampler::TexelSampler t;
+    t.seed = 4242;
+    bool streams_even = true;
+    for (uint32_t stream : {(uint32_t)sampler::TexelSampler::Gather, (uint32_t)sampler::TexelSampler::Emit, 8u, 9u})
+      for (int k = 4; k <= 10; k++) {
+        const uint32_t n = 1u << k;
+        for (int a = 0; a <= k; a++) {
+          std::vector<int> count((size_t)n, 0);
+          for (uint32_t i = 0; i < n; i++) {
+            float x, y;
+            t.pt(stream, i, x, y);
+            count[(size_t)((uint32_t)(x * (float)(1u << a)) << (k - a) | (uint32_t)(y * (float)(1u << (k - a))))]++;
+          }
+          for (int c : count) streams_even = streams_even && c == 1;
+        }
+      }
+    CHECK(streams_even);
+  });
+  test("sobol sampler (round 465): dimensions (1, 2), where the emitter stream takes its point, are nearly as even - every interval of area 4 x 2^-k holds 4 points within 3, and dimension 3 is a van der Corput-like net on its own", [] {
+    for (uint32_t seed : {3u, 77u})
+      for (int k = 6; k <= 10; k++) {
+        const uint32_t n = 1u << k;
+        std::vector<float> x(n), y(n), z(n);
+        for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(i, 1, seed), y[i] = sampler::sobol_burley(i, 2, seed), z[i] = sampler::sobol_burley(i, 3, seed);
+        int worst = 0;
+        for (int a = 0; a <= k - 2; a++) {
+          const int b = k - 2 - a;
+          std::vector<int> count((size_t)(n / 4), 0);
+          for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << b | (uint32_t)(y[i] * (float)(1u << b)))]++;
+          for (int c : count) worst = std::max(worst, std::abs(c - 4));
+        }
+        std::printf("    dims (1, 2), 2^%d points: worst interval off by %d\n", k, worst);
+        CHECK(worst <= 3);
+        std::vector<int> bins((size_t)n, 0);
+        for (uint32_t i = 0; i < n; i++) bins[(size_t)(z[i] * (float)n)]++;
+        bool net = true;
+        for (int c : bins) net = net && c == 1;
+        CHECK(net);
+      }
+  });
+  test("sobol sampler (round 465): every dimension's mean over 4096 points is 0.5 within 1 %, two seeds give different points, one seed the same points bit for bit, and all values are in [0, 1)", [] {
+    for (uint32_t dim = 0; dim < 4; dim++) {
+      double m = 0.0, m2 = 0.0;
+      bool same = true, differ = false, in_range = true;
+      for (uint32_t i = 0; i < 4096; i++) {
+        const float a = sampler::sobol_burley(i, dim, 5), b = sampler::sobol_burley(i, dim, 5), c = sampler::sobol_burley(i, dim, 6);
+        m += a / 4096.0, m2 += c / 4096.0;
+        same = same && std::memcmp(&a, &b, 4) == 0;
+        differ = differ || a != c;
+        in_range = in_range && a >= 0.0f && a < 1.0f;
+      }
+      CHECK(std::fabs(m - 0.5) < 0.005 && std::fabs(m2 - 0.5) < 0.005);
+      CHECK(same && differ && in_range);
+    }
+  });
+  test("sobol sampler (round 465): a sample count that is no power of two is still spread - 300 points over an 8 x 8 grid hold 4 or 5 each; two streams of one texel are not correlated (the mean r over 256 texels' seeds within 0.1, each texel's own r differing in sign); neighbouring texels' seeds give other points", [] {
+    sampler::TexelSampler t;
+    t.seed = 99;
+    std::vector<int> cell(64, 0);
+    for (uint32_t k = 0; k < 300; k++) {
+      float a, b;
+      t.pt(sampler::TexelSampler::Gather, k, a, b);
+      cell[(size_t)((int)(a * 8.0f) * 8 + (int)(b * 8.0f))]++;
+    }
+    int lo = 99, hi = 0;
+    for (int c : cell) lo = std::min(lo, c), hi = std::max(hi, c);
+    std::printf("    300 points over 8 x 8 cells: %d to %d each\n", lo, hi);
+    CHECK(lo >= 4 && hi <= 5);
+    /* Two purposes' streams are scrambled alone, so a texel's own r is random (the points are the same sequence) with mean 0 over
+     * texels: that is what keeps the gather's and the emitters' errors from adding. */
+    double mean_r = 0.0;
+    int positive = 0;
+    for (uint32_t seed = 1; seed <= 256; seed++) {
+      sampler::TexelSampler s;
+      s.seed = seed * 2654435761u;
+      std::vector<float> g, e;
+      for (uint32_t k = 0; k < 512; k++) g.push_back(s.u(sampler::TexelSampler::Gather, k)), e.push_back(s.u(sampler::TexelSampler::Emit, k));
+      const double r = r465::correlation(g, e);
+      mean_r += r / 256.0;
+      positive += r > 0.0;
+    }
+    std::printf("    gather vs emitter stream: mean r = %.4f over 256 texels (%d positive)\n", mean_r, positive);
+    CHECK(std::fabs(mean_r) < 0.1 && positive > 80 && positive < 176);
+    sampler::TexelSampler n;
+    n.seed = 100;
+    int same = 0;
+    for (uint32_t k = 0; k < 64; k++) same += n.u(sampler::TexelSampler::Gather, k) == t.u(sampler::TexelSampler::Gather, k);
+    CHECK(same < 4);
+  });
+  test("sobol bake (round 465): a lone plane under a gradient sky bakes to its exact value 0.36 within 3 standard errors (the seeds' spread, plus half a percent) with Sobol and with random numbers", [] {
+    for (bool sobol : {true, false}) {
+      std::vector<double> v;
+      for (uint32_t seed = 1; seed <= 6; seed++) v.push_back(r465::plane_value(seed, sobol, 64));
+      double m = 0.0, var = 0.0;
+      for (double x : v) m += x / 6.0;
+      for (double x : v) var += (x - m) * (x - m) / 5.0;
+      const double se = std::sqrt(var / 6.0);
+      std::printf("    %s: mean %.5f +- %.5f (exact 0.36)\n", sobol ? "sobol " : "random", m, se);
+      CHECK(std::fabs(m - 0.36) <= 3.0 * se + 0.0018);
+    }
+  });
+  test("sobol bake (round 465): the light-tree lamps scene bakes bit for bit the same twice at one seed, another seed draws other samples, and random numbers other than Sobol's; Sobol and random agree on the mean (within 3 standard errors)", [] {
+    const r464::Lamps lamps;
+    const LightingData a = lamps.bake(true, true, 64, 3, -1), b = lamps.bake(true, true, 64, 3, -1);
+    CHECK(r463::same_pages(a, b));
+    CHECK(!r463::same_pages(a, lamps.bake(true, true, 64, 4, -1)));
+    const LightingData rnd = lamps.bake(true, true, 64, 3, -1, nullptr, false);
+    CHECK(!r463::same_pages(a, rnd));
+    CHECK(r463::same_pages(rnd, lamps.bake(true, true, 64, 3, -1, nullptr, false)));
+    const r464::Mean ms = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, 64, s, -1); });
+    const r464::Mean mr = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, 64, s, -1, nullptr, false); });
+    std::printf("    floor light: sobol %.4f +- %.4f, random %.4f +- %.4f\n", ms.mean, ms.se, mr.mean, mr.se);
+    CHECK(ms.mean > 1e-3);
+    CHECK(r464::agree(ms, mr));
+  });
+}
+
+static void tests_round465_console() {
+  test("`lighting sampler random` (round 465): the next bake draws other samples than `sobol`'s, the lighting stays current (not in the scene's key), `sobol` brings the old pages back bit for bit, and a fresh editor starts on sobol", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    ed.command("lighting sampler random");
+    CHECK(r463::join_log(mark).find("lighting sampler: random") != std::string::npos);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    r35_bake(ed);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()));
+    CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    ed.command("lighting sampler sobol");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting sampler random");
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+    ed.command("lighting sampler sobol");
+  });
+  test("`lighting sampler` (round 465): a word that is not sobol or random warns and the setting stays, whichever it was; with no word it is sobol", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData sobol_pages = ed.lighting_data_for_test();
+    ed.command("lighting sampler random");
+    r35_bake(ed);
+    const LightingData random_pages = ed.lighting_data_for_test();
+    CHECK(!r463::same_pages(sobol_pages, random_pages));
+    const char *junk[] = {"lighting sampler halton", "lighting sampler 1", "lighting sampler on", "lighting sampler -1", "lighting sampler nan", "lighting sampler sobo"};
+    for (int round = 0; round < 2; round++) {
+      const bool is_sobol = round == 1;
+      ed.command(is_sobol ? "lighting sampler sobol" : "lighting sampler random");
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        CHECK(said.find("say sobol or random") != std::string::npos && said.find(is_sobol ? "stays sobol" : "stays random") != std::string::npos);
+      }
+      r35_bake(ed);
+      CHECK(r463::same_pages(is_sobol ? sobol_pages : random_pages, ed.lighting_data_for_test()));
+    }
+    ed.command("lighting sampler random");
+    ed.command("lighting sampler");  // (no word: back to the default)
+    r35_bake(ed);
+    CHECK(r463::same_pages(sobol_pages, ed.lighting_data_for_test()));
+  });
+}
+
+/* ---- round 465, the independent checks (test engineer): odd counts, the range's ends, the triangle and sky mappings, streams per
+ * light, the filter's edge stop, the card's directions ---- */
+namespace r465 {
+static int popcount32(uint32_t v) {
+  int c = 0;
+  for (; v; v >>= 1) c += (int)(v & 1u);
+  return c;
+}
+
+/* sampler.h's pcg_hash and sobol01 exactly as gpu_kernel.h writes them (uint ops, bitfieldReverse), so the card's directions
+ * can be compared with the CPU's where no card runs. A drift in either side's constants or its dimension-1 loop shows here. */
+static uint32_t glsl_pcg_hash(uint32_t v) {
+  uint32_t state = v * 747796405u + 2891336453u;
+  uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+static uint32_t glsl_lk_hash(uint32_t x, uint32_t s) {
+  x ^= x * 0x3d20adeau;
+  x += s;
+  x *= (s >> 16) | 1u;
+  x ^= x * 0x05526c56u;
+  x ^= x * 0x53a22864u;
+  return x;
+}
+static uint32_t glsl_bitfield_reverse(uint32_t v) {  // (a different way than sampler.h's: bit by bit)
+  uint32_t r = 0;
+  for (int i = 0; i < 32; i++) r |= ((v >> i) & 1u) << (31 - i);
+  return r;
+}
+static float glsl_sobol01(uint32_t index, uint32_t dim, uint32_t seed) {
+  uint32_t x = glsl_bitfield_reverse(index);
+  if (dim == 1u) {
+    x = 0u;
+    uint32_t v = 0x80000000u;
+    for (uint32_t n = index; n != 0u; n >>= 1) {
+      if ((n & 1u) != 0u) x ^= v;
+      v ^= v >> 1;
+    }
+  }
+  x = glsl_bitfield_reverse(glsl_lk_hash(glsl_bitfield_reverse(x), glsl_pcg_hash(glsl_pcg_hash(seed) + dim * 0x9E3779B9u)));
+  return (float)(x >> 8) * (1.0f / 16777216.0f);
+}
+
+/* Barycentric coordinates (b1, b2) of P in triangle abc (P on its plane). */
+static void bary(Vec3 a, Vec3 b, Vec3 c, Vec3 P, float &b1, float &b2) {
+  const Vec3 v0 = b - a, v1 = c - a, v2 = P - a;
+  const float d00 = dot(v0, v0), d01 = dot(v0, v1), d11 = dot(v1, v1), d20 = dot(v2, v0), d21 = dot(v2, v1);
+  const float den = d00 * d11 - d01 * d01;
+  b1 = (d11 * d20 - d01 * d21) / den;
+  b2 = (d00 * d21 - d01 * d20) / den;
+}
+
+/* The cell of a point of the unit triangle among 16 equal-area ones (the triangle cut twice into quarters). */
+static int sub_triangle(float u, float v) {
+  const int I = std::min(3, (int)(4.0f * u)), J = std::min(3, (int)(4.0f * v));
+  const float fx = 4.0f * u - (float)I, fy = 4.0f * v - (float)J;
+  const bool down = fx + fy >= 1.0f && I + J <= 2;
+  return (down ? 16 : 0) + I * 4 + J;
+}
+
+/* The luminance (y) error of a bake of the r423 scene against `ref`. */
+struct Scene423 {
+  MeshPtr floor = primitives::plane(4.0f, 8), wall = primitives::plane(4.0f, 8);
+  MaterialPtr white = make_material("White", Vec3(0.8f));
+  std::vector<BakeObject> objs;
+  BakeLight sun;
+  Environment env;
+  Scene423() {
+    objs = {bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, wall, Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {white})};
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    env.mode = Environment::Gradient;
+  }
+  LightingData bake(int n, bool denoise, uint32_t seed, bool sobol) const {
+    BakeSettings bs;
+    bs.texels_per_unit = 8, bs.indirect_samples = n, bs.denoise = denoise, bs.seed = seed, bs.sobol = sobol;
+    Lightmapper lm;
+    lm.begin(objs, {sun}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    return lm.take_result();
+  }
+  static double rmse(const LightingData &a, const LightingData &ref) {
+    double s = 0;
+    size_t k = 0;
+    for (size_t p = 0; p < a.pages.size(); p++)
+      for (size_t i = 0; i < a.pages[p].texels.size(); i++) {
+        const float r = ref.pages[p].texels[i].y;
+        if (!(r > 0.0f)) continue;
+        const double d = (double)a.pages[p].texels[i].y - r;
+        s += d * d, k++;
+      }
+    return k ? std::sqrt(s / (double)k) : 1e9;
+  }
+};
+}  // namespace r465
+
+static void tests_round465_edges() {
+  test("sobol sampler (round 465): a sample count that is no power of two (1, 3, 7, 300, 1000) spreads as a (0, 2)-sequence's prefix must - in every interval of area 2^-m the count is above n 2^-m - 1 and at most n 2^-m + (the 1 bits of n below 2^m), every shape, and the 1D dimensions likewise", [] {
+    /* Why that bound: the first n points split into aligned blocks of 2^j points (n's binary digits); each block is a (0, j, 2)-net.
+     * A block of 2^j >= 2^m points holds exactly 2^(j-m) in an interval of area 2^-m; a smaller block holds at most 1 (and its
+     * expected share is below 1). So the error is above -1 and at most the number of small blocks. */
+    int checked = 0;
+    for (uint32_t seed : {0u, 11u, 0xFFFFFFFFu})
+      for (uint32_t n : {1u, 3u, 7u, 300u, 1000u}) {
+        std::vector<float> x(n), y(n);
+        for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(i, 0, seed), y[i] = sampler::sobol_burley(i, 1, seed);
+        for (int m = 1; m <= 12; m++) {
+          const int low = r465::popcount32(n & ((1u << m) - 1u));
+          const double expect = (double)n / (double)(1u << m);
+          for (int a = 0; a <= m; a++) {
+            const int b = m - a;
+            std::vector<int> count((size_t)1 << m, 0);
+            for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << b | (uint32_t)(y[i] * (float)(1u << b)))]++;
+            for (int c : count) {
+              checked++;
+              if (!((double)c > expect - 1.0 - 1e-9 && (double)c <= expect + (double)low + 1e-9)) {
+                std::printf("    n %u seed %u m %d a %d: a cell holds %d, expected %.3f, allowed up to +%d\n", n, seed, m, a, c, expect, low);
+                CHECK(false);
+                return;
+              }
+            }
+          }
+        }
+        /* one dimension: every interval of length 2^-m */
+        for (int m = 1; m <= 12; m++) {
+          std::vector<int> count((size_t)1 << m, 0);
+          for (uint32_t i = 0; i < n; i++) count[(size_t)(x[i] * (float)(1u << m))]++;
+          const int low = r465::popcount32(n & ((1u << m) - 1u));
+          const double expect = (double)n / (double)(1u << m);
+          bool cells_ok = true;
+          for (size_t ci = 0; ci < count.size() && cells_ok; ci++) {
+            cells_ok = (double)count[ci] > expect - 1.0 - 1e-9 && (double)count[ci] <= expect + (double)low + 1e-9;
+            if (!cells_ok) std::printf("    1D n %u seed %u m %d: cell %zu holds %d, expected %.3f\n", n, seed, m, ci, count[ci], expect);
+          }
+          CHECK(cells_ok);
+        }
+      }
+    std::printf("    %d interval counts checked\n", checked);
+  });
+  test("sobol sampler (round 465): a later run of samples is as even as the first - 2^k points from a block-aligned start (2^20, 3 x 2^28, 2^31) still hold one in every elementary interval", [] {
+    for (uint32_t seed : {2u, 0xFFFFFFFFu})
+      for (uint32_t base : {1u << 20, 3u << 28, 1u << 31})
+        for (int k = 4; k <= 9; k++) {
+          const uint32_t n = 1u << k;
+          std::vector<float> x(n), y(n);
+          for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(base + i, 0, seed), y[i] = sampler::sobol_burley(base + i, 1, seed);
+          bool ok = true;
+          for (int a = 0; a <= k; a++) {
+            std::vector<int> count((size_t)n, 0);
+            for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << (k - a) | (uint32_t)(y[i] * (float)(1u << (k - a))))]++;
+            for (int c : count) ok = ok && c == 1;
+          }
+          CHECK(ok);
+        }
+  });
+  test("sobol sampler (round 465): index 0, indices 2^31 and 2^32 - 1, seeds 0 and 0xFFFFFFFF, every dimension (also 4 and up): every value in [0, 1), none NaN, and over seeds the first point is not stuck (mean 0.5, not at 0)", [] {
+    const uint32_t indices[] = {0u, 1u, 0x7FFFFFFFu, 0x80000000u, 0x80000001u, 0xFFFFFFFEu, 0xFFFFFFFFu};
+    const uint32_t seeds[] = {0u, 1u, 0x80000000u, 0xFFFFFFFEu, 0xFFFFFFFFu};
+    bool ok = true;
+    for (uint32_t idx : indices)
+      for (uint32_t seed : seeds)
+        for (uint32_t dim = 0; dim < 9; dim++) {
+          const float v = sampler::sobol_burley(idx, dim, seed);
+          ok = ok && std::isfinite(v) && v >= 0.0f && v < 1.0f;
+        }
+    CHECK(ok);
+    for (uint32_t idx : {0u, 0x80000000u, 0xFFFFFFFFu})
+      for (uint32_t dim = 0; dim < 4; dim++) {
+        double m = 0.0;
+        float lo = 1.0f, hi = 0.0f;
+        const int N = 4096;
+        for (int s = 0; s < N; s++) {
+          const float v = sampler::sobol_burley(idx, dim, (uint32_t)s * 2654435761u);
+          m += v / N, lo = std::min(lo, v), hi = std::max(hi, v);
+        }
+        CHECK(std::fabs(m - 0.5) < 0.03 && lo < 0.05f && hi > 0.95f);
+      }
+    /* the same inputs, the same bits, whatever was drawn before (no hidden state) */
+    const float first = sampler::sobol_burley(0xFFFFFFFFu, 3, 0xFFFFFFFFu);
+    for (uint32_t i = 0; i < 100; i++) sampler::sobol_burley(i, i & 3u, i);
+    CHECK(first == sampler::sobol_burley(0xFFFFFFFFu, 3, 0xFFFFFFFFu));
+  });
+  test("sobol sampler (round 465): the card's sobol01 (gpu_kernel.h, ported over the same uint ops) gives bit for bit the CPU's sobol_burley for dimensions 0 and 1 - edge indices, edge seeds and 20,000 mixed ones", [] {
+    uint32_t state = 12345u;
+    auto next = [&]() {
+      state = state * 1664525u + 1013904223u;
+      return state ^ (state >> 15);
+    };
+    int diff = 0, total = 0;
+    auto check = [&](uint32_t idx, uint32_t dim, uint32_t seed) {
+      const float a = sampler::sobol_burley(idx, dim, seed), b = r465::glsl_sobol01(idx, dim, seed);
+      diff += std::memcmp(&a, &b, 4) != 0, total++;
+    };
+    const uint32_t edge[] = {0u, 1u, 2u, 3u, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu};
+    for (uint32_t i : edge)
+      for (uint32_t s : edge)
+        for (uint32_t d : {0u, 1u}) check(i, d, s);
+    for (int k = 0; k < 20000; k++) check(k < 10000 ? (uint32_t)(k % 1024) : next(), (uint32_t)(k & 1), next());
+    std::printf("    %d of %d values differ between the kernel's port and the CPU\n", diff, total);
+    CHECK(diff == 0);
+    CHECK(r465::glsl_pcg_hash(7u) == sampler::hash(7u) && r465::glsl_pcg_hash(0xFFFFFFFFu) == sampler::hash(0xFFFFFFFFu));
+    CHECK(r465::glsl_bitfield_reverse(0x12345678u) == sampler::reverse_bits(0x12345678u));
+    /* the kernel's cosine directions for one texel: a (0, 2)-net, as the CPU's */
+    const uint32_t sseed = r465::glsl_pcg_hash(77u * 9781u + 5u);
+    for (int k = 4; k <= 9; k++) {
+      const uint32_t n = 1u << k;
+      std::vector<int> count((size_t)n, 0);
+      for (int a = 0; a <= k; a++) {
+        std::fill(count.begin(), count.end(), 0);
+        for (uint32_t i = 0; i < n; i++)
+          count[(size_t)((uint32_t)(r465::glsl_sobol01(i, 0, sseed) * (float)(1u << a)) << (k - a) | (uint32_t)(r465::glsl_sobol01(i, 1, sseed) * (float)(1u << (k - a))))]++;
+        bool one_each = true;
+        for (size_t ci = 0; ci < count.size() && one_each; ci++) {
+          one_each = count[ci] == 1;
+          if (!one_each) std::printf("    kernel port, 2^%d points, a = %d: cell %zu holds %d\n", k, a, ci, count[ci]);
+        }
+        CHECK(one_each);
+      }
+    }
+  });
+  test("sobol sampler (round 465): each sized light of a texel draws its own points - the light streams get different ids, different seeds, different points, each one a (0, 2)-net, and two of them are not correlated over texels", [] {
+    sampler::TexelSampler t;
+    t.seed = 31337;
+    std::set<uint32_t> ids, seeds;
+    for (int i = 0; i < 64; i++) ids.insert(t.next_light_stream());
+    CHECK(ids.size() == 64 && !ids.count(sampler::TexelSampler::Gather) && !ids.count(sampler::TexelSampler::Emit) && !ids.count(sampler::TexelSampler::Sky));
+    CHECK(t.lights == 64);
+    for (uint32_t s = 0; s < 1000; s++) seeds.insert(t.stream_seed(s));
+    CHECK(seeds.size() == 1000);
+    const uint32_t la = sampler::TexelSampler::FirstLight, lb = la + 1;
+    int same = 0;
+    for (uint32_t k = 0; k < 64; k++) {
+      float ax, ay, bx, by;
+      t.pt(la, k, ax, ay), t.pt(lb, k, bx, by);
+      same += ax == bx && ay == by;
+    }
+    CHECK(same == 0);
+    for (uint32_t stream : {la, lb, la + 40})
+      for (int k = 4; k <= 8; k++) {
+        const uint32_t n = 1u << k;
+        for (int a = 0; a <= k; a++) {
+          std::vector<int> count((size_t)n, 0);
+          for (uint32_t i = 0; i < n; i++) {
+            float x, y;
+            t.pt(stream, i, x, y);
+            count[(size_t)((uint32_t)(x * (float)(1u << a)) << (k - a) | (uint32_t)(y * (float)(1u << (k - a))))]++;
+          }
+          bool one_each = true;
+          for (size_t ci = 0; ci < count.size() && one_each; ci++) {
+            one_each = count[ci] == 1;
+            if (!one_each) std::printf("    light stream %u, 2^%d points, a = %d: cell %zu holds %d\n", stream, k, a, ci, count[ci]);
+          }
+          CHECK(one_each);
+        }
+      }
+    /* a texel's two lights: the first coordinates' correlation averages 0 over texels */
+    double mean_r = 0.0;
+    int positive = 0;
+    for (uint32_t s = 1; s <= 256; s++) {
+      sampler::TexelSampler u;
+      u.seed = s * 2246822519u;
+      std::vector<float> a, b;
+      for (uint32_t k = 0; k < 64; k++) a.push_back(u.u(la, k)), b.push_back(u.u(lb, k));
+      const double r = r465::correlation(a, b);
+      mean_r += r / 256.0, positive += r > 0.0;
+    }
+    std::printf("    light stream 1 vs 2: mean r = %.4f (%d of 256 positive)\n", mean_r, positive);
+    CHECK(std::fabs(mean_r) < 0.1 && positive > 80 && positive < 176);
+    /* two texels' light 1: other points */
+    sampler::TexelSampler u1, u2;
+    u1.seed = 5, u2.seed = 6;
+    int equal = 0;
+    for (uint32_t k = 0; k < 64; k++) equal += u1.u(la, k) == u2.u(la, k);
+    CHECK(equal < 4);
+  });
+}
+
+static void tests_round465_mappings() {
+  test("sobol sampler (round 465): the emitter's point from (pu, pv) is uniform over the triangle - 16 equal sub-triangles, a chi-square under the 0.1 % bound, for Sobol's and for random squares - and (pu, pv) at the ends of [0, 1) stay on the triangle; the same numbers give the same ray whatever the rng", [] {
+    /* One emissive quad (two triangles) at y = 2, turned each way until a point at the origin, its normal up, sees it. */
+    MeshPtr quad = primitives::quad(1.0f);
+    std::vector<MaterialPtr> glow = {make_material("light", Vec3(0.0f))};
+    glow[0]->emission = Vec3(1.0f), glow[0]->emission_strength = 5.0f;
+    Environment black;
+    black.mode = Environment::Color, black.color = Vec3(0.0f);
+    PathTracer pt;
+    PTSettings pst;
+    pst.use_guiding = false, pst.denoise = false;
+    pt.set_settings(pst);
+    const Vec3 origin(0, 0, 0), up(0, 1, 0);
+    Vec3 v[2][3];
+    auto draw = [&](uint32_t rng, float u, float pu, float pv, Vec3 &P, int, bool &ok, LightTree::Cache *cache = nullptr) {
+      Vec3 dir, Le;
+      float dist = 0.0f, pdf = 0.0f;
+      ok = pt.sample_mesh_light(rng, origin, up, dir, dist, Le, pdf, u, cache, pu, pv);
+      P = origin + dir * dist;
+      return ok && std::isfinite(dist) && std::isfinite(pdf) && pdf > 0.0f;
+    };
+    int side = 0, tri = -1;
+    std::vector<PTObject> objs;  // (outlives the loop: the path tracer may read it later)
+    const float first_u = 0.3f;
+    for (float pitch : {0.0f, 90.0f, 180.0f, 270.0f}) {
+      const Mat4 model = Mat4::trs({0, 2, 0}, Quat::euler({pitch, 0, 0}), {1, 1, 1});
+      objs = {{&quad->render_mesh_tangents(), model, &glow}};
+      pt.build(objs, {}, black);
+      const RenderMesh &rm = *objs[0].mesh;
+      for (int t = 0; t < 2; t++)
+        for (int c = 0; c < 3; c++) v[t][c] = model.point(rm.positions[rm.indices[(size_t)(t * 3 + c)]]);
+      Vec3 P;
+      bool ok = false;
+      if (!draw(1, first_u, 0.3f, 0.3f, P, 0, ok)) continue;
+      for (int t = 0; t < 2; t++) {
+        float b1, b2;
+        r465::bary(v[t][0], v[t][1], v[t][2], P, b1, b2);
+        if (b1 > 0.0f && b2 > 0.0f && b1 + b2 < 1.0f && std::fabs(dot(P - v[t][0], normalize(cross(v[t][1] - v[t][0], v[t][2] - v[t][0])))) < 1e-3f) tri = t;
+      }
+      if (tri >= 0) break;
+    }
+    CHECK(tri >= 0);
+    if (tri < 0) return;
+    static const Vec3 toward[1][2] = {{Vec3(0, 0, 0), Vec3(0, 1, 0)}};  // (cache_begin below)
+    auto cell_counts = [&](const std::vector<std::pair<float, float>> &pts, std::vector<int> &count, int &outside) {
+      count.assign(32, 0), outside = 0;
+      for (const auto &p : pts) {
+        Vec3 P;
+        bool ok = false;
+        if (!draw(9, first_u, p.first, p.second, P, side, ok)) {
+          outside++;
+          continue;
+        }
+        float b1, b2;
+        r465::bary(v[tri][0], v[tri][1], v[tri][2], P, b1, b2);
+        if (b1 < -1e-3f || b2 < -1e-3f || b1 + b2 > 1.0f + 1e-3f) outside++;
+        count[(size_t)r465::sub_triangle(std::clamp(b1, 0.0f, 1.0f), std::clamp(b2, 0.0f, 1.0f))]++;
+      }
+    };
+    const int N = 8192;
+    std::vector<std::pair<float, float>> sobol, rand_pts;
+    std::mt19937 g(2024);
+    for (int i = 0; i < N; i++) {
+      sobol.push_back({sampler::sobol_burley((uint32_t)i, 0, 77), sampler::sobol_burley((uint32_t)i, 1, 77)});
+      rand_pts.push_back({(float)(g() >> 8) * (1.0f / 16777216.0f), (float)(g() >> 8) * (1.0f / 16777216.0f)});
+    }
+    for (int which = 0; which < 2; which++) {
+      std::vector<int> count;
+      int outside = 0;
+      cell_counts(which ? rand_pts : sobol, count, outside);
+      double chi = 0.0;
+      int cells = 0;
+      for (int c : count) {
+        if (!c) continue;
+        cells++;
+        chi += ((double)c - N / 16.0) * ((double)c - N / 16.0) / (N / 16.0);
+      }
+      std::printf("    %s squares: chi-square %.2f over %d sub-triangles (0.1%% bound %.1f), %d outside\n", which ? "random" : "sobol ", chi, cells, r464::chi2_crit(15), outside);
+      CHECK(cells == 16 && outside == 0 && chi < r464::chi2_crit(15));
+    }
+    /* the square's ends: all four corners and the edge nearest 1 */
+    const float top = 0.99999994f;
+    const float ends[][2] = {{0, 0}, {top, 0}, {0, top}, {top, top}, {0.5f, 0}, {0.5f, top}, {0, 0.5f}, {top, 0.5f}, {1e-30f, 1e-30f}};
+    int bad = 0;
+    for (const auto &e : ends) {
+      Vec3 P;
+      bool ok = false;
+      draw(5, first_u, e[0], e[1], P, side, ok);
+      float b1, b2;
+      r465::bary(v[tri][0], v[tri][1], v[tri][2], P, b1, b2);
+      bad += !ok || !std::isfinite(P.x + P.y + P.z) || b1 < -1e-3f || b2 < -1e-3f || b1 + b2 > 1.0f + 1e-3f;
+    }
+    CHECK(bad == 0);
+    /* given the pick and the point, the rng plays no part - and neither does the tree's cache */
+    LightTree::Cache cache;
+    pt.light_tree().cache_begin(cache, toward[side][0], &toward[side][1]);
+    Vec3 P1, P2, P3;
+    bool ok1 = false, ok2 = false, ok3 = false;
+    draw(1, first_u, 0.37f, 0.61f, P1, side, ok1);
+    draw(0xFFFFFFFFu, first_u, 0.37f, 0.61f, P2, side, ok2);
+    draw(1, first_u, 0.37f, 0.61f, P3, side, ok3, &cache);
+    CHECK(ok1 && ok2 && std::memcmp(&P1, &P2, sizeof(Vec3)) == 0);
+    std::printf("    with the light tree's cache: %s\n", ok3 ? "drew" : "refused");
+    /* NaN or negative numbers fall back on random ones and stay finite */
+    int finite = 0;
+    for (float pu : {std::nanf(""), -1.0f, -0.0f - 1e-9f})
+      for (float pv : {0.4f, std::nanf("")}) {
+        Vec3 P;
+        bool ok = false;
+        if (draw(3, first_u, pu, pv, P, side, ok)) finite += std::isfinite(P.x + P.y + P.z);
+      }
+    CHECK(finite > 0);
+  });
+  test("sobol sampler (round 465): the sky's pick and point from three given numbers - a direction inside the picked cell with the pdf env_pdf gives, the ends of [0, 1) and NaN give a finite direction or a refusal, the same numbers the same ray whatever the rng, the bright patch found as often as with random numbers", [] {
+    Bitmap b;
+    b.width = 64, b.height = 32, b.is_float = true;
+    b.rgbaf.assign((size_t)64 * 32 * 4, 0.05f);
+    for (int y = 6; y < 8; y++)
+      for (int x = 20; x < 22; x++)
+        for (int c = 0; c < 3; c++) b.rgbaf[((size_t)y * 64 + x) * 4 + c] = 400.0f;
+    for (size_t i = 3; i < b.rgbaf.size(); i += 4) b.rgbaf[i] = 1.0f;
+    auto tex = std::make_shared<Texture>();
+    tex->build(b, false);
+    Environment env;
+    env.mode = Environment::Hdri, env.map = tex;
+    P37Pt s;
+    s.add(primitives::plane(4.0f, 1), Mat4::translate({0, -1.0f, 0}), Vec3(0.5f));
+    s.build({}, env);
+    CHECK(s.pt.has_env_dist());
+    uint32_t bad_pdf = 0, bad_dir = 0, patch_sobol = 0, patch_rand = 0, refused = 0;
+    const int N = 4096;
+    /* (the patch is where the sky's pdf is far above the uniform 1 / 4 pi: where it sits on the map, row order and all, is the
+     * sampler's business) */
+    auto in_patch = [&](Vec3 d) { return s.pt.env_pdf(d) > 2.0f; };
+    for (int i = 0; i < N; i++) {
+      float u3[3] = {sampler::sobol_burley((uint32_t)i, 0, 5), sampler::sobol_burley((uint32_t)i, 1, 6), sampler::sobol_burley((uint32_t)i, 2, 6)};
+      uint32_t rng = 1;
+      Vec3 dir;
+      float pdf = 0.0f;
+      if (!s.pt.sample_env(rng, dir, pdf, u3)) {
+        refused++;
+        continue;
+      }
+      bad_dir += !(std::fabs(length(dir) - 1.0f) < 1e-4f);
+      const float pe = s.pt.env_pdf(dir);
+      bad_pdf += !(pdf > 0.0f && std::fabs(pe - pdf) <= 2e-3f * pdf);
+      patch_sobol += in_patch(dir);
+      uint32_t r2 = 0x1234567u + (uint32_t)i * 977u;
+      Vec3 d2;
+      float p2 = 0.0f;
+      if (s.pt.sample_env(r2, d2, p2)) patch_rand += in_patch(d2);
+    }
+    std::printf("    %u refusals, %u bad directions, %u pdf mismatches; the patch got %u of %d draws (random numbers: %u)\n", refused, bad_dir, bad_pdf, patch_sobol, N, patch_rand);
+    CHECK(bad_dir == 0 && bad_pdf == 0 && refused < (uint32_t)N / 50);
+    CHECK(patch_sobol > 0 && std::fabs((double)patch_sobol - (double)patch_rand) < 0.05 * N);
+    const float top = 0.99999994f, nan = std::nanf("");
+    const float cases[][3] = {{0, 0, 0}, {top, top, top}, {0, top, 0}, {top, 0, top}, {0.5f, 0, top}, {nan, 0.5f, 0.5f}, {0.5f, nan, 0.5f}, {0.5f, 0.5f, nan}, {nan, nan, nan}, {1.0f, 1.0f, 1.0f}};
+    int not_clean = 0;
+    for (const auto &c : cases) {
+      uint32_t rng = 1;
+      Vec3 dir;
+      float pdf = 0.0f;
+      const bool ok = s.pt.sample_env(rng, dir, pdf, c);
+      if (ok && !(std::isfinite(dir.x + dir.y + dir.z) && std::isfinite(pdf) && pdf > 0.0f)) {
+        std::printf("    u3 = (%g, %g, %g) was accepted with direction (%g, %g, %g), pdf %g\n", c[0], c[1], c[2], dir.x, dir.y, dir.z, pdf);
+        not_clean++;
+      }
+    }
+    CHECK(not_clean == 0);
+    const float mid[3] = {0.31f, 0.62f, 0.93f};
+    uint32_t r1 = 1, r2 = 0xFFFFFFFFu;
+    Vec3 d1, d2;
+    float p1 = 0.0f, p2 = 0.0f;
+    const bool k1 = s.pt.sample_env(r1, d1, p1, mid), k2 = s.pt.sample_env(r2, d2, p2, mid);
+    CHECK(k1 == k2 && (!k1 || (std::memcmp(&d1, &d2, sizeof(Vec3)) == 0 && p1 == p2)));
+  });
+}
+
+static void tests_round465_bakes() {
+  test("sobol bake (round 465): any sample count (1, 2, 3, 7, 300) bakes finite, non-negative light that lit the plane, with Sobol and random numbers; the mean of 3 and 7 samples is the exact 0.36 within what a few samples give", [] {
+    for (bool sobol : {true, false})
+      for (int n : {1, 2, 3, 7, 300}) {
+        Environment env;
+        env.mode = Environment::Gradient;
+        env.sky = Vec3(0.2f, 0.0f, 0.0f), env.equator = Vec3(1.0f, 0.0f, 0.0f), env.ground = Vec3(0.0f);
+        BakeSettings bs;
+        bs.texels_per_unit = 8, bs.indirect_samples = n, bs.bounces = 2, bs.denoise = false, bs.directional = false, bs.seed = 3, bs.sobol = sobol;
+        bs.backface_tolerance = 0.0f;
+        std::vector<BakeObject> objs{bake_object(1, primitives::plane(2.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+        Lightmapper lm;
+        lm.begin(objs, {}, env, bs);
+        while (!lm.step(1e9)) {
+        }
+        const LightingData d = lm.take_result();
+        bool finite = true;
+        size_t lit = 0;
+        for (const Vec3 &t : d.pages.at(0).texels) {
+          finite = finite && std::isfinite(t.x + t.y + t.z) && t.x >= 0.0f && t.y >= 0.0f && t.z >= 0.0f;
+          lit += t.x > 0.0f;
+        }
+        CHECK(finite && lit > 0);
+        const double m = r465::plane_value(3, sobol, n);
+        std::printf("    %s, %d samples: mean %.4f (exact 0.36)\n", sobol ? "sobol " : "random", n, m);
+        if (n >= 7) CHECK(std::fabs(m - 0.36) < (n == 7 ? 0.06 : 0.01));
+      }
+  });
+  test("sobol bake (round 465): the lamps scene at 1, 3 and 7 samples gives finite light and the same mean light with Sobol and random numbers within 3 standard errors", [] {
+    const r464::Lamps lamps;
+    for (int n : {3, 7}) {
+      const LightingData d = lamps.bake(true, true, n, 2, -1);
+      bool finite = true;
+      for (const Lightmap &pg : d.pages)
+        for (const Vec3 &t : pg.texels) finite = finite && std::isfinite(t.x + t.y + t.z) && t.x >= 0.0f;
+      CHECK(finite);
+      const r464::Mean ms = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, n, s, -1); });
+      const r464::Mean mr = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, n, s, -1, nullptr, false); });
+      std::printf("    %d samples: floor light sobol %.4f +- %.4f, random %.4f +- %.4f\n", n, ms.mean, ms.se, mr.mean, mr.se);
+      CHECK(r464::agree(ms, mr));
+    }
+    CHECK(std::isfinite(r464::floor_light(lamps.bake(true, true, 1, 5, -1))));
+  });
+  test("sobol bake (round 465): the filter helps a short bake and doesn't make a long one worse, with Sobol and with random numbers (16 samples: error under 0.8 of the unfiltered; 512: at most 1.1 of it); Sobol's raw error at 16 samples is no worse than random's", [] {
+    const r465::Scene423 sc;
+    const LightingData ref = sc.bake(4096, false, 99, true);
+    double raw16[2] = {0, 0};
+    for (int mode = 0; mode < 2; mode++) {
+      const bool sobol = mode == 0;
+      double e_raw = 0.0, e_fil = 0.0;
+      for (uint32_t seed = 1; seed <= 3; seed++) {
+        e_raw += r465::Scene423::rmse(sc.bake(16, false, seed, sobol), ref) / 3.0;
+        e_fil += r465::Scene423::rmse(sc.bake(16, true, seed, sobol), ref) / 3.0;
+      }
+      raw16[mode] = e_raw;
+      const double l_raw = r465::Scene423::rmse(sc.bake(512, false, 4, sobol), ref), l_fil = r465::Scene423::rmse(sc.bake(512, true, 4, sobol), ref);
+      std::printf("    %s: 16 samples %.4f raw, %.4f filtered; 512 samples %.4f raw, %.4f filtered\n", sobol ? "sobol " : "random", e_raw, e_fil, l_raw, l_fil);
+      CHECK(e_fil < e_raw * 0.8);
+      CHECK(l_fil <= l_raw * 1.1 + 1e-4);
+    }
+    CHECK(raw16[0] <= raw16[1] * 1.05);
+  });
+  test("sobol bake (round 465): the filter at 16 samples treats the two samplers alike - each filtered bake keeps the unfiltered one's mean light within 1 %", [] {
+    /* The edge stop's sigma is a private number (2 / samples^0.75 for Sobol, 2 / sqrt(samples) for random: 0.25 and 0.5 at 16),
+     * so only its effect is observable: the filter doesn't shift the light (a per-texel range check was dropped: the texel-level check is round 423's review test). */
+    const r465::Scene423 sc;
+    for (bool sobol : {true, false}) {
+      const LightingData raw = sc.bake(16, false, 2, sobol), fil = sc.bake(16, true, 2, sobol);
+      double sr = 0.0, sf = 0.0;
+      for (size_t p = 0; p < raw.pages.size(); p++)
+        for (size_t i = 0; i < raw.pages[p].texels.size(); i++) sr += raw.pages[p].texels[i].y, sf += fil.pages[p].texels[i].y;
+      std::printf("    %s: summed light %.2f raw, %.2f filtered\n", sobol ? "sobol " : "random", sr, sf);
+      CHECK(sr > 0.0 && std::fabs(sf - sr) < 0.01 * sr);
+    }
+  });
+}
+
+static void tests_round465_card() {
+  test("sobol bake (round 465): the card's first-bounce directions are the Sobol ones - 64 points at 64 samples under a gradient sky spread less between points than with random directions, the same mean (skipped with a note when no GPU opens)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = Vec3(0.2f, 0.0f, 0.0f), env.equator = Vec3(1.0f, 0.0f, 0.0f), env.ground = Vec3(0.0f);
+    s.build({}, env, 1);
+    std::vector<Vec3> origins(64, Vec3(0.0f, 0.0f, 0.0f)), dirs(64, Vec3(0, 1, 0));
+    auto gather = [&](bool sobol, std::vector<Vec3> &out) {
+      std::string err;
+      for (int i = 0; i < 100; i++) {
+        if (s.pt.gpu_gather(0, 1, origins, dirs, 64, out, nullptr, &err, 0.0f, 0, sobol)) return true;
+        if (!s.pt.gpu_gather_waiting()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      std::printf("    (the gather did not run: %s - skipped)\n", err.c_str());
+      return false;
+    };
+    std::vector<Vec3> so, ra;
+    if (!gather(true, so) || !gather(false, ra)) return;
+    CHECK(so.size() == 64 && ra.size() == 64);
+    auto stats = [](const std::vector<Vec3> &v, double &m, double &sd) {
+      m = 0.0, sd = 0.0;
+      for (const Vec3 &c : v) m += c.x / (double)v.size();
+      for (const Vec3 &c : v) sd += (c.x - m) * (c.x - m) / (double)v.size();
+      sd = std::sqrt(sd);
+    };
+    double ms, ss, mr, sr;
+    stats(so, ms, ss), stats(ra, mr, sr);
+    std::printf("    card, 64 points x 64 samples: sobol mean %.4f sd %.4f; random mean %.4f sd %.4f\n", ms, ss, mr, sr);
+    CHECK(std::fabs(ms - mr) < 0.03 * std::fabs(mr) + 1e-3);
+    CHECK(ss < 0.7 * sr);
+    std::vector<Vec3> again;
+    CHECK(gather(true, again) && again.size() == so.size() && std::memcmp(again.data(), so.data(), so.size() * sizeof(Vec3)) == 0);
+  });
+}
+
+static void tests_round465() {
+  tests_round465_sampler();
+  tests_round465_console();
+  tests_round465_edges();
+  tests_round465_mappings();
+  tests_round465_bakes();
+  tests_round465_card();
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -9729,4 +10539,5 @@ void run_lighting_tests() {
   tests_round455();
   tests_round463();
   tests_round464();
+  tests_round465();
 }

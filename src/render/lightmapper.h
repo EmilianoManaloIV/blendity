@@ -18,6 +18,7 @@
 #pragma once
 
 #include "pathtracer.h"
+#include "sampler.h"
 #include "raster.h"
 #include "../scene/mesh.h"
 #include "shading.h"
@@ -62,6 +63,9 @@ struct BakeSettings {
   /* Round 464 (ADR 0121): emissive triangles picked by a light tree - by what each can give the texel - rather than by
    * their share of the scene's power (off only for comparisons: `lighting tree off`). */
   bool light_tree = true;
+  /* Round 465 (task 0441): a texel's samples from an Owen-scrambled Sobol sequence (sampler.h), which fills the hemisphere
+   * evenly whatever the count, rather than plain random numbers (`lighting sampler random`: for comparisons; both are unbiased). */
+  bool sobol = true;
   /* Round 444 (ADR 0117): Unity's Lighting Mode - 0 Baked Indirect, 1 Shadowmask (the Mixed lights' shadows from the
    * static scene in a mask, up to kMaskChannels lights), 2 Subtractive (their direct light in the lightmaps too). */
   int lighting_mode = 0;
@@ -106,7 +110,8 @@ std::vector<RenderLight> bounce_lights(const std::vector<BakeLight> &lights);
  * nothing blocks, each ray weighted by its cosine to the surface normal `n` (none below the horizon; null for a probe:
  * every ray alike). Each ray toward a ball stops at the ball's near side along it. One ray when the light has no size;
  * 1 with no ray when it casts no shadow (Unity's No Shadows bakes none either). `rays` counts the rays. */
-float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays);
+float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays,
+                             TexelSampler *smp = nullptr);  // smp (round 465): the rays' points from the texel's Sobol stream, else a jittered grid
 /* Round 425: how much of a bake's shadow ray gets through - 0 past an opaque surface, a see-through one's (1 - alpha) on
  * the way (Unity's lightmapper lets light through a transparent material by its alpha: SideRail's lamps shape their
  * baked light with see-through "light profile" meshes round the bulb, which had blocked all of it). */
@@ -296,7 +301,7 @@ class Lightmapper {
   std::vector<Vec4> masks_;              // (round 444: per texel, in a Shadowmask bake; round 454: four channels)
   std::vector<int> mask_channel_;        // (round 444: per light, its mask channel or -1)
   bool bakes_direct(const BakeLight &bl) const { return bl.mode == 2 || (bl.mode == 1 && s_.lighting_mode == 2); }
-  Vec4 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const;
+  Vec4 shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays, TexelSampler *smp) const;
  public:
   static constexpr int kMaskChannels = 4;  // (round 454: Unity's four lights a texel; round 444 held three)
  private:
@@ -318,8 +323,8 @@ class Lightmapper {
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
   /* gather_ratio: the gather's rays for each of these samples (round 464: MIS with the counts; 0 when the gather can't
    * meet what these sample). */
-  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const;  // task 0157
-  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const;  // round 441
+  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const;  // task 0157 (round 465: smp the texel's Sobol streams, null: random)
+  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const;  // round 441
   /* Round 464: on the GPU path, the card's gather rays for each of the texel's own emitter samples (bake_texel's 64 on
    * the CPU) - the card weighs its first emissive hits with it, as emissive_at does; 0 when no emitters are sampled. */
   float gpu_first_hit_ratio() const;

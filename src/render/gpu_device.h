@@ -49,7 +49,7 @@ struct GParams {
   float env_f[4];       // strength, rotation
   float env_sky[4], env_equator[4], env_ground[4], env_color[4];
   /* (The stylized sky and fog, task 0248: appended at the block's end in the kernel; see env_disc below.) */
-  float lens[4];        // aperture radius, focus distance, blades, blade rotation
+  float lens[4];        // aperture radius, focus distance, blades, blade rotation (a bake's gather: x 1 = xorshift-like random directions, 0 = Sobol - round 465)
   float cam_right[4], cam_up[4], cam_fwd[4];
   float background[4];  // a camera's Solid Color for camera rays (w: on)
   float retro_vp[16];   // a camera filter's view-projection (task 0032)

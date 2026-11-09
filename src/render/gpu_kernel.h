@@ -104,6 +104,28 @@ uint pcg_hash(uint v) {
   return (word >> 22u) ^ word;
 }
 float rnd(inout uint s) { s = pcg_hash(s); return float(s >> 8) * (1.0 / 16777216.0); }
+/* Round 465: dimension 0 or 1 of sampler.h's sobol_burley, line for line - a bake's first-bounce directions. */
+uint lk_hash(uint x, uint s) {
+  x ^= x * 0x3d20adeau;
+  x += s;
+  x *= (s >> 16) | 1u;
+  x ^= x * 0x05526c56u;
+  x ^= x * 0x53a22864u;
+  return x;
+}
+float sobol01(uint index, uint dim, uint seed) {
+  uint x = bitfieldReverse(index);
+  if (dim == 1u) {
+    x = 0u;
+    uint v = 0x80000000u;
+    for (uint n = index; n != 0u; n >>= 1) {
+      if ((n & 1u) != 0u) x ^= v;
+      v ^= v >> 1;
+    }
+  }
+  x = bitfieldReverse(lk_hash(bitfieldReverse(x), pcg_hash(pcg_hash(seed) + dim * 0x9E3779B9u)));
+  return float(x >> 8) * (1.0 / 16777216.0);
+}
 /* A point on a unit aperture: a disk, or a regular polygon (Cycles: regular_polygon_sample). */
 vec2 sample_aperture(float u, float v, int blades, float rotation) {
   if (blades < 3) {
@@ -1131,7 +1153,14 @@ void main() {
       ro = o;
       rd = nd;
       if (P.env_i.z == 1) {
-        float r1 = rnd(rng), r2 = rnd(rng), r = sqrt(r1), phi = 6.28318530718 * r2;
+        float r1, r2;
+        if (P.lens.x > 0.5) { r1 = rnd(rng); r2 = rnd(rng); }  // (the `lighting sampler random` measurement)
+        else {
+          uint sseed = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + 5u);  // the texel's own sequence, its sample number the index
+          r1 = sobol01(uint(s), 0u, sseed);
+          r2 = sobol01(uint(s), 1u, sseed);
+        }
+        float r = sqrt(r1), phi = 6.28318530718 * r2;
         vec3 t, b;
         onb(nd, t, b);
         rd = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));

@@ -2155,6 +2155,11 @@ Where the noise comes from (round 464): a texel lit by many small lamps sends em
 ? Does the light tree know that a lamp is behind a wall? | No: it sees positions, power and facing, not walls. A lamp around a corner still draws samples if it faces the texel; the shadow ray finds the wall.
 ! cmd:lighting tree off; bake | 6. Bake with emitters picked by power alone (the old way), wait for it, then save and measure as in steps 2-5
 ! cmd:lighting tree on | 7. Back to the light tree (the default)
+Spreading the samples (round 465): plain random numbers clump. A texel's 512 directions land thick in one patch of the hemisphere and leave a gap in another, so the average wobbles more than it must. The bake now draws a texel's samples from an Owen-scrambled Sobol sequence (Burley 2020): the first 2^k points fill the square so that every cell of area 2^-k holds exactly one, and a count that is no power of two is still evenly spread. Each texel scrambles the sequence with its own seed (so neighbours don't repeat one pattern, and `lighting seed` still gives independent samples), and the texel's gather, emitters, sky and soft shadows each take their own stream so they don't correlate. Deeper bounces keep plain random numbers. It is unbiased like the random way: the mean is the same, the noise is less. `lighting sampler random` bakes the old way for comparison.
+? Sobol's first 256 points put exactly 4 in each cell of an 8 x 8 grid, and random numbers do not. Does that make the sobol bake darker or brighter? | Neither: both are unbiased, so over many bakes they average to the same light. Sobol's points vary less from the even share, so a single bake lands nearer that average - less noise, the same level.
+? Why does each texel scramble the sequence with its own seed instead of every texel using the same points? | Identical points in neighbouring texels would repeat one pattern of error across the wall - a fixed structure the filter cannot tell from detail. A different scramble per texel turns it into unstructured noise the filter removes.
+! cmd:lighting sampler random; bake | 8. Bake with plain random numbers, wait for it, then save and measure as in steps 2-5 and compare with the sobol bake's grain
+! cmd:lighting sampler sobol | 9. Back to Sobol (the default)
 )"},
 };
 

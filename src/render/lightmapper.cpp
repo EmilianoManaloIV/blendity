@@ -626,9 +626,9 @@ bool Lightmapper::texel_inside(const LightmapTexel &t, uint32_t k, float limit) 
 /* Emissive meshes sampled at the texel (task 0157): one emitter point a sample, weighted against the hemisphere
  * gather that may hit the same emitter (the power heuristic, both ways), so a small bright object lights its
  * surroundings smoothly instead of where a hemisphere ray chanced on it. The mean is irradiance / pi, as the gather's. */
-Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const {
+Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const {
   Vec3 esum(0.0f);
-  const float shift = rnd01(rng);  // (the emitter choice stratified over the samples: a lamp's triangles taken in turn, shifted at random per texel)
+  const float shift = smp ? 0.0f : rnd01(rng);  // (the emitter choice stratified over the samples: a lamp's triangles taken in turn, shifted at random per texel)
   /* Round 464: every sample here is from (o, n): the light tree works out each node's split once for the texel. */
   thread_local LightTree::Cache tree_cache;  // (8 bytes x 2 a node a worker thread, kept for the next bake: at most ~16 MB at the 2^20-emitter cap)
   LightTree::Cache *cache = pt_->uses_light_tree() ? &tree_cache : nullptr;
@@ -636,8 +636,12 @@ Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float 
   for (int k = 0; k < samples; k++) {
     Vec3 dir, Le;
     float dist, pl;
-    const float light_u = std::fmod(((float)k + shift) / (float)samples, 1.0f);
-    if (!pt_->sample_mesh_light(rng, o, n, dir, dist, Le, pl, light_u, cache)) continue;
+    float light_u = std::fmod(((float)k + shift) / (float)samples, 1.0f), pu = -1.0f, pv = -1.0f;
+    if (smp) {  // (round 465: the pick and the point from Sobol streams: spread over the lamp's triangles and over each one)
+      light_u = smp->u(TexelSampler::Emit, (uint32_t)k);
+      smp->pt(TexelSampler::Emit, (uint32_t)k, pu, pv, 1);
+    }
+    if (!pt_->sample_mesh_light(rng, o, n, dir, dist, Le, pl, light_u, cache, pu, pv)) continue;
     rays++;
     const Vec3 Tr = pt_->transmittance({o, dir}, dist * (1.0f - 1e-4f));
     if (!(std::max({Tr.x, Tr.y, Tr.z}) > 0.0f)) continue;
@@ -652,12 +656,17 @@ Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float 
 
 /* Round 441: the world sampled at the texel by its light (PathTracer::sample_env), weighted against the cosine gather
  * that may escape to the same sky (the power heuristic, both ways). The mean is irradiance / pi, as the gather's. */
-Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const {
+Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays, const TexelSampler *smp) const {
   Vec3 esum(0.0f);
   for (int k = 0; k < samples; k++) {
     Vec3 dir;
     float pe = 0.0f;
-    if (!pt_->sample_env(rng, dir, pe)) continue;
+    float u3[3];
+    if (smp) {
+      u3[0] = smp->u(TexelSampler::Sky, (uint32_t)k);
+      smp->pt(TexelSampler::Sky, (uint32_t)k, u3[1], u3[2], 1);
+    }
+    if (!pt_->sample_env(rng, dir, pe, smp ? u3 : nullptr)) continue;
     const float cosn = dot(n, dir);
     if (!(cosn > 0.0f)) continue;
     rays++;
@@ -695,7 +704,7 @@ float baked_shadow_ray(const PathTracer &pt, const Ray &r, float tmax) {
 }
 
 /* Round 424: directions spread uniformly over the cone's solid angle (cos from 1 to cos_max) on a stratified grid. */
-float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays) {
+float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o, const Vec3 *n, Vec3 L, float dist, int samples, uint32_t &rng, uint64_t &rays, TexelSampler *smp) {
   if (!l.shadows) return 1.0f;
   const bool sun = l.type == RenderLight::Directional;
   const float radius = std::max(0.0f, l.shadow_radius);
@@ -709,11 +718,13 @@ float baked_light_visibility(const PathTracer &pt, const RenderLight &l, Vec3 o,
   basis(L, tu, tv);
   const int nx = std::max(1, (int)std::ceil(std::sqrt((double)samples)));
   const int ny = std::max(1, (samples + nx - 1) / nx);
-  const float sx = rnd01(rng), sy = rnd01(rng);
+  const uint32_t stream = smp ? smp->next_light_stream() : 0;  // (round 465: each sized light its own Sobol stream)
+  const float sx = smp ? 0.0f : rnd01(rng), sy = smp ? 0.0f : rnd01(rng);
   float wsum = 0.0f, vsum = 0.0f;
   for (int k = 0; k < samples; k++) {
     float a, b;
-    stratified_point(k, nx, ny, sx, sy, rng, a, b);
+    if (smp) smp->pt(stream, (uint32_t)k, a, b);
+    else stratified_point(k, nx, ny, sx, sy, rng, a, b);
     const float c = 1.0f - a * one_minus_cos, s = std::sqrt(std::max(0.0f, 1.0f - c * c)), phi = 2.0f * kPi * b;
     const Vec3 d = normalize(L * c + tu * (s * std::cos(phi)) + tv * (s * std::sin(phi)));
     const float w = n ? dot(*n, d) : 1.0f;  // (below the horizon: the surface itself, not a shadow - review 424)
@@ -785,7 +796,7 @@ void Lightmapper::assign_mask_channels() {
 
 /* Round 444: a texel's shadowmask - each channel's light seen past the static scene (its soft shadow too), 1 where the
  * light doesn't reach (out of range: nothing to shadow), 0 behind the surface. */
-Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays) const {
+Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, uint64_t &rays, TexelSampler *smp) const {
   Vec4 m(1.0f, 1.0f, 1.0f, 1.0f);
   for (size_t i = 0; i < lights_.size() && i < mask_channel_.size(); i++) {
     const int ch = mask_channel_[i];
@@ -804,7 +815,7 @@ Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, u
       m[ch] = 0.0f;
       continue;
     }
-    m[ch] = baked_light_visibility(*pt_, l, o, &t.normal, L, dist, s_.direct_samples, rng, rays);
+    m[ch] = baked_light_visibility(*pt_, l, o, &t.normal, L, dist, s_.direct_samples, rng, rays, smp);
   }
   return m;
 }
@@ -812,6 +823,9 @@ Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, u
 Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec4 *mask_out) {
   DirSum dirs;  // (round 426: where this texel's light comes from)
   uint32_t rng = hash32(seed);
+  TexelSampler texel_smp;  // (round 465: this texel's Sobol streams, scrambled by its own seed - and so by `lighting seed`; null: random, as before)
+  texel_smp.seed = sampler::hash(seed ^ 0x5bd1e995u);
+  TexelSampler *smp = s_.sobol ? &texel_smp : nullptr;
   const Vec3 n = t.normal;
   /* Off the surface a little, scaled to where it is (far from the origin floats are coarse). */
   const float eps = 1e-3f + 1e-6f * std::max({std::fabs(t.position.x), std::fabs(t.position.y), std::fabs(t.position.z)});
@@ -837,7 +851,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   first.emit_ratio = (float)n_gather / (float)n_emit;
   first.env_ratio = (float)n_gather / (float)n_env;
   for (int i = 0; i < N; i++) {
-    const float r1 = rnd01(rng), r2 = rnd01(rng);
+    float r1, r2;
+    if (smp) smp->pt(TexelSampler::Gather, (uint32_t)i, r1, r2);
+    else r1 = rnd01(rng), r2 = rnd01(rng);
     const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
     const float cosn = std::sqrt(std::max(0.0f, 1.0f - r1));
     const Vec3 d = normalize(tu * (r * std::cos(phi)) + tv * (r * std::sin(phi)) + n * cosn);
@@ -861,7 +877,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
   if (env_mis) {
-    const Vec3 e = env_at(o, n, rng, n_env, first.env_ratio, rays) * s_.indirect_intensity;
+    const Vec3 e = env_at(o, n, rng, n_env, first.env_ratio, rays, smp) * s_.indirect_intensity;
     value += e;
     dirs.add(e, Vec3(0.0f));  // (the sky's light: as the gather's, weighed but pointing nowhere - round 427)
   }
@@ -870,7 +886,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   /* The noisy parts the filter denoises (round 423): the gather, and the emitters sampled at the texel (task 0157). */
   if (gather_out) *gather_out = finite3(value) ? value : Vec3(0.0f);
   if (emissive) {
-    const Vec3 e = emissive_at(o, n, rng, n_emit, gather_sees_emitters ? first.emit_ratio : 0.0f, rays) * s_.indirect_intensity;
+    const Vec3 e = emissive_at(o, n, rng, n_emit, gather_sees_emitters ? first.emit_ratio : 0.0f, rays, smp) * s_.indirect_intensity;
     value += e;
     if (emitted_out) *emitted_out = finite3(e) ? e : Vec3(0.0f);
     dirs.add(e, Vec3(0.0f));  // (the emitters' light: as the bounced light, weighed but pointing nowhere - round 427)
@@ -884,7 +900,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   if (pick) light_pick_estimate(pk, lights_, o, &n, t.position, [&](const BakeLight &bl) { return bakes_direct(bl); });
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
-  if (mask_out && !masks_.empty()) *mask_out = shadowmask_at(t, o, rng, rays);  // (round 444)
+  if (mask_out && !masks_.empty()) *mask_out = shadowmask_at(t, o, rng, rays, smp);  // (round 444)
   for (const BakeLight &bl : lights_) {
     if (!bakes_direct(bl)) continue;  // (round 444: a Subtractive Mixed light's direct light too)
     const RenderLight &l = bl.light;
@@ -893,7 +909,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       const Vec3 L = normalize(-l.direction);
       const float ndl = dot(n, L);
       if (!(ndl > 0.0f)) continue;
-      const Vec3 c = col * (ndl * baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays));
+      const Vec3 c = col * (ndl * baked_light_visibility(*pt_, l, o, &n, L, 1e30f, s_.direct_samples, rng, rays, smp));
       value += c;
       dirs.add(c, L);
       continue;
@@ -917,11 +933,13 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       const int ns = std::max(1, s_.direct_samples);
       const int nx = std::max(1, (int)std::ceil(std::sqrt((double)ns)));
       const int ny = std::max(1, (ns + nx - 1) / nx);
-      const float sx = rnd01(rng), sy = rnd01(rng);
+      const uint32_t stream = smp ? smp->next_light_stream() : 0;  // (round 465: the light's points from a Sobol stream of its own)
+      const float sx = smp ? 0.0f : rnd01(rng), sy = smp ? 0.0f : rnd01(rng);
       float wsum = 0.0f, vsum = 0.0f;
       for (int k = 0; k < ns; k++) {
         float a, b;
-        stratified_point(k, nx, ny, sx, sy, rng, a, b);
+        if (smp) smp->pt(stream, (uint32_t)k, a, b);
+        else stratified_point(k, nx, ny, sx, sy, rng, a, b);
         const Vec3 q = area_light_point(l, a - 0.5f, b - 0.5f), dvec = q - o;
         const float dist = length(dvec);
         if (!(dist > 1e-5f)) continue;
@@ -964,7 +982,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       keep = light_pick_keep(pk, (size_t)(&bl - &lights_[0]));
       if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
     }
-    const Vec3 c = col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays) / keep);
+    const Vec3 c = col * (ndl * fall * baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays, smp) / keep);
     value += c;
     dirs.add(c, L);
     if (keep < 1.0f) picked += c;  // (review 441: a light kept by chance is noise - it goes with the emitters' part, denoised, never clamped)
@@ -1002,7 +1020,7 @@ bool Lightmapper::step(double budget_ms) {
         normals[i] = tx.normal;
       }
       std::string err;
-      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed) ||
+      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed, s_.sobol) ||
           ind.size() != batch) {
         if (pt_->gpu_gather_waiting()) {
           gpu_waiting = true;
@@ -1315,7 +1333,14 @@ void Lightmapper::atrous(std::vector<Vec3> &ind, const std::vector<Vec3> &normal
   for (int it = 0, step = 1; it < 4; it++, step *= 2) {
     /* Its edge stop follows the noise the gather leaves - a texel's relative error falls as 1 / sqrt(samples): a long bake
      * is filtered only where neighbours agree that closely (review 423: a fixed 0.6 had blurred a 512-sample bake). */
-    const float sigma_c = std::max(0.04f, std::min(0.8f, 2.0f / std::sqrt((float)std::max(1, s_.indirect_samples)))) / (float)(1 << it);
+    /* Round 465: Owen-scrambled Sobol samples converge faster than 1 / sqrt(samples) - samples^-0.75, their rate with
+     * visibility edges - so the 1 / sqrt formula would blur a clean long bake (512 samples: 0.0036 raw, 0.0056 filtered).
+     * The deeper bounces and emitters, which share this sigma, still fall as 1 / sqrt, so the edge-stop is on the tight
+     * side until round 466 measures each texel's noise.
+     * Sobol's edge-stop is therefore tighter at every count (16 samples: 0.25 against random's 0.5; both clamp to 0.8 at 3
+     * or fewer); round 466 replaces the formula by each texel's measured noise. */
+    const float n = (float)std::max(1, s_.indirect_samples), expected = s_.sobol ? 2.0f / std::pow(n, 0.75f) : 2.0f / std::sqrt(n);
+    const float sigma_c = std::max(0.04f, std::min(0.8f, expected)) / (float)(1 << it);
     const AtrousPage pg{ind, normals, positions, cov, own, size, W, H};
     JobSystem::global().parallel_for(H, 8, [&](int64_t y0, int64_t y1) {
       for (int64_t y = y0; y < y1; y++)

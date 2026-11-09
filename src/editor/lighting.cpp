@@ -416,6 +416,7 @@ void Editor::bake_start() {
   s.directional = ls.directional_mode != 0;  // (round 426)
   s.lighting_mode = ls.lighting_mode;  // (round 444)
   s.backface_tolerance = finite_bits(ls.backface_tolerance) ? std::max(0.0f, std::min(1.0f, ls.backface_tolerance)) : 0.9f;  // (round 430)
+  s.sobol = bake_sobol_;  // (round 465: unbiased either way, so not in the scene key)
   s.light_tree = bake_light_tree_;  // (round 464: unbiased either way, so not in the scene key)
   s.seed = bake_seed_;  // (round 463: the texels, the card's gather and the probes all draw from it)
   if (s.seed) Log::info("Generate Lighting: seed %u (`lighting seed 0` for the normal bake)", s.seed);

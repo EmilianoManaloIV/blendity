@@ -1139,14 +1139,15 @@ void PathTracer::build_env_dist() {
   env_w_ = w, env_h_ = h;
 }
 
-bool PathTracer::sample_env(uint32_t &rng, Vec3 &dir, float &pdf) const {
+bool PathTracer::sample_env(uint32_t &rng, Vec3 &dir, float &pdf, const float *u3) const {
   if (!env_w_) return false;
-  const float r = rnd(rng);
+  const float r = u3 ? u3[0] : rnd(rng);
   const size_t k = std::min<size_t>(std::upper_bound(env_cdf_.begin(), env_cdf_.end(), r) - env_cdf_.begin(), env_cdf_.size() - 1);
   const int i = (int)(k % (size_t)env_w_), j = (int)(k / (size_t)env_w_);
   const float dth = kPi / env_h_, dph = 2.0f * kPi / env_w_;
-  const float th = (j + rnd(rng)) * dth, ph = (i + rnd(rng)) * dph, st = std::sin(th);
-  if (!(st > 1e-6f) || !(env_cell_[k] > 0.0f)) return false;
+  const float uj = u3 ? u3[1] : rnd(rng), ui = u3 ? u3[2] : rnd(rng);
+  const float th = (j + uj) * dth, ph = (i + ui) * dph, st = std::sin(th);
+  if (!(st > 1e-6f) || !(env_cell_[k] > 0.0f) || !finite_bits(ph)) return false;  // (round 465: given numbers may be NaN - refused, not a NaN ray)
   dir = Vec3(st * std::cos(ph), std::cos(th), st * std::sin(ph));
   pdf = env_cell_[k] / (dth * dph * st);  // (uniform in angle within the cell: the solid angle's sin theta in the pdf)
   return pdf > 0.0f && pdf < 1e30f;
@@ -1187,14 +1188,21 @@ bool PathTracer::pick_mesh_light(float u, Vec3 P, const Vec3 *N, uint32_t &li, f
 }
 
 bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u,
-                                   LightTree::Cache *cache) const {
+                                   LightTree::Cache *cache, float pu, float pv) const {
   uint32_t li = 0;
   float pick = 0.0f;
   const float u = light_u >= 0.0f && light_u < 1.0f ? light_u : rnd(rng);
   const bool picked = cache && !light_tree_.empty() ? light_tree_.sample(*cache, u, li, pick) : pick_mesh_light(u, origin, &n, li, pick, true);
   if (!picked) return false;
-  float su = rnd(rng), sv = rnd(rng);
-  if (su + sv > 1.0f) su = 1.0f - su, sv = 1.0f - sv;
+  float su, sv;
+  if (pu >= 0.0f && pv >= 0.0f) {  // (round 465: the square's point onto the triangle without a fold, so its spread stays)
+    const float r = std::sqrt(pu);
+    su = 1.0f - r, sv = pv * r;
+  }
+  else {
+    su = rnd(rng), sv = rnd(rng);
+    if (su + sv > 1.0f) su = 1.0f - su, sv = 1.0f - sv;
+  }
   SurfacePoint lp;
   const Material *lmat = surface_at(mesh_lights_[li].object, mesh_lights_[li].prim, su, sv, lp);
   const Vec3 d = lp.position - origin;
@@ -3018,7 +3026,7 @@ bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &no
 }
 
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed) const {
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol) const {
   std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
   out.clear();
   if (hit) hit->clear();
@@ -3077,6 +3085,7 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
      * (the kernel hashes the point's index and nothing else of it). Only about 2^21 distinct GPU streams exist this way. */
     const size_t shift = seed ? (size_t)(((seed * 0x9E3779B1u) >> 10) | (1u << 21)) : 0;
     p.cam_pos[3] = (float)(first + shift);
+    p.lens[0] = sobol ? 0.0f : 1.0f;  // (round 465: a bake has no lens - the kernel reads this as "random directions")
     bake_gpu_->set_params(p);
     const size_t cells = (size_t)W * H;
     pts.assign(cells * 8, 0.0f);

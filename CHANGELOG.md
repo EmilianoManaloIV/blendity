@@ -2,6 +2,67 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-09 (round 465): samples spread evenly - Owen-scrambled Sobol
+
+**Asked (Pass 21, task 0441):** the bake's random numbers were plain xorshift: a texel's 512 gather directions clump in
+places and leave gaps in others, and so do its emitter and sky samples. Draw them from an Owen-scrambled Sobol sequence
+so the same rays give less noise.
+
+**Added**
+- **`render/sampler.h`**: `sobol_burley(index, dim, seed)` (Burley 2020, "Practical Hash-based Owen Scrambling": written
+  from the paper, no code copied - the first four dimensions of Sobol's sequence, Laine-Karras nested uniform scrambling
+  by a hash of (seed, dimension)) and `TexelSampler`, one stream a purpose, each with its own seed from the texel's.
+  The first 2^k points of a stream's dimensions (0, 1) hold exactly one point in every elementary interval of area 2^-k
+  (tested for k = 4 to 10, every shape); 300 points still put 4 or 5 in each cell of an 8 x 8 grid.
+- **Where it draws:** a texel's gather directions, its emitter pick (the light tree's u) and point on the triangle (the
+  square mapped onto it without the old fold, so its spread survives), its sky samples, and each sized light's shadow
+  points (a stream a light, replacing the jittered grid and its shift). Seeded from the texel's own seed and
+  `BakeSettings::seed`, so `lighting seed` still gives independent samples. Deeper bounces keep xorshift. The MIS weights
+  are as in round 464, only the numbers changed. The card's first-bounce direction is the same function in the kernel
+  (`sobol01`, with GLSL `bitfieldReverse` / CUDA `__brev` added to the OptiX shim) - the PTX is regenerated.
+- **`lighting sampler sobol|random`** (a measurement setting like `lighting tree`: not saved, not in the scene key) and
+  the stress rows "sampler (256 samples, filter on)" - sobol against random on all four scenes.
+- **Learn:** "A bake's noise, measured" gains the spread samples - a paragraph, two questions, Try-its 8 and 9.
+
+**Changed**
+- No per-dimension index shuffle (Burley's padding for dimensions past the first four): a shuffle that keeps a prefix's
+  set cannot decorrelate two streams, and one that doesn't gives up each stream's stratification. Each purpose takes its
+  own seed over the same first dimensions, every dimension its own scramble: the streams' errors are independent in
+  expectation (their covariance is zero over the seeds; the tests' mean r is -0.009 over 256 seeds) and each keeps its
+  full net. Sobol's dimensions 2 and 3 are not used (the pair is not a (0, 2) net).
+- **The probes keep their Fibonacci spiral.** Measured at 16 to 300 rays, 2,000 rotations / seeds, the mean of z^2,
+  (1 - z^2) cos 2 phi and x z over the sphere: the turned Fibonacci lattice's RMS error is 5 to 100 times Sobol's (N = 64:
+  0.00008 against 0.00130, 0.00052 against 0.01353, 0.00064 against 0.00640), and with Sobol's rays the round 398 Light
+  Volume test (L1 within 10 % of the scene's probes) failed. The task's probe item is not done, for that reason.
+
+**Results** (`--quick --only lightmap_quality`: reference 4 x fewer samples than the full run, so every RMSE is flattered
+by the reference's own noise, but the sobol and random bakes share it; 256 indirect samples, filter on)
+
+| scene | bake ms random / sobol | relative RMSE | bias | grain | blotch |
+|---|---|---|---|---|---|
+| room (area light) | 897 / 882 | 0.017 / 0.015 | 0.0011 / 0.0012 | 0.0102 / 0.0064 | 0.0036 / 0.0028 |
+| corridor (8 points) | 1,260 / 1,286 | 0.008 / 0.006 | 0.0023 / 0.0022 | 0.0049 / 0.0020 | 0.0015 / 0.0007 |
+| tunnel (lamps) | 4,287 / 4,239 | 0.147 / 0.133 | 0.0000 / -0.0001 | 0.1122 / 0.0932 | 0.0253 / 0.0225 |
+| courtyard (sun, sky) | 242 / 253 | 0.060 / 0.059 | 0.0012 / 0.0011 | 0.0083 / 0.0042 | 0.0025 / 0.0013 |
+
+Relative RMSE falls on every scene (mean -12 %), grain by 17 to 59 %, bias moves by under 0.0002, bake time within +-5 %
+(the corridor +2 %, the courtyard +5 %, in a quick run's noise).
+
+- **SideRail on the card (chain 465): grain 5.455 -> 0.513 (-91 %), blotch 1.242 -> 0.273 (-78 %)** - page 1, where the sparse very bright texels were, 17.5 -> 1.06; page 0's grain unchanged (0.41 -> 0.42) and its blotch up 0.10 -> 0.22 (the filter's tighter Sobol edge-stop smooths less; round 466 replaces it by measured noise). Bake 39 s (lightmaps 36.6 s), stations within +-0.06 MAE and 0.002 SSIM of round 464 (side_bar_high 6.75 / 0.853, side_tunnel_eye 6.10 / 0.876). lightmap_quality's gains mix the sampler and the edge-stop change (no row separates them).
+
+**Found**
+- Sobol makes the bake so clean that the A-Trous filter (the build without OIDN) becomes its largest error at 512
+  samples: the round 423 test "lightmap denoiser" - the filter must not make a long bake worse - reads 0.0036 unfiltered
+  against 0.0056 filtered (it was noise-dominated before). **Fixed:** the filter's colour edge-stop assumed the noise falls
+  as 2 / sqrt(samples); with Sobol it is 2 / samples^0.75 (16 samples: 0.25 against 0.5; 512: 0.04 against 0.088), and
+  the test passes unchanged: 0.0036 raw, 0.0034 filtered; at 16 samples 0.0345 -> 0.0140. Round 466 replaces the formula
+  by each texel's measured noise.
+
+**Checked:** the suites - Windows dependency-free 20,029 checks, 0 failed; with Blender's libraries 20,939 (the four worktree `gpu` picture comparisons, as rounds 463-464; the card's Sobol gather test passes there); Linux 20,035, 0 failed; `tests_round465` (8 tests: the net property of the stream pairs, dimension means / determinism, an uneven
+count's spread and the streams' correlation, a lone plane under a gradient sky baking to its exact value 0.36 within 3
+standard errors with Sobol and random, the lamps scene bit for bit twice on the CPU, `lighting sampler`). The `lighting`
+group: 8,668 checks, 0 failed (the denoiser test above passes with the edge-stop fix). `test_coverage_map --check` finds no gap.
+
 ## 2026-11-08 (round 464): a light tree picks the emitters
 
 **Asked (Pass 21, task 0440, ADR 0121):** every texel - and every bounce of the path tracer - picked an emissive triangle

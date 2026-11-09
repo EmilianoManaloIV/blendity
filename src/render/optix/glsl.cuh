@@ -166,4 +166,5 @@ struct GlslBase {
   static bvec3 lessThanEqual(vec3 a, vec3 b) { return bvec3{a.x <= b.x, a.y <= b.y, a.z <= b.z}; }
   static uint floatBitsToUint(float x) { return __float_as_uint(x); }
   static float uintBitsToFloat(uint x) { return __uint_as_float(x); }
+  static uint bitfieldReverse(uint x) { return __brev(x); }  // (round 465: the Sobol bake's bit reversal)
 };

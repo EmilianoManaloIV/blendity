@@ -11,6 +11,7 @@ to their screenshots of 2026-11-08), where the blotches are.
 
 | round | change | bake s (lightmaps s) | grain (page 0 / 1) | blotch (page 0 / 1) | MAE / SSIM: spawn, spawn_back, floor, ahead | side_bar_high | side_tunnel_eye |
 |---|---|---|---|---|---|---|---|
+| 465 | Owen-scrambled Sobol samples (and the filter's edge-stop at samples^-0.75) | 39 (36.6; filter 2.1) | 0.513 (0.42 / 1.06) | 0.273 (0.22 / 0.58) | 3.55/0.843, 1.24/0.790, 3.35/0.817, 2.29/0.934 | 6.75 / 0.853 | 6.10 / 0.876 |
 | 464 | a light tree picks the emitters (texel samples, camera first hits) | 39 (36.3; filter 2.1) | 5.46 (0.41 / 17.5) | 1.24 (0.10 / 3.99) | as 463 | 6.73 / 0.854 | 6.06 / 0.876 |
 | 463 | baseline (no change to the bake) | 39 (35.5; filter 2.3) | 5.46 (0.41 / 17.5) | 1.24 (0.10 / 3.99) | 3.57/0.843, 1.30/0.791, 3.35/0.818, 2.32/0.933 | 6.73 / 0.854 | 6.06 / 0.876 |
 

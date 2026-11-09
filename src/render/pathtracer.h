@@ -237,13 +237,13 @@ class PathTracer {
    * directions (each cell's radiance x its solid angle), one cell by that and a direction inside it. Gradients and flat
    * colours aren't sampled this way (the cosine gather is already right for them). */
   bool has_env_dist() const { return env_w_ > 0; }
-  bool sample_env(uint32_t &rng, Vec3 &dir, float &pdf) const;
+  bool sample_env(uint32_t &rng, Vec3 &dir, float &pdf, const float *u3 = nullptr) const;  // u3: the cell's pick and the point in it, given (round 465: Sobol), else random
   float env_pdf(Vec3 dir) const;  // the solid-angle pdf sample_env draws `dir` with
   /* Round 441: which lights a bake's own sampling at the texel covers, so the gather's first hit is weighted against them
    * (MIS) and nothing counts twice: emitters (task 0157, the default) and the world. */
   void set_bake_mis(bool emitters, bool env) { bake_mis_emitters_ = emitters, bake_mis_env_ = env; }
   bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f,
-                         LightTree::Cache *cache = nullptr) const;  // light_u in [0,1): the emitter choice given (stratified), else random; cache: begun at (origin, n) - round 464
+                         LightTree::Cache *cache = nullptr, float pu = -1.0f, float pv = -1.0f) const;  // light_u in [0,1): the emitter choice given (stratified), else random; cache: begun at (origin, n) - round 464; pu, pv (round 465): the point on the triangle given (both in [0,1)), else random
   /* Round 464: the probability an emitter sample from P (normal N, or nullptr) picks emissive triangle `light` - the
    * light tree's, or its power share without the tree; and whether the tree is in use. */
   float mesh_light_pick_pmf(uint32_t light, Vec3 P, const Vec3 *N, bool tree = true) const;  // tree false: by power
@@ -256,7 +256,7 @@ class PathTracer {
    * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't.
    * Round 463: `seed` (0: as before) moves every point's random sequence to another one - the noise measurement's second bake. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
-                  std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0) const;  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
+                  std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0, bool sobol = true) const;  // sobol (round 465): mode 1's first directions from the Owen-scrambled Sobol sequence, else random  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
   /* Round 331: the fogs a path is in - a Volume material's object, entered by a front face, left by a back face. Fogs
    * inside fogs add up (their densities sum where they overlap), up to four deep. */
   struct Medium {
