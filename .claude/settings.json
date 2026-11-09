@@ -11,12 +11,6 @@
       "Bash(git push origin blendity-root:main:*)",
       "Bash(gh pr merge:*)",
       "Bash(git reset --hard:*)"
-    ],
-    "ask": [
-      "Bash(git push:*)",
-      "Bash(git commit:*)",
-      "Bash(gh pr create:*)",
-      "Bash(gh api:*)"
     ]
   }
 }
