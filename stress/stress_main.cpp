@@ -6923,9 +6923,10 @@ struct Result {
 };
 /* seed 1 for the references: their samples independent of the bake they score (seed 0, a bake's own) - with the same
  * seed the bake's samples would be the first of the reference's, and the error read too low. */
-Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0) {
+Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0, bool light_tree = true) {
   BakeSettings bs;
   bs.seed = seed;
+  bs.light_tree = light_tree;  // (round 464: off picks emitters by power alone, for the comparison)
   bs.texels_per_unit = s.texels;
   bs.indirect_samples = indirect;
   bs.direct_samples = direct;
@@ -7018,9 +7019,9 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
             "on real scenes by tools/unity_compare.py --blendity-bake.");
   rep.table({"scene", "texels", "bake ms", "relative RMSE", "bias", "grain", "blotch", "reference ms"});
   const int ref_indirect = o.quick ? 1024 : 4096, ref_direct = o.quick ? 128 : 512;
-  lmq::Result room_ref;
-  const lmq::Scene room = lmq::room();
-  for (const lmq::Scene &s : {room, lmq::corridor(), lmq::tunnel_lamps(), lmq::courtyard()}) {
+  lmq::Result room_ref, tunnel_ref;
+  const lmq::Scene room = lmq::room(), tunnel = lmq::tunnel_lamps();
+  for (const lmq::Scene &s : {room, lmq::corridor(), tunnel, lmq::courtyard()}) {
     const lmq::Result ref = lmq::bake(s, ref_indirect, ref_direct, false, 1);
     const lmq::Result def = lmq::bake(s, 256, 32, true);
     const lmq::Error e = lmq::compare(def.data, ref.data);
@@ -7030,6 +7031,16 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
     const LightmapNoise nz = lightmap_noise(def.data, again.data);
     rep.row({s.name, std::to_string(e.texels), f1(def.ms), lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-", f1(ref.ms)});
     if (s.name == room.name) room_ref = ref;
+    if (s.name == tunnel.name) tunnel_ref = ref;
+  }
+  /* Round 464 (ADR 0121): the tunnel's emitters picked by the light tree against by power alone, at the same samples -
+   * the error at equal time is what task 0440 asks to fall by 40 %. */
+  rep.table({"tunnel_lamps: emitters picked", "bake ms", "relative RMSE", "bias", "grain", "blotch"});
+  for (bool tree : {false, true}) {
+    const lmq::Result r = lmq::bake(tunnel, 256, 32, true, 0, tree), r1 = lmq::bake(tunnel, 256, 32, true, 1, tree);
+    const lmq::Error e = lmq::compare(r.data, tunnel_ref.data);
+    const LightmapNoise nz = lightmap_noise(r.data, r1.data);
+    rep.row({tree ? "by the light tree" : "by power (the old way)", f1(r.ms), lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-"});
   }
   rep.table({"room: indirect samples", "filter", "bake ms", "relative RMSE", "bias"});
   for (int n : {64, 256, 1024})

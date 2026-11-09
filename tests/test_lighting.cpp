@@ -8819,6 +8819,880 @@ static void tests_round463() {
   tests_round463_console();
 }
 
+/* ---- round 464 (task 0440, ADR 0121): emitters picked by where the texel is - a light tree (test engineer) ---- */
+namespace r464 {
+struct Rng {
+  std::mt19937 g;
+  explicit Rng(uint32_t seed) : g(seed) {}
+  float f() { return (float)(g() >> 8) * (1.0f / 16777216.0f); }
+  float r(float a, float b) { return a + (b - a) * f(); }
+  Vec3 box(float h) { return Vec3(r(-h, h), r(-h, h), r(-h, h)); }
+  Vec3 unit() {
+    for (;;) {
+      const Vec3 v = box(1.0f);
+      const float l = length_sq(v);
+      if (l > 0.01f && l <= 1.0f) return v / std::sqrt(l);
+    }
+  }
+};
+
+/* n small triangles scattered in a cube of half side `box`; powers 0.1 to 10, half of them two-sided. */
+static std::vector<LightTreeEmitter> scatter(Rng &rng, int n, float box, float size, bool coplanar = false) {
+  std::vector<LightTreeEmitter> v((size_t)n);
+  for (LightTreeEmitter &e : v) {
+    const Vec3 c = rng.box(box);
+    Vec3 a = c + rng.box(size), b = c + rng.box(size), d = c + rng.box(size);
+    if (coplanar) a.y = b.y = d.y = 0.0f;
+    e.a = a, e.b = b, e.c = d;
+    e.power = rng.r(0.1f, 10.0f);
+    e.two_sided = rng.f() < 0.5f;
+  }
+  return v;
+}
+
+static double pmf_sum(const LightTree &t, size_t n, Vec3 P, const Vec3 *N) {
+  double s = 0.0;
+  for (size_t i = 0; i < n; i++) s += t.pmf(P, N, (uint32_t)i);
+  return s;
+}
+
+static int max_depth(const LightTree &t) {
+  int d = 0;
+  for (size_t i = 0; i < t.nodes().size(); i++) {
+    int k = 0;
+    for (int a = (int)i; t.nodes()[(size_t)a].parent >= 0; a = t.nodes()[(size_t)a].parent) k++;
+    d = std::max(d, k);
+  }
+  return d;
+}
+
+static float cone_angle(Vec3 a, Vec3 b) { return std::atan2(length(cross(a, b)), dot(a, b)); }
+
+/* The 0.1 % critical value of chi-square with df degrees (Wilson-Hilferty). */
+static double chi2_crit(int df) {
+  const double k = 2.0 / (9.0 * df);
+  return df * std::pow(1.0 - k + 3.09 * std::sqrt(k), 3.0);
+}
+
+/* A floor with five lamps over it (two flipped to face down onto it, three up): different powers, so the tree and the power
+ * CDF pick differently. */
+struct Lamps {
+  MeshPtr floor = primitives::plane(2.0f, 4), lamp = primitives::plane(0.3f, 1);
+  MaterialPtr white = make_material("White", Vec3(0.8f));
+  std::vector<MaterialPtr> glow;
+  Lamps() {
+    const float strength[5] = {3.0f, 10.0f, 1.0f, 6.0f, 2.0f};
+    for (int i = 0; i < 5; i++) {
+      glow.push_back(make_material("Glow", Vec3(0.0f)));
+      glow.back()->emission = Vec3(1.0f), glow.back()->emission_strength = strength[i];
+    }
+  }
+  LightingData bake(bool tree, bool sample, int samples, uint32_t seed, int gpu, size_t *gpu_texels = nullptr) const {
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    BakeSettings bs;
+    bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 2, bs.denoise = false, bs.directional = false;
+    bs.sample_emissive = sample, bs.light_tree = tree, bs.seed = seed, bs.gpu_device = gpu;
+    const Vec3 pos[5] = {{-0.7f, 0.5f, 0.0f}, {0.6f, 0.9f, 0.4f}, {0.0f, 0.4f, -0.7f}, {0.8f, 0.6f, -0.6f}, {-0.5f, 1.1f, 0.6f}};
+    std::vector<BakeObject> objs;
+    objs.push_back(bake_object(1, floor, Mat4::identity(), {white}));
+    for (int i = 0; i < 5; i++) {
+      const Quat q = Quat::euler(Vec3(i % 2 ? 180.0f : 0.0f, 0, 0));
+      objs.push_back(bake_object((uint64_t)(2 + i), lamp, Mat4::trs(pos[i], q, Vec3(1.0f)), {glow[(size_t)i]}));
+      objs.back().want_lightmap = false;
+    }
+    Lightmapper lm;
+    lm.begin(objs, {}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    if (gpu_texels) *gpu_texels = lm.gpu_texels();
+    return lm.take_result();
+  }
+};
+
+/* The floor's light: the page sampled at every triangle corner, summed. */
+static double floor_light(const LightingData &d) {
+  double s = 0.0;
+  const LightingData::Entry &e = d.entries.at(1);
+  const Lightmap &pg = d.pages[(size_t)e.page];
+  for (const Vec2 &uv : e.tri_uv) {
+    const Vec3 c = pg.sample(uv);
+    s += 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+  }
+  return s;
+}
+
+struct Mean {
+  double mean = 0.0, se = 0.0;
+};
+/* The mean of the floor's light over seeds 1..k and its standard error (from the spread between seeds). */
+template <class F>
+static Mean over_seeds(int k, F bake) {
+  std::vector<double> v;
+  for (int s = 1; s <= k; s++) v.push_back(floor_light(bake((uint32_t)s)));
+  Mean m;
+  for (double x : v) m.mean += x / (double)k;
+  double var = 0.0;
+  for (double x : v) var += (x - m.mean) * (x - m.mean) / (double)(k - 1);
+  m.se = std::sqrt(var / (double)k);
+  return m;
+}
+
+/* Two means agree: within 3 standard errors of their difference, plus half a percent of the reference for the error in the
+ * errors themselves (six seeds estimate a spread only roughly). */
+static bool agree(const Mean &a, const Mean &ref) { return std::fabs(a.mean - ref.mean) <= 3.0 * std::sqrt(a.se * a.se + ref.se * ref.se) + 0.005 * ref.mean; }
+
+/* The r463 scene and two lamps, so the bake has emitters. */
+static void lamp_scene(Editor &ed) {
+  r463::scene(ed);
+  const Vec3 pos[2] = {{-1.5f, 0.8f, 0.0f}, {1.2f, 0.5f, 1.0f}};
+  for (int i = 0; i < 2; i++) {
+    GameObject *lamp = r35_add(ed, "Plane", i ? "Lamp B" : "Lamp A", pos[i], {0.05f, 0.05f, 0.05f}, Vec3(1.0f));
+    lamp->get<MeshRenderer>()->materials[0]->emission = Vec3(1.0f);
+    lamp->get<MeshRenderer>()->materials[0]->emission_strength = i ? 30.0f : 8.0f;
+  }
+  ed.commit_change("r464 lamps");
+}
+}  // namespace r464
+
+static void tests_round464_tree() {
+  test("light tree (round 464): at every point and normal the chances of the several hundred emitters add to 1, and a sample's own chance is the one asked for (with and without a normal)", [] {
+    r464::Rng rng(464);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 400, 20.0f, 1.5f);
+    LightTree t;
+    t.build(em);
+    CHECK(!t.empty() && t.leaves().size() == em.size());
+    double worst = 0.0, worst_pmf = 0.0;
+    for (int i = 0; i < 60; i++) {
+      const Vec3 P = rng.box(i < 10 ? 2.0f : 30.0f), N = rng.unit();
+      worst = std::max({worst, std::fabs(r464::pmf_sum(t, em.size(), P, &N) - 1.0), std::fabs(r464::pmf_sum(t, em.size(), P, nullptr) - 1.0)});
+      for (int k = 0; k < 40; k++) {
+        const Vec3 *n = k % 2 ? &N : nullptr;
+        uint32_t id = 0;
+        float p = 0.0f;
+        if (!t.sample(P, n, rng.f(), id, p)) {
+          CHECK(false);
+          continue;
+        }
+        const float q = t.pmf(P, n, id);
+        worst_pmf = std::max(worst_pmf, (double)std::fabs(p - q) / std::max(1e-12, (double)q));
+        CHECK(id < em.size() && p > 0.0f && p <= 1.0f);
+      }
+    }
+    std::printf("    worst |sum pmf - 1| %.2e, worst relative gap between sample's pmf and pmf() %.2e\n", worst, worst_pmf);
+    CHECK(worst < 1e-4);
+    CHECK(worst_pmf < 1e-4);
+  });
+  test("light tree (round 464): the emitters a point draws follow their chances (chi-square at 0.1 %), for a point with a normal and one without", [] {
+    r464::Rng rng(7);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 300, 20.0f, 1.5f);
+    LightTree t;
+    t.build(em);
+    const Vec3 Ps[2] = {{3.0f, 5.0f, -2.0f}, {-8.0f, -1.0f, 6.0f}};
+    const Vec3 Ns[2] = {normalize(Vec3(0.2f, 1.0f, 0.1f)), normalize(Vec3(1.0f, 0.0f, -0.4f))};
+    const int draws = 300000;
+    for (int c = 0; c < 2; c++) {
+      const Vec3 *N = c == 0 ? &Ns[0] : nullptr;
+      std::vector<uint32_t> count(em.size(), 0u);
+      for (int i = 0; i < draws; i++) {
+        uint32_t id = 0;
+        float p = 0.0f;
+        if (t.sample(Ps[c], N, rng.f(), id, p)) count[id]++;
+      }
+      /* Emitters expecting under 5 draws pool into one bin. */
+      double chi = 0.0, pool_e = 0.0, pool_o = 0.0;
+      int bins = 0;
+      bool impossible = false;
+      for (size_t i = 0; i < em.size(); i++) {
+        const double e = (double)t.pmf(Ps[c], N, (uint32_t)i) * draws;
+        if (e == 0.0 && count[i] > 0) impossible = true;
+        if (e < 5.0) {
+          pool_e += e, pool_o += count[i];
+        } else {
+          chi += (count[i] - e) * (count[i] - e) / e, bins++;
+        }
+      }
+      if (pool_e >= 5.0) chi += (pool_o - pool_e) * (pool_o - pool_e) / pool_e, bins++;
+      const double crit = r464::chi2_crit(std::max(1, bins - 1));
+      std::printf("    point %d (%s): chi-square %.1f over %d bins, critical %.1f\n", c, N ? "with a normal" : "no normal", chi, bins, crit);
+      CHECK(!impossible);
+      CHECK(bins > 20 && chi < crit);
+    }
+  });
+  test("light tree (round 464): a texel's cached picks are exactly the uncached picks and chances, across many points sharing one cache", [] {
+    r464::Rng rng(11);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 250, 15.0f, 1.0f);
+    LightTree t;
+    t.build(em);
+    LightTree::Cache cache;
+    int diff = 0, total = 0;
+    for (int i = 0; i < 80; i++) {
+      const Vec3 P = rng.box(25.0f), N = rng.unit();
+      const Vec3 *n = i % 3 ? &N : nullptr;
+      t.cache_begin(cache, P, n);
+      for (int k = 0; k < 100; k++) {
+        const float u = rng.f();
+        uint32_t a = 0, b = 0;
+        float pa = 0.0f, pb = 0.0f;
+        const bool ok_a = t.sample(P, n, u, a, pa), ok_b = t.sample(cache, u, b, pb);
+        total++;
+        if (ok_a != ok_b || (ok_a && (a != b || pa != pb))) diff++;
+      }
+    }
+    std::printf("    %d draws, %d differ\n", total, diff);
+    CHECK(diff == 0);
+  });
+  test("light tree (round 464): one emitter is always picked with chance 1, from any side; nothing to pick (empty list, or only bad triangles) says so", [] {
+    LightTreeEmitter e;
+    e.a = Vec3(-1, 0, -1), e.b = Vec3(-1, 0, 1), e.c = Vec3(1, 0, -1);
+    e.power = 2.0f, e.two_sided = false;
+    LightTree t;
+    t.build({e});
+    CHECK(!t.empty() && t.node_count() == 1);
+    const Vec3 spots[3] = {{0, 5, 0}, {0, -5, 0}, {0, 0, 0}};
+    for (const Vec3 &P : spots) {
+      uint32_t id = 99;
+      float p = 0.0f;
+      const Vec3 N(0, 1, 0);
+      CHECK(t.sample(P, &N, 0.3f, id, p) && id == 0 && p == 1.0f && t.pmf(P, &N, 0) == 1.0f && t.pmf(P, nullptr, 0) == 1.0f);
+    }
+    LightTree none;
+    none.build({});
+    uint32_t id = 0;
+    float p = 0.0f;
+    CHECK(none.empty() && !none.sample(Vec3(0.0f), nullptr, 0.5f, id, p) && none.pmf(Vec3(0.0f), nullptr, 0) == 0.0f && none.flatten().empty());
+    LightTreeEmitter bad = e;
+    bad.power = 0.0f;
+    none.build({bad, bad});
+    CHECK(none.empty() && !none.sample(Vec3(0.0f), nullptr, 0.5f, id, p));
+  });
+  test("light tree (round 464): emitters all in one plane, or all the very same triangle, build, add up to 1 from both sides and keep the tree shallow", [] {
+    r464::Rng rng(21);
+    const std::vector<LightTreeEmitter> flat = r464::scatter(rng, 500, 10.0f, 1.0f, true);
+    LightTree t;
+    t.build(flat);
+    CHECK(!t.empty());
+    for (float y : {4.0f, -4.0f, 0.0f}) {
+      const Vec3 P(rng.r(-8, 8), y, rng.r(-8, 8)), N(0, y >= 0 ? -1.0f : 1.0f, 0);
+      CHECK(std::fabs(r464::pmf_sum(t, flat.size(), P, nullptr) - 1.0) < 1e-4);
+      CHECK(std::fabs(r464::pmf_sum(t, flat.size(), P, &N) - 1.0) < 1e-4);
+    }
+    LightTreeEmitter same;
+    same.a = Vec3(0, 0, 0), same.b = Vec3(0, 0, 1), same.c = Vec3(1, 0, 0);
+    same.power = 1.0f;
+    LightTree s;
+    s.build(std::vector<LightTreeEmitter>(3000, same));
+    const int depth = r464::max_depth(s);
+    std::printf("    3000 identical triangles: depth %d; 500 coplanar: depth %d\n", depth, r464::max_depth(t));
+    CHECK(depth <= 64);
+    CHECK(std::fabs(r464::pmf_sum(s, 3000, Vec3(0.5f, 3.0f, 0.5f), nullptr) - 1.0) < 1e-4);
+    uint32_t id = 0;
+    float p = 0.0f;
+    CHECK(s.sample(Vec3(0.5f, 3.0f, 0.5f), nullptr, 0.77f, id, p) && id < 3000);
+  });
+  test("light tree (round 464): 100,000 emitters build under 64 levels deep (time printed), their chances add to 1 and a sample's own chance matches", [] {
+    r464::Rng rng(100000);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 100000, 200.0f, 1.0f);
+    LightTree t;
+    const auto t0 = std::chrono::steady_clock::now();
+    t.build(em);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const int depth = r464::max_depth(t);
+    std::printf("    100,000 emitters: built in %.0f ms, %zu nodes, depth %d\n", ms, t.node_count(), depth);
+    CHECK(!t.empty() && depth <= 64 && t.node_count() <= 200000);
+    const Vec3 P(10.0f, 20.0f, -30.0f), N = normalize(Vec3(1, 1, 0));
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, &N) - 1.0) < 1e-4);
+    int bad = 0;
+    for (int i = 0; i < 2000; i++) {
+      uint32_t id = 0;
+      float p = 0.0f;
+      if (!t.sample(P, &N, rng.f(), id, p) || id >= em.size() || std::fabs(p - t.pmf(P, &N, id)) > 1e-4f * p) bad++;
+    }
+    CHECK(bad == 0);
+    const std::vector<float> flat = t.flatten();
+    CHECK(flat.size() == t.node_count() * (size_t)LightTree::kFloatsPerNode);
+  });
+  test("light tree (round 464): zero-area, collinear, NaN, infinite, zero and negative power triangles are never picked (chance 0) and the good ones still add to 1", [] {
+    r464::Rng rng(31);
+    std::vector<LightTreeEmitter> em = r464::scatter(rng, 40, 10.0f, 1.0f);
+    const size_t first_bad = em.size();
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const LightTreeEmitter e = em[0];
+    LightTreeEmitter zero_area = e, line = e, nan_corner = e, nan_power = e, inf_power = e, no_power = e, neg_power = e, inf_corner = e;
+    zero_area.b = zero_area.c = zero_area.a;
+    line.b = line.a + Vec3(1, 0, 0), line.c = line.a + Vec3(2, 0, 0);
+    nan_corner.b.y = nan;
+    inf_corner.c.x = inf;
+    nan_power.power = nan, inf_power.power = inf, no_power.power = 0.0f, neg_power.power = -3.0f;
+    for (const LightTreeEmitter &b : {zero_area, line, nan_corner, nan_power, inf_power, no_power, neg_power, inf_corner}) em.push_back(b);
+    LightTree t;
+    t.build(em);
+    CHECK(!t.empty());
+    for (size_t i = first_bad; i < em.size(); i++) CHECK(t.leaves()[i] == -1 && t.pmf(Vec3(0, 3, 0), nullptr, (uint32_t)i) == 0.0f);
+    int picked_bad = 0, failed = 0;
+    for (int i = 0; i < 20000; i++) {
+      const Vec3 P = rng.box(15.0f);
+      uint32_t id = 0;
+      float p = 0.0f;
+      if (!t.sample(P, nullptr, rng.f(), id, p)) failed++;
+      else if (id >= first_bad) picked_bad++;
+    }
+    CHECK(picked_bad == 0 && failed == 0);
+    const Vec3 P(1.0f, 2.0f, 3.0f);
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, nullptr) - 1.0) < 1e-4);
+    CHECK(t.pmf(P, nullptr, 100000u) == 0.0f);  // (an index that was never an emitter)
+    uint32_t dummy = 0;
+    float dp = 0.0f;
+    CHECK(!t.sample(P, nullptr, nan, dummy, dp) || dummy < first_bad);  // (a NaN u never walks onto a skipped triangle)
+  });
+  test("light tree (round 464): a point inside the emitters' bounds, or on an emitter's corner, gives finite chances that still add to 1", [] {
+    r464::Rng rng(41);
+    std::vector<LightTreeEmitter> em = r464::scatter(rng, 6, 0.3f, 0.3f);
+    LightTreeEmitter big;
+    big.a = Vec3(-2, 0, -2), big.b = Vec3(-2, 0, 2), big.c = Vec3(2, 0, -2);
+    big.power = 5.0f;
+    em.push_back(big);
+    LightTree t;
+    t.build(em);
+    const Vec3 inside[4] = {Vec3(0.0f), Vec3(0.1f, 0.0f, 0.1f), em[2].a, big.a};
+    const Vec3 N(0, 1, 0);
+    for (const Vec3 &P : inside) {
+      for (const Vec3 *n : {&N, (const Vec3 *)nullptr}) {
+        double sum = 0.0;
+        bool finite = true;
+        for (size_t i = 0; i < em.size(); i++) {
+          const float p = t.pmf(P, n, (uint32_t)i);
+          finite = finite && std::isfinite(p) && p >= 0.0f && p <= 1.0f;
+          sum += p;
+        }
+        uint32_t id = 0;
+        float sp = 0.0f;
+        CHECK(finite && std::fabs(sum - 1.0) < 1e-4 && t.sample(P, n, 0.5f, id, sp) && std::isfinite(sp) && sp > 0.0f);
+      }
+    }
+  });
+  test("light tree (round 464): a two-sided emitter has a chance from either side; a one-sided one has none behind its back and none for a surface turned away from it", [] {
+    LightTreeEmitter a;  // faces +y
+    a.a = Vec3(-1, 0, -1), a.b = Vec3(-1, 0, 1), a.c = Vec3(1, 0, -1);
+    a.power = 4.0f;
+    LightTreeEmitter far_two = a;  // a distant two-sided one, to be the other leaf
+    far_two.a += Vec3(100, 0, 0), far_two.b += Vec3(100, 0, 0), far_two.c += Vec3(100, 0, 0);
+    far_two.two_sided = true;
+    const Vec3 front(0, 5, 0), back(0, -5, 0);
+    for (bool two : {true, false}) {
+      a.two_sided = two;
+      LightTree t;
+      t.build({a, far_two});
+      const float pf = t.pmf(front, nullptr, 0), pb = t.pmf(back, nullptr, 0);
+      std::printf("    %s emitter: chance in front %.4f, behind %.4f\n", two ? "two-sided" : "one-sided", pf, pb);
+      CHECK(pf > 0.5f);
+      if (two) CHECK(pb > 0.5f);
+      else CHECK(pb == 0.0f && t.pmf(back, nullptr, 1) == 1.0f);
+    }
+    /* A receiver facing up (away from a lamp below it) gets nothing from that lamp; a lamp above it does. */
+    a.two_sided = true;
+    LightTreeEmitter above = far_two;
+    above.a = Vec3(-1, 50, -1), above.b = Vec3(-1, 50, 1), above.c = Vec3(1, 50, -1);
+    LightTree t;
+    t.build({a, above});
+    const Vec3 up(0, 1, 0), down(0, -1, 0), P(0, 5, 0);
+    CHECK(t.pmf(P, &up, 0) == 0.0f && t.pmf(P, &up, 1) == 1.0f);
+    CHECK(t.pmf(P, &down, 0) > 0.0f);
+  });
+  test("light tree (round 464): emitters that a normal turns away from entirely still pick something (by power) - no sample dead-ends and the chances add to 1", [] {
+    r464::Rng rng(51);
+    std::vector<LightTreeEmitter> em = r464::scatter(rng, 50, 5.0f, 0.5f);
+    for (LightTreeEmitter &e : em) e.a.y += 30.0f, e.b.y += 30.0f, e.c.y += 30.0f;  // all high above: a face looking down sees none
+    LightTree t;
+    t.build(em);
+    const Vec3 P(0, 0, 0), down(0, -1, 0);
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, nullptr) - 1.0) < 1e-4);
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, &down) - 1.0) < 1e-4);
+    int ok = 0;
+    for (int i = 0; i < 1000; i++) {
+      uint32_t id = 0;
+      float p = 0.0f;
+      ok += t.sample(P, &down, rng.f(), id, p) && p > 0.0f;
+    }
+    CHECK(ok == 1000);
+  });
+  test("light tree (round 464): a union of cones holds both cones; two-sided cones of opposite axes make a narrow one, one-sided opposite ones the whole sphere", [] {
+    r464::Rng rng(61);
+    int outside = 0;
+    for (int i = 0; i < 400; i++) {
+      LightCone a, b;
+      a.axis = rng.unit(), b.axis = rng.unit();
+      a.theta_o = rng.r(0.0f, 1.5f), b.theta_o = rng.r(0.0f, 1.5f);
+      a.two_sided = b.two_sided = i % 2 == 1;
+      const LightCone u = light_cone_union(a, b);
+      for (const LightCone &c : {a, b}) {
+        float ang = r464::cone_angle(u.axis, c.axis);
+        if (u.two_sided) ang = std::min(ang, r464::cone_angle(u.axis, -c.axis));
+        if (ang + c.theta_o > u.theta_o + 1e-3f) outside++;
+      }
+      if (std::fabs(length(u.axis) - 1.0f) > 1e-3f) outside++;
+    }
+    CHECK(outside == 0);
+    LightCone up, down;
+    up.axis = Vec3(0, 1, 0), down.axis = Vec3(0, -1, 0);
+    up.two_sided = down.two_sided = true;
+    LightCone u = light_cone_union(up, down);
+    std::printf("    two-sided +y and -y: theta_o %.4f; ", u.theta_o);
+    CHECK(u.two_sided && u.theta_o < 1e-3f);
+    up.two_sided = down.two_sided = false;
+    u = light_cone_union(up, down);
+    std::printf("one-sided: %.4f (pi %.4f)\n", u.theta_o, kPi);
+    CHECK(u.theta_o >= kPi - 1e-3f);
+    const LightCone same = light_cone_union(up, up);
+    CHECK(same.theta_o < 1e-4f && dot(same.axis, up.axis) > 0.9999f);
+  });
+}
+
+static void tests_round464_pathtracer() {
+  test("light tree (round 464): the path tracer's emitter pick chances add to 1 at a point, by tree and by power; with the tree off the chance is the power's share wherever you stand", [] {
+    MeshPtr panel = primitives::quad(1.0f), cube = primitives::cube(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", Vec3(0.6f))};
+    std::vector<MaterialPtr> glow[3];
+    const float strength[3] = {5.0f, 12.0f, 2.0f};
+    for (int i = 0; i < 3; i++) {
+      glow[i] = {make_material("light", Vec3(0.0f))};
+      glow[i][0]->emission = Vec3(1.0f), glow[i][0]->emission_strength = strength[i];
+    }
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({-2, 3, 0}, Quat::euler({90, 0, 0}), {1.5f, 1.5f, 1}), &glow[0]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({2, 2, 1}, Quat::euler({90, 0, 0}), {1, 1, 1}), &glow[1]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({0, 1, -3}, Quat::euler({0, 0, 0}), {2, 2, 1}), &glow[2]}};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    for (bool tree : {true, false}) {
+      PathTracer pt;
+      PTSettings st;
+      st.light_tree = tree;
+      st.use_guiding = false, st.denoise = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      CHECK(pt.has_mesh_lights() && pt.uses_light_tree() == tree);
+      const uint32_t n = 6;  // (3 quads of 2 triangles)
+      r464::Rng rng(71);
+      double worst = 0.0, spread_by_point = 0.0;
+      float first_share = -1.0f;
+      for (int i = 0; i < 30; i++) {
+        const Vec3 P(rng.r(-3, 3), rng.r(0.1f, 2), rng.r(-3, 3)), N = rng.unit();
+        double s = 0.0, s_power = 0.0;
+        for (uint32_t li = 0; li < n; li++) {
+          s += pt.mesh_light_pick_pmf(li, P, &N, true);
+          s_power += pt.mesh_light_pick_pmf(li, P, &N, false);
+        }
+        worst = std::max({worst, std::fabs(s - 1.0), std::fabs(s_power - 1.0)});
+        const float share = pt.mesh_light_pick_pmf(0, P, &N, false);
+        if (first_share < 0.0f) first_share = share;
+        spread_by_point = std::max(spread_by_point, (double)std::fabs(share - first_share));
+        if (!tree) CHECK(pt.mesh_light_pick_pmf(0, P, &N, true) == share);
+      }
+      std::printf("    light tree %s: worst |sum - 1| %.2e, the power share moves by %.2e between points\n", tree ? "on" : "off", worst, spread_by_point);
+      CHECK(worst < 1e-4 && spread_by_point == 0.0);
+      CHECK(pt.mesh_light_pick_pmf(999, Vec3(0.0f), nullptr, true) == 0.0f);  // (no such emitter)
+    }
+  });
+  test("light tree (round 464): the path tracer's camera render of an emitter-lit room keeps its mean with the tree on or off (first hits pick by the tree, deeper bounces by power)", [] {
+    auto cube = primitives::cube(1.0f);
+    auto panel = primitives::quad(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", {0.6f, 0.6f, 0.6f})};
+    std::vector<MaterialPtr> glow[3];
+    const float strength[3] = {5.0f, 14.0f, 3.0f};
+    for (int i = 0; i < 3; i++) {
+      glow[i] = {make_material("light", {0, 0, 0})};
+      glow[i][0]->emission = {1.0f, 0.9f, 0.8f}, glow[i][0]->emission_strength = strength[i];
+    }
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+                                  {&cube->render_mesh_tangents(), Mat4::trs({0.3f, 0.5f, 0}, Quat::euler({0, 25, 0}), {1, 1, 1}), &grey},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({-1.5f, 3, 0}, Quat::euler({90, 0, 0}), {1.5f, 1.5f, 1}), &glow[0]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({1.8f, 2.2f, 1.0f}, Quat::euler({90, 0, 0}), {1, 1, 1}), &glow[1]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({0, 3.2f, -1.5f}, Quat::euler({90, 0, 0}), {0.6f, 0.6f, 1}), &glow[2]}};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto render = [&](int spp, bool tree) {
+      PathTracer pt;
+      PTSettings st;
+      st.light_tree = tree, st.max_bounces = 4, st.clamp_indirect = 0, st.use_guiding = false, st.denoise = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 2, -4}, {0, 0.5f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 4.0f / 3.0f, 0.05f, 50), 32, 24);
+      pt.render(1e9, spp);
+      return pt.linear_rgb(false);
+    };
+    auto mean = [](const std::vector<float> &a) {
+      double s = 0;
+      for (float v : a) s += v;
+      return s / (double)a.size();
+    };
+    auto rmse = [](const std::vector<float> &a, const std::vector<float> &b) {
+      double e = 0;
+      for (size_t i = 0; i < a.size(); i++) e += (a[i] - b[i]) * (a[i] - b[i]);
+      return std::sqrt(e / (double)a.size());
+    };
+    const std::vector<float> on = render(512, true), off = render(512, false);
+    const double ratio = mean(on) / mean(off);
+    std::printf("    mean radiance at 512 spp: tree on %.4f, off %.4f (ratio %.4f)\n", mean(on), mean(off), ratio);
+    CHECK(mean(off) > 0.01);
+    CHECK(std::fabs(ratio - 1.0) < 0.02);
+    const std::vector<float> a16 = render(16, true), b16 = render(16, false);
+    std::printf("    RMSE at 16 spp against the 512-spp tree-on render: tree on %.4f, off %.4f (printed, not asserted)\n", rmse(a16, on), rmse(b16, on));
+  });
+}
+
+static void tests_round464_bake() {
+  test("light tree (round 464): a bake of five lamps over a floor has the same mean light with the tree on and off, with the emitters sampled and not, within 3 standard errors", [] {
+    r464::Lamps lamps;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto series = [&](bool tree, bool sample) {
+      return r464::over_seeds(6, [&](uint32_t seed) { return lamps.bake(tree, sample, sample ? 128 : 4096, seed, -1); });  // (gather alone needs many rays to be a tight reference for the weights)
+    };
+    const r464::Mean ref = series(false, true), on = series(true, true), on_gather = series(true, false);  // (gather alone never picks an emitter, tree or CDF: the same bakes, so one series is the reference - review 464)
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    floor light: CDF %.4f +- %.4f, tree %.4f +- %.4f, gather only %.4f +- %.4f (%.0f ms for 18 bakes)\n", ref.mean, ref.se, on.mean, on.se, on_gather.mean,
+                on_gather.se, ms);
+    CHECK(ref.mean > 1e-2);
+    CHECK(r464::agree(on, ref));
+    /* The MIS weights of the emitter samples and the gather add to 1 exactly when the two ways of finding the lamps agree. */
+    CHECK(r464::agree(on_gather, ref));
+    /* The switch changes the draws: one seed's pages are not the same. */
+    const LightingData a = lamps.bake(true, true, 32, 1, -1), b = lamps.bake(false, true, 32, 1, -1), a2 = lamps.bake(true, true, 32, 1, -1);
+    CHECK(r463::same_pages(a, a2));
+    CHECK(!r463::same_pages(a, b));
+  });
+  test("light tree (round 464): on the card the five-lamp floor's mean light agrees with the CPU's, tree on and off (skipped with a note when no GPU opens)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    r464::Lamps lamps;
+    size_t gpu_texels = 0;
+    lamps.bake(true, true, 8, 1, 0, &gpu_texels);
+    if (gpu_texels == 0) {
+      std::printf("    (the card did not gather: skipped)\n");
+      return;
+    }
+    const r464::Mean ref = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(false, true, 64, s, -1); });
+    const r464::Mean g_on = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, 64, s, 0); });
+    const r464::Mean g_off = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(false, true, 64, s, 0); });
+    std::printf("    floor light: CPU CDF %.4f +- %.4f, card tree %.4f +- %.4f, card CDF %.4f +- %.4f\n", ref.mean, ref.se, g_on.mean, g_on.se, g_off.mean, g_off.se);
+    CHECK(ref.mean > 1e-2);
+    CHECK(r464::agree(g_on, ref));
+    CHECK(r464::agree(g_off, ref));
+  });
+}
+
+static void tests_round464_console() {
+  test("`lighting tree off` (round 464): the next bake draws other samples than `on`'s, the lighting stays current (not in the scene's key), `on` brings the old pages back bit for bit", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    ed.command("lighting tree off");
+    CHECK(r463::join_log(mark).find("lighting tree: off") != std::string::npos);
+    CHECK(!ed.lighting_out_of_date_for_test());  // (the switch alone doesn't stale the bake)
+    r35_bake(ed);
+    const bool differs = !r463::same_pages(base, ed.lighting_data_for_test());
+    std::printf("    tree off: pages %s the tree's\n", differs ? "differ from" : "are the same as");
+    CHECK(differs);
+    CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    ed.command("lighting tree on");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting tree off");  // (and a fresh editor starts with it on: the setting isn't saved)
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+    ed.command("lighting tree on");
+  });
+  test("`lighting tree` (round 464): a word that is not on or off warns and the setting stays, whichever it was (the next bake is the same as before the junk)", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData on_pages = ed.lighting_data_for_test();
+    ed.command("lighting tree off");
+    r35_bake(ed);
+    const LightingData off_pages = ed.lighting_data_for_test();
+    CHECK(!r463::same_pages(on_pages, off_pages));
+    const char *junk[] = {"lighting tree maybe", "lighting tree 1", "lighting tree 0", "lighting tree true", "lighting tree -1", "lighting tree nan", "lighting tree onn"};
+    for (int round = 0; round < 2; round++) {
+      const bool is_on = round == 1;
+      ed.command(is_on ? "lighting tree on" : "lighting tree off");
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        const bool warned = said.find("say on or off") != std::string::npos && said.find(is_on ? "stays on" : "stays off") != std::string::npos;
+        CHECK(warned);
+        if (!warned) std::printf("    \"%s\" said: %.100s\n", cmd, said.c_str());
+      }
+      r35_bake(ed);
+      CHECK(r463::same_pages(is_on ? on_pages : off_pages, ed.lighting_data_for_test()));
+    }
+    ed.command("lighting tree on");
+  });
+}
+
+/* ---- round 464, review: the card's layout read on the CPU, the MIS weights, the tree kept between builds ---- */
+namespace r464 {
+/* The kernel's lt_* (gpu_kernel.h), copied over the decoded floats alone: the buffer the card reads (flatten(), then each
+ * emitter's leaf as int bits). A swapped slot in flatten() makes this disagree with LightTree. */
+struct Card {
+  std::vector<float> m;
+  int nodes = 0;
+  explicit Card(const LightTree &t) : m(t.flatten()), nodes((int)t.node_count()) {
+    for (int32_t leaf : t.leaves()) {
+      float f;
+      std::memcpy(&f, &leaf, 4);
+      m.push_back(f);
+    }
+  }
+  float f(int n, int k) const { return m[(size_t)(n * 16 + k)]; }
+  int i(int n, int k) const {
+    uint32_t u;
+    std::memcpy(&u, &m[(size_t)(n * 16 + k)], 4);
+    return (int)u;
+  }
+  float importance(int node, Vec3 p, Vec3 nrm, bool has_n) const {
+    const float power = f(node, 7), r2 = f(node, 3);
+    if (!(power > 0.0f)) return 0.0f;
+    const Vec3 to_c = Vec3(f(node, 0), f(node, 1), f(node, 2)) - p;
+    const float d2 = dot(to_c, to_c);
+    if (!(d2 > r2)) return power / std::max(r2, 1e-12f);
+    const Vec3 w = to_c * (1.0f / std::sqrt(d2));
+    const float sin_u2 = r2 / d2, sin_u = std::sqrt(sin_u2), cos_u = std::sqrt(std::max(0.0f, 1.0f - sin_u2));
+    float cos_i = 1.0f;
+    if (has_n) {
+      const float ci = dot(nrm, w), si = std::sqrt(std::max(0.0f, 1.0f - ci * ci));
+      cos_i = ci >= cos_u ? 1.0f : ci * cos_u + si * sin_u;
+      if (!(cos_i > 0.0f)) return 0.0f;
+    }
+    float ct = dot(Vec3(f(node, 4), f(node, 5), f(node, 6)), -w);
+    if (f(node, 10) > 0.5f) ct = std::fabs(ct);
+    const float st = std::sqrt(std::max(0.0f, 1.0f - ct * ct)), co = f(node, 8), so = f(node, 9);
+    const float c1 = ct >= co ? 1.0f : ct * co + st * so, s1 = ct >= co ? 0.0f : st * co - ct * so;
+    const float c2 = c1 >= cos_u ? 1.0f : c1 * cos_u + s1 * sin_u;
+    if (!(c2 > 0.0f)) return 0.0f;
+    return power * cos_i * c2 / d2;
+  }
+  float left(int node, Vec3 p, Vec3 nrm, bool has_n) const {
+    const int l = i(node, 12), r = i(node, 13);
+    float il = importance(l, p, nrm, has_n), ir = importance(r, p, nrm, has_n);
+    if (std::isnan(il) || std::isinf(il)) il = 0.0f;
+    if (std::isnan(ir) || std::isinf(ir)) ir = 0.0f;
+    if (!(il + ir > 0.0f)) il = f(l, 7), ir = f(r, 7);
+    return il / (il + ir);
+  }
+  int sample(Vec3 p, Vec3 nrm, float u, float &pmf) const {
+    pmf = 1.0f;
+    int at = 0;
+    for (int depth = 0; depth < 64 && i(at, 12) >= 0; depth++) {
+      const float pl = left(at, p, nrm, true);
+      if (u < pl) u = std::min(u / pl, 0.99999994f), pmf *= pl, at = i(at, 12);
+      else u = std::min((u - pl) / (1.0f - pl), 0.99999994f), pmf *= 1.0f - pl, at = i(at, 13);
+    }
+    return i(at, 12) >= 0 ? -1 : i(at, 14);
+  }
+  float pmf(int li, Vec3 p, Vec3 nrm, bool has_n) const {
+    uint32_t u;
+    std::memcpy(&u, &m[(size_t)(nodes * 16 + li)], 4);
+    int at = (int)u;
+    if (at < 0) return 0.0f;
+    float pm = 1.0f;
+    for (int depth = 0; depth < 64 && i(at, 15) >= 0; depth++) {
+      const int up = i(at, 15);
+      const float pl = left(up, p, nrm, has_n);
+      pm *= i(up, 12) == at ? pl : 1.0f - pl;
+      at = up;
+    }
+    return pm;
+  }
+};
+
+/* A floor, a box and three emissive quads (two triangles each), in one PathTracer. */
+struct PtLamps {
+  MeshPtr panel = primitives::quad(1.0f), cube = primitives::cube(1.0f);
+  std::vector<MaterialPtr> grey = {make_material("grey", Vec3(0.6f))};
+  std::vector<MaterialPtr> glow[3];
+  std::vector<PTObject> objs;
+  Environment env;
+  PathTracer pt;
+  PtLamps() {
+    const float strength[3] = {5.0f, 12.0f, 2.0f};
+    for (int i = 0; i < 3; i++) {
+      glow[i] = {make_material("light", Vec3(0.0f))};
+      glow[i][0]->emission = Vec3(1.0f), glow[i][0]->emission_strength = strength[i];
+    }
+    objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+            {&panel->render_mesh_tangents(), Mat4::trs({-2, 3, 0}, Quat::euler({90, 0, 0}), {1.5f, 1.5f, 1}), &glow[0]},
+            {&panel->render_mesh_tangents(), Mat4::trs({2, 2, 1}, Quat::euler({90, 0, 0}), {1, 1, 1}), &glow[1]},
+            {&panel->render_mesh_tangents(), Mat4::trs({0, 1, -3}, Quat::euler({0, 0, 0}), {2, 2, 1}), &glow[2]}};
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    PTSettings st;
+    st.use_guiding = false, st.denoise = false;
+    pt.set_settings(st);
+    rebuild();
+  }
+  void rebuild() { pt.build(objs, {}, env); }
+  /* The emitter number of triangle `tri` of object `obj` (objects 1..3 are the quads: collect_mesh_lights' order). */
+  static uint32_t light_of(uint32_t obj, uint32_t tri) { return (obj - 1) * 2 + tri; }
+  float tri_area(uint32_t obj, uint32_t tri) const {
+    const RenderMesh &rm = *objs[obj].mesh;
+    const Vec3 a = objs[obj].model.point(rm.positions[rm.indices[tri * 3]]), b = objs[obj].model.point(rm.positions[rm.indices[tri * 3 + 1]]),
+               c = objs[obj].model.point(rm.positions[rm.indices[tri * 3 + 2]]);
+    return 0.5f * length(cross(b - a, c - a));
+  }
+};
+}  // namespace r464
+
+static void tests_round464_review() {
+  test("light tree (round 464): the card's flat buffer, read as the kernel reads it, picks the same emitters with the same chances and importances as LightTree", [] {
+    r464::Rng rng(81);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 200, 15.0f, 1.2f);
+    LightTree t;
+    t.build(em);
+    const r464::Card card(t);
+    int pick_diff = 0, draws = 0;
+    double worst_pmf = 0.0, worst_imp = 0.0;
+    for (int i = 0; i < 120; i++) {
+      const Vec3 P = rng.box(i < 20 ? 3.0f : 25.0f), N = rng.unit();
+      for (size_t n = 0; n < t.nodes().size(); n += 7) {
+        const float a = t.importance(t.nodes()[n], P, &N), b = card.importance((int)n, P, N, true);
+        worst_imp = std::max(worst_imp, (double)std::fabs(a - b) / std::max(1e-20, (double)std::fabs(a)));
+        const float a0 = t.importance(t.nodes()[n], P, nullptr), b0 = card.importance((int)n, P, N, false);
+        worst_imp = std::max(worst_imp, (double)std::fabs(a0 - b0) / std::max(1e-20, (double)std::fabs(a0)));
+      }
+      for (size_t e = 0; e < em.size(); e += 3) {
+        const float a = t.pmf(P, &N, (uint32_t)e), b = card.pmf((int)e, P, N, true), a0 = t.pmf(P, nullptr, (uint32_t)e), b0 = card.pmf((int)e, P, N, false);
+        worst_pmf = std::max({worst_pmf, (double)std::fabs(a - b) / std::max(1e-20, (double)a), (double)std::fabs(a0 - b0) / std::max(1e-20, (double)a0)});
+      }
+      for (int k = 0; k < 25; k++) {
+        const float u = rng.f();
+        uint32_t id = 0;
+        float pm = 0.0f, cpm = 0.0f;
+        const bool ok = t.sample(P, &N, u, id, pm);
+        const int cid = card.sample(P, N, u, cpm);
+        draws++;
+        if (!ok || cid != (int)id || std::fabs(pm - cpm) > 1e-6f * pm) pick_diff++;
+      }
+    }
+    std::printf("    %d draws, %d picks differ; worst relative gap: importance %.2e, pmf %.2e\n", draws, pick_diff, worst_imp, worst_pmf);
+    CHECK(pick_diff == 0);
+    CHECK(worst_imp < 1e-5 && worst_pmf < 1e-6);
+    /* A leaf's emitter and the leaves array agree. */
+    int bad = 0;
+    for (size_t e = 0; e < em.size(); e++) bad += card.i(t.leaves()[e], 14) != (int)e;
+    CHECK(bad == 0);
+  });
+  test("light tree (round 464): at a texel the emitter sample's MIS weight and the gather's add to 1, because the chance the gather weighs by is the very one the sample drew with", [] {
+    /* trace()'s first-hit weight reads mesh_light_pdf (private) = mesh_light_pick_pmf(li, o, &n) x dist^2 / (area cos_l);
+     * emissive_at's reads sample_mesh_light's pdf. Both are reached here through the public calls, so this pins that the
+     * two agree (and then the weights sum to 1 for any count ratio). The kernel's own weights are not reachable. */
+    r464::PtLamps s;
+    r464::Rng rng(91);
+    LightTree::Cache cache;
+    int used = 0, mismatch = 0, not_one = 0;
+    double worst_pl = 0.0, worst_sum = 0.0;
+    for (int p = 0; p < 150; p++) {
+      const Vec3 o(rng.r(-3, 3), rng.r(0.05f, 1.5f), rng.r(-3, 3)), n = rng.unit();
+      s.pt.light_tree().cache_begin(cache, o, &n);
+      for (int k = 0; k < 20; k++) {
+        uint32_t rs = (uint32_t)(p * 31 + k + 1);
+        Vec3 dir, Le;
+        float dist = 0.0f, pl = 0.0f;
+        if (!s.pt.sample_mesh_light(rs, o, n, dir, dist, Le, pl, rng.f(), k % 2 ? &cache : nullptr)) continue;
+        PathTracer::Hit h;
+        if (!s.pt.intersect({o, dir}, h) || h.object < 1 || h.object > 3 || std::fabs(h.t - dist) > 1e-2f * dist) continue;  // (something in the way: skip)
+        const uint32_t li = r464::PtLamps::light_of(h.object, h.tri);
+        const float cos_l = std::fabs(dot(s.pt.hit_geo_normal(h), dir));
+        const float plp = s.pt.mesh_light_pick_pmf(li, o, &n, true) * dist * dist / (s.tri_area(h.object, h.tri) * cos_l);
+        worst_pl = std::max(worst_pl, (double)std::fabs(plp - pl) / pl);
+        used++;
+        if (std::fabs(plp - pl) > 1e-3f * pl) mismatch++;
+        for (float ratio : {0.0f, 0.25f, 1.0f, 8.0f, 64.0f}) {
+          const float pb = ratio * dot(n, dir) / kPi;
+          const float w_emit = pl * pl / (pl * pl + pb * pb), w_gather = pb * pb / (pb * pb + plp * plp);
+          worst_sum = std::max(worst_sum, (double)std::fabs(w_emit + w_gather - 1.0f));
+          if (std::fabs(w_emit + w_gather - 1.0f) > 1e-5f) not_one++;
+        }
+      }
+    }
+    std::printf("    %d samples checked: worst gap between the sample's pdf and the gather's %.2e; worst |w_emit + w_gather - 1| %.2e\n", used, worst_pl, worst_sum);
+    CHECK(used > 500);
+    CHECK(mismatch == 0 && not_one == 0);
+  });
+  test("light tree (round 464): rebuilding a scene where only the floor moved keeps the tree; moving a lamp rebuilds it and the chances change; past 2^20 emitters there is no tree", [] {
+    r464::PtLamps s;
+    const Vec3 P(0.5f, 0.5f, 0.5f), N(0, 1, 0);
+    auto pmfs = [&]() {
+      std::vector<float> v;
+      for (uint32_t i = 0; i < 6; i++) v.push_back(s.pt.mesh_light_pick_pmf(i, P, &N, true));
+      return v;
+    };
+    CHECK(s.pt.uses_light_tree());
+    const std::vector<float> before = pmfs();
+    const LightTreeNode *nodes0 = s.pt.light_tree().nodes().data();
+    const size_t count0 = s.pt.light_tree().node_count();
+    s.objs[0].model = Mat4::trs({1.0f, -0.05f, 2.0f}, Quat(), {8, 0.1f, 8});  // (the floor moves)
+    auto t0 = std::chrono::steady_clock::now();
+    s.rebuild();
+    const double ms_same = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(s.pt.light_tree().node_count() == count0 && pmfs() == before);
+    CHECK(s.pt.light_tree().nodes().data() == nodes0);  // (the same nodes, not rebuilt)
+    s.objs[2].model = Mat4::trs({-4, 0.6f, 2}, Quat::euler({90, 0, 0}), {1, 1, 1});  // (a lamp moves)
+    t0 = std::chrono::steady_clock::now();
+    s.rebuild();
+    const double ms_moved = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const std::vector<float> after = pmfs();
+    double change = 0.0;
+    for (size_t i = 0; i < 6; i++) change = std::max(change, (double)std::fabs(after[i] - before[i]));
+    double sum = 0.0;
+    for (float v : after) sum += v;
+    std::printf("    rebuild with the floor moved %.1f ms, with a lamp moved %.1f ms; the chances moved by up to %.3f\n", ms_same, ms_moved, change);
+    CHECK(change > 1e-3 && std::fabs(sum - 1.0) < 1e-4 && s.pt.uses_light_tree());
+    /* Turning the tree off in the settings gives no tree; on again builds one. */
+    PTSettings st = s.pt.settings();
+    st.light_tree = false;
+    s.pt.set_settings(st);
+    s.rebuild();
+    CHECK(!s.pt.uses_light_tree());
+    st.light_tree = true;
+    s.pt.set_settings(st);
+    s.rebuild();
+    CHECK(s.pt.uses_light_tree());
+    /* More than 2^20 emissive triangles: picked by power, no tree. */
+    MeshPtr big = primitives::plane(10.0f, 725);  // 2 x 725^2 = 1,051,250 triangles
+    std::vector<MaterialPtr> lit = {make_material("lit", Vec3(0.0f))};
+    lit[0]->emission = Vec3(1.0f), lit[0]->emission_strength = 1.0f;
+    PathTracer pt;
+    PTSettings ps;
+    ps.use_guiding = false, ps.denoise = false;
+    pt.set_settings(ps);
+    t0 = std::chrono::steady_clock::now();
+    pt.build({{&big->render_mesh_tangents(), Mat4::identity(), &lit}}, {}, s.env);
+    const double ms_big = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    %zu-triangle emitter: build %.0f ms, tree %s\n", big->render_mesh_tangents().tri_count(), ms_big, pt.uses_light_tree() ? "yes" : "no");
+    CHECK(pt.has_mesh_lights() && !pt.uses_light_tree());
+    const float share = 1.0f / (float)big->render_mesh_tangents().tri_count();  // (equal triangles: a power share each)
+    std::printf("    power share of triangle 5: %.6e (1/n = %.6e)\n", pt.mesh_light_pick_pmf(5, Vec3(0, 1, 0), nullptr, true), share);
+    /* (0.1 %: the scene's power is summed in double since review 464 - as a float running sum of a million terms it read
+     * about 1.2 % low; the margin left is each triangle's area in float) */
+    CHECK(std::fabs(pt.mesh_light_pick_pmf(5, Vec3(0, 1, 0), nullptr, true) - share) < 1e-3f * share);
+  });
+}
+
+static void tests_round464() {
+  tests_round464_review();
+  tests_round464_tree();
+  tests_round464_pathtracer();
+  tests_round464_bake();
+  tests_round464_console();
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -8854,4 +9728,5 @@ void run_lighting_tests() {
   tests_round459();
   tests_round455();
   tests_round463();
+  tests_round464();
 }

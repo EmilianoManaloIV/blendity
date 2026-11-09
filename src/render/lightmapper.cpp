@@ -572,6 +572,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   ps.max_bounces = std::max(0, s_.bounces - 1);
   ps.denoise = false;
   ps.use_guiding = false;
+  ps.light_tree = s_.light_tree;  // (round 464)
   ps.gpus.clear();
   pt_->set_settings(ps);
   pt_->build(pt_objects_, pt_lights, env);
@@ -625,18 +626,24 @@ bool Lightmapper::texel_inside(const LightmapTexel &t, uint32_t k, float limit) 
 /* Emissive meshes sampled at the texel (task 0157): one emitter point a sample, weighted against the hemisphere
  * gather that may hit the same emitter (the power heuristic, both ways), so a small bright object lights its
  * surroundings smoothly instead of where a hemisphere ray chanced on it. The mean is irradiance / pi, as the gather's. */
-Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const {
+Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const {
   Vec3 esum(0.0f);
   const float shift = rnd01(rng);  // (the emitter choice stratified over the samples: a lamp's triangles taken in turn, shifted at random per texel)
+  /* Round 464: every sample here is from (o, n): the light tree works out each node's split once for the texel. */
+  thread_local LightTree::Cache tree_cache;  // (8 bytes x 2 a node a worker thread, kept for the next bake: at most ~16 MB at the 2^20-emitter cap)
+  LightTree::Cache *cache = pt_->uses_light_tree() ? &tree_cache : nullptr;
+  if (cache) pt_->light_tree().cache_begin(*cache, o, &n);
   for (int k = 0; k < samples; k++) {
     Vec3 dir, Le;
     float dist, pl;
     const float light_u = std::fmod(((float)k + shift) / (float)samples, 1.0f);
-    if (!pt_->sample_mesh_light(rng, o, n, dir, dist, Le, pl, light_u)) continue;
+    if (!pt_->sample_mesh_light(rng, o, n, dir, dist, Le, pl, light_u, cache)) continue;
     rays++;
     const Vec3 Tr = pt_->transmittance({o, dir}, dist * (1.0f - 1e-4f));
     if (!(std::max({Tr.x, Tr.y, Tr.z}) > 0.0f)) continue;
-    const float cosn = dot(n, dir), pb = gather_sees_emitters ? cosn / kPi : 0.0f;
+    /* Round 464 (ADR 0121): the power heuristic with the sample counts - the gather sends gather_ratio rays for each of
+     * these samples (0: it doesn't see emitters), so its pdf counts that many times (Veach 1997, 9.13). */
+    const float cosn = dot(n, dir), pb = gather_ratio * cosn / kPi;
     const float w = pl * pl / (pl * pl + pb * pb);
     esum += Le * Tr * (cosn * w / pl);
   }
@@ -645,7 +652,7 @@ Vec3 Lightmapper::emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool g
 
 /* Round 441: the world sampled at the texel by its light (PathTracer::sample_env), weighted against the cosine gather
  * that may escape to the same sky (the power heuristic, both ways). The mean is irradiance / pi, as the gather's. */
-Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &rays) const {
+Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const {
   Vec3 esum(0.0f);
   for (int k = 0; k < samples; k++) {
     Vec3 dir;
@@ -656,7 +663,7 @@ Vec3 Lightmapper::env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &r
     rays++;
     const float vis = baked_shadow_ray(*pt_, {o, dir}, 1e30f);
     if (!(vis > 0.0f)) continue;
-    const float pb = cosn / kPi;
+    const float pb = gather_ratio * cosn / kPi;  // (round 464: with the sample counts, as emissive_at)
     esum += env_.radiance(dir) * (vis * cosn * pe / (pe * pe + pb * pb));
   }
   return esum * (1.0f / (kPi * (float)std::max(1, samples)));
@@ -820,6 +827,15 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   const bool env_mis = N > 0 && s_.sample_env && pt_->has_env_dist();  // (round 441: the world sampled at the texel too)
   const bool gather_sees_emitters = s_.bounces > 0;  // (bounces 0: the gather sees the sky only)
   const float gather_scale = N ? s_.indirect_intensity / (float)N : 0.0f;
+  /* Round 464: the texel's own emitter and sky sample counts, for MIS with the counts (the GPU path gathers on the card:
+   * s_.indirect_samples rays there, 64 emitter samples here). */
+  const int n_emit = std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64));
+  const int n_env = std::max(kEnvSamplesMin, std::min(N, kEnvSamplesMax));
+  const int n_gather = indirect ? N : s_.indirect_samples;
+  PathTracer::GatherFirst first;
+  first.normal = n;
+  first.emit_ratio = (float)n_gather / (float)n_emit;
+  first.env_ratio = (float)n_gather / (float)n_env;
   for (int i = 0; i < N; i++) {
     const float r1 = rnd01(rng), r2 = rnd01(rng);
     const float r = std::sqrt(r1), phi = 2.0f * kPi * r2;
@@ -831,18 +847,21 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
       rays++;
       L = env_.radiance(d) * baked_shadow_ray(*pt_, {o, d}, 1e30f);
       if (env_mis) {
-        const float pb = cosn / kPi, pe = pt_->env_pdf(d);
+        const float pb = first.env_ratio * cosn / kPi, pe = pt_->env_pdf(d);
         L = L * (pb * pb / (pb * pb + pe * pe));
       }
     }
-    else L = pt_->incoming_radiance({o, d}, prng, rays, emissive || env_mis ? cosn / kPi : 0.0f);
+    else {
+      first.pdf = emissive || env_mis ? cosn / kPi : 0.0f;
+      L = pt_->incoming_radiance({o, d}, prng, rays, first);
+    }
     if (!finite3(L)) continue;
     sum += L;
     dirs.add(L * gather_scale, Vec3(0.0f));  // (round 427: the bounced light weighs but points nowhere - Unity's directionality, measured on SideRail's own direction maps)
   }
   Vec3 value = N ? sum * (s_.indirect_intensity / (float)N) : Vec3(0.0f);
   if (env_mis) {
-    const Vec3 e = env_at(o, n, rng, std::max(kEnvSamplesMin, std::min(N, kEnvSamplesMax)), rays) * s_.indirect_intensity;
+    const Vec3 e = env_at(o, n, rng, n_env, first.env_ratio, rays) * s_.indirect_intensity;
     value += e;
     dirs.add(e, Vec3(0.0f));  // (the sky's light: as the gather's, weighed but pointing nowhere - round 427)
   }
@@ -851,7 +870,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   /* The noisy parts the filter denoises (round 423): the gather, and the emitters sampled at the texel (task 0157). */
   if (gather_out) *gather_out = finite3(value) ? value : Vec3(0.0f);
   if (emissive) {
-    const Vec3 e = emissive_at(o, n, rng, std::max(16, std::min(2 * s_.indirect_samples, indirect ? 256 : 64)), gather_sees_emitters, rays) * s_.indirect_intensity;
+    const Vec3 e = emissive_at(o, n, rng, n_emit, gather_sees_emitters ? first.emit_ratio : 0.0f, rays) * s_.indirect_intensity;
     value += e;
     if (emitted_out) *emitted_out = finite3(e) ? e : Vec3(0.0f);
     dirs.add(e, Vec3(0.0f));  // (the emitters' light: as the bounced light, weighed but pointing nowhere - round 427)
@@ -956,6 +975,12 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);
 }
 
+float Lightmapper::gpu_first_hit_ratio() const {
+  if (!s_.sample_emissive || !pt_->has_mesh_lights()) return 0.0f;
+  const int n_emit = std::max(16, std::min(2 * s_.indirect_samples, 64));  // (bake_texel's count without the gather)
+  return (float)std::max(1, s_.indirect_samples) / (float)n_emit;
+}
+
 bool Lightmapper::step(double budget_ms) {
   if (!active_) return true;
   ScopedTimer t;
@@ -977,7 +1002,7 @@ bool Lightmapper::step(double budget_ms) {
         normals[i] = tx.normal;
       }
       std::string err;
-      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, s_.sample_emissive && pt_->has_mesh_lights(), s_.seed) ||
+      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed) ||
           ind.size() != batch) {
         if (pt_->gpu_gather_waiting()) {
           gpu_waiting = true;

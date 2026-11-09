@@ -2150,6 +2150,11 @@ How noisy is a bake? Round 463 answers with one number and no reference: bake th
 ! cmd:lighting seed 1; bake | 3. Bake again at seed 1, and wait for it to finish
 ! cmd:lighting save NoiseB overwrite | 4. Save this bake as folder NoiseB (only after the bake has finished)
 ! cmd:lighting noise NoiseA NoiseB; lighting seed 0 | 5. Print the grain and blotch of the two bakes (noise.json and a picture of the worst objects land in NoiseB), and go back to the normal seed
+Where the noise comes from (round 464): a texel lit by many small lamps sends emitter samples toward them, and until now it chose each sample's lamp by its share of the whole scene's light - a lamp at the far end of a tunnel, or facing away, drew as many samples as the one beside the texel. A light tree groups the emissive triangles by place and facing and picks down the tree by what each group can give this texel (its power, distance and facing), so the samples go where the light is. Both ways are unbiased: the mean is the same, the noise is less. `lighting tree off` bakes the old way for comparison.
+? A tunnel has 40 lamps; a texel sits next to one. With the light tree, which lamps get its emitter samples? | Mostly the near lamp and the ones facing it: the tree weighs each group by its power over the squared distance and by how it faces the texel. Far and back-facing lamps still get a few samples (never none while they could light it), so the result stays unbiased.
+? Does the light tree know that a lamp is behind a wall? | No: it sees positions, power and facing, not walls. A lamp around a corner still draws samples if it faces the texel; the shadow ray finds the wall.
+! cmd:lighting tree off; bake | 6. Bake with emitters picked by power alone (the old way), wait for it, then save and measure as in steps 2-5
+! cmd:lighting tree on | 7. Back to the light tree (the default)
 )"},
 };
 

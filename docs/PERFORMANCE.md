@@ -11,11 +11,13 @@ to their screenshots of 2026-11-08), where the blotches are.
 
 | round | change | bake s (lightmaps s) | grain (page 0 / 1) | blotch (page 0 / 1) | MAE / SSIM: spawn, spawn_back, floor, ahead | side_bar_high | side_tunnel_eye |
 |---|---|---|---|---|---|---|---|
+| 464 | a light tree picks the emitters (texel samples, camera first hits) | 39 (36.3; filter 2.1) | 5.46 (0.41 / 17.5) | 1.24 (0.10 / 3.99) | as 463 | 6.73 / 0.854 | 6.06 / 0.876 |
 | 463 | baseline (no change to the bake) | 39 (35.5; filter 2.3) | 5.46 (0.41 / 17.5) | 1.24 (0.10 / 3.99) | 3.57/0.843, 1.30/0.791, 3.35/0.818, 2.32/0.933 | 6.73 / 0.854 | 6.06 / 0.876 |
 
 Page 1's grain is carried by rare very bright texels - the sparse dots of `noise_worst_*.png`: emitter samples and lights kept by
 chance, which skip today's firefly clamp - the spots on the side tunnel's sofas and floor in the two views. `lightmap_quality`
-(round 421's settings): room grain 0.0102 / blotch 0.0036, corridor 0.0049 / 0.0015, courtyard 0.0083 / 0.0025, and the new
+(round 421's settings; round 464's light tree: `tunnel_lamps` grain 0.1122, blotch 0.0253, RMSE 0.143 at 2,305 ms against 0.1330 /
+0.0274 / 0.154 at 2,218 ms by power - SideRail itself unchanged, its noise being the chance-kept point lights): room grain 0.0102 / blotch 0.0036, corridor 0.0049 / 0.0015, courtyard 0.0083 / 0.0025, and the new
 `tunnel_lamps` 0.1329 / 0.0274 (relative RMSE 0.154 against its 16x reference, bake 2,218 ms).
 
 ## Pass 19: Pass 18's open items (rounds 447-459)

@@ -2079,6 +2079,16 @@ void Editor::run_console_command(const std::string &line) {
         Log::info("lighting seed: %u%s", bake_seed_, bake_seed_ ? " (the next bake draws other samples; `lighting seed 0` restores the normal bake)" : "");
       }
     }
+    else if (sub == "tree") {
+      /* lighting tree on|off (round 464, ADR 0121): the next bake picks emissive triangles by a light tree (on, the default)
+       * or by their share of the scene's power - for comparing the two; not saved, not in the scene's key. */
+      const std::string w = to_lower(arg(2, "on"));
+      if (w != "on" && w != "off") Log::warn("lighting tree: say on or off - the light tree stays %s", bake_light_tree_ ? "on" : "off");
+      else {
+        bake_light_tree_ = w == "on";
+        Log::info("lighting tree: %s (the next bake picks emitters %s)", w.c_str(), bake_light_tree_ ? "by what each can give the texel" : "by their share of the scene's power");
+      }
+    }
     else if (sub == "noise") {  // (a folder with spaces in "quotes")
       const std::vector<std::string> f = split_quoted(line_rest(line, 2));
       lighting_noise_command(f.size() > 0 ? f[0] : std::string(), f.size() > 1 ? f[1] : std::string());

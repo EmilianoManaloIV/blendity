@@ -2,6 +2,51 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 464): a light tree picks the emitters
+
+**Asked (Pass 21, task 0440, ADR 0121):** every texel - and every bounce of the path tracer - picked an emissive triangle
+from one power CDF over the whole scene, so in a tunnel lined with small lamps most emitter samples went to lamps far
+away or facing elsewhere. Pick by what each emitter can give the point, at the same bake time.
+
+**Added**
+- **`LightTree`** (`src/render/light_tree.{h,cpp}`, after Conty Estevez & Kulla 2018 - written from the paper, no Cycles
+  code): a binary tree over the emissive triangles, each node with its bounds, power and an orientation cone, built by
+  the orientation-aware SAH; one emitter a leaf; `sample` descends by each child's importance at the point (its power x
+  how it faces the point and the point's normal / the squared distance - cosines only, no inverse trigonometry), `pmf`
+  walks the same choices from the leaf up, `Cache` keeps a point's node splits for its many samples.
+- **Where it picks:** a texel's own emitter samples (cached per texel) and a camera ray's first hit, on the CPU, in the
+  GPU kernel and (through the GLSL's translation) OptiX, whose PTX is regenerated. Deeper path vertices pick by power:
+  a descent at every bounce cost more time than it saved there. Each vertex weighs a BSDF hit on an emitter by the pick
+  that vertex made, so MIS stays exact.
+- **MIS with the sample counts** (task 0157's open item): the texel's gather, its emitter samples and its sky samples are
+  weighed by the power heuristic with their counts (`PathTracer::GatherFirst`, the card's `gpu_gather` ratio).
+- **`lighting tree on|off`** (a measurement setting like `lighting seed`: not saved, not in the scene key) and the stress
+  rows "tunnel_lamps: emitters picked" (by power / by the light tree, at the same samples).
+- The tree is kept while its emitters are the same (a hash of their corners and power): a traced preview that rebuilds
+  when something moves doesn't rebuild the tree (100,000 emitters take ~0.8 s). Past 2^20 emitters no tree is built.
+- **Learn:** "A bake's noise, measured" gains the light tree - where the samples go, two questions, Try-its 6 and 7.
+
+**Results**
+- `tunnel_lamps` at the same bake time (the full run): bake 2,218 -> 2,305 ms (+4 %), grain 0.133 -> 0.112 (-16 %), blotch
+  0.027 -> 0.025, relative RMSE 0.154 -> 0.143 (-7 %). **Task 0440's criterion 4 (-40 %) is not met** - with the tree at every path vertex the grain fell
+  29 % but the bake took 27 % longer; part of that scene's noise is its 10 point lights picked by chance (round 466).
+  The owner decides at review whether to accept the lower gain.
+- The five-lamp floor of `tests_round464`: the tree's standard error over six seeds ~40 % under the CDF's on the CPU,
+  ~60 % under on the card (24.162 +- 0.033 against 24.150 +- 0.085), the means agreeing.
+- **SideRail: unchanged** - bake 39 s (lightmaps 36.3 s against 35.5, 890 M rays against 881), grain 5.455 and blotch
+  1.242 (both as round 463's), every station's MAE / SSIM as round 463's to the third decimal. Its emissive triangles
+  carry little of its light; the noise is page 1's rare very bright texels, which come from the 71 Baked point and spot
+  lights kept by chance (`light_pick.h`: Russian roulette, their light skipping the firefly clamp) - the tree doesn't
+  touch those (ADR 0121, decision 8). Rounds 465-466 and the owner's review decide what follows.
+
+**Checked:** the suites - Windows dependency-free 19,494 checks, 0 failed; Windows with Blender's libraries 20,400 (the
+`gpu` group's four picture comparisons that fail in any worktree build with the libraries, as round 463 found; the card's
+light tree test passes there); Linux 19,500 (Live Link's frame-time test failed once while another build ran and passes
+alone, 366 checks). `tests_round464` (20 tests: the tree's pmf sums, chi-square, cache, edges, 100,000 emitters, the
+card's layout re-implemented on the CPU, the MIS weights, tree reuse and its cap, unbiased bakes on the CPU and the card,
+`lighting tree`). Stress `lightmap_quality`: the other scenes unchanged; the audits pass. Review: changes needed (the tree
+rebuilt at every scene change, the card's layout unpinned, criterion 4) then approved.
+
 ## 2026-11-08 (round 463): a bake's noise, measured
 
 **Asked:** SideRail's full bake (2 pages at 2048 px, 806,641 texels, 50.3 s) leaves blotchy noise on the side tunnel's walls and

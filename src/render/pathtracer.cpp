@@ -1027,6 +1027,7 @@ void PathTracer::collect_mesh_lights() {
   light_cdf_.clear();
   light_of_.clear();
   light_power_ = 0.0f;
+  double power_sum = 0.0;  // (in double: a float running sum of a million emitters drifts ~1 % - review 464)
   if (!settings_.sample_mesh_lights) return;
   std::unordered_map<const Material *, float> lum_of;  // (each material's once: a texture's mean per material, not per triangle)
   for (size_t o = 0; o < objects_.size(); o++) {
@@ -1048,10 +1049,44 @@ void PathTracer::collect_mesh_lights() {
       float power = lum * area;
       light_of_[((uint64_t)o << 32) | t] = (uint32_t)mesh_lights_.size();
       mesh_lights_.push_back({(uint32_t)o, t, area, power});
-      light_power_ += power;
-      light_cdf_.push_back(light_power_);
+      power_sum += power;
+      light_cdf_.push_back((float)power_sum);
     }
   }
+  light_power_ = (float)power_sum;
+  build_light_tree();
+}
+
+/* Round 464 (ADR 0121): the light tree over the emissive triangles just collected, in mesh_lights_' order. A build
+ * runs on every scene change (a traced preview rebuilds on the main thread when anything moves), and a big tree costs
+ * most of a second (100,000 emitters: ~0.8 s) - so the tree is kept while its emitters (their corners and power) are
+ * the same, which a hash says in O(n); moving a non-emitter costs nothing (review 464). Past kLightTreeMax emitters the
+ * tree is not built (power picks them): the card reads the node count as a float, exact only below 2^24 nodes. */
+void PathTracer::build_light_tree() {
+  constexpr size_t kLightTreeMax = 1u << 20;
+  if (!settings_.light_tree || mesh_lights_.empty() || mesh_lights_.size() > kLightTreeMax) {
+    light_tree_ = LightTree();
+    light_tree_key_ = 0;
+    return;
+  }
+  std::vector<LightTreeEmitter> em(mesh_lights_.size());
+  for (size_t i = 0; i < mesh_lights_.size(); i++) {
+    const MeshLight &ml = mesh_lights_[i];
+    const PTObject &ob = objects_[ml.object];
+    const RenderMesh &rm = *ob.mesh;
+    em[i].a = ob.model.point(rm.positions[rm.indices[ml.prim * 3]]);
+    em[i].b = ob.model.point(rm.positions[rm.indices[ml.prim * 3 + 1]]);
+    em[i].c = ob.model.point(rm.positions[rm.indices[ml.prim * 3 + 2]]);
+    em[i].power = ml.power;
+    em[i].two_sided = true;  // (emission is two-sided in this integrator: |cos| in mesh_light_pdf)
+  }
+  uint64_t key = kFnvBasis;
+  for (const LightTreeEmitter &e : em) key = mix_bytes(mix_float(key, e.power), &e.a, sizeof(Vec3) * 3);
+  key = key ? key : 1;
+  if (key == light_tree_key_ && !light_tree_.empty()) return;
+  light_tree_ = LightTree();
+  light_tree_.build(em);
+  light_tree_key_ = key;
 }
 
 namespace {
@@ -1130,15 +1165,34 @@ float PathTracer::env_pdf(Vec3 dir) const {
 
 /* Solid-angle pdf of picking the point at distance `dist` on light `li` seen
  * at cos_light, through mesh-light sampling. */
-float PathTracer::mesh_light_pdf(uint32_t li, float dist, float cos_light) const {
-  const MeshLight &l = mesh_lights_[li];
-  return cos_light > 1e-6f ? (l.power / light_power_) * dist * dist / (l.area * cos_light) : 0.0f;
+float PathTracer::mesh_light_pick_pmf(uint32_t li, Vec3 P, const Vec3 *N, bool tree) const {
+  if (li >= mesh_lights_.size() || !(light_power_ > 0.0f)) return 0.0f;
+  return !tree || light_tree_.empty() ? mesh_lights_[li].power / light_power_ : light_tree_.pmf(P, N, li);
 }
 
-bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u) const {
+float PathTracer::mesh_light_pdf(uint32_t li, Vec3 P, const Vec3 *N, float dist, float cos_light, bool tree) const {
+  if (!(cos_light > 1e-6f)) return 0.0f;
+  return mesh_light_pick_pmf(li, P, N, tree) * dist * dist / (mesh_lights_[li].area * cos_light);
+}
+
+/* One emissive triangle for u in [0, 1): by the light tree from P (N its normal, or nullptr) when `tree` and there is
+ * one, else by power. */
+bool PathTracer::pick_mesh_light(float u, Vec3 P, const Vec3 *N, uint32_t &li, float &pmf, bool tree) const {
   if (mesh_lights_.empty() || !(light_power_ > 0.0f)) return false;
-  const float r = (light_u >= 0.0f && light_u < 1.0f ? light_u : rnd(rng)) * light_power_;
-  const uint32_t li = (uint32_t)std::min<size_t>(std::upper_bound(light_cdf_.begin(), light_cdf_.end(), r) - light_cdf_.begin(), mesh_lights_.size() - 1);
+  if (tree && !light_tree_.empty()) return light_tree_.sample(P, N, u, li, pmf);
+  const float r = u * light_power_;
+  li = (uint32_t)std::min<size_t>(std::upper_bound(light_cdf_.begin(), light_cdf_.end(), r) - light_cdf_.begin(), mesh_lights_.size() - 1);
+  pmf = mesh_lights_[li].power / light_power_;
+  return true;
+}
+
+bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u,
+                                   LightTree::Cache *cache) const {
+  uint32_t li = 0;
+  float pick = 0.0f;
+  const float u = light_u >= 0.0f && light_u < 1.0f ? light_u : rnd(rng);
+  const bool picked = cache && !light_tree_.empty() ? light_tree_.sample(*cache, u, li, pick) : pick_mesh_light(u, origin, &n, li, pick, true);
+  if (!picked) return false;
   float su = rnd(rng), sv = rnd(rng);
   if (su + sv > 1.0f) su = 1.0f - su, sv = 1.0f - sv;
   SurfacePoint lp;
@@ -1148,7 +1202,7 @@ bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir
   if (!(dist > 1e-5f) || !lmat) return false;
   dir = d / dist;
   const float cos_l = std::fabs(dot(lp.geo_normal, dir));
-  pdf = mesh_light_pdf(li, dist, cos_l);
+  pdf = cos_l > 1e-6f ? pick * dist * dist / (mesh_lights_[li].area * cos_l) : 0.0f;
   if (!(pdf > 0.0f) || dot(n, dir) <= 0.0f) return false;
   const SurfaceSample ls = evaluate_material(*lmat, lp);
   if (lmat->surface == (int)MaterialSurface::Cutout && ls.alpha < lmat->alpha_clip) return false;  // (a hole: the gather passes through it too)
@@ -1157,8 +1211,18 @@ bool PathTracer::sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir
 }
 
 Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_out, float *depth_out, uint32_t *id_out, uint64_t &rays,
-                       PTGuidingThread *guide, bool camera, float first_pdf) const {
+                       PTGuidingThread *guide, bool camera, float first_pdf, const GatherFirst *first) const {
   Vec3 L(0.0f), beta(1.0f);
+  /* Round 464: where the direction that led here was chosen, and that surface's normal - the light tree's pick of an
+   * emitter depends on both, so a BSDF hit on an emitter is weighted by the pick the NEE made there. A texel's gather
+   * starts at the texel (its normal from `first`); a camera ray never weighs (last_pdf 0). */
+  Vec3 scatter_p = ray.origin, scatter_n = first ? first->normal : Vec3(0, 1, 0);
+  bool scatter_has_n = first != nullptr;
+  bool from_texel = first != nullptr;  // (the first segment of a texel's gather: weighed with the sample counts)
+  /* The tree picks where it pays (round 464): a texel's own emitter samples and a camera ray's first hit. Deeper vertices
+   * pick by power - a descent a vertex cost more than it saved there - and each vertex's BSDF hits are weighed by the
+   * strategy that vertex used. */
+  bool scatter_tree = first != nullptr;
   const float clamp = settings_.clamp_indirect;
   float last_pdf = first_pdf;  // solid-angle pdf of the direction that led here (0 = camera ray; a bake's gather gives its cosine pdf)
   float since_scatter = 0.0f;  // the distance travelled since that direction was chosen: see-through passes add to it (the emitter's pdf is by that distance, task 0157)
@@ -1197,8 +1261,8 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
        * the texel did). */
       float w_env = 1.0f;
       if (env_w_ && last_pdf > 0.0f && (bounce > 0 || bake_mis_env_)) {
-        const float pe = env_pdf(ray.dir);
-        w_env = last_pdf * last_pdf / (last_pdf * last_pdf + pe * pe);
+        const float pe = env_pdf(ray.dir), pb = from_texel ? last_pdf * first->env_ratio : last_pdf;
+        w_env = pb * pb / (pb * pb + pe * pe);  // (round 464: with the sample counts at a texel - Veach's power heuristic)
       }
 #ifdef BL_WITH_OPENPGL
       if (record) {
@@ -1325,8 +1389,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     if (last_pdf > 0.0f && !mesh_lights_.empty() && luminance(emitted(s)) > 0.0f && (bounce > 0 || bake_mis_emitters_)) {
       auto it = light_of_.find(((uint64_t)h.object << 32) | h.tri);
       if (it != light_of_.end()) {
-        float pl = mesh_light_pdf(it->second, since_scatter + h.t, cos_hit);  // (the whole way from the scatter, not the last segment)
-        w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
+        float pl = mesh_light_pdf(it->second, scatter_p, scatter_has_n ? &scatter_n : nullptr, since_scatter + h.t, cos_hit, scatter_tree);  // (the whole way from the scatter, not the last segment)
+        const float pb = from_texel ? last_pdf * first->emit_ratio : last_pdf;
+        w_emit = pb * pb / (pb * pb + pl * pl);
       }
     }
     add(beta * s.emission * w_emit);
@@ -1392,6 +1457,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       continue;
     }
     Vec3 origin = sp.position + sp.geo_normal * (1e-4f + h.t * 1e-5f);
+    const bool tree_here = camera_path && bounce == 0;  // (round 464: the light tree at a camera ray's first hit)
     /* Toon (ADR 0020) where the eye sees the surface: its tones and rim. Elsewhere (bounces, bakes) it is Lambert. */
     const bool toon_here = s.toon && bounce == 0 && camera_path;
     if (toon_here && s.lil) {  // (round 402: lilToon's whole colour, then the path ends)
@@ -1495,9 +1561,9 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     /* Next-event estimation for emissive meshes: one triangle by power, a
      * uniform point on it, MIS against BSDF sampling (power heuristic). */
     if (!mesh_lights_.empty()) {
-      float r = rnd(rng) * light_power_;
-      uint32_t li = (uint32_t)std::min<size_t>(std::upper_bound(light_cdf_.begin(), light_cdf_.end(), r) - light_cdf_.begin(),
-                                               mesh_lights_.size() - 1);
+      uint32_t li = 0;
+      float pick = 0.0f;
+      const bool picked = pick_mesh_light(rnd(rng), origin, &n, li, pick, tree_here);
       float su = rnd(rng), sv = rnd(rng);
       if (su + sv > 1.0f) {
         su = 1.0f - su;
@@ -1511,7 +1577,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
       if (dist > 1e-5f) {
         Vec3 dir = d / dist;
         float cos_l = std::fabs(dot(lp.geo_normal, dir));
-        float pl = mesh_light_pdf(li, dist, cos_l);
+        float pl = picked && cos_l > 1e-6f ? pick * dist * dist / (mesh_lights_[li].area * cos_l) : 0.0f;
         if (pl > 0.0f && dot(n, dir) > 0 && dot(sp.geo_normal, dir) > 0) {
           rays++;
           const Vec3 Tr = transmittance({origin, dir}, dist * (1.0f - 1e-4f), &media);
@@ -1581,6 +1647,7 @@ Vec3 PathTracer::trace(Ray ray, uint32_t &rng, Vec3 *albedo_out, Vec3 *normal_ou
     beta = beta * f / pdf;
     last_pdf = pdf;
     since_scatter = 0.0f;
+    scatter_p = origin, scatter_n = n, scatter_has_n = true, from_texel = false, scatter_tree = tree_here;  // (round 464: the NEE above picked from here)
 #ifdef BL_WITH_OPENPGL
     if (record && seg) {
       openpgl::cpp::SetDirectionIn(seg, pgl_v(dir));
@@ -2724,6 +2791,16 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   }
   for (const MeshLight &ml : mesh_lights_) s.mesh_lights.push_back({ml.object, ml.prim, ml.area, ml.power});
   s.mesh_cdf = light_cdf_;
+  /* Round 464: the light tree after the CDF (the kernel reads both from one buffer; OptiX reads the CDF), then each
+   * emitter's leaf. */
+  const std::vector<float> tree = light_tree_.flatten();
+  s.mesh_cdf.insert(s.mesh_cdf.end(), tree.begin(), tree.end());
+  if (!tree.empty())
+    for (int32_t leaf : light_tree_.leaves()) {
+      float f;
+      std::memcpy(&f, &leaf, 4);
+      s.mesh_cdf.push_back(f);
+    }
   gpu::GParams &p = s.params;
   std::memset(&p, 0, sizeof(p));
   p.size[2] = settings_.max_bounces;
@@ -2740,6 +2817,7 @@ void PathTracer::build_gpu_scene(gpu::Scene &s, int tex_skip, std::vector<std::p
   p.env_i[1] = (env_.mode == Environment::Sky || env_.mode == Environment::Hdri) ? texture(env_.map, false) : -1;
   p.key_light[0] = toon_key_L_.x, p.key_light[1] = toon_key_L_.y, p.key_light[2] = toon_key_L_.z, p.key_light[3] = (float)toon_key_;  // (task 0148)
   p.misc[0] = 8.0f, p.misc[1] = p.misc[2] = p.misc[3] = 0.0f;  // (task 0149: the kernel's toon map reads)
+  p.misc[3] = (float)light_tree_.node_count();  // (round 464: the light tree's nodes after the CDF; 0 picks by power)
   p.misc[2] = (float)s.materials.size();  // (round 330: the extras' records follow the materials)
   s.materials.insert(s.materials.end(), extras.begin(), extras.end());
   p.env_f[0] = env_.strength;
@@ -2940,7 +3018,7 @@ bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &no
 }
 
 bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, bool mis_first_hit, uint32_t seed) const {
+                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed) const {
   std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
   out.clear();
   if (hit) hit->clear();
@@ -2993,7 +3071,7 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
     p.size[1] = H;
     p.env_i[2] = mode;
     p.env_i[3] = (int32_t)n;
-    p.misc[1] = mis_first_hit ? 1.0f : 0.0f;  // (task 0157: the gather's first emissive hit weighted against the texel's own emitter sampling)
+    p.misc[1] = mis_first_hit;  // (task 0157: the gather's first emissive hit weighted against the texel's own emitter sampling - round 464: by the gather's rays for each of them, 0 off)
     /* each point's own random sequence, whatever the batch (exact below 2^24); a seed (not 0) shifts the whole range by 2^21 to 2^22
      * points (bit 21 set, so no seed lands on or near seed 0's range), so a texel draws the stream another texel drew at seed 0
      * (the kernel hashes the point's index and nothing else of it). Only about 2^21 distinct GPU streams exist this way. */

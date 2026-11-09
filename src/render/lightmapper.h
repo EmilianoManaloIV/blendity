@@ -59,6 +59,9 @@ struct BakeSettings {
   bool sample_env = true;
   /* Round 441: with more than 8 Baked point and spot lights, each texel picks among them by their light there. */
   bool pick_lights = true;
+  /* Round 464 (ADR 0121): emissive triangles picked by a light tree - by what each can give the texel - rather than by
+   * their share of the scene's power (off only for comparisons: `lighting tree off`). */
+  bool light_tree = true;
   /* Round 444 (ADR 0117): Unity's Lighting Mode - 0 Baked Indirect, 1 Shadowmask (the Mixed lights' shadows from the
    * static scene in a mask, up to kMaskChannels lights), 2 Subtractive (their direct light in the lightmaps too). */
   int lighting_mode = 0;
@@ -313,8 +316,13 @@ class Lightmapper {
   void atrous(std::vector<Vec3> &ind, const std::vector<Vec3> &normals, const std::vector<Vec3> &positions, const std::vector<uint8_t> &cov,
               const std::vector<int32_t> &own, int W, int H) const;
   std::string last_denoiser_;  // (round 423: which filter the last bake's pages had - the log and the tests)
-  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, bool gather_sees_emitters, uint64_t &rays) const;  // task 0157
-  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, uint64_t &rays) const;  // round 441
+  /* gather_ratio: the gather's rays for each of these samples (round 464: MIS with the counts; 0 when the gather can't
+   * meet what these sample). */
+  Vec3 emissive_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const;  // task 0157
+  Vec3 env_at(Vec3 o, Vec3 n, uint32_t &rng, int samples, float gather_ratio, uint64_t &rays) const;  // round 441
+  /* Round 464: on the GPU path, the card's gather rays for each of the texel's own emitter samples (bake_texel's 64 on
+   * the CPU) - the card weighs its first emissive hits with it, as emissive_at does; 0 when no emitters are sampled. */
+  float gpu_first_hit_ratio() const;
   size_t point_lights_ = 0;  // (round 441: the Baked point and spot lights; past kLightPickOver (light_pick.h) each texel picks among them)
  public:
   static constexpr int kEnvSamplesMin = 16, kEnvSamplesMax = 256;  // (the world's samples at a texel: as the gather's, within these)

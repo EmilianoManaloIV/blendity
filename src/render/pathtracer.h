@@ -21,6 +21,7 @@
 #include "raster.h"
 #include "../core/core.h"
 #include "gpu_device.h"
+#include "light_tree.h"
 #include "shading.h"
 
 #include <atomic>
@@ -87,6 +88,9 @@ struct PTSettings {
   /* Sample emissive meshes directly (Cycles: mesh lights in the light tree),
    * MIS-combined with BSDF hits. Off only for comparisons. Takes effect on build(). */
   bool sample_mesh_lights = true;
+  /* Round 464 (ADR 0121): pick an emissive triangle by what it can give the point (a light tree) rather than by its
+   * share of the scene's power alone. Both are unbiased; off only for comparisons. Takes effect on build(). */
+  bool light_tree = true;
   /* Render devices (Cycles: Preferences > System > Render Devices plus the
    * scene's Device). Every enabled device renders whole samples of the frame;
    * their sums are averaged, so the CPU and any number of GPUs combine. */
@@ -214,6 +218,17 @@ class PathTracer {
   Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays, float first_pdf) const {
     return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false, first_pdf);
   }
+  /* Round 464: a texel's gather ray, told what the texel's own emitter and sky samples were (ADR 0121, MIS with the
+   * sample counts): its normal (the light tree's pick there depends on it) and how many gather rays it sends for
+   * each emitter or sky sample. */
+  struct GatherFirst {
+    float pdf = 0.0f;       // the ray's solid-angle pdf (cos / pi)
+    Vec3 normal{0, 1, 0};   // the texel's normal: the emitter pick the texel made was from here
+    float emit_ratio = 1.0f, env_ratio = 1.0f;  // gather rays / emitter samples, gather rays / sky samples
+  };
+  Vec3 incoming_radiance(const Ray &r, uint32_t &rng, uint64_t &rays, const GatherFirst &first) const {
+    return trace(r, rng, nullptr, nullptr, nullptr, nullptr, rays, nullptr, false, first.pdf, &first);
+  }
   /* One emissive triangle by power and a uniform point on it, seen from `origin` with normal `n`: the direction, the
    * distance, the emitted radiance and the solid-angle pdf (the texel's next-event estimation of emissive meshes,
    * task 0157). False when there are none or the point is behind the surface or the emitter. */
@@ -227,7 +242,13 @@ class PathTracer {
   /* Round 441: which lights a bake's own sampling at the texel covers, so the gather's first hit is weighted against them
    * (MIS) and nothing counts twice: emitters (task 0157, the default) and the world. */
   void set_bake_mis(bool emitters, bool env) { bake_mis_emitters_ = emitters, bake_mis_env_ = env; }
-  bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f) const;  // light_u in [0,1): the emitter choice given (stratified), else random
+  bool sample_mesh_light(uint32_t &rng, Vec3 origin, Vec3 n, Vec3 &dir, float &dist, Vec3 &Le, float &pdf, float light_u = -1.0f,
+                         LightTree::Cache *cache = nullptr) const;  // light_u in [0,1): the emitter choice given (stratified), else random; cache: begun at (origin, n) - round 464
+  /* Round 464: the probability an emitter sample from P (normal N, or nullptr) picks emissive triangle `light` - the
+   * light tree's, or its power share without the tree; and whether the tree is in use. */
+  float mesh_light_pick_pmf(uint32_t light, Vec3 P, const Vec3 *N, bool tree = true) const;  // tree false: by power
+  bool uses_light_tree() const { return !light_tree_.empty(); }
+  const LightTree &light_tree() const { return light_tree_; }
   bool occluded(const Ray &r, float tmax) const;
   /* Baking on a GPU (task 0018): the radiance arriving at each origin, `samples` paths each - mode 1:
    * cosine-weighted around dirs[i] as a normal (the mean is irradiance / pi, as incoming_radiance's
@@ -235,7 +256,7 @@ class PathTracer {
    * something. The scene goes up on the first call after a build(). False (with why) if the GPU can't.
    * Round 463: `seed` (0: as before) moves every point's random sequence to another one - the noise measurement's second bake. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
-                  std::vector<float> *hit, std::string *error, bool mis_first_hit = false, uint32_t seed = 0) const;
+                  std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0) const;  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
   /* Round 331: the fogs a path is in - a Volume material's object, entered by a front face, left by a back face. Fogs
    * inside fogs add up (their densities sum where they overlap), up to four deep. */
   struct Medium {
@@ -337,16 +358,20 @@ class PathTracer {
   bool bake_mis_emitters_ = true, bake_mis_env_ = false;
   void build_env_dist();
   std::vector<float> light_cdf_;  // cumulative power
+  LightTree light_tree_;          // round 464: over the same triangles (empty: picked by light_cdf_)
+  uint64_t light_tree_key_ = 0;   // (the emitters it was built from: kept while they don't change - review 464)
+  bool pick_mesh_light(float u, Vec3 P, const Vec3 *N, uint32_t &li, float &pmf, bool tree) const;
   float light_power_ = 0.0f;
   std::unordered_map<uint64_t, uint32_t> light_of_;  // (object << 32 | triangle) -> mesh light
   void collect_mesh_lights();
+  void build_light_tree();
  public:
   /* Round 439: the light a material sends, for picking emitters by power (its emission, and an Unlit one's colour). */
   static float emitter_luminance(const Material &m);
   /* What a sampled emitter point sends: its emission, plus its colour when Unlit (round 439). */
   static Vec3 emitted(const SurfaceSample &s) { return s.unlit ? s.emission + s.albedo : s.emission; }
  private:
-  float mesh_light_pdf(uint32_t light, float dist, float cos_light) const;
+  float mesh_light_pdf(uint32_t light, Vec3 P, const Vec3 *N, float dist, float cos_light, bool tree) const;
   const Material *surface_at(uint32_t object, uint32_t prim, float u, float v, SurfacePoint &sp) const;
   std::vector<float> denoised_oidn() const;
   mutable const char *oidn_label_ = "OpenImageDenoise";  // the device the last OIDN denoise ran on
@@ -376,7 +401,7 @@ class PathTracer {
   static bool intersect_blas(const Blas &b, const Ray &r, Hit &h);
   /* camera: a camera's ray (the bakes' gathers are not: toon tones, outlines and the Retro stages are for the eye). */
   Vec3 trace(Ray ray, uint32_t &rng, Vec3 *albedo, Vec3 *normal, float *depth, uint32_t *id, uint64_t &rays, PTGuidingThread *guide,
-             bool camera = true, float first_pdf = 0.0f) const;
+             bool camera = true, float first_pdf = 0.0f, const GatherFirst *first = nullptr) const;
   /* The Retro stages (task 0032): where p lands on the filter's internal image; a triangle's UVs interpolated
    * there in screen space. */
   bool retro_screen(Vec3 p, Vec2 &s) const;
