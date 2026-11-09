@@ -393,10 +393,12 @@ long imprint_loop_across(Mesh &m, const std::vector<Vec3> &loop_in, Vec3 n, std:
     return -1L;
   };
   if (inner_faces) inner_faces->clear();
-  if (loop_in.size() < 3 || length(n) < 1e-9f) return fail("a closed shape needs 3 or more points");
+  if (loop_in.size() < 3 || !(length(n) >= 1e-9f)) return fail("a closed shape needs 3 or more points");
+  auto finite3 = [](Vec3 p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); };
+  if (!finite3(n) || !std::all_of(loop_in.begin(), loop_in.end(), finite3)) return fail("a point of the shape isn't a number");
   n = normalize(n);
   const Vec3 p0 = loop_in[0];
-  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  const float eps = relative_eps(m);
   auto on_plane = [&](Vec3 p) { return std::fabs(dot(p - p0, n)) < eps; };
   std::vector<Vec3> loop;
   for (Vec3 p : loop_in) loop.push_back(p - n * dot(p - p0, n));

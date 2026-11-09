@@ -12,6 +12,7 @@
 #include "editor.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace bl {
 
@@ -521,7 +522,7 @@ std::string Editor::draw_project_hint() const {
  * around it is (a bevelled box's flat top shares a smooth patch with its bevels). */
 static bool draw_over_flat_faces(const Mesh &m, size_t face, const std::vector<Vec3> &pts) {
   const Vec3 n = normalize(m.face_normal(face)), p0 = m.positions[m.face_verts(face)[0]];
-  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  const float eps = meshops::relative_eps(m);
   std::vector<size_t> flat;
   for (size_t f = 0; f < m.face_count(); f++)
     if (dot(normalize(m.face_normal(f)), n) > 0.9999f && std::fabs(dot(m.positions[m.face_verts(f)[0]] - p0, n)) < eps) flat.push_back(f);
@@ -558,10 +559,52 @@ bool Editor::draw_try_projected(Mesh &m, const std::vector<Vec3> &pts, bool clos
   return true;
 }
 
+/* Push/Pull's weld tolerance (5e-4 of the mesh's size), but never more than a tenth of the shape's shortest side: a small
+ * shape drawn on a big mesh must not be welded into itself. */
+static float draw_weld_eps(const Mesh &m, const std::vector<Vec3> &pts) {
+  float eps = meshops::relative_eps(m, 5e-4f);
+  float shortest = std::numeric_limits<float>::max();
+  for (size_t i = 0; i + 1 < pts.size(); i++) {
+    const float l = length(pts[i + 1] - pts[i]);
+    if (l > 0.0f) shortest = std::min(shortest, l);
+  }
+  if (shortest < std::numeric_limits<float>::max()) eps = std::min(eps, std::max(0.1f * shortest, meshops::relative_eps(m, 0.0f)));
+  return eps;
+}
+
+/* The overlap check is a pair search over the faces: skipped on meshes this big (as Push Through's guard is). */
+static constexpr size_t kDrawGuardFaces = 20000;
+
+std::string Editor::draw_tidy(Mesh &m, const Mesh &before, const std::vector<Vec3> &pts) {
+  const bool check = before.face_count() < kDrawGuardFaces;
+  const size_t overlaps_before = check ? meshops::overlapping_faces(before) : 0;
+  meshops::cleanup_after_draw(m, before, face_sel_, draw_weld_eps(m, pts));
+  m.sync_attributes();
+  m.touch();
+  const std::vector<uint8_t> added = meshops::vertices_not_in(m, before.positions);
+  vert_sel_.assign(added.begin(), added.end());
+  face_sel_.resize(m.face_count(), 0);
+  if (!check) return "";
+  const size_t overlaps_after = meshops::overlapping_faces(m);
+  if (overlaps_after <= overlaps_before) return "";
+  return strprintf("it would leave %zu more faces on top of each other", overlaps_after - overlaps_before);
+}
+
+void Editor::draw_roll_back(MeshPtr &mp, const MeshPtr &before, const std::vector<uint8_t> &vsel, const std::vector<uint8_t> &fsel, const std::string &why) {
+  *mp = *before;  // in place: the mesh object stays the same one (anything holding it sees the old shape again)
+  mp->touch();
+  vert_sel_ = vsel;
+  face_sel_ = fsel;
+  if (elem_ == EditElement::Edge) edges_from_verts();
+  Log::warn("Draw: not drawn - %s", why.c_str());  // (a warning is a toast)
+}
+
 void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   GameObject *g = edit_object();
   if (!g || outline_w.size() < 2) return;
   MeshPtr &mp = *edit_mesh_ptr();
+  const MeshPtr keep = mesh_copy_bare(*mp);  // the mesh as it was (a copy, not a share: the edit stays in place): put back when the overlap guard refuses
+  const std::vector<uint8_t> vsel_keep = vert_sel_, fsel_keep = face_sel_;
   Mesh &m = *mesh_make_mutable(mp);
   /* The first shape in a new, empty Drawing object: the object takes the shape's place and turn. */
   const bool fresh = m.vert_count() == 0 && m.face_count() == 0 && starts_with(g->name, "Drawing");
@@ -575,12 +618,9 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
    * flat path below runs as it always did. */
   {
     std::string projected;
-    const size_t nv_before = m.vert_count();
     if (draw_try_projected(m, pts, closed, inv, projected)) {
-      vert_sel_.assign(m.vert_count(), 0);
-      for (size_t v = nv_before; v < m.vert_count(); v++) vert_sel_[v] = 1;
-      m.sync_attributes();
-      m.touch();
+      const std::string refused = draw_tidy(m, *keep, pts);
+      if (!refused.empty()) return draw_roll_back(mp, keep, vsel_keep, fsel_keep, refused);
       if (elem_ == EditElement::Face) sync_vert_face_selection(true);
       else if (elem_ == EditElement::Edge) edges_from_verts();
       mark_changed(std::string("Draw ") + kDrawShapes[draw_.shape]);
@@ -608,8 +648,6 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
       pts.push_back(pts.front());
     }
   }
-  std::vector<uint32_t> new_verts;
-  const size_t nv0 = m.vert_count();
   std::string what;
   if (closed && pts.size() >= 3) {
     std::string err;
@@ -649,7 +687,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
   else {
     /* Open: cut faces between snapped corners / edge points, wire edges elsewhere. */
     auto vertex_at = [&](Vec3 p) -> uint32_t {
-      const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+      const float eps = meshops::relative_eps(m);
       for (uint32_t v = 0; v < m.vert_count(); v++)
         if (length(m.positions[v] - p) < eps) return v;
       for (auto &e : m.edge_cache()) {
@@ -667,7 +705,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
      * runs through one face and can cut it. */
     if (draw_.has_plane && !draw_.bent && !wire_loop && pts.size() >= 2) {
       const Vec3 n = normalize(inv.dir(draw_.plane_n)), p0 = inv.point(draw_.plane_p);
-      const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+      const float eps = meshops::relative_eps(m);
       auto on_plane = [&](Vec3 q) { return std::fabs(dot(q - p0, n)) < eps; };
       std::vector<std::pair<uint32_t, uint32_t>> plane_edges;
       {
@@ -734,7 +772,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
           if (!has_a || !has_b) continue;
           /* Through the face: split it. Outside it, in its plane (an arc on a
            * rectangle's side): a new face against it. */
-          const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+          const float eps = meshops::relative_eps(m);
           bool inside = true;
           if (interior.empty()) inside = meshops::point_in_face(m, f, (pts[i] + pts[j]) * 0.5f, eps);
           for (const Vec3 &p : interior) inside = inside && meshops::point_in_face(m, f, p, eps);
@@ -798,7 +836,7 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
           /* A stretch of the path itself (its inner corners came from the cuts, not on_mesh). */
           bool along_path = false;
           {
-            const float peps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+            const float peps = meshops::relative_eps(m);
             const Vec3 q = m.positions[other];
             for (size_t s2 = 0; s2 + 1 < pts.size() && !along_path; s2++) {
               const Vec3 sa = pts[s2], sd = pts[s2 + 1] - sa;
@@ -830,11 +868,8 @@ void Editor::draw_commit(const std::vector<Vec3> &outline_w, bool closed) {
     face_sel_.assign(m.face_count(), 0);
     what = strprintf("(%zu face cut(s), %zu wire edge(s))", cuts, wires);
   }
-  for (size_t v = nv0; v < m.vert_count(); v++) new_verts.push_back((uint32_t)v);
-  m.sync_attributes();
-  m.touch();
-  vert_sel_.assign(m.vert_count(), 0);
-  for (uint32_t v : new_verts) vert_sel_[v] = 1;
+  const std::string refused = draw_tidy(m, *keep, pts);
+  if (!refused.empty()) return draw_roll_back(mp, keep, vsel_keep, fsel_keep, refused);
   if (elem_ == EditElement::Face) sync_vert_face_selection(true);
   else if (elem_ == EditElement::Edge) edges_from_verts();
   if (fresh && m.vert_count() && draw_.has_plane && !draw_.bent) {
@@ -1077,7 +1112,7 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
       /* The face this point lies on, then its centre (what Start at Face Center does with a click). */
       const Mesh &m = **edit_mesh_ptr();
       const Vec3 p = g->world_matrix().inverse().point(world);
-      const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+      const float eps = meshops::relative_eps(m);
       for (size_t f = 0; f < m.face_count(); f++)
         if (meshops::point_in_face(m, f, p, eps)) return draw_add(g->world_matrix().point(meshops::face_area_center(m, f)), (int)f, 0);
     }
@@ -1087,7 +1122,7 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
     if (GameObject *g = edit_object()) {
       const Mesh &m = **edit_mesh_ptr();
       const Vec3 p = g->world_matrix().inverse().point(world);
-      const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+      const float eps = meshops::relative_eps(m);
       /* Any face shape (a ring around an earlier drawing is concave). A point on an edge lies in
        * the faces on both sides: the one facing the camera most, as a click would pick. */
       const Vec3 to_cam = normalize(g->world_matrix().inverse().dir(cam_.position() - world));
@@ -1097,7 +1132,7 @@ void Editor::draw_point(Vec3 world, const std::string &mode) {
           const float facing = dot(normalize(m.face_normal(f)), to_cam);
           if (facing > best) best = facing, face = (int)f;
         }
-      if (face < 0) face = nearest_face_within(m, p, 1e-3f * std::max(1.0f, length(m.bounds().extent())));
+      if (face < 0) face = nearest_face_within(m, p, meshops::relative_eps(m, 1e-3f));
     }
   draw_add(world, face, 0);
 }

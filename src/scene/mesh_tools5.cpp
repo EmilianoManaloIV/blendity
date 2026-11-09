@@ -192,7 +192,7 @@ size_t array_faces(Mesh &m, std::vector<uint8_t> &face_sel, int count, Vec3 offs
   /* The flat surface a shape lies on: the outer outline of the faces in its plane around it
    * (Sutherland-Hodgman clips a copy hanging past its edge to it - when that outline is convex). */
   auto surface_outline = [&](Vec3 n, Vec3 p0, std::vector<Vec3> &outline) {
-    const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+    const float eps = relative_eps(m);
     std::unordered_map<uint64_t, int> uses;
     for (size_t f = 0; f < m.face_count(); f++) {
       if (dot(normalize(m.face_normal(f)), n) < 0.9999f) continue;
@@ -267,7 +267,7 @@ size_t array_faces(Mesh &m, std::vector<uint8_t> &face_sel, int count, Vec3 offs
      * there (no face lying on top of another). Hanging past the surface's edge, the part on it is
      * cut in. With nothing flat under it at all, it is a separate copy. */
     const Mesh before = m;
-    const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+    const float eps = relative_eps(m);
     bool any_on = false, failed = false;
     for (const Shape &sh : shapes) {
       std::vector<Vec3> loop;
@@ -337,7 +337,7 @@ size_t array_faces(Mesh &m, std::vector<uint8_t> &face_sel, int count, Vec3 offs
   }
   /* The originals and every copy selected (found by where their centres are). */
   face_sel.assign(m.face_count(), 0);
-  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  const float eps = relative_eps(m);
   for (size_t f = 0; f < m.face_count(); f++) {
     const Vec3 c = face_area_center(m, f);
     for (const Vec3 &w : wanted)

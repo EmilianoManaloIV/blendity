@@ -6,6 +6,7 @@
 #include "mesh.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 
 namespace bl::meshops {
@@ -106,6 +107,15 @@ class EdgeFaces {
 
 /* Shared with mesh_tools.cpp. */
 void cleanup_faces(Mesh &m);
+/* Inserts vertices on edges, in every face that uses the edge (so neighbours stay watertight; UVs interpolate).
+ * splits[edge_key] = (t from the lower vertex index, vertex). Seams and marks are the caller's (mesh_cleanup.cpp). */
+using EdgeSplits = std::unordered_map<uint64_t, std::vector<std::pair<float, uint32_t>>>;
+void apply_edge_splits(Mesh &m, EdgeSplits &splits);
+/* tidy_new_geometry's face remap applied to a face selection. */
+void remap_selection(std::vector<uint8_t> &sel, const std::vector<uint32_t> &remap, size_t faces);
+/* Faces flattened onto a line threaded into the face across their longest edge; only faces not in face_sel, and only those
+ * with a corner that moved from `old` or is new (an empty `old`: every face). Returns faces removed. */
+size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float eps, const std::vector<Vec3> &old);
 /* The selected faces' corners grouped, per vertex, into wedges: faces round a vertex joined by
  * edges inside the region share one. A region that touches itself at a vertex (a cone's apex
  * between two arms of it) has two there, and each needs its own copy of the vertex when the

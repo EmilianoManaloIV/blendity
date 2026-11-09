@@ -180,9 +180,10 @@ std::vector<Region> face_regions(const Mesh &m, const std::vector<uint8_t> &fsel
   return out;
 }
 
+}  // namespace
+
 /* Inserts vertices on edges, in every face that uses the edge (so neighbours
  * stay watertight). splits[edge_key] = (t from the lower vertex index, vertex). */
-using EdgeSplits = std::unordered_map<uint64_t, std::vector<std::pair<float, uint32_t>>>;
 
 void apply_edge_splits(Mesh &m, EdgeSplits &splits) {
   if (splits.empty()) return;
@@ -215,6 +216,8 @@ void apply_edge_splits(Mesh &m, EdgeSplits &splits) {
   }
   fb.commit(m);
 }
+
+namespace {
 
 /* Adds `extra` vertices to a closed loop by splitting its longest edges, and
  * returns the loop with them in order. */
@@ -1338,7 +1341,7 @@ static bool push_through_flat_exit(Mesh &m, std::vector<uint8_t> &face_sel, cons
                                    const std::set<uint32_t> &exit_faces) {
   const std::vector<uint32_t> &L = r.loops[0];
   const size_t n = L.size();
-  const float eps = 1e-4f * std::max(1.0f, length(m.bounds().extent()));
+  const float eps = relative_eps(m);
   const Vec3 nb = normalize(m.face_normal(*exit_faces.begin()));
   for (uint32_t f : exit_faces)
     if (dot(normalize(m.face_normal(f)), nb) < 0.9999f) return false;
@@ -1558,14 +1561,28 @@ static bool push_through_raw(Mesh &m, std::vector<uint8_t> &face_sel, int segmen
   }
   Mesh prism;
   const float far_d = scale * 4.0f;
-  for (uint32_t v : L) prism.add_vert(m.positions[v] - d * (1e-3f * scale));
+  const float near_d = 1e-3f * scale;
+  for (uint32_t v : L) prism.add_vert(m.positions[v] - d * near_d);
   for (uint32_t v : L) prism.add_vert(m.positions[v] + d * far_d);
   const uint32_t n = (uint32_t)L.size();
   std::vector<uint32_t> cap(n), back(n);
   for (uint32_t i = 0; i < n; i++) { cap[i] = i; back[i] = 2 * n - 1 - i; }
-  prism.add_face(cap.data(), n);
-  prism.add_face(back.data(), n);
-  for (uint32_t i = 0; i < n; i++) prism.add_face({(i + 1) % n, i, n + i, n + (i + 1) % n});
+  /* The walls the cut leaves carry the UVs the prism's walls have: the region face's own along each edge, continued across
+   * it at its texel density (as the tube of the other paths), so the boolean hands them on (round 462; the cap and the
+   * back are cut away whole). A mesh without UVs gives the prism none. */
+  const bool has_uv = m.has_uvs();
+  const std::vector<Vec2> zero_uv(n, Vec2(0.0f, 0.0f));
+  prism.add_face(cap.data(), n, has_uv ? zero_uv.data() : nullptr);
+  prism.add_face(back.data(), n, has_uv ? zero_uv.data() : nullptr);
+  const EdgeFaces side_faces(m);
+  for (uint32_t i = 0; i < n; i++) {
+    const uint32_t j = (i + 1) % n, quad[4] = {j, i, n + i, n + j};
+    const uint32_t side = has_uv ? region_face_on(side_faces, in_region, L[i], L[j]) : UINT32_MAX;
+    Vec2 w[4] = {Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f)};
+    if (side != UINT32_MAX) wall_uvs(m, side, L[i], L[j], near_d, near_d, -far_d, -far_d, w);
+    const Vec2 t[4] = {w[1], w[0], w[3], w[2]};  // the quad runs j, i, i', j'
+    prism.add_face(quad, 4, has_uv ? t : nullptr);
+  }
   std::string berr;
   if (!boolean_op(m, prism, Mat4::identity(), BooleanOp::Difference, &berr)) {
     if (err) *err = "Push Through (Boolean): " + berr;
@@ -1752,6 +1769,8 @@ static bool closed_manifold(const Mesh &m) {
   return true;
 }
 
+}  // namespace
+
 /* Tidies what an operator just built. A cut or a moved face can land exactly
  * on an existing corner or face; then the new geometry
  *  - welds any new vertex onto a vertex within eps (old ones preferred),
@@ -1761,7 +1780,7 @@ static bool closed_manifold(const Mesh &m) {
  * Vertices whose positions were in `old` are never welded to each other, so
  * deliberately unwelded geometry elsewhere is left alone. Returns the face
  * remap (old face -> new face, UINT32_MAX = removed). */
-static std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> &old, float eps) {
+std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> &old, float eps) {
   struct Key {
     uint32_t x, y, z;
     bool operator==(const Key &o) const { return x == o.x && y == o.y && z == o.z; }
@@ -1902,7 +1921,7 @@ static std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> 
   return remap;
 }
 
-static void remap_selection(std::vector<uint8_t> &sel, const std::vector<uint32_t> &remap, size_t faces) {
+void remap_selection(std::vector<uint8_t> &sel, const std::vector<uint32_t> &remap, size_t faces) {
   std::vector<uint8_t> out(faces, 0);
   for (size_t f = 0; f < sel.size() && f < remap.size(); f++)
     if (sel[f] && remap[f] != UINT32_MAX && remap[f] < faces) out[remap[f]] = 1;
@@ -1913,7 +1932,7 @@ static void remap_selection(std::vector<uint8_t> &sel, const std::vector<uint32_
  * or pull has reduced to no width): the face goes and its corners are threaded
  * into the face across its longest edge, so every edge keeps two faces and no
  * zero-area face is left to flicker or turn inside out. Returns faces removed. */
-static size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float eps, const std::vector<Vec3> &old) {
+size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float eps, const std::vector<Vec3> &old) {
   /* Only faces this operation changed (a corner moved or new), never the selection
    * itself: slivers that were there before are the user's to keep. */
   auto changed = [&](uint32_t v) { return v >= old.size() || length(m.positions[v] - old[v]) > eps * 1e-3f; };
@@ -1997,8 +2016,6 @@ static size_t dissolve_line_faces(Mesh &m, std::vector<uint8_t> &face_sel, float
   if (removed) m.touch();
   return removed;
 }
-
-}  // namespace
 
 /* Push Through, then a weld: new corners landing on old ones merge and the spikes
  * that leaves go (a cut reaching the face's own edge left a fold there). Faces
@@ -2678,7 +2695,7 @@ bool push_pull_multi(Mesh &m, std::vector<uint8_t> &face_sel, float distance, bo
     Vec3 c, n;
   };
   auto sig = [&](size_t f) { return Sig{m.face_center(f), normalize(m.face_normal(f))}; };
-  const float eps = 1e-4f * std::max(1.0f, mesh_scale(m));
+  const float eps = relative_eps(m);
   auto find = [&](const Sig &s) -> size_t {
     for (size_t f = 0; f < m.face_count(); f++)
       if (length(m.face_center(f) - s.c) < eps && dot(normalize(m.face_normal(f)), s.n) > 0.999f) return f;
@@ -2980,10 +2997,13 @@ long imprint_loop(Mesh &m, size_t face, const std::vector<Vec3> &pts_in, std::st
     return -1L;
   };
   if (face >= m.face_count() || pts_in.size() < 3) return fail("a closed shape needs 3 or more points on a face");
+  /* A NaN or infinite point passes the inside test (every comparison with it is false) and would poison the faces: refuse. */
+  for (const Vec3 &p : pts_in)
+    if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return fail("a point of the shape isn't a number");
   const Vec3 n = normalize(m.face_normal(face));
   const Vec3 p0 = m.positions[m.face_verts(face)[0]];
   const std::vector<uint32_t> outer = face_loop(m, face);
-  const float eps = 1e-4f * std::max(1.0f, mesh_scale(m));
+  const float eps = relative_eps(m);
   std::vector<Vec3> pts;
   for (Vec3 p : pts_in) {
     p -= n * dot(p - p0, n);  // onto the face's plane

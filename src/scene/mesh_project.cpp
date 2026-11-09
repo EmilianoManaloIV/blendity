@@ -689,7 +689,7 @@ bool imprint_projected(Mesh &m, const std::vector<Vec3> &outline, bool closed, P
   for (Vec3 p : outline)
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) return refuse("a point of the shape isn't a number");
   const float scale = std::max(1e-6f, length(m.bounds().extent()));
-  const float eps = 1e-5f * std::max(1.0f, scale);
+  const float eps = relative_eps(m, 1e-5f);
   const RenderMesh &rm = m.render_mesh(true);
   const Topo topo = build_topo(m);
 

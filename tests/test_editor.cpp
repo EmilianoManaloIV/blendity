@@ -10300,6 +10300,215 @@ static void tests_round461_review() {
   });
 }
 
+/* ---- Round 462 (task 0438): cleanup after drawing, and Solve Mesh ---- */
+
+/* A cube (vertex i at bits 0, 1, 2 of i) with a doubled vertex, a T-junction and a doubled face planted, UVs per face. */
+static Mesh r462e_planted_cube() {
+  Mesh m;
+  for (int i = 0; i < 8; i++) m.add_vert({(i & 1) ? 0.5f : -0.5f, (i & 2) ? 0.5f : -0.5f, (i & 4) ? 0.5f : -0.5f});
+  m.add_vert({0.0f, -0.5f, -0.5f});                // 8: the middle of the edge 0-1
+  m.add_vert({-0.5f + 1e-5f, 0.5f, 0.5f});         // 9: vertex 6 again, a hair off
+  std::vector<std::vector<uint32_t>> faces = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 8, 1, 5, 4}, {2, 9, 7, 3}};
+  faces.push_back(faces[2]);
+  for (size_t f = 0; f < faces.size(); f++) {
+    std::vector<Vec2> t;
+    for (size_t k = 0; k < faces[f].size(); k++) t.push_back({0.3f * (float)f + (k == 1 || k == 2 ? 0.25f : 0.0f), 0.7f + (k >= 2 ? 0.2f : 0.0f)});
+    m.add_face(faces[f].data(), faces[f].size(), t.data(), 0);
+  }
+  return m;
+}
+
+static bool r462e_same_mesh(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && a.corner_verts == b.corner_verts && a.face_offsets == b.face_offsets && a.uvs.size() == b.uvs.size() &&
+         std::equal(a.uvs.begin(), a.uvs.end(), b.uvs.begin(), [](Vec2 x, Vec2 y) { return x.x == y.x && x.y == y.y; }) &&
+         std::equal(a.positions.begin(), a.positions.end(), b.positions.begin(), [](Vec3 x, Vec3 y) { return x.x == y.x && x.y == y.y && x.z == y.z; });
+}
+
+static void tests_round462() {
+  test("draw after-cleanup: a rectangle drawn exactly over an existing corner and edge of a face adds no doubled vertex or edge and leaves no T-junction", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    CHECK(g != nullptr);
+    if (!g) return;
+    const Mesh was = *g->get<MeshFilter>()->mesh;
+    CHECK(meshops::overlapping_vertices(was).empty() && meshops::overlapping_edges(was).empty());
+    /* Face 0's own corner, along its own bottom edge, half way up its sides. */
+    Vec3 lo = was.positions[was.face_verts(0)[0]], hi = lo;
+    for (uint32_t k = 0; k < was.face_size(0); k++) {
+      lo = Vec3(std::min(lo.x, was.positions[was.face_verts(0)[k]].x), lo.y, std::min(lo.z, was.positions[was.face_verts(0)[k]].z));
+      hi = Vec3(std::max(hi.x, was.positions[was.face_verts(0)[k]].x), hi.y, std::max(hi.z, was.positions[was.face_verts(0)[k]].z));
+    }
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    const Vec3 a = g->world_matrix().point({lo.x, lo.y, lo.z}), b = g->world_matrix().point({hi.x, lo.y, lo.z + 0.5f * (hi.z - lo.z)});
+    ed.command(strprintf("drawpoint %.7f %.7f %.7f", a.x, a.y, a.z));
+    ed.command(strprintf("drawpoint %.7f %.7f %.7f", b.x, b.y, b.z));
+    ed.step_frame_headless();
+    const Mesh m = *g->get<MeshFilter>()->mesh;
+    std::printf("    rectangle over a corner and an edge: %zu -> %zu faces, %zu -> %zu vertices, doubled vertices %zu, doubled edges %zu\n", was.face_count(), m.face_count(),
+                was.vert_count(), m.vert_count(), meshops::overlapping_vertices(m).size(), meshops::overlapping_edges(m).size());
+    CHECK(m.face_count() > was.face_count());  // the cell became the rectangle and what is left of it
+    size_t slivers = 0;  // no face flattened onto a line is left along the old edges
+    for (size_t f = 0; f < m.face_count(); f++) slivers += length(m.face_normal(f)) < 1e-6f ? 1 : 0;
+    CHECK(slivers == 0);
+    CHECK(meshops::overlapping_vertices(m).empty());
+    CHECK(meshops::overlapping_edges(m).empty());
+    Mesh copy = m;
+    CHECK(meshops::fix_t_junctions(copy, {}, meshops::relative_eps(m)) == 0);
+    CHECK(meshops::overlapping_faces(m) == meshops::overlapping_faces(was));
+  });
+  test("draw after-cleanup: two touching rectangles drawn on one face share their common edge, with no doubled vertex or edge and no T-junction", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    ed.command("create Plane");
+    GameObject *g = ed.selected_object();
+    CHECK(g && g->get<MeshFilter>()->mesh->has_uvs());
+    if (!g) return;
+    const Mesh was = *g->get<MeshFilter>()->mesh;
+    ed.command("edit face");
+    auto draw = [&](Vec3 p, Vec3 q) {
+      ed.command("draw rectangle");
+      const Vec3 a = g->world_matrix().point(p), b = g->world_matrix().point(q);
+      ed.command(strprintf("drawpoint %.7f %.7f %.7f", a.x, a.y, a.z));
+      ed.command(strprintf("drawpoint %.7f %.7f %.7f", b.x, b.y, b.z));
+      ed.step_frame_headless();
+    };
+    draw({0.1f, 0, 0.1f}, {0.5f, 0, 0.8f});
+    const size_t after_one = g->get<MeshFilter>()->mesh->face_count();
+    draw({0.5f, 0, 0.2f}, {0.9f, 0, 0.6f});  // its left side lies along the first's right side
+    const Mesh m = *g->get<MeshFilter>()->mesh;
+    std::printf("    two rectangles: %zu -> %zu -> %zu faces, doubled vertices %zu, doubled edges %zu\n", was.face_count(), after_one, m.face_count(),
+                meshops::overlapping_vertices(m).size(), meshops::overlapping_edges(m).size());
+    CHECK(m.face_count() > after_one);
+    CHECK(meshops::overlapping_vertices(m).empty());
+    CHECK(meshops::overlapping_edges(m).empty());
+    Mesh copy = m;
+    CHECK(meshops::fix_t_junctions(copy, {}, meshops::relative_eps(m)) == 0);
+    CHECK(meshops::overlapping_faces(m) == meshops::overlapping_faces(was));
+    /* The texture stayed where it was: no corner has the all-zero UV a new vertex would otherwise get. */
+    size_t zero = 0;
+    for (const Vec2 &t : m.uvs) zero += t.x == 0.0f && t.y == 0.0f ? 1 : 0;
+    size_t zero_was = 0;
+    for (const Vec2 &t : was.uvs) zero_was += t.x == 0.0f && t.y == 0.0f ? 1 : 0;
+    CHECK(zero <= zero_was + 4);
+  });
+  test("draw after-cleanup: a draw that would leave faces on top of each other is rolled back - the mesh and the selection as before, a warning says why - and the same draw elsewhere stands", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.step_frame_headless();
+    GameObject *g = ed.scene().create("Doubled");
+    g->add<MeshFilter>()->mesh = primitives::plane(2.0f, 1);
+    g->add<MeshRenderer>();
+    {
+      Mesh &m = *mesh_make_mutable(g->get<MeshFilter>()->mesh);
+      /* A second face lying on the first, smaller: z-fighting that was there before the draw. */
+      const uint32_t b[4] = {m.add_vert({-0.5f, 0, -0.5f}), m.add_vert({-0.5f, 0, 0.5f}), m.add_vert({0.5f, 0, 0.5f}), m.add_vert({0.5f, 0, -0.5f})};
+      if (m.face_normal(0).y > 0) m.add_face(b, 4);
+      else {
+        const uint32_t r[4] = {b[3], b[2], b[1], b[0]};
+        m.add_face(r, 4);
+      }
+      m.sync_attributes();
+    }
+    ed.mark_changed_for_test("Doubled");
+    ed.command("select Doubled");
+    ed.command("edit face");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const Mesh before = *g->get<MeshFilter>()->mesh;
+    const size_t overlaps = meshops::overlapping_faces(before);
+    CHECK(overlaps == 1);
+    const std::vector<uint8_t> fsel_before = ed.face_sel_for_test();
+    ed.command("draw rectangle");
+    ed.command("drawpoint -0.2 0 -0.2");
+    ed.command("drawpoint 0.2 0 0.2");
+    ed.step_frame_headless();
+    const Mesh &after = *g->get<MeshFilter>()->mesh;
+    std::printf("    draw over a doubled face: %zu -> %zu faces, overlapping %zu -> %zu\n", before.face_count(), after.face_count(), overlaps, meshops::overlapping_faces(after));
+    CHECK(r462e_same_mesh(before, after));
+    CHECK(ed.face_sel_for_test() == fsel_before);
+    bool said = false;
+    for (const auto &t : ed.toasts_for_test()) said = said || t.text.find("on top of each other") != std::string::npos;
+    CHECK(said);
+    /* Without the doubled face the same draw is fine. */
+    GameObject *h = ed.scene().create("Single");
+    h->add<MeshFilter>()->mesh = primitives::plane(2.0f, 1);
+    h->add<MeshRenderer>();
+    h->set_local_position({10, 0, 0});
+    ed.mark_changed_for_test("Single");
+    ed.command("edit off");
+    ed.command("select Single");
+    ed.command("edit face");
+    ed.command("draw rectangle");
+    ed.command("drawpoint 9.8 0 -0.2");
+    ed.command("drawpoint 10.2 0 0.2");
+    ed.step_frame_headless();
+    CHECK(h->get<MeshFilter>()->mesh->face_count() > 1);
+  });
+  test("solve mesh: editop solve_mesh cleans planted duplicates, a doubled face and a T-junction to a closed manifold; F9 re-runs it from before with another weld distance; one undo restores the mesh", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    GameObject *g = ed.scene().create("Planted");
+    const Mesh planted = r462e_planted_cube();
+    g->add<MeshFilter>()->mesh = std::make_shared<Mesh>(planted);
+    g->add<MeshRenderer>();
+    ed.mark_changed_for_test("Planted");
+    ed.command("select Planted");
+    ed.command("edit vertex");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(!closed_manifold(planted) && planted.face_count() == 7);
+    ed.command("editop solve_mesh");
+    ed.step_frame_headless();
+    const Mesh solved = *g->get<MeshFilter>()->mesh;
+    std::printf("    solve mesh: %zu faces, %zu vertices, closed %d, weld distance %.3g\n", solved.face_count(), solved.vert_count(), (int)closed_manifold(solved),
+                ed.last_op_amount_for_test());
+    CHECK(ed.last_op_name_for_test() == "solve_mesh");
+    CHECK(ed.last_op_amount_for_test() > 1e-5f && ed.last_op_amount_for_test() < 1e-3f);  // 1e-4 of the mesh's size
+    CHECK(closed_manifold(solved) && solved.face_count() == 6 && solved.vert_count() == 9);
+    bool said = false;
+    for (const auto &t : ed.toasts_for_test()) said = said || t.text.find("Solve Mesh") != std::string::npos;
+    CHECK(said);
+    /* F9: a weld distance under the doubled vertex's offset leaves it; the first distance again gives the first result. */
+    ed.command("redo amount 0.000001");
+    const Mesh narrow = *g->get<MeshFilter>()->mesh;
+    CHECK(narrow.vert_count() == 10 && !closed_manifold(narrow));
+    ed.command("redo amount 0.001");
+    CHECK(r462e_same_mesh(solved, *g->get<MeshFilter>()->mesh));
+    ed.step_frame_headless();
+    /* One undo. */
+    ed.command("undo");
+    const GameObject *back = ed.scene().find_by_name("Planted");
+    CHECK(back != nullptr);
+    if (back) CHECK(r462e_same_mesh(planted, *back->get<MeshFilter>()->mesh));
+  });
+  test("solve mesh: with faces selected it cleans those only, and F9's merge angle re-runs it", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.step_frame_headless();
+    GameObject *g = ed.scene().create("Planted2");
+    Mesh planted = r462e_planted_cube();
+    g->add<MeshFilter>()->mesh = std::make_shared<Mesh>(planted);
+    g->add<MeshRenderer>();
+    ed.mark_changed_for_test("Planted2");
+    ed.command("select Planted2");
+    ed.command("edit face");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    /* Only the +X face (1, 3, 7, 5), which has nothing planted on it: nothing changes. */
+    ed.command("fsel 3");
+    ed.step_frame_headless();
+    ed.command("editop solve_mesh");
+    ed.step_frame_headless();
+    const Mesh &m = *g->get<MeshFilter>()->mesh;
+    CHECK(m.vert_count() == planted.vert_count() && m.face_count() == planted.face_count());
+    ed.command("redo amount2 5");
+    CHECK(g->get<MeshFilter>()->mesh->vert_count() == planted.vert_count());
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -10389,5 +10598,6 @@ void run_editor_tests() {
   tests_round461();
   tests_round461_engineer();
   tests_round461_review();
+  tests_round462();
   coverage_tests();
 }

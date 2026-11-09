@@ -124,7 +124,7 @@ Each stage is a **layout** that arranges the windows and shows only that stage's
 everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
-- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style), Booleans, snapping;
+- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
   **drawing in perspective** with a pen - SketchBook-style rulers, ellipses, symmetry and a 3-point guide that *is* the
   camera, strokes corrected to what the hand meant, canvases on the ground and on faces, and boxes, cylinders, faces and
   whole scaffolds built from the construction lines, never guessed.

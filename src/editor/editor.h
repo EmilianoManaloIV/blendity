@@ -3377,6 +3377,7 @@ class Editor {
   bool overlap_current();
   bool last_op_hidden_ = false;  // put away (x, Esc, a selection click) until the next operator or F9
   void run_last_op(bool first);
+  void run_solve_mesh(Mesh &m, LastOp &L);  // Solve Mesh (task 0438) on the selection's vertices or the whole mesh
   void remember_last_op_settings();
   void draw_last_op_panel(const Recti &view);
   bool try_auto_fuse(Mesh &m);
@@ -5500,6 +5501,12 @@ class Editor {
    * drawproject view|closest). Not saved. */
   meshops::ProjectMode draw_project_ = meshops::ProjectMode::View;
   bool draw_try_projected(Mesh &m, const std::vector<Vec3> &pts, bool closed, const Mat4 &inv, std::string &what);
+  /* Task 0438: the cleanup after a commit (meshops::cleanup_after_draw: weld, T-junctions, UV-safe merge) and the overlap
+   * guard. Empty when the result stands; otherwise why the commit must be rolled back (faces would lie on top of each
+   * other). The new vertices become the vertex selection. */
+  std::string draw_tidy(Mesh &m, const Mesh &before, const std::vector<Vec3> &pts);
+  /* Puts the mesh and the selections back as they were before a commit the guard refused. */
+  void draw_roll_back(MeshPtr &mp, const MeshPtr &before, const std::vector<uint8_t> &vsel, const std::vector<uint8_t> &fsel, const std::string &why);
  public:
   std::string draw_project_hint() const;  // the hint line's "Project: View (Tab)" part (task 0437)
   /* Task 0266: Adjust Last outside Edit Mode's operators (editor/adjust_last.cpp) - an added primitive, a UV operator, a

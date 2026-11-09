@@ -697,7 +697,44 @@ std::unordered_set<uint64_t> coplanar_edges(const Mesh &m, float angle_deg);
 /* Blender: Limited Dissolve. Coplanar faces become one n-gon; corners on a
  * straight run vanish. Returns how many edges and vertices went. */
 /* face_mask: only within those faces (edges between two of them; corners only they use). */
-size_t dissolve_limited(Mesh &m, float angle_deg = 1.0f, const std::vector<uint8_t> *face_mask = nullptr);
+/* guard (task 0438; after a Draw and in Solve Mesh): uv_safe merges only across edges whose two faces have the same UVs at
+ * both ends (no seam, no marked sharp edge) and drops a straight-run corner only where its UVs run straight too; protect
+ * lists edges (Mesh::edge_key) that stay, and the corners on them. */
+struct DissolveGuard {
+  bool uv_safe = false;
+  const std::unordered_set<uint64_t> *protect = nullptr;
+};
+size_t dissolve_limited(Mesh &m, float angle_deg = 1.0f, const std::vector<uint8_t> *face_mask = nullptr, const DissolveGuard *guard = nullptr);
+/* A tolerance relative to the mesh (task 0438): rel x the mesh size (half the bounding diagonal of its finite vertices: what `length(bounds().extent())` and `mesh_scale` measure), never under 8 float
+ * steps at the farthest coordinate (a mesh far from the origin cannot tell closer points apart), and never zero. The old
+ * `rel * max(1, size)` was absolute below size 1: a mesh 1e-4 across had a tolerance bigger than itself. */
+float relative_eps(const Mesh &m, float rel = 1e-4f);
+/* Task 0438 (ADR 0120): the geometry an operator built tidied (mesh_tools.cpp). New vertices (those at a position `old` did
+ * not have, or more of them there) within eps of another weld onto it (old ones preferred); repeated corners, spikes and
+ * collapsed faces go; faces on the same corners facing opposite ways cancel. Vertices at positions in `old` are never
+ * welded to each other, so unwelded geometry elsewhere stays. Returns the face remap (old -> new, UINT32_MAX removed). */
+std::vector<uint32_t> tidy_new_geometry(Mesh &m, const std::vector<Vec3> &old, float eps);
+/* T-junctions: a vertex of `verts` (empty = every vertex in use) lying strictly inside an edge of faces it doesn't belong to,
+ * within eps, joins that edge - the vertex is inserted into every face on the edge, its UV interpolated per face, seams and
+ * sharp marks following - so the surface is watertight there. A candidate search on a cell grid, not all pairs; NaN
+ * positions are skipped. Returns the edges split. */
+size_t fix_t_junctions(Mesh &m, const std::vector<uint32_t> &verts, float eps);
+/* What Solve Mesh did and what it found left. */
+struct SolveReport {
+  size_t welded = 0, t_junctions = 0, duplicate_faces = 0, line_faces = 0, merged = 0;  // fixed
+  size_t overlap_faces = 0, overlap_vertices = 0, overlap_edges = 0;                      // still there, whole mesh
+};
+/* Solve Mesh: the cleanup Draw runs on what it made, for a mesh that exists. `scope` marks the vertices it may change (empty
+ * or all zero = the whole mesh); it is rewritten to mark the same places in the result. In order: weld within weld_dist
+ * (scope vertices among themselves), fix_t_junctions, doubled faces (same corners: one stays; opposite ways: both go), faces
+ * flattened onto a line, the UV-safe coplanar merge at angle_deg on the scope's faces (those with every corner in it). */
+SolveReport solve_mesh(Mesh &m, std::vector<uint8_t> &scope, float weld_dist, float angle_deg);
+/* The cleanup after a Draw commit (ADR 0120 decision 5): tidy_new_geometry at eps, fix_t_junctions on the new vertices and the
+ * old ones lying on new edges, then a UV-safe limited dissolve on the faces those two changed, never across an edge the draw
+ * made. `before` is the mesh as it was; selection (faces) follows. Returns the number of vertices welded plus edges split. */
+size_t cleanup_after_draw(Mesh &m, const Mesh &before, std::vector<uint8_t> &face_sel, float eps);
+/* The vertices of m at a place `old` had none (bit for bit): what an operator added, whatever the renumbering. */
+std::vector<uint8_t> vertices_not_in(const Mesh &m, const std::vector<Vec3> &old);
 /* Blender: Select > Select Sharp Edges (faces meeting at more than angle_deg; edges
  * marked sharp when include_marked), as sorted edge keys. */
 std::vector<uint64_t> sharp_edges_by_angle(const Mesh &m, float angle_deg, bool include_marked = true);

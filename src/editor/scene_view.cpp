@@ -1750,6 +1750,10 @@ void Editor::fill_last_op_settings(LastOp &L, const std::string &op) const {
   else if (op == "recess") { L.amount = recess_depth_; L.amount2 = recess_border_; }
   else if (op == "shell" || op == "thicken") L.amount = shell_thickness_;
   else if (op == "draft") L.amount = draft_angle_;
+  else if (op == "solve_mesh") {
+    L.amount = meshops::relative_eps(*L.before, 1e-4f);  // the weld distance: 1e-4 of the mesh's size
+    L.amount2 = 1.0f;                                    // the merge angle, degrees
+  }
 }
 
 /* The one selected edge (exactly two adjacent selected vertices) Loop Cut and Select Loop start from; false when
@@ -2261,7 +2265,7 @@ int edit_op_group(const std::string &op) {
                                  "poke", "duplicate", "split", "spin", "follow", "shell", "thicken", "draft", "fuse"};
   static const char *cut[] = {"loopcut", "knife", "subdivide_edges", "connect", "slice", "bevel", "edge_split"};
   static const char *clean[] = {"merge_center", "merge_distance", "merge_overlaps", "select_overlaps", "collapse", "dissolve", "dissolve_vertices", "dissolve_faces", "dissolve_limited", "delete",
-                                "delete_loose", "tris_to_quads", "triangulate_faces", "recalc_normals", "flip_faces"};
+                                "delete_loose", "solve_mesh", "tris_to_quads", "triangulate_faces", "recalc_normals", "flip_faces"};
   static const char *deform[] = {"smooth", "shrink_fatten", "to_sphere", "randomize"};
   static const char *shading[] = {"shade_smooth", "shade_flat", "mark_sharp", "clear_sharp", "mark_seam", "clear_seam", "seams_from_sharp"};
   for (const char *o : create)
@@ -2370,6 +2374,10 @@ const std::vector<EditOpInfo> &edit_op_table() {
       {"merge_overlaps", "Merge Overlapping", "", "Weld vertices lying on top of each other (doubled edges on them become one).", ALL},
       {"delete_loose", "Delete Loose", "", "Remove vertices and edges no face uses (wire edges, stray points), within the selection,\n"
        "or in the whole mesh when nothing is selected. Blender: Mesh > Clean Up > Delete Loose.", ALL},
+      {"solve_mesh", "Solve Mesh", "", "Clean the selection (the whole mesh when nothing is selected): weld doubled vertices, join T-junctions, drop doubled\n"
+       "faces and faces flattened onto a line, merge flat faces where the texture is continuous. The toast counts what\n"
+       "is left on top of each other. Adjust Last Operation: the weld distance and the merge angle. Draw runs the same\n"
+       "steps on what it draws. Blender: Mesh > Clean Up.", ALL},
       {"recalc_normals", "Recalculate Normals", "mesh.recalc_normals", "Make every face point outward. Blender: Mesh > Normals > Recalculate Outside.", ALL},
       {"shrink_fatten", "Shrink/Fatten", "mesh.shrink_fatten", "Move the selected vertices along their normals (Adjust Last Operation sets the distance). Blender: Alt+S.", ALL},
       {"to_sphere", "To Sphere", "mesh.to_sphere", "Pull the selected vertices onto a sphere around their centre (Adjust Last Operation sets how far). Blender: Shift+Alt+S.", ALL},
@@ -2759,7 +2767,7 @@ bool Editor::edit_op_redoable(const std::string &op) const {
   return op == "extrude" || op == "inset" || op == "bevel" || op == "bridge" || op == "push_through" || op == "subdivide_edges" || op == "merge_distance" ||
          op == "loopcut" || op == "smooth" || op == "push_pull" || op == "poke" || op == "extrude_individual" ||
          op == "shrink_fatten" || op == "to_sphere" || op == "randomize" || op == "grid" || op == "pipe" || op == "array" || op == "taper" ||
-         op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder";
+         op == "recess" || op == "shell" || op == "thicken" || op == "draft" || op == "sketch_box" || op == "sketch_cylinder" || op == "solve_mesh";
 }
 
 bool Editor::last_op_valid() {
@@ -2777,6 +2785,28 @@ bool Editor::try_auto_fuse(Mesh &m) {
   vert_sel_.assign(m.vert_count(), 0);
   Log::info("Fused: the selection touched another face, so the two were joined (the touching area became an opening)");
   return true;
+}
+
+/* Solve Mesh (task 0438, ADR 0120): meshops::solve_mesh on the selection's vertices (faces and edges bring theirs), or on
+ * the whole mesh when nothing is selected. The toast says what was fixed and what is still on top of each other. */
+void Editor::run_solve_mesh(Mesh &m, LastOp &L) {
+  std::vector<uint8_t> scope = vert_sel_;
+  scope.resize(m.vert_count(), 0);
+  for (size_t f = 0; f < m.face_count() && f < face_sel_.size(); f++)
+    if (face_sel_[f])
+      for (uint32_t k = 0; k < m.face_size(f); k++) scope[m.face_verts(f)[k]] = 1;
+  const meshops::SolveReport r = meshops::solve_mesh(m, scope, L.amount, L.amount2);
+  vert_sel_ = scope;
+  face_sel_.assign(m.face_count(), 0);
+  sync_vert_face_selection(false);
+  const size_t left = r.overlap_faces + r.overlap_vertices + r.overlap_edges;
+  const std::string text = strprintf("Solve Mesh: welded %zu, joined %zu T-junctions, dropped %zu doubled + %zu flat faces, merged %zu; left: %zu faces / %zu vertices / %zu edges on top of each other",
+                        r.welded, r.t_junctions, r.duplicate_faces, r.line_faces, r.merged, r.overlap_faces, r.overlap_vertices, r.overlap_edges);
+  if (left) Log::warn("%s", text.c_str());
+  else {
+    Log::info("%s", text.c_str());
+    toast(LogLevel::Info, text);
+  }
 }
 
 void Editor::run_last_op(bool first) {
@@ -2822,6 +2852,7 @@ void Editor::run_last_op(bool first) {
     L.message = strprintf("Removed %zu vertices", n);
     Log::info("Merge by Distance: removed %zu vertices", n);
   }
+  else if (op == "solve_mesh") run_solve_mesh(m, L);
   else if (op == "extrude" || op == "inset") {
     if (op == "extrude") meshops::extrude_faces(m, face_sel_, L.amount);
     else if (L.individual) meshops::inset_faces(m, face_sel_, L.amount);
@@ -3002,13 +3033,14 @@ void Editor::draw_last_op_panel(const Recti &view) {
       {"array", "Array"},              {"taper", "Taper Extrude"},
       {"sketch_box", "Box from Sketch"}, {"sketch_cylinder", "Cylinder / Cone from Sketch"},
       {"recess", "Recess / Plate"},   {"shell", "Shell"},
-      {"thicken", "Thicken"},          {"draft", "Draft"}};
+      {"thicken", "Thicken"},          {"draft", "Draft"},
+      {"solve_mesh", "Solve Mesh"}};
   auto it = titles.find(L.op);
   std::string title = it == titles.end() ? L.op : it->second;
   const int rh = u.row_h(), pad = u.px(6), w = std::min(u.px(270), view.w - u.px(20));
   /* Rows: the operator's own fields, then Move, Along Normal, Orientation. */
   int fields = L.op == "bevel" || L.op == "sketch_cylinder" ? 4 : L.op == "push_pull" || L.op == "array" || L.op == "sketch_box" ? 3 :
-               L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
+               L.op == "grid" || L.op == "pipe" || L.op == "taper" || L.op == "recess" || L.op == "solve_mesh" ? 2 : L.op == "randomize" ? 2 : L.op == "extrude" || L.op == "loopcut" || L.op == "smooth" ? 2 : L.op == "bridge" ? 4 : 1;
   int rows = last_op_open_ ? fields + 3 + (L.message.empty() ? 0 : 1) : 0;
   int h = rh + u.px(6) + rows * (rh + u.px(2)) + (rows ? pad : 0);
   Recti r{view.x + u.px(10), view.bottom() - h - u.px(10), w, h};
@@ -3052,6 +3084,12 @@ void Editor::draw_last_op_panel(const Recti &view) {
     Recti cr = row("Fuse on Contact");
     changed |= u.checkbox({cr.x, cr.y, cr.h, cr.h}, L.fuse);
     u.tooltip("When the extruded face ends on another face of the mesh, join them\n(the touching area becomes an opening, like Bridge).");
+  }
+  else if (L.op == "solve_mesh") {
+    fl("Weld Distance", L.amount, 0.0001f, 0.0f, 1000.0f);
+    u.tooltip("Vertices closer than this weld, vertices this close to an edge join it. Starts at 1e-4 of the mesh's size.");
+    fl("Merge Angle", L.amount2, 0.1f, 0.0f, 90.0f);
+    u.tooltip("Flat faces meeting at less than this (degrees) merge, where the texture is continuous.");
   }
   else if (L.op == "merge_distance") {
     fl("Merge Distance", L.amount, 0.0005f, 0.0f, 1000.0f);

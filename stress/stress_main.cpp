@@ -7250,9 +7250,14 @@ struct ProjectedDraw {
   bool skipped = false, ok = false;
   std::string err, bad;
   float off = 0.0f;    // the furthest new vertex from the old surface, over the mesh's size
-  bool overlaps = false;  // faces newly on top of each other
+  bool overlaps = false;  // faces newly on top of each other (after Draw's cleanup)
+  bool guarded = false;   // ... so Draw's overlap guard would have rolled the commit back (round 462)
+  size_t doubles_raw = 0, doubles = 0;  // new doubled vertices + doubled edges: as the cut left them, and after Draw's cleanup
   double ms = 0;
 };
+
+/* Doubled vertices and doubled edges of a mesh (the overlap checks' pairs). */
+static size_t curved_doubles(const Mesh &m) { return meshops::overlapping_vertices(m).size() + meshops::overlapping_edges(m).size(); }
 
 /* kind: 0 along the view (orthographic), 1 to the closest point, 2 along the view in perspective. The circle faces the
  * view in front of the mesh; Closest gets it just off the surface where the view meets it. */
@@ -7288,22 +7293,33 @@ static ProjectedDraw curved_projected_draw(const Mesh &base, Vec3 d, float frac,
   view.eye = mid - d * 3.0f * s;
   Mesh m = base;
   ScopedTimer t;
-  r.ok = meshops::imprint_projected(m, circle, true, kind == 1 ? meshops::ProjectMode::Closest : meshops::ProjectMode::View, view, nullptr, &r.err);
+  std::vector<size_t> inner;
+  r.ok = meshops::imprint_projected(m, circle, true, kind == 1 ? meshops::ProjectMode::Closest : meshops::ProjectMode::View, view, &inner, &r.err);
   r.ms = t.ms();
   if (!r.ok) return r;
+  /* Draw's cleanup after the cut (round 462): what is left doubled, and whether its guard would refuse the result. */
+  if (count_overlaps) {
+    const size_t doubles0 = curved_doubles(base);
+    r.doubles_raw = curved_doubles(m) > doubles0 ? curved_doubles(m) - doubles0 : 0;
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    for (size_t f : inner) sel[f] = 1;
+    meshops::cleanup_after_draw(m, base, sel, std::min(meshops::relative_eps(m, 5e-4f), 0.1f * 2.0f * kPi * frac * s / 20.0f));
+    r.doubles = curved_doubles(m) > doubles0 ? curved_doubles(m) - doubles0 : 0;
+  }
   r.bad = invalid(m);
   if (r.bad.empty() && closed_manifold(base) && !closed_manifold(m)) r.bad = "a closed mesh came out open";
   if (r.bad.empty() && degenerate_faces(m, s) > degenerate_faces(base, s)) r.bad = "new zero-area faces";
   for (size_t v = base.vert_count(); v < m.vert_count(); v++) r.off = std::max(r.off, curved_surface_distance(base, m.positions[v]) / s);
   r.overlaps = count_overlaps && meshops::overlapping_faces(m, 1e-3f * s) > ov0;
+  r.guarded = r.overlaps;  // (the guard counts pairs at the mesh's own plane tolerance; this row's tolerance is wider)
   return r;
 }
 
 template <class Curved>
 static void curved_projected_draws(Report &rep, const Options &o, const std::vector<Curved> &meshes) {
-  rep.table({"mesh (projected draw)", "draws", "cut", "curved draws refused", "problems", "new overlaps", "furthest off the surface / size", "max ms"});
+  rep.table({"mesh (projected draw)", "draws", "cut", "curved draws refused", "problems", "new overlaps", "doubles after drawing", "furthest off the surface / size", "max ms"});
   static const char *const kKinds[] = {"view", "closest", "view, perspective"};
-  size_t total = 0, total_refused = 0, total_problems = 0, total_overlaps = 0;
+  size_t total = 0, total_refused = 0, total_problems = 0, total_overlaps = 0, total_doubles = 0, total_doubles_raw = 0;
   float total_off = 0.0f;
   std::map<std::string, int> reasons;
   std::vector<std::string> examples;
@@ -7316,7 +7332,7 @@ static void curved_projected_draws(Report &rep, const Options &o, const std::vec
     for (Vec3 p : base.positions) bb.add(p);
     const bool count_overlaps = base.face_count() < 2000;
     const size_t ov0 = count_overlaps ? meshops::overlapping_faces(base, 1e-3f * length(bb.max - bb.min)) : 0;
-    size_t draws = 0, cut = 0, refused = 0, problems = 0, overlaps = 0;
+    size_t draws = 0, cut = 0, refused = 0, problems = 0, overlaps = 0, doubles = 0, doubles_raw = 0;
     float off = 0.0f;
     double max_ms = 0;
     for (Vec3 d : dirs)
@@ -7337,7 +7353,10 @@ static void curved_projected_draws(Report &rep, const Options &o, const std::vec
           cut++;
           off = std::max(off, r.off);
           overlaps += r.overlaps ? 1 : 0;
+          doubles += r.doubles;
+          doubles_raw += r.doubles_raw;
           if (r.overlaps) examples.push_back(what + ": faces newly on top of each other");
+          if (r.doubles) examples.push_back(what + strprintf(": %zu doubled vertices / edges after drawing (%zu before the cleanup)", r.doubles, r.doubles_raw));
           if (r.bad.empty()) continue;
           problems++;
           reasons["problem: " + r.bad]++;
@@ -7347,9 +7366,11 @@ static void curved_projected_draws(Report &rep, const Options &o, const std::vec
     total_refused += refused;
     total_problems += problems;
     total_overlaps += overlaps;
+    total_doubles += doubles;
+    total_doubles_raw += doubles_raw;
     total_off = std::max(total_off, off);
-    rep.row({cv.name, num((double)draws), num((double)cut), num((double)refused), num((double)problems), num((double)overlaps), strprintf("%.1e", off),
-             f2(max_ms)});
+    rep.row({cv.name, num((double)draws), num((double)cut), num((double)refused), num((double)problems), num((double)overlaps), strprintf("%zu (%zu raw)", doubles, doubles_raw),
+             strprintf("%.1e", off), f2(max_ms)});
   }
   /* The cost on a big mesh (ADR 0056: printed, never asserted): the teapot at about 51k faces, one draw of each kind. */
   {
@@ -7361,11 +7382,11 @@ static void curved_projected_draws(Report &rep, const Options &o, const std::vec
       worst = std::max(worst, r.ms);
       big_cut += r.ok ? 1 : 0;
     }
-    rep.row({strprintf("Utah teapot, %zu faces (cost)", big.face_count()), "3", num((double)big_cut), num((double)(3 - big_cut)), "-", "-", "-", f2(worst)});
+    rep.row({strprintf("Utah teapot, %zu faces (cost)", big.face_count()), "3", num((double)big_cut), num((double)(3 - big_cut)), "-", "-", "-", "-", f2(worst)});
   }
   rep.note(strprintf("%zu projected draws on curved meshes, %zu refused, %zu problems, %zu with faces newly on top of each other, furthest new vertex "
-                     "%.1e of the size off the surface",
-                     total, total_refused, total_problems, total_overlaps, total_off));
+                     "%.1e of the size off the surface; doubled vertices / edges after drawing (Draw's cleanup run on the cut): %zu, %zu before it",
+                     total, total_refused, total_problems, total_overlaps, total_off, total_doubles, total_doubles_raw));
   for (auto &[why, n] : reasons) rep.note(strprintf("projected draw %d x: %s", n, why.c_str()));
   for (const std::string &e : examples) rep.note("projected draw: " + e);
 }
