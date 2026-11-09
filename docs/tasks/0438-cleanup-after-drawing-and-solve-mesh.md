@@ -1,6 +1,6 @@
 # 0438: Cleanup after drawing, and Solve Mesh (round 462)
 
-- **Status:** in review (round 462, after its code review; the stress runs and the Linux build are pending, see As built)
+- **Status:** done (round 462)
 - **Requirements:** R-02 (modeling), R-04 (UVs)
 - **Decisions:** ADR 0120 (the drawing solver), decisions 5-6
 - **Model:** implementer (Sonnet)

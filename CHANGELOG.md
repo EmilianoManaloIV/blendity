@@ -36,7 +36,7 @@ there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interf
 
 **Also (testing):** the after-draw overlap guard compares the area lying on another face, not the number of such pairs (a draw that only split a face already in a pair was refused); Solve Mesh on a selection no longer welds an unselected shell touching it (its scope is the selection's faces, not their places).
 
-**Checked:** both suites - CHECKS_462; the audits; stress `curved`, `pushpull`, `modifiers_ngon`, `editor` - STRESS_462.
+**Checked:** both suites - with Blender's libraries 20,551; dependency-free 19,636 (Windows) and 19,642 (Linux, WSL), 0 failed; the audits; stress on Linux - `curved` 5,036 / 3 / 68, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 (the same as main); the projected-draw block 236 draws, 82 refused, 0 problems, 0 doubled vertices or edges after drawing; the 51k-face teapot cut 480 ms, cleanup 8 ms, guard 28 ms.
 
 ## 2026-11-08 (round 461): Draw projects onto curved surfaces
 
