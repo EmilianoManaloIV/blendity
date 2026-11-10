@@ -147,7 +147,13 @@ everything):
   strands and moves in the wind (and is rigged from its own mesh in one step), soft tissue that trails the body's
   acceleration and keeps its volume, texture baking.
 - **Lighting & Rendering** - point, spot, area and sun lights; baked lightmaps (denoised where they're noisy, soft
-  shadows from Unity's Baked Shadow Radius and Angle, directional as Unity's), probe volumes and voxel realtime GI; baked VRC Light Volumes light moving objects in the views as VRChat does; a light's Indirect Multiplier scales the light the bake bounces (round 452); baked probes hold the sky's own light by direction, and a changed sky still relights them without a re-bake (round 453); Shadowmask keeps four Mixed lights' baked shadows (a fifth is baked), Distance Shadowmask shows the key light's realtime shadow near the camera and the mask beyond the Shadow Distance, and Unity's own masks and light channels come in with Use Unity's Lightmaps while an exported package carries the masks as Shadowmask textures (round 454); a Unity scene's lights take their intensity as its project's Graphics settings say (linear or gamma), so a world like SideRail bakes far closer to Unity's light (round 459); Remove Ringing (Hanning or Lanczos, a view setting) softens the dark ring a bright lamp leaves in baked probes, and Light Probe Groups are objects - placed and moved in the Scene view, imported from Unity - that Generate Lighting bakes at in place of the automatic grid (round 455);
+  shadows from Unity's Baked Shadow Radius and Angle, directional as Unity's), probe volumes and voxel realtime GI;
+  baked VRC Light Volumes light moving objects in the views as VRChat does;
+  a light's Indirect Multiplier scales the light the bake bounces (round 452);
+  baked probes hold the sky's own light by direction, and a changed sky still relights them without a re-bake (round 453);
+  Shadowmask keeps four Mixed lights' baked shadows (a fifth is baked), Distance Shadowmask shows the key light's realtime shadow near the camera and the mask beyond the Shadow Distance, and Unity's own masks and light channels come in with Use Unity's Lightmaps while an exported package carries the masks as Shadowmask textures (round 454);
+  a Unity scene's lights take their intensity as its project's Graphics settings say (linear or gamma), so a world like SideRail bakes far closer to Unity's light (round 459);
+  Remove Ringing (Hanning or Lanczos, a view setting) softens the dark ring a bright lamp leaves in baked probes, and Light Probe Groups are objects - placed and moved in the Scene view, imported from Unity - that Generate Lighting bakes at in place of the automatic grid (round 455);
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
   the GPU as the CPU draws them (textures, Sky and HDRI worlds, toon, the Edit Mode cage); camera filters from colour
@@ -183,7 +189,73 @@ everything):
   switch in Preferences: hand animation never changes.
 
 Files: import and export OBJ, FBX, glTF, STL, PLY and USD, checked both ways against Blender 5.2 (shape keys go out as
-glTF morph targets and FBX blend shapes, round 351; FBX carries the skeleton, skin and clip as glTF does, round 352; the texture set and lightmap UVs go along, round 353; an export waits for a remesh or bind still running on it, round 354; the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355; the Avatar window makes VRChat's 15 visemes and checks an avatar, after the CATS plugin, round 356, and its Fix Model readies an imported character for Unity's Humanoid in one step, round 357, with CATS' Model Options and Pose and Shape tools, round 358, and its Decimation modes, Bone Root and Bone Merging, round 359, Eye Tracking and the Texture Atlas, round 360, Merge Armatures, Attach Mesh, Translate and Export for VRChat, round 361; a Collider component written for Unity, Unreal and Godot, round 362, and LOD Groups switched in the Game view and exported as _LOD0.._LODn for Unity, round 363); the Sequencer holds storyboard cards and camera cuts for animatics and cinematics (round 364) and WAV sound, played in step and mixed into Render Animation's video (round 365), and footage, keyed opacity and transform, Add Edit, Ripple Delete and ProRes and VRChat export presets (round 391); Poiyomi, lilToon and URP texture presets, Material ID masks and Bake All Maps (round 392); the dependency-free build's Render Animation offers Blender's libraries for its MP4 (round 366); a Capsule, Unity's unique names, and the console's save / open / new / rotate / scale (round 367); the pen's eraser end, tilt and a pressure curve in sculpting (round 368); Unity packages unpacked into the project (round 369) and their prefabs and scenes brought in, scripts kept as Engine Components (round 370), with Unity's materials converted by shader (lilToon, Poiyomi, MToon, UTS2, Standard, URP) and PhysBones' settings kept as spring bones (round 371) - the materials keeping their maps whatever is open while a package unpacks, the shader's keyword deciding which sliders and maps count, and a smoothness kept in a map read as its mean (round 485) - a .unity opened as the scene with its materials on its models' parts (numbered by the installed Unity once), its lights' and renderers' overrides, ambient and fog, and Silent's Filamented as PBR (round 395), and Unity's own baked lightmaps and light probes shown, read by the installed Unity (round 400), its fog modes, skybox, camera, post-processing, lights' shadows and reflection probes as Unity shows them (round 401); lilToon's own lighting model on a Toon material - checked against lilToon's renders - and the avatar's VRChat components (descriptor, PhysBones, colliders, contacts, constraints, Animator) as Blendity's, written back and sent over Live Link (round 402); every kept Unity component editable under Unity's names, VRChat's SDK classes named, the world's Scene Descriptor and Pipeline Manager as Blendity's (round 403); the same stations rendered by Unity and Blendity and scored - Shinano passing at every station, SideRail near the target - with the attributes table and the report (round 404); Unity's own ACES curve, its BRDF's weight on a Unity scene's reflections and three more shaders read, the stations measured again (round 405); Unity's BlendShapes foldout with Edit this shape and the Animation window in Unity's layout (round 406); Unity .anim clips read and written (round 407); clips retargeted between humanoid rigs like Mecanim (round 408); Export Unity Package sends the work back under the same GUIDs (round 372); Godot scenes (.tscn) come in, scripts kept, and go back with their nodes' transforms (round 373); .blend files come in through the installed Blender, and the Blender and Unreal bridges Send to Blendity (round 374); the round trip run as a production, glTF's Keep Transforms keeping pivots on the way back (round 375); its world, fog, exposure and the render camera's Bloom, Vignette and grading go to every bridge as you light (round 376), and textures go by their pixels - a painted surface each stroke, a procedural texture as you drag (round 377); skinned characters go once with their skin and blend shapes, then only poses and weights (round 378); clips go baked as the engines' own clips when keyed (round 379); LOD Groups and colliders arrive as the engines' own levels and collision (round 380); with VRChat's SDK in a Unity project, avatars get their Avatar Descriptor and PhysBones and worlds a Scene Descriptor (round 381); all of it streams at a millisecond or two a frame with four engines connected, and goes on while jobs run on workers (round 382); VR View puts you in the scene at life size through OpenXR - SteamVR, Quest Link, Windows Mixed Reality (Edit > VR View, `vr start`; round 383) - where your controllers teleport, walk, snap-turn, grab, turn and scale the world and measure it (round 384), and sketch ribbons and tubes in the air with pressure and a palette (`vr sketch`; round 385) and paint the object in Paint mode with the desk's brush (`vr paint`; round 386); **Live Link** sends the
+glTF morph targets and FBX blend shapes, round 351;
+FBX carries the skeleton, skin and clip as glTF does, round 352;
+the texture set and lightmap UVs go along, round 353;
+an export waits for a remesh or bind still running on it, round 354;
+the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355;
+the Avatar window makes VRChat's 15 visemes and checks an avatar,
+after the CATS plugin,
+round 356,
+and its Fix Model readies an imported character for Unity's Humanoid in one step,
+round 357,
+with CATS' Model Options and Pose and Shape tools,
+round 358,
+and its Decimation modes,
+Bone Root and Bone Merging,
+round 359,
+Eye Tracking and the Texture Atlas,
+round 360,
+Merge Armatures,
+Attach Mesh,
+Translate and Export for VRChat,
+round 361;
+a Collider component written for Unity, Unreal and Godot, round 362, and LOD Groups switched in the Game view and exported as _LOD0.._LODn for Unity, round 363);
+the Sequencer holds storyboard cards and camera cuts for animatics and cinematics (round 364) and WAV sound, played in step and mixed into Render Animation's video (round 365), and footage, keyed opacity and transform, Add Edit, Ripple Delete and ProRes and VRChat export presets (round 391);
+Poiyomi, lilToon and URP texture presets, Material ID masks and Bake All Maps (round 392);
+the dependency-free build's Render Animation offers Blender's libraries for its MP4 (round 366);
+a Capsule, Unity's unique names, and the console's save / open / new / rotate / scale (round 367);
+the pen's eraser end, tilt and a pressure curve in sculpting (round 368);
+Unity packages unpacked into the project (round 369) and their prefabs and scenes brought in,
+scripts kept as Engine Components (round 370),
+with Unity's materials converted by shader (lilToon, Poiyomi, MToon, UTS2, Standard, URP) and PhysBones' settings kept as spring bones (round 371),
+a .unity opened as the scene with its materials on its models' parts (numbered by the installed Unity once),
+its lights' and renderers' overrides,
+ambient and fog,
+and Silent's Filamented as PBR (round 395),
+and Unity's own baked lightmaps and light probes shown,
+read by the installed Unity (round 400),
+its fog modes,
+skybox,
+camera,
+post-processing,
+lights' shadows and reflection probes as Unity shows them (round 401);
+lilToon's own lighting model on a Toon material - checked against lilToon's renders - and the avatar's VRChat components (descriptor, PhysBones, colliders, contacts, constraints, Animator) as Blendity's, written back and sent over Live Link (round 402);
+every kept Unity component editable under Unity's names, VRChat's SDK classes named, the world's Scene Descriptor and Pipeline Manager as Blendity's (round 403);
+the same stations rendered by Unity and Blendity and scored - Shinano passing at every station, SideRail near the target - with the attributes table and the report (round 404);
+Unity's own ACES curve, its BRDF's weight on a Unity scene's reflections and three more shaders read, the stations measured again (round 405);
+Unity's BlendShapes foldout with Edit this shape and the Animation window in Unity's layout (round 406);
+Unity .anim clips read and written (round 407);
+clips retargeted between humanoid rigs like Mecanim (round 408);
+Export Unity Package sends the work back under the same GUIDs (round 372);
+Godot scenes (.tscn) come in, scripts kept, and go back with their nodes' transforms (round 373);
+.blend files come in through the installed Blender, and the Blender and Unreal bridges Send to Blendity (round 374);
+the round trip run as a production, glTF's Keep Transforms keeping pivots on the way back (round 375);
+its world, fog, exposure and the render camera's Bloom, Vignette and grading go to every bridge as you light (round 376), and textures go by their pixels - a painted surface each stroke, a procedural texture as you drag (round 377);
+skinned characters go once with their skin and blend shapes, then only poses and weights (round 378);
+clips go baked as the engines' own clips when keyed (round 379);
+LOD Groups and colliders arrive as the engines' own levels and collision (round 380);
+with VRChat's SDK in a Unity project, avatars get their Avatar Descriptor and PhysBones and worlds a Scene Descriptor (round 381);
+all of it streams at a millisecond or two a frame with four engines connected, and goes on while jobs run on workers (round 382);
+VR View puts you in the scene at life size through OpenXR - SteamVR,
+Quest Link,
+Windows Mixed Reality (Edit > VR View, `vr start`; round 383) - where your controllers teleport,
+walk,
+snap-turn,
+grab,
+turn and scale the world and measure it (round 384),
+and sketch ribbons and tubes in the air with pressure and a palette (`vr sketch`; round 385) and paint the object in Paint mode with the desk's brush (`vr paint`; round 386);
+**Live Link** sends the
 scene as you change it to Blender, Unity, Godot or Unreal on the same computer (`docs/LIVELINK.md`). The keymap starts
 from Unity, Unreal, Blender, Maya, 3ds Max or SketchUp, and **Edit > Editor Feel** switches the keys and the Scene view's
 mouse navigation together to Unity's, Unreal's, Blender's or Maya's. Any tab can have a window of its own, on any
@@ -210,7 +282,17 @@ Window*), and tabs dock into whichever window they are dropped on. The **Draw ta
 pen drawing in that perspective while the keyboard moves the view, every stroke placed in the scene where it was drawn;
 it works like SketchBook Pro's canvas - one slim toolbar (the brush, its color and size, the Ruler, Ellipse and Curve,
 symmetry, perspective, Steady and Predictive Stroke, Layers, More), the pad zoomed, panned, turned and flipped with the
-wheel, a middle-drag or Space+drag and two fingers, Tab to hide the tools, and blank Paper as a source - its layers with Photoshop's 27 blend modes, clipping and layer masks, and rectangle and lasso selections to fill and delete (round 388), and Ctrl+T's Free Transform and a brush's pen tilt (round 389), Illustrator's shapes, Bezier Pen, fills, artboards and SVG in and out (round 390) - and SketchBook's
+wheel,
+a middle-drag or Space+drag and two fingers,
+Tab to hide the tools,
+and blank Paper as a source - its layers with Photoshop's 27 blend modes,
+clipping and layer masks,
+and rectangle and lasso selections to fill and delete (round 388),
+and Ctrl+T's Free Transform and a brush's pen tilt (round 389),
+Illustrator's shapes,
+Bezier Pen,
+fills,
+artboards and SVG in and out (round 390) - and SketchBook's
 brushes (Pencil, Pen, Inker, Felt Pen, Marker, Airbrush, an Eraser that cuts) in a floating palette with the puck for size
 and opacity, B / E / [ ] over the pad. The **Board** is a reference board in PureRef's way: images dropped, pasted or
 dragged from the Project window onto an endless canvas, moved, scaled and turned by their handles, kept in
@@ -306,7 +388,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (25344 unit checks in 1918 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (23897 unit checks in 1860 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

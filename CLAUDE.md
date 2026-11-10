@@ -43,7 +43,7 @@ non-trivial.
 - Before a change is done: the full unit suite passes on Windows and Linux.
 - Geometry changes also run the matching stress sections (`blendity_stress --only pushpull |
   modifiers_ngon | curved | editor`). Problem counts and "faces newly on top of each other" counts must
-  not rise without an explanation in the CHANGELOG. Delete the report files a run creates and restore
+  not rise without an explanation in the round's changelog entry. Delete the report files a run creates and restore
   `stress/results/latest.md` with `git checkout`.
 - Tests and stress run in a scratch project and trash (`BLENDITY_PROJECT`, `BLENDITY_TRASH`); nothing a
   test does may touch the user's files.
@@ -64,8 +64,12 @@ non-trivial.
   inputs must leave a structurally valid mesh or refuse cleanly.
 
 ## Documentation duties (every change)
-- `CHANGELOG.md`: one entry per round (asked / fixed / changed / added / checked, stress numbers).
-- `README.md`: the unit-check count and the feature paragraph when user-facing behaviour changes.
+- `changelog.d/<round>-<slug>.md`: one entry per round (asked / fixed / changed / added / checked, stress numbers),
+  plus a `<!-- README -->` section with the feature-paragraph line when user-facing behaviour changes (format:
+  `changelog.d/README.md`). **A round never edits `CHANGELOG.md` or `README.md`, nor README's unit-check count**
+  (ADR 0123: parallel passes' PRs conflicted there). The pass write-up runs `py tools/dev/changelog.py fold --checks
+  LIBS TESTS` once the pass's PRs are on `main` and commits it with a `Docs-fold: yes` trailer; the hub runs one fold
+  at a time. The `docs-fragments` CI job fails any other commit that edits the two files.
 - `docs/ARCHITECTURE.md`: a row for new subsystems or functions others build on.
 - `docs/USABILITY.md`: a "fixed" row for user-facing problems solved.
 - `docs/decisions/`: an ADR for any architectural choice (new subsystem, data-model change, new

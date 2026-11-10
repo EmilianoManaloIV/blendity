@@ -1,229 +1,47 @@
 # Changelog
 
-One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
+One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
-## 2026-11-10 (round 486): the bake's specks
+## 2026-11-09 (round 467): Changelog fragments - parallel passes stop conflicting in CHANGELOG and README
 
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
-Pass 24's third round: the splotches. Round 484 measured them as specks (small round spots one bake has and the next
-has not) and named a lead; the owner approved the pass's specs ("Continue and finish all tasks, I approve all specs
-from all passes.").
+**Asked:** (the user approved, 2026-11-09) Pass 21's whole stack, #358-#364, went CONFLICTING in `CHANGELOG.md` and
+`README.md` alone once Pass 20's #357 and #360 merged, and was resolved by hand. Rounds should stop editing those two
+files.
 
-**Fixed (task 0462, ADR 0122 amended)**
-- **A bake leaves far fewer specks.** A texel lit by two or three of its thousand gather rays - the ones that met a
-  small bright patch - is luck, and the bake's filter should spread it into its neighbours. It did not: since round 465
-  the filter took a Sobol-sampled texel's measured noise for an eighth of itself (at 1024 samples), which is right for
-  light that fills the hemisphere and wrong for light a few rays carry, so the lucky texel passed for steady light.
-  The filter (and the firefly clamp) now read each texel's noise by how many of its samples carry its light - its
-  light squared over its samples' variance: the samples' own noise up to 16 such samples, round 465's scale from the
-  sample count on, a smooth curve between. On SideRail (lights linear, round 485's materials, two seeds) the specks at
-  the owner's two views fall from **90 and 71 to 11 and 39**, the grain from 0.190 to 0.181, the blotch from 0.055 to
-  0.053; the bake takes what it took (38.8 s against 38.9 s, like for like in one queue).
-- What is left - 11 and 39 - is about what round 484 measured for the direct light alone: the lights a texel keeps
-  by chance. That is the next round's (the picking spread evenly), not this filter's.
+**Changed (task 0443, ADR 0123)**
+- **`changelog.d/` fragments and the rule:** a round adds `changelog.d/<round>-<slug>.md` (its CHANGELOG entry, plus an
+  optional `<!-- README -->` section of `after:` / `replace:` edits) instead of editing `CHANGELOG.md` or `README.md`;
+  the pass write-up folds the fragments in. `CHANGELOG.md`'s intro says so.
+- **`tools/dev/changelog.py`** (`check`, `fold`, `same-render`, `--self-test`): `check` validates every fragment and that
+  its README edits apply to today's README; `fold` puts the entries under the intro (highest round first), applies the
+  README edits, sets the unit-check count and deletes the fragments, all or nothing, with each file's line endings kept
+  (CRLF); `same-render` compares two Markdown files' rendered paragraphs.
+- **`tools/dev/docs_check.sh` and the `docs-fragments` CI job** (`.github/workflows/docs.yml`, one run per PR at a
+  time): a commit that edits `CHANGELOG.md` or `README.md` fails unless its message carries a `Docs-fold: yes` trailer.
+- **`tools/dev/fill_checks.py`** fills the `CHECKS_*` placeholders in fragments; README's count changes only through
+  the fold. `publish.sh` stages `changelog.d/`. `stack_check.sh` reports open PRs that edit the two files.
+- **README's three long lines** (the Lighting & Rendering item, the Files paragraph and the drawing paragraph) are split
+  one clause per source line, so a new clause is a one-line insertion; the page renders the same.
+- **Documentation:** `CLAUDE.md`, the task and PR templates, the implementer and code-reviewer prompts,
+  `docs/ARCHITECTURE.md` and the tools/dev README.
 
-**Bake again.** A saved bake is not marked out of date by this change: Generate Lighting once more to get it.
+**Also (testing and review):** the self-test grew to 49 cases (CRLF fragments, several insert lines, an anchor on a
+line an earlier round inserted, odd file names, `fill_checks.py` under a temporary tree, the trailer in lower case or
+with CRLF). The review found `docs_check.sh` picking Windows' Microsoft Store `python3` stub (it now uses a Python that
+runs), `stack_check.sh` looking for it under `blender-main/` from the libraries clone, `after:` anchors failing on
+README's indented list lines (they ignore the indent now, and inserted lines take it), the CI check reading the PR's
+fork-point README instead of the merge result, and `docs_check.sh` passing a ref that isn't a published tree (it
+refuses now); the fold writes both files to temporaries before swapping them in, and warns about unfilled `CHECKS_*`.
 
-**Changed**
-- Preview Lighting's filter reads the noise the same way.
-- The change is in Blendity's own filter. Where OIDN's lightmap filter runs instead (not today: it has no lightmap
-  weights), the specks must be measured again before it becomes a bake's own.
+**Not done / alternatives**
+- `.gitattributes` with `merge=union` was rejected: a test in a scratch repo duplicated README's count line and a
+  feature line without a conflict, and GitHub's own merge reportedly ignores merge drivers.
+- ARCHITECTURE and USABILITY stay direct edits: 1 conflict in 134 merges replayed since 2026-10-01, none in
+  ARCHITECTURE.
 
-**Added**
-- `lighting variancescale auto|on|off` (console; as `lighting pick`: the next Generate Lighting, not saved, not in the
-  scene's key): `on` is rounds 465 to 485's reading - round 485's SideRail bake byte for byte, both seeds - `off` the
-  samples' own noise everywhere (it blurs detail in dim places: the tunnel's error 7 % up); `clamp`, `snr` and `step`
-  are the round's measured candidates.
-- `gather_variance_read` (`render/lightmapper.h`): the rule, on its own for tests.
-- Stress `lightmap_quality`: a table of the old and the new reading on every scene.
-- Learn, "A bake's noise, measured": what a speck is, why the filter let it through, two questions, two Try-it steps.
-
-**Not built, and said in the task:** the largest-sample sums and batch means (the texel's own signal to noise does
-it, with nothing new from the card); a lower gate for the firefly clamp (the clamp changes no texel under any
-reading); the lights kept by chance spread evenly (a round of its own, `lamp_hall` its mark).
-
-**Marks missed, and said in the task:** at 2048 samples the tunnel view counts 47 specks against 39 at 1024 - one
-past "within a fifth" (grain and blotch fall: 0.146 / 0.047); against Unity with Blendity's own bake the dark station
-`spawn_back` reads SSIM 0.798 against 0.804, 0.001 past the mark, its grid correlation up from 0.953 to 0.959 - the
-other five stations are within it and the owner's two views a hair better (6.80 / 0.879 and 6.15 / 0.899 against 6.81
-/ 0.877 and 6.15 / 0.898). On the CPU path, where the sky lights a texel, the rule leans towards the old reading (the
-review's finding; a follow-up).
-
-**Checked**
-- Unit: 11 tests for the round (`tests_round486`, `tests_round486_independent`: two seeds' bakes of a small lamp only
-  the gather finds differ by less than 0.6 of what they did, more samples make fewer specks, a steady glow keeps its
-  peak, the rule on hostile numbers, few-sample and plain-random bakes bit for bit as before, the verb's words). Full
-  suite: Windows dependency-free 24,430 checks, 0 failed; Windows with Blender's libraries 25,344 checks in 1,918
-  tests, 4 failed - the four GPU picture comparisons that fail on this machine's card on `main` too; Linux 24,436, 0
-  failed. `tools/test_coverage_map.py --check`: nothing untested.
-- Stress `lightmap_quality` (relative RMSE against the reference, old reading -> new): room 0.0133 -> 0.0133 (1024
-  samples: 0.0119 -> 0.0119), corridor 0.0039 -> 0.0039, tunnel 0.1033 -> 0.1061 (1024: 0.0581 -> 0.0569), courtyard
-  0.0071 -> 0.0071, hall 0.0433 -> 0.0433; bias unchanged to 0.0001; the tunnel's grain 0.062 -> 0.052. No problem
-  counts in this section.
-- test-engineer: five tests, one finding (a few-sample bake one float step off the old one) - fixed, the test made
-  bit for bit. code-reviewer: approved; its five minor findings and three nits fixed or written into the task and
-  the ADR.
-
-## 2026-11-10 (round 485): Unity materials keep their maps and their gloss
-
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
-Pass 24's second round, cut from round 484's tables: the mirror finish. The owner approved the pass's specs ("Continue
-and finish all tasks, I approve all specs from all passes.").
-
-**Fixed (task 0461, ADR 0131)**
-- **A world no longer comes in as mirrors after importing its package.** A Unity material read while its package was
-  still unpacking found none of its textures (the package's GUID table is written last) and kept Metallic 1, Roughness
-  0 and no maps until Blendity restarted - the Materials window, open, read every `.mat` it saw. Now the list of the
-  project's materials leaves out a folder that is still unpacking, and where the import ends every Unity material
-  already read under it is read again, in place: the objects wearing it, the Inspector and the Materials window follow
-  with nothing to redo. In the real window, with the Materials window open as the owner has it, five imports of
-  SideRail's package: no material read early, all 38 linked with their maps (round 484: maps lost in 6 of 7 runs).
-- **Deleting an imported folder and importing the package again** in one session brings its materials back (the
-  folder's "deleted this session" marks are cleared where the import ends). Before, none loaded until a restart.
-- **The shader's keyword decides, as in Unity** (Standard, Filamented, URP Lit): a texture left in the Metallic slot
-  without `_METALLICGLOSSMAP` (URP: `_METALLICSPECGLOSSMAP`) is ignored and the sliders count; a slot a keyword names
-  and nothing fills is Unity's white texture.
-- **A smoothness kept in a map comes in**, as one number a material: Roughness = 1 - the mean of the alpha Unity's
-  shader samples (the metallic map's, or the albedo's under `_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A`) x its scale. A worn
-  wall is as rough as Unity shades it on average; it is not yet glossier in its polished patches than in its dust
-  (ADR 0131: a channel on the texture slot is the later step). On SideRail, of the 38 Unity materials the scene wears,
-  "smoothness dropped" goes from 10 to 0, and the two views the owner looks from read 3.71 / 0.905 and 3.57 / 0.912
-  against Unity with Unity's bake (3.75 / 0.898 and 3.67 / 0.902 before) - round 484's by-hand mark.
-- **16-bit PNGs read as stored in the build with Blender's libraries** (libpng is asked for the file's own samples):
-  one half reads 128 / 255 in both builds, not 186.
-- **A Unity `.mat` is never written over** (found by the round's review, older than the round): a scene opened while
-  its package's folder was missing kept its own copies of the materials, and once the folder was back the next edit
-  wrote Blendity's text over each Unity file. Such a copy is now read from the Unity file where an import ends (or on
-  Reimport Unity Materials), and is not written while a Unity file is at its path.
-
-**Bake again.** Lightmaps baked while the materials had no maps, or with the brighter 16-bit textures, were lit by
-those materials, and a bake is not marked out of date by a material's maps: Generate Lighting once more after this
-round.
-
-**Added**
-- **`.unity-stats`** beside a package folder's `.unity-guids`: a line for each texture a material reads its gloss
-  from - GUID, the file's bytes, width, height, mean R G B A. The unpack's worker writes it; for a package unpacked by
-  an older Blendity the maps are measured by one background job when its scene opens (the job tray: "Reading Unity
-  materials' gloss"; at once in a headless run) and the materials that asked follow - no others. No image is decoded
-  on the main thread for a material's values. On SideRail the unpack's worker took 2.3 to 3.4 s for its 14 maps and
-  the job 2.3 to 2.6 s for 13 (both with two other passes building beside them; the decode alone is 1.6 s), and the
-  frame that takes the job's result cost 30 to 40 ms, once. Opening the scene takes what it took: 2.23 s against
-  2.23 s for round 484's build over the undisturbed turns of eight.
-- **Assets > Reimport Unity Materials** (`unity rematerials`): every Unity material read again from its file, at once;
-  it says how many changed. Reading again is not an edit - no undo step, the scene not marked changed, and the copies
-  the undo history and Play's Stop keep take the new reading too, so neither brings the early one back. A value typed
-  on a Unity material in the session is replaced by the file's, as at a restart; the Materials window's tooltip on a
-  Unity material says so.
-- **Learn:** "A Unity material's gloss, and reading materials again" (a Try-it, two questions).
-
-**Changed**
-- Round 484's tests that pinned the faults now pin Unity's numbers, each saying what it pinned before; the committed
-  set gains its `.unity-stats`, and `blendity_today.txt` / `expected.json` hold round 485's reading.
-  `tools/unity_materials.py` counts a texture left in the slot as a fault only when Blendity went by it, checks the
-  committed table against its own reading of the PNGs, and keeps round 484's reading as a case of its self-test.
-- `unity materials all` in a headless run measures the gloss maps of the materials it has just loaded before it lists
-  them.
-- A scene that wears a material whose Metallic slot held a texture without its keyword asks for a new bake once: its
-  lighting was baked with that surface as metal.
-
-**Not done (by design):** smoothness per texel; reflections off, highlights off and occlusion maps (Blendity's material
-has no property for them); the lamps', glass's and mirrors' own shaders; URP Lit's and Standard's specular setups; a
-scene saved while its materials were the models' own (opening the `.unity` again is the repair); the lights' intensity
-in a project made from a package (the owner's decision, as round 484 put it). Not reached by a test: Cancel in the job
-tray itself (the landing of a cancelled job is tested).
-
-**Checked:** both Windows suites - dependency-free 23,541 checks, 0 failed; with Blender's libraries 24,455 with the
-four worktree `gpu` picture comparisons failing as in rounds 463 to 484 (the same four, not this round's); Linux (WSL,
-GCC) 23,547 checks, 0 failed; the audits; both tools' self-tests; the test-engineer's ten independent tests (two
-packages sharing a GUID, a package imported over itself, hostile tables, unreadable maps, 16-bit PNGs of every colour
-type, the import settings' Alpha Source; no product fault found); the code review (changes needed, all applied: a
-landing read every Unity material again, Stop undid a landing made in Play, a stand-in copy could be written over a
-Unity `.mat`, a landing could write the table beside an unpack; and one fault the round's own tests found after it -
-a mean held more digits in the session that measured it than in the table). SideRail in scratch copies: the five
-windowed imports, delete-and-import-again (38 linked), a project unpacked by round 484's build (the job, 38 linked),
-the materials table (smoothness dropped 12 -> 0, slot without keyword 1 -> 0, decoders differ 4 -> 0 of 57), the six
-stations with Unity's bake (the owner's two at round 484's by-hand mark, the other four unchanged). The owner's four
-folders have no file changed; the tests' own import cache left four small folders in `~/.blendity/cache/import`, as
-earlier rounds' did (a follow-up). Not done on a quiet machine: every timing above.
-
-## 2026-11-10 (round 484): SideRail's mirror finish and splotches, reproduced and measured
-
-**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." (the
-owner's imported VRChat world SideRail, against its reference). Pass 24's first round: name each cause with evidence
-before anything is fixed. **This round changes no behaviour** - one log line apart (below).
-
-**Found (task 0460; the tables are in `docs/tasks/0460-siderail-look-measured.md`, "Results")**
-- **The mirror finish in the owner's screenshots is materials read without their textures.** A Unity `.mat` read before
-  its package's GUID table exists gets Metallic 1, Roughness 0 and no map; the table is written last while a package
-  unpacks, the Materials window loads every `.mat` it sees meanwhile, and the asset library keeps what it read until
-  Blendity restarts. Reproduced on main in the real window: `ConcretePanel` without its maps in 6 of 7 runs, 17 to 37 of
-  the scene's 38 Unity materials without any (10 is right). At the owner's two stations the picture goes from 3.75 /
-  0.898 and 3.67 / 0.902 (MAE / SSIM against Unity) to 13.71 / 0.702 and 12.50 / 0.697. **Until round 485: restart
-  Blendity after importing a package** (or keep the Materials window closed while it unpacks).
-- **Deleting a package's folder and importing it again in one session** leaves a Unity scene with none of its Unity
-  materials (the models' own instead), until a restart.
-- **Smoothness is dropped** where Unity keeps it in the metallic map's alpha: 10 of the 38 Unity materials the scene
-  wears (181 renderer slots) come in at roughness 0 where Unity shades roughness 0.24 to 0.76. Set right by hand, F12's
-  picture moves little (3.74 / 0.905 and 3.58 / 0.912).
-- **16-bit PNGs are read brighter by the build with Blender's libraries** (libpng's simplified interface takes them as
-  linear light: one half reads 186 / 255, not 128): 14 of SideRail's textures, 7 of them on materials - the plank
-  floor's colour, mask and normal map among them. The dependency-free build reads them as Unity does.
-- **The lights' intensity:** a project made from a package has no Unity `ProjectSettings`, so its lights are taken in
-  gamma, silently; SideRail's own project is linear. With Blendity's own bake the owner's two stations then read 17.76
-  / 0.734 and 16.40 / 0.761 against Unity where the linear bake reads 6.64 / 0.863 and 5.97 / 0.885, and are 2.9 and
-  2.6 times as bright - the largest single fault there. Whether such a project should take its lights linear is the
-  owner's decision.
-- **The splotches are mostly not the lights kept by chance** (the plan's cause, and Pass 21's note): with every light
-  kept at every texel SideRail's bake has the same grain and blotch (0.384 / 0.251 against 0.382 / 0.251). They are
-  **specks** - small round spots in one seed's bake and not the other's, about 140 a view at the owner's stations (800
-  unfiltered, 330 in the owner's own session with no maps and the lights in gamma). About 100 are in the gathered
-  bounce and about 20 are lights kept by chance; the emitters and the texels filled from their neighbours are not it.
-  **More samples make them worse** (271 and 210 at 2048 samples, 59 and 78 at 256): the lead for round 486 is that the
-  bake scales the noise it measures for Sobol samples (to an eighth at 1024), so its firefly clamp and its filter take
-  a texel's few rare bright samples for steady light.
-
-**Added (measuring only)**
-- **`unity materials [all] [to "<file>"]`**: what Blendity made of every material the scene wears, as text;
-  **`unity mapstats [decoders] "<image>"...`**: an image's channel means as it is decoded, and with `decoders` as
-  Blendity's own decoder reads it (a script's verb: refused in a window).
-- **`lighting pick on|off|<rays>`**: how many Baked point and spot lights a texel keeps by chance in the next Generate
-  Lighting (8: the bake as before; `off`: every light); a bake that picks says how many lights a texel kept and
-  dropped - the one line a default bake's log gains.
-- **`tools/unity_materials.py`**: every Unity `.mat` of a project beside what Blendity made of it - Unity's metallic
-  and roughness by the shader's own rule, Blendity's, a fault class per material, the images two decoders read
-  differently; `state` puts a scratch project into a test state (no maps; Unity's values by hand; 16-bit PNGs as
-  8-bit).
-- **`tests/fixtures/unity_gloss/`**: twelve small Unity materials of our own, one per fault, with Unity's values worked
-  out by hand; the folder is checked out byte for byte (`.gitattributes`).
-- **`tools/unity_compare.py`**: `--bake-cmd`, `--lights-as-imported`, `--reuse-unity-lightmaps`; `noise`, a bake's
-  noise at seeds 0 and 1 without Unity; and at each station the two bakes' own grain, blotch and **specks** (spots
-  where the two pictures differ by over half the picture's mean light).
-- **Stress `lightmap_quality`: `lamp_hall`** - a hall lit by 72 Baked lights whose reference keeps every light, with the
-  bake at `pick` off / 8 / 16 / 32: there the picking is the noise (4.8 times the blotch of keeping every light), which
-  on SideRail it is not. The four older scenes' rows are unchanged to the last digit.
-- **`decode_image_own`** (`image.h`): Blendity's own decoders whatever the process's codec switch says.
-- **Learn:** "A Unity material beside Unity's own values" (a Try-it, two questions); "Many lamps" in "A bake's noise,
-  measured" (two questions, two Try-its).
-
-**Kept exactly:** a bake at the defaults saves the same pages, byte for byte, from main's build and from this round's
-(a room with twelve Baked lights; four files). It did not at first: with the rays a run-time number MSVC ordered one
-expression another way and two bytes of one page differed, so the default path keeps the constant and the measuring
-path is a function of its own, never inlined.
-
-**Not done (by design):** nothing is fixed; rounds 485 and 486 are specified from these tables, and 486 is cut again
-(the plan's stratified light picking would not touch most of SideRail's specks). Not taken as timings: the bake at
-`pick off` and 16 (another worker's build ran beside them) and the stress section's times. Not run: the reproduction
-with the Project window in place of the Materials window. The lights' intensity in a project made from a package is put
-to the owner, not changed.
-
-**Checked:** both Windows suites - dependency-free 23,199 checks, 0 failed; with Blender's libraries 24,114 (the four worktree `gpu` picture comparisons, as rounds 463-466, and in one of two runs
-the slow-open test while another worker used the card);
-Linux (WSL) 23,205 checks with one failure while the machine was baking - "Live Link never pauses the editor", round
-382's tick-time bound - which passes alone; the audits; both tools' self-tests; the code review (changes needed, all
-applied: the committed materials checked out byte for byte, a decoder entry that leaves the process's switch alone, the
-tools refusing a project that is not a scratch copy); stress `lightmap_quality` - `lamp_hall` 0.043 / 0.0327 / 0.0096
-(relative RMSE / grain / blotch), 4.8 times the blotch of every light kept, the four older scenes as Pass 21 left them;
-SideRail in scratch copies - the tables of the task's results; the owner's folders untouched.
+**Checked:** `changelog.py --self-test` 49 passed on Windows and Linux (WSL); README `same-render` before and after the
+split; the C++ suites are untouched (no `src/` or `tests/` change), CI's four jobs run them. No README section in this
+fragment (nothing user-facing in the editor).
 
 ## 2026-11-08 (round 462): Cleanup after drawing, and Solve Mesh
 

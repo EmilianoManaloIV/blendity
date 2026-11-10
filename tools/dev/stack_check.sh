@@ -11,6 +11,7 @@ set -e
 REPO=${REPO:-EmilianoManaloIV/blendity}
 GH=gh
 command -v gh >/dev/null 2>&1 || GH="/c/Program Files/GitHub CLI/gh.exe"
+HERE=$(cd "$(dirname "$0")" && pwd)   # before the cd: from the libraries clone the toplevel is blender-main/
 cd "${BL_MAIN:-$(git rev-parse --show-toplevel)}"
 git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
 
@@ -66,5 +67,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" "origin/${B[t]}" || {
   git worktree remove --force "$T"
   echo "FIXED: #${N[newest]} now carries its whole stack"
 done
+# Changelog fragments (ADR 0123): a PR whose own commits edit CHANGELOG.md / README.md outside a fold conflicts with the
+# other passes' PRs. Reported here only; the `docs-fragments` CI job is the one that fails the PR.
+if [ -z "$CI" ]; then
+  for ((i = 0; i < COUNT; i++)); do
+    out=$(NO_FRAGMENTS=1 bash "$HERE/docs_check.sh" origin/main "origin/${B[i]}" 2>&1) ||
+      echo "docs: #${N[i]}: $(echo "$out" | grep -m1 '::error::' | sed 's/^::error:://')"
+  done
+fi
 [ $fail = 1 ] && echo "run FIX=1 bash tools/dev/stack_check.sh"
 exit $fail
