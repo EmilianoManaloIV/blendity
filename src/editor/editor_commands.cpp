@@ -1215,6 +1215,8 @@ void Editor::run_console_command(const std::string &line) {
     return unity_materials_command(split_quoted(line_rest(line, 2)));
   if (c == "unity" && t.size() > 1 && t[1] == "mapstats")  // unity mapstats [decoders] "<image>"... [to "<file>"] (round 484: an image's channels as decoded; a script's)
     return unity_mapstats_command(split_quoted(line_rest(line, 2)));
+  if (c == "unity" && t.size() > 1 && t[1] == "rematerials")  // unity rematerials (round 485: every Unity .mat read again from its file; the gloss maps not measured yet, measured)
+    return (void)unity_rematerials();
   if (c == "unity" && t.size() > 1 && t[1] == "lightsgamma") {  // unity lightsgamma [on|off] (round 459: a copy without ProjectSettings - its project's lightsUseLinearIntensity off / on)
     if (t.size() > 2 && (t[2] == "on" || t[2] == "off")) {
       scene_->unity.lights_gamma = t[2] == "on";

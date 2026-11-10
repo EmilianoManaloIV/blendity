@@ -9035,11 +9035,27 @@ static void tests_round371() {
     CHECK(m.normal_map.path == "Assets/T/normal.png" && m.normal_strength == 0.5f && std::fabs(m.metallic - 0.7f) < 1e-6f && std::fabs(m.roughness - 0.2f) < 1e-5f);
     CHECK(m.surface == (int)MaterialSurface::Cutout && std::fabs(m.alpha_clip - 0.3f) < 1e-6f && m.emission.x == 1.0f && std::fabs(m.emission_strength - std::pow(2.0f, 2.2f)) < 1e-4f &&
           m.shading_model == 0);  // (Unity's colours are gamma: linear here, an HDR 2 by the same curve - review 371)
-    /* Review 371: a metallic map - metal from its red, the slider (0 in the file) ignored; smoothness by _GlossMapScale. */
+    /* Review 371, rewritten at round 485 (task 0461): a metallic map counts under its keyword, as in Unity - metal from
+     * its red, the slider (0 in the file) ignored; smoothness its alpha times _GlossMapScale, the alpha as its mean when
+     * one is known (ADR 0131) and as 1 while it is not. Until round 485 the slot alone decided and this material had no
+     * keyword: round 484 measured that Unity then reads the sliders. */
+    const std::string standard_shader = "{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}";
+    const std::string metal_slot = "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: metal, type: 3}\n";
+    const std::string metal_floats = "    - _Metallic: 0\n    - _Glossiness: 0.5\n    - _GlossMapScale: 0.9\n", white = "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n";
     Material mm;
-    CHECK(unity_material(mat("{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}", "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: metal, type: 3}\n",
-                             "    - _Metallic: 0\n    - _Glossiness: 0.5\n    - _GlossMapScale: 0.9\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n"), kTex, shader("Standard"), mm, info));
+    CHECK(unity_material(mat(standard_shader, metal_slot, metal_floats, white, "_METALLICGLOSSMAP"), kTex, shader("Standard"), mm, info));
     CHECK(mm.metallic == 1.0f && mm.metallic_map.path == "Assets/T/metal.png" && std::fabs(mm.roughness - 0.1f) < 1e-5f);
+    CHECK(info.gloss_pending && info.gloss_texture == "metal");  // (no mean given: the caller is told which texture to measure)
+    Material mk;
+    CHECK(unity_material(mat(standard_shader, metal_slot, metal_floats, white, "_METALLICGLOSSMAP"), kTex, shader("Standard"), mk, info, {},
+                         [](const std::string &guid, float &alpha) {
+                           alpha = 0.5f;
+                           return guid == "metal";
+                         }));
+    CHECK(mk.metallic == 1.0f && std::fabs(mk.roughness - 0.55f) < 1e-5f && !info.gloss_pending && info.gloss_texture == "metal");
+    Material ms;  // (the same slot without the keyword: the sliders, and no map)
+    CHECK(unity_material(mat(standard_shader, metal_slot, metal_floats, white), kTex, shader("Standard"), ms, info));
+    CHECK(ms.metallic == 0.0f && ms.metallic_map.empty() && std::fabs(ms.roughness - 0.5f) < 1e-5f && info.gloss_texture.empty() && !info.gloss_pending);
     Material u;
     CHECK(unity_material(mat("{fileID: 4800000, guid: 933532a4fcc9baf4fa0491de14d08ed7, type: 3}", "    - _BaseMap:\n        m_Texture: {fileID: 2800000, guid: base, type: 3}\n",
                              "    - _Smoothness: 0.25\n    - _Surface: 1\n    - _Cull: 0\n", "    - _BaseColor: {r: 0.2, g: 0.4, b: 0.6, a: 0.5}\n"),
@@ -13823,8 +13839,10 @@ static void tests_round456() {
 
 /* ---------------------------------------------------------------- round 484: Unity gloss, measured (task 0460) */
 /* The committed set tests/fixtures/unity_gloss (README.md works out Unity's numbers) is copied into the scratch project
- * where its .unity-guids names it. These tests pin how Blendity reads each material TODAY, wrong where the README says so;
- * round 485 changes the reading and rewrites the matching test with the reason. */
+ * where its .unity-guids names it. Round 484 pinned how Blendity read each material then, wrong where the README said
+ * so. Round 485 (task 0461, ADR 0131) changed the reading - a material read too early is read again where the import
+ * ends, the keyword decides, a map's smoothness comes in as its mean, a 16-bit PNG reads as stored - and rewrote the
+ * tests that pinned those faults; each says what it pinned before. */
 namespace r484a {
 static const char *const kDir = "Assets/Imported/UnityGloss";
 
@@ -13833,8 +13851,16 @@ static std::string mat_path(const std::string &name) { return std::string(kDir) 
 
 static void refresh_index() { unity_guid_index_cached(resolve_asset_path("Assets"), project_dir(), true); }
 
-/* The fixture's files in the scratch project; the GUID table only when asked (a package's is written last). */
-static bool install(bool with_guids) {
+/* What one test measured or asked for is not the next one's (both are the session's, kept for the process). */
+static void forget_gloss() {
+  unity_gloss_session_means().clear();
+  unity_gloss_wanted().clear();
+}
+
+/* The fixture's files in the scratch project; the GUID table only when asked (a package's is written last, its table of
+ * means just before it: without the one there is neither), and no table of means when `with_stats` is off - a package
+ * unpacked before round 485. */
+static bool install(bool with_guids, bool with_stats = true) {
   std::error_code ec;
   const std::string dir = resolve_asset_path(kDir);
   std::filesystem::remove_all(dir, ec);
@@ -13842,6 +13868,8 @@ static bool install(bool with_guids) {
   std::filesystem::copy("tests/fixtures/unity_gloss", dir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
   if (ec) return false;
   if (!with_guids) std::filesystem::remove(fs::join(dir, ".unity-guids"), ec);
+  if (!with_guids || !with_stats) std::filesystem::remove(fs::join(dir, ".unity-stats"), ec);
+  forget_gloss();
   refresh_index();
   return fs::exists(fs::join(dir, ".unity-meta"));
 }
@@ -13850,7 +13878,32 @@ static void cleanup() {
   std::error_code ec;
   std::filesystem::remove_all(resolve_asset_path(kDir), ec);
   clear_material_assets();
+  forget_gloss();
   refresh_index();
+}
+
+/* The committed set as a .unitypackage (round 485): each file under Assets/ with its GUID and the .meta the set keeps
+ * for it, so that unpacking "UnityGloss.unitypackage" lands on the folder install() makes. Stored, not compressed. */
+static std::string package() {
+  std::string table, tar;
+  if (!fs::read_file("tests/fixtures/unity_gloss/.unity-guids", table)) return "";
+  for (size_t at = 0; at < table.size();) {
+    const size_t end = std::min(table.find('\n', at), table.size());
+    const std::string line = table.substr(at, end - at);
+    at = end + 1;
+    const size_t tab = line.find('\t'), slash = line.rfind('/');
+    if (tab == std::string::npos || slash == std::string::npos) continue;
+    const std::string guid = line.substr(0, tab), name = line.substr(slash + 1);
+    std::string data, meta;
+    if (!fs::read_file("tests/fixtures/unity_gloss/" + name, data)) return "";
+    if (!fs::read_file("tests/fixtures/unity_gloss/.unity-meta/" + guid + ".meta", meta)) meta = "fileFormatVersion: 2\nguid: " + guid + "\n";
+    r369::tar_add(tar, guid + "/", "", '5');
+    r369::tar_add(tar, guid + "/asset", data);
+    r369::tar_add(tar, guid + "/asset.meta", meta);
+    r369::tar_add(tar, guid + "/pathname", "Assets/" + name + "\n00");
+  }
+  const std::string pkg = fs::join(test_dir(), "UnityGloss.unitypackage");
+  return fs::write_file(pkg, r369::gzip_stored(tar, true)) ? pkg : "";
 }
 
 static size_t log_mark() {
@@ -13972,34 +14025,45 @@ static void report(const char *name, const Seen &s, float unity_metal, float uni
 }  // namespace r484a
 
 static void tests_round484() {
-  /* Criterion 2: the mechanism at its smallest. This pins a FAULT that round 485 removes: when it does, the middle check
-   * (the same session still has no maps after the table is written) flips and is rewritten there. */
-  test("A Unity material read before its package's GUID table is written comes in chrome with no maps and keeps none after the table is written (round 484 pins the fault; round 485 removes it and flips the middle check); read in a fresh library it has its maps", [] {
+  /* Task 0460's criterion 2, the mechanism at its smallest - flipped by round 485 (task 0461). Round 484 pinned the
+   * fault: once the table was written the material still had no maps, for the rest of the session. Now the import's end
+   * reads again, in place, whatever was read before the package was all there. */
+  test("A Unity material read while its package is still unpacking comes in chrome with no maps; when the import ends the same material has its maps and its gloss, with no restart, and the unpack leaves the table of means beside the GUIDs (round 485; round 484 pinned that it kept no maps)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     clear_material_assets();
-    CHECK(r484a::install(false));
-    const std::string path = r484a::mat_path("gloss_in_metal_alpha");
+    CHECK(r484a::install(false));  // (half way through an unpack: the files, neither table yet)
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha"), dir = r484a::kDir;
     const MaterialPtr early = material_asset(path);  // (the Materials window loading it while the package unpacks)
     CHECK(early != nullptr);
     if (!early) return;
     std::printf("    before the table: metallic %g roughness %g, base map '%s', metallic map '%s'\n", early->metallic, early->roughness, early->base_map.path.c_str(),
                 early->metallic_map.path.c_str());
     CHECK(early->foreign && early->metallic == 1.0f && early->roughness == 0.0f && early->base_map.empty() && early->metallic_map.empty());
-    /* The table lands (it is written last) and the index is refreshed. */
-    std::error_code ec;
-    std::filesystem::copy_file("tests/fixtures/unity_gloss/.unity-guids", fs::join(resolve_asset_path(r484a::kDir), ".unity-guids"), std::filesystem::copy_options::overwrite_existing, ec);
-    CHECK(!ec);
-    r484a::refresh_index();
+    /* The unpack ends: the means, then the GUIDs are written, and the materials read too early are read again. */
+    const std::string pkg = r484a::package();
+    CHECK(!pkg.empty());
+    const size_t mark = r484a::log_mark();
+    ed.command("import " + pkg);
+    const Editor::PackageJob *job = ed.last_package_for_test();
+    CHECK(job && job->why.empty() && job->into_rel == dir && job->gloss_measured == 3);
     const MaterialPtr same_session = material_asset(path);
-    CHECK(same_session == early && same_session->base_map.empty() && same_session->metallic_map.empty() && same_session->metallic == 1.0f && same_session->roughness == 0.0f);
-    clear_material_assets();  // (Blendity restarted: a fresh library)
+    CHECK(same_session == early);  // (the object every renderer wears: nothing to assign again)
+    std::printf("    after the import's end: metallic %g roughness %g, base map '%s', metallic map '%s'\n", early->metallic, early->roughness, early->base_map.path.c_str(),
+                early->metallic_map.path.c_str());
+    CHECK(early->foreign && early->base_map.path == dir + "/albedo_opaque.png" && early->metallic_map.path == dir + "/mask_r0_g230_a92.png");
+    CHECK(early->metallic == 1.0f && std::fabs(early->roughness - 0.639216f) < 0.005f);  // (metal x the map's red, 0; the mask's alpha is 92 / 255)
+    CHECK(r484a::log_since(mark).find("1 of its material(s) had been read before it was all there") != std::string::npos);
+    /* What the unpack measured is the table the set commits, byte for byte (make_gloss.py writes that one). */
+    std::string wrote, committed;
+    CHECK(fs::read_file(fs::join(resolve_asset_path(dir), ".unity-stats"), wrote) && fs::read_file("tests/fixtures/unity_gloss/.unity-stats", committed));
+    CHECK(!wrote.empty() && wrote == committed);
+    if (wrote != committed) std::printf("    the unpack wrote:\n%s--- the set commits:\n%s", wrote.c_str(), committed.c_str());
+    clear_material_assets();  // (Blendity restarted: a fresh library reads the same)
     const MaterialPtr late = material_asset(path);
     CHECK(late != nullptr && late != early);
-    if (late) {
-      std::printf("    after the table, fresh library: base map '%s', metallic map '%s'\n", late->base_map.path.c_str(), late->metallic_map.path.c_str());
-      CHECK(late->base_map.path == std::string(r484a::kDir) + "/albedo_opaque.png" && late->metallic_map.path == std::string(r484a::kDir) + "/mask_r0_g230_a92.png");
-    }
+    if (late) CHECK(late->base_map.path == early->base_map.path && late->metallic_map.path == early->metallic_map.path && late->roughness == early->roughness);
+    std::remove(pkg.c_str());
     r484a::cleanup();
   });
   /* Criterion 6, the controls: right today. */
@@ -14025,8 +14089,9 @@ static void tests_round484() {
     }
     r484a::cleanup();
   });
-  /* Criterion 6: smoothness in the mask's alpha. */
-  test("A Unity material whose smoothness is in its mask map's alpha comes in mirror-smooth: roughness 0 where Unity's is 0.64 (round 484 pins it; round 485 reads the alpha)", [] {
+  /* Task 0460's criterion 6, the four faults in the reading - each flipped by round 485 (task 0461, ADR 0131): the
+   * numbers are Unity's now, within 0.005, with the set's table of means beside its GUIDs. */
+  test("A Unity material whose smoothness is in its mask map's alpha comes in as rough as Unity shades it on average - 0.64, not a mirror (round 485: the alpha's mean from the package's table; round 484 pinned roughness 0)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     clear_material_assets();
@@ -14036,11 +14101,11 @@ static void tests_round484() {
       r484a::report(name, s, 0.0f, 0.639216f);
       CHECK(s.loaded && s.metal_map && s.base_map);
       CHECK(std::fabs(s.metal - 0.0f) < 0.005f);  // (the mask's red is 0: a polished non-metal, not chrome)
-      CHECK(std::fabs(s.rough - 0.639216f) > 0.05f && s.rough == 0.0f);
+      CHECK(std::fabs(s.rough - 0.639216f) < 0.005f);
     }
     r484a::cleanup();
   });
-  test("A Unity material whose mask's alpha is scaled by _GlossMapScale (Standard) or _Smoothness (URP Lit) comes in half rough where Unity's is 0.82 (round 484 pins it; round 485 reads the alpha times the scale)", [] {
+  test("A Unity material whose mask's alpha is scaled by _GlossMapScale (Standard) or _Smoothness (URP Lit) comes in at Unity's 0.82 (round 485: the alpha's mean times the scale; round 484 pinned 0.5)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     clear_material_assets();
@@ -14049,11 +14114,11 @@ static void tests_round484() {
       const r484a::Seen s = r484a::seen(name);
       r484a::report(name, s, 0.0f, 0.819608f);
       CHECK(s.loaded && s.metal_map);
-      CHECK(std::fabs(s.metal) < 0.005f && std::fabs(s.rough - 0.819608f) > 0.05f);
+      CHECK(std::fabs(s.metal) < 0.005f && std::fabs(s.rough - 0.819608f) < 0.005f);
     }
     r484a::cleanup();
   });
-  test("A Unity material whose smoothness is in its albedo's alpha reads the slider's 0.5 where Unity's roughness is 0.80, and no map is read for it (round 484 pins it; round 485 reads _SmoothnessTextureChannel)", [] {
+  test("A Unity material whose smoothness is in its albedo's alpha comes in at Unity's roughness 0.80 with its metallic slider and no metallic map (round 485: the keyword names the albedo; round 484 pinned the slider's 0.5)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     clear_material_assets();
@@ -14061,24 +14126,24 @@ static void tests_round484() {
     const r484a::Seen s = r484a::seen("gloss_in_albedo_alpha");
     r484a::report("gloss_in_albedo_alpha", s, 0.1f, 0.799216f);
     CHECK(s.loaded && s.base_map && !s.metal_map);
-    CHECK(std::fabs(s.metal - 0.1f) < 0.005f);  // (the metallic slider is right; the smoothness is not)
-    CHECK(std::fabs(s.rough - 0.799216f) > 0.05f);
+    CHECK(std::fabs(s.metal - 0.1f) < 0.005f);
+    CHECK(std::fabs(s.rough - 0.799216f) < 0.005f);  // (1 - 64 / 255 x _GlossMapScale 0.8)
     r484a::cleanup();
   });
-  /* Criterion 6: the slot decides, not the keyword. */
-  test("A Unity material with a texture in its metallic slot but the keyword off comes in with the map's metal (0.8) and no roughness where Unity uses the sliders (0.2 / 0.7) (round 484 pins it; round 485 reads the keyword)", [] {
+  /* The keyword decides, not the slot. */
+  test("A Unity material with a texture in its metallic slot but the keyword off comes in with the sliders, as Unity shades it - metallic 0.2, roughness 0.7, no metallic map (round 485: the keyword decides; round 484 pinned the map's 0.8 and roughness 0)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     clear_material_assets();
     CHECK(r484a::install(true));
     const r484a::Seen s = r484a::seen("slot_without_keyword");
     r484a::report("slot_without_keyword", s, 0.2f, 0.7f);
-    CHECK(s.loaded && s.metal_map);
-    CHECK(std::fabs(s.metal - 0.2f) > 0.05f && std::fabs(s.rough - 0.7f) > 0.05f);
+    CHECK(s.loaded && s.base_map && !s.metal_map);
+    CHECK(std::fabs(s.metal - 0.2f) < 0.005f && std::fabs(s.rough - 0.7f) < 0.005f);
     r484a::cleanup();
   });
   /* Criterion 6: the listing of the whole set. */
-  test("`unity materials all` on the committed set lists its twelve materials exactly as tests/fixtures/unity_gloss/blendity_today.txt has them (round 485 replaces that file when it changes how they are read)", [] {
+  test("`unity materials all` on the committed set lists its twelve materials exactly as tests/fixtures/unity_gloss/blendity_today.txt has them (the file is round 485's reading; a round that changes how they are read replaces it, with the reason)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     clear_material_assets();
@@ -14296,8 +14361,10 @@ static void tests_round484() {
     CHECK(save_scene_text(ed.scene()) == scene_before);
     r484a::cleanup();
   });
-  /* The 16-bit map: round 485 fixes the library path; this round pins today's. */
-  test("A 16-bit PNG (red and green 0x8000) is read brighter by the libraries build than by Blendity's own decoder: 186/255 against 128/255 (round 484 pins the fault where libpng is built in; round 485 makes the two equal and flips that branch)", [] {
+  /* The 16-bit map. Round 484 pinned the libraries build's reading - 186 / 255, libpng's simple interface taking 16 bits
+   * as linear light and handing them back with a gamma of 2.2; round 485 (task 0461) asks libpng for the file's own
+   * samples, and the branch that pinned the fault is gone: every build reads what the file stores. */
+  test("A 16-bit PNG (red and green 0x8000) reads as the file stores it in every build - 128/255 through the build's decoder as through Blendity's own (round 485; round 484 pinned 186/255 where libpng is built in)", [] {
     Editor ed;
     ed.init_headless(1200, 900);
     CHECK(r484a::install(true));
@@ -14312,16 +14379,8 @@ static void tests_round484() {
     std::printf("    libpng in this build: %d; mean %.4f %.4f %.4f %.4f; own_mean %.4f %.4f %.4f %.4f (file: 0.5020 0.5020 1 1)\n", libpng ? 1 : 0, s.mean[0], s.mean[1], s.mean[2],
                 s.mean[3], own[0], own[1], own[2], own[3]);
     const float file_value = 128.0f / 255.0f, tol = 1.0f / 255.0f;
-    CHECK(std::fabs(own[0] - file_value) < tol && std::fabs(own[1] - file_value) < tol && own[2] > 1.0f - tol && own[3] > 1.0f - tol);  // (every build)
-    if (!libpng) {
-      CHECK(r484a::near_all(s.mean, own, tol));
-      r484a::cleanup();
-      return;
-    }
-    /* TODAY'S FAULT (libpng's simplified API takes 16 bits as linear light and hands back that with a gamma of 2.2: one half
-     * becomes 186, measured in the libraries build): round 485 flips this branch to equal. */
-    CHECK(std::fabs(s.mean[0] - 186.0f / 255.0f) < tol && std::fabs(s.mean[1] - 186.0f / 255.0f) < tol);
-    CHECK(s.mean[0] > file_value + 0.2f && s.mean[1] > file_value + 0.2f);
+    CHECK(std::fabs(own[0] - file_value) < tol && std::fabs(own[1] - file_value) < tol && own[2] > 1.0f - tol && own[3] > 1.0f - tol);
+    CHECK(r484a::near_all(s.mean, own, tol));  // (with libpng or without: one 8-bit step at most between the two decoders)
     r484a::cleanup();
   });
   test("Decoding the 16-bit normal map with Blendity's own decoders (decode_image_own) gives bytes 128, 128, 255, 255 at every pixel and leaves the process's codec switch alone (round 484)", [] {
@@ -14360,6 +14419,1109 @@ static void tests_round484() {
     const std::vector<r484a::Block> all = r484a::blocks_of(r484a::log_since(mark));
     const r484a::Block *b = r484a::find_block(all, "sixteen_bit_normal");
     CHECK(b && r484a::has_line(*b, "normal_map \"" + std::string(r484a::kDir) + "/normal16_flat.png\" ok data"));
+    r484a::cleanup();
+  });
+}
+
+/* ---------------------------------------------------------------- round 485: Unity materials keep their maps and their gloss (task 0461, ADR 0131) */
+/* The committed set of round 484 again (r484a), with its table of means. The tests of tests_round484 that pinned round
+ * 484's faults were rewritten there; these are what round 485 adds: the history, a folder deleted and imported again,
+ * a package unpacked before the table existed, a table with junk in it, a Unity project's own Assets, an unpack still
+ * under way. */
+namespace r485a {
+static void steps(Editor &ed, int n) {
+  for (int i = 0; i < n; i++) ed.step_frame_headless();
+}
+
+/* The first material of the object of this name, wherever an undo or a redo has put it. */
+static MaterialPtr worn_by(Editor &ed, const char *name) {
+  GameObject *g = ed.scene().find_by_name(name);
+  MeshRenderer *mr = g ? g->get<MeshRenderer>() : nullptr;
+  return mr && !mr->materials.empty() ? mr->materials[0] : nullptr;
+}
+
+/* The set's two tables where an unpack's end leaves them. */
+static bool land_tables() {
+  std::error_code ec;
+  const std::string dir = resolve_asset_path(r484a::kDir);
+  for (const char *name : {".unity-stats", ".unity-guids"}) {
+    std::filesystem::copy_file(std::string("tests/fixtures/unity_gloss/") + name, fs::join(dir, name), std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+  }
+  return true;
+}
+
+/* `gloss_in_metal_alpha` as round 485 reads it: its two maps, and the mask's alpha (92 / 255) as its roughness. */
+static bool reads_right(const MaterialPtr &m, const std::string &dir = r484a::kDir) {
+  return m && m->base_map.path == dir + "/albedo_opaque.png" && m->metallic_map.path == dir + "/mask_r0_g230_a92.png" && std::fabs(m->roughness - 0.639216f) < 0.005f;
+}
+
+/* A map's GUID in the set: make_gloss.py numbers them from 1 (the mask 1, mask_r204_g255_a255 3, albedo_a64 4, albedo_opaque 5). */
+static std::string map_guid(int n) { return "aa" + std::string(29, '0') + std::to_string(n); }
+static const char *const kMaskLine = "\t74\t8\t8\t0.000000\t0.901961\t0.000000\t0.360784\n";  // (the mask's line after its GUID)
+}  // namespace r485a
+
+/* Round 485, the independent tests (test engineer): generated PNGs, packages of our own making, hostile files. */
+namespace r485b {
+static uint32_t crc32_of(const std::string &s) {
+  uint32_t table[256];
+  for (uint32_t n = 0; n < 256; n++) {
+    uint32_t c = n;
+    for (int k = 0; k < 8; k++) c = (c & 1u) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+    table[n] = c;
+  }
+  uint32_t c = 0xFFFFFFFFu;
+  for (unsigned char ch : s) c = table[(c ^ ch) & 0xFFu] ^ (c >> 8);
+  return c ^ 0xFFFFFFFFu;
+}
+static uint32_t adler32_of(const std::string &s) {
+  uint32_t a = 1, b = 0;
+  for (unsigned char ch : s) a = (a + ch) % 65521u, b = (b + a) % 65521u;
+  return (b << 16) | a;
+}
+static void be32(std::string &out, uint32_t v) {
+  for (int k = 3; k >= 0; k--) out += (char)((v >> (8 * k)) & 0xFFu);
+}
+static std::string chunk(const char *kind, const std::string &body) {
+  std::string out;
+  be32(out, (uint32_t)body.size());
+  out += kind;
+  out += body;
+  be32(out, crc32_of(std::string(kind) + body));
+  return out;
+}
+static int channels_of(int type) { return type == 0 ? 1 : type == 2 ? 3 : type == 4 ? 2 : 4; }
+
+/* A PNG of `depth` bits a sample (8 or 16) and colour `type` (0 grey, 2 RGB, 4 grey + alpha, 6 RGBA): the samples row by
+ * row, filter 0, a zlib stream of stored blocks with its Adler-32. */
+static std::string png_bytes(int w, int h, int type, int depth, const std::vector<uint16_t> &samples) {
+  std::string raw;
+  size_t at = 0;
+  for (int y = 0; y < h; y++) {
+    raw += '\0';
+    for (int i = 0; i < w * channels_of(type); i++, at++) {
+      if (depth == 16) raw += (char)(samples[at] >> 8), raw += (char)(samples[at] & 0xFFu);
+      else raw += (char)(samples[at] & 0xFFu);
+    }
+  }
+  std::string z = {(char)0x78, (char)0x01};
+  for (size_t p = 0; p < raw.size() || p == 0;) {
+    const size_t n = std::min<size_t>(65535, raw.size() - p);
+    const bool last = p + n >= raw.size();
+    z += (char)(last ? 1 : 0);
+    z += (char)(n & 255), z += (char)(n >> 8), z += (char)(~n & 255), z += (char)((~n >> 8) & 255);
+    z += raw.substr(p, n);
+    p += n;
+    if (last) break;
+  }
+  be32(z, adler32_of(raw));
+  std::string ihdr;
+  be32(ihdr, (uint32_t)w), be32(ihdr, (uint32_t)h);
+  ihdr += (char)depth, ihdr += (char)type, ihdr += '\0', ihdr += '\0', ihdr += '\0';
+  return std::string("\x89PNG\r\n\x1a\n", 8) + chunk("IHDR", ihdr) + chunk("IDAT", z) + chunk("IEND", "");
+}
+
+/* A one-colour image as write_png writes it (0xAABBGGRR), its bytes. */
+static std::string flat_png(int w, int h, uint32_t px) {
+  const std::vector<uint32_t> v((size_t)w * h, px);
+  const std::string path = fs::join(test_dir(), "r485_flat.png");
+  std::string bytes;
+  if (write_png(path, v.data(), w, h, w, true)) fs::read_file(path, bytes);
+  std::remove(path.c_str());
+  return bytes;
+}
+
+struct Item {
+  std::string guid, pathname, data, importer;
+};
+/* <test dir>/<stem>.unitypackage with these assets (stored, not compressed); unpacking it lands in Assets/Imported/<stem>. */
+static std::string pack(const std::string &stem, const std::vector<Item> &items) {
+  std::string tar;
+  for (const Item &it : items) {
+    r369::tar_add(tar, it.guid + "/", "", '5');
+    r369::tar_add(tar, it.guid + "/asset", it.data);
+    r369::tar_add(tar, it.guid + "/asset.meta", "fileFormatVersion: 2\nguid: " + it.guid + "\n" + it.importer);
+    r369::tar_add(tar, it.guid + "/pathname", it.pathname + "\n00");
+  }
+  const std::string path = fs::join(test_dir(), stem + ".unitypackage");
+  return fs::write_file(path, r369::gzip_stored(tar, true)) ? path : "";
+}
+static const char *const kTextureImporter = "TextureImporter:\n  sRGBTexture: 0\n  alphaUsage: 1\n";
+
+/* A Standard material whose smoothness is the alpha of the map `guid` in the metallic slot (the scale 1). */
+static std::string gloss_mat(const std::string &guid, const char *keywords = "_METALLICGLOSSMAP") {
+  return r371::mat("{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}",
+                   "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: " + guid + ", type: 3}\n        m_Scale: {x: 1, y: 1}\n        m_Offset: {x: 0, y: 0}\n",
+                   "    - _GlossMapScale: 1\n    - _Glossiness: 0.5\n", "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n", keywords);
+}
+
+static void drop_folder(const std::string &rel) {
+  std::error_code ec;
+  std::filesystem::remove_all(resolve_asset_path(rel), ec);
+}
+
+/* How many lines of a table start with this GUID. */
+static int lines_of(const std::string &file, const std::string &guid) {
+  std::string text;
+  if (!fs::read_file(file, text)) return -1;
+  int n = 0;
+  for (size_t at = 0; at < text.size();) {
+    const size_t end = std::min(text.find('\n', at), text.size());
+    n += text.compare(at, guid.size(), guid) == 0 ? 1 : 0;
+    at = end + 1;
+  }
+  return n;
+}
+
+/* The mask's `.meta` as a Unity project keeps it, with this alpha source. */
+static bool write_meta(const std::string &guid, int usage) {
+  return fs::write_file(fs::join(fs::join(resolve_asset_path(r484a::kDir), ".unity-meta"), guid + ".meta"),
+                        "fileFormatVersion: 2\nguid: " + guid + "\nTextureImporter:\n  sRGBTexture: 0\n  alphaUsage: " + std::to_string(usage) + "\n");
+}
+
+/* One generated PNG through both decoders. `pair`: the largest difference between decode_image and decode_image_own at
+ * any pixel and channel; `truth`: the own decoder's largest distance from the stored value on the 0..255 scale. */
+struct PngDiff {
+  bool ok = false;
+  int pair = 0;
+  double truth = 0.0;
+};
+static PngDiff compare_decoders(int depth, int type) {
+  PngDiff d;
+  const uint16_t vals[7] = {0x0000, 0x00FF, 0x0100, 0x7FFF, 0x8000, 0xFF00, 0xFFFF};
+  const int w = 7, h = 3, n = channels_of(type);
+  std::vector<uint16_t> s;
+  for (int i = 0; i < w * h * n; i++) {
+    const int p = i / n, c = i % n;
+    const uint16_t v = vals[(p + c * 3) % 7];
+    s.push_back(depth == 16 ? v : (uint16_t)(((v >> 8) + p * 11) & 255));
+  }
+  const std::string bytes = png_bytes(w, h, type, depth, s);
+  Bitmap a, b;
+  std::string ea, eb;
+  const bool oka = decode_image(bytes, a, ea), okb = decode_image_own(bytes, b, eb);
+  if (!oka || !okb) return std::printf("    decode failed (depth %d type %d): '%s' / '%s'\n", depth, type, ea.c_str(), eb.c_str()), d;
+  const size_t want = (size_t)w * h * 4;
+  if (a.width != w || a.height != h || b.width != w || b.height != h || a.is_float || b.is_float || a.rgba8.size() != want || b.rgba8.size() != want) return d;
+  d.ok = true;
+  for (int p = 0; p < w * h; p++)
+    for (int k = 0; k < 4; k++) {
+      const bool alpha_given = type == 4 || type == 6;
+      const int src = type == 0 ? p : type == 2 ? p * 3 + (k < 3 ? k : 0) : type == 4 ? p * 2 + (k < 3 ? 0 : 1) : p * 4 + k;
+      double truth = k == 3 && !alpha_given ? 255.0 : depth == 16 ? s[(size_t)src] / 257.0 : (double)s[(size_t)src];
+      d.pair = std::max(d.pair, std::abs((int)a.rgba8[(size_t)p * 4 + k] - (int)b.rgba8[(size_t)p * 4 + k]));
+      d.truth = std::max(d.truth, std::fabs((double)b.rgba8[(size_t)p * 4 + k] - truth));
+    }
+  return d;
+}
+}  // namespace r485b
+
+static void tests_round485() {
+  /* Criterion 2: reading again is not an edit, and the history keeps no copy of the early reading. */
+  test("Reading a Unity material again is not an edit: a wall wearing one read before its package was all there shows its maps after `unity rematerials`, with no undo step and the scene not marked changed - and undoing a rename made before it, then redoing, leaves the maps on (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(false));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha");
+    create_primitive(ed.scene(), "Cube")->name = "Wall";
+    ed.command("select Wall");
+    ed.command("assignmat " + path);
+    r485a::steps(ed, 3);
+    const MaterialPtr early = r485a::worn_by(ed, "Wall");
+    CHECK(early && early->asset_path == path && early->foreign && early->base_map.empty() && early->metallic_map.empty() && early->roughness == 0.0f);
+    if (!early) return;
+    /* An edit whose "before" holds the early reading: the wall renamed. */
+    ed.scene().find_by_name("Wall")->name = "Wall Renamed";
+    ed.mark_changed_for_test("Rename Wall");
+    r485a::steps(ed, 2);
+    CHECK(r485a::land_tables());  // (the unpack's end, by hand; `unity rematerials` is the way in a running session)
+    const size_t undo_before = ed.undo_depth_for_test();
+    const bool dirty_before = ed.scene_dirty_for_test();
+    const size_t mark = r484a::log_mark();
+    ed.command("unity rematerials");
+    r485a::steps(ed, 3);
+    const std::string said = r484a::log_since(mark);
+    CHECK(said.find("unity rematerials: ") != std::string::npos && said.find(", 1 changed") != std::string::npos);
+    CHECK(r485a::worn_by(ed, "Wall Renamed") == early && r485a::reads_right(early));  // (the same object, read again in place)
+    CHECK(ed.undo_depth_for_test() == undo_before && ed.scene_dirty_for_test() == dirty_before);
+    /* Undo the rename. The state it brings back held a copy of the early reading, and a restored state's values win over
+     * the asset's when they differ: the copy took the new reading when the asset did, so nothing is put back. */
+    ed.command("undo");
+    r485a::steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Wall") != nullptr && ed.scene().find_by_name("Wall Renamed") == nullptr);
+    CHECK(r485a::reads_right(r485a::worn_by(ed, "Wall")) && r485a::reads_right(material_asset(path)));
+    ed.command("redo");
+    r485a::steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Wall Renamed") != nullptr);
+    CHECK(r485a::reads_right(r485a::worn_by(ed, "Wall Renamed")) && r485a::reads_right(material_asset(path)));
+    r484a::cleanup();
+  });
+  test("Deleting an imported Unity package's folder and importing the package again in one session brings its materials back with their maps and their gloss, and a wall can wear one (round 485; before, none of them loaded until Blendity restarted)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();  // (no folder, a fresh library, nothing measured)
+    const std::string pkg = r484a::package(), path = r484a::mat_path("gloss_in_metal_alpha");
+    CHECK(!pkg.empty());
+    ed.command("import " + pkg);
+    CHECK(r485a::reads_right(material_asset(path)));
+    ed.command(std::string("deleteasset ") + r484a::kDir);
+    CHECK(!fs::exists(resolve_asset_path(r484a::kDir)) && material_asset(path) == nullptr);  // (in the scratch trash: nothing to load)
+    ed.command("import " + pkg);
+    const MaterialPtr again = material_asset(path);
+    std::printf("    after deleting the folder and importing again: %s\n", again ? "its material loads" : "its material does NOT load");
+    CHECK(again != nullptr && again->foreign && r485a::reads_right(again));
+    create_primitive(ed.scene(), "Cube")->name = "Wall";
+    ed.command("select Wall");
+    ed.command("assignmat " + path);
+    r485a::steps(ed, 2);
+    CHECK(again != nullptr && r485a::worn_by(ed, "Wall") == again);
+    std::remove(pkg.c_str());
+    r484a::cleanup();
+  });
+  /* Criterion 4, without the table. */
+  test("A Unity package unpacked before round 485 has no table of means: its materials come in with their maps and the old gloss, the maps their gloss is in are measured off the frame (at once in a headless run), the materials follow in place and the table is written for the next session (round 485, ADR 0131)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha"), stats = fs::join(resolve_asset_path(r484a::kDir), ".unity-stats"), mask = r485a::map_guid(1);
+    CHECK(!fs::exists(stats));
+    const MaterialPtr m = material_asset(path);
+    CHECK(m != nullptr);
+    if (!m) return;
+    CHECK(m->foreign && !m->base_map.empty() && !m->metallic_map.empty() && m->roughness == 0.0f);  // (as before round 485, until its mask is measured)
+    CHECK(unity_gloss_wanted().count(mask) == 1);
+    const size_t mark = r484a::log_mark();
+    ed.step_frame_headless();  // (the frame's poll: the job runs and lands)
+    CHECK(!ed.unity_gloss_running_for_test() && unity_gloss_wanted().empty());
+    CHECK(material_asset(path) == m && r485a::reads_right(m));
+    const std::string said = r484a::log_since(mark);
+    std::printf("    %s", said.find("Unity materials: ") == std::string::npos ? "(the job said nothing)\n" : said.substr(said.find("Unity materials: ")).c_str());
+    CHECK(said.find("texture(s) their gloss is read from") != std::string::npos && said.find("measured for their gloss") != std::string::npos);
+    std::string wrote, committed;
+    CHECK(fs::read_file(stats, wrote) && wrote.find(mask + r485a::kMaskLine) != std::string::npos);
+    /* The next session: a fresh library and index find the line; nothing is asked for again. */
+    clear_material_assets();
+    r484a::forget_gloss();
+    r484a::refresh_index();
+    const MaterialPtr next = material_asset(path);
+    CHECK(next != m && r485a::reads_right(next) && unity_gloss_wanted().count(mask) == 0);
+    /* `unity rematerials` loads the rest and measures what they ask for: the table ends as the set commits it. */
+    ed.command("unity rematerials");
+    r485a::steps(ed, 2);
+    CHECK(fs::read_file(stats, wrote) && fs::read_file("tests/fixtures/unity_gloss/.unity-stats", committed) && wrote == committed);
+    if (wrote != committed) std::printf("    the job wrote:\n%s--- the set commits:\n%s", wrote.c_str(), committed.c_str());
+    const r484a::Seen albedo = r484a::seen("gloss_in_albedo_alpha"), red = r484a::seen("metal_from_red");
+    CHECK(std::fabs(albedo.rough - 0.799216f) < 0.005f && std::fabs(red.rough - 0.75f) < 0.005f && std::fabs(red.metal - 0.8f) < 0.005f);
+    /* Asked again, nothing is left to do. */
+    const size_t again = r484a::log_mark();
+    ed.command("unity rematerials");
+    CHECK(r484a::log_since(again).find(", 0 changed") != std::string::npos && !ed.unity_gloss_running_for_test());
+    r484a::cleanup();
+  });
+  test("A table of means with junk in it changes nothing and breaks nothing: lines that are not numbers, name no texture or were measured on a file of another size are not read and their texture is measured again; a line ending in CR LF is read; a gloss map that is gone leaves its material as it was, then and after `unity rematerials` (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const std::string dir = resolve_asset_path(r484a::kDir), stats = fs::join(dir, ".unity-stats");
+    const std::string mask = r485a::map_guid(1), red = r485a::map_guid(3), albedo = r485a::map_guid(4);
+    const std::string junk = "not a line\n" + mask + "\t74\t8\t8\tnan\t0\t0\t0.5\n" + mask + "\t75\t8\t8\t0\t0\t0\t0.9\n" + mask + "\t74x\t8\t8\t0\t0\t0\t0.9\n" + mask + "\t74\t8\t8\t0\t0\t0\n" +
+                             "zz" + std::string(30, '0') + "\t74\t8\t8\t0\t0\t0\t0.9\n\n\t\t\t\n" + red + "\t76\t8\t8\t0.8\t1\t0\t1\r\n" + albedo + "\t76\t8\t8\t0.7\t0.6\t0.6\t1e999\n";
+    CHECK(fs::write_file(stats, junk));
+    r484a::refresh_index();
+    const MaterialPtr worn = material_asset(r484a::mat_path("gloss_in_metal_alpha")), control = material_asset(r484a::mat_path("metal_from_red"));
+    CHECK(worn && control);
+    if (!worn || !control) return;
+    CHECK(worn->roughness == 0.0f && unity_gloss_wanted().count(mask) == 1);  // (none of the mask's lines was read: as before round 485, and asked for)
+    CHECK(std::fabs(control->roughness - 0.75f) < 0.005f && unity_gloss_wanted().count(red) == 0);  // (the CR LF line was)
+    ed.step_frame_headless();
+    CHECK(r485a::reads_right(worn));  // (measured again: its line added below the junk, which stays as it was)
+    std::string wrote;
+    CHECK(fs::read_file(stats, wrote) && wrote.compare(0, junk.size(), junk) == 0 && wrote.find(mask + r485a::kMaskLine, junk.size()) != std::string::npos);
+    /* A gloss map that is gone: its material stays as it was read, and the texture is not asked for a second time. */
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    CHECK(std::filesystem::remove(fs::join(dir, "mask_r0_g230_a92.png")));
+    const MaterialPtr lost = material_asset(r484a::mat_path("gloss_scaled"));
+    CHECK(lost != nullptr);
+    if (!lost) return;
+    const float before = lost->roughness;
+    const size_t mark = r484a::log_mark();
+    r485a::steps(ed, 2);
+    CHECK(lost->roughness == before && !ed.unity_gloss_running_for_test());
+    CHECK(r484a::log_since(mark).find("could not be read") != std::string::npos && ed.unity_gloss_failed_for_test(mask));  // (said once; not sent to the worker again)
+    ed.command("unity rematerials");
+    r485a::steps(ed, 2);
+    CHECK(lost->roughness == before && !ed.unity_gloss_running_for_test());
+    CHECK(fs::read_file(stats, wrote) && wrote.find(mask) == std::string::npos && wrote.find(red) != std::string::npos);  // (the other materials' maps were measured; the missing one has no line)
+    r484a::cleanup();
+  });
+  test("The alpha a Unity shader samples follows the texture's import settings - the image's own, 1 when its Alpha Source is None, its grey when From Gray Scale; a line of the table is what the unpack writes; a .mat names the maps its gloss is read from by its keywords (round 485)", [] {
+    const float mean[4] = {0.2f, 0.4f, 0.9f, 0.25f};
+    CHECK(unity_sampled_alpha("", mean) == 0.25f);  // (no .meta: the image's own alpha)
+    CHECK(unity_sampled_alpha("fileFormatVersion: 2\nTextureImporter:\n  alphaUsage: 1\n", mean) == 0.25f);
+    CHECK(unity_sampled_alpha("fileFormatVersion: 2\nTextureImporter:\n  alphaUsage: 0\n", mean) == 1.0f);
+    CHECK(std::fabs(unity_sampled_alpha("fileFormatVersion: 2\nTextureImporter:\n  alphaUsage: 2\n", mean) - 0.5f) < 1e-6f);
+    CHECK(unity_sampled_alpha("fileFormatVersion: 2\nDefaultImporter:\n  userData: \n", mean) == 0.25f);  // (not a texture's importer)
+    CHECK(unity_stats_line("abc", 1234567890123ull, 4096, 2048, mean) == "abc\t1234567890123\t4096\t2048\t0.200000\t0.400000\t0.900000\t0.250000\n");
+    auto maps_of = [](const char *name) {
+      std::string text;
+      return fs::read_file(std::string("tests/fixtures/unity_gloss/") + name + ".mat", text) ? unity_material_gloss_textures(text) : std::vector<std::string>{"(the file can't be read)"};
+    };
+    CHECK(maps_of("gloss_in_metal_alpha") == std::vector<std::string>{r485a::map_guid(1)});
+    CHECK(maps_of("urp_lit_mask") == std::vector<std::string>{r485a::map_guid(1)});          // (URP's keyword)
+    CHECK(maps_of("gloss_in_albedo_alpha") == std::vector<std::string>{r485a::map_guid(4)});  // (the albedo, by its keyword)
+    CHECK(maps_of("slot_without_keyword").empty() && maps_of("mirror").empty());              // (a texture in the slot is not enough)
+    CHECK(unity_material_gloss_textures("").empty() && unity_material_gloss_textures("not: a material\n").empty() &&
+          unity_material_gloss_textures("--- !u!21 &2100000\nMaterial:\n  m_SavedProperties: [\n").empty());  // (anything else: none, no throw)
+  });
+  test("A Unity project's own Assets copied in (a .meta beside each file, no package's table): a material's gloss map is measured the same way and kept for the session - nothing is written beside the project's files - and a map replaced on disk is measured again (round 485, ADR 0131)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    r484a::forget_gloss();
+    const std::string rel = "Assets/R485Copied", dir = resolve_asset_path(rel), mask = r485a::map_guid(1);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    fs::make_dirs(dir);
+    const struct {
+      const char *file;
+      int guid;
+    } files[] = {{"gloss_in_metal_alpha.mat", 0}, {"mask_r0_g230_a92.png", 1}, {"albedo_opaque.png", 5}};
+    for (const auto &f : files) {
+      std::string data;
+      CHECK(fs::read_file(std::string("tests/fixtures/unity_gloss/") + f.file, data) && fs::write_file(fs::join(dir, f.file), data));
+      if (f.guid) CHECK(fs::write_file(fs::join(dir, std::string(f.file) + ".meta"), "fileFormatVersion: 2\nguid: " + r485a::map_guid(f.guid) + "\nTextureImporter:\n  alphaUsage: 1\n"));
+    }
+    r484a::refresh_index();
+    const std::string path = rel + "/gloss_in_metal_alpha.mat";
+    const MaterialPtr m = material_asset(path);
+    CHECK(m != nullptr);
+    if (!m) return;
+    CHECK(m->foreign && m->metallic_map.path == rel + "/mask_r0_g230_a92.png" && m->roughness == 0.0f && unity_gloss_wanted().count(mask) == 1);
+    ed.step_frame_headless();
+    CHECK(r485a::reads_right(m, rel));
+    CHECK(!fs::exists(fs::join(dir, ".unity-stats")) && !fs::exists(fs::join(resolve_asset_path("Assets"), ".unity-stats")));
+    /* The same session, a fresh library: the mean is at hand; nothing is asked for again... */
+    clear_material_assets();
+    const MaterialPtr again = material_asset(path);
+    CHECK(again && again != m && r485a::reads_right(again, rel) && unity_gloss_wanted().count(mask) == 0);
+    /* ...until the file is another one (4 x 4, alpha 51 / 255): the session's mean was measured on other bytes. */
+    std::vector<uint32_t> px(16, 0x33336699u);
+    CHECK(write_png(fs::join(dir, "mask_r0_g230_a92.png"), px.data(), 4, 4, 4, true));
+    clear_material_assets();
+    const MaterialPtr other = material_asset(path);
+    CHECK(other != nullptr);
+    if (!other) return;
+    CHECK(other->roughness == 0.0f && unity_gloss_wanted().count(mask) == 1);
+    ed.step_frame_headless();
+    std::printf("    the replaced map (alpha 51 / 255): roughness %.4f (0.8 wanted)\n", other->roughness);
+    CHECK(std::fabs(other->roughness - 0.8f) < 0.005f);
+    std::filesystem::remove_all(dir, ec);
+    clear_material_assets();
+    r484a::forget_gloss();
+    r484a::refresh_index();
+  });
+  /* Criterion 1's mechanism: what the Materials window reads while a package unpacks. */
+  test("While a Unity package unpacks, the list of the project's materials leaves its folder out - the Materials window, open, loads none of them half-read - `unity rematerials` waits for it, and when it ends the window has all of them with their maps (round 485: how a world came in as mirrors)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(false));  // (half way through: the files, neither table)
+    const std::string prefix = std::string(r484a::kDir) + "/";
+    auto job = std::make_shared<Editor::PackageJob>();
+    job->path = "UnityGloss.unitypackage", job->into_rel = r484a::kDir;
+    ed.set_package_job_for_test(job);  // (no worker: it stands in for one until `done`)
+    auto listed = [&] {
+      size_t n = 0;
+      for (const std::string &p : ed.material_asset_paths_for_test()) n += p.rfind(prefix, 0) == 0 ? 1 : 0;
+      return n;
+    };
+    auto loaded = [&] {
+      size_t n = 0;
+      for (const auto &kv : loaded_material_assets()) n += kv.first.rfind(prefix, 0) == 0 ? 1 : 0;
+      return n;
+    };
+    ed.command("window Materials");
+    r485a::steps(ed, 4);
+    CHECK(listed() == 0 && loaded() == 0);
+    const size_t mark = r484a::log_mark();
+    ed.command("unity rematerials");
+    CHECK(r484a::log_since(mark).find("not while UnityGloss.unitypackage unpacks") != std::string::npos && loaded() == 0);
+    /* The unpack ends: its tables are there, and the next frame lands it. */
+    CHECK(r485a::land_tables());
+    job->done.store(true);
+    r485a::steps(ed, 4);
+    CHECK(ed.last_package_for_test() == job.get());
+    std::printf("    after the unpack's end: %zu of its 12 materials listed, %zu loaded\n", listed(), loaded());
+    CHECK(listed() == 12 && loaded() == 12);
+    CHECK(r485a::reads_right(material_asset(r484a::mat_path("gloss_in_metal_alpha"))));
+    r484a::cleanup();
+  });
+  test("the lesson's Try-it (round 485): unity rematerials with nothing read too early says how many Unity materials it read again and that none changed, adds no undo step and leaves no job running", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    CHECK(r484a::install(true));
+    const size_t undo_before = ed.undo_depth_for_test(), mark = r484a::log_mark();
+    ed.command("unity rematerials");
+    const std::string said = r484a::log_since(mark);
+    std::printf("    %s", said.find("unity rematerials: ") == std::string::npos ? "(it said nothing)\n" : said.substr(said.find("unity rematerials: ")).c_str());
+    CHECK(said.find("unity rematerials: ") != std::string::npos && said.find("Unity material(s) read again, 0 changed") != std::string::npos);
+    CHECK(loaded_material_assets().size() >= 12 && ed.undo_depth_for_test() == undo_before && !ed.unity_gloss_running_for_test());
+    r484a::cleanup();
+  });
+  /* The round's review: what it found, each with the test that would have caught it. */
+  test("`unity materials all` in a headless run lists a material it has just loaded with its measured gloss, not as it stood before its map was measured: gloss_scaled at roughness 0.819608 in a package without a table of means (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const size_t mark = r484a::log_mark();
+    ed.command("unity materials all");
+    const std::vector<r484a::Block> all = r484a::blocks_of(r484a::log_since(mark));
+    const r484a::Block *scaled = r484a::find_block(all, "gloss_scaled"), *albedo = r484a::find_block(all, "gloss_in_albedo_alpha");
+    CHECK(scaled && albedo);
+    if (!scaled || !albedo) return;
+    CHECK(r484a::has_line(*scaled, "metallic 1 roughness 0.819608 specular 0.5") && r484a::has_line(*albedo, "metallic 0.1 roughness 0.799216 specular 0.5"));
+    CHECK(!ed.unity_gloss_running_for_test() && fs::exists(fs::join(resolve_asset_path(r484a::kDir), ".unity-stats")));
+    r484a::cleanup();
+  });
+  test("Measuring one material's gloss map reads that material again and no other: a value typed on another Unity material of the package stays, until `unity rematerials` is asked for (round 485: every landing read every Unity material again)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    /* The table without the mask's line: only the materials that read their gloss from the mask ask for anything. */
+    const std::string stats = fs::join(resolve_asset_path(r484a::kDir), ".unity-stats"), mask = r485a::map_guid(1);
+    std::string table, kept;
+    CHECK(fs::read_file(stats, table));
+    for (size_t at = 0; at < table.size();) {
+      const size_t end = std::min(table.find('\n', at), table.size());
+      if (table.compare(at, mask.size(), mask) != 0) kept += table.substr(at, end - at) + "\n";
+      at = end + 1;
+    }
+    CHECK(!kept.empty() && kept.size() < table.size() && fs::write_file(stats, kept));
+    r484a::refresh_index();
+    const MaterialPtr typed = material_asset(r484a::mat_path("metal_from_red")), asks = material_asset(r484a::mat_path("gloss_in_metal_alpha"));
+    CHECK(typed && asks);
+    if (!typed || !asks) return;
+    typed->roughness = 0.3f, typed->touch();  // (typed in the Inspector)
+    CHECK(asks->roughness == 0.0f && unity_gloss_wanted().count(mask) == 1 && unity_gloss_wanted().size() == 1);
+    ed.step_frame_headless();
+    CHECK(r485a::reads_right(asks));
+    CHECK(typed->roughness == 0.3f);
+    ed.command("unity rematerials");  // (asked for: every Unity material's file again - the typed value goes, as the lesson says)
+    CHECK(std::fabs(typed->roughness - 0.75f) < 0.005f && r485a::reads_right(asks));
+    r484a::cleanup();
+  });
+  test("A gloss job cancelled part way lands what it measured: those materials follow, the Console says how many textures are left, they are not sent again on their own, and `unity rematerials` measures them (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string mask = r485a::map_guid(1), albedo = r485a::map_guid(4);
+    const std::string mask_mat = r484a::mat_path("gloss_in_metal_alpha"), albedo_mat = r484a::mat_path("gloss_in_albedo_alpha");
+    const MaterialPtr a = material_asset(mask_mat), b = material_asset(albedo_mat);
+    CHECK(a && b);
+    if (!a || !b) return;
+    const float waiting = b->roughness;
+    CHECK(std::fabs(waiting - 0.2f) < 1e-5f);  // (its map's mean not known: the alpha stands at 1, times the scale 0.8)
+    /* The job as its worker would leave it had Cancel come after the first texture (a headless editor runs its own to the end). */
+    const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
+    auto job = std::make_shared<Editor::GlossJob>();
+    for (const auto &want : {std::make_pair(mask, mask_mat), std::make_pair(albedo, albedo_mat)}) {
+      const auto it = index->find(want.first);
+      CHECK(it != index->end());
+      if (it == index->end()) return;
+      Editor::GlossJob::Item item;
+      item.guid = want.first, item.path = it->second.path, item.table = it->second.table, item.materials = {want.second};
+      job->items.push_back(item);
+    }
+    Editor::GlossJob::Item &first = job->items[0];
+    first.bytes = unity_file_bytes(first.path);
+    first.ok = unity_texture_mean(first.path, first.width, first.height, first.mean);
+    job->cancel.store(true);
+    job->run();  // (cancelled: it measures nothing more, and ends)
+    CHECK(first.ok && !job->items[1].ok && job->done.load());
+    r484a::forget_gloss();  // (the job took what was asked for)
+    const size_t mark = r484a::log_mark();
+    ed.land_unity_gloss_for_test(job);
+    const std::string said = r484a::log_since(mark);
+    CHECK(said.find("cancelled with 1 left") != std::string::npos && said.find("1 material(s) read again") != std::string::npos);
+    CHECK(r485a::reads_right(a) && b->roughness == waiting);
+    CHECK(ed.unity_gloss_failed_for_test(albedo) && !ed.unity_gloss_failed_for_test(mask) && !ed.unity_gloss_running_for_test());
+    /* Read again on its own (the Materials window, a scene): the texture left is asked for, and not sent. */
+    clear_material_assets();
+    const MaterialPtr again = material_asset(albedo_mat);
+    CHECK(again && unity_gloss_wanted().count(albedo) == 1);
+    r485a::steps(ed, 2);
+    CHECK(again && again->roughness == waiting && !ed.unity_gloss_running_for_test());
+    /* Asked for by hand: measured. */
+    ed.command("unity rematerials");
+    r485a::steps(ed, 2);
+    CHECK(again && std::fabs(again->roughness - 0.799216f) < 0.005f && !ed.unity_gloss_failed_for_test(albedo));
+    r484a::cleanup();
+  });
+  test("A gloss job that lands while the scene plays is still there after Stop: the wall wears the measured gloss in Play and when Play ends (round 485: Stop brought the reading from before the job back)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true, false));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha"), mask = r485a::map_guid(1);
+    create_primitive(ed.scene(), "Cube")->name = "Wall";
+    ed.command("select Wall");
+    ed.command("assignmat " + path);
+    r484a::forget_gloss();  // (held back: this test lands the job by hand, in Play - a headless frame would run it now)
+    r485a::steps(ed, 3);
+    const MaterialPtr before = r485a::worn_by(ed, "Wall");
+    CHECK(before && before->asset_path == path && before->roughness == 0.0f && !before->metallic_map.empty());
+    if (!before) return;
+    ed.command("play");
+    r485a::steps(ed, 2);
+    const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(resolve_asset_path("Assets"), r484a::project_dir());
+    const auto it = index->find(mask);
+    CHECK(it != index->end());
+    if (it == index->end()) return;
+    auto job = std::make_shared<Editor::GlossJob>();
+    Editor::GlossJob::Item item;
+    item.guid = mask, item.path = it->second.path, item.table = it->second.table, item.materials = {path};
+    job->items.push_back(item);
+    job->run();
+    ed.land_unity_gloss_for_test(job);
+    CHECK(r485a::reads_right(r485a::worn_by(ed, "Wall")) && r485a::reads_right(material_asset(path)));  // (in Play)
+    ed.command("stop");
+    r485a::steps(ed, 2);
+    const MaterialPtr after = r485a::worn_by(ed, "Wall");
+    std::printf("    after Stop: roughness %.4f (0.6392 wanted; 0 is the reading from before the job)\n", after ? after->roughness : -1.0f);
+    CHECK(r485a::reads_right(after) && r485a::reads_right(material_asset(path)));
+    r484a::cleanup();
+  });
+  test("A scene opened while its Unity package's folder is missing keeps its own copies of the materials; importing the package reads the Unity files into them - the wall has its maps - and no later save writes Blendity's text over a Unity .mat; the same when the folder is put back by hand (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    const std::string pkg = r484a::package(), path = r484a::mat_path("gloss_in_metal_alpha"), scene_file = "Assets/Scenes/R485StandIn.scene";
+    const std::string mat_file = resolve_asset_path(path);
+    CHECK(!pkg.empty());
+    ed.command("newscene");
+    ed.command("import " + pkg);
+    create_primitive(ed.scene(), "Cube")->name = "Wall";
+    ed.command("select Wall");
+    ed.command("assignmat " + path);
+    r485a::steps(ed, 2);
+    ed.command("save " + scene_file);
+    r485a::steps(ed, 2);
+    std::string unity_text, now_text;
+    CHECK(fs::read_file(mat_file, unity_text) && unity_material_text(unity_text));
+    std::error_code ec;
+    /* The folder gone and Blendity started again (a fresh library); the scene opened: its copy stands in for the file. */
+    auto reopen_without_folder = [&]() -> MaterialPtr {
+      std::filesystem::remove_all(resolve_asset_path(r484a::kDir), ec);
+      clear_material_assets();
+      r484a::forget_gloss();
+      r484a::refresh_index();
+      ed.command("newscene");
+      ed.command("open " + scene_file);
+      return r485a::worn_by(ed, "Wall");
+    };
+    auto edit = [&](const char *name) {  // (any edit: its step saves the material assets that changed)
+      GameObject *wall = ed.scene().find_by_name("Wall");
+      if (wall) wall->name = name;
+      ed.mark_changed_for_test("Rename Wall");
+      r485a::steps(ed, 3);
+      if (GameObject *renamed = ed.scene().find_by_name(name)) renamed->name = "Wall";
+    };
+    MaterialPtr stand_in = reopen_without_folder();
+    CHECK(stand_in && stand_in->asset_path == path && !stand_in->foreign);
+    if (!stand_in) return;
+    ed.command("import " + pkg);
+    r485a::steps(ed, 2);
+    CHECK(r485a::worn_by(ed, "Wall") == stand_in && stand_in->foreign && r485a::reads_right(stand_in));
+    edit("Wall Renamed");
+    CHECK(fs::read_file(mat_file, now_text) && now_text == unity_text);
+    /* The folder put back by hand (out of the Recycle Bin, say): nothing reads it yet, and nothing is written over it. */
+    stand_in = reopen_without_folder();
+    CHECK(stand_in && !stand_in->foreign);
+    if (!stand_in) return;
+    CHECK(r484a::install(true));
+    edit("Wall Renamed");
+    CHECK(fs::read_file(mat_file, now_text) && now_text == unity_text);
+    ed.command("unity rematerials");
+    CHECK(r485a::worn_by(ed, "Wall") == stand_in && stand_in->foreign && r485a::reads_right(stand_in));
+    std::remove(resolve_asset_path(scene_file).c_str());
+    std::remove(pkg.c_str());
+    r484a::cleanup();
+  });
+  test("A Unity material whose keyword names a map its slot does not hold is shaded with Unity's white texture there - all metal, the smoothness its scale alone; with both keywords the smoothness is the albedo's alpha, not the metallic map's, and that is the one map measured; a mean not known yet stands at alpha 1 (round 485)", [] {
+    using namespace r371;
+    const std::string standard = "{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}";
+    const std::string floats = "    - _Metallic: 0.2\n    - _Glossiness: 0.3\n    - _GlossMapScale: 0.6\n", white = "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n";
+    const std::string metal_slot = "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: metal, type: 3}\n";
+    const std::string main_slot = "    - _MainTex:\n        m_Texture: {fileID: 2800000, guid: albedo, type: 3}\n";
+    const char *const both_keys = "_METALLICGLOSSMAP _SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A";
+    const std::function<bool(const std::string &, float &)> mean = [](const std::string &guid, float &alpha) -> bool {
+      alpha = guid == "albedo" ? 0.5f : 0.25f;
+      return true;
+    };
+    UnityMaterialInfo info;
+    Material empty_metal;  // (_METALLICGLOSSMAP over an empty slot)
+    CHECK(unity_material(mat(standard, "", floats, white, "_METALLICGLOSSMAP"), kTex, shader("Standard"), empty_metal, info, {}, mean));
+    CHECK(empty_metal.metallic == 1.0f && empty_metal.metallic_map.empty() && std::fabs(empty_metal.roughness - 0.4f) < 1e-5f && info.gloss_texture.empty() && !info.gloss_pending);
+    Material empty_albedo;  // (the albedo-alpha keyword and no albedo: alpha 1 x the scale; metal is the slider)
+    CHECK(unity_material(mat(standard, "", floats, white, "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A"), kTex, shader("Standard"), empty_albedo, info, {}, mean));
+    CHECK(std::fabs(empty_albedo.metallic - 0.2f) < 1e-6f && std::fabs(empty_albedo.roughness - 0.4f) < 1e-5f && info.gloss_texture.empty() && !info.gloss_pending);
+    Material both;  // (both keywords, both maps: metal from the metallic map, the smoothness from the albedo's alpha)
+    CHECK(unity_material(mat(standard, main_slot + metal_slot, floats, white, both_keys), kTex, shader("Standard"), both, info, {}, mean));
+    CHECK(both.metallic == 1.0f && both.metallic_map.path == "Assets/T/metal.png" && info.gloss_texture == "albedo" && std::fabs(both.roughness - 0.7f) < 1e-5f);
+    CHECK(unity_material_gloss_textures(mat(standard, main_slot + metal_slot, floats, white, both_keys)) == std::vector<std::string>{"albedo"});
+    Material pending;  // (no mean yet: the alpha stands at 1 - what Unity shows for a texture it cannot find)
+    CHECK(unity_material(mat(standard, main_slot, floats, white, "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A"), kTex, shader("Standard"), pending, info));
+    CHECK(info.gloss_pending && info.gloss_texture == "albedo" && std::fabs(pending.roughness - 0.4f) < 1e-5f);
+  });
+}
+
+/* ---------------------------------------------------------------- round 485, the test engineer's independent tests */
+static void tests_round485_independent() {
+  /* Criterion 5. */
+  test("A 16-bit PNG - grey, grey + alpha, RGB, RGBA, with 0x0000 0x00FF 0x0100 0x7FFF 0x8000 0xFF00 0xFFFF in it - reads the same, within one 8-bit step, through the libraries' decoder and Blendity's own, whichever build runs; an 8-bit PNG's bytes are identical through both (round 485)", [] {
+    const bool switch_before = image_library_codecs();
+    set_image_library_codecs(true);
+    std::printf("    libpng built in: %s\n", r484a::libpng_built_in() ? "yes" : "no (both decoders are Blendity's own)");
+    for (int depth : {16, 8})
+      for (int type : {0, 2, 4, 6}) {
+        const r485b::PngDiff d = r485b::compare_decoders(depth, type);
+        std::printf("    %d bit, colour type %d: the decoders differ by %d, Blendity's own is %.2f from the stored value\n", depth, type, d.pair, d.truth);
+        CHECK(d.ok);
+        CHECK(d.pair <= (depth == 16 ? 1 : 0));
+        CHECK(d.truth <= (depth == 16 ? 1.0 + 1e-9 : 0.0));
+      }
+    /* An 8-bit RGBA image as the program's own writer makes it: every byte the same through both. */
+    std::vector<uint32_t> px(16 * 16);
+    for (size_t i = 0; i < px.size(); i++) px[i] = ((uint32_t)((i * 7) & 0xFF) << 24) | ((uint32_t)((i * 37) & 0xFF) << 16) | ((uint32_t)((i * 91) & 0xFF) << 8) | (uint32_t)(i & 0xFF);
+    const std::string path = fs::join(test_dir(), "r485_eight.png");
+    std::string bytes;
+    CHECK(write_png(path, px.data(), 16, 16, 16, true) && fs::read_file(path, bytes));
+    std::remove(path.c_str());
+    Bitmap a, b;
+    std::string ea, eb;
+    CHECK(decode_image(bytes, a, ea) && decode_image_own(bytes, b, eb));
+    CHECK(a.width == 16 && a.height == 16 && a.rgba8.size() == 16 * 16 * 4 && a.rgba8 == b.rgba8);
+    set_image_library_codecs(switch_before);
+    CHECK(image_library_codecs() == switch_before);
+  });
+
+  /* Criterion 2's two-package cases. */
+  test("Two Unity packages that carry a texture of the same GUID, each folder with its own copy of it and its own table: a material gets the file the GUID index names and the mean measured on that file; when only the other folder has a line, the material gets no mean from it - it is measured on the file it wears (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    r485b::drop_folder("Assets/Imported/R485PkgA");
+    r485b::drop_folder("Assets/Imported/R485PkgB");
+    const std::string guid = "dd" + std::string(29, '0') + "1";
+    const std::string png_a = r485b::flat_png(8, 8, 0x5C336699u), png_b = r485b::flat_png(4, 4, 0xC8336699u);
+    CHECK(!png_a.empty() && !png_b.empty() && png_a != png_b);
+    const float rough_a = 1.0f - 92.0f / 255.0f, rough_b = 1.0f - 200.0f / 255.0f;
+    const std::string pkg_a = r485b::pack("R485PkgA", {{guid, "Assets/Pkg/mask.png", png_a, r485b::kTextureImporter}, {"ee" + std::string(29, '0') + "1", "Assets/Pkg/wall.mat", r485b::gloss_mat(guid), ""}});
+    const std::string pkg_b = r485b::pack("R485PkgB", {{guid, "Assets/Pkg/mask.png", png_b, r485b::kTextureImporter}, {"ee" + std::string(29, '0') + "2", "Assets/Pkg/wall.mat", r485b::gloss_mat(guid), ""}});
+    CHECK(!pkg_a.empty() && !pkg_b.empty());
+    ed.command("import " + pkg_a);
+    CHECK(ed.last_package_for_test() && ed.last_package_for_test()->gloss_measured == 1);
+    ed.command("import " + pkg_b);
+    CHECK(ed.last_package_for_test() && ed.last_package_for_test()->gloss_measured == 1);
+    const std::string assets = resolve_asset_path("Assets");
+    const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets, fs::parent(assets), true);
+    const auto at = index->find(guid);
+    CHECK(at != index->end());
+    if (at == index->end()) return;
+    const bool b_wins = at->second.path.find("R485PkgB") != std::string::npos;
+    const std::string win = b_wins ? "R485PkgB" : "R485PkgA", lose = b_wins ? "R485PkgA" : "R485PkgB";
+    const float rough_win = b_wins ? rough_b : rough_a, rough_lose = b_wins ? rough_a : rough_b;
+    std::printf("    the index names the texture of %s (the folder read later wins); its mean gives roughness %.4f, the other's %.4f\n", win.c_str(), rough_win, rough_lose);
+    const std::string win_map = "Assets/Imported/" + win + "/Pkg/mask.png";
+    const std::string mat_a = "Assets/Imported/R485PkgA/Pkg/wall.mat", mat_b = "Assets/Imported/R485PkgB/Pkg/wall.mat";
+    const std::string win_stats = fs::join(resolve_asset_path("Assets/Imported/" + win), ".unity-stats"), lose_stats = fs::join(resolve_asset_path("Assets/Imported/" + lose), ".unity-stats");
+    CHECK(r485b::lines_of(win_stats, guid) == 1 && r485b::lines_of(lose_stats, guid) == 1);
+    /* Both tables have a line: each material wears the winner's file and its mean - the material of the other folder too. */
+    MaterialPtr ma = material_asset(mat_a), mb = material_asset(mat_b);
+    CHECK(ma && mb);
+    if (!ma || !mb) return;
+    CHECK(ma->metallic_map.path == win_map && mb->metallic_map.path == win_map);
+    CHECK(std::fabs(ma->roughness - rough_win) < 0.005f && std::fabs(mb->roughness - rough_win) < 0.005f);
+    /* Only the folder read first (the loser) keeps its line: a mean measured on the other folder's file is not used. */
+    std::string lose_before, lose_after;
+    CHECK(fs::read_file(lose_stats, lose_before));
+    CHECK(std::filesystem::remove(win_stats));
+    clear_material_assets();
+    r484a::forget_gloss();
+    r484a::refresh_index();
+    ma = material_asset(mat_a), mb = material_asset(mat_b);
+    CHECK(ma && mb);
+    if (!ma || !mb) return;
+    std::printf("    only the other folder has a line: roughness %.4f / %.4f (that folder's own mean would give %.4f)\n", ma->roughness, mb->roughness, rough_lose);
+    CHECK(ma->roughness == 0.0f && mb->roughness == 0.0f && unity_gloss_wanted().count(guid) == 1);
+    ed.step_frame_headless();  // (the job measures the file the materials wear)
+    CHECK(!ed.unity_gloss_running_for_test());
+    CHECK(std::fabs(ma->roughness - rough_win) < 0.005f && std::fabs(mb->roughness - rough_win) < 0.005f);
+    CHECK(r485b::lines_of(win_stats, guid) == 1 && fs::read_file(lose_stats, lose_after) && lose_after == lose_before);  // (the line went to the winner's table)
+    std::remove(pkg_a.c_str());
+    std::remove(pkg_b.c_str());
+    r485b::drop_folder("Assets/Imported/R485PkgA");
+    r485b::drop_folder("Assets/Imported/R485PkgB");
+    r484a::cleanup();
+  });
+
+  /* Criterion 2, a package imported over itself. */
+  test("A Unity package imported twice, its texture's alpha changed in the second: the material a wall wears follows the second import in place, the table has one line for the texture and it is the new file's, the GUID table lists it once (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    r485b::drop_folder("Assets/Imported/R485Over");
+    const std::string guid = "dd" + std::string(29, '0') + "2", mat_guid = "ee" + std::string(29, '0') + "3";
+    const std::string path = "Assets/Imported/R485Over/Pkg/wall.mat", dir = resolve_asset_path("Assets/Imported/R485Over");
+    const std::string first = r485b::pack("R485Over", {{guid, "Assets/Pkg/mask.png", r485b::flat_png(8, 8, 0x5C336699u), r485b::kTextureImporter}, {mat_guid, "Assets/Pkg/wall.mat", r485b::gloss_mat(guid), ""}});
+    CHECK(!first.empty());
+    ed.command("import " + first);
+    const MaterialPtr m = material_asset(path);
+    CHECK(m != nullptr);
+    if (!m) return;
+    CHECK(std::fabs(m->roughness - (1.0f - 92.0f / 255.0f)) < 0.005f && m->metallic_map.path == "Assets/Imported/R485Over/Pkg/mask.png");
+    const std::string second = r485b::pack("R485Over", {{guid, "Assets/Pkg/mask.png", r485b::flat_png(8, 8, 0x33336699u), r485b::kTextureImporter}, {mat_guid, "Assets/Pkg/wall.mat", r485b::gloss_mat(guid), ""}});
+    const size_t mark = r484a::log_mark();
+    ed.command("import " + second);
+    CHECK(material_asset(path) == m);  // (the object every wall wears)
+    std::printf("    after the second import: roughness %.4f (0.8 wanted)\n", m->roughness);
+    CHECK(std::fabs(m->roughness - 0.8f) < 0.005f);
+    CHECK(r484a::log_since(mark).find("1 of its material(s) had been read before it was all there") != std::string::npos);
+    const std::string stats = fs::join(dir, ".unity-stats");
+    std::string text;
+    CHECK(r485b::lines_of(stats, guid) == 1 && r485b::lines_of(fs::join(dir, ".unity-guids"), guid) == 1);
+    CHECK(fs::read_file(stats, text) && text.find(guid + "\t" + std::to_string(unity_file_bytes(fs::join(dir, "Pkg/mask.png"))) + "\t8\t8\t") == 0);
+    clear_material_assets();  // (a restart reads the same)
+    const MaterialPtr fresh = material_asset(path);
+    CHECK(fresh && std::fabs(fresh->roughness - 0.8f) < 0.005f);
+    std::remove(first.c_str());
+    r485b::drop_folder("Assets/Imported/R485Over");
+    r484a::cleanup();
+  });
+
+  /* Criterion 4. */
+  test("A gloss job told to cancel before it starts measures nothing: every item stays unmeasured and the session's means are untouched; the same job not cancelled measures its three maps (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    CHECK(r484a::install(true));
+    const std::string dir = resolve_asset_path(r484a::kDir);
+    auto fill = [&](Editor::GlossJob &job) {
+      for (const auto &gf : std::vector<std::pair<int, const char *>>{{1, "mask_r0_g230_a92.png"}, {3, "mask_r204_g255_a255.png"}, {4, "albedo_a64.png"}}) {
+        Editor::GlossJob::Item it;
+        it.guid = r485a::map_guid(gf.first), it.path = fs::join(dir, gf.second), it.table = dir;
+        job.items.push_back(it);
+      }
+    };
+    Editor::GlossJob control;
+    fill(control);
+    control.run();
+    CHECK(control.done.load() && control.items.size() == 3);
+    for (const Editor::GlossJob::Item &it : control.items) CHECK(it.ok && it.bytes > 0 && it.width == 8 && it.height == 8);
+    CHECK(control.items.size() == 3 && std::fabs(control.items[0].mean[3] - 0.360784f) < 0.001f);
+    Editor::GlossJob cancelled;
+    fill(cancelled);
+    cancelled.cancel.store(true);
+    cancelled.run();
+    CHECK(cancelled.done.load() && cancelled.items.size() == 3);
+    for (const Editor::GlossJob::Item &it : cancelled.items) CHECK(!it.ok && it.bytes == 0 && it.width == 0 && it.mean[3] == 0.0f);
+    CHECK(unity_gloss_session_means().empty() && !ed.unity_gloss_running_for_test());
+    Editor::GlossJob empty;  // (nothing to measure: it ends)
+    empty.run();
+    CHECK(empty.done.load());
+    r484a::cleanup();
+  });
+
+  /* Criterion 5 of the spec's scope 2: Filamented's Roughness setup. */
+  test("Silent's Filamented in its Roughness setup (round 485): its metal follows the keyword - a texture in the slot without _METALLICGLOSSMAP is not attached and the slider counts, with it the map is attached and Metallic is 1 - and its roughness stays its own (_Glossiness, or the _SpecGlossMap) whatever the keyword and _GlossMapScale say", [] {
+    using namespace r371;
+    const std::string shader_id = "{fileID: 4800000, guid: f, type: 3}";
+    const std::string metal_slot = "    - _MetallicGlossMap:\n        m_Texture: {fileID: 2800000, guid: metal, type: 3}\n";
+    const std::string spec_slot = "    - _SpecGlossMap:\n        m_Texture: {fileID: 2800000, guid: rough, type: 3}\n";
+    const std::string floats = "    - _Metallic: 0.2\n    - _Glossiness: 0.8\n    - _GlossMapScale: 0.3\n", white = "    - _Color: {r: 1, g: 1, b: 1, a: 1}\n";
+    const std::function<bool(const std::string &, float &)> mean = [](const std::string &, float &alpha) -> bool {
+      alpha = 0.1f;
+      return true;
+    };
+    auto read = [&](const std::string &slots, const char *keywords, Material &m, UnityMaterialInfo &info, bool with_mean) -> bool {
+      return unity_material(mat(shader_id, slots, floats, white, keywords), kTex, shader("Silent/Filamented (Roughness setup)"), m, info, {}, with_mean ? mean : std::function<bool(const std::string &, float &)>());
+    };
+    UnityMaterialInfo info;
+    Material no_key;  // (both maps, no keyword)
+    CHECK(read(metal_slot + spec_slot, "", no_key, info, false) && info.shader == "Filamented (Roughness setup)");
+    CHECK(no_key.metallic_map.empty() && std::fabs(no_key.metallic - 0.2f) < 1e-6f && no_key.roughness_map.path == "Assets/T/rough.png" && no_key.roughness == 1.0f);
+    CHECK(!info.gloss_pending && info.gloss_texture.empty());
+    Material with_key;
+    CHECK(read(metal_slot + spec_slot, "_METALLICGLOSSMAP", with_key, info, false));
+    CHECK(with_key.metallic_map.path == "Assets/T/metal.png" && with_key.metallic == 1.0f && with_key.roughness_map.path == "Assets/T/rough.png" && with_key.roughness == 1.0f);
+    CHECK(!info.gloss_pending && info.gloss_texture.empty());
+    /* No roughness map: _Glossiness is the roughness, not 1 - it; _GlossMapScale and a known mean change nothing. */
+    for (bool with_mean : {false, true}) {
+      Material slider;
+      CHECK(read(metal_slot, "_METALLICGLOSSMAP", slider, info, with_mean));
+      CHECK(slider.metallic_map.path == "Assets/T/metal.png" && slider.metallic == 1.0f && slider.roughness_map.empty() && std::fabs(slider.roughness - 0.8f) < 1e-6f);
+      CHECK(!info.gloss_pending && info.gloss_texture.empty());
+      Material off;
+      CHECK(read(metal_slot, "", off, info, with_mean));
+      CHECK(off.metallic_map.empty() && std::fabs(off.metallic - 0.2f) < 1e-6f && std::fabs(off.roughness - 0.8f) < 1e-6f);
+    }
+    /* The keyword with no texture in the slot: Unity's shader samples its white texture there - all metal. (This pinned
+     * the slider's 0.2 when it was written; the round's review asked that the reader follow Unity here too, and it does.) */
+    Material key_no_slot;
+    CHECK(read("", "_METALLICGLOSSMAP", key_no_slot, info, false));
+    CHECK(key_no_slot.metallic_map.empty() && key_no_slot.metallic == 1.0f && std::fabs(key_no_slot.roughness - 0.8f) < 1e-6f);
+    Material rough_only;  // (the roughness map alone, no keyword: metal is the slider)
+    CHECK(read(spec_slot, "", rough_only, info, false));
+    CHECK(std::fabs(rough_only.metallic - 0.2f) < 1e-6f && rough_only.roughness_map.path == "Assets/T/rough.png" && rough_only.roughness == 1.0f);
+  });
+
+  /* Criterion 4's alpha rule, in the real .unity-meta. */
+  test("The alpha a Unity shader samples follows the texture's real .unity-meta, in the loaded material: with Alpha Source None the albedo's gloss is 1 x the scale (roughness 0.2), with From Gray Scale its grey (1 - 0.667 x 0.8); the same for a metal map's alpha; put back to the image's own it reads as before (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    CHECK(r484a::install(true));
+    const std::string albedo = r485a::map_guid(4), mask = r485a::map_guid(1);
+    const MaterialPtr by_albedo = material_asset(r484a::mat_path("gloss_in_albedo_alpha")), by_mask = material_asset(r484a::mat_path("gloss_in_metal_alpha"));
+    CHECK(by_albedo && by_mask);
+    if (!by_albedo || !by_mask) return;
+    CHECK(std::fabs(by_albedo->roughness - 0.799216f) < 0.005f && std::fabs(by_mask->roughness - 0.639216f) < 0.005f);
+    struct Row {
+      int usage;
+      float albedo, mask;
+    };
+    /* grey of the albedo line (0.705882 0.666667 0.627451) is 0.666667, of the mask's (0 0.901961 0) 0.300654 */
+    const Row rows[] = {{0, 0.2f, 0.0f}, {2, 1.0f - 0.666667f * 0.8f, 1.0f - 0.300654f}, {1, 0.799216f, 0.639216f}};
+    for (const Row &r : rows) {
+      CHECK(r485b::write_meta(albedo, r.usage) && r485b::write_meta(mask, r.usage));
+      const size_t mark = r484a::log_mark();
+      ed.command("unity rematerials");
+      std::printf("    alphaUsage %d: albedo's gloss roughness %.4f (%.4f wanted), mask's %.4f (%.4f wanted)\n", r.usage, by_albedo->roughness, r.albedo, by_mask->roughness, r.mask);
+      CHECK(material_asset(r484a::mat_path("gloss_in_albedo_alpha")) == by_albedo && material_asset(r484a::mat_path("gloss_in_metal_alpha")) == by_mask);
+      CHECK(std::fabs(by_albedo->roughness - r.albedo) < 0.005f && std::fabs(by_mask->roughness - r.mask) < 0.005f);
+      CHECK(r484a::log_since(mark).find("read again") != std::string::npos && !ed.unity_gloss_running_for_test());
+    }
+    /* And a fresh library, as a restart reads it. */
+    CHECK(r485b::write_meta(albedo, 0));
+    r484a::refresh_index();
+    clear_material_assets();
+    const MaterialPtr fresh = material_asset(r484a::mat_path("gloss_in_albedo_alpha"));
+    CHECK(fresh && std::fabs(fresh->roughness - 0.2f) < 0.005f);
+    r484a::cleanup();
+  });
+
+  /* Scope 1: revive_asset_paths. */
+  test("A package imported again after its folder, one of its files, or a folder above it was deleted in the session has its materials load; a path deleted elsewhere stays deleted and a file that was moved stays moved (round 485: revive_asset_paths)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    r485b::drop_folder("Assets/R485Other");
+    r485b::drop_folder("Assets/R485Moved");
+    CHECK(r484a::install(true));
+    const std::string dir = r484a::kDir, a = r484a::mat_path("gloss_scaled"), b = r484a::mat_path("metal_from_red");
+    CHECK(revive_asset_paths("") == 0);  // (nothing named: nothing revived)
+    /* a file of the folder deleted */
+    CHECK(material_asset(a) != nullptr);
+    CHECK(forget_material_assets(a) == 1);
+    CHECK(material_asset(a) == nullptr && material_asset(b) != nullptr);  // (the file is on disk: only the mark keeps it out)
+    CHECK(revive_asset_paths(dir) == 1);
+    const MaterialPtr back = material_asset(a);
+    CHECK(back != nullptr && back->asset_path == a);
+    /* a folder above it deleted */
+    CHECK(forget_material_assets("Assets/Imported") >= 2);
+    CHECK(material_asset(a) == nullptr && material_asset(b) == nullptr);
+    CHECK(revive_asset_paths(dir) == 1);
+    CHECK(material_asset(a) != nullptr && material_asset(b) != nullptr);
+    /* an unrelated path deleted: it stays so */
+    Material src;
+    src.name = "Other", src.roughness = 0.4f;
+    const std::string other = "Assets/R485Other/other.mat";
+    CHECK(create_material_asset(src, other) != nullptr);
+    CHECK(forget_material_assets(other) == 1 && material_asset(other) == nullptr);
+    CHECK(revive_asset_paths(dir) == 0);
+    CHECK(material_asset(other) == nullptr);
+    CHECK(revive_asset_paths("Assets/R485Other") == 1 && material_asset(other) != nullptr);
+    /* a moved (not deleted) path stays moved; a delete mark beside it goes */
+    const std::string from = "Assets/R485Moved/a.mat", to = "Assets/R485Moved/b.mat", gone = "Assets/R485Moved/gone.mat";
+    const MaterialPtr mover = create_material_asset(src, from);
+    CHECK(mover != nullptr && create_material_asset(src, gone) != nullptr);
+    std::error_code ec;
+    std::filesystem::rename(resolve_asset_path(from), resolve_asset_path(to), ec);
+    CHECK(!ec && retarget_material_assets(from, to) == 1);
+    CHECK(material_asset(from) == mover && mover && mover->asset_path == to);
+    CHECK(forget_material_assets(gone) == 1 && material_asset(gone) == nullptr);
+    CHECK(revive_asset_paths("Assets/R485Moved") == 1);  // (the delete mark only)
+    CHECK(material_asset(gone) != nullptr);
+    CHECK(material_asset(from) == mover && material_asset(to) == mover);
+    r485b::drop_folder("Assets/R485Other");
+    r485b::drop_folder("Assets/R485Moved");
+    r484a::cleanup();  // (clears the redirects too)
+  });
+
+  /* Scope 1: reload_foreign_materials. */
+  test("Reading Unity materials again (round 485): a Blendity .mat is left alone, a Unity material whose reading did not change keeps its version, one edited by hand in the session is replaced by the file's reading (in place, version up), an edit outside the folder asked for stays, and a file that is gone leaves its material as it is", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    r485b::drop_folder("Assets/R485Own");
+    CHECK(r484a::install(true));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha");
+    const MaterialPtr unity = material_asset(path);
+    Material src;
+    src.name = "Own", src.roughness = 0.25f;
+    const MaterialPtr own = create_material_asset(src, "Assets/R485Own/own.mat");
+    CHECK(unity && own && unity->foreign && !own->foreign);
+    if (!unity || !own) return;
+    CHECK(r485a::reads_right(unity));
+    own->roughness = 0.9f, own->touch();  // (edited in the session, not saved)
+    const uint64_t own_version = own->version, unity_version = unity->version;
+    std::vector<MaterialPtr> changed;
+    CHECK(reload_foreign_materials("", &changed) == 0 && changed.empty());
+    CHECK(own->roughness == 0.9f && own->version == own_version && unity->version == unity_version);  // (nothing to tell their users)
+    unity->touch();  // (a touch alone is no change of reading)
+    const uint64_t touched = unity->version;
+    CHECK(reload_foreign_materials(r484a::kDir) == 0 && unity->version == touched);
+    /* A value changed by hand and touched. */
+    unity->roughness = 0.05f, unity->metallic = 0.5f, unity->touch();
+    const uint64_t edited = unity->version;
+    CHECK(reload_foreign_materials("Assets/R485Own", &changed) == 0 && unity->roughness == 0.05f);  // (another folder asked for)
+    CHECK(reload_foreign_materials(r484a::kDir, &changed) == 1 && changed.size() == 1 && changed[0] == unity);
+    CHECK(material_asset(path) == unity && r485a::reads_right(unity) && unity->metallic == 1.0f && unity->version > edited);
+    CHECK(own->roughness == 0.9f && own->version == own_version);
+    const uint64_t read = unity->version;
+    CHECK(reload_foreign_materials() == 0 && unity->version == read);  // (read again as it is: nothing)
+    /* A file that is gone. */
+    unity->roughness = 0.05f, unity->touch();
+    CHECK(std::filesystem::remove(resolve_asset_path(path)));
+    CHECK(reload_foreign_materials() == 0 && unity->roughness == 0.05f);
+    r485b::drop_folder("Assets/R485Own");
+    r484a::cleanup();
+  });
+
+  /* Hostile inputs 1: the table. */
+  test("A table of means made of hostile bytes - 1 MB of random bytes, byte counts negative, huge or past 64 bits, means far outside 0..1 or past what a float holds - never crashes and never takes a material's roughness out of 0..1; lines it cannot read are measured again and left in place, and nothing stays running (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    CHECK(r484a::install(true));
+    const std::string dir = resolve_asset_path(r484a::kDir), stats = fs::join(dir, ".unity-stats"), mask = r485a::map_guid(1), albedo = r485a::map_guid(4);
+    auto set_stats = [&](const std::string &text) {
+      CHECK(fs::write_file(stats, text));
+      clear_material_assets();
+      r484a::forget_gloss();
+      r484a::refresh_index();
+    };
+    auto sane = [](const MaterialPtr &m) { return m && std::isfinite(m->roughness) && m->roughness >= 0.0f && m->roughness <= 1.0f; };
+    /* 1 MB of random bytes (newlines, NULs, tabs and all). */
+    std::string noise;
+    uint32_t x = 2463534242u;
+    for (int i = 0; i < (1 << 20); i++) {
+      x ^= x << 13, x ^= x >> 17, x ^= x << 5;
+      noise += (char)(x >> 11);
+    }
+    set_stats(noise);
+    MaterialPtr worn = material_asset(r484a::mat_path("gloss_in_metal_alpha"));
+    CHECK(sane(worn) && worn->roughness == 0.0f && unity_gloss_wanted().count(mask) == 1);
+    ed.step_frame_headless();
+    std::string wrote;
+    CHECK(!ed.unity_gloss_running_for_test() && r485a::reads_right(worn));
+    CHECK(fs::read_file(stats, wrote) && wrote.compare(0, noise.size(), noise) == 0 && wrote.find(mask + r485a::kMaskLine, noise.size()) != std::string::npos);
+    /* Byte counts that are not the file's size. */
+    const std::string tail = "\t8\t8\t0.0\t0.9\t0.0\t0.36\n";
+    set_stats(mask + "\t-74" + tail + mask + "\t18446744073709551615" + tail + mask + "\t99999999999999999999999999" + tail + mask + "\t+0x4A" + tail);
+    worn = material_asset(r484a::mat_path("gloss_in_metal_alpha"));
+    std::printf("    byte counts -74 / 2^64-1 / past 64 bits / +0x4A: the mask's roughness %.4f\n", worn ? worn->roughness : -1.0f);
+    CHECK(sane(worn) && worn->roughness == 0.0f && unity_gloss_wanted().count(mask) == 1);
+    ed.step_frame_headless();
+    CHECK(!ed.unity_gloss_running_for_test() && r485a::reads_right(worn));
+    /* Means outside 0..1 on a line whose byte count is right: read, and clamped by the rule (alpha 0..1, scale 0.5 for gloss_scaled). */
+    const struct {
+      const char *text;
+      float alpha;
+    } means[] = {{"-7", 0.0f}, {"5", 1.0f}, {"3e38", 1.0f}, {"1e-45", 0.0f}};
+    for (const auto &mv : means) {
+      const std::string v = mv.text;
+      set_stats(mask + "\t74\t8\t8\t" + v + "\t" + v + "\t" + v + "\t" + v + "\n");
+      const MaterialPtr m1 = material_asset(r484a::mat_path("gloss_in_metal_alpha")), m2 = material_asset(r484a::mat_path("gloss_scaled"));
+      ed.step_frame_headless();
+      std::printf("    mean %s: roughness %.4f / %.4f (%.4f / %.4f by the rule)\n", mv.text, m1 ? m1->roughness : -1.0f, m2 ? m2->roughness : -1.0f, 1.0f - mv.alpha, 1.0f - 0.5f * mv.alpha);
+      CHECK(sane(m1) && sane(m2));
+      CHECK(m1 && m2 && std::fabs(m1->roughness - (1.0f - mv.alpha)) < 0.005f && std::fabs(m2->roughness - (1.0f - 0.5f * mv.alpha)) < 0.005f);
+      CHECK(!ed.unity_gloss_running_for_test());
+    }
+    /* From Gray Scale with R, G and B so large that their sum is past a float: no number to use, the material as before. */
+    CHECK(r485b::write_meta(albedo, 2));
+    set_stats(albedo + "\t76\t8\t8\t3e38\t3e38\t3e38\t0.5\n");
+    const MaterialPtr grey = material_asset(r484a::mat_path("gloss_in_albedo_alpha"));
+    ed.step_frame_headless();
+    std::printf("    grey of 3e38 x 3: roughness %.4f\n", grey ? grey->roughness : -1.0f);
+    CHECK(sane(grey) && !ed.unity_gloss_running_for_test());
+    r484a::cleanup();
+  });
+
+  /* Hostile inputs 2: textures that cannot be read. */
+  test("A Unity material whose gloss map is a .txt, a zero-byte .png or a PNG cut in half comes in as it did before, the maps that could not be read are not asked for again on their own, and no job is left running (round 485)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r484a::cleanup();
+    const std::string rel = "Assets/R485Hostile", dir = resolve_asset_path(rel);
+    r485b::drop_folder(rel);
+    fs::make_dirs(dir);
+    /* A noisy 64 x 64 image, and the committed 8 x 8 mask, each cut in half. */
+    std::vector<uint32_t> noise(64 * 64);
+    uint32_t x = 88172645u;
+    for (uint32_t &p : noise) x ^= x << 13, x ^= x >> 17, x ^= x << 5, p = x | 0xFF000000u;
+    std::string big, small;
+    const std::string tmp = fs::join(test_dir(), "r485_noise.png");
+    CHECK(write_png(tmp, noise.data(), 64, 64, 64, true) && fs::read_file(tmp, big) && fs::read_file("tests/fixtures/unity_gloss/mask_r0_g230_a92.png", small));
+    std::remove(tmp.c_str());
+    CHECK(big.size() > 1000 && !small.empty());
+    struct File {
+      const char *name;
+      std::string data;
+      std::string guid;
+    };
+    const std::vector<File> files = {{"notes.txt", "hello, not an image", "ff" + std::string(29, '0') + "1"},
+                                     {"empty.png", "", "ff" + std::string(29, '0') + "2"},
+                                     {"half.png", big.substr(0, big.size() / 2), "ff" + std::string(29, '0') + "3"},
+                                     {"tiny_half.png", small.substr(0, small.size() / 2), "ff" + std::string(29, '0') + "4"}};
+    for (const File &f : files) {
+      CHECK(fs::write_file(fs::join(dir, f.name), f.data));
+      CHECK(fs::write_file(fs::join(dir, std::string(f.name) + ".meta"), "fileFormatVersion: 2\nguid: " + f.guid + "\nTextureImporter:\n  alphaUsage: 1\n"));
+      CHECK(fs::write_file(fs::join(dir, std::string("mat_") + f.name + ".mat"), r485b::gloss_mat(f.guid)));
+    }
+    r484a::refresh_index();
+    std::vector<MaterialPtr> mats;
+    std::vector<float> before;
+    for (const File &f : files) {
+      const MaterialPtr m = material_asset(rel + "/mat_" + f.name + ".mat");
+      CHECK(m != nullptr);
+      if (!m) return;
+      mats.push_back(m), before.push_back(m->roughness);
+    }
+    CHECK(unity_gloss_wanted().count(files[0].guid) == 0);  // (a .txt is not an image: never sent)
+    for (int pass = 0; pass < 2; pass++) {
+      r485a::steps(ed, 3);
+      CHECK(!ed.unity_gloss_running_for_test() && unity_gloss_wanted().empty());
+      for (size_t i = 0; i < mats.size(); i++) {
+        std::printf("    %-14s roughness %.4f before %.4f%s\n", files[i].name, mats[i]->roughness, before[i], mats[i]->roughness == before[i] ? "" : "  CHANGED");
+        CHECK(std::isfinite(mats[i]->roughness) && mats[i]->roughness >= 0.0f && mats[i]->roughness <= 1.0f);
+        CHECK(mats[i]->roughness == before[i]);
+      }
+      CHECK(ed.unity_gloss_failed_for_test(files[1].guid) && ed.unity_gloss_failed_for_test(files[3].guid));
+      CHECK(!fs::exists(fs::join(dir, ".unity-stats")));  // (nothing measured: nothing written)
+      ed.command("unity rematerials");  // (the second pass: asked for by hand, tried again, same outcome)
+    }
+    CHECK(!ed.unity_gloss_running_for_test());
+    r485b::drop_folder(rel);
     r484a::cleanup();
   });
 }
@@ -14425,4 +15587,6 @@ void run_assets_tests() {
   tests_round417();
   tests_round456();
   tests_round484();
+  tests_round485();
+  tests_round485_independent();
 }

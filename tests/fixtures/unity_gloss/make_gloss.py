@@ -117,9 +117,23 @@ def write(name, data):
         f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
 
 
+def gloss_maps():
+    """The maps a material's gloss is read from, by its keywords - what an unpack measures for `.unity-stats` (round 485)."""
+    out = set()
+    for shader, keywords, slots, floats in MATERIALS.values():
+        if "_METALLICGLOSSMAP" in keywords or "_METALLICSPECGLOSSMAP" in keywords:
+            out.add(slots.get("_MetallicGlossMap"))
+        if "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A" in keywords:
+            out.add(slots.get("_BaseMap") or slots.get("_MainTex"))
+    return {m for m in out if m}
+
+
 guids = []
+sizes = {}
 for name in list(MAPS) + list(MAPS16):
-    write(name, png(8, 8, MAPS[name]) if name in MAPS else png16(8, 8, MAPS16[name]))
+    data = png(8, 8, MAPS[name]) if name in MAPS else png16(8, 8, MAPS16[name])
+    sizes[name] = len(data)
+    write(name, data)
     # A mask map as Unity imports one: not sRGB, its alpha the image's own.
     write(".unity-meta/%s.meta" % TEX[name], "fileFormatVersion: 2\nguid: %s\nTextureImporter:\n  sRGBTexture: %d\n  alphaUsage: 1\n" % (TEX[name], 1 if name.startswith("albedo") else 0))
     guids.append((TEX[name], name))
@@ -131,4 +145,9 @@ for name, (shader, keywords, slots, floats) in MATERIALS.items():
     guids.append((MAT_GUID[name], name + ".mat"))
 # The package's GUID table as Blendity's Import Unity Package writes it: the GUID, Unity's path, the path in the project.
 write(".unity-guids", "".join("%s\tAssets/UnityGloss/%s\t%s/%s\n" % (g, n, INTO, n) for g, n in guids))
+# ...and its table of means (round 485, ADR 0131), as the unpack writes it for the maps a material's gloss is read
+# from: the GUID, the file's bytes, width, height, mean R G B A. A test that wants "a package unpacked before round
+# 485" deletes this file from its scratch copy.
+write(".unity-stats", "".join("%s\t%d\t8\t8\t%s\n" % (TEX[n], sizes[n], "\t".join("%.6f" % (v / 255.0) for v in MAPS[n]))
+                              for n in sorted(gloss_maps(), key=lambda n: TEX[n])))
 print("%d maps, %d shaders, %d materials" % (len(MAPS) + len(MAPS16), len(SHADERS), len(MATERIALS)))

@@ -1,18 +1,18 @@
 {
- "note": "What Unity's shaders read from each material of this folder (README.md works the numbers out), and the faults tools/unity_materials.py finds in what Blendity makes of it today (blendity_today.txt). Round 485 changes faults_today and blendity_today.txt, with the reason.",
+ "note": "What Unity's shaders read from each material of this folder (README.md works the numbers out), and the faults tools/unity_materials.py finds in what Blendity makes of it: faults_today for blendity_today.txt (round 485's reading), faults_round_484 for the reading round 484 pinned where it differs - the tool's self-test builds that reading again so its fault classes stay checked. A round that changes how a material is read changes faults_today and blendity_today.txt, with the reason.",
  "materials": {
-  "gloss_in_metal_alpha": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.639216, "faults_today": ["smoothness dropped"]},
-  "gloss_scaled": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.819608, "faults_today": ["smoothness dropped"]},
-  "gloss_in_albedo_alpha": {"family": "Standard", "unity_metallic": 0.1, "unity_roughness": 0.799216, "faults_today": ["smoothness dropped"]},
-  "slot_without_keyword": {"family": "Standard", "unity_metallic": 0.2, "unity_roughness": 0.7, "faults_today": ["slot without keyword"]},
+  "gloss_in_metal_alpha": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.639216, "faults_today": [], "faults_round_484": ["smoothness dropped"]},
+  "gloss_scaled": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.819608, "faults_today": [], "faults_round_484": ["smoothness dropped"]},
+  "gloss_in_albedo_alpha": {"family": "Standard", "unity_metallic": 0.1, "unity_roughness": 0.799216, "faults_today": [], "faults_round_484": ["smoothness dropped"]},
+  "slot_without_keyword": {"family": "Standard", "unity_metallic": 0.2, "unity_roughness": 0.7, "faults_today": [], "faults_round_484": ["slot without keyword"]},
   "metal_from_red": {"family": "Standard", "unity_metallic": 0.8, "unity_roughness": 0.75, "faults_today": []},
   "reflections_off": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.1, "faults_today": ["reflections off ignored"]},
   "highlights_off": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.4, "faults_today": ["highlights off ignored"]},
   "occlusion_in_green": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.5, "occlusion": 0.501961, "faults_today": ["occlusion ignored"]},
-  "filamented_mask": {"family": "Filamented", "unity_metallic": 0.0, "unity_roughness": 0.639216, "occlusion": 0.901961, "faults_today": ["smoothness dropped", "occlusion ignored"]},
-  "urp_lit_mask": {"family": "URP Lit", "unity_metallic": 0.0, "unity_roughness": 0.819608, "faults_today": ["smoothness dropped"]},
+  "filamented_mask": {"family": "Filamented", "unity_metallic": 0.0, "unity_roughness": 0.639216, "occlusion": 0.901961, "faults_today": ["occlusion ignored"], "faults_round_484": ["smoothness dropped", "occlusion ignored"]},
+  "urp_lit_mask": {"family": "URP Lit", "unity_metallic": 0.0, "unity_roughness": 0.819608, "faults_today": [], "faults_round_484": ["smoothness dropped"]},
   "mirror": {"family": "FX/MirrorReflection", "unity_metallic": null, "unity_roughness": null, "faults_today": ["not modelled"]},
   "sixteen_bit_normal": {"family": "Standard", "unity_metallic": 0.0, "unity_roughness": 0.5, "faults_today": []}
  },
- "decoders_differ_with_libpng": {"normal16_flat.png": {"file": [0.501961, 0.501961, 1.0], "libpng_today": [0.729412, 0.729412, 1.0], "named_by": ["sixteen_bit_normal"]}}
+ "sixteen_bit": {"normal16_flat.png": {"file": [0.501961, 0.501961, 1.0], "libpng_until_round_485": [0.729412, 0.729412, 1.0], "named_by": ["sixteen_bit_normal"]}}
 }

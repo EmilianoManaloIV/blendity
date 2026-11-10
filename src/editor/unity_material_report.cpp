@@ -179,6 +179,11 @@ std::string Editor::unity_materials_text(bool all, size_t *count, size_t *from_u
     const MaterialPtr m = material_asset(path);
     if (m && !wear.count(m.get())) list.push_back(m);
   }
+  /* Round 485: a .mat loaded just now may have asked for its gloss map's mean (a package unpacked before the table
+   * existed). A headless run measures and lands it here, so the list is what a script's next line would read - round
+   * 485's own table listed two unworn materials at the old gloss otherwise; in a window this starts the worker and the
+   * materials, listed as they are now, follow when it lands. */
+  if (all) poll_unity_gloss();
   size_t unity = 0;
   std::string text = strprintf("unity_materials 1 scene %s materials %zu worn %zu\n", quoted(scene_->name).c_str(), list.size(), worn);
   for (const MaterialPtr &m : list) {

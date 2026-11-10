@@ -246,6 +246,14 @@ bool decode_png_lib(const uint8_t *data, size_t size, Bitmap &out, std::string &
     return false;
   }
   img.format = PNG_FORMAT_RGBA;  // 16-bit, palette and grey inputs are converted
+  /* Round 485 (task 0461): a file of 16 bits a sample holds the same kind of values as one of 8 - a colour's sRGB, a
+   * normal's or a mask's numbers. libpng's simple interface otherwise takes it as linear light and hands back that
+   * with a gamma of 2.2 on it: one half came out as 186 of 255, where Unity and Blendity's own decoder read 128 (round
+   * 484: a world's plank floor 2.4 times too bright, its flat normals leaning 30 degrees). Set after begin_read, which
+   * resets the flags. */
+#ifdef PNG_IMAGE_FLAG_16BIT_sRGB
+  img.flags |= PNG_IMAGE_FLAG_16BIT_sRGB;
+#endif
   out.width = (int)img.width;
   out.height = (int)img.height;
   out.is_float = false;

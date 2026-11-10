@@ -37,7 +37,8 @@ tests/fixtures/unity_gloss (no Blendity needed).
 FAULTS (a material can have several):
   not read                 Blendity's listing has no material for the file
   maps missing             a texture Unity uses is in the project, and Blendity's slot for it is empty or its file gone
-  slot without keyword     _MetallicGlossMap holds a texture but the keyword is off: Unity uses the sliders
+  slot without keyword     _MetallicGlossMap holds a texture but the keyword is off - Unity uses the sliders - and
+                           Blendity attached the texture or its values are off by more than TOLERANCE
   smoothness dropped       Unity's smoothness comes from a map's alpha; Blendity's roughness is off by more than TOLERANCE
   values differ            metallic or roughness off by more than TOLERANCE for another reason
   decoders differ          an image it names reads differently in this build than in Blendity's own decoder (by more
@@ -419,8 +420,7 @@ def classify(mat, unity, blendity, paths, stats_by_path):
         row["faults"].append("maps missing")
     urp = unity["family"] == "URP Lit"
     keyword = "_METALLICSPECGLOSSMAP" if urp else "_METALLICGLOSSMAP"
-    if unity["family"] in MODELLED and mat["tex"].get("_MetallicGlossMap") and keyword not in mat["keywords"]:
-        row["faults"].append("slot without keyword")
+    slot_idle = unity["family"] in MODELLED and bool(mat["tex"].get("_MetallicGlossMap")) and keyword not in mat["keywords"]
     if unity["family"] not in MODELLED or unity["roughness"] is None:
         row["faults"].append("not modelled")
     else:
@@ -428,6 +428,10 @@ def classify(mat, unity, blendity, paths, stats_by_path):
         row["d_roughness"] = row["blendity_roughness"] - unity["roughness"]
         off = abs(row["d_metallic"]) > TOLERANCE or abs(row["d_roughness"]) > TOLERANCE
         from_map = "alpha" in unity["smooth_from"] or "red" in unity["smooth_from"]
+        # A texture in the slot without its keyword is only a fault when Blendity went by the slot (round 485 reads the
+        # keyword: the file is as it was, the reading right).
+        if slot_idle and (off or blendity["maps"].get("metallic_map", ("", "none"))[1] != "none"):
+            row["faults"].append("slot without keyword")
         if off and from_map and abs(row["d_roughness"]) > TOLERANCE and "slot without keyword" not in row["faults"]:
             row["faults"].append("smoothness dropped")
         elif off and not row["faults"]:
@@ -909,7 +913,50 @@ def self_test():
             check(r["family"] == want["family"], "%s: family %r, expected %r" % (name, r["family"], want["family"]))
             check(sorted(r["faults"]) == sorted(want["faults_today"]), "%s: faults %s, expected %s" % (name, sorted(r["faults"]), sorted(want["faults_today"])))
         lines = report_lines(list(rows.values()), stats_by_path, "self-test")
-        check(any(line.startswith("| gloss_in_metal_alpha |") and "smoothness dropped" in line for line in lines), "the report's row for gloss_in_metal_alpha")
+        check(not any("smoothness dropped" in line or "slot without keyword" in line for line in lines), "round 485's reading: no smoothness dropped, no slot without keyword")
+        # Round 484's reading of the same files - what this test held as "today" until round 485 put it right (the
+        # keyword's rule, a map's smoothness as its mean). The fault classes still name each of them: (metallic,
+        # roughness, the map in the metallic slot when the reading differs there).
+        round_484 = {"gloss_in_metal_alpha": (1.0, 0.0, None), "gloss_scaled": (1.0, 0.5, None), "gloss_in_albedo_alpha": (0.1, 0.5, None),
+                     "slot_without_keyword": (1.0, 0.0, "mask_r204_g255_a51.png"), "filamented_mask": (1.0, 0.0, None), "urp_lit_mask": (1.0, 0.5, None)}
+        old = [dict(e, maps=dict(e["maps"])) for e in listing]
+        for e in old:
+            was = round_484.get(os.path.splitext(os.path.basename(e["asset"]))[0])
+            if not was:
+                continue
+            e["metallic"], e["roughness"] = was[0], was[1]
+            if was[2]:
+                e["maps"]["metallic_map"] = (os.path.dirname(e["asset"]) + "/" + was[2], "ok")
+        rows_old = {r["material"]: r for r in build_rows(project, mats, paths, metas, stats_by_path, old)}
+        for name, want in expected["materials"].items():
+            was = sorted(want.get("faults_round_484", want["faults_today"]))
+            got = sorted(rows_old[name]["faults"]) if name in rows_old else None
+            check(got == was, "%s as round 484 read it: faults %s, expected %s" % (name, got, was))
+        lines_old = report_lines(list(rows_old.values()), stats_by_path, "self-test")
+        check(any(line.startswith("| gloss_in_metal_alpha |") and "smoothness dropped" in line for line in lines_old), "the report's row for gloss_in_metal_alpha as round 484 read it")
+        # The table of means an unpack writes beside the GUIDs (round 485, ADR 0131): the committed one has a line for
+        # each map a material reads its gloss from by its keywords, with the file's bytes, its size and the means this
+        # reader finds in the PNG.
+        with open(os.path.join(FIXTURES, ".unity-stats"), encoding="utf-8", newline="") as f:
+            stats_lines = [line.split("\t") for line in f.read().split("\n") if line]
+        gloss = set()
+        for m in mats.values():
+            if "_METALLICGLOSSMAP" in m["keywords"] or "_METALLICSPECGLOSSMAP" in m["keywords"]:
+                gloss.add(m["tex"].get("_MetallicGlossMap", ""))
+            if "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A" in m["keywords"]:
+                gloss.add(m["tex"].get("_BaseMap") or m["tex"].get("_MainTex", ""))
+        gloss.discard("")
+        check(sorted(w[0] for w in stats_lines) == sorted(gloss) and all(len(w) == 8 for w in stats_lines),
+              ".unity-stats: a line of eight fields for each gloss map (%d lines, %d maps)" % (len(stats_lines), len(gloss)))
+        for w in stats_lines:
+            rel = paths.get(w[0], "")
+            st = stats_by_path.get(rel)
+            if not st or len(w) != 8:
+                fails.append(".unity-stats: %s is not a map this reader measured" % w[0])
+                continue
+            same = (int(w[1]) == os.path.getsize(os.path.join(project, rel)) and (int(w[2]), int(w[3])) == tuple(st["size"]) and
+                    all(abs(float(w[4 + k]) - st["mean"][k]) < 1e-6 for k in range(4)))
+            check(same, ".unity-stats: %s's line %s, the PNG reads %s %s" % (os.path.basename(rel), w[1:], st["size"], st["mean"]))
         # A listing with Unity's own values is clean of value faults; one without the material says `not read`.
         fixed = [dict(e) for e in listing]
         for e in fixed:
@@ -983,11 +1030,11 @@ def self_test():
         check(all(open(os.path.join(project, rel), "rb").read() == data for rel, data in pngs.items() if rel != n16), "png8 left the 8-bit maps as they were")
         check(not decoder_suspects(project, mats, paths), "after png8 no image is left that a library may read its own way")
         with open(os.path.join(tmp, "materials.json"), "w", encoding="utf-8") as f:
-            json.dump({"materials": list(rows.values())}, f)
+            json.dump({"materials": list(rows_old.values())}, f)  # (round 484's reading: it has materials that are off)
         state(project, "byhand", os.path.join(tmp, "materials.json"))
         mats_bh = unity_mats(project, paths)
         for rel, m in mats_bh.items():
-            r = rows[os.path.splitext(os.path.basename(rel))[0]]
+            r = rows_old[os.path.splitext(os.path.basename(rel))[0]]
             if not any(x in r["faults"] for x in ("smoothness dropped", "slot without keyword", "values differ")):
                 check(m == mats[rel], "%s: byhand changed a material that wasn't off" % rel)
                 continue
