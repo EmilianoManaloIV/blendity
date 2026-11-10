@@ -23,7 +23,9 @@ Every path is a setting at the top of a script, overridable by environment varia
 | `stack_check.sh` | The stack guarantee (the owner, 2026-11-08): merging the newest open pull request merges every open one below it. Lists the open PRs whose head is not in the newest PR's history; `FIX=1` merges them into the newest PR's branch (a merge commit, pushed). Run from the libraries clone after every publish and every push to a PR branch; `.github/workflows/stack.yml` runs the same check on every pull request. |
 | `copy_w_to_main.py` | The dependency-free tree's changes (against HEAD) into the libraries clone, checked byte for byte. |
 | `patchlib.py` | `patch(path, [(old, new)])`: each old text must occur exactly once; newlines kept. The rounds' patch scripts import it (write them with an editor, not a shell heredoc: heredocs drop backslashes). |
-| `fill_checks.py` | Fills a round's `CHECKS_*` placeholders in the CHANGELOG and the README's check count from a chain's numbers. |
+| `fill_checks.py` | Fills a round's `CHECKS_*` placeholders in its changelog fragment (`changelog.d/`) and extra files from a chain's numbers. README's count is the fold's. |
+| `changelog.py` | Changelog fragments (ADR 0123): `check` validates `changelog.d/`; `fold --checks LIBS TESTS` puts the fragments into `CHANGELOG.md` (highest round first) and their README edits into `README.md`, sets the count and deletes them, all or nothing (`--dry-run`); `same-render OLD NEW` compares two READMEs as they render; `--self-test` runs its cases in temporary folders. Format: `changelog.d/README.md`. |
+| `docs_check.sh` | Fails when one of a branch's own commits edits `CHANGELOG.md` / `README.md` without a `Docs-fold: yes` trailer, and runs `changelog.py check`. `bash docs_check.sh [BASE [HEAD]]`; the `docs-fragments` job (`.github/workflows/docs.yml`) runs it on every PR, `stack_check.sh` reports it for every open PR. |
 | `views.py` | Pass 18's view rows: Shinano's Scene view (and Scene + Game) and 50,000 cubes' Scene view, windowed on the card through `tools/bench_world.py` (`BL_SHINANO` names the project holding the imported prefab). `py tools/dev/views.py <Blendity.exe> <out dir> [label]`. Run it with nothing else building. |
 | `siderail_stations.json` | The four SideRail camera stations the bake comparison renders (`tools/unity_compare.py world ...`). |
 | `dircompare.py` | Unity's direction maps against a Blendity bake's direction pages (the length's spread over lit texels, round 427 / 438). |
@@ -33,4 +35,8 @@ Every path is a setting at the top of a script, overridable by environment varia
 - One round, one commit and one pull request, against `main`, its commit on the previous round's (the newest PR carries
   every open one: `stack_check.sh`); CI checked once per push; the owner
   reviews before anything is merged.
+- A round never edits `CHANGELOG.md` or `README.md` (ADR 0123): its entry, and any README line, go in
+  `changelog.d/<round>-<slug>.md`. The pass write-up runs `py tools/dev/changelog.py fold --checks LIBS TESTS` after
+  the pass's PRs have merged into `main`, and commits the result with a `Docs-fold: yes` trailer. The hub runs one
+  write-up (one fold) at a time; a pass without a write-up gets a one-commit fold PR.
 - See `docs/PERFORMANCE.md` and the round specs in `docs/tasks/` for what each round measured.

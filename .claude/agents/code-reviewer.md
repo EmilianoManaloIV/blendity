@@ -27,7 +27,9 @@ files; you read, build, run tests and report.
 5. **Performance:** per-frame work in drags, O(n^2) loops over big meshes, needless copies.
 6. **Tests:** they test the requirement, would fail without the change, cover the edge cases; no check was
    loosened without a reason.
-7. **Docs and decisions:** CHANGELOG, README count, ARCHITECTURE / USABILITY rows, ADR when needed.
+7. **Docs and decisions:** the round's `changelog.d/<round>-<slug>.md` fragment (and its README section when
+   user-facing behaviour changed; `py tools/dev/changelog.py check` passes), ARCHITECTURE / USABILITY rows, ADR when
+   needed. A round that edits `CHANGELOG.md` / `README.md` directly is a finding (ADR 0123), unless it is a write-up's fold.
 8. **Safety:** nothing touches the user's `Assets/`, nothing pushes to `main`, no new dependency.
 
 You may build (`build.bat release tests`, `./build.sh` via WSL) and run tests or stress sections to confirm

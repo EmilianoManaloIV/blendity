@@ -1,0 +1,32 @@
+# Changelog fragments (task 0443, ADR 0123): a round adds changelog.d/<round>-<slug>.md instead of editing CHANGELOG.md
+# or README.md, so the PRs of passes running in parallel never conflict there; the pass write-up folds the fragments
+# (tools/dev/changelog.py fold). This job fails a PR whose own commits edit either file without a "Docs-fold: yes"
+# trailer, or that adds a malformed fragment. One run per PR (its own concurrency group), unlike the `stack` job.
+name: docs
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: docs-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  docs-fragments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The working tree is the PR merged into main (the default ref): fragments' README anchors are checked against
+      # the README they will meet, not the one the branch forked from. The commits checked are the PR head's own.
+      - name: The fragment tools' own checks
+        run: python3 tools/dev/changelog.py --self-test
+      - name: No direct CHANGELOG.md / README.md edits outside a fold
+        run: |
+          git fetch -q origin main
+          bash tools/dev/docs_check.sh origin/main ${{ github.event.pull_request.head.sha }}
