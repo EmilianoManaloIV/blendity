@@ -1024,10 +1024,14 @@ void Renderer3D::raster_tile(int tile_index) {
       int miny = pixel_in(std::floor(std::min({y0, y1, y2})), ry0, ry1);
       int maxy = pixel_in(std::ceil(std::max({y0, y1, y2})), ry0 - 1, ry1 - 1);
       if (minx > maxx || miny > maxy) continue;
-      /* Edge functions w_i(x, y) = A_i * x + B_i * y + C_i (FoCG ch. 9.1.2). */
-      const float A0 = y1 - y2, B0 = x2 - x1, C0 = x1 * y2 - x2 * y1;
-      const float A1 = y2 - y0, B1 = x0 - x2, C1 = x2 * y0 - x0 * y2;
-      const float A2 = y0 - y1, B2 = x1 - x0, C2 = x0 * y1 - x1 * y0;
+      /* Edge functions w_i(x, y) = A_i * x + B_i * y + C_i (FoCG ch. 9.1.2). C_i is a difference of two products, in
+       * double: a float product of two floats is exact there, so a compiler fusing it into an FMA (Apple clang does
+       * by default) can't leave a rounding error - with vertices 2e10 pixels off, that error (1.5e13) outweighed every
+       * pixel's real distance from the edge and both halves of a huge quad covered nothing (round 462, macOS CI). */
+      const auto edge_c = [](float xa, float ya, float xb, float yb) { return (float)((double)xa * yb - (double)xb * ya); };
+      const float A0 = y1 - y2, B0 = x2 - x1, C0 = edge_c(x1, y1, x2, y2);
+      const float A1 = y2 - y0, B1 = x0 - x2, C1 = edge_c(x2, y2, x0, y0);
+      const float A2 = y0 - y1, B2 = x1 - x0, C2 = edge_c(x0, y0, x1, y1);
       const float area = C0 + C1 + C2;
       if (area <= 0.0f) continue;
       const float inv_area = 1.0f / area;
