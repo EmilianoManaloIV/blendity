@@ -11128,6 +11128,184 @@ static void tests_round466() {
   tests_round466_card();
 }
 
+/* ---------------------------------------------------------------- round 484: `lighting pick` (task 0460) */
+namespace r484 {
+/* A floor and a box under twelve Baked point lights (more than the eight past which a texel picks among them), the sun
+ * off, small settings: the light comes only from the lamps, each reaching every texel. */
+static void lamp_hall(Editor &ed) {
+  r463::scene(ed);
+  ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+  LightingSettings &ls = ed.scene().lighting;
+  ls.texels_per_unit = 4.0f, ls.indirect_samples = 4, ls.direct_samples = 4;
+  for (int i = 0; i < 12; i++) {
+    GameObject *lamp = ed.scene().create("Lamp " + std::to_string(i));
+    Light *l = lamp->add<Light>();
+    l->type = 1;
+    l->mode = 2;
+    l->intensity = 1.0f + 0.4f * (float)(i % 5);
+    l->range = 30.0f;
+    l->color = Vec3(1.0f, 0.7f + 0.03f * (float)i, 0.5f + 0.04f * (float)i);
+    const float a = (float)i * (2.0f * kPi / 12.0f);
+    lamp->set_local_position({3.5f * std::cos(a), 2.5f, 3.5f * std::sin(a)});
+  }
+  ed.commit_change("r484 lamps");
+}
+
+static double light_sum(const LightingData &d) {
+  double s = 0;
+  for (const Lightmap &p : d.pages)
+    for (const Vec3 &c : p.texels) s += (c.x + c.y + c.z) / 3.0;
+  return s;
+}
+
+/* The bake's picking counts as the editor read them: the lights kept / dropped by chance, per picking texel. */
+struct Counts {
+  uint64_t texels, kept, dropped;
+  double kept_per() const { return texels ? (double)kept / (double)texels : 0.0; }
+  double dropped_per() const { return texels ? (double)dropped / (double)texels : 0.0; }
+};
+static Counts counts(Editor &ed) {
+  const auto &t = ed.last_bake_times_for_test();
+  return {t.pick_texels, t.chance_kept, t.chance_dropped};
+}
+
+static LightingData baked_with(Editor &ed, const char *pick_command) {
+  if (pick_command) ed.command(pick_command);
+  r35_bake(ed);
+  return ed.lighting_data_for_test();
+}
+}  // namespace r484
+
+static void tests_round484() {
+  /* Criterion 5: `on` and `8` are today's bake bit for bit. (What this can show inside one build: typing them leaves the
+   * default bake as it is - no hidden state, the same pages again. That the default bake itself is main's, byte for
+   * byte, is criterion 11's compare of two builds' saved pages, in the task's results - no unit test can make it.) */
+  test("`lighting pick on` and `lighting pick 8` bake twelve Baked lamps exactly as the default does, and the default's bake picked among them (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const r484::Counts normal = r484::counts(ed);
+    std::printf("    default: %llu picking texels, %.2f lights kept by chance and %.2f dropped a texel\n", (unsigned long long)normal.texels, normal.kept_per(), normal.dropped_per());
+    CHECK(!base.pages.empty() && normal.texels > 0 && normal.kept > 0 && normal.dropped > 0);
+    CHECK(r463::same_pages(base, r484::baked_with(ed, "lighting pick on")));
+    CHECK(r463::same_pages(base, r484::baked_with(ed, "lighting pick 8")));
+    const r484::Counts again = r484::counts(ed);
+    CHECK(again.texels == normal.texels && again.kept == normal.kept && again.dropped == normal.dropped);
+  });
+  /* Criterion 5: off keeps every candidate light at every texel, with the same light on average. */
+  test("`lighting pick off` keeps all twelve lamps at every texel (none kept or dropped by chance) and lights the floor as much as the default within 2 % (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const LightingData off = r484::baked_with(ed, "lighting pick off");
+    const r484::Counts c = r484::counts(ed);
+    const double a = r484::light_sum(base), b = r484::light_sum(off);
+    std::printf("    pick off: counts %llu / %llu / %llu; light %.2f against the default's %.2f (%.2f %%)\n", (unsigned long long)c.texels, (unsigned long long)c.kept,
+                (unsigned long long)c.dropped, b, a, 100.0 * std::fabs(b - a) / a);
+    CHECK(c.texels == 0 && c.kept == 0 && c.dropped == 0);
+    CHECK(a > 0.0 && std::fabs(b - a) / a < 0.02);
+    CHECK(!r463::same_pages(base, off));
+  });
+  /* Criterion 5: more rays keeps more lights a texel. */
+  test("`lighting pick 16` bakes other pages than 8 and keeps more of the twelve lamps at a texel and drops fewer (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const r484::Counts c8 = r484::counts(ed);
+    const LightingData sixteen = r484::baked_with(ed, "lighting pick 16");
+    const r484::Counts c16 = r484::counts(ed);
+    std::printf("    kept a texel: %.2f at 8, %.2f at 16; dropped: %.2f at 8, %.2f at 16\n", c8.kept_per(), c16.kept_per(), c8.dropped_per(), c16.dropped_per());
+    CHECK(c16.texels > 0 && !r463::same_pages(base, sixteen));
+    /* More rays keep more lights, so fewer are dropped. The count of lights kept BY CHANCE need not rise with them (measured
+     * 4.08 at 8 against 3.57 at 16): a light kept for certain is in neither count (lightmapper.h), and more rays make more
+     * lights certain. The spec's "keeps more lights a texel" is therefore pinned through the drops, not chance_kept. */
+    CHECK(c16.dropped_per() < c8.dropped_per());
+    CHECK(c16.kept_per() > 0.0 && c8.dropped_per() > 0.0);
+  });
+  /* Criterion 5: junk is refused and the setting stays. */
+  test("`lighting pick` with junk (8x, -3, 0, 0.5, 5000, 1e3, '.', abc) warns and the setting stays - at 8 and at 16 alike; alone it only says the setting (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const LightingData sixteen = r484::baked_with(ed, "lighting pick 16");
+    const char *junk[] = {"8x", "-3", "0", "0.5", "5000", "1e3", ".", "abc"};
+    for (int round = 0; round < 2; round++) {
+      ed.command(round ? "lighting pick on" : "lighting pick 16");
+      for (const char *word : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(std::string("lighting pick ") + word);
+        const std::string said = r463::join_log(mark);
+        const std::string stays = round ? "stays 8" : "stays 16";
+        CHECK(said.find("lighting pick: say on, off or a number") != std::string::npos && said.find(stays) != std::string::npos);
+        if (said.find(stays) == std::string::npos) std::printf("    lighting pick %s said: %s", word, said.c_str());
+      }
+      CHECK(r463::same_pages(round ? base : sixteen, r484::baked_with(ed, nullptr)));
+    }
+    const size_t mark = r463::log_mark();
+    ed.command("lighting pick");
+    const std::string said = r463::join_log(mark);
+    CHECK(said.find("lighting pick: about 8 lights a texel") != std::string::npos && said.find("say on, off") == std::string::npos);
+    ed.command("lighting pick off");
+    r484::baked_with(ed, "lighting pick banana");  // (still off: refused, no change)
+    CHECK(r484::counts(ed).texels == 0);
+  });
+  /* Criterion 5: a measuring setting - not out of date, not saved, not remembered. */
+  test("`lighting pick 16` is a measuring setting: the lighting stays current after its bake, the saved scene has no trace of it, and a new editor starts at 8 (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const std::string text_before = save_scene_text(ed.scene());
+    ed.command("lighting pick 16");
+    CHECK(!ed.lighting_out_of_date_for_test());  // (the word alone changes nothing the key reads)
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.lighting_data_for_test().scene_key == base.scene_key);
+    const std::string text_after = save_scene_text(ed.scene());
+    CHECK(text_after == text_before);
+    CHECK(to_lower(text_after).find("pick") == std::string::npos);
+    Editor fresh;
+    r484::lamp_hall(fresh);
+    CHECK(r463::same_pages(base, r484::baked_with(fresh, nullptr)));
+    const size_t mark = r463::log_mark();
+    fresh.command("lighting pick");
+    CHECK(r463::join_log(mark).find("about 8 lights a texel (the normal bake)") != std::string::npos);
+  });
+  /* Criterion 5 below the editor: pick_rays is 8 unless set (setting 8 is setting nothing), 16 bakes other pages, and
+   * with pick_lights off nothing is counted. */
+  test("Lightmapper: BakeSettings::pick_rays 8 bakes the default settings' pages bit for bit, and pick_lights off counts nothing (round 484)", [] {
+    MeshPtr floor = primitives::plane(8.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    std::vector<BakeLight> lamps;
+    for (int i = 0; i < 12; i++) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(-3.0f + 0.55f * (float)i, 1.5f, 0.0f), l.light.intensity = 2.0f, l.light.range = 1e3f;
+      l.mode = 2, l.id = (uint64_t)(200 + i);
+      lamps.push_back(l);
+    }
+    Environment dark;
+    dark.mode = Environment::Color, dark.color = Vec3(0.0f);
+    struct Run {
+      LightingData d;
+      uint64_t texels, kept, dropped;
+    };
+    auto bake = [&](bool set_rays, float rays, bool pick) {
+      BakeSettings bs;
+      bs.texels_per_unit = 3, bs.indirect_samples = 1, bs.bounces = 0, bs.denoise = true, bs.directional = false, bs.pick_lights = pick;
+      if (set_rays) bs.pick_rays = rays;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, lamps, dark, bs);
+      while (!lm.step(1e9)) {
+      }
+      LightingData d = lm.take_result();
+      return Run{std::move(d), lm.pick_texels(), lm.chance_kept(), lm.chance_dropped()};
+    };
+    const Run normal = bake(false, 0, true), eight = bake(true, 8.0f, true), sixteen = bake(true, 16.0f, true), none = bake(false, 0, false);
+    CHECK(BakeSettings().pick_rays == 8.0f && !normal.d.pages.empty());
+    CHECK(r463::same_pages(normal.d, eight.d) && normal.texels == eight.texels && normal.kept == eight.kept && normal.dropped == eight.dropped);
+    CHECK(normal.texels > 0 && !r463::same_pages(normal.d, sixteen.d));
+    CHECK(none.texels == 0 && none.kept == 0 && none.dropped == 0);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -11166,4 +11344,5 @@ void run_lighting_tests() {
   tests_round464();
   tests_round465();
   tests_round466();
+  tests_round484();
 }

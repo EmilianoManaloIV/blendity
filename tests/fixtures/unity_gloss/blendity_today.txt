@@ -1,0 +1,157 @@
+unity_materials 1 scene "UnityGloss" materials 12 worn 0
+material "filamented_mask"
+  asset "Assets/Imported/UnityGloss/filamented_mask.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0 specular 0.5
+  exposure_occlusion 0.2 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map "Assets/Imported/UnityGloss/mask_r0_g230_a92.png" ok data
+  roughness_map -
+  normal_map "Assets/Imported/UnityGloss/normal_flat.png" ok data
+  emission_map -
+end
+material "gloss_in_albedo_alpha"
+  asset "Assets/Imported/UnityGloss/gloss_in_albedo_alpha.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 0.1 roughness 0.5 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_a64.png" ok colour
+  metallic_map -
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "gloss_in_metal_alpha"
+  asset "Assets/Imported/UnityGloss/gloss_in_metal_alpha.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map "Assets/Imported/UnityGloss/mask_r0_g230_a92.png" ok data
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "gloss_scaled"
+  asset "Assets/Imported/UnityGloss/gloss_scaled.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0.5 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map "Assets/Imported/UnityGloss/mask_r0_g230_a92.png" ok data
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "highlights_off"
+  asset "Assets/Imported/UnityGloss/highlights_off.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 0 roughness 0.4 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map -
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "metal_from_red"
+  asset "Assets/Imported/UnityGloss/metal_from_red.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0.75 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map "Assets/Imported/UnityGloss/mask_r204_g255_a255.png" ok data
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "mirror"
+  asset "Assets/Imported/UnityGloss/mirror.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map -
+  metallic_map -
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "occlusion_in_green"
+  asset "Assets/Imported/UnityGloss/occlusion_in_green.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 0 roughness 0.5 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map -
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "reflections_off"
+  asset "Assets/Imported/UnityGloss/reflections_off.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 0 roughness 0.1 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map -
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "sixteen_bit_normal"
+  asset "Assets/Imported/UnityGloss/sixteen_bit_normal.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 0 roughness 0.5 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map -
+  roughness_map -
+  normal_map "Assets/Imported/UnityGloss/normal16_flat.png" ok data
+  emission_map -
+end
+material "slot_without_keyword"
+  asset "Assets/Imported/UnityGloss/slot_without_keyword.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map "Assets/Imported/UnityGloss/mask_r204_g255_a51.png" ok data
+  roughness_map -
+  normal_map -
+  emission_map -
+end
+material "urp_lit_mask"
+  asset "Assets/Imported/UnityGloss/urp_lit_mask.mat" unity
+  users 0 first -
+  surface 0 shading 0 unlit 0 double_sided 0
+  base_color 1 1 1 alpha 1
+  metallic 1 roughness 0.5 specular 0.5
+  exposure_occlusion 0 emission_strength 0 normal_strength 1
+  base_map "Assets/Imported/UnityGloss/albedo_opaque.png" ok colour
+  metallic_map "Assets/Imported/UnityGloss/mask_r0_g230_a92.png" ok data
+  roughness_map -
+  normal_map -
+  emission_map -
+end

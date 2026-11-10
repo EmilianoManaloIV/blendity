@@ -1560,6 +1560,14 @@ class Editor {
    * count, so tools/unity_compare.py can pair Blendity's pages with Unity's object by object. */
   void lighting_noise_command(const std::string &folder_a, const std::string &folder_b);  // (round 463: `lighting noise`)
   void save_shown_lighting(const std::string &dir, bool overwrite = false);  // (review 451: a relative folder is the project's; a bake there needs `overwrite`)
+  /* Round 484 (task 0460, unity_material_report.cpp): two measuring verbs for tools/unity_materials.py. `unity materials
+   * [all] [to "<file>"]`: what Blendity made of every material the scene's renderers wear (all: every .mat under Assets
+   * too), as text. `unity mapstats [decoders] "<image>"... [to "<file>"]`: an image's size and channels as Blendity
+   * decodes it as data, with `decoders` also through its own decoder alone (a script's: it decodes on the main thread).
+   * Neither changes the scene. */
+  void unity_materials_command(const std::vector<std::string> &words);
+  void unity_mapstats_command(const std::vector<std::string> &words);
+  std::string unity_materials_text(bool all, size_t *count = nullptr, size_t *from_unity = nullptr);
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
   void unity_subtractive_modes(LightingData &ld) const;  // (round 444)
@@ -5700,6 +5708,10 @@ class Editor {
   bool bake_variance_denoiser_ = true;  // round 466 (`lighting denoiser variance|atrous`): the filter guided by measured noise - a comparison switch, not saved
   bool bake_light_tree_ = true;  // round 464 (`lighting tree on|off`): emitters picked by a light tree - a comparison switch, not saved
   uint32_t bake_seed_ = 0;  // round 463 (`lighting seed <n>`): a measurement setting - not saved, not in the scene key; 0 the normal bake
+  /* Round 484 (`lighting pick on|off|<rays>`): about how many Baked point and spot lights a texel keeps by chance - 8 the
+   * normal bake, 0 every light at every texel; a measurement setting, not saved, not in the scene key. */
+  float bake_pick_rays_ = 8.0f;
+  void lighting_pick_command(const std::string &word);
   int bake_gpu_ = -1;  // task 0018: the GPU Generate Lighting gathers on (Render > Device: GPU Compute), -1 the CPU
   std::string gi_gpu_name_;  // the device in use, for the Lighting window
   bool rtlm_busy_ = false;  // a realtime lightmap pass is still gathering
@@ -5774,6 +5786,8 @@ class Editor {
     std::vector<uint64_t> mesh_hashes;  // (round 422: lightmap_mesh_hash of each of `objects`, on the worker - not in the landing frame)
     std::string lightmap_denoiser;      // (round 423)
     uint64_t lightmap_rays = 0;
+    uint64_t lightmap_pick_texels = 0, lightmap_chance_kept = 0, lightmap_chance_dropped = 0;  // (round 484)
+    float pick_rays = 8.0f;  // (round 484: what `lighting pick` was when the bake started; 0: off)
     size_t lightmap_gpu_texels = 0;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> done{false}, cancel{false};
@@ -5795,6 +5809,7 @@ class Editor {
     double phase_ms[5] = {0, 0, 0, 0, 0}, finish_ms = 0, land_ms = 0, total_ms = 0;
     size_t texels = 0, gpu_texels = 0;
     uint64_t rays = 0;
+    uint64_t pick_texels = 0, chance_kept = 0, chance_dropped = 0;  // (round 484: light picking, counted - Lightmapper::pick_texels)
   };
   BakeTimes last_bake_times_;
   double last_bake_start_ms_ = 0;  // (round 422: the frame that starts Generate Lighting)

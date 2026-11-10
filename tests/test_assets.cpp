@@ -13821,6 +13821,549 @@ static void tests_round456() {
   });
 }
 
+/* ---------------------------------------------------------------- round 484: Unity gloss, measured (task 0460) */
+/* The committed set tests/fixtures/unity_gloss (README.md works out Unity's numbers) is copied into the scratch project
+ * where its .unity-guids names it. These tests pin how Blendity reads each material TODAY, wrong where the README says so;
+ * round 485 changes the reading and rewrites the matching test with the reason. */
+namespace r484a {
+static const char *const kDir = "Assets/Imported/UnityGloss";
+
+static std::string project_dir() { return fs::parent(resolve_asset_path("Assets")); }
+static std::string mat_path(const std::string &name) { return std::string(kDir) + "/" + name + ".mat"; }
+
+static void refresh_index() { unity_guid_index_cached(resolve_asset_path("Assets"), project_dir(), true); }
+
+/* The fixture's files in the scratch project; the GUID table only when asked (a package's is written last). */
+static bool install(bool with_guids) {
+  std::error_code ec;
+  const std::string dir = resolve_asset_path(kDir);
+  std::filesystem::remove_all(dir, ec);
+  fs::make_dirs(fs::parent(dir));
+  std::filesystem::copy("tests/fixtures/unity_gloss", dir, std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing, ec);
+  if (ec) return false;
+  if (!with_guids) std::filesystem::remove(fs::join(dir, ".unity-guids"), ec);
+  refresh_index();
+  return fs::exists(fs::join(dir, ".unity-meta"));
+}
+
+static void cleanup() {
+  std::error_code ec;
+  std::filesystem::remove_all(resolve_asset_path(kDir), ec);
+  clear_material_assets();
+  refresh_index();
+}
+
+static size_t log_mark() {
+  std::vector<LogEntry> out;
+  return Log::fetch(0, out);
+}
+static std::string log_since(size_t since) {
+  std::vector<LogEntry> out;
+  Log::fetch(since, out);
+  std::string all;
+  for (const LogEntry &e : out) all += e.text + "\n";
+  return all;
+}
+
+/* One 8-bit channel of a one-colour image, 0..1, as the data decode gives it (what `unity mapstats` reads). */
+static float first_pixel(const std::string &asset, int channel) {
+  const TexturePtr t = texture_load(resolve_asset_path(asset), false);
+  if (!t || t->levels.empty() || t->levels[0].px8.empty()) return -1.0f;
+  return (float)((t->levels[0].px8[0] >> (8 * channel)) & 0xFFu) / 255.0f;
+}
+
+/* The material as the shaders use it: metallic x its map's red, roughness x its map's red. */
+struct Seen {
+  bool loaded = false, base_map = false, metal_map = false;
+  float metal = -1.0f, rough = -1.0f;
+};
+static Seen seen(const std::string &name) {
+  Seen s;
+  const MaterialPtr m = material_asset(mat_path(name));
+  if (!m) return s;
+  s.loaded = true;
+  s.base_map = !m->base_map.empty(), s.metal_map = !m->metallic_map.empty();
+  s.metal = m->metallic * (s.metal_map ? first_pixel(m->metallic_map.path, 0) : 1.0f);
+  s.rough = m->roughness * (m->roughness_map.empty() ? 1.0f : first_pixel(m->roughness_map.path, 0));
+  return s;
+}
+
+/* A listing's blocks: `material "<name>"` up to its `end`, with the asset path of the second line. */
+struct Block {
+  std::string name, text, asset;
+};
+static std::vector<Block> blocks_of(const std::string &listing) {
+  std::vector<Block> v;
+  for (size_t at = listing.find("material \""); at != std::string::npos; at = listing.find("\nmaterial \"", at)) {
+    if (listing[at] == '\n') at++;
+    const size_t end = listing.find("\nend\n", at);
+    if (end == std::string::npos) break;
+    Block b;
+    b.text = listing.substr(at, end + 5 - at);
+    const size_t q = b.text.find('"', 10);
+    b.name = b.text.substr(10, q - 10);
+    const size_t a = b.text.find("  asset ");
+    b.asset = a == std::string::npos ? "" : b.text.substr(a + 8, b.text.find('\n', a) - a - 8);
+    v.push_back(b);
+    at = end;
+  }
+  return v;
+}
+static std::vector<Block> gloss_blocks(const std::string &listing) {
+  std::vector<Block> v;
+  for (const Block &b : blocks_of(listing))
+    if (b.asset.find(std::string("\"") + kDir + "/") == 0) v.push_back(b);
+  return v;
+}
+static const Block *find_block(const std::vector<Block> &v, const std::string &name) {
+  size_t n = 0;
+  const Block *hit = nullptr;
+  for (const Block &b : v) n += b.name == name ? (hit = &b, 1) : 0;
+  return n == 1 ? hit : nullptr;  // (exactly one block of a name)
+}
+static bool has_line(const Block &b, const std::string &line) { return b.text.find("\n  " + line + "\n") != std::string::npos; }
+
+/* `mapstats "<image>" size W H float F alpha A mean r g b a min r g b a max r g b a ...` */
+struct Stats {
+  bool ok = false;
+  int w = 0, h = 0, fl = -1, alpha = -1;
+  float mean[4] = {-1, -1, -1, -1}, lo[4] = {-1, -1, -1, -1}, hi[4] = {-1, -1, -1, -1};
+};
+static std::string line_naming(const std::string &said, const std::string &image) {
+  size_t at = 0;
+  while (at < said.size()) {
+    const size_t end = std::min(said.find('\n', at), said.size());
+    const std::string line = said.substr(at, end - at);
+    if (line.find("mapstats \"" + image + "\"") == 0) return line;
+    at = end + 1;
+  }
+  return "";
+}
+static Stats parse_stats(const std::string &line) {
+  Stats s;
+  const size_t at = line.find(" size ");
+  if (at == std::string::npos) return s;
+  s.ok = std::sscanf(line.c_str() + at, " size %d %d float %d alpha %d mean %f %f %f %f min %f %f %f %f max %f %f %f %f", &s.w, &s.h, &s.fl, &s.alpha, &s.mean[0], &s.mean[1],
+                     &s.mean[2], &s.mean[3], &s.lo[0], &s.lo[1], &s.lo[2], &s.lo[3], &s.hi[0], &s.hi[1], &s.hi[2], &s.hi[3]) == 16;
+  return s;
+}
+/* The ` own_mean r g b a` at a line's end; false for ` own_mean -` or none. */
+static bool parse_own(const std::string &line, float *out) {
+  const size_t at = line.find(" own_mean ");
+  if (at == std::string::npos) return false;
+  return std::sscanf(line.c_str() + at, " own_mean %f %f %f %f", &out[0], &out[1], &out[2], &out[3]) == 4;
+}
+/* libpng compiled into this build (run time, from the dependency list). */
+static bool libpng_built_in() {
+  for (const deps::Library &l : deps::libraries())
+    if (std::string(l.name).find("libpng") == 0) return l.enabled;
+  return false;
+}
+static bool near_all(const float *a, const float *b, float tol) {
+  for (int k = 0; k < 4; k++)
+    if (!(std::fabs(a[k] - b[k]) <= tol)) return false;
+  return true;
+}
+
+/* Blendity's values against Unity's, printed so the owner's numbers are in the log. */
+static void report(const char *name, const Seen &s, float unity_metal, float unity_rough) {
+  std::printf("    %-22s Blendity metal %.3f rough %.3f%s | Unity metal %.3f rough %.3f\n", name, s.metal, s.rough, s.metal_map ? " (via map)" : "", unity_metal, unity_rough);
+}
+}  // namespace r484a
+
+static void tests_round484() {
+  /* Criterion 2: the mechanism at its smallest. This pins a FAULT that round 485 removes: when it does, the middle check
+   * (the same session still has no maps after the table is written) flips and is rewritten there. */
+  test("A Unity material read before its package's GUID table is written comes in chrome with no maps and keeps none after the table is written (round 484 pins the fault; round 485 removes it and flips the middle check); read in a fresh library it has its maps", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(false));
+    const std::string path = r484a::mat_path("gloss_in_metal_alpha");
+    const MaterialPtr early = material_asset(path);  // (the Materials window loading it while the package unpacks)
+    CHECK(early != nullptr);
+    if (!early) return;
+    std::printf("    before the table: metallic %g roughness %g, base map '%s', metallic map '%s'\n", early->metallic, early->roughness, early->base_map.path.c_str(),
+                early->metallic_map.path.c_str());
+    CHECK(early->foreign && early->metallic == 1.0f && early->roughness == 0.0f && early->base_map.empty() && early->metallic_map.empty());
+    /* The table lands (it is written last) and the index is refreshed. */
+    std::error_code ec;
+    std::filesystem::copy_file("tests/fixtures/unity_gloss/.unity-guids", fs::join(resolve_asset_path(r484a::kDir), ".unity-guids"), std::filesystem::copy_options::overwrite_existing, ec);
+    CHECK(!ec);
+    r484a::refresh_index();
+    const MaterialPtr same_session = material_asset(path);
+    CHECK(same_session == early && same_session->base_map.empty() && same_session->metallic_map.empty() && same_session->metallic == 1.0f && same_session->roughness == 0.0f);
+    clear_material_assets();  // (Blendity restarted: a fresh library)
+    const MaterialPtr late = material_asset(path);
+    CHECK(late != nullptr && late != early);
+    if (late) {
+      std::printf("    after the table, fresh library: base map '%s', metallic map '%s'\n", late->base_map.path.c_str(), late->metallic_map.path.c_str());
+      CHECK(late->base_map.path == std::string(r484a::kDir) + "/albedo_opaque.png" && late->metallic_map.path == std::string(r484a::kDir) + "/mask_r0_g230_a92.png");
+    }
+    r484a::cleanup();
+  });
+  /* Criterion 6, the controls: right today. */
+  test("Unity materials that Blendity reads right today (round 484 control; no round changes them): metal from the map's red, and a mirror that stays chrome with no base map", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const r484a::Seen red = r484a::seen("metal_from_red"), mirror = r484a::seen("mirror");
+    r484a::report("metal_from_red", red, 0.8f, 0.75f);
+    r484a::report("mirror", mirror, 1.0f, 0.0f);
+    CHECK(red.loaded && red.metal_map && std::fabs(red.metal - 0.8f) < 0.005f && std::fabs(red.rough - 0.75f) < 0.005f);
+    CHECK(mirror.loaded && !mirror.base_map && !mirror.metal_map && mirror.metal == 1.0f && mirror.rough == 0.0f);
+    /* The three whose fault is a keyword no Material field holds (reflections off, highlights off, an occlusion map): the two values are Unity's. */
+    const struct {
+      const char *name;
+      float rough;
+    } flags[] = {{"reflections_off", 0.1f}, {"highlights_off", 0.4f}, {"occlusion_in_green", 0.5f}};
+    for (const auto &f : flags) {
+      const r484a::Seen s = r484a::seen(f.name);
+      r484a::report(f.name, s, 0.0f, f.rough);
+      CHECK(s.loaded && std::fabs(s.metal) < 0.005f && std::fabs(s.rough - f.rough) < 0.005f);
+    }
+    r484a::cleanup();
+  });
+  /* Criterion 6: smoothness in the mask's alpha. */
+  test("A Unity material whose smoothness is in its mask map's alpha comes in mirror-smooth: roughness 0 where Unity's is 0.64 (round 484 pins it; round 485 reads the alpha)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    for (const char *name : {"gloss_in_metal_alpha", "filamented_mask"}) {
+      const r484a::Seen s = r484a::seen(name);
+      r484a::report(name, s, 0.0f, 0.639216f);
+      CHECK(s.loaded && s.metal_map && s.base_map);
+      CHECK(std::fabs(s.metal - 0.0f) < 0.005f);  // (the mask's red is 0: a polished non-metal, not chrome)
+      CHECK(std::fabs(s.rough - 0.639216f) > 0.05f && s.rough == 0.0f);
+    }
+    r484a::cleanup();
+  });
+  test("A Unity material whose mask's alpha is scaled by _GlossMapScale (Standard) or _Smoothness (URP Lit) comes in half rough where Unity's is 0.82 (round 484 pins it; round 485 reads the alpha times the scale)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    for (const char *name : {"gloss_scaled", "urp_lit_mask"}) {
+      const r484a::Seen s = r484a::seen(name);
+      r484a::report(name, s, 0.0f, 0.819608f);
+      CHECK(s.loaded && s.metal_map);
+      CHECK(std::fabs(s.metal) < 0.005f && std::fabs(s.rough - 0.819608f) > 0.05f);
+    }
+    r484a::cleanup();
+  });
+  test("A Unity material whose smoothness is in its albedo's alpha reads the slider's 0.5 where Unity's roughness is 0.80, and no map is read for it (round 484 pins it; round 485 reads _SmoothnessTextureChannel)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const r484a::Seen s = r484a::seen("gloss_in_albedo_alpha");
+    r484a::report("gloss_in_albedo_alpha", s, 0.1f, 0.799216f);
+    CHECK(s.loaded && s.base_map && !s.metal_map);
+    CHECK(std::fabs(s.metal - 0.1f) < 0.005f);  // (the metallic slider is right; the smoothness is not)
+    CHECK(std::fabs(s.rough - 0.799216f) > 0.05f);
+    r484a::cleanup();
+  });
+  /* Criterion 6: the slot decides, not the keyword. */
+  test("A Unity material with a texture in its metallic slot but the keyword off comes in with the map's metal (0.8) and no roughness where Unity uses the sliders (0.2 / 0.7) (round 484 pins it; round 485 reads the keyword)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const r484a::Seen s = r484a::seen("slot_without_keyword");
+    r484a::report("slot_without_keyword", s, 0.2f, 0.7f);
+    CHECK(s.loaded && s.metal_map);
+    CHECK(std::fabs(s.metal - 0.2f) > 0.05f && std::fabs(s.rough - 0.7f) > 0.05f);
+    r484a::cleanup();
+  });
+  /* Criterion 6: the listing of the whole set. */
+  test("`unity materials all` on the committed set lists its twelve materials exactly as tests/fixtures/unity_gloss/blendity_today.txt has them (round 485 replaces that file when it changes how they are read)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const std::string out = "R484/today.txt";
+    std::remove(fs::join(r484a::project_dir(), out).c_str());
+    const size_t mark = r484a::log_mark();
+    ed.command("unity materials all to \"" + out + "\"");
+    const std::string said = r484a::log_since(mark);
+    const size_t summary = said.find("unity materials: ");
+    std::printf("    %s", summary == std::string::npos ? "(no summary line)\n" : said.substr(summary).c_str());
+    std::string text, today;
+    CHECK(fs::read_file(fs::join(r484a::project_dir(), out), text));
+    CHECK(fs::read_file("tests/fixtures/unity_gloss/blendity_today.txt", today));
+    const std::vector<r484a::Block> got = r484a::gloss_blocks(text), want = r484a::gloss_blocks(today);
+    CHECK(want.size() == 12 && got.size() == 12);
+    for (size_t i = 0; i < want.size() && i < got.size(); i++) {
+      CHECK(got[i].name == want[i].name);
+      CHECK(got[i].text == want[i].text);
+      if (got[i].text != want[i].text) std::printf("    %s differs:\n%s--- fixture says:\n%s", got[i].name.c_str(), got[i].text.c_str(), want[i].text.c_str());
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(fs::join(r484a::project_dir(), "R484"), ec);
+    r484a::cleanup();
+  });
+  /* Criterion 3. */
+  test("`unity materials`: a scene wearing a Unity .mat, a Blendity .mat and a scene material gets one block each (asset, users, first user's Hierarchy path, values, map slots); a deleted map reads missing, an empty slot -; the scene, its undo and its changed mark stay as they were", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const std::string unity = r484a::mat_path("metal_from_red"), blend = "Assets/Materials/R484Blend.mat";
+    std::remove(resolve_asset_path(blend).c_str());
+    CHECK(create_material_asset(*make_material("R484Blend", Vec3(0.2f, 0.4f, 0.6f)), blend) != nullptr);
+    GameObject *rig = ed.scene().create("Rig");
+    auto cube = [&](const char *name) {
+      GameObject *g = create_primitive(ed.scene(), "Cube");
+      g->name = name;
+      return g;
+    };
+    ed.scene().set_parent(cube("Wall"), rig);
+    cube("WallTwo");
+    cube("Floor");
+    cube("Lamp")->get<MeshRenderer>()->materials = {make_material("R484 Lamp Scene", Vec3(1.0f, 0.5f, 0.2f))};
+    for (const char *who : {"Wall", "WallTwo"}) {
+      ed.command(std::string("select ") + who);
+      ed.command("assignmat " + unity);
+    }
+    ed.command("select Floor");
+    ed.command("assignmat " + blend);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const std::string scene_before = save_scene_text(ed.scene());
+    const size_t undo_before = ed.undo_depth_for_test();
+    const bool dirty_before = ed.scene_dirty_for_test();
+    /* The listing in the log. */
+    size_t mark = r484a::log_mark();
+    ed.command("unity materials");
+    const std::string said = r484a::log_since(mark);
+    const std::vector<r484a::Block> blocks = r484a::blocks_of(said);
+    const r484a::Block *u = r484a::find_block(blocks, "metal_from_red"), *b = r484a::find_block(blocks, "R484Blend"), *s = r484a::find_block(blocks, "R484 Lamp Scene");
+    CHECK(u && b && s);
+    if (!u || !b || !s) return;
+    CHECK(said.find("unity_materials 1 scene ") != std::string::npos && said.find("unity materials: ") != std::string::npos);
+    /* The Unity one: its file, a Unity file, two renderers, the first by Hierarchy path; the values and the five slots. */
+    CHECK(r484a::has_line(*u, "asset \"" + unity + "\" unity"));
+    CHECK(r484a::has_line(*u, "users 2 first \"Rig/Wall\""));
+    CHECK(r484a::has_line(*u, "metallic 1 roughness 0.75 specular 0.5"));
+    for (const char *key : {"surface ", "base_color ", "exposure_occlusion ", "base_map ", "metallic_map ", "roughness_map ", "normal_map ", "emission_map "})
+      CHECK(u->text.find(std::string("\n  ") + key) != std::string::npos);
+    CHECK(u->text.find(" emission_strength ") != std::string::npos && u->text.find(" normal_strength ") != std::string::npos);  // (the third field of a line)
+    CHECK(r484a::has_line(*u, "base_map \"" + std::string(r484a::kDir) + "/albedo_opaque.png\" ok colour"));
+    CHECK(r484a::has_line(*u, "metallic_map \"" + std::string(r484a::kDir) + "/mask_r204_g255_a255.png\" ok data"));
+    CHECK(r484a::has_line(*u, "roughness_map -") && r484a::has_line(*u, "normal_map -") && r484a::has_line(*u, "emission_map -"));
+    /* The Blendity .mat and the scene's own material. */
+    CHECK(r484a::has_line(*b, "asset \"" + blend + "\" blendity") && r484a::has_line(*b, "users 1 first \"Floor\""));
+    CHECK(r484a::has_line(*s, "asset - scene") && r484a::has_line(*s, "users 1 first \"Lamp\""));
+    for (const r484a::Block *x : {b, s})
+      for (const char *key : {"surface ", "base_color ", "metallic ", "exposure_occlusion ", "base_map ", "emission_map "}) CHECK(x->text.find(std::string("\n  ") + key) != std::string::npos);
+    /* `to "<file>"`: a relative file lands in the project and holds the text the log shows; an absolute one too. */
+    const std::string rel = "R484/materials.txt", absolute = fs::join(r484a::project_dir(), "R484/materials_abs.txt");
+    std::remove(fs::join(r484a::project_dir(), rel).c_str());
+    mark = r484a::log_mark();
+    ed.command("unity materials to \"" + rel + "\"");
+    std::string file, abs_file;
+    CHECK(fs::read_file(fs::join(r484a::project_dir(), rel), file));
+    CHECK(!file.empty() && said.find(file) != std::string::npos);  // (the same lines, nothing else, in the file)
+    CHECK(r484a::log_since(mark).find("material \"") == std::string::npos);  // (and the log doesn't repeat them)
+    ed.command("unity materials to \"" + absolute + "\"");
+    CHECK(fs::read_file(absolute, abs_file) && abs_file == file);
+    /* A map whose file is gone reads missing. */
+    CHECK(std::filesystem::remove(resolve_asset_path(std::string(r484a::kDir) + "/albedo_opaque.png")));
+    mark = r484a::log_mark();
+    ed.command("unity materials");
+    const std::vector<r484a::Block> after = r484a::blocks_of(r484a::log_since(mark));
+    const r484a::Block *u2 = r484a::find_block(after, "metal_from_red");
+    CHECK(u2 && r484a::has_line(*u2, "base_map \"" + std::string(r484a::kDir) + "/albedo_opaque.png\" missing colour") &&  // (the slot's text: path, then missing / ok, then how it is read)
+          r484a::has_line(*u2, "metallic_map \"" + std::string(r484a::kDir) + "/mask_r204_g255_a255.png\" ok data"));    /* `all`: the .mat files no renderer wears, with no users. */
+    mark = r484a::log_mark();
+    ed.command("unity materials all");
+    const std::vector<r484a::Block> all = r484a::blocks_of(r484a::log_since(mark));
+    const r484a::Block *idle = r484a::find_block(all, "gloss_scaled");
+    CHECK(idle && r484a::has_line(*idle, "users 0 first -") && r484a::has_line(*idle, "asset \"" + r484a::mat_path("gloss_scaled") + "\" unity"));
+    CHECK(all.size() > blocks.size() && r484a::find_block(all, "metal_from_red") && r484a::find_block(all, "R484Blend") && r484a::find_block(all, "R484 Lamp Scene"));
+    CHECK(!r484a::find_block(blocks, "gloss_scaled"));  // (without `all`, only what is worn)
+    /* Refusals: an unknown word, `to` with no file - a warning, nothing written, nothing listed. */
+    const std::string never = fs::join(r484a::project_dir(), "R484/never.txt");
+    mark = r484a::log_mark();
+    ed.command("unity materials bogus to \"R484/never.txt\"");
+    std::string refused = r484a::log_since(mark);
+    CHECK(refused.find("isn't one of its words") != std::string::npos && refused.find("unity_materials 1") == std::string::npos && !fs::exists(never));
+    mark = r484a::log_mark();
+    ed.command("unity materials to");
+    refused = r484a::log_since(mark);
+    CHECK(refused.find("needs a file") != std::string::npos && refused.find("unity_materials 1") == std::string::npos);
+    /* None of it touched the scene. */
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(save_scene_text(ed.scene()) == scene_before);
+    CHECK(ed.undo_depth_for_test() == undo_before && ed.scene_dirty_for_test() == dirty_before);
+    std::error_code ec;
+    std::filesystem::remove_all(fs::join(r484a::project_dir(), "R484"), ec);
+    std::remove(resolve_asset_path(blend).c_str());
+    r484a::cleanup();
+  });
+  /* Criterion 4. */
+  test("`unity mapstats`: an 8 x 8 PNG of one colour reads its size and each channel's mean within 1/255; an image without alpha reads alpha 1; a missing file is named; several images give one line each in order; `to \"<file>\"` writes them", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    CHECK(r484a::install(true));
+    const std::string mask = std::string(r484a::kDir) + "/mask_r0_g230_a92.png", flat = std::string(r484a::kDir) + "/normal_flat.png";
+    const std::string rgb = std::string(r484a::kDir) + "/r484_rgb_only.png", gone = std::string(r484a::kDir) + "/r484_not_there.png";
+    std::vector<uint32_t> px(16, 0xFF336699u);  // (opaque; 4 x 4; written as RGB, no alpha channel)
+    CHECK(write_png(resolve_asset_path(rgb), px.data(), 4, 4, 4, false));
+    size_t mark = r484a::log_mark();
+    ed.command("unity mapstats \"" + mask + "\"");
+    const r484a::Stats m = r484a::parse_stats(r484a::line_naming(r484a::log_since(mark), mask));
+    const float want[4] = {0.0f, 230.0f / 255.0f, 0.0f, 92.0f / 255.0f};
+    std::printf("    %s: %d x %d, mean %.6f %.6f %.6f %.6f, min %.6f max %.6f (green)\n", mask.c_str(), m.w, m.h, m.mean[0], m.mean[1], m.mean[2], m.mean[3], m.lo[1], m.hi[1]);
+    CHECK(m.ok && m.w == 8 && m.h == 8 && m.fl == 0 && m.alpha == 1);
+    CHECK(r484a::near_all(m.mean, want, 1.0f / 255.0f));
+    CHECK(r484a::near_all(m.lo, m.mean, 1.0f / 255.0f) && r484a::near_all(m.hi, m.mean, 1.0f / 255.0f));  // (one colour: least = greatest = mean)
+    /* No alpha channel: alpha reads 1 (mean, least and greatest). */
+    mark = r484a::log_mark();
+    ed.command("unity mapstats \"" + rgb + "\"");
+    const r484a::Stats n = r484a::parse_stats(r484a::line_naming(r484a::log_since(mark), rgb));
+    const float rgb_want[4] = {0x33 / 255.0f, 0x66 / 255.0f, 0x99 / 255.0f, 1.0f};
+    std::printf("    %s: %d x %d, alpha channel %d, mean %.4f %.4f %.4f %.4f\n", rgb.c_str(), n.w, n.h, n.alpha, n.mean[0], n.mean[1], n.mean[2], n.mean[3]);
+    CHECK(n.ok && n.w == 4 && n.h == 4 && n.alpha == 0);
+    CHECK(n.mean[3] == 1.0f && n.lo[3] == 1.0f && n.hi[3] == 1.0f);
+    CHECK(std::fabs(n.mean[0] - rgb_want[2]) < 1.0f / 255.0f || std::fabs(n.mean[0] - rgb_want[0]) < 1.0f / 255.0f);  // (which of R / B the ARGB word's order puts first is the PNG writer's: only alpha is pinned)
+    /* A missing file: its line says missing and names it; no numbers. */
+    mark = r484a::log_mark();
+    ed.command("unity mapstats \"" + gone + "\"");
+    const std::string miss = r484a::line_naming(r484a::log_since(mark), gone);
+    CHECK(miss.find(" missing") != std::string::npos && miss.find(gone) != std::string::npos && miss.find(" size ") == std::string::npos);
+    /* Several images, one line each, in the order given - the missing one among them does not stop the rest. */
+    mark = r484a::log_mark();
+    ed.command("unity mapstats \"" + flat + "\" \"" + gone + "\" \"" + mask + "\"");
+    const std::string said = r484a::log_since(mark);
+    const size_t a = said.find("mapstats \"" + flat), b = said.find("mapstats \"" + gone), c = said.find("mapstats \"" + mask);
+    CHECK(a != std::string::npos && b != std::string::npos && c != std::string::npos && a < b && b < c);
+    CHECK(r484a::parse_stats(r484a::line_naming(said, flat)).ok && r484a::parse_stats(r484a::line_naming(said, mask)).ok);
+    /* `to "<file>"` writes the same lines. */
+    const std::string out = "R484/mapstats.txt";
+    std::remove(fs::join(r484a::project_dir(), out).c_str());
+    ed.command("unity mapstats \"" + flat + "\" \"" + mask + "\" to \"" + out + "\"");
+    std::string file;
+    CHECK(fs::read_file(fs::join(r484a::project_dir(), out), file));
+    CHECK(file.find("mapstats \"" + flat) == 0 && file.find("mapstats \"" + mask) != std::string::npos && file.find("mapstats \"" + flat) < file.find("mapstats \"" + mask));
+    /* No image / `to` with no file: a warning, nothing written. */
+    mark = r484a::log_mark();
+    ed.command("unity mapstats");
+    CHECK(r484a::log_since(mark).find("give at least one image") != std::string::npos);
+    mark = r484a::log_mark();
+    ed.command("unity mapstats \"" + mask + "\" to");
+    CHECK(r484a::log_since(mark).find("needs a file") != std::string::npos && r484a::line_naming(r484a::log_since(mark), mask).empty());
+    /* (The refusal in a window - `unity mapstats` is a script's - cannot be driven here: the suite's Editors are all headless;
+     * Editor::init opens a real window. Reported, not tested.) */
+    std::error_code ec;
+    std::filesystem::remove_all(fs::join(r484a::project_dir(), "R484"), ec);
+    r484a::cleanup();
+  });
+  /* `unity mapstats decoders`: the same image read by Blendity's own decoder as well. */
+  test("`unity mapstats decoders` adds own_mean (Blendity's own decoder) to each image's line - equal to mean on an 8-bit map in any build - and without the word no line carries it; missing files and a bare `decoders` are refused as before; the scene is untouched (round 484)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    CHECK(r484a::install(true));
+    const std::string mask = std::string(r484a::kDir) + "/mask_r0_g230_a92.png", flat = std::string(r484a::kDir) + "/normal_flat.png", gone = std::string(r484a::kDir) + "/r484_not_there.png";
+    const std::string scene_before = save_scene_text(ed.scene());
+    size_t mark = r484a::log_mark();
+    ed.command("unity mapstats decoders \"" + mask + "\"");
+    std::string line = r484a::line_naming(r484a::log_since(mark), mask);
+    float own[4] = {-1, -1, -1, -1};
+    const r484a::Stats m = r484a::parse_stats(line);
+    CHECK(m.ok && r484a::parse_own(line, own) && r484a::near_all(own, m.mean, 1.0f / 255.0f));
+    std::printf("    8-bit mask: mean %.4f %.4f %.4f %.4f, own_mean %.4f %.4f %.4f %.4f\n", m.mean[0], m.mean[1], m.mean[2], m.mean[3], own[0], own[1], own[2], own[3]);
+    mark = r484a::log_mark();
+    ed.command("unity mapstats \"" + mask + "\"");
+    line = r484a::line_naming(r484a::log_since(mark), mask);
+    CHECK(!line.empty() && line.find("own_mean") == std::string::npos && r484a::parse_stats(line).ok);
+    mark = r484a::log_mark();
+    ed.command("unity mapstats decoders");
+    std::string said = r484a::log_since(mark);
+    CHECK(said.find("give at least one image") != std::string::npos && said.find("own_mean") == std::string::npos);
+    mark = r484a::log_mark();
+    ed.command("unity mapstats decoders \"" + gone + "\"");
+    line = r484a::line_naming(r484a::log_since(mark), gone);
+    CHECK(line.find(" missing") != std::string::npos && line.find(gone) != std::string::npos && line.find("own_mean") == std::string::npos);
+    mark = r484a::log_mark();
+    ed.command("unity mapstats decoders \"" + flat + "\" \"" + gone + "\" \"" + mask + "\"");
+    said = r484a::log_since(mark);
+    const size_t a = said.find("mapstats \"" + flat), b = said.find("mapstats \"" + gone), c = said.find("mapstats \"" + mask);
+    CHECK(a != std::string::npos && b != std::string::npos && c != std::string::npos && a < b && b < c);
+    CHECK(r484a::parse_own(r484a::line_naming(said, flat), own) && r484a::parse_own(r484a::line_naming(said, mask), own));
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(save_scene_text(ed.scene()) == scene_before);
+    r484a::cleanup();
+  });
+  /* The 16-bit map: round 485 fixes the library path; this round pins today's. */
+  test("A 16-bit PNG (red and green 0x8000) is read brighter by the libraries build than by Blendity's own decoder: 186/255 against 128/255 (round 484 pins the fault where libpng is built in; round 485 makes the two equal and flips that branch)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    CHECK(r484a::install(true));
+    const std::string map = std::string(r484a::kDir) + "/normal16_flat.png";
+    const bool libpng = r484a::libpng_built_in() && image_library_codecs();  // (image_library_codecs() is only the switch: true by default even with no libpng)
+    const size_t mark = r484a::log_mark();
+    ed.command("unity mapstats decoders \"" + map + "\"");
+    const std::string line = r484a::line_naming(r484a::log_since(mark), map);
+    const r484a::Stats s = r484a::parse_stats(line);
+    float own[4] = {-1, -1, -1, -1};
+    CHECK(s.ok && r484a::parse_own(line, own) && s.w == 8 && s.h == 8);
+    std::printf("    libpng in this build: %d; mean %.4f %.4f %.4f %.4f; own_mean %.4f %.4f %.4f %.4f (file: 0.5020 0.5020 1 1)\n", libpng ? 1 : 0, s.mean[0], s.mean[1], s.mean[2],
+                s.mean[3], own[0], own[1], own[2], own[3]);
+    const float file_value = 128.0f / 255.0f, tol = 1.0f / 255.0f;
+    CHECK(std::fabs(own[0] - file_value) < tol && std::fabs(own[1] - file_value) < tol && own[2] > 1.0f - tol && own[3] > 1.0f - tol);  // (every build)
+    if (!libpng) {
+      CHECK(r484a::near_all(s.mean, own, tol));
+      r484a::cleanup();
+      return;
+    }
+    /* TODAY'S FAULT (libpng's simplified API takes 16 bits as linear light and hands back that with a gamma of 2.2: one half
+     * becomes 186, measured in the libraries build): round 485 flips this branch to equal. */
+    CHECK(std::fabs(s.mean[0] - 186.0f / 255.0f) < tol && std::fabs(s.mean[1] - 186.0f / 255.0f) < tol);
+    CHECK(s.mean[0] > file_value + 0.2f && s.mean[1] > file_value + 0.2f);
+    r484a::cleanup();
+  });
+  test("Decoding the 16-bit normal map with Blendity's own decoders (decode_image_own) gives bytes 128, 128, 255, 255 at every pixel and leaves the process's codec switch alone (round 484)", [] {
+    CHECK(r484a::install(true));
+    const bool before = image_library_codecs();
+    Bitmap bmp;
+    std::string bytes, error;
+    CHECK(fs::read_file(resolve_asset_path(std::string(r484a::kDir) + "/normal16_flat.png"), bytes));
+    const bool ok = decode_image_own(bytes, bmp, error);
+    CHECK(image_library_codecs() == before);  // (it takes no switch: other threads decode with the library meanwhile)
+    CHECK(ok && bmp.width == 8 && bmp.height == 8 && !bmp.is_float && bmp.rgba8.size() == 8 * 8 * 4);
+    size_t wrong = 0;
+    for (size_t i = 0; i + 3 < bmp.rgba8.size(); i += 4) wrong += !(bmp.rgba8[i] == 128 && bmp.rgba8[i + 1] == 128 && bmp.rgba8[i + 2] == 255 && bmp.rgba8[i + 3] == 255);
+    std::printf("    own decoders: %zu of 64 pixels differ from 128 128 255 255\n", wrong);
+    CHECK(wrong == 0);
+    /* An 8-bit map reads the same through both entry points in every build. */
+    Bitmap a, b;
+    std::string bytes8;
+    CHECK(fs::read_file(resolve_asset_path(std::string(r484a::kDir) + "/mask_r0_g230_a92.png"), bytes8));
+    CHECK(decode_image(bytes8, a, error) && decode_image_own(bytes8, b, error) && a.width == b.width && a.height == b.height && a.rgba8 == b.rgba8);
+    r484a::cleanup();
+  });
+  /* The 12th material, a third control. */
+  test("A Unity material with a 16-bit normal map reads as Unity does today (control, no round changes its values): metallic 0, roughness 0.5, the normal map attached as data and listed ok data", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    clear_material_assets();
+    CHECK(r484a::install(true));
+    const r484a::Seen s = r484a::seen("sixteen_bit_normal");
+    r484a::report("sixteen_bit_normal", s, 0.0f, 0.5f);
+    CHECK(s.loaded && s.base_map && !s.metal_map && std::fabs(s.metal) < 0.005f && std::fabs(s.rough - 0.5f) < 0.005f);
+    const MaterialPtr m = material_asset(r484a::mat_path("sixteen_bit_normal"));
+    CHECK(m && m->foreign && m->normal_map.path == std::string(r484a::kDir) + "/normal16_flat.png" && m->normal_map.non_color && m->normal_strength == 1.0f);
+    const size_t mark = r484a::log_mark();
+    ed.command("unity materials all");
+    const std::vector<r484a::Block> all = r484a::blocks_of(r484a::log_since(mark));
+    const r484a::Block *b = r484a::find_block(all, "sixteen_bit_normal");
+    CHECK(b && r484a::has_line(*b, "normal_map \"" + std::string(r484a::kDir) + "/normal16_flat.png\" ok data"));
+    r484a::cleanup();
+  });
+}
+
 void run_assets_tests() {
   image_tests();
   import_and_material_tests();
@@ -13881,4 +14424,5 @@ void run_assets_tests() {
   tests_round391();
   tests_round417();
   tests_round456();
+  tests_round484();
 }

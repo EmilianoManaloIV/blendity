@@ -60,6 +60,9 @@ struct BakeSettings {
   bool sample_env = true;
   /* Round 441: with more than 8 Baked point and spot lights, each texel picks among them by their light there. */
   bool pick_lights = true;
+  /* Round 484 (`lighting pick <rays>`, for measuring): about how many of them a texel keeps by chance - the bake's own
+   * number is 8 (kLightPickRays, light_pick.h; the light probes always use that). */
+  float pick_rays = 8.0f;
   /* Round 464 (ADR 0121): emissive triangles picked by a light tree - by what each can give the texel - rather than by
    * their share of the scene's power (off only for comparisons: `lighting tree off`). */
   bool light_tree = true;
@@ -251,6 +254,11 @@ class Lightmapper {
   LightingData take_result();
   /* For tests and stress: texels, rays. */
   uint64_t rays() const { return rays_; }
+  /* Round 484: light picking, counted - the texels that picked among the Baked point and spot lights, and over them the
+   * lights kept by chance and the lights dropped (a light kept for certain is in neither). */
+  uint64_t pick_texels() const { return pick_texels_; }
+  uint64_t chance_kept() const { return chance_kept_; }
+  uint64_t chance_dropped() const { return chance_dropped_; }
   /* Task 0018: texels whose indirect light the GPU gathered, and why it stopped (empty: it didn't). */
   size_t gpu_texels() const { return gpu_texels_; }
   const std::string &gpu_error() const { return gpu_error_; }
@@ -267,6 +275,7 @@ class Lightmapper {
   std::atomic<size_t> total_{0};  // (round 412: read by the main thread while a worker bakes)
   std::atomic<size_t> done_{0};  // (round 412: read by the main thread while a worker bakes)
   std::atomic<uint64_t> rays_{0};
+  std::atomic<uint64_t> pick_texels_{0}, chance_kept_{0}, chance_dropped_{0};  // (round 484)
   std::unique_ptr<class PathTracer> pt_;
   std::vector<PTObject> pt_objects_;
   LightingData out_;

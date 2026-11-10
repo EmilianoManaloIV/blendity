@@ -561,6 +561,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   total_ = 0;
   done_ = 0;
   rays_ = 0;
+  pick_texels_ = 0, chance_kept_ = 0, chance_dropped_ = 0;
   gpu_texels_ = 0;
   gpu_error_.clear();
   active_ = true;
@@ -857,6 +858,16 @@ Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, u
   return m;
 }
 
+/* light_pick.h: the probability a light is kept with when `lighting pick <rays>` measures another number of rays. Out
+ * of line and never inlined, so bake_texel's default path keeps light_pick_keep's constant and the instructions main
+ * compiles for it (as corner_normalize in mesh.cpp: one copy of the instructions, one answer). */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+float light_pick_keep_rays(const LightPick &pk, size_t li, float rays) { return std::min(1.0f, rays * pk.est[li] / std::max(1e-30f, pk.sum)); }
+
 Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec4 *mask_out,
                               Vec3 *var_out) {
   DirSum dirs;  // (round 426: where this texel's light comes from)
@@ -943,7 +954,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
    * roulette: unbiased). About 8 lights' shadow rays a texel in expectation, the bright near ones always. */
   thread_local LightPick pk;  // (round 453: the picking shared with the probes, light_pick.h)
   Vec3 picked(0.0f);
+  uint32_t chance_kept = 0, chance_dropped = 0;  // (round 484: counted for `lighting pick`'s log line)
   const bool pick = s_.pick_lights && point_lights_ > kLightPickOver;
+  const bool pick_measured = s_.pick_rays != kLightPickRays;  // (round 484: `lighting pick <rays>`; the default keeps its own arithmetic, see light_pick_keep_rays)
   if (pick) light_pick_estimate(pk, lights_, o, &n, t.position, [&](const BakeLight &bl) { return bakes_direct(bl); });
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
@@ -1031,11 +1044,17 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (pick) {
       const size_t li = (size_t)(&bl - &lights_[0]);
       keep = light_pick_keep(pk, li);
+      if (pick_measured) keep = light_pick_keep_rays(pk, li, s_.pick_rays);  // (never at the default: light_pick.h says why it is a call)
       /* (round 466: kept by chance with probability p, its light divided by p: the variance est^2 (1/p - 1) from its
        * unshadowed estimate - counted whether or not this texel kept it, so a texel that kept none still reports the noise
        * it carries) */
-      if (keep > 0.0f && keep < 1.0f) var_ind += pk.est[li] * pk.est[li] * (1.0f / keep - 1.0f);
-      if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
+      const bool by_chance = keep > 0.0f && keep < 1.0f;
+      if (by_chance) var_ind += pk.est[li] * pk.est[li] * (1.0f / keep - 1.0f);
+      if (!(keep > 0.0f) || rnd01(rng) >= keep) {
+        chance_dropped += by_chance;
+        continue;
+      }
+      chance_kept += by_chance;
     }
     const float vis = baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays, smp);
     const Vec3 c = col * (ndl * fall * vis / keep);
@@ -1047,6 +1066,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   if (emitted_out && finite3(picked)) *emitted_out += picked;
   if (dir_out) *dir_out = dirs;
   rays_ += rays;
+  if (pick) pick_texels_ += 1, chance_kept_ += chance_kept, chance_dropped_ += chance_dropped;
   if (var_out) *var_out = Vec3(finite_bits(var_ind) ? var_ind : 0.0f, finite_bits(var_dir) ? var_dir : 0.0f, finite_bits(var_gather) ? var_gather : 0.0f);
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);
 }

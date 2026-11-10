@@ -1,5 +1,114 @@
 # Performance, limits and efficiencies
 
+## Pass 24: SideRail's look - the baseline (round 484, measured locally)
+
+Round 484 fixes nothing: it names what makes the owner's imported world look wrong and gives the numbers rounds 485 and
+486 have to beat (docs/tasks/0460, "Results", has the reproduction, all 57 materials and the reasoning). SideRail is the
+owner's package, never committed: everything here ran in scratch copies, with the build with Blender's libraries, F12's
+CPU rasterizer at the six stations (`side_bar_high` and `side_tunnel_eye` are the owner's two views), Unity 2022.3.22f1
+for Unity's side.
+
+### The materials (rows for round 485)
+
+| state of the materials (Unity's bake under all) | spawn | spawn_back | floor | ahead | side_bar_high | side_tunnel_eye |
+|---|---|---|---|---|---|---|
+| as imported in a fresh session | 2.42 / 0.866 | 1.39 / 0.758 | 2.15 / 0.828 | 2.16 / 0.925 | 3.75 / 0.898 | 3.67 / 0.902 |
+| **without their maps** (the owner's session) | 4.65 / 0.759 | 1.63 / 0.784 | 6.90 / 0.682 | 5.04 / 0.780 | **13.71 / 0.702** | **12.50 / 0.697** |
+| the ten materials' values by hand | 2.42 / 0.867 | 1.39 / 0.758 | 2.15 / 0.829 | 2.17 / 0.926 | 3.74 / 0.905 | 3.58 / 0.912 |
+| 16-bit PNGs as stored | 2.42 / 0.866 | 1.39 / 0.758 | 2.15 / 0.828 | 2.16 / 0.925 | 3.73 / 0.898 | 3.67 / 0.902 |
+| by hand and 16-bit PNGs as stored (round 485's mark) | 2.42 / 0.867 | 1.39 / 0.758 | 2.15 / 0.829 | 2.17 / 0.926 | **3.71 / 0.905** | **3.57 / 0.912** |
+
+MAE / SSIM against Unity's picture. "Without their maps" is what a session shows after importing the package with the
+Materials window open (reproduced in 6 of 7 runs; 17 to 37 of the scene's 38 Unity materials). "By hand" sets the ten
+materials whose smoothness is dropped (181 renderer slots; Unity's roughness 0.24 to 0.76, Blendity's 0) to Unity's mean
+values; "16-bit PNGs as stored" rewrites the 14 PNGs the libraries build reads brighter (one half reads 186 / 255, not
+128) as 8-bit - it changes 4.3 % and 1.7 % of the pixels at the owner's two stations. Without reflections the last two
+columns lose 0.36 and 0.57 MAE in the best state: the reflections are not the mirror finish.
+
+Costs round 485 has to place off the frame: the 14 mask maps decode (with their mip levels, one thread) in 1,685 ms with
+Blender's libraries and 4,077 ms without; `unity materials` takes 61 ms on SideRail's scene and 114 ms with `all`.
+
+### The lights' intensity
+
+A project made by unpacking a `.unitypackage` has no Unity `ProjectSettings`, so Blendity takes the scene's lights in
+gamma - Unity's old default - without saying so; SideRail's own Unity project uses linear intensity (as VRChat's world
+template sets it). The chains have passed `unity lightsgamma off` since round 459, so their numbers are of the linear
+bake; the owner's own Generate Lighting is not.
+
+| Blendity's own bake, materials as imported | spawn | spawn_back | floor | ahead | side_bar_high | side_tunnel_eye |
+|---|---|---|---|---|---|---|
+| lights linear (the chains; Pass 21's last row) | 3.53 / 0.846 | 1.35 / 0.773 | 3.04 / 0.844 | 2.25 / 0.936 | 6.64 / 0.863 | 5.97 / 0.885 |
+| lights in gamma (what a package's import gives) | 3.16 / 0.909 | 1.17 / 0.834 | 4.86 / 0.891 | 3.11 / 0.941 | **17.76 / 0.734** | **16.40 / 0.761** |
+
+In gamma the owner's two stations are 2.9 and 2.6 times as bright in linear light (mean 0.0284 and 0.0282 against 0.0098
+and 0.0109); the bake's noise is about the same (below). Whether such a project should take its lights linear changes what every import from a package looks
+like, so it is the owner's decision, not round 485's.
+
+### The bake's noise (rows for round 486)
+
+SideRail at its LightingSettings asset (40 texels a unit, 32 direct and 1024 indirect samples, 2 bounces; 2 pages, 820,031
+texels, 890 M rays, every texel gathered on the card), lights linear, seeds 0 and 1 of each. Grain and blotch are round
+463's; **specks** are new (`unity_compare.py`, `speck_count`): connected spots of six pixels or more where the two
+seeds' pictures of a station differ by more than half the picture's mean light - what a rare bright sample leaves after
+the filter, and what the eye calls splotches there. Pass 21's last row was grain 0.382, blotch 0.251, 39 s.
+
+| bake (lights linear unless said) | grain | blotch | blotch, page 0 / 1 | side_bar_high: grain / blotch / specks | side_tunnel_eye: grain / blotch / specks |
+|---|---|---|---|---|---|
+| today (`pick` 8; 1024 Sobol samples; round 466's filter) | 0.382 | 0.251 | 0.197 / 0.548 | 0.0976 / 0.0318 / **147** | 0.0913 / 0.0279 / **133** |
+| every light (`lighting pick off`) | 0.384 | 0.251 | 0.197 / 0.548 | 0.1037 / 0.0283 / 178 | 0.0934 / 0.0257 / 139 |
+| `lighting pick 16` | 0.383 | 0.251 | 0.197 / 0.548 | 0.0987 / 0.0268 / 161 | 0.0902 / 0.0243 / 135 |
+| `lighting pick 32` | 0.383 | 0.251 | 0.197 / 0.548 | 0.1019 / 0.0279 / 167 | 0.0921 / 0.0251 / 136 |
+| the filter off | 5.824 | 1.149 | 1.020 / 1.951 | 1.4997 / 0.4253 / 893 | 1.2847 / 0.4163 / 721 |
+| round 423's A-Trous | 0.513 | 0.273 | 0.218 / 0.583 | 0.2445 / 0.0774 / 747 | 0.1925 / 0.0653 / 489 |
+| the Baked lights' direct light alone | 0.190 | 0.058 | 0.057 / 0.029 | 0.0315 / 0.0197 / 24 | 0.0398 / 0.0160 / 47 |
+| the direct light alone, every light kept | 0.187 | 0.055 | 0.054 / 0.000 | 0.0069 / 0.0019 / 1 | 0.0283 / 0.0030 / 30 |
+| no bounce (the lights and the emitters at the texel) | 0.217 | 0.070 | 0.057 / 0.170 | 0.0314 / 0.0197 / 24 | 0.0395 / 0.0160 / 45 |
+| no texel filled from its neighbours | 0.373 | 0.253 | 0.200 / 0.527 | 0.0974 / 0.0309 / 147 | 0.0915 / 0.0273 / 137 |
+| 256 indirect samples | 1.971 | 0.818 | 0.818 / 0.593 | 0.1073 / 0.0277 / 59 | 0.0912 / 0.0203 / 78 |
+| 2048 indirect samples | 0.621 | 0.349 | 0.299 / 0.647 | 0.3174 / 0.0713 / **271** | 0.2878 / 0.0800 / **210** |
+| plain random samples | 3.367 | 0.982 | 0.087 / 3.165 | 0.3891 / 0.0951 / 59 | 0.2129 / 0.0386 / 64 |
+| lights in gamma | 0.482 | 0.222 | 0.179 / 0.603 | 0.0733 / 0.0229 / 138 | 0.0668 / 0.0193 / 137 |
+| the owner's session: no maps, lights in gamma | 2.493 | 1.335 | 0.490 / 4.802 | 0.2081 / 0.0808 / **326** | 0.2729 / 0.0928 / **344** |
+
+The lights kept by chance are not SideRail's noise: a texel keeps 0.17 of them by chance and drops 0.46, with every
+light kept the bake's numbers do not move, and in the direct light alone they account for about 20 specks a view. The
+filter makes none of it: it takes the specks from about 800 a view to about 140. About 100 of the 140 are in the
+gathered bounce, and they grow with the sample count (59 and 78 at 256 samples, 271 and 210 at 2048) - the lead for
+round 486: the bake scales the variance it measures for Sobol samples by `4 / sqrt(samples)` (an eighth at 1024), and
+its firefly clamp and its filter then take a texel's few rare bright samples for steady light. Round 486's marks: 147
+and 133 specks, grain 0.382, blotch 0.251, at no more than 1.25 times the bake time below.
+
+Bake times on a quiet machine (five bakes one after another in one session; the round's final build): the default bake
+**38.9 s** (lightmaps 36.5 s, the filter 2.0 s; Pass 21: 39 s), `lighting pick 32` 40.1 s (37.6 s); a session's first
+bake 78.3 s (the meshes onto the card and the materials frozen, once). `pick off` and 16 were disturbed by another
+worker's build (61.7 and 67.7 s: not timings); by the rays they add - at most 12 M on 890 M - they cost about 1 %.
+
+### `lightmap_quality`: a hall lit by 72 lamps
+
+`lmq::lamp_hall()` is the stand-in for a world whose lamps overlap: 72 Baked point and spot lights in a hall with a side
+room, Unity's falloff, 27,693 texels; its reference keeps every light at every texel. Quality against that reference
+(the times of this run are not given: it shared the machine with the measurements above):
+
+| scene | texels | relative RMSE | bias | grain | blotch |
+|---|---|---|---|---|---|
+| a room lit by a ceiling area light | 38,895 | 0.013 | 0.0007 | 0.0084 | 0.0028 |
+| a corridor lit by 8 point lights | 31,329 | 0.004 | -0.0003 | 0.0033 | 0.0008 |
+| a bent tunnel lit by lamps | 85,896 | 0.103 | -0.0001 | 0.0622 | 0.0209 |
+| a courtyard under a sun and the sky | 22,000 | 0.007 | -0.0001 | 0.0055 | 0.0014 |
+| a hall lit by 72 lamps (new) | 27,693 | 0.043 | 0.0005 | 0.0327 | 0.0096 |
+
+| `lamp_hall`: lights a texel keeps by chance | filter | relative RMSE | grain | blotch | kept a texel | dropped a texel |
+|---|---|---|---|---|---|---|
+| every light (`lighting pick off`) | on | 0.010 | 0.0082 | 0.0020 | 0 | 0 |
+| about 8 (the bake's own) | on | 0.043 | 0.0327 | 0.0096 | 1.504 | 5.304 |
+| about 16 | on | 0.023 | 0.0175 | 0.0054 | 1.321 | 4.332 |
+| about 32 | on | 0.015 | 0.0117 | 0.0036 | 1.172 | 3.467 |
+| every light | off | 0.013 | 0.0139 | 0.0022 | 0 | 0 |
+| about 8 | off | 0.081 | 0.0870 | 0.0132 | 1.504 | 5.304 |
+
+In the hall the picking is the noise - 4.8 times the blotch of keeping every light - where a texel drops 5.3 lights by
+chance; on SideRail a texel drops 0.46 and the picking is not. The four older rows are Pass 21's to the last digit.
+
 ## Pass 21: SideRail's bake, measured by its noise (rounds 463-466)
 
 Round 463 adds the measure (`lightmap_noise`, `lighting noise`, `unity_compare.py --noise`, the `lightmap_quality` columns grain and
@@ -19,7 +128,7 @@ to their screenshots of 2026-11-08), where the blotches are.
 Page 1's grain is carried by rare very bright texels - the sparse dots of `noise_worst_*.png`: emitter samples and lights kept by
 chance, which skip today's firefly clamp - the spots on the side tunnel's sofas and floor in the two views. `lightmap_quality`
 (round 421's settings; round 464's light tree: `tunnel_lamps` grain 0.1122, blotch 0.0253, RMSE 0.143 at 2,305 ms against 0.1330 /
-0.0274 / 0.154 at 2,218 ms by power - SideRail itself unchanged, its noise being the chance-kept point lights): room grain 0.0102 / blotch 0.0036, corridor 0.0049 / 0.0015, courtyard 0.0083 / 0.0025, and the new
+0.0274 / 0.154 at 2,218 ms by power - SideRail itself unchanged, its noise being the chance-kept point lights - round 484 measured otherwise: with every light kept its noise is the same, see Pass 24): room grain 0.0102 / blotch 0.0036, corridor 0.0049 / 0.0015, courtyard 0.0083 / 0.0025, and the new
 `tunnel_lamps` 0.1329 / 0.0274 (relative RMSE 0.154 against its 16x reference, bake 2,218 ms).
 
 ## Pass 19: Pass 18's open items (rounds 447-459)
