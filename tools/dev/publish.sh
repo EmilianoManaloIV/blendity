@@ -6,7 +6,7 @@
 set -e
 M=${BL_MAIN:-C:/Users/trick/Downloads/blender-main/blendity}
 cd "$M/.."
-git add -A blendity/.github blendity/src blendity/tests blendity/docs blendity/stress blendity/tools blendity/CHANGELOG.md blendity/README.md blendity/bridges blendity/packaging 2>/dev/null || true
+git add -A blendity/.github blendity/src blendity/tests blendity/docs blendity/stress blendity/tools blendity/CHANGELOG.md blendity/README.md blendity/changelog.d blendity/bridges blendity/packaging 2>/dev/null || true
 git status --short blendity | grep -v "^??" | head -40
 if git diff --cached -- blendity | grep -E "^\+.*(EXPERIMENT|BLENDITY_EXP_)" ; then echo "REFUSED: an experiment hook is staged"; git reset -q; exit 1; fi
 git commit -q -F "$MSG"

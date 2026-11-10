@@ -16,8 +16,8 @@ docs/tasks/NNNN-slug.md (status: in review) - requirements R-xx; ADR NNNN or "no
 - [ ] No new dependency (or ADR + `licenses/` updated)
 
 ## Documentation
-- [ ] CHANGELOG entry
-- [ ] README count / paragraph
+- [ ] `changelog.d/<round>-<slug>.md` entry (+ README section if user-facing); CHANGELOG.md / README.md untouched
+      unless this is a write-up's fold (`Docs-fold: yes`, ADR 0123)
 - [ ] docs/ARCHITECTURE.md, docs/USABILITY.md rows (if applicable)
 - [ ] ADR (if architectural)
 

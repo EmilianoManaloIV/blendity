@@ -22,7 +22,8 @@ in every respect (build commands, scratch project, code standards, documentation
    anything GCC-sensitive.
 4. Run the filtered tests for the task, then the full suite. Run the stress sections the spec names and
    clean up their report files.
-5. Update CHANGELOG / README / ARCHITECTURE / USABILITY as `CLAUDE.md` requires, and set the task's status
+5. Write the round's `changelog.d/<round>-<slug>.md` fragment (never edit `CHANGELOG.md` / `README.md`, ADR 0123)
+   and update ARCHITECTURE / USABILITY as `CLAUDE.md` requires, and set the task's status
    to "in review".
 
 ## Output (your final message)

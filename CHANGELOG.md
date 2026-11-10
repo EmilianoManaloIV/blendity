@@ -1,6 +1,47 @@
 # Changelog
 
-One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
+One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
+
+## 2026-11-09 (round 467): Changelog fragments - parallel passes stop conflicting in CHANGELOG and README
+
+**Asked:** (the user approved, 2026-11-09) Pass 21's whole stack, #358-#364, went CONFLICTING in `CHANGELOG.md` and
+`README.md` alone once Pass 20's #357 and #360 merged, and was resolved by hand. Rounds should stop editing those two
+files.
+
+**Changed (task 0443, ADR 0123)**
+- **`changelog.d/` fragments and the rule:** a round adds `changelog.d/<round>-<slug>.md` (its CHANGELOG entry, plus an
+  optional `<!-- README -->` section of `after:` / `replace:` edits) instead of editing `CHANGELOG.md` or `README.md`;
+  the pass write-up folds the fragments in. `CHANGELOG.md`'s intro says so.
+- **`tools/dev/changelog.py`** (`check`, `fold`, `same-render`, `--self-test`): `check` validates every fragment and that
+  its README edits apply to today's README; `fold` puts the entries under the intro (highest round first), applies the
+  README edits, sets the unit-check count and deletes the fragments, all or nothing, with each file's line endings kept
+  (CRLF); `same-render` compares two Markdown files' rendered paragraphs.
+- **`tools/dev/docs_check.sh` and the `docs-fragments` CI job** (`.github/workflows/docs.yml`, one run per PR at a
+  time): a commit that edits `CHANGELOG.md` or `README.md` fails unless its message carries a `Docs-fold: yes` trailer.
+- **`tools/dev/fill_checks.py`** fills the `CHECKS_*` placeholders in fragments; README's count changes only through
+  the fold. `publish.sh` stages `changelog.d/`. `stack_check.sh` reports open PRs that edit the two files.
+- **README's three long lines** (the Lighting & Rendering item, the Files paragraph and the drawing paragraph) are split
+  one clause per source line, so a new clause is a one-line insertion; the page renders the same.
+- **Documentation:** `CLAUDE.md`, the task and PR templates, the implementer and code-reviewer prompts,
+  `docs/ARCHITECTURE.md` and the tools/dev README.
+
+**Also (testing and review):** the self-test grew to 49 cases (CRLF fragments, several insert lines, an anchor on a
+line an earlier round inserted, odd file names, `fill_checks.py` under a temporary tree, the trailer in lower case or
+with CRLF). The review found `docs_check.sh` picking Windows' Microsoft Store `python3` stub (it now uses a Python that
+runs), `stack_check.sh` looking for it under `blender-main/` from the libraries clone, `after:` anchors failing on
+README's indented list lines (they ignore the indent now, and inserted lines take it), the CI check reading the PR's
+fork-point README instead of the merge result, and `docs_check.sh` passing a ref that isn't a published tree (it
+refuses now); the fold writes both files to temporaries before swapping them in, and warns about unfilled `CHECKS_*`.
+
+**Not done / alternatives**
+- `.gitattributes` with `merge=union` was rejected: a test in a scratch repo duplicated README's count line and a
+  feature line without a conflict, and GitHub's own merge reportedly ignores merge drivers.
+- ARCHITECTURE and USABILITY stay direct edits: 1 conflict in 134 merges replayed since 2026-10-01, none in
+  ARCHITECTURE.
+
+**Checked:** `changelog.py --self-test` 49 passed on Windows and Linux (WSL); README `same-render` before and after the
+split; the C++ suites are untouched (no `src/` or `tests/` change), CI's four jobs run them. No README section in this
+fragment (nothing user-facing in the editor).
 
 ## 2026-11-08 (round 462): Cleanup after drawing, and Solve Mesh
 
