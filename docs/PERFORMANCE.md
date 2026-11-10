@@ -144,6 +144,202 @@ Unscaled everywhere takes the same specks and costs the tunnel 7 %: in dim place
 The rule built keeps the scale where a texel's samples share its light. What remains on SideRail (11 / 39) is about
 the direct light's own (round 484: 24 / 47 with the picking, 1 / 30 with every light kept).
 
+## Pass 23: the Blockout kernel (round 476)
+
+Round 476 builds Blockout's kernel - `blockout::build`, pieces in and one closed mesh out (ADR 0128) - and measures it
+before anything in the editor is built on it. Two questions decide how the rest of the pass is built: can the mesh of
+100 pieces be made again fast enough to drag one of them (the goal: the new mesh within 100 ms), and can a build
+without Blender's libraries, which has no boolean at all, make flat walls and square corners.
+
+This machine (AMD Ryzen 9 5900XT, 16 cores / 32 threads, 32 GB, Windows 11), release builds, `blendity_stress --only
+blockout`, 2026-11-10 10:22-10:25 with nothing else building or running (the other passes' workers held; a watcher
+that read the process list every 10 s saw no other tree's process). The kernel is timed as the editor will call it:
+on a thread of its own inside `JobSystem::run_background`, its loops spread over the pool.
+
+The scenes are made by the section, the same every run:
+- `interior N`: rooms on a square grid - an Add box of 4.2 x 3.2 x 4.2 m with a Subtract box of 3.8 x 2.8 x 3.8 m
+  inside (walls, floor and ceiling 0.2 m), 4 m apart so neighbours share their walls, and door cuts 0.9 m wide and
+  2.1 m high through shared walls, down to the floor. 2 x 2 rooms and 2 doors (10 pieces), 6 x 6 and 28 doors (100),
+  12 x 12 and 112 doors (400). **One cluster:** every build is the whole interior, also after one door moved.
+- `scatter N`: boxes, cylinders and spheres of 0.8 to 1.6 m in turn, every fourth a Subtract, at odd angles, in piles
+  of four that don't touch: N / 4 clusters.
+- `heap 100`: 100 such pieces through one spot, one cluster.
+
+The columns: `ms / build` the whole Blockout from nothing (the median of 5); `moved` a build after one piece moved -
+a door slid 0.3 m along its wall, one piece of one pile - with the cache warm; `until drawn` that plus the result's
+first render mesh, the number the 100 ms line is drawn against (the verdict, on the 100-piece rows); the three stage
+columns are summed over clusters that are built side by side, so on `scatter` they exceed the time that passed;
+`flatness` the farthest any corner of a flat face lies from the side of the piece it names; `corner error` the
+farthest a corner of the crisp result lies from the nearest corner of the field result (the measure stops at 0.5 m);
+`unresolved` the places whose corner could not be put where its planes meet - their faces stay small.
+
+**With Blender's libraries** (the crisp path is Manifold 3.5.2; the field path is ours):
+
+| first build in the process | ms | then (median of 3) |
+|---|---|---|
+| interior 100, crisp | 15.47 | 11.19 |
+| interior 100, field cell 0.1 | 46.51 | 40.96 |
+
+| row | ms / build | moved ms | render mesh ms | until drawn ms | solids ms | boolean or grid ms | faces ms | clusters | faces | triangles | points | cells | volume error % | flatness m | corner error m | unresolved | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| interior 10, crisp | 1.65 | 1.48 | 0.81 | 2.29 | 0.02 | 1.36 | 0.23 | 1 | 34 | 100 | 56 | 0 | 0.0000 | 0 | - | 0 | - |
+| interior 10, field cell 0.2 | 2.81 | 2.71 | 0.02 | 2.73 | 0.02 | 1.56 | 1.06 | 1 | 34 | 100 | 56 | 13.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior 10, field cell 0.1 | 6.80 | 6.78 | 0.03 | 6.81 | 0.02 | 3.72 | 3.15 | 1 | 34 | 100 | 56 | 52.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior 10, field cell 0.05 | 21.64 | 21.27 | 0.02 | 21.30 | 0.02 | 11.59 | 10.00 | 1 | 34 | 100 | 56 | 208.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior 100, crisp | 11.08 | 11.15 | 0.15 | 11.30 | 0.14 | 9.29 | 1.39 | 1 | 392 | 1004 | 520 | 0 | 0.0001 | 0 | - | 0 | ok |
+| interior 100, field cell 0.2 | 13.63 | 13.21 | 0.15 | 13.36 | 0.14 | 6.10 | 6.97 | 1 | 392 | 1004 | 520 | 99.7k | 0.0001 | 0 | 0 | 0 | ok |
+| interior 100, field cell 0.1 | 41.19 | 40.68 | 0.14 | 40.83 | 0.17 | 19.57 | 20.47 | 1 | 392 | 1004 | 520 | 398.1k | 0.0001 | 0 | 0 | 0 | ok |
+| interior 100, field cell 0.05 | 179.38 | 180.40 | 0.14 | 180.54 | 0.16 | 101.17 | 88.42 | 1 | 392 | 1004 | 520 | 1.59M | 0.0001 | 0 | 0 | 0 | OVER |
+| interior 400, crisp | 37.57 | 38.18 | 0.87 | 39.05 | 0.48 | 32.59 | 4.52 | 1 | 1424 | 3980 | 2056 | 0 | 0.0001 | 0 | - | 0 | - |
+| interior 400, field cell 0.2 | 45.44 | 45.81 | 0.58 | 46.39 | 0.43 | 18.69 | 25.49 | 1 | 1424 | 3980 | 2056 | 382.3k | 0.0001 | 0 | 0 | 0 | - |
+| interior 400, field cell 0.1 | 175.82 | 181.83 | 0.58 | 182.41 | 0.44 | 91.63 | 84.79 | 1 | 1424 | 3980 | 2056 | 1.53M | 0.0001 | 0 | 0 | 0 | - |
+| interior 400, field cell 0.05 | 709.85 | 705.93 | 0.50 | 706.43 | 0.41 | 387.34 | 314.59 | 1 | 1424 | 3980 | 2056 | 6.10M | 0.0001 | 0 | 0 | 0 | - |
+| scatter 10, crisp | 6.17 | 5.73 | 0.18 | 5.91 | 0.08 | 10.37 | 3.48 | 3 | 738 | 1542 | 764 | 0 | - | 3.6e-07 | - | 0 | - |
+| scatter 10, field cell 0.2 | 3.14 | 2.78 | 0.16 | 2.95 | 0.08 | 4.61 | 2.42 | 3 | 661 | 1422 | 731 | 1.3k | 1.0035 | 3.9e-07 | 3.9e-01 | 273 | - |
+| scatter 10, field cell 0.1 | 6.30 | 5.93 | 0.37 | 6.30 | 0.09 | 8.05 | 7.19 | 3 | 1513 | 3052 | 1637 | 5.3k | 0.2531 | 3.7e-07 | 2.1e-01 | 304 | - |
+| scatter 10, field cell 0.05 | 12.73 | 7.82 | 0.94 | 8.76 | 0.07 | 9.90 | 25.40 | 3 | 2464 | 6432 | 2738 | 22.1k | 0.0284 | 4.0e-07 | 7.7e-02 | 252 | - |
+| scatter 100, crisp | 13.58 | 6.52 | 1.36 | 7.88 | 0.74 | 192.65 | 42.78 | 25 | 7493 | 16434 | 8246 | 0 | - | 2.0e-06 | - | 1 | ok |
+| scatter 100, field cell 0.2 | 6.82 | 3.39 | 1.46 | 4.85 | 0.74 | 61.73 | 23.91 | 25 | 7197 | 15644 | 7890 | 11.6k | 1.9747 | 1.8e-06 | 5.0e-01 | 3015 | ok |
+| scatter 100, field cell 0.1 | 16.52 | 6.72 | 2.19 | 8.91 | 0.82 | 166.51 | 107.74 | 25 | 14446 | 31892 | 16099 | 48.6k | 0.2223 | 2.0e-06 | 5.0e-01 | 3057 | ok |
+| scatter 100, field cell 0.05 | 43.71 | 8.63 | 3.01 | 11.64 | 0.74 | 536.32 | 263.43 | 25 | 23228 | 52418 | 25775 | 199.8k | 0.0200 | 2.0e-06 | 2.7e-01 | 2370 | ok |
+| scatter 400, crisp | 49.24 | 8.44 | 3.20 | 11.64 | 2.81 | 945.46 | 182.91 | 100 | 29948 | 65402 | 32836 | 0 | - | 3.8e-06 | - | 1 | - |
+| scatter 400, field cell 0.2 | 21.48 | 5.51 | 3.36 | 8.87 | 2.87 | 336.11 | 102.93 | 100 | 29564 | 63882 | 32141 | 46.9k | 2.1243 | 3.8e-06 | 5.0e-01 | 12825 | - |
+| scatter 400, field cell 0.1 | 60.48 | 8.93 | 6.16 | 15.09 | 2.63 | 849.21 | 491.54 | 100 | 59600 | 132124 | 66315 | 198.5k | 0.2359 | 3.8e-06 | 5.0e-01 | 12578 | - |
+| scatter 400, field cell 0.05 | 161.77 | 11.75 | 9.01 | 20.76 | 2.70 | 2816.76 | 1227.57 | 100 | 85963 | 193436 | 96388 | 816.0k | 0.0182 | 3.8e-06 | 5.0e-01 | 9405 | - |
+| heap 100, crisp | 131.25 | 131.73 | 0.51 | 132.24 | 0.67 | 120.21 | 5.36 | 1 | 1463 | 3668 | 1822 | 0 | - | 1.5e-07 | - | 0 | - |
+| heap 100, field cell 0.2 | 42.28 | 42.40 | 0.27 | 42.66 | 0.72 | 33.70 | 2.57 | 1 | 1199 | 2588 | 1272 | 1.4k | 3.9748 | 1.2e-07 | 5.0e-01 | 489 | - |
+| heap 100, field cell 0.1 | 46.80 | 46.66 | 0.91 | 47.57 | 0.62 | 25.50 | 15.28 | 1 | 3082 | 6922 | 3452 | 6.0k | 0.5904 | 1.5e-07 | 2.0e-01 | 643 | - |
+| heap 100, field cell 0.05 | 89.86 | 92.25 | 1.43 | 93.68 | 0.80 | 22.67 | 61.74 | 1 | 6942 | 16544 | 7630 | 25.8k | 0.1080 | 1.5e-07 | 1.4e-01 | 643 | - |
+
+| called from the main thread | ms / build |
+|---|---|
+| interior 100, crisp | 12.33 |
+| interior 100, field cell 0.1 | 40.23 |
+
+| blended: scatter 100, a Blend radius of 0.25 m on every fifth piece | ms / build | clusters | faces | of them blended | triangles | points | result |
+|---|---|---|---|---|---|---|---|
+| cell 0.2 | 17.53 | 25 | 8565 | 5297 | 17992 | 9048 | closed |
+| cell 0.1 | 34.88 | 25 | 25314 | 18838 | 52286 | 26195 | closed |
+| cell 0.05 | 114.83 | 25 | 87014 | 68529 | 177062 | 88579 | closed |
+
+| sweep | arrangements | built | pieces skipped | refused | problems | with small faces on top of others | with faces of no area | unresolved places |
+|---|---|---|---|---|---|---|---|---|
+| crisp, boxes on a 0.25 m grid | 2000 | 2000 | 0 | 0 | 0 | 0 | 2 | 3 |
+| crisp, the same boxes turned as a whole | 2000 | 2000 | 0 | 0 | 0 | 0 | 6 | 6 |
+| crisp, any pieces | 2000 | 2000 | 936 | 0 | 0 | 1 | 45 | 113 |
+| field cell 0.08, boxes on a 0.25 m grid | 2000 | 2000 | 0 | 0 | 0 | 2 | 1 | 80 |
+| field cell 0.08, the same boxes turned as a whole | 2000 | 2000 | 0 | 0 | 0 | 42 | 12 | 14895 |
+| field cell 0.08, any pieces | 2000 | 2000 | 936 | 0 | 0 | 185 | 56 | 56945 |
+
+**Dependency-free build** (no Manifold: every cluster by the field path; this is the build CI tests). The same code
+runs 4 to 23 % slower on the interiors here than in the libraries build, whose allocator is oneTBB's (ADR 0112) -
+the likely reason, not measured:
+
+| first build in the process | ms | then (median of 3) |
+|---|---|---|
+| interior 100, field cell 0.1 | 48.27 | 50.18 |
+
+| row | ms / build | moved ms | render mesh ms | until drawn ms | solids ms | boolean or grid ms | faces ms | clusters | faces | triangles | points | cells | volume error % | flatness m | corner error m | unresolved | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| interior 10, field cell 0.2 | 2.99 | 3.12 | 0.87 | 3.99 | 0.02 | 1.69 | 1.21 | 1 | 34 | 100 | 56 | 13.0k | 0.0000 | 0 | - | 0 | - |
+| interior 10, field cell 0.1 | 7.89 | 7.74 | 0.03 | 7.78 | 0.02 | 4.17 | 3.46 | 1 | 34 | 100 | 56 | 52.0k | 0.0000 | 0 | - | 0 | - |
+| interior 10, field cell 0.05 | 26.52 | 25.95 | 0.03 | 25.99 | 0.02 | 14.02 | 11.61 | 1 | 34 | 100 | 56 | 208.0k | 0.0000 | 0 | - | 0 | - |
+| interior 100, field cell 0.2 | 15.83 | 15.94 | 0.19 | 16.13 | 0.22 | 6.96 | 8.40 | 1 | 392 | 1004 | 520 | 99.7k | 0.0001 | 0 | - | 0 | ok |
+| interior 100, field cell 0.1 | 48.51 | 48.46 | 0.18 | 48.64 | 0.22 | 23.29 | 23.37 | 1 | 392 | 1004 | 520 | 398.1k | 0.0001 | 0 | - | 0 | ok |
+| interior 100, field cell 0.05 | 188.87 | 189.28 | 0.17 | 189.46 | 0.21 | 131.09 | 90.07 | 1 | 392 | 1004 | 520 | 1.59M | 0.0001 | 0 | - | 0 | OVER |
+| interior 400, field cell 0.2 | 54.23 | 54.01 | 0.62 | 54.62 | 0.67 | 22.26 | 28.87 | 1 | 1424 | 3980 | 2056 | 382.3k | 0.0001 | 0 | - | 0 | - |
+| interior 400, field cell 0.1 | 183.94 | 183.97 | 0.67 | 184.64 | 0.78 | 88.96 | 91.17 | 1 | 1424 | 3980 | 2056 | 1.53M | 0.0001 | 0 | - | 0 | - |
+| interior 400, field cell 0.05 | 741.23 | 737.94 | 0.57 | 738.50 | 0.66 | 413.30 | 325.54 | 1 | 1424 | 3980 | 2056 | 6.10M | 0.0001 | 0 | - | 0 | - |
+| scatter 10, field cell 0.2 | 2.73 | 2.34 | 0.18 | 2.52 | 0.07 | 3.72 | 1.99 | 3 | 661 | 1422 | 731 | 1.3k | - | 3.9e-07 | - | 273 | - |
+| scatter 10, field cell 0.1 | 7.12 | 5.76 | 0.49 | 6.25 | 0.09 | 9.61 | 6.73 | 3 | 1513 | 3052 | 1637 | 5.3k | - | 3.7e-07 | - | 304 | - |
+| scatter 10, field cell 0.05 | 21.65 | 8.12 | 0.93 | 9.05 | 0.10 | 29.06 | 21.91 | 3 | 2464 | 6432 | 2738 | 22.1k | - | 4.0e-07 | - | 252 | - |
+| scatter 100, field cell 0.2 | 7.80 | 3.11 | 1.71 | 4.82 | 1.01 | 75.61 | 24.44 | 25 | 7197 | 15644 | 7890 | 11.6k | - | 1.8e-06 | - | 3015 | ok |
+| scatter 100, field cell 0.1 | 19.79 | 6.59 | 2.22 | 8.81 | 0.93 | 190.01 | 111.34 | 25 | 14446 | 31892 | 16099 | 48.6k | - | 2.0e-06 | - | 3057 | ok |
+| scatter 100, field cell 0.05 | 50.25 | 8.92 | 2.96 | 11.88 | 0.78 | 608.50 | 286.49 | 25 | 23228 | 52418 | 25775 | 199.8k | - | 2.0e-06 | - | 2370 | ok |
+| scatter 400, field cell 0.2 | 23.67 | 5.35 | 3.65 | 8.99 | 2.84 | 335.29 | 126.36 | 100 | 29564 | 63882 | 32141 | 46.9k | - | 3.8e-06 | - | 12825 | - |
+| scatter 400, field cell 0.1 | 61.57 | 8.84 | 6.76 | 15.60 | 2.77 | 873.87 | 600.28 | 100 | 59600 | 132124 | 66315 | 198.5k | - | 3.8e-06 | - | 12578 | - |
+| scatter 400, field cell 0.05 | 168.78 | 11.57 | 9.88 | 21.45 | 3.07 | 2812.32 | 1396.16 | 100 | 85963 | 193436 | 96388 | 816.0k | - | 3.8e-06 | - | 9405 | - |
+| heap 100, field cell 0.2 | 43.77 | 43.08 | 0.36 | 43.44 | 0.79 | 34.65 | 2.50 | 1 | 1199 | 2588 | 1272 | 1.4k | - | 1.2e-07 | - | 489 | - |
+| heap 100, field cell 0.1 | 48.60 | 51.22 | 1.16 | 52.38 | 0.87 | 25.22 | 16.71 | 1 | 3082 | 6922 | 3452 | 6.0k | - | 1.5e-07 | - | 643 | - |
+| heap 100, field cell 0.05 | 97.51 | 98.42 | 1.63 | 100.04 | 0.82 | 23.50 | 66.51 | 1 | 6942 | 16544 | 7630 | 25.8k | - | 1.5e-07 | - | 643 | - |
+
+| called from the main thread | ms / build |
+|---|---|
+| interior 100, field cell 0.1 | 46.71 |
+
+| blended: scatter 100, a Blend radius of 0.25 m on every fifth piece | ms / build | clusters | faces | of them blended | triangles | points | result |
+|---|---|---|---|---|---|---|---|
+| cell 0.2 | 15.93 | 25 | 8623 | 5297 | 18056 | 9080 | closed |
+| cell 0.1 | 46.14 | 25 | 26368 | 18838 | 54724 | 27410 | closed |
+| cell 0.05 | 150.06 | 25 | 91584 | 68529 | 186754 | 93427 | closed |
+
+| sweep | arrangements | built | pieces skipped | refused | problems | with small faces on top of others | with faces of no area | unresolved places |
+|---|---|---|---|---|---|---|---|---|
+| field cell 0.08, boxes on a 0.25 m grid | 2000 | 2000 | 0 | 0 | 0 | 2 | 1 | 80 |
+| field cell 0.08, the same boxes turned as a whole | 2000 | 2000 | 0 | 0 | 0 | 42 | 12 | 14895 |
+| field cell 0.08, any pieces | 2000 | 2000 | 936 | 0 | 0 | 185 | 56 | 56945 |
+
+**What the numbers say**
+- **Dragging a piece in a 100-piece interior fits the budget on both paths.** From a door moving until the new mesh
+  can be drawn: 11.3 ms by Manifold; 40.8 ms by the grid at a cell of 0.1 m, half the wall (48.6 ms in the
+  dependency-free build); 13.4 / 16.1 ms at 0.2 m. The line is 100 ms. At 0.05 m the grid is over it (181 / 189 ms):
+  its cost is the surface over the cell squared, four times for half the cell (13.6 -> 41.2 -> 179 ms a build).
+- **400 pieces:** 39 ms by Manifold. The grid stays under 100 ms at 0.2 m (46 / 55 ms) and takes 182 / 185 ms at
+  0.1 m: an interior of that size wants the libraries, or a coarser cell while a piece is dragged and the fine one
+  when it is let go.
+- **Where the cell resolves the pieces the two paths give the same mesh.** `interior 100` is 392 faces and 520 points
+  by Manifold and by the grid at all three cells, in both builds; `interior 400` 1,424 and 2,056. Corner error 0 and
+  flatness 0 - every corner on its planes to the bit -, the volume right to 0.0001 %, no unresolved place. So a build
+  without the libraries does make flat walls and square corners, at a cell of the wall's thickness or less. (These
+  rooms lie along the grid's axes; turned ones need a finer cell - the sweep, below.)
+- **What lands on the main thread** - the result's first render mesh - is 0.14 to 0.2 ms on `interior 100`, under
+  1 ms on `interior 400`, 1.4 to 3 ms on `scatter 100`'s 7,000 to 23,000 faces. A frame is 16.7 ms; whether the
+  frame holds 60 fps while the worker builds is round 477's measurement.
+- **The cache pays for free-standing groups only.** `scatter 100` after one piece moved: one pile of 25 is built
+  again, 6.5 ms against 13.6 ms for all by Manifold, 6.7 against 16.5 by the grid at 0.1 m (7.9 and 8.9 ms until
+  the mesh can be drawn). In an interior it saves
+  nothing: `moved` equals `ms / build`.
+- **Pieces that all cut each other** (`heap 100`) are the boolean's worst case and not the grid's: 131 ms by
+  Manifold, 47 ms by the grid at 0.1 m, whose cost follows the surface and not the number of pieces that meet.
+- **The grid does not resolve round pieces faceted finer than about two cells, nor parts thinner than a cell.**
+  `scatter`'s cylinders (24 sides) and spheres (24 segments, 12 rings) have facets of 3 to 20 cm. At 0.1 m the grid
+  leaves 3,057 unresolved places on `scatter 100` (Manifold: 1): small faces where merged ones should be, corners
+  half a metre or more from the crisp result's in places, the volume 2 % off at 0.2 m, 0.2 % at 0.1 m and 0.02 % at
+  0.05 m. The mesh is closed all the same, and its flat faces are flat to float rounding (2e-6 m).
+- **The first build in a process** costs 15.5 ms by Manifold (11.2 after it) and 46.5 / 48.3 ms by the grid (41 / 50
+  after it): no cold cost to name in the job tray. **Called from the main thread** with every thread the build takes
+  about the same time (12.3 ms; 40.2 / 46.7 ms): the worker thread costs nothing.
+- **A blended pile** - a Blend radius of 0.25 m on every fifth piece of `scatter 100`, by the grid - is closed at
+  every cell: 17.5 / 34.9 / 114.8 ms at 0.2 / 0.1 / 0.05 m (15.9 / 46.1 / 150.1 dependency-free). Blended faces lie
+  in no plane and are not merged, so the mesh grows as the cell shrinks: 8,600, 25,300 and 87,000 faces.
+- **Half of the field path's time is the face maker** (20.5 of 41.2 ms on `interior 100` at 0.1 m). It runs on one
+  thread; the grid's half is spread over the pool.
+
+**The sweep** - 2,000 arrangements a kind on each path: boxes of a floor plan on a quarter-metre grid (shared faces,
+flush cuts and touching cutters are the rule there), the same boxes turned as a whole by an odd angle, and any pieces
+(turned, scaled to slivers, mirrored, sheared, tiny, huge, not finite). A **problem** is a result that is open,
+pinched, inside out or has two flat faces on top of each other: **0 on both paths, and no build refused.** What is
+left has columns of its own:
+- crisp: a flat face of three points in a line in 2 arrangements of boxes and in 6 of turned boxes (a cut flush
+  along a face's edge leaves the outline touching its hole along that edge), with 3 and 6 unresolved places; among
+  any pieces 45 arrangements with a face of no area, 1 with a small face on a neighbour, 113 unresolved places;
+- field at 0.08 m, boxes along the grid: 80 unresolved places in the 2,000 arrangements, 2 arrangements with a small
+  face on a neighbour, 1 with a face of no area;
+- field at 0.08 m, the same boxes turned: 14,895 unresolved places, 42 and 12 arrangements. A turned box needs a
+  finer cell than one along the grid: at 0.04 m - a sixth of the boxes' quarter metre - 200 arrangements leave 33
+  unresolved places where 0.08 m leaves 1,629;
+- field at 0.08 m, any pieces: 56,945 unresolved places, 185 and 56 arrangements.
+
+Among any pieces 936 are skipped by name on either path (not finite, no size, too small for where they lie).
+
+**What it decides (ADR 0128).** The crisp path stands: 11.3 ms of the 100. The field path stands for blended
+clusters: closed at every cell, 35 / 46 ms at 0.1 m. For crisp clusters in the dependency-free build the field path
+stands by the ADR's own rule - `interior 100` at a cell of half the wall is flat, square, has no unresolved place and
+is drawn 48.6 ms after a door moved - so the exact boolean of our own (the ADR's option B) is not built. Its limits
+are the rows above: a cell of a third to a half of the thinnest part for rooms along the Blockout's axes and of about
+a sixth for turned ones, facets of two cells or more for round pieces, and 400 pieces at 0.1 m outside the budget.
+Round 477 gives the Blockout its Field Cell setting and has the Inspector name the unresolved places.
+
 ## Pass 21: SideRail's bake, measured by its noise (rounds 463-466)
 
 Round 463 adds the measure (`lightmap_noise`, `lighting noise`, `unity_compare.py --noise`, the `lightmap_quality` columns grain and
