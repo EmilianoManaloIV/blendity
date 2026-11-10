@@ -1,0 +1,134 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Blockout's kernel, inside (ADR 0128): what blockout.cpp, blockout_crisp.cpp, blockout_field.cpp and
+// blockout_faces.cpp share. Not part of the public API.
+#pragma once
+
+#include "blockout.h"
+
+#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace bl::blockout::detail {
+
+/* The kernel works in doubles: a wall has to stay flat to a float's rounding after planes were met and solved. */
+struct V3 {
+  double x = 0, y = 0, z = 0;
+  V3() = default;
+  constexpr V3(double x_, double y_, double z_) : x(x_), y(y_), z(z_) {}
+  double &operator[](int i) { return (&x)[i]; }
+  double operator[](int i) const { return (&x)[i]; }
+  V3 operator+(V3 o) const { return {x + o.x, y + o.y, z + o.z}; }
+  V3 operator-(V3 o) const { return {x - o.x, y - o.y, z - o.z}; }
+  V3 operator*(double s) const { return {x * s, y * s, z * s}; }
+  V3 operator-() const { return {-x, -y, -z}; }
+};
+inline double dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+inline V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+inline double length(V3 a) { return std::sqrt(dot(a, a)); }
+
+/* n . x = d on the plane; n has length 1. */
+struct Plane {
+  V3 n;
+  double d = 0;
+  double value(V3 p) const { return dot(n, p) - d; }
+  /* The axis the plane is square to when its normal is that axis to the bit (blockout.cpp squares up the ones a
+   * float's rounding off), else -1. A point's coordinate along that axis can then be set exactly, so two solids'
+   * faces in such a plane are in it to the bit. */
+  int axis() const { return n.y == 0.0 && n.z == 0.0 ? 0 : n.x == 0.0 && n.z == 0.0 ? 1 : n.x == 0.0 && n.y == 0.0 ? 2 : -1; }
+  void put_on(V3 &p) const {
+    const int a = axis();
+    if (a >= 0) p[a] = d * n[a];  // (n[a] is 1 or -1)
+  }
+};
+
+/* The point nearest `x0` among those that best satisfy the planes (least squares): on the plane where there is one,
+ * on the line where two meet, at the corner where three do. `residual` is how far the answer still lies from the
+ * worst plane (0 unless four or more planes don't share a point). */
+V3 solve_planes(const Plane *const *planes, int count, V3 x0, double *residual);
+
+/* A piece as a closed convex solid in the Blockout's space: faces counter-clockwise from outside. */
+struct Solid {
+  uint32_t piece = 0;  // its place in the cluster's piece list
+  bool subtract = false;
+  double blend = 0.0;
+  double melt = 0.0;  // the largest Blend radius that reaches it: its own, or that of a solid whose grown bounds meet its
+  Shape shape = Shape::Box;
+  std::vector<V3> verts;
+  std::vector<uint32_t> face_offsets{0}, face_verts;
+  std::vector<uint32_t> face_side;   // which side of the piece each face is (blockout.h)
+  std::vector<uint32_t> face_plane;  // each face's plane in the cluster's table...
+  std::vector<int8_t> face_sign;     // ...and whether the face looks along its normal (+1) or against it (-1)
+  std::vector<uint32_t> corner_start, corner_faces;  // the faces at each corner (faces[start[v]] .. faces[start[v + 1]])
+  V3 lo, hi;                         // bounds
+  uint32_t label_base = 0;           // its first face's label (the cluster numbers every face of every solid)
+  /* For a blended cluster's field: the Blockout's space back to the piece's, and the piece's own sizes. */
+  double inv[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // rows of a 3 x 4 matrix
+  double scale_min = 1.0;                                 // the smallest stretch of the piece's matrix
+  V3 half{0.5, 0.5, 0.5};                                 // box: half sizes; cylinder: (radius, half height, radius); sphere: radius
+  size_t face_count() const { return face_offsets.size() - 1; }
+};
+
+/* One cluster ready to mesh: its solids, the planes their faces lie in (faces of different pieces in one plane share
+ * an entry), the tolerances that follow from its size. */
+struct Cluster {
+  std::vector<Solid> solids;
+  std::vector<Plane> planes;
+  std::vector<uint32_t> label_solid, label_face;  // a face label -> its solid and its face there
+  std::vector<uint32_t> plane_users;              // how many solids have a face in each plane
+  V3 lo, hi, mid;
+  double scale = 1.0;    // the bounding diagonal
+  double tol = 1e-6;     // planes nearer than this are one plane; twice it is "these planes meet in a point"
+  bool blended = false;  // some piece has a Blend radius
+};
+
+/* The step of a 32-bit float at a coordinate's size, over that size: a mesh's positions are such floats. */
+constexpr double kFloatStep = 1.1920929e-7;
+
+/* A face's merge key: its plane as the result sees it - the table's entry, doubled, plus 1 when the face looks against
+ * the entry's normal. Faces merge only with the same key. kNoMerge: a face of no flat side. */
+constexpr uint32_t kNoMerge = 0xFFFFFFFFu;
+constexpr uint32_t kBlendLabel = 0x80000000u;  // set on a face's label when it came from a blended join
+
+inline uint32_t face_key(const Cluster &c, uint32_t label) {
+  const Solid &s = c.solids[c.label_solid[label]];
+  const uint32_t f = c.label_face[label];
+  const bool against = (s.face_sign[f] < 0) != s.subtract;  // a cut's faces show their back
+  return s.face_plane[f] * 2u + (against ? 1u : 0u);
+}
+
+/* What both paths hand the face maker: a closed surface of triangles or quads over shared points. */
+struct Soup {
+  int arity = 3;                 // 3 or 4 corners a face
+  std::vector<uint32_t> verts;   // arity per face
+  std::vector<uint32_t> twin;    // for each corner's edge (to the face's next corner): the same edge in the neighbour
+  std::vector<uint32_t> label;   // per face: the solid face it came from (| kBlendLabel)
+  std::vector<uint32_t> key;     // per face: its merge key, or kNoMerge
+  std::vector<V3> points;        // where each point is - or, from the grid, only about where
+  std::vector<uint8_t> apart;    // per point, set by the face maker: never joined with another at its place
+  bool trust_points = true;      // crisp: the points are right; the grid's are a cell's centre
+  double reach = 0.0;            // how far a solved point may lie from where the soup had it
+  size_t face_count() const { return verts.size() / (size_t)arity; }
+};
+
+/* The face maker's result: faces without holes, corners on their planes. */
+struct Polys {
+  std::vector<V3> points;
+  std::vector<uint32_t> offsets{0}, verts;
+  std::vector<uint32_t> label;  // per face (| kBlendLabel)
+  std::vector<uint8_t> flat;    // per face: it lies in its side's plane (not: a blended face, an unresolved place's)
+  size_t unresolved = 0;
+};
+
+/* ADR 0128 decision 8. False when cancelled. `open`: null when the faces are a closed surface, else what keeps them
+ * from being one (the soup itself was not closed). */
+bool make_faces(const Cluster &c, Soup &soup, Polys &out, const std::atomic<bool> *cancel, const char **open);
+
+/* The two paths. False with `why` when the cluster could not be meshed (or the call was cancelled). */
+bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &why);
+bool field_soup(const Cluster &c, const Settings &settings, Soup &soup, ClusterReport &rep, const std::atomic<bool> *cancel, std::string &why);
+
+inline bool cancelled(const std::atomic<bool> *cancel) { return cancel && cancel->load(std::memory_order_relaxed); }
+
+}  // namespace bl::blockout::detail
