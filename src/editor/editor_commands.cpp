@@ -1955,6 +1955,7 @@ void Editor::run_console_command(const std::string &line) {
     std::string k = arg(1, "");
     float v = (float)std::atof(arg(2, "0").c_str());
     if (k == "amount") last_op_.amount = v;
+    else if (k == "amount2") last_op_.amount2 = v;  // taper's end scale, recess' border, Solve Mesh's merge angle
     else if (k == "segments") last_op_.segments = (int)v;
     else if (k == "twist") last_op_.twist = (int)v;
     else if (k == "smooth") last_op_.smooth = v;

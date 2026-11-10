@@ -2,6 +2,42 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits.
 
+## 2026-11-08 (round 462): Cleanup after drawing, and Solve Mesh
+
+**Asked:** Pass 20's round C (the drawing solver) - drawing leaves proper topology (no doubled vertices or edges, no
+T-junctions, no faces on top of each other, flat regions merged only where the texture is continuous), and a Solve Mesh
+command does the same to a mesh that exists.
+
+**Changed (task 0438, ADR 0120 decisions 5-6)**
+- **After every Draw commit** (flat and projected path, `Editor::draw_tidy`): the new vertices weld onto existing ones at
+  Push/Pull's tolerance (never more than a tenth of the shape's shortest side; a local weld whose cost follows the draw, wires
+  and marks following), faces the shape flattened onto an old edge go (`dissolve_line_faces`, their corners threaded into the
+  face across) and a corner on another face's edge joins it (`meshops::fix_t_junctions`, among the faces around the new
+  vertices; an old vertex never joins a piece of an old edge, so a separate shell stays apart). Nothing is merged: the
+  lines you drew before stay. A draw that would leave more area lying on top of other faces is rolled back - the mesh in
+  place and the selection as before - with a warning (a toast) saying why; the guard measures only beside what the draw
+  changed (`meshops::draw_overlap_gain`), so it costs the same on a 19,600-face wall as on a quad.
+- **`meshops::fix_t_junctions(m, verts, eps)`** (`mesh_cleanup.cpp`): a vertex strictly inside an edge of faces it isn't
+  in, within eps, is inserted into every face on that edge (one batched rebuild, UVs interpolated per face, seams and
+  marks following); candidates from a cell grid, not all pairs; NaN positions skipped.
+- **Solve Mesh** (Mesh > Merge & Clean Up, `editop solve_mesh`, a redoable operator): on the selection's vertices or
+  the whole mesh - weld, T-junctions, doubled faces, faces flattened onto a line, the UV-safe coplanar merge, and a toast
+  counting what was fixed and what still lies on top of each other (faces, vertices, edges). F9 holds the Weld Distance
+  (1e-4 of the mesh's size) and the Merge Angle (1); `redo amount2 <degrees>` from the console.
+- **Drawing tolerances relative to the mesh** (`meshops::relative_eps`): the `1e-4 x max(1, size)` of the imprint, Push
+  Through, Push/Pull and Draw code were absolute below size 1 (a rectangle bigger than a 1e-4-sized face was imprinted);
+  now rel x the mesh size (half the bounding diagonal) with a floor of 8 float steps at the farthest coordinate.
+- **`imprint_loop_across`** refuses a NaN or infinite outline (it added a face); Push Through's Boolean fallback gives
+  its walls UVs read off the faces they cut (Manifold builds only).
+- **Learn:** a "Solve Mesh" section (Try-it, two questions) and a line and a question in "Drawing onto faces".
+
+**Not done:** the stress runs and the cause of the one projected cut that leaves faces on top of each other were held back (a bake was being timed); the Boolean fallback's UV code runs in no build here (no Manifold in the dependency-free build): the test skips
+there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interface).
+
+**Also (testing):** the after-draw overlap guard compares the area lying on another face, not the number of such pairs (a draw that only split a face already in a pair was refused); Solve Mesh on a selection no longer welds an unselected shell touching it (its scope is the selection's faces, not their places).
+
+**Checked:** both suites - with Blender's libraries 20,551; dependency-free 19,636 (Windows) and 19,642 (Linux, WSL), 0 failed; the audits; stress on Linux - `curved` 5,036 / 3 / 68, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 (the same as main); the projected-draw block 236 draws, 82 refused, 0 problems, 0 doubled vertices or edges after drawing; the 51k-face teapot cut 480 ms, cleanup 8 ms, guard 28 ms.
+
 ## 2026-11-09 (round 466): a denoiser driven by measured noise
 
 **Asked (Pass 21, task 0442, ADR 0122):** the bake's filter assumed how noisy each texel was (a formula of the sample

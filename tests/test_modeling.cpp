@@ -10212,6 +10212,811 @@ static void tests_round461_review() {
   });
 }
 
+/* ---- Round 462 (task 0438): cleanup after drawing, and Solve Mesh ---- */
+
+/* A welded cube from faces given as corner lists; face f's UVs are its own (every face a separate island). */
+static Mesh r462_cube_from(const std::vector<std::vector<uint32_t>> &faces, const std::vector<Vec3> &extra_verts = {}) {
+  Mesh m;
+  for (int i = 0; i < 8; i++) m.add_vert({(i & 1) ? 0.5f : -0.5f, (i & 2) ? 0.5f : -0.5f, (i & 4) ? 0.5f : -0.5f});
+  for (const Vec3 &p : extra_verts) m.add_vert(p);
+  for (size_t f = 0; f < faces.size(); f++) {
+    std::vector<Vec2> t;
+    for (size_t k = 0; k < faces[f].size(); k++) t.push_back({0.3f * (float)f + (k == 1 || k == 2 ? 0.25f : 0.0f), 0.7f + (k >= 2 ? 0.2f : 0.0f)});
+    m.add_face(faces[f].data(), faces[f].size(), t.data(), 0);
+  }
+  return m;
+}
+
+/* The corner lists of a cube whose vertex i sits at (x, y, z) = bits 0, 1, 2 of i, wound outward. */
+static std::vector<std::vector<uint32_t>> r462_cube_faces() {
+  return {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}};
+}
+
+/* The face of m whose corners are at these places (in this cyclic order), or SIZE_MAX. */
+static size_t r462_face_at(const Mesh &m, const std::vector<Vec3> &places) {
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (m.face_size(f) != places.size()) continue;
+    for (size_t start = 0; start < places.size(); start++) {
+      bool same = true;
+      for (size_t k = 0; k < places.size() && same; k++) {
+        const Vec3 p = m.positions[m.face_verts(f)[k]], q = places[(start + k) % places.size()];
+        same = p.x == q.x && p.y == q.y && p.z == q.z;
+      }
+      if (same) return f;
+    }
+  }
+  return SIZE_MAX;
+}
+
+/* Whether face f gives each of `places` exactly these UVs (bit for bit). */
+static bool r462_uvs_at(const Mesh &m, size_t f, const std::vector<Vec3> &places, const std::vector<Vec2> &uvs) {
+  for (size_t k = 0; k < places.size(); k++)
+    for (size_t j = 0; j < m.face_size(f); j++) {
+      const Vec3 p = m.positions[m.face_verts(f)[j]];
+      if (p.x != places[k].x || p.y != places[k].y || p.z != places[k].z) continue;
+      const Vec2 t = m.uvs[m.face_offsets[f] + j];
+      if (t.x != uvs[k].x || t.y != uvs[k].y) return false;
+    }
+  return true;
+}
+
+static void tests_round462() {
+  test("solve mesh: a cube with a doubled vertex, a doubled face and a T-junction comes out a closed manifold, faces it did not change keep their UVs bit for bit", [] {
+    auto faces = r462_cube_faces();
+    /* A T-junction: the bottom face (0, 1, 5, 4) gets the middle of its edge 0-1, the face across the edge does not. */
+    faces[4] = {0, 8, 1, 5, 4};
+    /* A doubled vertex (vertex 6 again, a hair off) used by the top face. */
+    faces[5] = {2, 9, 7, 3};
+    faces.push_back(faces[2]);  // a doubled face, same way round
+    Mesh m = r462_cube_from(faces, {{0.0f, -0.5f, -0.5f}, {-0.5f + 1e-5f, 0.5f, 0.5f}});
+    CHECK(m.face_count() == 7 && !closed_manifold(m));
+    CHECK(meshops::overlapping_vertices(m).size() == 1);
+    const Mesh planted = m;
+    /* The faces nothing touches: the +Z face (4, 5, 7, 6) and the +X face (1, 3, 7, 5). */
+    const std::vector<Vec3> pz = {planted.positions[4], planted.positions[5], planted.positions[7], planted.positions[6]};
+    const std::vector<Vec3> px = {planted.positions[1], planted.positions[3], planted.positions[7], planted.positions[5]};
+    const size_t fz = r462_face_at(planted, pz), fx = r462_face_at(planted, px);
+    CHECK(fz != SIZE_MAX && fx != SIZE_MAX);
+    if (fz == SIZE_MAX || fx == SIZE_MAX) return;
+    auto uvs_of = [&](size_t f) {
+      std::vector<Vec2> t;
+      for (uint32_t k = 0; k < planted.face_size(f); k++) t.push_back(planted.uvs[planted.face_offsets[f] + k]);
+      return t;
+    };
+    const std::vector<Vec2> uz = uvs_of(fz), ux = uvs_of(fx);
+    std::vector<uint8_t> scope;
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-3f, 1.0f);
+    std::printf("    solve: welded %zu, T-junctions %zu, doubled faces %zu, line faces %zu, merged %zu; %zu faces, %zu vertices, closed %d\n", r.welded, r.t_junctions,
+                r.duplicate_faces, r.line_faces, r.merged, m.face_count(), m.vert_count(), (int)closed_manifold(m));
+    CHECK(closed_manifold(m));
+    CHECK(m.face_count() == 6 && m.vert_count() == 9);
+    CHECK(r.welded == 1 && r.t_junctions == 1 && r.duplicate_faces == 1);
+    CHECK(r.overlap_faces == 0 && r.overlap_vertices == 0 && r.overlap_edges == 0);
+    const size_t gz = r462_face_at(m, pz), gx = r462_face_at(m, px);
+    CHECK(gz != SIZE_MAX && gx != SIZE_MAX);
+    if (gz == SIZE_MAX || gx == SIZE_MAX) return;
+    CHECK(r462_uvs_at(m, gz, pz, uz) && r462_uvs_at(m, gx, px, ux));
+    /* The face across the T-junction's edge gained the corner as well. */
+    size_t five = 0;
+    for (size_t f = 0; f < m.face_count(); f++) five += m.face_size(f) == 5 ? 1 : 0;
+    CHECK(five == 2);
+  });
+  test("solve mesh: on a selection it welds inside it only - a doubled vertex elsewhere stays - and the selection follows the result", [] {
+    Mesh m;
+    const uint32_t a[4] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({1, 0, 1}), m.add_vert({0, 0, 1})};
+    m.add_face(a, 4);
+    const uint32_t b[4] = {m.add_vert({3, 0, 0}), m.add_vert({4, 0, 0}), m.add_vert({4, 0, 1}), m.add_vert({3, 0, 1})};
+    m.add_face(b, 4);
+    /* A doubled corner by each face, as a user might split them on purpose. */
+    const uint32_t da = m.add_vert({1, 0, 1}), db = m.add_vert({4, 0, 1});
+    const uint32_t ta[3] = {a[2], da, m.add_vert({1, 0, 2})};
+    m.add_face(ta, 3);
+    const uint32_t tb[3] = {b[2], db, m.add_vert({4, 0, 2})};
+    m.add_face(tb, 3);
+    CHECK(meshops::overlapping_vertices(m).size() == 2);
+    std::vector<uint8_t> scope(m.vert_count(), 0);
+    for (uint32_t v : {a[0], a[1], a[2], a[3], da}) scope[v] = 1;
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-3f, 1.0f);
+    CHECK(r.welded == 1);
+    CHECK(meshops::overlapping_vertices(m).size() == 1);  // b's pair is outside the scope
+    size_t marked = 0;
+    for (uint8_t s : scope) marked += s ? 1 : 0;
+    CHECK(scope.size() == m.vert_count() && marked == 4);
+  });
+  test("fix t-junctions: a vertex on another face's edge joins it - UV interpolated, seam kept - and NaN positions, edge ends and its own faces are left alone", [] {
+    Mesh m;
+    const uint32_t a[4] = {m.add_vert({0, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({2, 0, 2}), m.add_vert({0, 0, 2})};
+    const Vec2 ua[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    m.add_face(a, 4, ua);
+    /* A second face with a corner in the middle of a's bottom edge, and one with a NaN corner. */
+    const uint32_t t0 = m.add_vert({1, 0, 0}), t1 = m.add_vert({1, 0, -1}), t2 = m.add_vert({2, 0, -1});
+    const uint32_t tri[3] = {t0, t2, t1};
+    const Vec2 ut[3] = {{0, 0}, {0, 0}, {0, 0}};
+    m.add_face(tri, 3, ut);
+    const uint32_t nan = m.add_vert({std::nanf(""), 0.0f, 0.0f});
+    const uint32_t tn[3] = {nan, t1, t2};
+    const Vec2 un[3] = {{0, 0}, {0, 0}, {0, 0}};
+    m.add_face(tn, 3, un);
+    m.set_seam(a[0], a[1], true);
+    const size_t n = meshops::fix_t_junctions(m, {}, 1e-4f);
+    CHECK(n == 1);
+    const uint32_t *v = m.face_verts(0);
+    CHECK(m.face_size(0) == 5 && v[0] == a[0] && v[1] == t0 && v[2] == a[1]);
+    CHECK(std::fabs(m.uvs[m.face_offsets[0] + 1].x - 0.5f) < 1e-6f && m.uvs[m.face_offsets[0] + 1].y == 0.0f);
+    CHECK(m.is_seam(a[0], t0) && m.is_seam(t0, a[1]) && !m.is_seam(a[0], a[1]));
+    CHECK(std::isnan(m.positions[nan].x));
+    CHECK(meshops::fix_t_junctions(m, {}, 1e-4f) == 0);  // nothing left
+    CHECK(meshops::fix_t_junctions(m, {}, 0.0f) == 0 && meshops::fix_t_junctions(m, {}, std::nanf("")) == 0);
+  });
+  test("cleanup after a draw: two touching rectangles share their edge, a corner on an edge joins it, no doubled vertices or edges are left", [] {
+    Mesh before;
+    const uint32_t r1[4] = {before.add_vert({0, 0, 0}), before.add_vert({1, 0, 0}), before.add_vert({1, 0, 1}), before.add_vert({0, 0, 1})};
+    const Vec2 u1[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    before.add_face(r1, 4, u1);
+    /* What a draw added: a rectangle touching the first along the lower half of its right side, all corners new. */
+    Mesh m = before;
+    const uint32_t r2[4] = {m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({2, 0, 0.5f}), m.add_vert({1, 0, 0.5f})};
+    const Vec2 u2[4] = {{1, 0}, {2, 0}, {2, 0.5f}, {1, 0.5f}};
+    m.add_face(r2, 4, u2);
+    CHECK(meshops::overlapping_vertices(m).size() == 1);
+    std::vector<uint8_t> sel = {0, 1};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    CHECK(m.face_count() == 2 && m.vert_count() == 7);
+    CHECK(meshops::overlapping_vertices(m).empty() && meshops::overlapping_edges(m).empty());
+    CHECK(meshops::fix_t_junctions(m, {}, 1e-3f) == 0);
+    CHECK(sel.size() == 2 && sel[1] == 1 && sel[0] == 0);
+    size_t five = 0;
+    for (size_t f = 0; f < m.face_count(); f++) five += m.face_size(f) == 5 ? 1 : 0;
+    CHECK(five == 1);  // the first rectangle took the corner
+    CHECK(meshops::overlapping_faces(m) == 0);
+  });
+  test("cleanup never merges across a UV seam, a marked seam or a material border, and merges where the texture is continuous; a protected edge stays", [] {
+    auto two_quads = [](float u_second, int mat_second, bool seam) {
+      Mesh m;
+      const uint32_t v[6] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({0, 0, 1}), m.add_vert({1, 0, 1}), m.add_vert({2, 0, 1})};
+      const uint32_t f0[4] = {v[0], v[3], v[4], v[1]}, f1[4] = {v[1], v[4], v[5], v[2]};
+      const Vec2 t0[4] = {{0, 0}, {0, 1}, {0.5f, 1}, {0.5f, 0}};
+      const Vec2 t1[4] = {{u_second, 0}, {u_second, 1}, {u_second + 0.5f, 1}, {u_second + 0.5f, 0}};
+      m.add_face(f0, 4, t0, 0);
+      m.add_face(f1, 4, t1, mat_second);
+      if (seam) m.set_seam(v[1], v[4], true);
+      return m;
+    };
+    meshops::DissolveGuard guard;
+    guard.uv_safe = true;
+    Mesh joined = two_quads(0.5f, 0, false);  // the second quad's UVs continue the first's
+    CHECK(meshops::dissolve_limited(joined, 1.0f, nullptr, &guard) > 0 && joined.face_count() == 1);
+    Mesh seam = two_quads(0.0f, 0, false);  // the texture starts again: a seam down the middle
+    CHECK(meshops::dissolve_limited(seam, 1.0f, nullptr, &guard) == 0 && seam.face_count() == 2);
+    Mesh marked = two_quads(0.5f, 0, true);  // continuous, but the user marked the edge
+    CHECK(meshops::dissolve_limited(marked, 1.0f, nullptr, &guard) == 0 && marked.face_count() == 2);
+    Mesh border = two_quads(0.5f, 1, false);  // another material
+    CHECK(meshops::dissolve_limited(border, 1.0f, nullptr, &guard) == 0 && border.face_count() == 2);
+    /* Solve Mesh uses the same guard. */
+    std::vector<uint8_t> scope;
+    meshops::solve_mesh(seam, scope, 1e-4f, 1.0f);
+    CHECK(seam.face_count() == 2);
+    Mesh again = two_quads(0.5f, 0, false);
+    scope.clear();
+    const meshops::SolveReport r = meshops::solve_mesh(again, scope, 1e-4f, 1.0f);
+    CHECK(r.merged > 0 && again.face_count() == 1);
+    Mesh keep = two_quads(0.5f, 0, false);
+    std::unordered_set<uint64_t> protect = {Mesh::edge_key(1, 4)};
+    guard.protect = &protect;
+    CHECK(meshops::dissolve_limited(keep, 1.0f, nullptr, &guard) == 0 && keep.face_count() == 2);
+  });
+  test("drawing tolerances are relative to the mesh: a rectangle bigger than a 1e-4-sized face is refused, not imprinted, and a NaN or infinite outline is refused cleanly", [] {
+    Mesh tiny;
+    const uint32_t q[4] = {tiny.add_vert({-5e-5f, 0, -5e-5f}), tiny.add_vert({5e-5f, 0, -5e-5f}), tiny.add_vert({5e-5f, 0, 5e-5f}), tiny.add_vert({-5e-5f, 0, 5e-5f})};
+    tiny.add_face(q, 4);
+    CHECK(meshops::relative_eps(tiny) < 1e-7f && meshops::relative_eps(tiny) > 0.0f);
+    Mesh m = tiny;
+    std::string err;
+    const std::vector<Vec3> big = {{-8e-5f, 0, -8e-5f}, {8e-5f, 0, -8e-5f}, {8e-5f, 0, 8e-5f}, {-8e-5f, 0, 8e-5f}};
+    CHECK(meshops::imprint_loop(m, 0, big, &err) < 0 && m.face_count() == 1);
+    m = tiny;
+    CHECK(meshops::imprint_loop_across(m, {{-2e-5f, 0, -2e-5f}, {2e-5f, 0, -2e-5f}, {0, 0, 2e-5f}}, {0, 1, 0}) >= 0);  // inside: still drawn
+    /* Far from the origin: the tolerance is at least a few float steps there. */
+    Mesh distant = tiny;
+    for (Vec3 &p : distant.positions) p += Vec3(1e7f, 0, 0);
+    CHECK(meshops::relative_eps(distant) >= 8.0f * 1e7f * 1.2e-7f * 0.99f);
+    CHECK(meshops::relative_eps(Mesh()) > 0.0f);
+    /* NaN / infinite outlines (imprint_loop already refused them: imprint_loop_across added a face). */
+    const float nan = std::nanf(""), inf = std::numeric_limits<float>::infinity();
+    const Mesh was = *primitives::plane(2.0f, 1);
+    for (float bad : {nan, inf, -inf}) {
+      Mesh p = was;
+      std::string e2;
+      const std::vector<Vec3> loop = {{-0.2f, 0, -0.2f}, {0.2f, 0, -0.2f}, {0.2f, 0, bad}, {-0.2f, 0, 0.2f}};
+      CHECK(meshops::imprint_loop_across(p, loop, {0, 1, 0}, nullptr, &e2) < 0);
+      CHECK(p.face_count() == was.face_count() && p.vert_count() == was.vert_count());
+      CHECK(meshops::imprint_loop(p, 0, loop, &e2) < 0 && p.face_count() == was.face_count());
+      CHECK(meshops::imprint_loop_across(p, {{-0.2f, 0, -0.2f}, {0.2f, 0, -0.2f}, {0, 0, 0.2f}}, {0, bad, 0}, nullptr, &e2) < 0);
+    }
+  });
+  test("push through (Boolean fallback): the walls the cut leaves have UVs read off the faces they cut, none all zero (builds with Manifold; skipped without)", [] {
+    if (!meshops::boolean_available()) {
+      std::printf("    (no Manifold in this build: the Boolean fallback can't run)\n");
+      return;
+    }
+    /* A box whose underside is a shallow roof: a hole from the top exits through the two roof slopes. */
+    Mesh m;
+    const uint32_t v[10] = {m.add_vert({-1, 0.5f, -1}), m.add_vert({1, 0.5f, -1}), m.add_vert({1, 0.5f, 1}), m.add_vert({-1, 0.5f, 1}),
+                            m.add_vert({-1, -0.5f, -1}), m.add_vert({1, -0.5f, -1}), m.add_vert({1, -0.5f, 1}), m.add_vert({-1, -0.5f, 1}),
+                            m.add_vert({0, -0.9f, -1}), m.add_vert({0, -0.9f, 1})};
+    (void)v;
+    const std::vector<std::vector<uint32_t>> faces = {{0, 3, 2, 1}, {0, 4, 8, 5, 1}, {3, 2, 6, 9, 7}, {0, 3, 7, 4}, {1, 5, 6, 2}, {4, 7, 9, 8}, {8, 9, 6, 5}};
+    for (size_t f = 0; f < faces.size(); f++) {
+      std::vector<Vec2> t;
+      for (size_t k = 0; k < faces[f].size(); k++) t.push_back({m.positions[faces[f][k]].x * 0.5f + 0.5f, m.positions[faces[f][k]].z * 0.5f + 0.5f + 0.1f * (float)f});
+      m.add_face(faces[f].data(), faces[f].size(), t.data());
+    }
+    const long inner = meshops::imprint_loop(m, 0, {{-0.4f, 0.5f, -0.4f}, {0.4f, 0.5f, -0.4f}, {0.4f, 0.5f, 0.4f}, {-0.4f, 0.5f, 0.4f}});
+    CHECK(inner >= 0);
+    if (inner < 0) return;
+    std::vector<uint8_t> sel(m.face_count(), 0);
+    sel[(size_t)inner] = 1;
+    std::string err;
+    const bool ok = meshops::push_through(m, sel, 1, &err);
+    std::printf("    push through the roof: %s %s, %zu faces\n", ok ? "done" : "refused", err.c_str(), m.face_count());
+    if (!ok) return;  // (a refusal is the solver's call; the UV claim is only for a cut that was made)
+    size_t zero = 0;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool all0 = true;
+      for (uint32_t k = 0; k < m.face_size(f); k++) all0 = all0 && m.uvs[m.face_offsets[f] + k].x == 0.0f && m.uvs[m.face_offsets[f] + k].y == 0.0f;
+      zero += all0 ? 1 : 0;
+    }
+    CHECK(zero == 0);
+  });
+}
+
+
+/* ---- Round 462 (task 0438), the test engineer's independent checks ---- */
+
+/* Whether the mesh's arrays agree with each other and every corner names a real vertex. */
+static bool r462e_valid(const Mesh &m) {
+  size_t corners = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    if (m.face_size(f) < 3) return false;
+    corners += m.face_size(f);
+  }
+  if (corners != m.corner_verts.size()) return false;
+  if (m.has_uvs() && m.uvs.size() != corners) return false;
+  for (uint32_t c : m.corner_verts)
+    if (c >= m.vert_count()) return false;
+  return true;
+}
+
+/* The cube of the author's test with a doubled vertex, a doubled face and a T-junction, at scale s. */
+static Mesh r462e_planted(float s) {
+  Mesh m;
+  for (int i = 0; i < 8; i++) m.add_vert({((i & 1) ? 0.5f : -0.5f) * s, ((i & 2) ? 0.5f : -0.5f) * s, ((i & 4) ? 0.5f : -0.5f) * s});
+  m.add_vert({0.0f, -0.5f * s, -0.5f * s});
+  m.add_vert({(-0.5f + 1e-5f) * s, 0.5f * s, 0.5f * s});
+  std::vector<std::vector<uint32_t>> faces = {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 8, 1, 5, 4}, {2, 9, 7, 3}};
+  faces.push_back(faces[2]);
+  for (size_t f = 0; f < faces.size(); f++) {
+    std::vector<Vec2> t;
+    for (size_t k = 0; k < faces[f].size(); k++) t.push_back({0.3f * (float)f + (k == 1 || k == 2 ? 0.25f : 0.0f), 0.7f + (k >= 2 ? 0.2f : 0.0f)});
+    m.add_face(faces[f].data(), faces[f].size(), t.data(), 0);
+  }
+  return m;
+}
+
+/* A rectangle over the plane's surface as Draw's flat path imprints it, then Draw's cleanup. */
+static void r462e_draw_flat_rect(Mesh &m, Vec3 a, Vec3 b, std::vector<uint8_t> &sel) {
+  const Mesh before = m;
+  std::vector<size_t> inner;
+  const std::vector<Vec3> loop = {{a.x, a.y, a.z}, {b.x, a.y, a.z}, {b.x, a.y, b.z}, {a.x, a.y, b.z}};
+  meshops::imprint_loop_across(m, loop, {0, 1, 0}, &inner);
+  sel.assign(m.face_count(), 0);
+  for (size_t f : inner)
+    if (f < sel.size()) sel[f] = 1;
+  meshops::cleanup_after_draw(m, before, sel, meshops::relative_eps(m, 5e-4f));
+}
+
+static void tests_round462_engineer() {
+  test("(engineer) a rectangle drawn over a plane's corner, along its edge or from its middle vertex leaves no doubled vertex or edge, at 1e-4, 1 and 1e5 scale", [] {
+    for (float s : {1e-4f, 1.0f, 1e5f}) {
+      /* plane(2s, 2): four cells, a vertex in the middle. */
+      struct Case {
+        const char *what;
+        Vec3 a, b;
+      };
+      const Case cases[] = {{"corner", {-1, 0, -1}, {-0.4f, 0, -0.3f}},
+                            {"edge", {-0.3f, 0, -1}, {0.3f, 0, -0.4f}},
+                            {"middle vertex", {0, 0, 0}, {0.5f, 0, 0.5f}},
+                            {"over a whole cell", {-1, 0, -1}, {0, 0, 0}}};
+      for (const Case &c : cases) {
+        Mesh m = *primitives::plane(2.0f * s, 2);
+        const Mesh was = m;
+        std::vector<uint8_t> sel;
+        r462e_draw_flat_rect(m, c.a * s, c.b * s, sel);
+        const size_t ov = meshops::overlapping_vertices(m).size(), oe = meshops::overlapping_edges(m).size();
+        std::printf("    scale %.0e, %s: %zu -> %zu faces, doubled vertices %zu, doubled edges %zu, overlapping faces %zu\n", (double)s, c.what, was.face_count(),
+                    m.face_count(), ov, oe, meshops::overlapping_faces(m));
+        CHECK(r462e_valid(m));
+        CHECK(ov == 0 && oe == 0);
+        Mesh copy = m;
+        CHECK(meshops::fix_t_junctions(copy, {}, meshops::relative_eps(m)) == 0);
+        CHECK(meshops::overlapping_faces(m) == 0);
+      }
+    }
+  });
+
+  test("(engineer) two rectangles that touch along a full edge, drawn one after the other, share that edge with no T-junction left", [] {
+    Mesh m = *primitives::plane(2.0f, 1);
+    std::vector<uint8_t> sel;
+    r462e_draw_flat_rect(m, {-0.6f, 0, -0.6f}, {0.0f, 0, 0.2f}, sel);
+    const size_t one = m.face_count();
+    r462e_draw_flat_rect(m, {0.0f, 0, -0.6f}, {0.5f, 0, 0.2f}, sel);  // same z range: the whole shared side
+    std::printf("    touching rectangles: %zu -> %zu faces, %zu vertices\n", one, m.face_count(), m.vert_count());
+    CHECK(m.face_count() > one);
+    CHECK(meshops::overlapping_vertices(m).empty() && meshops::overlapping_edges(m).empty());
+    Mesh copy = m;
+    CHECK(meshops::fix_t_junctions(copy, {}, meshops::relative_eps(m)) == 0);
+    CHECK(meshops::overlapping_faces(m) == 0);
+    /* On a flat plane every edge is used by one face (the border) or two (inside): nothing by three. */
+    std::unordered_map<uint64_t, int> uses;
+    for (size_t f = 0; f < m.face_count(); f++)
+      for (uint32_t k = 0; k < m.face_size(f); k++) uses[Mesh::edge_key(m.face_verts(f)[k], m.face_verts(f)[(k + 1) % m.face_size(f)])]++;
+    bool over = false;
+    for (const auto &e : uses) over = over || e.second > 2;
+    CHECK(!over);
+  });
+
+  test("(engineer) after a draw, a vertex that lands on a seam edge between two faces with different UVs keeps both faces apart; a material border too", [] {
+    for (int variant = 0; variant < 2; variant++) {
+      Mesh before;
+      const uint32_t v[6] = {before.add_vert({0, 0, 0}), before.add_vert({1, 0, 0}), before.add_vert({2, 0, 0}), before.add_vert({0, 0, 1}), before.add_vert({1, 0, 1}), before.add_vert({2, 0, 1})};
+      const uint32_t f0[4] = {v[0], v[3], v[4], v[1]}, f1[4] = {v[1], v[4], v[5], v[2]};
+      const Vec2 t0[4] = {{0, 0}, {0, 1}, {0.5f, 1}, {0.5f, 0}};
+      const float u2 = variant == 0 ? 0.0f : 0.5f;  // 0: the texture starts again; 1: continuous but another material
+      const Vec2 t1[4] = {{u2, 0}, {u2, 1}, {u2 + 0.5f, 1}, {u2 + 0.5f, 0}};
+      before.add_face(f0, 4, t0, 0);
+      before.add_face(f1, 4, t1, variant);
+      Mesh m = before;
+      /* What a draw added: a triangle standing up from the shared edge's middle. */
+      const uint32_t n0 = m.add_vert({1, 0, 0.5f}), n1 = m.add_vert({1, 1, 0.5f}), n2 = m.add_vert({1, 1, 0.7f});
+      const uint32_t tri[3] = {n0, n1, n2};
+      const Vec2 tt[3] = {{0, 0}, {0, 0}, {0, 0}};
+      m.add_face(tri, 3, tt, 0);
+      std::vector<uint8_t> sel = {0, 0, 1};
+      meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+      size_t flat = 0;
+      for (size_t f = 0; f < m.face_count(); f++) {
+        bool in_plane = true;
+        for (uint32_t k = 0; k < m.face_size(f); k++) in_plane = in_plane && m.positions[m.face_verts(f)[k]].y == 0.0f;
+        flat += in_plane ? 1 : 0;
+      }
+      std::printf("    %s: %zu faces in the plane after the cleanup (%zu faces)\n", variant ? "material border" : "UV seam", flat, m.face_count());
+      CHECK(r462e_valid(m));
+      CHECK(flat == 2);
+    }
+  });
+
+  test("(engineer) solve mesh on a planted cube scaled to 1e-4, 1 and 1e5 comes out a closed manifold of six faces", [] {
+    for (float s : {1e-4f, 1.0f, 1e5f}) {
+      Mesh m = r462e_planted(s);
+      CHECK(!closed_manifold(m));
+      std::vector<uint8_t> scope;
+      const meshops::SolveReport r = meshops::solve_mesh(m, scope, meshops::relative_eps(m, 1e-4f), 1.0f);
+      std::printf("    scale %.0e: %zu faces, %zu vertices, welded %zu, T-junctions %zu, doubled faces %zu, closed %d\n", (double)s, m.face_count(), m.vert_count(), r.welded,
+                  r.t_junctions, r.duplicate_faces, (int)closed_manifold(m));
+      CHECK(r462e_valid(m));
+      CHECK(closed_manifold(m) && m.face_count() == 6 && m.vert_count() == 9);
+      CHECK(r.overlap_faces == 0 && r.overlap_vertices == 0 && r.overlap_edges == 0);
+    }
+  });
+
+  test("(engineer) solve mesh with a NaN vertex and a face using it finishes, keeps the real geometry cleaned, and spreads no NaN", [] {
+    Mesh m = r462e_planted(1.0f);
+    const uint32_t nan = m.add_vert({std::nanf(""), 0.0f, 0.0f});
+    m.add_vert({std::nanf(""), std::nanf(""), 1.0f});  // a stray one no face uses
+    const uint32_t tri[3] = {0, 1, nan};
+    const Vec2 t[3] = {{0, 0}, {1, 0}, {0, 1}};
+    m.add_face(tri, 3, t, 0);
+    CHECK(std::isfinite(meshops::relative_eps(m)) && meshops::relative_eps(m) > 0.0f);
+    std::vector<uint8_t> scope;
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-4f, 1.0f);
+    size_t nans = 0;
+    for (const Vec3 &p : m.positions) nans += std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z) ? 0 : 1;
+    std::printf("    NaN mesh: %zu faces, %zu vertices, %zu NaN positions left, welded %zu\n", m.face_count(), m.vert_count(), nans, r.welded);
+    CHECK(r462e_valid(m));
+    CHECK(nans <= 2);
+    CHECK(r.welded >= 1);  // the doubled vertex of the planted cube
+    const size_t fz = r462_face_at(m, {{-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}});
+    CHECK(fz != SIZE_MAX);
+    Mesh nan_only = r462e_planted(1.0f);
+    nan_only.positions[3] = {std::nanf(""), std::nanf(""), std::nanf("")};
+    scope.clear();
+    meshops::solve_mesh(nan_only, scope, 1e-4f, 1.0f);  // must come back
+    CHECK(r462e_valid(nan_only));
+    Mesh empty;
+    scope.clear();
+    const meshops::SolveReport e = meshops::solve_mesh(empty, scope, 1e-4f, 1.0f);
+    CHECK(e.welded == 0 && empty.face_count() == 0);
+  });
+
+  test("(engineer) solve mesh on non-manifold input (three pages on one spine, one spine end doubled) keeps all three pages and a valid mesh", [] {
+    Mesh m;
+    const uint32_t s0 = m.add_vert({0, 0, 0}), s1 = m.add_vert({0, 0, 1}), s1b = m.add_vert({0, 0, 1});
+    uint32_t o[3][2];
+    for (int k = 0; k < 3; k++) {
+      const float a = 2.0943951f * (float)k;
+      o[k][0] = m.add_vert({std::cos(a), std::sin(a), 0});
+      o[k][1] = m.add_vert({std::cos(a), std::sin(a), 1});
+    }
+    for (int k = 0; k < 3; k++) {
+      const uint32_t q[4] = {s0, o[k][0], o[k][1], k == 2 ? s1b : s1};
+      const Vec2 t[4] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+      m.add_face(q, 4, t, 0);
+    }
+    std::vector<uint8_t> scope;
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-4f, 1.0f);
+    std::printf("    three pages: %zu faces, %zu vertices, welded %zu\n", m.face_count(), m.vert_count(), r.welded);
+    CHECK(r462e_valid(m));
+    CHECK(m.face_count() == 3 && m.vert_count() == 8 && r.welded == 1);
+    /* Flat non-manifold: two pages in one plane and a third across them. Whatever it decides, the mesh stays valid. */
+    Mesh flat;
+    const uint32_t a0 = flat.add_vert({0, 0, 0}), a1 = flat.add_vert({0, 0, 1}), l0 = flat.add_vert({-1, 0, 0}), l1 = flat.add_vert({-1, 0, 1}), r0 = flat.add_vert({1, 0, 0}),
+                   r1 = flat.add_vert({1, 0, 1}), u0 = flat.add_vert({0, 1, 0}), u1 = flat.add_vert({0, 1, 1});
+    const uint32_t pg[3][4] = {{a0, l0, l1, a1}, {a0, a1, r1, r0}, {a0, a1, u1, u0}};
+    for (const auto &q : pg) flat.add_face(q, 4);
+    scope.clear();
+    meshops::solve_mesh(flat, scope, 1e-4f, 1.0f);
+    CHECK(r462e_valid(flat) && flat.face_count() >= 2);
+  });
+
+  test("(engineer) solve mesh on a whole subdivided flat plane collapses it to one face of four corners (documented), and a UV seam down its middle keeps two faces", [] {
+    Mesh plane = *primitives::plane(2.0f, 8);
+    CHECK(plane.face_count() == 64);
+    std::vector<uint8_t> scope;
+    meshops::SolveReport r = meshops::solve_mesh(plane, scope, 1e-4f, 1.0f);
+    std::printf("    plane 8x8 solved: %zu faces, %zu vertices, merged %zu\n", plane.face_count(), plane.vert_count(), r.merged);
+    CHECK(r462e_valid(plane));
+    CHECK(plane.face_count() == 1 && plane.vert_count() == 4);
+    Mesh seamed = *primitives::plane(2.0f, 4);
+    CHECK(seamed.has_uvs());
+    for (size_t f = 0; f < seamed.face_count(); f++)
+      if (seamed.face_center(f).x > 0.0f)
+        for (uint32_t k = 0; k < seamed.face_size(f); k++) seamed.uvs[seamed.face_offsets[f] + k].x += 0.37f;
+    scope.clear();
+    r = meshops::solve_mesh(seamed, scope, 1e-4f, 1.0f);
+    size_t straddle = 0;
+    for (size_t f = 0; f < seamed.face_count(); f++) {
+      float lo = 1e30f, hi = -1e30f;
+      for (uint32_t k = 0; k < seamed.face_size(f); k++) {
+        lo = std::min(lo, seamed.positions[seamed.face_verts(f)[k]].x);
+        hi = std::max(hi, seamed.positions[seamed.face_verts(f)[k]].x);
+      }
+      straddle += lo < -1e-4f && hi > 1e-4f ? 1 : 0;
+    }
+    std::printf("    plane with a UV seam solved: %zu faces, %zu straddle the seam\n", seamed.face_count(), straddle);
+    CHECK(straddle == 0 && seamed.face_count() == 2);
+  });
+
+  test("(engineer) solve mesh with the first cube of two touching cubes selected leaves the second shell exactly as it was (its corners lie at the places of the first cube's: an unselected vertex at a selected one's place must not weld)", [] {
+    Mesh m = r462_cube_from(r462_cube_faces());
+    const size_t a_verts = m.vert_count();
+    for (int i = 0; i < 8; i++) m.add_vert({((i & 1) ? 1.5f : 0.5f), (i & 2) ? 0.5f : -0.5f, (i & 4) ? 0.5f : -0.5f});  // touches A's +X face
+    for (const auto &f : r462_cube_faces()) {
+      std::vector<uint32_t> c;
+      for (uint32_t v : f) c.push_back(v + (uint32_t)a_verts);
+      const std::vector<Vec2> t(c.size(), Vec2(0.5f, 0.5f));
+      m.add_face(c.data(), c.size(), t.data(), 0);
+    }
+    const Mesh was = m;
+    std::vector<uint8_t> scope(m.vert_count(), 0);
+    for (size_t v = 0; v < a_verts; v++) scope[v] = 1;
+    meshops::solve_mesh(m, scope, 1e-3f, 1.0f);
+    CHECK(m.vert_count() == was.vert_count() && m.face_count() == was.face_count());
+    bool same = m.vert_count() == was.vert_count();
+    for (size_t v = a_verts; same && v < was.vert_count(); v++) same = std::memcmp(&m.positions[v], &was.positions[v], sizeof(Vec3)) == 0;
+    CHECK(same);
+    /* Whole mesh: the touching shells are a Merge by Distance case; say what happens. */
+    Mesh whole = was;
+    std::vector<uint8_t> none;
+    meshops::solve_mesh(whole, none, 1e-3f, 1.0f);
+    std::printf("    two touching cubes, whole mesh: %zu faces, %zu vertices, closed %d\n", whole.face_count(), whole.vert_count(), (int)closed_manifold(whole));
+    CHECK(r462e_valid(whole));
+  });
+
+  test("(engineer) solve mesh on a clean cube with seams, sharp edges and smooth shading changes nothing, UVs bit for bit", [] {
+    std::vector<uint8_t> scope;
+    Mesh cube = r462_cube_from(r462_cube_faces());
+    cube.smooth = true;
+    cube.set_seam(0, 1, true);
+    cube.set_seam(1, 5, true);
+    cube.set_sharp(2, 3, true);
+    cube.set_sharp(4, 6, true);
+    const Mesh cube_was = cube;
+    scope.clear();
+    meshops::solve_mesh(cube, scope, 1e-4f, 1.0f);
+    CHECK(cube.face_count() == 6 && cube.vert_count() == 8);
+    CHECK(cube.smooth == cube_was.smooth && cube.seams == cube_was.seams && cube.sharp_edges == cube_was.sharp_edges);
+    CHECK(cube.uvs.size() == cube_was.uvs.size() && std::memcmp(cube.uvs.data(), cube_was.uvs.data(), cube.uvs.size() * sizeof(Vec2)) == 0);
+    CHECK(cube.corner_verts == cube_was.corner_verts);
+  });
+
+  test("(engineer) the cleanup after a draw welds only new vertices: two old vertices at one place (a split UV island) stay apart while a new corner on that place joins one of them", [] {
+    Mesh m;
+    const uint32_t a0 = m.add_vert({0, 0, 0}), a1 = m.add_vert({0, 0, 0});
+    const uint32_t p[4] = {m.add_vert({1, 0, 0}), m.add_vert({0, 0, 1}), m.add_vert({-1, 0, 0}), m.add_vert({0, 0, -1})};
+    const uint32_t t0[3] = {a0, p[0], p[1]}, t1[3] = {a1, p[2], p[3]};
+    m.add_face(t0, 3);
+    m.add_face(t1, 3);
+    const Mesh before = m;
+    const uint32_t n0 = m.add_vert({1e-6f, 0, 0}), n1 = m.add_vert({0, 5, 0}), n2 = m.add_vert({0, 5, 1});
+    const uint32_t t2[3] = {n0, n1, n2};
+    m.add_face(t2, 3);
+    std::vector<uint8_t> sel = {0, 0, 1};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    std::printf("    split island: %zu vertices (was %zu), doubled vertex pairs %zu\n", m.vert_count(), before.vert_count(), meshops::overlapping_vertices(m).size());
+    CHECK(r462e_valid(m));
+    CHECK(m.vert_count() == before.vert_count() + 2);  // n1, n2 are new; n0 joined an old vertex
+    CHECK(meshops::overlapping_vertices(m).size() == 1);
+    /* tidy_new_geometry itself, called as Push/Pull does: with every vertex "old", nothing welds. */
+    Mesh t = m;
+    meshops::tidy_new_geometry(t, t.positions, 1e-3f);
+    CHECK(t.vert_count() == m.vert_count());
+  });
+
+  test("(engineer) push/pull on a cube still gives a closed manifold with the expected size: pulled out (merged and not), pushed in, pushed past the far side, and a NaN distance", [] {
+    auto top_of = [](const Mesh &c) {
+      std::vector<uint8_t> sel(c.face_count(), 0);
+      for (size_t f = 0; f < c.face_count(); f++) sel[f] = c.face_normal(f).y > 0.9f ? 1 : 0;
+      return sel;
+    };
+    for (int merge = 0; merge < 2; merge++) {
+      Mesh m = *primitives::cube(1.0f);
+      std::vector<uint8_t> sel = top_of(m);
+      CHECK(meshops::push_pull(m, sel, 0.5f, merge != 0));
+      std::printf("    pull top, merge %d: %zu faces, %zu vertices, height %.3f\n", merge, m.face_count(), m.vert_count(), (double)m.bounds().extent().y * 2.0);
+      CHECK(r462e_valid(m) && closed_manifold(m));
+      CHECK(std::fabs(m.bounds().extent().y * 2.0f - 1.5f) < 1e-4f);
+      CHECK(meshops::overlapping_faces(m) == 0 && meshops::overlapping_vertices(m).empty());
+    }
+    Mesh inw = *primitives::cube(1.0f);
+    std::vector<uint8_t> top = top_of(inw);
+    CHECK(meshops::push_pull(inw, top, -0.4f));
+    CHECK(closed_manifold(inw) && std::fabs(inw.bounds().extent().y * 2.0f - 0.6f) < 1e-4f);
+    Mesh through = *primitives::cube(1.0f);
+    const Mesh was = through;
+    std::vector<uint8_t> top2 = top_of(through);
+    std::string err;
+    const bool ok = meshops::push_pull(through, top2, -1.4f, true, nullptr, &err);
+    std::printf("    pushed past the far side: %s %s, %zu faces\n", ok ? "done" : "refused", err.c_str(), through.face_count());
+    CHECK(r462e_valid(through));
+    CHECK(ok ? meshops::overlapping_faces(through) == 0 : (through.vert_count() == was.vert_count() && through.face_count() == was.face_count()));
+    Mesh nanm = *primitives::cube(1.0f);
+    std::vector<uint8_t> top3 = top_of(nanm);
+    meshops::push_pull(nanm, top3, std::nanf(""));
+    bool finite = true;
+    for (const Vec3 &p : nanm.positions) finite = finite && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+    CHECK(finite && r462e_valid(nanm));
+  });
+
+  test("(engineer) relative_eps and the loop imprints on huge and tiny meshes: a rectangle inside a 1e5 or 1e-4 face is drawn, one outside it is refused, NaN and infinite outlines are refused on both", [] {
+    const float inf = std::numeric_limits<float>::infinity();
+    for (float s : {1e-4f, 1e5f}) {
+      Mesh m = *primitives::plane(2.0f * s, 1);
+      const float eps = meshops::relative_eps(m);
+      CHECK(eps > 0.0f && eps < 1e-3f * s);
+      const Mesh was = m;
+      std::string err;
+      const float inside = 0.5f * s, outside = 1.2f * s;
+      CHECK(meshops::imprint_loop(m, 0, {{-inside, 0, -inside}, {inside, 0, -inside}, {inside, 0, inside}, {-inside, 0, inside}}, &err) >= 0);
+      Mesh o = was;
+      CHECK(meshops::imprint_loop(o, 0, {{-outside, 0, -outside}, {outside, 0, -outside}, {outside, 0, outside}, {-outside, 0, outside}}, &err) < 0 && o.face_count() == was.face_count());
+      for (float bad : {std::nanf(""), inf, -inf}) {
+        Mesh p = was;
+        CHECK(meshops::imprint_loop(p, 0, {{-inside, 0, -inside}, {inside, 0, -inside}, {bad, 0, inside}}, &err) < 0 && p.face_count() == was.face_count());
+        CHECK(meshops::imprint_loop_across(p, {{-inside, 0, -inside}, {inside, 0, -inside}, {inside, bad, inside}}, {0, 1, 0}, nullptr, &err) < 0 && p.face_count() == was.face_count());
+      }
+    }
+    Mesh nanmesh = *primitives::plane(2.0f, 1);
+    nanmesh.positions.push_back({std::nanf(""), 0, 0});
+    CHECK(std::isfinite(meshops::relative_eps(nanmesh)) && meshops::relative_eps(nanmesh) > 0.0f);
+    nanmesh.positions.push_back({inf, 0, 0});
+    CHECK(std::isfinite(meshops::relative_eps(nanmesh)) && meshops::relative_eps(nanmesh) > 0.0f);
+  });
+
+  test("(engineer) fix t-junctions on a 30000-face grid with one vertex on an edge finds just that one; a whole-mesh solve on it finishes and stays valid", [] {
+    Mesh m = *primitives::plane(2.0f, 175);  // 30625 quads
+    CHECK(m.face_count() > 30000);
+    /* A loose triangle whose corner lies in the middle of a border edge of the grid, and one with a corner off every edge. */
+    const Vec3 lo = m.bounds().min;
+    const float cell = 2.0f / 175.0f;
+    const uint32_t t0 = m.add_vert({lo.x + 0.5f * cell, 0, lo.z});
+    const uint32_t t1 = m.add_vert({lo.x + 0.5f * cell, 0, lo.z - 1.0f}), t2 = m.add_vert({lo.x + 0.9f * cell, 0, lo.z - 1.0f});
+    const uint32_t off = m.add_vert({lo.x + 3.5f * cell, 0, lo.z + 0.01f});
+    const uint32_t tri[3] = {t0, t2, t1}, tri2[3] = {off, t1, t2};
+    m.add_face(tri, 3);
+    m.add_face(tri2, 3);
+    const size_t n = meshops::fix_t_junctions(m, {}, 1e-4f);
+    CHECK(n == 1);
+    CHECK(r462e_valid(m));
+    std::vector<uint8_t> scope;
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-4f, 1.0f);
+    CHECK(r462e_valid(m));
+    std::printf("    big grid solve: %zu faces left, merged %zu\n", m.face_count(), r.merged);
+  });
+}
+
+/* ---- Round 462's code review: the cleanup keeps the user's lines, stays local, follows wires and keeps shells apart ---- */
+
+/* Two quads side by side in the XZ plane, (0..1) and (1..2) by (0..1), sharing the line x = 1, planar UVs (u = x, v = z). */
+static Mesh r462r_two_rectangles() {
+  Mesh m;
+  const uint32_t v[6] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({0, 0, 1}), m.add_vert({1, 0, 1}), m.add_vert({2, 0, 1})};
+  const uint32_t a[4] = {v[0], v[3], v[4], v[1]}, b[4] = {v[1], v[4], v[5], v[2]};
+  const Vec2 ta[4] = {{0, 0}, {0, 1}, {1, 1}, {1, 0}}, tb[4] = {{1, 0}, {1, 1}, {2, 1}, {2, 0}};
+  m.add_face(a, 4, ta);
+  m.add_face(b, 4, tb);
+  return m;
+}
+
+static size_t r462r_faces_with(const Mesh &m, Vec3 p, Vec3 q) {
+  size_t n = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    bool has_p = false, has_q = false;
+    for (uint32_t k = 0; k < m.face_size(f); k++) {
+      const Vec3 c = m.positions[m.face_verts(f)[k]];
+      has_p = has_p || length(c - p) < 1e-5f;
+      has_q = has_q || length(c - q) < 1e-5f;
+    }
+    n += has_p && has_q ? 1 : 0;
+  }
+  return n;
+}
+
+static void tests_round462_review() {
+  test("the draw guard measures an exact duplicate face (same places, same winding) as overlap, and the cleanup keeps a lone vertex of the user's far from a draw that welds", [] {
+    Mesh one;
+    const uint32_t q[4] = {one.add_vert({0, 0, 0}), one.add_vert({1, 0, 0}), one.add_vert({1, 0, 1}), one.add_vert({0, 0, 1})};
+    one.add_face(q, 4);
+    Mesh two = one;
+    two.add_face(q, 4);
+    const double gain = meshops::draw_overlap_gain(one, two, meshops::relative_eps(two));
+    std::printf("    a quad and the same quad again: the guard sees %.3f of area\n", gain);
+    CHECK(gain > 0.5);
+    CHECK(std::fabs(meshops::draw_overlap_gain(two, two, meshops::relative_eps(two))) < 1e-9);
+    /* A lone vertex far away survives a draw that welds. */
+    Mesh before = one;
+    const uint32_t lone = before.add_vert({50, 0, 50});
+    Mesh m = before;
+    const uint32_t d[4] = {m.add_vert({1, 0, 1}), m.add_vert({2, 0, 1}), m.add_vert({2, 0, 2}), m.add_vert({1, 0, 2})};  // its first corner on the quad's
+    m.add_face(d, 4);
+    std::vector<uint8_t> sel = {0, 1};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    bool kept = false;
+    for (const Vec3 &p : m.positions) kept = kept || length(p - Vec3(50, 0, 50)) < 1e-6f;
+    (void)lone;
+    CHECK(kept);
+    CHECK(m.vert_count() == 8);  // 4 + the lone one + 3 new corners (the fourth welded)
+  });
+  test("cleanup after a draw keeps the user's earlier lines: a rectangle drawn along two touching rectangles joins their corners and leaves the line between them", [] {
+    const Mesh before = r462r_two_rectangles();
+    Mesh m = before;
+    /* A free rectangle below both, its top side along their lower sides: new corners, two of them on the others' edges. */
+    const uint32_t d[4] = {m.add_vert({0.5f, 0, -1}), m.add_vert({1.5f, 0, -1}), m.add_vert({1.5f, 0, 0}), m.add_vert({0.5f, 0, 0})};
+    const Vec2 td[4] = {{0.5f, -1}, {1.5f, -1}, {1.5f, 0}, {0.5f, 0}};
+    m.add_face(d, 4, td);
+    std::vector<uint8_t> sel = {0, 0, 1};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    std::printf("    two rectangles and a third: %zu faces, sizes", m.face_count());
+    for (size_t f = 0; f < m.face_count(); f++) std::printf(" %u", m.face_size(f));
+    std::printf("\n");
+    CHECK(m.face_count() == 3);
+    CHECK(r462r_faces_with(m, {1, 0, 0}, {1, 0, 1}) == 2);  // the line between the first two still has a face each side
+    for (size_t f = 0; f < 2; f++) CHECK(m.face_size(f) == 5);  // each gained the third's corner on its lower side
+    CHECK(sel.size() == 3 && sel[2] == 1 && sel[0] == 0 && sel[1] == 0);
+    CHECK(meshops::overlapping_vertices(m).empty() && meshops::overlapping_edges(m).empty());
+    Mesh again = m;
+    CHECK(meshops::fix_t_junctions(again, {}, 1e-3f) == 0);
+  });
+  test("cleanup after a draw: a wire on a welded new corner follows the corner it was welded to, and no vertex is left orphaned", [] {
+    Mesh before;
+    const uint32_t q[4] = {before.add_vert({0, 0, 0}), before.add_vert({1, 0, 0}), before.add_vert({1, 0, 1}), before.add_vert({0, 0, 1})};
+    before.add_face(q, 4);
+    Mesh m = before;
+    const uint32_t w0 = m.add_vert({1, 0, 1}), w1 = m.add_vert({3, 0, 3}), w2 = m.add_vert({1, 0, 1});
+    m.add_loose_edge(w0, w1);
+    m.add_loose_edge(w2, w0);  // both ends weld to one corner: the wire has nothing left
+    std::vector<uint8_t> sel(1, 0);
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    CHECK(m.vert_count() == 5);
+    CHECK(m.loose_edges.size() == 1);
+    if (m.loose_edges.size() != 1) return;
+    const uint32_t a = (uint32_t)(m.loose_edges[0] >> 32), b = (uint32_t)(m.loose_edges[0] & 0xFFFFFFFF);
+    CHECK(a < m.vert_count() && b < m.vert_count());
+    if (a >= m.vert_count() || b >= m.vert_count()) return;
+    const Vec3 pa = m.positions[a], pb = m.positions[b];
+    const bool corner_a = length(pa - Vec3(1, 0, 1)) < 1e-6f, corner_b = length(pb - Vec3(1, 0, 1)) < 1e-6f;
+    CHECK(corner_a != corner_b);                                       // one end on the old corner ...
+    CHECK(length((corner_a ? pb : pa) - Vec3(3, 0, 3)) < 1e-6f);        // ... the other where the wire ends
+    CHECK((corner_a ? a : b) < 4);                                      // and that end is the old vertex, not an orphan beside it
+  });
+  test("cleanup after a draw never stitches a separate shell: its corner on a piece of an old edge the draw split stays unjoined", [] {
+    Mesh before;
+    const uint32_t a[4] = {before.add_vert({0, 0, 0}), before.add_vert({2, 0, 0}), before.add_vert({2, 0, 2}), before.add_vert({0, 0, 2})};
+    before.add_face(a, 4);
+    const uint32_t b[3] = {before.add_vert({1, 0, 0}), before.add_vert({1, 0, -1}), before.add_vert({2, 0, -1})};  // another shell, its corner on A's edge
+    before.add_face(b, 3);
+    /* The draw cut A in two from the middle of its lower side to the middle of its upper: two new vertices. */
+    Mesh m;
+    for (const Vec3 &p : before.positions) m.add_vert(p);
+    const uint32_t lo = m.add_vert({0.5f, 0, 0}), hi = m.add_vert({0.5f, 0, 2});
+    const uint32_t left[4] = {a[0], lo, hi, a[3]}, right[4] = {lo, a[1], a[2], hi};
+    m.add_face(left, 4);
+    m.add_face(right, 4);
+    m.add_face(b, 3);
+    std::vector<uint8_t> sel = {1, 1, 0};
+    meshops::cleanup_after_draw(m, before, sel, 1e-3f);
+    bool joined = false;
+    for (size_t f = 0; f < m.face_count(); f++) {
+      bool has_b0 = false;
+      for (uint32_t k = 0; k < m.face_size(f); k++) has_b0 = has_b0 || length(m.positions[m.face_verts(f)[k]] - Vec3(1, 0, 0)) < 1e-6f;
+      if (has_b0 && m.face_size(f) != 3) joined = true;
+    }
+    CHECK(!joined);
+    CHECK(m.face_count() == 3);
+  });
+  test("solve mesh on a selection joins no T-junction on an edge whose faces are all outside it: a plain quad beside the selected, subdivided one stays untouched", [] {
+    Mesh m;
+    const uint32_t a0[4] = {m.add_vert({0, 0, 0}), m.add_vert({1, 0, 0}), m.add_vert({1, 0, 0.5f}), m.add_vert({0, 0, 0.5f})};
+    const uint32_t mid = 2;
+    m.add_face(a0, 4);
+    const uint32_t top[4] = {a0[3], mid, m.add_vert({1, 0, 1}), m.add_vert({0, 0, 1})};
+    m.add_face(top, 4);
+    const uint32_t b[4] = {m.add_vert({1, 0, 0}), m.add_vert({2, 0, 0}), m.add_vert({2, 0, 1}), m.add_vert({1, 0, 1})};  // beside it, its own vertices
+    m.add_face(b, 4);
+    m.set_seam(3, 2, true);  // (the two selected quads stay two: this test is about the join)
+    const Mesh was = m;
+    std::vector<uint8_t> scope(m.vert_count(), 0);
+    for (uint32_t v = 0; v < 6; v++) scope[v] = 1;  // A's, the middle one of its right side included
+    const meshops::SolveReport r = meshops::solve_mesh(m, scope, 1e-3f, 1.0f);
+    CHECK(r.t_junctions == 0);
+    CHECK(m.vert_count() == was.vert_count() && m.face_count() == was.face_count());
+    size_t sizes4 = 0;
+    for (size_t f = 0; f < m.face_count(); f++) sizes4 += m.face_size(f) == 4 ? 1 : 0;
+    CHECK(sizes4 == 3);  // the plain quad kept its four corners
+    /* With everything selected the touching shells are one job: the weld and the joins happen. */
+    Mesh whole = was;
+    std::vector<uint8_t> none;
+    meshops::solve_mesh(whole, none, 1e-3f, 1.0f);
+    CHECK(whole.vert_count() < was.vert_count());
+  });
+  test("the draw guard is local: the overlap area a draw adds is measured beside the draw, on a 19,600-face YZ wall as on a small mesh (the time is printed, not asserted)", [] {
+    Mesh wall;
+    const int n = 140;
+    for (int j = 0; j <= n; j++)
+      for (int i = 0; i <= n; i++) wall.add_vert({0, (float)j, (float)i});
+    for (int j = 0; j < n; j++)
+      for (int i = 0; i < n; i++) {
+        const uint32_t v[4] = {(uint32_t)(j * (n + 1) + i), (uint32_t)((j + 1) * (n + 1) + i), (uint32_t)((j + 1) * (n + 1) + i + 1), (uint32_t)(j * (n + 1) + i + 1)};
+        wall.add_face(v, 4);
+      }
+    CHECK(wall.face_count() == 19600);
+    Mesh after = wall;
+    /* A free face lying on the wall, half over four cells. */
+    const uint32_t f[4] = {after.add_vert({0, 70.5f, 70.5f}), after.add_vert({0, 71.5f, 70.5f}), after.add_vert({0, 71.5f, 71.5f}), after.add_vert({0, 70.5f, 71.5f})};
+    if (after.face_normal(0).x > 0) after.add_face(f, 4);
+    else {
+      const uint32_t r[4] = {f[3], f[2], f[1], f[0]};
+      after.add_face(r, 4);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const double gain = meshops::draw_overlap_gain(wall, after, meshops::relative_eps(after));
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const double none = meshops::draw_overlap_gain(wall, wall, meshops::relative_eps(wall));
+    std::printf("    the guard on a 19,600-face YZ wall: %.1f ms, the free face adds %.4f of area (1 expected), an unchanged mesh %.4f\n", ms, gain, none);
+    CHECK(std::fabs(gain - 1.0) < 1e-3);
+    CHECK(std::fabs(none) < 1e-9);
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -10258,4 +11063,7 @@ void run_modeling_tests() {
   tests_round461();
   tests_round461_engineer();
   tests_round461_review();
+  tests_round462();
+  tests_round462_engineer();
+  tests_round462_review();
 }

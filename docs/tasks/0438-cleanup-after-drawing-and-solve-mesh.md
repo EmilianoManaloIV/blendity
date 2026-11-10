@@ -1,6 +1,6 @@
 # 0438: Cleanup after drawing, and Solve Mesh (round 462)
 
-- **Status:** approved (2026-11-08)
+- **Status:** done (round 462)
 - **Requirements:** R-02 (modeling), R-04 (UVs)
 - **Decisions:** ADR 0120 (the drawing solver), decisions 5-6
 - **Model:** implementer (Sonnet)
@@ -94,3 +94,45 @@ already exists.
   `fix_t_junctions`, Solve Mesh), USABILITY "fixed" row (duplicates left by drawing), ADR 0120 decisions 5-6, Learn:
   a "Solve Mesh" section with `!` Try-it and `?` questions, plus a line in "Drawing onto faces" on the automatic
   cleanup.
+
+## As built
+- **The overlap guard compares area, not pairs** (changed in testing): the area the z-fighting pairs share (`zfight_pairs`)
+  before and after the draw. A pair count rose whenever a draw merely split a face already lying on another (two pieces
+  over it instead of one) and refused harmless draws; the shared area doesn't rise then. A draw that adds a face lying on
+  another (a shape started off the mesh, partly over a face) is rolled back.
+- **Solve Mesh's scope is the selection's faces, not its places** (fixed in testing): an unselected vertex can sit
+  exactly on a selected one (a second shell touching the first). The weld runs on the selected vertices as given; the
+  later passes take as in scope the faces whose corners all sit at selected places, minus the faces that were outside
+  the selection before (kept by their corners' places and facing), and a vertex only while no outside face uses it.
+- **New file `src/scene/mesh_cleanup.cpp`** holds `fix_t_junctions`, `relative_eps`, `cleanup_after_draw`, `solve_mesh` and
+  `vertices_not_in` (not `mesh_tools3.cpp`: they share `apply_edge_splits`, now external, from `mesh_tools.cpp`).
+  `tidy_new_geometry`, `dissolve_line_faces` and `remap_selection` left the anonymous namespace (declared in `mesh.h` /
+  `mesh_internal.h`).
+- **A joined T-junction inserts the existing vertex** into the edge's faces (one batched `apply_edge_splits`) instead of
+  `split_edge` + weld: same result, one rebuild, no extra vertex.
+- **Draw's cleanup merges nothing** (review of round 462). The first version ran a UV-safe `dissolve_limited` on the faces
+  the weld and the T-junction fix changed; it erased the user's earlier lines (two touching rectangles with continuous UVs
+  became one face when a third was drawn along them). `cleanup_after_draw` is now: a local weld (a grid of the new vertices and
+  one pass over the old, not `tidy_new_geometry`, so the cost follows the draw), `dissolve_line_faces` on faces with a new
+  vertex (criterion 1), and T-junctions among the faces around the new vertices (a new vertex joins any edge it lies on; an
+  old vertex only an edge the draw made, never a piece of an old edge the draw split; Solve Mesh with a selection skips an
+  edge whose faces are all outside it). Wires, seams and sharp marks follow a welded vertex. Solve Mesh keeps the merge.
+- **Twins cancel in the weld**: `weld_faces_local` removes both of two faces on the same corners facing opposite ways, as
+  Push/Pull's `tidy_new_geometry` does (a new wall on an old face is a solid's inner wall). Only the welded-away vertices are
+  compacted afterwards, so a stray vertex of the user's elsewhere stays; a wire that comes to lie on a face edge is pruned; the
+  T-junction step starts from every vertex the draw added, welded or not (a gap filled between old corners).
+- **The guard is local and by area** (`meshops::draw_overlap_gain`): the area lying on another face after the commit minus
+  before it, counted only for faces the draw added or changed (after) and removed or changed (before), the faces beside
+  them found on a cell grid; no face cap. Measured on a 19,600-face YZ wall and in the `curved` stress rows (cut, cleanup and
+  guard in their own columns).
+- **Draw's weld tolerance** is Push/Pull's (5e-4 of the mesh size) but at most a tenth of the shape's shortest side.
+- **Snapping before adding** (spec 1) is done by the weld and T-junction passes after the commit, not before.
+- **`relative_eps`** measures the half bounding diagonal (what `mesh_scale` and `bounds().extent()` are), so meshes of
+  size >= 1 get exactly the old tolerances. Also changed: `mesh_project.cpp`, `mesh_tools5.cpp`, Push Through's flat exit.
+- **`imprint_loop` hung on a NaN point** (the inside test is true for NaN); it and `imprint_loop_across` now refuse a
+  non-finite outline.
+- **The guard** rolls back in place (the mesh object stays; the commit keeps one bare copy of the mesh, as `imprint_projected` already did).
+  Solve Mesh has F9 fields only, no drag helper. `redo amount2` sets the merge angle from the console.
+- **Stress:** `curved`'s projected-draw rows now run Draw's cleanup on each cut and print "doubles after drawing"
+  (with the raw count). Not yet run (a hold on builds); the cause of the one overlapping cut is not yet found.
+- **Not run:** Linux build, the stress sections, the Boolean fallback's UV code (it runs in no build here).

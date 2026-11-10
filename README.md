@@ -124,7 +124,7 @@ Each stage is a **layout** that arranges the windows and shows only that stage's
 everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
-- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style), Booleans, snapping;
+- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
   **drawing in perspective** with a pen - SketchBook-style rulers, ellipses, symmetry and a 3-point guide that *is* the
   camera, strokes corrected to what the hand meant, canvases on the ground and on faces, and boxes, cylinders, faces and
   whole scaffolds built from the construction lines, never guessed.
@@ -306,7 +306,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (23552 unit checks in 1817 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (23897 unit checks in 1860 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub
