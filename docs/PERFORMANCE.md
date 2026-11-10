@@ -109,6 +109,41 @@ room, Unity's falloff, 27,693 texels; its reference keeps every light at every t
 In the hall the picking is the noise - 4.8 times the blotch of keeping every light - where a texel drops 5.3 lights by
 chance; on SideRail a texel drops 0.46 and the picking is not. The four older rows are Pass 21's to the last digit.
 
+### The specks (round 486)
+
+SideRail in the scratch copy with round 485's materials, lights linear, 1024 indirect samples, seeds 0 and 1, the build
+with Blender's libraries, the card's gather; specks at `side_bar_high` / `side_tunnel_eye` (docs/tasks/0462 has the
+candidates and the reasoning):
+
+| bake | grain | blotch | specks | a bake |
+|---|---|---|---|---|
+| round 484 (materials as mirrors) | 0.382 | 0.251 | 147 / 133 | 38.9 s |
+| round 485 (`lighting variancescale on`) | 0.1900 | 0.0550 | 90 / 71 | 38.9 s |
+| the noise unscaled everywhere (`off`) | 0.1812 | 0.0532 | 11 / 39 | |
+| **round 486: by the samples that carry the light** | 0.1814 | 0.0532 | **11 / 39** | 38.8 s |
+| a step at 16 such samples (`step`) | 0.1816 | 0.0533 | 12 / 39 | |
+| 2048 samples, round 485 | 0.1644 | 0.0485 | 68 / 66 | |
+| 2048 samples, round 486 | 0.1456 | 0.0470 | 13 / 47 | 104.6 s |
+
+The bake times are pairs from one queue with another session's build running, so like for like and not timings; the
+change is arithmetic on three numbers a texel in the filter (2.0 s of the bake).
+
+`lightmap_quality`, relative RMSE against the reference (bias unchanged to 0.0001 in every row):
+
+| scene, samples | round 465's scale everywhere | none (`off`) | by the samples that carry the light | a step at 16 |
+|---|---|---|---|---|
+| room, 256 | 0.0133 | 0.0135 | 0.0133 | 0.0133 |
+| room, 1024 | 0.0119 | 0.0116 | 0.0119 | 0.0119 |
+| corridor, 256 | 0.0039 | 0.0037 | 0.0039 | 0.0039 |
+| tunnel, 256 | 0.1033 | 0.1107 | 0.1061 | 0.1013 |
+| tunnel, 1024 | 0.0581 | 0.0621 | 0.0569 | 0.0581 |
+| courtyard, 256 | 0.0071 | 0.0083 | 0.0071 | 0.0071 |
+| hall, 256 | 0.0433 | 0.0434 | 0.0433 | 0.0433 |
+
+Unscaled everywhere takes the same specks and costs the tunnel 7 %: in dim places the filter then smooths real detail.
+The rule built keeps the scale where a texel's samples share its light. What remains on SideRail (11 / 39) is about
+the direct light's own (round 484: 24 / 47 with the picking, 1 / 30 with every light kept).
+
 ## Pass 21: SideRail's bake, measured by its noise (rounds 463-466)
 
 Round 463 adds the measure (`lightmap_noise`, `lighting noise`, `unity_compare.py --noise`, the `lightmap_quality` columns grain and

@@ -5760,6 +5760,11 @@ class Editor {
    * normal bake, 0 every light at every texel; a measurement setting, not saved, not in the scene key. */
   float bake_pick_rays_ = 8.0f;
   void lighting_pick_command(const std::string &word);
+  /* Round 486 (`lighting variancescale auto|on|off`, task 0462): how the next Generate Lighting's filter reads the
+   * noise measured in the gathered light - BakeSettings::variance_scale, or -1 for the bake's own (auto). A comparison
+   * switch: not saved, not in the scene's key. */
+  int bake_variance_scale_ = -1;
+  void lighting_variancescale_command(const std::string &word);
   int bake_gpu_ = -1;  // task 0018: the GPU Generate Lighting gathers on (Render > Device: GPU Compute), -1 the CPU
   std::string gi_gpu_name_;  // the device in use, for the Lighting window
   bool rtlm_busy_ = false;  // a realtime lightmap pass is still gathering

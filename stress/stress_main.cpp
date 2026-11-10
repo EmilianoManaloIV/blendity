@@ -6994,9 +6994,12 @@ struct Result {
 };
 /* seed 1 for the references: their samples independent of the bake they score (seed 0, a bake's own) - with the same
  * seed the bake's samples would be the first of the reference's, and the error read too low. `pick` (round 484): about
- * how many Baked point and spot lights a texel keeps by chance (8 the bake's own; 0: every light, `lighting pick off`). */
-Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0, bool light_tree = true, bool sobol = true, float pick = 8.0f) {
+ * how many Baked point and spot lights a texel keeps by chance (8 the bake's own; 0: every light, `lighting pick off`).
+ * `variance_scale` (round 486): BakeSettings::variance_scale, -1 the bake's own. */
+Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0, bool light_tree = true, bool sobol = true, float pick = 8.0f,
+            int variance_scale = -1) {
   BakeSettings bs;
+  if (variance_scale >= 0) bs.variance_scale = variance_scale;
   bs.seed = seed;
   bs.sobol = sobol;  // (round 465: off draws plain random numbers, for the comparison)
   bs.light_tree = light_tree;  // (round 464: off picks emitters by power alone, for the comparison)
@@ -7152,6 +7155,23 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
       const lmq::Error e = lmq::compare(r.data, refs[i].data);
       const LightmapNoise nz = lightmap_noise(r.data, r1.data);
       rep.row({sobol ? "sobol" : "random", s.name, f1(r.ms), lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-"});
+    }
+  /* Round 486 (task 0462): where the gather's measured noise takes round 465's scale for Sobol samples - everywhere
+   * (rounds 465 to 485), or only as far as a texel's samples carry its light (the bake's own since) - on every scene at
+   * 256 samples (the scale is a quarter there) and on the room and the tunnel at 1024 (an eighth). The round's other
+   * candidates (2: nowhere, 4: a step at 16 such samples) are in the task's tables. */
+  rep.table({"the gather's measured noise scaled for Sobol samples", "scene", "samples", "bake ms", "relative RMSE", "bias", "grain", "blotch"});
+  for (size_t i = 0; i < scenes.size(); i++)
+    for (const int samples : {256, 1024}) {
+      const lmq::Scene &s = scenes[i];
+      if (samples == 1024 && s.name != room.name && s.name != tunnel.name) continue;
+      for (const int mode : {0, 3}) {
+        const lmq::Result r = lmq::bake(s, samples, 32, true, 0, true, true, 8.0f, mode), r1 = lmq::bake(s, samples, 32, true, 1, true, true, 8.0f, mode);
+        const lmq::Error e = lmq::compare(r.data, refs[i].data);
+        const LightmapNoise nz = lightmap_noise(r.data, r1.data);
+        rep.row({mode == 0 ? "everywhere (rounds 465 to 485)" : "by the samples that carry the light", s.name,
+                 std::to_string(samples), f1(r.ms), strprintf("%.4f", e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-"});
+      }
     }
   rep.table({"room: indirect samples", "filter", "bake ms", "relative RMSE", "bias"});
   for (int n : {64, 256, 1024})

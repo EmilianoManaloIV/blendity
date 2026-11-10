@@ -2128,6 +2128,7 @@ void Editor::run_console_command(const std::string &line) {
       lighting_noise_command(f.size() > 0 ? f[0] : std::string(), f.size() > 1 ? f[1] : std::string());
     }
     else if (sub == "pick") lighting_pick_command(to_lower(arg(2, "")));  // (round 484: lighting pick [on|off|<rays>] - its own function: this chain is near the compiler's nesting limit)
+    else if (sub == "variancescale") lighting_variancescale_command(to_lower(arg(2, "")));  // (round 486: lighting variancescale [auto|on|off])
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
       mark_changed("Preview Lighting");

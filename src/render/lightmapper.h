@@ -72,10 +72,24 @@ struct BakeSettings {
   /* Round 465 (task 0441): a texel's samples from an Owen-scrambled Sobol sequence (sampler.h), which fills the hemisphere
    * evenly whatever the count, rather than plain random numbers (`lighting sampler random`: for comparisons; both are unbiased). */
   bool sobol = true;
+  /* Round 486 (task 0462, ADR 0122 amended; `lighting variancescale`): how the firefly clamp and the filter's
+   * edge-stop read the gather's measured variance, which carries round 465's scale for Sobol samples (qmc_scale) -
+   * 3, the bake's own: scaled by how many samples carry the texel's light (gather_variance_read below); for
+   * comparisons 0 as measured (the bake of rounds 465 to 485), 1 unscaled for the clamp alone, 2 unscaled for both,
+   * 4 a step at 16 samples in place of 3's curve. The gathered light itself is the same whatever this is. */
+  int variance_scale = 3;
   /* Round 444 (ADR 0117): Unity's Lighting Mode - 0 Baked Indirect, 1 Shadowmask (the Mixed lights' shadows from the
    * static scene in a mask, up to kMaskChannels lights), 2 Subtractive (their direct light in the lightmaps too). */
   int lighting_mode = 0;
 };
+
+/* Round 486 (ADR 0122, amended): the gather's variance as the firefly clamp and the filter's edge-stop read it, from
+ * what the bake measured for a texel - `scaled`, its samples' variance of the mean times round 465's scale for
+ * `samples` Sobol samples - and the texel's gathered luminance. `mode` is BakeSettings::variance_scale. The scale is
+ * right for light that fills the hemisphere and wrong for a texel lit by a few rays that met a small bright patch:
+ * lum^2 over the unscaled variance is how many samples carry the texel's light (about K for K rare bright ones, about
+ * the sample count over the samples' relative variance for filled light), and modes 3 and 4 scale by that. */
+float gather_variance_read(float scaled, float lum, int samples, bool sobol, int mode);
 
 struct BakeLight;
 /* Round 444 (review): Unity's Subtractive split - the main directional Mixed light (the brightest) stays Mixed (the bake

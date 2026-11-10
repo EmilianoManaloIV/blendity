@@ -389,6 +389,38 @@ void Editor::lighting_pick_command(const std::string &word) {
   say();
 }
 
+/* lighting variancescale [auto|on|off] (round 486, task 0462): how the next Generate Lighting's filter reads the noise
+ * the bake measured in the gathered light. Round 465 scaled it for Sobol samples (by 4 over the square root of the
+ * samples); auto, the bake's own, keeps that scale only as far as the texel's samples carry it (a texel lit by a few
+ * rare bright samples gets none: what specks are made of); on is round 465's scale everywhere (the bake of rounds
+ * 465 to 485), off none at all - both for comparisons. The round's other measured candidates answer too (clamp, snr,
+ * step). The gathered light is the same whatever the word, so it is not saved and not in the scene's key. Alone it
+ * says the setting. */
+namespace {
+/* `lighting variancescale`'s words and what each sets BakeSettings::variance_scale to (-1: the bake's own). */
+const struct {
+  const char *name;
+  int mode;
+} kVarianceScaleWords[] = {{"auto", -1}, {"on", 0}, {"clamp", 1}, {"off", 2}, {"snr", 3}, {"step", 4}};
+
+const char *variance_scale_name(int mode) {
+  for (const auto &w : kVarianceScaleWords)
+    if (w.mode == mode) return w.name;
+  return "auto";
+}
+}  // namespace
+
+void Editor::lighting_variancescale_command(const std::string &word) {
+  auto say = [&] {
+    Log::info("lighting variancescale: %s%s", variance_scale_name(bake_variance_scale_),
+              bake_variance_scale_ < 0 ? " (the normal bake)" : " (the next Generate Lighting; Preview Lighting keeps auto; `lighting variancescale auto` restores the normal bake)");
+  };
+  if (word.empty()) return say();
+  for (const auto &w : kVarianceScaleWords)
+    if (word == w.name) return bake_variance_scale_ = w.mode, say();
+  Log::warn("lighting variancescale: say auto, on or off - it stays %s", variance_scale_name(bake_variance_scale_));
+}
+
 void Editor::bake_start() {
   if (baking_) return;
   if (unity_lighting_job_) return refuse("Generate Lighting: not while Unity reads its lightmaps for this scene (they'd land in the middle of the bake)", "", "");  // (review 400)
@@ -454,6 +486,11 @@ void Editor::bake_start() {
   if (bake_pick_rays_ != normal_pick)
     Log::info("Generate Lighting: light picking %s (`lighting pick on` for the normal bake)",
               s.pick_lights ? strprintf("at about %g lights a texel", bake_pick_rays_).c_str() : "off - every Baked point and spot light at every texel");
+  if (bake_variance_scale_ >= 0) {  // (round 486: what the filter reads - the gathered light is the same either way, so not in the scene key)
+    s.variance_scale = bake_variance_scale_;
+    Log::info("Generate Lighting: the gather's measured noise read as `lighting variancescale %s` (`lighting variancescale auto` for the normal bake)",
+              variance_scale_name(bake_variance_scale_));
+  }
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
