@@ -144,6 +144,70 @@ Unscaled everywhere takes the same specks and costs the tunnel 7 %: in dim place
 The rule built keeps the scale where a texel's samples share its light. What remains on SideRail (11 / 39) is about
 the direct light's own (round 484: 24 / 47 with the picking, 1 / 30 with every light kept).
 
+### Pass 24 in one table (round 488)
+
+The owner's report was two things: "a mirror finish" and "splotches still". Both are measured at the two views the
+report came from, `side_bar_high` and `side_tunnel_eye`, in a scratch copy of the world. A station's pair is the mean
+absolute difference from Unity's own picture (0 to 255, lower is closer) and SSIM (1 is the same picture).
+
+| | before the pass | now | built in |
+|---|---|---|---|
+| **The mirror finish**: the two views with Unity's bake, in the owner's session (the maps lost: 6 of 7 runs) | 13.71 / 0.702 and 12.50 / 0.697 | 3.71 / 0.905 and 3.57 / 0.912: the maps can no longer be lost | 485 |
+| The same, a fresh import that kept its maps | 3.75 / 0.898 and 3.67 / 0.902 | 3.71 / 0.905 and 3.57 / 0.912 | 485 |
+| The same views with Blendity's own bake, the lights linear | 6.64 / 0.863 and 5.97 / 0.885 | 6.80 / 0.879 and 6.15 / 0.899 | 485, 486 |
+| The same, the lights in gamma (what a project made from the package alone has) | 17.76 / 0.734 and 16.40 / 0.761 | the default is as it was (the owner's decision); not measured again after round 485 | - |
+| **The splotches**: specks at the two views, two seeds' bakes compared (the maps present, lights linear; the owner's session counted 326 and 344) | 147 and 133 | 11 and 39 (90 and 71 after 485) | 485, 486 |
+| The bake's grain / blotch | 0.382 / 0.251 | 0.181 / 0.053 | 485, 486 |
+| More samples (2048) | far more specks than at 1024: 271 and 210 | 13 and 47: far fewer than before, still a few more than at 1024 (11 and 39) - the mark missed by one speck at `side_tunnel_eye` | 485, 486 |
+| The default bake of the world | 38.9 s (round 484, a quiet machine) | 38.8 s against 38.9 s for the old reading: a like-for-like pair from one busy queue, not a timing | 486 |
+
+What each round did:
+
+| round | task | what |
+|---|---|---|
+| 484 | 0460 | Nothing fixed: the report reproduced and its causes measured. The mirror finish was materials read before their package's table of ids existed (Metallic 1, Roughness 0, no maps), smoothness dropped on ten worn materials and 16-bit PNGs read as linear. The splotches are specks, counted by `speck_count`; the lights kept by chance are about one speck in seven. |
+| 485 | 0461 | Unity materials keep their maps and their gloss: read again where a package's import ends, Reimport Unity Materials for projects already imported, smoothness from the map Unity names, 16-bit PNGs in sRGB (ADR 0131). |
+| 486 | 0462 | The bake's filter reads a texel's noise by how many samples carry its light (ADR 0122 amended); `lighting variancescale`. |
+| 487 | - (0463 was not written) | Not run: light cookies, the Light Volume mist and OIDN's lightmap weights each wait for the owner to ask. |
+| 488 | 0464 | This table. |
+
+Missed or not done, plainly:
+- With Blendity's own bake the two views are closer in structure than before (SSIM 0.863 to 0.879, 0.885 to 0.899) but
+  not in mean difference (6.64 to 6.80, 5.97 to 6.15), and both still miss the stations' target that Unity's bake now
+  passes. What separates the two bakes there was not this pass's question.
+- At 2048 samples one view counts 47 specks against a mark of 46.8 (1.2 times the 39 at 1024).
+- With Blendity's default bake the dark station `spawn_back` reads SSIM 0.798 against 0.804 before round 486 (mark:
+  within 0.005).
+- The plan's "blotch under 0.15" is met (0.053), by round 485's materials more than by the bake: round 484 found that
+  the blotch is a mean a hundred small spots hardly move, so round 486 was re-cut to count specks instead.
+- The 11 and 39 specks left are about what the direct light alone gave in round 484 (24 and 47).
+- A saved bake is not marked out of date by round 486: Generate Lighting again to get it.
+
+Open items, ranked:
+1. **The lights a texel keeps by chance, spread evenly** (stratified picking): what the remaining specks are. Its mark
+   is `lightmap_quality`'s `lamp_hall` (blotch 0.0096 picking 8 against 0.0020 with every light kept).
+2. **The Lights Gamma default for a project made from a package**: the largest difference measured on this world (17.76
+   at the bar in round 484, before round 485's materials and not measured again, against 6.80 linear now). The
+   owner's decision.
+3. **Blendity's bake against Unity's at the two views** (6.80 against 3.71): not attributed.
+4. On the CPU path the new reading leans towards the old one where the sky lights a texel (never past it).
+5. OIDN's lightmap weights would replace the filter round 486 changed: the specks must be counted again with them.
+6. A console command on an editor that has no scene reads through a null scene (`Editor::sketch_doc`). Only a test
+   can do it today; the sanitizers' job found it in two of round 486's tests.
+7. Reimport Unity Materials replaces a value typed on a Unity material; light cookies; the Light Volume mist.
+
+Wall time (local clock, one worker; 2026-11-10):
+
+| round | from - to | hours | of which waiting |
+|---|---|---|---|
+| 484 | 00:40 - 05:53 | 5.2 | 0.8: a bake that fell back to the CPU |
+| 485 | 05:58 - 09:12 | 3.2 | 2.4: held for another pass's timed runs |
+| 486 | 09:12 - 11:38 | 2.4 | 0.1 |
+| 486's follow-ups | 13:24 - 15:40 | - | the sanitizers' fix after a 1.8-hour hold, then a merge of `main` |
+
+From the session's own log, not from a file in the tree. Waiting was 3.3 of the 10.8 hours, 2.4 of them held for
+another pass's timed runs on the one machine; the follow-ups' 1.8-hour hold is beside that total.
+
 ## Pass 23: the Blockout kernel (round 476)
 
 Round 476 builds Blockout's kernel - `blockout::build`, pieces in and one closed mesh out (ADR 0128) - and measures it
