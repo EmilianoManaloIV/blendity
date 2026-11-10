@@ -6,6 +6,7 @@
 #include "unity_anim.h"  // (round 407)
 
 #include "material.h"
+#include "pose_counts.h"
 #include "sequence.h"
 
 #include "../core/core.h"
@@ -613,6 +614,8 @@ static void rest_unkeyed_fk(const std::vector<GameObject *> &weighted, const std
 }
 
 void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int hold, bool hold_cameras, float hold_from) {
+  BL_ZONE("apply clip");
+  PoseTimer timer(PoseStat::ClipApply);  // (round 468)
   /* (Round 340: held from `hold_from` - a render range's first frame is a drawn one; the camera and its rig not held.) */
   const float held = hold_frame_from(hold_from, frame, hold);
   std::unordered_map<const GameObject *, bool> rigs;  // (each object asked once, not once a track)

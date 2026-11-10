@@ -2577,3 +2577,257 @@ pixel.
 |---|---|
 | `canopyfill 1 100` | 100 cards, 424 vertices, one rebuild |
 | a scatter dab of density 4 in a 1 m disc | 13 instances, one step |
+
+## Pass 22: posing, scrubbing and playback, measured (round 468, task 0444)
+
+A measurement round: nothing is faster yet. It adds the counters (`pose_counts()`, the Profiler's Posing block), the
+scripted drags (`perf drag`, `perf clip`, `perf pick`), a stand-in avatar and world (`benchscene avatarlike` /
+`avatarworld`), the stress section `posing` and `tools/bench_world.py --posing`, and takes the baseline the fix rounds
+(469 to 474) are judged against. The goal is 16.7 ms a frame (60 a second) in a window on the card.
+
+**How it was measured.** One machine (the owner's), the build with Blender's libraries, 2026-11-10. Other sessions build
+on this machine, so every timed piece ran under a watcher that samples every 5 s for compilers, linkers, test and stress
+runs, other editors, Unity, and the Linux VM's load, by executable path; a piece starts only after 120 s with none and is
+ended when one appears - except, in the two pieces that open the owner's Unity scene, the Unity editor that import
+itself starts and a Linux VM sample under one core (the editor's own probe), which were let pass and are listed. Each
+piece below says what the watcher saw. The owner's own editor stayed open throughout (parked;
+its CPU seconds were logged each minute).
+
+| piece | window | what the watcher saw |
+|---|---|---|
+| the stress baseline (`posing`, `animation`), saved into `stress/results/baseline.md` | 11:37:14 - 11:40:38 | nothing |
+| the check against it, run twice | 11:43:02 - 11:46:26, 14:11:17 - 14:14:36 | nothing |
+| the owner's avatar alone | 11:57:25 - 12:17:38 | nothing |
+| the owner's world alone | 12:22:33 - 12:23:30 | the Unity editor the bench's own scene import starts |
+| the avatar in the world | 13:29:25 - 14:08:49 | the bench's own Unity (4 samples, 13:29:33 - 13:31:31: as the two headless runs opened the scene), the Linux VM at 26 % of a core (1 sample, 13:32:23: during the windowed orbit row). No sample during the windowed posing rows (13:32:40 on) |
+| cold (a never-run exe name, an empty cache folder) | 14:16:39 - 14:21:00 | nothing |
+| main's build against the round's | 14:23:03 - 14:25:00 | nothing |
+
+**Not measured, or not settled:**
+- The settings rows (Record, Preview, a second view, trails, ...) on the owner's avatar in the owner's world: the piece
+  took over two minutes a row in a window and its first run was cut at 54 minutes; the rerun left them out. The stand-in's
+  settings table below is the only one.
+- **The check does not pass yet.** Two rows of the stand-in have two states: "the clip playing" with the Inspector on a
+  skinned mesh, and with the Rigging window open, read 22 ms in the baseline run and the cold run and 32 ms in the two
+  check runs (one of them in the second) - the Scene view was drawn on 12 of 30 frames in one state and on 20 of 30 in
+  the other. All four runs were quiet, so it is the editor, not the machine: how often a playing clip redraws the view is
+  not fixed. Cause not found; it goes to round 472 (record / scrub / play). The rows stay as they are, so
+  `perf_suite.py --check` can fail on them until then.
+- On the owner's avatar alone, in a window, "IK: the left hand's target moved" (with and without Record) moved nothing
+  (0 meshes deformed, 4 ms): the same row moved the arm headless (43.3 ms, in the local report) and in the world (62 ms). Not a fast row - a row
+  that did not run. "FK: an upper arm" and "Puppet: the left hand" are refused on this avatar everywhere (below).
+- Whether opening a real window starts the Linux VM through the editor's MoonRay probe (`wsl.exe`): seen twice as a VM
+  load spike right after a window opened, not proven. The VM was kept up and idle for the later pieces.
+
+### What a posed frame costs (the answer)
+
+On the stand-in (292 bones, 15 skinned meshes, 139,912 triangles) no posing row meets 16.7 ms: a gizmo, G / R or Puppet
+drag costs 48 to 63 ms a frame alone on the card and 65 to 80 ms in the stand-in world; a scrub 55 to 123 ms; Play with
+the springs 87 to 108 ms. The owner's avatar agrees: 34 to 68 ms alone, 58 to 91 ms in the world, a scrub or a playing
+clip 76 to 192 ms. Orbiting and standing still are fine on the card (2 to 16 ms on the stand-in, 4 to 10 ms on the
+owner's avatar and world); on the CPU an orbit of either world is 33 ms.
+
+Ranked, from the owner's avatar in a window (ms a frame; the third table below has every row):
+
+1. **Render meshes rebuilt whole, and their tangents with them: up to 36 ms with one view, 74 ms with two.** Every posed
+   frame up to 9 of the avatar's 13 moved meshes refuse the in-place move and are built again (`tangents built whole` 2 to
+   22 ms, `render meshes built whole` 3 to 14 ms). The reason, counted exactly: the meshes are smooth-by-angle (60
+   degrees), and at 1 to 135 corners on sliver faces the split decision flips with the pose, so the corner layout
+   "changed". Round 470.
+2. **Every mesh goes to the card whole, every frame: 6 to 17 ms, 4.8 to 5.9 MB a frame** (twice that with a Game view).
+   A moved mesh needs positions and normals only. Round 470.
+3. **Skinning: 8.7 ms, of all 13 meshes, whatever moved.** A rigid move of the avatar's root deforms all 13 (nothing
+   deforms: the root is above every bone); one leg bone deforms all 13. Twice with a second view or in Play (26 deforms
+   a frame). Round 469.
+4. **Normals: 2 to 11 ms**, recomputed for whole meshes. Rounds 469 / 470.
+5. **Skin keys: 4.6 to 9.3 ms, 78 to 156 hashes a frame** for 13 meshes (six a mesh, seven in the world; up to twelve
+   with a second view), and 52
+   hashes (2.7 ms) while a *prop* of the world moves and the avatar stands still. Round 469.
+6. **Record: 11 ms** on the frame's drag when on. Round 472.
+7. **The world: +23 to +35 ms on a posed frame** against the avatar alone (the same parts grow a little each: more
+   refused moves, `scene hashes` 2 to 5.5 ms, `instances gathered`), though the world alone holds 8 ms. Round 471.
+8. **Cheap, and left alone:** constraints (0.1 to 0.4 ms, VRChat's included), the IK solver itself (0.01 ms for four
+   chains), shape keys, outlines (none on the owner's avatar), the window panels.
+
+Also found:
+- **The pose is drawn a frame late.** Solving the constraints once more after each drawn frame of an IK-target drag
+  moved the hand by up to 16.5 mm (30 of 35 frames; 0 after the last): the frame drew the limb where the solver had it
+  before the target moved. Round 472.
+- **The owner's avatar has no arms in its humanoid map** ("the rig Armature has no Left Upper Arm", no left-hand Puppet
+  control), so its arm rows are refused; suspected: its `_sup` twist bones stop the walk down the arm (`next_down` in
+  `gait.cpp`, `limb_of` in `ik.cpp`). Round 473.
+- **First use** stays near its 100 ms budget, not far over: the first Puppet drag's longest frame 104 ms (the body
+  model, the rig analysis, the pose prior), the first Preview on 110 ms (106 cold), the first Record on 100 ms (101
+  cold). A cold pipeline cache changes nothing that matters here.
+- **The counters cost nothing that shows:** main's build against this round's on `editor_render` and `world_like`, 0
+  findings; on `responsiveness` two longest-frame rows moved (3.2 to 4.5 ms, 0.9 to 2.3 ms, both far inside their
+  budgets, single frames).
+- **AutoPhysics** stalls one frame for 86 ms (over its 50 ms budget); the 201-track clip evaluates in 0.75 ms against a
+  0.5 ms target (as before this round).
+
+### The stand-in (`blendity_stress --only posing`; in `stress/results/baseline.md`)
+
+Headless frames, stricter than a window; `(n)` is the longest frame; **OVER** is against 16.7 ms.
+
+| ms a frame (the longest) | alone, CPU | alone, card | world alone, CPU | world alone, card | in the world, CPU | in the world, card |
+|---|---|---|---|---|---|---|
+| idle | 2.56 (2.7) | 2.54 (2.6) | 1.39 (1.5) | 1.92 (2.2) | 3.23 (3.7) | 5.24 (24.7) |
+| orbiting the Scene view | 11.08 (11.5) | 7.03 (7.2) | 33.85 (35.9) | 9.14 (9.9) | 33.21 (37.3) | 15.53 (17.1) |
+| the Rotate gizmo on the chest (FK) | 39.20 (40.4) | **49.90 (52.5) OVER** |  |  | 76.60 (79.6) | **65.25 (70.2) OVER** |
+| the Move gizmo on the left hand's IK target | 33.54 (43.2) | **48.39 (54.6) OVER** |  |  | 70.73 (80.0) | **66.53 (75.6) OVER** |
+| the Move gizmo on the left elbow's pole (the arm bent first) | 33.71 (41.8) | **52.91 (60.4) OVER** |  |  | 70.97 (79.6) | **68.84 (73.1) OVER** |
+| a Puppet handle (the left hand, AutoPosing on) | 46.35 (106.8) | **63.10 (67.5) OVER** |  |  | 85.47 (140.4) | **78.41 (82.9) OVER** |
+| G on the left hand's IK target | 33.32 (41.8) | **55.82 (70.0) OVER** |  |  | 71.17 (79.7) | **75.53 (87.8) OVER** |
+| R on the chest (the Blender keymap) | 38.91 (39.5) | **59.38 (63.3) OVER** |  |  | 76.16 (78.7) | **79.68 (82.8) OVER** |
+| a scrub on the Animation window's ruler, Scene + Game view | 62.69 (80.9) | **93.60 (120.3) OVER** |  |  | 97.71 (125.1) | **123.04 (150.3) OVER** |
+| the clip playing, Scene + Game view | 37.52 (83.1) | **42.09 (123.2) OVER** |  |  | 42.18 (126.7) | **82.38 (165.9) OVER** |
+| a scrub on the Animation window's ruler, Scene view only | 35.40 (45.5) | **55.13 (74.9) OVER** |  |  | 75.13 (95.8) | **67.89 (103.8) OVER** |
+| the clip playing, Scene view only | 24.29 (46.4) | **18.95 (68.1) OVER** |  |  | 38.41 (96.6) | **31.78 (85.6) OVER** |
+| Play with the springs | 65.89 (69.5) | **86.69 (101.1) OVER** |  |  | 125.15 (130.8) | **107.87 (115.6) OVER** |
+| a prop moved with the Move gizmo |  |  | 16.11 (16.9) | 8.37 (8.7) | 22.53 (23.1) | 15.46 (18.2) |
+
+| press / first move / release ms | alone, CPU | alone, card | world alone, CPU | world alone, card | in the world, CPU | in the world, card |
+|---|---|---|---|---|---|---|
+| the Rotate gizmo on the chest (FK) | 9.5 / 46.0 / 35.2 | 4.9 / 45.6 / 53.3 |  |  | 44.1 / 84.9 / 78.5 | 12.4 / 55.8 / 65.2 |
+| the Move gizmo on the left hand's IK target | 8.5 / 2.7 / 33.1 | 4.9 / 2.6 / 52.2 |  |  | 46.3 / 3.4 / 74.3 | 16.9 / 3.4 / 70.9 |
+| the Move gizmo on the left elbow's pole (the arm bent first) | 8.5 / 2.7 / 34.7 | 6.7 / 2.7 / 55.2 |  |  | 45.2 / 3.4 / 77.2 | 23.2 / 3.3 / 70.0 |
+| a Puppet handle (the left hand, AutoPosing on) | 9.7 / 2.9 / 44.6 | 8.6 / 2.7 / 64.1 |  |  | 43.1 / 3.9 / 89.8 | 24.4 / 3.3 / 81.1 |
+| G on the left hand's IK target | 2.6 / 8.8 / 32.8 | 2.5 / 8.6 / 57.4 |  |  | 3.3 / 46.7 / 73.8 | 3.4 / 23.8 / 75.7 |
+| R on the chest (the Blender keymap) | 2.6 / 45.5 / 36.7 | 2.6 / 65.0 / 58.5 |  |  | 3.3 / 83.8 / 75.8 | 3.2 / 89.0 / 79.2 |
+| a scrub on the Animation window's ruler, Scene + Game view | 4.2 / 4.3 / 3.5 | 21.6 / 21.1 / 3.5 |  |  | 6.0 / 5.9 / 4.1 | 51.2 / 52.6 / 4.2 |
+| a scrub on the Animation window's ruler, Scene view only | 3.8 / 3.9 / 3.0 | 3.9 / 4.3 / 3.3 |  |  | 5.5 / 5.5 / 3.7 | 5.3 / 5.9 / 3.8 |
+| a prop moved with the Move gizmo |  |  | 18.3 / 20.4 / 26.2 | 8.9 / 8.3 / 8.9 | 22.9 / 26.5 / 31.8 | 13.4 / 19.1 / 14.1 |
+
+| in the world, with | on | card |
+|---|---|---|
+| Record on | the IK-target drag | **80.13 (89.8) OVER** |
+| Preview off | the IK-target drag | **69.42 (72.2) OVER** |
+| the Game view beside the Scene view | the IK-target drag | **67.58 (78.2) OVER** |
+| the Game view beside the Scene view | the clip playing | **89.82 (161.1) OVER** |
+| the Game view beside the Scene view and Other Views Follow Drags on | the IK-target drag | **139.57 (151.6) OVER** |
+| trails, onion skins and the zoetrope (Record on) | the IK-target drag | **86.28 (120.5) OVER** |
+| trails, onion skins and the zoetrope (Record on) | a scrub | **131.70 (182.8) OVER** |
+| Centre of Mass shown | the IK-target drag | **74.16 (85.9) OVER** |
+| Centre of Mass shown | the clip playing | **24.45 (87.6) OVER** |
+| the Avatar window open | the IK-target drag | **77.77 (95.8) OVER** |
+| the Avatar window open | the clip playing | **32.11 (85.0) OVER** |
+| the Inspector on the Armature | the clip playing | **22.21 (89.7) OVER** |
+| the Inspector on a skinned mesh | the clip playing | **21.98 (85.5) OVER** |
+| the Rigging window open (its Walk section) | the IK-target drag | **75.39 (100.8) OVER** |
+| the Rigging window open (its Walk section) | the clip playing | **22.30 (87.5) OVER** |
+| Realtime GI on, Lighting Updates Automatic | the IK-target drag | **104.09 (123.6) OVER** |
+| Realtime GI on, Lighting Updates Manual | the IK-target drag | **68.76 (75.8) OVER** |
+| Live Link with a client | the IK-target drag | **78.28 (84.6) OVER** |
+| Live Link with a client | the clip playing | **49.87 (99.4) OVER** |
+| surface snapping (Ctrl+Shift held) | the IK-target drag | **73.32 (76.3) OVER** |
+| an F12 Live Preview | the IK-target drag | **78.54 (115.3) OVER** |
+| a path-traced view open (Camera Preview rendered, locked to the Main Camera) | the IK-target drag | **850.60 (878.0) OVER** |
+
+| first use | ms | budget ms | budget |
+|---|---|---|---|
+| the first posed frame after the avatar is built (one bone turned, one frame) | 56.4 | 100.0 | ok |
+| the second posed frame (one bone turned, one frame) | 43.7 | 100.0 | ok |
+| the first Puppet drag, its press frame | 4.7 | 100.0 | ok |
+| the first Puppet drag, its first move frame | 2.5 | 100.0 | ok |
+| the first Puppet drag, its longest frame (the body model, the rig analysis, the pose prior) | 103.7 | 100.0 | OVER |
+| the second Puppet drag, its press frame | 5.3 | 100.0 | ok |
+| the second Puppet drag, its first move frame | 2.8 | 100.0 | ok |
+| the second Puppet drag, its longest frame | 66.6 | 100.0 | ok |
+| the first Preview on (the command and its frame) | 110.3 | 100.0 | OVER |
+| the first Record on (the command and its frame) | 99.8 | 100.0 | ok |
+| entering Play (the command and its frame) | 97.2 | 100.0 | ok |
+| leaving Play (the command and its frame) | 10.7 | 100.0 | ok |
+
+| operation | longest frame ms | mean frame ms | total s | frames | in the tray | budget |
+|---|---|---|---|---|---|---|
+| Walk Cycle (walk cycle) | 31.1 | 31.1 | 0.03 | 1 | - | ok |
+| Retarget the clip onto a second rig (anim retarget Humanoid) | 40.4 | 40.4 | 0.04 | 1 | - | ok |
+| AutoPhysics (body physics) | 86.0 | 86.0 | 0.09 | 1 | - | OVER |
+| the ragdoll (body ragdoll show) | 42.3 | 3.7 | 0.40 | 108 | Ragdoll | ok |
+| FK / IK switch (autopose fk larm) | 3.3 | 3.3 | 0.00 | 1 | - | ok |
+| FK / IK switch back (autopose ik larm) | 3.3 | 3.3 | 0.00 | 1 | - | ok |
+| Match IK to FK (autopose match larm) | 3.2 | 3.2 | 0.00 | 1 | - | ok |
+
+| at rest | frames that asked for another | views drawn | constraint moves |
+|---|---|---|---|
+| the avatar at the origin, after a pose | 0 | 0 | 0 |
+| the avatar 5,000 m from the origin, after a pose | 0 | 0 | 0 |
+
+| alone (round 468: from vgroups) | ms | second ms |
+|---|---|---|
+| Skin pose change, 49922 vertices, 3 bones: Linear / Dual Quaternion | 6.25 | 6.27 |
+| IK: a humanoid's 4 chains, targets moved / nothing moved | 0.0100 | 0.0040 |
+| IK: the same rig among 20k objects, nothing moved | 0.1745 | - |
+
+### The owner's avatar and world (measured locally; `tools/bench_world.py --posing`)
+
+The avatar (13 skinned meshes that move) and the world are the owner's own projects: read from scratch copies, compared
+by their file count, total size and newest change time before and after (unchanged), nothing of them is in the repository. A real window on the card, 120 frames
+a row, `(n)` the longest. The upper-arm and left-hand rows read as an idle frame because the avatar refuses them; the
+two IK left-hand rows of the avatar alone did not move it (see "Not measured" above).
+
+| windowed, on the card: ms a frame (presented by the system) | the avatar alone | the world alone | the avatar in the world |
+|---|---|---|---|
+| still: the Scene view | 3.8 (8.6) | 8.3 (9.2) | 7.9 (11.4) |
+| orbiting the Scene view | 3.9 (9.0) | 8.2 (9.4) | 9.6 (10.8) |
+| the whole avatar moved (its root selected) | 50.7 (58.6) |  | 82.8 (91.9) |
+| FK: the chest turned | 51.2 (59.6) |  | 81.1 (90.0) |
+| FK: an upper leg turned | 33.8 (41.8) |  | 58.1 (68.0) |
+| FK: an upper arm turned | 3.9 (8.7) |  | 9.0 (11.4) |
+| Puppet: the hips' handle | 56.4 (65.1) |  | 90.6 (100.0) |
+| Puppet: the head's handle | 67.8 (76.1) |  | 90.5 (100.0) |
+| Puppet: the left hand's handle | 4.2 (8.3) |  | 8.7 (11.5) |
+| scrubbing, Scene view only | 75.5 (84.8) |  | 103.9 (116.2) |
+| the clip playing, Scene view only | 77.6 (91.3) |  | 105.5 (121.9) |
+| scrubbing, Scene + Game view | 140.4 (148.5) |  | 173.7 (195.6) |
+| the clip playing, Scene + Game view | 161.2 (167.7) |  | 191.8 (214.7) |
+| Play with the springs | 73.8 (76.0) |  | 108.4 (112.2) |
+| IK: the left hand's target moved | 4.0 (9.8) |  | 61.7 (71.4) |
+| IK: the left foot's target moved | 43.2 (51.6) |  | 66.1 (75.9) |
+| IK: the target moved, Record on | 4.0 (8.0) |  | 75.1 (84.7) |
+| IK: the clip playing, Scene view only | 81.2 (95.5) |  | 110.2 (123.4) |
+| a prop of the world moved |  | 12.3 (12.0) | 19.5 (28.0) |
+
+| where the frame goes (windowed, on the card; ms a frame, the biggest first; nested parts left out) | the avatar alone | the world alone | the avatar in the world |
+|---|---|---|---|
+| still: the Scene view | rig overlay 1.1, skin keys 0.2, scene hashes 0.1, vrchat constraints 0.1, shape key hashes 0.1, window inspector 0.1, window hierarchy 0.0 | instances gathered 0.5, rig overlay 0.5, window hierarchy 0.0, scene hashes 0.0, window inspector 0.0 | rig overlay 1.4, instances gathered 0.6, skin keys 0.2, vrchat constraints 0.1, scene hashes 0.1, shape key hashes 0.1, window inspector 0.1 |
+| orbiting the Scene view | rig overlay 1.1, skin keys 0.2, scene hashes 0.1, vrchat constraints 0.1, shape key hashes 0.1, window inspector 0.1, window hierarchy 0.0 | instances gathered 0.7, rig overlay 0.4, window hierarchy 0.0, scene hashes 0.0, window inspector 0.0 | rig overlay 1.4, instances gathered 0.6, skin keys 0.2, vrchat constraints 0.2, scene hashes 0.1, shape key hashes 0.1, window inspector 0.1 |
+| the whole avatar moved (its root selected) | normals 10.6, skinning 9.0, mesh uploads 6.7, skin keys 5.1, render meshes moved in place, the rest 4.3, tangents built whole 2.4, scene hashes 2.4 |  | normals 9.4, tangents built whole 9.3, mesh uploads 9.0, skinning 8.8, skin keys 4.7, render meshes built whole 3.8, render meshes moved in place, the rest 3.5 |
+| FK: the chest turned | normals 9.0, skinning 8.7, mesh uploads 7.7, tangents built whole 4.8, skin keys 4.8, render meshes moved in place, the rest 3.3, scene hashes 2.2 |  | tangents built whole 9.3, mesh uploads 9.0, normals 8.8, skinning 8.8, skin keys 4.7, render meshes built whole 3.8, render meshes moved in place, the rest 3.0 |
+| FK: an upper leg turned | skinning 8.7, mesh uploads 6.1, skin keys 4.8, tangents 2.4, scene hashes 2.2, normals 1.9, render meshes moved in place, the rest 1.6 |  | skinning 8.7, mesh uploads 6.6, skin keys 4.7, scene hashes 2.3, tangents 2.3, normals 1.9, render meshes moved in place, the rest 1.5 |
+| FK: an upper arm turned | rig overlay 1.1, skin keys 0.2, scene hashes 0.1, vrchat constraints 0.1, shape key hashes 0.1, window inspector 0.1, window hierarchy 0.0 |  | rig overlay 1.4, instances gathered 0.6, skin keys 0.2, vrchat constraints 0.2, scene hashes 0.1, shape key hashes 0.1, window inspector 0.1 |
+| Puppet: the hips' handle | normals 10.0, skinning 8.7, mesh uploads 8.3, tangents built whole 5.3, skin keys 4.7, render meshes moved in place, the rest 4.0, puppet controls 2.6 |  | tangents built whole 12.8, mesh uploads 10.0, normals 9.6, skinning 8.7, render meshes built whole 5.3, skin keys 4.6, render meshes moved in place, the rest 3.3 |
+| Puppet: the head's handle | tangents built whole 12.9, mesh uploads 10.4, normals 9.7, skinning 8.8, render meshes built whole 5.2, skin keys 4.7, render meshes moved in place, the rest 3.4 |  | tangents built whole 12.8, mesh uploads 10.0, normals 9.6, skinning 8.7, render meshes built whole 5.3, skin keys 4.6, render meshes moved in place, the rest 3.3 |
+| Puppet: the left hand's handle | rig overlay 1.1, window inspector 0.2, skin keys 0.2, scene hashes 0.1, window hierarchy 0.1, vrchat constraints 0.1, shape key hashes 0.1 |  | rig overlay 1.4, instances gathered 0.6, window inspector 0.2, skin keys 0.2, vrchat constraints 0.1, scene hashes 0.1, window hierarchy 0.1 |
+| scrubbing, Scene view only | tangents built whole 16.6, mesh uploads 13.7, render meshes built whole 10.3, normals 9.3, skinning 8.8, skin keys 4.8, render meshes moved in place, the rest 2.3 |  | tangents built whole 19.2, mesh uploads 15.1, render meshes built whole 11.9, normals 9.0, skinning 8.7, skin keys 5.4, scene hashes 3.3 |
+| the clip playing, Scene view only | tangents built whole 19.5, mesh uploads 13.0, render meshes built whole 12.2, skinning 8.7, normals 8.6, skin keys 4.7, scene hashes 2.2 |  | tangents built whole 22.2, mesh uploads 14.0, render meshes built whole 13.7, skinning 8.7, normals 8.5, skin keys 5.3, scene hashes 3.4 |
+| scrubbing, Scene + Game view | tangents built whole 32.3, mesh uploads 27.2, render meshes built whole 20.6, normals 18.2, skinning 17.4, skin keys 7.2, render meshes moved in place, the rest 4.6 |  | tangents built whole 38.1, mesh uploads 31.3, render meshes built whole 23.5, normals 17.9, skinning 17.5, skin keys 7.8, render meshes moved in place, the rest 3.9 |
+| the clip playing, Scene + Game view | tangents built whole 41.7, mesh uploads 35.0, render meshes built whole 26.3, skinning 17.6, normals 17.0, skin keys 8.4, scene hashes 4.0 |  | tangents built whole 46.1, mesh uploads 37.4, render meshes built whole 28.3, skinning 17.6, normals 17.0, skin keys 9.3, scene hashes 5.5 |
+| Play with the springs | skinning 17.2, mesh uploads 11.2, tangents built whole 9.7, render meshes built whole 8.3, normals 6.8, skin keys 4.8, springs 4.3 |  | skinning 17.5, mesh uploads 11.7, tangents built whole 10.6, render meshes built whole 9.2, normals 6.7, skin keys 5.5, springs 4.3 |
+| IK: the left hand's target moved | rig overlay 1.2, skin keys 0.2, scene hashes 0.1, window hierarchy 0.1, vrchat constraints 0.1, window inspector 0.1, shape key hashes 0.1 |  | skinning 8.9, mesh uploads 7.2, skin keys 4.8, tangents built whole 3.0, scene hashes 2.4, tangents 2.0, normals 2.0 |
+| IK: the left foot's target moved | mesh uploads 9.9, skinning 8.7, skin keys 4.8, render meshes built whole 3.9, tangents built whole 2.8, normals 2.4, scene hashes 2.1 |  | mesh uploads 9.2, skinning 8.9, skin keys 4.8, render meshes built whole 4.0, tangents built whole 2.9, normals 2.4, scene hashes 2.3 |
+| IK: the target moved, Record on | rig overlay 1.2, skin keys 0.2, scene hashes 0.1, window hierarchy 0.1, vrchat constraints 0.1, window inspector 0.1, shape key hashes 0.1 |  | record 11.2, skinning 8.9, mesh uploads 7.7, skin keys 4.7, tangents built whole 4.0, render meshes built whole 2.5, normals 2.3 |
+| IK: the clip playing, Scene view only | tangents built whole 21.2, mesh uploads 14.1, render meshes built whole 13.2, skinning 8.7, normals 8.6, skin keys 4.8, scene hashes 2.1 |  | tangents built whole 22.4, mesh uploads 17.5, render meshes built whole 13.8, skinning 9.0, normals 8.5, skin keys 5.4, scene hashes 3.4 |
+| a prop of the world moved |  | instances gathered 0.7, rig overlay 0.6, scene hashes 0.1, window inspector 0.1, window hierarchy 0.1 | skin keys 2.7, rig overlay 1.4, scene hashes 1.1, shape key hashes 0.8, instances gathered 0.6, vrchat constraints 0.1, window inspector 0.1 |
+
+| counts a frame (windowed, on the card): skin keys, skin deforms, moves in place refused, render meshes built whole, meshes sent whole, upload KB, scene hashes, instances built | the avatar alone | the world alone | the avatar in the world |
+|---|---|---|---|
+| still: the Scene view | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 1.0 | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 1.0 |
+| orbiting the Scene view | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 1.0 | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 1.0 |
+| the whole avatar moved (its root selected) | 78.0 / 13.0 / 0.6 / 0.6 / 13.0 / 5877.1 / 2.0 / 1.0 |  | 78.0 / 13.0 / 2.0 / 2.0 / 13.0 / 5877.9 / 2.0 / 1.0 |
+| FK: the chest turned | 78.0 / 13.0 / 1.1 / 1.1 / 13.0 / 5467.3 / 2.0 / 1.0 |  | 78.0 / 13.0 / 2.0 / 2.0 / 13.0 / 5461.4 / 2.0 / 1.0 |
+| FK: an upper leg turned | 78.0 / 13.0 / 0.0 / 0.0 / 13.0 / 5125.1 / 2.0 / 1.0 |  | 78.0 / 13.0 / 0.4 / 0.4 / 13.0 / 5182.1 / 2.0 / 1.0 |
+| FK: an upper arm turned | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 |  | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 1.0 |
+| Puppet: the hips' handle | 78.0 / 13.0 / 1.2 / 1.2 / 13.0 / 5880.6 / 2.0 / 1.0 |  | 78.0 / 13.0 / 3.0 / 3.0 / 13.0 / 5881.0 / 2.0 / 1.0 |
+| Puppet: the head's handle | 78.0 / 13.0 / 2.8 / 2.8 / 13.0 / 5881.4 / 2.0 / 1.0 |  | 78.0 / 13.0 / 3.0 / 3.0 / 13.0 / 5879.9 / 2.0 / 1.0 |
+| Puppet: the left hand's handle | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 |  | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 1.0 |
+| scrubbing, Scene view only | 78.0 / 13.0 / 5.9 / 5.9 / 13.0 / 5890.4 / 2.0 / 1.0 |  | 89.9 / 13.0 / 7.4 / 7.4 / 13.0 / 5890.2 / 2.9 / 1.0 |
+| the clip playing, Scene view only | 78.0 / 13.0 / 7.7 / 7.7 / 13.0 / 5887.9 / 2.0 / 1.0 |  | 91.0 / 13.0 / 9.1 / 9.1 / 13.0 / 5887.8 / 3.0 / 1.0 |
+| scrubbing, Scene + Game view | 117.0 / 26.0 / 11.8 / 11.8 / 26.0 / 11780.7 / 2.0 / 2.0 |  | 128.9 / 26.0 / 14.7 / 14.7 / 26.0 / 11780.4 / 2.9 / 2.0 |
+| the clip playing, Scene + Game view | 143.0 / 26.0 / 16.8 / 16.8 / 26.0 / 11776.5 / 4.0 / 2.0 |  | 156.0 / 26.0 / 18.8 / 18.8 / 26.0 / 11775.9 / 5.0 / 2.0 |
+| Play with the springs | 78.0 / 26.0 / 6.0 / 6.0 / 13.0 / 4842.9 / 1.0 / 1.0 |  | 91.0 / 26.0 / 6.6 / 6.6 / 13.0 / 4844.7 / 2.0 / 1.0 |
+| IK: the left hand's target moved | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 |  | 78.0 / 13.0 / 0.7 / 0.7 / 13.0 / 5297.3 / 2.0 / 1.0 |
+| IK: the left foot's target moved | 78.0 / 13.0 / 2.4 / 2.4 / 13.0 / 5859.3 / 2.0 / 1.0 |  | 78.0 / 13.0 / 2.4 / 2.4 / 13.0 / 5858.1 / 2.0 / 1.0 |
+| IK: the target moved, Record on | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 |  | 78.0 / 13.0 / 0.9 / 0.9 / 13.0 / 5370.1 / 2.0 / 1.0 |
+| IK: the clip playing, Scene view only | 78.0 / 13.0 / 8.6 / 8.6 / 13.0 / 5888.4 / 2.0 / 1.0 |  | 91.0 / 13.0 / 9.1 / 9.1 / 13.0 / 5888.7 / 3.0 / 1.0 |
+| a prop of the world moved |  | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 1.0 / 1.0 | 52.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 1.0 / 1.0 |

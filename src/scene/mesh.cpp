@@ -257,6 +257,8 @@ namespace {
 enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, kStatCount };
 std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
 std::atomic<uint64_t> g_partial_normals{0};
+std::atomic<uint64_t> g_in_place_normals_us{0}, g_in_place_tangents_us{0};  // (round 468: parts of kStatInPlace's time)
+std::atomic<uint64_t> g_in_place_refused{0}, g_in_place_split{0};            // (round 468: moves refused; of them, for a new split)
 std::atomic<bool> g_serial_build{false};  // tests: the build before task 0109 (one thread, a map of corners), to compare against
 struct StatTimer {
   MeshStat stat;
@@ -278,6 +280,10 @@ MeshCounts mesh_counts() {
     *ms[i] = g_stat_us[i].load(std::memory_order_relaxed) / 1000.0;
   }
   c.partial_normals = g_partial_normals.load(std::memory_order_relaxed);
+  c.ms_in_place_normals = g_in_place_normals_us.load(std::memory_order_relaxed) / 1000.0;
+  c.ms_in_place_tangents = g_in_place_tangents_us.load(std::memory_order_relaxed) / 1000.0;
+  c.in_place_refused = g_in_place_refused.load(std::memory_order_relaxed);
+  c.in_place_split = g_in_place_split.load(std::memory_order_relaxed);
   return c;
 }
 
@@ -288,6 +294,8 @@ MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
   d.partial_normals = partial_normals - o.partial_normals;
   d.ms_copies = ms_copies - o.ms_copies, d.ms_full_builds = ms_full_builds - o.ms_full_builds;
   d.ms_in_place = ms_in_place - o.ms_in_place, d.ms_tangents = ms_tangents - o.ms_tangents, d.ms_edges = ms_edges - o.ms_edges;
+  d.ms_in_place_normals = ms_in_place_normals - o.ms_in_place_normals, d.ms_in_place_tangents = ms_in_place_tangents - o.ms_in_place_tangents;
+  d.in_place_refused = in_place_refused - o.in_place_refused, d.in_place_split = in_place_split - o.in_place_split;
   return d;
 }
 
@@ -812,9 +820,15 @@ bool Mesh::corner_normals_moved(NormalState &st, bool flat, const std::vector<ui
  * triangles are a rebuild's. */
 bool Mesh::update_in_place(int ci, bool flat) const {
   StatTimer st{kStatInPlace, {}, false};  // (counted once it worked; a refused one's time is still spent)
+  /* Round 468: a refusal counted (the caller builds the render mesh whole then - on a posed avatar, every frame). */
+  auto refused = [](bool split) {
+    g_in_place_refused.fetch_add(1, std::memory_order_relaxed);
+    if (split) g_in_place_split.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  };
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
-  if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return false;
+  if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return refused(false);
   /* Which faces moved, before anything is written: only they are split into triangles again (task 0090). */
   std::vector<uint32_t> faces;
   moved_faces(ci, faces);
@@ -825,13 +839,18 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   NormalState &ns = nstate_[ci];
   std::vector<uint32_t> verts, changed;
   /* Custom normals (task 0149) aren't summed from the faces: every corner takes its vertex's own again (cheap). */
+  ScopedTimer normals_timer;  // (round 468: the normals and their corners, apart in MeshCounts)
   const bool partial = !custom_normals_fit() && corner_normals_moved(ns, flat, faces, verts);
   if (!partial) corner_normals(flat, ns.cnormal, &ns);
-  if (!(partial ? write_corners_at(ci, ns.cnormal, verts, changed) : write_corners(ci, ns.cnormal, changed))) return false;
-  if (!retriangulate(rm, crv, &fmoved)) return false;
+  bool split = false;  // (two corners of one render vertex now differ: the build would split it)
+  const bool written = partial ? write_corners_at(ci, ns.cnormal, verts, changed, split) : write_corners(ci, ns.cnormal, changed, split);
+  g_in_place_normals_us.fetch_add((uint64_t)(normals_timer.ms() * 1000.0), std::memory_order_relaxed);
+  if (!written) return refused(split);
+  if (!retriangulate(rm, crv, &fmoved)) return refused(false);
   bool tangents_rewritten = false;
   if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
     tangents_rewritten = true;
+    ScopedTimer tangents_timer;
     /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
      * made orthogonal to the new normal: they depend on the shape alone, not on the drag that led there.
      * MikkTSpace (the next full build) is the same idea with more care at splits, so they differ slightly. */
@@ -862,6 +881,7 @@ bool Mesh::update_in_place(int ci, bool flat) const {
       rm.tangents[i] = Vec4(t, dot(cross(n, t), tdir[i]) < 0.0f ? -1.0f : 1.0f);
     }
     cache_approx_[ci] = true;
+    g_in_place_tangents_us.fetch_add((uint64_t)(tangents_timer.ms() * 1000.0), std::memory_order_relaxed);
   }
   rm.bounds = bounds();
   record_moved(rm, changed, faces);
@@ -910,14 +930,14 @@ static bool put_corner(RenderMesh &rm, uint32_t rv, const Vec3 &p, const Vec3 &n
   return true;
 }
 
-bool Mesh::write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed) const {
+bool Mesh::write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed, bool &split) const {
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   std::vector<uint8_t> seen(rm.positions.size(), 0);
   for (size_t c = 0; c < corner_verts.size(); c++) {
     const uint32_t rv = crv[c], v = corner_verts[c];
     if (rv >= rm.positions.size() || v >= positions.size()) return false;
-    if (!put_corner(rm, rv, positions[v], cnormal[c], !seen[rv], changed)) return false;
+    if (!put_corner(rm, rv, positions[v], cnormal[c], !seen[rv], changed)) return split = true, false;
     seen[rv] = 1;
   }
   return true;
@@ -925,7 +945,7 @@ bool Mesh::write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<u
 
 /* Only the corners at `verts`: a render vertex's corners all sit on its one vertex, and corners_at lists them in
  * corner order, so the same corner writes as in write_corners. */
-bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const {
+bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed, bool &split) const {
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
   const VertexFaces &vf = vertex_faces();
@@ -938,7 +958,7 @@ bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std:
       const uint32_t rv = crv[cf.first];
       if (rv >= rm.positions.size()) return false;
       const bool first = std::find(written.begin(), written.end(), rv) == written.end();
-      if (!put_corner(rm, rv, positions[v], cnormal[cf.first], first, changed)) return false;
+      if (!put_corner(rm, rv, positions[v], cnormal[cf.first], first, changed)) return split = true, false;
       if (first) written.push_back(rv);
     }
   }

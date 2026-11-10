@@ -7,15 +7,18 @@ when given, compared with the committed baseline, and written into PERFORMANCE.m
                                [--ui] [--world "<project>|<scene>" ...] [--baseline stress/results/baseline.md]
                                [--out build/perf] [--write docs/PERFORMANCE.md] [--save-baseline] [--check]
 
-- Runs `blendity_stress --only <section> --out <out>/<section>` for each section (default: responsiveness, operations,
-  world_like, editor_render, bake, pathtracer, serialization, undo, livelink) and reads each `latest.md`.
+- Runs `blendity_stress --only <section> --out <out>/<section>` for each section (default: `DEFAULT_SECTIONS` below -
+  responsiveness, operations, world_like, editor_render, bake, ... and, since round 468, posing) and reads each
+  `latest.md`.
 - `--ui` runs tools/bench_ui.py; `--world` runs tools/bench_world.py for each "project|scene" or "project|prefab=..." given.
 - Compares every time cell of every table row with the baseline - the same section, the same table (its header) and the
   same row (its first cell, and which of that name: round 432 - a section's second table had been read with the first
   one's header, and two rows of one name collided): a row whose first time column (ms, s, frames, bytes, MB; never a
-  rate such as Mrays/s or fps) grew by more than 20 % is a regression; a responsiveness row over its budget is OVER.
-  `--check` exits 1 on a regression. `--save-baseline` copies the run's tables into the baseline file with the
-  machine's name.
+  rate such as Mrays/s or fps) grew by more than 20 % is a regression; a row over its budget is OVER (its last cell).
+  `--check` exits 1 on a regression or a row newly OVER; a row that was OVER in the baseline and still is, is listed
+  as "still over" and doesn't fail it (round 468: a pass that starts by measuring what is over budget keeps `--check`
+  for what gets worse). `--save-baseline` copies the run's tables into the baseline file with the machine's name;
+  with `--sections` given it replaces only those sections and keeps the rest of the file (round 468).
 - `--compare <latest.md>` (round 432): no runs - one report against the baseline, for CI's quick stress. `--annotate`
   prints each finding as a GitHub warning; CI compares with `stress/results/ci-<runner>.md` when one is committed (a
   CI runner isn't this machine: its own baseline, informative first - ADR 0105) and says so when there is none.
@@ -29,7 +32,8 @@ sys.path.insert(0, HERE)
 from bench_table import write_between_markers  # noqa: E402
 
 DEFAULT_SECTIONS = ["responsiveness", "operations", "world_like", "editor_render", "bake", "pathtracer", "serialization", "undo", "livelink",
-                    "parity", "memory", "physics", "animation", "filters"]  # (round 432: the last five were run by hand only)
+                    "parity", "memory", "physics", "animation", "filters",  # (round 432: the last five were run by hand only)
+                    "posing"]  # (round 468: posing, scrubbing and playing a skinned avatar, alone and in a world)
 
 
 def read_tables(path):
@@ -98,21 +102,59 @@ def time_column(header):
     return bool(TIME_COLUMN.search(header)) and not RATE_COLUMN.search(header)
 
 
+def first_time_cell(head, r):
+    """(header, cell) of row `r`'s first time column that holds a number; (None, the second cell) when it has none."""
+    for i, cell in enumerate(r[1:], 1):
+        if i < len(head) and time_column(head[i]) and numeric(cell) is not None:
+            return head[i], cell
+    return None, (r[1] if len(r) > 1 else "")
+
+
+def over_finding(section, head, r, found):
+    """An OVER row's finding: "budget" when it is new, "still over" when the baseline's same row was OVER too (round
+    468). Its seventh field names the time column the value is from."""
+    where, cell = first_time_cell(head, r)
+    if found and found[1] and found[1][-1] == "OVER":
+        return (section, r[0], "still over", first_time_cell(found[0], found[1])[1], cell, None, where)
+    return (section, r[0], "budget", "", cell, None, where)
+
+
 def compare(now, base):
-    """[(section, row, column, before, after, ratio)] for rows whose first time column grew over 20 %; also the OVER rows.
+    """[(section, row, column, before, after, ratio, ...)] for rows whose first time column grew over 20 %; also the OVER
+    rows - column "budget" for a row newly over, "still over" for one the baseline already had over.
     A row is matched by its section, its table's header and its label (and which of that label) - round 432."""
     findings = []
     for section, rows in now.items():
         brows = keyed_rows(base.get(section, []))
         for key, (head, r) in keyed_rows(rows).items():
-            if r[-1] == "OVER":
-                findings.append((section, r[0], "budget", "", r[1] if len(r) > 1 else "", None))
             found = brows.get(key)
+            if r[-1] == "OVER":
+                findings.append(over_finding(section, head, r, found))
             if found:
                 finding = first_regression(section, head, r, found[1])
                 if finding:
                     findings.append(finding)
     return findings
+
+
+def failing(findings):
+    """The findings `--check` fails on: regressions and rows newly OVER, not the ones that were over already."""
+    return [f for f in findings if f[2] != "still over"]
+
+
+def finding_text(f):
+    section, row, col, before, after, ratio = f[:6]
+    where = f[6] if len(f) > 6 and f[6] else "its first number"
+    if col == "budget":
+        return "OVER the budget: [%s] %s: %s %s" % (section, row, where, after)
+    if col == "still over":
+        return "still over the budget, as in the baseline: [%s] %s: %s %s (the baseline's %s)" % (section, row, where, after, before)
+    return "regression: [%s] %s - %s: %s -> %s (x%.2f)" % (section, row, col, before, after, ratio)
+
+
+def summary_text(findings, against):
+    still = len(findings) - len(failing(findings))
+    return "%d finding(s) against %s%s" % (len(failing(findings)), against, ", %d row(s) still over their budget" % still if still else "")
 
 
 def first_regression(section, head, r, b):
@@ -138,6 +180,22 @@ def run_stress(exe, section, out, quick):
     if r.returncode != 0:
         print("  stress exited with", r.returncode)
     return read_tables(os.path.join(folder, "latest.md"))
+
+
+def merged_baseline(path, now):
+    """The baseline file's tables with the sections of `now` put in their place (a new one after the others): a run of
+    some sections keeps the rest of the baseline (round 468; before, it dropped every section not run)."""
+    tables = read_tables(path)
+    for section, rows in now.items():
+        tables[section] = rows
+    return tables
+
+
+def baseline_text(machine, tables, resaved=None):
+    """The baseline file: its title, the machine's line and the tables. `resaved`: the sections a partial save replaced."""
+    note = " Re-saved alone: %s." % ", ".join(resaved) if resaved else ""
+    return ("# Performance baseline (tools/perf_suite.py --save-baseline)\n\nMachine: %s. Sections: %s.%s\n\n" % (machine, ", ".join(tables.keys()), note) +
+            tables_to_md(tables))
 
 
 def tables_to_md(tables):
@@ -166,7 +224,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "build", "perf"))
     ap.add_argument("--write", help="docs/PERFORMANCE.md: replace the pass16-after-table block (the latest run)")
     ap.add_argument("--save-baseline", action="store_true")
-    ap.add_argument("--check", action="store_true", help="exit 1 on a regression or an OVER row")
+    ap.add_argument("--check", action="store_true", help="exit 1 on a regression or a row newly OVER (one the baseline already had OVER is listed as still over)")
     ap.add_argument("--compare", help="no runs: this report (a latest.md) against the baseline (round 432, CI)")
     ap.add_argument("--annotate", action="store_true", help="print each finding as a GitHub Actions warning")
     a = ap.parse_args()
@@ -191,28 +249,31 @@ def main():
             worlds.append(json.load(open(rep, encoding="utf-8")))
     base = read_tables(a.baseline)
     findings = compare(now, base)
-    for section, row, col, before, after, ratio in findings:
-        if col == "budget":
-            print("OVER the budget: [%s] %s: longest frame %s ms" % (section, row, after))
-        else:
-            print("regression: [%s] %s - %s: %s -> %s (x%.2f)" % (section, row, col, before, after, ratio))
-    print("%d finding(s) against %s" % (len(findings), os.path.relpath(a.baseline, ROOT) if os.path.exists(a.baseline) else "(no baseline yet)"))
-    md = "Machine: %s %s, %s. Sections: %s.\n\n" % (platform.node(), platform.machine(), platform.platform(), ", ".join(now.keys())) + tables_to_md(now)
+    for f in findings:
+        print(finding_text(f))
+    print(summary_text(findings, os.path.relpath(a.baseline, ROOT) if os.path.exists(a.baseline) else "(no baseline yet)"))
+    machine = "%s %s, %s" % (platform.node(), platform.machine(), platform.platform())
+    md = "Machine: %s. Sections: %s.\n\n" % (machine, ", ".join(now.keys())) + tables_to_md(now)
     for w in worlds:
         md += "### %s (tools/bench_world.py)\n\n| step | total ms | frames | longest frame ms |\n|---|---|---|---|\n" % w["label"]
         for s in w["steps"]:
             md += "| %s | %.0f | %d | %.1f |\n" % (s["step"], s["ms"], s["frames"], s["longest"])
         md += "\n"
-    with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
+    report = os.path.join(a.out, "report.md")
+    with open(report, "w", encoding="utf-8") as f:
         f.write(md)
     if a.save_baseline:
+        # Round 468: a run of some sections replaces those in the file (this run's world tables too) and keeps the rest.
+        partial = a.sections != ",".join(DEFAULT_SECTIONS)
+        ran = read_tables(report)
+        text = baseline_text(machine, merged_baseline(a.baseline, ran), list(ran.keys())) if partial else "# Performance baseline (tools/perf_suite.py --save-baseline)\n\n" + md
         with open(a.baseline, "w", encoding="utf-8", newline="\n") as f:
-            f.write("# Performance baseline (tools/perf_suite.py --save-baseline)\n\n" + md)
-        print("baseline saved:", a.baseline)
+            f.write(text)
+        print("baseline saved%s:" % (" (the sections run; the others kept)" if partial else ""), a.baseline)
     if a.write:
         write_between_markers(a.write, md, "pass16-after-table")
         print("written:", a.write)
-    return 1 if (a.check and findings) else 0
+    return 1 if (a.check and failing(findings)) else 0
 
 
 def compare_only(a):
@@ -221,12 +282,10 @@ def compare_only(a):
         print("no baseline at %s: nothing compared (commit one from this runner's stress artifact to start)" % a.baseline)
         return 0
     findings = compare(read_tables(a.compare), read_tables(a.baseline))
-    for section, row, col, before, after, ratio in findings:
-        text = ("OVER the budget: [%s] %s: longest frame %s ms" % (section, row, after) if col == "budget"
-                else "regression: [%s] %s - %s: %s -> %s (x%.2f)" % (section, row, col, before, after, ratio))
-        print(("::warning::" if a.annotate else "") + text)
-    print("%d finding(s) against %s" % (len(findings), a.baseline))
-    return 1 if (a.check and findings) else 0
+    for f in findings:
+        print(("::warning::" if a.annotate and f[2] != "still over" else "") + finding_text(f))
+    print(summary_text(findings, a.baseline))
+    return 1 if (a.check and failing(findings)) else 0
 
 
 if __name__ == "__main__":

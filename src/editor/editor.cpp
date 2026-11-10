@@ -476,7 +476,11 @@ void Editor::process_events(std::vector<Event> &events) {
         in.down[b] = true;
         in.pressed[b] = true;
         double t = clock_now();
-        if (t - last_click[b] < 0.35 && std::abs(e.x - last_click_x[b]) < 5 && std::abs(e.y - last_click_y[b]) < 5) {
+        /* Round 468: a playing `perf drag` presses the same pixel a moment after its last press (a drag played again
+         * after an undo): never a double click - the Scene view would frame the selection and fly the camera through
+         * the measurement - and no real click right after it pairs with the script's. */
+        if (perf_.active) last_click[b] = -1;
+        else if (t - last_click[b] < 0.35 && std::abs(e.x - last_click_x[b]) < 5 && std::abs(e.y - last_click_y[b]) < 5) {
           in.double_clicked[b] = true;
           last_click[b] = -1;
         }
@@ -554,12 +558,15 @@ void Editor::apply_ui_scale() {
 /* ===================================================================== */
 
 void Editor::frame(std::vector<Event> &events) {
+  perf_script_before(events);  // (round 468: while a `perf drag` plays, its events replace the system's; nothing without one)
+  ScopedTimer script_timer;
   {
     BL_ZONE("frame");  // (round 419: Tracy's zones in a BLENDITY_TRACY=1 build; nothing otherwise)
     in_frame_ = true;
     frame_body(events);
     in_frame_ = false;
   }
+  if (perf_.active) perf_script_after(script_timer.ms());
   BL_FRAME_MARK();
   trim_idle_memory();  // (task 0421)
   if (save_prefs_pending_) save_prefs();  // (asked for while another window drew: its state was in place then)
@@ -787,6 +794,10 @@ void Editor::frame_body(std::vector<Event> &events) {
   const MeshCounts mc = mesh_counts();
   mesh_last_ = mc - mesh_seen_;
   mesh_seen_ = mc;
+  const PoseCounts pc = pose_counts();
+  pose_last_ = pc - pose_seen_;
+  pose_seen_ = pc;
+  if (pose_last_.any() || prof_last_.ms_record > 0.0 || prof_last_.ms_autopose > 0.0) pose_work_at_ = now;
   prof_ = FrameProfile{};
   frame_history_.push_back(frame_ms_);
   if (frame_history_.size() > 240) frame_history_.erase(frame_history_.begin());
@@ -836,6 +847,59 @@ std::string Editor::perf_status_text() const {
   for (const JobView &j : const_cast<Editor *>(this)->jobs_running()) jobs += (jobs.empty() ? "" : ", ") + j.label;
   s += "; jobs: " + (jobs.empty() ? std::string("none") : jobs);
   s += "; views: " + gpu_view_status();
+  return s;
+}
+
+/* Round 468 (task 0444): the posing frame's parts as "<name> <ms>" items (a mean a frame over `frames`), nested in the
+ * frame and in each other - not to add up. The names are what tools/bench_world.py and the stress section look for. */
+Editor::PosingList Editor::posing_parts(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc) {
+  return {
+      {"constraints", pc.ms_constraints}, {"fk constraints", pc.ms_constraints_fk}, {"ik constraints", pc.ms_constraints_ik},
+      {"vrchat constraints", pc.ms_constraints_vrc}, {"the solver", pc.ms_solver}, {"autoposing", p.ms_autopose},
+      {"skin keys", pc.ms_skin_keys}, {"shape key hashes", pc.ms_shape_hashes}, {"skin setup", pc.ms_skin_setup},
+      {"skinning", pc.ms_skin_deforms}, {"shape keys", pc.ms_shape_applies}, {"evaluations", pc.ms_evaluations},
+      {"in place", mc.ms_in_place}, {"normals", mc.ms_in_place_normals}, {"tangents", mc.ms_in_place_tangents},
+      {"outlines", pc.ms_outline_shells}, {"mesh uploads", p.ms_mesh_uploads}, {"scene hashes", p.ms_hash},
+      {"draw items", p.ms_collect}, {"instances", p.ms_gpu_instances}, {"overlays", p.ms_overlays}, {"rig overlay", p.ms_rig_overlay},
+      {"puppet controls", p.ms_puppet}, {"lighting key", p.ms_lighting_key}, {"record", p.ms_record}, {"clip", pc.ms_clip_applies},
+      {"anim apply", p.ms_anim_apply}, {"trails", p.ms_trails}, {"springs", pc.ms_springs}, {"undo step", p.ms_commit},
+      {"scene view", p.ms_scene3d}, {"game view", p.ms_game}, {"gpu path", p.ms_gpu}, {"ui", p.ms_ui},
+      {"window animation", p.ms_window[(int)WindowKind::Animation]}, {"window inspector", p.ms_window[(int)WindowKind::Inspector]},
+      {"window rigging", p.ms_window[(int)WindowKind::Rigging]}, {"window avatar", p.ms_window[(int)WindowKind::Avatar]},
+      {"window hierarchy", p.ms_window[(int)WindowKind::Hierarchy]},
+      /* (A move in place that is refused builds the render mesh whole, and its tangents with MikkTSpace: on the owner's
+       * avatar that was most of a scrubbed frame's gather - so the whole builds and the copies are parts too.) */
+      {"render meshes built whole", mc.ms_full_builds}, {"tangents built whole", mc.ms_tangents}, {"mesh copies", mc.ms_copies}};
+}
+
+std::string Editor::posing_parts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames) {
+  const double n = frames > 0.0 ? frames : 1.0;
+  std::string s;
+  for (const auto &[name, ms] : posing_parts(p, pc, mc)) s += strprintf("%s%s %.2f", s.empty() ? "" : ", ", name, ms / n);
+  return s;
+}
+
+Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc) {
+  return {
+      {"constraint solves", (double)pc.constraint_solves}, {"constraint moves", (double)pc.constraint_moves},
+      {"name walks", (double)pc.name_walks}, {"skin keys", (double)pc.skin_keys}, {"skin deforms", (double)pc.skin_deforms},
+      {"shape key applies", (double)pc.shape_applies}, {"evaluations", (double)pc.evaluations},
+      {"outline shells", (double)pc.outline_shells}, {"meshes sent whole", (double)(p.gpu_mesh_uploads + p.gpu_mesh_updates)},
+      {"meshes updated in part", (double)p.gpu_mesh_partial}, {"upload KB", (double)p.gpu_upload_bytes / 1024.0},
+      {"scene hashes", (double)p.scene_hashes}, {"draw items kept", (double)p.items_kept},
+      {"instances built", (double)p.instances_built}, {"instances kept", (double)p.instances_kept},
+      {"lightmap keys", (double)p.lightmap_key_hashes}, {"clip applies", (double)pc.clip_applies},
+      {"clip serialisations", (double)p.clip_serialisations}, {"solver iterations", (double)pc.solver_iterations},
+      {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
+      {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
+      {"refused for a new split", (double)mc.in_place_split}, {"render meshes built whole", (double)mc.full_builds},
+      {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies}};
+}
+
+std::string Editor::posing_counts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames) {
+  const double n = frames > 0.0 ? frames : 1.0;
+  std::string s;
+  for (const auto &[name, v] : posing_counts(p, pc, mc)) s += strprintf("%s%s %.1f", s.empty() ? "" : ", ", name, v / n);
   return s;
 }
 
@@ -2065,7 +2129,13 @@ void Editor::trim_undo() {
 
 void Editor::commit_undo() {
   if (!pending_change_) return;
-  settle_meshes();
+  BL_ZONE("commit undo");
+  ProfileScope commit_scope{prof_.ms_commit, {}};  // (round 468: the step's whole time, its parts below inside it)
+  prof_.undo_steps++;
+  {
+    ProfileScope settle_scope{prof_.ms_commit_settle, {}};
+    settle_meshes();
+  }
   if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
   s.scene = std::move(stable_);
@@ -2097,8 +2167,12 @@ void Editor::commit_undo() {
   undo_serial_++;
   trim_undo();
   redo_.clear();
-  stable_ = scene_->clone();
+  {
+    ProfileScope clone_scope{prof_.ms_commit_clone, {}};
+    stable_ = scene_->clone();
+  }
   pending_change_ = false;
+  ProfileScope assets_scope{prof_.ms_commit_assets, {}};
   paint_flush_images();  // (task 0245: the Paint layers' PNGs before their textures' texts)
   const size_t clips_saved = save_dirty_clip_assets();
   if (clips_saved) repoint_moved_clips();  // (round 407: a Unity clip's edits live in its Blendity copy - the components name it from now on)
@@ -3559,9 +3633,13 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     size_t views = 0;
     for (int i = 0; i < 10; i++) step(true);  // (settled first)
     const FrameProfile p0 = frame_profile_totals();
+    FrameProfile posing_acc;  // (round 468: every field of the measured frames, for the posing lines)
+    const PoseCounts pose0 = pose_counts();
+    const MeshCounts mesh0 = mesh_counts();
     for (int i = 0; i < frames && running_; i++) {
       sum += step(true);
       views += card_views_shown_.size();
+      posing_acc.add(prof_last_);
     }
     if (pixels) *pixels = window_pixels();
     const double n = std::max(1, frames);
@@ -3585,6 +3663,11 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
     std::printf("    instance arrays: %llu kept, %llu gathered over the frames; meshes left waiting %llu (queue now %zu)\n", (unsigned long long)(p1.instances_kept - p0.instances_kept),
                 (unsigned long long)(p1.instances_built - p0.instances_built), (unsigned long long)(p1.mesh_deferred - p0.mesh_deferred), mesh_queue_);  // (round 458)
     print_window_times(p0, p1, n);  // (round 436)
+    /* Round 468 (task 0444): where a posing frame goes - tools/bench_world.py reads these two lines. */
+    const PoseCounts pose_d = pose_counts() - pose0;
+    const MeshCounts mesh_d = mesh_counts() - mesh0;
+    std::printf("    posing parts ms (a frame's mean; nested, not to add up): %s\n", posing_parts_text(posing_acc, pose_d, mesh_d, n).c_str());
+    std::printf("    posing counts (a frame's mean): %s\n", posing_counts_text(posing_acc, pose_d, mesh_d, n).c_str());
   };
   std::printf("windowed check: %dx%d, views %s; the card %s%s%s\n", fb_.width, fb_.height, gpu_view_status().c_str(),
               card_present_ ? "presents the window" : "doesn't present it", card_reason_.empty() ? "" : ": ", card_reason_.c_str());
@@ -3603,6 +3686,9 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
   for (bool every_row : {false, true})
     for (bool card : {true, false}) canvas(card, every_row);
   card_present_pref_ = true;
+  /* Round 468: a looping `perf drag` ends with the check. No frame follows - the process exits - so a drag in its move
+   * stage is only asked to stop and never plays its release: nothing is left to hold a button. */
+  if (perf_script_active_for_test()) perf_script_stop("the windowed check ended");
   const bool wrote = !pixels.empty() && write_png(out, pixels.data(), fb_.width, fb_.height, fb_.width);
   std::printf("  %s %s\n", wrote ? "wrote" : "could not write", out.c_str());
   return wrote ? 0 : 1;
@@ -4649,6 +4735,16 @@ bool Editor::bench_scene(const std::string &name) {
     for (const char *starter : {"Utah Teapot", "Plane", "Point Light"})  // (the stand-in brings its own lights)
       if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
     build_world_like(name == "worldlikequick");
+    mark_changed("Bench scene");
+    return true;
+  }
+  if (name == "avatarlike" || name == "avatarlikequick" || name == "avatarworld" || name == "avatarworldquick") {  // (round 468: the avatar stand-in; alone, or standing in worldlike)
+    const bool quick = name.size() > 5 && name.compare(name.size() - 5, 5, "quick") == 0, world = name.rfind("avatarworld", 0) == 0;
+    new_scene();
+    for (const char *starter : {"Utah Teapot", "Plane", "Point Light"})
+      if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
+    if (world) build_world_like(quick);
+    build_avatar_like(quick, world ? Vec3(0.0f, 0.0f, -15.0f) : Vec3(0.0f));
     mark_changed("Bench scene");
     return true;
   }
