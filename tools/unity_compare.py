@@ -28,6 +28,9 @@ Round 451 (task 0427), where the error lives - additions, the command lines abov
   * ... world ... --pages        (with --blendity-bake) saves Unity's lightmaps and Blendity's (`lighting save`) and compares
                                  them object by object - each chart resampled over Blendity's lightmap UVs, MAE / SSIM per
                                  object, the worst first - in <out dir>/pages (pages.md, pages.json, worst_N.png);
+  * ... world ... --pages --noise   (round 463) bakes Blendity's lighting at `lighting seed 0` and again at seed 1 in one open of the scene, saves both, runs
+                                 `lighting noise` between them: the bake's grain and blotch (per page, the worst
+                                 objects) in report.md / report.json and <out dir>/pages/blendity_seed1/noise.json;
     py tools/unity_compare.py pages <Unity's lighting folder> <Blendity's lighting folder> <out dir>   (the same, standalone)
     py tools/unity_compare.py --self-test                                                             (the tools' own checks)"""
 import json
@@ -454,6 +457,64 @@ def save_lighting(exe, project, open_asset, unity_lightmaps, folder, log_path):
     return os.path.isfile(os.path.join(folder, "LightingData.bin"))
 
 
+def noise_bake(exe, project, asset, pages_out):
+    """Round 463: the scene opened once and baked at seed 0 and again at seed 1 (so both lighting folders hold the same object
+    ids), each saved with `lighting save`, then `lighting noise` between them (its noise.json lands in
+    <pages_out>/blendity_seed1/); returns read_noise()'s summary."""
+    first, second = (os.path.join(pages_out, n).replace("\\", "/") for n in ("blendity_seed0", "blendity_seed1"))
+    for d in (first, second):
+        shutil.rmtree(d, ignore_errors=True)
+    q = lambda d: '"%s"' % d  # (the console takes a folder with spaces in quotes)
+    cmds = ["open " + asset] + LIGHTS_CMDS + ["lighting seed 0", "bake", "perf wait", "lighting save " + q(first),
+                                              "lighting seed 1", "bake", "perf wait", "lighting save " + q(second),
+                                              "lighting noise %s %s" % (q(first), q(second))]
+    args = [exe, "--headless-screenshot", os.path.join(pages_out, "noise_editor.png"), "--size", "800x600", "--frames", "1"]
+    for c in cmds:
+        args += ["--cmd", c]
+    log_path = os.path.join(pages_out, "noise.log")
+    t0 = time.time()
+    try:
+        with open(log_path, "w", encoding="utf-8") as log:
+            subprocess.run(args, cwd=project, env=dict(os.environ, BLENDITY_PROJECT=project), stdout=log, stderr=subprocess.STDOUT, timeout=4 * 3600)
+    except subprocess.TimeoutExpired:
+        return {"skipped": "the two noise bakes took over four hours: stopped (see pages/noise.log)"}
+    summary = read_noise(os.path.join(second, "noise.json"))
+    summary["both_bakes_s"] = round(time.time() - t0, 1)
+    if "skipped" in summary:
+        summary["skipped"] = "%s (see pages/noise.log)" % summary["skipped"]
+    return summary
+
+
+def read_noise(path):
+    """The noise.json `lighting noise` wrote, as the report keeps it; {"skipped": why} when it isn't there or doesn't read."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            n = json.load(f)
+        return {"all": n["all"], "pages": n["pages"], "worst": n["worst"], "skipped_texels": n.get("skipped", 0)}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {"skipped": "no noise.json (the second bake or `lighting noise` failed)"}
+
+
+def noise_text(p):
+    return "dark" if p.get("dark") else "grain %.4f, blotch %.4f" % (p["grain"], p["blotch"])
+
+
+def noise_lines(s):
+    """The report's noise section: all pages, each page, the worst objects."""
+    if not s or "skipped" in s:
+        return ["## A bake's noise", "", "Skipped: %s." % (s or {}).get("skipped", "-"), ""]
+    lines = ["## A bake's noise (the same bake at seeds 0 and 1)", "",
+             "All pages: %s over %d texels. Grain is one bake's per-texel noise relative to its light; blotch is what a 7 x 7 average of the "
+             "difference keeps (what reads as blotches); neither sees bias." % (noise_text(s["all"]), s["all"]["texels"]), "",
+             "| page | grain | blotch | texels |", "|---|---|---|---|"]
+    for i, p in enumerate(s["pages"]):
+        lines.append("| %d | %s | %s | %d |" % (i, "dark" if p.get("dark") else "%.4f" % p["grain"], "dark" if p.get("dark") else "%.4f" % p["blotch"], p["texels"]))
+    lines += ["", "The five objects with the most blotch:", "", "| object | page | grain | blotch | texels |", "|---|---|---|---|---|"]
+    for w in s["worst"][:5]:
+        lines.append("| %s | %d | %.4f | %.4f | %d |" % (w.get("name") or w.get("id"), w["page"], w["grain"], w["blotch"], w["texels"]))
+    return lines + [""]
+
+
 def component_rows(out, stations, full):
     """Each station's full render and its split renders against Unity's: MAE / SSIM and the change from the full one."""
     rows, data = [], {}
@@ -567,6 +628,18 @@ def self_test():
             got[name] = unity_lights_cmds(os.path.join(d, name))
         if got != {"on": ["unity lightsgamma off"], "off": ["unity lightsgamma on"], "nofield": [], "nofile": []}:
             fails.append("the lights' intensity setting passed on as %s" % got)
+    with tempfile.TemporaryDirectory() as d:  # (round 463: the noise report from a noise.json as `lighting noise` writes it)
+        part = {"grain": 0.0834, "blotch": 0.0412, "texels": 806641, "dark": False}
+        js = {"all": part, "pages": [part, {"grain": 0.0, "blotch": 0.0, "texels": 5, "dark": True}],
+              "worst": [dict(part, id="9", name="Tunnel/Floor", page=1)], "skipped": 2}
+        path = os.path.join(d, "noise.json")
+        json.dump(js, open(path, "w"))
+        text = chr(10).join(noise_lines(read_noise(path)))
+        for want in ("grain 0.0834, blotch 0.0412 over 806641 texels", "| 1 | dark | dark | 5 |", "| Tunnel/Floor | 1 | 0.0834 | 0.0412 | 806641 |"):
+            if want not in text:
+                fails.append("the noise report lacks %r" % want)
+        if "Skipped" not in chr(10).join(noise_lines(read_noise(os.path.join(d, "none.json")))):
+            fails.append("a missing noise.json isn't reported as skipped")
     r = image_compare.self_test()
     for f in fails:
         print("FAIL: " + f)
@@ -586,7 +659,7 @@ def main(argv):
     kind, unity, project, asset, bl_project, bl_asset, stations_path, out = argv[:8]
     project, bl_project, out, stations_path = (os.path.abspath(x) for x in (project, bl_project, out, stations_path))  # (review 404: Unity and Blendity run in their projects)
     exe = os.path.join(REPO, "dist", "windows", "Blendity.exe")
-    lightmaps, engine, own_bake, components, pages = True, "Rasterized", False, False, False
+    lightmaps, engine, own_bake, components, pages, noise = True, "Rasterized", False, False, False, False
     rest = argv[8:]
     while rest:
         if rest[0] == "--blendity" and len(rest) > 1:
@@ -599,12 +672,16 @@ def main(argv):
             components, rest = True, rest[1:]
         elif rest[0] == "--pages":
             pages, rest = True, rest[1:]
+        elif rest[0] == "--noise":
+            noise, rest = True, rest[1:]
         elif rest[0] == "--engine" and len(rest) > 1 and rest[1] in ("Rasterized", "Path"):
             engine, rest = rest[1], rest[2:]
         else:
             sys.exit("unknown or incomplete option " + rest[0])
     if components and engine != "Rasterized":
         sys.exit("--components splits F12's rasterized render only (BLENDITY_RENDER_COMPONENTS): leave out --engine Path")
+    if noise and not (own_bake and pages):
+        sys.exit("--noise needs --blendity-bake and --pages (the noise is reported with the pages; it bakes seeds 0 and 1 itself from one open of the scene)")
     refuse_users_project(project)
     try:
         with open(stations_path, encoding="utf-8") as f:
@@ -662,15 +739,18 @@ def main(argv):
     if components and kind == "world":
         lines, split = component_rows(out, stations, results)
         report += lines
-    page_summary = None
+    page_summary, noise_summary = None, None
     if pages and kind == "world":
         page_summary = run_pages(exe, bl_project, bl_asset, bake, out)
         report += page_lines(page_summary)
+        if noise:
+            noise_summary = noise_bake(exe, bl_project, bl_asset, os.path.join(out, "pages")) if "worst" in page_summary else {"skipped": "no saved pages to compare"}
+            report += noise_lines(noise_summary)
     with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(report))
     with open(os.path.join(out, "report.json"), "w", encoding="utf-8") as f:
         json.dump({"kind": kind, "unity_s": unity_s, "lighting": lighting, "bake_s": bake[1] if bake else None, "stations": results,
-                   "components": split, "pages": page_summary}, f, indent=1)
+                   "components": split, "pages": page_summary, "noise": noise_summary}, f, indent=1)
     print("\n".join(report))
     return 1 if failed else 0
 

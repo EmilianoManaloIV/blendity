@@ -84,7 +84,7 @@ static const SweepCommand kSweepCommands[] = {
   {"layoutguide", "layoutguide reset", ""},
   {"lesson", "lesson 1", ""},
   {"libs", "libs", ""},
-  {"lighting", "lighting update", ""},
+  {"lighting", "lighting seed", ""},
   {"livelink", "", "a network server"},
   {"loopcuts", "loopcuts 3 0.25", ""},
   {"manual", "", "opens the manual in the system browser"},

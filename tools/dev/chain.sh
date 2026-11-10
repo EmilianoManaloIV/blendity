@@ -45,7 +45,7 @@ fi
 if [ -n "$SIDERAIL" ]; then
   ST="$W/tools/dev/siderail_stations.json"
   BA="Assets/Imported/SideRail_Ver1.0.0/QuickBrown/SideRail/SCENE/SideRail.unity"
-  py tools/unity_compare.py world "$U" C:/blsiderail/world Assets/QuickBrown/SideRail/SCENE/SideRail.unity "$BP" "$BA" "$ST" $CMP/blendity_bake --blendity "$M/dist/windows/Blendity.exe" --blendity-bake > $CMP/bb.log 2>&1; echo "blendity bake rc=$?"
+  py tools/unity_compare.py world "$U" C:/blsiderail/world Assets/QuickBrown/SideRail/SCENE/SideRail.unity "$BP" "$BA" "$ST" $CMP/blendity_bake --blendity "$M/dist/windows/Blendity.exe" --blendity-bake --pages --noise > $CMP/bb.log 2>&1; echo "blendity bake rc=$?"
   cat $CMP/blendity_bake/report.md
 fi
 echo CHAIN DONE

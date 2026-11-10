@@ -104,6 +104,28 @@ uint pcg_hash(uint v) {
   return (word >> 22u) ^ word;
 }
 float rnd(inout uint s) { s = pcg_hash(s); return float(s >> 8) * (1.0 / 16777216.0); }
+/* Round 465: dimension 0 or 1 of sampler.h's sobol_burley, line for line - a bake's first-bounce directions. */
+uint lk_hash(uint x, uint s) {
+  x ^= x * 0x3d20adeau;
+  x += s;
+  x *= (s >> 16) | 1u;
+  x ^= x * 0x05526c56u;
+  x ^= x * 0x53a22864u;
+  return x;
+}
+float sobol01(uint index, uint dim, uint seed) {
+  uint x = bitfieldReverse(index);
+  if (dim == 1u) {
+    x = 0u;
+    uint v = 0x80000000u;
+    for (uint n = index; n != 0u; n >>= 1) {
+      if ((n & 1u) != 0u) x ^= v;
+      v ^= v >> 1;
+    }
+  }
+  x = bitfieldReverse(lk_hash(bitfieldReverse(x), pcg_hash(pcg_hash(seed) + dim * 0x9E3779B9u)));
+  return float(x >> 8) * (1.0 / 16777216.0);
+}
 /* A point on a unit aperture: a disk, or a regular polygon (Cycles: regular_polygon_sample). */
 vec2 sample_aperture(float u, float v, int blades, float rotation) {
   if (blades < 3) {
@@ -711,6 +733,67 @@ float mesh_light_pdf(uint li, float dist, float cos_light) {
   MeshLight l = mlights[li];
   return cos_light > 1e-6 ? (l.power / P.settings.w) * dist * dist / (l.area * cos_light) : 0.0;
 }
+/* Round 464 (ADR 0121): the light tree, as LightTree on the CPU (light_tree.cpp - the same formulas, so the card picks
+ * as the CPU does). P.misc.w nodes of 16 floats follow the power CDF in mcdf, then each emitter's leaf; 0 nodes: by
+ * power. Iterative, one emitter a leaf, at most 64 deep (the build caps it). */
+float lt_f(int node, int k) { return mcdf[P.counts.y + node * 16 + k]; }
+int lt_i(int node, int k) { return int(floatBitsToUint(lt_f(node, k))); }  // (floatBitsToUint: the OptiX translation has it)
+float lt_importance(int node, vec3 p, vec3 nrm, bool has_n) {  // (cosines only, as LightTree::importance)
+  float power = lt_f(node, 7), r2 = lt_f(node, 3);
+  if (!(power > 0.0)) return 0.0;
+  vec3 to_c = vec3(lt_f(node, 0), lt_f(node, 1), lt_f(node, 2)) - p;
+  float d2 = dot(to_c, to_c);
+  if (!(d2 > r2)) return power / max(r2, 1e-12);
+  vec3 w = to_c * (1.0 / sqrt(d2));
+  float sin_u2 = r2 / d2, sin_u = sqrt(sin_u2), cos_u = sqrt(max(0.0, 1.0 - sin_u2));
+  float cos_i = 1.0;
+  if (has_n) {
+    float ci = dot(nrm, w), si = sqrt(max(0.0, 1.0 - ci * ci));
+    cos_i = ci >= cos_u ? 1.0 : ci * cos_u + si * sin_u;
+    if (!(cos_i > 0.0)) return 0.0;
+  }
+  float ct = dot(vec3(lt_f(node, 4), lt_f(node, 5), lt_f(node, 6)), -w);
+  if (lt_f(node, 10) > 0.5) ct = abs(ct);
+  float st = sqrt(max(0.0, 1.0 - ct * ct)), co = lt_f(node, 8), so = lt_f(node, 9);
+  float c1 = ct >= co ? 1.0 : ct * co + st * so, s1 = ct >= co ? 0.0 : st * co - ct * so;
+  float c2 = c1 >= cos_u ? 1.0 : c1 * cos_u + s1 * sin_u;
+  if (!(c2 > 0.0)) return 0.0;
+  return power * cos_i * c2 / d2;
+}
+float lt_left(int node, vec3 p, vec3 nrm, bool has_n) {
+  int l = lt_i(node, 12), r = lt_i(node, 13);
+  float il = lt_importance(l, p, nrm, has_n), ir = lt_importance(r, p, nrm, has_n);
+  if (isnan(il) || isinf(il)) il = 0.0;
+  if (isnan(ir) || isinf(ir)) ir = 0.0;
+  if (!(il + ir > 0.0)) { il = lt_f(l, 7); ir = lt_f(r, 7); }
+  return il / (il + ir);
+}
+int lt_sample(vec3 p, vec3 nrm, float u, out float pmf) {
+  pmf = 1.0;
+  int at = 0;
+  for (int depth = 0; depth < 64 && lt_i(at, 12) >= 0; depth++) {
+    float pl = lt_left(at, p, nrm, true);
+    if (u < pl) { u = min(u / pl, 0.99999994); pmf *= pl; at = lt_i(at, 12); }
+    else { u = min((u - pl) / (1.0 - pl), 0.99999994); pmf *= 1.0 - pl; at = lt_i(at, 13); }
+  }
+  return lt_i(at, 12) >= 0 ? -1 : lt_i(at, 14);
+}
+float lt_pmf(int li, vec3 p, vec3 nrm, bool has_n) {
+  int at = int(floatBitsToUint(mcdf[P.counts.y + int(P.misc.w) * 16 + li]));
+  if (at < 0) return 0.0;
+  float pmf = 1.0;
+  for (int depth = 0; depth < 64 && lt_i(at, 15) >= 0; depth++) {
+    int up = lt_i(at, 15);
+    float pl = lt_left(up, p, nrm, has_n);
+    pmf *= lt_i(up, 12) == at ? pl : 1.0 - pl;
+    at = up;
+  }
+  return pmf;
+}
+/* The pick's probability from p (the tree's, or by power). */
+float mesh_light_pick(uint li, vec3 p, vec3 nrm, bool tree) {
+  return tree && P.misc.w > 0.5 ? lt_pmf(int(li), p, nrm, true) : mlights[li].power / P.settings.w;
+}
 int find_mesh_light(uint obj, uint prim) {
   /* Round 439: a binary search - the emitters are in (object, triangle) order (collect_mesh_lights), and with Unlit
    * surfaces there can be many. */
@@ -726,6 +809,7 @@ int find_mesh_light(uint obj, uint prim) {
 )GLSL",
 R"GLSL(
 /* ----------------------------------------------------------- integrator */
+vec3 g_first_n = vec3(0.0, 1.0, 0.0);  // round 464: the texel's normal (the light tree's pick at the texel depends on it)
 float g_first_pdf = 0.0;  // a bake gather's cosine pdf: its first emissive hit is weighted against the texel's emitter sampling (task 0157; a file-scope value, not a parameter: the kernel is at SPIR-V's id bound)
 vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 normal_out, out float depth_out, out float id_out, bool camera) {
   id_out = 0.0;
@@ -733,6 +817,8 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
   float clamp_ind = P.settings.x;
   float last_pdf = g_first_pdf;
   float since_scatter = 0.0;  // the distance since that direction was chosen (see-through passes add to it)
+  vec3 sc_p = ro, sc_n = g_first_n;  // round 464: where that direction was chosen and its normal (the emitter pick's)
+  bool sc_tree = g_first_pdf > 0.0;  // (the tree picked there: a texel, or a camera ray's first hit - as the CPU's trace)
   int see_through_hits = 0, glass_hits = 0;
   bool camera_path = camera;  // the camera ray (see-through passes keep it; glass ends it; a bake's gather isn't one)
   albedo_out = vec3(0.0);
@@ -804,7 +890,10 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     float w_emit = 1.0;
     if (last_pdf > 0.0 && P.counts.y > 0 && luminance(s.unlit ? s.emission + s.albedo : s.emission) > 0.0) {
       int li = find_mesh_light(h.obj, h.prim);
-      if (li >= 0) { float pl = mesh_light_pdf(uint(li), since_scatter + h.t, cos_hit); w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl); }
+      if (li >= 0) {
+        float pl = cos_hit > 1e-6 ? mesh_light_pick(uint(li), sc_p, sc_n, sc_tree) * (since_scatter + h.t) * (since_scatter + h.t) / (mlights[li].area * cos_hit) : 0.0;
+        w_emit = last_pdf * last_pdf / (last_pdf * last_pdf + pl * pl);
+      }
     }
     c0 = beta * s.emission * w_emit;
     if (bounce > 0 && clamp_ind > 0.0) { float mx = max(c0.x, max(c0.y, c0.z)); if (mx > clamp_ind) c0 *= clamp_ind / mx; }
@@ -952,9 +1041,18 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     }
     /* Mesh lights with MIS. */
     if (P.counts.y > 0) {
-      float r = rnd(rng) * P.settings.w;
-      int lo = 0, hi = P.counts.y - 1;
-      while (lo < hi) { int mid = (lo + hi) / 2; if (mcdf[mid] > r) hi = mid; else lo = mid + 1; }
+      float pick = 0.0;
+      int lo = 0;
+      if (P.misc.w > 0.5 && camera_path && bounce == 0) {  // (round 464: by the light tree from a camera ray's first hit)
+        lo = lt_sample(origin, n, rnd(rng), pick);
+      }
+      else {
+        float r = rnd(rng) * P.settings.w;
+        int hi = P.counts.y - 1;
+        while (lo < hi) { int mid = (lo + hi) / 2; if (mcdf[mid] > r) hi = mid; else lo = mid + 1; }
+        pick = mlights[lo].power / P.settings.w;
+      }
+      if (lo < 0) { lo = 0; pick = 0.0; }
       uint li = uint(lo);
       float su = rnd(rng), sv = rnd(rng);
       if (su + sv > 1.0) { su = 1.0 - su; sv = 1.0 - sv; }
@@ -965,7 +1063,7 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
       if (dist > 1e-5) {
         vec3 dir = dd / dist;
         float cos_l = abs(dot(lp.geo_normal, dir));
-        float pl = mesh_light_pdf(li, dist, cos_l);
+        float pl = cos_l > 1e-6 ? pick * dist * dist / (mlights[li].area * cos_l) : 0.0;
         if (pl > 0.0 && dot(n, dir) > 0.0 && dot(sp.geo_normal, dir) > 0.0) {
           vec3 Tr = transmittance(origin, dir, dist * (1.0 - 1e-4));
           if (max(Tr.x, max(Tr.y, Tr.z)) > 0.0) {
@@ -1010,6 +1108,9 @@ vec3 trace(vec3 ro, vec3 rd, inout uint rng, out vec3 albedo_out, out vec3 norma
     beta *= bsdf_any(toon, s, n, V, dir) / pdf;
     last_pdf = pdf;
     since_scatter = 0.0;
+    sc_p = origin;
+    sc_n = n;
+    sc_tree = camera_path && bounce == 0;
     if (bounce >= 3) {
       float q = min(0.95, max(beta.x, max(beta.y, beta.z)));
       if (rnd(rng) > q) break;
@@ -1032,7 +1133,7 @@ void main() {
    * once, not twice (task 0157: the software-BVH variant had reached SPIR-V's id bound, 4,194,303, and a second copy
    * no longer fit; one copy leaves room). Baking (task 0018): one point per invocation, its origin in Aux [0, n) and
    * its normal (mode 1: cosine-weighted directions around it) or its direction (mode 2) in Aux [n, 2n). The radiance
-   * arriving there adds up in Accum; w counts the paths whose first ray hit something. */
+   * arriving there adds up in Accum; w counts the paths whose first ray hit something (mode 2; mode 1 sums the squared luminance - round 466). */
   const bool bake = P.env_i.z != 0;
   int i = px.y * W + px.x;
   if (bake && i >= P.env_i.w) return;
@@ -1052,12 +1153,21 @@ void main() {
       ro = o;
       rd = nd;
       if (P.env_i.z == 1) {
-        float r1 = rnd(rng), r2 = rnd(rng), r = sqrt(r1), phi = 6.28318530718 * r2;
+        float r1, r2;
+        if (P.lens.x > 0.5) { r1 = rnd(rng); r2 = rnd(rng); }  // (the `lighting sampler random` measurement)
+        else {
+          uint sseed = pcg_hash(uint(i + int(P.cam_pos.w)) * 9781u + 5u);  // the texel's own sequence, its sample number the index
+          r1 = sobol01(uint(s), 0u, sseed);
+          r2 = sobol01(uint(s), 1u, sseed);
+        }
+        float r = sqrt(r1), phi = 6.28318530718 * r2;
         vec3 t, b;
         onb(nd, t, b);
         rd = normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + nd * sqrt(max(0.0, 1.0 - r1)));
       }
-      g_first_pdf = (P.env_i.z == 1 && P.misc.y > 0.5) ? max(dot(nd, rd), 0.0) / 3.14159265 : 0.0;
+      /* misc.y: the gather's rays for each of the texel's own emitter samples (round 464: MIS with the counts; 0 off). */
+      g_first_pdf = (P.env_i.z == 1 && P.misc.y > 0.0) ? max(dot(nd, rd), 0.0) / 3.14159265 * P.misc.y : 0.0;
+      g_first_n = nd;
     }
     else {
       rng = pcg_hash(uint(i) * 9781u + uint(s) * 6271u + 1u);
@@ -1083,7 +1193,7 @@ void main() {
     vec3 c = trace(ro, rd, rng, alb, nrm, dep, hit_id, !bake);
     if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
     if (bake) {
-      sum += vec4(c, dot(nrm, nrm) > 0.25 ? 1.0 : 0.0);
+      sum += vec4(c, P.env_i.z == 1 ? luminance(c) * luminance(c) : (dot(nrm, nrm) > 0.25 ? 1.0 : 0.0));  // (w: mode 1 the squared luminance - round 466's variance; mode 2 a hit)
       continue;
     }
     csum += c;

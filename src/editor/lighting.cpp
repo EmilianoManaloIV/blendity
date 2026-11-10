@@ -416,6 +416,11 @@ void Editor::bake_start() {
   s.directional = ls.directional_mode != 0;  // (round 426)
   s.lighting_mode = ls.lighting_mode;  // (round 444)
   s.backface_tolerance = finite_bits(ls.backface_tolerance) ? std::max(0.0f, std::min(1.0f, ls.backface_tolerance)) : 0.9f;  // (round 430)
+  s.sobol = bake_sobol_;  // (round 465: unbiased either way, so not in the scene key)
+  s.denoiser = bake_variance_denoiser_ ? 1 : 0;  // (round 466: filtering happens at the end - not in the scene key)
+  s.light_tree = bake_light_tree_;  // (round 464: unbiased either way, so not in the scene key)
+  s.seed = bake_seed_;  // (round 463: the texels, the card's gather and the probes all draw from it)
+  if (s.seed) Log::info("Generate Lighting: seed %u (`lighting seed 0` for the normal bake)", s.seed);
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
@@ -533,7 +538,7 @@ void Editor::bake_job_run(BakeJob &j) {
         /* On a GPU about 8M rays a slice (their points go up at once: memory), on the CPU 1,024 probes. */
         const size_t slice = std::min<size_t>(n - next, gpu >= 0 ? std::max<size_t>(1, ((size_t)8 << 20) / (size_t)psamples) : 1024);
         std::string gerr;
-        probe_bake(pv, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr, &j.env);
+        probe_bake(pv, pt, j.lights, psamples, j.bounces, next, slice, j.indirect_intensity, gpu, &gerr, &j.env, j.settings.seed);
         if (!gerr.empty()) {
           Log::warn("Baking probes on the GPU stopped (%s): the CPU bakes the rest", gerr.c_str());
           gpu = -1;

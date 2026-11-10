@@ -46,4 +46,4 @@ Perlin, Meyer et al., Welman, Jakobsen, Kugelstadt and Schömer, Macklin et al.,
 Jimenez, McTaggart, Kajiya and Kay, Motomura (Arc System Works), Brown, Sutherland and Hodgman, Hammersley, Lorensen
 and Cline, Shoemake, Phong, Igarashi et al., Chen et al. (3-Sweep), Gryaditskaya et al. and Hähnlein et al., Jacobson
 et al., Gibson, Huang et al. (QuadriFlow), Baxter et al. (IMPaSTo), Abdrashitov et al., Oreshkin et al. (ProtoRes),
-Okabe and Ito. Thank you.
+Burley (hash-based Owen-scrambled Sobol samples: the method only, no code copied), Okabe and Ito. Thank you.

@@ -235,6 +235,72 @@ void Editor::save_shown_lighting(const std::string &folder, bool overwrite) {
   Log::info("lighting save: %zu page(s), %zu object(s) (%s's lightmaps) in %s", ld.pages.size(), ld.entries.size(), lighting_from_unity_ ? "Unity" : "Blendity", dir.c_str());
 }
 
+/* Round 463 (task 0439): `lighting noise <folder A> <folder B>` - two saved bakes of one scene at different seeds: the grain and
+ * blotch numbers (lightmap_noise) printed, and written as noise.json inside B. */
+static void noise_part_json(JsonWriter &w, const LightmapNoise::Part &p) {
+  w.key("grain").num(p.grain).key("blotch").num(p.blotch).key("texels").integer((int64_t)p.texels).key("dark").boolean(p.dark);
+}
+
+static std::string noise_part_text(const LightmapNoise::Part &p) {
+  if (p.dark) return strprintf("dark (%zu texels)", p.texels);
+  return strprintf("grain %.4f  blotch %.4f  (%zu texels)", p.grain, p.blotch, p.texels);
+}
+
+/* A worst object's |a - b| as a grey picture beside noise.json (one noise step of the mean light over all pages is half grey), enlarged up to 4x but never past 2048 px a side (a whole wall chart would be a 256 MB picture); true when written. */
+static bool write_noise_picture(const std::string &path, const LightmapNoise::Object &o, double mean_light) {
+  if (o.diff.empty() || o.w <= 0 || o.h <= 0) return false;
+  const int S = std::max(1, std::min(4, 2048 / std::max(o.w, o.h)));
+  const float scale = mean_light > 1e-6 ? 0.5f / (float)mean_light : 1.0f;
+  std::vector<uint32_t> px((size_t)o.w * S * o.h * S);
+  for (int y = 0; y < o.h * S; y++)
+    for (int x = 0; x < o.w * S; x++) {
+      const uint32_t v = (uint32_t)std::min(255.0f, o.diff[(size_t)(y / S) * o.w + (size_t)(x / S)] * scale * 255.0f);
+      px[(size_t)y * o.w * S + x] = 0xFF000000u | v << 16 | v << 8 | v;
+    }
+  return write_png(path, px.data(), o.w * S, o.h * S, o.w * S);
+}
+
+void Editor::lighting_noise_command(const std::string &folder_a, const std::string &folder_b) {
+  if (folder_a.empty() || folder_b.empty()) return Log::warn("lighting noise: give two folders saved with `lighting save` (a relative one is the project's)");
+  auto resolve = [&](const std::string &f) { return std::filesystem::u8path(f).is_absolute() ? f : fs::join(project_root_, f); };
+  const std::string dir_a = resolve(folder_a), dir_b = resolve(folder_b);
+  LightingData a, b;
+  std::string err;
+  if (!a.load(dir_a, err)) return Log::error("lighting noise: %s: %s", dir_a.c_str(), err.c_str());
+  if (!b.load(dir_b, err)) return Log::error("lighting noise: %s: %s", dir_b.c_str(), err.c_str());
+  const LightmapNoise n = lightmap_noise(a, b);
+  if (!n.ok) return refuse("lighting noise: the two bakes don't line up - " + n.error, "", "");
+  Log::info("lighting noise: all pages %s", noise_part_text(n.all).c_str());
+  for (size_t p = 0; p < n.pages.size(); p++) Log::info("lighting noise: page %zu %s", p, noise_part_text(n.pages[p]).c_str());
+  int picture = 0;
+  for (const LightmapNoise::Object &o : n.worst) {
+    const GameObject *g = scene_->find(o.id);
+    Log::info("lighting noise: worst object %s (page %d) %s", g ? g->name.c_str() : std::to_string(o.id).c_str(), o.page, noise_part_text(o).c_str());
+    if (write_noise_picture(fs::join(dir_b, strprintf("noise_worst_%d.png", picture + 1)), o, n.all.mean_light)) picture++;
+  }
+  if (n.skipped) Log::info("lighting noise: %zu texel(s) left out (NaN or negative)", n.skipped);
+  JsonWriter w;
+  w.obj().key("all").obj();
+  noise_part_json(w, n.all);
+  w.end().key("pages").arr();
+  for (const LightmapNoise::Part &p : n.pages) {
+    w.obj();
+    noise_part_json(w, p);
+    w.end();
+  }
+  w.end().key("worst").arr();
+  for (const LightmapNoise::Object &o : n.worst) {
+    const GameObject *g = scene_->find(o.id);
+    w.obj().key("id").str(std::to_string(o.id)).key("name").str(g ? g->name : std::string()).key("page").integer(o.page);
+    noise_part_json(w, o);
+    w.end();
+  }
+  w.end().key("skipped").integer((int64_t)n.skipped).end();
+  const std::string out = fs::join(dir_b, "noise.json");
+  if (!fs::write_file(out, w.out)) return Log::error("lighting noise: could not write %s", out.c_str());
+  Log::info("lighting noise: written to %s", out.c_str());
+}
+
 void Editor::load_light_volume_bakes(const std::string &dir) {
   const std::string path = fs::join(dir, kBakesFile);
   std::string err;
