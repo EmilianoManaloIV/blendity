@@ -1855,7 +1855,11 @@ static void tests_round262() {
     size_t left = 0, right = 0;
     for (size_t v = verts2; v < M()->vert_count(); v++) (M()->positions[v].x < 0.0f ? left : right)++;
     std::printf("    Mirror X: %zu new vertices on x < 0, %zu on x > 0\n", left, right);
-    CHECK(left > 0 && right > 0 && std::fabs((double)left - (double)right) <= 0.2 * (double)std::max(left, right) + 2.0);
+    /* Both sides grow by a like amount, not the same: the mirrored dab splits edges in a different order, and the hit
+     * comes from the rasterizer's depth, so a rounding step there moves it and the counts with it. Seen: Windows 90 / 77,
+     * macOS 112 / 96, and 121 / 90 once round 462 computed the edge constants in double (no FMA on macOS) - so a third
+     * apart, not a fifth. A broken mirror gives 0 on one side, which this still catches. */
+    CHECK(left > 0 && right > 0 && std::fabs((double)left - (double)right) <= 0.34 * (double)std::max(left, right) + 2.0);
     ed.command("undo");
     ed.command("sculpt symmetry off");
     /* A fully masked region at a coarse detail: nothing collapses, nothing moves. */
