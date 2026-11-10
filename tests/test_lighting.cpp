@@ -11467,6 +11467,7 @@ static void tests_round486() {
   });
   test("`lighting variancescale` (round 486): a word that is not one of its own warns and the setting stays, whichever it was", [] {
     Editor ed;
+    r464::lamp_scene(ed);  // (a console command needs a scene: without one the sanitizers' job stops at sketch_doc())
     const char *junk[] = {"lighting variancescale 1", "lighting variancescale yes", "lighting variancescale -1", "lighting variancescale nan", "lighting variancescale aut", "lighting variancescale on,off"};
     for (const char *held : {"auto", "on", "off"}) {
       ed.command(std::string("lighting variancescale ") + held);
@@ -11621,6 +11622,7 @@ static void tests_round486_independent() {
     CHECK(r463::join_log(mark).find("read as `lighting variancescale") == std::string::npos);
     ed.command("lighting variancescale step");
     Editor fresh;
+    r464::lamp_scene(fresh);  // (as above: a command needs a scene)
     mark = r463::log_mark();
     fresh.command("lighting variancescale");
     CHECK(r463::join_log(mark).find("lighting variancescale: auto (the normal bake)") != std::string::npos);
