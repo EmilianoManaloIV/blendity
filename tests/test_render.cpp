@@ -12266,6 +12266,39 @@ static void tests_round334() {
   });
 }
 
+/* ---- Round 462 (CI, linux-sanitizers): screen coordinates past int range ---- */
+static void tests_round462() {
+  test("rasterizer: a face reaching billions of pixels past the screen (a huge quad right in front of the camera) draws where it covers the screen, with no screen coordinate overflowing an int", [] {
+    const MeshPtr huge = primitives::quad(2.0e9f);
+    Image img;
+    img.resize(32, 32);
+    RenderTarget rt;
+    rt.attach(img, {0, 0, 32, 32});
+    Renderer3D r;
+    RasterOptions opt;
+    opt.shade = ShadeMode::Deferred;
+    LightingEnv env;
+    env.view_transform = ViewTransform::Standard;
+    env.camera_pos = {0, 0, -3};
+    MaterialPtr red = make_material("red", {1, 0, 0});
+    red->unlit = true;
+    std::vector<MaterialPtr> mats = {red};
+    r.begin(&rt, Mat4::look_at({0, 0, -3}, {0, 0, 0}, {0, 1, 0}), Mat4::perspective(30 * kDeg2Rad, 1, 0.1f, 10), env, opt);
+    r.clear(0xFFFFFFFF);
+    DrawItem it;
+    it.mesh = &huge->render_mesh_tangents();
+    it.materials = &mats;
+    it.double_sided = true;
+    r.add(it);
+    r.flush();
+    size_t red_pixels = 0;
+    for (uint32_t p : img.pixels) red_pixels += ((p >> 16) & 255) > 200 && ((p >> 8) & 255) < 60 ? 1 : 0;
+    std::printf("    a 2e9 quad 3 units away: %zu of %zu pixels red, depth at the centre %.3f\n", red_pixels, img.pixels.size(), (double)rt.depth_at(16, 16));
+    CHECK(red_pixels == img.pixels.size());  // (it covers the whole view; sanitizer builds catch an overflowing cast)
+    CHECK(std::isfinite(rt.depth_at(16, 16)));
+  });
+}
+
 void run_render_tests() {
   colormanagement_tests();
   render_tests();
@@ -12319,4 +12352,5 @@ void run_render_tests() {
   tests_round342();
   tests_round343();
   tests_round341();
+  tests_round462();
 }

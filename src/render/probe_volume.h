@@ -100,7 +100,8 @@ void probe_validate(ProbeVolumeData &d, const PathTracer &pt, int rays);
  * slices); the slice that finishes the last probe also dilates (probe_dilate). `indirect_intensity` as the lightmaps'. */
 void probe_bake(ProbeVolumeData &d, const PathTracer &pt, const std::vector<BakeLight> &lights, int samples, int bounces, size_t start = 0,
                 size_t count = SIZE_MAX, float indirect_intensity = 1.0f, int gpu_device = -1, std::string *gpu_error = nullptr,
-                const Environment *env = nullptr);  // (round 453: `env` - the world the probes' SH are baked under - is kept for a sky change)
+                const Environment *env = nullptr,  // (round 453: `env` - the world the probes' SH are baked under - is kept for a sky change)
+                uint32_t seed = 0);                // (round 463: another seed draws other rays - `lighting seed`, the noise measurement)
 /* Round 455 (ADR 0119): a volume over probes placed by hand (a Light Probe Group's, Unity's lighting file's), as Unity
  * interpolates them: a grid placed round the points, each of its probes taking the four of the tetrahedron it lies in by
  * barycentric weights, or the nearest four outside the points' hull. `sh` (or empty, the cubes alone) and `cubes` are one

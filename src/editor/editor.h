@@ -1558,6 +1558,7 @@ class Editor {
   /* Round 451 (task 0427): `lighting save <dir>` - the shown lightmaps (Blendity's bake or Unity's) written as a bake's
    * folder is (LightingData.bin, Lightmap-N.hdr) plus objects.json: each entry's object id, hierarchy path and triangle
    * count, so tools/unity_compare.py can pair Blendity's pages with Unity's object by object. */
+  void lighting_noise_command(const std::string &folder_a, const std::string &folder_b);  // (round 463: `lighting noise`)
   void save_shown_lighting(const std::string &dir, bool overwrite = false);  // (review 451: a relative folder is the project's; a bake there needs `overwrite`)
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
@@ -5695,6 +5696,10 @@ class Editor {
   VoxelGiGpu *gi_gpu(VoxelGIState &st);
   bool gi_gpu_failed_ = false;
   int gi_gpu_device_seen_ = 0;
+  bool bake_sobol_ = true;       // round 465 (`lighting sampler sobol|random`): a texel's samples from Owen-scrambled Sobol - a comparison switch, not saved
+  bool bake_variance_denoiser_ = true;  // round 466 (`lighting denoiser variance|atrous`): the filter guided by measured noise - a comparison switch, not saved
+  bool bake_light_tree_ = true;  // round 464 (`lighting tree on|off`): emitters picked by a light tree - a comparison switch, not saved
+  uint32_t bake_seed_ = 0;  // round 463 (`lighting seed <n>`): a measurement setting - not saved, not in the scene key; 0 the normal bake
   int bake_gpu_ = -1;  // task 0018: the GPU Generate Lighting gathers on (Render > Device: GPU Compute), -1 the CPU
   std::string gi_gpu_name_;  // the device in use, for the Lighting window
   bool rtlm_busy_ = false;  // a realtime lightmap pass is still gathering

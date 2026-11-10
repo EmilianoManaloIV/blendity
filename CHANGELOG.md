@@ -38,6 +38,186 @@ there. Solve Mesh's F9 panel has no drag helper (the fields are the whole interf
 
 **Checked:** both suites - with Blender's libraries 20,551; dependency-free 19,636 (Windows) and 19,642 (Linux, WSL), 0 failed; the audits; stress on Linux - `curved` 5,036 / 3 / 68, `pushpull` 26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0 (the same as main); the projected-draw block 236 draws, 82 refused, 0 problems, 0 doubled vertices or edges after drawing; the 51k-face teapot cut 480 ms, cleanup 8 ms, guard 28 ms.
 
+## 2026-11-09 (round 466): a denoiser driven by measured noise
+
+**Asked (Pass 21, task 0442, ADR 0122):** the bake's filter assumed how noisy each texel was (a formula of the sample
+count) - blotches larger than that survived as "edges", quiet areas were blurred for nothing, the lights kept by chance
+skipped the clamp, and the direct light got a radius-1 blur that smeared sharp shadows. Filter each texel by its own
+measured noise, at the same bake time.
+
+**Added**
+- **Each texel's variance, measured while baking** (`bake_texel`'s `var_out`): the gather's, the emitters' and the sky's
+  from their own samples (running sums, nothing stored); a light kept by chance from its estimate, est^2 (1/p - 1), for
+  every candidate; the direct lights' shadow-ray visibility, v (1 - v) / k; on the card, the gather's samples' mean
+  square (`gpu_gather`'s `sq`, the accumulator's spare channel - the PTX regenerated). With Sobol the gather's measured
+  variance is scaled down (its stratified mean beats its spread); under 16 samples the gather's is floored.
+- **The variance-guided A-Trous** (`svgf_atrous`, after SVGF): five passes at steps 1-16, a tap's weight by the facing, the
+  world distance and the luminance difference over 4 of the texel's own standard deviations (its variance blurred 3 x 3),
+  the variance filtered along; a page stops when its mean relative noise is under 0.5 %. The indirect light (gather, sky,
+  emitters, lights kept by chance) and the direct light are filtered apart, each by its own noise: a texel with none - a
+  sun shadow decided by one ray - passes unchanged.
+- **The firefly clamp gated by the noise, on the gather:** a texel past 8 times its neighbours' mean is brought down only
+  when the excess is within 4 of its own deviations (a lucky ray; a steady glow stays). The emitters and the lights kept
+  by chance are not clamped - cutting their rare large values biased the mean - the filter spreads them instead.
+- OIDN's lightmap filter stays first where linked; `lighting denoiser variance|atrous` (a measurement setting) bakes with
+  round 423's filter for comparison. Learn: the filter's paragraph, two questions, Try-its 10-11.
+
+**Results**
+- `lightmap_quality` (full run, round 465 -> 466, same samples): relative RMSE room 0.016 -> 0.013, corridor 0.006 ->
+  0.004, tunnel 0.127 -> 0.103, courtyard 0.059 -> 0.007 (its sun shadows no longer blurred); grain room 0.0139 -> 0.0084,
+  tunnel 0.101 -> 0.062; bias corridor 0.0022 -> -0.0003.
+- **SideRail on the card (chain 466, nothing else running): grain 0.513 -> 0.382 (-26 %), blotch 0.273 -> 0.251 (-8 %)** - task 0442's further -50 % is **not met**; over Pass 21 (round 463's baseline -> 466) grain 5.455 -> 0.382 (-93 %), blotch 1.242 -> 0.251 (-80 %), at the same 39 s. The filter and dilation take 2,255 ms (round 423's 2,070 ms; the spec's 2 s budget is missed by 0.26 s - five indirect passes took 3.4 s, so four, and a square root a tap went). The stations improve: floor MAE / SSIM 3.35 / 0.817 -> 3.04 / 0.844, ahead 2.29 / 0.934 -> 2.25 / 0.936 (passes), side_bar_high 6.75 / 0.853 -> 6.64 / 0.863, side_tunnel_eye 6.10 / 0.876 -> 5.97 / 0.885; the owner's two views lose most of their floor speckle and sofa spots, a few remain.
+
+**Checked:** the suites - Windows dependency-free 20,128 checks, 0 failed; with Blender's libraries 21,041 (the four worktree `gpu` picture comparisons, as before; the card's mean-square variance test passes there - 2.672e-4 against 2.637e-4 across points); Linux 20,134, 0 failed. `tests_round466` (15 tests: grain falls 5.7-41x through the filter, a noiseless page unchanged, a contact shadow's edge, a colour bleed and a lamp's glow kept, fireflies, the measured variance against 24 seeds' spread 0.93-0.98x and the 40 chance-kept lamps' 0.96x, the Sobol scale, robustness, `lighting denoiser`). Stress `lightmap_quality` (full run): relative RMSE room 0.013, corridor 0.004, tunnel 0.103, courtyard 0.007; bias at most 0.0007. Review: changes needed (the Sobol scale on random parts, a page-wide stop, the time, AC1 untested, an asymmetric edge-stop that darkened gradients) then approved.
+
+## 2026-11-09 (round 465): samples spread evenly - Owen-scrambled Sobol
+
+**Asked (Pass 21, task 0441):** the bake's random numbers were plain xorshift: a texel's 512 gather directions clump in
+places and leave gaps in others, and so do its emitter and sky samples. Draw them from an Owen-scrambled Sobol sequence
+so the same rays give less noise.
+
+**Added**
+- **`render/sampler.h`**: `sobol_burley(index, dim, seed)` (Burley 2020, "Practical Hash-based Owen Scrambling": written
+  from the paper, no code copied - the first four dimensions of Sobol's sequence, Laine-Karras nested uniform scrambling
+  by a hash of (seed, dimension)) and `TexelSampler`, one stream a purpose, each with its own seed from the texel's.
+  The first 2^k points of a stream's dimensions (0, 1) hold exactly one point in every elementary interval of area 2^-k
+  (tested for k = 4 to 10, every shape); 300 points still put 4 or 5 in each cell of an 8 x 8 grid.
+- **Where it draws:** a texel's gather directions, its emitter pick (the light tree's u) and point on the triangle (the
+  square mapped onto it without the old fold, so its spread survives), its sky samples, and each sized light's shadow
+  points (a stream a light, replacing the jittered grid and its shift). Seeded from the texel's own seed and
+  `BakeSettings::seed`, so `lighting seed` still gives independent samples. Deeper bounces keep xorshift. The MIS weights
+  are as in round 464, only the numbers changed. The card's first-bounce direction is the same function in the kernel
+  (`sobol01`, with GLSL `bitfieldReverse` / CUDA `__brev` added to the OptiX shim) - the PTX is regenerated.
+- **`lighting sampler sobol|random`** (a measurement setting like `lighting tree`: not saved, not in the scene key) and
+  the stress rows "sampler (256 samples, filter on)" - sobol against random on all four scenes.
+- **Learn:** "A bake's noise, measured" gains the spread samples - a paragraph, two questions, Try-its 8 and 9.
+
+**Changed**
+- No per-dimension index shuffle (Burley's padding for dimensions past the first four): a shuffle that keeps a prefix's
+  set cannot decorrelate two streams, and one that doesn't gives up each stream's stratification. Each purpose takes its
+  own seed over the same first dimensions, every dimension its own scramble: the streams' errors are independent in
+  expectation (their covariance is zero over the seeds; the tests' mean r is -0.009 over 256 seeds) and each keeps its
+  full net. Sobol's dimensions 2 and 3 are not used (the pair is not a (0, 2) net).
+- **The probes keep their Fibonacci spiral.** Measured at 16 to 300 rays, 2,000 rotations / seeds, the mean of z^2,
+  (1 - z^2) cos 2 phi and x z over the sphere: the turned Fibonacci lattice's RMS error is 5 to 100 times Sobol's (N = 64:
+  0.00008 against 0.00130, 0.00052 against 0.01353, 0.00064 against 0.00640), and with Sobol's rays the round 398 Light
+  Volume test (L1 within 10 % of the scene's probes) failed. The task's probe item is not done, for that reason.
+
+**Results** (`--quick --only lightmap_quality`: reference 4 x fewer samples than the full run, so every RMSE is flattered
+by the reference's own noise, but the sobol and random bakes share it; 256 indirect samples, filter on)
+
+| scene | bake ms random / sobol | relative RMSE | bias | grain | blotch |
+|---|---|---|---|---|---|
+| room (area light) | 897 / 882 | 0.017 / 0.015 | 0.0011 / 0.0012 | 0.0102 / 0.0064 | 0.0036 / 0.0028 |
+| corridor (8 points) | 1,260 / 1,286 | 0.008 / 0.006 | 0.0023 / 0.0022 | 0.0049 / 0.0020 | 0.0015 / 0.0007 |
+| tunnel (lamps) | 4,287 / 4,239 | 0.147 / 0.133 | 0.0000 / -0.0001 | 0.1122 / 0.0932 | 0.0253 / 0.0225 |
+| courtyard (sun, sky) | 242 / 253 | 0.060 / 0.059 | 0.0012 / 0.0011 | 0.0083 / 0.0042 | 0.0025 / 0.0013 |
+
+Relative RMSE falls on every scene (mean -12 %), grain by 17 to 59 %, bias moves by under 0.0002, bake time within +-5 %
+(the corridor +2 %, the courtyard +5 %, in a quick run's noise).
+
+- **SideRail on the card (chain 465): grain 5.455 -> 0.513 (-91 %), blotch 1.242 -> 0.273 (-78 %)** - page 1, where the sparse very bright texels were, 17.5 -> 1.06; page 0's grain unchanged (0.41 -> 0.42) and its blotch up 0.10 -> 0.22 (the filter's tighter Sobol edge-stop smooths less; round 466 replaces it by measured noise). Bake 39 s (lightmaps 36.6 s), stations within +-0.06 MAE and 0.002 SSIM of round 464 (side_bar_high 6.75 / 0.853, side_tunnel_eye 6.10 / 0.876). lightmap_quality's gains mix the sampler and the edge-stop change (no row separates them).
+
+**Found**
+- Sobol makes the bake so clean that the A-Trous filter (the build without OIDN) becomes its largest error at 512
+  samples: the round 423 test "lightmap denoiser" - the filter must not make a long bake worse - reads 0.0036 unfiltered
+  against 0.0056 filtered (it was noise-dominated before). **Fixed:** the filter's colour edge-stop assumed the noise falls
+  as 2 / sqrt(samples); with Sobol it is 2 / samples^0.75 (16 samples: 0.25 against 0.5; 512: 0.04 against 0.088), and
+  the test passes unchanged: 0.0036 raw, 0.0034 filtered; at 16 samples 0.0345 -> 0.0140. Round 466 replaces the formula
+  by each texel's measured noise.
+
+**Checked:** the suites - Windows dependency-free 20,029 checks, 0 failed; with Blender's libraries 20,939 (the four worktree `gpu` picture comparisons, as rounds 463-464; the card's Sobol gather test passes there); Linux 20,035, 0 failed; `tests_round465` (8 tests: the net property of the stream pairs, dimension means / determinism, an uneven
+count's spread and the streams' correlation, a lone plane under a gradient sky baking to its exact value 0.36 within 3
+standard errors with Sobol and random, the lamps scene bit for bit twice on the CPU, `lighting sampler`). The `lighting`
+group: 8,668 checks, 0 failed (the denoiser test above passes with the edge-stop fix). `test_coverage_map --check` finds no gap.
+
+## 2026-11-08 (round 464): a light tree picks the emitters
+
+**Asked (Pass 21, task 0440, ADR 0121):** every texel - and every bounce of the path tracer - picked an emissive triangle
+from one power CDF over the whole scene, so in a tunnel lined with small lamps most emitter samples went to lamps far
+away or facing elsewhere. Pick by what each emitter can give the point, at the same bake time.
+
+**Added**
+- **`LightTree`** (`src/render/light_tree.{h,cpp}`, after Conty Estevez & Kulla 2018 - written from the paper, no Cycles
+  code): a binary tree over the emissive triangles, each node with its bounds, power and an orientation cone, built by
+  the orientation-aware SAH; one emitter a leaf; `sample` descends by each child's importance at the point (its power x
+  how it faces the point and the point's normal / the squared distance - cosines only, no inverse trigonometry), `pmf`
+  walks the same choices from the leaf up, `Cache` keeps a point's node splits for its many samples.
+- **Where it picks:** a texel's own emitter samples (cached per texel) and a camera ray's first hit, on the CPU, in the
+  GPU kernel and (through the GLSL's translation) OptiX, whose PTX is regenerated. Deeper path vertices pick by power:
+  a descent at every bounce cost more time than it saved there. Each vertex weighs a BSDF hit on an emitter by the pick
+  that vertex made, so MIS stays exact.
+- **MIS with the sample counts** (task 0157's open item): the texel's gather, its emitter samples and its sky samples are
+  weighed by the power heuristic with their counts (`PathTracer::GatherFirst`, the card's `gpu_gather` ratio).
+- **`lighting tree on|off`** (a measurement setting like `lighting seed`: not saved, not in the scene key) and the stress
+  rows "tunnel_lamps: emitters picked" (by power / by the light tree, at the same samples).
+- The tree is kept while its emitters are the same (a hash of their corners and power): a traced preview that rebuilds
+  when something moves doesn't rebuild the tree (100,000 emitters take ~0.8 s). Past 2^20 emitters no tree is built.
+- **Learn:** "A bake's noise, measured" gains the light tree - where the samples go, two questions, Try-its 6 and 7.
+
+**Results**
+- `tunnel_lamps` at the same bake time (the full run): bake 2,218 -> 2,305 ms (+4 %), grain 0.133 -> 0.112 (-16 %), blotch
+  0.027 -> 0.025, relative RMSE 0.154 -> 0.143 (-7 %). **Task 0440's criterion 4 (-40 %) is not met** - with the tree at every path vertex the grain fell
+  29 % but the bake took 27 % longer; part of that scene's noise is its 10 point lights picked by chance (round 466).
+  The owner decides at review whether to accept the lower gain.
+- The five-lamp floor of `tests_round464`: the tree's standard error over six seeds ~40 % under the CDF's on the CPU,
+  ~60 % under on the card (24.162 +- 0.033 against 24.150 +- 0.085), the means agreeing.
+- **SideRail: unchanged** - bake 39 s (lightmaps 36.3 s against 35.5, 890 M rays against 881), grain 5.455 and blotch
+  1.242 (both as round 463's), every station's MAE / SSIM as round 463's to the third decimal. Its emissive triangles
+  carry little of its light; the noise is page 1's rare very bright texels, which come from the 71 Baked point and spot
+  lights kept by chance (`light_pick.h`: Russian roulette, their light skipping the firefly clamp) - the tree doesn't
+  touch those (ADR 0121, decision 8). Rounds 465-466 and the owner's review decide what follows.
+
+**Checked:** the suites - Windows dependency-free 19,494 checks, 0 failed; Windows with Blender's libraries 20,400 (the
+`gpu` group's four picture comparisons that fail in any worktree build with the libraries, as round 463 found; the card's
+light tree test passes there); Linux 19,500 (Live Link's frame-time test failed once while another build ran and passes
+alone, 366 checks). `tests_round464` (20 tests: the tree's pmf sums, chi-square, cache, edges, 100,000 emitters, the
+card's layout re-implemented on the CPU, the MIS weights, tree reuse and its cap, unbiased bakes on the CPU and the card,
+`lighting tree`). Stress `lightmap_quality`: the other scenes unchanged; the audits pass. Review: changes needed (the tree
+rebuilt at every scene change, the card's layout unpinned, criterion 4) then approved.
+
+## 2026-11-08 (round 463): a bake's noise, measured
+
+**Asked:** SideRail's full bake (2 pages at 2048 px, 806,641 texels, 50.3 s) leaves blotchy noise on the side tunnel's walls and
+floor and nothing measured it: `lightmap_quality` needs a reference 16 times longer, and the stations against Unity mix noise
+with bias. One number for a bake's noise, without a reference, so rounds 464-466 can each show their gain at the same bake time.
+
+**Added (task 0439)**
+- **`lightmap_noise(a, b)`** (`src/render/lightmapper.{h,cpp}`): two bakes of one scene at different seeds (the layout is
+  deterministic, so the texels line up). Over the covered, valid texels, **grain** = sqrt(mean((a - b)^2) / 2) / mean((a + b) / 2)
+  is one bake's per-texel noise relative to its light; **blotch** is the same with (a - b) first averaged over each texel's 7 x 7
+  neighbours in its own chart - what a filter leaves. Per page, and the five objects with the most blotch; a different layout is
+  refused with the reason; NaN or negative texels are left out and counted; a page with no light is "dark". It cannot see bias.
+- **`lighting seed <n>`** (a measurement setting: not saved, not in `lightmap_scene_key`, so the other seed's bake leaves the
+  lighting current; the log names a seed when it isn't 0) reaches the CPU texels, the card's gather (`PathTracer::gpu_gather`
+  takes a seed: it moves every point's random stream) and the probe bake (`probe_bake`'s `seed`). `lighting noise <A> <B>` prints the
+  numbers of two `lighting save` folders and writes `noise.json` inside folder B (and `noise_worst_N.png`, the worst objects' |a - b|, there).
+- **`tools/unity_compare.py ... --blendity-bake --pages --noise`**: the scene opened once and baked at seeds 0 and 1, both saved, `lighting noise` between them (`pages/blendity_seed1/noise.json`), in report.md / report.json (and `--self-test`); `tools/dev/chain.sh`'s SIDERAIL stage passes `--pages --noise`.
+- **`lightmap_quality`**: the scene `tunnel_lamps` (a 24 m bent tunnel, 20 small emissive lamps, 10 Baked point lights of range 2, black
+  sky) and the columns grain and blotch for all four scenes (a second bake at seed 1). The old scenes' bake and reference are the same code.
+- **What the number is not (deviations from the spec):** saved pages are RGBE (8-bit mantissa, no negatives), a grain floor of roughly
+  0.1-0.2 % per texel (0.0027 in memory against 0.00284 from saved folders); `lighting noise`, the comparison tool and the stress columns
+  pass no invalid mask, so they count inside-geometry texels; the 7 x 7 window's chart is an object's entry, not a UV island, and near a
+  chart's edge it holds fewer texels (charts 1-3 texels wide read white noise as about s / 4.6); the Light Volume bake ignores the seed;
+  the card's stream shifts by 2^21-2^22 points (about 2^21 distinct streams).
+- **Learn:** "A bake's noise, measured", its Try-it in five steps the user clicks after each bake has finished.
+- **Baseline (SideRail on the card, today's main, its LightingSettings: 1024 indirect samples, 820,031 texels):** bake 39 s (lightmaps
+  35.5 s, the A-Trous filter 2.3 s); grain 5.46 (page 0 0.41, page 1 17.5), blotch 1.24 (0.10 / 3.99) - page 1 carried by rare very
+  bright texels (emitter samples and chance-kept lights skip the clamp: the spots on the sofas and floor). Stations MAE / SSIM: spawn
+  3.57 / 0.843, spawn_back 1.30 / 0.791, floor 3.35 / 0.818, ahead 2.32 / 0.933 (Pass 19's, unchanged), and two new stations at the
+  owner's views of the side tunnel (`tools/dev/siderail_stations.json`, matched by eye to their screenshots): side_bar_high 6.73 / 0.854,
+  side_tunnel_eye 6.06 / 0.876. docs/PERFORMANCE.md's "Pass 21" table starts there.
+
+**Checked:** the suites - Windows dependency-free 16,936 checks, Windows with Blender's libraries 17,839, Linux 16,942; after the chain's
+two test fixes (the card's seed test sampled a uniform sky, so no seed could change it; Linux kept NaN != NaN in the layout compare, now a
+bit compare) `--group lighting` again in all three (5,575 / 5,608 with the card's seed test run / 5,577), 0 failed. The libraries
+build's `gpu` group fails four picture comparisons (test_gpu.cpp:887, 2226, 4821) and the slow-open test (:52) in a worktree build - the
+same in Pass 20's worktree build (C:/blwtlib), while the main clone's binary passes: the build setting, not this round (open item); the new group `tests_round463` (18 tests in three functions - 5 of the measure, 7 edges, 6 console and seed: one seed grain 0 and blotch 0, seeds 0 and 1 above 0; a synthetic page of
+light 1 plus noise 0.1 reads grain 0.1004 and blotch 0.0144 against a seventh 0.0143, smooth noise within 2 %; refusals, invalid, NaN and
+dark; `lighting seed 3` leaves the lighting current and seed 0 returns the pages bit for bit; `lighting noise` on two folders). Stress: `lightmap_quality` - the old three scenes' RMSE and bias unchanged (0.016 / 0.008 / 0.060),
+`tunnel_lamps` 0.154 / 0.0002, grain and blotch above; the audits (coverage, HCI, KLM, Unity meta, citations, the command sweep
+regenerated for the two new commands, perf suite).
+
 ## 2026-11-08 (round 461): Draw projects onto curved surfaces
 
 **Asked:** Pass 20's round B (the drawing solver) - a shape drawn over a curved mesh (the Utah teapot) lands on the

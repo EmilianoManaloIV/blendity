@@ -990,6 +990,15 @@ static inline uint32_t pack_rgb(float r, float g, float b) {
   return 0xFF000000u | (c(r) << 16) | (c(g) << 8) | c(b);
 }
 
+/* A floored or ceiled screen coordinate as a pixel index within [lo, hi]: clamped as a float first, so a triangle
+ * reaching billions of pixels past the screen (a huge face up close, a tiny mesh's frame) never overflows the cast to
+ * int (UBSan: round 462's 1e-4-scale test). NaN gives lo. */
+static inline int pixel_in(float v, int lo, int hi) {
+  if (!(v > (float)lo)) return lo;
+  if (!(v < (float)hi)) return hi;
+  return (int)v;
+}
+
 void Renderer3D::raster_tile(int tile_index) {
   const int T = opt_.tile_size;
   const int tx = tile_index % tiles_x_, ty = tile_index / tiles_x_;
@@ -1009,10 +1018,11 @@ void Renderer3D::raster_tile(int tile_index) {
       const uint32_t ref = (((uint32_t)ci << kRefShift) | local) + 1u;
       const ScreenTri &st = ch.tris[local];
       const float x0 = st.x[0], y0 = st.y[0], x1 = st.x[1], y1 = st.y[1], x2 = st.x[2], y2 = st.y[2];
-      int minx = std::max(rx0, (int)std::floor(std::min({x0, x1, x2})));
-      int maxx = std::min(rx1 - 1, (int)std::ceil(std::max({x0, x1, x2})));
-      int miny = std::max(ry0, (int)std::floor(std::min({y0, y1, y2})));
-      int maxy = std::min(ry1 - 1, (int)std::ceil(std::max({y0, y1, y2})));
+      /* Past the tile on one side the box comes out empty (min > max) and the triangle is skipped. */
+      int minx = pixel_in(std::floor(std::min({x0, x1, x2})), rx0, rx1);
+      int maxx = pixel_in(std::ceil(std::max({x0, x1, x2})), rx0 - 1, rx1 - 1);
+      int miny = pixel_in(std::floor(std::min({y0, y1, y2})), ry0, ry1);
+      int maxy = pixel_in(std::ceil(std::max({y0, y1, y2})), ry0 - 1, ry1 - 1);
       if (minx > maxx || miny > maxy) continue;
       /* Edge functions w_i(x, y) = A_i * x + B_i * y + C_i (FoCG ch. 9.1.2). */
       const float A0 = y1 - y2, B0 = x2 - x1, C0 = x1 * y2 - x2 * y1;
@@ -1036,8 +1046,8 @@ void Renderer3D::raster_tile(int tile_index) {
           else if (row_c < 0) { empty = true; break; }
         }
         if (empty) continue;
-        int sx = std::max(minx, (int)std::ceil(xl - 1e-4f));
-        int ex = std::min(maxx, (int)std::floor(xr + 1e-4f));
+        int sx = pixel_in(std::ceil(xl - 1e-4f), minx, maxx + 1);
+        int ex = pixel_in(std::floor(xr + 1e-4f), minx - 1, maxx);
         if (sx > ex) continue;
         float px = sx + 0.5f;
         float w0 = A0 * px + B0 * py + C0;
@@ -2420,8 +2430,8 @@ void Renderer3D::draw_see_through(const std::vector<uint8_t> &see_through) {
     for (const FTri &t : tris) {
       float minx = std::min({t.x[0], t.x[1], t.x[2]}), maxx = std::max({t.x[0], t.x[1], t.x[2]});
       float miny = std::min({t.y[0], t.y[1], t.y[2]}), maxy = std::max({t.y[0], t.y[1], t.y[2]});
-      int ix0 = std::max(0, (int)std::floor(minx)), ix1 = std::min(W - 1, (int)std::ceil(maxx));
-      int iy0 = std::max((int)y0, (int)std::floor(miny)), iy1 = std::min((int)y1 - 1, (int)std::ceil(maxy));
+      int ix0 = pixel_in(std::floor(minx), 0, W), ix1 = pixel_in(std::ceil(maxx), -1, W - 1);
+      int iy0 = pixel_in(std::floor(miny), (int)y0, (int)y1), iy1 = pixel_in(std::ceil(maxy), (int)y0 - 1, (int)y1 - 1);
       if (ix0 > ix1 || iy0 > iy1) continue;
       const float area = (t.x[1] - t.x[0]) * (t.y[2] - t.y[0]) - (t.x[2] - t.x[0]) * (t.y[1] - t.y[0]);
       if (area <= 0.0f) continue;

@@ -8,6 +8,8 @@
 #include "../src/render/unity_lightmaps.h"
 #include "../src/scene/unity_scene.h"
 #include "../src/render/light_pick.h"
+#include "../src/render/sampler.h"
+#include <random>
 #include <set>
 #include <tuple>
 
@@ -5873,7 +5875,8 @@ static void tests_round423() {
     std::string why;
     const bool lightmap_oidn = PathTracer::oidn_lightmap_available(&why);
     if (!lightmap_oidn) std::printf("    (OIDN's lightmap filter: %s)\n", why.c_str());
-    CHECK(which == (lightmap_oidn ? "OpenImageDenoise (RTLightmap)" : "the A-Trous filter"));
+    /* (round 466: without OIDN's lightmap filter the default is the variance-guided A-Trous - ADR 0122) */
+    CHECK(which == (lightmap_oidn ? "OpenImageDenoise (RTLightmap)" : "the variance-guided A-Trous filter"));
     CHECK(rmse(filtered) < rmse(noisy) * 0.8);
     /* A long bake: the filter mustn't make it worse (round 421 had found the old one doubling the error at 1024). */
     const LightingData long_raw = bake(512, false, 0, nullptr), long_filtered = bake(512, true, 0, nullptr);
@@ -8278,6 +8281,2853 @@ static void tests_round455() {
   });
 }
 
+/* ---- round 463 (task 0439): a bake's noise, measured ---- */
+namespace r463 {
+/* One page of w x h texels, one chart over all of it (two triangles), the luminance `fill(x, y)` gives. */
+template <class F>
+static LightingData page_of(int w, int h, F fill) {
+  LightingData d;
+  Lightmap lm;
+  lm.width = w, lm.height = h;
+  lm.texels.resize((size_t)w * h);
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) lm.texels[(size_t)y * w + x] = Vec3(fill(x, y));
+  d.pages.push_back(lm);
+  LightingData::Entry e;
+  e.page = 0;
+  e.tri_uv = {Vec2(0, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0, 0), Vec2(1, 1), Vec2(0, 1)};
+  d.entries[7] = e;
+  return d;
+}
+
+/* A coarse random grid sampled bilinearly: noise whose 7 x 7 average is itself (a blotch, not grain). */
+struct SmoothNoise {
+  int cell = 24, n = 0;
+  std::vector<float> v;
+  SmoothNoise(int size, float sd, uint32_t seed) {
+    n = size / cell + 2;
+    std::mt19937 rng(seed);
+    std::normal_distribution<float> g(0.0f, sd);
+    for (int i = 0; i < n * n; i++) v.push_back(g(rng));
+  }
+  float at(int x, int y) const {
+    const float fx = (float)x / (float)cell, fy = (float)y / (float)cell;
+    const int ix = (int)fx, iy = (int)fy;
+    const float tx = fx - (float)ix, ty = fy - (float)iy;
+    auto c = [&](int a, int b) { return v[(size_t)(b * n + a)]; };
+    return (c(ix, iy) * (1 - tx) + c(ix + 1, iy) * tx) * (1 - ty) + (c(ix, iy + 1) * (1 - tx) + c(ix + 1, iy + 1) * tx) * ty;
+  }
+};
+
+static std::string join_log(size_t since) {
+  std::vector<LogEntry> out;
+  Log::fetch(since, out);
+  std::string all;
+  for (const LogEntry &e : out) all += e.text + "\n";
+  return all;
+}
+static size_t log_mark() {
+  std::vector<LogEntry> out;
+  return Log::fetch(0, out);
+}
+
+static bool same_pages(const LightingData &a, const LightingData &b) {
+  if (a.pages.size() != b.pages.size()) return false;
+  for (size_t p = 0; p < a.pages.size(); p++)
+    if (a.pages[p].texels.size() != b.pages[p].texels.size() ||
+        std::memcmp(a.pages[p].texels.data(), b.pages[p].texels.data(), a.pages[p].texels.size() * sizeof(Vec3)) != 0)
+      return false;
+  return true;
+}
+
+/* A floor with a box on it: the box's shadow and bounce give the gather something to be noisy about. */
+static void scene(Editor &ed) {
+  r35_open(ed);
+  r35_add(ed, "Plane", "Floor", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+  r35_add(ed, "Cube", "Box", {0, 0.5f, 0}, {1, 1, 1}, Vec3(0.8f));
+  ed.commit_change("r463 scene");
+}
+
+static void bake_at(Editor &ed, int seed) {
+  ed.command("lighting seed " + std::to_string(seed));
+  r35_bake(ed);
+}
+}  // namespace r463
+
+/* ---- round 463, the independent checks (test engineer): edges of lightmap_noise, the console's refusals, the seed on the other streams ---- */
+namespace r463 {
+/* Charts as blocks of a page; every block is its own chart (two triangles). */
+struct Block {
+  int x, y, w, h;
+  uint64_t id;
+  int page = 0;
+};
+static LightingData blocks_of(int W, int H, int pages, const std::vector<Block> &bs, float fill) {
+  LightingData d;
+  for (int p = 0; p < pages; p++) {
+    Lightmap lm;
+    lm.width = W, lm.height = H;
+    lm.texels.assign((size_t)W * H, Vec3(fill));
+    d.pages.push_back(lm);
+  }
+  for (const Block &b : bs) {
+    LightingData::Entry e;
+    e.page = b.page;
+    const float x0 = (float)b.x / (float)W, x1 = (float)(b.x + b.w) / (float)W, y0 = (float)b.y / (float)H, y1 = (float)(b.y + b.h) / (float)H;
+    e.tri_uv = {Vec2(x0, y0), Vec2(x1, y0), Vec2(x1, y1), Vec2(x0, y0), Vec2(x1, y1), Vec2(x0, y1)};
+    d.entries[b.id] = e;
+  }
+  return d;
+}
+static void paint(LightingData &d, const Block &b, float v) {
+  Lightmap &lm = d.pages[(size_t)b.page];
+  for (int y = b.y; y < b.y + b.h; y++)
+    for (int x = b.x; x < b.x + b.w; x++) lm.texels[(size_t)y * lm.width + x] = Vec3(v);
+}
+static LightingData scaled(const LightingData &d, float k) {
+  LightingData o = d;
+  for (Lightmap &lm : o.pages)
+    for (Vec3 &t : lm.texels) t = t * k;
+  return o;
+}
+static bool finite_noise(const LightmapNoise &n) {
+  bool ok = std::isfinite(n.all.grain) && std::isfinite(n.all.blotch);
+  for (const LightmapNoise::Part &p : n.pages) ok = ok && std::isfinite(p.grain) && std::isfinite(p.blotch);
+  for (const LightmapNoise::Object &o : n.worst) ok = ok && std::isfinite(o.grain) && std::isfinite(o.blotch);
+  return ok;
+}
+static LightingData noisy_page(int N, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::normal_distribution<float> g(0.0f, 0.1f);
+  return page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+}
+}  // namespace r463
+
+static void tests_round463_edges() {
+  test("A bake's noise (round 463): an empty lighting, a bake with no pages, and bakes with different page counts are refused with a reason, never read", [] {
+    const LightingData empty;
+    const LightmapNoise e = lightmap_noise(empty, empty);
+    CHECK(!e.ok && !e.error.empty() && e.pages.empty() && e.worst.empty());
+    const LightingData one = r463::page_of(16, 16, [](int, int) { return 1.0f; });
+    CHECK(!lightmap_noise(empty, one).ok && !lightmap_noise(one, empty).ok);
+    LightingData two = one;
+    two.pages.push_back(two.pages[0]);
+    const LightmapNoise c = lightmap_noise(one, two);
+    std::printf("    page counts: \"%s\"\n", c.error.c_str());
+    CHECK(!c.ok && !c.error.empty());
+    CHECK(!lightmap_noise(two, one).ok);
+    /* A page whose texel array doesn't match its size must not be indexed. */
+    LightingData torn = one;
+    torn.pages[0].texels.resize(10);
+    CHECK(!lightmap_noise(torn, torn).ok && !lightmap_noise(one, torn).ok);
+  });
+  test("A bake's noise (round 463): every texel invalid, a wrong-sized invalid mask, a chart off the page and an object on a missing page read as no measurement, never NaN", [] {
+    const int N = 24;
+    const LightingData a = r463::noisy_page(N, 1), b = r463::noisy_page(N, 2);
+    std::vector<std::vector<uint8_t>> all_bad(1, std::vector<uint8_t>((size_t)N * N, 1));
+    const LightmapNoise n = lightmap_noise(a, b, &all_bad);
+    CHECK(n.ok && n.all.texels == 0 && n.all.dark && r463::finite_noise(n) && n.all.grain == 0.0 && n.worst.empty());
+    std::vector<std::vector<uint8_t>> short_mask(1, std::vector<uint8_t>(5, 1));
+    const LightmapNoise s = lightmap_noise(a, b, &short_mask);
+    CHECK(s.ok && s.all.texels == (size_t)N * N);
+    LightingData off = r463::page_of(N, N, [](int, int) { return 1.0f; });
+    off.entries[7].tri_uv = {Vec2(2, 2), Vec2(3, 2), Vec2(3, 3), Vec2(-3, -3), Vec2(-2, -3), Vec2(-2, -2), Vec2(0.5f, 0.5f), Vec2(0.5f, 0.5f), Vec2(0.5f, 0.5f)};
+    const LightmapNoise o = lightmap_noise(off, off);
+    CHECK(o.ok && o.all.texels == 0 && r463::finite_noise(o));
+    LightingData lost = r463::page_of(N, N, [](int, int) { return 1.0f; });
+    lost.entries[7].page = 5;
+    const LightmapNoise l = lightmap_noise(lost, lost);
+    CHECK(l.ok && l.all.texels == 0 && r463::finite_noise(l));
+  });
+  test("A bake's noise (round 463): one-texel and one-texel-wide charts at the page's corner and edges are read inside their bounds, and charts under 16 texels stay out of the worst list", [] {
+    using r463::Block;
+    const int W = 32, H = 32;
+    const std::vector<Block> bs = {{0, 0, 1, 1, 1}, {W - 1, 0, 1, H, 2}, {5, H - 1, 20, 1, 3}, {8, 8, 12, 12, 4}};
+    LightingData a = r463::blocks_of(W, H, 1, bs, 1.0f), b = a;
+    for (const Block &k : bs) r463::paint(b, k, 1.5f);
+    r463::paint(a, bs[3], 0.5f);
+    const LightmapNoise n = lightmap_noise(a, b);
+    CHECK(n.ok && r463::finite_noise(n));
+    CHECK(n.all.texels == (size_t)(1 + H + 20 + 144));
+    CHECK(n.worst.size() == 3);  // ids 2 (32 texels), 3 (20) and 4 (144); the one-texel chart is out
+    for (const LightmapNoise::Object &o : n.worst) {
+      CHECK(o.texels >= 16 && o.id != 1);
+      /* a constant difference survives any averaging inside the chart: blotch equals grain */
+      CHECK(std::fabs(o.blotch - o.grain) < 1e-6 * std::max(1.0, o.grain));
+    }
+  });
+  test("A bake's noise (round 463): a quiet chart beside a loud one is not smeared by it, and the worst objects come ordered, at most five, the loudest first", [] {
+    using r463::Block;
+    const int W = 32, H = 24;
+    std::vector<Block> bs;
+    const float delta[8] = {0.10f, 0.80f, 0.30f, 0.05f, 0.60f, 0.20f, 0.90f, 0.40f};
+    for (int i = 0; i < 8; i++) bs.push_back({(i % 4) * 8, (i / 4) * 8, 8, 8, (uint64_t)(10 + i)});
+    bs.push_back({0, 16, 3, 3, 99});  // 9 texels: under 16, left out even with the biggest difference
+    LightingData a = r463::blocks_of(W, H, 1, bs, 1.0f), b = a;
+    for (int i = 0; i < 8; i++) r463::paint(b, bs[(size_t)i], 1.0f + delta[i]);
+    r463::paint(b, bs[8], 9.0f);
+    const LightmapNoise n = lightmap_noise(a, b);
+    CHECK(n.ok && n.worst.size() == 5);
+    for (size_t i = 1; i < n.worst.size(); i++) CHECK(n.worst[i - 1].blotch >= n.worst[i].blotch);
+    const uint64_t want[5] = {16, 11, 14, 17, 12};  // deltas .90 .80 .60 .40 .30
+    for (size_t i = 0; i < n.worst.size() && i < 5; i++) CHECK(n.worst[i].id == want[i]);
+    for (const LightmapNoise::Object &o : n.worst) {
+      const double d = (double)delta[o.id - 10];
+      const double exact = d / std::sqrt(2.0) / (1.0 + d / 2.0);
+      CHECK(std::fabs(o.blotch - exact) < 1e-4 && std::fabs(o.grain - exact) < 1e-4);
+    }
+  });
+  test("A bake's noise (round 463): swapping the two bakes reads the same numbers, and lighting 4 times dimmer, 2 times or 1000 times brighter reads the same relative grain and blotch", [] {
+    const int N = 64;
+    const LightingData a = r463::noisy_page(N, 11), b = r463::noisy_page(N, 12);
+    const LightmapNoise ab = lightmap_noise(a, b), ba = lightmap_noise(b, a);
+    CHECK(ab.ok && ba.ok && ab.all.grain > 0.0);
+    CHECK(std::fabs(ab.all.grain - ba.all.grain) < 1e-9 * ab.all.grain && std::fabs(ab.all.blotch - ba.all.blotch) < 1e-9 * ab.all.blotch);
+    const float ks[3] = {2.0f, 0.25f, 1000.0f};
+    for (float k : ks) {
+      const LightmapNoise s = lightmap_noise(r463::scaled(a, k), r463::scaled(b, k));
+      std::printf("    x%g: grain %.6f (was %.6f), blotch %.6f (was %.6f)\n", k, s.all.grain, ab.all.grain, s.all.blotch, ab.all.blotch);
+      CHECK(s.ok && std::fabs(s.all.grain - ab.all.grain) < 1e-4 * ab.all.grain && std::fabs(s.all.blotch - ab.all.blotch) < 1e-4 * ab.all.blotch);
+    }
+    /* one bake 1.5 times the other is a bias, and does read as a difference */
+    CHECK(lightmap_noise(a, r463::scaled(a, 1.5f)).all.grain > 0.1);
+  });
+  test("A bake's noise (round 463): lights of 1e30 stay finite and scale-free, infinities are left out and counted in either bake, and two pages read separately (a quiet one beside a noisy one)", [] {
+    const int N = 32;
+    LightingData a = r463::noisy_page(N, 21), b = r463::noisy_page(N, 22);
+    const LightmapNoise ref = lightmap_noise(a, b);
+    const LightmapNoise huge = lightmap_noise(r463::scaled(a, 1e30f), r463::scaled(b, 1e30f));
+    std::printf("    1e30: grain %.5f (at 1: %.5f)\n", huge.all.grain, ref.all.grain);
+    CHECK(huge.ok && r463::finite_noise(huge) && std::fabs(huge.all.grain - ref.all.grain) < 1e-3 * ref.all.grain);
+    LightingData inf = b;
+    const float big = std::numeric_limits<float>::infinity();
+    inf.pages[0].texels[0] = Vec3(big);
+    inf.pages[0].texels[1] = Vec3(-big);
+    inf.pages[0].texels[2] = Vec3(big, 0.0f, 0.0f);
+    const LightmapNoise i = lightmap_noise(a, inf);
+    CHECK(i.ok && i.skipped == 3 && r463::finite_noise(i) && i.all.texels == (size_t)N * N - 3);
+    const LightmapNoise j = lightmap_noise(inf, a);
+    CHECK(j.ok && j.skipped == 3 && j.all.texels == i.all.texels);
+    using r463::Block;
+    const std::vector<Block> bs = {{0, 0, 16, 16, 1, 0}, {0, 0, 16, 16, 2, 1}};
+    LightingData p = r463::blocks_of(16, 16, 2, bs, 1.0f), q = p;
+    std::mt19937 rng(3);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    for (Vec3 &t : q.pages[0].texels) t = Vec3(1.0f + g(rng));
+    const LightmapNoise two = lightmap_noise(p, q);
+    CHECK(two.ok && two.pages.size() == 2 && two.pages[0].grain > 0.02 && two.pages[1].grain == 0.0 && two.pages[1].blotch == 0.0);
+    CHECK(two.all.grain < two.pages[0].grain && two.all.grain > 0.0 && two.all.texels == 512);
+  });
+  test("A bake's noise (round 463): a page with no light reads 'dark' beside a lit, noisy page, and the all-pages number still reads", [] {
+    using r463::Block;
+    const std::vector<Block> bs = {{0, 0, 16, 16, 1, 0}, {0, 0, 16, 16, 2, 1}};
+    LightingData p = r463::blocks_of(16, 16, 2, bs, 0.0f), q = p;
+    std::mt19937 rng(8);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    for (Vec3 &t : p.pages[0].texels) t = Vec3(1.0f + g(rng));
+    for (Vec3 &t : q.pages[0].texels) t = Vec3(1.0f + g(rng));
+    const LightmapNoise n = lightmap_noise(p, q);
+    CHECK(n.ok && n.pages.size() == 2 && !n.pages[0].dark && n.pages[1].dark && n.pages[1].grain == 0.0);
+    CHECK(!n.all.dark && n.all.grain > 0.0 && r463::finite_noise(n));
+  });
+}
+
+static void tests_round463_console() {
+  test("`lighting seed` (round 463): a word, a negative or a malformed number is refused with a warning and the seed set before stays (the next bake is seed 7's, bit for bit)", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 7);
+    const LightingData base = ed.lighting_data_for_test();
+    const char *junk[] = {"lighting seed abc", "lighting seed -1", "lighting seed -5", "lighting seed 1.5x", "lighting seed 99999999999999999999", "lighting seed nan"};
+    for (const char *cmd : junk) {
+      ed.command("lighting seed 7");
+      const size_t mark = r463::log_mark();
+      ed.command(cmd);
+      const std::string said = r463::join_log(mark);
+      CHECK(said.find("is not a whole number") != std::string::npos && said.find("the seed stays 7") != std::string::npos);
+      r35_bake(ed);
+      const bool same = r463::same_pages(base, ed.lighting_data_for_test());
+      std::printf("    \"%s\": next bake %s seed 7's; log: %.90s\n", cmd, same ? "is" : "is NOT", said.c_str());
+      CHECK(same);
+      CHECK(!ed.lighting_out_of_date_for_test());
+    }
+    ed.command("lighting seed 0");
+  });
+  test("`lighting seed` (round 463): with no number the old pages come back, and a seed is not part of the scene's key", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 0);
+    const LightingData base = ed.lighting_data_for_test();
+    ed.command("lighting seed 7");
+    r35_bake(ed);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()) && ed.lighting_data_for_test().scene_key == base.scene_key);
+    ed.command("lighting seed");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting seed 0");
+  });
+  test("`lighting noise` (round 463): missing folders, one missing folder and an empty folder are refused with a message and write no noise.json", [] {
+    Editor ed;
+    r463::scene(ed);
+    const std::string good = fs::join(scratch_project(), "R463G"), none = fs::join(scratch_project(), "R463None"), empty = fs::join(scratch_project(), "R463Empty");
+    std::error_code ec;
+    for (const std::string &d : {good, none, empty}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+    std::filesystem::create_directories(std::filesystem::u8path(empty), ec);
+    r463::bake_at(ed, 0);
+    ed.command("lighting save " + good);
+    ed.command("lighting seed 0");
+    const std::pair<std::string, std::string> cases[] = {{none, none}, {good, none}, {none, good}, {good, empty}, {empty, good}, {empty, empty}};
+    for (const auto &c : cases) {
+      const size_t mark = r463::log_mark();
+      ed.command("lighting noise " + c.first + " " + c.second);
+      CHECK(!r463::join_log(mark).empty());
+      CHECK(!fs::exists(fs::join(none, "noise.json")) && !fs::exists(fs::join(empty, "noise.json")));
+    }
+    CHECK(!fs::exists(fs::join(good, "noise.json")));
+    ed.command("lighting noise");
+    for (const std::string &d : {good, none, empty}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+  });
+  test("`lighting noise` (round 463): a folder against itself reads grain 0 and blotch 0 and writes noise.json; a relative folder is the project's", [] {
+    Editor ed;
+    r463::scene(ed);
+    const std::string da = fs::join(scratch_project(), "R463Rel");
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::u8path(da), ec);
+    r463::bake_at(ed, 0);
+    ed.command("lighting save R463Rel");
+    const size_t mark = r463::log_mark();
+    ed.command("lighting noise R463Rel R463Rel");
+    const std::string said = r463::join_log(mark);
+    std::string json;
+    CHECK(fs::read_file(fs::join(da, "noise.json"), json));
+    std::printf("    %.160s\n", said.c_str());
+    CHECK(said.find("grain 0.0000  blotch 0.0000") != std::string::npos);
+    CHECK(json.find("\"pages\"") != std::string::npos && json.find("\"skipped\"") != std::string::npos);
+    std::filesystem::remove_all(std::filesystem::u8path(da), ec);
+  });
+  test("The bake's seed (round 463): probes baked at seed 1 differ from seed 0's, seed 0 is the default call bit for bit, and one seed repeats", [] {
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::identity(), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.5f);
+    s.build({}, env);
+    auto bake = [&](bool give_seed, uint32_t seed) {
+      ProbeVolumeData d;
+      probe_place(d, p37_box(Vec3(-2.0f), Vec3(2.0f)), s.tri_boxes(), 1.0f, 1.0f);
+      probe_validate(d, s.pt, 64);
+      if (give_seed) probe_bake(d, s.pt, {}, 24, 2, 0, SIZE_MAX, 1.0f, -1, nullptr, &env, seed);
+      else probe_bake(d, s.pt, {}, 24, 2, 0, SIZE_MAX, 1.0f, -1, nullptr, &env);
+      return d;
+    };
+    auto same = [](const ProbeVolumeData &x, const ProbeVolumeData &y) {
+      if (x.baked.size() != y.baked.size()) return false;
+      for (size_t i = 0; i < x.baked.size(); i++)
+        for (size_t ax = 0; ax < 6; ax++)
+          if (x.baked[i].bounce[ax].x != y.baked[i].bounce[ax].x || x.baked[i].bounce[ax].y != y.baked[i].bounce[ax].y || x.baked[i].sky[ax] != y.baked[i].sky[ax])
+            return false;
+      return true;
+    };
+    const ProbeVolumeData plain = bake(false, 0), zero = bake(true, 0), one = bake(true, 1), one_again = bake(true, 1);
+    CHECK(plain.baked.size() > 8);
+    CHECK(same(plain, zero));
+    CHECK(!same(plain, one));
+    CHECK(same(one, one_again));
+  });
+  test("The bake's seed (round 463): the card's gather draws other samples at another seed (skipped with a note when no GPU opens), seed 0 is the old call, one seed repeats", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    s.add(primitives::cube(), Mat4::identity(), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Color;
+    env.color = Vec3(0.6f);
+    s.build({}, env);
+    /* On the floor beside the cube, facing up: each point sees part cube, part sky, so its 8 samples depend on the random
+     * numbers (above the cube, facing up, every sample met the same uniform sky and no seed could change it - chain 463). */
+    std::vector<Vec3> origins(64, Vec3(0.75f, -0.99f, 0.0f)), dirs(64, Vec3(0, 1, 0));
+    auto gather = [&](bool give, uint32_t seed, std::vector<Vec3> &out) {
+      std::string err;
+      for (int i = 0; i < 100; i++) {
+        const bool ok = give ? s.pt.gpu_gather(0, 1, origins, dirs, 8, out, nullptr, &err, false, seed) : s.pt.gpu_gather(0, 1, origins, dirs, 8, out, nullptr, &err);
+        if (ok) return true;
+        if (!s.pt.gpu_gather_waiting()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      std::printf("    (the gather did not run: %s - skipped)\n", err.c_str());
+      return false;
+    };
+    std::vector<Vec3> plain, zero, one, one_again;
+    if (!gather(false, 0, plain)) return;
+    CHECK(gather(true, 0, zero) && gather(true, 1, one) && gather(true, 1, one_again));
+    CHECK(plain.size() == 64 && zero.size() == 64 && one.size() == 64);
+    auto eq = [](const std::vector<Vec3> &x, const std::vector<Vec3> &y) { return x.size() == y.size() && std::memcmp(x.data(), y.data(), x.size() * sizeof(Vec3)) == 0; };
+    CHECK(eq(plain, zero));
+    CHECK(!eq(plain, one));
+    CHECK(eq(one, one_again));
+  });
+}
+
+static void tests_round463() {
+  test("A bake's noise (round 463): two bakes of one scene at one seed read grain 0 and blotch 0; at seeds 0 and 1 both are above 0, the blotch under the grain", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 0);
+    const LightingData first = ed.lighting_data_for_test();
+    r463::bake_at(ed, 0);
+    const LightmapNoise same = lightmap_noise(first, ed.lighting_data_for_test());
+    CHECK(same.ok && same.all.texels > 100 && same.all.grain == 0.0 && same.all.blotch == 0.0);
+    r463::bake_at(ed, 1);
+    const LightmapNoise diff = lightmap_noise(first, ed.lighting_data_for_test());
+    std::printf("    seed 0 vs 1: %zu texels, grain %.4f, blotch %.4f; the worst object has blotch %.4f\n", diff.all.texels, diff.all.grain, diff.all.blotch,
+                diff.worst.empty() ? 0.0 : diff.worst[0].blotch);
+    CHECK(diff.ok && diff.all.grain > 0.0 && diff.all.blotch > 0.0 && diff.all.blotch < diff.all.grain);
+    CHECK(!diff.pages.empty() && diff.pages.size() == first.pages.size() && !diff.worst.empty() && diff.worst.size() <= 5);
+    ed.command("lighting seed 0");
+  });
+  test("A bake's noise (round 463): on a page of light 1 plus independent noise of 0.1 a texel, the grain reads 0.1 and the blotch about a seventh of it; on noise already smooth over many texels the blotch keeps all of it", [] {
+    const int N = 128;
+    std::mt19937 rng(463);
+    std::normal_distribution<float> g(0.0f, 0.1f);
+    const LightingData a = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    const LightingData b = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    const LightmapNoise white = lightmap_noise(a, b);
+    std::printf("    white noise 0.1: grain %.4f, blotch %.4f (a seventh: %.4f)\n", white.all.grain, white.all.blotch, 0.1 / 7.0);
+    CHECK(white.ok && std::fabs(white.all.grain - 0.1) < 0.005);
+    CHECK(white.all.blotch > 0.1 / 7.0 * 0.85 && white.all.blotch < 0.1 / 7.0 * 1.15);
+    /* Smooth noise: what the 7 x 7 average of the difference should read is the difference's own spread. */
+    const r463::SmoothNoise na(N, 0.2f, 1), nb(N, 0.2f, 2);
+    const LightingData sa = r463::page_of(N, N, [&](int x, int y) { return 1.0f + na.at(x, y); });
+    const LightingData sb = r463::page_of(N, N, [&](int x, int y) { return 1.0f + nb.at(x, y); });
+    double d2 = 0.0, mean = 0.0;
+    for (int y = 0; y < N; y++)
+      for (int x = 0; x < N; x++) {
+        const double fa = 1.0 + na.at(x, y), fb = 1.0 + nb.at(x, y);
+        d2 += (fa - fb) * (fa - fb), mean += 0.5 * (fa + fb);
+      }
+    const double want = std::sqrt(d2 / (N * N) / 2.0) / (mean / (N * N));
+    const LightmapNoise smooth = lightmap_noise(sa, sb);
+    std::printf("    smooth noise: blotch %.4f, the difference's own spread %.4f, grain %.4f\n", smooth.all.blotch, want, smooth.all.grain);
+    CHECK(smooth.ok && std::fabs(smooth.all.blotch - want) < 0.1 * want && std::fabs(smooth.all.grain - want) < 0.02 * want);
+  });
+  test("A bake's noise (round 463): bakes laid out differently are refused with the reason; texels inside geometry are left out; NaN and negative texels are left out and counted", [] {
+    const int N = 64;
+    std::mt19937 rng(5);
+    std::normal_distribution<float> g(0.0f, 0.05f);
+    LightingData a = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    LightingData b = r463::page_of(N, N, [&](int, int) { return 1.0f + g(rng); });
+    const LightmapNoise clean = lightmap_noise(a, b);
+    CHECK(clean.ok && clean.skipped == 0 && clean.all.texels == (size_t)N * N);
+    /* Other pages, other charts. */
+    LightingData small = r463::page_of(32, 32, [](int, int) { return 1.0f; });
+    const LightmapNoise bad_size = lightmap_noise(a, small);
+    CHECK(!bad_size.ok && !bad_size.error.empty() && bad_size.pages.empty());
+    LightingData moved = b;
+    moved.entries[7].tri_uv[0] = Vec2(0.1f, 0.0f);
+    const LightmapNoise bad_chart = lightmap_noise(a, moved);
+    std::printf("    refused: \"%s\" and \"%s\"\n", bad_size.error.c_str(), bad_chart.error.c_str());
+    CHECK(!bad_chart.ok && !bad_chart.error.empty());
+    LightingData extra = b;
+    extra.entries[8] = extra.entries[7];
+    CHECK(!lightmap_noise(a, extra).ok);
+    /* A broken chart (UVs that are not numbers or far off the page) covers nothing and breaks nothing. */
+    LightingData nan_a = a, nan_b = b;
+    nan_a.entries[7].tri_uv[0] = nan_b.entries[7].tri_uv[0] = Vec2(std::nanf(""), 0.0f);
+    nan_a.entries[7].tri_uv[4] = nan_b.entries[7].tri_uv[4] = Vec2(1.0e30f, 1.0f);
+    CHECK(lightmap_noise(nan_a, nan_b).ok);
+    /* Inside geometry: a wild block marked invalid changes nothing. */
+    LightingData wild = b;
+    std::vector<std::vector<uint8_t>> invalid(1, std::vector<uint8_t>((size_t)N * N, 0));
+    for (int y = 0; y < 10; y++)
+      for (int x = 0; x < 10; x++) wild.pages[0].texels[(size_t)y * N + x] = Vec3(50.0f), invalid[0][(size_t)y * N + x] = 1;
+    const LightmapNoise masked = lightmap_noise(a, wild, &invalid);
+    const LightmapNoise unmasked = lightmap_noise(a, wild);
+    CHECK(masked.ok && masked.all.texels == (size_t)N * N - 100 && unmasked.all.grain > 5.0 * clean.all.grain);
+    /* NaN and negative: counted, and the rest reads as before. */
+    LightingData holes = b;
+    holes.pages[0].texels[3] = Vec3(std::nanf(""));
+    holes.pages[0].texels[N + 9] = Vec3(-1.0f);
+    holes.pages[0].texels[N * 5 + 5] = Vec3(1.0f, std::nanf(""), 1.0f);
+    const LightmapNoise nan = lightmap_noise(a, holes);
+    std::printf("    3 bad texels: %zu left out, grain %.4f (clean %.4f)\n", nan.skipped, nan.all.grain, clean.all.grain);
+    CHECK(nan.ok && nan.skipped == 3 && nan.all.texels == (size_t)N * N - 3 && std::fabs(nan.all.grain - clean.all.grain) < 0.05 * clean.all.grain);
+    /* A page with no light: "dark", no relative number. */
+    const LightingData black_a = r463::page_of(N, N, [](int, int) { return 0.0f; }), black_b = r463::page_of(N, N, [](int, int) { return 0.0f; });
+    const LightmapNoise dark = lightmap_noise(black_a, black_b);
+    CHECK(dark.ok && dark.all.dark && dark.pages.size() == 1 && dark.pages[0].dark && dark.all.grain == 0.0);
+  });
+  test("`lighting seed 3` (round 463): the next Generate Lighting says its seed, leaves the lighting current and draws other samples; `lighting seed 0` brings the old pages back bit for bit", [] {
+    Editor ed;
+    r463::scene(ed);
+    r463::bake_at(ed, 0);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    r463::bake_at(ed, 3);
+    const std::string said = r463::join_log(mark);
+    CHECK(said.find("Generate Lighting: seed 3") != std::string::npos);  // (not the console's echo "> lighting seed 3")
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.lighting_data_for_test().scene_key == base.scene_key);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()));
+    const size_t mark0 = r463::log_mark();
+    r463::bake_at(ed, 0);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    CHECK(r463::join_log(mark0).find("Generate Lighting: seed") == std::string::npos);  // (the log names a seed only when it isn't 0)
+  });
+  test("`lighting noise <A> <B>` (round 463): two saved bakes at seeds 0 and 1 print their grain and blotch and write noise.json inside folder B; a bake of another scene is refused and writes nothing", [] {
+    Editor ed;
+    r463::scene(ed);
+    const std::string da = fs::join(scratch_project(), "R463A"), db = fs::join(scratch_project(), "R463B"), dc = fs::join(scratch_project(), "R463C");
+    std::error_code ec;
+    for (const std::string &d : {da, db, dc}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+    r463::bake_at(ed, 0);
+    ed.command("lighting save " + da);
+    r463::bake_at(ed, 1);
+    ed.command("lighting save " + db);
+    ed.command("lighting seed 0");
+    const size_t mark = r463::log_mark();
+    ed.command("lighting noise " + da + " " + db);
+    const std::string said = r463::join_log(mark);
+    std::string json;
+    CHECK(fs::read_file(fs::join(db, "noise.json"), json));
+    std::printf("    %.200s\n    noise.json: %.160s\n", said.c_str(), json.c_str());
+    CHECK(said.find("lighting noise: all pages grain") != std::string::npos && said.find("page 0") != std::string::npos);
+    CHECK(json.find("\"grain\"") != std::string::npos && json.find("\"blotch\"") != std::string::npos && json.find("\"worst\"") != std::string::npos);
+    CHECK(fs::exists(fs::join(db, "noise_worst_1.png")));  // (the worst object's |a - b| as a picture)
+    /* Another scene's layout. */
+    r35_add(ed, "Sphere", "Ball", {3, 1, 0}, {1, 1, 1}, Vec3(0.5f));
+    ed.commit_change("r463 ball");
+    r463::bake_at(ed, 1);
+    ed.command("lighting seed 0");
+    ed.command("lighting save " + dc);
+    ed.command("lighting noise " + da + " " + dc);
+    CHECK(!fs::exists(fs::join(dc, "noise.json")));
+    ed.command("lighting noise " + da);  // (one folder: a hint, nothing written)
+    /* A folder with a space in its name, in quotes (the comparison tool's paths). */
+    const std::string ds = fs::join(scratch_project(), "R463 spaced");
+    std::filesystem::remove_all(std::filesystem::u8path(ds), ec);
+    ed.command("lighting save \"" + ds + "\"");
+    CHECK(fs::exists(fs::join(ds, "LightingData.bin")));
+    const size_t mark_q = r463::log_mark();
+    ed.command("lighting noise \"" + ds + "\" \"" + ds + "\"");
+    CHECK(r463::join_log(mark_q).find("lighting noise: all pages grain") != std::string::npos);
+    std::filesystem::remove_all(std::filesystem::u8path(ds), ec);
+    for (const std::string &d : {da, db, dc}) std::filesystem::remove_all(std::filesystem::u8path(d), ec);
+  });
+  tests_round463_edges();
+  tests_round463_console();
+}
+
+/* ---- round 464 (task 0440, ADR 0121): emitters picked by where the texel is - a light tree (test engineer) ---- */
+namespace r464 {
+struct Rng {
+  std::mt19937 g;
+  explicit Rng(uint32_t seed) : g(seed) {}
+  float f() { return (float)(g() >> 8) * (1.0f / 16777216.0f); }
+  float r(float a, float b) { return a + (b - a) * f(); }
+  Vec3 box(float h) { return Vec3(r(-h, h), r(-h, h), r(-h, h)); }
+  Vec3 unit() {
+    for (;;) {
+      const Vec3 v = box(1.0f);
+      const float l = length_sq(v);
+      if (l > 0.01f && l <= 1.0f) return v / std::sqrt(l);
+    }
+  }
+};
+
+/* n small triangles scattered in a cube of half side `box`; powers 0.1 to 10, half of them two-sided. */
+static std::vector<LightTreeEmitter> scatter(Rng &rng, int n, float box, float size, bool coplanar = false) {
+  std::vector<LightTreeEmitter> v((size_t)n);
+  for (LightTreeEmitter &e : v) {
+    const Vec3 c = rng.box(box);
+    Vec3 a = c + rng.box(size), b = c + rng.box(size), d = c + rng.box(size);
+    if (coplanar) a.y = b.y = d.y = 0.0f;
+    e.a = a, e.b = b, e.c = d;
+    e.power = rng.r(0.1f, 10.0f);
+    e.two_sided = rng.f() < 0.5f;
+  }
+  return v;
+}
+
+static double pmf_sum(const LightTree &t, size_t n, Vec3 P, const Vec3 *N) {
+  double s = 0.0;
+  for (size_t i = 0; i < n; i++) s += t.pmf(P, N, (uint32_t)i);
+  return s;
+}
+
+static int max_depth(const LightTree &t) {
+  int d = 0;
+  for (size_t i = 0; i < t.nodes().size(); i++) {
+    int k = 0;
+    for (int a = (int)i; t.nodes()[(size_t)a].parent >= 0; a = t.nodes()[(size_t)a].parent) k++;
+    d = std::max(d, k);
+  }
+  return d;
+}
+
+static float cone_angle(Vec3 a, Vec3 b) { return std::atan2(length(cross(a, b)), dot(a, b)); }
+
+/* The 0.1 % critical value of chi-square with df degrees (Wilson-Hilferty). */
+static double chi2_crit(int df) {
+  const double k = 2.0 / (9.0 * df);
+  return df * std::pow(1.0 - k + 3.09 * std::sqrt(k), 3.0);
+}
+
+/* A floor with five lamps over it (two flipped to face down onto it, three up): different powers, so the tree and the power
+ * CDF pick differently. */
+struct Lamps {
+  MeshPtr floor = primitives::plane(2.0f, 4), lamp = primitives::plane(0.3f, 1);
+  MaterialPtr white = make_material("White", Vec3(0.8f));
+  std::vector<MaterialPtr> glow;
+  Lamps() {
+    const float strength[5] = {3.0f, 10.0f, 1.0f, 6.0f, 2.0f};
+    for (int i = 0; i < 5; i++) {
+      glow.push_back(make_material("Glow", Vec3(0.0f)));
+      glow.back()->emission = Vec3(1.0f), glow.back()->emission_strength = strength[i];
+    }
+  }
+  LightingData bake(bool tree, bool sample, int samples, uint32_t seed, int gpu, size_t *gpu_texels = nullptr, bool sobol = true) const {
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    BakeSettings bs;
+    bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 2, bs.denoise = false, bs.directional = false;
+    bs.sample_emissive = sample, bs.light_tree = tree, bs.seed = seed, bs.gpu_device = gpu, bs.sobol = sobol;
+    const Vec3 pos[5] = {{-0.7f, 0.5f, 0.0f}, {0.6f, 0.9f, 0.4f}, {0.0f, 0.4f, -0.7f}, {0.8f, 0.6f, -0.6f}, {-0.5f, 1.1f, 0.6f}};
+    std::vector<BakeObject> objs;
+    objs.push_back(bake_object(1, floor, Mat4::identity(), {white}));
+    for (int i = 0; i < 5; i++) {
+      const Quat q = Quat::euler(Vec3(i % 2 ? 180.0f : 0.0f, 0, 0));
+      objs.push_back(bake_object((uint64_t)(2 + i), lamp, Mat4::trs(pos[i], q, Vec3(1.0f)), {glow[(size_t)i]}));
+      objs.back().want_lightmap = false;
+    }
+    Lightmapper lm;
+    lm.begin(objs, {}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    if (gpu_texels) *gpu_texels = lm.gpu_texels();
+    return lm.take_result();
+  }
+};
+
+/* The floor's light: the page sampled at every triangle corner, summed. */
+static double floor_light(const LightingData &d) {
+  double s = 0.0;
+  const LightingData::Entry &e = d.entries.at(1);
+  const Lightmap &pg = d.pages[(size_t)e.page];
+  for (const Vec2 &uv : e.tri_uv) {
+    const Vec3 c = pg.sample(uv);
+    s += 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+  }
+  return s;
+}
+
+struct Mean {
+  double mean = 0.0, se = 0.0;
+};
+/* The mean of the floor's light over seeds 1..k and its standard error (from the spread between seeds). */
+template <class F>
+static Mean over_seeds(int k, F bake) {
+  std::vector<double> v;
+  for (int s = 1; s <= k; s++) v.push_back(floor_light(bake((uint32_t)s)));
+  Mean m;
+  for (double x : v) m.mean += x / (double)k;
+  double var = 0.0;
+  for (double x : v) var += (x - m.mean) * (x - m.mean) / (double)(k - 1);
+  m.se = std::sqrt(var / (double)k);
+  return m;
+}
+
+/* Two means agree: within 3 standard errors of their difference, plus half a percent of the reference for the error in the
+ * errors themselves (six seeds estimate a spread only roughly). */
+static bool agree(const Mean &a, const Mean &ref) { return std::fabs(a.mean - ref.mean) <= 3.0 * std::sqrt(a.se * a.se + ref.se * ref.se) + 0.005 * ref.mean; }
+
+/* The r463 scene and two lamps, so the bake has emitters. */
+static void lamp_scene(Editor &ed) {
+  r463::scene(ed);
+  const Vec3 pos[2] = {{-1.5f, 0.8f, 0.0f}, {1.2f, 0.5f, 1.0f}};
+  for (int i = 0; i < 2; i++) {
+    GameObject *lamp = r35_add(ed, "Plane", i ? "Lamp B" : "Lamp A", pos[i], {0.05f, 0.05f, 0.05f}, Vec3(1.0f));
+    lamp->get<MeshRenderer>()->materials[0]->emission = Vec3(1.0f);
+    lamp->get<MeshRenderer>()->materials[0]->emission_strength = i ? 30.0f : 8.0f;
+  }
+  ed.commit_change("r464 lamps");
+}
+}  // namespace r464
+
+static void tests_round464_tree() {
+  test("light tree (round 464): at every point and normal the chances of the several hundred emitters add to 1, and a sample's own chance is the one asked for (with and without a normal)", [] {
+    r464::Rng rng(464);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 400, 20.0f, 1.5f);
+    LightTree t;
+    t.build(em);
+    CHECK(!t.empty() && t.leaves().size() == em.size());
+    double worst = 0.0, worst_pmf = 0.0;
+    for (int i = 0; i < 60; i++) {
+      const Vec3 P = rng.box(i < 10 ? 2.0f : 30.0f), N = rng.unit();
+      worst = std::max({worst, std::fabs(r464::pmf_sum(t, em.size(), P, &N) - 1.0), std::fabs(r464::pmf_sum(t, em.size(), P, nullptr) - 1.0)});
+      for (int k = 0; k < 40; k++) {
+        const Vec3 *n = k % 2 ? &N : nullptr;
+        uint32_t id = 0;
+        float p = 0.0f;
+        if (!t.sample(P, n, rng.f(), id, p)) {
+          CHECK(false);
+          continue;
+        }
+        const float q = t.pmf(P, n, id);
+        worst_pmf = std::max(worst_pmf, (double)std::fabs(p - q) / std::max(1e-12, (double)q));
+        CHECK(id < em.size() && p > 0.0f && p <= 1.0f);
+      }
+    }
+    std::printf("    worst |sum pmf - 1| %.2e, worst relative gap between sample's pmf and pmf() %.2e\n", worst, worst_pmf);
+    CHECK(worst < 1e-4);
+    CHECK(worst_pmf < 1e-4);
+  });
+  test("light tree (round 464): the emitters a point draws follow their chances (chi-square at 0.1 %), for a point with a normal and one without", [] {
+    r464::Rng rng(7);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 300, 20.0f, 1.5f);
+    LightTree t;
+    t.build(em);
+    const Vec3 Ps[2] = {{3.0f, 5.0f, -2.0f}, {-8.0f, -1.0f, 6.0f}};
+    const Vec3 Ns[2] = {normalize(Vec3(0.2f, 1.0f, 0.1f)), normalize(Vec3(1.0f, 0.0f, -0.4f))};
+    const int draws = 300000;
+    for (int c = 0; c < 2; c++) {
+      const Vec3 *N = c == 0 ? &Ns[0] : nullptr;
+      std::vector<uint32_t> count(em.size(), 0u);
+      for (int i = 0; i < draws; i++) {
+        uint32_t id = 0;
+        float p = 0.0f;
+        if (t.sample(Ps[c], N, rng.f(), id, p)) count[id]++;
+      }
+      /* Emitters expecting under 5 draws pool into one bin. */
+      double chi = 0.0, pool_e = 0.0, pool_o = 0.0;
+      int bins = 0;
+      bool impossible = false;
+      for (size_t i = 0; i < em.size(); i++) {
+        const double e = (double)t.pmf(Ps[c], N, (uint32_t)i) * draws;
+        if (e == 0.0 && count[i] > 0) impossible = true;
+        if (e < 5.0) {
+          pool_e += e, pool_o += count[i];
+        } else {
+          chi += (count[i] - e) * (count[i] - e) / e, bins++;
+        }
+      }
+      if (pool_e >= 5.0) chi += (pool_o - pool_e) * (pool_o - pool_e) / pool_e, bins++;
+      const double crit = r464::chi2_crit(std::max(1, bins - 1));
+      std::printf("    point %d (%s): chi-square %.1f over %d bins, critical %.1f\n", c, N ? "with a normal" : "no normal", chi, bins, crit);
+      CHECK(!impossible);
+      CHECK(bins > 20 && chi < crit);
+    }
+  });
+  test("light tree (round 464): a texel's cached picks are exactly the uncached picks and chances, across many points sharing one cache", [] {
+    r464::Rng rng(11);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 250, 15.0f, 1.0f);
+    LightTree t;
+    t.build(em);
+    LightTree::Cache cache;
+    int diff = 0, total = 0;
+    for (int i = 0; i < 80; i++) {
+      const Vec3 P = rng.box(25.0f), N = rng.unit();
+      const Vec3 *n = i % 3 ? &N : nullptr;
+      t.cache_begin(cache, P, n);
+      for (int k = 0; k < 100; k++) {
+        const float u = rng.f();
+        uint32_t a = 0, b = 0;
+        float pa = 0.0f, pb = 0.0f;
+        const bool ok_a = t.sample(P, n, u, a, pa), ok_b = t.sample(cache, u, b, pb);
+        total++;
+        if (ok_a != ok_b || (ok_a && (a != b || pa != pb))) diff++;
+      }
+    }
+    std::printf("    %d draws, %d differ\n", total, diff);
+    CHECK(diff == 0);
+  });
+  test("light tree (round 464): one emitter is always picked with chance 1, from any side; nothing to pick (empty list, or only bad triangles) says so", [] {
+    LightTreeEmitter e;
+    e.a = Vec3(-1, 0, -1), e.b = Vec3(-1, 0, 1), e.c = Vec3(1, 0, -1);
+    e.power = 2.0f, e.two_sided = false;
+    LightTree t;
+    t.build({e});
+    CHECK(!t.empty() && t.node_count() == 1);
+    const Vec3 spots[3] = {{0, 5, 0}, {0, -5, 0}, {0, 0, 0}};
+    for (const Vec3 &P : spots) {
+      uint32_t id = 99;
+      float p = 0.0f;
+      const Vec3 N(0, 1, 0);
+      CHECK(t.sample(P, &N, 0.3f, id, p) && id == 0 && p == 1.0f && t.pmf(P, &N, 0) == 1.0f && t.pmf(P, nullptr, 0) == 1.0f);
+    }
+    LightTree none;
+    none.build({});
+    uint32_t id = 0;
+    float p = 0.0f;
+    CHECK(none.empty() && !none.sample(Vec3(0.0f), nullptr, 0.5f, id, p) && none.pmf(Vec3(0.0f), nullptr, 0) == 0.0f && none.flatten().empty());
+    LightTreeEmitter bad = e;
+    bad.power = 0.0f;
+    none.build({bad, bad});
+    CHECK(none.empty() && !none.sample(Vec3(0.0f), nullptr, 0.5f, id, p));
+  });
+  test("light tree (round 464): emitters all in one plane, or all the very same triangle, build, add up to 1 from both sides and keep the tree shallow", [] {
+    r464::Rng rng(21);
+    const std::vector<LightTreeEmitter> flat = r464::scatter(rng, 500, 10.0f, 1.0f, true);
+    LightTree t;
+    t.build(flat);
+    CHECK(!t.empty());
+    for (float y : {4.0f, -4.0f, 0.0f}) {
+      const Vec3 P(rng.r(-8, 8), y, rng.r(-8, 8)), N(0, y >= 0 ? -1.0f : 1.0f, 0);
+      CHECK(std::fabs(r464::pmf_sum(t, flat.size(), P, nullptr) - 1.0) < 1e-4);
+      CHECK(std::fabs(r464::pmf_sum(t, flat.size(), P, &N) - 1.0) < 1e-4);
+    }
+    LightTreeEmitter same;
+    same.a = Vec3(0, 0, 0), same.b = Vec3(0, 0, 1), same.c = Vec3(1, 0, 0);
+    same.power = 1.0f;
+    LightTree s;
+    s.build(std::vector<LightTreeEmitter>(3000, same));
+    const int depth = r464::max_depth(s);
+    std::printf("    3000 identical triangles: depth %d; 500 coplanar: depth %d\n", depth, r464::max_depth(t));
+    CHECK(depth <= 64);
+    CHECK(std::fabs(r464::pmf_sum(s, 3000, Vec3(0.5f, 3.0f, 0.5f), nullptr) - 1.0) < 1e-4);
+    uint32_t id = 0;
+    float p = 0.0f;
+    CHECK(s.sample(Vec3(0.5f, 3.0f, 0.5f), nullptr, 0.77f, id, p) && id < 3000);
+  });
+  test("light tree (round 464): 100,000 emitters build under 64 levels deep (time printed), their chances add to 1 and a sample's own chance matches", [] {
+    r464::Rng rng(100000);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 100000, 200.0f, 1.0f);
+    LightTree t;
+    const auto t0 = std::chrono::steady_clock::now();
+    t.build(em);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const int depth = r464::max_depth(t);
+    std::printf("    100,000 emitters: built in %.0f ms, %zu nodes, depth %d\n", ms, t.node_count(), depth);
+    CHECK(!t.empty() && depth <= 64 && t.node_count() <= 200000);
+    const Vec3 P(10.0f, 20.0f, -30.0f), N = normalize(Vec3(1, 1, 0));
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, &N) - 1.0) < 1e-4);
+    int bad = 0;
+    for (int i = 0; i < 2000; i++) {
+      uint32_t id = 0;
+      float p = 0.0f;
+      if (!t.sample(P, &N, rng.f(), id, p) || id >= em.size() || std::fabs(p - t.pmf(P, &N, id)) > 1e-4f * p) bad++;
+    }
+    CHECK(bad == 0);
+    const std::vector<float> flat = t.flatten();
+    CHECK(flat.size() == t.node_count() * (size_t)LightTree::kFloatsPerNode);
+  });
+  test("light tree (round 464): zero-area, collinear, NaN, infinite, zero and negative power triangles are never picked (chance 0) and the good ones still add to 1", [] {
+    r464::Rng rng(31);
+    std::vector<LightTreeEmitter> em = r464::scatter(rng, 40, 10.0f, 1.0f);
+    const size_t first_bad = em.size();
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const LightTreeEmitter e = em[0];
+    LightTreeEmitter zero_area = e, line = e, nan_corner = e, nan_power = e, inf_power = e, no_power = e, neg_power = e, inf_corner = e;
+    zero_area.b = zero_area.c = zero_area.a;
+    line.b = line.a + Vec3(1, 0, 0), line.c = line.a + Vec3(2, 0, 0);
+    nan_corner.b.y = nan;
+    inf_corner.c.x = inf;
+    nan_power.power = nan, inf_power.power = inf, no_power.power = 0.0f, neg_power.power = -3.0f;
+    for (const LightTreeEmitter &b : {zero_area, line, nan_corner, nan_power, inf_power, no_power, neg_power, inf_corner}) em.push_back(b);
+    LightTree t;
+    t.build(em);
+    CHECK(!t.empty());
+    for (size_t i = first_bad; i < em.size(); i++) CHECK(t.leaves()[i] == -1 && t.pmf(Vec3(0, 3, 0), nullptr, (uint32_t)i) == 0.0f);
+    int picked_bad = 0, failed = 0;
+    for (int i = 0; i < 20000; i++) {
+      const Vec3 P = rng.box(15.0f);
+      uint32_t id = 0;
+      float p = 0.0f;
+      if (!t.sample(P, nullptr, rng.f(), id, p)) failed++;
+      else if (id >= first_bad) picked_bad++;
+    }
+    CHECK(picked_bad == 0 && failed == 0);
+    const Vec3 P(1.0f, 2.0f, 3.0f);
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, nullptr) - 1.0) < 1e-4);
+    CHECK(t.pmf(P, nullptr, 100000u) == 0.0f);  // (an index that was never an emitter)
+    uint32_t dummy = 0;
+    float dp = 0.0f;
+    CHECK(!t.sample(P, nullptr, nan, dummy, dp) || dummy < first_bad);  // (a NaN u never walks onto a skipped triangle)
+  });
+  test("light tree (round 464): a point inside the emitters' bounds, or on an emitter's corner, gives finite chances that still add to 1", [] {
+    r464::Rng rng(41);
+    std::vector<LightTreeEmitter> em = r464::scatter(rng, 6, 0.3f, 0.3f);
+    LightTreeEmitter big;
+    big.a = Vec3(-2, 0, -2), big.b = Vec3(-2, 0, 2), big.c = Vec3(2, 0, -2);
+    big.power = 5.0f;
+    em.push_back(big);
+    LightTree t;
+    t.build(em);
+    const Vec3 inside[4] = {Vec3(0.0f), Vec3(0.1f, 0.0f, 0.1f), em[2].a, big.a};
+    const Vec3 N(0, 1, 0);
+    for (const Vec3 &P : inside) {
+      for (const Vec3 *n : {&N, (const Vec3 *)nullptr}) {
+        double sum = 0.0;
+        bool finite = true;
+        for (size_t i = 0; i < em.size(); i++) {
+          const float p = t.pmf(P, n, (uint32_t)i);
+          finite = finite && std::isfinite(p) && p >= 0.0f && p <= 1.0f;
+          sum += p;
+        }
+        uint32_t id = 0;
+        float sp = 0.0f;
+        CHECK(finite && std::fabs(sum - 1.0) < 1e-4 && t.sample(P, n, 0.5f, id, sp) && std::isfinite(sp) && sp > 0.0f);
+      }
+    }
+  });
+  test("light tree (round 464): a two-sided emitter has a chance from either side; a one-sided one has none behind its back and none for a surface turned away from it", [] {
+    LightTreeEmitter a;  // faces +y
+    a.a = Vec3(-1, 0, -1), a.b = Vec3(-1, 0, 1), a.c = Vec3(1, 0, -1);
+    a.power = 4.0f;
+    LightTreeEmitter far_two = a;  // a distant two-sided one, to be the other leaf
+    far_two.a += Vec3(100, 0, 0), far_two.b += Vec3(100, 0, 0), far_two.c += Vec3(100, 0, 0);
+    far_two.two_sided = true;
+    const Vec3 front(0, 5, 0), back(0, -5, 0);
+    for (bool two : {true, false}) {
+      a.two_sided = two;
+      LightTree t;
+      t.build({a, far_two});
+      const float pf = t.pmf(front, nullptr, 0), pb = t.pmf(back, nullptr, 0);
+      std::printf("    %s emitter: chance in front %.4f, behind %.4f\n", two ? "two-sided" : "one-sided", pf, pb);
+      CHECK(pf > 0.5f);
+      if (two) CHECK(pb > 0.5f);
+      else CHECK(pb == 0.0f && t.pmf(back, nullptr, 1) == 1.0f);
+    }
+    /* A receiver facing up (away from a lamp below it) gets nothing from that lamp; a lamp above it does. */
+    a.two_sided = true;
+    LightTreeEmitter above = far_two;
+    above.a = Vec3(-1, 50, -1), above.b = Vec3(-1, 50, 1), above.c = Vec3(1, 50, -1);
+    LightTree t;
+    t.build({a, above});
+    const Vec3 up(0, 1, 0), down(0, -1, 0), P(0, 5, 0);
+    CHECK(t.pmf(P, &up, 0) == 0.0f && t.pmf(P, &up, 1) == 1.0f);
+    CHECK(t.pmf(P, &down, 0) > 0.0f);
+  });
+  test("light tree (round 464): emitters that a normal turns away from entirely still pick something (by power) - no sample dead-ends and the chances add to 1", [] {
+    r464::Rng rng(51);
+    std::vector<LightTreeEmitter> em = r464::scatter(rng, 50, 5.0f, 0.5f);
+    for (LightTreeEmitter &e : em) e.a.y += 30.0f, e.b.y += 30.0f, e.c.y += 30.0f;  // all high above: a face looking down sees none
+    LightTree t;
+    t.build(em);
+    const Vec3 P(0, 0, 0), down(0, -1, 0);
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, nullptr) - 1.0) < 1e-4);
+    CHECK(std::fabs(r464::pmf_sum(t, em.size(), P, &down) - 1.0) < 1e-4);
+    int ok = 0;
+    for (int i = 0; i < 1000; i++) {
+      uint32_t id = 0;
+      float p = 0.0f;
+      ok += t.sample(P, &down, rng.f(), id, p) && p > 0.0f;
+    }
+    CHECK(ok == 1000);
+  });
+  test("light tree (round 464): a union of cones holds both cones; two-sided cones of opposite axes make a narrow one, one-sided opposite ones the whole sphere", [] {
+    r464::Rng rng(61);
+    int outside = 0;
+    for (int i = 0; i < 400; i++) {
+      LightCone a, b;
+      a.axis = rng.unit(), b.axis = rng.unit();
+      a.theta_o = rng.r(0.0f, 1.5f), b.theta_o = rng.r(0.0f, 1.5f);
+      a.two_sided = b.two_sided = i % 2 == 1;
+      const LightCone u = light_cone_union(a, b);
+      for (const LightCone &c : {a, b}) {
+        float ang = r464::cone_angle(u.axis, c.axis);
+        if (u.two_sided) ang = std::min(ang, r464::cone_angle(u.axis, -c.axis));
+        if (ang + c.theta_o > u.theta_o + 1e-3f) outside++;
+      }
+      if (std::fabs(length(u.axis) - 1.0f) > 1e-3f) outside++;
+    }
+    CHECK(outside == 0);
+    LightCone up, down;
+    up.axis = Vec3(0, 1, 0), down.axis = Vec3(0, -1, 0);
+    up.two_sided = down.two_sided = true;
+    LightCone u = light_cone_union(up, down);
+    std::printf("    two-sided +y and -y: theta_o %.4f; ", u.theta_o);
+    CHECK(u.two_sided && u.theta_o < 1e-3f);
+    up.two_sided = down.two_sided = false;
+    u = light_cone_union(up, down);
+    std::printf("one-sided: %.4f (pi %.4f)\n", u.theta_o, kPi);
+    CHECK(u.theta_o >= kPi - 1e-3f);
+    const LightCone same = light_cone_union(up, up);
+    CHECK(same.theta_o < 1e-4f && dot(same.axis, up.axis) > 0.9999f);
+  });
+}
+
+static void tests_round464_pathtracer() {
+  test("light tree (round 464): the path tracer's emitter pick chances add to 1 at a point, by tree and by power; with the tree off the chance is the power's share wherever you stand", [] {
+    MeshPtr panel = primitives::quad(1.0f), cube = primitives::cube(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", Vec3(0.6f))};
+    std::vector<MaterialPtr> glow[3];
+    const float strength[3] = {5.0f, 12.0f, 2.0f};
+    for (int i = 0; i < 3; i++) {
+      glow[i] = {make_material("light", Vec3(0.0f))};
+      glow[i][0]->emission = Vec3(1.0f), glow[i][0]->emission_strength = strength[i];
+    }
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({-2, 3, 0}, Quat::euler({90, 0, 0}), {1.5f, 1.5f, 1}), &glow[0]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({2, 2, 1}, Quat::euler({90, 0, 0}), {1, 1, 1}), &glow[1]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({0, 1, -3}, Quat::euler({0, 0, 0}), {2, 2, 1}), &glow[2]}};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    for (bool tree : {true, false}) {
+      PathTracer pt;
+      PTSettings st;
+      st.light_tree = tree;
+      st.use_guiding = false, st.denoise = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      CHECK(pt.has_mesh_lights() && pt.uses_light_tree() == tree);
+      const uint32_t n = 6;  // (3 quads of 2 triangles)
+      r464::Rng rng(71);
+      double worst = 0.0, spread_by_point = 0.0;
+      float first_share = -1.0f;
+      for (int i = 0; i < 30; i++) {
+        const Vec3 P(rng.r(-3, 3), rng.r(0.1f, 2), rng.r(-3, 3)), N = rng.unit();
+        double s = 0.0, s_power = 0.0;
+        for (uint32_t li = 0; li < n; li++) {
+          s += pt.mesh_light_pick_pmf(li, P, &N, true);
+          s_power += pt.mesh_light_pick_pmf(li, P, &N, false);
+        }
+        worst = std::max({worst, std::fabs(s - 1.0), std::fabs(s_power - 1.0)});
+        const float share = pt.mesh_light_pick_pmf(0, P, &N, false);
+        if (first_share < 0.0f) first_share = share;
+        spread_by_point = std::max(spread_by_point, (double)std::fabs(share - first_share));
+        if (!tree) CHECK(pt.mesh_light_pick_pmf(0, P, &N, true) == share);
+      }
+      std::printf("    light tree %s: worst |sum - 1| %.2e, the power share moves by %.2e between points\n", tree ? "on" : "off", worst, spread_by_point);
+      CHECK(worst < 1e-4 && spread_by_point == 0.0);
+      CHECK(pt.mesh_light_pick_pmf(999, Vec3(0.0f), nullptr, true) == 0.0f);  // (no such emitter)
+    }
+  });
+  test("light tree (round 464): the path tracer's camera render of an emitter-lit room keeps its mean with the tree on or off (first hits pick by the tree, deeper bounces by power)", [] {
+    auto cube = primitives::cube(1.0f);
+    auto panel = primitives::quad(1.0f);
+    std::vector<MaterialPtr> grey = {make_material("grey", {0.6f, 0.6f, 0.6f})};
+    std::vector<MaterialPtr> glow[3];
+    const float strength[3] = {5.0f, 14.0f, 3.0f};
+    for (int i = 0; i < 3; i++) {
+      glow[i] = {make_material("light", {0, 0, 0})};
+      glow[i][0]->emission = {1.0f, 0.9f, 0.8f}, glow[i][0]->emission_strength = strength[i];
+    }
+    std::vector<PTObject> objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+                                  {&cube->render_mesh_tangents(), Mat4::trs({0.3f, 0.5f, 0}, Quat::euler({0, 25, 0}), {1, 1, 1}), &grey},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({-1.5f, 3, 0}, Quat::euler({90, 0, 0}), {1.5f, 1.5f, 1}), &glow[0]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({1.8f, 2.2f, 1.0f}, Quat::euler({90, 0, 0}), {1, 1, 1}), &glow[1]},
+                                  {&panel->render_mesh_tangents(), Mat4::trs({0, 3.2f, -1.5f}, Quat::euler({90, 0, 0}), {0.6f, 0.6f, 1}), &glow[2]}};
+    Environment env;
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    auto render = [&](int spp, bool tree) {
+      PathTracer pt;
+      PTSettings st;
+      st.light_tree = tree, st.max_bounces = 4, st.clamp_indirect = 0, st.use_guiding = false, st.denoise = false;
+      pt.set_settings(st);
+      pt.build(objs, {}, env);
+      pt.set_camera(Mat4::look_at({0, 2, -4}, {0, 0.5f, 0}, {0, 1, 0}), Mat4::perspective(50 * kDeg2Rad, 4.0f / 3.0f, 0.05f, 50), 32, 24);
+      pt.render(1e9, spp);
+      return pt.linear_rgb(false);
+    };
+    auto mean = [](const std::vector<float> &a) {
+      double s = 0;
+      for (float v : a) s += v;
+      return s / (double)a.size();
+    };
+    auto rmse = [](const std::vector<float> &a, const std::vector<float> &b) {
+      double e = 0;
+      for (size_t i = 0; i < a.size(); i++) e += (a[i] - b[i]) * (a[i] - b[i]);
+      return std::sqrt(e / (double)a.size());
+    };
+    const std::vector<float> on = render(512, true), off = render(512, false);
+    const double ratio = mean(on) / mean(off);
+    std::printf("    mean radiance at 512 spp: tree on %.4f, off %.4f (ratio %.4f)\n", mean(on), mean(off), ratio);
+    CHECK(mean(off) > 0.01);
+    CHECK(std::fabs(ratio - 1.0) < 0.02);
+    const std::vector<float> a16 = render(16, true), b16 = render(16, false);
+    std::printf("    RMSE at 16 spp against the 512-spp tree-on render: tree on %.4f, off %.4f (printed, not asserted)\n", rmse(a16, on), rmse(b16, on));
+  });
+}
+
+static void tests_round464_bake() {
+  test("light tree (round 464): a bake of five lamps over a floor has the same mean light with the tree on and off, with the emitters sampled and not, within 3 standard errors", [] {
+    r464::Lamps lamps;
+    const auto t0 = std::chrono::steady_clock::now();
+    auto series = [&](bool tree, bool sample) {
+      return r464::over_seeds(6, [&](uint32_t seed) { return lamps.bake(tree, sample, sample ? 128 : 4096, seed, -1); });  // (gather alone needs many rays to be a tight reference for the weights)
+    };
+    const r464::Mean ref = series(false, true), on = series(true, true), on_gather = series(true, false);  // (gather alone never picks an emitter, tree or CDF: the same bakes, so one series is the reference - review 464)
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    floor light: CDF %.4f +- %.4f, tree %.4f +- %.4f, gather only %.4f +- %.4f (%.0f ms for 18 bakes)\n", ref.mean, ref.se, on.mean, on.se, on_gather.mean,
+                on_gather.se, ms);
+    CHECK(ref.mean > 1e-2);
+    CHECK(r464::agree(on, ref));
+    /* The MIS weights of the emitter samples and the gather add to 1 exactly when the two ways of finding the lamps agree. */
+    CHECK(r464::agree(on_gather, ref));
+    /* The switch changes the draws: one seed's pages are not the same. */
+    const LightingData a = lamps.bake(true, true, 32, 1, -1), b = lamps.bake(false, true, 32, 1, -1), a2 = lamps.bake(true, true, 32, 1, -1);
+    CHECK(r463::same_pages(a, a2));
+    CHECK(!r463::same_pages(a, b));
+  });
+  test("light tree (round 464): on the card the five-lamp floor's mean light agrees with the CPU's, tree on and off (skipped with a note when no GPU opens)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    r464::Lamps lamps;
+    size_t gpu_texels = 0;
+    lamps.bake(true, true, 8, 1, 0, &gpu_texels);
+    if (gpu_texels == 0) {
+      std::printf("    (the card did not gather: skipped)\n");
+      return;
+    }
+    const r464::Mean ref = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(false, true, 64, s, -1); });
+    const r464::Mean g_on = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, 64, s, 0); });
+    const r464::Mean g_off = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(false, true, 64, s, 0); });
+    std::printf("    floor light: CPU CDF %.4f +- %.4f, card tree %.4f +- %.4f, card CDF %.4f +- %.4f\n", ref.mean, ref.se, g_on.mean, g_on.se, g_off.mean, g_off.se);
+    CHECK(ref.mean > 1e-2);
+    CHECK(r464::agree(g_on, ref));
+    CHECK(r464::agree(g_off, ref));
+  });
+}
+
+static void tests_round464_console() {
+  test("`lighting tree off` (round 464): the next bake draws other samples than `on`'s, the lighting stays current (not in the scene's key), `on` brings the old pages back bit for bit", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    ed.command("lighting tree off");
+    CHECK(r463::join_log(mark).find("lighting tree: off") != std::string::npos);
+    CHECK(!ed.lighting_out_of_date_for_test());  // (the switch alone doesn't stale the bake)
+    r35_bake(ed);
+    const bool differs = !r463::same_pages(base, ed.lighting_data_for_test());
+    std::printf("    tree off: pages %s the tree's\n", differs ? "differ from" : "are the same as");
+    CHECK(differs);
+    CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    ed.command("lighting tree on");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting tree off");  // (and a fresh editor starts with it on: the setting isn't saved)
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+    ed.command("lighting tree on");
+  });
+  test("`lighting tree` (round 464): a word that is not on or off warns and the setting stays, whichever it was (the next bake is the same as before the junk)", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData on_pages = ed.lighting_data_for_test();
+    ed.command("lighting tree off");
+    r35_bake(ed);
+    const LightingData off_pages = ed.lighting_data_for_test();
+    CHECK(!r463::same_pages(on_pages, off_pages));
+    const char *junk[] = {"lighting tree maybe", "lighting tree 1", "lighting tree 0", "lighting tree true", "lighting tree -1", "lighting tree nan", "lighting tree onn"};
+    for (int round = 0; round < 2; round++) {
+      const bool is_on = round == 1;
+      ed.command(is_on ? "lighting tree on" : "lighting tree off");
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        const bool warned = said.find("say on or off") != std::string::npos && said.find(is_on ? "stays on" : "stays off") != std::string::npos;
+        CHECK(warned);
+        if (!warned) std::printf("    \"%s\" said: %.100s\n", cmd, said.c_str());
+      }
+      r35_bake(ed);
+      CHECK(r463::same_pages(is_on ? on_pages : off_pages, ed.lighting_data_for_test()));
+    }
+    ed.command("lighting tree on");
+  });
+}
+
+/* ---- round 464, review: the card's layout read on the CPU, the MIS weights, the tree kept between builds ---- */
+namespace r464 {
+/* The kernel's lt_* (gpu_kernel.h), copied over the decoded floats alone: the buffer the card reads (flatten(), then each
+ * emitter's leaf as int bits). A swapped slot in flatten() makes this disagree with LightTree. */
+struct Card {
+  std::vector<float> m;
+  int nodes = 0;
+  explicit Card(const LightTree &t) : m(t.flatten()), nodes((int)t.node_count()) {
+    for (int32_t leaf : t.leaves()) {
+      float f;
+      std::memcpy(&f, &leaf, 4);
+      m.push_back(f);
+    }
+  }
+  float f(int n, int k) const { return m[(size_t)(n * 16 + k)]; }
+  int i(int n, int k) const {
+    uint32_t u;
+    std::memcpy(&u, &m[(size_t)(n * 16 + k)], 4);
+    return (int)u;
+  }
+  float importance(int node, Vec3 p, Vec3 nrm, bool has_n) const {
+    const float power = f(node, 7), r2 = f(node, 3);
+    if (!(power > 0.0f)) return 0.0f;
+    const Vec3 to_c = Vec3(f(node, 0), f(node, 1), f(node, 2)) - p;
+    const float d2 = dot(to_c, to_c);
+    if (!(d2 > r2)) return power / std::max(r2, 1e-12f);
+    const Vec3 w = to_c * (1.0f / std::sqrt(d2));
+    const float sin_u2 = r2 / d2, sin_u = std::sqrt(sin_u2), cos_u = std::sqrt(std::max(0.0f, 1.0f - sin_u2));
+    float cos_i = 1.0f;
+    if (has_n) {
+      const float ci = dot(nrm, w), si = std::sqrt(std::max(0.0f, 1.0f - ci * ci));
+      cos_i = ci >= cos_u ? 1.0f : ci * cos_u + si * sin_u;
+      if (!(cos_i > 0.0f)) return 0.0f;
+    }
+    float ct = dot(Vec3(f(node, 4), f(node, 5), f(node, 6)), -w);
+    if (f(node, 10) > 0.5f) ct = std::fabs(ct);
+    const float st = std::sqrt(std::max(0.0f, 1.0f - ct * ct)), co = f(node, 8), so = f(node, 9);
+    const float c1 = ct >= co ? 1.0f : ct * co + st * so, s1 = ct >= co ? 0.0f : st * co - ct * so;
+    const float c2 = c1 >= cos_u ? 1.0f : c1 * cos_u + s1 * sin_u;
+    if (!(c2 > 0.0f)) return 0.0f;
+    return power * cos_i * c2 / d2;
+  }
+  float left(int node, Vec3 p, Vec3 nrm, bool has_n) const {
+    const int l = i(node, 12), r = i(node, 13);
+    float il = importance(l, p, nrm, has_n), ir = importance(r, p, nrm, has_n);
+    if (std::isnan(il) || std::isinf(il)) il = 0.0f;
+    if (std::isnan(ir) || std::isinf(ir)) ir = 0.0f;
+    if (!(il + ir > 0.0f)) il = f(l, 7), ir = f(r, 7);
+    return il / (il + ir);
+  }
+  int sample(Vec3 p, Vec3 nrm, float u, float &pmf) const {
+    pmf = 1.0f;
+    int at = 0;
+    for (int depth = 0; depth < 64 && i(at, 12) >= 0; depth++) {
+      const float pl = left(at, p, nrm, true);
+      if (u < pl) u = std::min(u / pl, 0.99999994f), pmf *= pl, at = i(at, 12);
+      else u = std::min((u - pl) / (1.0f - pl), 0.99999994f), pmf *= 1.0f - pl, at = i(at, 13);
+    }
+    return i(at, 12) >= 0 ? -1 : i(at, 14);
+  }
+  float pmf(int li, Vec3 p, Vec3 nrm, bool has_n) const {
+    uint32_t u;
+    std::memcpy(&u, &m[(size_t)(nodes * 16 + li)], 4);
+    int at = (int)u;
+    if (at < 0) return 0.0f;
+    float pm = 1.0f;
+    for (int depth = 0; depth < 64 && i(at, 15) >= 0; depth++) {
+      const int up = i(at, 15);
+      const float pl = left(up, p, nrm, has_n);
+      pm *= i(up, 12) == at ? pl : 1.0f - pl;
+      at = up;
+    }
+    return pm;
+  }
+};
+
+/* A floor, a box and three emissive quads (two triangles each), in one PathTracer. */
+struct PtLamps {
+  MeshPtr panel = primitives::quad(1.0f), cube = primitives::cube(1.0f);
+  std::vector<MaterialPtr> grey = {make_material("grey", Vec3(0.6f))};
+  std::vector<MaterialPtr> glow[3];
+  std::vector<PTObject> objs;
+  Environment env;
+  PathTracer pt;
+  PtLamps() {
+    const float strength[3] = {5.0f, 12.0f, 2.0f};
+    for (int i = 0; i < 3; i++) {
+      glow[i] = {make_material("light", Vec3(0.0f))};
+      glow[i][0]->emission = Vec3(1.0f), glow[i][0]->emission_strength = strength[i];
+    }
+    objs = {{&cube->render_mesh_tangents(), Mat4::trs({0, -0.05f, 0}, Quat(), {8, 0.1f, 8}), &grey},
+            {&panel->render_mesh_tangents(), Mat4::trs({-2, 3, 0}, Quat::euler({90, 0, 0}), {1.5f, 1.5f, 1}), &glow[0]},
+            {&panel->render_mesh_tangents(), Mat4::trs({2, 2, 1}, Quat::euler({90, 0, 0}), {1, 1, 1}), &glow[1]},
+            {&panel->render_mesh_tangents(), Mat4::trs({0, 1, -3}, Quat::euler({0, 0, 0}), {2, 2, 1}), &glow[2]}};
+    env.mode = Environment::Color, env.color = Vec3(0.0f);
+    PTSettings st;
+    st.use_guiding = false, st.denoise = false;
+    pt.set_settings(st);
+    rebuild();
+  }
+  void rebuild() { pt.build(objs, {}, env); }
+  /* The emitter number of triangle `tri` of object `obj` (objects 1..3 are the quads: collect_mesh_lights' order). */
+  static uint32_t light_of(uint32_t obj, uint32_t tri) { return (obj - 1) * 2 + tri; }
+  float tri_area(uint32_t obj, uint32_t tri) const {
+    const RenderMesh &rm = *objs[obj].mesh;
+    const Vec3 a = objs[obj].model.point(rm.positions[rm.indices[tri * 3]]), b = objs[obj].model.point(rm.positions[rm.indices[tri * 3 + 1]]),
+               c = objs[obj].model.point(rm.positions[rm.indices[tri * 3 + 2]]);
+    return 0.5f * length(cross(b - a, c - a));
+  }
+};
+}  // namespace r464
+
+static void tests_round464_review() {
+  test("light tree (round 464): the card's flat buffer, read as the kernel reads it, picks the same emitters with the same chances and importances as LightTree", [] {
+    r464::Rng rng(81);
+    const std::vector<LightTreeEmitter> em = r464::scatter(rng, 200, 15.0f, 1.2f);
+    LightTree t;
+    t.build(em);
+    const r464::Card card(t);
+    int pick_diff = 0, draws = 0;
+    double worst_pmf = 0.0, worst_imp = 0.0;
+    for (int i = 0; i < 120; i++) {
+      const Vec3 P = rng.box(i < 20 ? 3.0f : 25.0f), N = rng.unit();
+      for (size_t n = 0; n < t.nodes().size(); n += 7) {
+        const float a = t.importance(t.nodes()[n], P, &N), b = card.importance((int)n, P, N, true);
+        worst_imp = std::max(worst_imp, (double)std::fabs(a - b) / std::max(1e-20, (double)std::fabs(a)));
+        const float a0 = t.importance(t.nodes()[n], P, nullptr), b0 = card.importance((int)n, P, N, false);
+        worst_imp = std::max(worst_imp, (double)std::fabs(a0 - b0) / std::max(1e-20, (double)std::fabs(a0)));
+      }
+      for (size_t e = 0; e < em.size(); e += 3) {
+        const float a = t.pmf(P, &N, (uint32_t)e), b = card.pmf((int)e, P, N, true), a0 = t.pmf(P, nullptr, (uint32_t)e), b0 = card.pmf((int)e, P, N, false);
+        worst_pmf = std::max({worst_pmf, (double)std::fabs(a - b) / std::max(1e-20, (double)a), (double)std::fabs(a0 - b0) / std::max(1e-20, (double)a0)});
+      }
+      for (int k = 0; k < 25; k++) {
+        const float u = rng.f();
+        uint32_t id = 0;
+        float pm = 0.0f, cpm = 0.0f;
+        const bool ok = t.sample(P, &N, u, id, pm);
+        const int cid = card.sample(P, N, u, cpm);
+        draws++;
+        if (!ok || cid != (int)id || std::fabs(pm - cpm) > 1e-6f * pm) pick_diff++;
+      }
+    }
+    std::printf("    %d draws, %d picks differ; worst relative gap: importance %.2e, pmf %.2e\n", draws, pick_diff, worst_imp, worst_pmf);
+    CHECK(pick_diff == 0);
+    CHECK(worst_imp < 1e-5 && worst_pmf < 1e-6);
+    /* A leaf's emitter and the leaves array agree. */
+    int bad = 0;
+    for (size_t e = 0; e < em.size(); e++) bad += card.i(t.leaves()[e], 14) != (int)e;
+    CHECK(bad == 0);
+  });
+  test("light tree (round 464): at a texel the emitter sample's MIS weight and the gather's add to 1, because the chance the gather weighs by is the very one the sample drew with", [] {
+    /* trace()'s first-hit weight reads mesh_light_pdf (private) = mesh_light_pick_pmf(li, o, &n) x dist^2 / (area cos_l);
+     * emissive_at's reads sample_mesh_light's pdf. Both are reached here through the public calls, so this pins that the
+     * two agree (and then the weights sum to 1 for any count ratio). The kernel's own weights are not reachable. */
+    r464::PtLamps s;
+    r464::Rng rng(91);
+    LightTree::Cache cache;
+    int used = 0, mismatch = 0, not_one = 0;
+    double worst_pl = 0.0, worst_sum = 0.0;
+    for (int p = 0; p < 150; p++) {
+      const Vec3 o(rng.r(-3, 3), rng.r(0.05f, 1.5f), rng.r(-3, 3)), n = rng.unit();
+      s.pt.light_tree().cache_begin(cache, o, &n);
+      for (int k = 0; k < 20; k++) {
+        uint32_t rs = (uint32_t)(p * 31 + k + 1);
+        Vec3 dir, Le;
+        float dist = 0.0f, pl = 0.0f;
+        if (!s.pt.sample_mesh_light(rs, o, n, dir, dist, Le, pl, rng.f(), k % 2 ? &cache : nullptr)) continue;
+        PathTracer::Hit h;
+        if (!s.pt.intersect({o, dir}, h) || h.object < 1 || h.object > 3 || std::fabs(h.t - dist) > 1e-2f * dist) continue;  // (something in the way: skip)
+        const uint32_t li = r464::PtLamps::light_of(h.object, h.tri);
+        const float cos_l = std::fabs(dot(s.pt.hit_geo_normal(h), dir));
+        const float plp = s.pt.mesh_light_pick_pmf(li, o, &n, true) * dist * dist / (s.tri_area(h.object, h.tri) * cos_l);
+        worst_pl = std::max(worst_pl, (double)std::fabs(plp - pl) / pl);
+        used++;
+        if (std::fabs(plp - pl) > 1e-3f * pl) mismatch++;
+        for (float ratio : {0.0f, 0.25f, 1.0f, 8.0f, 64.0f}) {
+          const float pb = ratio * dot(n, dir) / kPi;
+          const float w_emit = pl * pl / (pl * pl + pb * pb), w_gather = pb * pb / (pb * pb + plp * plp);
+          worst_sum = std::max(worst_sum, (double)std::fabs(w_emit + w_gather - 1.0f));
+          if (std::fabs(w_emit + w_gather - 1.0f) > 1e-5f) not_one++;
+        }
+      }
+    }
+    std::printf("    %d samples checked: worst gap between the sample's pdf and the gather's %.2e; worst |w_emit + w_gather - 1| %.2e\n", used, worst_pl, worst_sum);
+    CHECK(used > 500);
+    CHECK(mismatch == 0 && not_one == 0);
+  });
+  test("light tree (round 464): rebuilding a scene where only the floor moved keeps the tree; moving a lamp rebuilds it and the chances change; past 2^20 emitters there is no tree", [] {
+    r464::PtLamps s;
+    const Vec3 P(0.5f, 0.5f, 0.5f), N(0, 1, 0);
+    auto pmfs = [&]() {
+      std::vector<float> v;
+      for (uint32_t i = 0; i < 6; i++) v.push_back(s.pt.mesh_light_pick_pmf(i, P, &N, true));
+      return v;
+    };
+    CHECK(s.pt.uses_light_tree());
+    const std::vector<float> before = pmfs();
+    const LightTreeNode *nodes0 = s.pt.light_tree().nodes().data();
+    const size_t count0 = s.pt.light_tree().node_count();
+    s.objs[0].model = Mat4::trs({1.0f, -0.05f, 2.0f}, Quat(), {8, 0.1f, 8});  // (the floor moves)
+    auto t0 = std::chrono::steady_clock::now();
+    s.rebuild();
+    const double ms_same = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(s.pt.light_tree().node_count() == count0 && pmfs() == before);
+    CHECK(s.pt.light_tree().nodes().data() == nodes0);  // (the same nodes, not rebuilt)
+    s.objs[2].model = Mat4::trs({-4, 0.6f, 2}, Quat::euler({90, 0, 0}), {1, 1, 1});  // (a lamp moves)
+    t0 = std::chrono::steady_clock::now();
+    s.rebuild();
+    const double ms_moved = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const std::vector<float> after = pmfs();
+    double change = 0.0;
+    for (size_t i = 0; i < 6; i++) change = std::max(change, (double)std::fabs(after[i] - before[i]));
+    double sum = 0.0;
+    for (float v : after) sum += v;
+    std::printf("    rebuild with the floor moved %.1f ms, with a lamp moved %.1f ms; the chances moved by up to %.3f\n", ms_same, ms_moved, change);
+    CHECK(change > 1e-3 && std::fabs(sum - 1.0) < 1e-4 && s.pt.uses_light_tree());
+    /* Turning the tree off in the settings gives no tree; on again builds one. */
+    PTSettings st = s.pt.settings();
+    st.light_tree = false;
+    s.pt.set_settings(st);
+    s.rebuild();
+    CHECK(!s.pt.uses_light_tree());
+    st.light_tree = true;
+    s.pt.set_settings(st);
+    s.rebuild();
+    CHECK(s.pt.uses_light_tree());
+    /* More than 2^20 emissive triangles: picked by power, no tree. */
+    MeshPtr big = primitives::plane(10.0f, 725);  // 2 x 725^2 = 1,051,250 triangles
+    std::vector<MaterialPtr> lit = {make_material("lit", Vec3(0.0f))};
+    lit[0]->emission = Vec3(1.0f), lit[0]->emission_strength = 1.0f;
+    PathTracer pt;
+    PTSettings ps;
+    ps.use_guiding = false, ps.denoise = false;
+    pt.set_settings(ps);
+    t0 = std::chrono::steady_clock::now();
+    pt.build({{&big->render_mesh_tangents(), Mat4::identity(), &lit}}, {}, s.env);
+    const double ms_big = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::printf("    %zu-triangle emitter: build %.0f ms, tree %s\n", big->render_mesh_tangents().tri_count(), ms_big, pt.uses_light_tree() ? "yes" : "no");
+    CHECK(pt.has_mesh_lights() && !pt.uses_light_tree());
+    const float share = 1.0f / (float)big->render_mesh_tangents().tri_count();  // (equal triangles: a power share each)
+    std::printf("    power share of triangle 5: %.6e (1/n = %.6e)\n", pt.mesh_light_pick_pmf(5, Vec3(0, 1, 0), nullptr, true), share);
+    /* (0.1 %: the scene's power is summed in double since review 464 - as a float running sum of a million terms it read
+     * about 1.2 % low; the margin left is each triangle's area in float) */
+    CHECK(std::fabs(pt.mesh_light_pick_pmf(5, Vec3(0, 1, 0), nullptr, true) - share) < 1e-3f * share);
+  });
+}
+
+static void tests_round464() {
+  tests_round464_review();
+  tests_round464_tree();
+  tests_round464_pathtracer();
+  tests_round464_bake();
+  tests_round464_console();
+}
+
+/* ---- round 465 (task 0441): a texel's samples from Owen-scrambled Sobol ---- */
+namespace r465 {
+/* Points per elementary interval 2^-a x 2^-b of the first 2^k points of dimensions (d0, d1): true when every one holds exactly one. */
+static bool is_net(uint32_t seed, uint32_t d0, uint32_t d1, int k) {
+  const uint32_t n = 1u << k;
+  std::vector<float> x(n), y(n);
+  for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(i, d0, seed), y[i] = sampler::sobol_burley(i, d1, seed);
+  for (int a = 0; a <= k; a++) {
+    const int b = k - a;
+    std::vector<int> count((size_t)n, 0);
+    for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << b | (uint32_t)(y[i] * (float)(1u << b)))]++;
+    for (int c : count)
+      if (c != 1) return false;
+  }
+  return true;
+}
+
+static double correlation(const std::vector<float> &a, const std::vector<float> &b) {
+  double ma = 0, mb = 0;
+  for (size_t i = 0; i < a.size(); i++) ma += a[i], mb += b[i];
+  ma /= (double)a.size(), mb /= (double)a.size();
+  double sab = 0, saa = 0, sbb = 0;
+  for (size_t i = 0; i < a.size(); i++) sab += (a[i] - ma) * (b[i] - mb), saa += (a[i] - ma) * (a[i] - ma), sbb += (b[i] - mb) * (b[i] - mb);
+  return sab / std::sqrt(saa * sbb);
+}
+
+/* The mean and the spread between seeds of the luminance texels of a lone plane under a gradient sky (a lit plane's value is
+ * its irradiance / pi, which for this sky is 2 x the integral of L(t) t dt, t the cosine to the zenith). Sky 0.2, equator 1 in
+ * red: L(t) = 1 - 0.8 sqrt(t), so the value is 1 - 0.64 = 0.36 exactly. */
+static double plane_value(uint32_t seed, bool sobol, int samples) {
+  Environment env;
+  env.mode = Environment::Gradient;
+  env.sky = Vec3(0.2f, 0.0f, 0.0f), env.equator = Vec3(1.0f, 0.0f, 0.0f), env.ground = Vec3(0.0f);
+  BakeSettings bs;
+  bs.texels_per_unit = 8, bs.indirect_samples = samples, bs.bounces = 2, bs.denoise = false, bs.directional = false, bs.seed = seed, bs.sobol = sobol;
+  bs.backface_tolerance = 0.0f;
+  std::vector<BakeObject> objs{bake_object(1, primitives::plane(2.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+  Lightmapper lm;
+  lm.begin(objs, {}, env, bs);
+  while (!lm.step(1e9)) {
+  }
+  const LightingData d = lm.take_result();
+  const LightingData::Entry &e = d.entries.at(1);
+  const Lightmap &pg = d.pages[(size_t)e.page];
+  double sum = 0.0;
+  size_t n = 0;
+  for (const Vec3 &t : pg.texels)
+    if (t.x > 0.0f) sum += t.x, n++;
+  return n ? sum / (double)n : 0.0;
+}
+}  // namespace r465
+
+static void tests_round465_sampler() {
+  test("sobol sampler (round 465): after scrambling, the first 2^k points (k = 4 to 10) of dimensions (0, 1) hold one point in every elementary interval of area 2^-k (every shape), for several seeds, and so do a texel's gather and emitter streams", [] {
+    for (uint32_t seed : {0u, 1u, 12345u, 0xdeadbeefu})
+      for (int k = 4; k <= 10; k++) CHECK(r465::is_net(seed, 0, 1, k));
+    sampler::TexelSampler t;
+    t.seed = 4242;
+    bool streams_even = true;
+    for (uint32_t stream : {(uint32_t)sampler::TexelSampler::Gather, (uint32_t)sampler::TexelSampler::Emit, 8u, 9u})
+      for (int k = 4; k <= 10; k++) {
+        const uint32_t n = 1u << k;
+        for (int a = 0; a <= k; a++) {
+          std::vector<int> count((size_t)n, 0);
+          for (uint32_t i = 0; i < n; i++) {
+            float x, y;
+            t.pt(stream, i, x, y);
+            count[(size_t)((uint32_t)(x * (float)(1u << a)) << (k - a) | (uint32_t)(y * (float)(1u << (k - a))))]++;
+          }
+          for (int c : count) streams_even = streams_even && c == 1;
+        }
+      }
+    CHECK(streams_even);
+  });
+  test("sobol sampler (round 465): dimensions (1, 2), where the emitter stream takes its point, are nearly as even - every interval of area 4 x 2^-k holds 4 points within 3, and dimension 3 is a van der Corput-like net on its own", [] {
+    for (uint32_t seed : {3u, 77u})
+      for (int k = 6; k <= 10; k++) {
+        const uint32_t n = 1u << k;
+        std::vector<float> x(n), y(n), z(n);
+        for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(i, 1, seed), y[i] = sampler::sobol_burley(i, 2, seed), z[i] = sampler::sobol_burley(i, 3, seed);
+        int worst = 0;
+        for (int a = 0; a <= k - 2; a++) {
+          const int b = k - 2 - a;
+          std::vector<int> count((size_t)(n / 4), 0);
+          for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << b | (uint32_t)(y[i] * (float)(1u << b)))]++;
+          for (int c : count) worst = std::max(worst, std::abs(c - 4));
+        }
+        std::printf("    dims (1, 2), 2^%d points: worst interval off by %d\n", k, worst);
+        CHECK(worst <= 3);
+        std::vector<int> bins((size_t)n, 0);
+        for (uint32_t i = 0; i < n; i++) bins[(size_t)(z[i] * (float)n)]++;
+        bool net = true;
+        for (int c : bins) net = net && c == 1;
+        CHECK(net);
+      }
+  });
+  test("sobol sampler (round 465): every dimension's mean over 4096 points is 0.5 within 1 %, two seeds give different points, one seed the same points bit for bit, and all values are in [0, 1)", [] {
+    for (uint32_t dim = 0; dim < 4; dim++) {
+      double m = 0.0, m2 = 0.0;
+      bool same = true, differ = false, in_range = true;
+      for (uint32_t i = 0; i < 4096; i++) {
+        const float a = sampler::sobol_burley(i, dim, 5), b = sampler::sobol_burley(i, dim, 5), c = sampler::sobol_burley(i, dim, 6);
+        m += a / 4096.0, m2 += c / 4096.0;
+        same = same && std::memcmp(&a, &b, 4) == 0;
+        differ = differ || a != c;
+        in_range = in_range && a >= 0.0f && a < 1.0f;
+      }
+      CHECK(std::fabs(m - 0.5) < 0.005 && std::fabs(m2 - 0.5) < 0.005);
+      CHECK(same && differ && in_range);
+    }
+  });
+  test("sobol sampler (round 465): a sample count that is no power of two is still spread - 300 points over an 8 x 8 grid hold 4 or 5 each; two streams of one texel are not correlated (the mean r over 256 texels' seeds within 0.1, each texel's own r differing in sign); neighbouring texels' seeds give other points", [] {
+    sampler::TexelSampler t;
+    t.seed = 99;
+    std::vector<int> cell(64, 0);
+    for (uint32_t k = 0; k < 300; k++) {
+      float a, b;
+      t.pt(sampler::TexelSampler::Gather, k, a, b);
+      cell[(size_t)((int)(a * 8.0f) * 8 + (int)(b * 8.0f))]++;
+    }
+    int lo = 99, hi = 0;
+    for (int c : cell) lo = std::min(lo, c), hi = std::max(hi, c);
+    std::printf("    300 points over 8 x 8 cells: %d to %d each\n", lo, hi);
+    CHECK(lo >= 4 && hi <= 5);
+    /* Two purposes' streams are scrambled alone, so a texel's own r is random (the points are the same sequence) with mean 0 over
+     * texels: that is what keeps the gather's and the emitters' errors from adding. */
+    double mean_r = 0.0;
+    int positive = 0;
+    for (uint32_t seed = 1; seed <= 256; seed++) {
+      sampler::TexelSampler s;
+      s.seed = seed * 2654435761u;
+      std::vector<float> g, e;
+      for (uint32_t k = 0; k < 512; k++) g.push_back(s.u(sampler::TexelSampler::Gather, k)), e.push_back(s.u(sampler::TexelSampler::Emit, k));
+      const double r = r465::correlation(g, e);
+      mean_r += r / 256.0;
+      positive += r > 0.0;
+    }
+    std::printf("    gather vs emitter stream: mean r = %.4f over 256 texels (%d positive)\n", mean_r, positive);
+    CHECK(std::fabs(mean_r) < 0.1 && positive > 80 && positive < 176);
+    sampler::TexelSampler n;
+    n.seed = 100;
+    int same = 0;
+    for (uint32_t k = 0; k < 64; k++) same += n.u(sampler::TexelSampler::Gather, k) == t.u(sampler::TexelSampler::Gather, k);
+    CHECK(same < 4);
+  });
+  test("sobol bake (round 465): a lone plane under a gradient sky bakes to its exact value 0.36 within 3 standard errors (the seeds' spread, plus half a percent) with Sobol and with random numbers", [] {
+    for (bool sobol : {true, false}) {
+      std::vector<double> v;
+      for (uint32_t seed = 1; seed <= 6; seed++) v.push_back(r465::plane_value(seed, sobol, 64));
+      double m = 0.0, var = 0.0;
+      for (double x : v) m += x / 6.0;
+      for (double x : v) var += (x - m) * (x - m) / 5.0;
+      const double se = std::sqrt(var / 6.0);
+      std::printf("    %s: mean %.5f +- %.5f (exact 0.36)\n", sobol ? "sobol " : "random", m, se);
+      CHECK(std::fabs(m - 0.36) <= 3.0 * se + 0.0018);
+    }
+  });
+  test("sobol bake (round 465): the light-tree lamps scene bakes bit for bit the same twice at one seed, another seed draws other samples, and random numbers other than Sobol's; Sobol and random agree on the mean (within 3 standard errors)", [] {
+    const r464::Lamps lamps;
+    const LightingData a = lamps.bake(true, true, 64, 3, -1), b = lamps.bake(true, true, 64, 3, -1);
+    CHECK(r463::same_pages(a, b));
+    CHECK(!r463::same_pages(a, lamps.bake(true, true, 64, 4, -1)));
+    const LightingData rnd = lamps.bake(true, true, 64, 3, -1, nullptr, false);
+    CHECK(!r463::same_pages(a, rnd));
+    CHECK(r463::same_pages(rnd, lamps.bake(true, true, 64, 3, -1, nullptr, false)));
+    const r464::Mean ms = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, 64, s, -1); });
+    const r464::Mean mr = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, 64, s, -1, nullptr, false); });
+    std::printf("    floor light: sobol %.4f +- %.4f, random %.4f +- %.4f\n", ms.mean, ms.se, mr.mean, mr.se);
+    CHECK(ms.mean > 1e-3);
+    CHECK(r464::agree(ms, mr));
+  });
+}
+
+static void tests_round465_console() {
+  test("`lighting sampler random` (round 465): the next bake draws other samples than `sobol`'s, the lighting stays current (not in the scene's key), `sobol` brings the old pages back bit for bit, and a fresh editor starts on sobol", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    ed.command("lighting sampler random");
+    CHECK(r463::join_log(mark).find("lighting sampler: random") != std::string::npos);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    r35_bake(ed);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()));
+    CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    ed.command("lighting sampler sobol");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting sampler random");
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+    ed.command("lighting sampler sobol");
+  });
+  test("`lighting sampler` (round 465): a word that is not sobol or random warns and the setting stays, whichever it was; with no word it is sobol", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData sobol_pages = ed.lighting_data_for_test();
+    ed.command("lighting sampler random");
+    r35_bake(ed);
+    const LightingData random_pages = ed.lighting_data_for_test();
+    CHECK(!r463::same_pages(sobol_pages, random_pages));
+    const char *junk[] = {"lighting sampler halton", "lighting sampler 1", "lighting sampler on", "lighting sampler -1", "lighting sampler nan", "lighting sampler sobo"};
+    for (int round = 0; round < 2; round++) {
+      const bool is_sobol = round == 1;
+      ed.command(is_sobol ? "lighting sampler sobol" : "lighting sampler random");
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        CHECK(said.find("say sobol or random") != std::string::npos && said.find(is_sobol ? "stays sobol" : "stays random") != std::string::npos);
+      }
+      r35_bake(ed);
+      CHECK(r463::same_pages(is_sobol ? sobol_pages : random_pages, ed.lighting_data_for_test()));
+    }
+    ed.command("lighting sampler random");
+    ed.command("lighting sampler");  // (no word: back to the default)
+    r35_bake(ed);
+    CHECK(r463::same_pages(sobol_pages, ed.lighting_data_for_test()));
+  });
+}
+
+/* ---- round 465, the independent checks (test engineer): odd counts, the range's ends, the triangle and sky mappings, streams per
+ * light, the filter's edge stop, the card's directions ---- */
+namespace r465 {
+static int popcount32(uint32_t v) {
+  int c = 0;
+  for (; v; v >>= 1) c += (int)(v & 1u);
+  return c;
+}
+
+/* sampler.h's pcg_hash and sobol01 exactly as gpu_kernel.h writes them (uint ops, bitfieldReverse), so the card's directions
+ * can be compared with the CPU's where no card runs. A drift in either side's constants or its dimension-1 loop shows here. */
+static uint32_t glsl_pcg_hash(uint32_t v) {
+  uint32_t state = v * 747796405u + 2891336453u;
+  uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+static uint32_t glsl_lk_hash(uint32_t x, uint32_t s) {
+  x ^= x * 0x3d20adeau;
+  x += s;
+  x *= (s >> 16) | 1u;
+  x ^= x * 0x05526c56u;
+  x ^= x * 0x53a22864u;
+  return x;
+}
+static uint32_t glsl_bitfield_reverse(uint32_t v) {  // (a different way than sampler.h's: bit by bit)
+  uint32_t r = 0;
+  for (int i = 0; i < 32; i++) r |= ((v >> i) & 1u) << (31 - i);
+  return r;
+}
+static float glsl_sobol01(uint32_t index, uint32_t dim, uint32_t seed) {
+  uint32_t x = glsl_bitfield_reverse(index);
+  if (dim == 1u) {
+    x = 0u;
+    uint32_t v = 0x80000000u;
+    for (uint32_t n = index; n != 0u; n >>= 1) {
+      if ((n & 1u) != 0u) x ^= v;
+      v ^= v >> 1;
+    }
+  }
+  x = glsl_bitfield_reverse(glsl_lk_hash(glsl_bitfield_reverse(x), glsl_pcg_hash(glsl_pcg_hash(seed) + dim * 0x9E3779B9u)));
+  return (float)(x >> 8) * (1.0f / 16777216.0f);
+}
+
+/* Barycentric coordinates (b1, b2) of P in triangle abc (P on its plane). */
+static void bary(Vec3 a, Vec3 b, Vec3 c, Vec3 P, float &b1, float &b2) {
+  const Vec3 v0 = b - a, v1 = c - a, v2 = P - a;
+  const float d00 = dot(v0, v0), d01 = dot(v0, v1), d11 = dot(v1, v1), d20 = dot(v2, v0), d21 = dot(v2, v1);
+  const float den = d00 * d11 - d01 * d01;
+  b1 = (d11 * d20 - d01 * d21) / den;
+  b2 = (d00 * d21 - d01 * d20) / den;
+}
+
+/* The cell of a point of the unit triangle among 16 equal-area ones (the triangle cut twice into quarters). */
+static int sub_triangle(float u, float v) {
+  const int I = std::min(3, (int)(4.0f * u)), J = std::min(3, (int)(4.0f * v));
+  const float fx = 4.0f * u - (float)I, fy = 4.0f * v - (float)J;
+  const bool down = fx + fy >= 1.0f && I + J <= 2;
+  return (down ? 16 : 0) + I * 4 + J;
+}
+
+/* The luminance (y) error of a bake of the r423 scene against `ref`. */
+struct Scene423 {
+  MeshPtr floor = primitives::plane(4.0f, 8), wall = primitives::plane(4.0f, 8);
+  MaterialPtr white = make_material("White", Vec3(0.8f));
+  std::vector<BakeObject> objs;
+  BakeLight sun;
+  Environment env;
+  Scene423() {
+    objs = {bake_object(1, floor, Mat4::identity(), {white}), bake_object(2, wall, Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {white})};
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    env.mode = Environment::Gradient;
+  }
+  LightingData bake(int n, bool denoise, uint32_t seed, bool sobol) const {
+    BakeSettings bs;
+    bs.texels_per_unit = 8, bs.indirect_samples = n, bs.denoise = denoise, bs.seed = seed, bs.sobol = sobol;
+    Lightmapper lm;
+    lm.begin(objs, {sun}, env, bs);
+    while (!lm.step(1e9)) {
+    }
+    return lm.take_result();
+  }
+  static double rmse(const LightingData &a, const LightingData &ref) {
+    double s = 0;
+    size_t k = 0;
+    for (size_t p = 0; p < a.pages.size(); p++)
+      for (size_t i = 0; i < a.pages[p].texels.size(); i++) {
+        const float r = ref.pages[p].texels[i].y;
+        if (!(r > 0.0f)) continue;
+        const double d = (double)a.pages[p].texels[i].y - r;
+        s += d * d, k++;
+      }
+    return k ? std::sqrt(s / (double)k) : 1e9;
+  }
+};
+}  // namespace r465
+
+static void tests_round465_edges() {
+  test("sobol sampler (round 465): a sample count that is no power of two (1, 3, 7, 300, 1000) spreads as a (0, 2)-sequence's prefix must - in every interval of area 2^-m the count is above n 2^-m - 1 and at most n 2^-m + (the 1 bits of n below 2^m), every shape, and the 1D dimensions likewise", [] {
+    /* Why that bound: the first n points split into aligned blocks of 2^j points (n's binary digits); each block is a (0, j, 2)-net.
+     * A block of 2^j >= 2^m points holds exactly 2^(j-m) in an interval of area 2^-m; a smaller block holds at most 1 (and its
+     * expected share is below 1). So the error is above -1 and at most the number of small blocks. */
+    int checked = 0;
+    for (uint32_t seed : {0u, 11u, 0xFFFFFFFFu})
+      for (uint32_t n : {1u, 3u, 7u, 300u, 1000u}) {
+        std::vector<float> x(n), y(n);
+        for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(i, 0, seed), y[i] = sampler::sobol_burley(i, 1, seed);
+        for (int m = 1; m <= 12; m++) {
+          const int low = r465::popcount32(n & ((1u << m) - 1u));
+          const double expect = (double)n / (double)(1u << m);
+          for (int a = 0; a <= m; a++) {
+            const int b = m - a;
+            std::vector<int> count((size_t)1 << m, 0);
+            for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << b | (uint32_t)(y[i] * (float)(1u << b)))]++;
+            for (int c : count) {
+              checked++;
+              if (!((double)c > expect - 1.0 - 1e-9 && (double)c <= expect + (double)low + 1e-9)) {
+                std::printf("    n %u seed %u m %d a %d: a cell holds %d, expected %.3f, allowed up to +%d\n", n, seed, m, a, c, expect, low);
+                CHECK(false);
+                return;
+              }
+            }
+          }
+        }
+        /* one dimension: every interval of length 2^-m */
+        for (int m = 1; m <= 12; m++) {
+          std::vector<int> count((size_t)1 << m, 0);
+          for (uint32_t i = 0; i < n; i++) count[(size_t)(x[i] * (float)(1u << m))]++;
+          const int low = r465::popcount32(n & ((1u << m) - 1u));
+          const double expect = (double)n / (double)(1u << m);
+          bool cells_ok = true;
+          for (size_t ci = 0; ci < count.size() && cells_ok; ci++) {
+            cells_ok = (double)count[ci] > expect - 1.0 - 1e-9 && (double)count[ci] <= expect + (double)low + 1e-9;
+            if (!cells_ok) std::printf("    1D n %u seed %u m %d: cell %zu holds %d, expected %.3f\n", n, seed, m, ci, count[ci], expect);
+          }
+          CHECK(cells_ok);
+        }
+      }
+    std::printf("    %d interval counts checked\n", checked);
+  });
+  test("sobol sampler (round 465): a later run of samples is as even as the first - 2^k points from a block-aligned start (2^20, 3 x 2^28, 2^31) still hold one in every elementary interval", [] {
+    for (uint32_t seed : {2u, 0xFFFFFFFFu})
+      for (uint32_t base : {1u << 20, 3u << 28, 1u << 31})
+        for (int k = 4; k <= 9; k++) {
+          const uint32_t n = 1u << k;
+          std::vector<float> x(n), y(n);
+          for (uint32_t i = 0; i < n; i++) x[i] = sampler::sobol_burley(base + i, 0, seed), y[i] = sampler::sobol_burley(base + i, 1, seed);
+          bool ok = true;
+          for (int a = 0; a <= k; a++) {
+            std::vector<int> count((size_t)n, 0);
+            for (uint32_t i = 0; i < n; i++) count[(size_t)((uint32_t)(x[i] * (float)(1u << a)) << (k - a) | (uint32_t)(y[i] * (float)(1u << (k - a))))]++;
+            for (int c : count) ok = ok && c == 1;
+          }
+          CHECK(ok);
+        }
+  });
+  test("sobol sampler (round 465): index 0, indices 2^31 and 2^32 - 1, seeds 0 and 0xFFFFFFFF, every dimension (also 4 and up): every value in [0, 1), none NaN, and over seeds the first point is not stuck (mean 0.5, not at 0)", [] {
+    const uint32_t indices[] = {0u, 1u, 0x7FFFFFFFu, 0x80000000u, 0x80000001u, 0xFFFFFFFEu, 0xFFFFFFFFu};
+    const uint32_t seeds[] = {0u, 1u, 0x80000000u, 0xFFFFFFFEu, 0xFFFFFFFFu};
+    bool ok = true;
+    for (uint32_t idx : indices)
+      for (uint32_t seed : seeds)
+        for (uint32_t dim = 0; dim < 9; dim++) {
+          const float v = sampler::sobol_burley(idx, dim, seed);
+          ok = ok && std::isfinite(v) && v >= 0.0f && v < 1.0f;
+        }
+    CHECK(ok);
+    for (uint32_t idx : {0u, 0x80000000u, 0xFFFFFFFFu})
+      for (uint32_t dim = 0; dim < 4; dim++) {
+        double m = 0.0;
+        float lo = 1.0f, hi = 0.0f;
+        const int N = 4096;
+        for (int s = 0; s < N; s++) {
+          const float v = sampler::sobol_burley(idx, dim, (uint32_t)s * 2654435761u);
+          m += v / N, lo = std::min(lo, v), hi = std::max(hi, v);
+        }
+        CHECK(std::fabs(m - 0.5) < 0.03 && lo < 0.05f && hi > 0.95f);
+      }
+    /* the same inputs, the same bits, whatever was drawn before (no hidden state) */
+    const float first = sampler::sobol_burley(0xFFFFFFFFu, 3, 0xFFFFFFFFu);
+    for (uint32_t i = 0; i < 100; i++) sampler::sobol_burley(i, i & 3u, i);
+    CHECK(first == sampler::sobol_burley(0xFFFFFFFFu, 3, 0xFFFFFFFFu));
+  });
+  test("sobol sampler (round 465): the card's sobol01 (gpu_kernel.h, ported over the same uint ops) gives bit for bit the CPU's sobol_burley for dimensions 0 and 1 - edge indices, edge seeds and 20,000 mixed ones", [] {
+    uint32_t state = 12345u;
+    auto next = [&]() {
+      state = state * 1664525u + 1013904223u;
+      return state ^ (state >> 15);
+    };
+    int diff = 0, total = 0;
+    auto check = [&](uint32_t idx, uint32_t dim, uint32_t seed) {
+      const float a = sampler::sobol_burley(idx, dim, seed), b = r465::glsl_sobol01(idx, dim, seed);
+      diff += std::memcmp(&a, &b, 4) != 0, total++;
+    };
+    const uint32_t edge[] = {0u, 1u, 2u, 3u, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu};
+    for (uint32_t i : edge)
+      for (uint32_t s : edge)
+        for (uint32_t d : {0u, 1u}) check(i, d, s);
+    for (int k = 0; k < 20000; k++) check(k < 10000 ? (uint32_t)(k % 1024) : next(), (uint32_t)(k & 1), next());
+    std::printf("    %d of %d values differ between the kernel's port and the CPU\n", diff, total);
+    CHECK(diff == 0);
+    CHECK(r465::glsl_pcg_hash(7u) == sampler::hash(7u) && r465::glsl_pcg_hash(0xFFFFFFFFu) == sampler::hash(0xFFFFFFFFu));
+    CHECK(r465::glsl_bitfield_reverse(0x12345678u) == sampler::reverse_bits(0x12345678u));
+    /* the kernel's cosine directions for one texel: a (0, 2)-net, as the CPU's */
+    const uint32_t sseed = r465::glsl_pcg_hash(77u * 9781u + 5u);
+    for (int k = 4; k <= 9; k++) {
+      const uint32_t n = 1u << k;
+      std::vector<int> count((size_t)n, 0);
+      for (int a = 0; a <= k; a++) {
+        std::fill(count.begin(), count.end(), 0);
+        for (uint32_t i = 0; i < n; i++)
+          count[(size_t)((uint32_t)(r465::glsl_sobol01(i, 0, sseed) * (float)(1u << a)) << (k - a) | (uint32_t)(r465::glsl_sobol01(i, 1, sseed) * (float)(1u << (k - a))))]++;
+        bool one_each = true;
+        for (size_t ci = 0; ci < count.size() && one_each; ci++) {
+          one_each = count[ci] == 1;
+          if (!one_each) std::printf("    kernel port, 2^%d points, a = %d: cell %zu holds %d\n", k, a, ci, count[ci]);
+        }
+        CHECK(one_each);
+      }
+    }
+  });
+  test("sobol sampler (round 465): each sized light of a texel draws its own points - the light streams get different ids, different seeds, different points, each one a (0, 2)-net, and two of them are not correlated over texels", [] {
+    sampler::TexelSampler t;
+    t.seed = 31337;
+    std::set<uint32_t> ids, seeds;
+    for (int i = 0; i < 64; i++) ids.insert(t.next_light_stream());
+    CHECK(ids.size() == 64 && !ids.count(sampler::TexelSampler::Gather) && !ids.count(sampler::TexelSampler::Emit) && !ids.count(sampler::TexelSampler::Sky));
+    CHECK(t.lights == 64);
+    for (uint32_t s = 0; s < 1000; s++) seeds.insert(t.stream_seed(s));
+    CHECK(seeds.size() == 1000);
+    const uint32_t la = sampler::TexelSampler::FirstLight, lb = la + 1;
+    int same = 0;
+    for (uint32_t k = 0; k < 64; k++) {
+      float ax, ay, bx, by;
+      t.pt(la, k, ax, ay), t.pt(lb, k, bx, by);
+      same += ax == bx && ay == by;
+    }
+    CHECK(same == 0);
+    for (uint32_t stream : {la, lb, la + 40})
+      for (int k = 4; k <= 8; k++) {
+        const uint32_t n = 1u << k;
+        for (int a = 0; a <= k; a++) {
+          std::vector<int> count((size_t)n, 0);
+          for (uint32_t i = 0; i < n; i++) {
+            float x, y;
+            t.pt(stream, i, x, y);
+            count[(size_t)((uint32_t)(x * (float)(1u << a)) << (k - a) | (uint32_t)(y * (float)(1u << (k - a))))]++;
+          }
+          bool one_each = true;
+          for (size_t ci = 0; ci < count.size() && one_each; ci++) {
+            one_each = count[ci] == 1;
+            if (!one_each) std::printf("    light stream %u, 2^%d points, a = %d: cell %zu holds %d\n", stream, k, a, ci, count[ci]);
+          }
+          CHECK(one_each);
+        }
+      }
+    /* a texel's two lights: the first coordinates' correlation averages 0 over texels */
+    double mean_r = 0.0;
+    int positive = 0;
+    for (uint32_t s = 1; s <= 256; s++) {
+      sampler::TexelSampler u;
+      u.seed = s * 2246822519u;
+      std::vector<float> a, b;
+      for (uint32_t k = 0; k < 64; k++) a.push_back(u.u(la, k)), b.push_back(u.u(lb, k));
+      const double r = r465::correlation(a, b);
+      mean_r += r / 256.0, positive += r > 0.0;
+    }
+    std::printf("    light stream 1 vs 2: mean r = %.4f (%d of 256 positive)\n", mean_r, positive);
+    CHECK(std::fabs(mean_r) < 0.1 && positive > 80 && positive < 176);
+    /* two texels' light 1: other points */
+    sampler::TexelSampler u1, u2;
+    u1.seed = 5, u2.seed = 6;
+    int equal = 0;
+    for (uint32_t k = 0; k < 64; k++) equal += u1.u(la, k) == u2.u(la, k);
+    CHECK(equal < 4);
+  });
+}
+
+static void tests_round465_mappings() {
+  test("sobol sampler (round 465): the emitter's point from (pu, pv) is uniform over the triangle - 16 equal sub-triangles, a chi-square under the 0.1 % bound, for Sobol's and for random squares - and (pu, pv) at the ends of [0, 1) stay on the triangle; the same numbers give the same ray whatever the rng", [] {
+    /* One emissive quad (two triangles) at y = 2, turned each way until a point at the origin, its normal up, sees it. */
+    MeshPtr quad = primitives::quad(1.0f);
+    std::vector<MaterialPtr> glow = {make_material("light", Vec3(0.0f))};
+    glow[0]->emission = Vec3(1.0f), glow[0]->emission_strength = 5.0f;
+    Environment black;
+    black.mode = Environment::Color, black.color = Vec3(0.0f);
+    PathTracer pt;
+    PTSettings pst;
+    pst.use_guiding = false, pst.denoise = false;
+    pt.set_settings(pst);
+    const Vec3 origin(0, 0, 0), up(0, 1, 0);
+    Vec3 v[2][3];
+    auto draw = [&](uint32_t rng, float u, float pu, float pv, Vec3 &P, int, bool &ok, LightTree::Cache *cache = nullptr) {
+      Vec3 dir, Le;
+      float dist = 0.0f, pdf = 0.0f;
+      ok = pt.sample_mesh_light(rng, origin, up, dir, dist, Le, pdf, u, cache, pu, pv);
+      P = origin + dir * dist;
+      return ok && std::isfinite(dist) && std::isfinite(pdf) && pdf > 0.0f;
+    };
+    int side = 0, tri = -1;
+    std::vector<PTObject> objs;  // (outlives the loop: the path tracer may read it later)
+    const float first_u = 0.3f;
+    for (float pitch : {0.0f, 90.0f, 180.0f, 270.0f}) {
+      const Mat4 model = Mat4::trs({0, 2, 0}, Quat::euler({pitch, 0, 0}), {1, 1, 1});
+      objs = {{&quad->render_mesh_tangents(), model, &glow}};
+      pt.build(objs, {}, black);
+      const RenderMesh &rm = *objs[0].mesh;
+      for (int t = 0; t < 2; t++)
+        for (int c = 0; c < 3; c++) v[t][c] = model.point(rm.positions[rm.indices[(size_t)(t * 3 + c)]]);
+      Vec3 P;
+      bool ok = false;
+      if (!draw(1, first_u, 0.3f, 0.3f, P, 0, ok)) continue;
+      for (int t = 0; t < 2; t++) {
+        float b1, b2;
+        r465::bary(v[t][0], v[t][1], v[t][2], P, b1, b2);
+        if (b1 > 0.0f && b2 > 0.0f && b1 + b2 < 1.0f && std::fabs(dot(P - v[t][0], normalize(cross(v[t][1] - v[t][0], v[t][2] - v[t][0])))) < 1e-3f) tri = t;
+      }
+      if (tri >= 0) break;
+    }
+    CHECK(tri >= 0);
+    if (tri < 0) return;
+    static const Vec3 toward[1][2] = {{Vec3(0, 0, 0), Vec3(0, 1, 0)}};  // (cache_begin below)
+    auto cell_counts = [&](const std::vector<std::pair<float, float>> &pts, std::vector<int> &count, int &outside) {
+      count.assign(32, 0), outside = 0;
+      for (const auto &p : pts) {
+        Vec3 P;
+        bool ok = false;
+        if (!draw(9, first_u, p.first, p.second, P, side, ok)) {
+          outside++;
+          continue;
+        }
+        float b1, b2;
+        r465::bary(v[tri][0], v[tri][1], v[tri][2], P, b1, b2);
+        if (b1 < -1e-3f || b2 < -1e-3f || b1 + b2 > 1.0f + 1e-3f) outside++;
+        count[(size_t)r465::sub_triangle(std::clamp(b1, 0.0f, 1.0f), std::clamp(b2, 0.0f, 1.0f))]++;
+      }
+    };
+    const int N = 8192;
+    std::vector<std::pair<float, float>> sobol, rand_pts;
+    std::mt19937 g(2024);
+    for (int i = 0; i < N; i++) {
+      sobol.push_back({sampler::sobol_burley((uint32_t)i, 0, 77), sampler::sobol_burley((uint32_t)i, 1, 77)});
+      rand_pts.push_back({(float)(g() >> 8) * (1.0f / 16777216.0f), (float)(g() >> 8) * (1.0f / 16777216.0f)});
+    }
+    for (int which = 0; which < 2; which++) {
+      std::vector<int> count;
+      int outside = 0;
+      cell_counts(which ? rand_pts : sobol, count, outside);
+      double chi = 0.0;
+      int cells = 0;
+      for (int c : count) {
+        if (!c) continue;
+        cells++;
+        chi += ((double)c - N / 16.0) * ((double)c - N / 16.0) / (N / 16.0);
+      }
+      std::printf("    %s squares: chi-square %.2f over %d sub-triangles (0.1%% bound %.1f), %d outside\n", which ? "random" : "sobol ", chi, cells, r464::chi2_crit(15), outside);
+      CHECK(cells == 16 && outside == 0 && chi < r464::chi2_crit(15));
+    }
+    /* the square's ends: all four corners and the edge nearest 1 */
+    const float top = 0.99999994f;
+    const float ends[][2] = {{0, 0}, {top, 0}, {0, top}, {top, top}, {0.5f, 0}, {0.5f, top}, {0, 0.5f}, {top, 0.5f}, {1e-30f, 1e-30f}};
+    int bad = 0;
+    for (const auto &e : ends) {
+      Vec3 P;
+      bool ok = false;
+      draw(5, first_u, e[0], e[1], P, side, ok);
+      float b1, b2;
+      r465::bary(v[tri][0], v[tri][1], v[tri][2], P, b1, b2);
+      bad += !ok || !std::isfinite(P.x + P.y + P.z) || b1 < -1e-3f || b2 < -1e-3f || b1 + b2 > 1.0f + 1e-3f;
+    }
+    CHECK(bad == 0);
+    /* given the pick and the point, the rng plays no part - and neither does the tree's cache */
+    LightTree::Cache cache;
+    pt.light_tree().cache_begin(cache, toward[side][0], &toward[side][1]);
+    Vec3 P1, P2, P3;
+    bool ok1 = false, ok2 = false, ok3 = false;
+    draw(1, first_u, 0.37f, 0.61f, P1, side, ok1);
+    draw(0xFFFFFFFFu, first_u, 0.37f, 0.61f, P2, side, ok2);
+    draw(1, first_u, 0.37f, 0.61f, P3, side, ok3, &cache);
+    CHECK(ok1 && ok2 && std::memcmp(&P1, &P2, sizeof(Vec3)) == 0);
+    std::printf("    with the light tree's cache: %s\n", ok3 ? "drew" : "refused");
+    /* NaN or negative numbers fall back on random ones and stay finite */
+    int finite = 0;
+    for (float pu : {std::nanf(""), -1.0f, -0.0f - 1e-9f})
+      for (float pv : {0.4f, std::nanf("")}) {
+        Vec3 P;
+        bool ok = false;
+        if (draw(3, first_u, pu, pv, P, side, ok)) finite += std::isfinite(P.x + P.y + P.z);
+      }
+    CHECK(finite > 0);
+  });
+  test("sobol sampler (round 465): the sky's pick and point from three given numbers - a direction inside the picked cell with the pdf env_pdf gives, the ends of [0, 1) and NaN give a finite direction or a refusal, the same numbers the same ray whatever the rng, the bright patch found as often as with random numbers", [] {
+    Bitmap b;
+    b.width = 64, b.height = 32, b.is_float = true;
+    b.rgbaf.assign((size_t)64 * 32 * 4, 0.05f);
+    for (int y = 6; y < 8; y++)
+      for (int x = 20; x < 22; x++)
+        for (int c = 0; c < 3; c++) b.rgbaf[((size_t)y * 64 + x) * 4 + c] = 400.0f;
+    for (size_t i = 3; i < b.rgbaf.size(); i += 4) b.rgbaf[i] = 1.0f;
+    auto tex = std::make_shared<Texture>();
+    tex->build(b, false);
+    Environment env;
+    env.mode = Environment::Hdri, env.map = tex;
+    P37Pt s;
+    s.add(primitives::plane(4.0f, 1), Mat4::translate({0, -1.0f, 0}), Vec3(0.5f));
+    s.build({}, env);
+    CHECK(s.pt.has_env_dist());
+    uint32_t bad_pdf = 0, bad_dir = 0, patch_sobol = 0, patch_rand = 0, refused = 0;
+    const int N = 4096;
+    /* (the patch is where the sky's pdf is far above the uniform 1 / 4 pi: where it sits on the map, row order and all, is the
+     * sampler's business) */
+    auto in_patch = [&](Vec3 d) { return s.pt.env_pdf(d) > 2.0f; };
+    for (int i = 0; i < N; i++) {
+      float u3[3] = {sampler::sobol_burley((uint32_t)i, 0, 5), sampler::sobol_burley((uint32_t)i, 1, 6), sampler::sobol_burley((uint32_t)i, 2, 6)};
+      uint32_t rng = 1;
+      Vec3 dir;
+      float pdf = 0.0f;
+      if (!s.pt.sample_env(rng, dir, pdf, u3)) {
+        refused++;
+        continue;
+      }
+      bad_dir += !(std::fabs(length(dir) - 1.0f) < 1e-4f);
+      const float pe = s.pt.env_pdf(dir);
+      bad_pdf += !(pdf > 0.0f && std::fabs(pe - pdf) <= 2e-3f * pdf);
+      patch_sobol += in_patch(dir);
+      uint32_t r2 = 0x1234567u + (uint32_t)i * 977u;
+      Vec3 d2;
+      float p2 = 0.0f;
+      if (s.pt.sample_env(r2, d2, p2)) patch_rand += in_patch(d2);
+    }
+    std::printf("    %u refusals, %u bad directions, %u pdf mismatches; the patch got %u of %d draws (random numbers: %u)\n", refused, bad_dir, bad_pdf, patch_sobol, N, patch_rand);
+    CHECK(bad_dir == 0 && bad_pdf == 0 && refused < (uint32_t)N / 50);
+    CHECK(patch_sobol > 0 && std::fabs((double)patch_sobol - (double)patch_rand) < 0.05 * N);
+    const float top = 0.99999994f, nan = std::nanf("");
+    const float cases[][3] = {{0, 0, 0}, {top, top, top}, {0, top, 0}, {top, 0, top}, {0.5f, 0, top}, {nan, 0.5f, 0.5f}, {0.5f, nan, 0.5f}, {0.5f, 0.5f, nan}, {nan, nan, nan}, {1.0f, 1.0f, 1.0f}};
+    int not_clean = 0;
+    for (const auto &c : cases) {
+      uint32_t rng = 1;
+      Vec3 dir;
+      float pdf = 0.0f;
+      const bool ok = s.pt.sample_env(rng, dir, pdf, c);
+      if (ok && !(std::isfinite(dir.x + dir.y + dir.z) && std::isfinite(pdf) && pdf > 0.0f)) {
+        std::printf("    u3 = (%g, %g, %g) was accepted with direction (%g, %g, %g), pdf %g\n", c[0], c[1], c[2], dir.x, dir.y, dir.z, pdf);
+        not_clean++;
+      }
+    }
+    CHECK(not_clean == 0);
+    const float mid[3] = {0.31f, 0.62f, 0.93f};
+    uint32_t r1 = 1, r2 = 0xFFFFFFFFu;
+    Vec3 d1, d2;
+    float p1 = 0.0f, p2 = 0.0f;
+    const bool k1 = s.pt.sample_env(r1, d1, p1, mid), k2 = s.pt.sample_env(r2, d2, p2, mid);
+    CHECK(k1 == k2 && (!k1 || (std::memcmp(&d1, &d2, sizeof(Vec3)) == 0 && p1 == p2)));
+  });
+}
+
+static void tests_round465_bakes() {
+  test("sobol bake (round 465): any sample count (1, 2, 3, 7, 300) bakes finite, non-negative light that lit the plane, with Sobol and random numbers; the mean of 3 and 7 samples is the exact 0.36 within what a few samples give", [] {
+    for (bool sobol : {true, false})
+      for (int n : {1, 2, 3, 7, 300}) {
+        Environment env;
+        env.mode = Environment::Gradient;
+        env.sky = Vec3(0.2f, 0.0f, 0.0f), env.equator = Vec3(1.0f, 0.0f, 0.0f), env.ground = Vec3(0.0f);
+        BakeSettings bs;
+        bs.texels_per_unit = 8, bs.indirect_samples = n, bs.bounces = 2, bs.denoise = false, bs.directional = false, bs.seed = 3, bs.sobol = sobol;
+        bs.backface_tolerance = 0.0f;
+        std::vector<BakeObject> objs{bake_object(1, primitives::plane(2.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+        Lightmapper lm;
+        lm.begin(objs, {}, env, bs);
+        while (!lm.step(1e9)) {
+        }
+        const LightingData d = lm.take_result();
+        bool finite = true;
+        size_t lit = 0;
+        for (const Vec3 &t : d.pages.at(0).texels) {
+          finite = finite && std::isfinite(t.x + t.y + t.z) && t.x >= 0.0f && t.y >= 0.0f && t.z >= 0.0f;
+          lit += t.x > 0.0f;
+        }
+        CHECK(finite && lit > 0);
+        const double m = r465::plane_value(3, sobol, n);
+        std::printf("    %s, %d samples: mean %.4f (exact 0.36)\n", sobol ? "sobol " : "random", n, m);
+        if (n >= 7) CHECK(std::fabs(m - 0.36) < (n == 7 ? 0.06 : 0.01));
+      }
+  });
+  test("sobol bake (round 465): the lamps scene at 1, 3 and 7 samples gives finite light and the same mean light with Sobol and random numbers within 3 standard errors", [] {
+    const r464::Lamps lamps;
+    for (int n : {3, 7}) {
+      const LightingData d = lamps.bake(true, true, n, 2, -1);
+      bool finite = true;
+      for (const Lightmap &pg : d.pages)
+        for (const Vec3 &t : pg.texels) finite = finite && std::isfinite(t.x + t.y + t.z) && t.x >= 0.0f;
+      CHECK(finite);
+      const r464::Mean ms = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, n, s, -1); });
+      const r464::Mean mr = r464::over_seeds(6, [&](uint32_t s) { return lamps.bake(true, true, n, s, -1, nullptr, false); });
+      std::printf("    %d samples: floor light sobol %.4f +- %.4f, random %.4f +- %.4f\n", n, ms.mean, ms.se, mr.mean, mr.se);
+      CHECK(r464::agree(ms, mr));
+    }
+    CHECK(std::isfinite(r464::floor_light(lamps.bake(true, true, 1, 5, -1))));
+  });
+  test("sobol bake (round 465): the filter helps a short bake and doesn't make a long one worse, with Sobol and with random numbers (16 samples: error under 0.8 of the unfiltered; 512: at most 1.1 of it); Sobol's raw error at 16 samples is no worse than random's", [] {
+    const r465::Scene423 sc;
+    const LightingData ref = sc.bake(4096, false, 99, true);
+    double raw16[2] = {0, 0};
+    for (int mode = 0; mode < 2; mode++) {
+      const bool sobol = mode == 0;
+      double e_raw = 0.0, e_fil = 0.0;
+      for (uint32_t seed = 1; seed <= 3; seed++) {
+        e_raw += r465::Scene423::rmse(sc.bake(16, false, seed, sobol), ref) / 3.0;
+        e_fil += r465::Scene423::rmse(sc.bake(16, true, seed, sobol), ref) / 3.0;
+      }
+      raw16[mode] = e_raw;
+      const double l_raw = r465::Scene423::rmse(sc.bake(512, false, 4, sobol), ref), l_fil = r465::Scene423::rmse(sc.bake(512, true, 4, sobol), ref);
+      std::printf("    %s: 16 samples %.4f raw, %.4f filtered; 512 samples %.4f raw, %.4f filtered\n", sobol ? "sobol " : "random", e_raw, e_fil, l_raw, l_fil);
+      CHECK(e_fil < e_raw * 0.8);
+      CHECK(l_fil <= l_raw * 1.1 + 1e-4);
+    }
+    CHECK(raw16[0] <= raw16[1] * 1.05);
+  });
+  test("sobol bake (round 465): the filter at 16 samples treats the two samplers alike - each filtered bake keeps the unfiltered one's mean light within 1 %", [] {
+    /* The edge stop's sigma is a private number (2 / samples^0.75 for Sobol, 2 / sqrt(samples) for random: 0.25 and 0.5 at 16),
+     * so only its effect is observable: the filter doesn't shift the light (a per-texel range check was dropped: the texel-level check is round 423's review test). */
+    const r465::Scene423 sc;
+    for (bool sobol : {true, false}) {
+      const LightingData raw = sc.bake(16, false, 2, sobol), fil = sc.bake(16, true, 2, sobol);
+      double sr = 0.0, sf = 0.0;
+      for (size_t p = 0; p < raw.pages.size(); p++)
+        for (size_t i = 0; i < raw.pages[p].texels.size(); i++) sr += raw.pages[p].texels[i].y, sf += fil.pages[p].texels[i].y;
+      std::printf("    %s: summed light %.2f raw, %.2f filtered\n", sobol ? "sobol " : "random", sr, sf);
+      CHECK(sr > 0.0 && std::fabs(sf - sr) < 0.01 * sr);
+    }
+  });
+}
+
+static void tests_round465_card() {
+  test("sobol bake (round 465): the card's first-bounce directions are the Sobol ones - 64 points at 64 samples under a gradient sky spread less between points than with random directions, the same mean (skipped with a note when no GPU opens)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = Vec3(0.2f, 0.0f, 0.0f), env.equator = Vec3(1.0f, 0.0f, 0.0f), env.ground = Vec3(0.0f);
+    s.build({}, env, 1);
+    std::vector<Vec3> origins(64, Vec3(0.0f, 0.0f, 0.0f)), dirs(64, Vec3(0, 1, 0));
+    auto gather = [&](bool sobol, std::vector<Vec3> &out) {
+      std::string err;
+      for (int i = 0; i < 100; i++) {
+        if (s.pt.gpu_gather(0, 1, origins, dirs, 64, out, nullptr, &err, 0.0f, 0, sobol)) return true;
+        if (!s.pt.gpu_gather_waiting()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      std::printf("    (the gather did not run: %s - skipped)\n", err.c_str());
+      return false;
+    };
+    std::vector<Vec3> so, ra;
+    if (!gather(true, so) || !gather(false, ra)) return;
+    CHECK(so.size() == 64 && ra.size() == 64);
+    auto stats = [](const std::vector<Vec3> &v, double &m, double &sd) {
+      m = 0.0, sd = 0.0;
+      for (const Vec3 &c : v) m += c.x / (double)v.size();
+      for (const Vec3 &c : v) sd += (c.x - m) * (c.x - m) / (double)v.size();
+      sd = std::sqrt(sd);
+    };
+    double ms, ss, mr, sr;
+    stats(so, ms, ss), stats(ra, mr, sr);
+    std::printf("    card, 64 points x 64 samples: sobol mean %.4f sd %.4f; random mean %.4f sd %.4f\n", ms, ss, mr, sr);
+    CHECK(std::fabs(ms - mr) < 0.03 * std::fabs(mr) + 1e-3);
+    CHECK(ss < 0.7 * sr);
+    std::vector<Vec3> again;
+    CHECK(gather(true, again) && again.size() == so.size() && std::memcmp(again.data(), so.data(), so.size() * sizeof(Vec3)) == 0);
+  });
+}
+
+static void tests_round465() {
+  tests_round465_sampler();
+  tests_round465_console();
+  tests_round465_edges();
+  tests_round465_mappings();
+  tests_round465_bakes();
+  tests_round465_card();
+}
+
+
+/* ---- round 466 (task 0442, ADR 0122), the independent checks (test engineer): the filter guided by each texel's measured noise.
+ * The measured variance (`var_`), `svgf_atrous` and `clamp_fireflies_var` are private, so every check reads the baked pages: a
+ * variance that is too low leaves the grain (smoothing checks), one too high smears edges and glows (edge checks), one that is
+ * not 0 where it should be shows as a page that changes under the filter (zero-variance check). Only the card's second output
+ * (`sq`) is public and is compared with the CPU's own arithmetic directly. ---- */
+namespace r466 {
+struct World {
+  std::vector<BakeObject> objs;
+  std::vector<BakeLight> lights;
+  Environment env;
+  float tpu = 16.0f;
+  int min_chart = 8;
+  bool sample_emissive = true;
+};
+
+static LightingData bake(const World &w, int n, bool denoise, int denoiser, uint32_t seed, bool sobol = true, std::string *which = nullptr,
+                         int direct_samples = 32) {
+  BakeSettings bs;
+  bs.texels_per_unit = w.tpu, bs.indirect_samples = n, bs.bounces = 2, bs.denoise = denoise, bs.denoiser = denoiser, bs.seed = seed, bs.sobol = sobol;
+  bs.directional = false, bs.backface_tolerance = 0.0f, bs.use_oidn = false, bs.direct_samples = direct_samples;
+  bs.min_chart = w.min_chart, bs.sample_emissive = w.sample_emissive;
+  Lightmapper lm;
+  lm.begin(w.objs, w.lights, w.env, bs);
+  while (!lm.step(1e9)) {
+  }
+  if (which) *which = lm.denoiser();
+  return lm.take_result();
+}
+
+static float lum(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+static BakeLight point_light(Vec3 pos, float intensity, float range, float radius) {
+  BakeLight bl;
+  bl.light.type = RenderLight::Point, bl.light.position = pos, bl.light.intensity = intensity, bl.light.range = range;
+  bl.light.shadow_radius = radius, bl.light.baked_falloff = true;
+  bl.mode = 2, bl.id = 90;
+  return bl;
+}
+
+/* The page texel of a world point on a plane object (found through the object's own triangles). */
+static bool texel_of(const LightingData &d, const BakeObject &o, Vec3 P, int &px, int &py, const Lightmap *&pg) {
+  const LightingData::Entry &e = d.entries.at(o.id);
+  pg = &d.pages[(size_t)e.page];
+  const RenderMesh &rm = o.mesh->render_mesh();
+  for (size_t t = 0; t < rm.tri_count(); t++) {
+    Vec3 v[3];
+    for (size_t c = 0; c < 3; c++) v[c] = o.model.point(rm.positions[rm.indices[t * 3 + c]]);
+    float b1, b2;
+    r465::bary(v[0], v[1], v[2], P, b1, b2);
+    if (b1 < -1e-4f || b2 < -1e-4f || b1 + b2 > 1.0001f) continue;
+    const Vec2 uv = e.tri_uv[t * 3] * (1.0f - b1 - b2) + e.tri_uv[t * 3 + 1] * b1 + e.tri_uv[t * 3 + 2] * b2;
+    px = std::clamp((int)(uv.x * (float)pg->width), 0, pg->width - 1), py = std::clamp((int)(uv.y * (float)pg->height), 0, pg->height - 1);
+    return true;
+  }
+  return false;
+}
+static Vec3 at(const LightingData &d, const BakeObject &o, Vec3 P) {
+  int x = 0, y = 0;
+  const Lightmap *pg = nullptr;
+  if (!texel_of(d, o, P, x, y, pg)) return Vec3(0.0f);
+  return pg->texels[(size_t)y * pg->width + x];
+}
+
+/* An object's chart texels (its chart's box, the two outermost texels on each side left out). */
+static std::vector<Vec3> chart_texels(const LightingData &d, uint64_t id) {
+  const LightingData::Entry &e = d.entries.at(id);
+  const Lightmap &pg = d.pages[(size_t)e.page];
+  float u0 = 1, v0 = 1, u1 = 0, v1 = 0;
+  for (const Vec2 &uv : e.tri_uv) u0 = std::min(u0, uv.x), v0 = std::min(v0, uv.y), u1 = std::max(u1, uv.x), v1 = std::max(v1, uv.y);
+  std::vector<Vec3> out;
+  for (int y = (int)(v0 * (float)pg.height) + 2; y < (int)(v1 * (float)pg.height) - 2; y++)
+    for (int x = (int)(u0 * (float)pg.width) + 2; x < (int)(u1 * (float)pg.width) - 2; x++) out.push_back(pg.texels[(size_t)y * pg.width + x]);
+  return out;
+}
+static double sum_lum(const LightingData &d) {
+  double s = 0.0;
+  for (const Lightmap &pg : d.pages)
+    for (const Vec3 &t : pg.texels) s += lum(t);
+  return s;
+}
+static bool all_finite(const LightingData &d) {
+  for (const Lightmap &pg : d.pages)
+    for (const Vec3 &t : pg.texels)
+      if (!std::isfinite(t.x + t.y + t.z) || t.x < 0.0f || t.y < 0.0f || t.z < 0.0f) return false;
+  return true;
+}
+
+/* A plane alone under a gradient sky (0.2 at the zenith, 1 at the horizon, 0 below): every texel's true light is exactly 0.36 -
+ * round 465's plane_value (L(t) = 1 - 0.8 sqrt(t), twice the integral of L(t) t dt). A uniform sky would give no noise at all
+ * (every ray sees the same light), so the gradient is what makes the grain. */
+static const double kSkyPlane = 0.36;
+static World sky_plane() {
+  World w;
+  w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+  w.env.mode = Environment::Gradient;
+  w.env.sky = Vec3(0.2f), w.env.equator = Vec3(1.0f), w.env.ground = Vec3(0.0f);
+  return w;
+}
+
+/* A floor with a box on it under a soft-shadowing point light, no sky. */
+static World box_on_floor() {
+  World w;
+  w.objs = {bake_object(1, primitives::plane(10.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+            bake_object(2, primitives::cube(), Mat4::translate({0, 0.5f, 0}), {make_material("Grey", Vec3(0.6f))})};
+  w.lights = {point_light({-2.5f, 2.0f, 0.0f}, 6.0f, 12.0f, 0.15f)};
+  w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+  return w;
+}
+
+/* The five lamps over a floor of round 464, as a world. */
+static World lamps_world() {
+  const r464::Lamps l;
+  World w;
+  w.tpu = 8.0f;
+  w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+  const Vec3 pos[5] = {{-0.7f, 0.5f, 0.0f}, {0.6f, 0.9f, 0.4f}, {0.0f, 0.4f, -0.7f}, {0.8f, 0.6f, -0.6f}, {-0.5f, 1.1f, 0.6f}};
+  w.objs.push_back(bake_object(1, l.floor, Mat4::identity(), {l.white}));
+  for (int i = 0; i < 5; i++) {
+    const Quat q = Quat::euler(Vec3(i % 2 ? 180.0f : 0.0f, 0, 0));
+    w.objs.push_back(bake_object((uint64_t)(2 + i), l.lamp, Mat4::trs(pos[i], q, Vec3(1.0f)), {l.glow[(size_t)i]}));
+    w.objs.back().want_lightmap = false;
+  }
+  return w;
+}
+
+/* The mean over rows z0..z1 of the floor's light along +x from x0 to x1, a value per texel step. */
+static std::vector<double> profile(const LightingData &d, const BakeObject &floor, float x0, float x1, float z0, float z1, float tpu) {
+  std::vector<double> p;
+  for (float x = x0; x < x1; x += 1.0f / tpu) {
+    double s = 0.0;
+    int k = 0;
+    for (float z = z0; z <= z1; z += 1.0f / tpu) s += lum(at(d, floor, {x, 0, z})), k++;
+    p.push_back(s / k);
+  }
+  return p;
+}
+static double mean_of(const std::vector<double> &p, size_t a, size_t b) {
+  double s = 0.0;
+  for (size_t i = a; i < b; i++) s += p[i];
+  return s / (double)(b - a);
+}
+/* The 10-90 % width, in texels, of the step from `dark` to `lit`; -1: no clean step. */
+static double edge_width(const std::vector<double> &p, double dark, double lit) {
+  if (!(lit > dark * 1.5)) return -1.0;
+  double x10 = -1.0, x90 = -1.0;
+  for (size_t i = 1; i < p.size(); i++) {
+    const double a = (p[i - 1] - dark) / (lit - dark), b = (p[i] - dark) / (lit - dark);
+    if (x10 < 0.0 && b > 0.1) x10 = (double)(i - 1) + (a < 0.1 ? (0.1 - a) / (b - a) : 0.0);
+    if (x90 < 0.0 && b > 0.9) x90 = (double)(i - 1) + (a < 0.9 ? (0.9 - a) / (b - a) : 0.0);
+  }
+  return (x10 < 0.0 || x90 < 0.0) ? -1.0 : x90 - x10;
+}
+}  // namespace r466
+
+static void tests_round466_smoothing() {
+  test("variance-guided filter (round 466): the grain of a uniformly lit plane falls at least 4x through the filter, with random and Sobol samples at 8, 32 and 128; the mean stays within 1 % of the exact 0.36 and the texels end closer to it", [] {
+    const r466::World w = r466::sky_plane();
+    struct Cfg {
+      bool sobol;
+      int n;
+    };
+    for (const Cfg c : {Cfg{false, 8}, Cfg{true, 8}, Cfg{false, 32}, Cfg{true, 32}, Cfg{true, 128}}) {
+      const LightingData r1 = r466::bake(w, c.n, false, 1, 1, c.sobol), r2 = r466::bake(w, c.n, false, 1, 2, c.sobol);
+      std::string which;
+      const LightingData f1 = r466::bake(w, c.n, true, 1, 1, c.sobol, &which), f2 = r466::bake(w, c.n, true, 1, 2, c.sobol);
+      const LightmapNoise nr = lightmap_noise(r1, r2), nf = lightmap_noise(f1, f2);
+      double mean = 0.0, err_raw = 0.0, err_fil = 0.0;
+      const std::vector<Vec3> tf = r466::chart_texels(f1, 1), tr = r466::chart_texels(r1, 1);
+      for (size_t i = 0; i < tf.size(); i++) {
+        mean += tf[i].x / (double)tf.size();
+        err_fil += (tf[i].x - r466::kSkyPlane) * (tf[i].x - r466::kSkyPlane), err_raw += (tr[i].x - r466::kSkyPlane) * (tr[i].x - r466::kSkyPlane);
+      }
+      std::printf("    %s, %d samples: grain %.4f raw -> %.4f filtered (%.1fx), mean %.4f, rms error %.4f -> %.4f\n", c.sobol ? "sobol " : "random", c.n,
+                  nr.all.grain, nf.all.grain, nr.all.grain / std::max(1e-9, nf.all.grain), mean, std::sqrt(err_raw / (double)tr.size()),
+                  std::sqrt(err_fil / (double)tf.size()));
+      CHECK(nr.ok && nf.ok && which == "the variance-guided A-Trous filter");
+      CHECK(nr.all.grain > 0.0 && nf.all.grain * 4.0 <= nr.all.grain);
+      CHECK(std::fabs(mean - r466::kSkyPlane) < 0.004 && err_fil < err_raw);
+    }
+  });
+  test("variance-guided filter (round 466): a page with no noise passes through unchanged - a plane under a point light's falloff gradient or a soft-angled sun, black sky, nothing shadowed (direct variance 0)", [] {
+    for (int which = 0; which < 2; which++) {
+      r466::World w;
+      w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+      if (which == 0) w.lights = {r466::point_light({0.3f, 1.5f, 0.2f}, 3.0f, 6.0f, 0.0f)};
+      else {
+        BakeLight sun;
+        sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.light.shadow_angle = 5.0f, sun.mode = 2, sun.id = 91;
+        w.lights = {sun};
+      }
+      std::string name;
+      const LightingData raw = r466::bake(w, 64, false, 1, 3), fil = r466::bake(w, 64, true, 1, 3, true, &name);
+      double worst = 0.0, peak = 0.0;
+      const std::vector<Vec3> a = r466::chart_texels(raw, 1), b = r466::chart_texels(fil, 1);
+      for (size_t i = 0; i < a.size(); i++) worst = std::max(worst, (double)std::fabs(a[i].y - b[i].y) / std::max(1e-3, (double)a[i].y)), peak = std::max(peak, (double)a[i].y);
+      std::printf("    %s: peak %.3f, worst relative change %.2e\n", which ? "sun" : "point light", peak, worst);
+      CHECK(name == "the variance-guided A-Trous filter" && peak > 0.05 && worst < 1e-4);
+    }
+  });
+}
+
+static void tests_round466_edges() {
+  test("variance-guided filter (round 466): a box on a floor under a soft point light - the shadow's 10-90 % edge grows by at most 1 texel through the filter, and the shadow's and the lit floor's levels stay within 2 %", [] {
+    const r466::World w = r466::box_on_floor();
+    const BakeObject &floor = w.objs[0];
+    const LightingData raw = r466::bake(w, 64, false, 1, 4), fil = r466::bake(w, 64, true, 1, 4);
+    /* The shadow of the box's top edge falls from x 3.1 to 4.0 along +x; the rows run along it. */
+    const std::vector<double> pr = r466::profile(raw, floor, 0.8f, 5.0f, -0.3f, 0.3f, w.tpu), pf = r466::profile(fil, floor, 0.8f, 5.0f, -0.3f, 0.3f, w.tpu);
+    const size_t ia = (size_t)((1.0f - 0.8f) * w.tpu), ib = (size_t)((2.8f - 0.8f) * w.tpu), ic = (size_t)((4.3f - 0.8f) * w.tpu), id = (size_t)((4.6f - 0.8f) * w.tpu);
+    const double dark_r = r466::mean_of(pr, ia, ib), lit_r = r466::mean_of(pr, ic, id), dark_f = r466::mean_of(pf, ia, ib), lit_f = r466::mean_of(pf, ic, id);
+    const double wr = r466::edge_width(pr, dark_r, lit_r), wf = r466::edge_width(pf, dark_f, lit_f);
+    std::printf("    shadow level %.4f -> %.4f, lit level %.4f -> %.4f, 10-90 %% edge %.2f -> %.2f texels\n", dark_r, dark_f, lit_r, lit_f, wr, wf);
+    CHECK(lit_r > 0.05 && wr > 2.0 && wf > 0.0);  // (the scene has a real soft shadow edge to keep)
+    CHECK(wf - wr <= 1.0);
+    CHECK(std::fabs(lit_f - lit_r) < 0.02 * lit_r && std::fabs(dark_f - dark_r) < 0.02 * lit_r);
+  });
+  test("variance-guided filter (round 466): a white floor beside a red wall keeps the red tint the wall bounces onto it, texel row by texel row from the wall out (no change over 0.04 in R/G), and the white floor far away stays white", [] {
+    r466::World w;
+    w.tpu = 16.0f;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+              bake_object(2, primitives::plane(4.0f, 1), Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {make_material("Red", Vec3(0.8f, 0.05f, 0.05f))})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    w.lights = {sun};
+    w.env.mode = Environment::Gradient;
+    const LightingData raw = r466::bake(w, 64, false, 1, 6), fil = r466::bake(w, 64, true, 1, 6);
+    auto tint = [&](const LightingData &d, int row) {
+      Vec3 s(0.0f);
+      for (float x = -1.0f; x <= 1.0f; x += 1.0f / w.tpu) s += r466::at(d, w.objs[0], {x, 0, -2.0f + ((float)row + 0.5f) / w.tpu});
+      return s.x / std::max(1e-6f, s.y);
+    };
+    double worst = 0.0, near_r = tint(raw, 1);
+    for (int row = 1; row <= 8; row++) worst = std::max(worst, (double)std::fabs(tint(fil, row) - tint(raw, row)));
+    std::printf("    R/G one texel from the wall: %.3f raw, %.3f filtered; worst row difference %.4f; far floor %.3f\n", near_r, tint(fil, 1), worst, tint(fil, 50));
+    CHECK(near_r > 1.05);  // (the wall really tints the floor)
+    CHECK(worst < 0.04);
+    CHECK(std::fabs(tint(fil, 50) - tint(raw, 50)) < 0.02);
+  });
+  test("variance-guided filter (round 466): a lamp's glow on a wall (low variance) keeps 95 % of its peak, and a steady bright texel is not clamped like a firefly", [] {
+    r466::World w;
+    w.tpu = 16.0f;
+    MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 600.0f;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+              bake_object(2, primitives::plane(4.0f, 1), Mat4::trs({0, 2, -2}, Quat::euler({90, 0, 0}), {1, 1, 1}), {make_material("White", Vec3(0.8f))}),
+              bake_object(3, primitives::plane(0.1f, 1), Mat4::trs({0, 1, -1.75f}, Quat::euler({-90, 0, 0}), {1, 1, 1}), {glow})};
+    w.objs.back().want_lightmap = false;
+    w.env.mode = Environment::Gradient;
+    auto peak_mean = [&](const LightingData &d, double &mean) {
+      double pk = 0.0;
+      mean = 0.0;
+      const std::vector<Vec3> t = r466::chart_texels(d, 2);
+      for (const Vec3 &c : t) pk = std::max(pk, (double)r466::lum(c)), mean += r466::lum(c) / (double)t.size();
+      return pk;
+    };
+    double m_ref, m_fil, m_raw;
+    const double ref = peak_mean(r466::bake(w, 512, false, 1, 9), m_ref);
+    const double fil = peak_mean(r466::bake(w, 64, true, 1, 1), m_fil), raw = peak_mean(r466::bake(w, 64, false, 1, 1), m_raw);
+    std::printf("    glow peak: converged raw %.3f (wall mean %.3f), 64 samples raw %.3f, filtered %.3f\n", ref, m_ref, raw, fil);
+    CHECK(ref > 5.0 * m_ref);  // (the lamp makes a real glow, not an even wall)
+    CHECK(fil >= 0.95 * ref && fil <= 1.1 * ref);
+  });
+}
+
+static void tests_round466_fireflies() {
+  test("variance-guided filter (round 466): lucky rays - a tiny lamp only the gather can find (about 100x the floor's light a hit) over a gradient sky - are brought down, and the floor's summed light is no worse than round 423's filter keeps and within 0.3 to 1.4 of the converged bake's", [] {
+    r466::World w;
+    w.tpu = 16.0f;
+    MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+    glow->emission = Vec3(1.0f), glow->emission_strength = 4000.0f;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+              bake_object(2, primitives::plane(0.04f, 1), Mat4::trs({0, 1, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+    w.objs.back().want_lightmap = false;
+    w.env.mode = Environment::Gradient, w.env.sky = Vec3(0.2f), w.env.equator = Vec3(1.0f), w.env.ground = Vec3(0.0f);  // (a dense base the fireflies sit on: with a black sky the rare hits ARE the floor's whole light, and clamping them leaves nothing - the old filter did the same)
+    r466::World wref = w;
+    wref.sample_emissive = true;
+    w.sample_emissive = false;  // (the old way: only the hemisphere rays can find the lamp)
+    const std::vector<Vec3> ref = r466::chart_texels(r466::bake(wref, 256, false, 1, 5), 1);
+    const std::vector<Vec3> raw = r466::chart_texels(r466::bake(w, 16, false, 1, 1, false), 1);
+    const std::vector<Vec3> fil = r466::chart_texels(r466::bake(w, 16, true, 1, 1, false), 1);
+    double ref_max = 0, raw_max = 0, fil_max = 0, ref_sum = 0, fil_sum = 0, e_raw = 0, e_fil = 0;
+    for (size_t i = 0; i < ref.size(); i++) {
+      ref_max = std::max(ref_max, (double)r466::lum(ref[i])), raw_max = std::max(raw_max, (double)r466::lum(raw[i])), fil_max = std::max(fil_max, (double)r466::lum(fil[i]));
+      ref_sum += r466::lum(ref[i]), fil_sum += r466::lum(fil[i]);
+      e_raw += std::pow(r466::lum(raw[i]) - r466::lum(ref[i]), 2.0), e_fil += std::pow(r466::lum(fil[i]) - r466::lum(ref[i]), 2.0);
+    }
+    std::printf("    brightest texel: converged %.2f, raw %.1f, filtered %.2f; summed light filtered / converged %.3f; rms error %.4f -> %.4f\n", ref_max, raw_max, fil_max,
+                fil_sum / ref_sum, std::sqrt(e_raw / (double)ref.size()), std::sqrt(e_fil / (double)ref.size()));
+    CHECK(raw_max > 20.0 * ref_max);  // (the scene does make fireflies)
+    CHECK(fil_max < 5.0 * ref_max);
+    CHECK(e_fil < 0.25 * e_raw);
+    /* A clamp trades the lamp's rare hits for quiet (round 423's did too: the old filter is the yardstick for what is lost) */
+    double old_sum = 0;
+    for (const Vec3 &c : r466::chart_texels(r466::bake(w, 16, true, 0, 1, false), 1)) old_sum += r466::lum(c);
+    std::printf("    summed light: converged %.1f, variance filter %.1f, old A-Trous %.1f\n", ref_sum, fil_sum, old_sum);
+    CHECK(fil_sum >= 0.9 * old_sum && fil_sum > 0.3 * ref_sum && fil_sum < 1.4 * ref_sum);
+  });
+}
+
+static void tests_round466_robust() {
+  test("variance-guided filter (round 466): NaN and infinite lights and emission, a scene with nothing to bake, a lone one-texel chart, a zero-area plane and a cube through the floor (texels inside geometry) bake finite light with both filters", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    auto floor = [](uint64_t id) { return bake_object(id, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}); };
+    std::vector<std::pair<std::string, r466::World>> cases;
+    {
+      r466::World w;  // NaN light, infinite light colour
+      w.objs = {floor(1)};
+      w.lights = {r466::point_light({0, 1, 0}, nan, 6.0f, 0.1f), r466::point_light({1, 1, 0}, inf, 6.0f, 0.1f)};
+      BakeLight sun;
+      sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.color = Vec3(inf, nan, 1.0f), sun.mode = 2, sun.id = 7;
+      w.lights.push_back(sun);
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.3f);
+      cases.push_back({"NaN and infinite lights", w});
+    }
+    {
+      r466::World w;  // NaN and infinite emission, an infinite sky
+      MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+      glow->emission = Vec3(nan, inf, 1.0f), glow->emission_strength = inf;
+      w.objs = {floor(1), bake_object(2, primitives::plane(0.3f, 1), Mat4::trs({0, 0.6f, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+      w.objs.back().want_lightmap = false;
+      w.env.mode = Environment::Color, w.env.color = Vec3(inf, nan, 0.2f);
+      cases.push_back({"NaN and infinite emission and sky", w});
+    }
+    {
+      r466::World w;  // enormous emission: its square overflows a float
+      MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+      glow->emission = Vec3(1.0f), glow->emission_strength = 1e30f;
+      w.objs = {floor(1), bake_object(2, primitives::plane(0.3f, 1), Mat4::trs({0, 0.6f, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+      w.objs.back().want_lightmap = false;
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+      cases.push_back({"1e30 emission", w});
+    }
+    {
+      r466::World w;  // nothing in the scene
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"empty scene", w});
+    }
+    {
+      r466::World w;  // an object that wants no lightmap: a zero-texel page
+      w.objs = {floor(1)};
+      w.objs[0].want_lightmap = false;
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"no chart", w});
+    }
+    {
+      r466::World w;  // one-texel chart
+      w.objs = {bake_object(1, primitives::plane(0.01f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+      w.tpu = 1.0f, w.min_chart = 1;
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"one-texel chart", w});
+    }
+    {
+      r466::World w;  // zero-area faces
+      w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::trs({0, 0, 0}, Quat::euler({0, 0, 0}), {0, 1, 0}), {make_material("White", Vec3(0.8f))}), floor(2)};
+      w.env.mode = Environment::Color, w.env.color = Vec3(0.5f);
+      cases.push_back({"zero-area plane", w});
+    }
+    {
+      r466::World w;  // a cube through the floor: its lower half, and the floor under it, lie inside geometry
+      w.objs = {floor(1), bake_object(2, primitives::cube(), Mat4::translate({0, 0, 0}), {make_material("Grey", Vec3(0.6f))})};
+      w.lights = {r466::point_light({0, 2, 0}, 4.0f, 8.0f, 0.1f)};
+      w.env.mode = Environment::Gradient;
+      cases.push_back({"cube through the floor", w});
+    }
+    for (auto &c : cases)
+      for (int denoiser = 0; denoiser < 2; denoiser++) {
+        const LightingData d = r466::bake(c.second, 16, true, denoiser, 2);
+        const bool ok = r466::all_finite(d);
+        std::printf("    %s, %s: %zu pages, finite %d\n", c.first.c_str(), denoiser ? "variance" : "atrous", d.pages.size(), (int)ok);
+        CHECK(ok);
+      }
+  });
+}
+
+static void tests_round466_bias() {
+  test("variance-guided filter (round 466): the mean light is kept within 1 % filtered against unfiltered (same samples), with both denoisers, on the sun-wall-floor scene, the five lamps and the box under a point light", [] {
+    std::vector<std::pair<std::string, r466::World>> scenes;
+    {
+      const r465::Scene423 sc;
+      r466::World w;
+      w.objs = sc.objs, w.lights = {sc.sun}, w.env = sc.env, w.tpu = 8.0f;
+      scenes.push_back({"sun, wall and floor", w});
+    }
+    scenes.push_back({"five lamps", r466::lamps_world()});
+    {
+      r466::World w = r466::box_on_floor();
+      w.tpu = 8.0f;
+      scenes.push_back({"box under a point light", w});
+    }
+    /* Summed over four seeds: one bake's filter-induced shift is partly its own noise; a bias that is the filter's repeats. */
+    for (auto &sc : scenes) {
+      double sr = 0.0, sf[2] = {0.0, 0.0};
+      for (uint32_t seed = 1; seed <= 4; seed++) {
+        sr += r466::sum_lum(r466::bake(sc.second, 32, false, 1, seed));
+        for (int denoiser = 0; denoiser < 2; denoiser++) sf[denoiser] += r466::sum_lum(r466::bake(sc.second, 32, true, denoiser, seed));
+      }
+      for (int denoiser = 1; denoiser >= 0; denoiser--) {
+        std::printf("    %s, %s: summed light %.2f raw, %.2f filtered (%+.2f %%)\n", sc.first.c_str(), denoiser ? "variance" : "atrous", sr, sf[denoiser], 100.0 * (sf[denoiser] - sr) / sr);
+      }
+      /* Criterion 6 is relative to the old filter ("|bias| doesn't grow by more than 0.002"). A bare 1 % bound fails the five lamps
+       * for both filters (the old one at +1.6 %, the new +1.1 % - an emitter-dominated floor the filter shifts), so: no worse than
+       * the old filter's + 0.002, neither past 2 %, and within 1 % on the other two scenes. */
+      /* (review 466: an edge-stop by each texel's own noise alone shifted the box -0.36 % - bright noisy texels took in dim
+       * quiet ones, not the other way; with the two texels' noise together it is -0.10 %, inside the bound) */
+      const double bv = (sf[1] - sr) / sr, ba = (sf[0] - sr) / sr;
+      CHECK(sr > 0.0 && std::fabs(bv) <= std::fabs(ba) + 0.002 && std::fabs(bv) < 0.02 && std::fabs(ba) < 0.02);
+      CHECK(sc.first == "five lamps" || (std::fabs(bv) < 0.01 && std::fabs(ba) < 0.01));
+    }
+  });
+}
+
+static void tests_round466_console() {
+  test("`lighting denoiser atrous` (round 466): the next bake has other pages than `variance`, the lighting stays current (not in the scene's key), `variance` brings the old pages back bit for bit, and a fresh editor starts on variance", [] {
+    if (PathTracer::oidn_lightmap_available()) {
+      std::printf("    (OIDN's lightmap filter is linked: it filters before either fallback - skipped)\n");
+      return;
+    }
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    const size_t mark = r463::log_mark();
+    ed.command("lighting denoiser atrous");
+    CHECK(r463::join_log(mark).find("lighting denoiser: atrous") != std::string::npos);
+    CHECK(!ed.lighting_out_of_date_for_test());
+    r35_bake(ed);
+    CHECK(!r463::same_pages(base, ed.lighting_data_for_test()));
+    CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    ed.command("lighting denoiser variance");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting denoiser atrous");
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+    ed.command("lighting denoiser variance");
+  });
+  test("`lighting denoiser` (round 466): a word that is not variance or atrous warns and the setting stays, whichever it was; with no word it is variance", [] {
+    if (PathTracer::oidn_lightmap_available()) {
+      std::printf("    (OIDN's lightmap filter is linked: skipped)\n");
+      return;
+    }
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData variance_pages = ed.lighting_data_for_test();
+    ed.command("lighting denoiser atrous");
+    r35_bake(ed);
+    const LightingData atrous_pages = ed.lighting_data_for_test();
+    CHECK(!r463::same_pages(variance_pages, atrous_pages));
+    const char *junk[] = {"lighting denoiser oidn", "lighting denoiser 1", "lighting denoiser on", "lighting denoiser -1", "lighting denoiser nan", "lighting denoiser varianc"};
+    for (int round = 0; round < 2; round++) {
+      const bool is_variance = round == 1;
+      ed.command(is_variance ? "lighting denoiser variance" : "lighting denoiser atrous");
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        CHECK(said.find("say variance or atrous") != std::string::npos && said.find(is_variance ? "stays variance" : "stays atrous") != std::string::npos);
+      }
+      r35_bake(ed);
+      CHECK(r463::same_pages(is_variance ? variance_pages : atrous_pages, ed.lighting_data_for_test()));
+    }
+    ed.command("lighting denoiser atrous");
+    ed.command("lighting denoiser");  // (no word: back to the default)
+    r35_bake(ed);
+    CHECK(r463::same_pages(variance_pages, ed.lighting_data_for_test()));
+  });
+}
+
+static void tests_round466_card() {
+  test("variance-guided filter (round 466): the card's second gather output (mode 1) gives the CPU's variance of the mean - 1024 identical points at 64 samples: sq >= mean^2 everywhere, and the spread of the means matches (sq - mean^2) / (n - 1) within 15 % (skipped with a note when no GPU opens)", [] {
+    if (!gpu::available()) {
+      std::printf("    (no GPU here: skipped)\n");
+      return;
+    }
+    P37Pt s;
+    s.add(primitives::plane(10.0f, 2), Mat4::translate({0, -1.0f, 0}), Vec3(0.7f));
+    Environment env;
+    env.mode = Environment::Gradient;
+    env.sky = Vec3(0.2f), env.equator = Vec3(1.0f), env.ground = Vec3(0.0f);
+    s.build({}, env, 1);
+    const int points = 1024, n = 64;
+    std::vector<Vec3> origins((size_t)points, Vec3(0.0f)), dirs((size_t)points, Vec3(0, 1, 0)), out;
+    std::vector<float> sq;
+    std::string err;
+    bool ran = false;
+    for (int i = 0; i < 100 && !ran; i++) {
+      ran = s.pt.gpu_gather(0, 1, origins, dirs, n, out, nullptr, &err, 0.0f, 0, false, &sq);
+      if (!ran && !s.pt.gpu_gather_waiting()) break;
+      if (!ran) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!ran) {
+      std::printf("    (the gather did not run: %s - skipped)\n", err.c_str());
+      return;
+    }
+    CHECK(out.size() == (size_t)points && sq.size() == (size_t)points);
+    if (out.size() != (size_t)points || sq.size() != (size_t)points) return;
+    double m = 0.0, within = 0.0, vmeans = 0.0;
+    size_t below = 0;
+    for (int i = 0; i < points; i++) {
+      const double l = r466::lum(out[(size_t)i]);
+      m += l / points;
+      within += std::max(0.0, (double)sq[(size_t)i] - l * l) / points;
+      below += (double)sq[(size_t)i] < l * l * (1.0 - 1e-4) - 1e-8;
+    }
+    for (int i = 0; i < points; i++) vmeans += std::pow(r466::lum(out[(size_t)i]) - m, 2.0) / (points - 1);
+    const double predicted = within / (n - 1);
+    std::printf("    card: mean %.4f, variance of the mean %.3e between points, %.3e from sq\n", m, vmeans, predicted);
+    CHECK(below == 0);
+    CHECK(vmeans > 0.0 && std::fabs(predicted - vmeans) < 0.15 * vmeans);
+  });
+}
+
+
+/* ---- round 466 review follow-up: the measured variance itself (Lightmapper::variance_for_test, until take_result) ---- */
+namespace r466 {
+struct Measured {
+  LightingData d;
+  std::vector<Vec3> var;  // x indirect, y direct, z the gather's own (bake order)
+};
+static Measured bake_measured(const World &w, int n, uint32_t seed, bool sobol, int bounces = 2, bool pick = true) {
+  BakeSettings bs;
+  bs.texels_per_unit = w.tpu, bs.indirect_samples = n, bs.bounces = bounces, bs.denoise = false, bs.seed = seed, bs.sobol = sobol, bs.pick_lights = pick;
+  bs.directional = false, bs.backface_tolerance = 0.0f, bs.use_oidn = false;
+  Lightmapper lm;
+  lm.begin(w.objs, w.lights, w.env, bs);
+  while (!lm.step(1e9)) {
+  }
+  Measured m;
+  m.var = lm.variance_for_test();
+  m.d = lm.take_result();
+  return m;
+}
+static double mean_component(const std::vector<Vec3> &v, int c) {
+  double s = 0.0;
+  for (const Vec3 &x : v) s += c == 0 ? x.x : c == 1 ? x.y : x.z;
+  return v.empty() ? 0.0 : s / (double)v.size();
+}
+/* The variance of one texel's luminance across `seeds` unfiltered bakes, averaged over the texels of object 1's chart. */
+static double across_seeds(const World &w, int n, bool sobol, int bounces, bool pick, int seeds) {
+  std::vector<std::vector<double>> v;
+  for (int s = 1; s <= seeds; s++) {
+    std::vector<double> col;
+    for (const Vec3 &t : chart_texels(bake_measured(w, n, (uint32_t)s, sobol, bounces, pick).d, 1)) col.push_back(lum(t));
+    v.push_back(col);
+  }
+  double total = 0.0;
+  for (size_t i = 0; i < v[0].size(); i++) {
+    double m = 0.0, q = 0.0;
+    for (int s = 0; s < seeds; s++) m += v[(size_t)s][i] / seeds;
+    for (int s = 0; s < seeds; s++) q += (v[(size_t)s][i] - m) * (v[(size_t)s][i] - m) / (seeds - 1);
+    total += q / (double)v[0].size();
+  }
+  return total;
+}
+}  // namespace r466
+
+static void tests_round466_measured() {
+  test("measured noise (round 466): on a plane under a gradient sky with random samples, the mean measured indirect variance matches the variance of the texels across 24 seeds' bakes within 15 % (16 and 64 samples)", [] {
+    const r466::World w = r466::sky_plane();
+    for (int n : {16, 64}) {
+      const r466::Measured m = r466::bake_measured(w, n, 1, false);
+      const double measured = r466::mean_component(m.var, 0), actual = r466::across_seeds(w, n, false, 2, true, 24);
+      std::printf("    %d samples: measured %.3e, across seeds %.3e (%.2fx)\n", n, measured, actual, measured / actual);
+      CHECK(actual > 0.0 && std::fabs(measured - actual) < 0.15 * actual);
+    }
+  });
+  test("measured noise (round 466): with Sobol samples the gather's measured variance is the random one x min(1, 4 / sqrt(N)) within 20 % (N = 16, 64, 256)", [] {
+    const r466::World w = r466::sky_plane();
+    // (N = 4 left out: with so few samples the Sobol / random ratio of the measured spread wanders - 1.28 when the sums still
+    // divided by n; MeanVar uses n - 1 since review 466, and the ratio at 16 and up is what the scale is set by)
+    for (int n : {16, 64, 256}) {
+      const double zs = r466::mean_component(r466::bake_measured(w, n, 1, true).var, 2), zr = r466::mean_component(r466::bake_measured(w, n, 1, false).var, 2);
+      const double expect = std::min(1.0, 4.0 / std::sqrt((double)n));
+      std::printf("    N %d: gather variance sobol %.3e, random %.3e, ratio %.3f (expected %.3f)\n", n, zs, zr, zs / zr, expect);
+      CHECK(zr > 0.0 && std::fabs(zs / zr - expect) < 0.2 * expect);
+    }
+  });
+  test("measured noise (round 466): a plane fully lit by a directional light under a black sky, nothing shadowed, measures no variance at all (indirect and direct 0 on every texel)", [] {
+    r466::World w;
+    w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+    BakeLight sun;
+    sun.light.direction = normalize(Vec3(0.3f, -1.0f, -0.4f)), sun.light.intensity = 1.0f, sun.mode = 2, sun.id = 9;
+    w.lights = {sun};
+    w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+    const r466::Measured m = r466::bake_measured(w, 32, 1, true);
+    float worst = 0.0f;
+    for (const Vec3 &v : m.var) worst = std::max(worst, std::max(v.x, v.y));
+    CHECK(!m.var.empty() && worst == 0.0f);
+  });
+  test("measured noise (round 466): forty lamps picked by chance (Bounces 0, 1 sample): the measured indirect variance is within 0.8x to 3x of the variance across seeds - an upper bound, as each lamp's chance variance is worked out from its unshadowed estimate", [] {
+    r466::World w;
+    w.tpu = 2.0f;
+    w.objs = {bake_object(1, primitives::plane(40.0f, 40), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+    for (int i = 0; i < 40; i++) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(-19.5f + (float)i, 1.0f, 0.0f), l.light.intensity = 2.0f, l.light.range = 1e4f;
+      l.mode = 2, l.id = (uint64_t)(100 + i);
+      w.lights.push_back(l);
+    }
+    w.env.mode = Environment::Color, w.env.color = Vec3(0.0f);
+    const r466::Measured m = r466::bake_measured(w, 1, 1, true, 0, true);
+    const double measured = r466::mean_component(m.var, 0), actual = r466::across_seeds(w, 1, true, 0, true, 30);
+    std::printf("    40 lamps: measured %.3e, across seeds %.3e (%.2fx)\n", measured, actual, measured / actual);
+    CHECK(actual > 0.0 && measured >= 0.8 * actual && measured <= 3.0 * actual);
+  });
+}
+
+static void tests_round466() {
+  tests_round466_smoothing();
+  tests_round466_edges();
+  tests_round466_fireflies();
+  tests_round466_measured();
+  tests_round466_robust();
+  tests_round466_bias();
+  tests_round466_console();
+  tests_round466_card();
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -8312,4 +11162,8 @@ void run_lighting_tests() {
   tests_round454();
   tests_round459();
   tests_round455();
+  tests_round463();
+  tests_round464();
+  tests_round465();
+  tests_round466();
 }
