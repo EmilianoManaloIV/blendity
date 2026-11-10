@@ -1,0 +1,732 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Blockout's kernel (ADR 0128, task 0452): the pieces made into closed solids, sorted into clusters of touching pieces,
+// each cluster meshed by the crisp path or the field path and turned into faces, the clusters laid into one mesh in a
+// fixed order. Nothing here reads a scene or a global, so a worker thread can run it and the same pieces give the same
+// bytes.
+#include "blockout_internal.h"
+
+#include "../core/core.h"
+#include "../core/jobs.h"
+
+#include <algorithm>
+#include <cstring>
+#include <exception>
+#include <unordered_map>
+
+namespace bl::blockout {
+namespace detail {
+
+/* ------------------------------------------------------------ planes met */
+
+/* A symmetric 3 x 3 matrix's eigenvalues `w` and eigenvectors (the columns of `v`), by cyclic Jacobi rotations. */
+static void eigen_sym3(double a[3][3], double w[3], double v[3][3]) {
+  for (int i = 0; i < 3; i++)
+    for (int j = 0; j < 3; j++) v[i][j] = i == j ? 1.0 : 0.0;
+  static const int kPairs[3][2] = {{0, 1}, {0, 2}, {1, 2}};
+  for (int sweep = 0; sweep < 40; sweep++) {
+    const double off = std::fabs(a[0][1]) + std::fabs(a[0][2]) + std::fabs(a[1][2]);
+    const double diag = std::fabs(a[0][0]) + std::fabs(a[1][1]) + std::fabs(a[2][2]);
+    if (off <= 1e-18 * diag || off == 0.0) break;
+    for (const int *pq : kPairs) {
+      const int p = pq[0], q = pq[1], r = 3 - p - q;
+      const double apq = a[p][q];
+      if (apq == 0.0) continue;
+      const double theta = (a[q][q] - a[p][p]) / (2.0 * apq);
+      const double t = (theta >= 0.0 ? 1.0 : -1.0) / (std::fabs(theta) + std::sqrt(theta * theta + 1.0));
+      const double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+      a[p][p] -= t * apq;
+      a[q][q] += t * apq;
+      a[p][q] = a[q][p] = 0.0;
+      const double arp = a[r][p], arq = a[r][q];
+      a[r][p] = a[p][r] = c * arp - s * arq;
+      a[r][q] = a[q][r] = s * arp + c * arq;
+      for (int k = 0; k < 3; k++) {
+        const double vkp = v[k][p], vkq = v[k][q];
+        v[k][p] = c * vkp - s * vkq;
+        v[k][q] = s * vkp + c * vkq;
+      }
+    }
+  }
+  for (int i = 0; i < 3; i++) w[i] = a[i][i];
+}
+
+/* Three planes that meet squarely enough: their corner by Cramer's rule, which gives a box along the axes its
+ * coordinates to the last bit. False when they are too near to sharing a line. */
+static bool corner_of_three(const Plane *const *pl, V3 &x) {
+  const V3 a = pl[0]->n, b = pl[1]->n, c = pl[2]->n;
+  const V3 bc = cross(b, c), ca = cross(c, a), ab = cross(a, b);
+  const double det = dot(a, bc);
+  if (std::fabs(det) < 1e-3) return false;
+  x = (bc * pl[0]->d + ca * pl[1]->d + ab * pl[2]->d) * (1.0 / det);
+  return true;
+}
+
+V3 solve_planes(const Plane *const *pl, int count, V3 x0, double *residual) {
+  V3 x = x0;
+  if (count == 1) x = x0 - pl[0]->n * pl[0]->value(x0);
+  else if (count == 3 && corner_of_three(pl, x)) {}
+  else if (count > 0) {
+    /* x0 moved the least that best meets the planes: the pseudo-inverse of the planes' normals, directions the
+     * planes don't fix (an eigenvalue near nothing) left alone. */
+    double m[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, rhs[3] = {0, 0, 0};
+    for (int i = 0; i < count; i++) {
+      const V3 n = pl[i]->n;
+      const double r = -pl[i]->value(x0);
+      for (int j = 0; j < 3; j++) {
+        rhs[j] += n[j] * r;
+        for (int k = 0; k < 3; k++) m[j][k] += n[j] * n[k];
+      }
+    }
+    double w[3], v[3][3];
+    eigen_sym3(m, w, v);
+    const double wmax = std::max(w[0], std::max(w[1], w[2]));
+    for (int k = 0; k < 3; k++) {
+      if (!(w[k] > 1e-9 * wmax)) continue;
+      const V3 axis(v[0][k], v[1][k], v[2][k]);
+      const double coef = (axis.x * rhs[0] + axis.y * rhs[1] + axis.z * rhs[2]) / w[k];
+      x = x + axis * coef;
+    }
+  }
+  if (residual) {
+    *residual = 0.0;
+    for (int i = 0; i < count; i++) *residual = std::max(*residual, std::fabs(pl[i]->value(x)));
+  }
+  return x;
+}
+
+/* ------------------------------------------------------- pieces as solids */
+
+namespace {
+
+bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
+
+bool finite_piece(const Piece &p) {
+  for (float f : p.to_blockout.m)
+    if (!finite_bits(f)) return false;
+  return finite3(p.size) && finite_bits(p.radius) && finite_bits(p.height) && finite_bits(p.blend);
+}
+
+void add_face(Solid &s, std::initializer_list<uint32_t> verts, uint32_t side) {
+  s.face_verts.insert(s.face_verts.end(), verts.begin(), verts.end());
+  s.face_offsets.push_back((uint32_t)s.face_verts.size());
+  s.face_side.push_back(side);
+}
+
+/* The shapes in the piece's own space, as primitives::cube, cylinder and uv_sphere lay them out. */
+bool local_box(const Piece &p, Solid &s) {
+  const double hx = std::fabs((double)p.size.x) * 0.5, hy = std::fabs((double)p.size.y) * 0.5, hz = std::fabs((double)p.size.z) * 0.5;
+  if (!(hx > 1e-30 && hy > 1e-30 && hz > 1e-30)) return false;
+  for (int i = 0; i < 8; i++) s.verts.push_back({i & 1 ? hx : -hx, i & 2 ? hy : -hy, i & 4 ? hz : -hz});
+  add_face(s, {0, 2, 6, 4}, 0);
+  add_face(s, {1, 3, 7, 5}, 1);
+  add_face(s, {0, 1, 5, 4}, 2);
+  add_face(s, {2, 3, 7, 6}, 3);
+  add_face(s, {0, 1, 3, 2}, 4);
+  add_face(s, {4, 5, 7, 6}, 5);
+  s.half = {hx, hy, hz};
+  return true;
+}
+
+bool local_cylinder(const Piece &p, Solid &s) {
+  const double r = std::fabs((double)p.radius), h = std::fabs((double)p.height) * 0.5;
+  if (!(r > 1e-30 && h > 1e-30)) return false;
+  const uint32_t seg = (uint32_t)std::max(3, std::min(256, p.segments));
+  const double two_pi = 6.283185307179586476925;
+  for (uint32_t i = 0; i < seg; i++) {
+    const double a = two_pi * (double)i / (double)seg;
+    s.verts.push_back({r * std::cos(a), -h, r * std::sin(a)});
+    s.verts.push_back({r * std::cos(a), h, r * std::sin(a)});
+  }
+  for (uint32_t i = 0; i < seg; i++) {
+    const uint32_t b0 = i * 2, t0 = b0 + 1, b1 = ((i + 1) % seg) * 2, t1 = b1 + 1;
+    add_face(s, {b0, t0, t1, b1}, 0);
+  }
+  for (int cap = 0; cap < 2; cap++) {
+    for (uint32_t i = 0; i < seg; i++) s.face_verts.push_back(i * 2 + (uint32_t)cap);
+    s.face_offsets.push_back((uint32_t)s.face_verts.size());
+    s.face_side.push_back(cap == 0 ? 1u : 2u);
+  }
+  s.half = {r, h, r};
+  return true;
+}
+
+bool local_sphere(const Piece &p, Solid &s) {
+  const double r = std::fabs((double)p.radius);
+  if (!(r > 1e-30)) return false;
+  const uint32_t seg = (uint32_t)std::max(3, std::min(256, p.segments)), rings = (uint32_t)std::max(2, std::min(128, p.rings));
+  const double pi = 3.141592653589793238463;
+  s.verts.push_back({0, r, 0});
+  for (uint32_t i = 1; i < rings; i++) {
+    const double phi = pi * (double)i / (double)rings;
+    for (uint32_t j = 0; j < seg; j++) {
+      const double th = 2.0 * pi * (double)j / (double)seg;
+      s.verts.push_back({r * std::sin(phi) * std::cos(th), r * std::cos(phi), r * std::sin(phi) * std::sin(th)});
+    }
+  }
+  const uint32_t bottom = (uint32_t)s.verts.size();
+  s.verts.push_back({0, -r, 0});
+  auto ring = [&](uint32_t i, uint32_t j) { return 1 + (i - 1) * seg + (j % seg); };
+  for (uint32_t j = 0; j < seg; j++) add_face(s, {0u, ring(1, j + 1), ring(1, j)}, 0);
+  for (uint32_t i = 1; i + 1 < rings; i++)
+    for (uint32_t j = 0; j < seg; j++) add_face(s, {ring(i, j), ring(i, j + 1), ring(i + 1, j + 1), ring(i + 1, j)}, 0);
+  for (uint32_t j = 0; j < seg; j++) add_face(s, {bottom, ring(rings - 1, j), ring(rings - 1, j + 1)}, 0);
+  s.half = {r, r, r};
+  return true;
+}
+
+V3 newell(const Solid &s, size_t f) {
+  const uint32_t b = s.face_offsets[f], n = s.face_offsets[f + 1] - b;
+  const V3 o = s.verts[s.face_verts[b]];
+  V3 nrm;
+  for (uint32_t i = 0; i < n; i++) {
+    const V3 p = s.verts[s.face_verts[b + i]] - o, q = s.verts[s.face_verts[b + (i + 1) % n]] - o;
+    nrm.x += (p.y - q.y) * (p.z + q.z);
+    nrm.y += (p.z - q.z) * (p.x + q.x);
+    nrm.z += (p.x - q.x) * (p.y + q.y);
+  }
+  return nrm;
+}
+
+V3 face_centre(const Solid &s, size_t f) {
+  const uint32_t b = s.face_offsets[f], n = s.face_offsets[f + 1] - b;
+  V3 c;
+  for (uint32_t i = 0; i < n; i++) c = c + s.verts[s.face_verts[b + i]];
+  return c * (1.0 / (double)n);
+}
+
+void set_bounds(Solid &s) {
+  s.lo = s.hi = s.verts[0];
+  for (const V3 &p : s.verts)
+    for (int a = 0; a < 3; a++) s.lo[a] = std::min(s.lo[a], p[a]), s.hi[a] = std::max(s.hi[a], p[a]);
+}
+
+/* The piece's matrix, in doubles, as the rows of a 3 x 4; its inverse; how much it stretches each of the piece's
+ * axes, and how thick it leaves a slab of 1 across each (less than the stretch when the matrix shears). False when
+ * it flattens the piece. */
+bool placement(const Piece &p, double m[12], double inv[12], double stretch[3], double thick[3]) {
+  const float *f = p.to_blockout.m;  // (column-major)
+  for (int r = 0; r < 3; r++)
+    for (int c = 0; c < 4; c++) m[r * 4 + c] = (double)f[c * 4 + r];
+  const V3 a(m[0], m[4], m[8]), b(m[1], m[5], m[9]), c(m[2], m[6], m[10]);  // (its columns: where the axes go)
+  const V3 bc = cross(b, c), ca = cross(c, a), ab = cross(a, b);
+  const double det = dot(a, bc), la = length(a), lb = length(b), lc = length(c);
+  if (!finite_bits(det) || !(std::fabs(det) > 1e-12 * la * lb * lc) || !(la * lb * lc > 0.0)) return false;
+  const V3 rows[3] = {bc * (1.0 / det), ca * (1.0 / det), ab * (1.0 / det)};
+  const V3 t(m[3], m[7], m[11]);
+  for (int r = 0; r < 3; r++) {
+    inv[r * 4] = rows[r].x, inv[r * 4 + 1] = rows[r].y, inv[r * 4 + 2] = rows[r].z;
+    inv[r * 4 + 3] = -dot(rows[r], t);
+  }
+  stretch[0] = la, stretch[1] = lb, stretch[2] = lc;
+  thick[0] = std::fabs(det) / length(bc), thick[1] = std::fabs(det) / length(ca), thick[2] = std::fabs(det) / length(ab);
+  return true;
+}
+
+/* The shortest edge of the piece's faceting, about (a box has none shorter than its sizes). */
+double finest_facet(const Piece &p, const Solid &s, const double stretch[3]) {
+  const double pi = 3.141592653589793238463;
+  const double least = std::min(stretch[0], std::min(stretch[1], stretch[2]));
+  const double seg = (double)std::max(3, std::min(256, p.segments)), rings = (double)std::max(2, std::min(128, p.rings));
+  if (p.shape == Shape::Cylinder) return 2.0 * s.half.x * std::sin(pi / seg) * least;
+  if (p.shape == Shape::Sphere) return 2.0 * s.half.x * std::sin(pi / rings) * std::sin(pi / seg) * least;
+  return 1e300;
+}
+
+/* A piece as a solid in the Blockout's space, or why it can't be one. */
+const char *make_solid(const Piece &p, Solid &s) {
+  if (!finite_piece(p)) return "a number of it is not finite";
+  s = Solid();
+  const bool sized = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : local_sphere(p, s);
+  if (!sized) return "it has no size";
+  double m[12], stretch[3], thick[3];
+  if (!placement(p, m, s.inv, stretch, thick)) return "its matrix flattens it";
+  s.scale_min = std::min(stretch[0], std::min(stretch[1], stretch[2]));
+  for (V3 &v : s.verts) v = {m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3], m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7], m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11]};
+  for (const V3 &v : s.verts)
+    if (!finite_bits(v.x) || !finite_bits(v.y) || !finite_bits(v.z)) return "a number of it is not finite";
+  set_bounds(s);
+  /* The result is a mesh of 32-bit positions. A piece only a few of their steps thick, where it lies, would come out
+   * with its faces on top of each other: left out, and named. (A box of 0.1 mm is fine at the origin and gone 6 km
+   * from it; a 5 mm panel holds out to 5 km.) Faceting is given more room - points four steps apart are still two
+   * points - and its own words, since fewer segments would cure it. (A cluster's tolerance can still be coarser
+   * than a small piece's faceting - a finely faceted ball beside a hall: its facets then merge as planes do.) */
+  double far = 0.0;
+  for (int a = 0; a < 3; a++) far = std::max(far, std::max(std::fabs(s.lo[a]), std::fabs(s.hi[a])));
+  const double thinnest = std::min(2.0 * s.half.x * thick[0], std::min(2.0 * s.half.y * thick[1], 2.0 * s.half.z * thick[2]));
+  if (!(thinnest >= 8.0 * kFloatStep * far)) return "it is too small for where it lies (a mesh's positions are 32-bit numbers)";
+  if (!(finest_facet(p, s, stretch) >= 4.0 * kFloatStep * far)) return "its faceting is too fine for where it lies (a mesh's positions are 32-bit numbers): fewer segments";
+  /* Every face counter-clockwise from outside, whatever the matrix did (a mirror turns them round). */
+  V3 mid;
+  for (const V3 &v : s.verts) mid = mid + v;
+  mid = mid * (1.0 / (double)s.verts.size());
+  for (size_t f = 0; f < s.face_count(); f++)
+    if (dot(newell(s, f), face_centre(s, f) - mid) < 0.0) std::reverse(s.face_verts.begin() + s.face_offsets[f], s.face_verts.begin() + s.face_offsets[f + 1]);
+  s.subtract = p.op == Op::Subtract;
+  /* A Blend radius is at most the piece's own size: past that it rounds nothing more, and the grid a blend needs
+   * grows with the radius. */
+  s.blend = std::max(0.0, std::min((double)p.blend, length(s.hi - s.lo)));
+  s.shape = p.shape;
+  return nullptr;
+}
+
+/* ----------------------------------------------------------------- clusters */
+
+/* Solids whose bounds touch or overlap (grown by their Blend radius), in groups: each group's indices ascending, the
+ * groups by their first index. */
+void cluster_solids(const std::vector<Solid> &solids, std::vector<std::vector<uint32_t>> &groups) {
+  const size_t n = solids.size();
+  std::vector<V3> lo(n), hi(n);
+  for (size_t i = 0; i < n; i++) {
+    const double grow = solids[i].blend + 1e-6 * length(solids[i].hi - solids[i].lo);
+    lo[i] = solids[i].lo - V3(grow, grow, grow), hi[i] = solids[i].hi + V3(grow, grow, grow);
+  }
+  std::vector<uint32_t> order(n), parent(n);
+  for (uint32_t i = 0; i < n; i++) order[i] = parent[i] = i;
+  std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return lo[a].x != lo[b].x ? lo[a].x < lo[b].x : a < b; });
+  auto find = [&](uint32_t v) {
+    while (parent[v] != v) v = parent[v] = parent[parent[v]];
+    return v;
+  };
+  for (size_t oi = 0; oi < n; oi++) {
+    const uint32_t a = order[oi];
+    for (size_t oj = oi + 1; oj < n && lo[order[oj]].x <= hi[a].x; oj++) {
+      const uint32_t b = order[oj];
+      if (lo[b].y > hi[a].y || lo[a].y > hi[b].y || lo[b].z > hi[a].z || lo[a].z > hi[b].z) continue;
+      const uint32_t ra = find(a), rb = find(b);
+      if (ra != rb) parent[std::max(ra, rb)] = std::min(ra, rb);  // (the smaller index stays the group's name)
+    }
+  }
+  std::vector<uint32_t> group_of(n, UINT32_MAX);
+  for (uint32_t i = 0; i < n; i++) {
+    const uint32_t r = find(i);
+    if (group_of[r] == UINT32_MAX) group_of[r] = (uint32_t)groups.size(), groups.emplace_back();
+    groups[group_of[r]].push_back(i);
+  }
+}
+
+/* The cluster's table of planes: a face joins the entry it lies in to within the tolerance, so faces of different
+ * pieces in one plane - a door's sill and the floor it reaches, two rooms' walls in a row - are one plane to the bit.
+ * Two faces of one solid never share an entry (a plate thinner than the tolerance keeps its two sides). */
+struct PlaneTable {
+  std::vector<Plane> &planes;
+  double tol_n, tol_d;
+  V3 mid;  // the cluster's middle: planes are compared where the cluster is, not at the Blockout's origin far away
+  std::vector<uint32_t> last_solid;
+  std::unordered_map<uint64_t, std::vector<uint32_t>> buckets;
+
+  static uint64_t bucket_key(const int64_t q[4]) {
+    uint64_t h = kFnvBasis;
+    for (int i = 0; i < 4; i++) h = hash_mix(h, (uint64_t)q[i]);
+    return h;
+  }
+  /* How far the plane passes from the cluster's middle (two planes a hair apart in direction differ by that hair
+   * times the distance to where they are measured: at the middle, at most the hair times the cluster's size). */
+  double offset(const Plane &p) const { return p.d - dot(p.n, mid); }
+  void quantize(const Plane &p, int64_t base[4], int alt[4]) const {
+    const double v[4] = {p.n.x / (8.0 * tol_n), p.n.y / (8.0 * tol_n), p.n.z / (8.0 * tol_n), offset(p) / (8.0 * tol_d)};
+    for (int i = 0; i < 4; i++) {
+      const double fl = std::floor(std::max(-4.0e18, std::min(4.0e18, v[i] + 0.5))), r = v[i] + 0.5 - fl;
+      base[i] = (int64_t)fl;
+      alt[i] = r < 0.126 ? -1 : r > 0.874 ? 1 : 0;  // (near a bucket's edge: its neighbour is searched too)
+    }
+  }
+  bool same(const Plane &a, const Plane &b) const {
+    return std::fabs(a.n.x - b.n.x) <= tol_n && std::fabs(a.n.y - b.n.y) <= tol_n && std::fabs(a.n.z - b.n.z) <= tol_n && std::fabs(offset(a) - offset(b)) <= tol_d;
+  }
+  /* The entry `p` lies in that `solid` has not joined yet, or UINT32_MAX. */
+  uint32_t find(const Plane &p, uint32_t solid) const {
+    int64_t base[4];
+    int alt[4];
+    quantize(p, base, alt);
+    for (int combo = 0; combo < 16; combo++) {
+      int64_t q[4];
+      bool valid = true;
+      for (int i = 0; i < 4; i++) {
+        const bool other = (combo >> i) & 1;
+        if (other && alt[i] == 0) valid = false;
+        q[i] = base[i] + (other ? alt[i] : 0);
+      }
+      if (!valid) continue;
+      const auto it = buckets.find(bucket_key(q));
+      if (it == buckets.end()) continue;
+      for (uint32_t id : it->second)
+        if (last_solid[id] != solid && same(planes[id], p)) return id;
+    }
+    return UINT32_MAX;
+  }
+  uint32_t add(const Plane &p, uint32_t solid) {
+    int64_t base[4];
+    int alt[4];
+    quantize(p, base, alt);
+    const uint32_t id = (uint32_t)planes.size();
+    planes.push_back(p);
+    last_solid.push_back(solid);
+    buckets[bucket_key(base)].push_back(id);
+    return id;
+  }
+};
+
+/* Whether a normal is written the other way round in the table: the first of its components that is clearly not
+ * nothing decides, so a plane and its mirror image share an entry. `unsure`: a component sits on that threshold. */
+bool written_reversed(V3 n, bool &unsure) {
+  unsure = false;
+  for (int i = 0; i < 3; i++) {
+    const double a = std::fabs(n[i]);
+    if (std::fabs(a - 0.4) < 1e-5) unsure = true;
+    if (a >= 0.4) return n[i] < 0.0;
+  }
+  return false;
+}
+
+/* A normal within the tolerance of an axis is that axis: a box turned by right angles through a float matrix is a
+ * hair off the axes, and corners worked out from planes exactly along them come out equal to the bit - which is
+ * what lets Manifold see two such faces as one plane. */
+void square_up(V3 &n) {
+  int along = -1, small = 0;
+  for (int a = 0; a < 3; a++) {
+    if (std::fabs(n[a]) < 1e-6) small++;
+    else along = a;
+  }
+  if (small != 2) return;
+  const double way = n[along] < 0.0 ? -1.0 : 1.0;
+  n = V3(0, 0, 0);
+  n[along] = way;
+}
+
+void assign_planes(Cluster &c) {
+  PlaneTable table{c.planes, 1e-6, c.tol, c.mid, {}, {}};
+  for (uint32_t si = 0; si < c.solids.size(); si++) {
+    Solid &s = c.solids[si];
+    s.face_plane.assign(s.face_count(), 0);
+    s.face_sign.assign(s.face_count(), 1);
+    for (size_t f = 0; f < s.face_count(); f++) {
+      V3 n = newell(s, f);
+      const double len = length(n);
+      n = len > 0.0 ? n * (1.0 / len) : V3(0, 1, 0);
+      square_up(n);
+      Plane p{n, dot(n, face_centre(s, f))};
+      bool unsure = false;
+      int8_t sign = 1;
+      if (written_reversed(n, unsure)) p = {-n, -p.d}, sign = -1;
+      uint32_t id = table.find(p, si);
+      if (id == UINT32_MAX && unsure) {  // (written the other way by a face a hair off: look there too)
+        id = table.find(Plane{-p.n, -p.d}, si);
+        if (id != UINT32_MAX) sign = (int8_t)-sign;
+      }
+      if (id == UINT32_MAX) id = table.add(p, si);
+      table.last_solid[id] = si;
+      s.face_plane[f] = id, s.face_sign[f] = sign;
+    }
+  }
+  /* How many solids use each plane (a solid has one face in a plane at most). */
+  c.plane_users.assign(c.planes.size(), 0);
+  for (const Solid &s : c.solids)
+    for (uint32_t p : s.face_plane) c.plane_users[p]++;
+}
+
+/* Each solid's corners put on its faces' planes from the table, so faces in one plane have their corners in it to
+ * the bit: what lets Manifold see them as one plane, and what the bounds below are taken from. */
+void snap_to_planes(Cluster &c) {
+  std::vector<const Plane *> at;
+  for (Solid &s : c.solids) {
+    std::vector<uint32_t> &start = s.corner_start, &faces = s.corner_faces;
+    start.assign(s.verts.size() + 1, 0);
+    for (uint32_t v : s.face_verts) start[v + 1]++;
+    for (size_t v = 0; v < s.verts.size(); v++) start[v + 1] += start[v];
+    faces.assign(s.face_verts.size(), 0);
+    std::vector<uint32_t> fill(start.begin(), start.end() - 1);
+    for (size_t f = 0; f < s.face_count(); f++)
+      for (uint32_t k = s.face_offsets[f]; k < s.face_offsets[f + 1]; k++) faces[fill[s.face_verts[k]]++] = (uint32_t)f;
+    for (size_t v = 0; v < s.verts.size(); v++) {
+      at.clear();
+      for (uint32_t k = start[v]; k < start[v + 1]; k++) at.push_back(&c.planes[s.face_plane[faces[k]]]);
+      s.verts[v] = solve_planes(at.data(), (int)at.size(), s.verts[v], nullptr);
+      for (const Plane *p : at) p->put_on(s.verts[v]);  // (a plane square to an axis: the coordinate itself, no rounding)
+    }
+    set_bounds(s);
+  }
+}
+
+/* For each solid the largest Blend radius that reaches it: its own, or that of a solid whose bounds, grown by that
+ * radius, meet its bounds. The field needs its wider margin only there. */
+void spread_blends(Cluster &c) {
+  for (Solid &s : c.solids) s.melt = s.blend;
+  for (const Solid &b : c.solids) {
+    if (!(b.blend > 0.0)) continue;
+    for (Solid &s : c.solids) {
+      bool apart = false;
+      for (int a = 0; a < 3; a++) apart = apart || s.lo[a] > b.hi[a] + 2.0 * b.blend || s.hi[a] < b.lo[a] - 2.0 * b.blend;
+      if (!apart) s.melt = std::max(s.melt, b.blend);
+    }
+  }
+}
+
+void finish_cluster(Cluster &c) {
+  c.lo = c.solids[0].lo, c.hi = c.solids[0].hi;
+  c.blended = false;
+  for (const Solid &s : c.solids) {
+    for (int a = 0; a < 3; a++) c.lo[a] = std::min(c.lo[a], s.lo[a]), c.hi[a] = std::max(c.hi[a], s.hi[a]);
+    c.blended = c.blended || s.blend > 0.0;
+  }
+  c.scale = length(c.hi - c.lo);
+  c.mid = (c.lo + c.hi) * 0.5;
+  /* Planes nearer than a millionth of the cluster's size are one plane - or nearer than two steps of a 32-bit
+   * position where the cluster lies, if that is more: the mesh could not tell them apart either. */
+  double far = 0.0;
+  for (int a = 0; a < 3; a++) far = std::max(far, std::max(std::fabs(c.lo[a]), std::fabs(c.hi[a])));
+  c.tol = std::max(1e-6 * c.scale, 2.0 * kFloatStep * far);
+  assign_planes(c);
+  snap_to_planes(c);
+  spread_blends(c);
+  uint32_t label = 0;
+  for (uint32_t si = 0; si < c.solids.size(); si++) {
+    Solid &s = c.solids[si];
+    s.piece = si;
+    s.label_base = label;
+    for (uint32_t f = 0; f < s.face_count(); f++) c.label_solid.push_back(si), c.label_face.push_back(f);
+    label += (uint32_t)s.face_count();
+  }
+}
+
+/* ------------------------------------------------------- one cluster built */
+
+struct ClusterResult {
+  std::vector<Piece> pieces;  // what it was built from, with the settings below: the cache's proof
+  Settings settings;
+  std::vector<Vec3> positions;
+  std::vector<uint32_t> face_offsets{0}, corner_verts;
+  std::vector<uint32_t> face_piece;  // (an index into `pieces`)
+  std::vector<uint32_t> face_side;
+  std::vector<uint8_t> face_flat;
+  ClusterReport rep;
+};
+
+bool same_piece(const Piece &a, const Piece &b) {
+  return a.id == b.id && a.shape == b.shape && a.op == b.op && a.segments == b.segments && a.rings == b.rings &&
+         std::memcmp(&a.size, &b.size, sizeof(Vec3)) == 0 && std::memcmp(&a.radius, &b.radius, 4) == 0 && std::memcmp(&a.height, &b.height, 4) == 0 &&
+         std::memcmp(&a.blend, &b.blend, 4) == 0 && std::memcmp(a.to_blockout.m, b.to_blockout.m, sizeof(a.to_blockout.m)) == 0;
+}
+
+uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
+  uint64_t h = hash_mix(kFnvBasis, 0x0452u);  // (the kernel's own number: a change to what it builds moves it)
+  h = mix_float(h, st.cell);
+  h = hash_mix(h, (uint64_t)st.path);
+  h = hash_mix(h, (uint64_t)st.max_cells);
+  for (const Piece &p : pieces) {
+    h = hash_mix(h, p.id);
+    h = hash_mix(h, ((uint64_t)p.shape << 8) | (uint64_t)p.op);
+    h = hash_mix(h, ((uint64_t)(uint32_t)p.segments << 32) | (uint32_t)p.rings);
+    for (float f : {p.size.x, p.size.y, p.size.z, p.radius, p.height, p.blend}) h = mix_float(h, f);
+    h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
+  }
+  return h;
+}
+
+Path path_for(const Cluster &c, const Settings &st) {
+  if (st.path != Path::Auto) return st.path;
+  return crisp_available() && !c.blended ? Path::Crisp : Path::Field;
+}
+
+bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std::atomic<bool> *cancel, std::string &why) {
+  const double t0 = now_seconds();
+  res.rep.path = path_for(c, st);
+  res.rep.pieces = (uint32_t)c.solids.size();
+  Soup soup;
+  const bool made = res.rep.path == Path::Crisp ? crisp_soup(c, soup, res.rep, why) : field_soup(c, st, soup, res.rep, cancel, why);
+  if (!made) return false;
+  const double t1 = now_seconds();
+  res.rep.faces_in = soup.face_count();
+  Polys polys;
+  const char *open = nullptr;
+  if (!make_faces(c, soup, polys, cancel, &open)) {
+    why = "cancelled";
+    return false;
+  }
+  if (open) {
+    why = strprintf("the surface of a cluster of %u pieces did not close (%s)", (unsigned)c.solids.size(), open);
+    return false;
+  }
+  res.positions.reserve(polys.points.size());
+  for (const V3 &p : polys.points) res.positions.push_back(Vec3((float)p.x, (float)p.y, (float)p.z));
+  res.face_offsets = std::move(polys.offsets);
+  res.corner_verts = std::move(polys.verts);
+  for (uint32_t label : polys.label) {
+    const uint32_t plain = label & ~kBlendLabel;
+    res.face_piece.push_back(c.label_solid[plain]);
+    res.face_side.push_back(label & kBlendLabel ? kSideBlend : c.solids[c.label_solid[plain]].face_side[c.label_face[plain]]);
+  }
+  res.face_flat = std::move(polys.flat);
+  res.rep.faces_out = res.face_piece.size();
+  res.rep.unresolved = polys.unresolved;
+  const double t2 = now_seconds();
+  res.rep.ms_soup = (t1 - t0) * 1000.0, res.rep.ms_faces = (t2 - t1) * 1000.0, res.rep.ms = (t2 - t0) * 1000.0;
+  return true;
+}
+
+}  // namespace
+}  // namespace detail
+
+using namespace detail;
+
+struct Cache::Impl {
+  std::unordered_map<uint64_t, std::shared_ptr<const ClusterResult>> clusters;
+};
+Cache::Cache() : impl(std::make_unique<Impl>()) {}
+Cache::~Cache() = default;
+void Cache::clear() { impl->clusters.clear(); }
+size_t Cache::size() const { return impl->clusters.size(); }
+
+namespace {
+
+/* One cluster on its way through build(): its pieces, where its result comes from. */
+struct Job {
+  std::vector<uint32_t> solids;  // (indices into the build's solids)
+  std::vector<Piece> pieces;
+  uint64_t hash = 0;
+  std::shared_ptr<const ClusterResult> result;
+  bool cached = false;
+  std::string why;
+};
+
+void run_job(Job &job, std::vector<Solid> &solids, const Settings &st, const std::atomic<bool> *cancel) {
+  /* (A cluster that runs out of memory is a refusal like any other: the caller keeps its last mesh. The large
+   * blocks - the bricks, the soup - are asked for on this thread; a failure inside one of the pool's loops is caught
+   * here only where the pool hands it back, which TBB's does.) */
+  try {
+    Cluster c;
+    for (uint32_t si : job.solids) c.solids.push_back(std::move(solids[si]));
+    finish_cluster(c);
+    auto res = std::make_shared<ClusterResult>();
+    if (!build_cluster(c, st, *res, cancel, job.why)) return;
+    res->pieces = job.pieces;
+    res->settings = st;
+    job.result = std::move(res);
+  }
+  catch (const std::exception &e) {
+    job.result.reset();
+    job.why = strprintf("a cluster of %u pieces could not be built (%s)", (unsigned)job.pieces.size(), e.what());
+  }
+}
+
+/* The jobs still to build: the large ones one after another (each spreads over the threads itself), the small ones
+ * side by side. */
+void run_jobs(std::vector<Job> &jobs, std::vector<Solid> &solids, const Settings &st, const std::atomic<bool> *cancel) {
+  std::vector<Job *> large, small;
+  for (Job &j : jobs) {
+    if (j.result) continue;
+    (j.solids.size() > 16 ? large : small).push_back(&j);
+  }
+  for (Job *j : large) {
+    if (cancelled(cancel)) return;
+    run_job(*j, solids, st, cancel);
+  }
+  JobSystem::global().parallel_for((int64_t)small.size(), 1, [&](int64_t a, int64_t b) {
+    for (int64_t i = a; i < b; i++)
+      if (!cancelled(cancel)) run_job(*small[(size_t)i], solids, st, cancel);
+  });
+}
+
+Settings usable(Settings st) {
+  if (!finite_bits(st.cell) || !(st.cell > 0.0f)) st.cell = 0.1f;
+  st.cell = std::max(1e-5f, std::min(1e6f, st.cell));
+  st.max_cells = std::max<int64_t>(4096, std::min<int64_t>(st.max_cells, 64000000));
+  return st;
+}
+
+}  // namespace
+
+bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out, Faces *faces, Report *report, Cache *cache,
+           const std::atomic<bool> *cancel) {
+  const double t0 = now_seconds();
+  Report rep;
+  auto refuse = [&](const std::string &why) {
+    rep.why = why;
+    rep.ms_total = (now_seconds() - t0) * 1000.0;
+    if (report) *report = std::move(rep);
+    return false;
+  };
+  if (cancelled(cancel)) return refuse("cancelled");
+  if (settings.path == Path::Crisp && !crisp_available()) return refuse("this build has no Manifold (it comes with Blender's libraries): there is no crisp path");
+  const Settings st = usable(settings);
+
+  /* The pieces as solids; the ones that can't be are named and left out. */
+  std::vector<Solid> solids;
+  std::vector<uint32_t> piece_of;
+  for (uint32_t i = 0; i < pieces.size(); i++) {
+    Solid s;
+    if (const char *problem = make_solid(pieces[i], s)) {
+      rep.skipped.push_back({pieces[i].id, problem});
+      continue;
+    }
+    solids.push_back(std::move(s));
+    piece_of.push_back(i);
+  }
+  std::vector<std::vector<uint32_t>> groups;
+  cluster_solids(solids, groups);
+  rep.ms_solids = (now_seconds() - t0) * 1000.0;
+
+  /* Each cluster from the cache when its pieces and the settings are the ones it was built from, else built. */
+  std::vector<Job> jobs(groups.size());
+  for (size_t g = 0; g < groups.size(); g++) {
+    Job &job = jobs[g];
+    job.solids = std::move(groups[g]);
+    for (uint32_t si : job.solids) job.pieces.push_back(pieces[piece_of[si]]);
+    job.hash = cluster_hash(job.pieces, st);
+    if (!cache) continue;
+    const auto it = cache->impl->clusters.find(job.hash);
+    if (it == cache->impl->clusters.end()) continue;
+    const ClusterResult &r = *it->second;
+    const bool same = r.pieces.size() == job.pieces.size() && std::memcmp(&r.settings.cell, &st.cell, 4) == 0 && r.settings.path == st.path &&
+                      r.settings.max_cells == st.max_cells && std::equal(r.pieces.begin(), r.pieces.end(), job.pieces.begin(), same_piece);
+    if (same) job.result = it->second, job.cached = true;
+  }
+  run_jobs(jobs, solids, st, cancel);
+  if (cancelled(cancel)) {
+    for (const Job &job : jobs) rep.stopped_inside += !job.result && job.why == "cancelled";
+    return refuse("cancelled");
+  }
+  for (const Job &job : jobs)
+    if (!job.result) return refuse(job.why.empty() ? "a cluster could not be built" : job.why);
+
+  /* The clusters laid end to end, in their order. */
+  Mesh mesh;
+  mesh.name = "Blockout";
+  Faces named;
+  size_t points = 0, corners = 0, face_count = 0;
+  for (const Job &job : jobs) points += job.result->positions.size(), corners += job.result->corner_verts.size(), face_count += job.result->face_piece.size();
+  mesh.positions.reserve(points);
+  mesh.corner_verts.reserve(corners);
+  mesh.face_offsets.reserve(face_count + 1);
+  named.piece.reserve(face_count), named.side.reserve(face_count), named.flat.reserve(face_count);
+  for (const Job &job : jobs) {
+    const ClusterResult &r = *job.result;
+    const uint32_t base = (uint32_t)mesh.positions.size(), corner_base = (uint32_t)mesh.corner_verts.size();
+    mesh.positions.insert(mesh.positions.end(), r.positions.begin(), r.positions.end());
+    for (uint32_t v : r.corner_verts) mesh.corner_verts.push_back(base + v);
+    for (size_t f = 1; f < r.face_offsets.size(); f++) mesh.face_offsets.push_back(corner_base + r.face_offsets[f]);
+    for (size_t f = 0; f < r.face_piece.size(); f++) named.piece.push_back(r.pieces[r.face_piece[f]].id), named.side.push_back(r.face_side[f]);
+    named.flat.insert(named.flat.end(), r.face_flat.begin(), r.face_flat.end());
+    ClusterReport cr = r.rep;
+    cr.cached = job.cached;
+    rep.clusters.push_back(cr);
+    (job.cached ? rep.cached : rep.built)++;
+    if (job.cached) continue;
+    rep.faces_in += cr.faces_in, rep.faces_out += cr.faces_out, rep.cells += cr.cells, rep.filled += cr.filled, rep.unresolved += cr.unresolved;
+    rep.cell = std::max(rep.cell, cr.cell);
+    (cr.path == Path::Crisp ? rep.ms_boolean : rep.ms_grid) += cr.ms_soup;
+    rep.ms_faces += cr.ms_faces;
+  }
+  mesh.touch();
+  if (cache) {
+    std::unordered_map<uint64_t, std::shared_ptr<const ClusterResult>> kept;
+    for (const Job &job : jobs) kept[job.hash] = job.result;
+    cache->impl->clusters.swap(kept);
+  }
+  out = std::move(mesh);
+  if (faces) *faces = std::move(named);
+  rep.ms_total = (now_seconds() - t0) * 1000.0;
+  if (report) *report = std::move(rep);
+  return true;
+}
+
+}  // namespace bl::blockout
