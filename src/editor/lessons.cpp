@@ -2177,6 +2177,21 @@ The filter (round 466) is told how noisy each texel is. While baking, every texe
 ! cmd:lighting denoiser atrous; bake | 10. Bake with the old A-Trous filter, wait for it, then save and measure as in steps 2-5
 ! cmd:lighting denoiser variance | 11. Back to the filter guided by measured noise (the default)
 )"},
+    {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
+Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
+# The Posing block
+Window > Profiler shows a "Posing" block while a rig is posed: the milliseconds of the constraint solve (split into FK, IK and VRChat constraints), the skin's cache keys and the skinning itself, shape keys, outline shells, the in-place mesh moves, Record, the clip, the trails, the springs, the undo step, and how many of each ran in the frame. The parts nest and overlap, so they are not added up. `perf status` prints the same lines for the last frame.
+# perf drag
+`perf drag gizmo x 80` presses the active object's Move or Rotate handle where the gizmo's own hit test has it, moves 80 pixels in 30 frames and lets go, as real mouse events; `perf drag puppet lhand 40 30`, `perf drag key g 40 20` and `perf drag ruler 0 40` do the same for a Puppet handle, G / R and the Animation window's ruler. It logs the press, first-move, mean, longest and release frames and the parts of a drag frame. While it plays, the real mouse is ignored, and Esc stops it.
+# The stand-in avatar
+`benchscene avatarlike` builds an avatar of a real one's size from Blendity's own shapes - 292 bones, 15 skinned meshes of about 140,000 triangles, spring chains, constraints, outlines and shape keys; the quick one is a fifth of it. `benchscene avatarworld` stands it in the world stand-in. The stress section `posing` (`blendity_stress --only posing`) drives every pose row on them.
+? A drag frame costs 40 ms. The constraint solve is 0.2 ms and skinning 1 ms. Where do you look next? | At what the nested parts leave out: the draw (the Scene view, the views' meshes sent to the card, the outlines) is usually the rest; the Posing block shows the skin and the constraints are small, so the cost is elsewhere in the frame.
+? A scrub row reports 2 ms a frame. Why might that be wrong? | If the layout hides the Scene view (the Animation window opened as a tab over it), no view is drawn at all, so nothing is skinned: check that the view renders count is not 0.
+! cmd:benchscene avatarlikequick | 1. Build the small stand-in avatar (about 60 bones and 20,000 triangles)
+! cmd:perf pick chest | 2. Select the chest bone of its rig
+! cmd:tool rotate | 3. Choose the Rotate tool
+! cmd:perf drag gizmo rz 60 frames 20 | 4. Turn the chest 60 pixels as a real drag, then open the Profiler to read the Posing block
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

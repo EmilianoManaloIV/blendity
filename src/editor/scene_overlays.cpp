@@ -640,7 +640,11 @@ const std::vector<GameObject *> &Editor::scene_icon_objects() {
 
 void Editor::draw_scene_icons(const Recti &view) {
   auto &u = ui_;
-  ik_bones_frame_ = ik_driven_bones();
+  BL_ZONE("rig overlay");
+  {
+    ProfileScope ik_scope{prof_.ms_rig_overlay, {}};  // (round 468)
+    ik_bones_frame_ = ik_driven_bones();
+  }
   auto one = [&](GameObject &g) {
     /* Each kind on its own overlay layer (task 0146). */
     if (const Component *bc = show_bones_ ? g.find_role(Component::RenderRole::Bone) : nullptr; bc && g.active_in_hierarchy()) draw_bone(g, *static_cast<const Bone *>(bc));
@@ -745,6 +749,7 @@ void Editor::draw_scene_icons(const Recti &view) {
       }
     }
   };
+  ProfileScope rig_scope{prof_.ms_rig_overlay, {}};  // (round 468: the bones, rig controls and icons together - one timer around the pass, none per object)
   for (GameObject *g : scene_icon_objects()) one(*g);  // (round 436: the few with an icon, a bone or points)
 }
 

@@ -81,9 +81,13 @@ void Editor::autopose_begin(GameObject &bone) {
     if (t) autopose_.iks.push_back({g.id, t->id, p ? p->id : 0});
   });
   const uint64_t key = body::body_key(*scene_, *arm);
-  if (key != autopose_.body_key || !autopose_.body.valid()) {
+  /* (Round 468: the key is by value, and an undo or a redo swaps the scene for a copy - the same bones as other
+   *  objects. The kept body is pointed at this scene's bones before the solver reads it: it walked the old scene's,
+   *  freed by the next edit - a crash in a Puppet drag after an undo.) */
+  if (key != autopose_.body_key || !autopose_.body.valid() || !body::rebind(autopose_.body, *arm)) {
     autopose_.body = body::build(*scene_, *arm, arm->get<Armature>()->body_mass);
     autopose_.body_key = key;
+    autopose_.body_builds++;
   }
   autopose_begin_puppet(*arm);
 }
@@ -158,6 +162,8 @@ std::vector<GameObject *> Editor::autopose_pins(GameObject &arm, GameObject &dra
 void Editor::autopose_to(GameObject &bone, Vec3 target) {
   GameObject *arm = scene_->find(autopose_.armature);
   if (!arm) return;
+  BL_ZONE("autopose frame");
+  ProfileScope scope{prof_.ms_autopose, {}};  // (round 468: one drag frame's solve - the prior, the IK, the controls moved after it)
   for (const auto &st : autopose_.start)
     if (GameObject *g = scene_->find(st.first)) g->set_local(st.second);
   std::vector<GameObject *> pins;
