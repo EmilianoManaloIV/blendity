@@ -49,4 +49,10 @@ inline float light_pick_keep(const LightPick &pk, size_t li) {
   return std::min(1.0f, kLightPickRays * pk.est[li] / std::max(1e-30f, pk.sum));
 }
 
+/* The same when a bake is measuring another number of rays (round 484: `lighting pick <rays>`). A function of its own,
+ * out of line (lightmapper.cpp) and never inlined, rather than a parameter of the one above: with the rays a variable
+ * the optimizer (/fp:fast) orders this arithmetic another way, and a bake at the default then saved pages a byte or
+ * two apart from main's. So the default keeps the constant and the code it had, and only a measuring bake comes here. */
+float light_pick_keep_rays(const LightPick &pk, size_t li, float rays);
+
 }  // namespace bl

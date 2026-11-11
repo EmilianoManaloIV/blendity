@@ -1452,9 +1452,21 @@ ForeignMaterialLoader &foreign_loader() {
   static ForeignMaterialLoader f;
   return f;
 }
+std::function<bool(const std::string &)> &foreign_probe() {
+  static std::function<bool(const std::string &)> f;
+  return f;
+}
+/* The file at `key` is there and is the foreign format's (round 485): never to be written over by a scene's copy. */
+bool foreign_file_at(const std::string &key) {
+  std::string text;
+  return foreign_probe() && fs::read_file(resolve_asset_path(key), text) && foreign_probe()(text);
+}
 }  // namespace
 
-void set_foreign_material_loader(ForeignMaterialLoader loader) { foreign_loader() = std::move(loader); }
+void set_foreign_material_loader(ForeignMaterialLoader loader, std::function<bool(const std::string &text)> is_foreign) {
+  foreign_loader() = std::move(loader);
+  foreign_probe() = std::move(is_foreign);
+}
 
 MaterialPtr material_asset(const std::string &path_in) {
   if (path_in.empty()) return nullptr;
@@ -1669,6 +1681,11 @@ size_t save_dirty_material_assets() {
     AssetEntry &e = kv.second;
     if (!e.m || e.m->version == e.saved_version) continue;
     if (e.m->foreign) continue;  // (round 371: Unity's own file stays Unity's - an edit lasts the session; Save As keeps it)
+    /* Round 485 (review): a scene's copy standing in for a .mat that was missing when the scene opened (saved_version
+     * 0, relink_material_assets) is written where the file was - but not over a foreign file that has appeared there
+     * since (a Unity package imported again, a folder put back): Blendity's text over Unity's .mat would lose it, with
+     * the scene's old values in its place. reload_foreign_materials reads such a file into the stand-in instead. */
+    if (e.saved_version == 0 && foreign_file_at(kv.first)) continue;
     if (fs::write_file(resolve_asset_path(kv.first), save_material_text(*e.m))) {
       e.saved_version = e.m->version;
       n++;
@@ -1788,6 +1805,49 @@ size_t forget_material_assets(const std::string &path_in) {
     else ++it;
   }
   return n;
+}
+
+size_t reload_foreign_materials(const std::string &under_in, std::vector<MaterialPtr> *changed_out, const std::set<std::string> *only) {
+  const std::string under = asset_key(under_in);
+  if (!foreign_loader()) return 0;
+  size_t changed = 0;
+  for (auto &kv : asset_library()) {
+    AssetEntry &e = kv.second;
+    if (!e.m || !(under.empty() || path_under(kv.first, under)) || (only && !only->count(kv.first))) continue;
+    /* A scene's copy standing in for a file that was missing when the scene opened: once the file is there and
+     * foreign, it is the file that counts, as at any open (review 485: the import's end left such a copy as it was, and
+     * the next save wrote it over the Unity .mat just unpacked). A Blendity .mat that came back is not this function's. */
+    const bool stand_in = !e.m->foreign && e.saved_version == 0;
+    if (!e.m->foreign && !stand_in) continue;
+    std::string text;
+    if (!fs::read_file(resolve_asset_path(kv.first), text)) continue;
+    if (stand_in && !(foreign_probe() && foreign_probe()(text))) continue;
+    Material fresh;
+    fresh.name = fs::stem(kv.first);
+    if (!foreign_loader()(text, kv.first, fresh)) continue;
+    fresh.name = fs::stem(kv.first), fresh.asset_path = kv.first, fresh.foreign = true;
+    if (!stand_in && save_material_text(fresh) == save_material_text(*e.m)) continue;  // (read as before: nothing to tell its users)
+    const uint64_t version = std::max(e.m->version, fresh.version) + 1;
+    *e.m = fresh;
+    e.m->version = version;
+    e.saved_version = version;  // (a foreign file is never written back)
+    changed++;
+    if (changed_out) changed_out->push_back(e.m);
+  }
+  return changed;
+}
+
+size_t revive_asset_paths(const std::string &under_in) {
+  const std::string under = asset_key(under_in);
+  if (under.empty()) return 0;
+  /* (A mark on a folder `under` lies in goes too - the list has no way to say "deleted, except this" - so what else
+   * was deleted with that folder is, from here on, a missing file like any other: nothing loads it.) */
+  auto &red = asset_redirects();
+  const size_t before = red.size();
+  red.erase(std::remove_if(red.begin(), red.end(),
+                           [&](const std::pair<std::string, std::string> &r) { return r.second.empty() && (path_under(r.first, under) || path_under(under, r.first)); }),
+            red.end());
+  return before - red.size();
 }
 
 bool scene_compression_available() {

@@ -33,5 +33,6 @@ what should happen.
   presets, the dependency-free build ...
 
 ## Documentation to update
-- `changelog.d/<round>-<slug>.md` entry (with its README line when user-facing; ADR 0123 - never CHANGELOG.md /
-  README.md directly), ARCHITECTURE row, USABILITY row, ADR (as applicable).
+- `changelog.d/<round>-<slug>.md` entry, with its README line when user-facing and its ARCHITECTURE / USABILITY /
+  PERFORMANCE / tools/README lines as sections (ADR 0123 - never those files or CHANGELOG.md directly), ADR (as
+  applicable).

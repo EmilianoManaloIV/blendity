@@ -65,13 +65,15 @@ non-trivial.
 
 ## Documentation duties (every change)
 - `changelog.d/<round>-<slug>.md`: one entry per round (asked / fixed / changed / added / checked, stress numbers),
-  plus a `<!-- README -->` section with the feature-paragraph line when user-facing behaviour changes (format:
-  `changelog.d/README.md`). **A round never edits `CHANGELOG.md` or `README.md`, nor README's unit-check count**
-  (ADR 0123: parallel passes' PRs conflicted there). The pass write-up runs `py tools/dev/changelog.py fold --checks
-  LIBS TESTS` once the pass's PRs are on `main` and commits it with a `Docs-fold: yes` trailer; the hub runs one fold
-  at a time. The `docs-fragments` CI job fails any other commit that edits the two files.
-- `docs/ARCHITECTURE.md`: a row for new subsystems or functions others build on.
-- `docs/USABILITY.md`: a "fixed" row for user-facing problems solved.
+  plus a `<!-- README -->` section with the feature-paragraph line when user-facing behaviour changes, and a section
+  for each shared doc the round adds to: `<!-- docs/USABILITY.md -->`, `<!-- tools/README.md -->`,
+  `<!-- docs/ARCHITECTURE.md -->`, `<!-- docs/PERFORMANCE.md -->` (format: `changelog.d/README.md`). **A round never
+  edits `CHANGELOG.md`, `README.md` (nor its unit-check count) or those four shared docs** (ADR 0123: parallel
+  passes' PRs conflicted there). The pass write-up runs `py tools/dev/changelog.py fold --checks LIBS TESTS` once the
+  pass's PRs are on `main` and commits it with a `Docs-fold: yes` trailer; the hub runs one fold at a time. The
+  `docs-fragments` CI job fails any other commit that edits those files.
+- `docs/ARCHITECTURE.md`: a row for new subsystems or functions others build on - in the fragment's section.
+- `docs/USABILITY.md`: a "fixed" row for user-facing problems solved - in the fragment's section.
 - `docs/decisions/`: an ADR for any architectural choice (new subsystem, data-model change, new
   dependency, change to a documented convention).
 - `docs/tasks/`: the task spec the work was done against; mark it done.
@@ -92,6 +94,12 @@ non-trivial.
    open at once, one per pass; each must have exactly one top. After every publish and every push to a PR
    branch run `bash tools/dev/stack_check.sh` (`FIX=1` merges a stack's stray heads into its newest PR);
    the `stack` CI job runs the same check. The body's "Merging this also merges" line names the PRs it carries.
+   **The integration PR** (ADR 0132): when several stacks are open, `bash tools/dev/integrate.sh` merges the top of
+   every stack whose four required jobs are green into `integration/<n>` (from `main`, merge commits only) and opens
+   one PR on `main` that carries them all - the one the user merges; `CHECK=1` only reports what it would merge and
+   what conflicts. It is the one allowed top over several stacks; every stack it carries must be in it up to that
+   stack's own top (`stack_check.sh` fails otherwise: run `integrate.sh` again after a push). Each PR still targets
+   `main` and can still be merged on its own.
 
 Run agents one after another; don't fan out. For a one-line fix, implement in the main session and still
 run the reviewer.

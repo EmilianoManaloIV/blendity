@@ -96,6 +96,7 @@ Editor::~Editor() {
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
   stop_unity_package();    // (round 369: an unpacking stopped at its next file and waited for)
+  stop_unity_gloss();      // (round 485: the gloss job likewise - stopped at its next texture and waited for)
   stop_unity_export();     // (round 372: an export likewise, nothing written)
   paint_abort_stroke();    // (task 0245)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
@@ -155,7 +156,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
-  set_foreign_material_loader(load_unity_material);  // (round 371: a Unity .mat loads converted)
+  set_foreign_material_loader(load_unity_material, unity_material_text);  // (round 371: a Unity .mat loads converted; 485: and is never written over)
   clear_material_assets();  // assets belong to one project
   clear_texture_assets();
   clear_clip_assets();
@@ -754,6 +755,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   take_favorite_request();
   poll_skin_job();
   poll_unity_package();  // (round 369)
+  poll_unity_gloss();    // (round 485: after the package - an unpack writes its own table)
   poll_unity_export();   // (round 372)
   poll_unity_model_ids();  // (round 395)
   poll_unity_lighting();   // (round 400)
@@ -1105,6 +1107,9 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Import Model...")) import_dialog();
     if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
+    if (u.menu_item("Reimport Unity Materials")) unity_rematerials();  // (round 485)
+    u.tooltip("Every Unity material (.mat from a Unity package) read again from its file: its maps, its metal and its gloss as Unity's shader reads them.\n"
+              "The textures a material's gloss comes from are measured once, in the background.");
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
     if (u.menu_item("Refresh", key("assets.refresh").c_str())) project_listed_ = -100;
@@ -2509,6 +2514,7 @@ bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
   mesh_owner_shown_.clear();  // (round 469: the same - this scene is seen for the first time)
   relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
+  poll_unity_gloss();  // (round 485: its Unity materials' gloss maps not measured yet go to the worker - at once in a headless run)
   load_lighting_data();  // <scene folder>/<scene name>/: its lightmaps, if baked
   stable_ = scene_->clone();
   undo_.clear();

@@ -34,9 +34,12 @@ void read_package_guids(const std::string &dir, const std::string &project_root,
     const size_t t1 = line.find('\t'), t2 = t1 == std::string::npos ? t1 : line.find('\t', t1 + 1);
     if (t2 == std::string::npos) continue;
     UnityGuidEntry &e = out[line.substr(0, t1)];
+    e = UnityGuidEntry{};  // (round 485: a GUID two packages share is the later one's file - with no mean measured on the other's)
     e.path = fs::join(project_root, line.substr(t2 + 1));
+    e.table = dir;  // (round 485: where this package's `.unity-stats` is, for a mean measured later)
     fs::read_file(fs::join(fs::join(dir, ".unity-meta"), line.substr(0, t1) + ".meta"), e.meta);
   }
+  unity_stats_read(dir, out);  // (round 485, ADR 0131: the means of the textures its materials read their gloss from)
 }
 
 }  // namespace
@@ -183,8 +186,26 @@ void Editor::apply_unity_bake_settings(const std::vector<UnityDoc> &docs, std::v
   if (!missing.empty()) notes.push_back("not baked yet from the scene's lightmap settings: " + missing);
 }
 
+std::map<std::string, std::set<std::string>> &unity_gloss_wanted() {
+  static std::map<std::string, std::set<std::string>> wanted;
+  return wanted;
+}
+
+std::map<std::string, UnityGlossMean> &unity_gloss_session_means() {
+  static std::map<std::string, UnityGlossMean> means;
+  return means;
+}
+
+const float *unity_gloss_session_mean(const std::string &guid, const std::string &path) {
+  const auto it = unity_gloss_session_means().find(guid);
+  if (it == unity_gloss_session_means().end() || it->second.path != path || it->second.bytes != unity_file_bytes(path)) return nullptr;
+  return it->second.mean.data();
+}
+
+bool unity_material_text(const std::string &text) { return text.find("--- !u!21 ") != std::string::npos; }
+
 bool load_unity_material(const std::string &text, const std::string &path, Material &m) {
-  if (text.find("--- !u!21 ") == std::string::npos) return false;  // (a Material document: anything else isn't one - no index walked for it)
+  if (!unity_material_text(text)) return false;  // (a Material document: anything else isn't one - no index walked for it)
   const std::string assets = resolve_asset_path("Assets");
   const std::shared_ptr<const UnityGuidIndex> index = unity_guid_index_cached(assets, fs::parent(assets));
   UnityMaterialInfo info;
@@ -197,8 +218,21 @@ bool load_unity_material(const std::string &text, const std::string &path, Mater
         std::string source;
         if (it == index->end() || fs::extension(it->second.path) != ".shader" || !fs::read_file(it->second.path, source)) return std::vector<std::string>();
         return unity_shader_properties(source);
+      },
+      [&](const std::string &guid, float &alpha) -> bool {  // (round 485, ADR 0131: the mean of the alpha Unity's shader samples)
+        const auto it = index->find(guid);
+        if (it == index->end()) return false;
+        const float *mean = it->second.has_mean ? it->second.mean : unity_gloss_session_mean(guid, it->second.path);
+        if (!mean) return false;
+        alpha = unity_sampled_alpha(it->second.meta, mean);
+        return true;
       });
   if (!ok) return false;
+  /* Its gloss is in a texture no table has measured yet (a package unpacked before round 485, or a Unity project's
+   * Assets copied in): the gloss job measures it off the frame and reads this material again - this one, by its path,
+   * not every Unity material of the project. */
+  const auto gloss = info.gloss_pending ? index->find(info.gloss_texture) : index->end();
+  if (gloss != index->end() && image_extension_supported(fs::extension(gloss->second.path))) unity_gloss_wanted()[info.gloss_texture].insert(path);
   m.import_outline = info.outline_width, m.import_outline_color = info.outline_color;
   for (const std::string &n : info.notes) Log::info("Unity material %s: %s", path.c_str(), n.c_str());
   if (!info.known) Log::warn("Unity material %s: its shader (%s) isn't one Blendity reads - its main texture and colour came in", path.c_str(), info.shader.c_str());
@@ -454,6 +488,7 @@ bool Editor::import_unity_scene(const std::string &typed, bool as_scene, std::ve
             ctx.missing_meshes ? strprintf(" (%d not found)", ctx.missing_meshes).c_str() : "", ctx.lights, ctx.cameras, ctx.colliders, ctx.prefabs, ctx.engine,
             ctx.overrides_kept ? strprintf(", %d prefab override(s) applied, %d Blendity doesn't hold left to Unity", ctx.overrides_applied, ctx.overrides_kept).c_str()
                                : ctx.overrides_applied ? strprintf(", %d prefab override(s) applied", ctx.overrides_applied).c_str() : "");
+  poll_unity_gloss();  // (round 485: its materials' gloss maps not measured yet go to the worker now - at once in a headless run)
   return true;
 }
 

@@ -43,6 +43,11 @@ const std::vector<std::string> &Editor::material_asset_paths() {
   for (const std::string &f : fs::find_files(assets_dir_, ".mat"))
     material_paths_.push_back(rel_ok ? assets_rel + "/" + f : make_asset_relative(fs::join(assets_dir_, f)));
   for (std::string &p : material_paths_) std::replace(p.begin(), p.end(), '\\', '/');
+  /* Round 485 (task 0461): a package still unpacking has no GUID table yet - a .mat read now finds none of its
+   * textures. Its folder's files are left out until it has landed (poll_unity_package asks for a fresh list then). */
+  const std::string unpacking = pkg_job_ ? pkg_job_->into_rel + "/" : std::string();
+  const auto inside = [&](const std::string &p) { return !unpacking.empty() && p.compare(0, unpacking.size(), unpacking) == 0; };
+  material_paths_.erase(std::remove_if(material_paths_.begin(), material_paths_.end(), inside), material_paths_.end());
   std::sort(material_paths_.begin(), material_paths_.end());
   return material_paths_;
 }

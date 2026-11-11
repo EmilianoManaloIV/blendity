@@ -6783,6 +6783,10 @@ struct Scene {
   float texels = 20.0f;
   uint64_t probe_object = 0;  // (the leak scene: the floor whose texels under the box are measured)
   float probe_half = 0.0f;    // (...and the box's half side, its footprint centred on the origin)
+  /* Round 484: the reference keeps every Baked point and spot light at every texel (`lighting pick off`). More samples
+   * never thin the picking's noise - a texel decides once which lights it keeps - so a reference that picks would carry
+   * the very noise lamp_hall is there to measure. */
+  bool exact_reference_lights = false;
 };
 /* A 4 x 3 x 4 room, red and green side walls, two white boxes, a 1 m area light under the ceiling (Baked). */
 Scene room() {
@@ -6880,6 +6884,72 @@ Scene tunnel_lamps() {
   s.texels = 16.0f;
   return s;
 }
+/* Round 484 (task 0460): a hall 24 m long, 6 m wide and 3.2 m high with a side room off its right wall, six pillars and
+ * a counter, lit by 72 Baked point and spot lights of mixed strength and colour - foot lights along the walls, spots
+ * under the ceiling, lamps in the room and over the counter, strong spots at both ends - with Unity's baked falloff
+ * under a black sky. A texel is reached by many of them and some are hidden behind the pillars and the room's wall, so
+ * most of its direct light comes from lights the bake keeps by chance (light_pick.h): SideRail's 71 lamps in little.
+ * tunnel_lamps' ten lights of range 2 reach a texel one or two at a time and cannot show that noise. */
+Scene lamp_hall() {
+  Scene s;
+  s.name = "a hall lit by 72 lamps";
+  s.exact_reference_lights = true;
+  const MaterialPtr wall_m = make_material("Wall", {0.62f, 0.6f, 0.58f}), floor_m = make_material("Floor", {0.45f, 0.4f, 0.36f});
+  uint64_t id = 1;
+  auto add = [&](Vec3 at, Vec3 euler, float w, float h, const MaterialPtr &m) { s.objects.push_back(wall(id++, at, euler, w, h, m, s.keep)); };
+  add({0, 0, 12}, {0, 0, 0}, 6, 24, floor_m);                 // the hall: x -3..3, z 0..24
+  add({0, 3.2f, 12}, {180, 0, 0}, 6, 24, wall_m);
+  add({-3, 1.6f, 12}, {0, 0, -90}, 24, 3.2f, wall_m);         // its left wall
+  add({3, 1.6f, 4.75f}, {0, 0, 90}, 9.5f, 3.2f, wall_m);      // its right wall, up to the room's opening (z 9.5..12.5)
+  add({3, 1.6f, 18.25f}, {0, 0, 90}, 11.5f, 3.2f, wall_m);    // and after it
+  add({0, 1.6f, 0}, {90, 0, 0}, 6, 3.2f, wall_m);             // the near end
+  add({0, 1.6f, 24}, {-90, 0, 0}, 6, 3.2f, wall_m);           // the far end
+  add({7.05f, 0, 11}, {0, 0, 0}, 7.9f, 6, floor_m);           // the side room: x 3.1..11, z 8..14
+  add({7.05f, 3.2f, 11}, {180, 0, 0}, 7.9f, 6, wall_m);
+  add({7.05f, 1.6f, 8}, {90, 0, 0}, 7.9f, 3.2f, wall_m);
+  add({7.05f, 1.6f, 14}, {-90, 0, 0}, 7.9f, 3.2f, wall_m);
+  add({11, 1.6f, 11}, {0, 0, 90}, 6, 3.2f, wall_m);
+  add({3.1f, 1.6f, 8.75f}, {0, 0, -90}, 1.5f, 3.2f, wall_m);  // the room's side of the wall it shares with the hall
+  add({3.1f, 1.6f, 13.25f}, {0, 0, -90}, 1.5f, 3.2f, wall_m);
+  MeshPtr cube = primitives::cube();
+  s.keep.push_back(cube);
+  auto box = [&](Vec3 at, Vec3 size) { s.objects.push_back(bake_object(id++, cube, Mat4::trs(at, Quat(), size), {wall_m})); };
+  for (int i = 0; i < 6; i++) box({(i % 2) ? 1.6f : -1.6f, 1.6f, 4.0f + 6.0f * (float)(i / 2)}, {0.5f, 3.2f, 0.5f});  // six pillars
+  box({-1.2f, 0.5f, 20.5f}, {0.6f, 1.0f, 5.0f});              // the counter
+  auto light = [&](RenderLight::Type type, Vec3 at, Vec3 color, float intensity, float range) -> BakeLight & {
+    BakeLight l;
+    l.light.type = type;
+    l.light.position = at;
+    l.light.color = color;
+    l.light.intensity = intensity;
+    l.light.range = range;
+    l.light.baked_falloff = true;  // (as a Unity scene's Baked lights fall off)
+    l.mode = 2, l.id = 900 + (uint64_t)s.lights.size();
+    s.lights.push_back(l);
+    return s.lights.back();
+  };
+  auto spot = [&](Vec3 at, Vec3 dir, float outer_deg, float inner_deg, Vec3 color, float intensity, float range) {
+    BakeLight &l = light(RenderLight::Spot, at, color, intensity, range);
+    l.light.direction = normalize(dir);
+    l.light.cos_outer = std::cos(outer_deg * 3.14159265f / 180.0f), l.light.cos_inner = std::cos(inner_deg * 3.14159265f / 180.0f);
+  };
+  for (int i = 0; i < 24; i++)  // 24 foot lights along the hall's walls
+    light(RenderLight::Point, {(i % 2) ? 2.85f : -2.85f, 0.25f, 1.0f + 2.0f * (float)(i / 2)}, {1.0f, 0.75f, 0.5f}, 0.5f, 5.0f);
+  for (int i = 0; i < 16; i++)  // 16 spots under its ceiling, pointing down
+    spot({(i % 2) ? 1.2f : -1.2f, 3.1f, 1.5f + 3.0f * (float)(i / 2)}, {0, -1, 0}, 50.0f, 30.0f, {0.85f, 0.92f, 1.0f}, 1.6f, 7.0f);
+  for (int i = 0; i < 4; i++)   // the room: a lamp in each corner
+    light(RenderLight::Point, {(i % 2) ? 10.0f : 4.0f, 2.7f, (i / 2) ? 13.0f : 9.0f}, {1.0f, 0.6f, 0.3f}, 1.0f, 7.0f);
+  for (int i = 0; i < 8; i++)   // and eight table lamps
+    light(RenderLight::Point, {4.5f + 1.6f * (float)(i % 4), 0.9f, (i / 4) ? 12.4f : 9.6f}, {1.0f, 0.8f, 0.55f}, 0.4f, 3.5f);
+  for (int i = 0; i < 12; i++)  // 12 small lights over the counter
+    light(RenderLight::Point, {-1.2f, 1.25f, 18.2f + 0.42f * (float)i}, {0.35f, 0.5f, 1.0f}, 0.3f, 3.0f);
+  for (int i = 0; i < 8; i++)   // four strong spots at each end, pointing down the hall
+    spot({-2.1f + 1.4f * (float)(i % 4), 2.9f, (i / 4) ? 23.6f : 0.4f}, {0, -0.45f, (i / 4) ? -1.0f : 1.0f}, 35.0f, 20.0f, {1.0f, 1.0f, 1.0f}, 2.5f, 12.0f);
+  s.env.mode = Environment::Color;
+  s.env.color = Vec3(0.0f);
+  s.texels = 5.0f;  // (about 21,000 texels, as the corridor and the courtyard: its reference sends every light's rays at every texel, 16 times over - at 10 a metre that one bake took half an hour)
+  return s;
+}
 /* A courtyard open to the sky (the gradient), a Baked sun, a box in the middle. */
 Scene courtyard() {
   Scene s;
@@ -6927,14 +6997,21 @@ struct Result {
   LightingData data;
   double ms = 0.0;
   uint64_t rays = 0;
+  double kept = 0.0, dropped = 0.0;  // (round 484: the lights a texel kept by chance and dropped, on average - 0 with no picking)
 };
 /* seed 1 for the references: their samples independent of the bake they score (seed 0, a bake's own) - with the same
- * seed the bake's samples would be the first of the reference's, and the error read too low. */
-Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0, bool light_tree = true, bool sobol = true) {
+ * seed the bake's samples would be the first of the reference's, and the error read too low. `pick` (round 484): about
+ * how many Baked point and spot lights a texel keeps by chance (8 the bake's own; 0: every light, `lighting pick off`).
+ * `variance_scale` (round 486): BakeSettings::variance_scale, -1 the bake's own. */
+Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t seed = 0, bool light_tree = true, bool sobol = true, float pick = 8.0f,
+            int variance_scale = -1) {
   BakeSettings bs;
+  if (variance_scale >= 0) bs.variance_scale = variance_scale;
   bs.seed = seed;
   bs.sobol = sobol;  // (round 465: off draws plain random numbers, for the comparison)
   bs.light_tree = light_tree;  // (round 464: off picks emitters by power alone, for the comparison)
+  bs.pick_lights = pick > 0.0f;
+  if (pick > 0.0f) bs.pick_rays = pick;
   bs.texels_per_unit = s.texels;
   bs.indirect_samples = indirect;
   bs.direct_samples = direct;
@@ -6950,6 +7027,7 @@ Result bake(const Scene &s, int indirect, int direct, bool denoise, uint32_t see
   r.data = lm.take_result();
   r.ms = t.ms();
   r.rays = lm.rays();
+  if (lm.pick_texels()) r.kept = (double)lm.chance_kept() / (double)lm.pick_texels(), r.dropped = (double)lm.chance_dropped() / (double)lm.pick_texels();
   return r;
 }
 /* Over the texels both bakes hold (the layout is the same for the same scene and resolution - checked: every entry's
@@ -7024,15 +7102,16 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
             "of the same scene and layout (16 times the samples - 4 in a quick run -, the filter off, its own random samples); the "
             "error is the luminance RMSE over the covered texels, relative to the reference's mean, and the mean difference (a "
             "filter's bias; round 463: and the bake's own grain and blotch, from a second bake at seed 1 - no reference needed, no bias seen). Then the samples against time on the room, and the leak under a sunk box. Unity's own bake is compared "
-            "on real scenes by tools/unity_compare.py --blendity-bake.");
+            "on real scenes by tools/unity_compare.py --blendity-bake. Round 484: a hall lit by 72 Baked lights, whose reference keeps every light at every texel, "
+            "and its bake with about 8, 16 and 32 of them kept a texel by chance (`lighting pick`).");
   rep.table({"scene", "texels", "bake ms", "relative RMSE", "bias", "grain", "blotch", "reference ms"});
   const int ref_indirect = o.quick ? 1024 : 4096, ref_direct = o.quick ? 128 : 512;
-  lmq::Result room_ref, tunnel_ref;
-  const lmq::Scene room = lmq::room(), tunnel = lmq::tunnel_lamps();
-  const std::vector<lmq::Scene> scenes = {room, lmq::corridor(), tunnel, lmq::courtyard()};
+  lmq::Result room_ref, tunnel_ref, hall_ref;
+  const lmq::Scene room = lmq::room(), tunnel = lmq::tunnel_lamps(), hall = lmq::lamp_hall();
+  const std::vector<lmq::Scene> scenes = {room, lmq::corridor(), tunnel, lmq::courtyard(), hall};
   std::vector<lmq::Result> refs;  // (round 465: kept for the sampler rows below)
   for (const lmq::Scene &s : scenes) {
-    const lmq::Result ref = lmq::bake(s, ref_indirect, ref_direct, false, 1);
+    const lmq::Result ref = lmq::bake(s, ref_indirect, ref_direct, false, 1, true, true, s.exact_reference_lights ? 0.0f : 8.0f);
     refs.push_back(ref);
     const lmq::Result def = lmq::bake(s, 256, 32, true);
     const lmq::Error e = lmq::compare(def.data, ref.data);
@@ -7043,7 +7122,27 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
     rep.row({s.name, std::to_string(e.texels), f1(def.ms), lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-", f1(ref.ms)});
     if (s.name == room.name) room_ref = ref;
     if (s.name == tunnel.name) tunnel_ref = ref;
+    if (s.name == hall.name) hall_ref = ref;
   }
+  /* Round 484 (task 0460): the hall's 72 Baked lights kept by chance (`lighting pick off | 8 | 16 | 32`) - what the
+   * picking costs in noise and saves in time, against a reference that keeps every light; then the same without the
+   * filter, to tell the noise the picking makes from what the filter does with it. */
+  rep.table({"lamp_hall: Baked lights a texel keeps by chance", "filter", "bake ms", "relative RMSE", "bias", "grain", "blotch", "kept a texel", "dropped a texel"});
+  double hall_blotch_off = 0.0, hall_blotch_8 = 0.0;
+  for (const bool filter : {true, false})
+    for (const float pick : {0.0f, 8.0f, 16.0f, 32.0f}) {
+      if (!filter && pick > 8.0f) continue;  // (unfiltered: every light and the bake's own number say enough)
+      const lmq::Result r = lmq::bake(hall, 256, 32, filter, 0, true, true, pick), r1 = lmq::bake(hall, 256, 32, filter, 1, true, true, pick);
+      const lmq::Error e = lmq::compare(r.data, hall_ref.data);
+      const LightmapNoise nz = lightmap_noise(r.data, r1.data);
+      if (filter && nz.ok && pick == 0.0f) hall_blotch_off = nz.all.blotch;
+      if (filter && nz.ok && pick == 8.0f) hall_blotch_8 = nz.all.blotch;
+      rep.row({pick > 0.0f ? strprintf("about %g%s", pick, pick == 8.0f ? " (the bake's own)" : "") : std::string("every light (pick off)"), filter ? "on" : "off", f1(r.ms),
+               lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-", lmq::f3(r.kept), lmq::f3(r.dropped)});
+    }
+  if (hall_blotch_off > 0.0)
+    rep.note(strprintf("lamp_hall: keeping about 8 lights a texel by chance leaves %.1f times the blotch of keeping every light (%.4f against %.4f, the filter on).",
+                       hall_blotch_8 / hall_blotch_off, hall_blotch_8, hall_blotch_off));
   /* Round 464 (ADR 0121): the tunnel's emitters picked by the light tree against by power alone, at the same samples -
    * the error at equal time is what task 0440 asks to fall by 40 %. */
   rep.table({"tunnel_lamps: emitters picked", "bake ms", "relative RMSE", "bias", "grain", "blotch"});
@@ -7063,6 +7162,23 @@ static void test_lightmap_quality(Report &rep, const Options &o) {
       const lmq::Error e = lmq::compare(r.data, refs[i].data);
       const LightmapNoise nz = lightmap_noise(r.data, r1.data);
       rep.row({sobol ? "sobol" : "random", s.name, f1(r.ms), lmq::f3(e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-"});
+    }
+  /* Round 486 (task 0462): where the gather's measured noise takes round 465's scale for Sobol samples - everywhere
+   * (rounds 465 to 485), or only as far as a texel's samples carry its light (the bake's own since) - on every scene at
+   * 256 samples (the scale is a quarter there) and on the room and the tunnel at 1024 (an eighth). The round's other
+   * candidates (2: nowhere, 4: a step at 16 such samples) are in the task's tables. */
+  rep.table({"the gather's measured noise scaled for Sobol samples", "scene", "samples", "bake ms", "relative RMSE", "bias", "grain", "blotch"});
+  for (size_t i = 0; i < scenes.size(); i++)
+    for (const int samples : {256, 1024}) {
+      const lmq::Scene &s = scenes[i];
+      if (samples == 1024 && s.name != room.name && s.name != tunnel.name) continue;
+      for (const int mode : {0, 3}) {
+        const lmq::Result r = lmq::bake(s, samples, 32, true, 0, true, true, 8.0f, mode), r1 = lmq::bake(s, samples, 32, true, 1, true, true, 8.0f, mode);
+        const lmq::Error e = lmq::compare(r.data, refs[i].data);
+        const LightmapNoise nz = lightmap_noise(r.data, r1.data);
+        rep.row({mode == 0 ? "everywhere (rounds 465 to 485)" : "by the samples that carry the light", s.name,
+                 std::to_string(samples), f1(r.ms), strprintf("%.4f", e.rel), lmq::f4(e.bias), nz.ok ? lmq::f4(nz.all.grain) : "-", nz.ok ? lmq::f4(nz.all.blotch) : "-"});
+      }
     }
   rep.table({"room: indirect samples", "filter", "bake ms", "relative RMSE", "bias"});
   for (int n : {64, 256, 1024})

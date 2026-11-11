@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -2187,9 +2188,11 @@ MaterialPtr material_asset(const std::string &path);  // cached; null when the f
  * (Blendity's own .mat text; a foreign one - Unity's - is left to material_asset, which loads it on the calling thread). */
 void preload_material_assets(const std::vector<std::string> &paths);
 /* Round 371: a material file in another engine's format (a Unity .mat) read through this; the material is `foreign`,
- * and save_dirty_material_assets leaves its file alone. */
+ * and save_dirty_material_assets leaves its file alone. `is_foreign` (round 485): whether a file's text is that
+ * format's at all, with nothing else done - asked before a scene's copy that stands in for a missing .mat would be
+ * written over a file that has appeared at its path (a Unity package imported again): it is not. */
 using ForeignMaterialLoader = std::function<bool(const std::string &text, const std::string &path, Material &m)>;
-void set_foreign_material_loader(ForeignMaterialLoader loader);
+void set_foreign_material_loader(ForeignMaterialLoader loader, std::function<bool(const std::string &text)> is_foreign = {});
 MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
 size_t save_dirty_material_assets();  // writes the assets changed since they were saved
 /* The material assets loaded so far (path, shared instance). */
@@ -2199,6 +2202,19 @@ const std::vector<std::pair<std::string, MaterialPtr>> &loaded_material_assets()
 size_t retarget_material_assets(const std::string &from, const std::string &to);
 /* A .mat (or folder) deleted: materials that used it become scene materials (they keep their values). */
 size_t forget_material_assets(const std::string &path);
+/* Round 485 (task 0461): every foreign material the library holds under `under` ("" - all of them) read from its file
+ * again, into the same shared instance: whoever wears it follows without a reopen. For where a package's import ends -
+ * a Unity .mat read while its package was still unpacking found no path for its textures and kept no maps for the
+ * session - and for `unity rematerials`. `only`: of those, the ones at these paths alone (the materials a gloss job
+ * measured maps for: a value typed on any other Unity material stays). A scene's copy standing in for a .mat that was
+ * missing when the scene opened (relink_material_assets) is read from the file too once it is there and foreign.
+ * Returns how many came out different (their versions go up; `changed` gets them); a file that is gone, or that the
+ * loader no longer takes, leaves its material as it is. Main thread, as material_asset. */
+size_t reload_foreign_materials(const std::string &under = std::string(), std::vector<MaterialPtr> *changed = nullptr, const std::set<std::string> *only = nullptr);
+/* Round 485: `under` (a file or a folder) is on disk again - a package imported after its folder was deleted in this
+ * session: the marks that said "deleted" for it, for anything inside it and for a folder it lies in are taken off, so
+ * material_asset loads its files again. Returns how many marks went. */
+size_t revive_asset_paths(const std::string &under);
 /* Rewrites references to a moved asset (or folder) in every .scene file under dir. Returns files changed. */
 size_t retarget_scene_files(const std::string &dir, const std::string &from, const std::string &to);
 /* After undo / redo / load: every slot naming an asset uses the library's

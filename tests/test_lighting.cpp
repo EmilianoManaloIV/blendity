@@ -10518,11 +10518,13 @@ struct World {
   float tpu = 16.0f;
   int min_chart = 8;
   bool sample_emissive = true;
+  int variance_scale = -1;  // (round 486: BakeSettings::variance_scale - how the filter reads the gather's noise; -1 the bake's own)
 };
 
 static LightingData bake(const World &w, int n, bool denoise, int denoiser, uint32_t seed, bool sobol = true, std::string *which = nullptr,
                          int direct_samples = 32) {
   BakeSettings bs;
+  if (w.variance_scale >= 0) bs.variance_scale = w.variance_scale;
   bs.texels_per_unit = w.tpu, bs.indirect_samples = n, bs.bounces = 2, bs.denoise = denoise, bs.denoiser = denoiser, bs.seed = seed, bs.sobol = sobol;
   bs.directional = false, bs.backface_tolerance = 0.0f, bs.use_oidn = false, bs.direct_samples = direct_samples;
   bs.min_chart = w.min_chart, bs.sample_emissive = w.sample_emissive;
@@ -11128,6 +11130,505 @@ static void tests_round466() {
   tests_round466_card();
 }
 
+/* ---------------------------------------------------------------- round 484: `lighting pick` (task 0460) */
+namespace r484 {
+/* A floor and a box under twelve Baked point lights (more than the eight past which a texel picks among them), the sun
+ * off, small settings: the light comes only from the lamps, each reaching every texel. */
+static void lamp_hall(Editor &ed) {
+  r463::scene(ed);
+  ed.scene().find_by_name("Directional Light")->get<Light>()->enabled = false;
+  LightingSettings &ls = ed.scene().lighting;
+  ls.texels_per_unit = 4.0f, ls.indirect_samples = 4, ls.direct_samples = 4;
+  for (int i = 0; i < 12; i++) {
+    GameObject *lamp = ed.scene().create("Lamp " + std::to_string(i));
+    Light *l = lamp->add<Light>();
+    l->type = 1;
+    l->mode = 2;
+    l->intensity = 1.0f + 0.4f * (float)(i % 5);
+    l->range = 30.0f;
+    l->color = Vec3(1.0f, 0.7f + 0.03f * (float)i, 0.5f + 0.04f * (float)i);
+    const float a = (float)i * (2.0f * kPi / 12.0f);
+    lamp->set_local_position({3.5f * std::cos(a), 2.5f, 3.5f * std::sin(a)});
+  }
+  ed.commit_change("r484 lamps");
+}
+
+static double light_sum(const LightingData &d) {
+  double s = 0;
+  for (const Lightmap &p : d.pages)
+    for (const Vec3 &c : p.texels) s += (c.x + c.y + c.z) / 3.0;
+  return s;
+}
+
+/* The bake's picking counts as the editor read them: the lights kept / dropped by chance, per picking texel. */
+struct Counts {
+  uint64_t texels, kept, dropped;
+  double kept_per() const { return texels ? (double)kept / (double)texels : 0.0; }
+  double dropped_per() const { return texels ? (double)dropped / (double)texels : 0.0; }
+};
+static Counts counts(Editor &ed) {
+  const auto &t = ed.last_bake_times_for_test();
+  return {t.pick_texels, t.chance_kept, t.chance_dropped};
+}
+
+static LightingData baked_with(Editor &ed, const char *pick_command) {
+  if (pick_command) ed.command(pick_command);
+  r35_bake(ed);
+  return ed.lighting_data_for_test();
+}
+}  // namespace r484
+
+static void tests_round484() {
+  /* Criterion 5: `on` and `8` are today's bake bit for bit. (What this can show inside one build: typing them leaves the
+   * default bake as it is - no hidden state, the same pages again. That the default bake itself is main's, byte for
+   * byte, is criterion 11's compare of two builds' saved pages, in the task's results - no unit test can make it.) */
+  test("`lighting pick on` and `lighting pick 8` bake twelve Baked lamps exactly as the default does, and the default's bake picked among them (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const r484::Counts normal = r484::counts(ed);
+    std::printf("    default: %llu picking texels, %.2f lights kept by chance and %.2f dropped a texel\n", (unsigned long long)normal.texels, normal.kept_per(), normal.dropped_per());
+    CHECK(!base.pages.empty() && normal.texels > 0 && normal.kept > 0 && normal.dropped > 0);
+    CHECK(r463::same_pages(base, r484::baked_with(ed, "lighting pick on")));
+    CHECK(r463::same_pages(base, r484::baked_with(ed, "lighting pick 8")));
+    const r484::Counts again = r484::counts(ed);
+    CHECK(again.texels == normal.texels && again.kept == normal.kept && again.dropped == normal.dropped);
+  });
+  /* Criterion 5: off keeps every candidate light at every texel, with the same light on average. */
+  test("`lighting pick off` keeps all twelve lamps at every texel (none kept or dropped by chance) and lights the floor as much as the default within 2 % (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const LightingData off = r484::baked_with(ed, "lighting pick off");
+    const r484::Counts c = r484::counts(ed);
+    const double a = r484::light_sum(base), b = r484::light_sum(off);
+    std::printf("    pick off: counts %llu / %llu / %llu; light %.2f against the default's %.2f (%.2f %%)\n", (unsigned long long)c.texels, (unsigned long long)c.kept,
+                (unsigned long long)c.dropped, b, a, 100.0 * std::fabs(b - a) / a);
+    CHECK(c.texels == 0 && c.kept == 0 && c.dropped == 0);
+    CHECK(a > 0.0 && std::fabs(b - a) / a < 0.02);
+    CHECK(!r463::same_pages(base, off));
+  });
+  /* Criterion 5: more rays keeps more lights a texel. */
+  test("`lighting pick 16` bakes other pages than 8 and keeps more of the twelve lamps at a texel and drops fewer (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const r484::Counts c8 = r484::counts(ed);
+    const LightingData sixteen = r484::baked_with(ed, "lighting pick 16");
+    const r484::Counts c16 = r484::counts(ed);
+    std::printf("    kept a texel: %.2f at 8, %.2f at 16; dropped: %.2f at 8, %.2f at 16\n", c8.kept_per(), c16.kept_per(), c8.dropped_per(), c16.dropped_per());
+    CHECK(c16.texels > 0 && !r463::same_pages(base, sixteen));
+    /* More rays keep more lights, so fewer are dropped. The count of lights kept BY CHANCE need not rise with them (measured
+     * 4.08 at 8 against 3.57 at 16): a light kept for certain is in neither count (lightmapper.h), and more rays make more
+     * lights certain. The spec's "keeps more lights a texel" is therefore pinned through the drops, not chance_kept. */
+    CHECK(c16.dropped_per() < c8.dropped_per());
+    CHECK(c16.kept_per() > 0.0 && c8.dropped_per() > 0.0);
+  });
+  /* Criterion 5: junk is refused and the setting stays. */
+  test("`lighting pick` with junk (8x, -3, 0, 0.5, 5000, 1e3, '.', abc) warns and the setting stays - at 8 and at 16 alike; alone it only says the setting (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const LightingData sixteen = r484::baked_with(ed, "lighting pick 16");
+    const char *junk[] = {"8x", "-3", "0", "0.5", "5000", "1e3", ".", "abc"};
+    for (int round = 0; round < 2; round++) {
+      ed.command(round ? "lighting pick on" : "lighting pick 16");
+      for (const char *word : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(std::string("lighting pick ") + word);
+        const std::string said = r463::join_log(mark);
+        const std::string stays = round ? "stays 8" : "stays 16";
+        CHECK(said.find("lighting pick: say on, off or a number") != std::string::npos && said.find(stays) != std::string::npos);
+        if (said.find(stays) == std::string::npos) std::printf("    lighting pick %s said: %s", word, said.c_str());
+      }
+      CHECK(r463::same_pages(round ? base : sixteen, r484::baked_with(ed, nullptr)));
+    }
+    const size_t mark = r463::log_mark();
+    ed.command("lighting pick");
+    const std::string said = r463::join_log(mark);
+    CHECK(said.find("lighting pick: about 8 lights a texel") != std::string::npos && said.find("say on, off") == std::string::npos);
+    ed.command("lighting pick off");
+    r484::baked_with(ed, "lighting pick banana");  // (still off: refused, no change)
+    CHECK(r484::counts(ed).texels == 0);
+  });
+  /* Criterion 5: a measuring setting - not out of date, not saved, not remembered. */
+  test("`lighting pick 16` is a measuring setting: the lighting stays current after its bake, the saved scene has no trace of it, and a new editor starts at 8 (round 484)", [] {
+    Editor ed;
+    r484::lamp_hall(ed);
+    const LightingData base = r484::baked_with(ed, nullptr);
+    const std::string text_before = save_scene_text(ed.scene());
+    ed.command("lighting pick 16");
+    CHECK(!ed.lighting_out_of_date_for_test());  // (the word alone changes nothing the key reads)
+    r35_bake(ed);
+    CHECK(!ed.lighting_out_of_date_for_test() && ed.lighting_data_for_test().scene_key == base.scene_key);
+    const std::string text_after = save_scene_text(ed.scene());
+    CHECK(text_after == text_before);
+    CHECK(to_lower(text_after).find("pick") == std::string::npos);
+    Editor fresh;
+    r484::lamp_hall(fresh);
+    CHECK(r463::same_pages(base, r484::baked_with(fresh, nullptr)));
+    const size_t mark = r463::log_mark();
+    fresh.command("lighting pick");
+    CHECK(r463::join_log(mark).find("about 8 lights a texel (the normal bake)") != std::string::npos);
+  });
+  /* Criterion 5 below the editor: pick_rays is 8 unless set (setting 8 is setting nothing), 16 bakes other pages, and
+   * with pick_lights off nothing is counted. */
+  test("Lightmapper: BakeSettings::pick_rays 8 bakes the default settings' pages bit for bit, and pick_lights off counts nothing (round 484)", [] {
+    MeshPtr floor = primitives::plane(8.0f, 8);
+    const MaterialPtr white = make_material("White", Vec3(0.8f));
+    std::vector<BakeLight> lamps;
+    for (int i = 0; i < 12; i++) {
+      BakeLight l;
+      l.light.type = RenderLight::Point, l.light.position = Vec3(-3.0f + 0.55f * (float)i, 1.5f, 0.0f), l.light.intensity = 2.0f, l.light.range = 1e3f;
+      l.mode = 2, l.id = (uint64_t)(200 + i);
+      lamps.push_back(l);
+    }
+    Environment dark;
+    dark.mode = Environment::Color, dark.color = Vec3(0.0f);
+    struct Run {
+      LightingData d;
+      uint64_t texels, kept, dropped;
+    };
+    auto bake = [&](bool set_rays, float rays, bool pick) {
+      BakeSettings bs;
+      bs.texels_per_unit = 3, bs.indirect_samples = 1, bs.bounces = 0, bs.denoise = true, bs.directional = false, bs.pick_lights = pick;
+      if (set_rays) bs.pick_rays = rays;
+      Lightmapper lm;
+      lm.begin({bake_object(1, floor, Mat4::identity(), {white})}, lamps, dark, bs);
+      while (!lm.step(1e9)) {
+      }
+      LightingData d = lm.take_result();
+      return Run{std::move(d), lm.pick_texels(), lm.chance_kept(), lm.chance_dropped()};
+    };
+    const Run normal = bake(false, 0, true), eight = bake(true, 8.0f, true), sixteen = bake(true, 16.0f, true), none = bake(false, 0, false);
+    CHECK(BakeSettings().pick_rays == 8.0f && !normal.d.pages.empty());
+    CHECK(r463::same_pages(normal.d, eight.d) && normal.texels == eight.texels && normal.kept == eight.kept && normal.dropped == eight.dropped);
+    CHECK(normal.texels > 0 && !r463::same_pages(normal.d, sixteen.d));
+    CHECK(none.texels == 0 && none.kept == 0 && none.dropped == 0);
+  });
+}
+
+/* ---------------------------------------------------------------- round 486: the bake's specks (task 0462, ADR 0122 amended) */
+namespace r486 {
+/* A floor under a gradient sky and, a metre above it, a lamp only the gather's rays can find (the emitters are not
+ * sampled at the texel here). A side of 0.04 m is met by about one ray in two thousand: at 1024 samples a texel below
+ * it has none, one or two lucky rays - what a speck is made of. A side of 0.6 m is met by dozens of rays a texel: a
+ * steady glow. */
+static r466::World lamp_over_floor(float side, float strength) {
+  r466::World w;
+  w.tpu = 16.0f;
+  MaterialPtr glow = make_material("Glow", Vec3(0.0f));
+  glow->emission = Vec3(1.0f), glow->emission_strength = strength;
+  w.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))}),
+            bake_object(2, primitives::plane(side, 1), Mat4::trs({0, 1, 0}, Quat::euler({180, 0, 0}), {1, 1, 1}), {glow})};
+  w.objs.back().want_lightmap = false;
+  w.env.mode = Environment::Gradient, w.env.sky = Vec3(0.2f), w.env.equator = Vec3(1.0f), w.env.ground = Vec3(0.0f);
+  w.sample_emissive = false;
+  return w;
+}
+
+/* How unlike two bakes of the floor are, over the floor's mean light: the root mean square of the difference and the
+ * largest one - a speck is a spot one bake has and the other has not. */
+struct Unlike {
+  double rms = 0.0, worst = 0.0, mean = 0.0;
+};
+static Unlike unlike(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  Unlike u;
+  for (const Vec3 &t : a) u.mean += r466::lum(t) / (double)std::max<size_t>(1, a.size());
+  if (!(u.mean > 0.0)) return u;
+  for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+    const double d = ((double)r466::lum(a[i]) - (double)r466::lum(b[i])) / u.mean;
+    u.worst = std::max(u.worst, std::fabs(d));
+    u.rms += d * d / (double)a.size();
+  }
+  u.rms = std::sqrt(u.rms);
+  return u;
+}
+/* The floor at seeds 1 and 2 with Sobol samples and the filter on; `mode` is BakeSettings::variance_scale, -1 the bake's own. */
+static Unlike two_seeds(r466::World w, int samples, int mode) {
+  w.variance_scale = mode;
+  return unlike(r466::chart_texels(r466::bake(w, samples, true, 1, 1, true), 1), r466::chart_texels(r466::bake(w, samples, true, 1, 2, true), 1));
+}
+
+/* A filtered bake of the floor against a converged one: the peak's share, the summed light's share, the rms error. */
+struct Against {
+  double peak = 0.0, sum = 0.0, rms = 0.0;
+};
+static Against against(const std::vector<Vec3> &got, const std::vector<Vec3> &ref) {
+  Against g;
+  double got_peak = 0.0, ref_peak = 0.0, got_sum = 0.0, ref_sum = 0.0;
+  for (size_t i = 0; i < got.size() && i < ref.size(); i++) {
+    const double a = r466::lum(got[i]), b = r466::lum(ref[i]);
+    got_peak = std::max(got_peak, a), ref_peak = std::max(ref_peak, b), got_sum += a, ref_sum += b;
+    g.rms += (a - b) * (a - b) / (double)ref.size();
+  }
+  g.peak = ref_peak > 0.0 ? got_peak / ref_peak : 0.0, g.sum = ref_sum > 0.0 ? got_sum / ref_sum : 0.0, g.rms = std::sqrt(g.rms);
+  return g;
+}
+}  // namespace r486
+
+static void tests_round486() {
+  /* Criterion 6: the lucky rays. Round 465 scaled the gather's measured noise for Sobol samples; a texel lit by a few
+   * rare bright samples then passed for steady light in the filter, and a spot stayed where each one fell. */
+  test("the bake's specks (round 486): where a small lamp only the gather's rays can find lights a floor, two seeds' bakes differ by less than 0.6 of what they did under rounds 465 to 485's reading of the noise (root mean square, at 256 and at 1024 Sobol samples), the largest difference falls, and the floor is as bright on average", [] {
+    const r466::World w = r486::lamp_over_floor(0.04f, 4000.0f);
+    for (int n : {256, 1024}) {
+      const r486::Unlike was = r486::two_seeds(w, n, 0), now = r486::two_seeds(w, n, -1);
+      std::printf("    %4d samples: the two seeds differ by rms %.3f -> %.3f of the mean light, at most %.1f -> %.1f; mean light %.3f -> %.3f\n", n, was.rms, now.rms, was.worst,
+                  now.worst, was.mean, now.mean);
+      CHECK(was.rms > 0.5);  // (the scene does make specks under the old reading)
+      CHECK(now.rms < 0.6 * was.rms);
+      CHECK(now.worst < was.worst);
+      CHECK(std::fabs(now.mean - was.mean) < 0.03 * was.mean);
+    }
+  });
+  /* Criterion 3, at the suite's size: four times the samples used to leave two seeds as unlike as before. */
+  test("more samples make a bake's specks fewer, not more (round 486): with the small lamp, two seeds' bakes at 1024 Sobol samples differ less than at 256 - under rounds 465 to 485's reading they did not", [] {
+    const r466::World w = r486::lamp_over_floor(0.04f, 4000.0f);
+    const r486::Unlike now_256 = r486::two_seeds(w, 256, -1), now_1024 = r486::two_seeds(w, 1024, -1), was_256 = r486::two_seeds(w, 256, 0), was_1024 = r486::two_seeds(w, 1024, 0);
+    std::printf("    rms difference between two seeds, 256 -> 1024 samples: now %.3f -> %.3f; rounds 465 to 485: %.3f -> %.3f\n", now_256.rms, now_1024.rms, was_256.rms, was_1024.rms);
+    CHECK(now_1024.rms < 0.8 * now_256.rms);
+    CHECK(was_1024.rms > 0.9 * was_256.rms);  // (what the round found: the old reading gained nothing from the samples here)
+  });
+  /* Criterion 6: the glow stays. A lamp met by dozens of rays a texel is steady light, however bright. */
+  test("a steady glow the gather finds is not taken for specks (round 486): a wide lamp over a floor keeps at least 92 % of its converged peak at 256 Sobol samples and 95 % at 1024, the floor's summed light within 1 %, and the error against the converged bake is no more than under rounds 465 to 485's reading", [] {
+    const r466::World glow = r486::lamp_over_floor(0.6f, 20.0f);
+    r466::World converged = glow, old_reading = glow;
+    converged.sample_emissive = true;
+    old_reading.variance_scale = 0;
+    const std::vector<Vec3> ref = r466::chart_texels(r466::bake(converged, 1024, false, 1, 5), 1);
+    for (int n : {256, 1024}) {
+      const r486::Against now = r486::against(r466::chart_texels(r466::bake(glow, n, true, 1, 1, true), 1), ref);
+      const r486::Against was = r486::against(r466::chart_texels(r466::bake(old_reading, n, true, 1, 1, true), 1), ref);
+      std::printf("    %4d samples: peak %.1f %% of the converged one (rounds 465 to 485: %.1f %%), summed light %.2f %%, rms error %.4f (%.4f)\n", n, 100.0 * now.peak,
+                  100.0 * was.peak, 100.0 * now.sum, now.rms, was.rms);
+      CHECK(now.peak > (n == 256 ? 0.92 : 0.95) && now.peak < 1.05);
+      CHECK(std::fabs(now.sum - 1.0) < 0.01);
+      CHECK(now.rms <= 1.05 * was.rms);
+    }
+  });
+  /* The rule itself (lightmapper.h: gather_variance_read). */
+  test("how the filter reads the gather's measured noise (round 486): a texel lit by up to 16 rare bright samples gets the noise as its samples measured it, one lit by the whole hemisphere keeps round 465's scale for Sobol samples, and nothing in between reads less than the scaled noise or more than the measured one; plain random samples, 16 samples or fewer, and `on` are left as they were", [] {
+    const int n = 1024;
+    const float q = 4.0f / std::sqrt((float)n);  // (round 465's scale: an eighth at 1024 samples)
+    /* K samples of X among n: the mean K X / n, the samples' variance of the mean about K X^2 / n^2. */
+    auto rare = [&](int k, int mode) {
+      const float lum = (float)k * 100.0f / (float)n, raw = (float)k * 100.0f * 100.0f / ((float)n * (float)n);
+      return gather_variance_read(raw * q, lum, n, true, mode) / raw;
+    };
+    const int own = BakeSettings().variance_scale;
+    std::printf("    of the measured noise, read for 1, 4, 16, 64, 256, 1024 samples carrying the light: %.3f %.3f %.3f %.3f %.3f %.3f (round 465's scale: %.3f)\n", rare(1, own), rare(4, own),
+                rare(16, own), rare(64, own), rare(256, own), rare(1024, own), q);
+    for (int k : {1, 2, 4, 8, 16}) CHECK(std::fabs(rare(k, own) - 1.0f) < 1e-4f);
+    CHECK(std::fabs(rare(1024, own) - q) < 1e-4f && std::fabs(rare(4096, own) - q) < 1e-4f);  // (the whole hemisphere, and past it)
+    float before = 1.0f;
+    for (int k = 1; k <= 2048; k *= 2) {
+      const float r = rare(k, own);
+      CHECK(r <= before + 1e-6f && r >= q - 1e-6f && r <= 1.0f + 1e-6f);  // (never rising with the samples that carry the light)
+      before = r;
+    }
+    /* Left as they were: the comparison word `on`, plain random samples, and so few samples that round 465 scaled nothing. */
+    CHECK(gather_variance_read(0.25f, 3.0f, n, true, 0) == 0.25f);
+    CHECK(gather_variance_read(0.25f, 3.0f, n, false, own) == 0.25f);
+    CHECK(gather_variance_read(0.25f, 3.0f, 16, true, own) == 0.25f && gather_variance_read(0.25f, 3.0f, 1, true, own) == 0.25f);
+    /* `off` is the measured noise whatever carries it; nothing to read where nothing was measured. */
+    CHECK(std::fabs(rare(1, 2) - 1.0f) < 1e-4f && std::fabs(rare(1024, 2) - 1.0f) < 1e-4f);
+    CHECK(gather_variance_read(0.0f, 3.0f, n, true, own) == 0.0f && gather_variance_read(0.0f, 0.0f, n, true, own) == 0.0f);
+    CHECK(std::isfinite(gather_variance_read(1e-30f, 0.0f, n, true, own)) && std::isfinite(gather_variance_read(1e30f, 1e30f, n, true, own)));
+  });
+  /* The switch. (That `on` is the bake of rounds 465 to 485 byte for byte is a compare of two builds' saved pages, in the
+   * task's results; inside one build: typing the words leaves no hidden state.) */
+  test("`lighting variancescale` (round 486): alone it says auto, the normal bake; `on` and `off` say they hold for the next Generate Lighting and leave the lighting current (not in the scene's key); `auto` bakes the default's pages again bit for bit, and so does a fresh editor", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    r35_bake(ed);
+    const LightingData base = ed.lighting_data_for_test();
+    CHECK(!base.pages.empty() && !ed.lighting_out_of_date_for_test());
+    size_t mark = r463::log_mark();
+    ed.command("lighting variancescale");
+    CHECK(r463::join_log(mark).find("lighting variancescale: auto (the normal bake)") != std::string::npos);
+    for (const char *word : {"on", "off"}) {
+      mark = r463::log_mark();
+      ed.command(std::string("lighting variancescale ") + word);
+      const std::string said = r463::join_log(mark);
+      CHECK(said.find(std::string("lighting variancescale: ") + word + " (the next Generate Lighting") != std::string::npos);
+      CHECK(!ed.lighting_out_of_date_for_test());
+      r35_bake(ed);
+      CHECK(ed.lighting_data_for_test().scene_key == base.scene_key && !ed.lighting_out_of_date_for_test());
+    }
+    ed.command("lighting variancescale auto");
+    r35_bake(ed);
+    CHECK(r463::same_pages(base, ed.lighting_data_for_test()));
+    ed.command("lighting variancescale on");  // (left on in this editor: a fresh one starts on auto)
+    Editor fresh;
+    r464::lamp_scene(fresh);
+    r35_bake(fresh);
+    CHECK(r463::same_pages(base, fresh.lighting_data_for_test()));
+  });
+  test("`lighting variancescale` (round 486): a word that is not one of its own warns and the setting stays, whichever it was", [] {
+    Editor ed;
+    r464::lamp_scene(ed);  // (a console command needs a scene: without one the sanitizers' job stops at sketch_doc())
+    const char *junk[] = {"lighting variancescale 1", "lighting variancescale yes", "lighting variancescale -1", "lighting variancescale nan", "lighting variancescale aut", "lighting variancescale on,off"};
+    for (const char *held : {"auto", "on", "off"}) {
+      ed.command(std::string("lighting variancescale ") + held);
+      for (const char *cmd : junk) {
+        const size_t mark = r463::log_mark();
+        ed.command(cmd);
+        const std::string said = r463::join_log(mark);
+        CHECK(said.find("say auto, on or off") != std::string::npos && said.find(std::string("it stays ") + held) != std::string::npos);
+      }
+      const size_t mark = r463::log_mark();
+      ed.command("lighting variancescale");
+      CHECK(r463::join_log(mark).find(std::string("lighting variancescale: ") + held) != std::string::npos);
+    }
+    ed.command("lighting variancescale auto");
+  });
+}
+
+/* ---------------------------------------------------------------- round 486, the test engineer's own (task 0462) */
+static void tests_round486_independent() {
+  /* The rule, from the header's words alone: modes 3 and 4 never read less than the scaled noise nor more than the
+   * measured one (scaled / q), mode 0 hands back its input, and hostile numbers never make it blow up. */
+  test("how the filter reads the gather's noise, hostile and edge inputs (round 486): never below the scaled noise nor above the measured one, falls steadily with the samples carrying the light, joins up at 16 and at the sample count, mode 0 returns its input bit for bit, and zero, negative, huge, infinite or NaN light and sample counts never give a negative or infinite reading", [] {
+    for (int n : {17, 64, 1024, 100000}) {
+      const float q = std::min(1.0f, 4.0f / std::sqrt((float)n));
+      for (float scaled : {1e-20f, 1e-6f, 0.3f, 7.0f, 1e12f}) {
+        const float raw = scaled / q;
+        float before = 1e30f;
+        for (int mode : {3, 4}) {
+          before = 1e30f;
+          float last_k = 0.0f;
+          for (float k : {0.5f, 1.0f, 3.0f, 15.9f, 16.1f, 40.0f, 200.0f, (float)n * 0.5f, (float)n, (float)n * 8.0f}) {
+            if (k < last_k) continue;  // (ascending in k only: the list is not for a small n)
+            last_k = k;
+            const float lum = std::sqrt(k * raw);
+            const float r = gather_variance_read(scaled, lum, n, true, mode);
+            CHECK(std::isfinite(r) && r >= scaled * (1.0f - 1e-5f) && r <= raw * (1.0f + 1e-5f));
+            if (mode == 3) {
+              CHECK(r <= before * (1.0f + 1e-5f));  // (more samples carrying the light never read noisier)
+              before = r;
+            }
+          }
+        }
+        const float at_n = gather_variance_read(scaled, std::sqrt((float)n * raw), n, true, 3);
+        CHECK(std::fabs(at_n - scaled) <= 1e-4f * scaled);  // (every sample carries it: round 465's scale exactly)
+        const float lo = gather_variance_read(scaled, std::sqrt(15.99f * raw), n, true, 3), hi = gather_variance_read(scaled, std::sqrt(16.01f * raw), n, true, 3);
+        CHECK(std::fabs(lo - hi) <= 1e-3f * raw);  // (no cliff at 16)
+        CHECK(std::fabs(lo - raw) <= 1e-3f * raw);
+        float in = scaled, out = gather_variance_read(in, 1.5f, n, true, 0);
+        CHECK(std::memcmp(&in, &out, sizeof(float)) == 0);
+      }
+    }
+    /* Hostile light and samples. */
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (int mode : {0, 1, 2, 3, 4}) {
+      for (float lum : {0.0f, -1.0f, -1e30f, 1e30f, inf, -inf, nan}) {
+        const float r = gather_variance_read(0.25f, lum, 1024, true, mode);
+        CHECK(std::isfinite(r) && r >= 0.0f && r >= 0.25f - 1e-6f && r <= 0.25f * 8.0f + 1e-5f);
+      }
+      for (int samples : {0, -1, -1000000, 1, 2, 16, 17, 2147483647}) {
+        const float r = gather_variance_read(0.25f, 0.7f, samples, true, mode);
+        CHECK(std::isfinite(r) && r >= 0.25f - 1e-6f);
+      }
+      for (float scaled : {0.0f, -0.0f, -1.0f, 1e-45f, 1e30f, 1e36f}) CHECK(!std::isinf(gather_variance_read(scaled, 1.0f, 1024, true, mode)));
+      CHECK(gather_variance_read(0.0f, 5.0f, 1024, true, mode) == 0.0f);
+    }
+    /* An unknown mode is one of the existing ones, not a crash or a rise. */
+    for (int mode : {-1, 5, 99, -100}) {
+      const float r = gather_variance_read(0.25f, 0.7f, 1024, true, mode);
+      CHECK(std::isfinite(r) && r >= 0.25f - 1e-6f && r <= 0.25f * 8.0f + 1e-5f);
+    }
+  });
+  /* The setting only changes how the filter reads: with nothing to filter, or nothing scaled, the pages are the same. */
+  test("the specks' reading changes nothing where it has nothing to read (round 486): with the filter off, with plain random samples, and with 16 samples or fewer, a bake's pages are the same bit for bit whatever the variance setting", [] {
+    r466::World w = r486::lamp_over_floor(0.04f, 4000.0f);
+    struct Case {
+      int n;
+      bool denoise, sobol;
+    };
+    for (const Case c : {Case{256, false, true}, Case{256, true, false}, Case{16, true, true}, Case{8, true, true}, Case{1, true, true}}) {
+      w.variance_scale = 0;
+      const LightingData old_reading = r466::bake(w, c.n, c.denoise, 1, 3, c.sobol);
+      for (int mode : {-1, 3, 4}) {
+        w.variance_scale = mode;
+        const LightingData now = r466::bake(w, c.n, c.denoise, 1, 3, c.sobol);
+        const bool same = r463::same_pages(old_reading, now);
+        if (!same) {
+          float worst = 0.0f, top = 0.0f;
+          for (size_t p = 0; p < now.pages.size() && p < old_reading.pages.size(); p++)
+            for (size_t t = 0; t < now.pages[p].texels.size(); t++) {
+              const Vec3 d = now.pages[p].texels[t] - old_reading.pages[p].texels[t];
+              worst = std::max(worst, std::max(std::fabs(d.x), std::max(std::fabs(d.y), std::fabs(d.z))));
+              top = std::max(top, now.pages[p].texels[t].y);
+            }
+          std::printf("    differs: n=%d denoise=%d sobol=%d mode=%d, by at most %g (the brightest texel %g)\n", c.n, (int)c.denoise, (int)c.sobol, mode, worst, top);
+        }
+        /* (This check found one float step at 8 samples - the texel's variance stored as (var.x - var.z) + var.z, which
+         * rounds a hair differently from var.x; a texel whose reading is the one it had is now left alone.) */
+        CHECK(same);
+        CHECK(!old_reading.pages.empty());
+      }
+    }
+    /* ...and where it does read, it changes the pages (the setting reaches the filter at all). */
+    w.variance_scale = 0;
+    const LightingData a = r466::bake(w, 1024, true, 1, 3, true);
+    w.variance_scale = -1;
+    CHECK(!r463::same_pages(a, r466::bake(w, 1024, true, 1, 3, true)));
+  });
+  test("more samples do not raise a steady floor's seed-to-seed difference (round 486): the plain sky floor and a box under a soft light differ no more between two seeds at 1024 Sobol samples than at 256", [] {
+    for (const r466::World &w : {r466::sky_plane(), r466::box_on_floor()}) {
+      const r486::Unlike a = r486::two_seeds(w, 256, -1), b = r486::two_seeds(w, 1024, -1);
+      std::printf("    two seeds differ by rms %.4f at 256 samples, %.4f at 1024\n", a.rms, b.rms);
+      CHECK(b.rms <= 1.05 * a.rms + 1e-9);
+    }
+  });
+  test("a few-sample or unlit bake stays valid under the specks' reading (round 486): 8 and 2 samples give finite non-negative pages on the small lamp's floor, and a floor with no light at all bakes to finite zero pages", [] {
+    const r466::World lamp = r486::lamp_over_floor(0.04f, 4000.0f);
+    for (int n : {2, 8, 16, 17})
+      for (int mode : {-1, 0, 1, 2, 3, 4}) {
+        r466::World w = lamp;
+        w.variance_scale = mode;
+        const LightingData d = r466::bake(w, n, true, 1, 7, true);
+        CHECK(!d.pages.empty() && r466::all_finite(d));
+      }
+    r466::World dark;
+    dark.objs = {bake_object(1, primitives::plane(4.0f, 1), Mat4::identity(), {make_material("White", Vec3(0.8f))})};
+    dark.env.mode = Environment::Color, dark.env.color = Vec3(0.0f);
+    for (int mode : {-1, 0, 2, 3, 4})
+      for (int n : {1, 8, 1024}) {
+        dark.variance_scale = mode;
+        const LightingData d = r466::bake(dark, n, true, 1, 1, true);
+        CHECK(!d.pages.empty() && r466::all_finite(d) && r466::sum_lum(d) <= 1e-6);
+      }
+  });
+  test("`lighting variancescale` words (round 486): auto, on, clamp, off, snr and step are each accepted in any letter case and say themselves, a bake logs the word it was read as, auto bakes without that line, and a new editor starts on auto", [] {
+    Editor ed;
+    r464::lamp_scene(ed);
+    for (const char *word : {"auto", "on", "clamp", "off", "snr", "step", "ON", "Off", "StEp", "AUTO"}) {
+      const size_t mark = r463::log_mark();
+      ed.command(std::string("lighting variancescale ") + word);
+      std::string lower = word;
+      for (char &c : lower) c = (char)std::tolower((unsigned char)c);
+      const std::string said = r463::join_log(mark);
+      CHECK(said.find("lighting variancescale: " + lower) != std::string::npos && said.find("say auto") == std::string::npos);
+    }
+    ed.command("lighting variancescale on");
+    size_t mark = r463::log_mark();
+    r35_bake(ed);
+    CHECK(r463::join_log(mark).find("read as `lighting variancescale on`") != std::string::npos);
+    ed.command("lighting variancescale auto");
+    mark = r463::log_mark();
+    r35_bake(ed);
+    CHECK(r463::join_log(mark).find("read as `lighting variancescale") == std::string::npos);
+    ed.command("lighting variancescale step");
+    Editor fresh;
+    r464::lamp_scene(fresh);  // (as above: a command needs a scene)
+    mark = r463::log_mark();
+    fresh.command("lighting variancescale");
+    CHECK(r463::join_log(mark).find("lighting variancescale: auto (the normal bake)") != std::string::npos);
+  });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -11166,4 +11667,7 @@ void run_lighting_tests() {
   tests_round464();
   tests_round465();
   tests_round466();
+  tests_round484();
+  tests_round486();
+  tests_round486_independent();
 }
