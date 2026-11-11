@@ -10948,6 +10948,811 @@ static void tests_round462_review() {
   });
 }
 
+/* ---- Round 468 (task 0444): posing, measured - `perf drag` plays a drag as real events; the posing counters ---- */
+static size_t r468_log_mark() {
+  std::vector<LogEntry> skipped;
+  return Log::fetch(0, skipped);
+}
+
+static std::string r468_log_since(size_t at) {
+  std::vector<LogEntry> said;
+  Log::fetch(at, said);
+  std::string all;
+  for (const LogEntry &e : said) all += e.text + "\n";
+  return all;
+}
+
+/* A humanoid rig 3 m in front of a camera that faces it, settled (the IK test's set-up: the Move gizmo's X arrow points right). */
+static GameObject *r468_rig(Editor &ed) {
+  r34_open(ed);
+  ed.command("rig humanoid");
+  GameObject *rig = ed.scene().find_by_name("Humanoid");
+  if (rig) rig->set_world_position({0, 0, 3.0f});
+  ed.command("camera 0 1.2 9 0 0.8 3");
+  ed.mark_changed_for_test("R468 setup");
+  r34_steps(ed, 3);
+  return rig;
+}
+
+/* The events a hand would send for the same drag: a move over the Scene view, to the press point, the press, `n` equal steps
+ * (rounded as the script rounds them), the release and a frame after. */
+static void r468_hand_drag(Editor &ed, int px, int py, int ex, int ey, int n) {
+  const Recti v = ed.scene_view_rect();
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, v.x + v.w / 2, v.y + v.h / 2)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px, py)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, px, py)});
+  for (int i = 1; i <= n; i++) {
+    const float f = (float)i / (float)n;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, (int)std::lround((float)px + (float)(ex - px) * f), (int)std::lround((float)py + (float)(ey - py) * f))});
+  }
+  ed.step_frame_headless({r34_mouse(R34ET::MouseUp, ex, ey)});
+  ed.step_frame_headless();
+}
+
+static bool r468_same_turn(const Quat &a, const Quat &b, float eps) {
+  const float s = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0f ? -1.0f : 1.0f;
+  return std::fabs(a.x - s * b.x) < eps && std::fabs(a.y - s * b.y) < eps && std::fabs(a.z - s * b.z) < eps && std::fabs(a.w - s * b.w) < eps;
+}
+
+static void tests_round468() {
+  test("perf drag gizmo rz 60 part chest (round 468): the Rotate gizmo's Z ring turns the chest as the same mouse events sent by hand do - the same rotation to 1e-5 - in one undo step", [] {
+    Quat by_script, at_rest;
+    int px = 0, py = 0, ex = 0, ey = 0;
+    size_t steps = 0;
+    {
+      Editor ed;
+      r468_rig(ed);
+      ed.command("tool rotate");
+      const size_t u0 = ed.undo_steps_for_test();
+      ed.command("perf drag gizmo rz 60 part chest");
+      r34_steps(ed, 2);
+      const PerfDragResult &r = ed.perf_drag_result_for_test();
+      std::printf("    %s: pressed at (%d, %d), ended at (%d, %d), %d drag frames, error '%s'\n", r.what.c_str(), r.press_x, r.press_y, r.end_x, r.end_y, r.frames, r.error.c_str());
+      CHECK(r.ok && r.what == "gizmo rz" && r.frames == 29 && !ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test());
+      px = r.press_x, py = r.press_y, ex = r.end_x, ey = r.end_y;
+      GameObject *chest = ed.active_object_for_test();
+      CHECK(chest != nullptr);
+      if (!chest) return;
+      by_script = chest->world_rotation();
+      at_rest = chest->get<Bone>()->rest_rotation;
+      steps = ed.undo_steps_for_test() - u0;
+      CHECK(!r468_same_turn(chest->local().rotation, at_rest, 1e-3f));  // (it did turn)
+    }
+    CHECK(steps == 1);
+    Editor ed;
+    r468_rig(ed);
+    ed.command("perf pick chest");
+    ed.command("tool rotate");
+    r468_hand_drag(ed, px, py, ex, ey, 30);
+    r34_steps(ed, 2);
+    GameObject *chest = ed.active_object_for_test();
+    CHECK(chest && r468_same_turn(chest->world_rotation(), by_script, 1e-5f));
+  });
+
+  test("perf drag gizmo x 80 on an IK target (round 468): the Move gizmo's X arrow, pressed where its hit test has it, moves LeftHandIK and the arm follows", [] {
+    Editor ed;
+    r468_rig(ed);
+    GameObject *target = ed.scene().find_by_name("LeftHandIK"), *lower = ed.scene().find_by_name("LeftLowerArm");
+    CHECK(target && lower);
+    if (!target || !lower) return;
+    /* (A straight arm is at its full reach: the target goes in a little first, so a drag either way is within it.) */
+    target->set_world_position(target->world_position() + Vec3(0, 0.12f, 0));
+    ed.mark_changed_for_test("R468 hand up");
+    r34_steps(ed, 2);
+    ed.command("select LeftHandIK");
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    auto tip = [&] { return lower->world_matrix().point({0, lower->get<Bone>()->length, 0}); };
+    const Vec3 t0 = target->world_position(), h0 = tip();
+    ed.command("perf drag gizmo x 80");
+    r34_steps(ed, 2);
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    std::printf("    %s ok %d: the target moved %.3f m, the hand %.3f m; '%s'\n", r.what.c_str(), (int)r.ok, length(target->world_position() - t0), length(tip() - h0), r.error.c_str());
+    CHECK(r.ok && length(target->world_position() - t0) > 0.05f && length(tip() - h0) > 0.02f);
+  });
+
+  test("perf drag key g and key r (round 468): G with the mouse over the object, moved and clicked, leaves it moved; R leaves it turned; no modal is left running", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const Vec3 p0 = cube->world_position();
+    const Quat q0 = cube->world_rotation();
+    ed.command("perf drag key g 40 20");
+    r34_steps(ed, 2);
+    std::printf("    G: the cube moved %.3f m; modal running %d; %s\n", length(cube->world_position() - p0), (int)ed.transform_active_for_test(), ed.perf_drag_result_for_test().error.c_str());
+    CHECK(ed.perf_drag_result_for_test().ok && length(cube->world_position() - p0) > 0.05f && !ed.transform_active_for_test() && !ed.perf_script_active_for_test());
+    /* (R is the Scale tool's key in the Unity keymap: with it the script is refused, and says so.) */
+    const size_t at = r468_log_mark();
+    ed.command("perf drag key r 40 20");
+    CHECK(!ed.perf_drag_result_for_test().ok && r468_log_since(at).find("R is the Scale tool's key") != std::string::npos);
+    ed.command("keymap Blender");
+    r34_steps(ed, 2);
+    ed.command("select Cube");
+    r34_steps(ed, 2);
+    ed.command("perf drag key r 40 20");
+    r34_steps(ed, 2);
+    std::printf("    R: %s\n", ed.perf_drag_result_for_test().error.c_str());
+    CHECK(ed.perf_drag_result_for_test().ok && !r468_same_turn(cube->world_rotation(), q0, 1e-3f) && !ed.transform_active_for_test());
+  });
+
+  test("perf drag refuses (round 468): no active object, a handle that isn't drawn with this tool, an unknown handle or part, a bone IK turns, no Animation window, AutoPosing off - each says why, presses nothing, and the next real click works", [] {
+    Editor ed;
+    GameObject *rig = r468_rig(ed);
+    CHECK(rig != nullptr);
+    auto refused = [&](const std::string &line, const char *why) {
+      const size_t at = r468_log_mark();
+      ed.command(line);
+      r34_steps(ed, 2);
+      const std::string said = r468_log_since(at);
+      std::printf("    %s -> %s\n", line.c_str(), said.find("perf drag") != std::string::npos ? "refused" : "NOT refused");
+      CHECK(said.find(why) != std::string::npos);
+      CHECK(!ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test() && !ed.ui_for_test().in.down[0]);
+      CHECK(!ed.perf_drag_result_for_test().ok);
+    };
+    ed.clear_selection_for_test();
+    r34_steps(ed, 2);
+    refused("perf drag gizmo x 50", "no active object");
+    ed.command("select LeftHandIK");
+    ed.command("tool rotate");
+    r34_steps(ed, 2);
+    refused("perf drag gizmo x 50", "not on screen");  // (an arrow with the Rotate tool)
+    ed.command("tool move");
+    r34_steps(ed, 2);
+    refused("perf drag gizmo q 50", "no handle called");
+    refused("perf drag gizmo x 50 part wing", "no humanoid part called");
+    refused("perf drag ruler 0 10", "Animation window isn't open");
+    refused("perf drag puppet lhand 10 10", "AutoPosing is off");
+    refused("perf drag wobble", "unknown kind");
+    ed.command("select RightLowerLeg");  // (IK turns it: the gizmo refuses the press, as it does for a hand)
+    r34_steps(ed, 2);
+    GameObject *shin = ed.scene().find_by_name("RightLowerLeg");
+    const Quat q0 = shin->local().rotation;
+    refused("perf drag gizmo x 40", "started no drag");
+    CHECK(r468_same_turn(shin->local().rotation, q0, 1e-6f));
+    /* The next real click works: a real drag of the hand target's gizmo moves it. */
+    ed.command("select LeftHandIK");
+    r34_steps(ed, 3);
+    GameObject *hand = ed.scene().find_by_name("LeftHandIK");
+    hand->set_world_position(hand->world_position() + Vec3(0, 0.12f, 0));  // (a little inside the arm's reach)
+    ed.mark_changed_for_test("R468 hand up");
+    r34_steps(ed, 2);
+    const Vec3 h0 = hand->world_position();
+    r34_gizmo_drag_x(ed, h0, 40);
+    r34_steps(ed, 2);
+    CHECK(length(hand->world_position() - h0) > 0.02f);
+  });
+
+  test("perf drag queue, loop and Esc (round 468): a queued drag plays one step a frame with the gizmo dragging between, the real mouse meanwhile changes nothing, a real Esc stops it with the button released, and a loop runs until perf drag stop", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    ed.command("perf drag gizmo x 40 frames 6 queue");
+    CHECK(ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test());  // (queued: nothing has played)
+    int frames_dragging = 0;
+    for (int i = 0; i < 60 && ed.perf_script_active_for_test(); i++) {
+      ed.step_frame_headless();
+      frames_dragging += ed.gizmo_dragging_for_test() ? 1 : 0;
+      if (i == 4) {  // (mid-drag: a real click on nothing, a real release - dropped)
+        ed.step_frame_headless({r34_mouse(R34ET::MouseMove, 5, 5), r34_mouse(R34ET::MouseDown, 5, 5), r34_mouse(R34ET::MouseUp, 5, 5)});
+        CHECK(ed.gizmo_dragging_for_test() && ed.active_object_for_test() == cube);
+      }
+    }
+    std::printf("    the gizmo was dragging in %d of the frames; the cube is at %.3f, %.3f, %.3f\n", frames_dragging, cube->world_position().x, cube->world_position().y, cube->world_position().z);
+    CHECK(frames_dragging >= 6 && !ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test() && ed.perf_drag_result_for_test().ok);
+    /* A loop never releases by itself; Esc, a real one, stops it with the button up. */
+    ed.command("perf drag gizmo x 40 frames 4 loop queue");
+    for (int i = 0; i < 40; i++) ed.step_frame_headless();
+    CHECK(ed.perf_script_active_for_test() && ed.gizmo_dragging_for_test());
+    platform::Event esc;
+    esc.type = platform::EventType::KeyDown;
+    esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    ed.step_frame_headless();
+    CHECK(!ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test() && !ed.ui_for_test().in.down[0] && ed.perf_drag_result_for_test().error == "stopped by Esc");
+    /* ...and perf drag stop ends a loop where it is, releasing it, with the result logged. */
+    const size_t at = r468_log_mark();
+    ed.command("perf drag gizmo x 40 frames 4 loop");  // (headless without queue, but a loop is queued: it can't play at once)
+    CHECK(ed.perf_script_active_for_test());
+    for (int i = 0; i < 25; i++) ed.step_frame_headless();
+    CHECK(ed.perf_script_active_for_test() && ed.gizmo_dragging_for_test());
+    ed.command("perf drag stop");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(!ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test() && ed.perf_drag_result_for_test().ok);
+    CHECK(r468_log_since(at).find("perf drag gizmo x: press ") != std::string::npos);
+  });
+
+  test("perf drag logs its numbers (round 468): the press, the first move, the mean and longest of the drag frames, the release and the frame after, the parts and the counts of a drag frame, and the release's undo step", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const size_t at = r468_log_mark();
+    const FrameProfile before = ed.frame_profile_totals();
+    ed.command("perf drag gizmo x 40 frames 5");
+    const std::string said = r468_log_since(at);
+    std::printf("%s", said.c_str());
+    for (const char *part : {"perf drag gizmo x: press ", " ms, first move ", " ms, 4 drag frame(s) mean ", " ms (longest ", " ms), release ", " ms, the frame after ",
+                             "perf drag parts ms (a drag frame's mean; nested, not to add up): constraints ", ", skinning ", ", scene view ", ", window hierarchy ",
+                             "perf drag counts (a drag frame's mean): constraint solves ", ", skin deforms ", ", undo steps ", ", view renders ",
+                             "perf drag release ms: undo step ", " (settle ", ", clone ", ", assets ", "), record "})
+      CHECK(said.find(part) != std::string::npos);
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    CHECK(r.ok && r.frames == 4 && r.ms_press > 0.0 && r.ms_first > 0.0 && r.ms_longest >= r.ms_mean && r.ms_release > 0.0 && r.ms_after > 0.0);
+    CHECK(r.after.frames - r.before.frames == 5);  // (the totals around the move frames)
+    /* A release counts one commit_undo, with its parts; the drag's frames before it none. */
+    CHECK(ed.frame_profile_totals().undo_steps - before.undo_steps == 1);
+    CHECK(r.after.undo_steps == r.before.undo_steps);
+    CHECK(ed.frame_profile_totals().ms_commit > before.ms_commit);
+  });
+
+  test("the posing counters (round 468): no count moves across the frames of a scene with no rig; `perf status` prints the posing lines; the Profiler's Posing block shows its rows while a rig is posed and not otherwise", [] {
+    {
+      Editor ed;
+      r34_open(ed);
+      ed.record_buttons_for_test(true);
+      ed.command("window Profiler");
+      r34_steps(ed, 4);
+      const PoseCounts a = ed.pose_counts_total_for_test();
+      r34_steps(ed, 4);
+      const PoseCounts d = ed.pose_counts_total_for_test() - a;
+      std::printf("    a scene with no rig, four frames: %llu solves, %llu skin keys, %llu deforms, %llu evaluations\n", (unsigned long long)d.constraint_solves, (unsigned long long)d.skin_keys,
+                  (unsigned long long)d.skin_deforms, (unsigned long long)d.evaluations);
+      CHECK(!d.any() && d.evaluations == 0 && d.outline_shells == 0 && d.name_walks == 0 && d.solver_solves == 0 && d.spring_steps == 0);
+      Recti row;
+      CHECK(!ed.button_rect_for_test("Posing (the last frame)", row));
+    }
+    Editor ed;
+    r468_rig(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("window Profiler");
+    ed.command("select LeftHandIK");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    ed.command("perf drag gizmo y 40 frames 3");
+    r34_steps(ed, 1);
+    Recti row;
+    const bool header = ed.button_rect_for_test("Posing (the last frame)", row), solves = ed.button_rect_for_test("Posing count: constraint solves", row);
+    std::printf("    the Profiler while a rig with IK is posed: header %d, constraint solves row %d\n", (int)header, (int)solves);
+    CHECK(header && solves);
+    const size_t at = r468_log_mark();
+    ed.command("perf status");
+    const std::string said = r468_log_since(at);
+    CHECK(said.find("perf posing: constraints ") != std::string::npos && said.find("perf posing counts: constraint solves ") != std::string::npos);
+    CHECK(said.find("perf: frame ") != std::string::npos);  // (the first line is as it was)
+  });
+
+  /* ---- Round 468, the test engineer's additions (from the acceptance criteria, not from the code) ---- */
+  /* After any perf drag, run or refused: nothing is playing, no button is down, no drag or modal runs. */
+  auto r468t_clean = [](Editor &ed) {
+    return !ed.perf_script_active_for_test() && !ed.gizmo_dragging_for_test() && !ed.ui_for_test().in.down[0] && !ed.transform_active_for_test();
+  };
+  /* The camera command flies the view by the real clock: a drag's pixels mean metres only once it has landed. */
+  auto r468t_settle = [](Editor &ed) {
+    for (int i = 0; i < 40; i++) {
+      ed.step_frame_headless();
+      std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+  };
+  /* The next real click selects: with nothing selected, a click on the cube's own point picks it. */
+  auto r468t_click_selects = [](Editor &ed) {
+    ed.clear_selection_for_test();
+    ed.step_frame_headless();
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    int x = 0, y = 0;
+    if (!cube || !ed.project_to_window(cube->world_position(), x, y)) return false;
+    r34_click(ed, x, y);
+    r34_steps(ed, 2);
+    return ed.active_object_for_test() == cube;
+  };
+
+  test("perf drag's numbers and words (round 468): zero pixels moves nothing, negative pixels go the other way, frames 0 is one frame, a huge frames is cut short by perf drag stop, and a bad word or number is refused with the button up", [r468t_clean, r468t_click_selects, r468t_settle] {
+    Editor ed;
+    r34_open(ed);
+    r468t_settle(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    const Vec3 p0 = cube->world_position();
+    ed.command("perf drag gizmo x 0 frames 3");
+    CHECK(ed.perf_drag_result_for_test().ok && length(cube->world_position() - p0) < 1e-4f && r468t_clean(ed));
+    r468t_settle(ed);  // (a second press at the same pixel within the double-click interval frames the selection: see the test "perf drag twice at the same pixel")
+    ed.command("perf drag gizmo x 40 frames 0");
+    const Vec3 p1 = cube->world_position();
+    CHECK(ed.perf_drag_result_for_test().ok && length(p1 - p0) > 0.02f && r468t_clean(ed));
+    r468t_settle(ed);
+    ed.command("perf drag gizmo x -40 frames 4");
+    const Vec3 p2 = cube->world_position();
+    std::printf("    +40 px moved the cube %.3f m, then -40 px left it %.3f m from the start\n", length(p1 - p0), length(p2 - p0));
+    /* (Not "back to where it began": a pixel is not a fixed length - the gizmo's screen direction and the perspective differ from the second press - but the move goes the other way.) */
+    CHECK(ed.perf_drag_result_for_test().ok && dot(p2 - p1, p1 - p0) < 0.0f && length(p2 - p1) > 0.02f && r468t_clean(ed));
+    /* A huge frame count: queued, then stopped before anything is pressed, and again part-way (released, reported). */
+    ed.command("perf drag gizmo x 40 frames 99999999 queue");
+    CHECK(ed.perf_script_active_for_test());
+    ed.command("perf drag stop");
+    CHECK(r468t_clean(ed));
+    ed.command("perf drag gizmo x 40 frames 99999999 queue");
+    r34_steps(ed, 10);
+    CHECK(ed.perf_script_active_for_test() && ed.gizmo_dragging_for_test());
+    ed.command("perf drag stop");
+    r34_steps(ed, 4);
+    CHECK(r468t_clean(ed));
+    /* perf drag stop with none playing is harmless. */
+    ed.command("perf drag stop");
+    CHECK(r468t_clean(ed));
+    /* Words and numbers it doesn't understand. */
+    for (const char *bad : {"perf drag", "perf drag gizmo", "perf drag gizmo x", "perf drag gizmo x abc", "perf drag gizmo x nan", "perf drag gizmo x inf", "perf drag gizmo x 40 bogus", "perf drag gizmo x 40 frames",
+                            "perf drag gizmo x 40 mods hyper", "perf drag gizmo x 40 part", "perf drag key x 1 1", "perf drag key g 1", "perf drag puppet lhand 1", "perf drag at 1 2 3", "perf drag ruler a b",
+                            "perf drag lasso 1 2"}) {
+      const size_t at = r468_log_mark();
+      ed.command(bad);
+      r34_steps(ed, 2);
+      CHECK(r468t_clean(ed));
+      CHECK(!r468_log_since(at).empty());  // (it says something)
+    }
+    CHECK(r468t_click_selects(ed));
+  });
+
+  test("perf drag while another is queued (round 468): the second is refused and says so; the first plays to its end unchanged", [r468t_clean] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    ed.command("perf drag gizmo x 40 frames 5 queue");
+    const size_t at = r468_log_mark();
+    ed.command("perf drag gizmo y 30 frames 2 queue");
+    CHECK(r468_log_since(at).find("playing already") != std::string::npos && ed.perf_script_active_for_test());
+    for (int i = 0; i < 60 && ed.perf_script_active_for_test(); i++) ed.step_frame_headless();
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    CHECK(r.ok && r.what == "gizmo x" && r.frames == 4 && r468t_clean(ed));
+  });
+
+  test("perf drag key g (round 468): the same mouse and key events sent by hand leave the cube in the same place, one undo step each", [r468t_settle] {
+    Vec3 by_script;
+    int px = 0, py = 0, ex = 0, ey = 0;
+    size_t steps = 0;
+    Vec3 start;
+    {
+      Editor ed;
+      r34_open(ed);
+      r468t_settle(ed);
+      ed.command("select Cube");
+      r34_steps(ed, 3);
+      GameObject *cube = ed.scene().find_by_name("Cube");
+      start = cube->world_position();
+      const size_t u0 = ed.undo_steps_for_test();
+      ed.command("perf drag key g 60 -30 frames 8");
+      r34_steps(ed, 2);
+      const PerfDragResult &r = ed.perf_drag_result_for_test();
+      CHECK(r.ok);
+      px = r.press_x, py = r.press_y, ex = r.end_x, ey = r.end_y;
+      by_script = cube->world_position();
+      steps = ed.undo_steps_for_test() - u0;
+    }
+    CHECK(steps == 1);
+    Editor ed;
+    r34_open(ed);
+    r468t_settle(ed);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const size_t u0 = ed.undo_steps_for_test();
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px, py)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px, py)});
+    platform::Event kd, ku;
+    kd.type = platform::EventType::KeyDown, kd.key = platform::KEY_G;
+    ku.type = platform::EventType::KeyUp, ku.key = platform::KEY_G;
+    ed.step_frame_headless({kd, ku});
+    for (int i = 1; i <= 8; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px + (int)std::lround((float)(ex - px) * i / 8.0f), py + (int)std::lround((float)(ey - py) * i / 8.0f))});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, ex, ey), r34_mouse(R34ET::MouseUp, ex, ey)});
+    r34_steps(ed, 2);
+    std::printf("    by script %.4f %.4f %.4f, by hand %.4f %.4f %.4f (from %.4f %.4f %.4f)\n", by_script.x, by_script.y, by_script.z, cube->world_position().x, cube->world_position().y, cube->world_position().z, start.x,
+                start.y, start.z);
+    CHECK(length(by_script - start) > 0.05f && length(cube->world_position() - by_script) < 1e-3f && ed.undo_steps_for_test() - u0 == 1);
+  });
+
+  test("perf drag with Record on (round 468): a rotate-gizmo drag of the chest keys the clip the same as the hand's events do - the same tracks, the same key values", [] {
+    std::vector<AnimTrack> by_script;
+    int px = 0, py = 0, ex = 0, ey = 0;
+    {
+      Editor ed;
+      r468_rig(ed);
+      ed.command("perf clip");
+      ed.command("anim record on");
+      ed.command("tool rotate");
+      r34_steps(ed, 3);
+      ed.command("perf drag gizmo rz 50 part chest frames 6");
+      r34_steps(ed, 2);
+      const PerfDragResult &r = ed.perf_drag_result_for_test();
+      CHECK(r.ok);
+      px = r.press_x, py = r.press_y, ex = r.end_x, ey = r.end_y;
+      CHECK(ed.anim_clip_for_test() != nullptr);
+      if (ed.anim_clip_for_test()) by_script = ed.anim_clip_for_test()->tracks;
+    }
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+    Editor ed;
+    r468_rig(ed);
+    ed.command("perf clip");
+    ed.command("anim record on");
+    ed.command("perf pick chest");
+    ed.command("tool rotate");
+    r34_steps(ed, 3);
+    r468_hand_drag(ed, px, py, ex, ey, 6);
+    r34_steps(ed, 2);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr && clip->tracks.size() == by_script.size());
+    if (clip && clip->tracks.size() == by_script.size()) {
+      size_t differing = 0;
+      for (size_t t = 0; t < by_script.size(); t++) {
+        const AnimTrack &a = by_script[t], &b = clip->tracks[t];
+        bool same = a.path == b.path && a.property == b.property && a.axis == b.axis && a.keys.size() == b.keys.size();
+        for (size_t k = 0; same && k < a.keys.size(); k++) same = std::fabs(a.keys[k].frame - b.keys[k].frame) < 1e-4f && std::fabs(a.keys[k].value - b.keys[k].value) < 1e-3f;
+        differing += same ? 0 : 1;
+      }
+      std::printf("    %zu tracks, %zu differ between the script and the hand\n", by_script.size(), differing);
+      CHECK(differing == 0);
+    }
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("a hand drag before and after a script (round 468): with no script playing, real mouse events reach the gizmo exactly as before - the same move each time", [r468t_clean, r468t_settle] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("camera 0 1.0 8 0 0.5 0");  // (facing the cube: the Move gizmo's X arrow points right, as r34_gizmo_drag_x assumes)
+    r468t_settle(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    auto where = [&] { return ed.scene().find_by_name("Cube")->world_position(); };  // (an undo brings back another scene: look the cube up again)
+    const Vec3 p0 = where(), eye0 = ed.scene_eye();
+    r34_gizmo_drag_x(ed, p0, 50);
+    r34_steps(ed, 2);
+    const Vec3 hand1 = where() - p0;
+    ed.command("undo");
+    r468t_settle(ed);  // (and let the double-click interval pass: a second press at the same pixel frames the selection and flies the camera)
+    CHECK(length(where() - p0) < 1e-5f);
+    ed.command("select Cube");  // (an undo leaves nothing selected)
+    r34_steps(ed, 2);
+    ed.command("perf drag gizmo x 40 frames 5");
+    CHECK(ed.perf_drag_result_for_test().ok && r468t_clean(ed));
+    ed.command("undo");
+    r468t_settle(ed);  // (and let the double-click interval pass: a second press at the same pixel frames the selection and flies the camera)
+    CHECK(length(where() - p0) < 1e-5f);
+    ed.command("select Cube");
+    r468t_settle(ed);
+    r34_gizmo_drag_x(ed, p0, 50);
+    r34_steps(ed, 2);
+    const Vec3 hand2 = where() - p0;
+    std::printf("    the hand moved the cube %.5f m before the script and %.5f m after (the eye moved %.5f m between)\n", length(hand1), length(hand2), length(ed.scene_eye() - eye0));
+    CHECK(length(hand1) > 0.02f && length(hand2 - hand1) < 1e-5f);
+  });
+
+  test("perf drag in Edit Mode, in Play, with another tab in front and over another window (round 468): each either plays or refuses with a reason - never a button left down or a script left running - and the next real click selects", [r468t_clean, r468t_click_selects] {
+    auto run = [&](const char *what, Editor &ed, const char *line) {
+      const size_t at = r468_log_mark();
+      ed.command(line);
+      r34_steps(ed, 3);
+      const PerfDragResult &r = ed.perf_drag_result_for_test();
+      std::printf("    %s: ok %d '%s'\n", what, (int)r.ok, r.error.c_str());
+      CHECK(r468t_clean(ed));
+      CHECK(r.ok || !r.error.empty() || !r468_log_since(at).empty());
+    };
+    {
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Cube");
+      ed.command("edit vertex");
+      ed.command("tool move");
+      r34_steps(ed, 3);
+      run("Edit Mode", ed, "perf drag gizmo x 30 frames 3");
+      ed.command("edit off");
+      r34_steps(ed, 3);
+      CHECK(r468t_click_selects(ed));
+    }
+    {
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Cube");
+      ed.command("tool move");
+      ed.command("play");
+      r34_steps(ed, 4);
+      run("Play", ed, "perf drag gizmo x 30 frames 3");
+      run("Play, G", ed, "perf drag key g 20 20 frames 3");
+      ed.command("stop");
+      r34_steps(ed, 4);
+      CHECK(r468t_click_selects(ed));
+    }
+    {
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Cube");
+      ed.command("tool move");
+      ed.command("window Game");
+      r34_steps(ed, 3);
+      run("Game tab in front", ed, "perf drag gizmo x 30 frames 3");
+      ed.command("window Scene");
+      r34_steps(ed, 3);
+      CHECK(r468t_click_selects(ed));
+    }
+    {
+      Editor ed;
+      r34_open(ed);
+      const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+      run("mouse over the Hierarchy", ed, strprintf("perf drag at %d %d %d %d frames 3", h.x + h.w / 2, h.y + 20, h.x + h.w / 2, h.y + 60).c_str());
+      CHECK(r468t_click_selects(ed));
+    }
+    {
+      Editor ed;
+      r34_open(ed);
+      ed.command("select Cube");
+      run("ruler with no Animation window", ed, "perf drag ruler 0 20");
+      CHECK(!ed.perf_drag_result_for_test().ok && r468t_click_selects(ed));
+    }
+  });
+
+  test("perf drag twice at the same pixel (round 468): the second press, a moment after the first release, is not a double-click - the Scene view is not framed on the selection and the camera stays", [r468t_settle] {
+    Editor ed;
+    r34_open(ed);
+    r468t_settle(ed);
+    ed.command("select Cube");
+    r34_steps(ed, 3);
+    const Recti v = ed.scene_view_rect();
+    const int x = v.x + v.w / 2, y = v.y + v.h / 2;
+    const Vec3 eye0 = ed.scene_eye();
+    ed.command(strprintf("perf drag at %d %d %d %d frames 2", x, y, x + 6, y));
+    ed.command(strprintf("perf drag at %d %d %d %d frames 2", x, y, x + 6, y));
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int i = 0; i < 6; i++) ed.step_frame_headless();
+    std::printf("    the eye moved %.4f m after two scripted presses at (%d, %d)\n", length(ed.scene_eye() - eye0), x, y);
+    CHECK(length(ed.scene_eye() - eye0) < 1e-3f);
+  });
+
+  test("a clip playing with Centre of Mass shown (round 468): the Scene view still draws the moving avatar - about as many frames as with it hidden (the stress row 'Centre of Mass shown: the clip playing' read NO VIEW)", [] {
+    uint64_t renders[2] = {0, 0}, deforms[2] = {0, 0}, applies[2] = {0, 0};
+    for (int shown = 0; shown < 2; shown++) {
+      Editor ed;
+      ed.init_headless(1600, 1000);
+      ed.command("benchscene avatarlikequick");
+      ed.command("layout H(0.74,V(0.6,L(0:0),L(16,17,4,5:0)),L(3,15,2:0))");  // (the stress section's Scene-view-only layout)
+      for (int i = 0; i < 4; i++) ed.step_frame_headless();
+      ed.command("select AvatarLike");
+      ed.command("assist on physics");
+      ed.command(shown ? "body show on" : "body show off");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      ed.command("anim play");
+      for (int i = 0; i < 2; i++) ed.step_frame_headless();
+      const FrameProfile p0 = ed.frame_profile_totals();
+      const PoseCounts c0 = ed.pose_counts_total_for_test();
+      for (int i = 0; i < 24; i++) {
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(17));
+      }
+      const FrameProfile p1 = ed.frame_profile_totals();
+      renders[shown] = p1.view_renders - p0.view_renders, deforms[shown] = (ed.pose_counts_total_for_test() - c0).skin_deforms, applies[shown] = (ed.pose_counts_total_for_test() - c0).clip_applies;
+      ed.command("anim stop");
+      std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+    }
+    std::printf("    24 paced frames, Centre of Mass hidden: %llu view renders, %llu deforms, %llu clip applies; shown: %llu view renders, %llu deforms, %llu clip applies\n", (unsigned long long)renders[0],
+                (unsigned long long)deforms[0], (unsigned long long)applies[0], (unsigned long long)renders[1], (unsigned long long)deforms[1], (unsigned long long)applies[1]);
+    CHECK(renders[0] > 0 && renders[1] > 0 && renders[1] * 2 >= renders[0]);
+  });
+
+  test("perf drag key with nothing under it (round 468): an origin off the Scene view (behind the camera, far to the side) is refused and the key never left pressed; with no active object likewise", [r468t_clean, r468t_click_selects, r468t_settle] {
+    Editor ed;
+    r34_open(ed);
+    r468t_settle(ed);
+    ed.command("select Cube");
+    GameObject *cube = ed.scene().find_by_name("Cube");
+    const Vec3 eye = ed.scene_eye();
+    int off_screen_cases = 0, started_anyway = 0;
+    const Vec3 spots[] = {eye + (eye - Vec3(0.0f, 0.5f, 0.0f)) * 100.0f, Vec3(500, 0, 500), Vec3(-500, 0, -500), Vec3(500, 0, -500), Vec3(-500, 0, 500), Vec3(0, 3000, 0), Vec3(4000, 0, 0)};
+    for (const Vec3 &spot : spots) {
+      cube->set_world_position(spot);
+      ed.mark_changed_for_test("R468t far");
+      r34_steps(ed, 3);
+      ed.command("select Cube");
+      int x = 0, y = 0;
+      const bool projects = ed.project_to_window(spot, x, y);
+      const bool on_view = projects && ed.scene_view_rect().contains(x, y);
+      if (on_view) continue;
+      off_screen_cases++;
+      ed.command("perf drag key g 10 10 frames 3");
+      r34_steps(ed, 2);
+      const bool refused = !ed.perf_drag_result_for_test().ok;
+      std::printf("    origin at %g %g %g projects %d to (%d, %d), on the view %d: %s\n", spot.x, spot.y, spot.z, (int)projects, x, y, (int)on_view, refused ? "refused" : "the script ran anyway");
+      started_anyway += refused ? 0 : 1;
+      CHECK(r468t_clean(ed));
+    }
+    CHECK(off_screen_cases >= 1);
+    CHECK(started_anyway == 0);  // (the message says "the active object's origin is not on screen")
+    cube->set_world_position({0.0f, 0.5f, 0.0f});
+    ed.mark_changed_for_test("R468t back");
+    r34_steps(ed, 3);
+    ed.clear_selection_for_test();
+    r34_steps(ed, 2);
+    ed.command("perf drag key g 10 10");
+    CHECK(!ed.perf_drag_result_for_test().ok && r468t_clean(ed));  // (no active object)
+    CHECK(r468t_click_selects(ed));
+  });
+
+  test("perf drag and Esc before the press (round 468): a real Esc while the script is still aiming ends it; nothing is pressed", [r468t_clean] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const Vec3 p0 = ed.scene().find_by_name("Cube")->world_position();
+    ed.command("perf drag gizmo x 40 frames 6 queue");
+    ed.step_frame_headless();  // the probe
+    platform::Event esc;
+    esc.type = platform::EventType::KeyDown;
+    esc.key = platform::KEY_ESCAPE;
+    ed.step_frame_headless({esc});
+    r34_steps(ed, 3);
+    CHECK(r468t_clean(ed) && length(ed.scene().find_by_name("Cube")->world_position() - p0) < 1e-5f);
+  });
+
+  test("perf status and perf mark print what they printed, and the posing lines carry the in-place and whole-build counts (round 468)", [] {
+    Editor ed;
+    r468_rig(ed);
+    ed.command("select LeftHandIK");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    ed.command("perf mark one");
+    r34_steps(ed, 3);
+    size_t at = r468_log_mark();
+    ed.command("perf mark two");
+    const std::string mark = r468_log_since(at);
+    std::printf("    %s", mark.c_str());
+    CHECK(mark.find("perf mark two: ") != std::string::npos && mark.find(" ms over 3 frame(s), the longest ") != std::string::npos);
+    at = r468_log_mark();
+    ed.command("perf status");
+    const std::string status = r468_log_since(at);
+    for (const char *item : {"perf: frame ", "perf posing: ", "perf posing counts: ", "render meshes built whole", "tangents built whole", "mesh copies", "render meshes moved in place", "moves in place refused",
+                             "refused for a new split"})
+      CHECK(status.find(item) != std::string::npos);
+    at = r468_log_mark();
+    ed.command("perf drag gizmo y 30 frames 3");
+    const std::string said = r468_log_since(at);
+    for (const char *item : {"render meshes built whole", "tangents built whole", "mesh copies", "render meshes moved in place", "moves in place refused", "refused for a new split"})
+      CHECK(said.find(item) != std::string::npos);
+    at = r468_log_mark();
+    ed.command("perf frames 2");
+    CHECK(r468_log_since(at).find("moves in place refused") != std::string::npos);
+  });
+
+  test("the posing counters after undo and redo (round 468): an undone IK-target drag solves again and puts the hand back; a redo solves again and moves it out", [] {
+    Editor ed;
+    r468_rig(ed);
+    GameObject *target = ed.scene().find_by_name("LeftHandIK");
+    CHECK(target != nullptr);
+    if (!target) return;
+    target->set_world_position(target->world_position() + Vec3(0, 0.12f, 0));
+    ed.mark_changed_for_test("R468t hand up");
+    r34_steps(ed, 2);
+    ed.command("select LeftHandIK");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const Vec3 t0 = target->world_position();
+    ed.command("perf drag gizmo x 60 frames 4");
+    r34_steps(ed, 2);
+    const Vec3 t1 = target->world_position();
+    CHECK(ed.perf_drag_result_for_test().ok && length(t1 - t0) > 0.05f);
+    const PoseCounts a = ed.pose_counts_total_for_test();
+    ed.command("undo");
+    r34_steps(ed, 3);
+    const PoseCounts b = ed.pose_counts_total_for_test();
+    GameObject *back = ed.scene().find_by_name("LeftHandIK");
+    std::printf("    after undo: %llu solves, the target %.3f m from where the drag began\n", (unsigned long long)(b - a).constraint_solves, back ? length(back->world_position() - t0) : -1.0f);
+    CHECK(back && length(back->world_position() - t0) < 1e-3f && (b - a).constraint_solves >= 1);
+    ed.command("redo");
+    r34_steps(ed, 3);
+    const PoseCounts c = ed.pose_counts_total_for_test();
+    back = ed.scene().find_by_name("LeftHandIK");
+    CHECK(back && length(back->world_position() - t1) < 1e-3f && (c - b).constraint_solves >= 1);
+  });
+
+  /* ---- Round 468, from the code review: a script plays in the main window alone ---- */
+  test("perf drag with another editor window open (round 468): refused - the script's events go to the main window, and what it aims at is kept once for the editor - and a window opened under a playing script stops it with the button released", [r468t_clean, r468t_click_selects] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("window Render");
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    ed.command("dock move Render newwindow");
+    r34_steps(ed, 2);
+    CHECK(ed.window_count_for_test() == 2);
+    for (const char *line : {"perf drag gizmo x 40 frames 3", "perf drag key g 10 10 frames 3", "perf drag at 300 300 320 300 frames 3", "perf drag ruler 0 10"}) {
+      ed.command(line);
+      r34_steps(ed, 2);
+      const PerfDragResult &r = ed.perf_drag_result_for_test();
+      CHECK(!r.ok && r.error.find("another editor window is open") != std::string::npos && r468t_clean(ed));
+    }
+    ed.command("dock move Render main");
+    r34_steps(ed, 2);
+    CHECK(ed.window_count_for_test() == 1);
+    /* One window again: the script plays; a window opened under it stops it as a real Esc would. */
+    ed.command("select Cube");
+    ed.command("perf drag gizmo x 40 frames 4 loop queue");
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();
+    CHECK(ed.perf_script_active_for_test() && ed.gizmo_dragging_for_test());
+    ed.command("dock move Render newwindow");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::printf("    a window opened under a looping drag: %s\n", ed.perf_drag_result_for_test().error.c_str());
+    CHECK(r468t_clean(ed) && ed.perf_drag_result_for_test().error.find("another editor window opened") != std::string::npos);
+    ed.command("dock move Render main");
+    r34_steps(ed, 2);
+    CHECK(r468t_click_selects(ed));
+  });
+
+  test("perf drag ruler when the ruler is not under its own point (round 468): the aim frame checks it as the gizmo's and the Puppet controls' are checked - with the Animation window gone the script is refused before it presses, and no click lands on what is there instead", [r468t_clean] {
+    Editor ed;
+    r468_rig(ed);
+    ed.command("perf clip frames 20");
+    ed.command("layout Animation");
+    r34_steps(ed, 4);
+    ed.command("perf drag ruler 0 10 frames 3");
+    r34_steps(ed, 2);
+    CHECK(ed.perf_drag_result_for_test().ok && std::fabs(ed.anim_frame_for_test() - 10.0f) < 0.51f);
+    /* The Animation window closed between the command's check and its first frame: the aim frame finds no ruler under
+     * the mouse and nothing is pressed. (A queued script: the layout changes before its aim frame runs.) */
+    ed.command("anim frame 0");
+    r34_steps(ed, 2);
+    const uint64_t undo0 = ed.frame_profile_totals().undo_steps;
+    ed.command("perf drag ruler 0 10 frames 3 queue");
+    ed.command("layout Default");
+    for (int i = 0; i < 8; i++) ed.step_frame_headless();
+    std::printf("    the ruler gone under a queued scrub: %s; the playhead on frame %.1f\n", ed.perf_drag_result_for_test().error.c_str(), ed.anim_frame_for_test());
+    CHECK(!ed.perf_drag_result_for_test().ok && ed.perf_drag_result_for_test().error.find("the ruler isn't under its own point") != std::string::npos);
+    CHECK(r468t_clean(ed) && std::fabs(ed.anim_frame_for_test()) < 0.01f && ed.frame_profile_totals().undo_steps == undo0);  // (no press reached anything)
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("a key held when a script starts (round 468): its release still arrives while the script plays, a modifier held then is not the script's, and a lost focus is handed on when the script has ended", [r468t_clean] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    auto key = [](platform::EventType t, int k) {
+      platform::Event e;
+      e.type = t, e.key = k;
+      return e;
+    };
+    ed.step_frame_headless({key(platform::EventType::KeyDown, platform::KEY_ENTER), key(platform::EventType::KeyDown, platform::KEY_SHIFT), key(platform::EventType::KeyDown, platform::KEY_SUPER)});
+    CHECK(ed.ui_for_test().in.key_down[platform::KEY_ENTER] && ed.ui_for_test().in.key_down[platform::KEY_SHIFT] && ed.ui_for_test().in.key_down[platform::KEY_SUPER]);
+    ed.command("perf drag gizmo x 40 frames 12 queue");
+    CHECK(!ed.ui_for_test().in.key_down[platform::KEY_SHIFT]);  // (the modifier is not the script's: its `mods` are)
+    for (int i = 0; i < 5; i++) ed.step_frame_headless();
+    CHECK(ed.perf_script_active_for_test());
+    platform::Event lost;
+    lost.type = platform::EventType::FocusLost;
+    ed.step_frame_headless({key(platform::EventType::KeyUp, platform::KEY_ENTER), lost});
+    CHECK(!ed.ui_for_test().in.key_down[platform::KEY_ENTER]);       // (the release arrived)
+    CHECK(ed.ui_for_test().in.key_down[platform::KEY_SUPER]);        // (the lost focus is held back: it would let go of the script's button too)
+    CHECK(ed.perf_script_active_for_test() && ed.gizmo_dragging_for_test());
+    ed.step_frame_headless({key(platform::EventType::KeyDown, platform::KEY_CTRL)});  // (a real press meanwhile: dropped)
+    CHECK(!ed.ui_for_test().in.key_down[platform::KEY_CTRL]);
+    for (int i = 0; i < 40 && ed.perf_script_active_for_test(); i++) ed.step_frame_headless();
+    CHECK(ed.perf_drag_result_for_test().ok && r468t_clean(ed));
+    ed.step_frame_headless({key(platform::EventType::KeyDown, platform::KEY_ALT)});
+    CHECK(!ed.ui_for_test().in.key_down[platform::KEY_SUPER]);  // (the script has ended: the lost focus is handed on, before this frame's own events)
+    CHECK(ed.ui_for_test().in.key_down[platform::KEY_ALT]);     // (real input again)
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -11040,5 +11845,6 @@ void run_editor_tests() {
   tests_round462();
   tests_round462_engineer();
   tests_round462_review();
+  tests_round468();
   coverage_tests();
 }

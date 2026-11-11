@@ -213,6 +213,17 @@ Body build(const Scene &scene, const GameObject &root, float total_mass) {
   return body;
 }
 
+bool rebind(Body &b, const GameObject &root) {
+  std::vector<ArmatureBone> bones;
+  armature_bones(root, bones);
+  if (bones.size() != b.bones.size()) return false;  // (build makes one entry a bone, in this order)
+  for (size_t i = 0; i < bones.size(); i++)
+    if (bones[i].object->name != b.bones[i].name) return false;
+  for (size_t i = 0; i < bones.size(); i++) b.bones[i].object = bones[i].object;
+  b.root = &root;
+  return true;
+}
+
 State state(const Body &b, const std::vector<ArmatureBone> &now) {
   State st;
   std::unordered_map<const GameObject *, const ArmatureBone *> by;

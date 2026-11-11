@@ -346,9 +346,10 @@ struct Mesh : MeshCaches {
   /* The faces with a vertex whose position differs from the one cache ci drew, ascending. */
   void moved_faces(int ci, std::vector<uint32_t> &faces) const;
   /* Positions and corner normals into cache ci's render vertices: every corner, or only those at `verts`. The changed
-   * render vertices are added to `changed`; false when a render vertex's corners now differ (the build would split). */
-  bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed) const;
-  bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const;
+   * render vertices are added to `changed`; false when a render vertex's corners now differ (the build would split:
+   * `split` is set then - round 468's count) or when the cache's indices don't fit the mesh. */
+  bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed, bool &split) const;
+  bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed, bool &split) const;
   void record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const std::vector<uint32_t> &faces) const;
   /* A full build's render vertices and triangles (corner_rv: each corner's render vertex): on every thread (task 0109),
    * or the serial build before it (the tests compare). */
@@ -382,6 +383,10 @@ struct MeshCounts {
   uint64_t copies = 0, full_builds = 0, in_place = 0, tangent_builds = 0, edge_builds = 0;
   uint64_t partial_normals = 0;  // task 0099: in-place moves whose normals were worked out only around what moved
   double ms_copies = 0, ms_full_builds = 0, ms_in_place = 0, ms_tangents = 0, ms_edges = 0;
+  double ms_in_place_normals = 0, ms_in_place_tangents = 0;  // round 468: inside ms_in_place - the move's normals, and its tangents (a normal-mapped mesh's)
+  /* Round 468: in-place moves refused (the render mesh is then built whole, and its tangents with it) - and, of
+   * them, the ones refused because a render vertex's corners no longer share a normal (the build would split it). */
+  uint64_t in_place_refused = 0, in_place_split = 0;
   MeshCounts operator-(const MeshCounts &o) const;
 };
 MeshCounts mesh_counts();

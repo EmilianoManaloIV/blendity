@@ -7,6 +7,7 @@
 // Also the Humanoid / Quadruped rig presets and the name-based mapping of an imported skeleton to IK.
 #include "scene.h"
 #include "rig_build.h"
+#include "pose_counts.h"
 #include "../core/core.h"
 
 #include <algorithm>
@@ -52,6 +53,7 @@ GameObject *named_below(GameObject &g, const std::string &name) {
 GameObject *resolve(const Scene &scene, const GameObject &from, const std::string &name, uint64_t &id) {
   if (GameObject *g = id ? scene.find(id) : nullptr)
     if (g->name == name) return g;
+  pose_add_name_walks(1);  // (round 468: a lookup that had to search, not the remembered id's hit)
   const GameObject *top = &from;
   while (top->parent) top = top->parent;
   GameObject *g = named_below(*const_cast<GameObject *>(top), name);
@@ -413,19 +415,48 @@ static bool solve_vrc(Scene &scene, GameObject &owner, VRCConstraintComponent &c
   return any;
 }
 
+static bool solve_ik_all(Scene &scene) {
+  bool any = false;
+  scene.for_each([&](GameObject &g) {
+    for (auto &c : g.components)
+      if (std::strcmp(c->type_name(), IKConstraint::kName) == 0) any = solve_one(*static_cast<IKConstraint *>(c.get())) || any;
+  });
+  return any;
+}
+
+static bool solve_vrc_all(Scene &scene) {
+  bool any = false;
+  scene.for_each([&](GameObject &g) {
+    for (auto &c : g.components)
+      if (std::strcmp(c->type_name(), VRCConstraintComponent::kName) == 0) any = solve_vrc(scene, g, *static_cast<VRCConstraintComponent *>(c.get())) || any;
+  });
+  return any;
+}
+
 bool solve_constraints(Scene &scene) {
-  const bool fk = RigControl::live.load(std::memory_order_relaxed) != 0 && solve_fk(scene);
-  bool any = fk;
-  if (IKConstraint::live.load(std::memory_order_relaxed) != 0)
-    scene.for_each([&](GameObject &g) {
-      for (auto &c : g.components)
-        if (std::strcmp(c->type_name(), IKConstraint::kName) == 0) any = solve_one(*static_cast<IKConstraint *>(c.get())) || any;
-    });
-  if (VRCConstraintComponent::live.load(std::memory_order_relaxed) != 0)  // (round 402: after FK and IK, as Unity's constraints run after the animator)
-    scene.for_each([&](GameObject &g) {
-      for (auto &c : g.components)
-        if (std::strcmp(c->type_name(), VRCConstraintComponent::kName) == 0) any = solve_vrc(scene, g, *static_cast<VRCConstraintComponent *>(c.get())) || any;
-    });
+  const bool fk_live = RigControl::live.load(std::memory_order_relaxed) != 0;
+  const bool ik_live = IKConstraint::live.load(std::memory_order_relaxed) != 0;
+  const bool vrc_live = VRCConstraintComponent::live.load(std::memory_order_relaxed) != 0;
+  if (!fk_live && !ik_live && !vrc_live) return false;  // (no rig: no walk, and no PoseCounts tally either)
+  BL_ZONE("solve constraints");
+  PoseTimer whole(PoseStat::Constraints);  // (round 468: one solve a call, its parts nested)
+  bool any = false;
+  if (fk_live) {
+    PoseTimer part(PoseStat::ConstraintsFK);
+    part.count = false;
+    any = solve_fk(scene);
+  }
+  if (ik_live) {
+    PoseTimer part(PoseStat::ConstraintsIK);
+    part.count = false;
+    any = solve_ik_all(scene) || any;
+  }
+  if (vrc_live) {  // (round 402: after FK and IK, as Unity's constraints run after the animator)
+    PoseTimer part(PoseStat::ConstraintsVRC);
+    part.count = false;
+    any = solve_vrc_all(scene) || any;
+  }
+  if (any) pose_add_moves(1);
   return any;
 }
 

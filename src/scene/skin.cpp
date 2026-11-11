@@ -7,6 +7,7 @@
 #include "export.h"
 #include "scene.h"
 #include "skin_weights.h"
+#include "pose_counts.h"
 #include "../core/core.h"
 #include "../core/jobs.h"
 
@@ -228,8 +229,10 @@ static const GameObject *armature_target(const SkinModifier &s) {
 }
 
 uint64_t SkinModifier::modifier_dependency_hash() const {
+  BL_ZONE("skin key");
   const GameObject *root = armature_target(*this);
   if (!root) return 0;
+  PoseTimer timer(PoseStat::SkinKey);  // (round 468: only the keys that walked the bones; a skin with no rig costs nothing)
   uint64_t h = kFnvBasis;
   auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
   const Armature &a = *root->get<Armature>();
@@ -252,6 +255,8 @@ uint64_t SkinModifier::modifier_dependency_hash() const {
 }
 
 void SkinModifier::modify(Mesh &m) const {
+  BL_ZONE("skin deform");
+  ScopedTimer whole;  // (round 468: PoseCounts' setup time is read off it before the vertex loop, the deform's at the end)
   const GameObject *root = armature_target(*this);
   if (!root || m.vertex_groups.empty() || !m.groups_fit()) return;
   const Armature &arm = *root->get<Armature>();
@@ -290,6 +295,7 @@ void SkinModifier::modify(Mesh &m) const {
   const int kmax = std::max(1, std::min(max_influences, 8));
   const bool dq = arm.deform == 1;
   const bool has_cn = m.custom_normals_fit();  // custom normals (task 0149) turn with the same blend
+  pose_add(PoseStat::SkinSetup, whole.ms(), 0);
   JobSystem::global().parallel_for((int64_t)m.vert_count(), 1024, [&](int64_t b, int64_t e) {
     int idx[8];
     float wt[8];
@@ -355,6 +361,7 @@ void SkinModifier::modify(Mesh &m) const {
     }
   });
   m.touch();
+  pose_add(PoseStat::SkinDeform, whole.ms());
 }
 
 /* Automatic weights (Blender's With Automatic / Envelope weights, simplified): each vertex to the bones nearest it,

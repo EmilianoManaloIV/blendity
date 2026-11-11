@@ -31,6 +31,8 @@ void Editor::trail_refresh() {
   GameObject *arm = puppet_rig_of(active_object());  // (review 346: the controls' own lookup - a selected mesh finds its rig)
   TrailCache &c = trails_;
   if (!clip || !root || !arm || !(trails_.show || trails_.onion > 0 || zoe_.on)) return c.frames.clear(), c.todo.clear(), void(c.clip = nullptr);
+  BL_ZONE("trail refresh");
+  ProfileScope scope{prof_.ms_trails, {}};  // (round 468: only while trails, onion skins or the zoetrope are on)
   const uint64_t h = clip->version ^ (uint64_t)(uintptr_t)clip.get();  // (any key edit bumps the version)
   if (c.clip != clip.get() || c.hash != h || c.arm != arm->id) {
     c.clip = clip.get(), c.hash = h, c.arm = arm->id;

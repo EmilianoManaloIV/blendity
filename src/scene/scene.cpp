@@ -9,6 +9,7 @@
 #include "curve.h"
 #include "stroke_object.h"
 #include "blockout_object.h"  // (Blockout's and BlockoutPiece's registration)
+#include "pose_counts.h"
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -1826,6 +1827,8 @@ const Mesh *Outline::shell(const Mesh &src, float world_scale, int slot, float t
   ShellCache &c = shells_[std::max(0, std::min(kShellSlots - 1, slot))];
   const uint64_t serial = src.render_mesh().serial;  // unique per build of the source (not a reused address)
   if (c.mesh && serial != 0 && serial == c.serial && offset == c.offset && c.group == thickness_group) return c.mesh.get();
+  BL_ZONE("outline shell");
+  PoseTimer timer(PoseStat::OutlineShell);  // (round 468: shells built, not the cache hits above)
   /* The per-vertex width (task 0149): the thickness group's weight, 1 without one (or one the mesh hasn't). */
   const int gi = thickness_group.empty() ? -1 : src.find_group(thickness_group);
   const std::vector<float> *gw = gi >= 0 && src.vertex_groups[(size_t)gi].weights.size() == src.positions.size() ? &src.vertex_groups[(size_t)gi].weights : nullptr;
@@ -3211,6 +3214,8 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     return mf->mesh.get();
   }
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
+  BL_ZONE("evaluate mesh");
+  PoseTimer eval_timer(PoseStat::Evaluate);  // (round 468: the calls past the key hit, whole - the skin, the keys and the copies nested in it)
   /* Round 413 (ADR 0107): a slow stack goes to the editor's worker; what it had stays up meanwhile. Not when only the
    * base's positions moved since the last result (a dab, a drag: the chain follows them here, ADR 0075), and not inside
    * an EvaluateNowScope. */
@@ -3218,6 +3223,7 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   if (slow_eval_hook && tl_evaluate_now == 0 && kind <= 2 && !deform_only && (eval_pending_[kind] == key || evaluation_slow(*mf->mesh, components, on)) &&
       slow_eval_hook(*this, kind, key)) {
     eval_pending_[kind] = key;
+    eval_timer.count = false;  // (handed to the worker: not evaluated here)
     return eval_mesh_[kind] ? eval_mesh_[kind].get() : mf->mesh.get();
   }
   eval_pending_[kind] = 0;

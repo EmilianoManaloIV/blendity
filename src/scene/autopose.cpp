@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "autopose.h"
 #include "spring_bones.h"
+#include "pose_counts.h"
 #include "../core/core.h"
 #include <algorithm>
 #include <chrono>
@@ -74,6 +75,7 @@ bool hinge_like(const GameObject &g) {
 }  // namespace
 
 Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::vector<GameObject *> &pins, const body::Body *body, const Settings &s) {
+  BL_ZONE("autopose solve");
   Result res;
   const auto t0 = std::chrono::steady_clock::now();
   /* The joints: every body bone under the armature, parents first, each with the index of its nearest joint above. */
@@ -325,6 +327,8 @@ Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::ve
     res.balance = std::sqrt((c.x - support.x) * (c.x - support.x) + (c.z - support.z) * (c.z - support.z));
   }
   res.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  pose_add(PoseStat::Solver, res.ms);  // (round 468: a solve that reached its loop, and the iterations it ran)
+  pose_add_solver_iterations((uint64_t)std::max(0, (int)res.iterations));
   return res;
 }
 

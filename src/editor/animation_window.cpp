@@ -170,6 +170,8 @@ void Editor::draw_anim_holds(const Recti &ruler, const Recti &sheet, float end, 
 
 /* The clip at the playhead onto the scene (Preview only), IK after it, and what's shown remembered for Record. */
 void Editor::anim_apply() {
+  BL_ZONE("anim apply");
+  ProfileScope scope{prof_.ms_anim_apply, {}};  // (round 468)
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
   if (anim_.preview && root && clip) {
@@ -250,6 +252,7 @@ void Editor::note_clip_edit(AnimationClip &c) {
   if (c.asset_path.empty()) return;
   for (const auto &kv : clip_before_)
     if (kv.first == c.asset_path) return;
+  prof_.clip_serialisations++;  // (round 468)
   clip_before_.push_back({c.asset_path, save_clip_text(c)});
 }
 
@@ -306,6 +309,9 @@ void Editor::anim_record_changes() {
   AnimationClipPtr clip = anim_clip();
   if (!anim_.record || !anim_.preview || !root || !clip || playing_) return;
   if (anim_.shown_root != root->id || anim_.shown_clip != clip.get()) return anim_snapshot_shown();
+  BL_ZONE("record changes");
+  ProfileScope scope{prof_.ms_record, {}};  // (round 468: the Record pass whole, the clip's text it serialises counted)
+  prof_.clip_serialisations++;
   const std::string before = save_clip_text(*clip);
   bool keyed = false;
   for (GameObject *g : subtree(root)) {
@@ -1343,6 +1349,8 @@ void Editor::draw_animation_window(const Recti &r) {
   draw_body_strip(ruler, end);  // (contacts and the flight's frames under the ruler: tasks 0116, 0117)
   draw_anim_rows(*clip, root, list, body2, sheet, row_h, end);
   anim_.sheet = sheet, anim_.sheet_end = end;
+  anim_.ruler = ruler, anim_.drawn_at = frames_;  // (round 468: `perf drag ruler` needs both)
+  anim_.ruler_hot = u.hovered(ruler);             // (and whether a press at the mouse would be the ruler's: no menu over it)
   if (anim_.curves) draw_anim_curves(*clip, sheet, end);
   /* The playhead (red while recording). */
   const int px = anim_x_of(sheet, anim_.frame, end);
