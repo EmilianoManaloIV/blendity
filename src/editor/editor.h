@@ -1034,6 +1034,7 @@ class Editor {
   bool export_textures_dialog_for_test() const { return dialog_ == Dialog::ExportTextures; }  // (task 0257)
   Vec2 render_pan_for_test() const { return render_pan_; }
   bool scene_dirty_for_test() const { return scene_dirty_; }
+  void clear_scene_dirty_for_test() { scene_dirty_ = false; }  // (round 479: a saved scene)
   bool playing_for_test() const { return playing_; }
   void request_close_for_test() { request_close(); }
   std::string button_disabled_why_for_test(const std::string &label) const {
@@ -3233,6 +3234,7 @@ class Editor {
   void assign_texture_asset(GameObject *g, const std::string &asset_path);
   bool drop_texture_asset(const std::string &abs_path, int mx, int my);
   bool scene_drawn_ = false;  // the Scene view drew this frame (another tab can hide it)
+  bool any_scene_drawn_ = false;  // (round 479) some window's Scene view drew this frame; never swapped with a window's view state
   bool texture_touch_pending_ = false;  // a texture field was dragged: materials re-resolve on release
   ProceduralTexturePtr texture_selected_;
   MultiSelect<ProceduralTexturePtr> texture_multi_;   // task 0053
@@ -3971,6 +3973,64 @@ class Editor {
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   bool blockout_refuses_edit_mode(const GameObject *g);
+  /* Round 479 (task 0455; editor/blockout_handles.cpp, blockout_tool.cpp): handles on the active piece, the Room tool. */
+  struct BlockoutDrag {
+    bool active = false;
+    uint64_t piece = 0;
+    BlockoutHandle handle;
+    BlockoutPiece before;     // the component as it was when the handle was taken (every frame is made from it: no drift)
+    Transform local0;         // the piece's local transform then (Esc puts it back byte for byte)
+    Mat4 world0;            // its world matrix then
+    Vec3 origin_w, dir_w;     // the handle's place and unit way out in the world then
+    float scale_dir = 1.0f;   // how long the handle's own-space way out is in the world (a world metre is 1 / this own units)
+    float to_blockout = 1.0f; // ... in the Blockout's space (a wall is measured there)
+    float grab = 0.0f;        // where on the handle's line the mouse took it
+    float t = 0.0f;           // world metres moved, after snapping
+    bool snapped = false;     // held to a plane of another piece (kept until the mouse leaves it by twice the snap distance)
+    float snap_t = 0.0f;
+    bool moved = false;
+    Vec2 press_px;            // where the mouse took it (window pixels): nothing changes until it has left this by a few pixels
+    bool armed = false;
+    bool was_dirty = false;   // the scene's unsaved mark at the press (Esc puts it back)
+    std::string text;         // "+x  3.00 m": beside the handle and in the hint line
+  } blockout_drag_;
+  struct RoomTool {
+    bool active = false;
+    int stage = 0;            // 0 waiting for the first press, 1 the footprint is dragged, 2 the height
+    bool circle = false, solid = false, subtract = false;  // the options: a Circle footprint, a Solid piece (not a room), Subtract (a solid's operation)
+    float wall = 0.2f;        // a room's wall, floor and ceiling
+    Vec3 origin, normal, u;   // the surface point of the first press, its normal and the axis lying in it (u, normal, cross(u, normal): right-handed)
+    Vec3 corner;              // the footprint's other point
+    float height = 0.0f;
+    std::string typed;
+  } room_;
+  GameObject *blockout_handle_target();  // the active piece that shows handles (nullptr: none)
+  void blockout_handle_view(const GameObject &g, std::vector<BlockoutHandle> &out, bool visible_only = true);  // its handles as the camera sees them now
+  int blockout_handle_hot(const Recti &view, const GameObject &g, const std::vector<BlockoutHandle> &hs);  // the handle under the mouse (-1 none)
+  bool blockout_handle_begin(GameObject &g, const BlockoutHandle &h, BlockoutDrag &d);
+  void blockout_handle_move(GameObject &g, const BlockoutDrag &d, float metres, bool both);
+  float blockout_snap_t(const Recti &view, const GameObject &g, float raw);
+  /* The transform gizmo's axis move of a piece: `d` (metres along `axis`) lands a corner or face of the piece in the plane of another
+   * piece's face or corner within a few pixels. `start_pos`: where the piece was when the drag began. True when it snapped. */
+  bool blockout_move_snap(const Recti &view, const GameObject &lead, Vec3 start_pos, Vec3 axis, float &d);
+  bool blockout_handles_update(const Recti &view);
+  bool blockout_drag_update(const Recti &view);
+  void blockout_drag_cancel(GameObject *g);
+  void draw_blockout_handles(const Recti &view);
+  void blockout_handle_command(const std::vector<std::string> &t);
+  void set_room_tool(bool on);
+  bool room_update(const Recti &view);
+  void room_draw(const Recti &view);
+  bool room_surface_hit(const Recti &view, int mx, int my, Vec3 &p, Vec3 &n);
+  Vec3 room_snap_point(Vec3 p, Vec3 n) const;
+  void room_extent(float &du, float &dz) const;  // the footprint's size so far: along u and the third axis (a circle: its radius, 0)
+  std::vector<Vec3> room_outline(float height) const;  // the footprint's corners (a circle's 32 points) lifted `height` along the normal
+  GameObject *room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float dz, float height, bool circle);
+  GameObject *create_empty_blockout();
+  void room_command(const std::vector<std::string> &t);
+  void room_options_command(const std::vector<std::string> &t);
+  void draw_room_tools(ui::Layout &lay);
+  void record_blockout_last(GameObject *piece);
   void join_selected();
   GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
@@ -5688,6 +5748,11 @@ class Editor {
     int draw_face = -1, draw_shape = 0;
     const Mesh *result = nullptr;  // the mesh the operation left on the object, and its version: anything else there ends the panel
     uint64_t result_version = 0;
+    /* A Blockout piece just made (round 479): a b c = the sizes the shape reads (width / radius, depth / head, height / sill), d e f =
+     * a room's wall, floor, ceiling, op = its operation; the floor's middle and the way up, so a new height keeps the floor where it was. */
+    float c = 0.0f, d = 0.0f, e = 0.0f, f = 0.0f;
+    int op = 0;
+    Vec3 base_p, base_up;
   };
   bool obj_last_valid() const;
   const ObjLastOp &obj_last_for_test() const { return obj_last_; }
@@ -5703,6 +5768,7 @@ class Editor {
   void obj_last_note_result();
   void obj_last_end() { obj_last_ = ObjLastOp{}; }
   void obj_last_rerun();
+  void blockout_last_rerun();  // (round 479: a Blockout piece just made)
   void draw_obj_last_panel(const Recti &view);
   /* Plasticity's construction lines while drawing: X / Y / Z lay a guide along that axis (local
    * or global, as Snap Axes says) through the last point or the point under the mouse; Ctrl+click
@@ -6951,6 +7017,21 @@ class Editor {
     for (const auto &j : blockout_jobs_)
       if (!j->done.load()) return false;
     return true;
+  }
+  /* Round 479: the handles' drag and the Room tool, for the tests. */
+  bool blockout_dragging_for_test() const { return blockout_drag_.active; }
+  const std::string &blockout_drag_text_for_test() const { return blockout_drag_.text; }
+  bool blockout_drag_snapped_for_test() const { return blockout_drag_.snapped; }
+  bool room_tool_active_for_test() const { return room_.active; }
+  int room_tool_stage_for_test() const { return room_.stage; }
+  /* Where the active piece's handle `name` is on the screen now (the window's pixels); false when it has none or is behind the camera. */
+  bool blockout_handle_pixel_for_test(const std::string &name, int &x, int &y) {
+    GameObject *g = blockout_handle_target();
+    if (!g) return false;
+    std::vector<BlockoutHandle> hs;
+    blockout_handle_view(*g, hs);
+    const BlockoutHandle *h = blockout_handle_named(hs, name);
+    return h && project_to_window(g->world_matrix().point(h->at), x, y);
   }
   void blockout_poll_for_test() { blockout_jobs_poll(); }  // (the frame's poll alone: what a frame does after its views moved a piece)
   void set_blockout_cancel_stale_for_test(bool on) { blockout_cancel_stale_ = on; }  // (the stress row measures both)

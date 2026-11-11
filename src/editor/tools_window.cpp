@@ -103,6 +103,7 @@ void Editor::draw_tools_window(const Recti &r) {
                           true, [this, kind] { create_object(kind); }});
     }
     grid(blockout, 4);
+    draw_room_tools(lay);  // (round 479: the Room tool and its options)
   }
   if (section("Draw", FocusDraw)) {
     std::vector<GridButton> bs;

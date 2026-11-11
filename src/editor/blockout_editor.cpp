@@ -15,6 +15,8 @@ namespace bl {
 
 namespace {
 
+bool finite3_bits(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
+
 /* Whether this part of the build ran by the exact path, the field path or both. */
 std::string path_text(const blockout::Report &r) {
   bool exact = false, field = false;
@@ -313,7 +315,106 @@ GameObject *Editor::create_blockout(const std::string &first_piece) {
   select(piece->id);
   update_blockouts(true);  // (its first mesh now: the step recorded holds it)
   mark_changed("Create Blockout");
+  record_blockout_last(piece);
   return g;
+}
+
+/* A Blockout with no piece, at the world's origin and unturned: the Room tool's pieces are placed in the world, so their numbers are the
+ * Blockout's own. */
+GameObject *Editor::create_empty_blockout() {
+  GameObject *g = scene_->create(unique_object_name("Blockout"), nullptr);
+  g->add<Blockout>();
+  g->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  g->add<MeshRenderer>();
+  return g;
+}
+
+/* What the Room tool's two drags (and `blockout room`) make: a room, or a solid when the tool's Solid option is on (Add or Subtract),
+ * standing on the surface. `u`, `normal` and cross(u, normal) are its right-handed axes; the footprint runs from `origin` by `du` along u
+ * and `dz` along the third axis (signed), or is a circle of radius `du` round `origin`; `height` is along the normal (a room always goes
+ * up the normal: its floor's top is the surface). The piece goes into the Blockout of the selected piece, else the selected Blockout, else
+ * a new one. nullptr (and a warning) when the numbers are no piece. */
+GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float dz, float height, bool circle) {
+  const bool solid = room_.solid;
+  const Vec3 z = cross(u, normal);
+  if (!finite3_bits(origin) || !finite3_bits(u) || !finite3_bits(normal) || !finite_bits(du) || !finite_bits(dz) || !finite_bits(height)) {
+    Log::warn("Room: the numbers are not finite - nothing made");
+    return nullptr;
+  }
+  const float h = solid ? height : std::fabs(height);
+  const float small = 1e-3f;
+  if (std::fabs(h) < small || (circle ? std::fabs(du) < small : std::fabs(du) < small || std::fabs(dz) < small)) {
+    Log::warn("Room: a footprint or a height of no size - nothing made");
+    return nullptr;
+  }
+  GameObject *sel = active_object();
+  GameObject *target = sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
+  /* The sizes are written in the Blockout's own units: a uniformly scaled Blockout takes them divided by its scale, an unevenly scaled one
+   * has no piece of the dragged size whatever its turn. */
+  float scale = 1.0f;
+  if (target) {
+    const Mat4 &tw = target->world_matrix();
+    const float sx = length(tw.dir({1.0f, 0.0f, 0.0f})), sy = length(tw.dir({0.0f, 1.0f, 0.0f})), sz = length(tw.dir({0.0f, 0.0f, 1.0f}));
+    const float lo = std::min(sx, std::min(sy, sz)), hi = std::max(sx, std::max(sy, sz));
+    /* Axes that are not square to each other (a turned Blockout under an unevenly scaled parent) shear the piece: no size is right for it. */
+    bool square = lo > 1e-6f && finite_bits(hi);
+    if (square) {
+      const Vec3 ax = normalize(tw.dir({1.0f, 0.0f, 0.0f})), ay = normalize(tw.dir({0.0f, 1.0f, 0.0f})), az = normalize(tw.dir({0.0f, 0.0f, 1.0f}));
+      square = std::fabs(dot(ax, ay)) < 1e-3f && std::fabs(dot(ay, az)) < 1e-3f && std::fabs(dot(ax, az)) < 1e-3f;
+    }
+    if (!square || hi > lo * 1.001f) {
+      Log::warn("Room: '%s' is scaled unevenly or sheared (or flat): a room of the dragged size cannot be made in it - make it in a Blockout with an even scale", target->name.c_str());
+      return nullptr;
+    }
+    scale = sx;
+  }
+  if (!target) target = create_empty_blockout();
+  PieceWords w;
+  w.room = !solid, w.shape = circle ? 1 : 0, w.op = solid && room_.subtract ? 1 : 0, w.ok = true;
+  GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);  // (a thickness is in the Blockout's units too)
+  BlockoutPiece *bp = piece->get<BlockoutPiece>();
+  Vec3 centre = origin + normal * (h * 0.5f);
+  if (circle) bp->radius = std::fabs(du) / scale, bp->height = std::fabs(h) / scale;
+  else {
+    centre = centre + u * (du * 0.5f) + z * (dz * 0.5f);
+    bp->size = {std::fabs(du) / scale, std::fabs(h) / scale, std::fabs(dz) / scale};
+  }
+  piece->set_world_rotation(quat_from_axes(u, normal, z));
+  piece->set_world_position(centre);
+  expanded_.insert(target->id);
+  select(piece->id);
+  update_blockouts(true);
+  mark_changed(std::string("Create Blockout ") + piece_base_name(w));
+  record_blockout_last(piece);
+  if (solid && h < 0.0f) {  // (a solid dug down from the surface: F9's height keeps the surface where it is, not the far end)
+    obj_last_.base_p = origin;
+    obj_last_.base_up = -piece->world_matrix().dir({0.0f, 1.0f, 0.0f});
+  }
+  return piece;
+}
+
+/* A piece just made: Adjust Last Operation (F9) re-runs it from its sizes. The floor's middle is kept where it was so a new height
+ * grows the piece upward from it; width and depth grow about the centre. */
+void Editor::record_blockout_last(GameObject *g) {
+  const BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+  if (!bp) return;
+  ObjLastOp o;
+  o.kind = "blockout", o.what = g->name, o.obj = g->id;
+  o.op = bp->operation;
+  if (bp->opening) o.a = bp->width, o.b = bp->head, o.c = bp->sill, o.n = 3;
+  else if (bp->shape == 0) o.a = bp->size.x, o.b = bp->size.z, o.c = bp->size.y, o.n = 0;
+  else if (bp->shape == 1) o.a = bp->radius, o.c = bp->height, o.n = 1;
+  else o.a = bp->radius, o.n = 2;
+  o.d = bp->wall, o.e = bp->floor, o.f = bp->ceiling;
+  o.flag = bp->room && !bp->opening;
+  const Mat4 w = g->world_matrix();
+  const float half = bp->shape == 0 ? bp->size.y * 0.5f : bp->shape == 1 ? bp->height * 0.5f : bp->radius;
+  o.base_p = w.point({0.0f, -half, 0.0f});
+  o.base_up = w.dir({0.0f, 1.0f, 0.0f});
+  o.serial = obj_last_serial_now();
+  obj_last_ = std::move(o);
+  obj_last_open_ = true;
+  obj_last_note_result();
 }
 
 /* The entries every menu that creates objects shares (GameObject, the Hierarchy's +, the Tools window's grid is its own). */
@@ -363,6 +464,7 @@ GameObject *Editor::create_blockout_piece(const std::string &what) {
   select(piece->id);
   update_blockouts(true);
   mark_changed(std::string("Create Blockout ") + base);
+  record_blockout_last(piece);
   return piece;
 }
 
@@ -403,16 +505,15 @@ GameObject *Editor::create_opening(GameObject &bo, int opening, const std::vecto
   select(piece->id);
   update_blockouts(true);
   mark_changed(std::string("Create Blockout ") + base);
+  record_blockout_last(piece);
   return piece;
 }
 
 /* ===================================================================== */
-/* Seeing and picking them                                                */
+/* Seeing and picking them                                              */
 /* ===================================================================== */
 
 namespace {
-
-bool finite3_bits(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
 
 /* The box a piece's wire is drawn in, in the piece's own space: a box's own corners; a cylinder's or a sphere's bounding box, the
  * shape inscribed in it. A room's shell is the air's box grown by `g` (RoomGrowth), the way the kernel grows it. */
@@ -735,7 +836,8 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "info";
   auto usage = [] {
     Log::info("blockout new | add box|cylinder|sphere [subtract|intersect] [x y z | radius height | radius] | add room [box|cylinder] [sizes] | "
-              "add door|window [width head [sill]] | set cell|method|wall|floor|ceiling|walls|opentop <value> | rebuild | wait | info");
+              "add door|window [width head [sill]] | set cell|method|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
+              "room <x0 z0 x1 z1 height> | room circle <x z radius height> | roomopt circle|solid|subtract on|off, wall <metres> | rebuild | wait | info");
   };
   /* The Blockouts a command is about: the selected ones and the ones the selected pieces belong to; with none, every one. */
   std::vector<GameObject *> targets;
@@ -752,6 +854,9 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
     for (size_t i = 2; i < t.size(); i++) what += (what.empty() ? "" : " ") + t[i];
     create_blockout_piece(what);
   }
+  else if (sub == "handle") blockout_handle_command(t);   // (round 479)
+  else if (sub == "room") room_command(t);
+  else if (sub == "roomopt") room_options_command(t);
   else if (sub == "set") {
     const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";
     if (key == "wall" || key == "floor" || key == "ceiling" || key == "walls" || key == "opentop") return blockout_set_command(t);

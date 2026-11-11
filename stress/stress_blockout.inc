@@ -566,6 +566,89 @@ static void live_row(Report &rep, const Options &o, bool cancel_stale, bool head
            std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
 
+/* Round 479 (task 0455): a face handle dragged, as real mouse events, in `interior 100` with workers on. The first piece (a room's Add
+ * shell) is selected and its +X handle taken; the mouse then moves a pixel further each frame for 120 frames (one every 16.7 ms) and
+ * lets go. Ctrl is held (snapping off): with it on, most frames leave the face on the same grid line - no change, no build - and a
+ * landing would be timed from a mouse move that changed nothing. The frame is the main thread's whole step_frame_headless, with the handles' hit test and drawing in it; the landing is
+ * timed as the live row does. The verdict is the live row's: no frame over 16.7 ms, a landing within 100 ms, no kernel call on the
+ * main thread. */
+static void handle_row(Report &rep, const Options &o) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  std::vector<GameObject *> roots;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!g.parent) roots.push_back(&g);
+  });
+  ed.scene().destroy(roots);
+  GameObject *bo = ed.scene().create("Blockout");
+  bo->add<Blockout>();
+  bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  bo->add<MeshRenderer>();
+  const std::vector<Piece> src = interior(6, 28);
+  std::vector<GameObject *> objs;
+  for (const Piece &p : src) {
+    GameObject *g = ed.scene().create("Piece", bo);
+    BlockoutPiece *bp = g->add<BlockoutPiece>();
+    bp->operation = p.op == Op::Subtract ? 1 : 0;
+    bp->size = p.size;
+    g->set_local_position(p.to_blockout.translation());
+    objs.push_back(g);
+  }
+  const Vec3 at = objs[0]->world_position();
+  ed.command(strprintf("camera 25 60 14 %g %g %g", at.x, at.y, at.z));
+  ed.select_object(objs[0]->id);
+  ed.command("blockout wait");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  auto mouse = [](platform::EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y, e.mods = platform::MOD_CTRL;
+    return e;
+  };
+  int hx = 0, hy = 0;
+  const bool found = ed.blockout_handle_pixel_for_test("+x", hx, hy);
+  rep.table({"live: a face handle (the first shell box's +X face, Ctrl held: no snapping) dragged for " + std::string(o.quick ? "30" : "120") + " frames in interior 100 (one every 16.7 ms)", "frame median ms", "frame worst ms",
+             "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms", "builds started", "landed", "main-thread builds", "verdict"});
+  if (!found) {
+    rep.row({"no +X handle on the first piece in view", "", "", "", "", "", "", "", "", "", "OVER"});
+    return;
+  }
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), main0 = ed.blockout_main_builds_for_test();
+  ed.step_frame_headless({mouse(platform::EventType::MouseMove, hx, hy)});
+  ed.step_frame_headless({mouse(platform::EventType::MouseDown, hx, hy)});
+  const int frames = o.quick ? 30 : 120;
+  std::vector<double> frame_ms, landing_ms;
+  uint64_t landed = landed0;
+  double oldest = -1.0;
+  const double start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    const double moved_at = now_seconds();
+    if (oldest < 0.0) oldest = moved_at;
+    ScopedTimer t;
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, hx + 1 + f % 40, hy)});
+    frame_ms.push_back(t.ms());
+    if (ed.blockout_landed_for_test() != landed) {
+      landed = ed.blockout_landed_for_test();
+      landing_ms.push_back((now_seconds() - oldest) * 1000.0);
+      oldest = -1.0;
+    }
+    const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+    if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+  }
+  const double drag_end = now_seconds();
+  ed.step_frame_headless({mouse(platform::EventType::MouseUp, hx + 1, hy)});
+  ed.command("blockout wait");
+  const double settle_ms = (now_seconds() - drag_end) * 1000.0;
+  std::sort(frame_ms.begin(), frame_ms.end());
+  const double worst = frame_ms.empty() ? 0.0 : frame_ms.back();
+  const double land_median = median(landing_ms), land_worst = landing_ms.empty() ? 0.0 : *std::max_element(landing_ms.begin(), landing_ms.end());
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = worst <= 16.7 && !landing_ms.empty() && land_median <= 100.0 && main_builds == 0;
+  rep.row({"the running build finishes and lands, then the newest starts (ADR 0129)", f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median),
+           landing_ms.empty() ? "none" : f2(land_worst), std::to_string(landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0),
+           std::to_string(ed.blockout_landed_for_test() - landed0), std::to_string(main_builds), ok ? "ok" : "OVER"});
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -701,5 +784,6 @@ static void test_blockout(Report &rep, const Options &o) {
 
   live_row(rep, o, false, true);
   live_row(rep, o, true, false);
+  handle_row(rep, o);
   sweep(rep, o, crisp);
 }
