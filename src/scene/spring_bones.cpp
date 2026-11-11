@@ -2,6 +2,7 @@
 #include "spring_bones.h"
 #include "../core/core.h"
 #include "animation.h"
+#include "pose_counts.h"
 #include "body_physics.h"
 #include "material.h"  // (fbm_noise: the wind's turbulence and gusts)
 #include <algorithm>
@@ -1038,7 +1039,11 @@ void step(Scene &scene, float dt) {
   for (const auto &o : scene.objects())
     if (SpringBone *s = o->get<SpringBone>())
       if (s->enabled && o->active_in_hierarchy() && is_bone(o.get())) springs.push_back({s, o.get()});
+  if (springs.empty()) return void(step_springs(springs, std::min(dt, 0.1f), sim_clocks()[&scene]));  // (the clock runs on; no chains to count - round 468)
+  BL_ZONE("spring step");
+  PoseTimer timer(PoseStat::Spring);
   step_springs(springs, std::min(dt, 0.1f), sim_clocks()[&scene]);
+  pose_add_spring_chains(springs.size());
 }
 
 void unstretch(SpringBone &s, GameObject &first) {

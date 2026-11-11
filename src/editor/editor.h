@@ -49,6 +49,7 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/pose_counts.h"
 #include "../scene/board.h"
 #include "../scene/quad_remesh.h"
 #include "../scene/dyntopo.h"
@@ -213,6 +214,12 @@ struct FrameProfile {
    * frame's own work but counted in the frame, so a stall there shows in the Profiler and the stress rows. */
   double ms_deferred = 0;
   double ms_undo = 0;  // task 0185: undo / redo restoring a state (the scene swapped in, assets relinked and saved); inside ms_ui when the UI ran it
+  /* Round 468 (task 0444): the parts of a posing frame, nested in the times above as the ones before them are - Record's
+   * changes (and the clip texts it wrote), the Animation window's apply, the trails, AutoPosing's frame, the Puppet
+   * controls (drawn and hit), the rig overlay, the meshes sent to the card, and an undo step kept (its parts inside it). */
+  double ms_record = 0, ms_anim_apply = 0, ms_trails = 0, ms_autopose = 0, ms_puppet = 0, ms_rig_overlay = 0, ms_mesh_uploads = 0;
+  double ms_commit = 0, ms_commit_settle = 0, ms_commit_clone = 0, ms_commit_assets = 0;
+  uint64_t clip_serialisations = 0, undo_steps = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
   uint64_t instances_kept = 0, instances_built = 0, mesh_deferred = 0;  // round 458: GPU views that kept / gathered their instance array; meshes left waiting for the card
@@ -259,6 +266,10 @@ struct FrameProfile {
     filter_target_resizes += o.filter_target_resizes, filter_stack_builds += o.filter_stack_builds;
     ms_edit_apply += o.ms_edit_apply, ms_overlap += o.ms_overlap, ms_lighting_key += o.ms_lighting_key, ms_snap_pick += o.ms_snap_pick;
     ms_edit_op += o.ms_edit_op, ms_undo += o.ms_undo;
+    ms_record += o.ms_record, ms_anim_apply += o.ms_anim_apply, ms_trails += o.ms_trails, ms_autopose += o.ms_autopose;
+    ms_puppet += o.ms_puppet, ms_rig_overlay += o.ms_rig_overlay, ms_mesh_uploads += o.ms_mesh_uploads;
+    ms_commit += o.ms_commit, ms_commit_settle += o.ms_commit_settle, ms_commit_clone += o.ms_commit_clone, ms_commit_assets += o.ms_commit_assets;
+    clip_serialisations += o.clip_serialisations, undo_steps += o.undo_steps;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
@@ -286,6 +297,51 @@ struct ProfileScope {
   ~ProfileScope() { ms += t.ms(); }
 };
 ui::Icon window_icon(WindowKind k);
+
+/* Round 468 (task 0444, perf_script.cpp): the last `perf drag`'s numbers - the press, the first move, the move frames'
+ * mean and longest, the release and the frame after, in ms; the totals (FrameProfile, PoseCounts, MeshCounts) at the start
+ * and the end of the move frames; the points it pressed and ended at (a test replays the same events by hand). */
+struct PerfDragResult {
+  bool ok = false;
+  std::string what, error;
+  int frames = 0;  // the move frames the mean is over (all but the first; the first alone when there is one)
+  double ms_press = 0, ms_first = 0, ms_mean = 0, ms_longest = 0, ms_release = 0, ms_after = 0;
+  int press_x = 0, press_y = 0, end_x = 0, end_y = 0;
+  FrameProfile before, after;
+  PoseCounts pose_before, pose_after;
+  MeshCounts mesh_before, mesh_after;
+};
+/* Where a script asks the Move / Rotate gizmo for a handle's press point (scene_view.cpp's gizmo_update fills it). */
+struct GizmoProbe {
+  int want = -1;                  // the handle asked for (-1: no script is asking)
+  bool drawn = false, found = false;
+  float x = 0, y = 0, dx = 1, dy = 0;  // the point in window pixels, and the screen direction a drag along it takes
+};
+int perf_gizmo_handle(const std::string &word);  // x y z free rx ry rz -> the gizmo's handle number, -1 unknown (scene_view.cpp)
+/* The scripted drag's state (a small state machine the frame steps: Editor::perf_script_before / _after). */
+struct PerfScript {
+  enum Kind { None, Gizmo, Puppet, Key, Ruler, At };
+  enum Stage { Probe, Aim, Press, Move, Release, After, Abort, Done };
+  bool active = false, loop = false, button_down = false, stop_asked = false, queued = false, sent = false, esc = false;
+  bool focus_lost = false;  // the main window lost focus while it played: handed on once it has ended (it would let go of the script's button)
+  Kind kind = None;
+  Stage stage = Done;
+  std::string what;  // "gizmo rz", "puppet lhand", "key g", "ruler", "at"
+  int frames = 30, mods = 0, handle = -1, key = 0;
+  float x0 = 0, y0 = 0, x1 = 0, y1 = 0;  // where it presses, where the moves end
+  float dir_x = 1, dir_y = 0, pixels = 0;
+  float dx = 0, dy = 0, from = 0, to = 0;
+  int move_i = 0, step = 1, cx = 0, cy = 0;  // move frames played, the loop's direction, the last point sent
+  int moves_done = 0;
+  double ms_press = 0, ms_first = 0, ms_sum = 0, ms_longest = 0, ms_release = 0, ms_after = 0;
+  int sum_frames = 0;
+  bool prior_ran = false;  // a Puppet drag: the pose prior ran in the last move frame
+  double prior_ms = 0;
+  FrameProfile acc_moves, acc_release;
+  FrameProfile before_total;
+  PoseCounts pose_before;
+  MeshCounts mesh_before;
+};
 
 /* The internal image a filtered render draws at the stack's resolution before scaling up into its view;
  * one per view, so two filtered views of different sizes don't reallocate it every frame (task 0024). */
@@ -491,6 +547,9 @@ struct AnimEditorState {
   float drag_df = 0.0f, drag_dv = 0.0f;  // what the last preview moved the keys by (the commit and the selection use it)
   Recti sheet;  // where the sheet was last drawn, and the frames across it (tests find keys by them)
   float sheet_end = 1.0f;
+  Recti ruler;          // round 468: the ruler's rect as last drawn (`perf drag ruler` presses on it)
+  int drawn_at = -10;   // round 468: Editor::frames_ when the window last drew its sheet (a script needs it open)
+  bool ruler_hot = false;  // round 468: the mouse was on the ruler, nothing over it, when it last drew (a press there is the ruler's)
   std::vector<std::tuple<std::string, std::string, int, AnimKey>> clipboard;  // (path, property, axis, key from the first copied)
 };
 
@@ -873,6 +932,18 @@ class Editor {
   float last_frame_ms() const { return frame_ms_; }
   const std::vector<float> &frame_history() const { return frame_history_; }
   std::string perf_status_text() const;
+  /* Round 468 (task 0444): the posing frame's parts (ms) and counts as the one text every printer shares - `perf status`,
+   * `perf drag`, the windowed check - over a span of `frames` frames, a mean a frame. Items are "<name> <number>" after
+   * the colon, comma-separated; tools/bench_world.py and the stress section parse them. */
+  using PosingList = std::vector<std::pair<const char *, double>>;
+  static PosingList posing_parts(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc);  // (ms, summed over the span)
+  static PosingList posing_counts(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc);
+  static std::string posing_parts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames);
+  static std::string posing_counts_text(const FrameProfile &p, const PoseCounts &pc, const MeshCounts &mc, double frames);
+  PoseCounts pose_counts_last_for_test() const { return pose_last_; }
+  const PerfDragResult &perf_drag_result_for_test() const { return perf_result_; }  // (the last `perf drag`'s numbers)
+  bool perf_script_active_for_test() const { return perf_.active; }
+  PoseCounts pose_counts_total_for_test() const { return pose_counts(); }  // (process-wide, running: subtract two readings)
   std::string perf_mark(const std::string &name);
   std::string worst_frame_parts() const;
   /* Round 437: F12's image files decoded on a worker first when some aren't in the texture cache - the snapshot (which
@@ -994,10 +1065,15 @@ class Editor {
   bool smat_dialog_open_for_test() const { return dialog_ == Dialog::SaveSmat; }
   const std::string &dialog_text_for_test() const { return dialog_text_; }
   const std::vector<uint64_t> &autopose_locks_for_test() const { return autopose_.locks; }  // (task 0281)
+  const body::Body &autopose_body_for_test() const { return autopose_.body; }  // (round 468: the body model kept between Puppet drags)
+  size_t autopose_body_builds_for_test() const { return autopose_.body_builds; }
+  const body::Body &body_view_body_for_test() const { return body_.body; }     // (round 468: the Centre of Mass's)
   size_t trail_frames_for_test() const { return trails_.frames.size(); }  // (task 0282)
   int zoe_step_for_test() const { return zoe_.step; }  // (task 0283)
   size_t motion_issues_for_test() const { return motion_issues_.size(); }  // (task 0284)
   float anim_frame_for_test() const { return anim_.frame; }
+  bool anim_preview_for_test() const { return anim_.preview; }  // (round 468)
+  bool anim_record_for_test() const { return anim_.record; }
   bool trail_at_for_test(uint64_t bone, int f, Vec3 &head) const { return trail_at(bone, f, head); }
   bool bake_keep_uvs_for_test(int mode) const { return mode == 1 ? bake_keep_uvs_textures_ : bake_keep_uvs_; }
   int meshmaps_settings_size_for_test() const { return meshmaps_settings_.size; }
@@ -1378,6 +1454,7 @@ class Editor {
   const Environment &env_for_test() const { return env_; }
   void light_volume_bakes_changed_for_test() { lv_bake_gen_++; }
   bool wants_continuous_redraw_for_test() const { return wants_continuous_redraw(); }
+  bool frame_asked_for_another_for_test() const { return ui_.redraw || wants_continuous_redraw(); }  // (round 468: the frame that just ran wants one more)
   bool probe_volume_box_for_test(AABB &out) { return probe_volume_box(out); }
   bool probe_live_ready_for_test() const { return probe_live_ready_; }
   size_t probe_live_left_for_test() const { return probe_live_left_; }
@@ -2156,6 +2233,7 @@ class Editor {
   void open_references();  // Learn > References (the papers behind features; the Research window is retired)
   void draw_profiler(const Recti &r);
   void draw_profiler_gpu(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat);  // task 0159
+  void draw_profiler_posing(const std::function<void(const std::string &, const std::string &)> &stat);  // round 468
   void draw_profiler_gpu_views(const FrameProfile &fp, const std::function<void(const std::string &, const std::string &)> &stat);
   void draw_profiler_gpu_tracer(const char *what, const PTStats &s, double wall_ms, const char *of_what, const std::function<void(const std::string &, const std::string &)> &stat);
   void draw_render_window(const Recti &r);
@@ -2598,6 +2676,7 @@ class Editor {
     std::vector<std::pair<uint64_t, Transform>> start;      // everything under the armature as the drag started
     body::Body body;
     uint64_t body_key = 0;                                  // what `body` was weighed for (body::body_key)
+    size_t body_builds = 0;                                 // (round 468: how often it was weighed - a test tells a rebind from a rebuild)
     std::vector<uint64_t> pins;                             // this drag's pinned bones
     struct Ik {
       uint64_t bone, target, pole;
@@ -2668,6 +2747,7 @@ class Editor {
   void draw_puppet_handles();
   bool puppet_handles_update(const Recti &view);
   bool puppet_drag(const Recti &view, float x, float y);
+  bool puppet_press_point(const std::string &word, int &x, int &y, std::string &why);  // round 468: where `perf drag puppet` presses
   /* Motion trails and onion skin (task 0282, motion_trail.cpp). */
   struct TrailCache {
     bool show = false;
@@ -4001,6 +4081,7 @@ class Editor {
   void spawn_stress_grid(int count, const std::string &kind);
   bool bench_scene(const std::string &name);  // (task 0202: the Blender parity scenes, built as tools/bench_blender.py builds them)
   void build_world_like(bool quick);  // (round 411: the Unity-world stand-in, benchscene worldlike)
+  void build_avatar_like(bool quick, Vec3 at);  // (round 468: the avatar stand-in, benchscene avatarlike | avatarworld; bench_avatar.cpp)
   void run_console_command(const std::string &cmd);
   bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();
@@ -4320,6 +4401,30 @@ class Editor {
   /* The mesh caches' tallies at the last frame's end, and that frame's share (task 0083). Process-wide: work on other
    * threads (a skin bind) lands in the frame it finished in. */
   MeshCounts mesh_seen_ = mesh_counts(), mesh_last_;
+  PoseCounts pose_seen_ = pose_counts(), pose_last_;  // (round 468: the same for the posing counters; pose_total_ the editor's running sum)
+  double pose_work_at_ = -1e9;  // when a frame last did posing work (the Profiler's Posing block shows for a second after)
+  /* Round 468 (task 0444, perf_script.cpp): `perf drag | clip | pick`. The script's events replace the system's while it
+   * plays (frame() calls _before and _after). */
+  PerfScript perf_;
+  PerfDragResult perf_result_;
+  GizmoProbe gizmo_probe_;
+  void perf_script_command(const std::string &sub, const std::vector<std::string> &t);
+  bool perf_drag_parse(const std::vector<std::string> &t, PerfScript &s, std::string &part);
+  bool perf_drag_begin(PerfScript &s, const std::string &part);
+  bool perf_drag_aim(PerfScript &s);  // the press point of a puppet / key / ruler script (a gizmo's comes from its probe frame)
+  void perf_script_before(std::vector<platform::Event> &events);
+  void perf_script_after(double ms);
+  void perf_script_events(std::vector<platform::Event> &events);
+  void perf_script_advance(double ms);
+  void perf_script_refuse(const std::string &why);
+  void perf_script_finish();
+  void perf_script_stop(const std::string &why);
+  bool perf_other_window() const;             // another editor window is open: a script plays in the main window alone
+  bool perf_check_aimed(std::string &why);    // after the aim frame: is the handle under the mouse
+  bool perf_check_pressed(std::string &why);  // after the press frame: did the drag start
+  void perf_clip(const std::vector<std::string> &t);
+  void perf_pick(const std::string &word);
+  GameObject *perf_part_bone(const std::string &word, std::string &error);
   float measured_fps_ = 0;
   void draw_performance_settings(ui::Layout *lay);  // Preferences and the Profiler
 
