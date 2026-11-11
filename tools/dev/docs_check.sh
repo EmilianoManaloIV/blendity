@@ -17,11 +17,20 @@ done
 git cat-file -e "$HEAD:CHANGELOG.md" 2>/dev/null ||
   { echo "::error::docs_check: $HEAD is not a published tree (no CHANGELOG.md at its root)"; exit 1; }
 COMMITS=$(git rev-list --no-merges "$BASE..$HEAD")
+# A commit written before the rule reached its own history is exempt (the owner, 2026-11-10; ADR 0123's amendment): one
+# that does not descend from the commit that added this script to BASE. Rounds published while the rule was being
+# merged edited CHANGELOG.md the old way, and history is not rewritten; a commit made after its branch merged main is
+# checked. RULE: the oldest commit on BASE that added this script (none: nothing is exempt).
+RULE=$(git log --diff-filter=A --format=%H "$BASE" -- ':(top)tools/dev/docs_check.sh' | tail -1)
 bad=0
 for c in $COMMITS; do
   # :(top) - the paths are at the root of the published tree whatever folder this runs from.
   files=$(git diff-tree --no-commit-id --name-only -r "$c" -- ':(top)CHANGELOG.md' ':(top)README.md' | tr '\n' ' ')
   [ -z "$files" ] && continue
+  if [ -n "$RULE" ] && ! git merge-base --is-ancestor "$RULE" "$c"; then
+    echo "exempt: $(git log -1 --format='%h %s' "$c" | cut -c1-80) was written before the rule (edits $files)"
+    continue
+  fi
   if git log -1 --format=%B "$c" | tr -d '\r' | grep -qiE '^Docs-fold:[[:space:]]*yes[[:space:]]*$'; then
     echo "ok: $(git log -1 --format='%h %s' "$c" | cut -c1-80) folds ($files)"
     continue
