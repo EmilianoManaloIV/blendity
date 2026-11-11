@@ -1976,7 +1976,7 @@ static void tests_round477() {
     ed.command("export obj all " + obj);
     ed.command("export glb all " + glb);
     r477_settle(ed, 5);
-    for (int i = 0; i < 400 && (!fs::exists(obj) || !fs::exists(glb)); i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && (!fs::exists(obj) || !fs::exists(glb) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
     std::string text, bin;
     CHECK(fs::read_file(obj, text) && fs::read_file(glb, bin));
     size_t verts = 0, objects = 0;
@@ -2665,7 +2665,7 @@ static void tests_round477_te() {
     r477_settle(ed, 2);
     const std::string path = te_scene_path(ed, "r477te_open.scene");
     ed.command("save " + path);
-    for (int i = 0; i < 400 && !fs::exists(path); i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); i++) ed.step_frame_headless();  // (the file is there before the save job has written all of it)
     r477_settle(ed, 3);
     const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
     ed.command("blockout wait");
@@ -3287,7 +3287,7 @@ static void tests_round477_te() {
     const std::string path = te_scene_path(ed, "r477te_save.scene");
     fs::remove_file(path);
     ed.command("save " + path);
-    for (int i = 0; i < 400 && !fs::exists(path); i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); i++) ed.step_frame_headless();  // (the file is there before the save job has written all of it)
     r477_settle(ed, 3);
     CHECK(fs::exists(path));
     ed.hold_blockout_landing_for_test(false);
@@ -3334,7 +3334,7 @@ static void tests_round477_te() {
     CHECK(!stray->get<MeshFilter>());
     const std::string path = te_scene_path(ed, "r477te_plain.scene");
     ed.command("save " + path);
-    for (int i = 0; i < 400 && !fs::exists(path); i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); i++) ed.step_frame_headless();  // (the file is there before the save job has written all of it)
     r477_settle(ed, 3);
     ed.command("newscene");
     CHECK(ed.open_scene_for_test(path));
@@ -3530,7 +3530,7 @@ static void tests_round477_te() {
     ed.select_for_test(r477_find(ed, "Box")->id, false);
     ed.select_for_test(r477_find(ed, "Subtract Cylinder")->id, true);
     ed.command("export obj " + piece_obj);
-    for (int i = 0; i < 60 && !fs::exists(piece_obj); i++) ed.step_frame_headless();
+    for (int i = 0; i < 60 && (!fs::exists(piece_obj) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
     std::string text;
     size_t verts = 0;
     if (fs::exists(piece_obj) && fs::read_file(piece_obj, text)) {
@@ -3540,7 +3540,7 @@ static void tests_round477_te() {
     CHECK(verts == 0 && text.find("Subtract Cylinder") == std::string::npos);
     ed.select_for_test(bo->id, false);
     ed.command("export obj " + whole_obj);
-    for (int i = 0; i < 400 && !fs::exists(whole_obj); i++) ed.step_frame_headless();
+    for (int i = 0; i < 400 && (!fs::exists(whole_obj) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
     r477_settle(ed, 4);
     std::string whole;
     CHECK(fs::read_file(whole_obj, whole));
