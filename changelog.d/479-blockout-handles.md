@@ -44,7 +44,9 @@ now; an uneven or sheared one is refused with the reason); Esc after a drag left
 also left a piloted camera; a middle-button pan moved the camera under a held handle; with the tool waiting for a
 height and another dock tab clicked, every shortcut stayed off (the footprint and a held handle now end when no
 window draws a Scene view - checked with the Scene view in a second window only); the dragged handle could vanish
-at a steep angle.
+at a steep angle. Found by CI's macOS job after the PR was opened: a box's +-Y and +-Z handles had no place and
+no direction there (a local vector filled through `operator[]` and copied; Apple clang kept only its x) - the
+handles and the Room tool's grid snap build the vector from its three numbers now.
 
 **Known limits:** F9's rows for a piece of a scaled Blockout are in the Blockout's own units; snapping uses each
 piece's bounding-box corners, which for a turned cylinder or sphere are not on the shape; the Room tool's first

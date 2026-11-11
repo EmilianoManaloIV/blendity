@@ -70,9 +70,9 @@ Vec3 Editor::room_snap_point(Vec3 p, Vec3 n) const {
   const float step = std::max(1e-3f, snap_move_);
   for (int a = 0; a < 3; a++) {
     if (std::fabs(n[a]) < 0.9999f) continue;
-    for (int b = 0; b < 3; b++)
-      if (b != a) p[b] = std::round(p[b] / step) * step;
-    return p;
+    /* (Each coordinate written out, not through operator[] on the local: see along_axis in blockout_object.cpp.) */
+    auto snapped = [&](int b, float v) { return b == a ? v : std::round(v / step) * step; };
+    return Vec3(snapped(0, p.x), snapped(1, p.y), snapped(2, p.z));
   }
   return p;
 }

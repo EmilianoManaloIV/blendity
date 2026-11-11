@@ -257,6 +257,11 @@ Vec3 flat_toward(Vec3 toward) {
 
 float finite_or(float v, float fallback) { return finite_bits(v) ? v : fallback; }
 
+/* `v` along one axis and nothing along the others. (Written out: a local Vec3 filled through operator[] - which reaches
+ * past its first member - and then copied was compiled by Apple clang as if only x had been written; the +-Y and +-Z
+ * handles then had no place and no direction. Found by CI's macOS job in round 479.) */
+Vec3 along_axis(int axis, float v) { return Vec3(axis == 0 ? v : 0.0f, axis == 1 ? v : 0.0f, axis == 2 ? v : 0.0f); }
+
 }  // namespace
 
 void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *growth, std::vector<BlockoutHandle> &out) {
@@ -278,9 +283,8 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
     for (int k = 0; k < 6; k++) {
       const int axis = k / 2;
       const float s = (k & 1) ? -1.0f : 1.0f;
-      Vec3 at(0.0f), dir(0.0f);
-      at[axis] = s * h[axis], dir[axis] = s;
-      out.push_back(make_handle(H::BoxFace, axis, at, dir, names[k]));
+      const float half = axis == 0 ? h.x : axis == 1 ? h.y : h.z;
+      out.push_back(make_handle(H::BoxFace, axis, along_axis(axis, s * half), along_axis(axis, s), names[k]));
     }
     if (!room) return;
     /* The wall nearest the viewer: its outer face's middle. */
@@ -290,8 +294,7 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
       const int axis = k < 2 ? 0 : 2;
       const float s = (k & 1) ? -1.0f : 1.0f;
       const double g = axis == 0 ? growth->x : growth->z;
-      Vec3 a(0.0f), d(0.0f);
-      a[axis] = s * (h[axis] + (float)g), d[axis] = s;
+      const Vec3 a = along_axis(axis, s * ((axis == 0 ? h.x : h.z) + (float)g)), d = along_axis(axis, s);
       const float dist = length(toward - a);
       if (dist < best) best = dist, at = a, dir = d;
     }

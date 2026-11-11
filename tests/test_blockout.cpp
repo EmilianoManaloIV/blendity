@@ -6233,8 +6233,8 @@ static void tests_round479_engineer_handles() {
       Editor ed;
       GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {4, 4, 4});
       const int axis = name[1] - 'x';
-      Vec3 dir(0.0f);
-      dir[axis] = name[0] == '+' ? 1.0f : -1.0f;
+      const float way = name[0] == '+' ? 1.0f : -1.0f;
+      const Vec3 dir(axis == 0 ? way : 0.0f, axis == 1 ? way : 0.0f, axis == 2 ? way : 0.0f);  // (written out: see along_axis in blockout_object.cpp)
       const Vec3 grab = dir * 2.0f, opposite = dir * -2.0f;
       CHECK(r479_pull(ed, name, grab + dir * 1.0f, platform::MOD_CTRL));
       const BlockoutPiece *bp = box->get<BlockoutPiece>();
@@ -6244,8 +6244,7 @@ static void tests_round479_engineer_handles() {
       const float other_a = bp->size[(axis + 1) % 3], other_b = bp->size[(axis + 2) % 3];
       CHECK(other_a == 4.0f && other_b == 4.0f);
       /* the opposite face: own coordinate -dir*size/2 + position stays at `opposite` */
-      Vec3 far = box->local().position;
-      far[axis] -= (name[0] == '+' ? 1.0f : -1.0f) * bp->size[axis] * 0.5f;
+      const Vec3 far = box->local().position - dir * (bp->size[axis] * 0.5f);
       CHECK(length(far - opposite) < 1e-4f);
     }
   });
