@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Changelog fragments (task 0443, ADR 0123). A round never edits CHANGELOG.md or README.md: it adds
-changelog.d/<round>-<slug>.md, its CHANGELOG entry plus an optional README section, and the pass write-up folds
-them in. New files never conflict, so the PRs of passes running in parallel merge in any order.
+"""Changelog fragments (tasks 0443 and 0465, ADR 0123). A round never edits CHANGELOG.md, README.md or the shared
+docs (docs/USABILITY.md, tools/README.md, docs/ARCHITECTURE.md, docs/PERFORMANCE.md): it adds
+changelog.d/<round>-<slug>.md, its CHANGELOG entry plus optional sections of edits to those files, and the pass
+write-up folds them in. New files never conflict, so the PRs of passes running in parallel merge in any order.
 
-Usage: py tools/dev/changelog.py check                  every fragment well formed, its README edits applicable
+Usage: py tools/dev/changelog.py check                  every fragment well formed, each edit applicable exactly once
        py tools/dev/changelog.py fold [--checks LIBS TESTS] [--dry-run]
-                                                        fragments into CHANGELOG.md / README.md, then deleted
+                                                        fragments into CHANGELOG.md, README.md and the shared docs,
+                                                        then deleted
        py tools/dev/changelog.py same-render OLD NEW    two READMEs read the same once soft line breaks are joined
        py tools/dev/changelog.py --self-test            the task's acceptance cases, in temporary folders only
 --root DIR picks the tree (default: the one this script is in). The format is in changelog.d/README.md."""
@@ -17,9 +19,15 @@ from fill_checks import readme_count  # noqa: E402  (one count rule for the chai
 
 TRAILER = 'Docs-fold: yes'
 README_MARK = '<!-- README -->'
+# The files a fragment may edit, by the path its section mark names: `<!-- docs/USABILITY.md -->`. README keeps its
+# short mark. tools/dev/docs_check.sh holds the same list (SHARED_DOCS; the self-test compares them).
+SHARED_DOCS = ('docs/USABILITY.md', 'tools/README.md', 'docs/ARCHITECTURE.md', 'docs/PERFORMANCE.md')
+TARGETS = ('README.md',) + SHARED_DOCS
+MARKS = dict({'README': 'README.md'}, **{t: t for t in SHARED_DOCS})
+MARK = re.compile(r'^<!-- (\S+) -->[ \t]*$')
 NAME = re.compile(r'^(\d+)-[A-Za-z0-9._-]+\.md$')
 HEADING = re.compile(r'^## \d{4}-\d{2}-\d{2} \(round (\d+)\): \S')
-OP = re.compile(r'^(after|replace|with):[ \t]?(.*)$')
+OP = re.compile(r'^(after|replace|with|append):[ \t]?(.*)$')
 
 
 class FoldError(Exception):
@@ -45,9 +53,24 @@ def fragment_paths(root):
     return sorted(os.path.join(d, n) for n in os.listdir(d) if NAME.match(n))
 
 
-def parse_ops(name, lines):
-    """README operations: `after: <line start>` + the lines to insert, or `replace: <text>` + `with: <text>`."""
+def op_body(lines, i):
+    """The lines below operation line i, up to the next operation, without the blank lines around them."""
+    j = i + 1
+    while j < len(lines) and not OP.match(lines[j]):
+        j += 1
+    body = lines[i + 1:j]
+    while body and not body[-1].strip():
+        body.pop()
+    while body and not body[0].strip():
+        body.pop(0)
+    return body, j
+
+
+def parse_ops(name, target, lines):
+    """A section's operations: `after: <line start>` + the lines to insert, `replace: <text>` + `with: <text>`, or
+    `append:` + the block that goes at the file's end."""
     ops, i = [], 0
+    where = '%s: %s section' % (name, target)
     while i < len(lines):
         line = lines[i]
         if not line.strip():
@@ -55,36 +78,54 @@ def parse_ops(name, lines):
             continue
         m = OP.match(line)
         if not m or m.group(1) == 'with':
-            raise FoldError('%s: README section: expected "after:" or "replace:", found %r' % (name, line[:60]))
+            raise FoldError('%s: expected "after:", "replace:" or "append:", found %r' % (where, line[:60]))
         kind, text = m.group(1), m.group(2)
+        if kind == 'append':
+            if text.strip():
+                raise FoldError('%s: "append:" stands alone on its line, the block goes on the lines below it' % where)
+            body, i = op_body(lines, i)
+            if not body:
+                raise FoldError('%s: "append:" has no lines below it' % where)
+            ops.append(('append', '', body))
+            continue
         if not text.strip():
-            raise FoldError('%s: README section: "%s:" names no text' % (name, kind))
+            raise FoldError('%s: "%s:" names no text' % (where, kind))
         if kind == 'replace':
             w = OP.match(lines[i + 1]) if i + 1 < len(lines) else None
             if not w or w.group(1) != 'with':
-                raise FoldError('%s: README section: "replace:" must be followed by "with:"' % name)
+                raise FoldError('%s: "replace:" must be followed by "with:"' % where)
             ops.append(('replace', text, w.group(2)))
             i += 2
             continue
-        j = i + 1
-        while j < len(lines) and not OP.match(lines[j]):
-            j += 1
-        body = lines[i + 1:j]
-        while body and not body[-1].strip():
-            body.pop()
+        body, i = op_body(lines, i)
         if not body:
-            raise FoldError('%s: README section: "after:" has no lines below it' % name)
+            raise FoldError('%s: "after:" has no lines below it' % where)
         ops.append(('after', text, body))
-        i = j
     return ops
+
+
+def split_sections(name, text):
+    """The entry, then [(target file, its lines)] for each `<!-- README -->` / `<!-- path -->` section below it."""
+    entry, sections, current = [], [], None
+    for line in text.split('\n'):
+        m = MARK.match(line)
+        token = m.group(1) if m else None
+        if token in MARKS:
+            if any(t == MARKS[token] for t, _ in sections):
+                raise FoldError('%s: two "<!-- %s -->" sections (a file has one)' % (name, token))
+            current = []
+            sections.append((MARKS[token], current))
+            continue
+        if token and token.endswith('.md'):
+            raise FoldError('%s: "<!-- %s -->" names no file a fragment may edit (README, %s)' % (name, token, ', '.join(SHARED_DOCS)))
+        (entry if current is None else current).append(line)
+    return '\n'.join(entry), sections
 
 
 def parse_fragment(path):
     name = os.path.basename(path)
     text, _ = read(path)
-    entry, _, readme = text.partition('\n' + README_MARK)
-    if text.startswith(README_MARK):
-        entry, readme = '', text[len(README_MARK):]
+    entry, sections = split_sections(name, text)
     entry = entry.strip('\n')
     first = entry.split('\n', 1)[0]
     m = HEADING.match(first)
@@ -93,29 +134,39 @@ def parse_fragment(path):
     rnd = int(m.group(1))
     if int(NAME.match(name).group(1)) != rnd:
         raise FoldError('%s: the file name says round %s, the heading round %d' % (name, NAME.match(name).group(1), rnd))
-    ops = parse_ops(name, readme.split('\n')) if readme else []
-    return {'path': path, 'name': name, 'round': rnd, 'entry': entry, 'ops': ops}
+    return {'path': path, 'name': name, 'round': rnd, 'entry': entry,
+            'sections': [(target, parse_ops(name, target, lines)) for target, lines in sections]}
 
 
-def apply_ops(frag, readme):
-    for kind, text, arg in frag['ops']:
+def apply_ops(frag, target, ops, doc):
+    """One fragment's operations on one file's text. Each must apply exactly once: an anchor found once, a replaced
+    text found once, an appended block whose first line is not in the file yet (so a fold run twice, or two fragments
+    with the same block, stop instead of doubling it)."""
+    for kind, text, arg in ops:
         if kind == 'replace':
-            n = readme.count(text)
+            n = doc.count(text)
             if n != 1:
-                raise FoldError('%s: "replace:" text found %d times in README.md (needs exactly 1): %r' % (frag['name'], n, text[:60]))
-            readme = readme.replace(text, arg)
+                raise FoldError('%s: "replace:" text found %d times in %s (needs exactly 1): %r' % (frag['name'], n, target, text[:60]))
+            doc = doc.replace(text, arg)
             continue
-        lines = readme.split('\n')
+        lines = doc.split('\n')
+        if kind == 'append':
+            if arg[0] in lines:
+                raise FoldError('%s: "append:" block is already in %s (its first line is there): %r' % (frag['name'], target, arg[0][:60]))
+            while lines and not lines[-1].strip():
+                lines.pop()
+            doc = '\n'.join(lines + ([''] if lines else []) + arg + [''])
+            continue
         # README's list items indent their continuation lines: the anchor ignores that indent, and inserted lines
         # written without one take the anchor's, so they stay in the item.
         hits = [k for k, l in enumerate(lines) if l.lstrip().startswith(text.strip())]
         if len(hits) != 1:
-            raise FoldError('%s: "after:" matches %d README.md lines (needs exactly 1): %r' % (frag['name'], len(hits), text[:60]))
+            raise FoldError('%s: "after:" matches %d %s lines (needs exactly 1): %r' % (frag['name'], len(hits), target, text[:60]))
         anchor = lines[hits[0]]
         indent = anchor[:len(anchor) - len(anchor.lstrip())]
         lines[hits[0] + 1:hits[0] + 1] = [l if l[:1] in (' ', '\t') or not l.strip() else indent + l for l in arg]
-        readme = '\n'.join(lines)
-    return readme
+        doc = '\n'.join(lines)
+    return doc
 
 
 def insert_entries(changelog, entries):
@@ -143,17 +194,31 @@ def plan(root, checks=None):
             errors.append(str(e))
     if errors:
         raise FoldError('\n'.join(errors))
-    cl_path, rd_path = os.path.join(root, 'CHANGELOG.md'), os.path.join(root, 'README.md')
+    cl_path = os.path.join(root, 'CHANGELOG.md')
     changelog, cl_nl = read(cl_path)
-    readme, rd_nl = read(rd_path)
-    new_readme = readme
+    docs = {}  # target -> [path, old text, new text, newline]; README always (its count), the others when edited
+
+    def doc(target, name):
+        if target not in docs:
+            path = os.path.join(root, *target.split('/'))
+            if not os.path.isfile(path):
+                raise FoldError('%s: a "<!-- %s -->" section, but the tree has no %s' % (name, target, target))
+            text, nl = read(path)
+            docs[target] = [path, text, text, nl]
+        return docs[target]
+
+    doc('README.md', 'changelog.py')
     for f in sorted(frags, key=lambda f: (f['round'], f['name'])):
-        new_readme = apply_ops(f, new_readme)
+        for target, ops in f['sections']:
+            d = doc(target, f['name'])
+            d[2] = apply_ops(f, target, ops, d[2])
     if checks:
-        new_readme = readme_count(new_readme, checks[0], checks[1])
+        docs['README.md'][2] = readme_count(docs['README.md'][2], checks[0], checks[1])
     newest = sorted(frags, key=lambda f: (-f['round'], f['name']))
     new_changelog = insert_entries(changelog, [f['entry'] for f in newest]) if frags else changelog
-    return {'frags': frags, 'cl': (cl_path, changelog, new_changelog, cl_nl), 'rd': (rd_path, readme, new_readme, rd_nl)}
+    files = [('CHANGELOG.md', (cl_path, changelog, new_changelog, cl_nl))]
+    files += [(t, tuple(docs[t])) for t in TARGETS if t in docs]
+    return {'frags': frags, 'files': files}
 
 
 def remove(root, path):
@@ -181,7 +246,7 @@ def swap(changed):
                 write(path, old, nl)
             if os.path.exists(path + '.fold-tmp'):
                 os.remove(path + '.fold-tmp')
-        raise FoldError('could not write %s (%s); CHANGELOG.md and README.md are as they were' % (os.path.basename(failing), e))
+        raise FoldError('could not write %s (%s); every file is as it was' % (os.path.basename(failing), e))
 
 
 def cmd_fold(root, checks, dry):
@@ -192,10 +257,9 @@ def cmd_fold(root, checks, dry):
     for f in p['frags']:
         if re.search(r'\bCHECKS_(LIBS|W|L)\b', f['entry']):
             print('warning: changelog.d/%s still holds CHECKS_* placeholders (fill_checks.py was not run for it)' % f['name'])
-    changed = [p[k] for k in ('cl', 'rd') if p[k][1] != p[k][2]]
-    for key in ('cl', 'rd'):
-        path, old, new, _ = p[key]
-        print('%s %s' % ('unchanged' if old == new else ('would change' if dry else 'changed'), os.path.basename(path)))
+    changed = [f for _, f in p['files'] if f[1] != f[2]]
+    for label, (_, old, new, _) in p['files']:
+        print('%s %s' % ('unchanged' if old == new else ('would change' if dry else 'changed'), label))
     if not dry:
         swap(changed)
     for f in p['frags']:
@@ -203,7 +267,7 @@ def cmd_fold(root, checks, dry):
         if not dry:
             remove(root, f['path'])
     if not dry:
-        print('Put this line in the commit message (tools/dev/docs_check.sh lets the commit edit CHANGELOG / README):')
+        print('Put this line in the commit message (tools/dev/docs_check.sh lets the commit edit CHANGELOG, README and the shared docs):')
         print('  ' + TRAILER)
     return 0
 
@@ -211,6 +275,10 @@ def cmd_fold(root, checks, dry):
 def cmd_check(root):
     p = plan(root)
     print('changelog.d: %d fragment(s), all well formed and applicable' % len(p['frags']))
+    for target in TARGETS:
+        n = sum(len(ops) for f in p['frags'] for t, ops in f['sections'] if t == target)
+        if n:
+            print('  %s: %d edit(s), each applies exactly once' % (target, n))
     return 0
 
 
@@ -242,7 +310,7 @@ def cmd_same_render(a, b):
     return 1
 
 
-# --- self-test (acceptance criteria of task 0443) -------------------------------------------------------------------
+# --- self-test (acceptance criteria of tasks 0443 and 0465) ---------------------------------------------------------
 
 INTRO = '# Changelog\n\nOne entry per round, newest first.\n\n'
 OLD = '## 2026-11-01 (round 400): old\n\n**Asked:** old.\n'
@@ -253,11 +321,21 @@ def entry(rnd, title='t'):
     return '## 2026-11-09 (round %d): %s\n\n**Asked:** %s.\n\n**Checked:** CHECKS_LIBS checks.\n' % (rnd, title, title)
 
 
-def tree(cl=INTRO + OLD, rd=README, nl='\n', frags=None):
+USABILITY = '# Usability\n\n| # | Problem | Status |\n|---|---|---|\n| 1 | Menus are long | open |\n| 2 | No search | fixed (round 2) |\n\nNotes.\n'
+TOOLS = '# Tools\n\n| Tool | What it does |\n|---|---|\n| `a.py` | does a |\n| `b.py` | does b |\n'
+ARCH = '# Architecture\n\n```\nsrc/   the code\ntools/ scripts: a.py, b.py\n```\n\n| Function | Where |\n|---|---|\n| `f()` | `src/f.cpp` |\n'
+PERF = '# Performance\n\n## Round 1: first numbers\n\n| row | ms |\n|---|---|\n| a | 1.0 |\n'
+DOCS = {'docs/USABILITY.md': USABILITY, 'tools/README.md': TOOLS, 'docs/ARCHITECTURE.md': ARCH, 'docs/PERFORMANCE.md': PERF}
+
+
+def tree(cl=INTRO + OLD, rd=README, nl='\n', frags=None, docs=None):
     d = tempfile.mkdtemp(prefix='bl0443-')
     os.makedirs(os.path.join(d, 'changelog.d'))
     write(os.path.join(d, 'CHANGELOG.md'), cl, nl)
     write(os.path.join(d, 'README.md'), rd, nl)
+    for rel, body in (docs or {}).items():
+        os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+        write(os.path.join(d, rel), body, nl)
     write(os.path.join(d, 'changelog.d', 'README.md'), 'the format\n', '\n')
     for name, body in (frags or {}).items():
         write(os.path.join(d, 'changelog.d', name), body, '\n')
@@ -515,6 +593,128 @@ def self_test():
         check('a fold whose second file cannot be swapped in puts the first back and leaves no temporary',
               raised and snapshot(d) == before and not os.path.exists(blocked + '.fold-tmp'))
 
+        # 10. The shared docs (task 0465): sections for docs/USABILITY.md, tools/README.md, docs/ARCHITECTURE.md and
+        # docs/PERFORMANCE.md beside README's, with "after:", "replace:" / "with:" and "append:".
+        def doc(d, rel):
+            with open(os.path.join(d, rel), 'rb') as f:
+                return f.read().decode('utf-8')
+
+        def fold_fails(d):
+            before = snapshot(d)
+            err, _ = fails(d)
+            try:
+                code = cmd_fold(d, None, False)
+            except FoldError:
+                code = 1
+            return err, code == 1 and snapshot(d) == before
+
+        block = '## Round 510: the fold, measured\n\n| row | ms |\n|---|---|\n| fold | 0.4 |\n'
+        full = (entry(510, 'All') + '\n' + README_MARK + '\nafter: a (round 1)\nshared docs fold (round 510);\n\n'
+                '<!-- docs/USABILITY.md -->\nafter: | 2 | No search\n| 3 | Docs conflict | fixed (round 510) |\n\n'
+                'replace: | 1 | Menus are long | open |\nwith: | 1 | Menus are long | fixed (round 510) |\n\n'
+                '<!-- tools/README.md -->\nafter: | `a.py`\n| `aa.py` | does aa (round 510) |\n\n'
+                '<!-- docs/ARCHITECTURE.md -->\nreplace: scripts: a.py, b.py\nwith: scripts: a.py, aa.py, b.py\n\n'
+                'after: | `f()`\n| `g()` | `src/g.cpp` |\n\n'
+                '<!-- docs/PERFORMANCE.md -->\nappend:\n\n' + block)
+        d = tree(frags={'510-all.md': full}, docs=DOCS)
+        temps.append(d)
+        err, _ = fails(d)
+        cmd_fold(d, None, False)
+        check('a fragment with README and all four shared-docs sections is well formed', err is None, str(err))
+        check('docs/USABILITY.md: "after:" adds the row under the row it names, "replace:" changes a row\'s status',
+              doc(d, 'docs/USABILITY.md') == USABILITY.replace('| 1 | Menus are long | open |', '| 1 | Menus are long | fixed (round 510) |')
+              .replace('| 2 | No search | fixed (round 2) |\n', '| 2 | No search | fixed (round 2) |\n| 3 | Docs conflict | fixed (round 510) |\n'),
+              doc(d, 'docs/USABILITY.md'))
+        check('tools/README.md: the new tool\'s row lands under the row it names',
+              doc(d, 'tools/README.md') == TOOLS.replace('| `a.py` | does a |\n', '| `a.py` | does a |\n| `aa.py` | does aa (round 510) |\n'),
+              doc(d, 'tools/README.md'))
+        check('docs/ARCHITECTURE.md: a "replace:" and an "after:" in one section both apply',
+              doc(d, 'docs/ARCHITECTURE.md') == ARCH.replace('scripts: a.py, b.py', 'scripts: a.py, aa.py, b.py')
+              .replace('| `f()` | `src/f.cpp` |\n', '| `f()` | `src/f.cpp` |\n| `g()` | `src/g.cpp` |\n'), doc(d, 'docs/ARCHITECTURE.md'))
+        check('docs/PERFORMANCE.md: "append:" puts the block at the file\'s end, one blank line above it, one newline after it',
+              doc(d, 'docs/PERFORMANCE.md') == PERF + '\n' + block, repr(doc(d, 'docs/PERFORMANCE.md')))
+        check('the same fold still applies the README section and the CHANGELOG entry',
+              'a (round 1);\nshared docs fold (round 510);\nb (round 2)' in doc(d, 'README.md') and entry(510, 'All') in doc(d, 'CHANGELOG.md'))
+        check('fold deletes the fragment once all five files are written', sorted(os.listdir(os.path.join(d, 'changelog.d'))) == ['README.md'])
+
+        d = tree(nl='\r\n', frags={'511-crlf.md': full.replace('510', '511')}, docs=DOCS)
+        temps.append(d)
+        cmd_fold(d, None, False)
+        raws = [doc(d, rel) for rel in DOCS]
+        check('the shared docs keep their CRLF line endings, appended and inserted lines included',
+              all('\n' not in r.replace('\r\n', '') and '\r\n' in r for r in raws)
+              and doc(d, 'docs/PERFORMANCE.md') == (PERF + '\n' + block.replace('510', '511')).replace('\n', '\r\n'))
+
+        # Parallel passes: two fragments each add a row and a section; ascending round order, whatever the file names.
+        d = tree(docs=DOCS, frags={
+            '521-b.md': entry(521) + '<!-- docs/USABILITY.md -->\nafter: | 3 | From round 520\n| 4 | From round 521 | fixed |\n'
+                        '<!-- docs/PERFORMANCE.md -->\nappend:\n## Round 521\nb\n',
+            '520-a.md': entry(520) + '<!-- docs/USABILITY.md -->\nafter: | 2 | No search\n| 3 | From round 520 | fixed |\n'
+                        '<!-- docs/PERFORMANCE.md -->\nappend:\n## Round 520\n\na\n'})
+        temps.append(d)
+        cmd_fold(d, None, False)
+        check('two passes\' rows fold in ascending round order, so a later round can anchor on an earlier round\'s row',
+              '| 2 | No search | fixed (round 2) |\n| 3 | From round 520 | fixed |\n| 4 | From round 521 | fixed |\n' in doc(d, 'docs/USABILITY.md'),
+              doc(d, 'docs/USABILITY.md'))
+        check('two "append:" blocks land at the end in round order, a blank line between them',
+              doc(d, 'docs/PERFORMANCE.md') == PERF + '\n## Round 520\n\na\n\n## Round 521\nb\n', repr(doc(d, 'docs/PERFORMANCE.md')))
+
+        # Exactly once, all or nothing: a bad operation in any section stops the fold before any file is written.
+        stops = {
+            'a missing docs/USABILITY.md anchor': '<!-- docs/USABILITY.md -->\nafter: | 9 | no such row\n| x |\n',
+            'an ambiguous tools/README.md anchor': '<!-- tools/README.md -->\nafter: |\n| x |\n',
+            'a docs/ARCHITECTURE.md "replace:" text found twice': '<!-- docs/ARCHITECTURE.md -->\nreplace: .py\nwith: .txt\n',
+            'an "append:" whose block is already in docs/PERFORMANCE.md': '<!-- docs/PERFORMANCE.md -->\nappend:\n## Round 1: first numbers\nagain\n',
+        }
+        for label, section in stops.items():
+            good = entry(530) + README_MARK + '\nafter: a (round 1)\nfine (round 530);\n<!-- docs/USABILITY.md -->\nafter: | 2 | No search\n| 3 | fine |\n'
+            d = tree(docs=DOCS, frags={'530-ok.md': good, '531-bad.md': entry(531) + section})
+            temps.append(d)
+            err, unchanged = fold_fails(d)
+            check('%s stops the fold, names the fragment and the file, changes no file' % label,
+                  err is not None and '531-bad.md' in err and section.split(' ')[1] in err and unchanged, str(err))
+        twice = {'540-a.md': entry(540) + '<!-- docs/PERFORMANCE.md -->\nappend:\n## Pass 9\none\n',
+                 '541-b.md': entry(541) + '<!-- docs/PERFORMANCE.md -->\nappend:\n## Pass 9\ntwo\n'}
+        d = tree(docs=DOCS, frags=twice)
+        temps.append(d)
+        err, unchanged = fold_fails(d)
+        check('two fragments appending a block with the same first line: the second is refused, nothing is written',
+              err is not None and '541-b.md' in err and unchanged, str(err))
+        d = tree(frags={'542-x.md': entry(542) + '<!-- docs/USABILITY.md -->\nafter: | 2 |\n| x |\n'})
+        temps.append(d)
+        err, unchanged = fold_fails(d)
+        check('a section for a file the tree does not have is refused, with the fragment\'s and the file\'s name',
+              err is not None and '542-x.md' in err and 'docs/USABILITY.md' in err and unchanged, str(err))
+
+        malformed = {'an unknown file ("<!-- docs/requirements.md -->")': '<!-- docs/requirements.md -->\nafter: a\nb\n',
+                     'the same section twice': '<!-- tools/README.md -->\nafter: | `a.py`\n| x |\n<!-- tools/README.md -->\nafter: | `b.py`\n| y |\n',
+                     '"append:" with no lines below it': '<!-- docs/PERFORMANCE.md -->\nappend:\n\n',
+                     '"append:" with text on its own line': '<!-- docs/PERFORMANCE.md -->\nappend: ## Round 550\nrow\n',
+                     'a "with:" that follows no "replace:" in a shared-docs section': '<!-- docs/USABILITY.md -->\nwith: x\n'}
+        for label, section in malformed.items():
+            d = tree(docs=DOCS, frags={'550-x.md': entry(550) + section})
+            temps.append(d)
+            err, _ = fails(d)
+            check('check rejects a fragment with %s' % label, err is not None and '550-x.md' in err, str(err))
+
+        note = entry(551).replace('**Asked:**', '<!-- a note for the reviewer -->\n**Asked:**')
+        d = tree(docs=DOCS, frags={'551-x.md': note + '<!-- docs/USABILITY.md -->\nafter: | 2 |\n| 3 | x |\n'})
+        temps.append(d)
+        err, p = fails(d)
+        check('an HTML comment in the entry that names no file stays in the entry',
+              err is None and '<!-- a note for the reviewer -->' in p['frags'][0]['entry'], str(err))
+
+        d = tree(docs=DOCS, frags={'552-x.md': full.replace('510', '552')})
+        temps.append(d)
+        before = snapshot(d)
+        code = main(['--root', d, 'fold', '--dry-run'])
+        check('fold --dry-run with shared-docs sections writes nothing', code == 0 and snapshot(d) == before)
+        check('check passes the same tree', main(['--root', d, 'check']) == 0 and snapshot(d) == before)
+
+        with open(os.path.join(HERE, 'docs_check.sh'), encoding='utf-8') as f:
+            listed = re.search(r'^SHARED_DOCS="([^"]*)"', f.read(), re.M)
+        check('docs_check.sh and changelog.py name the same shared docs', listed is not None and tuple(listed.group(1).split()) == SHARED_DOCS)
+
         # 8. The render comparison.
         a = tree()
         temps.append(a)
@@ -594,6 +794,56 @@ def self_test():
                   docs_check('main', 'nested') == 1)
             git(d, 'checkout', '-qf', 'c3')
             check('docs_check runs changelog.py check with a Python that works', docs_check('c1', 'HEAD', fragments=True) == 0)
+
+            # The shared docs (task 0465): the same rule for docs/USABILITY.md, tools/README.md, docs/ARCHITECTURE.md
+            # and docs/PERFORMANCE.md. This repository's base commit holds the script with the list, so every commit
+            # of a branch descends from the rule and is checked.
+            def touch(rel):
+                def edit():
+                    os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+                    with open(os.path.join(d, rel), 'a', encoding='utf-8') as f:
+                        f.write('x\n')
+                return edit
+
+            for k, rel in enumerate(SHARED_DOCS):
+                check('docs_check fails a commit editing %s without the trailer' % rel, run_check('s%da' % k, touch(rel), 'round') == 1)
+                check('docs_check passes a %s edit with the trailer (a fold)' % rel, run_check('s%db' % k, touch(rel), 'fold\n\n' + TRAILER) == 0)
+            check('docs_check leaves other docs alone (docs/tasks, tools/dev/README.md)',
+                  run_check('s9', lambda: (touch('docs/tasks/0001-x.md')(), touch('tools/dev/README.md')()), 'round') == 0)
+
+            # A commit written before the shared docs joined the rule is exempt for them; one made after its branch
+            # merged the rule is not. A second repository, where main gains the script after a first commit.
+            d3 = tree(docs=DOCS)
+            temps.append(d3)
+            git(d3, 'init', '-q', '-b', 'main')
+            git(d3, 'add', '-A')
+            git(d3, 'commit', '-qm', 'before the rule')
+            git(d3, 'checkout', '-qb', 'old', 'main')
+            with open(os.path.join(d3, 'docs', 'USABILITY.md'), 'a', encoding='utf-8') as f:
+                f.write('| 3 | a row the old way | fixed |\n')
+            git(d3, 'commit', '-qam', 'a round the old way')
+            git(d3, 'checkout', '-q', 'main')
+            os.makedirs(os.path.join(d3, 'tools', 'dev'))
+            for n in ('docs_check.sh', 'changelog.py', 'fill_checks.py'):
+                shutil.copy(os.path.join(HERE, n), os.path.join(d3, 'tools', 'dev', n))
+            git(d3, 'add', '-A')
+            git(d3, 'commit', '-qm', 'the shared docs join the rule')
+            git(d3, 'checkout', '-q', 'old')
+
+            def shared_check():
+                return subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'HEAD'], cwd=d3, capture_output=True,
+                                      text=True, env=dict(os.environ, NO_FRAGMENTS='1'))
+
+            git(d3, 'merge', '-q', '--no-ff', '-m', 'merge main', 'main')
+            r = shared_check()
+            check('docs_check exempts a shared-docs edit written before the shared docs joined the rule, and says so',
+                  r.returncode == 0 and 'exempt:' in r.stdout and 'docs/USABILITY.md' in r.stdout, r.stdout + r.stderr)
+            with open(os.path.join(d3, 'tools', 'README.md'), 'a', encoding='utf-8') as f:
+                f.write('| `c.py` | a row after merging main |\n')
+            git(d3, 'commit', '-qam', 'a round after merging main')
+            r = shared_check()
+            check('docs_check fails a shared-docs edit made after its branch merged the rule, naming the file',
+                  r.returncode == 1 and 'tools/README.md' in r.stdout, r.stdout + r.stderr)
     finally:
         for t in temps:
             shutil.rmtree(t, ignore_errors=True)

@@ -18,7 +18,8 @@ docs/tasks/NNNN-slug.md (status: in review) - requirements R-xx; ADR NNNN or "no
 ## Documentation
 - [ ] `changelog.d/<round>-<slug>.md` entry (+ README section if user-facing); CHANGELOG.md / README.md untouched
       unless this is a write-up's fold (`Docs-fold: yes`, ADR 0123)
-- [ ] docs/ARCHITECTURE.md, docs/USABILITY.md rows (if applicable)
+- [ ] docs/ARCHITECTURE.md, docs/USABILITY.md, docs/PERFORMANCE.md, tools/README.md lines (if applicable) as
+      sections of that fragment, the four files untouched (ADR 0123)
 - [ ] ADR (if architectural)
 
 Merging is the human's decision; agents never merge. This project is written with an AI under human direction and

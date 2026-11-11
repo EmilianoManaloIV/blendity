@@ -2,6 +2,8 @@
 # it. Several stacks may be open at once (one per pass): PRs sharing commits not yet on main form one stack, and each
 # stack must have exactly one top. tools/dev/stack_check.sh does the check; the fix is
 # `FIX=1 bash tools/dev/stack_check.sh` (it merges a stack's other heads into its newest PR's branch).
+# An integration PR (head integration/<n>, tools/dev/integrate.sh, ADR 0132) is the one allowed top over several
+# stacks; a stack it holds only part of fails until integrate.sh runs again.
 name: stack
 
 on:
@@ -23,6 +25,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: The stack scripts' self-test (a throwaway repository, a stand-in gh)
+        run: bash tools/dev/stack_selftest.sh
       - name: Each stack's top PR carries the whole stack
         env:
           GH_TOKEN: ${{ github.token }}
