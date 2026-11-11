@@ -11753,6 +11753,133 @@ static void tests_round468() {
   });
 }
 
+
+/* ---------------------------------------------------------------- round 469 (task 0445): the avatar stand-in through real events */
+static void tests_round469() {
+  test("dragging the character's root with the Move gizmo re-skins nothing (round 469): 30 frames of a real drag on AvatarLike count no skin deform and no evaluation, the torso keeps its positions to the bit, the avatar moves; turned and evenly scaled the same", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 4);
+    GameObject *avatar = ed.scene().find_by_name("AvatarLike");
+    CHECK(avatar != nullptr);
+    if (!avatar) return;
+    ed.command("select AvatarLike");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    GameObject *torso = ed.scene().find_by_name("TorsoMesh");
+    CHECK(torso != nullptr);
+    if (!torso) return;
+    const Mesh *t0 = torso->evaluated_mesh();
+    const std::vector<Vec3> p0 = t0->positions;
+    const Vec3 at = avatar->world_position();
+    const PoseCounts c0 = pose_counts();
+    ed.command("perf drag gizmo x 80 frames 30");
+    r34_steps(ed, 3);
+    const PoseCounts d = pose_counts() - c0;
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    std::printf("    %s ok %d: the avatar moved %.3f m; %llu deforms, %llu evaluations, %llu keys walked, %llu kept, %llu stale\n", r.what.c_str(), (int)r.ok, length(avatar->world_position() - at),
+                (unsigned long long)d.skin_deforms, (unsigned long long)d.evaluations, (unsigned long long)d.skin_keys, (unsigned long long)d.skin_keys_kept, (unsigned long long)d.skin_keys_stale);
+    CHECK(r.ok && length(avatar->world_position() - at) > 0.05f);
+    CHECK(d.skin_deforms == 0 && d.evaluations == 0 && d.skin_keys_stale == 0);
+    CHECK(torso->evaluated_mesh() == t0 && torso->evaluated_mesh()->positions == p0);
+    /* Turned, then evenly scaled, then both moved again: still nothing re-skinned. */
+    const PoseCounts c1 = pose_counts();
+    std::map<std::string, Transform> bones_before;  // (a deform is right when a bone moved: the IK limbs re-solve when the avatar turns)
+    ed.scene().for_each([&](GameObject &g) { if (g.get<Bone>()) bones_before[g.name] = g.local(); });
+    std::map<std::string, uint64_t> versions;  // (which mesh deformed, if one did: named in the failure's line)
+    ed.scene().for_each([&](GameObject &g) { if (g.get<SkinModifier>() && g.evaluated_mesh()) versions[g.name] = g.evaluated_mesh()->deform_version; });
+    avatar->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.65f));
+    ed.mark_changed_for_test("R469 turn");
+    r34_steps(ed, 3);
+    auto so_far = [&](const char *what) { std::printf("    after %s: %llu deforms so far\n", what, (unsigned long long)(pose_counts() - c1).skin_deforms); };
+    so_far("turning");
+    ed.scene().for_each([&](GameObject &g) { if (g.get<SkinModifier>() && g.evaluated_mesh() && versions[g.name] != g.evaluated_mesh()->deform_version) std::printf("    re-skinned: %s\n", g.name.c_str()); });
+    const Vec3 s0 = avatar->local().scale;
+    avatar->set_local_scale(s0 * 1.5f);
+    ed.mark_changed_for_test("R469 scale");
+    r34_steps(ed, 3);
+    so_far("scaling");
+    avatar->set_local_position(avatar->local().position + Vec3(40, 0, 3));
+    ed.mark_changed_for_test("R469 far");
+    r34_steps(ed, 3);
+    so_far("moving");
+    const PoseCounts d1 = pose_counts() - c1;
+    std::printf("    turned, scaled 1.5 and moved: %llu deforms, %llu evaluations\n", (unsigned long long)d1.skin_deforms, (unsigned long long)d1.evaluations);
+    size_t bones_moved = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.get<Bone>() || !bones_before.count(g.name)) return;
+      const Transform &b = bones_before[g.name], &now = g.local();
+      const bool same = b.position.x == now.position.x && b.position.y == now.position.y && b.position.z == now.position.z && b.rotation.x == now.rotation.x && b.rotation.y == now.rotation.y &&
+                        b.rotation.z == now.rotation.z && b.rotation.w == now.rotation.w;
+      bones_moved += same ? 0 : 1;
+    });
+    std::printf("    %zu bone(s) changed their own transform meanwhile (IK, constraints)\n", bones_moved);
+    CHECK(d1.skin_keys_stale == 0 && (bones_moved > 0 || (d1.skin_deforms == 0 && d1.evaluations == 0)));  // (a deform with no bone moved is a re-skin of a character moved as a whole)
+    CHECK(torso->evaluated_mesh() == t0 && torso->evaluated_mesh()->positions == p0);
+    /* An uneven scale does re-skin (world space) and the pose is kept right: the meshes still follow the bones. */
+    avatar->set_local_scale({s0.x * 1.5f, s0.y * 2.0f, s0.z * 1.5f});
+    ed.mark_changed_for_test("R469 uneven");
+    r34_steps(ed, 3);
+    CHECK(pose_counts().skin_keys_stale == c0.skin_keys_stale);
+  });
+
+  test("the Scene view beside the Game view deforms a posed frame as often as the Scene view alone (round 469): turning the chest counts the same deforms in 2 by 3 and in the default layout", [] {
+    uint64_t deforms[2] = {0, 0}, evaluations[2] = {0, 0};
+    for (int two_by_three = 0; two_by_three < 2; two_by_three++) {
+      Editor ed;
+      r34_open(ed, two_by_three != 0);
+      ed.command("benchscene avatarlikequick");
+      r34_steps(ed, 5);
+      GameObject *chest = ed.scene().find_by_name("Chest");
+      CHECK(chest != nullptr);
+      if (!chest) return;
+      const PoseCounts c0 = pose_counts();
+      for (int i = 0; i < 6; i++) {
+        chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.1f * (float)(i + 1)));
+        ed.mark_changed_for_test("R469 chest");
+        r34_steps(ed, 2);
+      }
+      const PoseCounts d = pose_counts() - c0;
+      deforms[two_by_three] = d.skin_deforms, evaluations[two_by_three] = d.evaluations;
+      std::printf("    %s: %llu deforms, %llu evaluations in 6 posed frames\n", two_by_three ? "Scene + Game" : "Scene alone", (unsigned long long)d.skin_deforms, (unsigned long long)d.evaluations);
+    }
+    CHECK(deforms[0] > 0 && deforms[0] == deforms[1]);
+  });
+
+  test("a clip playing and a Puppet drag keep every skin key right (round 469): over the frames of both, no kept key is found stale on benchscene avatarlikequick", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.set_render_cache_verify(false);
+    ed.command("benchscene avatarlikequick");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const PoseCounts c0 = pose_counts();
+    ed.command("anim play");
+    for (int i = 0; i < 40; i++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      ed.step_frame_headless();
+    }
+    ed.command("anim stop");
+    const PoseCounts played = pose_counts() - c0;
+    std::printf("    a clip playing: %llu deforms, %llu keys walked, %llu kept, %llu stale\n", (unsigned long long)played.skin_deforms, (unsigned long long)played.skin_keys,
+                (unsigned long long)played.skin_keys_kept, (unsigned long long)played.skin_keys_stale);
+    CHECK(played.skin_keys_stale == 0);
+    ed.command("select AvatarLike");
+    ed.command("assist on physics");
+    ed.command("autopose on");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const PoseCounts c1 = pose_counts();
+    ed.command("perf drag puppet lhand 24 36 frames 12");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    const PoseCounts dragged = pose_counts() - c1;
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    std::printf("    a Puppet drag (ok %d): %llu deforms, %llu keys walked, %llu kept, %llu stale\n", (int)r.ok, (unsigned long long)dragged.skin_deforms, (unsigned long long)dragged.skin_keys,
+                (unsigned long long)dragged.skin_keys_kept, (unsigned long long)dragged.skin_keys_stale);
+    CHECK(r.ok && dragged.skin_deforms > 0 && dragged.skin_keys_stale == 0);
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -11846,5 +11973,6 @@ void run_editor_tests() {
   tests_round462_engineer();
   tests_round462_review();
   tests_round468();
+  tests_round469();
   coverage_tests();
 }

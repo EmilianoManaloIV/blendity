@@ -2935,7 +2935,8 @@ Mat4 GameObject::world_matrix_uncached() const {
 }
 
 void GameObject::mark_dirty() {
-  edit_epoch::bump();  // (ADR 0115: the views' scene hash - once for the subtree, not per node: review 435)
+  edit_epoch::bump_transform();  // (ADR 0115: the views' scene hash - once for the subtree, not per node: review 435)
+  for (GameObject *g = this; g; g = g->parent) g->below_version++;  // (round 469: a dozen steps a write)
   mark_dirty_tree();
 }
 
@@ -3207,6 +3208,18 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
     return mf->mesh.get();
   }
   if (eval_mesh_[kind] && eval_key_[kind] == key) return eval_mesh_[kind].get();
+  /* Round 469 (ADR 0124): another kind of view already has exactly this - the same base, modifiers and shape weights
+   * (the Scene view's and the Game view's, in the common case): one mesh for both, deformed once and sent to the card
+   * once. Only for stacks that deform the base (no head to share) and never Edit Mode's cage. */
+  if (!any_head && mods != 2)
+    for (int k2 = 0; k2 < 9; k2++) {
+      if (k2 == kind || k2 == 2 || !eval_mesh_[k2] || eval_key_[k2] != key || eval_head_[k2] || eval_pending_[k2]) continue;
+      eval_mesh_[kind] = eval_mesh_[k2], eval_key_[kind] = key, eval_shape_key_[kind] = eval_shape_key_[k2];
+      eval_from_[kind] = eval_from_[k2], eval_from_topo_[kind] = eval_from_topo_[k2];
+      eval_head_[kind] = nullptr, eval_chain_[kind] = nullptr, eval_pending_[kind] = 0;
+      return eval_mesh_[kind].get();
+    }
+  edit_epoch::Moved moved;  // (what follows derives a mesh from inputs that were bumped themselves: not a structure change)
   BL_ZONE("evaluate mesh");
   PoseTimer eval_timer(PoseStat::Evaluate);  // (round 468: the calls past the key hit, whole - the skin, the keys and the copies nested in it)
   /* Round 413 (ADR 0107): a slow stack goes to the editor's worker; what it had stays up meanwhile. Not when only the
@@ -3303,6 +3316,10 @@ const Mesh *GameObject::evaluated_mesh(int kind) const {
   if (m && same_head && same_topology) {
     /* Deform again from the head's positions. A copy shared with a snapshot (Scene::clone) or another
      * scene is never written: it is copied first, render mesh included, which still saves the rebuild. */
+    /* (Round 469: the other kinds that share this mesh let go of it before it is written - each takes it back by its
+     * key when it is asked for the same thing, and gets its own when it is not.) */
+    for (int k2 = 0; k2 < 9; k2++)
+      if (k2 != kind && eval_mesh_[k2] == m) eval_mesh_[k2] = nullptr, eval_key_[k2] = 0;
     if (m.use_count() > 2) m = std::make_shared<Mesh>(*m);  // more holders than eval_mesh_ and this one
     const uint64_t v = m->version;
     m->positions = head->positions;
@@ -3507,6 +3524,9 @@ void Scene::set_parent(GameObject *child, GameObject *new_parent, int index, boo
   else list.insert(list.begin() + index, child);
   child->world_dirty_ = false;  // force mark_dirty to propagate
   child->mark_dirty();
+  /* (Round 469, review: a structure change - what is kept for "nothing under this object moved" would otherwise hold
+   * for the old parents, whose below_version nothing bumps.) */
+  edit_epoch::bump();
   if (keep_world) child->set_world_matrix(world);
 }
 

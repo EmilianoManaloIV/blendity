@@ -7203,7 +7203,9 @@ static void tests_round468() {
     a.tube->evaluated_mesh();
     const PoseCounts idle = pose_counts_this_thread() - p0;
     std::printf("    nothing turned: %llu skin keys, %llu deforms, %llu evaluations\n", (unsigned long long)idle.skin_keys, (unsigned long long)idle.skin_deforms, (unsigned long long)idle.evaluations);
-    CHECK(idle.skin_keys == 2 && idle.skin_deforms == 0 && idle.evaluations == 0);  // (the keys answer; nothing is deformed)
+    /* (Round 469, ADR 0124: a key answered from what was kept no longer walks the bones - it counts as skin_keys_kept;
+     * skin_keys counts the walks, none on a frame in which nothing moved.) */
+    CHECK(idle.skin_keys == 0 && idle.skin_keys_kept == 2 && idle.skin_deforms == 0 && idle.evaluations == 0);
     a.upper->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.6f));
     const PoseCounts p1 = pose_counts_this_thread();
     b.tube->evaluated_mesh();
@@ -7676,6 +7678,787 @@ static void tests_round468() {
   });
 }
 
+
+/* ---------------------------------------------------------------- round 469 (task 0445): a skin deformed once, only when its own bones moved */
+/* A character: Char > Rig (Armature) > Hip > Spine > Head, Spine > Arm, Hip > Tail; the meshes beside the rig under Char.
+ * Body (Hip + Spine weights, y 0..2), Hair (Head only, y 2..3), Glove (Arm only, near the arm's end); Tail binds nothing.
+ * `character` false: no Char - the rig and the meshes at the scene's root (the skin works in world space then). */
+struct R469Char {
+  GameObject *chr = nullptr, *rig = nullptr, *hip = nullptr, *spine = nullptr, *head = nullptr, *arm = nullptr, *tail = nullptr;
+  GameObject *body = nullptr, *hair = nullptr, *glove = nullptr;
+};
+static MeshPtr r469_tube(float x, float y0, float y1, int rings, const std::vector<std::string> &names, const std::function<float(size_t, float)> &weight, bool normals) {
+  auto m = std::make_shared<Mesh>();
+  const int seg = 12;
+  for (int r = 0; r < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const float a = k * 2.0f * kPi / seg, y = y0 + (y1 - y0) * (float)r / (float)(rings - 1);
+      m->add_vert({x + 0.2f * std::cos(a), y, 0.2f * std::sin(a)});
+    }
+  for (int r = 0; r + 1 < rings; r++)
+    for (int k = 0; k < seg; k++) {
+      const uint32_t a = (uint32_t)(r * seg + k), b = (uint32_t)(r * seg + (k + 1) % seg);
+      m->add_face({a, a + seg, b + seg, b});
+    }
+  for (size_t gi = 0; gi < names.size(); gi++) {
+    VertexGroup g{names[gi], {}};
+    for (const Vec3 &p : m->positions) g.weights.push_back(weight(gi, p.y));
+    m->vertex_groups.push_back(g);
+  }
+  if (normals)
+    for (const Vec3 &p : m->positions) m->custom_normals.push_back(normalize(Vec3(p.x - x, 0.3f, p.z)));
+  m->touch();
+  return m;
+}
+static GameObject *r469_bone(Scene &s, const std::string &name, GameObject *parent, Vec3 at) {
+  GameObject *g = s.create(name, parent);
+  g->set_local_position(at);
+  g->add<Bone>()->rest_position = at;
+  return g;
+}
+static GameObject *r469_skinned(Scene &s, const std::string &name, GameObject *parent, MeshPtr m, const std::string &rig) {
+  GameObject *g = s.create(name, parent);
+  g->add<MeshFilter>()->mesh = m;
+  g->add<SkinModifier>()->object = rig;
+  return g;
+}
+static R469Char r469_build(Scene &s, bool character, bool normals = false) {
+  R469Char c;
+  c.chr = character ? s.create("Char") : nullptr;
+  c.rig = s.create("Rig", c.chr);
+  c.rig->add<Armature>();
+  c.hip = r469_bone(s, "Hip", c.rig, {0, 0, 0});
+  c.spine = r469_bone(s, "Spine", c.hip, {0, 1, 0});
+  c.head = r469_bone(s, "Head", c.spine, {0, 1, 0});
+  c.arm = r469_bone(s, "Arm", c.spine, {0.5f, 0, 0});
+  c.tail = r469_bone(s, "Tail", c.hip, {-0.5f, 0, 0});
+  auto blend = [](size_t gi, float y) {
+    const float t = std::max(0.0f, std::min(1.0f, (y - 0.9f) / 0.2f));
+    return gi == 0 ? 1.0f - t : t;
+  };
+  c.body = r469_skinned(s, "Body", c.chr, r469_tube(0, 0, 2, 21, {"Hip", "Spine"}, blend, normals), "Rig");
+  c.hair = r469_skinned(s, "Hair", c.chr, r469_tube(0, 2, 3, 11, {"Head"}, [](size_t, float) { return 1.0f; }, normals), "Rig");
+  c.glove = r469_skinned(s, "Glove", c.chr, r469_tube(0.6f, 0.8f, 1.2f, 6, {"Arm"}, [](size_t, float) { return 1.0f; }, normals), "Rig");
+  return c;
+}
+
+static bool r469_mesh_bits(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && a.custom_normals.size() == b.custom_normals.size() &&
+         (a.positions.empty() || std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0) &&
+         (a.custom_normals.empty() || std::memcmp(a.custom_normals.data(), b.custom_normals.data(), a.custom_normals.size() * sizeof(Vec3)) == 0);
+}
+static float r469_max_diff(const Mesh &a, const Mesh &b) {
+  if (a.positions.size() != b.positions.size()) return 1e30f;
+  float d = 0.0f;
+  for (size_t i = 0; i < a.positions.size(); i++) d = std::max(d, length(a.positions[i] - b.positions[i]));
+  return d;
+}
+
+/* The skin as it was before round 469 (git show HEAD:src/scene/skin.cpp, SkinModifier::modify): world matrices of every
+ * bone, a scan of all vertex groups for each vertex. The second implementation the new deform is compared with. */
+namespace {
+struct R469Dual {
+  Quat r{0, 0, 0, 0}, d{0, 0, 0, 0};
+};
+bool r469_finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bits(v.z); }
+R469Dual r469_to_dual(const Mat4 &m) {
+  R469Dual q;
+  const Vec3 x = normalize(m.column(0)), y = normalize(m.column(1)), z = normalize(m.column(2));
+  q.r = normalize(quat_from_axes(x, y, z));
+  const Vec3 t = m.translation();
+  const Quat tq(t.x, t.y, t.z, 0.0f);
+  const Quat d = tq * q.r;
+  q.d = {d.x * 0.5f, d.y * 0.5f, d.z * 0.5f, d.w * 0.5f};
+  return q;
+}
+bool r469_rigid(const Mat4 &m) {
+  const Vec3 c[3] = {m.column(0), m.column(1), m.column(2)};
+  for (int k = 0; k < 3; k++)
+    if (std::fabs(length(c[k]) - 1.0f) > 1e-3f || std::fabs(dot(c[k], c[(k + 1) % 3])) > 1e-3f) return false;
+  return dot(cross(c[0], c[1]), c[2]) > 0.0f;
+}
+}  // namespace
+
+static void r469_reference_modify(Mesh &m, const GameObject &owner, const GameObject &root, int max_influences) {
+  if (m.vertex_groups.empty() || !m.groups_fit()) return;
+  const Armature &arm = *root.get<Armature>();
+  if (arm.rest_position) return;
+  std::vector<ArmatureBone> bones;
+  armature_bones(root, bones);
+  if (bones.empty()) return;
+  const Mat4 ow = owner.world_matrix(), owner_inv = ow.inverse(), base = armature_base(root);
+  std::unordered_map<std::string, int> by_name;
+  std::vector<Mat4> rest_inv(bones.size());
+  for (size_t i = 0; i < bones.size(); i++) {
+    const Mat4 rw = base * bones[i].rest;
+    const float det = dot(cross(rw.column(0), rw.column(1)), rw.column(2));
+    rest_inv[i] = rw.inverse();
+    if (bones[i].bone->deform && std::fabs(det) > 1e-12f && finite_bits(det)) by_name.emplace(bones[i].object->name, (int)i);
+  }
+  std::vector<int> group_bone(m.vertex_groups.size(), -1);
+  bool any = false;
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    auto it = by_name.find(m.vertex_groups[gi].name);
+    if (it != by_name.end()) group_bone[gi] = it->second, any = true;
+  }
+  if (!any) return;
+  std::vector<Mat4> mats(bones.size());
+  std::vector<R469Dual> duals(bones.size());
+  std::vector<uint8_t> is_rigid(bones.size());
+  for (size_t i = 0; i < bones.size(); i++) {
+    mats[i] = bones[i].world * rest_inv[i];
+    is_rigid[i] = r469_rigid(mats[i]);
+    duals[i] = r469_to_dual(mats[i]);
+  }
+  const int kmax = std::max(1, std::min(max_influences, 8));
+  const bool dq = arm.deform == 1;
+  const bool has_cn = m.custom_normals_fit();
+  for (size_t v = 0; v < m.vert_count(); v++) {
+    int idx[8];
+    float wt[8];
+    int n = 0;
+    for (size_t gi = 0; gi < group_bone.size(); gi++) {
+      if (group_bone[gi] < 0) continue;
+      const float w = m.vertex_groups[gi].weights[v];
+      if (!(w > 0.0f) || !finite_bits(w)) continue;
+      if (n < kmax) {
+        idx[n] = group_bone[gi], wt[n] = w, n++;
+        continue;
+      }
+      int low = 0;
+      for (int k = 1; k < n; k++)
+        if (wt[k] < wt[low]) low = k;
+      if (w > wt[low]) idx[low] = group_bone[gi], wt[low] = w;
+    }
+    float sum = 0.0f;
+    for (int k = 0; k < n; k++) sum += wt[k];
+    if (!(sum > 0.0f)) continue;
+    Vec3 &p = m.positions[v];
+    const Vec3 rest = ow.point(p);
+    bool all_rigid = dq;
+    for (int k = 0; k < n && all_rigid; k++) all_rigid = is_rigid[(size_t)idx[k]] != 0;
+    Vec3 out(0.0f);
+    Quat turn(0, 0, 0, 1);
+    if (all_rigid) {
+      const R469Dual &q0 = duals[(size_t)idx[0]];
+      Quat r(0, 0, 0, 0), d(0, 0, 0, 0);
+      for (int k = 0; k < n; k++) {
+        const R469Dual &q = duals[(size_t)idx[k]];
+        float w = wt[k] / sum;
+        if (q.r.x * q0.r.x + q.r.y * q0.r.y + q.r.z * q0.r.z + q.r.w * q0.r.w < 0.0f) w = -w;
+        r = {r.x + q.r.x * w, r.y + q.r.y * w, r.z + q.r.z * w, r.w + q.r.w * w};
+        d = {d.x + q.d.x * w, d.y + q.d.y * w, d.z + q.d.z * w, d.w + q.d.w * w};
+      }
+      const float len = std::sqrt(r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w);
+      if (!(len > 1e-8f)) continue;
+      r = {r.x / len, r.y / len, r.z / len, r.w / len};
+      d = {d.x / len, d.y / len, d.z / len, d.w / len};
+      const Quat t = d * r.conjugate();
+      out = r.rotate(rest) + Vec3(t.x, t.y, t.z) * 2.0f;
+      turn = r;
+    }
+    else
+      for (int k = 0; k < n; k++) out += mats[(size_t)idx[k]].point(rest) * (wt[k] / sum);
+    out = owner_inv.point(out);
+    if (r469_finite3(out)) p = out;
+    if (!has_cn) continue;
+    const Vec3 nw = ow.dir(m.custom_normals[v]);
+    Vec3 on(0.0f);
+    if (all_rigid) on = turn.rotate(nw);
+    else
+      for (int k = 0; k < n; k++) on += mats[(size_t)idx[k]].dir(nw) * (wt[k] / sum);
+    on = owner_inv.dir(on);
+    const float nlen = length(on);
+    if (finite_bits(nlen) && nlen > 1e-12f) m.custom_normals[v] = on / nlen;
+  }
+}
+
+/* What the mesh object shows today for its first Skin: the reference deform of a copy of its base, limited by the Skin's
+ * vertex group the way run_modifier limits a deform-only modifier. */
+static Mesh r469_expected(const GameObject &g) {
+  const MeshFilter *mf = g.mesh_filter();
+  const SkinModifier *skin = g.get<SkinModifier>();
+  Mesh m = *mf->mesh;
+  const GameObject *root = skin_armature_of(g, skin->object);
+  if (!root || !root->get<Armature>()) return m;
+  const std::vector<Vec3> before = m.positions;
+  r469_reference_modify(m, g, *root, skin->max_influences);
+  const int gi = skin->vertex_group.empty() ? -1 : m.find_group(skin->vertex_group);
+  if (gi >= 0 && m.vertex_groups[(size_t)gi].weights.size() == m.vert_count()) {
+    const std::vector<float> &w = m.vertex_groups[(size_t)gi].weights;
+    for (size_t i = 0; i < before.size(); i++) {
+      float k = finite_bits(w[i]) ? std::max(0.0f, std::min(w[i], 1.0f)) : 0.0f;
+      if (skin->invert_group) k = 1.0f - k;
+      m.positions[i] = k == 0.0f ? before[i] : before[i] + (m.positions[i] - before[i]) * k;
+    }
+  }
+  return m;
+}
+/* (Not to the bit: the release build is /fp:fast, which compiles this file's copy of the old loop and skin.cpp's with different
+ * contraction and order - a few ulps (1e-6) of noise, measured. The bit-for-bit pins are between two uses of the new code: the
+ * character at the origin and far away, a pose kept and recomputed. `tolerance` 0 means that noise floor.) */
+static bool r469_agrees(const GameObject &g, const char *what, float tolerance = 0.0f) {
+  const Mesh *got = g.evaluated_mesh();
+  const Mesh want = r469_expected(g);
+  if (tolerance == 0.0f) tolerance = 4e-6f;
+  bool ok = got && r469_max_diff(*got, want) <= tolerance && got->custom_normals.size() == want.custom_normals.size();
+  for (size_t i = 0; got && ok && i < want.custom_normals.size(); i++) ok = length(got->custom_normals[i] - want.custom_normals[i]) <= tolerance;
+  if (!ok) std::printf("    %s: %s does not equal the reference (largest difference %g)\n", what, g.name.c_str(), got ? r469_max_diff(*got, want) : -1.0f);
+  return ok;
+}
+static void r469_pose(const R469Char &c) {
+  c.hip->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.15f));
+  c.spine->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.4f));
+  c.head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.5f));
+  c.arm->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.7f));
+}
+static uint64_t r469_stale_base = 0;  // (the stale count when the running test began: this thread's tally runs on across tests)
+static PoseCounts r469_since(const PoseCounts &p) { return pose_counts_this_thread() - p; }
+static void r469_all(const R469Char &c) {
+  c.body->evaluated_mesh();
+  c.hair->evaluated_mesh();
+  c.glove->evaluated_mesh();
+}
+
+static void tests_round469() {
+  test("an untouched skinned character costs nothing (round 469): after a settled frame, asking again - and again after a prop outside it moved, or another character was posed - walks no key and deforms nothing", [] {
+    r469_stale_base = pose_counts_this_thread().skin_keys_stale;
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    R468Skinned other = r468_skinned(s, "B", 8.0f);
+    GameObject *prop = s.create("Prop");
+    r469_pose(c);
+    r469_all(c);
+    other.tube->evaluated_mesh();
+    PoseCounts p0 = pose_counts_this_thread();
+    uint64_t keys[3];
+    for (GameObject *g : {c.body, c.hair, c.glove}) g->evaluated_mesh(), g->evaluated_keys(keys);
+    PoseCounts d = r469_since(p0);
+    std::printf("    settled: %llu keys walked, %llu kept, %llu deforms, %llu evaluations\n", (unsigned long long)d.skin_keys, (unsigned long long)d.skin_keys_kept, (unsigned long long)d.skin_deforms, (unsigned long long)d.evaluations);
+    CHECK(d.skin_keys == 0 && d.skin_deforms == 0 && d.evaluations == 0 && d.skin_keys_kept > 0 && d.skin_bindings == 0);
+    prop->set_local_position({3, 4, 5});  // (outside the character)
+    p0 = pose_counts_this_thread();
+    r469_all(c);
+    d = r469_since(p0);
+    CHECK(d.skin_keys == 0 && d.skin_deforms == 0 && d.evaluations == 0);
+    other.upper->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.9f));  // (another character posed)
+    other.tube->evaluated_mesh();
+    p0 = pose_counts_this_thread();
+    r469_all(c);
+    d = r469_since(p0);
+    std::printf("    after another character was posed: %llu keys walked, %llu deforms\n", (unsigned long long)d.skin_keys, (unsigned long long)d.skin_deforms);
+    CHECK(d.skin_keys == 0 && d.skin_deforms == 0 && d.evaluations == 0);
+    CHECK(r469_agrees(*c.body, "untouched") && r469_agrees(*c.hair, "untouched") && r469_agrees(*c.glove, "untouched"));
+    CHECK(pose_counts_this_thread().skin_keys_stale == r469_stale_base);
+  });
+
+  test("a bone moves only the meshes bound to it or to a bone below it (round 469): turning the head deforms the hair alone; the arm, the glove alone; the spine all three; the tail (bound to nothing) none", [] {
+    r469_stale_base = pose_counts_this_thread().skin_keys_stale;
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    r469_pose(c);
+    r469_all(c);
+    const Mesh *m0[3] = {c.body->evaluated_mesh(), c.hair->evaluated_mesh(), c.glove->evaluated_mesh()};
+    const uint64_t dv0[3] = {m0[0]->deform_version, m0[1]->deform_version, m0[2]->deform_version};
+    const std::vector<Vec3> body0 = m0[0]->positions, hair0 = m0[1]->positions, glove0 = m0[2]->positions;
+    auto turn = [&](GameObject *bone, float a) { bone->set_local_rotation(Quat::axis_angle({0, 0, 1}, a)); };
+    auto same = [&](int i, const Mesh *m, uint64_t dv) { return m == (i == 0 ? c.body : i == 1 ? c.hair : c.glove)->evaluated_mesh() && m->deform_version == dv; };
+    PoseCounts p0 = pose_counts_this_thread();
+    turn(c.tail, 0.8f);
+    r469_all(c);
+    CHECK(r469_since(p0).skin_deforms == 0 && same(0, m0[0], dv0[0]) && same(1, m0[1], dv0[1]) && same(2, m0[2], dv0[2]));
+    p0 = pose_counts_this_thread();
+    turn(c.head, 0.9f);
+    r469_all(c);
+    PoseCounts d = r469_since(p0);
+    std::printf("    the head turned: %llu deforms, %llu evaluations\n", (unsigned long long)d.skin_deforms, (unsigned long long)d.evaluations);
+    CHECK(d.skin_deforms == 1 && d.evaluations == 1 && same(0, m0[0], dv0[0]) && same(2, m0[2], dv0[2]) && c.hair->evaluated_mesh()->deform_version != dv0[1]);
+    CHECK(c.body->evaluated_mesh()->positions == body0 && c.glove->evaluated_mesh()->positions == glove0 && c.hair->evaluated_mesh()->positions != hair0);
+    p0 = pose_counts_this_thread();
+    turn(c.arm, 0.3f);
+    r469_all(c);
+    d = r469_since(p0);
+    CHECK(d.skin_deforms == 1 && same(0, m0[0], dv0[0]) && c.glove->evaluated_mesh()->positions != glove0);
+    p0 = pose_counts_this_thread();
+    turn(c.spine, 0.35f);  // (a bone ABOVE the bound ones: the head and the arm go with it)
+    r469_all(c);
+    d = r469_since(p0);
+    std::printf("    the spine turned: %llu deforms\n", (unsigned long long)d.skin_deforms);
+    CHECK(d.skin_deforms == 3);
+    p0 = pose_counts_this_thread();
+    turn(c.hip, 0.2f);
+    r469_all(c);
+    CHECK(r469_since(p0).skin_deforms == 3);
+    CHECK(r469_agrees(*c.body, "turned") && r469_agrees(*c.hair, "turned") && r469_agrees(*c.glove, "turned"));
+    CHECK(pose_counts_this_thread().skin_keys_stale == r469_stale_base);
+  });
+
+  test("the Scene, Game and render views share one deform (round 469): after a pose change views 0, 1 and 3 get the same mesh from one deform; a modifier shown in the viewport only gives each kind its own, and asking one never changes the other's", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    r469_all(c);
+    c.spine->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.6f));
+    const PoseCounts p0 = pose_counts_this_thread();
+    const Mesh *m0 = c.body->evaluated_mesh(0), *m1 = c.body->evaluated_mesh(1), *m3 = c.body->evaluated_mesh(3), *m4 = c.body->evaluated_mesh(4);
+    const PoseCounts d = r469_since(p0);
+    std::printf("    views 0, 1, 3, 4: %llu deform(s), pointers %s\n", (unsigned long long)d.skin_deforms, m0 == m1 && m1 == m3 && m3 == m4 ? "equal" : "differ");
+    CHECK(d.skin_deforms == 1 && m0 && m0 == m1 && m1 == m3 && m3 == m4);
+    CHECK(r469_agrees(*c.body, "shared"));
+    /* The second pose change, asked in another order. */
+    c.spine->set_local_rotation(Quat::axis_angle({1, 0, 0}, -0.3f));
+    const PoseCounts p1 = pose_counts_this_thread();
+    const Mesh *n3 = c.body->evaluated_mesh(3), *n0 = c.body->evaluated_mesh(0), *n1 = c.body->evaluated_mesh(1);
+    CHECK(r469_since(p1).skin_deforms == 1 && n0 == n3 && n3 == n1);
+    CHECK(r469_agrees(*c.body, "shared, the other order"));
+    /* A difference between the kinds: a second Skin (one influence) that renders do not show. */
+    SkinModifier *extra = c.body->add<SkinModifier>();
+    extra->object = "Rig", extra->max_influences = 1, extra->show_in_render = false;
+    c.spine->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
+    const Mesh *v0 = c.body->evaluated_mesh(0);
+    const std::vector<Vec3> viewport = v0->positions;
+    const Mesh *r1 = c.body->evaluated_mesh(1);
+    const std::vector<Vec3> render = r1->positions;
+    CHECK(v0 != r1 && viewport != render);
+    CHECK(c.body->evaluated_mesh(0)->positions == viewport && c.body->evaluated_mesh(1)->positions == render);  // (neither changed by the other's evaluation)
+    CHECK(c.body->evaluated_mesh(3)->positions == viewport && c.body->evaluated_mesh(4)->positions == render);
+    /* Each equals what a fresh evaluation in a clone of the scene gives. */
+    std::unique_ptr<Scene> copy = s.clone();
+    GameObject *fresh = copy->find_by_name("Body");
+    CHECK(fresh != nullptr);
+    if (!fresh) return;
+    CHECK(fresh->evaluated_mesh(0)->positions == viewport && fresh->evaluated_mesh(1)->positions == render);
+    /* ...and a pose change afterwards moves both. */
+    c.spine->set_local_rotation(Quat::axis_angle({1, 0, 0}, -0.2f));
+    c.body->evaluated_mesh(1), c.body->evaluated_mesh(0), c.body->evaluated_mesh(3), c.body->evaluated_mesh(4);
+    const std::vector<Vec3> viewport2 = c.body->evaluated_mesh(0)->positions, render2 = c.body->evaluated_mesh(1)->positions;
+    CHECK(viewport2 != viewport && render2 != render);
+    std::unique_ptr<Scene> copy2 = s.clone();
+    CHECK(copy2->find_by_name("Body")->evaluated_mesh(0)->positions == viewport2 && copy2->find_by_name("Body")->evaluated_mesh(1)->positions == render2);
+  });
+
+  test("moving, turning or evenly scaling the character re-skins nothing (round 469): the meshes keep their own-space positions to the bit and nothing deforms; an uneven scale skins in world space and equals the old result", [] {
+    r469_stale_base = pose_counts_this_thread().skin_keys_stale;
+    Scene s;
+    GameObject *world = s.create("World");
+    const R469Char c = r469_build(s, true);
+    s.set_parent(c.chr, world, -1, false);
+    r469_pose(c);
+    r469_all(c);
+    const Mesh *m0[3] = {c.body->evaluated_mesh(), c.hair->evaluated_mesh(), c.glove->evaluated_mesh()};
+    const std::vector<Vec3> p[3] = {m0[0]->positions, m0[1]->positions, m0[2]->positions};
+    const uint64_t dv[3] = {m0[0]->deform_version, m0[1]->deform_version, m0[2]->deform_version};
+    auto still = [&](const char *what) {
+      const PoseCounts p0 = pose_counts_this_thread();
+      r469_all(c);
+      const PoseCounts d = r469_since(p0);
+      bool ok = d.skin_deforms == 0 && d.evaluations == 0;
+      int i = 0;
+      for (GameObject *g : {c.body, c.hair, c.glove}) {
+        const Mesh *m = g->evaluated_mesh();
+        ok = ok && m == m0[i] && m->deform_version == dv[i] && m->positions.size() == p[i].size() && std::memcmp(m->positions.data(), p[i].data(), p[i].size() * sizeof(Vec3)) == 0;
+        i++;
+      }
+      std::printf("    %s: %llu deforms, %llu evaluations\n", what, (unsigned long long)d.skin_deforms, (unsigned long long)d.evaluations);
+      return ok;
+    };
+    c.chr->set_local_position({5000, 20, -30});
+    CHECK(still("moved"));
+    c.chr->set_local_rotation(Quat::axis_angle(normalize(Vec3(1, 2, 3)), 0.9f));
+    CHECK(still("turned"));
+    c.chr->set_local_scale({1.5f, 1.5f, 1.5f});
+    CHECK(still("scaled evenly"));
+    world->set_local_position({-70, 0, 4});  // (above the character)
+    world->set_local_rotation(Quat::axis_angle({0, 1, 0}, 2.0f));
+    world->set_local_scale({0.5f, 0.5f, 0.5f});
+    CHECK(still("the object above it moved, turned and scaled"));
+    /* Uneven: the skin is measured in the world again, and equals the old code's result. */
+    world->set_local_scale({1.0f, 2.0f, 1.0f});
+    for (GameObject *g : {c.body, c.hair, c.glove}) CHECK(r469_agrees(*g, "uneven scale above the character", 5e-3f));
+    c.chr->set_local_scale({1.0f, 1.0f, 1.0f});
+    world->set_local_scale({1.0f, 1.0f, 1.0f});
+    world->set_local_rotation(Quat());
+    for (GameObject *g : {c.body, c.hair, c.glove}) CHECK(r469_agrees(*g, "even again", 5e-3f));  // (the old arithmetic at 5000 m, as above: 1.5e-3 measured)
+    CHECK(pose_counts_this_thread().skin_keys_stale == r469_stale_base);
+  });
+
+  test("an uneven scale at the character's root skins in world space and equals the old skin (round 469, to 4e-6): Char scaled (1, 2, 1) with no other transform above it", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true, true);
+    c.chr->set_local_scale({1.0f, 2.0f, 1.0f});
+    r469_pose(c);
+    for (GameObject *g : {c.body, c.hair, c.glove}) CHECK(r469_agrees(*g, "uneven root"));
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.9f));
+    for (GameObject *g : {c.body, c.hair, c.glove}) CHECK(r469_agrees(*g, "uneven root, posed again"));
+    c.rig->get<Armature>()->deform = 1;
+    for (GameObject *g : {c.body, c.hair, c.glove}) CHECK(r469_agrees(*g, "uneven root, dual quaternion"));
+  });
+
+  test("a skinned mesh equals the old skin to float noise (round 469, 4e-6; /fp:fast makes a copy of the loop differ by an ulp): Linear and Dual Quaternion, 1 to 8 influences, a vertex-group limit, custom normals, a NaN weight, a zero-scale bone, a non-deform bone - with and without a Char above", [] {
+    for (int with_char = 0; with_char < 2; with_char++)
+      for (int dq = 0; dq < 2; dq++)
+        for (int influences = 1; influences <= 8; influences++) {
+          Scene s;
+          GameObject *chr = with_char ? s.create("Char") : nullptr;
+          GameObject *rig = s.create("Rig", chr);
+          rig->add<Armature>()->deform = dq;
+          std::vector<std::string> names;
+          GameObject *parent = rig;
+          std::vector<GameObject *> bones;
+          for (int i = 0; i < 8; i++) {
+            names.push_back("B" + std::to_string(i));
+            parent = r469_bone(s, names.back(), parent, {0, 1, 0});
+            bones.push_back(parent);
+          }
+          GameObject *dead = r469_bone(s, "Dead", rig, {0.3f, 0, 0}), *passive = r469_bone(s, "Passive", rig, {-0.3f, 0, 0});
+          dead->get<Bone>()->rest_scale = {0, 1, 1};
+          passive->get<Bone>()->deform = false;
+          names.push_back("Dead"), names.push_back("Passive");
+          names.push_back("Limit");
+          MeshPtr m = r469_tube(0, 0, 8, 33, names, [](size_t gi, float y) {
+            if (gi == 10) return y < 4.0f ? 0.5f : 0.0f;                                // (the limit group: the lower half, halfway)
+            const float x = std::sin((float)(gi + 1) * 1.7f + y * 2.3f) * 0.5f + 0.5f;  // (every group on every vertex, different weights)
+            return gi >= 8 ? x * 0.3f : x;
+          }, true);
+          m->vertex_groups[3].weights[17] = kNaN;
+          m->vertex_groups[5].weights[40] = -1.0f;
+          m->touch();
+          GameObject *tube = r469_skinned(s, "Tube", chr, m, "Rig");
+          tube->get<SkinModifier>()->max_influences = influences;
+          if (influences % 3 == 0) tube->get<SkinModifier>()->vertex_group = "Limit", tube->get<SkinModifier>()->invert_group = influences == 6;
+          for (int i = 0; i < 8; i++) {
+            bones[(size_t)i]->set_local_rotation(Quat::axis_angle(normalize(Vec3(1.0f, (float)i * 0.3f, 0.5f)), 0.15f + 0.05f * (float)i));
+            if (i == 5) bones[5]->set_local_scale({1.2f, 1.0f, 1.0f});  // (not rigid: Dual Quaternion falls back to Linear there)
+          }
+          dead->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.8f)), passive->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.8f));
+          char what[96];
+          std::snprintf(what, sizeof(what), "char %d dq %d influences %d", with_char, dq, influences);
+          CHECK(r469_agrees(*tube, what));
+          bones[2]->set_local_rotation(Quat::axis_angle({1, 0, 0}, 1.1f));  // (a second pose, from the kept binding)
+          CHECK(r469_agrees(*tube, what));
+        }
+  });
+
+  test("a character moved to (5000, 0, 0), turned 37 degrees and scaled 1.5 deforms as at the origin (round 469): the same positions to the bit in the mesh's own space, and within 2e-3 m of the old world-space result (the spec says 1e-4: the old code is the noisy one at 5000 m)", [] {
+    for (int dq = 0; dq < 2; dq++) {
+      Scene a, b;
+      const R469Char home = r469_build(a, true, true), away = r469_build(b, true, true);
+      home.rig->get<Armature>()->deform = away.rig->get<Armature>()->deform = dq;
+      away.chr->set_local_position({5000, 0, 0});
+      away.chr->set_local_rotation(Quat::axis_angle({0, 1, 0}, 37.0f * kPi / 180.0f));
+      away.chr->set_local_scale({1.5f, 1.5f, 1.5f});
+      r469_pose(home);
+      r469_pose(away);
+      const GameObject *homes[3] = {home.body, home.hair, home.glove}, *aways[3] = {away.body, away.hair, away.glove};
+      for (int i = 0; i < 3; i++) {
+        const Mesh &h = *homes[i]->evaluated_mesh(), &w = *aways[i]->evaluated_mesh();
+        const Mesh ref = r469_expected(*aways[i]);
+        const float off = r469_max_diff(w, ref);
+        std::printf("    dq %d %s: bit-equal to the origin's %d; the old world-space result differs by %g m\n", dq, aways[i]->name.c_str(), (int)r469_mesh_bits(h, w), off);
+        CHECK(r469_mesh_bits(h, w));
+        CHECK(off <= 2e-3f);  // (the spec says 1e-4 m, but the OLD code is the noisy one: float32 at 5000 m has a step of 4.9e-4 and it multiplies several such terms - 6e-4 to 8e-4 measured; the new result is bit-equal to the origin's)
+      }
+    }
+  });
+
+  test("a skin is rebuilt and right after every kind of change to the character (round 469): weights, Max Influences, a bone renamed, added, removed, reparented, Rest, Deform, another rig, Rest Position, a copy of the whole character", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true, true);
+    GameObject *rig2 = s.create("Rig2", c.chr);
+    rig2->add<Armature>();
+    GameObject *other = r469_bone(s, "Hip", rig2, {0, 0, 0});  // (a bone named like the first rig's: only the Skin's Armature field tells them apart)
+    other->set_local_rotation(Quat::axis_angle({0, 0, 1}, 1.0f));
+    r469_pose(c);
+    const PoseCounts p0 = pose_counts_this_thread();
+    CHECK(r469_agrees(*c.body, "start") && r469_agrees(*c.hair, "start") && r469_agrees(*c.glove, "start"));
+    const uint64_t bindings0 = pose_counts_this_thread().skin_bindings;
+    /* A weight changed (and the mesh touched). */
+    MeshPtr bm = c.body->mesh_filter()->mesh;
+    for (float &w : bm->vertex_groups[1].weights) w *= 0.5f;
+    bm->touch();
+    CHECK(r469_agrees(*c.body, "a weight painted"));
+    CHECK(pose_counts_this_thread().skin_bindings > bindings0);
+    /* Max Influences. */
+    bm->vertex_groups[0].weights[3] = 0.4f;
+    bm->touch();
+    c.body->get<SkinModifier>()->max_influences = 1;
+    CHECK(r469_agrees(*c.body, "Max Influences 1"));
+    c.body->get<SkinModifier>()->max_influences = 4;
+    CHECK(r469_agrees(*c.body, "Max Influences 4"));
+    /* A bone renamed the way the Hierarchy does it (a name, then the change count). */
+    const MeshPtr hm = c.hair->mesh_filter()->mesh;
+    c.head->name = "Head2";
+    edit_epoch::bump();
+    CHECK(r469_agrees(*c.hair, "the head renamed (the group names a bone that is gone)"));
+    CHECK(c.hair->evaluated_mesh()->positions == hm->positions);  // (it follows nothing now)
+    c.head->name = "Head";
+    edit_epoch::bump();
+    CHECK(r469_agrees(*c.hair, "the head named back") && c.hair->evaluated_mesh()->positions != hm->positions);
+    /* A bone added, under the head, with a group of its own. */
+    GameObject *tip = r469_bone(s, "Tip", c.head, {0, 1, 0});
+    tip->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.9f));
+    VertexGroup g{"Tip", {}};
+    for (const Vec3 &p : hm->positions) g.weights.push_back(p.y > 2.5f ? 1.0f : 0.0f);
+    hm->vertex_groups.push_back(g);
+    hm->touch();
+    CHECK(r469_agrees(*c.hair, "a bone added"));
+    /* ...reparented (a different place in the chain), then removed. */
+    s.set_parent(tip, c.hip, -1, true);
+    CHECK(r469_agrees(*c.hair, "the new bone under the hip"));
+    s.destroy(tip);
+    CHECK(r469_agrees(*c.hair, "the new bone removed"));
+    /* A bone's Rest. */
+    Transform rest = c.arm->local();
+    rest.position = {0.7f, 0.2f, 0};
+    c.arm->get<Bone>()->set_rest(rest);
+    CHECK(r469_agrees(*c.glove, "Bone::set_rest"));
+    /* Deform unticked (the field, then a transform written, as a tool does). */
+    c.arm->get<Bone>()->deform = false;
+    c.arm->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.2f));
+    CHECK(r469_agrees(*c.glove, "Deform unticked"));
+    c.arm->get<Bone>()->deform = true;
+    edit_epoch::bump();
+    CHECK(r469_agrees(*c.glove, "Deform ticked"));
+    /* The Skin's Armature field pointed at another rig, and back. */
+    c.glove->get<SkinModifier>()->object = "Rig2";
+    CHECK(r469_agrees(*c.glove, "another rig"));
+    c.glove->get<SkinModifier>()->object = "Rig";
+    CHECK(r469_agrees(*c.glove, "back to the first rig"));
+    /* Rest Position and Deform on the Armature, assigned directly (no Inspector): the next evaluation shows them. */
+    Armature *arm = c.rig->get<Armature>();
+    const std::vector<Vec3> posed = c.body->evaluated_mesh()->positions;
+    arm->rest_position = true;
+    CHECK(c.body->evaluated_mesh()->positions == c.body->mesh_filter()->mesh->positions);
+    arm->rest_position = false;
+    CHECK(c.body->evaluated_mesh()->positions == posed);
+    arm->deform = 1;
+    CHECK(r469_agrees(*c.body, "Dual Quaternion assigned directly") && c.body->evaluated_mesh()->positions != posed);
+    arm->deform = 0;
+    CHECK(c.body->evaluated_mesh()->positions == posed && r469_agrees(*c.body, "Linear again"));
+    /* A duplicate of the whole character has its own binding: posing the copy leaves the original alone. */
+    GameObject *copy = s.duplicate(c.chr);
+    CHECK(copy != nullptr);
+    if (!copy) return;
+    GameObject *cbody = nullptr, *cspine = nullptr;
+    for (GameObject *k : copy->children) {
+      if (k->get<SkinModifier>() && k->name.rfind("Body", 0) == 0) cbody = k;
+      if (k->get<Armature>())
+        for (GameObject *h : k->children)
+          for (GameObject *sp : h->children)
+            if (sp->name.rfind("Spine", 0) == 0) cspine = sp;
+    }
+    CHECK(cbody && cspine && cspine->get<Bone>());
+    if (!cbody || !cspine) return;
+    const Mesh *orig = c.body->evaluated_mesh();
+    const std::vector<Vec3> orig_pos = orig->positions;
+    const uint64_t orig_dv = orig->deform_version;
+    CHECK(r469_agrees(*cbody, "the copy as made"));
+    cspine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 1.0f));
+    CHECK(r469_agrees(*cbody, "the copy posed"));
+    CHECK(c.body->evaluated_mesh() == orig && orig->deform_version == orig_dv && orig->positions == orig_pos && r469_agrees(*c.body, "the original beside a posed copy"));
+    c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, -1.0f));
+    CHECK(r469_agrees(*c.body, "the original posed beside the copy") && r469_agrees(*cbody, "the copy beside the posed original"));
+    const PoseCounts d = r469_since(p0);
+    std::printf("    through all of it: %llu stale keys, %llu bindings built\n", (unsigned long long)d.skin_keys_stale, (unsigned long long)d.skin_bindings);
+    CHECK(d.skin_keys_stale == 0);
+  });
+
+  test("a bone's name written past every funnel is caught (round 469): the key kept for it is checked against a fresh walk on the 64th ask and counted stale, and the mesh is right after it - a transform written next puts it right at once", [] {
+    Scene s;
+    const R469Char c = r469_build(s, true);
+    r469_pose(c);
+    CHECK(r469_agrees(*c.hair, "start"));
+    const std::vector<Vec3> before = c.hair->evaluated_mesh()->positions;
+    const PoseCounts p0 = pose_counts_this_thread();
+    c.head->name = "HeadX";  // (no bump, no transform: nothing tells the skin)
+    CHECK(c.hair->evaluated_mesh()->positions == before);  // (the kept answer: what the 'stale' count exists to show)
+    SkinModifier *skin = c.hair->get<SkinModifier>();
+    for (int i = 0; i < 130; i++) skin->modifier_dependency_hash();
+    const PoseCounts d = r469_since(p0);
+    std::printf("    a name assigned directly: %llu stale key(s) counted in 130 asks\n", (unsigned long long)d.skin_keys_stale);
+    CHECK(d.skin_keys_stale >= 1);
+    CHECK(r469_agrees(*c.hair, "after the 64th-ask check") && c.hair->evaluated_mesh()->positions != before);
+    /* The same rename followed by a transform write is seen at once and counts nothing. */
+    const PoseCounts p1 = pose_counts_this_thread();
+    c.head->name = "Head";
+    c.head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.6f));
+    CHECK(r469_agrees(*c.hair, "name then transform") && r469_since(p1).skin_keys_stale == 0);
+  });
+
+  test("a skin in unusual places is right and kept (round 469): the rig at the scene's root, a mesh under the rig's root, a mesh on a bone, a rig under the mesh, two rigs, a missing rig, a clone of a posed scene", [] {
+    r469_stale_base = pose_counts_this_thread().skin_keys_stale;
+    /* The rig and the meshes at the root: world space, kept while nothing moves anywhere. */
+    {
+      Scene s;
+      const R469Char c = r469_build(s, false);
+      r469_pose(c);
+      r469_all(c);
+      const PoseCounts p0 = pose_counts_this_thread();
+      r469_all(c);
+      CHECK(r469_since(p0).skin_keys == 0 && r469_since(p0).skin_deforms == 0);
+      CHECK(r469_agrees(*c.body, "scene root") && r469_agrees(*c.glove, "scene root"));
+      c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.7f));
+      CHECK(r469_agrees(*c.body, "scene root, spine turned") && r469_agrees(*c.hair, "scene root, spine turned"));
+      GameObject *prop = s.create("Prop");  // (any transform in the scene counts in world space: still right)
+      prop->set_local_position({1, 1, 1});
+      CHECK(r469_agrees(*c.body, "scene root, a prop moved"));
+      c.rig->set_local_position({4, 0, 0});  // (the rig moved in world space: the mesh stays, the skin follows the bones)
+      CHECK(r469_agrees(*c.body, "scene root, the rig moved"));
+    }
+    /* A mesh under the rig's root, and one on a bone. */
+    {
+      Scene s;
+      R469Char c = r469_build(s, true);
+      s.set_parent(c.body, c.rig, -1, true);
+      s.set_parent(c.hair, c.spine, -1, true);
+      r469_pose(c);
+      CHECK(r469_agrees(*c.body, "under the rig's root") && r469_agrees(*c.hair, "on a bone") && r469_agrees(*c.glove, "beside"));
+      c.hip->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.4f));
+      c.spine->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.2f));
+      CHECK(r469_agrees(*c.body, "under the rig's root, posed") && r469_agrees(*c.hair, "on a bone, posed") && r469_agrees(*c.glove, "beside, posed"));
+      c.chr->set_local_position({9, 1, 2});
+      CHECK(r469_agrees(*c.body, "moved with the character", 1e-3f) && r469_agrees(*c.hair, "moved with the character", 1e-3f));
+    }
+    /* The rig under the mesh it skins. */
+    {
+      Scene s;
+      R469Char c = r469_build(s, true);
+      s.set_parent(c.rig, c.body, -1, true);
+      r469_pose(c);
+      CHECK(r469_agrees(*c.body, "rig under the mesh", 1e-5f));
+      c.hip->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.6f));
+      CHECK(r469_agrees(*c.body, "rig under the mesh, posed", 1e-5f) && r469_agrees(*c.glove, "beside it", 1e-5f));
+    }
+    /* Two rigs on one mesh (two Skins), and a Skin naming a missing rig. */
+    {
+      Scene s;
+      const R469Char c = r469_build(s, true);
+      GameObject *rig2 = s.create("Rig2", c.chr);
+      rig2->add<Armature>();
+      GameObject *h2 = r469_bone(s, "Hip", rig2, {0, 0, 0}), *s2 = r469_bone(s, "Spine", h2, {0, 1, 0});
+      SkinModifier *second = c.body->add<SkinModifier>();
+      second->object = "Rig2";
+      r469_pose(c);
+      s2->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+      const Mesh *got = c.body->evaluated_mesh();
+      Mesh want = *c.body->mesh_filter()->mesh;
+      r469_reference_modify(want, *c.body, *c.rig, 4);
+      r469_reference_modify(want, *c.body, *rig2, 4);
+      std::printf("    two rigs: largest difference from the old skins run in turn %g\n", r469_max_diff(*got, want));
+      CHECK(got && r469_max_diff(*got, want) <= 4e-6f);
+      s2->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.9f));
+      Mesh want2 = *c.body->mesh_filter()->mesh;
+      r469_reference_modify(want2, *c.body, *c.rig, 4);
+      r469_reference_modify(want2, *c.body, *rig2, 4);
+      CHECK(r469_max_diff(*c.body->evaluated_mesh(), want2) <= 4e-6f && r469_max_diff(*c.body->evaluated_mesh(), want) > 1e-3f);
+      c.hair->get<SkinModifier>()->object = "Nowhere";
+      SkinModifier *missing = c.hair->get<SkinModifier>();
+      CHECK(missing->modifier_dependency_hash() == 0 && missing->modifier_dependency_hash() == 0);
+      CHECK(c.hair->evaluated_mesh()->positions == c.hair->mesh_filter()->mesh->positions);
+    }
+    /* A clone evaluated while the original is posed: its result is its own. */
+    {
+      Scene s;
+      const R469Char c = r469_build(s, true);
+      r469_pose(c);
+      r469_all(c);
+      std::unique_ptr<Scene> copy = s.clone();
+      GameObject *cb = copy->find_by_name("Body"), *cspine = copy->find_by_name("Spine");
+      c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 1.2f));
+      CHECK(r469_agrees(*c.body, "original posed after the clone"));
+      CHECK(cb && cspine && r469_agrees(*cb, "the clone as it was cut"));
+      if (!cb || !cspine) return;
+      cspine->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.3f));
+      CHECK(r469_agrees(*cb, "the clone posed") && r469_agrees(*c.body, "the original beside the posed clone"));
+      CHECK(pose_counts_this_thread().skin_keys_stale == r469_stale_base);
+    }
+  });
+}
+
+
+static void tests_round469_editor() {
+  test("undo, redo, Play, a rename and the Inspector's fields leave every skin right (round 469): the scene swapped under the kept keys never shows an old pose", [] {
+    Editor ed;
+    r34_open(ed, false);
+    const R469Char c = r469_build(ed.scene(), true, true);
+    GameObject *rig2 = ed.scene().create("Rig2", c.chr);
+    rig2->add<Armature>();
+    r469_bone(ed.scene(), "Hip", rig2, {0, 0, 0})->set_local_rotation(Quat::axis_angle({0, 0, 1}, 1.0f));
+    ed.mark_changed_for_test("R469 setup");
+    r34_steps(ed, 3);
+    const uint64_t stale0 = pose_counts().skin_keys_stale;
+    auto agree = [&](const char *what) {
+      bool ok = true;
+      for (const char *n : {"Body", "Hair", "Glove"}) {
+        GameObject *g = ed.scene().find_by_name(n);
+        ok = ok && g && r469_agrees(*g, what);
+      }
+      return ok;
+    };
+    auto bone = [&](const char *n) { return ed.scene().find_by_name(n); };
+    CHECK(agree("as built"));
+    bone("Spine")->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.5f));
+    ed.mark_changed_for_test("Pose A");
+    r34_steps(ed, 2);
+    CHECK(agree("pose A"));
+    bone("Spine")->set_local_rotation(Quat::axis_angle({1, 0, 0}, -0.5f));
+    bone("Head")->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.9f));
+    ed.mark_changed_for_test("Pose B");
+    r34_steps(ed, 2);
+    CHECK(agree("pose B"));
+    const std::vector<Vec3> hair_b = ed.scene().find_by_name("Hair")->evaluated_mesh()->positions;
+    ed.command("undo");
+    r34_steps(ed, 2);
+    CHECK(agree("after undo") && ed.scene().find_by_name("Hair")->evaluated_mesh()->positions != hair_b);
+    ed.command("redo");
+    r34_steps(ed, 2);
+    CHECK(agree("after redo") && ed.scene().find_by_name("Hair")->evaluated_mesh()->positions == hair_b);
+    /* Play entered and left (the scene is a copy while it runs). */
+    ed.command("play");
+    r34_steps(ed, 3);
+    CHECK(agree("in Play"));
+    bone("Spine")->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.8f));  // (posed while playing: the pose is thrown away on Stop)
+    r34_steps(ed, 2);
+    CHECK(agree("posed in Play"));
+    ed.command("stop");
+    r34_steps(ed, 3);
+    CHECK(agree("after Stop") && ed.scene().find_by_name("Hair")->evaluated_mesh()->positions == hair_b);
+    /* A bone renamed (the Hierarchy: the name, then the change). */
+    bone("Head")->name = "Head2";
+    ed.mark_changed_for_test("Rename");
+    r34_steps(ed, 2);
+    CHECK(agree("a bone renamed") && ed.scene().find_by_name("Hair")->evaluated_mesh()->positions != hair_b);
+    bone("Head2")->name = "Head";
+    ed.mark_changed_for_test("Rename back");
+    r34_steps(ed, 2);
+    CHECK(agree("renamed back") && ed.scene().find_by_name("Hair")->evaluated_mesh()->positions == hair_b);
+    /* Deform unticked and the Armature field, through the console's `set` (the Inspector's route). */
+    ed.command("select Arm");
+    ed.command("set Bone.Deform off");
+    r34_steps(ed, 2);
+    CHECK(!bone("Arm")->get<Bone>()->deform && agree("Deform unticked through set"));
+    ed.command("set Bone.Deform on");
+    r34_steps(ed, 2);
+    CHECK(bone("Arm")->get<Bone>()->deform && agree("Deform ticked through set"));
+    ed.command("select Glove");
+    ed.command("set SkinModifier.Armature Rig2");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Glove")->get<SkinModifier>()->object == "Rig2" && agree("the Skin's Armature pointed at Rig2"));
+    ed.command("set SkinModifier.Armature Rig");
+    r34_steps(ed, 2);
+    CHECK(agree("the Skin's Armature pointed back"));
+    ed.command("select Rig");
+    ed.command("set Armature.Deform 1");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Rig")->get<Armature>()->deform == 1 && agree("Dual Quaternion through set"));
+    ed.command("set Armature.RestPosition on");
+    r34_steps(ed, 2);
+    CHECK(ed.scene().find_by_name("Body")->evaluated_mesh()->positions == ed.scene().find_by_name("Body")->mesh_filter()->mesh->positions);
+    const uint64_t stale = pose_counts().skin_keys_stale - stale0;
+    std::printf("    through all of it: %llu stale keys\n", (unsigned long long)stale);
+    CHECK(stale == 0);
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -7705,4 +8488,6 @@ void run_animation_tests() {
   tests_round174();
   tests_round226();
   tests_round468();
+  tests_round469();
+  tests_round469_editor();
 }

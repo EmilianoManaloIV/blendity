@@ -105,4 +105,19 @@ can go stale (the row it names was reworded) - `check` says so on the PR, and th
 - Order in `CHANGELOG.md` becomes round number, descending, per fold; folds keep their own block at the top.
 - One more step in the write-up round, and one more script to keep working (its self-test runs in CI).
 - A round in flight when this lands (opened before it, still editing CHANGELOG.md) must move its entry into a
-  fragment before merging, or go red on `docs-fragments`.
+  fragment before merging, or go red on `docs-fragments`. (Amended below: moving the entry is enough.)
+
+## Amended 2026-11-10: commits written before the rule are exempt
+Pass 24's rounds 484 to 486 were committed while this ADR's PR (#365) was being merged. Their branch then merged
+`main`, took its `CHANGELOG.md` and `README.md` and moved the three entries into fragments - the end state follows the
+rule - but `docs-fragments` stayed red: the check reads each commit, and the three round commits themselves edit
+`CHANGELOG.md`. History is not rewritten here, so no later commit could make it pass.
+
+The owner chose (2026-11-10, "Option a") to exempt such commits rather than accept a red job:
+- `tools/dev/docs_check.sh` skips a commit that **does not descend from the commit that added the script to the
+  base** - one written before the rule reached its own history - and prints an `exempt:` line naming it.
+- A commit made after its branch merged `main` descends from it and is checked as before.
+- What the exemption does not check: that an exempt commit's entry was moved into a fragment. Such a branch conflicts
+  with `main` in `CHANGELOG.md` until it is, so it cannot merge without someone resolving that by hand; the reviewer
+  sees the `exempt:` lines in the job's log.
+- `changelog.py --self-test` holds both cases.

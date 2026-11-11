@@ -96,6 +96,7 @@ Editor::~Editor() {
   meshmaps_job_.reset();   // (task 0243: a mesh-map bake the same)
   surface_job_.reset();    // (task 0244: a surface evaluation the same)
   stop_unity_package();    // (round 369: an unpacking stopped at its next file and waited for)
+  stop_unity_gloss();      // (round 485: the gloss job likewise - stopped at its next texture and waited for)
   stop_unity_export();     // (round 372: an export likewise, nothing written)
   paint_abort_stroke();    // (task 0245)
   cancel_render_video();  // (an MP4 being encoded in-process stops before the program's statics go)
@@ -155,7 +156,7 @@ void Editor::resolve_project_paths(const std::string &near) {
   fs::make_dirs(prefs_dir);
   prefs_path_ = fs::join(prefs_dir, "prefs.txt");
   set_asset_root(project_root_);  // material texture paths are project-relative
-  set_foreign_material_loader(load_unity_material);  // (round 371: a Unity .mat loads converted)
+  set_foreign_material_loader(load_unity_material, unity_material_text);  // (round 371: a Unity .mat loads converted; 485: and is never written over)
   clear_material_assets();  // assets belong to one project
   clear_texture_assets();
   clear_clip_assets();
@@ -635,7 +636,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   /* Locomotion's legs on the moved characters (task 0127), then IK after scripts move the targets, before anything
    * draws (task 0048); unchanged inputs cost a hash per chain. */
   if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
-  if (solve_constraints(*scene_)) ui_.redraw = true, edit_epoch::bump();
+  if (solve_constraints(*scene_)) ui_.redraw = true, edit_epoch::bump_moved();  // (round 469: bones turned - a move, not a structure change)
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   else if (play_dt > 0.0f) spring::tick(*scene_, play_dt);  // (the simulated clock still runs: the Jiggle modifier reads it; task 0153)
   if (cam_.update(now)) ui_.redraw = true;
@@ -753,6 +754,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   take_favorite_request();
   poll_skin_job();
   poll_unity_package();  // (round 369)
+  poll_unity_gloss();    // (round 485: after the package - an unpack writes its own table)
   poll_unity_export();   // (round 372)
   poll_unity_model_ids();  // (round 395)
   poll_unity_lighting();   // (round 400)
@@ -883,6 +885,7 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
   return {
       {"constraint solves", (double)pc.constraint_solves}, {"constraint moves", (double)pc.constraint_moves},
       {"name walks", (double)pc.name_walks}, {"skin keys", (double)pc.skin_keys}, {"skin deforms", (double)pc.skin_deforms},
+      {"skin keys kept", (double)pc.skin_keys_kept}, {"skin keys stale", (double)pc.skin_keys_stale}, {"skin bindings", (double)pc.skin_bindings},
       {"shape key applies", (double)pc.shape_applies}, {"evaluations", (double)pc.evaluations},
       {"outline shells", (double)pc.outline_shells}, {"meshes sent whole", (double)(p.gpu_mesh_uploads + p.gpu_mesh_updates)},
       {"meshes updated in part", (double)p.gpu_mesh_partial}, {"upload KB", (double)p.gpu_upload_bytes / 1024.0},
@@ -1103,6 +1106,9 @@ void Editor::draw_menubar(const Recti &r) {
     auto &u = ui_;
     if (u.menu_item("Import Model...")) import_dialog();
     if (u.menu_item("Import Unity Package...")) import_package_dialog();  // (round 369)
+    if (u.menu_item("Reimport Unity Materials")) unity_rematerials();  // (round 485)
+    u.tooltip("Every Unity material (.mat from a Unity package) read again from its file: its maps, its metal and its gloss as Unity's shader reads them.\n"
+              "The textures a material's gloss comes from are measured once, in the background.");
     if (u.menu_item("Create Material", nullptr, false, true, Icon::Plus)) new_material_asset(nullptr, false);
     u.tooltip("A new Material asset in Assets/Materials: drag it from the Project window onto objects, faces or slots.");
     if (u.menu_item("Refresh", key("assets.refresh").c_str())) project_listed_ = -100;
@@ -2398,6 +2404,7 @@ void Editor::new_scene() {
   render_job_wait("a new scene");  // (round 412: a render on a worker reads this scene's shells and lighting)
   scene_ = std::make_unique<Scene>();
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
+  mesh_owner_shown_.clear();  // (round 469: the same - this scene is seen for the first time)
   build_starter_scene(*scene_);
   scene_->name = "Untitled";
   load_lighting_data();  // none: the scene has no file yet
@@ -2472,7 +2479,9 @@ bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s
   render_job_wait("the scene opened");  // (round 412)
   scene_ = std::move(s);
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
+  mesh_owner_shown_.clear();  // (round 469: the same - this scene is seen for the first time)
   relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
+  poll_unity_gloss();  // (round 485: its Unity materials' gloss maps not measured yet go to the worker - at once in a headless run)
   load_lighting_data();  // <scene folder>/<scene name>/: its lightmaps, if baked
   stable_ = scene_->clone();
   undo_.clear();
@@ -3616,7 +3625,14 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
    * scene.) */
   auto settle = [&] {
     step(false);  // (the frame that starts what the command, or the startup, deferred)
-    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty() || texture_stream_busy()); i++) step(false);
+    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty() || texture_stream_busy()); i++) {
+      step(false);
+      if (i % 2000 != 1999) continue;
+      /* (Round 469: a run that waited 40 minutes here said nothing. What it waits for, every 2000 frames.) */
+      std::printf("still settling after %d frames: file jobs %d, a texture batch %d, textures waiting for the card %d, meshes waiting for the card %d (queue %zu), files noted %d; %s\n", i + 1,
+                  (int)file_jobs_running(), (int)(tex_stream_ != nullptr), (int)upload_waiting_, (int)mesh_waiting_, mesh_queue_, (int)texture_stream_pending(), perf_status_text().c_str());
+      std::fflush(stdout);
+    }
   };
   settle();
   for (const std::string &c : commands) {  // (task 0199: the scene to measure)

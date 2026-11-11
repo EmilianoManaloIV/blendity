@@ -799,6 +799,39 @@ def self_test():
             check('docs_check rejects "Docs-fold: no" and a trailer buried in a sentence',
                   run_check('r5', touch_cl, 'fold\n\nDocs-fold: no') == 1 and run_check('r6', touch_cl, 'say Docs-fold: yes here') == 1)
 
+            # A commit from before the rule reached its history is exempt; one made after main was merged in is not
+            # (ADR 0123's amendment). A second repository, where main gains the script after a first commit.
+            d2 = tree()
+            temps.append(d2)
+            git(d2, 'init', '-q', '-b', 'main')
+            git(d2, 'add', '-A')
+            git(d2, 'commit', '-qm', 'before the rule')
+            git(d2, 'checkout', '-qb', 'old', 'main')
+            with open(os.path.join(d2, 'CHANGELOG.md'), 'a', encoding='utf-8') as f:
+                f.write('an old round\n')
+            git(d2, 'commit', '-qam', 'a round the old way')
+            git(d2, 'checkout', '-q', 'main')
+            os.makedirs(os.path.join(d2, 'tools', 'dev'))
+            for n in ('docs_check.sh', 'changelog.py', 'fill_checks.py'):
+                shutil.copy(os.path.join(HERE, n), os.path.join(d2, 'tools', 'dev', n))
+            git(d2, 'add', '-A')
+            git(d2, 'commit', '-qm', 'the rule')
+            git(d2, 'checkout', '-q', 'old')
+            git(d2, 'merge', '-q', '--no-ff', '-m', 'merge main', 'main')
+
+            def old_check():
+                return subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'HEAD'], cwd=d2, capture_output=True,
+                                      text=True, env=dict(os.environ, NO_FRAGMENTS='1'))
+
+            r = old_check()
+            check('docs_check exempts a commit written before the rule reached its history, and says so',
+                  r.returncode == 0 and 'exempt:' in r.stdout, r.stdout + r.stderr)
+            with open(os.path.join(d2, 'CHANGELOG.md'), 'a', encoding='utf-8') as f:
+                f.write('a new round\n')
+            git(d2, 'commit', '-qam', 'a round after merging main')
+            r = old_check()
+            check('docs_check still fails a commit made after its branch merged the rule', r.returncode == 1, r.stdout + r.stderr)
+
             def docs_check(*refs, fragments=False):
                 env = dict(os.environ)
                 if not fragments:

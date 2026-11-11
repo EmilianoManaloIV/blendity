@@ -285,7 +285,11 @@ void Editor::draw_materials_window(const Recti &r) {
     u.label({cx, cy + tile, tile, u.row_h()}, m->name, u.theme.text, ui::Align::Center);
     if (!m->asset_path.empty()) u.draw_icon(Icon::File, {cx + u.px(4), cy + u.px(4), u.px(12), u.px(12)}, u.theme.accent);
     u.tooltip(m->name + (m->asset_path.empty() ? "  (scene material)" : "  (" + m->asset_path + ")") +
-              strprintf("\nUsed by %d slot(s). Click to edit; drag onto an object, a face, a Hierarchy row or a slot.", list[i].users));
+              strprintf("\nUsed by %d slot(s). Click to edit; drag onto an object, a face, a Hierarchy row or a slot.", list[i].users) +
+              /* (round 485: where someone about to edit one looks - its file is Unity's and never written) */
+              (m->foreign ? "\nRead from a Unity .mat: what you change lasts this session, and reading it again (Assets > Reimport Unity Materials, or its "
+                            "package imported again) puts the file's values back."
+                          : ""));
     if (hot && in.pressed[0] && !asking) {
       /* Ctrl toggles, Shift selects the range from the last click (task 0053); a plain click selects it and may drag. */
       material_multi_.click(shown, i, in.ctrl(), in.shift());
