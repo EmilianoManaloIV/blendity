@@ -199,6 +199,19 @@ struct Component {
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
 };
 
+/* Round 469 (ADR 0124): something a component keeps to answer faster - never part of it. A copy of the component
+ * (clone: an undo snapshot, a duplicate, a job's scene) starts with none, so what is kept never points into another
+ * scene's objects and is never shared between two threads' scenes. */
+template<class T> struct KeptCache {
+  mutable std::shared_ptr<T> p;
+  KeptCache() = default;
+  KeptCache(const KeptCache &) {}
+  KeptCache &operator=(const KeptCache &) {
+    p.reset();
+    return *this;
+  }
+};
+
 template<class T, class Base = Component> struct ComponentBase : Base {
   const char *type_name() const override { return T::kName; }
   std::unique_ptr<Component> clone() const override {
@@ -1493,6 +1506,7 @@ struct Armature : ComponentBase<Armature> {
   std::string puppet_bone(const std::string &key) const;
   void set_puppet_bone(const std::string &key, const std::string &bone);
   float control_size = 1.0f;  // (round 346) Puppet Posing's controls, times a twelfth of the rig's height
+  KeptCache<struct ArmaturePose> pose;  // (round 469: the bones' matrices, shared by the skins bound to it - skin.cpp)
   static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
@@ -1514,6 +1528,9 @@ struct SkinModifier : ComponentBase<SkinModifier> {
   void modify(Mesh &m) const override;                 // skin.cpp
   uint64_t modifier_dependency_hash() const override;  // skin.cpp
   bool unique() const override { return false; }
+  /* Round 469 (ADR 0124): the key it last gave, with what it held for (skin.cpp), and each vertex's bones. */
+  KeptCache<struct SkinKeep> keep;
+  KeptCache<struct SkinBinding> binding;
 };
 
 /* A bone of an armature: its object, its world matrix now, its rest matrix relative to the root's parent. */
@@ -1794,6 +1811,9 @@ class GameObject {
   /* Bumped every time the world matrix is marked stale (own transform, a parent's, reparenting): a
    * counter rather than the dirty flag, which world_matrix() consumes (ADR 0015). */
   uint64_t transform_version = 1;
+  /* Round 469 (ADR 0124): bumped when this object's local transform or one anywhere below it is written
+   * (mark_dirty walks up): "did anything under this character move?" is one comparison. */
+  uint64_t below_version = 1;
   /* The render hash this object last produced and the inputs it came from (ADR 0015): when they all
    * compare equal the hash is reused instead of re-hashing the world matrix and the materials. */
   struct RenderHashMemo {

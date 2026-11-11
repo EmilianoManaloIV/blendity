@@ -1002,7 +1002,11 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err, uint64_t owner) {
    * huge mesh still goes up (alone) and can't wait forever. */
   const size_t estimate = rm.positions.size() * sizeof(gpu::RasterVertex) + rm.indices.size() * 4;
   const bool over = e.id < 0 && texture_streaming() && mesh_bytes_frame_ > 0 && (mesh_bytes_frame_ + estimate > mesh_budget_ || mesh_ms_frame_ > mesh_budget_ms_);
-  if (over && owner != 0 && !is_selected(owner) && !(edit_mode_ && owner == edit_obj_)) {
+  /* Round 469: nor an object the card has drawn before. A posed mesh that is built whole is a render mesh new to the
+   * card on every frame; over the frame's budget it was left out of that frame, and of the next, for as long as the
+   * pose moved (the owner's avatar in Play in the owner's world: one mesh never drawn, the queue never empty). The
+   * budget spreads the first sight of a scene; what is already shown is replaced at once, as an update is. */
+  if (over && owner != 0 && !is_selected(owner) && !(edit_mode_ && owner == edit_obj_) && !mesh_owner_shown_.count(owner)) {
     if (e.queued_at != hash_frame_) mesh_queue_++, prof_.mesh_deferred++;
     e.queued_at = hash_frame_;
     if (mesh_drain_t0_ < 0) mesh_drain_t0_ = clock_now();
@@ -1028,6 +1032,7 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err, uint64_t owner) {
     gpu_mesh_bytes_ -= e.bytes;
   }
   e.id = gpu_view_->add_mesh(v, indices, &err);
+  if (e.id >= 0 && owner != 0) mesh_owner_shown_.insert(owner);
   mesh_ms_frame_ += add_timer.ms();  // (round 458: first uses cost time, not only bytes - the budget counts both)
   e.serial = rm.serial;
   e.tangents = tangents;
@@ -2057,6 +2062,7 @@ void Editor::gpu_view_drop() {
   scene_planes_slot_ = -1;  // (task 0204: the card's planes go with it)
   card_forget_windows();  // (task 0193)
   gpu_meshes_.clear();
+  mesh_owner_shown_.clear();
   gpu_textures_.clear();
   for (InstanceKeep &k : instance_keep_) k.valid = false;  // (round 458: their card ids went with it)
   card_instances_ = nullptr;

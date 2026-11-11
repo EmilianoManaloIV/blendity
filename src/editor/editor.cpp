@@ -635,7 +635,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   /* Locomotion's legs on the moved characters (task 0127), then IK after scripts move the targets, before anything
    * draws (task 0048); unchanged inputs cost a hash per chain. */
   if (play_dt > 0.0f && assist_on(Assist::Locomotion)) locomotion::step(*scene_, play_dt, play_ground_);
-  if (solve_constraints(*scene_)) ui_.redraw = true, edit_epoch::bump();
+  if (solve_constraints(*scene_)) ui_.redraw = true, edit_epoch::bump_moved();  // (round 469: bones turned - a move, not a structure change)
   if (play_dt > 0.0f && assist_on(Assist::Physics)) spring::step(*scene_, play_dt);  // (hair, ears, tails, cloth on the pose IK finished: task 0120)
   else if (play_dt > 0.0f) spring::tick(*scene_, play_dt);  // (the simulated clock still runs: the Jiggle modifier reads it; task 0153)
   if (cam_.update(now)) ui_.redraw = true;
@@ -883,6 +883,7 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
   return {
       {"constraint solves", (double)pc.constraint_solves}, {"constraint moves", (double)pc.constraint_moves},
       {"name walks", (double)pc.name_walks}, {"skin keys", (double)pc.skin_keys}, {"skin deforms", (double)pc.skin_deforms},
+      {"skin keys kept", (double)pc.skin_keys_kept}, {"skin keys stale", (double)pc.skin_keys_stale}, {"skin bindings", (double)pc.skin_bindings},
       {"shape key applies", (double)pc.shape_applies}, {"evaluations", (double)pc.evaluations},
       {"outline shells", (double)pc.outline_shells}, {"meshes sent whole", (double)(p.gpu_mesh_uploads + p.gpu_mesh_updates)},
       {"meshes updated in part", (double)p.gpu_mesh_partial}, {"upload KB", (double)p.gpu_upload_bytes / 1024.0},
@@ -2398,6 +2399,7 @@ void Editor::new_scene() {
   render_job_wait("a new scene");  // (round 412: a render on a worker reads this scene's shells and lighting)
   scene_ = std::make_unique<Scene>();
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
+  mesh_owner_shown_.clear();  // (round 469: the same - this scene is seen for the first time)
   build_starter_scene(*scene_);
   scene_->name = "Untitled";
   load_lighting_data();  // none: the scene has no file yet
@@ -2472,6 +2474,7 @@ bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s
   render_job_wait("the scene opened");  // (round 412)
   scene_ = std::move(s);
   autopose_.locks.clear(), autopose_.bone = 0, autopose_.body = body::Body();  // (another scene's ids)
+  mesh_owner_shown_.clear();  // (round 469: the same - this scene is seen for the first time)
   relink_material_assets(*scene_, false);  // slots naming a .mat use the asset file
   load_lighting_data();  // <scene folder>/<scene name>/: its lightmaps, if baked
   stable_ = scene_->clone();
@@ -3616,7 +3619,14 @@ int Editor::windowed_check(int frames, const std::string &out, const std::vector
    * scene.) */
   auto settle = [&] {
     step(false);  // (the frame that starts what the command, or the startup, deferred)
-    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty() || texture_stream_busy()); i++) step(false);
+    for (int i = 0; i < 100000 && running_ && (file_jobs_running() || !jobs_running().empty() || texture_stream_busy()); i++) {
+      step(false);
+      if (i % 2000 != 1999) continue;
+      /* (Round 469: a run that waited 40 minutes here said nothing. What it waits for, every 2000 frames.) */
+      std::printf("still settling after %d frames: file jobs %d, a texture batch %d, textures waiting for the card %d, meshes waiting for the card %d (queue %zu), files noted %d; %s\n", i + 1,
+                  (int)file_jobs_running(), (int)(tex_stream_ != nullptr), (int)upload_waiting_, (int)mesh_waiting_, mesh_queue_, (int)texture_stream_pending(), perf_status_text().c_str());
+      std::fflush(stdout);
+    }
   };
   settle();
   for (const std::string &c : commands) {  // (task 0199: the scene to measure)

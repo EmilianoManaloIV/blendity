@@ -624,7 +624,11 @@ static void livelink_fixture_tests() {
     std::printf("\n");
     for (const char *t : {"transform", "delete"}) CHECK(count_of(s.ms, t) == 1);
     CHECK(count_of(s.ms, "pose") == 2);    // (a bone turned; round 379: the clip's frame 30)
-    CHECK(count_of(s.ms, "deform") == 7);  // (the Box's vertex; round 378's skinned Arm and round 381's Face, each at rest built, posed, posed by the clip - this client doesn't skin)
+    /* (The Box's vertex; round 378's skinned Arm at rest built, posed, posed by the clip - this client doesn't skin; round
+     * 381's Face once, built. Round 469, ADR 0124: 5, not 7 - the Face has no vertex groups, no bone moves a vertex of it,
+     * and a skin is now deformed only when a bone it is bound to moved: before, turning any bone of the rig sent the
+     * Face's unchanged positions again, twice in this session.) */
+    CHECK(count_of(s.ms, "deform") == 5);
     CHECK(count_of(s.ms, "clip") == 1);    // (round 379: Wave at the sync)
     CHECK(count_of(s.ms, "lod") == 1 && count_of(s.ms, "lodmesh") == 2 && count_of(s.ms, "collider") == 1);  // (round 380: the crate's, at the sync)
     CHECK(count_of(s.ms, "play") == 2 && count_of(s.ms, "material") >= 3);
@@ -803,7 +807,7 @@ static void tests_round297() {
     }
     std::printf("    %d messages framed, %zu bytes left; %d meshes, %d vertices outside their mesh; normals worked out again agree at %zu of %zu; %d of %d deforms applied\n",
                 n, st.pending(), meshes, bad_vert, agree, total, deformed, deforms);
-    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 7 && deformed == 7);  // (the Box's; the skinned Arm's (round 378) and Face's (round 381): built, posed, posed by the clip - the recorder doesn't skin)
+    CHECK(n > 20 && st.pending() == 0 && meshes > 0 && bad_vert == 0 && agree * 10 >= total * 9 && deforms == 5 && deformed == 5);  // (round 469: 5, see the recorded session's test)  // (the Box's; the skinned Arm's (round 378) and Face's (round 381): built, posed, posed by the clip - the recorder doesn't skin)
     /* The Box moved to Blendity's (1, 2, 3): glTF (-1, 2, 3), Unreal (300 cm forward, 100 cm right, 200 cm up). */
     std::printf("    the Box in Unreal: (%.1f, %.1f, %.1f) cm\n", box.x, box.y, box.z);
     CHECK(box_name == "Box" && std::fabs(box.x - 300) < 1e-6 && std::fabs(box.y - 100) < 1e-6 && std::fabs(box.z - 200) < 1e-6);
