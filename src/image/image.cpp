@@ -955,23 +955,25 @@ bool decode_exr_lib(const std::string &bytes, Bitmap &out, std::string &error);
 bool decode_jpeg_lib(const uint8_t *data, size_t size, Bitmap &out, std::string &error);
 bool decode_png_lib(const uint8_t *data, size_t size, Bitmap &out, std::string &error);
 
-bool decode_image(const std::string &bytes, Bitmap &out, std::string &error) {
+/* `libraries`: Blender's codec libraries first, as decode_image does; false: Blendity's own decoders only
+ * (decode_image_own). */
+static bool decode_image_with(const std::string &bytes, Bitmap &out, std::string &error, bool libraries) {
   const uint8_t *d = (const uint8_t *)bytes.data();
   size_t n = bytes.size();
   out = Bitmap();
   std::string lib_error;
   if (n >= 8 && !std::memcmp(d, "\x89PNG", 4)) {
-    if (decode_png_lib(d, n, out, lib_error)) return true;
+    if (libraries && decode_png_lib(d, n, out, lib_error)) return true;
     out = Bitmap();
     return decode_png(d, n, out, error);
   }
   if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8) {
-    if (decode_jpeg_lib(d, n, out, lib_error)) return true;
+    if (libraries && decode_jpeg_lib(d, n, out, lib_error)) return true;
     out = Bitmap();
     return decode_jpeg(d, n, out, error);
   }
   if (n >= 4 && d[0] == 0x76 && d[1] == 0x2F && d[2] == 0x31 && d[3] == 0x01) {
-    if (decode_exr_lib(bytes, out, lib_error)) return true;
+    if (libraries && decode_exr_lib(bytes, out, lib_error)) return true;
     out = Bitmap();
     if (decode_exr_plain(bytes, out, error)) return true;  // (without the libraries: an uncompressed one still reads)
     if (!lib_error.empty()) error = lib_error;
@@ -984,6 +986,9 @@ bool decode_image(const std::string &bytes, Bitmap &out, std::string &error) {
   error = "unknown image format";
   return false;
 }
+
+bool decode_image(const std::string &bytes, Bitmap &out, std::string &error) { return decode_image_with(bytes, out, error, true); }
+bool decode_image_own(const std::string &bytes, Bitmap &out, std::string &error) { return decode_image_with(bytes, out, error, false); }
 
 namespace {
 float half_to_float(uint16_t h) {

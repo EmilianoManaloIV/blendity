@@ -76,3 +76,28 @@ along. A bake has no frames to accumulate over, but it does have every sample of
   makes that possible without deciding it.
 - Bias: a variance-guided filter is still a filter; `lightmap_quality`'s bias column and the stations against Unity keep
   watching it.
+
+## Amended at round 486 (task 0462): Sobol's scale goes by the samples that carry the light
+"Sobol's spread overstates its error" holds for light that fills the hemisphere and not for a texel lit by a few rays
+that met a small bright patch: stratification does not help those, and scaled by 4 / sqrt(n) (an eighth at 1024
+samples) such a texel passed the filter's edge-stop as steady light - SideRail's specks, 90 and 71 at the owner's two
+views.
+- **The filter's edge-stop and the firefly clamp read the gather's variance as raw x min(1, 4 / sqrt(k))**, raw the
+  samples' own variance of the mean and k = min(n, light^2 / raw): the texel's squared signal to noise, which is how
+  many of its samples carry its light (`gather_variance_read`). Up to 16 samples that is the samples' own noise; for
+  filled light it approaches round 465's scale.
+- **Where:** in `denoise_page_variance`, from the three numbers a texel already has. What the bake measures and keeps
+  (`var_`), the gather and the card's kernels are unchanged.
+- **Rejected:** unscaled everywhere (the tunnel's relative RMSE 7 % up: it blurs real detail in dim places); a step at
+  16 samples (the same on SideRail, a cliff between seeds, further from the converged bake on a steady glow); the
+  clamp alone unscaled (changes no texel); largest-sample or fourth-power sums and batch means (a second buffer in
+  both card backends for what the texel's own signal to noise already says).
+- **Measured:** SideRail's specks 90 / 71 -> 11 / 39, grain 0.190 -> 0.181, blotch 0.055 -> 0.053; stress
+  `lightmap_quality` within 3 % in every scene, bias unchanged (task 0462's tables).
+- **Limits, known:** on the CPU path the light the rule squares includes the sky sampled at the texel (the part the
+  filter denoises), so k reads high there and the reading leans towards round 465's - never past it; the card's path
+  has the gather alone. Preview Lighting's filter reads the same way. Where OIDN's lightmap filter replaces this one,
+  the edge-stop is not read at all: the specks must be measured again before that filter becomes a bake's own (round
+  487). A saved bake is not marked out of date by this change.
+- **The switch** is the console's `lighting variancescale auto|on|off` (a measurement setting, as `lighting seed`):
+  `on` is rounds 465 to 485's reading, bit for bit.

@@ -101,6 +101,20 @@ inline float lum3(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z
  * random's error at 16 samples, 0.35 at 512), so a Sobol-sampled part's measured variance is scaled by (2 n^-0.25)^2,
  * at most 1 - n its own sample count. Random parts (the lights kept by chance) keep theirs. */
 inline float qmc_scale(bool sobol, int n) { return sobol ? std::min(1.0f, 4.0f / std::sqrt((float)std::max(1, n))) : 1.0f; }
+}  // namespace
+
+/* Round 486 (lightmapper.h says what it is for): the modes are BakeSettings::variance_scale's. */
+float gather_variance_read(float scaled, float lum, int samples, bool sobol, int mode) {
+  const float q = qmc_scale(sobol, samples);
+  if (mode == 0 || !(q > 0.0f) || q >= 1.0f || !(scaled > 0.0f)) return scaled;  // (plain random samples, or so few that nothing was scaled)
+  const float raw = scaled / q, n = (float)std::max(1, samples);
+  if (mode <= 2) return raw;
+  const float k = lum * lum / raw;  // (how many samples carry the texel's light: its own estimate's squared signal to noise)
+  if (k >= n || (mode != 3 && k > 16.0f)) return scaled;  // (light from everywhere: round 465's scale, to the bit)
+  return mode == 3 ? raw * std::min(1.0f, 4.0f / std::sqrt(std::max(1.0f, k))) : raw;
+}
+
+namespace {
 /* A light's share v seen by k stratified shadow rays: (full light)^2 v (1 - v) / k - an upper bound (stratification only
  * lowers it); 0 for one ray or a light wholly seen or hidden. */
 inline float visibility_var(float full, float v, int k) {
@@ -561,6 +575,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   total_ = 0;
   done_ = 0;
   rays_ = 0;
+  pick_texels_ = 0, chance_kept_ = 0, chance_dropped_ = 0;
   gpu_texels_ = 0;
   gpu_error_.clear();
   active_ = true;
@@ -857,6 +872,16 @@ Vec4 Lightmapper::shadowmask_at(const LightmapTexel &t, Vec3 o, uint32_t &rng, u
   return m;
 }
 
+/* light_pick.h: the probability a light is kept with when `lighting pick <rays>` measures another number of rays. Out
+ * of line and never inlined, so bake_texel's default path keeps light_pick_keep's constant and the instructions main
+ * compiles for it (as corner_normalize in mesh.cpp: one copy of the instructions, one answer). */
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+float light_pick_keep_rays(const LightPick &pk, size_t li, float rays) { return std::min(1.0f, rays * pk.est[li] / std::max(1e-30f, pk.sum)); }
+
 Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirect, Vec3 *gather_out, Vec3 *emitted_out, DirSum *dir_out, Vec4 *mask_out,
                               Vec3 *var_out) {
   DirSum dirs;  // (round 426: where this texel's light comes from)
@@ -943,7 +968,9 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
    * roulette: unbiased). About 8 lights' shadow rays a texel in expectation, the bright near ones always. */
   thread_local LightPick pk;  // (round 453: the picking shared with the probes, light_pick.h)
   Vec3 picked(0.0f);
+  uint32_t chance_kept = 0, chance_dropped = 0;  // (round 484: counted for `lighting pick`'s log line)
   const bool pick = s_.pick_lights && point_lights_ > kLightPickOver;
+  const bool pick_measured = s_.pick_rays != kLightPickRays;  // (round 484: `lighting pick <rays>`; the default keeps its own arithmetic, see light_pick_keep_rays)
   if (pick) light_pick_estimate(pk, lights_, o, &n, t.position, [&](const BakeLight &bl) { return bakes_direct(bl); });
   /* Direct light from Baked lights (Mixed ones are drawn in realtime). Same units as the rasterizer:
    * colour x intensity x N.L x falloff is what albedo multiplies. */
@@ -1031,11 +1058,17 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
     if (pick) {
       const size_t li = (size_t)(&bl - &lights_[0]);
       keep = light_pick_keep(pk, li);
+      if (pick_measured) keep = light_pick_keep_rays(pk, li, s_.pick_rays);  // (never at the default: light_pick.h says why it is a call)
       /* (round 466: kept by chance with probability p, its light divided by p: the variance est^2 (1/p - 1) from its
        * unshadowed estimate - counted whether or not this texel kept it, so a texel that kept none still reports the noise
        * it carries) */
-      if (keep > 0.0f && keep < 1.0f) var_ind += pk.est[li] * pk.est[li] * (1.0f / keep - 1.0f);
-      if (!(keep > 0.0f) || rnd01(rng) >= keep) continue;
+      const bool by_chance = keep > 0.0f && keep < 1.0f;
+      if (by_chance) var_ind += pk.est[li] * pk.est[li] * (1.0f / keep - 1.0f);
+      if (!(keep > 0.0f) || rnd01(rng) >= keep) {
+        chance_dropped += by_chance;
+        continue;
+      }
+      chance_kept += by_chance;
     }
     const float vis = baked_light_visibility(*pt_, l, o, &n, L, dist, s_.direct_samples, rng, rays, smp);
     const Vec3 c = col * (ndl * fall * vis / keep);
@@ -1047,6 +1080,7 @@ Vec3 Lightmapper::bake_texel(const LightmapTexel &t, uint32_t seed, bool indirec
   if (emitted_out && finite3(picked)) *emitted_out += picked;
   if (dir_out) *dir_out = dirs;
   rays_ += rays;
+  if (pick) pick_texels_ += 1, chance_kept_ += chance_kept, chance_dropped_ += chance_dropped;
   if (var_out) *var_out = Vec3(finite_bits(var_ind) ? var_ind : 0.0f, finite_bits(var_dir) ? var_dir : 0.0f, finite_bits(var_gather) ? var_gather : 0.0f);
   return finite3(value) ? Vec3(std::max(0.0f, value.x), std::max(0.0f, value.y), std::max(0.0f, value.z)) : Vec3(0.0f);
 }
@@ -1458,6 +1492,28 @@ void svgf_at(const SvgfPage &pg, int x, int y, int step, Vec3 &out, float &var_o
   out = acc / wsum, var_out = vsum / (wsum * wsum);
 }
 
+/* Round 486 (task 0462, `lighting variancescale`): the gather's variance for the firefly clamp (vg) and the filter's
+ * edge-stop (vi: the texel's other parts keep theirs), read otherwise than rounds 465 to 485 did. `var`'s third number
+ * is the samples' own variance of the mean times round 465's scale q for Sobol samples (4 over the square root of the
+ * samples n): right for light that fills the hemisphere, wrong for a texel whose light is a few rays that met a small
+ * bright patch - stratification does not help those, and scaled, such a texel passes for steady light. Modes: 1 the
+ * clamp reads the variance unscaled; 2 the clamp and the filter do; 3 the scale goes by how many samples carry the
+ * texel's light, k = light^2 / variance (the squared signal to noise of its own estimate: about K for K rare bright
+ * samples, about n over the samples' relative variance for filled light) - 4 / sqrt(min(n, k)), so 1 up to 16 samples
+ * and round 465's from n on; 4 the same as a step - unscaled up to 16, round 465's beyond. */
+void unscale_gather_variance(const std::vector<Vec3> &var, const std::vector<Vec3> &gathered, const std::vector<uint8_t> &cov, float floor_rel, int samples, bool sobol,
+                             int mode, std::vector<float> &vi, std::vector<float> &vg) {
+  for (size_t i = 0; i < var.size() && i < cov.size(); i++) {
+    if (!cov[i]) continue;
+    const float lg = lum_of(gathered[i]), floor_g = floor_rel * lg * lg;
+    const float read = gather_variance_read(var[i].z, lg, samples, sobol, mode);
+    if (read == var[i].z) continue;  // (nothing to read otherwise - 16 samples or fewer, plain random ones: the texel stays as it was to the bit)
+    const float v = std::max(read, floor_g);
+    vg[i] = v;
+    if (mode >= 2) vi[i] = std::max(0.0f, var[i].x - var[i].z) + v;
+  }
+}
+
 /* One row of a pass: each noisy texel filtered, the rest copied; the count of noisy texels back. */
 size_t svgf_row(const SvgfPage &pg, int y, int step, std::vector<Vec3> &next, std::vector<float> &nvar) {
   size_t noisy = 0;
@@ -1562,6 +1618,7 @@ void Lightmapper::denoise_page_variance(Lightmap &lm, const std::vector<Vec3> &g
     const float lg = lum_of(gathered[i]), floor_g = floor_rel * lg * lg;  // (the floor for the gather alone)
     vi[i] = var[i].x + std::max(0.0f, floor_g - var[i].z), vd[i] = var[i].y, vg[i] = std::max(var[i].z, floor_g);
   }
+  if (s_.variance_scale != 0) unscale_gather_variance(var, gathered, cov, floor_rel, s_.indirect_samples, s_.sobol, s_.variance_scale, vi, vg);
   /* Only the gather is clamped (as round 423's): the emitters and the lights kept by chance are unbiased only with their
    * rare large values kept - the filter spreads them by their measured noise instead of cutting them. */
   clamp_fireflies_var(gath, vg, cov, own, normals, W, H);

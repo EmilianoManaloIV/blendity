@@ -7,6 +7,7 @@
 
 #include "../scene/unity_package.h"
 #include "../scene/unity_scene.h"
+#include "../scene/unity_material.h"
 #include "../scene/material.h"
 #include "../core/core.h"
 
@@ -34,6 +35,16 @@ bool unity_guid(const std::string &g) {
   return g.size() == 32 && std::all_of(g.begin(), g.end(), [](char c) { return std::isxdigit((unsigned char)c) != 0; });
 }
 
+/* Round 485: the GUIDs of the textures a .mat's gloss is read from - none for a file the reader can't take: nothing a
+ * material holds may stop the unpack. */
+std::vector<std::string> gloss_textures_of(const std::string &mat_text) {
+  try {
+    return unity_material_gloss_textures(mat_text);
+  } catch (...) {
+    return {};
+  }
+}
+
 }  // namespace
 
 /* The worker's whole job: read, unpack, write - nothing of the editor touched. Nothing it meets ends the program
@@ -55,6 +66,8 @@ void Editor::PackageJob::unpack() {
   if (!read_unity_package(bytes, assets, why, &cancel)) return finish(why);
   std::string guids;
   std::set<std::string> written;  // (each target once, as Windows sees it: Case.txt and case.txt are one file)
+  std::set<std::string> gloss;                // (round 485: the textures its materials read their gloss from...)
+  std::map<std::string, std::string> rel_of;  // (...and where each unpacked GUID went)
   for (size_t i = 0; i < assets.size() && !cancel.load(); i++) {
     UnityAsset &a = assets[i];
     progress.store((float)(i + 1) / (float)assets.size());
@@ -74,11 +87,44 @@ void Editor::PackageJob::unpack() {
       fs::make_dirs(fs::join(fs::join(project_root, into_rel), ".unity-meta"));
       fs::write_file(fs::join(fs::join(fs::join(project_root, into_rel), ".unity-meta"), a.guid + ".meta"), a.meta);
     }
+    rel_of[a.guid] = rel;
+    if (fs::extension(rel) == ".mat")
+      for (const std::string &g : gloss_textures_of(a.data)) gloss.insert(g);
     std::string().swap(a.data);
   }
-  fs::make_dirs(fs::join(project_root, into_rel));
-  fs::write_file(fs::join(fs::join(project_root, into_rel), ".unity-guids"), guids);
+  const std::string dir = fs::join(project_root, into_rel);
+  fs::make_dirs(dir);
+  /* Round 485 (ADR 0131): the means before the GUIDs - whoever finds the GUID table finds them beside it. Nothing here
+   * stands in the table's way: a texture that can't be measured has no line, and its materials read without it. */
+  std::string stats;
+  try {
+    stats = gloss_stats(gloss, rel_of);
+  } catch (...) {
+    stats.clear();
+  }
+  if (!stats.empty()) fs::write_file(fs::join(dir, ".unity-stats"), stats);
+  fs::write_file(fs::join(dir, ".unity-guids"), guids);
   finish(cancel.load() ? "cancelled - the files unpacked so far stay in " + into_rel : "");
+}
+
+/* Round 485 (ADR 0131): the textures the package's materials read their gloss from, decoded and averaged here on the
+ * worker - the lines of `.unity-stats`, so that reading a material never decodes an image. */
+std::string Editor::PackageJob::gloss_stats(const std::set<std::string> &gloss, const std::map<std::string, std::string> &rel_of) {
+  std::string lines;
+  ScopedTimer t;
+  for (const std::string &guid : gloss) {
+    if (cancel.load()) break;
+    const auto it = rel_of.find(guid);
+    if (it == rel_of.end() || !image_extension_supported(fs::extension(it->second))) continue;
+    const std::string abs = fs::join(project_root, it->second);
+    float mean[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    int w = 0, h = 0;
+    if (!unity_texture_mean(abs, w, h, mean)) continue;
+    lines += unity_stats_line(guid, unity_file_bytes(abs), w, h, mean);
+    gloss_measured++;
+  }
+  gloss_ms = t.ms();
+  return lines;
 }
 
 /* One asset written (a folder made); counted. */
@@ -119,11 +165,22 @@ void Editor::poll_unity_package() {
   project_listed_ = -100;
   unity_guid_index_cached(assets_dir_, project_root_, true);  // (round 371: the new GUIDs known before its materials load)
   image_assets_time_ = -100;
+  /* Round 485 (task 0461): where the import ends. Its folder counts as there again (it may have been deleted earlier in
+   * this session: its materials would never load), its .mat files are listed again, and every Unity material the
+   * library already holds under it is read again in place - one read while the package was still unpacking found no
+   * path for its textures and would keep Metallic 1, Roughness 0 and no maps until Blendity restarts. */
+  material_paths_listed_ = -100;
+  revive_asset_paths(job->into_rel);
+  const size_t reread = reread_unity_materials(job->into_rel);
+  if (reread) Log::info("Import Unity Package: %zu of its material(s) had been read before it was all there - read again", reread);
   for (const std::string &p : job->skipped) Log::warn("Import Unity Package: %s was left out (its path leaves the package's folder, or it couldn't be written)", p.c_str());
   if (!job->why.empty()) return Log::warn("Import Unity Package: %s - %s", fs::filename(job->path).c_str(), job->why.c_str());
   Log::info("Import Unity Package: %s into %s - %d model(s), %d texture(s), %d script/shader file(s) kept as they are, %d prefab/scene/material "
             "file(s), %d other, %d folder(s)", fs::filename(job->path).c_str(), job->into_rel.c_str(), job->counts[0], job->counts[1], job->counts[2],
             job->counts[3], job->counts[4], job->folders);
+  if (job->gloss_measured)
+    Log::info("Import Unity Package: %d texture(s) its materials read their gloss from were measured while it unpacked (%.0f ms on its worker)", job->gloss_measured,
+              job->gloss_ms);
 }
 
 /* Quitting while a package unpacks: it stops at its next file and is waited for (review 369: the thread was cut at
