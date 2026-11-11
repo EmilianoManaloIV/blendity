@@ -75,8 +75,9 @@ against main; it does not for three stacks that all add at the same place. The o
    round order (so a later round may anchor on an earlier round's row), keeps each file's line endings, writes all
    the files or none, and deletes the fragments.
 4. `docs_check.sh` holds the four files to the same `Docs-fold: yes` rule, **for commits newer than this rule
-   only**: a commit that does not descend from the commit in which the script gained the list (found on the base
-   with `git log -S`) is exempt for these four files and named in an `exempt:` line. The rounds of the three open
+   only**: a commit that does not descend from the commit in which the script gained the list (found in the
+   branch's history with `git log -S`; a branch that never met it has none) is exempt for these four files and
+   named in an `exempt:` line. The rounds of the three open
    passes that already edited the files directly therefore stay green; a round made after its branch merged `main`
    is checked.
 

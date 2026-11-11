@@ -834,6 +834,12 @@ def self_test():
                 return subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'HEAD'], cwd=d3, capture_output=True,
                                       text=True, env=dict(os.environ, NO_FRAGMENTS='1'))
 
+            git(d3, 'checkout', '-q', 'main')
+            r = subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'old'], cwd=d3, capture_output=True, text=True,
+                               env=dict(os.environ, NO_FRAGMENTS='1'))
+            check('docs_check exempts the shared-docs edits of a branch that never met the rule (the report stack_check.sh prints)',
+                  r.returncode == 0 and 'exempt:' in r.stdout, r.stdout + r.stderr)
+            git(d3, 'checkout', '-q', 'old')
             git(d3, 'merge', '-q', '--no-ff', '-m', 'merge main', 'main')
             r = shared_check()
             check('docs_check exempts a shared-docs edit written before the shared docs joined the rule, and says so',
