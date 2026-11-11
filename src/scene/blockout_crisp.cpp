@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Blockout's crisp path (ADR 0128, decision 6): a cluster's pieces handed to Manifold - the solver behind Blender's
-// Boolean modifier - all Add pieces in one batch, then all Subtract pieces in another, never two at a time. Every
+// Boolean modifier - each step of the build order (blockout.h) as one batch, never two solids at a time. Every
 // triangle carries the solid face it came from as its face id, so the result knows each face's piece and side.
 // Only in a build with Blender's libraries.
 #include "blockout_internal.h"
@@ -176,7 +176,7 @@ bool figures_overlap(const std::vector<double> &a, const std::vector<double> &b,
 std::vector<std::vector<AddFace>> add_faces_by_plane(const Cluster &c, const std::vector<Plane> &in_frame) {
   std::vector<std::vector<AddFace>> faces(c.planes.size());
   for (const Solid &s : c.solids) {
-    if (s.subtract) continue;
+    if (s.subtract || s.role == Role::Intersect) continue;
     for (size_t f = 0; f < s.face_count(); f++) {
       const uint32_t p = s.face_plane[f];
       if (in_frame[p].axis() >= 0 || c.plane_users[p] < 2) continue;
@@ -202,11 +202,27 @@ std::vector<std::vector<AddFace>> add_faces_by_plane(const Cluster &c, const std
  *   the two pieces touch, over the same-way face alone, the cut ends a hair short of that face - a known limit;)
  * - it lies on none: one hair out, as Add pieces among themselves (cutters that meet become one cut).
  * (Two sides that look the same way in such a plane - a door's sill and a floor at an angle to every frame - are
- * moved alike and stay a rounding apart: that case is left to Manifold's tidying.) */
+ * moved alike and stay a rounding apart: that case is left to Manifold's tidying.)
+ * "Add piece" reads: a solid that adds - also a room's shell; "cutter": one that takes away - also a room's air. */
 double side_shift(const Cluster &c, const Solid &s, size_t f, const Plane &in_frame, const std::vector<std::vector<AddFace>> &add_faces) {
   const uint32_t p = s.face_plane[f];
+  /* An Intersect piece's side in a plane some other solid has a side in: two hairs in, also in a plane square to
+   * the axes. What lies against it from outside - a floor under a piece that starts at the floor's top - is then
+   * clear of it. (Left to the rule for faces that coincide, Manifold kept such a floor as a sheet of no thickness
+   * when the plane was square to X, and not when it was square to Y or Z: measured in round 478.) What ends flush
+   * with it from inside ends two hairs short, on the same plane of the table: the face maker puts it back. */
+  if (s.role == Role::Intersect) return c.plane_users[p] < 2 ? 0.0 : -2.0;
   if (in_frame.axis() >= 0 || c.plane_users[p] < 2) return 0.0;
   if (!s.subtract) return 1.0;
+  /* A room's air in a plane of its own shell (a wall, floor or ceiling of no thickness): moved as the shell's side
+   * is, so the two stay one plane to the bit and the rule for faces that coincide applies - the room is open there.
+   * (Two hairs out, as for any flush cut, would leave the air a hair wider than its own shell: a rim of slivers on
+   * whatever lies around.) */
+  if (s.role == Role::Air && &s != &c.solids[0]) {
+    const Solid &shell = *(&s - 1);
+    for (size_t g = 0; g < shell.face_count(); g++)
+      if (shell.face_plane[g] == p && shell.face_sign[g] == s.face_sign[f]) return 1.0;
+  }
   const std::vector<double> mine = face_figure(c, s, f);
   const double sliver = 16.0 * c.tol;
   bool same = false, other = false;
@@ -285,7 +301,8 @@ bool pair_edges(Soup &soup) {
 bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &why) {
 #ifdef BL_WITH_MANIFOLD
   try {
-    std::vector<manifold::Manifold> adds, subs;
+    std::vector<manifold::Manifold> merged, airs, parts, subs, trims;  // (parts: the Keep rooms, then the Add pieces)
+    manifold::Manifold keep_shell;
     const Frame fr = choose_frame(c);
     rep.turned = fr.turned;
     const std::vector<Plane> planes = planes_in(c, fr);
@@ -296,18 +313,39 @@ bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &w
         why = "Manifold refused a piece's solid";
         return false;
       }
-      (s.subtract ? subs : adds).push_back(std::move(m));
+      switch (s.role) {
+        case Role::MergeShell: merged.push_back(std::move(m)); break;
+        case Role::KeepShell: keep_shell = std::move(m); break;
+        case Role::Air:
+          if (&s != &c.solids[0] && (&s - 1)->role == Role::KeepShell) parts.push_back(keep_shell - m);  // (a Keep room: its shell less its own air)
+          airs.push_back(std::move(m));
+          break;
+        case Role::Add: parts.push_back(std::move(m)); break;
+        case Role::Subtract: subs.push_back(std::move(m)); break;
+        case Role::Intersect: trims.push_back(std::move(m)); break;
+      }
     }
     soup = Soup();
     soup.arity = 3;
     soup.trust_points = true;
     soup.reach = std::max(1e-5 * c.scale, 8.0 * c.tol);  // (the hairs and Manifold's tidying stay inside it wherever the cluster lies)
-    if (adds.empty()) return true;
-    manifold::Manifold r = manifold::Manifold::BatchBoolean(adds, manifold::OpType::Add);
+    if (merged.empty() && parts.empty()) return true;
+    /* The order: the Merge rooms' shells united, less every room's air; plus the Keep rooms and the Add pieces;
+     * less the Subtract pieces; what of that is inside every Intersect piece. */
+    if (!merged.empty()) {
+      manifold::Manifold r = manifold::Manifold::BatchBoolean(merged, manifold::OpType::Add);
+      airs.insert(airs.begin(), r);
+      parts.insert(parts.begin(), manifold::Manifold::BatchBoolean(airs, manifold::OpType::Subtract));
+    }
+    manifold::Manifold r = manifold::Manifold::BatchBoolean(parts, manifold::OpType::Add);
     if (!subs.empty()) {
       subs.insert(subs.begin(), r);
       r = manifold::Manifold::BatchBoolean(subs, manifold::OpType::Subtract);
     }
+    /* (One Intersect piece at a time, the result first: a batch takes its operands in an order of its own, and with
+     * the pieces met first a side of the result that lies in an Intersect piece's plane from outside - a floor
+     * under a piece that starts at the floor's top - was left behind as a sheet of no thickness. There are few.) */
+    for (const manifold::Manifold &trim : trims) r = r.Boolean(trim, manifold::OpType::Intersect);
     if (r.Status() != manifold::Manifold::Error::NoError) {
       why = "Manifold could not combine the pieces";
       return false;

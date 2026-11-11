@@ -337,6 +337,7 @@ void Editor::render_static_overlays_kept() {
 
 void Editor::render_static_overlays() {
   draw_colliders();        // (round 362: Unity's green collider wires)
+  draw_blockouts();        // (round 477: a Blockout's pieces, when it or they are selected)
   draw_light_volumes();    // (round 397: VRC Light Volumes' boxes)
   draw_reflection_probes();  // (round 401)
   /* Wireframes. */

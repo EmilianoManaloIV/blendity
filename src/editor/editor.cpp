@@ -82,6 +82,7 @@ static Editor *g_eval_hook_owner = nullptr;  // (round 413: the editor GameObjec
 Editor::~Editor() {
   livelink_remove_discovery();  // (task 0274: the bridges stop finding a Blendity that is gone)
   eval_jobs_.clear();      // (round 413: the workers joined before the scene goes, and before the hook they may read)
+  blockout_jobs_.clear();  // (round 477: the Blockout builds the same)
   if (g_eval_hook_owner == this) g_eval_hook_owner = nullptr, GameObject::slow_eval_hook = nullptr;
   save_job_wait();         // (a save in flight finishes - its file is whole)
   mesh_job_.reset();
@@ -589,6 +590,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   mesh_bytes_frame_ = 0, mesh_queue_ = 0, mesh_ms_frame_ = 0;  // (round 458: this frame's mesh uploads and what its views leave waiting)
   texture_stream_poll();  // (round 447: what the views found missing, loading on a worker)
   update_procedural_shapes();
+  update_blockouts();  // (round 477: a Blockout's mesh follows its pieces: asked for when the snapshot changed)
   /* A texture drag ended outside the Textures window (or the window closed during it): the set size again. */
   if (texture_touch_pending_ && !any_button_down()) {
     procedural_texture_clear_previews();
@@ -724,6 +726,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   texbake_poll();   // (round 412: a Bake Textures lands as a material and the UVs)
   mesh_job_poll();  // (round 413: a Subdivide or DynaMesh lands as one step)
   eval_jobs_poll();  // (a slow modifier stack's result adopted)
+  blockout_jobs_poll();  // (round 477: a Blockout's finished build adopted)
   save_job_poll();
   shot_job_poll();  // (round 418)
   open_job_poll();
@@ -1125,6 +1128,9 @@ void Editor::draw_menubar(const Recti &r) {
         for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
           if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k);
       });
+    u.submenu("Blockout", u.px(190), [this] { blockout_menu_items(false); });  // (round 477)
+    u.tooltip("Pieces that build one mesh: boxes, cylinders and spheres that add or cut (Subtract). Move, turn or resize a piece and the\n"
+              "mesh follows. A piece goes under the selected Blockout.");
     if (shows(FocusReference)) {
       u.submenu("Reference Image", u.px(160), [this] {  // (task 0287: the side and top views too, the project's images listed)
         static const char *const kSides[][2] = {{"Front", "front"}, {"Side", "side"}, {"Top", "top"}};
@@ -2380,6 +2386,7 @@ void Editor::redo() {
 
 void Editor::new_scene() {
   save_job_wait();  // (round 413: a save in flight lands on the scene it was of)
+  blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's - the next scene's ids start again)
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -2459,6 +2466,7 @@ void Editor::open_job_poll() {
 
 bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s) {
   save_job_wait();  // (round 413: a save started while the file loaded lands on the scene it was of)
+  blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's)
   export_waits_drop("another scene opened");  // (review 354)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -2501,6 +2509,7 @@ bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s
 
 void Editor::save_scene_cmd(bool save_as) {
   fold_edit_shape();  // (round 406: a file holds the basis and the keys, never a shape half folded)
+  blockout_jobs_wait();  // (round 477: a Blockout's file holds the mesh its pieces make now - also what a script changed since the last frame)
   sketch_xf_settle();  // (review 389: a save keeps a transform first, as Photoshop's)
   eye_test_off();  // (round 360: the eye test's pose isn't written)
   anim_set_preview(false);  // (the scene is saved in its own pose, not the one previewed)
@@ -2705,6 +2714,7 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
     Log::warn("Bake Textures: select an object with a mesh");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: the bake writes UVs into the mesh, and a Blockout's next rebuild has none)
   if (edit_mode_) exit_edit_mode();
   /* The views show the evaluated mesh. Modifiers that keep the topology (deformers) are baked as shown and the UVs
    * go on the base mesh's same corners; ones that add or remove geometry (Mirror, Array, Boolean...) would repeat
@@ -2834,6 +2844,7 @@ MaterialPtr Editor::snapshot_material(const MaterialPtr &m) {
 bool Editor::mesh_job_start(GameObject &g, const std::string &label, std::function<bool(Mesh &, std::string &)> op, std::function<void(GameObject &)> landed) {
   MeshFilter *mf = g.get<MeshFilter>();
   if (!mf || !mf->mesh) return false;
+  if (blockout_refuses_edit_mode(&g)) return false;  // (round 477)
   if (mesh_job_) {
     refuse(label + ": " + mesh_job_->label + " is still running - the tray's Cancel stops it", "jobs cancel " + mesh_job_->label, "Cancel it");
     return false;
@@ -3396,6 +3407,7 @@ std::string Editor::export_model(const ExportOptions &o, const std::string &path
 std::string Editor::export_objects(const std::vector<GameObject *> &objects, const ExportOptions &o, const std::string &path) {
   ProceduralTextureFinalScope final_outputs;  // (round 412: a surface's whole images in the files, never the views' stand-in)
   eval_jobs_wait();  // (round 413: the workers' finished results taken first)
+  blockout_jobs_wait();  // (round 477: a Blockout exports the mesh its pieces make now)
   const GameObject::EvaluateNowScope evaluate_now;  // (the stacks' exact results, not what a worker is still making)
   sculpt_end_stroke();  // (a stroke writes the mesh in place)
   fold_edit_shape();  // (round 406: a file holds the basis and the keys)
@@ -4152,9 +4164,12 @@ void Editor::nest_armature(GameObject *armature, GameObject *mesh) {
 /* The kind as create knows it, matched without case ("sphere", "point light"); "" when there's none. */
 std::string Editor::known_create_kind(const std::string &kind) {
   static const char *const kKinds[] = {"Empty", "Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot",
-                                       "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice"};
+                                       "Directional Light", "Point Light", "Spot Light", "Area Light", "Light Probe Group", "Camera", "Armature", "Lattice",
+                                       "Blockout"};
   for (const char *k : kKinds)
     if (to_lower(kind) == to_lower(k)) return k;
+  static const std::string kPiece = "blockout piece:";  // (round 477: "Blockout Piece: Subtract Box"; the rest is matched where it's made)
+  if (to_lower(kind).rfind(kPiece, 0) == 0) return "Blockout Piece:" + kind.substr(kPiece.size());
   for (const char *prefix : {"Curve:", "Shape:"})  // (review 367: "curve: path" too; the rest is matched where it's made)
     if (to_lower(kind).rfind(to_lower(prefix), 0) == 0) return prefix + kind.substr(6);
   return "";
@@ -4297,9 +4312,12 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     mark_changed("Create " + std::string(kShapeNames[k]));
     return g;
   }
+  if (kind == "Blockout") return create_blockout("");  // (round 477, ADR 0129)
+  if (starts_with(kind, "Blockout Piece:")) return create_blockout_piece(kind.substr(std::string("Blockout Piece:").size()));
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
     Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
-              "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>", kind.c_str());
+              "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>, Blockout, "
+              "Blockout Piece: [Subtract|Intersect] Box|Cylinder|Sphere, Room Box|Cylinder, Door, Window", kind.c_str());
     return nullptr;
   }
   const std::string name = unique_object_name(kind == "Empty" ? "GameObject" : kind);  // (finding 8: Unity's "Sphere (1)")
@@ -4477,6 +4495,7 @@ void Editor::set_origin(int mode, Vec3 world_point) {
   int n = 0;
   for (GameObject *g : selected_objects(false)) {
     Vec3 c;  // the new origin, in mesh space
+    if (mode == 8 && blockout_refuses_edit_mode(g)) continue;  // (round 477: Geometry to Origin moves the mesh alone - a Blockout's would jump back at the next rebuild; the other modes move the pieces with it)
     if (!origin_target(*g, mode, world_point, c)) {
       if (mode == 6 && edit_mode_ && g->id == edit_obj_) {
         Log::warn("Set Origin: select vertices, edges or faces in Edit Mode first");
@@ -4495,6 +4514,7 @@ void Editor::set_origin(int mode, Vec3 world_point) {
     }
     n++;
   }
+  if (!n && mode == 8 && active_object() && active_object()->get<Blockout>()) return;  // (round 477: the Blockout's hint was the answer)
   if (!n) {
     Log::warn("Set Origin needs a selected object with a mesh");
     return;
@@ -4510,6 +4530,7 @@ void Editor::mesh_op(const std::string &op) {
   for (GameObject *g : selected_objects(false)) {
     auto *mf = g->get<MeshFilter>();
     if (!mf || !mf->mesh) continue;
+    if (blockout_refuses_edit_mode(g)) continue;  // (round 477: its mesh is its pieces' - what an operator wrote would stay until a piece moved, then go)
     if (op == "apply_transform") {
       /* Reset XForm (UModeler) / Apply Rotation & Scale (Blender Ctrl+A): the
        * rotation and scale go into the vertices; the object keeps its place. */
@@ -4853,6 +4874,7 @@ void Editor::enter_play() {
   seq_set_preview(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();
+  blockout_jobs_wait();  // (round 477: physics reads the mesh the pieces make now; nothing rebuilds while playing)
   commit_undo();
   play_backup_ = scene_->clone();
   spring::reset(*scene_);  // (the springs start from the pose Play starts in)
@@ -5634,6 +5656,7 @@ bool Editor::vgroup_op(const std::string &verb, const std::string &name_in, cons
     Log::warn("vgroup: select a mesh object first");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: groups on a Blockout's mesh would go at the next rebuild)
   const Mesh &cur = **mp;
   int gi = name_in.empty() ? active_vgroup_ : cur.find_group(name_in);
   if (verb != "add" && (gi < 0 || gi >= (int)cur.vertex_groups.size())) {

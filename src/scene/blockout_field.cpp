@@ -114,44 +114,77 @@ bool span_of(const Cluster &c, const Solid &s, V3 a, V3 b, Span &sp) {
   return sp.t0 <= sp.t1;
 }
 
-/* The side the surface shows where the edge from `a` (inside the result) to `b` (outside) first leaves the result: the
- * face the last Add piece is left by, or the face of the Subtract piece entered before that. kNone when the spans
- * don't tell (a point a hair on the wrong side of a plane). */
-uint32_t exit_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 a, V3 b, double &at) {
-  double reach = 0.0, cut = 2.0;
-  uint32_t label = kNone, cut_label = kNone;
-  bool grown = true;
-  while (grown) {
-    grown = false;
-    for (uint32_t si : cand) {
-      const Solid &s = c.solids[si];
-      Span sp;
-      if (s.subtract || !span_of(c, s, a, b, sp) || sp.t0 > reach + 1e-12) continue;
-      if (label != kNone && sp.t1 <= reach) continue;
-      reach = sp.t1, grown = true;
-      label = sp.out == kNone ? kNone - 1 : s.label_base + sp.out;  // (kNone - 1: this piece runs to the edge's far end)
-    }
-  }
-  if (label == kNone) return kNone;
-  for (uint32_t si : cand) {
-    const Solid &s = c.solids[si];
+/* A grid edge entering or leaving a solid: where along the edge, which solid (its place among the candidates) and by
+ * which face. */
+struct Event {
+  double t = 0.0;
+  uint32_t k = 0, face = 0;
+  bool enter = false;
+};
+
+/* What exit_label works with, kept by its caller from one edge to the next. */
+struct ExitScratch {
+  std::vector<Event> events;
+  std::vector<uint8_t> in;
+};
+
+/* The side the surface shows where the edge from `a` (inside the result) to `b` (outside) first leaves the result.
+ * Every solid is convex, so the edge is in it for one stretch: the edge's ends of those stretches are walked in
+ * order, the build order asked again after each (in_result), and the first that puts the edge outside names the
+ * side - the face a solid that takes away is entered by (a Subtract piece, a room's air), or the face a solid that
+ * adds or an Intersect piece is left by. Ends at one place count together: two Add pieces that touch are one, a cut
+ * flush with a face goes through it. kNone when the stretches don't tell (a point a hair on the wrong side of a
+ * plane). */
+uint32_t exit_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 a, V3 b, double &at, ExitScratch &scratch) {
+  std::vector<Event> &events = scratch.events;
+  std::vector<uint8_t> &in = scratch.in;
+  events.clear();
+  in.assign(cand.size(), 0);
+  for (uint32_t k = 0; k < cand.size(); k++) {
+    const Solid &s = c.solids[cand[k]];
     Span sp;
-    if (!s.subtract || !span_of(c, s, a, b, sp) || sp.in == kNone || sp.t0 > reach || sp.t0 >= cut) continue;
-    cut = sp.t0, cut_label = s.label_base + sp.in;
+    if (!span_of(c, s, a, b, sp)) continue;
+    if (sp.in == kNone) in[k] = 1;
+    else events.push_back({sp.t0, k, sp.in, true});
+    if (sp.out != kNone) events.push_back({sp.t1, k, sp.out, false});
   }
-  at = cut_label != kNone ? cut : reach;
-  if (cut_label != kNone) return cut_label;
-  return label == kNone - 1 ? kNone : label;
+  if (!in_result(c, cand.data(), cand.size(), in.data())) return kNone;
+  std::stable_sort(events.begin(), events.end(), [](const Event &x, const Event &y) { return x.t < y.t; });
+  for (size_t i = 0; i < events.size();) {
+    size_t j = i;
+    while (j < events.size() && events[j].t <= events[i].t + 1e-12) in[events[j].k] = events[j].enter ? 1 : 0, j++;
+    if (in_result(c, cand.data(), cand.size(), in.data())) {
+      i = j;
+      continue;
+    }
+    /* Of the ends at this place: one that alone puts the edge outside, a cut before a leaving; else the first that
+     * could. */
+    int best_rank = -1;
+    uint32_t label = kNone;
+    for (size_t e = i; e < j; e++) {
+      const Solid &s = c.solids[cand[events[e].k]];
+      if (events[e].enter != s.subtract) continue;  // (entering a solid that adds, leaving one that takes away: never the reason)
+      in[events[e].k] = events[e].enter ? 0 : 1;
+      const bool alone = in_result(c, cand.data(), cand.size(), in.data());
+      in[events[e].k] = events[e].enter ? 1 : 0;
+      const int rank = (alone ? 4 : 0) + (s.subtract ? 2 : s.role == Role::Intersect ? 1 : 0);  // (a cut, then an Intersect piece's side - as the crisp path, which moves that side in - then a solid's that adds)
+      if (rank > best_rank) best_rank = rank, label = s.label_base + events[e].face;
+    }
+    at = events[i].t;
+    return label;
+  }
+  return kNone;
 }
 
 /* For a point that is not in the result (one filled in, or one the spans could not place): the side nearest to it -
- * of the Subtract piece it is in, else of the nearest Add piece. Every quad round a filled point takes this one
+ * of the solid that takes it away (a Subtract piece or an air it is in, else an Intersect piece it is outside of),
+ * else of the nearest solid that adds. Every quad round a filled point takes this one
  * side, whichever way the quad faces: the quads then join that side's region, and the region's corners are worked
  * out from the planes, so the filled point leaves no trace. (Sides chosen quad by quad, by the way each faces, were
  * tried: they cut the place into regions that meet nowhere.) */
 uint32_t nearest_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 p) {
-  double sub_best = -1e300, out_best = 1e300, in_best = -1e300;
-  uint32_t sub_label = kNone, out_label = kNone, in_label = kNone;
+  double sub_best = -1e300, out_best = 1e300, in_best = -1e300, trim_best = 1e300;
+  uint32_t sub_label = kNone, out_label = kNone, in_label = kNone, trim_label = kNone;
   for (uint32_t si : cand) {
     const Solid &s = c.solids[si];
     double m = -1e300;
@@ -161,13 +194,18 @@ uint32_t nearest_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 p
       if (v > m) m = v, fm = f;
     }
     const uint32_t label = s.label_base + fm;
+    if (s.role == Role::Intersect) {
+      if (m > 0.0 && m < trim_best) trim_best = m, trim_label = label;
+      continue;
+    }
     if (s.subtract && m <= 0.0 && m > sub_best) sub_best = m, sub_label = label;
     if (!s.subtract && m > 0.0 && m < out_best) out_best = m, out_label = label;
     if (!s.subtract && m <= 0.0 && m > in_best) in_best = m, in_label = label;
   }
   if (in_label != kNone && sub_label != kNone) return sub_label;
+  if (in_label != kNone && trim_label != kNone) return trim_label;
   if (in_label == kNone && out_label != kNone) return out_label;
-  return in_label != kNone ? in_label : sub_label;
+  return in_label != kNone ? in_label : sub_label != kNone ? sub_label : trim_label;
 }
 
 /* ------------------------------------------------------- a blended field */
@@ -208,23 +246,41 @@ double solid_distance(const Cluster &c, const Solid &s, V3 x, uint32_t *face = n
   return m;
 }
 
-/* Inside the blended result: the plain pieces united, each blended piece melted in with its own radius, then the
- * cuts, each rounded by its radius. A cut removes its own surface, as everywhere. */
+/* A solid's distance with what an air takes cut out of it: above 0 inside the air and on its surface. */
+double less_air(double solid, double air) { return std::max(solid, air <= 0.0 ? std::max(-air, 1e-300) : -air); }
+
+/* Inside the blended result, in the build order: the rooms (their shells less the airs, never rounded), the plain
+ * Add pieces, each blended piece melted in with its own radius, then the cuts, each rounded by its radius, then the
+ * Intersect pieces. A cut removes its own surface, as everywhere. */
 bool inside_blended(const Cluster &c, const std::vector<uint32_t> &cand, V3 x) {
-  double f = 1e300;
+  double f = 1e300, merge = 1e300, air = 1e300;
+  for (size_t k = 0; k < cand.size(); k++) {
+    const Solid &s = c.solids[cand[k]];
+    if (s.role == Role::MergeShell) merge = std::min(merge, solid_distance(c, s, x));
+    if (s.role == Role::Air) air = std::min(air, solid_distance(c, s, x));
+    if (s.role == Role::KeepShell) {
+      const bool has_air = k + 1 < cand.size() && cand[k + 1] == cand[k] + 1;
+      f = std::min(f, less_air(solid_distance(c, s, x), has_air ? solid_distance(c, c.solids[cand[k + 1]], x) : 1e300));
+    }
+    if (s.role == Role::Add && !(s.blend > 0.0)) f = std::min(f, solid_distance(c, s, x));
+  }
+  f = std::min(f, less_air(merge, air));
   for (uint32_t si : cand)
-    if (!c.solids[si].subtract && !(c.solids[si].blend > 0.0)) f = std::min(f, solid_distance(c, c.solids[si], x));
-  for (uint32_t si : cand)
-    if (!c.solids[si].subtract && c.solids[si].blend > 0.0) f = smooth_min(f, solid_distance(c, c.solids[si], x), c.solids[si].blend);
+    if (c.solids[si].role == Role::Add && c.solids[si].blend > 0.0) f = smooth_min(f, solid_distance(c, c.solids[si], x), c.solids[si].blend);
   if (!(f <= 0.0)) return false;
+  uint32_t trims = 0;
   for (uint32_t si : cand) {
     const Solid &s = c.solids[si];
-    if (!s.subtract) continue;
+    if (s.role == Role::Intersect) {
+      if (solid_distance(c, s, x) > 0.0) return false;
+      trims++;
+    }
+    if (s.role != Role::Subtract) continue;
     const double d = solid_distance(c, s, x);
     if (d <= 0.0) return false;
     f = -smooth_min(-f, d, s.blend);
   }
-  return f <= 0.0;
+  return f <= 0.0 && trims == c.trims;
 }
 
 /* The label of the surface at `x` in a blended cluster: the nearest solid's nearest side, flat (mergeable) only where
@@ -373,6 +429,9 @@ void Grid::mark_face(const Solid &s, size_t f) {
     for (int a = 0; a < 3; a++) lo[a] = std::min(lo[a], p[a]), hi[a] = std::max(hi[a], p[a]);
     outline.push_back(p[u]), outline.push_back(p[w]);
   }
+  /* (An Intersect piece may be far larger than what it trims: its faces are followed only where the others are.) */
+  for (int a = 0; a < 3; a++) lo[a] = std::max(lo[a], c.lo[a]), hi[a] = std::min(hi[a], c.hi[a]);
+  if (lo[0] > hi[0] || lo[1] > hi[1] || lo[2] > hi[2]) return;
   /* (A blended join lies within its radius and a quarter of the pieces it joins; a solid no blend reaches needs a
    * cell's margin only.) */
   const double margin = h + 1.5 * s.melt;
@@ -440,7 +499,13 @@ void Grid::sides(Brick &br) const {
     for (int i = 0; i < 8; i++) p[a][i] = coord(a, (int64_t)br.b[a] * 8 + i);
     centre[a] = 0.5 * (p[a][0] + p[a][7]), half[a] = 0.5 * (p[a][7] - p[a][0]);
   }
-  uint64_t add[8] = {}, sub[8] = {};
+  uint64_t add[8] = {}, sub[8] = {}, merge[8] = {}, air[8] = {}, kept[8] = {}, held[8] = {}, trim[8];
+  for (uint64_t &word : trim) word = ~0ull;
+  uint32_t held_solid = kNone, trims = 0;  // (a Keep room's shell waits for its air: the next solid)
+  auto keep_held = [&](const uint64_t *own_air) {
+    for (int i = 0; i < 8; i++) kept[i] |= held[i] & ~(own_air ? own_air[i] : 0ull);
+    held_solid = kNone;
+  };
   br.sided = true;
   if (c.blended) {
     for (uint32_t i = 0; i < 512; i++)
@@ -450,6 +515,7 @@ void Grid::sides(Brick &br) const {
   }
   for (uint32_t si : cand) {
     const Solid &s = c.solids[si];
+    if (held_solid != kNone && si != held_solid + 1) keep_held(nullptr);
     uint64_t in[8];
     for (uint64_t &word : in) word = ~0ull;
     bool misses = false;
@@ -465,11 +531,22 @@ void Grid::sides(Brick &br) const {
       for (uint32_t i = 0; i < 512; i++)
         if (ax[i & 7] + ay[(i >> 3) & 7] + az[i >> 6] > 0.0) in[i >> 6] &= ~(1ull << (i & 63));
     }
-    if (misses) continue;
-    uint64_t *into = s.subtract ? sub : add;
-    for (int i = 0; i < 8; i++) into[i] |= in[i];
+    if (misses)
+      for (uint64_t &word : in) word = 0;
+    if (s.role == Role::Air && held_solid != kNone) keep_held(in);
+    if (s.role == Role::Intersect) trims++;
+    if (s.role == Role::KeepShell) held_solid = si;
+    uint64_t *into = s.role == Role::Add ? add : s.role == Role::Subtract ? sub : s.role == Role::MergeShell ? merge : s.role == Role::Air ? air : s.role == Role::KeepShell ? held : nullptr;
+    for (int i = 0; i < 8; i++) {
+      if (s.role == Role::Intersect) trim[i] &= in[i];
+      else if (s.role == Role::KeepShell) into[i] = in[i];
+      else into[i] |= in[i];
+    }
   }
-  for (int i = 0; i < 8; i++) br.inside[i] = add[i] & ~sub[i];
+  if (held_solid != kNone) keep_held(nullptr);
+  /* The build order (blockout.h): an Intersect solid whose bounds miss the brick is not among the candidates, and
+   * nothing here is inside it. */
+  for (int i = 0; i < 8; i++) br.inside[i] = trims == c.trims ? (((merge[i] & ~air[i]) | kept[i] | add[i]) & ~sub[i]) & trim[i] : 0ull;
 }
 
 /* The sides of every brick that has none yet, side by side. */
@@ -648,6 +725,7 @@ uint32_t Grid::twin_of(const Brick &br, const int g[3], int axis, int k, const i
 void Grid::emit(Brick &br, Soup &soup, std::vector<float> &cross) {
   std::vector<uint32_t> cand;
   candidates(br, 8, cand);
+  ExitScratch scratch;
   for (uint32_t i = 0; i < 512; i++)
     for (int axis = 0; axis < 3; axis++) {
       if (!bit(br.edges, i * 3 + (uint32_t)axis)) continue;
@@ -685,7 +763,7 @@ void Grid::emit(Brick &br, Soup &soup, std::vector<float> &cross) {
         const Brick *owner = brick_near(br, in_l[0], in_l[1], in_l[2]);
         const bool filled = owner && bit(owner->forced, (uint32_t)(in_l[0] + 8 * in_l[1] + 64 * in_l[2]));
         double t = 0.5;
-        if (!filled) label = exit_label(c, cand, a, b, t);
+        if (!filled) label = exit_label(c, cand, a, b, t, scratch);
         if (label == kNone) label = nearest_label(c, cand, a), t = 0.5;
         t = std::max(0.0, std::min(1.0, t));
         cross[q] = (float)(lower_inside ? t : 1.0 - t);
@@ -729,6 +807,7 @@ bool field_soup(const Cluster &c, const Settings &settings, Soup &soup, ClusterR
   double area = 0.0, melt = 0.0, far = 0.0;
   for (const Solid &s : c.solids) {
     melt = std::max(melt, s.melt);
+    if (s.role == Role::Intersect) continue;  // (it may be far larger than what it trims; it adds no surface beyond the others' bounds)
     for (size_t f = 0; f < s.face_count(); f++) {
       V3 n;
       const uint32_t b = s.face_offsets[f], count = s.face_offsets[f + 1] - b;

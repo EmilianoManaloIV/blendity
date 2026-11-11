@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Blockout (ADR 0128, task 0452): pieces - a shape, Add or Subtract, a place - built into one closed mesh. The kernel
+// Blockout (ADR 0128, tasks 0452 and 0454): pieces - a shape, Add, Subtract or Intersect, a place; or a room: its shape
+// is the air and it brings walls, a floor and a ceiling - built into one closed mesh. The kernel
 // only: a function of the pieces and the settings, with no scene and no editor behind it, so a worker thread can run
 // it. Two ways to mesh a cluster of touching pieces: the crisp path (an exact boolean by Manifold, where the build has
 // Blender's libraries) and the field path (our own: inside or outside sampled on a grid, the surface built from that).
@@ -15,7 +16,8 @@
 namespace bl::blockout {
 
 enum class Shape : uint8_t { Box, Cylinder, Sphere };
-enum class Op : uint8_t { Add, Subtract };
+/* Intersect: what is inside the piece is kept, of the whole Blockout (two of them: what is inside both). */
+enum class Op : uint8_t { Add, Subtract, Intersect };
 /* Auto: the crisp path where the build has it and no piece of the cluster has a Blend radius, else the field path.
  * Crisp: the crisp path for every cluster (Blend radii are then ignored). Field: the field path for every cluster. */
 enum class Path : uint8_t { Auto, Crisp, Field };
@@ -23,6 +25,9 @@ enum class Path : uint8_t { Auto, Crisp, Field };
 /* The side of a piece a face came from. A box: 0 -X, 1 +X, 2 -Y, 3 +Y, 4 -Z, 5 +Z. A cylinder: 0 its side, 1 the
  * bottom (-Y), 2 the top (+Y). A sphere: 0. kSideBlend: no single flat side (a blended join). */
 constexpr uint32_t kSideBlend = 0xFFFFFFFFu;
+/* A room is two solids: its air (the piece's shape; sides as above - they are the room's inside) and its shell (the
+ * air grown by the wall, floor and ceiling; its sides are the room's outside, numbered kSideShell + the side). */
+constexpr uint32_t kSideShell = 0x100u;
 
 /* One piece. Shapes are centred on the piece's origin, Y up; `to_blockout` places it (any rotation, uneven scale,
  * mirror or shear). A cylinder and a sphere are the faceted solids primitives::cylinder and uv_sphere make. */
@@ -37,7 +42,17 @@ struct Piece {
   int rings = 12;          // sphere: rings from pole to pole (2-128)
   float blend = 0.0f;      // the Blend radius, in the Blockout's units; above 0 sends its cluster to the field path
   Mat4 to_blockout;        // piece space -> the Blockout's space
+  /* A room (task 0454): the shape is its air; `op` and `blend` are not read. The thicknesses are metres in the
+   * Blockout's space, measured square to the piece's own sides (0 to 1000; a negative or non-finite one is 0). */
+  bool room = false;
+  float wall = 0.2f, floor = 0.2f, ceiling = 0.2f;
+  bool keep_walls = false;  // false: Merge with neighbours - every room's air clears this room's walls; true: only its own air does
+  bool open_top = false;    // no ceiling: the walls end flat at the air's top
 };
+
+/* What a face is, for materials (round 482): by the piece and the side the face names. */
+enum class SideClass : uint8_t { Outside, Floor, Ceiling, Wall, Cut };
+SideClass side_class(const Piece &piece, uint32_t side);
 
 struct Settings {
   float cell = 0.1f;           // the field path's grid step, in the Blockout's units
@@ -78,6 +93,7 @@ struct Skipped {
 struct Report {
   std::vector<ClusterReport> clusters;  // in the order their faces lie in the mesh
   std::vector<Skipped> skipped;         // pieces that could not be used
+  std::vector<Skipped> notes;           // pieces that were used but give nothing of their own (a room without any thickness)
   size_t built = 0, cached = 0;         // clusters built by this call, and taken from the cache
   size_t faces_in = 0, faces_out = 0, cells = 0, filled = 0, unresolved = 0;  // sums over the clusters built
   float cell = 0.0f;                    // the largest cell a field cluster used
@@ -103,8 +119,12 @@ class Cache {
 /* Whether this build has the crisp path (Manifold, from Blender's libraries). */
 bool crisp_available();
 
-/* Builds the pieces' mesh, in the Blockout's space: all Add pieces united, then every Subtract piece cut out. The
- * result is closed, every edge on two faces, faces outward, no face with a hole. Touching pieces become one solid, a
+/* Builds the pieces' mesh, in the Blockout's space, in this order (ADR 0128, amended in round 478):
+ *   1. the shells of the Merge rooms, united;   2. less the air of every room;
+ *   3. plus each Keep room's shell less its own air;   4. plus every Add piece;
+ *   5. less every Subtract piece;   6. what of that is inside every Intersect piece.
+ * So air removes room walls only: an Add piece standing in a room stays, a Keep room keeps its walls inside another.
+ * The result is closed, every edge on two faces, faces outward, no face with a hole. Touching pieces become one solid, a
  * cut flush with a face goes through it. The same pieces give the same bytes, on one thread or many.
  * False, with `report->why`, when cancelled, when Path::Crisp is asked of a build without Manifold, or when a
  * cluster's surface did not close: `out` and `faces` are then untouched. A piece that cannot be used (a number that

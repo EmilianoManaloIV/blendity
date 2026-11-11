@@ -130,6 +130,57 @@ What the code had to do differently from the decisions above, and what it added 
   or its faceting finer than four (the mesh could not hold it); a Blend radius is at most its piece's size; a cluster
   that runs out of memory is a refusal like any other. In the sweeps (12,000 arrangements) no build was refused.
 
+## Amended in round 478 (task 0454): solids with roles, the order with rooms
+- **A piece is one or more convex solids, each with a role** (decision 2 said one solid a piece). A plain piece is one
+  solid: Add, Subtract or Intersect. A room is two: its **shell** and, right after it, its **air**. The air is the
+  piece's shape; the shell is the air grown in the piece's own space - sideways by the wall, down by the floor, up by
+  the ceiling (not at all with Open Top) - each thickness divided by how thick the piece's matrix leaves a slab of 1
+  across that axis, so a wall measures what was set, square to the room's side, in the Blockout's space, under any
+  scale and under shear too (the spec expected shear to be approximate; a sheared box grown along its own axes is
+  still exact). A cylinder's wall is measured at its facets' middles. Round 480's stairs and arches are several
+  solids of one role and plug in here.
+- **The order of combination** (decision 3 said: Add united, Subtract cut):
+  1. the shells of the Merge rooms, united; 2. less the air of every room; 3. plus each Keep room's shell less its
+  own air; 4. plus every Add piece; 5. less every Subtract piece; 6. what of that is inside every Intersect piece.
+  **Air removes room walls only.** An Add piece standing in a room stays; a Keep room keeps its walls inside another
+  room, and the wall between two Merge rooms does not run through a Keep room placed across it. (The pass's plan,
+  read literally, united the Add pieces before the air was cut, which cuts a column in a room away. The owner was
+  asked in the spec and had not answered when the round was built; a room cannot be carved out of a solid Add block
+  this way - a Subtract piece does that.)
+- **Every solid only ever adds to the result or only ever takes from it.** A shell, an Add piece and an Intersect
+  piece can only put a place inside; an air and a Subtract piece only outside. So the result shows an air's and a
+  Subtract piece's faces from the back and every other solid's from the front, and a solid's role alone says which
+  way its faces look (`Solid::subtract`, `face_key`).
+- **The crisp path** runs the order as Manifold batch operations, one a step; a Keep room's shell less its own air
+  is the one operation on two solids. Sides in shared planes at an angle are moved as in round 476 with "Add piece"
+  read as "a solid that adds" and "cutter" as "one that takes away". Two rules were added by measuring: a room's
+  air in a plane of its own shell (a wall of no thickness) is moved as the shell is, so the two stay one plane; and
+  an Intersect piece's side in any plane another solid has a side in is moved two hairs in, also in planes square
+  to the axes - Manifold kept a wall that lay against such a side from outside as a sheet of no thickness when the
+  plane was square to X (not Y or Z), and a batch of several Intersect pieces did the same; they are now taken one
+  after another, the result first. The field path names such a flush face after the Intersect piece too.
+- **The field path:** a grid point's side is the order as a test on which solids the point is in (`in_result`). A
+  crossing's label: each solid is convex, so a grid edge is in it for one stretch; the stretches' ends are walked in
+  order, the test asked after each, and the first end that puts the edge outside names the face - ends at one place
+  counted together (touching Add pieces are one, a cut flush with a face goes through), and of several the one that
+  alone is the reason, a cut before a leaving. This replaced round 476's two loops (Add stretches chained, then the
+  first cut) and gives their answers on Add and Subtract pieces.
+- **Intersect pieces are outside the clusters.** A piece that reached into everything would make everything one
+  cluster. Each cluster instead gets every Intersect solid; its bounds, tolerance and grid follow the other solids
+  (the result lies inside them), an Intersect solid's faces are followed on the grid only inside those bounds, and
+  a cluster no part of which can be inside an Intersect piece is empty without being built. Every cluster's cache
+  key holds every Intersect piece.
+- **A room without any thickness** has no matter of its own; its air still clears the Merge rooms it overlaps. It is
+  used, and named in `Report::notes`. So is a room with a thickness of which no face came out - walls thinner than
+  the grid's cell or than a mesh's positions hold where it lies, or a Merge room wholly in other rooms' air. A
+  thickness is at most 1000 m (a cluster tells planes apart to a millionth of its size).
+- An Intersect piece's Blend radius is not read: it trims, and would send every cluster to the grid.
+- **A face's side** for a room: the air's sides as the shape numbers them (the room's inside), the shell's sides
+  plus `kSideShell` (its outside). `side_class(piece, side)` gives Floor, Ceiling, Wall, Outside or Cut for round
+  482's materials.
+- A blended cluster with rooms: rooms are never rounded; their distance joins the blended field as plain pieces'
+  does. Round 481 decides what a blend does beside a room.
+
 ## What round 476 measures
 From `blendity_stress --only blockout` on a quiet machine, both builds (2026-11-10 10:22-10:25; AMD Ryzen 9 5900XT,
 32 threads; the kernel on a worker thread); the whole table is in `docs/PERFORMANCE.md`, "Pass 23". `interior N` is N

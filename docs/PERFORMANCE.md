@@ -404,6 +404,33 @@ are the rows above: a cell of a third to a half of the thinnest part for rooms a
 a sixth for turned ones, facets of two cells or more for round pieces, and 400 pieces at 0.1 m outside the budget.
 Round 477 gives the Blockout its Field Cell setting and has the Inspector name the unresolved places.
 
+### The Blockout object, live (round 477)
+
+Round 477 puts the kernel behind an object in the editor (ADR 0129): the pieces are hashed in the frame, the build
+runs on a worker, and the main thread only lands its result. The row: `interior 100` as a Blockout in a headless
+editor with workers on, one door moved 2 mm a frame for 120 frames, a frame stepped every 16.7 ms
+(`BLENDITY_BLOCKOUT_LIVE=1 blendity_stress --only blockout`). `frame` is the editor's whole frame - the hash of 100
+pieces, a landing when one came back, the views; `move to landing` runs from the first move the mesh had not yet
+shown to the frame that shows a mesh at least that new. Release builds, this machine, 2026-11-10 20:07-20:09 with
+nothing else building or running (the machine at 1 % before the runs; Pass 22 had just ended its own); each build
+run three to four times, the range given.
+
+| Build, path | frame median ms | frame worst ms | move to landing median ms | worst ms | landings in 120 frames | main-thread builds | verdict |
+|---|---|---|---|---|---|---|---|
+| with Blender's libraries, exact (Manifold) | 3.0 - 3.2 | 3.5 - 4.8 (45.6 in the first run of four) | 3.0 - 3.4 | 40 - 48 (101 in that run) | 108 - 110 | 0 | ok (OVER in that run) |
+| dependency-free, the grid at 0.1 m | 1.0 - 1.1 | 10.7 - 12.2 | 47.9 - 48.3 | 83 - 96 | 30 - 31 | 0 | ok |
+| either, a newer snapshot cancelling the running build (not shipped) | 0.9 - 1.2 | 1.6 - 3.6 | none | none | 0 | 0 | OVER |
+
+- **The frame never waits for a build:** no kernel call on the main thread, in either build. A frame without a
+  landing is about 1 ms; a frame with one is about 3 ms with the libraries and up to 12 ms without (the grid's
+  result takes longer to land - not attributed this round).
+- **The mesh follows a drag:** with the libraries a new mesh nearly every frame; without them one every fourth
+  frame, 48 ms behind the hand - the kernel's 48.6 ms of round 476.
+- **One run of the libraries build's four had a 45.6 ms frame** (and with it a 101 ms landing). It did not come back
+  in the next three runs; nothing else ran. It is in the table as seen, not explained.
+- **Why a running build is not cancelled:** the last row. A piece moved every frame starts a build 60 to 116 times and
+  lets one land; the mesh stands still until the piece rests (ADR 0129, decision 6).
+
 ## Pass 21: SideRail's bake, measured by its noise (rounds 463-466)
 
 Round 463 adds the measure (`lightmap_noise`, `lighting noise`, `unity_compare.py --noise`, the `lightmap_quality` columns grain and

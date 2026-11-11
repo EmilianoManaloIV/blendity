@@ -7,6 +7,7 @@
 #include "../src/scene/blockout.h"
 
 #include <array>
+#include <limits>
 
 using namespace bl;
 
@@ -1322,7 +1323,4170 @@ static void tests_round476_engineer() {
   });
 }
 
+/* ===================================================================== */
+/* Round 477 (task 0453, ADR 0129): the Blockout object, live                */
+/* ===================================================================== */
+
+namespace {
+
+using R477ET = platform::EventType;
+
+platform::Event r477_ev(R477ET t, int x, int y, int mods = 0) {
+  platform::Event e;
+  e.type = t, e.x = x, e.y = y, e.mods = mods;
+  return e;
+}
+platform::Event r477_key(int key, bool down = true) {
+  platform::Event e;
+  e.type = down ? R477ET::KeyDown : R477ET::KeyUp, e.key = key;
+  return e;
+}
+
+/* Byte for byte: the positions and the faces. */
+bool r477_same(const Mesh &a, const Mesh &b) {
+  return a.positions.size() == b.positions.size() && a.face_offsets == b.face_offsets && a.corner_verts == b.corner_verts &&
+         (a.positions.empty() || std::memcmp(a.positions.data(), b.positions.data(), a.positions.size() * sizeof(Vec3)) == 0);
+}
+
+GameObject *r477_find(Editor &ed, const char *name = "Blockout") { return ed.scene().find_by_name(name); }
+const Mesh *r477_mesh(GameObject *g) {
+  const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
+  return mf && mf->mesh ? mf->mesh.get() : nullptr;
+}
+
+/* What blockout::build makes of the Blockout's snapshot with no cache and no editor: the mesh the editor's must equal. */
+bool r477_scratch(const GameObject &g, Mesh &out) {
+  std::vector<Piece> pieces;
+  blockout::Settings st;
+  blockout_snapshot(g, pieces, st);
+  return blockout::build(pieces, st, out);
+}
+bool r477_matches(Editor &ed, const char *name = "Blockout") {
+  GameObject *g = r477_find(ed, name);
+  const Mesh *m = r477_mesh(g);
+  Mesh ref;
+  return g && m && r477_scratch(*g, ref) && r477_same(ref, *m);
+}
+
+/* A Blockout object made by hand (no editor command): the object, its mesh and renderer. */
+GameObject *r477_blockout(Editor &ed, const char *name = "Blockout") {
+  GameObject *g = ed.scene().create(name);
+  g->add<Blockout>();
+  g->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  g->add<MeshRenderer>();
+  return g;
+}
+GameObject *r477_piece(Editor &ed, GameObject &parent, const char *name, int shape, int op, Vec3 at, Vec3 size = Vec3(1.0f), float radius = 0.5f, float height = 1.0f) {
+  GameObject *g = ed.scene().create(name, &parent);
+  BlockoutPiece *p = g->add<BlockoutPiece>();
+  p->shape = shape, p->operation = op, p->size = size, p->radius = radius, p->height = height;
+  g->set_local_position(at);
+  return g;
+}
+
+/* Rooms on a square grid as the stress section builds them: an Add box with a Subtract box inside, doors through shared walls. */
+std::vector<GameObject *> r477_rooms(Editor &ed, GameObject &bo, int n, int doors) {
+  std::vector<GameObject *> out;
+  for (int j = 0; j < n; j++)
+    for (int i = 0; i < n; i++) {
+      const Vec3 at(4.0f * (float)i, 0.0f, 4.0f * (float)j);
+      out.push_back(r477_piece(ed, bo, "Shell", 0, 0, at, {4.2f, 3.2f, 4.2f}));
+      out.push_back(r477_piece(ed, bo, "Room", 0, 1, at, {3.8f, 2.8f, 3.8f}));
+    }
+  for (int j = 0; j < n && doors > 0; j++)
+    for (int i = 0; i + 1 < n && doors > 0; i++, doors--)
+      out.push_back(r477_piece(ed, bo, "Door", 0, 1, {4.0f * (float)i + 2.0f, -0.35f, 4.0f * (float)j}, {0.6f, 2.1f, 0.9f}));
+  return out;
+}
+
+std::vector<GameObject *> r477_all_pieces(GameObject &bo) {
+  std::vector<GameObject *> out;
+  std::function<void(GameObject &)> walk = [&](GameObject &g) {
+    for (GameObject *c : g.children) {
+      if (c->get<Blockout>()) continue;
+      if (c->get<BlockoutPiece>()) out.push_back(c);
+      walk(*c);
+    }
+  };
+  walk(bo);
+  return out;
+}
+
+/* The log lines written since `mark` (r477_mark's), joined; and how many of them warn. */
+size_t r477_mark() {
+  std::vector<LogEntry> tmp;
+  return Log::fetch((size_t)1 << 40, tmp);
+}
+std::string r477_log_since(size_t mark, size_t *warnings = nullptr) {
+  std::vector<LogEntry> v;
+  Log::fetch(mark, v);
+  std::string s;
+  if (warnings) *warnings = 0;
+  for (const LogEntry &e : v) {
+    s += e.text + "\n";
+    if (warnings && e.level != LogLevel::Info) (*warnings)++;
+  }
+  return s;
+}
+
+/* Nothing in the scene: the default scene's plane, cube and teapot would be floors and occluders of their own. */
+void r477_empty_scene(Editor &ed) {
+  std::vector<GameObject *> roots;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!g.parent) roots.push_back(&g);
+  });
+  ed.scene().destroy(roots);
+  ed.clear_selection_for_test();
+}
+
+void r477_settle(Editor &ed, int frames = 2) {
+  for (int i = 0; i < frames; i++) ed.step_frame_headless();
+}
+
+void r477_click(Editor &ed, int x, int y, int mods = 0) {
+  ed.step_frame_headless({r477_ev(R477ET::MouseMove, x, y, mods)});
+  ed.step_frame_headless({r477_ev(R477ET::MouseDown, x, y, mods)});
+  ed.step_frame_headless({r477_ev(R477ET::MouseUp, x, y, mods)});
+}
+
+/* A menu reached by real events: each key but the last is a menubar entry clicked or a submenu hovered, the last is clicked. */
+bool r477_menu(Editor &ed, const std::vector<std::string> &keys) {
+  for (size_t i = 0; i < keys.size(); i++) {
+    Recti r;
+    for (int k = 0; k < 4 && !ed.button_rect_for_test(keys[i], r); k++) ed.step_frame_headless();
+    if (!ed.button_rect_for_test(keys[i], r)) return false;
+    const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    if (i + 1 < keys.size() && keys[i].rfind("submenu:", 0) == 0) {
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, cx, cy)});
+      ed.step_frame_headless();
+      continue;
+    }
+    for (R477ET t : {R477ET::MouseMove, R477ET::MouseDown, R477ET::MouseUp}) ed.step_frame_headless({r477_ev(t, cx, cy)});
+    ed.step_frame_headless();
+  }
+  return true;
+}
+
+size_t r477_count(Editor &ed, bool pieces) {
+  size_t n = 0;
+  ed.scene().for_each([&](GameObject &g) { n += pieces ? g.get<BlockoutPiece>() != nullptr : g.get<Blockout>() != nullptr; });
+  return n;
+}
+
+/* The newest piece made: the active object. */
+const BlockoutPiece *r477_active_piece(Editor &ed) {
+  GameObject *g = ed.active_object_for_test();
+  return g ? g->get<BlockoutPiece>() : nullptr;
+}
+
+/* Pixels near a colour (the packing is 0xAARRGGBB; lines are anti-aliased and blended, so a band). */
+size_t r477_near(const std::vector<uint32_t> &px, uint32_t rgb, int tol) {
+  size_t n = 0;
+  const int r = (int)((rgb >> 16) & 255), g = (int)((rgb >> 8) & 255), b = (int)(rgb & 255);
+  for (uint32_t p : px)
+    n += std::abs((int)((p >> 16) & 255) - r) <= tol && std::abs((int)((p >> 8) & 255) - g) <= tol && std::abs((int)(p & 255) - b) <= tol;
+  return n;
+}
+
+struct R477Rand {
+  uint32_t s;
+  float next() {
+    s = s * 1664525u + 1013904223u;
+    return (float)(s >> 8) / 16777216.0f;
+  }
+  float in(float lo, float hi) { return lo + (hi - lo) * next(); }
+  int pick(int n) { return std::min(n - 1, (int)(next() * (float)n)); }
+};
+
+}  // namespace
+
+static void tests_round477() {
+  /* ---- Making one ---- */
+  test("blockout: 'blockout new' makes an object with a closed box mesh, its one piece selected, and the piece has no mesh or collider", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    CHECK(bo && bo->get<Blockout>() && bo->get<MeshFilter>() && bo->get<MeshRenderer>());
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && m->face_count() == 6 && structurally_valid(*m) && closed_manifold(*m) && normals_outward(*m));
+    GameObject *box = r477_find(ed, "Box");
+    CHECK(box && box->parent == bo && box->get<BlockoutPiece>() && !box->get<MeshFilter>() && !box->get<ColliderComponent>() && !box->get<MeshRenderer>());
+    CHECK(ed.active_object_for_test() == box && ed.selection_size_for_test() == 1);
+    CHECK(box && box->get<BlockoutPiece>()->size.x == 2.0f && box->get<BlockoutPiece>()->size.y == 2.0f && box->get<BlockoutPiece>()->size.z == 2.0f);
+    CHECK(r477_matches(ed));
+    CHECK(ed.blockout_main_builds_for_test() >= 1);  // (no workers in a unit test: built on the spot)
+  });
+
+  test("blockout: 'blockout add' puts a box, cylinder or sphere that adds or subtracts under the selected Blockout, with the sizes it was given", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    ed.command("blockout add cylinder subtract 0.4 3");
+    const BlockoutPiece *cyl = r477_active_piece(ed);
+    CHECK(cyl && cyl->shape == 1 && cyl->operation == 1 && cyl->radius == 0.4f && cyl->height == 3.0f);
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->parent == r477_find(ed));
+    ed.command("blockout add sphere 0.7");
+    const BlockoutPiece *sph = r477_active_piece(ed);
+    CHECK(sph && sph->shape == 2 && sph->operation == 0 && sph->radius == 0.7f);
+    ed.command("blockout add box 0.5 0.25 0.75");  // (a piece selected: the new one goes under the same Blockout)
+    const BlockoutPiece *box = r477_active_piece(ed);
+    CHECK(box && box->shape == 0 && box->size.x == 0.5f && box->size.y == 0.25f && box->size.z == 0.75f);
+    CHECK(r477_count(ed, true) == 4 && r477_count(ed, false) == 1);
+    CHECK(r477_matches(ed));
+    const size_t before = r477_count(ed, true);
+    ed.command("blockout add pyramid");  // (a shape it doesn't know: refused, nothing made)
+    CHECK(r477_count(ed, true) == before);
+  });
+
+  test("blockout: 'blockout add' with nothing selected makes a new Blockout with that piece, and the piece is one undo step", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.clear_selection_for_test();
+    r477_settle(ed);
+    const size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout add sphere 1");
+    CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 1);
+    r477_settle(ed);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    GameObject *bo = r477_find(ed);
+    CHECK(bo && r477_mesh(bo) && r477_mesh(bo)->face_count() > 0);
+    ed.command("undo");
+    r477_settle(ed);
+    CHECK(r477_count(ed, false) == 0 && r477_count(ed, true) == 0);
+    ed.command("redo");
+    r477_settle(ed);
+    CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 1 && r477_matches(ed));
+  });
+
+  /* ---- Criterion 1: every way of changing the pieces gives the mesh of a build from scratch ---- */
+  test("blockout: a piece moved, turned, scaled, resized, reshaped, added, deleted, disabled or re-parented gives the mesh of a build from scratch; undo and redo give each state's mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    r477_piece(ed, *bo, "Cutter", 1, 1, {0.3f, 0.0f, 0.2f}, Vec3(1.0f), 0.4f, 3.0f);
+    r477_piece(ed, *bo, "Ball", 2, 0, {1.2f, 0.5f, 0.0f}, Vec3(1.0f), 0.7f);
+    ed.scene().create("Folder", bo);
+    ed.mark_changed_for_test("setup");
+    r477_settle(ed);
+    CHECK(r477_matches(ed));
+    std::vector<std::string> labels;
+    std::vector<Mesh> after;  // (each state's mesh, by a build from scratch)
+    auto step = [&](const char *label, const std::function<void()> &act) {
+      act();
+      ed.mark_changed_for_test(label);
+      r477_settle(ed);
+      const bool ok = r477_matches(ed);
+      if (!ok) std::printf("    '%s': the editor's mesh differs from a build from scratch\n", label);
+      CHECK(ok);
+      Mesh ref;
+      r477_scratch(*r477_find(ed), ref);
+      labels.push_back(label), after.push_back(std::move(ref));
+    };
+    auto piece = [&](const char *name) { return r477_find(ed, name); };  // (an undo makes the objects again: found by name each time)
+    step("move", [&] { piece("Ball")->set_local_position({1.0f, 0.6f, 0.3f}); });
+    step("turn", [&] { piece("Cutter")->set_local_euler({20.0f, 30.0f, 10.0f}); });
+    step("scale evenly", [&] { piece("Box")->set_local_scale({1.2f, 1.2f, 1.2f}); });
+    step("scale unevenly", [&] { piece("Ball")->set_local_scale({1.0f, 0.6f, 1.4f}); });
+    step("size", [&] { piece("Box")->get<BlockoutPiece>()->size = {2.0f, 1.5f, 2.5f}; });
+    step("radius", [&] { piece("Cutter")->get<BlockoutPiece>()->radius = 0.55f; });
+    step("shape", [&] { piece("Ball")->get<BlockoutPiece>()->shape = 1; });
+    step("operation", [&] { piece("Ball")->get<BlockoutPiece>()->operation = 1; });
+    step("add", [&] { r477_piece(ed, *r477_find(ed), "Extra", 0, 0, {-1.0f, 0.2f, 0.3f}, {0.6f, 0.6f, 0.6f}); });
+    step("disable", [&] { piece("Extra")->active = false; });
+    step("enable", [&] { piece("Extra")->active = true; });
+    step("component disabled", [&] { piece("Extra")->get<BlockoutPiece>()->enabled = false; });
+    step("component enabled", [&] { piece("Extra")->get<BlockoutPiece>()->enabled = true; });
+    step("under an empty child", [&] { ed.scene().set_parent(piece("Extra"), piece("Folder"), -1, true); });
+    step("out of the Blockout", [&] { ed.scene().set_parent(piece("Extra"), nullptr, -1, true); });
+    step("back in", [&] { ed.scene().set_parent(piece("Extra"), r477_find(ed), -1, true); });
+    step("delete", [&] { ed.scene().destroy(piece("Extra")); });
+    /* Undo: each step back restores the mesh of the state before it. */
+    for (size_t i = after.size(); i-- > 1;) {
+      ed.command("undo");
+      r477_settle(ed);
+      const Mesh *m = r477_mesh(r477_find(ed));
+      const bool ok = m && r477_same(*m, after[i - 1]) && r477_matches(ed);
+      if (!ok) std::printf("    undo of '%s': the mesh is not the one before it\n", labels[i].c_str());
+      CHECK(ok);
+    }
+    for (size_t i = 1; i < after.size(); i++) {
+      ed.command("redo");
+      r477_settle(ed);
+      const Mesh *m = r477_mesh(r477_find(ed));
+      const bool ok = m && r477_same(*m, after[i]) && r477_matches(ed);
+      if (!ok) std::printf("    redo of '%s': the mesh is not the one after it\n", labels[i].c_str());
+      CHECK(ok);
+    }
+  });
+
+  test("blockout: a piece moved into another Blockout and out of the first changes both meshes to builds from scratch", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *a = r477_blockout(ed, "Blockout");
+    GameObject *b = r477_blockout(ed, "Blockout B");
+    b->set_local_position({10.0f, 0.0f, 0.0f});
+    r477_piece(ed, *a, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *slab = r477_piece(ed, *a, "Slab", 0, 0, {0.5f, 1.5f, 0}, {1, 1, 1});
+    r477_piece(ed, *b, "Floor", 0, 0, {0, 0, 0}, {3, 1, 3});
+    r477_settle(ed);
+    CHECK(r477_matches(ed, "Blockout") && r477_matches(ed, "Blockout B"));
+    const size_t faces_a = r477_mesh(a)->face_count(), faces_b = r477_mesh(b)->face_count();
+    ed.scene().set_parent(slab, b, -1, true);
+    r477_settle(ed);
+    CHECK(r477_matches(ed, "Blockout") && r477_matches(ed, "Blockout B"));
+    CHECK(r477_mesh(a)->face_count() == 6 && r477_mesh(b)->face_count() != faces_b);
+    std::printf("    faces: A %zu -> %zu, B %zu -> %zu\n", faces_a, r477_mesh(a)->face_count(), faces_b, r477_mesh(b)->face_count());
+    ed.scene().set_parent(slab, a, -1, true);
+    r477_settle(ed);
+    CHECK(r477_matches(ed, "Blockout") && r477_matches(ed, "Blockout B") && r477_mesh(a)->face_count() == faces_a && r477_mesh(b)->face_count() == faces_b);
+  });
+
+  test("blockout: moving, turning and scaling the Blockout itself keeps the same mesh and builds nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *parent = ed.scene().create("Holder");
+    ed.scene().set_parent(bo, parent, -1, true);
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    r477_piece(ed, *bo, "Cut", 1, 1, {0.2f, 0.1f, 0}, Vec3(1.0f), 0.4f, 3.0f);
+    r477_settle(ed);
+    const Mesh *built = r477_mesh(bo);
+    const uint64_t builds = ed.blockout_main_builds_for_test();
+    CHECK(built && builds >= 1);
+    bo->set_local_position({3.0f, 1.0f, -2.0f});
+    r477_settle(ed);
+    bo->set_local_euler({10.0f, 70.0f, 5.0f});
+    r477_settle(ed);
+    bo->set_local_scale({2.0f, 0.5f, 1.5f});
+    r477_settle(ed);
+    parent->set_local_euler({0.0f, 33.0f, 0.0f});
+    parent->set_local_scale({1.3f, 1.3f, 1.3f});
+    r477_settle(ed);
+    CHECK(r477_mesh(bo) == built);
+    CHECK(ed.blockout_main_builds_for_test() == builds);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout: a piece under a turned, unevenly scaled parent is built where it stands in the Blockout, and a mirrored parent keeps the mesh closed", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {3, 2, 3});
+    GameObject *group = ed.scene().create("Group", bo);
+    group->set_local_euler({0.0f, 40.0f, 0.0f});
+    group->set_local_scale({1.5f, 0.8f, 1.0f});
+    group->set_local_position({0.5f, 0.2f, 0.0f});
+    r477_piece(ed, *group, "Cut", 0, 1, {0.2f, 0.0f, 0.0f}, {0.6f, 0.6f, 4.0f});
+    r477_settle(ed);
+    CHECK(r477_matches(ed));
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && closed_manifold(*m) && structurally_valid(*m) && signed_volume(*m) > 1.0f);
+    group->set_local_scale({-1.5f, 0.8f, 1.0f});  // (a mirror)
+    r477_settle(ed);
+    m = r477_mesh(bo);
+    CHECK(r477_matches(ed) && m && closed_manifold(*m) && structurally_valid(*m) && signed_volume(*m) > 1.0f);
+  });
+
+  test("blockout: a Blockout's pieces are the enabled pieces active below it, depth first, down to but not into another Blockout, each at its matrix in the Blockout's space", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_local_position({7.0f, 0.0f, 0.0f});
+    bo->set_local_scale({2.0f, 2.0f, 2.0f});
+    GameObject *a = r477_piece(ed, *bo, "A", 0, 0, {0, 0, 0});
+    GameObject *folder = ed.scene().create("Folder", bo);
+    folder->set_local_position({0.0f, 5.0f, 0.0f});
+    GameObject *b = r477_piece(ed, *folder, "B", 0, 0, {1.0f, 0.0f, 0.0f});
+    GameObject *c = r477_piece(ed, *b, "C", 1, 1, {0.0f, 0.0f, 2.0f});
+    GameObject *inner = r477_blockout(ed, "Inner");
+    ed.scene().set_parent(inner, bo, -1, false);
+    GameObject *inner_piece = r477_piece(ed, *inner, "InnerPiece", 2, 0, {0, 0, 0});
+    GameObject *off = r477_piece(ed, *bo, "Off", 0, 0, {0, 3, 0});
+    off->active = false;
+    r477_piece(ed, *off, "UnderOff", 0, 0, {0, 0, 0});
+    GameObject *disabled = r477_piece(ed, *bo, "Disabled", 0, 0, {0, -3, 0});
+    disabled->get<BlockoutPiece>()->enabled = false;
+    GameObject *under = r477_piece(ed, *disabled, "UnderDisabled", 0, 0, {0, 0, 1.0f});
+    std::vector<Piece> pieces;
+    blockout::Settings st;
+    blockout_snapshot(*bo, pieces, st);
+    CHECK(pieces.size() == 4);
+    if (pieces.size() != 4) return;
+    CHECK(pieces[0].id == a->id && pieces[1].id == b->id && pieces[2].id == c->id && pieces[3].id == under->id);
+    CHECK(pieces[1].shape == Shape::Box && pieces[2].shape == Shape::Cylinder && pieces[2].op == Op::Subtract);
+    /* In the Blockout's space: the chain of local matrices below it, whatever the Blockout's own transform. */
+    CHECK_NEAR(pieces[1].to_blockout.m[12], 1.0f, 1e-6f);
+    CHECK_NEAR(pieces[1].to_blockout.m[13], 5.0f, 1e-6f);
+    CHECK_NEAR(pieces[2].to_blockout.m[12], 1.0f, 1e-6f);
+    CHECK_NEAR(pieces[2].to_blockout.m[14], 2.0f, 1e-6f);
+    CHECK_NEAR(pieces[3].to_blockout.m[13], -3.0f, 1e-6f);
+    std::vector<Piece> in;
+    blockout_snapshot(*inner, in, st);
+    CHECK(in.size() == 1 && in[0].id == inner_piece->id && in[0].shape == Shape::Sphere);
+    CHECK(blockout_of_piece(*c) == bo && blockout_of_piece(*inner_piece) == inner && blockout_of_piece(*bo) == nullptr);
+    /* The hash changes with a piece's bits and not with the Blockout's place. */
+    const uint64_t h = blockout_snapshot_hash(pieces, st);
+    bo->set_local_position({-1.0f, 2.0f, 3.0f});
+    std::vector<Piece> again;
+    blockout_snapshot(*bo, again, st);
+    CHECK(blockout_snapshot_hash(again, st) == h);
+    a->set_local_position({0.0f, 0.0f, 1e-3f});
+    blockout_snapshot(*bo, again, st);
+    CHECK(blockout_snapshot_hash(again, st) != h);
+  });
+
+  /* ---- Criterion 2: save and load ---- */
+  test("blockout: a saved scene of five pieces opens with the same mesh bytes, and the rebuild does not mark the scene changed", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Hall", 0, 0, {0, 0, 0}, {4, 2.5f, 3});
+    r477_piece(ed, *bo, "Pocket", 0, 1, {0.3f, 0.2f, 0}, {3, 2, 2});
+    r477_piece(ed, *bo, "Pillar", 1, 0, {-1.0f, 0, 0.3f}, Vec3(1.0f), 0.25f, 2.0f);
+    r477_piece(ed, *bo, "Dome", 2, 0, {1.0f, 1.2f, 0.0f}, Vec3(1.0f), 0.6f);
+    r477_piece(ed, *bo, "Window", 0, 1, {2.0f, 0.2f, 0.0f}, {1.0f, 0.8f, 0.6f});
+    r477_settle(ed);
+    const Mesh built = *r477_mesh(bo);
+    CHECK(built.face_count() > 6 && r477_matches(ed));
+    const std::string dir = ed.resolve_asset_path_for_test("Assets/Scenes");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "r477_blockout.scene");
+    ed.command("save " + path);
+    CHECK(fs::exists(path));
+    ed.command("newscene");
+    r477_settle(ed);
+    CHECK(r477_find(ed) == nullptr);
+    ed.command("open " + path);
+    GameObject *loaded = r477_find(ed);
+    CHECK(loaded && r477_count(ed, true) == 5);
+    const Mesh *shown = r477_mesh(loaded);
+    CHECK(shown && r477_same(*shown, built));  // (shown at once: the saved mesh)
+    r477_settle(ed, 3);
+    loaded = r477_find(ed);
+    CHECK(loaded && r477_mesh(loaded) && r477_same(*r477_mesh(loaded), built) && r477_matches(ed));  // (and rebuilt from the pieces to the same bytes)
+    CHECK(!ed.scene_dirty_for_test());
+    const BlockoutPiece *pillar = r477_find(ed, "Pillar") ? r477_find(ed, "Pillar")->get<BlockoutPiece>() : nullptr;
+    CHECK(pillar && pillar->shape == 1 && pillar->radius == 0.25f && pillar->height == 2.0f);
+  });
+
+  /* ---- Criterion 3: a drag does no build on the main thread ---- */
+  test("blockout: dragging a piece with workers on builds nothing on the main thread, shows only meshes some snapshot of the drag built, and ends on the build from scratch", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    GameObject *door = rooms.back();
+    const Vec3 home = door->local().position;
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed));
+    const Mesh start = *r477_mesh(bo);
+    /* The meshes the drag's snapshots build from scratch. */
+    std::vector<Mesh> refs;
+    refs.push_back(start);
+    for (int k = 1; k <= 30; k++) {
+      door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)k));
+      Mesh ref;
+      CHECK(r477_scratch(*bo, ref));
+      refs.push_back(std::move(ref));
+    }
+    door->set_local_position(home);
+    ed.command("blockout wait");
+    const uint64_t main0 = ed.blockout_main_builds_for_test(), started0 = ed.blockout_started_for_test(), cancelled0 = ed.blockout_cancelled_for_test();
+    ed.hold_blockout_landing_for_test(true);  // (the first half of the drag: builds finish but the poll leaves them, as a slow build's)
+    size_t shown_ok = 0, frames = 0;
+    bool listed = false;
+    for (int k = 1; k <= 30; k++) {
+      if (k == 16) ed.hold_blockout_landing_for_test(false);
+      door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)k));
+      ed.step_frame_headless();
+      frames++;
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label.rfind("Building ", 0) == 0;
+      const Mesh *m = r477_mesh(bo);
+      bool known = m && m->face_count() > 0;
+      bool any = false;
+      for (size_t r = 0; r < refs.size() && known && !any; r++) any = r477_same(*m, refs[r]);
+      shown_ok += known && any;
+    }
+    CHECK(shown_ok == frames);  // (never empty, never half: always a mesh some snapshot built)
+    CHECK(ed.blockout_main_builds_for_test() == main0);
+    CHECK(ed.blockout_started_for_test() > started0);
+    CHECK(ed.blockout_cancelled_for_test() > cancelled0);
+    CHECK(listed);  // (the tray lists "Building Blockout")
+    std::printf("    30 frames: %llu build(s) started, %llu cancelled or superseded, %llu landed, main-thread builds %llu\n",
+                (unsigned long long)(ed.blockout_started_for_test() - started0), (unsigned long long)(ed.blockout_cancelled_for_test() - cancelled0),
+                (unsigned long long)ed.blockout_landed_for_test(), (unsigned long long)(ed.blockout_main_builds_for_test() - main0));
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && r477_same(*r477_mesh(bo), refs.back()));
+    CHECK(!ed.blockout_jobs_running_for_test());
+  });
+
+  test("blockout: with a newer snapshot cancelling the running build (the measurement's other policy), a drag still shows only meshes some snapshot built, and ends on the build from scratch", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    ed.set_blockout_cancel_stale_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    GameObject *door = rooms.back();
+    const Vec3 home = door->local().position;
+    ed.command("blockout wait");
+    std::vector<Mesh> refs;
+    refs.push_back(*r477_mesh(bo));
+    for (int k = 1; k <= 20; k++) {
+      door->set_local_position(home + Vec3(0.0f, 0.0f, 0.03f * (float)k));
+      Mesh ref;
+      CHECK(r477_scratch(*bo, ref));
+      refs.push_back(std::move(ref));
+    }
+    door->set_local_position(home);
+    ed.command("blockout wait");
+    const uint64_t landed0 = ed.blockout_landed_for_test();
+    size_t shown_ok = 0;
+    for (int k = 1; k <= 20; k++) {
+      door->set_local_position(home + Vec3(0.0f, 0.0f, 0.03f * (float)k));
+      ed.step_frame_headless();
+      const Mesh *m = r477_mesh(bo);
+      bool any = false;
+      for (size_t r = 0; r < refs.size() && m && !any; r++) any = r477_same(*m, refs[r]);
+      shown_ok += any;
+    }
+    CHECK(shown_ok == 20);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && r477_same(*r477_mesh(bo), refs.back()) && ed.blockout_landed_for_test() > landed0 && ed.blockout_main_builds_for_test() == 0);
+  });
+
+  test("blockout: the Move gizmo dragged with real mouse events moves a piece and the mesh follows to the build from scratch, without a build on the main thread", [] {
+    Editor ed;
+    r34_open(ed);
+    r477_empty_scene(ed);
+    ed.command("camera 0 20 6 0 0.5 0");  // (the X arrow points straight right on screen)
+    ed.command("tool move");
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_local_position({0.0f, 0.5f, 0.0f});
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {4, 2, 4});
+    GameObject *cut = r477_piece(ed, *bo, "Cut", 0, 1, {0.0f, 0.0f, 0.0f}, {1, 1, 6});
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("setup");
+    ed.select_for_test(cut->id, false);
+    r34_steps(ed, 3);
+    const uint64_t main0 = ed.blockout_main_builds_for_test();
+    const Vec3 before = cut->local().position;
+    r34_gizmo_drag_x(ed, cut->world_position(), 60);
+    CHECK(cut->local().position.x > before.x + 0.05f);
+    r34_steps(ed, 2);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && ed.blockout_main_builds_for_test() == main0);
+    ed.command("undo");
+    r34_steps(ed, 2);
+    ed.command("blockout wait");
+    cut = r477_find(ed, "Cut");
+    CHECK(cut && std::fabs(cut->local().position.x - before.x) < 1e-4f && r477_matches(ed));
+  });
+
+  test("blockout: a build asked for while another runs supersedes it, the cache comes back, and the landed mesh is the newest snapshot's, also after an undo", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    for (int i = 0; i < 5; i++) {
+      rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.05f));
+      ed.step_frame_headless();
+    }
+    ed.command("blockout wait");
+    CHECK(!ed.blockout_jobs_running_for_test() && r477_matches(ed));
+    /* Undo while a job runs: the hash decides - the mesh landed is the restored state's. */
+    ed.mark_changed_for_test("moved");
+    ed.step_frame_headless();
+    r477_find(ed, "Door")->set_local_position(r477_find(ed, "Door")->local().position + Vec3(0.0f, 0.0f, 0.5f));
+    ed.mark_changed_for_test("moved more");
+    ed.step_frame_headless();
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+  });
+
+  /* ---- Criterion 4: Play mode collides with the result ---- */
+  test("blockout: a box dropped in Play rests on a Blockout floor and, with Blender's libraries, falls through its Subtract hole; no piece collides", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Floor", 0, 0, {0.0f, -0.2f, 0.0f}, {6.0f, 0.4f, 6.0f});
+    r477_piece(ed, *bo, "Hole", 0, 1, {0.0f, -0.2f, 0.0f}, {2.0f, 1.0f, 2.0f});
+    r477_settle(ed);
+    CHECK(r477_mesh(bo) && r477_mesh(bo)->face_count() > 6);
+    for (GameObject *p : r477_all_pieces(*bo)) CHECK(!p->get<MeshFilter>() && !p->get<ColliderComponent>() && !p->get<MeshRenderer>());
+    auto dropper = [&](const char *name, Vec3 at) {
+      GameObject *g = ed.scene().create(name);
+      g->add<MeshFilter>()->mesh = primitives::cube();
+      g->add<MeshRenderer>();
+      g->add<Rigidbody>()->bounciness = 0.0f;
+      g->set_local_scale({0.5f, 0.5f, 0.5f});
+      g->set_local_position(at);
+      return g;
+    };
+    GameObject *over_floor = dropper("OverFloor", {2.2f, 1.5f, 0.0f});
+    GameObject *over_hole = dropper("OverHole", {0.0f, 1.5f, 0.0f});
+    PlayContext ctx;
+    ed.scene().start(ctx);
+    ctx.dt = 1.0f / 60.0f;
+    for (int i = 0; i < 240; i++) ed.scene().update(ctx);
+    std::printf("    on the floor: y %.3f; over the hole: y %.3f (Jolt %s)\n", over_floor->world_position().y, over_hole->world_position().y,
+                physics_jolt_available() ? "on" : "off: the built-in physics sees each static mesh as its bounds");
+    CHECK(over_floor->world_position().y > 0.1f && over_floor->world_position().y < 0.4f);
+    if (physics_jolt_available()) CHECK(over_hole->world_position().y < -1.0f);
+  });
+
+  test("blockout: Play starts from the mesh the pieces make now, even with a build running on a worker", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 2, 1);
+    ed.step_frame_headless();
+    rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.step_frame_headless();
+    ed.command("play");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    ed.command("stop");
+  });
+
+  /* ---- Criterion 5: export ---- */
+  test("blockout: an OBJ and a GLB of the scene hold the Blockout's mesh and nothing for its pieces", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    ed.command("blockout new");
+    ed.command("blockout add cylinder subtract 0.5 3");
+    ed.command("blockout add sphere 0.4");
+    r477_settle(ed);
+    GameObject *bo = r477_find(ed);
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && m->face_count() > 6);
+    const std::string dir = ed.resolve_asset_path_for_test("Assets/Exports");
+    fs::make_dirs(dir);
+    const std::string obj = fs::join(dir, "r477_blockout.obj"), glb = fs::join(dir, "r477_blockout.glb");
+    fs::remove_file(obj), fs::remove_file(glb);
+    ed.command("export obj all " + obj);
+    ed.command("export glb all " + glb);
+    r477_settle(ed, 5);
+    for (int i = 0; i < 400 && (!fs::exists(obj) || !fs::exists(glb) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
+    std::string text, bin;
+    CHECK(fs::read_file(obj, text) && fs::read_file(glb, bin));
+    size_t verts = 0, objects = 0;
+    std::istringstream is(text);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("v ", 0) == 0) verts++;
+      if (line.rfind("o ", 0) == 0 || line.rfind("g ", 0) == 0) objects++;
+    }
+    CHECK(m && verts == m->vert_count() && objects == 1);
+    CHECK(text.find("Blockout") != std::string::npos);
+    for (const char *piece : {"Box", "Subtract Cylinder", "Sphere"}) CHECK(text.find(std::string("o ") + piece) == std::string::npos && text.find(std::string("g ") + piece) == std::string::npos);
+    CHECK(bin.find("Blockout") != std::string::npos);
+    for (const char *piece : {"\"Box\"", "\"Subtract Cylinder\"", "\"Sphere\""}) CHECK(bin.find(piece) == std::string::npos);
+  });
+
+  test("blockout: an export asked for with a build still running waits for it and writes the mesh the pieces make now", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 2, 1);
+    ed.command("blockout wait");
+    rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.4f));
+    const std::string dir = ed.resolve_asset_path_for_test("Assets/Exports");
+    fs::make_dirs(dir);
+    const std::string obj = fs::join(dir, "r477_wait.obj");
+    fs::remove_file(obj);
+    ed.command("export obj all " + obj);
+    for (int i = 0; i < 2000 && (!fs::exists(obj) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
+    r477_settle(ed, 3);
+    std::string text;
+    CHECK(fs::read_file(obj, text));
+    Mesh ref;
+    CHECK(r477_scratch(*bo, ref));
+    size_t verts = 0;
+    std::istringstream is(text);
+    for (std::string line; std::getline(is, line);) verts += line.rfind("v ", 0) == 0;
+    CHECK(verts == ref.vert_count());
+  });
+
+  /* ---- Criterion 6: clicking the result selects the piece ---- */
+  test("blockout: a click on a face a Subtract cylinder cut selects the cylinder, on the box's outer face the box, Shift adds the other; a click after the pieces are gone selects the Blockout", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *wall = r477_piece(ed, *bo, "Block", 0, 0, {0, 0, 0}, {4, 2, 4});
+    GameObject *cut = r477_piece(ed, *bo, "Pocket", 1, 1, {0.0f, 1.0f, 0.0f}, Vec3(1.0f), 1.0f, 1.0f);
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed) && r477_mesh(bo)->face_count() > 6);
+    int px = 0, py = 0;
+    CHECK(ed.project_to_window({0.0f, 0.5f, 0.0f}, px, py));  // (the pocket's floor, the cylinder's bottom)
+    ed.clear_selection_for_test();
+    r477_click(ed, px, py);
+    r34_steps(ed, 2);
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cut);
+    int tx = 0, ty = 0;
+    CHECK(ed.project_to_window({1.7f, 1.0f, 1.7f}, tx, ty));  // (the box's top, outside the pocket)
+    r477_click(ed, tx, ty);
+    r34_steps(ed, 2);
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == wall);
+    ed.clear_selection_for_test();  // (the box's gizmo sits on the pocket: nothing selected, then the pocket, then Shift on the top - away from the cylinder's gizmo)
+    r477_click(ed, px, py);
+    r34_steps(ed, 2);
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cut);
+    r477_click(ed, tx, ty, platform::MOD_SHIFT);
+    r34_steps(ed, 2);
+    const std::vector<GameObject *> sel = ed.selected_objects_for_test();
+    CHECK(sel.size() == 2 && std::find(sel.begin(), sel.end(), wall) != sel.end() && std::find(sel.begin(), sel.end(), cut) != sel.end());
+    /* The pieces gone, the build not yet landed (held): the mesh on screen belongs to no piece. */
+    ed.set_async_jobs_for_test(true);
+    ed.hold_blockout_landing_for_test(true);
+    ed.scene().destroy(std::vector<GameObject *>{wall, cut});
+    ed.clear_selection_for_test();
+    r477_click(ed, tx, ty);
+    r34_steps(ed, 2);
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == bo);
+    ed.hold_blockout_landing_for_test(false);
+  });
+
+  /* ---- Criterion 7: Edit Mode is refused ---- */
+  test("blockout: Tab and 'edit' on a Blockout or one of its pieces stay in Object mode with the hint, the mesh untouched; a parametric shape still enters Edit Mode", [] {
+    Editor ed;
+    ed.init_headless(1000, 700);
+    ed.command("blockout new");
+    r477_settle(ed);
+    GameObject *bo = r477_find(ed);
+    const Mesh *mesh = r477_mesh(bo);
+    const uint64_t version = mesh ? mesh->version : 0;
+    const Recti r = ed.scene_view_rect();
+    auto press_tab = [&] {
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+      ed.step_frame_headless({r477_key(platform::KEY_TAB)});
+      ed.step_frame_headless({r477_key(platform::KEY_TAB, false)});
+      ed.step_frame_headless();
+    };
+    ed.clear_toasts_for_test();
+    press_tab();  // (the piece is selected)
+    CHECK(!ed.in_edit_mode());
+    bool hint = false;
+    for (const Editor::Toast &t : ed.toasts_for_test()) hint = hint || t.text.find("rebuilt from its pieces") != std::string::npos;
+    CHECK(hint);
+    ed.select_for_test(bo->id, false);
+    const size_t mark = r477_mark();
+    press_tab();
+    CHECK(!ed.in_edit_mode());
+    ed.command("edit");
+    CHECK(!ed.in_edit_mode());
+    ed.command("edit face");
+    CHECK(!ed.in_edit_mode());
+    const std::string said = r477_log_since(mark);
+    CHECK(said.find("A Blockout's mesh is rebuilt from its pieces: move or resize the pieces.") != std::string::npos);
+    CHECK(r477_mesh(bo) == mesh && mesh && mesh->version == version);
+    ed.command("sculpt on");
+    CHECK(!ed.sculpt_mode_for_test());
+    ed.command("weightpaint on");
+    CHECK(!ed.weight_paint_active_for_test());
+    /* A parametric shape is still editable. */
+    ed.command("create Shape: Box");
+    r477_settle(ed);
+    press_tab();
+    CHECK(ed.in_edit_mode());
+    press_tab();
+    CHECK(!ed.in_edit_mode());
+  });
+
+  test("blockout: Apply Modifiers does not turn a Blockout with a modifier into an ordinary mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    r477_settle(ed);
+    GameObject *bo = r477_find(ed);
+    ed.select_for_test(bo->id, false);
+    ed.command("component MirrorModifier");
+    const Mesh *mesh = r477_mesh(bo);
+    ed.command("applymods");
+    r477_settle(ed);
+    CHECK(r477_find(ed) && r477_find(ed)->get<Blockout>() && r477_find(ed)->get<MirrorModifier>() && r477_mesh(r477_find(ed)) == mesh);
+  });
+
+  /* ---- Criterion 8: robust ---- */
+  test("blockout: a Blockout with no piece has an empty mesh and draws without a warning each frame", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    r477_settle(ed);
+    GameObject *bo = r477_find(ed);
+    ed.scene().destroy(r477_find(ed, "Box"));
+    ed.mark_changed_for_test("delete");
+    ed.select_for_test(bo->id, false);
+    const size_t mark = r477_mark();
+    r477_settle(ed, 10);
+    size_t warnings = 99;
+    r477_log_since(mark, &warnings);
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && m->face_count() == 0 && m->positions.empty());
+    CHECK(warnings == 0);
+    CHECK(r477_matches(ed));
+    ed.command("blockout info");
+    CHECK(r477_log_since(mark).find("No pieces") != std::string::npos);
+  });
+
+  test("blockout: a piece with a NaN size or a zero scale is skipped and named in 'blockout info' and the Inspector; the rest builds", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    r477_piece(ed, *bo, "Nan Piece", 0, 0, {3, 0, 0}, {kNaN, 1, 1});
+    GameObject *flat = r477_piece(ed, *bo, "Flat Piece", 0, 0, {-3, 0, 0}, {1, 1, 1});
+    flat->set_local_scale({0.0f, 1.0f, 1.0f});
+    ed.select_for_test(bo->id, false);
+    r477_settle(ed, 3);
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && m->face_count() == 6 && r477_matches(ed));  // (the 2 m box alone)
+    const size_t mark = r477_mark();
+    ed.command("blockout info");
+    const std::string said = r477_log_since(mark);
+    CHECK(said.find("Skipped 'Nan Piece'") != std::string::npos && said.find("Skipped 'Flat Piece'") != std::string::npos);
+    CHECK(said.find("1 of 3 pieces used") != std::string::npos);
+    bool nan_line = false, flat_line = false;
+    for (const auto &kv : ed.ui_for_test().button_rects) {
+      nan_line = nan_line || kv.first.rfind("shown:Skipped 'Nan Piece'", 0) == 0;
+      flat_line = flat_line || kv.first.rfind("shown:Skipped 'Flat Piece'", 0) == 0;
+    }
+    CHECK(nan_line && flat_line);
+  });
+
+  test("blockout: Method Exact in a build without Blender's libraries keeps the last mesh and says there is no Manifold, once", [] {
+    if (blockout::crisp_available()) return;  // (the libraries' build runs the exact path; there is nothing to refuse)
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    const Mesh *kept = r477_mesh(bo);
+    CHECK(kept && kept->face_count() == 6);
+    ed.select_for_test(bo->id, false);
+    const size_t mark = r477_mark();
+    ed.command("blockout set method exact");
+    r477_settle(ed, 12);
+    CHECK(r477_mesh(bo) == kept);
+    const std::string said = r477_log_since(mark);
+    size_t first = said.find("Manifold"), count = 0;
+    for (size_t at = first; at != std::string::npos; at = said.find("Manifold", at + 1)) count++;
+    CHECK(first != std::string::npos && count == 1);
+    bool shown = false;
+    for (const auto &kv : ed.ui_for_test().button_rects) shown = shown || (kv.first.rfind("shown:Refused", 0) == 0 && kv.first.find("Manifold") != std::string::npos);
+    CHECK(shown);
+    ed.command("blockout set method auto");
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout: 200 random edits (add, delete, move, undo, redo, re-parent, disable) with workers on end, after 'blockout wait', on the build from scratch every time", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    ed.command("blockout new");
+    ed.command("blockout wait");
+    GameObject *bo = r477_find(ed);
+    ed.scene().create("Folder", bo);
+    ed.mark_changed_for_test("setup");
+    r477_settle(ed);
+    const size_t base = ed.undo_depth_for_test();
+    R477Rand rnd{477u};
+    int bad = 0, checks = 0;
+    const uint64_t main0 = ed.blockout_main_builds_for_test();
+    for (int i = 0; i < 200; i++) {
+      GameObject *b = r477_find(ed);
+      if (!b) break;
+      std::vector<GameObject *> ps = r477_all_pieces(*b);
+      GameObject *folder = r477_find(ed, "Folder");
+      const int op = rnd.pick(7);
+      bool did = false;
+      if (op == 0) {
+        GameObject *at = folder && rnd.pick(3) == 0 ? folder : b;
+        const int shape = rnd.pick(3), sub = rnd.pick(4) == 0 ? 1 : 0;
+        const Vec3 pos(rnd.in(-1.5f, 1.5f), rnd.in(-1, 1), rnd.in(-1.5f, 1.5f)), size(rnd.in(0.5f, 1.5f), rnd.in(0.5f, 1.5f), rnd.in(0.5f, 1.5f));
+        r477_piece(ed, *at, "P", shape, sub, pos, size, rnd.in(0.3f, 0.8f), rnd.in(0.5f, 1.5f));
+        did = true;
+      }
+      else if (op == 1 && !ps.empty()) {
+        ed.scene().destroy(ps[(size_t)rnd.pick((int)ps.size())]);
+        did = true;
+      }
+      else if (op == 2 && !ps.empty()) {
+        ps[(size_t)rnd.pick((int)ps.size())]->set_local_position({rnd.in(-1.5f, 1.5f), rnd.in(-1, 1), rnd.in(-1.5f, 1.5f)});
+        did = true;
+      }
+      else if (op == 3 && ed.undo_depth_for_test() > base) {
+        ed.command("undo");
+        did = true;
+      }
+      else if (op == 4) {
+        ed.command("redo");
+        did = true;
+      }
+      else if (op == 5 && !ps.empty() && folder) {
+        GameObject *p = ps[(size_t)rnd.pick((int)ps.size())];
+        ed.scene().set_parent(p, p->parent == b ? folder : b, -1, false);
+        did = true;
+      }
+      else if (op == 6 && !ps.empty()) {
+        GameObject *p = ps[(size_t)rnd.pick((int)ps.size())];
+        p->active = !p->active;
+        did = true;
+      }
+      if (!did) continue;
+      if (op != 3 && op != 4) ed.mark_changed_for_test("random edit");
+      for (int f = rnd.pick(3); f > 0; f--) ed.step_frame_headless();
+      ed.command("blockout wait");
+      checks++;
+      if (!r477_matches(ed)) bad++;
+    }
+    std::printf("    %d checks, %d differ from a build from scratch, builds on the main thread %llu\n", checks, bad,
+                (unsigned long long)(ed.blockout_main_builds_for_test() - main0));
+    CHECK(checks >= 150 && bad == 0);
+    CHECK(ed.blockout_main_builds_for_test() == main0);
+  });
+
+  /* ---- The Inspector, the console, the menus, the tray ---- */
+  test("blockout: the Inspector shows a Blockout's Field Cell and Method, a piece's fields for its shape, the status line, and no Blend Radius", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    ed.select_for_test(bo->id, false);
+    r477_settle(ed, 3);
+    auto has = [&](const std::string &key) {
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind(key, 0) == 0) return true;
+      return false;
+    };
+    CHECK(has("field:Field Cell"));
+    CHECK(has("shown:1 of 1 pieces used, 6 faces"));
+    /* (Only numbers record a key: a piece's Shape, Operation and Size are not among them.) */
+    ed.select_for_test(r477_find(ed, "Box")->id, false);
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(!has("field:Radius") && !has("field:Height") && !has("field:Segments") && !has("field:Rings") && !has("field:Blend Radius"));
+    r477_find(ed, "Box")->get<BlockoutPiece>()->shape = 2;
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(has("field:Radius") && has("field:Segments") && has("field:Rings") && !has("field:Height") && !has("field:Blend Radius"));
+    r477_find(ed, "Box")->get<BlockoutPiece>()->shape = 1;
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(has("field:Radius") && has("field:Height") && has("field:Segments") && !has("field:Rings") && !has("field:Blend Radius"));
+  });
+
+  test("blockout: 'set BlockoutPiece.Radius' and a clone carry a piece's fields like any component's", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    ed.command("blockout add cylinder 0.5 2");
+    ed.command("set BlockoutPiece.Radius 0.8");
+    ed.command("set BlockoutPiece.Segments 12");
+    GameObject *cyl = ed.active_object_for_test();
+    CHECK(cyl && cyl->get<BlockoutPiece>() && cyl->get<BlockoutPiece>()->radius == 0.8f && cyl->get<BlockoutPiece>()->segments == 12);
+    r477_settle(ed);
+    CHECK(r477_matches(ed));
+    if (!cyl || !cyl->get<BlockoutPiece>()) return;
+    auto copy = cyl->get<BlockoutPiece>()->clone();
+    CHECK(static_cast<BlockoutPiece *>(copy.get())->radius == 0.8f && static_cast<BlockoutPiece *>(copy.get())->shape == 1);
+    ed.select_for_test(r477_find(ed)->id, false);
+    ed.command("set Blockout.FieldCell 0.2");
+    GameObject *bo = r477_find(ed);
+    CHECK(bo && bo->get<Blockout>()->cell == 0.2f);
+    r477_settle(ed);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout: 'blockout set cell' and 'blockout set method' change the selected Blockout and rebuild it", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    ed.command("blockout add sphere 1");
+    GameObject *bo = r477_find(ed);
+    const uint64_t builds = ed.blockout_main_builds_for_test();
+    ed.command("blockout set cell 0.25");
+    CHECK(bo->get<Blockout>()->cell == 0.25f && ed.blockout_main_builds_for_test() > builds);
+    CHECK(r477_matches(ed));
+    ed.command("blockout set method field");
+    CHECK(bo->get<Blockout>()->method == 2 && r477_matches(ed));
+    ed.command("blockout set method auto");
+    CHECK(bo->get<Blockout>()->method == 0);
+    const size_t mark = r477_mark();
+    ed.command("blockout set colour 1");
+    CHECK(r477_log_since(mark).find("blockout set cell") != std::string::npos);
+  });
+
+  test("blockout: 'blockout rebuild' forgets what was built and the cache and builds again to the same mesh; 'blockout info' prints the status; 'help blockout' lists the verbs", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    ed.command("blockout add cylinder subtract 0.5 3");
+    GameObject *bo = r477_find(ed);
+    const Mesh before = *r477_mesh(bo);
+    const uint64_t builds = ed.blockout_main_builds_for_test();
+    ed.command("blockout rebuild");
+    CHECK(ed.blockout_main_builds_for_test() == builds + 1);
+    CHECK(r477_same(*r477_mesh(bo), before) && !bo->get<Blockout>()->state.status.path.empty());
+    const size_t mark = r477_mark();
+    ed.command("blockout info");
+    std::string said = r477_log_since(mark);
+    CHECK(said.find("Blockout 'Blockout'") != std::string::npos && said.find("2 of 2 pieces used") != std::string::npos && said.find(" faces, ") != std::string::npos);
+    const size_t mark2 = r477_mark();
+    ed.command("help blockout");
+    said = r477_log_since(mark2);
+    for (const char *verb : {"blockout new", "blockout add", "blockout set", "blockout rebuild", "blockout wait", "blockout info"}) CHECK(said.find(verb) != std::string::npos);
+  });
+
+  test("blockout: 'blockout wait' joins the running builds so the next command sees the mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    ed.command("blockout new");
+    ed.command("blockout add sphere 1.4");
+    ed.command("blockout wait");
+    CHECK(!ed.blockout_jobs_running_for_test() && r477_matches(ed) && r477_mesh(r477_find(ed))->face_count() > 6);
+    CHECK(ed.blockout_main_builds_for_test() == 0 && ed.blockout_landed_for_test() >= 1);
+  });
+
+  test("blockout: GameObject > Blockout offers a new Blockout and an Add or Subtract Box, Cylinder or Sphere, each one undo step", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "menu:New Blockout"}));
+    CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 1);
+    r477_settle(ed);
+    CHECK(ed.undo_label_for_test(0).find("Blockout") != std::string::npos);
+    struct Row {
+      const char *label;
+      int shape, op;
+    };
+    for (const Row &row : {Row{"Add Box", 0, 0}, Row{"Add Cylinder", 1, 0}, Row{"Add Sphere", 2, 0}, Row{"Subtract Box", 0, 1}, Row{"Subtract Cylinder", 1, 1}, Row{"Subtract Sphere", 2, 1}}) {
+      const size_t pieces = r477_count(ed, true), depth = ed.undo_depth_for_test();
+      CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", std::string("menu:") + row.label}));
+      r477_settle(ed);
+      const BlockoutPiece *p = r477_active_piece(ed);
+      const bool ok = p && p->shape == row.shape && p->operation == row.op && r477_count(ed, true) == pieces + 1 && r477_count(ed, false) == 1 && ed.undo_depth_for_test() == depth + 1;
+      if (!ok) std::printf("    GameObject > Blockout > %s: not as asked\n", row.label);
+      CHECK(ok);
+    }
+    CHECK(r477_matches(ed));
+    ed.command("undo");
+    r477_settle(ed);
+    CHECK(r477_count(ed, true) == 6);
+  });
+
+  test("blockout: the Hierarchy's + menu offers the same Blockout entries, and Add Cylinder with nothing selected builds a Blockout with a cylinder", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    ed.clear_selection_for_test();
+    r477_settle(ed, 3);
+    const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+    const ui::Context &u = ed.ui_for_test();
+    const int bh = u.row_h() + u.px(6), hh = bh - u.px(8);
+    const int cx = h.x + u.px(5) + (hh + u.px(16)) / 2, cy = h.y + u.px(4) + hh / 2;
+    r477_click(ed, cx, cy);
+    r477_settle(ed);
+    CHECK(r477_menu(ed, {"submenu:Blockout", "menu:Add Cylinder"}));
+    r477_settle(ed);
+    const BlockoutPiece *p = r477_active_piece(ed);
+    CHECK(p && p->shape == 1 && r477_count(ed, false) == 1 && r477_count(ed, true) == 1);
+    r477_click(ed, cx, cy);
+    r477_settle(ed);
+    CHECK(r477_menu(ed, {"submenu:Blockout", "menu:Subtract Sphere"}));
+    r477_settle(ed);
+    p = r477_active_piece(ed);
+    CHECK(p && p->shape == 2 && p->operation == 1 && r477_count(ed, true) == 2 && r477_count(ed, false) == 1);
+  });
+
+  test("blockout: the Modeling Tools window has New Blockout and Add / Subtract buttons that make them", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.command("layout Default");
+    ed.command("window Modeling Tools");
+    ed.command("alltools on");
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 4);
+    Recti r;
+    CHECK(ed.button_rect_for_test("New Blockout", r));
+    if (!ed.button_rect_for_test("New Blockout", r)) return;
+    r477_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    r477_settle(ed);
+    CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 1);
+    for (const char *label : {"Add Box", "Subtract Cylinder"}) {
+      ed.record_buttons_for_test(true);
+      r477_settle(ed, 2);
+      CHECK(ed.button_rect_for_test(label, r));
+      if (!ed.button_rect_for_test(label, r)) continue;
+      r477_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+      r477_settle(ed);
+    }
+    CHECK(r477_count(ed, true) == 3 && r477_count(ed, false) == 1);
+    const BlockoutPiece *p = r477_active_piece(ed);
+    CHECK(p && p->shape == 1 && p->operation == 1);
+  });
+
+  test("blockout: a build on a worker is in the job tray as 'Building <name>' while it runs", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = r477_blockout(ed, "Hall");
+    r477_rooms(ed, *bo, 3, 4);
+    ed.hold_blockout_landing_for_test(true);
+    ed.step_frame_headless();
+    bool listed = false;
+    for (int i = 0; i < 5; i++) {
+      ed.step_frame_headless();
+      for (const Editor::JobView &j : ed.jobs_for_test()) listed = listed || j.label == "Building Hall";
+    }
+    CHECK(listed);
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    bool still = false;
+    for (const Editor::JobView &j : ed.jobs_for_test()) still = still || j.label == "Building Hall";
+    CHECK(!still && r477_matches(ed, "Hall"));
+  });
+
+  test("blockout: a selected Add piece shows as a wire in the selection colour and a selected Subtract piece in the warning colour; nothing is drawn for pieces nothing selects", [] {
+    Editor ed;
+    r34_open(ed);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *wall = r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *cut = r477_piece(ed, *bo, "Cut", 1, 1, {0, 0, 0}, Vec3(1.0f), 0.4f, 3.0f);
+    ed.command("camera 25 25 8 0 0 0");
+    ed.clear_selection_for_test();
+    r34_steps(ed, 4);
+    auto orange_yellow = [&](GameObject *sel) {
+      if (sel) ed.select_for_test(sel->id, false);
+      else ed.clear_selection_for_test();
+      r34_steps(ed, 4);
+      const std::vector<uint32_t> px = r34_crop(ed, ed.scene_view_rect());
+      return std::make_pair(r477_near(px, 0xF7941D, 14), r477_near(px, 0xF4BC02, 14));
+    };
+    const auto none = orange_yellow(nullptr), box_sel = orange_yellow(wall), cut_sel = orange_yellow(cut), all_sel = orange_yellow(bo);
+    std::printf("    wire pixels (orange, yellow): nothing %zu/%zu, the Add box %zu/%zu, the Subtract cylinder %zu/%zu, the Blockout %zu/%zu\n", none.first, none.second,
+                box_sel.first, box_sel.second, cut_sel.first, cut_sel.second, all_sel.first, all_sel.second);
+    CHECK(none.second == 0);
+    CHECK(box_sel.first > none.first + 20 && box_sel.second == 0);
+    CHECK(cut_sel.second > 20 && cut_sel.first <= none.first);
+    CHECK(all_sel.second > 0);
+  });
+
+  test("blockout: the Learn tab has the lesson 'Blockout: pieces that build one mesh' with a Try-it of commands that run and two questions", [] {
+    int found = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Blockout: pieces that build one mesh") found = i;
+    CHECK(found >= 0);
+    if (found < 0) return;
+    const std::string body = lesson(found).body;
+    size_t questions = 0, cmds = 0;
+    std::istringstream is(body);
+    Editor ed;
+    ed.init_headless(900, 600);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      cmds++;
+      ed.command(line.substr(6, line.find(" | ") - 6));
+    }
+    CHECK(questions == 2 && cmds >= 3);
+    CHECK(r477_find(ed) && r477_count(ed, true) == 2 && r477_matches(ed));
+  });
+}
+
+/* ===================================================================== */
+/* Round 477, the test engineer's: lifetime of the workers, undo with held builds, duplicates, picks,   */
+/* hostile numbers, refusals, Play, export, the tray (written from the acceptance criteria and ADR 0129) */
+/* ===================================================================== */
+
+namespace {
+
+platform::Event te_key(int key, int mods, bool down = true) {
+  platform::Event e;
+  e.type = down ? R477ET::KeyDown : R477ET::KeyUp, e.key = key, e.mods = mods;
+  return e;
+}
+
+/* A key with the mouse over the Scene view, as a user presses it. */
+void te_press(Editor &ed, int key, int mods = 0) {
+  const Recti r = ed.scene_view_rect();
+  ed.step_frame_headless({r477_ev(R477ET::MouseMove, r.x + r.w / 2, r.y + r.h / 2)});
+  ed.step_frame_headless({te_key(key, mods)});
+  ed.step_frame_headless({te_key(key, mods, false)});
+  ed.step_frame_headless();
+}
+
+bool te_matches(GameObject *g) {
+  const Mesh *m = r477_mesh(g);
+  Mesh ref;
+  return g && m && r477_scratch(*g, ref) && r477_same(ref, *m);
+}
+
+std::vector<GameObject *> te_blockouts(Editor &ed) {
+  std::vector<GameObject *> out;
+  ed.scene().for_each([&](GameObject &g) {
+    if (g.get<Blockout>()) out.push_back(&g);
+  });
+  return out;
+}
+
+std::vector<uint64_t> te_piece_ids(GameObject &bo) {
+  std::vector<uint64_t> v;
+  for (GameObject *p : r477_all_pieces(bo)) v.push_back(p->id);
+  return v;
+}
+
+bool te_has(const std::vector<uint64_t> &v, uint64_t id) { return std::find(v.begin(), v.end(), id) != v.end(); }
+
+std::string te_scene_path(Editor &ed, const char *file) {
+  const std::string dir = ed.resolve_asset_path_for_test("Assets/Scenes");
+  fs::make_dirs(dir);
+  return fs::join(dir, file);
+}
+
+/* A window sized for picking, an empty scene and the camera (yaw pitch distance pivot). */
+void te_view(Editor &ed, const char *camera) {
+  ed.init_headless(1600, 1000);
+  r477_empty_scene(ed);
+  ed.command(camera);
+}
+
+/* A click on a world point with nothing selected (so no gizmo is in the way); false when the point is off the view. */
+bool te_click_world(Editor &ed, Vec3 w, int mods = 0) {
+  int x = 0, y = 0;
+  if (!ed.project_to_window(w, x, y)) return false;
+  ed.clear_selection_for_test();
+  r477_click(ed, x, y, mods);
+  r34_steps(ed, 2);
+  return true;
+}
+
+/* The pocket scene: a 4 x 2 x 4 block with a Subtract cylinder (radius 1, 1 m tall) centred on its top, so the pocket's
+ * floor is the plane y = 0.5. */
+GameObject *te_pocket_blockout(Editor &ed, const char *name, GameObject **wall, GameObject **cut) {
+  GameObject *bo = r477_blockout(ed, name);
+  GameObject *w = r477_piece(ed, *bo, "Block", 0, 0, {0, 0, 0}, {4, 2, 4});
+  GameObject *c = r477_piece(ed, *bo, "Pocket", 1, 1, {0, 1, 0}, Vec3(1.0f), 1.0f, 1.0f);
+  if (wall) *wall = w;
+  if (cut) *cut = c;
+  return bo;
+}
+
+/* A Blockout whose id is `id` (objects made and destroyed to pad the scene's counter), so two scenes can hold the same one. */
+GameObject *te_blockout_at_id(Editor &ed, uint64_t id, const char *name = "Blockout") {
+  std::vector<GameObject *> pads;
+  while (ed.scene().next_id() < id) pads.push_back(ed.scene().create("pad"));
+  GameObject *bo = r477_blockout(ed, name);
+  ed.scene().destroy(pads);
+  return bo;
+}
+
+GameObject *te_find_piece(GameObject &bo, int shape) {
+  for (GameObject *p : r477_all_pieces(bo))
+    if (p->get<BlockoutPiece>()->shape == shape) return p;
+  return nullptr;
+}
+
+size_t te_warnings_since(size_t mark) {
+  size_t w = 0;
+  r477_log_since(mark, &w);
+  return w;
+}
+
+}  // namespace
+
+static void tests_round477_te() {
+  /* ---- The worker's lifetime ---- */
+  test("blockout: a New Scene made while a build runs never shows the old scene's mesh on the new scene's Blockout of the same id", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = te_blockout_at_id(ed, 500);
+    const uint64_t id = bo->id;
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    const Mesh old = *r477_mesh(bo);
+    CHECK(old.face_count() > 24);
+    ed.hold_blockout_landing_for_test(true);
+    rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("move");
+    Mesh moved;  // (what the running build makes)
+    CHECK(r477_scratch(*bo, moved) && !r477_same(moved, old));
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_jobs_running_for_test());
+    ed.command("newscene");
+    r477_empty_scene(ed);
+    GameObject *nb = te_blockout_at_id(ed, 500);
+    r477_piece(ed, *nb, "Only", 0, 0, {0, 0, 0}, {2, 2, 2});
+    CHECK(nb->id == id);  // (the same id as the old scene's Blockout: the case that matters)
+    ed.hold_blockout_landing_for_test(false);
+    bool old_shown = false;
+    for (int i = 0; (i < 8 || ed.blockout_jobs_running_for_test()) && i < 300; i++) {
+      ed.step_frame_headless();
+      const Mesh *m = r477_mesh(r477_find(ed));
+      if (m && (r477_same(*m, old) || r477_same(*m, moved))) old_shown = true;
+    }
+    if (old_shown) std::printf("    the new scene's Blockout showed the old scene's mesh (%zu faces)\n", old.face_count());
+    CHECK(!old_shown);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    CHECK(r477_mesh(r477_find(ed)) && r477_mesh(r477_find(ed))->face_count() == 6);
+  });
+
+  test("blockout: Open Scene while a build runs never shows the previous scene's mesh on the opened scene's Blockout", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Hall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    ed.command("blockout wait");
+    r477_settle(ed, 2);
+    const std::string path = te_scene_path(ed, "r477te_open.scene");
+    ed.command("save " + path);
+    for (int i = 0; i < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); i++) ed.step_frame_headless();  // (the file is there before the save job has written all of it)
+    r477_settle(ed, 3);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    const Mesh big = *r477_mesh(bo);
+    ed.hold_blockout_landing_for_test(true);
+    rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("move");
+    Mesh moved;  // (what the running build makes)
+    CHECK(r477_scratch(*bo, moved) && !r477_same(moved, big));
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_jobs_running_for_test());
+    const uint64_t old_id = bo->id;
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && r477_count(ed, true) != 1; i++) ed.step_frame_headless();
+    CHECK(r477_count(ed, true) == 1);
+    CHECK(r477_find(ed) && r477_find(ed)->id == old_id);  // (the scene file keeps ids: the same-id case)
+    ed.hold_blockout_landing_for_test(false);
+    bool old_shown = false;
+    for (int i = 0; i < 8 || ed.blockout_jobs_running_for_test(); i++) {
+      ed.step_frame_headless();
+      const Mesh *m = r477_mesh(r477_find(ed));
+      if (m && (r477_same(*m, big) || r477_same(*m, moved))) old_shown = true;
+      if (i > 300) break;  // (a build takes some frames: the loop watches until it is done)
+    }
+    if (old_shown) std::printf("    the opened scene's Blockout showed the previous scene's mesh (%zu faces)\n", big.face_count());
+    CHECK(!old_shown);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && r477_mesh(r477_find(ed))->face_count() == 6);
+  });
+
+  test("blockout: deleting a Blockout while its build runs, then undoing the delete, ends with no job and the build from scratch", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("built");
+    r477_settle(ed);
+    ed.hold_blockout_landing_for_test(true);
+    GameObject *door = r477_find(ed, "Door");
+    door->set_local_position(door->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("moved");
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_jobs_running_for_test());
+    ed.scene().destroy(r477_find(ed));
+    ed.mark_changed_for_test("deleted");
+    r477_settle(ed, 2);
+    ed.hold_blockout_landing_for_test(false);
+    r477_settle(ed, 4);
+    ed.command("blockout wait");
+    CHECK(!ed.blockout_jobs_running_for_test() && r477_find(ed) == nullptr);
+    ed.command("undo");
+    r477_settle(ed, 2);
+    CHECK(r477_find(ed) != nullptr);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    ed.command("undo");
+    r477_settle(ed, 2);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    ed.command("redo");
+    ed.command("redo");
+    r477_settle(ed, 2);
+    ed.command("blockout wait");
+    CHECK(r477_find(ed) == nullptr && !ed.blockout_jobs_running_for_test());
+  });
+
+  test("blockout: an editor closed with a build running and one waiting joins them and exits cleanly", [] {
+    bool reached = false;
+    {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.set_async_jobs_for_test(true);
+      GameObject *bo = r477_blockout(ed);
+      const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+      r477_settle(ed, 2);
+      rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.3f));
+      ed.hold_blockout_landing_for_test(true);
+      r477_settle(ed, 2);
+      CHECK(ed.blockout_jobs_running_for_test());
+      reached = true;
+    }
+    CHECK(reached);
+  });
+
+  test("blockout: an undo back to the mesh already shown cancels the build running for the state undone: nothing lands and the mesh stays", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("base");
+    r477_settle(ed, 2);
+    const Mesh base = *r477_mesh(r477_find(ed));
+    const uint64_t landed0 = ed.blockout_landed_for_test();
+    ed.hold_blockout_landing_for_test(true);
+    GameObject *door = r477_find(ed, "Door");
+    door->set_local_position(door->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("moved");
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_jobs_running_for_test());
+    ed.command("undo");
+    r477_settle(ed, 2);
+    ed.hold_blockout_landing_for_test(false);
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    const bool same = r477_same(*r477_mesh(r477_find(ed)), base);
+    CHECK(same && r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    if (ed.blockout_landed_for_test() != landed0) std::printf("    %llu build(s) landed after the undo (the pieces were back at the shown mesh)\n", (unsigned long long)(ed.blockout_landed_for_test() - landed0));
+    CHECK(ed.blockout_landed_for_test() == landed0);
+    CHECK(ed.blockout_main_builds_for_test() == 0);
+  });
+
+  test("blockout: undo, undo, redo, redo with builds held and then released lands each state's mesh and ends on the last", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_rooms(ed, *bo, 2, 1);
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("base");
+    r477_settle(ed, 2);
+    const Mesh m_base = *r477_mesh(r477_find(ed));
+    GameObject *door = r477_find(ed, "Door");
+    door->set_local_position(door->local().position + Vec3(0.0f, 0.0f, 0.2f));
+    ed.mark_changed_for_test("A");
+    r477_settle(ed, 2);
+    ed.command("blockout wait");
+    const Mesh m_a = *r477_mesh(r477_find(ed));
+    CHECK(!r477_same(m_a, m_base));
+    ed.hold_blockout_landing_for_test(true);
+    door = r477_find(ed, "Door");
+    door->set_local_position(door->local().position + Vec3(0.0f, 0.0f, 0.4f));
+    ed.mark_changed_for_test("B");
+    r477_settle(ed, 3);
+    for (const char *step : {"undo", "undo", "redo", "redo"}) {
+      ed.command(step);
+      r477_settle(ed, 2);
+    }
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    ed.command("undo");
+    ed.command("blockout wait");
+    CHECK(r477_same(*r477_mesh(r477_find(ed)), m_a));
+    ed.command("undo");
+    ed.command("blockout wait");
+    CHECK(r477_same(*r477_mesh(r477_find(ed)), m_base));
+    ed.command("redo");
+    ed.command("blockout wait");
+    CHECK(r477_same(*r477_mesh(r477_find(ed)), m_a));
+    ed.command("redo");
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout: 120 random edits, undos, redos and hold / release of the landing with workers on always end on the build from scratch", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_rooms(ed, *bo, 2, 1);
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("base");
+    r477_settle(ed, 2);
+    const size_t base = ed.undo_depth_for_test();
+    R477Rand rnd{4770u};
+    bool held = false;
+    int checks = 0, bad = 0;
+    for (int i = 0; i < 120; i++) {
+      GameObject *b = r477_find(ed);
+      if (!b) break;
+      const std::vector<GameObject *> ps = r477_all_pieces(*b);
+      const int op = rnd.pick(9);
+      if (op <= 1 && !ps.empty()) {
+        ps[(size_t)rnd.pick((int)ps.size())]->set_local_position({rnd.in(-6, 6), rnd.in(-1, 1), rnd.in(-6, 6)});
+        ed.mark_changed_for_test("move");
+      }
+      else if (op == 2 && !ps.empty()) {
+        ps[(size_t)rnd.pick((int)ps.size())]->get<BlockoutPiece>()->size.x = rnd.in(0.5f, 4.0f);
+        ed.mark_changed_for_test("size");
+      }
+      else if (op == 3 && ed.undo_depth_for_test() > base) ed.command("undo");
+      else if (op == 4) ed.command("redo");
+      else if (op == 5) held = !held, ed.hold_blockout_landing_for_test(held);
+      else if (op == 6)
+        for (int f = rnd.pick(4); f > 0; f--) ed.step_frame_headless();
+      else if (op >= 7) {
+        ed.command("blockout wait");
+        checks++;
+        if (!te_matches(r477_find(ed))) bad++;
+      }
+      ed.step_frame_headless();
+    }
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    checks++;
+    if (!te_matches(r477_find(ed))) bad++;
+    std::printf("    %d checks, %d differ from a build from scratch, main-thread builds %llu\n", checks, bad, (unsigned long long)ed.blockout_main_builds_for_test());
+    CHECK(checks >= 10 && bad == 0);
+    CHECK(ed.blockout_main_builds_for_test() == 0 && !ed.blockout_jobs_running_for_test());
+  });
+
+  test("blockout: a piece moved from one Blockout to another while both build lands both meshes as builds from scratch", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *a = r477_blockout(ed, "Alpha");
+    r477_rooms(ed, *a, 3, 4);
+    GameObject *b = r477_blockout(ed, "Beta");
+    b->set_local_position({60.0f, 0.0f, 0.0f});
+    r477_rooms(ed, *b, 2, 1);
+    ed.command("blockout wait");
+    ed.hold_blockout_landing_for_test(true);
+    GameObject *door = r477_find(ed, "Door");
+    ed.scene().set_parent(door, r477_find(ed, "Beta"), -1, true);
+    ed.mark_changed_for_test("moved over");
+    r477_settle(ed, 3);
+    ed.hold_blockout_landing_for_test(false);
+    GameObject *shell = r477_find(ed, "Shell");
+    shell->set_local_position(shell->local().position + Vec3(0.0f, 0.2f, 0.0f));
+    ed.mark_changed_for_test("shell");
+    r477_settle(ed, 2);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed, "Alpha") && r477_matches(ed, "Beta") && !ed.blockout_jobs_running_for_test());
+  });
+
+  test("blockout: 'blockout rebuild' and 'blockout set cell' while a build runs end on the build from scratch with no job left", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    ed.hold_blockout_landing_for_test(true);
+    rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("move");
+    r477_settle(ed, 2);
+    ed.command("blockout rebuild");
+    r477_settle(ed, 2);
+    ed.command("blockout set cell 0.25");
+    ed.command("blockout set method field");
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    CHECK(r477_find(ed)->get<Blockout>()->cell == 0.25f && r477_find(ed)->get<Blockout>()->method == 2);
+    const uint64_t started = ed.blockout_started_for_test();
+    ed.command("blockout rebuild");
+    ed.command("blockout wait");
+    CHECK(ed.blockout_started_for_test() == started + 1 && r477_matches(ed));
+    CHECK(ed.blockout_main_builds_for_test() == 0);
+  });
+
+  /* ---- Duplicates ---- */
+  test("blockout: Ctrl+D on a Blockout makes a clone with its own pieces, ids, cache and faces' origins, and editing the clone leaves the original's mesh alone", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    r477_empty_scene(ed);
+    GameObject *wall = nullptr, *cut = nullptr;
+    GameObject *bo = te_pocket_blockout(ed, "Blockout", &wall, &cut);
+    r477_piece(ed, *bo, "Ball", 2, 0, {2.5f, 1.0f, 0.0f}, Vec3(1.0f), 0.6f);
+    ed.mark_changed_for_test("setup");
+    r477_settle(ed, 2);
+    const Mesh original = *r477_mesh(bo);
+    ed.select_for_test(bo->id, false);
+    te_press(ed, platform::KEY_D, platform::MOD_CTRL);
+    const std::vector<GameObject *> all = te_blockouts(ed);
+    CHECK(all.size() == 2);
+    if (all.size() != 2) return;
+    GameObject *clone = all[0] == bo ? all[1] : all[0];
+    CHECK(r477_all_pieces(*clone).size() == 3);
+    const std::vector<uint64_t> mine = te_piece_ids(*bo), theirs = te_piece_ids(*clone);
+    bool disjoint = true;
+    for (uint64_t id : theirs) disjoint = disjoint && !te_has(mine, id);
+    CHECK(disjoint && theirs.size() == 3);
+    r477_settle(ed, 3);
+    CHECK(te_matches(bo) && te_matches(clone));
+    Blockout *ob = bo->get<Blockout>(), *cb = clone->get<Blockout>();
+    CHECK(cb->state.cache && cb->state.cache.get() != ob->state.cache.get());
+    bool faces_own = cb->state.faces.piece.size() == r477_mesh(clone)->face_count();
+    for (uint64_t id : cb->state.faces.piece) faces_own = faces_own && te_has(theirs, id);
+    bool faces_orig = ob->state.faces.piece.size() == r477_mesh(bo)->face_count();
+    for (uint64_t id : ob->state.faces.piece) faces_orig = faces_orig && te_has(mine, id);
+    CHECK(faces_own && faces_orig);
+    CHECK(r477_same(*r477_mesh(bo), original));
+    /* Editing the clone's piece changes the clone only. */
+    GameObject *cpocket = te_find_piece(*clone, 1);
+    CHECK(cpocket != nullptr);
+    if (!cpocket) return;
+    cpocket->get<BlockoutPiece>()->radius = 0.5f;
+    ed.mark_changed_for_test("clone edit");
+    r477_settle(ed, 3);
+    CHECK(te_matches(bo) && te_matches(clone));
+    CHECK(r477_same(*r477_mesh(bo), original) && !r477_same(*r477_mesh(clone), original));
+    ed.command("undo");
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(te_blockouts(ed).size() == 1 && te_matches(te_blockouts(ed)[0]));
+  });
+
+  test("blockout: Ctrl+D on one piece makes one more piece under the same Blockout, one undo step, and the mesh is the build from scratch", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    r477_empty_scene(ed);
+    GameObject *wall = nullptr, *cut = nullptr;
+    GameObject *bo = te_pocket_blockout(ed, "Blockout", &wall, &cut);
+    ed.mark_changed_for_test("setup");
+    r477_settle(ed, 2);
+    ed.select_for_test(cut->id, false);
+    const size_t depth = ed.undo_depth_for_test();
+    te_press(ed, platform::KEY_D, platform::MOD_CTRL);
+    CHECK(r477_all_pieces(*bo).size() == 3 && r477_count(ed, false) == 1);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    GameObject *fresh = ed.active_object_for_test();
+    CHECK(fresh && fresh != cut && fresh->get<BlockoutPiece>() && fresh->parent == bo && fresh->id != cut->id);
+    r477_settle(ed, 3);
+    CHECK(te_matches(bo));
+    if (fresh) fresh->set_local_position(fresh->local().position + Vec3(1.0f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("move the copy");
+    r477_settle(ed, 3);
+    CHECK(te_matches(bo));
+    ed.command("undo");
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_find(ed) && r477_all_pieces(*r477_find(ed)).size() == 2 && te_matches(r477_find(ed)));
+  });
+
+  test("blockout: a clicked piece of a duplicated Blockout is the duplicate's own piece, never the original's", [] {
+    Editor ed;
+    te_view(ed, "camera 25 60 14 4 0 0");
+    GameObject *wall = nullptr, *cut = nullptr;
+    GameObject *bo = te_pocket_blockout(ed, "Blockout", &wall, &cut);
+    r34_steps(ed, 4);
+    ed.select_for_test(bo->id, false);
+    te_press(ed, platform::KEY_D, platform::MOD_CTRL);
+    const std::vector<GameObject *> all = te_blockouts(ed);
+    CHECK(all.size() == 2);
+    if (all.size() != 2) return;
+    GameObject *clone = all[0] == bo ? all[1] : all[0];
+    clone->set_world_position({8.0f, 0.0f, 0.0f});
+    ed.mark_changed_for_test("move the clone");
+    r34_steps(ed, 4);
+    CHECK(te_matches(bo) && te_matches(clone));
+    GameObject *cpocket = te_find_piece(*clone, 1);
+    CHECK(cpocket && cpocket != cut);
+    CHECK(te_click_world(ed, clone->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cpocket);
+    CHECK(te_click_world(ed, bo->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cut);
+    CHECK(te_click_world(ed, clone->world_matrix().point({1.7f, 1.0f, 1.7f})));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() && ed.active_object_for_test()->parent == clone);
+  });
+
+  test("blockout: until a duplicate's own build lands, a click on it selects nothing of the original's (with workers on)", [] {
+    Editor ed;
+    te_view(ed, "camera 25 60 14 4 0 0");
+    ed.set_async_jobs_for_test(true);
+    GameObject *wall = nullptr, *cut = nullptr;
+    GameObject *bo = te_pocket_blockout(ed, "Blockout", &wall, &cut);
+    ed.command("blockout wait");
+    r34_steps(ed, 4);
+    ed.hold_blockout_landing_for_test(true);
+    ed.select_for_test(bo->id, false);
+    te_press(ed, platform::KEY_D, platform::MOD_CTRL);
+    const std::vector<GameObject *> all = te_blockouts(ed);
+    CHECK(all.size() == 2);
+    if (all.size() != 2) return;
+    GameObject *clone = all[0] == bo ? all[1] : all[0];
+    clone->set_world_position({8.0f, 0.0f, 0.0f});
+    ed.mark_changed_for_test("move the clone");
+    r34_steps(ed, 4);
+    CHECK(ed.blockout_jobs_running_for_test());
+    CHECK(te_click_world(ed, clone->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    GameObject *got = ed.active_object_for_test();
+    const bool original_piece = got == wall || got == cut;
+    if (original_piece) std::printf("    a click on the duplicate's pocket selected the ORIGINAL's piece '%s' (the faces' origins are still the original's ids)\n", got->name.c_str());
+    CHECK(!original_piece);
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    CHECK(te_matches(bo) && te_matches(clone));
+    CHECK(te_click_world(ed, clone->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    CHECK(ed.active_object_for_test() == te_find_piece(*clone, 1));
+  });
+
+  /* ---- Picking ---- */
+  test("blockout: a click selects the right piece through a Blockout that is moved, turned and unevenly scaled, with the piece under an empty folder", [] {
+    Editor ed;
+    te_view(ed, "camera 25 60 12 3 0 -1");
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({3.0f, 0.0f, -1.0f});
+    bo->set_local_euler({0.0f, 30.0f, 0.0f});
+    bo->set_local_scale({1.5f, 1.5f, 1.5f});
+    GameObject *wall = r477_piece(ed, *bo, "Block", 0, 0, {0, 0, 0}, {4, 2, 4});
+    GameObject *folder = ed.scene().create("Folder", bo);
+    folder->set_local_position({0.5f, 0.0f, 0.0f});
+    GameObject *cut = r477_piece(ed, *folder, "Pocket", 1, 1, {-0.5f, 1.0f, 0.0f}, Vec3(1.0f), 1.0f, 1.0f);
+    r34_steps(ed, 4);
+    CHECK(te_matches(bo));
+    CHECK(te_click_world(ed, bo->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cut);
+    CHECK(te_click_world(ed, bo->world_matrix().point({1.7f, 1.0f, 1.7f})));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == wall);
+    const uint64_t builds = ed.blockout_main_builds_for_test();
+    bo->set_local_scale({2.0f, 1.0f, 0.7f});  // (uneven: the mesh moves with the object, no rebuild)
+    bo->set_local_euler({10.0f, 75.0f, 5.0f});
+    r34_steps(ed, 4);
+    CHECK(ed.blockout_main_builds_for_test() == builds);
+    CHECK(te_click_world(ed, bo->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cut);
+    /* An inactive Blockout is not drawn: a click where it was selects nothing. */
+    bo->active = false;
+    r34_steps(ed, 3);
+    CHECK(te_click_world(ed, bo->world_matrix().point({0.0f, 0.5f, 0.0f})));
+    CHECK(ed.selection_size_for_test() == 0);
+  });
+
+  /* ---- Odd hierarchies ---- */
+  test("blockout: a Blockout inside another, a piece that is also a Blockout and a piece with no Blockout above it make valid meshes, draw, and warn nothing", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    r477_empty_scene(ed);
+    GameObject *outer = r477_blockout(ed, "Outer");
+    r477_piece(ed, *outer, "OuterBox", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *inner = r477_blockout(ed, "Inner");
+    ed.scene().set_parent(inner, outer, -1, false);
+    inner->set_local_position({5.0f, 0.0f, 0.0f});
+    r477_piece(ed, *inner, "InnerBall", 2, 0, {0, 0, 0}, Vec3(1.0f), 0.8f);
+    GameObject *both = r477_blockout(ed, "Both");
+    both->add<BlockoutPiece>();
+    ed.scene().set_parent(both, outer, -1, false);
+    both->set_local_position({0.0f, 5.0f, 0.0f});
+    r477_piece(ed, *both, "BothBox", 0, 0, {0, 0, 0}, {1, 1, 1});
+    GameObject *stray = ed.scene().create("Stray");
+    stray->add<BlockoutPiece>();
+    const size_t mark = r477_mark();
+    r477_settle(ed, 4);
+    for (GameObject *g : {outer, inner, both, stray}) {
+      ed.select_for_test(g->id, false);
+      r477_settle(ed, 3);
+    }
+    CHECK(te_matches(outer) && te_matches(inner) && te_matches(both));
+    CHECK(r477_mesh(outer)->face_count() == 6 && r477_mesh(inner)->face_count() > 6 && r477_mesh(both)->face_count() == 6);
+    std::vector<Piece> ps;
+    blockout::Settings st;
+    blockout_snapshot(*outer, ps, st);
+    CHECK(ps.size() == 1);  // (the inner Blockout and the object that is a Blockout are not the outer's pieces)
+    CHECK(blockout_of_piece(*both) == outer && blockout_of_piece(*stray) == nullptr);
+    CHECK(!stray->get<MeshFilter>());  // (nothing builds for a piece with no Blockout)
+    ed.select_for_test(stray->id, false);
+    ed.command("edit");
+    CHECK(!ed.in_edit_mode());
+    CHECK(te_warnings_since(mark) <= 1);  // (the Edit Mode hint is the only warning allowed)
+  });
+
+  test("blockout: a Blockout whose component is disabled keeps a valid mesh, draws and picks without a warning, and builds again with the component on", [] {
+    Editor ed;
+    te_view(ed, "camera 25 60 9 0 0 0");
+    GameObject *wall = nullptr, *cut = nullptr;
+    GameObject *bo = te_pocket_blockout(ed, "Blockout", &wall, &cut);
+    r34_steps(ed, 4);
+    bo->get<Blockout>()->enabled = false;
+    cut->set_local_position({0.5f, 1.0f, 0.0f});
+    ed.mark_changed_for_test("move with the Blockout component off");
+    const size_t mark = r477_mark();
+    r34_steps(ed, 6);
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && structurally_valid(*m));
+    std::printf("    component off: the mesh %s the pieces\n", te_matches(bo) ? "follows" : "does not follow");
+    CHECK(te_warnings_since(mark) == 0);
+    ed.select_for_test(bo->id, false);
+    r34_steps(ed, 3);
+    bo->get<Blockout>()->enabled = true;
+    ed.mark_changed_for_test("on");
+    r34_steps(ed, 3);
+    CHECK(te_matches(bo));
+  });
+
+  /* ---- Hostile numbers ---- */
+  test("blockout: hostile numbers in a piece's fields or the Blockout's settings leave a valid mesh and at most one warning, not one a frame", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    BlockoutPiece *pb = r477_find(ed, "Box")->get<BlockoutPiece>();
+    BlockoutPiece *pc = r477_piece(ed, *bo, "Cyl", 1, 0, {3, 0, 0}, Vec3(1.0f), 0.5f, 2.0f)->get<BlockoutPiece>();
+    BlockoutPiece *ps = r477_piece(ed, *bo, "Sph", 2, 0, {-3, 0, 0}, Vec3(1.0f), 0.7f)->get<BlockoutPiece>();
+    Blockout *b = bo->get<Blockout>();
+    r477_settle(ed);
+    auto reset = [&] {
+      pb->size = {2, 2, 2}, pb->shape = 0, pb->operation = 0, pb->blend = 0.0f;
+      pc->radius = 0.5f, pc->height = 2.0f, pc->segments = 24, pc->shape = 1, pc->operation = 0, pc->blend = 0.0f;
+      ps->radius = 0.7f, ps->segments = 24, ps->rings = 12, ps->shape = 2, ps->operation = 0;
+      b->cell = 0.1f, b->method = 0;
+    };
+    struct Case {
+      std::string what;
+      std::function<void()> apply;
+    };
+    std::vector<Case> cases;
+    for (float v : {-2.0f, 0.0f, 1e30f, -1e30f, kNaN, kInf, -kInf, 1e-30f}) {
+      const std::string s = strprintf("%g", (double)v);
+      const bool huge = std::fabs(v) == 1e30f;  // (a 1e6 m piece takes 1.6 s a build: only some fields get it in the suite)
+      cases.push_back({"box size.x " + s, [=] { pb->size.x = v; }});
+      if (!huge) cases.push_back({"box size (all) " + s, [=] { pb->size = {v, v, v}; }});
+      cases.push_back({"cylinder radius " + s, [=] { pc->radius = v; }});
+      cases.push_back({"cylinder height " + s, [=] { pc->height = v; }});
+      if (!huge) cases.push_back({"sphere radius " + s, [=] { ps->radius = v; }});
+      cases.push_back({"blend " + s, [=] { pb->blend = v; }});
+      cases.push_back({"field cell " + s, [=] { b->cell = v; }});
+    }
+    const int big = std::numeric_limits<int>::max(), small = std::numeric_limits<int>::min();
+    for (int v : {0, -4, 100000, big, small}) {
+      const std::string s = std::to_string(v);
+      cases.push_back({"cylinder segments " + s, [=] { pc->segments = v; }});
+      cases.push_back({"sphere segments " + s, [=] { ps->segments = v; }});
+      cases.push_back({"sphere rings " + s, [=] { ps->rings = v; }});
+    }
+    for (int v : {-1, 7, big, small}) {
+      const std::string s = std::to_string(v);
+      cases.push_back({"shape " + s, [=] { pc->shape = v; }});
+      cases.push_back({"operation " + s, [=] { pc->operation = v; pb->operation = 0; }});
+      cases.push_back({"method " + s, [=] { b->method = v; }});
+    }
+    int failed = 0;
+    for (const Case &c : cases) {
+      reset();
+      c.apply();
+      ed.mark_changed_for_test("hostile");
+      const auto t0 = std::chrono::steady_clock::now();
+      const size_t first = r477_mark();
+      r477_settle(ed, 2);
+      const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+      if (ms > 1000.0) std::printf("    (slow: '%s' took %.0f ms to build)\n", c.what.c_str(), ms);  // (printed, never asserted: ADR 0056)
+      const size_t early = te_warnings_since(first);
+      const size_t mark = r477_mark();
+      r477_settle(ed, 5);
+      const size_t late = te_warnings_since(mark);
+      const Mesh *m = r477_mesh(bo);
+      bool finite = m != nullptr;
+      for (size_t i = 0; m && i < m->positions.size(); i++) finite = finite && std::isfinite(m->positions[i].x) && std::isfinite(m->positions[i].y) && std::isfinite(m->positions[i].z);
+      Mesh ref;
+      const bool scratch_ok = r477_scratch(*bo, ref);
+      const bool ok = m && finite && structurally_valid(*m) && early <= 1 && late == 0 && (!scratch_ok || r477_same(ref, *m));
+      if (!ok) {
+        std::printf("    '%s': mesh %s, finite %d, valid %d, warnings %zu then %zu, scratch %s, matches %d\n", c.what.c_str(), m ? "present" : "missing", (int)finite,
+                    (int)(m && structurally_valid(*m)), early, late, scratch_ok ? "builds" : "refuses", (int)(scratch_ok && m && r477_same(ref, *m)));
+        failed++;
+      }
+      CHECK(ok);
+    }
+    std::printf("    %zu hostile settings tried, %d went wrong\n", cases.size(), failed);
+  });
+
+  test("blockout: 'blockout set cell' with nan, inf, negative, zero, tiny, huge or a word, and a piece of zero size, never leave a broken mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    ed.command("blockout add sphere 1.4");  // (a sphere poking out of the 2 m box: its own faces show)
+    GameObject *bo = r477_find(ed);
+    ed.select_for_test(bo->id, false);
+    for (const char *v : {"nan", "inf", "-1", "0", "1e-9", "1e30", "abc", "-0", "0.00001"}) {
+      const size_t mark = r477_mark();
+      ed.command(std::string("blockout set cell ") + v);
+      r477_settle(ed, 3);
+      const Mesh *m = r477_mesh(r477_find(ed));
+      /* (A cell of 10 m is coarser than the 2.8 m sphere: the field path then keeps nothing, an empty mesh the build from scratch makes too.) */
+      const bool coarse = r477_find(ed)->get<Blockout>()->cell > 1.0f;
+      const bool ok = m && structurally_valid(*m) && (coarse || m->face_count() > 6) && te_matches(r477_find(ed)) && te_warnings_since(mark) <= 1;
+      if (!ok)
+        std::printf("    cell '%s' (now %g): mesh %s, %zu faces, valid %d, matches a build from scratch %d, warnings %zu\n", v, (double)r477_find(ed)->get<Blockout>()->cell,
+                    m ? "present" : "missing", m ? m->face_count() : (size_t)0, (int)(m && structurally_valid(*m)), (int)te_matches(r477_find(ed)), te_warnings_since(mark));
+      CHECK(ok);
+    }
+    for (const char *v : {"banana", "9", "-3", ""}) {
+      ed.command(std::string("blockout set method ") + v);
+      r477_settle(ed, 2);
+      CHECK(r477_mesh(r477_find(ed)) && structurally_valid(*r477_mesh(r477_find(ed))));
+    }
+    ed.command("blockout set method auto");
+    ed.command("blockout add box 0 0 0");
+    ed.command("blockout add cylinder 0 0");
+    ed.command("blockout add sphere 0");
+    ed.command("blockout add box 1e30 1e30 1e30");
+    ed.command("blockout add box nan 1 1");
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    const size_t mark = r477_mark();
+    ed.command("blockout info");
+    const std::string said = r477_log_since(mark);
+    CHECK(said.find("Skipped") != std::string::npos);
+    CHECK(r477_mesh(r477_find(ed)) && structurally_valid(*r477_mesh(r477_find(ed))) && te_matches(r477_find(ed)));
+  });
+
+  /* ---- Save, open, old scenes ---- */
+  test("blockout: a scene saved while a build runs opens with its pieces, rebuilds to the build from scratch and is not marked changed", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 3, 4);
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("built");
+    ed.hold_blockout_landing_for_test(true);
+    rooms.back()->set_local_position(rooms.back()->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("moved");
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_jobs_running_for_test());
+    const Vec3 moved = rooms.back()->local().position;
+    const size_t npieces = r477_all_pieces(*bo).size();
+    const std::string path = te_scene_path(ed, "r477te_save.scene");
+    fs::remove_file(path);
+    ed.command("save " + path);
+    for (int i = 0; i < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); i++) ed.step_frame_headless();  // (the file is there before the save job has written all of it)
+    r477_settle(ed, 3);
+    CHECK(fs::exists(path));
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    GameObject *loaded = r477_find(ed);
+    CHECK(loaded && r477_all_pieces(*loaded).size() == npieces);
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    loaded = r477_find(ed);
+    CHECK(loaded && te_matches(loaded) && !ed.scene_dirty_for_test() && !ed.blockout_jobs_running_for_test());
+    GameObject *door = r477_all_pieces(*loaded).empty() ? nullptr : r477_all_pieces(*loaded).back();
+    CHECK(door && std::fabs(door->local().position.z - moved.z) < 1e-5f);
+  });
+
+  test("blockout: a scene with no Blockout is left alone - no MeshFilter added, nothing built, with workers off and on, and after a save and open", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *stray = ed.scene().create("OnlyAPiece");
+    stray->add<BlockoutPiece>();
+    size_t objects = 0, filters = 0, renderers = 0;
+    auto count = [&](size_t &o, size_t &f, size_t &r) {
+      o = f = r = 0;
+      ed.scene().for_each([&](GameObject &g) {
+        o++;
+        f += g.get<MeshFilter>() != nullptr;
+        r += g.get<MeshRenderer>() != nullptr;
+      });
+    };
+    count(objects, filters, renderers);
+    for (int async = 0; async < 2; async++) {
+      ed.set_async_jobs_for_test(async == 1);
+      r477_settle(ed, 6);
+      ed.command("blockout wait");
+      ed.command("blockout rebuild");
+      size_t o = 0, f = 0, r = 0;
+      count(o, f, r);
+      CHECK(o == objects && f == filters && r == renderers);
+    }
+    CHECK(ed.blockout_main_builds_for_test() == 0 && ed.blockout_started_for_test() == 0 && !ed.blockout_jobs_running_for_test());
+    CHECK(!stray->get<MeshFilter>());
+    const std::string path = te_scene_path(ed, "r477te_plain.scene");
+    ed.command("save " + path);
+    for (int i = 0; i < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); i++) ed.step_frame_headless();  // (the file is there before the save job has written all of it)
+    r477_settle(ed, 3);
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed, "OnlyAPiece"); i++) ed.step_frame_headless();
+    r477_settle(ed, 4);
+    size_t o = 0, f = 0, r = 0;
+    count(o, f, r);
+    CHECK(o == objects && f == filters && r == renderers);
+  });
+
+  /* ---- Edit Mode and the other writers of a mesh ---- */
+  test("blockout: Tab is refused on a Blockout in every keymap preset (where a parametric shape enters Edit Mode by Tab)", [] {
+    for (const char *preset : {"Unity", "Blender", "Maya", "SketchUp"}) {
+      Editor ed;
+      ed.init_headless(1000, 700);
+      ed.command(std::string("keymap ") + preset);
+      ed.command("blockout new");
+      r477_settle(ed, 2);
+      GameObject *bo = r477_find(ed);
+      const Mesh *mesh = r477_mesh(bo);
+      const size_t pieces = r477_count(ed, true);
+      for (int who = 0; who < 2; who++) {
+        ed.select_for_test(who == 0 ? bo->id : r477_find(ed, "Box")->id, false);
+        te_press(ed, platform::KEY_TAB);
+        if (!ed.in_edit_mode()) continue;
+        std::printf("    keymap %s: Tab entered Edit Mode on the %s\n", preset, who == 0 ? "Blockout" : "piece");
+        CHECK(!ed.in_edit_mode());
+        ed.command("edit off");
+      }
+      CHECK(r477_mesh(r477_find(ed)) == mesh && r477_count(ed, true) == pieces);
+      ed.command("create Shape: Box");
+      r477_settle(ed, 2);
+      te_press(ed, platform::KEY_TAB);
+      const bool shape_enters = ed.in_edit_mode();
+      if (!shape_enters) std::printf("    keymap %s: Tab does not enter Edit Mode for a shape either (the preset's own binding)\n", preset);
+      ed.command("edit off");
+    }
+  });
+
+  test("blockout: every command route into a mode that writes the mesh (edit, esel, vsel, edittool, editop, draw, sculpt, weight paint, paint) leaves a Blockout and a piece as they were", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.command("blockout new");
+    ed.command("blockout add cylinder subtract 0.5 3");
+    r477_settle(ed, 2);
+    GameObject *bo = r477_find(ed);
+    const Mesh *mesh = r477_mesh(bo);
+    const uint64_t version = mesh->version;
+    const size_t objects = ed.scene().object_count();
+    for (int who = 0; who < 2; who++) {
+      const char *routes[] = {"edit", "edit vertex", "edit face", "edit edge", "edit face all", "esel 0 1 1 2", "vsel 0 1 2", "edittool extrude", "edittool fill",
+                              "editop extrude", "editop fill", "editop bevel", "sculpt on", "weightpaint on", "draw rectangle", "draw polyline", "pushpull individual on"};
+      for (const char *route : routes) {
+        if (who == 1 && std::string(route).rfind("draw", 0) == 0) continue;  // (a piece has no mesh: Draw makes a new object to draw in)
+        ed.select_for_test(who == 0 ? bo->id : r477_find(ed, "Subtract Cylinder")->id, false);
+        ed.command(route);
+        r477_settle(ed, 1);
+        const bool still = !ed.in_edit_mode() && !ed.sculpt_mode_for_test() && !ed.weight_paint_active_for_test() && r477_mesh(r477_find(ed)) == mesh && mesh->version == version &&
+                           ed.scene().object_count() == objects;
+        if (!still) std::printf("    '%s' on the %s changed the mode, the mesh or the objects\n", route, who == 0 ? "Blockout" : "piece");
+        CHECK(still);
+        ed.command("edit off");
+        ed.command("sculpt off");
+        ed.command("weightpaint off");
+      }
+    }
+    CHECK(r477_matches(ed));
+    /* Texture paint is allowed: it must not crash and must not leave the mesh other than the pieces' next build. */
+    ed.select_for_test(bo->id, false);
+    ed.command("paint on");
+    r477_settle(ed, 2);
+    ed.command("paint off");
+    r477_settle(ed, 2);
+    GameObject *cyl = r477_find(ed, "Subtract Cylinder");
+    cyl->set_local_position(cyl->local().position + Vec3(0.1f, 0.0f, 0.0f));
+    ed.mark_changed_for_test("nudge");
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout: Subdivide, Join, Separate, Boolean, Apply Modifiers and the other mesh operators on a Blockout never leave a mesh its pieces do not make", [] {
+    struct Op {
+      const char *command;
+      bool with_other;
+    };
+    const Op ops[] = {{"subdivide", false}, {"subdivide 2", false}, {"meshop subdivide", false}, {"meshop smooth", false}, {"meshop triangulate", false},
+                      {"meshop mirror_x", false}, {"meshop apply_transform", false}, {"meshop shade_auto_smooth", false}, {"meshop delete_loose", false},
+                      {"meshop smart_fill", false}, {"meshop merge", false}, {"applymods", false}, {"separate loose", false}, {"separate selection", false},
+                      {"join", true}, {"boolean difference", true}, {"boolean union", true}, {"boolean intersect", true}, {"boolean difference modifier", true}};
+    int wrong = 0;
+    for (const Op &op : ops) {
+      for (int who = 0; who < 2; who++) {
+        Editor ed;
+        ed.init_headless(1200, 800);
+        r477_empty_scene(ed);
+        GameObject *bo = r477_blockout(ed);
+        GameObject *wall = r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+        r477_piece(ed, *bo, "Far", 0, 0, {6, 0, 0}, {2, 2, 2});  // (a second, separate part for Separate)
+        GameObject *cut = r477_piece(ed, *bo, "Cut", 1, 1, {0, 0, 0}, Vec3(1.0f), 0.4f, 4.0f);
+        GameObject *other = ed.scene().create("Other");
+        other->add<MeshFilter>()->mesh = primitives::cube();
+        other->add<MeshRenderer>();
+        other->set_local_position({0.0f, 5.0f, 0.0f});
+        r477_settle(ed, 3);
+        const size_t blockouts = r477_count(ed, false), pieces = r477_count(ed, true);
+        GameObject *target = who == 0 ? bo : cut;
+        if (op.with_other) ed.select_for_test(other->id, false), ed.select_for_test(target->id, true);
+        else ed.select_for_test(target->id, false);
+        const size_t mark = r477_mark();
+        ed.command(op.command);
+        r477_settle(ed, 4);
+        ed.command("blockout wait");
+        (void)wall;
+        std::vector<GameObject *> now = te_blockouts(ed);
+        bool ok = now.size() == blockouts && r477_count(ed, true) == pieces;
+        for (GameObject *g : now) ok = ok && te_matches(g);
+        if (!ok) {
+          wrong++;
+          std::printf("    '%s' with the %s selected: the Blockout%s ends %s\n", op.command, who == 0 ? "Blockout" : "piece", op.with_other ? " and another mesh" : "",
+                      now.size() != blockouts ? strprintf("with %zu Blockout objects instead of %zu (an object was made from its mesh)", now.size(), blockouts).c_str()
+                                              : "with a mesh its pieces do not make (until a piece changes)");
+        }
+        CHECK(ok);
+        /* Whatever the operator did, the next change of a piece must rebuild to the pieces' mesh, and nothing may be left half. */
+        now = te_blockouts(ed);
+        for (GameObject *g : now) {
+          std::vector<GameObject *> ps = r477_all_pieces(*g);
+          if (ps.empty()) continue;
+          ps.front()->set_local_position(ps.front()->local().position + Vec3(0.05f, 0.0f, 0.0f));
+        }
+        ed.mark_changed_for_test("nudge");
+        r477_settle(ed, 3);
+        ed.command("blockout wait");
+        for (GameObject *g : te_blockouts(ed)) CHECK(te_matches(g));
+        (void)mark;
+      }
+    }
+    std::printf("    %d of %zu operator and selection pairs left a Blockout whose mesh is not its pieces'\n", wrong, sizeof(ops) / sizeof(ops[0]) * 2);
+  });
+
+  /* ---- Play ---- */
+  test("blockout: Play started with a build held waits for it, nothing rebuilds while playing, and the scene after Stop has the right mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_rooms(ed, *bo, 2, 1);
+    ed.command("blockout wait");
+    ed.mark_changed_for_test("built");
+    r477_settle(ed, 2);
+    ed.hold_blockout_landing_for_test(true);
+    GameObject *door = r477_find(ed, "Door");
+    door->set_local_position(door->local().position + Vec3(0.0f, 0.0f, 0.3f));
+    ed.mark_changed_for_test("moved");
+    r477_settle(ed, 3);
+    ed.command("play");
+    CHECK(r477_matches(ed) && !ed.blockout_jobs_running_for_test());
+    const Mesh *during = r477_mesh(r477_find(ed));
+    const uint64_t started = ed.blockout_started_for_test();
+    r477_find(ed, "Door")->set_local_position({9.0f, 0.0f, 0.0f});
+    r477_settle(ed, 5);
+    CHECK(r477_mesh(r477_find(ed)) == during && ed.blockout_started_for_test() == started);  // (nothing rebuilds while playing)
+    ed.command("stop");
+    r477_settle(ed, 3);
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    CHECK(r477_find(ed) && te_matches(r477_find(ed)) && !ed.blockout_jobs_running_for_test());
+    GameObject *back = r477_find(ed, "Door");
+    CHECK(back && std::fabs(back->local().position.x - 9.0f) > 1.0f);  // (the pre-Play pieces)
+    /* Play and Stop with no build pending leave the mesh as it was. */
+    const Mesh before = *r477_mesh(r477_find(ed));
+    ed.command("play");
+    ed.command("stop");
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    CHECK(r477_same(*r477_mesh(r477_find(ed)), before));
+  });
+
+  /* ---- Export ---- */
+  test("blockout: an export of a selection that holds only a piece writes none of the piece, and one of the Blockout writes its mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    ed.command("blockout new");
+    ed.command("blockout add cylinder subtract 0.5 3");
+    r477_settle(ed, 2);
+    GameObject *bo = r477_find(ed);
+    const std::string dir = ed.resolve_asset_path_for_test("Assets/Exports");
+    fs::make_dirs(dir);
+    const std::string piece_obj = fs::join(dir, "r477te_piece.obj"), whole_obj = fs::join(dir, "r477te_whole.obj");
+    fs::remove_file(piece_obj), fs::remove_file(whole_obj);
+    ed.select_for_test(r477_find(ed, "Box")->id, false);
+    ed.select_for_test(r477_find(ed, "Subtract Cylinder")->id, true);
+    ed.command("export obj " + piece_obj);
+    for (int i = 0; i < 60 && (!fs::exists(piece_obj) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
+    std::string text;
+    size_t verts = 0;
+    if (fs::exists(piece_obj) && fs::read_file(piece_obj, text)) {
+      std::istringstream is(text);
+      for (std::string line; std::getline(is, line);) verts += line.rfind("v ", 0) == 0;
+    }
+    CHECK(verts == 0 && text.find("Subtract Cylinder") == std::string::npos);
+    ed.select_for_test(bo->id, false);
+    ed.command("export obj " + whole_obj);
+    for (int i = 0; i < 400 && (!fs::exists(whole_obj) || ed.file_export_running_for_test()); i++) ed.step_frame_headless();
+    r477_settle(ed, 4);
+    std::string whole;
+    CHECK(fs::read_file(whole_obj, whole));
+    verts = 0;
+    std::istringstream is(whole);
+    for (std::string line; std::getline(is, line);) verts += line.rfind("v ", 0) == 0;
+    CHECK(verts == r477_mesh(bo)->vert_count());
+  });
+
+  test("blockout: a piece with a NaN, infinite or huge position, scale or turn is skipped and named, the rest builds, and a Blockout scaled to zero or NaN keeps its mesh", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    GameObject *nan_at = r477_piece(ed, *bo, "NanAt", 0, 0, {kNaN, 0, 0}, {1, 1, 1});
+    GameObject *inf_at = r477_piece(ed, *bo, "InfAt", 0, 0, {kInf, 0, 0}, {1, 1, 1});
+    GameObject *inf_scale = r477_piece(ed, *bo, "InfScale", 0, 0, {4, 0, 0}, {1, 1, 1});
+    inf_scale->set_local_scale({kInf, 1.0f, 1.0f});
+    GameObject *nan_turn = r477_piece(ed, *bo, "NanTurn", 0, 0, {-4, 0, 0}, {1, 1, 1});
+    nan_turn->set_local_euler({kNaN, 0.0f, 0.0f});
+    GameObject *huge = r477_piece(ed, *bo, "Huge", 0, 0, {0, 0, 4}, {1, 1, 1});
+    huge->set_local_scale({1e20f, 1e20f, 1e20f});
+    (void)nan_at, (void)inf_at;
+    ed.select_for_test(bo->id, false);
+    const size_t mark = r477_mark();
+    r477_settle(ed, 4);
+    const Mesh *m = r477_mesh(bo);
+    CHECK(m && structurally_valid(*m) && te_matches(bo));
+    bool finite = m != nullptr;
+    for (size_t i = 0; m && i < m->positions.size(); i++) finite = finite && std::isfinite(m->positions[i].x) && std::isfinite(m->positions[i].y) && std::isfinite(m->positions[i].z);
+    CHECK(finite);
+    CHECK(te_warnings_since(mark) <= 1);
+    ed.command("blockout info");
+    const std::string said = r477_log_since(mark);
+    for (const char *name : {"NanAt", "InfAt", "InfScale", "NanTurn"}) {
+      const bool named = said.find(std::string("Skipped '") + name + "'") != std::string::npos;
+      if (!named) std::printf("    '%s' is not named as skipped in 'blockout info'\n", name);
+      CHECK(named);
+    }
+    /* The Blockout itself flattened or NaN: the pieces' matrices are relative to it, so nothing about the mesh changes. */
+    const Mesh built = *m;
+    const uint64_t builds = ed.blockout_main_builds_for_test();
+    bo->set_local_scale({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    bo->set_local_scale({kNaN, 1.0f, 1.0f});
+    r477_settle(ed, 3);
+    bo->set_local_position({kNaN, kNaN, kNaN});
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_main_builds_for_test() == builds && r477_same(*r477_mesh(bo), built));
+    bo->set_local_scale({1.0f, 1.0f, 1.0f});
+    bo->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    CHECK(te_matches(bo));
+  });
+
+  test("blockout: the Inspector's status line says 'Building...' while the build runs and the finished status after it lands", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.set_async_jobs_for_test(true);
+    ed.record_buttons_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed, "Hall");
+    r477_rooms(ed, *bo, 3, 4);
+    ed.select_for_test(bo->id, false);
+    ed.hold_blockout_landing_for_test(true);
+    r477_settle(ed, 4);
+    auto has = [&](const std::string &key) {
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind(key, 0) == 0) return true;
+      return false;
+    };
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 2);
+    CHECK(has("shown:Building..."));
+    CHECK(has("shown:Not built yet"));
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(!has("shown:Building...") && !has("shown:Not built yet") && has("shown:") && has("shown:") );
+    bool pieces_line = false;
+    for (const auto &kv : ed.ui_for_test().button_rects) pieces_line = pieces_line || (kv.first.rfind("shown:", 0) == 0 && kv.first.find("pieces used") != std::string::npos);
+    CHECK(pieces_line);
+  });
+
+  /* ---- The job tray ---- */
+  test("blockout: 'jobs' lists a running Blockout build as 'Building <name>' that cannot be cancelled, and 'jobs cancel' leaves it running without a crash", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = r477_blockout(ed, "Hall");
+    r477_rooms(ed, *bo, 3, 4);
+    ed.hold_blockout_landing_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(ed.blockout_jobs_running_for_test());
+    size_t mark = r477_mark();
+    ed.command("jobs");
+    std::string said = r477_log_since(mark);
+    CHECK(said.find("Building Hall") != std::string::npos && said.find("cannot be cancelled") != std::string::npos);
+    mark = r477_mark();
+    ed.command("jobs cancel Building Hall");
+    said = r477_log_since(mark);
+    CHECK(said.find("cannot be cancelled") != std::string::npos && ed.blockout_jobs_running_for_test());
+    ed.command("jobs cancel Nothing By That Name");
+    CHECK(ed.blockout_jobs_running_for_test());
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    mark = r477_mark();
+    ed.command("jobs");
+    CHECK(r477_log_since(mark).find("Building Hall") == std::string::npos && r477_matches(ed, "Hall"));
+  });
+}
+
+/* Round 477, the code review's findings: each was a fault before its fix. */
+static void r477_until_built(Editor &ed) {  // (the workers return; nothing is adopted - no frame, no poll)
+  for (int i = 0; i < 20000 && !ed.blockout_jobs_done_for_test(); i++) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+static void tests_round477_review() {
+  test("blockout: a build that finishes in the frame the gizmo moved its piece on is still shown, and the piece's new place is built next", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *cut = r477_piece(ed, *bo, "Cut", 1, 1, {0, 0, 0}, Vec3(1.0f), 0.4f, 4.0f);
+    ed.command("blockout wait");
+    ed.hold_blockout_landing_for_test(true);
+    cut->set_local_position({0.3f, 0.0f, 0.0f});
+    ed.mark_changed_for_test("drag");
+    ed.step_frame_headless();  // (the frame asks for the piece at 0.3 ...)
+    Mesh at_03;
+    CHECK(r477_scratch(*bo, at_03));
+    cut->set_local_position({0.5f, 0.0f, 0.0f});  // (... and its Scene view, drawn after the asking, moves the piece on)
+    r477_until_built(ed);
+    const uint64_t landed0 = ed.blockout_landed_for_test();
+    ed.hold_blockout_landing_for_test(false);
+    ed.blockout_poll_for_test();  // (the frame's poll: the build of 0.3 is done, the piece is at 0.5, nothing newer was asked for yet)
+    CHECK(ed.blockout_landed_for_test() == landed0 + 1);
+    CHECK(r477_mesh(bo) && r477_same(*r477_mesh(bo), at_03));  // (one build behind, shown)
+    CHECK(ed.blockout_jobs_running_for_test());                // (0.5 started at once)
+    ed.command("blockout wait");
+    CHECK(r477_matches(ed) && ed.blockout_main_builds_for_test() == 0);
+  });
+
+  test("blockout: a mesh that lands a frame after its worker finished is drawn by the Scene view at once - no change the views' counter missed", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.set_async_jobs_for_test(true);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *cut = r477_piece(ed, *bo, "Cut", 1, 1, {0, 0, 0}, Vec3(1.0f), 0.4f, 4.0f);
+    ed.command("blockout wait");
+    for (int i = 0; i < 10; i++) ed.step_frame_headless();
+    const uint64_t misses0 = ed.scene_hash_misses_for_test();
+    ed.hold_blockout_landing_for_test(true);
+    cut->set_local_position({0.4f, 0.0f, 0.0f});
+    ed.mark_changed_for_test("move");
+    ed.step_frame_headless();
+    r477_until_built(ed);      // (the worker's own touch() of the new mesh is behind us)
+    ed.step_frame_headless();  // (a frame whose views were drawn with the old mesh after it)
+    ed.hold_blockout_landing_for_test(false);
+    for (int i = 0; i < 20; i++) ed.step_frame_headless();  // (past the every-8th-frame check of the scene's hash)
+    CHECK(r477_matches(ed));
+    CHECK(ed.scene_hash_misses_for_test() == misses0);
+  });
+
+  test("blockout: Geometry to Origin, the UV operators and Paint leave a Blockout's mesh as its pieces make it, each with the hint", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Wall", 0, 0, {1, 0, 0}, {2, 2, 2});
+    r477_settle(ed, 2);
+    ed.select_for_test(bo->id, false);
+    const Mesh *mesh = r477_mesh(bo);
+    const uint64_t version = mesh->version;
+    for (const char *line : {"origin geometry", "uv unwrap", "uv smart", "uv pack", "paint on"}) {
+      const size_t mark = r477_mark();
+      ed.command(line);
+      r477_settle(ed, 2);
+      const bool hinted = r477_log_since(mark).find("rebuilt from its pieces") != std::string::npos;
+      const bool same = r477_mesh(bo) == mesh && mesh->version == version && r477_matches(ed);
+      if (!hinted || !same) std::printf("    '%s': %s%s\n", line, hinted ? "" : "no hint ", same ? "" : "the mesh changed");
+      CHECK(hinted && same);
+    }
+  });
+}
+
+static void tests_round477_review2() {
+  test("blockout: DynaMesh, Quad Remesh, Bake Textures, Mesh Maps, shape keys, vertex groups and Subdivide on a worker leave a Blockout's mesh as its pieces make it", [] {
+    for (int workers = 0; workers < 2; workers++) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.set_async_jobs_for_test(workers == 1);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      r477_piece(ed, *bo, "Wall", 0, 0, {1, 0, 0}, {2, 2, 2});
+      r477_settle(ed, 2);
+      ed.command("blockout wait");
+      ed.select_for_test(bo->id, false);
+      const Mesh *mesh = r477_mesh(bo);
+      const uint64_t version = mesh->version;
+      for (const char *line : {"sculpt dynamesh 32", "sculpt remesh 200", "baketex 256", "meshmaps 256", "shape add Puff", "vgroup add Top", "subdivide"}) {
+        const size_t mark = r477_mark();
+        ed.command(line);
+        r477_settle(ed, 3);
+        const std::string said = r477_log_since(mark);
+        const bool quiet = std::string(line) == "save" || std::string(line) == "sculpt remesh 200";  // (save writes nothing into the mesh; Quad Remesh may say the build has no QuadriFlow first)
+        const bool hinted = quiet || said.find("rebuilt from its pieces") != std::string::npos;
+        const Mesh *now = r477_mesh(bo);
+        const bool same = now == mesh && now->version == version && now->uvs.empty() && now->shape_keys.empty() && now->vertex_groups.empty() && r477_matches(ed);
+        if (!hinted || !same) std::printf("    '%s' (workers %s): %s%s\n", line, workers ? "on" : "off", hinted ? "" : "no hint ", same ? "" : "the mesh changed");
+        CHECK(hinted && same);
+      }
+      CHECK(!ed.mesh_job_started_for_test());
+    }
+  });
+
+  test("blockout: 'save' right after a script moved a piece writes the mesh the pieces make now", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *wall = r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {2, 2, 2});
+    r477_settle(ed, 2);
+    wall->set_local_position({3.0f, 0.0f, 0.0f});  // (no frame between this and the save)
+    ed.mark_changed_for_test("move");
+    const std::string dir = ed.resolve_asset_path_for_test("Assets/Scenes");
+    fs::make_dirs(dir);
+    const std::string path = fs::join(dir, "r477_save_now.scene");
+    ed.command("save " + path);
+    CHECK(r477_matches(ed));
+    fs::remove_file(path);
+  });
+}
+
+/* ------------------------------------------------------------------ round 478 (task 0454): rooms and Intersect */
+namespace {
+
+Piece r478_room(uint64_t id, Vec3 air, Vec3 at, bool keep = false, float thick = 0.2f) {
+  Piece p = box_piece(id, air, at);
+  p.room = true, p.keep_walls = keep, p.wall = p.floor = p.ceiling = thick;
+  return p;
+}
+
+size_t r478_faces_of(const R476Built &b, uint64_t id) {
+  size_t n = 0;
+  for (uint64_t p : b.faces.piece) n += p == id;
+  return n;
+}
+
+/* Corners of the result strictly inside the box lo..hi (a hundredth of a millimetre in from its sides). */
+size_t r478_corners_inside(const Mesh &m, Vec3 lo, Vec3 hi) {
+  size_t n = 0;
+  const float e = 1e-5f;
+  for (const Vec3 &p : m.positions) n += p.x > lo.x + e && p.x < hi.x - e && p.y > lo.y + e && p.y < hi.y - e && p.z > lo.z + e && p.z < hi.z - e;
+  return n;
+}
+
+}  // namespace
+
+static void tests_round478() {
+  test("blockout rooms: one box room is two shells - 12 faces, 16 corners - with its inside named floor, ceiling and walls", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{r478_room(5, {4, 3, 4}, {0.5f, 0.25f, -1.0f})};
+      const R476Built b = r476_build(pieces, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK(b.mesh.face_count() == 12);
+      CHECK(b.mesh.vert_count() == 16);
+      CHECK_NEAR(r476_volume(b.mesh), 4.4 * 3.4 * 4.4 - 48.0, 2e-3);
+      CHECK(r476_flatness(b, pieces) <= 1e-5 * 7.0);
+      unsigned inside = 0, outside = 0;
+      int floors = 0, ceilings = 0, walls = 0, outs = 0;
+      for (size_t f = 0; f < b.faces.side.size(); f++) {
+        CHECK(b.faces.piece[f] == 5);
+        const uint32_t side = b.faces.side[f];
+        if (side < 6) inside |= 1u << side;
+        if (side >= blockout::kSideShell && side < blockout::kSideShell + 6) outside |= 1u << (side - blockout::kSideShell);
+        const blockout::SideClass cls = blockout::side_class(pieces[0], side);
+        floors += cls == blockout::SideClass::Floor, ceilings += cls == blockout::SideClass::Ceiling, walls += cls == blockout::SideClass::Wall, outs += cls == blockout::SideClass::Outside;
+      }
+      CHECK(inside == 63u && outside == 63u);
+      CHECK(floors == 1 && ceilings == 1 && walls == 4 && outs == 6);
+      /* The floor is the face at the air's bottom. */
+      for (size_t f = 0; f < b.mesh.face_count(); f++)
+        if (blockout::side_class(pieces[0], b.faces.side[f]) == blockout::SideClass::Floor) CHECK_NEAR(b.mesh.positions[b.mesh.face_verts(f)[0]].y, 0.25f - 1.5f, 1e-5f);
+      CHECK(b.report.clusters.size() == 1 && b.report.clusters[0].pieces == 1);
+    }
+  });
+
+  test("blockout rooms: a cylinder room's wall is as thick as set between its facets, and its volume is the shell's less the air's", [] {
+    for (Path path : r476_paths()) {
+      Piece p = cylinder_piece(1, 2.0f, 3.0f, 16, {0, 0, 0});
+      p.room = true, p.wall = 0.3f, p.floor = 0.2f, p.ceiling = 0.1f;
+      const R476Built b = r476_build({p}, path, 0.05f);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      const double pi = 3.14159265358979323846, n = 16.0;
+      const double outer = 2.0 + 0.3 / std::cos(pi / n);
+      const double area = [&](double r) { return 0.5 * n * r * r * std::sin(2.0 * pi / n); }(outer), air = 0.5 * n * 4.0 * std::sin(2.0 * pi / n);
+      CHECK_NEAR(r476_volume(b.mesh), area * 3.3 - air * 3.0, 2e-3);
+      CHECK(b.mesh.face_count() == 2 * 18);
+      float top = -1e9f, bottom = 1e9f;
+      for (const Vec3 &q : b.mesh.positions) top = std::max(top, q.y), bottom = std::min(bottom, q.y);
+      CHECK_NEAR(top, 1.6f, 1e-5f);
+      CHECK_NEAR(bottom, -1.7f, 1e-5f);
+    }
+  });
+
+  test("blockout rooms: two Merge rooms whose air overlaps are one room - no wall, no face, where both have air", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {3, 0, 0})};
+      const R476Built b = r476_build(pieces, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), (2 * 4.4 * 3.4 * 4.4 - 1.4 * 3.4 * 4.4) - (96.0 - 12.0), 3e-3);
+      CHECK(r478_corners_inside(b.mesh, {-2, -1.5f, -2}, {5, 1.5f, 2}) == 0);
+      CHECK(b.mesh.face_count() == 12);  // (one long room: its faces merge across the two)
+    }
+  });
+
+  test("blockout rooms: Merge rooms side by side keep the wall between them; rooms that only touch stand wall to wall with nothing between", [] {
+    for (Path path : r476_paths()) {
+      const R476Built shared = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0})}, path);
+      CHECK(shared.ok && r476_sound(shared.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(shared.mesh), 2 * 4.4 * 3.4 * 4.4 - 0.2 * 3.4 * 4.4 - 96.0, 3e-3);
+      CHECK(shared.mesh.face_count() == 6 + 12);
+      const R476Built touch = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.4f, 0, 0})}, path);
+      CHECK(touch.ok && r476_sound(touch.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(touch.mesh), 2 * (4.4 * 3.4 * 4.4 - 48.0), 3e-3);
+      CHECK(touch.mesh.face_count() == 6 + 12);
+      CHECK(r478_corners_inside(touch.mesh, {2.0f, -1.7f, -2.2f}, {2.4f, 1.7f, 2.2f}) == 0);
+    }
+  });
+
+  test("blockout rooms: a Keep room keeps all its walls - inside a Merge room, across the wall between two, and inside another Keep room", [] {
+    for (Path path : r476_paths()) {
+      const R476Built in = r476_build({r478_room(1, {8, 3, 8}, {0, 0, 0}), r478_room(2, {2, 2, 2}, {0.5f, -0.3f, 0.25f}, true)}, path);
+      CHECK(in.ok && r476_sound(in.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(in.mesh), (8.4 * 3.4 * 8.4 - 192.0) + (2.4 * 2.4 * 2.4 - 8.0), 5e-3);
+      CHECK(r478_faces_of(in, 2) >= 11);  // (six inside; its outside's bottom lies on the Merge room's floor and is one with it)
+
+      /* Across the wall: the wall does not run through the Keep room's air. */
+      const std::vector<Piece> across{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), r478_room(3, {2, 2, 2}, {2.1f, -0.3f, 0}, true)};
+      const R476Built b = r476_build(across, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), (2 * 4.4 * 3.4 * 4.4 - 0.2 * 3.4 * 4.4 - 96.0) - 0.2 * 2 * 2 + (2.4 * 2.4 * 2.4 - 8.0) - (2.4 * 2.4 - 4.0) * 0.2, 4e-3);
+      CHECK(r478_corners_inside(b.mesh, {1.1f, -1.3f, -1}, {3.1f, 0.7f, 1}) == 0);
+
+      const R476Built two = r476_build({r478_room(1, {2, 2, 2}, {0, 0, 0}, true), r478_room(2, {2, 2, 2}, {1.5f, 0, 0}, true)}, path);
+      CHECK(two.ok && r476_sound(two.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(two.mesh), 2 * (2.4 * 2.4 * 2.4 - 8.0) - 1.584, 2e-3);
+    }
+  });
+
+  test("blockout rooms: an Add piece standing in a room stays - a column from floor to ceiling is one solid with both", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(2, {0.5f, 3.0f, 0.5f}, {0.5f, 0, 0.25f})};
+      const R476Built b = r476_build(pieces, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), 4.4 * 3.4 * 4.4 - 48.0 + 0.75, 2e-3);
+      size_t column = 0;
+      for (size_t f = 0; f < b.mesh.face_count(); f++) {
+        if (b.faces.piece[f] != 2) continue;
+        column++;
+        CHECK(b.faces.side[f] != 2 && b.faces.side[f] != 3);  // (no face where it meets the floor and the ceiling)
+      }
+      CHECK(column == 4);
+    }
+  });
+
+  test("blockout rooms: a door through the wall between two rooms opens one into the other, and a window leaves a sill", [] {
+    for (Path path : r476_paths()) {
+      std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), box_piece(3, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 0}, Op::Subtract)};
+      const R476Built door = r476_build(pieces, path);
+      CHECK(door.ok && r476_sound(door.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(door.mesh), 2 * 4.4 * 3.4 * 4.4 - 0.2 * 3.4 * 4.4 - 96.0 - 0.2 * 2.1 * 0.9, 3e-3);
+      CHECK(r478_faces_of(door, 3) == 3);  // (two jambs and a head: the cut reaches the floor, so there is no step)
+      for (size_t f = 0; f < door.mesh.face_count(); f++)
+        if (door.faces.piece[f] == 3) CHECK(blockout::side_class(pieces[2], door.faces.side[f]) == blockout::SideClass::Cut);
+      pieces[2] = box_piece(3, {0.6f, 1.0f, 0.9f}, {2.1f, -0.1f, 0}, Op::Subtract);
+      const R476Built window = r476_build(pieces, path);
+      CHECK(window.ok && r476_sound(window.mesh, r476_name(path)));
+      CHECK(r478_faces_of(window, 3) == 4);
+      CHECK_NEAR(r476_volume(window.mesh), 2 * 4.4 * 3.4 * 4.4 - 0.2 * 3.4 * 4.4 - 96.0 - 0.2 * 1.0 * 0.9, 3e-3);
+    }
+  });
+
+  test("blockout rooms: an open-topped room has no ceiling and its walls end flat at the air's top", [] {
+    for (Path path : r476_paths()) {
+      Piece p = r478_room(1, {4, 3, 4}, {0, 0, 0});
+      p.open_top = true;
+      const R476Built b = r476_build({p}, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), 4.4 * 3.2 * 4.4 - 48.0, 2e-3);
+      float top = -1e9f;
+      for (const Vec3 &q : b.mesh.positions) top = std::max(top, q.y);
+      CHECK_NEAR(top, 1.5f, 1e-5f);
+      for (size_t f = 0; f < b.mesh.face_count(); f++) CHECK(blockout::side_class(p, b.faces.side[f]) != blockout::SideClass::Ceiling);
+    }
+  });
+
+  test("blockout: an Intersect piece keeps what is inside it, of every cluster; two keep what is inside both", [] {
+    for (Path path : r476_paths()) {
+      std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), box_piece(3, {3, 10, 10}, {2.1f, 0, 0}, Op::Intersect),
+                                box_piece(9, {1, 1, 1}, {100, 0, 0})};
+      const R476Built one = r476_build(pieces, path);
+      CHECK(one.ok && r476_sound(one.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(one.mesh), 3 * 3.4 * 4.4 - 2 * 1.4 * 12.0, 2e-3);
+      CHECK(r478_faces_of(one, 9) == 0);  // (the box far away is outside the Intersect piece: gone)
+      size_t cut = 0;
+      for (size_t f = 0; f < one.mesh.face_count(); f++) {
+        if (one.faces.piece[f] != 3) continue;
+        cut++;
+        CHECK(one.faces.side[f] == 0 || one.faces.side[f] == 1);
+        CHECK(blockout::side_class(pieces[2], one.faces.side[f]) == blockout::SideClass::Cut);
+      }
+      CHECK(cut >= 2);
+      float lo = 1e9f, hi = -1e9f;
+      for (const Vec3 &q : one.mesh.positions) lo = std::min(lo, q.x), hi = std::max(hi, q.x);
+      CHECK_NEAR(lo, 0.6f, 1e-5f);
+      CHECK_NEAR(hi, 3.6f, 1e-5f);
+      pieces.push_back(box_piece(4, {10, 2, 10}, {2.1f, 0, 0}, Op::Intersect));
+      const R476Built both = r476_build(pieces, path);
+      CHECK(both.ok && r476_sound(both.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(both.mesh), 2 * 1.4 * 0.4 * 2.0 + 0.2 * 2.0 * 4.4, 1e-3);
+    }
+  });
+
+  test("blockout: an Intersect piece that ends on a room's floor plane takes the floor and leaves no sheet behind", [] {
+    for (Path path : r476_paths()) {
+      /* The floor slab lies below the plane the Intersect piece starts at: nothing of it is inside. */
+      const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(2, {10, 10, 10}, {0, 3.5f, 0}, Op::Intersect)};
+      const R476Built b = r476_build(pieces, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), 4.4 * 3.2 * 4.4 - 48.0, 2e-3);
+      float low = 1e9f;
+      for (const Vec3 &q : b.mesh.positions) low = std::min(low, q.y);
+      CHECK_NEAR(low, -1.5f, 1e-5f);
+      /* ...and one that ends on the ceiling's underside, with a second one beside it. */
+      const std::vector<Piece> two{r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(2, {10, 10, 10}, {0, -3.5f, 0}, Op::Intersect), box_piece(3, {10, 10, 10}, {3, 0, 0}, Op::Intersect)};
+      const R476Built c = r476_build(two, path);
+      CHECK(c.ok && r476_sound(c.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(c.mesh), 4.2 * 3.2 * 4.4 - 4.0 * 3.0 * 4.0, 2e-3);
+    }
+  });
+
+  test("blockout: an Intersect piece that starts at any of a room's six inside planes leaves no sheet of the slab behind it", [] {
+    /* (Manifold kept the slab as a sheet of no thickness when the plane was square to X, and only then.) */
+    for (Path path : r476_paths())
+      for (int axis = 0; axis < 3; axis++)
+        for (float way : {-1.0f, 1.0f}) {
+          Vec3 at(0.0f);
+          at[axis] = way * (axis == 1 ? 3.5f : 3.0f);  // (a 10 m box whose near side is the air's side)
+          const R476Built b = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(2, {10, 10, 10}, at, Op::Intersect)}, path);
+          const bool sound = b.ok && r476_sound(b.mesh, r476_name(path));
+          if (!sound) std::printf("    axis %d, way %+.0f\n", axis, way);
+          CHECK(sound);
+          CHECK(b.mesh.face_count() == 14);
+          CHECK_NEAR(r476_volume(b.mesh), axis == 1 ? 4.4 * 3.2 * 4.4 - 48.0 : 4.2 * 3.4 * 4.4 - 48.0, 2e-3);
+        }
+  });
+
+  test("blockout rooms: rooms at other floor heights, a floor of no thickness and rooms sharing a wall's plane leave no face of no thickness", [] {
+    for (Path path : r476_paths()) {
+      for (float lift : {0.1f, 3.2f}) {
+        const R476Built b = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, lift, 0})}, path);
+        CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      }
+      Piece bare_floor = r478_room(1, {4, 3, 4}, {0, 0, 0});
+      bare_floor.floor = 0.0f;
+      const R476Built open = r476_build({bare_floor}, path);
+      CHECK(open.ok && r476_sound(open.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(open.mesh), 4.4 * 3.2 * 4.4 - 48.0, 2e-3);
+      /* The second room's air ends where the first one's shell does. */
+      const R476Built plane = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.0f, 0, 0})}, path);
+      CHECK(plane.ok && r476_sound(plane.mesh, r476_name(path)));
+      CHECK(r478_corners_inside(plane.mesh, {-2, -1.5f, -2}, {6, 1.5f, 2}) == 0);  // (the airs touch: no wall is left between)
+    }
+  });
+
+  test("blockout rooms: hostile rooms - no thickness, a wall thicker than the room, a negative or NaN thickness, squashed and mirrored - are closed or say why", [] {
+    for (Path path : r476_paths()) {
+      Piece bare = r478_room(1, {4, 3, 4}, {0, 0, 0}, false, 0.0f);
+      const R476Built none = r476_build({bare}, path);
+      CHECK(none.ok && none.mesh.face_count() == 0);
+      CHECK(none.report.notes.size() == 1 && none.report.notes[0].id == 1 && none.report.skipped.empty());
+      /* ...but its air still clears a Merge room it overlaps. */
+      const R476Built clears = r476_build({r478_room(2, {4, 3, 4}, {0, 0, 0}), r478_room(1, {2, 1, 2}, {2, -1, 0}, false, 0.0f)}, path);
+      CHECK(clears.ok && r476_sound(clears.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(clears.mesh), 4.4 * 3.4 * 4.4 - 48.0 - 0.2 * 1.0 * 2.0, 2e-3);
+
+      const R476Built thick = r476_build({r478_room(1, {1, 1, 1}, {0, 0, 0}, false, 5.0f)}, path);
+      CHECK(thick.ok && r476_sound(thick.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(thick.mesh), 11.0 * 11.0 * 11.0 - 1.0, 0.2);
+
+      Piece odd = r478_room(1, {4, 3, 4}, {0, 0, 0});
+      odd.wall = -3.0f, odd.floor = std::numeric_limits<float>::quiet_NaN(), odd.ceiling = std::numeric_limits<float>::infinity();
+      const R476Built safe = r476_build({odd}, path);
+      CHECK(safe.ok && safe.report.skipped.empty() && safe.mesh.face_count() == 0);  // (each read as 0: a room of no thickness)
+
+      Piece squashed = r478_room(1, {4, 3, 4}, {0, 0, 0});
+      squashed.to_blockout = Mat4::trs({1, 2, 3}, Quat::euler({0, 30, 0}), {-0.5f, 2.0f, 1.5f});
+      const R476Built sq = r476_build({squashed}, path, 0.025f);
+      CHECK(sq.ok && r476_sound(sq.mesh, r476_name(path)));
+      CHECK(sq.mesh.face_count() == 12);
+      /* The wall is 0.2 m in the Blockout's space whatever the scale: the shell is the scaled air plus 0.4 a side. */
+      CHECK_NEAR(r476_volume(sq.mesh), (2.0 + 0.4) * (6.0 + 0.4) * (6.0 + 0.4) - 2.0 * 6.0 * 6.0, 5e-3);
+    }
+  });
+
+  test("blockout rooms: the same rooms give the same bytes, and a build after nothing moved comes from the cache", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), r478_room(3, {2, 2, 2}, {2.1f, -0.3f, 0}, true),
+                                      box_piece(4, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 1.4f}, Op::Subtract), box_piece(5, {100, 2.5f, 100}, {0, 0, 0}, Op::Intersect),
+                                      r478_room(6, {2, 2, 2}, {40, 0, 0})};
+      blockout::Cache cache;
+      const R476Built a = r476_build(pieces, path), b = r476_build(pieces, path, 0.1f, &cache), c = r476_build(pieces, path, 0.1f, &cache);
+      CHECK(a.ok && b.ok && c.ok && r476_sound(a.mesh, r476_name(path)));
+      CHECK(r476_same_mesh(a, b) && r476_same_mesh(a, c));
+      CHECK(b.report.built == 2 && c.report.cached == 2 && c.report.built == 0);
+      /* A thickness is part of what a cluster was built from. */
+      std::vector<Piece> thicker = pieces;
+      thicker[5].wall = 0.3f;
+      const R476Built d = r476_build(thicker, path, 0.1f, &cache);
+      CHECK(d.ok && d.report.built == 1 && d.report.cached == 1);
+      CHECK(!r476_same_mesh(a, d));
+    }
+  });
+
+  test("blockout rooms: the field path gives the crisp path's faces on rooms, Keep rooms, doors and an Intersect piece", [] {
+    if (!blockout::crisp_available()) return;
+    const std::vector<std::vector<Piece>> cases{
+        {r478_room(1, {4, 3, 4}, {0, 0, 0})},
+        {r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {3, 0, 0})},
+        {r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), box_piece(3, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 0}, Op::Subtract)},
+        {r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), r478_room(3, {2, 2, 2}, {2.1f, -0.3f, 0}, true)},
+        {r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), box_piece(3, {3, 10, 10}, {2.1f, 0, 0}, Op::Intersect)},
+        {r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(2, {0.5f, 3.0f, 0.5f}, {0.5f, 0, 0.25f})},
+    };
+    for (size_t i = 0; i < cases.size(); i++) {
+      const R476Built crisp = r476_build(cases[i], Path::Crisp), field = r476_build(cases[i], Path::Field, 0.05f);
+      const bool same = crisp.ok && field.ok && r476_same_shape(crisp, field);
+      if (!same) std::printf("    case %zu: crisp %zu faces / %zu points, field %zu / %zu\n", i, crisp.mesh.face_count(), crisp.mesh.vert_count(), field.mesh.face_count(), field.mesh.vert_count());
+      CHECK(same);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ round 478: the object, the editor, the console */
+namespace {
+
+/* What a component's reflect() says: each field's name, whether it was greyed, and the help given for it. */
+struct R478Probe : Reflector {
+  struct Seen {
+    std::string name, help;
+    bool greyed = false;
+  };
+  std::vector<Seen> seen;
+  bool grey = false;
+  void note(const char *n) { seen.push_back({n, "", grey}); }
+  void field(const char *n, float &, float, float, float) override { note(n); }
+  void field(const char *n, int &, int, int) override { note(n); }
+  void field(const char *n, bool &) override { note(n); }
+  void field(const char *n, Vec3 &) override { note(n); }
+  void color(const char *n, Vec3 &) override { note(n); }
+  void enumeration(const char *n, int &, const char *const *, int) override { note(n); }
+  void text(const char *n, std::string &) override { note(n); }
+  void mesh(const char *, MeshPtr &) override {}
+  void help(const char *t) override {
+    if (!seen.empty()) seen.back().help = t;
+  }
+  void greyed(bool on) override { grey = on; }
+  const Seen *find(const char *name) const {
+    for (const Seen &s : seen)
+      if (s.name == name) return &s;
+    return nullptr;
+  }
+};
+
+/* A Blockout at the world origin in an empty scene, selected, with the camera on it. */
+GameObject *r478_scene(Editor &ed, const char *camera = "camera 30 20 12 0 0 0") {
+  r477_empty_scene(ed);
+  ed.command(camera);
+  GameObject *bo = r477_blockout(ed);
+  ed.select_for_test(bo->id, false);
+  return bo;
+}
+
+/* A room as the console makes it, selected afterwards: the first piece. */
+GameObject *r478_room_by_command(Editor &ed, GameObject &bo, const char *line = "blockout add room box 4 3 4") {
+  ed.select_for_test(bo.id, false);
+  ed.command(line);
+  r477_settle(ed, 2);
+  return ed.active_object_for_test();
+}
+
+size_t r478_faces_named(const Blockout &b, uint64_t id) {
+  size_t n = 0;
+  for (uint64_t p : b.state.faces.piece) n += p == id;
+  return n;
+}
+
+Vec3 r478_forward(const GameObject &g) { return g.local().rotation.rotate({0.0f, 0.0f, 1.0f}); }
+
+}  // namespace
+
+static void tests_round478_object() {
+  /* ---- The component and the Inspector ---- */
+  test("blockout rooms: a room's Wall, Floor, Ceiling, Walls and Open Top show only for a room, its Operation is greyed with the reason in its help, an opening's Width, Head and Sill only for an opening", [] {
+    BlockoutPiece plain;
+    R478Probe a;
+    plain.reflect(a);
+    CHECK(a.find("Room") && a.find("Opening") && a.find("Operation") && !a.find("Wall") && !a.find("Floor") && !a.find("Ceiling") && !a.find("Walls") && !a.find("Open Top") &&
+          !a.find("Width") && !a.find("Head") && !a.find("Sill") && !a.find("Depth"));
+    CHECK(a.find("Operation") && !a.find("Operation")->greyed && a.find("Size"));
+    BlockoutPiece room;
+    room.room = true;
+    R478Probe b;
+    room.reflect(b);
+    CHECK(b.find("Wall") && b.find("Floor") && b.find("Ceiling") && b.find("Walls") && b.find("Open Top") && b.find("Room") && !b.find("Opening") && !b.find("Width"));
+    const R478Probe::Seen *op = b.find("Operation");
+    CHECK(op && op->greyed && op->help.find("ignored") != std::string::npos);
+    CHECK(b.find("Shape") && !b.find("Shape")->greyed && b.find("Wall") && !b.find("Wall")->greyed);  // (only the Operation is greyed)
+    CHECK(b.find("Walls") && b.find("Walls")->help.find("Merge with neighbours") != std::string::npos);
+    BlockoutPiece door;
+    door.opening = 1;
+    R478Probe c;
+    door.reflect(c);
+    CHECK(c.find("Width") && c.find("Head") && c.find("Sill") && c.find("Depth") && c.find("Opening") && !c.find("Room") && !c.find("Wall") && !c.find("Operation") && !c.find("Size") &&
+          !c.find("Shape"));
+    /* Files, undo and `set` still see every field. */
+    struct All : R478Probe {
+      bool all_fields() const override { return true; }
+    } all;
+    plain.reflect(all);
+    for (const char *n : {"Room", "Wall", "Floor", "Ceiling", "Walls", "Open Top", "Opening", "Width", "Head", "Sill", "Depth", "Operation", "Size"}) CHECK(all.find(n));
+    Blockout bo;
+    R478Probe d;
+    bo.reflect(d);
+    CHECK(d.find("Default Wall Thickness") && d.find("Default Wall Thickness")->help.find("new room") != std::string::npos);
+  });
+
+  test("blockout rooms: the Inspector draws a piece's room fields only once it is a room, an opening's only for a door, and the status line names a room of no thickness", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    GameObject *box = r477_find(ed, "Box");
+    auto has = [&](const std::string &key) {
+      for (const auto &kv : ed.ui_for_test().button_rects)
+        if (kv.first.rfind(key, 0) == 0) return true;
+      return false;
+    };
+    auto look = [&](GameObject *g) {
+      ed.select_for_test(g->id, false);
+      ed.record_buttons_for_test(true);
+      r477_settle(ed, 3);
+    };
+    look(bo);
+    CHECK(has("field:Default Wall Thickness"));
+    look(box);
+    CHECK(has("field:Room") && !has("field:Wall") && !has("field:Floor") && !has("field:Ceiling") && !has("field:Open Top") && !has("field:Width") && !has("greyed:Operation"));
+    BlockoutPiece *bp = box->get<BlockoutPiece>();
+    bp->room = true;
+    look(box);
+    CHECK(has("field:Wall") && has("field:Floor") && has("field:Ceiling") && has("field:Open Top") && has("greyed:Operation") && !has("field:Width"));
+    bp->room = false, bp->opening = 1;
+    look(box);
+    CHECK(has("field:Width") && has("field:Head") && has("field:Sill") && has("field:Depth") && !has("field:Room") && !has("field:Wall") && !has("greyed:Operation"));
+    bp->opening = 0, bp->room = true, bp->wall = bp->floor = bp->ceiling = 0.0f;
+    look(bo);
+    r477_settle(ed, 3);
+    CHECK(has("shown:'Box': the room has no wall, floor or ceiling thickness"));
+  });
+
+  test("blockout rooms: 'set BlockoutPiece.Wall' and a clone carry the room fields, and the mesh follows", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    ed.clear_selection_for_test();
+    ed.command("blockout add room box 4 3 4");
+    GameObject *room = ed.active_object_for_test();
+    CHECK(room && room->get<BlockoutPiece>() && room->get<BlockoutPiece>()->room);
+    if (!room) return;
+    const Mesh thin = *r477_mesh(r477_find(ed));
+    ed.command("set BlockoutPiece.Wall 0.4");
+    ed.command("set BlockoutPiece.Walls 1");
+    ed.command("set BlockoutPiece.OpenTop 1");
+    const BlockoutPiece *bp = room->get<BlockoutPiece>();
+    CHECK(bp->wall == 0.4f && bp->walls == 1 && bp->open_top);
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed) && !r477_same(thin, *r477_mesh(r477_find(ed))));
+    auto copy = room->get<BlockoutPiece>()->clone();
+    const BlockoutPiece *c = static_cast<BlockoutPiece *>(copy.get());
+    CHECK(c->room && c->wall == 0.4f && c->walls == 1 && c->open_top && c->floor == 0.2f);
+  });
+
+  /* ---- The console ---- */
+  test("blockout rooms: 'blockout add room' makes a room with the Blockout's Default Wall Thickness all round, one undo step, closed; 'room cylinder' a round one", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    GameObject *bo = r477_find(ed);
+    ed.select_for_test(bo->id, false);
+    ed.command("set Blockout.DefaultWallThickness 0.3");
+    CHECK(bo->get<Blockout>()->default_wall == 0.3f);
+    const size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout add room");
+    r477_settle(ed, 2);
+    const BlockoutPiece *room = r477_active_piece(ed);
+    CHECK(room && room->room && room->shape == 0 && room->size.x == 4.0f && room->size.y == 3.0f && room->size.z == 4.0f);
+    CHECK(room && room->wall == 0.3f && room->floor == 0.3f && room->ceiling == 0.3f && room->walls == 0 && !room->open_top);
+    CHECK(ed.undo_depth_for_test() == depth + 1 && ed.active_object_for_test()->parent == bo);
+    ed.command("blockout add room cylinder 1.5 2.5");
+    r477_settle(ed, 2);
+    const BlockoutPiece *round = r477_active_piece(ed);
+    CHECK(round && round->room && round->shape == 1 && round->radius == 1.5f && round->height == 2.5f && round->wall == 0.3f);
+    CHECK(r477_matches(ed) && r477_count(ed, true) == 3);
+    ed.command("undo");
+    r477_settle(ed, 2);
+    CHECK(r477_count(ed, true) == 2);
+    /* Alone in a new Blockout: one room is two shells - 12 faces. */
+    r477_empty_scene(ed);
+    ed.command("blockout add room box 4 3 4");
+    const Mesh *m = r477_mesh(r477_find(ed));
+    CHECK(m && m->face_count() == 12 && r476_sound(*m, "one room"));
+    r477_empty_scene(ed);
+    ed.command("blockout add room cylinder 2 3");
+    const Mesh *cm = r477_mesh(r477_find(ed));
+    CHECK(cm && cm->face_count() >= 40 && r476_sound(*cm, "a round room"));
+    const size_t mark = r477_mark();
+    ed.command("blockout add room sphere");  // (no sphere rooms yet: refused, said)
+    CHECK(r477_count(ed, true) == 1 && te_warnings_since(mark) >= 1);
+  });
+
+  test("blockout rooms: 'blockout add box intersect' keeps only what is inside it, and 'blockout set wall|floor|ceiling|walls|opentop' change the selected rooms", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    ed.command("blockout new");
+    ed.command("blockout add box intersect 1 10 10");
+    const BlockoutPiece *cut = r477_active_piece(ed);
+    CHECK(cut && cut->operation == 2 && cut->shape == 0 && !cut->room && cut->size.x == 1.0f);
+    CHECK(r477_matches(ed));
+    CHECK_NEAR(r476_volume(*r477_mesh(r477_find(ed))), 4.0, 0.2);  // (the 2 m box cut to a metre of it)
+    ed.command("blockout add intersect cylinder 1 3");
+    CHECK(r477_active_piece(ed) && r477_active_piece(ed)->operation == 2 && r477_active_piece(ed)->shape == 1);
+    r477_empty_scene(ed);
+    ed.command("blockout add room");
+    GameObject *room = ed.active_object_for_test();
+    const BlockoutPiece *bp = room ? room->get<BlockoutPiece>() : nullptr;
+    CHECK(bp != nullptr);
+    if (!bp) return;
+    ed.command("blockout set wall 0.35");
+    ed.command("blockout set floor 0.1");
+    ed.command("blockout set ceiling 0.4");
+    CHECK(bp->wall == 0.35f && bp->floor == 0.1f && bp->ceiling == 0.4f);
+    ed.command("blockout set walls keep");
+    CHECK(bp->walls == 1);
+    ed.command("blockout set walls merge");
+    CHECK(bp->walls == 0);
+    ed.command("blockout set opentop on");
+    CHECK(bp->open_top);
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed));
+    ed.command("blockout set opentop off");
+    CHECK(!bp->open_top);
+    const size_t mark = r477_mark();
+    ed.command("blockout set wall abc");
+    ed.command("blockout set walls maybe");
+    ed.command("blockout set opentop sideways");
+    CHECK(te_warnings_since(mark) == 3 && bp->wall == 0.35f && bp->walls == 0 && !bp->open_top);
+    /* Two selected rooms change together; a piece that is not a room is left alone, and with no room selected it says so. */
+    ed.command("blockout add room");
+    GameObject *second = ed.active_object_for_test();
+    ed.select_for_test(room->id, false);
+    ed.select_for_test(second->id, true);
+    ed.command("blockout set wall 0.6");
+    CHECK(room->get<BlockoutPiece>()->wall == 0.6f && second->get<BlockoutPiece>()->wall == 0.6f);
+    ed.select_for_test(r477_find(ed)->id, false);
+    const size_t mark2 = r477_mark();
+    ed.command("blockout set wall 0.1");
+    CHECK(te_warnings_since(mark2) == 1 && room->get<BlockoutPiece>()->wall == 0.6f);
+    const size_t mark3 = r477_mark();
+    ed.command("help blockout");
+    const std::string said = r477_log_since(mark3);
+    for (const char *verb : {"add room", "add door|window", "intersect", "wall|floor|ceiling", "opentop"}) CHECK(said.find(verb) != std::string::npos);
+  });
+
+  /* ---- Doors and windows ---- */
+  test("blockout rooms: 'blockout add door' puts a door in the middle of the selected room's first wall, turned to it and standing on the floor, and the wall is cut", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room && room->get<BlockoutPiece>() && room->get<BlockoutPiece>()->room);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 2);
+    const double closed = r476_volume(*r477_mesh(bo));
+    const size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout add door");
+    r477_settle(ed, 2);
+    GameObject *door = ed.active_object_for_test();
+    const BlockoutPiece *dp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(dp && dp->opening == 1 && !dp->room && dp->width == 0.9f && dp->head == 2.1f && dp->sill == 0.0f && door->parent == bo);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    if (!dp) return;
+    /* The first wall is the air's -X side: the wall's middle at x = -2.1, the door's feet on the floor (y = -1.5), turned to look through the wall along X. */
+    const Vec3 at = door->local().position, fwd = r478_forward(*door);
+    CHECK_NEAR(at.x, -2.1f, 1e-4f);
+    CHECK_NEAR(at.y, -1.5f, 1e-4f);
+    CHECK_NEAR(at.z, 0.0f, 1e-4f);
+    CHECK_NEAR(std::fabs(fwd.x), 1.0f, 1e-4f);
+    CHECK_NEAR(dp->depth, 0.4f, 1e-5f);  // (the wall's 0.2 m and 0.1 m either side)
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed));
+    const Blockout &b = *bo->get<Blockout>();
+    CHECK(r478_faces_named(b, door->id) >= 3);
+    const Mesh &m = *r477_mesh(bo);
+    CHECK(r476_sound(m, "a room with a door"));
+    CHECK_NEAR(r476_volume(m), closed - 0.2 * 0.9 * 2.1, 0.12);
+    for (size_t f = 0; f < b.state.faces.piece.size(); f++)
+      if (b.state.faces.piece[f] == door->id) CHECK(blockout::side_class(door->get<BlockoutPiece>()->to_piece(door->id, door->local_matrix()), b.state.faces.side[f]) == blockout::SideClass::Cut);
+    /* Moving it afterwards is moving any piece: it follows the origin, which is the floor line. */
+    door->set_local_position(door->local().position + Vec3(0.0f, 0.0f, 1.0f));
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed) && r478_faces_named(b, door->id) >= 3);
+    /* Changing the sill moves the cut up from the floor line without moving the object. */
+    const Vec3 stayed = door->get<BlockoutPiece>() ? door->local().position : Vec3();
+    door->get<BlockoutPiece>()->sill = 0.9f;
+    r477_settle(ed, 3);
+    CHECK(door->local().position == stayed && r477_matches(ed));
+    CHECK(r478_faces_named(b, door->id) >= 4);  // (now a window: a sill, two jambs and a head)
+  });
+
+  test("blockout rooms: 'blockout add window' is 1.2 m wide from a sill at 0.9 m to a head at 2 m, with the numbers it was given taking over; with no room to put it in it says so and makes nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 2);
+    ed.command("blockout add window");
+    GameObject *win = ed.active_object_for_test();
+    const BlockoutPiece *wp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(wp && wp->opening == 2 && wp->width == 1.2f && wp->head == 2.0f && wp->sill == 0.9f);
+    CHECK(win && std::fabs(win->local().position.y + 1.5f) < 1e-4f);
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed) && r478_faces_named(*bo->get<Blockout>(), win->id) >= 4);
+    ed.command("blockout add window 2 1.6 0.5");
+    wp = r477_active_piece(ed);
+    CHECK(wp && wp->width == 2.0f && wp->head == 1.6f && wp->sill == 0.5f);
+    ed.command("blockout add door 1 2.3");
+    wp = r477_active_piece(ed);
+    CHECK(wp && wp->opening == 1 && wp->width == 1.0f && wp->head == 2.3f && wp->sill == 0.0f);
+    /* No room: a Blockout of boxes alone. */
+    Editor ed2;
+    ed2.init_headless(900, 600);
+    ed2.command("blockout new");
+    const size_t pieces = r477_count(ed2, true), depth = ed2.undo_depth_for_test();
+    const size_t mark = r477_mark();
+    ed2.command("blockout add door");
+    ed2.command("blockout add window");
+    CHECK(r477_count(ed2, true) == pieces && ed2.undo_depth_for_test() == depth && te_warnings_since(mark) == 2);
+    ed2.clear_selection_for_test();
+    const size_t mark2 = r477_mark();
+    ed2.command("blockout add door");  // (nothing selected: there is no Blockout to put one in)
+    CHECK(r477_count(ed2, true) == pieces && te_warnings_since(mark2) == 1);
+  });
+
+  test("blockout rooms: with the mouse over a room's wall in the Scene view a door goes on that wall - turned to it, at the spot, on the floor - and with the mouse elsewhere on the first wall", [] {
+    Editor ed;
+    te_view(ed, "camera 30 20 12 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 3);
+    /* A wall the camera sees from outside (the first wall, -X, is not it). */
+    const Vec2 centre{(float)ed.scene_view_rect().w * 0.5f, (float)ed.scene_view_rect().h * 0.5f};
+    const Ray eye = ed.screen_ray_for_test(centre);
+    struct Wall {
+      Vec3 normal, at;
+    };
+    const Wall walls[] = {{{0, 0, 1}, {0.7f, 0.2f, 2.2f}}, {{0, 0, -1}, {0.7f, 0.2f, -2.2f}}, {{1, 0, 0}, {2.2f, 0.2f, 0.7f}}};
+    const Wall *seen = nullptr;
+    for (const Wall &w : walls)
+      if (!seen && dot(w.normal, eye.origin - w.at) > 1.0f) seen = &w;
+    CHECK(seen != nullptr);
+    if (!seen) return;
+    int px = 0, py = 0;
+    CHECK(ed.project_to_window(seen->at, px, py));
+    ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+    ed.step_frame_headless({r477_ev(R477ET::MouseMove, px, py)});
+    ed.command("blockout add door");
+    GameObject *door = ed.active_object_for_test();
+    CHECK(door && door->get<BlockoutPiece>() && door->get<BlockoutPiece>()->opening == 1);
+    if (!door || !door->get<BlockoutPiece>()) return;
+    const Vec3 at = door->local().position, fwd = r478_forward(*door);
+    CHECK(std::fabs(dot(fwd, seen->normal)) > 0.99f);                                          // (looking through that wall)
+    const float along = seen->normal.z != 0.0f ? at.z : at.x;                                  // (in the wall's middle: the wall's face is at 2.2, its middle at 2.1)
+    CHECK_NEAR(std::fabs(along), 2.1f, 0.03f);
+    const float across = seen->normal.z != 0.0f ? at.x : at.z;                                 // (where the mouse was)
+    CHECK_NEAR(across, 0.7f, 0.15f);
+    CHECK_NEAR(at.y, -1.5f, 1e-3f);
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed) && r478_faces_named(*bo->get<Blockout>(), door->id) >= 3);
+    /* With the mouse parked over the Hierarchy the same command takes the selected room's first wall. */
+    ed.select_for_test(room->id, false);
+    const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+    ed.step_frame_headless({r477_ev(R477ET::MouseMove, h.x + h.w / 2, h.y + h.h - 10)});
+    ed.step_frame_headless();
+    ed.command("blockout add door");
+    GameObject *second = ed.active_object_for_test();
+    CHECK(second && second != door && std::fabs(second->local().position.x + 2.1f) < 1e-3f);
+    /* Over the roof, no wall is under the mouse: the first wall again. */
+    int fx = 0, fy = 0;
+    CHECK(ed.project_to_window({0.5f, 1.7f, 0.5f}, fx, fy));  // (the room's top, seen from above: a ceiling is no wall)
+    ed.select_for_test(room->id, false);
+    ed.step_frame_headless({r477_ev(R477ET::MouseMove, fx, fy)});
+    ed.step_frame_headless({r477_ev(R477ET::MouseMove, fx, fy)});
+    ed.command("blockout add window");
+    GameObject *third = ed.active_object_for_test();
+    CHECK(third && third != second && third->get<BlockoutPiece>() && third->get<BlockoutPiece>()->opening == 2 && std::fabs(third->local().position.x + 2.1f) < 1e-3f);
+  });
+
+  test("blockout rooms: a door put in a turned and scaled room is turned with it and stands on its floor", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room);
+    if (!room) return;
+    room->set_local_position({1.0f, 0.5f, -2.0f});
+    room->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));
+    room->set_local_scale({1.0f, 2.0f, 1.0f});
+    r477_settle(ed, 2);
+    ed.select_for_test(room->id, false);
+    ed.command("blockout add door");
+    GameObject *door = ed.active_object_for_test();
+    CHECK(door && door->get<BlockoutPiece>() && door->get<BlockoutPiece>()->opening == 1);
+    if (!door) return;
+    /* The air is 4 x 6 x 4 now (Y scaled): its floor is at 0.5 - 3 = -2.5; the first wall, the room's -X, faces along Z after the turn. */
+    const Vec3 at = door->local().position, fwd = r478_forward(*door);
+    CHECK_NEAR(at.y, -2.5f, 1e-3f);
+    CHECK(std::fabs(fwd.z) > 0.99f);  // (the room's X now runs along Z)
+    r477_settle(ed, 2);
+    CHECK(r477_matches(ed) && r478_faces_named(*bo->get<Blockout>(), door->id) >= 3);
+  });
+
+  /* ---- The menus ---- */
+  test("blockout: GameObject > Blockout offers Room (Box), Room (Cylinder), Door and Window, each one undo step", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 3);
+    CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", "menu:New Blockout"}));
+    r477_settle(ed);
+    struct Row {
+      const char *label;
+      bool room;
+      int shape, opening;
+    };
+    for (const Row &row : {Row{"Room (Box)", true, 0, 0}, Row{"Room (Cylinder)", true, 1, 0}, Row{"Door", false, 0, 1}, Row{"Window", false, 0, 2}}) {
+      const size_t pieces = r477_count(ed, true), depth = ed.undo_depth_for_test();
+      CHECK(r477_menu(ed, {"menubar:GameObject", "submenu:Blockout", std::string("menu:") + row.label}));
+      r477_settle(ed);
+      const BlockoutPiece *p = r477_active_piece(ed);
+      const bool ok = p && p->room == row.room && p->shape == row.shape && p->opening == row.opening && r477_count(ed, true) == pieces + 1 && ed.undo_depth_for_test() == depth + 1;
+      if (!ok) std::printf("    GameObject > Blockout > %s: not as asked\n", row.label);
+      CHECK(ok);
+    }
+    CHECK(r477_count(ed, false) == 1 && r477_matches(ed));
+  });
+
+  test("blockout: the Hierarchy's + menu and the Modeling Tools window offer the room entries too", [] {
+    Editor ed;
+    ed.init_headless(1500, 1000);
+    ed.record_buttons_for_test(true);
+    ed.clear_selection_for_test();
+    r477_settle(ed, 3);
+    const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+    const ui::Context &u = ed.ui_for_test();
+    const int bh = u.row_h() + u.px(6), hh = bh - u.px(8);
+    const int cx = h.x + u.px(5) + (hh + u.px(16)) / 2, cy = h.y + u.px(4) + hh / 2;
+    r477_click(ed, cx, cy);
+    r477_settle(ed);
+    CHECK(r477_menu(ed, {"submenu:Blockout", "menu:Room (Cylinder)"}));
+    r477_settle(ed);
+    const BlockoutPiece *p = r477_active_piece(ed);
+    CHECK(p && p->room && p->shape == 1 && r477_count(ed, false) == 1);
+    Editor tools;
+    tools.init_headless(1500, 1000);
+    tools.command("layout Default");
+    tools.command("window Modeling Tools");
+    tools.command("alltools on");
+    tools.record_buttons_for_test(true);
+    r477_settle(tools, 4);
+    for (const char *label : {"Room (Box)", "Door"}) {
+      tools.record_buttons_for_test(true);
+      r477_settle(tools, 2);
+      Recti r;
+      CHECK(tools.button_rect_for_test(label, r));
+      if (!tools.button_rect_for_test(label, r)) continue;
+      r477_click(tools, r.x + r.w / 2, r.y + r.h / 2);
+      r477_settle(tools);
+      if (std::string(label) == "Room (Box)") {
+        const BlockoutPiece *room = r477_active_piece(tools);
+        CHECK(room && room->room && r477_count(tools, false) == 1);
+      }
+    }
+    const BlockoutPiece *door = r477_active_piece(tools);
+    CHECK(door && door->opening == 1 && r477_count(tools, true) == 2);
+  });
+
+  /* ---- Scenes ---- */
+  test("blockout rooms: a scene saved with round 477's fields only opens unchanged - the room fields at their defaults, the mesh the same", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {3, 2, 3});
+    r477_piece(ed, *bo, "Pocket", 1, 1, {0.2f, 0.5f, 0.0f}, Vec3(1.0f), 0.5f, 3.0f);
+    r477_piece(ed, *bo, "Ball", 2, 0, {1.0f, 1.0f, 0.0f}, Vec3(1.0f), 0.6f);
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    const Mesh before = *r477_mesh(bo);
+    std::string text = save_scene_text(ed.scene());
+    CHECK(text.find("Open_Top") != std::string::npos);  // (this build writes them...)
+    std::istringstream is(text);
+    std::string old;
+    for (std::string line; std::getline(is, line);) {
+      bool added = false;  // ...and round 477 did not: left out, as its files lack them
+      for (const char *key : {"Room ", "Wall ", "Floor ", "Ceiling ", "Walls ", "Open_Top ", "Opening ", "Width ", "Head ", "Sill ", "Depth ", "Default_Wall_Thickness "})
+        added = added || line.rfind(std::string("  ") + key, 0) == 0;
+      if (!added) old += line + "\n";
+    }
+    CHECK(old.size() < text.size() && old.find("Open_Top") == std::string::npos);
+    const std::string path = te_scene_path(ed, "r478_old.scene");
+    CHECK(fs::write_file(path, old));
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int i = 0; i < 400 && !r477_find(ed); i++) ed.step_frame_headless();
+    r477_settle(ed, 4);
+    ed.command("blockout wait");
+    GameObject *loaded = r477_find(ed);
+    CHECK(loaded && r477_all_pieces(*loaded).size() == 3);
+    for (GameObject *p : r477_all_pieces(*loaded)) {
+      const BlockoutPiece *bp = p->get<BlockoutPiece>();
+      CHECK(!bp->room && bp->opening == 0 && bp->wall == 0.2f && bp->floor == 0.2f && bp->ceiling == 0.2f && bp->walls == 0 && !bp->open_top && bp->width == 0.9f);
+    }
+    CHECK(loaded && loaded->get<Blockout>()->default_wall == 0.2f);
+    CHECK(loaded && r477_mesh(loaded) && r477_same(before, *r477_mesh(loaded)) && te_matches(loaded));
+    fs::remove_file(path);
+  });
+
+  test("blockout rooms: a scene with rooms, a door, an Intersect piece and a Default Wall Thickness saves and opens with every field and the same mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->get<Blockout>()->default_wall = 0.25f;
+    GameObject *a = r477_piece(ed, *bo, "Hall", 0, 0, {0, 0, 0}, {4, 3, 4});
+    BlockoutPiece *ap = a->get<BlockoutPiece>();
+    ap->room = true, ap->wall = 0.3f, ap->floor = 0.15f, ap->ceiling = 0.35f, ap->walls = 1, ap->open_top = true;
+    GameObject *d = r477_piece(ed, *bo, "Entry", 0, 0, {-2.15f, -1.5f, 0}, Vec3(1.0f));
+    BlockoutPiece *dp = d->get<BlockoutPiece>();
+    dp->opening = 2, dp->width = 1.1f, dp->head = 1.9f, dp->sill = 0.8f, dp->depth = 0.45f;
+    GameObject *i = r477_piece(ed, *bo, "Clip", 0, 2, {0, 0, 0}, {10, 2.5f, 10});
+    (void)i;
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    const Mesh before = *r477_mesh(bo);
+    const std::string path = te_scene_path(ed, "r478_rooms.scene");
+    ed.command("save " + path);
+    for (int k = 0; k < 400 && (!fs::exists(path) || ed.save_job_running_for_test()); k++) ed.step_frame_headless();
+    r477_settle(ed, 3);
+    ed.command("newscene");
+    CHECK(ed.open_scene_for_test(path));
+    for (int k = 0; k < 400 && !r477_find(ed); k++) ed.step_frame_headless();
+    r477_settle(ed, 4);
+    ed.command("blockout wait");
+    GameObject *loaded = r477_find(ed);
+    CHECK(loaded && loaded->get<Blockout>()->default_wall == 0.25f);
+    const GameObject *hall = r477_find(ed, "Hall"), *entry = r477_find(ed, "Entry"), *clip = r477_find(ed, "Clip");
+    CHECK(hall && entry && clip);
+    if (!hall || !entry || !clip) return;
+    const BlockoutPiece *h = hall->get<BlockoutPiece>(), *e = entry->get<BlockoutPiece>();
+    CHECK(h->room && h->wall == 0.3f && h->floor == 0.15f && h->ceiling == 0.35f && h->walls == 1 && h->open_top);
+    CHECK(e->opening == 2 && e->width == 1.1f && e->head == 1.9f && e->sill == 0.8f && e->depth == 0.45f);
+    CHECK(clip->get<BlockoutPiece>()->operation == 2);
+    CHECK(r477_mesh(loaded) && r477_same(before, *r477_mesh(loaded)) && te_matches(loaded));
+    fs::remove_file(path);
+  });
+
+  /* ---- The wires ---- */
+  test("blockout rooms: a selected room draws its air and, fainter, its shell; an Intersect piece draws in a violet of its own", [] {
+    Editor ed;
+    r34_open(ed);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    bo->get<MeshRenderer>()->enabled = false;  // (the wires alone)
+    GameObject *room = r477_piece(ed, *bo, "Room", 0, 0, {0, 0, 0}, {2, 1.5f, 2});
+    room->get<BlockoutPiece>()->room = true;
+    GameObject *clip = r477_piece(ed, *bo, "Clip", 0, 2, {0, 0, 0}, {6, 6, 6});
+    ed.command("camera 25 25 9 0 0 0");
+    auto shot = [&](GameObject *sel) {
+      ed.clear_selection_for_test();  // (fields were set by hand: a picture of nothing selected first makes the views draw again)
+      ed.mark_changed_for_test("wires");
+      r34_steps(ed, 2);
+      if (sel) ed.select_for_test(sel->id, false);
+      r34_steps(ed, 4);
+      return r34_crop(ed, ed.scene_view_rect());
+    };
+    auto differing = [](const std::vector<uint32_t> &a, const std::vector<uint32_t> &b) {
+      size_t n = 0;
+      for (size_t i = 0; i < a.size() && i < b.size(); i++) n += a[i] != b[i];
+      return n;
+    };
+    const std::vector<uint32_t> none = shot(nullptr);
+    room->get<BlockoutPiece>()->wall = room->get<BlockoutPiece>()->floor = room->get<BlockoutPiece>()->ceiling = 0.0f;
+    const std::vector<uint32_t> bare = shot(room);  // (no thickness: the shell is the air - one wire)
+    room->get<BlockoutPiece>()->wall = room->get<BlockoutPiece>()->floor = room->get<BlockoutPiece>()->ceiling = 0.5f;
+    const std::vector<uint32_t> thick = shot(room);
+    const size_t air = differing(none, bare), shell = differing(bare, thick);
+    std::printf("    room wires: air %zu pixels, the shell beyond it %zu\n", air, shell);
+    CHECK(air > 100 && shell > 100);
+    CHECK(r477_near(thick, 0xF7941D, 14) > 20);  // (the air in the selection colour, at full strength)
+    room->get<BlockoutPiece>()->open_top = true;
+    const std::vector<uint32_t> open = shot(room);
+    CHECK(differing(thick, open) > 20);  // (no ceiling: the shell's top edges go)
+    const size_t violet_none = r477_near(shot(nullptr), 0xB06CF5, 14), violet_clip = r477_near(shot(clip), 0xB06CF5, 14);
+    CHECK(violet_none == 0 && violet_clip > 20 && r477_near(shot(clip), 0xF4BC02, 14) == 0);
+  });
+
+  test("blockout rooms: a room's shell wire reaches past its air by the wall, the floor and the ceiling as the kernel grows it", [] {
+    Piece p;
+    p.room = true, p.size = {4, 3, 4}, p.wall = 0.2f, p.floor = 0.3f, p.ceiling = 0.4f;
+    p.to_blockout = Mat4::identity();
+    RoomGrowth g;
+    CHECK(blockout_room_growth(p, g));
+    CHECK_NEAR(g.x, 0.2, 1e-6);
+    CHECK_NEAR(g.z, 0.2, 1e-6);
+    CHECK_NEAR(g.down, 0.3, 1e-6);
+    CHECK_NEAR(g.up, 0.4, 1e-6);
+    p.open_top = true;
+    CHECK(blockout_room_growth(p, g) && g.up == 0.0);
+    p.open_top = false;
+    p.to_blockout = Mat4::trs({0, 0, 0}, Quat::euler({0, 30, 0}), {2.0f, 4.0f, 0.5f});  // (a thickness is metres in the Blockout's space: divided by the scale)
+    CHECK(blockout_room_growth(p, g));
+    CHECK_NEAR(g.x, 0.1, 1e-5);
+    CHECK_NEAR(g.z, 0.4, 1e-5);
+    CHECK_NEAR(g.down, 0.075, 1e-5);
+    CHECK_NEAR(g.up, 0.1, 1e-5);
+    p.shape = Shape::Cylinder, p.segments = 16;
+    CHECK(blockout_room_growth(p, g) && g.x > 0.1);  // (a cylinder's wall is measured at its facets' middles)
+    p.room = false;
+    CHECK(!blockout_room_growth(p, g));
+    p.room = true;
+    p.to_blockout = Mat4::trs({0, 0, 0}, Quat(), {1.0f, 0.0f, 1.0f});
+    CHECK(!blockout_room_growth(p, g));
+  });
+
+  test("blockout rooms: an opening's size is worked out from its Width, Head and Sill and its Depth, and a head under the sill is skipped by name", [] {
+    BlockoutPiece door;
+    door.opening = 1, door.width = 0.9f, door.head = 2.1f, door.sill = 0.0f, door.depth = 0.4f;
+    const Piece p = door.to_piece(7, Mat4::identity());
+    CHECK(p.shape == Shape::Box && p.op == Op::Subtract && !p.room);
+    CHECK_NEAR(p.size.x, 0.9f, 1e-6f);
+    CHECK_NEAR(p.size.y, 2.1f, 1e-6f);
+    CHECK_NEAR(p.size.z, 0.4f, 1e-6f);
+    CHECK_NEAR(p.to_blockout.point({0, 0, 0}).y, 1.05f, 1e-6f);  // (the box's middle between sill and head above the origin)
+    door.opening = 2, door.sill = 0.9f, door.head = 2.0f;
+    const Piece w = door.to_piece(7, Mat4::translate({1, 2, 3}));
+    CHECK_NEAR(w.size.y, 1.1f, 1e-6f);
+    CHECK_NEAR(w.to_blockout.point({0, 0, 0}).y, 2.0f + 1.45f, 1e-6f);
+    door.head = 0.5f;  // (under the sill)
+    blockout::Report rep;
+    Mesh out;
+    std::vector<Piece> pieces{door.to_piece(7, Mat4::identity())};
+    CHECK(blockout::build(pieces, blockout::Settings(), out, nullptr, &rep) && rep.skipped.size() == 1 && rep.skipped[0].id == 7);
+  });
+}
+
+/* ------------------------------------------------------------------ round 478: the test engineer's (independent of the implementation) */
+#include <atomic>
+#include <cfloat>
+#include <chrono>
+#include <thread>
+
+namespace {
+
+/* Matter in a room's own box: shell less air (a box room of equal thicknesses). */
+double r478e_matter(Vec3 air, double t = 0.2) { return (air.x + 2 * t) * (air.y + 2 * t) * (air.z + 2 * t) - (double)air.x * air.y * air.z; }
+
+/* Corners of a mesh: the bounds. */
+void r478e_bounds(const Mesh &m, Vec3 &lo, Vec3 &hi) {
+  lo = Vec3(1e30f), hi = Vec3(-1e30f);
+  for (const Vec3 &p : m.positions) {
+    lo = Vec3(std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z));
+    hi = Vec3(std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z));
+  }
+}
+
+/* Whether a result is a mesh a user could keep, or the build said why not. */
+bool r478e_ok_or_named(const R476Built &b, const char *what) {
+  if (!b.ok) return !b.report.why.empty();
+  if (b.mesh.face_count() == 0) return true;
+  return r476_sound(b.mesh, what);
+}
+
+/* How many faces of a box-only result do not lie in the plane of the side they name, or face the wrong way. A face's
+ * side is the air's (the room's inside: the face looks into the air), the shell's (outside) or the box's own (an Add
+ * and an Intersect face look out of the box, a Subtract's into it). Axis-aligned unit-scale pieces only. */
+size_t r478e_wrong_planes(const R476Built &b, const std::vector<Piece> &pieces, size_t *not_flat = nullptr) {
+  size_t wrong = 0;
+  if (not_flat) *not_flat = 0;
+  for (size_t f = 0; f < b.mesh.face_count(); f++) {
+    const Piece *p = nullptr;
+    for (const Piece &q : pieces)
+      if (q.id == b.faces.piece[f]) p = &q;
+    if (!p) {
+      wrong++;
+      continue;
+    }
+    const uint32_t s = b.faces.side[f];
+    const bool shell = s >= blockout::kSideShell;
+    const uint32_t t = shell ? s - blockout::kSideShell : s;
+    if (t > 5 || !b.faces.flat[f]) {
+      if (not_flat) (*not_flat)++;
+      if (t > 5) wrong++;
+      continue;
+    }
+    const int axis = (int)t / 2;
+    const float sign = (t & 1) ? 1.0f : -1.0f;
+    const Vec3 at = p->to_blockout.point(Vec3(0.0f));
+    float half = p->size[axis] * 0.5f, expect_normal = sign;
+    if (p->room && shell) {
+      const float grow = axis == 1 ? (sign < 0 ? p->floor : (p->open_top ? 0.0f : p->ceiling)) : p->wall;
+      half += grow;
+    } else if (p->room) {
+      expect_normal = -sign;
+    } else if (p->op == Op::Subtract) {
+      expect_normal = -sign;
+    }
+    const float where = at[axis] + sign * half;
+    Vec3 n(0.0f);
+    const uint32_t k = b.mesh.face_size(f);
+    const uint32_t *v = b.mesh.face_verts(f);
+    double worst = 0.0;
+    for (uint32_t i = 0; i < k; i++) {
+      const Vec3 a = b.mesh.positions[v[i]], c = b.mesh.positions[v[(i + 1) % k]];
+      n.x += (a.y - c.y) * (a.z + c.z), n.y += (a.z - c.z) * (a.x + c.x), n.z += (a.x - c.x) * (a.y + c.y);
+      worst = std::max(worst, (double)std::fabs(a[axis] - where));
+    }
+    const float len = std::sqrt(dot(n, n));
+    const bool facing = len > 0.0f && n[axis] / len * expect_normal > 0.99f;
+    if (worst > 1e-4 || !facing) {
+      std::printf("    face %zu names piece %llu side %u: off its plane by %g, facing %d\n", f, (unsigned long long)p->id, s, worst, (int)facing);
+      wrong++;
+    }
+  }
+  return wrong;
+}
+
+Piece r478e_turned(Piece p, Vec3 at, Vec3 euler_degrees) {
+  const Quat q = Quat::euler(euler_degrees);
+  p.to_blockout = Mat4::trs(q.rotate(at), q, Vec3(1.0f));
+  return p;
+}
+
+}  // namespace
+
+static void tests_round478_engineer() {
+  /* ---- Rooms turned, far away, small, odd ---- */
+  test("blockout rooms (te): a room turned to an odd angle is still 12 faces with a wall of the set thickness, alone and with a neighbour", [] {
+    /* (The field path needs a cell of about a sixth of the wall on a turned room: 0.03 m for a 0.2 m wall.) */
+    for (Path path : r476_paths())
+      for (const Vec3 turn : {Vec3(0, 33, 0), Vec3(20, 0, 0), Vec3(11, 47, 29)}) {
+        const R476Built one = r476_build({r478e_turned(r478_room(1, {4, 3, 4}, {0, 0, 0}), {0, 0, 0}, turn)}, path, 0.03f);
+        const bool good = one.ok && r476_sound(one.mesh, r476_name(path));
+        if (!good) std::printf("    one room turned %g %g %g\n", turn.x, turn.y, turn.z);
+        CHECK(good);
+        CHECK(one.mesh.face_count() == 12);
+        CHECK_NEAR(r476_volume(one.mesh), r478e_matter({4, 3, 4}), 0.03);
+        /* Two overlapping, both turned together: the same airs and shells, turned. */
+        const R476Built two = r476_build({r478e_turned(r478_room(1, {4, 3, 4}, {0, 0, 0}), {0, 0, 0}, turn), r478e_turned(r478_room(2, {4, 3, 4}, {0, 0, 0}), {3, 0, 0}, turn)}, path, 0.03f);
+        CHECK(two.ok && r476_sound(two.mesh, r476_name(path)));
+        CHECK_NEAR(r476_volume(two.mesh), 26.704, 0.05);
+      }
+  });
+
+  test("blockout rooms (te): a room a kilometre from the origin is the same room; a hundred kilometres away is closed or named, never broken", [] {
+    for (Path path : r476_paths()) {
+      const R476Built km = r476_build({r478_room(1, {4, 3, 4}, {1000, 0, 0}), r478_room(2, {4, 3, 4}, {1004.2f, 0, 0})}, path);
+      CHECK(km.ok && r476_sound(km.mesh, r476_name(path)));
+      CHECK(km.mesh.face_count() == 6 + 12);
+      CHECK_NEAR(r476_volume(km.mesh), 2 * 4.4 * 3.4 * 4.4 - 0.2 * 3.4 * 4.4 - 96.0, 0.05);
+      const R476Built far = r476_build({r478_room(1, {4, 3, 4}, {100000, 0, 0})}, path);
+      CHECK(r478e_ok_or_named(far, r476_name(path)));
+      if (far.ok && far.mesh.face_count() > 0) CHECK(structurally_valid(far.mesh) && closed_manifold(far.mesh));
+    }
+  });
+
+  test("blockout rooms (te): a closet of half a metre built onto a hall's outer wall is closed and has its own air", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{r478_room(1, {10, 3, 10}, {0, 0, 0}), r478_room(2, {0.5f, 0.5f, 0.5f}, {5.45f, -1.2f, 0})};
+      const R476Built b = r476_build(pieces, path, 0.025f);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), r478e_matter({10, 3, 10}) + 0.7 * 0.9 * 0.9 - 0.125, 5e-3);
+      CHECK(r478e_ok_or_named(b, "closet"));
+    }
+  });
+
+  test("blockout rooms (te): three Merge rooms meeting at a corner are one space with no wall between them", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {3, 0, 0}), r478_room(3, {4, 3, 4}, {0, 0, 3})};
+      const R476Built b = r476_build(pieces, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), 45.76 * 3.4 - 40.0 * 3.0, 4e-3);
+      CHECK(r478_corners_inside(b.mesh, {-2, -1.5f, -2}, {5, 1.5f, 2}) == 0 && r478_corners_inside(b.mesh, {-2, -1.5f, -2}, {2, 1.5f, 5}) == 0);
+    }
+  });
+
+  test("blockout rooms (te): rooms of every kind in one scene - pieces in any order give the same shape", [] {
+    for (Path path : r476_paths()) {
+      std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), r478_room(3, {2, 2, 2}, {2.1f, -0.3f, 0}, true),
+                                box_piece(4, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 1.7f}, Op::Subtract), box_piece(5, {0.5f, 3.0f, 0.5f}, {-0.8f, 0, 0.5f}),
+                                box_piece(6, {10, 10, 10}, {4, 0, 0}, Op::Intersect)};
+      pieces[1].open_top = true;
+      const R476Built a = r476_build(pieces, path);
+      CHECK(a.ok && r476_sound(a.mesh, r476_name(path)));
+      std::vector<Piece> reversed(pieces.rbegin(), pieces.rend()), turned(pieces.begin() + 2, pieces.end());
+      turned.insert(turned.end(), pieces.begin(), pieces.begin() + 2);
+      for (const std::vector<Piece> *other : {&reversed, &turned}) {
+        const R476Built b = r476_build(*other, path);
+        const bool same = b.ok && r476_same_shape(a, b);
+        if (!same) std::printf("    %s: another order gave %zu faces, not %zu\n", r476_name(path), b.mesh.face_count(), a.mesh.face_count());
+        CHECK(same);
+      }
+    }
+  });
+
+  /* ---- Rooms inside rooms ---- */
+  test("blockout rooms (te): a Keep room wholly inside another Keep room's air floats with all its walls; one inside a Merge room's wall leaves a sealed pocket", [] {
+    for (Path path : r476_paths()) {
+      const R476Built floating = r476_build({r478_room(1, {8, 4, 8}, {0, 0, 0}, true), r478_room(2, {2, 2, 2}, {0, 0, 0}, true)}, path);
+      CHECK(floating.ok && r476_sound(floating.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(floating.mesh), r478e_matter({8, 4, 8}) + r478e_matter({2, 2, 2}), 5e-3);
+      CHECK(floating.mesh.face_count() == 24);
+      /* A pocket of air inside the wall (x 2.05..2.15 of the wall 2.0..2.2), its own walls reaching 0.05 out of it. */
+      Piece pocket = r478_room(2, {0.1f, 0.1f, 0.1f}, {2.1f, 0, 0});
+      pocket.wall = pocket.floor = pocket.ceiling = 0.1f;
+      const R476Built in_wall = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), pocket}, path, 0.025f);
+      CHECK(in_wall.ok && r476_sound(in_wall.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(in_wall.mesh), r478e_matter({4, 3, 4}) + 0.3 * 0.3 * 0.05 - 0.001, 3e-3);
+    }
+  });
+
+  test("blockout rooms (te): a Merge room inside a Keep room's air has no walls of its own - the Keep room's air removes them", [] {
+    /* ADR 0128's order: the Merge shells less every room's air (a Keep room's too), so a Merge room in a Keep room's air leaves nothing. */
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> keep_alone{r478_room(1, {8, 3, 8}, {0, 0, 0}, true)};
+      const std::vector<Piece> both{r478_room(1, {8, 3, 8}, {0, 0, 0}, true), r478_room(2, {2, 2, 2}, {0.5f, -0.3f, 0.25f})};
+      const R476Built a = r476_build(keep_alone, path), b = r476_build(both, path);
+      CHECK(a.ok && b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK(r476_same_shape(a, b));
+    }
+  });
+
+  test("blockout rooms (te): a door wider than the wall is long cuts the whole wall; a door cut in the air or far away changes nothing", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> base{r478_room(1, {4, 3, 4}, {0, 0, 0})};
+      std::vector<Piece> wide = base;
+      wide.push_back(box_piece(2, {0.6f, 2.1f, 10.0f}, {2.1f, -0.45f, 0}, Op::Subtract));
+      const R476Built w = r476_build(wide, path);
+      CHECK(w.ok && r476_sound(w.mesh, r476_name(path)));
+      /* The cut leaves the box x 1.8..2.2, z of the whole shell, y -1.5..0.6, less the air in it. */
+      CHECK_NEAR(r476_volume(w.mesh), r478e_matter({4, 3, 4}) - (0.4 * 4.4 * 2.1 - 0.2 * 4.0 * 2.1), 4e-3);
+      const R476Built plain = r476_build(base, path);
+      for (const Piece &miss : {box_piece(2, {0.6f, 2.1f, 0.9f}, {0, 0, 0}, Op::Subtract), box_piece(2, {0.6f, 2.1f, 0.9f}, {50, 0, 0}, Op::Subtract)}) {
+        std::vector<Piece> v = base;
+        v.push_back(miss);
+        const R476Built b = r476_build(v, path);
+        CHECK(b.ok && r476_same_shape(plain, b) && r478_faces_of(b, 2) == 0);
+      }
+      /* A door through a Keep room's wall opens it to the outside. */
+      Piece keep = r478_room(1, {4, 3, 4}, {0, 0, 0}, true);
+      const R476Built opened = r476_build({keep, box_piece(2, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 0}, Op::Subtract)}, path);
+      CHECK(opened.ok && r476_sound(opened.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(opened.mesh), r478e_matter({4, 3, 4}) - 0.2 * 0.9 * 2.1, 3e-3);
+    }
+  });
+
+  test("blockout rooms (te): a cylinder room overlapping a box room is one space; their shared air has no wall in it", [] {
+    for (Path path : r476_paths()) {
+      Piece cyl = cylinder_piece(2, 2.0f, 3.0f, 16, {3, 0, 0});
+      cyl.room = true;
+      const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), cyl};
+      const R476Built b = r476_build(pieces, path, 0.05f);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK(r478_corners_inside(b.mesh, {-2, -1.5f, -2}, {2, 1.5f, 2}) == 0);
+      const double box_only = r478e_matter({4, 3, 4});
+      CHECK(r476_volume(b.mesh) > box_only - 1e-3);
+      CHECK(r476_volume(b.mesh) < box_only + 40.0);
+    }
+  });
+
+  test("blockout rooms (te): an open-topped room under another room's floor is closed by that floor", [] {
+    for (Path path : r476_paths()) {
+      Piece lower = r478_room(1, {4, 3, 4}, {0, 0, 0});
+      lower.open_top = true;
+      const R476Built b = r476_build({lower, r478_room(2, {4, 3, 4}, {0, 3.2f, 0})}, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(b.mesh), (4.4 * 3.2 * 4.4 - 48.0) + r478e_matter({4, 3, 4}), 4e-3);
+      CHECK(b.report.clusters.size() == 1);
+      /* Nothing of the lower room's air lies in the upper room's floor. */
+      CHECK(r478_corners_inside(b.mesh, {-2, -1.5f, -2}, {2, 1.5f, 2}) == 0);
+    }
+  });
+
+  /* ---- Intersect ---- */
+  test("blockout rooms (te): an Intersect piece that holds everything changes nothing; one that misses everything leaves an empty mesh, not a refusal", [] {
+    for (Path path : r476_paths()) {
+      const std::vector<Piece> base{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), box_piece(3, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 0}, Op::Subtract)};
+      const R476Built plain = r476_build(base, path);
+      std::vector<Piece> all = base;
+      all.push_back(box_piece(9, {1000, 1000, 1000}, {0, 0, 0}, Op::Intersect));
+      const R476Built everything = r476_build(all, path);
+      CHECK(everything.ok && r476_sound(everything.mesh, r476_name(path)) && r476_same_shape(plain, everything));
+      CHECK(r478_faces_of(everything, 9) == 0);
+      /* Exactly the two shells' box: its sides are the outer walls' own planes. */
+      std::vector<Piece> flush = base;
+      flush.push_back(box_piece(9, {8.8f, 3.4f, 4.4f}, {2.1f, 0, 0}, Op::Intersect));
+      const R476Built same = r476_build(flush, path);
+      CHECK(same.ok && r476_sound(same.mesh, r476_name(path)) && r476_same_shape(plain, same));
+      std::vector<Piece> none = base;
+      none.push_back(box_piece(9, {1, 1, 1}, {500, 0, 0}, Op::Intersect));
+      const R476Built nothing = r476_build(none, path);
+      CHECK(nothing.ok && nothing.mesh.face_count() == 0 && nothing.report.why.empty() && nothing.faces.piece.empty());
+      /* The air's own box: what is inside it is no matter at all. */
+      std::vector<Piece> air = {r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(9, {4, 3, 4}, {0, 0, 0}, Op::Intersect)};
+      const R476Built empty_air = r476_build(air, path);
+      CHECK(empty_air.ok && empty_air.mesh.face_count() == 0 && empty_air.report.why.empty());
+      /* Two that do not overlap: nothing is inside both. */
+      std::vector<Piece> apart = base;
+      apart.push_back(box_piece(8, {2, 10, 10}, {-1, 0, 0}, Op::Intersect));
+      apart.push_back(box_piece(9, {2, 10, 10}, {6, 0, 0}, Op::Intersect));
+      const R476Built two = r476_build(apart, path);
+      CHECK(two.ok && two.mesh.face_count() == 0 && two.report.why.empty());
+      /* An Intersect piece alone. */
+      const R476Built alone = r476_build({box_piece(9, {1, 1, 1}, {0, 0, 0}, Op::Intersect)}, path);
+      CHECK(alone.ok && alone.mesh.face_count() == 0);
+    }
+  });
+
+  test("blockout rooms (te): a door inside an Intersect piece still cuts; an Add piece half inside one is trimmed to it", [] {
+    for (Path path : r476_paths()) {
+      const R476Built cut = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), box_piece(3, {3, 10, 10}, {2.1f, 0, 0}, Op::Intersect),
+                                        box_piece(4, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 0}, Op::Subtract)},
+                                       path);
+      CHECK(cut.ok && r476_sound(cut.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(cut.mesh), 3 * 3.4 * 4.4 - 2 * 1.4 * 12.0 - 0.2 * 2.1 * 0.9, 3e-3);
+      CHECK(r478_faces_of(cut, 4) >= 3);
+      const R476Built half = r476_build({box_piece(1, {4, 1, 1}, {1, 0, 0}), box_piece(2, {2, 10, 10}, {0, 0, 0}, Op::Intersect)}, path);
+      CHECK(half.ok && r476_sound(half.mesh, r476_name(path)));
+      CHECK_NEAR(r476_volume(half.mesh), 2.0, 1e-4);
+    }
+  });
+
+  /* ---- Names of sides ---- */
+  test("blockout rooms (te): every face of a result with rooms, a Keep room, an open top, a door, a column and an Intersect piece lies in the plane of the side it names", [] {
+    for (Path path : r476_paths()) {
+      std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {4.2f, 0, 0}), r478_room(3, {2, 2, 2}, {2.1f, -0.3f, 0}, true),
+                                box_piece(4, {0.6f, 2.1f, 0.9f}, {2.1f, -0.45f, 1.7f}, Op::Subtract), box_piece(5, {0.5f, 3.0f, 0.5f}, {-0.8f, 0, 0.5f}),
+                                box_piece(6, {10, 10, 10}, {4, 0, 0}, Op::Intersect)};
+      pieces[1].open_top = true;
+      const R476Built b = r476_build(pieces, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      size_t not_flat = 0;
+      CHECK(r478e_wrong_planes(b, pieces, &not_flat) == 0);
+      if (path == Path::Crisp) CHECK(not_flat == 0);
+      /* Every named side's class is what the side is. */
+      for (size_t f = 0; f < b.mesh.face_count(); f++) {
+        const blockout::SideClass c = blockout::side_class(*std::find_if(pieces.begin(), pieces.end(), [&](const Piece &p) { return p.id == b.faces.piece[f]; }), b.faces.side[f]);
+        if (b.faces.piece[f] == 4 || b.faces.piece[f] == 6) CHECK(c == blockout::SideClass::Cut);
+        if (b.faces.piece[f] == 5) CHECK(c == blockout::SideClass::Outside);
+      }
+    }
+  });
+
+  /* ---- The cache, cancelling, hostile numbers ---- */
+  test("blockout rooms (te): changing only a thickness, Keep walls or Open top rebuilds that room's cluster and no other", [] {
+    using Edit = void (*)(Piece &);
+    const std::vector<std::pair<const char *, Edit>> edits{{"wall", [](Piece &p) { p.wall = 0.3f; }},       {"floor", [](Piece &p) { p.floor = 0.3f; }},
+                                                           {"ceiling", [](Piece &p) { p.ceiling = 0.3f; }}, {"keep walls", [](Piece &p) { p.keep_walls = true; }},
+                                                           {"open top", [](Piece &p) { p.open_top = true; }}};
+    for (Path path : r476_paths())
+      for (const auto &e : edits) {
+        const std::vector<Piece> base{r478_room(1, {4, 3, 4}, {0, 0, 0}), r478_room(2, {4, 3, 4}, {40, 0, 0}), r478_room(3, {4, 3, 4}, {43, 0, 0})};
+        blockout::Cache cache;
+        const R476Built a = r476_build(base, path, 0.1f, &cache);
+        std::vector<Piece> edited = base;
+        e.second(edited[1]);
+        const R476Built b = r476_build(edited, path, 0.1f, &cache), fresh = r476_build(edited, path);
+        const bool good = a.ok && b.ok && b.report.built == 1 && b.report.cached == 1 && r476_same_mesh(b, fresh) && !r476_same_mesh(a, b);
+        if (!good) std::printf("    %s (%s): built %zu cached %zu, same as fresh %d, changed %d\n", e.first, r476_name(path), b.report.built, b.report.cached, (int)r476_same_mesh(b, fresh), (int)!r476_same_mesh(a, b));
+        CHECK(good);
+      }
+  });
+
+  test("blockout rooms (te): cancelling a build with rooms refuses as cancelled and leaves the mesh it was given untouched", [] {
+    for (Path path : r476_paths()) {
+      std::vector<Piece> pieces;
+      for (int i = 0; i < 6; i++)
+        for (int j = 0; j < 6; j++) pieces.push_back(r478_room((uint64_t)(i * 6 + j + 1), {4, 3, 4}, {4.0f * (float)i, 0, 4.0f * (float)j}));
+      blockout::Settings st;
+      st.path = path;
+      std::atomic<bool> flag(true);
+      blockout::Report rep;
+      const R476Built seed = r476_build({r478_room(1, {1, 1, 1}, {0, 0, 0})}, Path::Field); Mesh out = seed.mesh;
+      const size_t before = out.face_count();
+      CHECK(!blockout::build(pieces, st, out, nullptr, &rep, nullptr, &flag) && rep.why == "cancelled" && out.face_count() == before);
+      /* Cancelled while running: either it finished first or it refused cleanly, and the mesh is whole either way. */
+      std::atomic<bool> later(false);
+      std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        later = true;
+      });
+      Mesh out2;
+      blockout::Report rep2;
+      const bool done = blockout::build(pieces, st, out2, nullptr, &rep2, nullptr, &later);
+      stopper.join();
+      CHECK(done ? (out2.face_count() > 0 && closed_manifold(out2)) : (rep2.why == "cancelled" && out2.face_count() == 0));
+    }
+  });
+
+  test("blockout rooms (te): hostile numbers in a room's thicknesses, size and Intersect pieces give a valid mesh or a named refusal, and the other rooms stay", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    for (Path path : r476_paths())
+      for (float bad : {nan, inf, -inf, -1.0f, 1e30f, FLT_MAX, 1e-30f, 1e6f})
+        for (int field = 0; field < 4; field++) {
+          Piece hostile = r478_room(1, {4, 3, 4}, {0, 0, 0});
+          (field == 0 ? hostile.wall : field == 1 ? hostile.floor : field == 2 ? hostile.ceiling : hostile.size.x) = bad;
+          hostile.open_top = field == 2;
+          const R476Built b = r476_build({hostile, r478_room(2, {2, 2, 2}, {30, 0, 0})}, path);
+          const bool good = r478e_ok_or_named(b, r476_name(path));
+          if (!good) std::printf("    %s: field %d = %g\n", r476_name(path), field, bad);
+          CHECK(good);
+        }
+    for (Path path : r476_paths()) {
+      Piece bad_cut = box_piece(9, {nan, 1, 1}, {0, 0, 0}, Op::Intersect);
+      const R476Built b = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), bad_cut}, path);
+      CHECK(r478e_ok_or_named(b, "NaN Intersect piece"));
+      if (b.ok) CHECK(b.report.skipped.size() == 1 && b.report.skipped[0].id == 9);
+    }
+  });
+}
+
+/* ---- The object, the editor, the console ---- */
+namespace {
+
+GameObject *r478e_room_scene(Editor &ed, GameObject **bo_out = nullptr, bool at_origin = true) {
+  r477_empty_scene(ed);
+  GameObject *bo = r477_blockout(ed);
+  ed.select_for_test(bo->id, false);
+  if (bo_out) *bo_out = bo;
+  ed.command("blockout add room box 4 3 4");
+  r477_settle(ed, 2);
+  GameObject *room = ed.active_object_for_test();
+  if (room && at_origin) room->set_local_position({0.0f, 0.0f, 0.0f});  // (Undo goes back to where the command put it, so the Undo tests leave it)
+  r477_settle(ed, 2);
+  return room;
+}
+
+}  // namespace
+
+static void tests_round478_engineer_object() {
+  test("blockout rooms (te): Undo and Redo walk every room field back and forth with the mesh", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *room0 = r478e_room_scene(ed, nullptr, false);
+    CHECK(room0 && room0->get<BlockoutPiece>());
+    if (!room0) return;
+    /* (Undo may rebuild the scene's objects: everything is found again by name and parent.) */
+    auto mesh_now = [&]() -> Mesh { ed.command("blockout wait"); r477_settle(ed, 3); return *r477_mesh(r477_find(ed)); };
+    auto room_now = [&]() { return r477_all_pieces(*r477_find(ed)).front(); };
+    const Mesh base = mesh_now();
+    for (const char *line : {"set BlockoutPiece.Wall 0.4", "set BlockoutPiece.Floor 0.5", "set BlockoutPiece.Ceiling 0.1", "set BlockoutPiece.Walls 1", "set BlockoutPiece.OpenTop 1"}) {
+      ed.select_for_test(room_now()->id, false);
+      const size_t depth = ed.undo_depth_for_test();
+      const Mesh before = mesh_now();
+      ed.command(line);
+      const Mesh after = mesh_now();
+      CHECK(ed.undo_depth_for_test() == depth + 1);
+      ed.command("undo");
+      const Mesh undone = mesh_now();
+      const bool back = r477_same(undone, before) && r477_matches(ed);
+      if (!back) std::printf("    '%s': after Undo the mesh has %zu points, before it had %zu\n", line, undone.positions.size(), before.positions.size());
+      CHECK(back);
+      ed.command("redo");
+      const Mesh redone = mesh_now();
+      CHECK(r477_same(redone, after) && r477_matches(ed));
+    }
+    for (int i = 0; i < 5; i++) ed.command("undo");
+    CHECK(r477_same(mesh_now(), base));
+  });
+
+  test("blockout rooms (te): adding a door is one step; Undo takes the door and the wall closes, Redo brings both back", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *room = r478e_room_scene(ed, nullptr, false);
+    if (!room) { CHECK(false); return; }
+    auto mesh_now = [&]() -> Mesh { ed.command("blockout wait"); r477_settle(ed, 3); return *r477_mesh(r477_find(ed)); };
+    const Mesh closed = mesh_now();
+    const size_t pieces = r477_count(ed, true);
+    ed.command("blockout add door");
+    const Mesh opened = mesh_now();
+    CHECK(r477_count(ed, true) == pieces + 1 && !r477_same(opened, closed));
+    ed.command("undo");
+    const Mesh undone = mesh_now();
+    if (!(r477_count(ed, true) == pieces && r477_same(undone, closed) && r477_matches(ed)))
+      std::printf("    after Undo: %zu pieces (was %zu), mesh %zu faces (closed %zu), matches pieces %d, same as closed %d\n", r477_count(ed, true), pieces, undone.face_count(), closed.face_count(), (int)r477_matches(ed), (int)r477_same(undone, closed));
+    CHECK(r477_count(ed, true) == pieces && r477_same(undone, closed) && r477_matches(ed));
+    ed.command("redo");
+    const Mesh redone = mesh_now();
+    CHECK(r477_count(ed, true) == pieces + 1 && r477_same(redone, opened) && r477_matches(ed));
+  });
+
+  test("blockout rooms (te): duplicating a room puts a twin on top of it that changes nothing; duplicating a door cuts the same hole", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    ed.command("blockout add door");
+    r477_settle(ed, 3);
+    GameObject *door = ed.active_object_for_test();
+    const double volume = r476_volume(*r477_mesh(bo));
+    const size_t pieces = r477_count(ed, true);
+    for (GameObject *g : {room, door}) {
+      ed.select_for_test(g->id, false);
+      ed.command("duplicate");
+      r477_settle(ed, 3);
+      CHECK(r477_count(ed, true) > pieces);
+      CHECK(r477_matches(ed));
+      CHECK_NEAR(r476_volume(*r477_mesh(bo)), volume, 5e-3);
+      CHECK(r476_sound(*r477_mesh(bo), "after duplicate"));
+    }
+  });
+
+  test("blockout rooms (te): deleting the room a door stood in leaves the door cutting nothing and the Blockout empty, closed and matching", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    ed.command("blockout add door");
+    r477_settle(ed, 3);
+    GameObject *door = ed.active_object_for_test();
+    ed.scene().destroy(room);
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed) && r477_mesh(bo)->face_count() == 0);
+    CHECK(door && r478_faces_named(*bo->get<Blockout>(), door->id) == 0);
+  });
+
+  test("blockout rooms (te): a disabled room leaves the Blockout, a room under an empty goes with the empty, and Play and Stop keep the rooms", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    GameObject *group = ed.scene().create("Group", bo);
+    group->set_local_position({20.0f, 2.0f, 0.0f});
+    GameObject *second = r477_piece(ed, *group, "Room2", 0, 0, {0, 0, 0}, {4, 3, 4});
+    second->get<BlockoutPiece>()->room = true;
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+    Vec3 lo, hi;
+    r478e_bounds(*r477_mesh(bo), lo, hi);
+    CHECK_NEAR(hi.x, 22.2f, 1e-3f);
+    CHECK_NEAR(lo.y, -1.7f, 1e-3f);
+    CHECK_NEAR(r476_volume(*r477_mesh(bo)), 2 * r478e_matter({4, 3, 4}), 5e-3);
+    room->active = false;
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+    r478e_bounds(*r477_mesh(bo), lo, hi);
+    CHECK_NEAR(lo.x, 17.8f, 1e-3f);
+    CHECK_NEAR(r476_volume(*r477_mesh(bo)), r478e_matter({4, 3, 4}), 5e-3);
+    room->active = true;
+    r477_settle(ed, 3);
+    const Mesh both = *r477_mesh(bo);
+    ed.command("play");
+    r477_settle(ed, 3);
+    bo = r477_find(ed);
+    CHECK(bo && r477_matches(ed) && r477_same(*r477_mesh(bo), both));
+    ed.command("stop");
+    r477_settle(ed, 3);
+    bo = r477_find(ed);  // (Stop puts the scene back from its copy: the old pointers are gone)
+    CHECK(bo && r477_matches(ed) && r477_same(*r477_mesh(bo), both));
+    CHECK(bo && r477_all_pieces(*bo).size() == 2);
+  });
+
+  test("blockout rooms (te): bad console input for rooms, doors and 'blockout set' warns and changes nothing", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    const size_t pieces = r477_count(ed, true);
+    const Mesh before = *r477_mesh(bo);
+    for (const char *line : {"blockout add room box abc", "blockout add room box 4 3", "blockout add room box -1 3 4", "blockout add room box nan 3 4", "blockout add room cylinder 0 2",
+                             "blockout add room cylinder -1 2", "blockout add room sphere 1", "blockout add door abc", "blockout add door -1 2", "blockout add door 1 nan",
+                             "blockout add window 1 -2", "blockout add door 1 2 nan", "blockout set wall", "blockout set wall -0.5", "blockout set wall nan", "blockout set floor inf",
+                             "blockout set ceiling x", "blockout set walls", "blockout set opentop", "blockout add box intersect abc", "blockout add intersect nonsense"}) {
+      bo = r477_find(ed);
+      room = r477_all_pieces(*bo).front();
+      ed.select_for_test(room->id, false);
+      const size_t mark = r477_mark();
+      const size_t count = r477_count(ed, true);
+      ed.command(line);
+      r477_settle(ed, 3);
+      size_t warnings = 0;
+      r477_log_since(mark, &warnings);
+      bo = r477_find(ed);
+      room = r477_all_pieces(*bo).front();
+      const BlockoutPiece *bp = room->get<BlockoutPiece>();
+      const bool fields_sane = std::isfinite(bp->wall) && std::isfinite(bp->floor) && std::isfinite(bp->ceiling) && bp->wall >= 0.0f && bp->floor >= 0.0f && bp->ceiling >= 0.0f;
+      const bool made_nothing = r477_count(ed, true) == count;
+      /* Either it warned and left the scene alone, or it did something valid: a piece, if made, has finite sensible numbers. */
+      const bool ok = fields_sane && r477_matches(ed) && (made_nothing ? warnings >= 1 || r477_same(before, *r477_mesh(bo)) : true);
+      if (!ok || (!made_nothing && warnings == 0 && false)) std::printf("    '%s': warnings %zu, made %zu piece(s), sane %d\n", line, warnings, r477_count(ed, true) - count, (int)fields_sane);
+      CHECK(ok);
+      if (!made_nothing) {
+        const BlockoutPiece *np = r477_active_piece(ed);
+        if (np && !(np->size.x > 0.0f && np->radius > 0.0f)) std::printf("    '%s' made a piece: shape %d size %g %g %g radius %g opening %d width %g head %g sill %g\n", line, np->shape, np->size.x, np->size.y, np->size.z, np->radius, np->opening, np->width, np->head, np->sill);
+        CHECK(np && std::isfinite(np->size.x) && std::isfinite(np->size.y) && std::isfinite(np->size.z) && np->size.x > 0.0f && np->radius > 0.0f);
+        ed.command("undo");
+        r477_settle(ed, 2);
+      }
+    }
+    CHECK(r477_count(ed, true) == pieces);
+  });
+
+  test("blockout rooms (te): 'blockout set wall' on a mixed selection changes the rooms and leaves the box, the door and the Blockout alone", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    GameObject *plain = r477_piece(ed, *bo, "Plain", 0, 0, {20, 0, 0}, {2, 2, 2});
+    GameObject *other = r477_piece(ed, *bo, "Room2", 0, 0, {10, 0, 0}, {2, 2, 2});
+    other->get<BlockoutPiece>()->room = true;
+    r477_settle(ed, 2);
+    ed.select_for_test(room->id, false);
+    ed.select_for_test(plain->id, true);
+    ed.select_for_test(other->id, true);
+    ed.select_for_test(bo->id, true);
+    ed.command("blockout set wall 0.45");
+    r477_settle(ed, 3);
+    CHECK(room->get<BlockoutPiece>()->wall == 0.45f && other->get<BlockoutPiece>()->wall == 0.45f);
+    CHECK(plain->get<BlockoutPiece>()->wall == 0.2f && !plain->get<BlockoutPiece>()->room && r477_matches(ed));
+  });
+
+  test("blockout rooms (te): the same room edits give the same mesh with workers on and off", [] {
+    Mesh made[2];
+    for (int workers = 0; workers < 2; workers++) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.set_async_jobs_for_test(workers == 1);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      ed.select_for_test(bo->id, false);
+      ed.command("blockout add room box 4 3 4");
+      ed.command("blockout add door");
+      ed.command("blockout set wall 0.3");
+      ed.command("blockout set opentop on");
+      r477_settle(ed, 3);
+      ed.command("blockout wait");
+      r477_settle(ed, 3);
+      CHECK(r477_matches(ed));
+      made[workers] = *r477_mesh(bo);
+    }
+    CHECK(r477_same(made[0], made[1]));
+  });
+}
+
+/* ------------------------------------------------------------------ round 478: the code review's findings */
+static void tests_round478_review() {
+  test("blockout: an Intersect piece exactly as wide as a room names the room's two ends on both paths", [] {
+    std::vector<R476Built> built;
+    const std::vector<Piece> pieces{r478_room(1, {4, 3, 4}, {0, 0, 0}), box_piece(2, {4.4f, 10, 10}, {0, 0, 0}, Op::Intersect)};
+    for (Path path : r476_paths()) {
+      built.push_back(r476_build(pieces, path));
+      const R476Built &b = built.back();
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK(b.mesh.face_count() == 12);
+      CHECK_NEAR(r476_volume(b.mesh), 4.4 * 3.4 * 4.4 - 48.0, 2e-3);
+      size_t ends = 0;
+      for (size_t f = 0; f < b.mesh.face_count(); f++) {
+        if (b.faces.piece[f] != 2) continue;
+        ends++;
+        CHECK(std::fabs(std::fabs(b.mesh.positions[b.mesh.face_verts(f)[0]].x) - 2.2f) < 1e-5f);
+      }
+      if (ends != 2) std::printf("    %s: %zu faces name the Intersect piece\n", r476_name(path), ends);
+      CHECK(ends == 2);  // (the two faces in its planes are its own: Cut for materials, whichever path built them)
+    }
+    if (built.size() == 2) CHECK(r476_same_shape(built[0], built[1]));
+  });
+
+  test("blockout rooms: a room of which nothing came out is named in the report's notes", [] {
+    for (Path path : r476_paths()) {
+      /* A Merge room wholly in a Keep room's air has no wall left: every room's air clears a Merge room's shell. */
+      const R476Built in = r476_build({r478_room(1, {8, 3, 8}, {0, 0, 0}, true), r478_room(2, {2, 2, 2}, {0.5f, 0, 0.25f})}, path);
+      CHECK(in.ok && r476_sound(in.mesh, r476_name(path)));
+      CHECK(in.report.notes.size() == 1 && in.report.notes[0].id == 2 && in.report.skipped.empty());
+      /* A room that did come out is not named. */
+      const R476Built fine = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0})}, path);
+      CHECK(fine.ok && fine.report.notes.empty());
+    }
+    /* The grid, a wall of a centimetre at a cell of ten: the room is not there, and the report says so. */
+    const R476Built thin = r476_build({r478_room(7, {4, 3, 4}, {0, 0, 0}, false, 0.01f)}, Path::Field, 0.1f);
+    CHECK(thin.ok);
+    if (thin.mesh.face_count() == 0) CHECK(thin.report.notes.size() == 1 && thin.report.notes[0].id == 7);
+  });
+
+  test("blockout: a Blend radius on an Intersect piece rounds nothing - the room stays twelve flat faces", [] {
+    Piece trim = box_piece(2, {20, 20, 20}, {0, 0, 0}, Op::Intersect);
+    trim.blend = 0.5f;
+    for (Path path : r476_paths()) {
+      const R476Built b = r476_build({r478_room(1, {4, 3, 4}, {0, 0, 0}), trim}, path);
+      CHECK(b.ok && r476_sound(b.mesh, r476_name(path)));
+      CHECK(b.mesh.face_count() == 12);
+    }
+  });
+
+  test("blockout: a cluster no Intersect piece reaches is reported by the path the others took", [] {
+    blockout::Settings st;
+    Mesh m;
+    blockout::Report rep;
+    CHECK(blockout::build({box_piece(1, {1, 1, 1}, {0, 0, 0}), box_piece(2, {1, 1, 1}, {50, 0, 0}), box_piece(3, {4, 4, 4}, {0, 0, 0}, Op::Intersect)}, st, m, nullptr, &rep));
+    CHECK(rep.clusters.size() == 2 && m.face_count() == 6);
+    for (const blockout::ClusterReport &c : rep.clusters) CHECK(c.path == (blockout::crisp_available() ? Path::Crisp : Path::Field));
+  });
+
+  test("blockout rooms: a door added to a cylinder room of five sides, with no wall under the mouse, cuts through its first wall", [] {
+    for (const char *line : {"blockout add room cylinder 2 3", "blockout add room box 4 3 4"}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      r477_empty_scene(ed);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_world_position({0.0f, 0.0f, 0.0f});
+      GameObject *room = r478_room_by_command(ed, *bo, line);
+      CHECK(room);
+      if (!room) return;
+      if (BlockoutPiece *bp = room->get<BlockoutPiece>()) bp->segments = 5;  // (a box does not read it)
+      ed.mark_changed_for_test("segments");
+      r477_settle(ed, 2);
+      ed.select_for_test(room->id, false);
+      ed.command("blockout add door");
+      GameObject *door = ed.active_object_for_test();
+      CHECK(door && door->get<BlockoutPiece>() && door->get<BlockoutPiece>()->opening == 1);
+      if (!door) return;
+      r477_settle(ed, 2);
+      const size_t named = r478_faces_named(*bo->get<Blockout>(), door->id);
+      if (named < 3) std::printf("    '%s': %zu faces name the door\n", line, named);
+      CHECK(r477_matches(ed) && named >= 3);  // (two jambs and a head at least: it went through)
+    }
+  });
+
+  test("blockout rooms: a door put where two rooms stand wall to wall goes through both walls", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *left = r478_room_by_command(ed, *bo), *right = r478_room_by_command(ed, *bo);
+    CHECK(left && right);
+    if (!left || !right) return;
+    left->set_local_position({-4.4f, 0.0f, 0.0f});  // (air 4 m wide, walls 0.2: the shells touch at x = -2.2)
+    right->set_local_position({0.0f, 0.0f, 0.0f});
+    ed.mark_changed_for_test("place");
+    r477_settle(ed, 2);
+    ed.select_for_test(right->id, false);
+    ed.command("blockout add door");  // (its first wall is -X: the one against the other room)
+    GameObject *door = ed.active_object_for_test();
+    CHECK(door && door->get<BlockoutPiece>());
+    if (!door || !door->get<BlockoutPiece>()) return;
+    CHECK_NEAR(door->get<BlockoutPiece>()->depth, 0.4f + 0.2f, 1e-2f);
+    CHECK_NEAR(door->local().position.x, -2.2f, 1e-2f);
+    r477_settle(ed, 2);
+    /* Open from one room's air to the other's: a corner of the result at each air's wall plane, within the door. */
+    const Mesh *mesh = bo->get<MeshFilter>()->mesh.get();
+    bool at_left = false, at_right = false;
+    for (const Vec3 &p : mesh->positions) {
+      if (std::fabs(p.z) > 0.5f) continue;
+      at_left = at_left || std::fabs(p.x + 2.4f) < 1e-4f;
+      at_right = at_right || std::fabs(p.x + 2.0f) < 1e-4f;
+    }
+    CHECK(r477_matches(ed) && at_left && at_right);
+  });
+
+  test("blockout rooms: 'blockout set wall' to the thickness the rooms already have adds no undo step", [] {
+    Editor ed;
+    ed.init_headless(900, 600);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room);
+    if (!room) return;
+    ed.select_for_test(room->id, false);
+    ed.command("blockout set wall 0.35");
+    const size_t steps = ed.undo_depth_for_test();
+    ed.command("blockout set wall 0.35");
+    CHECK(ed.undo_depth_for_test() == steps);
+    ed.command("blockout set wall 0.4");
+    CHECK(ed.undo_depth_for_test() >= steps && room->get<BlockoutPiece>()->wall == 0.4f);  // (a real change still goes through; like steps may be one)
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
+  tests_round477();
+  tests_round477_te();
+  tests_round477_review();
+  tests_round477_review2();
+  tests_round478();
+  tests_round478_object();
+  tests_round478_engineer();
+  tests_round478_engineer_object();
+  tests_round478_review();
 }

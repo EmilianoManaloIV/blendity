@@ -25,6 +25,8 @@ using ui::Icon;
 static Icon object_icon(const GameObject &g) {
   if (g.get<Camera>()) return Icon::Camera;
   if (g.get<Light>()) return Icon::Light;
+  if (g.get<Blockout>()) return Icon::Cube;  // (round 477: the result's mesh - its pieces below show the Subtract below)
+  if (const BlockoutPiece *bp = g.get<BlockoutPiece>()) return bp->operation == 1 ? Icon::Close : Icon::Plus;
   if (g.get<MeshFilter>()) return Icon::Cube;
   return Icon::Empty;
 }
@@ -56,6 +58,7 @@ void Editor::draw_hierarchy(const Recti &r) {
       for (const char *k : {"Cube", "Sphere", "Icosphere", "Cylinder", "Capsule", "Cone", "Torus", "Plane", "Quad", "Teapot"})
         if (ui_.menu_item(k, nullptr, false, true, Icon::Cube)) create_object(k, child);
     });
+    u.submenu("Blockout", u.px(190), [this, child] { blockout_menu_items(child); });  // (round 477)
     u.submenu("Shapes (Parametric)", u.px(190), [this, child] {
       for (int k = 0; k < kShapeCount; k++)
         if (ui_.menu_item(kShapeNames[k], nullptr, false, true, Icon::Cube)) create_object(std::string("Shape: ") + kShapeNames[k], child);
@@ -798,6 +801,14 @@ struct InspectorReflector : Reflector {
     if (std::string(n) == "Interpolation") last_interp = v;
     if (skip()) return;
     Recti row = lay.row();
+    if (dim) {  // (a field with no effect now: its value shown, not editable; the help says why)
+      u.label(label_rect(row), n, u.theme.text_dim);
+      const Recti f = field_rect(row);
+      u.frame(f, u.theme.field, u.theme.field_border, u.px(2));
+      u.label({f.x + u.px(5), f.y, f.w - u.px(8), f.h}, opts[std::max(0, std::min(count - 1, v))], u.theme.text_dim);
+      if (u.record_buttons) u.button_rects["greyed:" + record_prefix + n] = f;
+      return;
+    }
     u.label(label_rect(row), n);
     if (u.combo(fid(n), field_rect(row), v, opts, count) || field_menu(n, label_rect(row), defaults ? &defaults->i : nullptr, v)) {
       record(FieldEdit::Enum, n).i_new = v;
@@ -920,6 +931,8 @@ struct InspectorReflector : Reflector {
   void help(const char *t) override {
     if (!last_skipped) u.tooltip(t);
   }
+  bool dim = false;  // (round 478: greyed(), the fields between are drawn but not editable)
+  void greyed(bool on) override { dim = on; }
 
   /* A collapsible group (task 0145): a foldout row, its fields indented under it and skipped while it is closed. The
    * state is kept by the group's name - per material for a material's groups (an axis material's Axis Material
@@ -1806,6 +1819,7 @@ void Editor::draw_inspector(const Recti &r) {
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
       if (auto *pg = dynamic_cast<LightProbeGroupComponent *>(c)) draw_probe_group_extras(*g, *pg, lay);  // (round 455)
       if (dynamic_cast<Armature *>(c)) draw_puppet_controls_extras(*g, lay);  // (round 347: the analysis' problems)
+      if (auto *bo = dynamic_cast<Blockout *>(c)) draw_blockout_extras(*g, *bo, lay);  // (round 477: its status lines)
       if (auto *ikc = dynamic_cast<IKConstraint *>(c)) {  // (round 348: FK / IK without a jump)
         const Recti row = lay.row(u.row_h() + u.px(2));
         const int bw = (row.w - u.px(16)) / 3;
@@ -2109,6 +2123,7 @@ void Editor::draw_inspector(const Recti &r) {
         };
         switch (act) {
           case Apply: {
+            if (blockout_refuses_edit_mode(g)) break;  // (round 477: applied, the modifier's work would go at the next rebuild)
             auto *mf = g->get<MeshFilter>();
             if (mf && mf->mesh) {
               bool first = true;

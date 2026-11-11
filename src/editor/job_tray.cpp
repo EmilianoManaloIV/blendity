@@ -30,6 +30,8 @@ std::string Editor::pending_job_on(GameObject &g, const std::vector<std::string>
   if (mesh_job_ && mesh_job_->obj == g.id) return mesh_job_->label;  // (round 413)
   for (const auto &j : eval_jobs_)
     if (j->obj == g.id) return "Evaluating " + j->name;
+  for (const auto &j : blockout_jobs_)  // (round 477)
+    if (j->obj == g.id) return "Building " + j->name;
   if (!surface_job_) return "";
   if (surfaces) return std::find(surfaces->begin(), surfaces->end(), surface_job_->path) != surfaces->end() ? "Surface" : "";
   const ProceduralTexturePtr surface = surface_of(&g, nullptr);
@@ -107,6 +109,7 @@ std::vector<Editor::JobView> Editor::jobs_running() {
   /* Round 413: the mesh operator, the slow stacks, the file jobs. */
   if (mesh_job_) add(mesh_job_->label, -1.0f, [this] { mesh_job_->cancel.store(true); }, mesh_job_->cancel.load());
   for (const auto &j : eval_jobs_) add("Evaluating " + j->name, -1.0f, nullptr);
+  for (const auto &j : blockout_jobs_) add("Building " + j->name, -1.0f, nullptr);  // (round 477: no Cancel - the next change builds it again at once; the Blockout keeps its mesh meanwhile)
   if (save_job_) add("Saving " + fs::filename(save_job_->path), -1.0f, nullptr);
   if (shot_job_) add("Saving screenshot", -1.0f, nullptr);  // (round 418)
   if (open_job_) add("Opening " + fs::filename(open_job_->path), -1.0f, nullptr);

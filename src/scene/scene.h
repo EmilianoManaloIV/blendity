@@ -104,6 +104,9 @@ struct Reflector {
   }
   /* Help text for the previous field (shown as an Inspector tooltip). */
   virtual void help(const char *) {}
+  /* The fields drawn from here on, until greyed(false), are shown greyed and can't be edited (the Inspector's; a field that is
+   * kept and saved but has no effect now, its help saying why). Everyone else reads and writes them as any. */
+  virtual void greyed(bool) {}
   /* A collapsible group of fields (task 0145): the Inspector draws a foldout row and skips the fields while it is
    * closed; every other reader (files, undo, hashing, `set`, clips) sees them and gets true. Each group() is paired
    * with a group_end(), whatever it returned. */
