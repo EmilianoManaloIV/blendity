@@ -1159,14 +1159,33 @@ void Editor::gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1) {
 /* Task 0099: the card's copy is the render mesh this one moved from in place: only what the move changed goes up. */
 bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) {
   if (e.id < 0 || rm.moved_from == 0 || e.serial != rm.moved_from || e.vertices != rm.positions.size() || e.indices != rm.indices.size()) return false;
-  if (!e.parts.empty()) return false;  // (its triangles are grouped by material on the card: the index ranges don't hold)
+  /* Round 470: ranges that cover most of a mesh, or come in hundreds of pieces, go as the whole mesh in one copy, as
+   * before the round (each range is a copy of its own, and its vertices are gathered one by one here). A rule of
+   * thumb, not measured apart: the rows that move most of a mesh showed no gain from ranges. */
+  size_t moved = 0;
+  for (const auto &r : rm.moved_vertices) moved += r.second;
+  if (moved * 2 > rm.positions.size() || rm.moved_vertices.size() > 256) return false;
   std::vector<gpu::RasterVertex> v;  // (just the moved ranges' vertices, one range after another)
+  v.reserve(moved);
   for (const auto &r : rm.moved_vertices)
     for (uint32_t i = r.first; i < r.first + r.second && i < rm.positions.size(); i++) v.push_back(raster_vertex(rm, i));
-  if (!gpu_view_->update_mesh_ranges(e.id, v, rm.moved_vertices, rm.indices, rm.moved_indices, &err)) return false;
+  /* Round 470: a mesh with several materials too. Its parts share one vertex array, so the vertex ranges hold as they
+   * are; its triangles are grouped by material on the card, so when quads or n-gons were split again the indices go
+   * up whole, grouped again (a twentieth of the vertices' bytes) - a mesh of triangles sends none. */
+  std::vector<uint32_t> grouped;
+  std::vector<std::pair<uint32_t, uint32_t>> whole;
+  if (!e.parts.empty() && !rm.moved_indices.empty()) {
+    std::vector<std::array<uint32_t, 3>> parts;
+    grouped = card_indices(rm, parts);
+    if (parts != e.parts) return false;  // (a face changed its slot under the same sizes: not a move)
+    whole.push_back({0, (uint32_t)grouped.size()});
+  }
+  const std::vector<uint32_t> &indices = whole.empty() ? rm.indices : grouped;
+  const std::vector<std::pair<uint32_t, uint32_t>> &index_ranges = whole.empty() ? rm.moved_indices : whole;
+  if (!gpu_view_->update_mesh_ranges(e.id, v, rm.moved_vertices, indices, index_ranges, &err)) return false;
   uint64_t bytes = 0;
   for (const auto &r : rm.moved_vertices) bytes += (uint64_t)r.second * sizeof(gpu::RasterVertex);
-  for (const auto &r : rm.moved_indices) bytes += (uint64_t)r.second * 4;
+  for (const auto &r : index_ranges) bytes += (uint64_t)r.second * 4;
   prof_.gpu_upload_bytes += bytes;
   prof_.gpu_partial_bytes += bytes;
   prof_.gpu_mesh_partial++;

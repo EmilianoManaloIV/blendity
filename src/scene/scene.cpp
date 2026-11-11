@@ -2934,6 +2934,19 @@ Mat4 GameObject::world_matrix_uncached() const {
   return m;
 }
 
+int GameObject::settle_evaluated(int most, bool *left) const {
+  int n = 0;
+  for (const std::shared_ptr<Mesh> &m : eval_mesh_) {
+    if (!m || !m->needs_settle()) continue;  // (kinds that share one mesh: settled once)
+    if (n >= most) {
+      if (left) *left = true;
+      break;
+    }
+    n += m->settle();
+  }
+  return n;
+}
+
 void GameObject::mark_dirty() {
   edit_epoch::bump_transform();  // (ADR 0115: the views' scene hash - once for the subtree, not per node: review 435)
   for (GameObject *g = this; g; g = g->parent) g->below_version++;  // (round 469: a dozen steps a write)

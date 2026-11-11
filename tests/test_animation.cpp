@@ -7564,7 +7564,7 @@ static void tests_round468() {
     std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
   });
 
-  test("moves in place counted (round 468): a smooth-by-angle mesh whose bend crosses its angle between two builds counts a refusal for a new split and a whole build; a move that keeps the split counts an in-place move and no refusal", [] {
+  test("moves in place counted (round 468; round 470: split in place): a smooth-by-angle mesh whose bend crosses its angle is moved in place too - the corners that left their render vertex counted, no refusal, no whole build; a move that keeps the split counts an in-place move and no split", [] {
     auto make = [] {
       MeshPtr g = primitives::grid(4.0f, 12, 12);
       g->smooth = true;
@@ -7591,10 +7591,10 @@ static void tests_round468() {
       const MeshCounts c0 = mesh_counts();
       const RenderMesh &rm = m->render_mesh();
       const MeshCounts d = mesh_counts() - c0;
-      std::printf("    a spike: %llu in place, %llu refused, %llu for a split, %llu built whole\n", (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused,
+      std::printf("    a spike: %llu in place, %llu refused, %llu corner(s) split in place, %llu built whole\n", (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused,
                   (unsigned long long)d.in_place_split, (unsigned long long)d.full_builds);
-      CHECK(d.in_place_refused >= 1 && d.in_place_split >= 1 && d.full_builds >= 1 && d.in_place == 0);
-      CHECK(rm.positions.size() > m->positions.size());  // (the build split the spike's vertex)
+      CHECK(d.in_place >= 1 && d.in_place_split >= 1 && d.in_place_refused == 0 && d.full_builds == 0);  // (round 470: until then a refusal and a whole build)
+      CHECK(rm.positions.size() > m->positions.size());  // (the spike's vertex was split, in place)
     }
   });
 
@@ -8459,6 +8459,302 @@ static void tests_round469_editor() {
   });
 }
 
+
+/* ===================================================================== */
+/* Round 470 (task 0446, ADR 0124): posed meshes follow in place, bounded; settled at rest. The test engineer's tests,   */
+/* written from the acceptance criteria.                                                                                  */
+/* ===================================================================== */
+/* The three tubes smooth by angle (so a bend splits fans) and with UVs (so tangents exist and follow quickly). */
+static void r470_prepare(const R469Char &c) {
+  for (GameObject *g : {c.body, c.hair, c.glove}) {
+    Mesh &m = *g->mesh_filter()->mesh;
+    m.smooth = true;
+    m.smooth_angle = 40.0f;
+    m.uvs.resize(m.corner_count());
+    for (size_t k = 0; k < m.corner_count(); k++) {
+      const Vec3 &p = m.positions[m.corner_verts[k]];
+      m.uvs[k] = Vec2(p.x * 0.5f + 0.5f, p.y * 0.3f + p.z * 0.1f);
+    }
+    m.touch();
+  }
+}
+/* A bone swinging out and back every 20 steps. */
+static void r470_swing(const R469Char &c, int k) {
+  const int ph = k % 20;
+  const float t = (float)(ph <= 10 ? ph : 20 - ph) / 10.0f;
+  c.spine->set_local_rotation(Quat::axis_angle({0, 0, 1}, 1.1f * t));
+  c.head->set_local_rotation(Quat::axis_angle({0, 1, 0}, 0.7f * t));
+  c.arm->set_local_rotation(Quat::axis_angle({0, 0, 1}, -0.9f * t));
+}
+static bool r470_valid_mesh(const RenderMesh &rm) {
+  const size_t nv = rm.positions.size();
+  if (rm.normals.size() != nv || (!rm.uvs.empty() && rm.uvs.size() != nv) || (!rm.tangents.empty() && rm.tangents.size() != nv) || rm.indices.size() % 3 != 0 ||
+      rm.tri_face.size() != rm.indices.size() / 3 || rm.tri_corner.size() != rm.indices.size())
+    return false;
+  for (uint32_t i : rm.indices)
+    if (i >= nv) return false;
+  return true;
+}
+/* What the mesh draws (every triangle corner's position, normal and UV) against a fresh build of a copy. */
+static bool r470_draws_like_fresh(const Mesh &em, const char *what, bool check_tangents = false) {
+  const RenderMesh &got = check_tangents ? em.render_mesh_tangents() : em.render_mesh();
+  Mesh ref = em;
+  ref.forget_caches();
+  const RenderMesh &want = check_tangents ? ref.render_mesh_tangents() : ref.render_mesh();
+  bool ok = r470_valid_mesh(got) && got.indices.size() == want.indices.size() && got.tri_corner == want.tri_corner && got.tri_face == want.tri_face && got.uvs.empty() == want.uvs.empty();
+  for (size_t k = 0; ok && k < got.indices.size(); k++) {
+    const uint32_t i = got.indices[k], j = want.indices[k];
+    ok = std::memcmp(&got.positions[i], &want.positions[j], sizeof(Vec3)) == 0 && std::memcmp(&got.normals[i], &want.normals[j], sizeof(Vec3)) == 0 &&
+         (got.uvs.empty() || std::memcmp(&got.uvs[i], &want.uvs[j], sizeof(Vec2)) == 0) && (!check_tangents || std::memcmp(&got.tangents[i], &want.tangents[j], sizeof(Vec4)) == 0);
+    if (!ok) std::printf("    %s: triangle corner %zu differs from a fresh build\n", what, k);
+  }
+  if (!ok && got.indices.size() != want.indices.size()) std::printf("    %s: %zu vs %zu triangle corners\n", what, got.indices.size(), want.indices.size());
+  return ok;
+}
+
+static void tests_round470() {
+  test("round 470: a skinned character's bones swinging back and forth for 1,000 frames: no render mesh built whole, no refusal, never more render vertices than corners, none added after the first swing; settle() and a read give a fresh build's count", [] {
+    for (int normals = 0; normals < 2; normals++) {
+      Scene s;
+      const R469Char c = r469_build(s, true, normals != 0);
+      r470_prepare(c);
+      const GameObject *objs[3] = {c.body, c.hair, c.glove};
+      for (int warm = 0; warm < 2; warm++) {  // (the first poses build; the thousand follow)
+        r470_swing(c, warm);
+        for (const GameObject *g : objs) g->evaluated_mesh()->render_mesh_tangents();
+      }
+      const MeshCounts c0 = mesh_counts();
+      size_t worst[3] = {0, 0, 0}, at20[3] = {0, 0, 0}, late[3] = {0, 0, 0};
+      size_t invalid = 0, unequal = 0;
+      uint64_t fresh_builds = 0;
+      for (int step = 2; step < 1002; step++) {
+        r470_swing(c, step);
+        for (int i = 0; i < 3; i++) {
+          const Mesh *em = objs[i]->evaluated_mesh();
+          const RenderMesh &rm = em->render_mesh_tangents();
+          invalid += !r470_valid_mesh(rm);
+          worst[i] = std::max(worst[i], rm.positions.size());
+          if (step == 21) at20[i] = rm.positions.size();
+          if (step > 21 && rm.positions.size() != at20[i]) late[i]++;
+          if (step % 97 == 0) {  // (a fresh build of a copy is a whole build too: not counted against the frames)
+            const MeshCounts b0 = mesh_counts();
+            unequal += !r470_draws_like_fresh(*em, objs[i]->name.c_str());
+            fresh_builds += (mesh_counts() - b0).full_builds;
+          }
+        }
+      }
+      const MeshCounts d = mesh_counts() - c0;
+      std::printf("    custom normals %d: %llu in place, %llu corners split in place, %llu refused, %llu built whole, %llu tangent builds; vertices at most %zu / %zu / %zu (corners %zu / %zu / %zu); after the first swing %zu / %zu / %zu, changes later %zu / %zu / %zu\n",
+                  normals, (unsigned long long)d.in_place, (unsigned long long)d.in_place_split, (unsigned long long)d.in_place_refused, (unsigned long long)d.full_builds,
+                  (unsigned long long)d.tangent_builds, worst[0], worst[1], worst[2], objs[0]->evaluated_mesh()->corner_count(), objs[1]->evaluated_mesh()->corner_count(),
+                  objs[2]->evaluated_mesh()->corner_count(), at20[0], at20[1], at20[2], late[0], late[1], late[2]);
+      CHECK(invalid == 0 && unequal == 0);
+      CHECK(d.in_place_refused == 0 && d.full_builds == fresh_builds);  // (the only whole builds are the comparisons' own)
+      if (normals == 0) CHECK(d.in_place_split > 0);  // (custom normals do not depend on the faces: nothing to split)
+      for (int i = 0; i < 3; i++) {
+        CHECK(worst[i] <= objs[i]->evaluated_mesh()->corner_count());
+        CHECK(late[i] == 0);
+      }
+      /* At rest, settled: the count is a fresh build's. */
+      r470_swing(c, 0);
+      for (int i = 0; i < 3; i++) {
+        const Mesh *em = objs[i]->evaluated_mesh();
+        (void)em->render_mesh_tangents();
+        em->settle();
+        const size_t settled = em->render_mesh_tangents().positions.size();
+        Mesh ref = *em;
+        ref.forget_caches();
+        const size_t fresh = ref.render_mesh_tangents().positions.size();
+        std::printf("    %s at rest: %zu render vertices after settle(), a fresh build %zu\n", objs[i]->name.c_str(), settled, fresh);
+        CHECK(settled == fresh);
+        CHECK(r470_draws_like_fresh(*em, objs[i]->name.c_str(), true));  // (tangents a fresh build's: MikkTSpace)
+      }
+    }
+  });
+
+  test("round 470: a stand-in avatar dragged by its chest builds no render mesh whole and no tangents with MikkTSpace after the first frame, and refuses nothing (a 2-frame drag against a 30- or 60-frame one, each started at rest)", [] {
+    for (const char *scene : {"avatarlikequick", "avatarlike"}) {
+      const bool full = std::strcmp(scene, "avatarlike") == 0;
+      Editor ed;
+      ed.init_headless(1200, 900);
+      ed.command(std::string("benchscene ") + scene);
+      ed.command("tool rotate");
+      r34_steps(ed, 3);
+      struct Run {
+        bool ok = false;
+        std::string error;
+        MeshCounts mesh;
+        PoseCounts pose;
+      };
+      auto drag = [&](int frames) {
+        ed.command(strprintf("perf drag gizmo rz 60 part chest frames %d", frames));
+        r34_steps(ed, 14);  // (the pose rests: the evaluated meshes are settled, and the next drag starts from there)
+        const PerfDragResult &r = ed.perf_drag_result_for_test();
+        Run out;
+        out.ok = r.ok, out.error = r.error, out.mesh = r.mesh_after - r.mesh_before, out.pose = r.pose_after - r.pose_before;
+        return out;
+      };
+      (void)drag(2);  // (cold: the first drag of a scene builds what the next ones keep)
+      const Run a = drag(2), b = drag(full ? 60 : 30);
+      std::printf("    %s: 2-frame drag ok %d '%s': %llu built whole (%llu of them outline shells), %llu in place, %llu refused, %llu tangent builds; long drag ok %d '%s': %llu built whole (%llu outline shells), %llu in place, %llu refused, %llu corners split, %llu tangent builds\n",
+                  scene, (int)a.ok, a.error.c_str(), (unsigned long long)a.mesh.full_builds, (unsigned long long)a.pose.outline_shells, (unsigned long long)a.mesh.in_place,
+                  (unsigned long long)a.mesh.in_place_refused, (unsigned long long)a.mesh.tangent_builds, (int)b.ok, b.error.c_str(), (unsigned long long)b.mesh.full_builds,
+                  (unsigned long long)b.pose.outline_shells, (unsigned long long)b.mesh.in_place, (unsigned long long)b.mesh.in_place_refused, (unsigned long long)b.mesh.in_place_split,
+                  (unsigned long long)b.mesh.tangent_builds);
+      CHECK(a.ok && b.ok);
+      CHECK(a.mesh.in_place_refused == 0 && b.mesh.in_place_refused == 0);
+      CHECK(b.mesh.in_place > 0);
+      /* The long drag's extra frames build nothing: its whole builds are the short one's (the first frame's), plus the
+       * outline shells (ADR 0124 leaves them out: a shell is a new mesh every frame), which are counted apart. */
+      CHECK(b.mesh.full_builds <= a.mesh.full_builds + (b.pose.outline_shells > a.pose.outline_shells ? b.pose.outline_shells - a.pose.outline_shells : 0));
+      CHECK(b.mesh.tangent_builds <= a.mesh.tangent_builds);
+      std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+    }
+  });
+}
+
+static void tests_round470_editor() {
+  /* The frames' watch for rest: a pose changing every frame settles nothing; at rest the evaluated meshes with quick
+   * tangents are settled, two a frame at most; a step still pending (the mouse held) waits. */
+  auto setup = [](Editor &ed) {
+    r34_open(ed, false);
+    const R469Char c = r469_build(ed.scene(), true, false);
+    r470_prepare(c);
+    ed.mark_changed_for_test("R470 setup");
+    r34_steps(ed, 4);
+    return c;
+  };
+  auto tangents_of = [](const R469Char &c) {
+    for (const GameObject *g : {c.body, c.hair, c.glove}) g->evaluated_mesh()->render_mesh_tangents();  // (a normal-mapped material's draw)
+  };
+  auto approximate = [](const R469Char &c) {
+    int n = 0;
+    for (const GameObject *g : {c.body, c.hair, c.glove}) n += g->evaluated_mesh()->tangents_approximate();
+    return n;
+  };
+  auto exact = [](const R469Char &c, const char *what) {
+    bool ok = true;
+    for (GameObject *g : {c.body, c.hair, c.glove}) {
+      const Mesh *em = g->evaluated_mesh();
+      ok = ok && !em->tangents_approximate() && r470_draws_like_fresh(*em, (std::string(what) + " " + g->name).c_str(), true);
+    }
+    return ok;
+  };
+
+  test("round 470: while a pose changes every frame nothing is settled; once it rests the posed meshes are made exact - two a frame at most, tangents and vertex count a fresh build's", [=] {
+    Editor ed;
+    const R469Char c = setup(ed);
+    for (int k = 0; k < 3; k++) {
+      r470_swing(c, 3 + k * 5);
+      r34_steps(ed, 1);
+      tangents_of(c);
+    }
+    const uint64_t s0 = ed.settled_evaluated_for_test();
+    for (int k = 0; k < 12; k++) {  // (a pose changed on every frame: the meshes follow in place, quick tangents)
+      r470_swing(c, k + 1);
+      r34_steps(ed, 1);
+      tangents_of(c);
+    }
+    std::printf("    posed for 12 frames: %llu settled, %d of the 3 meshes have quick tangents\n", (unsigned long long)(ed.settled_evaluated_for_test() - s0), approximate(c));
+    CHECK(ed.settled_evaluated_for_test() == s0);
+    CHECK(approximate(c) == 3);
+    uint64_t last = ed.settled_evaluated_for_test(), worst = 0;
+    int first_settle = -1;
+    for (int k = 0; k < 10; k++) {
+      r34_steps(ed, 1);
+      const uint64_t now = ed.settled_evaluated_for_test();
+      worst = std::max(worst, now - last);
+      if (first_settle < 0 && now > last) first_settle = k;
+      last = now;
+    }
+    std::printf("    at rest: %llu meshes settled in all, the most in one frame %llu, the first on rest frame %d\n", (unsigned long long)(last - s0), (unsigned long long)worst, first_settle);
+    CHECK(last - s0 == 3);
+    CHECK(worst <= 2);
+    CHECK(approximate(c) == 0);
+    CHECK(exact(c, "settled"));
+    /* Nothing left to do: a rested scene settles no more. */
+    r34_steps(ed, 6);
+    CHECK(ed.settled_evaluated_for_test() == last);
+  });
+
+  test("round 470: a step still pending (the mouse held) settles nothing until it is committed; then the meshes are settled", [=] {
+    Editor ed;
+    const R469Char c = setup(ed);
+    for (int k = 0; k < 4; k++) {
+      r470_swing(c, 2 + k * 3);
+      r34_steps(ed, 1);
+      tangents_of(c);
+    }
+    CHECK(approximate(c) == 3);
+    const Recti h = ed.window_rect_for_test(WindowKind::Hierarchy);
+    const int x = h.x + h.w / 2, y = h.y + h.h - 10;
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x, y)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x, y)});  // (the button is held from here on; whatever the click does lands now)
+    r34_steps(ed, 1);
+    for (int k = 0; k < 3; k++) {  // (poses made while the button is down: each leaves a step pending that cannot commit)
+      r470_swing(c, 7 + k * 4);
+      ed.mark_changed_for_test("R470 held pose");
+      r34_steps(ed, 1);
+      tangents_of(c);
+    }
+    CHECK(approximate(c) == 3);
+    const uint64_t s0 = ed.settled_evaluated_for_test();  // (what the frames before the hold settled is not counted)
+    for (int k = 0; k < 10; k++) r34_steps(ed, 1);
+    std::printf("    mouse held 10 frames: %llu settled\n", (unsigned long long)(ed.settled_evaluated_for_test() - s0));
+    CHECK(ed.settled_evaluated_for_test() == s0);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x, y)});
+    r34_steps(ed, 10);
+    std::printf("    released: %llu settled\n", (unsigned long long)(ed.settled_evaluated_for_test() - s0));
+    CHECK(ed.settled_evaluated_for_test() > s0);
+  });
+
+  test("round 470: undo and redo after the meshes were settled draw correctly - the poses before and after, each a fresh build's, no crash", [=] {
+    Editor ed;
+    const R469Char c0 = setup(ed);
+    (void)c0;
+    auto bone = [&](const char *n) { return ed.scene().find_by_name(n); };
+    auto body_draws = [&](const char *what, bool tangents = true) {
+      bool ok = true;
+      for (const char *n : {"Body", "Hair", "Glove"}) {
+        GameObject *g = ed.scene().find_by_name(n);
+        const Mesh *em = g ? g->evaluated_mesh() : nullptr;
+        ok = ok && em && r470_draws_like_fresh(*em, (std::string(what) + " " + n).c_str(), tangents);
+      }
+      return ok;
+    };
+    for (int pose = 0; pose < 2; pose++) {
+      bone("Spine")->set_local_rotation(Quat::axis_angle({0, 0, 1}, pose ? 0.9f : 0.5f));
+      bone("Arm")->set_local_rotation(Quat::axis_angle({0, 0, 1}, pose ? -0.6f : -0.2f));
+      ed.mark_changed_for_test(pose ? "R470 pose B" : "R470 pose A");
+      r34_steps(ed, 2);
+      for (const char *n : {"Body", "Hair", "Glove"}) ed.scene().find_by_name(n)->evaluated_mesh()->render_mesh_tangents();
+      r34_steps(ed, 10);  // (rest: settled)
+    }
+    CHECK(ed.settled_evaluated_for_test() > 0);
+    CHECK(body_draws("pose B settled"));
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(body_draws("after undo"));
+    r34_steps(ed, 8);
+    CHECK(body_draws("after undo, at rest"));
+    ed.command("redo");
+    r34_steps(ed, 3);
+    CHECK(body_draws("after redo"));
+    r34_steps(ed, 8);
+    CHECK(body_draws("after redo, at rest"));
+    /* Play and Stop over it. */
+    ed.command("play");
+    r34_steps(ed, 4);
+    bone("Spine")->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.7f));
+    r34_steps(ed, 3);
+    CHECK(body_draws("posed in Play", false));  // (quick tangents while the pose moves: positions, normals and UVs are what must equal a rebuild's)
+    ed.command("stop");
+    r34_steps(ed, 12);
+    CHECK(body_draws("after Stop"));
+  });
+}
+
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -8490,4 +8786,6 @@ void run_animation_tests() {
   tests_round468();
   tests_round469();
   tests_round469_editor();
+  tests_round470();
+  tests_round470_editor();
 }
