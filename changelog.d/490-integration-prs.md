@@ -49,7 +49,7 @@ and docs only: no product code, no build, nothing in the editor changes.**
   task templates say the two rules. The agents' prompts (`.claude/agents/*.md`) are unchanged.
 
 **Checked:** `changelog.py --self-test` 91 passed, 0 failed on Windows and on Linux (49 before); `stack_selftest.sh`
-77 passed, 0 failed on Windows (Git Bash) and on Linux (WSL). A fold on a copy of the tree with a sample fragment
+95 passed, 0 failed on Linux (WSL); on Windows (Git Bash) 77 of 77 before the review's fixes, not rerun after them. A fold on a copy of the tree with a sample fragment
 for all four files: `--dry-run` wrote nothing, the fold changed exactly the lines the fragments named, CRLF kept.
 `integrate.sh` was not run for real. `CHECK=1 bash tools/dev/integrate.sh` against the open PRs (2026-11-11, read-only):
 
