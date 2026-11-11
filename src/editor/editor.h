@@ -996,6 +996,7 @@ class Editor {
   size_t mesh_queue_ = 0;     // (meshes left waiting by the last view frame that left any)
   bool mesh_waiting_ = false;
   bool mesh_deferred_now_ = false;  // (gpu_mesh's answer -1 was a deferral, not a refusal)
+  std::unordered_set<uint64_t> mesh_owner_shown_;  // (round 469: objects a mesh of which went up - never left waiting again)
   double mesh_drain_ms_ = 0;        // (the last queue's life: first mesh left waiting to the frame none was)
   double mesh_drain_t0_ = -1;
   static void texture_stream_run(TextureStream &st);
@@ -1585,10 +1586,13 @@ class Editor {
     std::atomic<bool> cancel{false}, done{false};
     int counts[5] = {};  // models, textures, scripts and shaders, prefabs / scenes / materials, other
     int folders = 0;
+    int gloss_measured = 0;  // (round 485: the textures measured for `.unity-stats`, and what that took on the worker)
+    double gloss_ms = 0.0;
     std::vector<std::string> skipped;
     void run();
     void unpack();
     bool write_asset(const UnityAsset &a, const std::string &rel);
+    std::string gloss_stats(const std::set<std::string> &gloss, const std::map<std::string, std::string> &rel_of);
     void finish(const std::string &failure);
   };
   bool import_unity_package(const std::string &path);
@@ -1639,6 +1643,53 @@ class Editor {
    * count, so tools/unity_compare.py can pair Blendity's pages with Unity's object by object. */
   void lighting_noise_command(const std::string &folder_a, const std::string &folder_b);  // (round 463: `lighting noise`)
   void save_shown_lighting(const std::string &dir, bool overwrite = false);  // (review 451: a relative folder is the project's; a bake there needs `overwrite`)
+  /* Round 484 (task 0460, unity_material_report.cpp): two measuring verbs for tools/unity_materials.py. `unity materials
+   * [all] [to "<file>"]`: what Blendity made of every material the scene's renderers wear (all: every .mat under Assets
+   * too), as text. `unity mapstats [decoders] "<image>"... [to "<file>"]`: an image's size and channels as Blendity
+   * decodes it as data, with `decoders` also through its own decoder alone (a script's: it decodes on the main thread).
+   * Neither edits the scene (no undo step, no changed mark). Round 485: `unity materials all` loads the project's
+   * .mat files, and one loaded for the first time may ask for its gloss map's mean - a headless run measures it and
+   * reads that material again before the list is made, a window starts the job and lists what is there. */
+  void unity_materials_command(const std::vector<std::string> &words);
+  void unity_mapstats_command(const std::vector<std::string> &words);
+  std::string unity_materials_text(bool all, size_t *count = nullptr, size_t *from_unity = nullptr);
+  /* Round 485 (task 0461, ADR 0131; unity_gloss_ui.cpp): a Unity material's smoothness kept in a map comes in as the
+   * map's mean alpha, which a package folder's `.unity-stats` holds. The unpack writes the table; for a package
+   * unpacked before, the textures materials asked for (unity_gloss_wanted) are measured by this job - decoded on a
+   * worker, landed on the main thread: the lines written, and the materials that asked - no others - read again.
+   * `unity rematerials` (Assets > Reimport Unity Materials) loads every .mat, reads the Unity ones again and starts
+   * the job for what is missing; it returns how many materials changed at once. */
+  struct GlossJob {
+    struct Item {
+      std::string guid, path, table;  // (the texture's GUID, its file, its package's folder - "" when it has none)
+      std::set<std::string> materials;  // (the .mat files that asked for its mean: read again when it lands, and no others)
+      float mean[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      int width = 0, height = 0;
+      uint64_t bytes = 0;
+      bool ok = false;
+    };
+    std::vector<Item> items;
+    std::atomic<float> progress{0.0f};
+    std::atomic<bool> cancel{false}, done{false};
+    double ms = 0.0;  // (what the decoding took, said when the job lands; written before `done`)
+    void run();
+  };
+  void poll_unity_gloss();
+  void land_unity_gloss();
+  size_t unity_rematerials();
+  /* The Unity materials the library holds under `under` ("" - all; `only`: of those, the ones at these paths) read
+   * again from their files, in place; the copies the undo and redo states, the last committed state and the scene Stop
+   * brings back keep of them take the new reading too - reading a file again is not an edit, and neither an Undo back
+   * past this moment nor a Stop may bring the old reading back. How many changed. */
+  size_t reread_unity_materials(const std::string &under = std::string(), const std::set<std::string> *only = nullptr);
+  bool unity_gloss_running_for_test() const { return gloss_job_ != nullptr; }
+  /* A job as a worker left it - cancelled part way, say - landed on this thread: a headless editor runs its own jobs
+   * to their end before anything can cancel them. */
+  void land_unity_gloss_for_test(std::shared_ptr<GlossJob> job) {
+    gloss_job_ = std::move(job);
+    land_unity_gloss();
+  }
+  bool unity_gloss_failed_for_test(const std::string &guid) const { return gloss_failed_.count(guid) != 0; }  // (a texture that could not be measured: not asked for again)
   void poll_unity_lighting();
   bool apply_unity_lighting(const std::string &file);
   void unity_subtractive_modes(LightingData &ld) const;  // (round 444)
@@ -1688,6 +1739,9 @@ class Editor {
   const ExportJob *last_export_for_test() const { return export_last_.get(); }
   void import_package_dialog();
   const PackageJob *last_package_for_test() const { return pkg_last_.get(); }
+  /* Round 485: a package "still unpacking" for a test, which has no worker to wait on (a headless import runs to its
+   * end at once): the job stands in for one until the test sets its `done`, and the next frame lands it. */
+  void set_package_job_for_test(std::shared_ptr<PackageJob> job) { pkg_job_ = std::move(job); }
   std::vector<GameObject *> selected_objects_for_test() const { return selected_objects(false); }
   bool scene_planes_deferred_for_test() const { return scene_planes_slot_ >= 0; }
   Recti top_popup_rect_for_test() const { return ui_.top_popup_rect(); }
@@ -2506,6 +2560,9 @@ class Editor {
   float sculpt_lean_angle_ = 0.0f;
   bool pen_curve_dirty_ = false;  // (saved once the drag ends - review 368)
   std::shared_ptr<PackageJob> pkg_job_, pkg_last_;  // (round 369: the unpacking under way, the last one finished)
+  std::shared_ptr<GlossJob> gloss_job_;  // (round 485: the textures being measured for Unity materials' gloss)
+  std::set<std::string> gloss_failed_;   // (...and the ones that could not be read, or were left when the job was cancelled: not sent again on their own - `unity rematerials` asks again)
+  void stop_unity_gloss();
   std::shared_ptr<ExportJob> export_job_, export_last_;  // (round 372)
   void poll_unity_export();
   void stop_unity_export();
@@ -5925,6 +5982,15 @@ class Editor {
   bool bake_variance_denoiser_ = true;  // round 466 (`lighting denoiser variance|atrous`): the filter guided by measured noise - a comparison switch, not saved
   bool bake_light_tree_ = true;  // round 464 (`lighting tree on|off`): emitters picked by a light tree - a comparison switch, not saved
   uint32_t bake_seed_ = 0;  // round 463 (`lighting seed <n>`): a measurement setting - not saved, not in the scene key; 0 the normal bake
+  /* Round 484 (`lighting pick on|off|<rays>`): about how many Baked point and spot lights a texel keeps by chance - 8 the
+   * normal bake, 0 every light at every texel; a measurement setting, not saved, not in the scene key. */
+  float bake_pick_rays_ = 8.0f;
+  void lighting_pick_command(const std::string &word);
+  /* Round 486 (`lighting variancescale auto|on|off`, task 0462): how the next Generate Lighting's filter reads the
+   * noise measured in the gathered light - BakeSettings::variance_scale, or -1 for the bake's own (auto). A comparison
+   * switch: not saved, not in the scene's key. */
+  int bake_variance_scale_ = -1;
+  void lighting_variancescale_command(const std::string &word);
   int bake_gpu_ = -1;  // task 0018: the GPU Generate Lighting gathers on (Render > Device: GPU Compute), -1 the CPU
   std::string gi_gpu_name_;  // the device in use, for the Lighting window
   bool rtlm_busy_ = false;  // a realtime lightmap pass is still gathering
@@ -5999,6 +6065,8 @@ class Editor {
     std::vector<uint64_t> mesh_hashes;  // (round 422: lightmap_mesh_hash of each of `objects`, on the worker - not in the landing frame)
     std::string lightmap_denoiser;      // (round 423)
     uint64_t lightmap_rays = 0;
+    uint64_t lightmap_pick_texels = 0, lightmap_chance_kept = 0, lightmap_chance_dropped = 0;  // (round 484)
+    float pick_rays = 8.0f;  // (round 484: what `lighting pick` was when the bake started; 0: off)
     size_t lightmap_gpu_texels = 0;
     std::atomic<float> progress{0.0f};
     std::atomic<bool> done{false}, cancel{false};
@@ -6020,6 +6088,7 @@ class Editor {
     double phase_ms[5] = {0, 0, 0, 0, 0}, finish_ms = 0, land_ms = 0, total_ms = 0;
     size_t texels = 0, gpu_texels = 0;
     uint64_t rays = 0;
+    uint64_t pick_texels = 0, chance_kept = 0, chance_dropped = 0;  // (round 484: light picking, counted - Lightmapper::pick_texels)
   };
   BakeTimes last_bake_times_;
   double last_bake_start_ms_ = 0;  // (round 422: the frame that starts Generate Lighting)

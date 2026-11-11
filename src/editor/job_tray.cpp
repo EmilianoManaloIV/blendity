@@ -99,6 +99,8 @@ std::vector<Editor::JobView> Editor::jobs_running() {
         [this] { bakelight_->cancel.store(true, std::memory_order_relaxed); }, bakelight_->cancel.load(std::memory_order_relaxed));
   if (pkg_job_)  // (round 369)
     add("Unpacking " + fs::filename(pkg_job_->path), pkg_job_->progress.load(), [this] { pkg_job_->cancel.store(true); }, pkg_job_->cancel.load());
+  if (gloss_job_)  // (round 485: the textures Unity materials read their gloss from, measured once)
+    add("Reading Unity materials' gloss", gloss_job_->progress.load(), [this] { gloss_job_->cancel.store(true); }, gloss_job_->cancel.load());
   if (export_job_)  // (round 372)
     add("Writing " + fs::filename(export_job_->out), export_job_->progress.load(), [this] { export_job_->cancel.store(true); }, export_job_->cancel.load());
   if (surface_job_) add("Surface", -1.0f, nullptr);  // (no Cancel: the stack would be evaluated again at once)

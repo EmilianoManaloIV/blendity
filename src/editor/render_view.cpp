@@ -1708,7 +1708,7 @@ void Editor::apply_camera_focus() {
     Camera *c = g.get<Camera>();
     if (!c || !c->dof || !c->focus_track) return;
     const float d = dot(c->focus_point - g.world_position(), normalize(g.world_rotation().rotate({0, 0, 1})));
-    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d, edit_epoch::bump();
+    if (d > 0.01f && std::fabs(d - c->focus_distance) > 1e-5f) c->focus_distance = d, edit_epoch::bump_moved();  // (round 469: it follows a moved subject - a view must draw, no structure changed)
   });
 }
 

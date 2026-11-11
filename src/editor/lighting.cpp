@@ -364,6 +364,64 @@ int Editor::choose_bake_gpu() {
   return -1;
 }
 
+/* lighting pick [on|off|<rays>] (round 484): how the next Generate Lighting treats the Baked point and spot lights when
+ * there are more than eight - about <rays> of them kept a texel by chance (on: 8, the bake's own number), or every one
+ * at every texel (off). For measuring what the picking costs in noise and saves in time: both are unbiased, so it is
+ * not saved and not in the scene's key. Alone it says the setting. Preview Lighting builds its own settings and the
+ * light probes pick on their own: both keep 8. */
+void Editor::lighting_pick_command(const std::string &word) {
+  const float normal = BakeSettings().pick_rays;
+  auto say = [&] {
+    if (bake_pick_rays_ <= 0.0f)
+      return Log::info("lighting pick: off (the next Generate Lighting sends every Baked point and spot light's shadow rays at every texel; Preview Lighting keeps 8)");
+    Log::info("lighting pick: about %g lights a texel%s", bake_pick_rays_,
+              bake_pick_rays_ == normal ? " (the normal bake)" : " (the next Generate Lighting; Preview Lighting keeps 8; `lighting pick on` restores the normal 8)");
+  };
+  if (word.empty()) return say();
+  if (word == "on") return bake_pick_rays_ = normal, say();
+  if (word == "off") return bake_pick_rays_ = 0.0f, say();
+  /* Digits and at most one point, from 1 to 4096: strtof alone would read "8x" as 8 and "-3" as a number. */
+  const bool number = word.size() <= 8 && word.find_first_not_of("0123456789.") == std::string::npos && std::count(word.begin(), word.end(), '.') <= 1 &&
+                      word.find_first_of("0123456789") != std::string::npos;
+  const float v = number ? std::strtof(word.c_str(), nullptr) : 0.0f;
+  if (!number || !(v >= 1.0f) || v > 4096.0f)
+    return Log::warn("lighting pick: say on, off or a number of lights from 1 to 4096 - it stays %s", bake_pick_rays_ > 0.0f ? strprintf("%g", bake_pick_rays_).c_str() : "off");
+  bake_pick_rays_ = v;
+  say();
+}
+
+/* lighting variancescale [auto|on|off] (round 486, task 0462): how the next Generate Lighting's filter reads the noise
+ * the bake measured in the gathered light. Round 465 scaled it for Sobol samples (by 4 over the square root of the
+ * samples); auto, the bake's own, keeps that scale only as far as the texel's samples carry it (a texel lit by a few
+ * rare bright samples gets none: what specks are made of); on is round 465's scale everywhere (the bake of rounds
+ * 465 to 485), off none at all - both for comparisons. The round's other measured candidates answer too (clamp, snr,
+ * step). The gathered light is the same whatever the word, so it is not saved and not in the scene's key. Alone it
+ * says the setting. */
+namespace {
+/* `lighting variancescale`'s words and what each sets BakeSettings::variance_scale to (-1: the bake's own). */
+const struct {
+  const char *name;
+  int mode;
+} kVarianceScaleWords[] = {{"auto", -1}, {"on", 0}, {"clamp", 1}, {"off", 2}, {"snr", 3}, {"step", 4}};
+
+const char *variance_scale_name(int mode) {
+  for (const auto &w : kVarianceScaleWords)
+    if (w.mode == mode) return w.name;
+  return "auto";
+}
+}  // namespace
+
+void Editor::lighting_variancescale_command(const std::string &word) {
+  auto say = [&] {
+    Log::info("lighting variancescale: %s%s", variance_scale_name(bake_variance_scale_),
+              bake_variance_scale_ < 0 ? " (the normal bake)" : " (the next Generate Lighting; Preview Lighting keeps auto; `lighting variancescale auto` restores the normal bake)");
+  };
+  if (word.empty()) return say();
+  for (const auto &w : kVarianceScaleWords)
+    if (word == w.name) return bake_variance_scale_ = w.mode, say();
+  Log::warn("lighting variancescale: say auto, on or off - it stays %s", variance_scale_name(bake_variance_scale_));
+}
+
 void Editor::bake_start() {
   if (baking_) return;
   if (unity_lighting_job_) return refuse("Generate Lighting: not while Unity reads its lightmaps for this scene (they'd land in the middle of the bake)", "", "");  // (review 400)
@@ -422,6 +480,18 @@ void Editor::bake_start() {
   s.light_tree = bake_light_tree_;  // (round 464: unbiased either way, so not in the scene key)
   s.seed = bake_seed_;  // (round 463: the texels, the card's gather and the probes all draw from it)
   if (s.seed) Log::info("Generate Lighting: seed %u (`lighting seed 0` for the normal bake)", s.seed);
+  const float normal_pick = BakeSettings().pick_rays;
+  s.pick_lights = bake_pick_rays_ > 0.0f;  // (round 484: unbiased either way, so not in the scene key)
+  s.pick_rays = s.pick_lights ? bake_pick_rays_ : normal_pick;
+  job->pick_rays = bake_pick_rays_;
+  if (bake_pick_rays_ != normal_pick)
+    Log::info("Generate Lighting: light picking %s (`lighting pick on` for the normal bake)",
+              s.pick_lights ? strprintf("at about %g lights a texel", bake_pick_rays_).c_str() : "off - every Baked point and spot light at every texel");
+  if (bake_variance_scale_ >= 0) {  // (round 486: what the filter reads - the gathered light is the same either way, so not in the scene key)
+    s.variance_scale = bake_variance_scale_;
+    Log::info("Generate Lighting: the gather's measured noise read as `lighting variancescale %s` (`lighting variancescale auto` for the normal bake)",
+              variance_scale_name(bake_variance_scale_));
+  }
   bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
@@ -488,6 +558,7 @@ void Editor::bake_job_run(BakeJob &j) {
   j.lighting = baker_.take_result();
   j.lighting.scene_key = j.key;
   j.lightmap_finish_ms = baker_.finish_ms(), j.lightmap_texels = baker_.texel_count(), j.lightmap_rays = baker_.rays(), j.lightmap_gpu_texels = baker_.gpu_texels();
+  j.lightmap_pick_texels = baker_.pick_texels(), j.lightmap_chance_kept = baker_.chance_kept(), j.lightmap_chance_dropped = baker_.chance_dropped();  // (round 484)
   j.lightmap_denoiser = baker_.denoiser();
   j.mesh_hashes.assign(j.objects.size(), 0);
   JobSystem::global().parallel_for((int64_t)j.objects.size(), 4, [&](int64_t a, int64_t b) {
@@ -661,6 +732,11 @@ void Editor::bake_job_land(BakeJob &j) {
                 "Light Volumes %.1f s, reflection probes %.1f s, saving %.1f s; the landing frame %.0f ms",
                 b.phase_ms[0] / 1000.0, b.texels, b.rays / 1e6, b.gpu_texels, j.lightmap_denoiser.empty() ? "no filter" : j.lightmap_denoiser.c_str(), b.finish_ms,
                 b.phase_ms[1] / 1000.0, b.phase_ms[2] / 1000.0, b.phase_ms[3] / 1000.0, b.phase_ms[4] / 1000.0, b.land_ms);
+      /* Round 484: what the light picking did, for `lighting pick`'s comparisons (light_pick.h). */
+      b.pick_texels = j.lightmap_pick_texels, b.chance_kept = j.lightmap_chance_kept, b.chance_dropped = j.lightmap_chance_dropped;
+      if (b.pick_texels)
+        Log::info("Generate Lighting: light picking at about %g lights a texel - %.2f kept by chance and %.2f dropped a texel, over %llu texels", j.pick_rays,
+                  (double)b.chance_kept / (double)b.pick_texels, (double)b.chance_dropped / (double)b.pick_texels, (unsigned long long)b.pick_texels);
     }
   } land_timer{*this, j, land_t};
   const bool cancelled = j.cancel.load();

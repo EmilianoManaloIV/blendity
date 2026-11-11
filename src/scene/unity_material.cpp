@@ -143,7 +143,8 @@ void read_base(const Props &p, const YamlNode &body, const std::function<std::st
   m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
   m.roughness = (float)std::clamp(1.0 - prop(p, "_Smoothness", prop(p, "_Glossiness", 0.5)), 0.0, 1.0);
   /* A metallic map: Unity takes metal from its red and ignores the slider (left at 0 in the file); smoothness from its
-   * alpha times _GlossMapScale (Standard) or _Smoothness (URP) - review 371. The alpha's smoothness isn't carried. */
+   * alpha times _GlossMapScale (Standard) or _Smoothness (URP) - review 371. Here the alpha is taken as 1; read_gloss
+   * (round 485) puts the keyword's rule and the alpha's mean on top for the families it knows. */
   const TexEnv *metal = tex_of(p, {"_MetallicGlossMap"});
   set_tex(m.metallic_map, metal, texture, true);
   if (metal) m.metallic = 1.0f, m.roughness = (float)std::clamp(1.0 - prop(p, "_GlossMapScale", prop(p, "_Smoothness", 1.0)), 0.0, 1.0);
@@ -162,6 +163,48 @@ void read_base(const Props &p, const YamlNode &body, const std::function<std::st
   m.surface = clip ? (int)MaterialSurface::Cutout : mode >= 2 || urp_transparent ? (int)MaterialSurface::Transparent : (int)MaterialSurface::Opaque;
   m.alpha_clip = (float)prop(p, "_Cutoff", 0.5);
   m.double_sided = prop(p, "_Cull", 2.0) < 0.5 || prop(p, "_CullMode", 2.0) < 0.5;  // (Cull Off; MToon's and UTS2's _CullMode)
+}
+
+/* One keyword among shader_keywords' words (each ends in a space): _METALLICGLOSSMAP is not _METALLICSPECGLOSSMAP. */
+bool keyword_on(const std::string &keywords, const char *keyword) {
+  return (" " + keywords).find(std::string(" ") + keyword + " ") != std::string::npos;
+}
+
+/* Round 485 (ADR 0131): metal and gloss as Unity's Standard, Silent's Filamented and URP Lit read them - by the
+ * keyword, not by what sits in the slot (UnityStandardInput's MetallicGloss, LitInput's SampleMetallicSpecGloss).
+ * Under the metallic-gloss keyword metal is the map's red and the slider is ignored (read_base left it so); without it
+ * the slider counts and the slot's texture is not read. The smoothness is a texture's alpha times _GlossMapScale (URP:
+ * _Smoothness) when a keyword names one - the albedo's under _SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A, else the
+ * metallic-gloss map's - and the slider when none does. A slot a keyword names but nothing fills is Unity's white
+ * texture: all metal, alpha 1. A map's alpha comes in as its mean - one number a material, until a texture slot can
+ * name a channel; while the mean is not known the alpha stands at 1 (what Unity shows for a texture it cannot find)
+ * and `info` says which texture to measure. Filamented's Roughness setup keeps its own roughness (read_filamented):
+ * only its metal follows the keyword. Other families are left as read_base read them. */
+void read_gloss(const Props &p, const YamlNode &body, const std::string &family, const std::function<bool(const std::string &, float &)> &mean_alpha, Material &m,
+                UnityMaterialInfo &info) {
+  const bool roughness_setup = family == "Filamented (Roughness setup)";
+  if (family != "Standard" && family != "Filamented" && family != "URP Lit" && !roughness_setup) return;
+  const std::string keywords = shader_keywords(body);
+  const bool urp = family == "URP Lit";
+  const bool metal_on = keyword_on(keywords, urp ? "_METALLICSPECGLOSSMAP" : "_METALLICGLOSSMAP");
+  const bool albedo_on = keyword_on(keywords, "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A");
+  const TexEnv *metal = metal_on ? tex_of(p, {"_MetallicGlossMap"}) : nullptr;
+  if (!metal) m.metallic_map = TextureRef{}, m.metallic = metal_on ? 1.0f : (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
+  if (roughness_setup) return;
+  const double slider = prop(p, urp ? "_Smoothness" : "_Glossiness", 0.5);
+  if (!metal_on && !albedo_on) {
+    m.roughness = (float)std::clamp(1.0 - slider, 0.0, 1.0);
+    return;
+  }
+  const TexEnv *source = albedo_on ? tex_of(p, {"_BaseMap", "_MainTex"}) : metal;
+  float alpha = 1.0f;
+  if (source) {
+    info.gloss_texture = source->guid;
+    info.gloss_pending = !mean_alpha || !mean_alpha(source->guid, alpha) || !std::isfinite(alpha);
+    if (info.gloss_pending) alpha = 1.0f;
+  }
+  const double scale = urp ? slider : prop(p, "_GlossMapScale", 1.0);
+  m.roughness = (float)std::clamp(1.0 - std::clamp((double)alpha, 0.0, 1.0) * scale, 0.0, 1.0);
 }
 
 /* MToon's, lilToon's and UTS2's own blend modes (review 371: cutout lashes came in as solid quads). */
@@ -252,8 +295,7 @@ void read_filamented(const Props &p, const std::string &family, const std::funct
   Vec3 spec(0.04f);
   const bool has_spec = color_of(p, {"_SpecColor"}, spec);
   if (family == "Filamented (Roughness setup)") {
-    m.roughness = (float)std::clamp(prop(p, "_Glossiness", 0.5), 0.0, 1.0);
-    if (!tex_of(p, {"_MetallicGlossMap"})) m.metallic = (float)std::clamp(prop(p, "_Metallic", 0.0), 0.0, 1.0);
+    m.roughness = (float)std::clamp(prop(p, "_Glossiness", 0.5), 0.0, 1.0);  // (its metal: read_gloss, by the keyword - round 485)
     set_tex(m.roughness_map, spec_map, texture, true);
     if (spec_map) m.roughness = 1.0f;  // (the map is the roughness: Blendity scales it by the slider)
   }
@@ -522,9 +564,32 @@ std::vector<std::string> unity_shader_properties(const std::string &shader_text)
   return {};  // (the block never closed: a list cut short would drop real properties - none dropped)
 }
 
+std::vector<std::string> unity_material_gloss_textures(const std::string &yaml) {
+  std::vector<std::string> out;
+  if (yaml.find("--- !u!21 ") == std::string::npos) return out;  // (not a Material document: nothing parsed for it)
+  std::vector<UnityDoc> docs;
+  std::string why;
+  if (!parse_unity_yaml(yaml, docs, why)) return out;
+  const UnityDoc *mat = nullptr;
+  for (const UnityDoc &d : docs) mat = d.class_id == 21 && !mat ? &d : mat;
+  if (!mat) return out;
+  const Props p = read_props(mat->body);
+  const std::string keywords = shader_keywords(mat->body);
+  auto add = [&](const TexEnv *t) {
+    if (t && std::find(out.begin(), out.end(), t->guid) == out.end()) out.push_back(t->guid);
+  };
+  /* As read_gloss picks its source (the shader's family is not known here: either pipeline's metal keyword counts): the
+   * albedo when its keyword is on - the metallic map's alpha is not read then - else the metallic-gloss map. */
+  const bool metal_on = keyword_on(keywords, "_METALLICGLOSSMAP") || keyword_on(keywords, "_METALLICSPECGLOSSMAP");
+  if (keyword_on(keywords, "_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A")) add(tex_of(p, {"_BaseMap", "_MainTex"}));
+  else if (metal_on) add(tex_of(p, {"_MetallicGlossMap"}));
+  return out;
+}
+
 bool unity_material(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
                     const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info,
-                    const std::function<std::vector<std::string>(const std::string &guid)> &shader_properties) {
+                    const std::function<std::vector<std::string>(const std::string &guid)> &shader_properties,
+                    const std::function<bool(const std::string &guid, float &alpha)> &mean_alpha) {
   info = UnityMaterialInfo{};  // (a fresh account each material)
   std::vector<UnityDoc> docs;
   std::string why;
@@ -539,6 +604,7 @@ bool unity_material(const std::string &yaml, const std::function<std::string(con
   const std::string name = mat->body.str("m_Name");
   if (!name.empty()) m.name = name;
   read_base(p, mat->body, texture, m);
+  read_gloss(p, mat->body, info.shader, mean_alpha, m, info);  // (round 485: the keyword decides; a map's smoothness as its mean)
   {
     const std::string flags = mat->body.str("m_LightmapFlags");  // (round 439: Unity's Global Illumination)
     m.gi_flags = flags.empty() ? -1 : std::atoi(flags.c_str());
