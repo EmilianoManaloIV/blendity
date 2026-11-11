@@ -995,6 +995,7 @@ class Editor {
   size_t mesh_queue_ = 0;     // (meshes left waiting by the last view frame that left any)
   bool mesh_waiting_ = false;
   bool mesh_deferred_now_ = false;  // (gpu_mesh's answer -1 was a deferral, not a refusal)
+  std::unordered_set<uint64_t> mesh_owner_shown_;  // (round 469: objects a mesh of which went up - never left waiting again)
   double mesh_drain_ms_ = 0;        // (the last queue's life: first mesh left waiting to the frame none was)
   double mesh_drain_t0_ = -1;
   static void texture_stream_run(TextureStream &st);

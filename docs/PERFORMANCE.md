@@ -3235,3 +3235,140 @@ two IK left-hand rows of the avatar alone did not move it (see "Not measured" ab
 | IK: the target moved, Record on | 3.2 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.1 / 0.0 |  | 78.0 / 13.0 / 0.9 / 0.9 / 13.0 / 5370.1 / 2.0 / 1.0 |
 | IK: the clip playing, Scene view only | 78.0 / 13.0 / 8.6 / 8.6 / 13.0 / 5888.4 / 2.0 / 1.0 |  | 91.0 / 13.0 / 9.1 / 9.1 / 13.0 / 5888.7 / 3.0 / 1.0 |
 | a prop of the world moved |  | 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 1.0 / 1.0 | 52.0 / 0.0 / 0.0 / 0.0 / 0.0 / 0.0 / 1.0 / 1.0 |
+
+## Pass 22: skinning once, and only what moved (round 469, task 0445)
+
+The first fix round after round 468's table (its items 3 and 5, and part of 4): a skin keeps its cache key while nothing
+under its character moved, reads only the bones its mesh has weights on, works in the character's space, and the views
+that agree share one evaluated mesh (ADR 0124). The goal stays 16.7 ms a frame; this round does not reach it on a posed
+frame - what is left is round 468's items 1 and 2 (meshes built whole and sent whole, round 470) and the world (471).
+
+**How it was measured.** As round 468: the owner's machine, the build with Blender's libraries, 2026-11-10, each timed
+piece under the watcher (compilers, linkers, test and stress runs, other editors, Unity and the Linux VM's load sampled
+every 5 s), started after 120 s with none. The other pass that builds on this machine held its work for the pieces.
+
+| piece | window | what the watcher saw |
+|---|---|---|
+| the check against round 468's baseline | 18:33:50 - 18:36:19 | nothing |
+| the stress baseline (`posing`, `animation`), saved into `stress/results/baseline.md` | 18:40:25 - 18:42:58 | nothing |
+| the check against the new baseline | 18:47:04 - 18:49:32 | nothing |
+| the owner's avatar alone | 18:53:38 - 19:05:59 | nothing (the Linux VM at most 11 % of a core) |
+| the avatar in the world | 21:56:01 - 22:16:37 | the Unity editor the bench's own scene opens start (4 samples, 21:56:11 - 21:57:38: the two headless runs); no sample during the windowed rows |
+
+**Not measured, or not settled:**
+- The first four pieces ran on the build before the upload-budget fix below; the last on the build with it. The fix
+  changes which meshes wait while a scene first comes up, not a settled frame; the first four were not run again.
+- The world alone, the cold run and main's build against the round's were not repeated (nothing in them is skinned).
+- The settings rows on the owner's avatar in the owner's world, as in round 468: the stand-in's are the only ones.
+- **The check against round 468's baseline: 0 findings** (43 rows still over their budget, every one faster or equal).
+  **Against this round's own baseline it fails on one row**, a "clip playing" row again: Live Link with a client, 35.9 ms
+  in the baseline run and 45.8 ms three minutes later, both quiet. The two rows of round 468 held this time. The same
+  two states of a playing clip; round 472.
+- On the owner's avatar alone the two "IK: the left hand's target" rows still move nothing in a window (4 ms), as in
+  round 468.
+
+### What changed in a frame (the owner's avatar alone, counts a frame)
+
+| row | meshes skinned, 468 | 469 | skin keys hashed, 468 | 469 | kept without a walk, 469 |
+|---|---|---|---|---|---|
+| standing still | 0 | 0 | 15.6 | 0.4 | 14.5 |
+| the whole avatar moved (its root selected) | 12.8 | 0 | 76.9 | 13.7 | 37.7 |
+| FK: an upper leg turned | 13 | 4 | 78 | 13.9 | 55.1 |
+| FK: the head turned | 13 | 8 | 78 | 14 | 59 |
+| FK: the chest turned | 13 | 11 | 78 | 14 | 61.9 |
+| IK: the left foot's target moved | 12.6 | 3.9 | 75.8 | 13.7 | 53.4 |
+| scrubbing, Scene + Game view | 26 | 13 | 117 | 14.6 | 89.5 |
+| the clip playing, Scene + Game view | 25.8 | 12.9 | 142.8 | 14.7 | 114.4 |
+| Play with the springs | 26 | 23 | 78 | 26.7 | 48.3 |
+
+A moved avatar is not skinned at all; a leg skins the 4 meshes with weights on it; a second view costs no second
+deform. A mesh that moves is still hashed once a frame (13 to 14 keys for 13 meshes, where there were six a mesh). The
+chest, a scrub and a playing clip move nearly every mesh, so they gain least: their cost is the meshes built and sent
+whole. Play still deforms twice a frame (23): the springs move bones after the first evaluation - round 474.
+
+### The stand-in (`blendity_stress --only posing`; in `stress/results/baseline.md`)
+
+| row (a window on the card; ms a frame, the longest frame in brackets) | alone, 468 | alone, 469 | in the world, 468 | in the world, 469 |
+|---|---|---|---|---|
+| idle | 2.5 (3) | 1.8 (2) | 5.2 (25) | 4.1 (19) |
+| orbiting the Scene view | 7.0 (7) | 3.4 (4) | 15.5 (17) | 10.8 (12) |
+| the Rotate gizmo on the chest (FK) | 49.9 (52) | 36.0 (40) | 65.2 (70) | 46.7 (52) |
+| the Move gizmo on the left hand's IK target | 48.4 (55) | 9.9 (11) | 66.5 (76) | 21.8 (24) |
+| the Move gizmo on the left elbow's pole (the arm bent first) | 52.9 (60) | 9.8 (11) | 68.8 (73) | 23.6 (26) |
+| a Puppet handle (the left hand, AutoPosing on) | 63.1 (68) | 50.1 (55) | 78.4 (83) | 68.4 (74) |
+| G on the left hand's IK target | 55.8 (70) | 12.1 (14) | 75.5 (88) | 32.5 (36) |
+| R on the chest (the Blender keymap) | 59.4 (63) | 41.7 (45) | 79.7 (83) | 62.7 (70) |
+| a scrub on the Animation window's ruler, Scene + Game view | 93.6 (120) | 66.5 (87) | 123.0 (150) | 96.4 (125) |
+| the clip playing, Scene + Game view | 42.1 (123) | 25.6 (86) | 82.4 (166) | 45.2 (126) |
+| a scrub on the Animation window's ruler, Scene view only | 55.1 (75) | 46.9 (61) | 67.9 (104) | 63.2 (83) |
+| the clip playing, Scene view only | 18.9 (68) | 18.4 (61) | 31.8 (86) | 21.4 (78) |
+| Play with the springs | 86.7 (101) | 74.5 (85) | 107.9 (116) | 97.0 (107) |
+| a prop moved with the Move gizmo | - | - | 15.5 (18) | 10.6 (12) |
+
+The settings, on the stand-in in its world:
+
+| row (a window on the card; ms a frame, the longest frame in brackets) | in the world, 468 | in the world, 469 |
+| --- | --- | --- |
+| Record on: the IK-target drag | 80.1 (90) | 38.4 (42) |
+| Preview off: the IK-target drag | 69.4 (72) | 31.7 (45) |
+| the Game view beside the Scene view: the IK-target drag | 67.6 (78) | 30.3 (34) |
+| the Game view beside the Scene view: the clip playing (the Scene view alone unless the setting adds a view) | 89.8 (161) | 48.7 (127) |
+| the Game view beside the Scene view and Other Views Follow Drags on: the IK-target drag | 139.6 (152) | 55.0 (66) |
+| trails, onion skins and the zoetrope (Record on): the IK-target drag | 86.3 (120) | 45.7 (61) |
+| trails, onion skins and the zoetrope (Record on): a scrub | 131.7 (183) | 104.0 (137) |
+| Centre of Mass shown: the IK-target drag | 74.2 (86) | 31.1 (44) |
+| Centre of Mass shown: the clip playing (the Scene view alone unless the setting adds a view) | 24.4 (88) | 25.8 (82) |
+| the Avatar window open: the IK-target drag | 77.8 (96) | 34.9 (38) |
+| the Avatar window open: the clip playing (the Scene view alone unless the setting adds a view) | 32.1 (85) | 31.2 (86) |
+| the Inspector on the Armature: the clip playing (the Scene view alone unless the setting adds a view) | 22.2 (90) | 21.6 (81) |
+| the Inspector on a skinned mesh: the clip playing (the Scene view alone unless the setting adds a view) | 22.0 (86) | 22.3 (80) |
+| the Rigging window open (its Walk section): the IK-target drag | 75.4 (101) | 35.4 (52) |
+| the Rigging window open (its Walk section): the clip playing (the Scene view alone unless the setting adds a view) | 22.3 (88) | 27.4 (86) |
+| Realtime GI on, Lighting Updates Automatic: the IK-target drag | 104.1 (124) | 69.5 (71) |
+| Realtime GI on, Lighting Updates Manual: the IK-target drag | 68.8 (76) | 20.1 (27) |
+| Live Link with a client: the IK-target drag | 78.3 (85) | 31.6 (34) |
+| Live Link with a client: the clip playing (the Scene view alone unless the setting adds a view) | 49.9 (99) | 35.9 (94) |
+| surface snapping (Ctrl+Shift held): the IK-target drag | 73.3 (76) | 33.1 (35) |
+| an F12 Live Preview: the IK-target drag | 78.5 (115) | 35.1 (54) |
+| a path-traced view open (Camera Preview rendered, locked to the Main Camera): the IK-target drag | 850.6 (878) | 786.2 (800) |
+
+### The owner's avatar and world (measured locally; `tools/bench_world.py --posing`)
+
+Read from scratch copies; the two projects' file count, total size and newest change time were the same before and
+after each run, and nothing of them is in the repository.
+
+| row (a window on the card, ms a frame) | alone, 468 | alone, 469 | in the world, 468 | in the world, 469 |
+|---|---|---|---|---|
+| still: the Scene view | 3.8 | 3.9 | 7.9 | 8.5 |
+| orbiting the Scene view | 3.9 | 3.9 | 9.6 | 7.9 |
+| the whole avatar moved (its root selected) | 50.7 | 5.5 | 82.8 | 17.1 |
+| FK: the chest turned | 51.2 | 38.5 | 81.1 | 61.9 |
+| FK: an upper leg turned | 33.8 | 14.4 | 58.1 | 30.5 |
+| FK: an upper arm turned | 3.9 | 4.1 | 9.0 | 9.4 |
+| Puppet: the hips' handle | 56.4 | 46.8 | 90.6 | 70.7 |
+| Puppet: the head's handle | 67.8 | 56.7 | 90.5 | 76.6 |
+| Puppet: the left hand's handle | 4.2 | 4.0 | 8.7 | 9.4 |
+| scrubbing, Scene view only | 75.5 | 65.0 | 103.9 | 87.1 |
+| the clip playing, Scene view only | 77.6 | 69.2 | 105.5 | 94.4 |
+| scrubbing, Scene + Game view | 140.4 | 66.9 | 173.7 | 95.0 |
+| the clip playing, Scene + Game view | 161.2 | 73.2 | 191.8 | 104.2 |
+| Play with the springs | 73.8 | 43.5 | 108.4 | 72.0 |
+| IK: the left hand's target moved | 4.0 | 4.1 | 61.7 | 34.8 |
+| IK: the left foot's target moved | 43.2 | 25.7 | 66.1 | 44.4 |
+| IK: the target moved, Record on | 4.0 | 4.2 | 75.1 | 57.0 |
+| IK: the clip playing, Scene view only | 81.2 | 71.2 | 110.2 | 97.8 |
+
+The rows at 4 and 9 ms are the ones the avatar refuses or that do not move it (round 468's notes). No posed row of the
+avatar in the world is under 16.7 ms yet: the whole avatar moved is 17.1 ms (it was 82.8), a leg 30.5 ms, the rest 44
+to 104 ms.
+
+### Also found: a posed mesh could wait for the card for ever
+
+The first run of the avatar-in-the-world piece waited 40 minutes in "Play with the springs": after Play was entered one
+mesh of the avatar was left waiting for the mesh upload budget on every frame (round 458: once a frame has spent 4 ms or
+16 MB on meshes new to the card, the rest wait and are left out of the frame). A posed mesh that is built whole is a new
+render mesh on every frame, so the last one in the list waited again each time: not drawn, and the run's "has everything
+settled" never true. With a diagnostic build the row hung in 2 runs of 2 (`meshes waiting for the card 1 (queue 1)` for
+6,000 frames); with the round's build before that, in 1 of 3; round 468's runs of the row finished. Fixed in this round:
+an object the card has already shown is never left waiting again (`tests/test_gpu.cpp`, the round 469 test: 66
+mesh-frames undrawn without the fix, 0 with it). After it the row ran 4 times of 4, and settles as soon as Play starts.
