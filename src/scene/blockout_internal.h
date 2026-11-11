@@ -48,10 +48,17 @@ struct Plane {
  * worst plane (0 unless four or more planes don't share a point). */
 V3 solve_planes(const Plane *const *planes, int count, V3 x0, double *residual);
 
-/* A piece as a closed convex solid in the Blockout's space: faces counter-clockwise from outside. */
+/* What a solid does in the build order (blockout.h, build): a plain piece is one solid - Add, Subtract or Intersect;
+ * a room is two, its shell (Merge or Keep) and, right after it in the cluster, its air. */
+enum class Role : uint8_t { Add, Subtract, Intersect, MergeShell, KeepShell, Air };
+
+/* A piece - or one of a room's two parts - as a closed convex solid in the Blockout's space: faces counter-clockwise
+ * from outside. */
 struct Solid {
-  uint32_t piece = 0;  // its place in the cluster's piece list
-  bool subtract = false;
+  uint32_t piece = 0;  // its piece's place in the cluster's piece list
+  Role role = Role::Add;
+  bool subtract = false;   // it takes away (a Subtract piece, a room's air): the result shows its faces from the back
+  uint32_t side_base = 0;  // added to its faces' sides in what a face reports (kSideShell for a room's shell)
   double blend = 0.0;
   double melt = 0.0;  // the largest Blend radius that reaches it: its own, or that of a solid whose grown bounds meet its
   Shape shape = Shape::Box;
@@ -77,11 +84,33 @@ struct Cluster {
   std::vector<Plane> planes;
   std::vector<uint32_t> label_solid, label_face;  // a face label -> its solid and its face there
   std::vector<uint32_t> plane_users;              // how many solids have a face in each plane
-  V3 lo, hi, mid;
+  V3 lo, hi, mid;        // the bounds of all but the Intersect solids: the result lies inside them
+  uint32_t trims = 0;    // how many Intersect solids it has (every cluster has all of the build's)
   double scale = 1.0;    // the bounding diagonal
   double tol = 1e-6;     // planes nearer than this are one plane; twice it is "these planes meet in a point"
   bool blended = false;  // some piece has a Blend radius
 };
+
+/* The build order as a test: whether a place is in the result, given which solids it is in. `solids` are indices
+ * into the cluster's, ascending; `in[k]` says whether the place is in solids[k]. A solid not listed counts as "not in
+ * it". (Each solid only ever adds to the result or only ever takes from it: the surface shows a Subtract piece's and
+ * an air's faces from the back, every other solid's from the front.) */
+inline bool in_result(const Cluster &c, const uint32_t *solids, size_t count, const uint8_t *in) {
+  bool merge = false, air = false, kept = false, add = false, cut = false;
+  uint32_t trims = 0;
+  for (size_t k = 0; k < count; k++) {
+    if (!in[k]) continue;
+    switch (c.solids[solids[k]].role) {
+      case Role::MergeShell: merge = true; break;
+      case Role::Air: air = true; break;
+      case Role::KeepShell: kept = kept || !(k + 1 < count && solids[k + 1] == solids[k] + 1 && in[k + 1]); break;  // (not in its own air)
+      case Role::Add: add = true; break;
+      case Role::Subtract: cut = true; break;
+      case Role::Intersect: trims++; break;
+    }
+  }
+  return ((merge && !air) || kept || add) && !cut && trims == c.trims;
+}
 
 /* The step of a 32-bit float at a coordinate's size, over that size: a mesh's positions are such floats. */
 constexpr double kFloatStep = 1.1920929e-7;

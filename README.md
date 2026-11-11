@@ -153,6 +153,7 @@ everything):
   baked probes hold the sky's own light by direction, and a changed sky still relights them without a re-bake (round 453);
   Shadowmask keeps four Mixed lights' baked shadows (a fifth is baked), Distance Shadowmask shows the key light's realtime shadow near the camera and the mask beyond the Shadow Distance, and Unity's own masks and light channels come in with Use Unity's Lightmaps while an exported package carries the masks as Shadowmask textures (round 454);
   a Unity scene's lights take their intensity as its project's Graphics settings say (linear or gamma), so a world like SideRail bakes far closer to Unity's light (round 459);
+  a bake's filter reads each texel's noise by the samples that carry its light, so a texel lit by a few lucky rays is smoothed away and a bake leaves far fewer specks (round 486);
   Remove Ringing (Hanning or Lanczos, a view setting) softens the dark ring a bright lamp leaves in baked probes, and Light Probe Groups are objects - placed and moved in the Scene view, imported from Unity - that Generate Lighting bakes at in place of the automatic grid (round 455);
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
@@ -219,6 +220,7 @@ the pen's eraser end, tilt and a pressure curve in sculpting (round 368);
 Unity packages unpacked into the project (round 369) and their prefabs and scenes brought in,
 scripts kept as Engine Components (round 370),
 with Unity's materials converted by shader (lilToon, Poiyomi, MToon, UTS2, Standard, URP) and PhysBones' settings kept as spring bones (round 371),
+the materials keeping their maps whatever is open while a package unpacks, the shader's keyword deciding which sliders and maps count, and a smoothness kept in a map read as its mean (round 485),
 a .unity opened as the scene with its materials on its models' parts (numbered by the installed Unity once),
 its lights' and renderers' overrides,
 ambient and fog,
@@ -388,7 +390,7 @@ On Windows that build also uses oneTBB's memory allocator (ADR 0112; `BLENDITY_A
 Linux opts in with `BLENDITY_ALLOCATOR=tbbmalloc`). Developers can add Tracy's profiler: fetch it with
 `packaging/fetch_blender_libs.sh <platform> --extras`, then build with `BLENDITY_TRACY=1`.
 
-Each build produces **`Blendity`**, **`blendity_tests`** (23897 unit checks in 1860 tests with Blender's libraries; the
+Each build produces **`Blendity`**, **`blendity_tests`** (27385 unit checks in 2027 tests with Blender's libraries; the
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub

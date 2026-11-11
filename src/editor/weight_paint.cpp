@@ -68,6 +68,7 @@ bool Editor::set_weight_paint(bool on) {
     Log::warn("Weight Paint: select a mesh object first");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: its mesh is rebuilt from its pieces)
   if (playing_) {
     refuse("Weight Paint: stop Play first", "stop", "Stop Play");
     return false;

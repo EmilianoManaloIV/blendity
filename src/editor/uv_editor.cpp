@@ -64,6 +64,7 @@ void Editor::uv_op(const std::string &op) {
     Log::warn("UV tools need an object with a MeshFilter (select one, or Tab into Edit Mode)");
     return;
   }
+  if (blockout_refuses_edit_mode(g)) return;  // (round 477: UVs written into a Blockout's mesh would go at its next rebuild)
   /* Task 0266: Adjust Last runs an operator with numbers again from this - a detached copy, not a share of the live mesh
    * (a share would make the operator copy it, and whatever holds the mesh would see the old one). */
   const MeshPtr uv_before = op == "unwrap" || op == "smart" || op == "pack" ? mesh_copy_bare(**mp) : nullptr;

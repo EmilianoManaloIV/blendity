@@ -122,6 +122,7 @@ bool Editor::set_sculpt(bool on) {
     Log::warn("Sculpt: select a mesh object first");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: its mesh is rebuilt from its pieces)
   if (playing_) {
     refuse("Sculpt: stop Play first", "stop", "Stop Play");
     return false;
@@ -1354,6 +1355,7 @@ bool Editor::sculpt_dynamesh(int resolution, int smooth) {
     Log::warn("DynaMesh: select a mesh object first");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477)
   if (edit_mode_) exit_edit_mode();  // (as set_sculpt: a selection of the old mesh must not outlive it)
   if (weight_paint_) set_weight_paint(false);
   sculpt_end_stroke();
@@ -1410,6 +1412,7 @@ bool Editor::sculpt_quad_remesh(const meshops::QuadRemeshParams &p) {
     Log::warn("Quad Remesh: select a mesh object first");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: the quads would go at the next rebuild)
   if (edit_mode_) exit_edit_mode();
   if (weight_paint_) set_weight_paint(false);
   sculpt_end_stroke();
