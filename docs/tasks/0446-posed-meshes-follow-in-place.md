@@ -116,7 +116,7 @@ place keeps approximate tangents for good.
   the scene has changed for two frames and no undo step is pending, two posed meshes a frame are marked
   (`GameObject::settle_evaluated` -> `Mesh::settle`) and the next draw builds them whole - vertices shared anew,
   MikkTSpace. No worker, no cache swapped under a reader: the render caches are not made for two threads, and two
-  meshes a frame keep the frames at rest short (measured: SETTLE_FRAME_470). It follows from the rest itself, so a
+  meshes a frame keep the frames at rest short (measured: counted, not timed apart - the first settle on the second frame at rest, at most two a frame). It follows from the rest itself, so a
   clip stopped, Preview turned off and Play left need no call of their own; while a clip plays or Play runs nothing
   rests and the quick tangents stay, as in an Edit Mode drag. No tray label (there is no job).
 - **A mesh split in place is settled whether or not it has tangents** (`Mesh::needs_settle`, found by the
@@ -136,8 +136,8 @@ place keeps approximate tangents for good.
 - **`in_place_split` counts corners**, and the Profiler's item is now "corners split in place"; "meshes settled" is
   new. `in_place_refused` reads 0 on the posing rows (a cache from another topology is still refused).
 - **Outline shells are still built whole on every posed frame** (the test-engineer: 525 of 530 builds on the
-  stand-in over 60 frames). Out of scope here unless over 1 ms a frame: OUTLINE_470.
-- **Criterion 4's picture comparison** (moved-then-shot against posed-then-shot on the card): PICTURE_470.
+  stand-in over 60 frames). Out of scope here unless over 1 ms a frame: it is over: 7.8 ms a frame on the stand-in's chest row and 19.0 ms in Play, all of the stand-in's whole builds. Not done in this round - the stand-in therefore did not get faster; the owner's avatar has no outline shells. Listed for round 474.
+- **Criterion 4's picture comparison** (moved-then-shot against posed-then-shot on the card): not made as a picture test. What the picture is drawn from is compared instead: after the rest the tangents and vertex counts equal a fresh build's, and the in-place render mesh equals a rebuild's to the bit.
 - **ThreadSanitizer on the settle job (criterion 8):** there is no job; CI's sanitizer job runs the suite.
 
 ## Documentation to update
