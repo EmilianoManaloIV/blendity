@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -200,6 +201,19 @@ struct Component {
   enum class RenderRole : uint8_t { None, MeshFilter, MeshRenderer, Light, Camera, CameraFilter, ProbeVolume, Modifier, Outline, Curve, Lattice, Bone, Effector, CameraFlatten, ViewShapes, ProbeGroup };
   // Effector (task 0158): a Wind, a Rotator or an Oscillator - the Scene view gives it an icon
   virtual RenderRole render_role() const { return is_modifier() ? RenderRole::Modifier : RenderRole::None; }
+};
+
+/* Round 469 (ADR 0124): something a component keeps to answer faster - never part of it. A copy of the component
+ * (clone: an undo snapshot, a duplicate, a job's scene) starts with none, so what is kept never points into another
+ * scene's objects and is never shared between two threads' scenes. */
+template<class T> struct KeptCache {
+  mutable std::shared_ptr<T> p;
+  KeptCache() = default;
+  KeptCache(const KeptCache &) {}
+  KeptCache &operator=(const KeptCache &) {
+    p.reset();
+    return *this;
+  }
 };
 
 template<class T, class Base = Component> struct ComponentBase : Base {
@@ -1496,6 +1510,7 @@ struct Armature : ComponentBase<Armature> {
   std::string puppet_bone(const std::string &key) const;
   void set_puppet_bone(const std::string &key, const std::string &bone);
   float control_size = 1.0f;  // (round 346) Puppet Posing's controls, times a twelfth of the rig's height
+  KeptCache<struct ArmaturePose> pose;  // (round 469: the bones' matrices, shared by the skins bound to it - skin.cpp)
   static inline bool show_body_mass = true;  // (the Inspector shows it while the physics tools are switched on: task 0124)
   void reflect(Reflector &r) override;
 };
@@ -1517,6 +1532,9 @@ struct SkinModifier : ComponentBase<SkinModifier> {
   void modify(Mesh &m) const override;                 // skin.cpp
   uint64_t modifier_dependency_hash() const override;  // skin.cpp
   bool unique() const override { return false; }
+  /* Round 469 (ADR 0124): the key it last gave, with what it held for (skin.cpp), and each vertex's bones. */
+  KeptCache<struct SkinKeep> keep;
+  KeptCache<struct SkinBinding> binding;
 };
 
 /* A bone of an armature: its object, its world matrix now, its rest matrix relative to the root's parent. */
@@ -1797,6 +1815,9 @@ class GameObject {
   /* Bumped every time the world matrix is marked stale (own transform, a parent's, reparenting): a
    * counter rather than the dirty flag, which world_matrix() consumes (ADR 0015). */
   uint64_t transform_version = 1;
+  /* Round 469 (ADR 0124): bumped when this object's local transform or one anywhere below it is written
+   * (mark_dirty walks up): "did anything under this character move?" is one comparison. */
+  uint64_t below_version = 1;
   /* The render hash this object last produced and the inputs it came from (ADR 0015): when they all
    * compare equal the hash is reused instead of re-hashing the world matrix and the materials. */
   struct RenderHashMemo {
@@ -2166,9 +2187,11 @@ MaterialPtr material_asset(const std::string &path);  // cached; null when the f
  * (Blendity's own .mat text; a foreign one - Unity's - is left to material_asset, which loads it on the calling thread). */
 void preload_material_assets(const std::vector<std::string> &paths);
 /* Round 371: a material file in another engine's format (a Unity .mat) read through this; the material is `foreign`,
- * and save_dirty_material_assets leaves its file alone. */
+ * and save_dirty_material_assets leaves its file alone. `is_foreign` (round 485): whether a file's text is that
+ * format's at all, with nothing else done - asked before a scene's copy that stands in for a missing .mat would be
+ * written over a file that has appeared at its path (a Unity package imported again): it is not. */
 using ForeignMaterialLoader = std::function<bool(const std::string &text, const std::string &path, Material &m)>;
-void set_foreign_material_loader(ForeignMaterialLoader loader);
+void set_foreign_material_loader(ForeignMaterialLoader loader, std::function<bool(const std::string &text)> is_foreign = {});
 MaterialPtr create_material_asset(const Material &src, const std::string &path);  // writes it, returns the shared instance
 size_t save_dirty_material_assets();  // writes the assets changed since they were saved
 /* The material assets loaded so far (path, shared instance). */
@@ -2178,6 +2201,19 @@ const std::vector<std::pair<std::string, MaterialPtr>> &loaded_material_assets()
 size_t retarget_material_assets(const std::string &from, const std::string &to);
 /* A .mat (or folder) deleted: materials that used it become scene materials (they keep their values). */
 size_t forget_material_assets(const std::string &path);
+/* Round 485 (task 0461): every foreign material the library holds under `under` ("" - all of them) read from its file
+ * again, into the same shared instance: whoever wears it follows without a reopen. For where a package's import ends -
+ * a Unity .mat read while its package was still unpacking found no path for its textures and kept no maps for the
+ * session - and for `unity rematerials`. `only`: of those, the ones at these paths alone (the materials a gloss job
+ * measured maps for: a value typed on any other Unity material stays). A scene's copy standing in for a .mat that was
+ * missing when the scene opened (relink_material_assets) is read from the file too once it is there and foreign.
+ * Returns how many came out different (their versions go up; `changed` gets them); a file that is gone, or that the
+ * loader no longer takes, leaves its material as it is. Main thread, as material_asset. */
+size_t reload_foreign_materials(const std::string &under = std::string(), std::vector<MaterialPtr> *changed = nullptr, const std::set<std::string> *only = nullptr);
+/* Round 485: `under` (a file or a folder) is on disk again - a package imported after its folder was deleted in this
+ * session: the marks that said "deleted" for it, for anything inside it and for a folder it lies in are taken off, so
+ * material_asset loads its files again. Returns how many marks went. */
+size_t revive_asset_paths(const std::string &under);
 /* Rewrites references to a moved asset (or folder) in every .scene file under dir. Returns files changed. */
 size_t retarget_scene_files(const std::string &dir, const std::string &from, const std::string &to);
 /* After undo / redo / load: every slot naming an asset uses the library's

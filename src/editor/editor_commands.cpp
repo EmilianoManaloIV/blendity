@@ -1225,6 +1225,12 @@ void Editor::run_console_command(const std::string &line) {
     return read_unity_model_ids(std::find(t.begin(), t.end(), "all") != t.end(), std::find(t.begin(), t.end(), "wait") != t.end());
   if (c == "unity" && t.size() > 1 && t[1] == "lightmaps")  // unity lightmaps [wait] (round 400: Unity's baked lighting for this scene)
     return read_unity_lighting_cmd(std::find(t.begin(), t.end(), "wait") != t.end());
+  if (c == "unity" && t.size() > 1 && t[1] == "materials")  // unity materials [all] [to "<file>"] (round 484: what Blendity made of the scene's materials, as text)
+    return unity_materials_command(split_quoted(line_rest(line, 2)));
+  if (c == "unity" && t.size() > 1 && t[1] == "mapstats")  // unity mapstats [decoders] "<image>"... [to "<file>"] (round 484: an image's channels as decoded; a script's)
+    return unity_mapstats_command(split_quoted(line_rest(line, 2)));
+  if (c == "unity" && t.size() > 1 && t[1] == "rematerials")  // unity rematerials (round 485: every Unity .mat read again from its file; the gloss maps not measured yet, measured)
+    return (void)unity_rematerials();
   if (c == "unity" && t.size() > 1 && t[1] == "lightsgamma") {  // unity lightsgamma [on|off] (round 459: a copy without ProjectSettings - its project's lightsUseLinearIntensity off / on)
     if (t.size() > 2 && (t[2] == "on" || t[2] == "off")) {
       scene_->unity.lights_gamma = t[2] == "on";
@@ -2149,6 +2155,8 @@ void Editor::run_console_command(const std::string &line) {
       const std::vector<std::string> f = split_quoted(line_rest(line, 2));
       lighting_noise_command(f.size() > 0 ? f[0] : std::string(), f.size() > 1 ? f[1] : std::string());
     }
+    else if (sub == "pick") lighting_pick_command(to_lower(arg(2, "")));  // (round 484: lighting pick [on|off|<rays>] - its own function: this chain is near the compiler's nesting limit)
+    else if (sub == "variancescale") lighting_variancescale_command(to_lower(arg(2, "")));  // (round 486: lighting variancescale [auto|on|off])
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
       mark_changed("Preview Lighting");
@@ -2158,7 +2166,7 @@ void Editor::run_console_command(const std::string &line) {
       scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
       mark_changed("Lighting Updates");
     }
-    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] | seed <n> | noise <folder A> <folder B> (a relative folder is the project's)");
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] | seed <n> | noise <folder A> <folder B> | pick on|off|<rays> (a relative folder is the project's)");
   }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));

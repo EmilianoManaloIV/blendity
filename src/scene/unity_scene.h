@@ -9,6 +9,7 @@
 #include "scene.h"
 #include "unity_yaml.h"
 
+#include <array>
 #include <functional>
 #include <map>
 #include <memory>
@@ -129,17 +130,53 @@ struct UnityImport {
  * .unity-guids with their kept .meta texts, and any .meta beside an asset. */
 struct UnityGuidEntry {
   std::string path, meta;  // (absolute; the .meta's text)
+  /* Round 485 (ADR 0131): the texture's mean R G B A as its package folder's `.unity-stats` holds it (has_mean), and
+   * that folder ("" for a .meta beside an asset) - where a mean measured later is written. */
+  float mean[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  bool has_mean = false;
+  std::string table;
 };
 using UnityGuidIndex = std::map<std::string, UnityGuidEntry>;
 UnityGuidIndex unity_guid_index(const std::string &assets_dir, const std::string &project_root);
+/* Round 485 (ADR 0131): `.unity-stats`, beside a package folder's `.unity-guids` - one line a texture whose channels a
+ * material's values are read from: GUID, the file's bytes when it was measured, width, height, mean R G B A (tabs).
+ * unity_texture_mean decodes the image (never on the main thread: the unpack's worker and the gloss job call it; a
+ * float image's values count clamped to 0..1; the means come back at a line's six decimals, so whoever measured and
+ * whoever reads the line later hold the same numbers); unity_stats_read puts a folder's lines on the index entries they name,
+ * leaving out a line whose file is another size now; unity_sampled_alpha is the alpha Unity's shader gets from a
+ * texture with this .meta - the image's own, 1 when its Alpha Source is None, its grey when From Gray Scale. */
+bool unity_texture_mean(const std::string &path, int &width, int &height, float mean[4]);
+std::string unity_stats_line(const std::string &guid, uint64_t bytes, int width, int height, const float mean[4]);
+void unity_stats_read(const std::string &dir, UnityGuidIndex &index);
+float unity_sampled_alpha(const std::string &meta, const float mean[4]);
+/* The bytes of a file now (0 when it is not there): what a stats line is checked against. */
+uint64_t unity_file_bytes(const std::string &path);
+/* Round 485: the texture GUIDs whose mean a Unity material read this session wanted and no table had, each with the
+ * .mat files (asset paths) that asked - the editor's gloss job measures the textures off the frame and reads those
+ * materials again, and no others; and the means it measured, kept for the session - all a texture of no package
+ * folder has (a Unity project's Assets copied in), what a package's texture falls back on when its table could not be
+ * written, and what a material read just after the job landed finds before the index is walked again. A session's
+ * mean counts only while the file is the one that was measured (its path and its bytes), as a table's line does:
+ * unity_gloss_session_mean gives it, or null. Main thread, as the material loader that fills and reads them. */
+struct UnityGlossMean {
+  std::string path;  // (absolute, as the index names the file)
+  uint64_t bytes = 0;
+  std::array<float, 4> mean = {0.0f, 0.0f, 0.0f, 0.0f};
+};
+std::map<std::string, std::set<std::string>> &unity_gloss_wanted();
+std::map<std::string, UnityGlossMean> &unity_gloss_session_means();
+const float *unity_gloss_session_mean(const std::string &guid, const std::string &path);
 /* The project's index, kept a few seconds (a material loads a texture's path through it; many load at once). */
 /* `fresh`: read again now (an import: files may have just arrived). */
 std::shared_ptr<const UnityGuidIndex> unity_guid_index_cached(const std::string &assets_dir, const std::string &project_root, bool fresh = false);
 /* A Unity shader's name by its GUID and fileID: the built-in Standard, URP's Lit and Unlit, else its file's name. */
 std::string unity_shader_name(const UnityGuidIndex &index, const std::string &guid, int64_t file_id);
 /* The material loader for Unity .mat files (set_foreign_material_loader): its textures and shader through the
- * project's index. */
+ * project's index. unity_material_text (round 485): whether a file's text is a Unity Material at all - the loader's
+ * own first look, and what is asked, with nothing else done, before a scene's stand-in copy would be written over a
+ * file that has appeared at its path. */
 bool load_unity_material(const std::string &text, const std::string &path, Material &m);
+bool unity_material_text(const std::string &text);
 
 /* A model's nodes as objects (their hierarchy, transforms, meshes and materials) under one named `name` - a model
  * placed in a Unity prefab, or instanced in a Godot scene (round 373). */

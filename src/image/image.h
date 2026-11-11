@@ -30,6 +30,9 @@ struct Bitmap {
 };
 
 bool decode_image(const std::string &bytes, Bitmap &out, std::string &error);
+/* The same through Blendity's own decoders only, whatever set_image_library_codecs says and without touching that
+ * switch - safe while other threads decode (round 484: `unity mapstats decoders` reads one image both ways). */
+bool decode_image_own(const std::string &bytes, Bitmap &out, std::string &error);
 bool decode_psd(const uint8_t *data, size_t size, Bitmap &out, std::string &error);  // (round 399: the composite image)
 bool load_image(const std::string &path, Bitmap &out, std::string &error);
 bool image_extension_supported(const std::string &ext);

@@ -9,12 +9,15 @@
 #include "skin_weights.h"
 #include "pose_counts.h"
 #include "../core/core.h"
+#include "../core/edit_epoch.h"
 #include "../core/jobs.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <array>
+#include <mutex>
 #include <unordered_map>
 
 namespace bl {
@@ -74,6 +77,7 @@ Mat4 Bone::rest_matrix() const { return Mat4::trs(rest_position, rest_rotation, 
 
 void Bone::set_rest(const Transform &t) {
   rest_position = t.position, rest_rotation = normalize(t.rotation), rest_euler_hint = t.euler_hint, rest_scale = t.scale;
+  edit_epoch::bump();  // (round 469: a rest written by a tool - the skins' kept keys were measured from the old one)
 }
 
 void Bone::reflect(Reflector &r) {
@@ -228,21 +232,167 @@ static const GameObject *armature_target(const SkinModifier &s) {
   return t;
 }
 
-uint64_t SkinModifier::modifier_dependency_hash() const {
-  BL_ZONE("skin key");
-  const GameObject *root = armature_target(*this);
-  if (!root) return 0;
-  PoseTimer timer(PoseStat::SkinKey);  // (round 468: only the keys that walked the bones; a skin with no rig costs nothing)
+/* ------------------------------------------------------- round 469 (ADR 0124): the pose kept, the bones bound */
+
+/* Whether a matrix turns, moves and scales evenly and nothing else (a skin measured inside it deforms as in the world). */
+static bool similarity(const Mat4 &m) {
+  const Vec3 c[3] = {m.column(0), m.column(1), m.column(2)};
+  const float l0 = length(c[0]);
+  if (!finite_bits(l0) || !(l0 > 1e-8f)) return false;
+  for (int k = 0; k < 3; k++) {
+    const float l = length(c[k]);
+    if (!finite_bits(l) || std::fabs(l - l0) > 1e-4f * l0 || std::fabs(dot(c[k], c[(k + 1) % 3])) > 1e-4f * l0 * l0) return false;
+  }
+  return finite3(m.translation());
+}
+
+/* The object a skin's matrices are measured from: the nearest object above both the mesh and the armature's root (the
+ * character). Moving, turning or evenly scaling it or anything above it changes nothing a skin computes. Null - world
+ * space, as before round 469 - when the armature's root has no parent, the two share no ancestor, or that ancestor's
+ * world matrix is uneven (Dual Quaternion's rigid test is made on the bones' matrices: it must see them as the world
+ * does). */
+static const GameObject *skin_space(const GameObject &owner, const GameObject &root) {
+  for (const GameObject *c = root.parent; c; c = c->parent)
+    for (const GameObject *g = &owner; g; g = g->parent)
+      if (g == c) return similarity(c->world_matrix()) ? c : nullptr;
+  return nullptr;
+}
+
+/* An object's matrix relative to `c` (at or above it), by the same products world_matrix() makes: with nothing but
+ * identities at and above `c` the result is the world matrix to the bit. Null: the world matrix. */
+static Mat4 matrix_from(const GameObject *g, const GameObject *c) {
+  if (!c) return g->world_matrix();
+  if (g == c) return Mat4::identity();
+  return matrix_from(g->parent, c) * g->local_matrix();
+}
+
+/* Round 469: an armature's bones with their matrices relative to `c` (ArmatureBone::world holds that), kept on the
+ * Armature while nothing under `c` moved - or, in world space, while no transform anywhere was written - and the scene's
+ * structure holds. The skins bound to one character share it: each bone's chain is multiplied once a frame. */
+struct ArmaturePose {
+  const GameObject *root = nullptr, *c = nullptr;
+  uint64_t stamp = 0, structure = 0;
+  Mat4 base;  // (the root's parent, relative to c: rest matrices are relative to it)
+  std::vector<ArmatureBone> bones;
+  uint64_t names = 0;  // (the bones' names and Deform flags, hashed: what a binding of groups to bones by name holds for)
+};
+
+/* What skins keep (an armature's bone table, a skin's key, its per-vertex table) is read and replaced under this lock:
+ * keys are asked from more than one thread at once (Unity's lightmap match hashes its candidates in a parallel_for).
+ * A kept table is never changed in place - a rebuild makes a new one and a reader holds the one it took. */
+static std::recursive_mutex &skin_lock() {
+  static std::recursive_mutex m;
+  return m;
+}
+
+static uint64_t move_stamp(const GameObject *c) { return c ? c->below_version : edit_epoch::transforms(); }
+
+static void bones_from(const GameObject &root, const GameObject *c, const Mat4 &base, std::vector<ArmatureBone> &out) {
+  if (!c) return armature_bones(root, out);  // (world space: the walk every other caller makes)
+  out.clear();
+  struct Item {
+    const GameObject *g;
+    Mat4 parent_rest, parent_rel;
+  };
+  std::vector<Item> stack;
+  stack.push_back({&root, Mat4::identity(), base});
+  while (!stack.empty()) {
+    const Item it = stack.back();
+    stack.pop_back();
+    const Bone *b = it.g->get<Bone>();
+    const Mat4 rest = it.parent_rest * (b ? b->rest_matrix() : it.g->local_matrix());
+    const Mat4 rel = it.parent_rel * it.g->local_matrix();
+    if (b) out.push_back({it.g, b, rel, rest});
+    for (const GameObject *ch : it.g->children) stack.push_back({ch, rest, rel});
+  }
+}
+
+static std::shared_ptr<const ArmaturePose> armature_pose(const GameObject &root, const GameObject *c, bool fresh = false) {
+  std::lock_guard<std::recursive_mutex> lock(skin_lock());
+  const Armature &a = *root.get<Armature>();
+  const uint64_t stamp = move_stamp(c), structure = edit_epoch::structure();
+  if (const ArmaturePose *k = a.pose.p.get())
+    if (!fresh && k->root == &root && k->c == c && k->stamp == stamp && k->structure == structure) return a.pose.p;
+  auto p = std::make_shared<ArmaturePose>();
+  p->root = &root, p->c = c, p->stamp = stamp, p->structure = structure;
+  p->base = root.parent ? matrix_from(root.parent, c) : Mat4::identity();
+  bones_from(root, c, p->base, p->bones);
+  uint64_t h = kFnvBasis;
+  for (const ArmatureBone &b : p->bones) {
+    h = fnv1a(b.object->name.data(), b.object->name.size(), h);
+    h = (h ^ (b.bone->deform ? 0x1d1u : 0x2e2u)) * kFnvPrime;
+  }
+  p->names = h;
+  a.pose.p = p;
+  return p;
+}
+
+/* A bone moves vertices when it deforms and its rest has a volume (a scale of 0 has no inverse: such a bone moves
+ * nothing, rather than everything). */
+static bool bone_binds(const ArmatureBone &b, const Mat4 &base) {
+  const Mat4 rw = base * b.rest;
+  const float det = dot(cross(rw.column(0), rw.column(1)), rw.column(2));
+  return b.bone->deform && std::fabs(det) > 1e-12f && finite_bits(det);
+}
+
+/* What a skin's key was last computed from. Kept while the scene's structure, the mesh and the transforms under the
+ * character hold: an avatar nobody touches costs a comparison, not a walk of its bones. */
+struct SkinKeep {
+  const GameObject *owner = nullptr, *root = nullptr, *c = nullptr;
+  const Mesh *mesh = nullptr;
+  const Armature *arm = nullptr;  // (with the two fields of it the key hashes, as they were)
+  int arm_deform = 0;
+  bool arm_rest = false;
+  uint64_t mesh_version = 0, structure = 0, stamp = 0, c_transform = 0, hash = 0;
+  uint32_t asks = 0;
+  /* The bones this mesh has weights on (indices into the armature's bones), and what that list holds for. */
+  std::vector<int> bound;
+  const Mesh *bound_mesh = nullptr;
+  const GameObject *bound_root = nullptr;
+  uint64_t bound_version = 0, bound_names = 0;
+  bool bound_all = false, bound_made = false;
+};
+
+/* The bones a mesh is bound to: those a vertex group with any weight names. Every binding bone when a modifier that
+ * makes geometry runs on the object (it may make groups the base mesh doesn't have). */
+static bool makes_geometry(const GameObject &owner) {
+  for (const auto &comp : owner.components)
+    if (comp->is_modifier() && !comp->is_deform_only()) return true;
+  return false;
+}
+
+static void bound_bones(const GameObject &owner, const Mesh &m, const ArmaturePose &pose, std::vector<int> &out) {
+  out.clear();
+  const bool all = makes_geometry(owner);
+  std::unordered_map<std::string, int> by_name;
+  for (size_t i = 0; i < pose.bones.size(); i++)
+    if (pose.bones[i].bone->deform) by_name.emplace(pose.bones[i].object->name, (int)i);
+  if (all) {
+    for (const auto &kv : by_name) out.push_back(kv.second);
+  }
+  else
+    for (const VertexGroup &g : m.vertex_groups) {
+      const auto it = by_name.find(g.name);
+      if (it == by_name.end()) continue;
+      bool any = false;
+      for (size_t v = 0; v < g.weights.size() && !any; v++) any = g.weights[v] > 0.0f && finite_bits(g.weights[v]);
+      if (any) out.push_back(it->second);
+    }
+  std::sort(out.begin(), out.end());
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+}
+
+static uint64_t skin_key_hash(const SkinModifier &s, const GameObject &root, const GameObject *c, const ArmaturePose &pose, const std::vector<int> &bound) {
   uint64_t h = kFnvBasis;
   auto mix = [&](const void *p, size_t n) { h = fnv1a(p, n, h); };
-  const Armature &a = *root->get<Armature>();
-  const int head[2] = {a.deform, a.rest_position ? 1 : 0};
+  const Armature &a = *root.get<Armature>();
+  const int head[3] = {a.deform, a.rest_position ? 1 : 0, c ? 1 : 0};
   mix(head, sizeof(head));
-  mix(armature_base(*root).m, sizeof(float) * 16);
-  mix(owner->world_matrix().m, sizeof(float) * 16);
-  std::vector<ArmatureBone> bones;
-  armature_bones(*root, bones);
-  for (const ArmatureBone &b : bones) {
+  mix(pose.base.m, sizeof(float) * 16);
+  mix(matrix_from(s.owner, c).m, sizeof(float) * 16);
+  for (int i : bound) {
+    const ArmatureBone &b = pose.bones[(size_t)i];
+    mix(&i, sizeof(i));
     mix(b.world.m, sizeof(float) * 16);
     mix(b.rest.m, sizeof(float) * 16);
     const uint8_t d = b.bone->deform;
@@ -251,7 +401,136 @@ uint64_t SkinModifier::modifier_dependency_hash() const {
     mix(&n, sizeof(n));
     mix(b.object->name.data(), n);
   }
+  return h ? h : 1;  // (0 means "no rig": never a key)
+}
+
+uint64_t SkinModifier::modifier_dependency_hash() const {
+  BL_ZONE("skin key");
+  if (!owner || !owner->scene || object.empty()) return 0;
+  static const bool verify = std::getenv("BLENDITY_RENDER_CACHE_VERIFY") != nullptr;
+  std::lock_guard<std::recursive_mutex> lock(skin_lock());
+  const MeshFilter *mf = owner->mesh_filter();
+  const Mesh *mesh = mf ? mf->mesh.get() : nullptr;
+  const uint64_t structure = edit_epoch::structure();
+  SkinKeep *k = keep.p.get();
+  bool kept = k && k->owner == owner && k->structure == structure && k->mesh == mesh && (!mesh || k->mesh_version == mesh->version) &&
+              k->stamp == move_stamp(k->c) && k->arm->deform == k->arm_deform && k->arm->rest_position == k->arm_rest;
+  /* The character itself moved, or something above it: nothing a skin computes changes - unless its matrix stopped
+   * being even (or became even again), which changes the space the skin works in. */
+  if (kept && k->c && k->c->transform_version != k->c_transform) {
+    kept = skin_space(*owner, *k->root) == k->c;
+    if (kept) k->c_transform = k->c->transform_version;
+  }
+  if (kept && !k->c && k->root->parent && skin_space(*owner, *k->root)) kept = false;  // (world space no longer needed)
+  /* A kept key is checked against a fresh walk now and then (every time in the verify mode): a transform or a bone's
+   * field written past every funnel shows as a counted miss and is put right, not as a stale pose for good. */
+  const bool check = kept && (verify || (++k->asks & 63u) == 0);
+  if (kept && !check) {
+    pose_add_skin_keys_kept(1);
+    return k->hash;
+  }
+  const GameObject *root = armature_target(*this);
+  if (!root) {
+    keep.p.reset();
+    return 0;
+  }
+  PoseTimer timer(PoseStat::SkinKey);  // (the keys that walked the bones; a skin with no rig costs nothing)
+  if (!k) keep.p = std::make_shared<SkinKeep>(), k = keep.p.get();
+  const GameObject *c = skin_space(*owner, *root);
+  const std::shared_ptr<const ArmaturePose> held = armature_pose(*root, c, check);
+  const ArmaturePose &pose = *held;
+  const bool all = makes_geometry(*owner);
+  const bool same_bound = !check && k->bound_made && k->bound_mesh == mesh && (!mesh || k->bound_version == mesh->version) && k->bound_root == root &&
+                          k->bound_names == pose.names && k->bound_all == all;
+  if (!same_bound) {
+    if (mesh) bound_bones(*owner, *mesh, pose, k->bound);
+    else k->bound.clear();
+    k->bound_mesh = mesh, k->bound_version = mesh ? mesh->version : 0, k->bound_root = root, k->bound_names = pose.names;
+    k->bound_all = all, k->bound_made = true;
+  }
+  const uint64_t h = skin_key_hash(*this, *root, c, pose, k->bound);
+  if (check && h != k->hash) pose_add_skin_keys_stale(1);
+  k->owner = owner, k->root = root, k->c = c, k->mesh = mesh, k->mesh_version = mesh ? mesh->version : 0;
+  k->arm = root->get<Armature>(), k->arm_deform = k->arm->deform, k->arm_rest = k->arm->rest_position;
+  k->structure = structure, k->stamp = move_stamp(c), k->c_transform = c ? c->transform_version : 0, k->hash = h;
   return h;
+}
+
+/* Each vertex's bones and weights as the deform's selection leaves them (the first Max Influences in group order, then
+ * the lowest replaced), built once and read every frame after: the selection reads every vertex group for every vertex.
+ * Rebuilt when the mesh, the scene's structure, Max Influences or which bones bind change. */
+struct SkinBinding {
+  const Mesh *mesh = nullptr;
+  const GameObject *root = nullptr;
+  uint64_t mesh_version = 0, names = 0;
+  size_t verts = 0, groups = 0, bones = 0;
+  int kmax = 0;
+  bool any = false;
+  std::vector<uint8_t> binds;  // (per bone of the armature: whether it bound when this was built)
+  std::vector<uint8_t> n;      // per vertex: how many
+  std::vector<int> idx;        // kmax a vertex: the armature's bone
+  std::vector<float> wt;       // kmax a vertex: its weight, not normalised (divided by the sum at use, as before)
+};
+
+static std::shared_ptr<const SkinBinding> skin_binding(const SkinModifier &s, const Mesh &m, const GameObject &root, const ArmaturePose &pose,
+                                                       const std::vector<uint8_t> &binds, int kmax) {
+  const MeshFilter *mf = s.owner->mesh_filter();
+  const Mesh *base = mf ? mf->mesh.get() : nullptr;
+  const uint64_t base_version = base ? base->version : 0;
+  /* Behind a modifier that makes geometry the groups are that modifier's output, which can change with another
+   * object's transform (a Boolean's cutter) under the same counts: the table is built for each deform, as before
+   * round 469. */
+  const bool keepable = !makes_geometry(*s.owner);
+  if (keepable) {
+    std::lock_guard<std::recursive_mutex> lock(skin_lock());
+    const SkinBinding *k = s.binding.p.get();
+    if (k && k->mesh == base && k->mesh_version == base_version && k->names == pose.names && k->root == &root && k->verts == m.vert_count() &&
+        k->groups == m.vertex_groups.size() && k->bones == pose.bones.size() && k->kmax == kmax && k->binds == binds)
+      return s.binding.p;
+  }
+  auto made = std::make_shared<SkinBinding>();
+  SkinBinding *b = made.get();
+  b->mesh = base, b->mesh_version = base_version, b->names = pose.names, b->root = &root;
+  b->verts = m.vert_count(), b->groups = m.vertex_groups.size(), b->bones = pose.bones.size(), b->kmax = kmax, b->binds = binds;
+  std::unordered_map<std::string, int> by_name;
+  for (size_t i = 0; i < pose.bones.size(); i++)
+    if (binds[i]) by_name.emplace(pose.bones[i].object->name, (int)i);
+  std::vector<int> group_bone(m.vertex_groups.size(), -1);
+  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
+    auto it = by_name.find(m.vertex_groups[gi].name);
+    if (it != by_name.end()) group_bone[gi] = it->second, b->any = true;
+  }
+  if (b->any) {
+    b->n.assign(b->verts, 0);
+    b->idx.assign(b->verts * (size_t)kmax, 0);
+    b->wt.assign(b->verts * (size_t)kmax, 0.0f);
+    JobSystem::global().parallel_for((int64_t)b->verts, 1024, [&](int64_t from, int64_t to) {
+      for (int64_t v = from; v < to; v++) {
+        /* The largest weights among the groups that are bones. */
+        int *idx = &b->idx[(size_t)v * (size_t)kmax];
+        float *wt = &b->wt[(size_t)v * (size_t)kmax];
+        int n = 0;
+        for (size_t gi = 0; gi < group_bone.size(); gi++) {
+          if (group_bone[gi] < 0) continue;
+          const float w = m.vertex_groups[gi].weights[(size_t)v];
+          if (!(w > 0.0f) || !finite_bits(w)) continue;
+          if (n < kmax) {
+            idx[n] = group_bone[gi], wt[n] = w, n++;
+            continue;
+          }
+          int low = 0;
+          for (int k = 1; k < n; k++)
+            if (wt[k] < wt[low]) low = k;
+          if (w > wt[low]) idx[low] = group_bone[gi], wt[low] = w;
+        }
+        b->n[(size_t)v] = (uint8_t)n;
+      }
+    });
+  }
+  pose_add_skin_bindings(1);
+  std::lock_guard<std::recursive_mutex> lock(skin_lock());
+  s.binding.p = keepable ? made : nullptr;
+  return made;
 }
 
 void SkinModifier::modify(Mesh &m) const {
@@ -261,29 +540,27 @@ void SkinModifier::modify(Mesh &m) const {
   if (!root || m.vertex_groups.empty() || !m.groups_fit()) return;
   const Armature &arm = *root->get<Armature>();
   if (arm.rest_position) return;  // shown unposed
-  std::vector<ArmatureBone> bones;
-  armature_bones(*root, bones);
+  /* Round 469: everything measured from the character (skin_space) - the owner, the bones, the rests' base - so the
+   * character moved as a whole computes the same numbers; in world space when there is no such object. */
+  const GameObject *c = skin_space(*this->owner, *root);
+  const std::shared_ptr<const ArmaturePose> held = armature_pose(*root, c);
+  const ArmaturePose &pose = *held;
+  const std::vector<ArmatureBone> &bones = pose.bones;
   if (bones.empty()) return;
-  /* Each group's bone (by name), and each bone's matrix in world space: bone now x (base x rest)^-1, the identity at
-   * rest. Vertices are blended in world space (owner in, owner^-1 out), so a mesh scaled unevenly still gets rigid bone
-   * motions for Dual Quaternion (Blender blends in the armature's space likewise). */
-  const Mat4 owner = this->owner->world_matrix(), owner_inv = owner.inverse(), base = armature_base(*root);
-  std::unordered_map<std::string, int> by_name;
+  /* Each bone's matrix: bone now x (base x rest)^-1, the identity at rest. Vertices are blended in that space (owner
+   * in, owner^-1 out), so a mesh scaled unevenly still gets rigid bone motions for Dual Quaternion (Blender blends in
+   * the armature's space likewise). */
+  const Mat4 owner = matrix_from(this->owner, c), owner_inv = owner.inverse(), base = pose.base;
   std::vector<Mat4> rest_inv(bones.size());
+  std::vector<uint8_t> binds(bones.size());
   for (size_t i = 0; i < bones.size(); i++) {
-    const Mat4 rw = base * bones[i].rest;
-    const float det = dot(cross(rw.column(0), rw.column(1)), rw.column(2));
-    rest_inv[i] = rw.inverse();
-    /* A rest with no volume (a scale of 0) has no inverse: such a bone moves nothing (rather than everything). */
-    if (bones[i].bone->deform && std::fabs(det) > 1e-12f && finite_bits(det)) by_name.emplace(bones[i].object->name, (int)i);
+    rest_inv[i] = (base * bones[i].rest).inverse();
+    binds[i] = bone_binds(bones[i], base) ? 1 : 0;
   }
-  std::vector<int> group_bone(m.vertex_groups.size(), -1);
-  bool any = false;
-  for (size_t gi = 0; gi < m.vertex_groups.size(); gi++) {
-    auto it = by_name.find(m.vertex_groups[gi].name);
-    if (it != by_name.end()) group_bone[gi] = it->second, any = true;
-  }
-  if (!any) return;
+  const int kmax = std::max(1, std::min(max_influences, 8));
+  const std::shared_ptr<const SkinBinding> bind_held = skin_binding(*this, m, *root, pose, binds, kmax);
+  const SkinBinding *bind = bind_held.get();
+  if (!bind->any) return;
   std::vector<Mat4> mats(bones.size());
   std::vector<DualQuat> duals(bones.size());
   std::vector<uint8_t> is_rigid(bones.size());
@@ -292,34 +569,19 @@ void SkinModifier::modify(Mesh &m) const {
     is_rigid[i] = rigid(mats[i]);
     duals[i] = to_dual(mats[i]);
   }
-  const int kmax = std::max(1, std::min(max_influences, 8));
   const bool dq = arm.deform == 1;
   const bool has_cn = m.custom_normals_fit();  // custom normals (task 0149) turn with the same blend
   pose_add(PoseStat::SkinSetup, whole.ms(), 0);
   JobSystem::global().parallel_for((int64_t)m.vert_count(), 1024, [&](int64_t b, int64_t e) {
-    int idx[8];
-    float wt[8];
     for (int64_t v = b; v < e; v++) {
-      /* The largest weights among the groups that are bones. */
-      int n = 0;
-      for (size_t gi = 0; gi < group_bone.size(); gi++) {
-        if (group_bone[gi] < 0) continue;
-        const float w = m.vertex_groups[gi].weights[(size_t)v];
-        if (!(w > 0.0f) || !finite_bits(w)) continue;
-        if (n < kmax) {
-          idx[n] = group_bone[gi], wt[n] = w, n++;
-          continue;
-        }
-        int low = 0;
-        for (int k = 1; k < n; k++)
-          if (wt[k] < wt[low]) low = k;
-        if (w > wt[low]) idx[low] = group_bone[gi], wt[low] = w;
-      }
+      const int n = bind->n[(size_t)v];
+      const int *idx = &bind->idx[(size_t)v * (size_t)kmax];
+      const float *wt = &bind->wt[(size_t)v * (size_t)kmax];
       float sum = 0.0f;
       for (int k = 0; k < n; k++) sum += wt[k];
       if (!(sum > 0.0f)) continue;  // no bone: stays at rest
       Vec3 &p = m.positions[(size_t)v];
-      const Vec3 rest = owner.point(p);  // world space
+      const Vec3 rest = owner.point(p);  // the character's space (the world's when there is none)
       bool all_rigid = dq;
       for (int k = 0; k < n && all_rigid; k++) all_rigid = is_rigid[(size_t)idx[k]] != 0;
       Vec3 out(0.0f);

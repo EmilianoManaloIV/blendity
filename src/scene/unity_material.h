@@ -21,16 +21,29 @@ struct UnityMaterialInfo {
   bool known = true;    // (false: only the main texture and colour taken)
   float outline_width = 0.0f;  // metres (0: none)
   Vec3 outline_color{0.0f, 0.0f, 0.0f};
+  /* Round 485 (ADR 0131): the GUID of the texture whose alpha Unity's shader takes this material's smoothness from
+   * ("" when it comes from a slider), and whether that alpha's mean was not known - then the roughness is the one read
+   * without it, and the caller can have the texture measured and read the material again. */
+  std::string gloss_texture;
+  bool gloss_pending = false;
 };
 
 /* The shader family from its name (its file's) and the material's properties. */
 std::string unity_shader_family(const std::string &shader_name, const std::vector<std::string> &properties);
 
 /* A Unity .mat's text into `m`. `texture` gives a texture GUID's project-relative path ("" when not in the project);
- * `shader_name` a shader GUID's name ("" for a built-in one: then the fileID says). False when it isn't a material. */
+ * `shader_name` a shader GUID's name ("" for a built-in one: then the fileID says). False when it isn't a material.
+ * `mean_alpha` (round 485, optional): the mean of the alpha Unity's shader samples from a texture - true and the
+ * number when it is known; without it, or while it says false, a smoothness kept in a map is read as before. */
 bool unity_material(const std::string &yaml, const std::function<std::string(const std::string &guid)> &texture,
                     const std::function<std::string(const std::string &guid, int64_t file_id)> &shader_name, Material &m, UnityMaterialInfo &info,
-                    const std::function<std::vector<std::string>(const std::string &guid)> &shader_properties = {});
+                    const std::function<std::vector<std::string>(const std::string &guid)> &shader_properties = {},
+                    const std::function<bool(const std::string &guid, float &alpha)> &mean_alpha = {});
+
+/* Round 485: the GUIDs of the textures a Unity .mat's gloss is read from by its keywords - the metallic-gloss map
+ * under _METALLICGLOSSMAP (URP: _METALLICSPECGLOSSMAP), the albedo under _SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A. What an
+ * import measures once (`.unity-stats`), so that reading a material never decodes an image. Empty for anything else. */
+std::vector<std::string> unity_material_gloss_textures(const std::string &yaml);
 
 /* Round 400: the property names a shader's source declares (its Properties block) - a .mat keeps every property any
  * shader it ever had set, and Unity reads only its shader's: `shader_properties` (optional) gives them, and the rest

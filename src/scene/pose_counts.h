@@ -13,7 +13,10 @@
 namespace bl {
 
 struct PoseCounts {
-  uint64_t skin_keys = 0;        // SkinModifier::modifier_dependency_hash calls (the skin's cache key)
+  uint64_t skin_keys = 0;        // the skin's cache keys that walked the bones (round 469: a kept key is skin_keys_kept)
+  uint64_t skin_keys_kept = 0;   // ...answered from the kept key: nothing under the character moved
+  uint64_t skin_keys_stale = 0;  // a kept key that a fresh walk did not confirm (must stay 0: a write past every funnel)
+  uint64_t skin_bindings = 0;    // the per-vertex bone tables built (once a mesh, until its weights or the rig change)
   uint64_t skin_deforms = 0;     // SkinModifier::modify calls that reached the vertex loop
   uint64_t shape_hashes = 0;     // shape_key_hash calls
   uint64_t shape_applies = 0;    // apply_shape_keys calls that added at least one key or the open shape
@@ -52,6 +55,9 @@ void pose_add_moves(uint64_t n);
 void pose_add_name_walks(uint64_t n);
 void pose_add_solver_iterations(uint64_t n);
 void pose_add_spring_chains(uint64_t n);
+void pose_add_skin_keys_kept(uint64_t n);
+void pose_add_skin_keys_stale(uint64_t n);
+void pose_add_skin_bindings(uint64_t n);
 
 /* Wall time on the calling thread to the end of the scope. Put it around calls that run a few hundred times a frame at
  * most - never inside a per-vertex, per-face or per-object loop. `count` false: time only (a part, or a call that

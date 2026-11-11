@@ -4769,6 +4769,71 @@ static void tests_round458() {
   });
 }
 
+/* Round 469 (task 0445): found by the timed run of the owner's avatar in Play in the owner's world. */
+static void tests_round469_gpu() {
+  test("round 469: an object the card already shows is not left waiting for the upload budget when its mesh is replaced every frame (a posed mesh built whole) - every frame draws all of them; a scene opened after is budgeted again (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    ed.init_headless(640, 360);
+    ed.set_async_jobs_for_test(true);
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 4 7 0 0.5 0");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    ed.mesh_budget_for_test((size_t)1 << 30, 0.0);  // (no time to spend: one new mesh a frame)
+    /* Every mesh made here is kept alive to the end: the card's meshes are remembered by address, and a freed mesh's
+     * address given to a new one makes that one "already on the card" (updated, never left waiting) - which mesh that
+     * happens to is the allocator's choice, and the counts below would follow it. */
+    std::vector<MeshPtr> keep;
+    auto spheres = [&](float r) {
+      std::vector<GameObject *> made;
+      for (int i = 0; i < 12; i++) {
+        GameObject *g = ed.scene().create(strprintf("S469_%d", i));
+        keep.push_back(g->add<MeshFilter>()->mesh = primitives::uv_sphere(r, 24, 16));
+        g->add<MeshRenderer>();
+        g->set_local_position({-3.0f + 1.0f * (float)(i % 6), 0.5f, -1.5f + 1.0f * (float)(i / 6)});
+        made.push_back(g);
+      }
+      ed.mark_changed_for_test("r469 spheres");
+      return made;
+    };
+    std::vector<GameObject *> objs = spheres(0.4f);
+    ed.step_frame_headless();
+    const size_t queued_first = ed.mesh_queue_for_test();
+    int frames = 1;
+    for (; frames < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); frames++) ed.step_frame_headless();
+    CHECK(queued_first >= 6);  // (the first sight is spread over frames, as since round 458)
+    CHECK(ed.mesh_queue_for_test() == 0);
+    std::set<uint64_t> old_ids;
+    for (GameObject *g : objs) old_ids.insert(g->id);
+    size_t worst_queue = 0, missing = 0;
+    for (int k = 1; k <= 6; k++) {
+      for (GameObject *g : objs) keep.push_back(g->get<MeshFilter>()->mesh = primitives::uv_sphere(0.4f + 0.01f * (float)k, 24, 16));  // (a new mesh each: new to the card)
+      ed.mark_changed_for_test("r469 replaced");
+      ed.step_frame_headless();
+      worst_queue = std::max(worst_queue, ed.mesh_queue_for_test());
+      for (GameObject *g : objs) missing += !ed.mesh_on_card_for_test(g->evaluated_mesh(0)->render_mesh());
+    }
+    std::printf("    first sight: %zu waiting after one frame, all up after %d; replaced every frame for 6 frames: the longest queue %zu, %zu mesh-frames not on the card\n", queued_first, frames,
+                worst_queue, missing);
+    CHECK(worst_queue == 0);
+    CHECK(missing == 0);
+    CHECK(!ed.texture_stream_busy_for_test());
+    ed.command("newscene");
+    for (int k = 0; k < 3; k++) ed.step_frame_headless();
+    size_t same_ids = 0;
+    for (GameObject *g : spheres(0.4f)) same_ids += old_ids.count(g->id);
+    ed.step_frame_headless();
+    std::printf("    another scene: %zu of its 12 spheres have an id the first scene's had, %zu waiting after one frame\n", same_ids, ed.mesh_queue_for_test());
+    CHECK(same_ids >= 8);                    // (the ids do meet: without forgetting the shown objects at most 4 of the 12 would wait)
+    CHECK(ed.mesh_queue_for_test() >= 6);   // (another scene: its objects are new to the card, whatever their ids; the starter scene's own meshes go first)
+    for (int k = 0; k < 200 && (ed.mesh_queue_for_test() > 0 || ed.texture_stream_busy_for_test()); k++) ed.step_frame_headless();
+    CHECK(ed.mesh_queue_for_test() == 0);
+  });
+}
+
 /* ---------------------------------------------------------------- round 455: probe SH deringing on the card (task 0431) */
 static void tests_round455_gpu() {
   auto view = [](Editor &ed, GameObject *g, int device) {
@@ -4867,4 +4932,5 @@ void run_gpu_tests() {
   tests_round458();
   tests_round454_gpu();
   tests_round455_gpu();
+  tests_round469_gpu();
 }

@@ -60,6 +60,9 @@ struct BakeSettings {
   bool sample_env = true;
   /* Round 441: with more than 8 Baked point and spot lights, each texel picks among them by their light there. */
   bool pick_lights = true;
+  /* Round 484 (`lighting pick <rays>`, for measuring): about how many of them a texel keeps by chance - the bake's own
+   * number is 8 (kLightPickRays, light_pick.h; the light probes always use that). */
+  float pick_rays = 8.0f;
   /* Round 464 (ADR 0121): emissive triangles picked by a light tree - by what each can give the texel - rather than by
    * their share of the scene's power (off only for comparisons: `lighting tree off`). */
   bool light_tree = true;
@@ -69,10 +72,24 @@ struct BakeSettings {
   /* Round 465 (task 0441): a texel's samples from an Owen-scrambled Sobol sequence (sampler.h), which fills the hemisphere
    * evenly whatever the count, rather than plain random numbers (`lighting sampler random`: for comparisons; both are unbiased). */
   bool sobol = true;
+  /* Round 486 (task 0462, ADR 0122 amended; `lighting variancescale`): how the firefly clamp and the filter's
+   * edge-stop read the gather's measured variance, which carries round 465's scale for Sobol samples (qmc_scale) -
+   * 3, the bake's own: scaled by how many samples carry the texel's light (gather_variance_read below); for
+   * comparisons 0 as measured (the bake of rounds 465 to 485), 1 unscaled for the clamp alone, 2 unscaled for both,
+   * 4 a step at 16 samples in place of 3's curve. The gathered light itself is the same whatever this is. */
+  int variance_scale = 3;
   /* Round 444 (ADR 0117): Unity's Lighting Mode - 0 Baked Indirect, 1 Shadowmask (the Mixed lights' shadows from the
    * static scene in a mask, up to kMaskChannels lights), 2 Subtractive (their direct light in the lightmaps too). */
   int lighting_mode = 0;
 };
+
+/* Round 486 (ADR 0122, amended): the gather's variance as the firefly clamp and the filter's edge-stop read it, from
+ * what the bake measured for a texel - `scaled`, its samples' variance of the mean times round 465's scale for
+ * `samples` Sobol samples - and the texel's gathered luminance. `mode` is BakeSettings::variance_scale. The scale is
+ * right for light that fills the hemisphere and wrong for a texel lit by a few rays that met a small bright patch:
+ * lum^2 over the unscaled variance is how many samples carry the texel's light (about K for K rare bright ones, about
+ * the sample count over the samples' relative variance for filled light), and modes 3 and 4 scale by that. */
+float gather_variance_read(float scaled, float lum, int samples, bool sobol, int mode);
 
 struct BakeLight;
 /* Round 444 (review): Unity's Subtractive split - the main directional Mixed light (the brightest) stays Mixed (the bake
@@ -251,6 +268,11 @@ class Lightmapper {
   LightingData take_result();
   /* For tests and stress: texels, rays. */
   uint64_t rays() const { return rays_; }
+  /* Round 484: light picking, counted - the texels that picked among the Baked point and spot lights, and over them the
+   * lights kept by chance and the lights dropped (a light kept for certain is in neither). */
+  uint64_t pick_texels() const { return pick_texels_; }
+  uint64_t chance_kept() const { return chance_kept_; }
+  uint64_t chance_dropped() const { return chance_dropped_; }
   /* Task 0018: texels whose indirect light the GPU gathered, and why it stopped (empty: it didn't). */
   size_t gpu_texels() const { return gpu_texels_; }
   const std::string &gpu_error() const { return gpu_error_; }
@@ -267,6 +289,7 @@ class Lightmapper {
   std::atomic<size_t> total_{0};  // (round 412: read by the main thread while a worker bakes)
   std::atomic<size_t> done_{0};  // (round 412: read by the main thread while a worker bakes)
   std::atomic<uint64_t> rays_{0};
+  std::atomic<uint64_t> pick_texels_{0}, chance_kept_{0}, chance_dropped_{0};  // (round 484)
   std::unique_ptr<class PathTracer> pt_;
   std::vector<PTObject> pt_objects_;
   LightingData out_;

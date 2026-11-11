@@ -32,7 +32,19 @@ Round 451 (task 0427), where the error lives - additions, the command lines abov
                                  `lighting noise` between them: the bake's grain and blotch (per page, the worst
                                  objects) in report.md / report.json and <out dir>/pages/blendity_seed1/noise.json;
     py tools/unity_compare.py pages <Unity's lighting folder> <Blendity's lighting folder> <out dir>   (the same, standalone)
-    py tools/unity_compare.py --self-test                                                             (the tools' own checks)"""
+    py tools/unity_compare.py --self-test                                                             (the tools' own checks)
+
+Round 484 (task 0460), for measuring what a bake's settings do - additions, the command lines above unchanged:
+  * ... world ... --bake-cmd "<console line>"   (repeatable) a line run before each Blendity bake: `lighting pick off`,
+                                 `lighting denoiser atrous`, `set Lighting.Denoise false`;
+  * ... world ... --lights-as-imported   no `unity lightsgamma` line is passed: the lights as Blendity's import leaves them
+                                 (in a Blendity project without Unity's ProjectSettings: in gamma);
+  * ... world ... --reuse-unity-lightmaps   Unity isn't asked for its lightmaps again when <scene>.unity-lighting is already
+                                 beside the scene (opening the scene shows them): one Unity run fewer a station;
+  * --noise also renders every station with each seed's bake and reports the two pictures' own grain and blotch
+                                 (station_<name>_seed0/1.png and _seed_diff.png in <out dir>/pages), with the bakes' times;
+    py tools/unity_compare.py noise <Blendity.exe> <Blendity project> <Assets/.../scene.unity> <stations.json> <out dir>
+                                      [--bake-cmd "<console line>"]...   the noise alone: no Unity, no page compare."""
 import json
 import math
 import os
@@ -58,6 +70,13 @@ def refuse_users_project(project):
         sys.exit("refused: %s looks like a VCC project; this tool only works on a copy (write an empty BLENDITY_COPY file into the copy)" % project)
 
 
+def refuse_unmarked_project(project, what):
+    """Round 484: a Blendity project a new mode bakes in must be marked as a scratch copy - an empty BLENDITY_SCRATCH
+    file beside its Assets folder (tools/unity_materials.py's marker; BLENDITY_COPY counts too)."""
+    if not any(os.path.isfile(os.path.join(project, marker)) for marker in ("BLENDITY_SCRATCH", "BLENDITY_COPY")):
+        sys.exit("refused: %s, so it only works on a scratch copy - write an empty BLENDITY_SCRATCH file beside %s" % (what, os.path.join(project, "Assets")))
+
+
 def unity_side(unity, project, kind, asset, stations, out):
     checks = os.path.join(project, "Assets", "Editor", "BlendityChecks")
     os.makedirs(checks, exist_ok=True)
@@ -80,6 +99,8 @@ def unity_side(unity, project, kind, asset, stations, out):
 
 
 LIGHTS_CMDS = []  # (round 459: set from the Unity project copy's GraphicsSettings - see unity_lights_cmds)
+BAKE_CMDS = []    # (round 484: --bake-cmd - console lines run before each Blendity bake: `lighting pick off`, `set Lighting.Denoise false`)
+REUSE_UNITY_LIGHTMAPS = False  # (round 484: --reuse-unity-lightmaps - Unity isn't asked again for lightmaps already beside the scene)
 
 
 def unity_lights_cmds(unity_project):
@@ -109,7 +130,7 @@ def blendity_bake(exe, project, asset, out):
     env = dict(os.environ, BLENDITY_PROJECT=project)
     args = [exe, "--headless-screenshot", os.path.join(bl_out, "bake_editor.png"), "--size", "1600x1000", "--frames", "2",
             "--cmd", "open " + asset]
-    for c in LIGHTS_CMDS + ["bake", "perf wait", "save " + saved]:  # (round 459: the lights as the Unity project takes them)
+    for c in LIGHTS_CMDS + BAKE_CMDS + ["bake", "perf wait", "save " + saved]:  # (round 459: the lights as the Unity project takes them)
         args += ["--cmd", c]
     log_path = os.path.join(bl_out, "bake.log")
     t0 = time.time()
@@ -160,7 +181,8 @@ def blendity_side(exe, project, kind, asset, stations, out, lightmaps, engine, o
             cmds += ["open " + (open_asset or asset)]
             if not open_asset:
                 cmds += LIGHTS_CMDS  # (round 459; a saved bake carries it)
-            if lightmaps and not open_asset:
+            fetched = REUSE_UNITY_LIGHTMAPS and os.path.isfile(os.path.join(project, asset) + ".unity-lighting")  # (round 484: opening the scene shows them)
+            if lightmaps and not open_asset and not fetched:
                 cmds += ["unity lightmaps wait"]
             cmds += ["select Main Camera", "position %g %g %g" % (st["x"], st["y"], st["z"]), "rotate %g %g 0" % (st["pitch"], st["yaw"])]
             if st.get("fov"):
@@ -457,17 +479,121 @@ def save_lighting(exe, project, open_asset, unity_lightmaps, folder, log_path):
     return os.path.isfile(os.path.join(folder, "LightingData.bin"))
 
 
-def noise_bake(exe, project, asset, pages_out):
+def station_cmds(st, picture):
+    """The console lines that render one station with F12's rasterizer into `picture` (as blendity_side does)."""
+    cmds = ["select Main Camera", "position %g %g %g" % (st["x"], st["y"], st["z"]), "rotate %g %g 0" % (st["pitch"], st["yaw"])]
+    if st.get("fov"):
+        cmds += ["set Camera.FieldOfView %g" % st["fov"]]
+    return cmds + ["activecamera Main Camera", "set Render.ResolutionX 1280", "set Render.ResolutionY 720", "set Render.RenderEngine Rasterized",
+                   "set Render.Denoise false", "render wait", "saverender " + picture]
+
+
+def linear_luminance(w, h, rgb):
+    """An 8-bit sRGB picture's luminance in linear light, 0..1 a pixel."""
+    lut = [(v / 255.0 / 12.92) if v <= 10 else ((v / 255.0 + 0.055) / 1.055) ** 2.4 for v in range(256)]
+    return [0.2126 * lut[rgb[i]] + 0.7152 * lut[rgb[i + 1]] + 0.0722 * lut[rgb[i + 2]] for i in range(0, w * h * 3, 3)]
+
+
+def box_mean(w, h, vals, r):
+    """Each pixel's mean over the (2r + 1)^2 window round it (cut at the picture's edge), by a summed-area table."""
+    sat = [0.0] * ((w + 1) * (h + 1))
+    for y in range(h):
+        run, row, up = 0.0, (y + 1) * (w + 1), y * (w + 1)
+        for x in range(w):
+            run += vals[y * w + x]
+            sat[row + x + 1] = sat[up + x + 1] + run
+    out = [0.0] * (w * h)
+    for y in range(h):
+        y0, y1 = max(0, y - r), min(h, y + r + 1)
+        for x in range(w):
+            x0, x1 = max(0, x - r), min(w, x + r + 1)
+            s = sat[y1 * (w + 1) + x1] - sat[y0 * (w + 1) + x1] - sat[y1 * (w + 1) + x0] + sat[y0 * (w + 1) + x0]
+            out[y * w + x] = s / ((y1 - y0) * (x1 - x0))
+    return out
+
+
+def speck_count(w, h, diff, mean, share=0.5, least=6):
+    """Round 484: the specks between two seeds' pictures - connected spots (8 neighbours, at least `least` pixels) where
+    the pictures differ by more than `share` of the picture's mean light. A bake's rare bright sample leaves one after
+    the filter: a small round spot in one seed's picture and not in the other's, which grain and blotch - means over the
+    whole picture - hardly move for. Returns (how many, their pixels in all, the biggest one's pixels)."""
+    hot = bytearray(1 if abs(d) > share * mean else 0 for d in diff)
+    count = area = biggest = 0
+    for start in range(w * h):
+        if not hot[start]:
+            continue
+        hot[start] = 0
+        stack, n = [start], 0
+        while stack:
+            i = stack.pop()
+            n += 1
+            x, y = i % w, i // w
+            for yy in range(max(0, y - 1), min(h, y + 2)):
+                for xx in range(max(0, x - 1), min(w, x + 2)):
+                    j = yy * w + xx
+                    if hot[j]:
+                        hot[j] = 0
+                        stack.append(j)
+        if n >= least:
+            count, area, biggest = count + 1, area + n, max(biggest, n)
+    return count, area, biggest
+
+
+def station_noise(a_png, b_png, diff_png=None):
+    """Round 484: one station rendered with the bake at seed 0 and at seed 1 - the pictures' grain and blotch, the bake's
+    measure (round 463) on what the eye gets: grain = sqrt(mean((a - b)^2) / 2) / mean((a + b) / 2) over the pixels'
+    linear luminance; blotch the same with (a - b) first averaged over a window a fortieth of the picture's width to each
+    side (what reads as blotches at that station); and the specks (speck_count): how many, and their share of the
+    picture. `diff_png`: |a - b| as a grey picture, eight times enlarged in value."""
+    w, h, a = image_compare.read_png(a_png)
+    w2, h2, b = image_compare.read_png(b_png)
+    if (w, h) != (w2, h2):
+        return {"skipped": "the two pictures differ in size"}
+    la, lb = linear_luminance(w, h, a), linear_luminance(w, h, b)
+    n = w * h
+    diff = [la[i] - lb[i] for i in range(n)]
+    mean = sum(la[i] + lb[i] for i in range(n)) / (2.0 * n)
+    if mean < 1e-6:
+        return {"dark": True, "grain": 0.0, "blotch": 0.0, "mean": mean}
+    r = max(1, w // 80)
+    soft = box_mean(w, h, diff, r)
+    grain = math.sqrt(sum(d * d for d in diff) / n / 2.0) / mean
+    blotch = math.sqrt(sum(d * d for d in soft) / n / 2.0) / mean
+    if diff_png:
+        px = bytearray(n * 3)
+        for i in range(n):
+            v = min(255, int(abs(diff[i]) * 8.0 * 255.0 + 0.5))
+            px[i * 3] = px[i * 3 + 1] = px[i * 3 + 2] = v
+        image_compare.write_png(diff_png, w, h, bytes(px))
+    specks, speck_px, biggest = speck_count(w, h, diff, mean)
+    return {"dark": False, "grain": grain, "blotch": blotch, "mean": mean, "window": 2 * r + 1,
+            "specks": specks, "speck_share": speck_px / float(n), "speck_biggest": biggest}
+
+
+def bake_facts(log_text):
+    """What a noise run's log says of its bakes: each one's seconds, its phases line and its light-picking lines (the
+    ones with the counts first: a bake at another `lighting pick` setting says the setting too)."""
+    picking = [x.strip() for x in re.findall(r"Generate Lighting: light picking (.*)", log_text)]
+    return {"bake_s": [float(x) for x in re.findall(r"Generate Lighting: done in ([0-9.]+) s", log_text)],
+            "phases": [x.strip() for x in re.findall(r"Generate Lighting phases: (.*)", log_text)],
+            "picking": [x for x in picking if "kept by chance" in x] + [x for x in picking if "kept by chance" not in x]}
+
+
+def noise_bake(exe, project, asset, pages_out, stations=None):
     """Round 463: the scene opened once and baked at seed 0 and again at seed 1 (so both lighting folders hold the same object
     ids), each saved with `lighting save`, then `lighting noise` between them (its noise.json lands in
-    <pages_out>/blendity_seed1/); returns read_noise()'s summary."""
+    <pages_out>/blendity_seed1/); returns read_noise()'s summary. Round 484: BAKE_CMDS run before the bakes; with
+    `stations`, each station is rendered with each seed's bake (station_<name>_seed<k>.png) and the pictures' own grain
+    and blotch go into the summary's "stations" (station_noise), the bakes' times and picking lines into "bakes"."""
+    os.makedirs(pages_out, exist_ok=True)
     first, second = (os.path.join(pages_out, n).replace("\\", "/") for n in ("blendity_seed0", "blendity_seed1"))
     for d in (first, second):
         shutil.rmtree(d, ignore_errors=True)
     q = lambda d: '"%s"' % d  # (the console takes a folder with spaces in quotes)
-    cmds = ["open " + asset] + LIGHTS_CMDS + ["lighting seed 0", "bake", "perf wait", "lighting save " + q(first),
-                                              "lighting seed 1", "bake", "perf wait", "lighting save " + q(second),
-                                              "lighting noise %s %s" % (q(first), q(second))]
+    shots = lambda k: [c for st in (stations or {"stations": []})["stations"]
+                       for c in station_cmds(st, os.path.join(pages_out, "station_%s_seed%d.png" % (st["name"], k)).replace("\\", "/"))]
+    cmds = (["open " + asset] + LIGHTS_CMDS + BAKE_CMDS + ["lighting seed 0", "bake", "perf wait", "lighting save " + q(first)] + shots(0) +
+            ["lighting seed 1", "bake", "perf wait", "lighting save " + q(second)] + shots(1) + ["lighting noise %s %s" % (q(first), q(second))])
     args = [exe, "--headless-screenshot", os.path.join(pages_out, "noise_editor.png"), "--size", "800x600", "--frames", "1"]
     for c in cmds:
         args += ["--cmd", c]
@@ -482,6 +608,14 @@ def noise_bake(exe, project, asset, pages_out):
     summary["both_bakes_s"] = round(time.time() - t0, 1)
     if "skipped" in summary:
         summary["skipped"] = "%s (see pages/noise.log)" % summary["skipped"]
+        return summary
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        summary["bakes"] = bake_facts(f.read())
+    summary["stations"] = {}
+    for st in (stations or {"stations": []})["stations"]:
+        a, b = (os.path.join(pages_out, "station_%s_seed%d.png" % (st["name"], k)) for k in (0, 1))
+        if os.path.isfile(a) and os.path.isfile(b):
+            summary["stations"][st["name"]] = station_noise(a, b, os.path.join(pages_out, "station_%s_seed_diff.png" % st["name"]))
     return summary
 
 
@@ -512,6 +646,22 @@ def noise_lines(s):
     lines += ["", "The five objects with the most blotch:", "", "| object | page | grain | blotch | texels |", "|---|---|---|---|---|"]
     for w in s["worst"][:5]:
         lines.append("| %s | %d | %.4f | %.4f | %d |" % (w.get("name") or w.get("id"), w["page"], w["grain"], w["blotch"], w["texels"]))
+    bakes = s.get("bakes") or {}
+    if bakes.get("bake_s"):  # (round 484)
+        lines += ["", "The two bakes took %s s." % " and ".join("%.1f" % x for x in bakes["bake_s"])]
+        lines += ["Phases: " + p for p in bakes.get("phases", [])[:1]]
+        lines += ["Light picking " + p for p in bakes.get("picking", [])[:1]]
+    if s.get("stations"):
+        lines += ["", "At the stations (the two seeds' bakes rendered; the pictures' own grain and blotch, in linear light; specks: spots of 6 pixels "
+                  "or more where the two pictures differ by over half the picture's mean light):", "",
+                  "| station | grain | blotch | specks | their share of the picture | mean light |", "|---|---|---|---|---|---|"]
+        for name, n in s["stations"].items():
+            if "skipped" in n:
+                lines.append("| %s | skipped | %s | - | - | - |" % (name, n["skipped"]))
+                continue
+            specks = "-" if n.get("dark") or "specks" not in n else "%d" % n["specks"]
+            share = "-" if n.get("dark") or "specks" not in n else "%.3f %%" % (100.0 * n["speck_share"])
+            lines.append("| %s | %s | %s | %s | %s | %.4f |" % (name, "dark" if n.get("dark") else "%.4f" % n["grain"], "dark" if n.get("dark") else "%.4f" % n["blotch"], specks, share, n["mean"]))
     return lines + [""]
 
 
@@ -640,6 +790,55 @@ def self_test():
                 fails.append("the noise report lacks %r" % want)
         if "Skipped" not in chr(10).join(noise_lines(read_noise(os.path.join(d, "none.json")))):
             fails.append("a missing noise.json isn't reported as skipped")
+        # Round 484: a station's own noise - two equal pictures read 0; grey with a known step in half the picture reads it.
+        w, h = 160, 90
+        flat = bytes([128, 128, 128]) * (w * h)
+        stepped = bytearray(flat)
+        for y in range(h):
+            for x in range(w // 2):
+                stepped[(y * w + x) * 3:(y * w + x) * 3 + 3] = bytes([148, 148, 148])
+        pa, pb, pd = (os.path.join(d, n) for n in ("a.png", "b.png", "diff.png"))
+        image_compare.write_png(pa, w, h, flat)
+        image_compare.write_png(pb, w, h, bytes(stepped))
+        same = station_noise(pa, pa)
+        if same.get("grain") != 0.0 or same.get("blotch") != 0.0:
+            fails.append("two equal station pictures read noise: %s" % same)
+        sn = station_noise(pa, pb, pd)
+        la, lb = (((v / 255.0 + 0.055) / 1.055) ** 2.4 for v in (128, 148))
+        want = math.sqrt(((lb - la) ** 2 / 2.0) / 2.0) / ((la + (la + lb) / 2.0) / 2.0)  # (half the pixels differ by lb - la)
+        if abs(sn["grain"] - want) > 0.01 * want or not (0.8 * want < sn["blotch"] <= sn["grain"] + 1e-9) or not os.path.isfile(pd):
+            fails.append("the stepped station picture read grain %.4f blotch %.4f (the step gives %.4f)" % (sn["grain"], sn["blotch"], want))
+        if sn.get("specks") != 0 or same.get("specks") != 0:
+            fails.append("a broad step of a third of the light read as specks: %s" % sn)
+        # ...and its specks: three bright 3 x 3 spots are three specks of 27 pixels, a 2 x 2 one is too small to count.
+        spotted = bytearray(flat)
+        for x0, y0, side in ((10, 10, 3), (50, 40, 3), (120, 70, 3), (80, 20, 2)):
+            for y in range(y0, y0 + side):
+                for x in range(x0, x0 + side):
+                    spotted[(y * w + x) * 3:(y * w + x) * 3 + 3] = bytes([255, 255, 255])
+        ps = os.path.join(d, "spotted.png")
+        image_compare.write_png(ps, w, h, bytes(spotted))
+        sp = station_noise(pa, ps)
+        if (sp.get("specks"), sp.get("speck_biggest")) != (3, 9) or abs(sp.get("speck_share", 0) - 27.0 / (w * h)) > 1e-9:
+            fails.append("three 3 x 3 spots and a 2 x 2 one read as %s" % sp)
+        facts = bake_facts("Generate Lighting: done in 39.2 s\nGenerate Lighting phases: lightmaps 36.5 s\nGenerate Lighting: light picking at about 16 lights a texel (the setting)\n"
+                           "Generate Lighting: light picking at about 16 lights a texel - 5.10 kept by chance and 1.00 dropped a texel, over 9 texels\nGenerate Lighting: done in 40.1 s\n")
+        if facts["bake_s"] != [39.2, 40.1] or facts["phases"] != ["lightmaps 36.5 s"] or "5.10 kept by chance" not in facts["picking"][0] or len(facts["picking"]) != 2:
+            fails.append("the bakes' facts read as %s" % facts)
+        rows = chr(10).join(noise_lines(dict(read_noise(path), bakes=facts, stations={"side_bar_high": sn, "dark_one": {"dark": True, "grain": 0.0, "blotch": 0.0, "mean": 0.0}})))
+        for want_line in ("The two bakes took 39.2 and 40.1 s.", "| side_bar_high | %.4f | %.4f |" % (sn["grain"], sn["blotch"]), "| dark_one | dark | dark |"):
+            if want_line not in rows:
+                fails.append("the noise report lacks %r" % want_line)
+        if station_cmds({"x": 1, "y": 2, "z": 3, "pitch": 4, "yaw": 5, "fov": 0}, "p.png")[-1] != "saverender p.png":
+            fails.append("a station's render lines don't end in its picture")
+        # Round 484: `noise` bakes in the project it is given, so the project must be marked as a scratch copy.
+        try:
+            refuse_unmarked_project(d, "`noise` bakes in the project")
+            fails.append("a project without a scratch marker wasn't refused")
+        except SystemExit:
+            pass
+        open(os.path.join(d, "BLENDITY_SCRATCH"), "w").close()
+        refuse_unmarked_project(d, "`noise` bakes in the project")
     r = image_compare.self_test()
     for f in fails:
         print("FAIL: " + f)
@@ -647,19 +846,63 @@ def self_test():
     return 1 if fails or r else 0
 
 
+def read_stations(stations_path):
+    try:
+        with open(stations_path, encoding="utf-8") as f:
+            stations = json.load(f)
+        for st in stations["stations"]:
+            st["name"] = re.sub(r"[^A-Za-z0-9_-]", "_", str(st["name"]))[:64] or "station"  # (a file name, nothing more)
+            for k in ("x", "y", "z", "yaw", "pitch"):
+                st[k] = float(st.get(k, 0))
+            st["fov"] = float(st.get("fov", 0))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        sys.exit("stations: %s" % e)
+    return stations
+
+
+def noise_alone(fixed, rest):
+    """Round 484: `noise <Blendity.exe> <Blendity project> <scene> <stations.json> <out dir> [--bake-cmd "<line>"]...` - the
+    scene baked at seeds 0 and 1 in the project (a scratch copy: the bakes' folders land in <out dir>), the bake's grain and
+    blotch and each station's, with the bakes' times; no Unity and no page compare. The lights are as the import left them
+    unless a --bake-cmd line says otherwise (`unity lightsgamma off`)."""
+    exe, project, asset, stations_path, out = fixed
+    while rest:
+        if rest[0] == "--bake-cmd" and len(rest) > 1:
+            BAKE_CMDS.append(rest[1])
+            rest = rest[2:]
+        else:
+            sys.exit("unknown or incomplete option " + rest[0])
+    out = os.path.abspath(out)
+    refuse_unmarked_project(os.path.abspath(project), "`noise` bakes in the project")
+    summary = noise_bake(os.path.abspath(exe), os.path.abspath(project), asset, out, read_stations(os.path.abspath(stations_path)))
+    summary["bake_cmds"] = list(BAKE_CMDS)
+    lines = ["# A Blendity bake's noise: %s (%s)" % (asset, time.strftime("%Y-%m-%d")), "",
+             "Before each bake: %s." % ("; ".join("`%s`" % c for c in BAKE_CMDS) or "nothing (the lights as imported)"), ""] + noise_lines(summary)
+    with open(os.path.join(out, "noise_report.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    with open(os.path.join(out, "noise_report.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=1)
+    print("\n".join(lines))
+    return 1 if "skipped" in summary else 0
+
+
 def main(argv):
+    global REUSE_UNITY_LIGHTMAPS
     if argv[:1] == ["--self-test"]:
         return self_test()
     if argv[:1] == ["pages"] and len(argv) == 4:
         s = page_compare(argv[1], argv[2], argv[3])
         print(open(os.path.join(argv[3], "pages.md"), encoding="utf-8").read())
         return 0 if s["objects"] else 1
+    if argv[:1] == ["noise"] and len(argv) >= 6:  # (round 484: a bake's noise alone - no Unity, no page compare)
+        return noise_alone(argv[1:6], argv[6:])
     if len(argv) < 8 or argv[0] not in ("world", "avatar"):
         sys.exit(__doc__)
     kind, unity, project, asset, bl_project, bl_asset, stations_path, out = argv[:8]
     project, bl_project, out, stations_path = (os.path.abspath(x) for x in (project, bl_project, out, stations_path))  # (review 404: Unity and Blendity run in their projects)
     exe = os.path.join(REPO, "dist", "windows", "Blendity.exe")
     lightmaps, engine, own_bake, components, pages, noise = True, "Rasterized", False, False, False, False
+    lights_as_imported = False
     rest = argv[8:]
     while rest:
         if rest[0] == "--blendity" and len(rest) > 1:
@@ -676,6 +919,13 @@ def main(argv):
             noise, rest = True, rest[1:]
         elif rest[0] == "--engine" and len(rest) > 1 and rest[1] in ("Rasterized", "Path"):
             engine, rest = rest[1], rest[2:]
+        elif rest[0] == "--bake-cmd" and len(rest) > 1:  # (round 484)
+            BAKE_CMDS.append(rest[1])
+            rest = rest[2:]
+        elif rest[0] == "--lights-as-imported":
+            lights_as_imported, rest = True, rest[1:]
+        elif rest[0] == "--reuse-unity-lightmaps":
+            REUSE_UNITY_LIGHTMAPS, rest = True, rest[1:]
         else:
             sys.exit("unknown or incomplete option " + rest[0])
     if components and engine != "Rasterized":
@@ -683,21 +933,12 @@ def main(argv):
     if noise and not (own_bake and pages):
         sys.exit("--noise needs --blendity-bake and --pages (the noise is reported with the pages; it bakes seeds 0 and 1 itself from one open of the scene)")
     refuse_users_project(project)
-    try:
-        with open(stations_path, encoding="utf-8") as f:
-            stations = json.load(f)
-        for st in stations["stations"]:
-            st["name"] = re.sub(r"[^A-Za-z0-9_-]", "_", str(st["name"]))[:64] or "station"  # (a file name, nothing more)
-            for k in ("x", "y", "z", "yaw", "pitch"):
-                st[k] = float(st.get(k, 0))
-            st["fov"] = float(st.get("fov", 0))
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        sys.exit("stations: %s" % e)
+    stations = read_stations(stations_path)
     os.makedirs(out, exist_ok=True)
     for f in os.listdir(out):
         if f.endswith((".json", "_side_by_side.png", "_ssim.png", ".md")):
             os.remove(os.path.join(out, f))
-    LIGHTS_CMDS[:] = unity_lights_cmds(project) if kind == "world" else []
+    LIGHTS_CMDS[:] = unity_lights_cmds(project) if kind == "world" and not lights_as_imported else []
     unity_s = unity_side(unity, project, kind, asset, stations_path, out)
     bake = None
     if own_bake and kind == "world":
@@ -744,7 +985,7 @@ def main(argv):
         page_summary = run_pages(exe, bl_project, bl_asset, bake, out)
         report += page_lines(page_summary)
         if noise:
-            noise_summary = noise_bake(exe, bl_project, bl_asset, os.path.join(out, "pages")) if "worst" in page_summary else {"skipped": "no saved pages to compare"}
+            noise_summary = noise_bake(exe, bl_project, bl_asset, os.path.join(out, "pages"), stations) if "worst" in page_summary else {"skipped": "no saved pages to compare"}
             report += noise_lines(noise_summary)
     with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(report))

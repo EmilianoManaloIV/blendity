@@ -1495,6 +1495,37 @@ int unity_texture_alpha_rule(const std::string &path) {
 }
 const bool g_alpha_rule_set = (texture_set_alpha_rule(&unity_texture_alpha_rule), true);
 
+/* The next tab-separated field of `line` from `at` (moved past it). */
+std::string stats_field(const std::string &line, size_t &at) {
+  const size_t end = std::min(line.find('\t', at), line.size());
+  const std::string field = line.substr(at, end - at);
+  at = std::min(end + 1, line.size());
+  return field;
+}
+
+/* One `.unity-stats` line onto its index entry; false for a line that isn't numbers, names no known texture, or was
+ * measured on a file of another size. */
+bool stats_line_read(const std::string &line, const std::string &dir, UnityGuidIndex &index) {
+  size_t at = 0;
+  const std::string guid = stats_field(line, at);
+  const auto it = index.find(guid);
+  if (it == index.end()) return false;
+  char *end = nullptr;
+  const std::string bytes_text = stats_field(line, at);
+  const unsigned long long bytes = std::strtoull(bytes_text.c_str(), &end, 10);
+  if (bytes_text.empty() || *end != '\0' || bytes != unity_file_bytes(it->second.path)) return false;
+  stats_field(line, at), stats_field(line, at);  // (width and height: for a reader of the file, not for the index)
+  float mean[4];
+  for (float &m : mean) {
+    const std::string text = stats_field(line, at);
+    m = std::strtof(text.c_str(), &end);
+    if (text.empty() || *end != '\0' || !std::isfinite(m)) return false;
+  }
+  std::copy(mean, mean + 4, it->second.mean);
+  it->second.has_mean = true, it->second.table = dir;
+  return true;
+}
+
 /* TextureImporterFormat's bytes a texel (crunched as what it unpacks to); 0: automatic or one not listed. */
 double format_bytes(int format) {
   switch (format) {
@@ -1519,6 +1550,57 @@ double npot_side(double side, int mode) {
 }
 
 }  // namespace
+
+/* Round 485 (ADR 0131): `.unity-stats` - unity_scene.h says what it holds. */
+uint64_t unity_file_bytes(const std::string &path) {
+  std::error_code ec;
+  const auto n = std::filesystem::file_size(std::filesystem::u8path(path), ec);
+  return ec ? 0 : (uint64_t)n;
+}
+
+bool unity_texture_mean(const std::string &path, int &width, int &height, float mean[4]) {
+  Bitmap bmp;
+  std::string error;
+  if (!load_image(path, bmp, error)) return false;
+  const size_t n = (size_t)std::max(0, bmp.width) * (size_t)std::max(0, bmp.height);
+  if (n == 0 || (bmp.is_float ? bmp.rgbaf.size() : bmp.rgba8.size()) < n * 4) return false;
+  double sum[4] = {0.0, 0.0, 0.0, 0.0};
+  for (size_t i = 0; i < n * 4; i++) {
+    const double v = bmp.is_float ? (double)bmp.rgbaf[i] : (double)bmp.rgba8[i] / 255.0;
+    sum[i & 3] += std::isfinite(v) ? std::clamp(v, 0.0, 1.0) : 0.0;  // (a NaN texel counts as black, not as the whole mean)
+  }
+  /* Kept as a table's line holds them - six decimals - so the session that measured a texture and every later one
+   * that reads its line work with the very same number (they differed in the seventh digit, and a material read again
+   * after the index was walked came out "changed"). */
+  for (int k = 0; k < 4; k++) mean[k] = std::strtof(strprintf("%.6f", sum[k] / (double)n).c_str(), nullptr);
+  width = bmp.width, height = bmp.height;
+  return true;
+}
+
+std::string unity_stats_line(const std::string &guid, uint64_t bytes, int width, int height, const float mean[4]) {
+  return strprintf("%s\t%llu\t%d\t%d\t%.6f\t%.6f\t%.6f\t%.6f\n", guid.c_str(), (unsigned long long)bytes, width, height, mean[0], mean[1], mean[2], mean[3]);
+}
+
+void unity_stats_read(const std::string &dir, UnityGuidIndex &index) {
+  std::string text;
+  if (!fs::read_file(fs::join(dir, ".unity-stats"), text)) return;
+  for (size_t at = 0; at < text.size();) {
+    const size_t end = std::min(text.find('\n', at), text.size());
+    std::string line = text.substr(at, end - at);
+    at = end + 1;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (!line.empty()) stats_line_read(line, dir, index);
+  }
+}
+
+float unity_sampled_alpha(const std::string &meta, const float mean[4]) {
+  const int usage = meta.empty() ? -1 : meta_alpha_usage(meta);
+  if (usage == 0) return 1.0f;
+  /* (In double and kept to 0..1: a table's line is only checked for finite numbers, and three huge ones must not sum
+   * past what a float holds - an alpha that is not finite reads as "not measured" for ever.) */
+  const double a = usage == 2 ? ((double)mean[0] + (double)mean[1] + (double)mean[2]) / 3.0 : (double)mean[3];
+  return (float)std::clamp(a, 0.0, 1.0);
+}
 
 bool unity_texture_megabytes(const std::string &asset_path, int width, int height, bool has_alpha, double &mb) {
   std::string text;

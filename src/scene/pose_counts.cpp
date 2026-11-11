@@ -8,7 +8,7 @@ namespace bl {
 
 namespace {
 constexpr int kStats = (int)PoseStat::Count;
-enum Extra { kMoves, kNameWalks, kSolverIterations, kSpringChains, kExtras };
+enum Extra { kMoves, kNameWalks, kSolverIterations, kSpringChains, kKeysKept, kKeysStale, kBindings, kExtras };
 std::atomic<uint64_t> g_count[kStats], g_us[kStats], g_extra[kExtras];
 /* The calling thread's own share of the same tallies: a test (or a row) that calls the scene layer directly reads these,
  * so a worker of another editor counting at the same moment can't change what it sees. */
@@ -31,6 +31,7 @@ template<class Count, class Us, class Ext> PoseCounts counts_from(Count &&n, Us 
   c.evaluations = n(PoseStat::Evaluate), c.outline_shells = n(PoseStat::OutlineShell);
   c.constraint_solves = n(PoseStat::Constraints), c.constraint_moves = extra(kMoves);
   c.name_walks = extra(kNameWalks);
+  c.skin_keys_kept = extra(kKeysKept), c.skin_keys_stale = extra(kKeysStale), c.skin_bindings = extra(kBindings);
   c.clip_applies = n(PoseStat::ClipApply);
   c.solver_solves = n(PoseStat::Solver), c.solver_iterations = extra(kSolverIterations);
   c.spring_steps = n(PoseStat::Spring), c.spring_chains = extra(kSpringChains);
@@ -55,6 +56,9 @@ void pose_add_moves(uint64_t n) { add_extra(kMoves, n); }
 void pose_add_name_walks(uint64_t n) { add_extra(kNameWalks, n); }
 void pose_add_solver_iterations(uint64_t n) { add_extra(kSolverIterations, n); }
 void pose_add_spring_chains(uint64_t n) { add_extra(kSpringChains, n); }
+void pose_add_skin_keys_kept(uint64_t n) { add_extra(kKeysKept, n); }
+void pose_add_skin_keys_stale(uint64_t n) { add_extra(kKeysStale, n); }
+void pose_add_skin_bindings(uint64_t n) { add_extra(kBindings, n); }
 
 PoseCounts pose_counts() {
   return counts_from([](PoseStat s) { return g_count[(int)s].load(std::memory_order_relaxed); },
@@ -74,6 +78,8 @@ PoseCounts PoseCounts::operator-(const PoseCounts &o) const {
   d.evaluations = evaluations - o.evaluations, d.outline_shells = outline_shells - o.outline_shells;
   d.constraint_solves = constraint_solves - o.constraint_solves, d.constraint_moves = constraint_moves - o.constraint_moves;
   d.name_walks = name_walks - o.name_walks, d.clip_applies = clip_applies - o.clip_applies;
+  d.skin_keys_kept = skin_keys_kept - o.skin_keys_kept, d.skin_keys_stale = skin_keys_stale - o.skin_keys_stale;
+  d.skin_bindings = skin_bindings - o.skin_bindings;
   d.solver_solves = solver_solves - o.solver_solves, d.solver_iterations = solver_iterations - o.solver_iterations;
   d.spring_steps = spring_steps - o.spring_steps, d.spring_chains = spring_chains - o.spring_chains;
   d.ms_skin_keys = ms_skin_keys - o.ms_skin_keys, d.ms_skin_setup = ms_skin_setup - o.ms_skin_setup;
