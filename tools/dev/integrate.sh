@@ -17,26 +17,16 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)   # before the cd: from the libraries clone the toplevel is blender-main/
 . "$HERE/stack_lib.sh"
 cd "${BL_MAIN:-$(git rev-parse --show-toplevel)}"
-REQUIRED=${REQUIRED:-windows linux macos linux-sanitizers}
 stack_load
 [ $COUNT -eq 0 ] && { echo "no open pull requests to integrate"; exit 0; }
 stack_group
 
-# pr_green NUMBER: every required job passed. gh lists a job once per event (push and pull_request), so a job may have
-# several rows: every one must be "pass", and there must be one. WHY says what is missing otherwise.
-pr_green() {
-  local rows job states
+# green NUMBER: the pull request's required jobs all passed (pr_green; WHY says what is missing). CHECK=1 ANY=1 does
+# not read them.
+green() {
   WHY=
   if [ "$CHECK" = "1" ] && [ "$ANY" = "1" ]; then return 0; fi
-  rows=$("$GH" pr checks "$1" --repo "$REPO" --json name,bucket --jq '.[] | "\(.name)\t\(.bucket)"' 2>/dev/null | tr -d '\r') || true
-  WHY=
-  for job in $REQUIRED; do
-    states=$(printf '%s\n' "$rows" | awk -F'\t' -v j="$job" '$1 == j { print $2 }' | sort -u | tr '\n' ' ')
-    states=${states% }
-    [ "$states" = pass ] && continue
-    WHY="$WHY${WHY:+, }$job: ${states:-no result}"
-  done
-  [ -z "$WHY" ]
+  pr_green "$1"
 }
 
 # try_merge REF MESSAGE: $tip becomes a merge commit of $tip and REF. 1 on a conflict, with FILES the paths in it.
@@ -54,8 +44,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
   return 1
 }
 
-# conflicts_with A B: the two do not merge on their own.
-conflicts_with() { ! git merge-tree --write-tree --no-messages "$1" "$2" >/dev/null 2>&1; }
+# conflicts_with A B: the two do not merge on their own. merge-tree exits 1 for a conflict; anything else it fails
+# with (an old git without --write-tree, a bad ref) is an error, not a conflict to name.
+conflicts_with() {
+  local rc=0
+  git merge-tree --write-tree --no-messages "$1" "$2" >/dev/null 2>&1 || rc=$?
+  [ $rc = 0 ] && return 1
+  [ $rc = 1 ] && return 0
+  echo "integrate: git merge-tree failed on $1 and $2 (exit $rc; it needs git 2.38 or newer)" >&2
+  exit 2
+}
 
 # Which branch: the open integration PR's (the newest), or the next number - past every integration branch there
 # has been, open, merged or closed.
@@ -78,11 +76,19 @@ else
 fi
 start=$tip
 
+# stop WHERE: a conflict ends a real run here (CHECK=1 goes on, to report the rest). WHERE says who settles it: two
+# pull requests that are not on main can only be settled where both are - on the integration branch, by the later
+# pass's worker (ADR 0132) - while a pull request that no longer merges with main settles that on its own branch.
 conflicts=0
 stop() {
   conflicts=1
   [ "$CHECK" = "1" ] && return 0
-  echo "stopped: nothing pushed, no pull request opened or changed. Merge main into one of the two and settle it there, or leave one out with SKIP=\"<number>\"."
+  if [ "$1" = main ]; then
+    how="Merge main into that pull request's branch and settle it there"
+  else
+    how="Settle it on the integration branch: the later pass's worker merges the two by hand into $BRANCH (a merge commit, pushed; a pull request on main opened for it if it has none), then run this again"
+  fi
+  echo "stopped: nothing pushed, no pull request opened or changed. $how - or leave one out with SKIP=\"<number>\"."
   exit 1
 }
 
@@ -115,7 +121,13 @@ for ((root = 0; root < COUNT; root++)); do
     case " $SKIP " in *" ${N[i]} "*) skipped=${N[i]} ;; esac
   done
   if git merge-base --is-ancestor "origin/${B[t]}" "$tip"; then
-    echo "stack:$LIST -> already in $BRANCH"
+    # The branch only moves forward, so a stack it carries cannot be taken out again: SKIP says so instead of
+    # passing for done.
+    if [ -n "$skipped" ]; then
+      echo "stack:$LIST -> already in $BRANCH: SKIP of #$skipped does nothing, a carried stack cannot be taken out (NEW=1 SKIP=\"$skipped\" starts a new integration branch without it)"
+    else
+      echo "stack:$LIST -> already in $BRANCH"
+    fi
     merged+=($t)
     continue
   fi
@@ -124,7 +136,7 @@ for ((root = 0; root < COUNT; root++)); do
     left+=("$LIST: left out by hand")
     continue
   fi
-  if ! pr_green "${N[t]}"; then
+  if ! green "${N[t]}"; then
     echo "stack:$LIST -> left out: #${N[t]} is not green ($WHY)"
     left+=("$LIST: #${N[t]} not green ($WHY)")
     continue
@@ -146,7 +158,7 @@ for ((root = 0; root < COUNT; root++)); do
   done
   echo "stack:$LIST -> CONFLICT: #${N[t]} (${B[t]}) and ${other:-the pull requests merged before it, taken together}: $FILES"
   left+=("$LIST: #${N[t]} conflicts with ${other:-the others}")
-  stop
+  case "$other" in main*) stop main ;; *) stop ;; esac
 done
 
 carried=()
@@ -159,8 +171,6 @@ if [ "$CHECK" = "1" ]; then
   echo "CHECK=1: nothing pushed, no pull request opened or changed"
   exit $conflicts
 fi
-if [ "$tip" = "$start" ]; then echo "$BRANCH is up to date: nothing pushed"; exit 0; fi
-
 body="**Merging this also merges $(pr_join "${carried[@]}").**
 
 The integration PR (ADR 0132): every open stack whose required jobs ($REQUIRED) were green when \`tools/dev/integrate.sh\` ran, merged from main with merge commits only. Each pull request it carries can still be merged on its own instead."
@@ -176,6 +186,16 @@ Left out:"
     body="$body
 - $l"
   done
+fi
+# Nothing new to push: the body is still rewritten, since what is left out and why may have changed.
+if [ "$tip" = "$start" ]; then
+  if [ -n "$CUR" ]; then
+    "$GH" pr edit "$CUR" --repo "$REPO" --body "$body" >/dev/null
+    echo "$BRANCH is up to date: nothing pushed, #$CUR's body refreshed"
+  else
+    echo "$BRANCH is up to date: nothing pushed"
+  fi
+  exit 0
 fi
 git push -q origin "$tip:refs/heads/$BRANCH"
 if [ -n "$CUR" ]; then

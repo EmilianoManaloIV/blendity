@@ -141,13 +141,29 @@ t "... and says each stack is in it" has "in integration #5: merging #5 merges a
 t "... while each stack still has its own top" has "stack: #1 #2 -> OK: merging #2 merges all of it"
 run integrate.sh
 t "a second run with nothing new pushes nothing" has "integration/1 is up to date: nothing pushed"
-t "... and edits no PR" unlogged "edit #5"
+t "... and opens no second PR" eval '[ "$(grep -c create "$F/log")" = 1 ]'
+checks 3 pending
+run integrate.sh SKIP=3
+t "SKIP of a stack already carried says it does nothing and names NEW=1" has "stack: #3 -> already in integration/1: SKIP of #3 does nothing, a carried stack cannot be taken out (NEW=1 SKIP=\"3\""
+t "... and the stack stays in the branch" holds integration/1 b1
+checks 3 pass
 
 # A PR pushed on top of a carried stack: the integration PR is stale until integrate.sh runs again.
 pr a3 a2 a3.txt
+checks 6 pending
 run stack_check.sh
-t "a stack whose top is not in the integration PR fails the check" rc 1
-t "... naming what the integration PR holds and what it lacks" has "FAIL: integration #5 holds #1 and #2 but not #6"
+t "a top pushed onto a carried stack, its jobs still running: the check passes" rc 0
+t "... with a note of what the integration PR holds, lacks and waits for" has "held in part: integration #5 holds #1 and #2 but not #6 - waiting for #6 to be green (windows: pending"
+t "... and no failure line" lacks "FAIL"
+old=$(git -C "$O" rev-parse integration/1)
+run integrate.sh
+t "integrate.sh leaves the stack's new top out while it is not green" eval 'has "stack: #1 #2 #6 -> left out: #6 is not green" && [ "$(git -C "$O" rev-parse integration/1)" = "$old" ]'
+t "... but still rewrites the PR's body: what is left out has changed" eval 'logged "edit #5" && body_has "#6 not green"'
+t "... saying so" has "integration/1 is up to date: nothing pushed, #5's body refreshed"
+checks 6 pass
+run stack_check.sh
+t "once that top is green and still missing from the integration PR, the check fails" rc 1
+t "... naming what the integration PR holds and what it lacks" has "FAIL: integration #5 holds #1 and #2 but not #6, and #6 is green"
 t "... and the command that repairs it" has "run bash tools/dev/integrate.sh"
 old=$(git -C "$O" rev-parse integration/1)
 run integrate.sh
@@ -203,6 +219,7 @@ t "a required job with no result is not green" has "left out: #4 is not green (l
 three
 cat "$F/checks/3" "$F/checks/3" > "$F/checks/x"; mv "$F/checks/x" "$F/checks/3"
 run integrate.sh CHECK=1
+t "a job listed twice, every row passing, leaves no stack out" eval 'rc 0 && has "integration/1 carries #1, #2, #3 and #4" && lacks "left out"'
 checks 4 pending
 run integrate.sh CHECK=1 ANY=1
 t "CHECK=1 ANY=1 reports the merge of a stack that is not green yet" has "stack: #4 -> would merge #4 (c1): jobs not read (ANY=1), no conflict"
@@ -238,17 +255,32 @@ t "... nothing is pushed" unpushed integration/1
 t "... no PR is opened" unlogged create
 t "... no merge is left half done: working tree clean, no extra worktree" untouched
 t "... and it says so" has "stopped: nothing pushed"
+t "... and where two PRs' conflict is settled: on the integration branch, or SKIP" eval 'has "Settle it on the integration branch" && has "into integration/1" && has "SKIP="'
 run integrate.sh CHECK=1
 t "CHECK=1 reports the conflict and exits 1" eval 'rc 1 && has "CONFLICT: #2 (b1) and #1 (a1): shared.txt"'
 t "CHECK=1 goes on to the stacks after it" has "stack: #3 -> would merge #3 (c1)"
 t "CHECK=1 still pushes nothing" unpushed integration/1
 run integrate.sh SKIP=2
 t "leaving one of the two out lets the rest through" eval 'rc 0 && body_has "**Merging this also merges #1 and #3.**"'
+# The other way: the two merged by hand on the integration branch, which the next run continues.
+fresh
+pr a1 main shared.txt A; pr b1 main shared.txt B; pr c1 main c1.txt
+git -C "$W" checkout -q -B integration/1 a1
+git -C "$W" merge -q --no-ff -m "b1 by hand" b1 >/dev/null 2>&1
+echo AB > "$W/shared.txt"; git -C "$W" add -A; git -C "$W" commit -qm "Merge b1 by hand"
+git -C "$W" push -q origin integration/1; git -C "$W" checkout -q main
+echo "4 integration/1" >> "$F/open"; echo 5 > "$F/next"
+run integrate.sh
+t "a conflict settled by hand on the integration branch: the next run continues it" eval 'rc 0 && has "stack: #1 -> already in integration/1" && has "stack: #2 -> already in integration/1"'
+t "... adds the stack that was waiting behind the conflict" holds integration/1 c1
+t "... keeps the hand-made merge" eval '[ "$(git -C "$O" show integration/1:shared.txt)" = AB ]'
+t "... and the body names all three" body_has "**Merging this also merges #1, #2 and #3.**"
 fresh
 pr a1 main shared.txt A
 commit main main shared.txt M
 run integrate.sh
 t "a PR that no longer merges with main names main" has "CONFLICT: #1 (a1) and main"
+t "... and says to merge main into that PR's branch" has "Merge main into that pull request's branch and settle it there"
 t "... and nothing is pushed" unpushed integration/1
 fresh
 pr a1 main shared.txt A; pr b1 main b1.txt
@@ -257,6 +289,22 @@ commit main main shared.txt M
 run integrate.sh
 t "main moving into a conflict with the integration branch names the PR it carries" has "main: CONFLICT: main and #3 (integration/1) - of the PRs it carries: #1 (a1): shared.txt"
 t "... and stops" rc 1
+
+# merge-tree failing for another reason than a conflict (an old git) is an error, not a conflict to name.
+fresh
+pr a1 main shared.txt A; pr b1 main shared.txt B
+mkdir -p "$ROOT/oldgit"
+cat > "$ROOT/oldgit/git" <<EOF
+#!/bin/bash
+# A git whose merge-tree fails (129, as one too old for --write-tree does) when asked whether two refs conflict; the rest is the real git.
+if [ "\$1" = merge-tree ] && [[ " \$* " != *" --name-only "* ]]; then echo "usage: git merge-tree <base-tree> <branch1> <branch2>" >&2; exit 129; fi
+exec "$(command -v git)" "\$@"
+EOF
+chmod +x "$ROOT/oldgit/git"
+run integrate.sh PATH="$ROOT/oldgit:$PATH"
+t "git merge-tree failing without a conflict is reported as an error" eval 'rc 2 && has "git merge-tree failed"'
+t "... never as a conflict between pull requests" lacks "CONFLICT"
+t "... and nothing is pushed" unpushed integration/1
 
 echo "stack self-test: $passed passed, $failed failed"
 [ $failed = 0 ]

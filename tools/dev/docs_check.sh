@@ -16,12 +16,22 @@ for ref in "$BASE" "$HEAD"; do
   git rev-parse --verify -q "$ref^{commit}" >/dev/null || { echo "::error::docs_check: no commit '$ref'"; exit 1; }
 done
 # The shared docs joined the rule in round 490 (task 0465; tools/dev/changelog.py holds the same list). A commit
-# written before that reached its own history may still edit them: SHARED_RULE is the oldest commit of HEAD's history
-# in which this script gained the list, and a commit that does not descend from it is exempt for these four files. A
-# commit made after its branch merged main is checked. No such commit (a branch that never met the rule, checked with
-# a newer copy of this script, as stack_check.sh does): every commit is exempt for them.
+# written before the rule reached main may still edit them: SHARED_SINCE is the committer date of the commit on BASE's
+# first-parent line in which this script gained the list (the merge that brought it to main), and a commit dated
+# earlier is exempt for these four files. A date, not ancestry: a branch that never merges main is still checked for
+# what it commits afterwards. While the rule is not on BASE yet (this round's own PR, or a newer copy of this script
+# run on an older branch, as stack_check.sh does) there is no such date: then a commit is checked only when it
+# descends from the commit of HEAD's own history that brought the list (SHARED_RULE; none: every commit is exempt).
 SHARED_DOCS="docs/USABILITY.md tools/README.md docs/ARCHITECTURE.md docs/PERFORMANCE.md"
-SHARED_RULE=$(git log -S'SHARED_DOCS=' --format=%H "$HEAD" -- ':(top)tools/dev/docs_check.sh' | tail -1)
+gained() { git log "$@" -S'SHARED_DOCS=' --format=%H -- ':(top)tools/dev/docs_check.sh' | tail -1; }
+SHARED_SINCE=; SHARED_RULE=
+landed=$(gained -m --first-parent "$BASE")
+if [ -n "$landed" ]; then SHARED_SINCE=$(git log -1 --format=%ct "$landed"); else SHARED_RULE=$(gained "$HEAD"); fi
+# shared_exempt COMMIT: the commit may edit the shared docs the old way.
+shared_exempt() {
+  if [ -n "$SHARED_SINCE" ]; then [ "$(git log -1 --format=%ct "$1")" -lt "$SHARED_SINCE" ]; return; fi
+  [ -z "$SHARED_RULE" ] || ! git merge-base --is-ancestor "$SHARED_RULE" "$1"
+}
 # touched COMMIT PATH...: those of the paths the commit changes, on one line. :(top) - the paths are at the root of
 # the published tree whatever folder this runs from.
 touched() {
@@ -36,7 +46,7 @@ bad=0
 for c in $COMMITS; do
   files=$(touched "$c" CHANGELOG.md README.md)
   shared=$(touched "$c" $SHARED_DOCS)
-  if [ -n "$shared" ] && { [ -z "$SHARED_RULE" ] || ! git merge-base --is-ancestor "$SHARED_RULE" "$c"; }; then
+  if [ -n "$shared" ] && shared_exempt "$c"; then
     echo "exempt: $(git log -1 --format='%h %s' "$c" | cut -c1-80) was written before the shared docs joined the rule (edits $shared)"
     shared=
   fi

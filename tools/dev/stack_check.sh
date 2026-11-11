@@ -6,9 +6,10 @@
 # branch (a merge commit, pushed) so the guarantee holds again. Run it after every publish and every push to a PR
 # branch; the `stack` CI job runs it too (CI=1: check only).
 # An integration PR (head `integration/<n>`, made by integrate.sh, ADR 0132) is the one allowed top over several
-# stacks: it is not a stack of its own, and every stack it carries must be in it up to that stack's own top - a stack
-# it holds only part of fails (a PR was pushed after it was built: run integrate.sh again). A stack it holds nothing
-# of is only noted: integrate.sh leaves out a stack that is not green. The newest open integration PR is the one that
+# stacks: it is not a stack of its own, and every stack it carries must be in it up to that stack's own top. A stack
+# it holds only part of (a PR was pushed after it was built) is noted while that stack's top is not green yet -
+# integrate.sh would not take it - and fails once the top is green and still missing: run integrate.sh again. A stack
+# it holds nothing of is only noted: integrate.sh leaves out a stack that is not green. The newest open integration PR is the one that
 # counts; an older one still open is reported as superseded. FIX=1 never touches an integration branch.
 # Usage: bash tools/dev/stack_check.sh          (check only; exit 1 when a stack has more than one top)
 #        FIX=1 bash tools/dev/stack_check.sh    (also repair)
@@ -28,7 +29,8 @@ if [ ${#IN[@]} -gt 0 ]; then
   done
 fi
 
-# carried ROOT's stack against the integration PR: all of it inside, none of it, or a part (the failure).
+# integration_holds TOP: the stack (MEMBERS, its top's index given) against the integration PR: all of it inside, none
+# of it, or a part - which waits while the top's jobs run and is the failure once they passed.
 integration_holds() {
   local i in=() out=()
   for i in "${MEMBERS[@]}"; do
@@ -36,7 +38,11 @@ integration_holds() {
   done
   if [ ${#out[@]} -eq 0 ]; then echo "  in integration #$INT: merging #$INT merges all of it"; return 0; fi
   if [ ${#in[@]} -eq 0 ]; then echo "  not in integration #$INT (left out; it merges on its own)"; return 0; fi
-  echo "  FAIL: integration #$INT holds $(pr_join "${in[@]}") but not $(pr_join "${out[@]}")"
+  if ! pr_green "${N[$1]}"; then
+    echo "  held in part: integration #$INT holds $(pr_join "${in[@]}") but not $(pr_join "${out[@]}") - waiting for #${N[$1]} to be green ($WHY), then run bash tools/dev/integrate.sh"
+    return 0
+  fi
+  echo "  FAIL: integration #$INT holds $(pr_join "${in[@]}") but not $(pr_join "${out[@]}"), and #${N[$1]} is green"
   return 1
 }
 
@@ -46,7 +52,7 @@ for ((root = 0; root < COUNT; root++)); do
   stack_of $root
   if [ ${#TOPS[@]} -eq 1 ]; then
     echo "stack:$LIST -> OK: merging #${N[${TOPS[0]}]} merges all of it"
-    if [ -n "$INT" ]; then integration_holds || stale=1; fi
+    if [ -n "$INT" ]; then integration_holds "${TOPS[0]}" || stale=1; fi
     continue
   fi
   newest=${MEMBERS[-1]}
@@ -64,7 +70,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>" "origin/${B[t]}" || {
   git -C "$T" push -q origin "HEAD:refs/heads/${B[newest]}"
   git worktree remove --force "$T"
   echo "FIXED: #${N[newest]} now carries its whole stack"
-  if [ -n "$INT" ]; then integration_holds || stale=1; fi
+  if [ -n "$INT" ]; then integration_holds "$newest" || stale=1; fi
 done
 # Changelog fragments (ADR 0123): a PR whose own commits edit CHANGELOG.md / README.md / the shared docs outside a fold
 # conflicts with the other passes' PRs. Reported here only; the `docs-fragments` CI job is the one that fails the PR.

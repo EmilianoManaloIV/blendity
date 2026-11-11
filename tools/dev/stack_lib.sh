@@ -1,6 +1,6 @@
 #!/bin/bash
-# What stack_check.sh and integrate.sh share (sourced, not run): the open pull requests on main and their grouping
-# into stacks. Two PRs are in one stack when they share commits that are not on main yet; a stack's top is a PR whose
+# What stack_check.sh and integrate.sh share (sourced, not run): the open pull requests on main, their grouping into
+# stacks, and whether a pull request's required jobs passed. Two PRs are in one stack when they share commits that are not on main yet; a stack's top is a PR whose
 # history no other PR of the stack holds. An integration PR (head `integration/<n>`, ADR 0132) is not a member of any
 # stack: it would join them all, so it is listed apart.
 # GH names the gh to call (the self-test puts a stand-in there, so no test ever reaches GitHub); REPO the repository.
@@ -9,6 +9,24 @@ if [ -z "$GH" ]; then
   GH=gh
   command -v gh >/dev/null 2>&1 || GH="/c/Program Files/GitHub CLI/gh.exe"
 fi
+
+# The jobs main's protection requires: a pull request is green when each of them passed.
+REQUIRED=${REQUIRED:-windows linux macos linux-sanitizers}
+
+# pr_green NUMBER: every required job passed. gh lists a job once per event (push and pull_request), so a job may have
+# several rows: every one must be "pass", and there must be one. WHY says what is missing otherwise.
+pr_green() {
+  local rows job states
+  rows=$("$GH" pr checks "$1" --repo "$REPO" --json name,bucket --jq '.[] | "\(.name)\t\(.bucket)"' 2>/dev/null | tr -d '\r') || true
+  WHY=
+  for job in $REQUIRED; do
+    states=$(printf '%s\n' "$rows" | awk -F'\t' -v j="$job" '$1 == j { print $2 }' | sort -u | tr '\n' ' ')
+    states=${states% }
+    [ "$states" = pass ] && continue
+    WHY="$WHY${WHY:+, }$job: ${states:-no result}"
+  done
+  [ -z "$WHY" ]
+}
 
 # stack_load: fetches origin and reads the open PRs on main, oldest first. N[i] / B[i]: number and branch of the
 # ordinary ones (COUNT of them); IN[k] / IB[k]: the integration PRs.

@@ -31,12 +31,17 @@ amendment removes most of those, not the waiting).
 4. **The stack rule gains one exception.** A branch named `integration/<n>` is not a stack and is the one allowed
    top over several stacks. `stack_check.sh` (and the `stack` job) still require each stack to have exactly one
    top of its own, and require every stack the integration PR carries to be in it **up to that top**: a stack it
-   holds only part of fails, with `integrate.sh` named as the repair. A stack wholly outside it is noted, not
-   failed - the script leaves out a stack that is not green. The newest open integration PR counts; an older one
+   holds only part of fails once that top is green, with `integrate.sh` named as the repair. While the top's jobs
+   still run the stack is only noted ("held in part, waiting for green"): `integrate.sh` would not take it yet, and
+   a check that went red on every push for the hour CI takes would only be noise. A stack wholly outside it is
+   noted, not failed - the script leaves out a stack that is not green. The newest open integration PR counts; an older one
    is reported as superseded.
 5. **The script never merges a PR, never force-pushes and never resolves a conflict.** A conflict stops it before
    anything is pushed and names the two pull requests and the files; `CHECK=1` reports what would be merged and
-   what conflicts without pushing or touching a PR. While an integration PR is open, a later run continues its
+   what conflicts without pushing or touching a PR. Two pull requests that conflict are both off `main`, so merging
+   `main` into either settles nothing: the later pass's worker merges the two by hand **on the integration branch**
+   (a merge commit, pushed), which the next run continues - or one of them is left out with `SKIP`. A pull request
+   that no longer merges with `main` itself settles that on its own branch. While an integration PR is open, a later run continues its
    branch (`main` merged in when it has moved, then the tops it lacks: a fast-forward push); `NEW=1` starts the
    next number from `main`, `SKIP` leaves stacks out.
 6. The merges are made with `git merge-tree --write-tree` and `git commit-tree`, in the object store. No working
@@ -60,10 +65,15 @@ amendment removes most of those, not the waiting).
 - One merge and one CI run for all green stacks, instead of one a stack with a rebuild between.
 - One more PR open and one more branch namespace (`integration/*`); the integration PR's four jobs run in addition
   to each stack's own.
-- A push to a carried stack makes the `stack` job red on every open PR until `integrate.sh` runs again. That is the
-  guarantee doing its work, and the same cost a second top has today.
+- A push to a carried stack is noted by `stack_check.sh` while the new top's jobs run, and fails it once they have
+  passed, until `integrate.sh` runs again. That is the guarantee doing its work, and the same cost a second top
+  has today. The `stack` job runs when a PR is pushed, so it is the run of `stack_check.sh` after a publish (CLAUDE.md
+  step 6) that sees the top turn green.
 - Because the branch is only fast-forwarded, a stack cannot be taken back out of an integration branch; a fresh one
   (`NEW=1`, with `SKIP`) is built and the old PR closed by the user.
 - The integration PR's `docs-fragments` job reads every carried round commit, as each PR's own job does.
+- `changelog.py check` proves "each operation applies exactly once" only within one tree: two PRs that each replace
+  the same text pass on their own, and it is the integration PR's CI (the first tree that holds both fragments)
+  that catches it.
 - CLAUDE.md step 6 and `tools/dev/README.md` say the rule. The agents' prompts (`.claude/agents/*.md`) are not
   changed by task 0465: they are the user's configuration, and nothing in them contradicts this.

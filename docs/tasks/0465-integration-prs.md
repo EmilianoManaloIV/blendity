@@ -62,12 +62,15 @@ Part 2 (`bash tools/dev/stack_selftest.sh`, on a throwaway repository with a sta
 10. `CHECK=1` reports what would be merged and what conflicts, pushes nothing and opens or edits no PR.
 11. A conflict stops the run before anything is pushed, leaves no merge half done (working tree and worktree list
     as they were) and names the two pull requests and the files; when the other side is `main`, it says `main`.
+    It says where the conflict is settled: two PRs' on the integration branch (merged by hand there, the next run
+    continues it), one with `main` on that PR's branch; or `SKIP`. `git merge-tree` failing for another reason
+    than a conflict is an error, never reported as a conflict.
 12. While an integration PR is open a second run continues its branch with a fast-forward push and rewrites the
     PR's body; `NEW=1` starts the next number, which is past every integration branch there has been.
 13. `stack_check.sh` behaves as before without an integration PR (one top a stack, `FIX=1`); with one, it passes
     when every stack the integration PR holds is in it up to the stack's own top, notes a stack wholly outside it,
-    fails a stack it holds only part of and names `integrate.sh`; an older integration PR still open is reported
-    as superseded.
+    notes a stack it holds only part of while that stack's top is not green, fails it once the top is green and
+    names `integrate.sh`; an older integration PR still open is reported as superseded.
 14. Both self-tests pass on Windows (Git Bash) and Linux.
 
 ## Tests and checks to run
@@ -81,8 +84,8 @@ Part 2 (`bash tools/dev/stack_selftest.sh`, on a throwaway repository with a sta
 - Line endings: the four files are CRLF in a Windows working tree, LF in the index.
 - An anchor going stale between a round's PR and the fold: `check` in CI says so on the PR.
 - gh reporting each job twice (push and pull_request), and a job still queued.
-- A PR pushed after the integration branch was built: the `stack` job goes red on every PR until `integrate.sh`
-  runs again - the same cost a second top has today.
+- A PR pushed after the integration branch was built: `stack_check.sh` notes it while the new top's jobs run and
+  fails once they passed, until `integrate.sh` runs again - the same cost a second top has today.
 - The integration branch is only ever fast-forwarded (no force push): a stack that turned red after it was carried
   stays in it; `NEW=1` with `SKIP` builds one without it.
 

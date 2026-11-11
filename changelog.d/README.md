@@ -61,7 +61,7 @@ append:
     appended twice.
   A table row goes in with `after:` naming the start of the row it follows - a row that is on `main`, usually the
   table's last (not `append:`, whose blank line would end the table). Two fragments may name the same row: both
-  rows go in under it. Fragments fold in round order, so a round of the same pass may also name an earlier round's
+  rows go in under it, the earlier round's first. Fragments fold in round order, so a round of the same pass may also name an earlier round's
   row. Every operation must apply exactly once when the fold runs, or nothing is written.
 
 ## Commands
@@ -70,7 +70,7 @@ append:
 |---|---|
 | `py tools/dev/changelog.py check` | Every fragment well formed and each of its edits applicable exactly once to today's README and shared docs. |
 | `py tools/dev/changelog.py fold --checks 20,450 1760` | The entries into `CHANGELOG.md` under the intro (highest round first), the README and shared-docs edits applied (lowest round first), the count set, the fragments deleted. All or nothing. `--dry-run` writes nothing. |
-| `bash tools/dev/docs_check.sh` | Fails when a commit of this branch edits `CHANGELOG.md`, `README.md` or a shared doc without a `Docs-fold: yes` trailer (the `docs-fragments` CI job). A commit written before the shared docs joined the rule (round 490) is exempt for those four. |
+| `bash tools/dev/docs_check.sh` | Fails when a commit of this branch edits `CHANGELOG.md`, `README.md` or a shared doc without a `Docs-fold: yes` trailer (the `docs-fragments` CI job). A commit dated before the shared docs' rule reached `main` (round 490) is exempt for those four. |
 
 The fold's commit carries `Docs-fold: yes` in its message. The hub runs one pass write-up at a time, so folds never
 conflict with each other.

@@ -75,11 +75,13 @@ against main; it does not for three stacks that all add at the same place. The o
    round order (so a later round may anchor on an earlier round's row), keeps each file's line endings, writes all
    the files or none, and deletes the fragments.
 4. `docs_check.sh` holds the four files to the same `Docs-fold: yes` rule, **for commits newer than this rule
-   only**: a commit that does not descend from the commit in which the script gained the list (found in the
-   branch's history with `git log -S`; a branch that never met it has none) is exempt for these four files and
-   named in an `exempt:` line. The rounds of the three open
-   passes that already edited the files directly therefore stay green; a round made after its branch merged `main`
-   is checked.
+   only**: a commit whose committer date is earlier than the day the rule reached `main` - the commit on the base's
+   first-parent line in which the script gained the list, found with `git log -S` - is exempt for these four files
+   and named in an `exempt:` line. A date, not ancestry, so a branch that never merges `main` is still checked for
+   what it commits afterwards. While the rule is not on the base yet (the PR that brings it, or a newer copy of the
+   script run on an older branch) there is no such date, and a commit is checked only when it descends from the
+   commit of its own history that brought the list. The rounds of the three open passes that already edited the
+   files directly therefore stay green; a round written after the rule reached `main` is checked.
 
 What it costs: the four files on `main` lag until the write-up folds, as `CHANGELOG.md` does; and a fragment's anchor
 can go stale (the row it names was reworded) - `check` says so on the PR, and the fold stops before writing anything.

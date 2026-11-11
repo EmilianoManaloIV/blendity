@@ -138,10 +138,12 @@ def parse_fragment(path):
             'sections': [(target, parse_ops(name, target, lines)) for target, lines in sections]}
 
 
-def apply_ops(frag, target, ops, doc):
+def apply_ops(frag, target, ops, doc, tails=None):
     """One fragment's operations on one file's text. Each must apply exactly once: an anchor found once, a replaced
     text found once, an appended block whose first line is not in the file yet (so a fold run twice, or two fragments
-    with the same block, stop instead of doubling it)."""
+    with the same block, stop instead of doubling it). `tails` (one dict a fold) counts the lines already inserted
+    under each anchor, so a second "after:" on the same line goes below the first one's lines: fragments are applied
+    in ascending round order and the rows stay in it."""
     for kind, text, arg in ops:
         if kind == 'replace':
             n = doc.count(text)
@@ -164,7 +166,12 @@ def apply_ops(frag, target, ops, doc):
             raise FoldError('%s: "after:" matches %d %s lines (needs exactly 1): %r' % (frag['name'], len(hits), target, text[:60]))
         anchor = lines[hits[0]]
         indent = anchor[:len(anchor) - len(anchor.lstrip())]
-        lines[hits[0] + 1:hits[0] + 1] = [l if l[:1] in (' ', '\t') or not l.strip() else indent + l for l in arg]
+        new = [l if l[:1] in (' ', '\t') or not l.strip() else indent + l for l in arg]
+        key = (target, anchor.strip())
+        at = hits[0] + 1 + (tails.get(key, 0) if tails is not None else 0)
+        lines[at:at] = new
+        if tails is not None:
+            tails[key] = tails.get(key, 0) + len(new)
         doc = '\n'.join(lines)
     return doc
 
@@ -208,10 +215,11 @@ def plan(root, checks=None):
         return docs[target]
 
     doc('README.md', 'changelog.py')
+    tails = {}
     for f in sorted(frags, key=lambda f: (f['round'], f['name'])):
         for target, ops in f['sections']:
             d = doc(target, f['name'])
-            d[2] = apply_ops(f, target, ops, d[2])
+            d[2] = apply_ops(f, target, ops, d[2], tails)
     if checks:
         docs['README.md'][2] = readme_count(docs['README.md'][2], checks[0], checks[1])
     newest = sorted(frags, key=lambda f: (-f['round'], f['name']))
@@ -353,9 +361,14 @@ def snapshot(d):
     return out
 
 
-def git(d, *a):
+def git(d, *a, when=None):
+    """git in d; `when` (a day of January 2026) dates the commit it makes, author and committer."""
+    env = None
+    if when:
+        stamp = '2026-01-%02dT12:00:00+00:00' % when
+        env = dict(os.environ, GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
     return subprocess.run(['git', '-C', d, '-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.autocrlf=false'] + list(a),
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=env)
 
 
 def self_test():
@@ -659,6 +672,16 @@ def self_test():
         check('two "append:" blocks land at the end in round order, a blank line between them',
               doc(d, 'docs/PERFORMANCE.md') == PERF + '\n## Round 520\n\na\n\n## Round 521\nb\n', repr(doc(d, 'docs/PERFORMANCE.md')))
 
+        # Two passes name the same row (the table's last on main): the earlier round's row comes first.
+        d = tree(docs=DOCS, frags={
+            '523-b.md': entry(523) + '<!-- docs/USABILITY.md -->\nafter: | 2 | No search\n| 5 | From round 523 | fixed |\n',
+            '522-a.md': entry(522) + '<!-- docs/USABILITY.md -->\nafter: | 2 | No search\n| 3 | From round 522 | fixed |\n| 4 | Also 522 | fixed |\n'})
+        temps.append(d)
+        cmd_fold(d, None, False)
+        check('two fragments with "after:" on the same row: the rows go in under it in ascending round order',
+              '| 2 | No search | fixed (round 2) |\n| 3 | From round 522 | fixed |\n| 4 | Also 522 | fixed |\n| 5 | From round 523 | fixed |\n'
+              in doc(d, 'docs/USABILITY.md'), doc(d, 'docs/USABILITY.md'))
+
         # Exactly once, all or nothing: a bad operation in any section stops the fold before any file is written.
         stops = {
             'a missing docs/USABILITY.md anchor': '<!-- docs/USABILITY.md -->\nafter: | 9 | no such row\n| x |\n',
@@ -811,45 +834,83 @@ def self_test():
             check('docs_check leaves other docs alone (docs/tasks, tools/dev/README.md)',
                   run_check('s9', lambda: (touch('docs/tasks/0001-x.md')(), touch('tools/dev/README.md')()), 'round') == 0)
 
-            # A commit written before the shared docs joined the rule is exempt for them; one made after its branch
-            # merged the rule is not. A second repository, where main gains the script after a first commit.
+            # A commit dated before the shared docs' rule reached main is exempt for them; a later one is not, whether
+            # or not its branch ever merged main. A second repository with dated commits: main gains the script on
+            # day 10, the branch `old` edited a shared doc on day 2.
             d3 = tree(docs=DOCS)
             temps.append(d3)
             git(d3, 'init', '-q', '-b', 'main')
             git(d3, 'add', '-A')
-            git(d3, 'commit', '-qm', 'before the rule')
+            git(d3, 'commit', '-qm', 'before the rule', when=1)
+            git(d3, 'tag', 'pre')
             git(d3, 'checkout', '-qb', 'old', 'main')
             with open(os.path.join(d3, 'docs', 'USABILITY.md'), 'a', encoding='utf-8') as f:
                 f.write('| 3 | a row the old way | fixed |\n')
-            git(d3, 'commit', '-qam', 'a round the old way')
+            git(d3, 'commit', '-qam', 'a round the old way', when=2)
             git(d3, 'checkout', '-q', 'main')
             os.makedirs(os.path.join(d3, 'tools', 'dev'))
             for n in ('docs_check.sh', 'changelog.py', 'fill_checks.py'):
                 shutil.copy(os.path.join(HERE, n), os.path.join(d3, 'tools', 'dev', n))
             git(d3, 'add', '-A')
-            git(d3, 'commit', '-qm', 'the shared docs join the rule')
-            git(d3, 'checkout', '-q', 'old')
+            git(d3, 'commit', '-qm', 'the shared docs join the rule', when=10)
 
-            def shared_check():
-                return subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'HEAD'], cwd=d3, capture_output=True,
+            def shared_check(base, head):
+                return subprocess.run([bash, 'tools/dev/docs_check.sh', base, head], cwd=d3, capture_output=True,
                                       text=True, env=dict(os.environ, NO_FRAGMENTS='1'))
 
-            git(d3, 'checkout', '-q', 'main')
-            r = subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'old'], cwd=d3, capture_output=True, text=True,
-                               env=dict(os.environ, NO_FRAGMENTS='1'))
-            check('docs_check exempts the shared-docs edits of a branch that never met the rule (the report stack_check.sh prints)',
-                  r.returncode == 0 and 'exempt:' in r.stdout, r.stdout + r.stderr)
-            git(d3, 'checkout', '-q', 'old')
-            git(d3, 'merge', '-q', '--no-ff', '-m', 'merge main', 'main')
-            r = shared_check()
-            check('docs_check exempts a shared-docs edit written before the shared docs joined the rule, and says so',
+            def late_row(day, msg):
+                with open(os.path.join(d3, 'tools', 'README.md'), 'a', encoding='utf-8') as f:
+                    f.write('| `c%d.py` | a row on day %d |\n' % (day, day))
+                git(d3, 'commit', '-qam', msg, when=day)
+
+            # The checks run from main's checkout (the branch that never merged main has no script of its own).
+            r = shared_check('main', 'old')
+            check('docs_check exempts a shared-docs edit dated before the rule reached main, on a branch that never merged main, and says so',
                   r.returncode == 0 and 'exempt:' in r.stdout and 'docs/USABILITY.md' in r.stdout, r.stdout + r.stderr)
-            with open(os.path.join(d3, 'tools', 'README.md'), 'a', encoding='utf-8') as f:
-                f.write('| `c.py` | a row after merging main |\n')
-            git(d3, 'commit', '-qam', 'a round after merging main')
-            r = shared_check()
+            git(d3, 'checkout', '-qb', 'stale', 'old')
+            late_row(11, 'a round after the rule, on a branch that never merged main')
+            git(d3, 'checkout', '-q', 'main')
+            r = shared_check('main', 'stale')
+            check('docs_check fails a shared-docs edit dated after the rule reached main although its branch never merged main',
+                  r.returncode == 1 and 'tools/README.md' in r.stdout and 'exempt:' in r.stdout, r.stdout + r.stderr)
+            r = shared_check('pre', 'stale')
+            check('docs_check, the rule not on the base yet: a branch that never met the rule is exempt for the shared docs',
+                  r.returncode == 0 and r.stdout.count('exempt:') == 2, r.stdout + r.stderr)
+            git(d3, 'checkout', '-q', 'old')
+            git(d3, 'merge', '-q', '--no-ff', '-m', 'merge main', 'main', when=12)
+            r = shared_check('main', 'HEAD')
+            check('docs_check still exempts the edit dated before the rule after its branch merged main',
+                  r.returncode == 0 and 'exempt:' in r.stdout and 'docs/USABILITY.md' in r.stdout, r.stdout + r.stderr)
+            late_row(13, 'a round after merging main')
+            r = shared_check('main', 'HEAD')
             check('docs_check fails a shared-docs edit made after its branch merged the rule, naming the file',
                   r.returncode == 1 and 'tools/README.md' in r.stdout, r.stdout + r.stderr)
+            r = shared_check('pre', 'HEAD')
+            check('docs_check, the rule not on the base yet (the PR that brings it): a commit made on top of the rule is checked, an older one exempt',
+                  r.returncode == 1 and 'tools/README.md' in r.stdout and 'exempt:' in r.stdout, r.stdout + r.stderr)
+            # The rule reaching main through a merge commit: the date that counts is the merge's, not the day the
+            # rule was written on its branch.
+            d4 = tree(docs=DOCS)
+            temps.append(d4)
+            git(d4, 'init', '-q', '-b', 'main')
+            git(d4, 'add', '-A')
+            git(d4, 'commit', '-qm', 'before the rule', when=1)
+            git(d4, 'checkout', '-qb', 'rule', 'main')
+            os.makedirs(os.path.join(d4, 'tools', 'dev'))
+            for n in ('docs_check.sh', 'changelog.py', 'fill_checks.py'):
+                shutil.copy(os.path.join(HERE, n), os.path.join(d4, 'tools', 'dev', n))
+            git(d4, 'add', '-A')
+            git(d4, 'commit', '-qm', 'the rule, written on its branch', when=3)
+            git(d4, 'checkout', '-qb', 'other', 'main')
+            with open(os.path.join(d4, 'docs', 'USABILITY.md'), 'a', encoding='utf-8') as f:
+                f.write('| 3 | a row the old way | fixed |\n')
+            git(d4, 'commit', '-qam', 'another pass, between the rule being written and merged', when=5)
+            git(d4, 'checkout', '-q', 'main')
+            git(d4, 'merge', '-q', '--no-ff', '-m', 'merge the rule', 'rule', when=8)
+            r = subprocess.run([bash, 'tools/dev/docs_check.sh', 'main', 'other'], cwd=d4, capture_output=True, text=True,
+                               env=dict(os.environ, NO_FRAGMENTS='1'))
+            check('docs_check dates the rule by the merge that brought it to main: a commit between writing and merging is exempt',
+                  r.returncode == 0 and 'exempt:' in r.stdout, r.stdout + r.stderr)
     finally:
         for t in temps:
             shutil.rmtree(t, ignore_errors=True)
