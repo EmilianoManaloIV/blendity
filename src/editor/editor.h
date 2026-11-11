@@ -3880,9 +3880,15 @@ class Editor {
   std::vector<std::pair<std::string, bool>> blockout_status_lines(const GameObject &g, const Blockout &b) const;  // (text, a warning)
   GameObject *create_blockout(const std::string &first_piece);
   GameObject *create_blockout_piece(const std::string &what);
+  GameObject *create_opening(GameObject &bo, int opening, const std::vector<float> &numbers, const GameObject *sel);  // (round 478: a door (1) or window (2) put on a wall)
   void draw_blockouts();  // (the pieces' wires)
   void blockout_menu_items(bool child);  // (the GameObject menu's, the Hierarchy's + and the Tools window's: New Blockout, Add / Subtract Box, Cylinder, Sphere)
   uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y);  // (the piece that made the face under a view pixel; 0: none)
+  bool blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out);  // (round 478: the face under a view pixel, with its piece, side, point and normal)
+  bool blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out);  // (round 478: a room's wall under the mouse in the Scene view)
+  bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478: the middle of a room's first wall: -X of its air)
+  bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall);  // (round 478: a door or window turned to a wall, on its room's floor)
+  void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   bool blockout_refuses_edit_mode(const GameObject *g);
   void join_selected();

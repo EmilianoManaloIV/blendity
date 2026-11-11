@@ -1390,8 +1390,11 @@ void Editor::run_console_command(const std::string &line) {
   }
   if (c == "help" && to_lower(arg(1, "")) == "blockout") {  // help blockout (round 477)
     Log::info("blockout new: a Blockout with one 2 x 2 x 2 m box, selected; its mesh is built from the pieces below it");
-    Log::info("blockout add box|cylinder|sphere [subtract] [x y z | radius height | radius]: a piece under the selected Blockout (or the selected piece's)");
+    Log::info("blockout add box|cylinder|sphere [subtract|intersect] [x y z | radius height | radius]: a piece under the selected Blockout (or the selected piece's); intersect keeps only what is inside it");
+    Log::info("blockout add room [box|cylinder] [x y z | radius height]: a room - its shape is the air, with a wall, floor and ceiling of the Blockout's Default Wall Thickness");
+    Log::info("blockout add door|window [width head [sill]]: a cut through the wall under the mouse in the Scene view, or the selected room's first wall");
     Log::info("blockout set cell <metres> | method auto|exact|field: the selected Blockout's Field Cell and Method");
+    Log::info("blockout set wall|floor|ceiling <metres> | walls merge|keep | opentop on|off: the selected rooms' thicknesses, whether their walls merge with neighbours', and the ceiling");
     Log::info("blockout rebuild: forget what was built and build again from scratch; blockout wait: join the running builds; blockout info: the status");
     return;
   }

@@ -10,7 +10,9 @@
 namespace bl {
 
 extern const char *const kBlockoutShapeNames[3];
-extern const char *const kBlockoutOpNames[2];
+extern const char *const kBlockoutOpNames[3];
+extern const char *const kBlockoutWallNames[2];
+extern const char *const kBlockoutOpeningNames[3];
 extern const char *const kBlockoutMethodNames[3];
 
 /* What the last build said, for the Inspector and `blockout info`. */
@@ -19,8 +21,9 @@ struct BlockoutStatus {
   size_t pieces = 0;            // pieces in the snapshot
   size_t used = 0;              // ... of them built
   std::vector<std::pair<uint64_t, std::string>> skipped;  // piece id and why
+  std::vector<std::pair<uint64_t, std::string>> notes;    // pieces built that give nothing of their own (a room without thickness)
   size_t clusters = 0, faces = 0, unresolved = 0;
-  std::string path;             // "exact", "field", "exact + field" or "none"
+  std::string path;            // "exact", "field", "exact + field" or "none"
   double ms = 0.0;
   std::string refusal;          // why the last build was refused (the last good mesh stays)
 };
@@ -55,6 +58,7 @@ struct Blockout : ComponentBase<Blockout> {
   static constexpr const char *kName = "Blockout";
   float cell = 0.1f;   // the field path's grid step, in metres
   int method = 0;      // blockout::Path: Auto, Exact (crisp), Field
+  float default_wall = 0.2f;  // fills a new room's Wall, Floor and Ceiling (the kernel never reads it)
   BlockoutState state;
   void reflect(Reflector &r) override;
   blockout::Settings settings() const;  // made safe (finite, in range)
@@ -64,16 +68,48 @@ struct Blockout : ComponentBase<Blockout> {
 struct BlockoutPiece : ComponentBase<BlockoutPiece> {
   static constexpr const char *kName = "BlockoutPiece";
   int shape = 0;       // blockout::Shape: Box, Cylinder, Sphere
-  int operation = 0;   // blockout::Op: Add, Subtract
+  int operation = 0;   // blockout::Op: Add, Subtract, Intersect
   Vec3 size{1, 1, 1};  // Box
   float radius = 0.5f; // Cylinder, Sphere
   float height = 1.0f; // Cylinder
   int segments = 24;   // Cylinder, Sphere
   int rings = 12;      // Sphere
   float blend = 0.0f;  // the Blend radius: reaches the kernel, shown in the Inspector from round 481
+  /* A room (task 0454): the shape is its air; it brings a wall, a floor and a ceiling of these thicknesses (metres in the
+   * Blockout's space, square to the piece's own sides). */
+  bool room = false;
+  float wall = 0.2f, floor = 0.2f, ceiling = 0.2f;
+  int walls = 0;       // 0 Merge with neighbours, 1 Keep walls
+  bool open_top = false;
+  /* A door or window: a Subtract box the snapshot works out from these - Width across, Sill to Head up from the piece's
+   * origin (the floor line it was put on), Depth through the wall. 0: not an opening. */
+  int opening = 0;     // None, Door, Window
+  float width = 0.9f, head = 2.1f, sill = 0.0f, depth = 0.5f;
   void reflect(Reflector &r) override;
   blockout::Piece to_piece(uint64_t id, const Mat4 &to_blockout) const;  // made safe for the kernel
+  /* An opening's box lies between its Sill and its Head above the origin: this puts the box's centre there (identity for any other piece). */
+  Mat4 shape_offset() const;
+  Vec3 box_size() const;  // the size of a box piece as the kernel gets it (an opening's from Width, Head - Sill, Depth)
 };
+
+/* How far a room's shell reaches past its air in the piece's own space - along X, along Z, down, up - as the kernel grows it (a
+ * wall measured square to the piece's sides in the Blockout's space: divided by the piece's scale along that axis). For the wire.
+ * False: not a room, or a matrix that flattens it. */
+struct RoomGrowth {
+  double x = 0, z = 0, down = 0, up = 0;
+};
+bool blockout_room_growth(const blockout::Piece &p, RoomGrowth &out);
+
+/* The face of a Blockout's mesh under a pixel: the piece and side that made it, the point and the face's normal (turned toward
+ * the viewer, so out of the matter) in the Blockout's space. */
+struct BlockoutHit {
+  uint64_t piece = 0;
+  uint32_t side = 0;
+  Vec3 point, normal;
+};
+
+/* A piece object's matrix in its Blockout's space (the product of the local matrices up to the Blockout). */
+Mat4 blockout_piece_matrix(const GameObject &piece, const GameObject &blockout);
 
 /* The Blockout's pieces in the order the kernel wants them (the hierarchy's, depth first; an enabled piece in an active
  * object, down to but not into another Blockout) with each one's matrix in the Blockout's space (the product of the local

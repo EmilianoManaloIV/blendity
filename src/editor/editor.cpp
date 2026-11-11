@@ -4215,7 +4215,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
     Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
               "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>, Blockout, "
-              "Blockout Piece: [Subtract] Box|Cylinder|Sphere", kind.c_str());
+              "Blockout Piece: [Subtract|Intersect] Box|Cylinder|Sphere, Room Box|Cylinder, Door, Window", kind.c_str());
     return nullptr;
   }
   const std::string name = unique_object_name(kind == "Empty" ? "GameObject" : kind);  // (finding 8: Unity's "Sphere (1)")

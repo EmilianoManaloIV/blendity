@@ -174,6 +174,18 @@ bool local_sphere(const Piece &p, Solid &s) {
   return true;
 }
 
+/* A room's shell from its air, both still in the piece's own space: grown sideways by `gx` and `gz`, down by `down`,
+ * up by `up` (each along the piece's axes, so the shell is the same kind of solid and its sides are parallel to the
+ * air's). */
+void grow_local(Solid &s, double gx, double gz, double down, double up) {
+  for (V3 &v : s.verts) {
+    v.x *= (s.half.x + gx) / s.half.x;
+    v.z *= (s.half.z + gz) / s.half.z;
+    v.y *= (s.half.y + (v.y < 0.0 ? down : up)) / s.half.y;
+  }
+  s.half = {s.half.x + gx, s.half.y + 0.5 * (down + up), s.half.z + gz};
+}
+
 V3 newell(const Solid &s, size_t f) {
   const uint32_t b = s.face_offsets[f], n = s.face_offsets[f + 1] - b;
   const V3 o = s.verts[s.face_verts[b]];
@@ -232,14 +244,8 @@ double finest_facet(const Piece &p, const Solid &s, const double stretch[3]) {
   return 1e300;
 }
 
-/* A piece as a solid in the Blockout's space, or why it can't be one. */
-const char *make_solid(const Piece &p, Solid &s) {
-  if (!finite_piece(p)) return "a number of it is not finite";
-  s = Solid();
-  const bool sized = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : local_sphere(p, s);
-  if (!sized) return "it has no size";
-  double m[12], stretch[3], thick[3];
-  if (!placement(p, m, s.inv, stretch, thick)) return "its matrix flattens it";
+/* A solid made in the piece's own space, put into the Blockout's - or why it can't be. */
+const char *place_solid(const Piece &p, Solid &s, const double m[12], const double stretch[3], const double thick[3]) {
   s.scale_min = std::min(stretch[0], std::min(stretch[1], stretch[2]));
   for (V3 &v : s.verts) v = {m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3], m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7], m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11]};
   for (const V3 &v : s.verts)
@@ -261,11 +267,54 @@ const char *make_solid(const Piece &p, Solid &s) {
   mid = mid * (1.0 / (double)s.verts.size());
   for (size_t f = 0; f < s.face_count(); f++)
     if (dot(newell(s, f), face_centre(s, f) - mid) < 0.0) std::reverse(s.face_verts.begin() + s.face_offsets[f], s.face_verts.begin() + s.face_offsets[f + 1]);
-  s.subtract = p.op == Op::Subtract;
-  /* A Blend radius is at most the piece's own size: past that it rounds nothing more, and the grid a blend needs
-   * grows with the radius. */
-  s.blend = std::max(0.0, std::min((double)p.blend, length(s.hi - s.lo)));
   s.shape = p.shape;
+  return nullptr;
+}
+
+/* A thickness as the kernel takes it: 0 and up, finite, a kilometre at most. (A cluster's planes are told apart to a
+ * millionth of its size: a floor a thousand kilometres deep would make one plane of the two sides of every wall
+ * beside it.) */
+double safe_thickness(float t) { return finite_bits(t) && t > 0.0f ? std::min((double)t, 1000.0) : 0.0; }
+
+/* A piece as its solids in the Blockout's space - one, or a room's shell and then its air - or why it can't be
+ * used. `bare`: a room with no thickness anywhere (it has no matter of its own; its air still clears Merge rooms). */
+const char *make_solids(const Piece &p, std::vector<Solid> &out, bool &bare) {
+  bare = false;
+  if (!finite_piece(p)) return "a number of it is not finite";
+  Solid s;
+  const bool sized = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : local_sphere(p, s);
+  if (!sized) return "it has no size";
+  double m[12], stretch[3], thick[3];
+  if (!placement(p, m, s.inv, stretch, thick)) return "its matrix flattens it";
+  if (!p.room) {
+    if (const char *problem = place_solid(p, s, m, stretch, thick)) return problem;
+    s.role = p.op == Op::Subtract ? Role::Subtract : p.op == Op::Intersect ? Role::Intersect : Role::Add;
+    s.subtract = p.op == Op::Subtract;
+    /* A Blend radius is at most the piece's own size: past that it rounds nothing more, and the grid a blend needs
+     * grows with the radius. */
+    s.blend = std::max(0.0, std::min((double)p.blend, length(s.hi - s.lo)));
+    if (s.role == Role::Intersect) s.blend = 0.0;  // (it trims; it is not rounded, and does not send every cluster to the grid)
+    out.push_back(std::move(s));
+    return nullptr;
+  }
+  /* The shell: the air grown so that the wall, floor and ceiling measure what was asked square to the piece's own
+   * sides in the Blockout's space, whatever the matrix's scale or shear (`thick`). A cylinder's wall is measured at
+   * its facets' middles; a sphere room has one thickness all round, the wall's. */
+  const double wall = safe_thickness(p.wall), floor = safe_thickness(p.floor), ceiling = p.open_top ? 0.0 : safe_thickness(p.ceiling);
+  Solid shell = s;
+  if (p.shape == Shape::Sphere) grow_local(shell, wall / thick[0], wall / thick[2], wall / thick[1], wall / thick[1]);
+  else {
+    const double facet = p.shape == Shape::Cylinder ? std::cos(3.141592653589793238463 / (double)std::max(3, std::min(256, p.segments))) : 1.0;
+    grow_local(shell, wall / (thick[0] * facet), wall / (thick[2] * facet), floor / thick[1], ceiling / thick[1]);
+  }
+  bare = p.shape == Shape::Sphere ? wall == 0.0 : wall == 0.0 && floor == 0.0 && ceiling == 0.0;
+  if (const char *problem = place_solid(p, s, m, stretch, thick)) return problem;
+  if (const char *problem = place_solid(p, shell, m, stretch, thick)) return problem;
+  shell.role = p.keep_walls ? Role::KeepShell : Role::MergeShell;
+  shell.side_base = kSideShell;
+  s.role = Role::Air, s.subtract = true;
+  out.push_back(std::move(shell));
+  out.push_back(std::move(s));
   return nullptr;
 }
 
@@ -462,11 +511,15 @@ void spread_blends(Cluster &c) {
 }
 
 void finish_cluster(Cluster &c) {
+  /* (The Intersect solids come last and are not counted in the bounds: the result lies inside the others'.) */
   c.lo = c.solids[0].lo, c.hi = c.solids[0].hi;
   c.blended = false;
+  c.trims = 0;
   for (const Solid &s : c.solids) {
-    for (int a = 0; a < 3; a++) c.lo[a] = std::min(c.lo[a], s.lo[a]), c.hi[a] = std::max(c.hi[a], s.hi[a]);
     c.blended = c.blended || s.blend > 0.0;
+    c.trims += s.role == Role::Intersect;
+    if (s.role == Role::Intersect) continue;
+    for (int a = 0; a < 3; a++) c.lo[a] = std::min(c.lo[a], s.lo[a]), c.hi[a] = std::max(c.hi[a], s.hi[a]);
   }
   c.scale = length(c.hi - c.lo);
   c.mid = (c.lo + c.hi) * 0.5;
@@ -481,7 +534,6 @@ void finish_cluster(Cluster &c) {
   uint32_t label = 0;
   for (uint32_t si = 0; si < c.solids.size(); si++) {
     Solid &s = c.solids[si];
-    s.piece = si;
     s.label_base = label;
     for (uint32_t f = 0; f < s.face_count(); f++) c.label_solid.push_back(si), c.label_face.push_back(f);
     label += (uint32_t)s.face_count();
@@ -504,11 +556,13 @@ struct ClusterResult {
 bool same_piece(const Piece &a, const Piece &b) {
   return a.id == b.id && a.shape == b.shape && a.op == b.op && a.segments == b.segments && a.rings == b.rings &&
          std::memcmp(&a.size, &b.size, sizeof(Vec3)) == 0 && std::memcmp(&a.radius, &b.radius, 4) == 0 && std::memcmp(&a.height, &b.height, 4) == 0 &&
-         std::memcmp(&a.blend, &b.blend, 4) == 0 && std::memcmp(a.to_blockout.m, b.to_blockout.m, sizeof(a.to_blockout.m)) == 0;
+         std::memcmp(&a.blend, &b.blend, 4) == 0 && std::memcmp(a.to_blockout.m, b.to_blockout.m, sizeof(a.to_blockout.m)) == 0 &&
+         a.room == b.room && a.keep_walls == b.keep_walls && a.open_top == b.open_top && std::memcmp(&a.wall, &b.wall, 4) == 0 &&
+         std::memcmp(&a.floor, &b.floor, 4) == 0 && std::memcmp(&a.ceiling, &b.ceiling, 4) == 0;
 }
 
 uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
-  uint64_t h = hash_mix(kFnvBasis, 0x0452u);  // (the kernel's own number: a change to what it builds moves it)
+  uint64_t h = hash_mix(kFnvBasis, 0x0454u);  // (the kernel's own number: a change to what it builds moves it)
   h = mix_float(h, st.cell);
   h = hash_mix(h, (uint64_t)st.path);
   h = hash_mix(h, (uint64_t)st.max_cells);
@@ -516,7 +570,8 @@ uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
     h = hash_mix(h, p.id);
     h = hash_mix(h, ((uint64_t)p.shape << 8) | (uint64_t)p.op);
     h = hash_mix(h, ((uint64_t)(uint32_t)p.segments << 32) | (uint32_t)p.rings);
-    for (float f : {p.size.x, p.size.y, p.size.z, p.radius, p.height, p.blend}) h = mix_float(h, f);
+    for (float f : {p.size.x, p.size.y, p.size.z, p.radius, p.height, p.blend, p.wall, p.floor, p.ceiling}) h = mix_float(h, f);
+    h = hash_mix(h, (p.room ? 1u : 0u) | (p.keep_walls ? 2u : 0u) | (p.open_top ? 4u : 0u));
     h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
   }
   return h;
@@ -552,8 +607,9 @@ bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std
   res.corner_verts = std::move(polys.verts);
   for (uint32_t label : polys.label) {
     const uint32_t plain = label & ~kBlendLabel;
-    res.face_piece.push_back(c.label_solid[plain]);
-    res.face_side.push_back(label & kBlendLabel ? kSideBlend : c.solids[c.label_solid[plain]].face_side[c.label_face[plain]]);
+    const Solid &s = c.solids[c.label_solid[plain]];
+    res.face_piece.push_back(s.piece);
+    res.face_side.push_back(label & kBlendLabel ? kSideBlend : s.side_base + s.face_side[c.label_face[plain]]);
   }
   res.face_flat = std::move(polys.flat);
   res.rep.faces_out = res.face_piece.size();
@@ -581,6 +637,7 @@ namespace {
 /* One cluster on its way through build(): its pieces, where its result comes from. */
 struct Job {
   std::vector<uint32_t> solids;  // (indices into the build's solids)
+  std::vector<uint32_t> solid_piece;  // for each of them, then for each Intersect solid: its piece's place in `pieces`
   std::vector<Piece> pieces;
   uint64_t hash = 0;
   std::shared_ptr<const ClusterResult> result;
@@ -588,16 +645,38 @@ struct Job {
   std::string why;
 };
 
-void run_job(Job &job, std::vector<Solid> &solids, const Settings &st, const std::atomic<bool> *cancel) {
+/* Whether some Intersect solid's bounds miss the job's solids altogether: nothing of the cluster is inside it. */
+bool trimmed_away(const Job &job, const std::vector<Solid> &solids, const std::vector<Solid> &trims) {
+  V3 lo = solids[job.solids[0]].lo, hi = solids[job.solids[0]].hi;
+  for (uint32_t si : job.solids)
+    for (int a = 0; a < 3; a++) lo[a] = std::min(lo[a], solids[si].lo[a]), hi[a] = std::max(hi[a], solids[si].hi[a]);
+  for (const Solid &t : trims)
+    for (int a = 0; a < 3; a++)
+      if (t.lo[a] > hi[a] || t.hi[a] < lo[a]) return true;
+  return false;
+}
+
+void run_job(Job &job, std::vector<Solid> &solids, const std::vector<Solid> &trims, const Settings &st, const std::atomic<bool> *cancel) {
   /* (A cluster that runs out of memory is a refusal like any other: the caller keeps its last mesh. The large
    * blocks - the bricks, the soup - are asked for on this thread; a failure inside one of the pool's loops is caught
    * here only where the pool hands it back, which TBB's does.) */
   try {
+    auto res = std::make_shared<ClusterResult>();
+    if (trimmed_away(job, solids, trims)) {
+      res->rep.path = st.path != Path::Auto ? st.path : crisp_available() ? Path::Crisp : Path::Field;  // (nothing was built: the path it would have been)
+      res->rep.pieces = (uint32_t)job.pieces.size();
+      res->pieces = job.pieces;
+      res->settings = st;
+      job.result = std::move(res);
+      return;
+    }
     Cluster c;
     for (uint32_t si : job.solids) c.solids.push_back(std::move(solids[si]));
+    for (const Solid &t : trims) c.solids.push_back(t);  // (every cluster is cut by every Intersect piece)
+    for (size_t i = 0; i < c.solids.size(); i++) c.solids[i].piece = job.solid_piece[i];
     finish_cluster(c);
-    auto res = std::make_shared<ClusterResult>();
     if (!build_cluster(c, st, *res, cancel, job.why)) return;
+    res->rep.pieces = (uint32_t)job.pieces.size();
     res->pieces = job.pieces;
     res->settings = st;
     job.result = std::move(res);
@@ -610,7 +689,7 @@ void run_job(Job &job, std::vector<Solid> &solids, const Settings &st, const std
 
 /* The jobs still to build: the large ones one after another (each spreads over the threads itself), the small ones
  * side by side. */
-void run_jobs(std::vector<Job> &jobs, std::vector<Solid> &solids, const Settings &st, const std::atomic<bool> *cancel) {
+void run_jobs(std::vector<Job> &jobs, std::vector<Solid> &solids, const std::vector<Solid> &trims, const Settings &st, const std::atomic<bool> *cancel) {
   std::vector<Job *> large, small;
   for (Job &j : jobs) {
     if (j.result) continue;
@@ -618,13 +697,25 @@ void run_jobs(std::vector<Job> &jobs, std::vector<Solid> &solids, const Settings
   }
   for (Job *j : large) {
     if (cancelled(cancel)) return;
-    run_job(*j, solids, st, cancel);
+    run_job(*j, solids, trims, st, cancel);
   }
   JobSystem::global().parallel_for((int64_t)small.size(), 1, [&](int64_t a, int64_t b) {
     for (int64_t i = a; i < b; i++)
-      if (!cancelled(cancel)) run_job(*small[(size_t)i], solids, st, cancel);
+      if (!cancelled(cancel)) run_job(*small[(size_t)i], solids, trims, st, cancel);
   });
 }
+
+}  // namespace
+
+SideClass side_class(const Piece &piece, uint32_t side) {
+  if (!piece.room) return piece.op == Op::Add ? SideClass::Outside : SideClass::Cut;
+  if (side >= kSideShell) return SideClass::Outside;
+  if (piece.shape == Shape::Box) return side == 2 ? SideClass::Floor : side == 3 ? SideClass::Ceiling : SideClass::Wall;
+  if (piece.shape == Shape::Cylinder) return side == 1 ? SideClass::Floor : side == 2 ? SideClass::Ceiling : SideClass::Wall;
+  return SideClass::Wall;
+}
+
+namespace {
 
 Settings usable(Settings st) {
   if (!finite_bits(st.cell) || !(st.cell > 0.0f)) st.cell = 0.1f;
@@ -649,17 +740,25 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
   if (settings.path == Path::Crisp && !crisp_available()) return refuse("this build has no Manifold (it comes with Blender's libraries): there is no crisp path");
   const Settings st = usable(settings);
 
-  /* The pieces as solids; the ones that can't be are named and left out. */
-  std::vector<Solid> solids;
-  std::vector<uint32_t> piece_of;
+  /* The pieces as solids; the ones that can't be are named and left out. The Intersect pieces' solids are kept
+   * apart: they cut every cluster, and don't make pieces they reach into one cluster. */
+  std::vector<Solid> solids, trims;
+  std::vector<uint32_t> piece_of, trim_piece, walled;  // (walled: the rooms that have a thickness)
+  std::vector<Solid> made;
   for (uint32_t i = 0; i < pieces.size(); i++) {
-    Solid s;
-    if (const char *problem = make_solid(pieces[i], s)) {
+    made.clear();
+    bool bare = false;
+    if (const char *problem = make_solids(pieces[i], made, bare)) {
       rep.skipped.push_back({pieces[i].id, problem});
       continue;
     }
-    solids.push_back(std::move(s));
-    piece_of.push_back(i);
+    if (bare) rep.notes.push_back({pieces[i].id, "the room has no wall, floor or ceiling thickness: it only clears the rooms it overlaps"});
+    else if (pieces[i].room) walled.push_back(i);
+    for (Solid &s : made) {
+      const bool trim = s.role == Role::Intersect;
+      (trim ? trims : solids).push_back(std::move(s));
+      (trim ? trim_piece : piece_of).push_back(i);
+    }
   }
   std::vector<std::vector<uint32_t>> groups;
   cluster_solids(solids, groups);
@@ -670,7 +769,16 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
   for (size_t g = 0; g < groups.size(); g++) {
     Job &job = jobs[g];
     job.solids = std::move(groups[g]);
-    for (uint32_t si : job.solids) job.pieces.push_back(pieces[piece_of[si]]);
+    uint32_t last = UINT32_MAX;  // (a room's two solids follow each other)
+    for (uint32_t si : job.solids) {
+      if (piece_of[si] != last) job.pieces.push_back(pieces[piece_of[si]]);
+      last = piece_of[si];
+      job.solid_piece.push_back((uint32_t)job.pieces.size() - 1);
+    }
+    for (uint32_t pi : trim_piece) {
+      job.pieces.push_back(pieces[pi]);
+      job.solid_piece.push_back((uint32_t)job.pieces.size() - 1);
+    }
     job.hash = cluster_hash(job.pieces, st);
     if (!cache) continue;
     const auto it = cache->impl->clusters.find(job.hash);
@@ -680,7 +788,7 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
                       r.settings.max_cells == st.max_cells && std::equal(r.pieces.begin(), r.pieces.end(), job.pieces.begin(), same_piece);
     if (same) job.result = it->second, job.cached = true;
   }
-  run_jobs(jobs, solids, st, cancel);
+  run_jobs(jobs, solids, trims, st, cancel);
   if (cancelled(cancel)) {
     for (const Job &job : jobs) rep.stopped_inside += !job.result && job.why == "cancelled";
     return refuse("cancelled");
@@ -717,6 +825,16 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
     rep.ms_faces += cr.ms_faces;
   }
   mesh.touch();
+  /* A room with a thickness that no face of the result names: said, since nothing else would say it. (Its walls are
+   * thinner than the grid's cell or than a mesh's positions can hold where it lies, or all of it lies in other rooms'
+   * air or outside an Intersect piece.) */
+  if (!walled.empty()) {
+    std::vector<uint64_t> seen(named.piece);
+    std::sort(seen.begin(), seen.end());
+    for (uint32_t i : walled)
+      if (!std::binary_search(seen.begin(), seen.end(), pieces[i].id))
+        rep.notes.push_back({pieces[i].id, "nothing of the room came out: its walls are thinner than the mesh can hold there (a finer Field Cell, or thicker walls), or all of it lies in other rooms' air or outside an Intersect piece"});
+  }
   if (cache) {
     std::unordered_map<uint64_t, std::shared_ptr<const ClusterResult>> kept;
     for (const Job &job : jobs) kept[job.hash] = job.result;

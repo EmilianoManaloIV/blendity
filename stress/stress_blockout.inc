@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Stress section `blockout` (round 476, task 0452, ADR 0128): what Blockout's kernel costs and how exact it is, by its
-// two paths, at 10, 100 and 400 pieces; and a sweep of hostile arrangements. Included by stress_main.cpp.
+// two paths, at 10, 100 and 400 pieces; and a sweep of hostile arrangements. Round 478 (task 0454): the same building
+// built from room pieces, and a sweep of rooms and Intersect pieces. Included by stress_main.cpp.
 // BLENDITY_BLOCKOUT_DUMP=<folder> also writes the 10- and 100-piece interiors as OBJ files, one a path.
 #include "../src/scene/blockout.h"
 
@@ -44,6 +45,24 @@ static std::vector<Piece> interior(int n, int doors) {
     for (int i = 0; i + 1 < n && doors > 0; i++, doors--) p.push_back(box(id++, {0.6f, 2.1f, 0.9f}, {4.0f * (float)i + 2.0f, -0.35f, 4.0f * (float)j}, Op::Subtract));
   for (int j = 0; j + 1 < n && doors > 0; j++)
     for (int i = 0; i < n && doors > 0; i++, doors--) p.push_back(box(id++, {0.9f, 2.1f, 0.6f}, {4.0f * (float)i, -0.35f, 4.0f * (float)j + 2.0f}, Op::Subtract));
+  return p;
+}
+/* The same building from room pieces (round 478): a Merge room of 3.8 x 2.8 x 3.8 m of air with 0.2 m all round for each room - its
+ * shell is the 4.2 x 3.2 x 4.2 m box and its air the box cut out - and the same door cuts. 64 pieces for `interior 100`. */
+static std::vector<Piece> interior_rooms(int n, int doors) {
+  std::vector<Piece> p;
+  uint64_t id = 1;
+  for (int j = 0; j < n; j++)
+    for (int i = 0; i < n; i++) {
+      Piece room = box(id++, {3.8f, 2.8f, 3.8f}, {4.0f * (float)i, 0.0f, 4.0f * (float)j});
+      room.room = true, room.wall = room.floor = room.ceiling = 0.2f;
+      p.push_back(room);
+    }
+  const std::vector<Piece> boxes = interior(n, doors);
+  for (size_t k = (size_t)n * (size_t)n * 2; k < boxes.size(); k++) {
+    p.push_back(boxes[k]);
+    p.back().id = id++;
+  }
   return p;
 }
 static double interior_volume(int n, int doors) {
@@ -104,8 +123,21 @@ static double median(std::vector<double> v) {
 static bool side_plane(const Piece &p, uint32_t side, Vec3 &on, Vec3 &n) {
   int axis = 1;
   float at = 0.0f;
-  if (p.shape == Shape::Box && side < 6) axis = (int)side / 2, at = (side & 1 ? 0.5f : -0.5f) * std::fabs(p.size[axis]);
-  else if (p.shape == Shape::Cylinder && (side == 1 || side == 2)) at = (side == 2 ? 0.5f : -0.5f) * std::fabs(p.height);
+  /* A room's shell sides lie the wall, floor or ceiling past the air's (the stress rooms have no scale: a thickness is then the same in the
+   * piece's own space). */
+  float grow = 0.0f;
+  if (p.room && side >= bl::blockout::kSideShell) {
+    side -= bl::blockout::kSideShell;
+    grow = 1.0f;
+  }
+  if (p.shape == Shape::Box && side < 6) {
+    axis = (int)side / 2, at = (side & 1 ? 0.5f : -0.5f) * std::fabs(p.size[axis]);
+    if (grow > 0.0f) at += (axis == 1 ? (side & 1 ? (p.open_top ? 0.0f : p.ceiling) : -p.floor) : (side & 1 ? p.wall : -p.wall));
+  }
+  else if (p.shape == Shape::Cylinder && (side == 1 || side == 2)) {
+    at = (side == 2 ? 0.5f : -0.5f) * std::fabs(p.height);
+    if (grow > 0.0f) at += side == 2 ? (p.open_top ? 0.0f : p.ceiling) : -p.floor;
+  }
   else return false;
   Vec3 local(0.0f), dir(0.0f);
   local[axis] = at, dir[axis] = 1.0f;
@@ -291,12 +323,54 @@ static std::vector<Piece> hostile(uint32_t seed, bool boxes) {
 }
 
 /* The sweep's three kinds of arrangement. */
-static const char *const kWhat[3] = {", boxes on a 0.25 m grid", ", the same boxes turned as a whole", ", any pieces"};
-static const char *const kWhatShort[3] = {", boxes", ", boxes turned", ""};
+static const char *const kWhat[4] = {", boxes on a 0.25 m grid", ", the same boxes turned as a whole", ", any pieces", ", rooms and Intersect pieces"};
+static const char *const kWhatShort[4] = {", boxes", ", boxes turned", "", ", rooms"};
+
+/* Round 478: rooms on the 0.25 m grid - Merge and Keep, open-topped, with no thickness, thicker than the room is wide, round ones - among
+ * boxes that add, subtract and (at most two) intersect, some turned by right angles, a few unusable or unevenly scaled. */
+static std::vector<Piece> rooms_hostile(uint32_t seed) {
+  Rand r{seed * 2246822519u + 3266489917u};
+  std::vector<Piece> p;
+  const int count = 2 + r.pick(6);
+  int intersects = 0;
+  for (int i = 0; i < count; i++) {
+    Piece q;
+    q.id = (uint64_t)i + 1;
+    auto size = [&]() { return 0.5f * (float)(1 + r.pick(6)); };
+    q.size = {size(), size(), size()};
+    const int kind = r.pick(10);
+    if (kind < 5) {
+      q.room = true;
+      q.keep_walls = r.pick(3) == 0;
+      q.open_top = r.pick(4) == 0;
+      const int thick = r.pick(7);
+      auto t = [&]() { return thick == 0 ? 0.0f : thick == 1 ? 3.0f : 0.25f * (float)(1 + r.pick(2)); };  // (none, thicker than the room, a quarter or a half metre)
+      q.wall = t(), q.floor = t(), q.ceiling = t();
+      if (r.pick(6) == 0) q.shape = Shape::Cylinder, q.radius = 0.25f * (float)(2 + r.pick(5)), q.height = size(), q.segments = 3 + r.pick(14);
+    }
+    else if (kind < 7) q.op = Op::Add;
+    else if (kind < 9) q.op = Op::Subtract;
+    else if (intersects++ < 2) q.op = Op::Intersect, q.size = {3.0f + size(), 3.0f + size(), 3.0f + size()};
+    const Vec3 at(0.25f * (float)(r.pick(9) - 4), 0.25f * (float)(r.pick(9) - 4), 0.25f * (float)(r.pick(9) - 4));
+    Quat turn = Quat::euler({90.0f * (float)r.pick(4), 90.0f * (float)r.pick(4), 0.0f});
+    Vec3 scale(1.0f);
+    const int odd = r.pick(30);
+    if (odd == 0) q.size.x = 0.0f;
+    if (odd == 1) q.wall = std::numeric_limits<float>::quiet_NaN();
+    if (odd == 2) q.wall = -1.0f;
+    if (odd == 3) scale = {1.0f, 0.0f, 1.0f};
+    if (odd == 4) scale = {-1.0f, 1.0f, 1.0f};
+    if (odd == 5) scale = {2.0f, 0.5f, 1.0f};
+    q.to_blockout = Mat4::trs(at, turn, scale);
+    p.push_back(q);
+  }
+  return p;
+}
 
 /* Arrangement `seed` of a kind: boxes of a floor plan; the same, the whole plan turned by an odd angle (planes at an
  * angle that several pieces share); any pieces. */
 static std::vector<Piece> arrangement(uint32_t seed, int what) {
+  if (what == 3) return rooms_hostile(seed);
   std::vector<Piece> pieces = hostile(seed, what < 2);
   if (what != 1) return pieces;
   Rand r{seed * 40503u + 977u};
@@ -322,8 +396,9 @@ static void list_arrangement(uint32_t seed, Path path, int what, const std::vect
   for (const Piece &p : pieces) {
     const Vec3 x = p.to_blockout.column(0), y = p.to_blockout.column(1), z = p.to_blockout.column(2), t = p.to_blockout.translation();
     std::printf("    piece %llu: %s %s size %g %g %g radius %g height %g segments %d rings %d at %g %g %g, axes (%g %g %g) (%g %g %g) (%g %g %g)\n", (unsigned long long)p.id,
-                p.shape == Shape::Box ? "box" : p.shape == Shape::Cylinder ? "cylinder" : "sphere", p.op == Op::Add ? "add" : "subtract", p.size.x, p.size.y, p.size.z,
+                p.shape == Shape::Box ? "box" : p.shape == Shape::Cylinder ? "cylinder" : "sphere", p.room ? "room" : p.op == Op::Add ? "add" : p.op == Op::Subtract ? "subtract" : "intersect", p.size.x, p.size.y, p.size.z,
                 p.radius, p.height, p.segments, p.rings, t.x, t.y, t.z, x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z);
+    if (p.room) std::printf("      room: wall %g floor %g ceiling %g%s%s\n", p.wall, p.floor, p.ceiling, p.keep_walls ? ", keep walls" : ", merge", p.open_top ? ", open top" : "");
   }
   for (size_t i = 0; i < pairs.size() && i < 12; i++)
     for (uint32_t f : {pairs[i].first, pairs[i].second}) {
@@ -343,7 +418,7 @@ static void list_arrangement(uint32_t seed, Path path, int what, const std::vect
     if (!no_area(m, f, far)) continue;
     listed++;
     std::printf("    no area, face %zu: piece %llu side %u flat %d:", f, (unsigned long long)named.piece[f], named.side[f], (int)named.flat[f]);
-    for (uint32_t k = 0; k < m.face_size(f) && k < 8; k++) std::printf(" (%.4f %.4f %.4f)", m.positions[v[k]].x, m.positions[v[k]].y, m.positions[v[k]].z);
+    for (uint32_t k = 0; k < m.face_size(f) && k < 8; k++) std::printf(" %u (%.6f %.6f %.6f)", v[k], m.positions[v[k]].x, m.positions[v[k]].y, m.positions[v[k]].z);
     std::printf("\n");
   }
   dump(strprintf("seed%u_%s_%d", seed, path == Path::Crisp ? "crisp" : "field", what), m);
@@ -388,9 +463,9 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
   const char *cell_env = std::getenv("BLENDITY_BLOCKOUT_CELL");  // (the sweep at another cell, to see what a finer grid resolves)
   const float sweep_cell = cell_env && std::atof(cell_env) > 0.0 ? (float)std::atof(cell_env) : 0.08f;
   rep.table({"sweep", "arrangements", "built", "pieces skipped", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
-  for (int kind = 0; kind < 6; kind++) {
-    const Path path = kind < 3 ? Path::Crisp : Path::Field;
-    const int what = kind % 3;
+  for (int kind = 0; kind < 8; kind++) {
+    const Path path = kind < 4 ? Path::Crisp : Path::Field;
+    const int what = kind % 4;
     if (path == Path::Crisp && !crisp) continue;
     const std::string name = std::string(path == Path::Crisp ? "crisp" : "field") + kWhatShort[what];
     Tally t;
@@ -521,6 +596,15 @@ static void test_blockout(Report &rep, const Options &o) {
     sc.step = {0.0f, 0.0f, 0.3f};
     sc.verdict = sz[2] == 100;
     scenes.push_back(sc);
+    /* The same building from room pieces (round 478): the rooms come first, the doors after them. */
+    Scene3 rooms;
+    rooms.name = strprintf("interior rooms %d", sz[2]);
+    rooms.pieces = interior_rooms(sz[0], sz[1]);
+    rooms.volume = sc.volume;
+    rooms.moved = (size_t)sz[0] * (size_t)sz[0];
+    rooms.step = sc.step;
+    rooms.verdict = sz[2] == 100;
+    scenes.push_back(rooms);
   }
   for (int n : {10, 100, 400}) {
     if (o.quick && n > 100) continue;
@@ -562,6 +646,20 @@ static void test_blockout(Report &rep, const Options &o) {
       row(rep, o, sc, Path::Crisp, 0.1f, nullptr);
     }
     for (float cell : cells) row(rep, o, sc, Path::Field, cell, crisp && reference.ok ? &reference.mesh : nullptr);
+  }
+
+  /* Round 478: the room-built building is the box-pair one - the same faces, points and volume on each path. */
+  rep.table({"interior 100 from rooms against from box pairs", "faces (boxes / rooms)", "points (boxes / rooms)", "volume (boxes / rooms)", "pieces (boxes / rooms)", "verdict"});
+  for (Path path : {Path::Crisp, Path::Field}) {
+    if (path == Path::Crisp && !crisp) continue;
+    bl::blockout::Settings st;
+    st.path = path, st.cell = 0.1f;
+    const std::vector<Piece> boxes = interior(6, 28), rooms = interior_rooms(6, 28);
+    const Run a = on_worker(boxes, st), b = on_worker(rooms, st);
+    const double va = a.ok ? ppstress::signed_volume(a.mesh) : 0.0, vb = b.ok ? ppstress::signed_volume(b.mesh) : 0.0;
+    const bool same = a.ok && b.ok && a.mesh.face_count() == b.mesh.face_count() && a.mesh.vert_count() == b.mesh.vert_count() && std::fabs(va - vb) <= 1e-4 * std::max(1.0, std::fabs(va));
+    rep.row({path == Path::Crisp ? "crisp" : "field cell 0.1", strprintf("%zu / %zu", a.mesh.face_count(), b.mesh.face_count()), strprintf("%zu / %zu", a.mesh.vert_count(), b.mesh.vert_count()),
+             strprintf("%.4f / %.4f", va, vb), strprintf("%zu / %zu", boxes.size(), rooms.size()), same ? "same" : "DIFFERS"});
   }
 
   /* The same build from the calling thread, with every thread. */

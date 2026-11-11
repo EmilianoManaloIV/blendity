@@ -2194,6 +2194,28 @@ A Blockout is a room, a wall, a building made the way a level designer blocks on
 ? Why does Edit Mode refuse a Blockout instead of turning it into an ordinary mesh? | The pieces are the document and the mesh is derived from them: converting would drop the pieces, and any edit made to the mesh would be overwritten by the next rebuild. Move or resize the pieces; a later round adds Bake to Mesh for when you want an ordinary mesh.
 @ source/blender/modifiers/intern/MOD_boolean.cc (Blender's Boolean modifier with a Collection of operands)
 )"},
+    {"Rooms: air, walls, doors and windows", "A piece that is a room, rooms that merge or keep their walls, openings and Intersect", R"(
+A room is a Blockout piece whose shape is its air - what you walk in - and which brings its own walls, floor and ceiling. Put two rooms so their air overlaps and they become one connected space: the wall between them is gone exactly where the air is shared. Doors and windows are cuts with a sill and a head height that sit on a wall. Everything is still derived: change a thickness or move a room and the mesh is made again.
+# Try it
+! cmd:blockout new | A Blockout to build in
+! cmd:blockout add room box 4 3 4 | A room with 4 x 3 x 4 m of air: its walls, floor and ceiling make the closed shell around it (the Blockout's Default Wall Thickness, 0.2 m, fills all three)
+! cmd:blockout set wall 0.3 | A thicker wall for the selected room (also floor and ceiling; Open Top leaves the ceiling out)
+! cmd:blockout add room box 4 3 4 | A second room, put at the same place: the two airs overlap completely, so the walls between are gone
+! cmd:blockout add door | A door in the first wall of the selected room (point at a wall in the Scene view first to put it there instead)
+! cmd:blockout add window 1.2 1.5 0.9 | A window 1.2 m wide, from a sill at 0.9 m up to 1.5 m
+! cmd:blockout add box intersect 3 10 10 | An Intersect piece keeps only what is inside it: the whole building is cut to this box
+! cmd:blockout set walls keep | The selected room keeps all its walls even inside another room (Walls: Keep walls)
+# Rooms
+- Merge with neighbours (the default): every room's air clears the walls of the rooms it overlaps. Keep walls: only the room's own air clears its walls, so it stands as a closed box inside a bigger room.
+- Add pieces stay solid inside a room - a column from floor to ceiling is one piece with both. A room cannot be carved out of a solid Add block; a Subtract piece does that.
+- A room's Operation is ignored (greyed in the Inspector, its help says why). A room with no thickness at all only clears the rooms it overlaps, and the status line says so.
+- A door or window is a box that cuts through the wall it stands in, sized by Width, Head (top) and Sill (bottom) above the floor line it stands on, as deep as the wall plus 0.1 m either side. Moving it afterwards is moving any piece.
+- A room draws its air and, fainter, its shell; an Intersect piece draws violet. Thickness is measured square to the room's own sides in the Blockout's space, so a scaled or turned room keeps the wall that was set.
+? Two rooms overlap by half. One is Merge, one is Keep. Which walls are where the airs overlap? | The Keep room's walls stay where its own air is clear of them, and inside the other room it keeps all six; the Merge room's walls are cleared by both airs. So the Keep room stands as a closed box inside the Merge room's space, and the Merge room's own walls are open into it only where the Keep room's air is not.
+? You add a column (an Add box) from floor to ceiling in a room. Is it cut away with the room's air? | No. The air removes room walls only, so the column stays and is one solid with the floor and the ceiling; there is no face where it meets them.
+? A door's Sill is 0 and its Head 2.1. What does the wall look like? | A door-shaped opening from the floor up: two jambs and a head, with no step. A window with a sill leaves wall below it, so it has four faces and no hole in the wall's faces.
+@ source/blender/modifiers/intern/MOD_boolean.cc (Union, Difference and Intersect: what a room's walls and an Intersect piece are built from)
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }
