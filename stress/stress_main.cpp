@@ -41,6 +41,7 @@
 #include "../src/scene/export.h"
 #include "../src/scene/import.h"
 #include "../src/scene/autophysics.h"
+#include "../src/scene/ragdoll.h"
 #include "../tests/fixtures/synthetic_mmd.h"
 
 #include <algorithm>
@@ -4542,15 +4543,15 @@ static void locomotion_row(Report &rep) {
     t += dt, cost += lc->cost_ms_, worst = std::max(worst, lc->cost_ms_), frames++;
   }
   Locomotion::live = was_live;
-  rep.table({"Locomotion (W for 3 s)", "frames", "ms / frame", "worst frame ms", "walked (m)", "target ms"});
-  rep.row({"a humanoid rig", std::to_string(frames), strprintf("%.3f", cost / frames), strprintf("%.3f", worst), f2(rig->world_position().z), "0.2"});
+  rep.table({"Locomotion (W for 3 s)", "frames", "ms / frame", "worst frame ms", "walked (m)", "target ms", "budget"});
+  rep.row({"a humanoid rig", std::to_string(frames), strprintf("%.3f", cost / frames), strprintf("%.3f", worst), f2(rig->world_position().z), "0.2", cost / frames <= 0.2 ? "ok" : "OVER"});
 }
 
 static void test_animation_stress(Report &rep, const Options &o) {
   rep.title("Keyframe animation (task 0059)",
             "A chain of bones under a root, each turned by three Euler tracks with keys every 10 frames (Auto), applied with "
             "apply_clip at frames across the clip.");
-  rep.table({"tracks", "keys", "ms per frame", "target"});
+  rep.table({"tracks", "keys", "ms per frame", "target", "budget"});  // (round 468: the last cell is ok / OVER by the row's own target)
   Scene s;
   GameObject *root = s.create("Root");
   GameObject *parent = root;
@@ -4569,7 +4570,7 @@ static void test_animation_stress(Report &rep, const Options &o) {
   ScopedTimer t;
   for (int i = 0; i < frames; i++) apply_clip(clip, *root, (float)(i % 120) + 0.5f);
   const double per = t.ms() / frames;
-  rep.row({std::to_string(clip.tracks.size()), std::to_string(keys), strprintf("%.4f", per), "0.2"});
+  rep.row({std::to_string(clip.tracks.size()), std::to_string(keys), strprintf("%.4f", per), "0.2", per <= 0.2 ? "ok" : "OVER"});
   rep.note(strprintf("%zu tracks: %.4f ms a frame (target 0.2 ms). %s", clip.tracks.size(), per, per <= 0.2 ? "Within it." : "OVER the target."));
 
   /* A sequence (task 0062): 4 tracks, each two copies of the clip overlapping by half (a crossfade all the way along
@@ -4598,7 +4599,7 @@ static void test_animation_stress(Report &rep, const Options &o) {
     apply_anim_values(vals, root);
   }
   const double per_seq = ts.ms() / frames;
-  rep.row({"4 x 2 x " + std::to_string(clip.tracks.size()) + " (sequence)", std::to_string(keys * 8), strprintf("%.4f", per_seq), "0.5"});
+  rep.row({"4 x 2 x " + std::to_string(clip.tracks.size()) + " (sequence)", std::to_string(keys * 8), strprintf("%.4f", per_seq), "0.5", per_seq <= 0.5 ? "ok" : "OVER"});
   rep.note(strprintf("A sequence of 4 tracks crossfading 201-track clips: %.4f ms a frame (target 0.5 ms). %s", per_seq,
                      per_seq <= 0.5 ? "Within it." : "OVER the target."));
   for (int k = 0; k < 4; k++) {
@@ -4607,6 +4608,75 @@ static void test_animation_stress(Report &rep, const Options &o) {
     forget_clip_assets(cp);
   }
   locomotion_row(rep);
+}
+
+/* Round 468: the two timing rows `vgroups` held, shared with the `posing` section that writes them now. */
+struct SkinPoseTiming {
+  size_t vertices = 0;
+  double ms[2] = {1e30, 1e30};  // Linear, Dual Quaternion
+};
+static SkinPoseTiming skin_pose_timing() {
+  /* Task 0047: posing a 50k-vertex mesh skinned to a 3-bone chain (automatic weights), Linear and Dual Quaternion. */
+  SkinPoseTiming out;
+  Scene sc;
+  GameObject *rig = sc.create("Rig");
+  Armature *arm = rig->add<Armature>();
+  GameObject *b0 = sc.create("B0", rig);
+  b0->add<Bone>()->length = 0.7f;
+  b0->set_local_position({0, -1, 0});
+  b0->get<Bone>()->rest_position = {0, -1, 0};
+  GameObject *b1 = sc.create("B1", b0);
+  b1->add<Bone>()->length = 0.7f;
+  b1->set_local_position({0, 0.7f, 0});
+  b1->get<Bone>()->rest_position = {0, 0.7f, 0};
+  GameObject *b2 = sc.create("B2", b1);
+  b2->add<Bone>()->length = 0.6f;
+  b2->set_local_position({0, 0.7f, 0});
+  b2->get<Bone>()->rest_position = {0, 0.7f, 0};
+  GameObject *body = sc.create("Body");
+  MeshPtr m = primitives::uv_sphere(1.0f, 256, 196);
+  body->add<MeshFilter>()->mesh = m;
+  auto *sk = body->add<SkinModifier>();
+  sk->object = "Rig";
+  skin_bind_automatic(*sk, *m);
+  (void)body->evaluated_mesh()->render_mesh_tangents();
+  out.vertices = m->vert_count();
+  for (int dq = 0; dq < 2; dq++) {
+    arm->deform = dq;
+    for (int r = 0; r < 8; r++)
+      out.ms[dq] = std::min(out.ms[dq], time_ms([&] {
+                               b1->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.1f * (r + 1)));
+                               (void)body->evaluated_mesh()->render_mesh_tangents();
+                             }));
+  }
+  return out;
+}
+
+struct IkTiming {
+  double moved = 1e30, still = 1e30, big = 1e30;
+  float worst = 0.0f;
+};
+static IkTiming ik_timing() {
+  /* Task 0048: a humanoid rig's four IK chains solved with every target moved, and with nothing moved (a hash each). */
+  IkTiming out;
+  Scene sc;
+  create_rig(sc, false, {});
+  GameObject *t[4] = {sc.find_by_name("LeftFootIK"), sc.find_by_name("RightFootIK"), sc.find_by_name("LeftHandIK"), sc.find_by_name("RightHandIK")};
+  Vec3 home[4];
+  for (int k = 0; k < 4; k++) home[k] = t[k]->world_position();
+  for (int r = 0; r < 20; r++) {
+    out.moved = std::min(out.moved, time_ms([&] {
+                           for (int k = 0; k < 4; k++) t[k]->set_world_position(home[k] + Vec3(0.05f * std::sin(r * 0.7f + k), 0.2f, 0.05f * std::cos(r * 0.3f)));
+                           solve_constraints(sc);
+                         }));
+    out.still = std::min(out.still, time_ms([&] { solve_constraints(sc); }));
+    GameObject *shin = sc.find_by_name("LeftLowerLeg");
+    out.worst = std::max(out.worst, length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - t[0]->world_position()));
+  }
+  /* The per-frame walk in a big scene: 20k other objects, nothing moved (the editor pays this every frame). */
+  for (int k = 0; k < 20000; k++) sc.create(strprintf("Prop%d", k));
+  for (int r = 0; r < 10; r++) out.big = std::min(out.big, time_ms([&] { solve_constraints(sc); }));
+  return out;
 }
 
 static void test_vgroups_stress(Report &rep, const Options &o) {
@@ -4751,72 +4821,9 @@ static void test_vgroups_stress(Report &rep, const Options &o) {
                        "weights painted: %s): %s",
                        dab, one_ms, painted > 0.0f ? "yes" : "NO", dab <= 8.0 && painted > 0.0f ? "met" : "NOT MET"));
   }
-  /* Task 0047: posing a 50k-vertex mesh skinned to a 3-bone chain (automatic weights), Linear and Dual Quaternion. */
-  {
-    Scene sc;
-    GameObject *rig = sc.create("Rig");
-    Armature *arm = rig->add<Armature>();
-    GameObject *b0 = sc.create("B0", rig);
-    b0->add<Bone>()->length = 0.7f;
-    b0->set_local_position({0, -1, 0});
-    b0->get<Bone>()->rest_position = {0, -1, 0};
-    GameObject *b1 = sc.create("B1", b0);
-    b1->add<Bone>()->length = 0.7f;
-    b1->set_local_position({0, 0.7f, 0});
-    b1->get<Bone>()->rest_position = {0, 0.7f, 0};
-    GameObject *b2 = sc.create("B2", b1);
-    b2->add<Bone>()->length = 0.6f;
-    b2->set_local_position({0, 0.7f, 0});
-    b2->get<Bone>()->rest_position = {0, 0.7f, 0};
-    GameObject *body = sc.create("Body");
-    MeshPtr m = primitives::uv_sphere(1.0f, 256, 196);
-    body->add<MeshFilter>()->mesh = m;
-    auto *sk = body->add<SkinModifier>();
-    sk->object = "Rig";
-    skin_bind_automatic(*sk, *m);
-    (void)body->evaluated_mesh()->render_mesh_tangents();
-    double ms[2] = {1e30, 1e30};
-    for (int dq = 0; dq < 2; dq++) {
-      arm->deform = dq;
-      for (int r = 0; r < 8; r++)
-        ms[dq] = std::min(ms[dq], time_ms([&] {
-                   b1->set_local_rotation(Quat::axis_angle({1, 0, 0}, 0.1f * (r + 1)));
-                   (void)body->evaluated_mesh()->render_mesh_tangents();
-                 }));
-    }
-    rep.row({strprintf("Skin pose change, %zu vertices, 3 bones: Linear / Dual Quaternion (ms)", m->vert_count()), f2(ms[0]), f2(ms[1]), "-", "-"});
-    rep.note(strprintf("Task 0047's target: a pose change on a 50k-vertex mesh in at most 8 ms: Linear %.2f ms, Dual Quaternion %.2f ms: %s", ms[0], ms[1],
-                       std::max(ms[0], ms[1]) <= 8.0 ? "met" : "NOT MET"));
-  }
-  /* Task 0048: a humanoid rig's four IK chains solved with every target moved, and with nothing moved (a hash each). */
-  {
-    Scene sc;
-    create_rig(sc, false, {});
-    GameObject *t[4] = {sc.find_by_name("LeftFootIK"), sc.find_by_name("RightFootIK"), sc.find_by_name("LeftHandIK"), sc.find_by_name("RightHandIK")};
-    Vec3 home[4];
-    for (int k = 0; k < 4; k++) home[k] = t[k]->world_position();
-    double moved = 1e30, still = 1e30;
-    float worst = 0.0f;
-    for (int r = 0; r < 20; r++) {
-      moved = std::min(moved, time_ms([&] {
-                for (int k = 0; k < 4; k++) t[k]->set_world_position(home[k] + Vec3(0.05f * std::sin(r * 0.7f + k), 0.2f, 0.05f * std::cos(r * 0.3f)));
-                solve_constraints(sc);
-              }));
-      still = std::min(still, time_ms([&] { solve_constraints(sc); }));
-      GameObject *shin = sc.find_by_name("LeftLowerLeg");
-      worst = std::max(worst, length(shin->world_matrix().point({0, shin->get<Bone>()->length, 0}) - t[0]->world_position()));
-    }
-    rep.row({"IK: a humanoid's 4 chains, targets moved / nothing moved (ms)", strprintf("%.4f", moved), strprintf("%.4f", still), "-", "-"});
-    /* The per-frame walk in a big scene: 20k other objects, nothing moved (the editor pays this every frame). */
-    for (int k = 0; k < 20000; k++) sc.create(strprintf("Prop%d", k));
-    double big = 1e30;
-    for (int r = 0; r < 10; r++) big = std::min(big, time_ms([&] { solve_constraints(sc); }));
-    rep.row({"IK: the same rig among 20k objects, nothing moved (ms)", strprintf("%.4f", big), "-", "-", "-"});
-    rep.note(strprintf("Task 0048: with 20k other objects in the scene the per-frame IK pass costs %.3f ms when nothing moved", big));
-    rep.note(strprintf("Task 0048: solving a humanoid's four IK chains costs %.4f ms a frame when the targets move, %.4f ms when "
-                       "nothing does; the left foot is off its target by at most %g (should be under 1e-4)",
-                       moved, still, worst));
-  }
+  /* Round 468: the skin pose change and IK timing rows (tasks 0047 and 0048) are in the `posing` section now, under a
+   * header with ms columns the comparison reads; this section keeps its robustness rows. */
+  rep.note("Round 468: the skin pose change and IK timing rows moved to the `posing` section (blendity_stress --only posing).");
   /* The cost groups add to a stack that re-runs every frame (Edit Mode's cage, a deformer before a generative
    * modifier): a 25k-vertex mesh through Subdivision Surface, with and without two groups to carry. */
   {
@@ -7234,6 +7241,8 @@ static void test_world_like(Report &rep, const Options &o) {
   rep.note("perf status: " + ed.perf_status_text());
 }
 
+#include "stress_posing.inc"
+
 static void test_blender_parity(Report &rep, const Options &o) {
   rep.title("Blender parity (task 0201)",
             "Every row has a twin in tools/bench_blender.py, under the same name; tools/bench_table.py puts the two side by side "
@@ -7330,7 +7339,7 @@ int main(int argc, char **argv) {
                {"gpu", test_gpu_devices}, {"gpu_viewport", test_gpu_viewport}, {"gpu_gi", test_gpu_gi},        {"pushpull", test_pushpull_stress}, {"modifiers_ngon", test_modifier_tools_stress}, {"vgroups", test_vgroups_stress}, {"skin_weights", test_skin_weights_stress}, {"animation", test_animation_stress},
                {"curved", test_curved_surfaces},  {"filters", test_camera_filters}, {"present", test_present},
                {"gpu_raster", test_gpu_raster},  {"gpu_optix", test_gpu_optix}, {"livelink", test_livelink}, {"editing", test_editing}, {"windows", test_windows}, {"blender_parity", test_blender_parity},
-               {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like},
+               {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}, {"posing", test_posing},
                {"lightmap_quality", test_lightmap_quality}, {"blockout", test_blockout}};
   ScopedTimer total;
   for (auto &t : tests) {
@@ -7340,7 +7349,7 @@ int main(int argc, char **argv) {
     if (std::string(t.name) == "gpu_optix" && o.only != "gpu_optix") continue;  // (a spike: only when asked for)
     if (std::string(t.name) == "windows" && o.only != "windows") continue;  // (it opens a window: only when asked for)
     if ((std::string(t.name) == "operations" || std::string(t.name) == "responsiveness" || std::string(t.name) == "world_like" ||
-         std::string(t.name) == "lightmap_quality") && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
+         std::string(t.name) == "posing" || std::string(t.name) == "lightmap_quality") && o.only.empty()) continue;  // (round 411: minutes each - named, or tools/perf_suite.py)
     /* Progress on stderr (unbuffered): a run killed by a CI timeout still shows where it was. */
     std::fprintf(stderr, "[stress] %s started at %.1f s\n", t.name, total.ms() / 1000.0);
     std::fflush(stdout);

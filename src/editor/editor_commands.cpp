@@ -986,7 +986,7 @@ void Editor::run_console_command(const std::string &line) {
     Log::info("CPU badge: %s", badge.empty() ? "not shown" : badge.c_str());
     return;
   }
-  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | frames N | memory (round 411, ADR 0105; memory: task 0421)
+  if (c == "perf") {  // perf [status] | mark [name] | reset | wait | frames N | memory (round 411, ADR 0105; memory: task 0421) | drag ... | clip [frames N] | pick <part> (round 468: perf_script.cpp)
     const std::string sub = to_lower(arg(1, "status"));
     if (sub == "mark") Log::info("%s", perf_mark(t.size() > 2 ? line_rest(line, 2) : std::string()).c_str());
     else if (sub == "reset") perf_mark(""), Log::info("perf: the mark reset");
@@ -1002,10 +1002,24 @@ void Editor::run_console_command(const std::string &line) {
     else if (sub == "frames") {  // perf frames N (a script's, headless): N frames, whatever runs
       if (!headless_) { Log::info("perf frames: headless scripts only"); return; }
       const int n = std::max(0, std::min(1000000, std::atoi(arg(2, "1").c_str())));
-      for (int i = 0; i < n; i++) step_frame_headless();
+      FrameProfile acc;  // (round 468: every field of the stepped frames, for the posing lines below)
+      const PoseCounts pose0 = pose_counts();
+      const MeshCounts mesh0 = mesh_counts();
+      for (int i = 0; i < n; i++) step_frame_headless(), acc.add(prof_last_);
       Log::info("perf frames: %d frame(s)", n);
+      const PoseCounts pose = pose_counts() - pose0;  // (read once: both lines are of the same counts)
+      const MeshCounts mesh = mesh_counts() - mesh0;
+      Log::info("perf frames parts ms (a frame's mean; nested, not to add up): %s", posing_parts_text(acc, pose, mesh, (double)n).c_str());
+      Log::info("perf frames counts (a frame's mean): %s", posing_counts_text(acc, pose, mesh, (double)n).c_str());
     }
-    else Log::info("perf: %s", perf_status_text().c_str());
+    else if (sub == "drag" || sub == "clip" || sub == "pick") perf_script_command(sub, t);  // (round 468: the posing measurements, perf_script.cpp)
+    else {
+      Log::info("perf: %s", perf_status_text().c_str());
+      /* Round 468: the last frame's posing parts and counts, on lines of their own (the line above is parsed as it was). */
+      /* (Items only after the one colon: parts in ms, nested in the frame and each other, not to add up; counts for the frame.) */
+      Log::info("perf posing: %s", posing_parts_text(prof_last_, pose_last_, mesh_last_, 1.0).c_str());
+      Log::info("perf posing counts: %s", posing_counts_text(prof_last_, pose_last_, mesh_last_, 1.0).c_str());
+    }
     return;
   }
   if (c == "viewport" && arg(1, "") == "present") {  // viewport present card|system (task 0193)
@@ -1260,9 +1274,9 @@ void Editor::run_console_command(const std::string &line) {
     anim_command(split_quoted(line));  // (round 335: a property with spaces quoted - "Material 0.Roughness", "Cast Shadows")
     return;
   }
-  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike (task 0202; cubes50k round 433)
+  if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike|avatarlike|avatarworld (task 0202; cubes50k round 433; the avatar ones round 468)
     if (!bench_scene(to_lower(arg(1, ""))))
-      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike: the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike|avatarlike|avatarworld (and the quick ones: worldlikequick, avatarlikequick, avatarworldquick): the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
     return;
   }
   if (c == "manual") {

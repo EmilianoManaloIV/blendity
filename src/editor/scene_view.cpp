@@ -806,7 +806,83 @@ bool point_in_quad(Vec2 p, const Vec2 *q) {
     if (((q[i].y > p.y) != (q[j].y > p.y)) && (p.x < (q[j].x - q[i].x) * (p.y - q[i].y) / (q[j].y - q[i].y) + q[i].x)) in = !in;
   return in;
 }
+
+/* Round 468 (task 0444, `perf drag gizmo`): where a script presses the handle `pr.want` - a point on it, in view pixels,
+ * and the screen direction a drag along it takes - from the same projected geometry the hit test below uses (so no pixel
+ * constant lives in a script). A Move arrow: 60 % of the way out (clear of the plane squares and the pivot's free-move
+ * disc); the pivot for Free; a Rotate ring: the camera-facing stretch farthest from the other rings. Nothing is changed;
+ * `pr.found` stays false when the handle isn't drawn with the tool in use or points into the screen. */
+using ProjectFn = std::function<bool(Vec3, Vec2 &)>;
+bool ring_polyline(const ProjectFn &proj, Vec3 pivot, const Vec3 *axis, int k, float radius, Vec3 to_cam, std::vector<Vec2> &pts, std::vector<uint8_t> &ok) {
+  const Vec3 u1 = normalize(cross(axis[k], std::fabs(axis[k].y) < 0.9f ? Vec3(0, 1, 0) : Vec3(1, 0, 0)));
+  const Vec3 u2 = cross(axis[k], u1);
+  pts.assign(65, Vec2(0, 0)), ok.assign(65, 0);
+  for (int s = 0; s <= 64; s++) {
+    const float a = s / 64.0f * 2 * kPi;
+    const Vec3 d = u1 * std::cos(a) + u2 * std::sin(a);
+    if (dot(d, to_cam) < -0.05f) continue;  // (the far half isn't drawn or hit)
+    ok[(size_t)s] = proj(pivot + d * radius, pts[(size_t)s]) ? 1 : 0;
+  }
+  return true;
+}
+
+float other_rings_distance(Vec2 p, const std::vector<std::vector<Vec2>> &pts, const std::vector<std::vector<uint8_t>> &ok, int skip) {
+  float best = 1e9f;
+  for (size_t r = 0; r < pts.size(); r++) {
+    if ((int)r == skip) continue;
+    for (size_t s = 1; s < pts[r].size(); s++)
+      if (ok[r][s] && ok[r][s - 1]) best = std::min(best, dist_to_segment_2d(p, pts[r][s - 1], pts[r][s]));
+  }
+  return best;
+}
+
+void probe_gizmo_handle(GizmoProbe &pr, const ProjectFn &proj, Vec3 pivot, const Vec3 *axis, float size, Tool tool, Vec3 to_cam, Vec2 ps, float view_ring_px, float min_arrow_px) {
+  const int h = pr.want;
+  pr.found = false;
+  const bool do_move = tool == Tool::Move || tool == Tool::Transform, do_rot = tool == Tool::Rotate || tool == Tool::Transform;
+  if (h == H_MOVE_FREE && tool == Tool::Move) {
+    pr.found = true, pr.x = ps.x, pr.y = ps.y, pr.dx = 1.0f, pr.dy = 0.0f;
+    return;
+  }
+  if (h <= H_MOVE_Z && do_move) {
+    Vec2 a, b;
+    if (!proj(pivot, a) || !proj(pivot + axis[h] * size, b) || length(b - a) < min_arrow_px) return;  // (an arrow end-on has no length to press)
+    const Vec2 at = a + (b - a) * 0.6f, d = (b - a) / length(b - a);
+    pr.found = true, pr.x = at.x, pr.y = at.y, pr.dx = d.x, pr.dy = d.y;
+    return;
+  }
+  if (h < H_ROT_X || h > H_ROT_Z || !do_rot) return;
+  const float rscale = tool == Tool::Transform ? 1.25f : 1.0f;
+  std::vector<std::vector<Vec2>> pts(3);
+  std::vector<std::vector<uint8_t>> ok(3);
+  for (int k = 0; k < 3; k++) ring_polyline(proj, pivot, axis, k, size * rscale, to_cam, pts[(size_t)k], ok[(size_t)k]);
+  const int me = h - H_ROT_X;
+  float best = -1.0f;
+  for (size_t s = 1; s < pts[(size_t)me].size(); s++) {
+    if (!ok[(size_t)me][s] || !ok[(size_t)me][s - 1]) continue;
+    const Vec2 a = pts[(size_t)me][s - 1], b = pts[(size_t)me][s], mid = (a + b) * 0.5f;
+    if (length(b - a) < 1e-3f) continue;
+    float room = other_rings_distance(mid, pts, ok, me);  // (the hit test takes the nearest handle: stay clear of the others)
+    if (tool == Tool::Rotate) room = std::min(room, std::fabs(length(mid - ps) - view_ring_px));
+    if (room <= best) continue;
+    best = room;
+    const Vec2 d = (b - a) / length(b - a);
+    pr.found = true, pr.x = mid.x, pr.y = mid.y, pr.dx = d.x, pr.dy = d.y;
+  }
+}
 }  // namespace
+
+int perf_gizmo_handle(const std::string &word) {
+  const std::string w = to_lower(word);
+  if (w == "x") return H_MOVE_X;
+  if (w == "y") return H_MOVE_Y;
+  if (w == "z") return H_MOVE_Z;
+  if (w == "free") return H_MOVE_FREE;
+  if (w == "rx") return H_ROT_X;
+  if (w == "ry") return H_ROT_Y;
+  if (w == "rz") return H_ROT_Z;
+  return -1;
+}
 
 bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
@@ -902,6 +978,11 @@ bool Editor::gizmo_update(const Recti &view) {
   bool do_rot = tool_ == Tool::Rotate || tool_ == Tool::Transform;
   bool do_scale = (tool_ == Tool::Scale || tool_ == Tool::Transform) && !(origin_edit_ && !eo);  // an origin has no size
   float thr = (float)u.px(7);
+  if (gizmo_probe_.want >= 0) {  // (round 468: a script asked where a handle is; nothing below changes)
+    const Vec3 probe_cam = cam_.ortho ? -cam_.forward() : normalize(cam_.position() - pivot);
+    probe_gizmo_handle(gizmo_probe_, proj, pivot, axis, size, tool_, probe_cam, ps, size * 1.15f / world_per_px, (float)u.px(8));
+    gizmo_probe_.drawn = true;
+  }
 
   /* Hover test (skip while dragging). */
   if (drag_ != Drag::Gizmo && scene_hovered_ && !u.any_active()) {

@@ -55,6 +55,12 @@ struct Body {
  * the volume its weights carry, scaled so the whole is `total_mass` kg. */
 Body build(const Scene &scene, const GameObject &root, float total_mass);
 
+/* A body kept while the scene's objects were replaced (round 468): an undo or a redo puts a copy of the scene in place -
+ * the same bones as other objects, so `body_key`, which is by value, still matches - and the kept body's `root` and its
+ * bones' `object` then point into the scene that was swapped out (freed once the redo stack lets it go). This points
+ * them at `root`'s bones again, in armature_bones' order. False when they no longer line up: build the body again. */
+bool rebind(Body &b, const GameObject &root);
+
 /* The whole body at a pose: its center of mass and inertia about it (world), from each bone's matrix now. */
 struct State {
   Vec3 com;

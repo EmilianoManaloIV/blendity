@@ -991,6 +991,8 @@ int Editor::gpu_mesh(const RenderMesh &rm, std::string &err, uint64_t owner) {
    * normalized to NaN and drew the object black (a texture's Physical Size moved a cube from the CPU to the card). */
   const bool tangents = !rm.tangents.empty();
   if (e.id >= 0 && rm.serial != 0 && e.serial == rm.serial && e.tangents == tangents) return e.id;
+  BL_ZONE("gpu mesh");
+  ProfileScope upload_scope{prof_.ms_mesh_uploads, {}};  // (round 468: what a kept mesh doesn't cost - the partial update, or the whole send)
   if (e.tangents == tangents && gpu_mesh_moved(e, rm, err)) return e.id;
   err.clear();  // (a refused partial update falls back to the whole mesh)
   /* Round 458: while the views stream, a frame sends at most mesh_budget_ bytes of meshes new to the card (as gpu_texture's
