@@ -196,6 +196,8 @@ void Editor::draw_puppet_handles() {
   if (!arm) return;
   const auto &handles = puppet_handles();
   if (handles.empty()) return;
+  BL_ZONE("puppet draw");
+  ProfileScope scope{prof_.ms_puppet, {}};  // (round 468: the controls drawn; their hit test below adds to it)
   const std::vector<GameObject *> pins = autopose_pins(*arm, *arm);  // (once a frame, not once a handle)
   const float size = puppet_control_size(*arm);
   for (const auto &[k, gid] : puppet_control_list()) {
@@ -231,6 +233,8 @@ bool Editor::puppet_handles_update(const Recti &view) {
   if (handles.empty()) return puppet_.dragging = 0, false;
   GameObject *arm = rig_above(active_object());
   if (!arm) return puppet_.dragging = 0, false;
+  BL_ZONE("puppet hit");
+  ProfileScope scope{prof_.ms_puppet, {}};  // (round 468: with the controls' drawing, and the drag's frame when one runs)
   const float x = (float)(in.mx - view.x), y = (float)(in.my - view.y);
   const float size = puppet_control_size(*arm);
   puppet_.hover = 0;
@@ -298,6 +302,25 @@ bool Editor::puppet_handles_update(const Recti &view) {
   in.double_clicked[0] = false;  // (review 346: the pin's double-click isn't also the Scene view's Frame Selected)
   puppet_.normal = scene_r3d_.screen_ray(x, y).dir;  // (the drag moves the end in the plane facing the view)
   ui_.consume_click();
+  return true;
+}
+
+/* Round 468 (task 0444): where `perf drag puppet <word>` presses - the control's point as puppet_handles_update projects it
+ * (so the press lands on what the user sees). False with `why` when AutoPosing is off, the rig has no such control or the
+ * point is behind the camera. */
+bool Editor::puppet_press_point(const std::string &word, int &x, int &y, std::string &why) {
+  const int k = puppet_handle_index(word);
+  if (k < 0) return why = "no Puppet control called '" + word + "' (lhand rhand lfoot rfoot head hips)", false;
+  if (!autopose_.on) return why = "AutoPosing is off (autopose on): the Puppet controls aren't shown", false;
+  GameObject *arm = rig_above(active_object());
+  if (!arm) return why = "the active object has no rig", false;
+  puppet_handles();  // (the controls mapped for this rig)
+  GameObject *g = scene_->find(puppet_.part[k]);
+  if (!g) return why = "this rig has no " + word + " control", false;
+  Vec2 sp;
+  float depth = 0.0f;
+  if (!scene_r3d_.project(puppet_control(k, *g, puppet_control_size(*arm)).at, sp, depth)) return why = "the " + word + " control is not on screen", false;
+  x = scene_rect_.x + (int)std::lround(sp.x), y = scene_rect_.y + (int)std::lround(sp.y);
   return true;
 }
 

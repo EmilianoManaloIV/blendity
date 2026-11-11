@@ -7022,6 +7022,660 @@ static void tests_round335() {
   });
 }
 
+/* ---------------------------------------------------------------- round 468 (task 0444): posing, measured */
+/* The skinned tube of R69Rig, twice in one scene: bones, groups and the Skin's armature named by `tag`, the rig `x` along. */
+struct R468Skinned {
+  GameObject *rig = nullptr, *lower = nullptr, *upper = nullptr, *tube = nullptr;
+};
+static R468Skinned r468_skinned(Scene &s, const std::string &tag, float x) {
+  R468Skinned r;
+  r.rig = s.create("Rig" + tag);
+  r.rig->add<Armature>();
+  r.rig->set_local_position({x, 0, 0});
+  r.lower = s.create("Lower" + tag, r.rig);
+  r.lower->add<Bone>();
+  r.upper = s.create("Upper" + tag, r.lower);
+  r.upper->set_local_position({0, 1, 0});
+  r.upper->add<Bone>()->rest_position = {0, 1, 0};
+  auto base = std::make_shared<Mesh>();
+  const int rings = 21, seg = 16;
+  for (int ring = 0; ring < rings; ring++)
+    for (int k = 0; k < seg; k++) {
+      const float a = k * 2.0f * kPi / seg;
+      base->add_vert({0.2f * std::cos(a), ring * 0.1f, 0.2f * std::sin(a)});
+    }
+  for (int ring = 0; ring + 1 < rings; ring++)
+    for (int k = 0; k < seg; k++) {
+      const uint32_t a = (uint32_t)(ring * seg + k), b = (uint32_t)(ring * seg + (k + 1) % seg);
+      base->add_face({a, a + seg, b + seg, b});
+    }
+  VertexGroup lo{"Lower" + tag, {}}, up{"Upper" + tag, {}};
+  for (const Vec3 &p : base->positions) {
+    const float t = std::max(0.0f, std::min(1.0f, (p.y - 0.9f) / 0.2f));
+    lo.weights.push_back(1.0f - t);
+    up.weights.push_back(t);
+  }
+  base->vertex_groups = {lo, up};
+  base->touch();
+  r.tube = s.create("Tube" + tag);
+  r.tube->add<MeshFilter>()->mesh = base;
+  r.tube->add<SkinModifier>()->object = "Rig" + tag;
+  return r;
+}
+
+static GameObject *r468a_rig(Editor &ed) {
+  r34_open(ed);
+  ed.command("rig humanoid");
+  GameObject *rig = ed.scene().find_by_name("Humanoid");
+  if (rig) rig->set_world_position({0, 0, 3.0f});
+  ed.command("camera 0 1.2 9 0 0.8 3");
+  ed.mark_changed_for_test("R468 setup");
+  r34_steps(ed, 3);
+  return rig;
+}
+
+static size_t r468a_log_mark() {
+  std::vector<LogEntry> skipped;
+  return Log::fetch(0, skipped);
+}
+
+static std::string r468a_log_since(size_t at) {
+  std::vector<LogEntry> said;
+  Log::fetch(at, said);
+  std::string all;
+  for (const LogEntry &e : said) all += e.text + "\n";
+  return all;
+}
+
+static void tests_round468() {
+  test("perf drag puppet lhand 24 36 (round 468): with AutoPosing on, the drag on the left hand's control - as the test of Puppet Posing's handles sends it by hand - moves the hand and keys the pose; the line says whether the pose prior ran", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new R468Puppet");
+    ed.command("autopose on");
+    ed.command("focus");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    const Vec3 h0 = hand->world_position();
+    std::vector<LogEntry> skipped;
+    const size_t at = Log::fetch(0, skipped);
+    ed.command("perf drag puppet lhand 24 36");
+    ed.step_frame_headless();
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    const std::string said = r468a_log_since(at);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    %s ok %d: the left hand moved %.1f cm; the clip has %zu tracks\n%s", r.what.c_str(), (int)r.ok, length(hand->world_position() - h0) * 100.0f, clip ? clip->tracks.size() : (size_t)0, said.c_str());
+    CHECK(r.ok && r.what == "puppet lhand" && length(hand->world_position() - h0) > 0.02f && clip && !clip->tracks.empty());
+    CHECK(said.find("perf drag puppet lhand: press ") != std::string::npos && (said.find("the pose prior ran ") != std::string::npos || said.find("the pose prior did not run") != std::string::npos));
+    CHECK(!ed.perf_script_active_for_test() && ed.autopose_locks_for_test().empty());  // (a drag, not a click: nothing pinned)
+    std::remove(resolve_asset_path("Assets/Animations/R468Puppet.anim").c_str());
+  });
+
+  test("perf clip, perf pick and perf drag ruler 0 20 (round 468): a clip on the active rig keys every bone and each IK target at three frames; a scrub on the Animation window's ruler leaves the playhead on frame 20 with Preview on and the bones posed", [] {
+    Editor ed;
+    r468a_rig(ed);
+    ed.command("perf clip");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    size_t bones = 0, targets = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<Bone>()) bones++;
+      const RigControl *rc = g.get<RigControl>();
+      if (rc && rc->role == RigControl::IKTarget) targets++;
+    });
+    std::printf("    the clip: %zu tracks for %zu bones and %zu IK targets; the playhead on %g\n", clip->tracks.size(), bones, targets, ed.anim_frame_for_test());
+    CHECK(clip->tracks.size() == (bones + targets) * 3 && targets == 4 && ed.anim_frame_for_test() == 0.0f);
+    for (const AnimTrack &t : clip->tracks) CHECK(t.keys.size() == 3);
+    ed.command("window Animation");
+    r34_steps(ed, 4);
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    const Quat q0 = chest ? chest->local().rotation : Quat();
+    ed.command("perf drag ruler 0 20");
+    r34_steps(ed, 2);
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    const Quat q1 = chest ? chest->local().rotation : Quat();
+    std::printf("    %s ok %d '%s': the playhead on %g, Preview %d; the chest turned %g\n", r.what.c_str(), (int)r.ok, r.error.c_str(), ed.anim_frame_for_test(), (int)ed.anim_preview_for_test(),
+                std::fabs(q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w));
+    CHECK(r.ok && ed.anim_frame_for_test() == 20.0f && ed.anim_preview_for_test() && !ed.perf_script_active_for_test());
+    /* perf pick: a humanoid part by name or by the handles' short word; an unknown one, or no rig, warns and changes nothing. */
+    ed.command("perf pick Left Hand");
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "LeftHand");
+    ed.command("perf pick rfoot");
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "RightFoot");
+    GameObject *keep = ed.active_object_for_test();
+    const size_t at = r468a_log_mark();
+    ed.command("perf pick wing");
+    CHECK(ed.active_object_for_test() == keep && r468a_log_since(at).find("no humanoid part called") != std::string::npos);
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+    Editor bare;
+    r34_open(bare);
+    bare.clear_selection_for_test();
+    const size_t at2 = r468a_log_mark();
+    bare.command("perf pick chest");
+    bare.command("perf clip");
+    const std::string said = r468a_log_since(at2);
+    /* (Both look for a rig above the active object, then below it, then anywhere in the scene: only a scene with none refuses.) */
+    CHECK(said.find("perf pick: no rig") != std::string::npos && said.find("perf clip: no rig") != std::string::npos);
+  });
+  test("perf pick and perf clip find the rig below a character's root (round 468): with the root of an imported character active - its armature two levels down - a part is picked and the clip is made; with nothing active the scene's rig is used", [] {
+    Editor ed;
+    r34_open(ed);
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    GameObject *model = ed.scene().create("Model");
+    GameObject *character = ed.scene().create("Character");
+    ed.scene().set_parent(model, character);
+    ed.scene().set_parent(rig, model);
+    ed.mark_changed_for_test("A character above its rig");
+    ed.command("select Character");
+    r34_steps(ed, 2);
+    ed.command("perf pick chest");
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Chest");
+    ed.command("select Character");
+    const size_t at = r468a_log_mark();
+    ed.command("perf clip frames 20");
+    const std::string said = r468a_log_since(at);
+    std::printf("    with the character's root active: %s\n", said.c_str());
+    CHECK(said.find("perf clip: 17 bone(s) and 4 IK target(s) keyed at frames 0, 10 and 20") != std::string::npos && said.find("no rig") == std::string::npos);
+    ed.command("perf pick chest");  // (a bone of the rig active: the Animation window's clip is the rig's)
+    CHECK(ed.anim_clip_for_test() != nullptr && ed.anim_clip_for_test()->tracks.size() == 63);
+    ed.clear_selection_for_test();
+    ed.command("perf pick head");
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Head");
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  /* (These two call the scene layer directly, so they read the calling thread's own tallies: a worker of an earlier test's editor
+   * counting into the process-wide ones at the same moment made the exact counts flaky.) */
+  test("the posing counters (round 468): turning one bone counts a skin key and a deform, with its time, for the mesh skinned to that armature and none for a mesh skinned to another", [] {
+    Scene s;
+    R468Skinned a = r468_skinned(s, "A", 0.0f), b = r468_skinned(s, "B", 5.0f);
+    a.tube->evaluated_mesh();
+    b.tube->evaluated_mesh();
+    const PoseCounts p0 = pose_counts_this_thread();
+    b.tube->evaluated_mesh();
+    a.tube->evaluated_mesh();
+    const PoseCounts idle = pose_counts_this_thread() - p0;
+    std::printf("    nothing turned: %llu skin keys, %llu deforms, %llu evaluations\n", (unsigned long long)idle.skin_keys, (unsigned long long)idle.skin_deforms, (unsigned long long)idle.evaluations);
+    CHECK(idle.skin_keys == 2 && idle.skin_deforms == 0 && idle.evaluations == 0);  // (the keys answer; nothing is deformed)
+    a.upper->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.6f));
+    const PoseCounts p1 = pose_counts_this_thread();
+    b.tube->evaluated_mesh();
+    CHECK((pose_counts_this_thread() - p1).skin_deforms == 0 && (pose_counts_this_thread() - p1).evaluations == 0);  // (the other armature's mesh: untouched)
+    a.tube->evaluated_mesh();
+    const PoseCounts d = pose_counts_this_thread() - p1;
+    std::printf("    one bone turned: %llu deform (%.3f ms, setup %.3f), %llu evaluation (%.3f ms)\n", (unsigned long long)d.skin_deforms, d.ms_skin_deforms, d.ms_skin_setup, (unsigned long long)d.evaluations, d.ms_evaluations);
+    /* (What is nested in what, with half a microsecond's slack: a stat's time is kept in whole microseconds, and the
+     *  difference of two such totals as doubles can be an ulp off - 5.012 - 5.000 is not 0.012 to the bit. No time is
+     *  compared with a budget: ADR 0056.) */
+    const double slack = 0.0005;
+    CHECK(d.skin_deforms == 1 && d.evaluations == 1 && d.ms_skin_deforms > 0.0 && d.ms_evaluations + slack >= d.ms_skin_deforms && d.ms_skin_setup <= d.ms_skin_deforms + slack);
+  });
+
+  test("the posing counters (round 468): solve_constraints counts one solve a call - a move when it turned bones - and one name walk for each name it had to search", [] {
+    R69Rig t;
+    GameObject *target = t.s.create("Target"), *pole = t.s.create("Pole");
+    target->set_world_position({0.8f, 1.2f, 0.3f});
+    pole->set_world_position({0.0f, 1.0f, 2.0f});
+    IKConstraint *ik = t.upper->add<IKConstraint>();
+    ik->target = "Target";
+    ik->pole = "Pole";
+    const PoseCounts p0 = pose_counts_this_thread();
+    CHECK(solve_constraints(t.s));
+    const PoseCounts first = pose_counts_this_thread() - p0;
+    const PoseCounts p1 = pose_counts_this_thread();
+    CHECK(!solve_constraints(t.s));  // (unchanged: the inputs' key answers)
+    const PoseCounts again = pose_counts_this_thread() - p1;
+    std::printf("    first call: %llu solve, %llu move, %llu name walks, ik %.3f of %.3f ms; the same again: %llu solve, %llu moves, %llu walks\n", (unsigned long long)first.constraint_solves,
+                (unsigned long long)first.constraint_moves, (unsigned long long)first.name_walks, first.ms_constraints_ik, first.ms_constraints, (unsigned long long)again.constraint_solves,
+                (unsigned long long)again.constraint_moves, (unsigned long long)again.name_walks);
+    /* (The IK part is inside the solve: half a microsecond's slack, as above - the check failed once in a hundred runs
+     *  when both read the same whole microseconds and the two differences of doubles came out an ulp apart.) */
+    CHECK(first.constraint_solves == 1 && first.constraint_moves == 1 && first.name_walks == 2 && first.ms_constraints + 0.0005 >= first.ms_constraints_ik);
+    CHECK(again.constraint_solves == 1 && again.constraint_moves == 0 && again.name_walks == 0);  // (the ids are remembered now)
+    GameObject *other = t.s.create("Other");  // another target: the remembered id's object has the wrong name - the search runs again
+    other->set_world_position({0.5f, 1.0f, 0.2f});
+    ik->target = "Other";
+    const PoseCounts p2 = pose_counts_this_thread();
+    solve_constraints(t.s);
+    CHECK((pose_counts_this_thread() - p2).name_walks == 1 && (pose_counts_this_thread() - p2).constraint_solves == 1);
+  });
+
+  test("the posing counters (round 468): a Record drag counts the clip's serialisations and its time; a release counts one undo step", [] {
+    Editor ed;
+    r468a_rig(ed);
+    ed.command("perf clip");
+    ed.command("anim record on");
+    ed.command("tool rotate");
+    r34_steps(ed, 3);
+    CHECK(ed.anim_record_for_test());
+    const FrameProfile t0 = ed.frame_profile_totals();
+    ed.command("perf drag gizmo rz 60 part chest frames 10");
+    r34_steps(ed, 2);
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    const FrameProfile t1 = ed.frame_profile_totals();
+    std::printf("    ok %d '%s': %llu clip serialisations in the move frames, %llu in all; record %.3f ms; %llu undo step(s)\n", (int)r.ok, r.error.c_str(),
+                (unsigned long long)(r.after.clip_serialisations - r.before.clip_serialisations), (unsigned long long)(t1.clip_serialisations - t0.clip_serialisations), t1.ms_record - t0.ms_record,
+                (unsigned long long)(t1.undo_steps - t0.undo_steps));
+    CHECK(r.ok && t1.clip_serialisations > t0.clip_serialisations && t1.ms_record > t0.ms_record);
+    CHECK(t1.undo_steps - t0.undo_steps == 1);
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("benchscene avatarlikequick (round 468): builds the small stand-in - about 60 bones, 5 skinned meshes and 1 plain, about 20,000 triangles, 4 IK limbs, 9 spring chains with PhysBone settings, 4 constraints whose sources resolve, outlines, shape keys, a clip keying every bone", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    Scene &s = ed.scene();
+    size_t bones = 0, skinned = 0, plain = 0, tris = 0, springs = 0, physbones = 0, outlines = 0, constraints = 0, limbs = 0;
+    bool sources = true, ik_ends = true;
+    s.for_each([&](GameObject &g) {
+      bones += g.get<Bone>() ? 1 : 0;
+      springs += g.get<SpringBone>() ? 1 : 0;
+      physbones += g.get<PhysBoneComponent>() ? 1 : 0;
+      outlines += g.get<Outline>() ? 1 : 0;
+      if (const IKConstraint *ik = g.get<IKConstraint>()) {
+        limbs++;
+        ik_ends = ik_ends && s.find_by_name(ik->target) && s.find_by_name(ik->pole);
+      }
+      if (const VRCConstraintComponent *c = g.get<VRCConstraintComponent>()) {
+        constraints++;
+        float w = 0.0f;
+        for (const VRCConstraintComponent::Source &src : c->sources) sources = sources && s.find_by_name(src.transform) != nullptr, w += src.weight;
+        sources = sources && std::fabs(w - 1.0f) < 1e-5f && c->kind == 2;
+      }
+      const MeshFilter *mf = g.get<MeshFilter>();
+      if (!mf || !mf->mesh || !g.parent || g.parent->name != "AvatarLike") return;
+      (g.get<SkinModifier>() ? skinned : plain)++;
+      for (size_t f = 0; f < mf->mesh->face_count(); f++) tris += mf->mesh->face_size(f) - 2;
+    });
+    const GameObject *head = s.find_by_name("HeadMesh"), *torso = s.find_by_name("TorsoMesh");
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    %zu bones, %zu skinned + %zu plain meshes, %zu triangles, %zu IK limbs, %zu spring chains (%zu PhysBones), %zu constraints, %zu outlines; the clip has %zu tracks\n", bones, skinned, plain, tris, limbs,
+                springs, physbones, constraints, outlines, clip ? clip->tracks.size() : (size_t)0);
+    CHECK(bones >= 55 && bones <= 70 && skinned == 5 && plain == 1 && tris >= 18000 && tris <= 22000);
+    CHECK(limbs == 4 && ik_ends && springs == 9 && physbones == 9 && constraints == 4 && sources && outlines >= 4);
+    CHECK(head && torso && head->get<MeshFilter>()->mesh->shape_keys.size() == 8 && torso->get<MeshFilter>()->mesh->shape_keys.size() == 2);
+    CHECK(clip && clip->tracks.size() == (bones + 4) * 3);
+    CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "AvatarLike");
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("benchscene avatarlikequick (round 468): turning the chest moves vertices of the torso mesh and none of the plain prop; at rest the constraints move nothing; two builds give the same scene text", [] {
+    std::string text[2];
+    for (int round = 0; round < 2; round++) {
+      Editor ed;
+      ed.init_headless(1200, 900);
+      ed.command("benchscene avatarlikequick");
+      Scene &s = ed.scene();
+      text[round] = save_scene_text(s);
+      if (round == 0) {
+        CHECK(!solve_constraints(s));  // (the twist bones already stand where their sources put them)
+        GameObject *torso = s.find_by_name("TorsoMesh"), *prop = s.find_by_name("PropMesh"), *chest = s.find_by_name("Chest");
+        CHECK(torso && prop && chest);
+        if (!torso || !prop || !chest) return;
+        const std::vector<Vec3> t0 = torso->evaluated_mesh()->positions, p0 = prop->evaluated_mesh()->positions;
+        chest->set_local_rotation(Quat::axis_angle({0, 0, 1}, 0.5f));
+        const std::vector<Vec3> t1 = torso->evaluated_mesh()->positions, p1 = prop->evaluated_mesh()->positions;
+        size_t moved = 0, prop_moved = 0;
+        for (size_t v = 0; v < t0.size() && v < t1.size(); v++) moved += length(t1[v] - t0[v]) > 1e-4f ? 1 : 0;
+        for (size_t v = 0; v < p0.size() && v < p1.size(); v++) prop_moved += length(p1[v] - p0[v]) > 1e-6f ? 1 : 0;
+        std::printf("    the chest turned: %zu of %zu torso vertices moved, %zu of %zu prop vertices\n", moved, t0.size(), prop_moved, p0.size());
+        CHECK(moved > 100 && prop_moved == 0 && t0.size() == t1.size());
+      }
+      std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+    }
+    CHECK(!text[0].empty() && text[0] == text[1]);
+  });
+
+  test("benchscene avatarlikequick (round 468): the humanoid parts are found by perf pick and Puppet Posing's handle drags, with AutoPosing on", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    GameObject *rig = ed.scene().find_by_name("AvatarRig");
+    CHECK(rig && humanoid::map(ed.scene(), *rig).valid() && humanoid::map(ed.scene(), *rig).part[humanoid::Chest]);
+    const std::pair<const char *, const char *> picks[] = {{"lhand", "LeftHand"}, {"rhand", "RightHand"}, {"lfoot", "LeftFoot"}, {"rfoot", "RightFoot"}, {"head", "Head"}, {"hips", "Hips"}, {"chest", "Chest"}};
+    for (const auto &p : picks) {
+      ed.command(std::string("perf pick ") + p.first);
+      CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == p.second);
+    }
+    /* Every part the rig analysis can name resolves (the real avatar's arms do not: the stand-in must pass what it fails). A shoulder and toes are
+     * not in create_rig's preset (and the quick avatar has no toes). */
+    const humanoid::Map hm = rig ? humanoid::map(ed.scene(), *rig) : humanoid::Map();
+    int resolved = 0;
+    for (int p = 0; p < humanoid::kParts; p++) {
+      if (p == humanoid::LShoulder || p == humanoid::RShoulder || p == humanoid::LToes || p == humanoid::RToes) continue;
+      ed.command(std::string("perf pick ") + humanoid::kPartNames[p]);
+      resolved += hm.part[p] && ed.active_object_for_test() == hm.part[p] ? 1 : 0;
+    }
+    CHECK(resolved == humanoid::kParts - 4);
+    ed.command("select AvatarLike");
+    ed.command("assist on physics");
+    ed.command("autopose on");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    for (const char *handle : {"lhand", "rhand", "lfoot", "rfoot", "head", "hips"}) {
+      ed.command(std::string("perf drag puppet ") + handle + " 6 8 frames 3");
+      const PerfDragResult &r = ed.perf_drag_result_for_test();
+      std::printf("    puppet %s: ok %d %s\n", handle, (int)r.ok, r.error.c_str());
+      CHECK(r.ok);
+    }
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("benchscene avatarworldquick (round 468): the world's 600 parts and the avatar standing in it", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarworldquick");
+    size_t parts = 0;
+    ed.scene().for_each([&](GameObject &g) { parts += g.name.rfind("Part ", 0) == 0 ? 1 : 0; });
+    const GameObject *avatar = ed.scene().find_by_name("AvatarLike");
+    CHECK(parts == 600 && ed.scene().find_by_name("WorldLike") && ed.scene().find_by_name("Light 69"));
+    CHECK(avatar && avatar->world_position().z < -10.0f && ed.scene().find_by_name("AvatarRig") && ed.scene().find_by_name("TorsoMesh"));
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("perf frames (round 468): logs the posing parts and counts of the frames it stepped, on two lines after its own", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    ed.command("anim play");
+    std::vector<LogEntry> skipped;
+    const size_t at = Log::fetch(0, skipped);
+    ed.command("perf frames 6");
+    ed.command("anim stop");
+    const std::string said = r468a_log_since(at);
+    std::printf("%s", said.c_str());
+    CHECK(said.find("perf frames: 6 frame(s)") != std::string::npos && said.find("perf frames parts ms (a frame's mean; nested, not to add up): ") != std::string::npos);
+    CHECK(said.find("perf frames counts (a frame's mean): ") != std::string::npos && said.find("clip applies") != std::string::npos);
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  /* ---- Round 468, the test engineer's additions (from the acceptance criteria, not from the code) ---- */
+  /* Everything the avatar stand-in must hold, read off a built scene. */
+  struct R468tAvatar {
+    size_t bones = 0, skinned = 0, plain = 0, tris = 0, springs = 0, limbs = 0, constraints = 0, outlines = 0, shape_keys = 0;
+    bool ik_ends = true, sources = true, skins_resolve = true;
+  };
+  auto r468t_read = [](Scene &s) {
+    R468tAvatar a;
+    s.for_each([&](GameObject &g) {
+      a.bones += g.get<Bone>() ? 1 : 0;
+      a.springs += g.get<SpringBone>() ? 1 : 0;
+      a.outlines += g.get<Outline>() ? 1 : 0;
+      if (const IKConstraint *ik = g.get<IKConstraint>()) {
+        a.limbs++;
+        a.ik_ends = a.ik_ends && s.find_by_name(ik->target) && s.find_by_name(ik->pole);
+      }
+      if (const VRCConstraintComponent *c = g.get<VRCConstraintComponent>()) {
+        a.constraints++;
+        a.sources = a.sources && !c->sources.empty();
+        for (const VRCConstraintComponent::Source &src : c->sources) a.sources = a.sources && s.find_by_name(src.transform) != nullptr;
+      }
+      const MeshFilter *mf = g.get<MeshFilter>();
+      if (!mf || !mf->mesh || !g.parent || g.parent->name != "AvatarLike") return;
+      if (const SkinModifier *sk = g.get<SkinModifier>()) {
+        a.skinned++;
+        a.skins_resolve = a.skins_resolve && s.find_by_name(sk->object) != nullptr;
+      }
+      else a.plain++;
+      a.shape_keys += mf->mesh->shape_keys.size();
+      for (size_t f = 0; f < mf->mesh->face_count(); f++) a.tris += mf->mesh->face_size(f) - 2;
+    });
+    return a;
+  };
+
+  test("benchscene avatarlike (round 468): 270 to 300 bones, 15 skinned meshes and 1 plain, 133,000 to 147,000 triangles, 4 IK limbs whose targets and poles exist, 60 spring chains or more, 28 VRChat constraints whose sources all resolve, outlines, shape keys, a clip with a track for every bone", [r468t_read] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlike");
+    const R468tAvatar a = r468t_read(ed.scene());
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    std::printf("    %zu bones, %zu skinned + %zu plain, %zu triangles, %zu IK limbs, %zu spring chains, %zu constraints, %zu outlines, %zu shape keys; clip %zu tracks\n", a.bones, a.skinned, a.plain, a.tris, a.limbs,
+                a.springs, a.constraints, a.outlines, a.shape_keys, clip ? clip->tracks.size() : (size_t)0);
+    CHECK(a.bones >= 270 && a.bones <= 300 && a.skinned == 15 && a.plain == 1 && a.tris >= 133000 && a.tris <= 147000);
+    CHECK(a.limbs == 4 && a.ik_ends && a.springs >= 60 && a.constraints == 28 && a.sources && a.skins_resolve && a.outlines > 0 && a.shape_keys >= 60);
+    /* a track for every bone: each Bone has a Rotation track in the clip (a path ends in its name) */
+    CHECK(clip != nullptr);
+    if (clip) {
+      size_t keyed = 0, bones = 0;
+      ed.scene().for_each([&](GameObject &g) {
+        if (!g.get<Bone>()) return;
+        bones++;
+        for (const AnimTrack &t : clip->tracks)
+          if (t.property == "Rotation" && !t.keys.empty() && t.path.size() >= g.name.size() && t.path.compare(t.path.size() - g.name.size(), g.name.size(), g.name) == 0) {
+            keyed++;
+            break;
+          }
+      });
+      CHECK(keyed == bones);
+    }
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("benchscene avatarlikequick (round 468): turning an upper arm moves vertices of exactly the meshes skinned to it or to what it carries, and none of the plain prop", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    Scene &s = ed.scene();
+    GameObject *arm = s.find_by_name("LeftUpperArm");
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    std::set<std::string> carried;  // the bone and everything under it
+    std::function<void(GameObject *)> walk = [&](GameObject *g) {
+      carried.insert(g->name);
+      for (GameObject *c : g->children) walk(c);
+    };
+    walk(arm);
+    struct Row {
+      GameObject *g;
+      bool weighted;
+      std::vector<Vec3> before;
+    };
+    std::vector<Row> rows;
+    s.for_each([&](GameObject &g) {
+      const MeshFilter *mf = g.get<MeshFilter>();
+      if (!mf || !mf->mesh || !g.parent || g.parent->name != "AvatarLike") return;
+      Row r{&g, false, g.evaluated_mesh()->positions};
+      for (const VertexGroup &vg : mf->mesh->vertex_groups)
+        if (carried.count(vg.name))
+          for (float w : vg.weights) r.weighted = r.weighted || w > 0.0f;
+      rows.push_back(std::move(r));
+    });
+    arm->set_local_rotation(arm->local().rotation * Quat::axis_angle({0, 0, 1}, 0.7f));
+    int moved_meshes = 0, wrong = 0;
+    for (Row &r : rows) {
+      const std::vector<Vec3> after = r.g->evaluated_mesh()->positions;
+      size_t moved = 0;
+      for (size_t v = 0; v < after.size() && v < r.before.size(); v++) moved += length(after[v] - r.before[v]) > 1e-5f ? 1 : 0;
+      std::printf("    %s: weighted %d, %zu of %zu vertices moved\n", r.g->name.c_str(), (int)r.weighted, moved, after.size());
+      moved_meshes += moved > 0 ? 1 : 0;
+      wrong += (moved > 0) != r.weighted ? 1 : 0;
+    }
+    CHECK(moved_meshes >= 1 && wrong == 0);
+  });
+
+  test("benchscene avatarworld (round 468): worldlike's 600 parts and its lights with the full avatar standing in it", [r468t_read] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarworld");
+    size_t parts = 0;
+    ed.scene().for_each([&](GameObject &g) { parts += g.name.rfind("Part ", 0) == 0 ? 1 : 0; });
+    const R468tAvatar a = r468t_read(ed.scene());
+    CHECK(parts == 600 && a.skinned == 15 && a.bones >= 270 && ed.scene().find_by_name("WorldLike") != nullptr);
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("benchscene avatarlikequick twice, over an object already called AvatarLike or Humanoid, and undone (round 468): one avatar each time, every name resolving; undo takes the avatar away and redo brings it back", [r468t_read] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("rig humanoid");  // a rig named Humanoid and (below) an object named AvatarLike are in the scene first
+    ed.scene().create("AvatarLike");
+    ed.mark_changed_for_test("R468t before");
+    ed.command("benchscene avatarlikequick");
+    auto roots = [&] {
+      int n = 0;
+      ed.scene().for_each([&](GameObject &g) { n += g.name == "AvatarLike" ? 1 : 0; });
+      return n;
+    };
+    const R468tAvatar one = r468t_read(ed.scene());
+    CHECK(roots() == 1 && one.skinned == 5 && one.skins_resolve && one.sources && one.ik_ends);
+    ed.command("benchscene avatarlikequick");  // again, in the same editor: replaces, never doubles
+    const R468tAvatar two = r468t_read(ed.scene());
+    CHECK(roots() == 1 && two.bones == one.bones && two.skinned == 5 && two.skins_resolve && two.sources && two.ik_ends && two.constraints == one.constraints);
+    /* A bench scene starts a new scene (as worldlike does): what stood there - the Humanoid and the first AvatarLike - is gone, and the
+     * undo history begins at the build. Undo takes the avatar away (the starter scene), redo brings the same one back. */
+    CHECK(ed.scene().find_by_name("Humanoid") == nullptr);
+    ed.command("undo");
+    ed.step_frame_headless();
+    const R468tAvatar back = r468t_read(ed.scene());
+    CHECK(roots() == 0 && back.bones == 0 && back.skinned == 0);
+    ed.command("redo");
+    ed.step_frame_headless();
+    const R468tAvatar again = r468t_read(ed.scene());
+    CHECK(roots() == 1 && again.skinned == 5 && again.bones == one.bones && again.skins_resolve && again.sources && again.ik_ends);
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("perf clip twice and perf pick spellings (round 468): a second perf clip leaves one clip with a track for every bone and target; part names are found in any case, with spaces, underscores or dashes", [] {
+    Editor ed;
+    r468a_rig(ed);
+    ed.command("perf clip");
+    const size_t tracks = ed.anim_clip_for_test() ? ed.anim_clip_for_test()->tracks.size() : 0;
+    ed.command("perf clip");
+    CHECK(ed.anim_clip_for_test() != nullptr && ed.anim_clip_for_test()->tracks.size() == tracks && tracks == 63);
+    for (const char *spelling : {"LEFTHAND", "left hand", "Left_Hand", "left-hand", "  Left   Hand ", "lHand", "LHAND"}) {
+      ed.command("select Chest");
+      ed.command(std::string("perf pick ") + spelling);
+      CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "LeftHand");
+    }
+    for (const char *unknown : {"", "lefthandd", "42", "left"}) {
+      ed.command("select Chest");
+      ed.command(std::string("perf pick ") + unknown);
+      CHECK(ed.active_object_for_test() && ed.active_object_for_test()->name == "Chest");
+    }
+    std::remove(resolve_asset_path("Assets/Animations/Perf Clip.anim").c_str());
+  });
+
+  test("moves in place counted (round 468): a smooth-by-angle mesh whose bend crosses its angle between two builds counts a refusal for a new split and a whole build; a move that keeps the split counts an in-place move and no refusal", [] {
+    auto make = [] {
+      MeshPtr g = primitives::grid(4.0f, 12, 12);
+      g->smooth = true;
+      g->smooth_angle = 30.0f;
+      return g;
+    };
+    {
+      MeshPtr m = make();
+      (void)m->render_mesh();
+      m->positions[m->positions.size() / 2].y += 0.003f;  // (a hair: every corner of a vertex still shares a normal)
+      m->touch();
+      const MeshCounts c0 = mesh_counts();
+      (void)m->render_mesh();
+      const MeshCounts d = mesh_counts() - c0;
+      std::printf("    a hair's move: %llu in place, %llu refused, %llu for a split, %llu built whole\n", (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused,
+                  (unsigned long long)d.in_place_split, (unsigned long long)d.full_builds);
+      CHECK(d.in_place >= 1 && d.in_place_refused == 0 && d.in_place_split == 0 && d.full_builds == 0);
+    }
+    {
+      MeshPtr m = make();
+      (void)m->render_mesh();
+      m->positions[m->positions.size() / 2].y += 1.5f;  // (a spike: the faces around it now meet at far more than 30 degrees)
+      m->touch();
+      const MeshCounts c0 = mesh_counts();
+      const RenderMesh &rm = m->render_mesh();
+      const MeshCounts d = mesh_counts() - c0;
+      std::printf("    a spike: %llu in place, %llu refused, %llu for a split, %llu built whole\n", (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused,
+                  (unsigned long long)d.in_place_split, (unsigned long long)d.full_builds);
+      CHECK(d.in_place_refused >= 1 && d.in_place_split >= 1 && d.full_builds >= 1 && d.in_place == 0);
+      CHECK(rm.positions.size() > m->positions.size());  // (the build split the spike's vertex)
+    }
+  });
+
+  /* Found by the stress section `posing` (the libraries build, the card's rows): the body model AutoPosing keeps is keyed
+   * by value, an undo swaps the scene for a copy with the same values, and the next Puppet drag's solver walked the kept
+   * model's bones - objects of the swapped-out scene, freed by the edit in between. Access violation in body::hips_of. */
+  test("a Puppet drag after an undo and another edit (round 468): the body model kept for AutoPosing points at the bones of the scene now open - not at the scene the undo swapped out - and the hand follows the handle again", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    const std::string name = create_rig(ed.scene(), false, Vec3(0.0f))->name;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + name);
+    ed.command("autopose on");
+    ed.command("focus");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("perf drag puppet lhand 24 36 frames 4");
+    ed.step_frame_headless();
+    CHECK(ed.perf_drag_result_for_test().ok && ed.autopose_body_for_test().valid() && ed.autopose_body_builds_for_test() == 1);
+    const body::Body before = ed.autopose_body_for_test();
+    ed.command("undo");  // (the scene is a copy now: the same bones, other objects)
+    ed.step_frame_headless();
+    ed.command("create Cube");  // (an edit: the redo stack lets the swapped-out scene go)
+    ed.mark_changed_for_test("A cube");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("select " + name);
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    const Vec3 h0 = hand->world_position();
+    ed.command("perf drag puppet lhand 24 36 frames 4");
+    ed.step_frame_headless();
+    std::set<const GameObject *> here;  // (addresses only: a stale pointer is never read)
+    ed.scene().for_each([&](GameObject &g) { here.insert(&g); });
+    const body::Body &kept = ed.autopose_body_for_test();
+    size_t elsewhere = 0;
+    for (const body::BoneMass &bm : kept.bones) elsewhere += here.count(bm.object) ? 0 : 1;
+    std::printf("    the kept body: %zu bones, %zu of them not in the open scene, its root %s; the hand moved %.1f cm; mass %.2f kg (before the undo %.2f)\n", kept.bones.size(), elsewhere,
+                here.count(kept.root) ? "in it" : "NOT in it", length(hand->world_position() - h0) * 100.0f, kept.mass, before.mass);
+    CHECK(kept.valid() && here.count(kept.root) == 1 && elsewhere == 0);
+    CHECK(kept.bones.size() == before.bones.size() && kept.mass == before.mass && ed.autopose_body_builds_for_test() == 1);  // (the same body, pointed again: weighed once)
+    CHECK(ed.perf_drag_result_for_test().ok && length(hand->world_position() - h0) > 0.02f);
+  });
+
+  test("the Centre of Mass after an undo and another edit (round 468): its body is read every frame - its armature and bones are the open scene's objects, not those of the scene the undo swapped out", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    const std::string name = create_rig(ed.scene(), false, Vec3(0.0f))->name;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + name);
+    ed.command("anim new R468Com");
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    clip->track("", "Position", 1).set_key(0.0f, 0.0f, AnimLinear);
+    clip->track("", "Position", 1).set_key(10.0f, 0.2f, AnimLinear);
+    clip->touch();
+    ed.command("body show on");
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    CHECK(ed.body_view_body_for_test().valid() && ed.body_builds_for_test() == 1);
+    /* Undo steps that change nothing the body is keyed on and leave the rig active (another object made active would
+     * drop the body: the Animation window follows the selection). */
+    ed.mark_changed_for_test("A step");
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.command("undo");  // (the scene is a copy now: the same bones, other objects)
+    for (int i = 0; i < 2; i++) ed.step_frame_headless();
+    ed.mark_changed_for_test("Another step");  // (an edit: the redo stack lets the swapped-out scene go)
+    for (int i = 0; i < 4; i++) ed.step_frame_headless();
+    std::set<const GameObject *> here;  // (addresses only: a stale pointer is never read)
+    ed.scene().for_each([&](GameObject &g) { here.insert(&g); });
+    const body::Body &kept = ed.body_view_body_for_test();
+    size_t elsewhere = 0;
+    for (const body::BoneMass &bm : kept.bones) elsewhere += here.count(bm.object) ? 0 : 1;
+    std::printf("    the Centre of Mass's body: %zu bones, %zu of them not in the open scene, its root %s; built %zu time(s)\n", kept.bones.size(), elsewhere, here.count(kept.root) ? "in it" : "NOT in it",
+                ed.body_builds_for_test());
+    CHECK(kept.valid() && here.count(kept.root) == 1 && elsewhere == 0);
+    CHECK(ed.body_builds_for_test() == 1);  // (the body kept through the undo and pointed again - a rebuild would pass the check above without the fix)
+    std::remove(resolve_asset_path("Assets/Animations/R468Com.anim").c_str());
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -7050,4 +7704,5 @@ void run_animation_tests() {
   tests_round149_to_round151();
   tests_round174();
   tests_round226();
+  tests_round468();
 }

@@ -35,7 +35,9 @@ bool Editor::body_refresh() {
     return false;
   }
   const uint64_t key = path_key(*scene_, *root, *arm, *clip);
-  if (key == body_.key && body_.body.valid()) return true;
+  /* (Round 468: kept by value - after an undo or a redo the body's bones are another scene's objects: pointed at this
+   *  scene's again, as AutoPosing's is.) */
+  if (key == body_.key && body_.body.valid() && body::rebind(body_.body, *arm)) return true;
   body_.key = key;
   body_.body = body::build(*scene_, *arm, arm->get<Armature>()->body_mass);
   body_.builds++;

@@ -2380,6 +2380,22 @@ void Editor::draw_profiler_gpu_tracer(const char *what, const PTStats &s, double
   if (wall_ms > 0.0) stat(strprintf("%s: GPU busy over %s%s", what, of_what, cards > 1 ? " (a card's average)" : ""), strprintf("%.0f %% of %.0f ms", 100.0 * s.gpu_busy_ms / (wall_ms * cards), wall_ms));
 }
 
+/* Round 468 (task 0444): where the last frame's posing went - the skin, the constraints, the clip, Record, the undo step
+ * and the rest of what a rig costs a frame. Shown only when a frame in the last second did posing work, so a scene
+ * without rigs shows nothing new. The parts nest in each other and in the frame (not to add up); a row is listed when it
+ * is not zero. `perf status` and `--windowed-check` print the same lists. */
+void Editor::draw_profiler_posing(const std::function<void(const std::string &, const std::string &)> &stat) {
+  if (clock_now() - pose_work_at_ > 1.0) return;
+  stat("Posing (the last frame)", "parts nest in each other: not to add up");
+  for (const auto &[name, ms] : posing_parts(prof_last_, pose_last_, mesh_last_)) {
+    const std::string n = name;
+    if (ms <= 0.0 || n == "scene view" || n == "game view" || n == "gpu path" || n == "ui" || n.rfind("window ", 0) == 0) continue;  // (the frame's own rows are above)
+    stat("Posing: " + n, strprintf("%.2f ms", ms));
+  }
+  for (const auto &[name, v] : posing_counts(prof_last_, pose_last_, mesh_last_))
+    if (v > 0.0) stat(std::string("Posing count: ") + name, strprintf("%.0f", v));
+}
+
 void Editor::draw_profiler(const Recti &r) {
   auto &u = ui_;
   ui::Id sid = u.id("prof_scroll");
@@ -2463,6 +2479,7 @@ void Editor::draw_profiler(const Recti &r) {
                  mc.ms_full_builds, (unsigned long long)mc.in_place, mc.ms_in_place));
   stat("Tangents / edge tables built", strprintf("%llu (%.1f ms) / %llu (%.1f ms)", (unsigned long long)mc.tangent_builds, mc.ms_tangents,
                                                    (unsigned long long)mc.edge_builds, mc.ms_edges));
+  draw_profiler_posing(stat);
 
   lay.space(u.px(6));
   draw_performance_settings(&lay);
