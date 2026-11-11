@@ -1413,6 +1413,7 @@ void Editor::enter_edit_mode() {
   if (playing_) return;
   if (pilot_cam_) toggle_pilot_camera();  // piloting hides the editor's overlays: editing needs them back
   GameObject *g = active_object();
+  if (blockout_refuses_edit_mode(g)) return;  // (round 477, ADR 0129: a Blockout's mesh is rebuilt from its pieces; a piece has none)
   if (!g || !g->get<MeshFilter>() || !g->get<MeshFilter>()->mesh) {
     Log::warn("Edit Mode needs an active object with a MeshFilter");
     return;

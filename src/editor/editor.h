@@ -49,6 +49,7 @@
 #include "../scene/export.h"
 #include "../scene/import.h"
 #include "../scene/scene.h"
+#include "../scene/blockout_object.h"  // (round 477)
 #include "../scene/board.h"
 #include "../scene/quad_remesh.h"
 #include "../scene/dyntopo.h"
@@ -2161,7 +2162,7 @@ class Editor {
     uint64_t epoch = edit_epoch::now();
     ~WalkScope() { e.walk_done(m, epoch); }
   };
-  WalkMark shapes_walk_, collider_walk_, focus_walk_, icon_walk_;
+  WalkMark shapes_walk_, collider_walk_, focus_walk_, icon_walk_, blockout_walk_;
   /* (Round 449: render_static_overlays_kept's record and what it was made from.) */
   struct OverlayKeep {
     WalkMark mark;
@@ -3837,6 +3838,53 @@ class Editor {
   void camera_dof(RenderTarget &rt, const Mat4 &view, const Mat4 &proj, Vec3 eye, Vec3 forward, const Camera *cam, float aspect, float vfov_deg);
   void update_camera_focus();  // cameras keeping a picked point in focus
   void update_procedural_shapes();  // parametric shapes: rebuild on change, let go once edited
+  /* Round 477 (ADR 0129; editor/blockout_editor.cpp): Blockouts' meshes follow their pieces, built on a worker. */
+  void update_blockouts(bool force = false);
+  struct BlockoutJob {
+    uint64_t obj = 0, hash = 0;
+    std::string name;
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    std::unique_ptr<blockout::Cache> cache;
+    std::atomic<bool> cancel{false}, done{false};
+    std::thread thread;
+    /* What the thread made. */
+    MeshPtr mesh;
+    blockout::Faces faces;
+    blockout::Report report;
+    bool ok = false;
+    /* A newer snapshot was asked for while this job ran (its hash, so a frame asks once): the pieces as they then are start
+     * when this one has returned - the latest wins, nothing queues. */
+    bool has_next = false;
+    uint64_t next_hash = 0;
+    ~BlockoutJob() {
+      cancel.store(true);
+      if (thread.joinable()) thread.join();
+    }
+  };
+  std::vector<std::unique_ptr<BlockoutJob>> blockout_jobs_;
+  uint64_t blockout_main_builds_ = 0, blockout_started_ = 0, blockout_landed_ = 0, blockout_cancelled_ = 0;
+  bool blockout_hold_ = false;  // (a test's: finished builds wait in their jobs, as a slow build's result does)
+  /* ADR 0129 decision 6: the running build finishes and lands though a newer snapshot waits, then the newest starts - so a drag
+   * that never pauses shows the mesh follow, one build behind. On (the measurement's other row, task 0453): a newer snapshot
+   * cancels the running build and only the newest lands; a piece moved every frame then shows no new mesh until it rests. */
+  bool blockout_cancel_stale_ = false;
+  void blockout_request(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash);
+  void blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash);
+  void blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t piece_count, MeshPtr mesh, blockout::Faces &&faces, const blockout::Report &report, bool ok);
+  void blockout_unwant(uint64_t obj);  // (the pieces are back at what the mesh is: the running build and the waiting one dropped)
+  void blockout_finish(size_t index);  // (a returned job: its result adopted if still wanted, its cache given back, the next started)
+  void blockout_jobs_poll();
+  void blockout_jobs_wait(uint64_t obj = 0);  // (the running builds of `obj` - 0 all - joined and adopted: a caller that needs the mesh now)
+  void blockout_command(const std::vector<std::string> &t);
+  std::vector<std::pair<std::string, bool>> blockout_status_lines(const GameObject &g, const Blockout &b) const;  // (text, a warning)
+  GameObject *create_blockout(const std::string &first_piece);
+  GameObject *create_blockout_piece(const std::string &what);
+  void draw_blockouts();  // (the pieces' wires)
+  void blockout_menu_items(bool child);  // (the GameObject menu's, the Hierarchy's + and the Tools window's: New Blockout, Add / Subtract Box, Cylinder, Sphere)
+  uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y);  // (the piece that made the face under a view pixel; 0: none)
+  void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
+  bool blockout_refuses_edit_mode(const GameObject *g);
   void join_selected();
   GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
@@ -6781,6 +6829,21 @@ class Editor {
   /* Round 413. */
   bool eval_job_request(const GameObject &g, int kind, uint64_t key);  // (GameObject::slow_eval_hook's: true when a worker is on it)
   bool eval_jobs_running_for_test() const { return !eval_jobs_.empty(); }
+  /* Round 477 (ADR 0129): the live Blockout rebuild's counters - kernel calls made on the main thread (0 while workers are on),
+   * builds started on a worker, meshes landed, jobs cancelled or superseded. */
+  uint64_t blockout_main_builds_for_test() const { return blockout_main_builds_; }
+  uint64_t blockout_started_for_test() const { return blockout_started_; }
+  uint64_t blockout_landed_for_test() const { return blockout_landed_; }
+  uint64_t blockout_cancelled_for_test() const { return blockout_cancelled_; }
+  bool blockout_jobs_running_for_test() const { return !blockout_jobs_.empty(); }
+  bool blockout_jobs_done_for_test() const {  // (every worker has returned; its result may still wait for the poll)
+    for (const auto &j : blockout_jobs_)
+      if (!j->done.load()) return false;
+    return true;
+  }
+  void blockout_poll_for_test() { blockout_jobs_poll(); }  // (the frame's poll alone: what a frame does after its views moved a piece)
+  void set_blockout_cancel_stale_for_test(bool on) { blockout_cancel_stale_ = on; }  // (the stress row measures both)
+  void hold_blockout_landing_for_test(bool on) { blockout_hold_ = on; }  // (the poll adopts nothing while held: the mesh is the last one, as during a slow build)
   bool mesh_job_running_for_test() const { return mesh_job_ && !mesh_job_->done.load(); }
   bool mesh_job_started_for_test() const { return mesh_job_ != nullptr; }  // (round 420: started, landed or not)
   bool save_job_running_for_test() const { return save_job_ && !save_job_->done.load(); }

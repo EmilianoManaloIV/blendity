@@ -2177,6 +2177,23 @@ The filter (round 466) is told how noisy each texel is. While baking, every texe
 ! cmd:lighting denoiser atrous; bake | 10. Bake with the old A-Trous filter, wait for it, then save and measure as in steps 2-5
 ! cmd:lighting denoiser variance | 11. Back to the filter guided by measured noise (the default)
 )"},
+    {"Blockout: pieces that build one mesh", "Boxes, cylinders and spheres that add or cut, and one mesh that follows them", R"(
+A Blockout is a room, a wall, a building made the way a level designer blocks one out: not by editing a mesh but by placing pieces - boxes, cylinders, spheres - that add to the shape or cut from it. The Blockout object carries the result, one closed mesh; the pieces are the objects below it and the only thing you edit. Move, turn, scale or resize a piece, switch it off, delete it, drag it under another parent: the mesh is made again from the pieces, on a worker, so the editor never waits for it.
+# Try it
+! cmd:blockout new | A Blockout with one 2 m box: GameObject > Blockout > New Blockout (the piece "Box" is selected)
+! cmd:blockout add cylinder subtract 0.5 3 | A cylinder of radius 0.5 that cuts a hole through the box (Subtract)
+! cmd:blockout info | What was built: pieces used, faces, the path taken, the time
+! cmd:blockout set cell 0.05 | A finer grid for the field path (a build without Blender's libraries meshes every cluster by it)
+# The pieces
+- Add joins a piece to the mesh; Subtract cuts it out of everything added, whatever the order they sit in.
+- A piece has no mesh of its own: it shows as a wire when it or its Blockout is selected (orange: Add, yellow: Subtract). Click the result in the Scene view and the piece that made that face is selected.
+- Pieces keep their transforms: a turned parent turns its pieces; the Blockout moved, turned or scaled as a whole moves the mesh without a rebuild.
+- Edit Mode is refused on a Blockout: its mesh is rebuilt from its pieces, so a hand edit would be lost. Move or resize the pieces instead.
+- The Inspector's status lines say how the last build went: pieces used and skipped (with why), faces, the path (exact or field), and any places the field path could not resolve - lower Field Cell for those.
+? A Blockout has a box and a cylinder cutting a hole. You drag the cylinder with the Move gizmo. Does the Scene view's mesh follow every frame of the drag? | It follows as builds land: each frame the pieces change, the mesh is asked for again on a worker, the build that is running finishes and is shown, then the newest state is built - so the mesh is one build behind the piece, never half done. The wire of the piece follows the cursor at once.
+? Why does Edit Mode refuse a Blockout instead of turning it into an ordinary mesh? | The pieces are the document and the mesh is derived from them: converting would drop the pieces, and any edit made to the mesh would be overwritten by the next rebuild. Move or resize the pieces; a later round adds Bake to Mesh for when you want an ordinary mesh.
+@ source/blender/modifiers/intern/MOD_boolean.cc (Blender's Boolean modifier with a Collection of operands)
+)"},
 };
 
 int lesson_count() { return (int)(sizeof(kLessons) / sizeof(kLessons[0])); }

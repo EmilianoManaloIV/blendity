@@ -8,6 +8,7 @@
 #include "sequence.h"
 #include "curve.h"
 #include "stroke_object.h"
+#include "blockout_object.h"  // (Blockout's and BlockoutPiece's registration)
 
 #include "../core/core.h"
 #include "../platform/platform.h"
@@ -190,6 +191,12 @@ void register_builtin_components() {
              "Curve object (Bezier / Poly spline)");
   reg<ScrewModifier>("Mesh", "Sweeps the edges round an axis (a lathe): vases, bottles, springs.", "Screw modifier");
   reg<ProceduralShape>("Mesh", "Keeps the settings of a parametric shape (box, stairs, arch, pipe...) and rebuilds the mesh when they change.", "Add Mesh + Adjust Last Operation; Extra Objects shapes");
+  reg<Blockout>("Mesh", "A mesh built from the pieces below it: boxes, cylinders and spheres that add or cut. Move, turn or resize a piece and\n"
+                        "the mesh follows (rebuilt off the frame). Edit the pieces, not the mesh.",
+                "Boolean modifiers with Cutters; ProBuilder / UModeler booleans; a CSG blockout");
+  reg<BlockoutPiece>("Mesh", "A shape that adds to the Blockout above it or cuts from it (a door, a window). It has no mesh of its own: the\n"
+                             "Blockout's mesh is its result.",
+                     "a Boolean object (Union / Difference) or a ProBuilder shape in a CSG blockout");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
   reg<Strokes>("Mesh", "Brush strokes as geometry (task 0248): cards and ribbons painted onto surfaces, the object's mesh rebuilt from them with custom normals (Own, Surface or Canopy).", "Grease Pencil strokes / a cards mesh with custom normals");
   reg<ProbeVolume>("Rendering",

@@ -93,6 +93,7 @@ size_t Editor::zfight_fix(int index) {
       const uint32_t f = k ? z.face_b : z.face_a;
       GameObject *g = scene_->find(id);
       if (!g || !g->get<MeshFilter>() || !g->get<MeshFilter>()->mesh) continue;
+      if (blockout_refuses_edit_mode(g)) continue;  // (round 477: a Blockout's faces come back at its next rebuild - move the piece)
       auto &d = drop[id];
       d.resize(g->get<MeshFilter>()->mesh->face_count(), 0);
       if (f < d.size()) d[f] = 1;

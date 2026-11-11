@@ -256,6 +256,10 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
     if (id)
       if (GameObject *g = scene_->find(id)) hit = g->id;
   }
+  /* Round 477 (ADR 0129): a click on a Blockout's mesh selects the piece that made the face under the cursor. */
+  if (GameObject *bo = hit ? scene_->find(hit) : nullptr)
+    if (bo->get<Blockout>())
+      if (const uint64_t piece = blockout_pick_piece(*bo, mx - view.x, my - view.y)) hit = piece;
   if (hit) select(hit, mode);
   else if (mode == SEL_REPLACE) clear_selection();
 }

@@ -2266,6 +2266,7 @@ void Editor::trace_picture(RenderJob &j, PathTracer &pt) {
 }
 
 void Editor::start_final_render(bool preview, bool open_window) {
+  blockout_jobs_wait();  // (round 477, ADR 0129: a render's snapshot holds the mesh the pieces make now)
   struct Timed {  // (round 437: the start's time in the frame's profile, whichever way it returns)
     double &into;
     ScopedTimer t;

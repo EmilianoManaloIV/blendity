@@ -89,6 +89,18 @@ void Editor::draw_tools_window(const Recti &r) {
     grid(prims, 4);
     u.label(lay.row(), "Parametric shapes (keep their settings)", u.theme.text_dim);
     grid(shapes, 4);
+    u.label(lay.row(), "Blockout (pieces that build one mesh)", u.theme.text_dim);
+    std::vector<GridButton> blockout;
+    struct BlockoutKind { const char *label, *kind; };
+    for (const BlockoutKind &k : {BlockoutKind{"New Blockout", "Blockout"}, {"Add Box", "Blockout Piece: Box"}, {"Add Cylinder", "Blockout Piece: Cylinder"},
+                                  {"Add Sphere", "Blockout Piece: Sphere"}, {"Subtract Box", "Blockout Piece: Subtract Box"},
+                                  {"Subtract Cylinder", "Blockout Piece: Subtract Cylinder"}, {"Subtract Sphere", "Blockout Piece: Subtract Sphere"}}) {
+      const std::string kind = k.kind;
+      blockout.push_back({k.label, kind == "Blockout" ? "A Blockout with one box: add and subtract pieces under it and its mesh follows (GameObject > Blockout)."
+                                                      : "A piece under the selected Blockout (a new Blockout when none is selected): GameObject > Blockout.",
+                          true, [this, kind] { create_object(kind); }});
+    }
+    grid(blockout, 4);
   }
   if (section("Draw", FocusDraw)) {
     std::vector<GridButton> bs;

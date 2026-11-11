@@ -59,6 +59,7 @@ static int headless(int argc, char **argv) {
     ed.command(c);
     for (int i = 0; i < 100000 && ed.file_jobs_running(); i++) ed.step_frame_headless();  // (round 413: a save, open, import or export lands before the next line - as the line ran whole before)
   }
+  ed.command("blockout wait");  // (round 477, ADR 0129: the picture shows the mesh the Blockouts' pieces make, not one a worker is still on)
   for (auto [x, y, button, mods] : clicks) {
     platform::Event e;
     e.x = x;

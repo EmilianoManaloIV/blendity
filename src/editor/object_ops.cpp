@@ -73,6 +73,10 @@ void Editor::join_selected() {
     Log::warn("Join: select two or more mesh objects (Ctrl+click); the last one selected keeps the result");
     return;
   }
+  /* Round 477: a Blockout neither takes other meshes in (its next rebuild would drop them) nor is taken in (its pieces would go). */
+  if (blockout_refuses_edit_mode(a)) return;
+  for (GameObject *o : others)
+    if (blockout_refuses_edit_mode(o)) return;
   MeshPtr &mp = a->get<MeshFilter>()->mesh;
   Mesh &dst = *mesh_make_mutable(mp);
   const Mat4 inv = a->world_matrix().inverse();
@@ -128,6 +132,11 @@ void Editor::boolean_selected(int op, bool apply, uint64_t kept) {
     return;
   }
   op = std::max(0, std::min(op, 2));
+  /* Round 477: applied, a Boolean writes the kept object's mesh and deletes the cutters - a Blockout's mesh would last until
+   * a piece moved, and a Blockout used as a cutter would go with its pieces. The Brush (a modifier) is fine on both. */
+  if (apply && blockout_refuses_edit_mode(a)) return;
+  for (GameObject *c : cutters)
+    if (apply && blockout_refuses_edit_mode(c)) return;
   if (!apply) {
     /* Brush: a live modifier per cutter; the cutters stay movable. */
     for (GameObject *c : cutters) {
@@ -227,6 +236,7 @@ void Editor::separate(const std::string &mode) {
     Log::warn("Separate: select a mesh object");
     return;
   }
+  if (blockout_refuses_edit_mode(g)) return;  // (round 477: the parts would be Blockouts without pieces - empty at the next rebuild)
   MeshPtr &mp = g->get<MeshFilter>()->mesh;
   std::vector<GameObject *> made;
   if (mode == "selection") {

@@ -52,6 +52,7 @@ bool Editor::bake_mesh_maps_start(const MeshMapsSettings &s) {
     Log::warn("Mesh Maps: select a mesh object with faces first");
     return false;
   }
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: the maps' layout is written into the mesh, and a Blockout's next rebuild has none)
   if (edit_mode_) exit_edit_mode();
   if (weight_paint_) set_weight_paint(false);
   std::string why;

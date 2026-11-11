@@ -683,6 +683,7 @@ void Editor::shape_command(const std::vector<std::string> &t) {
   MeshFilter *mf = g ? g->mesh_filter() : nullptr;
   if (!mf || !mf->mesh) return Log::warn("shape: select an object with a mesh");
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "list";
+  if (sub != "list" && blockout_refuses_edit_mode(g)) return;  // (round 477: keys on a Blockout's mesh would go at the next rebuild)
   MeshRenderer *mr = g->get<MeshRenderer>();
   if (sub == "list") {
     if (mf->mesh->shape_keys.empty()) return Log::info("%s has no shape keys (shape add <name>)", g->name.c_str());

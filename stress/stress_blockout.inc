@@ -417,6 +417,80 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
   }
 }
 
+/* Round 477 (ADR 0129, task 0453): the Blockout object live in a headless editor with workers on, as the window runs it. `interior 100`
+ * as objects (an Add and a Subtract box for each room, a door cut through each shared wall); the first door moved a little every
+ * frame. The frame is the main thread's whole step_frame_headless (hash, swap, first render mesh of a landed result, the Scene
+ * view); a landing is timed from the first move whose mesh had not yet been shown. The builds started, landed and cancelled, and the
+ * kernel calls made on the main thread (none), say what the frames paid. */
+static void live_row(Report &rep, const Options &o, bool cancel_stale, bool header) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  ed.set_blockout_cancel_stale_for_test(cancel_stale);
+  std::vector<GameObject *> roots;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!g.parent) roots.push_back(&g);
+  });
+  ed.scene().destroy(roots);
+  GameObject *bo = ed.scene().create("Blockout");
+  bo->add<Blockout>();
+  bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  bo->add<MeshRenderer>();
+  const std::vector<Piece> src = interior(6, 28);
+  std::vector<GameObject *> objs;
+  for (const Piece &p : src) {
+    GameObject *g = ed.scene().create("Piece", bo);
+    BlockoutPiece *bp = g->add<BlockoutPiece>();
+    bp->operation = p.op == Op::Subtract ? 1 : 0;
+    bp->size = p.size;
+    g->set_local_position(p.to_blockout.translation());
+    objs.push_back(g);
+  }
+  ed.command("blockout wait");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();  // (the first mesh's render mesh and the views' first frames)
+  GameObject *door = objs[(size_t)6 * 6 * 2];
+  const Vec3 home = door->local().position;
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), cancelled0 = ed.blockout_cancelled_for_test(),
+                 main0 = ed.blockout_main_builds_for_test();
+  const int frames = o.quick ? 30 : 120;
+  std::vector<double> frame_ms, landing_ms;
+  uint64_t landed = landed0;
+  double oldest = -1.0;
+  const double start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    const double moved_at = now_seconds();
+    if (oldest < 0.0) oldest = moved_at;
+    door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
+    ScopedTimer t;
+    ed.step_frame_headless();
+    frame_ms.push_back(t.ms());
+    if (std::getenv("BLENDITY_BLOCKOUT_LIVE_DEBUG")) std::printf("  live frame %d: %.2f ms (started %llu, landed %llu)\n", f, frame_ms.back(), (unsigned long long)ed.blockout_started_for_test(), (unsigned long long)ed.blockout_landed_for_test());
+    if (ed.blockout_landed_for_test() != landed) {
+      landed = ed.blockout_landed_for_test();
+      landing_ms.push_back((now_seconds() - oldest) * 1000.0);
+      oldest = -1.0;
+    }
+    /* (A window's frames come every 16.7 ms: the drag lasts as long as a user's would, not as long as a headless frame's millisecond.) */
+    const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+    if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+  }
+  const double drag_end = now_seconds();
+  ed.command("blockout wait");
+  const double settle_ms = (now_seconds() - drag_end) * 1000.0;
+  std::sort(frame_ms.begin(), frame_ms.end());
+  const double worst = frame_ms.empty() ? 0.0 : frame_ms.back();
+  const double land_median = median(landing_ms), land_worst = landing_ms.empty() ? 0.0 : *std::max_element(landing_ms.begin(), landing_ms.end());
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = worst <= 16.7 && !landing_ms.empty() && land_median <= 100.0 && main_builds == 0;
+  if (header)
+    rep.table({"live: interior 100 in the editor, a door moved every frame for " + std::to_string(frames) + " frames (one every 16.7 ms)", "frame median ms", "frame worst ms",
+               "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms", "builds started", "landed", "overtaken by a newer move",
+               "main-thread builds", "verdict"});
+  rep.row({cancel_stale ? "a newer snapshot cancels the running build (not shipped)" : "the running build finishes and lands, then the newest starts (ADR 0129)", f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
+           std::to_string(landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0), std::to_string(ed.blockout_landed_for_test() - landed0),
+           std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -430,6 +504,8 @@ static void test_blockout(Report &rep, const Options &o) {
                       "ok up to 100 ms on the 100-piece rows.",
                       crisp ? "in this build" : "not in this build", o.quick ? 1 : 5));
 
+  /* (The live row alone: BLENDITY_BLOCKOUT_LIVE=1; BLENDITY_BLOCKOUT_LIVE_DEBUG=1 lists its frames.) */
+  if (std::getenv("BLENDITY_BLOCKOUT_LIVE")) return live_row(rep, o, false, true), live_row(rep, o, true, false);
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -525,5 +601,7 @@ static void test_blockout(Report &rep, const Options &o) {
              std::to_string(r.ok ? r.mesh.render_mesh().tri_count() : 0), std::to_string(r.mesh.vert_count()), bad.empty() ? "closed" : "PROBLEM: " + bad});
   }
 
+  live_row(rep, o, false, true);
+  live_row(rep, o, true, false);
   sweep(rep, o, crisp);
 }
