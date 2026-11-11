@@ -44,19 +44,30 @@ git cat-file -e "$HEAD:CHANGELOG.md" 2>/dev/null ||
 COMMITS=$(git rev-list --no-merges "$BASE..$HEAD")
 bad=0
 for c in $COMMITS; do
-  files=$(touched "$c" CHANGELOG.md README.md)
-  shared=$(touched "$c" $SHARED_DOCS)
-  if [ -n "$shared" ] && shared_exempt "$c"; then
-    echo "exempt: $(git log -1 --format='%h %s' "$c" | cut -c1-80) was written before the shared docs joined the rule (edits $shared)"
-    shared=
-  fi
-  files=$files$shared
+  # :(top) - the paths are at the root of the published tree whatever folder this runs from.
+  files=$(git diff-tree --no-commit-id --name-only -r "$c" -- ':(top)CHANGELOG.md' ':(top)README.md' | tr '\n' ' ')
   [ -z "$files" ] && continue
   if git log -1 --format=%B "$c" | tr -d '\r' | grep -qiE '^Docs-fold:[[:space:]]*yes[[:space:]]*$'; then
     echo "ok: $(git log -1 --format='%h %s' "$c" | cut -c1-80) folds ($files)"
     continue
   fi
-  echo "::error::$(git log -1 --format='%h %s' "$c" | cut -c1-80) edits ${files}without a 'Docs-fold: yes' trailer - put the entry and the docs' lines in changelog.d/<round>-<slug>.md instead (ADR 0123)"
+  echo "::error::$(git log -1 --format='%h %s' "$c" | cut -c1-80) edits ${files}without a 'Docs-fold: yes' trailer - put the entry in changelog.d/<round>-<slug>.md instead (ADR 0123)"
+  bad=1
+done
+# The shared docs, in a loop of their own, so their start date is the only thing that exempts a commit for them
+# (whatever the loop above exempts for CHANGELOG.md and README.md).
+for c in $COMMITS; do
+  shared=$(touched "$c" $SHARED_DOCS)
+  [ -z "$shared" ] && continue
+  if shared_exempt "$c"; then
+    echo "exempt: $(git log -1 --format='%h %s' "$c" | cut -c1-80) was written before the shared docs joined the rule (edits $shared)"
+    continue
+  fi
+  if git log -1 --format=%B "$c" | tr -d '\r' | grep -qiE '^Docs-fold:[[:space:]]*yes[[:space:]]*$'; then
+    echo "ok: $(git log -1 --format='%h %s' "$c" | cut -c1-80) folds ($shared)"
+    continue
+  fi
+  echo "::error::$(git log -1 --format='%h %s' "$c" | cut -c1-80) edits ${shared}without a 'Docs-fold: yes' trailer - put the docs' lines in changelog.d/<round>-<slug>.md instead (ADR 0123)"
   bad=1
 done
 if [ "$NO_FRAGMENTS" != "1" ]; then
