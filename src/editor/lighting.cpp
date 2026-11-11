@@ -275,6 +275,7 @@ void Editor::save_lighting_data() {
  * while it runs), and the lights with their modes. */
 void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights) {
   eval_jobs_wait();  // (round 413: the workers' finished results taken first)
+  blockout_jobs_wait();  // (round 477: a Blockout bakes the mesh its pieces make now)
   const GameObject::EvaluateNowScope evaluate_now;  // (the stacks' exact results, not what a worker is still making)
   objects.clear();
   lights.clear();

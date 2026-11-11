@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// The Blockout object (ADR 0129, task 0453): the two components' fields and the snapshot the kernel is given.
+#include "blockout_object.h"
+
+#include "../core/hash.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+namespace bl {
+
+const char *const kBlockoutShapeNames[3] = {"Box", "Cylinder", "Sphere"};
+const char *const kBlockoutOpNames[3] = {"Add", "Subtract", "Intersect"};
+const char *const kBlockoutMethodNames[3] = {"Auto", "Exact", "Field"};
+const char *const kBlockoutWallNames[2] = {"Merge with neighbours", "Keep walls"};
+const char *const kBlockoutOpeningNames[3] = {"None", "Door", "Window"};
+
+void Blockout::reflect(Reflector &r) {
+  r.field("Field Cell", cell, 0.01f, 0.01f, 10.0f);
+  r.help("The grid step, in metres, of the field path: every cluster of pieces in a build without Blender's libraries, and the\n"
+         "blended ones later. A smaller cell is truer to the pieces and slower.");
+  r.enumeration("Method", method, kBlockoutMethodNames, 3);
+  r.help("Auto: exact where the build has it (Blender's libraries), else the field path. Exact: the exact boolean only - a build\n"
+         "without Blender's libraries builds nothing and the status says why. Field: the field path for every cluster.");
+  r.field("Default Wall Thickness", default_wall, 0.01f, 0.0f, 100.0f);
+  r.help("What a new room's Wall, Floor and Ceiling start at, in metres. Rooms already made keep theirs.");
+}
+
+blockout::Settings Blockout::settings() const {
+  blockout::Settings s;
+  s.cell = finite_bits(cell) ? std::min(10.0f, std::max(0.01f, cell)) : 0.1f;
+  s.path = (blockout::Path)std::min(2, std::max(0, method));
+  return s;
+}
+
+void BlockoutPiece::reflect(Reflector &r) {
+  const bool all = r.all_fields();
+  const bool is_opening = opening != 0, is_room = room && !is_opening;
+  if (all || !is_opening) {  // (an opening is a box that cuts: its shape and operation are not its to choose)
+    r.enumeration("Shape", shape, kBlockoutShapeNames, 3);
+    r.help("What the piece is: a box, a cylinder (up Y) or a sphere, centred on the object. A room's shape is its air.");
+    r.greyed(is_room);
+    r.enumeration("Operation", operation, kBlockoutOpNames, 3);
+    r.help(is_room ? "A room's Operation is ignored: a room is its walls with its air cut out (Walls says whether they merge with its neighbours')."
+                   : "Add joins the piece to the Blockout's mesh; Subtract cuts it out of everything added (a door, a window, a pocket); "
+                     "Intersect keeps only what is inside it (two of them: what is inside both).");
+    r.greyed(false);
+    r.field("Room", room);
+    r.help("A room: the shape is the air you walk in, and the piece brings its own walls, floor and ceiling. Rooms that overlap become one "
+           "space, the wall between them gone where their air overlaps.");
+  }
+  if (all || is_room) {
+    r.field("Wall", wall, 0.01f, 0.0f, 1000.0f);
+    r.help("The wall's thickness, in metres in the Blockout's space, measured square to the room's own sides whatever the room's scale (up to "
+           "1000 m; a cylinder's wall is measured at its facets' middles, and an elliptical cylinder's varies between its two axes). 0 on all three "
+           "makes a room with no matter of its own: it only clears the rooms it overlaps.");
+    r.field("Floor", floor, 0.01f, 0.0f, 1000.0f);
+    r.help("The floor's thickness, below the air (metres).");
+    r.field("Ceiling", ceiling, 0.01f, 0.0f, 1000.0f);
+    r.help("The ceiling's thickness, above the air (metres). Open Top leaves it out.");
+    r.enumeration("Walls", walls, kBlockoutWallNames, 2);
+    r.help("Merge with neighbours: every room's air clears this room's walls, so rooms that overlap are one space. Keep walls: only this "
+           "room's own air clears its walls - it keeps all of them inside another room.");
+    r.field("Open Top", open_top);
+    r.help("No ceiling: the walls end flat at the air's top.");
+  }
+  if (all || !is_room) {
+    r.enumeration("Opening", opening, kBlockoutOpeningNames, 3);
+    r.help("A door or a window: a box that cuts through the wall it stands in, sized by Width, Head and Sill. None: an ordinary piece.");
+  }
+  if (all || is_opening) {
+    r.field("Width", width, 0.01f, 0.0f, 1000.0f);
+    r.help("Across the opening, in metres before the object's own scale.");
+    r.field("Head", head, 0.01f, 0.0f, 1000.0f);
+    r.help("The top of the opening above the floor line the piece stands on.");
+    r.field("Sill", sill, 0.01f, 0.0f, 1000.0f);
+    r.help("The bottom of the opening above the floor line: 0 for a door, about 0.9 m for a window.");
+    r.field("Depth", depth, 0.01f, 0.0f, 1000.0f);
+    r.help("Through the wall: the wall it was put in plus 0.1 m either side, so it always goes through.");
+  }
+  const int k = std::min(2, std::max(0, shape));
+  const bool shaped = all || !is_opening;
+  if (shaped && (all || k == 0)) {
+    r.field("Size", size);
+    r.help("Width (X), height (Y) and depth (Z), before the object's own scale.");
+  }
+  if (shaped && (all || k != 0)) r.field("Radius", radius, 0.01f, 0.0001f, 10000.0f);
+  if (shaped && (all || k == 1)) r.field("Height", height, 0.01f, 0.0001f, 10000.0f);
+  if (shaped && (all || k != 0)) {
+    r.field("Segments", segments, 3, 256);
+    r.help(k == 1 ? "Sides of the cylinder." : "Segments round the sphere.");
+  }
+  if (shaped && (all || k == 2)) {
+    r.field("Rings", rings, 2, 128);
+    r.help("Rings from pole to pole.");
+  }
+  if (all) r.field("Blend Radius", blend, 0.01f, 0.0f, 100.0f);  // (not in the Inspector until round 481)
+}
+
+namespace {
+
+float safe_len(float v) { return finite_bits(v) ? std::min(1e6f, std::fabs(v)) : v; }
+float safe_thickness(float v) { return finite_bits(v) ? std::min(1000.0f, std::max(0.0f, v)) : 0.0f; }  // (the kernel's own limits)
+
+}  // namespace
+
+Vec3 BlockoutPiece::box_size() const {
+  if (opening == 0) return {safe_len(size.x), safe_len(size.y), safe_len(size.z)};
+  /* A head at or under the sill leaves a box of no height: the kernel skips it and the status names it. */
+  const float up = finite_bits(head) && finite_bits(sill) ? std::max(0.0f, head - sill) : std::numeric_limits<float>::quiet_NaN();
+  return {safe_len(width), up, safe_len(depth)};
+}
+
+Mat4 BlockoutPiece::shape_offset() const {
+  if (opening == 0) return Mat4::identity();
+  const float mid = finite_bits(head) && finite_bits(sill) ? 0.5f * (head + sill) : 0.0f;
+  return Mat4::translate({0.0f, mid, 0.0f});
+}
+
+/* Typed or scripted numbers can be anything. Counts are held to what the kernel takes. A size that is not finite, or none at
+ * all, goes through as it is: the kernel skips such a piece and names it, so the Inspector can say which. */
+blockout::Piece BlockoutPiece::to_piece(uint64_t id, const Mat4 &to_blockout) const {
+  auto len = safe_len;
+  blockout::Piece p;
+  p.id = id;
+  p.shape = (blockout::Shape)std::min(2, std::max(0, shape));
+  p.op = (blockout::Op)std::min(2, std::max(0, operation));
+  p.size = box_size();
+  p.radius = len(radius);
+  p.height = len(height);
+  p.segments = std::min(256, std::max(3, segments));
+  p.rings = std::min(128, std::max(2, rings));
+  p.blend = finite_bits(blend) ? std::min(100.0f, std::max(0.0f, blend)) : blend;
+  p.to_blockout = to_blockout;
+  if (opening != 0) {  // (a box that cuts, its middle between the sill and the head above the origin)
+    p.shape = blockout::Shape::Box, p.op = blockout::Op::Subtract, p.blend = 0.0f;
+    p.to_blockout = to_blockout * shape_offset();
+    return p;
+  }
+  p.room = room;
+  p.wall = safe_thickness(wall), p.floor = safe_thickness(floor), p.ceiling = safe_thickness(ceiling);
+  p.keep_walls = walls == 1;
+  p.open_top = open_top;
+  return p;
+}
+
+bool blockout_room_growth(const blockout::Piece &p, RoomGrowth &out) {
+  if (!p.room) return false;
+  const float *f = p.to_blockout.m;  // (column-major: the columns are where the axes go)
+  auto cross = [](const double a[3], const double b[3], double r[3]) {
+    r[0] = a[1] * b[2] - a[2] * b[1], r[1] = a[2] * b[0] - a[0] * b[2], r[2] = a[0] * b[1] - a[1] * b[0];
+  };
+  auto length = [](const double v[3]) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); };
+  double a[3], b[3], c[3], bc[3], ca[3], ab[3];
+  for (int i = 0; i < 3; i++) a[i] = (double)f[i], b[i] = (double)f[4 + i], c[i] = (double)f[8 + i];
+  cross(b, c, bc), cross(c, a, ca), cross(a, b, ab);
+  const double det = std::fabs(a[0] * bc[0] + a[1] * bc[1] + a[2] * bc[2]);
+  const double lbc = length(bc), lca = length(ca), lab = length(ab);
+  if (!finite_bits(det) || !(det > 1e-12 * length(a) * length(b) * length(c)) || !(lbc > 0.0) || !(lca > 0.0) || !(lab > 0.0)) return false;
+  const double tx = det / lbc, ty = det / lca, tz = det / lab;  // (the distance between a pair of the piece's opposite sides, per unit)
+  const double wall = p.wall, floor = p.floor, ceiling = p.open_top ? 0.0 : p.ceiling;
+  if (p.shape == blockout::Shape::Sphere) {
+    out = {wall / tx, wall / tz, wall / ty, wall / ty};
+    return true;
+  }
+  const double facet = p.shape == blockout::Shape::Cylinder ? std::cos(3.141592653589793 / (double)std::max(3, std::min(256, p.segments))) : 1.0;
+  out = {wall / (tx * facet), wall / (tz * facet), floor / ty, ceiling / ty};
+  return true;
+}
+
+Mat4 blockout_piece_matrix(const GameObject &piece, const GameObject &blockout) {
+  Mat4 m = Mat4::identity();
+  for (const GameObject *g = &piece; g && g != &blockout; g = g->parent) m = g->local_matrix() * m;
+  return m;
+}
+
+namespace {
+
+/* Depth first, in the hierarchy's order. `to_here` is the product of the local matrices from the Blockout down to `g`'s
+ * parent. A Blockout below is not entered: it is not this one's piece. */
+void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Piece> &pieces) {
+  for (const GameObject *c : g.children) {
+    if (!c->active || c->get<Blockout>()) continue;
+    const Mat4 m = to_here * c->local_matrix();
+    const BlockoutPiece *bp = c->get<BlockoutPiece>();
+    if (bp && bp->enabled) pieces.push_back(bp->to_piece(c->id, m));
+    collect(*c, m, pieces);
+  }
+}
+
+}  // namespace
+
+void blockout_piece_objects(const GameObject &blockout, std::vector<const GameObject *> &out) {
+  for (const GameObject *c : blockout.children) {
+    if (!c->active || c->get<Blockout>()) continue;
+    const BlockoutPiece *bp = c->get<BlockoutPiece>();
+    if (bp && bp->enabled) out.push_back(c);
+    blockout_piece_objects(*c, out);
+  }
+}
+
+void blockout_snapshot(const GameObject &blockout, std::vector<blockout::Piece> &pieces, blockout::Settings &settings) {
+  pieces.clear();
+  const Blockout *b = blockout.get<Blockout>();
+  settings = b ? b->settings() : blockout::Settings();
+  collect(blockout, Mat4::identity(), pieces);
+}
+
+uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, const blockout::Settings &settings) {
+  uint64_t h = hash_mix(kFnvBasis, pieces.size());
+  h = mix_float(h, settings.cell);
+  h = hash_mix(h, (uint64_t)settings.path);
+  h = hash_mix(h, (uint64_t)settings.max_cells);
+  for (const blockout::Piece &p : pieces) {
+    h = hash_mix(h, p.id);
+    h = hash_mix(h, (uint64_t)p.shape | (uint64_t)p.op << 8 | (uint64_t)(uint32_t)p.segments << 16 | (uint64_t)(uint32_t)p.rings << 40);
+    for (int a = 0; a < 3; a++) h = mix_float(h, p.size[a]);
+    h = mix_float(h, p.radius);
+    h = mix_float(h, p.height);
+    h = mix_float(h, p.blend);
+    h = hash_mix(h, (uint64_t)p.room | (uint64_t)p.keep_walls << 1 | (uint64_t)p.open_top << 2);
+    h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
+    if (!p.room) continue;  // (the thicknesses are read by a room only)
+    h = mix_float(h, p.wall);
+    h = mix_float(h, p.floor);
+    h = mix_float(h, p.ceiling);
+  }
+  return h;
+}
+
+GameObject *blockout_of_piece(const GameObject &piece) {
+  for (GameObject *a = piece.parent; a; a = a->parent)
+    if (a->get<Blockout>()) return a;
+  return nullptr;
+}
+
+}  // namespace bl

@@ -132,6 +132,10 @@ bool Editor::set_paint(bool on) {
     refuse("Paint: stop Play first", "stop", "stop Play");
     return false;
   }
+  if (mf->mesh->uvs.size() != mf->mesh->corner_verts.size() && g->get<Blockout>()) {  // (round 477: Unwrap is not offered - its UVs would go at the next rebuild)
+    Log::warn("Paint: '%s' is a Blockout - its mesh is rebuilt from its pieces and has no UVs to paint on", g->name.c_str());
+    return false;
+  }
   std::string why;
   ProceduralTexturePtr pt = surface_of(g, &why);
   if (!pt) {
