@@ -181,6 +181,49 @@ What the code had to do differently from the decisions above, and what it added 
 - A blended cluster with rooms: rooms are never rounded; their distance joins the blended field as plain pieces'
   does. Round 481 decides what a blend does beside a room.
 
+## Amended in round 480 (task 0456): pieces of several solids, and a solid that is not convex
+
+**A piece may be several convex solids of one role** - stairs (a solid a step), an arch (a solid a block), an outline
+pulled up (a solid a convex part of the outline, cut by the face maker's own cutter). What had to hold for that:
+- One piece's solids are one cluster's, whatever their bounds, and follow each other in it.
+- A face between two parts of one piece is named `kSideInner`. On the crisp path the two parts hand that face over
+  corner for corner, to the bit (`SharedCorners`), cut into the same triangles, and it is not moved by a hair: the
+  rule for faces that coincide joins them. Moved into each other as two touching pieces are, an arch's blocks stuck
+  out of each other's curve by a sliver at every joint (measured).
+- Every part numbers its faces into the *piece's* sides, so the faces of two parts in one plane merge into one face.
+- A room of several solids (an outline room) is columns - its air's parts from the floor's underside to the ceiling's
+  top - a slab a wall segment and a kite at each outward corner, all round the air: every joint corner for corner.
+  (The spec's first form, the air's parts grown with slabs laid against them, shared corners with different hairs and
+  left slivers.) A Keep room is asked about by piece: its shell's solids less its own air's.
+- An Intersect piece has to be one convex solid: stairs, an arch, a concave outline or a mesh as an Intersect piece
+  is skipped by name. (A batch of Intersects is an intersection of all of them, not of their union.)
+
+**A mesh piece is the one solid that is not convex** (`Solid::mesh`), nor need it be closed:
+- Its faces are its triangles (a polygon cut by `meshops`' triangulation), each naming its polygon as its side; its
+  corners stay where the mesh has them - they are not put on planes, and no side of it is moved by a hair. Corners
+  at one place to the bit are one corner. A closed mesh that is inside out is turned round.
+- **Flat or curved, decided once for the mesh:** triangles in at most 64 planes (a block, a profile pulled up) make
+  a flat mesh - its triangles enter the cluster's plane table, share entries with each other and with other pieces,
+  merge into whole faces and get their corners from the planes as every flat face does. More planes, or a triangle
+  of no area, make a curved mesh: its faces carry the mark of "no flat side", merge with nothing and keep the
+  positions the path gives them (Manifold's on the crisp path, the grid's crossings on the field path). They still
+  name the mesh's face.
+- **Crisp path:** the triangles go to Manifold as they are. A mesh that is not closed (an edge without a face on each
+  side) sends its cluster to the field path when the path is left to the build, and is skipped by name when the
+  crisp path is asked for. One Manifold refuses or cannot combine, though closed, falls back to the field path too.
+- **Field path:** a plane cannot say which side of a mesh a grid point is on. The three grid lines through the point
+  vote, each by the winding number along it - the triangles it crosses beyond the point, +1 or -1 by the way each
+  faces (DynaMesh's rule, ADR 0076); a line whose crossings do not add up to nothing (an open edge) casts no vote.
+  A line through an edge two triangles share crosses exactly one of them (the edge is always worked out from its
+  lesser end). The triangles are found through a table of squares per axis (`MeshLines`), so a line asks few of
+  them. A grid edge's label is the triangle it crosses; where an open mesh has no triangle there, the face is the
+  lines' guess and is flat in no plane. An open mesh marks every brick its bounds reach (its surface may lie
+  anywhere in them); a closed one only the bricks its triangles pass.
+- **Not done, by decision:** a Blend radius is not read on a mesh piece nor on a piece in its cluster (a blended
+  join is a smooth minimum of distances asked at every grid point, and a mesh has no cheap distance) - the build
+  says so in a note; round 481 may take it up. A mesh is never a room.
+- **The cache** compares `Piece::mesh_key`, the caller's number for what the mesh holds, never the mesh itself.
+
 ## What round 476 measures
 From `blendity_stress --only blockout` on a quiet machine, both builds (2026-11-10 10:22-10:25; AMD Ryzen 9 5900XT,
 32 threads; the kernel on a worker thread); the whole table is in `docs/PERFORMANCE.md`, "Pass 23". `interior N` is N

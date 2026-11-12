@@ -6,6 +6,7 @@
 #include "blockout_internal.h"
 
 #include <algorithm>
+#include <iterator>
 
 #ifdef BL_WITH_MANIFOLD
 #  include <manifold/manifold.h>
@@ -49,6 +50,13 @@ struct Frame {
 
 bool parallel(V3 a, V3 b) { return length(cross(a, b)) <= 1e-6; }
 
+/* The axis `n` looks along least. (Built from its three numbers: a local vector filled through operator[] and then
+ * copied is not safe with every compiler - round 479's macOS red.) */
+V3 least_axis(V3 n) {
+  const int a = std::fabs(n.x) <= std::fabs(n.y) && std::fabs(n.x) <= std::fabs(n.z) ? 0 : std::fabs(n.y) <= std::fabs(n.z) ? 1 : 2;
+  return V3(a == 0 ? 1.0 : 0.0, a == 1 ? 1.0 : 0.0, a == 2 ? 1.0 : 0.0);
+}
+
 /* The frame for the cluster: the Blockout's, unless turned axes make more of the shared sides square. The turned
  * axes are the direction most shared sides at an angle look along, the one most of the rest square to it do, and
  * the third that follows. */
@@ -84,9 +92,7 @@ Frame choose_frame(const Cluster &c) {
   V3 n2;
   if (second != SIZE_MAX) n2 = ways[second].n;
   else {  // (nothing shared is square to it: any direction that is)
-    V3 e;
-    e[std::fabs(n1.x) <= std::fabs(n1.y) && std::fabs(n1.x) <= std::fabs(n1.z) ? 0 : std::fabs(n1.y) <= std::fabs(n1.z) ? 1 : 2] = 1.0;
-    n2 = cross(n1, e);
+    n2 = cross(n1, least_axis(n1));
   }
   V3 n3 = cross(n1, n2);
   n3 = n3 * (1.0 / length(n3));
@@ -118,8 +124,8 @@ std::vector<Plane> planes_in(const Cluster &c, const Frame &fr) {
     }
     out[p] = {n, pl.d};
     if (small != 2) continue;
-    V3 square;
-    square[along] = n[along] < 0.0 ? -1.0 : 1.0;
+    const double way = n[along] < 0.0 ? -1.0 : 1.0;
+    const V3 square(along == 0 ? way : 0.0, along == 1 ? way : 0.0, along == 2 ? way : 0.0);
     out[p] = {square, dot(square, mid) + (pl.d - dot(pl.n, c.mid))};
   }
   return out;
@@ -134,9 +140,7 @@ struct AddFace {
 /* A solid's face as a figure along two axes of its plane (the same two for every face of a plane). */
 std::vector<double> face_figure(const Cluster &c, const Solid &s, size_t f) {
   const V3 n = c.planes[s.face_plane[f]].n;
-  V3 e;
-  e[std::fabs(n.x) <= std::fabs(n.y) && std::fabs(n.x) <= std::fabs(n.z) ? 0 : std::fabs(n.y) <= std::fabs(n.z) ? 1 : 2] = 1.0;
-  V3 u = cross(n, e);
+  V3 u = cross(n, least_axis(n));
   u = u * (1.0 / length(u));
   const V3 w = cross(n, u);
   std::vector<double> xy;
@@ -191,6 +195,10 @@ std::vector<std::vector<AddFace>> add_faces_by_plane(const Cluster &c, const std
 
 /* How far outward (inward when negative) a solid's side is moved before Manifold sees it, in hairs.
  * - A plane square to the frame's axes, or one no other solid has a face in: not at all.
+ * - A face between two parts of one piece (kSideInner): not at all. The two parts have it corner for corner, and are
+ *   handed over with those corners equal to the bit (SharedCorners), cut into the same triangles: the rule for faces
+ *   that coincide joins them. (Moved a hair into each other, as two pieces that touch are, an arch's blocks stuck
+ *   out of each other's curve by a sliver at every joint: measured in round 480.)
  * - An Add piece's side: one hair out. Two that touch then overlap by two, and unite.
  * A cutter's side goes by the Add faces it lies on in its plane (their figures in the plane overlap its own):
  * - they look the same way as it does - the cut ends flush with that face, from inside: two hairs out, past the
@@ -211,18 +219,21 @@ double side_shift(const Cluster &c, const Solid &s, size_t f, const Plane &in_fr
    * clear of it. (Left to the rule for faces that coincide, Manifold kept such a floor as a sheet of no thickness
    * when the plane was square to X, and not when it was square to Y or Z: measured in round 478.) What ends flush
    * with it from inside ends two hairs short, on the same plane of the table: the face maker puts it back. */
+  if (s.mesh) return 0.0;  // (its corners are the mesh's own)
   if (s.role == Role::Intersect) return c.plane_users[p] < 2 ? 0.0 : -2.0;
-  if (in_frame.axis() >= 0 || c.plane_users[p] < 2) return 0.0;
+  if (in_frame.axis() >= 0 || c.plane_users[p] < 2 || (s.face_side[f] & 0xFFFFu) == kSideInner) return 0.0;
   if (!s.subtract) return 1.0;
   /* A room's air in a plane of its own shell (a wall, floor or ceiling of no thickness): moved as the shell's side
    * is, so the two stay one plane to the bit and the rule for faces that coincide applies - the room is open there.
    * (Two hairs out, as for any flush cut, would leave the air a hair wider than its own shell: a rim of slivers on
    * whatever lies around.) */
-  if (s.role == Role::Air && &s != &c.solids[0]) {
-    const Solid &shell = *(&s - 1);
-    for (size_t g = 0; g < shell.face_count(); g++)
-      if (shell.face_plane[g] == p && shell.face_sign[g] == s.face_sign[f]) return 1.0;
-  }
+  if (s.role == Role::Air)
+    for (const Solid *shell = &s; shell != &c.solids[0] && (shell - 1)->piece == s.piece;) {  // (its piece's solids before it: the shell's, then other parts of the air)
+      shell--;
+      if (shell->role == Role::Air) continue;
+      for (size_t g = 0; g < shell->face_count(); g++)
+        if (shell->face_plane[g] == p && shell->face_sign[g] == s.face_sign[f]) return 1.0;
+    }
   const std::vector<double> mine = face_figure(c, s, f);
   const double sliver = 16.0 * c.tol;
   bool same = false, other = false;
@@ -235,12 +246,56 @@ double side_shift(const Cluster &c, const Solid &s, size_t f, const Plane &in_fr
   return other ? -2.0 : 1.0;
 }
 
+/* The corners one piece's solids have handed over so far: a later solid of the piece takes a corner it shares with
+ * an earlier one (the same place before the planes were met, to the bit) as that one had it. A room's shell and its
+ * air are kept apart: the air's sides against its own walls are moved in by the hairs (side_shift), and must not be
+ * drawn back onto the shell's corners - there the two would coincide to a rounding, not to the bit. */
+struct SharedCorners {
+  uint32_t piece = UINT32_MAX;
+  bool air = false;
+  std::vector<V3> raw, given;
+  const V3 *find(const Solid &s, size_t v) const {
+    if (s.piece != piece || (s.role == Role::Air) != air) return nullptr;
+    const V3 r = s.raw[v];
+    for (size_t i = 0; i < raw.size(); i++)
+      if (raw[i].x == r.x && raw[i].y == r.y && raw[i].z == r.z) return &given[i];
+    return nullptr;
+  }
+  void add(const Solid &s, size_t v, V3 x) {
+    if (s.piece != piece || (s.role == Role::Air) != air) piece = s.piece, air = s.role == Role::Air, raw.clear(), given.clear();
+    raw.push_back(s.raw[v]), given.push_back(x);
+  }
+};
+
+/* A mesh of several closed shells that cross each other (two cubes pushed into one another and joined as one object - what
+ * most meshes that were never a boolean's result are): each shell is a solid, the mesh as a whole is not, and Manifold would
+ * count the place they share twice. The shells are united first. A shell that is inside out (a hollow's inner wall) means the
+ * mesh was built as one solid: it is left as it is. */
+manifold::Manifold shells_united(const manifold::Manifold &m) {
+  if (m.Status() != manifold::Manifold::Error::NoError) return m;
+  std::vector<manifold::Manifold> shells = m.Decompose();
+  if (shells.size() < 2) return m;
+  for (const manifold::Manifold &shell : shells)
+    if (!(shell.Volume() > 0.0)) return m;
+  return manifold::Manifold::BatchBoolean(shells, manifold::OpType::Add);
+}
+
 /* One solid as Manifold takes it, in the frame: its faces as fans of triangles, each with the face's label. */
-manifold::Manifold solid_manifold(const Cluster &c, const Solid &s, const Frame &fr, const std::vector<Plane> &planes, const std::vector<std::vector<AddFace>> &add_faces) {
+manifold::Manifold solid_manifold(const Cluster &c, const Solid &s, const Frame &fr, const std::vector<Plane> &planes, const std::vector<std::vector<AddFace>> &add_faces,
+                                  SharedCorners &shared) {
   manifold::MeshGL64 g;
   g.numProp = 3;
   g.tolerance = c.tol;
   g.vertProperties.reserve(s.verts.size() * 3);
+  if (s.mesh) {  // (as it is: its triangles, its corners)
+    for (const V3 &v : s.verts) {
+      const V3 x = fr.to(v);
+      g.vertProperties.insert(g.vertProperties.end(), {x.x, x.y, x.z});
+    }
+    g.triVerts.assign(s.face_verts.begin(), s.face_verts.end());
+    for (size_t f = 0; f < s.face_count(); f++) g.faceID.push_back(s.label_base + (uint32_t)f);
+    return shells_united(manifold::Manifold(g));
+  }
   const double hair = c.tol / 8.0;
   std::vector<double> shifts(s.face_count());
   for (size_t f = 0; f < s.face_count(); f++) shifts[f] = side_shift(c, s, f, planes[s.face_plane[f]], add_faces);
@@ -263,12 +318,20 @@ manifold::Manifold solid_manifold(const Cluster &c, const Solid &s, const Frame 
       x = solve_planes(at.data(), (int)at.size(), fr.to(s.verts[v]), nullptr);
       for (const Plane &p : moved) p.put_on(x);  // (the planes square to an axis were not moved)
     }
+    if (const V3 *had = shared.find(s, v)) x = *had;
+    shared.add(s, v, x);
     g.vertProperties.insert(g.vertProperties.end(), {x.x, x.y, x.z});
   }
   for (size_t f = 0; f < s.face_count(); f++) {
     const uint32_t b = s.face_offsets[f], n = s.face_offsets[f + 1] - b;
+    /* The fan starts at the face's least corner, so a face two parts share is the same triangles in both. */
+    uint32_t first = 0;
+    for (uint32_t i = 1; i < n; i++) {
+      const double *p = &g.vertProperties[(size_t)s.face_verts[b + i] * 3], *q = &g.vertProperties[(size_t)s.face_verts[b + first] * 3];
+      if (p[0] != q[0] ? p[0] < q[0] : p[1] != q[1] ? p[1] < q[1] : p[2] < q[2]) first = i;
+    }
     for (uint32_t i = 1; i + 1 < n; i++) {
-      g.triVerts.insert(g.triVerts.end(), {s.face_verts[b], s.face_verts[b + i], s.face_verts[b + i + 1]});
+      g.triVerts.insert(g.triVerts.end(), {s.face_verts[b + first], s.face_verts[b + (first + i) % n], s.face_verts[b + (first + i + 1) % n]});
       g.faceID.push_back(s.label_base + (uint32_t)f);
     }
   }
@@ -295,36 +358,168 @@ bool pair_edges(Soup &soup) {
   return true;
 }
 
+/* Edges of no length closed up. Where a mesh piece has corners in another piece's plane (a torus cut from a box whose top passes
+ * through the torus's middle ring) Manifold's cut leaves, at each of them, two points at one place with an edge between - and the face
+ * maker would carry each such edge in a triangle of no area. The edge's two ends become one point and its two triangles go, wherever
+ * that leaves a surface: the two ends' only common neighbours are the two triangles' third corners. (Two points at one place with no
+ * edge between them - a surface that touches itself - stay apart, as ever.) */
+void close_empty_edges(Soup &soup) {
+  double far = 0.0;
+  for (const V3 &q : soup.points) far = std::max(far, std::max(std::fabs(q.x), std::max(std::fabs(q.y), std::fabs(q.z))));
+  const double same2 = (4.0 * 1.1920929e-7 * far) * (4.0 * 1.1920929e-7 * far);  // (one place once the points are floats)
+  const size_t tris = soup.verts.size() / 3;
+  auto empty_edge = [&](size_t t, int k) {
+    const uint32_t a = soup.verts[t * 3 + (size_t)k], b = soup.verts[t * 3 + (size_t)(k + 1) % 3];
+    const V3 d = soup.points[a] - soup.points[b];
+    return a != b && dot(d, d) <= same2;
+  };
+  bool any = false;
+  for (size_t t = 0; t < tris && !any; t++) any = empty_edge(t, 0) || empty_edge(t, 1) || empty_edge(t, 2);
+  if (!any) return;
+  std::vector<std::vector<uint32_t>> around(soup.points.size());  // each point's triangles
+  for (size_t t = 0; t < tris; t++)
+    for (int k = 0; k < 3; k++) around[soup.verts[t * 3 + (size_t)k]].push_back((uint32_t)t);
+  std::vector<uint8_t> gone(tris, 0);
+  std::vector<uint32_t> near_u, near_v, both;
+  auto neighbours = [&](uint32_t at, std::vector<uint32_t> &out) {
+    out.clear();
+    for (uint32_t t : around[at])
+      for (int k = 0; k < 3 && !gone[t]; k++)
+        if (soup.verts[(size_t)t * 3 + (size_t)k] != at) out.push_back(soup.verts[(size_t)t * 3 + (size_t)k]);
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+  };
+  /* The edge u - v closed, when that leaves a surface. */
+  auto close = [&](uint32_t u, uint32_t v) {
+    uint32_t third[2] = {0, 0};
+    size_t shared = 0;
+    for (uint32_t t : around[v]) {
+      const uint32_t *c = &soup.verts[(size_t)t * 3];
+      if (gone[t] || (c[0] != u && c[1] != u && c[2] != u)) continue;
+      if (shared < 2) third[shared] = c[0] != u && c[0] != v ? c[0] : c[1] != u && c[1] != v ? c[1] : c[2];
+      shared++;
+    }
+    if (shared != 2 || third[0] == third[1]) return false;
+    neighbours(u, near_u), neighbours(v, near_v);
+    both.clear();
+    std::set_intersection(near_u.begin(), near_u.end(), near_v.begin(), near_v.end(), std::back_inserter(both));
+    if (both.size() != 2) return false;  // (more in common than the edge's two triangles: closing it would pinch the surface)
+    for (uint32_t t : around[v]) {
+      uint32_t *c = &soup.verts[(size_t)t * 3];
+      if (gone[t]) continue;
+      if (c[0] == u || c[1] == u || c[2] == u) {
+        gone[t] = 1;
+        continue;
+      }
+      for (int k = 0; k < 3; k++)
+        if (c[k] == v) c[k] = u;
+      around[u].push_back(t);
+    }
+    around[v].clear();
+    return true;
+  };
+  for (bool went = true; went;) {
+    went = false;
+    for (size_t t = 0; t < tris; t++)
+      for (int k = 0; k < 3 && !gone[t]; k++)
+        if (empty_edge(t, k)) went = close(soup.verts[t * 3 + (size_t)k], soup.verts[t * 3 + (size_t)(k + 1) % 3]) || went;
+  }
+  size_t kept = 0;
+  for (size_t t = 0; t < tris; t++) {
+    if (gone[t]) continue;
+    for (int k = 0; k < 3; k++) soup.verts[kept * 3 + (size_t)k] = soup.verts[t * 3 + (size_t)k];
+    soup.label[kept] = soup.label[t], soup.key[kept] = soup.key[t];
+    kept++;
+  }
+  soup.verts.resize(kept * 3), soup.label.resize(kept), soup.key.resize(kept);
+}
+
 }  // namespace
 #endif
+
+bool crisp_takes_mesh(const Solid &s) {
+#ifdef BL_WITH_MANIFOLD
+  try {
+    manifold::MeshGL64 g;
+    g.numProp = 3;
+    g.vertProperties.reserve(s.verts.size() * 3);
+    for (const V3 &v : s.verts) g.vertProperties.insert(g.vertProperties.end(), {v.x, v.y, v.z});
+    g.triVerts.assign(s.face_verts.begin(), s.face_verts.end());
+    return manifold::Manifold(g).Status() == manifold::Manifold::Error::NoError;
+  }
+  catch (const std::exception &) {
+    return false;
+  }
+#else
+  (void)s;
+  return true;
+#endif
+}
 
 bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &why) {
 #ifdef BL_WITH_MANIFOLD
   try {
-    std::vector<manifold::Manifold> merged, airs, parts, subs, trims;  // (parts: the Keep rooms, then the Add pieces)
-    manifold::Manifold keep_shell;
+    std::vector<manifold::Manifold> merged, airs, parts, subs, trims;  // (parts: the Keep rooms and the Add pieces)
+    /* A Keep room: its shell's solids united, less its own air's. They follow each other in the cluster. */
+    std::vector<manifold::Manifold> keep_shell, keep_air;
+    uint32_t keep_piece = UINT32_MAX;
+    auto close_keep = [&] {
+      keep_piece = UINT32_MAX;
+      if (keep_shell.empty()) return;
+      manifold::Manifold room = keep_shell.size() == 1 ? keep_shell[0] : manifold::Manifold::BatchBoolean(keep_shell, manifold::OpType::Add);
+      if (!keep_air.empty()) {
+        keep_air.insert(keep_air.begin(), room);
+        room = manifold::Manifold::BatchBoolean(keep_air, manifold::OpType::Subtract);
+      }
+      parts.push_back(std::move(room));
+      keep_shell.clear(), keep_air.clear();
+    };
     const Frame fr = choose_frame(c);
     rep.turned = fr.turned;
     const std::vector<Plane> planes = planes_in(c, fr);
     const std::vector<std::vector<AddFace>> add_faces = add_faces_by_plane(c, planes);
-    for (const Solid &s : c.solids) {
-      manifold::Manifold m = solid_manifold(c, s, fr, planes, add_faces);
-      if (m.Status() != manifold::Manifold::Error::NoError) {
-        why = "Manifold refused a piece's solid";
-        return false;
-      }
-      switch (s.role) {
+    SharedCorners shared;
+    auto sort_in = [&](manifold::Manifold m, Role role, uint32_t piece) {
+      if (keep_piece != UINT32_MAX && piece != keep_piece) close_keep();
+      switch (role) {
         case Role::MergeShell: merged.push_back(std::move(m)); break;
-        case Role::KeepShell: keep_shell = std::move(m); break;
+        case Role::KeepShell:
+          keep_piece = piece;
+          keep_shell.push_back(std::move(m));
+          break;
         case Role::Air:
-          if (&s != &c.solids[0] && (&s - 1)->role == Role::KeepShell) parts.push_back(keep_shell - m);  // (a Keep room: its shell less its own air)
+          if (keep_piece == piece) keep_air.push_back(m);
           airs.push_back(std::move(m));
           break;
         case Role::Add: parts.push_back(std::move(m)); break;
         case Role::Subtract: subs.push_back(std::move(m)); break;
         case Role::Intersect: trims.push_back(std::move(m)); break;
       }
+    };
+    /* A piece of several parts (stairs, an arch, an outline with a corner turned inward) is united before it meets the others,
+     * each of its roles by itself. Its parts have their seams corner for corner, and only among themselves is that still so: a
+     * batch takes its operands in an order of its own, and an arch's block that a box had cut first no longer met its neighbour
+     * to the bit - the seam stayed as a sheet of no thickness inside the arch. */
+    std::vector<manifold::Manifold> own;
+    Role own_role = Role::Add;
+    uint32_t own_piece = UINT32_MAX;
+    auto close_own = [&] {
+      if (own.empty()) return;
+      sort_in(own.size() == 1 ? own[0] : manifold::Manifold::BatchBoolean(own, manifold::OpType::Add), own_role, own_piece);
+      own.clear();
+    };
+    for (const Solid &s : c.solids) {
+      manifold::Manifold m = solid_manifold(c, s, fr, planes, add_faces, shared);
+      if (m.Status() != manifold::Manifold::Error::NoError) {
+        why = s.mesh ? "Manifold refused a mesh piece (it is closed, yet not a solid: the field path takes it)" : "Manifold refused a piece's solid";
+        return false;
+      }
+      if (s.piece != own_piece || s.role != own_role) close_own();
+      own_piece = s.piece, own_role = s.role;
+      own.push_back(std::move(m));
     }
+    close_own();
+    close_keep();
     soup = Soup();
     soup.arity = 3;
     soup.trust_points = true;
@@ -370,9 +565,11 @@ bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &w
         why = "Manifold's result names a face no piece has";
         return false;
       }
-      soup.label[t] = (uint32_t)label;
-      soup.key[t] = face_key(c, (uint32_t)label);
+      const bool curved = !c.solids[c.label_solid[label]].flat;  // (a curved mesh's faces merge with nothing)
+      soup.label[t] = (uint32_t)label | (curved ? kBlendLabel : 0u);
+      soup.key[t] = curved ? kNoMerge : face_key(c, (uint32_t)label);
     }
+    close_empty_edges(soup);
     if (!pair_edges(soup)) {
       why = "Manifold's result is not closed";
       return false;

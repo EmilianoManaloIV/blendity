@@ -322,9 +322,211 @@ static std::vector<Piece> hostile(uint32_t seed, bool boxes) {
   return p;
 }
 
-/* The sweep's three kinds of arrangement. */
-static const char *const kWhat[4] = {", boxes on a 0.25 m grid", ", the same boxes turned as a whole", ", any pieces", ", rooms and Intersect pieces"};
-static const char *const kWhatShort[4] = {", boxes", ", boxes turned", "", ", rooms"};
+/* Round 480 (test engineer): meshes as pieces, good and hostile - a torus, a cube, an icosphere, a concave prism, an open cube, an inside-out torus, two cubes
+ * crossing in one mesh, a cube cut apart along an edge loop, a cube whose faces share no point, a cube with a corner that is not a number, an empty mesh, one
+ * triangle, a two-sided sheet, a flat grid - among boxes, rooms, wedges, cylinders and spheres, some turned, mirrored or stretched. */
+struct MeshLib {
+  std::vector<MeshPtr> meshes;
+  std::vector<const char *> names;
+  static MeshPtr soup(const std::vector<Vec3> &pos, const std::vector<std::vector<uint32_t>> &faces) {
+    MeshPtr m = std::make_shared<Mesh>();
+    m->positions = pos;
+    for (const std::vector<uint32_t> &f : faces) {
+      for (uint32_t v : f) m->corner_verts.push_back(v);
+      m->face_offsets.push_back((uint32_t)m->corner_verts.size());
+    }
+    return m;
+  }
+  static std::vector<std::vector<uint32_t>> faces_of(const Mesh &m) {
+    std::vector<std::vector<uint32_t>> out;
+    for (size_t f = 0; f < m.face_count(); f++) out.emplace_back(m.face_verts(f), m.face_verts(f) + m.face_size(f));
+    return out;
+  }
+  void add(const char *name, MeshPtr m) { names.push_back(name), meshes.push_back(std::move(m)); }
+  MeshLib() {
+    add("torus", primitives::torus(0.5f, 0.2f, 24, 12));
+    add("cube", primitives::cube(1.0f));
+    add("ico sphere", primitives::ico_sphere(0.5f, 2));
+    {  // (an L prism: concave top and bottom faces)
+      const std::vector<Vec2> pts = {{0, 0}, {2, 0}, {2, 1}, {1, 1}, {1, 2}, {0, 2}};
+      std::vector<Vec3> pos;
+      for (const Vec2 &q : pts) pos.push_back(Vec3(q.x, 0.0f, q.y)), pos.push_back(Vec3(q.x, 1.5f, q.y));
+      std::vector<std::vector<uint32_t>> faces;
+      std::vector<uint32_t> bottom, top;
+      const uint32_t n = (uint32_t)pts.size();
+      for (uint32_t i = 0; i < n; i++) {
+        const uint32_t j = (i + 1) % n;
+        faces.push_back({2 * i, 2 * j, 2 * j + 1, 2 * i + 1});
+        bottom.push_back(2 * (n - 1 - i)), top.push_back(2 * i + 1);
+      }
+      faces.push_back(bottom), faces.push_back(top);
+      add("L prism", soup(pos, faces));
+    }
+    {
+      MeshPtr open = primitives::cube(1.0f);
+      open->corner_verts.resize(open->face_offsets[open->face_count() - 1]);
+      open->face_offsets.pop_back();
+      add("open cube", open);
+    }
+    {
+      MeshPtr flipped = mesh_copy(*primitives::torus(0.5f, 0.2f, 24, 12));
+      meshops::flip_normals(*flipped);
+      add("inside out torus", flipped);
+    }
+    {
+      const MeshPtr c = primitives::cube(1.0f);
+      std::vector<Vec3> pos = c->positions;
+      for (const Vec3 &p : c->positions) pos.push_back(p + Vec3(0.4f, 0.2f, 0.1f));
+      std::vector<std::vector<uint32_t>> faces = faces_of(*c);
+      for (std::vector<uint32_t> f : faces_of(*c)) {
+        for (uint32_t &v : f) v += (uint32_t)c->positions.size();
+        faces.push_back(f);
+      }
+      add("two crossing cubes", soup(pos, faces));
+    }
+    {
+      const MeshPtr c = primitives::cube(1.0f);
+      std::vector<Vec3> pos = c->positions;
+      for (const Vec3 &p : c->positions) pos.push_back(p);
+      std::vector<std::vector<uint32_t>> faces = faces_of(*c);
+      for (size_t f = 3; f < faces.size(); f++)
+        for (uint32_t &v : faces[f]) v += (uint32_t)c->positions.size();
+      add("split cube", soup(pos, faces));
+    }
+    {
+      const MeshPtr c = primitives::cube(1.0f);
+      std::vector<Vec3> pos;
+      std::vector<std::vector<uint32_t>> faces;
+      for (size_t f = 0; f < c->face_count(); f++) {
+        std::vector<uint32_t> face;
+        for (uint32_t i = 0; i < c->face_size(f); i++) face.push_back((uint32_t)pos.size()), pos.push_back(c->positions[c->face_verts(f)[i]]);
+        faces.push_back(face);
+      }
+      add("unwelded cube", soup(pos, faces));
+    }
+    {
+      MeshPtr nan = primitives::cube(1.0f);
+      nan->positions[3].y = std::numeric_limits<float>::quiet_NaN();
+      add("cube with a NaN corner", nan);
+    }
+    add("empty", std::make_shared<Mesh>());
+    add("one triangle", soup({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)}, {{0, 1, 2}}));
+    add("two-sided sheet", soup({Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1)}, {{0, 1, 2, 3}, {3, 2, 1, 0}}));
+    add("flat grid", primitives::plane(1.0f, 2));
+  }
+};
+static const MeshLib &mesh_lib() {
+  static const MeshLib lib;
+  return lib;
+}
+
+static std::vector<Piece> mesh_hostile(uint32_t seed) {
+  const MeshLib &lib = mesh_lib();
+  Rand r{seed * 2654435761u + 977u};
+  std::vector<Piece> out;
+  const int count = 2 + r.pick(7);
+  for (int i = 0; i < count; i++) {
+    const int kind = r.pick(12);
+    Piece p;
+    p.id = (uint64_t)i + 1;
+    if (kind < 3) p.shape = Shape::Box, p.size = {0.5f * (float)(2 + r.pick(5)), 0.5f * (float)(2 + r.pick(5)), 0.5f * (float)(2 + r.pick(5))};
+    else if (kind == 3) p.shape = Shape::Sphere, p.radius = 0.5f + 0.25f * (float)r.pick(4), p.segments = 12, p.rings = 6;
+    else if (kind == 4) p.shape = Shape::Wedge, p.size = {1.0f, 1.0f, 2.0f};
+    else if (kind == 5) p.shape = Shape::Box, p.size = {2.5f, 2.0f, 2.5f}, p.room = true;
+    else {
+      const size_t k = (size_t)r.pick((int)lib.meshes.size());
+      p.shape = Shape::Mesh, p.mesh = lib.meshes[k], p.mesh_key = (uint64_t)k + 1;
+    }
+    const int op = r.pick(5);
+    if (!p.room) p.op = op == 0 ? Op::Subtract : op == 1 && p.shape != Shape::Mesh ? Op::Subtract : Op::Add;
+    Vec3 scale(1.0f);
+    const int odd = r.pick(10);
+    if (odd == 0) scale = Vec3(-1.0f, 1.0f, 1.0f);
+    if (odd == 1) scale = Vec3(2.0f, 0.5f, 1.0f);
+    const Vec3 at(0.25f * (float)(r.pick(13) - 6), 0.25f * (float)(r.pick(13) - 6), 0.25f * (float)(r.pick(13) - 6));
+    const Quat turn = odd == 2 ? Quat::euler({r.in(0, 360), r.in(0, 360), r.in(0, 360)}) : Quat::euler({90.0f * (float)r.pick(4), 90.0f * (float)r.pick(4), 0.0f});
+    p.to_blockout = Mat4::trs(at, turn, scale);
+    out.push_back(p);
+  }
+  return out;
+}
+
+/* The sweep's kinds of arrangement. */
+static const char *const kWhat[6] = {", boxes on a 0.25 m grid", ", the same boxes turned as a whole", ", any pieces", ", rooms and Intersect pieces", ", wedges, stairs, arches and outlines",
+                                     ", hostile meshes as pieces among boxes, rooms and wedges"};
+static const char *const kWhatShort[6] = {", boxes", ", boxes turned", "", ", rooms", ", new shapes", ", mesh pieces"};
+
+/* Round 480 (task 0456): wedges, stairs, arches and outlines among boxes, on the 0.25 m grid and turned by right angles, with the hostile numbers
+ * of the task - 0, 1 and 257 steps, an angle of 0, of 720 and not a number, an inner radius above the outer, an outline of three points in a line,
+ * of 256 and of 300 points, crossing itself, with a point twice, with a corner that is not a number or of two corners only, a wedge with a side
+ * of no length - and the same shapes as rooms (the wedge and the outline) and as Subtract pieces. A piece it cannot use is skipped by name. */
+static std::vector<Piece> shapes_hostile(uint32_t seed) {
+  Rand r{seed * 3266489917u + 668265263u};
+  std::vector<Piece> p;
+  const int count = 2 + r.pick(5);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  for (int i = 0; i < count; i++) {
+    Piece q;
+    q.id = (uint64_t)i + 1;
+    const int kind = i == 0 && r.pick(2) == 0 ? 0 : r.pick(6);  // (a box now and then to stand the others on or cut from)
+    auto size = [&]() { return 0.5f * (float)(1 + r.pick(6)); };
+    q.size = {size(), size(), size()};
+    q.height = size();
+    q.radius = size();
+    q.op = r.pick(4) == 0 ? Op::Subtract : Op::Add;
+    if (kind == 0) q.shape = Shape::Box;
+    if (kind == 1 || kind == 2) {  // a wedge, a room with a sloped ceiling
+      q.shape = Shape::Wedge;
+      if (r.pick(5) == 0) q.room = true, q.wall = q.floor = q.ceiling = 0.25f * (float)(1 + r.pick(2)), q.keep_walls = r.pick(3) == 0, q.open_top = r.pick(4) == 0;
+      if (r.pick(25) == 0) q.size.z = 0.0f;
+    }
+    if (kind == 3) {  // stairs
+      q.shape = Shape::Stairs;
+      q.steps = 1 + r.pick(10);
+      const int odd = r.pick(8);
+      if (odd == 0) q.steps = 0;
+      if (odd == 1) q.steps = 1;
+      if (odd == 2) q.steps = 257;
+      q.fill_under = r.pick(2) == 0;
+    }
+    if (kind == 4) {  // an arch
+      q.shape = Shape::Arch;
+      q.inner_radius = q.radius * 0.5f, q.angle = 180.0f, q.segments = 3 + r.pick(14);
+      const int odd = r.pick(10);
+      if (odd == 0) q.angle = 0.0f;
+      if (odd == 1) q.angle = 720.0f;
+      if (odd == 2) q.inner_radius = q.radius * 1.5f;
+      if (odd == 3) q.angle = 360.0f;
+      if (odd == 4) q.angle = nan;
+      if (odd == 5) q.inner_radius = 0.0f;
+    }
+    if (kind == 5) {  // an outline: an L, a corridor with a bend, a rectangle, or something hostile
+      q.shape = Shape::Outline;
+      const int what = r.pick(12);
+      const float a = size() + 1.0f, b = size() + 1.0f;
+      if (what < 4) q.outline = {{0, 0}, {2 * a, 0}, {2 * a, a}, {a, a}, {a, 2 * a}, {0, 2 * a}};  // (an L)
+      else if (what < 6) q.outline = {{0, 0}, {3 * a, 0}, {3 * a, b}, {b, b}, {b, 3 * a}, {0, 3 * a}};
+      else if (what < 8) q.outline = {{0, 0}, {a, 0}, {a, b}, {0, b}};
+      else if (what == 8) q.outline = {{0, 0}, {a, 0}, {2 * a, 0}};                       // three points in a line
+      else if (what == 9) q.outline = {{0, 0}, {a, b}, {a, 0}, {0, b}};                     // crossing itself
+      else if (what == 10) {                                                                // 256 points on a circle (and 300 when the numbers are odd)
+        const int n = r.pick(2) == 0 ? 256 : 300;
+        for (int k = 0; k < n; k++) q.outline.push_back({a * std::cos(2.0f * kPi * (float)k / (float)n), a * std::sin(2.0f * kPi * (float)k / (float)n)});
+      }
+      else {
+        q.outline = {{0, 0}, {a, 0}, {a, 0}, {a, b}, {0, b}};  // a point twice
+        if (r.pick(2) == 0) q.outline[2] = {nan, 0.0f};
+        if (r.pick(3) == 0) q.outline.resize(2);
+      }
+      if (r.pick(6) == 0 && q.outline.size() >= 3) q.room = true, q.wall = q.floor = q.ceiling = 0.25f * (float)(1 + r.pick(2)), q.keep_walls = r.pick(3) == 0;
+    }
+    const Vec3 at(0.25f * (float)(r.pick(9) - 4), 0.25f * (float)(r.pick(9) - 4), 0.25f * (float)(r.pick(9) - 4));
+    const Quat turn = Quat::euler({90.0f * (float)r.pick(4), 90.0f * (float)r.pick(4), 90.0f * (float)r.pick(4)});
+    q.to_blockout = Mat4::trs(at, turn, Vec3(1.0f));
+    p.push_back(q);
+  }
+  return p;
+}
 
 /* Round 478: rooms on the 0.25 m grid - Merge and Keep, open-topped, with no thickness, thicker than the room is wide, round ones - among
  * boxes that add, subtract and (at most two) intersect, some turned by right angles, a few unusable or unevenly scaled. */
@@ -371,6 +573,8 @@ static std::vector<Piece> rooms_hostile(uint32_t seed) {
  * angle that several pieces share); any pieces. */
 static std::vector<Piece> arrangement(uint32_t seed, int what) {
   if (what == 3) return rooms_hostile(seed);
+  if (what == 4) return shapes_hostile(seed);
+  if (what == 5) return mesh_hostile(seed);
   std::vector<Piece> pieces = hostile(seed, what < 2);
   if (what != 1) return pieces;
   Rand r{seed * 40503u + 977u};
@@ -396,7 +600,7 @@ static void list_arrangement(uint32_t seed, Path path, int what, const std::vect
   for (const Piece &p : pieces) {
     const Vec3 x = p.to_blockout.column(0), y = p.to_blockout.column(1), z = p.to_blockout.column(2), t = p.to_blockout.translation();
     std::printf("    piece %llu: %s %s size %g %g %g radius %g height %g segments %d rings %d at %g %g %g, axes (%g %g %g) (%g %g %g) (%g %g %g)\n", (unsigned long long)p.id,
-                p.shape == Shape::Box ? "box" : p.shape == Shape::Cylinder ? "cylinder" : "sphere", p.room ? "room" : p.op == Op::Add ? "add" : p.op == Op::Subtract ? "subtract" : "intersect", p.size.x, p.size.y, p.size.z,
+                p.shape == Shape::Box ? "box" : p.shape == Shape::Cylinder ? "cylinder" : p.shape == Shape::Sphere ? "sphere" : p.shape == Shape::Wedge ? "wedge" : p.shape == Shape::Stairs ? "stairs" : p.shape == Shape::Arch ? "arch" : p.shape == Shape::Outline ? "outline" : "mesh", p.room ? "room" : p.op == Op::Add ? "add" : p.op == Op::Subtract ? "subtract" : "intersect", p.size.x, p.size.y, p.size.z,
                 p.radius, p.height, p.segments, p.rings, t.x, t.y, t.z, x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z);
     if (p.room) std::printf("      room: wall %g floor %g ceiling %g%s%s\n", p.wall, p.floor, p.ceiling, p.keep_walls ? ", keep walls" : ", merge", p.open_top ? ", open top" : "");
   }
@@ -463,9 +667,9 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
   const char *cell_env = std::getenv("BLENDITY_BLOCKOUT_CELL");  // (the sweep at another cell, to see what a finer grid resolves)
   const float sweep_cell = cell_env && std::atof(cell_env) > 0.0 ? (float)std::atof(cell_env) : 0.08f;
   rep.table({"sweep", "arrangements", "built", "pieces skipped", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
-  for (int kind = 0; kind < 8; kind++) {
-    const Path path = kind < 4 ? Path::Crisp : Path::Field;
-    const int what = kind % 4;
+  for (int kind = 0; kind < 12; kind++) {
+    const Path path = kind < 6 ? Path::Crisp : Path::Field;
+    const int what = kind % 6;
     if (path == Path::Crisp && !crisp) continue;
     const std::string name = std::string(path == Path::Crisp ? "crisp" : "field") + kWhatShort[what];
     Tally t;
@@ -688,6 +892,39 @@ static void test_blockout(Report &rep, const Options &o) {
     rooms.step = sc.step;
     rooms.verdict = sz[2] == 100;
     scenes.push_back(rooms);
+  }
+  /* Round 480: a staircase against the first room's outer wall and an arch through the last room's, added to interior 100 - the kernel's cost follows the
+   * solids (8 steps and 12 blocks more), not the pieces. */
+  {
+    Scene3 sc;
+    sc.name = "interior 100 + stairs + arch";
+    sc.pieces = interior(6, 28);
+    Piece stairs;
+    stairs.id = sc.pieces.size() + 1, stairs.shape = Shape::Stairs, stairs.size = {2.0f, 1.5f, 3.0f}, stairs.steps = 8;
+    stairs.to_blockout = Mat4::trs({-3.1f, -0.85f, 2.0f}, Quat(), Vec3(1.0f));
+    Piece arch;
+    arch.id = sc.pieces.size() + 2, arch.shape = Shape::Arch, arch.radius = 1.5f, arch.inner_radius = 1.0f, arch.angle = 180.0f, arch.segments = 12, arch.height = 0.4f;
+    arch.to_blockout = Mat4::trs({23.4f, -1.6f, 20.0f}, Quat(), Vec3(1.0f));
+    sc.moved = sc.pieces.size();  // (the staircase, slid along the wall)
+    sc.pieces.push_back(stairs);
+    sc.pieces.push_back(arch);
+    sc.step = {0.0f, 0.0f, 0.3f};
+    sc.verdict = !o.quick;
+    scenes.push_back(sc);
+  }
+  /* Round 480 (test engineer): a 10k-face mesh as a piece in interior 100 (built from room pieces, so an Add piece standing in a room stays): a torus of 128 x 80
+   * quads lying on the first room's floor, sunk 0.1 m into it, and slid 0.2 m along x between builds. The row is a measurement: the verdict is "-". */
+  {
+    Scene3 sc;
+    sc.name = "interior rooms 100 + a 10k-face mesh";
+    sc.pieces = interior_rooms(6, 28);
+    Piece m;
+    m.id = sc.pieces.size() + 1, m.shape = Shape::Mesh, m.mesh = bl::primitives::torus(0.5f, 0.2f, 128, 80), m.mesh_key = 1;
+    m.to_blockout = Mat4::trs({0.0f, -1.1f, 0.0f}, Quat(), Vec3(2.0f));
+    sc.moved = sc.pieces.size();
+    sc.pieces.push_back(m);
+    sc.step = {0.2f, 0.0f, 0.0f};
+    scenes.push_back(sc);
   }
   for (int n : {10, 100, 400}) {
     if (o.quick && n > 100) continue;

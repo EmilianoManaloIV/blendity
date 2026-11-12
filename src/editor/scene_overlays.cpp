@@ -345,7 +345,7 @@ void Editor::render_static_overlays() {
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
-    if (!mr || !mr->enabled) return;
+    if (!mr || !mr->enabled || blockout_uses_as_piece(g)) return;  // (round 480: no wireframe for a mesh a Blockout uses)
     if (edit_mode_ && g.id == edit_obj_) return;
     const Mesh *m = g.evaluated_mesh();
     if (!m) return;

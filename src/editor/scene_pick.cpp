@@ -74,7 +74,7 @@ bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
-    const Mesh *m = mr && mr->enabled && mr->display_as == 0 ? g.evaluated_mesh() : nullptr;
+    const Mesh *m = mr && mr->enabled && mr->display_as == 0 && !blockout_uses_as_piece(g) ? g.evaluated_mesh() : nullptr;
     if (!m) return;
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
@@ -372,8 +372,14 @@ void Editor::box_select(const Recti &view, Recti box, int mode) {
     }
   std::sort(ids.begin(), ids.end());
   ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-  for (uint32_t id : ids)
-    if (GameObject *g = scene_->find(id)) select(g->id, SEL_ADD);
+  for (uint32_t id : ids) {
+    GameObject *g = scene_->find(id);
+    if (!g) continue;
+    /* A Blockout in the box gives its pieces there, as a click gives the piece under it (the user, after round 479: a click that
+     * moved a few pixels is a small box, and it selected the whole Blockout where the click selects a piece). */
+    if (g->get<Blockout>() && blockout_box_select(*g, view, b)) continue;
+    select(g->id, SEL_ADD);
+  }
   scene_->for_each([&](GameObject &g) {
     if (!g.get<Light>() && !g.get<Camera>()) return;
     Vec2 sp;

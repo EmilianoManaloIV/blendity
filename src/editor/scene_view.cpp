@@ -87,6 +87,9 @@ void Editor::draw_scene_view(const Recti &r) {
   bool box_visible = false;
   if (drag_ == Drag::Box) {
     bool moved = box.w > u.px(4) || box.h > u.px(4);
+    /* A press that slipped straight sideways (or straight up) makes a box of no height (width): it held no pixel, selected nothing
+     * and cleared the selection - "selecting things on my cursor doesn't always select" (the user, round 479). It is a pixel thick. */
+    if (moved) box.w = std::max(box.w, 1), box.h = std::max(box.h, 1);
     box_visible = moved;
     if (in.cancelled) drag_ = Drag::None, box_visible = false;  // (a finger's press taken back: task 0213)
     if (drag_ == Drag::Box && (in.released[0] || !in.down[0])) {
@@ -573,7 +576,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *mf = g.get<MeshFilter>();
-    if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (!mr || !mr->enabled || !mf || !mf->mesh || blockout_uses_as_piece(g)) return;  // (round 480: a Blockout's mesh piece is not drawn)
     if (game ? !mr->show_in_renders : mr->display_as != 0) return;  // wire / bounds: drawn as overlays
     DrawItem it;
     bool editing = !game && edit_mode_ && g.id == edit_obj_;

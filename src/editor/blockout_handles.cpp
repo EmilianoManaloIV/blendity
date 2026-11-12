@@ -28,15 +28,14 @@ void snap_candidates(const GameObject &bo, uint64_t skip, Vec3 origin, Vec3 dir,
     if (only ? p->id != only : p->id == skip) continue;  // (`only`: the places of that one piece's corners)
     const BlockoutPiece *bp = p->get<BlockoutPiece>();
     Mat4 frame = p->world_matrix();
-    Vec3 h(0.0f);
+    Vec3 lo0, hi0;
     if (bp->opening != 0) {
-      h = bp->box_size() * 0.5f;
+      lo0 = bp->box_size() * -0.5f, hi0 = bp->box_size() * 0.5f;
       frame = frame * bp->shape_offset();
     }
-    else if (bp->shape == 0) h = bp->box_size() * 0.5f;
-    else if (bp->shape == 1) h = Vec3(std::fabs(bp->radius), std::fabs(bp->height) * 0.5f, std::fabs(bp->radius));
-    else h = Vec3(std::fabs(bp->radius));
-    if (!finite3(h)) continue;
+    else blockout_piece_bounds(*bp, lo0, hi0);  // (the piece's own box, whatever its shape: a wedge's, an outline's, a mesh's)
+    if (!finite3(lo0) || !finite3(hi0)) continue;
+    const Vec3 h = (hi0 - lo0) * 0.5f, centre = (hi0 + lo0) * 0.5f;
     auto add_box = [&](Vec3 lo, Vec3 hi) {
       for (int k = 0; k < 8; k++) {
         const Vec3 c((k & 1) ? hi.x : lo.x, (k & 2) ? hi.y : lo.y, (k & 4) ? hi.z : lo.z);
@@ -44,12 +43,13 @@ void snap_candidates(const GameObject &bo, uint64_t skip, Vec3 origin, Vec3 dir,
         if (finite_bits(t)) out.push_back(t);
       }
     };
-    add_box(-h, h);
-    if (!bp->room || bp->opening != 0) continue;
+    add_box(lo0, hi0);
+    if (!bp->is_room()) continue;
     const GameObject *owner = blockout_of_piece(*p);
     RoomGrowth g;
     if (owner && blockout_room_growth(bp->to_piece(p->id, blockout_piece_matrix(*p, *owner)), g))
-      add_box({-h.x - (float)g.x, -h.y - (float)g.down, -h.z - (float)g.z}, {h.x + (float)g.x, h.y + (float)g.up, h.z + (float)g.z});
+      add_box({centre.x - h.x - (float)g.x, centre.y - h.y - (float)g.down, centre.z - h.z - (float)g.z},
+              {centre.x + h.x + (float)g.x, centre.y + h.y + (float)g.up, centre.z + h.z + (float)g.z});
   }
 }
 
@@ -65,11 +65,20 @@ std::string handle_text(const BlockoutHandle &h, const BlockoutPiece &p) {
     case BlockoutHandle::OpenWidth: v = p.width; break;
     case BlockoutHandle::OpenHead: v = p.head; break;
     case BlockoutHandle::OpenSill: v = p.sill; break;
+    case BlockoutHandle::OutlinePoint:
+    case BlockoutHandle::OutlineAdd: {
+      const size_t i = (size_t)std::max(0, h.axis);
+      if (i < p.outline.size()) return strprintf("%s  %.3f, %.3f m", h.name.c_str(), p.outline[i].x, p.outline[i].y);
+      break;
+    }
   }
   return strprintf("%s  %.3f m", h.name.c_str(), v);
 }
 
 bool same_numbers(const BlockoutPiece &a, const BlockoutPiece &b) {
+  if (a.outline.size() != b.outline.size()) return false;
+  for (size_t i = 0; i < a.outline.size(); i++)
+    if (a.outline[i].x != b.outline[i].x || a.outline[i].y != b.outline[i].y) return false;
   return a.size.x == b.size.x && a.size.y == b.size.y && a.size.z == b.size.z && a.radius == b.radius && a.height == b.height && a.wall == b.wall &&
          a.width == b.width && a.head == b.head && a.sill == b.sill;
 }
@@ -96,7 +105,7 @@ void Editor::blockout_handle_view(const GameObject &g, std::vector<BlockoutHandl
   const Vec3 toward = w.inverse().point(cam_.position());
   RoomGrowth grow;
   bool has_growth = false;
-  if (bp->room && bp->opening == 0)
+  if (bp->is_room())
     if (const GameObject *bo = blockout_of_piece(g)) has_growth = blockout_room_growth(bp->to_piece(g.id, blockout_piece_matrix(g, *bo)), grow);
   blockout_handles(*bp, finite3(toward) ? toward : Vec3(0.0f), has_growth ? &grow : nullptr, out);
   if (!visible_only) return;
@@ -105,6 +114,7 @@ void Editor::blockout_handle_view(const GameObject &g, std::vector<BlockoutHandl
   const Vec3 eye = cam_.position();
   out.erase(std::remove_if(out.begin(), out.end(),
                            [&](const BlockoutHandle &h) {
+                             if (blockout_handle_planar(h)) return false;  // (dragged in a plane: any view can pull it)
                              const Vec3 way = w.dir(h.dir);
                              const Vec3 view = cam_.ortho ? cam_.forward() : w.point(h.at) - eye;
                              const float lw = length(way), lv = length(view);
@@ -257,9 +267,12 @@ bool Editor::blockout_drag_update(const Recti &view) {
     return true;
   }
   const Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
-  const float s = closest_on_line_to_ray(d.origin_w, d.dir_w, ray);
+  const float s = d.planar ? 0.0f : closest_on_line_to_ray(d.origin_w, d.dir_w, ray);
   if (!d.armed && std::hypot((float)in.mx - d.press_px.x, (float)in.my - d.press_px.y) >= (float)ui_.px(3)) d.armed = true;  // (a click is not a drag: no snap may resize it)
-  if (finite_bits(s) && d.armed) {
+  if (d.planar) {
+    if (d.armed) blockout_planar_move(*g, ray);
+  }
+  else if (finite_bits(s) && d.armed) {
     d.t = blockout_snap_t(view, *g, s - d.grab);
     if (d.t != 0.0f || d.moved) {  // (a press and release without a move changes nothing and makes no step)
       d.moved = true;
@@ -272,6 +285,31 @@ bool Editor::blockout_drag_update(const Recti &view) {
   ui_.redraw = true;
   if (!in.down[0]) blockout_drag_ = BlockoutDrag{};  // (the step commits once the button is up)
   return true;
+}
+
+/* An outline's point under the mouse: the ray meets the plane the point lies in (the piece's XZ plane at the point's height); the point goes
+ * where the mouse is (kept the same distance from it as it was when taken), on the grid - the world's, when the plane is level - unless Ctrl. */
+void Editor::blockout_planar_move(GameObject &g, const Ray &ray) {
+  BlockoutDrag &d = blockout_drag_;
+  BlockoutPiece *bp = g.get<BlockoutPiece>();
+  float t = 0.0f;
+  if (!bp || !ray_plane(ray, d.origin_w, d.dir_w, t) || !finite_bits(t)) return;
+  Vec3 at = ray.origin + ray.dir * t + d.grab_off;
+  d.snapped = false;
+  if (!ui_.in.ctrl()) {
+    const float step = std::max(1e-3f, snap_move_);
+    if (std::fabs(d.dir_w.y) > 0.9999f) at = Vec3(std::round(at.x / step) * step, at.y, std::round(at.z / step) * step);  // (a level plane: the world's grid)
+    else {
+      const Vec3 own = d.world0.inverse().point(at);
+      at = d.world0.point(Vec3(std::round(own.x / step) * step, own.y, std::round(own.z / step) * step));
+    }
+  }
+  const Vec3 own = d.world0.inverse().point(at);
+  if (!finite3(own)) return;
+  blockout_outline_move(*bp, d.base, d.index, own.x, own.z);
+  d.moved = true;
+  d.text = handle_text(BlockoutHandle{BlockoutHandle::OutlinePoint, d.index, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f), "p" + std::to_string(d.index)}, *bp);
+  mark_changed("Edit Blockout Outline");
 }
 
 /* A press on a handle starts its drag (before the gizmo sees it); hovering one keeps the gizmo off it. True while a handle has the mouse. */
@@ -288,8 +326,27 @@ bool Editor::blockout_handles_update(const Recti &view) {
   BlockoutDrag d;
   if (!blockout_handle_begin(*g, hs[(size_t)hot], d)) return true;
   const Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
-  d.grab = closest_on_line_to_ray(d.origin_w, d.dir_w, ray);
-  if (!finite_bits(d.grab)) d.grab = 0.0f;
+  if (blockout_handle_planar(d.handle)) {
+    /* An outline's point: taken where it is; a "+" first adds the point (the click is one undo step) and then drags it. */
+    d.planar = true, d.index = d.handle.axis, d.base = d.before;
+    BlockoutPiece *bp = g->get<BlockoutPiece>();
+    float t = 0.0f;
+    d.grab_off = ray_plane(ray, d.origin_w, d.dir_w, t) && finite_bits(t) ? d.origin_w - (ray.origin + ray.dir * t) : Vec3(0.0f);
+    if (d.handle.kind == BlockoutHandle::OutlineAdd) {
+      blockout_outline_insert(d.base, d.handle.axis);
+      if (d.base.outline.size() == d.before.outline.size()) return true;  // (256 corners: no more)
+      d.index = d.handle.axis + 1;
+      d.handle = BlockoutHandle{BlockoutHandle::OutlinePoint, d.index, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f), "p" + std::to_string(d.index)};
+      d.grab_off = Vec3(0.0f);
+      *bp = d.base;
+      d.moved = true;
+      mark_changed("Edit Blockout Outline");
+    }
+  }
+  else {
+    d.grab = closest_on_line_to_ray(d.origin_w, d.dir_w, ray);
+    if (!finite_bits(d.grab)) d.grab = 0.0f;
+  }
   d.active = true;
   d.press_px = Vec2((float)in.mx, (float)in.my);
   d.was_dirty = scene_dirty_;
@@ -321,9 +378,10 @@ void Editor::draw_blockout_handles(const Recti &view) {
     const float x = (float)view.x + s.x, y = (float)view.y + s.y;
     const bool over = hot == (int)i;
     const bool wall = hs[i].kind == BlockoutHandle::Thickness;
-    const float r = (float)u.px(over ? 6 : 5);
+    const bool add = hs[i].kind == BlockoutHandle::OutlineAdd;
+    const float r = (float)u.px(over ? 6 : add ? 4 : 5);
     u.canvas.fill_rect({(int)(x - r - 1), (int)(y - r - 1), (int)(2 * r + 2), (int)(2 * r + 2)}, Color::hex(0x101010));
-    u.canvas.fill_rect({(int)(x - r), (int)(y - r), (int)(2 * r), (int)(2 * r)}, over ? Color::hex(0xFFFFFF) : wall ? Color::hex(0xF4BC02) : Color::hex(0x5AA9FF));
+    u.canvas.fill_rect({(int)(x - r), (int)(y - r), (int)(2 * r), (int)(2 * r)}, over ? Color::hex(0xFFFFFF) : wall ? Color::hex(0xF4BC02) : add ? Color::hex(0x7BD88F) : Color::hex(0x5AA9FF));
     if (u.record_buttons) u.button_rects["blockout_handle:" + hs[i].name] = Recti{(int)x - 5, (int)y - 5, 10, 10};  // (tests)
     if (!blockout_drag_.active || !over) continue;
     const std::string text = blockout_drag_.text + (blockout_drag_.snapped ? "  (snapped)" : "");
@@ -341,7 +399,7 @@ void Editor::blockout_handle_command(const std::vector<std::string> &t) {
   BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
   if (!bp || !blockout_of_piece(*g)) return Log::warn("blockout handle <side> <metres>: select a Blockout piece first");
   const std::string usage = "blockout handle <side> <metres> [both] - sides: +x -x +y -y +z -z (a box, a room), top bottom side (a cylinder), radius (a sphere), "
-                            "wall (a room), width head sill (a door or window)";
+                            "wall (a room), width head sill (a door or window), +z -z (an arch's depth), top bottom (an outline's height)";
   if (t.size() < 4) return Log::warn("%s", usage.c_str());
   const std::string num = t[3];
   const bool is_number = !num.empty() && (std::isdigit((unsigned char)num[0]) || num[0] == '-' || num[0] == '.' || num[0] == '+');
@@ -351,6 +409,7 @@ void Editor::blockout_handle_command(const std::vector<std::string> &t) {
   blockout_handle_view(*g, hs, false);  // (a script reaches every handle, whichever way the camera looks)
   const BlockoutHandle *h = blockout_handle_named(hs, t[2]);
   if (!h) return Log::warn("blockout handle: this piece has no '%s' handle (%s)", t[2].c_str(), usage.c_str());
+  if (blockout_handle_planar(*h)) return Log::warn("blockout handle: an outline's points move in a plane - set them with blockout outline <x z> <x z> ...");
   BlockoutDrag d;
   if (!blockout_handle_begin(*g, *h, d)) return Log::warn("blockout handle: the piece is flat or not finite");
   blockout_handle_move(*g, d, metres, t.size() > 4 && to_lower(t[4]) == "both");

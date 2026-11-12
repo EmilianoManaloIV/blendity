@@ -83,6 +83,7 @@ Editor::~Editor() {
   livelink_remove_discovery();  // (task 0274: the bridges stop finding a Blendity that is gone)
   eval_jobs_.clear();      // (round 413: the workers joined before the scene goes, and before the hook they may read)
   blockout_jobs_.clear();  // (round 477: the Blockout builds the same)
+  blockout_publish_piece_sources({});  // (round 480: no object of a scene that is going is a Blockout's piece)
   if (g_eval_hook_owner == this) g_eval_hook_owner = nullptr, GameObject::slow_eval_hook = nullptr;
   save_job_wait();         // (a save in flight finishes - its file is whole)
   mesh_job_.reset();
@@ -790,7 +791,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   draw_secondary_windows(now);  // (task 0187: after the main window, with its own input each)
   if (!any_scene_drawn_ && scene_) {  // (round 479: a held handle and a Room tool's footprint stop when no window draws a Scene view any more - a tab switch; the keymap is off while they run. After the other windows: the Scene view may be in one of them)
     if (blockout_drag_.active) blockout_drag_cancel(scene_->find(blockout_drag_.piece));
-    if (room_.stage > 0) room_.stage = 0, room_.typed.clear();
+    if (room_.stage > 0) room_.stage = 0, room_.typed.clear(), room_.points.clear();
   }
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
@@ -3431,7 +3432,7 @@ std::string Editor::export_objects(const std::vector<GameObject *> &objects, con
   std::vector<std::shared_ptr<Mesh>> keep;  // (round 351: copies the items point at, until the file is written)
   std::vector<std::shared_ptr<const Mesh>> held;  // (round 413: the scene's meshes the items point at, held while a worker writes)
   auto add = [&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
+    if (!g.active_in_hierarchy() || blockout_uses_as_piece(g)) return;  // (round 480: a mesh a Blockout uses as a piece is in the Blockout's mesh)
     auto *mf = g.get<MeshFilter>();
     if (mf && mf->mesh) held.push_back(mf->mesh);
     if (std::shared_ptr<const Mesh> e = g.evaluated_mesh_shared(0)) held.push_back(e);
@@ -4333,7 +4334,7 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
     Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
               "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>, Blockout, "
-              "Blockout Piece: [Subtract|Intersect] Box|Cylinder|Sphere, Room Box|Cylinder, Door, Window", kind.c_str());
+              "Blockout Piece: [Subtract|Intersect] Box|Cylinder|Sphere|Wedge|Stairs|Arch|Outline|Mesh, Room Box|Cylinder|Wedge|Outline, Door, Window", kind.c_str());
     return nullptr;
   }
   const std::string name = unique_object_name(kind == "Empty" ? "GameObject" : kind);  // (finding 8: Unity's "Sphere (1)")

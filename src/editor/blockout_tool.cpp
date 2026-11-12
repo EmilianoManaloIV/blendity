@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The Room tool (task 0455, round 479): drag a rectangle - or, with the Circle option, a circle from its centre - on the ground or on a
 // face of any mesh, then move the mouse for the height and click: the result is a room (or, with Solid, an Add or Subtract box or
-// cylinder) in the active Blockout, turned to the surface and standing on it. The tool stays on for the next room; Esc leaves it. The
+// cylinder) in the active Blockout, turned to the surface and standing on it. With the Polyline option (round 480) the footprint is any
+// outline: click its corners on the surface, close it on the first corner or with Enter, then pull the height as before. The tool stays on for the next room; Esc leaves it. The
 // piece is made by room_make (blockout_editor.cpp), which `blockout room` calls with the same numbers.
 #include "editor.h"
 
@@ -31,7 +32,7 @@ bool is_number_word(const std::string &w) {
 void Editor::set_room_tool(bool on) {
   if (on == room_.active) return;
   if (!on) {
-    room_.active = false, room_.stage = 0, room_.typed.clear();
+    room_.active = false, room_.stage = 0, room_.typed.clear(), room_.points.clear();
     ui_.redraw = true;
     Log::info("Room tool: off");
     return;
@@ -45,7 +46,8 @@ void Editor::set_room_tool(bool on) {
   if (scatter_) set_scatter(false);
   room_.active = true, room_.stage = 0, room_.typed.clear();
   ui_.redraw = true;
-  Log::info("Room tool: drag a rectangle on the ground or a face%s, then move the mouse for the height and click  |  Esc leaves", room_.circle ? " (a circle from its centre)" : "");
+  if (room_.polyline) Log::info("Room tool: click the corners of an outline on the ground or a face, close it on the first corner or with Enter, then move the mouse for the height and click  |  Esc leaves");
+  else Log::info("Room tool: drag a rectangle on the ground or a face%s, then move the mouse for the height and click  |  Esc leaves", room_.circle ? " (a circle from its centre)" : "");
 }
 
 /* The surface under a view pixel: the nearest face of any rendered mesh, else the ground plane. */
@@ -70,9 +72,9 @@ Vec3 Editor::room_snap_point(Vec3 p, Vec3 n) const {
   const float step = std::max(1e-3f, snap_move_);
   for (int a = 0; a < 3; a++) {
     if (std::fabs(n[a]) < 0.9999f) continue;
-    for (int b = 0; b < 3; b++)
-      if (b != a) p[b] = std::round(p[b] / step) * step;
-    return p;
+    /* (Each coordinate written out, not through operator[] on the local: see along_axis in blockout_object.cpp.) */
+    auto snapped = [&](int b, float v) { return b == a ? v : std::round(v / step) * step; };
+    return Vec3(snapped(0, p.x), snapped(1, p.y), snapped(2, p.z));
   }
   return p;
 }
@@ -91,6 +93,10 @@ std::vector<Vec3> Editor::room_outline(float height) const {
   room_extent(du, dz);
   const Vec3 n = room_.normal, u = room_.u, z = cross(u, n), lift = n * height;
   std::vector<Vec3> out;
+  if (room_.stage >= 2 && !room_.points.empty()) {  // (a polyline's: its corners, lifted)
+    for (const Vec3 &p : room_.points) out.push_back(p + lift);
+    return out;
+  }
   if (room_.circle) {
     for (int k = 0; k < 32; k++) {
       const float a = 2.0f * kPi * (float)k / 32.0f;
@@ -101,6 +107,14 @@ std::vector<Vec3> Editor::room_outline(float height) const {
   const Vec3 o = room_.origin + lift;
   out = {o, o + u * du, o + u * du + z * dz, o + z * dz};
   return out;
+}
+
+/* Whether the mouse is on the polyline's first corner (a click there closes it): within a few pixels on the screen, three corners or more. */
+bool Editor::room_polyline_closes(const Recti &view) {
+  if (room_.points.size() < 3) return false;
+  Vec2 s;
+  if (!project_to_view(view, room_.points[0], s)) return false;
+  return std::hypot(s.x - (float)ui_.in.mx, s.y - (float)ui_.in.my) <= (float)ui_.px(9);
 }
 
 /* The tool's input: a press starts the footprint, the release fixes it (a drag of no area makes nothing), the height follows the mouse
@@ -121,7 +135,7 @@ bool Editor::room_update(const Recti &view) {
   }
   if (in.pressed[1] && r.stage > 0) {
     in.pressed[1] = false;
-    r.stage = 0, r.typed.clear();
+    r.stage = 0, r.typed.clear(), r.points.clear();
     return true;
   }
   const Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
@@ -136,7 +150,39 @@ bool Editor::room_update(const Recti &view) {
     r.normal = n;
     r.u = surface_axis(n);
     r.origin = r.corner = room_snap_point(p, n);
-    r.stage = 1, r.height = 0.0f, r.typed.clear();
+    r.height = 0.0f, r.typed.clear(), r.points.clear();
+    if (r.polyline) r.points.push_back(r.origin), r.stage = 3;  // (the first corner: the others are clicked)
+    else r.stage = 1;
+    return true;
+  }
+  if (r.stage == 3) {
+    /* The corners: each click adds one on the surface's plane, a click on the first (or Enter) closes the outline, Backspace takes one back. */
+    float t;
+    if (ray_plane(ray, r.origin, r.normal, t)) r.corner = room_snap_point(ray.origin + ray.dir * t, r.normal);
+    u.redraw = true;
+    const bool keys = !u.wants_keyboard();  // (a text field has them: Enter and Backspace typed there are not the outline's)
+    if (keys && in.key_pressed[platform::KEY_BACKSPACE]) {
+      in.key_pressed[platform::KEY_BACKSPACE] = false;
+      r.points.pop_back();
+      if (r.points.empty()) r.stage = 0;
+      return true;
+    }
+    const bool enter = keys && in.key_pressed[platform::KEY_ENTER];
+    const bool click = in.pressed[0] && scene_hovered_ && !in.alt() && !u.any_active();
+    if (!enter && !click) return true;
+    if (click) u.consume_click();
+    if (enter) in.key_pressed[platform::KEY_ENTER] = false;
+    if (enter || room_polyline_closes(view)) {
+      if (r.points.size() < 3) {
+        Log::warn("Room: an outline needs three corners at least - click more");
+        return true;
+      }
+      r.stage = 2, r.height = 0.0f, r.typed.clear();  // (closed: the height next)
+      return true;
+    }
+    /* (A click on a corner that is there already adds nothing - the first one too, while three are not there yet to close on it.) */
+    const bool there = std::any_of(r.points.begin(), r.points.end(), [&](Vec3 p) { return length(r.corner - p) <= 1e-3f; });
+    if (!there) r.points.push_back(r.corner);
     return true;
   }
   if (r.stage == 1) {
@@ -158,7 +204,11 @@ bool Editor::room_update(const Recti &view) {
   if (in.key_pressed[platform::KEY_BACKSPACE] && !r.typed.empty()) r.typed.pop_back();
   float du, dz;
   room_extent(du, dz);
-  const Vec3 centre = r.circle ? r.origin : r.origin + r.u * (du * 0.5f) + cross(r.u, r.normal) * (dz * 0.5f);
+  Vec3 centre = r.circle ? r.origin : r.origin + r.u * (du * 0.5f) + cross(r.u, r.normal) * (dz * 0.5f);
+  if (!r.points.empty()) {  // (a polyline: the height is read along the line through its middle)
+    centre = Vec3(0.0f);
+    for (const Vec3 &p : r.points) centre = centre + p * (1.0f / (float)r.points.size());
+  }
   double typed = 0.0;
   float h;
   if (!r.typed.empty() && ui::eval_number(r.typed, typed)) h = (float)typed;
@@ -174,8 +224,11 @@ bool Editor::room_update(const Recti &view) {
   const Vec3 origin = r.origin, up = r.u, n = r.normal;
   const float height = r.height;
   const bool circle = r.circle;
+  std::vector<Vec3> corners;
+  corners.swap(r.points);
   r.stage = 0, r.typed.clear();  // (the tool stays on for the next room)
-  room_make(origin, up, n, du, dz, height, circle);
+  if (!corners.empty()) room_make_outline(corners, up, n, height);
+  else room_make(origin, up, n, du, dz, height, circle);
   return true;
 }
 
@@ -202,17 +255,33 @@ void Editor::room_draw(const Recti &view) {
       u.canvas.fill_circle(s.x, s.y, (float)u.px(4), yellow);
     }
   }
-  if (r.stage > 0) {
+  if (r.stage == 3) {
+    /* The corners so far, joined, and the next one at the mouse; the first corner is marked so the closing click is seen. */
+    for (size_t i = 0; i + 1 < r.points.size(); i++) line(r.points[i], r.points[i + 1], yellow);
+    line(r.points.back(), r.corner, yellow);
+    Vec2 s;
+    if (project_to_view(view, r.points[0], s)) {
+      u.canvas.fill_circle(s.x, s.y, (float)u.px(6.5f), 0xFF000000);
+      u.canvas.fill_circle(s.x, s.y, (float)u.px(5), room_polyline_closes(view) ? Color::hex(0xFFFFFF) : yellow);
+    }
+    label = strprintf("%zu corners  (click the first or Enter to close)", r.points.size());
+    const int tw = u.font.text_width(label) + u.px(12);
+    const Recti box{u.in.mx + u.px(16), u.in.my + u.px(12), tw, u.row_h()};
+    u.canvas.fill_round_rect(box, u.px(3), Color::hex(0x202020, 230));
+    u.label(box, label, u.theme.text_bright, ui::Align::Center);
+  }
+  else if (r.stage > 0) {
     const std::vector<Vec3> base = room_outline(0.0f);
     for (size_t i = 0; i < base.size(); i++) line(base[i], base[(i + 1) % base.size()], yellow);
     float du, dz;
     room_extent(du, dz);
     label = r.circle ? strprintf("radius %.2f m", std::fabs(du)) : strprintf("%.2f x %.2f m", std::fabs(du), std::fabs(dz));
+    if (!r.points.empty()) label = strprintf("%zu corners", r.points.size());
     if (r.stage == 2) {
       const float shown = r.solid ? r.height : std::fabs(r.height);  // (a room is built upward whatever the mouse does)
       const std::vector<Vec3> top = room_outline(shown);
       for (size_t i = 0; i < top.size(); i++) line(top[i], top[(i + 1) % top.size()], blue);
-      const size_t step = r.circle ? 4 : 1;
+      const size_t step = r.circle && r.points.empty() ? 4 : 1;
       for (size_t i = 0; i < top.size(); i += step) line(base[i], top[i], blue);
       label = r.typed.empty() ? strprintf("height %.3f m", r.height) : strprintf("height [%s] = %.3f m", r.typed.c_str(), r.height);
     }
@@ -226,9 +295,25 @@ void Editor::room_draw(const Recti &view) {
 
 /* blockout room <x0 z0 x1 z1 height> | room circle <x z radius height>: what the tool's two drags make, on the ground plane, with the tool's options. */
 void Editor::room_command(const std::vector<std::string> &t) {
+  if (t.size() > 2 && to_lower(t[2]) == "outline") {
+    /* blockout room outline <height> <x z> <x z> <x z> ...: the Polyline option's room, its corners on the ground. */
+    const std::string outline_usage = "blockout room outline <height> <x z> <x z> <x z> ... (3 to 256 corners, metres on the ground)";
+    if (t.size() < 3 + 1 + 6 || (t.size() - 4) % 2 != 0 || (t.size() - 4) / 2 > 256) return Log::warn("%s", outline_usage.c_str());
+    std::vector<Vec3> corners;
+    float height = 0.0f;
+    for (size_t i = 3; i < t.size(); i++) {
+      if (!is_number_word(t[i]) || !finite_bits((float)std::atof(t[i].c_str()))) return Log::warn("%s", outline_usage.c_str());
+      const float v = (float)std::atof(t[i].c_str());
+      if (i == 3) height = v;
+      else if (i % 2 == 0) corners.push_back(Vec3(v, 0.0f, 0.0f));
+      else corners.back().z = v;
+    }
+    room_make_outline(corners, Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), height);
+    return;
+  }
   const bool circle = t.size() > 2 && to_lower(t[2]) == "circle";
   const size_t first = circle ? 3 : 2, want = circle ? 4 : 5;
-  const std::string usage = "blockout room <x0 z0 x1 z1 height> | blockout room circle <x z radius height> (metres on the ground; options: blockout roomopt)";
+  const std::string usage = "blockout room <x0 z0 x1 z1 height> | blockout room circle <x z radius height> | blockout room outline <height> <x z> <x z> <x z> ... (metres on the ground; options: blockout roomopt)";
   if (t.size() != first + want) return Log::warn("%s", usage.c_str());
   float v[5] = {};
   for (size_t i = 0; i < want; i++) {
@@ -254,8 +339,9 @@ void Editor::room_options_command(const std::vector<std::string> &t) {
     room_.wall = m;
     return;
   }
-  if ((key != "circle" && key != "solid" && key != "subtract") || (!on && !off)) return Log::warn("blockout roomopt circle|solid|subtract on|off | wall <metres>");
-  (key == "circle" ? room_.circle : key == "solid" ? room_.solid : room_.subtract) = on;
+  if ((key != "circle" && key != "solid" && key != "subtract" && key != "polyline") || (!on && !off)) return Log::warn("blockout roomopt circle|polyline|solid|subtract on|off | wall <metres>");
+  (key == "circle" ? room_.circle : key == "polyline" ? room_.polyline : key == "solid" ? room_.solid : room_.subtract) = on;
+  if (key == "polyline" && off) room_.points.clear(), room_.stage = room_.stage == 3 ? 0 : room_.stage;
   ui_.redraw = true;
 }
 
@@ -268,6 +354,7 @@ void Editor::draw_room_tools(ui::Layout &lay) {
             "Ctrl: no snapping. Esc leaves. Console: tool room, blockout room.");
   struct Opt { const char *label, *tip; bool *value; };
   for (const Opt &o : {Opt{"Circle Footprint", "Drag a circle from its centre: a cylinder room.", &room_.circle},
+                       Opt{"Polyline Footprint", "Click the corners of any outline on the ground or a face (close it on the first corner or with Enter, Backspace takes one back), then pull the height.", &room_.polyline},
                        Opt{"Solid Piece", "A plain box or cylinder instead of a room.", &room_.solid},
                        Opt{"Subtract", "A solid cuts out of the Blockout instead of adding to it.", &room_.subtract}}) {
     row = lay.row(u.row_h() + u.px(2));

@@ -4022,8 +4022,10 @@ class Editor {
   GameObject *create_opening(GameObject &bo, int opening, const std::vector<float> &numbers, const GameObject *sel);  // (round 478: a door (1) or window (2) put on a wall)
   void draw_blockouts();  // (the pieces' wires)
   void blockout_menu_items(bool child);  // (the GameObject menu's, the Hierarchy's + and the Tools window's: New Blockout, Add / Subtract Box, Cylinder, Sphere)
-  uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y);  // (the piece that made the face under a view pixel; 0: none)
-  bool blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out);  // (round 478: the face under a view pixel, with its piece, side, point and normal)
+  bool blockout_box_select(GameObject &g, const Recti &view, const Recti &box);  // (a box select over a Blockout: its pieces under the box; false: none to name)
+  struct BlockoutOwners;  // (the pieces a Blockout's mesh was built from, for naming a face shared by several: blockout_editor.cpp)
+  uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y, const BlockoutOwners *owners = nullptr);  // (the piece that made the face under a view pixel; 0: none)
+  bool blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out, const BlockoutOwners *owners = nullptr);  // (round 478: the face under a view pixel, with its piece, side, point and normal)
   bool blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out);  // (round 478: a room's wall under the mouse in the Scene view)
   bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478: the middle of a room's first wall: -X of its air)
   bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall);  // (round 478: a door or window turned to a wall, on its room's floor)
@@ -4050,11 +4052,20 @@ class Editor {
     bool armed = false;
     bool was_dirty = false;   // the scene's unsaved mark at the press (Esc puts it back)
     std::string text;         // "+x  3.00 m": beside the handle and in the hint line
+    /* An outline's point (round 480): the handle moves in the piece's XZ plane, not along a line. `base` is the piece the moves are made
+     * from (`before` with the point added, for a "+" handle: Esc still puts `before` back), `index` the point, `grab_off` where the point
+     * was from where the mouse took it (world, in the plane). */
+    bool planar = false;
+    int index = 0;
+    BlockoutPiece base;
+    Vec3 grab_off;
   } blockout_drag_;
   struct RoomTool {
     bool active = false;
-    int stage = 0;            // 0 waiting for the first press, 1 the footprint is dragged, 2 the height
+    int stage = 0;            // 0 waiting for the first press, 1 the footprint is dragged, 2 the height, 3 (Polyline) the corners are clicked
     bool circle = false, solid = false, subtract = false;  // the options: a Circle footprint, a Solid piece (not a room), Subtract (a solid's operation)
+    bool polyline = false;    // the Polyline option (round 480): click the corners of any outline instead of dragging a rectangle or circle
+    std::vector<Vec3> points; // the corners clicked so far (in the surface), the first the origin; while stage 2 follows a polyline they are its closed outline
     float wall = 0.2f;        // a room's wall, floor and ceiling
     Vec3 origin, normal, u;   // the surface point of the first press, its normal and the axis lying in it (u, normal, cross(u, normal): right-handed)
     Vec3 corner;              // the footprint's other point
@@ -4072,9 +4083,11 @@ class Editor {
   bool blockout_move_snap(const Recti &view, const GameObject &lead, Vec3 start_pos, Vec3 axis, float &d);
   bool blockout_handles_update(const Recti &view);
   bool blockout_drag_update(const Recti &view);
+  void blockout_planar_move(GameObject &g, const Ray &ray);  // (round 480: an outline's point dragged in its plane)
   void blockout_drag_cancel(GameObject *g);
   void draw_blockout_handles(const Recti &view);
   void blockout_handle_command(const std::vector<std::string> &t);
+  void blockout_outline_command(const std::vector<std::string> &t);  // (round 480: blockout outline <x z> ...)
   void set_room_tool(bool on);
   bool room_update(const Recti &view);
   void room_draw(const Recti &view);
@@ -4083,6 +4096,9 @@ class Editor {
   void room_extent(float &du, float &dz) const;  // the footprint's size so far: along u and the third axis (a circle: its radius, 0)
   std::vector<Vec3> room_outline(float height) const;  // the footprint's corners (a circle's 32 points) lifted `height` along the normal
   GameObject *room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float dz, float height, bool circle);
+  GameObject *room_make_outline(const std::vector<Vec3> &corners, Vec3 u, Vec3 normal, float height);  // (round 480: the Polyline option's room)
+  bool room_target(GameObject *&target, float &scale);  // (the Blockout a Room tool piece goes into and its even scale; false, warned: none can take one)
+  bool room_polyline_closes(const Recti &view);         // (the mouse is on the first corner, with three or more clicked)
   GameObject *create_empty_blockout();
   void room_command(const std::vector<std::string> &t);
   void room_options_command(const std::vector<std::string> &t);
@@ -7092,6 +7108,9 @@ class Editor {
   const std::string &blockout_drag_text_for_test() const { return blockout_drag_.text; }
   bool blockout_drag_snapped_for_test() const { return blockout_drag_.snapped; }
   bool room_tool_active_for_test() const { return room_.active; }
+  size_t room_tool_points_for_test() const { return room_.points.size(); }   // (round 480: the Polyline option's corners so far)
+  bool room_tool_polyline_for_test() const { return room_.polyline; }
+  uint64_t lightmap_scene_key_for_test() { return lightmap_scene_key(); }    // (round 480: what a bake would be made from)
   int room_tool_stage_for_test() const { return room_.stage; }
   /* Where the active piece's handle `name` is on the screen now (the window's pixels); false when it has none or is behind the camera. */
   bool blockout_handle_pixel_for_test(const std::string &name, int &x, int &y) {

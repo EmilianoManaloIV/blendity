@@ -57,8 +57,10 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
       {"room tool", [](const Editor &e) { return e.room_.active; },
        [](const Editor &e) {
          const std::string leave = e.room_.stage > 0 ? "  |  Ctrl: no snapping  |  right-click: drop it  |  Esc: leave the tool" : "  |  Ctrl: no snapping  |  Esc: leave the tool";
+         if (e.room_.stage == 3) return "Room: click the next corner  |  click the first corner or Enter: close it  |  Backspace: take the last corner back" + leave;
          if (e.room_.stage == 1) return std::string(e.room_.circle ? "Room: release to fix the circle's radius" : "Room: release to fix the rectangle") + leave;
          if (e.room_.stage == 2) return "Room: move the mouse for the height  |  type a height  |  click or Enter: make it" + leave;
+         if (e.room_.polyline) return "Room: click the first corner of the outline on the ground or a face" + leave;
          return std::string("Room: drag a ") + (e.room_.circle ? "circle from its centre" : "rectangle") + " on the ground or a face" + leave;
        }},
       {"transform modal", [](const Editor &e) { return e.xf_.active; },

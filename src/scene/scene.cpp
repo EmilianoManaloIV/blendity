@@ -3749,7 +3749,7 @@ void physics_step(Scene &scene, float dt) {
   std::vector<Body> bodies;
   std::vector<AABB> statics;
   scene.for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
+    if (!g.active_in_hierarchy() || blockout_uses_as_piece(g)) return;  // (round 480: a mesh a Blockout uses as a piece is not collided with)
     auto *rb = g.get<Rigidbody>();
     if (rb && rb->enabled) {
       AABB b = g.world_bounds();

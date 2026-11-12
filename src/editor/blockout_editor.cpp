@@ -25,13 +25,15 @@ std::string path_text(const blockout::Report &r) {
   return exact ? "exact" : field ? "field" : "none";
 }
 
-BlockoutStatus make_status(const blockout::Report &r, size_t piece_count, bool ok) {
+BlockoutStatus make_status(const blockout::Report &r, size_t piece_count, bool ok, const std::vector<std::pair<uint64_t, std::string>> &refused) {
   BlockoutStatus s;
   s.built = true;
-  s.pieces = piece_count;
+  s.pieces = piece_count + refused.size();
+  s.refused = refused.size();
+  for (const auto &k : refused) s.skipped.push_back(k);  // (mesh pieces the snapshot left out: named like the kernel's own)
   for (const blockout::Skipped &k : r.skipped) s.skipped.push_back({k.id, k.why});
   for (const blockout::Skipped &k : r.notes) s.notes.push_back({k.id, k.why});
-  s.used = piece_count > s.skipped.size() ? piece_count - s.skipped.size() : 0;
+  s.used = s.pieces > s.skipped.size() ? s.pieces - s.skipped.size() : 0;
   s.clusters = r.clusters.size();
   for (const blockout::ClusterReport &c : r.clusters) s.unresolved += c.unresolved;
   s.path = path_text(r);
@@ -55,6 +57,7 @@ void Editor::update_blockouts(bool force) {
     return;
   }
   WalkScope scope{*this, blockout_walk_};
+  std::vector<uint64_t> sources;  // (the objects the enabled pieces of enabled Blockouts use as meshes: not drawn, collided with, baked or exported)
   scene_->for_each([&](GameObject &g) {
     Blockout *b = g.get<Blockout>();
     if (!b) return;
@@ -63,11 +66,15 @@ void Editor::update_blockouts(bool force) {
     if (!g.get<MeshRenderer>()) g.add<MeshRenderer>();
     std::vector<blockout::Piece> pieces;
     blockout::Settings settings;
-    blockout_snapshot(g, pieces, settings);
-    const uint64_t h = blockout_snapshot_hash(pieces, settings);
+    BlockoutSnapshotNotes notes;
+    blockout_snapshot(g, pieces, settings, &notes);
+    if (b->enabled && g.active_in_hierarchy()) sources.insert(sources.end(), notes.sources.begin(), notes.sources.end());
+    const uint64_t h = blockout_snapshot_hash(pieces, settings, &notes);
+    b->state.refused = std::move(notes.refused);
     if (b->state.hash_valid && b->state.hash == h && mf->mesh) return blockout_unwant(g.id);
     blockout_request(g, *b, std::move(pieces), settings, h);
   });
+  blockout_publish_piece_sources(std::move(sources));
 }
 
 /* The pieces are back at what the mesh already is (an undo during a build): what runs or waits for this Blockout is not wanted. */
@@ -132,11 +139,11 @@ void Editor::blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t pie
   if (!mf) mf = g.add<MeshFilter>();
   if (!g.get<MeshRenderer>()) g.add<MeshRenderer>();
   BlockoutState &s = b.state;
-  s.status = make_status(report, piece_count, ok);
+  s.status = make_status(report, piece_count, ok, s.refused);
   if (ok && mesh) {
     mf->mesh = mesh;
     s.faces = std::move(faces);
-    s.faces_mesh = mesh.get(), s.faces_version = mesh->version;
+    s.faces_mesh = mesh.get(), s.faces_version = mesh->version, s.faces_hash = hash;
     s.status.faces = mesh->face_count();
     s.logged_why.clear();
     blockout_landed_++;
@@ -170,8 +177,10 @@ void Editor::blockout_finish(size_t index) {
   if (playing_) return;
   std::vector<blockout::Piece> pieces;
   blockout::Settings settings;
-  blockout_snapshot(*g, pieces, settings);
-  const uint64_t now = blockout_snapshot_hash(pieces, settings);
+  BlockoutSnapshotNotes notes;
+  blockout_snapshot(*g, pieces, settings, &notes);
+  const uint64_t now = blockout_snapshot_hash(pieces, settings, &notes);
+  b->state.refused = std::move(notes.refused);
   auto mesh_is_now = [&] {
     const MeshFilter *mf = g->get<MeshFilter>();
     return b->state.hash_valid && b->state.hash == now && mf && mf->mesh;
@@ -215,47 +224,60 @@ void Editor::blockout_jobs_wait(uint64_t obj) {
 
 namespace {
 
-/* "[subtract|intersect] box|cylinder|sphere [numbers]", "room [box|cylinder] [numbers]", "door|window [width head [sill]]" - a
- * piece's kind, operation and sizes as the menus and the console say them. */
+/* "[subtract|intersect] box|cylinder|sphere|wedge|stairs|arch|outline [numbers]", "mesh <object>", "room [box|cylinder|wedge|outline]
+ * [numbers]", "door|window [width head [sill]]" - a piece's kind, operation and sizes as the menus and the console say them. */
 struct PieceWords {
   int shape = 0, op = 0;
   int opening = 0;     // 1 door, 2 window
   bool room = false;
   std::vector<float> numbers;
+  std::string mesh_name;  // "mesh <object>": the object's name as it was typed (may be empty: chosen later in the Inspector)
   bool ok = false;
 };
+
+bool is_number_word(const std::string &w) { return !w.empty() && (std::isdigit((unsigned char)w[0]) || w[0] == '-' || w[0] == '.'); }
 
 PieceWords parse_piece_words(const std::string &what) {
   PieceWords p;
   bool shape_seen = false, numbers_ok = false;
-  for (const std::string &raw : split_ws(what)) {
-    const std::string w = to_lower(raw);
+  const std::vector<std::string> words = split_ws(what);
+  static const struct { const char *word; int shape; } kShapes[] = {{"box", 0}, {"cube", 0}, {"cylinder", 1}, {"sphere", 2}, {"wedge", 3}, {"ramp", 3},
+                                                                    {"stairs", 4}, {"arch", 5}, {"outline", 6}, {"mesh", 7}};
+  for (size_t i = 0; i < words.size(); i++) {
+    const std::string w = to_lower(words[i]);
+    int shape = -1;
+    for (const auto &k : kShapes)
+      if (w == k.word) shape = k.shape;
     if (w == "subtract" || w == "cut") p.op = 1;
     else if (w == "intersect") p.op = 2;
     else if (w == "add") p.op = 0;
     else if (!shape_seen && w == "room") p.room = true, numbers_ok = true;
     else if (!shape_seen && (w == "door" || w == "window")) p.opening = w == "door" ? 1 : 2, numbers_ok = true;
-    else if (!shape_seen && (w == "box" || w == "cube")) p.shape = 0, shape_seen = numbers_ok = true;
-    else if (!shape_seen && w == "cylinder") p.shape = 1, shape_seen = numbers_ok = true;
-    else if (!shape_seen && w == "sphere") p.shape = 2, shape_seen = numbers_ok = true;
-    else if (numbers_ok && (std::isdigit((unsigned char)w[0]) || w[0] == '-' || w[0] == '.')) p.numbers.push_back((float)std::atof(w.c_str()));
+    else if (!shape_seen && shape == 7) {
+      /* The rest of the line is the object's name (it may hold spaces and digits). */
+      p.shape = 7, shape_seen = true;
+      for (size_t j = i + 1; j < words.size(); j++) p.mesh_name += (p.mesh_name.empty() ? "" : " ") + words[j];
+      break;
+    }
+    else if (!shape_seen && shape >= 0) p.shape = shape, shape_seen = numbers_ok = true;
+    else if (numbers_ok && is_number_word(w)) p.numbers.push_back((float)std::atof(w.c_str()));
     else return p;  // (a word it does not know: not ok)
   }
   /* A negative size is not a piece the console makes. (A size of 0 is made, as in round 477: the Inspector's status
-   * then names the piece as skipped and says why.) */
+   * then names the piece as skipped and says why.) An outline's corners are the one place a number may be negative. */
   for (float n : p.numbers)
-    if (!finite_bits(n) || n < 0.0f) return p;
+    if (!finite_bits(n) || (n < 0.0f && p.shape != 6)) return p;
   if (p.opening) p.room = false, p.shape = 0, p.op = 1;  // (an opening is a box that cuts, whatever else was said)
-  if (p.room && p.shape == 2) return p;                  // (no sphere rooms from the menus and the console yet)
+  if (p.room && (p.shape == 2 || p.shape == 4 || p.shape == 5 || p.shape == 7)) return p;  // (no rooms of spheres from the menus and the console yet; stairs, arches and meshes are never rooms)
   p.ok = shape_seen || p.room || p.opening;
   return p;
 }
 
-/* What a piece is called when it is made: "Box", "Subtract Cylinder", "Room", "Room Cylinder", "Door", "Intersect Box". */
+/* What a piece is called when it is made: "Box", "Subtract Cylinder", "Room", "Room Cylinder", "Door", "Intersect Box", "Wedge", "Room Outline". */
 std::string piece_base_name(const PieceWords &w) {
   if (w.opening) return w.opening == 1 ? "Door" : "Window";
-  if (w.room) return w.shape == 1 ? "Room Cylinder" : "Room";
-  const std::string shape = kBlockoutShapeNames[w.shape];
+  if (w.room) return w.shape == 1 ? "Room Cylinder" : w.shape == 3 ? "Room Wedge" : w.shape == 6 ? "Room Outline" : "Room";
+  const std::string shape = kBlockoutShapeNames[std::min(7, std::max(0, w.shape))];
   return w.op == 1 ? "Subtract " + shape : w.op == 2 ? "Intersect " + shape : shape;
 }
 
@@ -281,14 +303,42 @@ static GameObject *add_piece(Scene &scene, GameObject &parent, const std::string
   if (w.room) {
     bp->room = true;
     bp->wall = bp->floor = bp->ceiling = wall;
-    if (w.shape == 0) bp->size = {4.0f, 3.0f, 4.0f};
+    if (w.shape == 0 || w.shape == 3) bp->size = {4.0f, 3.0f, 4.0f};
+    else if (w.shape == 6) bp->height = 3.0f;
     else bp->radius = 2.0f, bp->height = 3.0f;
   }
-  if (w.shape == 0 && n.size() >= 3) bp->size = {n[0], n[1], n[2]};
-  if (w.shape == 0 && n.size() == 1) bp->size = {n[0], n[0], n[0]};
+  const bool boxy = w.shape == 0 || w.shape == 3 || w.shape == 4;  // (a box, a wedge and stairs are sized by x y z)
+  if (w.shape == 3) bp->size = {2.0f, 1.0f, 4.0f};
+  if (w.shape == 3 && w.room) bp->size = {4.0f, 3.0f, 4.0f};
+  if (w.shape == 4) bp->size = {2.0f, 2.0f, 4.0f};
+  if (w.shape == 5) bp->radius = 1.5f, bp->inner_radius = 1.0f, bp->height = 0.5f, bp->segments = 12;
+  if (w.shape == 6) bp->outline = {Vec2(-2.0f, -2.0f), Vec2(2.0f, -2.0f), Vec2(2.0f, 2.0f), Vec2(-2.0f, 2.0f)};
+  if (boxy && n.size() >= 3) bp->size = {n[0], n[1], n[2]};
+  if (boxy && n.size() == 1) bp->size = {n[0], n[0], n[0]};
+  if (w.shape == 4 && n.size() >= 4) bp->steps = std::max(1, std::min(256, (int)std::lround(n[3])));
   if (w.shape == 1 && n.size() >= 1) bp->radius = n[0];
   if (w.shape == 1 && n.size() >= 2) bp->height = n[1];
   if (w.shape == 2 && n.size() >= 1) bp->radius = n[0];
+  if (w.shape == 5 && n.size() >= 1) bp->radius = n[0];            // arch: outer radius, inner radius, angle, depth, segments
+  if (w.shape == 5 && n.size() >= 2) bp->inner_radius = n[1];
+  if (w.shape == 5 && n.size() >= 3) bp->angle = n[2];
+  if (w.shape == 5 && n.size() >= 4) bp->height = n[3];
+  if (w.shape == 5 && n.size() >= 5) bp->segments = std::max(3, std::min(256, (int)std::lround(n[4])));
+  if (w.shape == 6) {  // outline: [height] then the corners as x z pairs (an odd count: the first number is the height)
+    size_t first = n.size() % 2;
+    if (first) bp->height = n[0];
+    if (n.size() - first >= 6) {
+      bp->outline.clear();
+      for (size_t i = first; i + 1 < n.size(); i += 2) bp->outline.push_back(Vec2(n[i], n[i + 1]));
+    }
+  }
+  if (w.shape == 7) {
+    bp->mesh_object = w.mesh_name;
+    if (const GameObject *src = w.mesh_name.empty() ? nullptr : scene.find_by_name(w.mesh_name)) {
+      g->set_world_matrix(src->world_matrix());  // (where the object stands: the piece takes its place, and is placed by its own transform from then on)
+      return g;
+    }
+  }
   if (at) g->set_world_position(*at);
   return g;
 }
@@ -329,6 +379,31 @@ GameObject *Editor::create_empty_blockout() {
   return g;
 }
 
+/* The Blockout of the selected piece, else the selected Blockout (nullptr in `target`: none - the caller makes one) and its scale. The sizes are written in
+ * the Blockout's own units: a uniformly scaled Blockout takes them divided by its scale, an unevenly scaled one has no piece of the dragged size
+ * whatever its turn. False, with a warning, for one that is scaled unevenly or sheared. */
+bool Editor::room_target(GameObject *&target, float &scale) {
+  GameObject *sel = active_object();
+  target = sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
+  scale = 1.0f;
+  if (!target) return true;
+  const Mat4 &tw = target->world_matrix();
+  const float sx = length(tw.dir({1.0f, 0.0f, 0.0f})), sy = length(tw.dir({0.0f, 1.0f, 0.0f})), sz = length(tw.dir({0.0f, 0.0f, 1.0f}));
+  const float lo = std::min(sx, std::min(sy, sz)), hi = std::max(sx, std::max(sy, sz));
+  /* Axes that are not square to each other (a turned Blockout under an unevenly scaled parent) shear the piece: no size is right for it. */
+  bool square = lo > 1e-6f && finite_bits(hi);
+  if (square) {
+    const Vec3 ax = normalize(tw.dir({1.0f, 0.0f, 0.0f})), ay = normalize(tw.dir({0.0f, 1.0f, 0.0f})), az = normalize(tw.dir({0.0f, 0.0f, 1.0f}));
+    square = std::fabs(dot(ax, ay)) < 1e-3f && std::fabs(dot(ay, az)) < 1e-3f && std::fabs(dot(ax, az)) < 1e-3f;
+  }
+  if (!square || hi > lo * 1.001f) {
+    Log::warn("Room: '%s' is scaled unevenly or sheared (or flat): a room of the dragged size cannot be made in it - make it in a Blockout with an even scale", target->name.c_str());
+    return false;
+  }
+  scale = sx;
+  return true;
+}
+
 /* What the Room tool's two drags (and `blockout room`) make: a room, or a solid when the tool's Solid option is on (Add or Subtract),
  * standing on the surface. `u`, `normal` and cross(u, normal) are its right-handed axes; the footprint runs from `origin` by `du` along u
  * and `dz` along the third axis (signed), or is a circle of radius `du` round `origin`; `height` is along the normal (a room always goes
@@ -347,27 +422,9 @@ GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float 
     Log::warn("Room: a footprint or a height of no size - nothing made");
     return nullptr;
   }
-  GameObject *sel = active_object();
-  GameObject *target = sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
-  /* The sizes are written in the Blockout's own units: a uniformly scaled Blockout takes them divided by its scale, an unevenly scaled one
-   * has no piece of the dragged size whatever its turn. */
+  GameObject *target = nullptr;
   float scale = 1.0f;
-  if (target) {
-    const Mat4 &tw = target->world_matrix();
-    const float sx = length(tw.dir({1.0f, 0.0f, 0.0f})), sy = length(tw.dir({0.0f, 1.0f, 0.0f})), sz = length(tw.dir({0.0f, 0.0f, 1.0f}));
-    const float lo = std::min(sx, std::min(sy, sz)), hi = std::max(sx, std::max(sy, sz));
-    /* Axes that are not square to each other (a turned Blockout under an unevenly scaled parent) shear the piece: no size is right for it. */
-    bool square = lo > 1e-6f && finite_bits(hi);
-    if (square) {
-      const Vec3 ax = normalize(tw.dir({1.0f, 0.0f, 0.0f})), ay = normalize(tw.dir({0.0f, 1.0f, 0.0f})), az = normalize(tw.dir({0.0f, 0.0f, 1.0f}));
-      square = std::fabs(dot(ax, ay)) < 1e-3f && std::fabs(dot(ay, az)) < 1e-3f && std::fabs(dot(ax, az)) < 1e-3f;
-    }
-    if (!square || hi > lo * 1.001f) {
-      Log::warn("Room: '%s' is scaled unevenly or sheared (or flat): a room of the dragged size cannot be made in it - make it in a Blockout with an even scale", target->name.c_str());
-      return nullptr;
-    }
-    scale = sx;
-  }
+  if (!room_target(target, scale)) return nullptr;
   if (!target) target = create_empty_blockout();
   PieceWords w;
   w.room = !solid, w.shape = circle ? 1 : 0, w.op = solid && room_.subtract ? 1 : 0, w.ok = true;
@@ -393,6 +450,62 @@ GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float 
   return piece;
 }
 
+/* The Polyline option's room (or solid): an Outline piece whose corners are `corners` (world points in the surface plane, the first the surface point
+ * clicked first) pulled up `height` along `normal`, standing on the surface. `u`, `normal` and cross(u, normal) are the right-handed axes the corners are
+ * measured in. The piece's origin is the middle of the outline's box at half the height, so it turns about it as every piece does. nullptr (and a
+ * warning) when the numbers are no outline: fewer than three corners, none of a size, or a height of none. */
+GameObject *Editor::room_make_outline(const std::vector<Vec3> &corners, Vec3 u, Vec3 normal, float height) {
+  const bool solid = room_.solid;
+  const Vec3 z = cross(u, normal);
+  if (corners.size() < 3 || corners.size() > 256 || !finite3_bits(u) || !finite3_bits(normal) || !finite_bits(height)) {
+    Log::warn("Room: an outline needs 3 to 256 finite corners - nothing made");
+    return nullptr;
+  }
+  for (const Vec3 &c : corners)
+    if (!finite3_bits(c)) {
+      Log::warn("Room: the numbers are not finite - nothing made");
+      return nullptr;
+    }
+  const float h = solid ? height : std::fabs(height);
+  std::vector<Vec2> flat;  // (each corner as (along u, along z) from the first)
+  float x0 = 1e30f, x1 = -1e30f, z0 = 1e30f, z1 = -1e30f;
+  double area = 0.0;
+  for (const Vec3 &c : corners) {
+    const Vec2 q(dot(c - corners[0], u), dot(c - corners[0], z));
+    flat.push_back(q);
+    x0 = std::min(x0, q.x), x1 = std::max(x1, q.x), z0 = std::min(z0, q.y), z1 = std::max(z1, q.y);
+  }
+  for (size_t i = 0; i < flat.size(); i++) area += (double)flat[i].x * flat[(i + 1) % flat.size()].y - (double)flat[(i + 1) % flat.size()].x * flat[i].y;
+  if (std::fabs(h) < 1e-3f || x1 - x0 < 1e-3f || z1 - z0 < 1e-3f || !(std::fabs(area) > 1e-6)) {
+    Log::warn("Room: an outline or a height of no size - nothing made");
+    return nullptr;
+  }
+  GameObject *target = nullptr;
+  float scale = 1.0f;
+  if (!room_target(target, scale)) return nullptr;
+  if (!target) target = create_empty_blockout();
+  PieceWords w;
+  w.room = !solid, w.shape = 6, w.op = solid && room_.subtract ? 1 : 0, w.ok = true;
+  GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);
+  BlockoutPiece *bp = piece->get<BlockoutPiece>();
+  const float cx = 0.5f * (x0 + x1), cz = 0.5f * (z0 + z1);
+  bp->outline.clear();
+  for (const Vec2 &q : flat) bp->outline.push_back(Vec2((q.x - cx) / scale, (q.y - cz) / scale));
+  bp->height = std::fabs(h) / scale;
+  piece->set_world_rotation(quat_from_axes(u, normal, z));
+  piece->set_world_position(corners[0] + u * cx + z * cz + normal * (h * 0.5f));
+  expanded_.insert(target->id);
+  select(piece->id);
+  update_blockouts(true);
+  mark_changed(std::string("Create Blockout ") + piece_base_name(w));
+  record_blockout_last(piece);
+  if (solid && h < 0.0f) {  // (a solid dug down from the surface: as room_make's)
+    obj_last_.base_p = corners[0];
+    obj_last_.base_up = -piece->world_matrix().dir({0.0f, 1.0f, 0.0f});
+  }
+  return piece;
+}
+
 /* A piece just made: Adjust Last Operation (F9) re-runs it from its sizes. The floor's middle is kept where it was so a new height
  * grows the piece upward from it; width and depth grow about the centre. */
 void Editor::record_blockout_last(GameObject *g) {
@@ -401,14 +514,19 @@ void Editor::record_blockout_last(GameObject *g) {
   ObjLastOp o;
   o.kind = "blockout", o.what = g->name, o.obj = g->id;
   o.op = bp->operation;
+  /* n: 0 a box, wedge or stairs (Width, Depth, Height), 1 a cylinder, 2 a sphere, 3 a door or window, 4 an outline (Height), 5 an arch
+   * (Radius, Inner Radius, Depth), 6 a mesh piece (nothing to adjust). */
   if (bp->opening) o.a = bp->width, o.b = bp->head, o.c = bp->sill, o.n = 3;
-  else if (bp->shape == 0) o.a = bp->size.x, o.b = bp->size.z, o.c = bp->size.y, o.n = 0;
+  else if (bp->shape == 0 || bp->shape == 3 || bp->shape == 4) o.a = bp->size.x, o.b = bp->size.z, o.c = bp->size.y, o.n = 0;
   else if (bp->shape == 1) o.a = bp->radius, o.c = bp->height, o.n = 1;
-  else o.a = bp->radius, o.n = 2;
+  else if (bp->shape == 2) o.a = bp->radius, o.n = 2;
+  else if (bp->shape == 6) o.c = bp->height, o.n = 4;
+  else if (bp->shape == 5) o.a = bp->radius, o.b = bp->inner_radius, o.c = bp->height, o.n = 5;
+  else o.n = 6;
   o.d = bp->wall, o.e = bp->floor, o.f = bp->ceiling;
-  o.flag = bp->room && !bp->opening;
+  o.flag = bp->is_room();
   const Mat4 w = g->world_matrix();
-  const float half = bp->shape == 0 ? bp->size.y * 0.5f : bp->shape == 1 ? bp->height * 0.5f : bp->radius;
+  const float half = blockout_floor_below_origin(*bp);
   o.base_p = w.point({0.0f, -half, 0.0f});
   o.base_up = w.dir({0.0f, 1.0f, 0.0f});
   o.serial = obj_last_serial_now();
@@ -424,14 +542,21 @@ void Editor::blockout_menu_items(bool child) {
   if (u.menu_item("New Blockout", nullptr, false, true, ui::Icon::Cube)) create_object("Blockout");
   u.tooltip("An object whose mesh is built from the pieces below it, starting with one 2 m box.");
   for (const char *op : {"Add", "Subtract"})
-    for (const char *shape : {"Box", "Cylinder", "Sphere"}) {
+    for (const char *shape : {"Box", "Cylinder", "Sphere", "Wedge", "Stairs", "Arch", "Outline", "Mesh"}) {
       const std::string op_s = op, shape_s = shape;
       if (u.menu_item(op_s + " " + shape_s, nullptr, false, true, op_s == "Add" ? ui::Icon::Plus : ui::Icon::Close))
         create_object("Blockout Piece: " + (op_s == "Add" ? shape_s : op_s + " " + shape_s));
+      if (shape_s == "Wedge") u.tooltip("A ramp: tall at -Z, sloping down to +Z.");
+      if (shape_s == "Stairs") u.tooltip("A flight of steps climbing towards +Z.");
+      if (shape_s == "Arch") u.tooltip("An arch standing in the XY plane: its radius, inner radius and the angle it spans.");
+      if (shape_s == "Outline") u.tooltip("A closed outline in the XZ plane pulled up: drag its corners in the Scene view, or click the + between two to add one.");
+      if (shape_s == "Mesh") u.tooltip("Any closed mesh of the scene as a piece: the selected object (or choose one in the Inspector). It is not drawn while it is a piece.");
     }
   struct RoomEntry { const char *label, *kind, *tip; };
   for (const RoomEntry &e : {RoomEntry{"Room (Box)", "Room Box", "A room: its box is the air, with walls, a floor and a ceiling of its own that merge with the rooms it overlaps."},
                              {"Room (Cylinder)", "Room Cylinder", "A round room: its cylinder is the air, with a wall, a floor and a ceiling of its own."},
+                             {"Room (Wedge)", "Room Wedge", "A room with a sloped ceiling: its wedge is the air."},
+                             {"Room (Outline)", "Room Outline", "A room of any outline (an L, a corridor with a bend): its outline is the air, the walls are as thick all the way round."},
                              {"Door", "Door", "A door through the wall under the mouse in the Scene view, or the selected room's first wall: a cut from the floor up."},
                              {"Window", "Window", "A window through the wall under the mouse in the Scene view, or the selected room's first wall: a cut with a sill."}}) {
     if (u.menu_item(e.label, nullptr, false, true, ui::Icon::Plus)) create_object(std::string("Blockout Piece: ") + e.kind);
@@ -442,19 +567,33 @@ void Editor::blockout_menu_items(bool child) {
 /* A piece under the selected Blockout, or under the Blockout the selected piece belongs to; with neither, a new Blockout
  * with that piece. `what`: "[subtract] box|cylinder|sphere [x y z | radius height | radius]". */
 GameObject *Editor::create_blockout_piece(const std::string &what) {
-  const PieceWords w = parse_piece_words(what);
+  PieceWords w = parse_piece_words(what);
   if (!w.ok) {
-    Log::warn("Blockout piece: '%s' - say box, cylinder or sphere (optionally 'subtract' or 'intersect' first), room [box|cylinder], or door|window, then its sizes "
-              "(x y z | radius height | radius | width head [sill])", what.c_str());
+    Log::warn("Blockout piece: '%s' - say box, cylinder, sphere, wedge, stairs, arch, outline or mesh <object> (optionally 'subtract' or 'intersect' first), room "
+              "[box|cylinder|wedge|outline], or door|window, then its sizes (x y z | radius height | radius | width head [sill] | stairs: x y z steps | arch: radius "
+              "inner angle depth | outline: [height] x z x z ...)", what.c_str());
     return nullptr;
   }
   GameObject *sel = active_object();
   GameObject *target = sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
+  if (w.shape == 7 && !w.room && !w.mesh_name.empty() && !scene_->find_by_name(w.mesh_name)) {
+    Log::warn("Blockout piece: there is no object named '%s' to use as a mesh", w.mesh_name.c_str());
+    return nullptr;
+  }
+  if (w.shape == 7 && w.mesh_name.empty()) {
+    /* The menu entry and "blockout add mesh" alone: the selected object that has a mesh and is no part of a Blockout. */
+    for (GameObject *g : selected_objects(false)) {
+      const MeshFilter *mf = g->get<MeshFilter>();
+      if (!mf || !mf->mesh || g->get<Blockout>() || g->get<BlockoutPiece>() || blockout_of_piece(*g) || (target && g == target)) continue;
+      w.mesh_name = g->name;
+      break;
+    }
+  }
   if (!target && w.opening) {
     Log::warn("Blockout piece: a door or window goes in a room's wall - select a Blockout or one of its rooms first");
     return nullptr;
   }
-  if (!target) return create_blockout(what);
+  if (!target) return create_blockout(w.shape == 7 && !w.mesh_name.empty() ? "mesh " + w.mesh_name : what);
   const std::string base = piece_base_name(w);
   const float wall = target->get<Blockout>()->default_wall;
   if (w.opening) return create_opening(*target, w.opening, w.numbers, sel);
@@ -485,7 +624,7 @@ GameObject *Editor::create_opening(GameObject &bo, int opening, const std::vecto
   if (!found) {
     std::vector<const GameObject *> pieces;
     blockout_piece_objects(bo, pieces);
-    auto is_room = [](const GameObject *p) { const BlockoutPiece *bp = p->get<BlockoutPiece>(); return bp->room && bp->opening == 0; };
+    auto is_room = [](const GameObject *p) { return p->get<BlockoutPiece>()->is_room(); };
     if (sel && sel->get<BlockoutPiece>() && std::find(pieces.begin(), pieces.end(), sel) != pieces.end() && is_room(sel)) room = sel;
     for (const GameObject *p : pieces)
       if (!room && is_room(p)) room = p;
@@ -526,7 +665,7 @@ struct WireBox {
 
 WireBox wire_box(const BlockoutPiece &p, Vec3 box_size, const RoomGrowth *g) {
   WireBox b;
-  b.shape = std::min(2, std::max(0, p.shape));
+  b.shape = std::min(2, std::max(0, p.shape));  // (a wedge, stairs, an arch, an outline or a mesh has its own wire: shape_wire)
   b.segments = std::min(256, std::max(3, p.segments));
   b.rings = std::min(128, std::max(2, p.rings));
   Vec3 h;
@@ -583,6 +722,135 @@ void piece_wire(const WireBox &b, const Mat4 &w, const std::function<void(Vec3, 
   }
 }
 
+using LineFn = std::function<void(Vec3, Vec3)>;
+
+/* A closed ring of points, and the same ring lifted: its sides. `top` and `bottom` are the two rings (same count). */
+void ring_wire(const std::vector<Vec3> &bottom, const std::vector<Vec3> &top, const LineFn &line) {
+  const size_t n = bottom.size();
+  for (size_t i = 0; i < n; i++) {
+    line(bottom[i], bottom[(i + 1) % n]);
+    line(top[i], top[(i + 1) % n]);
+    line(bottom[i], top[i]);
+  }
+}
+
+/* A profile (z, y) pulled along X from -x to x: its corners as lines at both ends and the edges between. */
+void prism_wire(const std::vector<Vec2> &zy, float x, const LineFn &line) {
+  const size_t n = zy.size();
+  for (size_t i = 0; i < n; i++) {
+    const Vec2 a = zy[i], b = zy[(i + 1) % n];
+    line(Vec3(-x, a.y, a.x), Vec3(-x, b.y, b.x));
+    line(Vec3(x, a.y, a.x), Vec3(x, b.y, b.x));
+    line(Vec3(-x, a.y, a.x), Vec3(x, a.y, a.x));
+  }
+}
+
+/* The wedge's profile as the kernel lays it out (a room's shell: each side moved out by `g`, the slope's by the ceiling's thickness). */
+std::vector<Vec2> wedge_profile(const BlockoutPiece &p, const RoomGrowth *g) {
+  const float hy = std::fabs(p.size.y) * 0.5f, hz = std::fabs(p.size.z) * 0.5f;
+  if (!g) return {Vec2(-hz, -hy), Vec2(hz, -hy), Vec2(-hz, hy)};
+  const float len = std::sqrt(hy * hy + hz * hz);
+  if (!(len > 0.0f)) return {Vec2(-hz, -hy), Vec2(hz, -hy), Vec2(-hz, hy)};
+  const float na = hy / len, nb = hz / len;  // (the slope's outward normal as (z, y))
+  const float down = hy + (float)g->down, back = hz + (float)g->z, c = (float)g->up;
+  if (!(na > 1e-6f) || !(nb > 1e-6f)) return {Vec2(-back, -down), Vec2(hz, -down), Vec2(-back, hy)};
+  return {Vec2(-back, -down), Vec2((c + nb * down) / na, -down), Vec2(-back, (c + na * back) / nb)};
+}
+
+/* The stairs' side profile (z, y): the ground, the back, then the treads and risers down to the ground again. */
+std::vector<Vec2> stairs_profile(const BlockoutPiece &p) {
+  const float height = std::fabs(p.size.y), depth = std::fabs(p.size.z);
+  const int n = std::max(1, std::min(256, p.steps));
+  const float run = depth / (float)n, rise = height / (float)n;
+  std::vector<Vec2> out = {Vec2(-depth * 0.5f, -height * 0.5f), Vec2(depth * 0.5f, -height * 0.5f), Vec2(depth * 0.5f, height * 0.5f)};
+  for (int i = n - 1; i >= 0; i--) {
+    const float z0 = -depth * 0.5f + run * (float)i, tread = (i + 1 == n ? height : rise * (float)(i + 1)) - height * 0.5f;
+    out.push_back(Vec2(z0, tread));
+    out.push_back(Vec2(z0, i == 0 ? -height * 0.5f : rise * (float)i - height * 0.5f));
+  }
+  return out;
+}
+
+/* An outline's corners, shifted out by `by` (a room's shell: the wall) at each corner along the bisector, as the walls' outer faces meet. */
+std::vector<Vec2> outline_offset(const std::vector<Vec2> &pts, float by) {
+  const size_t n = pts.size();
+  if (by == 0.0f || n < 3) return pts;
+  double area = 0.0;
+  for (size_t i = 0; i < n; i++) area += (double)pts[i].x * pts[(i + 1) % n].y - (double)pts[(i + 1) % n].x * pts[i].y;
+  const float turn = area >= 0.0 ? 1.0f : -1.0f;
+  auto outward = [&](size_t a, size_t b) {  // (the unit normal of the side from a to b, pointing away from the inside)
+    const Vec2 d(pts[b].x - pts[a].x, pts[b].y - pts[a].y);
+    const float l = std::hypot(d.x, d.y);
+    return l > 0.0f ? Vec2(turn * d.y / l, -turn * d.x / l) : Vec2(0.0f, 0.0f);
+  };
+  std::vector<Vec2> out;
+  for (size_t i = 0; i < n; i++) {
+    const Vec2 a = outward((i + n - 1) % n, i), b = outward(i, (i + 1) % n);
+    const float k = 1.0f + a.x * b.x + a.y * b.y;
+    const float s = by / std::max(0.2f, k);  // (a miter, held back at very sharp corners)
+    out.push_back(Vec2(pts[i].x + (a.x + b.x) * s, pts[i].y + (a.y + b.y) * s));
+  }
+  return out;
+}
+
+/* The wire of a wedge, stairs, an arch or an outline in the piece's own space - what the kernel builds, with `g` a room's growth. */
+void shape_wire(const BlockoutPiece &p, const RoomGrowth *g, const LineFn &line) {
+  const int k = p.shape;
+  if (k == 3 || k == 4) {
+    const float hx = std::fabs(p.size.x) * 0.5f + (g ? (float)g->x : 0.0f);
+    if (finite_bits(hx) && finite3_bits(p.size)) prism_wire(k == 3 ? wedge_profile(p, g) : stairs_profile(p), hx, line);
+    return;
+  }
+  if (k == 6) {
+    std::vector<Vec2> pts;
+    for (const Vec2 &q : p.outline)
+      if (finite_bits(q.x) && finite_bits(q.y)) pts.push_back(q);
+    if (pts.size() < 3 || !finite_bits(p.height)) return;
+    const float hh = std::fabs(p.height) * 0.5f;
+    if (g) pts = outline_offset(pts, (float)g->x);
+    std::vector<Vec3> bottom, top;
+    for (const Vec2 &q : pts) bottom.push_back(Vec3(q.x, -hh - (g ? (float)g->down : 0.0f), q.y)), top.push_back(Vec3(q.x, hh + (g ? (float)g->up : 0.0f), q.y));
+    ring_wire(bottom, top, line);
+    return;
+  }
+  if (k != 5) return;
+  const float outer = std::fabs(p.radius), inner = std::min(std::fabs(p.inner_radius), outer), hh = std::fabs(p.height) * 0.5f;
+  const float angle = std::min(360.0f, std::max(0.001f, p.angle));
+  if (!finite_bits(outer) || !finite_bits(inner) || !finite_bits(hh) || !finite_bits(angle)) return;
+  const int seg = std::max(std::max(1, std::min(256, p.segments)), (int)std::ceil(angle / 90.0f));
+  const bool pie = inner <= 1e-6f * outer;
+  for (int i = 0; i <= seg; i++) {
+    const float t = (90.0f - angle * 0.5f + angle * (float)i / (float)seg) * kPi / 180.0f;
+    const Vec3 o(outer * std::cos(t), outer * std::sin(t), 0.0f), n(inner * std::cos(t), inner * std::sin(t), 0.0f);
+    for (float z : {-hh, hh}) {
+      const Vec3 dz(0.0f, 0.0f, z);
+      if (i < seg) {
+        const float t1 = (90.0f - angle * 0.5f + angle * (float)(i + 1) / (float)seg) * kPi / 180.0f;
+        line(o + dz, Vec3(outer * std::cos(t1), outer * std::sin(t1), z));
+        if (!pie) line(n + dz, Vec3(inner * std::cos(t1), inner * std::sin(t1), z));
+      }
+      line(n + dz, o + dz);  // (a block's edge, inner to outer)
+    }
+    line(o + Vec3(0.0f, 0.0f, -hh), o + Vec3(0.0f, 0.0f, hh));
+    if (!pie) line(n + Vec3(0.0f, 0.0f, -hh), n + Vec3(0.0f, 0.0f, hh));
+  }
+}
+
+/* A mesh piece's wire: the edges of the mesh it uses (every few of them for a very big one). */
+void mesh_piece_wire(const BlockoutPiece &bp, const Mat4 &w, const LineFn &line) {
+  const GameObject *owner = bp.owner;
+  const GameObject *src = owner && owner->scene && !bp.mesh_object.empty() ? owner->scene->find_by_name(bp.mesh_object) : nullptr;
+  const MeshFilter *mf = src ? src->get<MeshFilter>() : nullptr;
+  if (!mf || !mf->mesh || !bp.mesh_problem().empty()) return;
+  const Mesh &m = *mf->mesh;
+  const auto &edges = m.edge_cache();
+  const size_t stride = std::max<size_t>(1, edges.size() / 40000);
+  for (size_t i = 0; i < edges.size(); i += stride) {
+    if (edges[i].first >= m.vert_count() || edges[i].second >= m.vert_count()) continue;
+    line(w.point(m.positions[edges[i].first]), w.point(m.positions[edges[i].second]));
+  }
+}
+
 }  // namespace
 
 /* Each piece of a selected Blockout, and a selected piece, as a wire: Add in the selection colour, Subtract in a yellow of
@@ -607,28 +875,48 @@ void Editor::draw_blockouts() {
       const float width = mine ? 4e-4f : 3e-4f;
       const Mat4 w = p->world_matrix();
       auto draw = [&](uint32_t c, float wd) { return [this, c, wd](Vec3 a, Vec3 b) { scene_r3d_.line(a, b, c, true, wd); }; };
+      /* A wedge, stairs, an arch, an outline: lines in the piece's own space, put in the world here. */
+      auto own = [&](uint32_t c, float wd) { return [this, c, wd, w](Vec3 a, Vec3 b) { scene_r3d_.line(w.point(a), w.point(b), c, true, wd); }; };
+      const bool shaped = !opening && bp->shape >= 3 && bp->shape <= 6;
+      if (!opening && bp->shape == 7) mesh_piece_wire(*bp, w, draw(col, width));
+      else if (shaped) shape_wire(*bp, nullptr, own(col, width));
       /* An opening's box lies between its sill and head above the origin. */
-      piece_wire(wire_box(*bp, bp->box_size(), nullptr), opening ? w * bp->shape_offset() : w, draw(col, width));
-      if (!bp->room || opening) continue;
+      else piece_wire(wire_box(*bp, bp->box_size(), nullptr), opening ? w * bp->shape_offset() : w, draw(col, width));
+      if (!bp->is_room()) continue;
       RoomGrowth grow;
       if (!blockout_room_growth(bp->to_piece(p->id, blockout_piece_matrix(*p, g)), grow)) continue;
       const uint32_t faint = (base & 0x00FFFFFFu) | ((mine ? 120u : 70u) << 24);
-      piece_wire(wire_box(*bp, bp->box_size(), &grow), w, draw(faint, width * 0.75f));
+      if (shaped) shape_wire(*bp, &grow, own(faint, width * 0.75f));
+      else piece_wire(wire_box(*bp, bp->box_size(), &grow), w, draw(faint, width * 0.75f));
     }
   });
 }
 
+/* The pieces' own faces, when the mesh was built from the pieces exactly as they are: while a build is in flight, and after one
+ * that was refused, the mesh is still the one before the edit, and the pieces as they are now say nothing about its faces (`faces`
+ * is then empty). */
+struct Editor::BlockoutOwners {
+  std::unique_ptr<blockout::FaceOwners> faces;
+  explicit BlockoutOwners(const GameObject &g) {
+    const Blockout *b = g.get<Blockout>();
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    blockout_snapshot(g, pieces, settings);
+    if (b && b->state.hash_valid && b->state.faces_hash == blockout_snapshot_hash(pieces, settings)) faces = std::make_unique<blockout::FaceOwners>(pieces);
+  }
+};
+
 /* The face of the Blockout's mesh under a view pixel, with the piece and side that made it (the faces' origins say which), the
  * point and the face's normal toward the viewer, in the Blockout's space; false when there is no face or the origins are not the
- * mesh's own (another writer's mesh). */
-bool Editor::blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out) {
+ * mesh's own (another writer's mesh). `owners`: a caller that asks many times reads the pieces once. */
+bool Editor::blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out, const BlockoutOwners *owners) {
   Blockout *b = g.get<Blockout>();
   const MeshFilter *mf = g.get<MeshFilter>();
   if (!b || !mf || !mf->mesh) return false;
   const Mesh &m = *mf->mesh;
   const BlockoutState &s = b->state;
   if (s.faces_mesh != &m || s.faces_version != m.version || s.faces.piece.size() != m.face_count()) return false;  // (another writer's mesh: no origins)
-  const Ray ray = scene_r3d_.screen_ray((float)view_x, (float)view_y);
+  const Ray ray = scene_r3d_.screen_ray((float)view_x + 0.5f, (float)view_y + 0.5f);  // (the pixel's middle, as the id buffer reads it: at an outline its corner can miss the mesh)
   const Mat4 inv = g.world_matrix().inverse();
   const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
   const RenderMesh &rm = m.render_mesh();
@@ -649,17 +937,46 @@ bool Editor::blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &ou
   if (!(len > 0.0f)) return false;
   n = n * (1.0f / len);
   out.normal = dot(n, lr.dir) > 0.0f ? -n : n;  // (the face the viewer sees: out of the matter)
+  /* Faces of several pieces in one plane are one face of the mesh, named for the first of them: the piece whose own face is under
+   * the pointer is the one meant (the user, after round 479: a click on one slab of a floor selected another). A blended face has
+   * no piece's plane to ask. */
+  if (out.side == blockout::kSideBlend) return true;
+  const Vec3 on = out.point - n * dot(n, out.point - a);  // (on the triangle's plane: from far away the ray's own point is off it by more than a face's thickness)
+  if (owners) {
+    if (owners->faces) owners->faces->at(on, n, out.piece, out.side);
+    return true;
+  }
+  const BlockoutOwners own(g);
+  if (own.faces) own.faces->at(on, n, out.piece, out.side);
   return true;
 }
 
 /* The piece that made the face under a view pixel; 0 when there is none to name - a blended face, a mesh whose origins are not
  * its own, a piece that is gone or another Blockout's. */
-uint64_t Editor::blockout_pick_piece(GameObject &g, int view_x, int view_y) {
+uint64_t Editor::blockout_pick_piece(GameObject &g, int view_x, int view_y, const BlockoutOwners *owners) {
   BlockoutHit hit;
-  if (!blockout_hit(g, view_x, view_y, hit)) return 0;
+  if (!blockout_hit(g, view_x, view_y, hit, owners)) return 0;
   const GameObject *piece = scene_->find(hit.piece);
   if (!piece || !piece->get<BlockoutPiece>()) return 0;
   return blockout_of_piece(*piece) == &g ? piece->id : 0;  // (a duplicate holds its original's origins until its own build lands)
+}
+
+/* A box select over a Blockout's mesh adds the pieces that made its faces in the box (`box` is in window pixels, inside the view), read
+ * at up to 16 x 16 places of it where the Blockout is what is drawn - so a piece that shows smaller than a sixteenth of a large box
+ * can fall between two of them. False when no piece can be named there: the Blockout itself is then what the box selects. */
+bool Editor::blockout_box_select(GameObject &g, const Recti &view, const Recti &box) {
+  const int step_x = std::max(1, (box.w + 15) / 16), step_y = std::max(1, (box.h + 15) / 16);
+  const BlockoutOwners owners(g);
+  std::vector<uint64_t> found;
+  for (int y = box.y + std::min(step_y, box.h) / 2; y < box.bottom(); y += step_y)
+    for (int x = box.x + std::min(step_x, box.w) / 2; x < box.right(); x += step_x) {
+      const GameObject *under = scene_->find(scene_rt_.id_at(x - view.x, y - view.y));
+      if (under != &g) continue;
+      const uint64_t piece = blockout_pick_piece(g, x - view.x, y - view.y, &owners);
+      if (piece && std::find(found.begin(), found.end(), piece) == found.end()) found.push_back(piece);
+    }
+  for (uint64_t id : found) select(id, SEL_ADD);
+  return !found.empty();
 }
 
 /* ===================================================================== */
@@ -674,11 +991,28 @@ bool Editor::blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out) {
   if (!blockout_hit(bo, ui_.in.mx - scene_rect_.x, ui_.in.my - scene_rect_.y, hit)) return false;
   const GameObject *room = scene_->find(hit.piece);
   const BlockoutPiece *bp = room ? room->get<BlockoutPiece>() : nullptr;
-  if (!bp || !bp->room || bp->opening != 0 || blockout_of_piece(*room) != &bo) return false;
+  if (!bp || !bp->is_room() || blockout_of_piece(*room) != &bo) return false;
   const Vec3 up = normalize(blockout_piece_matrix(*room, bo).dir({0, 1, 0}));
   if (std::fabs(dot(hit.normal, up)) > 0.5f) return false;
   out = hit;
   return true;
+}
+
+/* An outline room's first wall: the middle of its first side, with the normal pointing into the air (the side's left when the corners run
+ * anticlockwise as (x, z), its right otherwise). */
+static bool blockout_outline_first_wall(const Mat4 &m, const BlockoutPiece &bp, BlockoutHit &out, uint64_t piece) {
+  const size_t n = bp.outline.size();
+  if (n < 3) return false;
+  double area = 0.0;
+  for (size_t i = 0; i < n; i++) area += (double)bp.outline[i].x * bp.outline[(i + 1) % n].y - (double)bp.outline[(i + 1) % n].x * bp.outline[i].y;
+  const Vec2 a = bp.outline[0], b = bp.outline[1];
+  const float dx = b.x - a.x, dz = b.y - a.y, l = std::hypot(dx, dz);
+  if (!(l > 1e-6f) || !finite_bits(l) || !finite_bits(area)) return false;
+  const float turn = area >= 0.0 ? 1.0f : -1.0f;
+  out.piece = piece, out.side = 2;  // (the first segment's wall: side 2 + its index)
+  out.point = m.point(Vec3(0.5f * (a.x + b.x), 0.0f, 0.5f * (a.y + b.y)));
+  out.normal = normalize(m.dir(Vec3(-turn * dz / l, 0.0f, turn * dx / l)));
+  return finite3_bits(out.point) && finite3_bits(out.normal) && length(out.normal) > 0.5f;
 }
 
 /* The middle of a room's first wall: the air's side 0 of a box (-X), a cylinder's facet nearest -X, a sphere's -X. The point and normal are as a hit
@@ -687,7 +1021,9 @@ bool Editor::blockout_first_wall(GameObject &bo, const GameObject &room, Blockou
   const BlockoutPiece *bp = room.get<BlockoutPiece>();
   if (!bp) return false;
   const Mat4 m = blockout_piece_matrix(room, bo);
-  const float reach = bp->shape == 0 ? std::fabs(bp->size.x) * 0.5f : std::fabs(bp->radius);
+  const bool boxy = bp->shape == 0 || bp->shape == 3;  // (a wedge's tall end is its -Z side; its -X side is a wall like a box's)
+  const float reach = boxy ? std::fabs(bp->size.x) * 0.5f : std::fabs(bp->radius);
+  if (bp->shape == 6) return blockout_outline_first_wall(m, *bp, out, room.id);
   if (!finite_bits(reach)) return false;
   out.piece = room.id, out.side = 0;
   Vec3 at(-reach, 0.0f, 0.0f), in(1.0f, 0.0f, 0.0f);
@@ -738,7 +1074,7 @@ bool Editor::blockout_stand_opening(GameObject &bo, GameObject &opening, const B
   const float own = finite_bits(rp->wall) ? std::max(0.0f, std::min(100.0f, rp->wall)) : 0.0f;
   const float thick = blockout_matter_behind(bo, wall.point, through, own);
   const Vec3 centre = wall.point - through * (0.5f * thick);  // (the wall's middle: the matter lies behind the face)
-  const float hy = rp->shape == 0 ? std::fabs(rp->size.y) * 0.5f : rp->shape == 1 ? std::fabs(rp->height) * 0.5f : std::fabs(rp->radius);
+  const float hy = blockout_floor_below_origin(*rp);
   const Vec3 floor_point = m.point({0.0f, -hy, 0.0f});
   const Vec3 origin = centre + up * (dot(floor_point, up) - dot(centre, up));
   if (!finite3_bits(origin)) return false;
@@ -805,7 +1141,7 @@ void Editor::blockout_set_command(const std::vector<std::string> &t) {
   std::vector<BlockoutPiece *> rooms;
   for (GameObject *g : selected_objects(false))
     if (BlockoutPiece *bp = g->get<BlockoutPiece>())
-      if (bp->room && bp->opening == 0) rooms.push_back(bp);
+      if (bp->is_room()) rooms.push_back(bp);
   if (rooms.empty()) return Log::warn("blockout set %s: select a room piece first", key.c_str());
   const bool thickness = key == "wall" || key == "floor" || key == "ceiling";
   const bool is_number = !value.empty() && (std::isdigit((unsigned char)value[0]) || value[0] == '-' || value[0] == '.');
@@ -831,12 +1167,39 @@ void Editor::blockout_set_command(const std::vector<std::string> &t) {
   update_blockouts(true);
 }
 
-/* blockout new | add box|cylinder|sphere [subtract|intersect] [sizes] | add room | add door|window | set cell|method|wall|floor|ceiling|walls|opentop <value> | rebuild | wait | info */
+/* blockout outline <x z> <x z> <x z> ...: the selected Outline piece's corners (metres in the piece's own XZ plane, 3 to 256), as dragging its
+ * point handles would set them. With no numbers: the corners it has. */
+void Editor::blockout_outline_command(const std::vector<std::string> &t) {
+  GameObject *g = active_object();
+  BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+  if (!bp || !blockout_of_piece(*g) || bp->shape != (int)blockout::Shape::Outline)
+    return Log::warn("blockout outline <x z> <x z> <x z> ...: select an Outline piece first (blockout add outline)");
+  if (t.size() <= 2) return Log::info("outline of '%s': %s", g->name.c_str(), blockout_outline_text(bp->outline).c_str());
+  std::vector<Vec2> pts;
+  for (size_t i = 2; i < t.size(); i++) {
+    const bool number = !t[i].empty() && (std::isdigit((unsigned char)t[i][0]) || t[i][0] == '-' || t[i][0] == '.' || t[i][0] == '+');
+    const float v = (float)std::atof(t[i].c_str());
+    if (!number || !finite_bits(v)) return Log::warn("blockout outline: '%s' is not a number", t[i].c_str());
+    if (i % 2 == 0) pts.push_back(Vec2(v, 0.0f));
+    else pts.back().y = v;
+  }
+  if ((t.size() - 2) % 2 != 0 || pts.size() < 3 || pts.size() > 256)
+    return Log::warn("blockout outline: give 3 to 256 corners as x z pairs (%zu numbers given)", t.size() - 2);
+  bool same = pts.size() == bp->outline.size();
+  for (size_t i = 0; same && i < pts.size(); i++) same = pts[i].x == bp->outline[i].x && pts[i].y == bp->outline[i].y;
+  if (same) return;  // (no undo step for nothing)
+  bp->outline = pts;
+  mark_changed("Edit Blockout Outline");
+  update_blockouts(true);
+}
+
+/* blockout new | add box|cylinder|sphere|wedge|stairs|arch|outline|mesh [subtract|intersect] [sizes] | add room | add door|window | outline <x z>... | set cell|method|wall|floor|ceiling|walls|opentop <value> | rebuild | wait | info */
 void Editor::blockout_command(const std::vector<std::string> &t) {
   const std::string sub = t.size() > 1 ? to_lower(t[1]) : "info";
   auto usage = [] {
-    Log::info("blockout new | add box|cylinder|sphere [subtract|intersect] [x y z | radius height | radius] | add room [box|cylinder] [sizes] | "
-              "add door|window [width head [sill]] | set cell|method|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
+    Log::info("blockout new | add box|cylinder|sphere|wedge|stairs|arch|outline|mesh [subtract|intersect] [x y z | radius height | radius | stairs: x y z steps | "
+              "arch: radius inner angle depth | outline: [height] x z x z ... | mesh <object>] | add room [box|cylinder|wedge|outline] [sizes] | "
+              "add door|window [width head [sill]] | outline <x z> <x z> <x z> ... | set cell|method|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
               "room <x0 z0 x1 z1 height> | room circle <x z radius height> | roomopt circle|solid|subtract on|off, wall <metres> | rebuild | wait | info");
   };
   /* The Blockouts a command is about: the selected ones and the ones the selected pieces belong to; with none, every one. */
@@ -855,6 +1218,7 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
     create_blockout_piece(what);
   }
   else if (sub == "handle") blockout_handle_command(t);   // (round 479)
+  else if (sub == "outline") blockout_outline_command(t);  // (round 480)
   else if (sub == "room") room_command(t);
   else if (sub == "roomopt") room_options_command(t);
   else if (sub == "set") {

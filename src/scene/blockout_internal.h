@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -48,12 +49,18 @@ struct Plane {
  * worst plane (0 unless four or more planes don't share a point). */
 V3 solve_planes(const Plane *const *planes, int count, V3 x0, double *residual);
 
-/* What a solid does in the build order (blockout.h, build): a plain piece is one solid - Add, Subtract or Intersect;
- * a room is two, its shell (Merge or Keep) and, right after it in the cluster, its air. */
+/* What a solid does in the build order (blockout.h, build): a plain piece is one solid - Add, Subtract or Intersect -
+ * or several of one role (stairs, an arch, a concave outline; task 0456); a room is its shell (Merge or Keep; one
+ * solid or several) and, right after it in the cluster, its air (one or several). One piece's solids follow each
+ * other in a cluster, the shell's before the air's. */
 enum class Role : uint8_t { Add, Subtract, Intersect, MergeShell, KeepShell, Air };
 
+struct MeshLines;  // (blockout_mesh.cpp: a mesh solid's triangles, found by the grid lines that cross them)
+
 /* A piece - or one of a room's two parts - as a closed convex solid in the Blockout's space: faces counter-clockwise
- * from outside. */
+ * from outside. A mesh piece (`mesh`) is the one solid that need not be convex, nor closed: its faces are triangles,
+ * its corners stay where the mesh has them, and whether a place is inside it is asked of mesh_inside, not of its
+ * planes. */
 struct Solid {
   uint32_t piece = 0;  // its piece's place in the cluster's piece list
   Role role = Role::Add;
@@ -63,6 +70,7 @@ struct Solid {
   double melt = 0.0;  // the largest Blend radius that reaches it: its own, or that of a solid whose grown bounds meet its
   Shape shape = Shape::Box;
   std::vector<V3> verts;
+  std::vector<V3> raw;  // the corners before they were put on the cluster's planes: two parts of one piece have a shared corner here to the bit
   std::vector<uint32_t> face_offsets{0}, face_verts;
   std::vector<uint32_t> face_side;   // which side of the piece each face is (blockout.h)
   std::vector<uint32_t> face_plane;  // each face's plane in the cluster's table...
@@ -74,6 +82,10 @@ struct Solid {
   double inv[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};  // rows of a 3 x 4 matrix
   double scale_min = 1.0;                                 // the smallest stretch of the piece's matrix
   V3 half{0.5, 0.5, 0.5};                                 // box: half sizes; cylinder: (radius, half height, radius); sphere: radius
+  bool mesh = false;    // a mesh piece
+  bool flat = true;     // its faces lie in few planes and may merge by them (false: a curved mesh - its faces merge with nothing)
+  bool closed = true;   // a mesh piece: every edge has a face on each side (what Manifold takes)
+  std::shared_ptr<const MeshLines> lines;  // a mesh piece's table for the lines
   size_t face_count() const { return face_offsets.size() - 1; }
 };
 
@@ -89,6 +101,8 @@ struct Cluster {
   double scale = 1.0;    // the bounding diagonal
   double tol = 1e-6;     // planes nearer than this are one plane; twice it is "these planes meet in a point"
   bool blended = false;  // some piece has a Blend radius
+  bool meshes = false;   // some solid is a mesh piece (Blend radii are not read then)
+  bool open_mesh = false;  // ...and one of them is not closed: the field path, when the path is left to the build
 };
 
 /* The build order as a test: whether a place is in the result, given which solids it is in. `solids` are indices
@@ -103,7 +117,13 @@ inline bool in_result(const Cluster &c, const uint32_t *solids, size_t count, co
     switch (c.solids[solids[k]].role) {
       case Role::MergeShell: merge = true; break;
       case Role::Air: air = true; break;
-      case Role::KeepShell: kept = kept || !(k + 1 < count && solids[k + 1] == solids[k] + 1 && in[k + 1]); break;  // (not in its own air)
+      case Role::KeepShell: {  // (not in its own air: the Air solids of its piece, which follow its shell's)
+        bool own = false;
+        const uint32_t piece = c.solids[solids[k]].piece;
+        for (size_t j = k + 1; j < count && c.solids[solids[j]].piece == piece; j++) own = own || (in[j] && c.solids[solids[j]].role == Role::Air);
+        kept = kept || !own;
+        break;
+      }
       case Role::Add: add = true; break;
       case Role::Subtract: cut = true; break;
       case Role::Intersect: trims++; break;
@@ -154,8 +174,33 @@ struct Polys {
  * from being one (the soup itself was not closed). */
 bool make_faces(const Cluster &c, Soup &soup, Polys &out, const std::atomic<bool> *cancel, const char **open);
 
+/* An outline (x, y, x, y, ...; anticlockwise, no point in a line with its neighbours) cut into convex parts with the
+ * face maker's own cutter: ears clipped, merged while convex. Each part: places in the outline, anticlockwise. False
+ * when the outline crosses or touches itself. */
+bool convex_parts(const std::vector<double> &xy, std::vector<std::vector<uint32_t>> &parts);
+
+/* A mesh piece's solid (blockout_mesh.cpp). `m`: the piece's matrix as rows of a 3 x 4. Null, or why it can't be. */
+const char *mesh_solid(const Piece &p, const double m[12], Solid &s);
+/* Where the line along `axis` at (u, w) - the next two axes in turn - passes through a mesh solid's triangles.
+ * `way`: +1 where the triangle faces along the axis (a line going up the axis leaves the solid there), -1 against. */
+struct MeshCrossing {
+  double at = 0.0;
+  uint32_t face = 0;
+  int8_t way = 0;
+};
+void mesh_crossings(const Solid &s, int axis, double u, double w, std::vector<MeshCrossing> &out);
+/* Whether a place is inside a mesh solid: the three grid lines through it vote, each by the winding number along it;
+ * a line whose crossings don't add up (an open edge, a face the wrong way round) casts no vote. */
+bool mesh_inside(const Solid &s, V3 p, std::vector<MeshCrossing> &scratch);
+/* ...for the 8 x 8 x 8 points of a brick at once (x + 8 y + 64 z). */
+void mesh_inside_brick(const Solid &s, const double px[8], const double py[8], const double pz[8], uint64_t in[8]);
+/* The face of a mesh solid nearest a place, about, and how far it is. */
+uint32_t mesh_nearest_face(const Solid &s, V3 p, double &distance, std::vector<MeshCrossing> &scratch);
+
 /* The two paths. False with `why` when the cluster could not be meshed (or the call was cancelled). */
 bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &why);
+/* Whether the exact path can take a closed mesh solid as it is (true in a build without it: nothing there to ask). */
+bool crisp_takes_mesh(const Solid &s);
 bool field_soup(const Cluster &c, const Settings &settings, Soup &soup, ClusterReport &rep, const std::atomic<bool> *cancel, std::string &why);
 
 inline bool cancelled(const std::atomic<bool> *cancel) { return cancel && cancel->load(std::memory_order_relaxed); }

@@ -2257,6 +2257,26 @@ Typing sizes is exact but slow. A selected Blockout piece shows a small square o
 ? Why does dragging a handle on a piece scaled 2 times in X change its size by half the distance the face travels? | A handle moves the face under the mouse in the world; the size is in the piece's own units, which are twice as long here, so the size changes by the distance divided by the scale.
 ? Two boxes stand side by side with a 2 cm gap. You drag the facing handle toward the other box. What happens near the other face? | Within a few pixels it snaps onto the other face's plane, so the two faces are flush and the result has no face between them. Holding Ctrl turns that off.
 )"},
+    {"Ramps, stairs, arches and odd-shaped rooms", "Wedge, stairs, arch, an outline pulled up, any mesh as a piece, and the Room tool's Polyline", R"(
+A piece is not only a box, a cylinder or a sphere. A wedge is a ramp, stairs are a flight of steps, an arch is a ring cut into blocks, an outline is any closed figure in the floor plan pulled up into a wall of matter - an L-shaped room, a corridor with a bend - and any closed mesh of the scene can be a piece too. Each is an Add, a Subtract or an Intersect piece; a wedge and an outline can also be a room, with walls of an even thickness all the way round.
+# Try it
+! cmd:blockout new | A Blockout with its one 2 m box
+! cmd:blockout add wedge 2 1 4 | A ramp 2 m wide, 1 m tall at its -Z end and 4 m long, sloping down towards +Z
+! cmd:blockout add stairs 2 2 4 8 | A flight of 8 steps climbing 2 m over 4 m towards +Z (Fill Under in the Inspector turns it into a flight with a slab under the treads)
+! cmd:blockout add arch 1.5 1 180 0.5 | An arch standing in the XY plane: outer radius 1.5 m, inner 1 m, a half circle, 0.5 m deep
+! cmd:blockout add room outline 3 | A room whose air is an outline pulled up 3 m: select it and run blockout outline 0 0 6 0 6 2 2 2 2 6 0 6 for an L
+! cmd:blockout outline 0 0 6 0 6 2 2 2 2 6 0 6 | The corners of the selected outline as x z pairs: an L-shaped room whose wall is as thick at the corner turned inward as at every other
+! cmd:blockout roomopt polyline on | The Room tool's Polyline option: click the corners on the ground or a face, close on the first corner or Enter, then pull the height
+# Handles and the Polyline
+- An outline shows a handle on each corner and a + between two: drag a corner in the surface's plane (the grid, or another piece's corner when near, Ctrl turns snapping off), click a + to add a corner there. One drag is one Undo step and Esc puts the outline back.
+- The Room tool with Polyline on: click the first corner, then the others; click the first corner again or press Enter to close, Backspace takes the last corner back, Esc leaves nothing. Then move the mouse for the height, or type it, and click.
+# Any mesh as a piece
+- `blockout add mesh Torus` makes a piece from the object named Torus (or the selected one when no name is given): its evaluated mesh, placed by the piece's own transform. The object is no longer drawn, collided with, baked or exported while a piece uses it, and is again when the piece is deleted or switched off; editing the mesh rebuilds the Blockout.
+- A closed mesh is exact on the exact path, and one made of several closed shells pushed into each other (two cubes joined as one object) is united first; an open one is skipped there and named in the Inspector, and the field path still gives a closed result. A Blockout cannot use itself or one of its own pieces.
+? Two parts of an outline's cut lie in one plane, for instance the top of an L. How many faces does the top have in the result? | One: faces of a piece's parts that lie in one plane are one face, so the top of an L is one region, not one for each convex part.
+? Why are stairs, an arch and a concave outline refused as Intersect pieces? | Intersect keeps what is inside every Intersect piece, which needs one convex shape; these are several convex solids, so the status names the piece and says why.
+? A mesh piece's object is selected in the Hierarchy but not drawn. Where is it? | It is the Blockout's piece: the mesh is part of the Blockout's result while the piece is on, and shows as the piece's wire when it is selected; deleting or disabling the piece draws it again.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
 # The Posing block
