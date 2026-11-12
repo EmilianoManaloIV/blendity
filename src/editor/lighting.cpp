@@ -353,15 +353,35 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
             parts.size(), meshes.size(), eval_ms, mesh_ms, copies.size(), pass_t.ms() - eval_ms - mesh_ms);
 }
 
-/* Task 0018: on the first ticked GPU when Render > Device is GPU Compute (as F12 renders); -1 the CPU. */
-int Editor::choose_bake_gpu() {
+/* Task 0018: on the ticked GPUs when Render > Device is GPU Compute (as F12 renders); empty: the CPU. Round 487:
+ * every ticked one - Generate Lighting's gather shares its texels between them. */
+std::vector<int> Editor::choose_bake_gpus() {
   const int want = scene_->lighting.bake_device;  // (round 430: Unity's Lightmapper)
   const bool on_gpu = want == 2 || (want == 0 && scene_->render.device >= 1);
-  if (on_gpu && gpu::available()) {
-    const std::vector<int> g = enabled_gpus();
-    if (!g.empty()) return g[0];
-  }
-  return -1;
+  if (!on_gpu || !gpu::available()) return {};
+  std::vector<int> g = enabled_gpus();
+  if (bake_one_card_ && g.size() > 1) g.resize(1);  // (`lighting cards one`)
+  return g;
+}
+
+/* lighting cards [all|one] (round 487): whether the next Generate Lighting's gather runs on every ticked card (all,
+ * the normal bake) or on the first one only (one - what bakes did before round 487), for measuring what the other
+ * cards save. The lightmaps are the same either way, so it is not saved and not in the scene's key. Alone it says
+ * the setting. */
+void Editor::lighting_cards_command(const std::string &word) {
+  const char *now = bake_one_card_ ? "one" : "all";
+  if (!word.empty() && word != "all" && word != "one")
+    return Log::warn("lighting cards: say all or one, not '%s' - it stays %s", word.c_str(), now);
+  if (!word.empty()) bake_one_card_ = word == "one";
+  if (bake_one_card_)
+    return Log::info("lighting cards: one (the next Generate Lighting gathers on the first ticked card only; `lighting cards all` restores the normal bake)");
+  Log::info("lighting cards: all (Generate Lighting's gather on every ticked card - the normal bake)");
+}
+
+/* The first of them: what works on one card (Preview Lighting, which steps on the main thread; the probes); -1 the CPU. */
+int Editor::choose_bake_gpu() {
+  const std::vector<int> g = choose_bake_gpus();
+  return g.empty() ? -1 : g[0];
 }
 
 /* lighting pick [on|off|<rays>] (round 484): how the next Generate Lighting treats the Baked point and spot lights when
@@ -492,7 +512,9 @@ void Editor::bake_start() {
     Log::info("Generate Lighting: the gather's measured noise read as `lighting variancescale %s` (`lighting variancescale auto` for the normal bake)",
               variance_scale_name(bake_variance_scale_));
   }
-  bake_gpu_ = choose_bake_gpu();  // (the CPU after a GPU error, for the rest of the bake)
+  s.gpu_devices = choose_bake_gpus();  // (round 487: the gather on every ticked card)
+  s.gpu_batch_by_speed = true;  // (the bake has its own thread: batches as large as keep the cards working)
+  bake_gpu_ = s.gpu_devices.empty() ? -1 : s.gpu_devices[0];  // (the first of them: the probes' and the reflection probes' card)
   s.gpu_device = bake_gpu_;
   job->gpu = bake_gpu_;
   part(2);
@@ -558,6 +580,7 @@ void Editor::bake_job_run(BakeJob &j) {
   j.lighting = baker_.take_result();
   j.lighting.scene_key = j.key;
   j.lightmap_finish_ms = baker_.finish_ms(), j.lightmap_texels = baker_.texel_count(), j.lightmap_rays = baker_.rays(), j.lightmap_gpu_texels = baker_.gpu_texels();
+  j.lightmap_gpu_cards = baker_.gpu_cards();  // (round 487)
   j.lightmap_pick_texels = baker_.pick_texels(), j.lightmap_chance_kept = baker_.chance_kept(), j.lightmap_chance_dropped = baker_.chance_dropped();  // (round 484)
   j.lightmap_denoiser = baker_.denoiser();
   j.mesh_hashes.assign(j.objects.size(), 0);
@@ -728,6 +751,9 @@ void Editor::bake_job_land(BakeJob &j) {
       for (int k = 0; k < 5; k++) b.phase_ms[k] = j.phase_ms[k];
       b.finish_ms = j.lightmap_finish_ms, b.land_ms = t.ms(), b.total_ms = j.ms;
       b.texels = j.lightmap_texels, b.gpu_texels = j.lightmap_gpu_texels, b.rays = j.lightmap_rays;
+      b.gpu_cards = j.lightmap_gpu_cards;
+      if (!b.gpu_cards.empty())  // (round 487: which cards gathered, and how the texels were shared between them)
+        Log::info("Generate Lighting: the gather ran on %s", b.gpu_cards.c_str());
       Log::info("Generate Lighting phases: lightmaps %.1f s (%zu texels, %.0f Mrays, %zu on the GPU; %s and dilation %.0f ms), probes %.1f s, "
                 "Light Volumes %.1f s, reflection probes %.1f s, saving %.1f s; the landing frame %.0f ms",
                 b.phase_ms[0] / 1000.0, b.texels, b.rays / 1e6, b.gpu_texels, j.lightmap_denoiser.empty() ? "no filter" : j.lightmap_denoiser.c_str(), b.finish_ms,
@@ -781,6 +807,8 @@ void Editor::bake_job_land(BakeJob &j) {
   lighting_gen_++;
   const double secs = j.ms / 1000.0;
   bake_status_ = strprintf("Baked %zu lightmap%s in %.1f s", lighting_data_.pages.size(), lighting_data_.pages.size() == 1 ? "" : "s", secs);
+  /* (round 487: which cards gathered, and their shares - said only when more than one did: a bake on one card reads as it always did) */
+  if (j.lightmap_gpu_cards.find(", ") != std::string::npos) bake_status_ += " - the gather on " + j.lightmap_gpu_cards;
   lighting_saved_dir_.clear();
   Log::info("Generate Lighting: done in %.1f s", secs);
   if (j.saved && j.save_dir == lighting_dir()) {  // (the worker's files moved over: the scene's folder is still the one it was)

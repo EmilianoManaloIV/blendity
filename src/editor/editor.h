@@ -5962,6 +5962,9 @@ class Editor {
   uint64_t preview_view_key_ = 0, preview_scene_key_ = 0;  // lightmap_scene_key(), recomputed only when the scene changed
   void collect_bake_scene(std::vector<BakeObject> &objects, std::vector<BakeLight> &lights);
   int choose_bake_gpu();
+  std::vector<int> choose_bake_gpus();  // (round 487: every ticked card when the bake is on the GPU; empty: the CPU)
+  bool bake_one_card_ = false;  // (round 487, `lighting cards one`: the gather on the first ticked card only - a measuring setting, not saved, not in the scene's key)
+  void lighting_cards_command(const std::string &word);
   uint64_t vgi_updates_ = 0;  // update_voxel_gi() calls (tests: no live work once baked)
   bool probe_quad_reuse_ = true;
   void attach_lightmap(const GameObject &g, const Mesh &m, DrawItem &it);
@@ -6090,6 +6093,7 @@ class Editor {
     uint64_t lightmap_pick_texels = 0, lightmap_chance_kept = 0, lightmap_chance_dropped = 0;  // (round 484)
     float pick_rays = 8.0f;  // (round 484: what `lighting pick` was when the bake started; 0: off)
     size_t lightmap_gpu_texels = 0;
+    std::string lightmap_gpu_cards;  // (round 487: Lightmapper::gpu_cards)
     std::atomic<float> progress{0.0f};
     std::atomic<bool> done{false}, cancel{false};
     std::mutex mutex;
@@ -6110,12 +6114,14 @@ class Editor {
     double phase_ms[5] = {0, 0, 0, 0, 0}, finish_ms = 0, land_ms = 0, total_ms = 0;
     size_t texels = 0, gpu_texels = 0;
     uint64_t rays = 0;
+    std::string gpu_cards;  // (round 487: the cards that gathered, with their shares)
     uint64_t pick_texels = 0, chance_kept = 0, chance_dropped = 0;  // (round 484: light picking, counted - Lightmapper::pick_texels)
   };
   BakeTimes last_bake_times_;
   double last_bake_start_ms_ = 0;  // (round 422: the frame that starts Generate Lighting)
  public:
   const BakeTimes &last_bake_times_for_test() const { return last_bake_times_; }
+  const std::string &bake_status_for_test() const { return bake_status_; }  // (round 487: the Lighting window's line under the buttons)
  private:
   void bake_gather_volumes(BakeJob &j);
   void bake_gather_reflection_probes(BakeJob &j);

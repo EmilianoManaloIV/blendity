@@ -11629,6 +11629,96 @@ static void tests_round486_independent() {
   });
 }
 
+/* ---------------------------------------------------------------- round 487 (task 0463): the bake's gather on every card */
+static void tests_round487() {
+  test("`lighting cards` (round 487): alone it says all, the normal bake; `one` says it holds for the next Generate Lighting and how to go back; a word that is "
+       "not its own warns and the setting stays, whichever it was; the lighting stays current through all of it and a new editor starts on all",
+       [] {
+         Editor ed;
+         r464::lamp_scene(ed);
+         r35_bake(ed);
+         size_t mark = r463::log_mark();
+         ed.command("lighting cards");
+         CHECK(r463::join_log(mark).find("lighting cards: all (") != std::string::npos);
+         for (const char *held : {"one", "all"}) {
+           mark = r463::log_mark();
+           ed.command(std::string("lighting cards ") + held);
+           const std::string said = r463::join_log(mark);
+           CHECK(said.find(std::string("lighting cards: ") + held + " (") != std::string::npos);
+           CHECK(std::string(held) != "one" || said.find("`lighting cards all` restores") != std::string::npos);
+           for (const char *junk : {"lighting cards two", "lighting cards 1", "lighting cards on", "lighting cards al", "lighting cards one,all"}) {
+             mark = r463::log_mark();
+             ed.command(junk);
+             const std::string warned = r463::join_log(mark);
+             CHECK(warned.find("say all or one") != std::string::npos && warned.find(std::string("it stays ") + held) != std::string::npos);
+           }
+           mark = r463::log_mark();
+           ed.command("lighting cards");
+           CHECK(r463::join_log(mark).find(std::string("lighting cards: ") + held + " (") != std::string::npos);
+           CHECK(!ed.lighting_out_of_date_for_test());  // (a measuring setting: not in the scene's key)
+         }
+         ed.command("lighting cards ONE");  // (any letter case; left on one in this editor)
+         mark = r463::log_mark();
+         ed.command("lighting cards");
+         CHECK(r463::join_log(mark).find("lighting cards: one (") != std::string::npos);
+         Editor fresh;
+         r464::lamp_scene(fresh);
+         mark = r463::log_mark();
+         fresh.command("lighting cards");
+         CHECK(r463::join_log(mark).find("lighting cards: all (") != std::string::npos);
+       });
+
+  test("a bake's lightmaps do not depend on `lighting cards` (round 487): with the bake on the cards, the same scene baked on all the ticked cards and on one "
+       "gives the same pages (bit for bit where the cards are one model), the Console names the cards that gathered, and the Lighting window names "
+       "them only when more than one did",
+       [] {
+         if (!gpu::available()) {
+           std::printf("    (no GPU here: skipped)\n");
+           return;
+         }
+         Editor ed;
+         r464::lamp_scene(ed);
+         ed.scene().render.device = 1;  // (Render > Device: GPU Compute - the bake's gather goes to the cards)
+         ed.commit_change("GPU");
+         size_t mark = r463::log_mark();
+         r35_bake(ed);
+         const std::string said_all = r463::join_log(mark);
+         const LightingData all = ed.lighting_data_for_test();
+         const std::string cards_all = ed.last_bake_times_for_test().gpu_cards, status_all = ed.bake_status_for_test();
+         CHECK(ed.last_bake_times_for_test().gpu_texels > 0 && !cards_all.empty());  // (a card did gather: the comparison below is of a card's bake)
+         CHECK(said_all.find("Generate Lighting: the gather ran on " + cards_all) != std::string::npos);
+         const bool several = cards_all.find(", ") != std::string::npos;
+         CHECK(several == (gpu::devices().size() > 1));  // (every card is ticked in a fresh editor)
+         CHECK((status_all.find(" - the gather on " + cards_all) != std::string::npos) == several);
+         ed.command("lighting cards one");
+         mark = r463::log_mark();
+         r35_bake(ed);
+         const std::string said_one = r463::join_log(mark);
+         const LightingData &one = ed.lighting_data_for_test();
+         const std::string cards_one = ed.last_bake_times_for_test().gpu_cards;
+         CHECK(ed.last_bake_times_for_test().gpu_texels > 0 && cards_one == gpu::devices()[0].name);  // (the first ticked card alone, named without a share)
+         CHECK(said_one.find("Generate Lighting: the gather ran on " + cards_one) != std::string::npos);
+         CHECK(ed.bake_status_for_test().find("the gather on") == std::string::npos);
+         bool one_model = true;
+         for (const gpu::DeviceInfo &d : gpu::devices()) one_model = one_model && d.name == gpu::devices()[0].name;
+         double worst = 0.0, mean = 0.0;
+         size_t texels = 0;
+         bool shaped = all.pages.size() == one.pages.size();
+         for (size_t p = 0; shaped && p < all.pages.size(); p++) {
+           shaped = all.pages[p].texels.size() == one.pages[p].texels.size();
+           for (size_t i = 0; shaped && i < all.pages[p].texels.size(); i++) {
+             const Vec3 a = all.pages[p].texels[i], d = a - one.pages[p].texels[i];
+             worst = std::max(worst, (double)std::max({std::fabs(d.x), std::fabs(d.y), std::fabs(d.z)}));
+             mean += (a.x + a.y + a.z) / 3.0, texels++;
+           }
+         }
+         mean /= (double)std::max<size_t>(1, texels);
+         std::printf("    all: '%s'; one: '%s'; the pages differ by at most %.3g (mean light %.3g)\n", cards_all.c_str(), cards_one.c_str(), worst, mean);
+         CHECK(shaped && texels > 0 && mean > 0.0);
+         CHECK(one_model ? r463::same_pages(all, one) : worst <= 1e-4 * mean);  // (two models of card may round differently: task 0463's criterion 2)
+       });
+}
+
 void run_lighting_tests() {
   round35_tests();
   round36_tests();
@@ -11670,4 +11760,5 @@ void run_lighting_tests() {
   tests_round484();
   tests_round486();
   tests_round486_independent();
+  tests_round487();
 }
