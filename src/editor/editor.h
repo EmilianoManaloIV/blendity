@@ -221,6 +221,7 @@ struct FrameProfile {
   double ms_record = 0, ms_anim_apply = 0, ms_trails = 0, ms_autopose = 0, ms_puppet = 0, ms_rig_overlay = 0, ms_mesh_uploads = 0;
   double ms_commit = 0, ms_commit_settle = 0, ms_commit_clone = 0, ms_commit_assets = 0;
   uint64_t clip_serialisations = 0, undo_steps = 0;
+  uint64_t record_reads = 0;  // round 472: objects whose numbers Record read (not the ones it passed over: nothing written since they were shown)
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
   uint64_t instance_rows_kept = 0, instance_rows_built = 0, see_lists_kept = 0;  // round 471: items whose instances were copied / made again in a GPU view's gather; see-through lists copied
@@ -271,7 +272,7 @@ struct FrameProfile {
     ms_record += o.ms_record, ms_anim_apply += o.ms_anim_apply, ms_trails += o.ms_trails, ms_autopose += o.ms_autopose;
     ms_puppet += o.ms_puppet, ms_rig_overlay += o.ms_rig_overlay, ms_mesh_uploads += o.ms_mesh_uploads;
     ms_commit += o.ms_commit, ms_commit_settle += o.ms_commit_settle, ms_commit_clone += o.ms_commit_clone, ms_commit_assets += o.ms_commit_assets;
-    clip_serialisations += o.clip_serialisations, undo_steps += o.undo_steps;
+    clip_serialisations += o.clip_serialisations, undo_steps += o.undo_steps, record_reads += o.record_reads;
     ms_collect += o.ms_collect, ms_hash += o.ms_hash;
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
@@ -526,9 +527,25 @@ struct AnimEditorState {
   uint64_t prop_object = 0;              // round 406: the object unfolded in the Add Property tree
   std::vector<std::pair<uint64_t, Transform>> saved_pose;  // every object's transform before Preview (put back after)
   std::vector<std::tuple<uint64_t, std::string, int, float>> saved_values;  // the animated component numbers likewise
-  std::unordered_map<std::string, float> shown;  // each animated number as last shown (Record compares with it)
+  /* What Record compares with. Round 472: an object's Position / Rotation / Scale as last shown are kept by object id with
+   * the object's transform_version then, so an object that has not been written since is skipped without reading
+   * anything; the shape weights and the other tracks' numbers stay in `shown`, keyed by a built string as before. */
+  struct ShownObject {
+    const GameObject *obj = nullptr;  // (another object under the same id - a scene restored: looked at again)
+    uint64_t version = 0;             // its transform_version when the numbers were read
+    uint64_t pass = 0;                // the Record pass that last saw it in the subtree (the ones not seen are dropped)
+    float v[9] = {};                  // Position x y z, Rotation x y z (Euler hint), Scale x y z
+  };
+  std::unordered_map<uint64_t, ShownObject> shown_objects;
+  uint64_t shown_pass = 0;
+  std::unordered_map<std::string, float> shown;  // shape weights and the components' tracked numbers as last shown
   uint64_t shown_root = 0;  // the root and clip `shown` was taken for (another one: look again before recording)
   const AnimationClip *shown_clip = nullptr;
+  /* The tracks that are not Position / Rotation / Scale (indices), kept for the clip's layout and number of tracks. */
+  std::vector<uint32_t> other_tracks;
+  const AnimationClip *other_clip = nullptr;
+  uint64_t other_layout = 0;
+  size_t other_count = 0;
   int drag = 0;  // 1 scrubbing the ruler, 2 moving keys, 3 a box
   int drag_x = 0, drag_y = 0;
   int scroll = 0;  // the first track row shown
@@ -1079,6 +1096,12 @@ class Editor {
   float anim_frame_for_test() const { return anim_.frame; }
   bool anim_preview_for_test() const { return anim_.preview; }  // (round 468)
   bool anim_record_for_test() const { return anim_.record; }
+  uint64_t record_objects_read_for_test() const { return record_reads_last_; }  // (round 472: objects Record read the numbers of in its last pass)
+  uint64_t record_reads_total_for_test() const { return prof_.record_reads; }
+  uint64_t clip_serialisations_for_test() const { return prof_.clip_serialisations; }
+  uint64_t anim_row_builds_for_test() const { return anim_row_builds_; }  // (round 472: the Animation window's row layout built)
+  uint64_t modal_applies_for_test() const { return modal_applies_; }      // (round 472: G / R / S applies of the held transform)
+  uint64_t solves_after_tools_for_test() const { return solves_after_tools_; }  // (round 472: second solves, after a view's tools, that turned a bone)
   bool trail_at_for_test(uint64_t bone, int f, Vec3 &head) const { return trail_at(bone, f, head); }
   bool bake_keep_uvs_for_test(int mode) const { return mode == 1 ? bake_keep_uvs_textures_ : bake_keep_uvs_; }
   int meshmaps_settings_size_for_test() const { return meshmaps_settings_.size; }
@@ -3082,7 +3105,11 @@ class Editor {
   void restore_clip_texts(const std::vector<std::pair<std::string, std::string>> &texts, std::vector<std::pair<std::string, std::string>> *current);
   void anim_record_changes();
   bool anim_changed(uint64_t id, const std::string &property, int axis, float v) const;
-  bool anim_record_vector(AnimationClip &clip, GameObject &g, const std::string &path, const char *prop, float frame);
+  bool anim_record_vector(AnimationClip &clip, const std::string &path, int prop, const float *shown, const float *now, float frame);
+  bool anim_record_object(AnimationClip &clip, GameObject &root, GameObject &g, const float *shown, const float *now);  // (round 472)
+  void anim_snapshot_others(GameObject &root, const AnimationClip *clip, const std::vector<GameObject *> &walk);  // (round 472)
+  const std::vector<uint32_t> &anim_other_tracks(const AnimationClip &clip);  // (round 472)
+  uint64_t record_reads_last_ = 0;  // (round 472: the objects Record read the numbers of in its last pass)
   void anim_reset();
   void retarget_clip_references(const std::string &from, const std::string &to);
   void anim_tick();
@@ -3156,10 +3183,34 @@ class Editor {
   void anim_set_row_value(const AnimRow &row, float v);
   void anim_key_row(const AnimRow &row);
   std::map<std::string, float> anim_row_values_for_test_;  // (the value each single row showed, by label; with record_buttons)
-  void anim_record_shape_weights(AnimationClip &clip, GameObject &root, bool &keyed);
+  void anim_record_shape_weights(AnimationClip &clip, GameObject &root, const std::vector<GameObject *> &walk, bool &keyed);
   std::vector<AnimRow> anim_rows(const AnimationClip &clip) const;
   std::vector<std::pair<int, float>> anim_row_keys(const AnimationClip &clip, const AnimRow &row, float frame) const;
   std::vector<float> anim_row_frames(const AnimationClip &clip, const AnimRow &row) const;
+  /* Round 472: the rows and what each row's keys are, kept while only the playhead moves - until the clip's version, the
+   * mode (Dopesheet / Curves), the rows folded or unfolded, or the clip itself change. Each row's frames and the keys
+   * on them are worked out the first time the row is drawn or hit. The x positions follow the window's rect, scroll and
+   * zoom every draw (arithmetic on the kept frames), and the playhead is drawn over it all. */
+  struct AnimRowKeys {
+    bool built = false;
+    std::vector<float> frames;
+    std::vector<std::vector<std::pair<int, float>>> at;  // the keys on each frame (anim_row_keys)
+  };
+  struct AnimRowLayout {
+    const AnimationClip *clip = nullptr;
+    uint64_t version = 0;
+    size_t tracks = 0;
+    std::string asset_path;
+    bool curves = false;
+    std::set<std::string> expanded, folded;
+    std::vector<AnimRow> rows;
+    std::vector<AnimRowKeys> keys;  // by row
+  };
+  std::shared_ptr<AnimRowLayout> anim_row_layout(const AnimationClip &clip) const;
+  AnimRowKeys &anim_row_keys_kept(const AnimationClip &clip, AnimRowLayout &layout, size_t row) const;
+  mutable std::shared_ptr<AnimRowLayout> anim_layout_;
+  mutable uint64_t anim_row_builds_ = 0;  // (the layouts built)
+  uint64_t modal_applies_ = 0;            // (round 472: transform_update's applies of the held G / R / S)
   bool anim_all_selected(const std::vector<std::pair<int, float>> &keys) const;
   std::vector<std::pair<int, float>> anim_box_keys(const AnimationClip &clip, const Recti &sheet, int row_h, float end, const Recti &box) const;
   void anim_select_key(int track, float frame, bool on);
@@ -3592,7 +3643,31 @@ class Editor {
     float value = 0.0f;         // degrees or scale factor so far
     bool from_extrude = false;  // started by Extrude (E): one undo step with it
     std::weak_ptr<Mesh> copy;  // the mesh it made last frame, still its own while no ring was rebuilt (task 0087)
+    /* Round 472: everything the last apply was made from (the mouse, the modifiers, the lock, the typed number, the view
+     * and its camera, the snaps) and the scene's transform / structure counts just after it. A frame that finds all of
+     * it the same applies nothing and asks for no redraw: a held G with a still mouse costs nothing. */
+    struct Applied {
+      bool valid = false;
+      int mx = 0, my = 0, mode = 0, axis = -1, start_mx = 0, start_my = 0;
+      bool shift = false, ctrl = false, plane = false, local = false, ortho = false;
+      Recti view{0, 0, 0, 0};
+      std::string typed;
+      float cam[7] = {};   // pivot x y z, yaw, pitch, distance, fov
+      float snaps[3] = {};
+      uint64_t transforms = 0, structure = 0;
+      bool operator==(const Applied &o) const {
+        if (valid != o.valid || mx != o.mx || my != o.my || mode != o.mode || axis != o.axis || start_mx != o.start_mx || start_my != o.start_my) return false;
+        if (shift != o.shift || ctrl != o.ctrl || plane != o.plane || local != o.local || ortho != o.ortho || typed != o.typed) return false;
+        if (view.x != o.view.x || view.y != o.view.y || view.w != o.view.w || view.h != o.view.h) return false;
+        for (int k = 0; k < 7; k++)
+          if (cam[k] != o.cam[k]) return false;
+        for (int k = 0; k < 3; k++)
+          if (snaps[k] != o.snaps[k]) return false;
+        return transforms == o.transforms && structure == o.structure;
+      }
+    } applied;
   };
+  ModalTransform::Applied transform_inputs(const Recti &view) const;  // (round 472)
   ModalTransform xf_;
   bool blender_keys_ = false;  // preference: R / S start rotate / scale (the Scale tool moves to T)
   /* ---- Keymap (keymap.cpp; Preferences > Keymap) ---- */
@@ -6710,6 +6785,8 @@ class Editor {
   int interaction_window_ = -1;
   bool scene_interacting() const;
   bool scene_tool_updates(const Recti &view, bool busy);
+  void solve_after_tools(uint64_t transforms_before);  // (round 472: the constraints again when the view's tools moved something)
+  uint64_t solves_after_tools_ = 0;
   void queue_window_move(WindowMove m);  // (from the window drawing now: its id is the move's source)
   int inspector_content_h_ = 0;
   std::map<std::string, Recti> inspector_menu_rects_;  // each section's menu button, by key (tests click them)
