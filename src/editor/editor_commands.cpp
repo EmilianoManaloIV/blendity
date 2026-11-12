@@ -1497,8 +1497,10 @@ void Editor::run_console_command(const std::string &line) {
   }
   else if (c == "tool") {
     std::string w = to_lower(arg(1, "move"));
-    tool_ = w == "view" ? Tool::View : w == "rotate" ? Tool::Rotate : w == "scale" ? Tool::Scale : w == "transform" ? Tool::Transform
-            : Tool::Move;
+    if (w == "room") set_room_tool(true);  // (round 479: the Blockout Room tool; the gizmo's tool stays as it was)
+    else
+      tool_ = w == "view" ? Tool::View : w == "rotate" ? Tool::Rotate : w == "scale" ? Tool::Scale : w == "transform" ? Tool::Transform
+              : Tool::Move;
   }
   else if (c == "edit" && arg(1, "") == "off") {
     if (edit_mode_) exit_edit_mode();

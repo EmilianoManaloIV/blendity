@@ -161,6 +161,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mode.edit_toggle", "Edit Mode On / Off", "Modes", CTX_SCENE},
       {"mode.sculpt_toggle", "Sculpt Mode On / Off", "Modes", CTX_SCENE},  // (task 0236; unbound: the palette, the Wheel, the Tools window)
       {"mode.paint_toggle", "Paint Mode On / Off", "Modes", CTX_SCENE},    // (task 0245)
+      {"tool.room", "Room Tool On / Off (Blockout)", "Tools", CTX_SCENE},  // (round 479: drag a rectangle or a circle, pull it up into a room)
       /* Task 0261: one brush grammar - the active brush (Sculpt, Paint, Weight Paint, Strokes, Scatter) answers the same keys. */
       {"brush.smaller", "Brush Smaller", "Brushes", CTX_SCENE},
       {"brush.larger", "Brush Larger", "Brushes", CTX_SCENE},
@@ -288,6 +289,7 @@ static void common_bindings(Keymap &k) {
   b("object.create_empty_child", {"Alt+Shift+N"});
   b("object.move_to_view", {"Ctrl+Alt+F"});
   b("edit.rename", {"F2"});
+  b("tool.room", {"Shift+R"});  // (round 479: no other action has it in any preset)
   b("draw.hide_ui", {"Tab"});  // (round 319: over the Draw tab's pad only - its context comes first there)
   b("draw.fit", {"Home", "Ctrl+0"});  // (Ctrl+0: Photoshop's Fit on Screen)
   b("board.delete", {"Delete", "Backspace"});  // (over the reference board only: its context comes first there)
@@ -906,6 +908,7 @@ bool Editor::run_action(const std::string &id) {
   }
   else if (id == "mode.sculpt_toggle") set_sculpt(!sculpt_);  // (task 0236)
   else if (id == "mode.paint_toggle") set_paint(!paint_);     // (task 0245)
+  else if (id == "tool.room") set_room_tool(!room_.active);   // (round 479)
   else if (id == "brush.smaller") return brush_step(-1);     // (task 0261)
   else if (id == "brush.larger") return brush_step(1);
   else if (id == "brush.erase") return brush_erase_toggle();
@@ -976,7 +979,7 @@ bool Editor::run_action(const std::string &id) {
  * Scene view, then anywhere), so one key can mean different things there. */
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active || bone_drag_.modal || drag_ == Drag::Gizmo) return;  // a running operator (or a gizmo drag's typed number) takes the keys
+  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active || bone_drag_.modal || drag_ == Drag::Gizmo || blockout_drag_.active || (room_.active && room_.stage > 0)) return;  // a running operator (or a gizmo drag's typed number) takes the keys
   if (qm_.open) return;  // (the Wheel's keys: 1-8, letters, Esc - task 0230)
   if (!capturing_binding_.empty()) return;  // Preferences is waiting for a key to bind
   int mods = 0;

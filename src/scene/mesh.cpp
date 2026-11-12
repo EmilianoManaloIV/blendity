@@ -258,7 +258,10 @@ enum MeshStat { kStatCopy, kStatFull, kStatInPlace, kStatTangents, kStatEdges, k
 std::atomic<uint64_t> g_stat_count[kStatCount], g_stat_us[kStatCount];
 std::atomic<uint64_t> g_partial_normals{0};
 std::atomic<uint64_t> g_in_place_normals_us{0}, g_in_place_tangents_us{0};  // (round 468: parts of kStatInPlace's time)
-std::atomic<uint64_t> g_in_place_refused{0}, g_in_place_split{0};            // (round 468: moves refused; of them, for a new split)
+std::atomic<uint64_t> g_in_place_refused{0}, g_in_place_split{0};            // (round 468: moves refused; round 470: corners split in place)
+std::atomic<uint64_t> g_settled{0};
+std::atomic<float> g_partial_share{0.25f};  // (corner_normals_moved: the share of faces moved up to which it runs)
+std::atomic<bool> g_whole_tangents{false};  // tests (round 470): the quick tangents always for the whole mesh, to compare against
 std::atomic<bool> g_serial_build{false};  // tests: the build before task 0109 (one thread, a map of corners), to compare against
 struct StatTimer {
   MeshStat stat;
@@ -284,6 +287,7 @@ MeshCounts mesh_counts() {
   c.ms_in_place_tangents = g_in_place_tangents_us.load(std::memory_order_relaxed) / 1000.0;
   c.in_place_refused = g_in_place_refused.load(std::memory_order_relaxed);
   c.in_place_split = g_in_place_split.load(std::memory_order_relaxed);
+  c.settled = g_settled.load(std::memory_order_relaxed);
   return c;
 }
 
@@ -296,6 +300,7 @@ MeshCounts MeshCounts::operator-(const MeshCounts &o) const {
   d.ms_in_place = ms_in_place - o.ms_in_place, d.ms_tangents = ms_tangents - o.ms_tangents, d.ms_edges = ms_edges - o.ms_edges;
   d.ms_in_place_normals = ms_in_place_normals - o.ms_in_place_normals, d.ms_in_place_tangents = ms_in_place_tangents - o.ms_in_place_tangents;
   d.in_place_refused = in_place_refused - o.in_place_refused, d.in_place_split = in_place_split - o.in_place_split;
+  d.settled = settled - o.settled;
   return d;
 }
 
@@ -350,6 +355,7 @@ uint64_t Mesh::topology_serial() const {
 void Mesh::forget_caches() const {
   cache_version_[0] = cache_version_[1] = 0;
   cache_approx_[0] = cache_approx_[1] = false;
+  cache_split_[0] = cache_split_[1] = false;
   edges_version_ = 0;
   sides_topo_ = tri_topo_ = vf_topo_ = share_.cv_topo = 0;
   share_.tess_version = 0;
@@ -373,12 +379,13 @@ const Mesh::VertexFaces &Mesh::vertex_faces() const {
 }
 
 bool Mesh::settle() const {
-  if (!tangents_approximate()) return false;
+  if (!needs_settle()) return false;
   for (int ci = 0; ci < 2; ci++) {
-    if (!cache_approx_[ci]) continue;
-    cache_version_[ci] = 0;  // (the next read builds it, tangents with MikkTSpace)
-    cache_approx_[ci] = false;
+    if (!cache_approx_[ci] && !cache_split_[ci]) continue;
+    cache_version_[ci] = 0;  // (the next read builds it: vertices shared anew, tangents with MikkTSpace)
+    cache_approx_[ci] = cache_split_[ci] = false;
   }
+  g_settled.fetch_add(1, std::memory_order_relaxed);
   looks++;
   edit_epoch::bump();  // (ADR 0115)
   return true;
@@ -673,22 +680,21 @@ void Mesh::corner_normals(bool flat, std::vector<Vec3> &cnormal, NormalState *ke
       });
     }
     else {
-      /* vertex -> faces adjacency (CSR) */
-      std::vector<uint32_t> off(positions.size() + 1, 0), adj(corner_verts.size());
-      for (uint32_t v : corner_verts) off[v + 1]++;
-      for (size_t i = 0; i < positions.size(); i++) off[i + 1] += off[i];
-      std::vector<uint32_t> fill(off.begin(), off.end() - 1);
-      for (size_t f = 0; f < nf; f++)
-        for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) adj[fill[corner_verts[c]]++] = (uint32_t)f;
+      /* Each corner adds the faces around its vertex within the angle of its own face: the vertex's faces from the
+       * table kept per topology (ascending, a face once for each of its corners there - the order this pass always
+       * summed in), and the faces side by side (round 470: this pass ran on one thread and built the table on every
+       * call - a posed avatar's meshes are smooth by angle, and a chest turn moves most of their faces). */
+      const VertexFaces &vf = vertex_faces();
       const float cos_limit = std::cos(smooth_angle * kDeg2Rad);
-      for (size_t f = 0; f < nf; f++)
+      each_face([&](size_t f) {
         for (uint32_t c = face_offsets[f]; c < face_offsets[f + 1]; c++) {
-          uint32_t v = corner_verts[c];
+          const uint32_t v = corner_verts[c];
           Vec3 sum(0.0f);
-          for (uint32_t k = off[v]; k < off[v + 1]; k++)
-            if (dot(fnormal[adj[k]], fnormal[f]) >= cos_limit) sum += fweighted[adj[k]];
+          for (uint32_t k = vf.offsets[v]; k < vf.offsets[v + 1]; k++)
+            if (dot(fnormal[vf.faces[k]], fnormal[f]) >= cos_limit) sum += fweighted[vf.faces[k]];
           cnormal[c] = corner_normalize(sum);
         }
+      });
     }
   }
   if (!keep) return;
@@ -774,7 +780,7 @@ void Mesh::smooth_by_angle_at(NormalState &st, const VertexFaces &vf, uint32_t v
 bool Mesh::corner_normals_moved(NormalState &st, bool flat, const std::vector<uint32_t> &faces, std::vector<uint32_t> &verts) const {
   const size_t nf = face_count();
   if (!st.fits(topology_serial(), flat, nf, corner_verts.size())) return false;
-  if (faces.size() * 4 > nf) return false;  // (a large share moved: the whole pass costs no more)
+  if ((double)faces.size() > (double)g_partial_share.load(std::memory_order_relaxed) * (double)nf) return false;  // (a large share moved: the whole pass)
   for (uint32_t f : faces) {
     st.fnormal[f] = face_normal(f);
     if (!flat) st.fweighted[f] = face_weighted(f);
@@ -813,22 +819,97 @@ bool Mesh::corner_normals_moved(NormalState &st, bool flat, const std::vector<ui
   return true;
 }
 
+/* The quick tangents (round 34's, ADR 0034): the UV gradients of the deformed triangles (Lengyel's method), averaged
+ * per render vertex and made orthogonal to the new normal - they depend on the shape alone, not on the drag that led
+ * there. MikkTSpace (a full build, a settle) is the same idea with more care at splits, so they differ slightly.
+ * One triangle's share: weighted by its UV area (no division), so a sliver of an n-gon's triangulation adds almost
+ * nothing instead of a huge, badly rounded gradient. False when it has no UV area (or NaN). */
+static bool tangent_share(const RenderMesh &rm, size_t t, Vec3 &s, Vec3 &b) {
+  const uint32_t i0 = rm.indices[t], i1 = rm.indices[t + 1], i2 = rm.indices[t + 2];
+  const Vec3 e1 = rm.positions[i1] - rm.positions[i0], e2 = rm.positions[i2] - rm.positions[i0];
+  const float du1 = rm.uvs[i1].x - rm.uvs[i0].x, dv1 = rm.uvs[i1].y - rm.uvs[i0].y;
+  const float du2 = rm.uvs[i2].x - rm.uvs[i0].x, dv2 = rm.uvs[i2].y - rm.uvs[i0].y;
+  const float den = du1 * dv2 - du2 * dv1;
+  if (!(std::fabs(den) > 0.0f)) return false;
+  const float r = den < 0.0f ? -1.0f : 1.0f;
+  s = (e1 * dv2 - e2 * dv1) * r, b = (e2 * du1 - e1 * du2) * r;
+  return true;
+}
+
+/* A render vertex's tangent from its triangles' summed shares and its normal. */
+static Vec4 tangent_from(const Vec3 &n, const Vec3 &sdir, const Vec3 &tdir) {
+  Vec3 t = sdir - n * dot(n, sdir);
+  if (!(length_sq(t) > 1e-20f)) {  // no UV gradient here: any direction across the normal
+    const Vec3 a = std::fabs(n.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+    t = a - n * dot(n, a);
+  }
+  t = normalize(t);
+  if (!(length_sq(t) > 0.5f)) t = Vec3(1, 0, 0);  // a NaN normal: as the build's default
+  return Vec4(t, dot(cross(n, t), tdir) < 0.0f ? -1.0f : 1.0f);
+}
+
+void Mesh::quick_tangents_at(int ci, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const {
+  RenderMesh &rm = cache_[ci];
+  const std::vector<uint32_t> &crv = corner_rv_[ci];
+  const VertexFaces &vf = vertex_faces();
+  /* A vertex's render vertices are its own alone, so the vertices are worked out side by side; what changed is
+   * gathered per chunk and joined in order. */
+  const size_t chunk = 512, chunks = (verts.size() + chunk - 1) / chunk;
+  std::vector<std::vector<uint32_t>> found(chunks);
+  JobSystem::global().parallel_for((int64_t)chunks, 1, [&](int64_t k0, int64_t k1) {
+    CornerFaces at;
+    std::vector<uint32_t> rvs;
+    std::vector<Vec3> sdir, tdir;
+    for (int64_t k = k0; k < k1; k++)
+      for (size_t i = (size_t)k * chunk; i < std::min(verts.size(), ((size_t)k + 1) * chunk); i++) {
+        const uint32_t v = verts[i];
+        corners_at(*this, vf, v, at);
+        rvs.clear();
+        for (const auto &cf : at)
+          if (std::find(rvs.begin(), rvs.end(), crv[cf.first]) == rvs.end()) rvs.push_back(crv[cf.first]);
+        sdir.assign(rvs.size(), Vec3(0.0f)), tdir.assign(rvs.size(), Vec3(0.0f));
+        /* The faces around v ascending, their triangles in order: for each render vertex the whole pass's order. */
+        for (uint32_t q = vf.offsets[v]; q < vf.offsets[v + 1]; q++) {
+          const uint32_t f = vf.faces[q];
+          if ((q > vf.offsets[v] && vf.faces[q - 1] == f) || f + 1 >= tri_start_.size()) continue;
+          for (size_t t = (size_t)tri_start_[f] * 3; t + 2 < (size_t)tri_start_[f + 1] * 3 && t + 2 < rm.indices.size(); t += 3) {
+            Vec3 s, b;
+            if (!tangent_share(rm, t, s, b)) continue;
+            for (size_t j = t; j < t + 3; j++) {
+              if (corner_verts[rm.tri_corner[j]] != v) continue;
+              const size_t r = (size_t)(std::find(rvs.begin(), rvs.end(), rm.indices[j]) - rvs.begin());
+              if (r < rvs.size()) sdir[r] += s, tdir[r] += b;
+            }
+          }
+        }
+        for (size_t r = 0; r < rvs.size(); r++) {
+          const uint32_t rv = rvs[r];
+          if (rv >= rm.tangents.size()) continue;
+          const Vec4 t = tangent_from(rm.normals[rv], sdir[r], tdir[r]);
+          if (std::memcmp(&rm.tangents[rv], &t, sizeof(Vec4)) == 0) continue;
+          rm.tangents[rv] = t;
+          found[(size_t)k].push_back(rv);
+        }
+      }
+  });
+  for (const std::vector<uint32_t> &f : found) changed.insert(changed.end(), f.begin(), f.end());
+}
+
 /* The positions moved and nothing else (a deform, ADR 0022, or an Edit Mode drag, ADR 0034): the topology and the
- * UVs are the build's. Positions and normals are written per render vertex; if two corners of one render vertex now
- * have different normals (the full build would split it), the caller rebuilds instead. Quads and n-gons are
+ * UVs are the build's. Positions and normals are written per render vertex; a corner whose normal is no longer its
+ * render vertex's (the full build would split it) gets a render vertex of its own (round 470). Quads and n-gons are
  * triangulated again from the new positions, into the same slots (a face always makes n - 2 triangles), so the
  * triangles are a rebuild's. */
 bool Mesh::update_in_place(int ci, bool flat) const {
   StatTimer st{kStatInPlace, {}, false};  // (counted once it worked; a refused one's time is still spent)
   /* Round 468: a refusal counted (the caller builds the render mesh whole then - on a posed avatar, every frame). */
-  auto refused = [](bool split) {
+  auto refused = [] {
     g_in_place_refused.fetch_add(1, std::memory_order_relaxed);
-    if (split) g_in_place_split.fetch_add(1, std::memory_order_relaxed);
     return false;
   };
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
-  if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return refused(false);
+  if (crv.size() != corner_verts.size() || rm.normals.size() != rm.positions.size()) return refused();
   /* Which faces moved, before anything is written: only they are split into triangles again (task 0090). */
   std::vector<uint32_t> faces;
   moved_faces(ci, faces);
@@ -842,43 +923,30 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   ScopedTimer normals_timer;  // (round 468: the normals and their corners, apart in MeshCounts)
   const bool partial = !custom_normals_fit() && corner_normals_moved(ns, flat, faces, verts);
   if (!partial) corner_normals(flat, ns.cnormal, &ns);
-  bool split = false;  // (two corners of one render vertex now differ: the build would split it)
+  std::vector<uint32_t> split;  // (corners whose normal left their render vertex's: each got one of its own)
   const bool written = partial ? write_corners_at(ci, ns.cnormal, verts, changed, split) : write_corners(ci, ns.cnormal, changed, split);
   g_in_place_normals_us.fetch_add((uint64_t)(normals_timer.ms() * 1000.0), std::memory_order_relaxed);
-  if (!written) return refused(split);
-  if (!retriangulate(rm, crv, &fmoved)) return refused(false);
+  if (!written) return refused();
+  if (!retriangulate(rm, crv, &fmoved)) return refused();
+  split_slots(ci, split);
+  g_in_place_split.fetch_add(split.size(), std::memory_order_relaxed);
   bool tangents_rewritten = false;
   if (cache_tangents_[ci] && rm.tangents.size() == rm.positions.size() && rm.uvs.size() == rm.positions.size()) {
-    tangents_rewritten = true;
     ScopedTimer tangents_timer;
-    /* Tangents from the UV gradients of the deformed triangles (Lengyel's method), averaged per render vertex and
-     * made orthogonal to the new normal: they depend on the shape alone, not on the drag that led there.
-     * MikkTSpace (the next full build) is the same idea with more care at splits, so they differ slightly. */
-    const size_t nv = rm.positions.size();
-    std::vector<Vec3> sdir(nv, Vec3(0.0f)), tdir(nv, Vec3(0.0f));
-    for (size_t t = 0; t + 2 < rm.indices.size(); t += 3) {
-      const uint32_t i0 = rm.indices[t], i1 = rm.indices[t + 1], i2 = rm.indices[t + 2];
-      const Vec3 e1 = rm.positions[i1] - rm.positions[i0], e2 = rm.positions[i2] - rm.positions[i0];
-      const float du1 = rm.uvs[i1].x - rm.uvs[i0].x, dv1 = rm.uvs[i1].y - rm.uvs[i0].y;
-      const float du2 = rm.uvs[i2].x - rm.uvs[i0].x, dv2 = rm.uvs[i2].y - rm.uvs[i0].y;
-      /* Weighted by the triangle's UV area (no division): a sliver of an n-gon's triangulation adds almost
-       * nothing instead of a huge, badly rounded gradient. */
-      const float den = du1 * dv2 - du2 * dv1;
-      if (!(std::fabs(den) > 0.0f)) continue;  // no UV area (or NaN)
-      const float r = den < 0.0f ? -1.0f : 1.0f;
-      const Vec3 s = (e1 * dv2 - e2 * dv1) * r, b = (e2 * du1 - e1 * du2) * r;
-      for (uint32_t i : {i0, i1, i2}) sdir[i] += s, tdir[i] += b;
-    }
-    for (size_t i = 0; i < nv; i++) {
-      const Vec3 n = rm.normals[i];
-      Vec3 t = sdir[i] - n * dot(n, sdir[i]);
-      if (!(length_sq(t) > 1e-20f)) {  // no UV gradient here: any direction across the normal
-        const Vec3 a = std::fabs(n.x) < 0.9f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
-        t = a - n * dot(n, a);
+    /* Round 470: around the moved faces only, once this cache's tangents are the quick ones everywhere (the first
+     * in-place frame after a build turns MikkTSpace's into them, whole) and no vertex was appended this frame (its
+     * neighbours on the old vertex are rewritten by the whole pass). */
+    if (partial && cache_approx_[ci] && split.empty() && !g_whole_tangents.load(std::memory_order_relaxed)) quick_tangents_at(ci, verts, changed);
+    else {
+      tangents_rewritten = true;
+      const size_t nv = rm.positions.size();
+      std::vector<Vec3> sdir(nv, Vec3(0.0f)), tdir(nv, Vec3(0.0f));
+      for (size_t t = 0; t + 2 < rm.indices.size(); t += 3) {
+        Vec3 s, b;
+        if (!tangent_share(rm, t, s, b)) continue;
+        for (size_t j = t; j < t + 3; j++) sdir[rm.indices[j]] += s, tdir[rm.indices[j]] += b;
       }
-      t = normalize(t);
-      if (!(length_sq(t) > 0.5f)) t = Vec3(1, 0, 0);  // a NaN normal: as the build's default
-      rm.tangents[i] = Vec4(t, dot(cross(n, t), tdir[i]) < 0.0f ? -1.0f : 1.0f);
+      for (size_t i = 0; i < nv; i++) rm.tangents[i] = tangent_from(rm.normals[i], sdir[i], tdir[i]);
     }
     cache_approx_[ci] = true;
     g_in_place_tangents_us.fetch_add((uint64_t)(tangents_timer.ms() * 1000.0), std::memory_order_relaxed);
@@ -887,6 +955,9 @@ bool Mesh::update_in_place(int ci, bool flat) const {
   record_moved(rm, changed, faces);
   if (tangents_rewritten) rm.moved_from = 0;  // (every tangent written again: copies take it whole)
   rm.serial = next_render_serial();  // what was drawn from it changed: every cache keyed on it re-renders
+  /* Round 470: vertices were appended - another split pattern (what is kept per render vertex of a build is void), and
+   * the card and every copy take the mesh whole, once. */
+  if (!split.empty()) rm.moved_from = 0, rm.build_serial = rm.serial, cache_split_[ci] = true;
   if (partial) g_partial_normals.fetch_add(1, std::memory_order_relaxed);
   st.count = true;
   return true;
@@ -930,24 +1001,59 @@ static bool put_corner(RenderMesh &rm, uint32_t rv, const Vec3 &p, const Vec3 &n
   return true;
 }
 
-bool Mesh::write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed, bool &split) const {
+/* Round 470 (ADR 0124, decision 5): corner c leaves the render vertex it shared - its normal is no longer the others' -
+ * for one of its own: appended with the corner's position and normal and the old vertex's UV and tangent (the UV was
+ * the same by the build's rule; the tangent is written again by whoever writes tangents). Nothing is ever joined
+ * again in place, so a mesh holds at most one render vertex a corner; a settle or a build shares them anew. The first
+ * corner of a vertex (the one moved_faces compares positions through) is the first writer of its render vertex and
+ * never the one that leaves. */
+static void split_corner(RenderMesh &rm, std::vector<uint32_t> &crv, uint32_t c, const Vec3 &p, const Vec3 &n, std::vector<uint32_t> &changed,
+                         std::vector<uint32_t> &split) {
+  const uint32_t from = crv[c], rv = (uint32_t)rm.positions.size();
+  rm.positions.push_back(p);
+  rm.normals.push_back(n);
+  if (!rm.uvs.empty()) rm.uvs.push_back(rm.uvs[from]);
+  if (!rm.tangents.empty()) rm.tangents.push_back(rm.tangents[from]);
+  crv[c] = rv;
+  changed.push_back(rv);
+  split.push_back(c);
+}
+
+bool Mesh::write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed, std::vector<uint32_t> &split) const {
   RenderMesh &rm = cache_[ci];
-  const std::vector<uint32_t> &crv = corner_rv_[ci];
-  std::vector<uint8_t> seen(rm.positions.size(), 0);
+  std::vector<uint32_t> &crv = corner_rv_[ci];
+  const size_t before = rm.positions.size();  // (the vertices appended here have one corner each: never seen twice)
+  std::vector<uint8_t> seen(before, 0);
   for (size_t c = 0; c < corner_verts.size(); c++) {
     const uint32_t rv = crv[c], v = corner_verts[c];
-    if (rv >= rm.positions.size() || v >= positions.size()) return false;
-    if (!put_corner(rm, rv, positions[v], cnormal[c], !seen[rv], changed)) return split = true, false;
+    if (rv >= before || v >= positions.size()) return false;
+    if (!put_corner(rm, rv, positions[v], cnormal[c], !seen[rv], changed)) split_corner(rm, crv, (uint32_t)c, positions[v], cnormal[c], changed, split);
     seen[rv] = 1;
   }
   return true;
 }
 
-/* Only the corners at `verts`: a render vertex's corners all sit on its one vertex, and corners_at lists them in
- * corner order, so the same corner writes as in write_corners. */
-bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed, bool &split) const {
+/* The index slots of the corners that got a render vertex of their own: each sits in its face's triangles (a
+ * triangle's three slots; a quad's or an n-gon's, which retriangulate writes from the corners' render vertices only
+ * when the face moved - a corner's normal can change with a neighbour's move alone). */
+void Mesh::split_slots(int ci, const std::vector<uint32_t> &split) const {
+  if (split.empty()) return;
   RenderMesh &rm = cache_[ci];
   const std::vector<uint32_t> &crv = corner_rv_[ci];
+  for (uint32_t c : split) {
+    const size_t f = (size_t)(std::upper_bound(face_offsets.begin(), face_offsets.end(), c) - face_offsets.begin()) - 1;
+    if (f + 1 >= tri_start_.size()) continue;
+    for (size_t s = (size_t)tri_start_[f] * 3; s < (size_t)tri_start_[f + 1] * 3 && s < rm.indices.size(); s++)
+      if (rm.tri_corner[s] == c) rm.indices[s] = crv[c];
+  }
+}
+
+/* Only the corners at `verts`: a render vertex's corners all sit on its one vertex, and corners_at lists them in
+ * corner order, so the same corner writes as in write_corners. */
+bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed,
+                            std::vector<uint32_t> &split) const {
+  RenderMesh &rm = cache_[ci];
+  std::vector<uint32_t> &crv = corner_rv_[ci];
   const VertexFaces &vf = vertex_faces();
   CornerFaces at;
   std::vector<uint32_t> written;  // (the render vertices at this vertex already written: a handful)
@@ -958,7 +1064,10 @@ bool Mesh::write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std:
       const uint32_t rv = crv[cf.first];
       if (rv >= rm.positions.size()) return false;
       const bool first = std::find(written.begin(), written.end(), rv) == written.end();
-      if (!put_corner(rm, rv, positions[v], cnormal[cf.first], first, changed)) return split = true, false;
+      if (!put_corner(rm, rv, positions[v], cnormal[cf.first], first, changed)) {
+        split_corner(rm, crv, cf.first, positions[v], cnormal[cf.first], changed, split);
+        continue;
+      }
       if (first) written.push_back(rv);
     }
   }
@@ -1072,6 +1181,7 @@ const RenderMesh &Mesh::render_mesh(bool force_flat) const {
   cache_deform_[ci] = deform_version;
   cache_tangents_[ci] = false;
   cache_approx_[ci] = false;
+  cache_split_[ci] = false;
   cache_topo_[ci] = topo;
   cache_flat_[ci] = flat;
   return rm;
@@ -1386,6 +1496,8 @@ void Mesh::build_render_vertices(RenderMesh &rm, const std::vector<Vec3> &cnorma
 }
 
 void mesh_serial_build_for_test(bool on) { g_serial_build.store(on, std::memory_order_relaxed); }
+void mesh_whole_tangents_for_test(bool on) { g_whole_tangents.store(on, std::memory_order_relaxed); }
+float mesh_partial_share(float share) { return g_partial_share.exchange(share, std::memory_order_relaxed); }
 
 namespace {
 /* Adapter for Blender's MikkTSpace implementation over a triangulated RenderMesh. */
@@ -1439,7 +1551,7 @@ const RenderMesh &Mesh::render_mesh_tangents(bool force_flat) const {
     }
   }
   cache_tangents_[ci] = true;
-  cache_approx_[ci] = false;
+  cache_approx_[ci] = false;  // (cache_split_ stays: MikkTSpace ran on the vertices as they are split now)
   return rm;
 }
 

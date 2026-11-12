@@ -701,6 +701,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (filter_cache_.size() > 64) filter_cache_.clear();  // deleted cameras' stacks (ids are never reused within a scene)
   drop_slots_.clear();  // drop targets register again as the windows draw
   scene_drawn_ = false;  // set by the Scene view when it draws: drops onto it need this frame's picture
+  any_scene_drawn_ = false;  // (round 479: the same, for every window's Scene view together)
   drop_textures_.clear();
   drop_rows_.clear();
   drop_folders_.clear();
@@ -727,6 +728,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   mesh_job_poll();  // (round 413: a Subdivide or DynaMesh lands as one step)
   eval_jobs_poll();  // (a slow modifier stack's result adopted)
   blockout_jobs_poll();  // (round 477: a Blockout's finished build adopted)
+  settle_evaluated_step();  // (round 470: posed meshes made exact at rest; after the jobs that land this frame)
   save_job_poll();
   shot_job_poll();  // (round 418)
   open_job_poll();
@@ -787,6 +789,10 @@ void Editor::frame_body(std::vector<Event> &events) {
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present_changed();
   draw_secondary_windows(now);  // (task 0187: after the main window, with its own input each)
+  if (!any_scene_drawn_ && scene_) {  // (round 479: a held handle and a Room tool's footprint stop when no window draws a Scene view any more - a tab switch; the keymap is off while they run. After the other windows: the Scene view may be in one of them)
+    if (blockout_drag_.active) blockout_drag_cancel(scene_->find(blockout_drag_.piece));
+    if (room_.stage > 0) room_.stage = 0, room_.typed.clear();
+  }
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
   /* A move just ended (task 0103 / 0104): one more frame, whatever ends it, so no held or cheap picture stays up. */
@@ -872,6 +878,11 @@ Editor::PosingList Editor::posing_parts(const FrameProfile &p, const PoseCounts 
       {"window animation", p.ms_window[(int)WindowKind::Animation]}, {"window inspector", p.ms_window[(int)WindowKind::Inspector]},
       {"window rigging", p.ms_window[(int)WindowKind::Rigging]}, {"window avatar", p.ms_window[(int)WindowKind::Avatar]},
       {"window hierarchy", p.ms_window[(int)WindowKind::Hierarchy]},
+      /* Round 471: the card's own frame, inside "gpu path" - in a world it was the unnamed half of a posed frame. The
+       * three passes are the card's time stamps; the wait is the submission beyond them (copies out, the fence). */
+      {"card shadow maps", p.ms_gpu_shadow}, {"card g-buffer", p.ms_gpu_gbuffer}, {"card lighting", p.ms_gpu_lighting},
+      {"card copies and wait", p.ms_gpu_readback}, {"card render call", p.ms_gpu_render}, {"baked corners", p.ms_gpu_corners},
+      {"see-through triangles", p.ms_gpu_see}, {"presenting", p.ms_present},
       /* (A move in place that is refused builds the render mesh whole, and its tangents with MikkTSpace: on the owner's
        * avatar that was most of a scrubbed frame's gather - so the whole builds and the copies are parts too.) */
       {"render meshes built whole", mc.ms_full_builds}, {"tangents built whole", mc.ms_tangents}, {"mesh copies", mc.ms_copies}};
@@ -894,11 +905,13 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"meshes updated in part", (double)p.gpu_mesh_partial}, {"upload KB", (double)p.gpu_upload_bytes / 1024.0},
       {"scene hashes", (double)p.scene_hashes}, {"draw items kept", (double)p.items_kept},
       {"instances built", (double)p.instances_built}, {"instances kept", (double)p.instances_kept},
+      {"instance rows kept", (double)p.instance_rows_kept}, {"instance rows built", (double)p.instance_rows_built},
+      {"see-through lists kept", (double)p.see_lists_kept},
       {"lightmap keys", (double)p.lightmap_key_hashes}, {"clip applies", (double)pc.clip_applies},
       {"clip serialisations", (double)p.clip_serialisations}, {"solver iterations", (double)pc.solver_iterations},
       {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
       {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
-      {"refused for a new split", (double)mc.in_place_split}, {"render meshes built whole", (double)mc.full_builds},
+      {"corners split in place", (double)mc.in_place_split}, {"meshes settled", (double)mc.settled}, {"render meshes built whole", (double)mc.full_builds},
       {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies}};
 }
 
@@ -1499,6 +1512,15 @@ void Editor::draw_toolbar(const Recti &r) {
     }
     u.tooltip(strprintf("The move step for a Ctrl drag (and the magnet). A turn snaps to %g degrees (Preferences).", snap_rot_));
     x += sw + u.px(4);
+  }
+  {  /* Round 479: the Room tool (Blockout), a switch beside the snapping it uses. */
+    const std::string k = key("tool.room");
+    const std::string tip = strprintf("Room Tool%s%s%s\nDrag a rectangle on the ground or a face (a circle with the Circle option), move the mouse for the height and click: "
+                                      "a room of the active Blockout stands there. Ctrl: no snapping. Esc leaves.",
+                                      k.empty() ? "" : " (", k.c_str(), k.empty() ? "" : ")");
+    if (u.icon_button({x + bh + u.px(4), y, bh, bh}, Icon::Cube, room_.active, tip.c_str())) set_room_tool(!room_.active);
+    if (u.record_buttons) u.button_rects["toolbar:room"] = Recti{x + bh + u.px(4), y, bh, bh};
+    x += bh + u.px(4);
   }
   x += bh + u.px(14);
   if (edit_mode_) {
@@ -2103,6 +2125,37 @@ void Editor::settle_meshes() {
   if (any) ui_.redraw = true;
 }
 
+void Editor::settle_evaluated_step() {
+  const uint64_t now = edit_epoch::now();
+  if (now != settle_epoch_) {  // (something changed: a pose, a clip's frame, Play - watch for the rest after it)
+    settle_epoch_ = now;
+    settle_watch_ = true;
+    settle_rest_ = 0;
+    ui_.redraw = true;  // (the frame after, which may be the one at rest)
+    return;
+  }
+  /* A drag held still is not at rest (its commit starts the watch again), nor is any gesture with a button down - a
+   * scrub or a Puppet handle held: settled then, the next move would build and send each mesh whole. */
+  if (!settle_watch_ || pending_change_ || interacting()) return;
+  if (++settle_rest_ < 2) {
+    ui_.redraw = true;
+    return;
+  }
+  int n = 0;
+  bool left = false;
+  {
+    edit_epoch::Moved caches_only;  // (review 470: a settle's bump is no structure change - the skins' kept keys and bone tables stand)
+    scene_->for_each([&](GameObject &g) {
+      if (n >= 2) left = true;  // (asked cheaply next frame)
+      else n += g.settle_evaluated(2 - n, &left);
+    });
+  }
+  settled_evaluated_ += (uint64_t)n;
+  settle_epoch_ = edit_epoch::now();  // (the settles' own bumps are not a change to wait out)
+  settle_watch_ = n > 0 || left;
+  if (settle_watch_) ui_.redraw = true;
+}
+
 EditSelection Editor::edit_selection() const {
   EditSelection e;
   if (!edit_mode_) return e;
@@ -2147,6 +2200,7 @@ void Editor::commit_undo() {
   {
     ProfileScope settle_scope{prof_.ms_commit_settle, {}};
     settle_meshes();
+    settle_watch_ = true, settle_rest_ = 0;  // (round 470: the evaluated meshes follow, at rest)
   }
   if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
@@ -2387,6 +2441,7 @@ void Editor::redo() {
 void Editor::new_scene() {
   save_job_wait();  // (round 413: a save in flight lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's - the next scene's ids start again)
+  blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: a footprint drawn in the last scene made a room in this one at the next click)
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -2467,6 +2522,7 @@ void Editor::open_job_poll() {
 bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s) {
   save_job_wait();  // (round 413: a save started while the file loaded lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's)
+  blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: the last scene's drag and footprint)
   export_waits_drop("another scene opened");  // (review 354)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -4871,6 +4927,7 @@ void Editor::enter_play() {
   autorig_cancel();
   anim_set_preview(false);  // (Play plays from the scene's own pose)
   bone_drag_ = BoneDrag{};
+  blockout_drag_ = BlockoutDrag{};  // (round 479: a handle held when Play starts lets go - the piece stays where the drag had it, as its one step)
   seq_set_preview(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();

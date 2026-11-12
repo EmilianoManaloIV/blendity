@@ -5098,6 +5098,525 @@ static void tests_round487_gpu() {
        });
 }
 
+/* ---------------------------------------------------------------- round 470: ranges for meshes with several materials (task 0446) */
+static void tests_round470_gpu() {
+  test("gpu views (round 470): a finger turned on a mesh with tangents and three materials sends the card only the moved ranges - after the first frame no mesh goes up whole, and a frame's bytes are under a tenth of the mesh (triangles); a mesh of quads is counted too (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    for (int kind = 0; kind < 2; kind++) {  // 0: triangles (indices untouched by a move), 1: quads (split again: its indices go up whole, regrouped)
+      Editor ed;
+      r34_open(ed);
+      GameObject *g = ed.scene().create("Finger");
+      MeshPtr mesh = kind == 0 ? primitives::ico_sphere(1.0f, 5) : primitives::uv_sphere(1.0f, 96, 64);
+      mesh->smooth = true;
+      mesh->face_material.assign(mesh->face_count(), 0);
+      for (size_t f = 0; f < mesh->face_count(); f++) mesh->face_material[f] = (int)(f % 3);
+      g->add<MeshFilter>()->mesh = mesh;
+      MeshRenderer *mr = g->add<MeshRenderer>();
+      mr->materials.clear();
+      for (int k = 0; k < 3; k++) {
+        auto mat = std::make_shared<Material>();
+        mat->name = strprintf("R470 %d", k);
+        mat->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+        mr->materials.push_back(mat);
+      }
+      g->set_local_position({0.0f, 1.0f, 0.0f});
+      ed.mark_changed_for_test("R470 finger");
+      ed.command("camera 0 4 7 0 1 0");
+      ed.command("overlay grid off");
+      r34_steps(ed, 3);
+      ed.viewport_device_for_test(2);
+      r34_steps(ed, 4);
+      CHECK(ed.scene_on_gpu_for_test());
+      const RenderMesh &first = mesh->render_mesh_tangents();
+      const uint64_t whole = (uint64_t)first.positions.size() * sizeof(gpu::RasterVertex) + first.indices.size() * 4;
+      CHECK(!first.tangents.empty());
+      std::vector<std::pair<uint64_t, uint64_t>> frames;  // per frame: whole uploads, partial updates
+      uint64_t partial_bytes = 0, partial = 0, whole_after_first = 0;
+      const size_t finger = mesh->positions.size() / 3;
+      for (int k = 0; k < 8; k++) {
+        const FrameProfile before = ed.frame_profile_totals();
+        mesh->positions[finger].y += 0.02f;  // (one vertex a frame: a finger turning)
+        mesh->touch();
+        /* As a pose held does it: the views draw again, no undo step is committed (a committed step settles the
+         * mesh - ADR 0034 - and the next frame would rightly build and send it whole). */
+        edit_epoch::bump();
+        ed.scene_cache_reset_for_test();
+        r34_steps(ed, 1);
+        const FrameProfile after = ed.frame_profile_totals();
+        /* Whole: a mesh added, or updated other than by ranges. */
+        const uint64_t sent_whole = (after.gpu_mesh_uploads - before.gpu_mesh_uploads) +
+                                    ((after.gpu_mesh_updates - before.gpu_mesh_updates) - (after.gpu_mesh_partial - before.gpu_mesh_partial));
+        frames.push_back({sent_whole, after.gpu_mesh_partial - before.gpu_mesh_partial});
+        if (k > 0) {
+          whole_after_first += sent_whole;
+          partial += after.gpu_mesh_partial - before.gpu_mesh_partial;
+          partial_bytes += after.gpu_partial_bytes - before.gpu_partial_bytes;
+        }
+      }
+      std::printf("    %s (%zu triangles, whole %llu KB): after the first frame %llu meshes sent whole, %llu partial updates of %llu KB each on average\n", kind ? "quads" : "triangles",
+                  first.indices.size() / 3, (unsigned long long)(whole / 1024), (unsigned long long)whole_after_first, (unsigned long long)partial,
+                  (unsigned long long)(partial ? partial_bytes / partial / 1024 : 0));
+      CHECK(whole_after_first == 0);  // (`meshes sent whole` 0 after the first frame)
+      CHECK(partial >= 7);
+      if (kind == 0) CHECK(partial && partial_bytes / partial < whole / 10);
+      else CHECK(partial && partial_bytes / partial < whole / 2);  // (a quad mesh regroups its indices whole: a third of the bytes at most; the vertices stay ranges)
+      ed.viewport_device_for_test(1);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- round 471: the world stays kept while a character moves (task 0447) */
+/* The two 3D views side by side as one picture. */
+static std::vector<uint32_t> r471_pic(Editor &ed) {
+  std::vector<uint32_t> p = r34_crop(ed, ed.scene_view_rect());
+  const std::vector<uint32_t> g = r35_game(ed);
+  p.insert(p.end(), g.begin(), g.end());
+  return p;
+}
+
+/* The picture on screen now (drawn by rows, if the frame could be) against the same scene drawn with every row made again. */
+static size_t r471_whole_differs(Editor &ed) {
+  const std::vector<uint32_t> by_rows = r471_pic(ed);
+  ed.instance_rows_off_for_test(true);
+  ed.scene_cache_reset_for_test();
+  r34_steps(ed, 1);
+  const std::vector<uint32_t> whole = r471_pic(ed);
+  ed.instance_rows_off_for_test(false);
+  return r458_differ(by_rows, whole) + (by_rows.size() != whole.size() ? 1 : 0);
+}
+
+/* A field of cubes on the card, the last `see` of them see-through (a frame with a see-through list is never whole-kept). */
+static std::vector<GameObject *> r471_world(Editor &ed, int n, int see) {
+  std::vector<GameObject *> cubes = r458_field(ed, n);
+  for (int i = 0; i < see && i < n; i++) {
+    MaterialPtr m = cubes[(size_t)(n - 1 - i)]->get<MeshRenderer>()->materials[0];
+    m->surface = (int)MaterialSurface::Transparent, m->alpha = 0.5f;
+    m->touch();
+  }
+  ed.viewport_device_for_test(2);
+  r34_steps(ed, 4);
+  return cubes;
+}
+
+static void tests_round471_gpu() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  test("round 471: in the baked-look world with a stand-in avatar, a part moving each frame makes again only its own rows, and a posed avatar makes again no more rows than it has meshes (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r34_open(ed);
+    ed.command("benchscene avatarworldquick");
+    ed.viewport_device_for_test(2);
+    ed.command("camera 0 12 -34 0 1 -2");
+    r34_steps(ed, 6);
+    CHECK(ed.scene_on_gpu_for_test());
+    GameObject *part = ed.scene().find_by_name("Part 100");
+    CHECK(part != nullptr);
+    if (!part) return;
+    int whole_frames = 0, worst = 0;
+    uint64_t kept_total = 0;
+    for (int k = 0; k < 20; k++) {
+      const uint64_t b0 = ed.instance_rows_built_for_test(), c0 = ed.instance_rows_kept_for_test();
+      part->set_local_position({-11.0f * 2.2f + 0.1f * (float)k, 0.0f, -12.0f});
+      r34_steps(ed, 1);
+      const int made = (int)(ed.instance_rows_built_for_test() - b0);
+      kept_total += ed.instance_rows_kept_for_test() - c0;
+      if (made > 100) whole_frames++;  // (the refresh, a whole gather every 64 calls)
+      else worst = std::max(worst, made);
+    }
+    std::printf("    a moving part, 20 frames: at most %d rows made again on an ordinary frame, %d refresh frame(s), %llu rows copied\n", worst, whole_frames,
+                (unsigned long long)kept_total);
+    CHECK(worst <= 6);
+    CHECK(whole_frames <= 2);
+    CHECK(kept_total > 20 * 100);
+    /* The avatar: its meshes are the children of AvatarLike. */
+    GameObject *avatar = ed.scene().find_by_name("AvatarLike");
+    GameObject *chest = ed.scene().find_by_name("Chest");
+    CHECK(avatar && chest);
+    if (!avatar || !chest) return;
+    int meshes = 0;
+    int shells = 0;  // (an Outline draws its shell as an item of its own, a mesh made anew on every posed frame: the bound counts them - the first run of this test found 7 rows a view for 6 meshes)
+    for (GameObject *c : avatar->children) meshes += c->get<MeshFilter>() ? 1 : 0, shells += c->get<Outline>() ? 1 : 0;
+    ed.command("camera 0 3 -22 0 1 -15");
+    r34_steps(ed, 4);
+    whole_frames = 0, worst = 0;
+    std::string per_frame;
+    for (int k = 0; k < 16; k++) {
+      const uint64_t b0 = ed.instance_rows_built_for_test();
+      chest->set_local_rotation(Quat::euler({0.0f, 0.0f, 8.0f * std::sin(0.7f * (float)k)}));
+      r34_steps(ed, 1);
+      const int made = (int)(ed.instance_rows_built_for_test() - b0);
+      per_frame += strprintf(" %d", made);
+      if (made > 100) whole_frames++;
+      else worst = std::max(worst, made);
+    }
+    std::printf("    a posed avatar of %d meshes, 16 frames: at most %d rows made again on an ordinary frame (two views drawn), %d refresh frame(s); rows made per frame:%s\n", meshes,
+                worst, whole_frames, per_frame.c_str());
+    CHECK(meshes >= 5);
+    CHECK(worst <= 2 * (meshes + shells));  // (the Scene view and the Game view each make the avatar's meshes and outline shells again)
+    CHECK(whole_frames <= 2);
+    CHECK(r471_whole_differs(ed) == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: after each of these changes the frame drawn by rows is the frame drawn whole - an object moved, rotated, hidden, deleted, added, duplicated, reparented; a material's colour changed or swapped; a texture assigned; a mesh edited; Solid and back; an object made see-through; the camera orbited over see-through objects (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r471_world(ed, 24, 4);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    auto change = [&](const char *what, int need_copied, const std::function<void()> &act) {
+      r458_orbit(ed, 3);
+      const uint64_t c0 = ed.instance_rows_kept_for_test(), b0 = ed.instance_rows_built_for_test();
+      act();
+      r34_steps(ed, 1);
+      const uint64_t copied = ed.instance_rows_kept_for_test() - c0, made = ed.instance_rows_built_for_test() - b0;
+      const size_t differ = r471_whole_differs(ed);
+      std::printf("    %s: %llu rows copied, %llu made again, %zu pixels differ from the whole gather\n", what, (unsigned long long)copied, (unsigned long long)made, differ);
+      CHECK(differ == 0);
+      CHECK((int)copied >= need_copied);
+    };
+    change("an object moved", 10, [&] { cubes[5]->set_local_position({1.0f, 1.5f, 0.0f}); });
+    change("an object rotated", 10, [&] { cubes[6]->set_local_rotation(Quat::euler({0.0f, 40.0f, 0.0f})); });
+    change("a material's colour", 10, [&] {
+      MaterialPtr m = cubes[3]->get<MeshRenderer>()->materials[0];
+      m->base_color = Vec3(0.9f, 0.1f, 0.1f);
+      m->touch();
+    });
+    change("an object hidden", 0, [&] { cubes[7]->active = false, ed.mark_changed_for_test("r471 hide"); });
+    change("a see-through object hidden", 0, [&] { cubes[22]->active = false, ed.mark_changed_for_test("r471 hide see"); });
+    change("an object deleted", 0, [&] { ed.command("select K458_8"), ed.command("delete"); });
+    change("an object added", 0, [&] {
+      GameObject *g = create_primitive(ed.scene(), "Sphere");
+      g->name = "K471_new";
+      g->set_local_position({0.0f, 0.5f, 3.0f});
+      g->get<MeshRenderer>()->materials = {make_material("K471_new", Vec3(0.2f, 0.8f, 0.3f))};
+      ed.mark_changed_for_test("r471 add");
+    });
+    change("an object duplicated", 0, [&] { ed.command("select K458_9"), ed.command("duplicate"); });
+    change("an object reparented", 0, [&] {
+      ed.scene().set_parent(cubes[10], cubes[11]);
+      ed.mark_changed_for_test("r471 parent");
+    });
+    change("a material swapped", 0, [&] {
+      cubes[12]->get<MeshRenderer>()->materials = {make_material("K471_swapped", Vec3(0.1f, 0.6f, 0.9f))};
+      ed.mark_changed_for_test("r471 swap");
+    });
+    change("a texture assigned", 0, [&] {
+      const std::string tex = fs::join(test_dir(), "r471_tex.png");
+      std::vector<uint32_t> px(128 * 128, 0xFF30B0E0u);
+      for (size_t i = 0; i < px.size(); i += 7) px[i] = 0xFFE03030u;
+      CHECK(write_png(tex, px.data(), 128, 128, 128));
+      texture_cache_clear();
+      MaterialPtr m = cubes[13]->get<MeshRenderer>()->materials[0];
+      m->base_map.path = tex;
+      m->touch();
+      r34_steps(ed, 6);  // (the texture comes up)
+    });
+    change("a mesh edited in Edit Mode", 0, [&] {
+      ed.command("select K458_14");
+      ed.command("edit face");
+      ed.command("fsel facing 0 1 0 1 0 0");
+      ed.command("editop extrude");
+    });
+    change("Edit Mode left", 0, [&] { ed.command("edit off"); });
+    change("Solid shading", 0, [&] { ed.command("shading solid"); });
+    change("Shaded again", 0, [&] { ed.command("shading shaded"); });
+    change("an object made see-through", 0, [&] {
+      MaterialPtr m = cubes[15]->get<MeshRenderer>()->materials[0];
+      m->surface = (int)MaterialSurface::Transparent, m->alpha = 0.4f;
+      m->touch();
+    });
+    for (int k = 0; k < 4; k++) {  // (the sort follows the camera)
+      const std::string cam = strprintf("camera %d 5 %d 0 0 0", 6 * k - 9, 8 - 3 * k);
+      change(cam.c_str(), 0, [&] { ed.command(cam); });
+    }
+    CHECK(Editor::render_cache_mismatches_all() - m0 == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: a baked scene's lightmap bake done and redone shows the same picture by rows as whole (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    r35_open(ed);
+    r35_add(ed, "Plane", "Floor471", {0, 0, 0}, {1, 1, 1}, Vec3(0.8f));
+    GameObject *wall = r35_add(ed, "Cube", "Wall471", {0, 1, 0}, {0.2f, 2, 6}, Vec3(0.9f, 0.2f, 0.2f));
+    for (int i = 0; i < 4; i++) r35_add(ed, "Cube", strprintf("Box471_%d", i).c_str(), {-3.0f + 2.0f * (float)i, 0.5f, 2.0f}, Vec3(0.5f), Vec3(0.3f, 0.5f, 0.9f));
+    ed.viewport_device_for_test(2);
+    ed.command("camera 6 4 8 0 1 0");
+    r34_steps(ed, 4);
+    r458_orbit(ed, 3);
+    CHECK(r471_whole_differs(ed) == 0);
+    r35_bake(ed);
+    r458_orbit(ed, 3);
+    const size_t after_bake = r471_whole_differs(ed);
+    wall->set_local_position({1.0f, 1.0f, 0.0f});
+    r35_bake(ed);
+    const uint64_t c0 = ed.instance_rows_kept_for_test();
+    r458_orbit(ed, 3);
+    const size_t after_rebake = r471_whole_differs(ed);
+    std::printf("    after the bake %zu pixels differ from the whole gather, after the second bake %zu (%llu rows copied in between)\n", after_bake, after_rebake,
+                (unsigned long long)(ed.instance_rows_kept_for_test() - c0));
+    CHECK(after_bake == 0);
+    CHECK(after_rebake == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: verify mode over 60 frames of orbiting, moving objects and changing materials finds no stale row (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r471_world(ed, 24, 4);
+    r458_orbit(ed, 3);
+    const uint64_t m0 = Editor::render_cache_mismatches_all(), c0 = ed.instance_rows_kept_for_test(), b0 = ed.instances_built_for_test();
+    ed.set_render_cache_verify(true);
+    for (int f = 0; f < 60; f++) {
+      ed.command(strprintf("camera %.2f 6 %.2f 0 0 0", 0.2f * (float)(f % 9), 9.0f + 0.03f * (float)(f % 7)));
+      if (f % 3 == 0) cubes[(size_t)(f % 20)]->set_local_position({-3.0f + 1.2f * (float)(f % 6), 0.5f + 0.1f * (float)(f % 5), -3.0f + 1.2f * (float)(f / 6 % 3)});
+      if (f % 5 == 0) {
+        MaterialPtr m = cubes[(size_t)((f / 5) % 24)]->get<MeshRenderer>()->materials[0];
+        m->base_color = Vec3(0.1f * (float)(f % 9), 0.5f, 0.3f);
+        m->touch();
+      }
+      r34_steps(ed, 1);
+    }
+    ed.set_render_cache_verify(false);
+    const uint64_t stale = Editor::render_cache_mismatches_all() - m0;
+    std::printf("    60 frames in verify mode: %llu gathers, %llu rows copied, %llu stale\n", (unsigned long long)(ed.instances_built_for_test() - b0),
+                (unsigned long long)(ed.instance_rows_kept_for_test() - c0), (unsigned long long)stale);
+    /* (Verify mode gathers each by-rows frame whole a second time and resets the row counters, so the rows copied read 0 here: the
+     * check is that the gathers happened and none was found stale. The same sequence without verify copies rows: the other tests.) */
+    CHECK(ed.instances_built_for_test() - b0 >= 60);
+    CHECK(stale == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: with a still camera the see-through lists are copied and their sorted corners taken from the last frame, the picture stays right; an orbit makes the lists again; moving one see-through object makes only its list again (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r471_world(ed, 24, 4);
+    r458_orbit(ed, 4);
+    ed.command("camera 0 6 9 0 0 0");
+    r34_steps(ed, 2);
+    ed.instance_rows_off_for_test(true);
+    ed.scene_cache_reset_for_test();
+    r34_steps(ed, 1);
+    const std::vector<uint32_t> truth = r471_pic(ed);
+    ed.instance_rows_off_for_test(false);
+    int rises = 0, wrong = 0;
+    for (int k = 0; k < 6; k++) {
+      const uint64_t f0 = ed.see_frames_kept_for_test(), l0 = ed.see_lists_kept_for_test();
+      ed.scene_cache_reset_for_test();
+      r34_steps(ed, 1);
+      const uint64_t frames = ed.see_frames_kept_for_test() - f0, lists = ed.see_lists_kept_for_test() - l0;
+      const size_t d = r458_differ(truth, r471_pic(ed));
+      std::printf("    still frame %d: %llu see-through lists copied, sorted corners kept %llu, %zu pixels differ from the whole gather\n", k, (unsigned long long)lists,
+                  (unsigned long long)frames, d);
+      rises += frames > 0 ? 1 : 0;
+      wrong += d != 0 ? 1 : 0;
+    }
+    CHECK(rises == 6);
+    CHECK(wrong == 0);
+    /* Orbiting: the lists are made again each frame, the picture follows the camera. */
+    for (int k = 0; k < 4; k++) {
+      ed.command(strprintf("camera %d 6 %d 0 0 0", 5 * k - 7, 9 - k));
+      const uint64_t l0 = ed.see_lists_kept_for_test(), f0 = ed.see_frames_kept_for_test();
+      r34_steps(ed, 1);
+      const uint64_t lists = ed.see_lists_kept_for_test() - l0, frames = ed.see_frames_kept_for_test() - f0;
+      const size_t d = r471_whole_differs(ed);
+      std::printf("    orbit frame %d: %llu lists copied, %llu sorted corners kept, %zu pixels differ from the whole gather\n", k, (unsigned long long)lists,
+                  (unsigned long long)frames, d);
+      CHECK(lists == 0 && frames == 0);
+      CHECK(d == 0);
+    }
+    /* One see-through object moved, the camera still: only its list is made again. */
+    ed.command("camera 0 6 9 0 0 0");
+    r34_steps(ed, 3);
+    const uint64_t l0 = ed.see_lists_kept_for_test();
+    cubes[21]->set_local_position({1.0f, 1.5f, 1.0f});
+    r34_steps(ed, 1);
+    const uint64_t lists = ed.see_lists_kept_for_test() - l0;
+    const size_t d = r471_whole_differs(ed);
+    std::printf("    one see-through object moved: %llu lists copied (4 objects, two views drawn), %zu pixels differ\n", (unsigned long long)lists, d);
+    CHECK(lists >= 2 && lists <= 6);  // (3 copied in each of the two views; all 8 would mean the mover's list was copied too)
+    CHECK(d == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: textures and meshes that aged off the card come back right - the same picture as a whole gather, no stale row in verify mode, after a Viewport Device switch and after the card is set aside (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r471_world(ed, 24, 3);
+    std::vector<GameObject *> textured;
+    for (int i = 0; i < 4; i++) {
+      GameObject *g = cubes[(size_t)i];
+      const std::string tex = fs::join(test_dir(), strprintf("r471_age_%d.png", i));
+      std::vector<uint32_t> px(64 * 64, 0xFF000000u | (uint32_t)(50 * i) << 16 | 0x40u << 8 | 0xC0u);
+      CHECK(write_png(tex, px.data(), 64, 64, 64));
+      MaterialPtr m = g->get<MeshRenderer>()->materials[0];
+      m->base_map.path = tex;
+      m->touch();
+      textured.push_back(g);
+    }
+    texture_cache_clear();
+    r458_orbit(ed, 8);
+    const size_t before = r471_whole_differs(ed);
+    for (GameObject *g : textured) g->active = false;  // (their meshes and textures unused: they leave the card after 256 calls)
+    ed.mark_changed_for_test("r471 hide textured");
+    r458_orbit(ed, 330);
+    for (GameObject *g : textured) g->active = true;
+    ed.mark_changed_for_test("r471 show textured");
+    r34_steps(ed, 3);
+    const uint64_t m0 = Editor::render_cache_mismatches_all();
+    ed.set_render_cache_verify(true);
+    r458_orbit(ed, 4);
+    ed.set_render_cache_verify(false);
+    const size_t back = r471_whole_differs(ed);
+    /* The other content moved while the first is away again: rows made from a card that let ids go. */
+    ed.command("viewport device cpu");
+    r458_orbit(ed, 3);
+    ed.viewport_device_for_test(1);
+    r34_steps(ed, 3);
+    ed.viewport_device_for_test(2);
+    r458_orbit(ed, 4);
+    const size_t switched = r471_whole_differs(ed);
+    ed.gpu_view_drop_for_test();
+    cubes[9]->set_local_position({0.0f, 2.0f, 0.0f});
+    r458_orbit(ed, 4);
+    const size_t dropped = r471_whole_differs(ed);
+    const uint64_t stale = Editor::render_cache_mismatches_all() - m0;
+    std::printf("    before %zu, back after the age-off %zu, after a device switch %zu, after the card was set aside %zu pixels differ; %llu stale\n", before, back, switched,
+                dropped, (unsigned long long)stale);
+    CHECK(before == 0 && back == 0 && switched == 0 && dropped == 0);
+    CHECK(stale == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: on a still scene that can't be whole-kept a whole gather comes at least every 64 calls and the textures are not sent again (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    Editor ed;
+    std::vector<GameObject *> cubes = r471_world(ed, 30, 3);
+    for (int i = 0; i < 3; i++) {
+      const std::string tex = fs::join(test_dir(), strprintf("r471_ref_%d.png", i));
+      std::vector<uint32_t> px(64 * 64, 0xFF000000u | (uint32_t)(80 * i) << 16 | 0x90u);
+      CHECK(write_png(tex, px.data(), 64, 64, 64));
+      MaterialPtr m = cubes[(size_t)i]->get<MeshRenderer>()->materials[0];
+      m->base_map.path = tex;
+      m->touch();
+    }
+    texture_cache_clear();
+    r458_orbit(ed, 12);
+    const FrameProfile p0 = ed.frame_profile_totals();
+    std::vector<int> whole_at;
+    uint64_t kept = 0;
+    for (int f = 0; f < 200; f++) {
+      const uint64_t b0 = ed.instance_rows_built_for_test(), c0 = ed.instance_rows_kept_for_test();
+      ed.command(f % 2 ? "camera 0 6 9 0 0 0" : "camera 0 6 9.03 0 0 0");  // (the camera nudged: every frame draws)
+      r34_steps(ed, 1);
+      kept += ed.instance_rows_kept_for_test() - c0;
+      if (ed.instance_rows_built_for_test() - b0 >= 20) whole_at.push_back(f);
+    }
+    const uint64_t uploads = ed.frame_profile_totals().gpu_texture_uploads - p0.gpu_texture_uploads;
+    int gap = whole_at.empty() ? 200 : whole_at[0];
+    for (size_t k = 1; k < whole_at.size(); k++) gap = std::max(gap, whole_at[k] - whole_at[k - 1]);
+    if (!whole_at.empty()) gap = std::max(gap, 199 - whole_at.back());
+    std::printf("    200 still frames: %zu whole gathers, the longest run between them %d frames, %llu rows copied, %llu texture uploads\n", whole_at.size(), gap,
+                (unsigned long long)kept, (unsigned long long)uploads);
+    CHECK(whole_at.size() >= 3);
+    CHECK(gap <= 64);
+    CHECK(kept > 1000);
+    CHECK(uploads == 0);
+    CHECK(r471_whole_differs(ed) == 0);
+    ed.viewport_device_for_test(1);
+  });
+  test("round 471: an empty scene, a count of items that changes every frame, 5,000 objects with one moving, and a mesh made anew every frame all draw the same by rows as whole (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    {  // no items, and a count that changes every frame
+      Editor ed;
+      std::vector<GameObject *> cubes = r471_world(ed, 12, 2);
+      size_t differ = 0;
+      for (int f = 0; f < 10; f++) {
+        cubes[(size_t)(f % 12)]->active = f % 2 == 1;  // (toggled on alternate frames: the row count moves)
+        cubes[(size_t)((f + 5) % 12)]->active = f % 2 == 0;
+        ed.mark_changed_for_test("r471 toggle");
+        r34_steps(ed, 1);
+        differ += r471_whole_differs(ed);
+      }
+      std::printf("    a changing item count: %zu pixels differ over 10 frames\n", differ);
+      CHECK(differ == 0);
+      ed.scene().for_each([](GameObject &g) {
+        if (g.get<MeshRenderer>()) g.active = false;
+      });
+      ed.mark_changed_for_test("r471 empty");
+      r34_steps(ed, 4);
+      const size_t empty = r471_whole_differs(ed);
+      std::printf("    no items: %zu pixels differ\n", empty);
+      CHECK(empty == 0);
+      ed.viewport_device_for_test(1);
+    }
+    {  // 5,000 objects, one moving
+      Editor ed;
+      std::vector<GameObject *> cubes = r471_world(ed, 5000, 2);
+      ed.command("camera 0 30 40 0 0 20");
+      r34_steps(ed, 3);
+      uint64_t worst = 0;
+      for (int f = 0; f < 8; f++) {
+        const uint64_t b0 = ed.instance_rows_built_for_test();
+        cubes[100]->set_local_position({0.1f * (float)f, 1.0f, -1.8f});
+        r34_steps(ed, 1);
+        const uint64_t made = ed.instance_rows_built_for_test() - b0;
+        if (made < 1000) worst = std::max(worst, made);  // (a refresh frame makes them all)
+      }
+      const size_t d = r471_whole_differs(ed);
+      std::printf("    5,000 objects, one moving: at most %llu rows made again on an ordinary frame, %zu pixels differ\n", (unsigned long long)worst, d);
+      CHECK(worst <= 6);
+      CHECK(d == 0);
+      ed.viewport_device_for_test(1);
+    }
+    {  // a mesh whose serial changes every frame
+      Editor ed;
+      std::vector<GameObject *> cubes = r471_world(ed, 12, 2);
+      GameObject *g = ed.scene().create("K471_live");
+      MeshPtr mesh = primitives::uv_sphere(0.5f, 16, 12);
+      g->add<MeshFilter>()->mesh = mesh;
+      g->add<MeshRenderer>();
+      g->set_local_position({0.0f, 1.5f, 0.0f});
+      ed.mark_changed_for_test("r471 live mesh");
+      r34_steps(ed, 3);
+      size_t differ = 0;
+      for (int f = 0; f < 6; f++) {
+        mesh->positions[3].y += 0.05f;
+        mesh->touch();
+        edit_epoch::bump();
+        ed.scene_cache_reset_for_test();
+        r34_steps(ed, 1);
+        differ += r471_whole_differs(ed);
+      }
+      std::printf("    a mesh made anew each frame: %zu pixels differ over 6 frames\n", differ);
+      CHECK(differ == 0);
+      ed.viewport_device_for_test(1);
+    }
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -5132,5 +5651,7 @@ void run_gpu_tests() {
   tests_round454_gpu();
   tests_round455_gpu();
   tests_round469_gpu();
+  tests_round470_gpu();
+  tests_round471_gpu();
   tests_round487_gpu();
 }

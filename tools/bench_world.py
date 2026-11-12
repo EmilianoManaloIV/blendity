@@ -163,7 +163,7 @@ def items(text):
 
 
 # The parts that hold other parts (the lists are nested): left out of a ranking, their own remainder kept as a leaf.
-CONTAINERS = ("scene view", "game view", "gpu path", "ui", "draw items", "overlays", "constraints", "anim apply", "autoposing", "undo step")
+CONTAINERS = ("scene view", "game view", "gpu path", "ui", "draw items", "overlays", "constraints", "anim apply", "autoposing", "undo step", "card render call")
 REMAINDERS = (("evaluations", ("skinning", "shape keys"), "evaluations, the rest (copies of positions)"),
               ("in place", ("normals", "tangents"), "render meshes moved in place, the rest"),
               ("instances", ("mesh uploads",), "instances gathered"))

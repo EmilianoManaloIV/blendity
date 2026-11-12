@@ -223,6 +223,7 @@ struct FrameProfile {
   uint64_t clip_serialisations = 0, undo_steps = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
+  uint64_t instance_rows_kept = 0, instance_rows_built = 0, see_lists_kept = 0;  // round 471: items whose instances were copied / made again in a GPU view's gather; see-through lists copied
   uint64_t instances_kept = 0, instances_built = 0, mesh_deferred = 0;  // round 458: GPU views that kept / gathered their instance array; meshes left waiting for the card
   double ms_render_start = 0, ms_render_land = 0;  // round 437: F12's start (the snapshot) and each frame's poll and landing
   double ms_window[32] = {};  // round 436: each docked window's own drawing (WindowKind order; the views' rendering inside theirs)
@@ -275,6 +276,7 @@ struct FrameProfile {
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
     instances_kept += o.instances_kept, instances_built += o.instances_built, mesh_deferred += o.mesh_deferred;
+    instance_rows_kept += o.instance_rows_kept, instance_rows_built += o.instance_rows_built, see_lists_kept += o.see_lists_kept;
     for (int k = 0; k < 32; k++) ms_window[k] += o.ms_window[k];
     ms_render_start += o.ms_render_start, ms_render_land += o.ms_render_land;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
@@ -1035,6 +1037,7 @@ class Editor {
   bool export_textures_dialog_for_test() const { return dialog_ == Dialog::ExportTextures; }  // (task 0257)
   Vec2 render_pan_for_test() const { return render_pan_; }
   bool scene_dirty_for_test() const { return scene_dirty_; }
+  void clear_scene_dirty_for_test() { scene_dirty_ = false; }  // (round 479: a saved scene)
   bool playing_for_test() const { return playing_; }
   void request_close_for_test() { request_close(); }
   std::string button_disabled_why_for_test(const std::string &label) const {
@@ -1187,6 +1190,13 @@ class Editor {
   uint64_t overlays_kept_for_test() const { return overlays_kept_; }  // (round 449)
   uint64_t instances_kept_for_test() const { return instances_kept_; }  // (round 458: GPU views whose instance array was kept)
   uint64_t instances_built_for_test() const { return instances_built_; }  // (round 458: ... and those that gathered it)
+  /* Round 471: the items of a GPU view's gather whose instances were copied from the last frame's / made again, the
+   * see-through lists copied, and the frames whose sorted see-through corners were the last frame's. */
+  uint64_t instance_rows_kept_for_test() const { return instance_rows_kept_; }
+  uint64_t instance_rows_built_for_test() const { return instance_rows_built_; }
+  uint64_t see_lists_kept_for_test() const { return see_lists_kept_; }
+  uint64_t see_frames_kept_for_test() const { return see_frames_kept_; }
+  void instance_rows_off_for_test(bool off) { instance_rows_off_for_test_ = off; }  // (every gather whole: what a by-rows frame is compared with)
   size_t mesh_queue_for_test() const { return mesh_queue_; }            // (round 458: meshes waiting for the card, as of the last view frame)
   uint64_t mesh_uploaded_frame_bytes_for_test() const { return mesh_bytes_frame_max_; }  // (the most any frame sent)
   double mesh_drain_ms_for_test() const { return mesh_drain_ms_; }      // (the time from the first mesh left waiting until none was)
@@ -1194,6 +1204,7 @@ class Editor {
   bool texture_stream_busy_for_test() const { return texture_stream_busy(); }
   void gpu_evict_textures_for_test() {  // (round 458: the card's copies of the materials' textures gone, as if let go)
     if (!gpu_view_) return;
+    card_ids_gen_++;  // (round 471: the rows' copies hold their ids)
     for (auto it = gpu_textures_.begin(); it != gpu_textures_.end();) {
       if (it->first == gpu_world_tex_) {  // (the sky's map stays: it isn't a material's)
         ++it;
@@ -3290,6 +3301,7 @@ class Editor {
   void assign_texture_asset(GameObject *g, const std::string &asset_path);
   bool drop_texture_asset(const std::string &abs_path, int mx, int my);
   bool scene_drawn_ = false;  // the Scene view drew this frame (another tab can hide it)
+  bool any_scene_drawn_ = false;  // (round 479) some window's Scene view drew this frame; never swapped with a window's view state
   bool texture_touch_pending_ = false;  // a texture field was dragged: materials re-resolve on release
   ProceduralTexturePtr texture_selected_;
   MultiSelect<ProceduralTexturePtr> texture_multi_;   // task 0053
@@ -3489,6 +3501,16 @@ class Editor {
   size_t shallow_before_of(const LastOp &L) const;  // that count, or a fresh one when the settings changed since
   bool last_op_valid();
   void settle_meshes();
+  /* Round 470: the posed (evaluated) meshes made exact once the scene rests - nothing changed for two frames, no
+   * step pending - two meshes a frame, so no frame pays for a whole avatar (settle_evaluated_step, each frame). */
+  void settle_evaluated_step();
+  uint64_t settle_epoch_ = 0;
+  int settle_rest_ = 0;
+  bool settle_watch_ = false;
+  uint64_t settled_evaluated_ = 0;  // (meshes settled, for the tests and the posing counts)
+ public:
+  uint64_t settled_evaluated_for_test() const { return settled_evaluated_; }
+ private:
   /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
    * Push/Pull, a modal adjustment. Whole-scene checks wait for it to end (task 0087). */
   bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active || sculpt_stroking_; }
@@ -4020,14 +4042,74 @@ class Editor {
   GameObject *create_opening(GameObject &bo, int opening, const std::vector<float> &numbers, const GameObject *sel);  // (round 478: a door (1) or window (2) put on a wall)
   void draw_blockouts();  // (the pieces' wires)
   void blockout_menu_items(bool child);  // (the GameObject menu's, the Hierarchy's + and the Tools window's: New Blockout, Add / Subtract Box, Cylinder, Sphere)
-  uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y);  // (the piece that made the face under a view pixel; 0: none)
-  bool blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out);  // (round 478: the face under a view pixel, with its piece, side, point and normal)
+  bool blockout_box_select(GameObject &g, const Recti &view, const Recti &box);  // (a box select over a Blockout: its pieces under the box; false: none to name)
+  struct BlockoutOwners;  // (the pieces a Blockout's mesh was built from, for naming a face shared by several: blockout_editor.cpp)
+  uint64_t blockout_pick_piece(GameObject &g, int view_x, int view_y, const BlockoutOwners *owners = nullptr);  // (the piece that made the face under a view pixel; 0: none)
+  bool blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out, const BlockoutOwners *owners = nullptr);  // (round 478: the face under a view pixel, with its piece, side, point and normal)
   bool blockout_wall_under_mouse(GameObject &bo, BlockoutHit &out);  // (round 478: a room's wall under the mouse in the Scene view)
   bool blockout_first_wall(GameObject &bo, const GameObject &room, BlockoutHit &out);  // (round 478: the middle of a room's first wall: -X of its air)
   bool blockout_stand_opening(GameObject &bo, GameObject &opening, const BlockoutHit &wall);  // (round 478: a door or window turned to a wall, on its room's floor)
   void blockout_set_command(const std::vector<std::string> &t);  // (round 478: blockout set wall|floor|ceiling|walls|opentop <value>)
   void draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's status lines)
   bool blockout_refuses_edit_mode(const GameObject *g);
+  /* Round 479 (task 0455; editor/blockout_handles.cpp, blockout_tool.cpp): handles on the active piece, the Room tool. */
+  struct BlockoutDrag {
+    bool active = false;
+    uint64_t piece = 0;
+    BlockoutHandle handle;
+    BlockoutPiece before;     // the component as it was when the handle was taken (every frame is made from it: no drift)
+    Transform local0;         // the piece's local transform then (Esc puts it back byte for byte)
+    Mat4 world0;            // its world matrix then
+    Vec3 origin_w, dir_w;     // the handle's place and unit way out in the world then
+    float scale_dir = 1.0f;   // how long the handle's own-space way out is in the world (a world metre is 1 / this own units)
+    float to_blockout = 1.0f; // ... in the Blockout's space (a wall is measured there)
+    float grab = 0.0f;        // where on the handle's line the mouse took it
+    float t = 0.0f;           // world metres moved, after snapping
+    bool snapped = false;     // held to a plane of another piece (kept until the mouse leaves it by twice the snap distance)
+    float snap_t = 0.0f;
+    bool moved = false;
+    Vec2 press_px;            // where the mouse took it (window pixels): nothing changes until it has left this by a few pixels
+    bool armed = false;
+    bool was_dirty = false;   // the scene's unsaved mark at the press (Esc puts it back)
+    std::string text;         // "+x  3.00 m": beside the handle and in the hint line
+  } blockout_drag_;
+  struct RoomTool {
+    bool active = false;
+    int stage = 0;            // 0 waiting for the first press, 1 the footprint is dragged, 2 the height
+    bool circle = false, solid = false, subtract = false;  // the options: a Circle footprint, a Solid piece (not a room), Subtract (a solid's operation)
+    float wall = 0.2f;        // a room's wall, floor and ceiling
+    Vec3 origin, normal, u;   // the surface point of the first press, its normal and the axis lying in it (u, normal, cross(u, normal): right-handed)
+    Vec3 corner;              // the footprint's other point
+    float height = 0.0f;
+    std::string typed;
+  } room_;
+  GameObject *blockout_handle_target();  // the active piece that shows handles (nullptr: none)
+  void blockout_handle_view(const GameObject &g, std::vector<BlockoutHandle> &out, bool visible_only = true);  // its handles as the camera sees them now
+  int blockout_handle_hot(const Recti &view, const GameObject &g, const std::vector<BlockoutHandle> &hs);  // the handle under the mouse (-1 none)
+  bool blockout_handle_begin(GameObject &g, const BlockoutHandle &h, BlockoutDrag &d);
+  void blockout_handle_move(GameObject &g, const BlockoutDrag &d, float metres, bool both);
+  float blockout_snap_t(const Recti &view, const GameObject &g, float raw);
+  /* The transform gizmo's axis move of a piece: `d` (metres along `axis`) lands a corner or face of the piece in the plane of another
+   * piece's face or corner within a few pixels. `start_pos`: where the piece was when the drag began. True when it snapped. */
+  bool blockout_move_snap(const Recti &view, const GameObject &lead, Vec3 start_pos, Vec3 axis, float &d);
+  bool blockout_handles_update(const Recti &view);
+  bool blockout_drag_update(const Recti &view);
+  void blockout_drag_cancel(GameObject *g);
+  void draw_blockout_handles(const Recti &view);
+  void blockout_handle_command(const std::vector<std::string> &t);
+  void set_room_tool(bool on);
+  bool room_update(const Recti &view);
+  void room_draw(const Recti &view);
+  bool room_surface_hit(const Recti &view, int mx, int my, Vec3 &p, Vec3 &n);
+  Vec3 room_snap_point(Vec3 p, Vec3 n) const;
+  void room_extent(float &du, float &dz) const;  // the footprint's size so far: along u and the third axis (a circle: its radius, 0)
+  std::vector<Vec3> room_outline(float height) const;  // the footprint's corners (a circle's 32 points) lifted `height` along the normal
+  GameObject *room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float dz, float height, bool circle);
+  GameObject *create_empty_blockout();
+  void room_command(const std::vector<std::string> &t);
+  void room_options_command(const std::vector<std::string> &t);
+  void draw_room_tools(ui::Layout &lay);
+  void record_blockout_last(GameObject *piece);
   void join_selected();
   GameObject *join_target();
   void boolean_selected(int op, bool apply, uint64_t kept = 0);  // (kept: the object cut and kept; 0 the active one)
@@ -5745,6 +5827,11 @@ class Editor {
     int draw_face = -1, draw_shape = 0;
     const Mesh *result = nullptr;  // the mesh the operation left on the object, and its version: anything else there ends the panel
     uint64_t result_version = 0;
+    /* A Blockout piece just made (round 479): a b c = the sizes the shape reads (width / radius, depth / head, height / sill), d e f =
+     * a room's wall, floor, ceiling, op = its operation; the floor's middle and the way up, so a new height keeps the floor where it was. */
+    float c = 0.0f, d = 0.0f, e = 0.0f, f = 0.0f;
+    int op = 0;
+    Vec3 base_p, base_up;
   };
   bool obj_last_valid() const;
   const ObjLastOp &obj_last_for_test() const { return obj_last_; }
@@ -5760,6 +5847,7 @@ class Editor {
   void obj_last_note_result();
   void obj_last_end() { obj_last_ = ObjLastOp{}; }
   void obj_last_rerun();
+  void blockout_last_rerun();  // (round 479: a Blockout piece just made)
   void draw_obj_last_panel(const Recti &view);
   /* Plasticity's construction lines while drawing: X / Y / Z lay a guide along that axis (local
    * or global, as Snap Axes says) through the last point or the point under the mouse; Ctrl+click
@@ -6438,6 +6526,46 @@ class Editor {
     bool toon_maps = false;
   };
   InstanceKeep instance_keep_[gpu::Raster::kSlots];
+  /* Round 471 (ADR 0125): the same array kept by item, for the frames the whole array can't be kept for - a baked or
+   * see-through scene, or one object moving in a still world (a posed avatar). A row is an item's instances in the last
+   * frame's array and its see-through triangles; an item whose words (instance_item_sum: placement, mesh serial,
+   * materials' versions, lightmap pages) and mesh id are the row's takes a copy instead of raster_instance and the
+   * baked path. The texture ids inside a copy are not asked again: a texture let go bumps card_ids_gen_ (the rows are
+   * dropped), and every 64th call gathers whole, which marks them drawn. Items that are per-frame (a highlight, vertex
+   * colours, a volume, a live texture, an axis material, a texture still waiting) are made again every frame. */
+  struct InstanceRows {
+    struct Row {
+      uint64_t key = 0;      // the item's words and its mesh's card id
+      uint64_t see_key = 0;  // its see-through job: the view's matrix times its own, its culling, its fog side
+      uint32_t first = 0, count = 0;          // its instances in `inst`
+      uint32_t see_first = 0, see_count = 0;  // its see-through triangles in `see`
+      uint32_t dep_first = 0, dep_count = 0;  // the material textures its instances hold, in `deps`
+      bool keep = false, has_see = false;
+      uint64_t approximated = 0;  // what it noted for the view (round 414): its approximated materials, counted each
+      std::string approx, caps;   // ... their notes, and its capped textures' (those count once a frame, whatever the rows)
+    };
+    struct SeeRel {  // a see-through triangle of a row; `inst` counted from the row's first instance
+      float key;
+      uint32_t inst, prim;
+    };
+    const gpu::Raster *card = nullptr;
+    bool valid = false;
+    uint64_t global = 0, ids_gen = 0, whole_call = 0;  // what every row shares; the ids' generation; the last whole gather
+    std::vector<Row> rows;
+    std::vector<gpu::RasterInstance> inst;
+    std::vector<SeeRel> see;
+    std::vector<std::pair<std::weak_ptr<const Texture>, int>> deps;  // (for the whole keep made from a frame of copies)
+    std::vector<gpu::SeeCorner> see_frame;  // the last frame's sorted corners, taken back after the render
+    bool see_frame_ok = false;
+  };
+  InstanceRows instance_rows_[gpu::Raster::kSlots];
+  /* Bumped whenever a texture leaves the card, and when a mesh or a corner block is let go for age or the budget. Not
+   * when a mesh is sent again under a new serial: a row's key holds its mesh's serial and card
+   * id and the mesh is asked for on every frame, so a mesh sent again makes its row again - a posed mesh is sent again
+   * on every frame and must not drop the world's rows. */
+  uint64_t card_ids_gen_ = 0;
+  uint64_t instance_rows_kept_ = 0, instance_rows_built_ = 0, see_lists_kept_ = 0, see_frames_kept_ = 0;
+  bool instance_rows_off_for_test_ = false;
   const void *card_instances_ = nullptr;  // the vector the card's raster device holds now (a kept array isn't sent again)
   uint64_t instances_kept_ = 0, instances_built_ = 0;
   bool instance_keep_valid(InstanceKeep &k, uint64_t key);
@@ -7026,6 +7154,21 @@ class Editor {
     for (const auto &j : blockout_jobs_)
       if (!j->done.load()) return false;
     return true;
+  }
+  /* Round 479: the handles' drag and the Room tool, for the tests. */
+  bool blockout_dragging_for_test() const { return blockout_drag_.active; }
+  const std::string &blockout_drag_text_for_test() const { return blockout_drag_.text; }
+  bool blockout_drag_snapped_for_test() const { return blockout_drag_.snapped; }
+  bool room_tool_active_for_test() const { return room_.active; }
+  int room_tool_stage_for_test() const { return room_.stage; }
+  /* Where the active piece's handle `name` is on the screen now (the window's pixels); false when it has none or is behind the camera. */
+  bool blockout_handle_pixel_for_test(const std::string &name, int &x, int &y) {
+    GameObject *g = blockout_handle_target();
+    if (!g) return false;
+    std::vector<BlockoutHandle> hs;
+    blockout_handle_view(*g, hs);
+    const BlockoutHandle *h = blockout_handle_named(hs, name);
+    return h && project_to_window(g->world_matrix().point(h->at), x, y);
   }
   void blockout_poll_for_test() { blockout_jobs_poll(); }  // (the frame's poll alone: what a frame does after its views moved a piece)
   void set_blockout_cancel_stale_for_test(bool on) { blockout_cancel_stale_ = on; }  // (the stress row measures both)
