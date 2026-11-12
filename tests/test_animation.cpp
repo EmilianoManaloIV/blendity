@@ -8755,6 +8755,827 @@ static void tests_round470_editor() {
 }
 
 
+/* ===================================================================== */
+/* Round 472 (task 0448): Record keeps the keys it wrote, playback keeps its bindings (the test engineer's tests) */
+/* ===================================================================== */
+
+/* The clip's tracks as text, bit for bit (each float as its bits, so 0.1 and 0.10000001 differ): path, property, axis,
+ * then each key. Not save_clip_text: that holds the clip's name, which differs between the clips two editors make. */
+static std::string r472_tracks(const AnimationClip &c) {
+  std::string out;
+  for (const AnimTrack &t : c.tracks) {
+    out += t.path + "|" + t.property + "|" + std::to_string(t.axis) + ":";
+    for (const AnimKey &k : t.keys) {
+      uint32_t f = 0, v = 0, a = 0, b = 0;
+      std::memcpy(&f, &k.frame, 4), std::memcpy(&v, &k.value, 4), std::memcpy(&a, &k.in_slope, 4), std::memcpy(&b, &k.out_slope, 4);
+      out += strprintf(" %08x/%08x/%d/%d/%08x/%08x", f, v, k.interp, k.tangent, a, b);
+    }
+    out += "\n";
+  }
+  return out;
+}
+
+static const AnimTrack *r472_ref_find(const AnimationClip &c, const std::string &path, const std::string &prop, int axis) {
+  for (const AnimTrack &t : c.tracks)
+    if (t.path == path && t.property == prop && t.axis == axis) return &t;
+  return nullptr;
+}
+
+static void r472_remove_clip(const char *name) { std::remove(resolve_asset_path(std::string("Assets/Animations/") + name + ".anim").c_str()); }
+
+/* A root `name` with `children` children B0.. (a hundredth apart), a clip made on it (Animation component, asset in the scratch project). */
+static GameObject *r472_rig(Editor &ed, int children, const char *name) {
+  ed.init_headless(1400, 900);
+  r472_remove_clip(name);
+  GameObject *root = ed.scene().create(name);
+  for (int i = 0; i < children; i++) ed.scene().create("B" + std::to_string(i), root)->set_local_position({(float)i * 0.01f, 1.0f, 0.0f});
+  ed.command(std::string("select ") + name);
+  ed.mark_changed_for_test("R472 rig");
+  ed.step_frame_headless();
+  ed.command("anim new");
+  ed.step_frame_headless();
+  return root;
+}
+
+static GameObject *r472_child(Editor &ed, const char *name) { return ed.scene().find_by_name(name); }
+
+static void r472_commit(Editor &ed) {
+  ed.step_frame_headless();
+  ed.step_frame_headless();
+}
+
+static void tests_round472_record() {
+  test("round 472: Record: a 60-frame drag of an object serialises the clip once for the undo step, not once a frame", [] {
+    Editor ed;
+    r472_rig(ed, 40, "R472Ser");
+    ed.command("anim record on");
+    ed.command("anim frame 12");
+    r472_commit(ed);
+    const uint64_t s0 = ed.frame_profile_totals().clip_serialisations, in0 = ed.clip_serialisations_for_test();
+    const size_t u0 = ed.undo_steps_for_test();
+    GameObject *b = r472_child(ed, "B5");
+    CHECK(b != nullptr);
+    if (!b) return;
+    for (int f = 0; f < 60; f++) {
+      b->set_local_position({0.5f + 0.01f * (float)f, 1.0f, 0.0f});
+      ed.mark_changed_for_test("R472 drag");
+    }
+    CHECK(ed.clip_serialisations_for_test() - in0 == 1);  // (the frame still open: before the totals take it in)
+    r472_commit(ed);
+    std::printf("    60 edits: %llu clip serialisation(s), %zu undo step(s)\n", (unsigned long long)(ed.frame_profile_totals().clip_serialisations - s0), ed.undo_steps_for_test() - u0);
+    CHECK(ed.frame_profile_totals().clip_serialisations - s0 == 1 && ed.undo_steps_for_test() - u0 == 1);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    const AnimTrack *tx = clip ? clip->find("B5", "Position", 0) : nullptr;
+    CHECK(tx && tx->keys.size() == 1 && tx->keys[0].frame == 12.0f && std::fabs(tx->keys[0].value - (0.5f + 0.59f)) < 1e-5f);  // (the last of the 60)
+    r472_remove_clip("R472Ser");
+  });
+
+  test("round 472: Record: a real 60-frame gizmo drag of an object with Record on serialises the clip once", [] {
+    Editor ed;
+    r472_rig(ed, 6, "R472Gizmo");
+    ed.command("camera 0 1.0 8 0 0.8 0");
+    ed.command("select B2");
+    ed.command("tool move");
+    ed.command("anim record on");
+    r34_steps(ed, 4);
+    const uint64_t s0 = ed.frame_profile_totals().clip_serialisations;
+    const size_t u0 = ed.undo_steps_for_test();
+    const Vec3 p0 = r472_child(ed, "B2")->local().position;
+    ed.command("perf drag gizmo x 80 frames 60");
+    r34_steps(ed, 3);
+    const PerfDragResult &r = ed.perf_drag_result_for_test();
+    std::printf("    perf drag ok %d '%s': %llu serialisation(s), %zu undo step(s), moved %.3f\n", (int)r.ok, r.error.c_str(), (unsigned long long)(ed.frame_profile_totals().clip_serialisations - s0),
+                ed.undo_steps_for_test() - u0, length(r472_child(ed, "B2")->local().position - p0));
+    CHECK(r.ok);
+    CHECK(length(r472_child(ed, "B2")->local().position - p0) > 0.05f);
+    CHECK(ed.frame_profile_totals().clip_serialisations - s0 == 1 && ed.undo_steps_for_test() - u0 == 1);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("B2", "Position", 0) && !clip->find("B2", "Position", 0)->keys.empty());
+    r472_remove_clip("R472Gizmo");
+  });
+
+  test("round 472: Record: the keys written are the documented ones - the same tracks in the same order, a rotation takes the turn nearest the last (-170 after 170 keys 190)", [] {
+    Editor ed;
+    GameObject *root = r472_rig(ed, 3, "R472Keys");
+    (void)root;
+    ed.command("anim record on");
+    GameObject *b0 = r472_child(ed, "B0");
+    b0->set_local_position({1, 2, 3});
+    ed.mark_changed_for_test("pos");
+    ed.command("anim frame 10");
+    b0->set_local_euler({0, 0, 170});
+    ed.mark_changed_for_test("rot 170");
+    ed.command("anim frame 20");
+    b0->set_local_euler({0, 0, -170});
+    ed.mark_changed_for_test("rot -170");
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    /* The reference, from the rules: Position keys all three axes at frame 0; Rotation all three at 10 (x, y, z = 0, 0, 170) and at 20
+     * (z = 170 + remainder(-170 - 170, 360) = 190); Position and Rotation tracks in the order of the properties, axes x y z. */
+    AnimationClip want;
+    for (int a = 0; a < 3; a++) want.track("B0", "Position", a).set_key(0.0f, a == 0 ? 1.0f : a == 1 ? 2.0f : 3.0f);
+    const float z10 = 170.0f, z20 = 170.0f + std::remainder(-170.0f - 170.0f, 360.0f);
+    for (int a = 0; a < 3; a++) {
+      want.track("B0", "Rotation", a).set_key(10.0f, a == 2 ? z10 : 0.0f);
+      want.track("B0", "Rotation", a).set_key(20.0f, a == 2 ? z20 : 0.0f);
+    }
+    std::printf("    keys written:\n%s    reference:\n%s", r472_tracks(*clip).c_str(), r472_tracks(want).c_str());
+    CHECK(z20 == 190.0f);
+    CHECK(r472_tracks(*clip) == r472_tracks(want));
+    r472_remove_clip("R472Keys");
+  });
+
+  test("round 472: Record on 2s and 3s: the keys land on the drawn frame (frame 5 on 2s is 4, 8 on 3s is 6), as before", [] {
+    for (int hold = 2; hold <= 3; hold++) {
+      const std::string name = "R472Hold" + std::to_string(hold);
+      Editor ed;
+      GameObject *root = r472_rig(ed, 3, name.c_str());
+      root->get<Animation>()->hold = hold;
+      ed.command("anim record on");
+      const int frames[3] = {5, 8, 11};
+      AnimationClip want;
+      for (int i = 0; i < 3; i++) {
+        ed.command("anim frame " + std::to_string(frames[i]));
+        r472_child(ed, "B1")->set_local_position({0.1f * (float)(i + 1), 0.0f, 0.0f});
+        ed.mark_changed_for_test("held pose");
+        const float drawn = (float)((frames[i] / hold) * hold);
+        want.track("B1", "Position", 0).set_key(drawn, 0.1f * (float)(i + 1));
+        if (i == 0) {  // (the first edit moved y and z as well: 1 -> 0 and 0 -> 0)
+          want.track("B1", "Position", 1).set_key(drawn, 0.0f);
+          want.track("B1", "Position", 2).set_key(drawn, 0.0f);
+        }
+        else {
+          want.track("B1", "Position", 1).set_key(drawn, 0.0f);
+          want.track("B1", "Position", 2).set_key(drawn, 0.0f);
+        }
+      }
+      const AnimationClipPtr clip = ed.anim_clip_for_test();
+      CHECK(clip != nullptr);
+      if (!clip) return;
+      std::printf("    on %ds: %s", hold, r472_tracks(*clip).c_str());
+      const AnimTrack *x = clip->find("B1", "Position", 0);
+      CHECK(x && x->keys.size() >= 2 && x->keys[0].frame == (float)((5 / hold) * hold));
+      for (const AnimKey &k : x ? x->keys : std::vector<AnimKey>{}) CHECK(std::fmod(k.frame, (float)hold) == 0.0f);
+      r472_remove_clip(name.c_str());
+    }
+  });
+
+  test("round 472: Record: a long run of edits (positions, turns across +-180, scales, two objects at once, many frames) keys the same as the same edits with Record toggled off and on before each - a full snapshot every time", [] {
+    std::string text[2];
+    for (int forced = 0; forced < 2; forced++) {
+      const std::string name = forced ? "R472SeqB" : "R472SeqA";
+      Editor ed;
+      r472_rig(ed, 12, name.c_str());
+      ed.command("anim record on");
+      uint32_t seed = 90210;
+      auto rnd = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return (float)(seed >> 8) / 16777216.0f;
+      };
+      for (int i = 0; i < 160; i++) {
+        if (forced) ed.command("anim record off"), ed.command("anim record on");
+        ed.command("anim frame " + std::to_string((i * 7) % 41));
+        const int n = rnd() < 0.2f ? 2 : 1;
+        for (int e = 0; e < n; e++) {
+          GameObject *g = r472_child(ed, ("B" + std::to_string((int)(rnd() * 12.0f) % 12)).c_str());
+          const int kind = (int)(rnd() * 3.0f) % 3;
+          if (kind == 0) g->set_local_position({rnd() * 4 - 2, rnd() * 4 - 2, rnd() * 4 - 2});
+          else if (kind == 1) g->set_local_euler({rnd() * 360 - 180, rnd() < 0.5f ? 170.0f + rnd() * 9 : -170.0f - rnd() * 9, rnd() * 80 - 40});
+          else g->set_local_scale({0.5f + rnd(), 0.5f + rnd(), 0.5f + rnd()});
+        }
+        ed.mark_changed_for_test("R472 seq");
+        if (i % 9 == 0) ed.step_frame_headless();
+      }
+      const AnimationClipPtr clip = ed.anim_clip_for_test();
+      CHECK(clip != nullptr);
+      if (clip) text[forced] = r472_tracks(*clip);
+      r472_remove_clip(name.c_str());
+    }
+    std::printf("    %zu bytes of keys; the forced run's %zu\n", text[0].size(), text[1].size());
+    CHECK(!text[0].empty() && text[0] == text[1]);
+  });
+
+  test("round 472: Record: moving one object in a rig of 300 reads about one object, not 300; nothing moved reads none", [] {
+    Editor ed;
+    r472_rig(ed, 300, "R472Many");
+    ed.command("anim record on");
+    r472_commit(ed);
+    ed.mark_changed_for_test("nothing moved");
+    CHECK(ed.record_objects_read_for_test() == 0);
+    const uint64_t t0 = ed.record_reads_total_for_test();
+    r472_child(ed, "B17")->set_local_position({3, 3, 3});
+    ed.mark_changed_for_test("one moved");
+    const uint64_t one = ed.record_objects_read_for_test();
+    r472_child(ed, "B17")->set_local_position({3, 4, 3});
+    r472_child(ed, "B200")->set_local_position({5, 5, 5});
+    r472_child(ed, "B201")->set_local_euler({0, 20, 0});
+    ed.mark_changed_for_test("three moved");
+    const uint64_t three = ed.record_objects_read_for_test();
+    std::printf("    one moved: %llu read; three moved: %llu read; %llu in all\n", (unsigned long long)one, (unsigned long long)three, (unsigned long long)(ed.record_reads_total_for_test() - t0));
+    CHECK(one >= 1 && one <= 3);
+    CHECK(three >= 3 && three <= 6);
+    CHECK(ed.record_reads_total_for_test() - t0 <= 9);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->find("B17", "Position", 1) && clip->find("B200", "Position", 0) && clip->find("B201", "Rotation", 1) && !clip->find("B18", "Position", 0));
+    r472_remove_clip("R472Many");
+  });
+
+  test("round 472: Record: undo brings the clip's text back byte for byte, redo puts the keys back", [] {
+    Editor ed;
+    r472_rig(ed, 4, "R472Undo");
+    ed.command("anim key B1 Position 0 0 0.25");
+    r472_commit(ed);
+    ed.command("anim record on");
+    ed.command("anim frame 8");
+    r472_commit(ed);
+    const std::string t0 = save_clip_text(*ed.anim_clip_for_test());
+    for (int k = 0; k < 20; k++) {
+      r472_child(ed, "B1")->set_local_position({0.25f + 0.1f * (float)k, 1.0f, 0.0f});
+      r472_child(ed, "B2")->set_local_euler({0, 0, 10.0f * (float)k});
+      ed.mark_changed_for_test("R472 undo");
+    }
+    r472_commit(ed);
+    const std::string t1 = save_clip_text(*ed.anim_clip_for_test());
+    CHECK(t1 != t0);
+    ed.command("undo");
+    r472_commit(ed);
+    const std::string back = save_clip_text(*ed.anim_clip_for_test());
+    CHECK(back == t0);
+    ed.command("redo");
+    r472_commit(ed);
+    const std::string again = save_clip_text(*ed.anim_clip_for_test());
+    CHECK(again == t1);
+    r472_remove_clip("R472Undo");
+  });
+
+  test("round 472: Record: an object added under the root while recording is not keyed when Record first sees it, but is keyed when it moves after that", [] {
+    Editor ed;
+    r472_rig(ed, 3, "R472New");
+    ed.command("anim record on");
+    r472_commit(ed);
+    GameObject *root = ed.scene().find_by_name("R472New");
+    GameObject *c = ed.scene().create("Late", root);
+    c->set_local_position({7, 7, 7});
+    ed.mark_changed_for_test("a new object");
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    CHECK(clip->tracks.empty());
+    c->set_local_position({8, 7, 7});
+    ed.mark_changed_for_test("it moves");
+    const AnimTrack *t = clip->find("Late", "Position", 0);
+    CHECK(t && t->keys.size() == 1 && t->keys[0].value == 8.0f);
+    r472_remove_clip("R472New");
+  });
+
+  test("round 472: Record: IK-driven bones are not keyed, the handle that drives them is", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    r472_remove_clip("Humanoid");
+    ed.command("rig humanoid");
+    GameObject *root = ed.scene().find_by_name("Humanoid");
+    GameObject *target = ed.scene().find_by_name("LeftHandIK");
+    CHECK(root && target);
+    if (!root || !target) return;
+    ed.command("select Humanoid");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    ed.command("anim record on");
+    r472_commit(ed);
+    target->set_world_position(target->world_position() + Vec3(0.1f, -0.2f, 0.15f));
+    ed.mark_changed_for_test("move the handle");
+    r472_commit(ed);
+    ed.mark_changed_for_test("a pass after the solve moved the arm");
+    r472_commit(ed);
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    int driven = 0, bones = 0;
+    for (const AnimTrack &t : clip->tracks) {
+      GameObject *g = anim_target(*root, t.path);
+      if (g && g->get<Bone>()) bones++;
+      if (g && g->get<Bone>() && ik_drives(ed.scene(), *g)) driven++;
+    }
+    const AnimTrack *tp = clip->find(anim_path(*root, *target), "Position", 0);
+    std::printf("    %zu tracks; %d on IK-driven bones; handle Position %s\n", clip->tracks.size(), driven, tp ? "keyed" : "not keyed");
+    CHECK(driven == 0);
+    CHECK(tp && !tp->keys.empty());
+    r472_remove_clip("Humanoid");
+  });
+
+  test("round 472: Record, edge cases: an object deleted mid-record, one renamed, one moved in the Hierarchy: no crash, no stray keys, the rest keeps recording", [] {
+    Editor ed;
+    r472_rig(ed, 8, "R472Edge");
+    ed.command("anim record on");
+    r472_commit(ed);
+    GameObject *root = ed.scene().find_by_name("R472Edge");
+    r472_child(ed, "B1")->set_local_position({1, 1, 1});
+    ed.mark_changed_for_test("B1");
+    ed.scene().destroy(r472_child(ed, "B3"));  // (deleted mid-record)
+    ed.mark_changed_for_test("B3 gone");
+    r472_child(ed, "B4")->name = "Renamed";
+    ed.mark_changed_for_test("B4 renamed");
+    GameObject *b5 = r472_child(ed, "B5"), *b6 = r472_child(ed, "B6");
+    ed.scene().set_parent(b5, b6, -1, false);  // (under a sibling, its numbers as they were)
+    ed.mark_changed_for_test("B5 under B6");
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    std::printf("    after the deletion, rename and reparent: %zu track(s)\n%s", clip->tracks.size(), r472_tracks(*clip).c_str());
+    for (const AnimTrack &t : clip->tracks) CHECK(t.path == "B1");  // (only the one that moved)
+    r472_child(ed, "Renamed")->set_local_position({2, 2, 2});
+    b5->set_local_position({3, 3, 3});
+    ed.mark_changed_for_test("moves after");
+    CHECK(clip->find("Renamed", "Position", 0) != nullptr && clip->find("B6/B5", "Position", 0) != nullptr);
+    /* Out of the root: not recorded any more, nothing crashes. */
+    GameObject *out = ed.scene().create("Outside");
+    ed.scene().set_parent(b6, out, -1, false);
+    ed.mark_changed_for_test("B6 out of the root");
+    b6->set_local_position({9, 9, 9});
+    ed.mark_changed_for_test("B6 moves outside");
+    for (const AnimTrack &t : clip->tracks) CHECK(t.path.rfind("B6", 0) != 0 || t.path == "B6/B5");
+    CHECK(clip->find("B6", "Position", 0) == nullptr);
+    /* And back in: just looked at. */
+    ed.scene().set_parent(b6, root, -1, false);
+    ed.mark_changed_for_test("B6 back");
+    CHECK(clip->find("B6", "Position", 0) == nullptr);
+    r472_remove_clip("R472Edge");
+  });
+
+  test("round 472: Record, edge cases: undo and redo replacing the scene's objects with Record on, then the next edit is keyed exactly as typed", [] {
+    Editor ed;
+    r472_rig(ed, 5, "R472Rep");
+    ed.command("anim record on");
+    ed.command("anim frame 4");
+    r472_commit(ed);
+    r472_child(ed, "B2")->set_local_position({2, 2, 2});
+    ed.mark_changed_for_test("first edit");
+    r472_commit(ed);
+    ed.command("undo");
+    r472_commit(ed);
+    ed.command("redo");
+    r472_commit(ed);
+    std::printf("    Record after undo and redo: %s, Preview %s\n", ed.anim_record_for_test() ? "on" : "off", ed.anim_preview_for_test() ? "on" : "off");
+    ed.command("anim record on");  // (undo may have turned it off: either way it is on now, looking at the objects as they are)
+    r472_commit(ed);
+    const AnimationClipPtr before = ed.anim_clip_for_test();
+    CHECK(before != nullptr);
+    if (!before) return;
+    const std::string t0 = r472_tracks(*before);
+    ed.mark_changed_for_test("nothing moved");
+    CHECK(r472_tracks(*ed.anim_clip_for_test()) == t0);  // (no key out of a stale remembered pose)
+    r472_child(ed, "B4")->set_local_position({4, 4, 4});
+    ed.mark_changed_for_test("after the redo");
+    const AnimTrack *t = ed.anim_clip_for_test()->find("B4", "Position", 0);
+    CHECK(t && t->keys.size() >= 1 && t->keys.back().value == 4.0f && t->keys.back().frame == 4.0f);
+    r472_remove_clip("R472Rep");
+  });
+
+  test("round 472: Record, edge cases: a clip or a root changed: the edit goes to the clip it was made under, the other clip is untouched", [] {
+    Editor ed;
+    r472_rig(ed, 3, "R472X");
+    GameObject *y = ed.scene().create("R472Y");
+    r472_remove_clip("R472Y");
+    ed.scene().create("B7", y);
+    ed.command("select R472Y");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    r472_commit(ed);
+    const AnimationClipPtr cy = ed.anim_clip_for_test();
+    ed.command("select R472X");
+    ed.step_frame_headless();
+    const AnimationClipPtr cx = ed.anim_clip_for_test();
+    CHECK(cx && cy && cx != cy);
+    if (!cx || !cy) return;
+    ed.command("anim record on");
+    r472_commit(ed);
+    r472_child(ed, "B1")->set_local_position({5, 5, 5});
+    ed.mark_changed_for_test("X edit");
+    const std::string x1 = r472_tracks(*cx), y0 = r472_tracks(*cy);
+    CHECK(cx->find("B1", "Position", 0) && cy->tracks.empty());
+    ed.command("select R472Y");
+    r472_commit(ed);
+    ed.command("anim record on");
+    r472_commit(ed);
+    r472_child(ed, "B7")->set_local_position({6, 6, 6});
+    ed.mark_changed_for_test("Y edit");
+    CHECK(r472_tracks(*cx) == x1);
+    CHECK(cy->find("B7", "Position", 0) != nullptr && cy->find("B1", "Position", 0) == nullptr);
+    ed.command("select R472X");
+    r472_commit(ed);
+    ed.command("anim record on");
+    r472_commit(ed);
+    ed.mark_changed_for_test("back on X, nothing moved");
+    CHECK(r472_tracks(*cx) == x1);
+    CHECK(cy->find("B7", "Position", 0) != nullptr && r472_tracks(*cy) != y0);
+    r472_remove_clip("R472X");
+    r472_remove_clip("R472Y");
+  });
+
+  test("round 472: Record: a shape weight that moved makes its BlendShape track (the one that did not move makes none); a light's intensity already animated is keyed", [] {
+    Editor ed;
+    GameObject *root = r472_rig(ed, 2, "R472Num");
+    GameObject *mesh = ed.scene().create("Face", root);
+    MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+    m->shape_keys.push_back(ShapeKey{"Smile", std::vector<Vec3>(m->vert_count(), Vec3(0.0f, 0.1f, 0.0f))});
+    m->shape_keys.push_back(ShapeKey{"Blink", std::vector<Vec3>(m->vert_count(), Vec3(0.1f, 0.0f, 0.0f))});
+    m->touch();
+    mesh->add<MeshFilter>()->mesh = m;
+    MeshRenderer *mr = mesh->add<MeshRenderer>();
+    GameObject *lamp = ed.scene().create("Lamp", root);
+    Light *light = lamp->add<Light>();
+    light->intensity = 1.0f;
+    ed.mark_changed_for_test("R472 face and lamp");
+    r472_commit(ed);
+    ed.command("anim key Lamp Light.Intensity 0 0 1");
+    ed.command("anim record on");
+    ed.command("anim frame 10");
+    r472_commit(ed);
+    mr->set_shape_weight("Smile", 0.5f);
+    light->intensity = 3.0f;
+    ed.mark_changed_for_test("smile and brighten");
+    const AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    const AnimTrack *smile = clip->find("Face", "MeshRenderer.BlendShape/Smile", 0), *blink = clip->find("Face", "MeshRenderer.BlendShape/Blink", 0), *lum = clip->find("Lamp", "Light.Intensity", 0);
+    std::printf("    Smile %s, Blink %s, intensity keys %zu\n", smile ? "keyed" : "no track", blink ? "keyed" : "no track", lum ? lum->keys.size() : (size_t)0);
+    CHECK(smile && smile->keys.size() == 1 && smile->keys[0].frame == 10.0f && smile->keys[0].value == 0.5f);
+    CHECK(blink == nullptr);
+    CHECK(lum && lum->keys.size() == 2 && lum->keys[1].frame == 10.0f && lum->keys[1].value == 3.0f);
+    CHECK(clip->find("Lamp", "Light.Range", 0) == nullptr);  // (a number nobody animated: no track)
+    r472_remove_clip("R472Num");
+  });
+
+  test("round 472: a clip with 23, 24 and 25 and more tracks finds the first track of a (path, property, axis), duplicates included, as a walk would - after tracks are added, removed, swapped, kept by touch_keys, or the clip loaded from text", [] {
+    auto all_agree = [](AnimationClip &c, const char *what) {
+      size_t bad = 0;
+      for (int p = 0; p < 16; p++)
+        for (const char *prop : {"Position", "Rotation", "Scale", "Light.Intensity"})
+          for (int a = 0; a < 3; a++) {
+            const std::string path = "P" + std::to_string(p);
+            if (c.find(path, prop, a) != r472_ref_find(c, path, prop, a)) bad++;
+          }
+      if (c.find("", "Position", 0) != r472_ref_find(c, "", "Position", 0)) bad++;  // (a miss)
+      if (bad) std::printf("    %s: %zu lookups differ from a walk\n", what, bad);
+      return bad == 0;
+    };
+    for (size_t n : {23u, 24u, 25u, 40u, 120u}) {
+      AnimationClip c;
+      static const char *props[3] = {"Position", "Rotation", "Scale"};
+      for (size_t i = 0; i < n; i++) c.tracks.push_back({"P" + std::to_string(i % 13), props[i % 3], (int)((i / 3) % 3), {}});
+      c.touch();
+      if (n > 24) {  // duplicates: the same name again further down, with other keys - the lowest index must win
+        c.tracks.push_back({c.tracks[20].path, c.tracks[20].property, c.tracks[20].axis, {}});
+        c.tracks.back().keys.push_back(AnimKey{});
+        c.tracks.push_back({c.tracks[5].path, c.tracks[5].property, c.tracks[5].axis, {}});
+        c.touch();
+        CHECK(c.find(c.tracks[5].path, c.tracks[5].property, c.tracks[5].axis) == &c.tracks[5]);
+      }
+      CHECK(all_agree(c, "built"));
+      CHECK(all_agree(c, "again"));
+      /* A track made through track() is found at once and does not disturb the rest. */
+      const size_t before = c.tracks.size();
+      AnimTrack &made = c.track("P14", "Light.Intensity", 1);
+      CHECK(c.tracks.size() == before + 1 && &made == &c.tracks.back() && c.find("P14", "Light.Intensity", 1) == &c.tracks.back());
+      CHECK(&c.track("P14", "Light.Intensity", 1) == &c.tracks.back() && c.tracks.size() == before + 1);
+      CHECK(all_agree(c, "after track()"));
+      /* Keys only: touch_keys keeps the index, the answers hold. */
+      c.tracks[2].set_key(1.0f, 2.0f);
+      c.touch_keys();
+      CHECK(all_agree(c, "after touch_keys"));
+      /* Removed: the first of a duplicate pair goes, the second takes over. */
+      c.tracks.erase(c.tracks.begin() + 5);
+      c.touch();
+      CHECK(all_agree(c, "after erase"));
+      /* Swapped (a reorder): the lowest index wins again. */
+      std::swap(c.tracks[3], c.tracks[c.tracks.size() - 2]);
+      c.touch();
+      CHECK(all_agree(c, "after swap"));
+      /* Loaded from text, and looked up. */
+      AnimationClip loaded;
+      CHECK(load_clip_text(save_clip_text(c), loaded));
+      CHECK(loaded.tracks.size() == c.tracks.size());
+      CHECK(all_agree(loaded, "loaded"));
+      CHECK(load_clip_text(save_clip_text(c), c));  // (into itself: the same clip object, new tracks)
+      CHECK(all_agree(c, "reloaded in place"));
+      AnimationClip copy = c;  // (a copy starts with no index of its own)
+      CHECK(all_agree(copy, "copy"));
+    }
+  });
+}
+
+/* ---- Round 472: playback and scrubbing ---- */
+
+static GameObject *r472_build_rig(Scene &s, const std::string &name) {
+  GameObject *root = s.create(name);
+  GameObject *hips = s.create("Hips", root);
+  hips->add<Bone>();
+  GameObject *spine = s.create("Spine", hips);
+  spine->add<Bone>();
+  spine->set_local_position({0, 0.5f, 0});
+  GameObject *mesh = s.create("Mesh", root);
+  MeshPtr m = std::make_shared<Mesh>(*primitives::cube());
+  m->shape_keys.push_back(ShapeKey{"Smile", std::vector<Vec3>(m->vert_count(), Vec3(0.0f, 0.1f, 0.0f))});
+  m->shape_keys.push_back(ShapeKey{"Blink", std::vector<Vec3>(m->vert_count(), Vec3(0.1f, 0.0f, 0.0f))});
+  m->touch();
+  mesh->add<MeshFilter>()->mesh = m;
+  mesh->add<MeshRenderer>()->materials = {make_material("R472 mat", Vec3(0.5f))};
+  s.create("Lamp", root)->add<Light>();
+  s.create("Prop", root);
+  return root;
+}
+
+static AnimationClip r472_build_clip() {
+  AnimationClip c;
+  c.name = "R472";
+  for (int a = 0; a < 3; a++) {
+    c.track("Hips", "Position", a).set_key(0.0f, 0.1f * (float)a);
+    c.track("Hips", "Position", a).set_key(30.0f, 1.0f + 0.5f * (float)a);
+  }
+  c.track("Hips/Spine", "Rotation", 2).set_key(0.0f, 0.0f);
+  c.track("Hips/Spine", "Rotation", 2).set_key(30.0f, 90.0f);
+  c.track("Hips/Spine", "Rotation", 0).set_key(0.0f, 10.0f);
+  c.track("Hips/Spine", "Rotation", 0).set_key(30.0f, -20.0f);
+  c.track("Hips/Spine", "Scale", 1).set_key(0.0f, 1.0f);
+  c.track("Hips/Spine", "Scale", 1).set_key(30.0f, 2.0f);
+  c.track("Mesh", "MeshRenderer.BlendShape/Smile", 0).set_key(0.0f, 0.0f);
+  c.track("Mesh", "MeshRenderer.BlendShape/Smile", 0).set_key(30.0f, 1.0f);
+  c.track("Mesh", "MeshRenderer.BlendShape/Blink", 0).set_key(0.0f, 1.0f);
+  c.track("Mesh", "MeshRenderer.BlendShape/Blink", 0).set_key(30.0f, 0.0f);
+  c.track("Mesh", "Material 0.Roughness", 0).set_key(0.0f, 0.2f);
+  c.track("Mesh", "Material 0.Roughness", 0).set_key(30.0f, 0.9f);
+  c.track("Lamp", "Light.Intensity", 0).set_key(0.0f, 0.5f);
+  c.track("Lamp", "Light.Intensity", 0).set_key(30.0f, 4.0f);
+  AnimTrack &act = c.track("Prop", "Active", 0);
+  act.set_key(0.0f, 1.0f, AnimConstant);
+  act.set_key(15.0f, 0.0f, AnimConstant);
+  act.set_key(30.0f, 1.0f, AnimConstant);
+  c.touch();
+  return c;
+}
+
+/* Every number the clip can write on every object, in scene order. */
+static std::vector<float> r472_pose(Scene &s) {
+  std::vector<float> v;
+  s.for_each([&](GameObject &g) {
+    const Transform &t = g.local();
+    for (int a = 0; a < 3; a++) v.push_back(t.position[a]);
+    for (int a = 0; a < 3; a++) v.push_back(t.euler_hint[a]);
+    for (int a = 0; a < 3; a++) v.push_back(t.scale[a]);
+    v.push_back(t.rotation.x), v.push_back(t.rotation.y), v.push_back(t.rotation.z), v.push_back(t.rotation.w);
+    v.push_back(g.active ? 1.0f : 0.0f);
+    if (const Light *l = g.get<Light>()) v.push_back(l->intensity);
+    if (const MeshRenderer *mr = g.get<MeshRenderer>()) {
+      if (!mr->materials.empty() && mr->materials[0]) v.push_back(mr->materials[0]->roughness);
+      v.push_back((float)mr->shape_weights.size());
+      for (const auto &kv : mr->shape_weights) v.push_back(kv.second);
+    }
+  });
+  return v;
+}
+
+/* The scene posed by `clip` (with whatever it has kept) and by a fresh copy of it on a twin of the scene, from the same start:
+ * every number equal to the bit. */
+static bool r472_pose_matches(Scene &s, GameObject &root, const AnimationClip &clip, float frame, const char *what, int hold = 1) {
+  std::unique_ptr<Scene> twin;
+  {
+    edit_epoch::Moved quiet;  // (a clone bumps the structure stamp: that would rebind the clip under test and hide a stale binding)
+    twin = s.clone();
+  }
+  GameObject *r2 = twin->find(root.id);
+  if (!r2) {
+    std::printf("    %s: the twin has no root with id %llu\n", what, (unsigned long long)root.id);
+    return false;
+  }
+  const AnimationClip fresh = clip;  // (a copy starts with no bindings and no index)
+  {
+    edit_epoch::Moved quiet;  // (the twin's writes are moves: they must not look like a structure change to the bindings under test)
+    apply_clip(fresh, *r2, frame, hold);
+  }
+  apply_clip(clip, root, frame, hold);
+  const std::vector<float> a = r472_pose(s), b = r472_pose(*twin);
+  const bool same = a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
+  if (!same) {
+    size_t first = 0;
+    while (first < a.size() && first < b.size() && std::memcmp(&a[first], &b[first], sizeof(float)) == 0) first++;
+    std::printf("    %s at frame %g: posed differently from a fresh copy (%zu vs %zu numbers; first difference at %zu: %g vs %g)\n", what, frame, a.size(), b.size(), first,
+                first < a.size() ? a[first] : 0.0f, first < b.size() ? b[first] : 0.0f);
+  }
+  {
+    edit_epoch::Moved quiet;
+    twin.reset();
+  }
+  return same;
+}
+
+static void tests_round472_playback() {
+  test("round 472: scrubbing and playing 100 frames builds the clip's bindings once while the clip and the scene's structure hold; five roots on one clip build five", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    const AnimationClip clip = r472_build_clip();
+    const uint64_t b0 = clip_binding_builds();
+    for (int f = 0; f < 100; f++) apply_clip(clip, *root, (float)(f % 31));
+    CHECK(clip_binding_builds() - b0 == 1);
+    for (int f = 0; f < 100; f++) apply_clip(clip, *root, (float)f * 0.37f);  // (played: fractional frames, looping past the end)
+    CHECK(clip_binding_builds() - b0 == 1);
+    GameObject *roots[5];
+    for (int i = 0; i < 5; i++) roots[i] = r472_build_rig(s, "Crowd" + std::to_string(i));
+    const uint64_t c0 = clip_binding_builds();
+    for (int round = 0; round < 3; round++)
+      for (int i = 0; i < 5; i++) apply_clip(clip, *roots[i], (float)(round * 5 + i));
+    std::printf("    100 + 100 frames: %llu build(s); five roots, three rounds: %llu\n", (unsigned long long)(clip_binding_builds() - b0), (unsigned long long)(clip_binding_builds() - c0));
+    CHECK(clip_binding_builds() - c0 == 5);
+  });
+
+  test("round 472: playback poses every bone, blend shape, light intensity, material field and Active exactly as a fresh, unbound copy of the clip does, to the bit, over a scrub and a jump back", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    const AnimationClip clip = r472_build_clip();
+    size_t bad = 0;
+    for (int f = 0; f <= 60; f += 3) bad += !r472_pose_matches(s, *root, clip, (float)f * 0.5f, "scrub");
+    for (float f : {29.5f, 3.0f, 0.0f, 31.0f, 15.0f, 14.99f, 7.25f}) bad += !r472_pose_matches(s, *root, clip, f, "jump");
+    bad += !r472_pose_matches(s, *root, clip, 7.0f, "on 2s", 2);
+    bad += !r472_pose_matches(s, *root, clip, 9.0f, "on 3s", 3);
+    CHECK(bad == 0);
+    /* And it did pose something: Active off at 20, the lamp bright at 30. */
+    apply_clip(clip, *root, 20.0f);
+    CHECK(!s.find_by_name("Prop")->active);
+    apply_clip(clip, *root, 30.0f);
+    CHECK(s.find_by_name("Prop")->active && std::fabs(s.find_by_name("Lamp")->get<Light>()->intensity - 4.0f) < 1e-5f);
+  });
+
+  test("round 472: a track naming a missing object, two siblings with one name, an object renamed, reparented, deleted or added between applies, all pose as a fresh copy does", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    AnimationClip clip = r472_build_clip();
+    clip.track("Ghost", "Position", 0).set_key(0.0f, 1.0f);
+    clip.track("Ghost", "Position", 0).set_key(30.0f, 5.0f);
+    clip.track("Hips/Nobody", "Scale", 0).set_key(0.0f, 3.0f);
+    clip.touch();
+    size_t bad = 0;
+    auto check = [&](float f, const char *what) { bad += !r472_pose_matches(s, *root, clip, f, what); };
+    check(5.0f, "missing objects");
+    check(10.0f, "missing objects again");
+    GameObject *ghost = s.create("Ghost", root);  // (added: the track that named nothing has its object)
+    check(12.0f, "Ghost added");
+    CHECK(ghost->local().position.x > 1.0f);
+    GameObject *twin_hips = s.create("Hips", root);  // (two siblings with one name: the first is driven)
+    twin_hips->set_local_position({100, 100, 100});
+    check(14.0f, "two Hips");
+    CHECK(twin_hips->local().position.x == 100.0f);
+    s.destroy(s.find_by_name("Spine"));  // (deleted: the track finds none under the first Hips)
+    check(16.0f, "Spine deleted");
+    GameObject *hips = root->children[0];
+    CHECK(hips->name == "Hips");
+    hips->name = "Hips2";  // (renamed by a plain write: the tracks that named it find nothing; the second Hips takes over)
+    check(18.0f, "Hips renamed");
+    check(19.0f, "Hips renamed again");
+    hips->name = "Hips";
+    check(20.0f, "Hips named back");
+    s.set_parent(twin_hips, hips, -1, false);  // (reparented under the first one: Hips/Hips exists now, root's second Hips is gone)
+    check(22.0f, "a Hips under Hips");
+    s.set_parent(twin_hips, root, -1, false);
+    check(24.0f, "put back");
+    CHECK(bad == 0);
+  });
+
+  /* (This and the 'Hips named back' step above failed at first: the kept bindings checked only the objects they had
+   * bound, so a name written with no stamp bump was missed. They now carry a signature of every object under the root.) */
+  test("round 472: an object renamed into the name a track could not find (a plain write, no editor) is driven on the next apply, as a fresh copy does", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    AnimationClip clip = r472_build_clip();
+    clip.track("Wanted", "Position", 0).set_key(0.0f, 1.0f);
+    clip.track("Wanted", "Position", 0).set_key(30.0f, 5.0f);
+    clip.touch();
+    s.create("Spare", root);  // (an object no track names: it is not among the bound ones, so a rename of it is what the stamp alone must catch)
+    apply_clip(clip, *root, 3.0f);  // (bound: "Wanted" names nothing)
+    s.find_by_name("Spare")->name = "Wanted";  // (a plain write: nothing bumped the structure stamp)
+    CHECK(r472_pose_matches(s, *root, clip, 6.0f, "Spare renamed Wanted"));
+    CHECK(s.find_by_name("Wanted")->local().position.x > 1.0f);  // (a fresh copy poses it: so must the kept bindings)
+  });
+
+  test("round 472: the same rename followed by the structure bump the editor's rename makes (mark_changed) is driven on the next apply", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    AnimationClip clip = r472_build_clip();
+    clip.track("Wanted", "Position", 0).set_key(0.0f, 1.0f);
+    clip.track("Wanted", "Position", 0).set_key(30.0f, 5.0f);
+    clip.touch();
+    s.create("Spare", root);
+    apply_clip(clip, *root, 3.0f);
+    s.find_by_name("Spare")->name = "Wanted";
+    edit_epoch::bump();
+    CHECK(r472_pose_matches(s, *root, clip, 6.0f, "Spare renamed Wanted, bumped"));
+    CHECK(s.find_by_name("Wanted")->local().position.x > 1.0f);
+  });
+
+  test("round 472: a mesh whose shape keys were reordered or removed between applies: the blend shape tracks follow the names, not the old indices", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    const AnimationClip clip = r472_build_clip();
+    size_t bad = 0;
+    bad += !r472_pose_matches(s, *root, clip, 10.0f, "bound");
+    GameObject *mesh = s.find_by_name("Mesh");
+    MeshFilter *mf = mesh->get<MeshFilter>();
+    auto m = std::make_shared<Mesh>(*mf->mesh);
+    std::swap(m->shape_keys[0], m->shape_keys[1]);  // (Blink, Smile)
+    m->touch();
+    mf->mesh = m;
+    bad += !r472_pose_matches(s, *root, clip, 12.0f, "reordered");
+    auto m2 = std::make_shared<Mesh>(*mf->mesh);
+    m2->shape_keys.erase(m2->shape_keys.begin());  // (Blink gone: Smile moves to index 0, the track for Blink names nothing)
+    m2->touch();
+    mf->mesh = m2;
+    bad += !r472_pose_matches(s, *root, clip, 14.0f, "one removed");
+    auto m3 = std::make_shared<Mesh>(*mf->mesh);
+    m3->shape_keys.clear();
+    m3->touch();
+    mf->mesh = m3;
+    bad += !r472_pose_matches(s, *root, clip, 16.0f, "all removed");
+    CHECK(bad == 0);
+    const MeshRenderer *mr = mesh->get<MeshRenderer>();
+    CHECK(mr->shape_weight("Smile") >= 0.0f);
+  });
+
+  test("round 472: the same clip on 40 roots (past the 32 a clip keeps bindings for) poses every one as a fresh copy does, round after round", [] {
+    Scene s;
+    const AnimationClip clip = r472_build_clip();
+    std::vector<GameObject *> roots;
+    for (int i = 0; i < 40; i++) roots.push_back(r472_build_rig(s, "Crowd" + std::to_string(i)));
+    size_t bad = 0;
+    const uint64_t b0 = clip_binding_builds();
+    for (int round = 0; round < 3; round++)
+      for (int i = 0; i < 40; i++) bad += !r472_pose_matches(s, *roots[(size_t)i], clip, (float)((i * 3 + round * 7) % 31), "crowd");
+    std::printf("    40 roots, 3 rounds: %llu builds (evictions rebuild; the poses are what is pinned)\n", (unsigned long long)(clip_binding_builds() - b0));
+    CHECK(bad == 0);
+  });
+
+  test("round 472: two roots, each with its own clip carrying blend-shape, Active and light tracks, applied alternately for 100 frames build the bindings twice in all; an object made or renamed between applies still rebinds", [] {
+    Scene s;
+    GameObject *ra = r472_build_rig(s, "RigA"), *rb = r472_build_rig(s, "RigB");
+    const AnimationClip ca = r472_build_clip(), cb = r472_build_clip();
+    const uint64_t b0 = clip_binding_builds();
+    for (int f = 0; f < 100; f++) {
+      apply_clip(ca, *ra, (float)(f % 31));
+      apply_clip(cb, *rb, (float)((f * 3) % 31));
+    }
+    std::printf("    100 alternating frames: %llu build(s)\n", (unsigned long long)(clip_binding_builds() - b0));
+    CHECK(clip_binding_builds() - b0 == 2);
+    AnimationClip c2 = ca;
+    c2.track("Late", "Position", 0).set_key(0.0f, 1.0f);
+    c2.track("Late", "Position", 0).set_key(30.0f, 5.0f);
+    c2.touch();
+    apply_clip(c2, *ra, 5.0f);
+    s.create("Late", ra);
+    const uint64_t b1 = clip_binding_builds();
+    apply_clip(c2, *ra, 10.0f);
+    CHECK(clip_binding_builds() - b1 == 1 && s.find_by_name("Late")->local().position.x > 1.0f);
+    CHECK(r472_pose_matches(s, *ra, c2, 10.0f, "object made"));
+    s.find_by_name("Late")->name = "Later";
+    CHECK(r472_pose_matches(s, *ra, c2, 12.0f, "object renamed"));
+  });
+
+  test("round 472: a clip edited between applies: a key's value changed through touch_keys keeps the bindings and shows the new value; a track added rebinds and poses it", [] {
+    Scene s;
+    GameObject *root = r472_build_rig(s, "Rig");
+    AnimationClip clip = r472_build_clip();
+    apply_clip(clip, *root, 10.0f);
+    const uint64_t b0 = clip_binding_builds();
+    const float before = s.find_by_name("Hips")->local().position.x;
+    clip.tracks[0].keys[0].value = 7.0f;  // (Hips Position x, frame 0)
+    clip.tracks[0].keys[1].value = 9.0f;
+    clip.touch_keys();
+    apply_clip(clip, *root, 10.0f);
+    CHECK(clip_binding_builds() - b0 == 0);  // (nothing the bindings are made of changed)
+    CHECK(r472_pose_matches(s, *root, clip, 10.0f, "key value changed"));
+    const float after = s.find_by_name("Hips")->local().position.x;
+    std::printf("    Hips x at 10: %g -> %g; builds %llu\n", before, after, (unsigned long long)(clip_binding_builds() - b0));
+    CHECK(after > before + 1.0f);
+    /* A key edited with no touch at all: the bindings read the track's keys live. */
+    clip.tracks[0].keys[1].value = 11.0f;
+    CHECK(r472_pose_matches(s, *root, clip, 10.0f, "key value changed, no touch"));
+    /* A track added (touch_keys, as Record makes tracks through track()): rebound, and its object posed. */
+    const uint64_t b1 = clip_binding_builds();
+    AnimTrack &t = clip.track("Prop", "Position", 1);
+    t.set_key(0.0f, 2.0f);
+    t.set_key(30.0f, 6.0f);
+    clip.touch_keys();
+    apply_clip(clip, *root, 15.0f);
+    CHECK(clip_binding_builds() - b1 == 1);
+    CHECK(r472_pose_matches(s, *root, clip, 15.0f, "track added (touch_keys)"));
+    CHECK(std::fabs(s.find_by_name("Prop")->local().position.y - 4.0f) < 1e-3f);
+    /* Added with touch(), and one removed. */
+    clip.track("Lamp", "Position", 0).set_key(0.0f, 8.0f);
+    clip.touch();
+    CHECK(r472_pose_matches(s, *root, clip, 20.0f, "track added (touch)"));
+    clip.tracks.erase(clip.tracks.begin() + 2);  // (Hips Position z)
+    clip.touch();
+    CHECK(r472_pose_matches(s, *root, clip, 21.0f, "track removed"));
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -8788,4 +9609,6 @@ void run_animation_tests() {
   tests_round469_editor();
   tests_round470();
   tests_round470_editor();
+  tests_round472_record();
+  tests_round472_playback();
 }

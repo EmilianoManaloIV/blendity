@@ -9,6 +9,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace bl {
@@ -44,6 +45,44 @@ struct AnimTrack {
   std::string label() const;      // "Hips : Rotation.y"
 };
 
+/* Round 472: (path, property, axis) -> the track's index, for AnimationClip::find / track. Only a lookup aid: a copy of
+ * a clip starts with none (it builds its own), and every answer is checked against the track it names. */
+struct AnimTrackIndex {
+  std::unordered_multimap<size_t, uint32_t> map;  // hash of (path, property, axis) -> index into tracks
+  size_t tracks = 0;                              // how many tracks it was built for
+  uint64_t layout = 0;                            // the clip's layout it was built for
+  bool valid = false;
+  AnimTrackIndex() = default;
+  AnimTrackIndex(const AnimTrackIndex &) {}
+  AnimTrackIndex &operator=(const AnimTrackIndex &) {
+    map.clear(), valid = false;
+    return *this;
+  }
+};
+
+/* Round 472: apply_clip's bindings from a clip's tracks to the objects and properties they write (built in animation.cpp),
+ * kept per animated root on the clip they came from: a clip's tracks only change with its layout, and the scene's
+ * structure stamp says when the objects they name may have. A copy of a clip starts with none. */
+struct ClipBindings;
+struct ClipBindingEntry {
+  const GameObject *root = nullptr;
+  uint64_t root_id = 0, layout = 0, stamp = 0, used = 0;
+  size_t tracks = 0;
+  std::shared_ptr<const ClipBindings> set;
+};
+struct ClipBindingCache {
+  std::vector<ClipBindingEntry> entries;
+  ClipBindingCache() = default;
+  ClipBindingCache(const ClipBindingCache &) {}
+  ClipBindingCache &operator=(const ClipBindingCache &) {
+    entries.clear();
+    return *this;
+  }
+};
+/* How many times apply_clip built its bindings (process-wide, as the pose counts are): 0 while a clip and the structure
+ * under its root hold still. */
+uint64_t clip_binding_builds();
+
 struct AnimationClip {
   std::string name = "Clip", asset_path;
   float frame_rate = 60.0f;
@@ -70,10 +109,18 @@ struct AnimationClip {
   };
   std::vector<RagdollEvent> ragdoll;
   uint64_t version = 1;  // bumped by every edit (saving, undo snapshots)
-  void touch() { version++; }
+  /* Round 472: bumped by every edit but a keys-only one (touch_keys): what the lookups below and apply_clip's bindings
+   * from tracks to objects are built on - a key's value moving changes neither. */
+  uint64_t layout = 1;
+  void touch() { version++, layout++; }
+  /* touch() for an edit that changed keys only (and tracks made through track()): Record's per-frame touch keeps the
+   * track index and the bindings, which only the tracks' names and number decide (round 472). */
+  void touch_keys() { version++; }
   float end_frame() const;  // the length, or the last key if later
-  AnimTrack *find(const std::string &path, const std::string &property, int axis);
+  AnimTrack *find(const std::string &path, const std::string &property, int axis);  // (round 472: through the index on a clip with many tracks)
   AnimTrack &track(const std::string &path, const std::string &property, int axis);  // made when missing
+  mutable AnimTrackIndex track_index;  // (round 472)
+  mutable ClipBindingCache bindings;   // (round 472: apply_clip's, per animated root)
 };
 using AnimationClipPtr = std::shared_ptr<AnimationClip>;
 

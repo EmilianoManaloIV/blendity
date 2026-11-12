@@ -4,7 +4,7 @@
 - **Requirements:** Q-04 (interactive editor), Q-06 (responsiveness)
 - **Decisions:** ADR 0125 (amends ADR 0115)
 - **Model:** main session (cross-cutting: the views' hash, draw items, the card's instances, the lighting key)
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/385
 - **Round:** 471, Pass 22's fourth. Measured against the baseline as round 470 left it.
 
 ## Goal
