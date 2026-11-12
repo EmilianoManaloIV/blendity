@@ -89,7 +89,8 @@ editor_ui ran. `sweep_commands.py --check` (221 verbs), the coverage map (no com
 test; 166 widgets not driven by label, as before), the HCI audit and the KLM check pass. Test-engineer: 21 tests, two
 findings. Code review: changes needed (three majors, four minors), all fixed with tests; the re-review found five
 small things and then one fault in a fix (the Scene view in a second window), fixed and tested. The picking fix:
-Windows dependency-free 27,566 checks, 0 failed; Linux group `blockout` 2,577, and under ASan + UBSan, 0 failed; on
+Windows dependency-free 27,566 checks, 0 failed; Linux group `blockout` 2,577, 0 failed (under ASan + UBSan it is CI's job that ran it whole: the local run was
+stopped a third of the way, clean so far, to leave the machine to another pass's timed stage); on
 the exact path (round 480's tree with Blender's libraries) group `blockout` 5,144, 0 failed; two code reviews
 (tolerance by the candidate's size, cutters before matter, a build in flight, a refused build, a wall two rooms
 share), all fixed with tests.
