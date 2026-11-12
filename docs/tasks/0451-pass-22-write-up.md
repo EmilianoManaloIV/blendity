@@ -4,7 +4,7 @@
 - **Requirements:** Q-06 (responsiveness)
 - **Decisions:** none needed (it records the pass's; it may propose one)
 - **Model:** main session
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/394
 - **Round:** 475, Pass 22's last.
 
 ## Goal
