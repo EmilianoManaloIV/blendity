@@ -1089,6 +1089,16 @@ class Editor {
   const std::vector<uint64_t> &autopose_locks_for_test() const { return autopose_.locks; }  // (task 0281)
   const body::Body &autopose_body_for_test() const { return autopose_.body; }  // (round 468: the body model kept between Puppet drags)
   size_t autopose_body_builds_for_test() const { return autopose_.body_builds; }
+  /* (round 473: a drag a frame at a time - the gizmo's path - and how often the pose buffer was built) */
+  bool autopose_frame_for_test(uint64_t bone, Vec3 target) { return autopose_gizmo(bone, target); }
+  void autopose_release_for_test() { autopose_end(); }
+  size_t autopose_buffer_builds_for_test() const { return autopose_.buffer_builds; }
+  const gait::Rig &autopose_rig_for_test() const { return autopose_.rig; }  // (the prior's rig for this drag)
+  void autopose_set_prior_for_test(std::unique_ptr<ai::PriorModel> m) {  // (a stand-in prior, as if its load had finished)
+    autopose_.prior = std::make_shared<AutoPoseView::PriorLoad>();
+    autopose_.prior->model = std::move(m);
+    autopose_.prior->done = true;
+  }
   const body::Body &body_view_body_for_test() const { return body_.body; }     // (round 468: the Centre of Mass's)
   size_t trail_frames_for_test() const { return trails_.frames.size(); }  // (task 0282)
   int zoe_step_for_test() const { return zoe_.step; }  // (task 0283)
@@ -2713,6 +2723,9 @@ class Editor {
     body::Body body;
     uint64_t body_key = 0;                                  // what `body` was weighed for (body::body_key)
     size_t body_builds = 0;                                 // (round 468: how often it was weighed - a test tells a rebind from a rebuild)
+    autopose::Rig buffer;                                   // (round 473) the pose the solver works on; its `start` is the drag's start pose
+    uint64_t buffer_scene = 0;                              // the Scene::serial it was built for (an undo swaps the scene for a copy)
+    size_t buffer_builds = 0;                               // (how often it was built: a test tells a rebuild from a kept one)
     std::vector<uint64_t> pins;                             // this drag's pinned bones
     struct Ik {
       uint64_t bone, target, pole;
@@ -2738,6 +2751,7 @@ class Editor {
   ai::PriorModel *autopose_prior();  // the loaded prior, or null (and its load started)
   void autopose_begin(GameObject &bone);
   void autopose_begin_puppet(GameObject &arm);
+  void autopose_buffer(GameObject &arm);  // the pose buffer, built again when the scene or its structure changed under the drag
   /* Puppet Posing's handles (task 0281, puppet_ui.cpp). */
   struct PuppetView {
     uint64_t arm = 0, key = 0;     // the rig mapped, and as what (body::body_key)

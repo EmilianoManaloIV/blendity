@@ -43,6 +43,12 @@ void reach_spread(AnimationClip &c, const std::string &path, Quat dq, Vec3 dp, b
   }
 }
 
+bool same_local(const Transform &a, const Transform &b) {
+  return a.position.x == b.position.x && a.position.y == b.position.y && a.position.z == b.position.z && a.rotation.x == b.rotation.x &&
+         a.rotation.y == b.rotation.y && a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w && a.scale.x == b.scale.x &&
+         a.scale.y == b.scale.y && a.scale.z == b.scale.z;
+}
+
 GameObject *armature_above(GameObject &g) {
   for (GameObject *a = &g; a; a = a->parent)
     if (a->get<Armature>()) return a;
@@ -89,7 +95,33 @@ void Editor::autopose_begin(GameObject &bone) {
     autopose_.body_key = key;
     autopose_.body_builds++;
   }
+  autopose_.buffer = autopose::Rig();  // (never the last drag's: its objects may be gone)
+  autopose_.rig = gait::Rig();         // (analysed below, once, by autopose_begin_puppet)
+  autopose_buffer(*arm);
   autopose_begin_puppet(*arm);
+}
+
+/* Round 473: the pose buffer each frame solves on, from the pose the drag started in. It is built again - and only it -
+ * when the scene is another copy (an undo or a redo mid-drag, Play) or an object under the armature was made, destroyed,
+ * renamed or moved in the hierarchy (a stale buffer holds raw pointers). */
+void Editor::autopose_buffer(GameObject &arm) {
+  autopose::Rig &buf = autopose_.buffer;
+  const bool swapped = buf.armature != &arm || autopose_.buffer_scene != scene_->serial;
+  if (!swapped && !autopose::stale(buf)) return;
+  /* The kept body and the prior's rig hold raw bone pointers too: pointed at the bones there now. `rebind` refuses, and
+   * leaves its pointers as they were, when a bone was made, destroyed or renamed: then the body is dropped (the drag
+   * goes on without its balance) rather than read through a freed bone. */
+  if (autopose_.body.valid() && !body::rebind(autopose_.body, arm)) autopose_.body = body::Body();
+  if (autopose_.rig.valid()) autopose_.rig = autopose_prior() ? gait::analyse(*scene_, arm) : gait::Rig();
+  buf = autopose::build_rig(arm);
+  autopose_.buffer_scene = scene_->serial;
+  autopose_.buffer_builds++;
+  buf.hips = body::hips_of(arm, autopose_.body.valid() ? &autopose_.body : nullptr);  // (once a drag, not each frame's solve)
+  for (const auto &st : autopose_.start) {  // (a rebuild reads the scene as it is now: the drag's start is what each frame returns to)
+    const GameObject *g = scene_->find(st.first);
+    const auto it = g ? buf.node_of.find(g) : buf.node_of.end();
+    if (it != buf.node_of.end()) buf.nodes[(size_t)it->second].start = buf.nodes[(size_t)it->second].local = st.second;
+  }
 }
 
 /* Task 0280: the rig as the prior reads it, and the bones whose FK controls must turn with them (a control sets its
@@ -164,13 +196,27 @@ void Editor::autopose_to(GameObject &bone, Vec3 target) {
   if (!arm) return;
   BL_ZONE("autopose frame");
   ProfileScope scope{prof_.ms_autopose, {}};  // (round 468: one drag frame's solve - the prior, the IK, the controls moved after it)
-  for (const auto &st : autopose_.start)
-    if (GameObject *g = scene_->find(st.first)) g->set_local(st.second);
+  autopose_buffer(*arm);
+  /* Back to the drag's start: what the solver moves lives in the buffer (it starts from there each frame and writes
+   * what differs), so the scene is put back only where something else moved it - the FK controls, IK targets and poles
+   * the frame's tail moves, and (when the prior is about to read the scene) the joints the last frame posed. */
+  const auto back_to_start = [this](bool joints_too) {
+    for (const auto &st : autopose_.start) {
+      GameObject *g = scene_->find(st.first);
+      if (!g || same_local(g->local(), st.second)) continue;
+      const auto it = autopose_.buffer.node_of.find(g);
+      if (!joints_too && it != autopose_.buffer.node_of.end() && autopose_.buffer.nodes[(size_t)it->second].joint >= 0) continue;
+      g->set_local(st.second);
+    }
+  };
+  back_to_start(false);
+  const std::function<void()> scene_to_start = [&] { back_to_start(true); };
   std::vector<GameObject *> pins;
   for (uint64_t id : autopose_.pins)
     if (GameObject *g = scene_->find(id)) pins.push_back(g);
   ai::PriorModel *prior = autopose_.rig.valid() ? autopose_prior() : nullptr;  // (Puppet Posing: the prior, then exact IK)
-  const puppet::Result pr = puppet::pose(*arm, autopose_.rig, prior, {{&bone, target, 1.0f}}, pins, autopose_.body.valid() ? &autopose_.body : nullptr);
+  const puppet::Result pr = puppet::pose(*arm, autopose_.rig, prior, {{&bone, target, 1.0f}}, pins, autopose_.body.valid() ? &autopose_.body : nullptr,
+                                    autopose::Settings(), &autopose_.buffer, &scene_to_start);
   autopose_.last = pr.ik;
   autopose_.used_prior = pr.used_prior, autopose_.prior_ms = pr.prior_ms;
   for (const auto &fk : autopose_.fk)  // (each FK control turned with its bone: the control is what turns it from now on)

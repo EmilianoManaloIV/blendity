@@ -27,6 +27,7 @@ struct PoseCounts {
   uint64_t name_walks = 0;       // lookups by name that had to walk (past the remembered id)
   uint64_t clip_applies = 0;     // apply_clip calls
   uint64_t solver_solves = 0, solver_iterations = 0;  // autopose::solve calls and the iterations they ran
+  uint64_t solver_writes = 0;       // (round 473) transforms the solver's callers wrote into the scene after a solve
   uint64_t spring_steps = 0, spring_chains = 0;       // spring::step calls and the chains they stepped
   double ms_skin_keys = 0, ms_skin_setup = 0, ms_skin_deforms = 0;  // (setup: before the vertex loop, inside the deform's whole)
   double ms_shape_hashes = 0, ms_shape_applies = 0, ms_evaluations = 0, ms_outline_shells = 0;
@@ -54,6 +55,7 @@ void pose_add(PoseStat s, double ms, uint64_t count = 1);
 void pose_add_moves(uint64_t n);
 void pose_add_name_walks(uint64_t n);
 void pose_add_solver_iterations(uint64_t n);
+void pose_add_solver_writes(uint64_t n);
 void pose_add_spring_chains(uint64_t n);
 void pose_add_skin_keys_kept(uint64_t n);
 void pose_add_skin_keys_stale(uint64_t n);

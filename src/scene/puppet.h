@@ -8,6 +8,7 @@
 
 #include "autopose.h"
 #include "inbetween.h"
+#include <functional>
 
 namespace bl::puppet {
 
@@ -19,9 +20,13 @@ struct Result {
 };
 
 /* The body under `armature` posed for `goals` with `pins` held where they are now; `prior` may be null. The free hand
- * stays where it is unless dragged; the head and the hips go where the prior and the IK take them unless dragged. */
+ * stays where it is unless dragged; the head and the hips go where the prior and the IK take them unless dragged.
+ * With a `buffer` (round 473: the drag's pose buffer, its `start` the drag's start pose) the IK solves on it and
+ * writes once; `scene_to_start` puts the scene at the drag's start, called only when the prior is about to read the
+ * scene. Without them the IK works on the scene as it always did. */
 Result pose(GameObject &armature, const gait::Rig &rig, ai::PriorModel *prior, const std::vector<autopose::Goal> &goals,
-            const std::vector<GameObject *> &pins, const body::Body *body, const autopose::Settings &s = autopose::Settings());
+            const std::vector<GameObject *> &pins, const body::Body *body, const autopose::Settings &s = autopose::Settings(),
+            autopose::Rig *buffer = nullptr, const std::function<void()> *scene_to_start = nullptr);
 
 /* The prior's inputs for this rig as it stands now with `goals` and `pins` (tests and the editor's display). */
 bool prior_inputs(const ai::PoseMapping &m, const ai::ModelInfo &info, const std::vector<autopose::Goal> &goals,

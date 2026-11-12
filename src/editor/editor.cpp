@@ -909,6 +909,7 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"see-through lists kept", (double)p.see_lists_kept},
       {"lightmap keys", (double)p.lightmap_key_hashes}, {"clip applies", (double)pc.clip_applies},
       {"clip serialisations", (double)p.clip_serialisations}, {"solver iterations", (double)pc.solver_iterations},
+      {"scene writes by the solver", (double)pc.solver_writes},
       {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
       {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
       {"corners split in place", (double)mc.in_place_split}, {"meshes settled", (double)mc.settled}, {"render meshes built whole", (double)mc.full_builds},
