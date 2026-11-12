@@ -7229,6 +7229,44 @@ static void tests_round479_picking() {
     ed.hold_blockout_landing_for_test(false);
   });
 
+  test("blockout: a click that slips straight sideways or straight up - a box of no height or width - still selects what is under it: a mesh object, a Blockout's piece", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 25 60 9 0 0 0");
+    ed.command("create Shape: Box");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->set_world_position({0.0f, 0.0f, 4.0f});
+    GameObject *bo = r477_blockout(ed);
+    GameObject *a = r477_piece(ed, *bo, "Left", 0, 0, {-1, 0, 0}, {2, 1, 2});
+    GameObject *b = r477_piece(ed, *bo, "Right", 0, 0, {1, 0, 0}, {2, 1, 2});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    auto slip = [&](Vec3 at, int dx, int dy) {
+      int x = 0, y = 0;
+      if (!ed.project_to_window(at, x, y)) return false;
+      ed.select_for_test(bo->id, false);  // (something else selected: a click that selects nothing would clear it)
+      r34_steps(ed, 2);
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x, y)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseDown, x, y)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x + dx, y + dy)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseUp, x + dx, y + dy)});
+      r34_steps(ed, 2);
+      return true;
+    };
+    for (int way = 0; way < 4; way++) {
+      const int dx = way == 0 ? 7 : way == 1 ? -7 : 0, dy = way == 2 ? 7 : way == 3 ? -7 : 0;
+      CHECK(slip({0.0f, 0.0f, 4.0f}, dx, dy));
+      CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == cube);
+      CHECK(slip({1.0f, 0.5f, 0.0f}, dx, dy));
+      CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == b);
+      CHECK(slip({-1.0f, 0.5f, 0.0f}, dx, dy));
+      CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == a);
+    }
+  });
+
   test("blockout: three slabs of one floor, the middle one a cylinder: a click on each selects it", [] {
     Editor ed;
     ed.init_headless(1600, 1000);

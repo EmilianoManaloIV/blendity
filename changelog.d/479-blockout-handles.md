@@ -59,7 +59,9 @@ piece that trims, then a cutter that merely stands there; and nothing is asked w
 one that was refused (the picture is then still the mesh before the edit). A click that slipped more than
 four pixels is a box select, and a box over a Blockout selected the whole Blockout where a click selects a piece: a
 box now selects the Blockout's pieces under it (the Blockout itself only where its mesh names no piece), read at up
-to 16 x 16 places of the box. The pick's ray goes through the pixel's middle, as the picture's own id does (through
+to 16 x 16 places of the box. A click that slipped straight sideways or straight up made a box of no height or
+width: it held no pixel, selected nothing and cleared the selection, for any object - such a box is a pixel thick
+now (a box excludes its far edge still: a press on an object's last pixel that slips away from it can miss it). The pick's ray goes through the pixel's middle, as the picture's own id does (through
 its corner it could miss the mesh along an outline, and the whole Blockout was selected). One question costs about
 0.2 ms in a Blockout of a hundred rooms. Checked with real clicks too and found right: a mesh object in front of,
 behind and seen through a hole of a Blockout, and two Blockouts that overlap. Still as designed: a door or window
@@ -102,7 +104,7 @@ with: (round 478), dragged out with handles on every face that snap to the other
 <!-- docs/USABILITY.md -->
 after: | Building a room or a blockout from several shapes meant
 | A Blockout's rooms and pieces were sized by typing numbers in the Inspector, and placed by moving them with the gizmo until they looked flush. (round 479) | The selected piece shows a **handle on each face**: drag it and that face moves while the opposite one stays, snapping to the other pieces' faces and corners or the grid. The **Room tool** (Shift+R) draws a rectangle or circle on the ground or a face and pulls it up into a room; **F9** adjusts the piece just made. |
-| A click on a Blockout piece sometimes selected another piece - the first of several whose faces share a plane (slabs of one floor, rooms on one level) - and a click that slipped a few pixels selected the whole Blockout. (round 479, reported by the user) | The piece whose own face is under the pointer is selected; a box select over a Blockout selects its pieces under the box. |
+| A click on a Blockout piece sometimes selected another piece - the first of several whose faces share a plane (slabs of one floor, rooms on one level) - and a click that slipped a few pixels selected the whole Blockout. (round 479, reported by the user) | The piece whose own face is under the pointer is selected; a box select over a Blockout selects its pieces under the box; a click that slips straight sideways or straight up no longer clears the selection (any object). |
 
 <!-- docs/ARCHITECTURE.md -->
 append:
