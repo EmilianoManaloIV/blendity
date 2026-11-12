@@ -9,6 +9,8 @@ cd "$(dirname "$0")"
 CONFIG="${1:-release}"
 TARGET="${2:-all}"
 OS="$(uname -s)"
+# CI sets CXX="ccache g++" and CC="ccache gcc" (round 492, ADR 0133): a compiler cache kept between runs. Any
+# wrapper works the same way; nothing here needs one.
 CXX="${CXX:-c++}"
 JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 

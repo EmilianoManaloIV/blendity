@@ -1,7 +1,9 @@
 @echo off
 rem Blendity - Windows build without CMake. Needs only Visual Studio (or Build Tools) with C++.
 rem Usage: build.bat [release|debug] [app|stress|tests|check|all|installer]
-rem   check: the unit and stress tests from one compile (every source once, both linked from the same objects).
+rem   all: the editor, the stress tests and the unit tests from one compile (round 492, ADR 0133: every source once,
+rem   the three linked from the same objects; it compiled everything three times before).
+rem   check: the unit and stress tests the same way, without the editor.
 rem   BLENDITY_NO_LTCG=1: no whole-program optimization (/GL, /LTCG) - a faster build for quick local runs, not for checks:
 rem   with /fp:fast, MSVC then compiles two code paths differently that some tests compare bit for bit.
 rem   installer: the app, then dist\installers\Blendity-Setup-<VERSION>.exe with Inno Setup 6 (task 0076).
@@ -175,7 +177,7 @@ if "%BLENDITY_NO_LTCG%"=="1" set LINKFLAGS=!LINKFLAGS:/LTCG=!
 if /i "%CONFIG%"=="debug" set LINKFLAGS=/link /DEBUG user32.lib gdi32.lib shell32.lib comdlg32.lib ole32.lib winhttp.lib ws2_32.lib %LIBLINK%
 if "%USE_LIBS%"=="1" call :deploy_dlls
 
-if /i "%TARGET%"=="all" goto app
+if /i "%TARGET%"=="all" goto all
 if /i "%TARGET%"=="app" goto app
 if /i "%TARGET%"=="installer" goto app
 if /i "%TARGET%"=="stress" goto stress
@@ -188,28 +190,15 @@ rem BLENDITY_OUT lets you build while a copy of the editor is still running.
 if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
 cl %FLAGS% /Fo%OBJ%\ /Fe:%BLENDITY_OUT% %LIBSRC% src\app\main.cpp %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 if errorlevel 1 exit /b 1
-rem Task 0211: the GPU shaders compiled now into "shaders" beside the editor, so a new build's first GPU view doesn't
-rem wait for them. Only the build with Blender's libraries has a GPU path (and the dependency-free one, built beside
-rem it, must not remove its shaders); BLENDITY_NO_WARM=1 skips it; without a card the first GPU view compiles them.
-if not "%BLENDITY_NO_LIBS%"=="" goto app_warmed
-if not "%BLENDITY_NO_WARM%"=="" goto app_warmed
-for %%d in ("%BLENDITY_OUT%") do set "SHADERS=%%~dpdshaders"
-if exist "%SHADERS%" rmdir /s /q "%SHADERS%"
-start "" /wait "%BLENDITY_OUT%" --warm-shaders "%SHADERS%"
-if errorlevel 1 goto app_not_warmed
-echo [blendity] GPU shaders compiled into "%SHADERS%"
-goto app_warmed
-:app_not_warmed
-echo [blendity] No GPU shaders compiled ahead: no card opened. The first GPU view compiles them.
-:app_warmed
+call :warm_shaders
 if /i "%TARGET%"=="installer" goto installer
-if /i not "%TARGET%"=="all" goto done
+goto done
 
 :stress
 echo [blendity] Building stress tests (%CONFIG%)...
 cl %FLAGS% /Fo%OBJ%\ /Fe:dist\windows\blendity_stress.exe %LIBSRC% stress\stress_main.cpp %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
-if /i not "%TARGET%"=="all" goto done
+goto done
 
 :tests
 echo [blendity] Building unit tests (%CONFIG%)...
@@ -221,20 +210,31 @@ goto done
 echo [blendity] Building unit and stress tests (%CONFIG%, one compile)...
 cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% stress\stress_main.cpp tests\*.cpp
 if errorlevel 1 exit /b 1
-rem The objects in response files, as the sources are (the command line has an 8191-character limit).
-set TESTRSP=%OBJ%\tests_objects.rsp
-set STRESSRSP=%OBJ%\stress_objects.rsp
-> "%TESTRSP%" (
-  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
-  for %%f in (tests\*.cpp) do echo %OBJ%\%%~nf.obj
-)
-> "%STRESSRSP%" (
-  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
-  echo %OBJ%\stress_main.obj
-)
+call :object_lists
 cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+if errorlevel 1 exit /b 1
+goto done
+
+:all
+rem Round 492 (ADR 0133): one compile for the three programs. Each was a full cl of every source before - the same
+rem sources three times, a third of the build each; now they differ only in their link (with /GL: their code generation).
+rem A source that does not compile stops the build before any program is written, the editor included.
+echo [blendity] Building editor, stress tests and unit tests (%CONFIG%, one compile)...
+if "%BLENDITY_OUT%"=="" set BLENDITY_OUT=dist\windows\Blendity.exe
+cl /c %FLAGS% /Fo%OBJ%\ %LIBSRC% src\app\main.cpp stress\stress_main.cpp tests\*.cpp
+if errorlevel 1 exit /b 1
+call :object_lists
+echo [blendity] Linking editor...
+cl %FLAGS% /Fe:%BLENDITY_OUT% @%APPRSP% %LINKFLAGS% /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
+if errorlevel 1 exit /b 1
+call :warm_shaders
+echo [blendity] Linking stress tests...
+cl %FLAGS% /Fe:dist\windows\blendity_stress.exe @%STRESSRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
+if errorlevel 1 exit /b 1
+echo [blendity] Linking unit tests...
+cl %FLAGS% /Fe:dist\windows\blendity_tests.exe @%TESTRSP% %LINKFLAGS% /SUBSYSTEM:CONSOLE
 if errorlevel 1 exit /b 1
 goto done
 
@@ -256,6 +256,44 @@ goto done
 :done
 echo [blendity] Done. Binaries are in dist\windows\
 endlocal
+exit /b 0
+
+rem call :object_lists - each program's objects in a response file, as the sources are (the command line has an
+rem 8191-character limit): what `all` and `check` link after their one compile. An object is named for its source's
+rem file name alone (cl's /Fo<folder>), so no two sources may share one.
+:object_lists
+set APPRSP=%OBJ%\app_objects.rsp
+set TESTRSP=%OBJ%\tests_objects.rsp
+set STRESSRSP=%OBJ%\stress_objects.rsp
+> "%APPRSP%" (
+  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
+  echo %OBJ%\main.obj
+)
+> "%TESTRSP%" (
+  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
+  for %%f in (tests\*.cpp) do echo %OBJ%\%%~nf.obj
+)
+> "%STRESSRSP%" (
+  for /f "usebackq delims=" %%f in ("%SRCRSP%") do echo %OBJ%\%%~nf.obj
+  echo %OBJ%\stress_main.obj
+)
+exit /b 0
+
+rem call :warm_shaders - task 0211: the GPU shaders compiled now into "shaders" beside the editor, so a new build's
+rem first GPU view doesn't wait for them. Only the build with Blender's libraries has a GPU path (and the
+rem dependency-free one, built beside it, must not remove its shaders); BLENDITY_NO_WARM=1 skips it; without a card the
+rem first GPU view compiles them.
+:warm_shaders
+if not "%BLENDITY_NO_LIBS%"=="" exit /b 0
+if not "%BLENDITY_NO_WARM%"=="" exit /b 0
+for %%d in ("%BLENDITY_OUT%") do set "SHADERS=%%~dpdshaders"
+if exist "%SHADERS%" rmdir /s /q "%SHADERS%"
+start "" /wait "%BLENDITY_OUT%" --warm-shaders "%SHADERS%"
+if errorlevel 1 goto app_not_warmed
+echo [blendity] GPU shaders compiled into "%SHADERS%"
+exit /b 0
+:app_not_warmed
+echo [blendity] No GPU shaders compiled ahead: no card opened. The first GPU view compiles them.
 exit /b 0
 
 rem call :lib <folder> <define> "<include dirs>" "<link libs>"  (paths relative to the lib dir)
