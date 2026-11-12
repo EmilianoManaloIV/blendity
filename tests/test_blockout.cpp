@@ -10124,6 +10124,366 @@ static void tests_round480_engineer_shapes_editor() {
   });
 }
 
+/* Round 494 (task 0478): while anything of a Blockout is selected every piece shows its outline, and a piece that has no surface
+ * of its own to click - an opening, a piece that cuts - is clicked by it. */
+namespace {
+
+/* A click with real events at a place of the world, the selection left as it is; the one object selected after it (or none). */
+GameObject *r494_click(Editor &ed, Vec3 world, int mods = 0) {
+  int x = 0, y = 0;
+  if (!ed.project_to_window(world, x, y)) return nullptr;
+  /* Two presses within 5 px and 0.35 s are a double click, which frames the selection: the view then glides and the clicks after
+   * it land beside their places - or not, by how fast the machine is (8 runs of 25 failed that way). A second click on a place
+   * waits the double click's time out. */
+  static int last_x = -100, last_y = -100;
+  if (std::abs(x - last_x) < 6 && std::abs(y - last_y) < 6) std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  last_x = x, last_y = y;
+  r477_click(ed, x, y, mods);
+  r34_steps(ed, 2);
+  return ed.selection_size_for_test() == 1 ? ed.active_object_for_test() : nullptr;
+}
+
+/* A camera command, then frames until the view has stopped gliding: the camera moves over a few real milliseconds, and a click
+ * placed from a projection taken mid-glide lands beside the place (the first test of this round failed that way once in four runs). */
+void r494_camera(Editor &ed, const char *line) {
+  ed.command(line);
+  int px = -1, py = -1;
+  for (int i = 0; i < 300; i++) {
+    r34_steps(ed, 1);
+    int x = 0, y = 0;
+    ed.project_to_window({1.0f, 1.0f, 1.0f}, x, y);
+    const bool still = x == px && y == py;
+    px = x, py = y;
+    if (still && i > 3) break;
+  }
+  r34_steps(ed, 2);
+}
+
+/* The Scene view made orthographic, the camera where it is. */
+void r494_orthographic(Editor &ed) {
+  SceneCamera cam = ed.scene_camera_for_test();
+  cam.ortho = true;
+  cam.animating = false;
+  ed.set_scene_camera_for_test(cam);
+}
+
+}  // namespace
+
+static void tests_round494() {
+  test("blockout outlines: a box that cuts a hole through a slab, seen from above: with the Blockout selected a click on the cutter's outline selects it, with nothing selected it does not", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    r494_camera(ed, "camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *slab = r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {4, 1, 4});
+    /* (y -0.5 .. 1.5: its top stands a metre over the slab; away from the Blockout's middle, where the move gizmo of the selected
+     * Blockout or slab stands) */
+    GameObject *cut = r477_piece(ed, *bo, "Cut", 0, 1, {1.2f, 0.5f, 1.2f}, {1, 2, 1});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    const Vec3 on_outline(1.7f, 1.5f, 1.2f);  // (the middle of an edge of the cutter's top: in the air)
+    ed.clear_selection_for_test();
+    r34_steps(ed, 2);
+    CHECK(r494_click(ed, on_outline) != cut);  // (no outline is shown: the click is the surface's, or nothing's)
+    ed.select_for_test(bo->id, false);
+    r34_steps(ed, 2);
+    CHECK(r494_click(ed, on_outline) == cut);
+    /* A piece is selected now: the others' outlines stay, and the slab is still clicked on its surface. */
+    CHECK(r494_click(ed, {-1.5f, 0.5f, -1.5f}) == slab);
+    CHECK(r494_click(ed, on_outline) == cut);
+    /* Shift adds, as any click. */
+    ed.select_for_test(slab->id, false);
+    r34_steps(ed, 2);
+    r494_click(ed, on_outline, platform::MOD_SHIFT);
+    CHECK(ed.selection_size_for_test() == 2 && ed.active_object_for_test() == cut);  // (the slab stays, the cutter is added and active)
+    /* An orthographic view: the same click. */
+    r494_orthographic(ed);
+    ed.select_for_test(slab->id, false);
+    r34_steps(ed, 3);
+    CHECK(r494_click(ed, {-1.5f, 0.5f, -1.5f}) == slab);
+    CHECK(r494_click(ed, on_outline) == cut);
+  });
+
+  test("blockout outlines: a cutter wholly inside a slab - its outline is behind the slab's faces - is not clicked by it; an Add piece's outline never is", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    r494_camera(ed, "camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *slab = r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {4, 1, 4});
+    GameObject *cut = r477_piece(ed, *bo, "Cavity", 0, 1, {1.2f, 0, 1.2f}, {1, 0.5f, 1});  // (y -0.25 .. 0.25, inside the slab's -0.5 .. 0.5; away from the move gizmo at the Blockout's middle)
+    GameObject *post = r477_piece(ed, *bo, "Post", 0, 0, {3.5f, 0.5f, 0}, {0.5f, 2, 0.5f});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    ed.select_for_test(bo->id, false);
+    r34_steps(ed, 2);
+    CHECK(r494_click(ed, {1.7f, 0.25f, 1.2f}) == slab);
+    CHECK(r494_click(ed, {1.2f, 0.25f, 1.7f}) == slab);
+    (void)cut;
+    /* Three to six pixels beside the post's outline, in the air - all within the outline's reach: an Add piece is clicked on its
+     * surface only, so none of them selects it. (The review, 2026-11-12: the clicks went out to seven pixels and "fewer than
+     * three" could not fail.) */
+    int x = 0, y = 0;
+    CHECK(ed.project_to_window({3.75f, 1.5f, 0.25f}, x, y));
+    ed.select_for_test(bo->id, false);
+    r34_steps(ed, 2);
+    int best = 0;
+    for (int dx = 2; dx <= 4; dx++) {  // (to the side where the pixel is no longer the post's)
+      r477_click(ed, x + dx, y - dx);
+      r34_steps(ed, 2);
+      best += ed.selection_size_for_test() == 1 && ed.active_object_for_test() == post;
+      ed.select_for_test(bo->id, false);
+      r34_steps(ed, 2);
+    }
+    std::printf("    clicks beside the post that selected it: %d of 3\n", best);
+    CHECK(best == 0);
+    /* An orthographic view, whose rays start far behind the eye: the cavity's outline is hidden there too (the review: the
+     * allowance was a share of the ray's length, two metres in such a view). */
+    r494_orthographic(ed);
+    ed.select_for_test(bo->id, false);
+    r34_steps(ed, 3);
+    CHECK(r494_click(ed, {1.7f, 0.25f, 1.2f}) == slab);
+    CHECK(r494_click(ed, {1.2f, 0.25f, 1.7f}) == slab);
+  });
+
+  test("blockout outlines: a door in a room's wall: with a piece of the Blockout selected a click on the door's outline where it stands before the wall selects the door from some side and not from behind; a click in the door's middle never does", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 2);
+    ed.command("blockout add door");
+    r477_settle(ed, 2);
+    GameObject *door = ed.active_object_for_test();
+    const BlockoutPiece *dp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(dp && dp->opening == 1);
+    if (!dp) return;
+    /* Round 478's test: the door is in the wall at x = -2.1, 0.9 wide, from the floor (y = -1.5) to 0.6, 0.4 deep: its box stands
+     * 0.1 m before the wall on either side. A place on the head's edge outside, and the door's middle. */
+    const Vec3 head(-2.3f, 0.6f, 0.3f), middle(-2.1f, -0.45f, 0.0f);  // (toward the head's corner: the wall's face handle is at the wall's middle)
+    int by_outline = 0, without = 0, by_middle = 0;
+    bool head_on = false, from_behind = true;
+    /* What is selected is a post beside the room: the move gizmo stands at the selected piece, and at the room's middle it would
+     * lie over the door as seen from outside and take the click. */
+    GameObject *post = r477_piece(ed, *bo, "Post", 0, 0, {0.0f, -1.0f, 3.5f}, {0.3f, 0.3f, 0.3f});
+    r477_settle(ed, 2);
+    for (int yaw = 0; yaw < 360; yaw += 90) {
+      char line[96];
+      std::snprintf(line, sizeof line, "camera %d 5 9 0 0 0", yaw);
+      r494_camera(ed, line);
+      r477_settle(ed, 2);
+      ed.clear_selection_for_test();
+      r34_steps(ed, 2);
+      const bool none = r494_click(ed, head) == door;
+      ed.select_for_test(post->id, false);
+      r34_steps(ed, 2);
+      const bool mid = r494_click(ed, middle) == door;  // (between the two clicks on the head: two in a row there are a double click, which frames what it selects)
+      ed.select_for_test(post->id, false);
+      r34_steps(ed, 2);
+      const bool shown = r494_click(ed, head) == door;
+      std::printf("    yaw %d: outline click selects the door %d (nothing selected: %d), middle %d\n", yaw, (int)shown, (int)none, (int)mid);
+      by_outline += shown, without += none, by_middle += mid;
+      if (yaw == 90) head_on = shown;
+      if (yaw == 270) from_behind = shown;
+    }
+    CHECK(head_on);                // (seen from outside, the door's wall toward the eye)
+    CHECK(!from_behind);           // (from behind the room the outline is hidden)
+    CHECK(by_outline < 4);
+    CHECK(without < by_outline);   // (it is the outline that is clicked, shown only while something of the Blockout is selected)
+    CHECK(by_middle == 0);         // (a door's middle is air: what is behind is selected, as before)
+  });
+
+  test("blockout outlines: a window above the floor in a room's wall is selected by a click on its outline seen head-on from outside; a click in its middle never selects it", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    GameObject *room = r478_room_by_command(ed, *bo);
+    CHECK(room != nullptr);
+    if (!room) return;
+    room->set_local_position({0.0f, 0.0f, 0.0f});
+    r477_settle(ed, 2);
+    ed.command("blockout add window 1.2 1.5 0.9");
+    r477_settle(ed, 2);
+    GameObject *win = ed.active_object_for_test();
+    const BlockoutPiece *wp = win ? win->get<BlockoutPiece>() : nullptr;
+    CHECK(wp && wp->opening == 2);
+    if (!wp) return;
+    /* The window box stands 0.1 m before the wall on either side, as the door's does (round 478's test); its head is the box's top. */
+    const Vec3 c = win->world_position();
+    /* An opening's box lies between its sill and head above its origin, which is on the floor (blockout_editor.cpp). */
+    const Vec3 head(c.x - 0.2f, c.y + wp->head, c.z + 0.3f), middle(c.x, c.y + 0.5f * (wp->sill + wp->head), c.z);
+    std::printf("    window at %g %g %g, sill %g head %g\n", c.x, c.y, c.z, wp->sill, wp->head);
+    /* A post beside the room is what is selected: the move gizmo stands at the selected piece and would take the click otherwise. */
+    GameObject *post = r477_piece(ed, *bo, "Post", 0, 0, {0.0f, -1.0f, 3.5f}, {0.3f, 0.3f, 0.3f});
+    r477_settle(ed, 2);
+    int by_outline = 0, by_middle = 0;
+    bool head_on = false, from_behind = true;
+    for (int yaw = 0; yaw < 360; yaw += 90) {
+      char line[96];
+      std::snprintf(line, sizeof line, "camera %d 5 9 0 0 0", yaw);
+      r494_camera(ed, line);
+      r477_settle(ed, 2);
+      ed.select_for_test(post->id, false);
+      r34_steps(ed, 2);
+      const bool shown = r494_click(ed, head) == win;
+      if (yaw == 90) head_on = shown;
+      if (yaw == 270) from_behind = shown;
+      ed.select_for_test(post->id, false);
+      r34_steps(ed, 2);
+      const bool mid = r494_click(ed, middle) == win;
+      std::printf("    yaw %d: outline click selects the window %d, middle %d\n", yaw, (int)shown, (int)mid);
+      by_outline += shown, by_middle += mid;
+    }
+    CHECK(head_on);          // (seen from outside, the window's wall toward the eye)
+    CHECK(!from_behind);     // (from behind the room the outline is hidden)
+    CHECK(by_outline < 4);
+    CHECK(by_middle == 0);   // (the middle is air: what is behind is selected)
+  });
+
+  test("blockout outlines: Shift + click on a cutter's outline adds it to the selection and the piece selected before stays selected", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    r494_camera(ed, "camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {4, 1, 4});
+    GameObject *cut = r477_piece(ed, *bo, "Cut", 0, 1, {0, 0.5f, 0}, {1, 2, 1});
+    GameObject *post = r477_piece(ed, *bo, "Post", 0, 0, {-3.5f, 0.5f, -3.5f}, {0.5f, 2, 0.5f});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    ed.select_for_test(post->id, false);
+    r34_steps(ed, 2);
+    r494_click(ed, {0.5f, 1.5f, 0.0f}, platform::MOD_SHIFT);
+    CHECK(ed.selection_size_for_test() == 2);
+    bool has_post = false, has_cut = false;
+    for (GameObject *g : ed.selected_objects_for_test()) has_post |= g == post, has_cut |= g == cut;
+    CHECK(has_post && has_cut);
+  });
+
+  test("blockout outlines: the outlines of a Blockout's pieces are drawn when a piece of it is selected and not when an unrelated object is", [] {
+    /* No hook counts the editor's overlay lines (the recorded overlay list is private; overlays_extra_for_test only adds lines), so
+     * this reads the picture: the cutter's top edge hangs in the air over the slab, far from every gizmo; its pixels change when
+     * the outline is drawn. */
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    r494_camera(ed, "camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {4, 1, 4});
+    r477_piece(ed, *bo, "Cut", 0, 1, {0, 0.5f, 0}, {1, 2, 1});
+    GameObject *post = r477_piece(ed, *bo, "Post", 0, 0, {-3.5f, 0.5f, -3.5f}, {0.5f, 2, 0.5f});
+    GameObject *other = ed.scene().create("Unrelated");
+    other->set_world_position({3.5f, 0.0f, 3.5f});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    int x0 = 100000, y0 = 100000, x1 = -100000, y1 = -100000;
+    for (float sx : {-0.5f, 0.5f})
+      for (float sz : {-0.5f, 0.5f}) {
+        int x = 0, y = 0;
+        CHECK(ed.project_to_window({sx, 1.5f, sz}, x, y));
+        x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+      }
+    x0 -= 4, y0 -= 4, x1 += 4, y1 += 4;
+    auto frame = [&](GameObject *sel) {
+      ed.clear_selection_for_test();
+      if (sel) ed.select_for_test(sel->id, false);
+      r34_steps(ed, 3);
+      return ed.main_fb_for_test();
+    };
+    auto changed = [&](const Image &a, const Image &b) {
+      int n = 0;
+      for (int y = std::max(y0, 0); y <= std::min(y1, a.height - 1); y++)
+        for (int x = std::max(x0, 0); x <= std::min(x1, a.width - 1); x++) n += a.pixels[(size_t)y * a.width + x] != b.pixels[(size_t)y * b.width + x];
+      return n;
+    };
+    const Image none = frame(nullptr), piece = frame(post), unrelated = frame(other);
+    const int with_piece = changed(none, piece), with_other = changed(none, unrelated);
+    std::printf("    pixels around the cutter's top edge that differ from nothing selected: piece selected %d, unrelated object %d\n", with_piece, with_other);
+    CHECK(with_piece > 10);
+    CHECK(with_other == 0);
+  });
+
+  test("blockout outlines: an Intersect piece is selected by its outline", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    r494_camera(ed, "camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {6, 1, 4});
+    GameObject *inter = r477_piece(ed, *bo, "Keep", 0, 2, {1.5f, 0.5f, 0}, {2, 3, 2});  // (x 0.5 .. 2.5, y -1 .. 2: its top stands 1.5 m over the slab)
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    const Vec3 on_outline(2.5f, 2.0f, 0.0f);  // (the middle of an edge of the top: in the air)
+    ed.clear_selection_for_test();
+    r34_steps(ed, 2);
+    CHECK(r494_click(ed, on_outline) != inter);  // (nothing selected: no outline)
+    ed.select_for_test(bo->id, false);
+    r34_steps(ed, 2);
+    GameObject *hit = r494_click(ed, on_outline);
+    int px = 0, py = 0;
+    ed.project_to_window(on_outline, px, py);
+    std::printf("    intersect outline click at %d %d selected %s\n", px, py, hit ? hit->name.c_str() : "(nothing / several)");
+    CHECK(hit == inter);
+  });
+
+  test("blockout outlines: with nothing of the Blockout selected a click beside where an outline would be selects the surface there", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    r494_camera(ed, "camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *slab = r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {4, 1, 4});
+    GameObject *pocket = r477_piece(ed, *bo, "Pocket", 0, 1, {0.5f, 0.25f, 0.5f}, {1, 0.5f, 1});  // (x 0 .. 1, y 0 .. 0.5: open at the top)
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    const Vec3 beside(1.5f, 0.5f, 0.5f);  // (the slab top, 0.5 m from the pocket rim, inside its edge at 2)
+    ed.clear_selection_for_test();
+    r34_steps(ed, 2);
+    GameObject *beside_hit = r494_click(ed, beside);
+    std::printf("    beside the rim with nothing selected: %s\n", beside_hit ? beside_hit->name.c_str() : "(nothing)");
+    CHECK(beside_hit == slab);
+    const Vec3 on_rim(1.0f, 0.5f, 0.5f);
+    ed.clear_selection_for_test();
+    r34_steps(ed, 2);
+    GameObject *rim_hit = r494_click(ed, on_rim);
+    CHECK(rim_hit != nullptr);  // (the surface there, the slab's or the pocket's wall; no outline is shown, nothing to guess)
+    std::printf("    on the rim with nothing selected: %s\n", rim_hit == slab ? "slab" : rim_hit == pocket ? "pocket" : "other");
+  });
+
+  test("blockout outlines: a Blockout of 100 rooms with one piece selected: the frame with outlines against the frame with nothing selected (printed, never asserted)", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    GameObject *bo = r477_blockout(ed);
+    const std::vector<GameObject *> rooms = r477_rooms(ed, *bo, 10, 20);
+    r494_camera(ed, "camera 25 60 70 18 0 18");
+    ed.select_for_test(bo->id, false);
+    ed.command("blockout wait");
+    r477_settle(ed, 4);
+    CHECK(!rooms.empty());
+    auto per_frame_ms = [&](GameObject *sel) {
+      ed.clear_selection_for_test();
+      if (sel) ed.select_for_test(sel->id, false);
+      r477_settle(ed, 3);
+      const int n = 10;
+      const auto t0 = std::chrono::steady_clock::now();
+      r477_settle(ed, n);
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / n;
+    };
+    const double nothing = per_frame_ms(nullptr);
+    const double piece = per_frame_ms(rooms.front());
+    std::printf("    100 rooms, 20 doors: frame with nothing selected %.2f ms, with one piece selected (all outlines) %.2f ms\n", nothing, piece);
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -10144,4 +10504,5 @@ void run_blockout_tests() {
   tests_round480_mesh();
   tests_round480_editor();
   tests_round480_engineer();
+  tests_round494();
 }

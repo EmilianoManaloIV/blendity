@@ -4,6 +4,8 @@
 // is still wanted - and the ways to make, see, pick and refuse to edit one.
 #include "editor.h"
 
+#include "blockout_pick.h"
+
 #include "../core/core.h"
 #include "../core/jobs.h"
 
@@ -859,29 +861,129 @@ void mesh_piece_wire(const BlockoutPiece &bp, const Mat4 &w, const LineFn &line)
 static constexpr uint32_t kCutYellow = Color::hex(0xF4BC02);
 static constexpr uint32_t kIntersectViolet = Color::hex(0xB06CF5);
 
+/* A piece's outline as it is drawn, in the world. */
+static void piece_outline(const GameObject &p, const BlockoutPiece &bp, const LineFn &seg) {
+  const bool opening = bp.opening != 0;
+  const Mat4 w = p.world_matrix();
+  if (!opening && bp.shape == 7) return mesh_piece_wire(bp, w, seg);
+  /* A wedge, stairs, an arch, an outline: lines in the piece's own space, put in the world here. */
+  if (!opening && bp.shape >= 3 && bp.shape <= 6) return shape_wire(bp, nullptr, [&](Vec3 a, Vec3 b) { seg(w.point(a), w.point(b)); });
+  /* An opening's box lies between its sill and head above the origin. */
+  piece_wire(wire_box(bp, bp.box_size(), nullptr), opening ? w * bp.shape_offset() : w, seg);
+}
+
+bool blockout_outlines_shown(const GameObject &blockout, const std::function<bool(uint64_t)> &selected) {
+  if (!blockout.get<Blockout>() || !blockout.active_in_hierarchy()) return false;
+  if (selected(blockout.id)) return true;
+  std::vector<const GameObject *> pieces;
+  blockout_piece_objects(blockout, pieces);
+  return std::any_of(pieces.begin(), pieces.end(), [&](const GameObject *p) { return selected(p->id); });
+}
+
+namespace {
+
+/* How far along a pixel's ray the depth buffer's value `z` lies, in metres (the buffer's numbers crowd toward the far plane: a
+ * quarter of a metre at nine metres is a few parts in a hundred thousand of them, and no fixed allowance in them fits near and
+ * far alike). 1e30 when `z` is the background's or past what can be told. */
+float depth_metres(const Renderer3D &r3d, const Ray &ray, float z) {
+  auto depth_at = [&](float t, float &out) {
+    Vec2 s;
+    return r3d.project(ray.origin + ray.dir * t, s, out);
+  };
+  /* The ray starts on the near plane: a hand's width before the eye in a perspective view, a kilometre and more behind it in
+   * an orthographic one. So the far end is looked for, not taken as a number. */
+  float lo = 0.0f, hi = 1.0f, zhi = 0.0f;
+  if (!(z < 1.0f)) return 1e30f;
+  while (hi < 1e8f && depth_at(hi, zhi) && zhi < z) lo = hi, hi *= 2.0f;
+  if (!(hi < 1e8f)) return 1e30f;
+  for (int i = 0; i < 40; i++) {
+    const float mid = 0.5f * (lo + hi);
+    float zm;
+    const bool before = depth_at(mid, zm) && zm < z;  // (past the far plane nothing projects: that is behind `z` too)
+    (before ? lo : hi) = mid;
+  }
+  return 0.5f * (lo + hi);
+}
+
+/* How far behind the picture an outline may be and still count as on it (an outline lies in the faces it runs along): two parts
+ * in a thousand of its distance from the eye, and a millimetre. An orthographic view has no such distance - its rays are side by
+ * side and start far behind the eye - so there it is two parts in a thousand of the height of what the view shows. */
+float hidden_allowance(const Renderer3D &r3d, const RenderTarget &rt, const Ray &ray, float x, float y, float along) {
+  const Ray beside = r3d.screen_ray(x, y + 100.0f);
+  const bool orthographic = dot(ray.dir, beside.dir) > 0.999999f;
+  const float shown = length(beside.origin - ray.origin) * 0.01f * (float)rt.height;
+  return 0.002f * (orthographic ? shown : along) + 1e-3f;
+}
+
+/* How near a view pixel is to a line of the world as it is drawn, in pixels; 1e30 when it is `reach` or more away, when the line
+ * is behind the eye, or when it is behind the picture where it is nearest (a pixel around, and `hidden_allowance`). */
+float outline_distance(const Renderer3D &r3d, const RenderTarget &rt, Vec3 a, Vec3 b, float px, float py, float reach) {
+  Vec2 sa, sb;
+  float za, zb;
+  if (!r3d.project(a, sa, za) || !r3d.project(b, sb, zb)) return 1e30f;
+  const Vec2 d = sb - sa, m(px, py);
+  const float len2 = dot(d, d);
+  const float t = len2 > 1e-12f ? std::max(0.0f, std::min(1.0f, dot(m - sa, d) / len2)) : 0.0f;
+  const Vec2 at = sa + d * t;
+  const float away = length(at - m);
+  if (!(away < reach)) return 1e30f;  // (before the depth is asked: most lines of a building are nowhere near the click)
+  float behind = 0.0f;  // (the farthest the picture is at that place)
+  for (int j = -1; j <= 1; j++)
+    for (int i = -1; i <= 1; i++) behind = std::max(behind, rt.depth_at((int)at.x + i, (int)at.y + j));
+  const Ray ray = r3d.screen_ray(at.x, at.y);
+  const float line = depth_metres(r3d, ray, za + (zb - za) * t), picture = depth_metres(r3d, ray, behind);
+  if (line > picture + hidden_allowance(r3d, rt, ray, at.x, at.y, picture)) return 1e30f;
+  return away;
+}
+
+}  // namespace
+
+uint64_t blockout_pick_outline(Scene &scene, const Renderer3D &r3d, const RenderTarget &rt, const std::function<bool(uint64_t)> &selected, int view_x,
+                               int view_y, float reach) {
+  uint64_t hit = 0;
+  float best = reach;
+  const float px = (float)view_x + 0.5f, py = (float)view_y + 0.5f;
+  std::vector<const GameObject *> pieces;
+  scene.for_each([&](GameObject &g) {
+    if (!blockout_outlines_shown(g, selected)) return;
+    pieces.clear();  // (the list is added to: without this each Blockout would be asked about the ones before it again)
+    blockout_piece_objects(g, pieces);
+    for (const GameObject *p : pieces) {
+      const BlockoutPiece *bp = p->get<BlockoutPiece>();
+      const bool cuts = bp->opening != 0 || bp->operation == 1 || (bp->operation == 2 && !bp->room);
+      if (!cuts) continue;  // (a piece with a surface is clicked on its surface: its outline runs along edges two pieces share)
+      piece_outline(*p, *bp, [&](Vec3 a, Vec3 b) {
+        const float d = outline_distance(r3d, rt, a, b, px, py, best);
+        if (d < best) best = d, hit = p->id;
+      });
+    }
+  });
+  return hit;
+}
+
 void Editor::draw_blockouts() {
+  const std::function<bool(uint64_t)> selected = [this](uint64_t id) { return is_selected(id); };
   scene_->for_each([&](GameObject &g) {
     if (!g.get<Blockout>() || !g.active_in_hierarchy()) return;
-    const bool all = is_selected(g.id);
+    /* Round 494: every piece shows its outline while anything of the Blockout is selected - faintly when it is another piece that
+     * is (the owner: a door seen head-on is air, and could not be found to click). */
+    if (!blockout_outlines_shown(g, selected)) return;
+    const bool whole = is_selected(g.id);
     std::vector<const GameObject *> pieces;
     blockout_piece_objects(g, pieces);
     for (const GameObject *p : pieces) {
       const bool mine = is_selected(p->id);
-      if (!all && !mine) continue;
       const BlockoutPiece *bp = p->get<BlockoutPiece>();
       const bool opening = bp->opening != 0;
       const uint32_t base = opening || bp->operation == 1 ? kCutYellow : bp->operation == 2 && !bp->room ? kIntersectViolet : kSelectOrange;
-      const uint32_t col = (base & 0x00FFFFFFu) | ((mine ? 255u : 150u) << 24);
-      const float width = mine ? 4e-4f : 3e-4f;
+      const uint32_t col = (base & 0x00FFFFFFu) | ((mine ? 255u : whole ? 150u : 110u) << 24);
+      const float width = mine ? 4e-4f : whole ? 3e-4f : 2.5e-4f;
       const Mat4 w = p->world_matrix();
       auto draw = [&](uint32_t c, float wd) { return [this, c, wd](Vec3 a, Vec3 b) { scene_r3d_.line(a, b, c, true, wd); }; };
-      /* A wedge, stairs, an arch, an outline: lines in the piece's own space, put in the world here. */
       auto own = [&](uint32_t c, float wd) { return [this, c, wd, w](Vec3 a, Vec3 b) { scene_r3d_.line(w.point(a), w.point(b), c, true, wd); }; };
       const bool shaped = !opening && bp->shape >= 3 && bp->shape <= 6;
-      if (!opening && bp->shape == 7) mesh_piece_wire(*bp, w, draw(col, width));
-      else if (shaped) shape_wire(*bp, nullptr, own(col, width));
-      /* An opening's box lies between its sill and head above the origin. */
-      else piece_wire(wire_box(*bp, bp->box_size(), nullptr), opening ? w * bp->shape_offset() : w, draw(col, width));
+      piece_outline(*p, *bp, draw(col, width));
+      if (!mine && !whole) continue;  // (a room's grown shell is drawn for the pieces in hand only)
       if (!bp->is_room()) continue;
       RoomGrowth grow;
       if (!blockout_room_growth(bp->to_piece(p->id, blockout_piece_matrix(*p, g)), grow)) continue;
