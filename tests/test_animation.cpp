@@ -10647,6 +10647,935 @@ static void tests_round473_more() {
   });
 }
 
+/* ===================================================================== */
+/* Round 474 (task 0450): trails off the live scene, AutoPosing's pins once, Play with the springs                       */
+/* ===================================================================== */
+static void tests_round474() {
+  test("round 474: Play with the springs on the stand-in builds no render mesh whole once it has run a few frames", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    ed.command("play");
+    r34_steps(ed, 8);
+    const MeshCounts c0 = mesh_counts();
+    const PoseCounts p0 = pose_counts();
+    const int frames = 20;
+    r34_steps(ed, frames);
+    const MeshCounts d = mesh_counts() - c0;
+    const PoseCounts pd = pose_counts() - p0;
+    std::printf("    %d frames of Play: %llu built whole, %llu in place, %llu refused, %llu springs chains stepped, %llu outline shells\n", frames,
+                (unsigned long long)d.full_builds, (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused, (unsigned long long)pd.spring_chains,
+                (unsigned long long)pd.outline_shells);
+    CHECK(pd.spring_chains > 0);
+    /* The only whole builds left are the outline shells' (a new mesh each frame, ADR 0124 leaves them out): before, the skins
+     * were built whole as well - physics_step asked every mesh's bounds before the springs moved the pose, and the Game view's
+     * mesh then no longer matched the Scene view's. */
+    CHECK(d.full_builds <= pd.outline_shells);
+    CHECK(d.in_place_refused == 0 && d.in_place > 0);
+    size_t skins = 0, unequal = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.get<SkinModifier>() || !g.mesh_filter() || !g.mesh_filter()->mesh) return;
+      skins++;
+      const Mesh *em = g.evaluated_mesh();
+      unequal += !(em && r470_draws_like_fresh(*em, g.name.c_str()));
+    });
+    CHECK(skins > 0 && unequal == 0);  // (positions, normals and UVs a fresh build's, to the bit)
+  });
+
+  test("round 474: the scene's own physics step (no Jolt world) still stops a ball on a mesh (the meshes' bounds are asked for once there is a body)", [] {
+    Scene s;
+    GameObject *floor = s.create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::cube();
+    floor->add<MeshRenderer>();
+    floor->set_local_scale({10.0f, 1.0f, 10.0f});
+    floor->set_local_position({0, -0.5f, 0});
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({0, 3, 0});
+    PlayContext ctx;
+    ctx.dt = 1.0f / 60.0f;
+    float lowest = 3.0f;
+    for (int i = 0; i < 240; i++) {
+      s.update(ctx);
+      lowest = std::min(lowest, ball->world_position().y);
+    }
+    std::printf("    the ball rests at y %.3f, lowest %.3f\n", ball->world_position().y, lowest);
+    CHECK_NEAR(ball->world_position().y, 0.5f, 0.1f);
+    CHECK(lowest > 0.3f);
+  });
+
+  test("round 474: AutoPosing's pins are worked out once and kept while the scene, the clip's contacts, the playhead and the locks hold: no scene walk over 60 frames with the handles drawn; a lock, a contact, a rename and an undo each give today's pins", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *made = create_rig(ed.scene(), false, Vec3(0.0f));
+    const uint64_t rig_id = made->id;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + made->name);
+    ed.command("anim new Pins474");
+    ed.command("autopose on");
+    r34_steps(ed, 6);
+    auto bone_id = [&](const char *name) {
+      const GameObject *g = ed.scene().find_by_name(name);
+      return g ? g->id : (uint64_t)0;
+    };
+    auto sorted = [](std::vector<uint64_t> v) {
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    auto pins = [&] { return sorted(ed.autopose_pin_ids_for_test(rig_id, rig_id)); };
+    auto feet = [&] {  // (today's rule, written out: the bones under the rig with "foot" in their names)
+      std::vector<uint64_t> v;
+      const GameObject *rig = ed.scene().find(rig_id);
+      ed.scene().for_each([&](GameObject &g) {
+        if (g.get<Bone>() && rig && ed.scene().is_ancestor(rig, &g) && to_lower(g.name).find("foot") != std::string::npos) v.push_back(g.id);
+      });
+      return sorted(v);
+    };
+    CHECK(feet().size() == 2 && pins() == feet());
+    const size_t w0 = ed.autopose_pin_walks_for_test();
+    CHECK(w0 >= 1);  // (the handles asked for them)
+    r34_steps(ed, 60);
+    std::printf("    60 unchanged frames: %zu scene walks for the pins\n", ed.autopose_pin_walks_for_test() - w0);
+    CHECK(ed.autopose_pin_walks_for_test() == w0 && pins() == feet());
+    /* A lock adds its bone; an unlock takes it away. */
+    ed.command("autopose lock LeftHand");
+    r34_steps(ed, 3);
+    std::vector<uint64_t> want = feet();
+    want.push_back(bone_id("LeftHand"));
+    CHECK(pins() == sorted(want));
+    const size_t w1 = ed.autopose_pin_walks_for_test();
+    r34_steps(ed, 30);
+    CHECK(ed.autopose_pin_walks_for_test() == w1);
+    ed.command("autopose unlock LeftHand");
+    r34_steps(ed, 3);
+    CHECK(pins() == feet());
+    /* A contact at the playhead replaces the feet; the playhead leaving it brings them back; the clip's contact removed too. */
+    ed.command("anim frame 5");
+    ed.command("body contacts add RightHand 0 10");
+    r34_steps(ed, 3);
+    CHECK(pins() == std::vector<uint64_t>{bone_id("RightHand")});
+    ed.command("anim frame 20");
+    r34_steps(ed, 3);
+    CHECK(pins() == feet());
+    ed.command("anim frame 5");
+    r34_steps(ed, 3);
+    CHECK(pins() == std::vector<uint64_t>{bone_id("RightHand")});
+    ed.command("body contacts clear");
+    r34_steps(ed, 3);
+    CHECK(pins() == feet());
+    /* A bone renamed out of the rule, then the undo that gives it back. */
+    ed.scene().find_by_name("LeftFoot")->name = "Mover";
+    ed.mark_changed_for_test("Rename a foot");
+    r34_steps(ed, 3);
+    CHECK(feet().size() == 1 && pins() == feet());
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(feet().size() == 2 && pins() == feet());
+  });
+
+  /* A rig with a clip keying the left hand's IK target and the spine every five frames, trails on, the playhead at 20. */
+  auto trail_rig = [](Editor &ed, float key20) {
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Trail474");
+    for (int f = 0; f <= 40; f += 5) {
+      ed.command("anim key Spine Rotation 2 " + std::to_string(f) + " " + std::to_string(f % 10 ? 8 : 0));
+      ed.command("anim key LeftHandIK Position 1 " + std::to_string(f) + " " + std::to_string(f == 20 ? key20 : 1.0f + 0.01f * (float)f));
+    }
+    ed.command("anim frame 20");
+    ed.command("anim trails on");
+    r34_steps(ed, 40);  // (the clip's length is what it is: 31 to 51 frames around the playhead, six a frame)
+  };
+
+  test("round 474: trails sample each frame once and pose the live scene for none while nothing they read changes; a key edited samples again the frames around it only, and the trail's points equal a full resample's", [=] {
+    Editor ed;
+    trail_rig(ed, 1.2f);
+    const size_t sampled = ed.trail_frames_for_test();
+    const size_t s0 = ed.trail_samples_for_test();
+    CHECK(sampled >= 41 && s0 == sampled);
+    r34_steps(ed, 60);
+    std::printf("    60 unchanged frames: %zu live poses\n", ed.trail_samples_for_test() - s0);
+    CHECK(ed.trail_samples_for_test() == s0);
+    /* The key at frame 20 of the hand's target moved (Record's touch_keys): keys 10..30 are the frames it can move. */
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    AnimTrack *t = clip->find("LeftHandIK", "Position", 1);
+    CHECK(t != nullptr);
+    if (!t) return;
+    t->set_key(20.0f, 1.5f);
+    clip->touch_keys();
+    for (int i = 0; i < 12; i++) ed.step_frame_headless();
+    const size_t again = ed.trail_samples_for_test() - s0;
+    std::printf("    a key edited: %zu frames sampled again of %zu\n", again, sampled);
+    CHECK(again >= 1 && again <= 21 && ed.trail_frames_for_test() == sampled);
+    /* The same clip sampled from the start, whole: the same points. */
+    Editor fresh;
+    trail_rig(fresh, 1.5f);
+    float worst = 0.0f;
+    size_t compared = 0;
+    for (const char *bone : {"LeftHand", "Hips", "RightFoot", "Head"}) {
+      const GameObject *a = ed.scene().find_by_name(bone), *b = fresh.scene().find_by_name(bone);
+      CHECK(a && b);
+      if (!a || !b) continue;
+      for (int f = 0; f <= 40; f++) {
+        Vec3 pa, pb;
+        if (!ed.trail_at_for_test(a->id, f, pa) || !fresh.trail_at_for_test(b->id, f, pb)) continue;
+        worst = std::max(worst, length(pa - pb));
+        compared++;
+      }
+    }
+    std::printf("    %zu points compared with a full sample: at most %g m apart\n", compared, (double)worst);
+    CHECK(compared == 4 * 41 && worst < 1e-5f);
+    /* Trails off: the copy of the clip's keys goes too. */
+    CHECK(ed.trail_kept_tracks_for_test() > 0);
+    ed.command("anim trails off");
+    r34_steps(ed, 3);
+    CHECK(ed.trail_kept_tracks_for_test() == 0 && ed.trail_frames_for_test() == 0);
+  });
+
+  test("round 474: the pins are kept while the playhead moves between frames that hold the same contacts: one walk on entering a contact's frames, none inside, one on leaving", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *made = create_rig(ed.scene(), false, Vec3(0.0f));
+    const uint64_t rig_id = made->id;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + made->name);
+    ed.command("anim new Scrub474");
+    ed.command("autopose on");
+    ed.command("anim frame 0");
+    ed.command("body contacts add RightHand 10 20");
+    r34_steps(ed, 4);
+    const uint64_t hand = ed.scene().find_by_name("RightHand")->id;
+    auto sorted = [](std::vector<uint64_t> v) {
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    std::vector<uint64_t> feet;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<Bone>() && to_lower(g.name).find("foot") != std::string::npos) feet.push_back(g.id);
+    });
+    feet = sorted(feet);
+    ed.command("anim frame 1");  // (the first clip apply settles what it bumps)
+    r34_steps(ed, 3);
+    size_t walks = ed.autopose_pin_walks_for_test();
+    auto at = [&](int frame, const std::vector<uint64_t> &want, size_t more, const char *what) {
+      ed.command("anim frame " + std::to_string(frame));
+      r34_steps(ed, 2);
+      const bool ok = sorted(ed.autopose_pin_ids_for_test(rig_id, rig_id)) == want && ed.autopose_pin_walks_for_test() == walks + more;
+      if (!ok) std::printf("    frame %d (%s): %zu walks since the last, wanted %zu\n", frame, what, ed.autopose_pin_walks_for_test() - walks, more);
+      walks = ed.autopose_pin_walks_for_test();
+      CHECK(ok);
+    };
+    for (int f = 0; f <= 9; f++) at(f, feet, 0, "before the contact");
+    at(10, {hand}, 1, "enters it");
+    for (int f = 11; f <= 20; f++) at(f, {hand}, 0, "inside it");
+    at(21, feet, 1, "leaves it");
+  });
+
+  test("round 474: a Puppet drag on the skinned stand-in walks the scene for the pins at most once: skin evaluation moves no structure stamp", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    GameObject *arm = nullptr, *hand = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!arm && g.get<Armature>()) arm = &g;
+    });
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!hand && g.get<Bone>() && ed.scene().is_ancestor(arm, &g) && to_lower(g.name).find("hand") != std::string::npos) hand = &g;
+    });
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    const uint64_t hand_id = hand->id;
+    ed.command("select " + arm->name);
+    ed.command("autopose on");
+    r34_steps(ed, 4);
+    const Vec3 h0 = ed.scene().find(hand_id)->world_position();
+    CHECK(ed.autopose_frame_for_test(hand_id, h0 + Vec3(0.01f, 0.02f, 0.0f)));
+    ed.step_frame_headless();
+    const size_t w0 = ed.autopose_pin_walks_for_test();
+    for (int k = 2; k <= 7; k++) {
+      CHECK(ed.autopose_frame_for_test(hand_id, h0 + Vec3(0.01f, 0.02f, 0.0f) * (float)k));
+      ed.step_frame_headless();
+    }
+    std::printf("    six more drag frames with the handles drawn: %zu scene walks for the pins\n", ed.autopose_pin_walks_for_test() - w0);
+    CHECK(ed.autopose_pin_walks_for_test() == w0);
+    ed.autopose_release_for_test();
+  });
+}
+
+/* ===================================================================== */
+/* Round 474, the test engineer's pass: the scene's own physics with and without bodies, the pin cache's stale-hunting,  */
+/* the trail cache's key-edit windows against a from-scratch sample                                                     */
+/* ===================================================================== */
+static GameObject *r474_cube(Scene &s, const char *name, Vec3 pos, Vec3 scale = Vec3(1.0f)) {
+  GameObject *g = s.create(name);
+  g->add<MeshFilter>()->mesh = primitives::cube();
+  g->add<MeshRenderer>();
+  g->set_local_scale(scale);
+  g->set_local_position(pos);
+  return g;
+}
+
+static GameObject *r474_ball(Scene &s, const char *name, Vec3 pos) {
+  GameObject *g = r474_cube(s, name, pos);
+  g->add<Rigidbody>()->bounciness = 0.0f;
+  return g;
+}
+
+static void r474_run(Scene &s, int n) {
+  PlayContext ctx;
+  ctx.dt = 1.0f / 60.0f;
+  for (int i = 0; i < n; i++) s.update(ctx);
+}
+
+static GameObject *r474_floor(Scene &s) { return r474_cube(s, "Floor", {0, -0.5f, 0}, {10.0f, 1.0f, 10.0f}); }  // (its top at y 0)
+
+using R474Points = std::map<std::pair<uint64_t, int>, Vec3>;
+
+/* Every bone's head at every frame the trail cache holds. */
+static R474Points r474_points(Editor &ed) {
+  R474Points out;
+  std::vector<uint64_t> ids;
+  ed.scene().for_each([&](GameObject &g) {
+    if (g.get<Bone>()) ids.push_back(g.id);
+  });
+  for (uint64_t id : ids)
+    for (int f = 0; f <= 70; f++) {
+      Vec3 p;
+      if (ed.trail_at_for_test(id, f, p)) out[{id, f}] = p;
+    }
+  return out;
+}
+
+struct R474Edit {
+  size_t again = 0, whole = 0, kept_points = 0, fresh_points = 0, changed = 0;
+  float worst = 0.0f;
+  bool same_set = false;
+};
+
+/* After an edit made at `s0` samples: let the cache catch up, keep its points, drop it (trails off, on), sample from
+ * nothing, and compare. `again` is how many frames the cache posed on the live scene for the edit. */
+static R474Edit r474_after_edit(Editor &ed, size_t s0, const R474Points &before = {}) {
+  r34_steps(ed, 16);
+  R474Edit r;
+  r.again = ed.trail_samples_for_test() - s0;
+  r.whole = ed.trail_frames_for_test();
+  const R474Points kept = r474_points(ed);
+  for (const auto &[k, p] : kept) {
+    auto it = before.find(k);
+    if (it == before.end() || length(it->second - p) > 1e-6f) r.changed++;
+  }
+  ed.command("anim trails off");
+  r34_steps(ed, 2);
+  ed.command("anim trails on");
+  r34_steps(ed, 16);
+  const R474Points fresh = r474_points(ed);
+  r.kept_points = kept.size(), r.fresh_points = fresh.size();
+  /* Every point a fresh sample has, the kept cache has too and the same (it may hold more: frames an edit did not touch that
+   * the playhead has since left behind). */
+  r.same_set = true;
+  for (const auto &[k, p] : fresh) {
+    auto it = kept.find(k);
+    if (it == kept.end()) {
+      r.same_set = false;
+      continue;
+    }
+    r.worst = std::max(r.worst, length(p - it->second));
+  }
+  return r;
+}
+
+static AnimTrack *r474_track(AnimationClip &clip, const char *bone, const char *prop, int axis) {
+  for (AnimTrack &t : clip.tracks) {
+    const size_t n = std::strlen(bone);
+    const bool named = t.path.size() >= n && t.path.compare(t.path.size() - n, n, bone) == 0 && (t.path.size() == n || t.path[t.path.size() - n - 1] == '/');
+    if (named && t.property == prop && t.axis == axis) return &t;
+  }
+  return nullptr;
+}
+
+/* The rig the trail tests share: Spine rotation and the left hand's IK target keyed every five frames, trails on, the playhead at 20. */
+static void r474_trail_rig(Editor &ed) {
+  ed.init_headless(1200, 900);
+  ed.command("assist on physics");
+  GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+  ed.mark_changed_for_test("Add the rig");
+  ed.command("select " + rig->name);
+  ed.command("anim new Trail474b");
+  for (int f = 0; f <= 40; f += 5) {
+    ed.command("anim key Spine Rotation 2 " + std::to_string(f) + " " + std::to_string(f % 10 ? 8 : 0));
+    ed.command("anim key LeftHandIK Position 1 " + std::to_string(f) + " " + std::to_string(1.0f + 0.01f * (float)f));
+  }
+  ed.command("anim frame 20");
+  ed.command("anim trails on");
+  r34_steps(ed, 16);
+}
+
+static void tests_round474_more() {
+  /* ---------------------------------------------------------------- A: the scene's own physics */
+  test("round 474: with no body the scene's own physics asks no mesh for its bounds (nothing evaluated or built); once there is a body it does", [] {
+    Scene s;
+    r474_floor(s);
+    GameObject *sub = r474_cube(s, "Sub", {3, 1, 0});
+    sub->add<SubdivisionSurface>();
+    r474_cube(s, "Other", {-3, 1, 0});
+    const PoseCounts p0 = pose_counts();
+    const MeshCounts m0 = mesh_counts();
+    r474_run(s, 20);
+    const PoseCounts pd = pose_counts() - p0;
+    const MeshCounts md = mesh_counts() - m0;
+    std::printf("    20 updates with no body: %llu evaluations, %llu built whole\n", (unsigned long long)pd.evaluations, (unsigned long long)md.full_builds);
+    CHECK(pd.evaluations == 0 && md.full_builds == 0);
+    r474_ball(s, "Ball", {0, 3, 0});
+    const PoseCounts p1 = pose_counts();
+    r474_run(s, 2);
+    const uint64_t asked = (pose_counts() - p1).evaluations;
+    std::printf("    two updates with a body: %llu evaluations\n", (unsigned long long)asked);
+    CHECK(asked > 0);  // (the statics' bounds are still asked for: a ball must meet the subdivided cube's box)
+  });
+
+  test("round 474: a ball falls through nothing when there is no mesh under it, at the free-fall distance", [] {
+    Scene s;
+    GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+    r474_run(s, 60);
+    const float y = ball->world_position().y;
+    std::printf("    one second of free fall from y 3: y %.3f (no drag: %.3f)\n", y, 3.0f - 0.5f * 9.81f);
+    CHECK(y < -1.6f && y > -2.2f);
+    CHECK(std::fabs(ball->world_position().x) < 1e-5f && std::fabs(ball->world_position().z) < 1e-5f);
+  });
+
+  test("round 474: two balls dropped on a mesh floor stack on each other and stay put (bodies collide with bodies, both rest on the floor)", [] {
+    Scene s;
+    r474_floor(s);
+    GameObject *low = r474_ball(s, "Low", {0, 1.0f, 0});
+    GameObject *high = r474_ball(s, "High", {0, 3.0f, 0});
+    r474_run(s, 360);
+    const float yl = low->world_position().y, yh = high->world_position().y;
+    std::printf("    stack at rest: low %.3f, high %.3f\n", yl, yh);
+    CHECK_NEAR(yl, 0.5f, 0.15f);
+    CHECK(yh > yl + 0.85f && yh < yl + 1.3f);
+    r474_run(s, 60);
+    CHECK_NEAR(low->world_position().y, yl, 0.02f);
+    CHECK_NEAR(high->world_position().y, yh, 0.02f);
+  });
+
+  test("round 474: a kinematic body never moves and a ball lands on it; a disabled Rigidbody is a floor like any mesh; an inactive floor is none", [] {
+    {
+      Scene s;
+      GameObject *plat = r474_cube(s, "Platform", {0, 0, 0});
+      plat->add<Rigidbody>()->is_kinematic = true;
+      GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+      r474_run(s, 240);
+      std::printf("    on a kinematic platform: ball y %.3f, platform y %.4f\n", ball->world_position().y, plat->world_position().y);
+      CHECK(plat->world_position().y == 0.0f);
+      CHECK(ball->world_position().y > 0.85f && ball->world_position().y < 1.2f);
+    }
+    {
+      Scene s;
+      GameObject *slab = r474_cube(s, "Slab", {0, 0, 0});
+      slab->add<Rigidbody>()->enabled = false;
+      GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+      r474_run(s, 240);
+      std::printf("    on a disabled-Rigidbody slab: ball y %.3f\n", ball->world_position().y);
+      CHECK(slab->world_position().y == 0.0f);
+      CHECK(ball->world_position().y > 0.85f && ball->world_position().y < 1.2f);
+    }
+    {
+      Scene s;
+      GameObject *fl = r474_floor(s);
+      fl->active = false;
+      GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+      r474_run(s, 120);
+      CHECK(ball->world_position().y < -1.0f);
+    }
+  });
+
+  test("round 474: a body added after quiet frames lands on the floor, a body destroyed leaves the others and the floor alone, and a scene left with none steps cleanly", [] {
+    Scene s;
+    GameObject *fl = r474_floor(s);
+    r474_run(s, 30);
+    CHECK(fl->world_position().y == -0.5f);
+    GameObject *a = r474_ball(s, "A", {-2, 3, 0});
+    GameObject *b = r474_ball(s, "B", {2, 3, 0});
+    const uint64_t bid = b->id;
+    r474_run(s, 240);
+    CHECK_NEAR(a->world_position().y, 0.5f, 0.1f);
+    CHECK_NEAR(b->world_position().y, 0.5f, 0.1f);
+    s.destroy(b);
+    CHECK(s.find(bid) == nullptr);
+    r474_run(s, 60);
+    CHECK_NEAR(a->world_position().y, 0.5f, 0.1f);
+    s.destroy(a);
+    const PoseCounts p0 = pose_counts();
+    r474_run(s, 30);
+    CHECK((pose_counts() - p0).evaluations == 0);
+    CHECK(fl->world_position().y == -0.5f && fl->local().scale.x == 10.0f);
+  });
+
+  test("round 474: a ball on a mesh that is raised each frame rides it up (the statics are read at each step, not once)", [] {
+    Scene s;
+    GameObject *fl = r474_floor(s);
+    GameObject *ball = r474_ball(s, "Ball", {0, 0.5f, 0});
+    r474_run(s, 60);
+    float worst_gap = 0.0f;
+    for (int i = 1; i <= 120; i++) {
+      fl->set_local_position({0, -0.5f + 0.5f * (float)i / 120.0f, 0});
+      r474_run(s, 1);
+      worst_gap = std::max(worst_gap, (fl->world_position().y + 0.5f + 0.5f) - ball->world_position().y);  // how far the ball is below where it should rest
+    }
+    std::printf("    floor up 0.5 m: ball y %.3f, worst sink %.3f\n", ball->world_position().y, worst_gap);
+    CHECK_NEAR(ball->world_position().y, 1.0f, 0.15f);
+    CHECK(worst_gap < 0.2f);
+  });
+
+  test("round 474: Play with the springs, the Scene view and the Game view both open: no render mesh is built whole beyond the outline shells over 30 frames", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    ed.command("play");
+    r34_steps(ed, 10);
+    CHECK(ed.window_rect_for_test(WindowKind::Game).w > 0 && ed.window_rect_for_test(WindowKind::Scene).w > 0);
+    const MeshCounts c0 = mesh_counts();
+    const PoseCounts p0 = pose_counts();
+    r34_steps(ed, 30);
+    const MeshCounts d = mesh_counts() - c0;
+    const PoseCounts pd = pose_counts() - p0;
+    std::printf("    30 frames, two views: %llu built whole, %llu in place, %llu refused, %llu spring chains, %llu outline shells\n", (unsigned long long)d.full_builds,
+                (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused, (unsigned long long)pd.spring_chains, (unsigned long long)pd.outline_shells);
+    CHECK(pd.spring_chains > 0);
+    CHECK(d.full_builds <= pd.outline_shells);
+    CHECK(d.in_place_refused == 0);
+    ed.command("stop");
+    r34_steps(ed, 3);
+  });
+
+  test("round 474: a Rigidbody ball dropped over the stand-in character in Play comes to rest (the posed character's bounds are still a floor once there is a body)", [] {
+    /* The scene's own physics step is what this pins (round 474 changed it). With the Jolt world a mesh without a
+     * collider is no floor and the ball falls on: that build is left to the physics group's own tests. */
+    if (physics_jolt_available()) return;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    AABB all;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<MeshFilter>() && g.get<MeshRenderer>()) all.add(g.world_bounds());
+    });
+    CHECK(all.valid());
+    GameObject *ball = ed.scene().create("DroppedBall");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ball->set_local_scale(Vec3(0.2f));
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({all.center().x, all.max.y + 1.0f, all.center().z});
+    ed.mark_changed_for_test("Add the ball");
+    const uint64_t id = ball->id;
+    ed.command("play");
+    r34_steps(ed, 240);
+    GameObject *b = ed.scene().find(id);
+    CHECK(b != nullptr);
+    if (!b) return;
+    const float y1 = b->world_position().y;
+    r34_steps(ed, 30);
+    const float y2 = b->world_position().y;
+    std::printf("    ball: dropped from %.2f, rests at %.3f (character spans %.2f..%.2f)\n", all.max.y + 1.0f, y2, all.min.y, all.max.y);
+    CHECK(std::fabs(y2 - y1) < 0.05f);
+    CHECK(y2 > all.min.y - 0.5f);
+    ed.command("stop");
+  });
+
+  /* ---------------------------------------------------------------- B: the pins */
+  test("round 474: the pins follow every change that moves them (rename, delete, reparent, another rig, clip, contact, playhead, lock, undo / redo, Play / Stop, new scene) with one scene walk each, and none while only transforms change", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *made = create_rig(ed.scene(), false, Vec3(0.0f));
+    const uint64_t arm = made->id;
+    const std::string arm_name = made->name;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + arm_name);
+    ed.command("anim new Pins474b");
+    ed.command("redraw always");  // (every frame is drawn, the handles with it: idle frames really ask for the pins)
+    ed.command("autopose on");
+    r34_steps(ed, 6);
+    auto sorted = [](std::vector<uint64_t> v) {
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    auto pins_of = [&](uint64_t rid) { return sorted(ed.autopose_pin_ids_for_test(rid, rid)); };
+    auto feet_of = [&](uint64_t rid) {  // (the rule written out)
+      std::vector<uint64_t> v;
+      const GameObject *rig = ed.scene().find(rid);
+      ed.scene().for_each([&](GameObject &g) {
+        if (g.get<Bone>() && rig && ed.scene().is_ancestor(rig, &g) && to_lower(g.name).find("foot") != std::string::npos) v.push_back(g.id);
+      });
+      return sorted(v);
+    };
+    auto bone = [&](const char *name) -> GameObject * { return ed.scene().find_by_name(name); };
+    auto id_of = [&](const char *name) { return bone(name) ? bone(name)->id : (uint64_t)0; };
+    /* One change: the cache made current first, the change, a few frames with the handles drawn, then the answer. */
+    const std::vector<uint64_t> RULE = {~(uint64_t)0};  // (as wanted: the feet rule worked out after the change)
+    auto change = [&](const char *what, const std::function<void()> &edit, const std::vector<uint64_t> &want_in, size_t walks, size_t most = 0) {
+      pins_of(arm);
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      edit();
+      r34_steps(ed, 12);  // (the handles are drawn in these)
+      const size_t by_frames = ed.autopose_pin_walks_for_test() - w0;
+      const std::vector<uint64_t> got = pins_of(arm);
+      const size_t w = ed.autopose_pin_walks_for_test() - w0;
+      const std::vector<uint64_t> want = want_in == RULE ? feet_of(arm) : want_in;
+      const bool ok = got == sorted(want) && w >= walks && w <= std::max(walks, most);
+      std::printf("    %-52s pins %zu (want %zu), walks %zu (%zu by the handles)%s\n", what, got.size(), want.size(), w, by_frames, ok ? "" : "   <-- STALE?");
+      CHECK(got == sorted(want));
+      CHECK(w >= walks && w <= std::max(walks, most));
+    };
+    CHECK(feet_of(arm).size() == 2 && pins_of(arm) == feet_of(arm));
+    /* The handles ask for the pins themselves: a change shows a walk before the test asks. */
+    {
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      ed.scene().find_by_name("LeftFoot")->name = "Mover";
+      ed.mark_changed_for_test("Rename a foot");
+      r34_steps(ed, 3);
+      CHECK(ed.autopose_pin_walks_for_test() <= w0 + 1);  // (the drawn handles walked once, or the Scene view was not redrawn: they were not asked - no pins_of in between)
+      ed.scene().find_by_name("Mover")->name = "LeftFoot";
+      ed.mark_changed_for_test("Rename it back");
+      r34_steps(ed, 3);
+    }
+    change("a foot renamed away from 'foot'", [&] { bone("LeftFoot")->name = "Mover", ed.mark_changed_for_test("Rename"); }, {id_of("RightFoot")}, 1);
+    change("...and back to it", [&] { bone("Mover")->name = "LeftFoot", ed.mark_changed_for_test("Rename"); }, RULE, 1);
+    CHECK(feet_of(arm).size() == 2);
+    change("a bone renamed into the rule (Hips -> HipsFoot)", [&] { bone("Hips")->name = "HipsFoot", ed.mark_changed_for_test("Rename"); }, RULE, 1);
+    CHECK(pins_of(arm) == feet_of(arm) && feet_of(arm).size() == 3);
+    change("...and back", [&] { bone("HipsFoot")->name = "Hips", ed.mark_changed_for_test("Rename"); }, RULE, 1);
+    CHECK(feet_of(arm).size() == 2);
+    /* A bone taken out of the armature and put back: the funnel alone (no mark_changed) must be enough. */
+    {
+      GameObject *foot = bone("RightFoot");
+      const uint64_t parent_id = foot->parent->id;
+      const uint64_t foot_id = foot->id;
+      const uint64_t before = edit_epoch::structure();
+      const std::vector<uint64_t> left_only = {id_of("LeftFoot")};
+      change("a foot reparented out of the armature", [&] { ed.scene().set_parent(ed.scene().find(foot_id), nullptr); }, left_only, 1);
+      std::printf("    set_parent moved edit_epoch::structure() by %llu\n", (unsigned long long)(edit_epoch::structure() - before));
+      CHECK(edit_epoch::structure() != before);
+      change("...and back into it", [&] { ed.scene().set_parent(ed.scene().find(foot_id), ed.scene().find(parent_id)); }, RULE, 1);
+      CHECK(feet_of(arm).size() == 2);
+    }
+    /* A bone destroyed. */
+    {
+      change("a foot destroyed", [&] { ed.scene().destroy(bone("RightFoot")), ed.mark_changed_for_test("Destroy"); }, {id_of("LeftFoot")}, 1, 2);  // (a destroy leaves a second structure bump on the frame after)
+      CHECK(feet_of(arm).size() == 1);
+      ed.command("undo");
+      r34_steps(ed, 3);
+      CHECK(pins_of(arm) == feet_of(arm));
+      std::printf("    after the undo: %zu feet\n", feet_of(arm).size());
+    }
+    /* A second rig: its own pins; the first's again when asked. */
+    {
+      GameObject *second = create_rig(ed.scene(), false, Vec3(4.0f, 0.0f, 0.0f));
+      second->name = "SecondRig474";
+      const uint64_t arm2 = second->id;
+      ed.mark_changed_for_test("Add another rig");
+      r34_steps(ed, 3);
+      CHECK(feet_of(arm2).size() == 2 && feet_of(arm2) != feet_of(arm));
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      CHECK(pins_of(arm2) == feet_of(arm2));
+      CHECK(pins_of(arm) == feet_of(arm));
+      CHECK(pins_of(arm2) == feet_of(arm2));
+      std::printf("    alternating two rigs: %zu walks for three asks\n", ed.autopose_pin_walks_for_test() - w0);
+      CHECK(ed.autopose_pin_walks_for_test() - w0 == 3);  // (one answer is kept: each ask for the other rig walks)
+      ed.command("select SecondRig474");
+      r34_steps(ed, 4);
+      CHECK(pins_of(arm2) == feet_of(arm2));
+      ed.command("select " + arm_name);
+      r34_steps(ed, 4);
+      CHECK(pins_of(arm) == feet_of(arm));
+      ed.scene().destroy(ed.scene().find(arm2));
+      ed.mark_changed_for_test("Remove the other rig");
+      r34_steps(ed, 3);
+    }
+    /* The dragged bone: the pins of a drag of the left hand leave the hand out (and what is above it). */
+    {
+      const std::vector<uint64_t> drag = sorted(ed.autopose_pin_ids_for_test(arm, id_of("LeftHand")));
+      CHECK(drag == feet_of(arm));  // (neither foot is the hand or above it)
+      const std::vector<uint64_t> drag_foot = sorted(ed.autopose_pin_ids_for_test(arm, id_of("LeftFoot")));
+      CHECK(drag_foot == std::vector<uint64_t>{id_of("RightFoot")});  // (the dragged foot is not its own pin)
+      CHECK(pins_of(arm) == feet_of(arm));  // (and the next ask with another dragged bone is not the kept answer)
+    }
+    /* The clip swapped for another with the same (no) contacts: pins the same, one walk. */
+    change("the clip swapped for another with the same contacts", [&] { ed.command("anim new Pins474c"); }, RULE, 1);
+    /* A contact edited in place (the clip's own list, no version bump). */
+    ed.command("body contacts add RightHand 0 10");
+    ed.command("anim frame 5");
+    r34_steps(ed, 3);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->contacts.size() == 1);
+    if (clip && clip->contacts.size() == 1) {
+      CHECK(pins_of(arm) == std::vector<uint64_t>{id_of("RightHand")});
+      change("a contact's bone edited in place", [&] { clip->contacts[0].bone = "LeftHand"; }, {id_of("LeftHand")}, 1);
+      change("a contact's from edited past the playhead", [&] { clip->contacts[0].from = 6.0f; }, RULE, 1);
+      change("a contact's from edited back before it", [&] { clip->contacts[0].from = 2.0f; }, {id_of("LeftHand")}, 1);
+      change("a contact's to edited short of the playhead", [&] { clip->contacts[0].to = 4.0f; }, RULE, 1);
+      change("a contact's to edited to the playhead's frame", [&] { clip->contacts[0].to = 5.0f; }, {id_of("LeftHand")}, 1);
+      change("the playhead out of the contact", [&] { ed.command("anim frame 20"); }, RULE, 1);
+      change("the playhead into it again", [&] { ed.command("anim frame 4"); }, {id_of("LeftHand")}, 1);
+      change("the contacts cleared", [&] { ed.command("body contacts clear"); }, RULE, 1);
+    }
+    /* The locks. */
+    {
+      std::vector<uint64_t> with_head = feet_of(arm);
+      with_head.push_back(id_of("Head"));
+      change("a lock added (Head)", [&] { ed.command("autopose lock Head"); }, with_head, 1);
+      change("the lock removed", [&] { ed.command("autopose unlock Head"); }, RULE, 1);
+      ed.command("autopose lock Head");
+      r34_steps(ed, 3);
+      change("the locked bone destroyed", [&] { ed.scene().destroy(bone("Head")), ed.mark_changed_for_test("Destroy"); }, RULE, 1, 2);
+      ed.command("undo");
+      r34_steps(ed, 3);
+      CHECK(pins_of(arm).size() >= 2);
+      ed.command("autopose unlock Head");
+    }
+    /* Undo and redo of a rename. */
+    {
+      bone("RightFoot")->name = "Stepper";
+      ed.mark_changed_for_test("Rename a foot");
+      r34_steps(ed, 3);
+      CHECK(feet_of(arm).size() == 1 && pins_of(arm) == feet_of(arm));
+      change("the undo of a rename", [&] { ed.command("undo"); }, RULE, 1);
+      std::printf("    the undo gave back %zu feet, pins %zu\n", feet_of(arm).size(), pins_of(arm).size());
+      CHECK(feet_of(arm).size() == 2 && pins_of(arm) == feet_of(arm));
+      change("the redo of it", [&] { ed.command("redo"); }, RULE, 1);
+      CHECK(feet_of(arm).size() == 1 && pins_of(arm) == feet_of(arm));
+      ed.command("undo");
+      r34_steps(ed, 3);
+      CHECK(feet_of(arm).size() == 2 && pins_of(arm) == feet_of(arm));
+    }
+    /* Play and Stop. */
+    {
+      pins_of(arm);
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      ed.command("play");
+      r34_steps(ed, 4);
+      const std::vector<uint64_t> in_play = pins_of(arm);
+      std::printf("    in Play: %zu pins, %zu walks; rule says %zu\n", in_play.size(), ed.autopose_pin_walks_for_test() - w0, feet_of(arm).size());
+      CHECK(in_play == feet_of(arm));
+      const size_t w1 = ed.autopose_pin_walks_for_test();
+      ed.command("stop");
+      r34_steps(ed, 4);
+      CHECK(pins_of(arm) == feet_of(arm));
+      std::printf("    after Stop: %zu walks, %zu pins\n", ed.autopose_pin_walks_for_test() - w1, pins_of(arm).size());
+      CHECK(ed.autopose_pin_walks_for_test() > w1 || ed.autopose_pin_walks_for_test() > w0);
+    }
+    /* Quiet frames: nothing walks over 120 idle frames; transforms alone don't either. */
+    {
+      pins_of(arm);
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      r34_steps(ed, 120);
+      CHECK(ed.autopose_pin_walks_for_test() == w0);
+      const Vec3 home = bone("Hips")->local().position;
+      for (int i = 0; i < 30; i++) {
+        bone("Hips")->set_local_position(home + Vec3(0.002f * (float)i, 0.0f, 0.0f));
+        ed.step_frame_headless();
+      }
+      std::printf("    120 idle frames and 30 frames of a moving hips: %zu walks\n", ed.autopose_pin_walks_for_test() - w0);
+      CHECK(ed.autopose_pin_walks_for_test() == w0);
+      CHECK(pins_of(arm) == feet_of(arm));
+      /* For the record: a drag that marks a change each frame (Record's, the Inspector's) does walk each frame. */
+      const size_t w1 = ed.autopose_pin_walks_for_test();
+      for (int i = 0; i < 10; i++) {
+        bone("Hips")->set_local_position(home + Vec3(0.0f, 0.002f * (float)i, 0.0f));
+        ed.mark_changed_for_test("Move");
+        ed.step_frame_headless();
+      }
+      std::printf("    10 frames with a mark_changed each: %zu walks\n", ed.autopose_pin_walks_for_test() - w1);
+      bone("Hips")->set_local_position(home);
+      ed.mark_changed_for_test("Home");
+      r34_steps(ed, 3);
+      const size_t w2 = ed.autopose_pin_walks_for_test();
+      ed.command("autopose drag LeftHand 0.5 1.2 0.3");
+      r34_steps(ed, 3);
+      std::printf("    one console drag of the left hand: %zu walks\n", ed.autopose_pin_walks_for_test() - w2);
+      CHECK(pins_of(arm) == feet_of(arm));
+    }
+    /* A new scene: the rig is gone, a rig made there gets its own pins even if an id repeats. */
+    {
+      const uint64_t before_serial = ed.scene().serial;
+      ed.command("newscene");
+      r34_steps(ed, 3);
+      CHECK(ed.scene().serial != before_serial);
+      CHECK(pins_of(arm).empty() || pins_of(arm) == feet_of(arm));
+      GameObject *fresh = create_rig(ed.scene(), false, Vec3(0.0f));
+      const uint64_t fresh_id = fresh->id;
+      ed.mark_changed_for_test("Add a rig");
+      r34_steps(ed, 3);
+      CHECK(feet_of(fresh_id).size() == 2 && pins_of(fresh_id) == feet_of(fresh_id));
+      std::printf("    new scene: rig ids %llu then %llu\n", (unsigned long long)arm, (unsigned long long)fresh_id);
+    }
+  });
+
+  /* ---------------------------------------------------------------- C: the trails */
+  test("round 474: after each kind of key edit the trail's points equal a from-scratch sample, and an edit inside a track samples only the frames around it", [] {
+    Editor ed;
+    r474_trail_rig(ed);
+    const size_t whole = ed.trail_frames_for_test();
+    std::printf("    the trail holds %zu frames\n", whole);
+    CHECK(whole >= 41);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    enum { Partial, Any, Whole };
+    auto edit = [&](const char *what, int expect, const std::function<void()> &fn) {
+      clip = ed.anim_clip_for_test();
+      const size_t s0 = ed.trail_samples_for_test();
+      const R474Points before = r474_points(ed);
+      fn();
+      const R474Edit r = r474_after_edit(ed, s0, before);
+      const bool eq = r.same_set && r.worst < 1e-5f;
+      const bool count = expect == Any || (expect == Partial ? (r.again >= 1 && r.again < r.whole) : r.again >= r.whole);
+      std::printf("    %-58s %3zu of %3zu frames posed again, worst %.2g m%s\n", what, r.again, r.whole, (double)r.worst, eq && count ? "" : "   <-- FAILS");
+      CHECK(r.kept_points > 0);
+      CHECK(r.same_set);
+      CHECK(r.worst < 1e-5f);
+      CHECK(count);
+      if (expect == Partial) CHECK(r.changed > 0);  // (the edit moved something: a cache that ignored it would pass the rest)
+    };
+    auto ik = [&] { return r474_track(*clip, "LeftHandIK", "Position", 1); };
+    auto spine = [&] { return r474_track(*clip, "Spine", "Rotation", 2); };
+    CHECK(ik() != nullptr && spine() != nullptr);
+    if (!ik() || !spine()) return;
+    edit("one key's value changed (frame 20)", Partial, [&] { ik()->set_key(20.0f, 1.6f), clip->touch_keys(); });
+    edit("the first key's value changed", Partial, [&] { ik()->set_key(0.0f, 0.7f), clip->touch_keys(); });
+    edit("the last key's value changed", Partial, [&] { ik()->set_key(40.0f, 1.9f), clip->touch_keys(); });
+    edit("a key added in the middle (22.5, between keys)", Partial, [&] { ik()->set_key(22.5f, 0.4f), clip->touch_keys(); });
+    edit("a key added before the first (frame -4)", Partial, [&] { ik()->set_key(-4.0f, 0.3f), clip->touch_keys(); });
+    edit("a key added after the last (frame 47)", Partial, [&] { ik()->set_key(47.0f, 0.2f), clip->touch_keys(); });
+    edit("a key removed in the middle (frame 25)", Partial, [&] {
+      AnimTrack *t = ik();
+      const int k = t->key_at(25.0f);
+      CHECK(k >= 0);
+      if (k >= 0) t->keys.erase(t->keys.begin() + k);
+      clip->touch_keys();
+    });
+    edit("the first key removed", Partial, [&] { ik()->keys.erase(ik()->keys.begin()), clip->touch_keys(); });
+    edit("the last key removed", Partial, [&] { ik()->keys.pop_back(), clip->touch_keys(); });
+    edit("a key moved in time (30 -> 32.5)", Partial, [&] {
+      AnimTrack *t = ik();
+      const int k = t->key_at(30.0f);
+      CHECK(k >= 0);
+      if (k < 0) return;
+      const float v = t->keys[(size_t)k].value;
+      t->keys.erase(t->keys.begin() + k);
+      t->set_key(32.5f, v);
+      clip->touch_keys();
+    });
+    edit("a key moved past two neighbours (10 -> 26)", Partial, [&] {
+      AnimTrack *t = ik();
+      const int k = t->key_at(10.0f);
+      CHECK(k >= 0);
+      if (k < 0) return;
+      const float v = t->keys[(size_t)k].value + 0.3f;
+      t->keys.erase(t->keys.begin() + k);
+      t->set_key(26.0f, v);
+      clip->touch_keys();
+    });
+    edit("a key's tangent made flat (console)", Partial, [&] { ed.command("anim tangent LeftHandIK Position 1 15 flat"); });
+    edit("a key's tangent made free with slopes (console)", Partial, [&] { ed.command("anim tangent LeftHandIK Position 1 20 free 0.2 0.4"); });
+    edit("a key's interpolation made constant (console)", Partial, [&] { ed.command("anim interp LeftHandIK Position 1 5 constant"); });
+    edit("a key's interpolation made linear (console)", Partial, [&] { ed.command("anim interp LeftHandIK Position 1 35 linear"); });
+    edit("a key added by the console (anim key)", Partial, [&] { ed.command("anim key LeftHandIK Position 1 12 1.35"); });
+    edit("two tracks edited in one step (spine key 5, hand key 35)", Partial, [&] {
+      spine()->set_key(5.0f, 20.0f);
+      ik()->set_key(35.0f, 1.1f);
+      clip->touch_keys();
+    });
+    edit("another bone's track edited (spine key 30: the hand is under it)", Partial, [&] { spine()->set_key(30.0f, 25.0f), clip->touch_keys(); });
+    edit("two tracks edited with a touch each, in one frame", Partial, [&] {
+      spine()->set_key(15.0f, -12.0f), clip->touch_keys();
+      ik()->set_key(15.0f, 0.5f), clip->touch_keys();
+    });
+    edit("a track added (the head's rotation)", Whole, [&] {
+      AnimTrack &t = clip->track("Hips/Spine/Neck/Head", "Rotation", 0);
+      t.set_key(10.0f, 0.0f), t.set_key(30.0f, 20.0f);
+      clip->touch();
+    });
+    edit("a key edited on the track just added", Any, [&] { r474_track(*clip, "Head", "Rotation", 0)->set_key(20.0f, -30.0f), clip->touch_keys(); });
+    edit("a track removed (the head's)", Whole, [&] {
+      clip->tracks.erase(std::remove_if(clip->tracks.begin(), clip->tracks.end(), [](const AnimTrack &t) { return t.path.size() >= 4 && t.path.compare(t.path.size() - 4, 4, "Head") == 0; }),
+                         clip->tracks.end());
+      clip->touch();
+    });
+    edit("a track replaced by another of the same count (spine z -> spine x)", Whole, [&] {
+      AnimTrack *t = spine();
+      t->axis = 0;
+      clip->touch();
+    });
+    edit("...and the keys of it edited", Any, [&] { r474_track(*clip, "Spine", "Rotation", 0)->set_key(20.0f, 30.0f), clip->touch_keys(); });
+    edit("the clip's length shortened (60 -> 45)", Whole, [&] { clip->length = 45.0f, clip->touch(); });
+    edit("the clip's frame rate changed (60 -> 30)", Whole, [&] { clip->frame_rate = 30.0f, clip->touch(); });
+    edit("the clip's loop flag turned off", Whole, [&] { clip->loop = !clip->loop, clip->touch(); });
+    edit("the length changed without a version bump (touch_keys only)", Any, [&] { clip->length = 50.0f, clip->touch_keys(); });
+    edit("the clip swapped for a new empty one", Whole, [&] { ed.command("anim new Swapped474"); });
+    edit("a key added on the swapped-in clip", Any, [&] { ed.command("anim key LeftHandIK Position 1 20 1.8"); });
+    edit("a second key added by the console, then", Any, [&] { ed.command("anim key LeftHandIK Position 1 30 0.2"); });
+    edit("...its undo", Any, [&] { ed.command("undo"); });
+    edit("...and its redo", Any, [&] { ed.command("redo"); });
+    edit("the playhead far off (frame 58), then a key edited behind the window", Any, [&] {
+      ed.command("anim frame 58");
+      r34_steps(ed, 14);
+      r474_track(*clip, "LeftHandIK", "Position", 1)->set_key(10.0f, 2.0f), clip->touch_keys();
+    });
+    edit("the playhead back at the edited key (frame 10)", Any, [&] { ed.command("anim frame 10"); });
+  });
+
+  test("round 474: Record keying while a handle is dragged across 20 frames leaves a trail equal to a from-scratch sample, at a fixed playhead and across frames", [] {
+    for (int variant = 0; variant < 2; variant++) {
+      Editor ed;
+      r474_trail_rig(ed);
+      ed.command("anim record on");
+      r34_steps(ed, 2);
+      GameObject *target = ed.scene().find_by_name("LeftHandIK");
+      CHECK(target != nullptr);
+      if (!target) return;
+      const Vec3 home = target->local().position;
+      const size_t s0 = ed.trail_samples_for_test();
+      for (int i = 0; i < 20; i++) {
+        if (variant == 1) ed.command("anim frame " + std::to_string(10 + i));
+        ed.step_frame_headless();
+        ed.scene().find_by_name("LeftHandIK")->set_local_position(home + Vec3(0.01f * (float)i, 0.02f * (float)i, 0.0f));
+        ed.mark_changed_for_test("Drag");
+        ed.step_frame_headless();
+      }
+      ed.command("anim record off");
+      const R474Edit r = r474_after_edit(ed, s0);
+      std::printf("    drag %s: %zu frames posed for 20 key edits, trail %zu frames, worst %.2g m\n", variant ? "across frames" : "at one frame", r.again, r.whole, (double)r.worst);
+      CHECK(r.kept_points > 0 && r.same_set && r.worst < 1e-5f);
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      const AnimTrack *t = clip ? clip->find("LeftHandIK", "Position", 1) : nullptr;
+      const int k20 = t ? t->key_at(20.0f) : -1;
+      CHECK(k20 >= 0 && t->keys[(size_t)k20].value > 1.4f);  // (the drag keyed the target: frame 20 holds its last place)
+      if (variant == 1) CHECK(t->keys.size() > 9);  // (and new keys on the frames it crossed)
+    }
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -10684,4 +11613,6 @@ void run_animation_tests() {
   tests_round472_playback();
   tests_round473();
   tests_round473_more();
+  tests_round474();
+  tests_round474_more();
 }

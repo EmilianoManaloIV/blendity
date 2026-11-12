@@ -3764,14 +3764,20 @@ void physics_step(Scene &scene, float dt) {
   scene.for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *rb = g.get<Rigidbody>();
-    if (rb && rb->enabled) {
-      AABB b = g.world_bounds();
-      Vec3 e = b.extent();
-      bodies.push_back({&g, rb, b.center(), std::max({e.x, e.y, e.z, 0.05f})});
-    }
-    else if (g.get<MeshFilter>() && g.get<MeshRenderer>()) {
-      statics.push_back(g.world_bounds());
-    }
+    if (!rb || !rb->enabled) return;
+    AABB b = g.world_bounds();
+    Vec3 e = b.extent();
+    bodies.push_back({&g, rb, b.center(), std::max({e.x, e.y, e.z, 0.05f})});
+  });
+  /* Round 474: the other meshes' bounds are only what a body bounces off. With no body they are not asked for: each is an
+   * evaluated mesh and a render mesh, and in Play on a posed character that was a whole build of every skin a frame, at the
+   * pose before the springs and the IK had moved it. */
+  if (bodies.empty()) return;
+  scene.for_each([&](GameObject &g) {
+    if (!g.active_in_hierarchy()) return;
+    const Rigidbody *rb = g.get<Rigidbody>();
+    if (rb && rb->enabled) return;
+    if (g.get<MeshFilter>() && g.get<MeshRenderer>()) statics.push_back(g.world_bounds());
   });
   const float sub = 4;  // sub-steps for stability
   const float h = dt / sub;

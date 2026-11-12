@@ -164,6 +164,39 @@ ai::PriorModel *Editor::autopose_prior() {
 /* The pins: the ends in contact at the playhead (the clip's contacts), the locked bones, and with neither the feet;
  * never the dragged bone or one above it (dragging the hips keeps the feet down). */
 std::vector<GameObject *> Editor::autopose_pins(GameObject &arm, GameObject &dragged) {
+  /* Round 474: kept until something the walks read changes - the scene (a copy after an undo), its structure stamp (a bone
+   * made, destroyed, renamed or moved in the hierarchy), the clip's contacts and the playhead, the locks. Every frame of
+   * the handles asked for it; three walks of the scene each. */
+  AutoPoseView::PinCache &pc = autopose_.pin_cache;
+  AnimationClipPtr clip = anim_clip();
+  uint64_t contacts = 1469598103934665603ull;  // (the contacts' bones and frames: a key edit that leaves them doesn't look again)
+  if (clip)
+    for (const AnimationClip::Contact &k : clip->contacts)
+      contacts = mix_bytes(mix_bytes(mix_bytes(contacts, k.bone.data(), k.bone.size()), &k.from, sizeof(k.from)), &k.to, sizeof(k.to));
+  /* The playhead matters only through which contacts hold at it: a scrub or a playback inside one stays a hit. */
+  uint64_t active = 1469598103934665603ull;
+  if (clip)
+    for (size_t i = 0; i < clip->contacts.size(); i++)
+      if (anim_.frame >= clip->contacts[i].from && anim_.frame <= clip->contacts[i].to) active = mix_bytes(active, &i, sizeof(i));
+  const bool same = pc.valid && pc.arm == arm.id && pc.dragged == dragged.id && pc.scene == scene_->serial && pc.structure == edit_epoch::structure() &&
+                    pc.clip == clip.get() && pc.contacts == contacts && pc.active == active && pc.locks == autopose_.locks;
+  if (same) {
+    std::vector<GameObject *> kept;
+    for (uint64_t id : pc.pins)
+      if (GameObject *g = scene_->find(id)) kept.push_back(g);
+    if (kept.size() == pc.pins.size()) return kept;
+  }
+  pc.valid = true, pc.arm = arm.id, pc.dragged = dragged.id, pc.scene = scene_->serial, pc.structure = edit_epoch::structure();
+  pc.clip = clip.get(), pc.contacts = contacts, pc.active = active, pc.locks = autopose_.locks;
+  std::vector<GameObject *> found = autopose_pins_walk(arm, dragged, clip);
+  pc.pins.clear();
+  for (GameObject *g : found) pc.pins.push_back(g->id);
+  return found;
+}
+
+/* The pins from the scene itself (the three walks). */
+std::vector<GameObject *> Editor::autopose_pins_walk(GameObject &arm, GameObject &dragged, const AnimationClipPtr &clip) {
+  autopose_.pin_cache.walks++;
   std::vector<GameObject *> pins;
   auto add = [&](GameObject *g) {
     if (g && g != &dragged && !scene_->is_ancestor(g, &dragged) && std::find(pins.begin(), pins.end(), g) == pins.end()) pins.push_back(g);
@@ -175,7 +208,7 @@ std::vector<GameObject *> Editor::autopose_pins(GameObject &arm, GameObject &dra
     });
     return found;
   };
-  if (AnimationClipPtr clip = anim_clip())
+  if (clip)
     for (const AnimationClip::Contact &k : clip->contacts)
       if (anim_.frame >= k.from && anim_.frame <= k.to) add(under(k.bone));
   if (pins.empty())  // (no contacts here: the feet - a locked hand is held as well, not instead)

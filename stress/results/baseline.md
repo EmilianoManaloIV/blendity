@@ -303,11 +303,11 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 | tracks | keys | ms per frame | target | budget |
 |---|---|---|---|---|
-| 201 | 2613 | 0.0103 | 0.2 | ok |
-| 4 x 2 x 201 (sequence) | 20904 | 0.3251 | 0.5 | ok |
+| 201 | 2613 | 0.0095 | 0.2 | ok |
+| 4 x 2 x 201 (sequence) | 20904 | 0.3204 | 0.5 | ok |
 | Locomotion (W for 3 s) | frames | ms / frame | worst frame ms | walked (m) | target ms | budget |
 |---|---|---|---|---|---|---|
-| a humanoid rig | 180 | 0.016 | 0.085 | 3.97 | 0.2 | ok |
+| a humanoid rig | 180 | 0.015 | 0.082 | 3.97 | 0.2 | ok |
 
 ### Camera filters: the PS1 look's cost, and odd settings
 
@@ -358,119 +358,119 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 
 | first use | ms | budget ms | budget |
 |---|---|---|---|
-| the first posed frame after the avatar is built (one bone turned, one frame) | 52.6 | 100.0 | ok |
-| the second posed frame (one bone turned, one frame) | 37.6 | 100.0 | ok |
-| the first Puppet drag, its press frame | 3.2 | 100.0 | ok |
-| the first Puppet drag, its first move frame | 1.8 | 100.0 | ok |
-| the first Puppet drag, its longest frame (the body model, the rig analysis, the pose prior) | 110.1 | 100.0 | OVER |
-| the second Puppet drag, its press frame | 3.8 | 100.0 | ok |
-| the second Puppet drag, its first move frame | 2.1 | 100.0 | ok |
-| the second Puppet drag, its longest frame | 87.8 | 100.0 | ok |
-| the first Preview on (the command and its frame) | 92.2 | 100.0 | ok |
-| the first Record on (the command and its frame) | 70.5 | 100.0 | ok |
-| entering Play (the command and its frame) | 95.9 | 100.0 | ok |
-| leaving Play (the command and its frame) | 5.5 | 100.0 | ok |
+| the first posed frame after the avatar is built (one bone turned, one frame) | 46.0 | 100.0 | ok |
+| the second posed frame (one bone turned, one frame) | 34.9 | 100.0 | ok |
+| the first Puppet drag, its press frame | 3.1 | 100.0 | ok |
+| the first Puppet drag, its first move frame | 1.7 | 100.0 | ok |
+| the first Puppet drag, its longest frame (the body model, the rig analysis, the pose prior) | 103.2 | 100.0 | OVER |
+| the second Puppet drag, its press frame | 3.4 | 100.0 | ok |
+| the second Puppet drag, its first move frame | 1.8 | 100.0 | ok |
+| the second Puppet drag, its longest frame | 69.1 | 100.0 | ok |
+| the first Preview on (the command and its frame) | 76.2 | 100.0 | ok |
+| the first Record on (the command and its frame) | 66.6 | 100.0 | ok |
+| entering Play (the command and its frame) | 70.6 | 100.0 | ok |
+| leaving Play (the command and its frame) | 5.1 | 100.0 | ok |
 | row | ms / frame | longest ms | press ms | first move ms | release ms | constraints | skin keys | skinning | shape keys | in place | outlines | mesh uploads | scene hashes | draw items | instances | overlays | windows | budget |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| alone, CPU: idle | 2.06 | 2.6 | - | - | - | 0.08 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.03 | 0.00 | 0.00 | 0.00 | 1.50 | - |
-| alone, CPU: orbiting the Scene view | 8.13 | 10.1 | - | - | - | 0.09 | 0.11 | 0.00 | 0.01 | 0.00 | 0.00 | 0.00 | 0.05 | 0.14 | 0.00 | 1.81 | 7.39 | - |
-| alone, CPU: the Rotate gizmo on the chest (FK) | 31.63 | 35.9 | 8.8 | 33.7 | 9.3 | 0.22 | 0.23 | 1.08 | 0.05 | 8.88 | 2.58 | 0.00 | 0.16 | 21.66 | 0.00 | 1.83 | 30.80 | - |
-| alone, CPU: the Move gizmo on the left hand's IK target | 12.43 | 14.8 | 9.0 | 12.5 | 9.7 | 0.18 | 0.18 | 0.23 | 0.01 | 1.45 | 0.49 | 0.00 | 0.12 | 4.03 | 0.00 | 1.34 | 11.71 | - |
-| alone, CPU: the Move gizmo on the left elbow's pole (the arm bent first) | 12.44 | 14.7 | 8.1 | 14.9 | 8.8 | 0.18 | 0.19 | 0.22 | 0.01 | 1.40 | 0.49 | 0.00 | 0.13 | 4.11 | 0.00 | 1.34 | 11.78 | - |
-| alone, CPU: a Puppet handle (the left hand, AutoPosing on) | 41.26 | 98.7 | 10.4 | 2.8 | 16.9 | 0.20 | 0.20 | 1.54 | 0.04 | 11.54 | 3.27 | 0.00 | 0.13 | 27.55 | 0.00 | 1.76 | 39.20 | - |
-| alone, CPU: G on the left hand's IK target | 12.15 | 13.3 | 2.3 | 13.1 | 8.8 | 0.17 | 0.18 | 0.22 | 0.01 | 1.44 | 0.48 | 0.00 | 0.11 | 3.97 | 0.00 | 1.33 | 11.54 | - |
-| alone, CPU: R on the chest (the Blender keymap) | 30.33 | 31.4 | 2.2 | 35.1 | 8.8 | 0.18 | 0.19 | 1.07 | 0.05 | 8.86 | 2.51 | 0.00 | 0.13 | 21.28 | 0.00 | 1.73 | 29.79 | - |
-| alone, CPU: a scrub on the Animation window's ruler, Scene + Game view | 44.89 | 61.1 | 3.1 | 3.8 | 2.9 | 0.23 | 0.26 | 1.18 | 0.04 | 9.19 | 5.19 | 0.00 | 0.17 | 33.04 | 0.00 | 0.97 | 42.77 | - |
-| alone, CPU: the clip playing, Scene + Game view | 27.93 | 59.3 | - | - | - | 0.21 | 0.21 | 0.72 | 0.03 | 5.59 | 3.17 | 0.00 | 0.22 | 20.06 | 0.00 | 0.60 | 26.95 | - |
-| alone, CPU: a scrub on the Animation window's ruler, Scene view only | 31.18 | 41.5 | 2.7 | 2.6 | 2.2 | 0.20 | 0.19 | 1.19 | 0.04 | 9.15 | 2.62 | 0.00 | 0.14 | 21.68 | 0.00 | 1.89 | 29.57 | - |
-| alone, CPU: the clip playing, Scene view only | 20.94 | 40.5 | - | - | - | 0.22 | 0.14 | 0.77 | 0.03 | 5.98 | 1.74 | 0.00 | 0.17 | 14.20 | 0.00 | 1.21 | 20.01 | - |
-| alone, CPU: Play with the springs | 58.95 | 66.3 | - | - | - | 0.17 | 0.32 | 2.85 | 0.04 | 13.94 | 3.01 | 0.00 | 0.12 | 34.24 | 0.00 | 0.00 | 39.10 | - |
-| alone, card: idle | 2.30 | 3.3 | - | - | - | 0.10 | 0.04 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.08 | 0.00 | 0.00 | 0.00 | 1.64 | ok |
-| alone, card: orbiting the Scene view | 4.65 | 6.2 | - | - | - | 0.10 | 0.10 | 0.00 | 0.01 | 0.00 | 0.00 | 0.00 | 0.07 | 0.15 | 0.01 | 0.14 | 3.90 | ok |
-| alone, card: the Rotate gizmo on the chest (FK) | 41.76 | 45.6 | 4.9 | 44.8 | 5.9 | 0.23 | 0.25 | 1.19 | 0.06 | 8.82 | 2.60 | 14.48 | 0.23 | 20.24 | 14.78 | 1.60 | 41.04 | OVER |
-| alone, card: the Move gizmo on the left hand's IK target | 11.72 | 14.2 | 4.9 | 12.4 | 5.6 | 0.20 | 0.21 | 0.25 | 0.01 | 1.43 | 0.47 | 2.71 | 0.17 | 3.75 | 2.82 | 0.41 | 11.02 | ok |
-| alone, card: the Move gizmo on the left elbow's pole (the arm bent first) | 13.22 | 17.2 | 4.7 | 14.8 | 5.3 | 0.21 | 0.22 | 0.24 | 0.01 | 1.44 | 0.47 | 3.47 | 0.17 | 3.90 | 3.60 | 0.45 | 12.43 | ok |
-| alone, card: a Puppet handle (the left hand, AutoPosing on) | 55.47 | 69.4 | 5.7 | 2.4 | 12.8 | 0.21 | 0.23 | 1.60 | 0.05 | 11.56 | 3.36 | 18.39 | 0.19 | 26.05 | 18.74 | 2.09 | 52.96 | OVER |
-| alone, card: G on the left hand's IK target | 13.39 | 17.2 | 2.0 | 13.6 | 5.4 | 0.19 | 0.20 | 0.23 | 0.01 | 1.40 | 0.47 | 3.71 | 0.16 | 3.74 | 3.82 | 0.38 | 12.70 | ok |
-| alone, card: R on the chest (the Blender keymap) | 43.43 | 62.0 | 2.4 | 45.0 | 5.2 | 0.19 | 0.26 | 1.12 | 0.06 | 8.61 | 2.53 | 16.72 | 0.21 | 19.61 | 17.02 | 1.54 | 42.78 | OVER |
-| alone, card: a scrub on the Animation window's ruler, Scene + Game view | 63.04 | 85.8 | 3.1 | 3.6 | 2.6 | 0.24 | 0.26 | 1.23 | 0.05 | 8.96 | 5.11 | 22.36 | 0.17 | 31.16 | 22.80 | 1.50 | 60.35 | OVER |
-| alone, card: the clip playing, Scene + Game view | 20.69 | 81.4 | - | - | - | 0.21 | 0.14 | 0.36 | 0.01 | 2.70 | 1.51 | 6.81 | 0.20 | 9.20 | 6.93 | 0.46 | 19.76 | OVER |
-| alone, card: a scrub on the Animation window's ruler, Scene view only | 41.44 | 56.7 | 2.4 | 2.7 | 2.5 | 0.19 | 0.17 | 1.20 | 0.03 | 9.04 | 2.61 | 13.55 | 0.16 | 20.23 | 13.78 | 1.45 | 39.58 | OVER |
-| alone, card: the clip playing, Scene view only | 18.03 | 55.2 | - | - | - | 0.22 | 0.14 | 0.47 | 0.02 | 3.50 | 1.01 | 5.50 | 0.16 | 7.85 | 5.59 | 0.56 | 17.11 | OVER |
-| alone, card: Play with the springs | 82.30 | 117.0 | - | - | - | 0.18 | 0.35 | 2.85 | 0.03 | 13.71 | 2.99 | 26.37 | 0.12 | 33.84 | 26.69 | 0.00 | 63.14 | OVER |
-| world alone, CPU: idle | 1.53 | 2.0 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.08 | 0.00 | 0.00 | 0.00 | 0.92 | - |
-| world alone, CPU: orbiting the Scene view | 37.09 | 40.6 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.13 | 0.00 | 0.00 | 1.84 | 36.33 | - |
-| world alone, CPU: a prop moved with the Move gizmo | 18.27 | 22.4 | 20.1 | 22.6 | 31.7 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.10 | 0.28 | 0.00 | 1.54 | 17.60 | - |
-| world alone, card: idle | 2.36 | 2.8 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.09 | 0.00 | 0.00 | 0.00 | 1.67 | ok |
-| world alone, card: orbiting the Scene view | 9.82 | 11.9 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.09 | 0.00 | 0.26 | 0.31 | 9.07 | ok |
-| world alone, card: a prop moved with the Move gizmo | 5.99 | 7.0 | 6.2 | 6.3 | 10.9 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.07 | 0.20 | 0.20 | 0.27 | 5.32 | ok |
-| in the world, CPU: idle | 3.34 | 3.9 | - | - | - | 0.19 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.18 | 0.00 | 0.00 | 0.00 | 2.32 | - |
-| in the world, CPU: orbiting the Scene view | 38.85 | 45.7 | - | - | - | 0.25 | 0.10 | 0.00 | 0.01 | 0.00 | 0.01 | 0.00 | 0.31 | 0.62 | 0.00 | 3.42 | 37.50 | - |
-| in the world, CPU: a prop moved with the Move gizmo | 23.81 | 32.3 | 29.8 | 30.2 | 34.5 | 0.43 | 0.20 | 0.00 | 0.01 | 0.00 | 0.00 | 0.00 | 0.28 | 0.57 | 0.00 | 1.88 | 22.76 | - |
-| in the world, CPU: the Rotate gizmo on the chest (FK) | 72.24 | 80.8 | 51.8 | 86.1 | 56.0 | 0.38 | 0.23 | 1.11 | 0.05 | 8.63 | 2.58 | 0.00 | 0.46 | 21.64 | 0.00 | 2.20 | 71.43 | - |
-| in the world, CPU: the Move gizmo on the left hand's IK target | 53.55 | 56.7 | 47.8 | 53.5 | 52.7 | 0.37 | 0.19 | 0.24 | 0.01 | 1.37 | 0.47 | 0.00 | 0.42 | 4.16 | 0.00 | 1.76 | 52.37 | - |
-| in the world, CPU: the Move gizmo on the left elbow's pole (the arm bent first) | 51.29 | 55.5 | 46.9 | 53.0 | 50.3 | 0.33 | 0.18 | 0.22 | 0.01 | 1.31 | 0.47 | 0.00 | 0.34 | 4.10 | 0.00 | 1.66 | 50.28 | - |
-| in the world, CPU: a Puppet handle (the left hand, AutoPosing on) | 82.34 | 153.7 | 51.1 | 4.0 | 54.2 | 0.35 | 0.16 | 1.56 | 0.04 | 11.19 | 3.24 | 0.00 | 0.38 | 27.05 | 0.00 | 2.11 | 78.59 | - |
-| in the world, CPU: G on the left hand's IK target | 52.31 | 57.0 | 2.5 | 50.3 | 51.8 | 0.38 | 0.19 | 0.23 | 0.01 | 1.37 | 0.46 | 0.00 | 0.42 | 4.13 | 0.00 | 1.81 | 50.99 | - |
-| in the world, CPU: R on the chest (the Blender keymap) | 69.60 | 75.5 | 2.6 | 73.1 | 51.2 | 0.35 | 0.20 | 1.07 | 0.05 | 8.51 | 2.49 | 0.00 | 0.39 | 20.99 | 0.00 | 2.04 | 68.59 | - |
-| in the world, CPU: a scrub on the Animation window's ruler, Scene + Game view | 77.53 | 110.1 | 3.9 | 4.9 | 4.1 | 0.46 | 0.30 | 1.19 | 0.04 | 8.82 | 4.96 | 0.00 | 0.48 | 32.59 | 0.00 | 1.29 | 73.87 | - |
-| in the world, CPU: the clip playing, Scene + Game view | 38.13 | 98.8 | - | - | - | 0.37 | 0.22 | 0.56 | 0.02 | 4.19 | 2.36 | 0.00 | 0.61 | 15.37 | 0.00 | 0.62 | 36.68 | - |
-| in the world, CPU: a scrub on the Animation window's ruler, Scene view only | 72.45 | 95.9 | 3.6 | 4.5 | 2.8 | 0.35 | 0.22 | 1.17 | 0.03 | 8.76 | 2.54 | 0.00 | 0.33 | 21.33 | 0.00 | 2.17 | 69.19 | - |
-| in the world, CPU: the clip playing, Scene view only | 35.99 | 94.5 | - | - | - | 0.35 | 0.16 | 0.56 | 0.02 | 4.17 | 1.21 | 0.00 | 0.42 | 10.09 | 0.00 | 1.08 | 34.69 | - |
-| in the world, CPU: Play with the springs | 117.15 | 138.6 | - | - | - | 0.29 | 0.32 | 2.76 | 0.03 | 13.42 | 2.92 | 0.00 | 0.39 | 33.30 | 0.00 | 0.00 | 97.51 | - |
-| in the world, card: idle | 4.47 | 21.8 | - | - | - | 0.15 | 0.04 | 0.00 | 0.00 | 0.00 | 0.00 | 0.42 | 0.13 | 0.03 | 0.50 | 0.03 | 3.76 | ok |
-| in the world, card: orbiting the Scene view | 11.11 | 14.0 | - | - | - | 0.16 | 0.07 | 0.00 | 0.00 | 0.00 | 0.00 | 0.02 | 0.14 | 0.37 | 0.30 | 0.35 | 10.26 | ok |
-| in the world, card: a prop moved with the Move gizmo | 7.27 | 9.2 | 7.2 | 8.4 | 14.5 | 0.29 | 0.12 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.16 | 0.26 | 0.20 | 0.37 | 6.50 | ok |
-| in the world, card: the Rotate gizmo on the chest (FK) | 42.73 | 46.9 | 9.3 | 47.3 | 9.0 | 0.38 | 0.24 | 1.12 | 0.05 | 8.62 | 2.53 | 12.24 | 0.39 | 19.68 | 12.78 | 1.78 | 41.99 | OVER |
-| in the world, card: the Move gizmo on the left hand's IK target | 15.05 | 18.5 | 7.4 | 17.0 | 11.4 | 0.37 | 0.19 | 0.22 | 0.01 | 1.36 | 0.45 | 1.93 | 0.31 | 3.90 | 2.29 | 0.58 | 14.30 | ok |
-| in the world, card: the Move gizmo on the left elbow's pole (the arm bent first) | 16.20 | 19.9 | 8.2 | 17.8 | 9.4 | 0.31 | 0.18 | 0.21 | 0.01 | 1.33 | 0.44 | 2.69 | 0.32 | 3.94 | 3.01 | 0.54 | 15.50 | ok |
-| in the world, card: a Puppet handle (the left hand, AutoPosing on) | 57.86 | 81.3 | 8.7 | 3.2 | 20.6 | 0.34 | 0.18 | 1.51 | 0.04 | 11.59 | 3.23 | 15.68 | 0.34 | 25.67 | 16.26 | 2.20 | 55.19 | OVER |
-| in the world, card: G on the left hand's IK target | 17.98 | 22.2 | 2.5 | 17.8 | 15.6 | 0.34 | 0.20 | 0.22 | 0.01 | 1.36 | 0.45 | 2.10 | 0.35 | 3.95 | 2.44 | 0.58 | 17.14 | OVER |
-| in the world, card: R on the chest (the Blender keymap) | 47.68 | 54.8 | 2.6 | 53.5 | 14.4 | 0.36 | 0.23 | 1.08 | 0.04 | 8.59 | 2.49 | 12.94 | 0.39 | 19.76 | 13.49 | 1.70 | 46.97 | OVER |
-| in the world, card: a scrub on the Animation window's ruler, Scene + Game view | 80.10 | 161.8 | 3.7 | 4.1 | 4.1 | 0.48 | 0.27 | 1.19 | 0.04 | 8.82 | 4.97 | 26.23 | 0.53 | 30.81 | 27.13 | 1.65 | 76.41 | OVER |
-| in the world, card: the clip playing, Scene + Game view | 27.46 | 98.0 | - | - | - | 0.42 | 0.23 | 0.41 | 0.02 | 3.09 | 1.80 | 7.61 | 0.68 | 11.15 | 7.96 | 0.61 | 25.85 | OVER |
-| in the world, card: a scrub on the Animation window's ruler, Scene view only | 48.66 | 70.9 | 5.0 | 4.6 | 2.7 | 0.40 | 0.24 | 1.21 | 0.04 | 8.92 | 2.68 | 14.17 | 0.49 | 20.40 | 14.67 | 1.67 | 46.13 | OVER |
-| in the world, card: the clip playing, Scene view only | 19.60 | 68.7 | - | - | - | 0.38 | 0.14 | 0.41 | 0.02 | 3.10 | 0.88 | 5.18 | 0.45 | 6.99 | 5.34 | 0.61 | 18.23 | OVER |
-| in the world, card: Play with the springs | 91.68 | 111.6 | - | - | - | 0.32 | 0.29 | 2.76 | 0.03 | 13.32 | 2.93 | 23.26 | 0.39 | 33.58 | 23.81 | 0.00 | 72.30 | OVER |
+| alone, CPU: idle | 1.81 | 2.2 | - | - | - | 0.07 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.02 | 0.00 | 0.00 | 0.00 | 1.39 | - |
+| alone, CPU: orbiting the Scene view | 7.20 | 8.1 | - | - | - | 0.08 | 0.11 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.04 | 0.12 | 0.00 | 1.61 | 6.69 | - |
+| alone, CPU: the Rotate gizmo on the chest (FK) | 29.00 | 31.6 | 8.0 | 32.3 | 8.2 | 0.17 | 0.19 | 1.01 | 0.04 | 8.78 | 2.48 | 0.00 | 0.12 | 20.83 | 0.00 | 1.52 | 28.49 | - |
+| alone, CPU: the Move gizmo on the left hand's IK target | 11.19 | 13.1 | 7.2 | 11.5 | 8.7 | 0.17 | 0.17 | 0.21 | 0.01 | 1.38 | 0.47 | 0.00 | 0.10 | 3.84 | 0.00 | 1.22 | 10.62 | - |
+| alone, CPU: the Move gizmo on the left elbow's pole (the arm bent first) | 11.70 | 14.0 | 7.5 | 13.5 | 7.9 | 0.20 | 0.18 | 0.23 | 0.01 | 1.39 | 0.48 | 0.00 | 0.12 | 4.02 | 0.00 | 1.26 | 11.05 | - |
+| alone, CPU: a Puppet handle (the left hand, AutoPosing on) | 40.93 | 130.2 | 7.8 | 2.0 | 16.0 | 0.20 | 0.19 | 1.51 | 0.04 | 11.45 | 3.22 | 0.00 | 0.12 | 27.00 | 0.00 | 1.56 | 38.94 | - |
+| alone, CPU: G on the left hand's IK target | 11.22 | 13.0 | 1.9 | 12.2 | 7.6 | 0.16 | 0.17 | 0.21 | 0.01 | 1.38 | 0.47 | 0.00 | 0.10 | 3.80 | 0.00 | 1.22 | 10.71 | - |
+| alone, CPU: R on the chest (the Blender keymap) | 28.94 | 30.5 | 1.8 | 33.2 | 8.8 | 0.16 | 0.18 | 1.04 | 0.04 | 8.72 | 2.46 | 0.00 | 0.11 | 20.64 | 0.00 | 1.55 | 28.47 | - |
+| alone, CPU: a scrub on the Animation window's ruler, Scene + Game view | 43.10 | 56.3 | 3.0 | 2.9 | 2.3 | 0.21 | 0.23 | 1.12 | 0.03 | 9.23 | 5.11 | 0.00 | 0.14 | 32.42 | 0.00 | 0.92 | 41.13 | - |
+| alone, CPU: the clip playing, Scene + Game view | 28.25 | 55.5 | - | - | - | 0.18 | 0.22 | 0.74 | 0.02 | 5.99 | 3.34 | 0.00 | 0.21 | 21.06 | 0.00 | 0.60 | 27.46 | - |
+| alone, CPU: a scrub on the Animation window's ruler, Scene view only | 29.72 | 37.6 | 2.3 | 2.5 | 2.0 | 0.17 | 0.16 | 1.16 | 0.04 | 8.99 | 2.58 | 0.00 | 0.13 | 21.22 | 0.00 | 1.81 | 28.25 | - |
+| alone, CPU: the clip playing, Scene view only | 18.57 | 38.4 | - | - | - | 0.19 | 0.14 | 0.71 | 0.02 | 5.49 | 1.54 | 0.00 | 0.14 | 12.86 | 0.00 | 1.08 | 17.88 | - |
+| alone, CPU: Play with the springs | 26.58 | 36.5 | - | - | - | 0.09 | 0.15 | 1.03 | 0.02 | 8.00 | 2.38 | 0.00 | 0.10 | 18.92 | 0.00 | 0.00 | 22.97 | - |
+| alone, card: idle | 1.83 | 2.6 | - | - | - | 0.08 | 0.03 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.05 | 0.00 | 0.00 | 0.00 | 1.40 | ok |
+| alone, card: orbiting the Scene view | 3.28 | 4.0 | - | - | - | 0.07 | 0.06 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.04 | 0.09 | 0.00 | 0.10 | 2.85 | ok |
+| alone, card: the Rotate gizmo on the chest (FK) | 35.31 | 38.2 | 3.4 | 40.5 | 4.5 | 0.16 | 0.21 | 1.00 | 0.04 | 8.33 | 2.41 | 11.05 | 0.17 | 18.82 | 11.21 | 1.32 | 34.95 | OVER |
+| alone, card: the Move gizmo on the left hand's IK target | 10.09 | 13.0 | 3.3 | 10.3 | 3.9 | 0.16 | 0.18 | 0.20 | 0.01 | 1.30 | 0.44 | 2.58 | 0.12 | 3.44 | 2.63 | 0.33 | 9.63 | ok |
+| alone, card: the Move gizmo on the left elbow's pole (the arm bent first) | 10.86 | 13.0 | 3.4 | 12.6 | 4.7 | 0.15 | 0.18 | 0.20 | 0.01 | 1.27 | 0.44 | 2.77 | 0.12 | 3.50 | 2.83 | 0.35 | 10.46 | ok |
+| alone, card: a Puppet handle (the left hand, AutoPosing on) | 52.63 | 63.1 | 4.6 | 1.8 | 13.5 | 0.17 | 0.18 | 1.46 | 0.04 | 11.08 | 3.20 | 17.62 | 0.14 | 24.59 | 17.83 | 1.88 | 50.37 | OVER |
+| alone, card: G on the left hand's IK target | 12.90 | 15.2 | 1.8 | 14.2 | 7.2 | 0.15 | 0.18 | 0.20 | 0.01 | 1.28 | 0.44 | 3.46 | 0.12 | 3.45 | 3.52 | 0.32 | 12.51 | ok |
+| alone, card: R on the chest (the Blender keymap) | 44.14 | 48.0 | 1.8 | 50.9 | 7.7 | 0.16 | 0.21 | 1.00 | 0.04 | 8.25 | 2.40 | 17.54 | 0.16 | 18.55 | 17.71 | 1.36 | 43.84 | OVER |
+| alone, card: a scrub on the Animation window's ruler, Scene + Game view | 70.04 | 93.8 | 2.5 | 2.8 | 2.3 | 0.21 | 0.21 | 1.12 | 0.03 | 8.61 | 4.98 | 29.07 | 0.15 | 29.85 | 29.42 | 1.36 | 67.22 | OVER |
+| alone, card: the clip playing, Scene + Game view | 36.18 | 90.7 | - | - | - | 0.18 | 0.17 | 0.58 | 0.02 | 4.42 | 2.57 | 14.80 | 0.20 | 15.24 | 14.96 | 0.72 | 35.46 | OVER |
+| alone, card: a scrub on the Animation window's ruler, Scene view only | 46.36 | 63.4 | 2.2 | 2.4 | 2.0 | 0.17 | 0.18 | 1.10 | 0.03 | 8.64 | 2.51 | 17.59 | 0.18 | 19.32 | 17.75 | 1.38 | 44.41 | OVER |
+| alone, card: the clip playing, Scene view only | 28.15 | 59.9 | - | - | - | 0.18 | 0.13 | 0.67 | 0.02 | 5.18 | 1.53 | 10.67 | 0.15 | 11.57 | 10.77 | 0.84 | 27.48 | OVER |
+| alone, card: Play with the springs | 44.50 | 61.3 | - | - | - | 0.09 | 0.14 | 1.07 | 0.02 | 8.18 | 2.43 | 16.96 | 0.10 | 19.51 | 17.13 | 0.00 | 40.11 | OVER |
+| world alone, CPU: idle | 1.39 | 1.8 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.06 | 0.00 | 0.00 | 0.00 | 0.84 | - |
+| world alone, CPU: orbiting the Scene view | 34.76 | 37.0 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.09 | 0.00 | 0.00 | 1.71 | 34.10 | - |
+| world alone, CPU: a prop moved with the Move gizmo | 16.21 | 17.1 | 18.6 | 19.7 | 27.5 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.06 | 0.20 | 0.00 | 1.32 | 15.66 | - |
+| world alone, card: idle | 1.93 | 2.5 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.06 | 0.00 | 0.00 | 0.00 | 1.43 | ok |
+| world alone, card: orbiting the Scene view | 8.41 | 9.4 | - | - | - | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.06 | 0.00 | 0.20 | 0.27 | 7.86 | ok |
+| world alone, card: a prop moved with the Move gizmo | 5.36 | 6.0 | 5.3 | 5.4 | 10.0 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.06 | 0.18 | 0.17 | 0.25 | 4.84 | ok |
+| in the world, CPU: idle | 2.63 | 3.5 | - | - | - | 0.15 | 0.03 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.12 | 0.00 | 0.00 | 0.00 | 1.98 | - |
+| in the world, CPU: orbiting the Scene view | 29.49 | 32.9 | - | - | - | 0.16 | 0.08 | 0.00 | 0.00 | 0.00 | 0.01 | 0.00 | 0.11 | 0.43 | 0.00 | 2.49 | 28.61 | - |
+| in the world, CPU: a prop moved with the Move gizmo | 19.73 | 21.8 | 21.8 | 22.6 | 30.5 | 0.31 | 0.15 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.18 | 0.38 | 0.00 | 1.48 | 18.99 | - |
+| in the world, CPU: the Rotate gizmo on the chest (FK) | 67.13 | 70.0 | 43.9 | 78.1 | 52.0 | 0.33 | 0.21 | 1.03 | 0.04 | 8.62 | 2.43 | 0.00 | 0.37 | 21.03 | 0.00 | 1.90 | 66.43 | - |
+| in the world, CPU: the Move gizmo on the left hand's IK target | 50.46 | 53.5 | 44.9 | 49.0 | 49.7 | 0.34 | 0.16 | 0.23 | 0.01 | 1.38 | 0.45 | 0.00 | 0.33 | 3.98 | 0.00 | 1.55 | 49.41 | - |
+| in the world, CPU: the Move gizmo on the left elbow's pole (the arm bent first) | 49.82 | 53.8 | 43.2 | 49.4 | 49.8 | 0.32 | 0.17 | 0.22 | 0.01 | 1.31 | 0.44 | 0.00 | 0.32 | 4.04 | 0.00 | 1.54 | 48.85 | - |
+| in the world, CPU: a Puppet handle (the left hand, AutoPosing on) | 79.92 | 138.5 | 43.2 | 2.6 | 54.0 | 0.33 | 0.16 | 1.47 | 0.04 | 11.27 | 3.15 | 0.00 | 0.36 | 26.77 | 0.00 | 1.92 | 76.28 | - |
+| in the world, CPU: G on the left hand's IK target | 49.87 | 53.8 | 2.7 | 49.7 | 49.2 | 0.32 | 0.17 | 0.23 | 0.01 | 1.36 | 0.45 | 0.00 | 0.35 | 4.02 | 0.00 | 1.58 | 48.89 | - |
+| in the world, CPU: R on the chest (the Blender keymap) | 66.87 | 69.5 | 2.5 | 70.8 | 49.4 | 0.31 | 0.20 | 1.04 | 0.04 | 8.57 | 2.43 | 0.00 | 0.33 | 20.55 | 0.00 | 1.90 | 66.02 | - |
+| in the world, CPU: a scrub on the Animation window's ruler, Scene + Game view | 75.07 | 102.6 | 3.9 | 3.8 | 3.0 | 0.39 | 0.26 | 1.15 | 0.03 | 8.85 | 4.82 | 0.00 | 0.40 | 32.00 | 0.00 | 1.26 | 71.66 | - |
+| in the world, CPU: the clip playing, Scene + Game view | 39.41 | 95.3 | - | - | - | 0.35 | 0.19 | 0.60 | 0.02 | 4.55 | 2.53 | 0.00 | 0.55 | 16.48 | 0.00 | 0.62 | 38.13 | - |
+| in the world, CPU: a scrub on the Animation window's ruler, Scene view only | 70.07 | 90.9 | 3.6 | 3.3 | 2.6 | 0.32 | 0.17 | 1.14 | 0.03 | 8.75 | 2.47 | 0.00 | 0.31 | 20.93 | 0.00 | 2.12 | 66.90 | - |
+| in the world, CPU: the clip playing, Scene view only | 37.61 | 95.0 | - | - | - | 0.33 | 0.18 | 0.61 | 0.02 | 4.57 | 1.29 | 0.00 | 0.33 | 11.03 | 0.00 | 1.09 | 36.54 | - |
+| in the world, CPU: Play with the springs | 88.04 | 97.3 | - | - | - | 0.17 | 0.21 | 1.21 | 0.03 | 8.95 | 2.65 | 0.00 | 0.38 | 21.87 | 0.00 | 0.00 | 82.17 | - |
+| in the world, card: idle | 4.62 | 19.5 | - | - | - | 0.15 | 0.03 | 0.00 | 0.00 | 0.00 | 0.00 | 0.47 | 0.09 | 0.04 | 0.58 | 0.07 | 3.99 | ok |
+| in the world, card: orbiting the Scene view | 10.36 | 12.4 | - | - | - | 0.15 | 0.07 | 0.00 | 0.00 | 0.00 | 0.00 | 0.02 | 0.09 | 0.37 | 0.30 | 0.33 | 9.63 | ok |
+| in the world, card: a prop moved with the Move gizmo | 7.08 | 7.7 | 6.9 | 7.3 | 12.3 | 0.29 | 0.10 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.15 | 0.28 | 0.21 | 0.37 | 6.36 | ok |
+| in the world, card: the Rotate gizmo on the chest (FK) | 39.71 | 40.9 | 7.2 | 45.5 | 8.8 | 0.30 | 0.21 | 1.02 | 0.04 | 8.25 | 2.41 | 11.15 | 0.31 | 18.97 | 11.53 | 1.57 | 39.17 | OVER |
+| in the world, card: the Move gizmo on the left hand's IK target | 17.86 | 21.8 | 10.2 | 19.6 | 11.4 | 0.30 | 0.18 | 0.22 | 0.01 | 1.27 | 0.43 | 3.08 | 0.27 | 3.70 | 3.36 | 0.53 | 17.27 | OVER |
+| in the world, card: the Move gizmo on the left elbow's pole (the arm bent first) | 19.56 | 21.9 | 10.1 | 19.9 | 11.7 | 0.30 | 0.18 | 0.21 | 0.01 | 1.25 | 0.43 | 4.14 | 0.30 | 3.77 | 4.40 | 0.53 | 18.92 | OVER |
+| in the world, card: a Puppet handle (the left hand, AutoPosing on) | 61.95 | 84.0 | 10.4 | 2.5 | 23.3 | 0.32 | 0.18 | 1.45 | 0.04 | 11.03 | 3.18 | 18.84 | 0.30 | 24.77 | 19.30 | 2.07 | 59.19 | OVER |
+| in the world, card: G on the left hand's IK target | 24.66 | 29.6 | 2.4 | 24.6 | 18.4 | 0.29 | 0.18 | 0.21 | 0.01 | 1.29 | 0.42 | 3.70 | 0.26 | 3.70 | 3.96 | 0.53 | 24.01 | OVER |
+| in the world, card: R on the chest (the Blender keymap) | 60.98 | 65.9 | 2.5 | 71.7 | 21.6 | 0.30 | 0.21 | 1.02 | 0.04 | 8.23 | 2.39 | 22.29 | 0.32 | 18.99 | 22.70 | 1.57 | 60.61 | OVER |
+| in the world, card: a scrub on the Animation window's ruler, Scene + Game view | 90.90 | 123.8 | 3.5 | 3.7 | 3.4 | 0.39 | 0.25 | 1.13 | 0.03 | 8.62 | 4.92 | 31.39 | 0.43 | 29.99 | 32.15 | 1.56 | 86.99 | OVER |
+| in the world, card: the clip playing, Scene + Game view | 39.36 | 114.1 | - | - | - | 0.34 | 0.21 | 0.48 | 0.02 | 3.72 | 2.12 | 12.84 | 0.49 | 12.96 | 13.13 | 0.65 | 38.20 | OVER |
+| in the world, card: a scrub on the Animation window's ruler, Scene view only | 59.89 | 82.7 | 3.3 | 3.3 | 2.8 | 0.31 | 0.21 | 1.11 | 0.03 | 8.66 | 2.57 | 18.50 | 0.41 | 19.54 | 18.85 | 1.51 | 57.12 | OVER |
+| in the world, card: the clip playing, Scene view only | 35.96 | 75.0 | - | - | - | 0.33 | 0.16 | 0.69 | 0.02 | 5.21 | 1.53 | 10.76 | 0.41 | 11.80 | 10.97 | 0.91 | 34.88 | OVER |
+| in the world, card: Play with the springs | 69.82 | 81.1 | - | - | - | 0.16 | 0.20 | 1.20 | 0.03 | 9.08 | 2.68 | 19.75 | 0.32 | 22.29 | 20.17 | 0.00 | 64.35 | OVER |
 | row | ms / frame | longest ms | press ms | first move ms | release ms | constraints | skin keys | skinning | shape keys | in place | outlines | mesh uploads | scene hashes | draw items | instances | overlays | windows | budget |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| in the world, card, Record on: the IK-target drag | 24.42 | 34.4 | 17.0 | 28.9 | 18.6 | 0.37 | 0.19 | 0.23 | 0.01 | 1.40 | 0.45 | 2.82 | 0.37 | 3.92 | 3.20 | 0.68 | 23.67 | OVER |
-| in the world, card, Preview off: the IK-target drag | 21.55 | 31.3 | 14.5 | 22.6 | 14.4 | 0.33 | 0.17 | 0.21 | 0.01 | 1.37 | 0.45 | 2.80 | 0.35 | 3.87 | 3.13 | 0.55 | 20.78 | OVER |
-| in the world, card, the Game view beside the Scene view: the IK-target drag | 20.93 | 31.9 | 12.1 | 25.2 | 39.7 | 0.32 | 0.18 | 0.21 | 0.01 | 1.35 | 0.44 | 2.67 | 0.34 | 3.86 | 3.01 | 0.57 | 20.17 | OVER |
-| in the world, card, the Game view beside the Scene view: the clip playing (the Scene view alone unless the setting adds a view) | 35.54 | 99.7 | - | - | - | 0.36 | 0.20 | 0.50 | 0.02 | 3.78 | 2.17 | 8.92 | 0.62 | 13.36 | 9.25 | 0.67 | 34.14 | OVER |
-| in the world, card, the Game view beside the Scene view and Other Views Follow Drags on: the IK-target drag | 34.38 | 72.8 | 25.7 | 37.2 | 14.2 | 0.37 | 0.29 | 0.21 | 0.01 | 1.34 | 0.81 | 4.15 | 0.37 | 6.45 | 4.90 | 0.58 | 33.44 | OVER |
-| in the world, card, trails, onion skins and the zoetrope (Record on): the IK-target drag | 20.68 | 24.7 | 13.1 | 27.0 | 20.3 | 1.71 | 0.19 | 0.23 | 0.01 | 1.36 | 0.47 | 1.68 | 0.44 | 4.03 | 2.08 | 1.38 | 17.41 | OVER |
-| in the world, card, trails, onion skins and the zoetrope (Record on): a scrub | 76.40 | 146.9 | 11.2 | 13.1 | 10.9 | 0.72 | 0.33 | 1.18 | 0.03 | 8.87 | 5.01 | 22.34 | 0.55 | 31.20 | 23.31 | 2.39 | 72.78 | OVER |
-| in the world, card, Centre of Mass shown: the IK-target drag | 17.55 | 28.7 | 9.3 | 16.5 | 12.4 | 0.34 | 0.20 | 0.22 | 0.01 | 1.35 | 0.46 | 2.15 | 0.32 | 3.86 | 2.52 | 0.82 | 16.66 | OVER |
-| in the world, card, Centre of Mass shown: the clip playing (the Scene view alone unless the setting adds a view) | 22.12 | 60.5 | - | - | - | 0.38 | 0.12 | 0.52 | 0.02 | 3.82 | 1.11 | 5.57 | 0.43 | 8.63 | 5.77 | 0.81 | 20.81 | OVER |
-| in the world, card, the Avatar window open: the IK-target drag | 19.21 | 23.6 | 11.0 | 19.1 | 15.2 | 0.33 | 0.18 | 0.21 | 0.01 | 1.38 | 0.44 | 2.02 | 0.37 | 3.88 | 2.35 | 0.58 | 18.42 | OVER |
-| in the world, card, the Avatar window open: the clip playing (the Scene view alone unless the setting adds a view) | 19.31 | 62.7 | - | - | - | 0.37 | 0.12 | 0.42 | 0.01 | 3.07 | 0.90 | 4.54 | 0.43 | 6.90 | 4.68 | 0.57 | 17.94 | OVER |
-| in the world, card, the Inspector on the Armature: the clip playing (the Scene view alone unless the setting adds a view) | 19.61 | 66.8 | - | - | - | 0.40 | 0.13 | 0.41 | 0.01 | 3.09 | 0.88 | 4.55 | 0.40 | 6.99 | 4.70 | 0.55 | 18.28 | OVER |
-| in the world, card, the Inspector on a skinned mesh: the clip playing (the Scene view alone unless the setting adds a view) | 18.78 | 68.0 | - | - | - | 0.36 | 0.12 | 0.35 | 0.01 | 2.67 | 0.76 | 3.97 | 0.40 | 6.09 | 4.10 | 0.46 | 17.48 | OVER |
-| in the world, card, the Rigging window open (its Walk section): the IK-target drag | 23.04 | 37.7 | 16.2 | 26.8 | 11.0 | 0.39 | 0.24 | 0.23 | 0.01 | 1.43 | 0.47 | 3.10 | 0.42 | 3.97 | 3.52 | 0.70 | 22.25 | OVER |
-| in the world, card, the Rigging window open (its Walk section): the clip playing (the Scene view alone unless the setting adds a view) | 18.94 | 55.3 | - | - | - | 0.36 | 0.13 | 0.46 | 0.01 | 3.49 | 0.99 | 4.70 | 0.38 | 7.78 | 4.87 | 0.64 | 17.73 | OVER |
-| in the world, card, Realtime GI on, Lighting Updates Automatic: the IK-target drag | 75.49 | 86.1 | 48.3 | 72.7 | 56.3 | 0.37 | 0.20 | 0.22 | 0.01 | 1.35 | 0.45 | 0.00 | 0.38 | 4.17 | 0.00 | 1.81 | 64.74 | OVER |
-| in the world, card, Realtime GI on, Lighting Updates Manual: the IK-target drag | 20.64 | 25.2 | 9.1 | 19.0 | 14.0 | 0.43 | 0.19 | 0.26 | 0.01 | 1.38 | 0.48 | 3.94 | 0.46 | 4.03 | 4.42 | 0.74 | 19.41 | OVER |
-| in the world, card, Live Link with a client: the IK-target drag | 28.52 | 38.4 | 15.3 | 28.3 | 18.7 | 0.44 | 0.28 | 0.26 | 0.01 | 1.38 | 0.47 | 2.47 | 0.67 | 4.01 | 2.97 | 0.77 | 17.22 | OVER |
-| in the world, card, Live Link with a client: the clip playing (the Scene view alone unless the setting adds a view) | 21.78 | 75.6 | - | - | - | 0.42 | 0.17 | 0.38 | 0.02 | 2.73 | 0.82 | 3.75 | 0.37 | 6.24 | 3.91 | 0.11 | 15.18 | OVER |
-| in the world, card, surface snapping (Ctrl+Shift held): the IK-target drag | 19.25 | 24.8 | 39.4 | 19.0 | 21.4 | 0.33 | 0.24 | 0.22 | 0.01 | 1.36 | 0.45 | 2.76 | 0.32 | 3.92 | 3.10 | 0.58 | 18.44 | OVER |
-| in the world, card, an F12 Live Preview: the IK-target drag | 20.37 | 35.9 | 10.9 | 23.8 | 12.5 | 0.37 | 0.18 | 0.21 | 0.01 | 1.40 | 0.51 | 2.58 | 0.39 | 4.35 | 2.94 | 0.71 | 19.14 | OVER |
-| in the world, card, a path-traced view open (Camera Preview rendered, locked to the Main Camera): the IK-target drag | 815.18 | 862.9 | 137.1 | 807.7 | 49.2 | 0.41 | 0.29 | 0.23 | 0.01 | 1.32 | 0.80 | 3.49 | 0.41 | 6.40 | 3.89 | 0.62 | 813.70 | OVER |
+| in the world, card, Record on: the IK-target drag | 27.46 | 37.2 | 20.2 | 33.2 | 26.6 | 0.29 | 0.17 | 0.21 | 0.01 | 1.25 | 0.43 | 4.04 | 0.28 | 3.61 | 4.32 | 0.55 | 27.00 | OVER |
+| in the world, card, Preview off: the IK-target drag | 26.37 | 31.4 | 17.4 | 27.0 | 31.9 | 0.30 | 0.17 | 0.22 | 0.01 | 1.28 | 0.43 | 4.15 | 0.31 | 3.67 | 4.40 | 0.54 | 25.69 | OVER |
+| in the world, card, the Game view beside the Scene view: the IK-target drag | 27.45 | 31.0 | 16.3 | 27.6 | 40.7 | 0.34 | 0.17 | 0.20 | 0.01 | 1.31 | 0.43 | 5.89 | 0.30 | 3.69 | 6.17 | 0.55 | 26.56 | OVER |
+| in the world, card, the Game view beside the Scene view: the clip playing (the Scene view alone unless the setting adds a view) | 42.47 | 133.9 | - | - | - | 0.36 | 0.22 | 0.49 | 0.02 | 3.75 | 2.11 | 12.85 | 0.49 | 13.06 | 13.18 | 0.66 | 41.17 | OVER |
+| in the world, card, the Game view beside the Scene view and Other Views Follow Drags on: the IK-target drag | 45.63 | 58.1 | 34.3 | 47.6 | 32.0 | 0.33 | 0.27 | 0.20 | 0.01 | 1.30 | 0.76 | 7.80 | 0.27 | 6.07 | 8.38 | 0.53 | 44.74 | OVER |
+| in the world, card, trails, onion skins and the zoetrope (Record on): the IK-target drag | 28.72 | 31.5 | 20.4 | 34.7 | 27.2 | 1.43 | 0.16 | 0.21 | 0.01 | 1.27 | 0.43 | 2.86 | 0.34 | 3.60 | 3.11 | 1.12 | 26.16 | OVER |
+| in the world, card, trails, onion skins and the zoetrope (Record on): a scrub | 98.14 | 151.1 | 18.3 | 17.5 | 18.0 | 0.60 | 0.30 | 1.14 | 0.03 | 8.57 | 4.91 | 33.08 | 0.45 | 29.91 | 33.84 | 2.30 | 94.14 | OVER |
+| in the world, card, Centre of Mass shown: the IK-target drag | 29.99 | 41.4 | 20.1 | 29.2 | 20.0 | 0.30 | 0.17 | 0.20 | 0.01 | 1.28 | 0.44 | 5.97 | 0.27 | 3.72 | 6.27 | 0.73 | 29.27 | OVER |
+| in the world, card, Centre of Mass shown: the clip playing (the Scene view alone unless the setting adds a view) | 22.28 | 82.3 | - | - | - | 0.36 | 0.13 | 0.41 | 0.01 | 2.99 | 0.88 | 6.71 | 0.34 | 6.80 | 6.83 | 0.65 | 21.18 | OVER |
+| in the world, card, the Avatar window open: the IK-target drag | 29.58 | 37.5 | 21.5 | 30.9 | 19.8 | 0.32 | 0.17 | 0.21 | 0.01 | 1.30 | 0.44 | 5.34 | 0.30 | 3.71 | 5.63 | 0.56 | 28.91 | OVER |
+| in the world, card, the Avatar window open: the clip playing (the Scene view alone unless the setting adds a view) | 36.10 | 75.9 | - | - | - | 0.36 | 0.17 | 0.69 | 0.02 | 5.18 | 1.54 | 11.58 | 0.39 | 11.74 | 11.79 | 0.92 | 34.89 | OVER |
+| in the world, card, the Inspector on the Armature: the clip playing (the Scene view alone unless the setting adds a view) | 36.43 | 76.2 | - | - | - | 0.34 | 0.13 | 0.68 | 0.02 | 5.35 | 1.54 | 11.06 | 0.37 | 12.02 | 11.27 | 0.91 | 35.36 | OVER |
+| in the world, card, the Inspector on a skinned mesh: the clip playing (the Scene view alone unless the setting adds a view) | 36.84 | 77.4 | - | - | - | 0.35 | 0.16 | 0.69 | 0.02 | 5.35 | 1.54 | 11.06 | 0.37 | 12.04 | 11.27 | 0.96 | 35.73 | OVER |
+| in the world, card, the Rigging window open (its Walk section): the IK-target drag | 27.89 | 33.5 | 21.0 | 30.7 | 20.4 | 0.31 | 0.18 | 0.21 | 0.01 | 1.31 | 0.43 | 4.36 | 0.29 | 3.76 | 4.62 | 0.54 | 27.33 | OVER |
+| in the world, card, the Rigging window open (its Walk section): the clip playing (the Scene view alone unless the setting adds a view) | 37.54 | 81.9 | - | - | - | 0.37 | 0.18 | 0.70 | 0.02 | 5.22 | 1.55 | 11.95 | 0.39 | 11.95 | 12.17 | 1.01 | 36.31 | OVER |
+| in the world, card, Realtime GI on, Lighting Updates Automatic: the IK-target drag | 70.13 | 72.9 | 47.5 | 70.8 | 53.2 | 0.32 | 0.22 | 0.21 | 0.01 | 1.33 | 0.44 | 0.00 | 0.31 | 4.02 | 0.00 | 1.61 | 60.63 | OVER |
+| in the world, card, Realtime GI on, Lighting Updates Manual: the IK-target drag | 18.87 | 37.6 | 11.5 | 20.3 | 11.7 | 0.30 | 0.16 | 0.22 | 0.01 | 1.29 | 0.43 | 3.02 | 0.30 | 3.70 | 3.30 | 0.57 | 18.25 | OVER |
+| in the world, card, Live Link with a client: the IK-target drag | 31.94 | 36.3 | 16.7 | 30.1 | 30.1 | 0.43 | 0.28 | 0.24 | 0.01 | 1.32 | 0.46 | 3.70 | 0.56 | 3.90 | 4.11 | 0.73 | 21.78 | OVER |
+| in the world, card, Live Link with a client: the clip playing (the Scene view alone unless the setting adds a view) | 39.95 | 87.5 | - | - | - | 0.41 | 0.20 | 0.63 | 0.04 | 4.98 | 1.46 | 10.40 | 0.37 | 11.33 | 10.71 | 0.17 | 32.47 | OVER |
+| in the world, card, surface snapping (Ctrl+Shift held): the IK-target drag | 29.26 | 32.5 | 51.9 | 29.4 | 29.3 | 0.31 | 0.21 | 0.21 | 0.01 | 1.28 | 0.44 | 6.02 | 0.31 | 3.69 | 6.28 | 0.53 | 28.56 | OVER |
+| in the world, card, an F12 Live Preview: the IK-target drag | 30.44 | 47.6 | 17.8 | 33.5 | 19.0 | 0.37 | 0.22 | 0.22 | 0.01 | 1.35 | 0.49 | 5.29 | 0.35 | 4.19 | 5.60 | 0.87 | 29.16 | OVER |
+| in the world, card, a path-traced view open (Camera Preview rendered, locked to the Main Camera): the IK-target drag | 829.16 | 968.8 | 164.2 | 810.9 | 46.9 | 0.37 | 0.28 | 0.22 | 0.01 | 1.29 | 0.76 | 4.21 | 0.37 | 6.05 | 4.50 | 0.61 | 827.45 | OVER |
 | operation | longest frame ms | mean frame ms | total s | frames | in the tray | budget |
 |---|---|---|---|---|---|---|
-| Walk Cycle (walk cycle) | 26.3 | 26.3 | 0.03 | 1 | - | ok |
-| Retarget the clip onto a second rig (anim retarget Humanoid) | 12.0 | 12.0 | 0.01 | 1 | - | ok |
-| AutoPhysics (body physics) | 58.0 | 58.0 | 0.06 | 1 | - | OVER |
-| the ragdoll (body ragdoll show) | 15.1 | 2.7 | 0.28 | 105 | Ragdoll | ok |
+| Walk Cycle (walk cycle) | 27.6 | 27.6 | 0.03 | 1 | - | ok |
+| Retarget the clip onto a second rig (anim retarget Humanoid) | 10.7 | 10.7 | 0.01 | 1 | - | ok |
+| AutoPhysics (body physics) | 58.5 | 58.5 | 0.06 | 1 | - | OVER |
+| the ragdoll (body ragdoll show) | 12.4 | 2.4 | 0.27 | 113 | Ragdoll | ok |
 | FK / IK switch (autopose fk larm) | 2.7 | 2.7 | 0.00 | 1 | - | ok |
-| FK / IK switch back (autopose ik larm) | 2.9 | 2.9 | 0.00 | 1 | - | ok |
-| Match IK to FK (autopose match larm) | 2.6 | 2.6 | 0.00 | 1 | - | ok |
+| FK / IK switch back (autopose ik larm) | 2.6 | 2.6 | 0.00 | 1 | - | ok |
+| Match IK to FK (autopose match larm) | 2.5 | 2.5 | 0.00 | 1 | - | ok |
 | at rest | frames that asked for another | views drawn | constraint moves |
 |---|---|---|---|
 | the avatar at the origin, after a pose | 0 | 0 | 0 |
 | the avatar 5,000 m from the origin, after a pose | 0 | 0 | 0 |
 | alone (round 468: from vgroups) | ms | second ms |
 |---|---|---|
-| Skin pose change, 49922 vertices, 3 bones: Linear / Dual Quaternion | 6.91 | 6.84 |
-| IK: a humanoid's 4 chains, targets moved / nothing moved | 0.0098 | 0.0036 |
-| IK: the same rig among 20k objects, nothing moved | 0.1673 | - |
+| Skin pose change, 49922 vertices, 3 bones: Linear / Dual Quaternion | 6.53 | 6.61 |
+| IK: a humanoid's 4 chains, targets moved / nothing moved | 0.0101 | 0.0038 |
+| IK: the same rig among 20k objects, nothing moved | 0.1964 | - |
