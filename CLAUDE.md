@@ -40,7 +40,13 @@ non-trivial.
   asserts one, and a sweep keeps a sample of its cases in the suite with the whole sweep in stress. A spike's
   test goes when its ADR is written. `python tools/test_coverage_map.py --check` must find no console command,
   keymap action or window without a test.
-- Before a change is done: the full unit suite passes on Windows and Linux.
+- Before a change is done: the round's test groups and `editor` pass locally on Windows and Linux
+  (`TEST_GROUPS="a,b" bash tools/dev/chain.sh`), and the full unit suite passes on CI (ADR 0134). The round's
+  groups are those whose tests it changed and those that test the code it changed (code behind a `BL_WITH_*`
+  switch included: CI builds without the libraries); a round that cannot name them runs the whole suite
+  locally (the chain without `TEST_GROUPS`).
+- A timed run (a measurement, a timed bake, a chain with `POSING=1`) takes a slot from the hub's
+  `machine-slots.md` first: one holder at a time, nothing else builds or runs meanwhile.
 - Geometry changes also run the matching stress sections (`blendity_stress --only pushpull |
   modifiers_ngon | curved | editor`). Problem counts and "faces newly on top of each other" counts must
   not rise without an explanation in the round's changelog entry. Delete the report files a run creates and restore
