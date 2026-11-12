@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iterator>
 
 namespace bl {
 
@@ -40,6 +41,30 @@ struct NumericFields : Reflector {
 
 /* What Record compares by: the object (by id: a rename or a move in the Hierarchy isn't a change), the number. */
 std::string shown_key(uint64_t id, const std::string &property, int axis) { return std::to_string(id) + "|" + property + "|" + std::to_string(axis); }
+
+/* A number that moved since it was shown (the tolerance a float edit through the Inspector's text field can't reach). */
+bool differs(float shown, float v) { return std::fabs(shown - v) > 1e-5f * (1.0f + std::fabs(v)); }
+
+const char *const kVectorProps[3] = {"Position", "Rotation", "Scale"};
+
+/* Round 472: an object's nine Record numbers - Position, Rotation (the Euler hint), Scale, each x y z - as
+ * read_anim_value reads them. */
+void read_transform_values(const GameObject &g, float out[9]) {
+  const Transform &t = g.local();
+  for (int a = 0; a < 3; a++) out[a] = t.position[a], out[3 + a] = t.euler_hint[a], out[6 + a] = t.scale[a];
+}
+
+/* The object's numbers read and its transform_version remembered: what was shown, for Record to compare with. */
+void take_shown(AnimEditorState::ShownObject &s, const GameObject &g, uint64_t pass) {
+  s.obj = &g, s.version = g.transform_version, s.pass = pass;
+  read_transform_values(g, s.v);
+}
+
+/* The objects under the root that were not seen in `pass` (gone from the subtree) forgotten. */
+void prune_shown(AnimEditorState &a, size_t in_subtree, uint64_t pass) {
+  if (a.shown_objects.size() <= in_subtree) return;
+  for (auto it = a.shown_objects.begin(); it != a.shown_objects.end();) it = it->second.pass == pass ? std::next(it) : a.shown_objects.erase(it);
+}
 
 /* A file name from an object's name: no folders, nothing Windows refuses. */
 std::string file_safe(std::string n) {
@@ -108,30 +133,63 @@ AnimationClipPtr Editor::anim_new_clip(GameObject *root, const std::string &name
 
 /* ---------------------------------------------------------------- preview and record */
 
+/* Round 472: what's shown, remembered by object - an object not written since it was remembered (its transform_version)
+ * is not read again; the root or clip changed: all of them are. The shape weights and the tracks' components' numbers
+ * are looked at again whole (anim_snapshot_others). */
 void Editor::anim_snapshot_shown() {
-  anim_.shown.clear();
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
-  anim_.shown_root = root ? root->id : 0;
+  const uint64_t root_id = root ? root->id : 0;
+  if (!root || anim_.shown_root != root_id || anim_.shown_clip != clip.get()) anim_.shown_objects.clear(), anim_.other_clip = nullptr;
+  anim_.shown_root = root_id;
   anim_.shown_clip = clip.get();
+  anim_.shown.clear();
   if (!root) return;
-  for (GameObject *g : subtree(root)) {
-    for (const char *prop : {"Position", "Rotation", "Scale"})
-      for (int a = 0; a < 3; a++) {
-        float v = 0.0f;
-        if (read_anim_value(*g, prop, a, v)) anim_.shown[shown_key(g->id, prop, a)] = v;
-      }
-    const MeshFilter *mf = g->mesh_filter();  // (round 406: the shape weights, for Record to make their tracks)
+  const std::vector<GameObject *> walk = subtree(root);
+  const uint64_t pass = ++anim_.shown_pass;
+  uint64_t reads = 0;
+  for (GameObject *g : walk) {
+    AnimEditorState::ShownObject &s = anim_.shown_objects[g->id];
+    s.pass = pass;
+    if (s.obj == g && s.version == g->transform_version) continue;
+    take_shown(s, *g, pass);
+    reads++;
+  }
+  prune_shown(anim_, walk.size(), pass);
+  record_reads_last_ = reads;
+  prof_.record_reads += reads;
+  anim_snapshot_others(*root, clip.get(), walk);
+}
+
+/* The shape weights (round 406: for Record to make their tracks) and every number of the clip's other tracks (a
+ * component's field, a material's, Active), as they are now, keyed by a built string as before. */
+void Editor::anim_snapshot_others(GameObject &root, const AnimationClip *clip, const std::vector<GameObject *> &walk) {
+  anim_.shown.clear();
+  for (GameObject *g : walk) {
+    const MeshFilter *mf = g->mesh_filter();
     const MeshRenderer *mr = g->get<MeshRenderer>();
     for (size_t k = 0; mf && mf->mesh && mr && k < mf->mesh->shape_keys.size(); k++)
       anim_.shown[shown_key(g->id, "MeshRenderer.BlendShape/" + mf->mesh->shape_keys[k].name, 0)] = mr->shape_weight(mf->mesh->shape_keys[k].name);
   }
   if (!clip) return;
-  for (const AnimTrack &t : clip->tracks) {
-    GameObject *g = anim_target(*root, t.path);
+  for (const uint32_t i : anim_other_tracks(*clip)) {
+    if (i >= clip->tracks.size()) continue;
+    const AnimTrack &t = clip->tracks[i];
+    GameObject *g = anim_target(root, t.path);
     float v = 0.0f;
     if (g && read_anim_value(*g, t.property, t.axis, v)) anim_.shown[shown_key(g->id, t.property, t.axis)] = v;
   }
+}
+
+/* The clip's tracks that are not Position, Rotation or Scale (their indices), worked out again when the clip's layout or
+ * number of tracks differs from what they were last worked out for - not on every key Record writes. */
+const std::vector<uint32_t> &Editor::anim_other_tracks(const AnimationClip &clip) {
+  if (anim_.other_clip == &clip && anim_.other_layout == clip.layout && anim_.other_count == clip.tracks.size()) return anim_.other_tracks;
+  anim_.other_tracks.clear();
+  for (size_t i = 0; i < clip.tracks.size(); i++)
+    if (!is_transform_property(clip.tracks[i].property)) anim_.other_tracks.push_back((uint32_t)i);
+  anim_.other_clip = &clip, anim_.other_layout = clip.layout, anim_.other_count = clip.tracks.size();
+  return anim_.other_tracks;
 }
 
 /* Round 340: on 2s or 3s (the root's Animation's Hold), a mark on the ruler at each frame a new pose is drawn on, so
@@ -183,7 +241,7 @@ void Editor::anim_apply() {
    * every animated number of a thousand objects each frame of playback cost more than playing them; Record turned on
    * remembers them then, and anything else looks again before it records. */
   if (anim_.record) anim_snapshot_shown();
-  else anim_.shown_root = 0;
+  else anim_.shown_root = 0, anim_.shown_objects.clear();  // (round 472: Record off holds nothing of the last look)
 }
 
 void Editor::anim_set_frame(float f) {
@@ -280,30 +338,43 @@ void Editor::restore_clip_texts(const std::vector<std::pair<std::string, std::st
  * vector property keys all three axes, as Unity does). Called from mark_changed. */
 bool Editor::anim_changed(uint64_t id, const std::string &property, int axis, float v) const {
   const auto it = anim_.shown.find(shown_key(id, property, axis));
-  return it != anim_.shown.end() && std::fabs(it->second - v) > 1e-5f * (1.0f + std::fabs(v));  // (not shown before: not a change)
+  return it != anim_.shown.end() && differs(it->second, v);  // (not shown before: not a change)
 }
 
-/* A vector property of `g` keyed (all three axes, as Unity) when one of them changed. Rotations take the turn
- * nearest the one shown, so a gizmo's -170 after 170 keys 190, not a spin the long way round. */
-bool Editor::anim_record_vector(AnimationClip &clip, GameObject &g, const std::string &path, const char *prop, float frame) {
-  float v[3] = {0, 0, 0};
+/* A vector property (0 Position, 1 Rotation, 2 Scale) keyed (all three axes, as Unity) when one of its numbers `now`
+ * differs from `shown` (both an object's nine, see read_transform_values). Rotations take the turn nearest the one
+ * shown, so a gizmo's -170 after 170 keys 190, not a spin the long way round. */
+bool Editor::anim_record_vector(AnimationClip &clip, const std::string &path, int prop, const float *shown, const float *now, float frame) {
   bool changed = false;
-  for (int a = 0; a < 3; a++) {
-    read_anim_value(g, prop, a, v[a]);
-    changed = changed || anim_changed(g.id, prop, a, v[a]);
-  }
+  for (int a = 0; a < 3; a++) changed = changed || differs(shown[prop * 3 + a], now[prop * 3 + a]);
   if (!changed) return false;
+  note_clip_edit(clip);  // (round 472: the clip's text before the step's first key, taken now and once)
   for (int a = 0; a < 3; a++) {
-    const auto it = anim_.shown.find(shown_key(g.id, prop, a));
-    if (std::string(prop) == "Rotation" && it != anim_.shown.end()) v[a] = it->second + std::remainder(v[a] - it->second, 360.0f);
-    clip.track(path, prop, a).set_key(frame, v[a]);
+    float v = now[prop * 3 + a];
+    if (prop == 1) v = shown[3 + a] + std::remainder(v - shown[3 + a], 360.0f);
+    clip.track(path, kVectorProps[prop], a).set_key(frame, v);
   }
   return true;
 }
 
+/* Round 472: one object written since it was shown. Bones IK turns are left to IK; the rest keyed where a number moved
+ * (the path and IK checks only for an object that did move). */
+bool Editor::anim_record_object(AnimationClip &clip, GameObject &root, GameObject &g, const float *shown, const float *now) {
+  bool moved = false;
+  for (int i = 0; i < 9; i++) moved = moved || differs(shown[i], now[i]);
+  if (!moved || (g.get<Bone>() && ik_drives(*scene_, g))) return false;
+  const std::string path = anim_path(root, g);
+  bool keyed = false;
+  for (int prop = 0; prop < 3; prop++) keyed = anim_record_vector(clip, path, prop, shown, now, anim_key_frame(&g)) || keyed;  // (round 340: on 2s, the drawn frame)
+  return keyed;
+}
+
 /* Record: what changed since it was shown becomes keys at the playhead (a whole frame). Bones IK turns are left to
  * IK (their targets are what gets keyed); objects new under the root, or a root or clip changed since the last look,
- * just get looked at. Called from mark_changed. */
+ * just get looked at. Called from mark_changed.
+ * Round 472: an object whose transform_version is what it was when it was shown is passed over - no number read, no
+ * path built, no IK asked - and only the objects that were written are remembered again; the clip's text is taken once
+ * per undo step (note_clip_edit), when the step's first key is about to be written. */
 void Editor::anim_record_changes() {
   GameObject *root = anim_root();
   AnimationClipPtr clip = anim_clip();
@@ -311,30 +382,37 @@ void Editor::anim_record_changes() {
   if (anim_.shown_root != root->id || anim_.shown_clip != clip.get()) return anim_snapshot_shown();
   BL_ZONE("record changes");
   ProfileScope scope{prof_.ms_record, {}};  // (round 468: the Record pass whole, the clip's text it serialises counted)
-  prof_.clip_serialisations++;
-  const std::string before = save_clip_text(*clip);
+  const std::vector<GameObject *> walk = subtree(root);
+  const uint64_t pass = ++anim_.shown_pass;
+  uint64_t reads = 0;
   bool keyed = false;
-  for (GameObject *g : subtree(root)) {
-    if (g->get<Bone>() && ik_drives(*scene_, *g)) continue;
-    const std::string path = anim_path(*root, *g);
-    for (const char *prop : {"Position", "Rotation", "Scale"}) keyed = anim_record_vector(*clip, *g, path, prop, anim_key_frame(g)) || keyed;  // (round 340: on 2s, the drawn frame)
+  for (GameObject *g : walk) {
+    AnimEditorState::ShownObject &s = anim_.shown_objects[g->id];
+    const bool new_here = s.obj == nullptr;  // (not shown before: not a change - it is just looked at)
+    s.pass = pass;
+    if (!new_here && s.obj == g && s.version == g->transform_version) continue;
+    float now[9];
+    read_transform_values(*g, now);
+    reads++;
+    if (!new_here) keyed = anim_record_object(*clip, *root, *g, s.v, now) || keyed;
+    take_shown(s, *g, pass);
   }
-  anim_record_shape_weights(*clip, *root, keyed);  // (round 406: a weight moved makes its BlendShape track, as Unity's Record)
-  for (AnimTrack &t : clip->tracks) {  // the components' numbers already animated
-    if (is_transform_property(t.property)) continue;
+  prune_shown(anim_, walk.size(), pass);
+  anim_record_shape_weights(*clip, *root, walk, keyed);  // (round 406: a weight moved makes its BlendShape track, as Unity's Record)
+  for (const uint32_t i : anim_other_tracks(*clip)) {  // the components' numbers already animated
+    if (i >= clip->tracks.size()) continue;
+    AnimTrack &t = clip->tracks[i];
     GameObject *g = anim_target(*root, t.path);
     float v = 0.0f;
     if (!g || !read_anim_value(*g, t.property, t.axis, v) || !anim_changed(g->id, t.property, t.axis, v)) continue;
+    note_clip_edit(*clip);
     t.set_key(anim_key_frame(g), v);
     keyed = true;
   }
-  if (keyed) {
-    bool noted = false;
-    for (const auto &kv : clip_before_) noted = noted || kv.first == clip->asset_path;
-    if (!noted && !clip->asset_path.empty()) clip_before_.push_back({clip->asset_path, before});
-    clip->touch();
-  }
-  anim_snapshot_shown();
+  if (keyed) clip->touch_keys();  // (the tracks' layout is what it was, or the tracks made counted themselves)
+  record_reads_last_ = reads;
+  prof_.record_reads += reads;
+  anim_snapshot_others(*root, clip.get(), walk);
 }
 
 /* Round 408 (task 0385): the scene's humanoid rigs apart from the one animated - each a root an Armature sits under. */
@@ -382,16 +460,19 @@ bool Editor::retarget_open_clip(GameObject &target_root) {
 
 /* Round 406: Record on a shape weight that moved since it was shown - the BlendShape track made when missing (the
  * tracks that exist are keyed with the other components' numbers). */
-void Editor::anim_record_shape_weights(AnimationClip &clip, GameObject &root, bool &keyed) {
-  for (GameObject *g : subtree(&root)) {
+void Editor::anim_record_shape_weights(AnimationClip &clip, GameObject &root, const std::vector<GameObject *> &walk, bool &keyed) {
+  for (GameObject *g : walk) {
     const MeshFilter *mf = g->mesh_filter();
     const MeshRenderer *mr = g->get<MeshRenderer>();
     if (!mf || !mf->mesh || !mr) continue;
-    const std::string path = anim_path(root, *g);
+    std::string path;  // (round 472: built for an object whose weight moved, not for every one with shape keys)
+    bool have_path = false;
     for (const ShapeKey &k : mf->mesh->shape_keys) {
       const std::string prop = "MeshRenderer.BlendShape/" + k.name;
       const float v = mr->shape_weight(k.name);
       if (!anim_changed(g->id, prop, 0, v)) continue;
+      if (!have_path) path = anim_path(root, *g), have_path = true;
+      note_clip_edit(clip);
       clip.track(path, prop, 0).set_key(anim_key_frame(g), v);
       keyed = true;
     }
@@ -1006,6 +1087,36 @@ std::vector<Editor::AnimRow> Editor::anim_rows(const AnimationClip &clip) const 
   return rows;
 }
 
+/* Round 472: the rows kept while nothing they are made of changes (see AnimRowLayout). A caller holds the returned layout
+ * while it draws: a change makes a new one and leaves the held one as it was. */
+std::shared_ptr<Editor::AnimRowLayout> Editor::anim_row_layout(const AnimationClip &clip) const {
+  const std::shared_ptr<AnimRowLayout> &have = anim_layout_;
+  if (have && have->clip == &clip && have->version == clip.version && have->tracks == clip.tracks.size() && have->curves == anim_.curves &&
+      have->asset_path == clip.asset_path && have->expanded == anim_.expanded && have->folded == anim_.folded_objects)
+    return have;
+  auto made = std::make_shared<AnimRowLayout>();
+  made->clip = &clip, made->version = clip.version, made->tracks = clip.tracks.size(), made->asset_path = clip.asset_path;
+  made->curves = anim_.curves, made->expanded = anim_.expanded, made->folded = anim_.folded_objects;
+  made->rows = anim_rows(clip);
+  made->keys.resize(made->rows.size());
+  anim_row_builds_++;
+  anim_layout_ = made;
+  return made;
+}
+
+/* A row's frames and the keys on each, worked out once for the layout. */
+Editor::AnimRowKeys &Editor::anim_row_keys_kept(const AnimationClip &clip, AnimRowLayout &layout, size_t row) const {
+  AnimRowKeys &k = layout.keys[row];
+  if (k.built) return k;
+  if (layout.tracks != clip.tracks.size()) return k.built = true, k;  // (tracks went since the layout was made, this frame: it shows none)
+  const AnimRow &r = layout.rows[row];
+  k.frames = anim_row_frames(clip, r);
+  k.at.reserve(k.frames.size());
+  for (float f : k.frames) k.at.push_back(anim_row_keys(clip, r, f));
+  k.built = true;
+  return k;
+}
+
 /* A fold arrow clicked: an object row folds (open by default), a property group unfolds (folded by default). */
 void Editor::anim_toggle_row(const AnimRow &row) {
   if (row.summary()) return;
@@ -1084,12 +1195,13 @@ std::vector<float> Editor::anim_row_frames(const AnimationClip &clip, const Anim
 
 /* The diamond under (mx, my): the keys it stands for (a group row's: all its axes' at that frame). */
 bool Editor::anim_key_under(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my, std::vector<std::pair<int, float>> &keys) {
-  const std::vector<AnimRow> rows = anim_rows(clip);
+  const std::shared_ptr<AnimRowLayout> layout = anim_row_layout(clip);  // (round 472: kept rows and keys)
   const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
-  if (my < sheet.y || r < 0 || (size_t)r >= rows.size()) return false;
-  for (float f : anim_row_frames(clip, rows[(size_t)r])) {
-    if (std::abs(anim_x_of(sheet, f, end) - mx) > ui_.px(9)) continue;  // (task 0258: an 18 px target - 4.8 mm at 96 DPI, under 7 mm still; 10 px before)
-    keys = anim_row_keys(clip, rows[(size_t)r], f);
+  if (my < sheet.y || r < 0 || (size_t)r >= layout->rows.size()) return false;
+  const AnimRowKeys &row = anim_row_keys_kept(clip, *layout, (size_t)r);
+  for (size_t i = 0; i < row.frames.size(); i++) {
+    if (std::abs(anim_x_of(sheet, row.frames[i], end) - mx) > ui_.px(9)) continue;  // (task 0258: an 18 px target - 4.8 mm at 96 DPI, under 7 mm still; 10 px before)
+    keys = row.at[i];
     return !keys.empty();
   }
   return false;
@@ -1103,16 +1215,17 @@ bool Editor::anim_all_selected(const std::vector<std::pair<int, float>> &keys) c
  * group row standing for their axes. Shift adds, Ctrl takes away. */
 std::vector<std::pair<int, float>> Editor::anim_box_keys(const AnimationClip &clip, const Recti &sheet, int row_h, float end, const Recti &box) const {
   std::vector<std::pair<int, float>> out;
-  const std::vector<AnimRow> rows = anim_rows(clip);
+  const std::shared_ptr<AnimRowLayout> layout = anim_row_layout(clip);  // (round 472)
   const int half = ui_.px(9);  // (task 0258)
-  for (size_t r = (size_t)std::max(0, anim_.scroll); r < rows.size(); r++) {
+  for (size_t r = (size_t)std::max(0, anim_.scroll); r < layout->rows.size(); r++) {
     const int y0 = sheet.y + ((int)r - anim_.scroll) * row_h;
     if (y0 > sheet.bottom()) break;
     if (y0 + row_h < box.y || y0 > box.bottom()) continue;
-    for (float f : anim_row_frames(clip, rows[r])) {
-      const int x = anim_x_of(sheet, f, end);
+    const AnimRowKeys &row = anim_row_keys_kept(clip, *layout, r);
+    for (size_t i = 0; i < row.frames.size(); i++) {
+      const int x = anim_x_of(sheet, row.frames[i], end);
       if (x + half < box.x || x - half > box.right()) continue;
-      for (const auto &k : anim_row_keys(clip, rows[r], f)) out.push_back(k);
+      for (const auto &k : row.at[i]) out.push_back(k);
     }
   }
   return out;
@@ -1170,11 +1283,12 @@ void Editor::anim_select_key(int track, float frame, bool on) {
 
 /* A double-click on a row: a key at that frame on each of its tracks (a group row keys all its axes). */
 void Editor::anim_add_row_key(const AnimationClip &clip, const Recti &sheet, int row_h, float end, int mx, int my) {
-  const std::vector<AnimRow> rows = anim_rows(clip);
+  const std::shared_ptr<AnimRowLayout> layout = anim_row_layout(clip);  // (round 472)
   const int r = (my - sheet.y) / std::max(1, row_h) + anim_.scroll;
-  if (r < 0 || (size_t)r >= rows.size()) return;
+  if (r < 0 || (size_t)r >= layout->rows.size()) return;
   const float f = std::max(0.0f, std::round(anim_frame_at(sheet, mx, end)));  // (task 0267: left of frame 0 when panned: frame 0)
-  for (int t : rows[(size_t)r].tracks) anim_add_key((size_t)t, f);
+  const std::vector<int> tracks = layout->rows[(size_t)r].tracks;  // (a copy: each key added changes the clip, and the layout with it)
+  for (int t : tracks) anim_add_key((size_t)t, f);
 }
 
 void Editor::anim_end_drag(const AnimationClip &clip, const Recti &sheet, int row_h, float end) {
@@ -1211,7 +1325,8 @@ void Editor::draw_anim_ruler(const Recti &ruler, const Recti &sheet, float end) 
 void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const Recti &list, const Recti &body, const Recti &sheet, int row_h, float end) {
   auto &u = ui_;
   auto &in = u.in;
-  const std::vector<AnimRow> rows = anim_rows(clip);
+  const std::shared_ptr<AnimRowLayout> layout = anim_row_layout(clip);  // (round 472: not worked out again while only the playhead moves)
+  const std::vector<AnimRow> &rows = layout->rows;
   if (u.record_buttons) anim_row_values_for_test_.clear();
   const int fit = std::max(1, list.h / std::max(1, row_h));
   const Recti scroll_area = anim_.curves ? list : body;
@@ -1230,10 +1345,12 @@ void Editor::draw_anim_rows(const AnimationClip &clip, GameObject *root, const R
     draw_anim_row_name(clip, root, row, lr, body, sheet, (int)r);
     if (anim_.curves) continue;
     u.canvas.push_clip(sheet);  // (task 0267: zoomed or panned, keys outside the view stay in the sheet)
-    for (float f : anim_row_frames(clip, row)) {
-      const std::vector<std::pair<int, float>> ks = anim_row_keys(clip, row, f);
+    const AnimRowKeys &kept = anim_row_keys_kept(clip, *layout, r);
+    for (size_t fi = 0; fi < kept.frames.size(); fi++) {
+      const float f = kept.frames[fi];
+      const std::vector<std::pair<int, float>> &ks = kept.at[fi];
       const bool sel = anim_all_selected(ks);
-      const bool lit = std::any_of(ks.begin(), ks.end(), [&](const auto &k) {
+      const bool lit = !boxed.empty() && std::any_of(ks.begin(), ks.end(), [&](const auto &k) {
         return std::any_of(boxed.begin(), boxed.end(), [&](const auto &b) { return b.first == k.first && std::fabs(b.second - k.second) < 0.01f; });
       });
       const float cx = (float)anim_x_of(sheet, f + (sel ? shift : 0.0f), end), cy = (float)(lr.y + row_h / 2);

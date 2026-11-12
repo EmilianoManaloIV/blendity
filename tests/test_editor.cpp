@@ -11880,6 +11880,438 @@ static void tests_round469() {
   });
 }
 
+/* ===================================================================== */
+/* Round 472 (task 0448): the Animation window keeps its rows while only the playhead moves; G / R / S idle when the mouse is still */
+/* (the test engineer's tests) */
+/* ===================================================================== */
+
+static void r472w_remove(const char *name) { std::remove(resolve_asset_path(std::string("Assets/Animations/") + name + ".anim").c_str()); }
+
+/* Two roots, each with a clip (WinA is selected last); the Animation window wide, buttons recorded, Preview on. */
+static void r472w_open(Editor &ed) {
+  ed.init_headless(1400, 900);
+  ed.record_buttons_for_test(true);
+  r472w_remove("R472WinA");
+  r472w_remove("R472WinB");
+  for (const char *n : {"R472WinB", "R472WinA"}) {
+    GameObject *root = ed.scene().create(n);
+    const std::string pre(1, n[7]);
+    ed.scene().create(pre + "0", root);
+    ed.scene().create(pre + "1", root);
+    ed.command(std::string("select ") + n);
+    ed.mark_changed_for_test("R472 window rig");
+    ed.step_frame_headless();
+    ed.command("anim new");
+    ed.command("anim key " + pre + "0 Position 0 0 0");
+    ed.command("anim key " + pre + "0 Position 0 30 1");
+    ed.command("anim key " + pre + "0 Position 1 0 0");
+    ed.command("anim key " + pre + "0 Position 1 30 2");
+    ed.command("anim key " + pre + "1 Rotation 2 0 0");
+    ed.command("anim key " + pre + "1 Rotation 2 20 45");
+  }
+  ed.command("layout Animation");
+  ed.command("anim preview on");
+  r34_steps(ed, 4);
+}
+
+struct R472Sheet {
+  Recti sheet{0, 0, 0, 0}, ruler{0, 0, 0, 0};
+  float end = 33.0f;
+  bool ok = false;
+  int x_of(float f) const { return sheet.x + (int)std::lround(f / end * (float)sheet.w); }
+};
+static R472Sheet r472w_sheet(Editor &ed, const char *name) {
+  R472Sheet s;
+  s.ok = ed.button_rect_for_test("anim_sheet", s.sheet) && ed.button_rect_for_test("anim_ruler", s.ruler);
+  (void)name;
+  AnimationClipPtr c = ed.anim_clip_for_test();
+  if (c) s.end = std::max(30.0f, c->end_frame()) * 1.1f;
+  return s;
+}
+
+/* A press on the ruler, a drag through `frames`, a release. */
+static void r472w_scrub(Editor &ed, const R472Sheet &s, const std::vector<float> &frames) {
+  const int y = s.ruler.y + s.ruler.h / 2;
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, s.x_of(frames[0]), y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, s.x_of(frames[0]), y)});
+  for (float f : frames) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, s.x_of(f), y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseUp, s.x_of(frames.back()), y)});
+  ed.step_frame_headless();
+}
+
+static void tests_round472() {
+  test("round 472: Animation window: scrubbing the ruler and playing the clip with nothing else changing build the row layout 0 times after the first", [] {
+    Editor ed;
+    r472w_open(ed);
+    CHECK(ed.anim_row_builds_for_test() >= 1);
+    const R472Sheet s = r472w_sheet(ed, "R472WinA");
+    CHECK(s.ok);
+    if (!s.ok) return;
+    const uint64_t b0 = ed.anim_row_builds_for_test();
+    r472w_scrub(ed, s, {2, 5, 8, 11, 14, 17, 20, 23, 26, 12});
+    std::printf("    scrubbed to frame %g: %llu row build(s)\n", ed.anim_frame_for_test(), (unsigned long long)(ed.anim_row_builds_for_test() - b0));
+    CHECK(std::fabs(ed.anim_frame_for_test() - 12.0f) <= 1.0f);
+    CHECK(ed.anim_row_builds_for_test() == b0);
+    const float f0 = ed.anim_frame_for_test();
+    ed.command("anim play");
+    for (int i = 0; i < 400 && ed.anim_frame_for_test() == f0; i++) ed.step_frame_headless();
+    for (int i = 0; i < 30; i++) ed.step_frame_headless();
+    ed.command("anim stop");
+    r34_steps(ed, 2);
+    std::printf("    played from %g to %g: %llu row build(s)\n", f0, ed.anim_frame_for_test(), (unsigned long long)(ed.anim_row_builds_for_test() - b0));
+    CHECK(ed.anim_frame_for_test() != f0);
+    CHECK(ed.anim_row_builds_for_test() == b0);
+  });
+
+  test("round 472: Animation window: a key added, a track added, a row expanded or folded, the curves mode and another root's clip each make the row layout again", [] {
+    Editor ed;
+    r472w_open(ed);
+    auto rebuilds = [&](const char *what, const std::function<void()> &act) {
+      r34_steps(ed, 2);
+      const uint64_t b = ed.anim_row_builds_for_test();
+      act();
+      r34_steps(ed, 3);
+      const uint64_t d = ed.anim_row_builds_for_test() - b;
+      std::printf("    %s: %llu build(s)\n", what, (unsigned long long)d);
+      CHECK(d >= 1);
+      r34_steps(ed, 3);
+      CHECK(ed.anim_row_builds_for_test() - b == d);  // (and then it holds again)
+    };
+    rebuilds("a key added", [&] { ed.command("anim key A0 Position 0 10 0.4"); });
+    rebuilds("a track added", [&] { ed.command("anim key A1 Scale 0 5 2"); });
+    auto click_row = [&](const std::string &label, int dx) {
+      Recti r;
+      const bool found = ed.button_rect_for_test("anim_track:" + label, r);
+      CHECK(found);
+      if (found) r34_click(ed, r.x + dx, r.y + r.h / 2);
+    };
+    const int dx = ed.ui_for_test().px(12);
+    rebuilds("a group row expanded", [&] { click_row("A0 : Position", dx); });
+    rebuilds("a group row folded again", [&] { click_row("A0 : Position", dx); });
+    rebuilds("an object row folded", [&] { click_row("A0", dx); });
+    rebuilds("an object row opened", [&] { click_row("A0", dx); });
+    rebuilds("the curves mode", [&] {
+      Recti c;
+      CHECK(ed.button_rect_for_test("Curves", c));
+      r34_click(ed, c.x + c.w / 2, c.y + c.h / 2);
+    });
+    rebuilds("the dopesheet again", [&] {
+      Recti c;
+      CHECK(ed.button_rect_for_test("Dopesheet", c));
+      r34_click(ed, c.x + c.w / 2, c.y + c.h / 2);
+    });
+    rebuilds("another root's clip selected", [&] { ed.command("select R472WinB"); });
+    r472w_remove("R472WinA");
+    r472w_remove("R472WinB");
+  });
+
+  test("round 472: Animation window: after a scrub the window's picture is the one a fresh editor put straight at that frame draws", [] {
+    Editor a;
+    r472w_open(a);
+    const R472Sheet s = r472w_sheet(a, "R472WinA");
+    CHECK(s.ok);
+    if (!s.ok) return;
+    r472w_scrub(a, s, {3, 9, 15, 21, 27, 18});
+    const float frame = a.anim_frame_for_test();
+    r34_park_mouse(a);
+    r34_steps(a, 4);
+    const Recti wa = a.window_rect_for_test(WindowKind::Animation);
+    const std::vector<uint32_t> after_scrub = r34_crop(a, wa);
+    Editor b;
+    r472w_open(b);
+    b.command("anim frame " + std::to_string((int)frame));
+    r34_park_mouse(b);
+    r34_steps(b, 4);
+    const Recti wb = b.window_rect_for_test(WindowKind::Animation);
+    CHECK(wa.x == wb.x && wa.y == wb.y && wa.w == wb.w && wa.h == wb.h);
+    const std::vector<uint32_t> direct = r34_crop(b, wb);
+    std::printf("    frame %g: %zu pixels, %zu differ\n", frame, direct.size(), r35_diff_count(after_scrub, direct));
+    CHECK(after_scrub.size() == direct.size());
+    CHECK(r35_diff_count(after_scrub, direct) == 0);
+    r472w_remove("R472WinA");
+    r472w_remove("R472WinB");
+  });
+
+  test("round 472: Animation window: after a scrub a click on a key still selects it, and a box drag selects the keys it covers", [] {
+    Editor ed;
+    r472w_open(ed);
+    const R472Sheet s = r472w_sheet(ed, "R472WinA");
+    CHECK(s.ok);
+    if (!s.ok) return;
+    r472w_scrub(ed, s, {4, 8, 12, 16});
+    r34_steps(ed, 2);
+    const int row_h = ed.ui_for_test().row_h();
+    /* The summary row (the first) holds every track's keys: its key at frame 30 stands for B0's two tracks. */
+    r34_click(ed, s.x_of(30.0f), s.sheet.y + row_h / 2);
+    r34_steps(ed, 2);
+    const auto picked = ed.anim_for_test().selected;
+    std::printf("    clicked the key at 30: %zu selected\n", picked.size());
+    CHECK(!picked.empty());
+    for (const auto &k : picked) CHECK(std::fabs(k.second - 30.0f) < 0.01f);
+    /* A box from an empty place over the keys at 30 and 20. */
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, s.x_of(25.0f), s.sheet.y + 1)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, s.x_of(25.0f), s.sheet.y + 1)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, s.x_of(31.0f), s.sheet.y + row_h * 3)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, s.x_of(31.0f), s.sheet.y + row_h * 3)});
+    r34_steps(ed, 2);
+    const auto boxed = ed.anim_for_test().selected;
+    std::printf("    box over frames 25..31: %zu selected\n", boxed.size());
+    CHECK(!boxed.empty());
+    for (const auto &k : boxed) CHECK(std::fabs(k.second - 30.0f) < 0.01f);
+    r472w_remove("R472WinA");
+    r472w_remove("R472WinB");
+  });
+
+  /* ---- G / R / S idle ---- */
+  struct Grab {
+    Editor ed;
+    int mx = 0, my = 0;
+    void open() {
+      r34_open(ed);
+      ed.command("select Cube");
+      r34_steps(ed, 2);
+      const Recti v = ed.scene_view_rect();
+      mx = v.x + v.w / 2, my = v.y + v.h / 2;
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, mx, my)});
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, mx, my)});
+    }
+    void key(int k, int mods = 0) {
+      platform::Event d, u;
+      d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+      d.key = u.key = k;
+      d.mods = u.mods = mods;
+      ed.step_frame_headless({d, u});
+    }
+    void grab() {
+      key(platform::KEY_G);
+      r34_steps(ed, 1);
+    }
+    void text(char c) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+      ed.step_frame_headless({e});
+    }
+    Vec3 cube() { return ed.scene().find_by_name("Cube")->world_position(); }
+  };
+
+  test("round 472: a held G with a still mouse applies nothing and asks for no redraw over 60 frames", [] {
+    Grab g;
+    g.open();
+    g.grab();
+    CHECK(g.ed.transform_active_for_test());
+    g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, g.mx + 30, g.my + 10)});
+    r34_steps(g.ed, 3);
+    const uint64_t a0 = g.ed.modal_applies_for_test();
+    const R34Count t0 = r34_totals(g.ed);
+    const Vec3 p0 = g.cube();
+    r34_steps(g.ed, 60);
+    const uint64_t d = g.ed.modal_applies_for_test() - a0;
+    std::printf("    60 still frames: %llu apply(ies), %llu view render(s)\n", (unsigned long long)d, (unsigned long long)(r34_totals(g.ed) - t0).renders);
+    CHECK(g.ed.transform_active_for_test());
+    CHECK(d == 0);
+    CHECK((r34_totals(g.ed) - t0).renders == 0);
+    CHECK(length(g.cube() - p0) == 0.0f);
+  });
+
+  test("round 472: a held G applies again for a mouse move, a typed digit, an axis key, Shift or Ctrl changing, and a camera move - each at least once", [] {
+    Grab g;
+    g.open();
+    g.grab();
+    g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, g.mx + 30, g.my + 10)});
+    r34_steps(g.ed, 4);
+    auto again = [&](const char *what, const std::function<void()> &act) {
+      r34_steps(g.ed, 3);
+      const uint64_t a = g.ed.modal_applies_for_test();
+      act();
+      r34_steps(g.ed, 2);
+      std::printf("    %s: %llu apply(ies)\n", what, (unsigned long long)(g.ed.modal_applies_for_test() - a));
+      CHECK(g.ed.transform_active_for_test());
+      CHECK(g.ed.modal_applies_for_test() > a);
+    };
+    again("a mouse move", [&] { g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, g.mx + 60, g.my + 20)}); });
+    again("a typed digit", [&] { g.text('2'); });
+    again("the X key", [&] { g.key(platform::KEY_X); });
+    again("Shift held", [&] {
+      platform::Event e = r34_mouse(R34ET::MouseMove, g.mx + 60, g.my + 20);
+      e.mods = platform::MOD_SHIFT;
+      g.ed.step_frame_headless({e});
+    });
+    again("Shift let go", [&] { g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, g.mx + 60, g.my + 20)}); });
+    again("Ctrl held (snapping)", [&] {
+      platform::Event e = r34_mouse(R34ET::MouseMove, g.mx + 60, g.my + 20);
+      e.mods = platform::MOD_CTRL;
+      g.ed.step_frame_headless({e});
+    });
+    again("the camera moved", [&] { g.ed.command("camera 22 18 9 0 0.5 0"); });
+  });
+
+  test("round 472: G / R / S confirmed after idle frames leave the object exactly where the same gesture with every frame applied leaves it", [] {
+    auto gesture = [](int mode, int variant) {
+      Grab g;
+      g.open();
+      Vec3 start = g.cube();
+      g.key(platform::KEY_G);  // (R and S switch a running grab, as Blender does)
+      if (mode) {
+        r34_steps(g.ed, 1);
+        g.key(mode == 1 ? platform::KEY_R : platform::KEY_S);
+      }
+      r34_steps(g.ed, 1);
+      for (int i = 1; i <= 5; i++) g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, g.mx + 6 * i, g.my + 2 * i)});
+      const int ex = g.mx + 30, ey = g.my + 10;
+      if (variant == 1) r34_steps(g.ed, 60);  // (a still mouse: nothing applied)
+      if (variant == 2)
+        for (int i = 0; i < 20; i++) {  // (the mouse a pixel off and back: every frame applies)
+          g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, ex + 1, ey)});
+          g.ed.step_frame_headless({r34_mouse(R34ET::MouseMove, ex, ey)});
+        }
+      g.ed.step_frame_headless({r34_mouse(R34ET::MouseDown, ex, ey), r34_mouse(R34ET::MouseUp, ex, ey)});
+      r34_steps(g.ed, 2);
+      const GameObject *c = g.ed.scene().find_by_name("Cube");
+      struct R {
+        Vec3 p, s;
+        Quat q;
+        bool moved;
+      };
+      return R{c->world_position(), c->local().scale, c->local().rotation, length(c->world_position() - start) > 1e-4f || c->local().scale.x != 1.0f || std::fabs(c->local().rotation.w) < 0.99999f};
+    };
+    for (int mode = 0; mode < 3; mode++) {
+      const auto a = gesture(mode, 0), b = gesture(mode, 1), c = gesture(mode, 2);
+      std::printf("    mode %d: moved %d, idle %s, jiggled %s\n", mode, (int)a.moved, std::memcmp(&a.p, &b.p, sizeof(Vec3)) == 0 && std::memcmp(&a.s, &b.s, sizeof(Vec3)) == 0 && std::memcmp(&a.q, &b.q, sizeof(Quat)) == 0 ? "same" : "DIFFERENT",
+                  std::memcmp(&a.p, &c.p, sizeof(Vec3)) == 0 && std::memcmp(&a.s, &c.s, sizeof(Vec3)) == 0 && std::memcmp(&a.q, &c.q, sizeof(Quat)) == 0 ? "same" : "DIFFERENT");
+      CHECK(a.moved);
+      CHECK(std::memcmp(&a.p, &b.p, sizeof(Vec3)) == 0 && std::memcmp(&a.s, &b.s, sizeof(Vec3)) == 0 && std::memcmp(&a.q, &b.q, sizeof(Quat)) == 0);
+      CHECK(std::memcmp(&a.p, &c.p, sizeof(Vec3)) == 0 && std::memcmp(&a.s, &c.s, sizeof(Vec3)) == 0 && std::memcmp(&a.q, &c.q, sizeof(Quat)) == 0);
+    }
+  });
+
+  test("round 472: a typed distance on a held G (2, then idle frames) moves the object exactly 2 along X, as typing it and confirming at once does", [] {
+    Vec3 pos[2], start;
+    for (int idle = 0; idle < 2; idle++) {
+      Grab g;
+      g.open();
+      start = g.cube();
+      g.grab();
+      g.text('2');
+      if (idle) r34_steps(g.ed, 60);
+      g.key(platform::KEY_ENTER);
+      r34_steps(g.ed, 2);
+      pos[idle] = g.cube();
+    }
+    std::printf("    from %.3f: %.4f / %.4f\n", start.x, pos[0].x, pos[1].x);
+    CHECK(std::fabs(pos[0].x - (start.x + 2.0f)) < 1e-4f);
+    CHECK(std::memcmp(&pos[0], &pos[1], sizeof(Vec3)) == 0);
+  });
+
+  /* ---- Part E: the solve after the tools (an IK target's limb is where the solver puts it for that frame) ---- */
+  auto r472e_bones = [](Editor &ed) {
+    std::vector<Vec3> v;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<Bone>()) v.push_back(g.world_position());
+    });
+    return v;
+  };
+  auto r472e_diff = [](const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+    float worst = a.size() == b.size() ? 0.0f : 1e9f;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) worst = std::max(worst, length(a[i] - b[i]));
+    return worst;
+  };
+  /* The arm's target in, selected, Move tool: the press point of its X arrow. */
+  auto r472e_arm = [](Editor &ed, int &px, int &py) {
+    GameObject *target = ed.scene().find_by_name("LeftHandIK");
+    if (!target) return false;
+    target->set_world_position(target->world_position() + Vec3(0, 0.12f, 0));
+    ed.mark_changed_for_test("R472 hand up");
+    r34_steps(ed, 2);
+    ed.command("select LeftHandIK");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    return ed.project_to_window(ed.scene().find_by_name("LeftHandIK")->world_position(), px, py);
+  };
+
+  test("round 472: an IK target dragged with the gizmo: after every frame of the drag one more solve moves no bone (under 0.01 mm), the hand follows, one undo step, undo puts every bone back", [=] {
+    Editor ed;
+    r468_rig(ed);
+    int px = 0, py = 0;
+    CHECK(r472e_arm(ed, px, py));
+    const std::vector<Vec3> start = r472e_bones(ed);
+    const Vec3 t0 = ed.scene().find_by_name("LeftHandIK")->world_position();
+    const size_t u0 = ed.undo_steps_for_test();
+    const uint64_t s0 = ed.solves_after_tools_for_test();
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px + 55, py)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, px + 55, py)});
+    float worst = 0.0f;
+    for (int i = 1; i <= 24; i++) {
+      ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px + 55 + i * 2, py)});
+      const std::vector<Vec3> a = r472e_bones(ed);
+      solve_constraints(ed.scene());
+      worst = std::max(worst, r472e_diff(a, r472e_bones(ed)));
+    }
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, px + 55 + 48, py)});
+    r34_steps(ed, 3);
+    const Vec3 t1 = ed.scene().find_by_name("LeftHandIK")->world_position();
+    const std::vector<Vec3> end = r472e_bones(ed);
+    std::printf("    target moved %.3f; the pose a frame late by up to %.6f m; %llu second solve(s) turned a bone; %zu undo step(s)\n", length(t1 - t0), worst,
+                (unsigned long long)(ed.solves_after_tools_for_test() - s0), ed.undo_steps_for_test() - u0);
+    CHECK(length(t1 - t0) > 0.02f);
+    CHECK(worst < 1e-5f);
+    CHECK(ed.undo_steps_for_test() - u0 == 1);
+    CHECK(r472e_diff(start, end) > 1e-3f);
+    ed.command("undo");
+    r34_steps(ed, 3);
+    std::printf("    after undo: bones %.6f m from the start\n", r472e_diff(start, r472e_bones(ed)));
+    CHECK(r472e_diff(start, r472e_bones(ed)) < 1e-4f);
+  });
+
+  test("round 472: a plain object dragged with the gizmo in a scene with no constraint asks for no second solve", [=] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("camera 0 1.0 8 0 0.5 0");
+    ed.command("select Cube");
+    ed.command("tool move");
+    r34_steps(ed, 3);
+    const uint64_t s0 = ed.solves_after_tools_for_test();
+    const Vec3 p0 = ed.scene().find_by_name("Cube")->world_position();
+    r34_gizmo_drag_x(ed, p0, 50);
+    r34_steps(ed, 2);
+    CHECK(length(ed.scene().find_by_name("Cube")->world_position() - p0) > 0.01f);
+    CHECK(ed.solves_after_tools_for_test() == s0);
+  });
+
+  test("round 472: in Play the second solve does not run, whatever moves", [=] {
+    Editor ed;
+    r468_rig(ed);
+    ed.command("play");
+    r34_steps(ed, 4);
+    const uint64_t s0 = ed.solves_after_tools_for_test();
+    for (int i = 0; i < 10; i++) {
+      GameObject *t = ed.scene().find_by_name("LeftHandIK");
+      if (t) t->set_world_position(t->world_position() + Vec3(0.01f, 0.0f, 0.0f));
+      ed.mark_changed_for_test("R472 play move");
+      r34_steps(ed, 1);
+    }
+    CHECK(ed.solves_after_tools_for_test() == s0);
+    ed.command("stop");
+  });
+
+  test("round 472: a gizmo press held still on an IK target solves nothing more: 30 still frames, no second solve, no view render", [=] {
+    Editor ed;
+    r468_rig(ed);
+    int px = 0, py = 0;
+    CHECK(r472e_arm(ed, px, py));
+    ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px + 55, py)});
+    ed.step_frame_headless({r34_mouse(R34ET::MouseDown, px + 55, py)});
+    for (int i = 1; i <= 6; i++) ed.step_frame_headless({r34_mouse(R34ET::MouseMove, px + 55 + i * 3, py)});
+    r34_steps(ed, 3);
+    const uint64_t s0 = ed.solves_after_tools_for_test();
+    const R34Count t0 = r34_totals(ed);
+    r34_steps(ed, 30);
+    std::printf("    30 held frames: %llu second solve(s), %llu render(s)\n", (unsigned long long)(ed.solves_after_tools_for_test() - s0), (unsigned long long)(r34_totals(ed) - t0).renders);
+    CHECK(ed.solves_after_tools_for_test() == s0);
+    ed.step_frame_headless({r34_mouse(R34ET::MouseUp, px + 55 + 18, py)});
+    r34_steps(ed, 2);
+  });
+}
+
 void run_editor_tests() {
   round15_tests();
   round28_tests();
@@ -11974,5 +12406,6 @@ void run_editor_tests() {
   tests_round462_review();
   tests_round468();
   tests_round469();
+  tests_round472();
   coverage_tests();
 }

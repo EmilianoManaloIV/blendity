@@ -9,6 +9,7 @@
 #include "editor.h"
 
 #include "../core/core.h"
+#include "../core/edit_epoch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -238,6 +239,22 @@ void Editor::transform_finish(bool keep) {
   }
 }
 
+/* What transform_apply's result is made from, now (see ModalTransform::Applied). */
+Editor::ModalTransform::Applied Editor::transform_inputs(const Recti &view) const {
+  const auto &in = ui_.in;
+  const ModalTransform &t = xf_;
+  ModalTransform::Applied a;
+  a.valid = true;
+  a.mx = in.mx, a.my = in.my, a.mode = t.mode, a.axis = t.axis, a.start_mx = t.start_mx, a.start_my = t.start_my;
+  a.shift = in.shift(), a.ctrl = in.ctrl(), a.plane = t.plane, a.local = t.local, a.ortho = cam_.ortho;
+  a.view = view;
+  a.typed = t.typed;
+  a.cam[0] = cam_.pivot.x, a.cam[1] = cam_.pivot.y, a.cam[2] = cam_.pivot.z, a.cam[3] = cam_.yaw, a.cam[4] = cam_.pitch, a.cam[5] = cam_.distance, a.cam[6] = cam_.fov;
+  a.snaps[0] = snap_move_, a.snaps[1] = snap_rot_, a.snaps[2] = snap_scale_;
+  a.transforms = edit_epoch::transforms(), a.structure = edit_epoch::structure();
+  return a;
+}
+
 bool Editor::transform_update(const Recti &view) {
   if (!xf_.active) return false;
   auto &u = ui_;
@@ -273,8 +290,14 @@ bool Editor::transform_update(const Recti &view) {
     if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == '*' || c == '/' || c == '(' || c == ')') t.typed += c;
   in.text.clear();
   if (in.key_pressed[platform::KEY_BACKSPACE] && !t.typed.empty()) t.typed.pop_back();
-  transform_apply(transform_delta(view));
-  u.redraw = true;
+  /* Round 472: the same inputs as the last apply, on a scene nothing else wrote to since: it would come out the same -
+   * nothing applied, no redraw asked. Anything that can change the result is in transform_inputs. */
+  if (!(t.applied == transform_inputs(view))) {
+    transform_apply(transform_delta(view));
+    modal_applies_++;
+    t.applied = transform_inputs(view);  // (after the apply: its own writes bump the scene's counts)
+    u.redraw = true;
+  }
   if (in.pressed[0] || in.key_pressed[platform::KEY_ENTER]) {
     transform_finish(true);
     u.consume_click();
