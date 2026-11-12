@@ -873,6 +873,11 @@ Editor::PosingList Editor::posing_parts(const FrameProfile &p, const PoseCounts 
       {"window animation", p.ms_window[(int)WindowKind::Animation]}, {"window inspector", p.ms_window[(int)WindowKind::Inspector]},
       {"window rigging", p.ms_window[(int)WindowKind::Rigging]}, {"window avatar", p.ms_window[(int)WindowKind::Avatar]},
       {"window hierarchy", p.ms_window[(int)WindowKind::Hierarchy]},
+      /* Round 471: the card's own frame, inside "gpu path" - in a world it was the unnamed half of a posed frame. The
+       * three passes are the card's time stamps; the wait is the submission beyond them (copies out, the fence). */
+      {"card shadow maps", p.ms_gpu_shadow}, {"card g-buffer", p.ms_gpu_gbuffer}, {"card lighting", p.ms_gpu_lighting},
+      {"card copies and wait", p.ms_gpu_readback}, {"card render call", p.ms_gpu_render}, {"baked corners", p.ms_gpu_corners},
+      {"see-through triangles", p.ms_gpu_see}, {"presenting", p.ms_present},
       /* (A move in place that is refused builds the render mesh whole, and its tangents with MikkTSpace: on the owner's
        * avatar that was most of a scrubbed frame's gather - so the whole builds and the copies are parts too.) */
       {"render meshes built whole", mc.ms_full_builds}, {"tangents built whole", mc.ms_tangents}, {"mesh copies", mc.ms_copies}};
@@ -895,6 +900,8 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"meshes updated in part", (double)p.gpu_mesh_partial}, {"upload KB", (double)p.gpu_upload_bytes / 1024.0},
       {"scene hashes", (double)p.scene_hashes}, {"draw items kept", (double)p.items_kept},
       {"instances built", (double)p.instances_built}, {"instances kept", (double)p.instances_kept},
+      {"instance rows kept", (double)p.instance_rows_kept}, {"instance rows built", (double)p.instance_rows_built},
+      {"see-through lists kept", (double)p.see_lists_kept},
       {"lightmap keys", (double)p.lightmap_key_hashes}, {"clip applies", (double)pc.clip_applies},
       {"clip serialisations", (double)p.clip_serialisations}, {"solver iterations", (double)pc.solver_iterations},
       {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
