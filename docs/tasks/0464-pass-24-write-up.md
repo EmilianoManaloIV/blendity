@@ -70,3 +70,13 @@ stands beside it; the bake's time is called a pair, not a timing; the waits add 
 - Reimport Unity Materials replaces a value typed on a Unity material (round 485).
 - Round 487's three items.
 - The `docs-fragments` job on the pass's PRs: red for the three round commits written before ADR 0123 reached `main`.
+
+## Addendum (2026-11-11): round 487 ran after this write-up
+The write-up above says round 487 was not run. It then ran, on the owner's word ("Yes, both cards"): task 0463,
+Generate Lighting's gather on every ticked graphics card, in batches of what the cards return in about three quarters
+of a second. SideRail's lightmaps, a quiet machine, three runs: 37.7 / 39.1 / 36.6 s before; 17.7 / 17.5 / 17.8 s on
+one card; 16.2 / 16.2 / 16.5 s on the owner's two; the same lightmap on one card and on two. The first build of it
+was slower on two cards than on one, which is how the small batches were found. `changelog.d/488-pass-24-addendum.md`
+puts the bake's row and round 487's row into PERFORMANCE's "Pass 24 in one table". Of "Round 487's three items"
+under *Open with the owner*, light cookies are closed (the world has none); the Light Volume mist and OIDN's lightmap
+weights still wait for the owner to ask.
