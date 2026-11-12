@@ -223,6 +223,7 @@ struct FrameProfile {
   uint64_t clip_serialisations = 0, undo_steps = 0;
   uint64_t overlap_checks = 0, lightmap_key_hashes = 0, scene_hashes = 0;
   uint64_t items_kept = 0;  // round 436: gathers answered from the kept draw items
+  uint64_t instance_rows_kept = 0, instance_rows_built = 0, see_lists_kept = 0;  // round 471: items whose instances were copied / made again in a GPU view's gather; see-through lists copied
   uint64_t instances_kept = 0, instances_built = 0, mesh_deferred = 0;  // round 458: GPU views that kept / gathered their instance array; meshes left waiting for the card
   double ms_render_start = 0, ms_render_land = 0;  // round 437: F12's start (the snapshot) and each frame's poll and landing
   double ms_window[32] = {};  // round 436: each docked window's own drawing (WindowKind order; the views' rendering inside theirs)
@@ -275,6 +276,7 @@ struct FrameProfile {
     overlap_checks += o.overlap_checks, lightmap_key_hashes += o.lightmap_key_hashes, scene_hashes += o.scene_hashes;
     scene_hash_reuses += o.scene_hash_reuses, scene_hash_misses += o.scene_hash_misses, items_kept += o.items_kept;
     instances_kept += o.instances_kept, instances_built += o.instances_built, mesh_deferred += o.mesh_deferred;
+    instance_rows_kept += o.instance_rows_kept, instance_rows_built += o.instance_rows_built, see_lists_kept += o.see_lists_kept;
     for (int k = 0; k < 32; k++) ms_window[k] += o.ms_window[k];
     ms_render_start += o.ms_render_start, ms_render_land += o.ms_render_land;
     overlap_reused += o.overlap_reused, overlap_local += o.overlap_local, overlap_background += o.overlap_background;
@@ -1188,6 +1190,13 @@ class Editor {
   uint64_t overlays_kept_for_test() const { return overlays_kept_; }  // (round 449)
   uint64_t instances_kept_for_test() const { return instances_kept_; }  // (round 458: GPU views whose instance array was kept)
   uint64_t instances_built_for_test() const { return instances_built_; }  // (round 458: ... and those that gathered it)
+  /* Round 471: the items of a GPU view's gather whose instances were copied from the last frame's / made again, the
+   * see-through lists copied, and the frames whose sorted see-through corners were the last frame's. */
+  uint64_t instance_rows_kept_for_test() const { return instance_rows_kept_; }
+  uint64_t instance_rows_built_for_test() const { return instance_rows_built_; }
+  uint64_t see_lists_kept_for_test() const { return see_lists_kept_; }
+  uint64_t see_frames_kept_for_test() const { return see_frames_kept_; }
+  void instance_rows_off_for_test(bool off) { instance_rows_off_for_test_ = off; }  // (every gather whole: what a by-rows frame is compared with)
   size_t mesh_queue_for_test() const { return mesh_queue_; }            // (round 458: meshes waiting for the card, as of the last view frame)
   uint64_t mesh_uploaded_frame_bytes_for_test() const { return mesh_bytes_frame_max_; }  // (the most any frame sent)
   double mesh_drain_ms_for_test() const { return mesh_drain_ms_; }      // (the time from the first mesh left waiting until none was)
@@ -1195,6 +1204,7 @@ class Editor {
   bool texture_stream_busy_for_test() const { return texture_stream_busy(); }
   void gpu_evict_textures_for_test() {  // (round 458: the card's copies of the materials' textures gone, as if let go)
     if (!gpu_view_) return;
+    card_ids_gen_++;  // (round 471: the rows' copies hold their ids)
     for (auto it = gpu_textures_.begin(); it != gpu_textures_.end();) {
       if (it->first == gpu_world_tex_) {  // (the sky's map stays: it isn't a material's)
         ++it;
@@ -6508,6 +6518,46 @@ class Editor {
     bool toon_maps = false;
   };
   InstanceKeep instance_keep_[gpu::Raster::kSlots];
+  /* Round 471 (ADR 0125): the same array kept by item, for the frames the whole array can't be kept for - a baked or
+   * see-through scene, or one object moving in a still world (a posed avatar). A row is an item's instances in the last
+   * frame's array and its see-through triangles; an item whose words (instance_item_sum: placement, mesh serial,
+   * materials' versions, lightmap pages) and mesh id are the row's takes a copy instead of raster_instance and the
+   * baked path. The texture ids inside a copy are not asked again: a texture let go bumps card_ids_gen_ (the rows are
+   * dropped), and every 64th call gathers whole, which marks them drawn. Items that are per-frame (a highlight, vertex
+   * colours, a volume, a live texture, an axis material, a texture still waiting) are made again every frame. */
+  struct InstanceRows {
+    struct Row {
+      uint64_t key = 0;      // the item's words and its mesh's card id
+      uint64_t see_key = 0;  // its see-through job: the view's matrix times its own, its culling, its fog side
+      uint32_t first = 0, count = 0;          // its instances in `inst`
+      uint32_t see_first = 0, see_count = 0;  // its see-through triangles in `see`
+      uint32_t dep_first = 0, dep_count = 0;  // the material textures its instances hold, in `deps`
+      bool keep = false, has_see = false;
+      uint64_t approximated = 0;  // what it noted for the view (round 414): its approximated materials, counted each
+      std::string approx, caps;   // ... their notes, and its capped textures' (those count once a frame, whatever the rows)
+    };
+    struct SeeRel {  // a see-through triangle of a row; `inst` counted from the row's first instance
+      float key;
+      uint32_t inst, prim;
+    };
+    const gpu::Raster *card = nullptr;
+    bool valid = false;
+    uint64_t global = 0, ids_gen = 0, whole_call = 0;  // what every row shares; the ids' generation; the last whole gather
+    std::vector<Row> rows;
+    std::vector<gpu::RasterInstance> inst;
+    std::vector<SeeRel> see;
+    std::vector<std::pair<std::weak_ptr<const Texture>, int>> deps;  // (for the whole keep made from a frame of copies)
+    std::vector<gpu::SeeCorner> see_frame;  // the last frame's sorted corners, taken back after the render
+    bool see_frame_ok = false;
+  };
+  InstanceRows instance_rows_[gpu::Raster::kSlots];
+  /* Bumped whenever a texture leaves the card, and when a mesh or a corner block is let go for age or the budget. Not
+   * when a mesh is sent again under a new serial: a row's key holds its mesh's serial and card
+   * id and the mesh is asked for on every frame, so a mesh sent again makes its row again - a posed mesh is sent again
+   * on every frame and must not drop the world's rows. */
+  uint64_t card_ids_gen_ = 0;
+  uint64_t instance_rows_kept_ = 0, instance_rows_built_ = 0, see_lists_kept_ = 0, see_frames_kept_ = 0;
+  bool instance_rows_off_for_test_ = false;
   const void *card_instances_ = nullptr;  // the vector the card's raster device holds now (a kept array isn't sent again)
   uint64_t instances_kept_ = 0, instances_built_ = 0;
   bool instance_keep_valid(InstanceKeep &k, uint64_t key);
