@@ -43,6 +43,8 @@ struct BakeSettings {
   float indirect_intensity = 1.0f;
   bool sample_emissive = true;    // task 0157: emissive meshes sampled at each texel (off: found by the hemisphere rays only, the old way)
   int gpu_device = -1;            // task 0018: the indirect gather on this GPU (gpu::devices() index), -1 the CPU
+  std::vector<int> gpu_devices;   // round 487: every card the gather may use at once (empty: gpu_device alone); read only when gpu_device >= 0
+  bool gpu_batch_by_speed = false;  // round 487: batches of what the cards return in about 750 ms (a bake on its own thread); false: about 8M paths (Preview Lighting, stepped on the editor's)
   uint32_t seed = 0;              // round 421: another seed draws other samples (a reference independent of the bake it scores)
   bool use_oidn = true;           // round 423: OIDN's lightmap filter when linked (off: the A-Trous filter - Preview Lighting, which finishes on the main thread)
   /* Round 430 (Unity's Backface Tolerance): the share of a texel's validity rays that must not meet a back face (a ray to
@@ -275,6 +277,9 @@ class Lightmapper {
   uint64_t chance_dropped() const { return chance_dropped_; }
   /* Task 0018: texels whose indirect light the GPU gathered, and why it stopped (empty: it didn't). */
   size_t gpu_texels() const { return gpu_texels_; }
+  /* Round 487: the cards that gathered and each one's share of the points - "NVIDIA A 61 %, NVIDIA B 39 %" (empty:
+   * none). Kept past take_result(), until the next begin(). */
+  const std::string &gpu_cards() const { return gpu_cards_; }
   const std::string &gpu_error() const { return gpu_error_; }
 
  private:
@@ -382,6 +387,7 @@ class Lightmapper {
   void clamp_fireflies(std::vector<Vec3> &src, const std::vector<uint8_t> &cov, const std::vector<int32_t> &own, const std::vector<Vec3> &normals, int W,
                        int H) const;
   size_t gpu_texels_ = 0;
+  std::string gpu_cards_;  // (round 487)
   std::string gpu_error_;
   void finish();
 };

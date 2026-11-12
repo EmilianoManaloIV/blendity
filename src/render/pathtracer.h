@@ -26,6 +26,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -134,6 +135,12 @@ struct PTStats {
   int upload_calls = 0, instance_updates = 0, material_updates = 0, light_updates = 0;
   double upload_ms = 0;  // the last upload_gpus (flattening, hashing, sending)
 };
+
+/* Round 487: how PathTracer::gpu_gather_on shares `total` points between cards whose weights are `rates` (speeds in
+ * paths a millisecond, or the cards' batches before every card is measured; 0: the mean of the others, all equal
+ * when none is set). A share under `least`
+ * points goes to the fastest card. One count a card, adding up to total. */
+std::vector<size_t> gpu_gather_shares(const std::vector<double> &rates, size_t total, size_t least);
 
 class PathTracer {
  public:
@@ -257,7 +264,34 @@ class PathTracer {
    * Round 463: `seed` (0: as before) moves every point's random sequence to another one - the noise measurement's second bake. */
   bool gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples, std::vector<Vec3> &out,
                   std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0, bool sobol = true,
-                  std::vector<float> *sq = nullptr) const;  // sq (round 466): mode 1 - each point's samples' mean squared luminance, for the bake's variance  // sobol (round 465): mode 1's first directions from the Owen-scrambled Sobol sequence, else random  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
+                  std::vector<float> *sq = nullptr) const { return gpu_gather_on({device}, mode, origins, dirs, samples, out, hit, error, mis_first_hit, seed, sobol, sq); }  // sq (round 466): mode 1 - each point's samples' mean squared luminance, for the bake's variance  // sobol (round 465): mode 1's first directions from the Owen-scrambled Sobol sequence, else random  // mis_first_hit: the gather's rays for each of the texel's own emitter samples (round 464), 0 off
+  /* Round 487: the same gather on every card of `devices` at once (gpu::devices() indices; one card is gpu_gather). The
+   * points are shared between the cards as contiguous ranges, by the speed each card showed on the calls before (by
+   * the batches they take until every card is measured); a point's random sequence is its place in the call whichever card gathers it, so the
+   * split does not change the result. A card that is still opening, cannot hold the scene or fails leaves its range
+   * to the others; false (with why) only when no card could gather. A device listed twice gets two ranges on its card,
+   * one after the other. Bit for bit the one-card result where the cards run the same kernel on the same scene (a card
+   * with less memory may hold smaller textures: logged). Every card asked for keeps its renderer and its copy of the
+   * scene for this PathTracer's life. */
+  bool gpu_gather_on(const std::vector<int> &devices, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
+                     std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit = 0.0f, uint32_t seed = 0, bool sobol = true,
+                     std::vector<float> *sq = nullptr, size_t first_index = 0) const;
+  /* Round 487: the points the listed cards want in the next gpu_gather_on call of `samples` samples - each card the
+   * paths it returned in about three quarters of a second on the calls before (a card's time for a small call is
+   * mostly its wait for the longest paths of each dispatch: it starts at about 8M paths and grows at most fourfold a
+   * call, to about 270M, and never over 131072 points a card - the caller's own work on a batch is a step too). A
+   * card that failed, cannot hold the scene or is still opening wants none. `first_index` of gpu_gather_on is
+   * where a call begins in the caller's run of points (a bake's texels): a point's random sequence is its place in the
+   * run, so the result does not depend on how the run was cut into calls - for runs of up to 2^23 points: the place
+   * wraps there, and a call that crosses the wrap does not wrap with it. */
+  size_t gpu_gather_batch(const std::vector<int> &devices, int samples) const;
+  /* The cards gpu_gather_on used since the last reset and the points each gathered: "NVIDIA A 61 %, NVIDIA B 39 %"
+   * (empty: none; one card: its name alone). A bake's own PathTracer starts at none; reset is for one that is kept. */
+  std::string gpu_gather_cards() const;
+  void gpu_gather_reset_cards() const;
+  /* Round 487: where the gather's time went since the reset - the calls' wall time, and for each card its ranges'
+   * wall time and the time its own clock counted for the samples. Empty when no card gathered. */
+  std::string gpu_gather_times() const;
   /* Round 331: the fogs a path is in - a Volume material's object, entered by a front face, left by a back face. Fogs
    * inside fogs add up (their densities sum where they overlap), up to four deep. */
   struct Medium {
@@ -453,12 +487,48 @@ class PathTracer {
   std::mutex work_mutex_;
   std::condition_variable work_cv_, idle_cv_;
   std::vector<std::unique_ptr<GpuSlot>> gpus_;
-  mutable std::unique_ptr<gpu::Renderer> bake_gpu_;  // gpu_gather's device, and the build its scene came from
-  mutable int bake_gpu_index_ = -1;
-  mutable uint64_t bake_gpu_build_ = 0;
-  mutable uint64_t bake_nofit_build_ = ~0ull;  // the build whose scene didn't fit the bake's GPU (task 0051)
+  /* gpu_gather's cards (round 487: one a device asked for, kept for the next call), each with the build its scene came
+   * from. Under bake_gpu_mutex_. */
+  struct BakeCard {
+    std::unique_ptr<gpu::Renderer> r;
+    int index = -1;
+    uint64_t build = 0;             // the build whose scene is on the card
+    uint64_t nofit_build = ~0ull;   // the build whose scene didn't fit it (task 0051): not tried again for that scene
+    uint64_t failed_build = ~0ull;  // the build it failed on while gathering: the others gather that scene
+    gpu::GParams params{};
+    double rate = 0.0;              // paths a millisecond on the calls before (0: not measured yet)
+    double batch_paths = 8388608.0; // the paths it is given a call (gpu_gather_batch): what it returns in about 750 ms
+    int idle_calls = 0;             // calls in a row it was given no share (a small one every sixteenth: measured again)
+    std::string error;              // what it failed with on failed_build
+    uint64_t points = 0;            // gathered since gpu_gather_reset_cards
+    double wall_ms = 0.0;           // its ranges' wall time since the reset (set-up, samples, read-back)
+    double busy_ms = 0.0;           // of that, what the card's own clock counted for the samples
+    double setup_ms = 0.0;          // and the wall time before the samples were sent (parameters, the points)
+    double read_ms = 0.0;           // and after them (the sums read back)
+  };
+  mutable std::vector<std::unique_ptr<BakeCard>> bake_cards_;
+  mutable double gather_wall_ms_ = 0.0;  // (round 487: gpu_gather_on's calls since the reset)
+  mutable int gather_calls_ = 0;
+  mutable double gather_ready_ms_ = 0.0;  // (of that: opening the cards and sending them the scene)
+  struct BakePart {  // a card's range of one gpu_gather_on call
+    BakeCard *card;
+    size_t off, count;
+    bool ok = true;
+    std::string err;
+    double ms = 0.0;
+  };
+  using BakeGather = std::function<bool(BakeCard &, size_t, size_t, std::string *)>;  // (a card, a range's first point and count, why not)
+  BakeCard *bake_card_open(int device, bool *pending, std::string *error) const;
+  std::vector<BakeCard *> bake_cards_ready(const std::vector<int> &devices, bool *waiting, std::string *why) const;
+  std::vector<BakePart> bake_parts(const std::vector<BakeCard *> &cards, size_t points) const;
+  void bake_parts_run(std::vector<BakePart> &parts, const BakeGather &gather) const;
+  void bake_parts_measured(std::vector<BakePart> &parts, int samples, std::string *why) const;
+  bool bake_part_retry(BakePart &p, const std::vector<BakeCard *> &good, const BakeGather &gather, std::string *why) const;
+  std::shared_ptr<gpu::Scene> bake_card_scene(BakeCard &c, std::shared_ptr<gpu::Scene> &whole, std::string *error) const;
+  bool bake_card_gather(BakeCard &c, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, size_t off, size_t count, int samples,
+                        std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol,
+                        std::vector<float> *sq, size_t first_index) const;
   uint64_t build_count_ = 0;
-  mutable gpu::GParams bake_params_{};
   mutable std::mutex bake_gpu_mutex_;
   gpu::GParams gpu_params_{};
   std::string gpu_error_;

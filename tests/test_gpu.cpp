@@ -2,6 +2,7 @@
 // blendity_tests: the gpu tests (task 0177: one file a subsystem; the groups keep their rounds' order).
 #include "test_common.h"
 #include <cstring>
+#include <numeric>
 
 static void round59_tests() {
   test("GPU opening: a device that doesn't exist is refused at once (nothing pending, an error)", [] {
@@ -4899,6 +4900,203 @@ static void tests_round455_gpu() {
   });
 }
 
+/* ---------------------------------------------------------------- round 487 (task 0463): the bake's gather on every card */
+namespace r487 {
+/* A grey ball under a lit ball in a dim world: gather points on a ring round the ball, facing up. */
+struct Scene {
+  MeshPtr ball = primitives::uv_sphere(0.5f, 24, 12), lamp = primitives::uv_sphere(0.6f, 16, 8);
+  std::vector<MaterialPtr> grey = {make_material("Grey", Vec3(0.5f))}, lit = {make_material("Lit", Vec3(0.0f))};
+  Environment env;
+  PathTracer pt;
+  std::vector<Vec3> origins, dirs;
+  Scene(size_t points) {
+    lit[0]->emission = Vec3(1.0f, 0.8f, 0.6f), lit[0]->emission_strength = 4.0f;
+    env.mode = Environment::Color;
+    env.color = {0.05f, 0.06f, 0.08f};
+    pt.set_background_gpu_open(false);  // (opened here: the tests are about the gather, not the wait)
+    pt.build({{&ball->render_mesh_tangents(), Mat4::identity(), &grey},
+              {&lamp->render_mesh_tangents(), Mat4::translate({0.0f, 2.0f, 0.0f}), &lit}},
+             {}, env);
+    for (size_t i = 0; i < points; i++) {
+      const float a = 6.2831853f * (float)i / (float)points, r = 0.7f + 0.6f * (float)(i % 7) / 7.0f;
+      origins.push_back({r * std::cos(a), -0.4f, r * std::sin(a)});
+      dirs.push_back({0.0f, 1.0f, 0.0f});
+    }
+  }
+};
+
+static bool same_bits(const std::vector<Vec3> &a, const std::vector<Vec3> &b) {
+  return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(Vec3)) == 0);
+}
+}  // namespace r487
+
+static void tests_round487_gpu() {
+  test("the bake's gather shared between cards (round 487): the shares add up to the points, follow the cards' measured speeds, are equal before any card is measured, "
+       "give an unmeasured card the mean of the measured ones, and a share too small for a submission goes to the fastest card",
+       [] {
+         auto sum = [](const std::vector<size_t> &v) { return std::accumulate(v.begin(), v.end(), (size_t)0); };
+         for (size_t total : {(size_t)0, (size_t)1, (size_t)255, (size_t)8192, (size_t)1000003}) {
+           for (const std::vector<double> &rates : {std::vector<double>{0.0}, {0.0, 0.0}, {5.0, 3.0}, {3.0, 5.0, 0.0}, {1e-9, 1e9}, {-1.0, std::nan("")}}) {
+             const std::vector<size_t> s = gpu_gather_shares(rates, total, 256);
+             CHECK(s.size() == rates.size() && sum(s) == total);
+           }
+         }
+         CHECK(gpu_gather_shares({}, 100, 256).empty());
+         const std::vector<size_t> even = gpu_gather_shares({0.0, 0.0}, 8192, 256);
+         CHECK(even[0] == 4096 && even[1] == 4096);
+         const std::vector<size_t> by_speed = gpu_gather_shares({10.0, 6.0}, 8000, 1);  // (5/8 and 3/8)
+         CHECK(by_speed[0] == 5000 && by_speed[1] == 3000);
+         const std::vector<size_t> flipped = gpu_gather_shares({6.0, 10.0}, 8000, 1);
+         CHECK(flipped[0] == 3000 && flipped[1] == 5000);
+         const std::vector<size_t> filled = gpu_gather_shares({4.0, 0.0, 8.0}, 9000, 1);  // (the middle card takes the mean, 6: 4/18, 6/18, 8/18)
+         CHECK(filled[0] == 2000 && filled[1] == 3000 && filled[2] == 4000);
+         const std::vector<size_t> tiny = gpu_gather_shares({100.0, 1.0}, 8192, 256);  // (81 points: not worth a submission)
+         CHECK(tiny[0] == 8192 && tiny[1] == 0);
+         const std::vector<size_t> few = gpu_gather_shares({1.0, 1.0}, 300, 256);  // (150 each would be two small submissions: one card)
+         CHECK(few[0] + few[1] == 300 && (few[0] == 0 || few[1] == 0));
+         const std::vector<size_t> whole = gpu_gather_shares({10.0, 6.0, 3.0}, 8192, 256);  // (shares in whole 256s: a card's buffers keep their size)
+         CHECK(whole[1] % 256 == 0 && whole[2] % 256 == 0 && whole[1] > whole[2] && whole[2] > 0 && whole[0] > whole[1]);
+       });
+
+  test("the bake's gather with a card that cannot (round 487): a list holding a device that does not exist gathers exactly what the real card alone gathers, "
+       "a list of no real device fails and says why, and the old one-card call is the list of one",
+       [] {
+         if (!gpu::available()) {
+           std::printf("    (no GPU here: skipped)\n");
+           return;
+         }
+         r487::Scene s(3000);
+         std::vector<Vec3> alone, listed, with_ghost;
+         std::vector<float> sq_alone, sq_ghost;
+         std::string err;
+         CHECK(s.pt.gpu_gather(0, 1, s.origins, s.dirs, 16, alone, nullptr, &err, 0.0f, 0, true, &sq_alone));
+         CHECK(alone.size() == s.origins.size());
+         double light = 0.0;
+         for (const Vec3 &v : alone) light += v.x + v.y + v.z;
+         CHECK(light > 1.0);  // (the lamp is found: the comparison below is of real light)
+         CHECK(s.pt.gpu_gather_on({0}, 1, s.origins, s.dirs, 16, listed, nullptr, &err) && r487::same_bits(alone, listed));
+         CHECK(s.pt.gpu_gather_on({9999, 0, -3}, 1, s.origins, s.dirs, 16, with_ghost, nullptr, &err, 0.0f, 0, true, &sq_ghost));
+         CHECK(r487::same_bits(alone, with_ghost) && sq_alone == sq_ghost);
+         /* A device listed again is a range more on its card: the call split in three, each range begun off any
+          * buffer's edge, is the whole call bit for bit (what a machine with one card can test of the split). */
+         std::vector<float> sq_split;
+         CHECK(s.pt.gpu_gather_on({0, 0, 0}, 1, s.origins, s.dirs, 16, listed, nullptr, &err, 0.0f, 0, true, &sq_split));
+         CHECK(r487::same_bits(alone, listed) && sq_alone == sq_split);
+         for (uint32_t seed : {0u, 7u}) {  // (and at a seed, with plain random directions, in a call of another size)
+           r487::Scene odd(9001);
+           std::vector<Vec3> whole_call, split_call;
+           CHECK(odd.pt.gpu_gather_on({0}, 1, odd.origins, odd.dirs, 24, whole_call, nullptr, &err, 0.0f, seed, seed == 0));
+           CHECK(odd.pt.gpu_gather_on({0, 0}, 1, odd.origins, odd.dirs, 24, split_call, nullptr, &err, 0.0f, seed, seed == 0));
+           CHECK(whole_call.size() == 9001 && r487::same_bits(whole_call, split_call));
+         }
+         std::vector<Vec3> none;
+         err.clear();
+         CHECK(!s.pt.gpu_gather_on({9999}, 1, s.origins, s.dirs, 16, none, nullptr, &err) && none.empty() && !err.empty() && !s.pt.gpu_gather_waiting());
+         err.clear();
+         CHECK(!s.pt.gpu_gather_on({}, 1, s.origins, s.dirs, 16, none, nullptr, &err) && none.empty() && !err.empty());
+         const std::string cards = s.pt.gpu_gather_cards();
+         CHECK(cards == gpu::devices()[0].name);  // (one card gathered: its name, no shares)
+         s.pt.gpu_gather_reset_cards();
+         CHECK(s.pt.gpu_gather_cards().empty());
+       });
+
+  test("the bake's gather on two cards (round 487): split between both cards it equals the first card's own gather point by point (bit for bit where the cards "
+       "are one model, within 1e-4 of the light where they are two), both cards gathered a share, and their shares are named",
+       [] {
+         if (!gpu::available() || gpu::devices().size() < 2) {
+           std::printf("    (fewer than two GPUs here: skipped)\n");
+           return;
+         }
+         r487::Scene s(20000);
+         std::vector<Vec3> alone, both;
+         std::vector<float> sq_alone, sq_both;
+         std::string err;
+         CHECK(s.pt.gpu_gather(0, 1, s.origins, s.dirs, 32, alone, nullptr, &err, 0.0f, 0, true, &sq_alone));
+         s.pt.gpu_gather_reset_cards();
+         bool ok = true;
+         for (int round = 0; round < 3 && ok; round++)  // (the first call shares evenly, the later ones by the speeds measured: the result is the same)
+           ok = s.pt.gpu_gather_on({0, 1}, 1, s.origins, s.dirs, 32, both, nullptr, &err, 0.0f, 0, true, &sq_both) && both.size() == alone.size();
+         CHECK(ok);
+         if (!ok) {
+           std::printf("    the two-card gather failed: %s\n", err.c_str());
+           return;
+         }
+         double worst = 0.0, mean = 0.0;
+         size_t differ = 0;
+         for (size_t i = 0; i < alone.size(); i++) {
+           const Vec3 d = alone[i] - both[i];
+           const double e = std::max({std::fabs(d.x), std::fabs(d.y), std::fabs(d.z)});
+           worst = std::max(worst, e), differ += e > 0.0;
+           mean += (alone[i].x + alone[i].y + alone[i].z) / 3.0;
+         }
+         mean /= (double)alone.size();
+         const bool one_model = gpu::devices()[0].name == gpu::devices()[1].name;
+         std::printf("    %s and %s: %zu of %zu points differ, the largest by %.3g (mean light %.3g)\n", gpu::devices()[0].name.c_str(), gpu::devices()[1].name.c_str(),
+                     differ, alone.size(), worst, mean);
+         CHECK(worst <= (one_model ? 0.0 : 1e-4 * std::max(1e-6, mean)) || differ == 0);
+         const std::string cards = s.pt.gpu_gather_cards();
+         std::printf("    shares: %s\n", cards.c_str());
+         CHECK(cards.find(gpu::devices()[0].name) != std::string::npos && cards.find(", ") != std::string::npos && cards.find("100 %") == std::string::npos);
+       });
+  test("a bake's texels do not depend on its batches (round 487): points gathered in three calls of uneven sizes, each told where it begins in the run, are the "
+       "one call's points bit for bit (their squares too, at a seed too); a call not told where it begins draws the run's first sequences again; and the batch "
+       "the cards ask for is a real size for any list of cards and any sample count",
+       [] {
+         CHECK(PathTracer().gpu_gather_batch({}, 16) >= 1024);  // (no card and no scene: still a size, the call that follows says why it fails)
+         if (!gpu::available()) {
+           std::printf("    (no GPU here: skipped)\n");
+           return;
+         }
+         for (uint32_t seed : {0u, 7u}) {
+           r487::Scene s(9001);
+           std::vector<Vec3> whole, cut(s.origins.size()), again;
+           std::vector<float> sq_whole, sq_cut(s.origins.size());
+           std::string err;
+           CHECK(s.pt.gpu_gather_on({0}, 1, s.origins, s.dirs, 24, whole, nullptr, &err, 0.0f, seed, true, &sq_whole));
+           const size_t cuts[4] = {0, 257, 4100, s.origins.size()};
+           bool ok = whole.size() == s.origins.size();
+           for (int k = 0; k < 3 && ok; k++) {
+             const std::vector<Vec3> o(s.origins.begin() + (long)cuts[k], s.origins.begin() + (long)cuts[k + 1]), d(s.dirs.begin() + (long)cuts[k], s.dirs.begin() + (long)cuts[k + 1]);
+             std::vector<Vec3> part;
+             std::vector<float> sq_part;
+             ok = s.pt.gpu_gather_on({0}, 1, o, d, 24, part, nullptr, &err, 0.0f, seed, true, &sq_part, cuts[k]) && part.size() == o.size() && sq_part.size() == o.size();
+             if (!ok) break;
+             std::copy(part.begin(), part.end(), cut.begin() + (long)cuts[k]);
+             std::copy(sq_part.begin(), sq_part.end(), sq_cut.begin() + (long)cuts[k]);
+             if (k == 1) again = part;
+           }
+           CHECK(ok && r487::same_bits(whole, cut) && sq_whole == sq_cut);
+           if (!ok) continue;
+           /* (the same points sent as a run of their own: other sequences, so other noise - the place in the run is what counts) */
+           const std::vector<Vec3> o(s.origins.begin() + 257, s.origins.begin() + 4100), d(s.dirs.begin() + 257, s.dirs.begin() + 4100);
+           std::vector<Vec3> fresh;
+           CHECK(s.pt.gpu_gather_on({0}, 1, o, d, 24, fresh, nullptr, &err, 0.0f, seed) && fresh.size() == again.size() && !r487::same_bits(fresh, again));
+           /* (a run's place wraps at 2^23: a call begun there draws what the call begun at its remainder draws) */
+           std::vector<Vec3> wrapped;
+           CHECK(s.pt.gpu_gather_on({0}, 1, o, d, 24, wrapped, nullptr, &err, 0.0f, seed, true, nullptr, ((size_t)1 << 23) + 257) && r487::same_bits(wrapped, again));
+           for (int samples : {1, 16, 1024, 65536, 1 << 30}) {
+             const size_t one_card = s.pt.gpu_gather_batch({0}, samples), ghost = s.pt.gpu_gather_batch({9999, -1}, samples), twice = s.pt.gpu_gather_batch({0, 0}, samples);
+             CHECK(one_card >= 1024 && one_card <= 131072 && ghost >= 1024 && ghost <= 131072);  // (a card's texels a call are capped: a bake's step stays short)
+             CHECK(twice == one_card);  // (a card listed again is one card: it takes one batch)
+           }
+         }
+         /* A call of more paths than one submission holds (70000 points at 512 samples: submissions of 232, 232
+          * and 48 samples) cut unevenly, so each part cuts its samples elsewhere (504 + 8, 448 + 64): the same bits. */
+         r487::Scene big(70000);
+         std::vector<Vec3> whole, cut(big.origins.size());
+         std::string err;
+         CHECK(big.pt.gpu_gather_on({0}, 1, big.origins, big.dirs, 512, whole, nullptr, &err));
+         const size_t at[3] = {0, 33001, big.origins.size()};
+         bool ok = whole.size() == big.origins.size();
+         for (int k = 0; k < 2 && ok; k++) {
+           const std::vector<Vec3> o(big.origins.begin() + (long)at[k], big.origins.begin() + (long)at[k + 1]), d(big.dirs.begin() + (long)at[k], big.dirs.begin() + (long)at[k + 1]);
+           std::vector<Vec3> part;
+           ok = big.pt.gpu_gather_on({0}, 1, o, d, 512, part, nullptr, &err, 0.0f, 0, true, nullptr, at[k]) && part.size() == o.size();
+           if (ok) std::copy(part.begin(), part.end(), cut.begin() + (long)at[k]);
+         }
+         CHECK(ok && r487::same_bits(whole, cut));
+       });
+}
 
 /* ---------------------------------------------------------------- round 470: ranges for meshes with several materials (task 0446) */
 static void tests_round470_gpu() {
@@ -5455,4 +5653,5 @@ void run_gpu_tests() {
   tests_round469_gpu();
   tests_round470_gpu();
   tests_round471_gpu();
+  tests_round487_gpu();
 }

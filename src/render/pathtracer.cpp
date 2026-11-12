@@ -3025,70 +3025,94 @@ bool PathTracer::upload_gpus_partial(const gpu::Scene &gs, const GpuSections &no
   return true;
 }
 
-bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
-                            std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol,
-                            std::vector<float> *sq) const {
-  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
-  out.clear();
-  if (hit) hit->clear();
-  if (origins.size() != dirs.size() || (mode != 1 && mode != 2)) return false;
-  if (!gpu::available() || device < 0 || device >= (int)gpu::devices().size()) {
+/* Round 487: the card for `device`, open - or null: still opening (*pending), no such card, a scene known not to
+ * fit it (remembered for the build), or one that failed on this build. Its scene is sent by bake_cards_ready. */
+PathTracer::BakeCard *PathTracer::bake_card_open(int device, bool *pending, std::string *error) const {
+  if (device < 0 || device >= (int)gpu::devices().size()) {
     if (error) *error = "no such GPU";
-    return false;
+    return nullptr;
   }
-  samples = std::max(1, std::min(65536, samples));
-  if (!bake_gpu_ || bake_gpu_index_ != device) {
+  BakeCard *c = nullptr;
+  for (const std::unique_ptr<BakeCard> &k : bake_cards_)
+    if (k->index == device) c = k.get();
+  if (!c) {
+    bake_cards_.push_back(std::make_unique<BakeCard>());
+    c = bake_cards_.back().get();
+    c->index = device;
+  }
+  if (c->failed_build == build_count_) {
+    if (error) *error = c->error.empty() ? "the GPU failed on this scene" : c->error;  // (what it failed with)
+    return nullptr;
+  }
+  if (!c->r) {
     /* In the interactive editor the bakes step on its thread: a device still opening is not waited for, this
-     * slice gathers on the CPU (task 0037). Headless runs open it here. */
-    gpu_gather_waiting_ = false;
-    if (background_gpu_open_) {
-      bool pending = false;
-      bake_gpu_ = gpu::take_renderer(device, true, &pending, error);
-      gpu_gather_waiting_ = pending;
-    }
-    else bake_gpu_ = gpu::open_renderer(device, true, error);  // a ready one from the pool when there is
-    if (!bake_gpu_) return false;
-    bake_gpu_index_ = device;
-    bake_gpu_build_ = 0;
+     * slice gathers on the cards that are ready, or on the CPU (task 0037). Headless runs open it here. */
+    if (background_gpu_open_) c->r = gpu::take_renderer(device, true, pending, error);
+    else c->r = gpu::open_renderer(device, true, error);  // a ready one from the pool when there is
+    if (!c->r) return nullptr;
+    c->build = 0;
   }
-  if (bake_nofit_build_ == build_count_) {
+  if (c->nofit_build == build_count_) {
     if (error) *error = "the scene doesn't fit in the GPU's memory";
-    return false;  // (known for this scene: the bake gathers on the CPU)
+    return nullptr;  // (known for this scene)
   }
-  if (bake_gpu_build_ != build_count_) {
-    gpu::Scene gs;
-    if (!build_gpu_scene_fit(gs, bake_gpu_->info().memory_mb, nullptr, false)) {
-      bake_nofit_build_ = build_count_;  // (not tried again for this scene)
-      if (error) *error = strprintf("the scene doesn't fit in the GPU's %llu MB", (unsigned long long)bake_gpu_->info().memory_mb);
-      return false;  // (the bake gathers on the CPU)
-    }
-    bake_params_ = gs.params;
-    if (!bake_gpu_->upload(gs, error)) return false;
-    bake_gpu_build_ = build_count_;
+  return c;  // (open and able; its scene is on it when c->build is this build)
+}
+
+/* The scene as this card takes it. `whole` is the scene with every texture at its own size, kept from the card before:
+ * one build serves every card it fits (the build is the processor's work, the same for each). Null when the scene
+ * does not fit the card at any size. */
+std::shared_ptr<gpu::Scene> PathTracer::bake_card_scene(BakeCard &c, std::shared_ptr<gpu::Scene> &whole, std::string *error) const {
+  uint64_t mem = c.r->info().memory_mb;
+  if (const char *e = std::getenv("BLENDITY_GPU_VRAM_MB"))  // (as build_gpu_scene_fit budgets)
+    if (std::atoll(e) > 0) mem = mem ? std::min<uint64_t>(mem, (uint64_t)std::atoll(e)) : (uint64_t)std::atoll(e);
+  const uint64_t budget = mem ? mem * (1ull << 20) / 10 * 8 : 0;
+  if (whole && (!budget || gpu_scene_bytes(*whole) <= budget)) return whole;
+  std::shared_ptr<gpu::Scene> gs = std::make_shared<gpu::Scene>();
+  int smaller = 0;  // (the mip levels its textures were sent smaller by, so the scene fits the card)
+  if (!build_gpu_scene_fit(*gs, c.r->info().memory_mb, &smaller, false)) {
+    c.nofit_build = build_count_;  // (not tried again for this scene)
+    Log::warn("Baking: the scene doesn't fit in %s's %llu MB - that card gathers nothing of this bake", c.r->info().name.c_str(),
+              (unsigned long long)c.r->info().memory_mb);
+    if (error) *error = strprintf("the scene doesn't fit in the GPU's %llu MB", (unsigned long long)c.r->info().memory_mb);
+    return nullptr;
   }
-  out.resize(origins.size());
-  if (hit) hit->resize(origins.size());
-  if (sq) sq->assign(origins.size(), 0.0f);
+  if (smaller > 0)
+    Log::warn("Baking: %s holds the scene's textures %d size(s) smaller to fit its %llu MB - its texels may differ slightly from another card's",
+              c.r->info().name.c_str(), smaller, (unsigned long long)c.r->info().memory_mb);
+  else whole = gs;
+  return gs;
+}
+
+/* One card's range of a gather: points [off, off + count) of the call, each with the random sequence of its place in
+ * the call (so the range may be any card's). Writes only its own range of out / hit / sq. */
+bool PathTracer::bake_card_gather(BakeCard &c, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, size_t off, size_t count, int samples,
+                                  std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol,
+                                  std::vector<float> *sq, size_t first_index) const {
   /* In chunks of points (the buffers), and of samples (no single submission long enough for the driver
    * to give up on it). */
   const size_t chunk = (size_t)1 << 20;
   std::vector<float> pts, acc;
-  for (size_t first = 0; first < origins.size(); first += chunk) {
-    const size_t n = std::min(chunk, origins.size() - first);
+  for (size_t first = off; first < off + count; first += chunk) {
+    const size_t n = std::min(chunk, off + count - first);
     const int W = (int)std::min<size_t>(n, 4096), H = (int)((n + (size_t)W - 1) / (size_t)W);
-    gpu::GParams p = bake_params_;
+    gpu::GParams p = c.params;
     p.size[0] = W;
     p.size[1] = H;
     p.env_i[2] = mode;
     p.env_i[3] = (int32_t)n;
     p.misc[1] = mis_first_hit;  // (task 0157: the gather's first emissive hit weighted against the texel's own emitter sampling - round 464: by the gather's rays for each of them, 0 off)
     /* each point's own random sequence, whatever the batch (exact below 2^24); a seed (not 0) shifts the whole range by 2^21 to 2^22
-     * points (bit 21 set, so no seed lands on or near seed 0's range), so a texel draws the stream another texel drew at seed 0
-     * (the kernel hashes the point's index and nothing else of it). Only about 2^21 distinct GPU streams exist this way. */
+     * points, so a texel draws the stream another texel drew at seed 0 (the kernel hashes the point's index and nothing else of
+     * it): in a run of over 2^21 points a seed's range overlaps seed 0's, each texel's stream still another one. */
     const size_t shift = seed ? (size_t)(((seed * 0x9E3779B1u) >> 10) | (1u << 21)) : 0;
-    p.cam_pos[3] = (float)(first + shift);
+    /* (round 487: the caller's first_index is where its call begins in a longer run of points - a bake's texels -
+     * so a point's sequence does not depend on how the run was cut into calls; the run's place wraps at 2^23, so
+     * the sum stays exact as a float; a call's own offset is added as it always was) */
+    p.cam_pos[3] = (float)((first_index & (((size_t)1 << 23) - 1)) + first + shift);
     p.lens[0] = sobol ? 0.0f : 1.0f;  // (round 465: a bake has no lens - the kernel reads this as "random directions")
-    bake_gpu_->set_params(p);
+    ScopedTimer t_setup;
+    c.r->set_params(p);
     const size_t cells = (size_t)W * H;
     pts.assign(cells * 8, 0.0f);
     for (size_t i = 0; i < n; i++) {
@@ -3097,11 +3121,18 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
       a[0] = o.x, a[1] = o.y, a[2] = o.z;
       b[0] = d.x, b[1] = d.y, b[2] = d.z;
     }
-    if (!bake_gpu_->set_points(pts.data(), pts.size(), error)) return false;
-    const int per = std::max(1, std::min(samples, (int)(((size_t)1 << 24) / std::max<size_t>(1, n))));  // ~16M paths a submission
-    for (int done = 0; done < samples; done += per)
-      if (!bake_gpu_->render(done, std::min(per, samples - done), error)) return false;
-    bake_gpu_->download_accum(acc);
+    if (!c.r->set_points(pts.data(), pts.size(), error)) return false;
+    c.setup_ms += t_setup.ms();
+    int per = std::max(1, std::min(samples, (int)(((size_t)1 << 24) / std::max<size_t>(1, n))));  // ~16M paths a submission
+    /* (round 487: the card adds a submission's samples in dispatches of 8 counted from its first; a submission cut
+     * at a multiple of 8 keeps those groups the same whatever the range's size, so the sums round the same) */
+    if (per < samples) per = std::max(8, per - per % 8);
+    for (int done = 0; done < samples; done += per) {
+      if (!c.r->render(done, std::min(per, samples - done), error)) return false;
+      c.busy_ms += std::max(0.0, c.r->last_gpu_ms());  // (-1 where the queue has no timestamps)
+    }
+    ScopedTimer t_read;
+    c.r->download_accum(acc);
     if (acc.size() < n * 4) {
       if (error) *error = "the GPU's results came back short";
       return false;
@@ -3112,8 +3143,296 @@ bool PathTracer::gpu_gather(int device, int mode, const std::vector<Vec3> &origi
       if (hit && mode == 2) (*hit)[first + i] = acc[i * 4 + 3] * inv;  // (mode 2: the share of samples that hit; mode 1's w is review 466's squares)
       if (sq && mode == 1) (*sq)[first + i] = acc[i * 4 + 3] * inv;  // (mode 1, round 466: the mean squared luminance)
     }
+    c.read_ms += t_read.ms();
   }
   return true;
+}
+
+/* Round 487: `total` points shared between cards by their weights (`rates`: speeds in paths a millisecond, or the
+ * batches the cards take before every one is measured; a weight of 0 takes the mean of the others, all equal when
+ * none is set). Shares are whole multiples of `least` points (a card keeps
+ * its buffers' size from batch to batch) and a share under `least` is not worth a submission: what is left goes to the
+ * fastest card. The counts add up to total. */
+std::vector<size_t> gpu_gather_shares(const std::vector<double> &rates, size_t total, size_t least) {
+  const size_t n = rates.size();
+  std::vector<size_t> out(n, 0);
+  if (n == 0) return out;
+  least = std::max<size_t>(1, least);
+  double known = 0.0;
+  int measured = 0;
+  for (double r : rates)
+    if (r > 0.0 && std::isfinite(r)) known += r, measured++;
+  const double fill = measured ? known / measured : 1.0;
+  std::vector<double> w(n);
+  double sum = 0.0;
+  size_t best = 0;
+  for (size_t k = 0; k < n; k++) {
+    w[k] = rates[k] > 0.0 && std::isfinite(rates[k]) ? rates[k] : fill;
+    sum += w[k];
+    if (w[k] > w[best]) best = k;
+  }
+  size_t given = 0;
+  for (size_t k = 0; k < n; k++) {
+    if (k == best) continue;
+    const size_t share = (size_t)((double)total * (w[k] / sum));
+    out[k] = share - share % least;
+    given += out[k];
+  }
+  out[best] = total - given;
+  return out;
+}
+
+/* Round 487: the cards of `devices` that hold this build's scene now. The scene is built here once for every card it
+ * fits and sent to the cards that lack it at once, so a second card's upload does not hold the first back. A card
+ * whose upload fails is out for this build (the others gather; with none left the caller's CPU does). */
+std::vector<PathTracer::BakeCard *> PathTracer::bake_cards_ready(const std::vector<int> &devices, bool *waiting, std::string *why) const {
+  std::vector<BakeCard *> listed;
+  for (int device : devices) {
+    bool pending = false;
+    std::string err;
+    BakeCard *c = bake_card_open(device, &pending, &err);
+    *waiting = *waiting || pending;
+    if (!c && !err.empty()) *why = err;
+    if (c) listed.push_back(c);
+  }
+  struct Send {
+    BakeCard *card;
+    std::shared_ptr<gpu::Scene> scene;
+    bool ok = false;
+    std::string err;
+  };
+  std::vector<Send> sends;
+  std::shared_ptr<gpu::Scene> whole;
+  for (BakeCard *c : listed) {
+    const bool queued = std::any_of(sends.begin(), sends.end(), [c](const Send &s) { return s.card == c; });
+    if (c->build == build_count_ || c->nofit_build == build_count_ || queued) continue;
+    std::string err;
+    std::shared_ptr<gpu::Scene> gs = bake_card_scene(*c, whole, &err);
+    if (!gs) *why = err;
+    else sends.push_back({c, gs});
+  }
+  auto send = [](Send &s) {
+    try {
+      s.ok = s.card->r->upload(*s.scene, &s.err);
+    } catch (const std::exception &e) {
+      s.ok = false, s.err = e.what();
+    }
+  };
+  std::vector<std::thread> senders;
+  for (size_t k = 1; k < sends.size(); k++) {
+    try {
+      senders.emplace_back(send, std::ref(sends[k]));
+    } catch (const std::exception &) {  // (no thread to be had: sent from this one)
+      send(sends[k]);
+    }
+  }
+  if (!sends.empty()) send(sends[0]);
+  for (std::thread &t : senders) t.join();
+  for (Send &s : sends) {
+    if (s.ok) {
+      s.card->params = s.scene->params;
+      s.card->build = build_count_;
+      continue;
+    }
+    /* (not asked again for this scene: with another card gathering, a retry would build and send the scene every batch) */
+    s.card->failed_build = build_count_;
+    s.card->error = *why = s.err.empty() ? "the scene could not be sent to the GPU" : s.err;
+  }
+  std::vector<BakeCard *> cards;
+  for (BakeCard *c : listed)
+    if (c->build == build_count_ && c->nofit_build != build_count_ && c->failed_build != build_count_) cards.push_back(c);
+  return cards;
+}
+
+/* Each card its range of a call's points: by the speeds measured once every card has one, by the batches they take
+ * before that. A card left without a share is given a small one every sixteenth call, so it is measured again. */
+std::vector<PathTracer::BakePart> PathTracer::bake_parts(const std::vector<BakeCard *> &cards, size_t points) const {
+  const size_t least = 256;
+  const bool measured = std::all_of(cards.begin(), cards.end(), [](const BakeCard *c) { return c->rate > 0.0; });
+  std::vector<double> weights;
+  for (const BakeCard *c : cards) weights.push_back(measured ? c->rate : c->batch_paths);
+  std::vector<size_t> share = gpu_gather_shares(weights, points, least);
+  const size_t most = (size_t)(std::max_element(share.begin(), share.end()) - share.begin());
+  for (size_t k = 0; k < cards.size(); k++) {
+    if (share[k] > 0) cards[k]->idle_calls = 0;
+    else if (++cards[k]->idle_calls >= 16 && share[most] >= 2 * least) share[k] = least, share[most] -= least, cards[k]->idle_calls = 0;
+  }
+  std::vector<BakePart> parts;
+  size_t at = 0;
+  for (size_t k = 0; k < cards.size(); k++) {
+    if (share[k] == 0) continue;
+    parts.push_back({cards[k], at, share[k]});
+    at += share[k];
+  }
+  return parts;
+}
+
+/* The parts gathered at once: one thread a card (its ranges in turn), the first card on this thread. */
+void PathTracer::bake_parts_run(std::vector<BakePart> &parts, const BakeGather &gather) const {
+  auto run_card = [&](BakeCard *card) {
+    for (BakePart &p : parts) {
+      if (p.card != card) continue;
+      ScopedTimer t;
+      try {
+        p.ok = gather(*p.card, p.off, p.count, &p.err);
+      } catch (const std::exception &e) {  // (out of memory for a batch's buffers: this card's range is retried or left to the CPU, the program goes on)
+        p.ok = false, p.err = e.what();
+      }
+      p.ms = t.ms();
+    }
+  };
+  std::vector<BakeCard *> distinct;
+  for (const BakePart &p : parts)
+    if (std::find(distinct.begin(), distinct.end(), p.card) == distinct.end()) distinct.push_back(p.card);
+  std::vector<std::thread> threads;
+  for (size_t k = 1; k < distinct.size(); k++) {
+    try {
+      threads.emplace_back(run_card, distinct[k]);
+    } catch (const std::exception &) {  // (no thread to be had: that card's ranges after this card's, on this thread)
+      run_card(distinct[k]);
+    }
+  }
+  if (!distinct.empty()) run_card(distinct[0]);
+  for (std::thread &t : threads) t.join();
+}
+
+/* What each card did: its speed, the batch it takes next, or that it failed on this build. */
+void PathTracer::bake_parts_measured(std::vector<BakePart> &parts, int samples, std::string *why) const {
+  for (BakePart &p : parts) {
+    if (!p.ok) {
+      if (p.card->failed_build != build_count_) p.card->failed_build = build_count_, p.card->error = p.err.empty() ? "the GPU gather failed" : p.err;
+      *why = p.card->error;
+      continue;
+    }
+    const double paths = (double)p.count * samples, rate = paths / std::max(1e-3, p.ms);
+    p.card->rate = p.card->rate > 0.0 ? p.card->rate * 0.5 + rate * 0.5 : rate;
+    /* Its next batch: what it would return in 750 ms at this call's speed, at most four times this one (a small
+     * call's speed says little: the card waits more than it works). A range much under its batch - a bake's last
+     * texels - may raise the batch, never lower it. */
+    const double want = std::min(rate * 750.0, 4.0 * std::max(paths, p.card->batch_paths));
+    if (want > p.card->batch_paths || paths >= 0.5 * p.card->batch_paths) p.card->batch_paths = std::max(4194304.0, std::min(268435456.0, want));
+  }
+}
+
+/* A range whose card failed, on the cards that did not, the fastest first. False when none could. */
+bool PathTracer::bake_part_retry(BakePart &p, const std::vector<BakeCard *> &good, const BakeGather &gather, std::string *why) const {
+  for (BakeCard *g : good) {
+    if (g->failed_build == build_count_) continue;  // (failed on an earlier range of this call)
+    Log::warn("Baking on %s stopped (%s): %s takes its share", p.card->r->info().name.c_str(), p.card->error.c_str(), g->r->info().name.c_str());
+    std::string err;
+    if (gather(*g, p.off, p.count, &err)) {
+      p.card = g, p.ok = true;
+      return true;
+    }
+    g->failed_build = build_count_;
+    g->error = *why = err.empty() ? "the GPU gather failed" : err;
+  }
+  return false;
+}
+
+bool PathTracer::gpu_gather_on(const std::vector<int> &devices, int mode, const std::vector<Vec3> &origins, const std::vector<Vec3> &dirs, int samples,
+                               std::vector<Vec3> &out, std::vector<float> *hit, std::string *error, float mis_first_hit, uint32_t seed, bool sobol,
+                               std::vector<float> *sq, size_t first_index) const {
+  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
+  ScopedTimer t_call;
+  out.clear();
+  if (hit) hit->clear();
+  gpu_gather_waiting_ = false;
+  if (origins.size() != dirs.size() || (mode != 1 && mode != 2)) return false;
+  if (!gpu::available() || devices.empty()) {
+    if (error) *error = "no such GPU";
+    return false;
+  }
+  samples = std::max(1, std::min(65536, samples));
+  /* The cards that can gather this scene now. A device listed twice gets two ranges, one after the other on its card
+   * (what a test on a one-card machine splits with). */
+  bool waiting = false;
+  std::string why;
+  const std::vector<BakeCard *> cards = bake_cards_ready(devices, &waiting, &why);
+  gather_ready_ms_ += t_call.ms();
+  if (cards.empty()) {
+    gpu_gather_waiting_ = waiting;  // (still opening: the caller gathers on the CPU this time)
+    if (error) *error = why;
+    return false;
+  }
+  out.resize(origins.size());
+  if (hit) hit->resize(origins.size());
+  if (sq) sq->assign(origins.size(), 0.0f);
+  if (origins.empty()) return true;
+  const BakeGather gather = [&](BakeCard &c, size_t off, size_t count, std::string *err) {
+    return bake_card_gather(c, mode, origins, dirs, off, count, samples, out, hit, err, mis_first_hit, seed, sobol, sq, first_index);
+  };
+  std::vector<BakePart> parts = bake_parts(cards, origins.size());
+  bake_parts_run(parts, gather);
+  bake_parts_measured(parts, samples, &why);
+  std::vector<BakeCard *> good;
+  for (BakeCard *c : cards)
+    if (c->failed_build != build_count_ && std::find(good.begin(), good.end(), c) == good.end()) good.push_back(c);
+  std::sort(good.begin(), good.end(), [](const BakeCard *a, const BakeCard *b) { return a->rate > b->rate; });
+  for (BakePart &p : parts) {
+    if (p.ok || bake_part_retry(p, good, gather, &why)) continue;
+    out.clear();  // (no card could gather this range: nothing half done is handed back)
+    if (hit) hit->clear();
+    gpu_gather_waiting_ = waiting;  // (a card still opening may take the next batch: the caller gathers this one on the CPU and asks again)
+    if (error) *error = why;
+    return false;
+  }
+  for (const BakePart &p : parts) p.card->points += p.count, p.card->wall_ms += p.ms;  // (counted only for a gather that is handed back)
+  gather_wall_ms_ += t_call.ms(), gather_calls_++;
+  return true;
+}
+
+size_t PathTracer::gpu_gather_batch(const std::vector<int> &devices, int samples) const {
+  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
+  samples = std::max(1, std::min(65536, samples));
+  /* (a card's texels a call are capped: the caller's own work on a batch - a bake's direct light - is one step too,
+   * and a cancel waits for it; 131072 texels a dispatch already keep a card working, not waiting) */
+  const double most = 131072.0, first = 8388608.0;
+  double points = 0.0;
+  std::vector<int> seen;
+  for (int device : devices) {
+    if (device < 0 || device >= (int)gpu::devices().size() || std::find(seen.begin(), seen.end(), device) != seen.end()) continue;
+    seen.push_back(device);
+    const BakeCard *c = nullptr;
+    for (const std::unique_ptr<BakeCard> &k : bake_cards_)
+      if (k->index == device) c = k.get();
+    const bool out_of_it = c && (c->failed_build == build_count_ || c->nofit_build == build_count_ || !c->r);  // (failed, no room, or still opening)
+    if (!out_of_it) points += std::min(most, (c ? c->batch_paths : first) / (double)samples);
+  }
+  if (points <= 0.0) points = std::min(most, first / (double)samples);  // (no card able: the call fails or waits, whatever its size)
+  return (size_t)std::max(1024.0, points);
+}
+
+std::string PathTracer::gpu_gather_cards() const {
+  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
+  uint64_t total = 0;
+  int used = 0;
+  for (const std::unique_ptr<BakeCard> &c : bake_cards_) total += c->points, used += c->points > 0 && c->r;
+  std::string out;
+  for (const std::unique_ptr<BakeCard> &c : bake_cards_) {
+    if (c->points == 0 || !c->r) continue;
+    if (used == 1) return c->r->info().name;  // (one card: its name, as a bake on one card always said nothing of shares)
+    out += strprintf("%s%s %.0f %%", out.empty() ? "" : ", ", c->r->info().name.c_str(), 100.0 * (double)c->points / (double)total);
+  }
+  return out;
+}
+
+void PathTracer::gpu_gather_reset_cards() const {
+  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
+  for (const std::unique_ptr<BakeCard> &c : bake_cards_) c->points = 0, c->wall_ms = c->busy_ms = c->setup_ms = c->read_ms = 0.0;
+  gather_wall_ms_ = gather_ready_ms_ = 0.0, gather_calls_ = 0;
+}
+
+std::string PathTracer::gpu_gather_times() const {
+  std::lock_guard<std::mutex> lock(bake_gpu_mutex_);
+  std::string out;
+  for (const std::unique_ptr<BakeCard> &c : bake_cards_) {
+    if (c->points == 0 || !c->r) continue;
+    out += strprintf("; %s %.1f s (its samples %.1f s by the card's clock, sending the points %.1f s, reading back %.1f s)", c->r->info().name.c_str(),
+                     c->wall_ms / 1000.0, c->busy_ms / 1000.0, c->setup_ms / 1000.0, c->read_ms / 1000.0);
+  }
+  if (out.empty()) return out;
+  return strprintf("%d batches in %.1f s (making the cards ready %.1f s of it)", gather_calls_, gather_wall_ms_ / 1000.0, gather_ready_ms_ / 1000.0) + out;
 }
 
 std::vector<float> PathTracer::coverage() {
