@@ -3,6 +3,8 @@
 // box select, Set Origin's snap targets, the eyedroppers (task 0177: moved out of scene_view.cpp as they were).
 #include "../scene/curve.h"
 #include "editor.h"
+
+#include "blockout_pick.h"
 #include "../core/core.h"
 #include "../core/jobs.h"
 #include <algorithm>
@@ -74,7 +76,7 @@ bool Editor::raycast_scene(const Ray &ray, Vec3 &hit) {
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
-    const Mesh *m = mr && mr->enabled && mr->display_as == 0 ? g.evaluated_mesh() : nullptr;
+    const Mesh *m = mr && mr->enabled && mr->display_as == 0 && !blockout_uses_as_piece(g) ? g.evaluated_mesh() : nullptr;
     if (!m) return;
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
@@ -250,6 +252,10 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
     float d = length(Vec2(view.x + sp.x - mx, view.y + sp.y - my));
     if (d < best) { best = d; hit = g.id; }
   });
+  /* Round 494: a door, a window or a piece that cuts is air where it is seen head-on - its outline, shown while anything of its
+   * Blockout is selected, is what a click finds. */
+  if (!hit)
+    hit = blockout_pick_outline(*scene_, scene_r3d_, scene_rt_, [this](uint64_t id) { return is_selected(id); }, mx - view.x, my - view.y, (float)ui_.px(6));
   if (!hit) hit = pick_wire_object(view, mx, my, ui_.px(6));
   if (!hit) {
     uint32_t id = scene_rt_.id_at(mx - view.x, my - view.y);

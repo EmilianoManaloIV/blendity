@@ -7,11 +7,15 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <mutex>
+#include <unordered_set>
 
 namespace bl {
 
-const char *const kBlockoutShapeNames[3] = {"Box", "Cylinder", "Sphere"};
+const char *const kBlockoutShapeNames[8] = {"Box", "Cylinder", "Sphere", "Wedge", "Stairs", "Arch", "Outline", "Mesh"};
 const char *const kBlockoutOpNames[3] = {"Add", "Subtract", "Intersect"};
 const char *const kBlockoutMethodNames[3] = {"Auto", "Exact", "Field"};
 const char *const kBlockoutWallNames[2] = {"Merge with neighbours", "Keep walls"};
@@ -35,21 +39,37 @@ blockout::Settings Blockout::settings() const {
   return s;
 }
 
+namespace {
+
+/* Which shapes have an inside to walk in: box, cylinder, sphere, wedge (a sloped ceiling), outline. */
+bool shape_can_be_room(int shape) { return shape == 0 || shape == 1 || shape == 2 || shape == 3 || shape == 6; }
+
+}  // namespace
+
+bool BlockoutPiece::is_room() const { return room && opening == 0 && shape_can_be_room(shape); }
+
 void BlockoutPiece::reflect(Reflector &r) {
   const bool all = r.all_fields();
-  const bool is_opening = opening != 0, is_room = room && !is_opening;
+  const int k = std::min(7, std::max(0, shape));
+  const bool is_opening = opening != 0, is_room = this->is_room();
+  const bool room_shape = shape_can_be_room(k);
   if (all || !is_opening) {  // (an opening is a box that cuts: its shape and operation are not its to choose)
-    r.enumeration("Shape", shape, kBlockoutShapeNames, 3);
-    r.help("What the piece is: a box, a cylinder (up Y) or a sphere, centred on the object. A room's shape is its air.");
+    r.enumeration("Shape", shape, kBlockoutShapeNames, 8);
+    r.help("What the piece is: a box, a cylinder (up Y) or a sphere centred on the object; a wedge (a ramp: tall at -Z, sloping down to +Z), "
+           "stairs (climbing towards +Z), an arch (standing in the XY plane), an outline (corners in the XZ plane, pulled up) or any mesh of the "
+           "scene. A room's shape is its air.");
     r.greyed(is_room);
     r.enumeration("Operation", operation, kBlockoutOpNames, 3);
     r.help(is_room ? "A room's Operation is ignored: a room is its walls with its air cut out (Walls says whether they merge with its neighbours')."
                    : "Add joins the piece to the Blockout's mesh; Subtract cuts it out of everything added (a door, a window, a pocket); "
                      "Intersect keeps only what is inside it (two of them: what is inside both).");
     r.greyed(false);
-    r.field("Room", room);
-    r.help("A room: the shape is the air you walk in, and the piece brings its own walls, floor and ceiling. Rooms that overlap become one "
-           "space, the wall between them gone where their air overlaps.");
+    if (all || room_shape) {  // (stairs, an arch and a mesh have no inside to walk in)
+      r.field("Room", room);
+      r.help("A room: the shape is the air you walk in, and the piece brings its own walls, floor and ceiling. Rooms that overlap become one "
+             "space, the wall between them gone where their air overlaps. A wedge's room has a sloped ceiling; an outline's walls are as thick "
+             "all the way round.");
+    }
   }
   if (all || is_room) {
     r.field("Wall", wall, 0.01f, 0.0f, 1000.0f);
@@ -80,21 +100,54 @@ void BlockoutPiece::reflect(Reflector &r) {
     r.field("Depth", depth, 0.01f, 0.0f, 1000.0f);
     r.help("Through the wall: the wall it was put in plus 0.1 m either side, so it always goes through.");
   }
-  const int k = std::min(2, std::max(0, shape));
   const bool shaped = all || !is_opening;
-  if (shaped && (all || k == 0)) {
+  if (shaped && (all || k == 0 || k == 3 || k == 4)) {
     r.field("Size", size);
-    r.help("Width (X), height (Y) and depth (Z), before the object's own scale.");
+    r.help(k == 3 ? "Width (X), height (Y) at the tall end and length (Z) of the ramp, before the object's own scale."
+                  : k == 4 ? "Width (X), height (Y) and length (Z) of the flight, before the object's own scale."
+                           : "Width (X), height (Y) and depth (Z), before the object's own scale.");
   }
-  if (shaped && (all || k != 0)) r.field("Radius", radius, 0.01f, 0.0001f, 10000.0f);
-  if (shaped && (all || k == 1)) r.field("Height", height, 0.01f, 0.0001f, 10000.0f);
-  if (shaped && (all || k != 0)) {
+  if (shaped && (all || k == 1 || k == 2 || k == 5)) {
+    r.field("Radius", radius, 0.01f, 0.0001f, 10000.0f);
+    if (k == 5) r.help("The arch's outer radius.");
+  }
+  if (shaped && (all || k == 1 || k == 5 || k == 6)) {
+    r.field("Height", height, 0.01f, 0.0001f, 10000.0f);
+    if (k == 5) r.help("How deep the arch is, along Z.");
+    else if (k == 6) r.help("How far the outline is pulled up, along Y.");
+  }
+  if (shaped && (all || k == 1 || k == 2 || k == 5)) {
     r.field("Segments", segments, 3, 256);
-    r.help(k == 1 ? "Sides of the cylinder." : "Segments round the sphere.");
+    r.help(k == 1 ? "Sides of the cylinder." : k == 5 ? "Blocks the arch is cut into (at least one for each quarter turn it spans)." : "Segments round the sphere.");
   }
   if (shaped && (all || k == 2)) {
     r.field("Rings", rings, 2, 128);
     r.help("Rings from pole to pole.");
+  }
+  if (shaped && (all || k == 4)) {
+    r.field("Steps", steps, 1, 256);
+    r.help("How many steps the flight climbs in.");
+    r.field("Fill Under", fill_under);
+    r.help("On: each step stands on the ground. Off: a flight with a slab under its treads.");
+  }
+  if (shaped && (all || k == 5)) {
+    r.field("Inner Radius", inner_radius, 0.01f, 0.0f, 10000.0f);
+    r.help("The inside of the arch; it has to be less than the outer radius.");
+    r.field("Angle", angle, 1.0f, 0.0f, 360.0f);
+    r.help("How much of a circle the arch spans, in degrees: 180 a half circle, 360 a full ring.");
+  }
+  if (shaped && (all || k == 6)) {
+    std::string text = blockout_outline_text(outline);
+    const std::string before = text;
+    r.text("Outline", text);
+    r.help("The corners as 'x z; x z; ...' in the piece's XZ plane (3 to 256, either way round, not crossing itself). Drag the points in the Scene "
+           "view, or click the + between two to add one.");
+    if (text != before) blockout_outline_from_text(text, outline);
+  }
+  if (shaped && (all || k == 7)) {
+    r.object("Mesh Object", mesh_object, "MeshFilter");
+    r.help("The object whose mesh is this piece (a closed mesh; an open one is skipped on the exact path). The piece is placed by its own "
+           "transform; the object itself is no longer drawn, collided with, baked or exported while the piece is on.");
   }
   if (all) r.field("Blend Radius", blend, 0.01f, 0.0f, 100.0f);  // (not in the Inspector until round 481)
 }
@@ -104,7 +157,154 @@ namespace {
 float safe_len(float v) { return finite_bits(v) ? std::min(1e6f, std::fabs(v)) : v; }
 float safe_thickness(float v) { return finite_bits(v) ? std::min(1000.0f, std::max(0.0f, v)) : 0.0f; }  // (the kernel's own limits)
 
+/* The Blockout `g` is or lies in. */
+const GameObject *blockout_at(const GameObject *g) {
+  for (; g; g = g->parent)
+    if (g->get<Blockout>()) return g;
+  return nullptr;
+}
+
+bool at_or_below(const GameObject *g, const GameObject *top) {
+  for (; g; g = g->parent)
+    if (g == top) return true;
+  return false;
+}
+
+const GameObject *named_object(const BlockoutPiece &bp) {
+  return bp.owner && bp.owner->scene && !bp.mesh_object.empty() ? bp.owner->scene->find_by_name(bp.mesh_object) : nullptr;
+}
+
+/* Whether the mesh pieces of `from`, and of the Blockouts they use in turn, reach a piece of `goal`: a loop (the pieces' meshes would
+ * need each other). A chain of more than eight Blockouts counts as one. */
+bool reaches(const GameObject &from, const GameObject &goal, int depth) {
+  if (depth > 8) return true;
+  std::vector<const GameObject *> pieces;
+  blockout_piece_objects(from, pieces);
+  for (const GameObject *p : pieces) {
+    const BlockoutPiece *bp = p->get<BlockoutPiece>();
+    if (!bp || bp->shape != (int)blockout::Shape::Mesh || bp->opening != 0) continue;
+    const GameObject *next = blockout_at(named_object(*bp));
+    if (next && (next == &goal || reaches(*next, goal, depth + 1))) return true;
+  }
+  return false;
+}
+
+/* The object a mesh piece uses, or null with the reason in `why`. */
+const GameObject *resolve_mesh_piece(const BlockoutPiece &bp, std::string *why) {
+  auto refuse = [&](const std::string &text) -> const GameObject * {
+    if (why) *why = text;
+    return nullptr;
+  };
+  if (bp.mesh_object.empty()) return refuse("no Mesh Object is chosen");
+  const GameObject *bo = bp.owner ? blockout_of_piece(*bp.owner) : nullptr;
+  const GameObject *t = named_object(bp);
+  const std::string quoted = "'" + bp.mesh_object + "'";
+  if (!bp.owner || !bp.owner->scene) return refuse("it is not in a scene");
+  if (!t) return refuse(quoted + " is not in the scene");
+  if (bo && at_or_below(t, bo)) return refuse(quoted + " is this Blockout or one of its pieces");
+  if (bo) {
+    const GameObject *other = blockout_at(t);
+    if (other && reaches(*other, *bo, 0)) return refuse(quoted + " is built from this Blockout's own pieces");
+  }
+  const MeshFilter *mf = t->get<MeshFilter>();
+  if (!mf || !mf->mesh) return refuse(quoted + " has no mesh");
+  if (!t->evaluated_mesh_shared(0)) return refuse(quoted + "'s mesh is not ready");
+  if (mf->mesh->face_count() == 0) return refuse(quoted + "'s mesh has no faces");
+  return t;
+}
+
 }  // namespace
+
+std::string BlockoutPiece::mesh_problem() const {
+  std::string why;
+  if (shape == (int)blockout::Shape::Mesh && opening == 0) resolve_mesh_piece(*this, &why);
+  return why;
+}
+
+std::string blockout_outline_text(const std::vector<Vec2> &points) {
+  std::string s;
+  for (const Vec2 &q : points) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s%.9g %.9g", s.empty() ? "" : "; ", (double)q.x, (double)q.y);
+    s += buf;
+  }
+  return s;
+}
+
+/* Numbers separated by spaces, commas or semicolons; an odd count or a word that is no number is refused. */
+bool blockout_outline_from_text(const std::string &text, std::vector<Vec2> &out) {
+  std::vector<float> v;
+  std::string tok;
+  auto flush = [&]() -> bool {
+    if (tok.empty()) return true;
+    char *end = nullptr;
+    const double d = std::strtod(tok.c_str(), &end);
+    const bool whole = end != nullptr && end != tok.c_str() && *end == '\0';  // (read before the text is cleared: `end` points into it)
+    tok.clear();
+    if (!whole) return false;
+    v.push_back((float)d);
+    return true;
+  };
+  for (char c : text) {
+    if (c == ' ' || c == ',' || c == ';' || c == '\t' || c == '\n') {
+      if (!flush()) return false;
+    }
+    else tok += c;
+  }
+  if (!flush() || v.size() % 2 != 0) return false;
+  out.clear();
+  for (size_t i = 0; i + 1 < v.size(); i += 2) out.push_back(Vec2(v[i], v[i + 1]));
+  return true;
+}
+
+void blockout_piece_bounds(const BlockoutPiece &p, Vec3 &lo, Vec3 &hi) {
+  const int k = std::min(7, std::max(0, p.shape));
+  const float r = std::fabs(finite_bits(p.radius) ? p.radius : 0.0f), h = std::fabs(finite_bits(p.height) ? p.height : 0.0f) * 0.5f;
+  if (k == 0 || k == 3 || k == 4) {
+    const Vec3 s = p.box_size() * 0.5f;
+    lo = Vec3(-std::fabs(s.x), -std::fabs(s.y), -std::fabs(s.z)), hi = Vec3(std::fabs(s.x), std::fabs(s.y), std::fabs(s.z));
+  }
+  else if (k == 1) lo = Vec3(-r, -h, -r), hi = Vec3(r, h, r);
+  else if (k == 2) lo = Vec3(-r, -r, -r), hi = Vec3(r, r, r);
+  else if (k == 5) lo = Vec3(-r, -r, -h), hi = Vec3(r, r, h);  // (the arch's circle: its rim reaches no further than the radius)
+  else if (k == 6) {
+    float x0 = 0.0f, x1 = 0.0f, z0 = 0.0f, z1 = 0.0f;
+    for (size_t i = 0; i < p.outline.size(); i++) {
+      const Vec2 q = p.outline[i];
+      if (!finite_bits(q.x) || !finite_bits(q.y)) continue;
+      x0 = i ? std::min(x0, q.x) : q.x, x1 = i ? std::max(x1, q.x) : q.x, z0 = i ? std::min(z0, q.y) : q.y, z1 = i ? std::max(z1, q.y) : q.y;
+    }
+    lo = Vec3(x0, -h, z0), hi = Vec3(x1, h, z1);
+  }
+  else {
+    lo = Vec3(-0.5f), hi = Vec3(0.5f);
+    if (const GameObject *src = p.owner ? named_object(p) : nullptr)
+      if (const MeshFilter *mf = src->get<MeshFilter>(); mf && mf->mesh && mf->mesh->vert_count() > 0) {
+        const AABB b = mf->mesh->bounds();
+        lo = b.min, hi = b.max;
+      }
+  }
+}
+
+float blockout_floor_below_origin(const BlockoutPiece &p) {
+  if (p.shape == (int)blockout::Shape::Arch) return 0.0f;
+  Vec3 lo, hi;
+  blockout_piece_bounds(p, lo, hi);
+  return finite_bits(lo.y) ? -lo.y : 0.0f;
+}
+
+void blockout_outline_insert(BlockoutPiece &p, int segment) {
+  const size_t n = p.outline.size();
+  if (n < 2 || segment < 0 || (size_t)segment >= n || n >= 256) return;
+  const Vec2 a = p.outline[(size_t)segment], b = p.outline[((size_t)segment + 1) % n];
+  p.outline.insert(p.outline.begin() + segment + 1, Vec2(0.5f * (a.x + b.x), 0.5f * (a.y + b.y)));
+}
+
+void blockout_outline_move(BlockoutPiece &p, const BlockoutPiece &before, int index, float x, float z) {
+  p = before;
+  if (index < 0 || (size_t)index >= p.outline.size() || !finite_bits(x) || !finite_bits(z)) return;
+  p.outline[(size_t)index] = Vec2(x, z);
+}
 
 Vec3 BlockoutPiece::box_size() const {
   if (opening == 0) return {safe_len(size.x), safe_len(size.y), safe_len(size.z)};
@@ -121,17 +321,37 @@ Mat4 BlockoutPiece::shape_offset() const {
 
 /* Typed or scripted numbers can be anything. Counts are held to what the kernel takes. A size that is not finite, or none at
  * all, goes through as it is: the kernel skips such a piece and names it, so the Inspector can say which. */
-blockout::Piece BlockoutPiece::to_piece(uint64_t id, const Mat4 &to_blockout) const {
+blockout::Piece BlockoutPiece::to_piece(uint64_t id, const Mat4 &to_blockout, std::string *mesh_why, const GameObject **source) const {
   auto len = safe_len;
   blockout::Piece p;
   p.id = id;
-  p.shape = (blockout::Shape)std::min(2, std::max(0, shape));
+  p.shape = (blockout::Shape)std::min(7, std::max(0, shape));
   p.op = (blockout::Op)std::min(2, std::max(0, operation));
   p.size = box_size();
   p.radius = len(radius);
   p.height = len(height);
   p.segments = std::min(256, std::max(3, segments));
   p.rings = std::min(128, std::max(2, rings));
+  p.steps = std::min(256, std::max(1, steps));
+  p.fill_under = fill_under;
+  p.inner_radius = len(inner_radius);
+  p.angle = finite_bits(angle) ? std::min(1e6f, std::max(-1e6f, angle)) : angle;
+  p.outline = outline;  // (any count: the kernel names an outline of more than 256 or fewer than 3 corners)
+  if (p.shape == blockout::Shape::Mesh && opening == 0) {
+    std::string why;
+    const GameObject *src = resolve_mesh_piece(*this, &why);
+    if (mesh_why) *mesh_why = why;
+    if (source) *source = src;
+    if (src) {
+      /* The evaluated mesh, held (the build reads it on a worker while an edit writes a copy), and a number for what it holds: the
+       * object, the mesh's own identity and versions - an edit, a deformation, another mesh or another object each change it. */
+      p.mesh = src->evaluated_mesh_shared(0);
+      uint64_t key = hash_mix(kFnvBasis, src->id);
+      key = hash_mix(key, src->evaluated_key(0));
+      if (p.mesh) key = hash_mix(hash_mix(hash_mix(key, p.mesh->uid.v), p.mesh->version), p.mesh->deform_version);
+      p.mesh_key = key;
+    }
+  }
   p.blend = finite_bits(blend) ? std::min(100.0f, std::max(0.0f, blend)) : blend;
   p.to_blockout = to_blockout;
   if (opening != 0) {  // (a box that cuts, its middle between the sill and the head above the origin)
@@ -139,7 +359,7 @@ blockout::Piece BlockoutPiece::to_piece(uint64_t id, const Mat4 &to_blockout) co
     p.to_blockout = to_blockout * shape_offset();
     return p;
   }
-  p.room = room;
+  p.room = room && shape_can_be_room(shape);
   p.wall = safe_thickness(wall), p.floor = safe_thickness(floor), p.ceiling = safe_thickness(ceiling);
   p.keep_walls = walls == 1;
   p.open_top = open_top;
@@ -180,13 +400,25 @@ namespace {
 
 /* Depth first, in the hierarchy's order. `to_here` is the product of the local matrices from the Blockout down to `g`'s
  * parent. A Blockout below is not entered: it is not this one's piece. */
-void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Piece> &pieces) {
+void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Piece> &pieces, BlockoutSnapshotNotes *notes) {
   for (const GameObject *c : g.children) {
     if (!c->active || c->get<Blockout>()) continue;
     const Mat4 m = to_here * c->local_matrix();
     const BlockoutPiece *bp = c->get<BlockoutPiece>();
-    if (bp && bp->enabled) pieces.push_back(bp->to_piece(c->id, m));
-    collect(*c, m, pieces);
+    if (bp && bp->enabled) {
+      std::string why;
+      const GameObject *source = nullptr;
+      blockout::Piece p = bp->to_piece(c->id, m, &why, &source);
+      /* A mesh piece with no usable mesh is not the kernel's to meet: it is named here and the Blockout's status says why. */
+      if (!why.empty()) {
+        if (notes) notes->refused.push_back({c->id, why});
+      }
+      else {
+        pieces.push_back(std::move(p));
+        if (source && notes) notes->sources.push_back(source->id);
+      }
+    }
+    collect(*c, m, pieces, notes);
   }
 }
 
@@ -201,15 +433,18 @@ void blockout_piece_objects(const GameObject &blockout, std::vector<const GameOb
   }
 }
 
-void blockout_snapshot(const GameObject &blockout, std::vector<blockout::Piece> &pieces, blockout::Settings &settings) {
+void blockout_snapshot(const GameObject &blockout, std::vector<blockout::Piece> &pieces, blockout::Settings &settings, BlockoutSnapshotNotes *notes) {
   pieces.clear();
+  if (notes) notes->refused.clear(), notes->sources.clear();
   const Blockout *b = blockout.get<Blockout>();
   settings = b ? b->settings() : blockout::Settings();
-  collect(blockout, Mat4::identity(), pieces);
+  collect(blockout, Mat4::identity(), pieces, notes);
 }
 
-uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, const blockout::Settings &settings) {
+uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, const blockout::Settings &settings, const BlockoutSnapshotNotes *notes) {
   uint64_t h = hash_mix(kFnvBasis, pieces.size());
+  if (notes)
+    for (const auto &r : notes->refused) h = hash_mix(hash_mix(h, r.first), fnv1a(r.second.data(), r.second.size()));
   h = mix_float(h, settings.cell);
   h = hash_mix(h, (uint64_t)settings.path);
   h = hash_mix(h, (uint64_t)settings.max_cells);
@@ -220,6 +455,11 @@ uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, cons
     h = mix_float(h, p.radius);
     h = mix_float(h, p.height);
     h = mix_float(h, p.blend);
+    /* The round 480 shapes' numbers. */
+    h = hash_mix(h, (uint64_t)(uint32_t)p.steps | (uint64_t)p.fill_under << 32 | (uint64_t)p.outline.size() << 33);
+    h = mix_float(mix_float(h, p.inner_radius), p.angle);
+    for (const Vec2 &q : p.outline) h = mix_float(mix_float(h, q.x), q.y);
+    h = hash_mix(h, p.mesh_key);
     h = hash_mix(h, (uint64_t)p.room | (uint64_t)p.keep_walls << 1 | (uint64_t)p.open_top << 2);
     h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
     if (!p.room) continue;  // (the thicknesses are read by a room only)
@@ -234,6 +474,31 @@ GameObject *blockout_of_piece(const GameObject &piece) {
   for (GameObject *a = piece.parent; a; a = a->parent)
     if (a->get<Blockout>()) return a;
   return nullptr;
+}
+
+/* ---- The objects mesh pieces use (round 480) ---- */
+
+namespace {
+
+/* The set the walk publishes. Read from any thread (the draw path, a collider build, a bake's gather): a count first, so a scene with no mesh
+ * piece - nearly all of them - never takes the lock. */
+std::mutex g_sources_lock;
+std::unordered_set<uint64_t> g_sources;
+std::atomic<size_t> g_sources_count{0};
+
+}  // namespace
+
+bool blockout_uses_as_piece(const GameObject &g) {
+  if (g_sources_count.load(std::memory_order_relaxed) == 0) return false;
+  std::lock_guard<std::mutex> lock(g_sources_lock);
+  return g_sources.count(g.id) != 0;
+}
+
+void blockout_publish_piece_sources(std::vector<uint64_t> &&ids) {
+  std::lock_guard<std::mutex> lock(g_sources_lock);
+  g_sources.clear();
+  g_sources.insert(ids.begin(), ids.end());
+  g_sources_count.store(g_sources.size(), std::memory_order_relaxed);
 }
 
 /* ===================================================================== */
@@ -275,9 +540,38 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
     out.push_back(make_handle(H::OpenSill, 1, {0.0f, sill, 0.0f}, {0, -1, 0}, "sill"));
     return;
   }
-  const int shape = std::min(2, std::max(0, p.shape));
-  const bool room = p.room && growth;
-  if (shape == 0) {
+  const int shape = std::min(7, std::max(0, p.shape));
+  const bool room = p.is_room() && growth;
+  if (shape == 7) return;  // (a mesh piece is placed with its object, not stretched)
+  if (shape == 5) {
+    /* An arch: its outer radius at the top of the ring, its depth by the two faces along Z. */
+    const float r = std::fabs(finite_or(p.radius, 0.0f)), hh = std::fabs(finite_or(p.height, 0.0f)) * 0.5f;
+    const float mid = 0.5f * (r + std::min(r, std::fabs(finite_or(p.inner_radius, 0.0f))));
+    out.push_back(make_handle(H::CylRadius, 0, {0.0f, r, 0.0f}, {0, 1, 0}, "radius"));
+    out.push_back(make_handle(H::CylCap, 2, {0.0f, mid, hh}, {0, 0, 1}, "+z"));
+    out.push_back(make_handle(H::CylCap, 2, {0.0f, mid, -hh}, {0, 0, -1}, "-z"));
+    return;
+  }
+  if (shape == 6) {
+    /* An outline: a point handle on each corner of its top and a "+" in the middle of each side, and the height by the top and the
+     * bottom. They lie in the top ring's plane, which a drag keeps. */
+    const float hh = std::fabs(finite_or(p.height, 0.0f)) * 0.5f;
+    const size_t n = p.outline.size();
+    float cx = 0.0f, cz = 0.0f;
+    for (size_t i = 0; i < n; i++) {
+      const Vec2 q = p.outline[i];
+      if (!finite_bits(q.x) || !finite_bits(q.y)) continue;
+      cx += q.x / (float)n, cz += q.y / (float)n;
+      out.push_back(make_handle(H::OutlinePoint, (int)i, {q.x, hh, q.y}, {0, 1, 0}, ("p" + std::to_string(i)).c_str()));
+      const Vec2 b = p.outline[(i + 1) % n];
+      if (n < 256 && finite_bits(b.x) && finite_bits(b.y))
+        out.push_back(make_handle(H::OutlineAdd, (int)i, {0.5f * (q.x + b.x), hh, 0.5f * (q.y + b.y)}, {0, 1, 0}, ("+" + std::to_string(i)).c_str()));
+    }
+    out.push_back(make_handle(H::CylCap, 1, {cx, hh, cz}, {0, 1, 0}, "top"));
+    out.push_back(make_handle(H::CylCap, 1, {cx, -hh, cz}, {0, -1, 0}, "bottom"));
+    return;
+  }
+  if (shape == 0 || shape == 3 || shape == 4) {
     const Vec3 h(std::fabs(finite_or(p.size.x, 0.0f)) * 0.5f, std::fabs(finite_or(p.size.y, 0.0f)) * 0.5f, std::fabs(finite_or(p.size.z, 0.0f)) * 0.5f);
     static const char *const names[6] = {"+x", "-x", "+y", "-y", "+z", "-z"};
     for (int k = 0; k < 6; k++) {
@@ -354,6 +648,9 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
       return Vec3(0.0f);
     case BlockoutHandle::OpenSill:
       p.sill = std::min(before.head - kBlockoutMinSize, std::max(0.0f, before.sill - delta));  // (the handle points down)
+      return Vec3(0.0f);
+    case BlockoutHandle::OutlinePoint:  // (these move in a plane: blockout_outline_move / _insert)
+    case BlockoutHandle::OutlineAdd:
       return Vec3(0.0f);
   }
   return Vec3(0.0f);

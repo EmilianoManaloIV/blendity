@@ -5145,6 +5145,7 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
   }
   /* Parametric shapes: every shape with its defaults, random settings and extremes. */
   size_t shape_ops = 0, shape_problems = 0;
+  double max_ms_shapes = 0.0;
   uint32_t rng = 4242u;
   auto rnd = [&](float lo, float hi) {
     rng = rng * 1664525u + 1013904223u;
@@ -5180,6 +5181,72 @@ static void test_modifier_tools_stress(Report &rep, const Options &o) {
         if (examples.size() < 80) examples.push_back(strprintf("shape %s trial %d: %s", kShapeNames[k], trial, bad.empty() ? "no faces" : bad.c_str()));
       }
     }
+  /* Round 480 (task 0456): a Blockout object built from the new shapes - a wedge, stairs, an arch, an outline and a box, with random and extreme numbers
+   * (0, 1 and 257 steps, an angle of 0 and 720, an inner radius above the outer, an outline of three points in a line, of 256 and 300, crossing itself,
+   * not a number) - snapshotted and built as the editor does, on the field path and, where the build has it, the exact one; closed, or refused by name. */
+  {
+    size_t blockout_ops = 0, blockout_problems = 0, blockout_skipped = 0;
+    const float qnan = std::numeric_limits<float>::quiet_NaN();
+    for (int trial = 0; trial < (o.quick ? 12 : 60); trial++) {
+      Scene sc;
+      GameObject *bo = sc.create("Blockout");
+      bo->add<Blockout>();
+      auto piece = [&](int shape, int op, Vec3 at) {
+        GameObject *g = sc.create("Piece", bo);
+        BlockoutPiece *bp = g->add<BlockoutPiece>();
+        bp->shape = shape, bp->operation = op;
+        g->set_local_position(at);
+        return bp;
+      };
+      BlockoutPiece *base = piece(0, 0, Vec3(0.0f));
+      base->size = {4.0f, 3.0f, 4.0f};
+      BlockoutPiece *wedge = piece(3, trial % 4 == 0 ? 1 : 0, Vec3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)));
+      wedge->size = {rnd(0, 3), rnd(0, 3), rnd(0, 4)};
+      BlockoutPiece *stairs = piece(4, 0, Vec3(rnd(-1, 1), -0.5f, rnd(-1, 1)));
+      stairs->size = {rnd(0, 3), rnd(0, 3), rnd(0, 4)};
+      stairs->steps = trial % 5 == 0 ? 0 : trial % 5 == 1 ? 1 : trial % 5 == 2 ? 257 : 2 + trial % 9;
+      stairs->fill_under = trial % 2 == 0;
+      BlockoutPiece *arch = piece(5, trial % 3 == 0 ? 1 : 0, Vec3(rnd(-1, 1), 0.0f, rnd(-1, 1)));
+      arch->radius = rnd(0, 2), arch->inner_radius = trial % 4 == 1 ? 3.0f : rnd(0, 2), arch->height = rnd(0, 2);
+      arch->angle = trial % 6 == 0 ? 0.0f : trial % 6 == 1 ? 720.0f : trial % 6 == 2 ? qnan : rnd(-10, 400);
+      arch->segments = (int)rnd(-3, 40);
+      BlockoutPiece *outline = piece(6, trial % 7 == 0 ? 1 : 0, Vec3(rnd(-1, 1), rnd(-1, 1), rnd(-1, 1)));
+      outline->height = rnd(0, 3);
+      const float w = rnd(0.5f, 3.0f);
+      const int what = trial % 7;
+      if (what == 0) outline->outline = {{0, 0}, {w, 0}, {w, w}, {0, w}};
+      else if (what == 1) outline->outline = {{0, 0}, {2 * w, 0}, {2 * w, w}, {w, w}, {w, 2 * w}, {0, 2 * w}};
+      else if (what == 2) outline->outline = {{0, 0}, {w, 0}, {2 * w, 0}};
+      else if (what == 3) outline->outline = {{0, 0}, {w, w}, {w, 0}, {0, w}};
+      else if (what == 4) {
+        for (int k = 0; k < (trial % 2 ? 256 : 300); k++) outline->outline.push_back({w * std::cos(2.0f * kPi * (float)k / 256.0f), w * std::sin(2.0f * kPi * (float)k / 256.0f)});
+      }
+      else if (what == 5) outline->outline = {{0, 0}, {w, 0}, {qnan, 0}, {0, w}};
+      else outline->room = true, outline->outline = {{0, 0}, {w, 0}, {w, w}, {0, w}};
+      for (blockout::Path path : {blockout::Path::Field, blockout::Path::Crisp}) {
+        if (path == blockout::Path::Crisp && !blockout::crisp_available()) continue;
+        std::vector<blockout::Piece> pieces;
+        blockout::Settings settings;
+        blockout_snapshot(*bo, pieces, settings);
+        settings.path = path, settings.cell = 0.1f;
+        Mesh built;
+        blockout::Report report;
+        ScopedTimer t;
+        const bool ok = blockout::build(pieces, settings, built, nullptr, &report);
+        max_ms_shapes = std::max(max_ms_shapes, t.ms());
+        blockout_ops++;
+        blockout_skipped += report.skipped.size();
+        if (!ok) continue;  // (refused by name: not a problem)
+        const std::string bad = invalid(built);
+        if (bad.empty()) continue;
+        blockout_problems++;
+        problem_types[bad]++;
+        if (examples.size() < 80) examples.push_back(strprintf("blockout from new shapes, trial %d, %s: %s", trial, path == blockout::Path::Crisp ? "exact" : "field", bad.c_str()));
+      }
+    }
+    shape_ops += blockout_ops, shape_problems += blockout_problems;
+    rep.row({strprintf("a Blockout object built from the new shapes (%zu builds, %zu pieces skipped by name)", blockout_ops, blockout_skipped), num((double)blockout_ops), num((double)blockout_problems), f2(max_ms_shapes)});
+  }
   rep.row({"parametric shapes", num((double)shape_ops), num((double)shape_problems), "-"});
   rep.note(strprintf("%zu operations on odd meshes, %zu problems; %zu shapes built, %zu problems", total_ops, total_problems, shape_ops,
                      shape_problems));

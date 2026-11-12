@@ -114,6 +114,7 @@ bool Maker::on_its_faces(V3 x, const uint32_t *faces, size_t count, std::vector<
   const double tol = 4.0 * c.tol;
   for (uint32_t si : solids) {
     const Solid &s = c.solids[si];
+    if (s.mesh) continue;  // (not convex: its planes go on through it)
     for (uint32_t f = 0; f < s.face_count(); f++)
       if ((double)s.face_sign[f] * c.planes[s.face_plane[f]].value(x) > tol) return false;
   }
@@ -144,6 +145,7 @@ bool Maker::on_its_line(V3 &x, const Plane &a, const Plane &b, const uint32_t *f
   double from = -1e300, to = 1e300;
   for (uint32_t si : solids) {
     const Solid &s = c.solids[si];
+    if (s.mesh) continue;
     for (uint32_t f = 0; f < s.face_count(); f++) {
       const Plane &p = c.planes[s.face_plane[f]];
       const double out = (double)s.face_sign[f] * p.value(x) - tol, rise = (double)s.face_sign[f] * dot(p.n, dir);
@@ -907,6 +909,25 @@ const char *Maker::open_at(std::vector<uint8_t> &bad) const {
 }
 
 }  // namespace
+
+bool convex_parts(const std::vector<double> &xy, std::vector<std::vector<uint32_t>> &parts) {
+  const size_t n = xy.size() / 2;
+  if (n < 3) return false;
+  std::vector<P2> pt(n);
+  std::vector<uint32_t> ring(n);
+  P2 lo{xy[0], xy[1]}, hi = lo;
+  for (size_t i = 0; i < n; i++) {
+    pt[i] = {xy[2 * i], xy[2 * i + 1]}, ring[i] = (uint32_t)i;
+    lo.x = std::min(lo.x, pt[i].x), lo.y = std::min(lo.y, pt[i].y), hi.x = std::max(hi.x, pt[i].x), hi.y = std::max(hi.y, pt[i].y);
+  }
+  const double size2 = (hi.x - lo.x) * (hi.x - lo.x) + (hi.y - lo.y) * (hi.y - lo.y), eps = 1e-12 * size2;
+  if (!(size2 > 0.0) || !ring_simple(pt, ring, eps)) return false;
+  std::vector<uint32_t> tris;
+  if (!clip_ears(pt, ring, eps, 1e-18 * size2, tris)) return false;
+  merge_convex(pt, tris, eps, parts);
+  dissolve_flat(pt, eps, parts);
+  return !parts.empty();
+}
 
 bool make_faces(const Cluster &c, Soup &soup, Polys &out, const std::atomic<bool> *cancel, const char **open) {
   *open = nullptr;

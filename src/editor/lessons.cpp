@@ -2263,6 +2263,48 @@ Typing sizes is exact but slow. A selected Blockout piece shows a small square o
 ? Why does dragging a handle on a piece scaled 2 times in X change its size by half the distance the face travels? | A handle moves the face under the mouse in the world; the size is in the piece's own units, which are twice as long here, so the size changes by the distance divided by the scale.
 ? Two boxes stand side by side with a 2 cm gap. You drag the facing handle toward the other box. What happens near the other face? | Within a few pixels it snaps onto the other face's plane, so the two faces are flush and the result has no face between them. Holding Ctrl turns that off.
 )"},
+    {"Ramps, stairs, arches and odd-shaped rooms", "Wedge, stairs, arch, an outline pulled up, any mesh as a piece, and the Room tool's Polyline", R"(
+A piece is not only a box, a cylinder or a sphere. A wedge is a ramp, stairs are a flight of steps, an arch is a ring cut into blocks, an outline is any closed figure in the floor plan pulled up into a wall of matter - an L-shaped room, a corridor with a bend - and any closed mesh of the scene can be a piece too. Each is an Add, a Subtract or an Intersect piece; a wedge and an outline can also be a room, with walls of an even thickness all the way round.
+# Try it
+! cmd:blockout new | A Blockout with its one 2 m box
+! cmd:blockout add wedge 2 1 4 | A ramp 2 m wide, 1 m tall at its -Z end and 4 m long, sloping down towards +Z
+! cmd:blockout add stairs 2 2 4 8 | A flight of 8 steps climbing 2 m over 4 m towards +Z (Fill Under in the Inspector turns it into a flight with a slab under the treads)
+! cmd:blockout add arch 1.5 1 180 0.5 | An arch standing in the XY plane: outer radius 1.5 m, inner 1 m, a half circle, 0.5 m deep
+! cmd:blockout add room outline 3 | A room whose air is an outline pulled up 3 m: select it and run blockout outline 0 0 6 0 6 2 2 2 2 6 0 6 for an L
+! cmd:blockout outline 0 0 6 0 6 2 2 2 2 6 0 6 | The corners of the selected outline as x z pairs: an L-shaped room whose wall is as thick at the corner turned inward as at every other
+! cmd:blockout roomopt polyline on | The Room tool's Polyline option: click the corners on the ground or a face, close on the first corner or Enter, then pull the height
+# Handles and the Polyline
+- An outline shows a handle on each corner and a + between two: drag a corner in the surface's plane (the grid, or another piece's corner when near, Ctrl turns snapping off), click a + to add a corner there. One drag is one Undo step and Esc puts the outline back.
+- The Room tool with Polyline on: click the first corner, then the others; click the first corner again or press Enter to close, Backspace takes the last corner back, Esc leaves nothing. Then move the mouse for the height, or type it, and click.
+# Any mesh as a piece
+- `blockout add mesh Torus` makes a piece from the object named Torus (or the selected one when no name is given): its evaluated mesh, placed by the piece's own transform. The object is no longer drawn, collided with, baked or exported while a piece uses it, and is again when the piece is deleted or switched off; editing the mesh rebuilds the Blockout.
+- A closed mesh is exact on the exact path, and one made of several closed shells pushed into each other (two cubes joined as one object) is united first; an open one is skipped there and named in the Inspector, and the field path still gives a closed result. A Blockout cannot use itself or one of its own pieces.
+? Two parts of an outline's cut lie in one plane, for instance the top of an L. How many faces does the top have in the result? | One: faces of a piece's parts that lie in one plane are one face, so the top of an L is one region, not one for each convex part.
+? Why are stairs, an arch and a concave outline refused as Intersect pieces? | Intersect keeps what is inside every Intersect piece, which needs one convex shape; these are several convex solids, so the status names the piece and says why.
+? A mesh piece's object is selected in the Hierarchy but not drawn. Where is it? | It is the Blockout's piece: the mesh is part of the Blockout's result while the piece is on, and shows as the piece's wire when it is selected; deleting or disabling the piece draws it again.
+)"},
+    {"Drawing pieces on faces", "A Subtract box, a ramp, stairs or an arch drawn straight onto a face of a Blockout", R"(
+The Draw Piece (Room) tool (Shift+R, or Modeling Tools > Create > Blockout) draws a footprint on the ground or on any face and pulls it into a piece. Drawn on a face of a Blockout, the piece becomes a piece of that Blockout - whatever is selected - so a pocket, a window recess or a buttress is made where you look at it, as with SketchUp's rectangle and Push/Pull.
+# Piece and Operation
+- Draw: Room, Solid (a box, a cylinder with Circle Footprint, any outline with Polyline Footprint), Wedge, Stairs or Arch. A wedge is tall where the drag began; stairs climb the way the rectangle was dragged; an arch lies in the surface, as wide as the rectangle's first side, and is pushed in or pulled out.
+- Operation: Auto goes by the direction - pushed into the face the solid cuts (Subtract), pulled out it adds; in a Blockout with nothing in it yet it adds either way. Add, Subtract and Intersect fix it whichever way you pull. A room has no operation.
+- A wedge or stairs pushed into a face is turned over: you get a ramp or a stairwell going down into the face, open at it.
+- While you move the mouse for the height the label beside it says what the piece will do: Add, Subtract or Intersect. Type a number for an exact depth; a negative one goes into the face.
+# Try it
+! cmd:blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2 | 1. A 2 m box drawn on the ground from the origin (x, y and z from 0 to 2), in the selected Blockout or a new one
+! cmd:blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5 | 2. A 1 m square drawn on the box's top and pushed in half a metre: Auto makes it a Subtract piece - a pocket - of that Blockout
+! cmd:blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1 | 3. A circle of radius 0.2 m drawn on the top's corner and pulled up 1 m: Auto adds a column
+! cmd:blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2 | 4. An arch 1 m wide drawn on the +Z side, its feet 0.2 m up, dragged upward and pushed 2 m through: an arched opening
+! cmd:blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1 | 5. Stairs on the ground against the box's +X side, climbing 1 m along Z
+! cmd:tool room | 6. The tool itself: drag a rectangle on a face of the box, then move the mouse into the face and click
+# From the console
+- `blockout draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height>` makes what the tool's two drags make on that surface point: du and dz are the rectangle's sides from the point (a cylinder: du is its radius), the height is along the normal and negative into the face.
+- `blockout roomopt piece room|solid|wedge|stairs|arch` and `blockout roomopt operation auto|add|subtract|intersect` set the tool's rows.
+? Nothing of the wall's Blockout is selected - another Blockout's piece is. You draw a rectangle on the wall and push it in. Which Blockout gets the piece? | The wall's: a piece drawn on a face of a Blockout belongs to that Blockout. Only a footprint drawn on the ground or on a mesh that is no Blockout goes to the selected Blockout, or to a new one.
+? With Operation on Auto you draw a rectangle on a wall and pull it out by mistake. What do you get, and how do you make it a pocket? | An Add box standing on the wall. Undo and push in instead, or press F9 and set Operation to Subtract and move it - or set the tool's Operation to Subtract, which cuts whichever way you pull.
+? Why does a cutting arch come out filled while an arch that adds is a ring? | A Subtract arch is meant as an arched opening, so its inner radius is 0 and everything under the curve is cut; an arch that adds is the ring of blocks itself. The Inspector's Inner Radius changes either afterwards.
+? You chose Draw: Wedge and then ticked Circle Footprint. What does the tool draw now? | A cylinder: a wedge, stairs and an arch are drawn over a rectangle, so another footprint makes the tool's piece a plain solid again.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
 # The Posing block

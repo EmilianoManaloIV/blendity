@@ -15,7 +15,11 @@
 
 namespace bl::blockout {
 
-enum class Shape : uint8_t { Box, Cylinder, Sphere };
+/* Wedge, Stairs, Arch and Outline (task 0456) are laid out as ProceduralShape's: a wedge is tall at -Z and slopes down
+ * to +Z; stairs climb towards +Z; an arch stands in the XY plane, centred on its top, and is `height` deep along Z; an
+ * outline is a closed figure in the piece's XZ plane pulled up along Y. Stairs, an arch and a concave outline are
+ * several convex solids of one piece. */
+enum class Shape : uint8_t { Box, Cylinder, Sphere, Wedge, Stairs, Arch, Outline, Mesh };
 /* Intersect: what is inside the piece is kept, of the whole Blockout (two of them: what is inside both). */
 enum class Op : uint8_t { Add, Subtract, Intersect };
 /* Auto: the crisp path where the build has it and no piece of the cluster has a Blend radius, else the field path.
@@ -23,11 +27,16 @@ enum class Op : uint8_t { Add, Subtract, Intersect };
 enum class Path : uint8_t { Auto, Crisp, Field };
 
 /* The side of a piece a face came from. A box: 0 -X, 1 +X, 2 -Y, 3 +Y, 4 -Z, 5 +Z. A cylinder: 0 its side, 1 the
- * bottom (-Y), 2 the top (+Y). A sphere: 0. kSideBlend: no single flat side (a blended join). */
+ * bottom (-Y), 2 the top (+Y). A sphere: 0. A wedge: 0 -X, 1 +X, 2 the bottom, 3 the slope, 4 the tall end (-Z).
+ * Stairs: 0 -X, 1 +X, 2 the underside, 3 the treads, 4 the risers, 5 the back (+Z). An arch: 0 the inner curve, 1 the
+ * outer curve, 2 -Z, 3 +Z, 4 and 5 its two ends. An outline: 0 the bottom, 1 the top, 2 + i the wall over its i-th
+ * segment. kSideInner: a face between two parts of one piece (it lies inside the piece and shows only where the
+ * parts could not be joined). kSideBlend: no single flat side (a blended join). */
 constexpr uint32_t kSideBlend = 0xFFFFFFFFu;
+constexpr uint32_t kSideInner = 0xFFFFu;
 /* A room is two solids: its air (the piece's shape; sides as above - they are the room's inside) and its shell (the
  * air grown by the wall, floor and ceiling; its sides are the room's outside, numbered kSideShell + the side). */
-constexpr uint32_t kSideShell = 0x100u;
+constexpr uint32_t kSideShell = 0x10000u;
 
 /* One piece. Shapes are centred on the piece's origin, Y up; `to_blockout` places it (any rotation, uneven scale,
  * mirror or shear). A cylinder and a sphere are the faceted solids primitives::cylinder and uv_sphere make. */
@@ -40,10 +49,30 @@ struct Piece {
   float height = 1.0f;     // cylinder, along Y
   int segments = 24;       // cylinder: sides; sphere: segments around (3-256)
   int rings = 12;          // sphere: rings from pole to pole (2-128)
+  /* Wedge and stairs use `size` (x across, y up, z along). An arch: `radius` its outer radius, `inner_radius`,
+   * `angle` in degrees (above 0, 360 at most: a full ring), `segments` blocks, `height` its depth along Z. An outline:
+   * `outline` its corners as (x, z), 3 to 256 of them, either way round, and `height`. */
+  int steps = 8;               // stairs: 1 to 256
+  bool fill_under = true;      // stairs: solid down to the ground; off: a flight with a slab under the treads
+  float inner_radius = 0.25f;  // arch
+  float angle = 180.0f;        // arch
+  std::vector<Vec2> outline;   // outline
+  /* A mesh as a piece (Shape::Mesh): any mesh, in the piece's space. It is held, not copied (meshes are copy-on-write:
+   * the holder's mesh does not change under the build). `mesh_key` is the caller's number for what the mesh holds - a
+   * different mesh or an edited one has another - and is what the cache compares; the kernel does not read the mesh to
+   * tell. Sides: the mesh's own face indices. Never a room; its Blend radius is not read, nor is that of a piece it touches; as an Intersect piece it is
+   * skipped. A mesh whose triangles lie in few planes (a block) has flat faces that merge; a curved one's faces come
+   * out as the path leaves them. One that is not closed is built on the field path (skipped when the crisp path is
+   * asked for); a closed one that is inside out is turned round. */
+  std::shared_ptr<const Mesh> mesh;
+  uint64_t mesh_key = 0;
   float blend = 0.0f;      // the Blend radius, in the Blockout's units; above 0 sends its cluster to the field path
   Mat4 to_blockout;        // piece space -> the Blockout's space
   /* A room (task 0454): the shape is its air; `op` and `blend` are not read. The thicknesses are metres in the
-   * Blockout's space, measured square to the piece's own sides (0 to 1000; a negative or non-finite one is 0). */
+   * Blockout's space, measured square to the piece's own sides (0 to 1000; a negative or non-finite one is 0).
+   * Stairs and arches are never rooms (the flag is not read); a wedge room has a sloped ceiling; an outline room's
+   * walls follow its outline at an even thickness. A Blend radius is read for boxes, cylinders and spheres only, and
+   * an Intersect piece has to be one convex shape (not stairs, an arch or a concave outline). */
   bool room = false;
   float wall = 0.2f, floor = 0.2f, ceiling = 0.2f;
   bool keep_walls = false;  // false: Merge with neighbours - every room's air clears this room's walls; true: only its own air does
