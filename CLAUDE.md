@@ -28,6 +28,11 @@ non-trivial.
   aside (`Blendity.old.exe`) and build into place. Never kill the user's Blendity.
 - Optional Blender libraries come from `../blender/lib/<platform>`; `BLENDITY_NO_LIBS=1` forces the
   dependency-free build that CI uses. Both must keep building.
+- The user's local `dist\windows\Blendity.exe` stays current (the user, 2026-11-11): the hub rebuilds it from
+  `origin/main` plus every open pass's newest published branch when a round's PR is **published** (review done,
+  full local chain passed, commit pushed) - it does not wait for CI. Never earlier: not before review, not from
+  uncommitted code. Each time, one line to the user on what the exe contains and which rounds in it are not yet
+  green on CI; a fault CI finds later means a rebuild after the fix. Not while a timed stage runs.
 - Headless runs: `Blendity.exe --headless-screenshot out.png --cmd "..."` with `BLENDITY_PROJECT` and
   `BLENDITY_TRASH` pointing at a scratch copy, never the real `Assets/`.
 
