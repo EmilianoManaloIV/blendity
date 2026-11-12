@@ -577,6 +577,7 @@ void Lightmapper::begin(const std::vector<BakeObject> &objects, const std::vecto
   rays_ = 0;
   pick_texels_ = 0, chance_kept_ = 0, chance_dropped_ = 0;
   gpu_texels_ = 0;
+  gpu_cards_.clear();
   gpu_error_.clear();
   active_ = true;
 
@@ -1098,11 +1099,16 @@ bool Lightmapper::step(double budget_ms) {
    * light is added here. A GPU error leaves the rest to the CPU. */
   bool gpu_waiting = false;  // the GPU is still opening (task 0037): this step bakes on the CPU
   if (s_.gpu_device >= 0 && gpu_error_.empty() && s_.bounces > 0) {
+    /* (round 487) Generate Lighting asks the cards how many texels they take next (PathTracer::gpu_gather_batch):
+     * batches of 8192 texels kept a card waiting more than working (SideRail's gather: 28 s so, 8 s in batches
+     * of 131072). A texel's samples do not depend on its batch (its sequence is its place in the bake), so
+     * neither does the lightmap. Preview Lighting steps on the editor's thread and keeps the small batch. */
     const size_t per = (size_t)std::max<int64_t>(1024, std::min<int64_t>(1 << 20, ((int64_t)1 << 23) / std::max(1, s_.indirect_samples)));
+    const std::vector<int> cards = s_.gpu_devices.empty() ? std::vector<int>{s_.gpu_device} : s_.gpu_devices;
     std::vector<Vec3> origins, normals, ind;
     std::vector<float> ind_sq;  // (round 466: each point's samples' mean squared luminance)
     do {
-      const size_t batch = std::min<size_t>(total_ - done_.load(), per);
+      const size_t batch = std::min<size_t>(total_ - done_.load(), s_.gpu_batch_by_speed ? pt_->gpu_gather_batch(cards, s_.indirect_samples) : per);
       if (batch == 0) break;
       origins.resize(batch);
       normals.resize(batch);
@@ -1113,7 +1119,8 @@ bool Lightmapper::step(double budget_ms) {
         normals[i] = tx.normal;
       }
       std::string err;
-      if (!pt_->gpu_gather(s_.gpu_device, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed, s_.sobol, &ind_sq) ||
+      /* (round 487: on every card the bake was given - a texel's samples are the same whichever card gathers it) */
+      if (!pt_->gpu_gather_on(cards, 1, origins, normals, s_.indirect_samples, ind, nullptr, &err, gpu_first_hit_ratio(), s_.seed, s_.sobol, &ind_sq, done_.load()) ||
           ind.size() != batch) {
         if (pt_->gpu_gather_waiting()) {
           gpu_waiting = true;
@@ -1796,6 +1803,8 @@ void Lightmapper::fill_invalid(Lightmap &lm, std::vector<uint8_t> &cov, const st
 LightingData Lightmapper::take_result() {
   LightingData r = std::move(out_);
   out_ = LightingData{};
+  if (pt_) gpu_cards_ = pt_->gpu_gather_cards();  // (round 487: the path tracer holds the cards' counts)
+  if (pt_ && !gpu_cards_.empty()) Log::info("Generate Lighting: the gather's time: %s", pt_->gpu_gather_times().c_str());
   pt_.reset();
   texels_.clear();
   values_.clear();

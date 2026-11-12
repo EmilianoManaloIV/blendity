@@ -2156,6 +2156,7 @@ void Editor::run_console_command(const std::string &line) {
       lighting_noise_command(f.size() > 0 ? f[0] : std::string(), f.size() > 1 ? f[1] : std::string());
     }
     else if (sub == "pick") lighting_pick_command(to_lower(arg(2, "")));  // (round 484: lighting pick [on|off|<rays>] - its own function: this chain is near the compiler's nesting limit)
+    else if (sub == "cards") lighting_cards_command(to_lower(arg(2, "")));  // (round 487: lighting cards [all|one])
     else if (sub == "variancescale") lighting_variancescale_command(to_lower(arg(2, "")));  // (round 486: lighting variancescale [auto|on|off])
     else if (sub == "preview") {
       scene_->lighting.preview = to_lower(arg(2, scene_->lighting.preview ? "off" : "on")) == "on";
@@ -2166,7 +2167,7 @@ void Editor::run_console_command(const std::string &line) {
       scene_->lighting.update_mode = m == "automatic" || m == "auto" ? 1 : 0;
       mark_changed("Lighting Updates");
     }
-    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] | seed <n> | noise <folder A> <folder B> | pick on|off|<rays> (a relative folder is the project's)");
+    else Log::warn("lighting: update | preview on|off | mode manual|automatic | markstatic | save <folder> [overwrite] | seed <n> | noise <folder A> <folder B> | pick on|off|<rays> | cards all|one (a relative folder is the project's)");
   }
   else if (c == "shading") {
     std::string w = to_lower(arg(1, "shaded"));
