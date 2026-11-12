@@ -4,7 +4,7 @@
 - **Requirements:** Q-04 (interactive editor), Q-06 (responsiveness)
 - **Decisions:** ADR 0127
 - **Model:** main session (the solver's numerics; goldens)
-- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/389
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/391
 - **Round:** 473, Pass 22's sixth. Measured against the baseline as round 472 left it.
 
 ## Goal
