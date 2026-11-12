@@ -434,8 +434,8 @@ GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float 
   /* Round 495: a wedge, stairs or an arch over the rectangle, and the operation chosen - or, by the direction, Subtract when pushed in. */
   const int kind = solid && !circle ? blockout_draw_choice().piece : 0;
   PieceWords w;
-  /* (Auto in a Blockout with no piece yet - a new one too - adds: there is nothing to cut, and a lone cutter is nothing to see.) */
-  w.room = !solid, w.shape = circle ? 1 : kind, w.op = blockout_draw_operation(solid, room_.subtract, h, target->children.empty()), w.ok = true;
+  /* (Auto in a Blockout with no matter yet - a new one too - adds: there is nothing to cut, and a lone cutter is nothing to see.) */
+  w.room = !solid, w.shape = circle ? 1 : kind, w.op = blockout_draw_operation(solid, room_.subtract, h, blockout_nothing_to_cut(*target)), w.ok = true;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);  // (a thickness is in the Blockout's units too)
   BlockoutPiece *bp = piece->get<BlockoutPiece>();
   Vec3 centre = origin + normal * (h * 0.5f);
@@ -468,8 +468,12 @@ GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float 
   mark_changed(std::string("Create Blockout ") + piece_base_name(w));
   record_blockout_last(piece);
   if (solid && h < 0.0f && kind == 0) {  // (a box or cylinder dug down from the surface: F9's height keeps the surface where it is, not the far end; a wedge or stairs is turned over and stands on it already, an arch's Y is not its depth)
-    obj_last_.base_p = origin;
+    obj_last_.base_p = centre - normal * (h * 0.5f);  // (the face under the piece's middle - not the corner the drag began at: F9 put a rectangle's pocket there, the second review)
     obj_last_.base_up = -piece->world_matrix().dir({0.0f, 1.0f, 0.0f});
+  }
+  if (kind == 5) {  // (an arch drawn on a face: F9's Depth keeps the face and grows away from it, as a box's Height does)
+    obj_last_.base_p = centre - normal * (h * 0.5f);
+    obj_last_.base_up = normal * (h < 0.0f ? -scale : scale);
   }
   return piece;
 }
@@ -509,7 +513,7 @@ GameObject *Editor::room_make_outline(const std::vector<Vec3> &corners, Vec3 u, 
   if (!room_target(target, scale)) return nullptr;
   if (!target) target = create_empty_blockout();
   PieceWords w;
-  w.room = !solid, w.shape = 6, w.op = blockout_draw_operation(solid, room_.subtract, h, target->children.empty()), w.ok = true;
+  w.room = !solid, w.shape = 6, w.op = blockout_draw_operation(solid, room_.subtract, h, blockout_nothing_to_cut(*target)), w.ok = true;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);
   BlockoutPiece *bp = piece->get<BlockoutPiece>();
   const float cx = 0.5f * (x0 + x1), cz = 0.5f * (z0 + z1);
@@ -524,7 +528,7 @@ GameObject *Editor::room_make_outline(const std::vector<Vec3> &corners, Vec3 u, 
   mark_changed(std::string("Create Blockout ") + piece_base_name(w));
   record_blockout_last(piece);
   if (solid && h < 0.0f) {  // (a solid dug down from the surface: as room_make's)
-    obj_last_.base_p = corners[0];
+    obj_last_.base_p = corners[0] + u * cx + z * cz;  // (the face under the piece's middle, not the first corner)
     obj_last_.base_up = -piece->world_matrix().dir({0.0f, 1.0f, 0.0f});
   }
   return piece;
@@ -553,6 +557,7 @@ void Editor::record_blockout_last(GameObject *g) {
   const float half = blockout_floor_below_origin(*bp);
   o.base_p = w.point({0.0f, -half, 0.0f});
   o.base_up = w.dir({0.0f, 1.0f, 0.0f});
+  if (bp->shape == 5) o.base_up = Vec3(0.0f);  // (an arch keeps its middle - unless the tool drew it on a face: room_make says which way it grows)
   o.serial = obj_last_serial_now();
   obj_last_ = std::move(o);
   obj_last_open_ = true;

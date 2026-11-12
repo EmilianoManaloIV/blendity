@@ -11028,6 +11028,8 @@ static void tests_round495_te() {
     CHECK(bp->operation == 1);
     CHECK_NEAR(bp->size.y, 0.5f, 1e-3f);
     CHECK_NEAR(g->world_position().y + bp->size.y * 0.5f, 0.5f, 0.01f);  // (the pocket still starts on the slab's top: it grew downward)
+    CHECK_NEAR(g->world_position().x, 0.0f, 0.02f);  // (and where it was dragged: F9 put it on the drag's first corner, -1 -1 - the second review)
+    CHECK_NEAR(g->world_position().z, 0.0f, 0.02f);
     const Mesh *m = r495_mesh(*bo);
     CHECK(m && r495_clean(*m, "slab after F9"));
     if (m) CHECK_NEAR(r476_volume(*m), 16.0 - 2.0 * 2.0 * 0.5, 0.03);
@@ -11319,8 +11321,17 @@ static void tests_round495_review() {
     Editor ed;
     te_view(ed, kR479Camera);
     ed.command("blockout roomopt piece room");
-    /* (The lines of lessons.cpp's "Drawing pieces on faces", as they stand there.) */
-    ed.command("blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2");
+    /* The lesson's own `blockout draw` lines, in their order (the second review: copies of them could drift from lessons.cpp). */
+    std::vector<std::string> lines;
+    for (int i = 0; i < lesson_count(); i++) {
+      if (std::string(lesson(i).title) != "Drawing pieces on faces") continue;
+      std::istringstream is(lesson(i).body);
+      for (std::string line; std::getline(is, line);)
+        if (line.rfind("! cmd:blockout draw ", 0) == 0) lines.push_back(line.substr(6, line.find(" | ") - 6));
+    }
+    CHECK(lines.size() == 5);
+    if (lines.size() != 5) return;
+    ed.command(lines[0]);
     r495_built(ed);
     const BlockoutPiece *bp = r495_active(ed);
     GameObject *bo = bp ? ed.active_object_for_test()->parent : nullptr;
@@ -11328,19 +11339,19 @@ static void tests_round495_review() {
     if (!bo) return;
     CHECK_NEAR(r476_volume(*r495_mesh(*bo)), 8.0, 1e-3);
     CHECK_NEAR(r495_top(ed, 1.0f, 1.0f), 2.0f, 1e-3f);
-    ed.command("blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5");
+    ed.command(lines[1]);
     r495_built(ed);
     bp = r495_active(ed);
     CHECK(bp && bp->operation == 1 && ed.active_object_for_test()->parent == bo);
     CHECK_NEAR(r476_volume(*r495_mesh(*bo)), 7.5, 1e-3);
     CHECK_NEAR(r495_top(ed, 1.0f, 1.0f), 1.5f, 1e-3f);  // (the pocket's floor)
-    ed.command("blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1");
+    ed.command(lines[2]);
     r495_built(ed);
     bp = r495_active(ed);
     CHECK(bp && bp->operation == 0 && bp->shape == 1 && ed.active_object_for_test()->parent == bo);
     CHECK_NEAR(r495_top(ed, 1.75f, 1.75f), 3.0f, 1e-3f);  // (the column stands on the top)
     const double before_arch = r476_volume(*r495_mesh(*bo));
-    ed.command("blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2");
+    ed.command(lines[3]);
     r495_built(ed);
     bp = r495_active(ed);
     CHECK(bp && bp->operation == 1 && bp->shape == 5 && ed.active_object_for_test()->parent == bo);
@@ -11351,7 +11362,7 @@ static void tests_round495_review() {
       CHECK_NEAR(w.point({0.0f, 0.0f, 0.0f}).y, 0.2f, 1e-3f);            // (its feet where it was drawn)
     }
     CHECK(r476_volume(*r495_mesh(*bo)) < before_arch - 0.3);  // (half a disc of radius 0.5, 2 m through, less the pocket's part: it cut)
-    ed.command("blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1");
+    ed.command(lines[4]);
     r495_built(ed);
     bp = r495_active(ed);
     CHECK(bp && bp->operation == 0 && bp->shape == 4 && ed.active_object_for_test()->parent == bo);
@@ -11486,6 +11497,95 @@ static void tests_round495_review() {
     const BlockoutPiece *bp = r495_active(ed);
     CHECK(bp && bp->operation == 1 && ed.active_object_for_test()->parent == walls);
     ed.command("tool select");
+    ed.command("blockout roomopt piece room");
+  });
+
+  test("blockout draw: F9 keeps a drawn piece on its face and in its place - a pocket dug with a rectangle does not move sideways, a pushed-in wedge keeps its top on the face, an arch's Depth grows away from the wall", [] {
+    Editor ed;
+    ed.record_buttons_for_test(true);
+    te_view(ed, kR479Camera);
+    ed.command("blockout roomopt piece room");
+    GameObject *bo = r477_blockout(ed, "Slab");
+    r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {6, 1, 6});
+    r477_piece(ed, *bo, "Wall", 0, 0, {0, 2.0f, -2.75f}, {6, 3, 0.5f});  // (its +Z face is at z = -2.5)
+    ed.clear_selection_for_test();
+    r495_built(ed);
+    ed.mark_changed_for_test("test scene");  // (F9 re-runs from the scene before the piece: this one)
+    /* A pocket from a corner: its middle is a metre from where the drag began. */
+    r495_draw(ed, *bo, "box", "auto", {0.0f, 0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}, 2.0f, 2.0f, -0.25f);
+    CHECK(ed.obj_last_valid() && r479_type(ed, "adjust:Height", "0.5"));
+    r495_built(ed);
+    GameObject *g = ed.active_object_for_test();
+    const BlockoutPiece *bp = r495_active(ed);
+    CHECK(bp && bp->operation == 1);
+    if (!bp) return;
+    std::printf("    pocket after F9 Height 0.5: at %.3f %.3f %.3f, height %.3f\n", g->world_position().x, g->world_position().y, g->world_position().z, bp->size.y);
+    CHECK_NEAR(g->world_position().x, 1.0f, 1e-3f);  // (it was put on the drag's first corner, 0 0: the second review)
+    CHECK_NEAR(g->world_position().z, 1.0f, 1e-3f);
+    CHECK_NEAR(g->world_position().y + bp->size.y * 0.5f, 0.5f, 1e-3f);
+    ed.command("delete");
+    r495_built(ed);
+    ed.mark_changed_for_test("test scene");
+    /* A wedge pushed in, dragged toward -Z: deepest where the drag began, and F9's Height keeps its flat side on the face. */
+    r495_draw(ed, *bo, "wedge", "auto", {0.0f, 0.5f, 2.0f}, {0.0f, 1.0f, 0.0f}, 2.0f, -2.0f, -0.25f);
+    CHECK(r495_top(ed, 1.0f, 1.8f) < r495_top(ed, 1.0f, 0.2f) && r495_top(ed, 1.0f, 0.2f) < 0.499f);
+    CHECK(ed.obj_last_valid() && r479_type(ed, "adjust:Height", "0.5"));
+    r495_built(ed);
+    bp = r495_active(ed);
+    CHECK(bp && bp->shape == 3);
+    std::printf("    wedge after F9 Height 0.5: the cut's floor is at %.3f near the press and %.3f at the far end\n", r495_top(ed, 1.0f, 1.8f), r495_top(ed, 1.0f, 0.2f));
+    CHECK(r495_top(ed, 1.0f, 1.8f) < 0.15f && r495_top(ed, 1.0f, 1.8f) > -0.01f);  // (0.5 deep at its tall end, from the face down)
+    CHECK(r495_top(ed, 1.0f, 0.2f) > 0.4f && r495_top(ed, 1.0f, 0.2f) < 0.499f);
+    ed.command("delete");
+    r495_built(ed);
+    ed.mark_changed_for_test("test scene");
+    /* An arch on the wall, pulled out 0.3 then pushed in 0.2: F9's Depth keeps the end on the wall's face. */
+    for (float h : {0.3f, -0.2f}) {
+      r495_draw(ed, *bo, "arch", "add", {-0.5f, 2.0f, -2.5f}, {0.0f, 0.0f, 1.0f}, 1.0f, -1.0f, h);
+      CHECK(ed.obj_last_valid() && r479_type(ed, "adjust:Depth", "0.4"));
+      r495_built(ed);
+      g = ed.active_object_for_test();
+      bp = r495_active(ed);
+      CHECK(bp && bp->shape == 5);
+      if (!bp) return;
+      std::printf("    arch drawn %+.1f, after F9 Depth 0.4: depth %.3f, middle at z %.3f\n", h, bp->height, g->world_position().z);
+      CHECK_NEAR(bp->height, 0.4f, 1e-4f);
+      CHECK_NEAR(g->world_position().z, -2.5f + (h > 0.0f ? 0.2f : -0.2f), 1e-3f);  // (from the face, the way it was drawn)
+      CHECK_NEAR(g->world_position().x, 0.0f, 1e-3f);
+      CHECK_NEAR(g->world_position().y, 2.0f, 1e-3f);
+      ed.command("delete");
+      r495_built(ed);
+      ed.mark_changed_for_test("test scene");
+    }
+    /* An arch made by the menu's command keeps its middle, as before. */
+    ed.select_for_test(bo->id, false);
+    ed.command("blockout add arch 1 0.5 180 0.5");
+    r495_built(ed);
+    g = ed.active_object_for_test();
+    const Vec3 was = g ? g->world_position() : Vec3(0.0f);
+    CHECK(ed.obj_last_valid() && r479_type(ed, "adjust:Depth", "1"));
+    r495_built(ed);
+    g = ed.active_object_for_test();
+    CHECK(g && length(g->world_position() - was) < 1e-4f);
+  });
+
+  test("blockout draw: Auto pushed into a Blockout whose only pieces are switched off or cut adds - there is nothing to cut", [] {
+    Editor ed;
+    te_view(ed, kR479Camera);
+    ed.command("blockout roomopt piece room");
+    GameObject *bo = r477_blockout(ed, "Hollow");
+    GameObject *cutter = r477_piece(ed, *bo, "Cutter", 0, 1, {0, 0, 0}, {2, 1, 2});
+    ed.select_for_test(cutter->id, false);
+    r495_built(ed);
+    ed.command("blockout roomopt piece solid");
+    ed.command("blockout room 4 4 5 5 -0.5");  // (dug into the ground beside it; the selected piece's Blockout takes it)
+    r495_built(ed);
+    const BlockoutPiece *bp = r495_active(ed);
+    CHECK(bp && bp->operation == 0 && ed.active_object_for_test()->parent == bo);
+    ed.command("blockout room 4 4 4.5 4.5 -0.25");  // (now there is matter: pushed in cuts)
+    r495_built(ed);
+    bp = r495_active(ed);
+    CHECK(bp && bp->operation == 1);
     ed.command("blockout roomopt piece room");
   });
 }

@@ -78,6 +78,15 @@ int blockout_draw_operation(bool solid, bool subtract, float height, bool nothin
   return height < 0.0f && !nothing_to_cut ? 1 : 0;  // (Auto, by the direction)
 }
 
+bool blockout_nothing_to_cut(const GameObject &blockout) {
+  std::vector<const GameObject *> pieces;
+  blockout_piece_objects(blockout, pieces);  // (the pieces that are on)
+  return std::none_of(pieces.begin(), pieces.end(), [](const GameObject *p) {
+    const BlockoutPiece *bp = p->get<BlockoutPiece>();
+    return bp->operation == 0 || bp->is_room();
+  });
+}
+
 uint64_t blockout_at_surface(const Scene &scene, Vec3 point, Vec3 normal) {
   const bool finite = finite_bits(point.x) && finite_bits(point.y) && finite_bits(point.z) && finite_bits(normal.x) && finite_bits(normal.y) && finite_bits(normal.z);
   if (!finite || !(length(normal) > 1e-6f)) return 0;
@@ -350,8 +359,11 @@ void Editor::room_draw(const Recti &view) {
       const size_t step = r.circle && r.points.empty() ? 4 : 1;
       for (size_t i = 0; i < top.size(); i += step) line(base[i], top[i], blue);
       label = r.typed.empty() ? strprintf("height %.3f m", r.height) : strprintf("height [%s] = %.3f m", r.typed.c_str(), r.height);
+      /* What the piece will do - Auto: pushed in it subtracts, where the Blockout it goes into (room_target's) has something to cut. */
       static const char *const does[] = {"Add", "Subtract", "Intersect"};
-      if (r.solid) label += std::string("  ") + does[blockout_draw_operation(r.solid, r.subtract, r.height, false)];  // (Auto: pushed in subtracts)
+      GameObject *on = scene_->find(blockout_draw_choice().surface), *sel = active_object();
+      const GameObject *into = on && on->get<Blockout>() ? on : sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
+      if (r.solid) label += std::string("  ") + does[blockout_draw_operation(r.solid, r.subtract, r.height, !into || blockout_nothing_to_cut(*into))];
     }
     const int tw = u.font.text_width(label) + u.px(12);
     const Recti box{u.in.mx + u.px(16), u.in.my + u.px(12), tw, u.row_h()};
@@ -390,6 +402,7 @@ void Editor::room_command(const std::vector<std::string> &t) {
     /* (A box and a cylinder are the tool's Solid by the footprint; "solid" itself is not a word here - it would not say which.) */
     const bool known = set_draw_piece(piece == "box" || piece == "cylinder" ? "solid" : piece == "solid" ? "" : piece, room_.solid, room_.circle, room_.polyline) &&
                        set_draw_operation(op, room_.solid, room_.subtract);
+    if (known && !room_.solid && op != "auto") Log::warn("blockout draw: a room has no operation - '%s' is not used", op.c_str());
     if (known) {
       const Vec3 unit = normalize(n);
       blockout_draw_choice().surface = blockout_at_surface(*scene_, p, unit);

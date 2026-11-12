@@ -88,7 +88,8 @@ push it in or pull it out, as SketchUp, UModeler and Plasticity do, the piece be
    fields into `Editor::RoomTool` and give `draw` its own member when editor.h is free.
 5. **An arch** lies in the surface (its depth is the height pulled), its rise is half its width, the rectangle's second
    side only says which way it bulges; a cutting arch is filled, an adding one a ring half its radius thick. F9's Depth
-   keeps its middle, not the face (the review's finding 6, not fixed: `adjust_last.cpp` is not this round's).
+   on an arch the tool drew keeps the face (a follow-up commit: `adjust_last.cpp` was freed by the hub); an arch made
+   by `blockout add` keeps its middle as before.
 6. **A wedge or stairs pushed in is turned over** (the review): its floor on the face, so the cut is open at the face.
 7. **Rooms** drawn on a face of a Blockout join that Blockout as solids do.
 8. **Nested Blockouts:** the outer Blockout takes a piece drawn on a nested one's face (the nested one's mesh is not

@@ -37,6 +37,9 @@ void blockout_draw_forget();  // (the piece and the operation back to their defa
  * direction, and adds when the Blockout has nothing in it to cut (`nothing_to_cut`). */
 int blockout_draw_operation(bool solid, bool subtract, float height, bool nothing_to_cut);
 
+/* Whether a Blockout has no matter a cutter could cut: no piece that is on and adds (a room adds its shell). */
+bool blockout_nothing_to_cut(const GameObject &blockout);
+
 /* The Blockout whose mesh has a face at a surface point (`normal` the face's, toward the eye); 0: none there. */
 uint64_t blockout_at_surface(const Scene &scene, Vec3 point, Vec3 normal);
 

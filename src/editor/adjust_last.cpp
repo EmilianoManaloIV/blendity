@@ -174,7 +174,8 @@ void Editor::blockout_last_rerun() {
     else if (bp->shape == 5) bp->radius = size(o.a), bp->inner_radius = std::max(0.0f, std::min(o.b, bp->radius - kBlockoutMinSize)), bp->height = size(o.c);
     if (bp->is_room()) bp->wall = thick(o.d), bp->floor = thick(o.e), bp->ceiling = thick(o.f);
     else bp->operation = std::max(0, std::min(2, o.op));
-    g->set_world_position(o.base_p + o.base_up * blockout_floor_below_origin(*bp));
+    /* (An arch is as deep along its Z as `height`: one the tool drew on a face grows from the face - round 495; base_up is 0 for any other.) */
+    g->set_world_position(o.base_p + o.base_up * (bp->shape == 5 ? bp->height * 0.5f : blockout_floor_below_origin(*bp)));
   }
   edit_epoch::bump();  // (the Blockout's walk looks again)
   amend_last_step();
