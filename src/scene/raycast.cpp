@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "raycast.h"
+#include "blockout_object.h"
 #include "mesh.h"
 #include <algorithm>
 #include <cmath>
@@ -39,7 +40,7 @@ bool scene_raycast(const Scene &scene, Vec3 origin, Vec3 dir, float max_distance
   const Ray ray{origin, dir};
   for (const auto &o : scene.objects()) {
     const GameObject &g = *o;
-    if (!g.active_in_hierarchy() || !g.get<MeshRenderer>() || !g.evaluated_mesh() || (skip && skip(g))) continue;
+    if (!g.active_in_hierarchy() || !g.get<MeshRenderer>() || blockout_uses_as_piece(g) || !g.evaluated_mesh() || (skip && skip(g))) continue;
     const float enter = ray_aabb(ray, g.world_bounds());
     if (enter < 0.0f || enter > hit.distance) continue;
     for_each_triangle(g, [&](Vec3 a, Vec3 b, Vec3 c) {
@@ -57,7 +58,7 @@ GroundGrid build_ground_grid(const Scene &scene, const std::function<bool(const 
   AABB box;
   for (const auto &o : scene.objects()) {
     const GameObject &obj = *o;
-    if (!obj.active_in_hierarchy() || !obj.get<MeshRenderer>() || (skip && skip(obj))) continue;
+    if (!obj.active_in_hierarchy() || !obj.get<MeshRenderer>() || blockout_uses_as_piece(obj) || (skip && skip(obj))) continue;
     for_each_triangle(obj, [&](Vec3 a, Vec3 b, Vec3 c) {
       if (!std::isfinite(a.x + a.y + a.z + b.x + b.y + b.z + c.x + c.y + c.z)) return;
       g.tris.push_back(a), g.tris.push_back(b), g.tris.push_back(c);

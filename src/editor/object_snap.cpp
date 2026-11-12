@@ -32,7 +32,7 @@ bool Editor::raycast_surface(const Ray &ray, Vec3 &hit, Vec3 &normal, const std:
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy() || skip.count(g.id)) return;
     auto *mr = g.get<MeshRenderer>();
-    const Mesh *m = mr && mr->enabled && mr->display_as == 0 ? g.evaluated_mesh() : nullptr;
+    const Mesh *m = mr && mr->enabled && mr->display_as == 0 && !blockout_uses_as_piece(g) ? g.evaluated_mesh() : nullptr;
     if (!m) return;
     const Mat4 &w = g.world_matrix();
     const Mat4 inv = w.inverse();
@@ -112,7 +112,7 @@ bool Editor::nearest_vertex_on_screen(const Recti &view, int mx, int my, float r
     const bool is_sel = sel.count(g.id) > 0;
     if ((selected_only && !is_sel) || (skip_selected && is_sel)) return;
     auto *mr = g.get<MeshRenderer>();
-    const Mesh *m = mr && mr->enabled ? g.evaluated_mesh() : nullptr;
+    const Mesh *m = mr && mr->enabled && !blockout_uses_as_piece(g) ? g.evaluated_mesh() : nullptr;
     if (!m || m->vert_count() > 200000) return;
     const Mat4 &w = g.world_matrix();
     for (const Vec3 &v : m->positions) {

@@ -6,6 +6,7 @@
 // Without Jolt, Scene::update falls back to Blendity's sphere physics.
 // Theory: GEA Vol. II ch. 14 "Collision and Rigid Body Dynamics".
 #include "physics.h"
+#include "blockout_object.h"
 
 #include "scene.h"
 
@@ -154,7 +155,7 @@ std::shared_ptr<PhysicsWorld> physics_create(Scene &scene) {
   w->system.SetGravity(JPH::Vec3(0, -9.81f, 0));  // Unity: Physics.gravity
   BodyInterface &bi = w->system.GetBodyInterface();
   scene.for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
+    if (!g.active_in_hierarchy() || blockout_uses_as_piece(g)) return;  // (round 480: a mesh a Blockout uses as a piece is not collided with)
     const ColliderComponent *col = g.get<ColliderComponent>();
     if (col && !col->enabled) return;  // (review 362: a switched-off collider collides with nothing, as Unity's)
     const Mesh *m = g.evaluated_mesh();

@@ -167,13 +167,15 @@ void Editor::blockout_last_rerun() {
     bp->head = std::max(size(o.b), bp->sill + kBlockoutMinSize);
   }
   else {
-    if (bp->shape == 0) bp->size = {size(o.a), size(o.c), size(o.b)};
+    if (bp->shape == 0 || bp->shape == 3 || bp->shape == 4) bp->size = {size(o.a), size(o.c), size(o.b)};
     else if (bp->shape == 1) bp->radius = size(o.a), bp->height = size(o.c);
-    else bp->radius = size(o.a);
-    if (bp->room) bp->wall = thick(o.d), bp->floor = thick(o.e), bp->ceiling = thick(o.f);
+    else if (bp->shape == 2) bp->radius = size(o.a);
+    else if (bp->shape == 6) bp->height = size(o.c);
+    else if (bp->shape == 5) bp->radius = size(o.a), bp->inner_radius = std::max(0.0f, std::min(o.b, bp->radius - kBlockoutMinSize)), bp->height = size(o.c);
+    if (bp->is_room()) bp->wall = thick(o.d), bp->floor = thick(o.e), bp->ceiling = thick(o.f);
     else bp->operation = std::max(0, std::min(2, o.op));
-    const float half = bp->shape == 0 ? bp->size.y * 0.5f : bp->shape == 1 ? bp->height * 0.5f : bp->radius;
-    g->set_world_position(o.base_p + o.base_up * half);
+    /* (An arch is as deep along its Z as `height`: one the tool drew on a face grows from the face - round 495; base_up is 0 for any other.) */
+    g->set_world_position(o.base_p + o.base_up * (bp->shape == 5 ? bp->height * 0.5f : blockout_floor_below_origin(*bp)));
   }
   edit_epoch::bump();  // (the Blockout's walk looks again)
   amend_last_step();
@@ -204,7 +206,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     rows.push_back({"Margin", &o.a, nullptr, nullptr, 0.002f, 0.0f, 0.25f, 0, 0});
     if (o.what == "pack") rows.push_back({"Rotate", nullptr, nullptr, &o.flag, 0, 0, 0, 0, 0});
   }
-  else if (o.kind == "blockout") {  // (round 479: the piece just made; n 0 box, 1 cylinder, 2 sphere, 3 door or window)
+  else if (o.kind == "blockout") {  // (round 479: the piece just made; n 0 box, wedge or stairs, 1 cylinder, 2 sphere, 3 door or window, 4 outline, 5 arch, 6 mesh)
     title = "Blockout " + o.what;
     const float mn = kBlockoutMinSize, mx = 10000.0f;
     if (o.n == 3) {
@@ -212,10 +214,12 @@ void Editor::draw_obj_last_panel(const Recti &view) {
       rows.push_back({"Head", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Sill", &o.c, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
     }
+    else if (o.n == 6) rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2});  // (a mesh piece's numbers are its mesh's)
     else {
-      rows.push_back({o.n == 0 ? "Width" : "Radius", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.n != 4) rows.push_back({o.n == 0 ? "Width" : "Radius", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.n == 5) rows.push_back({"Inner Radius", &o.b, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
       if (o.n == 0) rows.push_back({"Depth", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
-      if (o.n != 2) rows.push_back({"Height", &o.c, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.n != 2) rows.push_back({o.n == 5 ? "Depth" : "Height", &o.c, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       if (o.flag) {
         rows.push_back({"Wall", &o.d, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
         rows.push_back({"Floor", &o.e, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});

@@ -103,7 +103,9 @@ bool finite3(Vec3 v) { return finite_bits(v.x) && finite_bits(v.y) && finite_bit
 bool finite_piece(const Piece &p) {
   for (float f : p.to_blockout.m)
     if (!finite_bits(f)) return false;
-  return finite3(p.size) && finite_bits(p.radius) && finite_bits(p.height) && finite_bits(p.blend);
+  for (const Vec2 &q : p.outline)
+    if (!finite_bits(q.x) || !finite_bits(q.y)) return false;
+  return finite3(p.size) && finite_bits(p.radius) && finite_bits(p.height) && finite_bits(p.blend) && finite_bits(p.inner_radius) && finite_bits(p.angle);
 }
 
 void add_face(Solid &s, std::initializer_list<uint32_t> verts, uint32_t side) {
@@ -241,6 +243,7 @@ double finest_facet(const Piece &p, const Solid &s, const double stretch[3]) {
   const double seg = (double)std::max(3, std::min(256, p.segments)), rings = (double)std::max(2, std::min(128, p.rings));
   if (p.shape == Shape::Cylinder) return 2.0 * s.half.x * std::sin(pi / seg) * least;
   if (p.shape == Shape::Sphere) return 2.0 * s.half.x * std::sin(pi / rings) * std::sin(pi / seg) * least;
+  if (p.shape == Shape::Arch) return 2.0 * std::fabs((double)p.radius) * std::sin(std::min(360.0, std::max(0.0, (double)p.angle)) * pi / 360.0 / seg) * least;
   return 1e300;
 }
 
@@ -276,11 +279,345 @@ const char *place_solid(const Piece &p, Solid &s, const double m[12], const doub
  * beside it.) */
 double safe_thickness(float t) { return finite_bits(t) && t > 0.0f ? std::min((double)t, 1000.0) : 0.0; }
 
-/* A piece as its solids in the Blockout's space - one, or a room's shell and then its air - or why it can't be
- * used. `bare`: a room with no thickness anywhere (it has no matter of its own; its air still clears Merge rooms). */
+
+/* ------------------------------------------- shapes of several convex parts */
+
+/* A point of a figure along two of the piece's axes. */
+struct Q2 {
+  double a = 0, b = 0;
+};
+double cross_q(Q2 o, Q2 p, Q2 q) { return (p.a - o.a) * (q.b - o.b) - (p.b - o.b) * (q.a - o.a); }
+
+/* A convex figure along two of the piece's axes (`ia`, `ib`) pulled from `w0` to `w1` along the third: a solid with a
+ * face over each of the figure's edges and one at each end. `edge_side[i]`: the side of the face over the edge from
+ * point i to the next. Points at their neighbour's place or in a line with their neighbours are left out. False when
+ * no figure with an area is left. (The faces' winding is place_solid's to settle.) */
+bool prism(Solid &s, std::vector<Q2> fig, std::vector<uint32_t> edge_side, int ia, int ib, int iw, double w0, double w1, uint32_t side_lo, uint32_t side_hi) {
+  if (fig.size() < 3 || !(w1 > w0)) return false;
+  Q2 lo = fig[0], hi = fig[0];
+  for (const Q2 &q : fig) lo.a = std::min(lo.a, q.a), lo.b = std::min(lo.b, q.b), hi.a = std::max(hi.a, q.a), hi.b = std::max(hi.b, q.b);
+  const double size = std::sqrt((hi.a - lo.a) * (hi.a - lo.a) + (hi.b - lo.b) * (hi.b - lo.b));
+  if (!(size > 0.0)) return false;
+  for (bool went = true; went && fig.size() >= 3;) {
+    went = false;
+    for (size_t i = 0; i < fig.size() && !went; i++) {
+      const size_t n = fig.size();
+      const Q2 before = fig[(i + n - 1) % n], here = fig[i], after = fig[(i + 1) % n];
+      const double step2 = (here.a - before.a) * (here.a - before.a) + (here.b - before.b) * (here.b - before.b);
+      if (step2 > 1e-18 * size * size && std::fabs(cross_q(before, here, after)) > 1e-12 * size * size) continue;
+      fig.erase(fig.begin() + (std::ptrdiff_t)i);  // (the edge that ended here goes on to the next point, under its own side)
+      edge_side.erase(edge_side.begin() + (std::ptrdiff_t)i);
+      went = true;
+    }
+  }
+  const size_t n = fig.size();
+  if (n < 3) return false;
+  double area2 = 0.0;
+  for (size_t i = 1; i + 1 < n; i++) area2 += cross_q(fig[0], fig[i], fig[i + 1]);
+  if (!(std::fabs(area2) > 1e-12 * size * size)) return false;
+  for (const Q2 &q : fig)
+    for (double w : {w0, w1}) {
+      double v[3];  // (a plain array, then the three numbers: a local V3 written through operator[] and copied is not safe with every compiler)
+      v[ia] = q.a, v[ib] = q.b, v[iw] = w;
+      s.verts.push_back(V3(v[0], v[1], v[2]));
+    }
+  for (uint32_t end = 0; end < 2; end++) {
+    for (uint32_t i = 0; i < n; i++) s.face_verts.push_back(i * 2 + end);
+    s.face_offsets.push_back((uint32_t)s.face_verts.size());
+    s.face_side.push_back(end == 0 ? side_lo : side_hi);
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    const uint32_t j = (i + 1) % (uint32_t)n;
+    add_face(s, {i * 2, j * 2, j * 2 + 1, i * 2 + 1}, edge_side[i]);
+  }
+  /* (Three numbers each way, and the vector built from them: one filled through operator[] and then copied lost its y and z
+   * with Apple's clang in round 479.) */
+  double least[3] = {s.verts[0].x, s.verts[0].y, s.verts[0].z}, most[3] = {s.verts[0].x, s.verts[0].y, s.verts[0].z};
+  for (const V3 &v : s.verts) {
+    least[0] = std::min(least[0], v.x), least[1] = std::min(least[1], v.y), least[2] = std::min(least[2], v.z);
+    most[0] = std::max(most[0], v.x), most[1] = std::max(most[1], v.y), most[2] = std::max(most[2], v.z);
+  }
+  s.half = V3((most[0] - least[0]) * 0.5, (most[1] - least[1]) * 0.5, (most[2] - least[2]) * 0.5);
+  return true;
+}
+
+/* How far apart, in the piece's own space, two planes with the local normal `n` (length 1) must be to lie 1 apart in
+ * the Blockout's: a thickness asked in the Blockout's space, times this, is the piece's own offset along `n`. */
+double local_per_metre(const double inv[12], V3 n) {
+  return length(V3(inv[0] * n.x + inv[4] * n.y + inv[8] * n.z, inv[1] * n.x + inv[5] * n.y + inv[9] * n.z, inv[2] * n.x + inv[6] * n.y + inv[10] * n.z));
+}
+
+/* What a room's thicknesses come to in the piece's own space. */
+struct Thick {
+  double wall = 0, floor = 0, ceiling = 0;  // in the Blockout's space
+};
+
+/* A wedge: the profile (z, y) of ProceduralShape's, pulled along X. `grow`: a room's shell - each side moved out by
+ * its thickness, measured square to that side in the Blockout's space. */
+bool local_wedge(const Piece &p, const double inv[12], const Thick *grow, Solid &s) {
+  const double hx = std::fabs((double)p.size.x) * 0.5, hy = std::fabs((double)p.size.y) * 0.5, hz = std::fabs((double)p.size.z) * 0.5;
+  if (!(hx > 1e-30 && hy > 1e-30 && hz > 1e-30)) return false;
+  Q2 low_tall{-hz, -hy}, low_thin{hz, -hy}, top{-hz, hy};
+  double x = hx;
+  if (grow) {
+    const double len = std::sqrt(hy * hy + hz * hz);
+    const Q2 n{hy / len, hz / len};  // (the slope's outward normal, as (z, y))
+    const double down = hy + grow->floor * local_per_metre(inv, V3(0, 1, 0)), back = hz + grow->wall * local_per_metre(inv, V3(0, 0, 1));
+    const double c = n.a * hz - n.b * hy + grow->ceiling * local_per_metre(inv, V3(0, n.b, n.a));
+    low_tall = {-back, -down};
+    low_thin = {(c + n.b * down) / n.a, -down};
+    top = {-back, (c + n.a * back) / n.b};
+    x = hx + grow->wall * local_per_metre(inv, V3(1, 0, 0));
+  }
+  return prism(s, {low_tall, low_thin, top}, {2, 3, 4}, 2, 1, 0, -x, x, 0, 1);
+}
+
+/* Stairs: one solid a step, as ProceduralShape's profile - each from the ground to its tread, or (Fill Under off) down
+ * to a slab under the flight. A step's far end lies against the next step: inside the piece. */
+void local_stairs(const Piece &p, std::vector<Solid> &out) {
+  const double hx = std::fabs((double)p.size.x) * 0.5, height = std::fabs((double)p.size.y), depth = std::fabs((double)p.size.z);
+  if (!(hx > 1e-30 && height > 1e-30 && depth > 1e-30)) return;
+  const int n = std::max(1, std::min(256, p.steps));
+  const double run = depth / (double)n, rise = height / (double)n, slab = std::min(rise, run) * 0.8;
+  const bool fill = p.fill_under || n == 1;
+  auto under = [&](int column) {  // (the underside's height where the column-th riser stands)
+    return fill || column <= 1 ? 0.0 : (double)(column - 1) / (double)(n - 1) * (height - slab);
+  };
+  for (int i = 0; i < n; i++) {
+    const double z0 = -depth * 0.5 + run * (double)i, z1 = i + 1 == n ? depth * 0.5 : -depth * 0.5 + run * (double)(i + 1);
+    const double tread = i + 1 == n ? height : rise * (double)(i + 1);
+    Solid s;
+    const std::vector<Q2> fig = {{z0, under(i) - height * 0.5}, {z1, under(i + 1) - height * 0.5}, {z1, tread - height * 0.5}, {z0, tread - height * 0.5}};
+    if (prism(s, fig, {2, i + 1 == n ? 5u : kSideInner, 3, 4}, 2, 1, 0, -hx, hx, 0, 1)) out.push_back(std::move(s));
+  }
+}
+
+/* An arch: `segments` blocks between the inner and the outer radius, ProceduralShape's ring_solid cut at every
+ * column. Null, or why it has no solid. */
+const char *local_arch(const Piece &p, std::vector<Solid> &out) {
+  const double outer = std::fabs((double)p.radius), inner = std::max(0.0, (double)p.inner_radius), depth = std::fabs((double)p.height) * 0.5;
+  const double angle = std::min(360.0, (double)p.angle);
+  if (!(outer > 1e-30 && depth > 1e-30 && angle > 1e-6)) return "it has no size";
+  if (!(inner < outer)) return "its inner radius is not less than its outer radius";
+  const bool full = angle >= 359.999, pie = inner <= 1e-9 * outer;
+  const int seg = std::max(std::max(1, std::min(256, p.segments)), (int)std::ceil(angle / 90.0));  // (a block turns a quarter at most: convex)
+  const double rad = 3.141592653589793238463 / 180.0;
+  std::vector<Q2> in_pt((size_t)seg + 1), out_pt((size_t)seg + 1);
+  for (int i = 0; i <= seg; i++) {
+    const double t = (90.0 - angle * 0.5 + angle * (double)i / (double)seg) * rad;
+    in_pt[(size_t)i] = {inner * std::cos(t), inner * std::sin(t)}, out_pt[(size_t)i] = {outer * std::cos(t), outer * std::sin(t)};
+  }
+  if (full) in_pt[(size_t)seg] = in_pt[0], out_pt[(size_t)seg] = out_pt[0];  // (a ring closes on its first column to the bit)
+  for (int i = 0; i < seg; i++) {
+    const uint32_t first = !full && i == 0 ? 4u : kSideInner, last = !full && i + 1 == seg ? 5u : kSideInner;
+    Solid s;
+    const size_t a = (size_t)i, b = (size_t)i + 1;
+    const bool made = pie ? prism(s, {Q2{0, 0}, out_pt[a], out_pt[b]}, {first, 1, last}, 0, 1, 2, -depth, depth, 2, 3)
+                          : prism(s, {in_pt[a], out_pt[a], out_pt[b], in_pt[b]}, {first, 1, last, 0}, 0, 1, 2, -depth, depth, 2, 3);
+    if (made) out.push_back(std::move(s));
+  }
+  return out.empty() ? "it has no size" : nullptr;
+}
+
+/* An outline tidied: its corners anticlockwise as (x, z), none at its neighbour's place or in a line with its
+ * neighbours; `side[k]`: the piece's side over the segment from corner k to the next (2 + that segment's place in the
+ * piece's own list). Null, or why the outline can't be used. */
+const char *tidy_outline(const Piece &p, std::vector<Q2> &ring, std::vector<uint32_t> &side) {
+  if (p.outline.size() > 256) return "its outline has more than 256 corners";
+  for (uint32_t i = 0; i < p.outline.size(); i++) ring.push_back({(double)p.outline[i].x, (double)p.outline[i].y}), side.push_back(2 + i);
+  if (ring.size() < 3) return "its outline has fewer than three corners";
+  Q2 lo = ring[0], hi = ring[0];
+  for (const Q2 &q : ring) lo.a = std::min(lo.a, q.a), lo.b = std::min(lo.b, q.b), hi.a = std::max(hi.a, q.a), hi.b = std::max(hi.b, q.b);
+  const double size = std::sqrt((hi.a - lo.a) * (hi.a - lo.a) + (hi.b - lo.b) * (hi.b - lo.b));
+  if (!(size > 1e-30)) return "it has no size";
+  for (bool went = true; went && ring.size() >= 3;) {
+    went = false;
+    for (size_t i = 0; i < ring.size() && !went; i++) {
+      const size_t n = ring.size();
+      const Q2 before = ring[(i + n - 1) % n], here = ring[i], after = ring[(i + 1) % n];
+      const double step2 = (here.a - before.a) * (here.a - before.a) + (here.b - before.b) * (here.b - before.b);
+      const double span = std::sqrt((after.a - before.a) * (after.a - before.a) + (after.b - before.b) * (after.b - before.b));
+      /* (In a line: nearer its neighbours' line than a millionth of the outline's size - a sliver's worth.) */
+      if (step2 > 1e-12 * size * size && std::fabs(cross_q(before, here, after)) > 1e-6 * size * std::max(span, 1e-6 * size)) continue;
+      ring.erase(ring.begin() + (std::ptrdiff_t)i);
+      side.erase(side.begin() + (std::ptrdiff_t)i);  // (the segment that ended here goes on under its own side)
+      went = true;
+    }
+  }
+  if (ring.size() < 3) return "its outline has no area";
+  double area2 = 0.0;
+  for (size_t i = 1; i + 1 < ring.size(); i++) area2 += cross_q(ring[0], ring[i], ring[i + 1]);
+  if (!(std::fabs(area2) > 1e-9 * size * size)) return "its outline has no area";
+  if (area2 < 0.0) {  // (the other way round: corner k's segment was the one that ended at it)
+    std::reverse(ring.begin(), ring.end());
+    std::reverse(side.begin(), side.end());
+    std::rotate(side.begin(), side.begin() + 1, side.end());
+  }
+  return nullptr;
+}
+
+/* A room's shell round a tidied outline, in the piece's own space: each convex part of the air as a column from the
+ * floor's underside to the ceiling's top, a slab along each segment as thick as the wall, and at each corner that
+ * turns outward what the two slabs leave open (a kite; a corner like a needle is cut off square). The wall is then
+ * evenly thick whatever the outline does, and nothing has to move a polygon outward. Like a box room's, the shell
+ * holds the air, which is cut out of it. Where two of its solids lie against each other they do so corner for
+ * corner (kSideInner): the crisp path joins such faces by rule. */
+void outline_shell(const std::vector<Q2> &ring, const std::vector<uint32_t> &side, const std::vector<std::vector<uint32_t>> &parts, const double inv[12], double half_height,
+                   const Thick &t, std::vector<Solid> &out) {
+  const size_t n = ring.size();
+  const double w0 = -half_height - t.floor * local_per_metre(inv, V3(0, 1, 0)), w1 = half_height + t.ceiling * local_per_metre(inv, V3(0, 1, 0));
+  const bool walled = t.wall > 0.0;
+  if (!walled && !(t.floor > 0.0) && !(t.ceiling > 0.0)) return;
+  for (const std::vector<uint32_t> &part : parts) {
+    std::vector<Q2> fig;
+    std::vector<uint32_t> edge;
+    for (size_t j = 0; j < part.size(); j++) {
+      const uint32_t a = part[j], b = part[(j + 1) % part.size()];
+      fig.push_back(ring[a]);
+      edge.push_back(b == (a + 1) % n && !walled ? kSideShell + side[a] : kSideInner);  // (against another part, or against its segment's slab)
+    }
+    Solid s;
+    if (prism(s, fig, edge, 0, 2, 1, w0, w1, kSideShell + 0, kSideShell + 1)) out.push_back(std::move(s));
+  }
+  if (!walled) return;
+  std::vector<Q2> along(n), outward(n), far_a(n), far_b(n);  // (far_a, far_b: a segment's two ends moved out by its wall)
+  std::vector<double> thick(n);
+  for (size_t k = 0; k < n; k++) {
+    const Q2 a = ring[k], b = ring[(k + 1) % n];
+    const double len = std::sqrt((b.a - a.a) * (b.a - a.a) + (b.b - a.b) * (b.b - a.b));
+    along[k] = {(b.a - a.a) / len, (b.b - a.b) / len};
+    outward[k] = {along[k].b, -along[k].a};
+    thick[k] = t.wall * local_per_metre(inv, V3(outward[k].a, 0, outward[k].b));
+    const Q2 o{outward[k].a * thick[k], outward[k].b * thick[k]};
+    far_a[k] = {a.a + o.a, a.b + o.b}, far_b[k] = {b.a + o.a, b.b + o.b};
+  }
+  auto turns_out = [&](size_t k) {  // (at corner k, where segment k begins)
+    const size_t j = (k + n - 1) % n;
+    return along[j].a * along[k].b - along[j].b * along[k].a > 1e-9;
+  };
+  for (size_t k = 0; k < n; k++) {
+    /* An end at a corner that turns outward lies against that corner's filler; one at a corner that turns inward
+     * lies in the next segment's slab or in the room's own air, and shows only where the two walls differ in
+     * thickness (an uneven scale). */
+    const uint32_t outside = kSideShell + side[k];
+    Solid s;
+    if (prism(s, {ring[k], ring[(k + 1) % n], far_b[k], far_a[k]}, {kSideInner, turns_out((k + 1) % n) ? kSideInner : outside, outside, turns_out(k) ? kSideInner : outside}, 0, 2, 1, w0,
+              w1, kSideShell + 0, kSideShell + 1))
+      out.push_back(std::move(s));
+  }
+  for (size_t k = 0; k < n; k++) {
+    if (!turns_out(k)) continue;  // (straight on, or turned inward: the two slabs meet or overlap)
+    const size_t j = (k + n - 1) % n;  // (the segment that ends at corner k)
+    const double turn = along[j].a * along[k].b - along[j].b * along[k].a;
+    const Q2 v = ring[k], p = far_b[j], q = far_a[k];
+    /* Where the two slabs' outer faces meet: p + along[j] * u. */
+    const double u = ((q.a - p.a) * along[k].b - (q.b - p.b) * along[k].a) / turn;
+    const Q2 mitre{p.a + along[j].a * u, p.b + along[j].b * u};
+    const double reach = std::sqrt((mitre.a - v.a) * (mitre.a - v.a) + (mitre.b - v.b) * (mitre.b - v.b));
+    Solid s;
+    const bool sharp = !(reach <= 4.0 * std::max(thick[j], thick[k]));
+    const bool made = sharp ? prism(s, {v, p, q}, {kSideInner, kSideShell + side[k], kSideInner}, 0, 2, 1, w0, w1, kSideShell + 0, kSideShell + 1)
+                            : prism(s, {v, p, mitre, q}, {kSideInner, kSideShell + side[j], kSideShell + side[k], kSideInner}, 0, 2, 1, w0, w1, kSideShell + 0, kSideShell + 1);
+    if (made) out.push_back(std::move(s));
+  }
+}
+
+/* Thicknesses a mesh's 32-bit positions could not hold where the room lies count as none: a wall a few steps thick
+ * would be two faces on each other. */
+Thick thick_enough(const Piece &p, const std::vector<Solid> &air) {
+  double far = 0.0;
+  for (const Solid &s : air)
+    for (int a = 0; a < 3; a++) far = std::max(far, std::max(std::fabs(s.lo[a]), std::fabs(s.hi[a])));
+  auto enough = [&](double t) { return t >= 8.0 * kFloatStep * far ? t : 0.0; };
+  return {enough(safe_thickness(p.wall)), enough(safe_thickness(p.floor)), p.open_top ? 0.0 : enough(safe_thickness(p.ceiling))};
+}
+
+/* A wedge, stairs, an arch or an outline as its solids in the Blockout's space - a room's shell first, then its air -
+ * or why it can't be used. */
+const char *make_parts(const Piece &p, std::vector<Solid> &out, bool &bare) {
+  double m[12], inv[12], stretch[3], thick[3];
+  if (!placement(p, m, inv, stretch, thick)) return "its matrix flattens it";
+  const bool room = p.room && (p.shape == Shape::Wedge || p.shape == Shape::Outline);
+  std::vector<Solid> body, shell;
+  std::vector<Q2> ring;
+  std::vector<uint32_t> side;
+  std::vector<std::vector<uint32_t>> parts;
+  const double half_height = std::fabs((double)p.height) * 0.5;
+  if (p.shape == Shape::Wedge) {
+    Solid s;
+    if (local_wedge(p, inv, nullptr, s)) body.push_back(std::move(s));
+  }
+  else if (p.shape == Shape::Stairs) local_stairs(p, body);
+  else if (p.shape == Shape::Arch) {
+    if (const char *problem = local_arch(p, body)) return problem;
+  }
+  else {
+    if (const char *problem = tidy_outline(p, ring, side)) return problem;
+    if (!(half_height > 1e-30)) return "it has no size";
+    std::vector<double> xy;
+    for (const Q2 &q : ring) xy.push_back(q.a), xy.push_back(q.b);
+    if (!convex_parts(xy, parts)) return "its outline crosses itself";
+    for (const std::vector<uint32_t> &part : parts) {
+      std::vector<Q2> fig;
+      std::vector<uint32_t> edge;
+      for (size_t j = 0; j < part.size(); j++) {
+        const uint32_t a = part[j], b = part[(j + 1) % part.size()];
+        fig.push_back(ring[a]);
+        edge.push_back(b == (a + 1) % ring.size() ? side[a] : kSideInner);
+      }
+      Solid s;
+      if (prism(s, fig, edge, 0, 2, 1, -half_height, half_height, 0, 1)) body.push_back(std::move(s));
+    }
+  }
+  if (body.empty()) return "it has no size";
+  if (!room && p.op == Op::Intersect && body.size() > 1) return "an Intersect piece has to be one convex shape: stairs, an arch and an outline with a corner turned inward are several";
+  for (Solid &s : body) {
+    std::memcpy(s.inv, inv, sizeof(s.inv));
+    if (const char *problem = place_solid(p, s, m, stretch, thick)) return problem;
+    s.role = room ? Role::Air : p.op == Op::Subtract ? Role::Subtract : p.op == Op::Intersect ? Role::Intersect : Role::Add;
+    s.subtract = room || p.op == Op::Subtract;
+  }
+  if (room) {
+    const Thick t = thick_enough(p, body);
+    if (p.shape == Shape::Wedge) {
+      Solid s;
+      if ((t.wall > 0.0 || t.floor > 0.0 || t.ceiling > 0.0) && local_wedge(p, inv, &t, s)) s.side_base = kSideShell, shell.push_back(std::move(s));
+    }
+    else outline_shell(ring, side, parts, inv, half_height, t, shell);
+    bare = shell.empty();
+    for (Solid &s : shell) {
+      std::memcpy(s.inv, inv, sizeof(s.inv));
+      if (const char *problem = place_solid(p, s, m, stretch, thick)) return problem;
+      s.role = p.keep_walls ? Role::KeepShell : Role::MergeShell;
+      out.push_back(std::move(s));
+    }
+  }
+  for (Solid &s : body) out.push_back(std::move(s));
+  return nullptr;
+}
+
+/* A piece as its solids in the Blockout's space - one, a room's shell and then its air, or the several convex parts
+ * of stairs, an arch or an outline (a room's shell parts first, then its air's) - or why it can't be used. `bare`: a
+ * room with no thickness anywhere (it has no matter of its own; its air still clears Merge rooms). */
+/* A mesh as a piece: one solid, never a room, never rounded. */
+const char *make_mesh(const Piece &p, std::vector<Solid> &out) {
+  if (p.op == Op::Intersect) return "an Intersect piece has to be one convex shape";
+  double m[12], stretch[3], thick[3];
+  Solid s;
+  if (!placement(p, m, s.inv, stretch, thick)) return "its matrix flattens it";
+  if (const char *problem = mesh_solid(p, m, s)) return problem;
+  s.scale_min = std::min(stretch[0], std::min(stretch[1], stretch[2]));
+  s.role = p.op == Op::Subtract ? Role::Subtract : Role::Add;
+  s.subtract = p.op == Op::Subtract;
+  out.push_back(std::move(s));
+  return nullptr;
+}
+
 const char *make_solids(const Piece &p, std::vector<Solid> &out, bool &bare) {
   bare = false;
   if (!finite_piece(p)) return "a number of it is not finite";
+  if (p.shape == Shape::Mesh) return make_mesh(p, out);
+  if (p.shape != Shape::Box && p.shape != Shape::Cylinder && p.shape != Shape::Sphere) return make_parts(p, out, bare);
   Solid s;
   const bool sized = p.shape == Shape::Box ? local_box(p, s) : p.shape == Shape::Cylinder ? local_cylinder(p, s) : local_sphere(p, s);
   if (!sized) return "it has no size";
@@ -322,7 +659,7 @@ const char *make_solids(const Piece &p, std::vector<Solid> &out, bool &bare) {
 
 /* Solids whose bounds touch or overlap (grown by their Blend radius), in groups: each group's indices ascending, the
  * groups by their first index. */
-void cluster_solids(const std::vector<Solid> &solids, std::vector<std::vector<uint32_t>> &groups) {
+void cluster_solids(const std::vector<Solid> &solids, const std::vector<uint32_t> &piece_of, std::vector<std::vector<uint32_t>> &groups) {
   const size_t n = solids.size();
   std::vector<V3> lo(n), hi(n);
   for (size_t i = 0; i < n; i++) {
@@ -336,6 +673,8 @@ void cluster_solids(const std::vector<Solid> &solids, std::vector<std::vector<ui
     while (parent[v] != v) v = parent[v] = parent[parent[v]];
     return v;
   };
+  for (uint32_t i = 1; i < n; i++)  // (one piece's solids are one cluster's, whatever their bounds: a room's air is found beside its shell)
+    if (piece_of[i] == piece_of[i - 1]) parent[i] = find(i - 1);
   for (size_t oi = 0; oi < n; oi++) {
     const uint32_t a = order[oi];
     for (size_t oj = oi + 1; oj < n && lo[order[oj]].x <= hi[a].x; oj++) {
@@ -438,8 +777,7 @@ void square_up(V3 &n) {
   }
   if (small != 2) return;
   const double way = n[along] < 0.0 ? -1.0 : 1.0;
-  n = V3(0, 0, 0);
-  n[along] = way;
+  n = V3(along == 0 ? way : 0.0, along == 1 ? way : 0.0, along == 2 ? way : 0.0);
 }
 
 void assign_planes(Cluster &c) {
@@ -457,9 +795,10 @@ void assign_planes(Cluster &c) {
       bool unsure = false;
       int8_t sign = 1;
       if (written_reversed(n, unsure)) p = {-n, -p.d}, sign = -1;
-      uint32_t id = table.find(p, si);
+      const uint32_t joiner = s.mesh ? UINT32_MAX - 1 : si;  // (a mesh's triangles of one flat face share their plane)
+      uint32_t id = table.find(p, joiner);
       if (id == UINT32_MAX && unsure) {  // (written the other way by a face a hair off: look there too)
-        id = table.find(Plane{-p.n, -p.d}, si);
+        id = table.find(Plane{-p.n, -p.d}, joiner);
         if (id != UINT32_MAX) sign = (int8_t)-sign;
       }
       if (id == UINT32_MAX) id = table.add(p, si);
@@ -467,10 +806,15 @@ void assign_planes(Cluster &c) {
       s.face_plane[f] = id, s.face_sign[f] = sign;
     }
   }
-  /* How many solids use each plane (a solid has one face in a plane at most). */
+  /* How many solids use each plane (a convex solid has one face in a plane at most; a mesh is counted once). */
   c.plane_users.assign(c.planes.size(), 0);
-  for (const Solid &s : c.solids)
-    for (uint32_t p : s.face_plane) c.plane_users[p]++;
+  std::vector<uint32_t> counted(c.planes.size(), UINT32_MAX);
+  for (uint32_t si = 0; si < c.solids.size(); si++)
+    for (uint32_t p : c.solids[si].face_plane) {
+      if (counted[p] == si) continue;
+      counted[p] = si;
+      c.plane_users[p]++;
+    }
 }
 
 /* Each solid's corners put on its faces' planes from the table, so faces in one plane have their corners in it to
@@ -478,6 +822,8 @@ void assign_planes(Cluster &c) {
 void snap_to_planes(Cluster &c) {
   std::vector<const Plane *> at;
   for (Solid &s : c.solids) {
+    s.raw = s.verts;
+    if (s.mesh) continue;  // (its corners are the mesh's: many faces meet at one, and not in a point of their planes)
     std::vector<uint32_t> &start = s.corner_start, &faces = s.corner_faces;
     start.assign(s.verts.size() + 1, 0);
     for (uint32_t v : s.face_verts) start[v + 1]++;
@@ -515,6 +861,11 @@ void finish_cluster(Cluster &c) {
   c.lo = c.solids[0].lo, c.hi = c.solids[0].hi;
   c.blended = false;
   c.trims = 0;
+  for (const Solid &s : c.solids) c.meshes = c.meshes || s.mesh, c.open_mesh = c.open_mesh || (s.mesh && !s.closed);
+  /* (A blended join is a smooth minimum of distances, asked at every grid point; a mesh has no cheap distance. Beside
+   * a mesh piece the Blend radii are not read: build() says so.) */
+  if (c.meshes)
+    for (Solid &s : c.solids) s.blend = 0.0;
   for (const Solid &s : c.solids) {
     c.blended = c.blended || s.blend > 0.0;
     c.trims += s.role == Role::Intersect;
@@ -558,11 +909,13 @@ bool same_piece(const Piece &a, const Piece &b) {
          std::memcmp(&a.size, &b.size, sizeof(Vec3)) == 0 && std::memcmp(&a.radius, &b.radius, 4) == 0 && std::memcmp(&a.height, &b.height, 4) == 0 &&
          std::memcmp(&a.blend, &b.blend, 4) == 0 && std::memcmp(a.to_blockout.m, b.to_blockout.m, sizeof(a.to_blockout.m)) == 0 &&
          a.room == b.room && a.keep_walls == b.keep_walls && a.open_top == b.open_top && std::memcmp(&a.wall, &b.wall, 4) == 0 &&
-         std::memcmp(&a.floor, &b.floor, 4) == 0 && std::memcmp(&a.ceiling, &b.ceiling, 4) == 0;
+         std::memcmp(&a.floor, &b.floor, 4) == 0 && std::memcmp(&a.ceiling, &b.ceiling, 4) == 0 && a.steps == b.steps && a.fill_under == b.fill_under && a.mesh_key == b.mesh_key && !a.mesh == !b.mesh &&
+         std::memcmp(&a.inner_radius, &b.inner_radius, 4) == 0 && std::memcmp(&a.angle, &b.angle, 4) == 0 && a.outline.size() == b.outline.size() &&
+         (a.outline.empty() || std::memcmp(a.outline.data(), b.outline.data(), a.outline.size() * sizeof(Vec2)) == 0);
 }
 
 uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
-  uint64_t h = hash_mix(kFnvBasis, 0x0454u);  // (the kernel's own number: a change to what it builds moves it)
+  uint64_t h = hash_mix(kFnvBasis, 0x0456u);  // (the kernel's own number: a change to what it builds moves it)
   h = mix_float(h, st.cell);
   h = hash_mix(h, (uint64_t)st.path);
   h = hash_mix(h, (uint64_t)st.max_cells);
@@ -571,7 +924,11 @@ uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
     h = hash_mix(h, ((uint64_t)p.shape << 8) | (uint64_t)p.op);
     h = hash_mix(h, ((uint64_t)(uint32_t)p.segments << 32) | (uint32_t)p.rings);
     for (float f : {p.size.x, p.size.y, p.size.z, p.radius, p.height, p.blend, p.wall, p.floor, p.ceiling}) h = mix_float(h, f);
-    h = hash_mix(h, (p.room ? 1u : 0u) | (p.keep_walls ? 2u : 0u) | (p.open_top ? 4u : 0u));
+    h = hash_mix(h, (p.room ? 1u : 0u) | (p.keep_walls ? 2u : 0u) | (p.open_top ? 4u : 0u) | (p.fill_under ? 8u : 0u));
+    h = hash_mix(h, ((uint64_t)(uint32_t)p.steps << 32) | (uint32_t)p.outline.size());
+    for (float f : {p.inner_radius, p.angle}) h = mix_float(h, f);
+    h = hash_mix(h, p.mesh ? p.mesh_key : 0x6e6f6d657368ull);
+    for (const Vec2 &q : p.outline) h = mix_float(mix_float(h, q.x), q.y);
     h = mix_bytes(h, p.to_blockout.m, sizeof(p.to_blockout.m));
   }
   return h;
@@ -579,7 +936,7 @@ uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
 
 Path path_for(const Cluster &c, const Settings &st) {
   if (st.path != Path::Auto) return st.path;
-  return crisp_available() && !c.blended ? Path::Crisp : Path::Field;
+  return crisp_available() && !c.blended && !c.open_mesh ? Path::Crisp : Path::Field;
 }
 
 bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std::atomic<bool> *cancel, std::string &why) {
@@ -587,7 +944,14 @@ bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std
   res.rep.path = path_for(c, st);
   res.rep.pieces = (uint32_t)c.solids.size();
   Soup soup;
-  const bool made = res.rep.path == Path::Crisp ? crisp_soup(c, soup, res.rep, why) : field_soup(c, st, soup, res.rep, cancel, why);
+  bool made = res.rep.path == Path::Crisp ? crisp_soup(c, soup, res.rep, why) : field_soup(c, st, soup, res.rep, cancel, why);
+  /* A mesh Manifold would not take or could not combine (closed, yet crossing itself or pinched): the grid takes
+   * anything - when the path was left to the build. */
+  if (!made && res.rep.path == Path::Crisp && st.path == Path::Auto && c.meshes && !cancelled(cancel)) {
+    why.clear();
+    res.rep.path = Path::Field;
+    made = field_soup(c, st, soup, res.rep, cancel, why);
+  }
   if (!made) return false;
   const double t1 = now_seconds();
   res.rep.faces_in = soup.face_count();
@@ -609,7 +973,8 @@ bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std
     const uint32_t plain = label & ~kBlendLabel;
     const Solid &s = c.solids[c.label_solid[plain]];
     res.face_piece.push_back(s.piece);
-    res.face_side.push_back(label & kBlendLabel ? kSideBlend : s.side_base + s.face_side[c.label_face[plain]]);
+    /* (A curved mesh's faces carry the mark of "no flat side" so that they merge with nothing: they still name the mesh's face.) */
+    res.face_side.push_back((label & kBlendLabel) && !s.mesh ? kSideBlend : s.side_base + s.face_side[c.label_face[plain]]);
   }
   res.face_flat = std::move(polys.flat);
   res.rep.faces_out = res.face_piece.size();
@@ -708,8 +1073,11 @@ void run_jobs(std::vector<Job> &jobs, std::vector<Solid> &solids, const std::vec
 }  // namespace
 
 SideClass side_class(const Piece &piece, uint32_t side) {
-  if (!piece.room) return piece.op == Op::Add ? SideClass::Outside : SideClass::Cut;
+  const bool never_room = piece.shape == Shape::Stairs || piece.shape == Shape::Arch || piece.shape == Shape::Mesh;
+  if (!piece.room || never_room) return piece.op == Op::Add ? SideClass::Outside : SideClass::Cut;
   if (side >= kSideShell) return SideClass::Outside;
+  if (piece.shape == Shape::Wedge) return side == 2 ? SideClass::Floor : side == 3 ? SideClass::Ceiling : SideClass::Wall;
+  if (piece.shape == Shape::Outline) return side == 0 ? SideClass::Floor : side == 1 ? SideClass::Ceiling : SideClass::Wall;
   if (piece.shape == Shape::Box) return side == 2 ? SideClass::Floor : side == 3 ? SideClass::Ceiling : SideClass::Wall;
   if (piece.shape == Shape::Cylinder) return side == 1 ? SideClass::Floor : side == 2 ? SideClass::Ceiling : SideClass::Wall;
   return SideClass::Wall;
@@ -846,6 +1214,16 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
       rep.skipped.push_back({pieces[i].id, problem});
       continue;
     }
+    if (st.path == Path::Crisp && made.size() == 1 && made[0].mesh && !made[0].closed) {
+      rep.skipped.push_back({pieces[i].id, "it is not closed (the crisp path needs a closed mesh)"});
+      continue;
+    }
+    /* (Closed edge by edge, yet pinched - two cubes that share one corner: with the exact path asked for there is no grid to fall
+     * back on, and one such piece must not cost the Blockout its build.) */
+    if (st.path == Path::Crisp && made.size() == 1 && made[0].mesh && !detail::crisp_takes_mesh(made[0])) {
+      rep.skipped.push_back({pieces[i].id, "it is closed, yet not a solid - a corner or an edge pinches it (the exact path cannot take it: Auto and Field can)"});
+      continue;
+    }
     if (bare) rep.notes.push_back({pieces[i].id, "the room has no wall, floor or ceiling thickness: it only clears the rooms it overlaps"});
     else if (pieces[i].room) walled.push_back(i);
     for (Solid &s : made) {
@@ -855,7 +1233,7 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
     }
   }
   std::vector<std::vector<uint32_t>> groups;
-  cluster_solids(solids, groups);
+  cluster_solids(solids, piece_of, groups);
   rep.ms_solids = (now_seconds() - t0) * 1000.0;
 
   /* Each cluster from the cache when its pieces and the settings are the ones it was built from, else built. */
@@ -863,7 +1241,7 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
   for (size_t g = 0; g < groups.size(); g++) {
     Job &job = jobs[g];
     job.solids = std::move(groups[g]);
-    uint32_t last = UINT32_MAX;  // (a room's two solids follow each other)
+    uint32_t last = UINT32_MAX;  // (a piece's solids follow each other)
     for (uint32_t si : job.solids) {
       if (piece_of[si] != last) job.pieces.push_back(pieces[piece_of[si]]);
       last = piece_of[si];
@@ -874,6 +1252,10 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
       job.solid_piece.push_back((uint32_t)job.pieces.size() - 1);
     }
     job.hash = cluster_hash(job.pieces, st);
+    bool beside_mesh = false;
+    for (const Piece &p : job.pieces) beside_mesh = beside_mesh || p.shape == Shape::Mesh;
+    for (const Piece &p : job.pieces)
+      if (beside_mesh && p.shape != Shape::Mesh && p.blend > 0.0f && !p.room) rep.notes.push_back({p.id, "its Blend radius is not read: it touches a mesh piece"});
     if (!cache) continue;
     const auto it = cache->impl->clusters.find(job.hash);
     if (it == cache->impl->clusters.end()) continue;

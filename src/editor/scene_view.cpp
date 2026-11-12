@@ -590,7 +590,7 @@ std::vector<DrawItem> Editor::solid_items(const Scene &s, bool game) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *mf = g.get<MeshFilter>();
-    if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (!mr || !mr->enabled || !mf || !mf->mesh || blockout_uses_as_piece(g)) return;  // (round 480: a Blockout's mesh piece is not drawn)
     if (game ? !mr->show_in_renders : mr->display_as != 0) return;  // wire / bounds: drawn as overlays
     DrawItem it;
     bool editing = !game && edit_mode_ && g.id == edit_obj_;

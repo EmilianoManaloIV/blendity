@@ -51,7 +51,7 @@ uint64_t Editor::lightmap_scene_key() {
   scene_->for_each([&](GameObject &g) {
     if (!g.active_in_hierarchy()) return;
     const auto *mr = g.mesh_renderer();
-    const Mesh *m = mr && mr->enabled && mr->contribute_gi && mr->show_in_renders ? g.evaluated_mesh(1) : nullptr;
+    const Mesh *m = mr && mr->enabled && mr->contribute_gi && mr->show_in_renders && !blockout_uses_as_piece(g) ? g.evaluated_mesh(1) : nullptr;
     if (m) {
       mix(g.id);
       mix(lightmap_hash_of(g, *m));
@@ -302,7 +302,7 @@ void Editor::collect_bake_scene(std::vector<BakeObject> &objects, std::vector<Ba
       lights.back().light.baked_falloff = l->mode != 0;  // (round 425: Unity's built-in pipeline bakes with the legacy falloff)
     }
     auto *mr = g.get<MeshRenderer>();
-    if (!mr || !mr->enabled || !mr->contribute_gi || !mr->show_in_renders) return;
+    if (!mr || !mr->enabled || !mr->contribute_gi || !mr->show_in_renders || blockout_uses_as_piece(g)) return;  // (round 480: a Blockout's mesh piece is not baked)
     const Mesh *raw = g.evaluated_mesh(1);
     if (!raw) return;
     std::shared_ptr<const Mesh> m = g.evaluated_mesh_shared(1);
@@ -871,7 +871,7 @@ bool Editor::probe_volume_box(AABB &out) {
     scene_->for_each([&](GameObject &g) {
       if (!g.active_in_hierarchy()) return;
       auto *mr = g.get<MeshRenderer>();
-      if (!mr || !mr->enabled || !g.evaluated_mesh(1)) return;
+      if (!mr || !mr->enabled || blockout_uses_as_piece(g) || !g.evaluated_mesh(1)) return;
       const AABB b = g.world_bounds();
       all.add(b.min), all.add(b.max);
       if (mr->contribute_gi) gi.add(b.min), gi.add(b.max);
@@ -1068,6 +1068,7 @@ uint64_t Editor::frozen_lighting_key() {
     if (!g.active_in_hierarchy()) return;
     const auto *mr = g.get<MeshRenderer>();
     const Light *l = g.get<Light>();
+    if (mr && blockout_uses_as_piece(g)) mr = nullptr;  // (round 480: a Blockout's mesh piece is no part of the baked scene)
     if (!(mr && mr->enabled) && !(l && l->enabled)) return;
     mix(&g.id, 8);
     mix(g.world_matrix().m, sizeof(float) * 16);

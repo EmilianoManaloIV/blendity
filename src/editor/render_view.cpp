@@ -186,7 +186,7 @@ void Editor::prebuild_render_meshes(const Scene &s, bool game) {
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *mf = g.get<MeshFilter>();
-    if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (!mr || !mr->enabled || !mf || !mf->mesh || blockout_uses_as_piece(g)) return;  // (round 480: a Blockout's mesh piece is not drawn)
     if (game ? !mr->show_in_renders : mr->display_as != 0) return;
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
     const Mesh *m = g.evaluated_mesh(editing ? 2 : game ? 1 : 0);
@@ -475,7 +475,7 @@ std::vector<DrawItem> Editor::collect_items_build(bool game, bool want_tangents,
     if (!g.active_in_hierarchy()) return;
     auto *mr = g.get<MeshRenderer>();
     auto *mf = g.get<MeshFilter>();
-    if (!mr || !mr->enabled || !mf || !mf->mesh) return;
+    if (!mr || !mr->enabled || !mf || !mf->mesh || blockout_uses_as_piece(g)) return;  // (round 480: a Blockout's mesh piece is not drawn)
     if (game ? !mr->show_in_renders : mr->display_as != 0) return;  // wire / bounds: drawn as overlays
     bool editing = !game && edit_mode_ && g.id == edit_obj_;
     /* Edit Mode shows the modifiers set to Show in Edit Mode over the cage; renders use Show in Renders. */
@@ -848,7 +848,7 @@ uint64_t Editor::object_render_hash(GameObject &g, bool memo) {
   if (mr) {
     flags = 1ull << 63 | (uint64_t)mr->enabled | (uint64_t)mr->show_wireframe << 1 | (uint64_t)mr->cast_shadows << 2 |
             (uint64_t)mr->receive_shadows << 3 | (uint64_t)mr->show_in_renders << 4 | (uint64_t)(uint32_t)mr->display_as << 8 |
-            (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41;
+            (uint64_t)mr->materials.size() << 16 | (uint64_t)mr->contribute_gi << 40 | (uint64_t)(uint32_t)mr->receive_gi << 41 | (uint64_t)blockout_uses_as_piece(g) << 50;  // (round 480: a Blockout's mesh piece drops out of the views)
     if (mr->enabled) {
       materials_key = kFnvBasis;
       for (auto &mp : mr->materials) {  // a material's version is an input of every object using it

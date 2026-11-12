@@ -120,13 +120,44 @@ struct Event {
   double t = 0.0;
   uint32_t k = 0, face = 0;
   bool enter = false;
+  bool guess = false;  // a mesh that is not closed: no triangle is here - the surface is the lines' votes, flat in no plane
 };
 
 /* What exit_label works with, kept by its caller from one edge to the next. */
 struct ExitScratch {
   std::vector<Event> events;
   std::vector<uint8_t> in;
+  std::vector<MeshCrossing> cross, lines;
 };
+
+double along(const V3 &v, int a) { return a == 0 ? v.x : a == 1 ? v.y : v.z; }
+
+/* A grid edge and a mesh solid: whether `a` is inside it, and - when the two ends are on different sides - where the
+ * edge passes its surface and by which triangle: the first it meets that faces the right way, else the first, else
+ * (the lines' votes put the surface here, no triangle does) the triangle nearest the edge's middle. */
+bool mesh_span(const Solid &s, V3 a, V3 b, ExitScratch &scratch, Event &ev) {
+  const bool in_a = mesh_inside(s, a, scratch.lines), in_b = mesh_inside(s, b, scratch.lines);
+  ev.enter = !in_a;
+  ev.t = -1.0;
+  if (in_a == in_b) return in_a;
+  const int axis = a.x != b.x ? 0 : a.y != b.y ? 1 : 2;
+  const double from = along(a, axis), to = along(b, axis), way = to > from ? 1.0 : -1.0;
+  mesh_crossings(s, axis, along(a, (axis + 1) % 3), along(a, (axis + 2) % 3), scratch.cross);
+  bool right = false;
+  for (const MeshCrossing &c : scratch.cross) {
+    const double t = (c.at - from) / (to - from);
+    if (!(t >= 0.0 && t <= 1.0)) continue;
+    const bool faces = ((double)c.way * way > 0.0) == in_a;  // (leaving: the triangle faces the way we go)
+    if (ev.t >= 0.0 && (right && !faces)) continue;
+    if (ev.t >= 0.0 && right == faces && t >= ev.t) continue;
+    ev.t = t, ev.face = c.face, right = faces;
+  }
+  if (ev.t < 0.0) {
+    double d = 0.0;
+    ev.t = 0.5, ev.face = mesh_nearest_face(s, (a + b) * 0.5, d, scratch.lines), ev.guess = true;
+  }
+  return in_a;
+}
 
 /* The side the surface shows where the edge from `a` (inside the result) to `b` (outside) first leaves the result.
  * Every solid is convex, so the edge is in it for one stretch: the edge's ends of those stretches are walked in
@@ -142,6 +173,13 @@ uint32_t exit_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 a, V
   in.assign(cand.size(), 0);
   for (uint32_t k = 0; k < cand.size(); k++) {
     const Solid &s = c.solids[cand[k]];
+    if (s.mesh) {
+      Event ev;
+      in[k] = mesh_span(s, a, b, scratch, ev) ? 1 : 0;
+      ev.k = k;
+      if (ev.t >= 0.0) events.push_back(ev);
+      continue;
+    }
     Span sp;
     if (!span_of(c, s, a, b, sp)) continue;
     if (sp.in == kNone) in[k] = 1;
@@ -168,7 +206,7 @@ uint32_t exit_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 a, V
       const bool alone = in_result(c, cand.data(), cand.size(), in.data());
       in[events[e].k] = events[e].enter ? 1 : 0;
       const int rank = (alone ? 4 : 0) + (s.subtract ? 2 : s.role == Role::Intersect ? 1 : 0);  // (a cut, then an Intersect piece's side - as the crisp path, which moves that side in - then a solid's that adds)
-      if (rank > best_rank) best_rank = rank, label = s.label_base + events[e].face;
+      if (rank > best_rank) best_rank = rank, label = (s.label_base + events[e].face) | (events[e].guess ? kBlendLabel : 0u);
     }
     at = events[i].t;
     return label;
@@ -182,18 +220,22 @@ uint32_t exit_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 a, V
  * side, whichever way the quad faces: the quads then join that side's region, and the region's corners are worked
  * out from the planes, so the filled point leaves no trace. (Sides chosen quad by quad, by the way each faces, were
  * tried: they cut the place into regions that meet nowhere.) */
-uint32_t nearest_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 p) {
+uint32_t nearest_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 p, ExitScratch &scratch) {
   double sub_best = -1e300, out_best = 1e300, in_best = -1e300, trim_best = 1e300;
   uint32_t sub_label = kNone, out_label = kNone, in_label = kNone, trim_label = kNone;
   for (uint32_t si : cand) {
     const Solid &s = c.solids[si];
     double m = -1e300;
     uint32_t fm = 0;
-    for (uint32_t f = 0; f < s.face_count(); f++) {
+    if (s.mesh) {  // (how far its nearest triangle is, below 0 inside)
+      fm = mesh_nearest_face(s, p, m, scratch.lines);
+      if (mesh_inside(s, p, scratch.lines)) m = -m;
+    }
+    for (uint32_t f = 0; f < s.face_count() && !s.mesh; f++) {
       const double v = (double)s.face_sign[f] * c.planes[s.face_plane[f]].value(p);
       if (v > m) m = v, fm = f;
     }
-    const uint32_t label = s.label_base + fm;
+    const uint32_t label = (s.label_base + fm) | (s.mesh && !s.closed ? kBlendLabel : 0u);  // (an open mesh: maybe where it has no face)
     if (s.role == Role::Intersect) {
       if (m > 0.0 && m < trim_best) trim_best = m, trim_label = label;
       continue;
@@ -258,9 +300,13 @@ bool inside_blended(const Cluster &c, const std::vector<uint32_t> &cand, V3 x) {
     const Solid &s = c.solids[cand[k]];
     if (s.role == Role::MergeShell) merge = std::min(merge, solid_distance(c, s, x));
     if (s.role == Role::Air) air = std::min(air, solid_distance(c, s, x));
-    if (s.role == Role::KeepShell) {
-      const bool has_air = k + 1 < cand.size() && cand[k + 1] == cand[k] + 1;
-      f = std::min(f, less_air(solid_distance(c, s, x), has_air ? solid_distance(c, c.solids[cand[k + 1]], x) : 1e300));
+    if (s.role == Role::KeepShell && !(k > 0 && c.solids[cand[k - 1]].piece == s.piece)) {  // (once a Keep room, at the first of its solids: its shell's, then its own air's)
+      double shell = 1e300, own = 1e300;
+      for (size_t j = k; j < cand.size() && c.solids[cand[j]].piece == s.piece; j++) {
+        const Solid &part = c.solids[cand[j]];
+        (part.role == Role::Air ? own : shell) = std::min(part.role == Role::Air ? own : shell, solid_distance(c, part, x));
+      }
+      f = std::min(f, less_air(shell, own));
     }
     if (s.role == Role::Add && !(s.blend > 0.0)) f = std::min(f, solid_distance(c, s, x));
   }
@@ -347,6 +393,7 @@ struct Grid {
 
   void candidates(const Brick &br, int upto, std::vector<uint32_t> &cand) const;
   void mark_face(const Solid &s, size_t f);
+  void mark_bounds(const Solid &s);
   bool mark_surface();
   void close_over(size_t from);
   void link(size_t from);
@@ -459,9 +506,23 @@ void Grid::mark_face(const Solid &s, size_t f) {
   }
 }
 
+/* Every brick the solid's bounds reach, a cell's margin around them. For a mesh that is not closed: where it has no
+ * face the lines' votes still end its inside somewhere, and that surface lies anywhere within its bounds. */
+void Grid::mark_bounds(const Solid &s) {
+  int b0[3], b1[3];
+  const double lo[3] = {s.lo.x, s.lo.y, s.lo.z}, hi[3] = {s.hi.x, s.hi.y, s.hi.z};
+  for (int a = 0; a < 3; a++) b0[a] = floor_div8(cell_of(a, lo[a] - h)), b1[a] = floor_div8(cell_of(a, hi[a] + h));
+  for (int bz = b0[2]; bz <= b1[2]; bz++)
+    for (int by = b0[1]; by <= b1[1]; by++) {
+      if (bricks.size() > brick_cap || cancelled(cancel)) return;
+      for (int bx = b0[0]; bx <= b1[0]; bx++) bricks[ensure(bx, by, bz)].marked = true;
+    }
+}
+
 /* False when the bricks passed the budget (the cell is too fine for the cluster) or the call was cancelled. */
 bool Grid::mark_surface() {
   for (const Solid &s : c.solids) {
+    if (s.mesh && !s.closed) mark_bounds(s);
     for (size_t f = 0; f < s.face_count(); f++) mark_face(s, f);
     if (bricks.size() > brick_cap || cancelled(cancel)) return false;
   }
@@ -499,12 +560,12 @@ void Grid::sides(Brick &br) const {
     for (int i = 0; i < 8; i++) p[a][i] = coord(a, (int64_t)br.b[a] * 8 + i);
     centre[a] = 0.5 * (p[a][0] + p[a][7]), half[a] = 0.5 * (p[a][7] - p[a][0]);
   }
-  uint64_t add[8] = {}, sub[8] = {}, merge[8] = {}, air[8] = {}, kept[8] = {}, held[8] = {}, trim[8];
+  uint64_t add[8] = {}, sub[8] = {}, merge[8] = {}, air[8] = {}, kept[8] = {}, held[8] = {}, own_air[8] = {}, trim[8];
   for (uint64_t &word : trim) word = ~0ull;
-  uint32_t held_solid = kNone, trims = 0;  // (a Keep room's shell waits for its air: the next solid)
-  auto keep_held = [&](const uint64_t *own_air) {
-    for (int i = 0; i < 8; i++) kept[i] |= held[i] & ~(own_air ? own_air[i] : 0ull);
-    held_solid = kNone;
+  uint32_t held_piece = kNone, trims = 0;  // (a Keep room's shell waits for its own air: its piece's solids that follow)
+  auto keep_held = [&] {
+    for (int i = 0; i < 8; i++) kept[i] |= held[i] & ~own_air[i], held[i] = own_air[i] = 0ull;
+    held_piece = kNone;
   };
   br.sided = true;
   if (c.blended) {
@@ -515,11 +576,12 @@ void Grid::sides(Brick &br) const {
   }
   for (uint32_t si : cand) {
     const Solid &s = c.solids[si];
-    if (held_solid != kNone && si != held_solid + 1) keep_held(nullptr);
+    if (held_piece != kNone && s.piece != held_piece) keep_held();
     uint64_t in[8];
     for (uint64_t &word : in) word = ~0ull;
     bool misses = false;
-    for (uint32_t f = 0; f < s.face_count() && !misses; f++) {
+    if (s.mesh) mesh_inside_brick(s, p[0], p[1], p[2], in);
+    for (uint32_t f = 0; f < s.face_count() && !misses && !s.mesh; f++) {
       const Plane &pl = c.planes[s.face_plane[f]];
       const double sg = (double)s.face_sign[f];
       const double v = sg * (pl.n.x * centre[0] + pl.n.y * centre[1] + pl.n.z * centre[2] - pl.d);
@@ -533,17 +595,17 @@ void Grid::sides(Brick &br) const {
     }
     if (misses)
       for (uint64_t &word : in) word = 0;
-    if (s.role == Role::Air && held_solid != kNone) keep_held(in);
+    if (s.role == Role::Air && held_piece == s.piece)
+      for (int i = 0; i < 8; i++) own_air[i] |= in[i];
     if (s.role == Role::Intersect) trims++;
-    if (s.role == Role::KeepShell) held_solid = si;
+    if (s.role == Role::KeepShell) held_piece = s.piece;
     uint64_t *into = s.role == Role::Add ? add : s.role == Role::Subtract ? sub : s.role == Role::MergeShell ? merge : s.role == Role::Air ? air : s.role == Role::KeepShell ? held : nullptr;
     for (int i = 0; i < 8; i++) {
       if (s.role == Role::Intersect) trim[i] &= in[i];
-      else if (s.role == Role::KeepShell) into[i] = in[i];
       else into[i] |= in[i];
     }
   }
-  if (held_solid != kNone) keep_held(nullptr);
+  if (held_piece != kNone) keep_held();
   /* The build order (blockout.h): an Intersect solid whose bounds miss the brick is not among the candidates, and
    * nothing here is inside it. */
   for (int i = 0; i < 8; i++) br.inside[i] = trims == c.trims ? (((merge[i] & ~air[i]) | kept[i] | add[i]) & ~sub[i]) & trim[i] : 0ull;
@@ -764,11 +826,12 @@ void Grid::emit(Brick &br, Soup &soup, std::vector<float> &cross) {
         const bool filled = owner && bit(owner->forced, (uint32_t)(in_l[0] + 8 * in_l[1] + 64 * in_l[2]));
         double t = 0.5;
         if (!filled) label = exit_label(c, cand, a, b, t, scratch);
-        if (label == kNone) label = nearest_label(c, cand, a), t = 0.5;
+        if (label == kNone) label = nearest_label(c, cand, a, scratch), t = 0.5;
         t = std::max(0.0, std::min(1.0, t));
         cross[q] = (float)(lower_inside ? t : 1.0 - t);
       }
       if (label == kNone) label = 0;
+      if (!c.solids[c.label_solid[label & ~kBlendLabel]].flat) label |= kBlendLabel;  // (a curved mesh's faces merge with nothing, and keep the grid's own points)
       soup.label[q] = label;
       soup.key[q] = label & kBlendLabel ? kNoMerge : face_key(c, label);
     }
