@@ -717,6 +717,100 @@ SideClass side_class(const Piece &piece, uint32_t side) {
 
 namespace {
 
+/* A face of some piece that lies at a point of the result. Among several, a room's air answers first (its face is seen from
+ * inside the room: the wall two rooms share is, from inside one of them, that room's wall - not the other's shell, which
+ * ends in the same plane), then matter's own face, then a piece that trims, then a piece that cuts (a cutter that stands on
+ * a slab has a face in the slab's top too, and cut nothing there); then the nearer plane. */
+struct FaceAt {
+  bool found = false;
+  int rank = 0;
+  double dist = 0.0;
+  uint32_t side = 0;
+  bool better(const FaceAt &o) const { return !o.found || rank < o.rank || (rank == o.rank && dist < o.dist); }
+};
+
+int owner_rank(const Solid &s) {
+  if (s.role == Role::Air) return 0;
+  if (s.role == Role::Intersect) return 2;
+  return s.role == Role::Subtract ? 3 : 1;
+}
+
+/* Whether `x` lies within face `f` of the solid, whose unit normal is `fn`. Faces here are convex. */
+bool in_face(const Solid &s, size_t f, V3 fn, V3 x, double tol) {
+  const uint32_t b = s.face_offsets[f], count = s.face_offsets[f + 1] - b;
+  for (uint32_t i = 0; i < count; i++) {
+    const V3 p = s.verts[s.face_verts[b + i]], q = s.verts[s.face_verts[b + (i + 1) % count]];
+    if (dot(cross(q - p, x - p), fn) < -tol * length(q - p)) return false;
+  }
+  return true;
+}
+
+/* The solid's face at `x` that the result would show looking along `n` (a solid that takes away shows its faces from the
+ * back), when it is better than `best`. `tol` is what the point itself is good for - not the solid's size: a ground a
+ * kilometre wide a hand below a slab's top is not at the point. */
+void solid_face_at(const Solid &s, V3 x, V3 n, double tol, FaceAt &best) {
+  if (x.x < s.lo.x - tol || x.y < s.lo.y - tol || x.z < s.lo.z - tol || x.x > s.hi.x + tol || x.y > s.hi.y + tol || x.z > s.hi.z + tol) return;
+  FaceAt at;
+  at.found = true, at.rank = owner_rank(s);
+  for (size_t f = 0; f < s.face_count(); f++) {
+    V3 fn = newell(s, f);
+    const double len = length(fn);
+    if (!(len > 0.0)) continue;
+    fn = fn * (1.0 / len);
+    at.dist = std::fabs(dot(fn, x - face_centre(s, f)));
+    if (dot(fn, n) * (s.subtract ? -1.0 : 1.0) < 0.99 || at.dist > tol || !at.better(best) || !in_face(s, f, fn, x, tol)) continue;
+    at.side = s.side_base + s.face_side[f];
+    best = at;
+  }
+}
+
+}  // namespace
+
+struct FaceOwners::Impl {
+  std::vector<uint64_t> ids;               // the pieces that have solids
+  std::vector<std::vector<Solid>> solids;  // and theirs
+};
+
+FaceOwners::FaceOwners(const std::vector<Piece> &pieces) : impl_(new Impl) {
+  for (const Piece &p : pieces) {
+    std::vector<Solid> solids;
+    bool bare = false;
+    if (make_solids(p, solids, bare)) continue;  // (a piece the build left out has no face to own)
+    impl_->ids.push_back(p.id);
+    impl_->solids.push_back(std::move(solids));
+  }
+}
+
+FaceOwners::~FaceOwners() = default;
+
+bool FaceOwners::at(Vec3 point, Vec3 normal, uint64_t &piece, uint32_t &side) const {
+  const V3 x((double)point.x, (double)point.y, (double)point.z);
+  V3 n((double)normal.x, (double)normal.y, (double)normal.z);
+  const double len = length(n);
+  if (!finite_bits(len) || !(len > 0.0) || !finite_bits(x.x) || !finite_bits(x.y) || !finite_bits(x.z)) return false;
+  n = n * (1.0 / len);
+  const double tol = 1e-4 * (1.0 + length(x));  // (a point of a mesh of floats, found by a ray of floats)
+  FaceAt own, other;
+  uint64_t other_piece = 0;
+  for (size_t i = 0; i < impl_->ids.size(); i++) {
+    FaceAt at;
+    for (const Solid &s : impl_->solids[i]) solid_face_at(s, x, n, tol, at);
+    if (!at.found) continue;
+    if (impl_->ids[i] == piece) own = at;
+    else if (at.better(other)) other = at, other_piece = impl_->ids[i];
+  }
+  /* The face's own name stays unless another piece's face there is of a better kind. */
+  if (!other.found || (own.found && own.rank <= other.rank)) return false;
+  piece = other_piece, side = other.side;
+  return true;
+}
+
+bool face_owner(const std::vector<Piece> &pieces, Vec3 point, Vec3 normal, uint64_t &piece, uint32_t &side) {
+  return FaceOwners(pieces).at(point, normal, piece, side);
+}
+
+namespace {
+
 Settings usable(Settings st) {
   if (!finite_bits(st.cell) || !(st.cell > 0.0f)) st.cell = 0.1f;
   st.cell = std::max(1e-5f, std::min(1e6f, st.cell));

@@ -36,16 +36,17 @@ struct BlockoutState {
   blockout::Faces faces;        // the faces' origins, for the mesh below
   const Mesh *faces_mesh = nullptr;  // the mesh they belong to, and its version: any other writer of the mesh makes them stale
   uint64_t faces_version = 0;
+  uint64_t faces_hash = 0;      // the snapshot those faces were made from (`hash` moves on at a refusal; the mesh and its faces do not)
   BlockoutStatus status;
   std::string logged_why;       // the refusal already written to the log
   std::unique_ptr<blockout::Cache> cache;
   BlockoutState() = default;
   BlockoutState(const BlockoutState &o)
-      : hash_valid(o.hash_valid), hash(o.hash), faces(o.faces), faces_mesh(o.faces_mesh), faces_version(o.faces_version), status(o.status),
+      : hash_valid(o.hash_valid), hash(o.hash), faces(o.faces), faces_mesh(o.faces_mesh), faces_version(o.faces_version), faces_hash(o.faces_hash), status(o.status),
         logged_why(o.logged_why) {}
   BlockoutState &operator=(const BlockoutState &o) {
     if (this == &o) return *this;
-    hash_valid = o.hash_valid, hash = o.hash, faces = o.faces, faces_mesh = o.faces_mesh, faces_version = o.faces_version, status = o.status;
+    hash_valid = o.hash_valid, hash = o.hash, faces = o.faces, faces_mesh = o.faces_mesh, faces_version = o.faces_version, faces_hash = o.faces_hash, status = o.status;
     logged_why = o.logged_why;
     cache.reset();
     return *this;

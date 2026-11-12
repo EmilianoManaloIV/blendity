@@ -116,6 +116,28 @@ class Cache {
   std::unique_ptr<Impl> impl;
 };
 
+/* Whose face the result's surface is at a point of it. Faces of several pieces that lie in one plane and touch become one face of
+ * the result, and that face names only the first of them (two slabs of one floor, two rooms on one level): `piece` and `side` are what
+ * the face said, `point` is on it and `normal` points out of the matter there, both in the Blockout's space. If the named piece has no
+ * face of its own at the point and another piece has one that looks the same way, `piece` and `side` become that one's and the answer
+ * is true; otherwise they are left as they were. */
+bool face_owner(const std::vector<Piece> &pieces, Vec3 point, Vec3 normal, uint64_t &piece, uint32_t &side);
+
+/* The same question asked many times of one set of pieces (a box select, a mesh piece of many faces): their solids are
+ * made once. */
+class FaceOwners {
+ public:
+  explicit FaceOwners(const std::vector<Piece> &pieces);
+  ~FaceOwners();
+  FaceOwners(const FaceOwners &) = delete;
+  FaceOwners &operator=(const FaceOwners &) = delete;
+  bool at(Vec3 point, Vec3 normal, uint64_t &piece, uint32_t &side) const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 /* Whether this build has the crisp path (Manifold, from Blender's libraries). */
 bool crisp_available();
 
