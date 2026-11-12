@@ -69,7 +69,8 @@ static int fake_moonray(int argc, char **argv) {
   return 0;
 }
 
-/* The groups, one file each (task 0177): `--group <name>` runs one, `--list-groups` names them. */
+/* The groups, one file each (task 0177): `--group <name>` runs one, `--group a,b,c` several (round 492: CI's
+ * sanitizer shards, tools/dev/test_shards.py), `--list-groups` names them. */
 void run_modeling_tests();
 void run_render_tests();
 void run_lighting_tests();
@@ -86,6 +87,7 @@ void run_sculpt_tests();
 void run_hci_tests();
 void run_vr_tests();
 void run_blockout_tests();
+void run_runner_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
     {"modeling", run_modeling_tests},
@@ -104,7 +106,26 @@ static const TestGroup kTestGroups[] = {
     {"hci", run_hci_tests},
     {"vr", run_vr_tests},
     {"blockout", run_blockout_tests},
+    {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
+
+/* `--group`'s value as names: "a,b,c" (round 492). False, with the offender in `bad`, when a name is no group or is
+ * empty ("a,,b", a trailing comma): a shard that misspells a group must fail, not run less than it says. */
+static bool parse_groups(const std::string &list, std::vector<std::string> &names, std::string &bad) {
+  std::stringstream in(list);
+  std::string name;
+  if (!list.empty() && list.back() == ',') return false;  // (bad stays empty: the name after the comma)
+  while (std::getline(in, name, ',')) {
+    bool known = false;
+    for (const TestGroup &g : kTestGroups) known = known || name == g.name;
+    if (!known) {
+      bad = name;
+      return false;
+    }
+    names.push_back(name);
+  }
+  return true;
+}
 
 int main(int argc, char **argv) {
   if (argc > 1 && std::string(argv[1]) == "--fake-moonray") return fake_moonray(argc, argv);
@@ -139,15 +160,16 @@ int main(int argc, char **argv) {
       return 0;
     }
   }
-  bool ran = false;
-  for (const TestGroup &g : kTestGroups) {
-    if (!group.empty() && group != g.name) continue;
-    g.run();
-    ran = true;
-  }
-  if (!ran) {
-    std::printf("no such group: %s (--list-groups names them)\n", group.c_str());
+  std::vector<std::string> wanted;  // (empty: every group)
+  std::string bad;
+  if (!parse_groups(group, wanted, bad)) {
+    std::printf("no such group: %s (--list-groups names them)\n", bad.c_str());
     return 2;
+  }
+  /* The groups run in the table's order whatever order they were named in, each once. */
+  for (const TestGroup &g : kTestGroups) {
+    if (!wanted.empty() && std::find(wanted.begin(), wanted.end(), g.name) == wanted.end()) continue;
+    g.run();
   }
 
   /* BLENDITY_RENDER_CACHE_VERIFY=1 re-renders every view the render cache would have reused: none may
