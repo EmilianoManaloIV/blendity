@@ -780,63 +780,99 @@ uint64_t gpu_mesh_budget(const gpu::DeviceInfo &d) { return std::min<uint64_t>(1
  * the baked path would read (whether the probes or Light Volumes could light an object). 50,000 cubes are about a
  * megabyte of words: the words of an item are summed with a multiplier each (they pipeline) and one step chains the
  * items, so the order matters. Not adversarial: a hash for noticing change, verified by the render cache's verify mode. */
+/* (Round 471: the key's parts on their own - the rows of InstanceRows hash an item at a time.) */
+uint64_t materials_sum(const std::vector<MaterialPtr> *mv) {
+  constexpr uint64_t kPrime = 0x100000001B3ull;
+  if (!mv) return 0;
+  uint64_t s = mv->size();
+  for (const MaterialPtr &mp : *mv) {
+    s = (s ^ (uint64_t)(uintptr_t)mp.get()) * kPrime;
+    s = (s ^ (mp ? mp->version : 0)) * kPrime;
+    if (!mp || mp->axis_mode == 0) continue;
+    for (const MaterialPtr &part : mp->textures().axis) {  // (an axis material's parts as resolved)
+      s = (s ^ (uint64_t)(uintptr_t)part.get()) * kPrime;
+      s = (s ^ (part ? part->version : 0)) * kPrime;
+    }
+  }
+  return s;
+}
+
+/* One item's words, summed with a multiplier each. Round 471: a lightmap page's serial with its address (a page is
+ * published whole under a new serial; a kept row holds the old page's card id). */
+uint64_t instance_item_sum(const DrawItem &it, uint64_t materials) {
+  constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ull;
+  auto page = [](const Lightmap *lm) { return (uint64_t)(uintptr_t)lm ^ (lm ? lm->serial * kGolden : 0); };
+  uint64_t w[24];
+  std::memcpy(w, it.model.m, 64);
+  const RenderMesh *rm = it.mesh;
+  w[8] = (uint64_t)(uintptr_t)rm;
+  w[9] = rm ? rm->serial ^ (uint64_t)(rm->tangents.empty() ? 0 : 1) << 60 ^ (uint64_t)(rm->uvs.empty() ? 0 : 1) << 61 : 0;
+  w[10] = (uint64_t)it.id | (uint64_t)it.unlit << 32 | (uint64_t)it.double_sided << 33 | (uint64_t)it.receive_shadows << 34 |
+          (uint64_t)it.cast_shadows << 35 | (uint64_t)it.use_probes << 36 | (uint64_t)it.always_cull << 37 | (uint64_t)it.realtime_lm << 38;
+  float f[4] = {it.albedo.x, it.albedo.y, it.albedo.z, it.specular};
+  std::memcpy(&w[11], f, 16);
+  w[13] = (uint64_t)(uintptr_t)it.materials;
+  w[14] = materials;
+  w[15] = (uint64_t)(uintptr_t)it.face_highlight;
+  w[16] = page(it.lightmap);
+  w[17] = (uint64_t)(uintptr_t)it.lightmap_uv ^ (it.lightmap_uv ? (uint64_t)it.lightmap_uv->size() << 48 : 0);
+  w[18] = page(it.lightmap_dir);
+  w[19] = page(it.shadowmask);
+  w[20] = page(it.rt_bounce);
+  w[21] = page(it.rt_sky);
+  w[22] = (uint64_t)(uintptr_t)it.rt_uv ^ (it.rt_uv ? (uint64_t)it.rt_uv->size() << 48 : 0);
+  w[23] = (uint64_t)(uintptr_t)it.vertex_colors;
+  uint64_t s = 0;
+  for (uint64_t k = 0; k < 24; k++) s += (w[k] ^ (0x5BD1E995ull * (k + 1))) * (kGolden * (2 * k + 1));
+  return s;
+}
+
+/* What every item's instance reads besides its own words: the shade mode, whether probes or Light Volumes could light
+ * an object, the textures' generation and the default material. */
+uint64_t instances_global_key(const LightingEnv &env, const RasterOptions &opt) {
+  constexpr uint64_t kPrime = 0x100000001B3ull;
+  const bool probes = (env.probes && env.probes->data && !env.probes->data->empty()) || env.light_volumes;
+  uint64_t h = 0xcbf29ce484222325ull;
+  for (uint64_t s : {(uint64_t)opt.shade | (uint64_t)probes << 8, (uint64_t)material_textures_generation(), (uint64_t)default_material()->version}) {
+    h = (h ^ s) * kPrime;
+    h ^= h >> 29;
+  }
+  return h;
+}
+
 uint64_t instances_key(const std::vector<DrawItem> &items, const LightingEnv &env, const RasterOptions &opt) {
-  constexpr uint64_t kGolden = 0x9E3779B97F4A7C15ull, kPrime = 0x100000001B3ull;
+  constexpr uint64_t kPrime = 0x100000001B3ull;
   uint64_t h = 0xcbf29ce484222325ull;
   auto chain = [&](uint64_t s) {
     h = (h ^ s) * kPrime;
     h ^= h >> 29;
   };
-  const bool probes = (env.probes && env.probes->data && !env.probes->data->empty()) || env.light_volumes;
-  chain((uint64_t)opt.shade | (uint64_t)probes << 8 | (uint64_t)items.size() << 16);
-  chain((uint64_t)material_textures_generation());
-  chain(default_material()->version);
-  auto materials_key = [](const std::vector<MaterialPtr> *mv) {
-    if (!mv) return (uint64_t)0;
-    uint64_t s = mv->size();
-    for (const MaterialPtr &mp : *mv) {
-      s = (s ^ (uint64_t)(uintptr_t)mp.get()) * kPrime;
-      s = (s ^ (mp ? mp->version : 0)) * kPrime;
-      if (!mp || mp->axis_mode == 0) continue;
-      for (const MaterialPtr &part : mp->textures().axis) {  // (an axis material's parts as resolved)
-        s = (s ^ (uint64_t)(uintptr_t)part.get()) * kPrime;
-        s = (s ^ (part ? part->version : 0)) * kPrime;
-      }
-    }
-    return s;
-  };
+  chain(instances_global_key(env, opt));
+  chain((uint64_t)items.size());
   const std::vector<MaterialPtr> *last_materials = nullptr;
   uint64_t last_sum = 0;
   for (const DrawItem &it : items) {
     if (it.materials != last_materials || !last_materials) {  // (items of one renderer share a list: its content once)
       last_materials = it.materials;
-      last_sum = materials_key(it.materials);
+      last_sum = materials_sum(it.materials);
     }
-    uint64_t w[24];
-    std::memcpy(w, it.model.m, 64);
-    const RenderMesh *rm = it.mesh;
-    w[8] = (uint64_t)(uintptr_t)rm;
-    w[9] = rm ? rm->serial ^ (uint64_t)(rm->tangents.empty() ? 0 : 1) << 60 ^ (uint64_t)(rm->uvs.empty() ? 0 : 1) << 61 : 0;
-    w[10] = (uint64_t)it.id | (uint64_t)it.unlit << 32 | (uint64_t)it.double_sided << 33 | (uint64_t)it.receive_shadows << 34 |
-            (uint64_t)it.cast_shadows << 35 | (uint64_t)it.use_probes << 36 | (uint64_t)it.always_cull << 37 | (uint64_t)it.realtime_lm << 38;
-    float f[4] = {it.albedo.x, it.albedo.y, it.albedo.z, it.specular};
-    std::memcpy(&w[11], f, 16);
-    w[13] = (uint64_t)(uintptr_t)it.materials;
-    w[14] = last_sum;
-    w[15] = (uint64_t)(uintptr_t)it.face_highlight;
-    w[16] = (uint64_t)(uintptr_t)it.lightmap;
-    w[17] = (uint64_t)(uintptr_t)it.lightmap_uv ^ (it.lightmap_uv ? (uint64_t)it.lightmap_uv->size() << 48 : 0);
-    w[18] = (uint64_t)(uintptr_t)it.lightmap_dir;
-    w[19] = (uint64_t)(uintptr_t)it.shadowmask;
-    w[20] = (uint64_t)(uintptr_t)it.rt_bounce;
-    w[21] = (uint64_t)(uintptr_t)it.rt_sky;
-    w[22] = (uint64_t)(uintptr_t)it.rt_uv ^ (it.rt_uv ? (uint64_t)it.rt_uv->size() << 48 : 0);
-    w[23] = (uint64_t)(uintptr_t)it.vertex_colors;
-    uint64_t s = 0;
-    for (uint64_t k = 0; k < 24; k++) s += (w[k] ^ (0x5BD1E995ull * (k + 1))) * (kGolden * (2 * k + 1));
-    chain(s);
+    chain(instance_item_sum(it, last_sum));
   }
   return h;
+}
+
+/* Round 471: a row's notes (several, joined as add_note joins them) into the view's. */
+size_t add_notes(std::string &all, const std::string &notes) {  // (how many were new to `all`)
+  size_t a = 0, added = 0;
+  while (a < notes.size()) {
+    size_t b = notes.find("; ", a);
+    if (b == std::string::npos) b = notes.size();
+    const size_t before = all.size();
+    add_note(all, notes.substr(a, b - a));
+    added += all.size() != before;
+    a = b + 2;
+  }
+  return added;
 }
 
 }  // namespace
@@ -1084,7 +1120,7 @@ void Editor::gpu_forget_old_world(const LightingEnv &env) {
   if (now == gpu_world_tex_) return;
   auto old = gpu_world_tex_ ? gpu_textures_.find(gpu_world_tex_) : gpu_textures_.end();
   if (old != gpu_textures_.end()) {
-    if (old->second.id >= 0) gpu_view_->remove_texture(old->second.id);
+    if (old->second.id >= 0) card_ids_gen_++, gpu_view_->remove_texture(old->second.id);
     gpu_textures_.erase(old);
   }
   gpu_world_tex_ = now;
@@ -1145,12 +1181,12 @@ void Editor::gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1) {
   if (found == gpu_textures_.end() || found->second.id < 0) return;
   std::string err;
   if (!found->second.approx.empty()) {  // (round 414: the card holds a smaller copy - its rows aren't these; the copy goes up again whole)
-    gpu_view_->remove_texture(found->second.id);
+    card_ids_gen_++, gpu_view_->remove_texture(found->second.id);
     gpu_textures_.erase(found);
     return;
   }
   if (!gpu_view_->update_texture_rows(found->second.id, *t, y0, y1, &err)) {
-    gpu_view_->remove_texture(found->second.id);  // (its slot freed; the whole texture goes up again at the next frame)
+    card_ids_gen_++, gpu_view_->remove_texture(found->second.id);  // (its slot freed; the whole texture goes up again at the next frame)
     gpu_textures_.erase(found);
     if (!err.empty()) Log::warn("GPU view: %s", err.c_str());
   }
@@ -1159,14 +1195,33 @@ void Editor::gpu_texture_rows_changed(const TexturePtr &t, int y0, int y1) {
 /* Task 0099: the card's copy is the render mesh this one moved from in place: only what the move changed goes up. */
 bool Editor::gpu_mesh_moved(GpuMesh &e, const RenderMesh &rm, std::string &err) {
   if (e.id < 0 || rm.moved_from == 0 || e.serial != rm.moved_from || e.vertices != rm.positions.size() || e.indices != rm.indices.size()) return false;
-  if (!e.parts.empty()) return false;  // (its triangles are grouped by material on the card: the index ranges don't hold)
+  /* Round 470: ranges that cover most of a mesh, or come in hundreds of pieces, go as the whole mesh in one copy, as
+   * before the round (each range is a copy of its own, and its vertices are gathered one by one here). A rule of
+   * thumb, not measured apart: the rows that move most of a mesh showed no gain from ranges. */
+  size_t moved = 0;
+  for (const auto &r : rm.moved_vertices) moved += r.second;
+  if (moved * 2 > rm.positions.size() || rm.moved_vertices.size() > 256) return false;
   std::vector<gpu::RasterVertex> v;  // (just the moved ranges' vertices, one range after another)
+  v.reserve(moved);
   for (const auto &r : rm.moved_vertices)
     for (uint32_t i = r.first; i < r.first + r.second && i < rm.positions.size(); i++) v.push_back(raster_vertex(rm, i));
-  if (!gpu_view_->update_mesh_ranges(e.id, v, rm.moved_vertices, rm.indices, rm.moved_indices, &err)) return false;
+  /* Round 470: a mesh with several materials too. Its parts share one vertex array, so the vertex ranges hold as they
+   * are; its triangles are grouped by material on the card, so when quads or n-gons were split again the indices go
+   * up whole, grouped again (a twentieth of the vertices' bytes) - a mesh of triangles sends none. */
+  std::vector<uint32_t> grouped;
+  std::vector<std::pair<uint32_t, uint32_t>> whole;
+  if (!e.parts.empty() && !rm.moved_indices.empty()) {
+    std::vector<std::array<uint32_t, 3>> parts;
+    grouped = card_indices(rm, parts);
+    if (parts != e.parts) return false;  // (a face changed its slot under the same sizes: not a move)
+    whole.push_back({0, (uint32_t)grouped.size()});
+  }
+  const std::vector<uint32_t> &indices = whole.empty() ? rm.indices : grouped;
+  const std::vector<std::pair<uint32_t, uint32_t>> &index_ranges = whole.empty() ? rm.moved_indices : whole;
+  if (!gpu_view_->update_mesh_ranges(e.id, v, rm.moved_vertices, indices, index_ranges, &err)) return false;
   uint64_t bytes = 0;
   for (const auto &r : rm.moved_vertices) bytes += (uint64_t)r.second * sizeof(gpu::RasterVertex);
-  for (const auto &r : rm.moved_indices) bytes += (uint64_t)r.second * 4;
+  for (const auto &r : index_ranges) bytes += (uint64_t)r.second * 4;
   prof_.gpu_upload_bytes += bytes;
   prof_.gpu_partial_bytes += bytes;
   prof_.gpu_mesh_partial++;
@@ -1184,7 +1239,7 @@ void Editor::gpu_forget_meshes() {
       ++it;
       continue;
     }
-    if (it->second.id >= 0) gpu_view_->remove_texture(it->second.id);
+    if (it->second.id >= 0) card_ids_gen_++, gpu_view_->remove_texture(it->second.id);
     it = gpu_textures_.erase(it);
   }
   const uint64_t budget = gpu_mesh_budget(gpu_view_->info());
@@ -1197,6 +1252,7 @@ void Editor::gpu_forget_meshes() {
     if (gpu_calls_ - a.first <= 256 && gpu_mesh_bytes_ <= budget) break;
     GpuMesh &e = gpu_meshes_[a.second];
     if (e.id >= 0) gpu_view_->remove_mesh(e.id);
+    card_ids_gen_++;  // (round 471: a mesh let go for age or the budget takes its corner blocks along - a kept row may hold their base)
     gpu_mesh_bytes_ -= e.bytes;
     gpu_meshes_.erase(a.second);
     gpu_forget_corners(a.second);  // (round 415: its corner blocks with it)
@@ -1208,7 +1264,7 @@ void Editor::gpu_forget_meshes() {
         k++;
         continue;
       }
-      if (blocks[k].base >= 0) gpu_view_->remove_corners(blocks[k].base, blocks[k].floats), gpu_corner_floats_ -= blocks[k].floats;
+      if (blocks[k].base >= 0) card_ids_gen_++, gpu_view_->remove_corners(blocks[k].base, blocks[k].floats), gpu_corner_floats_ -= blocks[k].floats;
       blocks.erase(blocks.begin() + (ptrdiff_t)k);
     }
     it = blocks.empty() ? gpu_corners_.erase(it) : std::next(it);
@@ -1313,7 +1369,7 @@ int Editor::gpu_corners(const DrawItem &it, const GpuMesh &e, bool lm, bool rt, 
     for (size_t t = 0; t < rm.tri_count(); t++)
       if (rm.tri_material[t] == e.parts[p][0]) put(t);
   if (mine && mine->base >= 0) {
-    gpu_view_->remove_corners(mine->base, mine->floats);
+    card_ids_gen_++, gpu_view_->remove_corners(mine->base, mine->floats);  // (round 471: a copied row may hold the base)
     gpu_corner_floats_ -= mine->floats;
     mine->base = -1;
   }
@@ -1350,7 +1406,7 @@ void Editor::gpu_forget_corners(const RenderMesh *rm) {
 void Editor::gpu_forget_texture(const Texture *t) {
   auto e = gpu_textures_.find(t);
   if (e == gpu_textures_.end()) return;
-  if (e->second.id >= 0 && gpu_view_) gpu_view_->remove_texture(e->second.id);
+  if (e->second.id >= 0 && gpu_view_) card_ids_gen_++, gpu_view_->remove_texture(e->second.id);
   gpu_textures_.erase(e);
 }
 
@@ -1460,7 +1516,23 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     Mat4 mvp;
   };
   std::vector<SeeJob> see_jobs;
-  auto gather_see_through = [&](const DrawItem &it, uint32_t first_inst, GpuMesh &e) {
+  /* Round 471 (ADR 0125): this frame's rows - an item's instances and see-through triangles, copied from the last
+   * frame's (InstanceRows) or made again. */
+  InstanceRows &rows = instance_rows_[slot];
+  std::vector<InstanceRows::Row> new_rows;
+  std::vector<const DrawItem *> row_items;
+  std::vector<int32_t> row_see;  // a row's see-through triangles: -1 none, -2 the kept list, else its job
+  std::vector<InstanceRows::SeeRel> new_see;
+  std::vector<std::pair<std::weak_ptr<const Texture>, int>> new_deps;
+  size_t cur_row = 0;
+  auto see_job_key = [](const SeeJob &j) {  // (what a job's keys and culling come from, besides the row's own key)
+    uint32_t w[16];
+    std::memcpy(w, j.mvp.m, 64);
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t x : w) h = (h ^ x) * 0x100000001B3ull;
+    return (h ^ ((uint64_t)j.cull | (uint64_t)j.fog_back << 1 | (uint64_t)(j.facing < 0.0f) << 2 | 8)) * 0x100000001B3ull;
+  };
+  auto see_job_of = [&](const DrawItem &it, uint32_t first_inst, GpuMesh &e) {
     ScopedTimer st;
     const RenderMesh &rm = *it.mesh;
     if (!e.see_listed || e.see_serial != rm.serial || rm.serial == 0) {  // (the mesh's slot count, walked once per mesh)
@@ -1495,9 +1567,13 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       const AABB &bb = rm.bounds;
       fog_back = bb.valid() && le.x > bb.min.x && le.y > bb.min.y && le.z > bb.min.z && le.x < bb.max.x && le.y < bb.max.y && le.z < bb.max.z;
     }
-    see_jobs.push_back({&it, &e, first_inst, mask, masked, !((it.double_sided || !opt.backface_culling) && !it.always_cull), fog_back,
-                        mirrored(it.model) ? -1.0f : 1.0f, vp * it.model});
     ms_see += st.ms();
+    return SeeJob{&it, &e, first_inst, mask, masked, !((it.double_sided || !opt.backface_culling) && !it.always_cull), fog_back,
+                  mirrored(it.model) ? -1.0f : 1.0f, vp * it.model};
+  };
+  auto gather_see_through = [&](const DrawItem &it, uint32_t first_inst, GpuMesh &e) {
+    row_see[cur_row] = (int32_t)see_jobs.size();
+    see_jobs.push_back(see_job_of(it, first_inst, e));
   };
   auto see_through_run = [&] {
     ScopedTimer st;
@@ -1529,7 +1605,25 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     };
     if (see_jobs.size() > 1) JobSystem::global().parallel_for((int64_t)see_jobs.size(), 1, run);
     else if (!see_jobs.empty()) run(0, 1);
-    for (std::vector<SeeTri> &out : per_job) see.insert(see.end(), out.begin(), out.end());
+    /* (The rows in item order, as the jobs were: a kept list's triangles at this frame's instances.) */
+    for (size_t k = 0; k < new_rows.size(); k++) {
+      InstanceRows::Row &r = new_rows[k];
+      r.see_first = (uint32_t)new_see.size();
+      if (row_see[k] == -2) {
+        const InstanceRows::Row &old = rows.rows[k];
+        for (uint32_t q = 0; q < old.see_count; q++) {
+          const InstanceRows::SeeRel t = rows.see[(size_t)old.see_first + q];
+          new_see.push_back(t);
+          see.push_back({t.key, r.first + t.inst, t.prim, row_items[k]});
+        }
+      }
+      else if (row_see[k] >= 0)
+        for (const SeeTri &t : per_job[(size_t)row_see[k]]) {
+          new_see.push_back({t.key, t.inst - r.first, t.prim});
+          see.push_back(t);
+        }
+      r.see_count = (uint32_t)new_see.size() - r.see_first;
+    }
     ms_see += st.ms();
   };
   auto highlight_base = [&](const DrawItem &it, const GpuMesh &e) {
@@ -1563,12 +1657,14 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   bool keepable = true;
   std::vector<std::pair<TexturePtr, int>> tex_deps;
   std::unordered_set<const Texture *> tex_dep_seen;
+  std::string row_caps;  // (round 471: the capped textures the item being gathered noted - counted once a frame, where its row lands)
   auto mtex = [&](const TexturePtr &t) {  // (a material's: capped, noted)
-    const size_t before = approx.size();
-    const int id = gpu_texture(t, tex_err, &approx);
-    if (approx.size() != before) approximated++;
+    const int id = gpu_texture(t, tex_err, &row_caps);
     if (id < 0) keepable = false;  // (deferred by the upload budget or refused: not final)
-    else if (t && tex_dep_seen.insert(t.get()).second) tex_deps.push_back({t, id});
+    else if (t) {
+      if (tex_dep_seen.insert(t.get()).second) tex_deps.push_back({t, id});
+      new_deps.emplace_back(std::weak_ptr<const Texture>(t), id);  // (round 471: the row's own)
+    }
     return id;
   };
   auto note_material = [&](const Material &m) {
@@ -1617,58 +1713,121 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   };
   ScopedTimer gather_timer;
   const char *close_up_why = nullptr;
-  auto gather = [&] {
+  /* One item's instances - and its see-through job, its baked ids - at the end of `inst`. */
+  auto gather_item = [&](const DrawItem &it, int mesh, GpuMesh &e) {
+    if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's colours, a mesh made anew every frame)
+    if (it.materials && keepable)  // (live_close_up_of looks at every material of the item, used or not: its answer is the eye's)
+      for (const MaterialPtr &mp : *it.materials)
+        for (int k = 0; mp && k < 5; k++)
+          if (mp->textures().live[k]) keepable = false;
+    const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
+    const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
+    const uint32_t first_inst = (uint32_t)inst.size();
+    if (e.parts.empty()) {
+      inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
+      note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
+      inst.back().highlight = hl;
+      inst.back().vertex_colors = vc;
+      if (gouraud) solid_instance(inst.back(), it);
+      axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
+      if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
+      if (inst.back().surface) gather_see_through(it, first_inst, e);
+      return;
+    }
+    for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
+      gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), mtex, env);
+      note_material(*slot_material(it, part[0]));
+      in.first_index = part[1];
+      in.index_count = part[2];
+      in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
+      in.vertex_colors = vc;
+      if (gouraud) solid_instance(in, it);
+      inst.push_back(in);
+      axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
+    }
+    for (size_t k = first_inst; k < inst.size(); k++)
+      if (inst[k].surface) {
+        gather_see_through(it, first_inst, e);
+        break;
+      }
+    if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
+  };
+  bool rows_whole = true;    // every drawn item has a row: no mesh left waiting or refused
+  bool layout_same = false;  // every row is where the kept one was
+  uint64_t rows_copied = 0, rows_made = 0, see_copied = 0;
+  /* Round 471: the gather, an item at a time. `by_rows`: an item whose key is its kept row's takes the row's instances
+   * (and its see-through triangles while its job's key holds) instead of making them. The mesh is asked for either way:
+   * that sends what moved and marks it drawn. */
+  auto gather = [&](bool by_rows) {
+    const std::vector<MaterialPtr> *last_materials = nullptr;
+    uint64_t last_sum = 0;
     for (const DrawItem &it : items) {
       if (!it.mesh || it.mesh->indices.empty()) continue;
       const int mesh = gpu_mesh(*it.mesh, err, it.id);
       if (mesh < 0 && mesh_deferred_now_) {  // (round 458: left for a later frame's budget: not drawn now, not a refusal)
-        keepable = false;
+        keepable = false, rows_whole = false;
         continue;
       }
       ok = ok && mesh >= 0;
-      if (mesh < 0) continue;
+      if (mesh < 0) {
+        rows_whole = false;
+        continue;
+      }
       GpuMesh &e = gpu_meshes_[it.mesh];
       if (const char *why = live_close_up_of(it, e, vp, p, eye, rt.height)) {
         close_up_why = why;
         return;
       }
-      if (it.mesh->serial == 0 || it.face_highlight || it.vertex_colors) keepable = false;  // (per-frame: Edit Mode's highlight, Weight Paint's colours, a mesh made anew every frame)
-      if (it.materials && keepable)  // (live_close_up_of looks at every material of the item, used or not: its answer is the eye's)
-        for (const MaterialPtr &mp : *it.materials)
-          for (int k = 0; mp && k < 5; k++)
-            if (mp->textures().live[k]) keepable = false;
-      const uint32_t hl = it.face_highlight && !it.mesh->tri_face.empty() ? highlight_base(it, e) + 1 : 0;
-      const uint32_t vc = gouraud && it.vertex_colors ? solid_vertex_colors(it, vcols) : 0;
-      const uint32_t first_inst = (uint32_t)inst.size();
-      if (e.parts.empty()) {
-        inst.push_back(raster_instance(it, mesh, *slot_material(it, mesh_slots(*it.mesh)[0]), mtex, env));
-        note_material(*slot_material(it, mesh_slots(*it.mesh)[0]));
-        inst.back().highlight = hl;
-        inst.back().vertex_colors = vc;
-        if (gouraud) solid_instance(inst.back(), it);
-        axis_of(inst.size() - 1, it, *slot_material(it, mesh_slots(*it.mesh)[0]));  // (after Solid's: no parts for its one colour)
-        if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
-        if (inst.back().surface) gather_see_through(it, first_inst, e);
+      if (it.materials != last_materials || !last_materials) last_materials = it.materials, last_sum = materials_sum(it.materials);
+      InstanceRows::Row r;
+      r.key = instance_item_sum(it, last_sum) ^ ((uint64_t)(uint32_t)mesh + 1) * 0x9E3779B97F4A7C15ull;
+      r.first = (uint32_t)inst.size();
+      r.dep_first = (uint32_t)new_deps.size();
+      cur_row = new_rows.size();
+      row_items.push_back(&it);
+      row_see.push_back(-1);
+      const InstanceRows::Row *old = by_rows && cur_row < rows.rows.size() ? &rows.rows[cur_row] : nullptr;
+      if (old && old->keep && old->key == r.key) {
+        inst.insert(inst.end(), rows.inst.begin() + old->first, rows.inst.begin() + old->first + old->count);
+        r.count = old->count, r.keep = true, r.has_see = old->has_see, r.approx = old->approx, r.caps = old->caps, r.approximated = old->approximated;
+        add_notes(approx, r.approx);
+        approximated += r.approximated + add_notes(approx, r.caps);
+        new_deps.insert(new_deps.end(), rows.deps.begin() + old->dep_first, rows.deps.begin() + old->dep_first + old->dep_count);
+        r.dep_count = old->dep_count;
+        rows_copied++;
+        if (r.has_see) {
+          const SeeJob job = see_job_of(it, r.first, e);
+          r.see_key = see_job_key(job);
+          if (old->see_key == r.see_key) row_see[cur_row] = -2, see_copied++;
+          else row_see[cur_row] = (int32_t)see_jobs.size(), see_jobs.push_back(job);
+        }
+        new_rows.push_back(std::move(r));
         continue;
       }
-      for (const auto &part : e.parts) {  // (several materials: one instance per material's triangles)
-        gpu::RasterInstance in = raster_instance(it, mesh, *slot_material(it, part[0]), mtex, env);
-        note_material(*slot_material(it, part[0]));
-        in.first_index = part[1];
-        in.index_count = part[2];
-        in.highlight = hl ? hl + part[1] / 3 : 0;  // (gl_PrimitiveID counts from the draw's first triangle)
-        in.vertex_colors = vc;
-        if (gouraud) solid_instance(in, it);
-        inst.push_back(in);
-        axis_of(inst.size() - 1, it, *slot_material(it, part[0]));
-      }
-      for (size_t k = first_inst; k < inst.size(); k++)
-        if (inst[k].surface) {
-          gather_see_through(it, first_inst, e);
-          break;
-        }
-      if (!gouraud) baked_of(it, e, first_inst);  // (task 0197; Solid lights by its own formula)
+      /* Made again: what the item noted and whether it may be kept are the row's own. */
+      const bool frame_keepable = keepable;
+      const size_t axis0 = axis_parts.size();
+      const uint64_t approximated0 = approximated;
+      std::string frame_approx;
+      frame_approx.swap(approx);
+      row_caps.clear();
+      keepable = true;
+      gather_item(it, mesh, e);
+      r.count = (uint32_t)inst.size() - r.first;
+      r.dep_count = (uint32_t)new_deps.size() - r.dep_first;
+      r.keep = keepable && axis_parts.size() == axis0 && tex_err.empty() && corner_err.empty();
+      r.has_see = row_see[cur_row] >= 0;
+      if (r.has_see) r.see_key = see_job_key(see_jobs[(size_t)row_see[cur_row]]);
+      r.approx = approx, r.caps = row_caps, r.approximated = approximated - approximated0;
+      approx.swap(frame_approx);
+      add_notes(approx, r.approx);
+      approximated += add_notes(approx, r.caps);
+      keepable = frame_keepable && keepable;
+      rows_made++;
+      new_rows.push_back(std::move(r));
     }
+    layout_same = by_rows && new_rows.size() == rows.rows.size();
+    for (size_t k = 0; layout_same && k < new_rows.size(); k++) layout_same = new_rows[k].first == rows.rows[k].first && new_rows[k].count == rows.rows[k].count;
     see_through_run();  // (round 415: the see-through triangles of every item, on every thread)
     for (size_t k = 0; k < axis_parts.size(); k++) {  // (the parts after every drawn instance: no index moves)
       inst[axis_owner[k]].axis_parts[axis_parts[k].second] = (float)inst.size();
@@ -1686,6 +1845,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   const bool kept_ok = have_key && instance_keep_valid(keep, inst_key);
   const std::vector<gpu::RasterInstance> *insts = &inst;
   bool toon_maps = false, baked = false;
+  bool by_rows = false;
   if (kept_ok && !cache_verify_) {
     insts = &keep.inst;
     approx = keep.approx, approximated = keep.approximated, toon_maps = keep.toon_maps;
@@ -1693,10 +1853,31 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     prof_.ms_gpu_instances += gather_timer.ms();  // (the key and the ids asked again: all of this frame's instance work)
   }
   else {
+    /* Round 471: by rows while the last frame's stand - made on this card, under the same shade mode and textures, no
+     * card id let go since, and a whole gather (which marks every id drawn) within the last 64 calls. */
+    const uint64_t rows_global = instances_global_key(env, opt) ^ (bounce_onto_lm ? 0x8000000000000000ull : 0);
+    by_rows = rows.valid && rows.card == g && rows.global == rows_global && rows.ids_gen == card_ids_gen_ && gpu_calls_ - rows.whole_call < 64 &&
+              !instance_rows_off_for_test_;
     inst.reserve(items.size());
-    gather();
+    gather(by_rows);
     if (close_up_why) return gpu_view_refuse(slot, close_up_why);
+    if (by_rows && cache_verify_) {  // (verify mode: the same frame gathered whole, and the two compared)
+      const std::vector<gpu::RasterInstance> rows_inst = std::move(inst);
+      const std::vector<SeeTri> rows_see = std::move(see);
+      inst.clear(), see.clear(), see_jobs.clear(), hl_bits.clear(), vcols.clear(), axis_parts.clear(), axis_owner.clear();
+      new_rows.clear(), row_items.clear(), row_see.clear(), new_see.clear(), new_deps.clear(), tex_deps.clear(), tex_dep_seen.clear();
+      approx.clear(), approximated = 0, keepable = true, rows_whole = true, rows_copied = rows_made = see_copied = 0, by_rows = false;
+      gather(false);
+      if (close_up_why) return gpu_view_refuse(slot, close_up_why);
+      bool same = rows_inst.size() == inst.size() && rows_see.size() == see.size() &&
+                  (inst.empty() || std::memcmp(inst.data(), rows_inst.data(), inst.size() * sizeof(gpu::RasterInstance)) == 0);
+      for (size_t k = 0; same && k < see.size(); k++) same = see[k].key == rows_see[k].key && see[k].inst == rows_see[k].inst && see[k].prim == rows_see[k].prim;
+      if (!same) note_render_cache_mismatch();  // (a kept row was stale)
+    }
     instances_built_++, prof_.instances_built++;
+    instance_rows_kept_ += rows_copied, prof_.instance_rows_kept += rows_copied;
+    instance_rows_built_ += rows_made, prof_.instance_rows_built += rows_made;
+    see_lists_kept_ += see_copied, prof_.see_lists_kept += see_copied;
     bool surface = false;
     for (const gpu::RasterInstance &in : inst) {
       toon_maps = toon_maps || (in.flags & gpu::RasterInstance::ToonMaps) != 0;
@@ -1714,6 +1895,14 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       keep.approx = approx, keep.approximated = approximated, keep.toon_maps = toon_maps;
       keep.textures.clear();
       for (const auto &[t, id] : tex_deps) keep.textures.emplace_back(std::weak_ptr<const Texture>(t), id);  // (weakly: a kept array doesn't hold a dropped texture alive)
+      if (rows_copied) {  // (round 471: a copied row's textures were not asked for this frame - the rows' own lists, each texture once)
+        keep.textures.clear();
+        std::unordered_set<const Texture *> listed;
+        for (const auto &dep : new_deps) {
+          const TexturePtr t = dep.first.lock();
+          if (!t || listed.insert(t.get()).second) keep.textures.push_back(dep);
+        }
+      }
       keep.meshes.clear();
       std::unordered_set<const RenderMesh *> seen;
       for (const DrawItem &it : items)
@@ -1721,6 +1910,24 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       keep.inst = std::move(inst);  // (this frame goes on with the kept one; a refusal later in it leaves the keep whole)
       insts = &keep.inst;
       if (card_instances_ == insts) card_instances_ = nullptr;  // (new contents at the old address: the card's copy is the old ones)
+    }
+    /* Round 471: this frame's rows for the next. The array itself is the rows' (the frame goes on with it) unless the
+     * whole keep took it; when every row was a copy in its old place the last frame's array stands and the card, if it
+     * still holds it, is not sent it again. */
+    const bool recordable = ok && rows_whole && tex_err.empty() && corner_err.empty();
+    /* (The last frame's sorted corners stand only for a frame that made no list again in the same layout: dropped
+     * here, where the rows are replaced, so a refusal further down can't leave them for rows they don't belong to.) */
+    if (!by_rows || !see_jobs.empty() || !layout_same) rows.see_frame_ok = false;
+    const bool unchanged = by_rows && recordable && rows_made == 0 && layout_same && insts == &inst && rows.inst.size() == inst.size();
+    rows.valid = false;
+    if (recordable) {
+      if (insts == &keep.inst) rows.inst = keep.inst;
+      else if (!unchanged) rows.inst = std::move(inst);
+      if ((insts == &keep.inst || !unchanged) && card_instances_ == &rows.inst) card_instances_ = nullptr;  // (new contents at the old address)
+      if (insts == &inst) insts = &rows.inst;
+      rows.rows = std::move(new_rows), rows.see = std::move(new_see), rows.deps = std::move(new_deps);
+      rows.card = g, rows.global = rows_global, rows.ids_gen = card_ids_gen_, rows.valid = true;
+      if (!by_rows) rows.whole_call = gpu_calls_;
     }
     prof_.ms_gpu_instances += std::max(0.0, gather_timer.ms() - ms_corners - ms_see);
   }
@@ -1752,7 +1959,12 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
   gpu::RasterFrame fr;
   {
     ScopedTimer sort_timer;
-    see_through_to_frame(see, fr.see_through);
+    /* Round 471: no see-through list was made again and every row is in its place - the sorted corners are the last
+     * frame's (taken back from the frame after the render; a refusal in between leaves none kept). */
+    const bool see_same = by_rows && rows.valid && rows.see_frame_ok && see_jobs.empty() && layout_same && !see.empty() && rows.see_frame.size() == see.size() * 3;
+    rows.see_frame_ok = false;
+    if (see_same) fr.see_through.swap(rows.see_frame), see_frames_kept_++;
+    else see_through_to_frame(see, fr.see_through);
     ms_see += sort_timer.ms();
   }
   prof_.ms_gpu_see += ms_see;
@@ -1849,6 +2061,7 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
     else ok = g->render_read(fr, color, depth, ids, &err);
     prof_.ms_gpu_render += render_timer.ms();
   }
+  if (ok && rows.valid && !fr.see_through.empty()) rows.see_frame = std::move(fr.see_through), rows.see_frame_ok = true;  // (round 471)
   if (ok && defer_planes) scene_planes_slot_ = slot, scene_planes_w_ = rt.width, scene_planes_h_ = rt.height;
   if (ok) {  // (task 0204: the card's times of the frames left running that finished meanwhile)
     const gpu::RasterTimes at = g->take_async_times();
@@ -2065,6 +2278,8 @@ void Editor::gpu_view_drop() {
   mesh_owner_shown_.clear();
   gpu_textures_.clear();
   for (InstanceKeep &k : instance_keep_) k.valid = false;  // (round 458: their card ids went with it)
+  for (InstanceRows &r : instance_rows_) r.valid = false, r.see_frame_ok = false;  // (round 471)
+  card_ids_gen_++;
   card_instances_ = nullptr;
   gpu_corners_.clear();  // (round 415: the blocks went with the card)
   gpu_corner_floats_ = 0;

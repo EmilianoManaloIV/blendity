@@ -1,6 +1,6 @@
 # 0034: The render mesh follows a positions-only edit in place
 
-- **Status:** accepted (task 0086)
+- **Status:** accepted (task 0086) Amended by ADR 0124 (round 470): a new split is made in place, the quick tangents are partial, evaluated meshes are settled at rest.
 - **Date:** 2026-10-15
 - **Requirements:** Q-04
 - **Relates to:** ADR 0022 (deforming modifiers move positions in place), task 0083 (the measurement)

@@ -74,6 +74,14 @@ below the views, redoing work whose inputs did not change:
 8. **Shape keys by index**: a renderer's weights are matched to the mesh's keys when either changes, not on every
    question; the apply runs on `parallel_for`.
 
+**As built (round 470).** Decision 6 is done without a job: once nothing in the scene has changed for two frames,
+no undo step is pending and no button is held, two posed meshes a frame are marked and the next draw builds them
+(`Editor::settle_evaluated_step`). The render caches are not made for two threads, and two meshes a frame keep the
+frames at rest short; the cost is that an avatar of sixteen meshes is exact eight frames after it rests, not one.
+A mesh that only had corners split (no tangents) is settled too. The share of moved faces above which the whole
+normals pass runs stays 25 % (measured: the kept-state pass is not faster with every face moved); the whole pass's
+smooth-by-angle branch runs on every thread.
+
 ## Not decided here
 - Skinning on the card (the deform as a vertex shader or a compute pass) is not in this pass. If 16.7 ms is not reached
   after rounds 469-474, round 475 writes it up as the first option, with what it costs (the CPU still needs deformed

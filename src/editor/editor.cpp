@@ -727,6 +727,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   mesh_job_poll();  // (round 413: a Subdivide or DynaMesh lands as one step)
   eval_jobs_poll();  // (a slow modifier stack's result adopted)
   blockout_jobs_poll();  // (round 477: a Blockout's finished build adopted)
+  settle_evaluated_step();  // (round 470: posed meshes made exact at rest; after the jobs that land this frame)
   save_job_poll();
   shot_job_poll();  // (round 418)
   open_job_poll();
@@ -872,6 +873,11 @@ Editor::PosingList Editor::posing_parts(const FrameProfile &p, const PoseCounts 
       {"window animation", p.ms_window[(int)WindowKind::Animation]}, {"window inspector", p.ms_window[(int)WindowKind::Inspector]},
       {"window rigging", p.ms_window[(int)WindowKind::Rigging]}, {"window avatar", p.ms_window[(int)WindowKind::Avatar]},
       {"window hierarchy", p.ms_window[(int)WindowKind::Hierarchy]},
+      /* Round 471: the card's own frame, inside "gpu path" - in a world it was the unnamed half of a posed frame. The
+       * three passes are the card's time stamps; the wait is the submission beyond them (copies out, the fence). */
+      {"card shadow maps", p.ms_gpu_shadow}, {"card g-buffer", p.ms_gpu_gbuffer}, {"card lighting", p.ms_gpu_lighting},
+      {"card copies and wait", p.ms_gpu_readback}, {"card render call", p.ms_gpu_render}, {"baked corners", p.ms_gpu_corners},
+      {"see-through triangles", p.ms_gpu_see}, {"presenting", p.ms_present},
       /* (A move in place that is refused builds the render mesh whole, and its tangents with MikkTSpace: on the owner's
        * avatar that was most of a scrubbed frame's gather - so the whole builds and the copies are parts too.) */
       {"render meshes built whole", mc.ms_full_builds}, {"tangents built whole", mc.ms_tangents}, {"mesh copies", mc.ms_copies}};
@@ -894,11 +900,13 @@ Editor::PosingList Editor::posing_counts(const FrameProfile &p, const PoseCounts
       {"meshes updated in part", (double)p.gpu_mesh_partial}, {"upload KB", (double)p.gpu_upload_bytes / 1024.0},
       {"scene hashes", (double)p.scene_hashes}, {"draw items kept", (double)p.items_kept},
       {"instances built", (double)p.instances_built}, {"instances kept", (double)p.instances_kept},
+      {"instance rows kept", (double)p.instance_rows_kept}, {"instance rows built", (double)p.instance_rows_built},
+      {"see-through lists kept", (double)p.see_lists_kept},
       {"lightmap keys", (double)p.lightmap_key_hashes}, {"clip applies", (double)pc.clip_applies},
       {"clip serialisations", (double)p.clip_serialisations}, {"solver iterations", (double)pc.solver_iterations},
       {"spring chains", (double)pc.spring_chains}, {"undo steps", (double)p.undo_steps}, {"view renders", (double)p.view_renders},
       {"render meshes moved in place", (double)mc.in_place}, {"moves in place refused", (double)mc.in_place_refused},
-      {"refused for a new split", (double)mc.in_place_split}, {"render meshes built whole", (double)mc.full_builds},
+      {"corners split in place", (double)mc.in_place_split}, {"meshes settled", (double)mc.settled}, {"render meshes built whole", (double)mc.full_builds},
       {"tangents built whole", (double)mc.tangent_builds}, {"mesh copies", (double)mc.copies}};
 }
 
@@ -2103,6 +2111,37 @@ void Editor::settle_meshes() {
   if (any) ui_.redraw = true;
 }
 
+void Editor::settle_evaluated_step() {
+  const uint64_t now = edit_epoch::now();
+  if (now != settle_epoch_) {  // (something changed: a pose, a clip's frame, Play - watch for the rest after it)
+    settle_epoch_ = now;
+    settle_watch_ = true;
+    settle_rest_ = 0;
+    ui_.redraw = true;  // (the frame after, which may be the one at rest)
+    return;
+  }
+  /* A drag held still is not at rest (its commit starts the watch again), nor is any gesture with a button down - a
+   * scrub or a Puppet handle held: settled then, the next move would build and send each mesh whole. */
+  if (!settle_watch_ || pending_change_ || interacting()) return;
+  if (++settle_rest_ < 2) {
+    ui_.redraw = true;
+    return;
+  }
+  int n = 0;
+  bool left = false;
+  {
+    edit_epoch::Moved caches_only;  // (review 470: a settle's bump is no structure change - the skins' kept keys and bone tables stand)
+    scene_->for_each([&](GameObject &g) {
+      if (n >= 2) left = true;  // (asked cheaply next frame)
+      else n += g.settle_evaluated(2 - n, &left);
+    });
+  }
+  settled_evaluated_ += (uint64_t)n;
+  settle_epoch_ = edit_epoch::now();  // (the settles' own bumps are not a change to wait out)
+  settle_watch_ = n > 0 || left;
+  if (settle_watch_) ui_.redraw = true;
+}
+
 EditSelection Editor::edit_selection() const {
   EditSelection e;
   if (!edit_mode_) return e;
@@ -2147,6 +2186,7 @@ void Editor::commit_undo() {
   {
     ProfileScope settle_scope{prof_.ms_commit_settle, {}};
     settle_meshes();
+    settle_watch_ = true, settle_rest_ = 0;  // (round 470: the evaluated meshes follow, at rest)
   }
   if (stable_) carry_vertex_groups(*stable_);  // before the new snapshot: it should hold them too
   UndoState s;
