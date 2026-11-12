@@ -3,7 +3,10 @@
 # Blender-libraries clone, its builds, both suites, Linux under WSL, the audits; LMQ=1 the bake-quality section;
 # SIDERAIL=1 the SideRail comparison against Unity; POSING=1 the posing sections against the baseline and the three
 # real-content posing runs (round 468) - timed: nothing else may build or run meanwhile.
-# Usage: TAG=NNN OUT=C:/blsuitesNNN [LMQ=1] [SIDERAIL=1] [POSING=1] bash tools/dev/chain.sh
+# TEST_GROUPS="a,b" (round 493, ADR 0134) runs only those test groups and `editor` in the three suites - the round's
+# own groups; CI runs the whole suite. Without it everything runs, as before. (Not GROUPS: bash keeps that name for
+# the user's group ids and throws a value given to it away.)
+# Usage: TAG=NNN OUT=C:/blsuitesNNN [TEST_GROUPS=a,b] [LMQ=1] [SIDERAIL=1] [POSING=1] bash tools/dev/chain.sh
 W=${BL_W:-W:/blendity}
 M=${BL_MAIN:-C:/Users/trick/Downloads/blender-main/blendity}
 WSL_TREE=${BL_WSL_TREE:-/mnt/c/Users/trick/AppData/Local/Temp/claude/C--Users-trick-Downloads-blender-main/a08cffd5-528d-4068-9221-b120acf3ea14/scratchpad/wt169/blendity}
@@ -15,10 +18,42 @@ CMP=C:/blcmp$TAG  # (logs here, never the drive's root: a failed redirect there 
 mkdir -p $CMP
 WIN_W=$(cygpath -w "$W" 2>/dev/null || echo "$W")
 WIN_M=$(cygpath -w "$M" 2>/dev/null || echo "$M")
+TEST_GROUPS=${TEST_GROUPS:-}
+if [ -n "$TEST_GROUPS" ]; then
+  # Before anything is built: a list that is no list of names stops here, not after three builds.
+  echo "$TEST_GROUPS" | grep -qE '^[a-z][a-z0-9_]*(,[a-z][a-z0-9_]*)*$' || { echo "TEST_GROUPS is not a list of group names (a,b,c): '$TEST_GROUPS'"; exit 1; }
+  TEST_GROUPS=$(echo "$TEST_GROUPS" | tr ',' '\n' | awk '!seen[$0]++' | paste -sd, -)  # (a name given twice runs once)
+  case ",$TEST_GROUPS," in *,editor,*) ;; *) TEST_GROUPS="$TEST_GROUPS,editor" ;; esac  # (CLAUDE.md: the round's groups and editor)
+  echo "test groups: $TEST_GROUPS (the whole suite runs on CI)"
+fi
+
+# One build's named groups, one after another, each in its own process and test folder (as tools/run_suites.py runs
+# them; one at a time, so the same group of two builds never runs at once: Live Link's tests take fixed ports).
+run_groups() {  # <blendity_tests> <label> <its tree>
+  local exe=$1 label=$2 tree=$3 g rc dir
+  mkdir -p "$OUT/$label"
+  rm -f "$OUT/$label"/*.log  # (an earlier group run's logs would be counted with these)
+  for g in ${TEST_GROUPS//,/ }; do
+    dir="$OUT/$label/$g"
+    rm -rf "$dir"; mkdir -p "$dir"
+    (cd "$tree" && BLENDITY_TEST_DIR="$dir" BLENDITY_CACHE_DIR="$OUT/$label/_cache" "$exe" --group "$g" > "$OUT/$label/$g.log" 2>&1); rc=$?
+    echo "  [$label] $g: $(grep -E '^[0-9]+ checks, [0-9]+ failed' "$OUT/$label/$g.log" | tail -1) rc=$rc"
+    grep -E '^\[FAIL\]|^  FAIL ' "$OUT/$label/$g.log" | head -10
+    # A crash, a name the program does not know (exit 2), a run without its summary line: said, never passed over.
+    if [ $rc -ne 0 ] || ! grep -qE '^[1-9][0-9]* checks, 0 failed' "$OUT/$label/$g.log"; then echo "GROUP FAILED: $label $g (rc=$rc, $OUT/$label/$g.log)"; fi
+  done
+}
+
 cd "$W" || exit 1
 BLENDITY_NO_LTCG=1 cmd //c "$WIN_W\\build.bat release tests" > "$CMP/w_tests_build.log" 2>&1; echo "w tests rc=$?"
 BLENDITY_NO_LTCG=1 cmd //c "$WIN_W\\build.bat release stress" > "$CMP/w_stress_build.log" 2>&1; echo "w stress rc=$?"
 grep -E " error |LNK[0-9]" "$CMP/w_tests_build.log" "$CMP/w_stress_build.log" | head -5 | grep . && { echo "W BUILD FAILED"; exit 1; }
+if [ -n "$TEST_GROUPS" ]; then
+  # A name that is no group stops the chain here, before the copy and the second tree's builds.
+  for g in ${TEST_GROUPS//,/ }; do
+    "$W/dist/windows/blendity_tests.exe" --list-groups | tr -d '\r' | grep -qx "$g" || { echo "TEST_GROUPS: no such group: $g (blendity_tests --list-groups names them)"; exit 1; }
+  done
+fi
 py "$W/tools/dev/copy_w_to_main.py" > "$CMP/copy.log" 2>&1 || { tail -3 "$CMP/copy.log"; echo "COPY FAILED"; exit 1; }; tail -1 "$CMP/copy.log"
 cd "$M" || exit 1
 BLENDITY_NO_LTCG=1 cmd //c "$WIN_M\\build.bat release tests" > "$CMP/main_tests_build.log" 2>&1; echo "main tests rc=$?"
@@ -27,9 +62,16 @@ BLENDITY_NO_LTCG=1 cmd //c "$WIN_M\\build.bat release app" > "$CMP/main_app_buil
 BLENDITY_NO_LTCG=1 cmd //c "$WIN_M\\build.bat release stress" > "$CMP/main_stress_build.log" 2>&1; echo "main stress rc=$?"
 grep -E " error |LNK[0-9]" "$CMP/main_tests_build.log" "$CMP/main_app_build.log" "$CMP/main_stress_build.log" | head -5 | grep . && { echo "MAIN BUILD FAILED"; exit 1; }
 cd "$W"
-py tools/run_suites.py "$W/dist/windows/blendity_tests.exe" "$M/dist/windows/blendity_tests.exe" --out $OUT 2>&1 | grep -E "checks|FAIL|\[FAIL\]|failed" | grep -v "\[ok\]" | head -20
+if [ -n "$TEST_GROUPS" ]; then
+  run_groups "$W/dist/windows/blendity_tests.exe" w "$W"
+  run_groups "$M/dist/windows/blendity_tests.exe" main "$M"
+  LINUX_RUN="for g in ${TEST_GROUPS//,/ }; do d=/tmp/blsuites$TAG/linux/\$g; rm -rf \$d; mkdir -p \$d; BLENDITY_TEST_DIR=\$d BLENDITY_CACHE_DIR=/tmp/blsuites$TAG/linux/_cache dist/linux/blendity_tests --group \$g > \$d.log 2>&1; rc=\$?; echo \"  [linux] \$g: \$(grep -E '^[0-9]+ checks, [0-9]+ failed' \$d.log | tail -1) rc=\$rc\"; grep -E '^\[FAIL\]|^  FAIL ' \$d.log | head -10; if [ \$rc -ne 0 ] || ! grep -qE '^[1-9][0-9]* checks, 0 failed' \$d.log; then echo \"GROUP FAILED: linux \$g (rc=\$rc)\"; fi; done"
+else
+  py tools/run_suites.py "$W/dist/windows/blendity_tests.exe" "$M/dist/windows/blendity_tests.exe" --out $OUT 2>&1 | grep -E "checks|FAIL|\[FAIL\]|failed" | grep -v "\[ok\]" | head -20
+  LINUX_RUN="python3 tools/run_suites.py dist/linux/blendity_tests --out /tmp/blsuites$TAG 2>&1 | grep -E 'checks|FAIL|failed' | grep -v '\[ok\]' | head -10"
+fi
 for d in $OUT/*/; do echo "$d tests: $(cat $d*.log | grep -cE '^\[ (ok|FAIL) \]')"; done
-wsl -e bash -lc "cd '$WSL_TREE' && rm -f dist/linux/blendity_tests && ./build.sh release tests > /mnt/c/blcmp$TAG/linux_build.log 2>&1; echo \"linux build rc=\$?\"; grep -E ' error ' /mnt/c/blcmp$TAG/linux_build.log | head -3; test -x dist/linux/blendity_tests && python3 tools/run_suites.py dist/linux/blendity_tests --out /tmp/blsuites$TAG 2>&1 | grep -E 'checks|FAIL|failed' | grep -v '\[ok\]' | head -10"
+wsl -e bash -lc "cd '$WSL_TREE' && rm -f dist/linux/blendity_tests && ./build.sh release tests > /mnt/c/blcmp$TAG/linux_build.log 2>&1; echo \"linux build rc=\$?\"; grep -E ' error ' /mnt/c/blcmp$TAG/linux_build.log | head -3; test -x dist/linux/blendity_tests && { $LINUX_RUN; }"
 echo SUITES DONE
 echo "--- audits"
 py tools/test_coverage_map.py --check --widgets 2>&1 | tail -2

@@ -2,6 +2,549 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-11 (round 490): Parallel passes stop conflicting - shared-docs fragments and the integration PR
+
+**Asked:** three passes (22, 23, 24) run side by side, each a stack of pull requests on `main`, and every merge made
+the others conflict again - in `docs/USABILITY.md`, `tools/README.md`, `docs/PERFORMANCE.md` and
+`docs/ARCHITECTURE.md` - and wait for a rebuild. The owner approved a plan (2026-11-10) with two parts: the four files
+join the changelog fragments, and one script builds a single pull request that carries every green stack. **Tooling
+and docs only: no product code, no build, nothing in the editor changes.**
+
+**Changed (task 0465, ADR 0123 amended)**
+- **A round's lines for the four shared docs go in its fragment.** `changelog.d/<round>-<slug>.md` may end with
+  sections `<!-- docs/USABILITY.md -->`, `<!-- tools/README.md -->`, `<!-- docs/ARCHITECTURE.md -->` and
+  `<!-- docs/PERFORMANCE.md -->` beside `<!-- README -->`, each taking `after:` + lines, `replace:` / `with:` and the
+  new **`append:`** (a whole block at the file's end, one blank line above it; refused when its first line is already
+  there). `tools/dev/changelog.py check` verifies every operation applies exactly once and names the fragment and
+  the file when one does not; `fold` applies them in ascending round order, keeps each file's line endings, writes
+  every file or none, and deletes the fragments.
+- **`tools/dev/docs_check.sh` holds the four files to the `Docs-fold: yes` rule, for commits newer than the rule.**
+  The rule's start is the day it reached `main`: the committer date of the commit on the base's first-parent line
+  in which the script gained its `SHARED_DOCS=` list (found with `git log -S`). A commit dated earlier is exempt for
+  these four files and printed as `exempt:`; a later one is checked whether or not its branch ever merged `main`
+  (review: an exemption by ancestry would have lasted for as long as a branch stayed unmerged). Until the rule is on
+  the base, a commit is checked only when it descends from the commit of its own history that brought the list. The
+  open passes' rounds that already edited the files directly stay green; a round written after the rule reached
+  `main` is checked. The block sits apart from PR #369's exemption for commits older than the fragment rule itself:
+  `git merge-file` of this version, `main`'s and #369's merges without a conflict, and the result holds both.
+
+**Added (task 0465, ADR 0132)**
+- **`tools/dev/integrate.sh`: the integration PR.** From `origin/main` it merges the top branch of every open stack
+  whose `windows`, `linux`, `macos` and `linux-sanitizers` jobs all passed (a job gh lists twice must have passed
+  twice) - merge commits only - pushes `integration/<n>` and opens one PR on `main` whose body has "Merging this
+  also merges #..." for every PR carried, and what was left out and why. The merges are made with `git merge-tree`
+  in the object store, so no working tree is touched and a conflict leaves nothing half merged: it stops the run
+  before anything is pushed, names the two pull requests and the files, and says where it is settled (two PRs': by
+  hand on the integration branch, which the next run continues; one with `main`: on that PR's branch; or `SKIP`).
+  `git merge-tree` failing for another reason is an error, not a conflict. `CHECK=1` only reports (with `ANY=1`: as
+  if every stack were green, to see today's conflicts); `SKIP="n"` leaves a stack out; while an integration PR is
+  open a later run continues its branch with a fast-forward push and rewrites the PR's body even when there is
+  nothing to push (what is left out may have changed); `SKIP` of a stack already carried says it does nothing;
+  `NEW=1` starts the next number. It never merges a
+  PR, and every PR still targets `main` and can be merged on its own.
+- **`tools/dev/stack_check.sh` and the `stack` job accept an integration PR** (head `integration/*`) as the one
+  allowed top over several stacks. Each stack still needs exactly one top of its own, and a stack the integration PR
+  holds only part of is noted while that stack's top is not green yet and fails once it is, naming
+  `integrate.sh`; a stack wholly outside it is noted. gh failing is now an error
+  instead of "no open pull requests". The grouping and the "required jobs passed" test moved to `tools/dev/stack_lib.sh`, which both scripts source.
+- **`tools/dev/stack_selftest.sh`**: both scripts on a throwaway repository with a local bare origin and a stand-in
+  gh (never GitHub); the `stack` job runs it before the check.
+- CLAUDE.md (Documentation duties, workflow step 6), `changelog.d/README.md`, `tools/dev/README.md`, the PR and
+  task templates say the two rules. The agents' prompts (`.claude/agents/*.md`) are unchanged.
+
+**Checked:** `changelog.py --self-test` 91 passed, 0 failed on Windows and on Linux (49 before); `stack_selftest.sh`
+95 passed, 0 failed on Linux (WSL); on Windows (Git Bash) 77 of 77 before the review's fixes, not rerun after them. A fold on a copy of the tree with a sample fragment
+for all four files: `--dry-run` wrote nothing, the fold changed exactly the lines the fragments named, CRLF kept.
+`integrate.sh` was not run for real. `CHECK=1 bash tools/dev/integrate.sh` against the open PRs (2026-11-11, read-only):
+
+```
+integration/1: new, from origin/main 04f45fd1
+stack: #366 #367 #369 #371 -> left out: #371 is not green (windows: pending, linux: pass pending, macos: pending, linux-sanitizers: pending)
+stack: #372 -> left out: #372 is not green (windows: pending, linux: pending, macos: pending, linux-sanitizers: pending)
+stack: #373 -> left out: #373 is not green (windows: pending, linux: pass pending, linux-sanitizers: pending)
+nothing to integrate: no stack is green
+```
+
+and with `ANY=1` (the jobs not read): #371 and #373 merge, and #372 conflicts with #371 in `docs/USABILITY.md` -
+the kind of conflict part 1 ends for rounds written from here on.
+
+## 2026-11-10 (round 489): the docs check exempts commits older than its rule
+
+**Asked:** the `docs-fragments` job was red on Pass 24's PRs for three round commits written before the changelog
+fragments rule (ADR 0123, #365) was on `main`; of the two options put to the owner - (a) the check skips commits older
+than the rule, (b) the red is accepted - the owner chose "Option a".
+
+**Changed (ADR 0123 amended)**
+- `tools/dev/docs_check.sh` no longer fails a commit that edits `CHANGELOG.md` or `README.md` when that commit was
+  written before the rule reached its own history (it does not descend from the commit that added the script to the
+  base). It prints an `exempt:` line for each. A commit made after its branch merged `main` is checked as before.
+- What it does not check, said in the ADR: that an exempt commit's entry was moved to a fragment. Pass 24's were
+  (`changelog.d/484-`, `485-`, `486-*.md`).
+
+**Checked**
+- `tools/dev/changelog.py --self-test`: two new cases (an older commit is exempt and named; a commit after the merge
+  still fails), all passing. `docs_check.sh` on Pass 24's two open branches: three `exempt:` lines, no error.
+- No source, test or stress file changes.
+
+## 2026-11-10 (round 488): Pass 24's write-up
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
+Pass 24's last round: what the pass did about both, in one table. The owner, through the hub: "Thank you, continue and
+finish all tasks."
+
+**Added (task 0464)**
+- `docs/PERFORMANCE.md`, "Pass 24 in one table": the mirror finish (the owner's two views against Unity's own
+  pictures: 13.71 / 0.702 and 12.50 / 0.697 in the owner's session, where the maps were lost, 3.71 / 0.905 and 3.57 /
+  0.912 now, mean difference / SSIM; a fresh import that kept its maps was already 3.75 / 0.898 and 3.67 / 0.902) and
+  the splotches (147 and 133 specks before, 11 and 39 now, the bake no longer by a like-for-like pair), what each round built, the
+  marks missed, the open items ranked and each round's wall time.
+- Before / after pictures of the two views, in the sessions' notes folder and not in the repository (the world is its
+  author's).
+
+**Not done**
+- Round 487 (light cookies, the Light Volume mist, OIDN's lightmap weights) was not run: each waits for the owner to
+  ask for it.
+- The lights a texel keeps by chance spread evenly - what the 11 and 39 specks left are - is a round of its own.
+
+**Checked**
+- No source, test or stress file changes; the suites are round 486's. `tools/dev/changelog.py check` passes.
+
+## 2026-11-10 (round 486): the bake's specks
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
+Pass 24's third round: the splotches. Round 484 measured them as specks (small round spots one bake has and the next
+has not) and named a lead; the owner approved the pass's specs ("Continue and finish all tasks, I approve all specs
+from all passes.").
+
+**Fixed (task 0462, ADR 0122 amended)**
+- **A bake leaves far fewer specks.** A texel lit by two or three of its thousand gather rays - the ones that met a
+  small bright patch - is luck, and the bake's filter should spread it into its neighbours. It did not: since round 465
+  the filter took a Sobol-sampled texel's measured noise for an eighth of itself (at 1024 samples), which is right for
+  light that fills the hemisphere and wrong for light a few rays carry, so the lucky texel passed for steady light.
+  The filter (and the firefly clamp) now read each texel's noise by how many of its samples carry its light - its
+  light squared over its samples' variance: the samples' own noise up to 16 such samples, round 465's scale from the
+  sample count on, a smooth curve between. On SideRail (lights linear, round 485's materials, two seeds) the specks at
+  the owner's two views fall from **90 and 71 to 11 and 39**, the grain from 0.190 to 0.181, the blotch from 0.055 to
+  0.053; the bake takes what it took (38.8 s against 38.9 s, like for like in one queue).
+- What is left - 11 and 39 - is about what round 484 measured for the direct light alone: the lights a texel keeps
+  by chance. That is the next round's (the picking spread evenly), not this filter's.
+
+**Bake again.** A saved bake is not marked out of date by this change: Generate Lighting once more to get it.
+
+**Changed**
+- Preview Lighting's filter reads the noise the same way.
+- The change is in Blendity's own filter. Where OIDN's lightmap filter runs instead (not today: it has no lightmap
+  weights), the specks must be measured again before it becomes a bake's own.
+
+**Added**
+- `lighting variancescale auto|on|off` (console; as `lighting pick`: the next Generate Lighting, not saved, not in the
+  scene's key): `on` is rounds 465 to 485's reading - round 485's SideRail bake byte for byte, both seeds - `off` the
+  samples' own noise everywhere (it blurs detail in dim places: the tunnel's error 7 % up); `clamp`, `snr` and `step`
+  are the round's measured candidates.
+- `gather_variance_read` (`render/lightmapper.h`): the rule, on its own for tests.
+- Stress `lightmap_quality`: a table of the old and the new reading on every scene.
+- Learn, "A bake's noise, measured": what a speck is, why the filter let it through, two questions, two Try-it steps.
+
+**Not built, and said in the task:** the largest-sample sums and batch means (the texel's own signal to noise does
+it, with nothing new from the card); a lower gate for the firefly clamp (the clamp changes no texel under any
+reading); the lights kept by chance spread evenly (a round of its own, `lamp_hall` its mark).
+
+**Marks missed, and said in the task:** at 2048 samples the tunnel view counts 47 specks against 39 at 1024 - one
+past "within a fifth" (grain and blotch fall: 0.146 / 0.047); against Unity with Blendity's own bake the dark station
+`spawn_back` reads SSIM 0.798 against 0.804, 0.001 past the mark, its grid correlation up from 0.953 to 0.959 - the
+other five stations are within it and the owner's two views a hair better (6.80 / 0.879 and 6.15 / 0.899 against 6.81
+/ 0.877 and 6.15 / 0.898). On the CPU path, where the sky lights a texel, the rule leans towards the old reading (the
+review's finding; a follow-up).
+
+**Checked**
+- Unit: 11 tests for the round (`tests_round486`, `tests_round486_independent`: two seeds' bakes of a small lamp only
+  the gather finds differ by less than 0.6 of what they did, more samples make fewer specks, a steady glow keeps its
+  peak, the rule on hostile numbers, few-sample and plain-random bakes bit for bit as before, the verb's words). Full
+  suite: Windows dependency-free 24,430 checks, 0 failed; Windows with Blender's libraries 25,344 checks in 1,918
+  tests, 4 failed - the four GPU picture comparisons that fail on this machine's card on `main` too; Linux 24,436, 0
+  failed. `tools/test_coverage_map.py --check`: nothing untested.
+- Stress `lightmap_quality` (relative RMSE against the reference, old reading -> new): room 0.0133 -> 0.0133 (1024
+  samples: 0.0119 -> 0.0119), corridor 0.0039 -> 0.0039, tunnel 0.1033 -> 0.1061 (1024: 0.0581 -> 0.0569), courtyard
+  0.0071 -> 0.0071, hall 0.0433 -> 0.0433; bias unchanged to 0.0001; the tunnel's grain 0.062 -> 0.052. No problem
+  counts in this section.
+- test-engineer: five tests, one finding (a few-sample bake one float step off the old one) - fixed, the test made
+  bit for bit. code-reviewer: approved; its five minor findings and three nits fixed or written into the task and
+  the ADR.
+
+## 2026-11-10 (round 485): Unity materials keep their maps and their gloss
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." -
+Pass 24's second round, cut from round 484's tables: the mirror finish. The owner approved the pass's specs ("Continue
+and finish all tasks, I approve all specs from all passes.").
+
+**Fixed (task 0461, ADR 0131)**
+- **A world no longer comes in as mirrors after importing its package.** A Unity material read while its package was
+  still unpacking found none of its textures (the package's GUID table is written last) and kept Metallic 1, Roughness
+  0 and no maps until Blendity restarted - the Materials window, open, read every `.mat` it saw. Now the list of the
+  project's materials leaves out a folder that is still unpacking, and where the import ends every Unity material
+  already read under it is read again, in place: the objects wearing it, the Inspector and the Materials window follow
+  with nothing to redo. In the real window, with the Materials window open as the owner has it, five imports of
+  SideRail's package: no material read early, all 38 linked with their maps (round 484: maps lost in 6 of 7 runs).
+- **Deleting an imported folder and importing the package again** in one session brings its materials back (the
+  folder's "deleted this session" marks are cleared where the import ends). Before, none loaded until a restart.
+- **The shader's keyword decides, as in Unity** (Standard, Filamented, URP Lit): a texture left in the Metallic slot
+  without `_METALLICGLOSSMAP` (URP: `_METALLICSPECGLOSSMAP`) is ignored and the sliders count; a slot a keyword names
+  and nothing fills is Unity's white texture.
+- **A smoothness kept in a map comes in**, as one number a material: Roughness = 1 - the mean of the alpha Unity's
+  shader samples (the metallic map's, or the albedo's under `_SMOOTHNESS_TEXTURE_ALBEDO_CHANNEL_A`) x its scale. A worn
+  wall is as rough as Unity shades it on average; it is not yet glossier in its polished patches than in its dust
+  (ADR 0131: a channel on the texture slot is the later step). On SideRail, of the 38 Unity materials the scene wears,
+  "smoothness dropped" goes from 10 to 0, and the two views the owner looks from read 3.71 / 0.905 and 3.57 / 0.912
+  against Unity with Unity's bake (3.75 / 0.898 and 3.67 / 0.902 before) - round 484's by-hand mark.
+- **16-bit PNGs read as stored in the build with Blender's libraries** (libpng is asked for the file's own samples):
+  one half reads 128 / 255 in both builds, not 186.
+- **A Unity `.mat` is never written over** (found by the round's review, older than the round): a scene opened while
+  its package's folder was missing kept its own copies of the materials, and once the folder was back the next edit
+  wrote Blendity's text over each Unity file. Such a copy is now read from the Unity file where an import ends (or on
+  Reimport Unity Materials), and is not written while a Unity file is at its path.
+
+**Bake again.** Lightmaps baked while the materials had no maps, or with the brighter 16-bit textures, were lit by
+those materials, and a bake is not marked out of date by a material's maps: Generate Lighting once more after this
+round.
+
+**Added**
+- **`.unity-stats`** beside a package folder's `.unity-guids`: a line for each texture a material reads its gloss
+  from - GUID, the file's bytes, width, height, mean R G B A. The unpack's worker writes it; for a package unpacked by
+  an older Blendity the maps are measured by one background job when its scene opens (the job tray: "Reading Unity
+  materials' gloss"; at once in a headless run) and the materials that asked follow - no others. No image is decoded
+  on the main thread for a material's values. On SideRail the unpack's worker took 2.3 to 3.4 s for its 14 maps and
+  the job 2.3 to 2.6 s for 13 (both with two other passes building beside them; the decode alone is 1.6 s), and the
+  frame that takes the job's result cost 30 to 40 ms, once. Opening the scene takes what it took: 2.23 s against
+  2.23 s for round 484's build over the undisturbed turns of eight.
+- **Assets > Reimport Unity Materials** (`unity rematerials`): every Unity material read again from its file, at once;
+  it says how many changed. Reading again is not an edit - no undo step, the scene not marked changed, and the copies
+  the undo history and Play's Stop keep take the new reading too, so neither brings the early one back. A value typed
+  on a Unity material in the session is replaced by the file's, as at a restart; the Materials window's tooltip on a
+  Unity material says so.
+- **Learn:** "A Unity material's gloss, and reading materials again" (a Try-it, two questions).
+
+**Changed**
+- Round 484's tests that pinned the faults now pin Unity's numbers, each saying what it pinned before; the committed
+  set gains its `.unity-stats`, and `blendity_today.txt` / `expected.json` hold round 485's reading.
+  `tools/unity_materials.py` counts a texture left in the slot as a fault only when Blendity went by it, checks the
+  committed table against its own reading of the PNGs, and keeps round 484's reading as a case of its self-test.
+- `unity materials all` in a headless run measures the gloss maps of the materials it has just loaded before it lists
+  them.
+- A scene that wears a material whose Metallic slot held a texture without its keyword asks for a new bake once: its
+  lighting was baked with that surface as metal.
+
+**Not done (by design):** smoothness per texel; reflections off, highlights off and occlusion maps (Blendity's material
+has no property for them); the lamps', glass's and mirrors' own shaders; URP Lit's and Standard's specular setups; a
+scene saved while its materials were the models' own (opening the `.unity` again is the repair); the lights' intensity
+in a project made from a package (the owner's decision, as round 484 put it). Not reached by a test: Cancel in the job
+tray itself (the landing of a cancelled job is tested).
+
+**Checked:** both Windows suites - dependency-free 23,541 checks, 0 failed; with Blender's libraries 24,455 with the
+four worktree `gpu` picture comparisons failing as in rounds 463 to 484 (the same four, not this round's); Linux (WSL,
+GCC) 23,547 checks, 0 failed; the audits; both tools' self-tests; the test-engineer's ten independent tests (two
+packages sharing a GUID, a package imported over itself, hostile tables, unreadable maps, 16-bit PNGs of every colour
+type, the import settings' Alpha Source; no product fault found); the code review (changes needed, all applied: a
+landing read every Unity material again, Stop undid a landing made in Play, a stand-in copy could be written over a
+Unity `.mat`, a landing could write the table beside an unpack; and one fault the round's own tests found after it -
+a mean held more digits in the session that measured it than in the table). SideRail in scratch copies: the five
+windowed imports, delete-and-import-again (38 linked), a project unpacked by round 484's build (the job, 38 linked),
+the materials table (smoothness dropped 12 -> 0, slot without keyword 1 -> 0, decoders differ 4 -> 0 of 57), the six
+stations with Unity's bake (the owner's two at round 484's by-hand mark, the other four unchanged). The owner's four
+folders have no file changed; the tests' own import cache left four small folders in `~/.blendity/cache/import`, as
+earlier rounds' did (a follow-up). Not done on a quiet machine: every timing above.
+
+## 2026-11-10 (round 484): SideRail's mirror finish and splotches, reproduced and measured
+
+**Asked:** "Baked lighting looks really weird here, its like it has a mirror finish and there is splotches still." (the
+owner's imported VRChat world SideRail, against its reference). Pass 24's first round: name each cause with evidence
+before anything is fixed. **This round changes no behaviour** - one log line apart (below).
+
+**Found (task 0460; the tables are in `docs/tasks/0460-siderail-look-measured.md`, "Results")**
+- **The mirror finish in the owner's screenshots is materials read without their textures.** A Unity `.mat` read before
+  its package's GUID table exists gets Metallic 1, Roughness 0 and no map; the table is written last while a package
+  unpacks, the Materials window loads every `.mat` it sees meanwhile, and the asset library keeps what it read until
+  Blendity restarts. Reproduced on main in the real window: `ConcretePanel` without its maps in 6 of 7 runs, 17 to 37 of
+  the scene's 38 Unity materials without any (10 is right). At the owner's two stations the picture goes from 3.75 /
+  0.898 and 3.67 / 0.902 (MAE / SSIM against Unity) to 13.71 / 0.702 and 12.50 / 0.697. **Until round 485: restart
+  Blendity after importing a package** (or keep the Materials window closed while it unpacks).
+- **Deleting a package's folder and importing it again in one session** leaves a Unity scene with none of its Unity
+  materials (the models' own instead), until a restart.
+- **Smoothness is dropped** where Unity keeps it in the metallic map's alpha: 10 of the 38 Unity materials the scene
+  wears (181 renderer slots) come in at roughness 0 where Unity shades roughness 0.24 to 0.76. Set right by hand, F12's
+  picture moves little (3.74 / 0.905 and 3.58 / 0.912).
+- **16-bit PNGs are read brighter by the build with Blender's libraries** (libpng's simplified interface takes them as
+  linear light: one half reads 186 / 255, not 128): 14 of SideRail's textures, 7 of them on materials - the plank
+  floor's colour, mask and normal map among them. The dependency-free build reads them as Unity does.
+- **The lights' intensity:** a project made from a package has no Unity `ProjectSettings`, so its lights are taken in
+  gamma, silently; SideRail's own project is linear. With Blendity's own bake the owner's two stations then read 17.76
+  / 0.734 and 16.40 / 0.761 against Unity where the linear bake reads 6.64 / 0.863 and 5.97 / 0.885, and are 2.9 and
+  2.6 times as bright - the largest single fault there. Whether such a project should take its lights linear is the
+  owner's decision.
+- **The splotches are mostly not the lights kept by chance** (the plan's cause, and Pass 21's note): with every light
+  kept at every texel SideRail's bake has the same grain and blotch (0.384 / 0.251 against 0.382 / 0.251). They are
+  **specks** - small round spots in one seed's bake and not the other's, about 140 a view at the owner's stations (800
+  unfiltered, 330 in the owner's own session with no maps and the lights in gamma). About 100 are in the gathered
+  bounce and about 20 are lights kept by chance; the emitters and the texels filled from their neighbours are not it.
+  **More samples make them worse** (271 and 210 at 2048 samples, 59 and 78 at 256): the lead for round 486 is that the
+  bake scales the noise it measures for Sobol samples (to an eighth at 1024), so its firefly clamp and its filter take
+  a texel's few rare bright samples for steady light.
+
+**Added (measuring only)**
+- **`unity materials [all] [to "<file>"]`**: what Blendity made of every material the scene wears, as text;
+  **`unity mapstats [decoders] "<image>"...`**: an image's channel means as it is decoded, and with `decoders` as
+  Blendity's own decoder reads it (a script's verb: refused in a window).
+- **`lighting pick on|off|<rays>`**: how many Baked point and spot lights a texel keeps by chance in the next Generate
+  Lighting (8: the bake as before; `off`: every light); a bake that picks says how many lights a texel kept and
+  dropped - the one line a default bake's log gains.
+- **`tools/unity_materials.py`**: every Unity `.mat` of a project beside what Blendity made of it - Unity's metallic
+  and roughness by the shader's own rule, Blendity's, a fault class per material, the images two decoders read
+  differently; `state` puts a scratch project into a test state (no maps; Unity's values by hand; 16-bit PNGs as
+  8-bit).
+- **`tests/fixtures/unity_gloss/`**: twelve small Unity materials of our own, one per fault, with Unity's values worked
+  out by hand; the folder is checked out byte for byte (`.gitattributes`).
+- **`tools/unity_compare.py`**: `--bake-cmd`, `--lights-as-imported`, `--reuse-unity-lightmaps`; `noise`, a bake's
+  noise at seeds 0 and 1 without Unity; and at each station the two bakes' own grain, blotch and **specks** (spots
+  where the two pictures differ by over half the picture's mean light).
+- **Stress `lightmap_quality`: `lamp_hall`** - a hall lit by 72 Baked lights whose reference keeps every light, with the
+  bake at `pick` off / 8 / 16 / 32: there the picking is the noise (4.8 times the blotch of keeping every light), which
+  on SideRail it is not. The four older scenes' rows are unchanged to the last digit.
+- **`decode_image_own`** (`image.h`): Blendity's own decoders whatever the process's codec switch says.
+- **Learn:** "A Unity material beside Unity's own values" (a Try-it, two questions); "Many lamps" in "A bake's noise,
+  measured" (two questions, two Try-its).
+
+**Kept exactly:** a bake at the defaults saves the same pages, byte for byte, from main's build and from this round's
+(a room with twelve Baked lights; four files). It did not at first: with the rays a run-time number MSVC ordered one
+expression another way and two bytes of one page differed, so the default path keeps the constant and the measuring
+path is a function of its own, never inlined.
+
+**Not done (by design):** nothing is fixed; rounds 485 and 486 are specified from these tables, and 486 is cut again
+(the plan's stratified light picking would not touch most of SideRail's specks). Not taken as timings: the bake at
+`pick off` and 16 (another worker's build ran beside them) and the stress section's times. Not run: the reproduction
+with the Project window in place of the Materials window. The lights' intensity in a project made from a package is put
+to the owner, not changed.
+
+**Checked:** both Windows suites - dependency-free 23,199 checks, 0 failed; with Blender's libraries 24,114 (the four worktree `gpu` picture comparisons, as rounds 463-466, and in one of two runs
+the slow-open test while another worker used the card);
+Linux (WSL) 23,205 checks with one failure while the machine was baking - "Live Link never pauses the editor", round
+382's tick-time bound - which passes alone; the audits; both tools' self-tests; the code review (changes needed, all
+applied: the committed materials checked out byte for byte, a decoder entry that leaves the process's switch alone, the
+tools refusing a project that is not a scratch copy); stress `lightmap_quality` - `lamp_hall` 0.043 / 0.0327 / 0.0096
+(relative RMSE / grain / blotch), 4.8 times the blotch of every light kept, the four older scenes as Pass 21 left them;
+SideRail in scratch copies - the tables of the task's results; the owner's folders untouched.
+
+## 2026-11-10 (round 476): Blockout's kernel - pieces built into one mesh, measured
+
+**Asked (Pass 23, task 0452, ADR 0128):** "meta-ball like modeling but with primitives", and "rooms such as rectangles,
+cylinders" that combine the same way - a **Blockout**: pieces that add to, cut from or melt into one mesh, rebuilt
+while they are dragged. This first round builds the function that makes the mesh and measures it, before anything in
+the editor is built on it: can 100 pieces be rebuilt fast enough to drag one, and can a build without Blender's
+libraries - which has no boolean at all - make flat walls and square corners?
+
+**Added (nothing the editor shows yet: no object, no tool, no command - those are round 477)**
+- **`blockout::build`** (`src/scene/blockout.h`): pieces in - a box, cylinder or sphere, Add or Subtract, a Blend
+  radius, a matrix - and one closed mesh out, with the piece and the side each face came from. A function of its
+  arguments: no scene, no global, the same bytes for the same pieces on one thread or all of them, a cancel flag, so a
+  worker thread can run it. Pieces that touch form a cluster; clusters are built side by side and kept in a cache the
+  caller holds. A piece that cannot be used (a number not finite, no size, a flattening matrix, a part too small or a
+  faceting too fine for a mesh's 32-bit positions where it lies) is skipped and named; a refusal leaves the caller's
+  mesh untouched.
+- **The crisp path** (with Blender's libraries): every Add piece to Manifold in one batch, every Subtract piece in a
+  second, each triangle carrying its piece and side. Faces in a plane square to the axes are handed over to the bit,
+  so Manifold's own rule for faces that coincide applies: pieces that share a face are one solid, a cut flush with a
+  face goes through it, a cutter that only touches takes nothing. A building turned as a whole inside its Blockout is
+  handed over in its own frame and is as exact; only planes at an angle even to that frame get a hair's shift.
+- **The field path** (every build; the only one without the libraries): a grid fixed to the Blockout's space, made
+  only near the pieces' surfaces; each grid point inside or outside by the pieces' own tests; cells that would pinch
+  the surface filled in; one point a cell, one quad across each grid edge that changes side, each quad knowing the
+  side it lies on. The grid gives only how the faces connect - where their corners lie is worked out from the sides'
+  planes.
+- **One face maker for both paths:** faces of one plane that touch become one face, corners are put exactly where
+  their planes meet, a face with holes is cut into convex faces. Where the cell resolves the pieces, the field path
+  gives the crisp path's faces corner for corner: `interior 100` (36 rooms with 0.2 m walls and 28 doors) is 392 faces
+  and 520 points by Manifold and by the grid at 0.2, 0.1 and 0.05 m, flat to the bit, its volume right to a millionth.
+  Where it does not - parts thinner than the cell, pieces that pass closer than a cell without touching - the place
+  is counted as unresolved, its faces stay small and say so (`Faces::flat`), and the mesh is closed all the same.
+- **Stress section `blockout`** (`stress/stress_blockout.inc`): rooms (`interior` 10 / 100 / 400 pieces, one cluster),
+  piles (`scatter`), a heap, by each path and at three cells - a build, a build after one piece moved, until the
+  result can be drawn; a blended row; and a sweep of 2,000 hostile arrangements a kind, six kinds.
+
+**The numbers** (`docs/PERFORMANCE.md`, "Pass 23"; this machine, 32 threads, the kernel on a worker thread, 10:22-10:25
+with nothing else building or running)
+- `interior 100`, from a door moving until the new mesh can be drawn (the line: 100 ms): **11.3 ms** by the crisp
+  path; by the field path 13.4 ms at a cell of 0.2 m, **40.8 ms at 0.1 m** (48.6 ms in the dependency-free build),
+  181 ms at 0.05 m (over).
+- `interior 400`: 39 ms crisp; field 46 ms at 0.2 m, 182 ms at 0.1 m.
+- `scatter 100` from one piece moving until the mesh can be drawn (its pile built again, the other 24 from the
+  cache): 7.9 ms crisp, 8.9 ms field.
+- `heap 100` (100 pieces through one spot): 131 ms crisp, 47 ms field at 0.1 m.
+- What the main thread pays when a mesh lands (its first render mesh): 0.15 ms on `interior 100`.
+- A blended pile (a Blend radius on every fifth piece of `scatter 100`): closed at every cell, 35 ms at 0.1 m.
+- **ADR 0128's choice is settled by its own rule:** without the libraries `interior 100` at a cell of half the wall is
+  flat, square, has no unresolved place and fits the budget, so the field path stands there and no exact boolean of
+  our own is built. The ADR is accepted with the numbers, and lists what the rule did not ask (next paragraph).
+
+**Not done / known limits**
+- The field path needs a cell no larger than half the thinnest part; pieces turned against the Blockout's axes need
+  about a sixth; faceted round pieces need facets of two cells or more - `scatter`'s spheres and cylinders leave
+  thousands of unresolved places at 0.1 m. In an unresolved place a small face can lie on a neighbour (2 of 2,000
+  hostile arrangements of boxes along the grid, 42 of turned boxes, 185 of any pieces); two flat faces never do.
+- The crisp path can leave a flat face of three points in a line where a cut is flush along a face's edge (2 of 2,000
+  arrangements of boxes, 6 of turned ones).
+- 400 pieces at a cell of 0.1 m take 185 ms without the libraries: over the line.
+- A connected interior is one cluster, so the cache saves nothing when a door moves: the interior is rebuilt whole
+  (which is what the table times).
+- The face maker runs on one thread; it is about half of the field path's time.
+- A Blend radius sends its whole cluster to the field path. Round 481 makes blends a feature and decides where a
+  blended part ends inside a building (ADR 0128's open point).
+
+**Checked:** the suites on the final sources - dependency-free 23,684 (Windows) and 23,690 (Linux, WSL), 0 failed;
+with Blender's libraries 25,372, 4 failed: the four `gpu` picture comparisons that fail in every worktree's
+libraries build (`tests/test_gpu.cpp:887` twice, `:2226`, `:4821`; Passes 21, 22 and 24 report the same, and nothing of
+this round is in their path); the `blockout` group under ASan + UBSan (698 checks, 0 failed, before the fifth
+review's change); the audits; the sweep of
+2,000 arrangements a kind: 0 problems on each path (12,000 builds, none refused); stress on Linux - `pushpull`
+26,608 / 0 / 394, `modifiers_ngon` 11,514 / 0, `curved` 5,036 / 3 / 68, `editor_ui`: main's numbers (this round
+touches no existing source file but two lines each in `tests/test_main.cpp` and `stress/stress_main.cpp`). A first
+timed attempt at 09:54 ran beside another pass's stress run and was thrown away. Found by the test engineer and the
+review (five passes; after the fifth, which changed one rule of the crisp path and added a test, the `blockout` group
+and the sweep were run again in every build and the other groups' counts carried over), fixed in the round: holes in a row left a face in thousands of pieces; a Blend radius had no
+limit, nor had the grid it asked for; a speck 6 km from the origin came out with its faces on top of each other;
+growing every solid by a hair to make touching faces meet left faces of no area; a cutter's side was judged by all its
+plane holds instead of by the faces it lies on, and then by those faces' bounds instead of their figures.
+
+## 2026-11-10 (round 469): A skinned mesh is deformed once, and only when its own bones moved
+
+**Asked:** Pass 22's second round (task 0445, ADR 0124), from round 468's table: posing an avatar re-skinned every mesh
+of it for any bone, once for each kind of view, and again while the whole avatar was only being moved; every question
+about a skinned mesh walked its whole armature.
+
+**Changed (task 0445, ADR 0124)**
+- **An avatar nobody touches costs a comparison.** A skin keeps its cache key while nothing under its character moved
+  and the scene's structure holds (`GameObject::below_version`, bumped on a written object and its ancestors;
+  `edit_epoch::structure()`, every change that is not a move). A prop of the world dragged, another character posed, the
+  camera flown: no skin of this character looks at a bone. Every 64th kept answer is checked against a fresh walk (every
+  one with `BLENDITY_RENDER_CACHE_VERIFY`); a miss is counted (`skin_keys_stale`) and put right.
+- **Only what a bone is bound to.** The key reads the bones the mesh has weights on, not the whole armature: turning a
+  finger no longer re-skins the hair, the skirt and the shoes.
+- **Moving the whole character re-skins nothing.** Everything a skin computes is measured from the character - the
+  nearest object above both the mesh and the armature - so moving, turning or evenly scaling it changes no key and no
+  vertex. With an uneven scale there, or no such object, the skin works in world space as before.
+- **One mesh for the views that agree.** The Scene view, the Game view and a render that would evaluate the same stack
+  with the same shape weights share one evaluated mesh: one deform and one upload instead of one per kind of view.
+- **Each vertex's bones are looked up once.** The deform read every vertex group for every vertex on every frame; it
+  now reads a table built once a mesh (`SkinBinding`), rebuilt when the weights, Max Influences or the rig's bones
+  change. The arithmetic is unchanged.
+- The Profiler's Posing block and `perf frames` show `skin keys kept`, `skin keys stale` and `skin bindings`.
+- Live Link: a mesh no bone moves is no longer sent again when a bone of its rig turns (the recorded session's Face:
+  5 deform messages where there were 7).
+
+**Fixed**
+- **A posed mesh could stay undrawn in Play, for as long as it moved.** The mesh upload budget of round 458 (meshes new
+  to the card wait for a later frame once a frame has spent 4 ms or 16 MB on them) counted a posed mesh that is rebuilt
+  whole as new on every frame, so the last of an avatar's meshes waited again and again and was left out of every frame.
+  Found by this round's timed run (the owner's avatar in Play in the owner's world: one row waited 40 minutes). An
+  object the card has shown is never left waiting again; another scene opened is budgeted afresh.
+- `--windowed-check` says what it is waiting for when its scene has not settled after 2000 frames.
+
+**Not in this round** (the spec had them): shape keys matched by index (round 468 measured them under 1 ms a frame),
+and a hand-over of the binding to the worker evaluation (a skin is never evaluated on a worker).
+
+**Checked:** the unit suite: Windows without the libraries 24,244 checks, 0 failed; Windows with them 25,941, the same 4 `gpu` picture checks failing as on main (`test_gpu.cpp:887` twice, `:2226`, and round 455's Lanczos picture); Linux 24,250, 0 failed. Three Live Link checks that assert a time or two streams' equality (`test_livelink.cpp:571`, `:2208`, `:2278`) failed in some runs while other sessions were building on the machine and passed in the quiet ones; they are not this round's and are listed for the write-up. Stress `vgroups`, `modifiers_ngon` (0 problems), `animation` and `editor` ran to their end. The audits pass. Code review: approved (the skinning, then the upload fix on its own).
+
+**Measured:** `docs/PERFORMANCE.md`, "Pass 22: skinning once, and only what moved". On the stand-in (a window on the card): an IK-target drag 48.4 -> 9.9 ms alone and 66.5 -> 21.8 ms in the world; the chest turned 49.9 -> 36.0 and 65.2 -> 46.7; a clip playing with a Game view 42.1 -> 25.6 and 82.4 -> 45.2. The owner's avatar (measured locally): the whole avatar moved 50.7 -> 5.5 ms alone and 82.8 -> 17.1 ms in the owner's world (0 meshes skinned where there were 13); a leg 33.8 -> 14.4 and 58.1 -> 30.5 (4 meshes skinned, not 13); scrubbing with a Game view 140.4 -> 66.9 and 173.7 -> 95.0; Play with the springs 73.8 -> 43.5 and 108.4 -> 72.0. No posed row reaches 16.7 ms in the world yet. `perf_suite.py --check` against round 468's baseline: 0 findings; against this round's new baseline it fails on one "clip playing" row (Live Link with a client, 35.9 then 45.8 ms, both runs quiet) - the two states of a playing clip that round 468 found, round 472's. `stress/results/baseline.md` holds this round's `posing` and `animation` sections.
+
+## 2026-11-10 (round 468): Posing, scrubbing and playback, measured
+
+**Asked:** Pass 22's first round. The owner reported a low frame rate while using IK handles, Puppet Posing, playback
+and scrubbing on their avatar, and wasn't sure the world around it matters. Nothing measured any of it. **This round
+measures: nothing is faster and no picture changes. What changes in behaviour: a crash is fixed; and while a `perf drag`
+script plays (a developer's console command) the system's mouse and keys are replaced by the script's, in the main window
+alone, and a press is never a double click.**
+
+**Fixed**
+- **A Puppet drag after an undo could crash** (found by the new stress section, on the card): AutoPosing keeps the body
+  model between drags, keyed by its values; an undo puts a copy of the scene in place - the same values, other objects -
+  and the next drag's solver walked the kept model's bones, which the next edit had freed (an access violation in
+  `body::hips_of`; without the crash, a pose solved from a stale body). The Centre of Mass's body had the same flaw and
+  read its armature every frame. `body::rebind` points a kept body at the open scene's bones again; nothing is weighed
+  again.
+
+**Added (task 0444)**
+- **The frame's parts while posing**: `PoseCounts` (`src/scene/pose_counts.h`; the skin's cache key and deform, shape keys,
+  evaluations, outline shells, `solve_constraints` with its FK / IK / VRChat parts and name walks, `apply_clip`, the
+  AutoPose solver, the springs) and new `FrameProfile` fields (Record, anim apply, trails, AutoPosing, the Puppet controls,
+  the rig overlay, mesh uploads, `commit_undo` and its parts), shown in a "Posing" block of the Profiler and printed by
+  `perf status`, `perf drag` and `--windowed-check`. `MeshCounts` also counts the in-place moves of a render mesh that were
+  refused (and of them those refused because a vertex's corners no longer share a normal) beside the render meshes and
+  tangents built whole.
+- **`perf drag gizmo | puppet | key | ruler | at`, `perf clip`, `perf pick`**: a drag played as real mouse and key events
+  through the editor's own input path, logged with the press, first-move, mean, longest and release frames and the parts of a
+  drag frame. `perf frames N` now also logs the posing parts and counts over the frames it stepped. `perf pick` and
+  `perf clip` find the rig above the active object, below it (an imported character's root) or anywhere in the scene.
+- **`benchscene avatarlike | avatarworld`** (and the `quick` names; `src/editor/bench_avatar.cpp`): a stand-in avatar of
+  Shinano's size built from Blendity's own shapes, deterministic - `create_rig`'s humanoid with its four IK limbs grown to
+  292 bones (fingers, toes, eyes and jaw, twist and helper bones, hair, skirt, tail, ears, ribbons), 15 skinned meshes and
+  1 plain one of 139,912 triangles (at most 4 weights a vertex; vertex groups only for the bones that move a mesh), 60
+  spring chains each with a PhysBone's settings kept beside it, 28 VRChat rotation constraints that name their sources and
+  move nothing at rest, 2 to 4 toon materials a mesh (a third with normal maps), outlines on 12 meshes, 70 shape keys and a
+  clip that keys every bone; built in about 0.2 s. The quick one: 61 bones, 5 + 1 meshes, 19,440 triangles, 9 chains,
+  4 constraints, 10 shape keys. `avatarworld` stands it in `worldlike`.
+- **Stress section `posing`** (named-only: it runs minutes; `stress/stress_posing.inc`): the avatar alone, the world alone and
+  the avatar in the world with its lighting baked, each with the views on the CPU and on the card (when there is one): idle,
+  orbiting, the Rotate gizmo on a bone IK doesn't turn, the Move gizmo on an IK target and a pole, a Puppet handle, G and R,
+  a scrub, the clip playing, Play with the springs; the press, first-move and release frames; cold first use; fourteen settings
+  (Record, Preview off, the Game view, Other Views Follow Drags, trails / onion skins / zoetrope, Centre of Mass, the Avatar
+  and Rigging windows, the Inspector, Realtime GI Automatic / Manual, Live Link with a client, surface snapping, F12 Live
+  Preview, a path-traced view); the assistants as stall rows; "does an untouched window settle" (0 frames, 0 views, 0 constraint
+  moves wanted), "is the pose a frame late" and "does the world matter". The last cell is `ok` / `OVER` / `-`, or `NO VIEW` for
+  a drag, scrub or play row whose frames drew no view (a layout that hides the Scene view measures nothing).
+- **`tools/bench_world.py --posing`** (real content, on a copy of the project it is given - the project itself is only read,
+  and its files are compared before and after): the same drags, scrub, clip and Play on an imported avatar as it comes in
+  and again with IK handles (`rig autoik`), headless (each row's press, first-move, mean, longest and release frames and the
+  frame's parts, biggest first) and in a real window on the card (`perf drag ... loop` under `--windowed-check`).
+  `--avatar-package` / `--avatar-prefab` / `--avatar-at` stand an avatar in an opened world, `--camera` sets the Scene view
+  (the same view of the avatar alone and in the world), `--prop` moves an object of the world, `--settings` adds the settings
+  matrix, `--frames`, `--no-pipeline`, `--self-test`. Before anything is timed the avatar's prefab is imported once so
+  Unity numbers its parts. `tools/dev/chain.sh` runs the three setups with `POSING=1`.
+- A Learn lesson, "Where a Posing Frame Goes".
+
+**Changed**
+- The skin pose change and IK timing rows moved from `vgroups` to `posing` (under a header with ms columns the comparison
+  reads); `vgroups` keeps its robustness rows. The `animation` section's rows gained a `budget` column (`ok` / `OVER` by
+  their own 0.2 / 0.5 / 0.2 ms targets: the 201-track row reads `OVER` at about 0.8 ms).
+- `tools/perf_suite.py`: `posing` joins the default sections, an OVER finding names its first time column, a row already OVER in
+  the baseline is "still over" and doesn't fail `--check`, and `--save-baseline --sections` keeps the other sections.
+
+**Checked:** the unit suites - with Blender's libraries 24,259 checks (of them four card-against-CPU picture checks
+of the `gpu` group fail in a worktree build of the libraries, the same four at the same lines on main's own build there;
+a Live Link check that asserts a tick time failed once while two suites ran side by side and passed alone), dependency-free
+23,345 and Linux 23,351, both with 0 failed; the audits (the coverage map, the sweep's command list, the HCI and Unity checks);
+`tools/test_perf_suite.py` and `tools/bench_world.py --self-test`. Headless screenshots of the starter scene, the world
+stand-in, a posed rig and the posed avatar, from main's build and from this round's, on the CPU and on the card: no pixel
+differs outside what the clock draws (the Statistics overlay, the status bar, a toast, the Project window's file list).
+`blendity_stress --only posing` (the card's rows need the build with Blender's libraries; the dependency-free build has
+no card path and leaves them out with a note), `animation` and `vgroups`. The timed runs (the baseline, the check twice, the owner's avatar, world and both, a cold
+run, main's build against this one) ran one at a time under a watcher for other builds and editors on the machine;
+`docs/PERFORMANCE.md` ("Pass 22") says what it saw during each. The baseline is saved in `stress/results/baseline.md`.
+**Not met:** `perf_suite.py --check` against that baseline fails on one or two rows (below); the settings rows on the
+owner's avatar inside the owner's world were not measured (over two minutes a row; the stand-in's are).
+
+**Found** (the numbers and the ranking: `docs/PERFORMANCE.md`, "Pass 22"; the owner's projects measured locally)
+- No posing row reaches 16.7 ms. The stand-in: a gizmo, G / R or Puppet drag 48 to 63 ms a frame alone on the card, 65
+  to 80 ms in the world; a scrub 55 to 123 ms; Play with the springs 87 to 108 ms. The owner's avatar in a window: 34 to
+  68 ms alone, 58 to 91 ms in the owner's world, a scrub or a playing clip 76 to 192 ms.
+- Where it goes, biggest first: render meshes rebuilt whole with their tangents because the in-place move is refused
+  (up to 36 ms; smooth-by-angle splits that flip with the pose at a few sliver corners), every moved mesh sent to the
+  card whole (6 to 17 ms, 4.8 to 5.9 MB a frame), skinning of all 13 meshes whatever moved (8.7 ms; a rigid move of the
+  root included), normals (2 to 11 ms), skin keys (78 to 156 hashes a frame, 5 to 9 ms; 52 while only a prop moves),
+  Record (11 ms). The world adds 23 to 35 ms to a posed frame. Constraints, the IK solver and shape keys are cheap.
+- The pose is drawn a frame late: up to 16.5 mm on an IK-target drag.
+- The owner's avatar has no arms in its humanoid map: its arm rows are refused.
+- Two "the clip playing" rows have two states (22 or 32 ms: the view drawn on 12 or on 20 of 30 frames) on a quiet
+  machine, which is what fails the check. Cause not found; round 472.
+- The counters do not show: main's build against this one, 0 findings on `editor_render` and `world_like`; two
+  single-frame rows of `responsiveness` moved (3.2 to 4.5 ms, 0.9 to 2.3 ms), far inside their budgets.
+
 ## 2026-11-09 (round 467): Changelog fragments - parallel passes stop conflicting in CHANGELOG and README
 
 **Asked:** (the user approved, 2026-11-09) Pass 21's whole stack, #358-#364, went CONFLICTING in `CHANGELOG.md` and

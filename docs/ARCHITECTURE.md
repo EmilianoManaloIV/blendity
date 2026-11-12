@@ -21,7 +21,7 @@ src/
 extern/         ufbx, fast_float, MikkTSpace, Hosek-Wilkie sky (copied from Blender's tree)
 stress/         blendity_stress  - limits & naive-vs-optimised comparisons
 tests/          blendity_tests   - unit checks, one file a subsystem (test_<group>.cpp, test_common.h; --group runs one)
-tools/          tools/dev: the round workflow's scripts (round 446, tools/dev/README.md), changelog.py folding changelog.d/ fragments into CHANGELOG / README (ADR 0123); the parallel test runner (run_suites.py), the coverage map, clean.bat, the Blender benchmark harness (bench.bat), the PTX compiler, the inbetweening model's training (tools/README.md)
+tools/          tools/dev: the round workflow's scripts (round 446, tools/dev/README.md), changelog.py folding changelog.d/ fragments into CHANGELOG / README and the shared docs (ADR 0123), integrate.sh building the integration PR over the green stacks (ADR 0132); the parallel test runner (run_suites.py), the coverage map, clean.bat, the Blender benchmark harness (bench.bat), the PTX compiler, the inbetweening model's training (tools/README.md)
 ```
 
 ## System overview

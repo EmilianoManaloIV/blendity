@@ -48,6 +48,27 @@ at a steep angle. Found by CI's macOS job after the PR was opened: a box's +-Y a
 no direction there (a local vector filled through `operator[]` and copied; Apple clang kept only its x) - the
 handles and the Room tool's grid snap build the vector from its three numbers now.
 
+**Reported by the user from the build with this round in it, fixed** ("Selecting things on my cursor doesn't always select.
+And often selects an object not on my cursor"): faces of several pieces that lie in one plane and touch are one face
+of the Blockout's mesh, and that face named only the first of them - a click on one slab of a floor, on the second of
+two rooms on one level, or on the level tops of two boxes selected the other piece (and a door hovered there would
+have read the wrong room). The piece whose own face is under the pointer is asked for now (`blockout::face_owner`):
+the face has to lie at the point to the point's own precision (a wide ground a hand below is not it); a room's air
+answers first (the wall two rooms share is, from inside one of them, that room's), then matter's own face, then a
+piece that trims, then a cutter that merely stands there; and nothing is asked while a build is in flight or after
+one that was refused (the picture is then still the mesh before the edit). A click that slipped more than
+four pixels is a box select, and a box over a Blockout selected the whole Blockout where a click selects a piece: a
+box now selects the Blockout's pieces under it (the Blockout itself only where its mesh names no piece), read at up
+to 16 x 16 places of the box. A click that slipped straight sideways or straight up made a box of no height or
+width: it held no pixel, selected nothing and cleared the selection, for any object - such a box is a pixel thick
+now (a box excludes its far edge still: a press on an object's last pixel that slips away from it can miss it). The pick's ray goes through the pixel's middle, as the picture's own id does (through
+its corner it could miss the mesh along an outline, and the whole Blockout was selected). One question costs about
+0.2 ms in a Blockout of a hundred rooms. Checked with real clicks too and found right: a mesh object in front of,
+behind and seen through a hole of a Blockout, and two Blockouts that overlap. Still as designed: a door or window
+seen head-on is air - a click in it selects what is behind, and the opening itself is picked on its reveal or in
+the Hierarchy; a handle of the selected piece is drawn over everything and takes a press within 7 px of it; in a
+box much larger than a piece, a piece that shows smaller than a sixteenth of the box can be missed.
+
 **Known limits:** F9's rows for a piece of a scaled Blockout are in the Blockout's own units; snapping uses each
 piece's bounding-box corners, which for a turned cylinder or sphere are not on the shape; the Room tool's first
 press raycasts every object under the ray - a hitch in a very heavy scene; the Room tool does not infer corners or
@@ -69,7 +90,14 @@ Stress on Linux at main's counts: pushpull 26,608 / 0 / 394, modifiers_ngon 11,5
 editor_ui ran. `sweep_commands.py --check` (221 verbs), the coverage map (no command, action or window without a
 test; 166 widgets not driven by label, as before), the HCI audit and the KLM check pass. Test-engineer: 21 tests, two
 findings. Code review: changes needed (three majors, four minors), all fixed with tests; the re-review found five
-small things and then one fault in a fix (the Scene view in a second window), fixed and tested.
+small things and then one fault in a fix (the Scene view in a second window), fixed and tested. The picking fix:
+Windows dependency-free 27,566 checks, 0 failed; Linux group `blockout` 2,577, 0 failed (under ASan + UBSan it is CI's job that ran it whole: the local run was
+stopped a third of the way, clean so far, to leave the machine to another pass's timed stage); on
+the exact path (round 480's tree with Blender's libraries) group `blockout` 5,144, 0 failed; two code reviews
+(tolerance by the candidate's size, cutters before matter, a build in flight, a refused build, a wall two rooms
+share), all fixed with tests. The sideways-slip fix, on main with the lighter local rule (ADR 0134: the round's
+group and `editor`; the whole suite is CI's): group `blockout` 2,601 (Windows) and 2,603 (Linux) checks, `editor`
+2,246 on both, 0 failed; code review: approved.
 
 <!-- README -->
 replace: (round 478), SketchUp-style drawing
@@ -78,6 +106,7 @@ with: (round 478), dragged out with handles on every face that snap to the other
 <!-- docs/USABILITY.md -->
 after: | Building a room or a blockout from several shapes meant
 | A Blockout's rooms and pieces were sized by typing numbers in the Inspector, and placed by moving them with the gizmo until they looked flush. (round 479) | The selected piece shows a **handle on each face**: drag it and that face moves while the opposite one stays, snapping to the other pieces' faces and corners or the grid. The **Room tool** (Shift+R) draws a rectangle or circle on the ground or a face and pulls it up into a room; **F9** adjusts the piece just made. |
+| A click on a Blockout piece sometimes selected another piece - the first of several whose faces share a plane (slabs of one floor, rooms on one level) - and a click that slipped a few pixels selected the whole Blockout. (round 479, reported by the user) | The piece whose own face is under the pointer is selected; a box select over a Blockout selects its pieces under the box; a click that slips straight sideways or straight up no longer clears the selection (any object). |
 
 <!-- docs/ARCHITECTURE.md -->
 append:
