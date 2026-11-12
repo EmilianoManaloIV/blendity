@@ -95,7 +95,9 @@ Windows dependency-free 27,566 checks, 0 failed; Linux group `blockout` 2,577, 0
 stopped a third of the way, clean so far, to leave the machine to another pass's timed stage); on
 the exact path (round 480's tree with Blender's libraries) group `blockout` 5,144, 0 failed; two code reviews
 (tolerance by the candidate's size, cutters before matter, a build in flight, a refused build, a wall two rooms
-share), all fixed with tests.
+share), all fixed with tests. The sideways-slip fix, on main with the lighter local rule (ADR 0134: the round's
+group and `editor`; the whole suite is CI's): group `blockout` 2,601 (Windows) and 2,603 (Linux) checks, `editor`
+2,246 on both, 0 failed; code review: approved.
 
 <!-- README -->
 replace: (round 478), SketchUp-style drawing
