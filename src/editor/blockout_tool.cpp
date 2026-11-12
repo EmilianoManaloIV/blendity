@@ -4,7 +4,11 @@
 // cylinder) in the active Blockout, turned to the surface and standing on it. With the Polyline option (round 480) the footprint is any
 // outline: click its corners on the surface, close it on the first corner or with Enter, then pull the height as before. The tool stays on for the next room; Esc leaves it. The
 // piece is made by room_make (blockout_editor.cpp), which `blockout room` calls with the same numbers.
+// Round 495 (task 0479): the tool draws any piece - a room, a solid, a wedge, stairs, an arch - with any operation, and a piece
+// drawn on a face of a Blockout lands in that Blockout; `blockout draw` is the same from the console.
 #include "editor.h"
+
+#include "blockout_pick.h"
 
 #include "../core/core.h"
 #include "../scene/raycast.h"
@@ -27,7 +31,62 @@ bool is_number_word(const std::string &w) {
   return !w.empty() && (std::isdigit((unsigned char)w[0]) || w[0] == '-' || w[0] == '.' || w[0] == '+');
 }
 
+/* The tool's Piece choice by its word: a room, a solid of the footprint's shape, or a wedge, stairs or an arch (whose footprint is
+ * the rectangle). False: no such word. */
+bool set_draw_piece(const std::string &word, bool &solid, bool &circle, bool &polyline) {
+  const int piece = word == "wedge" ? 3 : word == "stairs" ? 4 : word == "arch" ? 5 : 0;
+  if (word != "room" && word != "solid" && !piece) return false;
+  solid = word != "room";
+  if (!solid) blockout_draw_forget();  // (a room has no such choices)
+  if (piece) circle = polyline = false;
+  blockout_draw_choice().piece = piece;
+  return true;
+}
+
+/* The tool's Operation choice by its word; a room has none, and nothing is set for one. False: no such word. */
+bool set_draw_operation(const std::string &word, bool solid, bool &subtract) {
+  if (word != "auto" && word != "add" && word != "subtract" && word != "intersect") return false;
+  if (!solid) return true;
+  subtract = word == "subtract";
+  blockout_draw_choice().operation = word == "add" ? 0 : word == "intersect" ? 2 : -1;
+  return true;
+}
+
+/* The Operation chosen, as the row shows it: 0 Auto, 1 Add, 2 Subtract, 3 Intersect. */
+int draw_operation_row(bool solid, bool subtract) {
+  if (!solid) return 0;
+  const int chosen = blockout_draw_choice().operation;
+  return chosen == 0 ? 1 : chosen == 2 ? 3 : subtract ? 2 : 0;
+}
+
 }  // namespace
+
+BlockoutDrawChoice &blockout_draw_choice() {
+  static BlockoutDrawChoice choice;
+  return choice;
+}
+
+void blockout_draw_forget() {
+  blockout_draw_choice().piece = 0, blockout_draw_choice().operation = -1;
+}
+
+int blockout_draw_operation(bool solid, bool subtract, float height, bool nothing_to_cut) {
+  if (!solid) return 0;
+  const int chosen = blockout_draw_choice().operation;
+  if (chosen == 0 || chosen == 2) return chosen;
+  if (subtract) return 1;
+  return height < 0.0f && !nothing_to_cut ? 1 : 0;  // (Auto, by the direction)
+}
+
+uint64_t blockout_at_surface(const Scene &scene, Vec3 point, Vec3 normal) {
+  const bool finite = finite_bits(point.x) && finite_bits(point.y) && finite_bits(point.z) && finite_bits(normal.x) && finite_bits(normal.y) && finite_bits(normal.z);
+  if (!finite || !(length(normal) > 1e-6f)) return 0;
+  const Vec3 n = normalize(normal);
+  SceneHit hit;
+  /* A short ray back onto the face from just before it. */
+  if (!scene_raycast(scene, point + n * 0.02f, n * -1.0f, 0.05f, hit) || !hit.object) return 0;
+  return hit.object->get<Blockout>() ? hit.object->id : 0;
+}
 
 void Editor::set_room_tool(bool on) {
   if (on == room_.active) return;
@@ -45,6 +104,7 @@ void Editor::set_room_tool(bool on) {
   if (strokeobj_) set_strokeobj(false);
   if (scatter_) set_scatter(false);
   room_.active = true, room_.stage = 0, room_.typed.clear();
+  if (!room_.solid) blockout_draw_forget();  // (the Draw and Operation choices hold with Solid only: blockout_pick.h)
   ui_.redraw = true;
   if (room_.polyline) Log::info("Room tool: click the corners of an outline on the ground or a face, close it on the first corner or with Enter, then move the mouse for the height and click  |  Esc leaves");
   else Log::info("Room tool: drag a rectangle on the ground or a face%s, then move the mouse for the height and click  |  Esc leaves", room_.circle ? " (a circle from its centre)" : "");
@@ -150,6 +210,12 @@ bool Editor::room_update(const Recti &view) {
     r.normal = n;
     r.u = surface_axis(n);
     r.origin = r.corner = room_snap_point(p, n);
+    /* Round 495: a piece drawn on a face of a Blockout is that Blockout's - the face under the press itself (the ground may lie
+     * before it, and then the surface is the ground). */
+    SceneHit under;
+    const bool face = scene_raycast(*scene_, ray.origin, normalize(ray.dir), 1e5f, under) && under.object && under.object->get<Blockout>() &&
+                      length(under.point - p) <= 1e-3f * (1.0f + length(p));
+    blockout_draw_choice().surface = face ? under.object->id : 0;
     r.height = 0.0f, r.typed.clear(), r.points.clear();
     if (r.polyline) r.points.push_back(r.origin), r.stage = 3;  // (the first corner: the others are clicked)
     else r.stage = 1;
@@ -284,6 +350,8 @@ void Editor::room_draw(const Recti &view) {
       const size_t step = r.circle && r.points.empty() ? 4 : 1;
       for (size_t i = 0; i < top.size(); i += step) line(base[i], top[i], blue);
       label = r.typed.empty() ? strprintf("height %.3f m", r.height) : strprintf("height [%s] = %.3f m", r.typed.c_str(), r.height);
+      static const char *const does[] = {"Add", "Subtract", "Intersect"};
+      if (r.solid) label += std::string("  ") + does[blockout_draw_operation(r.solid, r.subtract, r.height, false)];  // (Auto: pushed in subtracts)
     }
     const int tw = u.font.text_width(label) + u.px(12);
     const Recti box{u.in.mx + u.px(16), u.in.my + u.px(12), tw, u.row_h()};
@@ -295,6 +363,43 @@ void Editor::room_draw(const Recti &view) {
 
 /* blockout room <x0 z0 x1 z1 height> | room circle <x z radius height>: what the tool's two drags make, on the ground plane, with the tool's options. */
 void Editor::room_command(const std::vector<std::string> &t) {
+  /* The surface of a footprint the tool has in progress is the tool's: a command run meanwhile puts it back. */
+  struct KeepSurface {
+    uint64_t surface = blockout_draw_choice().surface;
+    ~KeepSurface() { blockout_draw_choice().surface = surface; }
+  } keep;
+  blockout_draw_choice().surface = 0;  // (the ground: the selected Blockout, or a new one - `draw` looks its surface up)
+  if (t.size() > 1 && to_lower(t[1]) == "draw") {
+    /* blockout draw <piece> <operation> at <x y z> normal <x y z> size <du dz height>: what the tool's drags make on that surface
+     * point, whatever the tool's own options are (they are put back). A cylinder: du its radius. */
+    const char *usage = "blockout draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height> "
+                        "(metres; a cylinder: du its radius; on a face of a Blockout the piece is that Blockout's)";
+    if (t.size() != 16 || to_lower(t[4]) != "at" || to_lower(t[8]) != "normal" || to_lower(t[12]) != "size") return Log::warn("%s", usage);
+    float v[9] = {};
+    const size_t at[9] = {5, 6, 7, 9, 10, 11, 13, 14, 15};
+    for (size_t i = 0; i < 9; i++) {
+      v[i] = (float)std::atof(t[at[i]].c_str());
+      if (!is_number_word(t[at[i]]) || !finite_bits(v[i])) return Log::warn("%s", usage);
+    }
+    const Vec3 p(v[0], v[1], v[2]), n(v[3], v[4], v[5]);
+    if (!(length(n) > 1e-6f)) return Log::warn("blockout draw: the normal has no length - nothing made");
+    const std::string piece = to_lower(t[2]), op = to_lower(t[3]);
+    const RoomTool tool = room_;
+    const BlockoutDrawChoice chosen = blockout_draw_choice();
+    room_.circle = piece == "cylinder", room_.polyline = false;
+    /* (A box and a cylinder are the tool's Solid by the footprint; "solid" itself is not a word here - it would not say which.) */
+    const bool known = set_draw_piece(piece == "box" || piece == "cylinder" ? "solid" : piece == "solid" ? "" : piece, room_.solid, room_.circle, room_.polyline) &&
+                       set_draw_operation(op, room_.solid, room_.subtract);
+    if (known) {
+      const Vec3 unit = normalize(n);
+      blockout_draw_choice().surface = blockout_at_surface(*scene_, p, unit);
+      room_make(p, surface_axis(unit), unit, v[6], v[7], v[8], room_.circle);
+    }
+    else Log::warn("%s", usage);
+    room_ = tool;
+    blockout_draw_choice() = chosen;
+    return;
+  }
   if (t.size() > 2 && to_lower(t[2]) == "outline") {
     /* blockout room outline <height> <x z> <x z> <x z> ...: the Polyline option's room, its corners on the ground. */
     const std::string outline_usage = "blockout room outline <height> <x z> <x z> <x z> ... (3 to 256 corners, metres on the ground)";
@@ -339,9 +444,24 @@ void Editor::room_options_command(const std::vector<std::string> &t) {
     room_.wall = m;
     return;
   }
-  if ((key != "circle" && key != "solid" && key != "subtract" && key != "polyline") || (!on && !off)) return Log::warn("blockout roomopt circle|polyline|solid|subtract on|off | wall <metres>");
+  const char *usage = "blockout roomopt circle|polyline|solid|subtract on|off | piece room|solid|wedge|stairs|arch | operation auto|add|subtract|intersect | wall <metres>";
+  if (key == "piece" || key == "operation") {
+    /* Round 495: what is drawn, and what a solid does to its Blockout (an operation holds while a solid is the piece). */
+    const bool known = key == "piece" ? set_draw_piece(value, room_.solid, room_.circle, room_.polyline) : set_draw_operation(value, room_.solid, room_.subtract);
+    if (!known) return Log::warn("%s", usage);
+    if (key == "operation" && !room_.solid) return Log::warn("blockout roomopt operation: a room has no operation - choose a solid first (blockout roomopt piece solid|wedge|stairs|arch)");
+    if (!room_.polyline && room_.stage == 3) room_.points.clear(), room_.stage = 0;
+    ui_.redraw = true;
+    return;
+  }
+  if ((key != "circle" && key != "solid" && key != "subtract" && key != "polyline") || (!on && !off)) return Log::warn("%s", usage);
   (key == "circle" ? room_.circle : key == "polyline" ? room_.polyline : key == "solid" ? room_.solid : room_.subtract) = on;
   if (key == "polyline" && off) room_.points.clear(), room_.stage = room_.stage == 3 ? 0 : room_.stage;
+  /* (A wedge, stairs or an arch has the rectangle for its footprint: another footprint is a plain solid's. The Subtract tick is
+   * the Operation row's Subtract; off it is Auto again.) */
+  if ((key == "circle" || key == "polyline") && on) blockout_draw_choice().piece = 0;
+  if (key == "subtract") blockout_draw_choice().operation = -1;
+  if (!room_.solid) blockout_draw_forget();  // (Solid switched off: the choices that hold only with it are forgotten)
   ui_.redraw = true;
 }
 
@@ -349,17 +469,44 @@ void Editor::room_options_command(const std::vector<std::string> &t) {
 void Editor::draw_room_tools(ui::Layout &lay) {
   auto &u = ui_;
   Recti row = lay.row(u.row_h() + u.px(2));
-  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, room_.active ? "Exit Room Tool" : "Room Tool", room_.active)) set_room_tool(!room_.active);
-  u.tooltip("Drag a rectangle on the ground or a face, move the mouse for the height, click: a room of the active Blockout stands there.\n"
-            "Ctrl: no snapping. Esc leaves. Console: tool room, blockout room.");
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, room_.active ? "Exit Draw Piece (Room) Tool" : "Draw Piece (Room) Tool", room_.active)) set_room_tool(!room_.active);
+  u.tooltip("Drag a rectangle on the ground or a face, move the mouse for the height, click: a room - or the piece chosen below - stands there.\n"
+            "Drawn on a face of a Blockout it becomes a piece of that Blockout; pushed into the face it goes in (a Subtract box: a pocket).\n"
+            "Ctrl: no snapping. Esc leaves. Console: tool room, blockout room, blockout draw.");
   struct Opt { const char *label, *tip; bool *value; };
   for (const Opt &o : {Opt{"Circle Footprint", "Drag a circle from its centre: a cylinder room.", &room_.circle},
-                       Opt{"Polyline Footprint", "Click the corners of any outline on the ground or a face (close it on the first corner or with Enter, Backspace takes one back), then pull the height.", &room_.polyline},
-                       Opt{"Solid Piece", "A plain box or cylinder instead of a room.", &room_.solid},
-                       Opt{"Subtract", "A solid cuts out of the Blockout instead of adding to it.", &room_.subtract}}) {
+                       Opt{"Polyline Footprint", "Click the corners of any outline on the ground or a face (close it on the first corner or with Enter, Backspace takes one back), then pull the height.", &room_.polyline}}) {
     row = lay.row(u.row_h() + u.px(2));
-    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, o.label, *o.value)) *o.value = !*o.value;
+    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, o.label, *o.value)) {
+      *o.value = !*o.value;
+      if (*o.value) blockout_draw_choice().piece = 0;  // (a wedge, stairs or an arch has the rectangle for its footprint)
+    }
     u.tooltip(o.tip);
+  }
+  /* Round 495: what is drawn, and what a solid does to the Blockout it lands in. */
+  struct Pick { const char *label, *word, *tip; };
+  const int piece = !room_.solid ? 0 : blockout_draw_choice().piece == 0 ? 1 : blockout_draw_choice().piece - 1;
+  int at = 0;
+  for (const Pick &o : {Pick{"Draw: Room", "room", "A room: walls, a floor and a ceiling round the footprint."},
+                        Pick{"Draw: Solid", "solid", "A plain box, cylinder or outline - by the footprint - instead of a room."},
+                        Pick{"Draw: Wedge", "wedge", "A ramp over the dragged rectangle: tall where the drag began."},
+                        Pick{"Draw: Stairs", "stairs", "Stairs over the dragged rectangle, climbing the way it was dragged."},
+                        Pick{"Draw: Arch", "arch", "An arch lying in the surface, as wide as the rectangle's first side, pushed in or pulled out: Subtract cuts an arched opening."}}) {
+    row = lay.row(u.row_h() + u.px(2));
+    if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, o.label, piece == at++)) command(std::string("blockout roomopt piece ") + o.word);
+    u.tooltip(o.tip);
+  }
+  const int operation = draw_operation_row(room_.solid, room_.subtract);
+  at = 0;
+  for (const Pick &o : {Pick{"Operation: Auto", "auto", "By the direction: pushed into the surface the solid cuts (Subtract), pulled out it adds."},
+                        Pick{"Operation: Add", "add", "The solid adds to the Blockout whichever way it is pulled."},
+                        Pick{"Operation: Subtract", "subtract", "The solid cuts out of the Blockout."},
+                        Pick{"Operation: Intersect", "intersect", "The Blockout keeps only what is inside the solid."}}) {
+    row = lay.row(u.row_h() + u.px(2));
+    const bool on = room_.solid && operation == at++;
+    const Recti r{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
+    if (u.button_enabled(r, o.label, room_.solid, "A room has no operation: choose Draw: Solid, Wedge, Stairs or Arch first.", on)) command(std::string("blockout roomopt operation ") + o.word);
+    if (room_.solid) u.tooltip(o.tip);
   }
   row = lay.row();
   u.label({row.x + u.px(4), row.y, row.w / 2, row.h}, "Room Wall Thickness");

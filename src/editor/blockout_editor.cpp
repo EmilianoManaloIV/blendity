@@ -387,6 +387,9 @@ GameObject *Editor::create_empty_blockout() {
 bool Editor::room_target(GameObject *&target, float &scale) {
   GameObject *sel = active_object();
   target = sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
+  /* Round 495: a piece drawn on a face of a Blockout is that Blockout's, whatever is selected. */
+  GameObject *drawn_on = scene_->find(blockout_draw_choice().surface);
+  if (drawn_on && drawn_on->get<Blockout>()) target = drawn_on;
   scale = 1.0f;
   if (!target) return true;
   const Mat4 &tw = target->world_matrix();
@@ -428,24 +431,43 @@ GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float 
   float scale = 1.0f;
   if (!room_target(target, scale)) return nullptr;
   if (!target) target = create_empty_blockout();
+  /* Round 495: a wedge, stairs or an arch over the rectangle, and the operation chosen - or, by the direction, Subtract when pushed in. */
+  const int kind = solid && !circle ? blockout_draw_choice().piece : 0;
   PieceWords w;
-  w.room = !solid, w.shape = circle ? 1 : 0, w.op = solid && room_.subtract ? 1 : 0, w.ok = true;
+  /* (Auto in a Blockout with no piece yet - a new one too - adds: there is nothing to cut, and a lone cutter is nothing to see.) */
+  w.room = !solid, w.shape = circle ? 1 : kind, w.op = blockout_draw_operation(solid, room_.subtract, h, target->children.empty()), w.ok = true;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);  // (a thickness is in the Blockout's units too)
   BlockoutPiece *bp = piece->get<BlockoutPiece>();
   Vec3 centre = origin + normal * (h * 0.5f);
+  /* A wedge is tall at its -Z and stairs climb toward +Z: +Z is the way the rectangle was dragged, so a ramp is tall where the
+   * drag began and stairs climb away from it. */
+  const float way = kind && dz < 0.0f ? -1.0f : 1.0f;
+  /* Pushed into the surface a wedge or stairs is turned over, its flat floor on the face: the slope or the treads are the floor
+   * of what it cuts, open at the face - not a hollow closed under it. */
+  const bool over = (kind == 3 || kind == 4) && h < 0.0f;
+  Quat turn = over ? quat_from_axes(u * -way, normal * -1.0f, z * way) : quat_from_axes(u * way, normal, z * way);
   if (circle) bp->radius = std::fabs(du) / scale, bp->height = std::fabs(h) / scale;
+  else if (kind == 5) {
+    /* An arch stands in its XY plane round its origin and is `height` deep along Z: it lies in the surface, its feet on the
+     * rectangle's first side, bulging the way the rectangle was dragged, and the height pushes it in or pulls it out. A cutting
+     * arch is filled (an arched opening); one that adds is a ring. */
+    centre = centre + u * (du * 0.5f);
+    bp->radius = std::fabs(du) * 0.5f / scale, bp->height = std::fabs(h) / scale;
+    bp->inner_radius = w.op == 0 ? bp->radius * 0.5f : 0.0f;  // (the component's own proportion: 0.5 and 0.25)
+    turn = quat_from_axes(u, z * way, cross(u, z * way));
+  }
   else {
     centre = centre + u * (du * 0.5f) + z * (dz * 0.5f);
     bp->size = {std::fabs(du) / scale, std::fabs(h) / scale, std::fabs(dz) / scale};
   }
-  piece->set_world_rotation(quat_from_axes(u, normal, z));
+  piece->set_world_rotation(turn);
   piece->set_world_position(centre);
   expanded_.insert(target->id);
   select(piece->id);
   update_blockouts(true);
   mark_changed(std::string("Create Blockout ") + piece_base_name(w));
   record_blockout_last(piece);
-  if (solid && h < 0.0f) {  // (a solid dug down from the surface: F9's height keeps the surface where it is, not the far end)
+  if (solid && h < 0.0f && kind == 0) {  // (a box or cylinder dug down from the surface: F9's height keeps the surface where it is, not the far end; a wedge or stairs is turned over and stands on it already, an arch's Y is not its depth)
     obj_last_.base_p = origin;
     obj_last_.base_up = -piece->world_matrix().dir({0.0f, 1.0f, 0.0f});
   }
@@ -487,7 +509,7 @@ GameObject *Editor::room_make_outline(const std::vector<Vec3> &corners, Vec3 u, 
   if (!room_target(target, scale)) return nullptr;
   if (!target) target = create_empty_blockout();
   PieceWords w;
-  w.room = !solid, w.shape = 6, w.op = solid && room_.subtract ? 1 : 0, w.ok = true;
+  w.room = !solid, w.shape = 6, w.op = blockout_draw_operation(solid, room_.subtract, h, target->children.empty()), w.ok = true;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);
   BlockoutPiece *bp = piece->get<BlockoutPiece>();
   const float cx = 0.5f * (x0 + x1), cz = 0.5f * (z0 + z1);
@@ -1302,7 +1324,8 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
     Log::info("blockout new | add box|cylinder|sphere|wedge|stairs|arch|outline|mesh [subtract|intersect] [x y z | radius height | radius | stairs: x y z steps | "
               "arch: radius inner angle depth | outline: [height] x z x z ... | mesh <object>] | add room [box|cylinder|wedge|outline] [sizes] | "
               "add door|window [width head [sill]] | outline <x z> <x z> <x z> ... | set cell|method|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
-              "room <x0 z0 x1 z1 height> | room circle <x z radius height> | roomopt circle|solid|subtract on|off, wall <metres> | rebuild | wait | info");
+              "room <x0 z0 x1 z1 height> | room circle <x z radius height> | roomopt circle|solid|subtract on|off, piece <word>, operation <word>, wall <metres> | "
+              "draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height> | rebuild | wait | info");
   };
   /* The Blockouts a command is about: the selected ones and the ones the selected pieces belong to; with none, every one. */
   std::vector<GameObject *> targets;
@@ -1321,7 +1344,7 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   }
   else if (sub == "handle") blockout_handle_command(t);   // (round 479)
   else if (sub == "outline") blockout_outline_command(t);  // (round 480)
-  else if (sub == "room") room_command(t);
+  else if (sub == "room" || sub == "draw") room_command(t);  // (round 495: `draw` - any piece on any surface point)
   else if (sub == "roomopt") room_options_command(t);
   else if (sub == "set") {
     const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";

@@ -2283,6 +2283,28 @@ A piece is not only a box, a cylinder or a sphere. A wedge is a ramp, stairs are
 ? Why are stairs, an arch and a concave outline refused as Intersect pieces? | Intersect keeps what is inside every Intersect piece, which needs one convex shape; these are several convex solids, so the status names the piece and says why.
 ? A mesh piece's object is selected in the Hierarchy but not drawn. Where is it? | It is the Blockout's piece: the mesh is part of the Blockout's result while the piece is on, and shows as the piece's wire when it is selected; deleting or disabling the piece draws it again.
 )"},
+    {"Drawing pieces on faces", "A Subtract box, a ramp, stairs or an arch drawn straight onto a face of a Blockout", R"(
+The Draw Piece (Room) tool (Shift+R, or Modeling Tools > Create > Blockout) draws a footprint on the ground or on any face and pulls it into a piece. Drawn on a face of a Blockout, the piece becomes a piece of that Blockout - whatever is selected - so a pocket, a window recess or a buttress is made where you look at it, as with SketchUp's rectangle and Push/Pull.
+# Piece and Operation
+- Draw: Room, Solid (a box, a cylinder with Circle Footprint, any outline with Polyline Footprint), Wedge, Stairs or Arch. A wedge is tall where the drag began; stairs climb the way the rectangle was dragged; an arch lies in the surface, as wide as the rectangle's first side, and is pushed in or pulled out.
+- Operation: Auto goes by the direction - pushed into the face the solid cuts (Subtract), pulled out it adds; in a Blockout with nothing in it yet it adds either way. Add, Subtract and Intersect fix it whichever way you pull. A room has no operation.
+- A wedge or stairs pushed into a face is turned over: you get a ramp or a stairwell going down into the face, open at it.
+- While you move the mouse for the height the label beside it says what the piece will do: Add, Subtract or Intersect. Type a number for an exact depth; a negative one goes into the face.
+# Try it
+! cmd:blockout draw box add at 0 0 0 normal 0 1 0 size 2 2 2 | 1. A 2 m box drawn on the ground from the origin (x, y and z from 0 to 2), in the selected Blockout or a new one
+! cmd:blockout draw box auto at 0.5 2 0.5 normal 0 1 0 size 1 1 -0.5 | 2. A 1 m square drawn on the box's top and pushed in half a metre: Auto makes it a Subtract piece - a pocket - of that Blockout
+! cmd:blockout draw cylinder auto at 1.75 2 1.75 normal 0 1 0 size 0.2 0 1 | 3. A circle of radius 0.2 m drawn on the top's corner and pulled up 1 m: Auto adds a column
+! cmd:blockout draw arch subtract at 0.5 0.2 2 normal 0 0 1 size 1 -1 -2 | 4. An arch 1 m wide drawn on the +Z side, its feet 0.2 m up, dragged upward and pushed 2 m through: an arched opening
+! cmd:blockout draw stairs add at 2 0 0 normal 0 1 0 size 1 2 1 | 5. Stairs on the ground against the box's +X side, climbing 1 m along Z
+! cmd:tool room | 6. The tool itself: drag a rectangle on a face of the box, then move the mouse into the face and click
+# From the console
+- `blockout draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height>` makes what the tool's two drags make on that surface point: du and dz are the rectangle's sides from the point (a cylinder: du is its radius), the height is along the normal and negative into the face.
+- `blockout roomopt piece room|solid|wedge|stairs|arch` and `blockout roomopt operation auto|add|subtract|intersect` set the tool's rows.
+? Nothing of the wall's Blockout is selected - another Blockout's piece is. You draw a rectangle on the wall and push it in. Which Blockout gets the piece? | The wall's: a piece drawn on a face of a Blockout belongs to that Blockout. Only a footprint drawn on the ground or on a mesh that is no Blockout goes to the selected Blockout, or to a new one.
+? With Operation on Auto you draw a rectangle on a wall and pull it out by mistake. What do you get, and how do you make it a pocket? | An Add box standing on the wall. Undo and push in instead, or press F9 and set Operation to Subtract and move it - or set the tool's Operation to Subtract, which cuts whichever way you pull.
+? Why does a cutting arch come out filled while an arch that adds is a ring? | A Subtract arch is meant as an arched opening, so its inner radius is 0 and everything under the curve is cut; an arch that adds is the ring of blocks itself. The Inspector's Inner Radius changes either afterwards.
+? You chose Draw: Wedge and then ticked Circle Footprint. What does the tool draw now? | A cylinder: a wedge, stairs and an arch are drawn over a rectangle, so another footprint makes the tool's piece a plain solid again.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
 # The Posing block
