@@ -11620,12 +11620,12 @@ static void tests_round468() {
     ed.command("perf status");
     const std::string status = r468_log_since(at);
     for (const char *item : {"perf: frame ", "perf posing: ", "perf posing counts: ", "render meshes built whole", "tangents built whole", "mesh copies", "render meshes moved in place", "moves in place refused",
-                             "refused for a new split"})
+                             "corners split in place", "meshes settled"})
       CHECK(status.find(item) != std::string::npos);
     at = r468_log_mark();
     ed.command("perf drag gizmo y 30 frames 3");
     const std::string said = r468_log_since(at);
-    for (const char *item : {"render meshes built whole", "tangents built whole", "mesh copies", "render meshes moved in place", "moves in place refused", "refused for a new split"})
+    for (const char *item : {"render meshes built whole", "tangents built whole", "mesh copies", "render meshes moved in place", "moves in place refused", "corners split in place", "meshes settled"})
       CHECK(said.find(item) != std::string::npos);
     at = r468_log_mark();
     ed.command("perf frames 2");
