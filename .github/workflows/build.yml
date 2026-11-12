@@ -457,7 +457,7 @@ jobs:
           CXX: ccache g++
           CC: ccache gcc
           CCACHE_DIR: ${{ github.workspace }}/.ccache
-          CCACHE_MAXSIZE: 600M
+          CCACHE_MAXSIZE: 800M
         run: |
           ccache --zero-stats > /dev/null
           ./build.sh debug tests

@@ -49,7 +49,8 @@ passed on a branch up to date with `main`. Measured on a run of 2026-11-11 (2,15
    from a third party). CI sets `CXX="ccache g++"`; `build.sh` is unchanged. A pull request saves **one** cache per
    build kind (its first run's; later runs read it and save nothing), `main` one per state of the sources (a merge
    that changes no source saves nothing). A pull request's first run starts from `main`'s newest cache. Sizes are
-   capped (300 MB; 600 MB for the sanitizer objects). The repository's caches share 10 GB, least recently used out
+   capped (300 MB; 800 MB for the sanitizer objects, which measured 629 MB on the first run - the Linux and macOS
+   caches 24 and 28 MB). The repository's caches share 10 GB, least recently used out
    first, with the Blender libraries' cache (`release.yml`) and MoonRay's dependencies (`moonray.yml`, hours to
    rebuild): few, small caches so those are not pushed out.
 7. **A pull request that changes only documents nothing reads does not build.** The `changes` job lists the pull
@@ -74,6 +75,18 @@ passed on a branch up to date with `main`. Measured on a run of 2026-11-11 (2,15
   one after another. Tests and stress then run side by side. Linking the three programs at once, or building the
   tests and the editor in two jobs, would cut more; neither was done blind in a `cmd` script that only CI's runner
   can prove. Follow-up, with the numbers in `docs/PERFORMANCE.md`.
+
+## Measured (pull request #383's first run, 2026-11-12, 2,161 tests)
+| Check | Before | After | Its parts after |
+|---|---|---|---|
+| windows | about 48 min | about 26 min | build 15.7, then tests 10.0 beside stress 7.6 |
+| linux | about 27 min | about 18 min | build 8.4, then tests 8.9 beside stress 9.1 |
+| macos | about 21 min | about 13 min | build 6.4, then tests 6.8 beside stress 5.3 |
+| linux-sanitizers | about 106 min | about 36 min | build 21.8, then six shards of 9.5 to 13.7 |
+
+The whole run took 36 minutes, once (before: about 106 minutes, twice a push). The six shards ran 2,161 tests
+together, the number the `linux`, `windows` and `macos` test jobs each ran. The Windows build fell from 31 to
+15.7 minutes, further than the 20 expected above.
 
 ## Alternatives considered
 - **`paths-ignore` for documents.** A workflow that never starts leaves required checks "expected" for ever; the

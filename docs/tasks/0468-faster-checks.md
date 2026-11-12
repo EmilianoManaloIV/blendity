@@ -6,7 +6,7 @@
 - **Decisions:** ADR 0133 (the shape of the build workflow)
 - **Model:** a worker session (Opus) writes the workflow, the build script and the shard tool; test-engineer;
   code-reviewer
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/383
 
 ## Goal
 A pull request waits most of two hours for its four required checks: the sanitizer job runs every test in one

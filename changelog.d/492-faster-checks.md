@@ -37,9 +37,33 @@ the unit tests read `README.md`, `CREDITS.md`, the manual, the lighting guide an
 would have let through unbuilt. Windows keeps three whole-program code generations (about 14 minutes), so its build
 is expected near 20 minutes, not less.
 
-**Checked:** on the pull request's own CI (the machine was held for timed runs: no local build yet) - see the pull
-request for each job's time before and after, the shards' test counts, and the cache on a second push.
+**The numbers** (`docs/PERFORMANCE.md`, "CI: the four required checks"; pull request #383's first run): windows
+about 48 -> 26 minutes (its build 31 -> 15.7), linux 27 -> 18, macos 21 -> 13, linux-sanitizers 106 -> 36 (build
+21.8, the slowest shard 13.7). The whole run 36 minutes, once a push; it was about 106, twice.
+
+**Checked:** on the pull request's own CI (the machine was held for timed runs: no local build): every job green on
+the first run; the six shards ran 2,161 tests together, as many as the `linux`, `windows` and `macos` test jobs
+each ran, 0 failed.
 
 <!-- README -->
 replace: runs the tests under AddressSanitizer / UBSan.
 with: runs the tests under AddressSanitizer / UBSan (in six shards at once; a pull request that changes only specs, ADRs or changelog fragments builds nothing - round 492).
+
+<!-- docs/PERFORMANCE.md -->
+append:
+## CI: the four required checks (round 492, task 0468)
+
+How long a pull request waits for `windows`, `linux`, `macos` and `linux-sanitizers` (GitHub's hosted runners;
+minutes from the jobs' own times). Before: a run of `main`'s workflow on 2026-11-11, 2,157 tests. After: pull
+request #383's first run, 2,161 tests, no compiler cache yet (ADR 0133).
+
+| Check | Before | After | Its parts after |
+|---|---|---|---|
+| windows | about 48 | about 26 | build 15.7 (was 31), then tests 10.0 beside stress 7.6 |
+| linux | about 27 | about 18 | build 8.4, then tests 8.9 beside stress 9.1 |
+| macos | about 21 | about 13 | build 6.4, then tests 6.8 beside stress 5.3 |
+| linux-sanitizers | about 106 | about 36 | build 21.8 (was 27), then six shards: 11.5, 13.7, 10.3, 12.0, 9.8, 9.5 |
+
+The whole run: 36 minutes, started once a push (before: about 106 minutes, started twice). The sanitizer check is
+now its build plus its slowest shard; the build is the larger part, and the one the compiler cache is for. What
+would cut Windows further: linking the three programs at once, or the tests and the editor as two build jobs.
