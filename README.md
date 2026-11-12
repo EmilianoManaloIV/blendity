@@ -124,7 +124,7 @@ Each stage is a **layout** that arranges the windows and shows only that stage's
 everything):
 
 - **Reference & Planning** - reference images, physical cameras with depth of field, composition guides, Pilot Camera.
-- **Blocking Out** - primitives and parametric shapes, SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
+- **Blocking Out** - primitives and parametric shapes, a **Blockout** whose boxes, cylinders and spheres add to or cut one mesh that follows them as they move (round 477), with **rooms** - air that brings its walls, floor and ceiling and merges with its neighbours or keeps its walls - doors, windows and pieces that intersect (round 478), dragged out with handles on every face that snap to the other pieces and a **Room tool** that draws a room on the ground or a face (round 479), SketchUp-style drawing and **Push/Pull** (shapes projected onto curved surfaces, Plasticity-style; what you draw is welded, T-junctions joined and flat faces merged only across continuous UVs, and **Solve Mesh** cleans a mesh that already has doubles), Booleans, snapping;
   **drawing in perspective** with a pen - SketchBook-style rulers, ellipses, symmetry and a 3-point guide that *is* the
   camera, strokes corrected to what the hand meant, canvases on the ground and on faces, and boxes, cylinders, faces and
   whole scaffolds built from the construction lines, never guessed.
@@ -154,6 +154,7 @@ everything):
   Shadowmask keeps four Mixed lights' baked shadows (a fifth is baked), Distance Shadowmask shows the key light's realtime shadow near the camera and the mask beyond the Shadow Distance, and Unity's own masks and light channels come in with Use Unity's Lightmaps while an exported package carries the masks as Shadowmask textures (round 454);
   a Unity scene's lights take their intensity as its project's Graphics settings say (linear or gamma), so a world like SideRail bakes far closer to Unity's light (round 459);
   a bake's filter reads each texel's noise by the samples that carry its light, so a texel lit by a few lucky rays is smoothed away and a bake leaves far fewer specks (round 486);
+  Generate Lighting's gather runs on every ticked graphics card, as F12 does, in batches sized by the cards' speed, and says which cards gathered (round 487: SideRail's lightmaps 37.7 s to 16.2 s);
   Remove Ringing (Hanning or Lanczos, a view setting) softens the dark ring a bright lamp leaves in baked probes, and Light Probe Groups are objects - placed and moved in the Scene view, imported from Unity - that Generate Lighting bakes at in place of the automatic grid (round 455);
   F12 rasterized or path-traced renders (Embree, OpenImageDenoise, GPU through Vulkan), or in DreamWorks' MoonRay, an
   optional download run as a program of its own (in WSL on Windows); the editor's views drawn on
@@ -394,7 +395,7 @@ Each build produces **`Blendity`**, **`blendity_tests`** (27385 unit checks in 2
 dependency-free build skips the library ones) and **`blendity_stress`** (the stress and efficiency suite).
 `py tools/run_suites.py <blendity_tests> [<another build's>]` runs every test group as its own process (both
 Windows builds in about a minute and a half). GitHub
-Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan. macOS is built
+Actions builds and tests Windows, Linux and macOS, and runs the tests under AddressSanitizer / UBSan (in six shards at once; a pull request that changes only specs, ADRs or changelog fragments builds nothing - round 492). macOS is built
 and tested only on CI (no Mac here).
 
 ## Documentation
