@@ -3489,6 +3489,16 @@ class Editor {
   size_t shallow_before_of(const LastOp &L) const;  // that count, or a fresh one when the settings changed since
   bool last_op_valid();
   void settle_meshes();
+  /* Round 470: the posed (evaluated) meshes made exact once the scene rests - nothing changed for two frames, no
+   * step pending - two meshes a frame, so no frame pays for a whole avatar (settle_evaluated_step, each frame). */
+  void settle_evaluated_step();
+  uint64_t settle_epoch_ = 0;
+  int settle_rest_ = 0;
+  bool settle_watch_ = false;
+  uint64_t settled_evaluated_ = 0;  // (meshes settled, for the tests and the posing counts)
+ public:
+  uint64_t settled_evaluated_for_test() const { return settled_evaluated_; }
+ private:
   /* An interaction is changing things frame by frame - a mouse button held (a gizmo, a slider, an F9 field), G / R / S,
    * Push/Pull, a modal adjustment. Whole-scene checks wait for it to end (task 0087). */
   bool interacting() const { return ui_.in.down[0] || ui_.in.down[1] || ui_.in.down[2] || xf_.active || pp_.active || modal_.active || sculpt_stroking_; }

@@ -4899,6 +4899,77 @@ static void tests_round455_gpu() {
   });
 }
 
+
+/* ---------------------------------------------------------------- round 470: ranges for meshes with several materials (task 0446) */
+static void tests_round470_gpu() {
+  test("gpu views (round 470): a finger turned on a mesh with tangents and three materials sends the card only the moved ranges - after the first frame no mesh goes up whole, and a frame's bytes are under a tenth of the mesh (triangles); a mesh of quads is counted too (skipped without a GPU)", [&] {
+    if (!gpu::available()) {
+      std::printf("    no Vulkan GPU: skipped\n");
+      return;
+    }
+    for (int kind = 0; kind < 2; kind++) {  // 0: triangles (indices untouched by a move), 1: quads (split again: its indices go up whole, regrouped)
+      Editor ed;
+      r34_open(ed);
+      GameObject *g = ed.scene().create("Finger");
+      MeshPtr mesh = kind == 0 ? primitives::ico_sphere(1.0f, 5) : primitives::uv_sphere(1.0f, 96, 64);
+      mesh->smooth = true;
+      mesh->face_material.assign(mesh->face_count(), 0);
+      for (size_t f = 0; f < mesh->face_count(); f++) mesh->face_material[f] = (int)(f % 3);
+      g->add<MeshFilter>()->mesh = mesh;
+      MeshRenderer *mr = g->add<MeshRenderer>();
+      mr->materials.clear();
+      for (int k = 0; k < 3; k++) {
+        auto mat = std::make_shared<Material>();
+        mat->name = strprintf("R470 %d", k);
+        mat->normal_map.path = "Assets/Textures/none.png";  // (tangents wanted; the file needn't exist)
+        mr->materials.push_back(mat);
+      }
+      g->set_local_position({0.0f, 1.0f, 0.0f});
+      ed.mark_changed_for_test("R470 finger");
+      ed.command("camera 0 4 7 0 1 0");
+      ed.command("overlay grid off");
+      r34_steps(ed, 3);
+      ed.viewport_device_for_test(2);
+      r34_steps(ed, 4);
+      CHECK(ed.scene_on_gpu_for_test());
+      const RenderMesh &first = mesh->render_mesh_tangents();
+      const uint64_t whole = (uint64_t)first.positions.size() * sizeof(gpu::RasterVertex) + first.indices.size() * 4;
+      CHECK(!first.tangents.empty());
+      std::vector<std::pair<uint64_t, uint64_t>> frames;  // per frame: whole uploads, partial updates
+      uint64_t partial_bytes = 0, partial = 0, whole_after_first = 0;
+      const size_t finger = mesh->positions.size() / 3;
+      for (int k = 0; k < 8; k++) {
+        const FrameProfile before = ed.frame_profile_totals();
+        mesh->positions[finger].y += 0.02f;  // (one vertex a frame: a finger turning)
+        mesh->touch();
+        /* As a pose held does it: the views draw again, no undo step is committed (a committed step settles the
+         * mesh - ADR 0034 - and the next frame would rightly build and send it whole). */
+        edit_epoch::bump();
+        ed.scene_cache_reset_for_test();
+        r34_steps(ed, 1);
+        const FrameProfile after = ed.frame_profile_totals();
+        /* Whole: a mesh added, or updated other than by ranges. */
+        const uint64_t sent_whole = (after.gpu_mesh_uploads - before.gpu_mesh_uploads) +
+                                    ((after.gpu_mesh_updates - before.gpu_mesh_updates) - (after.gpu_mesh_partial - before.gpu_mesh_partial));
+        frames.push_back({sent_whole, after.gpu_mesh_partial - before.gpu_mesh_partial});
+        if (k > 0) {
+          whole_after_first += sent_whole;
+          partial += after.gpu_mesh_partial - before.gpu_mesh_partial;
+          partial_bytes += after.gpu_partial_bytes - before.gpu_partial_bytes;
+        }
+      }
+      std::printf("    %s (%zu triangles, whole %llu KB): after the first frame %llu meshes sent whole, %llu partial updates of %llu KB each on average\n", kind ? "quads" : "triangles",
+                  first.indices.size() / 3, (unsigned long long)(whole / 1024), (unsigned long long)whole_after_first, (unsigned long long)partial,
+                  (unsigned long long)(partial ? partial_bytes / partial / 1024 : 0));
+      CHECK(whole_after_first == 0);  // (`meshes sent whole` 0 after the first frame)
+      CHECK(partial >= 7);
+      if (kind == 0) CHECK(partial && partial_bytes / partial < whole / 10);
+      else CHECK(partial && partial_bytes / partial < whole / 2);  // (a quad mesh regroups its indices whole: a third of the bytes at most; the vertices stay ranges)
+      ed.viewport_device_for_test(1);
+    }
+  });
+}
+
 void run_gpu_tests() {
   round59_tests();
   tests_round122_to_round125();
@@ -4933,4 +5004,5 @@ void run_gpu_tests() {
   tests_round454_gpu();
   tests_round455_gpu();
   tests_round469_gpu();
+  tests_round470_gpu();
 }

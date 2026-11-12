@@ -6875,7 +6875,7 @@ static void tests_round112() {
     CHECK(!m->settle() && m->looks == l1);  // (nothing quick left: nothing to do)
   });
 
-  test("Edit Mode: a drag that changes where smoothing splits builds the render mesh again, and NaN positions stay drawable", [=] {
+  test("Edit Mode: a drag that changes where smoothing splits follows in place - the corners split there, no render mesh built again (round 470), and it draws what a build draws; NaN positions stay drawable", [=] {
     /* Two faces meeting at 20 degrees, smoothing limited to 30: one smooth fan. Folding them to 60 splits it. */
     Mesh m;
     for (Vec3 p : {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 1), Vec3(0, 0, 1), Vec3(-1, 0.36f, 1), Vec3(-1, 0.36f, 0)}) m.add_vert(p);
@@ -6892,7 +6892,7 @@ static void tests_round112() {
     Mesh ref = m;
     ref.forget_caches();
     std::string why;
-    CHECK(d.full_builds == 1);  // (the split changed: in place refused it)
+    CHECK(d.full_builds == 0 && d.in_place_split >= 1 && d.in_place_refused == 0);  // (round 470: the split is made in place; until then a refusal and a build)
     CHECK(r112_draw_same(got, ref.render_mesh(), &why));
     /* A NaN position: whatever path it takes, the result is a rebuild's. */
     m.positions[2] = Vec3(std::nanf(""), 0, 1);
@@ -11017,6 +11017,458 @@ static void tests_round462_review() {
   });
 }
 
+/* ===================================================================== */
+/* Round 470 (task 0446, ADR 0124): a posed / dragged render mesh follows in place - splits made in place, tangents    */
+/* only around what moved. Written from the acceptance criteria by the test engineer.                                 */
+/* ===================================================================== */
+namespace {
+struct R470Rng {
+  uint32_t s;
+  uint32_t next() { return (s = s * 1664525u + 1013904223u) >> 8; }
+  float unit() { return (float)(next() % 20001) / 10000.0f - 1.0f; }  // -1 .. 1
+};
+struct R470Case {
+  std::string name;
+  MeshPtr mesh;
+};
+
+/* A render mesh that can be drawn without reading out of range: every array the size it should be. */
+bool r470_valid(const RenderMesh &rm, std::string *why) {
+  auto fail = [&](const char *w) {
+    if (why) *why = w;
+    return false;
+  };
+  const size_t nv = rm.positions.size();
+  if (rm.normals.size() != nv) return fail("normals size");
+  if (!rm.uvs.empty() && rm.uvs.size() != nv) return fail("uvs size");
+  if (!rm.tangents.empty() && rm.tangents.size() != nv) return fail("tangents size");
+  if (rm.indices.size() % 3 != 0) return fail("indices not a multiple of 3");
+  if (rm.tri_face.size() != rm.indices.size() / 3 || rm.tri_material.size() != rm.indices.size() / 3) return fail("per-triangle arrays");
+  if (rm.tri_corner.size() != rm.indices.size()) return fail("tri_corner size");
+  for (uint32_t i : rm.indices)
+    if (i >= nv) return fail("an index past the vertices");
+  return true;
+}
+
+/* The same question as tests_round112's r112_draw_same (written again here: that one is local to its function): do the
+ * two render meshes draw the same triangles, bit for bit in position, normal and UV at every triangle corner. */
+bool r470_draw_same(const RenderMesh &a, const RenderMesh &b, std::string *why) {
+  auto fail = [&](const std::string &w) {
+    if (why) *why = w;
+    return false;
+  };
+  if (a.indices.size() != b.indices.size()) return fail(strprintf("%zu vs %zu triangle corners", a.indices.size(), b.indices.size()));
+  if (a.tri_face != b.tri_face || a.tri_material != b.tri_material) return fail("faces or materials of the triangles differ");
+  if (a.tri_corner != b.tri_corner) return fail("the triangulation differs");
+  if (a.uvs.empty() != b.uvs.empty()) return fail("one has UVs");
+  const bool uv = !a.uvs.empty();
+  for (size_t k = 0; k < a.indices.size(); k++) {
+    const uint32_t i = a.indices[k], j = b.indices[k];
+    if (std::memcmp(&a.positions[i], &b.positions[j], sizeof(Vec3)) != 0) return fail(strprintf("position at triangle corner %zu", k));
+    if (std::memcmp(&a.normals[i], &b.normals[j], sizeof(Vec3)) != 0)
+      return fail(strprintf("normal at triangle corner %zu: (%a %a %a) in place, (%a %a %a) rebuilt", k, a.normals[i].x, a.normals[i].y, a.normals[i].z, b.normals[j].x, b.normals[j].y, b.normals[j].z));
+    if (uv && std::memcmp(&a.uvs[i], &b.uvs[j], sizeof(Vec2)) != 0) return fail(strprintf("UV at triangle corner %zu", k));
+  }
+  return true;
+}
+
+void r470_corner_uvs(Mesh &m) {
+  m.uvs.resize(m.corner_count());
+  for (size_t c = 0; c < m.corner_count(); c++) {
+    const Vec3 &p = m.positions[m.corner_verts[c]];
+    m.uvs[c] = Vec2(p.x * 0.37f + 0.5f, p.z * 0.41f + 0.2f);
+  }
+}
+
+std::vector<R470Case> r470_cases() {
+  std::vector<R470Case> out;
+  for (auto &[name, base] : r63_meshes()) {  // cube, UV sphere, sharp-edged cylinder, seamed torus (not the 50k grid: too big for 500 steps)
+    if (name == "50k-face grid") continue;
+    out.push_back({name, std::make_shared<Mesh>(*base)});
+  }
+  {
+    MeshPtr g = primitives::grid(4.0f, 8, 8);
+    g->smooth = true;
+    g->smooth_angle = 30.0f;
+    out.push_back({"smooth-by-angle grid", g});
+  }
+  {
+    /* A dart (concave quad) and an L-shaped n-gon, smooth by angle, so a move splits and joins them. */
+    MeshPtr m = std::make_shared<Mesh>();
+    for (Vec3 p : {Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(1, 0, 0.4f), Vec3(1, 0, 2), Vec3(3, 0, 0), Vec3(5, 0, 0), Vec3(5, 0, 1), Vec3(4, 0, 1), Vec3(4, 0, 3), Vec3(3, 0, 3)})
+      m->add_vert(p);
+    const uint32_t dart[] = {0, 1, 3, 2}, ell[] = {4, 5, 6, 7, 8, 9};
+    const uint32_t tri[] = {1, 4, 9};
+    const Vec2 uv4[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}}, uv6[] = {{0, 0}, {1, 0}, {1, .3f}, {.5f, .3f}, {.5f, 1}, {0, 1}}, uv3[] = {{0, 0}, {1, 0}, {0, 1}};
+    m->add_face(dart, 4, uv4);
+    m->add_face(ell, 6, uv6);
+    m->add_face(tri, 3, uv3);
+    m->smooth = true;
+    m->smooth_angle = 25.0f;
+    out.push_back({"dart and n-gon", m});
+  }
+  {
+    /* Zero-area faces (two vertices on one spot) and a sliver (a vertex a micrometre off its neighbour). */
+    MeshPtr g = primitives::grid(3.0f, 5, 5);
+    g->smooth = true;
+    g->smooth_angle = 30.0f;
+    g->positions[8] = g->positions[7];
+    g->positions[13] = g->positions[12] + Vec3(1e-6f, 0, 0);
+    out.push_back({"zero-area and sliver faces", g});
+  }
+  {
+    MeshPtr g = primitives::grid(3.0f, 4, 4);  // (the vertex at the centre is flipped up and down on every step)
+    g->smooth = true;
+    g->smooth_angle = 30.0f;
+    out.push_back({"fan flipping every step", g});
+  }
+  {
+    MeshPtr s = primitives::uv_sphere(1.0f, 12, 8);
+    s->smooth = true;
+    for (const Vec3 &p : s->positions) s->custom_normals.push_back(normalize(p + Vec3(0.1f, 0.2f, 0.0f)));
+    out.push_back({"custom normals", s});
+  }
+  return out;
+}
+
+/* One step of a drag or a pose: a handful of vertices move (a big jump every fourth step, which folds the surface and
+ * crosses smoothing angles); the special meshes do their own thing on top. */
+void r470_move(Mesh &m, const std::string &name, int step, R470Rng &rng) {
+  const float scale = step % 4 == 3 ? 1.0f : 0.15f;
+  for (int k = 0; k < 6; k++) {
+    Vec3 &p = m.positions[rng.next() % m.positions.size()];
+    const float dx = rng.unit() * scale, dy = rng.unit() * scale, dz = rng.unit() * scale;
+    p = p + Vec3(dx, dy, dz);
+  }
+  if (name == "zero-area and sliver faces") {
+    const size_t a = rng.next() % m.positions.size(), b = rng.next() % m.positions.size();
+    m.positions[a] = m.positions[b];  // (a new zero-area face or two)
+    if (step % 3 == 0) m.positions[b] = m.positions[b] + Vec3(1e-6f, 0, 1e-6f);
+  }
+  if (name == "fan flipping every step") {
+    size_t apex = 0;
+    for (size_t v = 1; v < m.positions.size(); v++)
+      if (std::fabs(m.positions[v].x) + std::fabs(m.positions[v].z) < std::fabs(m.positions[apex].x) + std::fabs(m.positions[apex].z)) apex = v;
+    m.positions[apex].y = step % 2 ? 2.0f : 0.0f;
+  }
+  if (name == "custom normals" && step % 2 == 1)
+    for (int k = 0; k < 5; k++) {
+      Vec3 &n = m.custom_normals[rng.next() % m.custom_normals.size()];
+      n = normalize(n + Vec3(rng.unit(), rng.unit(), rng.unit()) * 0.3f);
+    }
+  m.touch();
+}
+
+/* Tests only: the quick tangents' whole pass forced for as long as this lives. */
+struct R470WholeTangents {
+  ~R470WholeTangents() { mesh_whole_tangents_for_test(false); }
+};
+}  // namespace
+
+/* Round 470, scope 6: the two normals passes against each other when every face moved. */
+static void tests_round470_share() {
+  test("round 470: when every face of a mesh moved, the normals worked out around the moved faces are the whole pass's to the bit - smooth, smooth by angle and with sharp edges (the times of both are printed)", [] {
+    for (int mode = 0; mode < 3; mode++) {
+      auto make = [&] {
+        MeshPtr m = primitives::uv_sphere(1.0f, 320, 200);
+        m->smooth = true;
+        m->smooth_angle = mode == 0 ? 180.0f : 60.0f;
+        if (mode == 2) m->sharp_edges.push_back(Mesh::edge_key(m->corner_verts[0], m->corner_verts[1]));
+        return m;
+      };
+      MeshPtr a = make(), b = make();
+      (void)a->render_mesh();
+      (void)b->render_mesh();
+      double ms[2] = {0, 0};
+      bool same = true;
+      for (int step = 1; step <= 6; step++) {
+        for (Mesh *m : {a.get(), b.get()}) {
+          for (size_t v = 0; v < m->positions.size(); v++) m->positions[v] = m->positions[v] * (1.0f + 0.01f * std::sin((float)v * 0.37f + (float)step));
+          m->touch();
+        }
+        const float before = mesh_partial_share(2.0f);  // (a: around the moved faces whatever their share)
+        ScopedTimer ta;
+        const RenderMesh &ra = a->render_mesh();
+        if (step > 1) ms[0] += ta.ms();
+        mesh_partial_share(0.0f);  // (b: the whole pass)
+        ScopedTimer tb;
+        const RenderMesh &rb = b->render_mesh();
+        if (step > 1) ms[1] += tb.ms();
+        mesh_partial_share(before);
+        /* Slot by slot (what is drawn): corners split in place are appended in the order each pass meets them. */
+        same = same && ra.indices.size() == rb.indices.size();
+        for (size_t i = 0; same && i < ra.indices.size(); i++)
+          same = std::memcmp(&ra.normals[ra.indices[i]], &rb.normals[rb.indices[i]], sizeof(Vec3)) == 0 &&
+                 std::memcmp(&ra.positions[ra.indices[i]], &rb.positions[rb.indices[i]], sizeof(Vec3)) == 0;
+      }
+      std::printf("    %s, %zu faces all moved: around the moved faces %.2f ms a frame, the whole pass %.2f ms\n",
+                  mode == 0 ? "smooth" : mode == 1 ? "smooth by angle (60)" : "sharp edges", a->face_count(), ms[0] / 5.0, ms[1] / 5.0);
+      CHECK(same);
+    }
+  });
+}
+
+static void tests_round470() {
+  test("round 470: random moves on smooth-by-angle, sharp, seamed, n-gon, concave, custom-normal, zero-area and fan-flipping meshes draw what a rebuild draws, flat and smooth and with tangents; never a refusal, never a whole build", [] {
+    R470Rng rng{470};
+    int cases = 0, mismatches = 0, invalid = 0;
+    uint64_t splits = 0, refused = 0, builds = 0, in_place = 0;
+    const std::vector<R470Case> all = r470_cases();
+    for (const R470Case &c : all)
+      for (int mode = 0; mode < 3; mode++) {  // as shaded, flat (Edit Mode's), with tangents
+        const bool flat = mode == 1, tang = mode == 2;
+        MeshPtr m = std::make_shared<Mesh>(*c.mesh);
+        auto read = [&](Mesh &x) -> const RenderMesh & { return tang ? x.render_mesh_tangents() : x.render_mesh(flat); };
+        (void)read(*m);
+        for (int step = 0; step < 24; step++) {
+          r470_move(*m, c.name, step, rng);
+          const MeshCounts c0 = mesh_counts();
+          const RenderMesh &got = read(*m);
+          const MeshCounts d = mesh_counts() - c0;
+          splits += d.in_place_split, refused += d.in_place_refused, builds += d.full_builds, in_place += d.in_place;
+          Mesh ref = *m;
+          ref.forget_caches();
+          std::string why;
+          cases++;
+          if (!r470_valid(got, &why) || (tang && got.tangents.size() != got.positions.size())) {
+            invalid++;
+            std::printf("    %s, mode %d, step %d: not a valid render mesh (%s)\n", c.name.c_str(), mode, step, why.c_str());
+          }
+          if (!r470_draw_same(got, read(ref), &why)) {
+            mismatches++;
+            std::printf("    %s, mode %d, step %d: %s\n", c.name.c_str(), mode, step, why.c_str());
+          }
+        }
+      }
+    std::printf("    %d steps on %zu meshes: %llu followed in place, %llu corners split in place, %llu refused, %llu built whole, %d drew differently from a rebuild, %d invalid\n", cases, all.size(),
+                (unsigned long long)in_place, (unsigned long long)splits, (unsigned long long)refused, (unsigned long long)builds, mismatches, invalid);
+    CHECK(mismatches == 0);
+    CHECK(invalid == 0);
+    CHECK(refused == 0);                 // (criterion 1: in_place_refused stays 0)
+    CHECK(builds == 0);                  // (nothing is built whole once the first build is there)
+    CHECK(in_place == (uint64_t)cases);  // (every step followed in place)
+    CHECK(splits > 0);                   // (the splitting path was really exercised)
+  });
+
+  test("round 470: quick tangents worked out around the moved faces only are the whole quick pass's to the bit, and every vertex and index that changed is inside the ranges the frame reports", [] {
+    R470WholeTangents guard;
+    R470Rng rng{4701};
+    int steps = 0, partial_frames = 0, tangent_mismatches = 0, other_mismatches = 0, missed_vertices = 0, missed_indices = 0, wrong_from = 0;
+    for (const R470Case &c : r470_cases()) {
+      if (c.name == "cube") continue;
+      MeshPtr a = std::make_shared<Mesh>(*c.mesh), b = std::make_shared<Mesh>(*c.mesh);  // a: partial tangents; b: the whole pass
+      mesh_whole_tangents_for_test(false);
+      (void)a->render_mesh_tangents();
+      mesh_whole_tangents_for_test(true);
+      (void)b->render_mesh_tangents();
+      mesh_whole_tangents_for_test(false);
+      RenderMesh prev = a->render_mesh_tangents();  // (a copy: the previous step's picture)
+      for (int step = 0; step < 24; step++) {
+        R470Rng again = rng;  // (the same moves for both)
+        r470_move(*a, c.name, step, rng);
+        r470_move(*b, c.name, step, again);
+        mesh_whole_tangents_for_test(false);
+        const RenderMesh &ra = a->render_mesh_tangents();
+        mesh_whole_tangents_for_test(true);
+        const RenderMesh &rb = b->render_mesh_tangents();
+        mesh_whole_tangents_for_test(false);
+        steps++;
+        const bool same_shape = ra.positions.size() == rb.positions.size() && ra.indices == rb.indices && ra.tangents.size() == rb.tangents.size();
+        if (!same_shape) {
+          other_mismatches++;
+          std::printf("    %s step %d: the two copies have different shapes\n", c.name.c_str(), step);
+          prev = ra;
+          continue;
+        }
+        if (!ra.tangents.empty() && std::memcmp(ra.tangents.data(), rb.tangents.data(), ra.tangents.size() * sizeof(Vec4)) != 0) {
+          tangent_mismatches++;
+          for (size_t i = 0; i < ra.tangents.size(); i++)
+            if (std::memcmp(&ra.tangents[i], &rb.tangents[i], sizeof(Vec4)) != 0) {
+              std::printf("    %s step %d: tangent of render vertex %zu differs from the whole pass's\n", c.name.c_str(), step, i);
+              break;
+            }
+        }
+        if (std::memcmp(ra.positions.data(), rb.positions.data(), ra.positions.size() * sizeof(Vec3)) != 0 || std::memcmp(ra.normals.data(), rb.normals.data(), ra.normals.size() * sizeof(Vec3)) != 0)
+          other_mismatches++;
+        /* The ranges: when the frame says it moved from the previous one, everything that differs lies inside them. */
+        if (ra.moved_from != 0) {
+          partial_frames++;
+          if (ra.moved_from != prev.serial || prev.positions.size() != ra.positions.size() || prev.indices.size() != ra.indices.size()) {
+            wrong_from++;
+            std::printf("    %s step %d: moved_from %llu is not the previous serial %llu (or the sizes changed)\n", c.name.c_str(), step, (unsigned long long)ra.moved_from, (unsigned long long)prev.serial);
+          }
+          else {
+            auto inside = [](const std::vector<std::pair<uint32_t, uint32_t>> &ranges, size_t i) {
+              for (const auto &r : ranges)
+                if (i >= r.first && i < (size_t)r.first + r.second) return true;
+              return false;
+            };
+            for (size_t i = 0; i < ra.positions.size(); i++) {
+              const bool diff = std::memcmp(&prev.positions[i], &ra.positions[i], sizeof(Vec3)) != 0 || std::memcmp(&prev.normals[i], &ra.normals[i], sizeof(Vec3)) != 0 ||
+                                (!ra.tangents.empty() && std::memcmp(&prev.tangents[i], &ra.tangents[i], sizeof(Vec4)) != 0);
+              if (diff && !inside(ra.moved_vertices, i)) {
+                missed_vertices++;
+                std::printf("    %s step %d: render vertex %zu changed but is in no moved range\n", c.name.c_str(), step, i);
+                break;
+              }
+            }
+            for (size_t k = 0; k < ra.indices.size(); k++)
+              if (prev.indices[k] != ra.indices[k] && !inside(ra.moved_indices, k)) {
+                missed_indices++;
+                std::printf("    %s step %d: index slot %zu changed but is in no moved range\n", c.name.c_str(), step, k);
+                break;
+              }
+          }
+        }
+        prev = ra;
+      }
+    }
+    std::printf("    %d steps; %d reported moved ranges (the others went whole): partial tangents differing from the whole pass %d, shape / position / normal differences %d, vertices missing from the ranges %d, indices %d, wrong moved_from %d\n",
+                steps, partial_frames, tangent_mismatches, other_mismatches, missed_vertices, missed_indices, wrong_from);
+    CHECK(tangent_mismatches == 0);
+    CHECK(other_mismatches == 0);
+    CHECK(missed_vertices == 0 && missed_indices == 0 && wrong_from == 0);
+    CHECK(partial_frames >= 30);  // (a guard against a vacuous test, not a product claim: big folds, splits and meshes this small (a quarter of the faces) go whole)
+  });
+
+  test("round 470: a vertex swinging back and forth for 1,000 frames leaves at most one render vertex a corner and stops adding any after the first swing", [] {
+    for (int tangents = 0; tangents < 2; tangents++) {
+      MeshPtr m = primitives::grid(4.0f, 8, 8);
+      m->smooth = true;
+      m->smooth_angle = 30.0f;
+      size_t centre = 0;
+      for (size_t v = 1; v < m->positions.size(); v++)
+        if (std::fabs(m->positions[v].x) + std::fabs(m->positions[v].z) < std::fabs(m->positions[centre].x) + std::fabs(m->positions[centre].z)) centre = v;
+      auto read = [&]() -> const RenderMesh & { return tangents ? m->render_mesh_tangents() : m->render_mesh(); };
+      (void)read();
+      const MeshCounts c0 = mesh_counts();
+      size_t worst = 0, after_first_swing = 0, changed_late = 0;
+      for (int step = 1; step <= 1000; step++) {
+        const int phase = step % 20;
+        m->positions[centre].y = 1.5f * (float)(phase <= 10 ? phase : 20 - phase) / 10.0f;  // (a triangle wave: out and back every 20 frames)
+        m->touch();
+        const size_t n = read().positions.size();
+        worst = std::max(worst, n);
+        if (step == 20) after_first_swing = n;
+        if (step > 20 && n != after_first_swing) changed_late++;
+      }
+      const MeshCounts d = mesh_counts() - c0;
+      std::printf("    %s: render vertices at most %zu (%zu corners), %zu after the first swing; %llu in place, %llu corners split, %llu refused, %llu built whole; changed after the first swing %zu times\n",
+                  tangents ? "with tangents" : "without", worst, m->corner_count(), after_first_swing, (unsigned long long)d.in_place, (unsigned long long)d.in_place_split,
+                  (unsigned long long)d.in_place_refused, (unsigned long long)d.full_builds, changed_late);
+      CHECK(worst <= m->corner_count());
+      CHECK(changed_late == 0);
+      CHECK(d.full_builds == 0 && d.in_place_refused == 0 && d.in_place == 1000);
+      CHECK(d.in_place_split > 0);  // (the swing really split the fan)
+      /* At rest the render mesh is a build's. */
+      m->positions[centre].y = 0.0f;
+      m->touch();
+      (void)read();
+      m->settle();
+      const size_t settled = read().positions.size();
+      Mesh ref = *m;
+      ref.forget_caches();
+      const size_t fresh = (tangents ? ref.render_mesh_tangents() : ref.render_mesh()).positions.size();
+      std::printf("    %s: after settle() %zu render vertices, a fresh build %zu\n", tangents ? "with tangents" : "without", settled, fresh);
+      /* (Criterion 2: "settle brings it back to a fresh build's". Mesh::settle only acts on quick tangents
+       * (tangents_approximate()), so a mesh drawn without tangents keeps the corners split in place for good: if this
+       * fails for tangents == 0, that is the gap. ADR 0124 decision 6 should say which is meant.) */
+      CHECK(settled == fresh);
+    }
+  });
+
+  test("round 470: NaN and infinite positions, a face with a repeated vertex, hidden faces and absurd scales: a structurally valid render mesh every frame, and a finite pose afterwards draws what a rebuild draws", [] {
+    MeshPtr base = primitives::grid(2.0f, 4, 4);
+    base->add_face({0, 1, 1, 5});  // a repeated vertex
+    base->add_face({3, 3, 4});     // a triangle on two vertices
+    base->smooth = true;
+    base->smooth_angle = 35.0f;
+    r470_corner_uvs(*base);
+    base->face_material.assign(base->face_count(), 0);
+    for (size_t f = 0; f < base->face_count(); f++) base->face_material[f] = (int)(f % 3);
+    base->set_face_hidden(2, true);
+    base->set_face_hidden(7, true);
+    int bad = 0, mismatches = 0, steps = 0;
+    for (int mode = 0; mode < 3; mode++) {
+      const bool flat = mode == 1, tang = mode == 2;
+      MeshPtr m = std::make_shared<Mesh>(*base);
+      auto read = [&](Mesh &x) -> const RenderMesh & { return tang ? x.render_mesh_tangents() : x.render_mesh(flat); };
+      (void)read(*m);
+      const std::vector<Vec3> rest = m->positions;
+      struct Pose {
+        const char *what;
+        std::function<void(Mesh &)> apply;
+        bool finite;
+      };
+      const float inf = std::numeric_limits<float>::infinity();
+      const std::vector<Pose> poses = {
+          {"a hair's move", [&](Mesh &x) { x.positions[6].y += 0.01f; }, true},
+          {"NaN position", [&](Mesh &x) { x.positions[6] = Vec3(kNaN, 0, 0.2f); }, false},
+          {"back to finite", [&](Mesh &x) { x.positions[6] = rest[6]; }, true},
+          {"infinite position", [&](Mesh &x) { x.positions[12] = Vec3(inf, 0, -inf); }, false},
+          {"NaN in the repeated-vertex face", [&](Mesh &x) { x.positions[1] = Vec3(kNaN, kNaN, kNaN); }, false},
+          {"all back", [&](Mesh &x) { x.positions = rest; }, true},
+          {"huge scale (1e25)", [&](Mesh &x) { for (size_t i = 0; i < x.positions.size(); i++) x.positions[i] = rest[i] * 1e25f; }, false},
+          {"tiny scale (1e-25)", [&](Mesh &x) { for (size_t i = 0; i < x.positions.size(); i++) x.positions[i] = rest[i] * 1e-25f; }, false},
+          {"everything on one point", [&](Mesh &x) { for (Vec3 &p : x.positions) p = Vec3(0.5f); }, true},
+          {"folded", [&](Mesh &x) { for (size_t i = 0; i < x.positions.size(); i++) x.positions[i] = rest[i] + Vec3(0, (i % 3) * 1.2f, 0); }, true},
+          {"all back again", [&](Mesh &x) { x.positions = rest; }, true},
+      };
+      for (const Pose &p : poses) {
+        p.apply(*m);
+        m->touch();
+        const RenderMesh &got = read(*m);
+        steps++;
+        std::string why;
+        if (!r470_valid(got, &why)) {
+          bad++;
+          std::printf("    mode %d, %s: not a valid render mesh (%s)\n", mode, p.what, why.c_str());
+        }
+        if (p.finite) {
+          Mesh ref = *m;
+          ref.forget_caches();
+          if (!r470_draw_same(got, read(ref), &why)) {
+            mismatches++;
+            std::printf("    mode %d, %s: %s\n", mode, p.what, why.c_str());
+          }
+        }
+        else {
+          Mesh ref = *m;
+          ref.forget_caches();
+          const RenderMesh &rr = read(ref);
+          if (got.indices.size() != rr.indices.size() || got.tri_corner != rr.tri_corner) {
+            bad++;
+            std::printf("    mode %d, %s: triangle count or triangulation differs from a rebuild's\n", mode, p.what);
+          }
+        }
+      }
+    }
+    std::printf("    %d frames: %d invalid render meshes, %d finite poses that drew differently from a rebuild\n", steps, bad, mismatches);
+    CHECK(bad == 0);
+    CHECK(mismatches == 0);
+  });
+
+  test("round 470: a cache from another topology is refused cleanly - a face added or a corner removed under the cache gives a valid render mesh that is a rebuild's", [] {
+    MeshPtr m = primitives::uv_sphere(1.0f, 12, 8);
+    m->smooth = true;
+    (void)m->render_mesh_tangents();
+    m->positions[3].y += 0.1f;
+    m->touch();
+    (void)m->render_mesh_tangents();  // (in place, tangents quick)
+    const uint32_t extra[] = {0, 1, 2};
+    m->add_face(extra, 3);
+    m->positions[4].x += 0.1f;
+    m->touch();
+    const RenderMesh &got = m->render_mesh_tangents();
+    std::string why;
+    CHECK(r470_valid(got, &why));
+    Mesh ref = *m;
+    ref.forget_caches();
+    CHECK(r470_draw_same(got, ref.render_mesh_tangents(), &why));
+    CHECK(got.tangents.size() == got.positions.size());
+  });
+}
+
 void run_modeling_tests() {
   first_tests();
   edge_tool_tests();
@@ -11066,4 +11518,6 @@ void run_modeling_tests() {
   tests_round462();
   tests_round462_engineer();
   tests_round462_review();
+  tests_round470();
+  tests_round470_share();
 }

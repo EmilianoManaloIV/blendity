@@ -1807,6 +1807,10 @@ class GameObject {
   bool evaluation_pending(int kind) const { return eval_pending_[std::max(0, std::min(kind, 8))] != 0; }
   uint64_t eval_pending_key(int kind) const { return eval_pending_[std::max(0, std::min(kind, 8))]; }  // (the key the last call asked a worker for)
   void adopt_evaluation(GameObject &from, int kind);
+  /* Round 470 (ADR 0124, decision 6): the evaluated meshes whose render caches followed a pose in place (quick
+   * tangents, corners split one by one) are built again at the next draw - vertices shared anew, MikkTSpace. Up to
+   * `most` of them; returns how many, `left` whether more wait. Only the caches change. */
+  int settle_evaluated(int most, bool *left = nullptr) const;
   uint64_t eval_generation() const { return eval_generation_; }
   AABB world_bounds() const;
 

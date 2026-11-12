@@ -128,6 +128,7 @@ struct MeshCacheFields {
   mutable uint64_t cache_topo_[2] = {0, 0};
   mutable bool cache_flat_[2] = {false, false};
   mutable bool cache_approx_[2] = {false, false};  // tangents made the quick way while following a drag
+  mutable bool cache_split_[2] = {false, false};   // (round 470) corners got render vertices of their own in place: a build would share them again
   mutable std::vector<uint32_t> corner_rv_[2];  // each corner's render vertex in cache_[i]
   /* What both caches' full builds share (task 0185: an Edit Mode operator rebuilt the flat one and the shaded one in
    * the same frame, each from scratch): the triangles (three corners and the face each, in face order) per version,
@@ -304,6 +305,8 @@ struct Mesh : MeshCaches {
   bool settle() const;
   /* Whether a render mesh's tangents are the quick ones (settle() redoes them). */
   bool tangents_approximate() const { return cache_approx_[0] || cache_approx_[1]; }
+  /* Round 470: what settle() puts right - quick tangents, or corners split one by one while the mesh moved in place. */
+  bool needs_settle() const { return tangents_approximate() || cache_split_[0] || cache_split_[1]; }
   /* Drops the render and edge caches: the next render_mesh() builds from scratch (tests compare the two). */
   void forget_caches() const;
   /* The caches of `before`, when this mesh (an operator's bare copy of it, MeshCopyBare) still has its topology:
@@ -346,10 +349,16 @@ struct Mesh : MeshCaches {
   /* The faces with a vertex whose position differs from the one cache ci drew, ascending. */
   void moved_faces(int ci, std::vector<uint32_t> &faces) const;
   /* Positions and corner normals into cache ci's render vertices: every corner, or only those at `verts`. The changed
-   * render vertices are added to `changed`; false when a render vertex's corners now differ (the build would split:
-   * `split` is set then - round 468's count) or when the cache's indices don't fit the mesh. */
-  bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed, bool &split) const;
-  bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed, bool &split) const;
+   * render vertices are added to `changed`. A corner whose normal no longer matches its render vertex (the build
+   * would split it) gets a render vertex of its own, appended (round 470, ADR 0124): `split` lists those corners,
+   * whose index slots split_slots() then rewrites. False when the cache's indices don't fit the mesh. */
+  bool write_corners(int ci, const std::vector<Vec3> &cnormal, std::vector<uint32_t> &changed, std::vector<uint32_t> &split) const;
+  bool write_corners_at(int ci, const std::vector<Vec3> &cnormal, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed,
+                        std::vector<uint32_t> &split) const;
+  void split_slots(int ci, const std::vector<uint32_t> &split) const;
+  /* Round 470: the quick tangents (update_in_place's) of the render vertices at `verts` alone, each summed over its
+   * triangles in the whole pass's order (the same bits); those whose tangent changed are added to `changed`. */
+  void quick_tangents_at(int ci, const std::vector<uint32_t> &verts, std::vector<uint32_t> &changed) const;
   void record_moved(RenderMesh &rm, std::vector<uint32_t> &changed, const std::vector<uint32_t> &faces) const;
   /* A full build's render vertices and triangles (corner_rv: each corner's render vertex): on every thread (task 0109),
    * or the serial build before it (the tests compare). */
@@ -386,7 +395,8 @@ struct MeshCounts {
   double ms_in_place_normals = 0, ms_in_place_tangents = 0;  // round 468: inside ms_in_place - the move's normals, and its tangents (a normal-mapped mesh's)
   /* Round 468: in-place moves refused (the render mesh is then built whole, and its tangents with it) - and, of
    * them, the ones refused because a render vertex's corners no longer share a normal (the build would split it). */
-  uint64_t in_place_refused = 0, in_place_split = 0;
+  uint64_t in_place_refused = 0, in_place_split = 0;  // (in_place_split, since round 470: corners given a render vertex of their own in place)
+  uint64_t settled = 0;  // (round 470: Mesh::settle calls that had something to put right)
   MeshCounts operator-(const MeshCounts &o) const;
 };
 MeshCounts mesh_counts();
@@ -403,6 +413,10 @@ MeshPtr mesh_copy_bare(const Mesh &m);
 /* ------------------------------------------------------------- Primitives */
 /* Tests: render meshes built the way before task 0109 (one thread), to compare the threaded build with. */
 void mesh_serial_build_for_test(bool on);
+void mesh_whole_tangents_for_test(bool on);  // (round 470: update_in_place writes every quick tangent, as before it)
+/* Round 470: the share of a mesh's faces that may have moved for the normals to be worked out around them alone
+ * (above it: the whole pass). Returns the share it replaces. */
+float mesh_partial_share(float share);
 
 /* Equivalent to blender/source/blender/bmesh/operators/bmo_primitive.cc and
  * Unity's GameObject > 3D Object menu. All are sized like Unity primitives. */
