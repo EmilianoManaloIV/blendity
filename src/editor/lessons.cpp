@@ -2238,6 +2238,25 @@ A room is a Blockout piece whose shape is its air - what you walk in - and which
 ? A door's Sill is 0 and its Head 2.1. What does the wall look like? | A door-shaped opening from the floor up: two jambs and a head, with no step. A window with a sill leaves wall below it, so it has four faces and no hole in the wall's faces.
 @ source/blender/modifiers/intern/MOD_boolean.cc (Union, Difference and Intersect: what a room's walls and an Intersect piece are built from)
 )"},
+    {"Dragging rooms out", "Handles on a piece's faces, snapping to the other pieces, the Room tool, and F9", R"(
+Typing sizes is exact but slow. A selected Blockout piece shows a small square on each face: pull one and that face moves while the opposite face stays where it was, the way a box is stretched in SketchUp or UModeler. The Room tool goes further: you drag the footprint of a room on the ground or on a face, move the mouse up for its height, click, and the room is there - with its walls, floor and ceiling, in the active Blockout.
+# Try it
+! cmd:blockout new | A Blockout with its one 2 m box selected: six squares sit on its faces
+! cmd:blockout handle +x 1 | The same as pulling the +X handle 1 m outward: the box is 3 m wide and its other face has not moved (Undo is one step)
+! cmd:blockout room 6 0 10 4 3 | What the Room tool's two drags make: a room 4 m wide and 4 m deep, 3 m high, standing on the ground (the Blockout of the selected piece takes it)
+! cmd:blockout handle wall 0.1 | The room's extra handle sits outside its nearest wall: pulling it changes the wall's thickness and nothing else
+! cmd:tool room | The Room tool (Shift+R, the toolbar button, Modeling Tools): drag a rectangle, then click for the height; Esc leaves
+# Handles
+- A box has six, a cylinder its top, bottom and side, a sphere one on its surface; a room's faces move its air and one more handle, outside the nearest wall, moves the wall; a door or window has both ends (the width), the head and the sill.
+- Shift pulls both opposite faces about the centre. Ctrl turns snapping off. Esc or the right button puts the piece back exactly. One drag is one Undo step; the mesh follows the drag a build behind.
+- A face lands on the grid step (the toolbar's), and within a few pixels of another piece's face or corner it lands flush: the two faces become one plane in the result, with no face between them.
+# The Room tool
+- First drag: a rectangle on the ground or on any face (the Circle option drags a circle from its centre). Then move the mouse for the height, or type it, and click. The room's floor top is on the surface, turned to it. The tool stays on for the next room.
+- Options: Room or Solid (a plain box or cylinder), Add or Subtract for a solid, the wall thickness. Adjust Last Operation (F9) changes the width, depth, height, thicknesses and operation of the piece just made, from where it started.
+? You drag a box's +X handle 1 m outward while holding Shift. How does the box change? | Both opposite faces move: the box grows 2 m in X about its centre and its position stays, where an ordinary drag grows it 1 m and shifts the position by half a metre so the other face stays.
+? Why does dragging a handle on a piece scaled 2 times in X change its size by half the distance the face travels? | A handle moves the face under the mouse in the world; the size is in the piece's own units, which are twice as long here, so the size changes by the distance divided by the scale.
+? Two boxes stand side by side with a 2 cm gap. You drag the facing handle toward the other box. What happens near the other face? | Within a few pixels it snaps onto the other face's plane, so the two faces are flush and the result has no face between them. Holding Ctrl turns that off.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
 # The Posing block

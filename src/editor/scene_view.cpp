@@ -38,6 +38,7 @@ void Editor::draw_scene_view(const Recti &r) {
   Recti view{r.x, r.y + bh, r.w, r.h - bh};
   scene_rect_ = view;
   scene_drawn_ = true;
+  any_scene_drawn_ = true;
   draw_scene_overlay_bar(bar);
   if (view.w < 8 || view.h < 8) {  // (the dock doesn't paint this view's content: it paints every pixel itself)
     u.canvas.fill_rect(view, u.theme.panel);
@@ -86,6 +87,9 @@ void Editor::draw_scene_view(const Recti &r) {
   bool box_visible = false;
   if (drag_ == Drag::Box) {
     bool moved = box.w > u.px(4) || box.h > u.px(4);
+    /* A press that slipped straight sideways (or straight up) makes a box of no height (width): it held no pixel, selected nothing
+     * and cleared the selection - "selecting things on my cursor doesn't always select" (the user, round 479). It is a pixel thick. */
+    if (moved) box.w = std::max(box.w, 1), box.h = std::max(box.h, 1);
     box_visible = moved;
     if (in.cancelled) drag_ = Drag::None, box_visible = false;  // (a finger's press taken back: task 0213)
     if (drag_ == Drag::Box && (in.released[0] || !in.down[0])) {
@@ -165,6 +169,8 @@ void Editor::draw_scene_view(const Recti &r) {
   draw_toasts(view);  // (task 0252: over the picture, under the handles)
   draw_autorig_markers(view);
   draw_bone_handles(view);  // (after the picture: drawn before it, it would be painted over)
+  draw_blockout_handles(view);  // (round 479)
+  room_draw(view);
   draw_pushpull(view);
   draw_modal(view);
   draw_transform(view);
@@ -216,14 +222,15 @@ void Editor::draw_scene_view(const Recti &r) {
 std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
   const auto &in = ui_.in;
   const bool unity_like = nav_style_ == NavStyle::Unity || nav_style_ == NavStyle::Unreal;
+  if (blockout_drag_.active) return {Drag::None, 0};  // (a handle in hand: the camera stays where it is until it is let go)
   /* Task 0216: a pen with its side button held (Windows sends it as the right button) navigates in every feel - orbit,
    * Shift pans, Ctrl zooms - as the middle button does in Blender's pen setup. */
   const int barrel_button = in.pressed[1] ? 1 : in.pressed[0] ? 0 : -1;
   if (in.pressed[0] && keymap_preset_ == "Adobe" && in.key_down[platform::KEY_SPACE]) return {Drag::Pan, 0};  // (round 389: Photoshop's Space-drag, in Sculpt too: re-check 389)
   if (sculpt_ && in.pressed[0] && !in.barrel) return {Drag::None, 0};  // (task 0236: the left button is the brush's, Shift and Alt its smooth and carve)
-  if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal)
+  if (in.pen && in.barrel && barrel_button >= 0 && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal && !blockout_drag_.active)
     return {in.shift() ? Drag::Pan : in.ctrl() ? Drag::Zoom : Drag::Orbit, barrel_button};
-  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
+  if (in.pressed[1] && !pp_.active && !modal_.active && !xf_.active && !bone_drag_.modal && !blockout_drag_.active && !(room_.active && room_.stage > 0)) {  // a right-click cancels a running Push/Pull, Inset, Bevel or bone Extrude instead
     if (nav_style_ == NavStyle::Unreal && in.down[0]) return {Drag::Pan, 1};
     if (in.alt() && nav_style_ != NavStyle::Blender) return {Drag::Zoom, 1};
     return {unity_like ? Drag::Fly : Drag::None, 1};
@@ -250,7 +257,8 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (sketch_in_world()) sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
   if (sketch_in_world() && sketch_update(view)) busy = true;
   if (bone_handles_update(view)) busy = true;
-  if (trail_update(view)) busy = true;           // (task 0282: a trail's key dot, before the handles it hands over to)
+  if (blockout_handles_update(view)) busy = true;  // (round 479: a Blockout piece's handle before the gizmo, as a bone's)
+  if (trail_update(view)) busy = true;          // (task 0282: a trail's key dot, before the handles it hands over to)
   if (puppet_handles_update(view)) busy = true;  // (task 0281: before the gizmo - a handle is the puppet's string)
   if (gizmo_update(view)) busy = true;
   if (wp_update(view)) busy = true;
@@ -265,6 +273,7 @@ bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (autorig_update(view)) busy = true;
   if (knife_update(view)) busy = true;
   if (draw_update(view)) busy = true;
+  if (room_update(view)) busy = true;  // (round 479: the Room tool)
   return busy;
 }
 
@@ -388,7 +397,7 @@ void Editor::scene_navigation(const Recti &view) {
     }
   }
   if (scene_hovered_ && drag_ == Drag::None && !modal_.active) touch_navigate(k_pan);
-  if (pilot_cam_ && in.key_pressed[platform::KEY_ESCAPE] && !pp_.active && !modal_.active && !xf_.active && !draw_.active && !knife_.active)
+  if (pilot_cam_ && in.key_pressed[platform::KEY_ESCAPE] && !pp_.active && !modal_.active && !xf_.active && !draw_.active && !knife_.active && !room_.active && !blockout_drag_.active)
     toggle_pilot_camera();
 }
 
@@ -888,7 +897,7 @@ bool Editor::gizmo_update(const Recti &view) {
   auto &u = ui_;
   auto &in = u.in;
   gizmo_hot_ = -1;
-  if (!show_gizmos_ || weight_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
+  if (!show_gizmos_ || weight_paint_ || sculpt_ || paint_ || autorig_.active || tool_ == Tool::View || pp_.active || modal_.active || xf_.active || knife_.active || draw_.active || room_.active || blockout_drag_.active || (drag_ != Drag::None && drag_ != Drag::Gizmo)) return false;
   if (puppet_control_selected()) return false;  // (round 346: a bone selected by its control is posed by the control, no gizmo over it)
 
   /* Targets & pivot. */
@@ -1211,6 +1220,11 @@ bool Editor::gizmo_update(const Recti &view) {
           gizmo_snap_shown_ = true;
           gizmo_snap_point_ = p;
         }
+      }
+      if (h <= H_MOVE_Z && !eo && !in.ctrl() && !gizmo_vsnap_ && !surface && !gizmo_starts_.empty()) {  // (round 479: a Blockout piece's faces land in other pieces' planes; Ctrl is the grid's here)
+        const GameObject *lead = scene_->find(gizmo_starts_.back().id);
+        float along = dot(delta, axis[h]);
+        if (lead && lead->get<BlockoutPiece>() && blockout_move_snap(view, *lead, gizmo_starts_.back().pos, axis[h], along)) delta = axis[h] * along;
       }
       if (h <= H_MOVE_Z) typed_axis_move(axis[h], delta);  // (task 0190: type 2.5 while dragging: exactly 2.5 along the axis)
       gizmo_live_delta_ = delta;

@@ -50,6 +50,17 @@ const std::vector<Editor::HintRow> &Editor::hint_rows() const {
        [](const Editor &e) {
          return std::string(e.knife_.has_first ? "Knife: click the second point to cut" : "Knife: click the first point of the cut") + "  |  Esc / Enter: done";
        }},
+      {"blockout handle", [](const Editor &e) { return e.blockout_drag_.active; },
+       [](const Editor &e) {
+         return "Resizing a Blockout piece (" + e.blockout_drag_.text + "): move the mouse along its side  |  Shift: both sides  |  Ctrl: no snapping  |  Esc or right-click: cancel";
+       }},
+      {"room tool", [](const Editor &e) { return e.room_.active; },
+       [](const Editor &e) {
+         const std::string leave = e.room_.stage > 0 ? "  |  Ctrl: no snapping  |  right-click: drop it  |  Esc: leave the tool" : "  |  Ctrl: no snapping  |  Esc: leave the tool";
+         if (e.room_.stage == 1) return std::string(e.room_.circle ? "Room: release to fix the circle's radius" : "Room: release to fix the rectangle") + leave;
+         if (e.room_.stage == 2) return "Room: move the mouse for the height  |  type a height  |  click or Enter: make it" + leave;
+         return std::string("Room: drag a ") + (e.room_.circle ? "circle from its centre" : "rectangle") + " on the ground or a face" + leave;
+       }},
       {"transform modal", [](const Editor &e) { return e.xf_.active; },
        [](const Editor &e) {
          static const char *const kModal[] = {"Move", "Rotate", "Scale"};

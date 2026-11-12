@@ -701,6 +701,7 @@ void Editor::frame_body(std::vector<Event> &events) {
   if (filter_cache_.size() > 64) filter_cache_.clear();  // deleted cameras' stacks (ids are never reused within a scene)
   drop_slots_.clear();  // drop targets register again as the windows draw
   scene_drawn_ = false;  // set by the Scene view when it draws: drops onto it need this frame's picture
+  any_scene_drawn_ = false;  // (round 479: the same, for every window's Scene view together)
   drop_textures_.clear();
   drop_rows_.clear();
   drop_folders_.clear();
@@ -788,6 +789,10 @@ void Editor::frame_body(std::vector<Event> &events) {
   ui_ms_ = (float)frame_timer.ms();
   if (window_) present_changed();
   draw_secondary_windows(now);  // (task 0187: after the main window, with its own input each)
+  if (!any_scene_drawn_ && scene_) {  // (round 479: a held handle and a Room tool's footprint stop when no window draws a Scene view any more - a tab switch; the keymap is off while they run. After the other windows: the Scene view may be in one of them)
+    if (blockout_drag_.active) blockout_drag_cancel(scene_->find(blockout_drag_.piece));
+    if (room_.stage > 0) room_.stage = 0, room_.typed.clear();
+  }
   frame_ms_ = (float)frame_timer.ms();
   prof_.frames = 1;
   /* A move just ended (task 0103 / 0104): one more frame, whatever ends it, so no held or cheap picture stays up. */
@@ -1507,6 +1512,15 @@ void Editor::draw_toolbar(const Recti &r) {
     }
     u.tooltip(strprintf("The move step for a Ctrl drag (and the magnet). A turn snaps to %g degrees (Preferences).", snap_rot_));
     x += sw + u.px(4);
+  }
+  {  /* Round 479: the Room tool (Blockout), a switch beside the snapping it uses. */
+    const std::string k = key("tool.room");
+    const std::string tip = strprintf("Room Tool%s%s%s\nDrag a rectangle on the ground or a face (a circle with the Circle option), move the mouse for the height and click: "
+                                      "a room of the active Blockout stands there. Ctrl: no snapping. Esc leaves.",
+                                      k.empty() ? "" : " (", k.c_str(), k.empty() ? "" : ")");
+    if (u.icon_button({x + bh + u.px(4), y, bh, bh}, Icon::Cube, room_.active, tip.c_str())) set_room_tool(!room_.active);
+    if (u.record_buttons) u.button_rects["toolbar:room"] = Recti{x + bh + u.px(4), y, bh, bh};
+    x += bh + u.px(4);
   }
   x += bh + u.px(14);
   if (edit_mode_) {
@@ -2427,6 +2441,7 @@ void Editor::redo() {
 void Editor::new_scene() {
   save_job_wait();  // (round 413: a save in flight lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's - the next scene's ids start again)
+  blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: a footprint drawn in the last scene made a room in this one at the next click)
   export_waits_drop("a new scene");  // (review 354: its objects are gone)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -2507,6 +2522,7 @@ void Editor::open_job_poll() {
 bool Editor::open_scene_landed(const std::string &path, std::unique_ptr<Scene> s) {
   save_job_wait();  // (round 413: a save started while the file loaded lands on the scene it was of)
   blockout_jobs_.clear();  // (round 477: a Blockout's build is its scene's)
+  blockout_drag_ = BlockoutDrag{}, room_.stage = 0, room_.typed.clear();  // (round 479: the last scene's drag and footprint)
   export_waits_drop("another scene opened");  // (review 354)
   unity_lighting_scene_.clear(), unity_lighting_under_ = 0, lighting_from_unity_ = false;  // (round 400: the last scene's)
   sketch_sel_.clear();  // (round 388: a selection is its canvas's)
@@ -4911,6 +4927,7 @@ void Editor::enter_play() {
   autorig_cancel();
   anim_set_preview(false);  // (Play plays from the scene's own pose)
   bone_drag_ = BoneDrag{};
+  blockout_drag_ = BlockoutDrag{};  // (round 479: a handle held when Play starts lets go - the piece stays where the drag had it, as its one step)
   seq_set_preview(false);
   if (playing_) return;
   if (edit_mode_) exit_edit_mode();

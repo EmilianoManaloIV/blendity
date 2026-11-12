@@ -36,16 +36,17 @@ struct BlockoutState {
   blockout::Faces faces;        // the faces' origins, for the mesh below
   const Mesh *faces_mesh = nullptr;  // the mesh they belong to, and its version: any other writer of the mesh makes them stale
   uint64_t faces_version = 0;
+  uint64_t faces_hash = 0;      // the snapshot those faces were made from (`hash` moves on at a refusal; the mesh and its faces do not)
   BlockoutStatus status;
   std::string logged_why;       // the refusal already written to the log
   std::unique_ptr<blockout::Cache> cache;
   BlockoutState() = default;
   BlockoutState(const BlockoutState &o)
-      : hash_valid(o.hash_valid), hash(o.hash), faces(o.faces), faces_mesh(o.faces_mesh), faces_version(o.faces_version), status(o.status),
+      : hash_valid(o.hash_valid), hash(o.hash), faces(o.faces), faces_mesh(o.faces_mesh), faces_version(o.faces_version), faces_hash(o.faces_hash), status(o.status),
         logged_why(o.logged_why) {}
   BlockoutState &operator=(const BlockoutState &o) {
     if (this == &o) return *this;
-    hash_valid = o.hash_valid, hash = o.hash, faces = o.faces, faces_mesh = o.faces_mesh, faces_version = o.faces_version, status = o.status;
+    hash_valid = o.hash_valid, hash = o.hash, faces = o.faces, faces_mesh = o.faces_mesh, faces_version = o.faces_version, faces_hash = o.faces_hash, status = o.status;
     logged_why = o.logged_why;
     cache.reset();
     return *this;
@@ -125,5 +126,32 @@ void blockout_piece_objects(const GameObject &blockout, std::vector<const GameOb
 
 /* The Blockout a piece belongs to: the nearest ancestor with a Blockout component, nullptr when none. */
 GameObject *blockout_of_piece(const GameObject &piece);
+
+/* ---- Handles (round 479, task 0455) ---- */
+
+/* A handle on a piece: a place on one of its faces and the way it pulls, both in the piece's own space. */
+struct BlockoutHandle {
+  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill };
+  Kind kind = BoxFace;
+  int axis = 0;     // the own axis a box face or a cylinder's cap stands on
+  Vec3 at, dir;     // where it is, and the unit way out
+  std::string name; // what the console calls it: "+x" "-x" "+y" "-y" "+z" "-z", "top", "bottom", "side", "radius", "wall", "width", "head", "sill"
+};
+
+/* The smallest a handle leaves a piece's size or an opening's height: dragging through zero stops here, never turned inside out. */
+constexpr float kBlockoutMinSize = 0.01f;
+
+/* The piece's handles: a box's six faces; a cylinder's top, bottom and the side turned toward `toward` (the viewer in the piece's own
+ * space); a sphere's surface toward it; a room's faces move its air and one more handle on the outside of the wall nearest `toward`
+ * changes the wall (`growth`, from blockout_room_growth, says where that is); a door's or window's two ends (the width), head and sill. */
+void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *growth, std::vector<BlockoutHandle> &out);
+
+/* `p` as it is after `h` moved `delta` (own-space units, along h.dir) from `before`. `both`: the opposite face moves too, about the
+ * centre. `to_blockout_scale`: the length of h.dir in the Blockout's space (a wall is measured there). The size stops at
+ * kBlockoutMinSize. Returns how far the piece's origin moves, in its own space (the opposite face stays where it was). */
+Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const BlockoutHandle &h, float delta, bool both, float to_blockout_scale);
+
+/* The handle the console's name picks ("x+" reads as "+x"; "width" is a door's "+x"; "radius" is "side"). nullptr: none. */
+const BlockoutHandle *blockout_handle_named(const std::vector<BlockoutHandle> &handles, const std::string &name);
 
 }  // namespace bl
