@@ -63,7 +63,9 @@ void Editor::draw_scene_view(const Recti &r) {
   scene_rt_.attach(fb_, view);
   scene_r3d_.begin(&scene_rt_, cam_.view(), cam_.proj(view.w / (float)view.h), LightingEnv(), raster_opt_);
   bool gizmo_busy = quick_menu_took || other_owns || toast_took;
+  const uint64_t moved_before_tools = edit_epoch::transforms();
   if (!other_owns) gizmo_busy = scene_tool_updates(view, gizmo_busy);
+  solve_after_tools(moved_before_tools);  // (round 472: the limb where the solver puts it for the target this frame shows)
   if (!other_owns) interaction_window_ = scene_interacting() ? active_window_ : -1;
 
   auto &in = u.in;
@@ -253,6 +255,18 @@ std::pair<Editor::Drag, int> Editor::nav_drag_for_press() const {
  * gizmos and tools, task 0223; a pressed bone handle before the gizmo, task 0066; the Weight Paint brush, a running
  * Push/Pull, the modal and transform operators, the focus pick, the auto-rig, the Knife, the Draw tools). True when one
  * of them owns the mouse this frame. */
+/* Round 472 (ADR 0126): the frame's solve ran before the windows were drawn; a tool of this view that moved an IK
+ * target, a pole or an FK control since then would be drawn a frame ahead of the limb it drives (measured: the hand
+ * up to 16.5 mm behind its handle). So the constraints are solved once more when a transform was written by the
+ * tools - a comparison when none was, a hash per chain when what moved drives nothing. Not in Play: scripts and
+ * the fixed steps own the order there. */
+void Editor::solve_after_tools(uint64_t transforms_before) {
+  if (playing_ || edit_epoch::transforms() == transforms_before) return;
+  if (!solve_constraints(*scene_)) return;
+  solves_after_tools_++;
+  ui_.redraw = true, edit_epoch::bump_moved();  // (bones turned - a move, as the frame's own solve says it)
+}
+
 bool Editor::scene_tool_updates(const Recti &view, bool busy) {
   if (sketch_in_world()) sketch_bind_scene(view, scene_hovered_);  // (task 0233: the tool works in this view)
   if (sketch_in_world() && sketch_update(view)) busy = true;

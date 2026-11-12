@@ -12,8 +12,11 @@
 #include "../core/core.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -119,15 +122,52 @@ float AnimationClip::end_frame() const {
   return e;
 }
 
+namespace {
+size_t track_hash(const std::string &path, const std::string &property, int axis) {
+  size_t h = std::hash<std::string>()(path);
+  h ^= std::hash<std::string>()(property) + (size_t)0x9e3779b9u + (h << 6) + (h >> 2);
+  h ^= (size_t)(axis + 1) * (size_t)0x85ebca6bu + (h << 6) + (h >> 2);
+  return h;
+}
+}  // namespace
+
+/* Round 472: a clip with many tracks (an avatar's 275 bones keyed: 2,475) is looked up through a hash of (path, property,
+ * axis) -> index instead of a walk over every track. Built again when the number of tracks or the clip's layout differ
+ * from what it was built for (any edit but a keys-only one touches the layout); a hit is checked against the track it
+ * names, and of several tracks that match the first one wins, as the walk did. */
 AnimTrack *AnimationClip::find(const std::string &path, const std::string &property, int axis) {
-  for (AnimTrack &t : tracks)
-    if (t.path == path && t.property == property && t.axis == axis) return &t;
-  return nullptr;
+  constexpr size_t kIndexFrom = 24;  // (fewer tracks than this: the walk is cheaper than keeping an index)
+  if (tracks.size() < kIndexFrom) {
+    for (AnimTrack &t : tracks)
+      if (t.path == path && t.property == property && t.axis == axis) return &t;
+    return nullptr;
+  }
+  AnimTrackIndex &ix = track_index;
+  if (!ix.valid || ix.tracks != tracks.size() || ix.layout != layout) {
+    ix.map.clear();
+    ix.map.reserve(tracks.size());
+    for (size_t i = 0; i < tracks.size(); i++) ix.map.emplace(track_hash(tracks[i].path, tracks[i].property, tracks[i].axis), (uint32_t)i);
+    ix.tracks = tracks.size(), ix.layout = layout, ix.valid = true;
+  }
+  const auto range = ix.map.equal_range(track_hash(path, property, axis));
+  size_t best = tracks.size();
+  for (auto it = range.first; it != range.second; ++it) {
+    const size_t i = it->second;
+    if (i >= best || i >= tracks.size()) continue;
+    const AnimTrack &t = tracks[i];
+    if (t.path == path && t.property == property && t.axis == axis) best = i;
+  }
+  return best < tracks.size() ? &tracks[best] : nullptr;
 }
 
 AnimTrack &AnimationClip::track(const std::string &path, const std::string &property, int axis) {
   if (AnimTrack *t = find(path, property, axis)) return *t;
+  const bool indexed = track_index.valid && track_index.tracks == tracks.size() && track_index.layout == layout;
   tracks.push_back({path, property, axis, {}});
+  if (indexed) {  // (the new track goes into the index as it is made: the next lookup finds it without a rebuild)
+    track_index.map.emplace(track_hash(path, property, axis), (uint32_t)(tracks.size() - 1));
+    track_index.tracks = tracks.size();
+  }
   return tracks.back();
 }
 
@@ -604,31 +644,76 @@ bool camera_rig(const GameObject &g) {
 /* Round 348 (review): an IK the clip turns off (Weight 0) leaves its bones to their own keys; the ones the clip doesn't
  * key go to the rest pose - what an IK off shows whatever frame was shown before (MMD's unkeyed knees, a Weight keyed
  * alone). */
-static void rest_unkeyed_fk(const std::vector<GameObject *> &weighted, const std::unordered_map<GameObject *, Transform> &poses) {
+static void rest_unkeyed_fk(const std::vector<GameObject *> &weighted, const std::unordered_set<const GameObject *> &keyed) {
   for (GameObject *g : weighted) {
     const IKConstraint *ik = g->get<IKConstraint>();
     if (!ik || !ik_off(*ik)) continue;
     for (GameObject *b : ik_turned_bones(*g, *ik))
-      if (!poses.count(b) && b->get<Bone>()) b->set_local_rotation(b->get<Bone>()->rest_rotation);
+      if (!keyed.count(b) && b->get<Bone>()) b->set_local_rotation(b->get<Bone>()->rest_rotation);
   }
 }
 
-void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int hold, bool hold_cameras, float hold_from) {
-  BL_ZONE("apply clip");
-  PoseTimer timer(PoseStat::ClipApply);  // (round 468)
-  /* (Round 340: held from `hold_from` - a render range's first frame is a drawn one; the camera and its rig not held.) */
-  const float held = hold_frame_from(hold_from, frame, hold);
-  std::unordered_map<const GameObject *, bool> rigs;  // (each object asked once, not once a track)
-  auto smooth = [&](const GameObject *g) {
-    if (hold <= 1 || hold_cameras) return false;
-    auto r = rigs.find(g);
-    if (r == rigs.end()) r = rigs.emplace(g, camera_rig(*g)).first;
-    return r->second;
-  };
-  /* Each object found once and its transform set once, however many of its numbers are animated. Task 0206: with many
-   * tracks, the objects found in one walk of the branches the tracks name (searching a parent's children by name for
-   * each track was half a million name compares a frame under a thousand children). It follows what anim_target
-   * follows - the first child of a name - and leaves to it the paths a walk can't spell (a name empty or with a '/'). */
+/* ---------------------------------------------------------------- apply_clip's bindings (round 472) */
+
+namespace {
+
+constexpr size_t kBlendPrefix = 24;  // "MeshRenderer.BlendShape/"
+constexpr size_t kBindingsPerClip = 32;  // (roots one clip keeps bindings for: a crowd past it builds them as it did before)
+
+std::atomic<uint64_t> g_binding_builds{0};
+std::mutex &binding_mutex() {
+  static std::mutex m;
+  return m;
+}
+
+enum class BindKind : uint8_t { Position, Rotation, Scale, Other, BlendShape };
+
+}  // namespace
+
+/* One track's target: the object it writes, and how. */
+struct TrackBinding {
+  GameObject *g = nullptr;
+  uint32_t track = 0;  // index in the clip's tracks
+  uint32_t slot = 0;   // a transform track: the object's place among the pose's (shape: the shape key's index)
+  BindKind kind = BindKind::Other;
+  uint8_t axis = 0;
+  bool weighted = false;  // IKConstraint.Weight (the constraints it turns off are rested after the pose)
+};
+
+struct ClipBindings {
+  std::vector<TrackBinding> tracks;  // in the clip's order
+  std::vector<GameObject *> slots;   // the objects a transform track sets, in the order the tracks first name them
+  uint64_t names = 0;  // every object under the root - which, hung from what, called what (a name written past the stamp is caught here)
+};
+
+/* What a search of `root`'s branches by name depends on: each object below it, its parent and its name, in the walk's
+ * order (the first child of a name is the one a path finds). A few nanoseconds an object - against the string map the
+ * bindings replaced, built per call. */
+static uint64_t names_below(const GameObject &root) {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+  std::vector<const GameObject *> stack{&root};
+  while (!stack.empty()) {
+    const GameObject *g = stack.back();
+    stack.pop_back();
+    mix((uint64_t)(uintptr_t)g), mix((uint64_t)(uintptr_t)g->parent), mix(std::hash<std::string>()(g->name));
+    for (size_t i = g->children.size(); i-- > 0;) stack.push_back(g->children[i]);
+  }
+  return h;
+}
+
+uint64_t clip_binding_builds() { return g_binding_builds.load(std::memory_order_relaxed); }
+
+namespace {
+
+/* The objects the tracks name, found once and each track tied to its property (the work apply_clip did on every call
+ * before round 472). Task 0206: with many tracks, the objects found in one walk of the branches the tracks name
+ * (searching a parent's children by name for each track was half a million name compares a frame under a thousand
+ * children). It follows what anim_target follows - the first child of a name - and leaves to it the paths a walk can't
+ * spell (a name empty or with a '/'). */
+std::shared_ptr<const ClipBindings> bind_clip(const AnimationClip &clip, GameObject &root) {
+  g_binding_builds.fetch_add(1, std::memory_order_relaxed);
+  auto out = std::make_shared<ClipBindings>();
   std::unordered_map<std::string, GameObject *> found;
   if (clip.tracks.size() > 64) {
     std::unordered_set<std::string> named;  // every track's path and the paths above it
@@ -652,33 +737,151 @@ void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int ho
       }
     }
   }
-  std::unordered_map<GameObject *, Transform> poses;
-  std::vector<GameObject *> weighted;  // (IKs whose Weight the clip sets)
-  for (const AnimTrack &t : clip.tracks) {
-    if (t.keys.empty()) continue;
+  std::unordered_map<GameObject *, uint32_t> slot_of;
+  out->tracks.reserve(clip.tracks.size());
+  for (size_t i = 0; i < clip.tracks.size(); i++) {
+    const AnimTrack &t = clip.tracks[i];
     auto it = found.find(t.path);
     if (it == found.end()) it = found.emplace(t.path, anim_target(root, t.path)).first;
-    GameObject *g = it->second;
+    TrackBinding b;
+    b.g = it->second;
+    b.track = (uint32_t)i;
+    b.axis = (uint8_t)std::max(0, std::min(2, t.axis));
+    if (b.g && is_transform_property(t.property)) {
+      b.kind = t.property == "Position" ? BindKind::Position : t.property == "Scale" ? BindKind::Scale : BindKind::Rotation;
+      auto s = slot_of.find(b.g);
+      if (s == slot_of.end()) s = slot_of.emplace(b.g, (uint32_t)out->slots.size()).first, out->slots.push_back(b.g);
+      b.slot = s->second;
+    }
+    else if (b.g && t.property.size() > kBlendPrefix && t.property.compare(0, kBlendPrefix, "MeshRenderer.BlendShape/") == 0) {
+      const MeshFilter *mf = b.g->mesh_filter();
+      const size_t n = mf && mf->mesh ? mf->mesh->shape_keys.size() : 0;
+      for (size_t k = 0; k < n; k++)  // (the first key of that name: what the reflection's walk finds first)
+        if (t.property.compare(kBlendPrefix, std::string::npos, mf->mesh->shape_keys[k].name) == 0) {
+          b.kind = BindKind::BlendShape, b.slot = (uint32_t)k;
+          break;
+        }
+    }
+    else b.weighted = b.g && t.property == "IKConstraint.Weight";
+    out->tracks.push_back(b);
+  }
+  out->names = names_below(root);
+  return out;
+}
+
+/* Every bound object still has the name and parent it was bound with. */
+bool bindings_hold(const ClipBindings &set, const GameObject &root) { return set.names == names_below(root); }
+
+/* The bindings of `clip` under `root`: kept while the clip's layout, its number of tracks and the scene's structure stamp
+ * hold (the stamp bumps for an object made, destroyed, reparented or renamed). Not kept past kBindingsPerClip roots: the
+ * least recently used one goes. */
+/* (What the applies themselves added to the structure stamp: an Active or a component's field written bumps it, and
+ *  that is no object made, destroyed, reparented or renamed. Taken off the stamp the entries keep, so one root's apply
+ *  does not make every other root's bindings look stale - two animated characters in Play rebuilt each other's on
+ *  every frame before this. The main thread only, as every apply_clip is.) */
+uint64_t &applies_own_bumps() {
+  static uint64_t own = 0;
+  return own;
+}
+
+std::shared_ptr<const ClipBindings> clip_bindings(const AnimationClip &clip, GameObject &root, uint64_t &stamp) {
+  static uint64_t tick = 0;
+  stamp = edit_epoch::structure() - applies_own_bumps();
+  {
+    std::lock_guard<std::mutex> lock(binding_mutex());
+    for (ClipBindingEntry &e : clip.bindings.entries)
+      if (e.root == &root && e.root_id == root.id && e.layout == clip.layout && e.tracks == clip.tracks.size() && e.stamp == stamp && bindings_hold(*e.set, root)) {
+        e.used = ++tick;
+        return e.set;
+      }
+  }
+  std::shared_ptr<const ClipBindings> set = bind_clip(clip, root);
+  std::lock_guard<std::mutex> lock(binding_mutex());
+  ClipBindingEntry *slot = nullptr;
+  for (ClipBindingEntry &e : clip.bindings.entries)
+    if (e.root == &root) slot = &e;
+  if (!slot && clip.bindings.entries.size() < kBindingsPerClip) slot = &clip.bindings.entries.emplace_back();
+  if (!slot) {
+    slot = &clip.bindings.entries.front();
+    for (ClipBindingEntry &e : clip.bindings.entries)
+      if (e.used < slot->used) slot = &e;
+  }
+  slot->root = &root, slot->root_id = root.id, slot->layout = clip.layout, slot->tracks = clip.tracks.size();
+  slot->stamp = stamp, slot->used = ++tick, slot->set = set;
+  return set;
+}
+
+/* The apply's own writes (an Active, a component's field) bump the structure stamp: counted as its own, so only what
+ * happens between applies - to this root or any other - makes a binding look again. */
+void bindings_applied(uint64_t structure_before) { applies_own_bumps() += edit_epoch::structure() - structure_before; }
+
+/* A shape key's weight written the way write_anim_value's reflection would, without walking every field of the
+ * MeshRenderer for each key: false when the mesh no longer has that key at that index (the caller writes the long way). */
+bool write_blend_shape(GameObject &g, const AnimTrack &t, size_t shape, float v) {
+  const MeshFilter *mf = g.mesh_filter();
+  MeshRenderer *mr = g.get<MeshRenderer>();
+  if (!mf || !mf->mesh || !mr || shape >= mf->mesh->shape_keys.size() || std::strcmp(mr->type_name(), "MeshRenderer") != 0) return false;
+  const std::string &name = mf->mesh->shape_keys[shape].name;
+  if (t.property.size() != kBlendPrefix + name.size() || t.property.compare(kBlendPrefix, std::string::npos, name) != 0) return false;
+  edit_epoch::bump();  // (as write_anim_value: a component's field written past every setter)
+  if (mr->shape_weight(name) != v) mr->set_shape_weight(name, v);
+  return true;
+}
+
+}  // namespace
+
+void apply_clip(const AnimationClip &clip, GameObject &root, float frame, int hold, bool hold_cameras, float hold_from) {
+  BL_ZONE("apply clip");
+  PoseTimer timer(PoseStat::ClipApply);  // (round 468)
+  /* (Round 340: held from `hold_from` - a render range's first frame is a drawn one; the camera and its rig not held.) */
+  const float held = hold_frame_from(hold_from, frame, hold);
+  std::unordered_map<const GameObject *, bool> rigs;  // (each object asked once, not once a track)
+  auto smooth = [&](const GameObject *g) {
+    if (hold <= 1 || hold_cameras) return false;
+    auto r = rigs.find(g);
+    if (r == rigs.end()) r = rigs.emplace(g, camera_rig(*g)).first;
+    return r->second;
+  };
+  /* Each object found once and its transform set once, however many of its numbers are animated. Round 472: the tracks'
+   * objects and properties are bound once per (clip layout, root, structure stamp), not on every call. */
+  uint64_t stamp = 0;
+  const std::shared_ptr<const ClipBindings> set = clip_bindings(clip, root, stamp);
+  const uint64_t structure_before = edit_epoch::structure();
+  const ClipBindings &bound = *set;
+  std::vector<Transform> poses(bound.slots.size());
+  std::vector<char> posed(bound.slots.size(), 0);
+  std::vector<GameObject *> weighted;  // (IKs whose Weight the clip sets)
+  for (const TrackBinding &b : bound.tracks) {
+    const AnimTrack &t = clip.tracks[b.track];
+    if (t.keys.empty()) continue;
+    GameObject *g = b.g;
     if (!g) continue;  // (renamed or gone: the window shows the track as missing)
     const float v = t.sample(smooth(g) ? frame : held);  // (round 340: a camera and its rig move on every frame)
     if (!std::isfinite(v)) continue;
-    if (!is_transform_property(t.property)) {
+    if (b.kind == BindKind::BlendShape && write_blend_shape(*g, t, b.slot, v)) continue;
+    if (b.kind == BindKind::Other || b.kind == BindKind::BlendShape) {
       write_anim_value(*g, t.property, t.axis, v);
-      if (t.property == "IKConstraint.Weight") weighted.push_back(g);
+      if (b.weighted) weighted.push_back(g);
       continue;
     }
-    auto p = poses.find(g);
-    if (p == poses.end()) p = poses.emplace(g, g->local()).first;
-    const int a = std::max(0, std::min(2, t.axis));
-    if (t.property == "Position") p->second.position[a] = v;
-    else if (t.property == "Scale") p->second.scale[a] = v;
-    else p->second.euler_hint[a] = v;
+    Transform &p = poses[b.slot];
+    if (!posed[b.slot]) p = g->local(), posed[b.slot] = 1;
+    if (b.kind == BindKind::Position) p.position[b.axis] = v;
+    else if (b.kind == BindKind::Scale) p.scale[b.axis] = v;
+    else p.euler_hint[b.axis] = v;
   }
-  for (auto &[g, pose] : poses) {
-    pose.rotation = Quat::euler(pose.euler_hint);
-    g->set_local(pose);
+  for (size_t i = 0; i < poses.size(); i++) {
+    if (!posed[i]) continue;
+    poses[i].rotation = Quat::euler(poses[i].euler_hint);
+    bound.slots[i]->set_local(poses[i]);
   }
-  rest_unkeyed_fk(weighted, poses);
+  if (!weighted.empty()) {
+    std::unordered_set<const GameObject *> keyed;
+    for (size_t i = 0; i < poses.size(); i++)
+      if (posed[i]) keyed.insert(bound.slots[i]);
+    rest_unkeyed_fk(weighted, keyed);
+  }
+  bindings_applied(structure_before);
 }
 
 float wrap_frame(float frame, float end, int wrap) {
