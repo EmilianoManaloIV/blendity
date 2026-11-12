@@ -631,12 +631,74 @@ static void list_arrangement(uint32_t seed, Path path, int what, const std::vect
 
 /* What the sweep counts of one kind of arrangement. */
 struct Tally {
-  size_t built = 0, skipped = 0, refused = 0, problems = 0, overlaps = 0, no_area = 0, unresolved = 0, unchecked = 0;
+  size_t built = 0, skipped = 0, refused = 0, problems = 0, overlaps = 0, ridges = 0, no_area = 0, unresolved = 0, unchecked = 0;
   std::string first;
 };
 
+/* A face's plane from its corners, in doubles: the unit normal, how wide the face is (twice its area over its longest
+ * edge) and how far its corners are off the plane. */
+struct FacePlane {
+  double n[3] = {0, 0, 0}, width = 0.0, off = 0.0;
+};
+
+static FacePlane face_plane(const Mesh &m, uint32_t f) {
+  FacePlane out;
+  const uint32_t *v = m.face_verts(f);
+  const uint32_t k = m.face_size(f);
+  const Vec3 o = m.positions[v[0]];
+  double twice[3] = {0, 0, 0}, longest = 0.0;
+  for (uint32_t i = 0; i < k; i++) {
+    const Vec3 p = m.positions[v[i]], q = m.positions[v[(i + 1) % k]];
+    const double a[3] = {(double)p.x - o.x, (double)p.y - o.y, (double)p.z - o.z}, b[3] = {(double)q.x - o.x, (double)q.y - o.y, (double)q.z - o.z};
+    twice[0] += a[1] * b[2] - a[2] * b[1], twice[1] += a[2] * b[0] - a[0] * b[2], twice[2] += a[0] * b[1] - a[1] * b[0];
+    longest = std::max(longest, std::sqrt((b[0] - a[0]) * (b[0] - a[0]) + (b[1] - a[1]) * (b[1] - a[1]) + (b[2] - a[2]) * (b[2] - a[2])));
+  }
+  const double len = std::sqrt(twice[0] * twice[0] + twice[1] * twice[1] + twice[2] * twice[2]);
+  if (!(len > 0.0) || !(longest > 0.0)) return out;
+  for (int c = 0; c < 3; c++) out.n[c] = twice[c] / len;
+  out.width = len / longest;
+  for (uint32_t i = 0; i < k; i++) {
+    const Vec3 p = m.positions[v[i]];
+    out.off = std::max(out.off, std::fabs(((double)p.x - o.x) * out.n[0] + ((double)p.y - o.y) * out.n[1] + ((double)p.z - o.z) * out.n[2]));
+  }
+  return out;
+}
+
+/* Two flat faces that meet at a ridge: back to back, their planes 0.3 degrees and more apart. They are in two planes
+ * that cross in a line, and neither lies on the other; the check for faces on top of each other names them all the
+ * same where one is a strip along that line narrow enough to stay within its distance for "one plane".
+ *
+ * Why this is told apart from a doubled wall (round 480; the code review's conditions are the three below). The first
+ * whole sweep of the new shapes on the exact path read 2 problems of 2,000, both a flat side against a round room's
+ * wall - an outline of 256 points, its facets 1.4 degrees apart - along the ridge between two facets:
+ * - seed 475: a stairs' side touches the ridge. The ridge is a float's rounding past the side at one end (a
+ *   millionth of a metre) and on it at the other: a needle of the side 2.5 m long and 0.18 mm wide is left, back to
+ *   back with the two facets - a closed crack a micron thick.
+ * - seed 1337: a cutter's end 0.04 mm short of the ridge (the room's inner outline is mitred: 0.5 m * (1 / cos(pi /
+ *   256) - 1) = 0.038 mm past the circle - the pieces' own numbers, no rounding): a skin of wall 0.04 mm thick and
+ *   3.1 mm wide is left between the cutter's end and the facets.
+ * Both results are closed and right for what was asked. The kernel is as it was: only this count changed.
+ *
+ * What keeps the exemption narrow:
+ * - back to back only. The check takes two such faces for one plane within a hundred-thousandth of the result's size,
+ *   and wants every corner of one that near the other's plane: at an angle of 5e-3 and more the strip can be no wider
+ *   than four thousandths of the size (2 cm of a 5 m result). Faces that look the same way are given ten times the
+ *   distance (20 cm), and such a pair inside a closed result is a pocket or a doubled skin: a problem as before.
+ * - both faces flat to that distance, and a tenth of a millimetre wide or more: the angle is then the planes' own, not
+ *   the rounding of a needle's corners (a float at 4 m is 2.4e-7 m apart: under 2.4e-3 of angle over 0.1 mm).
+ * - the pieces' round sides here are 256 and 300 facets: 0.0105 and more between neighbours, twice the threshold.
+ * Counted in a column of its own. Two faces of one plane - a doubled wall - are a problem as before. */
+static bool meet_at_a_ridge(const Mesh &m, uint32_t a, uint32_t b, double size) {
+  const FacePlane pa = face_plane(m, a), pb = face_plane(m, b);
+  if (std::min(pa.width, pb.width) < 1e-4 || std::max(pa.off, pb.off) > 1e-5 * size) return false;
+  const double along = pa.n[0] * pb.n[0] + pa.n[1] * pb.n[1] + pa.n[2] * pb.n[2];
+  const double c[3] = {pa.n[1] * pb.n[2] - pa.n[2] * pb.n[1], pa.n[2] * pb.n[0] - pa.n[0] * pb.n[2], pa.n[0] * pb.n[1] - pa.n[1] * pb.n[0]};
+  return along < 0.0 && std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]) > 5e-3;
+}
+
 /* One result judged. A problem: it is open, pinched or inside out, or two of its flat faces lie on top of each
- * other. Small faces of an unresolved place on top of others, and faces of no area, are counted apart. */
+ * other. Small faces of an unresolved place on top of others, flat faces that meet at a ridge, and faces of no area,
+ * are counted apart. */
 static void judge(uint32_t seed, const char *name, const Mesh &m, const bl::blockout::Faces &named, const bl::blockout::Report &r, Tally &t) {
   t.built++, t.skipped += r.skipped.size(), t.unresolved += r.unresolved;
   std::string bad = problem(m);
@@ -645,18 +707,21 @@ static void judge(uint32_t seed, const char *name, const Mesh &m, const bl::bloc
   const float size = length(bb.max - bb.min);
   if (m.face_count() && m.face_count() < 20000) meshops::overlapping_faces(m, 1e-4f * size, &pairs);
   else if (m.face_count()) t.unchecked++;  // (the pairwise check would take minutes: said in a note)
-  bool small = false;
+  bool small = false, ridge = false;
   for (const auto &pr : pairs) {
-    if (named.flat[pr.first] && named.flat[pr.second] && bad.empty()) bad = "flat faces on top of each other";
-    small = small || !named.flat[pr.first] || !named.flat[pr.second];
+    const bool flat = named.flat[pr.first] && named.flat[pr.second];
+    const bool at_ridge = flat && meet_at_a_ridge(m, pr.first, pr.second, size);
+    if (flat && !at_ridge && bad.empty()) bad = "flat faces on top of each other";
+    small = small || !flat;
+    ridge = ridge || at_ridge;
   }
   size_t flat_area = 0;
   const double far = farthest(m);
   for (size_t f = 0; f < m.face_count(); f++) flat_area += no_area(m, f, far);
-  t.problems += !bad.empty(), t.overlaps += small, t.no_area += flat_area > 0;
+  t.problems += !bad.empty(), t.overlaps += small, t.ridges += ridge, t.no_area += flat_area > 0;
   if (!bad.empty() && t.first.empty()) t.first = strprintf("seed %u: %s", seed, bad.c_str());
-  if (!std::getenv("BLENDITY_BLOCKOUT_DEBUG") || (bad.empty() && !small && !flat_area && !r.unresolved)) return;
-  std::printf("  seed %u (%s): %s%s%s%s\n", seed, name, bad.c_str(), small ? " small faces on top of others;" : "", flat_area ? strprintf(" %zu faces of no area;", flat_area).c_str() : "",
+  if (!std::getenv("BLENDITY_BLOCKOUT_DEBUG") || (bad.empty() && !small && !ridge && !flat_area && !r.unresolved)) return;
+  std::printf("  seed %u (%s): %s%s%s%s%s\n", seed, name, bad.c_str(), small ? " small faces on top of others;" : "", ridge ? " flat faces meeting at a ridge;" : "", flat_area ? strprintf(" %zu faces of no area;", flat_area).c_str() : "",
               r.unresolved ? strprintf(" %zu unresolved", r.unresolved).c_str() : "");
 }
 
@@ -666,7 +731,7 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
   const uint32_t cases = one ? (uint32_t)std::max(1, std::atoi(one)) : o.quick ? 200 : 2000;
   const char *cell_env = std::getenv("BLENDITY_BLOCKOUT_CELL");  // (the sweep at another cell, to see what a finer grid resolves)
   const float sweep_cell = cell_env && std::atof(cell_env) > 0.0 ? (float)std::atof(cell_env) : 0.08f;
-  rep.table({"sweep", "arrangements", "built", "pieces skipped", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
+  rep.table({"sweep", "arrangements", "built", "pieces skipped", "refused", "problems", "with small faces on top of others", "with flat faces meeting at a ridge", "with faces of no area", "unresolved places"});
   for (int kind = 0; kind < 12; kind++) {
     const Path path = kind < 6 ? Path::Crisp : Path::Field;
     const int what = kind % 6;
@@ -690,7 +755,7 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
       if (std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  seed %u (%s) refused: %s\n", seed, name.c_str(), r.why.c_str());
     }
     rep.row({std::string(path == Path::Crisp ? "crisp" : strprintf("field cell %g", sweep_cell)) + kWhat[what], std::to_string(cases), std::to_string(t.built), std::to_string(t.skipped),
-             std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved)});
+             std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.ridges), std::to_string(t.no_area), std::to_string(t.unresolved)});
     if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
     if (t.unchecked) rep.note(name + strprintf(": %zu results of 20,000 faces or more were not checked for faces on top of each other", t.unchecked));
   }

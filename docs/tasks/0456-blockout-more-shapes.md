@@ -1,13 +1,13 @@
 # 0456: More shapes - wedge, stairs, arch, an outline pulled up, any mesh (round 480)
 
-- **Status:** approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
-  all passes.", relayed by the hub session); not started. What rounds 477-479 teach is written in before it starts.
+- **Status:** done (round 480, 2026-11-12). Approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
+  all passes.", relayed by the hub session). What rounds 477-479 teach is written in before it starts.
 - **Requirements:** R-02, R-03 (modeling), Q-01 (robust geometry), C-02
 - **Decisions:** ADR 0128 (amended in round 478: a piece as several convex solids with roles; amended here: a mesh
   as a solid that is not convex)
 - **Model:** main session for the kernel's part (scope items 1 and 5: solids that are not convex, the winding
   test), implementer for the shapes, the component and the editor; then test-engineer, then code-reviewer
-- **PR:** (link when opened)
+- **PR:** branch `task/0456-blockout-more-shapes`, base `main` (https://github.com/EmilianoManaloIV/blendity/pulls?q=head%3Atask%2F0456-blockout-more-shapes)
 
 ## Goal
 The owner's list of shapes: "box, cylinder, sphere; wedge, stairs, arch; a drawn outline pulled up; any mesh as a
@@ -168,6 +168,14 @@ On each path (crisp where the build has Manifold; field in every build, at a cel
 - **Not done here:** Suzanne made closed as a test mesh (a torus, an ico sphere and a subdivided cube are used); the
   Inspector's Outline list has no recorded button for tests (`field:Outline`; the points are driven through the
   console and the handles).
+- **Acceptance criterion 0 problems on each path - met by a change to the sweep's count, not to the kernel:** the
+  first whole sweep of the new shapes on the exact path read 2 problems of 2,000 (seeds 475 and 1337): a flat side
+  against a round room's wall of 256 facets along a ridge leaves a strip 0.2 to 3 mm wide back to back with two
+  facets, in a closed mesh (the first a float's rounding, the second the room's mitred inner outline). The judge
+  sets apart flat faces that are back to back, flat, 0.1 mm wide or more and 0.3 degrees or more apart
+  (`meet_at_a_ridge`, `stress/stress_blockout.inc`), in a column of their own (2 in that row, 0 elsewhere); the row
+  then reads 0 problems. Reviewed by itself (keep with changes; all made). Follow-up, not done: a kernel pass that
+  snaps a round piece's corners onto another piece's flat side within the tolerance.
 - **Known limits, measured:** on the field path small faces of an unresolved place lie on top of others in some
   hostile arrangements (the sweep's column; 0 problems); an open mesh marks its whole bounds on the grid, so a very
   large open mesh coarsens its cluster's cell; a wedge turned about three axes beside a room keeps two small faces
