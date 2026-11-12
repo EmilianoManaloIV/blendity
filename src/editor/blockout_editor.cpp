@@ -136,7 +136,7 @@ void Editor::blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t pie
   if (ok && mesh) {
     mf->mesh = mesh;
     s.faces = std::move(faces);
-    s.faces_mesh = mesh.get(), s.faces_version = mesh->version;
+    s.faces_mesh = mesh.get(), s.faces_version = mesh->version, s.faces_hash = hash;
     s.status.faces = mesh->face_count();
     s.logged_why.clear();
     blockout_landed_++;
@@ -618,17 +618,31 @@ void Editor::draw_blockouts() {
   });
 }
 
+/* The pieces' own faces, when the mesh was built from the pieces exactly as they are: while a build is in flight, and after one
+ * that was refused, the mesh is still the one before the edit, and the pieces as they are now say nothing about its faces (`faces`
+ * is then empty). */
+struct Editor::BlockoutOwners {
+  std::unique_ptr<blockout::FaceOwners> faces;
+  explicit BlockoutOwners(const GameObject &g) {
+    const Blockout *b = g.get<Blockout>();
+    std::vector<blockout::Piece> pieces;
+    blockout::Settings settings;
+    blockout_snapshot(g, pieces, settings);
+    if (b && b->state.hash_valid && b->state.faces_hash == blockout_snapshot_hash(pieces, settings)) faces = std::make_unique<blockout::FaceOwners>(pieces);
+  }
+};
+
 /* The face of the Blockout's mesh under a view pixel, with the piece and side that made it (the faces' origins say which), the
  * point and the face's normal toward the viewer, in the Blockout's space; false when there is no face or the origins are not the
- * mesh's own (another writer's mesh). */
-bool Editor::blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out) {
+ * mesh's own (another writer's mesh). `owners`: a caller that asks many times reads the pieces once. */
+bool Editor::blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &out, const BlockoutOwners *owners) {
   Blockout *b = g.get<Blockout>();
   const MeshFilter *mf = g.get<MeshFilter>();
   if (!b || !mf || !mf->mesh) return false;
   const Mesh &m = *mf->mesh;
   const BlockoutState &s = b->state;
   if (s.faces_mesh != &m || s.faces_version != m.version || s.faces.piece.size() != m.face_count()) return false;  // (another writer's mesh: no origins)
-  const Ray ray = scene_r3d_.screen_ray((float)view_x, (float)view_y);
+  const Ray ray = scene_r3d_.screen_ray((float)view_x + 0.5f, (float)view_y + 0.5f);  // (the pixel's middle, as the id buffer reads it: at an outline its corner can miss the mesh)
   const Mat4 inv = g.world_matrix().inverse();
   const Ray lr{inv.point(ray.origin), inv.dir(ray.dir)};
   const RenderMesh &rm = m.render_mesh();
@@ -649,17 +663,46 @@ bool Editor::blockout_hit(GameObject &g, int view_x, int view_y, BlockoutHit &ou
   if (!(len > 0.0f)) return false;
   n = n * (1.0f / len);
   out.normal = dot(n, lr.dir) > 0.0f ? -n : n;  // (the face the viewer sees: out of the matter)
+  /* Faces of several pieces in one plane are one face of the mesh, named for the first of them: the piece whose own face is under
+   * the pointer is the one meant (the user, after round 479: a click on one slab of a floor selected another). A blended face has
+   * no piece's plane to ask. */
+  if (out.side == blockout::kSideBlend) return true;
+  const Vec3 on = out.point - n * dot(n, out.point - a);  // (on the triangle's plane: from far away the ray's own point is off it by more than a face's thickness)
+  if (owners) {
+    if (owners->faces) owners->faces->at(on, n, out.piece, out.side);
+    return true;
+  }
+  const BlockoutOwners own(g);
+  if (own.faces) own.faces->at(on, n, out.piece, out.side);
   return true;
 }
 
 /* The piece that made the face under a view pixel; 0 when there is none to name - a blended face, a mesh whose origins are not
  * its own, a piece that is gone or another Blockout's. */
-uint64_t Editor::blockout_pick_piece(GameObject &g, int view_x, int view_y) {
+uint64_t Editor::blockout_pick_piece(GameObject &g, int view_x, int view_y, const BlockoutOwners *owners) {
   BlockoutHit hit;
-  if (!blockout_hit(g, view_x, view_y, hit)) return 0;
+  if (!blockout_hit(g, view_x, view_y, hit, owners)) return 0;
   const GameObject *piece = scene_->find(hit.piece);
   if (!piece || !piece->get<BlockoutPiece>()) return 0;
   return blockout_of_piece(*piece) == &g ? piece->id : 0;  // (a duplicate holds its original's origins until its own build lands)
+}
+
+/* A box select over a Blockout's mesh adds the pieces that made its faces in the box (`box` is in window pixels, inside the view), read
+ * at up to 16 x 16 places of it where the Blockout is what is drawn - so a piece that shows smaller than a sixteenth of a large box
+ * can fall between two of them. False when no piece can be named there: the Blockout itself is then what the box selects. */
+bool Editor::blockout_box_select(GameObject &g, const Recti &view, const Recti &box) {
+  const int step_x = std::max(1, (box.w + 15) / 16), step_y = std::max(1, (box.h + 15) / 16);
+  const BlockoutOwners owners(g);
+  std::vector<uint64_t> found;
+  for (int y = box.y + std::min(step_y, box.h) / 2; y < box.bottom(); y += step_y)
+    for (int x = box.x + std::min(step_x, box.w) / 2; x < box.right(); x += step_x) {
+      const GameObject *under = scene_->find(scene_rt_.id_at(x - view.x, y - view.y));
+      if (under != &g) continue;
+      const uint64_t piece = blockout_pick_piece(g, x - view.x, y - view.y, &owners);
+      if (piece && std::find(found.begin(), found.end(), piece) == found.end()) found.push_back(piece);
+    }
+  for (uint64_t id : found) select(id, SEL_ADD);
+  return !found.empty();
 }
 
 /* ===================================================================== */

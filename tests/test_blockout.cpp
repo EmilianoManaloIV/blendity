@@ -7147,6 +7147,321 @@ static void tests_round479_review() {
   });
 }
 
+/* The user's report after round 479: "Selecting things on my cursor doesn't always select. And often selects an object not on my
+ * cursor." Each test clicks with real mouse events on what is drawn under the cursor. */
+static GameObject *r479p_click(Editor &ed, Vec3 world, bool clear = true) {
+  int x = 0, y = 0;
+  if (!ed.project_to_window(world, x, y)) return nullptr;
+  if (clear) ed.clear_selection_for_test();
+  r477_click(ed, x, y);
+  r34_steps(ed, 2);
+  return ed.selection_size_for_test() == 1 ? ed.active_object_for_test() : nullptr;
+}
+
+static void tests_round479_picking() {
+  test("blockout: a click on each of two boxes that stand side by side with their tops level selects the box under the cursor", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *a = r477_piece(ed, *bo, "Left", 0, 0, {-1, 0, 0}, {2, 1, 2});
+    GameObject *b = r477_piece(ed, *bo, "Right", 0, 0, {1, 0, 0}, {2, 1, 2});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    CHECK(r479p_click(ed, {-1.0f, 0.5f, 0.0f}) == a);
+    CHECK(r479p_click(ed, {1.0f, 0.5f, 0.0f}) == b);
+    CHECK(r479p_click(ed, {-0.2f, 0.5f, 0.6f}) == a);
+    CHECK(r479p_click(ed, {0.2f, 0.5f, -0.6f}) == b);
+    /* With the other one selected (its gizmo and handles are away from the click). */
+    ed.select_for_test(a->id, false);
+    r34_steps(ed, 2);
+    CHECK(r479p_click(ed, {1.6f, 0.5f, 0.6f}, false) == b);
+    CHECK(r479p_click(ed, {-1.6f, 0.5f, -0.6f}, false) == a);
+  });
+
+  test("blockout: a click that slips a few pixels, and a box dragged over a Blockout, select the pieces under it - not the whole Blockout", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 25 60 9 0 0 0");
+    ed.command("create Shape: Box");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->set_world_position({0.0f, 0.0f, 4.0f});
+    GameObject *bo = r477_blockout(ed);
+    GameObject *a = r477_piece(ed, *bo, "Left", 0, 0, {-1, 0, 0}, {2, 1, 2});
+    GameObject *b = r477_piece(ed, *bo, "Right", 0, 0, {1, 0, 0}, {2, 1, 2});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    auto drag = [&](Vec3 from, Vec3 to, int slip) {
+      int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+      if (!ed.project_to_window(from, x0, y0) || !ed.project_to_window(to, x1, y1)) return false;
+      x1 += slip, y1 += slip;
+      ed.clear_selection_for_test();
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x0, y0)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseDown, x0, y0)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, (x0 + x1) / 2, (y0 + y1) / 2)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x1, y1)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseUp, x1, y1)});
+      r34_steps(ed, 2);
+      return true;
+    };
+    auto has = [&](GameObject *g) {
+      const std::vector<GameObject *> sel = ed.selected_objects_for_test();
+      return std::find(sel.begin(), sel.end(), g) != sel.end();
+    };
+    CHECK(drag({1.0f, 0.5f, 0.0f}, {1.0f, 0.5f, 0.0f}, 7));  // (a click that slipped 7 pixels)
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == b);
+    CHECK(drag({-1.0f, 0.5f, 0.0f}, {-1.0f, 0.5f, 0.0f}, 7));
+    CHECK(ed.selection_size_for_test() == 1 && ed.active_object_for_test() == a);
+    CHECK(drag({-1.5f, 0.5f, 0.3f}, {1.5f, 0.5f, -0.3f}, 0));  // (a box across both)
+    CHECK(ed.selection_size_for_test() == 2 && has(a) && has(b) && !has(bo));
+    CHECK(drag({0.0f, 0.0f, 4.0f}, {0.0f, 0.0f, 4.0f}, 7));  // (a mesh object as before)
+    CHECK(ed.selection_size_for_test() == 1 && has(cube));
+    /* The pieces gone and the build held: the mesh in the box belongs to no piece, and the Blockout is what is selected. */
+    ed.set_async_jobs_for_test(true);
+    ed.hold_blockout_landing_for_test(true);
+    ed.scene().destroy(std::vector<GameObject *>{a, b});
+    CHECK(drag({1.0f, 0.5f, 0.0f}, {1.0f, 0.5f, 0.0f}, 7));
+    CHECK(ed.selection_size_for_test() == 1 && has(bo));
+    ed.hold_blockout_landing_for_test(false);
+  });
+
+  test("blockout: three slabs of one floor, the middle one a cylinder: a click on each selects it", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 35 40 12 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *a = r477_piece(ed, *bo, "Slab A", 0, 0, {-2, 0, 0}, {2, 0.5f, 3});
+    GameObject *c = r477_piece(ed, *bo, "Drum", 1, 0, {0, 0, 0}, Vec3(1.0f), 1.5f, 0.5f);
+    GameObject *b = r477_piece(ed, *bo, "Slab B", 0, 0, {2, 0, 0}, {2, 0.5f, 3});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    CHECK(r479p_click(ed, {-2.5f, 0.25f, 1.0f}) == a);
+    CHECK(r479p_click(ed, {2.5f, 0.25f, -1.0f}) == b);
+    CHECK(r479p_click(ed, {0.0f, 0.25f, 1.3f}) == c);
+    CHECK(r479p_click(ed, {0.0f, 0.25f, -1.3f}) == c);
+  });
+
+  test("blockout: two rooms side by side on one floor level: a click on each room's floor and on each room's wall top selects that room", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    GameObject *bo = r478_scene(ed, "camera 30 75 16 0 0 0");
+    GameObject *a = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+    GameObject *b = r478_room_by_command(ed, *bo, "blockout add room box 4 3 4");
+    CHECK(a && b && a != b);
+    if (!a || !b) return;
+    a->get<BlockoutPiece>()->open_top = true, b->get<BlockoutPiece>()->open_top = true;
+    a->set_local_position({-2.1f, 1.5f, 0.0f});
+    b->set_local_position({2.1f, 1.5f, 0.0f});
+    ed.mark_changed_for_test("test");
+    r34_steps(ed, 6);
+    CHECK(r477_matches(ed));
+    CHECK(r479p_click(ed, {-2.1f, 0.0f, 0.0f}) == a);
+    CHECK(r479p_click(ed, {2.1f, 0.0f, 0.0f}) == b);
+    CHECK(r479p_click(ed, {-3.0f, 0.0f, 1.0f}) == a);
+    CHECK(r479p_click(ed, {3.0f, 0.0f, -1.0f}) == b);
+    CHECK(r479p_click(ed, {-4.2f, 3.0f, 0.5f}) == a);  // (the tops of the outer walls: one plane, one face of the mesh)
+    CHECK(r479p_click(ed, {4.2f, 3.0f, -0.5f}) == b);
+  });
+
+  test("blockout: the kernel names the piece whose own face is at a point of a face several pieces share, and leaves a right name alone", [] {
+    std::vector<Piece> pieces{box_piece(1, {2, 1, 2}, {-1, 0, 0}), box_piece(2, {2, 1, 2}, {1, 0, 0}), box_piece(3, {1, 1, 1}, {1, 0.5f, 0}, Op::Subtract)};
+    uint64_t id = 1;
+    uint32_t side = 3;
+    CHECK(!blockout::face_owner(pieces, Vec3(-1.0f, 0.5f, 0.5f), Vec3(0, 1, 0), id, side) && id == 1 && side == 3);  // (its own top)
+    CHECK(blockout::face_owner(pieces, Vec3(1.8f, 0.5f, 0.8f), Vec3(0, 1, 0), id, side) && id == 2 && side == 3);    // (the other box's top, named for the first)
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(pieces, Vec3(1.0f, 0.0f, 0.2f), Vec3(0, 1, 0), id, side) && id == 3 && side == 2);    // (the pocket's floor: the cutter's bottom, seen from its back)
+    id = 1, side = 3;
+    CHECK(!blockout::face_owner(pieces, Vec3(1.8f, 0.5f, 0.8f), Vec3(0, -1, 0), id, side) && id == 1);               // (no face looks that way there)
+    CHECK(!blockout::face_owner(pieces, Vec3(9.0f, 9.0f, 9.0f), Vec3(0, 1, 0), id, side) && id == 1);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!blockout::face_owner(pieces, Vec3(nan, 0.5f, 0.8f), Vec3(0, 1, 0), id, side) && id == 1);
+    CHECK(!blockout::face_owner(pieces, Vec3(1.8f, 0.5f, 0.8f), Vec3(0, 0, 0), id, side) && id == 1);
+    CHECK(!blockout::face_owner({}, Vec3(1.8f, 0.5f, 0.8f), Vec3(0, 1, 0), id, side) && id == 1);
+  });
+
+  test("blockout: the piece under the cursor is named by what is at the point - not a wide ground just below it, not a cutter standing on it; turned and mirrored pieces too", [] {
+    /* A ground a kilometre wide whose top is a hand below two thin slabs' tops. */
+    std::vector<Piece> ground{box_piece(1, {2, 0.2f, 2}, {-1, 0.4f, 0}), box_piece(3, {1000, 1, 1000}, {0, -0.1f, 0}), box_piece(2, {2, 0.2f, 2}, {1, 0.4f, 0})};
+    uint64_t id = 1;
+    uint32_t side = 3;
+    CHECK(blockout::face_owner(ground, Vec3(1.5f, 0.5f, 0.5f), Vec3(0, 1, 0), id, side) && id == 2 && side == 3);
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(ground, Vec3(5.0f, 0.4f, 0.5f), Vec3(0, 1, 0), id, side) && id == 3);  // (the ground itself, where it shows)
+    /* A cutter that stands on the second box (its bottom lies in the box's top and cut nothing there), listed before it. */
+    std::vector<Piece> stood{box_piece(1, {2, 1, 2}, {-1, 0, 0}), box_piece(3, {1, 1, 1}, {1, 1.0f, 0}, Op::Subtract), box_piece(2, {2, 1, 2}, {1, 0, 0})};
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(stood, Vec3(1.0f, 0.5f, 0.1f), Vec3(0, 1, 0), id, side) && id == 2 && side == 3);
+    /* An Intersect piece whose top is level with the boxes' tops: the box under the point, not the piece that trims. */
+    std::vector<Piece> trimmed{box_piece(1, {2, 1, 2}, {-1, 0, 0}), box_piece(3, {8, 1, 8}, {0, 0, 0}, Op::Intersect), box_piece(2, {2, 1, 2}, {1, 0, 0})};
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(trimmed, Vec3(1.0f, 0.5f, 0.1f), Vec3(0, 1, 0), id, side) && id == 2);
+    /* A box turned a third of a right angle about Y, and one mirrored along X, tops level with the first. */
+    Piece mirrored = box_piece(3, {2, 1, 2}, {0, 0, 3});
+    mirrored.to_blockout = Mat4::trs({0, 0, 3}, Quat(), Vec3(-1.0f, 1.0f, 1.0f));
+    std::vector<Piece> turned{box_piece(1, {2, 1, 2}, {-1, 0, 0}), box_piece(2, {2, 1, 2}, {1.2f, 0, 0}, Op::Add, Quat::axis_angle({0, 1, 0}, 0.5236f)), mirrored};
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(turned, Vec3(2.2f, 0.5f, 0.0f), Vec3(0, 1, 0), id, side) && id == 2 && side == 3);  // (inside the turned box only: past the first box's x = 0 .. and the unturned one's 2.2)
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(turned, Vec3(0.5f, 0.5f, 3.5f), Vec3(0, 1, 0), id, side) && id == 3 && side == 3);
+    id = 1, side = 0;
+    CHECK(blockout::face_owner(turned, Vec3(1.0f, 0.2f, 3.5f), Vec3(1, 0, 0), id, side) && id == 3);  // (the mirrored box's side that looks along +X)
+    /* Two rooms that share a wall: from inside the second, the wall's face is the second room's - the first room's shell ends in
+     * the same plane and looks the same way. Whichever of the two, or a third piece, the mesh named it for. */
+    std::vector<Piece> rooms{r478_room(1, {4, 3, 4}, {-2.1f, 0, 0}), r478_room(2, {4, 3, 4}, {2.1f, 0, 0}), box_piece(3, {1, 1, 1}, {9, 0, 0})};
+    for (uint64_t named : {1, 2, 3}) {
+      id = named, side = 99;
+      const bool renamed = blockout::face_owner(rooms, Vec3(0.1f, 0.3f, 0.5f), Vec3(1, 0, 0), id, side);
+      CHECK(id == 2 && renamed == (named != 2));
+      id = named, side = 99;
+      blockout::face_owner(rooms, Vec3(-0.1f, 0.3f, 0.5f), Vec3(-1, 0, 0), id, side);  // (and from inside the first)
+      CHECK(id == 1);
+    }
+    /* A slab's top level with a room's floor: inside the room it is the room's floor. */
+    std::vector<Piece> floors{box_piece(1, {12, 1, 12}, {0, -2.0f, 0}), r478_room(2, {4, 3, 4}, {0, 0, 0})};
+    id = 1, side = 3;
+    CHECK(blockout::face_owner(floors, Vec3(0.5f, -1.5f, 0.5f), Vec3(0, 1, 0), id, side) && id == 2);
+    id = 1, side = 3;
+    CHECK(!blockout::face_owner(floors, Vec3(5.0f, -1.5f, 5.0f), Vec3(0, 1, 0), id, side) && id == 1);  // (the slab beside the room)
+    /* What one question costs with a hundred rooms (printed, not judged: ADR 0056). */
+    std::vector<Piece> many;
+    for (int i = 0; i < 100; i++) many.push_back(r478_room((uint64_t)(i + 1), {4, 3, 4}, {4.2f * (float)(i % 10), 0, 4.2f * (float)(i / 10)}));
+    const auto t0 = std::chrono::steady_clock::now();
+    int named = 0;
+    for (int k = 0; k < 200; k++) {
+      id = 1, side = 0;
+      named += blockout::face_owner(many, Vec3(4.2f * (float)(k % 10), -1.5f, 4.2f * (float)(k % 7)), Vec3(0, 1, 0), id, side);
+    }
+    const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / 200.0;
+    std::printf("    face_owner over 100 rooms: %.1f us a question (%d of 200 renamed)\n", us, named);
+  });
+
+  test("blockout: a small box drawn around one piece selects it, Shift with a box adds to the selection, and a click during a build in flight names the piece the picture shows", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 25 60 9 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *a = r477_piece(ed, *bo, "Left", 0, 0, {-1, 0, 0}, {2, 1, 2});
+    GameObject *b = r477_piece(ed, *bo, "Right", 0, 0, {1, 0, 0}, {2, 1, 2});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    auto box = [&](Vec3 at, int half, int mods) {
+      int x = 0, y = 0;
+      if (!ed.project_to_window(at, x, y)) return false;
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x - half, y - half, mods)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseDown, x - half, y - half, mods)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x, y, mods)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseMove, x + half, y + half, mods)});
+      ed.step_frame_headless({r477_ev(R477ET::MouseUp, x + half, y + half, mods)});
+      r34_steps(ed, 2);
+      return true;
+    };
+    auto has = [&](GameObject *g) {
+      const std::vector<GameObject *> sel = ed.selected_objects_for_test();
+      return std::find(sel.begin(), sel.end(), g) != sel.end();
+    };
+    ed.clear_selection_for_test();
+    CHECK(box({1.2f, 0.5f, 0.0f}, 12, 0));  // (24 pixels: between one and two steps of the sixteen)
+    CHECK(ed.selection_size_for_test() == 1 && has(b));
+    ed.clear_selection_for_test();
+    CHECK(box({-1.2f, 0.5f, 0.0f}, 9, 0));
+    CHECK(ed.selection_size_for_test() == 1 && has(a));
+    CHECK(box({1.2f, 0.5f, 0.0f}, 12, platform::MOD_SHIFT));
+    CHECK(ed.selection_size_for_test() == 2 && has(a) && has(b) && !has(bo));
+    /* The two boxes change places and the build is held: the picture is still the old one, where the left box is Left. */
+    ed.set_async_jobs_for_test(true);
+    ed.hold_blockout_landing_for_test(true);
+    a->set_local_position({1, 0, 0});
+    b->set_local_position({-1, 0, 0});
+    r34_steps(ed, 3);
+    CHECK(r479p_click(ed, {-1.4f, 0.5f, 0.3f}) == a);
+    ed.hold_blockout_landing_for_test(false);
+    ed.command("blockout wait");
+    r34_steps(ed, 3);
+    CHECK(r477_matches(ed));
+    CHECK(r479p_click(ed, {-1.4f, 0.5f, 0.3f}) == b);
+    CHECK(r479p_click(ed, {1.4f, 0.5f, 0.3f}) == a);
+    /* A build that is refused keeps the last mesh too (here: the exact path asked for in a build without Manifold). */
+    if (blockout::crisp_available()) return;
+    ed.set_async_jobs_for_test(false);
+    a->set_local_position({1.5f, 0, 0});  // (apart: each top is a face of its own, named for its box)
+    b->set_local_position({-1.5f, 0, 0});
+    ed.mark_changed_for_test("pieces apart");
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    bo->get<Blockout>()->method = 1;
+    a->set_local_position({-1.5f, 0, 0});
+    b->set_local_position({1.5f, 0, 0});
+    ed.mark_changed_for_test("pieces swapped, exact path asked");
+    r34_steps(ed, 4);
+    CHECK(!bo->get<Blockout>()->state.status.refusal.empty());
+    CHECK(r479p_click(ed, {-1.5f, 0.5f, 0.3f}) == b);  // (the picture still shows Right on the left)
+    CHECK(r479p_click(ed, {1.5f, 0.5f, 0.3f}) == a);
+  });
+
+  test("blockout: a mesh object seen through a hole cut in a Blockout wall is what a click in the hole selects; the wall beside the hole selects the wall", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 0 0 9 0 0 0");
+    ed.command("create Shape: Box");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->set_world_position({0.0f, 0.0f, -3.0f});
+    GameObject *bo = r477_blockout(ed);
+    GameObject *wall = r477_piece(ed, *bo, "Wall", 0, 0, {0, 0, 0}, {4, 3, 0.5f});
+    r477_piece(ed, *bo, "Hole", 0, 1, {0, 0, 0}, {1, 1, 2});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    CHECK(r479p_click(ed, {0.0f, 0.0f, 0.0f}) == cube);
+    CHECK(r479p_click(ed, {1.5f, 1.0f, 0.0f}) == wall);
+    CHECK(r479p_click(ed, {-1.5f, -1.0f, 0.0f}) == wall);
+  });
+
+  test("blockout: a mesh object standing on a Blockout floor: a click on it selects it, a click on the floor beside it the floor piece", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 30 45 10 0 0 0");
+    ed.command("create Shape: Box");
+    GameObject *cube = ed.active_object_for_test();
+    CHECK(cube != nullptr);
+    if (!cube) return;
+    cube->set_world_position({0.0f, 0.5f, 0.0f});
+    GameObject *bo = r477_blockout(ed);
+    GameObject *floor = r477_piece(ed, *bo, "Floor", 0, 0, {0, -0.25f, 0}, {6, 0.5f, 6});
+    GameObject *post = r477_piece(ed, *bo, "Post", 0, 0, {2, 1.0f, 2}, {0.5f, 2, 0.5f});
+    r34_steps(ed, 4);
+    CHECK(r477_matches(ed));
+    CHECK(r479p_click(ed, {0.0f, 1.0f, 0.0f}) == cube);
+    CHECK(r479p_click(ed, {-2.0f, 0.0f, 2.0f}) == floor);
+    CHECK(r479p_click(ed, {2.0f, 2.0f, 2.0f}) == post);
+    CHECK(r479p_click(ed, {0.0f, 1.0f, 0.0f}) == cube);
+  });
+
+  test("blockout: two Blockouts that overlap: a click on each one's visible top selects that one's piece", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("camera 30 45 10 0 0 0");
+    GameObject *one = r477_blockout(ed, "One");
+    GameObject *two = r477_blockout(ed, "Two");
+    GameObject *a = r477_piece(ed, *one, "A", 0, 0, {-0.5f, 0, 0}, {2, 1, 2});
+    GameObject *b = r477_piece(ed, *two, "B", 0, 0, {0.5f, 0.2f, 0}, {2, 1, 2});
+    r34_steps(ed, 4);
+    CHECK(r479p_click(ed, {-1.3f, 0.5f, 0.0f}) == a);
+    CHECK(r479p_click(ed, {1.3f, 0.7f, 0.0f}) == b);
+    CHECK(r479p_click(ed, {0.0f, 0.7f, 0.0f}) == b);
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -7162,4 +7477,5 @@ void run_blockout_tests() {
   tests_round479();
   tests_round479_engineer();
   tests_round479_review();
+  tests_round479_picking();
 }
