@@ -5,6 +5,7 @@
 #include "../core/hash.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 
@@ -232,6 +233,142 @@ uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, cons
 GameObject *blockout_of_piece(const GameObject &piece) {
   for (GameObject *a = piece.parent; a; a = a->parent)
     if (a->get<Blockout>()) return a;
+  return nullptr;
+}
+
+/* ===================================================================== */
+/* Handles                                                                */
+/* ===================================================================== */
+
+namespace {
+
+BlockoutHandle make_handle(BlockoutHandle::Kind kind, int axis, Vec3 at, Vec3 dir, const char *name) {
+  BlockoutHandle h;
+  h.kind = kind, h.axis = axis, h.at = at, h.dir = dir, h.name = name;
+  return h;
+}
+
+/* The direction in the XZ plane toward `toward` (+X when it is on the axis): which side of a round shape a handle sits on. */
+Vec3 flat_toward(Vec3 toward) {
+  Vec3 d(toward.x, 0.0f, toward.z);
+  const float l = length(d);
+  return l > 1e-6f && finite_bits(l) ? d * (1.0f / l) : Vec3(1.0f, 0.0f, 0.0f);
+}
+
+float finite_or(float v, float fallback) { return finite_bits(v) ? v : fallback; }
+
+/* `v` along one axis and nothing along the others. (Written out: a local Vec3 filled through operator[] - which reaches
+ * past its first member - and then copied was compiled by Apple clang as if only x had been written; the +-Y and +-Z
+ * handles then had no place and no direction. Found by CI's macOS job in round 479.) */
+Vec3 along_axis(int axis, float v) { return Vec3(axis == 0 ? v : 0.0f, axis == 1 ? v : 0.0f, axis == 2 ? v : 0.0f); }
+
+}  // namespace
+
+void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *growth, std::vector<BlockoutHandle> &out) {
+  out.clear();
+  using H = BlockoutHandle;
+  if (p.opening != 0) {
+    const float w = std::fabs(finite_or(p.width, 0.0f)) * 0.5f, head = finite_or(p.head, 0.0f), sill = finite_or(p.sill, 0.0f), mid = 0.5f * (head + sill);
+    out.push_back(make_handle(H::OpenWidth, 0, {w, mid, 0.0f}, {1, 0, 0}, "+x"));
+    out.push_back(make_handle(H::OpenWidth, 0, {-w, mid, 0.0f}, {-1, 0, 0}, "-x"));
+    out.push_back(make_handle(H::OpenHead, 1, {0.0f, head, 0.0f}, {0, 1, 0}, "head"));
+    out.push_back(make_handle(H::OpenSill, 1, {0.0f, sill, 0.0f}, {0, -1, 0}, "sill"));
+    return;
+  }
+  const int shape = std::min(2, std::max(0, p.shape));
+  const bool room = p.room && growth;
+  if (shape == 0) {
+    const Vec3 h(std::fabs(finite_or(p.size.x, 0.0f)) * 0.5f, std::fabs(finite_or(p.size.y, 0.0f)) * 0.5f, std::fabs(finite_or(p.size.z, 0.0f)) * 0.5f);
+    static const char *const names[6] = {"+x", "-x", "+y", "-y", "+z", "-z"};
+    for (int k = 0; k < 6; k++) {
+      const int axis = k / 2;
+      const float s = (k & 1) ? -1.0f : 1.0f;
+      const float half = axis == 0 ? h.x : axis == 1 ? h.y : h.z;
+      out.push_back(make_handle(H::BoxFace, axis, along_axis(axis, s * half), along_axis(axis, s), names[k]));
+    }
+    if (!room) return;
+    /* The wall nearest the viewer: its outer face's middle. */
+    float best = 1e30f;
+    Vec3 at(0.0f), dir(1.0f, 0.0f, 0.0f);
+    for (int k = 0; k < 4; k++) {
+      const int axis = k < 2 ? 0 : 2;
+      const float s = (k & 1) ? -1.0f : 1.0f;
+      const double g = axis == 0 ? growth->x : growth->z;
+      const Vec3 a = along_axis(axis, s * ((axis == 0 ? h.x : h.z) + (float)g)), d = along_axis(axis, s);
+      const float dist = length(toward - a);
+      if (dist < best) best = dist, at = a, dir = d;
+    }
+    out.push_back(make_handle(H::Thickness, dir.x != 0.0f ? 0 : 2, at, dir, "wall"));
+    return;
+  }
+  const float r = std::fabs(finite_or(p.radius, 0.0f));
+  if (shape == 1) {
+    const float hh = std::fabs(finite_or(p.height, 0.0f)) * 0.5f;
+    out.push_back(make_handle(H::CylCap, 1, {0.0f, hh, 0.0f}, {0, 1, 0}, "top"));
+    out.push_back(make_handle(H::CylCap, 1, {0.0f, -hh, 0.0f}, {0, -1, 0}, "bottom"));
+    /* On the silhouette - square to the view - so the handle's line is never the viewer's own: the mouse can always pull it. */
+    const Vec3 ft = flat_toward(toward), d(-ft.z, 0.0f, ft.x);
+    out.push_back(make_handle(H::CylRadius, 0, d * r, d, "side"));
+    if (room) out.push_back(make_handle(H::Thickness, 0, d * (r + (float)growth->x), d, "wall"));
+    return;
+  }
+  /* A direction square to the view (the sphere's silhouette), turned about Y; about X when the viewer is straight above or below. */
+  Vec3 d = cross(toward, Vec3(0.0f, 1.0f, 0.0f));
+  if (!(length(d) > 1e-4f * std::max(1e-6f, length(toward)))) d = cross(toward, Vec3(1.0f, 0.0f, 0.0f));
+  const float l = length(d);
+  d = l > 1e-6f && finite_bits(l) ? d * (1.0f / l) : Vec3(1.0f, 0.0f, 0.0f);
+  out.push_back(make_handle(H::SphereRadius, 0, d * r, d, "radius"));
+}
+
+Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const BlockoutHandle &h, float delta, bool both, float to_blockout_scale) {
+  p = before;
+  if (!finite_bits(delta)) return Vec3(0.0f);
+  const float k = both ? 2.0f : 1.0f;
+  /* A size moved by k * delta, stopped at the smallest allowed; the delta that was really made follows from it. */
+  auto stretch = [&](float &size, float was) {
+    const float now = std::max(kBlockoutMinSize, was + k * delta);
+    size = now;
+    return (now - was) / k;
+  };
+  switch (h.kind) {
+    case BlockoutHandle::BoxFace: {
+      const float eff = stretch(p.size[h.axis], std::fabs(before.size[h.axis]));
+      return both ? Vec3(0.0f) : h.dir * (eff * 0.5f);
+    }
+    case BlockoutHandle::CylCap: {
+      const float eff = stretch(p.height, std::fabs(before.height));
+      return both ? Vec3(0.0f) : h.dir * (eff * 0.5f);
+    }
+    case BlockoutHandle::CylRadius:
+    case BlockoutHandle::SphereRadius:
+      p.radius = std::max(kBlockoutMinSize, std::fabs(before.radius) + delta);  // (the centre stays: both sides move)
+      return Vec3(0.0f);
+    case BlockoutHandle::Thickness:
+      p.wall = std::min(1000.0f, std::max(0.0f, safe_thickness(before.wall) + delta * (finite_bits(to_blockout_scale) ? to_blockout_scale : 1.0f)));
+      return Vec3(0.0f);
+    case BlockoutHandle::OpenWidth:
+      p.width = std::max(kBlockoutMinSize, std::fabs(before.width) + 2.0f * delta);  // (both ends: the opening stays centred)
+      return Vec3(0.0f);
+    case BlockoutHandle::OpenHead:
+      p.head = std::max(before.sill + kBlockoutMinSize, before.head + delta);
+      return Vec3(0.0f);
+    case BlockoutHandle::OpenSill:
+      p.sill = std::min(before.head - kBlockoutMinSize, std::max(0.0f, before.sill - delta));  // (the handle points down)
+      return Vec3(0.0f);
+  }
+  return Vec3(0.0f);
+}
+
+const BlockoutHandle *blockout_handle_named(const std::vector<BlockoutHandle> &handles, const std::string &name) {
+  std::string n;
+  for (char c : name) n += (char)std::tolower((unsigned char)c);
+  if (n.size() == 2 && (n[1] == '+' || n[1] == '-')) std::swap(n[0], n[1]);  // ("x+" is "+x")
+  if (n == "radius") n = "side";
+  for (const BlockoutHandle &h : handles)
+    if (h.name == n || (n == "side" && h.name == "radius")) return &h;
+  if (n == "width")
+    for (const BlockoutHandle &h : handles)
+      if (h.kind == BlockoutHandle::OpenWidth && h.name == "+x") return &h;
   return nullptr;
 }
 

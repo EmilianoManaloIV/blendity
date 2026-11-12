@@ -5477,6 +5477,1676 @@ static void tests_round478_review() {
   });
 }
 
+/* ===================================================================== */
+/* Round 479 (task 0455): handles on the pieces, snapping, the Room tool, F9  */
+/* (the tool's and the handles' real-event tests live here with the helpers   */
+/* they share, not in tests_editor.cpp)                                       */
+/* ===================================================================== */
+
+namespace {
+
+/* A window sized for picking, an empty scene, the camera and a Blockout at the origin with one piece, selected. */
+GameObject *r479_piece_scene(Editor &ed, const char *camera, int shape, Vec3 at, Vec3 size, GameObject **bo_out = nullptr) {
+  te_view(ed, camera);
+  GameObject *bo = r477_blockout(ed);
+  bo->set_world_position({0.0f, 0.0f, 0.0f});
+  GameObject *p = r477_piece(ed, *bo, shape == 0 ? "Box" : shape == 1 ? "Cylinder" : "Sphere", shape, 0, at, size, 0.5f, 1.0f);
+  ed.select_for_test(p->id, false);
+  ed.mark_changed_for_test("test scene");  // (an Undo goes back to this scene, not to the one before the test made it)
+  r477_settle(ed, 3);
+  if (bo_out) *bo_out = bo;
+  return p;
+}
+
+void r479_press(Editor &ed, int x, int y, int mods = 0) {
+  ed.step_frame_headless({r477_ev(R477ET::MouseMove, x, y, mods)});
+  ed.step_frame_headless({r477_ev(R477ET::MouseDown, x, y, mods)});
+}
+void r479_move(Editor &ed, int x, int y, int mods = 0) { ed.step_frame_headless({r477_ev(R477ET::MouseMove, x, y, mods)}); }
+void r479_release(Editor &ed, int x, int y, int mods = 0) {
+  ed.step_frame_headless({r477_ev(R477ET::MouseUp, x, y, mods)});
+  r477_settle(ed, 3);
+}
+void r479_right_click(Editor &ed, int x, int y) {
+  platform::Event down = r477_ev(R477ET::MouseDown, x, y), up = r477_ev(R477ET::MouseUp, x, y);
+  down.button = up.button = 1;
+  ed.step_frame_headless({down});
+  ed.step_frame_headless({up});
+}
+
+/* A handle taken, pulled to the pixel of a world point and let go: false when the handle or the point is off the screen. */
+bool r479_pull(Editor &ed, const char *handle, Vec3 to, int mods = 0, bool *snapped = nullptr) {
+  int hx = 0, hy = 0, tx = 0, ty = 0;
+  if (!ed.blockout_handle_pixel_for_test(handle, hx, hy) || !ed.project_to_window(to, tx, ty)) return false;
+  r479_press(ed, hx, hy, mods);
+  if (!ed.blockout_dragging_for_test()) return false;
+  r479_move(ed, tx, ty, mods);
+  if (snapped) *snapped = ed.blockout_drag_snapped_for_test();
+  r479_release(ed, tx, ty, mods);
+  return true;
+}
+
+/* A number typed into one of the Adjust Last panel's fields (the panel must be showing and the buttons recorded). */
+bool r479_type(Editor &ed, const std::string &key, const std::string &text) {
+  Recti r;
+  for (int i = 0; i < 4 && !ed.button_rect_for_test(key, r); i++) ed.step_frame_headless();
+  if (!ed.button_rect_for_test(key, r)) return false;
+  const int x = r.x + r.w / 2, y = r.y + r.h / 2;
+  for (R477ET t : {R477ET::MouseMove, R477ET::MouseDown, R477ET::MouseUp, R477ET::MouseDown, R477ET::MouseUp}) ed.step_frame_headless({r477_ev(t, x, y)});
+  ed.step_frame_headless({te_key(platform::KEY_A, platform::MOD_CTRL)});
+  for (char c : text) {
+    platform::Event e;
+    e.type = R477ET::Text, e.codepoint = (uint32_t)c;
+    ed.step_frame_headless({e});
+  }
+  ed.step_frame_headless({r477_key(platform::KEY_ENTER)});
+  r477_settle(ed, 2);
+  return true;
+}
+
+const char *const kR479Camera = "camera 30 40 12 0 0 0";
+
+bool r479_bits_equal(const Vec3 &a, const Vec3 &b) { return std::memcmp(&a, &b, sizeof(Vec3)) == 0; }
+
+/* The newest piece made: the active object's component, nullptr when it is none. */
+BlockoutPiece *r479_active(Editor &ed) {
+  GameObject *g = ed.active_object_for_test();
+  return g ? g->get<BlockoutPiece>() : nullptr;
+}
+
+}  // namespace
+
+static void tests_round479_handles() {
+  test("blockout handles: pulling a box's +X handle 1 m outward with the mouse makes it 1 m wider, moves it half a metre and leaves the -X face in its plane - one undo step, the mesh follows", [] {
+    Editor ed;
+    GameObject *bo = nullptr;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2}, &bo);
+    const size_t depth = ed.undo_depth_for_test();
+    CHECK(r479_pull(ed, "+x", {2.0f, 0.0f, 0.0f}));
+    const BlockoutPiece *bp = box->get<BlockoutPiece>();
+    CHECK_NEAR(bp->size.x, 3.0f, 1e-4f);
+    CHECK(bp->size.y == 2.0f && bp->size.z == 2.0f);
+    CHECK_NEAR(box->local().position.x, 0.5f, 1e-4f);
+    CHECK_NEAR(box->world_matrix().point({-bp->size.x * 0.5f, 0.0f, 0.0f}).x, -1.0f, 1e-5f);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    CHECK(r477_matches(ed) && r477_mesh(bo)->bounds().max.x > 1.9f);
+    ed.command("undo");
+    r477_settle(ed, 3);
+    box = ed.scene().find_by_name("Box");
+    CHECK(box && box->get<BlockoutPiece>()->size.x == 2.0f && box->local().position.x == 0.0f);
+  });
+
+  test("blockout handles: on a piece turned 30 degrees and scaled 2 in X the handle moves the face under the mouse: the size changes by the drag divided by the scale, the -X face stays", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    box->set_local_rotation(Quat::axis_angle({0.0f, 1.0f, 0.0f}, 30.0f * kDeg2Rad));
+    box->set_local_scale({2.0f, 1.0f, 1.0f});
+    r477_settle(ed, 3);
+    const Mat4 w0 = box->world_matrix();
+    const Vec3 face0 = w0.point({-1.0f, 0.0f, 0.0f}), out = normalize(w0.dir({1.0f, 0.0f, 0.0f}));
+    CHECK(r479_pull(ed, "+x", w0.point({1.0f, 0.0f, 0.0f}) + out * 1.0f, platform::MOD_CTRL));  // (Ctrl: no snapping, the drag is the pixel's)
+    const BlockoutPiece *bp = box->get<BlockoutPiece>();
+    CHECK_NEAR(bp->size.x, 2.5f, 0.03f);  // (1 world metre is 0.5 own units at scale 2)
+    CHECK(length(box->world_matrix().point({-bp->size.x * 0.5f, 0.0f, 0.0f}) - face0) < 1e-4f);
+    CHECK(bp->size.y == 2.0f && bp->size.z == 2.0f);
+  });
+
+  test("blockout handles: Shift pulls both opposite faces about the centre", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    CHECK(r479_pull(ed, "+x", {2.0f, 0.0f, 0.0f}, platform::MOD_SHIFT));
+    const BlockoutPiece *bp = box->get<BlockoutPiece>();
+    CHECK_NEAR(bp->size.x, 4.0f, 1e-4f);
+    CHECK(box->local().position.x == 0.0f);
+  });
+
+  test("blockout handles: a cylinder's top and bottom keep the other cap, its side changes the radius, a sphere's handle its radius", [] {
+    Editor ed;
+    GameObject *bo = nullptr;
+    GameObject *cyl = r479_piece_scene(ed, kR479Camera, 1, {0, 0, 0}, Vec3(1.0f), &bo);  // (radius 0.5, height 1)
+    const BlockoutPiece *bp = cyl->get<BlockoutPiece>();
+    ed.command("blockout handle top 1");
+    CHECK_NEAR(bp->height, 2.0f, 1e-5f);
+    CHECK_NEAR(cyl->local().position.y, 0.5f, 1e-5f);
+    CHECK_NEAR(cyl->local().position.y - bp->height * 0.5f, -0.5f, 1e-5f);  // (the bottom stayed)
+    ed.command("blockout handle bottom 0.5");
+    CHECK_NEAR(bp->height, 2.5f, 1e-5f);
+    CHECK_NEAR(cyl->local().position.y + bp->height * 0.5f, 1.5f, 1e-5f);  // (the top stayed)
+    ed.command("blockout handle side 0.25");
+    CHECK_NEAR(bp->radius, 0.75f, 1e-5f);
+    CHECK_NEAR(bp->height, 2.5f, 1e-5f);
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+    CHECK(r479_pull(ed, "top", {0.0f, 2.5f, 0.0f}));  // (the same by the mouse: the top from 1.5 to 2.5)
+    CHECK_NEAR(bp->height, 3.5f, 0.02f);
+    Editor ed2;
+    GameObject *sph = r479_piece_scene(ed2, kR479Camera, 2, {0, 0, 0}, Vec3(1.0f));
+    ed2.command("blockout handle radius 0.5");
+    CHECK_NEAR(sph->get<BlockoutPiece>()->radius, 1.0f, 1e-5f);
+    CHECK(sph->local().position.x == 0.0f && sph->local().position.y == 0.0f);
+  });
+
+  test("blockout handles: a room's face handles move its air and the wall handle changes the wall thickness and nothing else", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    CHECK(room && room->get<BlockoutPiece>());
+    if (!room) return;
+    const BlockoutPiece *bp = room->get<BlockoutPiece>();
+    ed.command("blockout handle +x 1");
+    CHECK_NEAR(bp->size.x, 5.0f, 1e-5f);
+    CHECK_NEAR(room->local().position.x - bp->size.x * 0.5f, -2.0f, 1e-5f);
+    CHECK(bp->wall == 0.2f && bp->floor == 0.2f && bp->ceiling == 0.2f && bp->size.y == 3.0f && bp->size.z == 4.0f);
+    ed.command("blockout handle wall 0.1");
+    CHECK_NEAR(bp->wall, 0.3f, 1e-5f);
+    CHECK(bp->floor == 0.2f && bp->ceiling == 0.2f && bp->size.x == 5.0f && bp->size.y == 3.0f && bp->size.z == 4.0f);
+    CHECK_NEAR(room->local().position.x, 0.5f, 1e-5f);
+    ed.command("blockout handle -y 0.5");
+    CHECK_NEAR(bp->size.y, 3.5f, 1e-5f);
+    CHECK_NEAR(room->local().position.y, -0.25f, 1e-5f);
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles: a door's handles change its width about the centre, its head and its sill", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    ed.command("blockout add door");
+    GameObject *door = ed.active_object_for_test();
+    BlockoutPiece *bp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->opening == 1);
+    if (!bp) return;
+    const Vec3 at = door->local().position;
+    ed.command("blockout handle width 0.1");
+    CHECK_NEAR(bp->width, 1.1f, 1e-5f);
+    ed.command("blockout handle head 0.2");
+    CHECK_NEAR(bp->head, 2.3f, 1e-5f);
+    ed.command("blockout handle sill 0.1");  // (the sill handle points down: a door's sill is 0 and stays there)
+    CHECK(bp->sill == 0.0f);
+    ed.command("blockout handle sill -0.5");
+    CHECK_NEAR(bp->sill, 0.5f, 1e-5f);
+    CHECK(r479_bits_equal(door->local().position, at));
+  });
+
+  test("blockout handles: dragged through zero the size stops at a small positive number and the opposite face stays; bad input changes nothing", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    const BlockoutPiece *bp = box->get<BlockoutPiece>();
+    ed.command("blockout handle +x -5");
+    CHECK(bp->size.x == kBlockoutMinSize);
+    CHECK_NEAR(box->local().position.x - bp->size.x * 0.5f, -1.0f, 1e-5f);
+    ed.command("undo");
+    r477_settle(ed, 3);
+    box = ed.scene().find_by_name("Box");
+    bp = box->get<BlockoutPiece>();
+    const size_t depth = ed.undo_depth_for_test();
+    for (const char *line : {"blockout handle", "blockout handle +x", "blockout handle +x nan", "blockout handle +x abc", "blockout handle +w 1", "blockout handle wall 1",
+                             "blockout handle +x inf", "blockout handle top 1"}) {
+      const size_t mark = r477_mark();
+      ed.command(line);
+      size_t warnings = 0;
+      r477_log_since(mark, &warnings);
+      if (warnings == 0) std::printf("    '%s' did not warn\n", line);
+      CHECK(warnings >= 1);
+      CHECK(bp->size.x == 2.0f && bp->size.y == 2.0f && bp->size.z == 2.0f && box->local().position.x == 0.0f);
+    }
+    CHECK(ed.undo_depth_for_test() == depth);
+  });
+
+  test("blockout handles: Esc and the right button put the piece back byte for byte and leave no undo step", [] {
+    for (int how = 0; how < 2; how++) {
+      Editor ed;
+      GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+      const BlockoutPiece before = *box->get<BlockoutPiece>();
+      const Transform t0 = box->local();
+      const size_t depth = ed.undo_depth_for_test();
+      int hx = 0, hy = 0, tx = 0, ty = 0;
+      CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy) && ed.project_to_window({2.0f, 0.0f, 0.0f}, tx, ty));
+      r479_press(ed, hx, hy);
+      r479_move(ed, tx, ty);
+      CHECK(ed.blockout_dragging_for_test() && box->get<BlockoutPiece>()->size.x > 2.5f);
+      if (how == 0) {
+        ed.step_frame_headless({r477_key(platform::KEY_ESCAPE)});
+        ed.step_frame_headless({r477_key(platform::KEY_ESCAPE, false)});
+      }
+      else r479_right_click(ed, tx, ty);
+      CHECK(!ed.blockout_dragging_for_test());
+      r479_release(ed, tx, ty);
+      const BlockoutPiece *bp = box->get<BlockoutPiece>();
+      CHECK(r479_bits_equal(bp->size, before.size) && bp->radius == before.radius && bp->height == before.height && bp->wall == before.wall);
+      CHECK(r479_bits_equal(box->local().position, t0.position) && std::memcmp(&box->local().rotation, &t0.rotation, sizeof(Quat)) == 0 &&
+            r479_bits_equal(box->local().scale, t0.scale));
+      CHECK(ed.undo_depth_for_test() == depth);
+      CHECK(r477_matches(ed));
+    }
+  });
+
+  test("blockout handles: pressing a handle and letting go without moving makes no undo step", [] {
+    Editor ed;
+    r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    const size_t depth = ed.undo_depth_for_test();
+    int hx = 0, hy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+y", hx, hy));
+    r479_press(ed, hx, hy);
+    r479_release(ed, hx, hy);
+    CHECK(ed.undo_depth_for_test() == depth);
+  });
+
+  test("blockout handles: the hint line names the drag while a handle is held", [] {
+    Editor ed;
+    r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    int hx = 0, hy = 0, tx = 0, ty = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy) && ed.project_to_window({1.5f, 0.0f, 0.0f}, tx, ty));
+    r479_press(ed, hx, hy);
+    r479_move(ed, tx, ty);
+    ed.set_scene_hovered_for_test(true);
+    CHECK(ed.statusbar_hint_row_for_test() == "blockout handle");
+    CHECK(ed.statusbar_hint_for_test().find("Esc") != std::string::npos && ed.blockout_drag_text_for_test().find("+x") != std::string::npos);
+    r479_release(ed, tx, ty);
+  });
+}
+
+static void tests_round479_snapping() {
+  /* Two boxes, A at the origin (x from -1 to 1) and B 2.35 away at its middle (its -X face at 2.35). */
+  auto two_boxes = [](Editor &ed, GameObject **bo, GameObject **b) {
+    te_view(ed, "camera 20 55 22 3 0 0");
+    *bo = r477_blockout(ed);
+    (*bo)->set_world_position({0.0f, 0.0f, 0.0f});
+    r477_piece(ed, **bo, "A", 0, 0, {0, 0, 0}, {2, 2, 2});
+    *b = r477_piece(ed, **bo, "B", 0, 0, {3.35f, 0, 0}, {2, 2, 2});
+    ed.select_for_test((*b)->id, false);
+    r477_settle(ed, 3);
+  };
+  auto face_x = [](const GameObject &g, float side) { return g.world_matrix().point({side * g.get<BlockoutPiece>()->size.x * 0.5f, 0.0f, 0.0f}).x; };
+
+  test("blockout handles: a face pulled to within a few pixels of another piece's face lands in its plane, and the result has no face between them (on each path)", [] {
+    for (int path = 0; path < 3; path++) {  // (Auto, Exact, Field: the flush case on each path the build has)
+      if (path == 1 && !blockout::crisp_available()) continue;
+      Editor ed;
+      GameObject *bo = nullptr, *b = nullptr;
+      te_view(ed, "camera 20 55 22 3 0 0");
+      bo = r477_blockout(ed);
+      bo->set_world_position({0.0f, 0.0f, 0.0f});
+      bo->get<Blockout>()->method = path;
+      r477_piece(ed, *bo, "A", 0, 0, {0, 0, 0}, {2, 2, 2});
+      b = r477_piece(ed, *bo, "B", 0, 0, {3.35f, 0, 0}, {2, 2, 2});
+      ed.select_for_test(b->id, false);
+      r477_settle(ed, 3);
+      bool snapped = false;
+      CHECK(r479_pull(ed, "-x", {1.0f, 0.0f, 0.0f}, 0, &snapped));
+      CHECK(snapped);
+      const BlockoutPiece *bp = b->get<BlockoutPiece>();
+      CHECK_NEAR(b->world_matrix().point({-bp->size.x * 0.5f, 0.0f, 0.0f}).x, 1.0f, 1e-5f);  // (in A's +X plane)
+      r477_settle(ed, 3);
+      CHECK(r477_matches(ed));
+      const Mesh *m = r477_mesh(bo);
+      if (!(m && m->face_count() == 6)) std::printf("    path %d: %zu faces\n", path, m ? m->face_count() : (size_t)0);
+      CHECK(m && m->face_count() == 6);  // (one box: nothing between the two)
+    }
+  });
+
+  test("blockout handles: Ctrl turns snapping off - the face lands where the mouse is, not in the other piece's plane", [=] {
+    Editor ed;
+    GameObject *bo = nullptr, *b = nullptr;
+    two_boxes(ed, &bo, &b);
+    bool snapped = true;
+    CHECK(r479_pull(ed, "-x", {1.1f, 0.0f, 0.0f}, platform::MOD_CTRL, &snapped));
+    CHECK(!snapped);
+    CHECK(std::fabs(face_x(*b, -1.0f) - 1.1f) < 0.04f && std::fabs(face_x(*b, -1.0f) - 1.0f) > 1e-3f);
+  });
+
+  test("blockout handles: with nothing near, the face lands on the grid step", [=] {
+    Editor ed;
+    GameObject *bo = nullptr, *b = nullptr;
+    two_boxes(ed, &bo, &b);
+    CHECK(r479_pull(ed, "+x", {6.1f, 0.0f, 0.0f}));
+    CHECK_NEAR(face_x(*b, 1.0f), 6.0f, 1e-4f);  // (the step is 0.25 m: 6.1 lands on 6.0)
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles: a snap is held until the mouse leaves it by twice the snap distance, and the piece being dragged is no candidate", [=] {
+    Editor ed;
+    GameObject *bo = nullptr, *b = nullptr;
+    two_boxes(ed, &bo, &b);
+    int hx = 0, hy = 0, sx = 0, sy = 0, nx = 0, ny = 0, fx = 0, fy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("-x", hx, hy) && ed.project_to_window({1.0f, 0.0f, 0.0f}, sx, sy) && ed.project_to_window({1.1f, 0.0f, 0.0f}, nx, ny) &&
+          ed.project_to_window({1.9f, 0.0f, 0.0f}, fx, fy));
+    r479_press(ed, hx, hy);
+    r479_move(ed, sx, sy);
+    CHECK(ed.blockout_drag_snapped_for_test());
+    const float held = face_x(*b, -1.0f);
+    r479_move(ed, nx, ny);  // (a little away from the plane: still held)
+    CHECK(ed.blockout_drag_snapped_for_test() && std::fabs(face_x(*b, -1.0f) - held) < 1e-6f);
+    r479_move(ed, fx, fy);  // (far from it: let go, back on the grid)
+    CHECK(!ed.blockout_drag_snapped_for_test() || std::fabs(face_x(*b, -1.0f) - held) > 0.1f);
+    r479_release(ed, fx, fy);
+  });
+}
+
+static void tests_round479_gizmo_snap() {
+  test("blockout handles: a piece moved along an axis with the transform gizmo lands a face in the plane of another piece's face when it comes within a few pixels", [] {
+    Editor ed;
+    te_view(ed, "camera 20 55 22 3 0 0");
+    GameObject *bo = r477_blockout(ed);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    r477_piece(ed, *bo, "A", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *b = r477_piece(ed, *bo, "B", 0, 0, {3.3f, 0, 0}, {2, 2, 2});  // (B's -X face is at 2.3; A's +X face at 1)
+    ed.select_for_test(b->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    CHECK(ed.project_to_window({3.3f, 0.0f, 0.0f}, x0, y0) && ed.project_to_window({2.0f, 0.0f, 0.0f}, x1, y1));  // (B's centre; where it would be flush)
+    const int pixels = x1 - x0;  // (the gizmo's X handle follows the mouse along the screen)
+    ed.command("tool move");
+    ed.command("perf drag gizmo x " + std::to_string(pixels) + " frames 8");
+    r477_settle(ed, 40);
+    const float face = b->world_matrix().point({-1.0f, 0.0f, 0.0f}).x;
+    std::printf("    B's -X face ended at x = %.4f (A's +X face is at 1)\n", face);
+    CHECK_NEAR(face, 1.0f, 1e-4f);
+    CHECK(r477_matches(ed));
+  });
+}
+
+static void tests_round479_room_tool() {
+  /* The Room tool's two drags on the ground: from (-2, 0, -1) to (2, 0, 1), then 3 m up. */
+  auto ground_scene = [](Editor &ed) {
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.command("tool room");
+    r477_settle(ed, 2);
+  };
+  auto drags = [](Editor &ed, Vec3 a, Vec3 b, Vec3 top, bool make = true) {
+    int ax = 0, ay = 0, bx = 0, by = 0, cx = 0, cy = 0;
+    if (!ed.project_to_window(a, ax, ay) || !ed.project_to_window(b, bx, by) || !ed.project_to_window(top, cx, cy)) return false;
+    r479_press(ed, ax, ay);
+    r479_move(ed, bx, by);
+    r479_release(ed, bx, by);
+    if (!make) return true;
+    r479_move(ed, cx, cy);
+    r477_click(ed, cx, cy);
+    r477_settle(ed, 3);
+    return true;
+  };
+
+  test("blockout room tool: two drags on the ground make a room of the dragged size standing on it, in a new Blockout, as one undo step; the tool stays on", [=] {
+    Editor ed;
+    ground_scene(ed);
+    CHECK(ed.room_tool_active_for_test());
+    const size_t depth = ed.undo_depth_for_test();
+    CHECK(drags(ed, {-2.0f, 0.0f, -1.0f}, {2.0f, 0.0f, 1.0f}, {0.0f, 3.0f, 0.0f}));
+    GameObject *bo = r477_find(ed);
+    BlockoutPiece *bp = r479_active(ed);
+    CHECK(bo && bp && bp->room && bp->shape == 0 && blockout_of_piece(*ed.active_object_for_test()) == bo);
+    if (!bp) return;
+    CHECK_NEAR(bp->size.x, 4.0f, 1e-3f);
+    CHECK_NEAR(bp->size.y, 3.0f, 1e-3f);
+    CHECK_NEAR(bp->size.z, 2.0f, 1e-3f);
+    const GameObject *room = ed.active_object_for_test();
+    CHECK_NEAR(room->world_position().y - bp->size.y * 0.5f, 0.0f, 1e-3f);  // (the floor's top - the air's bottom - is on the ground)
+    CHECK_NEAR(room->world_position().x, 0.0f, 1e-3f);
+    CHECK_NEAR(room->world_position().z, 0.0f, 1e-3f);
+    CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 1 && r477_matches(ed) && r477_mesh(bo)->face_count() > 0);
+    CHECK(ed.undo_depth_for_test() == depth + 1);
+    CHECK(ed.room_tool_active_for_test() && ed.room_tool_stage_for_test() == 0);
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == 0);
+  });
+
+  test("blockout room tool: the Circle option makes a cylinder room from the centre and the radius", [=] {
+    Editor ed;
+    ground_scene(ed);
+    ed.command("blockout roomopt circle on");
+    CHECK(drags(ed, {0.0f, 0.0f, 0.0f}, {2.0f, 0.0f, 0.0f}, {0.0f, 3.0f, 0.0f}));
+    const BlockoutPiece *bp = r479_active(ed);
+    CHECK(bp && bp->room && bp->shape == 1);
+    if (!bp) return;
+    CHECK_NEAR(bp->radius, 2.0f, 1e-3f);
+    CHECK_NEAR(bp->height, 3.0f, 1e-3f);
+    CHECK_NEAR(ed.active_object_for_test()->world_position().y, 1.5f, 1e-3f);
+  });
+
+  test("blockout room tool: on the top face of a box the room stands on that face, in the box's Blockout, turned to the surface", [=] {
+    Editor ed;
+    GameObject *bo = nullptr;
+    GameObject *box = r479_piece_scene(ed, "camera 10 60 8 0 1 0", 0, {0, 0, 0}, {2, 2, 2}, &bo);
+    (void)box;
+    ed.command("tool room");
+    r477_settle(ed, 2);
+    CHECK(drags(ed, {-0.5f, 1.0f, -0.5f}, {0.5f, 1.0f, 0.5f}, {0.0f, 2.0f, 0.0f}));
+    const GameObject *room = ed.active_object_for_test();
+    const BlockoutPiece *bp = room ? room->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->room && room != box && blockout_of_piece(*room) == bo);
+    if (!bp) return;
+    CHECK_NEAR(bp->size.x, 1.0f, 1e-3f);
+    CHECK_NEAR(bp->size.z, 1.0f, 1e-3f);
+    CHECK_NEAR(bp->size.y, 1.0f, 1e-3f);
+    CHECK_NEAR(room->world_position().y - bp->size.y * 0.5f, 1.0f, 1e-3f);  // (the floor's top is the box's top)
+    CHECK(r477_count(ed, false) == 1 && r477_matches(ed));
+  });
+
+  test("blockout room tool: a drag of no area makes nothing and leaves no undo step; Esc leaves the tool and the right button drops the room in progress", [=] {
+    Editor ed;
+    ground_scene(ed);
+    const size_t depth = ed.undo_depth_for_test();
+    CHECK(drags(ed, {1.0f, 0.0f, 1.0f}, {1.0f, 0.0f, 1.0f}, {1.0f, 3.0f, 1.0f}, false));
+    CHECK(ed.room_tool_stage_for_test() == 0 && r477_count(ed, true) == 0 && ed.undo_depth_for_test() == depth);
+    CHECK(drags(ed, {-2.0f, 0.0f, 0.0f}, {2.0f, 0.0f, 0.0f}, {0.0f, 3.0f, 0.0f}, false));  // (a line: no area)
+    CHECK(ed.room_tool_stage_for_test() == 0 && r477_count(ed, true) == 0);
+    CHECK(drags(ed, {-2.0f, 0.0f, -1.0f}, {2.0f, 0.0f, 1.0f}, {0.0f, 3.0f, 0.0f}, false));
+    CHECK(ed.room_tool_stage_for_test() == 2);
+    int rx = 0, ry = 0;
+    CHECK(ed.project_to_window({0.0f, 2.0f, 0.0f}, rx, ry));
+    r479_right_click(ed, rx, ry);
+    CHECK(ed.room_tool_stage_for_test() == 0 && ed.room_tool_active_for_test() && r477_count(ed, true) == 0);
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE)});
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE, false)});
+    CHECK(!ed.room_tool_active_for_test());
+    CHECK(ed.undo_depth_for_test() == depth);
+  });
+
+  test("blockout room tool: a Solid option makes a plain box that adds or subtracts, not a room", [=] {
+    Editor ed;
+    ground_scene(ed);
+    ed.command("blockout roomopt solid on");
+    ed.command("blockout roomopt subtract on");
+    CHECK(drags(ed, {-1.0f, 0.0f, -1.0f}, {1.0f, 0.0f, 1.0f}, {0.0f, 2.0f, 0.0f}));
+    const BlockoutPiece *bp = r479_active(ed);
+    CHECK(bp && !bp->room && bp->operation == 1 && bp->shape == 0);
+    if (!bp) return;
+    CHECK_NEAR(bp->size.y, 2.0f, 1e-3f);
+  });
+
+  test("blockout room tool: the console makes what the two drags make - blockout room, blockout room circle - and refuses numbers that are no room", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("blockout room 0 0 4 3 2.5");
+    const BlockoutPiece *bp = r479_active(ed);
+    CHECK(bp && bp->room && bp->shape == 0);
+    if (!bp) return;
+    CHECK_NEAR(bp->size.x, 4.0f, 1e-5f);
+    CHECK_NEAR(bp->size.y, 2.5f, 1e-5f);
+    CHECK_NEAR(bp->size.z, 3.0f, 1e-5f);
+    const Vec3 at = ed.active_object_for_test()->world_position();
+    CHECK_NEAR(at.x, 2.0f, 1e-5f);
+    CHECK_NEAR(at.y, 1.25f, 1e-5f);
+    CHECK_NEAR(at.z, 1.5f, 1e-5f);
+    ed.command("blockout room circle 8 8 1.5 3");
+    const BlockoutPiece *c = r479_active(ed);
+    CHECK(c && c->shape == 1 && c->room && std::fabs(c->radius - 1.5f) < 1e-5f && std::fabs(c->height - 3.0f) < 1e-5f);
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, false) == 1 && r477_count(ed, true) == 2 && r477_matches(ed));
+    const size_t pieces = r477_count(ed, true), depth = ed.undo_depth_for_test();
+    for (const char *line : {"blockout room", "blockout room 0 0 4 3", "blockout room 0 0 0 3 2", "blockout room 0 0 4 3 0", "blockout room 0 0 4 3 nan", "blockout room a b c d e",
+                             "blockout room circle 1 1 0 2", "blockout room circle 1 1 -1 2", "blockout room circle 1 1 1", "blockout room 0 0 inf 3 2", "blockout roomopt", "blockout roomopt wall -1",
+                             "blockout roomopt circle maybe", "blockout roomopt nonsense on"}) {
+      const size_t mark = r477_mark();
+      ed.command(line);
+      size_t warnings = 0;
+      r477_log_since(mark, &warnings);
+      if (warnings == 0 || r477_count(ed, true) != pieces) std::printf("    '%s': warnings %zu, pieces %zu (was %zu)\n", line, warnings, r477_count(ed, true), pieces);
+      CHECK(warnings >= 1 && r477_count(ed, true) == pieces);
+    }
+    CHECK(ed.undo_depth_for_test() == depth);
+  });
+
+  test("blockout room tool: it is reachable - the console, the toolbar button, Shift+R in every preset - and the hint line describes each state", [] {
+    for (const char *preset : {"Unity", "Unreal", "Blender", "Maya", "3ds Max", "SketchUp", "Adobe"}) {
+      const Keymap k = keymap_preset(preset);
+      const auto it = k.find("tool.room");
+      CHECK(it != k.end());
+      if (it == k.end()) continue;
+      for (const KeyChord &c : it->second) CHECK(keymap_conflicts(k, "tool.room", c).empty());
+    }
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    r477_settle(ed, 2);
+    Recti r;
+    CHECK(ed.button_rect_for_test("toolbar:room", r));
+    r477_click(ed, r.x + r.w / 2, r.y + r.h / 2);
+    CHECK(ed.room_tool_active_for_test());
+    ed.set_scene_hovered_for_test(true);
+    CHECK(ed.statusbar_hint_row_for_test() == "room tool" && ed.statusbar_hint_for_test().find("drag a rectangle") != std::string::npos);
+    int ax = 0, ay = 0, bx = 0, by = 0;
+    CHECK(ed.project_to_window({-2.0f, 0.0f, -1.0f}, ax, ay) && ed.project_to_window({2.0f, 0.0f, 1.0f}, bx, by));
+    r479_press(ed, ax, ay);
+    ed.set_scene_hovered_for_test(true);
+    CHECK(ed.room_tool_stage_for_test() == 1 && ed.statusbar_hint_for_test().find("release") != std::string::npos);
+    r479_move(ed, bx, by);
+    r479_release(ed, bx, by);
+    ed.set_scene_hovered_for_test(true);
+    CHECK(ed.room_tool_stage_for_test() == 2 && ed.statusbar_hint_for_test().find("height") != std::string::npos);
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE)});  // (Esc leaves the tool; Shift+R, the Unity preset's key, brings it back)
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE, false)});
+    CHECK(!ed.room_tool_active_for_test());
+    te_press(ed, platform::KEY_R, platform::MOD_SHIFT);
+    CHECK(ed.room_tool_active_for_test());
+    ed.command("tool room");
+    CHECK(ed.room_tool_active_for_test());
+  });
+}
+
+static void tests_round479_f9() {
+  test("blockout F9: the piece just made - by blockout add, a menu entry and the Room tool - has its sizes, thicknesses and operation in the panel, each re-run from where it started (no drift after ten changes)", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    r477_settle(ed, 3);  // (its own step: the room's Undo goes back to this)
+    ed.command("blockout add room box 4 3 4");
+    r477_settle(ed, 3);
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "blockout");
+    GameObject *room = ed.active_object_for_test();
+    BlockoutPiece *bp = room ? room->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->room);
+    if (!bp) return;
+    const float bottom = room->world_position().y - bp->size.y * 0.5f;
+    const size_t steps = ed.undo_steps_for_test();
+    CHECK(r479_type(ed, "adjust:Width", "6"));
+    CHECK_NEAR(bp->size.x, 6.0f, 1e-4f);
+    CHECK(bp->size.y == 3.0f && bp->size.z == 4.0f);
+    CHECK(r479_type(ed, "adjust:Height", "5"));
+    CHECK_NEAR(bp->size.y, 5.0f, 1e-4f);
+    CHECK_NEAR(room->world_position().y - bp->size.y * 0.5f, bottom, 1e-4f);  // (the floor stayed)
+    CHECK(r479_type(ed, "adjust:Wall", "0.4"));
+    CHECK_NEAR(bp->wall, 0.4f, 1e-5f);
+    CHECK(r479_type(ed, "adjust:Depth", "7"));
+    CHECK_NEAR(bp->size.z, 7.0f, 1e-4f);
+    CHECK(ed.undo_steps_for_test() == steps);  // (the same step, amended)
+    for (int i = 1; i <= 10; i++) {
+      CHECK(r479_type(ed, "adjust:Width", std::to_string(3 + i)));
+      CHECK_NEAR(bp->size.x, (float)(3 + i), 1e-4f);
+      CHECK(r479_type(ed, "adjust:Height", std::to_string(2 + i)));
+      CHECK_NEAR(room->world_position().y - bp->size.y * 0.5f, bottom, 1e-4f);
+    }
+    CHECK(room->world_position().x == 0.0f || std::fabs(room->world_position().x) < 1e-4f);
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == 1);  // (one Ctrl+Z goes back to before the room was added)
+    /* A menu entry's piece and a plain box's operation. */
+    ed.command("create Blockout Piece: Room Cylinder");
+    r477_settle(ed, 3);
+    CHECK(ed.obj_last_valid() && ed.obj_last_for_test().kind == "blockout" && ed.obj_last_for_test().n == 1);
+    CHECK(r479_type(ed, "adjust:Radius", "1.5"));
+    CHECK_NEAR(r479_active(ed)->radius, 1.5f, 1e-4f);
+    ed.command("blockout add box 1 1 1");
+    r477_settle(ed, 3);
+    CHECK(ed.obj_last_valid());
+    CHECK(r479_type(ed, "adjust:Operation", "1"));
+    CHECK(r479_active(ed)->operation == 1);
+  });
+
+  test("blockout F9: a piece made by the Room tool can be adjusted, and anything else committed ends the panel", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    ed.command("blockout room 0 0 4 3 2");
+    r477_settle(ed, 3);
+    CHECK(ed.obj_last_valid());
+    CHECK(r479_type(ed, "adjust:Height", "4"));
+    CHECK_NEAR(r479_active(ed)->size.y, 4.0f, 1e-4f);
+    CHECK_NEAR(ed.active_object_for_test()->world_position().y - 2.0f, 0.0f, 1e-4f);
+    ed.command("blockout set wall 0.3");
+    r477_settle(ed, 3);
+    CHECK(!ed.obj_last_valid());
+  });
+}
+
+static void tests_round479_lesson() {
+  test("blockout handles: the Learn tab has the lesson 'Dragging rooms out' with a Try-it of commands that run and three questions", [] {
+    int found = -1;
+    for (int i = 0; i < lesson_count(); i++)
+      if (std::string(lesson(i).title) == "Dragging rooms out") found = i;
+    CHECK(found >= 0);
+    if (found < 0) return;
+    const std::string body = lesson(found).body;
+    size_t questions = 0, cmds = 0;
+    std::istringstream is(body);
+    Editor ed;
+    ed.init_headless(900, 600);
+    for (std::string line; std::getline(is, line);) {
+      if (line.rfind("? ", 0) == 0) questions++;
+      if (line.rfind("! cmd:", 0) != 0) continue;
+      cmds++;
+      ed.command(line.substr(6, line.find(" | ") - 6));
+      r477_settle(ed, 2);
+    }
+    CHECK(questions == 3 && cmds >= 4);
+    CHECK(r477_find(ed) && r477_count(ed, false) == 1 && r477_count(ed, true) == 2 && r477_matches(ed) && ed.room_tool_active_for_test());
+    const BlockoutPiece *room = nullptr;
+    for (GameObject *p : r477_all_pieces(*r477_find(ed)))
+      if (p->get<BlockoutPiece>()->room) room = p->get<BlockoutPiece>();
+    CHECK(room && std::fabs(room->wall - 0.3f) < 1e-5f);
+  });
+}
+
+static void tests_round479() {
+  tests_round479_lesson();
+  tests_round479_gizmo_snap();
+  tests_round479_handles();
+  tests_round479_snapping();
+  tests_round479_room_tool();
+  tests_round479_f9();
+}
+
+/* ===================================================================== */
+/* Round 479, the test engineer's: written from the task's criteria and risks */
+/* ===================================================================== */
+
+namespace {
+
+/* A box piece's face (side -1 or +1 along its own X) in the world. */
+Vec3 r479e_face(const GameObject &g, float side) { return g.world_matrix().point({side * g.get<BlockoutPiece>()->size.x * 0.5f, 0.0f, 0.0f}); }
+
+/* The Room tool's three steps on the ground (or a surface): press, drag, release, then the height's click. */
+bool r479e_room_drags(Editor &ed, Vec3 a, Vec3 b, Vec3 top, const char *typed = nullptr) {
+  int ax = 0, ay = 0, bx = 0, by = 0, cx = 0, cy = 0;
+  if (!ed.project_to_window(a, ax, ay) || !ed.project_to_window(b, bx, by) || !ed.project_to_window(top, cx, cy)) return false;
+  r479_press(ed, ax, ay);
+  r479_move(ed, bx, by);
+  r479_release(ed, bx, by);
+  r479_move(ed, cx, cy);
+  if (typed)
+    for (const char *c = typed; *c; c++) {
+      platform::Event e;
+      e.type = R477ET::Text, e.codepoint = (uint32_t)*c;
+      ed.step_frame_headless({e});
+    }
+  r477_click(ed, cx, cy);
+  r477_settle(ed, 3);
+  return true;
+}
+
+size_t r479e_warnings(Editor &ed, const std::string &line) {
+  const size_t mark = r477_mark();
+  ed.command(line);
+  size_t w = 0;
+  r477_log_since(mark, &w);
+  return w;
+}
+
+}  // namespace
+
+static void tests_round479_engineer_handles() {
+  test("blockout handles (te): under a turned, scaled and MIRRORED parent the face under the mouse moves a metre outward and the opposite face stays", [] {
+    Editor ed;
+    te_view(ed, kR479Camera);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *par = ed.scene().create("Mirror", bo);
+    par->set_local_rotation(Quat::axis_angle({0.0f, 1.0f, 0.0f}, 20.0f * kDeg2Rad));
+    par->set_local_scale({-1.5f, 1.0f, 1.0f});
+    GameObject *box = r477_piece(ed, *par, "Box", 0, 0, {0, 0, 0}, {3, 3, 3});
+    ed.select_for_test(box->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    const Vec3 far0 = r479e_face(*box, -1.0f), near0 = r479e_face(*box, 1.0f);
+    const Vec3 out = normalize(near0 - far0);
+    CHECK(r479_pull(ed, "+x", near0 + out * 1.0f, platform::MOD_CTRL));
+    const BlockoutPiece *bp = box->get<BlockoutPiece>();
+    CHECK(length(r479e_face(*box, -1.0f) - far0) < 1e-4f);
+    const float world_move = dot(r479e_face(*box, 1.0f) - near0, out);
+    std::printf("    mirrored: size.x %.4f, the +X face moved %.4f m outward\n", bp->size.x, world_move);
+    CHECK_NEAR(world_move, 1.0f, 0.05f);
+    CHECK(bp->size.y == 3.0f && bp->size.z == 3.0f);
+  });
+
+  test("blockout handles (te): a Blockout that is itself scaled 2 and turned 40 degrees - a world metre is half an own unit and the opposite face stays", [] {
+    Editor ed;
+    te_view(ed, kR479Camera);
+    GameObject *bo = r477_blockout(ed);
+    bo->set_local_rotation(Quat::axis_angle({0.0f, 1.0f, 0.0f}, 40.0f * kDeg2Rad));
+    bo->set_local_scale(Vec3(2.0f));
+    GameObject *box = r477_piece(ed, *bo, "Box", 0, 0, {0, 0, 0}, {2, 2, 2});
+    ed.select_for_test(box->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    const Vec3 far0 = r479e_face(*box, -1.0f), near0 = r479e_face(*box, 1.0f);
+    const Vec3 out = normalize(near0 - far0);
+    CHECK(r479_pull(ed, "+x", near0 + out * 1.0f, platform::MOD_CTRL));
+    CHECK_NEAR(box->get<BlockoutPiece>()->size.x, 2.5f, 0.03f);
+    CHECK(length(r479e_face(*box, -1.0f) - far0) < 1e-4f);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): dragged by the mouse far past the opposite face the size stops at the small positive minimum and the opposite face stays", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    const Vec3 far0 = r479e_face(*box, -1.0f);
+    CHECK(r479_pull(ed, "+x", {-4.0f, 0.0f, 0.0f}, platform::MOD_CTRL));
+    const BlockoutPiece *bp = box->get<BlockoutPiece>();
+    CHECK(bp->size.x == kBlockoutMinSize);
+    CHECK(length(r479e_face(*box, -1.0f) - far0) < 1e-4f);
+    CHECK(box->world_matrix().dir({1.0f, 0.0f, 0.0f}).x > 0.0f);  // (not turned inside out)
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): every face handle of a box, by real mouse events, grows its own side by what was dragged and leaves the opposite face", [] {
+    for (const char *name : {"+x", "-x", "+y", "-y", "+z", "-z"}) {
+      Editor ed;
+      GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {4, 4, 4});
+      const int axis = name[1] - 'x';
+      const float way = name[0] == '+' ? 1.0f : -1.0f;
+      const Vec3 dir(axis == 0 ? way : 0.0f, axis == 1 ? way : 0.0f, axis == 2 ? way : 0.0f);  // (written out: see along_axis in blockout_object.cpp)
+      const Vec3 grab = dir * 2.0f, opposite = dir * -2.0f;
+      CHECK(r479_pull(ed, name, grab + dir * 1.0f, platform::MOD_CTRL));
+      const BlockoutPiece *bp = box->get<BlockoutPiece>();
+      std::printf("    handle %s: size %.3f %.3f %.3f\n", name, bp->size.x, bp->size.y, bp->size.z);
+      CHECK_NEAR(bp->size[axis], 5.0f, 0.06f);
+      CHECK(length(box->world_matrix().point(Vec3(0.0f)) - Vec3(0.0f)) > 0.0f);
+      const float other_a = bp->size[(axis + 1) % 3], other_b = bp->size[(axis + 2) % 3];
+      CHECK(other_a == 4.0f && other_b == 4.0f);
+      /* the opposite face: own coordinate -dir*size/2 + position stays at `opposite` */
+      const Vec3 far = box->local().position - dir * (bp->size[axis] * 0.5f);
+      CHECK(length(far - opposite) < 1e-4f);
+    }
+  });
+
+  test("blockout handles (te): Shift on every console handle grows both opposite sides about the centre (box, cylinder, room)", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {1, 2, 3}, {2, 2, 2});
+    for (const char *name : {"+x", "-x", "+y", "-y", "+z", "-z"}) {
+      const BlockoutPiece before = *box->get<BlockoutPiece>();
+      const Vec3 at = box->local().position;
+      ed.command(std::string("blockout handle ") + name + " 0.5 both");
+      const int axis = name[1] - 'x';
+      CHECK_NEAR(box->get<BlockoutPiece>()->size[axis], before.size[axis] + 1.0f, 1e-5f);
+      CHECK(r479_bits_equal(box->local().position, at));
+    }
+    Editor ed2;
+    GameObject *cyl = r479_piece_scene(ed2, kR479Camera, 1, {0, 1, 0}, Vec3(1.0f));
+    for (const char *name : {"top", "bottom"}) {
+      const float h = cyl->get<BlockoutPiece>()->height;
+      ed2.command(std::string("blockout handle ") + name + " 0.5 both");
+      CHECK_NEAR(cyl->get<BlockoutPiece>()->height, h + 1.0f, 1e-5f);
+      CHECK(cyl->local().position.y == 1.0f);
+    }
+    Editor ed3;
+    ed3.init_headless(1600, 1000);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed3, &bo);
+    if (!room) { CHECK(false); return; }
+    const Vec3 at = room->local().position;
+    const float wall = room->get<BlockoutPiece>()->wall;
+    ed3.command("blockout handle +z 1 both");
+    CHECK_NEAR(room->get<BlockoutPiece>()->size.z, 6.0f, 1e-5f);
+    CHECK(r479_bits_equal(room->local().position, at) && room->get<BlockoutPiece>()->wall == wall);
+  });
+
+  test("blockout handles (te): the wall handle never takes the wall below zero or past the cap, and a door's head and sill never cross", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    BlockoutPiece *rp = room->get<BlockoutPiece>();
+    ed.command("blockout handle wall -5");
+    CHECK(rp->wall == 0.0f);
+    ed.command("blockout handle wall 5000");
+    CHECK(std::isfinite(rp->wall) && rp->wall <= 1000.0f && rp->wall > 0.0f);
+    r477_settle(ed, 3);
+    ed.command("blockout add door");
+    GameObject *door = ed.active_object_for_test();
+    BlockoutPiece *dp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(dp && dp->opening == 1);
+    if (!dp) return;
+    ed.command("blockout handle head -10");
+    CHECK(dp->head > dp->sill);
+    ed.command("blockout handle head 1");
+    ed.command("blockout handle sill -50");
+    std::printf("    door: sill %.3f head %.3f\n", dp->sill, dp->head);
+    CHECK(dp->head > dp->sill && dp->sill >= 0.0f);
+    ed.command("blockout handle width -50");
+    CHECK(dp->width == kBlockoutMinSize);
+  });
+
+  test("blockout handles (te): a piece scaled to zero, a huge scale and a tiny scale - the console handle refuses or keeps the opposite face", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    box->set_local_scale({0.0f, 1.0f, 1.0f});
+    const BlockoutPiece before = *box->get<BlockoutPiece>();
+    CHECK(r479e_warnings(ed, "blockout handle +x 1") >= 1);
+    CHECK(box->get<BlockoutPiece>()->size.x == before.size.x && box->local().position.x == 0.0f);
+    for (float s : {1e-3f, 1e3f}) {
+      box->set_local_scale({s, 1.0f, 1.0f});
+      box->get<BlockoutPiece>()->size = {2, 2, 2};
+      box->set_local_position({0, 0, 0});
+      const Vec3 far0 = r479e_face(*box, -1.0f);
+      ed.command("blockout handle +x 1");
+      const BlockoutPiece *bp = box->get<BlockoutPiece>();
+      std::printf("    scale %g: size.x %g\n", s, bp->size.x);
+      CHECK(std::isfinite(bp->size.x) && bp->size.x >= kBlockoutMinSize);
+      CHECK(length(r479e_face(*box, -1.0f) - far0) < 1e-3f * std::max(1.0f, s));
+    }
+  });
+
+  test("blockout handles (te): Undo and Redo of a drag restore the component and the transform byte for byte", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    const BlockoutPiece before = *box->get<BlockoutPiece>();
+    const Transform t0 = box->local();
+    CHECK(r479_pull(ed, "+x", {3.0f, 0.0f, 0.0f}));
+    const Vec3 size1 = box->get<BlockoutPiece>()->size, pos1 = box->local().position;
+    CHECK(size1.x > 2.5f);
+    ed.command("undo");
+    r477_settle(ed, 3);
+    box = ed.scene().find_by_name("Box");
+    CHECK(box && r479_bits_equal(box->get<BlockoutPiece>()->size, before.size) && r479_bits_equal(box->local().position, t0.position));
+    CHECK(r477_matches(ed));
+    ed.command("redo");
+    r477_settle(ed, 3);
+    box = ed.scene().find_by_name("Box");
+    CHECK(box && r479_bits_equal(box->get<BlockoutPiece>()->size, size1) && r479_bits_equal(box->local().position, pos1));
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): Esc after the face snapped to several planes puts the piece back byte for byte", [] {
+    Editor ed;
+    te_view(ed, "camera 20 55 22 3 0 0");
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "A", 0, 0, {0, 0, 0}, {2, 2, 2});
+    r477_piece(ed, *bo, "C", 0, 0, {0, 0, 5}, {2.5f, 2, 2});
+    GameObject *b = r477_piece(ed, *bo, "B", 0, 0, {3.35f, 0, 0}, {2, 2, 2});
+    ed.select_for_test(b->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    const BlockoutPiece before = *b->get<BlockoutPiece>();
+    const Transform t0 = b->local();
+    const size_t depth = ed.undo_depth_for_test();
+    int hx = 0, hy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("-x", hx, hy));
+    r479_press(ed, hx, hy);
+    for (float x : {1.0f, 1.25f, 2.0f, 1.25f, 1.0f}) {
+      int px = 0, py = 0;
+      CHECK(ed.project_to_window({x, 0.0f, 0.0f}, px, py));
+      r479_move(ed, px, py);
+    }
+    CHECK(ed.blockout_dragging_for_test());
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE)});
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE, false)});
+    r479_release(ed, hx, hy);
+    CHECK(!ed.blockout_dragging_for_test() && !ed.blockout_drag_snapped_for_test());
+    CHECK(r479_bits_equal(b->get<BlockoutPiece>()->size, before.size) && r479_bits_equal(b->local().position, t0.position));
+    CHECK(ed.undo_depth_for_test() == depth);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): the piece deleted by a command in the middle of a drag - the mouse-up finds no drag, no crash, the mesh is the rest", [] {
+    Editor ed;
+    GameObject *bo = nullptr;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2}, &bo);
+    r477_piece(ed, *bo, "Keep", 0, 0, {8, 0, 0}, {2, 2, 2});
+    int hx = 0, hy = 0, tx = 0, ty = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy) && ed.project_to_window({3.0f, 0.0f, 0.0f}, tx, ty));
+    r479_press(ed, hx, hy);
+    r479_move(ed, tx, ty);
+    CHECK(ed.blockout_dragging_for_test());
+    (void)box;
+    ed.command("delete");
+    r479_move(ed, tx + 5, ty);
+    r479_release(ed, tx + 5, ty);
+    CHECK(!ed.blockout_dragging_for_test());
+    CHECK(!ed.scene().find_by_name("Box"));
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): two pieces selected - the handles are the active one's and only it changes", [] {
+    Editor ed;
+    GameObject *bo = nullptr;
+    GameObject *a = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2}, &bo);
+    GameObject *b = r477_piece(ed, *bo, "Other", 0, 0, {8, 0, 0}, {2, 2, 2});
+    ed.select_for_test(b->id, false);
+    ed.select_for_test(a->id, true);  // (a is active)
+    r477_settle(ed, 2);
+    CHECK(r479_pull(ed, "+x", {3.0f, 0.0f, 0.0f}));
+    CHECK(a->get<BlockoutPiece>()->size.x > 2.5f);
+    CHECK(b->get<BlockoutPiece>()->size.x == 2.0f && b->local().position.x == 8.0f);
+  });
+
+  test("blockout handles (te): a disabled piece, an inactive piece and Play show no handles; entering Play mid-drag ends the drag without a crash", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    int x = 0, y = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", x, y));
+    box->get<BlockoutPiece>()->enabled = false;
+    CHECK(!ed.blockout_handle_pixel_for_test("+x", x, y));
+    box->get<BlockoutPiece>()->enabled = true;
+    box->active = false;
+    CHECK(!ed.blockout_handle_pixel_for_test("+x", x, y));
+    box->active = true;
+    int tx = 0, ty = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", x, y) && ed.project_to_window({3.0f, 0.0f, 0.0f}, tx, ty));
+    r479_press(ed, x, y);
+    r479_move(ed, tx, ty);
+    CHECK(ed.blockout_dragging_for_test());
+    ed.command("play");
+    r477_settle(ed, 3);
+    CHECK(!ed.blockout_dragging_for_test());
+    CHECK(!ed.blockout_handle_pixel_for_test("+x", x, y) || !ed.playing_for_test());
+    r479_release(ed, tx, ty);
+    ed.command("stop");
+    r477_settle(ed, 3);
+    CHECK(!ed.playing_for_test() && !ed.blockout_dragging_for_test());
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): a drag with workers on - the mesh at the end is the build from scratch of the final pieces", [] {
+    Editor ed;
+    ed.set_async_jobs_for_test(true);
+    GameObject *bo = nullptr;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2}, &bo);
+    r477_piece(ed, *bo, "Cut", 1, 1, {0, 0, 0}, Vec3(1.0f), 0.4f, 6.0f);
+    ed.command("blockout wait");
+    int hx = 0, hy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy));
+    r479_press(ed, hx, hy);
+    for (float x : {2.5f, 3.0f, 3.5f, 4.0f, 3.0f}) {
+      int px = 0, py = 0;
+      CHECK(ed.project_to_window({x, 0.0f, 0.0f}, px, py));
+      r479_move(ed, px, py);
+    }
+    int ex = 0, ey = 0;
+    CHECK(ed.project_to_window({3.0f, 0.0f, 0.0f}, ex, ey));
+    r479_release(ed, ex, ey);
+    ed.command("blockout wait");
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    CHECK(box->get<BlockoutPiece>()->size.x > 3.5f);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout handles (te): a handle and the transform gizmo - the handle at the face wins the press, and the gizmo's X arrow is still reachable from the centre", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    ed.command("tool move");
+    r477_settle(ed, 2);
+    const Vec3 at = box->local().position;
+    int hx = 0, hy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy));
+    r479_press(ed, hx, hy);
+    CHECK(ed.blockout_dragging_for_test());
+    r479_release(ed, hx, hy);
+    CHECK(r479_bits_equal(box->local().position, at));  // (the gizmo did not move the piece)
+    ed.command("perf drag gizmo x 40 frames 4");
+    r477_settle(ed, 3);
+    CHECK(box->local().position.x != at.x || box->local().position.z != at.z || box->local().position.y != at.y);
+  });
+}
+
+static void tests_round479_engineer_snapping() {
+  test("blockout handles (te): pieces of ANOTHER Blockout are no snap candidates, the same Blockout's are", [] {
+    for (int same = 0; same < 2; same++) {
+      Editor ed;
+      te_view(ed, "camera 20 55 22 3 0 0");
+      GameObject *bo = r477_blockout(ed, "Blockout");
+      GameObject *other = same ? bo : r477_blockout(ed, "Other");
+      GameObject *b = r477_piece(ed, *bo, "B", 0, 0, {3.35f, 0, 0}, {2, 2, 2});
+      r477_piece(ed, *other, "A", 0, 0, {0, 0, 0}, {2.2f, 2, 2});  // (its +X face is at 1.1, off the 0.25 grid)
+      ed.select_for_test(b->id, false);
+      ed.mark_changed_for_test("test scene");
+      r477_settle(ed, 3);
+      bool snapped = false;
+      CHECK(r479_pull(ed, "-x", {1.1f, 0.0f, 0.0f}, 0, &snapped));
+      const float face = r479e_face(*b, -1.0f).x;
+      std::printf("    %s Blockout: face at %.4f, snapped %d\n", same ? "same" : "another", face, (int)snapped);
+      if (same) CHECK(snapped && std::fabs(face - 1.1f) < 1e-4f);
+      else CHECK(!snapped && std::fabs(face - 1.0f) < 1e-4f);
+    }
+  });
+
+  test("blockout handles (te): between two planes 6 cm apart the face stays on the plane it took - no jitter while the mouse crosses both", [] {
+    Editor ed;
+    te_view(ed, "camera 20 55 22 3 0 0");
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "A", 0, 0, {0, 0, 0}, {2, 2, 2});
+    r477_piece(ed, *bo, "C", 0, 0, {0, 0, 5}, {2.12f, 2, 2});  // (+X face at 1.06)
+    GameObject *b = r477_piece(ed, *bo, "B", 0, 0, {3.35f, 0, 0}, {2, 2, 2});
+    ed.select_for_test(b->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    int hx = 0, hy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("-x", hx, hy));
+    r479_press(ed, hx, hy);
+    bool first = true;
+    float held = 0.0f;
+    for (float x : {1.0f, 1.03f, 1.06f, 1.03f, 1.0f, 1.06f, 1.02f}) {
+      int px = 0, py = 0;
+      CHECK(ed.project_to_window({x, 0.0f, 0.0f}, px, py));
+      r479_move(ed, px, py);
+      const float face = r479e_face(*b, -1.0f).x;
+      CHECK(ed.blockout_drag_snapped_for_test());
+      if (first) held = face, first = false;
+      if (std::fabs(face - held) > 1e-5f) std::printf("    mouse at %.2f: face %.4f, held %.4f\n", x, face, held);
+      CHECK(std::fabs(face - held) < 1e-5f);
+    }
+    r479_release(ed, hx, hy);
+  });
+
+  test("blockout handles (te): a snap to a corner - a face dragged level with the top of a lower piece lands in that corner's plane", [] {
+    Editor ed;
+    te_view(ed, "camera 30 40 12 0 0 0");
+    GameObject *bo = r477_blockout(ed);
+    r477_piece(ed, *bo, "Low", 0, 0, {0, 0, 0}, {2, 1.3f, 2});  // (its top corner plane is y = 0.65, off the grid)
+    GameObject *b = r477_piece(ed, *bo, "B", 0, 0, {6, 0, 0}, {2, 3, 2});
+    ed.select_for_test(b->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    bool snapped = false;
+    CHECK(r479_pull(ed, "-y", {6.0f, -0.65f, 0.0f}, 0, &snapped));
+    const Vec3 bottom = b->world_matrix().point({0.0f, -b->get<BlockoutPiece>()->size.y * 0.5f, 0.0f});
+    std::printf("    -Y face at y = %.4f, snapped %d\n", bottom.y, (int)snapped);
+    CHECK(snapped && std::fabs(bottom.y + 0.65f) < 1e-4f);
+  });
+}
+
+static void tests_round479_engineer_room() {
+  test("blockout room tool (te): a rectangle dragged in each of the four directions makes the same room (negative extents)", [] {
+    const Vec3 corners[4][2] = {{{-2, 0, -1}, {2, 0, 1}}, {{2, 0, 1}, {-2, 0, -1}}, {{-2, 0, 1}, {2, 0, -1}}, {{2, 0, -1}, {-2, 0, 1}}};
+    for (int k = 0; k < 4; k++) {
+      Editor ed;
+      te_view(ed, "camera 10 70 14 0 0 0");
+      ed.command("tool room");
+      r477_settle(ed, 2);
+      CHECK(r479e_room_drags(ed, corners[k][0], corners[k][1], {0.0f, 3.0f, 0.0f}));
+      const BlockoutPiece *bp = r479_active(ed);
+      CHECK(bp && bp->room);
+      if (!bp) continue;
+      const Vec3 at = ed.active_object_for_test()->world_position();
+      std::printf("    direction %d: size %.3f %.3f %.3f at %.3f %.3f %.3f\n", k, bp->size.x, bp->size.y, bp->size.z, at.x, at.y, at.z);
+      CHECK_NEAR(bp->size.x, 4.0f, 1e-3f);
+      CHECK_NEAR(bp->size.y, 3.0f, 1e-3f);
+      CHECK_NEAR(bp->size.z, 2.0f, 1e-3f);
+      CHECK(std::fabs(at.x) < 1e-3f && std::fabs(at.z) < 1e-3f && std::fabs(at.y - 1.5f) < 1e-3f);
+      CHECK(r477_matches(ed));
+    }
+  });
+
+  test("blockout room tool (te): the height typed as a number is the room's height, and two rooms in a row each undo as one step", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.command("tool room");
+    r477_settle(ed, 2);
+    const size_t depth = ed.undo_depth_for_test();
+    CHECK(r479e_room_drags(ed, {-4.0f, 0.0f, -1.0f}, {-1.0f, 0.0f, 1.0f}, {-2.0f, 2.0f, 0.0f}, "2.5"));
+    const BlockoutPiece *first = r479_active(ed);
+    CHECK(first && first->room);
+    if (!first) return;
+    CHECK_NEAR(first->size.y, 2.5f, 1e-3f);
+    CHECK(ed.undo_depth_for_test() == depth + 1 && ed.room_tool_active_for_test() && ed.room_tool_stage_for_test() == 0);
+    CHECK(r479e_room_drags(ed, {1.0f, 0.0f, -1.0f}, {4.0f, 0.0f, 1.0f}, {2.0f, 3.0f, 0.0f}));
+    CHECK(ed.undo_depth_for_test() == depth + 2);
+    CHECK(r477_count(ed, true) == 2 && r477_count(ed, false) == 1 && r477_matches(ed));  // (the second goes into the first's Blockout)
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == 1 && r477_matches(ed));
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(r477_count(ed, true) == 0);
+  });
+
+  test("blockout room tool (te): the room goes into the Blockout of the selected piece, else the selected Blockout, else a new one", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    GameObject *bo1 = r477_blockout(ed, "Blockout");
+    GameObject *bo2 = r477_blockout(ed, "Second");
+    r477_piece(ed, *bo1, "P1", 0, 0, {-20, 0, 0}, {2, 2, 2});
+    GameObject *p2 = r477_piece(ed, *bo2, "P2", 0, 0, {20, 0, 0}, {2, 2, 2});
+    GameObject *plain = ed.scene().create("Plain");
+    r477_settle(ed, 3);
+    ed.select_for_test(p2->id, false);
+    ed.command("blockout room 0 0 3 3 2");
+    CHECK(blockout_of_piece(*ed.active_object_for_test()) == bo2);
+    ed.select_for_test(bo1->id, false);
+    ed.command("blockout room 0 5 3 8 2");
+    CHECK(blockout_of_piece(*ed.active_object_for_test()) == bo1);
+    const size_t blockouts = r477_count(ed, false);
+    ed.select_for_test(plain->id, false);
+    ed.command("blockout room 0 10 3 13 2");
+    GameObject *made = ed.active_object_for_test();
+    CHECK(made && made->get<BlockoutPiece>() && r477_count(ed, false) == blockouts + 1);
+    GameObject *owner = made ? blockout_of_piece(*made) : nullptr;
+    CHECK(owner && owner != bo1 && owner != bo2);
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed, "Blockout") && r477_matches(ed, "Second"));
+  });
+
+  test("blockout room tool (te): the wall option 0 and a huge wall make a piece with those numbers and leave a structurally sound scene", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("blockout roomopt wall 0");
+    ed.command("blockout room 0 0 4 3 2");
+    const BlockoutPiece *bp = r479_active(ed);
+    CHECK(bp && bp->room && bp->wall == 0.0f && bp->floor == 0.0f && bp->ceiling == 0.0f);
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+    ed.command("blockout roomopt wall 1000");
+    ed.command("blockout room 10 0 14 3 2");
+    bp = r479_active(ed);
+    CHECK(bp && bp->room && bp->wall == 1000.0f);
+    r477_settle(ed, 3);
+    ed.command("blockout wait");
+    const Mesh *m = r477_mesh(r477_find(ed));
+    CHECK(m != nullptr);
+    CHECK(ed.undo_depth_for_test() >= 2);
+  });
+
+  test("blockout room tool (te): a solid Add and a solid Subtract by the tool's two drags, a Circle solid is a plain cylinder", [] {
+    for (int sub = 0; sub < 2; sub++) {
+      Editor ed;
+      te_view(ed, "camera 10 70 14 0 0 0");
+      ed.command("blockout roomopt solid on");
+      ed.command(std::string("blockout roomopt subtract ") + (sub ? "on" : "off"));
+      ed.command("blockout roomopt circle on");
+      ed.command("tool room");
+      r477_settle(ed, 2);
+      CHECK(r479e_room_drags(ed, {0.0f, 0.0f, 0.0f}, {1.5f, 0.0f, 0.0f}, {0.0f, 2.0f, 0.0f}));
+      const BlockoutPiece *bp = r479_active(ed);
+      CHECK(bp && !bp->room && bp->shape == 1 && bp->operation == sub);
+      if (bp) CHECK_NEAR(bp->radius, 1.5f, 1e-3f);
+    }
+  });
+
+  test("blockout room tool (te): a Room tool drag on a slanted face stands the room on that face, turned to it", [] {
+    Editor ed;
+    te_view(ed, "camera 12 50 14 0 1 0");
+    GameObject *bo = r477_blockout(ed);
+    GameObject *slab = r477_piece(ed, *bo, "Slab", 0, 0, {0, 0, 0}, {6, 1, 6});
+    slab->set_local_rotation(Quat::axis_angle({0.0f, 0.0f, 1.0f}, 20.0f * kDeg2Rad));
+    ed.select_for_test(slab->id, false);
+    ed.mark_changed_for_test("test scene");
+    r477_settle(ed, 3);
+    ed.command("tool room");
+    r477_settle(ed, 2);
+    const Mat4 w = slab->world_matrix();
+    const Vec3 a = w.point({-0.5f, 0.5f, -0.5f}), b = w.point({0.5f, 0.5f, 0.5f}), top = w.point({0.0f, 1.5f, 0.0f});
+    CHECK(r479e_room_drags(ed, a, b, top));
+    const GameObject *room = ed.active_object_for_test();
+    const BlockoutPiece *bp = room ? room->get<BlockoutPiece>() : nullptr;
+    CHECK(bp && bp->room && room != slab);
+    if (!bp) return;
+    const Vec3 up = normalize(room->world_matrix().dir({0.0f, 1.0f, 0.0f})), face_n = normalize(w.dir({0.0f, 1.0f, 0.0f}));
+    std::printf("    room up (%.3f %.3f %.3f) vs face normal (%.3f %.3f %.3f)\n", up.x, up.y, up.z, face_n.x, face_n.y, face_n.z);
+    CHECK(dot(up, face_n) > 0.99f);
+    CHECK(r477_matches(ed));
+  });
+
+  test("blockout room tool (te): a new scene in the middle of the height step leaves no half-made room that a click could finish in the new scene", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.command("tool room");
+    r477_settle(ed, 2);
+    CHECK(r479e_room_drags(ed, {-2.0f, 0.0f, -1.0f}, {2.0f, 0.0f, 1.0f}, {0.0f, 3.0f, 0.0f}) == true);
+    int ax = 0, ay = 0, bx = 0, by = 0;
+    CHECK(ed.project_to_window({-2.0f, 0.0f, -1.0f}, ax, ay) && ed.project_to_window({2.0f, 0.0f, 1.0f}, bx, by));
+    r479_press(ed, ax, ay);
+    r479_move(ed, bx, by);
+    r479_release(ed, bx, by);
+    CHECK(ed.room_tool_stage_for_test() == 2);
+    ed.command("newscene");
+    r477_settle(ed, 3);
+    std::printf("    after newscene: tool active %d, stage %d\n", (int)ed.room_tool_active_for_test(), ed.room_tool_stage_for_test());
+    const bool stale = ed.room_tool_active_for_test() && ed.room_tool_stage_for_test() == 2;
+    CHECK(!ed.room_tool_active_for_test() || ed.room_tool_stage_for_test() == 0);
+    if (stale) {  // (what the stale stage does: a click in the empty new scene finishes the old scene's room)
+      int cx = 0, cy = 0;
+      if (ed.project_to_window({0.0f, 2.0f, 0.0f}, cx, cy)) r477_click(ed, cx, cy);
+      r477_settle(ed, 3);
+      std::printf("    a click in the new scene made %zu piece(s) from the old footprint\n", r477_count(ed, true));
+    }
+  });
+}
+
+static void tests_round479_engineer_console() {
+  test("blockout handle (te): with nothing, the Blockout itself or a plain object selected it warns and changes nothing", [] {
+    Editor ed;
+    te_view(ed, kR479Camera);
+    GameObject *bo = r477_blockout(ed);
+    GameObject *plain = ed.scene().create("Plain");
+    r477_settle(ed, 2);
+    ed.clear_selection_for_test();
+    const size_t depth = ed.undo_depth_for_test();
+    CHECK(r479e_warnings(ed, "blockout handle +x 1") >= 1);
+    ed.select_for_test(bo->id, false);
+    CHECK(r479e_warnings(ed, "blockout handle +x 1") >= 1);
+    ed.select_for_test(plain->id, false);
+    CHECK(r479e_warnings(ed, "blockout handle +x 1") >= 1);
+    CHECK(ed.undo_depth_for_test() == depth);
+  });
+
+  test("blockout handle (te): words, nan text, zero and a metre count of zero - zero changes nothing and adds no undo step", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    const size_t depth = ed.undo_depth_for_test();
+    ed.command("blockout handle +x 0");
+    CHECK(box->get<BlockoutPiece>()->size.x == 2.0f && ed.undo_depth_for_test() == depth);
+    for (const char *line : {"blockout handle +x one", "blockout handle +x NaN", "blockout handle +x 1e999", "blockout handle bogus 1", "blockout handle -q 1"}) {
+      const size_t w = r479e_warnings(ed, line);
+      if (w == 0) std::printf("    '%s' did not warn\n", line);
+      CHECK(w >= 1);
+      CHECK(box->get<BlockoutPiece>()->size.x == 2.0f);
+    }
+    CHECK(ed.undo_depth_for_test() == depth);
+  });
+
+  test("blockout room (te): negative height makes a room standing up (solid: a negative height goes down), a footprint with nan or huge numbers is refused or finite", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    r477_empty_scene(ed);
+    ed.command("blockout room 0 0 4 3 -2");
+    const BlockoutPiece *bp = r479_active(ed);
+    CHECK(bp && bp->room && std::fabs(bp->size.y - 2.0f) < 1e-5f);
+    if (bp) CHECK(ed.active_object_for_test()->world_position().y > 0.0f);
+    const size_t pieces = r477_count(ed, true);
+    CHECK(r479e_warnings(ed, "blockout room 0 0 4 3 nan") >= 1);
+    CHECK(r479e_warnings(ed, "blockout room circle 0 0 nan 2") >= 1);
+    CHECK(r477_count(ed, true) == pieces);
+    ed.command("blockout room 0 0 1e30 3 2");
+    r477_settle(ed, 2);
+    GameObject *g = ed.active_object_for_test();
+    CHECK(g && g->get<BlockoutPiece>());
+    if (g && g->get<BlockoutPiece>() && r477_count(ed, true) > pieces) {
+      const Vec3 s = g->get<BlockoutPiece>()->size;
+      CHECK(std::isfinite(s.x) && std::isfinite(s.y) && std::isfinite(s.z));
+    }
+  });
+}
+
+static void tests_round479_engineer_f9() {
+  test("blockout F9 (te): a piece deleted after it was made ends the panel; an Undo ends it; another piece made after it takes the panel and leaves the first alone", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.record_buttons_for_test(true);
+    ed.command("blockout new");
+    r477_settle(ed, 3);
+    ed.command("blockout add room box 4 3 4");
+    r477_settle(ed, 3);
+    GameObject *room = ed.active_object_for_test();
+    CHECK(room && ed.obj_last_valid());
+    if (!room) return;
+    const uint64_t room_id = room->id;
+    ed.command("blockout add box 1 1 1");
+    r477_settle(ed, 3);
+    CHECK(ed.obj_last_valid());
+    GameObject *box = ed.active_object_for_test();
+    CHECK(box && box->id != room_id);
+    CHECK(r479_type(ed, "adjust:Width", "9"));
+    CHECK_NEAR(box->get<BlockoutPiece>()->size.x, 9.0f, 1e-4f);
+    GameObject *room_now = ed.scene().find(room_id);
+    CHECK(room_now && room_now->get<BlockoutPiece>()->size.x == 4.0f);
+    ed.command("undo");
+    r477_settle(ed, 3);
+    CHECK(!ed.obj_last_valid());
+    ed.command("blockout add box 2 2 2");
+    r477_settle(ed, 3);
+    CHECK(ed.obj_last_valid());
+    ed.command("delete");
+    r477_settle(ed, 3);
+    std::printf("    after deleting the piece the panel is %s\n", ed.obj_last_valid() ? "still showing" : "gone");
+    CHECK(!ed.obj_last_valid());
+  });
+
+  test("blockout F9 (te): a door's Width, Head and Sill rows re-run from where it started and keep Head above Sill", [] {
+    Editor ed;
+    ed.init_headless(1600, 1000);
+    GameObject *bo = nullptr;
+    GameObject *room = r478e_room_scene(ed, &bo);
+    if (!room) { CHECK(false); return; }
+    ed.record_buttons_for_test(true);
+    ed.command("blockout add door");
+    r477_settle(ed, 3);
+    GameObject *door = ed.active_object_for_test();
+    BlockoutPiece *dp = door ? door->get<BlockoutPiece>() : nullptr;
+    CHECK(dp && dp->opening == 1 && ed.obj_last_valid());
+    if (!dp) return;
+    const Vec3 at = door->local().position;
+    CHECK(r479_type(ed, "adjust:Width", "1.4"));
+    CHECK_NEAR(dp->width, 1.4f, 1e-4f);
+    CHECK(r479_type(ed, "adjust:Head", "1.8"));
+    CHECK_NEAR(dp->head, 1.8f, 1e-4f);
+    CHECK(r479_type(ed, "adjust:Sill", "2.5"));
+    std::printf("    door after Sill 2.5: sill %.3f head %.3f\n", dp->sill, dp->head);
+    CHECK(dp->head > dp->sill);
+    CHECK(r479_bits_equal(door->local().position, at));
+    r477_settle(ed, 3);
+    CHECK(r477_matches(ed));
+  });
+}
+
+static void tests_round479_engineer() {
+  tests_round479_engineer_handles();
+  tests_round479_engineer_snapping();
+  tests_round479_engineer_room();
+  tests_round479_engineer_console();
+  tests_round479_engineer_f9();
+}
+
+/* ===================================================================== */
+/* Round 479: the code review's findings                                  */
+/* ===================================================================== */
+
+namespace {
+
+/* A character typed as a user types it: the key, the text it makes, the key up. */
+void r479r_type(Editor &ed, int key, char c) {
+  ed.step_frame_headless({r477_key(key)});
+  platform::Event e;
+  e.type = R477ET::Text, e.codepoint = (uint32_t)c;
+  ed.step_frame_headless({e});
+  ed.step_frame_headless({r477_key(key, false)});
+}
+void r479r_key(Editor &ed, int key) {
+  ed.step_frame_headless({r477_key(key)});
+  ed.step_frame_headless({r477_key(key, false)});
+}
+
+/* A round handle taken and pulled 40 pixels away from the piece's centre on the screen, then let go. False when it has no handle in view. */
+bool r479r_pull_round(Editor &ed, const char *handle) {
+  int hx = 0, hy = 0, cx = 0, cy = 0;
+  if (!ed.blockout_handle_pixel_for_test(handle, hx, hy) || !ed.project_to_window({0.0f, 0.0f, 0.0f}, cx, cy)) return false;
+  const float dx = (float)(hx - cx), dy = (float)(hy - cy), len = std::sqrt(dx * dx + dy * dy);
+  if (len < 3.0f) return false;
+  const int tx = hx + (int)std::lround(dx / len * 40.0f), ty = hy + (int)std::lround(dy / len * 40.0f);
+  r479_press(ed, hx, hy);
+  if (!ed.blockout_dragging_for_test()) return false;
+  r479_move(ed, (hx + tx) / 2, (hy + ty) / 2);
+  r479_move(ed, tx, ty);
+  r479_release(ed, tx, ty);
+  return true;
+}
+
+}  // namespace
+
+static void tests_round479_review() {
+  test("blockout room tool: typing a height and correcting it with Backspace does not delete the room made before, a typed '.' leaves the view alone and Ctrl+Z in the middle of a handle drag changes nothing", [] {
+    Editor ed;
+    te_view(ed, "camera 10 70 14 0 0 0");
+    ed.command("blockout room 0 0 4 3 2");
+    r477_settle(ed, 3);
+    const uint64_t first = ed.active_object_for_test() ? ed.active_object_for_test()->id : 0;
+    ed.command("tool room");
+    r477_settle(ed, 2);
+    int ax = 0, ay = 0, bx = 0, by = 0;
+    CHECK(ed.project_to_window({6.0f, 0.0f, -1.0f}, ax, ay) && ed.project_to_window({8.0f, 0.0f, 1.0f}, bx, by));
+    r479_press(ed, ax, ay);
+    r479_move(ed, bx, by);
+    r479_release(ed, bx, by);
+    CHECK(ed.room_tool_stage_for_test() == 2);
+    const Vec3 eye = ed.scene_eye();
+    r479r_type(ed, platform::KEY_PERIOD, '.');
+    r479r_key(ed, platform::KEY_BACKSPACE);
+    r479r_type(ed, platform::KEY_3, '3');
+    r479r_key(ed, platform::KEY_BACKSPACE);
+    r479r_type(ed, platform::KEY_2, '2');
+    CHECK(ed.scene().find(first) && r477_count(ed, true) == 1);  // (the first room is still there)
+    CHECK(length(ed.scene_eye() - eye) < 1e-6f);
+    r479r_key(ed, platform::KEY_ENTER);
+    r477_settle(ed, 3);
+    const BlockoutPiece *bp = r479_active(ed);
+    CHECK(bp && ed.active_object_for_test()->id != first && r477_count(ed, true) == 2);
+    if (bp) CHECK_NEAR(bp->size.y, 2.0f, 1e-3f);
+    CHECK(ed.scene().find(first));
+
+    Editor ed2;
+    GameObject *box = r479_piece_scene(ed2, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    const size_t depth = ed2.undo_depth_for_test();
+    int hx = 0, hy = 0, tx = 0, ty = 0;
+    CHECK(ed2.blockout_handle_pixel_for_test("+x", hx, hy) && ed2.project_to_window({2.0f, 0.0f, 0.0f}, tx, ty));
+    r479_press(ed2, hx, hy);
+    r479_move(ed2, tx, ty);
+    ed2.step_frame_headless({te_key(platform::KEY_Z, platform::MOD_CTRL)});
+    ed2.step_frame_headless({te_key(platform::KEY_Z, platform::MOD_CTRL, false)});
+    CHECK(ed2.blockout_dragging_for_test() && box->get<BlockoutPiece>()->size.x > 2.5f);  // (the drag goes on)
+    r479_release(ed2, tx, ty);
+    CHECK(ed2.undo_depth_for_test() == depth + 1 && box->get<BlockoutPiece>()->size.x > 2.5f);
+  });
+
+  test("blockout handles: a sphere's radius handle and a cylinder's side handle with the camera level can be pulled with the mouse, a box seen from straight above shows no top or bottom handle, and the gizmo's centre on a sphere is still pressable", [] {
+    {
+      Editor ed;
+      GameObject *sph = r479_piece_scene(ed, kR479Camera, 2, {0, 0, 0}, Vec3(1.0f));
+      CHECK(r479r_pull_round(ed, "radius"));
+      CHECK(sph->get<BlockoutPiece>()->radius > 0.6f);
+      CHECK(r477_matches(ed));
+    }
+    {
+      Editor ed;
+      GameObject *cyl = r479_piece_scene(ed, "camera 30 0 12 0 0 0", 1, {0, 0, 0}, Vec3(1.0f));
+      CHECK(r479r_pull_round(ed, "side"));
+      CHECK(cyl->get<BlockoutPiece>()->radius > 0.6f);
+    }
+    {
+      Editor ed;
+      r479_piece_scene(ed, "camera 0 89 12 0 0 0", 0, {0, 0, 0}, {2, 2, 2});
+      int x = 0, y = 0;
+      CHECK(!ed.blockout_handle_pixel_for_test("+y", x, y) && !ed.blockout_handle_pixel_for_test("-y", x, y));  // (their lines are the viewer's own)
+      CHECK(ed.blockout_handle_pixel_for_test("+x", x, y));
+    }
+    {
+      Editor ed;
+      r479_piece_scene(ed, kR479Camera, 2, {0, 0, 0}, Vec3(1.0f));
+      int cx = 0, cy = 0;
+      CHECK(ed.project_to_window({0.0f, 0.0f, 0.0f}, cx, cy));
+      r479_press(ed, cx, cy);
+      CHECK(!ed.blockout_dragging_for_test());  // (the centre is the gizmo's, not a handle's)
+      r479_release(ed, cx, cy);
+    }
+  });
+
+  test("blockout handles: pressing a handle and letting go without moving changes nothing, on a box off the grid and with another piece's plane a few pixels away", [] {
+    Editor ed;
+    GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2.1f, 2, 2});
+    const size_t depth = ed.undo_depth_for_test();
+    int hx = 0, hy = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy));
+    r479_press(ed, hx, hy);
+    r479_release(ed, hx, hy);
+    CHECK(box->get<BlockoutPiece>()->size.x == 2.1f && box->local().position.x == 0.0f && ed.undo_depth_for_test() == depth);
+    Editor ed2;
+    te_view(ed2, "camera 20 55 22 3 0 0");
+    GameObject *bo = r477_blockout(ed2);
+    bo->set_world_position({0.0f, 0.0f, 0.0f});
+    r477_piece(ed2, *bo, "A", 0, 0, {0, 0, 0}, {2, 2, 2});
+    GameObject *b = r477_piece(ed2, *bo, "B", 0, 0, {2.1f, 0, 0}, {2, 2, 2});  // (B's -X face at 1.1, A's +X face at 1: about 4 pixels apart)
+    ed2.select_for_test(b->id, false);
+    ed2.mark_changed_for_test("test scene");
+    r477_settle(ed2, 3);
+    const size_t depth2 = ed2.undo_depth_for_test();
+    CHECK(ed2.blockout_handle_pixel_for_test("-x", hx, hy));
+    r479_press(ed2, hx, hy);
+    r479_release(ed2, hx, hy);
+    CHECK(b->get<BlockoutPiece>()->size.x == 2.0f && b->local().position.x == 2.1f && ed2.undo_depth_for_test() == depth2);
+  });
+
+  test("blockout room tool: a solid dug downward keeps the surface where it is when F9 changes its height; a Blockout scaled 2 gets a room of the dragged size, an unevenly scaled one a warning and nothing", [] {
+    {
+      Editor ed;
+      te_view(ed, "camera 10 70 14 0 0 0");
+      ed.record_buttons_for_test(true);
+      ed.command("tool room");
+      ed.command("blockout roomopt solid on");
+      ed.command("blockout roomopt subtract on");
+      r477_settle(ed, 2);
+      int ax = 0, ay = 0, bx = 0, by = 0, cx = 0, cy = 0;
+      CHECK(ed.project_to_window({-1.0f, 0.0f, -1.0f}, ax, ay) && ed.project_to_window({1.0f, 0.0f, 1.0f}, bx, by) && ed.project_to_window({0.0f, -2.0f, 0.0f}, cx, cy));
+      r479_press(ed, ax, ay);
+      r479_move(ed, bx, by);
+      r479_release(ed, bx, by);
+      r479_move(ed, cx, cy);
+      r477_click(ed, cx, cy);
+      r477_settle(ed, 3);
+      const GameObject *g = ed.active_object_for_test();
+      const BlockoutPiece *bp = r479_active(ed);
+      CHECK(bp && bp->operation == 1 && !bp->room);
+      if (!bp) return;
+      CHECK_NEAR(g->world_position().y + bp->size.y * 0.5f, 0.0f, 1e-3f);  // (its top is the surface)
+      CHECK(ed.obj_last_valid() && r479_type(ed, "adjust:Height", "1"));
+      CHECK_NEAR(bp->size.y, 1.0f, 1e-4f);
+      CHECK_NEAR(ed.active_object_for_test()->world_position().y + bp->size.y * 0.5f, 0.0f, 1e-3f);
+    }
+    {
+      Editor ed;
+      te_view(ed, kR479Camera);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_local_scale({2.0f, 2.0f, 2.0f});
+      GameObject *p = r477_piece(ed, *bo, "Box", 0, 0, {0, 0, 0}, {1, 1, 1});
+      ed.select_for_test(p->id, false);
+      r477_settle(ed, 2);
+      ed.command("blockout room 0 0 4 3 2");
+      const GameObject *room = ed.active_object_for_test();
+      const BlockoutPiece *bp = r479_active(ed);
+      CHECK(bp && bp->room && room != p);
+      if (!bp) return;
+      CHECK_NEAR(bp->size.x * 2.0f, 4.0f, 1e-4f);
+      CHECK_NEAR(bp->size.y * 2.0f, 2.0f, 1e-4f);
+      CHECK_NEAR(bp->size.z * 2.0f, 3.0f, 1e-4f);
+      CHECK_NEAR(room->world_position().y - bp->size.y, 0.0f, 1e-3f);  // (the air's bottom, half its own height down at scale 2, is on the ground)
+      CHECK_NEAR(bp->wall * 2.0f, 0.2f, 1e-5f);  // (the tool's 0.2 m is the wall's world thickness)
+      CHECK_NEAR(bp->floor * 2.0f, 0.2f, 1e-5f);
+    }
+    {
+      Editor ed;
+      te_view(ed, kR479Camera);
+      GameObject *bo = r477_blockout(ed);
+      bo->set_local_scale({2.0f, 1.0f, 1.0f});
+      GameObject *p = r477_piece(ed, *bo, "Box", 0, 0, {0, 0, 0}, {1, 1, 1});
+      ed.select_for_test(p->id, false);
+      r477_settle(ed, 2);
+      const size_t mark = r477_mark();
+      ed.command("blockout room 0 0 4 3 2");
+      size_t warnings = 0;
+      r477_log_since(mark, &warnings);
+      CHECK(warnings >= 1 && r477_count(ed, true) == 1);
+    }
+    {
+      Editor ed;  // (a Blockout turned 45 degrees under a parent scaled (2, 1, 1): its axes are not square to each other)
+      te_view(ed, kR479Camera);
+      GameObject *par = ed.scene().create("Par");
+      par->set_local_scale({2.0f, 1.0f, 1.0f});
+      GameObject *bo = ed.scene().create("Blockout", par);
+      bo->add<Blockout>();
+      bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+      bo->add<MeshRenderer>();
+      bo->set_local_rotation(Quat::axis_angle({0.0f, 1.0f, 0.0f}, 45.0f * kDeg2Rad));
+      GameObject *p = r477_piece(ed, *bo, "Box", 0, 0, {0, 0, 0}, {1, 1, 1});
+      ed.select_for_test(p->id, false);
+      r477_settle(ed, 2);
+      const size_t mark = r477_mark();
+      ed.command("blockout room 0 0 4 3 2");
+      size_t warnings = 0;
+      r477_log_since(mark, &warnings);
+      CHECK(warnings >= 1 && r477_count(ed, true) == 1);
+    }
+  });
+
+  test("blockout handles: Esc in the middle of a drag leaves a saved scene saved", [] {
+    Editor ed;
+    r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+    ed.clear_scene_dirty_for_test();
+    int hx = 0, hy = 0, tx = 0, ty = 0;
+    CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy) && ed.project_to_window({2.0f, 0.0f, 0.0f}, tx, ty));
+    r479_press(ed, hx, hy);
+    r479_move(ed, tx, ty);
+    CHECK(ed.scene_dirty_for_test());  // (the drag marked it)
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE)});
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE, false)});
+    r479_release(ed, tx, ty);
+    CHECK(!ed.scene_dirty_for_test());
+    ed.mark_changed_for_test("an edit");  // (an unsaved scene stays unsaved: the drag's Esc does not clean it)
+    r477_settle(ed, 3);
+    CHECK(ed.scene_dirty_for_test());
+    r479_press(ed, hx, hy);
+    r479_move(ed, tx, ty);
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE)});
+    ed.step_frame_headless({r477_key(platform::KEY_ESCAPE, false)});
+    r479_release(ed, tx, ty);
+    CHECK(ed.scene_dirty_for_test());
+  });
+
+  test("blockout room tool: switching to another dock tab while a height is being typed or a handle is held ends both, and Ctrl+Z works again", [] {
+    {
+      Editor ed;
+      te_view(ed, "camera 10 70 14 0 0 0");
+      ed.command("tool room");
+      r477_settle(ed, 2);
+      int ax = 0, ay = 0, bx = 0, by = 0;
+      CHECK(ed.project_to_window({-2.0f, 0.0f, -1.0f}, ax, ay) && ed.project_to_window({2.0f, 0.0f, 1.0f}, bx, by));
+      r479_press(ed, ax, ay);
+      r479_move(ed, bx, by);
+      r479_release(ed, bx, by);
+      ed.command("blockout room 8 0 10 2 2");  // (a room made before: the step Ctrl+Z undoes)
+      r477_settle(ed, 3);
+      r479r_type(ed, platform::KEY_3, '3');
+      CHECK(ed.room_tool_stage_for_test() == 2);
+      ed.command("window Game");
+      r477_settle(ed, 4);
+      CHECK(ed.room_tool_stage_for_test() == 0);
+      const size_t pieces = r477_count(ed, true);
+      ed.step_frame_headless({te_key(platform::KEY_Z, platform::MOD_CTRL)});
+      ed.step_frame_headless({te_key(platform::KEY_Z, platform::MOD_CTRL, false)});
+      r477_settle(ed, 3);
+      CHECK(r477_count(ed, true) < pieces);
+    }
+    {
+      Editor ed;
+      GameObject *box = r479_piece_scene(ed, kR479Camera, 0, {0, 0, 0}, {2, 2, 2});
+      (void)box;
+      int hx = 0, hy = 0, tx = 0, ty = 0;
+      CHECK(ed.blockout_handle_pixel_for_test("+x", hx, hy) && ed.project_to_window({2.0f, 0.0f, 0.0f}, tx, ty));
+      r479_press(ed, hx, hy);
+      r479_move(ed, tx, ty);
+      CHECK(ed.blockout_dragging_for_test());
+      const size_t depth = ed.undo_depth_for_test();
+      ed.command("window Game");
+      r477_settle(ed, 4);
+      CHECK(!ed.blockout_dragging_for_test());
+      ed.step_frame_headless({te_key(platform::KEY_Z, platform::MOD_CTRL)});
+      ed.step_frame_headless({te_key(platform::KEY_Z, platform::MOD_CTRL, false)});
+      r477_settle(ed, 3);
+      CHECK(ed.undo_depth_for_test() < depth);  // (Ctrl+Z reaches the undo stack again)
+    }
+  });
+
+  test("blockout room tool: with the Scene view in a second window and the main window on the Game tab, a room is still drawn there (the footprint is not dropped because the main window shows no Scene view)", [] {
+    Editor ed;
+    ed.init_headless(1200, 800);
+    ed.step_frame_headless();
+    ed.command("dock duplicate Scene");
+    ed.step_frame_headless();
+    EditorWindow *w = ed.window_for_test(1);
+    CHECK(w != nullptr);
+    if (!w) return;
+    ed.step_window_headless(1, {});
+    ed.command("window Game");  // (the main window's Scene tab goes behind Game: only the second window draws a Scene view)
+    ed.command("tool room");
+    for (int i = 0; i < 3; i++) ed.step_window_headless(1, {});
+    CHECK(!ed.scene_drawn_for_test());
+    const size_t pieces = r477_count(ed, true);
+    const int sx = w->fb.width / 2, sy = w->fb.height / 2 + 40;
+    ed.step_window_headless(1, {r477_ev(R477ET::MouseMove, sx, sy)});
+    ed.step_window_headless(1, {r477_ev(R477ET::MouseDown, sx, sy)});
+    for (int i = 1; i <= 6; i++) ed.step_window_headless(1, {r477_ev(R477ET::MouseMove, sx + 15 * i, sy + 8 * i)});
+    CHECK(ed.room_tool_stage_for_test() == 1);
+    ed.step_window_headless(1, {r477_ev(R477ET::MouseUp, sx + 90, sy + 48)});
+    for (int i = 0; i < 4; i++) ed.step_window_headless(1, {});  // (each window frame runs the main frame too)
+    CHECK(ed.room_tool_stage_for_test() == 2);
+    ed.step_window_headless(1, {r477_ev(R477ET::MouseMove, sx + 90, sy - 60)});
+    ed.step_window_headless(1, {r477_ev(R477ET::MouseDown, sx + 90, sy - 60)});
+    ed.step_window_headless(1, {r477_ev(R477ET::MouseUp, sx + 90, sy - 60)});
+    for (int i = 0; i < 3; i++) ed.step_window_headless(1, {});
+    std::printf("    pieces %zu -> %zu, stage %d\n", pieces, r477_count(ed, true), ed.room_tool_stage_for_test());
+    CHECK(r477_count(ed, true) == pieces + 1 && ed.room_tool_stage_for_test() == 0);
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -5489,4 +7159,7 @@ void run_blockout_tests() {
   tests_round478_engineer();
   tests_round478_engineer_object();
   tests_round478_review();
+  tests_round479();
+  tests_round479_engineer();
+  tests_round479_review();
 }

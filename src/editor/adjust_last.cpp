@@ -81,6 +81,7 @@ void Editor::record_draw_last(uint64_t obj, MeshPtr before, const Mat4 &before_x
 bool Editor::obj_last_valid() const {
   if (obj_last_.kind.empty() || playing_ || obj_last_.serial != undo_serial_ || pending_change_) return false;
   const GameObject *g = scene_->find(obj_last_.obj);
+  if (obj_last_.kind == "blockout") return g && g->get<BlockoutPiece>() && blockout_of_piece(*g);  // (a piece has no mesh to compare: the step's serial says it is still the newest)
   const MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf || !mf->mesh || mf->mesh.get() != obj_last_.result || mf->mesh->version != obj_last_.result_version) return false;  // (undone, replaced, edited since)
   return obj_last_.kind != "draw" || (edit_mode_ && edit_obj_ == g->id);  // (a Draw shape is adjusted in the Edit Mode it was drawn in)
@@ -108,6 +109,7 @@ void Editor::amend_last_step() {
 void Editor::obj_last_rerun() {
   ObjLastOp &o = obj_last_;
   GameObject *g = scene_->find(o.obj);
+  if (o.kind == "blockout") return blockout_last_rerun();
   MeshFilter *mf = g ? g->get<MeshFilter>() : nullptr;
   if (!mf) return;
   if (o.kind == "primitive") {
@@ -150,6 +152,33 @@ void Editor::obj_last_rerun() {
   }
 }
 
+/* A Blockout piece just made, from the panel's numbers: every one is absolute and the floor's middle is the one recorded when the piece was made,
+ * so ten changes leave no drift. The Blockout's mesh follows on the next frame (round 477's rebuild). */
+void Editor::blockout_last_rerun() {
+  ObjLastOp &o = obj_last_;
+  GameObject *g = scene_->find(o.obj);
+  BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
+  if (!bp) return;
+  auto size = [](float v) { return finite_bits(v) ? std::max(kBlockoutMinSize, std::min(10000.0f, v)) : kBlockoutMinSize; };
+  auto thick = [](float v) { return finite_bits(v) ? std::max(0.0f, std::min(1000.0f, v)) : 0.0f; };
+  if (bp->opening) {
+    bp->width = size(o.a);
+    bp->sill = thick(o.c);
+    bp->head = std::max(size(o.b), bp->sill + kBlockoutMinSize);
+  }
+  else {
+    if (bp->shape == 0) bp->size = {size(o.a), size(o.c), size(o.b)};
+    else if (bp->shape == 1) bp->radius = size(o.a), bp->height = size(o.c);
+    else bp->radius = size(o.a);
+    if (bp->room) bp->wall = thick(o.d), bp->floor = thick(o.e), bp->ceiling = thick(o.f);
+    else bp->operation = std::max(0, std::min(2, o.op));
+    const float half = bp->shape == 0 ? bp->size.y * 0.5f : bp->shape == 1 ? bp->height * 0.5f : bp->radius;
+    g->set_world_position(o.base_p + o.base_up * half);
+  }
+  edit_epoch::bump();  // (the Blockout's walk looks again)
+  amend_last_step();
+}
+
 /* The panel, at the bottom left of the Scene view as Edit Mode's is: a title, then the operation's numbers. */
 void Editor::draw_obj_last_panel(const Recti &view) {
   auto &u = ui_;
@@ -174,6 +203,26 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     if (o.what == "smart") rows.push_back({"Angle Limit", &o.b, nullptr, nullptr, 0.5f, 1.0f, 89.0f, 0, 0});
     rows.push_back({"Margin", &o.a, nullptr, nullptr, 0.002f, 0.0f, 0.25f, 0, 0});
     if (o.what == "pack") rows.push_back({"Rotate", nullptr, nullptr, &o.flag, 0, 0, 0, 0, 0});
+  }
+  else if (o.kind == "blockout") {  // (round 479: the piece just made; n 0 box, 1 cylinder, 2 sphere, 3 door or window)
+    title = "Blockout " + o.what;
+    const float mn = kBlockoutMinSize, mx = 10000.0f;
+    if (o.n == 3) {
+      rows.push_back({"Width", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      rows.push_back({"Head", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      rows.push_back({"Sill", &o.c, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+    }
+    else {
+      rows.push_back({o.n == 0 ? "Width" : "Radius", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.n == 0) rows.push_back({"Depth", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.n != 2) rows.push_back({"Height", &o.c, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.flag) {
+        rows.push_back({"Wall", &o.d, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
+        rows.push_back({"Floor", &o.e, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
+        rows.push_back({"Ceiling", &o.f, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
+      }
+      else rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2});  // (0 Add, 1 Subtract, 2 Intersect)
+    }
   }
   else {
     title = "Draw " + o.what;

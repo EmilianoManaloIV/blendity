@@ -212,7 +212,7 @@ static const SweepCommand kSweepCommands[] = {
   {"weightpaint", "weightpaint on", ""},
   {"wheel", "wheel open", ""},
   {"where", "where", ""},
-  {"window", "window Draw", ""},
+  {"window", "window Game", ""},
   {"world", "world sky", ""},
   {"wpbrush", "wpbrush add 1 0 1", ""},
   {"wpclean", "wpclean 0.6", ""},
