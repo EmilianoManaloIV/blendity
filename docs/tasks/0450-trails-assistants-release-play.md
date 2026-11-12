@@ -4,7 +4,7 @@
 - **Requirements:** Q-04 (interactive editor), Q-06 (responsiveness)
 - **Decisions:** none needed (ADR 0105's budgets; ADR 0126's registry is used)
 - **Model:** implementer (Sonnet), part by part
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/393
 - **Round:** 474, Pass 22's seventh. Measured against the baseline as round 473 left it.
 
 ## Goal
