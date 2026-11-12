@@ -2,6 +2,476 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-11 (round 493): The round chain runs the round's test groups; the whole suite is CI's
+
+**Asked:** a round's local check ran every test group three times whatever it changed, on the machine every session
+shares; with round 492's faster checks, let a round run its own groups locally and leave the whole suite to CI (the
+"Faster checks" plan, part 6; task 0469, ADR 0134).
+
+**Changed**
+- `tools/dev/chain.sh` takes `TEST_GROUPS="a,b"`: only those test groups, and `editor`, run in the three suites
+  (the dependency-free build, the Blender-libraries build, Linux under WSL), each in its own process and test
+  folder; a group that fails, crashes or prints no summary is named (`GROUP FAILED:`). A list that is no list of
+  names stops the chain before anything is built; a name that is no group stops it after the first build. Without
+  `TEST_GROUPS` everything runs as before.
+- `CLAUDE.md`, "Testing rules": before a change is done the round's test groups and `editor` pass locally on Windows
+  and Linux, and the full unit suite passes on CI. A timed run takes a slot from the hub's `machine-slots.md` first.
+- `tools/dev/README.md`: the chain's row, the rule, and a row for round 492's `test_shards.py`.
+
+**Different from the plan (ADR 0134):** the variable is `TEST_GROUPS`, not `GROUPS` - bash keeps `GROUPS` for the
+user's group ids and throws away a value given to it, so a chain started with `GROUPS="a,b"` could only ever have
+run everything.
+
+**Checked:** `bash -n`; the chain's group parts cut out of the script and run against a stand-in test program in Git
+Bash and in WSL (a passing group, a failed check, a crash, an unknown name, bad lists). The chain itself was not run:
+the machine was held for timed runs.
+
+## 2026-11-11 (round 492): Faster checks - one build a push, sanitizer shards, compile once
+
+**Asked:** the four required checks took most of two hours for every push, a documents-only pull request included;
+make them faster without touching what branch protection asks for (the "Faster checks" plan, parts 1, 2, 3 and 4a;
+task 0468, ADR 0133).
+
+**Changed**
+- **One run a push.** The build workflow starts on a push only on `main`; a pull request's branch is built once, as
+  the pull request (it ran twice before: as the push and as the pull request).
+- **The sanitizer tests run in six shards.** The sanitizer test binary is built once; six jobs run the 17 test
+  groups side by side (they took 79 minutes in one process; the slowest group, lighting, about 20). The job
+  `linux-sanitizers` is now the last one and passes only when every shard passed and none ran no test.
+- **`build.bat release all` compiles once.** One compile, three links - the editor, the stress tests and the unit
+  tests from the same objects, as `build.sh` always did. It was three complete compiles.
+- **Tests and stress side by side.** On every platform one job builds and uploads the programs, and the unit tests
+  and the quick stress pass run as two jobs at once. `windows`, `linux` and `macos` are the last jobs and pass only
+  when their build, tests and stress passed.
+- **A compiler cache** (`ccache`) for the Linux, macOS and sanitizer builds, kept between runs with GitHub's own
+  cache action: one cache per pull request and build kind, one per state of the sources on `main`. Not on Windows:
+  `sccache` cannot wrap the one `cl /MP` call the build makes and cannot cache `/GL`'s code generation, the larger
+  part - under the five minutes the plan asked for (ADR 0133).
+- **No build for documents.** A pull request that changes only text nothing builds, tests or checks - `CLAUDE.md`,
+  `CHANGELOG.md`, `changelog.d/`, `docs/tasks/`, `docs/decisions/`, `docs/hci/`, the `.md` files directly in `docs/`
+  except the manual - passes the four required checks without building. Anything else builds; so do the documents
+  the tests read (`README.md`, `CREDITS.md`, the manual, the guides, the books).
+
+**Added**
+- `blendity_tests --group a,b,c` runs several groups in one process, in the table's order; a name that is no group
+  runs nothing and exits 2. A 17th test group, `runner` (`tests/test_runner.cpp`), pins that and `--list-groups` by
+  starting the test program as a child.
+- `tools/dev/test_shards.py`: the shard table (`--shard N`, `--matrix`), `--check` (fails when a test group is in no
+  shard or in two - CI's first job, and again against the built runner's `--list-groups`), `--needs-build FILE` (the
+  no-build rule for a list of changed paths), `--self-test`.
+
+**Different from the plan (ADR 0133):** the no-build rule is a list of what may skip, not a list of what must build:
+the unit tests read `README.md`, `CREDITS.md`, the manual, the lighting guide and the books, which the plan's rule
+would have let through unbuilt. Windows keeps three whole-program code generations (about 14 minutes), so its build
+is expected near 20 minutes, not less.
+
+**The numbers** (`docs/PERFORMANCE.md`, "CI: the four required checks"; pull request #383's first run): windows
+about 48 -> 26 minutes (its build 31 -> 15.7), linux 27 -> 18, macos 21 -> 13, linux-sanitizers 106 -> 36 (build
+21.8, the slowest shard 13.7). The whole run 36 minutes, once a push; it was about 106, twice.
+
+**Checked:** on the pull request's own CI (the machine was held for timed runs: no local build): every job green on
+the first run; the six shards ran 2,161 tests together, as many as the `linux`, `windows` and `macos` test jobs
+each ran, 0 failed.
+
+## 2026-11-11 (round 491): The local exe is rebuilt when a PR is published
+
+**Asked:** "Can you build each .exe after each implementation and tests pass? Not necessarily when the PR goes green?" -
+then "Yes, lets do it that way from now on." and, for `CLAUDE.md`, "Yes, i want that change too."
+
+**Changed**
+- `CLAUDE.md` (Build and run): the user's local `dist\windows\Blendity.exe` is rebuilt when a round's PR is published
+  (review done, the full local chain passed, the commit pushed) instead of when its CI is green; never before review or
+  from uncommitted code; the user is told which rounds in the exe are not yet green.
+
+**Checked:** documentation only - no code, no tests changed; `tools/dev/changelog.py check` passes.
+
+## 2026-11-11 (round 488): An addendum - Pass 24's table with round 487 in it
+
+**Asked:** "Continue and finish all remaining tasks" - round 487 came after the pass's write-up (round 488, task 0464)
+and the write-up said it had not run.
+
+**Changed (task 0464, addendum; docs only)**
+- PERFORMANCE's "Pass 24 in one table": the bake's time now, and round 487's row saying what it became (the bake on
+  every ticked card, in batches by the cards' speed) where it said "not run".
+- Task 0464 has an addendum with the same.
+
+**Checked:** `changelog.py check`; nothing is built.
+
+## 2026-11-11 (round 487): Generate Lighting's gather on every ticked graphics card, in batches that keep a card working
+
+**Asked:** the owner, after baking SideRail on a machine with two cards: "when baking lights it uses all the GPU's
+available. I only saw the 4070ti working." Of the options put to them - the gather on every ticked card, the bake's
+CPU half moved to the card, or only saying which card bakes - they chose "Yes, both cards". (Round 487 was first light
+cookies: SideRail has none. Then two faults of their bake, which they dropped after the diagnosis: "2 and 3 can be
+ignored".)
+
+**Found while measuring:** the first build of this shared each batch between the two cards and SideRail's bake came
+out about 3 s *slower* on both cards than on one (41.1 / 40.9 / 39.7 s against 37.7 / 39.1 / 36.6 s). The cards'
+own clocks said why: a batch was 8192 texels, and a card's time for so small a batch is mostly its wait for the
+longest paths of each dispatch, not its work - the 4070 SUPER took almost as long for three quarters of a batch as for
+a whole one. That was true of every bake on one card too.
+
+**Changed (task 0463)**
+- **A bake's batches are as large as keep the cards working**: Generate Lighting asks the cards how many texels they
+  take next - what each returned in about three quarters of a second, from about 8 million paths up, at most 131,072
+  texels a card. **SideRail's lightmaps bake in 17.7 s on one card where they took 37.7 s** (the gather itself: 28.4 s
+  to 10.2 s by the card's clock), with the same samples.
+- **The gather runs on every graphics card ticked in Preferences**, as an F12 render does; until now only the first
+  ticked card gathered. Each call is shared between the cards by the speed each showed; the cards are made ready
+  together (the scene is built once for every card it fits, and sent to all of them at once). On the owner's two cards
+  (an RTX 4070 SUPER and an RTX 3060 Ti) SideRail's lightmaps bake in 16.2 s on both, 17.7 s on the first alone.
+- **A texel's random directions are its place in the bake**, not its place in a batch and not the card that gathers
+  it. So the lightmap does not depend on the batches or on the split: SideRail's saved lightmap pages are byte for
+  byte the same baked on both cards and on one, and a gather split between the two cards equals the first card's own
+  at all 20,000 points of the test, bit for bit.
+- A card that is still opening, cannot hold the scene, cannot be sent it or fails leaves its share to the others; a
+  card that cannot hold the scene, or holds it with smaller textures, says so in the Console. With no card left the
+  CPU gathers, as before.
+- **The bake says which cards gathered**: a Console line with each card's share ("the gather ran on NVIDIA GeForce
+  RTX 4070 SUPER 71 %, NVIDIA GeForce RTX 3060 Ti 29 %") and one with where the gather's time went (the batches, each
+  card's time by the wall and by its own clock), and the shares beside the bake's time in the Lighting window when
+  more than one card gathered. A bake on one card reads as it always did.
+- Preview Lighting keeps its small batches (it steps on the editor's thread) and one card; the light probes keep to
+  one card.
+
+**Added**
+- `lighting cards all|one` (console; a measuring setting like `lighting pick`: the next Generate Lighting, not saved,
+  not in the scene's key): `one` keeps the gather to the first ticked card.
+- Learn, "Rendering on the GPU": the section "Baking light on every card", two questions, two Try-it lines.
+
+**Measured (SideRail in a scratch copy, 820,031 texels, 1024 gather samples; the build with Blender's libraries; a
+quiet machine, three runs each after a warm-up that is not counted; the lightmaps' seconds)**
+- Before this round (one card, batches of 8192 texels): 37.7 / 39.1 / 36.6 s.
+- Now, one card: 17.7 / 17.5 / 17.8 s. Now, both cards: 16.2 / 16.2 / 16.5 s, the shares 71 % and 29 %.
+- The pages of the six runs after are one file, byte for byte.
+
+**Said plainly**
+- **The second card adds little on this pair**: 1.4 s of 17.7. The 3060 Ti gathers at well under half the 4070 SUPER's
+  speed here, the gather is now about 10 s of a 17 s bake, and making a second card ready costs about half a second.
+  Two like cards, or a heavier world, gain more. The larger part of this round's gain is the batches, and a machine
+  with one card has it too.
+- **A bake of more texels than one old batch (8192 at 1024 samples) has other noise than before this round** - the
+  same samples a texel, other random directions, since a texel's sequence is now its place in the bake. A saved bake
+  is not touched; a new bake of the same scene differs from the old one as two seeds do. Smaller bakes, and every
+  `gpu_gather` call that is not a bake's (the light probes'), are bit for bit what they were.
+- A step of a bake is now up to about a second on the cards and the direct light of up to 131,072 texels a card after
+  it: on two cards Cancel and the progress line answer within about two seconds, where they answered in a quarter of
+  one.
+- "Does not depend on the batches" holds for bakes of up to 8,388,608 texels (a texel's place wraps there, and a batch
+  that crosses the wrap does not wrap with it): a larger bake's noise can differ from run to run with the cards'
+  speeds. SideRail has 820,031.
+- When a card fails mid-bake the Console's "takes its share" line is written before the other card has taken it, and
+  the failed attempt's time is counted to the card that took over (the time line only).
+- A submission of more samples than fit one pass is cut at a multiple of 8 samples; that changes a one-card gather's
+  last bits only above 16,384 gather samples, which no bake setting reaches.
+- Moving the CPU half (the lamps' direct light, the emitters) onto the card is not built.
+- Four checks of three Scene-view tests fail in the gpu group of the build with Blender's libraries on this machine
+  (`tests/test_gpu.cpp:888`, `:2227`, `:4887` - the card's picture against the CPU's, 1.025 where 1.0 is allowed):
+  they fail the same way, with the same numbers, on `main` and in rounds 485 and 486's runs; not this round's.
+
+**Checked:** the round's groups and `editor` (ADR 0134; the whole suite is CI's) - the build with Blender's libraries:
+gpu 784 checks with the 4 of `main` failing and no other, lighting 9805, editor 2252; dependency-free on Windows: gpu
+112, lighting 9749, editor 2242; on Linux: gpu 113, lighting 9751, editor 2240; stress `lightmap_quality` ran to its end with no problem row (the dependency-free build:
+the CPU's bake, which this round does not change); `test_coverage_map.py --check` and `changelog.py check` pass. The two-card
+tests run where a machine has two cards (this one); CI has none and skips them.
+Review: three passes of the code-reviewer - the first on the split (all findings applied), the second on the batches
+(two majors: Preview Lighting would have had the large batches on the editor's thread, and Cancel would have waited
+for a whole large batch's direct light - both fixed, with five minors), the third approved the fixes (its minor is the
+8,388,608 line above). The tests are the main session's with the reviewer's gaps added; no separate test-engineer
+pass ran (the card tests need the machine's one card window).
+
+## 2026-11-11 (round 479): Dragging rooms out - handles on pieces, snapping, the Room tool
+
+**Asked (Pass 23, task 0455, ADR 0129):** after round 478 a room is made from a menu and sized by typing numbers;
+rooms should be dragged into being and their walls pulled.
+
+**Added**
+- **Handles on the selected piece.** A box shows one on each of its six faces, a cylinder on its side, top and
+  bottom, a sphere on its outline; a room's handles move its *air*, and one more on the outside of a wall changes
+  the **wall thickness**; a door or window has width, head and sill. Dragging a face's handle moves that face and
+  leaves the opposite one where it is; **Shift** moves both about the centre; a round side changes the radius about
+  the centre. The size shows beside the handle and in the hint line. **Esc** or the right button puts the piece back
+  exactly; one drag is one undo step; the mesh follows the drag (round 477's rebuild - nothing here builds).
+- **Snapping.** A dragged face lands in the plane of another piece's face of the same Blockout, or on one of its
+  corners, when it comes within a few pixels (and stays there until the mouse has left by twice that), else on the
+  Scene view's grid step. A face that lands in another's plane is flush: the two pieces come out as one solid there.
+  **Ctrl** turns it off. A piece moved along an axis with the transform gizmo snaps its faces to the other pieces'
+  planes too.
+- **The Room tool** (toolbar, Modeling Tools > Create > Blockout, **Shift+R** in every keymap, `tool room`): drag a
+  rectangle - or, with Circle Footprint, a circle from its centre - on the ground or on a face of any mesh, then
+  move the mouse for the height and click (or type it). The result is a room of the active Blockout - the selected
+  piece's, else the selected one, else a new one - turned to the surface with its floor's top on it. Options: Solid
+  Piece (Add or Subtract) instead of a room, the wall thickness. The tool stays on for the next room; Esc leaves it.
+- **F9 for the piece just made** - by the tool, a menu entry or `blockout add`: its sizes, thicknesses and operation
+  in Adjust Last Operation, each change made again from the state before.
+- **Console:** `blockout handle <side> <metres> [both]`, `blockout room <x0 z0 x1 z1 height>`, `blockout room circle
+  <x z radius height>`, `blockout roomopt circle|solid|subtract on|off | wall <m>`, `tool room`.
+- **Learn:** "Dragging rooms out".
+
+**Different from the spec** (listed in the task, "Done: deviations"): a round side's handle changes the radius about
+the centre; edges snap through their corners; the Room tool finds its surface by a ray at any rendered mesh (the
+Draw tool's own hit needs Edit Mode) and snaps to the grid on a surface square to a world axis, without inferring
+corners or edges; with the gizmo Ctrl keeps its own meaning (grid snapping), so it does not turn the piece snap off
+there, and only an axis move snaps; the tool's options are in the Modeling Tools window, not in a bar of its own; a
+Blockout scaled unevenly is refused by the tool with the reason.
+
+**Found by the test-engineer and the review, fixed:** a footprint half drawn survived New Scene and made a room in the next scene; a handle held when Play started stayed held;
+the keymap still fired while a height was typed or a handle held (in the Unity, Maya and 3ds Max keymaps Backspace
+deleted the room made before; Ctrl+Z cut a drag in two); a sphere's handle and a cylinder side's seen level lay on
+the line to the eye - undraggable, and on the gizmo's centre (they are on the outline now, and a handle whose line
+points at the eye is left out); a press and release without a move could snap the face and make an undo step
+(nothing is applied before 3 px); a solid dug downward kept its far end under F9's Height; the tool's preview went
+down where the room went up; a scaled Blockout got rooms and walls of the wrong size (divided by an even scale
+now; an uneven or sheared one is refused with the reason); Esc after a drag left a saved scene marked unsaved; Esc
+also left a piloted camera; a middle-button pan moved the camera under a held handle; with the tool waiting for a
+height and another dock tab clicked, every shortcut stayed off (the footprint and a held handle now end when no
+window draws a Scene view - checked with the Scene view in a second window only); the dragged handle could vanish
+at a steep angle. Found by CI's macOS job after the PR was opened: a box's +-Y and +-Z handles had no place and
+no direction there (a local vector filled through `operator[]` and copied; Apple clang kept only its x) - the
+handles and the Room tool's grid snap build the vector from its three numbers now.
+
+**Reported by the user from the build with this round in it, fixed** ("Selecting things on my cursor doesn't always select.
+And often selects an object not on my cursor"): faces of several pieces that lie in one plane and touch are one face
+of the Blockout's mesh, and that face named only the first of them - a click on one slab of a floor, on the second of
+two rooms on one level, or on the level tops of two boxes selected the other piece (and a door hovered there would
+have read the wrong room). The piece whose own face is under the pointer is asked for now (`blockout::face_owner`):
+the face has to lie at the point to the point's own precision (a wide ground a hand below is not it); a room's air
+answers first (the wall two rooms share is, from inside one of them, that room's), then matter's own face, then a
+piece that trims, then a cutter that merely stands there; and nothing is asked while a build is in flight or after
+one that was refused (the picture is then still the mesh before the edit). A click that slipped more than
+four pixels is a box select, and a box over a Blockout selected the whole Blockout where a click selects a piece: a
+box now selects the Blockout's pieces under it (the Blockout itself only where its mesh names no piece), read at up
+to 16 x 16 places of the box. A click that slipped straight sideways or straight up made a box of no height or
+width: it held no pixel, selected nothing and cleared the selection, for any object - such a box is a pixel thick
+now (a box excludes its far edge still: a press on an object's last pixel that slips away from it can miss it). The pick's ray goes through the pixel's middle, as the picture's own id does (through
+its corner it could miss the mesh along an outline, and the whole Blockout was selected). One question costs about
+0.2 ms in a Blockout of a hundred rooms. Checked with real clicks too and found right: a mesh object in front of,
+behind and seen through a hole of a Blockout, and two Blockouts that overlap. Still as designed: a door or window
+seen head-on is air - a click in it selects what is behind, and the opening itself is picked on its reveal or in
+the Hierarchy; a handle of the selected piece is drawn over everything and takes a press within 7 px of it; in a
+box much larger than a piece, a piece that shows smaller than a sixteenth of the box can be missed.
+
+**Known limits:** F9's rows for a piece of a scaled Blockout are in the Blockout's own units; snapping uses each
+piece's bounding-box corners, which for a turned cylinder or sphere are not on the shape; the Room tool's first
+press raycasts every object under the ray - a hitch in a very heavy scene; the Room tool does not infer corners or
+edges of the mesh it draws on.
+
+**The numbers** (the fragment's `docs/PERFORMANCE.md` section): this machine, 2026-11-11 08:32-08:38 with nothing else
+building or running. A face handle dragged for 120 frames in `interior 100` (snapping off, so every frame moves the
+face): a frame **2.9 ms** at the median and 3.3 ms at worst with Blender's libraries, the mesh following 3 ms behind
+(108 landings in 120 frames, the slowest 73 ms); **1.3 ms** and 10.1 ms dependency-free, the mesh 47 ms behind (33
+landings, the slowest 112 ms); no build on the main thread - the door row's numbers of round 477 (2.8 / 4.4 ms and
+1.0 / 8.6 ms in the same runs). The kernel's rows and the sweep are round 478's to the count (100 rooms until drawn
+10.9 ms exact, 41.1 ms on the 0.1 m grid, 47.4 ms dependency-free; 0 problems). The row's first form dragged with
+snapping on and timed landings from mouse moves that changed nothing (65 to 80 ms, one of 315 ms): it holds Ctrl now.
+
+**Checked:** both suites on the final sources - with Blender's libraries 27,809 checks, the four known `gpu` picture
+comparisons failed (`tests/test_gpu.cpp:887` twice, `:2226`, `:4821`, as on main); dependency-free 25,837 (Windows)
+and 25,845 (Linux), 0 failed. Group `blockout`: 2,491 checks dependency-free, 2,494 under ASan + UBSan, 0 failed.
+Stress on Linux at main's counts: pushpull 26,608 / 0 / 394, modifiers_ngon 11,514 / 0, curved 5,036 / 3 / 68,
+editor_ui ran. `sweep_commands.py --check` (221 verbs), the coverage map (no command, action or window without a
+test; 166 widgets not driven by label, as before), the HCI audit and the KLM check pass. Test-engineer: 21 tests, two
+findings. Code review: changes needed (three majors, four minors), all fixed with tests; the re-review found five
+small things and then one fault in a fix (the Scene view in a second window), fixed and tested. The picking fix:
+Windows dependency-free 27,566 checks, 0 failed; Linux group `blockout` 2,577, 0 failed (under ASan + UBSan it is CI's job that ran it whole: the local run was
+stopped a third of the way, clean so far, to leave the machine to another pass's timed stage); on
+the exact path (round 480's tree with Blender's libraries) group `blockout` 5,144, 0 failed; two code reviews
+(tolerance by the candidate's size, cutters before matter, a build in flight, a refused build, a wall two rooms
+share), all fixed with tests. The sideways-slip fix, on main with the lighter local rule (ADR 0134: the round's
+group and `editor`; the whole suite is CI's): group `blockout` 2,601 (Windows) and 2,603 (Linux) checks, `editor`
+2,246 on both, 0 failed; code review: approved.
+
+## 2026-11-10 (round 478): Rooms - air with walls, doors, windows, and pieces that intersect
+
+**Asked (Pass 23, task 0454, ADR 0128 amended):** "rooms such as rectangles, cylinders" that combine like the other
+pieces, to lay out interiors.
+
+**Added**
+- **A piece can be a room** (GameObject > Blockout > Room (Box) / Room (Cylinder); `blockout add room`): its shape is
+  the **air**, and it brings a **Wall**, **Floor** and **Ceiling** of set thicknesses (the Blockout's **Default Wall
+  Thickness** fills a new room's three). The thickness is what was set, measured square to the room's sides, however
+  the room is scaled or turned. **Open Top** leaves the ceiling off.
+- **Walls: Merge with neighbours or Keep walls**, room by room. Merge rooms whose air overlaps are one space - the
+  wall between them is gone exactly where both have air; side by side they keep the wall between them, as thick as
+  what is left. A Keep room keeps all its walls, inside another room too, and has clear air inside.
+- **Doors and windows** (`blockout add door|window [width head [sill]]`, the menus' Door and Window): a cut with a
+  Width, a Head and a Sill, put on the wall under the mouse in the Scene view - turned to the wall, standing on that
+  room's floor, as deep as the wall and a little more - or, with no wall under the mouse, in the middle of the
+  selected room's first wall. Afterwards it is a piece like any other.
+- **Intersect**, a third Operation: the Blockout keeps only what is inside the piece (two of them: what is inside
+  both). Its wire is violet.
+- **What stays where:** air removes room walls only. A column (an Add piece) standing in a room stays and is one
+  solid with floor and ceiling; a Subtract piece cuts everything, as before.
+- **Console:** `blockout add room [box|cylinder] [sizes]`, `add door|window`, `add <shape> intersect`,
+  `blockout set wall|floor|ceiling <m> | walls merge|keep | opentop on|off`. **Wires:** a room draws its air and,
+  fainter, its shell. **Learn:** "Rooms: air, walls, doors and windows".
+- **For materials later:** every face says whether it is a room's Floor, Ceiling, Wall, its Outside, or a Cut
+  (`blockout::side_class`).
+
+**Changed (the kernel, ADR 0128 "Amended in round 478")**
+- A piece is one or more convex solids, each with a role; a room is two (its shell and its air). The build order:
+  the Merge rooms' shells united, less every room's air, plus each Keep room's shell less its own air, plus the Add
+  pieces, less the Subtract pieces, then what is inside every Intersect piece - on both paths (Manifold batches; the
+  grid's point test and the walk along a grid edge that names a crossing's side).
+- Intersect pieces are outside the clusters: each cluster is cut by all of them, and one that none of them can reach
+  is empty without being built.
+
+**Fixed on the way (crisp path)**
+- An Intersect piece that starts exactly at a room's wall plane left the wall behind as a sheet of no thickness when
+  that plane was square to X (Manifold; not for Y or Z). Its sides in a shared plane are now moved two hairs in
+  (a quarter of the cluster's tolerance), and several Intersect pieces are taken one after another.
+
+**Decided without the owner's word** (asked in the spec, not answered when built): air removes room walls only -
+not, as the pass's plan read literally, a column standing in a room too. Say no and the plan's order is built.
+
+**Known limits:** with Manifold, hostile arrangements of rooms whose sides share planes with other pieces at an angle
+(cylinder rooms, rooms of no thickness) can keep a face of no area or a small face on a neighbour: 68 and 52 of 2,000
+(the grid: 13 and 12); two flat faces never lie on each other, on either path. A room whose walls are thinner than
+the grid's cell, or than a mesh's positions hold where it lies, does not come out - the Inspector's status now names
+it. The Inspector still shows a room's Operation (greyed). Sphere rooms are built by the kernel but not offered. A
+door is not tied to its wall once placed (handles and snapping: round 479). The Learn try-it starts from `blockout
+new`, whose 2 m box stands inside the first room. Thickness is at most 1000 m.
+
+**The numbers** (`docs/PERFORMANCE.md`, "Rooms (round 478)"): this machine, 2026-11-11 03:39-03:44 with nothing else building or running. `interior 100`
+built from 36 rooms and 28 doors (64 pieces) has the faces, points and volume of the 100-piece box-pair building on
+both paths (392 faces, 520 points, 407.9124 m3). From a door moving until the mesh can be drawn: **10.7 ms** by the
+crisp path (box pairs: 12.0), **41.9 ms** by the grid at 0.1 m (40.9), 46.1 ms in the dependency-free build (48.7);
+`interior 400` from rooms 37.0 / 176.5 / 182.0 ms. The live row is as in round 477: a frame 2.8 ms at the median
+with the libraries, 1.0 ms without. Sweep, 2,000 hostile arrangements a kind: 0 problems on every row, none refused.
+The grid's older rows moved by a hair (boxes turned: 43 arrangements with a small face on another, 13 with a face of
+no area, was 42 / 12; any pieces: 59 with a face of no area, was 56): the walk that names a crossing's side picks
+another of several ends at one place in a few arrangements. The crisp path's older rows are the same to the count.
+
+**Checked:** both suites on the final sources - with Blender's libraries 26,877 checks, the four known `gpu` picture
+comparisons failed (`tests/test_gpu.cpp:887` twice, `:2226`, `:4821`, as on main); dependency-free 24,910 (Windows),
+0 failed, and 24,918 (Linux), where the one failure was Live Link's timing check under load - it passes alone. Group
+`blockout`: 1,925 checks dependency-free, 2,978 with the libraries (every kernel test by both paths), 1,928 under
+ASan + UBSan, 0 failed. Stress on Linux at main's counts: pushpull 26,608 / 0 / 394, modifiers_ngon 11,514 / 0, curved
+5,036 / 3 / 68, editor_ui ran. `sweep_commands.py --check`, the coverage map (no command, action or window without a
+test; 166 widgets not driven by label, 167 before) and the HCI audit pass. Test-engineer: 25 tests, two findings (a
+floor a thousand kilometres thick left faces on each other: thickness capped at 1000 m; the console took negative
+sizes and thicknesses: refused). Code review: ready after fixes, all made and tested (a door on a five-sided
+cylinder room missed its wall; a door between rooms that only touch stopped half-way; a room of which nothing came
+out said nothing; the two paths named different pieces on an Intersect piece flush with a room; adding a door waited
+for a running build; a trimmed-away cluster was reported as the grid's; an Intersect piece's Blend radius rounded
+rooms).
+
+## 2026-11-10 (round 477): The Blockout object - pieces you move, one mesh that follows
+
+**Asked (Pass 23, task 0453, ADR 0129):** "meta-ball like modeling but with primitives". Round 476 built and measured
+the function that turns pieces into one mesh; this round puts it in the editor: an object whose boxes, cylinders and
+spheres add or cut, stay movable, and whose mesh follows them without the frame waiting.
+
+**Added**
+- **A Blockout** (GameObject > Blockout, the Hierarchy's +, the Modeling Tools window; `blockout new`): an object with
+  a mesh and, below it, **pieces** - a Box, Cylinder or Sphere, each Add or Subtract, with its sizes and faceting in
+  the Inspector. A piece has no mesh of its own; it is moved, turned, scaled, parented, duplicated, disabled and
+  deleted like any object, and the Blockout's one mesh is what its pieces make. Pieces may sit under empties; another
+  Blockout below is its own. Moving the Blockout itself builds nothing.
+- **In every build:** the exact boolean (Manifold) with Blender's libraries, the grid of our own without them, or
+  either by the Blockout's **Method**; **Field Cell** sets the grid's cell. The Inspector says what the last build
+  did: pieces used, faces, the path, the time, and by name any piece skipped and any place the cell could not resolve.
+- **Built on a worker, landed on the main thread.** Each frame only hashes the pieces; a hash other than the mesh's
+  starts one build an object. A build that is running finishes and lands, then the pieces as they are by then get
+  built - so the mesh follows a drag one build behind and nothing queues. Undo back to the mesh's state cancels.
+  Export, bakes, Play, saving, a render and a headless script's picture wait for the newest mesh first
+  (`blockout wait`).
+- **Click the mesh, get the piece:** a click on a Blockout's face selects the piece that made it; the pieces of a
+  selected Blockout draw as wires, Add in the selection's orange, Subtract in yellow.
+- **Console:** `blockout new | add [subtract] box|cylinder|sphere [sizes] | set cell|method | rebuild | wait | info`.
+- **Learn:** "Blockout: pieces that build one mesh", with a Try-it and questions.
+
+**Changed**
+- **What writes a mesh by hand refuses a Blockout** with one hint ("A Blockout's mesh is rebuilt from its pieces: move
+  or resize the pieces."): Edit Mode, Sculpt, Weight Paint, the mesh operators, Join, Separate, an applied Boolean,
+  Apply on a modifier, Geometry to Origin, the UV operators, Bake Textures, Mesh Maps, DynaMesh, Quad Remesh, shape
+  keys, vertex groups and the Z-fight fix. Modifiers left live on a Blockout still work.
+
+**Different from the spec** (listed in the task, "Done: deviations"): the spec cancelled a running build for every
+newer snapshot; measured, a piece moved every frame then never showed a new mesh until it rested (0 landings in 120
+frames), so a running build lands. ADR 0129's decisions 6 and 7 say so.
+
+**Known limits:** the Inspector still shows Mesh Tools and Enter Edit Mode on a Blockout (pressing gives the hint);
+without Blender's libraries a box cannot fall through a Blockout's hole in Play (that physics reads a static mesh as
+its bounding box, as before); undo and leaving Play drop the kernel's cache, so the next edit builds every cluster
+once; a Field Cell too coarse for every piece gives an empty mesh without a warning; rooms, handles, more shapes,
+Blend, materials and UVs are rounds 478-482.
+
+**The numbers** (`docs/PERFORMANCE.md`, "The Blockout object, live"; this machine, 20:07-20:09 with nothing else
+running): `interior 100`, a door moved every frame for 120 frames. With Blender's libraries a frame is 3.0-3.2 ms at
+the median, 3.5-4.8 ms at worst in three runs of four (one run had a single 45.6 ms frame, not seen again and not
+explained), a move shows 3 ms later, 108-110 landings. Dependency-free: 1.0-1.1 ms median, 10.7-12.2 ms worst, a
+move shows 48 ms later, 30-31 landings. No build on the main thread in either. The cancelling rule: 0 landings.
+
+**Checked:** both suites - with Blender's libraries 26,016 checks, the four known `gpu` picture comparisons failed
+(`tests/test_gpu.cpp:887` twice, `:2226`, `:4821`, as on main); dependency-free 24,332 (Windows) and 24,340 (Linux), 0
+failed. Group `blockout` under ASan + UBSan on Linux. Stress on Linux, unchanged from main: pushpull 26,608 / 0 /
+394, modifiers_ngon 11,514 / 0, curved 5,036 / 3 / 68, editor_ui ran. `sweep_commands.py --check` current (221
+verbs); the coverage map has no command, action or window without a test. Reviewed twice by the code-reviewer; its
+findings (a build finishing inside the gizmo's frame dropped; eight more writers of the mesh; saving not asking for
+the newest state) are fixed and tested.
+
+## 2026-11-11 (round 471): The world stays kept while a character moves - the card's instances and see-through lists by object
+
+**Asked:** Pass 22's fourth round (task 0447, ADR 0125): posing an avatar that stands in a world should cost what
+posing it alone costs, plus drawing the world. The spec read the cause as the scene hash, the draw items and the
+instance array made again for every object.
+
+**Measured first:** the card's own parts were added to the posing rows (`card shadow maps`, `card g-buffer`, `card
+lighting`, `card copies and wait`, `card render call`, `baked corners`, `see-through triangles`, `presenting`). In
+the owner's world most of the world's share of a posed frame is the card drawing the world (6 to 10 ms of a 10 to
+15 ms card path); the instance array made again is 2 to 3 ms and the see-through triangles about 2 ms; draw items
+and scene hashes are under 1.5 ms together. So the round is narrower than the spec (its deviations and ADR 0125 say
+what was left out and why).
+
+**Changed (task 0447, ADR 0125)**
+- **The card's instance array is kept by object** (`Editor::InstanceRows`): an object whose placement, mesh,
+  materials and lightmap pages are what they were takes last frame's instances; only what changed is made again -
+  in baked and see-through scenes too, where nothing was kept before.
+- **See-through triangles are kept by object**, and while no list changed and the camera rests the sorted corners
+  are last frame's. A camera move sorts them again, as before.
+- A change still gathers once and then settles into the whole-array keep of round 458.
+- Verify mode gathers such a frame whole as well and compares the two.
+- The Profiler's posing parts name the card's passes; counts "instance rows kept / built" and "see-through lists
+  kept".
+
+**Not in this round:** the list of what moved, the scene hash and the draw items by object, the lighting key for a
+move outside the bake, clips not "volatile" (measured small or belonging to round 472); the card's own passes for
+the world.
+
+**Checked:** 27,003 unit checks without the libraries and 27,011 on Linux, 0 failed; 29,080 with the libraries, where the 4 `gpu` picture checks that fail on `main` fail the same way (`test_gpu.cpp:887` twice, `:2226`, `:4886`); the audits pass. The round's own tests (`tests_round471_gpu`, 8 on the card): the picture drawn by rows equals a whole gather after 15 kinds of change and after a lightmap bake; verify mode finds 0 stale rows over 60 frames; see-through lists are copied while the camera rests; ids ageing off the card drop the rows; a whole gather at least every 64 calls; 5,000 objects with one moving make at most 2 rows a frame. The test-engineer found one fault (a mesh sent again dropped every kept row, so a posed avatar gathered whole on most frames) - fixed; the code review approved, its findings fixed. Not covered by a test: a texture or corner block freed under a row still being copied; the reuse of the last frame's sorted corners is checked by picture comparison only. An earlier run of the suites beside other passes' builds showed Live Link, `hci` and one `gpu` check failing; none repeated on the quiet machine.
+
+**Measured:** on a quiet machine, round 470's build against this round's, one after the other. The owner's avatar in the owner's world (measured locally, a window on the card, ms a frame): the Scene view still 8.7 -> 5.7; the whole avatar moved 15.9 -> 11.1; the chest turned 47.2 -> 38.3; an upper leg 25.3 -> 23.3; a hand's IK target 26.6 -> 23.4; a foot's 26.1 -> 22.2; a prop of the world moved 10.0 -> 8.6; scrubbing 53.3 -> 50.0; the clip playing 52.2 -> 49.8; Play with the springs 46.4 -> 44.3; the Puppet handles within 1 ms. The stand-in in its world (`blendity_stress --only perf`, the baseline taken again by both builds): the Move gizmo on a hand's IK target 21.0 -> 14.1, on the elbow's pole 23.5 -> 16.8, G on the target 30.3 -> 21.8, R on the chest 61.5 -> 49.9, a prop moved 10.7 -> 7.7; alone, where there is no world to keep, every row within 1 ms except the clip playing in both views (17.7 -> 27.5, a row whose longest frame is 88 ms in both). **Not reached:** the spec's "what posing alone costs plus drawing the world" - the chest turned is 28.5 ms alone and 38.3 in the world; what is left is the card drawing the world and presenting, which this round only names. **How far to trust a row:** the same build checked against its own baseline minutes later flagged 5 rows 20 to 35 % slower, and the check against round 470's baseline flagged 2 (leaving Play 5.2 -> 7.5 ms, the clip playing with a Live Link client 23.0 -> 29.9, a row the self-check flagged too); the bench's headless rows moved 6 to 8 ms either way between the two runs' settings (orbiting 8.6 -> 15.1 as imported, 16.6 -> 8.4 with IK handles), so the tables use the windowed rows, as round 470's did. `stress/results/baseline.md` is this round's.
+
+## 2026-11-11 (round 470): A posed mesh follows in place - corners split there, ranges for a small move, settled at rest
+
+**Asked:** Pass 22's third round (task 0446, ADR 0124 decisions 5 to 7), from round 468's table: while an avatar is
+posed, most of its meshes were built again from nothing on every frame, with MikkTSpace, because a few corners on
+sliver faces changed which neighbours they are smoothed with; every moved mesh with a normal map or several materials
+went to the card whole; and a posed mesh kept approximate tangents for good.
+
+**Changed (task 0446, ADR 0124)**
+- **A new split is made in place.** A corner whose normal no longer matches the render vertex it shared gets one of
+  its own (`Mesh::update_in_place`: `split_corner`, `split_slots`); the move is no longer refused and the mesh no
+  longer built whole. At most one render vertex a corner; a settle or a build shares them again.
+- **Tangents around what moved.** The quick tangents are worked out for the vertices of the moved faces only, each
+  summed in the whole pass's order (the same bits); a small move no longer rewrites, or sends, every tangent.
+- **Ranges for meshes with a normal map and for meshes with several materials.** The card takes the moved vertex
+  ranges; a mesh of triangles sends no indices at all.
+- **Posed meshes are made exact at rest.** Once nothing has changed for two frames, two posed meshes a frame are
+  built again (vertices shared anew, MikkTSpace), as ADR 0034 settles an edited mesh - also meshes that only had
+  corners split.
+- **The smooth-by-angle normals pass runs on every thread** and reads the vertex-face table kept per topology (it
+  built one on every call); the sums and their order are unchanged.
+- The Profiler's Posing block: "corners split in place" (was "refused for a new split") and "meshes settled".
+
+**Not in this round:** outline shells moved in place; the settle on a worker (two meshes a frame on the main thread
+instead - written in the spec's deviations).
+
+**Checked:** 25,777 unit checks without the libraries and 25,783 on Linux, 0 failed; 27,483 with the libraries, where the 4 `gpu` picture checks that fail on `main` fail the same way (`test_gpu.cpp:887` twice, `:2226`, round 455's Lanczos picture). The round's own tests: 648 random-move steps on smooth-by-angle, sharp, seamed, n-gon, concave, custom-normal, zero-area and fan-flipping meshes draw what a fresh build draws to the bit (913 corners split in place, 0 refused, 0 built whole); partial quick tangents equal the whole quick pass to the bit over 192 steps; 1,000 swings add no render vertex after the first; on the card a finger turned on a three-material mesh of triangles sends under 1 KB of 892 KB a frame (quads: 142 KB of 573 KB, their indices grouped again). `perf_suite.py --check` against the round's own baseline: 2 findings, both rows whose card time swings between runs of one build with the same counts (written in PERFORMANCE); against `main`'s: 3 of the same kind. The coverage map, `changelog.py check` and `docs_check.sh` pass. The code-reviewer approved (its findings - the settle bump made a move, a held button is not a rest - are in the commit).
+
+**Measured:** the owner's avatar (measured locally, on the card, against round 469's run): the chest turned 38.5 -> 28.5 ms a frame alone and 61.9 -> 47.2 ms in the owner's world; a scrub 65.0 -> 32.9 and 87.1 -> 53.3; the clip playing in both views 73.2 -> 35.6 and 104.2 -> 51.0; a foot's IK target 25.7 -> 12.0 and 44.4 -> 26.1; Play with the springs 43.5 -> 26.9 and 72.0 -> 46.4. Its meshes built whole a frame: 3 to 17 -> 0 on every posed row. **Not reached:** the uploads did not halve (the chest turned 6.6 -> 6.7 ms, a scrub 13.7 -> 10.8 ms): these rows move most of every mesh they touch, and a mesh that moved by more than a quarter still goes to the card whole; only the IK rows send ranges (the hand's target: 2,923 -> 1,604 KB a frame). **The stand-in did not get faster** (every row within the run-to-run spread of `main`'s build): its posed frames are its nine outline shells, built whole and sent whole (7.8 ms and most of 7.4 MB on the chest row) - not done in this round. No posed row in the world reaches 16.7 ms. Tables: `docs/PERFORMANCE.md`, "Pass 22: a posed mesh follows in place".
+
 ## 2026-11-11 (round 490): Parallel passes stop conflicting - shared-docs fragments and the integration PR
 
 **Asked:** three passes (22, 23, 24) run side by side, each a stack of pull requests on `main`, and every merge made

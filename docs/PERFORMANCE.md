@@ -160,6 +160,7 @@ absolute difference from Unity's own picture (0 to 255, lower is closer) and SSI
 | The bake's grain / blotch | 0.382 / 0.251 | 0.181 / 0.053 | 485, 486 |
 | More samples (2048) | far more specks than at 1024: 271 and 210 | 13 and 47: far fewer than before, still a few more than at 1024 (11 and 39) - the mark missed by one speck at `side_tunnel_eye` | 485, 486 |
 | The default bake of the world | 38.9 s (round 484, a quiet machine) | 38.8 s against 38.9 s for the old reading: a like-for-like pair from one busy queue, not a timing | 486 |
+| The same bake's lightmaps (round 487: a quiet machine, three runs) | 37.7 / 39.1 / 36.6 s on one card - a card was sent 8192 texels at a time and mostly waited | 17.7 / 17.5 / 17.8 s on one card, 16.2 / 16.2 / 16.5 s on the owner's two (batches by the cards' speed); the same lightmap on one card and on two | 487 |
 
 What each round did:
 
@@ -168,7 +169,7 @@ What each round did:
 | 484 | 0460 | Nothing fixed: the report reproduced and its causes measured. The mirror finish was materials read before their package's table of ids existed (Metallic 1, Roughness 0, no maps), smoothness dropped on ten worn materials and 16-bit PNGs read as linear. The splotches are specks, counted by `speck_count`; the lights kept by chance are about one speck in seven. |
 | 485 | 0461 | Unity materials keep their maps and their gloss: read again where a package's import ends, Reimport Unity Materials for projects already imported, smoothness from the map Unity names, 16-bit PNGs in sRGB (ADR 0131). |
 | 486 | 0462 | The bake's filter reads a texel's noise by how many samples carry its light (ADR 0122 amended); `lighting variancescale`. |
-| 487 | - (0463 was not written) | Not run: light cookies, the Light Volume mist and OIDN's lightmap weights each wait for the owner to ask. |
+| 487 | 0463 | Light cookies were chosen first (the world has none), then two faults of the owner's bake (dropped after the diagnosis), then what was built: Generate Lighting's gather on every ticked graphics card, in batches of what the cards return in about three quarters of a second. The Light Volume mist and OIDN's lightmap weights still wait for the owner to ask. |
 | 488 | 0464 | This table. |
 
 Missed or not done, plainly:
@@ -3399,3 +3400,273 @@ settled" never true. With a diagnostic build the row hung in 2 runs of 2 (`meshe
 6,000 frames); with the round's build before that, in 1 of 3; round 468's runs of the row finished. Fixed in this round:
 an object the card has already shown is never left waiting again (`tests/test_gpu.cpp`, the round 469 test: 66
 mesh-frames undrawn without the fix, 0 with it). After it the row ran 4 times of 4, and settles as soon as Play starts.
+
+## Pass 22: a posed mesh follows in place (round 470, task 0446)
+
+Round 469 left most of a posed avatar's meshes built again from nothing on every frame: a few corners changed which
+neighbours they are smoothed with, the move in place was refused, and the whole build ran MikkTSpace. Round 470 gives
+such a corner a render vertex of its own in place, works the quick tangents out around the moved faces only, sends
+vertex ranges for meshes with several materials too, and makes the posed meshes exact again once the pose rests.
+
+How these were taken: one machine, other sessions holding; each piece started after two minutes without foreign
+work, with a watcher sampling every few seconds. The four stand-in pieces ran with no foreign sample. The owner's
+avatar ran with the editor's own Linux VM probe at 26 to 35 % of one core on two samples, and the avatar in the world
+with the bench's own Unity (it prepares the comparison) for the first minute - both let pass and listed, as in
+rounds 468 and 469. Two earlier tries of these pieces were ended by a Blendity started from elsewhere and are not
+used.
+
+### The owner's avatar and world (measured locally; `tools/bench_world.py --posing`)
+
+| row (a window on the card, ms a frame) | alone, round 469 | alone, round 470 | in the world, round 469 | in the world, round 470 |
+|---|---|---|---|---|
+| still: the Scene view | 3.9 | 3.8 | 8.5 | 8.7 |
+| orbiting the Scene view | 3.9 | 4.2 | 7.9 | 9.9 |
+| the whole avatar moved (its root selected) | 5.5 | 6.0 | 17.1 | 15.9 |
+| FK: the chest turned | 38.5 | 28.5 | 61.9 | 47.2 |
+| FK: an upper leg turned | 14.4 | 12.3 | 30.5 | 25.3 |
+| FK: an upper arm turned | 4.1 | 4.0 | 9.4 | 8.3 |
+| Puppet: the hips' handle | 46.8 | 34.2 | 70.7 | 56.0 |
+| Puppet: the head's handle | 56.7 | 34.5 | 76.6 | 55.3 |
+| Puppet: the left hand's handle | 4.0 | 4.0 | 9.4 | 8.0 |
+| scrubbing, Scene view only | 65.0 | 32.9 | 87.1 | 53.3 |
+| the clip playing, Scene view only | 69.2 | 33.0 | 94.4 | 52.2 |
+| scrubbing, Scene + Game view | 66.9 | 35.0 | 95.0 | 52.3 |
+| the clip playing, Scene + Game view | 73.2 | 35.6 | 104.2 | 51.0 |
+| Play with the springs | 43.5 | 26.9 | 72.0 | 46.4 |
+| IK: the left hand's target moved | 4.1 | 4.2 | 34.8 | 26.6 |
+| IK: the left foot's target moved | 25.7 | 12.0 | 44.4 | 26.1 |
+| IK: the target moved, Record on | 4.2 | 4.0 | 57.0 | 43.9 |
+| IK: the clip playing, Scene view only | 71.2 | 33.6 | 97.8 | 53.1 |
+
+What a frame did (the avatar alone, a frame's mean):
+
+| row | meshes built whole, 469 -> 470 | corners split in place | upload KB, 469 -> 470 | meshes sent in ranges, 469 -> 470 |
+|---|---|---|---|---|
+| FK: the chest turned | 3.0 -> 0 | 21.6 | 5,099 -> 5,356 | 1.0 -> 1.0 of 11 |
+| FK: an upper leg turned | 1.6 -> 0 | 5.3 | 2,676 -> 1,433 | 0.2 -> 1.3 of 4 |
+| scrubbing, Scene view only | 6.0 -> 0 | 48.5 | 5,652 -> 5,990 | 0.1 -> 0 of 12.7 |
+| the clip playing, Scene + Game view | 7.8 -> 0 | 1.7 | 5,884 -> 6,125 | 0 -> 0 of 12.9 |
+| Play with the springs | 16.7 -> 0.1 | 125.8 | 1,804 -> 6,603 | 0 -> 0 of 13 |
+| IK: the left hand's target moved | 1.1 -> 0 | 6.6 | 2,923 -> 1,604 | 0.4 -> 2.8 of 3.9 |
+| IK: the left foot's target moved | 1.8 -> 0 | 5.9 | 2,654 -> 1,469 | 0.1 -> 1.2 of 3.9 |
+
+- **Reached:** the chest turned at most 30 ms (28.5) and a scrub at most 40 ms (32.9); no mesh built whole and no
+  MikkTSpace on a posed frame.
+- **Not reached: the uploads at half.** The chest turned 6.6 -> 6.7 ms of uploads, a scrub 13.7 -> 10.8 ms. A chest
+  turn, a scrub and a played clip move most of every mesh they touch; above a quarter of a mesh's faces the whole
+  normals and tangents passes run (measured: they are not slower than the kept-state ones there) and the mesh goes to
+  the card whole. Ranges are sent where a small part of a large mesh moves: the IK rows here, and a finger in the
+  `gpu` test (under 1 KB of 892 KB). The bench has no finger row; which meshes of the chest row are over the quarter
+  was read from the counts, not checked mesh by mesh.
+- **Round 469's Play row was too kind.** Its run on the avatar alone was taken before that round's own fix to the
+  upload budget: in Play 3 of 13 moved meshes reached the card a frame (1,804 KB), the others were not drawn. Round
+  470's 26.9 ms draws all 13 (6,603 KB), so the gain on that row is larger than 43.5 -> 26.9 reads. The same holds
+  for 469's "IK: the clip playing" row (9 of 12.9 sent).
+- No posed row in the owner's world reaches 16.7 ms. What is left there is the world's own frame (round 471) and,
+  on the avatar, normals, uploads and the shape-key hashes (rounds 472 to 474).
+
+### The stand-in (`blendity_stress --only posing`; in `stress/results/baseline.md`)
+
+Against `main`'s build (round 469 with its upload fix), taken in the same hour. Round 469's saved baseline is not
+the comparison: it was taken before the upload fix, when the stand-in's outline shells - a new mesh on every posed
+frame - were put off by the budget and not drawn (the chest row sent 15.2 meshes a frame then, 19 now).
+
+| row (a window on the card; ms a frame, the longest frame in brackets) | alone, main | alone, round 470 | in the world, main | in the world, round 470 |
+|---|---|---|---|---|
+| idle | 1.8 (2) | 1.7 (2) | 3.5 (18) | 3.9 (18) |
+| orbiting the Scene view | 3.3 (4) | 3.3 (4) | 10.7 (12) | 10.9 (13) |
+| the Rotate gizmo on the chest (FK) | 35.0 (38) | 35.4 (37) | 42.2 (44) | 43.2 (48) |
+| the Move gizmo on the left hand's IK target | 9.4 (11) | 9.8 (10) | 16.2 (20) | 20.1 (24) |
+| the Move gizmo on the left elbow's pole (the arm bent first) | 10.1 (12) | 9.3 (13) | 20.8 (22) | 23.2 (26) |
+| a Puppet handle (the left hand, AutoPosing on) | 50.8 (57) | 50.4 (58) | 64.7 (81) | 69.5 (84) |
+| G on the left hand's IK target | 12.2 (14) | 12.3 (14) | 29.0 (31) | 29.4 (32) |
+| R on the chest (the Blender keymap) | 41.3 (44) | 41.7 (45) | 60.3 (64) | 60.6 (65) |
+| a scrub on the Animation window's ruler, Scene + Game view | 68.7 (89) | 67.8 (89) | 94.5 (128) | 93.8 (124) |
+| the clip playing, Scene + Game view | 31.0 (89) | 17.7 (89) | 42.0 (119) | 42.1 (119) |
+| a scrub on the Animation window's ruler, Scene view only | 46.6 (60) | 47.2 (63) | 62.5 (92) | 61.7 (88) |
+| the clip playing, Scene view only | 17.8 (58) | 18.4 (62) | 18.9 (78) | 18.8 (77) |
+| Play with the springs | 82.5 (91) | 82.1 (89) | 106.1 (113) | 106.3 (112) |
+| a prop moved with the Move gizmo | - | - | 10.0 (13) | 10.9 (17) |
+
+- **No gain on the stand-in.** The counts of `main` and the round are the same on every row (the chest row: 10
+  meshes moved in place, 9 outline shells built whole, 19 meshes and 7,422 KB sent, 0 corners split): the stand-in's
+  body meshes were already moved in place, and what it builds whole on a posed frame is its outline shells (7.8 ms on
+  the chest row, 19.0 ms in Play). Outline shells moved in place are not done; the owner's avatar has none, so they
+  rank by the stand-in alone. Round 474 lists them.
+- **Rows that swing.** "The Move gizmo on the left hand's IK target" in the world read 16.2 ms on `main`'s build and
+  21.1, 20.1 and (the check) 17.2 ms on the round's, with the same counts and the same upload bytes each time; the
+  difference is all in the card's own path (7.7 to 12.3 ms). Round 469's baseline had it at 21.8. "The clip playing,
+  Scene + Game view" alone read 31.0 on `main` and 17.7 on the round the same way. The `--check` findings of this
+  round are world rows that read 1.2 to 1.3 times another run of the same build; the counts were compared on the
+  IK-target row only.
+
+### At rest
+
+Once nothing has changed for two frames, with no step pending and no button held, two posed meshes a frame are
+built whole again (vertices shared anew, MikkTSpace). Counted in the tests: the first settle on the second frame at
+rest, at most two a frame, tangents and vertex counts a fresh build's afterwards. The cost of those frames was not
+timed apart on the avatar: its 13 meshes take seven frames, each with two whole builds in it.
+
+## Pass 22: the world stays kept while a character moves (round 471, task 0447)
+
+Measured first: the card's own parts now have names in the posing rows. In the owner's world a posed frame's card
+path is 10 to 15 ms: the render call 6 to 10 (g-buffer 2.5 to 3.7, lighting 1.2 to 2, copies and wait 1 to 3.6), the
+instance array made again 2 to 3, the see-through triangles about 2; the scene hash and the draw items are under
+1.5 ms together. So round 471 keeps the instance array and the see-through lists by object and leaves the hash and
+the draw items as they are (ADR 0125).
+
+Round 470's build against round 471's, one after the other on a quiet machine. The owner's avatar in the owner's
+world is measured locally (a window on the card, ms a frame):
+
+| row | round 470 | round 471 |
+|---|---|---|
+| still: the Scene view | 8.7 | 5.7 |
+| orbiting the Scene view | 9.9 | 9.5 |
+| a prop of the world moved | 10.0 | 8.6 |
+| the whole avatar moved | 15.9 | 11.1 |
+| FK: the chest turned | 47.2 | 38.3 |
+| FK: an upper leg turned | 25.3 | 23.3 |
+| IK: the left hand's target moved | 26.6 | 23.4 |
+| IK: the left foot's target moved | 26.1 | 22.2 |
+| scrubbing, Scene view only | 53.3 | 50.0 |
+| the clip playing, Scene + Game view | 51.0 | 48.9 |
+| Play with the springs | 46.4 | 44.3 |
+
+The stand-in in its world (`blendity_stress --only perf`, ms a frame, the longest frame in brackets):
+
+| row | round 470 | round 471 |
+|---|---|---|
+| the Move gizmo on the left hand's IK target | 21.0 (23) | 14.1 (19) |
+| the Move gizmo on the left elbow's pole | 23.5 (26) | 16.8 (19) |
+| G on the left hand's IK target | 30.3 (34) | 21.8 (25) |
+| R on the chest | 61.5 (67) | 49.9 (55) |
+| the Rotate gizmo on the chest (FK) | 43.5 (52) | 41.9 (49) |
+| a Puppet handle | 70.6 (88) | 61.6 (77) |
+| a prop moved with the Move gizmo | 10.7 (13) | 7.7 (8) |
+| idle | 3.5 (18) | 4.7 (20) |
+
+Not reached: posing in the world at what posing alone costs (the chest: 28.5 ms alone in round 470, 38.3 in the
+world now). What is left of the world's share is the card drawing it and presenting. A row is good to about a
+fifth: the same build against its own baseline minutes later flagged 5 rows 20 to 35 % slower, and the bench's
+headless rows moved 6 to 8 ms either way between its two settings, which is why the windowed rows are the ones
+tabled.
+
+## Pass 23: rooms (round 478)
+
+Round 478 lets a Blockout piece be a room (its shape the air, with walls, a floor and a ceiling) and adds Intersect
+pieces. The question for the numbers: does a building made of rooms cost what the same building made of boxes and
+hollows costs, and is it the same mesh? `blendity_stress --only blockout`, release builds, this machine (AMD Ryzen 9
+5900XT, 32 threads), 2026-11-11 03:39-03:44 with nothing else building or running (the other passes held; the
+machine at 1 % before the runs). `interior N` is round 476's building; `interior rooms N` is the same building from
+room pieces and door cuts - 36 Merge rooms and 28 doors for `interior 100`, 64 pieces against 100.
+
+| ms from a door moving until the mesh can be drawn | exact (Manifold) | grid, cell 0.2 m | grid, cell 0.1 m | grid, cell 0.05 m |
+|---|---|---|---|---|
+| `interior 100`, with Blender's libraries | 12.0 | 13.3 | 40.9 | 191 (over) |
+| `interior rooms 100`, with the libraries | **10.7** | 13.4 | **41.9** | 193 (over) |
+| `interior 100`, dependency-free | - | 15.1 | 48.7 | 191 (over) |
+| `interior rooms 100`, dependency-free | - | 14.8 | **46.1** | 186 (over) |
+| `interior 400`, with the libraries | 38.2 | 46.7 | 183 | 710 |
+| `interior rooms 400`, with the libraries | 37.0 | 46.0 | 177 | 714 |
+| `interior 400`, dependency-free | - | 52.1 | 183 | 741 |
+| `interior rooms 400`, dependency-free | - | 51.5 | 182 | 729 |
+
+| `interior 100` from rooms against from box pairs | faces (boxes / rooms) | points | volume m3 | pieces | verdict |
+|---|---|---|---|---|---|
+| exact (Manifold) | 392 / 392 | 520 / 520 | 407.9124 / 407.9124 | 100 / 64 | same |
+| grid, cell 0.1 m, both builds | 392 / 392 | 520 / 520 | 407.9124 / 407.9124 | 100 / 64 | same |
+
+| sweep, 2,000 arrangements a kind | built | pieces skipped | refused | problems | with small faces on top of others | with faces of no area | unresolved places |
+|---|---|---|---|---|---|---|---|
+| exact, boxes on a 0.25 m grid | 2000 | 0 | 0 | 0 | 0 | 2 | 3 |
+| exact, the same boxes turned as a whole | 2000 | 0 | 0 | 0 | 0 | 6 | 6 |
+| exact, any pieces | 2000 | 936 | 0 | 0 | 1 | 45 | 113 |
+| exact, rooms and Intersect pieces | 2000 | 567 | 0 | 0 | 52 | 68 | 292 |
+| grid 0.08 m, boxes on a 0.25 m grid | 2000 | 0 | 0 | 0 | 2 | 1 | 80 |
+| grid 0.08 m, the same boxes turned as a whole | 2000 | 0 | 0 | 0 | 43 | 13 | 14904 |
+| grid 0.08 m, any pieces | 2000 | 936 | 0 | 0 | 185 | 59 | 56945 |
+| grid 0.08 m, rooms and Intersect pieces | 2000 | 567 | 0 | 0 | 12 | 13 | 6594 |
+
+- **A building of rooms costs what the building of box pairs costs** - the same solids in the kernel, a third fewer
+  pieces to keep - and is the same mesh to the face and the point on both paths.
+- **The new sweep kind** puts rooms on the 0.25 m grid - Merge and Keep, open-topped, without thickness, with walls
+  thicker than the room, round ones - among boxes that add, subtract and intersect, some unusable or unevenly scaled.
+  No arrangement has two flat faces on each other or is refused. With Manifold 68 of 2,000 keep a face of no area
+  and 52 a small face on a neighbour: those looked at were cylinder rooms and rooms of no thickness whose sides
+  share a plane at an angle with another piece's (the "hair" of round 476). Not chased further this round.
+- **The grid's older rows moved by a hair** (boxes turned 42 / 12 -> 43 / 13 arrangements, 14,895 -> 14,904
+  unresolved places; any pieces 56 -> 59 with a face of no area): the walk that names a crossing's side picks another
+  of several ends at one place. The exact path's older rows are round 476's to the count.
+- **The live row** (round 477's, measured again): a frame 2.8 ms at the median and 3.1 to 3.2 ms at worst with the
+  libraries, 110 landings in 120 frames; 1.0 ms and 9.3 to 9.6 ms without, 31 to 34 landings; no build on the
+  main thread. The 45.6 ms frame seen once in round 477 did not come back in these two runs.
+
+## Pass 23: handles (round 479)
+
+Round 479 adds handles on the selected piece and the Room tool. Neither builds: a drag changes one component a frame
+and round 477's worker follows. The question: does a frame with the handles' hit test, snapping and drawing in it
+stay a frame, and does the mesh follow a dragged face as it follows a moved door? `blendity_stress --only blockout`,
+release builds, this machine (AMD Ryzen 9 5900XT, 32 threads), 2026-11-11 08:32-08:38 with nothing else building or
+running (the other passes held). Real mouse events through `step_frame_headless`, one every 16.7 ms for 120 frames,
+workers on, in `interior 100`.
+
+| live, 120 frames | frame median ms | frame worst ms | move to landing median ms | slowest landing ms | landings | main-thread builds |
+|---|---|---|---|---|---|---|
+| a door moved, with Blender's libraries (round 477's row) | 2.82 | 4.41 | 2.87 | 44.7 | 110 | 0 |
+| a face handle dragged, with the libraries | **2.90** | 3.33 | 2.95 | 73.3 | 108 | 0 |
+| a door moved, dependency-free | 1.03 | 8.63 | 47.1 | 86.1 | 33 | 0 |
+| a face handle dragged, dependency-free | **1.27** | 10.09 | 47.4 | 112.4 | 33 | 0 |
+
+- **A dragged face costs what a moved door costs**: the handles add about 0.1 to 0.2 ms to a frame; the mesh is 3 ms
+  behind the mouse with Manifold and one grid build (47 ms) behind without.
+- **The row holds Ctrl.** Its first form dragged with snapping on: the face then stays on one grid line for most
+  frames, nothing changes and nothing builds, and a landing timed from the first of those mouse moves read 65 to
+  80 ms with one of 315 ms. That was the row, not the editor.
+- The kernel's rows and the sweep are round 478's to the count.
+
+## Pass 24: a bake on every ticked card, in batches that keep a card working (round 487)
+
+Generate Lighting's gather on the owner's two cards, an RTX 4070 SUPER (12 GB) and an RTX 3060 Ti (8 GB). SideRail in
+a scratch copy: 820,031 texels, 1024 gather samples, the build with Blender's libraries, a quiet machine, three runs
+each after a warm-up that is not counted.
+
+| SideRail's lightmaps | Run 1 | Run 2 | Run 3 | The gather (wall) | The cards' own clocks |
+|---|---|---|---|---|---|
+| Before: one card, batches of 8192 texels | 37.7 s | 39.1 s | 36.6 s | 30.2 s in 101 batches | 4070 SUPER 28.4 s |
+| First build: both cards, batches of 8192 texels shared | 41.1 s | 40.9 s | 39.7 s | 32.3 s in 101 batches | 4070 SUPER 25.4 s (76 %), 3060 Ti 24.7 s (24 %) |
+| Now: one card, batches by its speed | 17.7 s | 17.5 s | 17.8 s | 11.7 s in 15 batches | 4070 SUPER 10.2 s |
+| Now: both cards, batches by their speeds | 16.2 s | 16.2 s | 16.5 s | 10.2 s in 12 batches | 4070 SUPER 7.4 s (71 %), 3060 Ti 7.7 s (29 %) |
+
+(The gather columns of the first two rows are from single runs made while finding the cause, not from the timed
+three.)
+
+What the second row showed: with 8192 texels a batch a card's time hardly depends on how many of them it is given
+(three quarters of the batches' texels took the 4070 SUPER 25.4 s, all of them 28.4 s) - it waits for the longest
+paths of each small dispatch. Batches of fixed sizes, one card, the same bake, single runs: 8192 texels 28.4 s on the
+card's clock, 32,768 10.4 s, 65,536 9.2 s, 131,072 8.3 s, 262,144 8.0 s, the whole bake in one 7.7 s. So a card's
+batch grows from about 8 million paths by what it returned in the last call, to at most 131,072 texels (a bake's
+step, and so Cancel, stays under about two seconds).
+
+Making the cards ready (opening them, building the scene, sending it) is 1.4 s for one card and 1.9 s for two, the
+scene built once and sent to both at once.
+
+The lightmap pages of every run of the last two rows are byte for byte the same file: a texel's random sequence is its
+place in the bake, whichever card gathers it and however the bake is cut into batches. They are not the pages of the
+first two rows (there a texel's sequence was its place in its batch): the same samples, other directions.
+
+## CI: the four required checks (round 492, task 0468)
+
+How long a pull request waits for `windows`, `linux`, `macos` and `linux-sanitizers` (GitHub's hosted runners;
+minutes from the jobs' own times). Before: a run of `main`'s workflow on 2026-11-11, 2,157 tests. After: pull
+request #383's first run, 2,161 tests, no compiler cache yet (ADR 0133).
+
+| Check | Before | After | Its parts after |
+|---|---|---|---|
+| windows | about 48 | about 26 | build 15.7 (was 31), then tests 10.0 beside stress 7.6 |
+| linux | about 27 | about 18 | build 8.4, then tests 8.9 beside stress 9.1 |
+| macos | about 21 | about 13 | build 6.4, then tests 6.8 beside stress 5.3 |
+| linux-sanitizers | about 106 | about 36 | build 21.8 (was 27), then six shards: 11.5, 13.7, 10.3, 12.0, 9.8, 9.5 |
+
+The whole run: 36 minutes, started once a push (before: about 106 minutes, started twice). The sanitizer check is
+now its build plus its slowest shard; the build is the larger part, and the one the compiler cache is for. What
+would cut Windows further: linking the three programs at once, or the tests and the editor as two build jobs.
