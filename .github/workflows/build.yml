@@ -1,12 +1,20 @@
-# Builds Blendity for Windows, Linux and macOS, runs the unit tests and a quick
-# stress pass, and uploads the three executables as artifacts. A Linux job runs the
-# unit tests under AddressSanitizer + UndefinedBehaviorSanitizer.
-# The windows, linux and macos jobs are required checks for merging into main; linux-sanitizers
-# blocks too and joins them once task 0002 is merged.
+# Builds Blendity for Windows, Linux and macOS, runs the unit tests and a quick stress pass, and uploads the
+# executables as artifacts. A Linux build runs the unit tests under AddressSanitizer + UndefinedBehaviorSanitizer.
+#
+# The required checks for merging into main are the four jobs named windows, linux, macos and linux-sanitizers.
+# Since round 492 (ADR 0133) each of them is a last job that passes only when its parts passed:
+#   changes             what the pull request touches: nothing a program, test or check reads -> no build at all
+#   <os>-build          one build, its programs uploaded
+#   <os>-unit, -stress  the unit tests and the quick stress pass, side by side, from that build
+#   sanitizers-build    the sanitizer test binary, once
+#   sanitizers-shard    the test groups split over machines (tools/dev/test_shards.py holds the table)
+# The four names must stay as they are: branch protection asks for them by name.
 name: build
 
 on:
+  # A pull request's branch is built once, as the pull request; a push builds only on main (it built twice before).
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -15,17 +23,89 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
-  windows:
+  # What this run has to do. A pull request that changes only text nothing builds, tests or checks (specs, ADRs,
+  # changelog fragments, CLAUDE.md: the list is in tools/dev/test_shards.py) skips every build; the four required jobs
+  # then pass at once. Not `paths-ignore`: a workflow that never starts leaves required checks waiting for ever.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      shards: ${{ steps.decide.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The shard table holds every test group once
+        run: |
+          python3 tools/dev/test_shards.py --self-test
+          python3 tools/dev/test_shards.py --check
+      - name: Build, or nothing to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+        # A list of changed paths that cannot be read means a build, never a skip.
+        run: |
+          build=true
+          if [ "$EVENT" = pull_request ]; then
+            if gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files?per_page=100" \
+                 --jq '.[] | .filename, (.previous_filename // empty)' > changed.txt; then
+              echo "$(wc -l < changed.txt) changed paths"
+              build=$(python3 tools/dev/test_shards.py --needs-build changed.txt)
+            else
+              echo "::warning::the pull request's changed paths could not be read: building"
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "shards=$(python3 tools/dev/test_shards.py --matrix)" >> "$GITHUB_OUTPUT"
+          if [ "$build" = true ]; then
+            echo "::notice::This run builds and tests."
+          else
+            echo "::notice::Only documents that nothing builds or tests changed: no build, the required jobs pass at once."
+          fi
+
+  # ------------------------------------------------------------------------------------------------ Windows
+  windows-build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build (MSVC, no CMake needed)
         shell: cmd
         # Task 0169 (ADR 0054): NVIDIA's OptiX host headers fetched at a pinned tag; the kernel's PTX is committed.
+        # `all` compiles every source once and links the three programs from the same objects (round 492).
         env:
           BLENDITY_FETCH_OPTIX: "1"
         run: build.bat release all
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-windows
+          overwrite: true  # (a re-run of failed jobs uploads the name again)
+          path: |
+            dist/windows/*.exe
+            dist/windows/licenses
+      - name: Headless screenshot
+        run: dist\windows\Blendity.exe --headless-screenshot screenshot-windows.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-windows
+          overwrite: true
+          path: screenshot-windows.png
+
+  windows-unit:
+    needs: windows-build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-windows
+          path: dist/windows
       - name: Unit tests
         shell: bash
         # Each failing check also becomes an annotation, readable without signing in.
@@ -34,7 +114,18 @@ jobs:
           dist/windows/blendity_tests.exe 2>&1 | tee tests.log
           status=${PIPESTATUS[0]}
           grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          echo "::notice::windows: $(grep -cE '^\[( ok |FAIL)\]' tests.log) tests"
           exit $status
+
+  windows-stress:
+    needs: windows-build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-windows
+          path: dist/windows
       - name: Quick stress test
         shell: bash
         timeout-minutes: 20
@@ -56,45 +147,126 @@ jobs:
         # Round 432 (ADR 0105): the quick stress's tables against stress/results/ci-Windows.md when one is committed (a CI
         # runner isn't the developer's machine: its own baseline); findings as warnings, never a failure yet.
         run: python tools/perf_suite.py --compare stress/results/ci/latest.md --baseline stress/results/ci-Windows.md --annotate || true
-      - name: Headless screenshot
-        run: dist\windows\Blendity.exe --headless-screenshot screenshot-windows.png
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: blendity-windows
-          path: |
-            dist/windows/*.exe
-            screenshot-windows.png
-            stress/results/ci
+          name: stress-results-windows
+          overwrite: true
+          path: stress/results/ci
 
-  linux:
+  windows:
+    if: always()
+    needs: [changes, windows-build, windows-unit, windows-stress]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed, or nothing needed building
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.changes.outputs.build }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "changes: $CHANGES, build: $BUILD, parts: $RESULTS"
+          if [ "$CHANGES" != success ]; then echo "::error::the changes job did not pass"; exit 1; fi
+          for r in $RESULTS; do
+            if [ "$r" = success ]; then continue; fi
+            if [ "$r" = skipped ] && [ "$BUILD" = false ]; then continue; fi
+            echo "::error::a part of this check ended as '$r' (see the jobs it needs)"
+            exit 1
+          done
+          if [ "$BUILD" = false ]; then echo "::notice::nothing to build: passed without building"; fi
+
+  # -------------------------------------------------------------------------------------------------- Linux
+  linux-build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install compiler + X11 headers
-        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core
+      - name: Install compiler, X11 headers and ccache
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core ccache
+      # The compiler cache (round 492, ADR 0133): a pull request keeps one (its first run's; later runs read it and
+      # save nothing new), main one per state of the sources - few and small, so the caches of release.yml and
+      # moonray.yml are not pushed out of the repository's room. The same three steps in macos-build, sanitizers-build.
+      - uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-linux-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', hashFiles('src/**', 'tests/**', 'stress/**', 'extern/**', 'build.sh', 'VERSION')) }}
+          restore-keys: ccache-linux-main-
       - name: Build
         env:
           BLENDITY_FETCH_OPTIX: "1"  # (task 0169: the OptiX device, as on Windows)
-        run: ./build.sh release all
+          CXX: ccache g++
+          CC: ccache gcc
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 300M
+        run: |
+          ccache --zero-stats > /dev/null
+          ./build.sh release all
+          ccache --show-stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-linux
+          overwrite: true
+          path: |
+            dist/linux/Blendity
+            dist/linux/blendity_stress
+            dist/linux/blendity_tests
+            dist/linux/licenses
+      - name: Headless screenshot
+        run: ./dist/linux/Blendity --headless-screenshot screenshot-linux.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-linux
+          overwrite: true
+          path: screenshot-linux.png
+
+  linux-unit:
+    needs: linux-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core libx11-6 libxi6
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-linux
+          path: dist/linux
       - name: Unit tests
         shell: bash
-        # Each failing check also becomes an annotation, readable without signing in.
+        # Each failing check also becomes an annotation, readable without signing in. (An artifact keeps no file modes.)
         run: |
           set +e
+          chmod +x dist/linux/Blendity dist/linux/blendity_stress dist/linux/blendity_tests
           ./dist/linux/blendity_tests 2>&1 | tee tests.log
           status=${PIPESTATUS[0]}
           grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          echo "::notice::linux: $(grep -cE '^\[( ok |FAIL)\]' tests.log) tests"
           exit $status
+      - name: The shard table holds every group the built runner lists (round 492)
+        run: python3 tools/dev/test_shards.py --check --binary dist/linux/blendity_tests
       - name: The books' reference list agrees with itself (task 0386; no TeX needed, no drift check - ADR 0104)
         run: python3 tools/make_books.py --check-cited
       - name: The inventory sweep's command table is current (round 411)
         run: python3 tools/sweep_commands.py --check
+
+  linux-stress:
+    needs: linux-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core libx11-6 libxi6
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-linux
+          path: dist/linux
       - name: Quick stress test
         shell: bash
         timeout-minutes: 20
         # 15 minutes at most (it takes about one); where it stopped is shown as annotations.
         run: |
           set +e
+          chmod +x dist/linux/Blendity dist/linux/blendity_stress dist/linux/blendity_tests
           perl -e 'alarm shift; exec @ARGV' 900 ./dist/linux/blendity_stress --quick --out stress/results/ci 2>&1 | tee stress.log
           status=${PIPESTATUS[0]}
           if [ $status -ne 0 ]; then
@@ -110,39 +282,115 @@ jobs:
         # Round 432 (ADR 0105): the quick stress's tables against stress/results/ci-Linux.md when one is committed (a CI
         # runner isn't the developer's machine: its own baseline); findings as warnings, never a failure yet.
         run: python3 tools/perf_suite.py --compare stress/results/ci/latest.md --baseline stress/results/ci-Linux.md --annotate || true
-      - name: Headless screenshot
-        run: ./dist/linux/Blendity --headless-screenshot screenshot-linux.png
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: blendity-linux
-          path: |
-            dist/linux/Blendity
-            dist/linux/blendity_stress
-            dist/linux/blendity_tests
-            screenshot-linux.png
-            stress/results/ci
+          name: stress-results-linux
+          overwrite: true
+          path: stress/results/ci
 
-  macos:
+  linux:
+    if: always()
+    needs: [changes, linux-build, linux-unit, linux-stress]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed, or nothing needed building
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.changes.outputs.build }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "changes: $CHANGES, build: $BUILD, parts: $RESULTS"
+          if [ "$CHANGES" != success ]; then echo "::error::the changes job did not pass"; exit 1; fi
+          for r in $RESULTS; do
+            if [ "$r" = success ]; then continue; fi
+            if [ "$r" = skipped ] && [ "$BUILD" = false ]; then continue; fi
+            echo "::error::a part of this check ended as '$r' (see the jobs it needs)"
+            exit 1
+          done
+          if [ "$BUILD" = false ]; then echo "::notice::nothing to build: passed without building"; fi
+
+  # -------------------------------------------------------------------------------------------------- macOS
+  macos-build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install ccache
+        run: brew install ccache
+      - uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-macos-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', hashFiles('src/**', 'tests/**', 'stress/**', 'extern/**', 'build.sh', 'VERSION')) }}
+          restore-keys: ccache-macos-main-
       - name: Build
-        run: ./build.sh release all
+        env:
+          CXX: ccache clang++
+          CC: ccache clang
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 300M
+        run: |
+          ccache --zero-stats > /dev/null
+          ./build.sh release all
+          ccache --show-stats
+      - name: Zip app bundle
+        run: cd dist/macos && zip -r Blendity-macos.zip Blendity.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-macos
+          overwrite: true
+          path: |
+            dist/macos/Blendity-macos.zip
+            dist/macos/Blendity
+            dist/macos/blendity_stress
+            dist/macos/blendity_tests
+            dist/macos/licenses
+      - name: Headless screenshot
+        run: ./dist/macos/Blendity --headless-screenshot screenshot-macos.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-macos
+          overwrite: true
+          path: screenshot-macos.png
+
+  macos-unit:
+    needs: macos-build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-macos
+          path: dist/macos
       - name: Unit tests
         shell: bash
-        # Each failing check also becomes an annotation, readable without signing in.
+        # Each failing check also becomes an annotation, readable without signing in. (An artifact keeps no file modes.)
         run: |
           set +e
+          chmod +x dist/macos/Blendity dist/macos/blendity_stress dist/macos/blendity_tests
           ./dist/macos/blendity_tests 2>&1 | tee tests.log
           status=${PIPESTATUS[0]}
           grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          echo "::notice::macos: $(grep -cE '^\[( ok |FAIL)\]' tests.log) tests"
           exit $status
+
+  macos-stress:
+    needs: macos-build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-macos
+          path: dist/macos
       - name: Quick stress test
         shell: bash
         timeout-minutes: 20
         # 15 minutes at most (it takes about one); where it stopped is shown as annotations.
         run: |
           set +e
+          chmod +x dist/macos/Blendity dist/macos/blendity_stress dist/macos/blendity_tests
           perl -e 'alarm shift; exec @ARGV' 900 ./dist/macos/blendity_stress --quick --out stress/results/ci 2>&1 | tee stress.log
           status=${PIPESTATUS[0]}
           if [ $status -ne 0 ]; then
@@ -158,41 +406,147 @@ jobs:
         # Round 432 (ADR 0105): the quick stress's tables against stress/results/ci-macOS.md when one is committed (a CI
         # runner isn't the developer's machine: its own baseline); findings as warnings, never a failure yet.
         run: python3 tools/perf_suite.py --compare stress/results/ci/latest.md --baseline stress/results/ci-macOS.md --annotate || true
-      - name: Headless screenshot
-        run: ./dist/macos/Blendity --headless-screenshot screenshot-macos.png
-      - name: Zip app bundle
-        run: cd dist/macos && zip -r Blendity-macos.zip Blendity.app
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: blendity-macos
-          path: |
-            dist/macos/Blendity-macos.zip
-            dist/macos/blendity_stress
-            dist/macos/blendity_tests
-            screenshot-macos.png
-            stress/results/ci
+          name: stress-results-macos
+          overwrite: true
+          path: stress/results/ci
 
-  # Unit tests under AddressSanitizer + UndefinedBehaviorSanitizer: out-of-range indices, use after
-  # free and undefined behaviour. Blocking since task 0002 fixed its findings.
-  linux-sanitizers:
+  macos:
+    if: always()
+    needs: [changes, macos-build, macos-unit, macos-stress]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed, or nothing needed building
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.changes.outputs.build }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "changes: $CHANGES, build: $BUILD, parts: $RESULTS"
+          if [ "$CHANGES" != success ]; then echo "::error::the changes job did not pass"; exit 1; fi
+          for r in $RESULTS; do
+            if [ "$r" = success ]; then continue; fi
+            if [ "$r" = skipped ] && [ "$BUILD" = false ]; then continue; fi
+            echo "::error::a part of this check ended as '$r' (see the jobs it needs)"
+            exit 1
+          done
+          if [ "$BUILD" = false ]; then echo "::notice::nothing to build: passed without building"; fi
+
+  # --------------------------------------------------------------------------------------------- Sanitizers
+  # Unit tests under AddressSanitizer + UndefinedBehaviorSanitizer: out-of-range indices, use after free and
+  # undefined behaviour. Blocking since task 0002 fixed its findings. One build; the groups then run on several
+  # machines at once (they took 79 minutes in one process), each shard `--group a,b,c` from tools/dev/test_shards.py.
+  sanitizers-build:
+    needs: changes
+    if: needs.changes.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install compiler + X11 headers
-        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core
+      - name: Install compiler, X11 headers and ccache
+        run: sudo apt-get update && sudo apt-get install -y g++ libx11-dev libxi-dev fonts-dejavu-core ccache
+      - uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-sanitizers-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', hashFiles('src/**', 'tests/**', 'stress/**', 'extern/**', 'build.sh', 'VERSION')) }}
+          restore-keys: ccache-sanitizers-main-
       - name: Build the tests with sanitizers
         env:
           EXTRA_FLAGS: -O1 -fsanitize=address,undefined,float-cast-overflow -fno-omit-frame-pointer
-        run: ./build.sh debug tests
-      - name: Unit tests
+          CXX: ccache g++
+          CC: ccache gcc
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 600M
+        run: |
+          ccache --zero-stats > /dev/null
+          ./build.sh debug tests
+          ccache --show-stats
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blendity-tests-sanitizers
+          path: dist/linux/blendity_tests
+          retention-days: 2
+          overwrite: true
+
+  sanitizers-shard:
+    needs: [changes, sanitizers-build]
+    if: needs.changes.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.changes.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-dejavu-core libx11-6 libxi6
+      - uses: actions/download-artifact@v4
+        with:
+          name: blendity-tests-sanitizers
+          path: dist/linux
+      - name: Unit tests (this shard's groups)
         env:
           ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          SHARD: ${{ matrix.shard }}
         shell: bash
-        # Each failing check also becomes an annotation, readable without signing in.
+        # Each failing check also becomes an annotation, readable without signing in. A shard that ran no test fails.
         run: |
           set +e
-          ./dist/linux/blendity_tests 2>&1 | tee tests.log
+          chmod +x dist/linux/blendity_tests
+          groups=$(python3 tools/dev/test_shards.py --shard "$SHARD") || exit 1
+          echo "shard $SHARD: $groups"
+          ./dist/linux/blendity_tests --group "$groups" 2>&1 | tee tests.log
           status=${PIPESTATUS[0]}
           grep -E '^\[FAIL\]|^  FAIL |runtime error|ERROR: AddressSanitizer' tests.log | head -50 | sed 's/^ */::error::/'
+          count=$(grep -cE '^\[( ok |FAIL)\]' tests.log)
+          echo "$count" > "shard-$SHARD.count"
+          echo "::notice::shard $SHARD ($groups): $count tests"
+          if [ "$count" -eq 0 ] && [ $status -eq 0 ]; then echo "::error::shard $SHARD ran no test"; exit 1; fi
           exit $status
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sanitizers-count-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.count
+          retention-days: 2
+          overwrite: true
+
+  linux-sanitizers:
+    if: always()
+    needs: [changes, sanitizers-build, sanitizers-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every part passed, or nothing needed building
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.changes.outputs.build }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "changes: $CHANGES, build: $BUILD, parts: $RESULTS"
+          if [ "$CHANGES" != success ]; then echo "::error::the changes job did not pass"; exit 1; fi
+          for r in $RESULTS; do
+            if [ "$r" = success ]; then continue; fi
+            if [ "$r" = skipped ] && [ "$BUILD" = false ]; then continue; fi
+            echo "::error::a part of this check ended as '$r' (see the jobs it needs)"
+            exit 1
+          done
+          if [ "$BUILD" = false ]; then echo "::notice::nothing to build: passed without building"; fi
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.build == 'true'
+        with:
+          pattern: sanitizers-count-*
+          merge-multiple: true
+          path: counts
+      - name: How many tests the shards ran together
+        if: needs.changes.outputs.build == 'true'
+        env:
+          SHARDS: ${{ needs.changes.outputs.shards }}
+        run: |
+          want=$(python3 -c 'import json, os; print(len(json.loads(os.environ["SHARDS"])))')
+          have=$(ls counts/*.count | wc -l)
+          total=0; for f in counts/*.count; do total=$((total + $(cat "$f"))); done
+          echo "::notice::linux-sanitizers: $total tests in $have shards"
+          if [ "$have" -ne "$want" ]; then echo "::error::$have of $want shards reported a count"; exit 1; fi
