@@ -2325,6 +2325,37 @@ Joins in a Blockout are crisp by default. Give a piece a Blend Radius and it mel
 ? Field Cell is 0.1 m, you set a Blend Radius of 2 mm and the join stays sharp. Why? | The blend's grid is never finer than a thirty-second of Field Cell - 3 mm here - and a radius below that is no blend: the piece is built unblended and the status says so. Raise the radius or lower Field Cell; the Blend Detail does not change this.
 ? Why does a room's wall not round into its floor with a Blend Radius? | Rooms and Intersect pieces are not blended: the Blend Radius belongs to the Add and Subtract box, cylinder and sphere pieces, so a room has no such field.
 )"},
+    {"Materials, baking and export of a Blockout", "A material for each class of face, textures at one real-world size, Bake to Mesh and Unbake, lightmaps and export", R"(
+A Blockout's faces take their materials by what they are - a floor, a wall, a ceiling, the outside of a shell, a cut - and its textures run at one real-world size over every piece, so they do not slide when a piece moves. When the shape is right, Bake to Mesh turns the Blockout into an ordinary mesh you can edit, and Unbake brings the pieces back.
+# A material for each class of face
+- The Blockout has a Floor, Walls, Ceiling, Outside, Cut and Solid Material (a .mat from the project; empty is the default material). A room's inside gives Floor, Walls and Ceiling; the outer face of its shell is Outside; the faces a Subtract piece cut (a door's or window's reveal, a pocket's sides) are Cut; a plain Add piece that is no room gives Solid.
+- A piece has the same fields as overrides for the classes it makes (empty: the Blockout's), so one room can have another floor. A face made of several pieces' faces in one plane takes the material of the first of them.
+- The mesh's material slots are made again with every build: the Blockout's six first, then the pieces' overrides in the pieces' order - each material once, the ones no face uses left out - and the renderer's Materials follow in the same step. Once a Blockout has class materials its renderer's material list is written at every build: a material set by hand on the renderer is replaced (an older scene's hand-set material stays until a class material is set).
+# Textures at a real-world scale
+- Texture Scale on the Blockout is the metres one texture tile covers: every face is projected on its own plane (a turned wall and a ramp's slope too), so a texture has one size on every wall and its pattern runs on across pieces that meet in a plane. The directions U and V grow in are the Cube primitive's on each face, so a texture reads the same way on a Blockout wall as on a cube beside it.
+- A face that kept its corners when another piece moved keeps its coordinates to the last bit. A piece's Texture Offset (in tiles) and Texture Rotation (degrees) shift and turn the texture on its own faces only.
+- A turned wall's pattern agrees with a neighbour in the same plane only to rounding; on planes square to the axes it agrees exactly.
+- Flat faces are flat and blended joins and round shapes shade smooth: the mesh's Auto Smooth angle is 40 degrees. A mesh piece's faces are shaded flat.
+# Bake to Mesh and Unbake
+- Bake to Mesh (the Blockout's Inspector, Mesh > Bake Blockout to Mesh, `blockout bake`) keeps the mesh, its materials and its UVs, takes the Blockout component off, and moves the pieces - their own transforms untouched - under one disabled child named "Blockout Pieces". The object is then an ordinary mesh: Edit Mode, sculpting and modifiers work. A small BlockoutBaked component remembers the settings. The UVs it keeps tile one texture over every face: to Paint it or to bake maps with unique texels, unwrap it first.
+- Unbake (the baked object's Inspector, Mesh > Unbake Blockout, `blockout unbake`) brings the component back with its settings, takes the pieces out from under the disabled child and builds the mesh from them again. If the baked mesh was edited since, Unbake asks first because the edits are lost; `blockout unbake force` skips the question. Each is one Undo step.
+# Lightmaps and export
+- Generate Lighting bakes a live Blockout as it stands - no Bake to Mesh needed (a new Blockout has Contribute GI on). Its lightmap UVs are the bake's own, made for the lightmap; the tiling texture UVs are not used for it. Moving a piece, or changing a material or the Texture Scale, puts its lightmap out of date: bake again. A saved scene keeps the lightmap.
+- Bake Textures, Mesh Maps and Paint are refused on a live Blockout, which is rebuilt from its pieces and would lose what they write: Bake to Mesh first, then use them on the mesh.
+- Export (OBJ, FBX and GLB) writes a Blockout as one mesh with its material slots and UVs. The pieces and the disabled "Blockout Pieces" child are not written. (The Unity package export only repacks an imported package's folder: it does not write a Blockout.)
+# Try it
+! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6 | 1. A room 4 m by 4 m and 2.6 m high, in a new Blockout
+! cmd:newmat Brick | 2. A material asset named Brick in Assets/Materials
+! cmd:blockout set material walls Brick | 3. The room is selected, so this is its own Walls Material: its inside walls take Brick (its floor and ceiling stay the default material); with the Blockout selected it would be the Blockout's, for every room
+! cmd:blockout set texscale 0.5 | 4. Texture Scale 0.5: a texture tile covers half a metre on every face
+! cmd:blockout bake | 5. Bake to Mesh: an ordinary mesh with the same materials and UVs, the pieces under the disabled "Blockout Pieces"
+! cmd:blockout unbake | 6. Unbake: the Blockout is back, built from its pieces
+# From the console
+- `blockout set material floor|walls|ceiling|outside|cut|solid <material or none>` sets the Blockout's material for a class - or, with pieces selected, their own; `blockout set texscale <metres>`; `blockout bake`; `blockout unbake [force]`.
+? You move a room 3 m along X in a Blockout with a textured wall in another room. What happens to the other room's texture? | Nothing: a face that kept its corners keeps its texture coordinates bit for bit, because they depend only on the face's own positions, the Texture Scale and its piece's offset.
+? You Bake to Mesh, edit the faces in Edit Mode and then run blockout unbake. What happens? | It asks first: the mesh was edited since the bake and Unbake builds it again from the pieces, so the edits are lost. Cancel keeps the baked mesh; blockout unbake force skips the question.
+? Two rooms stand side by side and one door's piece has its own Cut Material. Which faces change? | Only the faces that door cut: a piece's override changes its own faces, and the Blockout's Cut Material still covers every other cut.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
 # The Posing block

@@ -9,8 +9,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace bl {
@@ -21,6 +23,33 @@ const char *const kBlockoutMethodNames[3] = {"Auto", "Exact", "Field"};
 const char *const kBlockoutBlendDetailNames[3] = {"Low", "Medium", "High"};
 const char *const kBlockoutWallNames[2] = {"Merge with neighbours", "Keep walls"};
 const char *const kBlockoutOpeningNames[3] = {"None", "Door", "Window"};
+const char *const kBlockoutClassNames[kBlockoutClasses] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid"};
+
+namespace {
+
+const char *const kMaterialFieldNames[kBlockoutClasses] = {"Floor Material", "Walls Material", "Ceiling Material", "Outside Material", "Cut Material", "Solid Material"};
+const char *const kMaterialHelp[kBlockoutClasses] = {
+    "The material of every room's floor (a .mat from the project; none: the default material). A piece's own Floor Material wins over it.",
+    "The material of the inside of every room's walls.",
+    "The material of every room's ceiling.",
+    "The material of the outer faces of every room's walls, floor and ceiling.",
+    "The material of the faces a Subtract piece cut (a door's or window's reveal, a pocket's sides), and of what an Intersect piece trimmed.",
+    "The material of the faces of a plain Add piece that is no room. A face made of several pieces' faces in one plane takes the material of the first of them."};
+
+float safe_scale(float v) { return finite_bits(v) && v > 0.0f ? std::min(1000.0f, std::max(0.001f, v)) : 1.0f; }
+
+/* The materials of a Blockout, as its reflect and the baked record's show them. */
+void reflect_materials(Reflector &r, std::string *materials, int only_classes_mask) {
+  for (int k = 0; k < kBlockoutClasses; k++) {
+    if (!(only_classes_mask & (1 << k))) continue;
+    r.asset(kMaterialFieldNames[k], materials[k], ".mat", "Material");
+    r.help(kMaterialHelp[k]);
+  }
+}
+
+}  // namespace
+
+float Blockout::safe_texture_scale() const { return safe_scale(texture_scale); }
 
 void Blockout::reflect(Reflector &r) {
   r.field("Field Cell", cell, 0.01f, 0.01f, 10.0f);
@@ -34,6 +63,25 @@ void Blockout::reflect(Reflector &r) {
          "Finer is rounder and slower. A radius below a thirty-second of Field Cell is built unblended and the status says so.");
   r.field("Default Wall Thickness", default_wall, 0.01f, 0.0f, 100.0f);
   r.help("What a new room's Wall, Floor and Ceiling start at, in metres. Rooms already made keep theirs.");
+  r.field("Texture Scale", texture_scale, 0.01f, 0.001f, 1000.0f);
+  r.help("How many metres a texture tile covers on every face (each face is projected on its own plane - a turned wall and a ramp's slope too): a wall\n"
+         "and a floor of different pieces show a texture at one size, its pattern runs on across pieces that meet in a plane, and it stays put when a piece moves.");
+  reflect_materials(r, material, (1 << kBlockoutClasses) - 1);
+  if (r.serializing()) r.field("Slots Set", slots_set);  // (the record that the renderer's materials follow the build, not for hand editing)
+}
+
+void BlockoutBaked::reflect(Reflector &r) {
+  r.field("Field Cell", cell, 0.01f, 0.01f, 10.0f);
+  r.help((std::string("What Unbake gives the Blockout back. The pieces are under the disabled child '") + kBlockoutPiecesName + "'.").c_str());
+  r.enumeration("Method", method, kBlockoutMethodNames, 3);
+  r.enumeration("Blend Detail", blend_detail, kBlockoutBlendDetailNames, 3);
+  r.field("Default Wall Thickness", default_wall, 0.01f, 0.0f, 100.0f);
+  r.field("Texture Scale", texture_scale, 0.01f, 0.001f, 1000.0f);
+  reflect_materials(r, material, (1 << kBlockoutClasses) - 1);
+  if (!r.serializing()) return;  // (the records of the bake, not for hand editing)
+  r.text("Baked Mesh", mesh_hash);
+  r.text("Pieces Id", pieces_id);
+  r.field("Slots Set", slots_set);
 }
 
 blockout::Settings Blockout::settings() const {
@@ -160,6 +208,22 @@ void BlockoutPiece::reflect(Reflector &r) {
            "Subtract piece a rounded rim. 0: a crisp join. What the blend does not reach stays as it was. Blend Detail on the Blockout sets how "
            "finely the rounded part is meshed. Rooms and Intersect pieces are not blended.");
   }
+  /* Round 482: its own materials for the classes of face it makes, and where its faces' texture starts. */
+  int shown = 0;
+  for (int k = 0; k < kBlockoutClasses; k++) shown |= (all || has_class(k)) << k;
+  reflect_materials(r, material, shown);
+  r.field("Texture Offset U", texture_offset_u, 0.01f, -1000.0f, 1000.0f);
+  r.help("Shifts the texture on this piece's faces along U, in tiles (one tile is the Blockout's Texture Scale in metres).");
+  r.field("Texture Offset V", texture_offset_v, 0.01f, -1000.0f, 1000.0f);
+  r.help("Shifts the texture on this piece's faces along V, in tiles.");
+  r.field("Texture Rotation", texture_rotation, 1.0f, -360.0f, 360.0f);
+  r.help("Turns the texture on this piece's faces, in degrees about the origin of the projection.");
+}
+
+bool BlockoutPiece::has_class(int cls) const {
+  if (is_room()) return cls <= kClassOutside;
+  const bool adds = opening == 0 && operation == (int)blockout::Op::Add;
+  return cls == (adds ? kClassSolid : kClassCut);
 }
 
 bool BlockoutPiece::takes_blend() const {
@@ -430,6 +494,15 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
       else {
         pieces.push_back(std::move(p));
         if (source && notes) notes->sources.push_back(source->id);
+        if (notes) {  // (round 482: what the faces of this piece are given besides their shape)
+          BlockoutSurface::Piece sp;
+          sp.id = c->id;
+          for (int k = 0; k < kBlockoutClasses; k++) sp.materials[k] = bp->material[k];
+          sp.offset_u = finite_bits(bp->texture_offset_u) ? bp->texture_offset_u : 0.0f;
+          sp.offset_v = finite_bits(bp->texture_offset_v) ? bp->texture_offset_v : 0.0f;
+          sp.rotation = finite_bits(bp->texture_rotation) ? bp->texture_rotation : 0.0f;
+          notes->surface.pieces.push_back(std::move(sp));
+        }
       }
     }
     collect(*c, m, pieces, notes);
@@ -449,9 +522,13 @@ void blockout_piece_objects(const GameObject &blockout, std::vector<const GameOb
 
 void blockout_snapshot(const GameObject &blockout, std::vector<blockout::Piece> &pieces, blockout::Settings &settings, BlockoutSnapshotNotes *notes) {
   pieces.clear();
-  if (notes) notes->refused.clear(), notes->sources.clear();
+  if (notes) notes->refused.clear(), notes->sources.clear(), notes->surface = BlockoutSurface();
   const Blockout *b = blockout.get<Blockout>();
   settings = b ? b->settings() : blockout::Settings();
+  if (notes && b) {
+    notes->surface.scale = b->safe_texture_scale();
+    for (int k = 0; k < kBlockoutClasses; k++) notes->surface.materials[k] = b->material[k];
+  }
   collect(blockout, Mat4::identity(), pieces, notes);
 }
 
@@ -463,6 +540,16 @@ uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, cons
   h = hash_mix(h, (uint64_t)settings.path);
   h = hash_mix(h, (uint64_t)(uint32_t)settings.blend_detail);
   h = hash_mix(h, (uint64_t)settings.max_cells);
+  if (notes) {  // (round 482: a material, the scale or a piece's offset changes the slots and the UVs: the mesh is built again)
+    const BlockoutSurface &s = notes->surface;
+    h = mix_float(h, s.scale);
+    for (const std::string &m : s.materials) h = hash_mix(h, fnv1a(m.data(), m.size()));
+    for (const BlockoutSurface::Piece &sp : s.pieces) {
+      h = hash_mix(h, sp.id);
+      for (const std::string &m : sp.materials) h = hash_mix(h, fnv1a(m.data(), m.size()));
+      h = mix_float(mix_float(mix_float(h, sp.offset_u), sp.offset_v), sp.rotation);
+    }
+  }
   for (const blockout::Piece &p : pieces) {
     h = hash_mix(h, p.id);
     h = hash_mix(h, (uint64_t)p.shape | (uint64_t)p.op << 8 | (uint64_t)(uint32_t)p.segments << 16 | (uint64_t)(uint32_t)p.rings << 40);
@@ -735,6 +822,200 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
       return Vec3(0.0f);
   }
   return Vec3(0.0f);
+}
+
+/* ===================================================================== */
+/* Materials, UVs and shading of the result (round 482)                   */
+/* ===================================================================== */
+
+int blockout_face_class(const blockout::Piece &piece, uint32_t side) {
+  const bool plain = !piece.room || side == blockout::kSideBlend;  // (a blend only comes from a piece that is no room)
+  if (plain) return piece.op == blockout::Op::Add ? kClassSolid : kClassCut;
+  switch (blockout::side_class(piece, side)) {
+    case blockout::SideClass::Floor: return kClassFloor;
+    case blockout::SideClass::Wall: return kClassWalls;
+    case blockout::SideClass::Ceiling: return kClassCeiling;
+    case blockout::SideClass::Outside: return kClassOutside;
+    case blockout::SideClass::Cut: return kClassCut;
+  }
+  return kClassOutside;
+}
+
+namespace {
+
+/* The texture coordinates of a face's corners, on the face's own plane: the basis comes from the face's unit normal alone, so metres over the
+ * scale are the coordinates on any flat face - square to the axes or turned, a ramp's slope too - and the faces on opposite sides of a wall
+ * each read the way the Cube's faces do. It is a pure function of the face's own corners, its piece's offset and the scale, so a face that kept
+ * its corners keeps its UVs to the bit. A normal within 1e-6 of an axis in cosine (about 0.08 degrees) is that axis exactly, so two faces of
+ * different pieces on one axis plane get the same basis and agree at shared corners (a turned plane only to rounding). A face within about 2.6
+ * degrees of horizontal (|n.y| > 0.999) takes the top / bottom basis: on a nearly flat ramp the texture turns there, a seam at that angle. A
+ * face of a blended join is not flat: it is projected on its own average plane, and where it meets a neighbour of another plane the texture has
+ * a seam - accepted. */
+void project_face(Mesh &mesh, size_t f, double scale, const BlockoutSurface::Piece *piece) {
+  const uint32_t first = mesh.face_offsets[f], last = mesh.face_offsets[f + 1];
+  double n[3] = {0, 0, 0};  // Newell's normal: right for n-gons with many corners
+  for (uint32_t c = first; c < last; c++) {
+    const Vec3 p = mesh.positions[mesh.corner_verts[c]], q = mesh.positions[mesh.corner_verts[c + 1 < last ? c + 1 : first]];
+    n[0] += ((double)p.y - q.y) * ((double)p.z + q.z);
+    n[1] += ((double)p.z - q.z) * ((double)p.x + q.x);
+    n[2] += ((double)p.x - q.x) * ((double)p.y + q.y);
+  }
+  const double len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+  if (!(len > 0.0) || !std::isfinite(len)) n[0] = 0, n[1] = 1, n[2] = 0;  // (a face of no area: any plane)
+  else n[0] /= len, n[1] /= len, n[2] /= len;
+  for (int a = 0; a < 3; a++)
+    if (std::fabs(n[a]) > 1.0 - 1e-6) {  // (snapped: an exact axis)
+      const double sign = n[a] < 0 ? -1.0 : 1.0;
+      n[0] = n[1] = n[2] = 0.0, n[a] = sign;
+      break;
+    }
+  /* The directions U and V grow along are the engine's Cube primitive's on each of its six faces (primitives::cube, UvKind::CubeCross), so a texture
+   * reads the same way on a Blockout wall as on a cube beside it: on a face that stands up, U along up x normal and V up; on one that looks up or
+   * down, U along -X and V along -Z (up) or +Z (down). (The Cube's top and bottom are mirrored against its sides by the cross product; matched anyway.) */
+  const bool vertical = std::fabs(n[1]) > 0.999;
+  double u_axis[3], v_axis[3];
+  if (vertical) {
+    const double d = -n[0];  // (-X taken into the face's plane)
+    u_axis[0] = -1.0 - n[0] * d, u_axis[1] = -n[1] * d, u_axis[2] = -n[2] * d;
+  }
+  else u_axis[0] = n[2], u_axis[1] = 0.0, u_axis[2] = -n[0];  // (up x normal)
+  const double ul = std::sqrt(u_axis[0] * u_axis[0] + u_axis[1] * u_axis[1] + u_axis[2] * u_axis[2]);
+  for (double &x : u_axis) x /= ul > 0.0 ? ul : 1.0;
+  if (vertical) {  // (V = U x normal)
+    v_axis[0] = u_axis[1] * n[2] - u_axis[2] * n[1], v_axis[1] = u_axis[2] * n[0] - u_axis[0] * n[2], v_axis[2] = u_axis[0] * n[1] - u_axis[1] * n[0];
+  }
+  else {  // (V = normal x U: up)
+    v_axis[0] = n[1] * u_axis[2] - n[2] * u_axis[1], v_axis[1] = n[2] * u_axis[0] - n[0] * u_axis[2], v_axis[2] = n[0] * u_axis[1] - n[1] * u_axis[0];
+  }
+  const bool turned = piece && piece->rotation != 0.0f;
+  const double rad = turned ? (double)piece->rotation * 3.14159265358979323846 / 180.0 : 0.0;
+  const double cs = std::cos(rad), sn = std::sin(rad);
+  for (uint32_t c = first; c < last; c++) {
+    const Vec3 p = mesh.positions[mesh.corner_verts[c]];
+    double u = ((double)p.x * u_axis[0] + (double)p.y * u_axis[1] + (double)p.z * u_axis[2]) / scale;
+    double v = ((double)p.x * v_axis[0] + (double)p.y * v_axis[1] + (double)p.z * v_axis[2]) / scale;
+    if (turned) {
+      const double ru = u * cs - v * sn, rv = u * sn + v * cs;
+      u = ru, v = rv;
+    }
+    if (piece) u += piece->offset_u, v += piece->offset_v;
+    mesh.uvs[c] = Vec2((float)u, (float)v);
+  }
+}
+
+/* Whether a face on this side of the piece is one of a curved surface (a cylinder's side, a sphere, an arch's two curves): those shade smooth. */
+bool curved_side(const blockout::Piece &p, uint32_t side) {
+  if (side == blockout::kSideBlend) return false;
+  const uint32_t base = side >= blockout::kSideShell ? side - blockout::kSideShell : side;
+  switch (p.shape) {
+    case blockout::Shape::Sphere: return true;
+    case blockout::Shape::Cylinder: return base == 0;
+    case blockout::Shape::Arch: return base == 0 || base == 1;
+    default: return false;
+  }
+}
+
+}  // namespace
+
+std::vector<std::string> blockout_finish_mesh(Mesh &mesh, const blockout::Faces &faces, const std::vector<blockout::Piece> &pieces, const BlockoutSurface &surface) {
+  const size_t count = mesh.face_count();
+  const bool named = faces.piece.size() == count && faces.side.size() == count;
+  const bool own = surface.pieces.size() == pieces.size();  // (the surface's pieces are the snapshot's, in its order)
+  std::unordered_map<uint64_t, size_t> index;
+  for (size_t i = 0; i < pieces.size(); i++) index.emplace(pieces[i].id, i);
+  /* The candidates for a face's material, in the fixed order: the Blockout's six, then each piece's six. */
+  const size_t candidates = (size_t)kBlockoutClasses * (1 + (own ? pieces.size() : 0));
+  std::vector<uint8_t> used(candidates, 0);
+  std::vector<uint32_t> face_candidate(count, (uint32_t)kClassOutside);
+  mesh.uvs.assign(mesh.corner_verts.size(), Vec2(0.0f, 0.0f));
+  const double scale = surface.scale > 0.0f ? (double)surface.scale : 1.0;
+  for (size_t f = 0; f < count; f++) {
+    const auto at = named ? index.find(faces.piece[f]) : index.end();
+    const BlockoutSurface::Piece *sp = own && at != index.end() ? &surface.pieces[at->second] : nullptr;
+    if (at != index.end()) {
+      const int cls = blockout_face_class(pieces[at->second], faces.side[f]);
+      const bool overridden = sp && !sp->materials[cls].empty();
+      face_candidate[f] = overridden ? (uint32_t)(kBlockoutClasses * (1 + at->second) + (size_t)cls) : (uint32_t)cls;
+    }
+    used[face_candidate[f]] = 1;
+    project_face(mesh, f, scale, sp);
+  }
+  auto path_of = [&](size_t cand) -> const std::string & {
+    if (cand < (size_t)kBlockoutClasses) return surface.materials[cand];
+    return surface.pieces[cand / kBlockoutClasses - 1].materials[cand % kBlockoutClasses];
+  };
+  std::vector<std::string> slots;
+  std::vector<int32_t> slot_of(candidates, 0);
+  for (size_t cand = 0; cand < candidates; cand++) {
+    if (!used[cand]) continue;
+    const std::string &path = path_of(cand);
+    const auto same = std::find(slots.begin(), slots.end(), path);
+    slot_of[cand] = (int32_t)(same - slots.begin());
+    if (same == slots.end()) slots.push_back(path);
+  }
+  mesh.face_material.assign(count, 0);
+  for (size_t f = 0; f < count; f++) mesh.face_material[f] = slot_of[face_candidate[f]];
+  /* Smooth by angle (40 degrees) for the faces that are not flat - a blended join, a curved side - and flat for every other face, whatever
+   * angle it meets its neighbour at (a 30 degree ramp does not shade into its floor). */
+  mesh.smooth = true, mesh.smooth_angle = 40.0f;
+  mesh.face_smooth.assign(count, 0);
+  for (size_t f = 0; f < count && named; f++) {
+    const auto at = index.find(faces.piece[f]);
+    const bool flat = f < faces.flat.size() ? faces.flat[f] != 0 : true;
+    mesh.face_smooth[f] = !flat || faces.side[f] == blockout::kSideBlend || (at != index.end() && curved_side(pieces[at->second], faces.side[f]));
+  }
+  mesh.touch();
+  return slots;
+}
+
+uint64_t blockout_mesh_hash(const Mesh &m) {
+  uint64_t h = hash_mix(kFnvBasis, m.positions.size());
+  h = mix_bytes(h, m.positions.data(), m.positions.size() * sizeof(Vec3));
+  h = hash_mix(h, m.face_count());
+  h = mix_bytes(h, m.face_offsets.data(), m.face_offsets.size() * sizeof(uint32_t));
+  h = mix_bytes(h, m.corner_verts.data(), m.corner_verts.size() * sizeof(uint32_t));
+  h = mix_bytes(h, m.uvs.data(), m.uvs.size() * sizeof(Vec2));
+  h = mix_bytes(h, m.face_material.data(), m.face_material.size() * sizeof(int32_t));
+  h = mix_bytes(h, m.face_smooth.data(), m.face_smooth.size());
+  h = mix_bytes(h, m.sharp_edges.data(), m.sharp_edges.size() * sizeof(uint64_t));
+  h = mix_bytes(h, m.seams.data(), m.seams.size() * sizeof(uint64_t));
+  h = mix_bytes(h, m.loose_edges.data(), m.loose_edges.size() * sizeof(uint64_t));
+  h = mix_bytes(h, m.custom_normals.data(), m.custom_normals.size() * sizeof(Vec3));
+  /* An all-zero polygroup list or sculpt mask is no list and no mask (the scene file drops them): equal to none for the hash. */
+  const bool any_group = std::any_of(m.face_group.begin(), m.face_group.end(), [](int32_t v) { return v != 0; });
+  const bool any_mask = std::any_of(m.sculpt_mask.begin(), m.sculpt_mask.end(), [](float v) { return v != 0.0f; });
+  if (any_group) h = mix_bytes(h, m.face_group.data(), m.face_group.size() * sizeof(int32_t));
+  if (any_mask) h = mix_bytes(h, m.sculpt_mask.data(), m.sculpt_mask.size() * sizeof(float));
+  h = mix_float(h, m.smooth_angle);
+  for (const VertexGroup &g : m.vertex_groups) h = mix_bytes(hash_mix(h, fnv1a(g.name.data(), g.name.size())), g.weights.data(), g.weights.size() * sizeof(float));
+  for (const ShapeKey &k : m.shape_keys) h = mix_bytes(hash_mix(h, fnv1a(k.name.data(), k.name.size())), k.delta.data(), k.delta.size() * sizeof(Vec3));
+  return hash_mix(h, (uint64_t)m.smooth | (uint64_t)m.seams_sharp << 1 | (uint64_t)m.vertex_groups.size() << 8 | (uint64_t)m.shape_keys.size() << 24);
+}
+
+GameObject *blockout_pieces_holder(const GameObject &baked) {
+  const BlockoutBaked *bk = baked.get<BlockoutBaked>();
+  const uint64_t id = bk ? std::strtoull(bk->pieces_id.c_str(), nullptr, 10) : 0;
+  GameObject *by_name = nullptr;
+  for (GameObject *c : baked.children) {
+    if (id && c->id == id) return c;  // (a child, so a number that means another object in a reloaded scene is not taken)
+    if (!by_name && c->name == kBlockoutPiecesName && !c->get<Blockout>()) by_name = c;
+  }
+  return by_name;
+}
+
+void blockout_baked_sources(const GameObject &baked, std::vector<uint64_t> &out) {
+  const GameObject *holder = blockout_pieces_holder(baked);
+  if (!holder) return;
+  std::function<void(const GameObject &)> walk = [&](const GameObject &g) {
+    for (const GameObject *c : g.children) {
+      if (!c->active || c->get<Blockout>()) continue;
+      const BlockoutPiece *bp = c->get<BlockoutPiece>();
+      if (bp && bp->enabled && bp->shape == (int)blockout::Shape::Mesh && bp->opening == 0)
+        if (const GameObject *src = resolve_mesh_piece(*bp, nullptr)) out.push_back(src->id);
+      walk(*c);
+    }
+  };
+  walk(*holder);
 }
 
 const BlockoutHandle *blockout_handle_named(const std::vector<BlockoutHandle> &handles, const std::string &name) {

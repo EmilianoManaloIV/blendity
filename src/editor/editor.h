@@ -4087,6 +4087,8 @@ class Editor {
     blockout::Faces faces;
     blockout::Report report;
     bool ok = false;
+    BlockoutSurface surface;           // (round 482: what the worker gives the faces besides their shape, and the slots it made)
+    std::vector<std::string> slots;
     /* A newer snapshot was asked for while this job ran (its hash, so a frame asks once): the pieces as they then are start
      * when this one has returned - the latest wins, nothing queues. */
     bool has_next = false;
@@ -4103,9 +4105,19 @@ class Editor {
    * that never pauses shows the mesh follow, one build behind. On (the measurement's other row, task 0453): a newer snapshot
    * cancels the running build and only the newest lands; a piece moved every frame then shows no new mesh until it rests. */
   bool blockout_cancel_stale_ = false;
-  void blockout_request(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash);
-  void blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash);
-  void blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t piece_count, MeshPtr mesh, blockout::Faces &&faces, const blockout::Report &report, bool ok);
+  void blockout_request(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash, BlockoutSurface &&surface);
+  void blockout_start(GameObject &g, Blockout &b, std::vector<blockout::Piece> &&pieces, const blockout::Settings &settings, uint64_t hash, BlockoutSurface &&surface);
+  void blockout_land(GameObject &g, Blockout &b, uint64_t hash, size_t piece_count, MeshPtr mesh, blockout::Faces &&faces, const blockout::Report &report, bool ok,
+                     std::vector<std::string> &&slots);
+  void blockout_set_slots(MeshRenderer &mr, Blockout &b, const std::vector<std::string> &slots);  // (round 482: the build's slot list as the renderer's materials)
+  /* Round 482 (task 0458): materials by class, Bake to Mesh and Unbake. */
+  bool blockout_bake(GameObject &g);
+  bool blockout_unbake(GameObject &g, bool force);  // (false: refused, or asked first - the dialog's Unbake answers with force)
+  bool blockout_baked_edited(const GameObject &g) const;  // (the baked mesh is no longer the one the bake left)
+  bool blockout_material_path(const std::string &word, std::string &out);
+  void blockout_surface_command(const std::vector<std::string> &t);  // (blockout set material <class> <material> | texscale <metres>)
+  void draw_blockout_baked_extras(GameObject &g, BlockoutBaked &b, ui::Layout &lay);  // (the Inspector's Unbake)
+  uint64_t unbake_ask_ = 0;  // the baked object whose Unbake is waiting for the dialog's answer
   void blockout_unwant(uint64_t obj);  // (the pieces are back at what the mesh is: the running build and the waiting one dropped)
   void blockout_finish(size_t index);  // (a returned job: its result adopted if still wanted, its cache given back, the next started)
   void blockout_jobs_poll();
@@ -7119,7 +7131,7 @@ class Editor {
   int stress_kind_ = 0;
 
   /* ---- dialogs ---- */
-  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig } dialog_ = Dialog::None;
+  enum class Dialog { None, SaveAs, OpenScene, ImportObj, About, Preferences, Export, FirstRunTier, Update, History, Libraries, MoonRay, Ai, ImportPreview, UnsavedChanges, Boolean, ExportTextures, Report, Bake, SaveSmat, HairRig, Unbake } dialog_ = Dialog::None;
   int dialog_shown_ = 0;  // which dialog has had its popup opened (task 0290: this editor's own - a file static carried one editor's open dialog into the next)
   /* Updates (task 0079, updater.cpp): the releases list asked for in the background, the build offered or picked,
    * and an installer being downloaded. */
@@ -7237,6 +7249,9 @@ class Editor {
   /* Round 477 (ADR 0129): the live Blockout rebuild's counters - kernel calls made on the main thread (0 while workers are on),
    * builds started on a worker, meshes landed, jobs cancelled or superseded. */
   uint64_t blockout_main_builds_for_test() const { return blockout_main_builds_; }
+  bool unbake_dialog_open_for_test() const { return dialog_ == Dialog::Unbake; }  // (round 482: Unbake of an edited mesh waits for the dialog's answer)
+  bool blockout_baked_edited_for_test(const GameObject &g) const { return blockout_baked_edited(g); }
+  void sculpt_mask_stroked_for_test() { sculpt_mask_version_++; }  // (what a mask stroke does besides writing the mask in place: the Inspector's cache must follow it)
   uint64_t blockout_started_for_test() const { return blockout_started_; }
   uint64_t blockout_landed_for_test() const { return blockout_landed_; }
   uint64_t blockout_cancelled_for_test() const { return blockout_cancelled_; }

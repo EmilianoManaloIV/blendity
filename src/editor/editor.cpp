@@ -1324,6 +1324,19 @@ void Editor::draw_menubar(const Recti &r) {
       });
       u.tooltip("Select the cutter(s), then Ctrl+click the object to cut last.\n"
                 "Blender: the Boolean modifier / Bool Tool (Auto and Brush). Solver: Manifold, as Blender's.");
+      /* Round 482: a Blockout becomes a plain mesh, and back. The command bakes the selected Blockouts and those of the selected pieces, so the
+       * entry is on when any of them is one. */
+      const GameObject *bo = active_object();
+      bool bakeable = false;
+      for (const GameObject *s : selected_objects(false)) bakeable = bakeable || s->get<Blockout>() || (s->get<BlockoutPiece>() && blockout_of_piece(*s));
+      if (u.menu_item("Bake Blockout to Mesh", nullptr, false, bakeable)) run_console_command("blockout bake");
+      u.tooltip(bakeable ? "The selected Blockout (or the Blockout of the selected piece) becomes an ordinary mesh you can edit (Edit Mode, sculpting, modifiers); its pieces go\n"
+                           "under a disabled child. Unbake brings the Blockout back. Console: blockout bake."
+                         : "Off: select a Blockout, or one of its pieces, first. Console: blockout bake.");
+      const bool baked = bo && bo->get<BlockoutBaked>();
+      if (u.menu_item("Unbake Blockout", nullptr, false, baked)) run_console_command("blockout unbake");
+      u.tooltip(baked ? "A baked mesh becomes the Blockout again, built from its pieces; a mesh edited since the bake asks first. Console: blockout unbake [force]."
+                      : "Off: select an object that was baked with Bake to Mesh first. Console: blockout unbake [force].");
     }
     u.submenu("Draw", u.px(200), [this] {
       for (int k = 0; k < kDrawShapeCount; k++)
@@ -2771,7 +2784,7 @@ bool Editor::bake_object_textures(int size, bool keep_uvs) {
     Log::warn("Bake Textures: select an object with a mesh");
     return false;
   }
-  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: the bake writes UVs into the mesh, and a Blockout's next rebuild has none)
+  if (blockout_refuses_edit_mode(g)) return false;  // (round 477: Bake Textures writes UVs and its own layout into the mesh; a Blockout's next rebuild would replace both - Bake to Mesh first)
   if (edit_mode_) exit_edit_mode();
   /* The views show the evaluated mesh. Modifiers that keep the topology (deformers) are baked as shown and the UVs
    * go on the base mesh's same corners; ones that add or remove geometry (Mirror, Array, Boolean...) would repeat
@@ -5197,6 +5210,28 @@ void Editor::draw_dialogs() {
           boolean_selected(boolean_op_, false, boolean_kept_);
         }
         else if (u.button(cancel, "Cancel")) close();
+        break;
+      }
+      case Dialog::Unbake: {  // (round 482: a baked mesh edited since the bake is lost by Unbake)
+        const GameObject *baked = scene_->find(unbake_ask_);
+        const std::string t = "Unbake " + (baked ? baked->name : std::string("the Blockout")) + "?";
+        title(t.c_str());
+        Recti r = u.popup_row();
+        u.label({r.x + u.px(12), r.y, r.w - u.px(20), r.h}, "The mesh was edited since the bake: Unbake builds it again from the pieces and the edits are lost.", u.theme.text_dim);
+        Recti b = u.popup_row(u.row_h() + u.px(10));
+        const int bw = u.px(100), bh = b.h - u.px(8), by = b.y + u.px(4);
+        const Recti go{b.right() - 2 * bw - u.px(18), by, bw, bh}, cancel{b.right() - bw - u.px(12), by, bw, bh};
+        if (u.record_buttons) u.button_rects["unbake:Unbake"] = go, u.button_rects["unbake:Cancel"] = cancel;
+        if (u.button(go, "Unbake")) {
+          const uint64_t id_now = unbake_ask_;
+          close();
+          unbake_ask_ = 0;
+          if (GameObject *g = scene_->find(id_now)) blockout_unbake(*g, true);
+        }
+        else if (u.button(cancel, "Cancel")) {
+          close();
+          unbake_ask_ = 0;
+        }
         break;
       }
       case Dialog::UnsavedChanges: {  // (task 0254: Save / Don't Save / Cancel before the scene is replaced)

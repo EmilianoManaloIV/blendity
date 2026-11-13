@@ -766,7 +766,7 @@ static void sweep(Report &rep, const Options &o, bool crisp) {
  * frame. The frame is the main thread's whole step_frame_headless (hash, swap, first render mesh of a landed result, the Scene
  * view); a landing is timed from the first move whose mesh had not yet been shown. The builds started, landed and cancelled, and the
  * kernel calls made on the main thread (none), say what the frames paid. */
-static void live_row(Report &rep, const Options &o, bool cancel_stale, bool header) {
+static void live_row(Report &rep, const Options &o, bool cancel_stale, bool header, int gi = -1) {
   Editor ed;
   ed.init_headless(1280, 720);
   ed.set_async_jobs_for_test(true);
@@ -779,7 +779,12 @@ static void live_row(Report &rep, const Options &o, bool cancel_stale, bool head
   GameObject *bo = ed.scene().create("Blockout");
   bo->add<Blockout>();
   bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
-  bo->add<MeshRenderer>();
+  bo->add<MeshRenderer>()->contribute_gi = gi == 1;  // (round 482: the rows with a Blockout that takes part in baked lighting - the Scene view lit, the realtime lightmap laid out for it)
+  if (gi == 1) {  // (the worst case for the realtime lightmap layout: Realtime GI on and following every change, a sun to light the view)
+    ed.scene().create("Sun")->add<Light>();
+    ed.scene().lighting.realtime_gi = true;
+    ed.scene().lighting.update_mode = 1;
+  }
   const std::vector<Piece> src = interior(6, 28);
   std::vector<GameObject *> objs;
   for (const Piece &p : src) {
@@ -830,7 +835,9 @@ static void live_row(Report &rep, const Options &o, bool cancel_stale, bool head
     rep.table({"live: interior 100 in the editor, a door moved every frame for " + std::to_string(frames) + " frames (one every 16.7 ms)", "frame median ms", "frame worst ms",
                "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms", "builds started", "landed", "overtaken by a newer move",
                "main-thread builds", "verdict"});
-  rep.row({cancel_stale ? "a newer snapshot cancels the running build (not shipped)" : "the running build finishes and lands, then the newest starts (ADR 0129)", f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
+  const std::string what = gi >= 0 ? std::string(gi == 1 ? "Realtime GI on (Automatic), a sun, Contribute GI on" : "Contribute GI off, Realtime GI off, no sun") + ": the running build finishes and lands, then the newest starts"
+                                   : cancel_stale ? "a newer snapshot cancels the running build (not shipped)" : "the running build finishes and lands, then the newest starts (ADR 0129)";
+  rep.row({what, f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
            std::to_string(landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0), std::to_string(ed.blockout_landed_for_test() - landed0),
            std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
@@ -1016,6 +1023,39 @@ static void blend_sweep(Report &rep, const Options &o, bool crisp) {
   }
 }
 
+/* Round 482: what the slots, the UVs and the shading add to a build - one pass over the result's faces, made on the worker with the mesh. interior rooms 100
+ * with the six materials and a piece override on every tenth piece; the timed part is blockout_finish_mesh alone, against the build it follows. */
+static void surface_row(Report &rep, const Options &o) {
+  rep.table({"slots, UVs and shading on the result (round 482): interior rooms 100", "build ms", "slots + UVs ms", "share of the build %", "faces", "corners", "slots", "verdict"});
+  for (int n : o.quick ? std::vector<int>{28} : std::vector<int>{28, 112}) {
+    const int rooms = n == 28 ? 6 : 12;
+    const std::vector<Piece> pieces = interior_rooms(rooms, n);
+    bl::blockout::Settings st;
+    std::vector<double> build_ms, finish_ms;
+    size_t faces = 0, corners = 0, slot_count = 0;
+    for (int i = 0; i < (o.quick ? 1 : 5); i++) {
+      Run r = on_worker(pieces, st);
+      if (!r.ok) continue;
+      bl::BlockoutSurface surface;
+      surface.scale = 0.5f;
+      for (int k = 0; k < bl::kBlockoutClasses; k++) surface.materials[k] = strprintf("Assets/Materials/Stress%d.mat", k);
+      for (size_t p = 0; p < pieces.size(); p++) {
+        bl::BlockoutSurface::Piece sp;
+        sp.id = pieces[p].id;
+        if (p % 10 == 0) sp.materials[bl::kClassWalls] = "Assets/Materials/StressOverride.mat", sp.offset_u = 0.25f, sp.rotation = 15.0f;
+        surface.pieces.push_back(sp);
+      }
+      ScopedTimer t;
+      const std::vector<std::string> slots = bl::blockout_finish_mesh(r.mesh, r.faces, pieces, surface);
+      finish_ms.push_back(t.ms()), build_ms.push_back(r.ms);
+      faces = r.mesh.face_count(), corners = r.mesh.corner_count(), slot_count = slots.size();
+    }
+    const double b = median(build_ms), f = median(finish_ms);
+    rep.row({strprintf("interior rooms %d", n == 28 ? 100 : 400), f2(b), f2(f), strprintf("%.1f", b > 0.0 ? 100.0 * f / b : 0.0), std::to_string(faces), std::to_string(corners),
+             std::to_string(slot_count), "-"});
+  }
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -1186,6 +1226,9 @@ static void test_blockout(Report &rep, const Options &o) {
   live_row(rep, o, true, false);
   handle_row(rep, o);
   blend_rows(rep, o);
+  surface_row(rep, o);
+  live_row(rep, o, false, true, 0);  // (round 482: the same drag with the Blockout in baked lighting, against without)
+  live_row(rep, o, false, false, 1);
   sweep(rep, o, crisp);
   blend_sweep(rep, o, crisp);
 }

@@ -198,6 +198,9 @@ void register_builtin_components() {
   reg<BlockoutPiece>("Mesh", "A shape that adds to the Blockout above it or cuts from it (a door, a window). It has no mesh of its own: the\n"
                              "Blockout's mesh is its result.",
                      "a Boolean object (Union / Difference) or a ProBuilder shape in a CSG blockout");
+  reg<BlockoutBaked>("Mesh", "What Bake to Mesh leaves on a Blockout turned into a plain mesh: its settings, so Unbake can bring the Blockout back from the pieces under\n"
+                             "the disabled child 'Blockout Pieces'.",
+                     "Apply of a CSG blockout, kept so it can be redone");
   reg<Light>("Rendering", "A directional (sun) or point light.", "Light object (Sun / Point)");
   reg<Strokes>("Mesh", "Brush strokes as geometry (task 0248): cards and ribbons painted onto surfaces, the object's mesh rebuilt from them with custom normals (Own, Surface or Canopy).", "Grease Pencil strokes / a cards mesh with custom normals");
   reg<ProbeVolume>("Rendering",
