@@ -18212,10 +18212,12 @@ static void tests_round483_te() {
       const std::string full = ed.resolve_asset_path_for_test(b->material[k]);
       CHECK(fs::exists(full));
       if (proj && *proj) {
-        std::string p = proj, f = full;
-        for (char &c : p) c = c == '\\' ? '/' : c;
-        for (char &c : f) c = c == '\\' ? '/' : c;
-        CHECK(f.rfind(p, 0) == 0);  // (inside the scratch project, not the user's Assets)
+        /* Inside the scratch project, not the user's Assets: the file the class names IS the one at that key under BLENDITY_PROJECT.
+         * Asked of the file system, not of the two paths' text - CI's temp folder is spelled two ways (Windows: RUNNER~1 and its long
+         * name; macOS: /var and /private/var), and the first version of this check, a prefix of one text in the other, failed there
+         * while the files were where they should be. */
+        std::error_code ec;
+        CHECK(std::filesystem::equivalent(std::filesystem::path(full), std::filesystem::path(fs::join(proj, b->material[k])), ec) && !ec);
       }
     }
   });
