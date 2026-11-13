@@ -3774,7 +3774,7 @@ void physics_step(Scene &scene, float dt) {
    * pose before the springs and the IK had moved it. */
   if (bodies.empty()) return;
   scene.for_each([&](GameObject &g) {
-    if (!g.active_in_hierarchy()) return;
+    if (!g.active_in_hierarchy() || blockout_uses_as_piece(g)) return;  // (round 480, as above: not a floor either)
     const Rigidbody *rb = g.get<Rigidbody>();
     if (rb && rb->enabled) return;
     if (g.get<MeshFilter>() && g.get<MeshRenderer>()) statics.push_back(g.world_bounds());
