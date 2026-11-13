@@ -918,6 +918,104 @@ static void handle_row(Report &rep, const Options &o) {
            std::to_string(ed.blockout_landed_for_test() - landed0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
 
+/* Round 481 (ADR 0130, task 0457): a blend is meshed in a box of its own and stitched to the rest. What one rounded column costs in
+ * a building - `interior 100` as rooms, a column 0.25 m thick from floor to ceiling in the first room with a Blend radius of 0.15 m -
+ * at each detail, against the same building with the column unblended; and the metaball case, where the boxes are the whole cluster. */
+static Piece blend_column(float blend) {
+  Piece p;
+  p.id = 9001, p.shape = Shape::Cylinder, p.radius = 0.25f, p.height = 2.8f, p.segments = 24, p.blend = blend;
+  p.to_blockout = Mat4::translate({1.0f, 0.0f, 1.0f});
+  return p;
+}
+
+static void blend_rows(Report &rep, const Options &o) {
+  static const char *const kDetail[3] = {"Low", "Medium", "High"};
+  rep.table({"a blended column in interior 100 (rooms), radius 0.15 m", "ms / build", "boxes", "tries again", "built whole", "blend cell", "grid cells", "faces", "of them blended", "result", "verdict (100 ms)"});
+  for (int detail = -1; detail < 3; detail++) {
+    std::vector<Piece> pieces = interior_rooms(6, 28);
+    pieces.push_back(blend_column(detail < 0 ? 0.0f : 0.15f));
+    bl::blockout::Settings st;
+    st.blend_detail = std::max(0, detail);
+    std::vector<double> ms;
+    Run r;
+    for (int i = 0; i < (o.quick ? 1 : 5); i++) {
+      r = on_worker(pieces, st);
+      ms.push_back(r.ms);
+    }
+    size_t blended = 0, boxes = 0, retries = 0, whole = 0, cells = 0;
+    float cell = 0.0f;
+    for (uint32_t side : r.faces.side) blended += side == bl::blockout::kSideBlend;
+    for (const bl::blockout::ClusterReport &c : r.rep.clusters) boxes += c.blend_regions, retries += c.seam_retries, whole += c.blend_whole, cells += c.cells, cell = std::max(cell, c.blend_cell);
+    const std::string bad = r.ok ? problem(r.mesh) : "refused: " + r.rep.why;
+    const double m = median(ms);
+    rep.row({detail < 0 ? "the column unblended" : kDetail[detail], f2(m), std::to_string(boxes), std::to_string(retries), std::to_string(whole), detail < 0 ? "-" : strprintf("%.4f", cell),
+             std::to_string(cells), std::to_string(r.mesh.face_count()), std::to_string(blended), bad.empty() ? "closed" : "PROBLEM: " + bad, detail < 0 ? "-" : m <= 100.0 ? "ok" : "over"});
+  }
+  rep.table({"blobs: 40 spheres and boxes, every one with a Blend radius of 0.2 m", "ms / build", "boxes", "built whole", "blend cell", "grid cells", "faces", "result"});
+  for (int detail = 0; detail < 3; detail++) {
+    std::vector<Piece> pieces = piles(o.quick ? 12 : 40, 3.0f, 11u);
+    for (Piece &p : pieces) p.blend = 0.2f;
+    bl::blockout::Settings st;
+    st.blend_detail = detail, st.max_cells = 64000000;
+    std::vector<double> ms;
+    Run r;
+    for (int i = 0; i < (o.quick ? 1 : 3); i++) {
+      r = on_worker(pieces, st);
+      ms.push_back(r.ms);
+    }
+    size_t boxes = 0, whole = 0, cells = 0;
+    float cell = 0.0f;
+    for (const bl::blockout::ClusterReport &c : r.rep.clusters) boxes += c.blend_regions, whole += c.blend_whole, cells += c.cells, cell = std::max(cell, c.blend_cell);
+    const std::string bad = r.ok ? problem(r.mesh) : "refused: " + r.rep.why;
+    rep.row({kDetail[detail], f2(median(ms)), std::to_string(boxes), std::to_string(whole), strprintf("%.4f", cell), std::to_string(cells), std::to_string(r.mesh.face_count()),
+             bad.empty() ? "closed" : "PROBLEM: " + bad});
+  }
+}
+
+/* The hostile arrangements of "any pieces" with Blend radii on them: none, below the detail, ordinary, larger than the piece, not a
+ * number. The same judge as the sweep's; and how the seams went. (500 arrangements a path, 50 quick: an arrangement with a blend
+ * costs a fine grid, where the sweep's cost a boolean.) */
+static void blend_sweep(Report &rep, const Options &o, bool crisp) {
+  const char *one = std::getenv("BLENDITY_BLOCKOUT_BLEND_SEED");
+  const uint32_t cases = one ? (uint32_t)std::max(1, std::atoi(one)) : o.quick ? 50 : 500;
+  rep.table({"sweep with Blend radii", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "boxes stitched", "clusters built whole",
+             "of them: the seam would not close", "tries again", "pieces below the detail", "clusters built without their blends"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Auto : Path::Field;
+    if (k == 0 && !crisp) continue;  // (without the exact path Auto is the grid: the second row)
+    const std::string name = path == Path::Auto ? "the rest on the exact path" : "the rest on the grid (cell 0.08)";
+    Tally t;
+    size_t boxes = 0, whole = 0, fallback = 0, retries = 0, below = 0, dropped = 0;
+    for (uint32_t seed = 1; seed <= cases; seed++) {
+      if (one && (uint32_t)std::atoi(one) != seed) continue;
+      std::vector<Piece> pieces = hostile(seed, false);
+      Rand r{seed * 40503u + 481u};
+      for (Piece &p : pieces) {
+        const int pick = r.pick(10);
+        p.blend = pick < 3 ? 0.0f : pick == 3 ? 0.001f : pick < 8 ? 0.05f + 0.05f * (float)r.pick(6) : pick == 8 ? 5.0f : std::numeric_limits<float>::quiet_NaN();
+      }
+      bl::blockout::Settings st;
+      st.path = path, st.cell = 0.08f, st.blend_detail = r.pick(3);
+      Mesh m;
+      bl::blockout::Report rp;
+      bl::blockout::Faces named;
+      if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+        t.refused++;
+        if (std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  blend seed %u (%s) refused: %s\n", seed, name.c_str(), rp.why.c_str());
+        continue;
+      }
+      judge(seed, name.c_str(), m, named, rp, t);
+      for (const bl::blockout::ClusterReport &c : rp.clusters)
+        if (c.blend_dropped && std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  blend seed %u (%s) built without its blends: %s\n", seed, name.c_str(), c.seam_why.c_str());
+      for (const bl::blockout::ClusterReport &c : rp.clusters) boxes += c.blend_regions, whole += c.blend_whole, fallback += c.blend_fallback, retries += c.seam_retries, below += c.blend_below, dropped += c.blend_dropped;
+    }
+    rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(boxes),
+             std::to_string(whole), std::to_string(fallback), std::to_string(retries), std::to_string(below), std::to_string(dropped)});
+    if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+    if (t.unchecked) rep.note(name + strprintf(": %zu results of 20,000 faces or more were not checked for faces on top of each other", t.unchecked));
+  }
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -1087,5 +1185,7 @@ static void test_blockout(Report &rep, const Options &o) {
   live_row(rep, o, false, true);
   live_row(rep, o, true, false);
   handle_row(rep, o);
+  blend_rows(rep, o);
   sweep(rep, o, crisp);
+  blend_sweep(rep, o, crisp);
 }

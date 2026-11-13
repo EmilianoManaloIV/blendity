@@ -11,6 +11,7 @@ namespace bl {
 
 extern const char *const kBlockoutShapeNames[8];  // (blockout::Shape's order: Box, Cylinder, Sphere, Wedge, Stairs, Arch, Outline, Mesh)
 extern const char *const kBlockoutOpNames[3];
+extern const char *const kBlockoutBlendDetailNames[3];
 extern const char *const kBlockoutWallNames[2];
 extern const char *const kBlockoutOpeningNames[3];
 extern const char *const kBlockoutMethodNames[3];
@@ -24,7 +25,10 @@ struct BlockoutStatus {
   std::vector<std::pair<uint64_t, std::string>> notes;    // pieces built that give nothing of their own (a room without thickness)
   size_t refused = 0;           // mesh pieces the snapshot left out before the kernel saw them (counted in `pieces`, named in `skipped`)
   size_t clusters = 0, faces = 0, unresolved = 0;
-  std::string path;           // "exact", "field", "exact + field" or "none"
+  size_t blend_regions = 0, seam_retries = 0, blend_below = 0;  // round 481: blends meshed in boxes of their own, the seam's retries, pieces whose radius is below the detail
+  bool blend_fallback = false;  // a cluster's seam would not close: it was built whole on the grid (or without its blends: blend_dropped)
+  bool blend_dropped = false;   // a cluster was built without its blends: no grid closed over it with them
+  std::string path;          // "exact", "field", "exact + field" or "none"
   double ms = 0.0;
   std::string refusal;          // why the last build was refused (the last good mesh stays)
 };
@@ -61,6 +65,7 @@ struct Blockout : ComponentBase<Blockout> {
   static constexpr const char *kName = "Blockout";
   float cell = 0.1f;   // the field path's grid step, in metres
   int method = 0;      // blockout::Path: Auto, Exact (crisp), Field
+  int blend_detail = 1;  // how finely a Blend radius is meshed: 0 Low, 1 Medium, 2 High (round 481)
   float default_wall = 0.2f;  // fills a new room's Wall, Floor and Ceiling (the kernel never reads it)
   BlockoutState state;
   void reflect(Reflector &r) override;
@@ -108,6 +113,8 @@ struct BlockoutPiece : ComponentBase<BlockoutPiece> {
   /* Whether the piece is a room the kernel builds as one: Room is on, it is no opening and its shape has an inside to walk in
    * (not stairs, an arch or a mesh). */
   bool is_room() const;
+  /* Whether the piece has a Blend radius to set (round 481): a box, cylinder or sphere that is no room, no opening and not an Intersect. */
+  bool takes_blend() const;
   /* A mesh piece's reasons not to be used (empty: none): no object chosen, not in the scene, no mesh, or the object is this piece's own
    * Blockout or one of its pieces (or reaches back to it through another Blockout's mesh pieces). The snapshot leaves such a piece out
    * and the Blockout's status names it. Always empty for another shape. */
@@ -175,11 +182,11 @@ GameObject *blockout_of_piece(const GameObject &piece);
 
 /* A handle on a piece: a place on one of its faces and the way it pulls, both in the piece's own space. */
 struct BlockoutHandle {
-  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill, OutlinePoint, OutlineAdd };
+  enum Kind { BoxFace, CylRadius, CylCap, SphereRadius, Thickness, OpenWidth, OpenHead, OpenSill, OutlinePoint, OutlineAdd, Blend };
   Kind kind = BoxFace;
   int axis = 0;     // the own axis a box face or a cylinder's cap stands on; an outline's point, or (OutlineAdd) the segment's first point
   Vec3 at, dir;     // where it is, and the unit way out
-  std::string name; // what the console calls it: "+x" "-x" "+y" "-y" "+z" "-z", "top", "bottom", "side", "radius", "wall", "width", "head", "sill"
+  std::string name; // what the console calls it: "+x" "-x" "+y" "-y" "+z" "-z", "top", "bottom", "side", "radius", "wall", "width", "head", "sill", "blend" (a radius outside the face that looks at the viewer)
 };
 
 /* An outline's point handle moves in the piece's XZ plane (its `dir` is the plane's normal, Y); the "+" between two points adds a point. */

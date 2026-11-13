@@ -65,6 +65,7 @@ std::string handle_text(const BlockoutHandle &h, const BlockoutPiece &p) {
     case BlockoutHandle::OpenWidth: v = p.width; break;
     case BlockoutHandle::OpenHead: v = p.head; break;
     case BlockoutHandle::OpenSill: v = p.sill; break;
+    case BlockoutHandle::Blend: v = p.blend; break;
     case BlockoutHandle::OutlinePoint:
     case BlockoutHandle::OutlineAdd: {
       const size_t i = (size_t)std::max(0, h.axis);
@@ -80,7 +81,7 @@ bool same_numbers(const BlockoutPiece &a, const BlockoutPiece &b) {
   for (size_t i = 0; i < a.outline.size(); i++)
     if (a.outline[i].x != b.outline[i].x || a.outline[i].y != b.outline[i].y) return false;
   return a.size.x == b.size.x && a.size.y == b.size.y && a.size.z == b.size.z && a.radius == b.radius && a.height == b.height && a.wall == b.wall &&
-         a.width == b.width && a.head == b.head && a.sill == b.sill;
+         a.blend == b.blend && a.width == b.width && a.head == b.head && a.sill == b.sill;
 }
 
 }  // namespace
@@ -175,6 +176,15 @@ float Editor::blockout_snap_t(const Recti &, const GameObject &g, float raw) {
   if (ui_.in.ctrl()) {
     d.snapped = false;
     return raw;
+  }
+  if (d.handle.kind == BlockoutHandle::Blend) {
+    /* The radius, not the handle's place, goes on the grid: another piece's face is nothing a radius is flush with. */
+    d.snapped = false;
+    /* (A fifth of the move snap: 5 cm at the default quarter metre - a radius is a small number beside a room's size.) */
+    const float step = std::max(1e-3f, snap_move_ * 0.2f), per_t = d.to_blockout / d.scale_dir;  // (radius per world metre along the line)
+    if (!(per_t > 0.0f) || !finite_bits(per_t)) return raw;
+    const float was = finite_bits(d.before.blend) ? std::max(0.0f, d.before.blend) : 0.0f;
+    return (std::round((was + raw * per_t) / step) * step - was) / per_t;
   }
   auto screen = [&](float t, Vec2 &s) {
     float z;
@@ -379,9 +389,11 @@ void Editor::draw_blockout_handles(const Recti &view) {
     const bool over = hot == (int)i;
     const bool wall = hs[i].kind == BlockoutHandle::Thickness;
     const bool add = hs[i].kind == BlockoutHandle::OutlineAdd;
+    const bool blend = hs[i].kind == BlockoutHandle::Blend;
     const float r = (float)u.px(over ? 6 : add ? 4 : 5);
     u.canvas.fill_rect({(int)(x - r - 1), (int)(y - r - 1), (int)(2 * r + 2), (int)(2 * r + 2)}, Color::hex(0x101010));
-    u.canvas.fill_rect({(int)(x - r), (int)(y - r), (int)(2 * r), (int)(2 * r)}, over ? Color::hex(0xFFFFFF) : wall ? Color::hex(0xF4BC02) : add ? Color::hex(0x7BD88F) : Color::hex(0x5AA9FF));
+    u.canvas.fill_rect({(int)(x - r), (int)(y - r), (int)(2 * r), (int)(2 * r)}, over ? Color::hex(0xFFFFFF) : wall ? Color::hex(0xF4BC02) : add ? Color::hex(0x7BD88F) : blend ? Color::hex(0xE58AF2) : Color::hex(0x5AA9FF));
+    if (blend) u.canvas.fill_rect({(int)(x - r + 3), (int)(y - r + 3), (int)(2 * r - 6), (int)(2 * r - 6)}, Color::hex(0x101010));  // (a ring: the radius, not a face)
     if (u.record_buttons) u.button_rects["blockout_handle:" + hs[i].name] = Recti{(int)x - 5, (int)y - 5, 10, 10};  // (tests)
     if (!blockout_drag_.active || !over) continue;
     const std::string text = blockout_drag_.text + (blockout_drag_.snapped ? "  (snapped)" : "");
@@ -399,7 +411,7 @@ void Editor::blockout_handle_command(const std::vector<std::string> &t) {
   BlockoutPiece *bp = g ? g->get<BlockoutPiece>() : nullptr;
   if (!bp || !blockout_of_piece(*g)) return Log::warn("blockout handle <side> <metres>: select a Blockout piece first");
   const std::string usage = "blockout handle <side> <metres> [both] - sides: +x -x +y -y +z -z (a box, a room), top bottom side (a cylinder), radius (a sphere), "
-                            "wall (a room), width head sill (a door or window), +z -z (an arch's depth), top bottom (an outline's height)";
+                            "wall (a room), blend (a box, cylinder or sphere's Blend radius), width head sill (a door or window), +z -z (an arch's depth), top bottom (an outline's height)";
   if (t.size() < 4) return Log::warn("%s", usage.c_str());
   const std::string num = t[3];
   const bool is_number = !num.empty() && (std::isdigit((unsigned char)num[0]) || num[0] == '-' || num[0] == '.' || num[0] == '+');

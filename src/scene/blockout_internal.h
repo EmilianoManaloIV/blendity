@@ -83,6 +83,7 @@ struct Solid {
   double scale_min = 1.0;                                 // the smallest stretch of the piece's matrix
   V3 half{0.5, 0.5, 0.5};                                 // box: half sizes; cylinder: (radius, half height, radius); sphere: radius
   bool mesh = false;    // a mesh piece
+  bool region = false;  // a blend's box (ADR 0130), not a piece: not counted in the cluster's bounds; its faces are the seam
   bool flat = true;     // its faces lie in few planes and may merge by them (false: a curved mesh - its faces merge with nothing)
   bool closed = true;   // a mesh piece: every edge has a face on each side (what Manifold takes)
   std::shared_ptr<const MeshLines> lines;  // a mesh piece's table for the lines
@@ -103,6 +104,7 @@ struct Cluster {
   bool blended = false;  // some piece has a Blend radius
   bool meshes = false;   // some solid is a mesh piece (Blend radii are not read then)
   bool open_mesh = false;  // ...and one of them is not closed: the field path, when the path is left to the build
+  double area_cap = 0.0;   // above 0: the most surface the grid is asked to budget for (a blend's box: its solids reach far past it)
 };
 
 /* The build order as a test: whether a place is in the result, given which solids it is in. `solids` are indices
@@ -169,6 +171,19 @@ struct Polys {
   std::vector<uint8_t> flat;    // per face: it lies in its side's plane (not: a blended face, an unresolved place's)
   size_t unresolved = 0;
 };
+
+/* A cluster's faces by name (ADR 0130): what the parts of a blended cluster are joined from. */
+struct Part {
+  std::vector<V3> points;
+  std::vector<uint32_t> offsets{0}, verts;
+  std::vector<uint32_t> piece, side;  // per face
+  std::vector<uint8_t> flat, seam;    // per face; seam: it lies on a blend's box
+};
+/* The parts' faces that are not on a box, as one surface: the corners the parts share along the boxes are made one
+ * (the first part's is kept; a corner in the middle of another part's edge is put into that edge). False, with `open`,
+ * when the result is not closed - the two sides of a box did not show the same outline. `weld`: how far apart one
+ * corner's two copies may be. */
+bool stitch_parts(const std::vector<Part> &parts, double weld, Part &out, const char **open, size_t *welded = nullptr);
 
 /* ADR 0128 decision 8. False when cancelled. `open`: null when the faces are a closed surface, else what keeps them
  * from being one (the soup itself was not closed). */

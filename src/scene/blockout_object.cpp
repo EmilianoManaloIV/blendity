@@ -18,6 +18,7 @@ namespace bl {
 const char *const kBlockoutShapeNames[8] = {"Box", "Cylinder", "Sphere", "Wedge", "Stairs", "Arch", "Outline", "Mesh"};
 const char *const kBlockoutOpNames[3] = {"Add", "Subtract", "Intersect"};
 const char *const kBlockoutMethodNames[3] = {"Auto", "Exact", "Field"};
+const char *const kBlockoutBlendDetailNames[3] = {"Low", "Medium", "High"};
 const char *const kBlockoutWallNames[2] = {"Merge with neighbours", "Keep walls"};
 const char *const kBlockoutOpeningNames[3] = {"None", "Door", "Window"};
 
@@ -28,6 +29,9 @@ void Blockout::reflect(Reflector &r) {
   r.enumeration("Method", method, kBlockoutMethodNames, 3);
   r.help("Auto: exact where the build has it (Blender's libraries), else the field path. Exact: the exact boolean only - a build\n"
          "without Blender's libraries builds nothing and the status says why. Field: the field path for every cluster.");
+  r.enumeration("Blend Detail", blend_detail, kBlockoutBlendDetailNames, 3);
+  r.help("How finely a piece's Blend Radius is meshed: Low a third of the radius, Medium a sixth, High a twelfth (never coarser than Field Cell). "
+         "Finer is rounder and slower. A radius below a thirty-second of Field Cell is built unblended and the status says so.");
   r.field("Default Wall Thickness", default_wall, 0.01f, 0.0f, 100.0f);
   r.help("What a new room's Wall, Floor and Ceiling start at, in metres. Rooms already made keep theirs.");
 }
@@ -36,6 +40,7 @@ blockout::Settings Blockout::settings() const {
   blockout::Settings s;
   s.cell = finite_bits(cell) ? std::min(10.0f, std::max(0.01f, cell)) : 0.1f;
   s.path = (blockout::Path)std::min(2, std::max(0, method));
+  s.blend_detail = std::min(2, std::max(0, blend_detail));
   return s;
 }
 
@@ -149,7 +154,16 @@ void BlockoutPiece::reflect(Reflector &r) {
     r.help("The object whose mesh is this piece (a closed mesh; an open one is skipped on the exact path). The piece is placed by its own "
            "transform; the object itself is no longer drawn, collided with, baked or exported while the piece is on.");
   }
-  if (all) r.field("Blend Radius", blend, 0.01f, 0.0f, 100.0f);  // (not in the Inspector until round 481)
+  if (all || takes_blend()) {
+    r.field("Blend Radius", blend, 0.01f, 0.0f, 100.0f);
+    r.help("Melts the piece into what it touches, in metres in the Blockout's space: an Add piece gets a rounded fillet along the join, a "
+           "Subtract piece a rounded rim. 0: a crisp join. What the blend does not reach stays as it was. Blend Detail on the Blockout sets how "
+           "finely the rounded part is meshed. Rooms and Intersect pieces are not blended.");
+  }
+}
+
+bool BlockoutPiece::takes_blend() const {
+  return opening == 0 && !is_room() && operation != (int)blockout::Op::Intersect && (shape == 0 || shape == 1 || shape == 2);
 }
 
 namespace {
@@ -352,7 +366,7 @@ blockout::Piece BlockoutPiece::to_piece(uint64_t id, const Mat4 &to_blockout, st
       p.mesh_key = key;
     }
   }
-  p.blend = finite_bits(blend) ? std::min(100.0f, std::max(0.0f, blend)) : blend;
+  p.blend = finite_bits(blend) ? std::min(100.0f, std::max(0.0f, blend)) : 0.0f;
   p.to_blockout = to_blockout;
   if (opening != 0) {  // (a box that cuts, its middle between the sill and the head above the origin)
     p.shape = blockout::Shape::Box, p.op = blockout::Op::Subtract, p.blend = 0.0f;
@@ -447,6 +461,7 @@ uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, cons
     for (const auto &r : notes->refused) h = hash_mix(hash_mix(h, r.first), fnv1a(r.second.data(), r.second.size()));
   h = mix_float(h, settings.cell);
   h = hash_mix(h, (uint64_t)settings.path);
+  h = hash_mix(h, (uint64_t)(uint32_t)settings.blend_detail);
   h = hash_mix(h, (uint64_t)settings.max_cells);
   for (const blockout::Piece &p : pieces) {
     h = hash_mix(h, p.id);
@@ -527,6 +542,63 @@ float finite_or(float v, float fallback) { return finite_bits(v) ? v : fallback;
  * handles then had no place and no direction. Found by CI's macOS job in round 479.) */
 Vec3 along_axis(int axis, float v) { return Vec3(axis == 0 ? v : 0.0f, axis == 1 ? v : 0.0f, axis == 2 ? v : 0.0f); }
 
+/* The Blend handle (round 481): one more handle on a piece that takes a Blend radius, a radius outside the point of the piece's
+ * surface that faces the viewer most - but never one whose line runs along the view ray (the mouse could not pull it: see
+ * Editor::blockout_handle_view), so a candidate looking straight at the viewer is passed over for the next. The candidates are
+ * the faces' middles of a box or a cylinder (a cylinder's side too, half way to its silhouette) and a sphere's surface half way
+ * to its silhouette. A radius of 0 still has a place: a tenth of the piece's reach out, so the handle can be taken and pulled. */
+void add_blend_handle(const BlockoutPiece &p, Vec3 toward, std::vector<BlockoutHandle> &out) {
+  if (!p.takes_blend()) return;
+  struct Candidate {
+    Vec3 at, dir;
+  };
+  std::vector<Candidate> cands;
+  float reach = 0.0f;  // the piece's largest half extent
+  if (p.shape == 0) {
+    const Vec3 h(std::fabs(finite_or(p.size.x, 0.0f)) * 0.5f, std::fabs(finite_or(p.size.y, 0.0f)) * 0.5f, std::fabs(finite_or(p.size.z, 0.0f)) * 0.5f);
+    reach = std::max(h.x, std::max(h.y, h.z));
+    for (int k = 0; k < 6; k++) {
+      const int axis = k / 2;
+      const float s = (k & 1) ? -1.0f : 1.0f;
+      cands.push_back({along_axis(axis, s * (axis == 0 ? h.x : axis == 1 ? h.y : h.z)), along_axis(axis, s)});
+    }
+  }
+  else {
+    const float r = std::fabs(finite_or(p.radius, 0.0f)), hh = p.shape == 1 ? std::fabs(finite_or(p.height, 0.0f)) * 0.5f : r;
+    reach = std::max(r, hh);
+    const Vec3 ft = flat_toward(toward);
+    if (p.shape == 1) {
+      cands.push_back({Vec3(0.0f, hh, 0.0f), Vec3(0, 1, 0)});
+      cands.push_back({Vec3(0.0f, -hh, 0.0f), Vec3(0, -1, 0)});
+      const Vec3 side(-ft.z, 0.0f, ft.x), mid = normalize(ft + side);
+      cands.push_back({mid * r, mid});
+    }
+    else {
+      Vec3 d = cross(toward, Vec3(0.0f, 1.0f, 0.0f));
+      if (!(length(d) > 1e-4f * std::max(1e-6f, length(toward)))) d = cross(toward, Vec3(1.0f, 0.0f, 0.0f));
+      const float l = length(d), lt = length(toward);
+      d = l > 1e-6f && finite_bits(l) ? d * (1.0f / l) : Vec3(1.0f, 0.0f, 0.0f);
+      const Vec3 t = lt > 1e-6f && finite_bits(lt) ? toward * (1.0f / lt) : Vec3(0.0f, 1.0f, 0.0f);
+      Vec3 mid = t * 0.8f + d * 0.6f;
+      mid = mid * (1.0f / length(mid));
+      cands.push_back({mid * r, mid});
+    }
+  }
+  const float blend = finite_bits(p.blend) ? std::max(0.0f, p.blend) : 0.0f;
+  const float offset = std::max(blend, std::max(0.05f, 0.1f * reach));
+  float best = -1e30f;
+  const Candidate *pick = nullptr;
+  for (const Candidate &c : cands) {
+    const Vec3 view = toward - c.at;
+    const float lv = length(view);
+    const float facing = lv > 1e-9f && finite_bits(lv) ? dot(c.dir, view) / lv : 0.0f;
+    if (facing > 0.95f || facing <= best) continue;
+    best = facing, pick = &c;
+  }
+  if (!pick) pick = &cands.back();
+  out.push_back(make_handle(BlockoutHandle::Blend, 0, pick->at + pick->dir * offset, pick->dir, "blend"));
+}
+
 }  // namespace
 
 void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *growth, std::vector<BlockoutHandle> &out) {
@@ -580,6 +652,7 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
       const float half = axis == 0 ? h.x : axis == 1 ? h.y : h.z;
       out.push_back(make_handle(H::BoxFace, axis, along_axis(axis, s * half), along_axis(axis, s), names[k]));
     }
+    add_blend_handle(p, toward, out);
     if (!room) return;
     /* The wall nearest the viewer: its outer face's middle. */
     float best = 1e30f;
@@ -604,6 +677,7 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
     const Vec3 ft = flat_toward(toward), d(-ft.z, 0.0f, ft.x);
     out.push_back(make_handle(H::CylRadius, 0, d * r, d, "side"));
     if (room) out.push_back(make_handle(H::Thickness, 0, d * (r + (float)growth->x), d, "wall"));
+    add_blend_handle(p, toward, out);
     return;
   }
   /* A direction square to the view (the sphere's silhouette), turned about Y; about X when the viewer is straight above or below. */
@@ -612,6 +686,7 @@ void blockout_handles(const BlockoutPiece &p, Vec3 toward, const RoomGrowth *gro
   const float l = length(d);
   d = l > 1e-6f && finite_bits(l) ? d * (1.0f / l) : Vec3(1.0f, 0.0f, 0.0f);
   out.push_back(make_handle(H::SphereRadius, 0, d * r, d, "radius"));
+  add_blend_handle(p, toward, out);
 }
 
 Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const BlockoutHandle &h, float delta, bool both, float to_blockout_scale) {
@@ -640,6 +715,12 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
     case BlockoutHandle::Thickness:
       p.wall = std::min(1000.0f, std::max(0.0f, safe_thickness(before.wall) + delta * (finite_bits(to_blockout_scale) ? to_blockout_scale : 1.0f)));
       return Vec3(0.0f);
+    case BlockoutHandle::Blend: {
+      /* In the Blockout's space, like the radius itself: the delta (own units along the handle) times the way's scale there. */
+      const float was = finite_bits(before.blend) ? std::max(0.0f, before.blend) : 0.0f;
+      p.blend = std::min(100.0f, std::max(0.0f, was + delta * (finite_bits(to_blockout_scale) ? to_blockout_scale : 1.0f)));
+      return Vec3(0.0f);
+    }
     case BlockoutHandle::OpenWidth:
       p.width = std::max(kBlockoutMinSize, std::fabs(before.width) + 2.0f * delta);  // (both ends: the opening stays centred)
       return Vec3(0.0f);

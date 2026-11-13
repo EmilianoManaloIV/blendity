@@ -809,12 +809,14 @@ void assign_planes(Cluster &c) {
   /* How many solids use each plane (a convex solid has one face in a plane at most; a mesh is counted once). */
   c.plane_users.assign(c.planes.size(), 0);
   std::vector<uint32_t> counted(c.planes.size(), UINT32_MAX);
-  for (uint32_t si = 0; si < c.solids.size(); si++)
+  for (uint32_t si = 0; si < c.solids.size(); si++) {
+    if (c.solids[si].region) continue;  // (a blend's box is not a piece: it does not make a plane "shared", and so does not turn a cluster's frame)
     for (uint32_t p : c.solids[si].face_plane) {
       if (counted[p] == si) continue;
       counted[p] = si;
       c.plane_users[p]++;
     }
+  }
 }
 
 /* Each solid's corners put on its faces' planes from the table, so faces in one plane have their corners in it to
@@ -869,7 +871,7 @@ void finish_cluster(Cluster &c) {
   for (const Solid &s : c.solids) {
     c.blended = c.blended || s.blend > 0.0;
     c.trims += s.role == Role::Intersect;
-    if (s.role == Role::Intersect) continue;
+    if (s.role == Role::Intersect || s.region) continue;
     for (int a = 0; a < 3; a++) c.lo[a] = std::min(c.lo[a], s.lo[a]), c.hi[a] = std::max(c.hi[a], s.hi[a]);
   }
   c.scale = length(c.hi - c.lo);
@@ -919,6 +921,10 @@ uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
   h = mix_float(h, st.cell);
   h = hash_mix(h, (uint64_t)st.path);
   h = hash_mix(h, (uint64_t)st.max_cells);
+  /* (The detail is part of a cluster's key only where a piece has a Blend radius: the others are not built again when it changes.) */
+  bool blended = false;
+  for (const Piece &p : pieces) blended = blended || p.blend > 0.0f;
+  if (blended) h = hash_mix(h, 0x481u + (uint64_t)(uint32_t)st.blend_detail);
   for (const Piece &p : pieces) {
     h = hash_mix(h, p.id);
     h = hash_mix(h, ((uint64_t)p.shape << 8) | (uint64_t)p.op);
@@ -939,22 +945,22 @@ Path path_for(const Cluster &c, const Settings &st) {
   return crisp_available() && !c.blended && !c.open_mesh ? Path::Crisp : Path::Field;
 }
 
-bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std::atomic<bool> *cancel, std::string &why) {
+/* A cluster through its path and the face maker: its faces by name. `rep` is added to (a blended cluster is several
+ * of these); `path` is the path that built it. */
+bool mesh_cluster(const Cluster &c, Path &path, const Settings &st, Part &part, ClusterReport &rep, const std::atomic<bool> *cancel, std::string &why) {
   const double t0 = now_seconds();
-  res.rep.path = path_for(c, st);
-  res.rep.pieces = (uint32_t)c.solids.size();
+  ClusterReport one;
   Soup soup;
-  bool made = res.rep.path == Path::Crisp ? crisp_soup(c, soup, res.rep, why) : field_soup(c, st, soup, res.rep, cancel, why);
+  bool made = path == Path::Crisp ? crisp_soup(c, soup, one, why) : field_soup(c, st, soup, one, cancel, why);
   /* A mesh Manifold would not take or could not combine (closed, yet crossing itself or pinched): the grid takes
    * anything - when the path was left to the build. */
-  if (!made && res.rep.path == Path::Crisp && st.path == Path::Auto && c.meshes && !cancelled(cancel)) {
+  if (!made && path == Path::Crisp && st.path == Path::Auto && c.meshes && !cancelled(cancel)) {
     why.clear();
-    res.rep.path = Path::Field;
-    made = field_soup(c, st, soup, res.rep, cancel, why);
+    path = Path::Field;
+    made = field_soup(c, st, soup, one, cancel, why);
   }
   if (!made) return false;
   const double t1 = now_seconds();
-  res.rep.faces_in = soup.face_count();
   Polys polys;
   const char *open = nullptr;
   if (!make_faces(c, soup, polys, cancel, &open)) {
@@ -965,22 +971,303 @@ bool build_cluster(Cluster &c, const Settings &st, ClusterResult &res, const std
     why = strprintf("the surface of a cluster of %u pieces did not close (%s)", (unsigned)c.solids.size(), open);
     return false;
   }
-  res.positions.reserve(polys.points.size());
-  for (const V3 &p : polys.points) res.positions.push_back(Vec3((float)p.x, (float)p.y, (float)p.z));
-  res.face_offsets = std::move(polys.offsets);
-  res.corner_verts = std::move(polys.verts);
+  part = Part();
+  part.points = std::move(polys.points);
+  part.offsets = std::move(polys.offsets);
+  part.verts = std::move(polys.verts);
   for (uint32_t label : polys.label) {
     const uint32_t plain = label & ~kBlendLabel;
     const Solid &s = c.solids[c.label_solid[plain]];
-    res.face_piece.push_back(s.piece);
+    part.piece.push_back(s.piece);
     /* (A curved mesh's faces carry the mark of "no flat side" so that they merge with nothing: they still name the mesh's face.) */
-    res.face_side.push_back((label & kBlendLabel) && !s.mesh ? kSideBlend : s.side_base + s.face_side[c.label_face[plain]]);
+    part.side.push_back((label & kBlendLabel) && !s.mesh ? kSideBlend : s.side_base + s.face_side[c.label_face[plain]]);
+    part.seam.push_back(s.region ? 1 : 0);
   }
-  res.face_flat = std::move(polys.flat);
-  res.rep.faces_out = res.face_piece.size();
-  res.rep.unresolved = polys.unresolved;
+  part.flat = std::move(polys.flat);
   const double t2 = now_seconds();
-  res.rep.ms_soup = (t1 - t0) * 1000.0, res.rep.ms_faces = (t2 - t1) * 1000.0, res.rep.ms = (t2 - t0) * 1000.0;
+  rep.turned = rep.turned || one.turned;
+  rep.cell = std::max(rep.cell, one.cell);
+  rep.cells += one.cells, rep.filled += one.filled, rep.faces_in += soup.face_count(), rep.unresolved += polys.unresolved;
+  rep.ms_soup += (t1 - t0) * 1000.0, rep.ms_faces += (t2 - t1) * 1000.0;
+  return true;
+}
+
+/* ------------------------------------------------- a blend in a box of its own (ADR 0130) */
+
+struct BlendRegion {
+  V3 lo, hi;
+  double cell = 0.0;  // its grid's
+};
+
+struct BlendPlan {
+  std::vector<BlendRegion> regions;
+  bool whole = false;  // one box holds the whole cluster: no rest, no seam
+  double cell = 0.0;   // the finest of the regions'
+  uint32_t below = 0;
+  bool stuck = false;  // a box's face could not be kept clear of the cluster's planes: no seam is tried
+};
+
+/* A blend's box as a solid: cut out of the rest (Subtract), or what the blend's own build is kept inside (Intersect). */
+Solid region_box(const BlendRegion &r, Role role) {
+  Solid s;
+  for (int i = 0; i < 8; i++) s.verts.push_back({i & 1 ? r.hi.x : r.lo.x, i & 2 ? r.hi.y : r.lo.y, i & 4 ? r.hi.z : r.lo.z});
+  add_face(s, {0, 4, 6, 2}, 0);
+  add_face(s, {1, 3, 7, 5}, 1);
+  add_face(s, {0, 1, 5, 4}, 2);
+  add_face(s, {2, 6, 7, 3}, 3);
+  add_face(s, {0, 2, 3, 1}, 4);
+  add_face(s, {4, 5, 7, 6}, 5);
+  const V3 mid = (r.lo + r.hi) * 0.5;
+  for (size_t f = 0; f < s.face_count(); f++)  // (counter-clockwise from outside, whatever the lists above say)
+    if (dot(newell(s, f), face_centre(s, f) - mid) < 0.0) std::reverse(s.face_verts.begin() + s.face_offsets[f], s.face_verts.begin() + s.face_offsets[f + 1]);
+  s.role = role, s.subtract = role == Role::Subtract, s.region = true;
+  s.piece = UINT32_MAX;  // (no piece's: a room's parts are found by their piece's number, and a box must never be taken for one)
+  s.half = (r.hi - r.lo) * 0.5;
+  s.inv[3] = -mid.x, s.inv[7] = -mid.y, s.inv[11] = -mid.z;
+  set_bounds(s);
+  return s;
+}
+
+/* Where the blends of a cluster are meshed: round each blended piece its bounds grown by the radius and two cells of
+ * its grid (a smooth minimum is the plain one beyond the radius), pushed out to whole cells; boxes that touch are one.
+ * The box holds the whole blended piece - a blended ball or column is round inside it, and its facets never have to be
+ * matched across a box's face: only what the piece touches is cut by the box (ADR 0130 says what a smaller box cost).
+ * A box's face is kept a quarter of a cell clear of every plane of the cluster that runs along it: the box cuts through
+ * faces, it never lies in one. A radius below the finest cell the detail allows is not a blend: the piece is built
+ * as it is, and counted. When the boxes take most of the cluster there is no rest worth a seam: the whole cluster is
+ * the one box. `grow`: cells added on every side (the seam's retries). */
+void plan_blend(Cluster &c, std::vector<Solid> &fresh, const Settings &st, int grow, bool rest_on_grid, BlendPlan &plan) {
+  plan = BlendPlan();
+  const double divide = st.blend_detail <= 0 ? 3.0 : st.blend_detail == 1 ? 6.0 : 12.0;
+  const double finest = (double)st.cell / 32.0;
+  for (size_t si = 0; si < c.solids.size(); si++) {
+    Solid &s = c.solids[si];
+    if (!(s.blend > 0.0)) continue;
+    const double cell = std::max(finest, std::min((double)st.cell, s.blend / divide));
+    if (s.blend < cell) {
+      s.blend = fresh[si].blend = 0.0;
+      plan.below++;
+      continue;
+    }
+    const double reach = s.blend + (2.0 + (double)grow) * cell;
+    plan.regions.push_back({s.lo - V3(reach, reach, reach), s.hi + V3(reach, reach, reach), cell});
+  }
+  if (plan.below) {
+    c.blended = false;
+    for (const Solid &s : c.solids) c.blended = c.blended || s.blend > 0.0;
+    spread_blends(c);
+  }
+  /* A box never cuts a round piece - a cylinder, a sphere, an arch: their facets are finer than the rest's grid can
+   * match on the box's face (measured: a third of a sweep's seams failed there). It grows to hold the piece whole;
+   * a box cuts flat-sided pieces only. Then boxes that touch (within a cell) are one box, with the finer cell. */
+  auto hold_round = [&] {
+    bool grew = false;
+    for (BlendRegion &r : plan.regions)
+      for (const Solid &t : c.solids) {
+        if (t.region || t.role == Role::Intersect || !(t.shape == Shape::Cylinder || t.shape == Shape::Sphere || t.shape == Shape::Arch)) continue;
+        bool apart = false, inside = true;
+        const double pad = 2.0 * r.cell;
+        for (int a = 0; a < 3; a++) {
+          apart = apart || t.lo[a] > r.hi[a] || t.hi[a] < r.lo[a];
+          inside = inside && t.lo[a] - pad >= r.lo[a] && t.hi[a] + pad <= r.hi[a];
+        }
+        if (apart || inside) continue;
+        for (int a = 0; a < 3; a++) r.lo[a] = std::min(r.lo[a], t.lo[a] - pad), r.hi[a] = std::max(r.hi[a], t.hi[a] + pad);
+        grew = true;
+      }
+    return grew;
+  };
+  for (bool merged = true; merged;) {
+    merged = hold_round();
+    for (size_t i = 0; i < plan.regions.size() && !merged; i++)
+      for (size_t j = i + 1; j < plan.regions.size() && !merged; j++) {
+        BlendRegion &a = plan.regions[i], &b = plan.regions[j];
+        const double gap = std::max(a.cell, b.cell);
+        bool apart = false;
+        for (int k = 0; k < 3; k++) apart = apart || a.lo[k] > b.hi[k] + gap || a.hi[k] < b.lo[k] - gap;
+        if (apart) continue;
+        for (int k = 0; k < 3; k++) a.lo[k] = std::min(a.lo[k], b.lo[k]), a.hi[k] = std::max(a.hi[k], b.hi[k]);
+        a.cell = std::min(a.cell, b.cell);
+        plan.regions.erase(plan.regions.begin() + (ptrdiff_t)j);
+        merged = true;
+      }
+  }
+  for (BlendRegion &r : plan.regions) {
+    plan.cell = plan.cell > 0.0 ? std::min(plan.cell, r.cell) : r.cell;
+    /* (How clear: a quarter of the blend's cell - and half the Blockout's cell where the rest is built on the grid, which
+     * cannot show a sliver thinner than its cell on the box's face.) */
+    const double clear = std::max(0.25 * r.cell, rest_on_grid ? 0.5 * (double)st.cell : 0.0);
+    for (int a = 0; a < 3; a++) {
+      r.lo[a] = std::floor(r.lo[a] / r.cell) * r.cell, r.hi[a] = std::ceil(r.hi[a] / r.cell) * r.cell;
+      for (int side = 0; side < 2; side++) {
+        double &at = side ? r.hi[a] : r.lo[a];
+        bool near = true;
+        for (int tries = 0; tries < 16 && near; tries++) {
+          near = false;
+          for (const Plane &p : c.planes) near = near || (p.axis() == a && std::fabs(p.d * p.n[a] - at) < clear);
+          if (near) at += (side ? 2.0 : -2.0) * clear;
+        }
+        plan.stuck = plan.stuck || near;
+      }
+    }
+  }
+  /* The boxes' share of the cluster (what of each lies inside its bounds): past a half, the whole cluster is the box. */
+  double boxes = 0.0, all = 1.0;
+  for (int a = 0; a < 3; a++) all *= std::max(c.hi[a] - c.lo[a], 1e-300);
+  for (const BlendRegion &r : plan.regions) {
+    double v = 1.0;
+    for (int a = 0; a < 3; a++) v *= std::max(0.0, std::min(r.hi[a], c.hi[a]) - std::max(r.lo[a], c.lo[a]));
+    boxes += v;
+  }
+  plan.whole = !plan.regions.empty() && (boxes > 0.5 * all || plan.stuck);
+}
+
+/* The parts of a blended cluster, built and joined: the rest with the boxes cut out, as if no piece had a Blend radius
+ * (the crisp path where the build has it), and each box's inside on its own finer grid. False with `mismatch` when
+ * the two sides of a box did not join - the caller grows the boxes and tries again; false without it: refused. */
+bool build_regions(const Cluster &c, const std::vector<Solid> &fresh, const Settings &st, const BlendPlan &plan, Part &out, ClusterReport &rep, Path &path,
+                   const std::atomic<bool> *cancel, std::string &why, bool &mismatch) {
+  mismatch = false;
+  size_t trims_at = fresh.size();
+  while (trims_at > 0 && fresh[trims_at - 1].role == Role::Intersect) trims_at--;  // (the Intersect solids come last)
+  std::vector<Part> parts(1 + plan.regions.size());
+  Cluster rest;
+  for (size_t i = 0; i < trims_at; i++) rest.solids.push_back(fresh[i]), rest.solids.back().blend = 0.0;
+  for (const BlendRegion &r : plan.regions) rest.solids.push_back(region_box(r, Role::Subtract));
+  for (size_t i = trims_at; i < fresh.size(); i++) rest.solids.push_back(fresh[i]);
+  finish_cluster(rest);
+  path = path_for(rest, st);
+  if (!mesh_cluster(rest, path, st, parts[0], rep, cancel, why)) {
+    if (cancelled(cancel)) return false;
+    mismatch = true;  // (the rest with these boxes cut out could not be built: other boxes, or the whole cluster on the grid)
+    rep.seam_why = "the rest: " + why;
+    why.clear();
+    return false;
+  }
+  double weld = rest.tol, finest = 1e300;
+  for (size_t k = 0; k < plan.regions.size(); k++) {
+    const BlendRegion &r = plan.regions[k];
+    Cluster in;
+    for (size_t i = 0; i < trims_at; i++) {
+      const Solid &s = c.solids[i];  // (its bounds as the cluster has them; the solid as it was before the cluster's planes)
+      bool apart = false;
+      for (int a = 0; a < 3; a++) apart = apart || s.lo[a] - s.blend > r.hi[a] || s.hi[a] + s.blend < r.lo[a];
+      if (!apart) in.solids.push_back(fresh[i]);
+    }
+    if (in.solids.empty()) continue;
+    for (size_t i = trims_at; i < fresh.size(); i++) in.solids.push_back(fresh[i]);
+    in.solids.push_back(region_box(r, Role::Intersect));
+    finish_cluster(in);
+    /* The grid follows the solids' faces inside the box only, and budgets for the box's surface, not the building's. */
+    const V3 size = r.hi - r.lo;
+    for (int a = 0; a < 3; a++) in.lo[a] = std::max(in.lo[a], r.lo[a] - 2.0 * r.cell), in.hi[a] = std::min(in.hi[a], r.hi[a] + 2.0 * r.cell);
+    in.area_cap = 16.0 * (size.x * size.y + size.y * size.z + size.z * size.x);
+    /* (A box has a budget of its own: a long wall with a small radius is meshed as finely as the budget lets it, and the
+     * report says at what cell.) */
+    Settings fine = st;
+    fine.cell = (float)r.cell, fine.path = Path::Field, fine.max_cells = std::min<int64_t>(st.max_cells, 600000);
+    Path field = Path::Field;
+    std::string inner_why;
+    ClusterReport inner;
+    const bool meshed = mesh_cluster(in, field, fine, parts[1 + k], inner, cancel, inner_why);
+    rep.cells += inner.cells, rep.filled += inner.filled, rep.faces_in += inner.faces_in, rep.unresolved += inner.unresolved;
+    rep.ms_soup += inner.ms_soup, rep.ms_faces += inner.ms_faces;
+    rep.blend_cell = std::max(rep.blend_cell, inner.cell);  // (the coarsest any box was meshed at: above the detail's when its budget was passed)
+    if (!meshed) {
+      if (cancelled(cancel)) {
+        why = "cancelled";
+        return false;
+      }
+      mismatch = true;  // (the box cut somewhere its grid could not close: another box may)
+      rep.seam_why = "inside a box: " + inner_why;
+      return false;
+    }
+    weld = std::max(weld, in.tol), finest = std::min(finest, r.cell);
+  }
+  const char *open = nullptr;
+  /* (One corner's two copies lie a few tolerances apart - never as far as a quarter of a blend's cell, where two corners are two.) */
+  if (!stitch_parts(parts, std::min(64.0 * weld, 0.25 * finest), out, &open, &rep.seam_points)) {
+    mismatch = true;
+    rep.seam_why = open ? open : "";
+    return false;
+  }
+  return true;
+}
+
+/* `fresh`: the cluster's solids as they were before its planes were assigned (a blended cluster's parts are clusters
+ * of their own, made from these); empty when no piece has a Blend radius. */
+bool build_cluster(Cluster &c, std::vector<Solid> &fresh, const Settings &st, ClusterResult &res, const std::atomic<bool> *cancel, std::string &why) {
+  const double t0 = now_seconds();
+  res.rep.pieces = (uint32_t)c.solids.size();
+  Part part;
+  bool done = false, seam_tried = false;
+  BlendPlan plan;
+  const bool blends = c.blended && st.path != Path::Crisp && fresh.size() == c.solids.size();
+  /* (Whether the rest is the grid's: the exact path takes it when the build has it and no mesh piece is open.) */
+  const bool rest_on_grid = st.path == Path::Field || !crisp_available() || c.open_mesh;
+  for (int grow = 0; blends && !done && grow <= 4; grow++) {
+    plan_blend(c, fresh, st, grow, rest_on_grid, plan);
+    res.rep.blend_below += plan.below, res.rep.blend_cell = (float)plan.cell;  // (pieces below are counted once: their radius is 0 from then on)
+    if (plan.regions.empty() || plan.whole) break;
+    ClusterReport tried;
+    bool mismatch = false;
+    Path path = Path::Field;
+    seam_tried = true;
+    done = build_regions(c, fresh, st, plan, part, tried, path, cancel, why, mismatch);
+    if (!done && !mismatch) return false;
+    res.rep.ms_soup += tried.ms_soup, res.rep.ms_faces += tried.ms_faces;
+    if (!tried.seam_why.empty()) res.rep.seam_why = tried.seam_why;
+    if (!done) {
+      res.rep.seam_retries += grow < 4;  // (the boxes are grown four times at most)
+      continue;
+    }
+    res.rep.path = path, res.rep.turned = tried.turned, res.rep.cell = tried.cell, res.rep.cells = tried.cells, res.rep.filled = tried.filled;
+    res.rep.faces_in = tried.faces_in, res.rep.unresolved = tried.unresolved, res.rep.seam_points = tried.seam_points, res.rep.blend_cell = tried.blend_cell;
+    res.rep.blend_regions = (uint32_t)plan.regions.size();
+  }
+  if (!done) {
+    /* The whole cluster on one path: nothing is blended, or one box holds it all, or the seam would not close. */
+    Settings whole = st;
+    const bool with_blends = c.blended && plan.cell > 0.0;
+    if (with_blends) {
+      whole.cell = (float)plan.cell;
+      res.rep.blend_whole = true, res.rep.blend_fallback = seam_tried;
+    }
+    Path path = path_for(c, st);
+    why.clear();
+    bool made = mesh_cluster(c, path, whole, part, res.rep, cancel, why);
+    /* A blend never costs the result. The blend's grid would not close over the whole cluster (11 of 500 hostile
+     * arrangements): the Blockout's own cell, which is what such a cluster was built at before it had a blend grid... */
+    if (!made && with_blends && whole.cell < st.cell && !cancelled(cancel)) {
+      res.rep.seam_why = "the whole cluster on the blend's grid: " + why;
+      why.clear();
+      path = path_for(c, st);
+      res.rep.blend_cell = st.cell;
+      made = mesh_cluster(c, path, st, part, res.rep, cancel, why);
+    }
+    /* ...nor would that (7 of 500): the cluster without its blends, as if no piece had a radius - and the report says so. */
+    if (!made && with_blends && fresh.size() == c.solids.size() && !cancelled(cancel)) {
+      res.rep.seam_why = "the whole cluster on the grid with its blends: " + why;
+      why.clear();
+      Cluster plain;
+      for (const Solid &s : fresh) plain.solids.push_back(s), plain.solids.back().blend = 0.0;
+      finish_cluster(plain);
+      path = path_for(plain, st);
+      made = mesh_cluster(plain, path, st, part, res.rep, cancel, why);
+      if (made) res.rep.blend_dropped = true, res.rep.blend_whole = false, res.rep.blend_cell = 0.0f;
+    }
+    if (!made) return false;
+    res.rep.path = path;
+  }
+  res.positions.reserve(part.points.size());
+  for (const V3 &p : part.points) res.positions.push_back(Vec3((float)p.x, (float)p.y, (float)p.z));
+  res.face_offsets = std::move(part.offsets);
+  res.corner_verts = std::move(part.verts);
+  res.face_piece = std::move(part.piece);
+  res.face_side = std::move(part.side);
+  res.face_flat = std::move(part.flat);
+  res.rep.faces_out = res.face_piece.size();
+  res.rep.ms = (now_seconds() - t0) * 1000.0;
   return true;
 }
 
@@ -1039,8 +1326,11 @@ void run_job(Job &job, std::vector<Solid> &solids, const std::vector<Solid> &tri
     for (uint32_t si : job.solids) c.solids.push_back(std::move(solids[si]));
     for (const Solid &t : trims) c.solids.push_back(t);  // (every cluster is cut by every Intersect piece)
     for (size_t i = 0; i < c.solids.size(); i++) c.solids[i].piece = job.solid_piece[i];
+    /* (A cluster with a Blend radius is built in parts, each a cluster made from the solids as they are now: ADR 0130.) */
+    std::vector<Solid> fresh;
+    if (st.path != Path::Crisp && std::any_of(c.solids.begin(), c.solids.end(), [](const Solid &s) { return s.blend > 0.0; })) fresh = c.solids;
     finish_cluster(c);
-    if (!build_cluster(c, st, *res, cancel, job.why)) return;
+    if (!build_cluster(c, fresh, st, *res, cancel, job.why)) return;
     res->rep.pieces = (uint32_t)job.pieces.size();
     res->pieces = job.pieces;
     res->settings = st;
@@ -1183,6 +1473,7 @@ Settings usable(Settings st) {
   if (!finite_bits(st.cell) || !(st.cell > 0.0f)) st.cell = 0.1f;
   st.cell = std::max(1e-5f, std::min(1e6f, st.cell));
   st.max_cells = std::max<int64_t>(4096, std::min<int64_t>(st.max_cells, 64000000));
+  st.blend_detail = std::max(0, std::min(2, st.blend_detail));
   return st;
 }
 
@@ -1260,8 +1551,10 @@ bool build(const std::vector<Piece> &pieces, const Settings &settings, Mesh &out
     const auto it = cache->impl->clusters.find(job.hash);
     if (it == cache->impl->clusters.end()) continue;
     const ClusterResult &r = *it->second;
+    const bool blended = std::any_of(job.pieces.begin(), job.pieces.end(), [](const Piece &p) { return p.blend > 0.0f; });
     const bool same = r.pieces.size() == job.pieces.size() && std::memcmp(&r.settings.cell, &st.cell, 4) == 0 && r.settings.path == st.path &&
-                      r.settings.max_cells == st.max_cells && std::equal(r.pieces.begin(), r.pieces.end(), job.pieces.begin(), same_piece);
+                      r.settings.max_cells == st.max_cells && (!blended || r.settings.blend_detail == st.blend_detail) &&
+                      std::equal(r.pieces.begin(), r.pieces.end(), job.pieces.begin(), same_piece);
     if (same) job.result = it->second, job.cached = true;
   }
   run_jobs(jobs, solids, trims, st, cancel);

@@ -313,6 +313,8 @@ out or with two flat faces on top of each other, and no build refused.
   planes (7.5, 8), so the two results can be joined along the box by an exact union. Whether that seam comes out
   clean depends on the flatness round 476 measures (measured: flat faces lie on their planes to float rounding - 0
   on the interiors, 2e-6 m on the piles). Until then a cluster with any Blend radius is meshed by the field whole.
+  **Decided in round 481: ADR 0130** - a box round each blended piece, its inside on a finer grid, the rest built
+  unblended with the boxes cut out, the two stitched along the boxes by which corner is which (not by a union).
 - The cell the editor picks by itself, materials, UVs and lightmaps: rounds 477 and 482.
 
 ## References

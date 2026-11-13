@@ -2305,6 +2305,26 @@ The Draw Piece (Room) tool (Shift+R, or Modeling Tools > Create > Blockout) draw
 ? Why does a cutting arch come out filled while an arch that adds is a ring? | A Subtract arch is meant as an arched opening, so its inner radius is 0 and everything under the curve is cut; an arch that adds is the ring of blocks itself. The Inspector's Inner Radius changes either afterwards.
 ? You chose Draw: Wedge and then ticked Circle Footprint. What does the tool draw now? | A cylinder: a wedge, stairs and an arch are drawn over a rectangle, so another footprint makes the tool's piece a plain solid again.
 )"},
+    {"Rounding joins: the Blend radius", "A piece's Blend Radius melts it into what it touches: a rounded fillet or a rounded rim", R"(
+Joins in a Blockout are crisp by default. Give a piece a Blend Radius and it melts into what it touches, like a metaball made of primitives: everything the blend does not reach stays exactly what it was - flat walls, square corners, the same vertices - and only the join is rounded.
+# What the radius does
+- An Add piece gets a rounded fillet all along the join with what it stands on or meets; a Subtract piece gets a rounded rim round its cut. The radius is in metres in the Blockout's space (set it in the Inspector, with the handle on the piece, or from the console).
+- Two blended pieces that meet blend with the larger of their radii. Intersect pieces, rooms and mesh pieces are not blended.
+- Blend Detail on the Blockout (Low, Medium, High) is how finely the rounded part is meshed: a third, a sixth or a twelfth of the radius. Finer is rounder and costs more; only the blend's own region is meshed finer, not the whole building.
+- The blend's grid is never finer than a thirty-second of the Blockout's Field Cell. A radius below that is built unblended, and the Blockout's status says so ("Blend radius below a thirty-second of Field Cell: built unblended"): raise the radius or lower Field Cell.
+# Try it
+! cmd:blockout draw box add at 0 0 0 normal 0 1 0 size 3 3 1 | 1. A slab-like box from the origin (x and z from 0 to 3, 1 m high), in the selected Blockout or a new one
+! cmd:blockout draw cylinder add at 1.5 1 1.5 normal 0 1 0 size 0.4 0 2 | 2. A column of radius 0.4 m standing on the slab's top, 2 m high: a crisp join
+! cmd:blockout set blend 0.2 | 3. A Blend Radius of 0.2 m on the selected column: the join with the slab is a rounded fillet
+! cmd:blockout set detail low | 4. Blend Detail Low: the fillet is meshed in thirds of the radius, coarser and quicker (High, twelfths, is rounder and costs several times more)
+! cmd:blockout draw cylinder subtract at 0.6 1 0.6 normal 0 1 0 size 0.3 0 -1 | 5. A hole of radius 0.3 m cut down through the slab
+! cmd:blockout set blend 0.1 | 6. A Blend Radius of 0.1 m on the hole: its rim is rounded
+# From the console
+- `blockout set blend <metres>` sets the Blend Radius of the selected pieces that take one (boxes, cylinders and spheres that add or subtract); `blockout set detail low|medium|high` sets the Blockout's Blend Detail; `blockout handle blend <metres>` moves the piece's blend handle that far.
+? You give a piece a Blend Radius and look at a flat wall of the building far from it. What has changed there? | Nothing: the blend is meshed in a box of its own round the blended piece and stitched to the rest, so a face away from the box has the same corners as before. (A flat face that runs through the box is cut along it into two faces of one plane.)
+? Field Cell is 0.1 m, you set a Blend Radius of 2 mm and the join stays sharp. Why? | The blend's grid is never finer than a thirty-second of Field Cell - 3 mm here - and a radius below that is no blend: the piece is built unblended and the status says so. Raise the radius or lower Field Cell; the Blend Detail does not change this.
+? Why does a room's wall not round into its floor with a Blend Radius? | Rooms and Intersect pieces are not blended: the Blend Radius belongs to the Add and Subtract box, cylinder and sphere pieces, so a room has no such field.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, perf drag, and the stand-in avatar", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the rig is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. Round 468 measures each part so a slow frame can be placed (round 475 writes the full lesson).
 # The Posing block

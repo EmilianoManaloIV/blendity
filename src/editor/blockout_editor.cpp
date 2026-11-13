@@ -37,7 +37,12 @@ BlockoutStatus make_status(const blockout::Report &r, size_t piece_count, bool o
   for (const blockout::Skipped &k : r.notes) s.notes.push_back({k.id, k.why});
   s.used = s.pieces > s.skipped.size() ? s.pieces - s.skipped.size() : 0;
   s.clusters = r.clusters.size();
-  for (const blockout::ClusterReport &c : r.clusters) s.unresolved += c.unresolved;
+  for (const blockout::ClusterReport &c : r.clusters) {
+    s.unresolved += c.unresolved;
+    s.blend_regions += c.blend_regions, s.seam_retries += c.seam_retries, s.blend_below += c.blend_below;
+    s.blend_fallback = s.blend_fallback || c.blend_fallback;
+    s.blend_dropped = s.blend_dropped || c.blend_dropped;
+  }
   s.path = path_text(r);
   s.ms = r.ms_total;
   if (!ok) s.refusal = r.why.empty() ? std::string("the build was refused") : r.why;
@@ -1249,6 +1254,11 @@ std::vector<std::pair<std::string, bool>> Editor::blockout_status_lines(const Ga
   if (!s.refusal.empty()) lines.push_back({"Refused: " + s.refusal + " - the last mesh stays", true});
   if (s.unresolved)
     lines.push_back({strprintf("%zu places could not be resolved (two corners in one cell): lower Field Cell", s.unresolved), true});
+  if (s.blend_regions) lines.push_back({strprintf("%zu blends meshed in boxes of their own", s.blend_regions), false});
+  if (s.blend_fallback && !s.blend_dropped)
+    lines.push_back({strprintf("A blend's seam would not close (%zu more boxes tried): that cluster was built whole on the grid", s.seam_retries), true});
+  if (s.blend_below) lines.push_back({strprintf("%zu pieces: Blend radius below a thirty-second of Field Cell: built unblended", s.blend_below), true});
+  if (s.blend_dropped) lines.push_back({"A cluster's blends were left out: no grid closed over it with them (its joins are crisp)", true});
   return lines;
 }
 
@@ -1267,6 +1277,26 @@ void Editor::draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay) {
  * `opentop on|off`. */
 void Editor::blockout_set_command(const std::vector<std::string> &t) {
   const std::string key = to_lower(t[2]), value = t.size() > 3 ? to_lower(t[3]) : "";
+  if (key == "blend") {  /* `blockout set blend <metres>` (round 481): the Blend radius of the selected pieces that take one, one undo step */
+    const bool is_number = !value.empty() && (std::isdigit((unsigned char)value[0]) || value[0] == '-' || value[0] == '.' || value[0] == '+');
+    char *end = nullptr;
+    const float metres = (float)std::strtod(value.c_str(), &end);
+    if (!is_number || *end != '\0' || !finite_bits(metres) || metres < 0.0f) return Log::warn("blockout set blend <metres>: a Blend radius is 0 metres or more");
+    bool any = false, changed = false;
+    for (GameObject *g : selected_objects(false)) {
+      BlockoutPiece *bp = g->get<BlockoutPiece>();
+      if (!bp || !blockout_of_piece(*g) || !bp->takes_blend()) continue;
+      any = true;
+      const float to = std::min(100.0f, metres);
+      changed = changed || bp->blend != to;
+      bp->blend = to;
+    }
+    if (!any) return Log::warn("blockout set blend: select a box, cylinder or sphere piece that adds or subtracts (rooms, Intersect pieces and other shapes take no Blend radius)");
+    if (!changed) return;  // (no undo step for nothing)
+    mark_changed("Edit Blockout Blend");
+    update_blockouts(true);
+    return;
+  }
   std::vector<BlockoutPiece *> rooms;
   for (GameObject *g : selected_objects(false))
     if (BlockoutPiece *bp = g->get<BlockoutPiece>())
@@ -1328,7 +1358,7 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   auto usage = [] {
     Log::info("blockout new | add box|cylinder|sphere|wedge|stairs|arch|outline|mesh [subtract|intersect] [x y z | radius height | radius | stairs: x y z steps | "
               "arch: radius inner angle depth | outline: [height] x z x z ... | mesh <object>] | add room [box|cylinder|wedge|outline] [sizes] | "
-              "add door|window [width head [sill]] | outline <x z> <x z> <x z> ... | set cell|method|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
+              "add door|window [width head [sill]] | outline <x z> <x z> <x z> ... | set cell|method|detail|blend|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
               "room <x0 z0 x1 z1 height> | room circle <x z radius height> | roomopt circle|solid|subtract on|off, piece <word>, operation <word>, wall <metres> | "
               "draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height> | rebuild | wait | info");
   };
@@ -1353,12 +1383,16 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   else if (sub == "roomopt") room_options_command(t);
   else if (sub == "set") {
     const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";
-    if (key == "wall" || key == "floor" || key == "ceiling" || key == "walls" || key == "opentop") return blockout_set_command(t);
-    if ((key != "cell" && key != "method") || value.empty()) return Log::warn("blockout set cell <metres> | method auto|exact|field | wall|floor|ceiling <metres> | walls merge|keep | opentop on|off");
+    if (key == "wall" || key == "floor" || key == "ceiling" || key == "walls" || key == "opentop" || key == "blend") return blockout_set_command(t);
+    if ((key != "cell" && key != "method" && key != "detail") || value.empty())
+      return Log::warn("blockout set cell <metres> | method auto|exact|field | detail low|medium|high | blend <metres> | wall|floor|ceiling <metres> | walls merge|keep | opentop on|off");
+    const bool detail_ok = value == "low" || value == "medium" || value == "high" || value == "0" || value == "1" || value == "2";
+    if (key == "detail" && !detail_ok) return Log::warn("blockout set detail low|medium|high");
     if (targets.empty()) return Log::warn("blockout set: no Blockout in the scene");
     for (GameObject *g : targets) {
       Blockout *b = g->get<Blockout>();
       if (key == "cell") b->cell = (float)std::atof(value.c_str());
+      else if (key == "detail") b->blend_detail = value == "low" || value == "0" ? 0 : value == "high" || value == "2" ? 2 : 1;
       else b->method = value == "exact" || value == "1" ? 1 : value == "field" || value == "2" ? 2 : 0;
     }
     mark_changed("Edit Blockout");

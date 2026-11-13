@@ -300,10 +300,11 @@ bool inside_blended(const Cluster &c, const std::vector<uint32_t> &cand, V3 x) {
     const Solid &s = c.solids[cand[k]];
     if (s.role == Role::MergeShell) merge = std::min(merge, solid_distance(c, s, x));
     if (s.role == Role::Air) air = std::min(air, solid_distance(c, s, x));
-    if (s.role == Role::KeepShell && !(k > 0 && c.solids[cand[k - 1]].piece == s.piece)) {  // (once a Keep room, at the first of its solids: its shell's, then its own air's)
+    if (s.role == Role::KeepShell && !(k > 0 && c.solids[cand[k - 1]].piece == s.piece && c.solids[cand[k - 1]].role != Role::Intersect)) {  // (once a Keep room, at the first of its solids: its shell's, then its own air's)
       double shell = 1e300, own = 1e300;
       for (size_t j = k; j < cand.size() && c.solids[cand[j]].piece == s.piece; j++) {
         const Solid &part = c.solids[cand[j]];
+        if (part.role != Role::Air && part.role != Role::KeepShell) break;  // (a room's parts only: never a solid that only shares its number)
         (part.role == Role::Air ? own : shell) = std::min(part.role == Role::Air ? own : shell, solid_distance(c, part, x));
       }
       f = std::min(f, less_air(shell, own));
@@ -311,8 +312,25 @@ bool inside_blended(const Cluster &c, const std::vector<uint32_t> &cand, V3 x) {
     if (s.role == Role::Add && !(s.blend > 0.0)) f = std::min(f, solid_distance(c, s, x));
   }
   f = std::min(f, less_air(merge, air));
-  for (uint32_t si : cand)
-    if (c.solids[si].role == Role::Add && c.solids[si].blend > 0.0) f = smooth_min(f, solid_distance(c, c.solids[si], x), c.solids[si].blend);
+  /* The blended pieces are melted in from the smallest radius to the largest: each joins what is there - the plain pieces
+   * and the blended ones before it - with its own radius, so two blended pieces that meet blend with the larger of
+   * theirs whatever order they are in (round 481; before, with the later one's). */
+  uint32_t few[16];
+  std::vector<uint32_t> many;  // (more than sixteen at one point - forty blobs in a heap: the same order, from a list)
+  size_t melts = 0;
+  bool sorted = true;
+  for (uint32_t si : cand) {
+    if (!(c.solids[si].role == Role::Add && c.solids[si].blend > 0.0)) continue;
+    if (melts == 16 && many.empty()) many.assign(few, few + 16);
+    const uint32_t before = melts == 0 ? si : melts <= 16 && many.empty() ? few[melts - 1] : many.back();
+    sorted = sorted && (melts == 0 || c.solids[before].blend <= c.solids[si].blend);
+    if (melts < 16) few[melts] = si;
+    else many.push_back(si);
+    melts++;
+  }
+  uint32_t *melt = many.empty() ? few : many.data();
+  if (!sorted) std::stable_sort(melt, melt + melts, [&](uint32_t a, uint32_t b) { return c.solids[a].blend < c.solids[b].blend; });
+  for (size_t k = 0; k < melts; k++) f = smooth_min(f, solid_distance(c, c.solids[melt[k]], x), c.solids[melt[k]].blend);
   if (!(f <= 0.0)) return false;
   uint32_t trims = 0;
   for (uint32_t si : cand) {
@@ -341,7 +359,7 @@ uint32_t blended_label(const Cluster &c, const std::vector<uint32_t> &cand, V3 x
   for (uint32_t si : cand) {
     const double d = std::fabs(solid_distance(c, c.solids[si], x));
     if (d < best) best = d, best_solid = si;
-    if (d > reach + h) continue;
+    if (d > reach + h || c.solids[si].region) continue;  // (a blend's box is not a surface a blend reaches: a piece's face that runs through it stays flat there)
     within++;
     blended_within = blended_within || c.solids[si].blend > 0.0;
   }
@@ -414,14 +432,16 @@ struct Grid {
   void settle_points(const Brick &br, const Soup &soup, const std::vector<float> &cross, std::vector<V3> &points) const;
 };
 
-/* The solids whose bounds reach the brick's points 0..upto (grown by their Blend radius in a blended cluster). */
+/* The solids whose bounds reach the brick's points 0..upto (grown by the Blend radius that reaches them in a blended cluster). */
 void Grid::candidates(const Brick &br, int upto, std::vector<uint32_t> &cand) const {
   cand.clear();
   double lo[3], hi[3];
   for (int a = 0; a < 3; a++) lo[a] = coord(a, (int64_t)br.b[a] * 8), hi[a] = coord(a, (int64_t)br.b[a] * 8 + upto);
   for (uint32_t si = 0; si < c.solids.size(); si++) {
     const Solid &s = c.solids[si];
-    const double grow = s.blend + 1e-9 * c.scale;
+    /* (By the largest radius that reaches the solid, not only its own: a plain box under a blended ball has no radius, and
+     * left out of the bricks above its top the ball's fillet ended there in a crease - round 481's roundness test.) */
+    const double grow = std::max(s.blend, s.melt) + 1e-9 * c.scale;
     bool apart = false;
     for (int a = 0; a < 3; a++) apart = apart || s.lo[a] - grow > hi[a] || s.hi[a] + grow < lo[a];
     if (!apart) cand.push_back(si);
@@ -879,6 +899,7 @@ bool field_soup(const Cluster &c, const Settings &settings, Soup &soup, ClusterR
     }
   }
   for (int a = 0; a < 3; a++) far = std::max(far, std::max(std::fabs(c.lo[a]), std::fabs(c.hi[a])) + 2.0 * melt);
+  if (c.area_cap > 0.0) area = std::min(area, c.area_cap);  // (a blend's box: the faces are followed inside it only)
   double h = (double)settings.cell;
   h = std::max(h, std::sqrt(area / (double)settings.max_cells));
   h = std::max(h, (c.scale + 4.0 * melt) / 2.0e6);
