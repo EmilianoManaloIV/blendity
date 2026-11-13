@@ -5,7 +5,7 @@
 - **Requirements:** R-03 (modeling), U-01 (selection does what the cursor says)
 - **Decisions:** ADR 0129 (the Blockout object: a click selects the piece that made the face). No new ADR: no data-model change.
 - **Model:** main session (small, in files this pass owns), then test-engineer, then code-reviewer
-- **PR:** on Pass 23's stack, on top of round 480's PR (its own commit and PR, base main)
+- **PR:** #390 (https://github.com/EmilianoManaloIV/blendity/pull/390)
 
 ## Goal
 The owner, after round 479: "Selecting things on my cursor doesn't always select." What is left of it after the picking fix: a

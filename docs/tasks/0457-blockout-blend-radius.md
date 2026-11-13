@@ -1,12 +1,12 @@
 # 0457: The Blend radius (round 481)
 
-- **Status:** approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
+- **Status:** done (round 481, 2026-11-12). Approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
   all passes.", relayed by the hub session). **Done (round 481, 2026-11-12)** - see "Done: deviations".
 - **Requirements:** R-02, R-03 (modeling), Q-01 (robust geometry), Q-06 (responsiveness), C-02
 - **Decisions:** ADR 0128's open point ("how a blended part joins the crisp rest") is decided here: ADR 0130, written
   with this round's numbers
 - **Model:** main session (kernel), then test-engineer, then code-reviewer
-- **PR:** branch `task/0457-blockout-blend-radius`, base `main` (https://github.com/EmilianoManaloIV/blendity/pulls?q=head%3Atask%2F0457-blockout-blend-radius)
+- **PR:** #395 (https://github.com/EmilianoManaloIV/blendity/pull/395)
 
 ## Goal
 The owner's first request: "meta-ball like modeling but with primitives" - joins that are crisp by default, with a

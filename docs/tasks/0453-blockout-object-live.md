@@ -1,13 +1,13 @@
 # 0453: The Blockout object, live (round 477)
 
-- **Status:** approved (the owner, 2026-11-10, with the specs of all passes: "Continue and finish all tasks, I approve
+- **Status:** done (round 477, 2026-11-10). Approved (the owner, 2026-11-10, with the specs of all passes: "Continue and finish all tasks, I approve
   all specs from all passes.", relayed by the hub session); **done** (round 477, in review)
 - **Requirements:** R-01 (a Unity-style editor), R-02, R-03 (modeling), R-07 (every tool reachable from the menus and
   the console), Q-01 (robust geometry), Q-04 and Q-06 (the editor stays interactive), Q-05 (undo), C-02 (the
   dependency-free build)
 - **Decisions:** ADR 0129 (the object and its live rebuild), ADR 0128 (the kernel)
 - **Model:** implementer (Sonnet), then test-engineer, then code-reviewer; the worker session runs the timed row
-- **PR:** (link when opened)
+- **PR:** #372 (https://github.com/EmilianoManaloIV/blendity/pull/372)
 
 ## Goal
 After round 476 the kernel exists and nothing in the editor uses it. After this round the owner can make a

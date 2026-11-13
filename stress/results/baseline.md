@@ -1,6 +1,6 @@
 # Performance baseline (tools/perf_suite.py --save-baseline)
 
-Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness, Operations, Unity world (stand-in), Editor frames in a working scene, Baked lighting (Generate Lighting), Texture bake (task 0036), Path tracer: BVH build and ray throughput (Blendity BVH vs Embree), Scene save / load (text format), Undo snapshots: copy-on-write vs deep copy, Live Link (task 0172): what the link costs the editor's frame, Blender parity (task 0201), Memory footprint, Physics: Blendity's sphere physics vs Jolt, Keyframe animation (task 0059), Camera filters: the PS1 look's cost, and odd settings, Posing, scrubbing and playback (round 468). Re-saved alone: Posing, scrubbing and playback (round 468), Keyframe animation (task 0059).
+Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness, Operations, Unity world (stand-in), Editor frames in a working scene, Baked lighting (Generate Lighting), Texture bake (task 0036), Path tracer: BVH build and ray throughput (Blendity BVH vs Embree), Scene save / load (text format), Undo snapshots: copy-on-write vs deep copy, Live Link (task 0172): what the link costs the editor's frame, Blender parity (task 0201), Memory footprint, Physics: Blendity's sphere physics vs Jolt, Keyframe animation (task 0059), Camera filters: the PS1 look's cost, and odd settings, Posing, scrubbing and playback (round 468), Blockout kernel (round 476, ADR 0128). Re-saved alone: Blockout kernel (round 476, ADR 0128).
 
 ### Responsiveness
 
@@ -474,3 +474,123 @@ Machine: Big-Brother AMD64, Windows-11-10.0.26200-SP0. Sections: Responsiveness,
 | Skin pose change, 49922 vertices, 3 bones: Linear / Dual Quaternion | 6.53 | 6.61 |
 | IK: a humanoid's 4 chains, targets moved / nothing moved | 0.0101 | 0.0038 |
 | IK: the same rig among 20k objects, nothing moved | 0.1964 | - |
+
+### Blockout kernel (round 476, ADR 0128)
+
+| first build in the process | ms | then (median of 3) |
+|---|---|---|
+| interior 100, crisp | 13.48 | 11.30 |
+| interior 100, field cell 0.1 | 48.18 | 42.52 |
+| row | ms / build | moved ms | render mesh ms | until drawn ms | solids ms | boolean or grid ms | faces ms | clusters | faces | triangles | points | cells | volume error % | flatness m | corner error m | unresolved | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| interior 10, crisp | 1.65 | 1.72 | 0.08 | 1.80 | 0.02 | 1.35 | 0.22 | 1 | 34 | 100 | 56 | 0 | 0.0000 | 0 | - | 0 | - |
+| interior 10, field cell 0.2 | 2.86 | 2.86 | 0.02 | 2.88 | 0.02 | 1.67 | 0.89 | 1 | 34 | 100 | 56 | 13.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior 10, field cell 0.1 | 7.25 | 7.20 | 0.03 | 7.23 | 0.02 | 4.24 | 3.21 | 1 | 34 | 100 | 56 | 52.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior 10, field cell 0.05 | 22.36 | 22.24 | 0.03 | 22.27 | 0.02 | 11.94 | 10.22 | 1 | 34 | 100 | 56 | 208.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior rooms 10, crisp | 1.64 | 1.54 | 0.02 | 1.56 | 0.03 | 1.46 | 0.21 | 1 | 34 | 100 | 56 | 0 | 0.0000 | 0 | - | 0 | - |
+| interior rooms 10, field cell 0.2 | 2.86 | 2.93 | 0.02 | 2.95 | 0.03 | 1.78 | 1.16 | 1 | 34 | 100 | 56 | 13.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior rooms 10, field cell 0.1 | 7.23 | 7.11 | 0.03 | 7.14 | 0.02 | 3.86 | 3.52 | 1 | 34 | 100 | 56 | 52.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior rooms 10, field cell 0.05 | 22.61 | 22.27 | 0.03 | 22.30 | 0.03 | 12.08 | 10.45 | 1 | 34 | 100 | 56 | 208.0k | 0.0000 | 0 | 0 | 0 | - |
+| interior 100, crisp | 11.29 | 11.05 | 0.13 | 11.18 | 0.16 | 9.52 | 1.41 | 1 | 392 | 1004 | 520 | 0 | 0.0001 | 0 | - | 0 | ok |
+| interior 100, field cell 0.2 | 13.59 | 13.82 | 0.12 | 13.94 | 0.15 | 5.98 | 7.24 | 1 | 392 | 1004 | 520 | 99.7k | 0.0001 | 0 | 0 | 0 | ok |
+| interior 100, field cell 0.1 | 42.92 | 42.29 | 0.14 | 42.43 | 0.12 | 20.91 | 21.12 | 1 | 392 | 1004 | 520 | 398.1k | 0.0001 | 0 | 0 | 0 | ok |
+| interior 100, field cell 0.05 | 186.65 | 192.87 | 0.15 | 193.02 | 0.13 | 109.74 | 80.60 | 1 | 392 | 1004 | 520 | 1.59M | 0.0001 | 0 | 0 | 0 | OVER |
+| interior rooms 100, crisp | 11.19 | 10.69 | 0.12 | 10.81 | 0.13 | 9.43 | 1.53 | 1 | 392 | 1004 | 520 | 0 | 0.0001 | 0 | - | 0 | ok |
+| interior rooms 100, field cell 0.2 | 13.71 | 13.71 | 0.15 | 13.86 | 0.11 | 5.95 | 7.48 | 1 | 392 | 1004 | 520 | 99.7k | 0.0001 | 0 | 0 | 0 | ok |
+| interior rooms 100, field cell 0.1 | 43.18 | 42.21 | 0.12 | 42.33 | 0.10 | 20.05 | 21.30 | 1 | 392 | 1004 | 520 | 398.1k | 0.0001 | 0 | 0 | 0 | ok |
+| interior rooms 100, field cell 0.05 | 188.21 | 196.24 | 0.12 | 196.35 | 0.12 | 115.88 | 79.26 | 1 | 392 | 1004 | 520 | 1.59M | 0.0001 | 0 | 0 | 0 | OVER |
+| interior 400, crisp | 40.43 | 40.60 | 0.90 | 41.50 | 0.50 | 32.98 | 4.72 | 1 | 1424 | 3980 | 2056 | 0 | 0.0001 | 0 | - | 0 | - |
+| interior 400, field cell 0.2 | 51.24 | 50.22 | 0.58 | 50.80 | 0.45 | 20.78 | 28.24 | 1 | 1424 | 3980 | 2056 | 382.3k | 0.0001 | 0 | 0 | 0 | - |
+| interior 400, field cell 0.1 | 190.61 | 191.58 | 0.58 | 192.16 | 0.42 | 105.07 | 88.56 | 1 | 1424 | 3980 | 2056 | 1.53M | 0.0001 | 0 | 0 | 0 | - |
+| interior 400, field cell 0.05 | 728.62 | 718.73 | 0.60 | 719.33 | 0.52 | 401.48 | 311.37 | 1 | 1424 | 3980 | 2056 | 6.10M | 0.0001 | 0 | 0 | 0 | - |
+| interior rooms 400, crisp | 36.72 | 37.82 | 0.67 | 38.50 | 0.36 | 31.03 | 4.68 | 1 | 1424 | 3980 | 2056 | 0 | 0.0001 | 0 | - | 0 | - |
+| interior rooms 400, field cell 0.2 | 46.88 | 47.06 | 0.58 | 47.64 | 0.37 | 18.85 | 26.82 | 1 | 1424 | 3980 | 2056 | 382.3k | 0.0001 | 0 | 0 | 0 | - |
+| interior rooms 400, field cell 0.1 | 182.06 | 181.62 | 0.49 | 182.11 | 0.45 | 91.94 | 86.80 | 1 | 1424 | 3980 | 2056 | 1.53M | 0.0001 | 0 | 0 | 0 | - |
+| interior rooms 400, field cell 0.05 | 720.75 | 722.03 | 0.66 | 722.69 | 0.45 | 397.94 | 310.35 | 1 | 1424 | 3980 | 2056 | 6.10M | 0.0001 | 0 | 0 | 0 | - |
+| interior 100 + stairs + arch, crisp | 15.85 | 15.64 | 0.14 | 15.77 | 0.15 | 13.57 | 1.62 | 1 | 474 | 1180 | 608 | 0 | - | 0 | - | 0 | ok |
+| interior 100 + stairs + arch, field cell 0.2 | 13.65 | 13.81 | 0.16 | 13.96 | 0.14 | 5.84 | 7.48 | 1 | 497 | 1230 | 633 | 100.4k | 0.0073 | 0 | 1.1e-01 | 7 | ok |
+| interior 100 + stairs + arch, field cell 0.1 | 42.33 | 42.81 | 0.15 | 42.96 | 0.14 | 19.54 | 21.62 | 1 | 501 | 1234 | 635 | 400.6k | 0.0004 | 0 | 4.7e-02 | 7 | ok |
+| interior 100 + stairs + arch, field cell 0.05 | 186.63 | 188.92 | 0.13 | 189.05 | 0.17 | 105.76 | 80.25 | 1 | 509 | 1258 | 647 | 1.60M | 0.0001 | 0 | 1.7e-02 | 11 | OVER |
+| interior rooms 100 + a 10k-face mesh, crisp | 62.66 | 63.11 | 1.67 | 64.78 | 17.07 | 33.13 | 7.78 | 1 | 16704 | 17644 | 8840 | 0 | - | 0 | - | 0 | - |
+| interior rooms 100 + a 10k-face mesh, field cell 0.2 | 29.85 | 36.53 | 0.24 | 36.77 | 8.02 | 9.93 | 7.91 | 1 | 897 | 2004 | 1020 | 100.1k | 0.0649 | 0 | 2.0e-01 | 56 | - |
+| interior rooms 100 + a 10k-face mesh, field cell 0.1 | 60.61 | 59.59 | 0.66 | 60.25 | 8.23 | 26.30 | 22.20 | 1 | 2217 | 4628 | 2332 | 399.4k | 0.0042 | 0 | 9.6e-02 | 0 | - |
+| interior rooms 100 + a 10k-face mesh, field cell 0.05 | 207.39 | 210.19 | 1.18 | 211.37 | 8.52 | 113.33 | 84.10 | 1 | 7628 | 15416 | 7726 | 1.60M | 0.0011 | 0 | 5.1e-02 | 0 | - |
+| scatter 10, crisp | 6.44 | 5.94 | 0.18 | 6.12 | 0.08 | 10.81 | 3.17 | 3 | 738 | 1542 | 764 | 0 | - | 3.6e-07 | - | 0 | - |
+| scatter 10, field cell 0.2 | 3.04 | 2.66 | 0.16 | 2.82 | 0.07 | 4.47 | 2.46 | 3 | 661 | 1422 | 731 | 1.3k | 1.0035 | 3.9e-07 | 3.9e-01 | 273 | - |
+| scatter 10, field cell 0.1 | 5.89 | 5.58 | 0.38 | 5.96 | 0.07 | 7.17 | 7.25 | 3 | 1513 | 3052 | 1637 | 5.3k | 0.2531 | 3.7e-07 | 2.1e-01 | 304 | - |
+| scatter 10, field cell 0.05 | 12.30 | 7.38 | 0.85 | 8.23 | 0.07 | 8.64 | 21.81 | 3 | 2464 | 6432 | 2738 | 22.1k | 0.0284 | 4.0e-07 | 7.7e-02 | 252 | - |
+| scatter 100, crisp | 13.90 | 6.85 | 1.28 | 8.13 | 0.74 | 194.00 | 44.69 | 25 | 7493 | 16434 | 8246 | 0 | - | 2.0e-06 | - | 1 | ok |
+| scatter 100, field cell 0.2 | 6.87 | 3.38 | 1.28 | 4.66 | 0.76 | 61.44 | 23.17 | 25 | 7197 | 15644 | 7890 | 11.6k | 1.9747 | 1.8e-06 | 5.0e-01 | 3015 | ok |
+| scatter 100, field cell 0.1 | 15.35 | 6.41 | 1.83 | 8.24 | 0.76 | 147.49 | 109.75 | 25 | 14446 | 31892 | 16099 | 48.6k | 0.2223 | 2.0e-06 | 5.0e-01 | 3057 | ok |
+| scatter 100, field cell 0.05 | 41.96 | 8.50 | 2.91 | 11.41 | 0.85 | 480.87 | 269.07 | 25 | 23227 | 52418 | 25775 | 199.8k | 0.0200 | 2.0e-06 | 2.7e-01 | 2370 | ok |
+| scatter 400, crisp | 49.54 | 8.95 | 3.20 | 12.16 | 2.81 | 974.03 | 185.93 | 100 | 29953 | 65398 | 32834 | 0 | - | 3.8e-06 | - | 2 | - |
+| scatter 400, field cell 0.2 | 21.78 | 5.49 | 3.11 | 8.59 | 3.08 | 297.93 | 100.25 | 100 | 29565 | 63880 | 32140 | 46.9k | 2.1242 | 3.8e-06 | 5.0e-01 | 12824 | - |
+| scatter 400, field cell 0.1 | 55.46 | 8.68 | 6.26 | 14.94 | 2.87 | 766.05 | 507.26 | 100 | 59600 | 132124 | 66315 | 198.5k | 0.2359 | 3.8e-06 | 5.0e-01 | 12578 | - |
+| scatter 400, field cell 0.05 | 147.49 | 11.03 | 9.39 | 20.42 | 2.66 | 2605.76 | 1236.23 | 100 | 85953 | 193414 | 96377 | 816.0k | 0.0182 | 3.8e-06 | 5.0e-01 | 9401 | - |
+| heap 100, crisp | 132.94 | 133.26 | 0.52 | 133.78 | 0.66 | 122.44 | 5.11 | 1 | 1463 | 3668 | 1822 | 0 | - | 1.5e-07 | - | 0 | - |
+| heap 100, field cell 0.2 | 41.71 | 41.75 | 0.27 | 42.02 | 0.65 | 32.80 | 2.68 | 1 | 1199 | 2588 | 1272 | 1.4k | 3.9748 | 1.2e-07 | 5.0e-01 | 489 | - |
+| heap 100, field cell 0.1 | 45.49 | 44.34 | 0.97 | 45.31 | 0.71 | 23.80 | 16.21 | 1 | 3082 | 6922 | 3452 | 6.0k | 0.5904 | 1.5e-07 | 2.0e-01 | 643 | - |
+| heap 100, field cell 0.05 | 89.24 | 89.45 | 1.21 | 90.66 | 0.80 | 19.80 | 62.22 | 1 | 6942 | 16544 | 7630 | 25.8k | 0.1080 | 1.5e-07 | 1.4e-01 | 643 | - |
+| interior 100 from rooms against from box pairs | faces (boxes / rooms) | points (boxes / rooms) | volume (boxes / rooms) | pieces (boxes / rooms) | verdict |
+|---|---|---|---|---|---|
+| crisp | 392 / 392 | 520 / 520 | 407.9124 / 407.9124 | 100 / 64 | same |
+| field cell 0.1 | 392 / 392 | 520 / 520 | 407.9124 / 407.9124 | 100 / 64 | same |
+| called from the main thread | ms / build |
+|---|---|
+| interior 100, crisp | 11.76 |
+| interior 100, field cell 0.1 | 41.28 |
+| blended: scatter 100, a Blend radius of 0.25 m on every fifth piece | ms / build | clusters | faces | of them blended | triangles | points | result |
+|---|---|---|---|---|---|---|---|
+| cell 0.2 | 244.49 | 25 | 120176 | 98014 | 243720 | 121910 | closed |
+| cell 0.1 | 246.86 | 25 | 120176 | 98014 | 243720 | 121910 | closed |
+| cell 0.05 | 243.77 | 25 | 120176 | 98014 | 243720 | 121910 | closed |
+| live: interior 100 in the editor, a door moved every frame for 120 frames (one every 16.7 ms) | frame median ms | frame worst ms | move to landing median ms | move to landing worst ms | landings during the drag | wait after the last move ms | builds started | landed | overtaken by a newer move | main-thread builds | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| the running build finishes and lands, then the newest starts (ADR 0129) | 3.00 | 4.70 | 3.04 | 48.00 | 111 | 0.30 | 112 | 112 | 111 | 0 | ok |
+| a newer snapshot cancels the running build (not shipped) | 1.05 | 3.11 | none | none | 0 | 0.25 | 116 | 1 | 112 | 0 | OVER |
+| live: a face handle (the first shell box's +X face, Ctrl held: no snapping) dragged for 120 frames in interior 100 (one every 16.7 ms) | frame median ms | frame worst ms | move to landing median ms | move to landing worst ms | landings during the drag | wait after the last move ms | builds started | landed | main-thread builds | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| the running build finishes and lands, then the newest starts (ADR 0129) | 3.31 | 5.05 | 3.35 | 83.82 | 108 | 15.43 | 110 | 110 | 0 | ok |
+| a blended column in interior 100 (rooms), radius 0.15 m | ms / build | boxes | tries again | built whole | blend cell | grid cells | faces | of them blended | result | verdict (100 ms) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| the column unblended | 12.54 | 0 | 0 | 0 | - | 0 | 460 | 0 | closed | - |
+| Low | 22.09 | 1 | 0 | 0 | 0.0500 | 4538 | 3158 | 2690 | closed | ok |
+| Medium | 41.51 | 1 | 0 | 0 | 0.0250 | 16262 | 10686 | 10202 | closed | ok |
+| High | 124.77 | 1 | 0 | 0 | 0.0128 | 57458 | 39059 | 38508 | closed | over |
+| blobs: 40 spheres and boxes, every one with a Blend radius of 0.2 m | ms / build | boxes | built whole | blend cell | grid cells | faces | result |
+|---|---|---|---|---|---|---|---|
+| Low | 22.26 | 0 | 7 | 0.0667 | 45396 | 34784 | closed |
+| Medium | 87.59 | 0 | 7 | 0.0333 | 183220 | 136475 | closed |
+| High | 506.61 | 0 | 7 | 0.0167 | 736470 | 536408 | closed |
+| slots, UVs and shading on the result (round 482): interior rooms 100 | build ms | slots + UVs ms | share of the build % | faces | corners | slots | verdict |
+|---|---|---|---|---|---|---|---|
+| interior rooms 100 | 12.63 | 0.03 | 0.2 | 392 | 1788 | 6 | - |
+| interior rooms 400 | 37.89 | 0.11 | 0.3 | 1424 | 6828 | 6 | - |
+| live: interior 100 in the editor, a door moved every frame for 120 frames (one every 16.7 ms) | frame median ms | frame worst ms | move to landing median ms | move to landing worst ms | landings during the drag | wait after the last move ms | builds started | landed | overtaken by a newer move | main-thread builds | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Contribute GI off, Realtime GI off, no sun: the running build finishes and lands, then the newest starts | 3.02 | 4.67 | 3.12 | 36.87 | 107 | 0.24 | 108 | 108 | 107 | 0 | ok |
+| Realtime GI on (Automatic), a sun, Contribute GI on: the running build finishes and lands, then the newest starts | 19.43 | 21.22 | 19.44 | 35.28 | 118 | 6.96 | 119 | 119 | 118 | 0 | OVER |
+| live: benchscene blockout in the editor, dragged for 600 frames (one every 16.7 ms) | frame median ms | frame 1 % slowest ms | frame worst ms | frames a second, median | frames a second, 1 % low | move to landing median ms | move to landing worst ms | landings during the drag | wait after the last move ms | builds started | main-thread builds | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 100 pieces, a door slid along its wall | 1.91 | 17.57 | 20.20 | 60.00 | 56.90 | 32.85 | 60.37 | 245 | 29.71 | 246 | 0 | OVER |
+| 100 pieces, a room's +X face handle dragged (Ctrl held: no snapping) | 1.64 | 16.36 | 17.18 | 60.00 | 60.00 | 32.70 | 92.64 | 237 | 32.16 | 239 | 0 | OVER |
+| 400 pieces, a door slid along its wall | 2.05 | 20.35 | 21.06 | 60.00 | 49.15 | 65.25 | 112.60 | 123 | 66.50 | 125 | 0 | OVER |
+| 400 pieces, a room's +X face handle dragged (Ctrl held: no snapping) | 1.78 | 19.50 | 19.98 | 60.00 | 51.29 | 65.08 | 143.99 | 124 | 118.64 | 126 | 0 | OVER |
+| sweep | arrangements | built | pieces skipped | refused | problems | with small faces on top of others | with flat faces meeting at a ridge | with faces of no area | unresolved places |
+|---|---|---|---|---|---|---|---|---|---|
+| crisp, boxes on a 0.25 m grid | 2000 | 2000 | 0 | 0 | 0 | 0 | 0 | 4 | 5 |
+| crisp, the same boxes turned as a whole | 2000 | 2000 | 0 | 0 | 0 | 0 | 0 | 5 | 6 |
+| crisp, any pieces | 2000 | 2000 | 936 | 0 | 0 | 1 | 0 | 9 | 61 |
+| crisp, rooms and Intersect pieces | 2000 | 2000 | 567 | 0 | 0 | 51 | 0 | 36 | 234 |
+| crisp, wedges, stairs, arches and outlines | 2000 | 2000 | 738 | 0 | 0 | 165 | 2 | 96 | 405 |
+| crisp, hostile meshes as pieces among boxes, rooms and wedges | 2000 | 2000 | 1805 | 0 | 0 | 183 | 0 | 122 | 352 |
+| field cell 0.08, boxes on a 0.25 m grid | 2000 | 2000 | 0 | 0 | 0 | 2 | 0 | 1 | 80 |
+| field cell 0.08, the same boxes turned as a whole | 2000 | 2000 | 0 | 0 | 0 | 43 | 0 | 13 | 14904 |
+| field cell 0.08, any pieces | 2000 | 2000 | 936 | 0 | 0 | 185 | 0 | 59 | 56945 |
+| field cell 0.08, rooms and Intersect pieces | 2000 | 2000 | 567 | 0 | 0 | 12 | 0 | 13 | 6594 |
+| field cell 0.08, wedges, stairs, arches and outlines | 2000 | 2000 | 738 | 0 | 0 | 26 | 0 | 48 | 158703 |
+| field cell 0.08, hostile meshes as pieces among boxes, rooms and wedges | 2000 | 2000 | 346 | 0 | 0 | 123 | 0 | 31 | 13200 |
+| sweep with Blend radii | arrangements | built | refused | problems | with small faces on top of others | with faces of no area | boxes stitched | clusters built whole | clusters whose seam would not close | tries again | pieces below the detail | clusters built without their blends |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| the rest on the exact path | 500 | 500 | 0 | 0 | 8 | 63 | 28 | 447 | 5 | 23 | 291 | 7 |
+| the rest on the grid (cell 0.08) | 500 | 500 | 0 | 0 | 8 | 62 | 24 | 450 | 8 | 38 | 291 | 7 |

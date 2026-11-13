@@ -2366,6 +2366,35 @@ A Blockout's faces take their materials by what they are - a floor, a wall, a ce
 ? You Bake to Mesh, edit the faces in Edit Mode and then run blockout unbake. What happens? | It asks first: the mesh was edited since the bake and Unbake builds it again from the pieces, so the edits are lost. Cancel keeps the baked mesh; blockout unbake force skips the question.
 ? Two rooms stand side by side and one door's piece has its own Cut Material. Which faces change? | Only the faces that door cut: a piece's override changes its own faces, and the Blockout's Cut Material still covers every other cut.
 )"},
+    {"Building rooms with Blockout", "From an empty scene to a lit interior: two rooms, a door, a window, a rounded column, materials and Bake to Mesh", R"(
+This lesson is the whole path in one sitting, with the other Blockout lessons as its chapters: you make a Blockout, make two materials, drag out two rooms side by side and give each its floor and walls, cut a door between them and a window in an outer wall, stand a column in one room with a rounded foot and bake the result to an ordinary mesh. At every step the mesh is built again from the pieces, so you can go back and change any number. It starts best from File > New Scene: each Try-it works on what the one before it left selected (a piece you draw is selected, and the commands that follow act on its Blockout), so a Blockout left over from another lesson would take the rooms in.
+
+# The way
+1. A Blockout and the first room: the room is the air you walk in, and its walls, floor and ceiling come with it ("Blockout: pieces that build one mesh", "Rooms: air, walls, doors and windows").
+2. The second room, one wall thickness further on, so the two share the wall between them. With the mouse, the Draw Piece tool (Shift+R) drags a rectangle on the ground and a click sets the height ("Dragging rooms out"; stairs, arches and outline rooms are in "Ramps, stairs, arches and odd-shaped rooms", and pieces drawn on the faces of what stands in "Drawing pieces on faces").
+3. A door in the wall between the rooms, a window in an outer wall: cuts with a sill and a head height.
+4. A column with a Blend radius, so it melts into the floor ("Rounding joins: the Blend radius").
+5. Materials for the floor and the walls ("Materials, baking and export of a Blockout"), set on the room that is selected - or, with a Blockout selected, for every room - and Bake to Mesh when the shape is right (Generate Lighting and the export work on the Blockout as it stands).
+# Try it
+! cmd:newmat Plaster | 1. A material asset named Plaster in Assets/Materials
+! cmd:newmat Oak | 2. And one named Oak
+! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6 | 3. The first room: 4 m by 4 m of air, 2.6 m high, in a new Blockout. The piece you draw is the selection
+! cmd:blockout set material walls Plaster; blockout set material floor Oak | 4. With the room selected these are its own materials: plaster walls and an oak floor (no name is needed: the commands act on the selected piece)
+! cmd:blockout draw room auto at 4.2 0 0 normal 0 1 0 size 4 4 2.6 | 5. A second room beside it, 4.2 m on: its wall and the first room's are the same wall
+! cmd:blockout set material walls Plaster; blockout set material floor Oak | 6. The same two materials for the second room, now the selected piece
+! cmd:blockout add door | 7. A door in the selected room's first wall - the wall it shares with the first room
+! cmd:blockout add window 1.2 2 0.9 | 8. A window 1.2 m wide, from a sill at 0.9 m up to 2 m, in the first room's first wall - the outside
+! cmd:blockout draw cylinder add at 2 0 2 normal 0 1 0 size 0.3 0 2.6 | 9. A column of radius 0.3 m standing on the first room's floor, up to the ceiling (with the mouse: Cylinder in the Draw Piece tool's Shape dropdown)
+! cmd:blockout set blend 0.1 | 10. A Blend Radius of 0.1 m on the column: its feet and head are rounded into the floor and the ceiling (with the mouse: Blend Radius in the Inspector)
+! cmd:blockout bake | 11. Bake to Mesh on the selected column's Blockout: one ordinary mesh with the materials and the UVs, the pieces under the disabled "Blockout Pieces" (blockout unbake brings the Blockout back; with the mouse: Bake to Mesh in the Inspector or Mesh > Bake Blockout to Mesh)
+# From here
+- Generate Lighting lights the baked mesh or the live Blockout alike; add a baked light inside a room first. Export (OBJ, FBX, GLB) writes it as one mesh.
+- The command `benchscene blockout` builds a whole interior of about 100 pieces - two storeys of rooms, doors, windows, a staircase, arches, columns, a blended column, materials and two lamps - and `benchscene blockout 400` one of 400, to see what a Blockout of real size feels like. It writes its four materials (Floor, Walls, Ceiling, Outside) as files in the project's Assets/Materials/BenchBlockout, and leaves one that is already there as it is.
+? You drag the second room so its air overlaps half of the first room's. What becomes of the wall between them? | It is gone where the air is shared: both rooms are Merge by default, so each room's air clears the walls of the other, and the two are one connected space, with no wall in the overlap.
+? You want the door to open on a corridor 1 m wide, not on the second room. Which piece do you change, and does the mesh need anything done by hand? | The door's own piece: its Width, Head and Sill (or the room it stands in). The mesh is derived from the pieces, so it is built again as soon as a number changes; nothing is edited on the mesh itself.
+? Why is the column's Blend radius a number on the column and not on the room? | A Blend radius belongs to the Add and Subtract box, cylinder and sphere pieces: the column melts into what it touches. A room is not blended, so the corner where its wall meets its floor stays crisp.
+? After Bake to Mesh you move a room's piece. Does the mesh follow? | No: the baked object is an ordinary mesh and no Blockout builds it any more; the pieces under the disabled "Blockout Pieces" child are kept so that Unbake can bring the Blockout back and build the mesh from them again.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, what the editor keeps between frames, and what still costs", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the moved bones is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. This lesson shows how to place a slow frame, what the editor keeps from one frame to the next so a small pose change stays small, and what a pose of the whole body still costs.
 # The Posing block

@@ -4382,6 +4382,7 @@ class Editor {
   bool bench_scene(const std::string &name);  // (task 0202: the Blender parity scenes, built as tools/bench_blender.py builds them)
   void build_world_like(bool quick);  // (round 411: the Unity-world stand-in, benchscene worldlike)
   void build_avatar_like(bool quick, Vec3 at);  // (round 468: the avatar stand-in, benchscene avatarlike | avatarworld; bench_avatar.cpp)
+  void build_blockout_bench(int pieces);  // (round 483: an interior of about `pieces` pieces in one Blockout, benchscene blockout [400]; bench_blockout.cpp)
   void run_console_command(const std::string &cmd);
   bool set_field_command(const std::string &path, const std::string &value);  // console: set Camera.FStop 1.4
   void enter_play();

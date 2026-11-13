@@ -7,7 +7,7 @@
 - **Decisions:** ADR 0085 (HCI rules) for the panel; **a new ADR for how a Blockout takes scale** (items 7 and 8: a
   change to a documented convention - a piece's size is its numbers, never its transform's scale)
 - **Model:** main session or implementer once the choice is made, then test-engineer, then code-reviewer
-- **PR:** branch `task/0480-blockout-panel-hci` (on top of #396)
+- **PR:** #397 (https://github.com/EmilianoManaloIV/blendity/pull/397)
 
 ## What the owner said
 - "Improve HCI for the blockout pieces, really looks crowded to work with. And is confusing between selection and

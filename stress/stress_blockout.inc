@@ -925,6 +925,99 @@ static void handle_row(Report &rep, const Options &o) {
            std::to_string(ed.blockout_landed_for_test() - landed0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
 
+/* Round 483 (task 0459): the pass's goal on something the size of real work - `benchscene blockout` (100 pieces: rooms of three
+ * shapes, doors, windows, stairs, arches, a blended column, materials, two lights) and its 400-piece version, live in a headless
+ * editor with workers on. A door slid along its wall every frame for ten seconds (600 frames, one every 16.7 ms), then a room's +X
+ * face handle dragged with real mouse events for as long. Frames a second are what the main thread's frames would allow, capped at
+ * the window's 60; the verdict is the goal's: no frame over 16.7 ms, a landing within 100 ms, no kernel call on the main thread. */
+struct BenchDrag {
+  std::vector<double> frame_ms, landing_ms;
+  uint64_t landed = 0;
+  double oldest = -1.0, start = 0.0;
+  void frame(Editor &ed, int f, const std::vector<platform::Event> &events) {
+    if (oldest < 0.0) oldest = now_seconds();
+    ScopedTimer t;
+    ed.step_frame_headless(events);
+    frame_ms.push_back(t.ms());
+    if (ed.blockout_landed_for_test() != landed) {
+      landed = ed.blockout_landed_for_test();
+      landing_ms.push_back((now_seconds() - oldest) * 1000.0);
+      oldest = -1.0;
+    }
+    const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+    if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+  }
+};
+
+static double fps_of(double frame_ms) { return std::min(60.0, 1000.0 / std::max(frame_ms, 1e-3)); }
+
+static void bench_drag_row(Report &rep, const Options &o, int pieces, bool handle) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  ed.command(pieces == 400 ? "benchscene blockout 400" : "benchscene blockout");
+  ed.command("blockout wait");
+  GameObject *door = nullptr, *room = nullptr;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!door && g.name.rfind("Door X 0.", 0) == 0) door = &g;  // (the first plain door of the ground floor: one of them is the arched one)
+    if (g.name == "Room 1.1.1") room = &g;  // (the upper storey: its handles are not under another floor)
+  });
+  const std::string what = strprintf("%d pieces, %s", pieces, handle ? "a room's +X face handle dragged (Ctrl held: no snapping)" : "a door slid along its wall");
+  if (!door || !room) return rep.row({what + ": the bench scene has no such piece", "", "", "", "", "", "", "", "", "", "", "", "OVER"});
+  int hx = 0, hy = 0;
+  if (handle) {
+    const Vec3 at = room->world_position();
+    ed.command(strprintf("camera 25 60 14 %g %g %g", at.x, at.y, at.z));
+    ed.select_object(room->id);
+  }
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  if (handle && !ed.blockout_handle_pixel_for_test("+x", hx, hy)) return rep.row({what + ": no +X handle in view", "", "", "", "", "", "", "", "", "", "", "", "OVER"});
+  auto mouse = [](platform::EventType t, int x, int y) {
+    platform::Event e;
+    e.type = t, e.x = x, e.y = y, e.mods = platform::MOD_CTRL;
+    return e;
+  };
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), main0 = ed.blockout_main_builds_for_test();
+  if (handle) {
+    ed.step_frame_headless({mouse(platform::EventType::MouseMove, hx, hy)});
+    ed.step_frame_headless({mouse(platform::EventType::MouseDown, hx, hy)});
+  }
+  const int frames = o.quick ? 30 : 600;
+  const Vec3 home = door->local().position;
+  BenchDrag d;
+  d.landed = landed0, d.start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    if (handle) {
+      d.frame(ed, f, {mouse(platform::EventType::MouseMove, hx + 1 + f % 40, hy)});
+      continue;
+    }
+    door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
+    d.frame(ed, f, {});
+  }
+  const double drag_end = now_seconds();
+  if (handle) ed.step_frame_headless({mouse(platform::EventType::MouseUp, hx + 1, hy)});
+  ed.command("blockout wait");
+  const double settle_ms = (now_seconds() - drag_end) * 1000.0;
+  std::sort(d.frame_ms.begin(), d.frame_ms.end());
+  const double worst = d.frame_ms.back(), low = d.frame_ms[(size_t)((double)(d.frame_ms.size() - 1) * 0.99)];
+  const double land_median = median(d.landing_ms), land_worst = d.landing_ms.empty() ? 0.0 : *std::max_element(d.landing_ms.begin(), d.landing_ms.end());
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = worst <= 16.7 && !d.landing_ms.empty() && land_median <= 100.0 && main_builds == 0;
+  rep.row({what, f2(median(d.frame_ms)), f2(low), f2(worst), f2(fps_of(median(d.frame_ms))), f2(fps_of(low)), d.landing_ms.empty() ? "none" : f2(land_median),
+           d.landing_ms.empty() ? "none" : f2(land_worst), std::to_string(d.landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0),
+           std::to_string(main_builds), o.quick ? "-" : ok ? "ok" : "OVER"});  // (30 frames on a shared runner say nothing: no verdict with --quick, as the kernel's rows)
+}
+
+static void bench_rows(Report &rep, const Options &o) {
+  rep.table({"live: benchscene blockout in the editor, dragged for " + std::string(o.quick ? "30" : "600") + " frames (one every 16.7 ms)", "frame median ms", "frame 1 % slowest ms", "frame worst ms",
+             "frames a second, median", "frames a second, 1 % low", "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms",
+             "builds started", "main-thread builds", "verdict"});
+  for (int pieces : {100, 400}) {
+    if (o.quick && pieces > 100) continue;  // (as the section's other 400-sized cases)
+    for (bool handle : {false, true}) bench_drag_row(rep, o, pieces, handle);
+  }
+}
+
 /* Round 481 (ADR 0130, task 0457): a blend is meshed in a box of its own and stitched to the rest. What one rounded column costs in
  * a building - `interior 100` as rooms, a column 0.25 m thick from floor to ceiling in the first room with a Blend radius of 0.15 m -
  * at each detail, against the same building with the column unblended; and the metaball case, where the boxes are the whole cluster. */
@@ -1071,6 +1164,7 @@ static void test_blockout(Report &rep, const Options &o) {
 
   /* (The live row alone: BLENDITY_BLOCKOUT_LIVE=1; BLENDITY_BLOCKOUT_LIVE_DEBUG=1 lists its frames.) */
   if (std::getenv("BLENDITY_BLOCKOUT_LIVE")) return live_row(rep, o, false, true), live_row(rep, o, true, false);
+  if (std::getenv("BLENDITY_BLOCKOUT_BENCH")) return bench_rows(rep, o);  // (round 483: the bench interior's drags alone)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -1229,6 +1323,7 @@ static void test_blockout(Report &rep, const Options &o) {
   surface_row(rep, o);
   live_row(rep, o, false, true, 0);  // (round 482: the same drag with the Blockout in baked lighting, against without)
   live_row(rep, o, false, false, 1);
+  bench_rows(rep, o);
   sweep(rep, o, crisp);
   blend_sweep(rep, o, crisp);
 }

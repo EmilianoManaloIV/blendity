@@ -148,6 +148,7 @@ def main():
     ok = check("its machine line", text.splitlines()[2], "Machine: this machine. Sections: Bake, Responsiveness, Posing. Re-saved alone: Responsiveness, Posing.") and ok
     ok = check("a missing baseline", list(perf_suite.merged_baseline(os.path.join(d, "none.md"), {"Posing": now["Posing"]}).keys()), ["Posing"]) and ok
     ok = check("posing is run by default", "posing" in perf_suite.DEFAULT_SECTIONS, True) and ok
+    ok = check("blockout is run by default (round 483)", "blockout" in perf_suite.DEFAULT_SECTIONS, True) and ok
     print("ok" if ok else "WRONG")
     return 0 if ok else 1
 

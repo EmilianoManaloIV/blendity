@@ -4848,6 +4848,14 @@ bool Editor::bench_scene(const std::string &name) {
     mark_changed("Bench scene");
     return true;
   }
+  if (name == "blockout" || name == "blockout400") {  // (round 483: an interior of 100 or 400 pieces in one Blockout; its mesh lands through the background job)
+    new_scene();
+    for (const char *starter : {"Utah Teapot", "Plane", "Point Light"})  // (the interior brings its own two lamps; the Main Camera stays and is moved outside)
+      if (GameObject *g = scene_->find_by_name(starter)) scene_->destroy(g);
+    build_blockout_bench(name == "blockout400" ? 400 : 100);
+    mark_changed("Bench scene");
+    return true;
+  }
   const bool known = name == "sphere50k" || name == "sphere500k" || name == "million" || name == "cubes10k" || name == "cubes50k" || name == "keyed1k";
   if (!known) return false;
   new_scene();

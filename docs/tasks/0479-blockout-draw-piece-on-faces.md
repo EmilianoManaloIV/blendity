@@ -1,12 +1,12 @@
 # 0479: Draw a piece - a Subtract box and the rest - on a face of a Blockout (round 495)
 
-- **Status:** approved - a direct ask of the owner, 2026-11-12, through the hub: "Make it so that you can "draw" subtract
-  box, etc. Onto faces other blockout objects." Round 495, task 0479. **Done (2026-11-12).**
+- **Status:** done (round 495, 2026-11-12). Approved - a direct ask of the owner, 2026-11-12, through the hub: "Make it so that you can "draw" subtract
+  box, etc. Onto faces other blockout objects." Round 495, task 0479.
 - **Requirements:** R-03 (modeling), U-01 (the tool does what the cursor says), C-02 (every tool from the console)
 - **Decisions:** ADR 0129 (the Blockout object; a face names the piece that made it). No new ADR: no data-model change -
   the pieces made are the ones the component has.
 - **Model:** main session (the tool is in files this pass owns), then test-engineer, then code-reviewer
-- **PR:** on Pass 23's stack, on top of round 494's #390 (its own commit and PR, base main)
+- **PR:** #392 (https://github.com/EmilianoManaloIV/blendity/pull/392)
 
 ## Goal
 The owner wants to draw a cutting box - and the other shapes and operations - straight onto a face of a Blockout and

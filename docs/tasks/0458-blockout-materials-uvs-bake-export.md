@@ -1,12 +1,12 @@
 # 0458: Materials, UVs, lightmaps, Bake to Mesh, export (round 482)
 
-- **Status:** approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
+- **Status:** done (round 482, 2026-11-13). Approved with the pass (the owner, 2026-11-10: "Continue and finish all tasks, I approve all specs from
   all passes.", relayed by the hub session). **Done (round 482, 2026-11-12)** - see "Done: deviations".
 - **Requirements:** R-04 (UVs and materials), R-05 (rendering: lightmaps), R-06 (file IO: export), R-07 (reachable
   from the menus and the console), Q-05 (undo), C-02
 - **Decisions:** ADR 0129 (the object); none new expected
 - **Model:** implementer (Sonnet), then test-engineer, then code-reviewer
-- **PR:** branch `task/0458-blockout-materials-uvs-bake-export` (on top of #395)
+- **PR:** #396 (https://github.com/EmilianoManaloIV/blendity/pull/396)
 
 ## Goal
 The owner's fourth answer: "bake to a normal mesh; materials per surface; collision and lightmaps; Unity / VRChat

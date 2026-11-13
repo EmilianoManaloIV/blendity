@@ -1275,8 +1275,13 @@ void Editor::run_console_command(const std::string &line) {
     return;
   }
   if (c == "benchscene") {  // benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike|avatarlike|avatarworld (task 0202; cubes50k round 433; the avatar ones round 468)
-    if (!bench_scene(to_lower(arg(1, ""))))
-      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike|avatarlike|avatarworld (and the quick ones: worldlikequick, avatarlikequick, avatarworldquick): the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
+    std::string which = to_lower(arg(1, ""));
+    if (which == "blockout" && !arg(2, "").empty()) {  // (round 483: benchscene blockout [400]; any other count builds nothing)
+      if (arg(2, "") != "400") return Log::warn("benchscene blockout [400]: the interior of 100 pieces, or of 400 - '%s' is neither", arg(2, "").c_str());
+      which = "blockout400";
+    }
+    if (!bench_scene(which))
+      Log::warn("benchscene sphere50k|sphere500k|million|cubes10k|cubes50k|keyed1k|worldlike|avatarlike|avatarworld|blockout [400] (and the quick ones: worldlikequick, avatarlikequick, avatarworldquick): the scenes tools/bench_blender.py --parity-ui builds (and round 433's 50,000 cubes)");
     return;
   }
   if (c == "manual") {
