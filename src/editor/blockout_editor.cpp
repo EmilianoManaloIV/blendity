@@ -39,8 +39,9 @@ BlockoutStatus make_status(const blockout::Report &r, size_t piece_count, bool o
   s.clusters = r.clusters.size();
   for (const blockout::ClusterReport &c : r.clusters) {
     s.unresolved += c.unresolved;
-    s.blend_regions += c.blend_regions, s.seam_retries += c.seam_retries, s.blend_below += c.blend_below;
-    s.blend_fallback = s.blend_fallback || c.blend_fallback;
+    s.blend_regions += c.blend_regions, s.blend_below += c.blend_below;
+    /* (A cluster at a time: one built whole after a failed seam is said with its own tries, whatever another cluster did.) */
+    if (c.blend_fallback && !c.blend_dropped) s.blend_fallback = true, s.seam_retries += c.seam_retries;
     s.blend_dropped = s.blend_dropped || c.blend_dropped;
   }
   s.path = path_text(r);
@@ -1255,7 +1256,7 @@ std::vector<std::pair<std::string, bool>> Editor::blockout_status_lines(const Ga
   if (s.unresolved)
     lines.push_back({strprintf("%zu places could not be resolved (two corners in one cell): lower Field Cell", s.unresolved), true});
   if (s.blend_regions) lines.push_back({strprintf("%zu blends meshed in boxes of their own", s.blend_regions), false});
-  if (s.blend_fallback && !s.blend_dropped)
+  if (s.blend_fallback)
     lines.push_back({strprintf("A blend's seam would not close (%zu more boxes tried): that cluster was built whole on the grid", s.seam_retries), true});
   if (s.blend_below) lines.push_back({strprintf("%zu pieces: Blend radius below a thirty-second of Field Cell: built unblended", s.blend_below), true});
   if (s.blend_dropped) lines.push_back({"A cluster's blends were left out: no grid closed over it with them (its joins are crisp)", true});

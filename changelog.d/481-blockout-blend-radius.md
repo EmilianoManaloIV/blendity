@@ -60,7 +60,7 @@ the 100 ms: the editor does not yet build Medium while a piece is dragged and Hi
 
 (The blobs are the grid path in both builds; the build with the libraries has their threads.)
 
-| sweep with Blend radii: 500 hostile arrangements a path (radii: none, 1 mm, 5 to 30 cm, 5 m, not a number) | built | refused | problems | with small faces on top of others | with faces of no area | boxes stitched | clusters built whole | of them after a seam that would not close | tries again | pieces below a thirty-second of the cell | clusters built without their blends |
+| sweep with Blend radii: 500 hostile arrangements a path (radii: none, 1 mm, 5 to 30 cm, 5 m, not a number) | built | refused | problems | with small faces on top of others | with faces of no area | boxes stitched | clusters built whole | clusters whose seam would not close (then built whole, or without their blends) | tries again | pieces below a thirty-second of the cell | clusters built without their blends |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | the rest on the exact path | 500 | 0 | **0** | 8 | 63 | 28 | 447 | 5 | 23 | 291 | 7 |
 | the rest on the grid (cell 0.08 m), with the libraries | 500 | 0 | **0** | 8 | 62 | 24 | 450 | 8 | 38 | 291 | 7 |
@@ -87,8 +87,11 @@ walls; blended pieces that meet blended with the later one's radius, not the lar
 depend on the detail (the texts said it did); the box's clearance, the weld's reach, a face with one corner twice.
 The test-engineer: the crease above. The stress sweep: the refusals above. The second review (approve with changes):
 the last rung was skipped when the blend's cell is the Blockout's; the report's fields after a fallback; more than
-sixteen blended pieces at one point were melted in out of order; the handle's snap had no test. A third review was
-not run.
+sixteen blended pieces at one point were melted in out of order; the handle's snap had no test. The third review
+(of those changes; in a follow-up commit): the last rung's test was a random arrangement ported from the stress
+section, whose pieces depend on the order a compiler evaluates arguments in - a different heap under Clang - so it is
+now a test's setting that makes every build with blends fail (`Settings::fail_blends_for_test`); the status said one
+cluster's fallback only when no other had lost its blends; the blended pieces' sort took memory at every grid point.
 
 **Known limits:** the box holds the whole blended piece, so the cost follows the piece, not only the join - a small
 radius on a large piece is expensive (the box's budget of 600,000 grid cells bounds it; the status shows the cell used);
@@ -100,7 +103,7 @@ without them; a failed seam is paid for by building the cluster again, up to eig
 100 ms on the column in a building (the editor does not yet build Medium while a piece is dragged); Intersect pieces,
 rooms and mesh pieces are not blended.
 
-**Checked:** on main `037ec4fd` (the round's groups and `editor`, ADR 0134; the full suite is CI's). Windows with Blender's libraries: `blockout` 5,848 checks, `editor` 2,346, 0 failed; Windows dependency-free: 4,346 and 2,331, 0 failed; Linux (GCC, dependency-free): 4,348 and 2,331, 0 failed. Stress `--only blockout` in both Windows builds, timed in the hub's window (above); the other geometry sections were not run (the kernel's change is the blended path; the unblended sweep's twelve rows are unchanged to the number). Not run here: the ASan + UBSan group (CI's sanitizer shards run it). Audits: the coverage map (378 entries, 0 empty), `changelog.py check`, `docs_check.sh`. Implementer (the object and editor part), test-engineer (7 tests, one real fault), code review twice.
+**Checked:** on main `037ec4fd` (the round's groups and `editor`, ADR 0134; the full suite is CI's). Windows with Blender's libraries: `blockout` 5,848 checks, `editor` 2,346, 0 failed; Windows dependency-free: 4,346 and 2,331, 0 failed; Linux (GCC, dependency-free): 4,348 and 2,331, 0 failed. Stress `--only blockout` in both Windows builds, timed in the hub's window (above); the other geometry sections were not run (the kernel's change is the blended path; the unblended sweep's twelve rows are unchanged to the number). Not run here: the ASan + UBSan group (CI's sanitizer shards run it). Audits: the coverage map (378 entries, 0 empty), `changelog.py check`, `docs_check.sh`. Implementer (the object and editor part), test-engineer (7 tests, one real fault), code review three times. After the third review's follow-up commit: Windows dependency-free `blockout` 4,357 and `editor` 2,331, Linux 4,359 and 2,331, 0 failed; the build with Blender's libraries was not run again for it (the same code on both).
 
 <!-- README -->
 replace: (round 479), with **wedges

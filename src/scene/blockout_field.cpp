@@ -329,7 +329,14 @@ bool inside_blended(const Cluster &c, const std::vector<uint32_t> &cand, V3 x) {
     melts++;
   }
   uint32_t *melt = many.empty() ? few : many.data();
-  if (!sorted) std::stable_sort(melt, melt + melts, [&](uint32_t a, uint32_t b) { return c.solids[a].blend < c.solids[b].blend; });
+  /* (An insertion sort: this is asked at every grid point, the list is short, and std::stable_sort takes a buffer from the
+   * heap each time. Equal radii keep their order.) */
+  for (size_t k = 1; !sorted && k < melts; k++) {
+    const uint32_t si = melt[k];
+    size_t j = k;
+    for (; j > 0 && c.solids[melt[j - 1]].blend > c.solids[si].blend; j--) melt[j] = melt[j - 1];
+    melt[j] = si;
+  }
   for (size_t k = 0; k < melts; k++) f = smooth_min(f, solid_distance(c, c.solids[melt[k]], x), c.solids[melt[k]].blend);
   if (!(f <= 0.0)) return false;
   uint32_t trims = 0;

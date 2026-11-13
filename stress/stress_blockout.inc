@@ -979,7 +979,7 @@ static void blend_sweep(Report &rep, const Options &o, bool crisp) {
   const char *one = std::getenv("BLENDITY_BLOCKOUT_BLEND_SEED");
   const uint32_t cases = one ? (uint32_t)std::max(1, std::atoi(one)) : o.quick ? 50 : 500;
   rep.table({"sweep with Blend radii", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "boxes stitched", "clusters built whole",
-             "of them: the seam would not close", "tries again", "pieces below the detail", "clusters built without their blends"});
+             "clusters whose seam would not close", "tries again", "pieces below the detail", "clusters built without their blends"});
   for (int k = 0; k < 2; k++) {
     const Path path = k == 0 ? Path::Auto : Path::Field;
     if (k == 0 && !crisp) continue;  // (without the exact path Auto is the grid: the second row)

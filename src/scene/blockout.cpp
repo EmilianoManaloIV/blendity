@@ -924,7 +924,7 @@ uint64_t cluster_hash(const std::vector<Piece> &pieces, const Settings &st) {
   /* (The detail is part of a cluster's key only where a piece has a Blend radius: the others are not built again when it changes.) */
   bool blended = false;
   for (const Piece &p : pieces) blended = blended || p.blend > 0.0f;
-  if (blended) h = hash_mix(h, 0x481u + (uint64_t)(uint32_t)st.blend_detail);
+  if (blended) h = hash_mix(h, 0x481u + (uint64_t)(uint32_t)st.blend_detail + (st.fail_blends_for_test ? 0x10000u : 0u));
   for (const Piece &p : pieces) {
     h = hash_mix(h, p.id);
     h = hash_mix(h, ((uint64_t)p.shape << 8) | (uint64_t)p.op);
@@ -1205,7 +1205,7 @@ bool build_cluster(Cluster &c, std::vector<Solid> &fresh, const Settings &st, Cl
   const bool blends = c.blended && st.path != Path::Crisp && fresh.size() == c.solids.size();
   /* (Whether the rest is the grid's: the exact path takes it when the build has it and no mesh piece is open.) */
   const bool rest_on_grid = st.path == Path::Field || !crisp_available() || c.open_mesh;
-  for (int grow = 0; blends && !done && grow <= 4; grow++) {
+  for (int grow = 0; blends && !done && grow <= 4 && !st.fail_blends_for_test; grow++) {
     plan_blend(c, fresh, st, grow, rest_on_grid, plan);
     res.rep.blend_below += plan.below, res.rep.blend_cell = (float)plan.cell;  // (pieces below are counted once: their radius is 0 from then on)
     if (plan.regions.empty() || plan.whole) break;
@@ -1228,6 +1228,7 @@ bool build_cluster(Cluster &c, std::vector<Solid> &fresh, const Settings &st, Cl
   if (!done) {
     /* The whole cluster on one path: nothing is blended, or one box holds it all, or the seam would not close. */
     Settings whole = st;
+    if (blends && st.fail_blends_for_test) plan_blend(c, fresh, st, 0, rest_on_grid, plan), res.rep.blend_below += plan.below;
     const bool with_blends = c.blended && plan.cell > 0.0;
     if (with_blends) {
       whole.cell = (float)plan.cell;
@@ -1235,10 +1236,11 @@ bool build_cluster(Cluster &c, std::vector<Solid> &fresh, const Settings &st, Cl
     }
     Path path = path_for(c, st);
     why.clear();
-    bool made = mesh_cluster(c, path, whole, part, res.rep, cancel, why);
+    bool made = !(with_blends && st.fail_blends_for_test) && mesh_cluster(c, path, whole, part, res.rep, cancel, why);
+    if (with_blends && st.fail_blends_for_test) why = "a test asked for it";
     /* A blend never costs the result. The blend's grid would not close over the whole cluster (11 of 500 hostile
      * arrangements): the Blockout's own cell, which is what such a cluster was built at before it had a blend grid... */
-    if (!made && with_blends && whole.cell < st.cell && !cancelled(cancel)) {
+    if (!made && with_blends && whole.cell < st.cell && !cancelled(cancel) && !st.fail_blends_for_test) {
       res.rep.seam_why = "the whole cluster on the blend's grid: " + why;
       why.clear();
       path = path_for(c, st);
