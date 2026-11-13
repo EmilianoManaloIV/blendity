@@ -30,14 +30,24 @@ void Editor::trail_refresh() {
   GameObject *root = anim_root();
   GameObject *arm = puppet_rig_of(active_object());  // (review 346: the controls' own lookup - a selected mesh finds its rig)
   TrailCache &c = trails_;
-  if (!clip || !root || !arm || !(trails_.show || trails_.onion > 0 || zoe_.on)) return c.frames.clear(), c.todo.clear(), void(c.clip = nullptr);
+  if (!clip || !root || !arm || !(trails_.show || trails_.onion > 0 || zoe_.on)) {
+    c.frames.clear(), c.todo.clear(), c.clip = nullptr;
+    c.tracks.clear(), c.tracks.shrink_to_fit();  // (the copy of the clip's keys isn't kept while nothing is drawn)
+    return;
+  }
   BL_ZONE("trail refresh");
   ProfileScope scope{prof_.ms_trails, {}};  // (round 468: only while trails, onion skins or the zoetrope are on)
   const uint64_t h = clip->version ^ (uint64_t)(uintptr_t)clip.get();  // (any key edit bumps the version)
-  if (c.clip != clip.get() || c.hash != h || c.arm != arm->id) {
-    c.clip = clip.get(), c.hash = h, c.arm = arm->id;
+  /* Round 474: a key edit that keeps the tracks (Record's, a dragged key) drops the frames around the edited keys only; the
+   * clip, the rig or the tracks being another start over. */
+  const bool other = c.clip != clip.get() || c.arm != arm->id || c.length != clip->length || c.frame_rate != clip->frame_rate || c.loop != clip->loop ||
+                     c.tracks.size() != clip->tracks.size();
+  if (other || (c.hash != h && !trail_follow_edit(*clip))) {
+    c.clip = clip.get(), c.arm = arm->id, c.length = clip->length, c.frame_rate = clip->frame_rate, c.loop = clip->loop;
+    c.tracks = clip->tracks;
     c.frames.clear(), c.todo.clear();
   }
+  c.hash = h;
   const int now = (int)std::lround(anim_.frame), end = (int)std::ceil(clip->length);
   for (int f = std::max(0, now - kTrailSpan); f <= std::min(end, now + kTrailSpan); f++)
     if (!c.frames.count(f) && std::find(c.todo.begin(), c.todo.end(), f) == c.todo.end()) c.todo.push_back(f);
@@ -53,10 +63,50 @@ void Editor::trail_refresh() {
     c.todo.erase(c.todo.begin());
     apply_clip(*clip, *root, (float)f);
     solve_constraints(*scene_);
+    c.samples++;
     auto &pose = c.frames[f];
     for (GameObject *b : bones) pose.push_back({b->id, {b->world_position(), body::bone_tip(*b)}});
   }
   ui_.redraw = true;
+}
+
+/* Round 474: the frames the keys that differ between two copies of one track can move - from two keys before the first
+ * difference (an Auto tangent reads its neighbours' neighbours) to two after the last. False when they are the same. */
+static bool track_edit_span(const AnimTrack &was, const AnimTrack &now, float &lo, float &hi) {
+  auto same = [](const AnimKey &a, const AnimKey &b) {
+    return a.frame == b.frame && a.value == b.value && a.interp == b.interp && a.tangent == b.tangent && a.in_slope == b.in_slope && a.out_slope == b.out_slope;
+  };
+  const size_t nw = was.keys.size(), nn = now.keys.size(), most = std::min(nw, nn);
+  size_t head = 0;
+  while (head < most && same(was.keys[head], now.keys[head])) head++;
+  if (head == most && nw == nn) return false;
+  size_t tail = 0;
+  while (tail < most - head && same(was.keys[nw - 1 - tail], now.keys[nn - 1 - tail])) tail++;
+  lo = head >= 2 ? now.keys[head - 2].frame : -1e30f;
+  const size_t after = nn - tail + 1;  // (the second key past the edit: the first is the first of the tail)
+  hi = tail >= 2 ? now.keys[after].frame : 1e30f;  // (the old keys of the edit lie between the same two bounds: keys are sorted)
+  return true;
+}
+
+/* The cache's frames the edit between its copy of the tracks and the clip's moved are dropped (sampled again as the rest
+ * is); its copy follows. False when the tracks aren't the same ones any more. */
+bool Editor::trail_follow_edit(const AnimationClip &clip) {
+  TrailCache &c = trails_;
+  std::vector<std::pair<float, float>> spans;
+  for (size_t i = 0; i < clip.tracks.size(); i++) {
+    const AnimTrack &was = c.tracks[i], &now = clip.tracks[i];
+    if (was.axis != now.axis || was.property != now.property || was.path != now.path) return false;
+    float lo = 0.0f, hi = 0.0f;
+    if (!track_edit_span(was, now, lo, hi)) continue;
+    spans.push_back({lo, hi});
+    c.tracks[i].keys = now.keys;
+  }
+  for (auto it = c.frames.begin(); it != c.frames.end();) {
+    const float f = (float)it->first;
+    const bool moved = std::any_of(spans.begin(), spans.end(), [&](const std::pair<float, float> &s) { return f >= s.first - 0.5f && f <= s.second + 0.5f; });
+    it = moved ? c.frames.erase(it) : std::next(it);
+  }
+  return true;
 }
 
 /* The bones the trails follow: the selected handles, else the hands. */

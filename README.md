@@ -196,6 +196,7 @@ FBX carries the skeleton, skin and clip as glTF does, round 352;
 the texture set and lightmap UVs go along, round 353;
 an export waits for a remesh or bind still running on it, round 354;
 the Profiler ranks a scene or avatar against VRChat's PC and Quest limits, round 355;
+posing pays for the meshes a pose moves, not for the avatar: each mesh is skinned once a frame and only when its bones moved, follows in place, and the world's rows stay on the card (dragging an IK target on a 140,000-triangle stand-in: 48 ms a frame before, 10 ms now; a whole-body pose 35 to 53 ms), Pass 22, rounds 468-475;
 the Avatar window makes VRChat's 15 visemes and checks an avatar,
 after the CATS plugin,
 round 356,

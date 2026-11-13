@@ -2,6 +2,165 @@
 
 One entry per round of requests, newest first: what was asked, what changed, and how it was checked. Earlier rounds are summarised from their commits. Entries for rounds whose pass is not yet written up live in `changelog.d/` and are folded in by the pass write-up (ADR 0123).
 
+## 2026-11-12 (round 475): Pass 22's write-up - what posing costs now, and what is left to decide
+
+**Asked:** Pass 22's last round (task 0451): the pass in one place - every row of round 468's baseline beside its
+number after rounds 469 to 474, whether posing holds 16.7 ms a frame, and for every row that does not, what is left
+in the frame and what the options are.
+
+**The short answer**
+- **Met (16.7 ms, a window on the card, the stand-in alone):** dragging an IK target, its pole, or G on it (48 to 56
+  ms before, 10 to 13 ms now), orbiting, a prop moved in the world.
+- **Not met:** every pose that moves the whole body - turning the chest (50 -> 35 ms), a Puppet handle (63 -> 53),
+  a scrub (55 -> 46), Play with the springs (87 -> 44.5) - and, in a world, the IK drags too (67 -> 18 ms: close).
+- **The owner's avatar in the owner's world (measured locally):** an IK target dragged 61.7 -> 23.9 ms, the chest
+  turned 81.1 -> 40.9 ms, a scrub 103.9 -> 50.0 ms, the clip playing with the Game view beside the Scene view 191.8
+  -> 51.8 ms, Play with the springs 108.4 -> 45.0 ms, the whole avatar moved 82.8 -> 11.5 ms. Between a seventh and
+  a half of the frame time of the pass's start, and not 60 frames a second for a whole-body pose.
+- **Why it stops there:** in a whole-body frame the solve is under 2 ms. What is left is the body itself: the moved
+  meshes sent to the card (11 to 18 ms on the stand-in), their positions, normals and tangents moved on the CPU (8
+  to 11 ms) and the outline shells built whole (7 to 10 ms).
+
+**For the owner to decide** (numbers and estimates in `docs/PERFORMANCE.md`, "Pass 22 in one table")
+1. **Skinning on the card** - the largest part: the uploads and the CPU's normals and tangents leave the frame (19
+   to 29 of the stand-in's 35 to 53 ms; what the card then spends deforming is not estimated). Alone it leaves a
+   Puppet drag near 24 ms; with the outline shells in place (option 2) the estimate is 8 to 15 ms - the one
+   combination that brings a whole-body pose under 16.7 ms. A pass of its own, with an ADR: picking, bounds,
+   snapping, the path tracer and exports still need the posed shape on the CPU, on demand.
+2. **Outline shells following in place** (or on the card): 7 to 10 ms of every whole-body frame; a round or two.
+3. **A cheaper view while posing** (outlines, shadows or probes off during a drag): it changes the picture while
+   the mouse is down - the owner's call.
+4. **One window's redraw at a time** (Pass 19's open item): the Game view beside the Scene view costs a scrub 24 ms.
+
+**Changed (task 0451)**
+- The Learn lesson "Where a Posing Frame Goes" in full: what the editor keeps between frames, what a frame still
+  costs, three more questions and a fifth Try-it step.
+- `tools/dev/changelog.py fold`: the fragments of rounds 472 to 475 are in `CHANGELOG.md`, `README.md` and the
+  shared docs.
+
+**Left open by the pass** (from the rounds' entries, their task files and their reviews)
+- Round 468: zero-area faces' normals (found there, not taken up in this pass).
+- Round 472: the rig registry is not built. It was under its line when measured then; in round 474's baseline the
+  constraints cost 0.29 to 0.43 ms a frame in the world, at or just over the 0.3 ms line - a candidate again. An
+  Inspector drag is still drawn a frame late. Three caches compare a raw pointer and a counter (a pointer reused by
+  a new object with the same counter would be taken for the old one).
+- Round 473: no early exit for the full-body solver (ending 32 iterations at 24 moves bones by up to 122 mm); the
+  body model is not built on a job (the first Puppet drag's longest frame is 103 ms against 100); the solver does not
+  converge under a rotated, non-uniformly scaled parent (the old one neither); a goal at 1e20 is not refused; the
+  body model is dropped when the buffer is built again mid-drag and its bones differ; the stand-in is not compared
+  against the reference solver; with the pose prior in use the start pose is still written.
+- Round 474: an enabled Rigidbody in the scene's own physics loses Play's saving; trails still pose the live scene;
+  the springs' own step (3.8 ms); the release frame and the analyses on a timer were not looked at; AutoPhysics 58
+  ms against 50; `rig_ends()` is keyed on the scene's serial only; with Record on a keyed frame samples about 13
+  trail frames again and compares every key of the clip (it grows with the clip); the trail keeps a copy of the
+  clip's tracks; sampling part of a trail again is untried on long IK chains.
+- The bench: on the owner's avatar "FK: an upper arm turned" did not drag in round 468's window run, and "Puppet:
+  the left hand's handle" drags in neither window run (a still frame's time); headless it is 50.3 ms a frame. The stand-in's
+  "the clip playing, Scene view only" rows read one of two values from run to run (18.9 or 28.1 ms alone).
+- Housekeeping: the dependency-free `editor` group's check count varies by a few from run to run (0 failed);
+  `tools/dev/chain.sh`'s `TEST_GROUPS` with two differently configured trees; the `stack` job that failed once on
+  PR 385; the merged branch `task/0448-record-scrub-play` is still on GitHub.
+
+**Checked:** the `editor` and `animation` groups, 0 failed: Windows without the libraries 2,331 and 2,229 checks, with them 2,352 and 2,230, Linux 2,331 and 2,229 (the lessons' audit is in `editor`). The whole suite is CI's (round 493's rule). No timed run was made for the stand-in in this round: its numbers are round 474's session; the owner's avatar alone and the owner's world alone were measured again in this round's own window. Code review: changes needed, all text - the options table overstated what skinning on the card saves alone and gave the card's picture a number from the wrong setup; both corrected, with the ranges, the lesson's wording and the list of what is left open.
+
+## 2026-11-12 (round 474): Play with the springs stops building meshes whole; pins and trails do less each frame
+
+**Asked:** Pass 22's seventh round (task 0450): what sits around a posed frame - trails, the assistants' views,
+AutoPosing's pins, Play with an avatar's springs - should stop costing more than the pose.
+
+**Measured first** (the stand-in, round 473's baseline; a part is built only when it is over 0.3 ms a frame or over
+its budget): Play with the springs 82 ms a frame with 20 render meshes built whole every frame (a playing clip
+builds none); trails, onion skins and the zoetrope add about 6 ms to a drag frame (the trail 2.6 ms, the constraints
+1.7 ms instead of 0.4); the Puppet controls 2.9 ms a frame. Under the line and left alone: Centre of Mass (0.24
+ms), the Avatar window (0.17 ms), the Rigging window (0.27 ms); the first Preview, the first Record and entering
+Play (92, 71 and 96 ms: under their 100).
+
+**Changed (task 0450)**
+- **Play with the springs**: the scene's own physics step looked up every mesh's bounds at the start of each Play
+  frame, even with no rigid body in the scene. That deformed every skinned mesh before the springs had moved the
+  pose, and the Game view then built its meshes whole. With no body the step now does nothing; with one it is as it
+  was.
+- **AutoPosing's pins** are kept until what they are read from changes (the objects, the clip's contacts at the
+  playhead, the locks), where every frame walked the scene up to three times.
+- **Motion trails**: a key edit samples again only the frames around the edited keys (two keys either side), where
+  it sampled the whole trail again - Record keys on every frame of a drag. Turning trails off releases what they kept.
+
+**Not in this round**
+- **Trails still pose the live scene** when they sample (the spec's private copy of the rig would have to repeat
+  the constraint solves exactly: too large here). What changed is how many frames an edit samples again.
+- **With a rigid body in the scene's own physics** (every build without the libraries; with them only a body added
+  during Play) the bounds are looked up as before, and the meshes are built whole again.
+- **The springs' own step** (4.9 ms a frame on the stand-in: three scans of the scene and a body fit hashed every
+  frame) is read and listed, not changed. The release frame, the analyses on a timer, the first Puppet drag's
+  longest frame (110 ms) and AutoPhysics (58 ms against 50) are not touched.
+
+**Checked:** the `animation`, `editor` and `physics` groups, 0 failed: Windows without the libraries 2,229, 2,331 and 190 checks, with them 2,230, 2,349 and 208, Linux 2,229, 2,331 and 190; `round 474` alone 342 checks (338 with the libraries, where one test steps aside: under Jolt a mesh without a collider is no floor); the `gpu` group with the libraries 886 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: no blocking finding. Its notes, kept here: the pins come from a cache, so a frame that commits an undo step walks once; an enabled Rigidbody in the scene's own physics loses the Play saving (follow-up: leave skinned objects out of the statics, or use last frame's bounds); with Record on, a keyed frame samples about 13 trail frames again on the test rig and compares every key of the clip (work that grows with the clip's keys); the trail keeps one copy of the clip's tracks; sampling part of a trail again could differ from sampling all of it where a constraint starts from its last answer (not seen in 37 kinds of edit on the test rig, not tried on long IK chains).
+
+**Measured:** the stand-in, round 473's build against this one on a quiet machine (a window on the card). **Play with the springs: 82.3 -> 44.5 ms a frame alone, 101.5 -> 69.8 ms in its world** (longest frame 93 -> 61 and 108 -> 81); evaluations a frame 27 -> 10.9, tangents built whole 5.3 -> 0 ms, mesh uploads 28.1 -> 17.0 ms, the interface's part (where the physics step sat) 18.9 -> 5.0 ms; entering Play 83.5 -> 70.6 ms. The row is still over its budget: what is left is the springs' own step (3.8 ms), the outline shells built whole and the uploads. **Pins and trails: nothing a row shows.** The drag with trails, onion skins and the zoetrope reads 31.8 -> 28.7 ms (within what a row is good for), its trail part 2.16 -> 2.10 ms: the bench's drag keys on every frame, where the trail was already sampled a few frames at a time. The Puppet handle's row is unchanged (52.4 -> 52.6 ms alone, 61.5 -> 62.0 in its world; controls 1.36 -> 1.39 ms). One check finding, leaving Play 5.3 -> 8.2 ms, did not repeat (5.1 ms in the round's own baseline). The owner's avatar in the owner's world, measured locally, round 472's run against this round's (Unity signed in for both; rounds 473 and 474 together): Play with the springs reads the same in a window (45.5 -> 45.0 ms) and 67.7 -> 55.0 ms headless (normals 11.5 -> 6.6 ms, meshes moved in place 10.3 -> 5.7 ms); the Puppet handles 56.2 -> 52.5 ms (hips) and 55.5 -> 52.2 ms (head); the other rows within a tenth. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+
+## 2026-11-12 (round 473): Puppet Posing's solver works on a pose buffer, not on the scene
+
+**Asked:** Pass 22's sixth round (task 0449, ADR 0127): dragging a Puppet handle should cost about what turning one
+bone costs.
+
+**Read first:** every frame of a Puppet or AutoPosing drag put the whole start pose back into the scene, built the
+joint list again, and wrote two transforms per bone into the scene on each of 32 to 92 iterations - thousands of
+scene writes that nothing draws, each one marking a subtree dirty.
+
+**Changed (task 0449, ADR 0127)**
+- **A pose buffer** (`autopose::Rig`): everything under the armature as plain numbers, parents first, built once per
+  drag. The solver reads and writes only the buffer; an iteration allocates nothing and touches no scene object.
+- **The scene is written once a frame**: after the solve each joint whose turn changed gets one write (the hips'
+  place and a joint's scale too, when they differ). The start pose
+  is no longer written back first (it is, as before, when the pose prior is used: the prior reads the scene).
+- **The pose is the same**: the buffer solver leaves every bone within 0.002 mm of the old solver's on 25 recorded
+  drags (each handle, pins on and off, a limit hit, a target out of reach, the hips with both feet pinned). The old
+  solver stays in the code as the tests' reference (`autopose::solve_reference`).
+- **Arms with support bones**: an avatar whose arms carry `_sup` bones placed further out than the next limb bone
+  now maps its arms, so Puppet Posing shows its hand handles there.
+
+**Not in this round**
+- **The early exit** of ADR 0127 (decision 3). Measured: the pose a drag reaches depends on the whole schedule of
+  iterations - ending the 32 main iterations at 24 moves bones by up to 122 mm and 15 degrees, at 16 by 323 mm - so
+  no exit can keep the pose within the task's 1 mm. The solve still runs 32 iterations, or up to 92 with pins.
+- **The body model on a job** when it takes over 50 ms (scope 6).
+
+**Checked:** the `animation` and `editor` groups, 0 failed: Windows without the libraries 1,887 and 2,326 checks, with them 1,892 and 2,340, Linux 1,887 and 2,330; `round 473` alone 380 checks; the `gpu` group with the libraries 886 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: the buffer solver read against the old one line by line, no difference found; one major finding fixed (a bone destroyed mid-drag left the body model and the prior's rig pointing at freed objects when the buffer was built again), with the armature's parent read every frame, a joint's scale put back, and tests that fail if a frame writes the start pose again.
+
+**Measured:** the stand-in, round 472's build against this one on a quiet machine (a Puppet handle dragged, a window on the card): the solver's own part 1.95 -> 1.11 ms a frame, the controls around it 3.56 -> 2.87 ms, 44.5 scene writes a frame by the solver where it made two a bone on each of 31 iterations; the frame itself reads the same (alone 50.3 -> 55.5 ms, in its world 63.4 -> 57.9: within what a row is good for). The solve was 2 ms of a 50 ms frame: a Puppet drag costs what moving the whole body costs (skinning, normals, uploads), not what the solver costs. The owner's avatar, measured locally: its left hand's handle exists now (a drag frame 49.7 ms headless; the solver 2.6 ms, 219 scene writes a frame); the solver's part for the hips' handle is unchanged there (4.65 -> 4.91 ms: on 200 joints it is the arithmetic per joint, not the scene writes). The avatar-in-the-world rows could not be compared with round 472's: Unity had no licence that morning, so the world came in without Unity's lightmaps and the avatar without its part numbers. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+
+## 2026-11-12 (round 472): Record, scrubbing and the Animation window cost what the pose costs; the limb is drawn where the solver puts it
+
+**Asked:** Pass 22's fifth round (task 0448, ADR 0126): posing with Record on, scrubbing and playing a clip should
+cost what the pose costs, and a dragged IK target's limb should be drawn where the solver puts it for that frame.
+
+**Measured first** (round 471's runs, the owner's avatar, 275 bones keyed): Record cost 10.5 ms a frame and
+serialised the clip once a frame; on a scrub the clip's apply was 1.4 ms and the Animation window 1.5 to 1.9 ms;
+the constraints 0.2 ms. On the stand-in the hand was drawn up to 16.5 mm behind its IK target on 30 of 35 frames
+of a drag.
+
+**Changed (task 0448, ADR 0126)**
+- **Record** takes the clip's text once per undo step instead of on every frame, and reads only the objects that
+  moved since it last looked (`transform_version`), where it read nine numbers of every object under the root
+  through a map keyed by text. The keys written are the same.
+- **A clip's tracks stay bound to their objects** (`apply_clip`): found once per clip and root, kept while the
+  clip's tracks and the objects under the root (which, hung from what, called what) are the same - no map of paths
+  built per call. Blend-shape tracks are bound by index. `AnimationClip::track` / `find` use an index from 24 tracks.
+- **The Animation window** keeps its rows and each row's keys while only the playhead moves.
+- **G / R / S** apply and redraw only when an input changed (the mouse, a typed number, an axis, a modifier, the
+  camera): a held modal with a still mouse costs nothing.
+- **The limb is drawn where the solver puts it**: the constraints are solved once more right after the Scene
+  view's tools moved something, before the view gathers (not in Play).
+
+**Not in this round:** the rig registry (the constraints cost 0.2 ms a frame, under the spec's 0.3 ms line - with
+the second solve a drag now pays 0.5 ms for them, so the registry is worth a look again in the write-up); the
+second solve after an Inspector drag (the Scene view's tools only); what a scrub mostly costs - the meshes moved
+in place, their normals and uploads, and the card.
+
+**Checked:** the `animation` and `editor` groups on main e978001a with the round on it, 0 failed: Windows without the libraries 1,507 and 2,327 checks, with them 1,512 and 2,342, Linux 1,507 and 2,331; `round 472` alone 255 checks; the `gpu` group with the libraries 795 checks, the 4 picture checks that also fail on `main`. The whole suite is CI's (round 493's rule). Code review: one major finding fixed (two animated roots rebuilt each other's bindings on every frame); one nit left for the write-up (three caches compare a raw pointer and a counter).
+
+**Measured:** measured locally, the owner's avatar in the owner's world (275 bones keyed; a window on the card): an IK target dragged with Record on 41.3 -> 25.3 ms a frame (the same drag with Record off: 23.7), Record's own part 10.5 -> 0.85 ms, clip serialisations 1 -> 0 a frame. On a scrub the clip's sampling 0.64 -> 0.05 ms, its apply 0.77 -> 0.17 ms, the Animation window 1.5 -> 0.4 ms (1.9 -> 0.7 with the Game view): about 2.3 ms of a 50 ms frame, so the scrub and play rows read the same (50.0 -> 49.4, 49.8 -> 50.0). The stand-in: the hand was drawn up to 16.5 mm behind its IK target on 30 of 35 frames of a drag, now 0.000 mm on all 35; `AnimationClip::find` on a 201-track clip 0.74 -> 0.009 ms (the `animation` section's row, over its budget before). The second solve doubles the constraints on a drag: 0.24 -> 0.48 ms, 46 -> 92 name walks. Tables: `docs/PERFORMANCE.md`, "Pass 22".
+
 ## 2026-11-11 (round 493): The round chain runs the round's test groups; the whole suite is CI's
 
 **Asked:** a round's local check ran every test group three times whatever it changed, on the machine every session
