@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Puppet Posing (task 0280). See puppet.h.
 #include "puppet.h"
+#include "pose_counts.h"
 
 #include <algorithm>
 #include <chrono>
@@ -31,6 +32,19 @@ int goal_of(const ai::PoseMapping &m, const GameObject *bone) {
   for (int k = 0; k < ai::kPriorGoals; k++)
     if (bone && m.bones[(size_t)ai::kPriorGoalJoint[k]] == bone) return k;
   return -1;
+}
+
+/* The IK solve: on the scene without a buffer, else on the buffer from the drag's start pose and written back once
+ * (what differs from the scene - the scene may hold the last frame's pose or the prior's). */
+autopose::Result ik_solve(GameObject &armature, autopose::Rig *buffer, const std::vector<autopose::Goal> &goals,
+                          const std::vector<GameObject *> &pins, const body::Body *body, const autopose::Settings &s) {
+  if (!buffer) return autopose::solve(armature, goals, pins, body, s);
+  autopose::read_root(*buffer);  // (the armature's parent may have moved since the last frame: Play)
+  autopose::to_start(*buffer);
+  autopose::Result res = autopose::solve(*buffer, goals, pins, body, s);
+  res.writes = autopose::write(*buffer);
+  pose_add_solver_writes(res.writes);
+  return res;
 }
 
 }  // namespace
@@ -72,11 +86,12 @@ bool prior_inputs(const ai::PoseMapping &m, const ai::ModelInfo &info, const std
 }
 
 Result pose(GameObject &armature, const gait::Rig &rig, ai::PriorModel *prior, const std::vector<autopose::Goal> &goals,
-            const std::vector<GameObject *> &pins, const body::Body *body, const autopose::Settings &s) {
+            const std::vector<GameObject *> &pins, const body::Body *body, const autopose::Settings &s, autopose::Rig *buffer,
+            const std::function<void()> *scene_to_start) {
   Result r;
   if (!prior) {
     r.note = "no pose prior: IK alone";
-    r.ik = autopose::solve(armature, goals, pins, body, s);
+    r.ik = ik_solve(armature, buffer, goals, pins, body, s);
     return r;
   }
   const ai::PoseMapping m = ai::pose_mapping(rig, prior->info);
@@ -84,15 +99,18 @@ Result pose(GameObject &armature, const gait::Rig &rig, ai::PriorModel *prior, c
   for (const autopose::Goal &g : goals) own_end = own_end || goal_of(m, g.bone) >= 0 || (!m.bones.empty() && g.bone == m.bones[kHipsJoint]);
   if (!own_end) {
     r.note = "not one of the prior's ends: IK alone";
-    r.ik = autopose::solve(armature, goals, pins, body, s);
+    r.ik = ik_solve(armature, buffer, goals, pins, body, s);
     return r;
   }
+  /* The prior reads the scene's pose and writes into it, so the scene goes to the drag's start first (the buffer
+   * solve's frames otherwise leave it where the last one ended). */
+  if (buffer && scene_to_start && *scene_to_start) (*scene_to_start)();
   float in[ai::kPriorInputs], out[ai::kPriorOutputs];
   Quat turn;
   Vec3 hips;
   if (!prior_inputs(m, prior->info, goals, pins, in, turn, hips)) {
     r.note = "the rig isn't mapped: IK alone";
-    r.ik = autopose::solve(armature, goals, pins, body, s);
+    r.ik = ik_solve(armature, buffer, goals, pins, body, s);
     return r;
   }
   /* Where the pins are now (place and turn): the prior moves the body, the solve holds them there as pins. A hand
@@ -112,7 +130,7 @@ Result pose(GameObject &armature, const gait::Rig &rig, ai::PriorModel *prior, c
   r.prior_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   if (!ran) {
     r.note = "the prior failed (" + error + "): IK alone";
-    r.ik = autopose::solve(armature, goals, pins, body, s);
+    r.ik = ik_solve(armature, buffer, goals, pins, body, s);
     return r;
   }
   /* The prior's pose on the rig: the hips where they are (or dragged to), turned back from the canonical facing. */
@@ -124,7 +142,14 @@ Result pose(GameObject &armature, const gait::Rig &rig, ai::PriorModel *prior, c
   r.used_prior = true;
   autopose::Settings st = s;
   st.pin_poses = &pin_poses;
-  r.ik = autopose::solve(armature, all, pins, body, st);  // (from the prior's pose, pulled toward it: the goals exact, the pins held)
+  if (!buffer) {
+    r.ik = autopose::solve(armature, all, pins, body, st);  // (from the prior's pose, pulled toward it: the goals exact, the pins held)
+    return r;
+  }
+  autopose::read_pose(*buffer);  // (the prior's pose is the solve's start; the drag's start stays for the next frame)
+  r.ik = autopose::solve(*buffer, all, pins, body, st);
+  r.ik.writes = autopose::write(*buffer);
+  pose_add_solver_writes(r.ik.writes);
   return r;
 }
 

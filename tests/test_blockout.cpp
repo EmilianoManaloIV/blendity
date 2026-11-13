@@ -11842,75 +11842,37 @@ static void tests_round481() {
     }
   });
 
-  test("blockout blend: an arrangement no grid closes over with its blends is built without them - closed, crisp joins - and the report says so; it is not refused", [] {
-    /* The stress sweep's arrangement 87 (stress_blockout.inc: `hostile(87, false)` and `blend_sweep`'s radii), made here as it is
-     * there: nine boxes, cylinders and spheres in a heap, some turned, mirrored or squashed. Its whole cluster does not close on
-     * the blend's grid nor at the Blockout's cell of 0.08 m. Before the last rung it was refused. */
-    struct Rand {
-      uint32_t s;
-      float next() {
-        s = s * 1664525u + 1013904223u;
-        return (float)(s >> 8) / 16777216.0f;
-      }
-      float in(float lo, float hi) { return lo + (hi - lo) * next(); }
-      int pick(int n) { return std::min(n - 1, (int)(next() * (float)n)); }
-    };
-    const uint32_t seed = 87;
-    Rand r{seed * 2654435761u + 12345u};
-    std::vector<Piece> pieces;
-    const int count = 2 + r.pick(8);
-    const bool snapped = r.pick(3) == 0;
-    for (int i = 0; i < count; i++) {
-      Piece q;
-      q.id = (uint64_t)i + 1;
-      q.shape = (Shape)r.pick(3);
-      q.op = r.pick(4) == 0 ? Op::Subtract : Op::Add;
-      auto size = [&]() { return snapped ? 0.25f * (float)(1 + r.pick(8)) : r.in(0.3f, 2.0f); };
-      q.size = {size(), size(), size()};
-      q.radius = size() * 0.5f, q.height = size();
-      q.segments = 3 + r.pick(14), q.rings = 2 + r.pick(8);
-      Vec3 at = snapped ? Vec3(0.25f * (float)(r.pick(9) - 4), 0.25f * (float)(r.pick(9) - 4), 0.25f * (float)(r.pick(9) - 4)) : Vec3(r.in(-1, 1), r.in(-1, 1), r.in(-1, 1));
-      Quat turn = snapped ? Quat::euler({90.0f * (float)r.pick(4), 90.0f * (float)r.pick(4), 0.0f}) : Quat::euler({r.in(0, 360), r.in(0, 360), r.in(0, 360)});
-      Vec3 scale(1.0f);
-      const int odd = r.pick(40);
-      if (odd == 0) q.size.x = 0.0f;
-      if (odd == 1) q.size.y = std::numeric_limits<float>::quiet_NaN();
-      if (odd == 2) at.x = std::numeric_limits<float>::infinity();
-      if (odd == 3) scale = {1.0f, 0.0f, 1.0f};
-      if (odd == 4) scale = {-1.0f, 1.0f, 1.0f};
-      if (odd == 5) scale = {1e-3f, 1e-3f, 1e-3f};
-      if (odd == 6) scale = {30.0f, 30.0f, 30.0f};
-      if (odd == 7) scale = {3.0f, 0.2f, 1.0f};
-      q.to_blockout = Mat4::trs(at, turn, scale);
-      if (odd == 8) q.to_blockout.m[4] = 0.7f;
-      pieces.push_back(q);
-    }
-    Rand b{seed * 40503u + 481u};
-    for (Piece &p : pieces) {
-      const int pick = b.pick(10);
-      p.blend = pick < 3 ? 0.0f : pick == 3 ? 0.001f : pick < 8 ? 0.05f + 0.05f * (float)b.pick(6) : pick == 8 ? 5.0f : std::numeric_limits<float>::quiet_NaN();
-    }
-    const int detail = b.pick(3);
+  /* (The third review: this was the stress sweep's arrangement 87, made here as it is made there - nine random pieces. Their
+   * places are drawn as arguments of one call, whose order C++ leaves to the compiler: another heap under Clang, where no
+   * rung fails. The rung is reached by a setting for tests instead; the sweep's real arrangements stay the stress section's.) */
+  test("blockout blend: a cluster no grid closes over with its blends is built without them - closed, crisp joins, the same bytes as with no radius - and the report says so; it is not refused", [] {
     for (Path path : {Path::Auto, Path::Field}) {
-      const R476Built built = r481_build(pieces, path, detail, 0.08f);
-      r481_print(path == Path::Auto ? "arrangement 87, auto" : "arrangement 87, field", built);
-      CHECK(built.ok);
-      if (!built.ok) continue;
-      std::string invalid;
-      CHECK(structurally_valid(built.mesh, &invalid) && closed_manifold(built.mesh) && r476_volume(built.mesh) > 0.0);
-      size_t dropped = 0;
-      for (const blockout::ClusterReport &c : built.report.clusters) {
-        dropped += c.blend_dropped;
-        if (c.blend_dropped) CHECK(!c.blend_whole && !c.seam_why.empty() && c.blend_regions == 0);
+      for (int scene = 0; scene < 2; scene++) {
+        const std::vector<Piece> pieces = scene == 0 ? r481_sphere_on_box(0.2f) : r481_column(0.15f);
+        blockout::Settings st;
+        st.path = path, st.cell = 0.1f, st.fail_blends_for_test = true;
+        R476Built built;
+        built.ok = blockout::build(pieces, st, built.mesh, &built.faces, &built.report);
+        r481_print(scene == 0 ? "a sphere on a box, no grid closes" : "a column on a slab, no grid closes", built);
+        CHECK(built.ok && built.report.clusters.size() == 1);
+        if (!built.ok || built.report.clusters.size() != 1) continue;
+        const blockout::ClusterReport &c = built.report.clusters[0];
+        CHECK(c.blend_dropped && !c.blend_whole && c.blend_regions == 0 && !c.seam_why.empty());
+        CHECK(r476_sound(built.mesh, "built without its blends"));
+        const R476Built crisp = r481_build(scene == 0 ? r481_sphere_on_box(0.0f) : r481_column(0.0f), path, 1);
+        CHECK(crisp.ok && r477_same(crisp.mesh, built.mesh));
+        size_t blended = 0;
+        for (uint32_t side : built.faces.side) blended += side == blockout::kSideBlend;
+        CHECK(blended == 0);
       }
-      CHECK(dropped == 1);
-      /* Without its blends means: what the same pieces give with every radius 0. */
-      std::vector<Piece> plain = pieces;
-      for (Piece &p : plain)
-        if (finite_bits(p.blend)) p.blend = 0.0f;
-      const R476Built crisp = r481_build(plain, path, detail, 0.08f);
-      CHECK(crisp.ok && r477_same(crisp.mesh, built.mesh));
     }
+    /* The setting changes nothing where no piece has a radius. */
+    blockout::Settings st;
+    st.fail_blends_for_test = true;
+    R476Built plain;
+    plain.ok = blockout::build(r481_column(0.0f), st, plain.mesh, &plain.faces, &plain.report);
+    const R476Built usual = r481_build(r481_column(0.0f), Path::Auto, 1);
+    CHECK(plain.ok && usual.ok && r477_same(plain.mesh, usual.mesh) && !plain.report.clusters[0].blend_dropped);
   });
 }
 

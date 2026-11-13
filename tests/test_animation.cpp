@@ -9576,6 +9576,2006 @@ static void tests_round472_playback() {
   });
 }
 
+/* ------------------------------------------------------------------------------------------------------------------
+ * Round 473 (task 0449, ADR 0127): Puppet Posing's solver on a pose buffer. The goldens: the same drag solved by
+ * autopose::solve_reference (the solver as it was, on the scene) and by the buffer solver, every bone compared. */
+namespace {
+
+struct R473Pose {
+  std::vector<GameObject *> bones;
+  std::vector<Transform> locals;
+  std::vector<Vec3> heads;
+  std::vector<Quat> turns;
+};
+
+R473Pose r473_pose(GameObject &arm) {
+  R473Pose p;
+  std::vector<GameObject *> st{&arm};
+  while (!st.empty()) {
+    GameObject *g = st.back();
+    st.pop_back();
+    for (GameObject *c : g->children) st.push_back(c);
+    p.bones.push_back(g), p.locals.push_back(g->local()), p.heads.push_back(g->world_position()), p.turns.push_back(g->world_rotation());
+  }
+  return p;
+}
+
+void r473_restore(const R473Pose &p) {
+  for (size_t i = 0; i < p.bones.size(); i++) p.bones[i]->set_local(p.locals[i]);
+}
+
+float r473_angle(Quat a, Quat b) {
+  const Quat d = normalize(a * b.conjugate());
+  return 2.0f * std::acos(std::min(1.0f, std::fabs(d.w))) * 57.2957795f;
+}
+
+struct R473Gap {
+  float m = 0.0f, deg = 0.0f;
+};
+
+R473Gap r473_gap(const R473Pose &a, const R473Pose &b) {
+  R473Gap g;
+  for (size_t i = 0; i < a.bones.size() && i < b.bones.size(); i++)
+    g.m = std::max(g.m, length(a.heads[i] - b.heads[i])), g.deg = std::max(g.deg, r473_angle(a.turns[i], b.turns[i]));
+  return g;
+}
+
+struct R473Drag {
+  const char *what, *bone;
+  Vec3 by;
+  bool pins;
+};
+
+/* One drag solved both ways from the same start: the reference's pose, the buffer's, and both results. */
+struct R473Both {
+  R473Pose ref, buf;
+  autopose::Result rr, rb;
+};
+
+R473Both r473_both(Scene &s, GameObject &rig, const body::Body *body, const R473Drag &d, const autopose::Settings &st) {
+  R473Both out;
+  GameObject *bone = s.find_by_name(d.bone);
+  std::vector<GameObject *> pins;
+  if (d.pins) pins = {s.find_by_name("LeftFoot"), s.find_by_name("RightFoot")};
+  const R473Pose start = r473_pose(rig);
+  const Vec3 to = bone->world_position() + d.by;
+  out.rr = autopose::solve_reference(rig, {{bone, to, 1.0f}}, pins, body, st);
+  out.ref = r473_pose(rig);
+  r473_restore(start);
+  out.rb = autopose::solve(rig, {{bone, to, 1.0f}}, pins, body, st);
+  out.buf = r473_pose(rig);
+  r473_restore(start);
+  return out;
+}
+
+const R473Drag kR473Drags[] = {
+    {"the left hand, in reach", "LeftHand", Vec3(0.15f, 0.3f, 0.25f), true},
+    {"the right hand, in reach", "RightHand", Vec3(-0.2f, 0.1f, 0.3f), true},
+    {"the left hand, no pins", "LeftHand", Vec3(0.15f, 0.3f, 0.25f), false},
+    {"the left hand, out of reach", "LeftHand", Vec3(1.2f, 0.4f, 0.0f), true},
+    {"the head, forward and down", "Head", Vec3(0.0f, -0.1f, 0.35f), true},
+    {"the head, no pins", "Head", Vec3(0.1f, -0.05f, 0.2f), false},
+    {"the hips, a crouch with both feet pinned", "Hips", Vec3(0.0f, -0.25f, 0.0f), true},
+    {"the hips, sideways past the lean's limit", "Hips", Vec3(0.6f, 0.0f, 0.0f), true},
+    {"the left foot lifted (the right pinned by default)", "LeftFoot", Vec3(0.0f, 0.3f, 0.2f), false},
+    {"the right foot, far forward", "RightFoot", Vec3(0.0f, 0.2f, 0.9f), false},
+};
+
+}  // namespace
+
+static void tests_round473() {
+  test("round 473: the buffer solver leaves every bone where the reference solver does (ten drags)", [&] {
+    for (const R473Drag &d : kR473Drags) {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      const body::Body b = body::build(s, *rig, 75.0f);
+      const R473Both r = r473_both(s, *rig, &b, d, autopose::Settings());
+      const R473Gap g = r473_gap(r.ref, r.buf);
+      std::printf("   %-52s %7.4f mm %7.4f deg, iterations %d / %d, %.2f -> %.2f ms, %zu writes\n", d.what, g.m * 1000.0f, g.deg, r.rr.iterations, r.rb.iterations, r.rr.ms, r.rb.ms, r.rb.writes);
+      CHECK(g.m < 1e-4f);
+      CHECK(g.deg < 0.01f);
+      CHECK(r.rr.iterations == r.rb.iterations);
+      CHECK(std::fabs(r.rr.error - r.rb.error) < 1e-4f);
+      CHECK(std::fabs(r.rr.pin_error - r.rb.pin_error) < 1e-4f);
+      CHECK(std::fabs(r.rr.balance - r.rb.balance) < 1e-3f);
+    }
+  });
+
+  /* The editor's drag (spec scope 3 to 5): the same pose as the solver on the scene made, solved on the buffer. */
+  test("round 473: an AutoPose drag of several frames ends with the bones where the reference solver puts them, writes at most a joint a frame and the hips, and builds the buffer once", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    const std::string name = create_rig(ed.scene(), false, Vec3(0.0f))->name;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("autopose on");
+    GameObject *rig = ed.scene().find_by_name(name);
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    CHECK(rig && hand);
+    if (!rig || !hand) return;
+    Scene s2;  // (the same rig, solved by the reference from the same start)
+    GameObject *rig2 = create_rig(s2, false, Vec3(0.0f));
+    const body::Body body2 = body::build(s2, *rig2, rig2->get<Armature>()->body_mass);
+    std::vector<GameObject *> pins2{s2.find_by_name("LeftFoot"), s2.find_by_name("RightFoot")};
+    const Vec3 at = hand->world_position();
+    const Vec3 steps[] = {Vec3(0.05f, 0.1f, 0.1f), Vec3(0.1f, 0.2f, 0.2f), Vec3(0.15f, 0.3f, 0.25f)};
+    const size_t joints = autopose::build_rig(*rig).joints.size();
+    for (const Vec3 &d : steps) {
+      const uint64_t w0 = pose_counts().solver_writes;
+      CHECK(ed.autopose_frame_for_test(hand->id, at + d));
+      CHECK(pose_counts().solver_writes - w0 <= joints + 1);
+    }
+    CHECK(ed.autopose_buffer_builds_for_test() == 1);
+    const R473Pose got = r473_pose(*rig);
+    GameObject *hand2 = s2.find_by_name("LeftHand");
+    autopose::solve_reference(*rig2, {{hand2, hand2->world_position() + steps[2], 1.0f}}, pins2, &body2, autopose::Settings());
+    const R473Pose want = r473_pose(*rig2);
+    R473Gap g;  // (the bones: the drag also moves the IK targets and poles, which the solver alone does not)
+    for (size_t i = 0; i < want.bones.size() && i < got.bones.size(); i++)
+      if (want.bones[i]->get<Bone>())
+        g.m = std::max(g.m, length(want.heads[i] - got.heads[i])), g.deg = std::max(g.deg, r473_angle(want.turns[i], got.turns[i]));
+    std::printf("    the editor's drag against the reference: %.4f mm, %.4f deg (hands %.3f %.3f %.3f / %.3f %.3f %.3f, want %.3f %.3f %.3f)\n", g.m * 1000.0f, g.deg,
+                hand->world_position().x, hand->world_position().y, hand->world_position().z, hand2->world_position().x, hand2->world_position().y,
+                hand2->world_position().z, at.x + steps[2].x, at.y + steps[2].y, at.z + steps[2].z);
+    CHECK(g.m < 1e-4f && g.deg < 0.01f);
+    CHECK(length(hand->world_position() - (at + steps[2])) < 0.02f);
+    ed.autopose_release_for_test();
+  });
+
+  test("round 473: a drag frame after an undo, a bone made or destroyed or renamed mid-drag poses the body again from a buffer built for the scene now open", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    const std::string name = create_rig(ed.scene(), false, Vec3(0.0f))->name;
+    ed.mark_changed_for_test("Add the rig");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    const uint64_t hand_id = hand->id;
+    const Vec3 at = hand->world_position();
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.1f, 0.2f, 0.2f)));
+    ed.autopose_release_for_test();  // (the first drag's undo step)
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.1f, 0.2f, 0.2f)));  // (a second drag, under way)
+    CHECK(ed.autopose_buffer_builds_for_test() == 2);
+    ed.command("undo");  // (the scene is a copy now: the same bones, other objects)
+    ed.step_frame_headless();
+    ed.command("create Cube");  // (an edit: the swapped-out scene is freed)
+    ed.mark_changed_for_test("A cube");
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.15f, 0.3f, 0.25f)));
+    CHECK(ed.autopose_buffer_builds_for_test() == 3);
+    hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand && length(hand->world_position() - (at + Vec3(0.15f, 0.3f, 0.25f))) < 0.02f);
+    if (!hand) return;
+    /* A bone made under the hand, then destroyed, then one renamed: each a structure change the buffer is rebuilt for. */
+    GameObject *extra = ed.scene().create("HandExtra", hand);
+    extra->add<Bone>()->length = 0.05f;
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.1f, 0.25f, 0.2f)));
+    CHECK(ed.autopose_buffer_builds_for_test() == 4);
+    ed.scene().destroy(extra);
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.12f, 0.2f, 0.2f)));
+    CHECK(ed.autopose_buffer_builds_for_test() == 5);
+    GameObject *elbow = ed.scene().find_by_name("LeftLowerArm");
+    CHECK(elbow != nullptr);
+    if (elbow) elbow->name = "LeftForeArmRenamed", edit_epoch::bump();
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.1f, 0.2f, 0.25f)));
+    CHECK(ed.autopose_buffer_builds_for_test() == 6);
+    hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand && length(hand->world_position() - (at + Vec3(0.1f, 0.2f, 0.25f))) < 0.02f);
+    /* The frames that follow keep the buffer. */
+    CHECK(ed.autopose_frame_for_test(hand_id, at + Vec3(0.1f, 0.2f, 0.2f)));
+    CHECK(ed.autopose_buffer_builds_for_test() == 6);
+    ed.autopose_release_for_test();
+  });
+
+  /* An arm whose upper and lower bones each carry a support bone, placed further out than the next limb bone. */
+  test("round 473: a rig whose arm bones carry support (_sup) bones further out than the next limb bone still has its arms found, and the plain rig's map is as it was", [] {
+    auto arm_names = [](const humanoid::Map &m) {
+      std::vector<std::string> out;
+      for (int p : {humanoid::LShoulder, humanoid::LUpperArm, humanoid::LLowerArm, humanoid::LHand, humanoid::RShoulder, humanoid::RUpperArm, humanoid::RLowerArm, humanoid::RHand})
+        out.push_back(m.part[p] ? m.part[p]->name : "-");
+      return out;
+    };
+    const std::vector<std::string> plain_expect = {"-", "LeftUpperArm", "LeftLowerArm", "LeftHand", "-", "RightUpperArm", "RightLowerArm", "RightHand"};
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    CHECK(arm_names(humanoid::map(s, *rig)) == plain_expect);
+    for (const char *side : {"Left", "Right"}) {
+      const float sx = side[0] == 'L' ? 1.0f : -1.0f;
+      GameObject *ua = s.find_by_name(std::string(side) + "UpperArm"), *la = s.find_by_name(std::string(side) + "LowerArm");
+      CHECK(ua && la);
+      if (!ua || !la) return;
+      GameObject *a = s.create(std::string(side) + "UpperArm_sup", ua), *b = s.create(std::string(side) + "LowerArm_sup", la);
+      a->add<Bone>()->length = 0.1f, b->add<Bone>()->length = 0.1f;
+      a->set_world_position(ua->world_position() + Vec3(0.9f * sx, 0.0f, 0.0f));  // (further from the upper arm's head than the lower arm is)
+      b->set_world_position(la->world_position() + Vec3(0.9f * sx, 0.0f, 0.0f));
+    }
+    CHECK(arm_names(humanoid::map(s, *rig)) == plain_expect);
+    const gait::Rig r = gait::analyse(s, *rig);
+    CHECK(r.arms.size() == 2);
+  });
+}
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * Round 473, the test engineer's own (independent of the implementer's): odd goldens, the solve's purity, scratch
+ * reuse, robustness, the editor's drag, and support-bone rigs written from the task's acceptance criteria. */
+namespace {
+
+R473Both r473_run(GameObject &rig, const body::Body *body, const std::vector<autopose::Goal> &goals, const std::vector<GameObject *> &pins,
+                  const autopose::Settings &st) {
+  R473Both out;
+  const R473Pose start = r473_pose(rig);
+  out.rr = autopose::solve_reference(rig, goals, pins, body, st);
+  out.ref = r473_pose(rig);
+  r473_restore(start);
+  out.rb = autopose::solve(rig, goals, pins, body, st);
+  out.buf = r473_pose(rig);
+  r473_restore(start);
+  return out;
+}
+
+bool r473_finite(GameObject &root) {
+  std::vector<GameObject *> st{&root};
+  while (!st.empty()) {
+    GameObject *g = st.back();
+    st.pop_back();
+    for (GameObject *c : g->children) st.push_back(c);
+    const Transform &t = g->local();
+    const float v[] = {t.position.x, t.position.y, t.position.z, t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w, t.scale.x, t.scale.y, t.scale.z};
+    for (float f : v)
+      if (!std::isfinite(f)) return false;
+  }
+  return true;
+}
+
+bool r473_same_transform(const Transform &x, const Transform &y) {
+  return x.position.x == y.position.x && x.position.y == y.position.y && x.position.z == y.position.z && x.rotation.x == y.rotation.x &&
+         x.rotation.y == y.rotation.y && x.rotation.z == y.rotation.z && x.rotation.w == y.rotation.w && x.scale.x == y.scale.x && x.scale.y == y.scale.y &&
+         x.scale.z == y.scale.z;
+}
+
+/* Exactly the same bones with exactly the same local transforms. */
+bool r473_same_locals(const R473Pose &a, const R473Pose &b) {
+  if (a.bones != b.bones) return false;
+  for (size_t i = 0; i < a.locals.size(); i++)
+    if (!r473_same_transform(a.locals[i], b.locals[i])) return false;
+  return true;
+}
+
+std::vector<Transform> r473_buffer_locals(const autopose::Rig &r) {
+  std::vector<Transform> out;
+  for (const autopose::Rig::Node &n : r.nodes) out.push_back(n.local);
+  return out;
+}
+
+bool r473_same_vectors(const std::vector<Transform> &a, const std::vector<Transform> &b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); i++)
+    if (!r473_same_transform(a[i], b[i])) return false;
+  return true;
+}
+
+GameObject *r473_bone(Scene &s, const std::string &name, GameObject *parent, Vec3 local, float len) {
+  GameObject *g = s.create(name, parent);
+  g->set_local_position(local);
+  Bone *b = g->add<Bone>();
+  b->length = len, b->rest_position = local;
+  return g;
+}
+
+GameObject *r473_armature(Scene &s, const char *name) {
+  GameObject *g = s.create(name);
+  g->add<Armature>();
+  return g;
+}
+
+/* A chain of `n` bones, each `len` above the one before (len 0: every bone at its parent's head), under a new armature. */
+GameObject *r473_chain(Scene &s, int n, float len, GameObject **tip) {
+  GameObject *arm = r473_armature(s, "Chain");
+  GameObject *parent = arm;
+  for (int i = 0; i < n; i++) parent = r473_bone(s, i == 0 ? std::string("Hips") : "Link" + std::to_string(i), parent, Vec3(0.0f, i == 0 ? 0.5f : len, 0.0f), len);
+  if (tip) *tip = parent;
+  return arm;
+}
+
+std::string r473_nm(const GameObject *g) { return g ? g->name : std::string("-"); }
+
+/* The rig's limbs as the gait analysis reads them, and the humanoid map's parts, as text to compare bone for bone. */
+std::string r473_limbs(Scene &s, GameObject &rig) {
+  const gait::Rig r = gait::analyse(s, rig);
+  std::vector<std::string> parts;
+  for (const gait::Arm &a : r.arms) parts.push_back(strprintf("arm%d %s>%s>%s", a.side, r473_nm(a.upper).c_str(), r473_nm(a.lower).c_str(), r473_nm(a.hand).c_str()));
+  for (const gait::Leg &l : r.legs) parts.push_back(strprintf("leg%d %s>%s>%s", l.side, r473_nm(l.upper).c_str(), r473_nm(l.lower).c_str(), r473_nm(l.foot).c_str()));
+  std::sort(parts.begin(), parts.end());
+  std::string out;
+  for (const std::string &p : parts) out += p + "; ";
+  return out;
+}
+
+std::string r473_map(Scene &s, GameObject &rig) {
+  const humanoid::Map m = humanoid::map(s, rig);
+  std::string out;
+  for (int p = 0; p < humanoid::kParts; p++) out += r473_nm(m.part[p]) + ",";
+  return out;
+}
+
+/* A support bone named `parent->name + suffix`, `away` metres from the parent's head. */
+GameObject *r473_support(Scene &s, GameObject *parent, const std::string &suffix, Vec3 away) {
+  GameObject *g = s.create(parent->name + suffix, parent);
+  g->add<Bone>()->length = 0.1f;
+  g->set_world_position(parent->world_position() + away);
+  return g;
+}
+
+}  // namespace
+
+static void tests_round473_more() {
+  /* ---- criterion 1: the odd goldens */
+  test("round 473: the buffer solver leaves every bone where the reference solver does in the odd cases (a hard joint limit, two goals, pins held elsewhere, no body, balance off, a locked hand, a moved or skewed parent, a posed start, one iteration, a finger, an outside object, null pins, a goal already met)", [] {
+    struct Odd {
+      const char *what;
+      int kind;
+    };
+    const Odd odds[] = {{"a joint limit (10 degrees) hit hard", 0}, {"two goals at once", 1}, {"the feet held elsewhere (pin_poses)", 2}, {"no body (nullptr: no balance)", 3},
+                        {"balance off", 4}, {"a locked hand as a third pin", 5}, {"a rig under a moved, turned, uniformly scaled parent", 6},
+                        {"a rig under a turned, non-uniformly scaled parent", 7}, {"a rig posed away from rest", 8}, {"iterations = 1", 9},
+                        {"a goal on a finger (a kept bone, not a joint)", 10}, {"a goal on an object outside the armature", 11}, {"null pins in the list", 12},
+                        {"a goal already met", 13}};
+    for (const Odd &o : odds) {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      if (o.kind == 6 || o.kind == 7) {
+        GameObject *carrier = s.create("Carrier");
+        carrier->set_local_position(Vec3(2.0f, 0.5f, -1.0f));
+        carrier->set_local_rotation(Quat::euler({0, 40, 0}));
+        carrier->set_local_scale(o.kind == 6 ? Vec3(1.5f) : Vec3(1.5f, 0.8f, 1.2f));
+        s.set_parent(rig, carrier, -1, false);
+      }
+      GameObject *lh = s.find_by_name("LeftHand"), *rh = s.find_by_name("RightHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+      CHECK(lh && rh && lf && rf);
+      if (!lh || !rh || !lf || !rf) return;
+      if (o.kind == 8) {
+        for (const char *n : {"Spine", "LeftUpperArm", "RightUpperArm", "LeftLowerArm"})
+          if (GameObject *g = s.find_by_name(n)) g->set_local_rotation(normalize(g->local().rotation * Quat::euler({20, 10, 15})));
+      }
+      GameObject *finger = o.kind == 10 ? r473_bone(s, "LeftIndex1", lh, Vec3(0.0f, 0.08f, 0.0f), 0.04f) : nullptr;
+      GameObject *marker = nullptr;
+      if (o.kind == 11) {
+        marker = s.create("Marker");
+        marker->set_world_position(lh->world_position() + Vec3(0.1f, 0.3f, 0.2f));
+      }
+      const body::Body b = body::build(s, *rig, 75.0f);
+      const body::Body *bp = &b;
+      autopose::Settings st;
+      std::vector<GameObject *> pins{lf, rf};
+      std::vector<std::pair<Vec3, Quat>> held;
+      std::vector<autopose::Goal> goals{{lh, lh->world_position() + Vec3(0.15f, 0.3f, 0.25f), 1.0f}};
+      switch (o.kind) {
+        case 0: st.limit_deg = 10.0f, goals[0].target = lh->world_position() + Vec3(0.3f, 0.4f, 0.3f); break;
+        case 1: goals.push_back({rh, rh->world_position() + Vec3(-0.2f, 0.1f, 0.3f), 1.0f}); break;
+        case 2:
+          held = {{lf->world_position() + Vec3(0.05f, 0.0f, -0.08f), lf->world_rotation()}, {rf->world_position() + Vec3(-0.04f, 0.02f, 0.05f), rf->world_rotation()}};
+          st.pin_poses = &held;
+          break;
+        case 3: bp = nullptr; break;
+        case 4: st.balance = false; break;
+        case 5: pins.push_back(rh); break;
+        case 9: st.iterations = 1; break;
+        case 10: goals = {{finger, finger->world_position() + Vec3(0.1f, 0.2f, 0.2f), 1.0f}}; break;
+        case 11: goals = {{marker, marker->world_position() + Vec3(0.2f, 0.1f, 0.0f), 1.0f}}; break;
+        case 12: pins = {nullptr, lf, nullptr, rf}; break;
+        case 13: goals[0].target = lh->world_position(); break;
+        default: break;
+      }
+      const Vec3 marker0 = marker ? marker->world_position() : Vec3(0.0f);
+      const R473Both r = r473_run(*rig, bp, goals, pins, st);
+      const R473Gap g = r473_gap(r.ref, r.buf);
+      std::printf("   %-58s %8.4f mm %8.4f deg, iterations %d / %d, error %.4f / %.4f m\n", o.what, g.m * 1000.0f, g.deg, r.rr.iterations, r.rb.iterations, r.rr.error, r.rb.error);
+      CHECK(g.m < 1e-4f && g.deg < 0.01f);
+      CHECK(r.rr.iterations == r.rb.iterations);
+      CHECK(std::fabs(r.rr.error - r.rb.error) < 1e-4f);
+      CHECK(std::fabs(r.rr.pin_error - r.rb.pin_error) < 1e-4f);
+      if (marker) CHECK(length(marker->world_position() - marker0) == 0.0f);  // (an object outside the armature is never moved by either solver)
+    }
+  });
+
+  test("round 473: the buffer solver agrees with the reference on figures a hundredth and forty times the usual size, and leaves finite transforms", [] {
+    for (float height : {0.02f, 40.0f}) {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f), height);
+      GameObject *lh = s.find_by_name("LeftHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+      CHECK(lh && lf && rf);
+      if (!lh || !lf || !rf) return;
+      const body::Body b = body::build(s, *rig, 75.0f);
+      const float k = height / 1.78f;
+      const R473Both r = r473_run(*rig, &b, {{lh, lh->world_position() + Vec3(0.15f, 0.3f, 0.25f) * k, 1.0f}}, {lf, rf}, autopose::Settings());
+      const R473Gap g = r473_gap(r.ref, r.buf);
+      std::printf("   height %g m: %.5f of the figure's height, %.4f deg, iterations %d / %d\n", height, g.m / height, g.deg, r.rr.iterations, r.rb.iterations);
+      CHECK(g.m / height < 1e-4f);  // (relative: a float's own error grows with the numbers)
+      CHECK(g.deg < 0.05f);
+      CHECK(r473_finite(*rig));
+      CHECK(r.rr.iterations == r.rb.iterations);
+    }
+  });
+
+  /* ---- criterion 2: no scene write inside the solve */
+  test("round 473: solving on the buffer alone moves no transform epoch and no below_version; writing then does, at most a joint and the hips, and a second write makes none; the same solve from the start twice is bit for bit the same", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    GameObject *lh = s.find_by_name("LeftHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    CHECK(lh && lf && rf);
+    if (!lh || !lf || !rf) return;
+    const body::Body b = body::build(s, *rig, 75.0f);
+    const R473Pose before = r473_pose(*rig);
+    autopose::Rig buf = autopose::build_rig(*rig);
+    const size_t joints = buf.joints.size();
+    CHECK(joints > 5);
+    const Vec3 to = lh->world_position() + Vec3(0.15f, 0.3f, 0.25f);
+    const uint64_t t0 = edit_epoch::transforms(), st0 = edit_epoch::structure(), bv0 = rig->below_version, hv0 = lh->below_version, fv0 = lf->below_version;
+    const autopose::Result r1 = autopose::solve(buf, {{lh, to, 1.0f}}, {lf, rf}, &b);
+    CHECK(r1.iterations > 0);
+    CHECK(edit_epoch::transforms() == t0);  // (not one set_local inside the solve)
+    CHECK(edit_epoch::structure() == st0);
+    CHECK(rig->below_version == bv0 && lh->below_version == hv0 && lf->below_version == fv0);
+    CHECK(r473_same_locals(before, r473_pose(*rig)));  // (the scene is exactly as it was)
+    const std::vector<Transform> solved = r473_buffer_locals(buf);
+    const size_t n = autopose::write(buf);
+    std::printf("    the solve %d iterations, write: %zu writes for %zu joints\n", r1.iterations, n, joints);
+    CHECK(n > 0 && n <= joints + 1);
+    CHECK(edit_epoch::transforms() > t0);
+    CHECK(rig->below_version != bv0);
+    CHECK(autopose::write(buf) == 0);  // (nothing differs now)
+    CHECK(length(lh->world_position() - to) < 0.02f);
+    autopose::to_start(buf);
+    autopose::solve(buf, {{lh, to, 1.0f}}, {lf, rf}, &b);
+    const std::vector<Transform> again = r473_buffer_locals(buf);
+    autopose::to_start(buf);
+    autopose::solve(buf, {{lh, to, 1.0f}}, {lf, rf}, &b);
+    CHECK(r473_same_vectors(again, r473_buffer_locals(buf)));
+    CHECK(r473_same_vectors(again, solved));
+  });
+
+  /* ---- criterion 3: no allocation after the first solve */
+  test("round 473: after the first solve the buffer's scratch holds the same bytes and the same memory through more solves with other targets, and through a smaller one", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    GameObject *lh = s.find_by_name("LeftHand"), *rh = s.find_by_name("RightHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    CHECK(lh && rh && lf && rf);
+    if (!lh || !rh || !lf || !rf) return;
+    const body::Body b = body::build(s, *rig, 75.0f);
+    autopose::Rig buf = autopose::build_rig(*rig);
+    CHECK(buf.scratch_bytes() == 0);
+    auto ptrs = [](const autopose::Rig &r) {
+      const autopose::Rig::Scratch &c = r.scratch;
+      return std::vector<const void *>{c.pts.data(), c.above.data(), c.free_col.data(), c.held.data(), c.ground.data(), c.sub_c.data(), c.hinge.data(), c.axes.data(),
+                                       c.sub_m.data(), c.masses.data(), c.start.data(), c.J.data(), c.e.data(), c.A.data(), c.A1.data(), c.y.data(), c.d.data()};
+    };
+    const Vec3 a = lh->world_position(), c = rh->world_position();
+    autopose::solve(buf, {{lh, a + Vec3(0.1f, 0.2f, 0.2f), 1.0f}, {rh, c + Vec3(-0.1f, 0.1f, 0.2f), 1.0f}}, {lf, rf}, &b);
+    const size_t bytes = buf.scratch_bytes();
+    const std::vector<const void *> where = ptrs(buf);
+    CHECK(bytes > 0);
+    for (int i = 0; i < 2; i++) {
+      autopose::to_start(buf);
+      autopose::solve(buf, {{lh, a + Vec3(0.1f, 0.2f, 0.2f) * (float)(i + 1), 1.0f}, {rh, c + Vec3(-0.1f, 0.1f, 0.2f), 1.0f}}, {lf, rf}, &b);
+      CHECK(buf.scratch_bytes() == bytes);
+      CHECK(ptrs(buf) == where);
+    }
+    autopose::to_start(buf);  // (a smaller problem: one goal, no pins, no body)
+    autopose::solve(buf, {{lh, a + Vec3(0.05f, 0.1f, 0.1f), 1.0f}}, {}, nullptr);
+    CHECK(buf.scratch_bytes() == bytes);
+    CHECK(ptrs(buf) == where);
+  });
+
+  /* ---- criterion 7: robust */
+  test("round 473: a rig of one bone, of no bones, of no legs, with zero-length bones, and the solve on a default buffer leave finite transforms or refuse cleanly (iterations 0, nothing moved)", [] {
+    {  // one bone
+      Scene s;
+      GameObject *arm = r473_armature(s, "Arm");
+      GameObject *only = r473_bone(s, "Only", arm, Vec3(0.0f, 0.5f, 0.0f), 0.5f);
+      const R473Pose before = r473_pose(*arm);
+      const autopose::Result r = autopose::solve(*arm, {{only, Vec3(0.3f, 0.4f, 0.0f), 1.0f}}, {}, nullptr);
+      std::printf("    one bone: %d iterations, %zu writes, error %.3f m\n", r.iterations, r.writes, r.error);
+      CHECK(r473_finite(*arm));
+      CHECK(r.bones == 1);
+      (void)before;
+    }
+    {  // no bones at all: refused
+      Scene s;
+      GameObject *arm = r473_armature(s, "Empty");
+      GameObject *marker = s.create("Marker");
+      const R473Pose before = r473_pose(*arm);
+      const autopose::Result r = autopose::solve(*arm, {{marker, Vec3(1.0f), 1.0f}}, {marker}, nullptr);
+      CHECK(r.iterations == 0 && r.bones == 0 && r.writes == 0);
+      CHECK(r473_same_locals(before, r473_pose(*arm)));
+      const autopose::Result r2 = autopose::solve(*arm, {}, {}, nullptr);
+      CHECK(r2.iterations == 0 && r2.writes == 0);
+    }
+    {  // no legs (a spine and one arm), with a body but no pins
+      Scene s;
+      GameObject *arm = r473_armature(s, "Torso");
+      GameObject *hips = r473_bone(s, "Hips", arm, Vec3(0.0f, 1.0f, 0.0f), 0.1f);
+      GameObject *spine = r473_bone(s, "Spine", hips, Vec3(0.0f, 0.1f, 0.0f), 0.2f);
+      r473_bone(s, "Head", spine, Vec3(0.0f, 0.2f, 0.0f), 0.2f);
+      GameObject *ua = r473_bone(s, "LeftUpperArm", spine, Vec3(0.1f, 0.2f, 0.0f), 0.3f);
+      GameObject *la = r473_bone(s, "LeftLowerArm", ua, Vec3(0.0f, 0.3f, 0.0f), 0.25f);
+      GameObject *hand = r473_bone(s, "LeftHand", la, Vec3(0.0f, 0.25f, 0.0f), 0.08f);
+      const body::Body b = body::build(s, *arm, 60.0f);
+      const Vec3 to = hand->world_position() + Vec3(0.1f, 0.1f, 0.2f);
+      const R473Both r = r473_run(*arm, &b, {{hand, to, 1.0f}}, {}, autopose::Settings());
+      const R473Gap g = r473_gap(r.ref, r.buf);
+      std::printf("    no legs: reference and buffer %.4f mm / %.4f deg apart, %d iterations\n", g.m * 1000.0f, g.deg, r.rb.iterations);
+      CHECK(g.m < 1e-4f && g.deg < 0.01f && r.rr.iterations == r.rb.iterations);
+      const autopose::Result w = autopose::solve(*arm, {{hand, to, 1.0f}}, {}, &b);
+      CHECK(r473_finite(*arm) && w.iterations > 0);
+      CHECK(length(hand->world_position() - to) < 0.02f);
+    }
+    {  // zero-length bones: every child at its parent's head
+      Scene s;
+      GameObject *tip = nullptr;
+      GameObject *arm = r473_chain(s, 6, 0.0f, &tip);
+      autopose::Settings st;
+      st.iterations = 8;
+      const autopose::Result r = autopose::solve(*arm, {{tip, Vec3(0.3f, 0.7f, 0.0f), 1.0f}}, {}, nullptr, st);
+      std::printf("    zero-length chain: %d iterations, error %.3f m\n", r.iterations, r.error);
+      CHECK(r473_finite(*arm));
+      const R473Both both = r473_run(*arm, nullptr, {{tip, Vec3(0.3f, 0.7f, 0.0f), 1.0f}}, {}, st);
+      CHECK(r473_gap(both.ref, both.buf).m < 1e-4f);
+    }
+    {  // a default-constructed buffer
+      autopose::Rig r;
+      CHECK(!r.valid() && autopose::stale(r));
+      Scene s;
+      GameObject *marker = s.create("Marker");
+      const autopose::Result res = autopose::solve(r, {{marker, Vec3(1.0f), 1.0f}}, {marker}, nullptr);
+      CHECK(res.iterations == 0 && res.writes == 0);
+      CHECK(autopose::write(r) == 0);
+      autopose::read(r);
+      autopose::read_pose(r);
+      autopose::to_start(r);
+      CHECK(r.scratch_bytes() == 0);
+    }
+  });
+
+  test("round 473: a goal that is NaN or infinite is refused (iterations 0, nothing moved, nothing written), a huge one leaves finite transforms, and a null goal bone or null pins don't crash", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    GameObject *lh = s.find_by_name("LeftHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    CHECK(lh && lf && rf);
+    if (!lh || !lf || !rf) return;
+    const body::Body b = body::build(s, *rig, 75.0f);
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    const Vec3 ok = lh->world_position() + Vec3(0.1f, 0.2f, 0.1f);
+    const Vec3 bad[] = {Vec3(nan, ok.y, ok.z), Vec3(ok.x, nan, ok.z), Vec3(ok.x, ok.y, nan), Vec3(inf, ok.y, ok.z), Vec3(ok.x, -inf, ok.z), Vec3(ok.x, ok.y, inf), Vec3(nan, nan, nan)};
+    const R473Pose before = r473_pose(*rig);
+    autopose::Rig buf = autopose::build_rig(*rig);
+    for (const Vec3 &t : bad) {
+      const autopose::Result r = autopose::solve(*rig, {{lh, t, 1.0f}}, {lf, rf}, &b);
+      CHECK(r.iterations == 0 && r.writes == 0);
+      CHECK(r473_same_locals(before, r473_pose(*rig)));
+      const autopose::Result rb = autopose::solve(buf, {{lh, t, 1.0f}}, {lf, rf}, &b);
+      CHECK(rb.iterations == 0);
+      CHECK(autopose::write(buf) == 0);
+      CHECK(r473_same_locals(before, r473_pose(*rig)));
+      const autopose::Result mixed = autopose::solve(*rig, {{lh, ok, 1.0f}, {lh, t, 1.0f}}, {lf, rf}, &b);  // (one bad goal refuses the whole solve)
+      CHECK(mixed.iterations == 0 && r473_same_locals(before, r473_pose(*rig)));
+    }
+    /* A goal 1e20 m away: finite, so not refused; whatever the solver does, the transforms stay finite. */
+    const autopose::Result huge = autopose::solve(*rig, {{lh, Vec3(1e20f, 1e20f, -1e20f), 1.0f}}, {lf, rf}, &b);
+    std::printf("    a goal 1e20 m away: %d iterations, error %g\n", huge.iterations, huge.error);
+    CHECK(r473_finite(*rig));
+    r473_restore(before);
+    /* No goal bone: the list's other entries still solve; a lone null goal does no harm. */
+    const autopose::Result nul = autopose::solve(*rig, {{nullptr, ok, 1.0f}}, {lf, rf}, &b);
+    std::printf("    a null goal bone with the feet pinned: %d iterations\n", nul.iterations);
+    CHECK(r473_finite(*rig));
+    r473_restore(before);
+    const autopose::Result nul2 = autopose::solve(*rig, {{nullptr, ok, 1.0f}}, {}, &b);
+    std::printf("    a lone null goal bone: %d iterations\n", nul2.iterations);
+    CHECK(r473_finite(*rig));
+    r473_restore(before);
+    const R473Both holes = r473_run(*rig, &b, {{lh, ok, 1.0f}}, {nullptr, lf, nullptr, rf, nullptr}, autopose::Settings());
+    CHECK(r473_finite(*rig) && r473_gap(holes.ref, holes.buf).m < 1e-4f && holes.rr.iterations == holes.rb.iterations);
+    /* Nothing to do: no goals and no pins is refused, pins alone are held. */
+    const autopose::Result none = autopose::solve(*rig, {}, {}, &b);
+    CHECK(none.iterations == 0 && none.writes == 0 && r473_same_locals(before, r473_pose(*rig)));
+    const autopose::Result held = autopose::solve(*rig, {}, {lf, rf}, &b);
+    CHECK(r473_finite(*rig) && held.pin_error < 1e-3f);
+  });
+
+  test("round 473: 2,000 bones in a chain solve on the buffer and write once, leaving finite transforms", [] {
+    Scene s;
+    GameObject *tip = nullptr;
+    GameObject *arm = r473_chain(s, 2000, 0.01f, &tip);
+    autopose::Settings st;
+    st.iterations = 2;
+    const Vec3 to = tip->world_position() + Vec3(0.5f, 0.0f, 0.5f);
+    autopose::Rig buf = autopose::build_rig(*arm);
+    CHECK(buf.joints.size() == 2000);
+    const uint64_t t0 = edit_epoch::transforms();
+    const autopose::Result r = autopose::solve(buf, {{tip, to, 1.0f}}, {}, nullptr, st);
+    CHECK(edit_epoch::transforms() == t0);
+    const size_t n = autopose::write(buf);
+    std::printf("    2,000 bones: %d iterations, %zu writes, error %.3f m\n", r.iterations, n, r.error);
+    CHECK(r.iterations > 0 && n <= 2001);
+    CHECK(r473_finite(*arm));
+    const autopose::Result w = autopose::solve(*arm, {{tip, to, 1.0f}}, {}, nullptr, st);  // (the wrapper too)
+    CHECK(w.bones == 2000 && r473_finite(*arm));
+  });
+
+  test("round 473: the buffer says it is stale after an object is made, destroyed or renamed under the armature, and not after a transform moves", [] {
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    autopose::Rig buf = autopose::build_rig(*rig);
+    CHECK(!autopose::stale(buf));
+    GameObject *hand = s.find_by_name("LeftHand");
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    hand->set_local_position(hand->local().position + Vec3(0.01f, 0.0f, 0.0f));  // (a move: the same objects)
+    CHECK(!autopose::stale(buf));
+    GameObject *extra = s.create("Extra", hand);
+    CHECK(autopose::stale(buf));
+    buf = autopose::build_rig(*rig);
+    CHECK(!autopose::stale(buf) && buf.node_of.count(extra) == 1);
+    s.destroy(extra);
+    CHECK(autopose::stale(buf));
+    buf = autopose::build_rig(*rig);
+    CHECK(!autopose::stale(buf));
+    edit_epoch::bump();  // (a rename goes through the same stamp: the editor's test does it by hand)
+    CHECK(autopose::stale(buf));
+  });
+
+  /* ---- criterion 4 and 5, through the editor */
+  test("round 473: a hand dragged for several frames with the other hand locked leaves the locked hand and both feet where they were, builds the buffer once a drag, and the hips pulled down with the feet pinned leave the feet down", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("autopose on");
+    auto at = [&](const char *n) {
+      GameObject *g = ed.scene().find_by_name(n);
+      return g ? g->world_position() : Vec3(1e9f);
+    };
+    GameObject *hand = ed.scene().find_by_name("LeftHand"), *hips = ed.scene().find_by_name("Hips");
+    CHECK(hand && hips);
+    if (!hand || !hips) return;
+    const uint64_t hand_id = hand->id, hips_id = hips->id;
+    const Vec3 h0 = at("LeftHand"), rh0 = at("RightHand"), lf0 = at("LeftFoot"), rf0 = at("RightFoot"), hp0 = at("Hips");
+    ed.command("autopose lock RightHand");
+    const size_t b0 = ed.autopose_buffer_builds_for_test();
+    for (int k = 1; k <= 4; k++) CHECK(ed.autopose_frame_for_test(hand_id, h0 + Vec3(0.03f, 0.05f, 0.04f) * (float)k));
+    CHECK(ed.autopose_buffer_builds_for_test() == b0 + 1);  // (one build for a drag of four frames)
+    const float reached = length(at("LeftHand") - (h0 + Vec3(0.12f, 0.2f, 0.16f)));
+    const float kept = std::max({length(at("RightHand") - rh0), length(at("LeftFoot") - lf0), length(at("RightFoot") - rf0)});
+    std::printf("    the hand %.1f mm from its target, the locked hand and the feet moved %.2f mm\n", reached * 1000.0f, kept * 1000.0f);
+    CHECK(reached < 0.02f && kept < 0.01f);
+    ed.autopose_release_for_test();
+    CHECK(ed.autopose_frame_for_test(hand_id, h0 + Vec3(0.05f, 0.05f, 0.05f)));  // (a second drag: one more build)
+    CHECK(ed.autopose_buffer_builds_for_test() == b0 + 2);
+    ed.autopose_release_for_test();
+    ed.command("autopose unlock RightHand");
+    for (int k = 1; k <= 4; k++) CHECK(ed.autopose_frame_for_test(hips_id, hp0 + Vec3(0.0f, -0.05f, 0.0f) * (float)k));
+    const float lowered = hp0.y - at("Hips").y, feet = std::max(length(at("LeftFoot") - lf0), length(at("RightFoot") - rf0));
+    std::printf("    the hips %.1f cm lower, the feet moved %.2f mm\n", lowered * 100.0f, feet * 1000.0f);
+    CHECK(lowered > 0.08f && feet < 0.01f);
+    ed.autopose_release_for_test();
+  });
+
+  test("round 473: a Puppet drag keys the pose and one undo takes it back, with Record off and on; a drag in Play poses the body but keys nothing", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new R473Puppet");
+    ed.step_frame_headless();
+    ed.command("autopose on");
+    auto hand = [&]() { return ed.scene().find_by_name("LeftHand"); };
+    auto tracks = [&]() {
+      AnimationClipPtr c = ed.anim_clip_for_test();
+      return c ? c->tracks.size() : (size_t)0;
+    };
+    CHECK(hand() != nullptr);
+    if (!hand()) return;
+    const Vec3 h0 = hand()->world_position();
+    const size_t t0 = tracks();
+    for (int pass = 0; pass < 2; pass++) {
+      if (pass == 1) ed.record_buttons_for_test(true);
+      const Vec3 to = h0 + Vec3(0.15f, 0.2f, 0.1f);
+      ed.command(strprintf("autopose drag LeftHand %f %f %f", to.x, to.y, to.z));
+      ed.step_frame_headless();
+      const float off = length(hand()->world_position() - to);
+      std::printf("    Record %s: the hand %.1f mm off, %zu tracks\n", pass ? "on" : "off", off * 1000.0f, tracks());
+      CHECK(off < 0.03f && tracks() > t0);
+      ed.command("undo");
+      ed.step_frame_headless();
+      const float back = length(hand()->world_position() - h0);
+      std::printf("    after one undo: the hand %.2f mm from where it began, %zu tracks\n", back * 1000.0f, tracks());
+      CHECK(back < 1e-3f && tracks() == t0);
+    }
+    ed.record_buttons_for_test(false);
+    /* Play: the body is posed, the clip is left alone. */
+    ed.command("play");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    GameObject *ph = hand();
+    CHECK(ph != nullptr);
+    if (ph) {
+      const Vec3 p0 = ph->world_position();
+      const size_t pt = tracks();
+      CHECK(ed.autopose_frame_for_test(ph->id, p0 + Vec3(0.1f, 0.2f, 0.1f)));
+      CHECK(ed.autopose_frame_for_test(ph->id, p0 + Vec3(0.15f, 0.25f, 0.1f)));
+      ed.autopose_release_for_test();
+      const float moved = length(hand()->world_position() - p0);
+      std::printf("    in Play: the hand moved %.1f cm, tracks %zu -> %zu\n", moved * 100.0f, pt, tracks());
+      CHECK(moved > 0.05f && tracks() == pt);
+    }
+    ed.command("stop");
+    ed.step_frame_headless();
+    std::remove(resolve_asset_path("Assets/Animations/R473Puppet.anim").c_str());
+  });
+
+  test("round 473: with a pose prior (a stand-in) the Puppet pose is the same solved on a buffer as on the scene", [] {
+    for (int variant = 0; variant < 2; variant++) {
+      Scene s;
+      GameObject *rig = r300_person(s);
+      const gait::Rig g = gait::analyse(s, *rig);
+      CHECK(g.valid());
+      const ai::ModelInfo info = r300_info();
+      float in[ai::kPriorInputs];
+      Quat turn;
+      Vec3 hips;
+      std::vector<float> frame((size_t)ai::kFeatures);
+      rig->set_local_rotation(Quat::euler({0, 35, 0}));
+      s.find_by_name("mixamorig:LeftArm")->set_local_rotation(Quat::euler({20, 0, -30}));
+      s.find_by_name("mixamorig:LeftLeg")->set_local_rotation(Quat::euler({25, 0, 0}));
+      ai::rig_to_frame(ai::pose_mapping(g, info), info, frame.data());
+      CHECK(puppet::prior_inputs(ai::pose_mapping(g, info), info, {}, {}, in, turn, hips));
+      R300Oracle oracle;
+      oracle.info = info;
+      oracle.pose.assign(frame.begin() + 3, frame.end());
+      const Vec3 a3(frame[3], frame[4], frame[5]), b3(frame[6], frame[7], frame[8]);
+      const Vec3 a = normalize(a3), b = normalize(b3 - a * dot(a, b3));
+      const Quat c = normalize(turn * quat_from_axes(a, b, cross(a, b)));
+      const Vec3 ax = c.rotate(Vec3(1, 0, 0)), ay = c.rotate(Vec3(0, 1, 0));
+      oracle.pose[0] = ax.x, oracle.pose[1] = ax.y, oracle.pose[2] = ax.z, oracle.pose[3] = ay.x, oracle.pose[4] = ay.y, oracle.pose[5] = ay.z;
+      GameObject *hand = s.find_by_name("mixamorig:LeftHand"), *lf = s.find_by_name("mixamorig:LeftFoot"), *rf = s.find_by_name("mixamorig:RightFoot");
+      CHECK(hand && lf && rf);
+      if (!hand || !lf || !rf) return;
+      const body::Body body = body::build(s, *rig, 70.0f);
+      const body::Body *bp = variant ? &body : nullptr;  // (once without a body, once with the balance)
+      const Vec3 target = hand->world_position() + Vec3(0.0f, -0.25f, 0.15f);
+      const R473Pose start = r473_pose(*rig);
+      const puppet::Result scene_run = puppet::pose(*rig, g, &oracle, {{hand, target, 1.0f}}, {lf, rf}, bp);
+      const R473Pose by_scene = r473_pose(*rig);
+      r473_restore(start);
+      autopose::Rig buf = autopose::build_rig(*rig);
+      const std::function<void()> to_start = [&] { r473_restore(start); };
+      const puppet::Result buffer_run = puppet::pose(*rig, g, &oracle, {{hand, target, 1.0f}}, {lf, rf}, bp, autopose::Settings(), &buf, &to_start);
+      const R473Pose by_buffer = r473_pose(*rig);
+      const R473Gap gap = r473_gap(by_scene, by_buffer);
+      std::printf("    prior, %s: used %d / %d, %.4f mm and %.4f deg apart, iterations %d / %d\n", variant ? "with a body" : "no body", (int)scene_run.used_prior,
+                  (int)buffer_run.used_prior, gap.m * 1000.0f, gap.deg, scene_run.ik.iterations, buffer_run.ik.iterations);
+      CHECK(scene_run.used_prior && buffer_run.used_prior && oracle.calls == 2);
+      CHECK(gap.m < 1e-3f && gap.deg < 0.1f);
+      CHECK(length(hand->world_position() - target) < 0.01f);
+      CHECK(r473_finite(*rig));
+    }
+  });
+
+  /* ---- criterion 8: support bones, spelled and placed in other ways */
+  test("round 473: arms and legs with support bones (_sup, Support, .support, Sup) found first or last among the children, on one side or both, on arms and legs, are mapped as the plain rig is; twist and roll bones too", [] {
+    Scene plain;
+    GameObject *prig = create_rig(plain, false, Vec3(0.0f));
+    const std::string limbs0 = r473_limbs(plain, *prig), map0 = r473_map(plain, *prig);
+    std::printf("    plain: %s\n", limbs0.c_str());
+    CHECK(limbs0.find("arm0") != std::string::npos && limbs0.find("arm1") != std::string::npos && limbs0.find("leg0") != std::string::npos &&
+          limbs0.find("leg1") != std::string::npos);
+    struct Variant {
+      const char *what;
+      std::function<void(Scene &)> make;
+    };
+    auto find = [](Scene &s, const char *n) { return s.find_by_name(n); };
+    const Vec3 far_arm(0.9f, 0.0f, 0.0f), far_leg(0.0f, 0.0f, 1.2f);
+    const std::vector<Variant> variants = {
+        {"Support spelled out, both arms", [&](Scene &s) {
+           for (const char *n : {"LeftUpperArm", "LeftLowerArm", "RightUpperArm", "RightLowerArm"}) r473_support(s, find(s, n), "Support", far_arm);
+         }},
+        {".support and _SUP", [&](Scene &s) {
+           r473_support(s, find(s, "LeftUpperArm"), ".support", far_arm);
+           r473_support(s, find(s, "LeftLowerArm"), "_SUP", far_arm);
+           r473_support(s, find(s, "RightUpperArm"), "Sup", far_arm * -1.0f);
+         }},
+        {"the support bone first among the children", [&](Scene &s) {
+           for (const char *n : {"LeftUpperArm", "LeftLowerArm"}) {
+             GameObject *p = find(s, n), *sup = r473_support(s, p, "_sup", far_arm);
+             s.set_parent(sup, p, 0, true);
+             std::printf("    (%s's children start with %s)\n", n, p->children.empty() ? "-" : p->children[0]->name.c_str());
+           }
+         }},
+        {"the support bone last among the children (and a second one)", [&](Scene &s) {
+           for (const char *n : {"RightUpperArm", "RightLowerArm"}) {
+             r473_support(s, find(s, n), "_sup", far_arm * -1.0f);
+             r473_support(s, find(s, n), "_sup2", far_arm * -1.5f);
+           }
+         }},
+        {"a support bone on the left arm only", [&](Scene &s) {
+           r473_support(s, find(s, "LeftUpperArm"), "_sup", far_arm);
+           r473_support(s, find(s, "LeftLowerArm"), "_sup", far_arm);
+         }},
+        {"support bones on the legs too (thigh, shin, foot)", [&](Scene &s) {
+           for (const char *n : {"LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot"})
+             if (GameObject *p = find(s, n)) r473_support(s, p, "_sup", far_leg);
+         }},
+        {"twist and roll bones further out than the next bone", [&](Scene &s) {
+           r473_support(s, find(s, "LeftUpperArm"), "_twist", far_arm);
+           r473_support(s, find(s, "LeftLowerArm"), "Twist", far_arm);
+           r473_support(s, find(s, "RightUpperArm"), ".roll", far_arm * -1.0f);
+           if (GameObject *p = find(s, "LeftUpperLeg")) r473_support(s, p, "_twist", far_leg);
+         }},
+        {"a bone with 'sup' only inside a word (Supinator) beside the hand", [&](Scene &s) {
+           r473_support(s, find(s, "LeftLowerArm"), "Supinator", far_arm);
+           r473_support(s, find(s, "RightLowerArm"), "_Supinator", far_arm * -1.0f);
+         }},
+    };
+    for (const Variant &v : variants) {
+      Scene s;
+      GameObject *rig = create_rig(s, false, Vec3(0.0f));
+      v.make(s);
+      const std::string limbs = r473_limbs(s, *rig), map = r473_map(s, *rig);
+      const bool same = limbs == limbs0 && map == map0;
+      std::printf("    %-62s %s\n", v.what, same ? "as the plain rig" : "DIFFERENT");
+      if (!same) std::printf("      limbs: %s\n      plain: %s\n", limbs.c_str(), limbs0.c_str());
+      CHECK(limbs == limbs0);
+      CHECK(map == map0);
+    }
+  });
+
+  /* ---- review fixes: what the buffer holds across a drag */
+  test("round 473: a weighed bone destroyed mid-drag leaves the next frame posing the body, finite, with no read through the freed bone", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand && ed.scene().find_by_name("RightHand"));
+    if (!hand) return;
+    const uint64_t id = hand->id;
+    const Vec3 at = hand->world_position();
+    CHECK(ed.autopose_frame_for_test(id, at + Vec3(0.1f, 0.2f, 0.2f)));
+    CHECK(ed.autopose_body_for_test().valid());  // (RightHand is one of the bones it weighed)
+    ed.scene().destroy(ed.scene().find_by_name("RightHand"));
+    CHECK(ed.autopose_frame_for_test(id, at + Vec3(0.15f, 0.3f, 0.25f)));
+    hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand && length(hand->world_position() - (at + Vec3(0.15f, 0.3f, 0.25f))) < 0.02f);
+    CHECK(r473_finite(*ed.scene().find_by_name("Humanoid")));
+    const body::Body &kept = ed.autopose_body_for_test();  // (dropped, or pointed at bones that exist: never at the freed one)
+    std::set<const GameObject *> here;
+    ed.scene().for_each([&](GameObject &g) { here.insert(&g); });
+    size_t elsewhere = 0;
+    for (const body::BoneMass &bm : kept.bones) elsewhere += here.count(bm.object) ? 0 : 1;
+    CHECK(elsewhere == 0);
+    (void)rig;
+    ed.autopose_release_for_test();
+  });
+
+  test("round 473: with a pose prior (a stand-in) an undo mid-drag and an edit after it leave the prior's rig in the scene now open, and the drag poses the body", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    GameObject *rig = r300_person(ed.scene());
+    ed.mark_changed_for_test("Add the rig");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const gait::Rig g = gait::analyse(ed.scene(), *rig);
+    const ai::ModelInfo info = r300_info();
+    std::vector<float> frame((size_t)ai::kFeatures);
+    ai::rig_to_frame(ai::pose_mapping(g, info), info, frame.data());
+    auto oracle = std::make_unique<R300Oracle>();
+    oracle->info = info;
+    oracle->pose.assign(frame.begin() + 3, frame.end());
+    ed.autopose_set_prior_for_test(std::move(oracle));
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("mixamorig:LeftHand");
+    CHECK(g.valid() && hand);
+    if (!hand) return;
+    const uint64_t id = hand->id;
+    const Vec3 at = hand->world_position();
+    CHECK(ed.autopose_frame_for_test(id, at + Vec3(0.0f, -0.2f, 0.15f)));
+    ed.autopose_release_for_test();
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    CHECK(ed.autopose_frame_for_test(id, at + Vec3(0.0f, -0.2f, 0.15f)));  // (a second drag, under way)
+    CHECK(ed.autopose_rig_for_test().valid());
+    ed.command("undo");
+    ed.step_frame_headless();
+    ed.command("create Cube");  // (an edit: the swapped-out scene is freed)
+    ed.mark_changed_for_test("A cube");
+    CHECK(ed.autopose_frame_for_test(id, at + Vec3(0.0f, -0.25f, 0.1f)));
+    std::set<const GameObject *> here;  // (addresses only)
+    ed.scene().for_each([&](GameObject &o) { here.insert(&o); });
+    const gait::Rig &kept = ed.autopose_rig_for_test();
+    CHECK(kept.valid() && here.count(kept.armature) == 1 && here.count(kept.hips) == 1);
+    for (const gait::Arm &a : kept.arms) CHECK(here.count(a.upper) == 1 && here.count(a.hand) == 1);
+    for (const gait::Leg &l : kept.legs) CHECK(here.count(l.upper) == 1 && here.count(l.foot) == 1);
+    hand = ed.scene().find_by_name("mixamorig:LeftHand");
+    CHECK(hand && r473_finite(*ed.scene().find_by_name("Rig")) && length(hand->world_position() - (at + Vec3(0.0f, -0.25f, 0.1f))) < 0.05f);
+    ed.autopose_release_for_test();
+  });
+
+  test("round 473: the armature's parent moved between two drag frames: the hand still lands on its target, as the reference solver from the same state puts it", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    Scene s2;
+    GameObject *rigs[2] = {create_rig(ed.scene(), false, Vec3(0.0f)), create_rig(s2, false, Vec3(0.0f))};
+    GameObject *carriers[2] = {ed.scene().create("Carrier"), s2.create("Carrier")};
+    ed.scene().set_parent(rigs[0], carriers[0], -1, false);
+    s2.set_parent(rigs[1], carriers[1], -1, false);
+    ed.mark_changed_for_test("Add the rig");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("LeftHand"), *hand2 = s2.find_by_name("LeftHand");
+    CHECK(hand && hand2);
+    if (!hand || !hand2) return;
+    const body::Body body2 = body::build(s2, *rigs[1], rigs[1]->get<Armature>()->body_mass);  // (as the drag's start weighs it)
+    const Vec3 at = hand->world_position();
+    CHECK(ed.autopose_frame_for_test(hand->id, at + Vec3(0.05f, 0.1f, 0.1f)));
+    const Vec3 move(0.6f, 0.0f, -0.4f);
+    carriers[0]->set_local_position(move);  // (a transform: the buffer is kept; the root it read is out of date)
+    carriers[1]->set_local_position(move);
+    const Vec3 target = at + move + Vec3(0.08f, 0.1f, 0.1f);  // (within reach of the hand where the parent has taken it)
+    CHECK(ed.autopose_frame_for_test(hand->id, target));
+    autopose::solve_reference(*rigs[1], {{hand2, target, 1.0f}}, {s2.find_by_name("LeftFoot"), s2.find_by_name("RightFoot")}, &body2, autopose::Settings());
+    const R473Pose want = r473_pose(*rigs[1]), got = r473_pose(*rigs[0]);
+    R473Gap gap;
+    for (size_t i = 0; i < want.bones.size() && i < got.bones.size(); i++)
+      if (want.bones[i]->get<Bone>())
+        gap.m = std::max(gap.m, length(want.heads[i] - got.heads[i])), gap.deg = std::max(gap.deg, r473_angle(want.turns[i], got.turns[i]));
+    std::printf("    a moved parent: the hand %.2f mm off its target, %.4f mm and %.4f deg from the reference\n", length(hand->world_position() - target) * 1000.0f, gap.m * 1000.0f, gap.deg);
+    CHECK(length(hand->world_position() - target) < 0.02f);
+    CHECK(gap.m < 1e-3f && gap.deg < 0.05f);
+    ed.autopose_release_for_test();
+  });
+
+  test("round 473: a drag over frames builds the pose buffer once, and a frame writes only what the solve and the frame's tail changed (not the whole start pose, nor the plain objects under the armature)", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    for (int i = 0; i < 40; i++) ed.scene().create("Plain" + std::to_string(i), rig);  // (objects the solve never moves: the old restore wrote each of them every frame)
+    ed.mark_changed_for_test("Add the rig");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    ed.command("autopose on");
+    GameObject *hand = ed.scene().find_by_name("LeftHand");
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    const Vec3 at = hand->world_position();
+    const size_t joints = autopose::build_rig(*rig).joints.size();
+    size_t iks = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      const IKConstraint *ik = g.get<IKConstraint>();
+      if (ik && ik->enabled && ed.scene().is_ancestor(rig, &g)) iks++;
+    });
+    /* The bound: the solve's writes (a joint's turn, the hips' place), and the IK targets and poles - put back at the
+     * frame's start and moved again at its end - twice each. */
+    const uint64_t bound = joints + 1 + 2 * 2 * iks;
+    const uint64_t builds0 = ed.autopose_buffer_builds_for_test();
+    CHECK(ed.autopose_frame_for_test(hand->id, at + Vec3(0.05f, 0.1f, 0.1f)));
+    ed.step_frame_headless();
+    uint64_t worst = 0;
+    for (int i = 2; i < 8; i++) {
+      const uint64_t t0 = edit_epoch::transforms();
+      CHECK(ed.autopose_frame_for_test(hand->id, at + Vec3(0.02f * (float)i, 0.1f, 0.1f)));
+      worst = std::max(worst, edit_epoch::transforms() - t0);
+      ed.step_frame_headless();
+    }
+    std::printf("    a drag of 8 frames: %zu buffer builds, at most %llu transform writes a frame (bound %llu: %zu joints, %zu IK chains, 40 plain objects)\n",
+                ed.autopose_buffer_builds_for_test() - builds0, (unsigned long long)worst, (unsigned long long)bound, joints, iks);
+    CHECK(ed.autopose_buffer_builds_for_test() - builds0 == 1);
+    CHECK(worst <= bound);
+    ed.autopose_release_for_test();
+  });
+
+  test("round 473: a goal with no bone beside the pins is not a point: the pins are held and the pose is the reference's without that goal", [] {
+    /* The old solver counted a null-bone goal as a point of its own: it cut the first pin's weight to 3 % in the settle
+     * phase and left the pin out of the settle check and the pin error. The buffer solver passes over it. */
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    GameObject *lh = s.find_by_name("LeftHand"), *lf = s.find_by_name("LeftFoot"), *rf = s.find_by_name("RightFoot");
+    CHECK(lh && lf && rf);
+    if (!lh || !lf || !rf) return;
+    const body::Body body = body::build(s, *rig, 75.0f);
+    const Vec3 target = lh->world_position() + Vec3(0.15f, 0.3f, 0.25f);
+    const R473Pose start = r473_pose(*rig);
+    const Vec3 lf0 = lf->world_position(), rf0 = rf->world_position();
+    const autopose::Result rr = autopose::solve_reference(*rig, {{lh, target, 1.0f}}, {lf, rf}, &body, autopose::Settings());
+    const R473Pose ref = r473_pose(*rig);
+    r473_restore(start);
+    const autopose::Result rb = autopose::solve(*rig, {{nullptr, Vec3(0.0f, 1.0f, 0.0f), 1.0f}, {lh, target, 1.0f}}, {lf, rf}, &body, autopose::Settings());
+    const R473Pose buf = r473_pose(*rig);
+    const R473Gap gap = r473_gap(ref, buf);
+    std::printf("    a null goal beside the pins: %.4f mm and %.4f deg from the reference without it; the feet %.3f / %.3f mm off\n", gap.m * 1000.0f, gap.deg,
+                length(lf->world_position() - lf0) * 1000.0f, length(rf->world_position() - rf0) * 1000.0f);
+    CHECK(gap.m < 1e-4f && gap.deg < 0.01f);
+    CHECK(rr.iterations == rb.iterations);
+    CHECK(length(lf->world_position() - lf0) < 1e-3f && length(rf->world_position() - rf0) < 1e-3f);
+    CHECK(r473_finite(*rig));
+  });
+
+  test("round 473: the name rule is whole words: _sup / Support / Sup are support bones (never a limb's next part), Supinator is not; limb_of leaves support names out of the limb map", [] {
+    int side = 0, limb = 0;
+    for (const char *n : {"LeftUpperArm_sup", "LeftUpperArmSupport", "Left_UpperArm.support", "LeftLowerArm_SUP", "LeftThigh_sup", "RightShin.sup", "LeftArmSup"})
+      CHECK(!limb_of(n, side, limb));
+    CHECK(limb_of("LeftUpperArm", side, limb) && side == 0 && limb == 2);
+    CHECK(limb_of("RightForeArm", side, limb) && side == 1 && limb == 3);
+    /* "Supinator" holds the letters s-u-p but is one word: a forearm's Supinator is still the forearm. */
+    CHECK(limb_of("LeftForearmSupinator", side, limb) && limb == 3);
+    CHECK(!limb_of("LeftSupinator", side, limb));  // (no part named: not a limb bone at all)
+    /* Which bone a far "Supinator" becomes is the analysis' business, not this rule's: only that the name is not a support
+     * bone (the name rule leaves it a limb word, as a forearm's own name). */
+    CHECK(limb_of("LeftLowerArmSupinator", side, limb) && limb == 3);
+    CHECK(limb_of("RightLowerArm_Supinator", side, limb) && limb == 3 && side == 1);
+    /* A far "_sup" child beside a hand named otherwise is passed over: the hand stays the Palm. */
+    Scene s;
+    GameObject *rig = create_rig(s, false, Vec3(0.0f));
+    GameObject *la = s.find_by_name("LeftLowerArm"), *hand = s.find_by_name("LeftHand");
+    CHECK(la && hand);
+    if (!la || !hand) return;
+    hand->name = "LeftPalm";
+    r473_support(s, la, "_sup", Vec3(0.9f, 0.0f, 0.0f));
+    const gait::Rig r = gait::analyse(s, *rig);
+    const gait::Arm *left = nullptr;
+    for (const gait::Arm &a : r.arms)
+      if (a.side == 0) left = &a;
+    CHECK(left && left->lower == la);
+    if (!left) return;
+    std::printf("    a far _sup beside the Palm: the left hand is %s\n", r473_nm(left->hand).c_str());
+    CHECK(left->hand && left->hand->name == "LeftPalm");
+  });
+}
+
+/* ===================================================================== */
+/* Round 474 (task 0450): trails off the live scene, AutoPosing's pins once, Play with the springs                       */
+/* ===================================================================== */
+static void tests_round474() {
+  test("round 474: Play with the springs on the stand-in builds no render mesh whole once it has run a few frames", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    ed.command("play");
+    r34_steps(ed, 8);
+    const MeshCounts c0 = mesh_counts();
+    const PoseCounts p0 = pose_counts();
+    const int frames = 20;
+    r34_steps(ed, frames);
+    const MeshCounts d = mesh_counts() - c0;
+    const PoseCounts pd = pose_counts() - p0;
+    std::printf("    %d frames of Play: %llu built whole, %llu in place, %llu refused, %llu springs chains stepped, %llu outline shells\n", frames,
+                (unsigned long long)d.full_builds, (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused, (unsigned long long)pd.spring_chains,
+                (unsigned long long)pd.outline_shells);
+    CHECK(pd.spring_chains > 0);
+    /* The only whole builds left are the outline shells' (a new mesh each frame, ADR 0124 leaves them out): before, the skins
+     * were built whole as well - physics_step asked every mesh's bounds before the springs moved the pose, and the Game view's
+     * mesh then no longer matched the Scene view's. */
+    CHECK(d.full_builds <= pd.outline_shells);
+    CHECK(d.in_place_refused == 0 && d.in_place > 0);
+    size_t skins = 0, unequal = 0;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!g.get<SkinModifier>() || !g.mesh_filter() || !g.mesh_filter()->mesh) return;
+      skins++;
+      const Mesh *em = g.evaluated_mesh();
+      unequal += !(em && r470_draws_like_fresh(*em, g.name.c_str()));
+    });
+    CHECK(skins > 0 && unequal == 0);  // (positions, normals and UVs a fresh build's, to the bit)
+  });
+
+  test("round 474: the scene's own physics step (no Jolt world) still stops a ball on a mesh (the meshes' bounds are asked for once there is a body)", [] {
+    Scene s;
+    GameObject *floor = s.create("Floor");
+    floor->add<MeshFilter>()->mesh = primitives::cube();
+    floor->add<MeshRenderer>();
+    floor->set_local_scale({10.0f, 1.0f, 10.0f});
+    floor->set_local_position({0, -0.5f, 0});
+    GameObject *ball = s.create("Ball");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({0, 3, 0});
+    PlayContext ctx;
+    ctx.dt = 1.0f / 60.0f;
+    float lowest = 3.0f;
+    for (int i = 0; i < 240; i++) {
+      s.update(ctx);
+      lowest = std::min(lowest, ball->world_position().y);
+    }
+    std::printf("    the ball rests at y %.3f, lowest %.3f\n", ball->world_position().y, lowest);
+    CHECK_NEAR(ball->world_position().y, 0.5f, 0.1f);
+    CHECK(lowest > 0.3f);
+  });
+
+  test("round 474: AutoPosing's pins are worked out once and kept while the scene, the clip's contacts, the playhead and the locks hold: no scene walk over 60 frames with the handles drawn; a lock, a contact, a rename and an undo each give today's pins", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *made = create_rig(ed.scene(), false, Vec3(0.0f));
+    const uint64_t rig_id = made->id;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + made->name);
+    ed.command("anim new Pins474");
+    ed.command("autopose on");
+    r34_steps(ed, 6);
+    auto bone_id = [&](const char *name) {
+      const GameObject *g = ed.scene().find_by_name(name);
+      return g ? g->id : (uint64_t)0;
+    };
+    auto sorted = [](std::vector<uint64_t> v) {
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    auto pins = [&] { return sorted(ed.autopose_pin_ids_for_test(rig_id, rig_id)); };
+    auto feet = [&] {  // (today's rule, written out: the bones under the rig with "foot" in their names)
+      std::vector<uint64_t> v;
+      const GameObject *rig = ed.scene().find(rig_id);
+      ed.scene().for_each([&](GameObject &g) {
+        if (g.get<Bone>() && rig && ed.scene().is_ancestor(rig, &g) && to_lower(g.name).find("foot") != std::string::npos) v.push_back(g.id);
+      });
+      return sorted(v);
+    };
+    CHECK(feet().size() == 2 && pins() == feet());
+    const size_t w0 = ed.autopose_pin_walks_for_test();
+    CHECK(w0 >= 1);  // (the handles asked for them)
+    r34_steps(ed, 60);
+    std::printf("    60 unchanged frames: %zu scene walks for the pins\n", ed.autopose_pin_walks_for_test() - w0);
+    CHECK(ed.autopose_pin_walks_for_test() == w0 && pins() == feet());
+    /* A lock adds its bone; an unlock takes it away. */
+    ed.command("autopose lock LeftHand");
+    r34_steps(ed, 3);
+    std::vector<uint64_t> want = feet();
+    want.push_back(bone_id("LeftHand"));
+    CHECK(pins() == sorted(want));
+    const size_t w1 = ed.autopose_pin_walks_for_test();
+    r34_steps(ed, 30);
+    CHECK(ed.autopose_pin_walks_for_test() == w1);
+    ed.command("autopose unlock LeftHand");
+    r34_steps(ed, 3);
+    CHECK(pins() == feet());
+    /* A contact at the playhead replaces the feet; the playhead leaving it brings them back; the clip's contact removed too. */
+    ed.command("anim frame 5");
+    ed.command("body contacts add RightHand 0 10");
+    r34_steps(ed, 3);
+    CHECK(pins() == std::vector<uint64_t>{bone_id("RightHand")});
+    ed.command("anim frame 20");
+    r34_steps(ed, 3);
+    CHECK(pins() == feet());
+    ed.command("anim frame 5");
+    r34_steps(ed, 3);
+    CHECK(pins() == std::vector<uint64_t>{bone_id("RightHand")});
+    ed.command("body contacts clear");
+    r34_steps(ed, 3);
+    CHECK(pins() == feet());
+    /* A bone renamed out of the rule, then the undo that gives it back. */
+    ed.scene().find_by_name("LeftFoot")->name = "Mover";
+    ed.mark_changed_for_test("Rename a foot");
+    r34_steps(ed, 3);
+    CHECK(feet().size() == 1 && pins() == feet());
+    ed.command("undo");
+    r34_steps(ed, 3);
+    CHECK(feet().size() == 2 && pins() == feet());
+  });
+
+  /* A rig with a clip keying the left hand's IK target and the spine every five frames, trails on, the playhead at 20. */
+  auto trail_rig = [](Editor &ed, float key20) {
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + rig->name);
+    ed.command("anim new Trail474");
+    for (int f = 0; f <= 40; f += 5) {
+      ed.command("anim key Spine Rotation 2 " + std::to_string(f) + " " + std::to_string(f % 10 ? 8 : 0));
+      ed.command("anim key LeftHandIK Position 1 " + std::to_string(f) + " " + std::to_string(f == 20 ? key20 : 1.0f + 0.01f * (float)f));
+    }
+    ed.command("anim frame 20");
+    ed.command("anim trails on");
+    r34_steps(ed, 40);  // (the clip's length is what it is: 31 to 51 frames around the playhead, six a frame)
+  };
+
+  test("round 474: trails sample each frame once and pose the live scene for none while nothing they read changes; a key edited samples again the frames around it only, and the trail's points equal a full resample's", [=] {
+    Editor ed;
+    trail_rig(ed, 1.2f);
+    const size_t sampled = ed.trail_frames_for_test();
+    const size_t s0 = ed.trail_samples_for_test();
+    CHECK(sampled >= 41 && s0 == sampled);
+    r34_steps(ed, 60);
+    std::printf("    60 unchanged frames: %zu live poses\n", ed.trail_samples_for_test() - s0);
+    CHECK(ed.trail_samples_for_test() == s0);
+    /* The key at frame 20 of the hand's target moved (Record's touch_keys): keys 10..30 are the frames it can move. */
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    AnimTrack *t = clip->find("LeftHandIK", "Position", 1);
+    CHECK(t != nullptr);
+    if (!t) return;
+    t->set_key(20.0f, 1.5f);
+    clip->touch_keys();
+    for (int i = 0; i < 12; i++) ed.step_frame_headless();
+    const size_t again = ed.trail_samples_for_test() - s0;
+    std::printf("    a key edited: %zu frames sampled again of %zu\n", again, sampled);
+    CHECK(again >= 1 && again <= 21 && ed.trail_frames_for_test() == sampled);
+    /* The same clip sampled from the start, whole: the same points. */
+    Editor fresh;
+    trail_rig(fresh, 1.5f);
+    float worst = 0.0f;
+    size_t compared = 0;
+    for (const char *bone : {"LeftHand", "Hips", "RightFoot", "Head"}) {
+      const GameObject *a = ed.scene().find_by_name(bone), *b = fresh.scene().find_by_name(bone);
+      CHECK(a && b);
+      if (!a || !b) continue;
+      for (int f = 0; f <= 40; f++) {
+        Vec3 pa, pb;
+        if (!ed.trail_at_for_test(a->id, f, pa) || !fresh.trail_at_for_test(b->id, f, pb)) continue;
+        worst = std::max(worst, length(pa - pb));
+        compared++;
+      }
+    }
+    std::printf("    %zu points compared with a full sample: at most %g m apart\n", compared, (double)worst);
+    CHECK(compared == 4 * 41 && worst < 1e-5f);
+    /* Trails off: the copy of the clip's keys goes too. */
+    CHECK(ed.trail_kept_tracks_for_test() > 0);
+    ed.command("anim trails off");
+    r34_steps(ed, 3);
+    CHECK(ed.trail_kept_tracks_for_test() == 0 && ed.trail_frames_for_test() == 0);
+  });
+
+  test("round 474: the pins are kept while the playhead moves between frames that hold the same contacts: one walk on entering a contact's frames, none inside, one on leaving", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *made = create_rig(ed.scene(), false, Vec3(0.0f));
+    const uint64_t rig_id = made->id;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + made->name);
+    ed.command("anim new Scrub474");
+    ed.command("autopose on");
+    ed.command("anim frame 0");
+    ed.command("body contacts add RightHand 10 20");
+    r34_steps(ed, 4);
+    const uint64_t hand = ed.scene().find_by_name("RightHand")->id;
+    auto sorted = [](std::vector<uint64_t> v) {
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    std::vector<uint64_t> feet;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<Bone>() && to_lower(g.name).find("foot") != std::string::npos) feet.push_back(g.id);
+    });
+    feet = sorted(feet);
+    ed.command("anim frame 1");  // (the first clip apply settles what it bumps)
+    r34_steps(ed, 3);
+    size_t walks = ed.autopose_pin_walks_for_test();
+    auto at = [&](int frame, const std::vector<uint64_t> &want, size_t more, const char *what) {
+      ed.command("anim frame " + std::to_string(frame));
+      r34_steps(ed, 2);
+      const bool ok = sorted(ed.autopose_pin_ids_for_test(rig_id, rig_id)) == want && ed.autopose_pin_walks_for_test() == walks + more;
+      if (!ok) std::printf("    frame %d (%s): %zu walks since the last, wanted %zu\n", frame, what, ed.autopose_pin_walks_for_test() - walks, more);
+      walks = ed.autopose_pin_walks_for_test();
+      CHECK(ok);
+    };
+    for (int f = 0; f <= 9; f++) at(f, feet, 0, "before the contact");
+    at(10, {hand}, 1, "enters it");
+    for (int f = 11; f <= 20; f++) at(f, {hand}, 0, "inside it");
+    at(21, feet, 1, "leaves it");
+  });
+
+  test("round 474: a Puppet drag on the skinned stand-in walks the scene for the pins at most once: skin evaluation moves no structure stamp", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    GameObject *arm = nullptr, *hand = nullptr;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!arm && g.get<Armature>()) arm = &g;
+    });
+    CHECK(arm != nullptr);
+    if (!arm) return;
+    ed.scene().for_each([&](GameObject &g) {
+      if (!hand && g.get<Bone>() && ed.scene().is_ancestor(arm, &g) && to_lower(g.name).find("hand") != std::string::npos) hand = &g;
+    });
+    CHECK(hand != nullptr);
+    if (!hand) return;
+    const uint64_t hand_id = hand->id;
+    ed.command("select " + arm->name);
+    ed.command("autopose on");
+    r34_steps(ed, 4);
+    const Vec3 h0 = ed.scene().find(hand_id)->world_position();
+    CHECK(ed.autopose_frame_for_test(hand_id, h0 + Vec3(0.01f, 0.02f, 0.0f)));
+    ed.step_frame_headless();
+    const size_t w0 = ed.autopose_pin_walks_for_test();
+    for (int k = 2; k <= 7; k++) {
+      CHECK(ed.autopose_frame_for_test(hand_id, h0 + Vec3(0.01f, 0.02f, 0.0f) * (float)k));
+      ed.step_frame_headless();
+    }
+    std::printf("    six more drag frames with the handles drawn: %zu scene walks for the pins\n", ed.autopose_pin_walks_for_test() - w0);
+    CHECK(ed.autopose_pin_walks_for_test() == w0);
+    ed.autopose_release_for_test();
+  });
+}
+
+/* ===================================================================== */
+/* Round 474, the test engineer's pass: the scene's own physics with and without bodies, the pin cache's stale-hunting,  */
+/* the trail cache's key-edit windows against a from-scratch sample                                                     */
+/* ===================================================================== */
+static GameObject *r474_cube(Scene &s, const char *name, Vec3 pos, Vec3 scale = Vec3(1.0f)) {
+  GameObject *g = s.create(name);
+  g->add<MeshFilter>()->mesh = primitives::cube();
+  g->add<MeshRenderer>();
+  g->set_local_scale(scale);
+  g->set_local_position(pos);
+  return g;
+}
+
+static GameObject *r474_ball(Scene &s, const char *name, Vec3 pos) {
+  GameObject *g = r474_cube(s, name, pos);
+  g->add<Rigidbody>()->bounciness = 0.0f;
+  return g;
+}
+
+static void r474_run(Scene &s, int n) {
+  PlayContext ctx;
+  ctx.dt = 1.0f / 60.0f;
+  for (int i = 0; i < n; i++) s.update(ctx);
+}
+
+static GameObject *r474_floor(Scene &s) { return r474_cube(s, "Floor", {0, -0.5f, 0}, {10.0f, 1.0f, 10.0f}); }  // (its top at y 0)
+
+using R474Points = std::map<std::pair<uint64_t, int>, Vec3>;
+
+/* Every bone's head at every frame the trail cache holds. */
+static R474Points r474_points(Editor &ed) {
+  R474Points out;
+  std::vector<uint64_t> ids;
+  ed.scene().for_each([&](GameObject &g) {
+    if (g.get<Bone>()) ids.push_back(g.id);
+  });
+  for (uint64_t id : ids)
+    for (int f = 0; f <= 70; f++) {
+      Vec3 p;
+      if (ed.trail_at_for_test(id, f, p)) out[{id, f}] = p;
+    }
+  return out;
+}
+
+struct R474Edit {
+  size_t again = 0, whole = 0, kept_points = 0, fresh_points = 0, changed = 0;
+  float worst = 0.0f;
+  bool same_set = false;
+};
+
+/* After an edit made at `s0` samples: let the cache catch up, keep its points, drop it (trails off, on), sample from
+ * nothing, and compare. `again` is how many frames the cache posed on the live scene for the edit. */
+static R474Edit r474_after_edit(Editor &ed, size_t s0, const R474Points &before = {}) {
+  r34_steps(ed, 16);
+  R474Edit r;
+  r.again = ed.trail_samples_for_test() - s0;
+  r.whole = ed.trail_frames_for_test();
+  const R474Points kept = r474_points(ed);
+  for (const auto &[k, p] : kept) {
+    auto it = before.find(k);
+    if (it == before.end() || length(it->second - p) > 1e-6f) r.changed++;
+  }
+  ed.command("anim trails off");
+  r34_steps(ed, 2);
+  ed.command("anim trails on");
+  r34_steps(ed, 16);
+  const R474Points fresh = r474_points(ed);
+  r.kept_points = kept.size(), r.fresh_points = fresh.size();
+  /* Every point a fresh sample has, the kept cache has too and the same (it may hold more: frames an edit did not touch that
+   * the playhead has since left behind). */
+  r.same_set = true;
+  for (const auto &[k, p] : fresh) {
+    auto it = kept.find(k);
+    if (it == kept.end()) {
+      r.same_set = false;
+      continue;
+    }
+    r.worst = std::max(r.worst, length(p - it->second));
+  }
+  return r;
+}
+
+static AnimTrack *r474_track(AnimationClip &clip, const char *bone, const char *prop, int axis) {
+  for (AnimTrack &t : clip.tracks) {
+    const size_t n = std::strlen(bone);
+    const bool named = t.path.size() >= n && t.path.compare(t.path.size() - n, n, bone) == 0 && (t.path.size() == n || t.path[t.path.size() - n - 1] == '/');
+    if (named && t.property == prop && t.axis == axis) return &t;
+  }
+  return nullptr;
+}
+
+/* The rig the trail tests share: Spine rotation and the left hand's IK target keyed every five frames, trails on, the playhead at 20. */
+static void r474_trail_rig(Editor &ed) {
+  ed.init_headless(1200, 900);
+  ed.command("assist on physics");
+  GameObject *rig = create_rig(ed.scene(), false, Vec3(0.0f));
+  ed.mark_changed_for_test("Add the rig");
+  ed.command("select " + rig->name);
+  ed.command("anim new Trail474b");
+  for (int f = 0; f <= 40; f += 5) {
+    ed.command("anim key Spine Rotation 2 " + std::to_string(f) + " " + std::to_string(f % 10 ? 8 : 0));
+    ed.command("anim key LeftHandIK Position 1 " + std::to_string(f) + " " + std::to_string(1.0f + 0.01f * (float)f));
+  }
+  ed.command("anim frame 20");
+  ed.command("anim trails on");
+  r34_steps(ed, 16);
+}
+
+static void tests_round474_more() {
+  /* ---------------------------------------------------------------- A: the scene's own physics */
+  test("round 474: with no body the scene's own physics asks no mesh for its bounds (nothing evaluated or built); once there is a body it does", [] {
+    Scene s;
+    r474_floor(s);
+    GameObject *sub = r474_cube(s, "Sub", {3, 1, 0});
+    sub->add<SubdivisionSurface>();
+    r474_cube(s, "Other", {-3, 1, 0});
+    const PoseCounts p0 = pose_counts();
+    const MeshCounts m0 = mesh_counts();
+    r474_run(s, 20);
+    const PoseCounts pd = pose_counts() - p0;
+    const MeshCounts md = mesh_counts() - m0;
+    std::printf("    20 updates with no body: %llu evaluations, %llu built whole\n", (unsigned long long)pd.evaluations, (unsigned long long)md.full_builds);
+    CHECK(pd.evaluations == 0 && md.full_builds == 0);
+    r474_ball(s, "Ball", {0, 3, 0});
+    const PoseCounts p1 = pose_counts();
+    r474_run(s, 2);
+    const uint64_t asked = (pose_counts() - p1).evaluations;
+    std::printf("    two updates with a body: %llu evaluations\n", (unsigned long long)asked);
+    CHECK(asked > 0);  // (the statics' bounds are still asked for: a ball must meet the subdivided cube's box)
+  });
+
+  test("round 474: a ball falls through nothing when there is no mesh under it, at the free-fall distance", [] {
+    Scene s;
+    GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+    r474_run(s, 60);
+    const float y = ball->world_position().y;
+    std::printf("    one second of free fall from y 3: y %.3f (no drag: %.3f)\n", y, 3.0f - 0.5f * 9.81f);
+    CHECK(y < -1.6f && y > -2.2f);
+    CHECK(std::fabs(ball->world_position().x) < 1e-5f && std::fabs(ball->world_position().z) < 1e-5f);
+  });
+
+  test("round 474: two balls dropped on a mesh floor stack on each other and stay put (bodies collide with bodies, both rest on the floor)", [] {
+    Scene s;
+    r474_floor(s);
+    GameObject *low = r474_ball(s, "Low", {0, 1.0f, 0});
+    GameObject *high = r474_ball(s, "High", {0, 3.0f, 0});
+    r474_run(s, 360);
+    const float yl = low->world_position().y, yh = high->world_position().y;
+    std::printf("    stack at rest: low %.3f, high %.3f\n", yl, yh);
+    CHECK_NEAR(yl, 0.5f, 0.15f);
+    CHECK(yh > yl + 0.85f && yh < yl + 1.3f);
+    r474_run(s, 60);
+    CHECK_NEAR(low->world_position().y, yl, 0.02f);
+    CHECK_NEAR(high->world_position().y, yh, 0.02f);
+  });
+
+  test("round 474: a kinematic body never moves and a ball lands on it; a disabled Rigidbody is a floor like any mesh; an inactive floor is none", [] {
+    {
+      Scene s;
+      GameObject *plat = r474_cube(s, "Platform", {0, 0, 0});
+      plat->add<Rigidbody>()->is_kinematic = true;
+      GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+      r474_run(s, 240);
+      std::printf("    on a kinematic platform: ball y %.3f, platform y %.4f\n", ball->world_position().y, plat->world_position().y);
+      CHECK(plat->world_position().y == 0.0f);
+      CHECK(ball->world_position().y > 0.85f && ball->world_position().y < 1.2f);
+    }
+    {
+      Scene s;
+      GameObject *slab = r474_cube(s, "Slab", {0, 0, 0});
+      slab->add<Rigidbody>()->enabled = false;
+      GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+      r474_run(s, 240);
+      std::printf("    on a disabled-Rigidbody slab: ball y %.3f\n", ball->world_position().y);
+      CHECK(slab->world_position().y == 0.0f);
+      CHECK(ball->world_position().y > 0.85f && ball->world_position().y < 1.2f);
+    }
+    {
+      Scene s;
+      GameObject *fl = r474_floor(s);
+      fl->active = false;
+      GameObject *ball = r474_ball(s, "Ball", {0, 3, 0});
+      r474_run(s, 120);
+      CHECK(ball->world_position().y < -1.0f);
+    }
+  });
+
+  test("round 474: a body added after quiet frames lands on the floor, a body destroyed leaves the others and the floor alone, and a scene left with none steps cleanly", [] {
+    Scene s;
+    GameObject *fl = r474_floor(s);
+    r474_run(s, 30);
+    CHECK(fl->world_position().y == -0.5f);
+    GameObject *a = r474_ball(s, "A", {-2, 3, 0});
+    GameObject *b = r474_ball(s, "B", {2, 3, 0});
+    const uint64_t bid = b->id;
+    r474_run(s, 240);
+    CHECK_NEAR(a->world_position().y, 0.5f, 0.1f);
+    CHECK_NEAR(b->world_position().y, 0.5f, 0.1f);
+    s.destroy(b);
+    CHECK(s.find(bid) == nullptr);
+    r474_run(s, 60);
+    CHECK_NEAR(a->world_position().y, 0.5f, 0.1f);
+    s.destroy(a);
+    const PoseCounts p0 = pose_counts();
+    r474_run(s, 30);
+    CHECK((pose_counts() - p0).evaluations == 0);
+    CHECK(fl->world_position().y == -0.5f && fl->local().scale.x == 10.0f);
+  });
+
+  test("round 474: a ball on a mesh that is raised each frame rides it up (the statics are read at each step, not once)", [] {
+    Scene s;
+    GameObject *fl = r474_floor(s);
+    GameObject *ball = r474_ball(s, "Ball", {0, 0.5f, 0});
+    r474_run(s, 60);
+    float worst_gap = 0.0f;
+    for (int i = 1; i <= 120; i++) {
+      fl->set_local_position({0, -0.5f + 0.5f * (float)i / 120.0f, 0});
+      r474_run(s, 1);
+      worst_gap = std::max(worst_gap, (fl->world_position().y + 0.5f + 0.5f) - ball->world_position().y);  // how far the ball is below where it should rest
+    }
+    std::printf("    floor up 0.5 m: ball y %.3f, worst sink %.3f\n", ball->world_position().y, worst_gap);
+    CHECK_NEAR(ball->world_position().y, 1.0f, 0.15f);
+    CHECK(worst_gap < 0.2f);
+  });
+
+  test("round 474: Play with the springs, the Scene view and the Game view both open: no render mesh is built whole beyond the outline shells over 30 frames", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    ed.command("play");
+    r34_steps(ed, 10);
+    CHECK(ed.window_rect_for_test(WindowKind::Game).w > 0 && ed.window_rect_for_test(WindowKind::Scene).w > 0);
+    const MeshCounts c0 = mesh_counts();
+    const PoseCounts p0 = pose_counts();
+    r34_steps(ed, 30);
+    const MeshCounts d = mesh_counts() - c0;
+    const PoseCounts pd = pose_counts() - p0;
+    std::printf("    30 frames, two views: %llu built whole, %llu in place, %llu refused, %llu spring chains, %llu outline shells\n", (unsigned long long)d.full_builds,
+                (unsigned long long)d.in_place, (unsigned long long)d.in_place_refused, (unsigned long long)pd.spring_chains, (unsigned long long)pd.outline_shells);
+    CHECK(pd.spring_chains > 0);
+    CHECK(d.full_builds <= pd.outline_shells);
+    CHECK(d.in_place_refused == 0);
+    ed.command("stop");
+    r34_steps(ed, 3);
+  });
+
+  test("round 474: a Rigidbody ball dropped over the stand-in character in Play comes to rest (the posed character's bounds are still a floor once there is a body)", [] {
+    /* The scene's own physics step is what this pins (round 474 changed it). With the Jolt world a mesh without a
+     * collider is no floor and the ball falls on: that build is left to the physics group's own tests. */
+    if (physics_jolt_available()) return;
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("benchscene avatarlikequick");
+    r34_steps(ed, 3);
+    AABB all;
+    ed.scene().for_each([&](GameObject &g) {
+      if (g.get<MeshFilter>() && g.get<MeshRenderer>()) all.add(g.world_bounds());
+    });
+    CHECK(all.valid());
+    GameObject *ball = ed.scene().create("DroppedBall");
+    ball->add<MeshFilter>()->mesh = primitives::cube();
+    ball->add<MeshRenderer>();
+    ball->set_local_scale(Vec3(0.2f));
+    ball->add<Rigidbody>()->bounciness = 0.0f;
+    ball->set_local_position({all.center().x, all.max.y + 1.0f, all.center().z});
+    ed.mark_changed_for_test("Add the ball");
+    const uint64_t id = ball->id;
+    ed.command("play");
+    r34_steps(ed, 240);
+    GameObject *b = ed.scene().find(id);
+    CHECK(b != nullptr);
+    if (!b) return;
+    const float y1 = b->world_position().y;
+    r34_steps(ed, 30);
+    const float y2 = b->world_position().y;
+    std::printf("    ball: dropped from %.2f, rests at %.3f (character spans %.2f..%.2f)\n", all.max.y + 1.0f, y2, all.min.y, all.max.y);
+    CHECK(std::fabs(y2 - y1) < 0.05f);
+    CHECK(y2 > all.min.y - 0.5f);
+    ed.command("stop");
+  });
+
+  /* ---------------------------------------------------------------- B: the pins */
+  test("round 474: the pins follow every change that moves them (rename, delete, reparent, another rig, clip, contact, playhead, lock, undo / redo, Play / Stop, new scene) with one scene walk each, and none while only transforms change", [] {
+    Editor ed;
+    ed.init_headless(1200, 900);
+    ed.command("assist on physics");
+    ed.command("autopose prior off");
+    GameObject *made = create_rig(ed.scene(), false, Vec3(0.0f));
+    const uint64_t arm = made->id;
+    const std::string arm_name = made->name;
+    ed.mark_changed_for_test("Add the rig");
+    ed.command("select " + arm_name);
+    ed.command("anim new Pins474b");
+    ed.command("redraw always");  // (every frame is drawn, the handles with it: idle frames really ask for the pins)
+    ed.command("autopose on");
+    r34_steps(ed, 6);
+    auto sorted = [](std::vector<uint64_t> v) {
+      std::sort(v.begin(), v.end());
+      return v;
+    };
+    auto pins_of = [&](uint64_t rid) { return sorted(ed.autopose_pin_ids_for_test(rid, rid)); };
+    auto feet_of = [&](uint64_t rid) {  // (the rule written out)
+      std::vector<uint64_t> v;
+      const GameObject *rig = ed.scene().find(rid);
+      ed.scene().for_each([&](GameObject &g) {
+        if (g.get<Bone>() && rig && ed.scene().is_ancestor(rig, &g) && to_lower(g.name).find("foot") != std::string::npos) v.push_back(g.id);
+      });
+      return sorted(v);
+    };
+    auto bone = [&](const char *name) -> GameObject * { return ed.scene().find_by_name(name); };
+    auto id_of = [&](const char *name) { return bone(name) ? bone(name)->id : (uint64_t)0; };
+    /* One change: the cache made current first, the change, a few frames with the handles drawn, then the answer. */
+    const std::vector<uint64_t> RULE = {~(uint64_t)0};  // (as wanted: the feet rule worked out after the change)
+    auto change = [&](const char *what, const std::function<void()> &edit, const std::vector<uint64_t> &want_in, size_t walks, size_t most = 0) {
+      pins_of(arm);
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      edit();
+      r34_steps(ed, 12);  // (the handles are drawn in these)
+      const size_t by_frames = ed.autopose_pin_walks_for_test() - w0;
+      const std::vector<uint64_t> got = pins_of(arm);
+      const size_t w = ed.autopose_pin_walks_for_test() - w0;
+      const std::vector<uint64_t> want = want_in == RULE ? feet_of(arm) : want_in;
+      const bool ok = got == sorted(want) && w >= walks && w <= std::max(walks, most);
+      std::printf("    %-52s pins %zu (want %zu), walks %zu (%zu by the handles)%s\n", what, got.size(), want.size(), w, by_frames, ok ? "" : "   <-- STALE?");
+      CHECK(got == sorted(want));
+      CHECK(w >= walks && w <= std::max(walks, most));
+    };
+    CHECK(feet_of(arm).size() == 2 && pins_of(arm) == feet_of(arm));
+    /* The handles ask for the pins themselves: a change shows a walk before the test asks. */
+    {
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      ed.scene().find_by_name("LeftFoot")->name = "Mover";
+      ed.mark_changed_for_test("Rename a foot");
+      r34_steps(ed, 3);
+      CHECK(ed.autopose_pin_walks_for_test() <= w0 + 1);  // (the drawn handles walked once, or the Scene view was not redrawn: they were not asked - no pins_of in between)
+      ed.scene().find_by_name("Mover")->name = "LeftFoot";
+      ed.mark_changed_for_test("Rename it back");
+      r34_steps(ed, 3);
+    }
+    change("a foot renamed away from 'foot'", [&] { bone("LeftFoot")->name = "Mover", ed.mark_changed_for_test("Rename"); }, {id_of("RightFoot")}, 1);
+    change("...and back to it", [&] { bone("Mover")->name = "LeftFoot", ed.mark_changed_for_test("Rename"); }, RULE, 1);
+    CHECK(feet_of(arm).size() == 2);
+    change("a bone renamed into the rule (Hips -> HipsFoot)", [&] { bone("Hips")->name = "HipsFoot", ed.mark_changed_for_test("Rename"); }, RULE, 1);
+    CHECK(pins_of(arm) == feet_of(arm) && feet_of(arm).size() == 3);
+    change("...and back", [&] { bone("HipsFoot")->name = "Hips", ed.mark_changed_for_test("Rename"); }, RULE, 1);
+    CHECK(feet_of(arm).size() == 2);
+    /* A bone taken out of the armature and put back: the funnel alone (no mark_changed) must be enough. */
+    {
+      GameObject *foot = bone("RightFoot");
+      const uint64_t parent_id = foot->parent->id;
+      const uint64_t foot_id = foot->id;
+      const uint64_t before = edit_epoch::structure();
+      const std::vector<uint64_t> left_only = {id_of("LeftFoot")};
+      change("a foot reparented out of the armature", [&] { ed.scene().set_parent(ed.scene().find(foot_id), nullptr); }, left_only, 1);
+      std::printf("    set_parent moved edit_epoch::structure() by %llu\n", (unsigned long long)(edit_epoch::structure() - before));
+      CHECK(edit_epoch::structure() != before);
+      change("...and back into it", [&] { ed.scene().set_parent(ed.scene().find(foot_id), ed.scene().find(parent_id)); }, RULE, 1);
+      CHECK(feet_of(arm).size() == 2);
+    }
+    /* A bone destroyed. */
+    {
+      change("a foot destroyed", [&] { ed.scene().destroy(bone("RightFoot")), ed.mark_changed_for_test("Destroy"); }, {id_of("LeftFoot")}, 1, 2);  // (a destroy leaves a second structure bump on the frame after)
+      CHECK(feet_of(arm).size() == 1);
+      ed.command("undo");
+      r34_steps(ed, 3);
+      CHECK(pins_of(arm) == feet_of(arm));
+      std::printf("    after the undo: %zu feet\n", feet_of(arm).size());
+    }
+    /* A second rig: its own pins; the first's again when asked. */
+    {
+      GameObject *second = create_rig(ed.scene(), false, Vec3(4.0f, 0.0f, 0.0f));
+      second->name = "SecondRig474";
+      const uint64_t arm2 = second->id;
+      ed.mark_changed_for_test("Add another rig");
+      r34_steps(ed, 3);
+      CHECK(feet_of(arm2).size() == 2 && feet_of(arm2) != feet_of(arm));
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      CHECK(pins_of(arm2) == feet_of(arm2));
+      CHECK(pins_of(arm) == feet_of(arm));
+      CHECK(pins_of(arm2) == feet_of(arm2));
+      std::printf("    alternating two rigs: %zu walks for three asks\n", ed.autopose_pin_walks_for_test() - w0);
+      CHECK(ed.autopose_pin_walks_for_test() - w0 == 3);  // (one answer is kept: each ask for the other rig walks)
+      ed.command("select SecondRig474");
+      r34_steps(ed, 4);
+      CHECK(pins_of(arm2) == feet_of(arm2));
+      ed.command("select " + arm_name);
+      r34_steps(ed, 4);
+      CHECK(pins_of(arm) == feet_of(arm));
+      ed.scene().destroy(ed.scene().find(arm2));
+      ed.mark_changed_for_test("Remove the other rig");
+      r34_steps(ed, 3);
+    }
+    /* The dragged bone: the pins of a drag of the left hand leave the hand out (and what is above it). */
+    {
+      const std::vector<uint64_t> drag = sorted(ed.autopose_pin_ids_for_test(arm, id_of("LeftHand")));
+      CHECK(drag == feet_of(arm));  // (neither foot is the hand or above it)
+      const std::vector<uint64_t> drag_foot = sorted(ed.autopose_pin_ids_for_test(arm, id_of("LeftFoot")));
+      CHECK(drag_foot == std::vector<uint64_t>{id_of("RightFoot")});  // (the dragged foot is not its own pin)
+      CHECK(pins_of(arm) == feet_of(arm));  // (and the next ask with another dragged bone is not the kept answer)
+    }
+    /* The clip swapped for another with the same (no) contacts: pins the same, one walk. */
+    change("the clip swapped for another with the same contacts", [&] { ed.command("anim new Pins474c"); }, RULE, 1);
+    /* A contact edited in place (the clip's own list, no version bump). */
+    ed.command("body contacts add RightHand 0 10");
+    ed.command("anim frame 5");
+    r34_steps(ed, 3);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip && clip->contacts.size() == 1);
+    if (clip && clip->contacts.size() == 1) {
+      CHECK(pins_of(arm) == std::vector<uint64_t>{id_of("RightHand")});
+      change("a contact's bone edited in place", [&] { clip->contacts[0].bone = "LeftHand"; }, {id_of("LeftHand")}, 1);
+      change("a contact's from edited past the playhead", [&] { clip->contacts[0].from = 6.0f; }, RULE, 1);
+      change("a contact's from edited back before it", [&] { clip->contacts[0].from = 2.0f; }, {id_of("LeftHand")}, 1);
+      change("a contact's to edited short of the playhead", [&] { clip->contacts[0].to = 4.0f; }, RULE, 1);
+      change("a contact's to edited to the playhead's frame", [&] { clip->contacts[0].to = 5.0f; }, {id_of("LeftHand")}, 1);
+      change("the playhead out of the contact", [&] { ed.command("anim frame 20"); }, RULE, 1);
+      change("the playhead into it again", [&] { ed.command("anim frame 4"); }, {id_of("LeftHand")}, 1);
+      change("the contacts cleared", [&] { ed.command("body contacts clear"); }, RULE, 1);
+    }
+    /* The locks. */
+    {
+      std::vector<uint64_t> with_head = feet_of(arm);
+      with_head.push_back(id_of("Head"));
+      change("a lock added (Head)", [&] { ed.command("autopose lock Head"); }, with_head, 1);
+      change("the lock removed", [&] { ed.command("autopose unlock Head"); }, RULE, 1);
+      ed.command("autopose lock Head");
+      r34_steps(ed, 3);
+      change("the locked bone destroyed", [&] { ed.scene().destroy(bone("Head")), ed.mark_changed_for_test("Destroy"); }, RULE, 1, 2);
+      ed.command("undo");
+      r34_steps(ed, 3);
+      CHECK(pins_of(arm).size() >= 2);
+      ed.command("autopose unlock Head");
+    }
+    /* Undo and redo of a rename. */
+    {
+      bone("RightFoot")->name = "Stepper";
+      ed.mark_changed_for_test("Rename a foot");
+      r34_steps(ed, 3);
+      CHECK(feet_of(arm).size() == 1 && pins_of(arm) == feet_of(arm));
+      change("the undo of a rename", [&] { ed.command("undo"); }, RULE, 1);
+      std::printf("    the undo gave back %zu feet, pins %zu\n", feet_of(arm).size(), pins_of(arm).size());
+      CHECK(feet_of(arm).size() == 2 && pins_of(arm) == feet_of(arm));
+      change("the redo of it", [&] { ed.command("redo"); }, RULE, 1);
+      CHECK(feet_of(arm).size() == 1 && pins_of(arm) == feet_of(arm));
+      ed.command("undo");
+      r34_steps(ed, 3);
+      CHECK(feet_of(arm).size() == 2 && pins_of(arm) == feet_of(arm));
+    }
+    /* Play and Stop. */
+    {
+      pins_of(arm);
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      ed.command("play");
+      r34_steps(ed, 4);
+      const std::vector<uint64_t> in_play = pins_of(arm);
+      std::printf("    in Play: %zu pins, %zu walks; rule says %zu\n", in_play.size(), ed.autopose_pin_walks_for_test() - w0, feet_of(arm).size());
+      CHECK(in_play == feet_of(arm));
+      const size_t w1 = ed.autopose_pin_walks_for_test();
+      ed.command("stop");
+      r34_steps(ed, 4);
+      CHECK(pins_of(arm) == feet_of(arm));
+      std::printf("    after Stop: %zu walks, %zu pins\n", ed.autopose_pin_walks_for_test() - w1, pins_of(arm).size());
+      CHECK(ed.autopose_pin_walks_for_test() > w1 || ed.autopose_pin_walks_for_test() > w0);
+    }
+    /* Quiet frames: nothing walks over 120 idle frames; transforms alone don't either. */
+    {
+      pins_of(arm);
+      const size_t w0 = ed.autopose_pin_walks_for_test();
+      r34_steps(ed, 120);
+      CHECK(ed.autopose_pin_walks_for_test() == w0);
+      const Vec3 home = bone("Hips")->local().position;
+      for (int i = 0; i < 30; i++) {
+        bone("Hips")->set_local_position(home + Vec3(0.002f * (float)i, 0.0f, 0.0f));
+        ed.step_frame_headless();
+      }
+      std::printf("    120 idle frames and 30 frames of a moving hips: %zu walks\n", ed.autopose_pin_walks_for_test() - w0);
+      CHECK(ed.autopose_pin_walks_for_test() == w0);
+      CHECK(pins_of(arm) == feet_of(arm));
+      /* For the record: a drag that marks a change each frame (Record's, the Inspector's) does walk each frame. */
+      const size_t w1 = ed.autopose_pin_walks_for_test();
+      for (int i = 0; i < 10; i++) {
+        bone("Hips")->set_local_position(home + Vec3(0.0f, 0.002f * (float)i, 0.0f));
+        ed.mark_changed_for_test("Move");
+        ed.step_frame_headless();
+      }
+      std::printf("    10 frames with a mark_changed each: %zu walks\n", ed.autopose_pin_walks_for_test() - w1);
+      bone("Hips")->set_local_position(home);
+      ed.mark_changed_for_test("Home");
+      r34_steps(ed, 3);
+      const size_t w2 = ed.autopose_pin_walks_for_test();
+      ed.command("autopose drag LeftHand 0.5 1.2 0.3");
+      r34_steps(ed, 3);
+      std::printf("    one console drag of the left hand: %zu walks\n", ed.autopose_pin_walks_for_test() - w2);
+      CHECK(pins_of(arm) == feet_of(arm));
+    }
+    /* A new scene: the rig is gone, a rig made there gets its own pins even if an id repeats. */
+    {
+      const uint64_t before_serial = ed.scene().serial;
+      ed.command("newscene");
+      r34_steps(ed, 3);
+      CHECK(ed.scene().serial != before_serial);
+      CHECK(pins_of(arm).empty() || pins_of(arm) == feet_of(arm));
+      GameObject *fresh = create_rig(ed.scene(), false, Vec3(0.0f));
+      const uint64_t fresh_id = fresh->id;
+      ed.mark_changed_for_test("Add a rig");
+      r34_steps(ed, 3);
+      CHECK(feet_of(fresh_id).size() == 2 && pins_of(fresh_id) == feet_of(fresh_id));
+      std::printf("    new scene: rig ids %llu then %llu\n", (unsigned long long)arm, (unsigned long long)fresh_id);
+    }
+  });
+
+  /* ---------------------------------------------------------------- C: the trails */
+  test("round 474: after each kind of key edit the trail's points equal a from-scratch sample, and an edit inside a track samples only the frames around it", [] {
+    Editor ed;
+    r474_trail_rig(ed);
+    const size_t whole = ed.trail_frames_for_test();
+    std::printf("    the trail holds %zu frames\n", whole);
+    CHECK(whole >= 41);
+    AnimationClipPtr clip = ed.anim_clip_for_test();
+    CHECK(clip != nullptr);
+    if (!clip) return;
+    enum { Partial, Any, Whole };
+    auto edit = [&](const char *what, int expect, const std::function<void()> &fn) {
+      clip = ed.anim_clip_for_test();
+      const size_t s0 = ed.trail_samples_for_test();
+      const R474Points before = r474_points(ed);
+      fn();
+      const R474Edit r = r474_after_edit(ed, s0, before);
+      const bool eq = r.same_set && r.worst < 1e-5f;
+      const bool count = expect == Any || (expect == Partial ? (r.again >= 1 && r.again < r.whole) : r.again >= r.whole);
+      std::printf("    %-58s %3zu of %3zu frames posed again, worst %.2g m%s\n", what, r.again, r.whole, (double)r.worst, eq && count ? "" : "   <-- FAILS");
+      CHECK(r.kept_points > 0);
+      CHECK(r.same_set);
+      CHECK(r.worst < 1e-5f);
+      CHECK(count);
+      if (expect == Partial) CHECK(r.changed > 0);  // (the edit moved something: a cache that ignored it would pass the rest)
+    };
+    auto ik = [&] { return r474_track(*clip, "LeftHandIK", "Position", 1); };
+    auto spine = [&] { return r474_track(*clip, "Spine", "Rotation", 2); };
+    CHECK(ik() != nullptr && spine() != nullptr);
+    if (!ik() || !spine()) return;
+    edit("one key's value changed (frame 20)", Partial, [&] { ik()->set_key(20.0f, 1.6f), clip->touch_keys(); });
+    edit("the first key's value changed", Partial, [&] { ik()->set_key(0.0f, 0.7f), clip->touch_keys(); });
+    edit("the last key's value changed", Partial, [&] { ik()->set_key(40.0f, 1.9f), clip->touch_keys(); });
+    edit("a key added in the middle (22.5, between keys)", Partial, [&] { ik()->set_key(22.5f, 0.4f), clip->touch_keys(); });
+    edit("a key added before the first (frame -4)", Partial, [&] { ik()->set_key(-4.0f, 0.3f), clip->touch_keys(); });
+    edit("a key added after the last (frame 47)", Partial, [&] { ik()->set_key(47.0f, 0.2f), clip->touch_keys(); });
+    edit("a key removed in the middle (frame 25)", Partial, [&] {
+      AnimTrack *t = ik();
+      const int k = t->key_at(25.0f);
+      CHECK(k >= 0);
+      if (k >= 0) t->keys.erase(t->keys.begin() + k);
+      clip->touch_keys();
+    });
+    edit("the first key removed", Partial, [&] { ik()->keys.erase(ik()->keys.begin()), clip->touch_keys(); });
+    edit("the last key removed", Partial, [&] { ik()->keys.pop_back(), clip->touch_keys(); });
+    edit("a key moved in time (30 -> 32.5)", Partial, [&] {
+      AnimTrack *t = ik();
+      const int k = t->key_at(30.0f);
+      CHECK(k >= 0);
+      if (k < 0) return;
+      const float v = t->keys[(size_t)k].value;
+      t->keys.erase(t->keys.begin() + k);
+      t->set_key(32.5f, v);
+      clip->touch_keys();
+    });
+    edit("a key moved past two neighbours (10 -> 26)", Partial, [&] {
+      AnimTrack *t = ik();
+      const int k = t->key_at(10.0f);
+      CHECK(k >= 0);
+      if (k < 0) return;
+      const float v = t->keys[(size_t)k].value + 0.3f;
+      t->keys.erase(t->keys.begin() + k);
+      t->set_key(26.0f, v);
+      clip->touch_keys();
+    });
+    edit("a key's tangent made flat (console)", Partial, [&] { ed.command("anim tangent LeftHandIK Position 1 15 flat"); });
+    edit("a key's tangent made free with slopes (console)", Partial, [&] { ed.command("anim tangent LeftHandIK Position 1 20 free 0.2 0.4"); });
+    edit("a key's interpolation made constant (console)", Partial, [&] { ed.command("anim interp LeftHandIK Position 1 5 constant"); });
+    edit("a key's interpolation made linear (console)", Partial, [&] { ed.command("anim interp LeftHandIK Position 1 35 linear"); });
+    edit("a key added by the console (anim key)", Partial, [&] { ed.command("anim key LeftHandIK Position 1 12 1.35"); });
+    edit("two tracks edited in one step (spine key 5, hand key 35)", Partial, [&] {
+      spine()->set_key(5.0f, 20.0f);
+      ik()->set_key(35.0f, 1.1f);
+      clip->touch_keys();
+    });
+    edit("another bone's track edited (spine key 30: the hand is under it)", Partial, [&] { spine()->set_key(30.0f, 25.0f), clip->touch_keys(); });
+    edit("two tracks edited with a touch each, in one frame", Partial, [&] {
+      spine()->set_key(15.0f, -12.0f), clip->touch_keys();
+      ik()->set_key(15.0f, 0.5f), clip->touch_keys();
+    });
+    edit("a track added (the head's rotation)", Whole, [&] {
+      AnimTrack &t = clip->track("Hips/Spine/Neck/Head", "Rotation", 0);
+      t.set_key(10.0f, 0.0f), t.set_key(30.0f, 20.0f);
+      clip->touch();
+    });
+    edit("a key edited on the track just added", Any, [&] { r474_track(*clip, "Head", "Rotation", 0)->set_key(20.0f, -30.0f), clip->touch_keys(); });
+    edit("a track removed (the head's)", Whole, [&] {
+      clip->tracks.erase(std::remove_if(clip->tracks.begin(), clip->tracks.end(), [](const AnimTrack &t) { return t.path.size() >= 4 && t.path.compare(t.path.size() - 4, 4, "Head") == 0; }),
+                         clip->tracks.end());
+      clip->touch();
+    });
+    edit("a track replaced by another of the same count (spine z -> spine x)", Whole, [&] {
+      AnimTrack *t = spine();
+      t->axis = 0;
+      clip->touch();
+    });
+    edit("...and the keys of it edited", Any, [&] { r474_track(*clip, "Spine", "Rotation", 0)->set_key(20.0f, 30.0f), clip->touch_keys(); });
+    edit("the clip's length shortened (60 -> 45)", Whole, [&] { clip->length = 45.0f, clip->touch(); });
+    edit("the clip's frame rate changed (60 -> 30)", Whole, [&] { clip->frame_rate = 30.0f, clip->touch(); });
+    edit("the clip's loop flag turned off", Whole, [&] { clip->loop = !clip->loop, clip->touch(); });
+    edit("the length changed without a version bump (touch_keys only)", Any, [&] { clip->length = 50.0f, clip->touch_keys(); });
+    edit("the clip swapped for a new empty one", Whole, [&] { ed.command("anim new Swapped474"); });
+    edit("a key added on the swapped-in clip", Any, [&] { ed.command("anim key LeftHandIK Position 1 20 1.8"); });
+    edit("a second key added by the console, then", Any, [&] { ed.command("anim key LeftHandIK Position 1 30 0.2"); });
+    edit("...its undo", Any, [&] { ed.command("undo"); });
+    edit("...and its redo", Any, [&] { ed.command("redo"); });
+    edit("the playhead far off (frame 58), then a key edited behind the window", Any, [&] {
+      ed.command("anim frame 58");
+      r34_steps(ed, 14);
+      r474_track(*clip, "LeftHandIK", "Position", 1)->set_key(10.0f, 2.0f), clip->touch_keys();
+    });
+    edit("the playhead back at the edited key (frame 10)", Any, [&] { ed.command("anim frame 10"); });
+  });
+
+  test("round 474: Record keying while a handle is dragged across 20 frames leaves a trail equal to a from-scratch sample, at a fixed playhead and across frames", [] {
+    for (int variant = 0; variant < 2; variant++) {
+      Editor ed;
+      r474_trail_rig(ed);
+      ed.command("anim record on");
+      r34_steps(ed, 2);
+      GameObject *target = ed.scene().find_by_name("LeftHandIK");
+      CHECK(target != nullptr);
+      if (!target) return;
+      const Vec3 home = target->local().position;
+      const size_t s0 = ed.trail_samples_for_test();
+      for (int i = 0; i < 20; i++) {
+        if (variant == 1) ed.command("anim frame " + std::to_string(10 + i));
+        ed.step_frame_headless();
+        ed.scene().find_by_name("LeftHandIK")->set_local_position(home + Vec3(0.01f * (float)i, 0.02f * (float)i, 0.0f));
+        ed.mark_changed_for_test("Drag");
+        ed.step_frame_headless();
+      }
+      ed.command("anim record off");
+      const R474Edit r = r474_after_edit(ed, s0);
+      std::printf("    drag %s: %zu frames posed for 20 key edits, trail %zu frames, worst %.2g m\n", variant ? "across frames" : "at one frame", r.again, r.whole, (double)r.worst);
+      CHECK(r.kept_points > 0 && r.same_set && r.worst < 1e-5f);
+      AnimationClipPtr clip = ed.anim_clip_for_test();
+      const AnimTrack *t = clip ? clip->find("LeftHandIK", "Position", 1) : nullptr;
+      const int k20 = t ? t->key_at(20.0f) : -1;
+      CHECK(k20 >= 0 && t->keys[(size_t)k20].value > 1.4f);  // (the drag keyed the target: frame 20 holds its last place)
+      if (variant == 1) CHECK(t->keys.size() > 9);  // (and new keys on the frames it crossed)
+    }
+  });
+}
+
 void run_animation_tests() {
   tests_round300();
   tests_round301();
@@ -9611,4 +11611,8 @@ void run_animation_tests() {
   tests_round470_editor();
   tests_round472_record();
   tests_round472_playback();
+  tests_round473();
+  tests_round473_more();
+  tests_round474();
+  tests_round474_more();
 }

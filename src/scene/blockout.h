@@ -90,6 +90,10 @@ struct Settings {
   /* How finely a blended join is meshed (ADR 0130): its grid's cell is a third (0, Low), a sixth (1, Medium) or a
    * twelfth (2, High) of the Blend radius - never coarser than `cell`, never finer than a thirty-second of it. */
   int blend_detail = 1;
+  /* For tests: every build of a cluster WITH its blends counts as one that did not close, so the last rung of ADR 0130's
+   * ladder - the cluster without its blends - is reached on any machine. (An arrangement that gets there by itself is a
+   * heap of turned pieces whose grids fail by a hair: not the same heap on every compiler.) */
+  bool fail_blends_for_test = false;
 };
 
 /* For each face of the result, in the mesh's face order: the piece (its id) and the side it came from, and whether
