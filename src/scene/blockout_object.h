@@ -7,6 +7,8 @@
 #include "blockout.h"
 #include "scene.h"
 
+#include <unordered_set>
+
 namespace bl {
 
 extern const char *const kBlockoutShapeNames[8];  // (blockout::Shape's order: Box, Cylinder, Sphere, Wedge, Stairs, Arch, Outline, Mesh)
@@ -273,6 +275,8 @@ void blockout_outline_move(BlockoutPiece &p, const BlockoutPiece &before, int in
 
 /* The smallest a handle leaves a piece's size or an opening's height: dragging through zero stops here, never turned inside out. */
 constexpr float kBlockoutMinSize = 0.01f;
+/* The largest a number made by a scale can be (F9 stops its sizes at the same 10000). */
+constexpr float kBlockoutMaxSize = 10000.0f;
 
 /* The piece's handles: a box's six faces; a cylinder's top, bottom and the side turned toward `toward` (the viewer in the piece's own
  * space); a sphere's surface toward it; a room's faces move its air and one more handle on the outside of the wall nearest `toward`
@@ -289,5 +293,54 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
 
 /* The handle the console's name picks ("x+" reads as "+x"; "width" is a door's "+x"; "radius" is "side"). nullptr: none. */
 const BlockoutHandle *blockout_handle_named(const std::vector<BlockoutHandle> &handles, const std::string &name);
+
+/* ---- Scale (round 496, task 0480, ADR 0135): a Blockout takes scale in its numbers ---- */
+
+/* `p`'s numbers scaled along the piece's own axes by `f` (X, Y, Z): a box's, wedge's and stairs' size; a cylinder's radius (by the factor of its round
+ * axes that is farthest from 1: it stays round) and height; a sphere's radius; an arch's two radii and depth; an outline's points and height; an
+ * opening's width, head, sill and depth; a Blend radius by the smallest factor (the scale set's own apply puts it back to what the user's scale made of it: a fillet is metres in the Blockout's space). A room's wall, floor and ceiling are in the Blockout's space and stay.
+ * Sizes stop at kBlockoutMinSize. False (nothing changed): a mesh piece, whose numbers are its mesh's. */
+bool blockout_piece_scale(BlockoutPiece &p, Vec3 f);
+
+/* The objects one scale of the selection goes through the Blockout's numbers for: each root that is a Blockout, a piece, or a folder / parent
+ * piece under a Blockout, with everything below it. A scale of anything else is the transform's, as before. */
+struct BlockoutScaleSet {
+  enum Role {
+    Numbers,  // a piece with numbers: they scale, its transform's scale is 1 1 1
+    Carrier,  // a Blockout, or a folder / object without numbers above pieces (a parent piece with numbers is Numbers): its scale stays what it was, the pieces below take it
+    Leaf      // any other object below (a mesh piece, a light, a mesh): its transform's scale grows
+  };
+  struct Entry {
+    uint64_t id = 0;
+    Role role = Leaf;
+    Transform local0;         // its local transform at the start (every frame is made from it: no drift)
+    Mat4 world0;              // its world matrix at the start
+    Vec3 outer{1, 1, 1};      // |scale| of the Blockout above it when that Blockout is in the set (a fold takes it out of the mesh's space); else 1
+    BlockoutPiece before;     // a Numbers entry's component at the start
+  };
+  std::vector<Entry> entries;  // parents before children
+  std::unordered_set<uint64_t> ids;
+  bool empty() const { return entries.empty(); }
+  bool has(uint64_t id) const { return ids.count(id) != 0; }
+};
+
+/* Fills `out` from the roots that go through the numbers (the others are left to the caller: `out.has(id)` says which are taken). */
+void blockout_scale_collect(const std::vector<GameObject *> &roots, BlockoutScaleSet &out);
+/* The set scaled by the world matrix `d` (a scale about a pivot): each place goes through `d`, a piece's numbers grow by what each of its own axes
+ * grew (the length of `d` on the axis, so a turned piece under a one-axis scale is never sheared), a Leaf's scale grows the same. With `fold`
+ * the Carriers' own scales go to 1 as well (d = identity: the same world sizes, the scale moved into the numbers below; a round piece keeps the rest of an uneven
+ * ratio on its own Scale so its shape stays; `outer` is the product of the Blockouts above). A place that would not be finite stays where it is. */
+void blockout_scale_apply(Scene &scene, const BlockoutScaleSet &set, const Mat4 &d, bool fold = false);
+/* Every object of the set as it was at the start (an Esc, a mode change). */
+void blockout_scale_restore(Scene &scene, const BlockoutScaleSet &set);
+
+/* A scale already in a scene that shears a turned piece: the objects at or above `blockout`, and the folders and parent pieces between it and its
+ * pieces, whose scale is uneven. `above` is true for the ones above the Blockout (not its to change). */
+struct BlockoutUnevenScale {
+  uint64_t id = 0;
+  bool above = false;
+};
+void blockout_uneven_scales(const GameObject &blockout, std::vector<BlockoutUnevenScale> &out);
+bool blockout_scale_uneven(const Vec3 &s);
 
 }  // namespace bl

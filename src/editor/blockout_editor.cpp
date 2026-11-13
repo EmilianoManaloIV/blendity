@@ -418,7 +418,7 @@ bool Editor::room_target(GameObject *&target, float &scale) {
   GameObject *sel = active_object();
   target = sel && sel->get<Blockout>() ? sel : sel ? blockout_of_piece(*sel) : nullptr;
   /* Round 495: a piece drawn on a face of a Blockout is that Blockout's, whatever is selected. */
-  GameObject *drawn_on = scene_->find(blockout_draw_choice().surface);
+  GameObject *drawn_on = scene_->find(room_.surface);
   if (drawn_on && drawn_on->get<Blockout>()) target = drawn_on;
   scale = 1.0f;
   if (!target) return true;
@@ -439,6 +439,82 @@ bool Editor::room_target(GameObject *&target, float &scale) {
   return true;
 }
 
+namespace {
+
+/* A direction in the surface turned a quarter, `quarters` times, round the normal (right-handed: the normal crossed with it). */
+Vec3 turned_in_surface(Vec3 d, Vec3 normal, int quarters) {
+  for (int k = 0; k < (quarters & 3); k++) d = cross(normal, d);
+  return d;
+}
+
+}  // namespace
+
+/* The piece the two drags describe, whether shown or made (round 496). A box, a cylinder and a room stand on the footprint. A wedge and stairs rise
+ * away from where the drag began along the rectangle's LONGER side (a wedge is tall at the far end, stairs climb toward it); an arch spans the longer
+ * side with its feet on the edge the drag began on and bulges across the shorter; each is turned `turn` quarters round the normal about the middle of
+ * its footprint, its two sizes swapping so the footprint stays. Pushed into the surface (a negative height) a wedge or stairs is turned over, its
+ * flat floor on the face: the slope or the treads are the floor of what it cuts, open at the face. */
+DrawnPiece blockout_drawn_piece(bool solid, bool circle, int kind_piece, int op, Vec3 origin, Vec3 u, Vec3 normal, float du, float dz, float height, float scale, int turn) {
+  DrawnPiece d;
+  const Vec3 z = cross(u, normal);
+  const float h = solid ? height : std::fabs(height);
+  const int kind = solid && !circle ? kind_piece : 0;
+  d.shape = circle ? 1 : kind, d.room = !solid, d.op = op, d.height = h;
+  const float side = 1.0f / scale, ah = std::fabs(h) * side;
+  d.centre = origin + normal * (h * 0.5f);
+  d.rotation = quat_from_axes(u, normal, z);
+  d.foot = origin;
+  if (circle) {
+    d.radius = std::fabs(du) * side, d.depth = ah;
+    return d;
+  }
+  if (kind == 0) {
+    d.centre = d.centre + u * (du * 0.5f) + z * (dz * 0.5f);
+    d.size = {std::fabs(du) * side, ah, std::fabs(dz) * side};
+    d.foot = origin + u * (du * 0.5f) + z * (dz * 0.5f);
+    return d;
+  }
+  d.directional = true;
+  /* (A square: a wedge and stairs rise along the second side as they always did, an arch spans the first.) */
+  const bool along_z = kind == 5 ? std::fabs(dz) > std::fabs(du) : std::fabs(dz) >= std::fabs(du);
+  const float longer = std::max(std::fabs(du), std::fabs(dz)), shorter = std::min(std::fabs(du), std::fabs(dz));
+  if (kind == 5) {
+    /* The span's axis and the bulge's: the longer side from where the drag began, and across the other side the way it was dragged. */
+    const Vec3 span = along_z ? z : u, across = along_z ? u : z;
+    const float across_sign = (along_z ? du : dz) < 0.0f ? -1.0f : 1.0f, span_extent = along_z ? dz : du;
+    const float radius = longer * 0.5f;
+    const Vec3 feet = origin + span * (span_extent * 0.5f);  // (the middle of the feet's edge)
+    const Vec3 middle = feet + across * (across_sign * radius * 0.5f);  // (the middle of the span x radius footprint it turns about)
+    const Vec3 s = turned_in_surface(span, normal, turn), b = turned_in_surface(across * across_sign, normal, turn);
+    d.foot = middle - b * (radius * 0.5f);
+    d.centre = d.foot + normal * (h * 0.5f);
+    d.rotation = quat_from_axes(s, b, cross(s, b));
+    d.rise = b, d.reach = radius;
+    d.radius = radius * side, d.depth = ah;
+    d.inner_radius = op == 0 ? d.radius * 0.5f : 0.0f;  // (the component's own proportion: 0.5 and 0.25)
+    return d;
+  }
+  /* Wedge (3) and stairs (4): the way away from the press along the longer side, then the turn. */
+  const Vec3 away = turned_in_surface(along_z ? z * (dz < 0.0f ? -1.0f : 1.0f) : u * (du < 0.0f ? -1.0f : 1.0f), normal, turn);
+  const bool odd = (turn & 1) != 0;
+  d.size = {(odd ? longer : shorter) * side, ah, (odd ? shorter : longer) * side};
+  d.centre = d.centre + u * (du * 0.5f) + z * (dz * 0.5f);
+  d.foot = d.centre - normal * (h * 0.5f);
+  const Vec3 up = h < 0.0f ? normal * -1.0f : normal, toward_z = kind == 3 ? away * -1.0f : away;  // (a wedge is tall at its -Z)
+  d.rotation = quat_from_axes(cross(up, toward_z), up, toward_z);
+  d.rise = away, d.reach = longer * 0.3f;
+  return d;
+}
+
+BlockoutPiece blockout_piece_from_drawn(const DrawnPiece &d, float wall) {
+  BlockoutPiece bp;
+  bp.shape = d.shape, bp.operation = d.op, bp.room = d.room;
+  bp.size = d.size, bp.radius = d.radius, bp.inner_radius = d.inner_radius, bp.height = d.depth;
+  if (d.shape == 5) bp.segments = 12;  // (an arch the tool makes: add_piece's)
+  if (d.room) bp.wall = bp.floor = bp.ceiling = wall;
+  return bp;
+}
+
 /* What the Room tool's two drags (and `blockout room`) make: a room, or a solid when the tool's Solid option is on (Add or Subtract),
  * standing on the surface. `u`, `normal` and cross(u, normal) are its right-handed axes; the footprint runs from `origin` by `du` along u
  * and `dz` along the third axis (signed), or is a circle of radius `du` round `origin`; `height` is along the normal (a room always goes
@@ -446,7 +522,6 @@ bool Editor::room_target(GameObject *&target, float &scale) {
  * a new one. nullptr (and a warning) when the numbers are no piece. */
 GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float dz, float height, bool circle) {
   const bool solid = room_.solid;
-  const Vec3 z = cross(u, normal);
   if (!finite3_bits(origin) || !finite3_bits(u) || !finite3_bits(normal) || !finite_bits(du) || !finite_bits(dz) || !finite_bits(height)) {
     Log::warn("Room: the numbers are not finite - nothing made");
     return nullptr;
@@ -462,35 +537,21 @@ GameObject *Editor::room_make(Vec3 origin, Vec3 u, Vec3 normal, float du, float 
   if (!room_target(target, scale)) return nullptr;
   if (!target) target = create_empty_blockout();
   /* Round 495: a wedge, stairs or an arch over the rectangle, and the operation chosen - or, by the direction, Subtract when pushed in. */
-  const int kind = solid && !circle ? blockout_draw_choice().piece : 0;
+  const int kind = solid && !circle ? room_.piece : 0;
   PieceWords w;
   /* (Auto in a Blockout with no matter yet - a new one too - adds: there is nothing to cut, and a lone cutter is nothing to see.) */
-  w.room = !solid, w.shape = circle ? 1 : kind, w.op = blockout_draw_operation(solid, room_.subtract, h, blockout_nothing_to_cut(*target)), w.ok = true;
+  w.room = !solid, w.shape = circle ? 1 : kind, w.op = blockout_draw_operation(solid, room_.operation, room_.subtract, room_.flip, h, blockout_nothing_to_cut(*target)), w.ok = true;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);  // (a thickness is in the Blockout's units too)
   BlockoutPiece *bp = piece->get<BlockoutPiece>();
-  Vec3 centre = origin + normal * (h * 0.5f);
-  /* A wedge is tall at its -Z and stairs climb toward +Z: +Z is the way the rectangle was dragged, so a ramp is tall where the
-   * drag began and stairs climb away from it. */
-  const float way = kind && dz < 0.0f ? -1.0f : 1.0f;
-  /* Pushed into the surface a wedge or stairs is turned over, its flat floor on the face: the slope or the treads are the floor
-   * of what it cuts, open at the face - not a hollow closed under it. */
-  const bool over = (kind == 3 || kind == 4) && h < 0.0f;
-  Quat turn = over ? quat_from_axes(u * -way, normal * -1.0f, z * way) : quat_from_axes(u * way, normal, z * way);
-  if (circle) bp->radius = std::fabs(du) / scale, bp->height = std::fabs(h) / scale;
-  else if (kind == 5) {
-    /* An arch stands in its XY plane round its origin and is `height` deep along Z: it lies in the surface, its feet on the
-     * rectangle's first side, bulging the way the rectangle was dragged, and the height pushes it in or pulls it out. A cutting
-     * arch is filled (an arched opening); one that adds is a ring. */
-    centre = centre + u * (du * 0.5f);
-    bp->radius = std::fabs(du) * 0.5f / scale, bp->height = std::fabs(h) / scale;
-    bp->inner_radius = w.op == 0 ? bp->radius * 0.5f : 0.0f;  // (the component's own proportion: 0.5 and 0.25)
-    turn = quat_from_axes(u, z * way, cross(u, z * way));
-  }
-  else {
-    centre = centre + u * (du * 0.5f) + z * (dz * 0.5f);
-    bp->size = {std::fabs(du) / scale, std::fabs(h) / scale, std::fabs(dz) / scale};
-  }
-  piece->set_world_rotation(turn);
+  /* The numbers and the place come from the one function the Scene view's preview uses too. An arch stands in its XY plane round its origin
+   * and is `height` deep along Z: it lies in the surface, and the height pushes it in or pulls it out. A cutting arch is filled (an arched
+   * opening); one that adds is a ring. */
+  const DrawnPiece d = blockout_drawn_piece(solid, circle, kind, w.op, origin, u, normal, du, dz, height, scale, room_turn(kind));
+  const Vec3 centre = d.centre;
+  if (circle) bp->radius = d.radius, bp->height = d.depth;
+  else if (kind == 5) bp->radius = d.radius, bp->height = d.depth, bp->inner_radius = d.inner_radius;
+  else bp->size = d.size;
+  piece->set_world_rotation(d.rotation);
   piece->set_world_position(centre);
   expanded_.insert(target->id);
   select(piece->id);
@@ -543,7 +604,7 @@ GameObject *Editor::room_make_outline(const std::vector<Vec3> &corners, Vec3 u, 
   if (!room_target(target, scale)) return nullptr;
   if (!target) target = create_empty_blockout();
   PieceWords w;
-  w.room = !solid, w.shape = 6, w.op = blockout_draw_operation(solid, room_.subtract, h, blockout_nothing_to_cut(*target)), w.ok = true;
+  w.room = !solid, w.shape = 6, w.op = blockout_draw_operation(solid, room_.operation, room_.subtract, room_.flip, h, blockout_nothing_to_cut(*target)), w.ok = true;
   GameObject *piece = add_piece(*scene_, *target, unique_object_name(piece_base_name(w)), w, nullptr, room_.wall / scale);
   BlockoutPiece *bp = piece->get<BlockoutPiece>();
   const float cx = 0.5f * (x0 + x1), cz = 0.5f * (z0 + z1);
@@ -583,6 +644,7 @@ void Editor::record_blockout_last(GameObject *g) {
   else o.n = 6;
   o.d = bp->wall, o.e = bp->floor, o.f = bp->ceiling;
   o.flag = bp->is_room();
+  o.turnable = blockout_turnable(*bp);  // (F9's Turn row counts its quarter turns from here: 0)
   const Mat4 w = g->world_matrix();
   const float half = blockout_floor_below_origin(*bp);
   o.base_p = w.point({0.0f, -half, 0.0f});
@@ -919,15 +981,28 @@ static constexpr uint32_t kCutYellow = Color::hex(0xF4BC02);
 static constexpr uint32_t kIntersectViolet = Color::hex(0xB06CF5);
 
 /* A piece's outline as it is drawn, in the world. */
-static void piece_outline(const GameObject &p, const BlockoutPiece &bp, const LineFn &seg) {
+static void piece_outline(const Mat4 &w, const BlockoutPiece &bp, const LineFn &seg) {
   const bool opening = bp.opening != 0;
-  const Mat4 w = p.world_matrix();
   if (!opening && bp.shape == 7) return mesh_piece_wire(bp, w, seg);
   /* A wedge, stairs, an arch, an outline: lines in the piece's own space, put in the world here. */
   if (!opening && bp.shape >= 3 && bp.shape <= 6) return shape_wire(bp, nullptr, [&](Vec3 a, Vec3 b) { seg(w.point(a), w.point(b)); });
   /* An opening's box lies between its sill and head above the origin. */
   piece_wire(wire_box(bp, bp.box_size(), nullptr), opening ? w * bp.shape_offset() : w, seg);
 }
+
+/* The Draw Piece tool's preview (round 496) draws a piece that is not made yet with the code that draws a made one: a room's shell too. */
+void blockout_piece_wire(const BlockoutPiece &bp, const Mat4 &world, bool shell, const std::function<void(Vec3, Vec3)> &seg) {
+  if (!shell) return piece_outline(world, bp, seg);
+  RoomGrowth grow;
+  if (!bp.is_room() || !blockout_room_growth(bp.to_piece(0, world), grow)) return;
+  const bool shaped = bp.shape >= 3 && bp.shape <= 6;
+  if (shaped) shape_wire(bp, &grow, [&](Vec3 a, Vec3 b) { seg(world.point(a), world.point(b)); });
+  else piece_wire(wire_box(bp, bp.box_size(), &grow), world, seg);
+}
+
+uint32_t blockout_operation_colour(int op, bool room) { return room || op == 0 ? kSelectOrange : op == 1 ? kCutYellow : kIntersectViolet; }
+
+bool blockout_turnable(const BlockoutPiece &bp) { return !bp.opening && (bp.shape == 3 || bp.shape == 4 || bp.shape == 5); }
 
 bool blockout_outlines_shown(const GameObject &blockout, const std::function<bool(uint64_t)> &selected) {
   if (!blockout.get<Blockout>() || !blockout.active_in_hierarchy()) return false;
@@ -1009,7 +1084,7 @@ uint64_t blockout_pick_outline(Scene &scene, const Renderer3D &r3d, const Render
       const BlockoutPiece *bp = p->get<BlockoutPiece>();
       const bool cuts = bp->opening != 0 || bp->operation == 1 || (bp->operation == 2 && !bp->room);
       if (!cuts) continue;  // (a piece with a surface is clicked on its surface: its outline runs along edges two pieces share)
-      piece_outline(*p, *bp, [&](Vec3 a, Vec3 b) {
+      piece_outline(p->world_matrix(), *bp, [&](Vec3 a, Vec3 b) {
         const float d = outline_distance(r3d, rt, a, b, px, py, best);
         if (d < best) best = d, hit = p->id;
       });
@@ -1039,7 +1114,7 @@ void Editor::draw_blockouts() {
       auto draw = [&](uint32_t c, float wd) { return [this, c, wd](Vec3 a, Vec3 b) { scene_r3d_.line(a, b, c, true, wd); }; };
       auto own = [&](uint32_t c, float wd) { return [this, c, wd, w](Vec3 a, Vec3 b) { scene_r3d_.line(w.point(a), w.point(b), c, true, wd); }; };
       const bool shaped = !opening && bp->shape >= 3 && bp->shape <= 6;
-      piece_outline(*p, *bp, draw(col, width));
+      piece_outline(w, *bp, draw(col, width));
       if (!mine && !whole) continue;  // (a room's grown shell is drawn for the pieces in hand only)
       if (!bp->is_room()) continue;
       RoomGrowth grow;
@@ -1387,6 +1462,14 @@ std::vector<std::pair<std::string, bool>> Editor::blockout_status_lines(const Ga
   const BlockoutStatus &s = b.state.status;
   for (const auto &j : blockout_jobs_)
     if (j->obj == g.id) lines.push_back({"Building...", false});
+  /* Round 496 (ADR 0135): a scale already in the scene that shears a turned piece - the Blockout's, a folder's or a parent piece's (Apply Scale to Pieces),
+   * or an object above the Blockout (not its to change). */
+  std::vector<BlockoutUnevenScale> uneven;
+  blockout_uneven_scales(g, uneven);
+  for (const BlockoutUnevenScale &k : uneven) {
+    const GameObject *o = scene_ ? scene_->find(k.id) : nullptr;
+    lines.push_back({strprintf("'%s' is scaled unevenly: turned pieces are sheared%s", o ? o->name.c_str() : "an object", k.above ? " (above the Blockout: not the Blockout's to change)" : ""), true});
+  }
   if (!s.built) {
     lines.push_back({"Not built yet", false});
     return lines;
@@ -1422,6 +1505,18 @@ void Editor::draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay) {
     u.tooltip(l.first);
     if (u.record_buttons) u.button_rects["shown:" + l.first] = row;
   }
+  std::vector<BlockoutUnevenScale> uneven;
+  blockout_uneven_scales(g, uneven);
+  if (std::any_of(uneven.begin(), uneven.end(), [](const BlockoutUnevenScale &k) { return !k.above; })) {
+    const Recti fold = lay.row(u.row_h() + u.px(2));
+    if (u.button({fold.x + u.px(4), fold.y, fold.w - u.px(8), fold.h}, "Apply Scale to Pieces"))
+      defer([this, id = g.id] {
+        if (GameObject *o = scene_->find(id)) blockout_apply_scale({o}, "Apply Scale to Pieces");
+      });
+    u.tooltip("Moves the scale of this Blockout, of its folders and of its parent pieces into the pieces: their places and their numbers (Width, Radius...) grow\n"
+              "and those objects' scale becomes 1 1 1, so no turned piece is sheared. The Blockout's own scale also grows every room's Wall, Floor and Ceiling and the\n"
+              "Texture Scale, so the world looks as it did (one wall factor for an uneven X / Z scale). One Undo step.");
+  }
   const Recti row = lay.row(u.row_h() + u.px(2));
   if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Bake to Mesh"))  // (round 482; after the panel's loop: it removes the component being drawn)
     defer([this, id = g.id] {
@@ -1429,6 +1524,117 @@ void Editor::draw_blockout_extras(GameObject &g, Blockout &b, ui::Layout &lay) {
     });
   u.tooltip("Turns the Blockout into an ordinary mesh you can edit (Edit Mode, sculpting, modifiers): the pieces go under a disabled child and the\n"
             "mesh no longer follows them. Unbake brings the Blockout back from them. One Undo step.");
+}
+
+/* The scale of the roots, and of the folders and parent pieces between them and their pieces, moved into the pieces (ADR 0135): their places and numbers
+ * take it, those objects' own scales go to 1 (a mirror stays), the world sizes stay. One undo step. False when there is no scale to move. */
+bool Editor::blockout_apply_scale(const std::vector<GameObject *> &roots, const char *label) {
+  BlockoutScaleSet set;
+  blockout_scale_collect(roots, set);
+  auto off_one = [](const Vec3 &s) {
+    for (int a = 0; a < 3; a++)
+      if (s[a] != 0.0f && std::fabs(std::fabs(s[a]) - 1.0f) > 1e-6f) return true;  // (a flat axis, 0, has nothing to move)
+    return false;
+  };
+  bool any = false;
+  for (const BlockoutScaleSet::Entry &e : set.entries) any = any || (e.role != BlockoutScaleSet::Leaf && off_one(e.local0.scale));
+  if (!any) return false;
+  blockout_scale_apply(*scene_, set, Mat4::identity(), true);
+  edit_epoch::bump();
+  update_blockouts(true);
+  mark_changed(label);
+  return true;
+}
+
+/* A wedge, stairs or arch turned `quarters` quarter turns round the surface's normal (its own up - an arch's own Z - as it stands), about the middle of its
+ * footprint: a wedge or stairs about its own origin with its two footprint sizes swapped when the turn is odd, so the world box stays; an arch about the middle
+ * of its span x radius box. False for a piece that has no such direction. No undo step: the callers make theirs. */
+bool Editor::blockout_turn_piece(GameObject &g, int quarters) {
+  BlockoutPiece *bp = g.get<BlockoutPiece>();
+  if (!bp || !blockout_turnable(*bp)) return false;
+  quarters = ((quarters % 4) + 4) % 4;
+  if (!quarters) return true;
+  {  // (a scale an older scene left on the piece goes into its numbers first: the turn swaps the numbers and the box must stay the same)
+    BlockoutScaleSet set;
+    blockout_scale_collect({&g}, set);
+    const Vec3 sc = g.local().scale;
+    const bool scaled = std::fabs(std::fabs(sc.x) - 1.0f) > 1e-6f || std::fabs(std::fabs(sc.y) - 1.0f) > 1e-6f || std::fabs(std::fabs(sc.z) - 1.0f) > 1e-6f;
+    if (scaled && !set.empty()) blockout_scale_apply(*scene_, set, Mat4::identity(), true);
+  }
+  const Mat4 w = g.world_matrix();
+  const bool arch = bp->shape == (int)blockout::Shape::Arch;
+  const Vec3 axis = normalize(w.dir(arch ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(0.0f, 1.0f, 0.0f)));
+  const Quat q = Quat::axis_angle(axis, (float)quarters * 0.5f * kPi);
+  const Vec3 pos = g.world_position(), pivot = arch ? w.point(Vec3(0.0f, bp->radius * 0.5f, 0.0f)) : pos;
+  g.set_world_rotation(normalize(q * g.world_rotation()));
+  g.set_world_position(pivot + q.rotate(pos - pivot));
+  if (!arch && (quarters & 1)) std::swap(bp->size.x, bp->size.z);
+  return true;
+}
+
+/* blockout turn [quarters]: the selected wedges, stairs and arches turned (default one quarter turn; negative turns back), one undo step. */
+void Editor::blockout_turn_command(const std::vector<std::string> &t) {
+  char *end = nullptr;
+  const long n = t.size() > 2 ? std::strtol(t[2].c_str(), &end, 10) : 1;
+  if (t.size() > 3 || (t.size() > 2 && (t[2].empty() || *end != '\0'))) return Log::warn("blockout turn [quarters]: a whole number of quarter turns (default 1)");
+  bool any = false;
+  for (GameObject *g : selected_objects(false)) {
+    const BlockoutPiece *bp = g->get<BlockoutPiece>();
+    if (!bp || !blockout_of_piece(*g) || !blockout_turnable(*bp)) continue;
+    any = true;
+    blockout_turn_piece(*g, (int)(n % 4));
+  }
+  if (!any) return Log::warn("blockout turn: select a wedge, stairs or arch piece first");
+  if (n % 4 == 0) return;  // (no undo step for nothing)
+  update_blockouts(true);
+  mark_changed("Turn Blockout Piece");
+}
+
+/* The Inspector's extras for a piece (round 496): Turn 90 for a wedge, stairs or arch, and a scale an older scene left on it, folded into its numbers. */
+void Editor::draw_blockout_piece_extras(GameObject &g, BlockoutPiece &bp, ui::Layout &lay) {
+  auto &u = ui_;
+  if (blockout_turnable(bp) && blockout_of_piece(g)) {
+    const Recti turn = lay.row(u.row_h() + u.px(2));
+    if (u.button({turn.x + u.px(4), turn.y, turn.w - u.px(8), turn.h}, "Turn 90"))
+      defer([this, id = g.id] {
+        GameObject *o = scene_->find(id);
+        if (!o || !blockout_turn_piece(*o, 1)) return;
+        update_blockouts(true);
+        mark_changed("Turn Blockout Piece");
+      });
+    u.tooltip("Turns the piece a quarter turn round the surface's normal, about the middle of its footprint: a wedge's or stairs' two footprint sizes swap so it\n"
+              "stays in the same box, an arch spans the other way. One Undo step. Console: blockout turn.");
+  }
+  const Vec3 s = g.local().scale;
+  const bool numbers = bp.shape != (int)blockout::Shape::Mesh || bp.opening != 0;
+  const bool scaled = std::fabs(std::fabs(s.x) - 1.0f) > 1e-6f || std::fabs(std::fabs(s.y) - 1.0f) > 1e-6f || std::fabs(std::fabs(s.z) - 1.0f) > 1e-6f;
+  if (!numbers || !scaled || !blockout_of_piece(g)) return;
+  const Recti row = lay.row(u.row_h() + u.px(2));
+  if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Apply Scale to Size"))
+    defer([this, id = g.id] {
+      if (GameObject *o = scene_->find(id)) blockout_apply_scale({o}, "Apply Scale to Size");
+    });
+  u.tooltip("Moves this object's Scale into the piece's own numbers (Width, Height, Depth, Radius...): the same shape, Scale 1 1 1. On a parent piece it also moves the Scale of the folders and pieces below it. One Undo step.");
+}
+
+/* blockout applyscale [size]: Apply Scale to Pieces - the selected Blockouts' (and the selected pieces' Blockouts'; none selected: every one) scale and that of the
+ * folders and parent pieces in them moved into the pieces; `size`: Apply Scale to Size of the selected pieces. */
+void Editor::blockout_apply_scale_command(const std::vector<std::string> &t) {
+  const bool size = t.size() > 2 && to_lower(t[2]) == "size";
+  if (t.size() > 2 && !size) return Log::warn("blockout applyscale [size]: Apply Scale to Pieces for the Blockouts, or Apply Scale to Size for the selected pieces");
+  std::vector<GameObject *> roots;
+  auto note = [&](GameObject *g) {
+    if (g && std::find(roots.begin(), roots.end(), g) == roots.end()) roots.push_back(g);
+  };
+  for (GameObject *g : selected_objects(false)) {
+    if (size) note(g->get<BlockoutPiece>() ? g : nullptr);
+    else note(g->get<Blockout>() ? g : blockout_of_piece(*g));
+  }
+  const bool nothing_selected = selected_objects(false).empty();
+  if (roots.empty() && !size && nothing_selected) scene_->for_each([&](GameObject &g) { if (g.get<Blockout>()) note(&g); });
+  if (roots.empty() && !size && !nothing_selected) return Log::warn("blockout applyscale: the selection holds no Blockout and no piece (select none to take every Blockout)");
+  if (roots.empty()) return Log::warn("blockout applyscale size: select a piece first");
+  if (!blockout_apply_scale(roots, size ? "Apply Scale to Size" : "Apply Scale to Pieces")) Log::info("blockout applyscale: no scale to move");
 }
 
 /* The Inspector's extras for a baked object (round 482): what it is and the Unbake button. */
@@ -1623,6 +1829,8 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
               "add door|window [width head [sill]] | outline <x z> <x z> <x z> ... | set cell|method|detail|blend|wall|floor|ceiling|walls|opentop <value> | handle <side> <metres> [both] | "
               "room <x0 z0 x1 z1 height> | room circle <x z radius height> | roomopt circle|solid|subtract on|off, piece <word>, operation <word>, wall <metres> | "
               "draw room|box|cylinder|wedge|stairs|arch add|subtract|intersect|auto at <x y z> normal <x y z> size <du dz height> | "
+              "applyscale [size] (the Blockouts' scale into their pieces; size: the selected pieces' own) | "
+              "turn [quarters] (the selected wedges, stairs and arches a quarter turn round the surface's normal) | "
               "set material floor|walls|ceiling|outside|cut|solid <material or none> | set texscale <metres> | bake (the selected Blockout or a piece's; nothing selected bakes nothing) | unbake [force] (the selected baked objects; nothing selected unbakes nothing) | rebuild | wait | info");
   };
   /* The Blockouts a command is about: the selected ones and the ones the selected pieces belong to; with none, every one. */
@@ -1644,6 +1852,8 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   else if (sub == "outline") blockout_outline_command(t);  // (round 480)
   else if (sub == "room" || sub == "draw") room_command(t);  // (round 495: `draw` - any piece on any surface point)
   else if (sub == "roomopt") room_options_command(t);
+  else if (sub == "applyscale") blockout_apply_scale_command(t);  // (round 496)
+  else if (sub == "turn") blockout_turn_command(t);
   else if (sub == "set") {
     const std::string key = t.size() > 2 ? to_lower(t[2]) : "", value = t.size() > 3 ? to_lower(t[3]) : "";
     if (key == "wall" || key == "floor" || key == "ceiling" || key == "walls" || key == "opentop" || key == "blend") return blockout_set_command(t);

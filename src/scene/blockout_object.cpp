@@ -1031,4 +1031,265 @@ const BlockoutHandle *blockout_handle_named(const std::vector<BlockoutHandle> &h
   return nullptr;
 }
 
+/* ===================================================================== */
+/* Scale (round 496, task 0480, ADR 0135)                                 */
+/* ===================================================================== */
+
+namespace {
+/* Two round axes in one radius: the one that changed more, so a cylinder scaled along X (or Z) stays round and a scale of both takes the larger. */
+float round_pick(float a, float b) {
+  const float la = std::fabs(std::log(std::max(a, 1e-12f))), lb = std::fabs(std::log(std::max(b, 1e-12f)));
+  return la >= lb ? a : b;
+}
+}  // namespace
+
+bool blockout_piece_scale(BlockoutPiece &p, Vec3 f) {
+  if (p.shape == (int)blockout::Shape::Mesh && p.opening == 0) return false;
+  for (int a = 0; a < 3; a++) f[a] = finite_bits(f[a]) ? std::fabs(f[a]) : 1.0f;
+  /* A number grown, stopped at the smallest size; a factor of exactly 1 leaves it as it is (a scale by nothing changes no bit). */
+  auto grow = [](float &v, float k) {
+    if (k == 1.0f || !finite_bits(v)) return;
+    v = std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, std::fabs(v) * k));
+  };
+  auto place = [](float &v, float k) {  // (an outline's corner: any sign, kept in range)
+    if (finite_bits(v)) v = std::max(-kBlockoutMaxSize, std::min(kBlockoutMaxSize, v * k));
+  };
+  auto round_k = [](float a, float b) { return round_pick(a, b); };
+  if (p.opening != 0) {  // (a door or window: width across, sill to head up, depth through the wall)
+    grow(p.width, f.x);
+    if (f.y != 1.0f && finite_bits(p.sill)) p.sill = std::min(kBlockoutMaxSize - kBlockoutMinSize, std::max(0.0f, p.sill * f.y));
+    if (f.y != 1.0f && finite_bits(p.head))
+      p.head = std::min(kBlockoutMaxSize, std::max(finite_bits(p.sill) ? p.sill + kBlockoutMinSize : kBlockoutMinSize, p.head * f.y));
+    grow(p.depth, f.z);
+    return true;
+  }
+  switch ((blockout::Shape)p.shape) {
+    case blockout::Shape::Box:
+    case blockout::Shape::Wedge:
+    case blockout::Shape::Stairs:
+      for (int a = 0; a < 3; a++) grow(p.size[a], f[a]);
+      break;
+    case blockout::Shape::Cylinder:
+      grow(p.radius, round_k(f.x, f.z));
+      grow(p.height, f.y);
+      break;
+    case blockout::Shape::Sphere:
+      grow(p.radius, round_k(round_k(f.x, f.y), f.z));
+      break;
+    case blockout::Shape::Arch: {
+      const float k = round_k(f.x, f.y);  // (the ring lies in the piece's XY plane)
+      grow(p.radius, k);
+      /* The inner radius may be 0 (a filled arch, the Subtract tool's): it scales with a floor of 0 and stays below the radius, as F9 keeps it. */
+      if (k != 1.0f && finite_bits(p.inner_radius) && finite_bits(p.radius))
+        p.inner_radius = std::max(0.0f, std::min(std::fabs(p.inner_radius) * k, p.radius - kBlockoutMinSize));
+      grow(p.height, f.z);  // (an arch's depth)
+      break;
+    }
+    case blockout::Shape::Outline:
+      for (Vec2 &q : p.outline) {
+        place(q.x, f.x);
+        place(q.y, f.z);  // (the outline's second number is z)
+      }
+      grow(p.height, f.y);
+      break;
+    case blockout::Shape::Mesh:
+      return false;
+  }
+  if (finite_bits(p.blend) && p.blend > 0.0f) p.blend = std::min(100.0f, p.blend * std::min(f.x, std::min(f.y, f.z)));
+  return true;
+}
+
+namespace {
+
+bool is_numbers_piece(const GameObject &g) {
+  const BlockoutPiece *bp = g.get<BlockoutPiece>();
+  return bp && (bp->shape != (int)blockout::Shape::Mesh || bp->opening != 0);
+}
+
+bool has_piece_below(const GameObject &g) {
+  for (const GameObject *c : g.children)
+    if (c->get<BlockoutPiece>() || has_piece_below(*c)) return true;
+  return false;
+}
+
+/* An object with geometry of its own (a mesh piece, a plain mesh object, a baked Blockout) that holds pieces: its scale is the geometry's, so it grows
+ * as a Leaf's does and is no Carrier (the pieces below follow through their world axes). A Blockout is no such object though it has a mesh. */
+bool has_own_geometry(const GameObject &g) {
+  if (g.get<Blockout>()) return false;
+  if (g.get<BlockoutPiece>()) return !is_numbers_piece(g);
+  return g.get<MeshFilter>() || g.get<BlockoutBaked>();
+}
+
+bool is_carrier(const GameObject &g) { return g.get<Blockout>() || (has_piece_below(g) && !has_own_geometry(g)); }
+
+/* A scale that goes through the numbers: a Blockout (or anything inside one) that is a piece with numbers, is a Blockout, or has pieces below it. */
+bool takes_scale_in_numbers(const GameObject &g) {
+  if (g.get<Blockout>()) return true;
+  if (!blockout_of_piece(g)) return false;
+  return is_numbers_piece(g) || has_piece_below(g);
+}
+
+void collect_scale(const GameObject &g, BlockoutScaleSet &out, Vec3 outer) {
+  if (out.has(g.id)) return;
+  if (g.get<Blockout>()) {  // (the scale a fold takes out of this Blockout's own transform: what a room's wall in its space grows by)
+    const Vec3 s = g.local().scale;
+    for (int a = 0; a < 3; a++) outer[a] *= finite_bits(s[a]) && s[a] != 0.0f ? std::fabs(s[a]) : 1.0f;  // (a Blockout inside a Blockout: the product, both are folded out of the walls below)
+  }
+  BlockoutScaleSet::Entry e;
+  e.id = g.id, e.local0 = g.local(), e.world0 = g.world_matrix(), e.outer = outer;
+  if (is_numbers_piece(g)) {
+    e.role = BlockoutScaleSet::Numbers;
+    e.before = *g.get<BlockoutPiece>();
+  }
+  else e.role = is_carrier(g) ? BlockoutScaleSet::Carrier : BlockoutScaleSet::Leaf;
+  out.entries.push_back(std::move(e));
+  out.ids.insert(g.id);
+  for (const GameObject *c : g.children) collect_scale(*c, out, outer);
+}
+
+float sign_of(float v) { return v < 0.0f ? -1.0f : v > 0.0f ? 1.0f : 0.0f; }  // (a zero axis stays zero: the object stays flat there)
+
+int depth_of(const GameObject &g) {
+  int n = 0;
+  for (const GameObject *a = g.parent; a; a = a->parent) n++;
+  return n;
+}
+
+/* How much longer the world matrix `d` makes the vector `m` than `now` (the object's own axis as it stands) is; 1 for what cannot be told. */
+float axis_growth(const Mat4 &d, const Vec3 &m, const Vec3 &now) {
+  const float have = length(now), want = length(d.dir(m));
+  if (!(have > 1e-12f) || !(length(m) > 1e-12f) || !finite_bits(want) || !finite_bits(have)) return 1.0f;  // (a flat piece stays flat: nothing to grow)
+  const float r = want / have;
+  return std::fabs(r - 1.0f) < 1e-6f ? 1.0f : r;
+}
+
+/* What a round piece's fold leaves on its own Scale so the world shape stays: the round axes were made one radius (the farther factor), the rest of each axis's
+ * factor is the piece's Scale (it never shears: the piece's own axes). 1 1 1 for every other shape and for an even scale. */
+Vec3 round_residual(const BlockoutPiece &p, const Vec3 &f) {
+  Vec3 r(1.0f, 1.0f, 1.0f);
+  auto share = [&](int a, int b, float k) {
+    for (int i : {a, b})
+      if (k > 0.0f && f[i] > 0.0f && std::fabs(f[i] / k - 1.0f) > 1e-5f) r[i] = f[i] / k;
+  };
+  if (p.opening != 0) return r;
+  switch ((blockout::Shape)p.shape) {
+    case blockout::Shape::Cylinder: share(0, 2, round_pick(f.x, f.z)); break;
+    case blockout::Shape::Arch: share(0, 1, round_pick(f.x, f.y)); break;
+    case blockout::Shape::Sphere: {
+      const float k = round_pick(round_pick(f.x, f.y), f.z);
+      share(0, 1, k);
+      share(2, 2, k);
+      break;
+    }
+    default: break;
+  }
+  return r;
+}
+
+}  // namespace
+
+void blockout_scale_collect(const std::vector<GameObject *> &roots, BlockoutScaleSet &out) {
+  out = BlockoutScaleSet();
+  std::vector<const GameObject *> order;  // (shallowest first, so a child selected before its parent still has its parent before it in the set)
+  for (const GameObject *g : roots)
+    if (g && takes_scale_in_numbers(*g)) order.push_back(g);
+  std::stable_sort(order.begin(), order.end(), [](const GameObject *a, const GameObject *b) { return depth_of(*a) < depth_of(*b); });
+  for (const GameObject *g : order) collect_scale(*g, out, Vec3(1.0f, 1.0f, 1.0f));
+}
+
+void blockout_scale_restore(Scene &scene, const BlockoutScaleSet &set) {
+  for (const BlockoutScaleSet::Entry &e : set.entries) {
+    GameObject *g = scene.find(e.id);
+    if (!g) continue;
+    g->set_local(e.local0);
+    if (e.role != BlockoutScaleSet::Numbers) continue;
+    if (BlockoutPiece *bp = g->get<BlockoutPiece>()) *bp = e.before;
+  }
+}
+
+void blockout_scale_apply(Scene &scene, const BlockoutScaleSet &set, const Mat4 &d, bool fold) {
+  for (const BlockoutScaleSet::Entry &e : set.entries) {  // (parents first: a child reads its parent as it is now)
+    GameObject *g = scene.find(e.id);
+    if (!g) continue;
+    Vec3 at = d.point(e.world0.translation());
+    if (!finite_bits(at.x) || !finite_bits(at.y) || !finite_bits(at.z)) at = e.world0.translation();  // (a typed 1e39 is inf: the object stays where it is)
+    Transform t = e.local0;
+    if (e.role == BlockoutScaleSet::Carrier && !fold) {
+      g->set_local(t);
+      g->set_world_position(at);
+      continue;
+    }
+    /* The object's own scale set aside (a mirror stays): what is left of its axes is its parents' and its turn. */
+    for (int a = 0; a < 3; a++) t.scale[a] = sign_of(e.local0.scale[a]);
+    g->set_local(t);
+    if (e.role == BlockoutScaleSet::Carrier) {
+      g->set_world_position(at);
+      if (fold)
+        if (Blockout *b = g->get<Blockout>()) {  // (a texture tile keeps its size in the world; the Field Cell is left as it is: it only sets how fine the build is)
+          const float u = std::cbrt(e.outer.x * e.outer.y * e.outer.z);
+          if (finite_bits(u) && finite_bits(b->texture_scale) && std::fabs(u - 1.0f) > 1e-6f) b->texture_scale = std::min(1000.0f, std::max(0.001f, b->texture_scale * u));
+        }
+      continue;
+    }
+    const Mat4 &now = g->world_matrix();
+    Vec3 f;
+    for (int a = 0; a < 3; a++) f[a] = axis_growth(d, e.world0.column(a), now.column(a));
+    if (e.role == BlockoutScaleSet::Numbers) {
+      if (BlockoutPiece *bp = g->get<BlockoutPiece>()) {
+        *bp = e.before;
+        const bool changed = blockout_piece_scale(*bp, f);
+        /* A fillet is metres in the Blockout's space, like a wall: the piece's own old scale is no growth of it; only the user's scale along the piece's world axes
+         * and, in a fold, the Blockout's own folded scale count. */
+        if (changed && bp->opening == 0 && finite_bits(e.before.blend) && e.before.blend > 0.0f) {
+          float k = std::min(e.outer.x, std::min(e.outer.y, e.outer.z));
+          if (!fold) {
+            k = 1e30f;
+            for (int a = 0; a < 3; a++) k = std::min(k, axis_growth(d, e.world0.column(a), e.world0.column(a)));
+          }
+          bp->blend = std::min(100.0f, e.before.blend * (finite_bits(k) && k > 0.0f ? k : 1.0f));
+        }
+        if (fold) {  // (a round piece with an uneven fold keeps the rest of the ratio on its own Scale: the world shape stays)
+          const Vec3 rr = round_residual(*bp, f);
+          for (int a = 0; a < 3; a++) t.scale[a] = sign_of(e.local0.scale[a]) * rr[a];
+          if (t.scale.x != sign_of(e.local0.scale.x) || t.scale.y != sign_of(e.local0.scale.y) || t.scale.z != sign_of(e.local0.scale.z)) g->set_local(t);
+        }
+        if (fold && bp->room) {  // (a wall is in the Blockout's space: only the Blockout's own scale, folded out, would have stretched it)
+          const float wall_k = std::sqrt(e.outer.x * e.outer.z);
+          auto thick = [](float &v, float k) {
+            if (k != 1.0f && finite_bits(v)) v = std::min(1000.0f, std::max(0.0f, v * k));
+          };
+          thick(bp->wall, wall_k), thick(bp->floor, e.outer.y), thick(bp->ceiling, e.outer.y);
+        }
+      }
+    }
+    else {
+      for (int a = 0; a < 3; a++) t.scale[a] *= f[a];
+      g->set_local(t);
+    }
+    g->set_world_position(at);
+  }
+}
+
+bool blockout_scale_uneven(const Vec3 &s) {
+  float lo = 1e30f, hi = 0.0f;
+  for (int a = 0; a < 3; a++) {
+    const float v = std::fabs(s[a]);
+    lo = std::min(lo, v), hi = std::max(hi, v);
+  }
+  return finite_bits(hi) && hi > lo * 1.0001f;
+}
+
+void blockout_uneven_scales(const GameObject &blockout, std::vector<BlockoutUnevenScale> &out) {
+  for (const GameObject *a = &blockout; a; a = a->parent)
+    if (blockout_scale_uneven(a->local().scale)) out.push_back({a->id, a != &blockout});
+  std::function<void(const GameObject &)> walk = [&](const GameObject &g) {
+    for (const GameObject *c : g.children) {
+      if (c->get<Blockout>()) continue;
+      if (has_piece_below(*c) && !has_own_geometry(*c) && blockout_scale_uneven(c->local().scale)) out.push_back({c->id, false});
+      walk(*c);
+    }
+  };
+  walk(blockout);
+}
+
 }  // namespace bl

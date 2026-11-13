@@ -161,7 +161,7 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"mode.edit_toggle", "Edit Mode On / Off", "Modes", CTX_SCENE},
       {"mode.sculpt_toggle", "Sculpt Mode On / Off", "Modes", CTX_SCENE},  // (task 0236; unbound: the palette, the Wheel, the Tools window)
       {"mode.paint_toggle", "Paint Mode On / Off", "Modes", CTX_SCENE},    // (task 0245)
-      {"tool.room", "Room Tool On / Off (Blockout)", "Tools", CTX_SCENE},  // (round 479: drag a rectangle or a circle, pull it up into a room)
+      {"tool.room", "Draw Piece Tool On / Off (Blockout)", "Tools", CTX_SCENE},  // (round 479: drag a rectangle or a circle, pull it up into a room)
       /* Task 0261: one brush grammar - the active brush (Sculpt, Paint, Weight Paint, Strokes, Scatter) answers the same keys. */
       {"brush.smaller", "Brush Smaller", "Brushes", CTX_SCENE},
       {"brush.larger", "Brush Larger", "Brushes", CTX_SCENE},

@@ -176,6 +176,16 @@ void Editor::blockout_last_rerun() {
     else bp->operation = std::max(0, std::min(2, o.op));
     /* (An arch is as deep along its Z as `height`: one the tool drew on a face grows from the face - round 495; base_up is 0 for any other.) */
     g->set_world_position(o.base_p + o.base_up * (bp->shape == 5 ? bp->height * 0.5f : blockout_floor_below_origin(*bp)));
+    if (o.turnable && o.turn != o.turn_done) {
+      /* Round 496: the Turn row. The sizes above are the unturned ones' numbers as they stand in the rows; a turn swaps a wedge's or stairs' footprint
+       * sizes in the piece and in the rows alike, and an arch that turns about its footprint's middle moves its feet - so the place it is remembered
+       * at moves too. */
+      const int quarters = o.turn - o.turn_done;
+      o.turn_done = o.turn;
+      blockout_turn_piece(*g, quarters);
+      if (bp->shape != 5 && (quarters & 1)) std::swap(o.a, o.b);
+      if (bp->shape == 5) o.base_p = g->world_position() - o.base_up * (bp->height * 0.5f);
+    }
   }
   edit_epoch::bump();  // (the Blockout's walk looks again)
   amend_last_step();
@@ -185,7 +195,8 @@ void Editor::blockout_last_rerun() {
 void Editor::draw_obj_last_panel(const Recti &view) {
   auto &u = ui_;
   ObjLastOp &o = obj_last_;
-  struct Row { const char *label; float *f; int *i; bool *b; float speed, mn, mx; int imn, imx; };
+  struct Row { const char *label; float *f; int *i; bool *b; float speed, mn, mx; int imn, imx; const char *const *words = nullptr; };  // (words: the int's choices by name, a dropdown)
+  static const char *const kOperations[] = {"Add", "Subtract", "Intersect"};
   std::vector<Row> rows;
   std::string title;
   if (o.kind == "primitive") {
@@ -214,18 +225,19 @@ void Editor::draw_obj_last_panel(const Recti &view) {
       rows.push_back({"Head", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Sill", &o.c, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
     }
-    else if (o.n == 6) rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2});  // (a mesh piece's numbers are its mesh's)
+    else if (o.n == 6) rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2, kOperations});  // (a mesh piece's numbers are its mesh's)
     else {
       if (o.n != 4) rows.push_back({o.n == 0 ? "Width" : "Radius", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       if (o.n == 5) rows.push_back({"Inner Radius", &o.b, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
       if (o.n == 0) rows.push_back({"Depth", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       if (o.n != 2) rows.push_back({o.n == 5 ? "Depth" : "Height", &o.c, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      if (o.turnable) rows.push_back({"Turn", nullptr, &o.turn, nullptr, 0, 0, 0, 0, 3});  // (round 496: quarter turns round the surface's normal, the footprint kept)
       if (o.flag) {
         rows.push_back({"Wall", &o.d, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
         rows.push_back({"Floor", &o.e, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
         rows.push_back({"Ceiling", &o.f, nullptr, nullptr, 0.01f, 0.0f, 1000.0f, 0, 0});
       }
-      else rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2});  // (0 Add, 1 Subtract, 2 Intersect)
+      else rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2, kOperations});  // (0 Add, 1 Subtract, 2 Intersect: words, round 496)
     }
   }
   else {
@@ -257,6 +269,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     if (u.record_buttons) u.button_rects[std::string("adjust:") + row.label] = fr;
     const ui::Id id = u.id(std::string("objlast_") + row.label);
     if (row.f) changed |= u.float_field(id, fr, *row.f, row.speed, row.mn, row.mx, "%.3g");
+    else if (row.i && row.words) changed |= u.combo(id, fr, *row.i, row.words, row.imx + 1);
     else if (row.i) changed |= u.int_field(id, fr, *row.i, row.imn, row.imx);
     else if (row.b) changed |= u.checkbox({fr.x, fr.y + u.px(2), rh - u.px(4), rh - u.px(4)}, *row.b);
   }

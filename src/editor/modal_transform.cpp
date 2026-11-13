@@ -67,6 +67,7 @@ bool Editor::transform_begin(int mode) {
       pivot += g->world_position();
       n++;
     }
+    blockout_scale_collect(selected_objects(true), t.blockout);  // (round 496, ADR 0135: a Scale of pieces, or of what holds them, goes into their numbers)
     if (GameObject *a = active_object()) t.local_rot = a->world_rotation();
     if (pivot_center_ && n) {
       /* The toolbar's Center: around the selection's bounds, like the gizmo. */
@@ -198,8 +199,22 @@ void Editor::transform_apply(const Mat4 &d) {
     else t.copy = mf->mesh;
     return;
   }
+  /* Round 496: a Scale writes the pieces' numbers (places move about the pivot, a turned piece grows along its own axes: it cannot shear); every
+   * other mode starts those objects from where they were, and moves them as a whole as before. */
+  const bool through = t.mode == 2 && !t.blockout.empty();
+  if (through) {
+    blockout_scale_apply(*scene_, t.blockout, d);
+    t.blockout_written = true;
+    edit_epoch::bump();  // (the numbers of a piece are no transform write: the Blockout's walk looks again)
+  }
+  else if (t.blockout_written) {  // (G or R after S: once, not every frame)
+    blockout_scale_restore(*scene_, t.blockout);
+    t.blockout_written = false;
+    edit_epoch::bump();
+  }
   for (auto &[id, w0] : t.objects)
-    if (GameObject *g = scene_->find(id)) g->set_world_matrix(d * w0);
+    if (GameObject *g = scene_->find(id))
+      if (!(through && t.blockout.has(id))) g->set_world_matrix(d * w0);
 }
 
 void Editor::transform_finish(bool keep) {
@@ -232,6 +247,7 @@ void Editor::transform_finish(bool keep) {
     return;
   }
   transform_apply(Mat4::identity());  // everything back where it was
+  if (!t.edit && !t.blockout.empty()) blockout_scale_restore(*scene_, t.blockout);  // (and those it can give back exactly, not through a matrix)
   if (t.edit) {
     if (GameObject *g = scene_->find(t.obj))
       if (MeshFilter *mf = g->get<MeshFilter>()) mf->mesh = t.mesh_before;

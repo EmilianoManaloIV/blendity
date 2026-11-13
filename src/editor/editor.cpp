@@ -1528,15 +1528,7 @@ void Editor::draw_toolbar(const Recti &r) {
     u.tooltip(strprintf("The move step for a Ctrl drag (and the magnet). A turn snaps to %g degrees (Preferences).", snap_rot_));
     x += sw + u.px(4);
   }
-  {  /* Round 479: the Room tool (Blockout), a switch beside the snapping it uses. */
-    const std::string k = key("tool.room");
-    const std::string tip = strprintf("Room Tool%s%s%s\nDrag a rectangle on the ground or a face (a circle with the Circle option), move the mouse for the height and click: "
-                                      "a room of the active Blockout stands there. Ctrl: no snapping. Esc leaves.",
-                                      k.empty() ? "" : " (", k.c_str(), k.empty() ? "" : ")");
-    if (u.icon_button({x + bh + u.px(4), y, bh, bh}, Icon::Cube, room_.active, tip.c_str())) set_room_tool(!room_.active);
-    if (u.record_buttons) u.button_rects["toolbar:room"] = Recti{x + bh + u.px(4), y, bh, bh};
-    x += bh + u.px(4);
-  }
+  /* (Round 496: the Draw Piece tool's button is no longer here - a niche tool; it lives in Modeling Tools > Create > Blockout, on Shift+R and in the menu.) */
   x += bh + u.px(14);
   if (edit_mode_) {
     int ew = u.font.text_width("Vertex") + bh + u.px(10);

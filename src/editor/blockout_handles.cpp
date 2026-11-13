@@ -333,6 +333,7 @@ bool Editor::blockout_handles_update(const Recti &view) {
   blockout_handle_view(*g, hs);
   const int hot = blockout_handle_hot(view, *g, hs);
   if (hot < 0 || !in.pressed[0] || in.alt() || u.any_active()) return hot >= 0;
+  if (gizmo_scale_handle_hot()) return true;  // (round 496: the Scale tool's handle and a piece's own under the cursor: the Scale handle takes the press)
   BlockoutDrag d;
   if (!blockout_handle_begin(*g, hs[(size_t)hot], d)) return true;
   const Ray ray = scene_r3d_.screen_ray((float)(in.mx - view.x), (float)(in.my - view.y));
