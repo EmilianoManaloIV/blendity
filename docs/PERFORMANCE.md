@@ -3670,3 +3670,483 @@ request #383's first run, 2,161 tests, no compiler cache yet (ADR 0133).
 The whole run: 36 minutes, started once a push (before: about 106 minutes, started twice). The sanitizer check is
 now its build plus its slowest shard; the build is the larger part, and the one the compiler cache is for. What
 would cut Windows further: linking the three programs at once, or the tests and the editor as two build jobs.
+
+## Pass 22: Record, scrubbing and the Animation window (round 472, task 0448)
+
+Measured first, from round 471's runs (the owner's avatar in the owner's world, 275 bones keyed): Record cost 10.5 ms
+a frame and wrote the whole clip out as text once a frame; on a scrub the clip's sampling and apply were 1.4 ms and
+the Animation window 1.5 to 1.9 ms; the constraints 0.2 ms a frame (46 to 92 walks by name), under the 0.3 ms line
+the task set for building the rig registry - it is not built. On the stand-in the hand was drawn up to 16.5 mm behind
+its IK target.
+
+The owner's avatar in the owner's world, measured locally (a window on the card, ms a frame). Before: round 471's
+run of 2026-11-11; after: round 472 on main e978001a, 2026-11-12, the machine quiet but for the bench's own Unity
+import and Linux probe:
+
+| part of a frame | round 471 | round 472 |
+|---|---|---|
+| Record, an IK target dragged: `record` | 10.54 | 0.85 |
+| ... clip serialisations a frame | 1 | 0 |
+| a scrub, Scene view only: `clip` (sampling) | 0.64 | 0.05 |
+| ... `anim apply` | 0.77 | 0.17 |
+| ... `window animation` | 1.49 | 0.41 |
+| a scrub, Scene + Game view: `window animation` | 1.90 | 0.67 |
+| the clip playing: `clip` + `anim apply` | 1.35 | 0.19 |
+| an IK target dragged: `constraints` (the second solve) | 0.24 | 0.48 |
+| ... walks by name a frame | 46 | 92 |
+
+| row | round 471 | round 472 |
+|---|---|---|
+| IK: the target moved, Record on | 41.3 | 25.3 |
+| IK: the left hand's target moved | 23.4 | 23.7 |
+| IK: the left foot's target moved | 22.2 | 23.2 |
+| scrubbing, Scene view only | 50.0 | 49.4 |
+| scrubbing, Scene + Game view | 47.4 | 47.3 |
+| the clip playing, Scene view only | 49.8 | 50.0 |
+| the clip playing, Scene + Game view | 48.9 | 47.9 |
+| FK: the chest turned | 38.3 | 41.8 |
+| Puppet: the hips' handle | 55.3 | 56.2 |
+| still: the Scene view | 5.7 | 6.6 |
+| a prop of the world moved | 8.6 | 11.2 |
+
+Read with care: the two runs are a day apart and `main` took Pass 23's and Pass 24's rounds in between, so the rows
+this round does not touch (the last four) show what a day and those rounds move, not this round. Rows are good to
+about a fifth.
+
+**Not reached:** a scrub or a playing clip at what the pose costs. What this round removed is 2.3 ms of a 50 ms
+frame; the rest is the meshes moved in place, their normals and uploads, and the card (rounds 469 to 471's ground,
+and round 474's for Play).
+
+The stand-in (`blendity_stress --only posing`, `--only animation`), main e978001a against round 472 one after the
+other on a quiet machine:
+
+| | main | round 472 |
+|---|---|---|
+| the hand behind its IK target during a drag (35 frames) | up to 16.512 mm, on 30 frames | 0.000 mm, on 0 frames |
+| `AnimationClip::find`, a 201-track clip (ms) | 0.7436 (over its budget) | 0.0092 |
+| a scrub, Scene + Game view, alone / in the world | 68.3 / 88.2 | 68.1 / 88.5 |
+| a scrub, Scene view only, alone / in the world | 46.8 / 59.4 | 46.1 / 59.4 |
+| the Move gizmo on the left hand's IK target, alone / in the world | 9.5 / 14.6 | 9.5 / 14.6 |
+| G on the left hand's IK target, alone / in the world | 12.3 / 20.0 | 12.2 / 20.6 |
+| a Puppet handle, alone / in the world | 50.3 / 60.5 | 54.6 / 62.4 |
+
+The stand-in's rows for a playing clip are not steady enough to compare: "the clip playing, Scene + Game view, alone"
+read 20.4, 16.7, 30.5 and 30.4 ms in four runs of this night, two builds, and the check of round 472 against its own
+baseline flags four such rows. The saved baseline is round 472's.
+
+## Pass 22: the pose solver on a pose buffer (round 473, task 0449)
+
+What a Puppet drag frame did before: the whole start pose into the scene, the joint list built again, then 32 to 92
+iterations that each wrote two transforms per bone into the scene. Round 473 solves on a buffer and writes each
+changed joint once.
+
+The stand-in (`blendity_stress --only posing`), round 472's build against round 473's, one after the other on a
+quiet machine (a window on the card, ms a frame):
+
+| a Puppet handle dragged (the left hand, AutoPosing on) | round 472 | round 473 |
+|---|---|---|
+| the solver | 1.95 | 1.11 |
+| the solve with what is around it (`autoposing`) | 2.07 | 1.28 |
+| the Puppet controls' part of the frame | 3.56 | 2.87 |
+| scene writes by the solver a frame | two a bone an iteration, 31 iterations | 44.5 |
+| the frame, alone | 50.3 | 55.5 |
+| the frame, in its world | 63.4 | 57.9 |
+| the first Puppet drag, its longest frame | 102.8 | 110.1 |
+
+**Not reached:** "dragging a Puppet handle costs about what turning one bone costs". The solve was 2 ms of a 50 ms
+frame; the frame is the whole body moving - skinning, normals, uploads - as when the chest is turned (34.9 ms alone).
+The frame rows moved by less than a row is good for (about a fifth), in both directions. The first drag's longest
+frame is still over 100 ms: the body model on a job was not built.
+
+**No early exit.** The pose a drag reaches depends on the whole schedule of iterations: ended at 24 of 32, bones are
+up to 122 mm and 15 degrees from where they end today; at 16, up to 323 mm; at 8, up to 515 mm (ten drags on the test
+rig). So the iteration count stays (30.9 a frame on the stand-in, as before).
+
+The owner's avatar, measured locally. Its arms carry support bones and were not found before; now Puppet Posing has
+its hand handles: the left hand's handle dragged costs 49.7 ms a frame headless (the solver 2.6 ms, 30.9 iterations,
+219 scene writes a frame). The solver's part for the hips' handle is unchanged (4.65 -> 4.91 ms): on about 200
+joints an iteration is the arithmetic per joint, which the buffer does not change.
+
+**Not measured:** the owner's avatar in the owner's world against round 472. On 2026-11-12 Unity's batch runs ended
+with exit 198 (no licence: "Access token is unavailable"), so the world was imported without Unity's lightmaps and
+the avatar without Unity's part numbers - another scene than round 472's run drew. In that state neither build
+steps a spring chain in Play (round 472's build was run again to check: 0 chains as well), so the rows that differ
+are the import's, not this round's. The piece is to be run again once Unity has its licence.
+
+## Pass 22: Play with the springs, pins and trails (round 474, task 0450)
+
+Measured first, on the stand-in with round 473's build: a part was built only when it cost over 0.3 ms a frame or sat
+over its budget. Play with the springs built 20 render meshes whole on every frame; a playing clip builds none. The
+cause was the scene's own physics step, which asked every mesh for its bounds before the springs had moved the pose.
+
+The stand-in (`blendity_stress --only posing`), round 473's build against round 474's, one after the other on a
+quiet machine (a window on the card; ms a frame, the longest frame in brackets):
+
+| row | alone, 473 | alone, 474 | in the world, 473 | in the world, 474 |
+|---|---|---|---|---|
+| Play with the springs | 82.3 (93) | 44.5 (61) | 101.5 (108) | 69.8 (81) |
+| the clip playing, Scene + Game view | 35.9 (88) | 36.2 (91) | 39.5 (114) | 39.4 (114) |
+| a Puppet handle (the left hand, AutoPosing on) | 52.4 (59) | 52.6 (63) | 61.5 (79) | 62.0 (84) |
+| the Move gizmo on the left hand's IK target | 10.1 (11) | 10.1 (13) | 16.6 (24) | 17.9 (22) |
+
+| Play with the springs, alone: where the frame went (ms a frame) | round 473 | round 474 |
+|---|---|---|
+| evaluations a frame (a count) | 27.0 | 10.9 |
+| meshes moved in place (normals and tangents in it) | 13.2 | 8.2 |
+| tangents built whole | 5.3 | 0.0 |
+| mesh uploads | 28.1 | 17.0 |
+| the interface's part, which held the physics step | 18.9 | 5.0 |
+| the springs' own step | 4.7 | 3.8 |
+
+| once-only costs (ms; budget 100) | round 473 | round 474 |
+|---|---|---|
+| entering Play | 83.5 | 70.6 |
+| the first Preview on | 79.0 | 76.2 |
+| the first Record on | 69.0 | 66.6 |
+| the first Puppet drag, its longest frame | 104.4 | 103.2 |
+| AutoPhysics (budget 50) | 58.9 | 58.5 |
+
+The drag with trails, onion skins and the zoetrope on (Record on, in the world): 31.8 -> 28.7 ms a frame, its trail
+part 2.16 -> 2.10 ms. That is no change a row can show: the bench keys on every frame of the drag, and the saving is
+for an edit of one key in a long clip.
+
+Not reached: Play with the springs is still over its budget; with a rigid body in the scene's own physics the meshes
+are built whole as before; trails still pose the live scene to sample.
+
+The owner's avatar in the owner's world (measured locally), round 472's run against round 474's - rounds 473 and 474
+together, both with Unity signed in (round 473's own run had no Unity licence and is not comparable):
+
+| row (a window on the card, ms a frame) | round 472 | round 474 |
+|---|---|---|
+| Play with the springs | 45.5 | 45.0 |
+| Puppet: the hips' handle | 56.2 | 52.5 |
+| Puppet: the head's handle | 55.5 | 52.2 |
+| FK: the chest turned | 41.8 | 40.9 |
+| the clip playing, Scene view only | 50.0 | 50.3 |
+| IK: the target moved, Record on | 25.3 | 25.0 |
+
+Headless, Play with the springs reads 67.7 -> 55.0 ms there. The avatar's Play frame in a window did not change: its
+frame is the card's work and presenting (g-buffer, lighting and presenting 33 of 45 ms).
+
+## Pass 22 in one table (round 475, task 0451)
+
+Before: round 468's baseline (the pass's first build). After: round 474's build, the pass's last (round 475 changes a
+lesson's text only), taken in one quiet session on 2026-11-12. The stand-in is `blendity_stress --only posing`
+(292 bones, 15 skinned meshes, about 140,000 triangles; "in the world" stands it in the world stand-in). The goal is
+16.7 ms a frame with the views on the card; ADR 0105's budgets are 50 ms for an operation and 100 ms for a once-only
+cost. A row is good to about a fifth. The tables hold the card's rows of the avatar alone and in its world; the
+CPU rows, the at-rest rows and the micro rows are in `stress/results/baseline.md` as they were. The world alone, on
+the card: orbiting 9.1 -> 8.4 ms, a prop moved 8.4 -> 5.4 ms (both met).
+
+| row (a window on the card; ms a frame, the longest frame in brackets) | alone, round 468 | alone, round 474 | 16.7 ms | in the world, round 468 | in the world, round 474 | 16.7 ms |
+|---|---|---|---|---|---|---|
+| idle | 2.5 (3) | 1.8 (3) | met | 5.2 (25) | 4.6 (20) | met |
+| orbiting the Scene view | 7.0 (7) | 3.3 (4) | met | 15.5 (17) | 10.4 (12) | met |
+| the Rotate gizmo on the chest (FK) | 49.9 (52) | 35.3 (38) | not met | 65.2 (70) | 39.7 (41) | not met |
+| the Move gizmo on the left hand's IK target | 48.4 (55) | 10.1 (13) | met | 66.5 (76) | 17.9 (22) | not met |
+| the Move gizmo on the left elbow's pole (the arm bent first) | 52.9 (60) | 10.9 (13) | met | 68.8 (73) | 19.6 (22) | not met |
+| a Puppet handle (the left hand, AutoPosing on) | 63.1 (68) | 52.6 (63) | not met | 78.4 (83) | 62.0 (84) | not met |
+| G on the left hand's IK target | 55.8 (70) | 12.9 (15) | met | 75.5 (88) | 24.7 (30) | not met |
+| R on the chest (the Blender keymap) | 59.4 (63) | 44.1 (48) | not met | 79.7 (83) | 61.0 (66) | not met |
+| a scrub on the Animation window's ruler, Scene + Game view | 93.6 (120) | 70.0 (94) | not met | 123.0 (150) | 90.9 (124) | not met |
+| the clip playing, Scene + Game view | 42.1 (123) | 36.2 (91) | not met | 82.4 (166) | 39.4 (114) | not met |
+| a scrub on the Animation window's ruler, Scene view only | 55.1 (75) | 46.4 (63) | not met | 67.9 (104) | 59.9 (83) | not met |
+| the clip playing, Scene view only | 18.9 (68) | 28.1 (60) | not met | 31.8 (86) | 36.0 (75) | not met |
+| Play with the springs | 86.7 (101) | 44.5 (61) | not met | 107.9 (116) | 69.8 (81) | not met |
+| a prop moved with the Move gizmo | - | - | - | 15.5 (18) | 7.1 (8) | met |
+
+"The clip playing" rows mean frames over a clip keyed at 24 a second, so some frames pose nothing; the Scene-view-only
+row reads one of two values from run to run (18.9 or 28.1 ms alone) and is not a regression.
+
+| in the world, with | on | round 468 | round 474 | 16.7 ms |
+|---|---|---|---|---|
+| Record on | the IK-target drag | 80.1 (90) | 27.5 (37) | not met |
+| Preview off | the IK-target drag | 69.4 (72) | 26.4 (31) | not met |
+| the Game view beside the Scene view | the IK-target drag | 67.6 (78) | 27.4 (31) | not met |
+| the Game view beside the Scene view | the clip playing (the Scene view alone unless the setting adds a view) | 89.8 (161) | 42.5 (134) | not met |
+| the Game view beside the Scene view and Other Views Follow Drags on | the IK-target drag | 139.6 (152) | 45.6 (58) | not met |
+| trails, onion skins and the zoetrope (Record on) | the IK-target drag | 86.3 (120) | 28.7 (32) | not met |
+| trails, onion skins and the zoetrope (Record on) | a scrub | 131.7 (183) | 98.1 (151) | not met |
+| Centre of Mass shown | the IK-target drag | 74.2 (86) | 30.0 (41) | not met |
+| Centre of Mass shown | the clip playing (the Scene view alone unless the setting adds a view) | 24.4 (88) | 22.3 (82) | not met |
+| the Avatar window open | the IK-target drag | 77.8 (96) | 29.6 (38) | not met |
+| the Avatar window open | the clip playing (the Scene view alone unless the setting adds a view) | 32.1 (85) | 36.1 (76) | not met |
+| the Inspector on the Armature | the clip playing (the Scene view alone unless the setting adds a view) | 22.2 (90) | 36.4 (76) | not met |
+| the Inspector on a skinned mesh | the clip playing (the Scene view alone unless the setting adds a view) | 22.0 (86) | 36.8 (77) | not met |
+| the Rigging window open (its Walk section) | the IK-target drag | 75.4 (101) | 27.9 (34) | not met |
+| the Rigging window open (its Walk section) | the clip playing (the Scene view alone unless the setting adds a view) | 22.3 (88) | 37.5 (82) | not met |
+| Realtime GI on, Lighting Updates Automatic | the IK-target drag | 104.1 (124) | 70.1 (73) | not met |
+| Realtime GI on, Lighting Updates Manual | the IK-target drag | 68.8 (76) | 18.9 (38) | not met |
+| Live Link with a client | the IK-target drag | 78.3 (85) | 31.9 (36) | not met |
+| Live Link with a client | the clip playing (the Scene view alone unless the setting adds a view) | 49.9 (99) | 40.0 (88) | not met |
+| surface snapping (Ctrl+Shift held) | the IK-target drag | 73.3 (76) | 29.3 (32) | not met |
+| an F12 Live Preview | the IK-target drag | 78.5 (115) | 30.4 (48) | not met |
+| a path-traced view open (Camera Preview rendered, locked to the Main Camera) | the IK-target drag | 850.6 (878) | 829.2 (969) | not met |
+
+| once-only costs and operations (ms) | round 468 | round 474 | budget | |
+|---|---|---|---|---|
+| the first posed frame after the avatar is built (one bone turned, one frame) | 56.4 | 46.0 | 100.0 | met |
+| the second posed frame (one bone turned, one frame) | 43.7 | 34.9 | 100.0 | met |
+| the first Puppet drag, its press frame | 4.7 | 3.1 | 100.0 | met |
+| the first Puppet drag, its first move frame | 2.5 | 1.7 | 100.0 | met |
+| the first Puppet drag, its longest frame (the body model, the rig analysis, the pose prior) | 103.7 | 103.2 | 100.0 | not met |
+| the second Puppet drag, its press frame | 5.3 | 3.4 | 100.0 | met |
+| the second Puppet drag, its first move frame | 2.8 | 1.8 | 100.0 | met |
+| the second Puppet drag, its longest frame | 66.6 | 69.1 | 100.0 | met |
+| the first Preview on (the command and its frame) | 110.3 | 76.2 | 100.0 | met |
+| the first Record on (the command and its frame) | 99.8 | 66.6 | 100.0 | met |
+| entering Play (the command and its frame) | 97.2 | 70.6 | 100.0 | met |
+| leaving Play (the command and its frame) | 10.7 | 5.1 | 100.0 | met |
+| Walk Cycle (walk cycle) | 31.1 | 27.6 | 50.0 | met |
+| Retarget the clip onto a second rig (anim retarget Humanoid) | 40.4 | 10.7 | 50.0 | met |
+| AutoPhysics (body physics) | 86.0 | 58.5 | 50.0 | not met |
+| the ragdoll (body ragdoll show) | 42.3 | 12.4 | 50.0 | met |
+| FK / IK switch (autopose fk larm) | 3.3 | 2.7 | 50.0 | met |
+| FK / IK switch back (autopose ik larm) | 3.3 | 2.6 | 50.0 | met |
+| Match IK to FK (autopose match larm) | 3.2 | 2.5 | 50.0 | met |
+
+### Does the world matter?
+Round 468: yes - 15 to 20 ms on a gizmo drag or a Puppet handle, 13 on a scrub or a clip in the Scene view, 21 to
+40 where the Game view or Play drew it too (the world's instances were gathered again each frame the character
+moved). Round 474: the world adds what its own picture costs on the card - 4 to 9 ms on a gizmo drag or a Puppet
+handle (IK target 10.1 -> 17.9 ms, chest 35.3 -> 39.7, Puppet 52.6 -> 62.0), 12 to 17 on G and R, 8 to 14 on a scrub
+or a clip in the Scene view, 3 on the clip with the Game view beside it, 21 to 25 on a scrub with both views and in
+Play (44.5 -> 69.8).
+
+### The frame's parts, before and after
+Parts nest and overlap; they are not added up. "scene view" or "game view" is the whole view, "gpu path" the card's
+share of it, "mesh uploads" the moved meshes sent to the card, "in place" positions, normals and tangents written into
+the kept render meshes, "render meshes built whole" what could not follow in place (the outline shells).
+
+| an FK drag (the Rotate gizmo on the chest), alone: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 47.76 | 33.43 |
+| draw items | 25.07 | 18.82 |
+| gpu path | 13.28 | 12.30 |
+| instances | 12.12 | 11.21 |
+| mesh uploads | 11.92 | 11.05 |
+| render meshes built whole | 10.53 | 7.85 |
+| in place | 8.23 | 8.33 |
+| skin keys | 6.40 | 0.21 |
+| overlays | 4.71 | 1.32 |
+
+| an IK drag (the left hand's target), alone: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 44.84 | 8.24 |
+| draw items | 20.60 | 3.44 |
+| gpu path | 14.31 | 3.64 |
+| instances | 12.78 | 2.63 |
+| mesh uploads | 12.55 | 2.58 |
+| render meshes built whole | 10.69 | 1.49 |
+| skin keys | 6.54 | 0.18 |
+| overlays | 4.87 | 0.33 |
+| evaluations | 3.80 | 0.23 |
+
+| a Puppet drag (the left hand), alone: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 56.81 | 47.46 |
+| draw items | 27.44 | 24.59 |
+| gpu path | 19.90 | 20.06 |
+| instances | 16.08 | 17.83 |
+| mesh uploads | 15.87 | 17.62 |
+| in place | 10.72 | 11.08 |
+| render meshes built whole | 10.40 | 10.04 |
+| skin keys | 6.35 | 0.18 |
+| normals | 4.86 | 4.84 |
+
+| a scrub, Scene view only, alone: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 49.78 | 42.49 |
+| draw items | 22.35 | 19.32 |
+| gpu path | 21.19 | 20.97 |
+| instances | 17.89 | 17.75 |
+| mesh uploads | 17.65 | 17.59 |
+| in place | 8.69 | 8.64 |
+| render meshes built whole | 8.52 | 7.99 |
+| skin keys | 5.39 | 0.18 |
+| normals | 3.94 | 3.75 |
+
+| a played clip, Scene view only, alone: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 15.53 | 25.73 |
+| gpu path | 6.30 | 12.72 |
+| draw items | 6.65 | 11.57 |
+| instances | 5.31 | 10.77 |
+| mesh uploads | 5.24 | 10.67 |
+| in place | 2.59 | 5.18 |
+| render meshes built whole | 2.52 | 4.77 |
+| ui | 3.41 | 2.42 |
+| normals | 1.19 | 2.23 |
+
+| Play with the springs, alone: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| game view | 64.77 | 39.52 |
+| draw items | 41.44 | 19.51 |
+| in place | 26.96 | 8.18 |
+| ui | 21.91 | 4.98 |
+| gpu path | 19.52 | 19.26 |
+| instances | 17.71 | 17.13 |
+| mesh uploads | 17.48 | 16.96 |
+| normals | 11.92 | 3.62 |
+| render meshes built whole | 10.80 | 7.45 |
+
+| an FK drag (the Rotate gizmo on the chest), in the world: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 62.06 | 36.91 |
+| draw items | 25.83 | 18.97 |
+| gpu path | 24.57 | 14.72 |
+| instances | 15.11 | 11.53 |
+| mesh uploads | 14.03 | 11.15 |
+| render meshes built whole | 10.72 | 7.73 |
+| in place | 8.40 | 8.25 |
+| skin keys | 6.57 | 0.21 |
+| overlays | 5.04 | 1.57 |
+
+| an IK drag (the left hand's target), in the world: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 61.71 | 15.24 |
+| gpu path | 31.04 | 9.47 |
+| draw items | 19.97 | 3.70 |
+| instances | 17.56 | 3.36 |
+| mesh uploads | 16.60 | 3.08 |
+| render meshes built whole | 10.18 | 1.45 |
+| skin keys | 6.17 | 0.18 |
+| card render call | - | 5.41 |
+| overlays | 4.69 | 0.53 |
+
+| a Puppet drag (the left hand), in the world: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 70.83 | 55.40 |
+| gpu path | 33.57 | 26.98 |
+| draw items | 26.58 | 24.77 |
+| instances | 16.56 | 19.30 |
+| mesh uploads | 15.64 | 18.84 |
+| in place | 10.46 | 11.03 |
+| render meshes built whole | 9.77 | 9.95 |
+| card render call | - | 6.88 |
+| skin keys | 6.14 | 0.18 |
+
+| a scrub, Scene view only, in the world: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 60.85 | 54.56 |
+| gpu path | 33.00 | 32.26 |
+| draw items | 21.20 | 19.54 |
+| instances | 17.27 | 18.85 |
+| mesh uploads | 16.44 | 18.50 |
+| card render call | - | 12.47 |
+| in place | 8.22 | 8.66 |
+| render meshes built whole | 7.97 | 7.79 |
+| card lighting | - | 7.46 |
+
+| a played clip, Scene view only, in the world: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| scene view | 26.85 | 32.59 |
+| gpu path | 14.16 | 18.88 |
+| draw items | 9.21 | 11.80 |
+| instances | 7.66 | 10.97 |
+| mesh uploads | 7.30 | 10.76 |
+| card render call | - | 7.59 |
+| in place | 3.58 | 5.21 |
+| ui | 4.92 | 3.36 |
+| render meshes built whole | 3.44 | 4.81 |
+
+| Play with the springs, in the world: the frame's parts (ms, nested, not to add up) | round 468 | round 474 |
+|---|---|---|
+| game view | 85.46 | 63.64 |
+| draw items | 40.50 | 22.29 |
+| gpu path | 39.63 | 39.71 |
+| in place | 26.19 | 9.08 |
+| ui | 22.40 | 6.17 |
+| instances | 16.50 | 20.17 |
+| mesh uploads | 15.54 | 19.75 |
+| card render call | - | 18.85 |
+| card lighting | - | 13.77 |
+
+### The owner's content (measured locally)
+The owner's avatar in the owner's world, round 468's run against round 474's (both with Unity's lightmaps and part
+numbers):
+
+| the owner's avatar in the owner's world (a window on the card, ms a frame) | round 468 | round 474 | 16.7 ms |
+|---|---|---|---|
+| still: the Scene view | 7.9 | 6.3 | met |
+| orbiting the Scene view | 9.6 | 9.2 | met |
+| a prop of the world moved | 19.5 | 11.7 | met |
+| the whole avatar moved (its root selected) | 82.8 | 11.5 | met |
+| FK: the chest turned | 81.1 | 40.9 | not met |
+| FK: an upper leg turned | 58.1 | 21.6 | not met |
+| FK: an upper arm turned | 9.0 | 21.7 | not met |
+| Puppet: the hips' handle | 90.6 | 52.5 | not met |
+| Puppet: the head's handle | 90.5 | 52.2 | not met |
+| Puppet: the left hand's handle | 8.7 | 6.4 | not met (the row did not drag: see below) |
+| scrubbing, Scene view only | 103.9 | 50.0 | not met |
+| the clip playing, Scene view only | 105.5 | 50.3 | not met |
+| scrubbing, Scene + Game view | 173.7 | 47.4 | not met |
+| the clip playing, Scene + Game view | 191.8 | 51.8 | not met |
+| Play with the springs | 108.4 | 45.0 | not met |
+| IK: the left hand's target moved | 61.7 | 23.9 | not met |
+| IK: the left foot's target moved | 66.1 | 22.6 | not met |
+| IK: the target moved, Record on | 75.1 | 25.0 | not met |
+| IK: the clip playing, Scene view only | 110.2 | 50.7 | not met |
+
+"FK: an upper arm turned" did not drag in round 468's window run (9.0 ms is a still frame's time). "Puppet: the left
+hand's handle" drags in neither window run; the handle exists since round 473 and headless its drag is 50.3 ms a
+frame: not met.
+
+The owner's avatar alone:
+
+| the owner's avatar alone (a window on the card, ms a frame) | round 468 | round 474 | 16.7 ms |
+|---|---|---|---|
+| still: the Scene view | 3.8 | 3.9 | met |
+| orbiting the Scene view | 3.9 | 3.7 | met |
+| the whole avatar moved (its root selected) | 50.7 | 5.7 | met |
+| FK: the chest turned | 51.2 | 28.6 | not met |
+| FK: an upper leg turned | 33.8 | 12.0 | met |
+| FK: an upper arm turned | 3.9 | 11.4 | met |
+| Puppet: the hips' handle | 56.4 | 32.3 | not met |
+| Puppet: the head's handle | 67.8 | 33.4 | not met |
+| Puppet: the left hand's handle | 4.2 | 32.5 | not met |
+| scrubbing, Scene view only | 75.5 | 31.7 | not met |
+| the clip playing, Scene view only | 77.6 | 32.5 | not met |
+| scrubbing, Scene + Game view | 140.4 | 33.4 | not met |
+| the clip playing, Scene + Game view | 161.2 | 34.1 | not met |
+| Play with the springs | 73.8 | 26.8 | not met |
+| IK: the left hand's target moved | 4.0 | 3.8 | met |
+| IK: the left foot's target moved | 43.2 | 12.2 | met |
+| IK: the target moved, Record on | 4.0 | 4.5 | met |
+| IK: the clip playing, Scene view only | 81.2 | 33.3 | not met |
+
+Rows that read a still frame's time (about 4 ms) did not drag in that window run and say nothing: the left hand's IK
+target with and without Record in both rounds, the upper arm and the left hand's Puppet handle in round 468. The leg's
+rows stand for an IK drag: 43.2 -> 12.2 ms.
+
+The owner's world alone:
+
+| the owner's world alone (a window on the card, ms a frame) | round 468 | round 474 | 16.7 ms |
+|---|---|---|---|
+| still: the Scene view | 8.3 | 5.2 | met |
+| orbiting the Scene view | 8.2 | 7.2 | met |
+| a prop of the world moved | 12.3 | 5.8 | met |
+
+### What is left, and the options
+A whole-body frame on the stand-in alone (the chest turned 35.3 ms, a Puppet handle 52.6 ms, a scrub 46.4 ms),
+except where a row names another setup:
+
+| what is left in the frame | ms | option | what it would save (an estimate from the parts, not measured) |
+|---|---|---|---|
+| the moved meshes sent to the card whole (19 to 26 a frame) | 11 to 18 | skinning on the card: the card deforms the rest mesh from the bone matrices; nothing is sent but the matrices | all of it |
+| positions, normals and tangents moved on the CPU | 8 to 11 | the same: normals and tangents come from the skinned frame on the card | all of it on frames nothing asks the CPU for the shape; picking, bounds, snapping, the path tracer and exports ask on demand |
+| outline shells built whole | 7 to 10 | shells follow in place like their meshes (a round or two), or are drawn from the card's skinned mesh | 6 to 9 |
+| the card's own picture (g-buffer, lighting, presenting): 1 to 2 alone; 7 to 12 on the stand-in in its world; about 33 of the 45 to 52 on the owner's avatar in the owner's world, in a window | 1 to 33 | a cheaper view while posing: outlines, shadows or probes off while the mouse is down - changes the picture during a drag | nothing alone; a part of the 7 to 12 and of the 33, not measured: which of the three is switched off decides it, and one headless run with each off would say |
+| a second view of the character (the Game view beside the Scene view) | 24 on a scrub | one window's redraw at a time (Pass 19's open item), or the second view at half rate while dragging | up to the 24 |
+| the full-body solver and the Puppet controls | 2.5 | none proposed: an early exit changes the pose (round 473) | - |
+| the springs' own step in Play | 3.8 | its three scans of the scene from a kept list; the step on a job | 2 to 3 |
+
+With skinning on the card and the shells in place, the estimate for a whole-body frame alone is 8 to 15 ms (from 35
+to 53; what the card spends deforming is not in it); skinning on the card alone leaves 16 to 24 ms, and no other
+single option brings it under 16.7 ms. On the owner's avatar in the owner's world a window frame is mostly the
+card's picture, so there the cheaper view (or a faster picture) weighs as much as the skinning. The IK drags are met alone (10 to 13 ms) and
+miss in the world by 1 to 8 ms: there the cheaper view or the shells would do.
+
+Still over an ADR 0105 budget: the first Puppet drag's longest frame (103 ms against 100: the body model, built on
+the frame; a job would take it off), AutoPhysics (58 ms against 50), the scrub with trails, onion skins and the
+zoetrope (98 ms a frame), and the drag beside a path-traced view (829 ms: the path tracer restarts on every pose).

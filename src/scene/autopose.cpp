@@ -3,6 +3,7 @@
 #include "spring_bones.h"
 #include "pose_counts.h"
 #include "../core/core.h"
+#include "../core/edit_epoch.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -74,8 +75,8 @@ bool hinge_like(const GameObject &g) {
 
 }  // namespace
 
-Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::vector<GameObject *> &pins, const body::Body *body, const Settings &s) {
-  BL_ZONE("autopose solve");
+Result solve_reference(GameObject &armature, const std::vector<Goal> &goals, const std::vector<GameObject *> &pins, const body::Body *body, const Settings &s) {
+  BL_ZONE("autopose solve (reference)");
   Result res;
   const auto t0 = std::chrono::steady_clock::now();
   /* The joints: every body bone under the armature, parents first, each with the index of its nearest joint above. */
@@ -327,8 +328,438 @@ Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::ve
     res.balance = std::sqrt((c.x - support.x) * (c.x - support.x) + (c.z - support.z) * (c.z - support.z));
   }
   res.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  pose_add(PoseStat::Solver, res.ms);  // (round 468: a solve that reached its loop, and the iterations it ran)
-  pose_add_solver_iterations((uint64_t)std::max(0, (int)res.iterations));
+  return res;  // (round 473: the reference counts nothing - the Profiler's solver rows are the buffer solver's)
+}
+
+/* ------------------------------------------------------------ the pose buffer (round 473, ADR 0127) */
+
+namespace {
+
+bool same_turn(const Quat &a, const Quat &b) { return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w; }
+
+/* Forward kinematics over the nodes this solve reads: the same products, in the same order, as
+ * GameObject::world_matrix() and world_rotation() make. */
+void rig_fk(Rig &r) {
+  for (Rig::Node &n : r.nodes) {
+    if (!n.used) continue;
+    const Mat4 local = Mat4::trs(n.local.position, n.local.rotation, n.local.scale);
+    if (n.parent >= 0) {
+      const Rig::Node &p = r.nodes[(size_t)n.parent];
+      n.world = p.world * local, n.turn = normalize(p.turn * n.local.rotation);
+      continue;
+    }
+    n.world = r.has_root ? r.root_world * local : local;
+    n.turn = r.has_root ? normalize(r.root_turn * n.local.rotation) : n.local.rotation;
+  }
+}
+
+/* A node's world turn from the locals as they are this instant (the held ends are turned one after another, and one
+ * may hang under another). */
+Quat rig_turn_now(const Rig &r, int node) {
+  const Rig::Node &n = r.nodes[(size_t)node];
+  if (n.parent >= 0) return normalize(rig_turn_now(r, n.parent) * n.local.rotation);
+  return r.has_root ? normalize(r.root_turn * n.local.rotation) : n.local.rotation;
+}
+
+/* What set_world_rotation(q) leaves as a node's local turn. */
+Quat rig_local_for(const Rig &r, int node, const Quat &parent_turn, const Quat &q) {
+  const bool parented = r.nodes[(size_t)node].parent >= 0 || r.has_root;
+  return normalize(parented ? parent_turn.conjugate() * q : q);
+}
+
+Vec3 rig_place(const Rig &r, const Rig::Scratch::Point &p) { return p.node >= 0 ? r.nodes[(size_t)p.node].world.translation() : p.fixed; }
+
+void rig_mark_used(Rig &r, int node) {
+  for (; node >= 0 && !r.nodes[(size_t)node].used; node = r.nodes[(size_t)node].parent) r.nodes[(size_t)node].used = true;
+}
+
+Vec3 rig_mass_center(const Rig &r, const Rig::Scratch::Mass &m) {
+  const Mat4 &w = m.node >= 0 ? r.nodes[(size_t)m.node].world : m.fixed;
+  return (w * m.bm->rest_inv).point(m.bm->center);
+}
+
+template <class T> size_t held_bytes(const std::vector<T> &v) { return v.capacity() * sizeof(T); }
+
+}  // namespace
+
+size_t Rig::scratch_bytes() const {
+  const Scratch &c = scratch;
+  return held_bytes(c.pts) + held_bytes(c.above) + held_bytes(c.free_col) + held_bytes(c.held) + held_bytes(c.ground) + held_bytes(c.sub_c) +
+         held_bytes(c.hinge) + held_bytes(c.axes) + held_bytes(c.sub_m) + held_bytes(c.masses) + held_bytes(c.start) + held_bytes(c.J) +
+         held_bytes(c.e) + held_bytes(c.A) + held_bytes(c.A1) + held_bytes(c.y) + held_bytes(c.d);
+}
+
+Rig build_rig(GameObject &armature) {
+  Rig r;
+  r.armature = &armature;
+  r.structure = edit_epoch::structure();
+  /* Every object under the armature, parents first (the walk the solver has always made). */
+  std::vector<std::pair<GameObject *, int>> stack{{&armature, -1}};
+  std::vector<int> depths;  // (below the armature, worked out once here: the joints are ordered by it)
+  while (!stack.empty()) {
+    const std::pair<GameObject *, int> top = stack.back();
+    stack.pop_back();
+    const int index = (int)r.nodes.size();
+    Rig::Node n;
+    n.g = top.first, n.parent = top.second;
+    r.nodes.push_back(n);
+    depths.push_back(top.second >= 0 ? depths[(size_t)top.second] + 1 : 0);
+    r.node_of[top.first] = index;
+    for (auto it = top.first->children.rbegin(); it != top.first->children.rend(); ++it) stack.push_back({*it, index});
+  }
+  /* The joints: the body bones, by depth (the order the Jacobian's columns have always had). */
+  std::vector<int> order;
+  for (int i = 0; i < (int)r.nodes.size(); i++)
+    if (r.nodes[(size_t)i].g->get<Bone>() && !kept(*r.nodes[(size_t)i].g)) order.push_back(i);
+  std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return depths[(size_t)a] < depths[(size_t)b]; });
+  r.joints.resize(order.size());
+  for (size_t j = 0; j < order.size(); j++) {
+    Rig::Node &n = r.nodes[(size_t)order[j]];
+    n.joint = (int)j;
+    r.joints[j].node = order[j];
+    r.joints[j].rest = n.g->get<Bone>()->rest_rotation;
+    r.joints[j].hinge_like = hinge_like(*n.g), r.joints[j].spine_like = spine_like(*n.g);
+  }
+  for (Rig::Node &n : r.nodes) n.joint_above = n.joint >= 0 ? n.joint : n.parent >= 0 ? r.nodes[(size_t)n.parent].joint_above : -1;
+  for (Rig::Joint &j : r.joints) {
+    const int up = r.nodes[(size_t)j.node].parent;
+    j.parent = up >= 0 ? r.nodes[(size_t)up].joint_above : -1;
+  }
+  read(r);
+  return r;
+}
+
+void read_root(Rig &r) {
+  if (!r.valid()) return;
+  r.has_root = r.armature->parent != nullptr;
+  r.root_world = r.has_root ? r.armature->parent->world_matrix() : Mat4();
+  r.root_turn = r.has_root ? r.armature->parent->world_rotation() : Quat();
+}
+
+void read_pose(Rig &r) {
+  if (!r.valid()) return;
+  read_root(r);
+  for (Rig::Node &n : r.nodes) n.local = n.g->local();
+}
+
+void read(Rig &r) {
+  read_pose(r);
+  for (Rig::Node &n : r.nodes) n.start = n.local;
+}
+
+void to_start(Rig &r) {
+  for (Rig::Node &n : r.nodes) n.local = n.start;
+}
+
+bool stale(const Rig &r) { return !r.valid() || r.structure != edit_epoch::structure(); }
+
+size_t write(Rig &r) {
+  size_t n = 0;
+  for (const Rig::Joint &j : r.joints) {
+    const Rig::Node &node = r.nodes[(size_t)j.node];
+    const Transform &now = node.g->local();
+    const bool placed = !(now.position.x == node.local.position.x && now.position.y == node.local.position.y && now.position.z == node.local.position.z);
+    const bool turned = !same_turn(now.rotation, node.local.rotation) && !same_turn(now.rotation, normalize(node.local.rotation));
+    if (placed) node.g->set_local_position(node.local.position), n++;
+    if (turned) node.g->set_local_rotation(node.local.rotation), n++;
+    const bool scaled = !(now.scale.x == node.local.scale.x && now.scale.y == node.local.scale.y && now.scale.z == node.local.scale.z);
+    if (scaled) node.g->set_local_scale(node.local.scale), n++;  // (changed mid-drag: back to the start, as the old full restore did)
+  }
+  return n;
+}
+
+Result solve(Rig &r, const std::vector<Goal> &goals, const std::vector<GameObject *> &pins, const body::Body *body, const Settings &s) {
+  BL_ZONE("autopose solve");
+  Result res;
+  const auto t0 = std::chrono::steady_clock::now();
+  const int B = (int)r.joints.size();
+  res.bones = r.joints.size();
+  if (!r.valid() || !B || (goals.empty() && pins.empty())) return res;
+  for (const Goal &g : goals)
+    if (!std::isfinite(g.target.x) || !std::isfinite(g.target.y) || !std::isfinite(g.target.z)) return res;  // (refused: nothing moves)
+  Rig::Scratch &c = r.scratch;
+  auto node_of = [&](const GameObject *g) {
+    const auto it = r.node_of.find(g);
+    return it == r.node_of.end() ? -1 : it->second;
+  };
+  GameObject *hips = r.hips ? r.hips : body ? body::hips_of(*r.armature, body) : body::hips_of(*r.armature);
+  const int hips_node = hips ? node_of(hips) : -1;
+  const int hips_i = hips_node >= 0 ? r.nodes[(size_t)hips_node].joint_above : -1;
+  const bool move_hips = hips_i >= 0 && r.joints[(size_t)hips_i].node == hips_node;
+  /* What this solve reads: the joints, the points' and the masses' bones, and everything above them. */
+  for (Rig::Node &n : r.nodes) n.used = false;
+  for (const Rig::Joint &j : r.joints) rig_mark_used(r, j.node);
+  c.pts.clear();
+  for (const Goal &g : goals) {
+    if (!g.bone) continue;
+    Rig::Scratch::Point p;
+    p.bone = g.bone, p.node = node_of(g.bone), p.target = g.target, p.w = std::max(0.0f, g.weight);
+    c.pts.push_back(p);
+  }
+  const int G = (int)c.pts.size();
+  for (size_t k = 0; k < pins.size(); k++) {
+    if (!pins[k]) continue;
+    Rig::Scratch::Point p;
+    p.bone = pins[k], p.pin = (int)k, p.node = node_of(pins[k]), p.w = 10.0f;  // (pins far firmer than goals: the feet don't slide to reach)
+    c.pts.push_back(p);
+  }
+  const int P = (int)c.pts.size();
+  for (Rig::Scratch::Point &p : c.pts) {
+    if (p.node >= 0) rig_mark_used(r, p.node);
+    p.joint = p.node >= 0 ? r.nodes[(size_t)p.node].joint_above : -1;
+    p.own = p.joint >= 0 && r.joints[(size_t)p.joint].node == p.node;
+  }
+  c.masses.clear();
+  const bool weighed = s.balance && body && body->valid();
+  if (weighed)
+    for (const body::BoneMass &bm : body->bones) {
+      if (!(bm.mass > 0.0f) || !bm.object) continue;
+      Rig::Scratch::Mass m;
+      m.bm = &bm, m.node = node_of(bm.object);
+      m.joint = m.node >= 0 ? r.nodes[(size_t)m.node].joint_above : -1;
+      if (m.node >= 0) rig_mark_used(r, m.node);
+      else m.fixed = bm.object->world_matrix();
+      c.masses.push_back(m);
+    }
+  rig_fk(r);
+  /* The starting pose and the bend axis of the hinges (knees, elbows: the plane they already bend in, else their own X). */
+  c.start.resize((size_t)B);
+  c.hinge.assign((size_t)B, Vec3(0.0f));
+  for (int b = 0; b < B; b++) {
+    const Rig::Joint &j = r.joints[(size_t)b];
+    const Rig::Node &n = r.nodes[(size_t)j.node];
+    c.start[(size_t)b] = n.local.rotation;
+    if (!j.hinge_like || !n.g->parent) continue;
+    const Quat above = n.parent >= 0 ? r.nodes[(size_t)n.parent].turn : r.root_turn;
+    const Vec3 up = normalize(above.rotate(Vec3(0, 1, 0))), down = normalize(n.turn.rotate(Vec3(0, 1, 0)));
+    Vec3 a = cross(up, down);
+    if (length(a) < 1e-3f) a = n.turn.rotate(Vec3(1, 0, 0));
+    c.hinge[(size_t)b] = normalize(above.conjugate().rotate(normalize(a)));  // (in the parent's space)
+  }
+  /* The points' places: a bone outside the armature where it is (read once), a pin where it is held. */
+  for (int p = 0; p < P; p++) {
+    Rig::Scratch::Point &pt = c.pts[(size_t)p];
+    if (pt.node < 0) pt.fixed = pt.bone->world_position();
+    if (p < G) continue;
+    pt.target = s.pin_poses && (size_t)pt.pin < s.pin_poses->size() ? (*s.pin_poses)[(size_t)pt.pin].first : rig_place(r, pt);
+  }
+  c.above.assign((size_t)P * (size_t)B, 0);
+  for (int p = 0; p < P; p++)
+    for (int b = c.pts[(size_t)p].joint; b >= 0; b = r.joints[(size_t)b].parent) c.above[(size_t)p * B + b] = 1;
+  /* The ends kept turned as they were (a planted foot stays flat, a dragged hand keeps its twist). */
+  c.held.clear();
+  for (const Rig::Scratch::Point &pt : c.pts) {
+    if (!pt.own) continue;
+    Quat turn = r.nodes[(size_t)pt.node].turn;
+    for (size_t q = 0; s.pin_poses && q < pins.size() && q < s.pin_poses->size(); q++)
+      if (pins[q] == pt.bone) turn = (*s.pin_poses)[q].second;  // (a pin's own turn from before the body moved)
+    c.held.push_back({pt.joint, turn});
+  }
+  /* Balance over the pins on the ground (within 10 cm of the lowest): the feet's, not a locked hand's; one foot too. */
+  c.ground.clear();
+  float low = 1e30f;
+  for (int p = G; p < P; p++) low = std::min(low, c.pts[(size_t)p].target.y);
+  for (int p = G; p < P; p++)
+    if (c.pts[(size_t)p].target.y <= low + 0.1f) c.ground.push_back(c.pts[(size_t)p].target);
+  const bool balance = weighed && !c.ground.empty();
+  Vec3 support(0.0f);
+  for (const Vec3 &g : c.ground) support = support + g / (float)c.ground.size();
+  if (!balance) c.masses.clear();
+  const int m = 3 * P + (balance ? 2 : 0), n = 3 * B + (move_hips ? 3 : 0), m1 = 3 * P;
+  c.J.resize((size_t)m * n), c.e.resize((size_t)m), c.A.resize((size_t)m * m), c.A1.resize((size_t)m1 * m1), c.y.resize((size_t)m1), c.d.resize((size_t)n);
+  c.axes.resize((size_t)B * 3), c.free_col.resize((size_t)n), c.sub_c.resize((size_t)B), c.sub_m.resize((size_t)B);
+  const float limit = s.limit_deg * 3.14159265f / 180.0f;
+  const int main_its = std::max(1, s.iterations), settle = pins.empty() ? 0 : 60;
+  const Vec3 hips_start = hips_node >= 0 ? r.nodes[(size_t)hips_node].world.translation() : hips ? hips->world_position() : Vec3(0.0f);
+  auto worst_gap = [&](int from, int to) {
+    float worst = 0.0f;
+    for (int p = from; p < to; p++) worst = std::max(worst, length(c.pts[(size_t)p].target - rig_place(r, c.pts[(size_t)p])));
+    return worst;
+  };
+  for (int it = 0; it < main_its + settle; it++) {
+    if (it) rig_fk(r);
+    if (it == main_its)
+      for (int p = 0; p < G; p++) c.pts[(size_t)p].w *= 0.03f;
+    if (it >= main_its && worst_gap(G, P) < 5e-4f) break;  // (settled: the pins back in place)
+    std::fill(c.J.begin(), c.J.end(), 0.0);
+    /* The center of mass and each joint's share of it: the masses at their joints, summed up the tree in one pass. */
+    Vec3 com(0.0f);
+    if (balance) {
+      std::fill(c.sub_c.begin(), c.sub_c.end(), Vec3(0.0f));
+      std::fill(c.sub_m.begin(), c.sub_m.end(), 0.0f);
+      float total = 0.0f;
+      for (const Rig::Scratch::Mass &mi : c.masses) {
+        const Vec3 at = rig_mass_center(r, mi);
+        com = com + at * mi.bm->mass, total += mi.bm->mass;
+        if (mi.joint >= 0) c.sub_c[(size_t)mi.joint] = c.sub_c[(size_t)mi.joint] + at * mi.bm->mass, c.sub_m[(size_t)mi.joint] += mi.bm->mass;
+      }
+      com = com / std::max(1e-6f, total);
+      for (int b = B - 1; b >= 0; b--) {
+        const int up = r.joints[(size_t)b].parent;
+        if (up >= 0) c.sub_c[(size_t)up] = c.sub_c[(size_t)up] + c.sub_c[(size_t)b], c.sub_m[(size_t)up] += c.sub_m[(size_t)b];
+      }
+    }
+    for (int p = 0; p < P; p++) {
+      /* Each goal's error at most 10 cm a step (Buss's clamping): a target out of reach can't drag the pins after it. */
+      Vec3 gap = c.pts[(size_t)p].target - rig_place(r, c.pts[(size_t)p]);
+      if (length(gap) > 0.1f) gap = gap * (0.1f / length(gap));
+      const Vec3 d = gap * c.pts[(size_t)p].w;
+      for (int a = 0; a < 3; a++) c.e[(size_t)(3 * p + a)] = d[a];
+    }
+    if (balance) {
+      c.e[(size_t)(3 * P)] = (support.x - com.x) * s.balance_weight;
+      c.e[(size_t)(3 * P + 1)] = (support.z - com.z) * s.balance_weight;
+    }
+    /* Each joint's axes: the world's three, or a hinge's one (its bend axis, now). */
+    for (int b = 0; b < B; b++) {
+      const Rig::Node &node = r.nodes[(size_t)r.joints[(size_t)b].node];
+      Vec3 *ax = &c.axes[(size_t)b * 3];
+      if (length(c.hinge[(size_t)b]) > 0.5f && node.g->parent) {
+        const Quat above = node.parent >= 0 ? r.nodes[(size_t)node.parent].turn : r.root_turn;
+        ax[0] = normalize(above.rotate(c.hinge[(size_t)b])), ax[1] = Vec3(0.0f), ax[2] = Vec3(0.0f);
+        continue;
+      }
+      ax[0] = Vec3(1, 0, 0), ax[1] = Vec3(0, 1, 0), ax[2] = Vec3(0, 0, 1);
+    }
+    for (int b = 0; b < B; b++) {
+      const Vec3 head = r.nodes[(size_t)r.joints[(size_t)b].node].world.translation();
+      for (int k = 0; k < 3; k++) {
+        const Vec3 axis = c.axes[(size_t)b * 3 + k];
+        if (length(axis) < 0.5f) continue;
+        const int col = 3 * b + k;
+        for (int p = 0; p < P; p++) {
+          const Rig::Scratch::Point &pt = c.pts[(size_t)p];
+          if (!c.above[(size_t)p * B + b] || (pt.own && pt.joint == b)) continue;  // (a bone's own turn doesn't move its head)
+          const Vec3 d = cross(axis, rig_place(r, pt) - head) * pt.w;
+          for (int a = 0; a < 3; a++) c.J[(size_t)(3 * p + a) * n + col] = d[a];
+        }
+        if (balance && c.sub_m[(size_t)b] > 0.0f) {
+          const Vec3 d = cross(axis, c.sub_c[(size_t)b] - head * c.sub_m[(size_t)b]) * (s.balance_weight / body->mass);
+          c.J[(size_t)(3 * P) * n + col] = d.x, c.J[(size_t)(3 * P + 1) * n + col] = d.z;
+        }
+      }
+    }
+    if (move_hips)
+      for (int k = 0; k < 3; k++) {
+        const int col = 3 * B + k;
+        for (int p = 0; p < P; p++)
+          if (c.above[(size_t)p * B + hips_i]) c.J[(size_t)(3 * p + k) * n + col] = c.pts[(size_t)p].w;
+        if (balance && k != 1) c.J[(size_t)(3 * P + (k == 0 ? 0 : 1)) * n + col] = s.balance_weight * c.sub_m[(size_t)hips_i] / body->mass;
+      }
+    /* Damped least squares in two priorities, as solve_reference: the goals and pins first, then the balance with
+     * only the joints that move no goal and no pin. */
+    const double l2 = (double)s.damping * s.damping;
+    for (int row = 0; row < m1; row++)
+      for (int col = 0; col <= row; col++) {
+        double sum = 0.0;
+        for (int k = 0; k < n; k++) sum += c.J[(size_t)row * n + k] * c.J[(size_t)col * n + k];
+        c.A[(size_t)row * m1 + col] = c.A[(size_t)col * m1 + row] = sum + (row == col ? l2 : 0.0);
+      }
+    std::copy(c.e.begin(), c.e.begin() + m1, c.y.begin());
+    std::copy(c.A.begin(), c.A.begin() + (size_t)m1 * m1, c.A1.begin());
+    solve_small(c.A1, c.y, m1);
+    std::fill(c.d.begin(), c.d.end(), 0.0);
+    for (int k = 0; k < n; k++)
+      for (int row = 0; row < m1; row++) c.d[(size_t)k] += c.J[(size_t)row * n + k] * c.y[(size_t)row];
+    if (balance) {
+      std::fill(c.free_col.begin(), c.free_col.end(), (uint8_t)1);
+      for (int b = 0; b < B; b++)
+        for (int p = 0; p < P; p++)
+          if (c.above[(size_t)p * B + b] && !(c.pts[(size_t)p].own && c.pts[(size_t)p].joint == b))
+            c.free_col[(size_t)(3 * b)] = c.free_col[(size_t)(3 * b + 1)] = c.free_col[(size_t)(3 * b + 2)] = 0;
+      for (int k = 3 * B; k < n; k++) c.free_col[(size_t)k] = 0;  // (the hips' place moves every point under them)
+      double e2[2], B2[4] = {l2, 0.0, 0.0, l2};
+      for (int q = 0; q < 2; q++) {
+        e2[q] = c.e[(size_t)(m1 + q)];
+        for (int k = 0; k < n; k++) e2[q] -= c.J[(size_t)(m1 + q) * n + k] * c.d[(size_t)k];
+        for (int col = 0; col < 2; col++)
+          for (int k = 0; k < n; k++)
+            if (c.free_col[(size_t)k]) B2[q * 2 + col] += c.J[(size_t)(m1 + q) * n + k] * c.J[(size_t)(m1 + col) * n + k];
+      }
+      const double det = B2[0] * B2[3] - B2[1] * B2[2];
+      if (std::fabs(det) > 1e-18) {
+        const double y0 = (B2[3] * e2[0] - B2[1] * e2[1]) / det, y1 = (B2[0] * e2[1] - B2[2] * e2[0]) / det;
+        for (int k = 0; k < n; k++)
+          if (c.free_col[(size_t)k]) c.d[(size_t)k] += c.J[(size_t)m1 * n + k] * y0 + c.J[(size_t)(m1 + 1) * n + k] * y1;
+      }
+    }
+    if (move_hips) {
+      /* With the feet pinned the hips lean (30 cm sideways at most) and crouch (a metre down), no further. */
+      Rig::Node &hn = r.nodes[(size_t)hips_node];
+      const Vec3 step((float)c.d[(size_t)(3 * B)], (float)c.d[(size_t)(3 * B + 1)], (float)c.d[(size_t)(3 * B + 2)]);
+      Vec3 off = hn.world.translation() + step - hips_start;
+      if (!pins.empty()) {
+        const float side = std::sqrt(off.x * off.x + off.z * off.z);
+        if (side > s.max_hips_shift) off.x *= s.max_hips_shift / side, off.z *= s.max_hips_shift / side;
+        off.y = std::max(-1.0f, std::min(s.max_hips_shift, off.y));
+      }
+      const bool parented = hn.parent >= 0 || r.has_root;
+      const Mat4 &above = hn.parent >= 0 ? r.nodes[(size_t)hn.parent].world : r.root_world;
+      hn.local.position = parented ? above.inverse().point(hips_start + off) : hips_start + off;
+    }
+    const float pull = s.rest_pull * std::max(0.0f, 1.0f - (float)it / (float)main_its);  // (none by the end: the goals reached)
+    /* Parents first: each joint turns about its head, what hangs below follows; 0.3 rad a step at most. The nodes
+     * between joints only carry the turn down. */
+    for (Rig::Node &node : r.nodes) {
+      if (!node.used) continue;
+      const bool parented = node.parent >= 0 || r.has_root;
+      const Quat above = node.parent >= 0 ? r.nodes[(size_t)node.parent].turn : r.root_turn;
+      node.turn = parented ? normalize(above * node.local.rotation) : node.local.rotation;
+      const int b = node.joint;
+      if (b < 0) continue;
+      const Vec3 *ax = &c.axes[(size_t)b * 3];
+      Vec3 w = ax[0] * (float)c.d[(size_t)(3 * b)] + ax[1] * (float)c.d[(size_t)(3 * b + 1)] + ax[2] * (float)c.d[(size_t)(3 * b + 2)];
+      const float a = length(w);
+      if (a > 0.3f) w = w * (0.3f / a);
+      Quat local = node.local.rotation;
+      if (length(w) > 1e-9f) local = rig_local_for(r, r.joints[(size_t)b].node, above, normalize(Quat::axis_angle(w, length(w)) * node.turn));
+      /* A hinge turns only about its bend axis (from the starting pose): a knee doesn't bend sideways. */
+      const bool hinged = length(c.hinge[(size_t)b]) > 0.5f;
+      if (hinged) {
+        const Quat rel = normalize(local * c.start[(size_t)b].conjugate());
+        const Vec3 axh = c.hinge[(size_t)b], v(rel.x, rel.y, rel.z);
+        const Vec3 tw = axh * dot(v, axh);
+        local = normalize(normalize(Quat(tw.x, tw.y, tw.z, rel.w)) * c.start[(size_t)b]);
+      }
+      /* Within its limit of the rest pose (or of where it started, if the animator had it further), pulled a little
+       * back towards the starting pose. */
+      const Rig::Joint &j = r.joints[(size_t)b];
+      const float lim = std::max((j.spine_like ? 0.5f : hinged ? 2.0f : 1.0f) * limit,  // (a knee bends to 150 degrees)
+                                  length(rotation_vector(normalize(c.start[(size_t)b] * j.rest.conjugate()))));
+      const Quat rel = normalize(local * j.rest.conjugate());
+      const float ang = length(rotation_vector(rel));
+      if (ang > lim) local = normalize(slerp(Quat(), rel, lim / ang) * j.rest);
+      if (pull > 0.0f) local = normalize(slerp(local, c.start[(size_t)b], pull));
+      node.local.rotation = normalize(local);
+      node.turn = parented ? normalize(above * node.local.rotation) : node.local.rotation;
+    }
+    for (const auto &h : c.held) {
+      Rig::Node &node = r.nodes[(size_t)r.joints[(size_t)h.first].node];
+      const Quat above = node.parent >= 0 ? rig_turn_now(r, node.parent) : r.root_turn;
+      node.local.rotation = rig_local_for(r, r.joints[(size_t)h.first].node, above, h.second);
+    }
+    res.iterations++;
+  }
+  rig_fk(r);
+  res.error = worst_gap(0, G), res.pin_error = worst_gap(G, P);
+  if (balance) {
+    Vec3 com(0.0f);
+    float total = 0.0f;
+    for (const Rig::Scratch::Mass &mi : c.masses) com = com + rig_mass_center(r, mi) * mi.bm->mass, total += mi.bm->mass;
+    com = com / std::max(1e-6f, total);
+    res.balance = std::sqrt((com.x - support.x) * (com.x - support.x) + (com.z - support.z) * (com.z - support.z));
+  }
+  res.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  pose_add(PoseStat::Solver, res.ms);
+  pose_add_solver_iterations((uint64_t)std::max(0, res.iterations));
+  return res;
+}
+
+Result solve(GameObject &armature, const std::vector<Goal> &goals, const std::vector<GameObject *> &pins, const body::Body *body, const Settings &s) {
+  Rig rig = build_rig(armature);
+  Result res = solve(rig, goals, pins, body, s);
+  if (res.iterations > 0) res.writes = write(rig);
+  pose_add_solver_writes(res.writes);
   return res;
 }
 

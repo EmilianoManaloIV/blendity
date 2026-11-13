@@ -628,7 +628,8 @@ bool limb_of(const std::string &raw, int &side, int &limb) {
     if (at != std::string::npos) core.erase(at, std::strlen(w));
   }
   auto has = [&](const char *w) { return core.find(w) != std::string::npos; };
-  if (has("twist") || has("roll") || has("share") || has("helper")) return false;  // (a twist or helper bone beside the limb's own)
+  if (has("twist") || has("roll") || has("share") || has("helper") || has("support")) return false;  // (a twist or helper bone beside the limb's own)
+  if (std::find(words.begin(), words.end(), "sup") != words.end()) return false;  // ("UpperArm_sup": a support bone)
   if (has("upleg") || has("upperleg") || has("thigh")) limb = 0;
   else if (has("lowerleg") || has("shin") || has("calf") || has("knee") || (has("leg") && !has("upleg"))) limb = 1;
   else if (has("forearm") || has("lowerarm") || has("elbow")) limb = 3;

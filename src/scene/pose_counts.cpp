@@ -8,7 +8,7 @@ namespace bl {
 
 namespace {
 constexpr int kStats = (int)PoseStat::Count;
-enum Extra { kMoves, kNameWalks, kSolverIterations, kSpringChains, kKeysKept, kKeysStale, kBindings, kExtras };
+enum Extra { kMoves, kNameWalks, kSolverIterations, kSpringChains, kKeysKept, kKeysStale, kBindings, kSolverWrites, kExtras };
 std::atomic<uint64_t> g_count[kStats], g_us[kStats], g_extra[kExtras];
 /* The calling thread's own share of the same tallies: a test (or a row) that calls the scene layer directly reads these,
  * so a worker of another editor counting at the same moment can't change what it sees. */
@@ -34,6 +34,7 @@ template<class Count, class Us, class Ext> PoseCounts counts_from(Count &&n, Us 
   c.skin_keys_kept = extra(kKeysKept), c.skin_keys_stale = extra(kKeysStale), c.skin_bindings = extra(kBindings);
   c.clip_applies = n(PoseStat::ClipApply);
   c.solver_solves = n(PoseStat::Solver), c.solver_iterations = extra(kSolverIterations);
+  c.solver_writes = extra(kSolverWrites);
   c.spring_steps = n(PoseStat::Spring), c.spring_chains = extra(kSpringChains);
   c.ms_skin_keys = ms(PoseStat::SkinKey), c.ms_skin_setup = ms(PoseStat::SkinSetup), c.ms_skin_deforms = ms(PoseStat::SkinDeform);
   c.ms_shape_hashes = ms(PoseStat::ShapeHash), c.ms_shape_applies = ms(PoseStat::ShapeApply);
@@ -55,6 +56,7 @@ void pose_add(PoseStat s, double ms, uint64_t count) {
 void pose_add_moves(uint64_t n) { add_extra(kMoves, n); }
 void pose_add_name_walks(uint64_t n) { add_extra(kNameWalks, n); }
 void pose_add_solver_iterations(uint64_t n) { add_extra(kSolverIterations, n); }
+void pose_add_solver_writes(uint64_t n) { add_extra(kSolverWrites, n); }
 void pose_add_spring_chains(uint64_t n) { add_extra(kSpringChains, n); }
 void pose_add_skin_keys_kept(uint64_t n) { add_extra(kKeysKept, n); }
 void pose_add_skin_keys_stale(uint64_t n) { add_extra(kKeysStale, n); }
@@ -81,6 +83,7 @@ PoseCounts PoseCounts::operator-(const PoseCounts &o) const {
   d.skin_keys_kept = skin_keys_kept - o.skin_keys_kept, d.skin_keys_stale = skin_keys_stale - o.skin_keys_stale;
   d.skin_bindings = skin_bindings - o.skin_bindings;
   d.solver_solves = solver_solves - o.solver_solves, d.solver_iterations = solver_iterations - o.solver_iterations;
+  d.solver_writes = solver_writes - o.solver_writes;
   d.spring_steps = spring_steps - o.spring_steps, d.spring_chains = spring_chains - o.spring_chains;
   d.ms_skin_keys = ms_skin_keys - o.ms_skin_keys, d.ms_skin_setup = ms_skin_setup - o.ms_skin_setup;
   d.ms_skin_deforms = ms_skin_deforms - o.ms_skin_deforms;

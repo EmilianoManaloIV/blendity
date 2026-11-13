@@ -14,13 +14,24 @@ const float kPiG = 3.14159265f;
 
 bool has_word(const std::string &name, const char *w) { return to_lower(name).find(w) != std::string::npos; }
 
+/* A support bone ("UpperArm_sup", "forearm.support"): a helper beside the limb, never its next part. */
+bool is_support(const std::string &name) {
+  for (const std::string &w : name_words(name))
+    if (w == "sup" || w == "support") return true;
+  return false;
+}
+
 /* The next bone down a limb: a child named for it (a toe, not a heel helper), else the one furthest from the parent's
- * head (so a twist helper beside the limb isn't taken), or null. */
-GameObject *next_down(const GameObject &g, const char *prefer = nullptr) {
+ * head (so a twist or support helper beside the limb isn't taken), or null. `named` (a limb's next part by its name)
+ * is asked first: a helper placed further out than the part must not win on distance. */
+GameObject *next_down(const GameObject &g, const char *prefer = nullptr, const std::function<bool(const GameObject &)> &named = nullptr) {
   GameObject *best = nullptr;
   float far = -1.0f;
+  if (named)
+    for (GameObject *c : bone_children(g))
+      if (!is_support(c->name) && named(*c)) return c;
   for (GameObject *c : bone_children(g)) {
-    if (has_word(c->name, "heel") || has_word(c->name, "twist") || has_word(c->name, "roll")) continue;
+    if (has_word(c->name, "heel") || has_word(c->name, "twist") || has_word(c->name, "roll") || is_support(c->name)) continue;
     if (prefer && has_word(c->name, prefer)) return c;
     const float d = length(c->world_position() - g.world_position());
     if (d > far) far = d, best = c;
@@ -168,7 +179,10 @@ Rig analyse(const Scene &scene, GameObject &armature, bool with_parts) {
   for (GameObject *b : bones) {
     int side = 0, limb = 0;
     if (!limb_of(b->name, side, limb) || (limb != 0 && limb != 2)) continue;
-    GameObject *lower = next_down(*b);
+    GameObject *lower = next_down(*b, nullptr, [&](const GameObject &c) {  // (the child named as this limb's lower bone, before the furthest)
+      int cs = 0, cl = 0;
+      return limb_of(c.name, cs, cl) && cs == side && cl == limb + 1;
+    });
     int s2 = 0, l2 = 0;
     if (!lower || !limb_of(lower->name, s2, l2) || l2 != limb + 1) {
       if (limb == 2 && lower && has_word(lower->name, "hand")) {  // (an arm without a forearm bone: upper, then the hand)
