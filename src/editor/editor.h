@@ -7309,6 +7309,12 @@ class Editor {
   uint64_t blockout_pick_piece_shown(GameObject &g, int view_x, int view_y, const std::unique_ptr<blockout::FaceOwners> *owners = nullptr);  // (the piece of the DRAWN face under a pixel: through deformers; 0: none)
   bool blockout_box_select_shown(GameObject &g, const Recti &view, const Recti &box);  // (a box's pieces, through the drawn mesh)
   void blockout_stacks_settle(uint64_t obj = 0);                 // (the Blockouts' stacks brought to their pieces' meshes now: `blockout wait`)
+  uint64_t eval_started_ = 0, eval_adopted_ = 0, eval_dropped_ = 0;  // (the worker's evaluations: begun, taken by the object, thrown away)
+  int eval_delay_ms_for_test_ = 0;                               // (each worker evaluation waits this long first: a slow machine in a test)
+  uint64_t eval_started_for_test() const { return eval_started_; }
+  uint64_t eval_adopted_for_test() const { return eval_adopted_; }
+  uint64_t eval_dropped_for_test() const { return eval_dropped_; }
+  void set_eval_delay_ms_for_test(int ms) { eval_delay_ms_for_test_ = ms; }
   /* Round 501 (task 0485), blockout_join.cpp: snapping between Blockouts, and joining Blockouts that touch. */
   void blockout_cross_candidates(const GameObject &own_blockout, Vec3 origin, Vec3 dir, std::vector<float> &out);  // (the other Blockouts' planes and corners along a line: a piece's snap and a face handle's)
   bool blockout_whole_snap(const GameObject &lead, Vec3 start_pos, Vec3 axis, const std::vector<uint64_t> &roots, float &d, Vec3 *marker = nullptr);  // (moved Blockouts' corners onto other Blockouts' along an axis; marker: where the landed corner is)
