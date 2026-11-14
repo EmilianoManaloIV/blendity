@@ -281,8 +281,8 @@ manifold::Manifold shells_united(const manifold::Manifold &m) {
 }
 
 /* One solid as Manifold takes it, in the frame: its faces as fans of triangles, each with the face's label. */
-manifold::Manifold solid_manifold(const Cluster &c, const Solid &s, const Frame &fr, const std::vector<Plane> &planes, const std::vector<std::vector<AddFace>> &add_faces,
-                                  SharedCorners &shared) {
+manifold::Manifold solid_manifold(const Cluster &c, const Solid &s, const Frame &fr, const std::vector<Plane> &planes, const SquareCoords &square,
+                                  const std::vector<std::vector<AddFace>> &add_faces, SharedCorners &shared) {
   manifold::MeshGL64 g;
   g.numProp = 3;
   g.tolerance = c.tol;
@@ -317,6 +317,9 @@ manifold::Manifold solid_manifold(const Cluster &c, const Solid &s, const Frame 
       for (const Plane &p : moved) at.push_back(&p);
       x = solve_planes(at.data(), (int)at.size(), fr.to(s.verts[v]), nullptr);
       for (const Plane &p : moved) p.put_on(x);  // (the planes square to an axis were not moved)
+      bool own[3] = {false, false, false};  // (a plane square to an axis, moved or not, has put the corner's coordinate there)
+      for (const Plane &p : moved) SquareCoords::note_own(own, p);
+      square.snap(x, c.tol, own);  // (and a corner on one this solid has no face in, as snap_to_planes did in the Blockout's frame; here the frame's square planes. Safe for a corner a hair moved: it ends off its moved planes by at most a quarter of the tolerance, below Manifold's own)
     }
     if (const V3 *had = shared.find(s, v)) x = *had;
     shared.add(s, v, x);
@@ -478,6 +481,7 @@ bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &w
     rep.turned = fr.turned;
     const std::vector<Plane> planes = planes_in(c, fr);
     const std::vector<std::vector<AddFace>> add_faces = add_faces_by_plane(c, planes);
+    const SquareCoords square(planes);
     SharedCorners shared;
     auto sort_in = [&](manifold::Manifold m, Role role, uint32_t piece) {
       if (keep_piece != UINT32_MAX && piece != keep_piece) close_keep();
@@ -509,7 +513,7 @@ bool crisp_soup(const Cluster &c, Soup &soup, ClusterReport &rep, std::string &w
       own.clear();
     };
     for (const Solid &s : c.solids) {
-      manifold::Manifold m = solid_manifold(c, s, fr, planes, add_faces, shared);
+      manifold::Manifold m = solid_manifold(c, s, fr, planes, square, add_faces, shared);
       if (m.Status() != manifold::Manifold::Error::NoError) {
         why = s.mesh ? "Manifold refused a mesh piece (it is closed, yet not a solid: the field path takes it)" : "Manifold refused a piece's solid";
         return false;
