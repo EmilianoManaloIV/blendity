@@ -1116,6 +1116,73 @@ static void blend_sweep(Report &rep, const Options &o, bool crisp) {
   }
 }
 
+/* Faces that are not simple polygons: a corner twice (by index or at one place) or a zero-width spike, where the outline goes out along a line
+ * and straight back. */
+static bool has_non_simple_face(const Mesh &m) {
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t k = m.face_size(f);
+    for (uint32_t i = 0; i < k; i++) {
+      const Vec3 a = m.positions[v[(i + k - 1) % k]], b = m.positions[v[i]], c = m.positions[v[(i + 1) % k]];
+      for (uint32_t j = i + 1; j < k; j++)
+        if (v[i] == v[j] || length(m.positions[v[i]] - m.positions[v[j]]) < 1e-6f) return true;
+      const Vec3 u = b - a, w = c - b;
+      const float lu = length(u), lw = length(w);
+      if (lu > 1e-7f && lw > 1e-7f && length(cross(u, w)) <= 1e-5f * lu * lw && dot(u, w) < 0.0f) return true;
+    }
+  }
+  return false;
+}
+
+/* Round 497 (task 0481): outline rooms - one piece, an L, a T, a U or a square with a slot one wall thick - at thousands of places and turns.
+ * A room's walls, floor and ceiling are several solids that must meet to the bit wherever the room stands: the fault found in round 483 was a
+ * notch wall in two layers at some places only. Judged as the sweep does, and each result's faces are asked to be simple polygons. */
+static void outline_room_sweep(Report &rep, const Options &o, bool crisp) {
+  const uint32_t cases = o.quick ? 200 : 2000;
+  rep.table({"sweep of outline rooms", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places", "with non-simple faces"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    const std::string name = path == Path::Crisp ? "outline rooms on the exact path" : "outline rooms on the grid (cell 0.08)";
+    Tally t;
+    size_t simple_not = 0;
+    for (uint32_t seed = 1; seed <= cases; seed++) {
+      Rand r{seed * 2654435761u + 497u};
+      const float wall = r.pick(3) == 0 ? 0.1f : r.pick(2) == 0 ? 0.2f : 0.25f;
+      std::vector<Vec2> outline;
+      switch (seed % 4) {
+        case 0: outline = {{-2, -2}, {2, -2}, {2, 0}, {0, 0}, {0, 2}, {-2, 2}}; break;                                  // L
+        case 1: outline = {{-3, -2}, {3, -2}, {3, 0}, {1, 0}, {1, 3}, {-1, 3}, {-1, 0}, {-3, 0}}; break;               // T
+        case 2: outline = {{-3, -2}, {3, -2}, {3, 2}, {1, 2}, {1, 0}, {-1, 0}, {-1, 2}, {-3, 2}}; break;               // U
+        default: outline = {{-2, -2}, {2, -2}, {2, 2}, {wall * 0.5f, 2}, {wall * 0.5f, 0}, {-wall * 0.5f, 0}, {-wall * 0.5f, 2}, {-2, 2}}; break;  // a slot one wall thick
+      }
+      Piece room;
+      room.id = 1, room.shape = Shape::Outline, room.outline = outline, room.height = r.in(2.2f, 3.0f), room.room = true;
+      room.wall = wall, room.floor = r.pick(2) == 0 ? 0.2f : 0.15f, room.ceiling = r.pick(2) == 0 ? 0.2f : 0.3f;
+      const int turn = r.pick(6);  // (a right angle's multiples, and two turns at odd angles)
+      const float angle = turn < 4 ? 90.0f * (float)turn : r.in(1.0f, 359.0f);
+      room.to_blockout = Mat4::trs({r.in(-60.0f, 60.0f), r.in(-3.0f, 3.0f), r.in(-60.0f, 60.0f)}, Quat::euler({0.0f, angle, 0.0f}), Vec3(1.0f));
+      bl::blockout::Settings st;
+      st.path = path, st.cell = 0.08f;
+      Mesh m;
+      bl::blockout::Report rp;
+      bl::blockout::Faces named;
+      if (!bl::blockout::build({room}, st, m, &named, &rp)) {
+        t.refused++;
+        continue;
+      }
+      const size_t overlaps_before = t.overlaps;
+      judge(seed, name.c_str(), m, named, rp, t);
+      if (t.overlaps > overlaps_before && std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  outline room seed %u (%s): small faces on top (shape %u, turn %d, angle %g)\n", seed, name.c_str(), seed % 4, turn, angle);
+      const bool bad = has_non_simple_face(m);
+      simple_not += bad;
+      if (bad && std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  outline room seed %u (%s): a face that is not simple (shape %u, turn %d)\n", seed, name.c_str(), seed % 4, turn);
+    }
+    rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved), std::to_string(simple_not)});
+    if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+  }
+}
+
 /* Round 482: what the slots, the UVs and the shading add to a build - one pass over the result's faces, made on the worker with the mesh. interior rooms 100
  * with the six materials and a piece override on every tenth piece; the timed part is blockout_finish_mesh alone, against the build it follows. */
 static void surface_row(Report &rep, const Options &o) {
@@ -1165,6 +1232,7 @@ static void test_blockout(Report &rep, const Options &o) {
   /* (The live row alone: BLENDITY_BLOCKOUT_LIVE=1; BLENDITY_BLOCKOUT_LIVE_DEBUG=1 lists its frames.) */
   if (std::getenv("BLENDITY_BLOCKOUT_LIVE")) return live_row(rep, o, false, true), live_row(rep, o, true, false);
   if (std::getenv("BLENDITY_BLOCKOUT_BENCH")) return bench_rows(rep, o);  // (round 483: the bench interior's drags alone)
+  if (std::getenv("BLENDITY_BLOCKOUT_OUTLINE")) return outline_room_sweep(rep, o, crisp);  // (round 497: the outline rooms' sweep alone)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -1326,4 +1394,5 @@ static void test_blockout(Report &rep, const Options &o) {
   bench_rows(rep, o);
   sweep(rep, o, crisp);
   blend_sweep(rep, o, crisp);
+  outline_room_sweep(rep, o, crisp);
 }

@@ -5,6 +5,7 @@
 
 #include "blockout.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -41,6 +42,36 @@ struct Plane {
   void put_on(V3 &p) const {
     const int a = axis();
     if (a >= 0) p[a] = d * n[a];  // (n[a] is 1 or -1)
+  }
+};
+
+/* Where the planes that are square to each axis lie (a table's, or as a turned frame sees them), sorted. A corner a rounding or
+ * a few float steps off one of them - one worked out from other planes than that, in a room turned by a float matrix, say - is
+ * put on it (`snap`): two solids that have the corner, one with a face in that plane and one without, then agree to the bit on
+ * where it is. Within the tolerance, which is what makes the planes of a table one plane: the table's planes on one axis lie more
+ * than the tolerance apart (it merges nearer ones), so the nearest within it is the only candidate. A feature of a solid thinner
+ * than the tolerance can close up, as the table already treats it. A coordinate along an axis that
+ * one of the corner's own planes is square to is left as it is: that plane has put it where it belongs (or moved it on purpose). */
+struct SquareCoords {
+  std::vector<double> at[3];
+  explicit SquareCoords(const std::vector<Plane> &planes) {
+    for (const Plane &p : planes)
+      if (p.axis() >= 0) at[p.axis()].push_back(p.d * p.n[p.axis()]);
+    for (std::vector<double> &w : at) std::sort(w.begin(), w.end());
+  }
+  static void note_own(bool own[3], const Plane &p) {
+    if (p.axis() >= 0) own[p.axis()] = true;
+  }
+  void snap(V3 &x, double tol, const bool own[3]) const {
+    for (int a = 0; a < 3; a++) {
+      if (own[a]) continue;
+      const std::vector<double> &w = at[a];
+      const auto next = std::lower_bound(w.begin(), w.end(), x[a]);
+      double nearest = x[a], gap = tol;
+      if (next != w.end() && *next - x[a] <= gap) gap = *next - x[a], nearest = *next;
+      if (next != w.begin() && x[a] - *(next - 1) <= gap) nearest = *(next - 1);
+      x[a] = nearest;
+    }
   }
 };
 

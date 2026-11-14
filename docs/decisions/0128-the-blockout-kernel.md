@@ -304,6 +304,25 @@ out or with two flat faces on top of each other, and no build refused.
   mesh, not pieces - its rule is reused); a chain of Boolean modifiers (main thread, two at a time, no
   dependency-free path).
 
+## Amended in round 497 (task 0481): a corner near a square plane it has no face in
+"A corner's coordinate along a plane square to an axis is written, not computed" held only for a corner whose own
+solid has a face in that plane. An outline's air is cut into convex parts along diagonals; the corner of a part where
+its diagonal ends on the room's wall has no face of its own in the wall's plane, so its coordinate was solved from
+three other planes and came out a rounding away from the coordinate the wall's own solids write. The exact path's
+faces then did not coincide to the bit: an L room's notch wall was two layers at some places and not at others.
+- **Now:** a corner within the tolerance of a square plane of the table, along an axis none of its own faces is square
+  to, is put on the nearest such plane (`SquareCoords::snap`) - in the Blockout's frame (`snap_to_planes`) and again in
+  the turned frame the cluster is handed over in (`solid_manifold`). The table's planes on one axis lie more than the
+  tolerance apart (it merges nearer ones), so that plane is the only candidate, and the solids that do have a face
+  there write the same coordinate.
+- A corner's own square planes are left alone - so an Intersect piece's planes moved on purpose stay moved.
+- **What it costs:** a feature of a solid thinner than the tolerance along that axis can close up - what the table
+  already could not tell apart.
+- Measured (the stress section, 2,000 arrangements a row, with Blender's libraries): outline rooms on the exact path
+  587 results with small faces on top of others and 422 with a non-simple face -> 0 and 0; the existing sweeps'
+  counts only fell (rooms and Intersect pieces 51 -> 39; wedges, stairs, arches and outlines 165 -> 94; hostile meshes
+  183 -> 177); problems 0 before and after. The grid path's rows did not move.
+
 ## Not decided here
 - The Blockout object, its components and the live rebuild on a worker: ADR 0129 (round 477), with this round's
   numbers.

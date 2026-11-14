@@ -823,6 +823,7 @@ void assign_planes(Cluster &c) {
  * the bit: what lets Manifold see them as one plane, and what the bounds below are taken from. */
 void snap_to_planes(Cluster &c) {
   std::vector<const Plane *> at;
+  const SquareCoords square(c.planes);
   for (Solid &s : c.solids) {
     s.raw = s.verts;
     if (s.mesh) continue;  // (its corners are the mesh's: many faces meet at one, and not in a point of their planes)
@@ -839,6 +840,15 @@ void snap_to_planes(Cluster &c) {
       for (uint32_t k = start[v]; k < start[v + 1]; k++) at.push_back(&c.planes[s.face_plane[faces[k]]]);
       s.verts[v] = solve_planes(at.data(), (int)at.size(), s.verts[v], nullptr);
       for (const Plane *p : at) p->put_on(s.verts[v]);  // (a plane square to an axis: the coordinate itself, no rounding)
+      /* A corner on a plane square to an axis that its own solid has no face in - the corner of one of an outline's convex parts where its diagonal ends on the room's wall, where the
+       * room's wall runs past - is worked out from the planes it does have, and lands a rounding off that plane (or, in a room
+       * turned by a float matrix, a few steps off it). The solids beside it, which have the face, put the same corner on the
+       * plane: the wall's face from one and from the other would then differ by that much and not be one face to Manifold, which
+       * keeps a doubled sheet there at some places and not at others. A corner within the tolerance of such a plane is on it:
+       * that is what the table means by one plane. The nearest one. */
+      bool own[3] = {false, false, false};
+      for (const Plane *p : at) SquareCoords::note_own(own, *p);
+      square.snap(s.verts[v], c.tol, own);
     }
     set_bounds(s);
   }

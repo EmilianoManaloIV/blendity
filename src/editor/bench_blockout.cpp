@@ -89,13 +89,12 @@ void Interior::rooms() {
 }
 
 /* A round room built on the front-east room's EAST wall, an L-shaped one on the front-west room's WEST wall (each overlaps the room it joins
- * by half a metre, the L Room by 0.6 m, so its air opens into it; the L Room stands a tenth further in because at 0.5 m the Blockout's exact path
- * (Blender's libraries) leaves six small faces on top of each other on the notch wall of an L-shaped room at this place), and a room that keeps its own walls BEHIND the back middle room: its front wall stands right
+ * by half a metre, so its air opens into it), and a room that keeps its own walls BEHIND the back middle room: its front wall stands right
  * against that room's back wall (a double wall, 0.4 m), and a door deep enough to cut both leads in. */
 void Interior::joined_rooms() {
   BlockoutPiece *round_room = room_at("Round Room", 1, Vec3(x_east() + 3.5f, kHeight * 0.5f, z_front()));
   round_room->radius = 2.0f, round_room->height = kHeight, round_room->segments = 32;
-  BlockoutPiece *l_room = room_at("L Room", 6, Vec3(x_west() - 3.4f, kHeight * 0.5f, z_front()));
+  BlockoutPiece *l_room = room_at("L Room", 6, Vec3(x_west() - 3.5f, kHeight * 0.5f, z_front()));
   l_room->height = kHeight, l_room->outline = {Vec2(-2.0f, -2.0f), Vec2(2.0f, -2.0f), Vec2(2.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(0.0f, 2.0f), Vec2(-2.0f, 2.0f)};
   const float wall_outer = z_back() + kAir * 0.5f + kWall;  // the back room's outer face
   BlockoutPiece *keep_room = room_at("Keep Room", 0, Vec3(cx(cols / 2), kHeight * 0.5f, wall_outer + kWall + kAir * 0.5f));

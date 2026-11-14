@@ -18385,6 +18385,577 @@ static void tests_round483_te() {
   });
 }
 
+/* ---- Round 497: an outline room's walls on the exact path ---- */
+namespace {
+
+/* The smallest case of task 0481: one Outline room, an L with a notch, 2.6 high, walls, floor and ceiling 0.2. */
+Piece r497_room(const std::vector<Vec2> &outline, Vec3 at, Quat turn = Quat()) {
+  Piece p = r480_outline(1, outline, 2.6f, at, Op::Add, turn);
+  p.room = true, p.wall = 0.2f, p.floor = 0.2f, p.ceiling = 0.2f;
+  return p;
+}
+std::vector<Vec2> r497_l() { return {{-2, -2}, {2, -2}, {2, 0}, {0, 0}, {0, 2}, {-2, 2}}; }
+
+/* Faces with a repeated corner (by index or at one place) or a zero-width spike (a corner where the outline goes out along a line
+ * and comes straight back): their count. It detects those two, not every way a polygon can fail to be simple. */
+size_t r497_not_simple(const Mesh &m) {
+  size_t bad = 0;
+  for (size_t f = 0; f < m.face_count(); f++) {
+    const uint32_t *v = m.face_verts(f);
+    const uint32_t k = m.face_size(f);
+    bool broken = false;
+    for (uint32_t i = 0; i < k && !broken; i++) {
+      const Vec3 a = m.positions[v[(i + k - 1) % k]], b = m.positions[v[i]], c = m.positions[v[(i + 1) % k]];
+      for (uint32_t j = i + 1; j < k && !broken; j++) broken = v[i] == v[j] || length(m.positions[v[i]] - m.positions[v[j]]) < 1e-6f;
+      const Vec3 u = b - a, w = c - b;
+      const float lu = length(u), lw = length(w);
+      if (lu > 1e-7f && lw > 1e-7f && length(cross(u, w)) <= 1e-5f * lu * lw && dot(u, w) < 0.0f) broken = true;
+    }
+    bad += broken;
+  }
+  return bad;
+}
+
+/* What a user could keep from the exact path: valid, closed, outward, no faces on top of each other, every face simple. */
+bool r497_clean(const Mesh &m, const char *what, size_t *overlaps = nullptr) {
+  const AABB box = m.bounds();
+  const size_t ov = meshops::overlapping_faces(m, 1e-4f * length(box.max - box.min)), bad = r497_not_simple(m);
+  if (overlaps) *overlaps = ov;
+  std::string why;
+  const bool ok = structurally_valid(m, &why) && closed_manifold(m) && signed_volume(m) > 0.0f && ov == 0 && bad == 0;
+  if (!ok) std::printf("    %s: overlapping %zu, not simple %zu (%s)\n", what, ov, bad, why.c_str());
+  return ok;
+}
+
+}  // namespace
+
+static void tests_round497() {
+  test("blockout outline room (497): an L room's notch wall is one simple face at the seven places the fault was found, on the exact path", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const Vec3 places[] = {{-22.4f, 1.3f, -10.5f}, {0, 1.3f, 0}, {-22.4f, 1.3f, 0}, {-22.4f, 1.3f, -10.45f}, {-22.3f, 1.3f, -10.5f}, {-9.8f, 1.3f, -4.2f}, {-22.4f, 1.3f, -10.4f}};
+    for (const Vec3 &at : places) {
+      const R476Built b = r476_build({r497_room(r497_l(), at)}, Path::Crisp);
+      char what[96];
+      std::snprintf(what, sizeof what, "L room at (%g, %g, %g)", at.x, at.y, at.z);
+      CHECK(b.ok);
+      if (b.ok) CHECK(r497_clean(b.mesh, what));
+    }
+  });
+
+  test("blockout outline room (497): an L room at 840 places with odd steps and four turns has no faces on top of each other on the exact path", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const float turns[] = {0.0f, 90.0f, 37.0f, -113.0f};
+    size_t built = 0, overlapping = 0, not_simple = 0, unsound = 0;
+    for (float turn : turns)
+      for (int i = 0; i < 15; i++)
+        for (int j = 0; j < 14; j++) {
+          const Vec3 at(-23.17f + 1.731f * (float)i, 1.3f, -11.43f + 1.337f * (float)j);
+          const R476Built b = r476_build({r497_room(r497_l(), at, Quat::euler({0.0f, turn, 0.0f}))}, Path::Crisp);
+          if (!b.ok) continue;
+          built++;
+          const AABB box = b.mesh.bounds();
+          std::string why;
+          overlapping += meshops::overlapping_faces(b.mesh, 1e-4f * length(box.max - box.min)) != 0;
+          not_simple += r497_not_simple(b.mesh) != 0;
+          unsound += !(structurally_valid(b.mesh, &why) && closed_manifold(b.mesh) && signed_volume(b.mesh) > 0.0f);
+        }
+    std::printf("    L room, 840 places and turns: %zu built, %zu with faces on top of each other, %zu with a face that is not simple, %zu unsound\n", built, overlapping, not_simple,
+                unsound);
+    CHECK(built == 840);
+    CHECK(overlapping == 0 && not_simple == 0 && unsound == 0);
+  });
+}
+
+/* ---- Round 497 (test engineer): what a tolerance snap of corners onto the table's square planes could break, and what it should also fix ---- */
+namespace {
+
+/* A piece of a rigid assembly: `local` inside the assembly whose origin is `at`, turned as a whole by `turn`. */
+Piece r497te_rig(Piece p, Vec3 at, Quat turn, Vec3 local = Vec3(0.0f)) {
+  p.to_blockout = Mat4::trs(at, turn, Vec3(1.0f)) * Mat4::translate(local);
+  return p;
+}
+
+double r497te_area(const std::vector<Vec2> &pts) {
+  double a = 0.0;
+  for (size_t i = 0; i < pts.size(); i++) {
+    const Vec2 p = pts[i], q = pts[(i + 1) % pts.size()];
+    a += (double)p.x * q.y - (double)q.x * p.y;
+  }
+  return std::fabs(a) * 0.5;
+}
+
+/* A mesh moved so that its middle is the origin (exact for floats of the same exponent), for volume tests far from it. */
+Mesh r497te_recentred(const Mesh &m) {
+  Mesh r = m;
+  const AABB b = m.bounds();
+  const Vec3 c = b.center();
+  for (Vec3 &p : r.positions) p = p - c;
+  return r;
+}
+
+/* Every problem a result can have that a user could not keep, in words ("" when it is clean). */
+std::string r497te_problem(const Mesh &m_in, bool gap_on_purpose = false) {
+  const Mesh m = r497te_recentred(m_in);
+  const AABB box = m.bounds();
+  std::string why, out;
+  if (!structurally_valid(m, &why)) out += "invalid (" + why + ") ";
+  if (!closed_manifold(m)) out += "open ";
+  if (m.face_count() && !(signed_volume(m) > 0.0f)) out += "inside out ";
+  const size_t ov = meshops::overlapping_faces(m, 1e-4f * length(box.max - box.min)), bad = r497_not_simple(m);
+  /* (overlapping_faces calls two faces that face each other "on top of each other" when they are closer than 1e-5 of the mesh's half-diagonal,
+   * which a gap that was asked for - 1e-5 m between two boxes - is: with `gap_on_purpose` that count is not held against the result.) */
+  if (ov && !gap_on_purpose) out += std::to_string(ov) + " overlapping pairs ";
+  if (bad) out += std::to_string(bad) + " faces not simple ";
+  return out;
+}
+
+/* A sweep's tally: results that are not clean, refusals (a refusal that left a mesh behind is unclean), and the first few reasons. */
+struct R497Tally {
+  size_t runs = 0, refused = 0, hard_refused = 0, bad = 0, off_volume = 0;
+  std::vector<std::string> first;
+  void note(const std::string &s) {
+    if (first.size() < 8) first.push_back(s);
+  }
+  /* `want_volume` < 0: not checked. `may_refuse`: a shape the kernel could fairly turn down (a sliver, a slit as thin as a wall). */
+  void add(const R476Built &b, const std::string &label, double want_volume = -1.0, bool may_refuse = false) {
+    runs++;
+    if (!b.ok) {
+      refused++;
+      hard_refused += !may_refuse;
+      if (b.mesh.face_count()) bad++, note(label + ": refused but left a mesh");
+      else if (!may_refuse) note(label + ": refused");
+      return;
+    }
+    const std::string why = r497te_problem(b.mesh);
+    if (!why.empty()) bad++, note(label + ": " + why);
+    if (want_volume >= 0.0) {
+      const double v = r476_volume(r497te_recentred(b.mesh));
+      if (std::fabs(v - want_volume) > 2e-3 * want_volume + 1e-3) off_volume++, note(label + ": volume " + std::to_string(v) + " want " + std::to_string(want_volume));
+    }
+  }
+  void report(const char *what) const {
+    std::printf("    %s: %zu runs, %zu refused (%zu not allowed), %zu not clean, %zu with another volume\n", what, runs, refused, hard_refused, bad, off_volume);
+    for (const std::string &s : first) std::printf("      %s\n", s.c_str());
+  }
+};
+
+struct R497Shape {
+  const char *name;
+  std::vector<Vec2> pts;
+  bool convex;
+  bool may_refuse;  // as a room (a slit as wide as a wall, a corner of one degree)
+};
+
+std::vector<R497Shape> r497te_shapes() {
+  const float apex = 2.5f, half = apex * std::tan(0.5f * 3.14159265f / 180.0f);
+  return {
+      {"L", {{-2, -2}, {2, -2}, {2, 0}, {0, 0}, {0, 2}, {-2, 2}}, false, false},
+      {"T", {{-2, -2}, {2, -2}, {2, -0.6f}, {0.6f, -0.6f}, {0.6f, 2}, {-0.6f, 2}, {-0.6f, -0.6f}, {-2, -0.6f}}, false, false},
+      {"U", {{-3, -2}, {3, -2}, {3, 2}, {1, 2}, {1, -0.5f}, {-1, -0.5f}, {-1, 2}, {-3, 2}}, false, false},
+      {"plus", {{-0.7f, -2}, {0.7f, -2}, {0.7f, -0.7f}, {2, -0.7f}, {2, 0.7f}, {0.7f, 0.7f}, {0.7f, 2}, {-0.7f, 2}, {-0.7f, 0.7f}, {-2, 0.7f}, {-2, -0.7f}, {-0.7f, -0.7f}}, false, false},
+      {"staircase", {{-2, -2}, {2, -2}, {2, -1}, {1, -1}, {1, 0}, {0, 0}, {0, 1}, {-1, 1}, {-1, 2}, {-2, 2}}, false, false},
+      {"slit one wall thick", {{-2, -2}, {2, -2}, {2, 2}, {0.1f, 2}, {0.1f, 0}, {-0.1f, 0}, {-0.1f, 2}, {-2, 2}}, false, true},
+      {"triangle", {{-2, -1.5f}, {2, -1.5f}, {0.3f, 2}}, true, false},
+      {"one degree corner", {{-apex, -half}, {apex, 0}, {-apex, half}}, true, true},
+      {"odd pentagon", {{-2, -1}, {0.5f, -2}, {2.1f, 0.3f}, {0.4f, 2}, {-1.7f, 1.2f}}, true, false},
+  };
+}
+
+/* The outline pieces of every shape in four ways: as a room, as a solid, as a pocket cut in a box and (convex ones) as an Intersect
+ * of a box - at the places and turns given - on one path. */
+void r497te_outline_sweep(Path path, const std::vector<Vec3> &places, const std::vector<Vec3> &turns, bool pockets, R497Tally &room_t, R497Tally &solid_t, R497Tally &pocket_t,
+                          R497Tally &inter_t) {
+  for (const R497Shape &s : r497te_shapes()) {
+    /* The grid path cannot resolve a corner of one degree at a 0.1 m cell (the sliver is 0.04 m across at its far end): it drops it or leaves
+     * faces that are not simple. That is the grid's resolution, not what this round changed; the exact path takes it (and is checked with it). */
+    if (path == Path::Field && std::string(s.name) == "one degree corner") continue;
+    const double area = r497te_area(s.pts);
+    for (const Vec3 &at : places)
+      for (const Vec3 &turn_deg : turns) {
+        const Quat turn = Quat::euler(turn_deg);
+        char label[160];
+        std::snprintf(label, sizeof label, "%s %s at (%g, %g, %g) turned (%g, %g, %g)", r476_name(path), s.name, at.x, at.y, at.z, turn_deg.x, turn_deg.y, turn_deg.z);
+        room_t.add(r476_build({r497te_rig(r497_room(s.pts, Vec3(0.0f)), at, turn)}, path), std::string("room ") + label, -1.0, s.may_refuse);
+        solid_t.add(r476_build({r497te_rig(r480_outline(1, s.pts, 2.0f, Vec3(0.0f)), at, turn)}, path), std::string("solid ") + label, area * 2.0);
+        if (pockets) {
+          const std::vector<Piece> pocket = {r497te_rig(box_piece(1, {6, 3, 6}, Vec3(0.0f)), at, turn),
+                                             r497te_rig(r480_outline(2, s.pts, 2.0f, Vec3(0.0f), Op::Subtract), at, turn, Vec3(0, 1, 0))};
+          pocket_t.add(r476_build(pocket, path), std::string("pocket ") + label, 108.0 - area * 1.5);
+        }
+        if (s.convex) {
+          const std::vector<Piece> cut = {r497te_rig(box_piece(1, {6, 3, 6}, Vec3(0.0f)), at, turn), r497te_rig(r480_outline(2, s.pts, 2.0f, Vec3(0.0f), Op::Intersect), at, turn)};
+          inter_t.add(r476_build(cut, path), std::string("intersect ") + label, area * 2.0);
+        }
+      }
+  }
+}
+
+AABB r497te_part(const R476Built &b, uint64_t id) {
+  AABB box;
+  for (size_t f = 0; f < b.mesh.face_count(); f++) {
+    if (b.faces.piece[f] != id) continue;
+    for (uint32_t i = 0; i < b.mesh.face_size(f); i++) box.add(b.mesh.positions[b.mesh.face_verts(f)[i]]);
+  }
+  return box;
+}
+
+}  // namespace
+
+static void tests_round497_te() {
+  test("blockout outline room (497 te): two boxes 1e-3 to 1e-6 m apart or overlapping, and at half, once and twice the tolerance, aligned and one turned 45 degrees: the gap and the overlap stay what they were", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const Vec3 p0(-9.8f, 1.3f, -4.2f);
+    const double tol_est = 1e-6 * 4.9;  // (c.tol = max(1e-6 * the cluster's diagonal, 2 float steps at its farthest coordinate); the diagonal here is about 5)
+    const double gaps[] = {1e-3, 1e-4, 1e-5, 1e-6, 0.5 * tol_est, tol_est, 2.0 * tol_est};
+    size_t bad = 0, unclean_refusals = 0;
+    for (int turned = 0; turned < 2; turned++)
+      for (int sign = -1; sign <= 1; sign += 2)
+        for (double g : gaps) {
+          const double centre = turned ? 1.0 + std::sqrt(2.0) : 2.0;
+          const Vec3 b_at(p0.x + (float)(centre + sign * g), p0.y, p0.z);
+          const double actual = (double)b_at.x - (double)p0.x - centre;  // (what the floats hold)
+          const std::vector<Piece> pieces = {box_piece(1, {2, 2, 2}, p0), box_piece(2, {2, 2, 2}, b_at, Op::Add, turned ? Quat::euler({0, 45, 0}) : Quat())};
+          const R476Built b = r476_build(pieces, Path::Crisp);
+          char what[120];
+          std::snprintf(what, sizeof what, "%s, gap %+.2e (floats hold %+.3e)", turned ? "turned" : "aligned", sign * g, actual);
+          if (!b.ok) {
+            unclean_refusals += b.mesh.face_count() != 0;
+            std::printf("    %s: refused (%s)\n", what, b.mesh.face_count() ? "and left a mesh" : "cleanly");
+            continue;
+          }
+          const std::string why = r497te_problem(b.mesh, std::fabs(actual) < 3e-5);
+          const double slack = 4.0 * tol_est + 2e-6;
+          const AABB box = b.mesh.bounds();
+          const double over = std::max(0.0, -actual);
+          const double want_v = turned ? 16.0 - 2.0 * over * over : 16.0 - 4.0 * over;
+          const double got_v = r476_volume(r497te_recentred(b.mesh));
+          const double width = (double)box.max.x - box.min.x, want_w = (turned ? 2.0 + 2.0 * std::sqrt(2.0) : 4.0) + actual;
+          const bool ok = why.empty() && std::fabs(width - want_w) <= slack && std::fabs(got_v - want_v) <= 16.0 * tol_est + 2e-5;
+          if (!ok) {
+            bad++;
+            std::printf("    %s: %s width %.9f want %.9f volume %.9f want %.9f\n", what, why.c_str(), width, want_w, got_v, want_v);
+          }
+          /* Each piece's own part keeps its extent where the gap is wider than the cluster's tolerance and the pieces are aligned. */
+          if (!turned && actual > 4.0 * tol_est) {
+            const AABB a = r497te_part(b, 1), c = r497te_part(b, 2);
+            const bool parts = std::fabs((double)a.max.x - (p0.x + 1.0)) <= slack && std::fabs((double)c.min.x - (b_at.x - 1.0)) <= slack;
+            if (!parts) bad++, std::printf("    %s: A's part ends at %.9f (want %.9f), B's begins at %.9f (want %.9f)\n", what, a.max.x, p0.x + 1.0, c.min.x, (double)b_at.x - 1.0);
+          }
+        }
+    CHECK(bad == 0);
+    CHECK(unclean_refusals == 0);
+  });
+
+  test("blockout outline room (497 te): thin things stay - a wall 1 mm thick, a wedge's thin end beside a box, a 1 cm piece in a cluster 100 m wide - closed, valid, not collapsed", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const Vec3 spots[] = {{-9.8f, 1.3f, -4.2f}, {3.37f, 0.71f, 7.93f}};
+    for (const Vec3 &at : spots)
+      for (float yaw : {0.0f, 37.0f, -113.0f}) {
+        const Quat turn = Quat::euler({0, yaw, 0});
+        char what[96];
+        std::snprintf(what, sizeof what, "at (%g, %g, %g) turned %g", at.x, at.y, at.z, yaw);
+        /* A wall 1 mm thick on its own, and flush against a slab (its face in the slab's plane, so the union has a 1 mm step). */
+        {
+          const R476Built one = r476_build({r497te_rig(box_piece(1, {4, 2.6f, 0.001f}, Vec3(0.0f)), at, turn)}, Path::Crisp);
+          CHECK(one.ok);
+          if (one.ok) {
+            CHECK(r497te_problem(one.mesh).empty());
+            CHECK_NEAR(r476_volume(r497te_recentred(one.mesh)), 4.0 * 2.6 * 0.001, 1e-4);
+          }
+          const R476Built two = r476_build({r497te_rig(box_piece(1, {4, 2.6f, 0.001f}, Vec3(0.0f)), at, turn), r497te_rig(box_piece(2, {4, 0.2f, 3}, Vec3(0.0f)), at, turn, Vec3(0, -1.4f, 1.4995f))},
+                                           Path::Crisp);
+          CHECK(two.ok);
+          if (two.ok) {
+            const std::string why = r497te_problem(two.mesh);
+            if (!why.empty()) std::printf("    thin wall on a slab %s: %s\n", what, why.c_str());
+            CHECK(why.empty());
+            CHECK_NEAR(r476_volume(r497te_recentred(two.mesh)), 4.0 * 2.6 * 0.001 + 4.0 * 0.2 * 3.0 - 4.0 * 0.2 * 0.001, 1e-3);
+          }
+        }
+        /* A wedge beside a box that is 0 (flush), 1e-5 and 1e-3 m off, and overlapped 1e-5. */
+        for (float d : {0.0f, 1e-5f, 1e-3f, -1e-5f}) {
+          for (int side = -1; side <= 1; side += 2) {
+            const std::vector<Piece> pieces = {r497te_rig(r480_wedge(1, {2, 1, 2}, Vec3(0.0f)), at, turn),
+                                               r497te_rig(box_piece(2, {2, 2, 2}, Vec3(0.0f)), at, turn, Vec3((float)side * (2.0f + d), 0, 0))};
+            const R476Built b = r476_build(pieces, Path::Crisp);
+            CHECK(b.ok);
+            if (!b.ok) continue;
+            const std::string why = r497te_problem(b.mesh, std::fabs(d) < 3e-5f);
+            if (!why.empty()) std::printf("    wedge and box %s, side %d, gap %g: %s\n", what, side, d, why.c_str());
+            CHECK(why.empty());
+            CHECK_NEAR(r476_volume(r497te_recentred(b.mesh)), 10.0, 2e-3);
+          }
+        }
+      }
+    /* A 1 cm box, flat on a slab and floating, aligned and turned, in a cluster 100 m wide (the tolerance there is about a tenth of a millimetre). */
+    for (float yaw : {0.0f, 37.0f}) {
+      const Quat turn = Quat::euler({0, yaw, 0});
+      const std::vector<Piece> pieces = {box_piece(1, {100, 2, 100}, {3.37f, 0.71f, 7.93f}),
+                                         box_piece(2, {0.01f, 0.01f, 0.01f}, {13.37f, 1.715f, 17.93f}, Op::Add, turn),   // standing on the slab
+                                         box_piece(3, {0.01f, 0.01f, 0.01f}, {-13.37f, 3.0f, 17.93f}, Op::Add, turn)};  // floating above it
+      const R476Built b = r476_build(pieces, Path::Crisp);
+      CHECK(b.ok);
+      if (!b.ok) continue;
+      const std::string why = r497te_problem(b.mesh);
+      if (!why.empty()) std::printf("    1 cm pieces in 100 m, turned %g: %s\n", yaw, why.c_str());
+      CHECK(why.empty());
+      for (uint64_t id : {2, 3}) {
+        const AABB part = r497te_part(b, id);
+        const bool there = part.valid() && part.max.y - part.min.y > 0.008f;
+        if (!there) std::printf("    1 cm piece %llu (turned %g) vanished or collapsed\n", (unsigned long long)id, yaw);
+        CHECK(there);
+      }
+      /* The floating one is a closed shell of its own: a mesh of 2 shells' worth of corners at least (8 + the slab's 8 + the standing one's). */
+      CHECK(b.mesh.vert_count() >= 24);
+    }
+  });
+
+  test("blockout outline room (497 te): T, U, plus, staircase, slit, triangle, 1 degree corner and odd pentagon outlines at odd places, turned about Y and tilted, as rooms, solids, pockets and Intersects on the exact path", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const std::vector<Vec3> places = {{-22.4f, 1.3f, -10.4f}, {-9.8f, 1.3f, -4.2f}, {3.37f, 0.71f, 7.93f}};
+    const std::vector<Vec3> turns = {{0, 0, 0}, {0, 37, 0}, {8, -113, -5}, {30, 45, 60}};
+    R497Tally room, solid, pocket, inter;
+    r497te_outline_sweep(Path::Crisp, places, turns, true, room, solid, pocket, inter);
+    room.report("rooms");
+    solid.report("solids");
+    pocket.report("pockets");
+    inter.report("intersects");
+    CHECK(room.bad == 0 && room.hard_refused == 0);
+    CHECK(solid.bad == 0 && solid.hard_refused == 0 && solid.off_volume == 0);
+    CHECK(pocket.bad == 0 && pocket.hard_refused == 0 && pocket.off_volume == 0);
+    CHECK(inter.bad == 0 && inter.hard_refused == 0 && inter.off_volume == 0);
+  });
+
+  test("blockout outline room (497 te): the same outlines on the field path, turned and tilted - closed, valid, no faces on top of each other (a sample)", [] {
+    const std::vector<Vec3> places = {{-9.8f, 1.3f, -4.2f}};
+    const std::vector<Vec3> turns = {{0, 0, 0}, {8, -113, -5}};
+    R497Tally room, solid, pocket, inter;
+    r497te_outline_sweep(Path::Field, places, turns, true, room, solid, pocket, inter);
+    room.report("field rooms");
+    solid.report("field solids");
+    pocket.report("field pockets");
+    inter.report("field intersects");
+    CHECK(room.bad == 0 && room.hard_refused == 0);
+    CHECK(solid.bad == 0 && solid.hard_refused == 0);
+    CHECK(pocket.bad == 0 && pocket.hard_refused == 0);
+    CHECK(inter.bad == 0 && inter.hard_refused == 0);
+  });
+
+  test("blockout outline room (497 te): wedges, stairs and arches against a wall at odd places and turns - closed, valid, outward, no faces on top of each other, the volumes add up", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const Vec3 places[] = {{-22.4f, 1.3f, -10.4f}, {-9.8f, 1.3f, -4.2f}, {3.37f, 0.71f, 7.93f}};
+    const Vec3 turns[] = {{0, 0, 0}, {0, 37, 0}, {0, -113, 0}, {8, 61, -5}};
+    size_t bad = 0, runs = 0;
+    for (const Vec3 &at : places)
+      for (const Vec3 &t : turns) {
+        const Quat turn = Quat::euler(t);
+        char what[128];
+        std::snprintf(what, sizeof what, "at (%g, %g, %g) turned (%g, %g, %g)", at.x, at.y, at.z, t.x, t.y, t.z);
+        const Piece wall = r497te_rig(box_piece(1, {6, 3, 0.3f}, Vec3(0.0f)), at, turn);
+        const Piece stairs = r497te_rig(r480_stairs(2, {1.5f, 1.2f, 2}, 6, true, Vec3(0.0f)), at, turn, Vec3(-1.5f, -0.9f, 1.15f));
+        const Piece wedge = r497te_rig(r480_wedge(3, {1.5f, 1.2f, 2}, Vec3(0.0f)), at, turn, Vec3(1.5f, -0.9f, 1.15f));
+        const double stairs_v = r476_volume(r476_build({stairs}, Path::Crisp).mesh), wedge_v = r476_volume(r476_build({wedge}, Path::Crisp).mesh);
+        const R476Built all = r476_build({wall, stairs, wedge}, Path::Crisp);
+        runs++;
+        std::string why = all.ok ? r497te_problem(all.mesh) : "refused";
+        if (all.ok) {
+          const double want = 5.4 + std::fabs(stairs_v) + std::fabs(wedge_v), got = r476_volume(r497te_recentred(all.mesh));
+          if (std::fabs(got - want) > 2e-3) why += "volume " + std::to_string(got) + " want " + std::to_string(want);
+        }
+        if (!why.empty()) bad++, std::printf("    wall, stairs, wedge %s: %s\n", what, why.c_str());
+        /* An arch on the wall (flush with both its faces) and an arch door cut through it. */
+        const Piece arch_add = r497te_rig(r480_arch(4, 1.5f, 1.0f, 180.0f, 8, 0.3f, Vec3(0.0f)), at, turn, Vec3(0, 0.5f, 0));
+        const Piece arch_cut = r497te_rig(r480_arch(4, 1.2f, 0.1f, 180.0f, 8, 0.6f, Vec3(0.0f), Op::Subtract), at, turn, Vec3(0, -1.5f, 0));
+        for (const Piece &arch : {arch_add, arch_cut}) {
+          const R476Built b = r476_build({wall, arch}, Path::Crisp);
+          runs++;
+          const std::string w2 = b.ok ? r497te_problem(b.mesh) : "refused";
+          if (!w2.empty()) bad++, std::printf("    wall and arch (%s) %s: %s\n", arch.op == Op::Add ? "added" : "cut", what, w2.c_str());
+        }
+      }
+    std::printf("    wedge / stairs / arch assemblies: %zu runs, %zu not clean\n", runs, bad);
+    CHECK(bad == 0);
+  });
+
+  test("blockout outline room (497 te): an Intersect box gives the same result as before - the part inside both, its bounds exact - with its sides flush, partly outside, turned, at odd places", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const Vec3 places[] = {{-22.4f, 1.3f, -10.4f}, {-9.8f, 1.3f, -4.2f}, {3.37f, 0.71f, 7.93f}, {0, 0, 0}};
+    size_t bad = 0;
+    for (const Vec3 &at : places) {
+      /* (a) A box in the middle of a bigger one: its own size. (b) One that sticks out at +x (flush on y and z): the part inside. (c) Two Add boxes meeting
+       * in a plane, an Intersect across the meeting. (d) The cut turned 45 degrees about Y inside the big box. */
+      struct Case {
+        const char *name;
+        std::vector<Piece> pieces;
+        double volume;
+        Vec3 lo, hi;  // relative to `at`
+      };
+      const std::vector<Case> cases = {
+          {"inside", {box_piece(1, {4, 4, 4}, at), box_piece(2, {2, 3, 2}, at + Vec3(0.3f, 0.2f, -0.1f), Op::Intersect)}, 12.0, Vec3(-0.7f, -1.3f, -1.1f), Vec3(1.3f, 1.7f, 0.9f)},
+          {"sticking out", {box_piece(1, {4, 4, 4}, at), box_piece(2, {2, 2, 2}, at + Vec3(1.5f, 0, 0), Op::Intersect)}, 6.0, Vec3(0.5f, -1, -1), Vec3(2, 1, 1)},
+          {"flush faces", {box_piece(1, {4, 4, 4}, at), box_piece(2, {2, 4, 4}, at + Vec3(1, 0, 0), Op::Intersect)}, 32.0, Vec3(0, -2, -2), Vec3(2, 2, 2)},
+          {"across two boxes", {box_piece(1, {2, 2, 2}, at + Vec3(-1, 0, 0)), box_piece(2, {2, 2, 2}, at + Vec3(1, 0, 0)), box_piece(3, {2, 1, 2}, at, Op::Intersect)}, 4.0, Vec3(-1, -0.5f, -1),
+           Vec3(1, 0.5f, 1)},
+          {"turned inside", {box_piece(1, {6, 4, 6}, at), box_piece(2, {2, 2, 2}, at, Op::Intersect, Quat::euler({0, 45, 0}))}, 8.0, Vec3(-1.41421356f, -1, -1.41421356f), Vec3(1.41421356f, 1, 1.41421356f)},
+      };
+      for (const Case &c : cases) {
+        const R476Built b = r476_build(c.pieces, Path::Crisp);
+        std::string why = b.ok ? r497te_problem(b.mesh) : "refused";
+        if (b.ok) {
+          const AABB box = b.mesh.bounds();
+          const double slack = 3e-6 * 6.0 + 4e-6;
+          for (int a = 0; a < 3; a++)
+            if (std::fabs((double)box.min[a] - (at[a] + c.lo[a])) > slack || std::fabs((double)box.max[a] - (at[a] + c.hi[a])) > slack) why += " bounds on axis " + std::to_string(a) + " differ";
+          const double v = r476_volume(r497te_recentred(b.mesh));
+          if (std::fabs(v - c.volume) > 1e-3) why += " volume " + std::to_string(v) + " want " + std::to_string(c.volume);
+        }
+        if (!why.empty()) bad++, std::printf("    Intersect '%s' at (%g, %g, %g): %s\n", c.name, at.x, at.y, at.z, why.c_str());
+      }
+    }
+    CHECK(bad == 0);
+  });
+
+  test("blockout outline room (497 te): the exact and the grid path agree on bounds and volume to within the grid's cell for turned and tilted rooms, wedges, stairs and arches", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    const float cell = 0.05f;
+    const Vec3 at(-9.8f, 1.3f, -4.2f);
+    struct Case {
+      const char *name;
+      std::vector<Piece> pieces;
+    };
+    std::vector<Case> cases;
+    for (const R497Shape &s : r497te_shapes()) {
+      if (s.may_refuse) continue;
+      cases.push_back({s.name, {r497te_rig(r497_room(s.pts, Vec3(0.0f)), at, Quat::euler({8, -113, -5}))}});
+    }
+    const Quat turn = Quat::euler({0, 37, 0});
+    cases.push_back({"wall, stairs and wedge",
+                     {r497te_rig(box_piece(1, {6, 3, 0.3f}, Vec3(0.0f)), at, turn), r497te_rig(r480_stairs(2, {1.5f, 1.2f, 2}, 6, true, Vec3(0.0f)), at, turn, Vec3(-1.5f, -0.9f, 1.15f)),
+                      r497te_rig(r480_wedge(3, {1.5f, 1.2f, 2}, Vec3(0.0f)), at, turn, Vec3(1.5f, -0.9f, 1.15f))}});
+    cases.push_back({"wall and arch", {r497te_rig(box_piece(1, {6, 3, 0.3f}, Vec3(0.0f)), at, turn), r497te_rig(r480_arch(2, 1.5f, 1.0f, 180.0f, 12, 0.3f, Vec3(0.0f)), at, turn, Vec3(0, 0.5f, 0))}});
+    size_t bad = 0;
+    for (const Case &c : cases) {
+      const R476Built crisp = r476_build(c.pieces, Path::Crisp, cell), field = r476_build(c.pieces, Path::Field, cell);
+      if (!crisp.ok || !field.ok) {
+        bad++;
+        std::printf("    %s: crisp %d field %d\n", c.name, (int)crisp.ok, (int)field.ok);
+        continue;
+      }
+      const AABB a = crisp.mesh.bounds(), b = field.mesh.bounds();
+      double off = 0.0;
+      for (int i = 0; i < 3; i++) off = std::max(off, std::max(std::fabs((double)a.min[i] - b.min[i]), std::fabs((double)a.max[i] - b.max[i])));
+      double area = 0.0;
+      for (size_t f = 0; f < crisp.mesh.face_count(); f++) {
+        const uint32_t *v = crisp.mesh.face_verts(f);
+        for (uint32_t i = 1; i + 1 < crisp.mesh.face_size(f); i++)
+          area += 0.5 * length(cross(crisp.mesh.positions[v[i]] - crisp.mesh.positions[v[0]], crisp.mesh.positions[v[i + 1]] - crisp.mesh.positions[v[0]]));
+      }
+      const double va = r476_volume(r497te_recentred(crisp.mesh)), vb = r476_volume(r497te_recentred(field.mesh));
+      const bool ok = off <= cell && std::fabs(va - vb) <= area * cell * 0.5;
+      if (!ok) bad++;
+      std::printf("    %s: bounds differ by %.4f, volume %.4f vs %.4f (limit %.4f)%s\n", c.name, off, va, vb, area * cell * 0.5, ok ? "" : "  <-- FAIL");
+    }
+    CHECK(bad == 0);
+  });
+
+  test("blockout outline room (497 te): the same pieces built twice, and on two threads at once, give the same bytes", [] {
+    const Quat turn = Quat::euler({8, -113, -5});
+    const std::vector<Vec2> t_pts = r497te_shapes()[1].pts;
+    const std::vector<Piece> pieces = {r497_room(r497_l(), Vec3(-9.8f, 1.3f, -4.2f)), r497te_rig(r497_room(t_pts, Vec3(0.0f)), Vec3(3.37f, 0.71f, 7.93f), turn),
+                                       r480_wedge(3, {2, 1, 2}, Vec3(-4.4f, 0.2f, 1.9f))};
+    for (Path path : r476_paths()) {
+      const R476Built first = r476_build(pieces, path), second = r476_build(pieces, path);
+      CHECK(first.ok && second.ok && r476_same_mesh(first, second));
+      R476Built left, right;
+      std::thread one([&] { left = r476_build(pieces, path); });
+      std::thread two([&] { right = r476_build(pieces, path); });
+      one.join();
+      two.join();
+      CHECK(left.ok && right.ok);
+      CHECK(r476_same_mesh(first, left));
+      CHECK(r476_same_mesh(first, right));
+    }
+  });
+
+  test("blockout outline room (497 te): NaN and infinite outline points, positions, sizes and heights are refused cleanly or built into something valid - nothing half-made", [] {
+    const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+    std::vector<std::vector<Piece>> bad_sets;
+    for (float v : {nan, inf, -inf}) {
+      std::vector<Vec2> pts = r497_l();
+      pts[2].x = v;
+      bad_sets.push_back({r497_room(pts, {0, 1.3f, 0})});
+      pts = r497_l(), pts[4].y = v;
+      bad_sets.push_back({r480_outline(1, pts, 2.0f, {0, 1, 0})});
+      bad_sets.push_back({r497_room(r497_l(), {v, 1.3f, 0})});
+      bad_sets.push_back({r480_outline(1, r497_l(), v, {0, 1, 0})});
+      bad_sets.push_back({box_piece(1, {v, 1, 1}, {0, 0, 0})});
+      bad_sets.push_back({box_piece(1, {1, 1, 1}, {0, 0, 0}), r497_room(r497_l(), {2, 1.3f, v})});               // a good piece with a hostile one
+      bad_sets.push_back({box_piece(1, {2, 2, 2}, {0, 0, 0}), box_piece(2, {2, 2, 2}, {2, v, 0}, Op::Subtract)});
+    }
+    for (Path path : r476_paths()) {
+      for (const std::vector<Piece> &pieces : bad_sets) {
+        const R476Built b = r476_build(pieces, path);
+        if (!b.ok) {
+          CHECK(b.mesh.face_count() == 0);
+          continue;
+        }
+        bool finite = true;
+        for (const Vec3 &p : b.mesh.positions) finite = finite && std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z);
+        CHECK(finite);
+        const std::string why = r497te_problem(b.mesh);
+        if (!why.empty()) std::printf("    %s: hostile numbers built into something not clean: %s\n", r476_name(path), why.c_str());
+        CHECK(why.empty());
+      }
+    }
+  });
+
+  test("blockout outline room (497 te): at 1e5 m from the origin L rooms, pocketed boxes and boxes 1e-3 m apart are clean (a float there is 8 mm)", [] {
+    if (!blockout::crisp_available()) {
+      std::printf("    no exact path in this build: skipped\n");
+      return;
+    }
+    size_t bad = 0;
+    for (float s : {1e5f, -1e5f}) {
+      const Vec3 spots[] = {{s, 1.3f, s}, {s, 1.3f, -s}, {s + 12.5f, 1.3f, s - 7.25f}};
+      for (const Vec3 &at : spots)
+        for (float yaw : {0.0f, 37.0f}) {
+          const Quat turn = Quat::euler({0, yaw, 0});
+          const R476Built room = r476_build({r497te_rig(r497_room(r497_l(), Vec3(0.0f)), at, turn)}, Path::Crisp);
+          std::string why = room.ok ? r497te_problem(room.mesh) : "refused";
+          if (!why.empty()) bad++, std::printf("    L room at (%g, %g, %g) turned %g: %s\n", at.x, at.y, at.z, yaw, why.c_str());
+          const R476Built gap = r476_build({box_piece(1, {2, 2, 2}, at), box_piece(2, {2, 2, 2}, at + Vec3(2.0625f, 0, 0), Op::Add, turn)}, Path::Crisp);
+          why = gap.ok ? r497te_problem(gap.mesh) : "refused";
+          if (!why.empty()) bad++, std::printf("    two boxes at (%g, %g, %g) turned %g: %s\n", at.x, at.y, at.z, yaw, why.c_str());
+        }
+    }
+    CHECK(bad == 0);
+  });
+}
+
 void run_blockout_tests() {
   tests_round476();
   tests_round476_engineer();
@@ -18422,4 +18993,6 @@ void run_blockout_tests() {
   tests_round483();
   tests_round483_lesson();
   tests_round483_te();
+  tests_round497();
+  tests_round497_te();
 }
