@@ -119,6 +119,8 @@ Mat4 Editor::transform_delta(const Recti &view) {
       if (t.axis >= 0 && !t.plane) {
         const Vec3 a = axis_dir(t.axis);
         move = a * ((closest_on_line_to_ray(t.pivot, a, r1) - closest_on_line_to_ray(t.pivot, a, r0)) * fine);
+        float along = dot(move, a);  // (round 501: moved Blockouts land on other Blockouts' faces and corners; Ctrl is the grid's below)
+        if (!in.ctrl() && !t.edit && blockout_modal_snap(a, along)) move = a * along;
       }
       else {
         /* On the view plane through the pivot, or the plane without the locked axis. */

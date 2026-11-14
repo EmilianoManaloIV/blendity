@@ -152,3 +152,34 @@ of the landing knows about modifiers.
 - **Decision 10 stands:** Apply (one modifier or all) is refused on a Blockout, now with Bake to Mesh as the offered
   way on. Bake to Mesh and Unbake leave the stack where it is: on a baked object it is an ordinary object's stack.
 - Not done: a modifier on a single piece (a piece is numbers), a modifier that changes the pieces.
+
+## Amendment (round 501)
+
+Snapping between Blockouts and joining them (task 0485). No new data: the join is the hierarchy's own operation on objects that already exist.
+
+- **Snapping.** A moved piece (the Move gizmo, the modal G with an axis lock) and a dragged face handle take the face
+  planes and corners of the other live Blockouts in the scene as targets after their own Blockout's pieces; a Blockout
+  (or several) moved along one axis lands a corner of its pieces' boxes (a room with its shell) in the plane of one of
+  theirs, within the piece snap's pixel reach, Ctrl off; the gizmo marks the corner that landed. Plane and free drags
+  take no Blockout snap. The targets are the pieces' boxes in the world, not the built meshes: they need no build, and
+  are collected once for the length of a drag and then cost one dot product a point a frame (`Editor::blockout_targets`:
+  keyed on the scene, the moving set, the object count and use in the frame before - not on the structure epoch, which
+  the gizmo bumps every frame).
+- **Touching** is read from the pieces too: a Blockout touches another when a solid piece of one - an Add piece, or a
+  room's wall, floor and ceiling slabs (the shell minus the air) - meets one of the other within a millimetre
+  (`Editor::blockout_touching`, per edit epoch). A Blockout of cutters alone has no matter and touches nothing; one
+  standing in a room's air does not touch the room.
+- **Join.** The other Blockouts' children are re-parented under the active Blockout keeping their world matrices
+  (`Scene::set_parent` with `keep_world`), after the scale of the other Blockout went into its pieces' numbers (ADR 0135,
+  `blockout_scale_apply` with fold). Then each moved branch's resulting Scale (the active Blockout's and its parents')
+  goes into the numbers as Apply Scale to Size does, and the rooms' wall / floor / ceiling and the Blend radii are scaled
+  by the ratio of the two Blockouts' world scales, so under an even scale every piece keeps its world box and thickness
+  and carries Scale 1. An unevenly scaled active Blockout shears a moved piece that is turned against it, as it shears its own
+  (round 496's status line says so). The emptied objects are destroyed: one undo step, ids kept by the scene snapshot.
+  Differing settings take the active Blockout's. A piece without an override for a class it makes keeps its old
+  Blockout's material as an override where the two differ; two limits: an empty override means the Blockout's, so an old
+  default material cannot be kept, and where the two Blockouts' outer faces lie in one plane the joined mesh has one face
+  with one material (round 482's rule), so those faces take the active Blockout's - the kernel is not changed. The removed
+  Blockout's modifiers and other components go with it; the active Blockout's modifiers apply to the pieces that came in,
+  and the pieces that came in follow the active Blockout's own in the build order. A baked Blockout is refused (Unbake first),
+  as are Play, Edit Mode, a Blockout holding the active one, and a zero or non-finite scale.
