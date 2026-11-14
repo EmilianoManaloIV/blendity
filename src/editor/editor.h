@@ -1977,7 +1977,7 @@ class Editor {
     upd_.extras = extras.empty() ? std::vector<releases::Release>() : releases::parse("[" + extras + "]");
     return offer_libraries();
   }
-  void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(); }
+  void record_buttons_for_test(bool on) { ui_.record_buttons = on; if (!on) ui_.button_rects.clear(), ui_.controls.clear(); }
   /* Preferences in a headless test: written to and read from `path` (never the user's). */
   void prefs_for_test(const std::string &path) {
     prefs_path_ = path;

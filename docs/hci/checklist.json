@@ -93,7 +93,13 @@
    {"id": "I6", "task": "Path-traced preview", "steps": "Render window > Preview with the path tracer", "expect": "Noise clears progressively", "target": 4, "source": "estimate", "ui": ["Preview"]},
    {"id": "I7", "task": "Develop a render (exposure, curve)", "steps": "Editing window > Render; adjust Exposure", "expect": "The picture brightens; Save keeps an .edit", "target": 8, "source": "estimate", "ui": ["Render"]},
    {"id": "I8", "task": "Point Blendity at your own ffmpeg", "steps": "Preferences > FFmpeg; type the path, Enter", "expect": "Render Animation uses it", "target": 8, "source": "reach", "ui": []},
-   {"id": "I9", "task": "MoonRay: check it works (needs MoonRay)", "steps": "Preferences > Renderers > Check", "expect": "A test render's result and time", "target": 4, "source": "reach", "ui": ["Check"]}
+   {"id": "I9", "task": "MoonRay: check it works (needs MoonRay)", "steps": "Preferences > Renderers > Check", "expect": "A test render's result and time", "target": 4, "source": "reach", "ui": ["Check"]},
+   {"id": "I10", "task": "Put light probes where you want them", "steps": "GameObject > Light > Light Probe Group; move it; Lighting > Generate Lighting", "expect": "The bake uses the group's probes instead of the automatic grid", "target": 6, "source": "estimate", "ui": ["Light Probe Group"]},
+   {"id": "I11", "task": "Bake a Mixed light as Shadowmask", "steps": "Lighting > Lighting Mode > Shadowmask; a Point Light's Mode > Mixed; Generate Lighting", "expect": "Baked shadows from the still meshes, live shadows from the moving ones", "target": 8, "source": "estimate", "ui": ["Lighting Mode", "Shadowmask"]},
+   {"id": "I12", "task": "Soften a baked light's shadow", "steps": "Select a Baked light; Inspector > Baked Shadow Radius 0.3; Generate Lighting", "expect": "The shadow's edge widens with distance from what casts it", "target": 6, "source": "estimate", "ui": ["Baked Shadow Radius"]},
+   {"id": "I13", "task": "Take the ringing out of the probes", "steps": "Lighting > Probe Remove Ringing > Hanning", "expect": "No dark halo opposite a bright light on a probe-lit object", "target": 4, "source": "estimate", "ui": ["Probe Remove Ringing"]},
+   {"id": "I14", "task": "Choose the bake's denoiser", "steps": "Lighting > Denoiser", "expect": "The lightmap's grain changes; the corners stay sharp", "target": 4, "source": "estimate", "ui": ["Denoiser"]},
+   {"id": "I15", "task": "Match a Unity project's light intensity", "steps": "Open a Unity project's scene; read the toast; Lighting > Lights Gamma", "expect": "The lights as bright as in Unity; the toast names the setting", "target": 6, "source": "estimate", "ui": ["Lights Gamma"]}
   ]},
   {"id": "J", "name": "Rigging, skinning and hair", "items": [
    {"id": "J1", "task": "Rig a humanoid", "steps": "Rigging > Humanoid Rig", "expect": "A skeleton with IK on hands and feet", "target": 4, "source": "estimate", "ui": []},
@@ -116,7 +122,9 @@
    {"id": "K10", "task": "AI Inbetween a span (local AI install)", "steps": "AI Inbetween; Apply", "expect": "A ghost between the keys, then keys", "target": 5, "source": "estimate", "ui": ["AI Inbetween"]},
    {"id": "K11", "task": "AI: a span by frame numbers", "steps": "AI ... options > From / To > Make This Span", "expect": "Only that span made", "target": 8, "source": "reach", "ui": ["Make This Span"]},
    {"id": "K12", "task": "Ragdoll a fall (needs Blender's libraries)", "steps": "Puppet > Ragdoll Events > Go Limp Here; Ragdoll", "expect": "The body falls and settles", "target": 6, "source": "reach", "ui": ["Ragdoll Events"]},
-   {"id": "K13", "task": "Generate a walk cycle and keep the style", "steps": "Rigging > Walk Cycle > Generate into the Clip; Save Style", "expect": "A walking clip; Assets/Gaits/<name>.gait", "target": 8.1, "source": "klm", "ui": ["Save Style", "Load Style..."]}
+   {"id": "K13", "task": "Generate a walk cycle and keep the style", "steps": "Rigging > Walk Cycle > Generate into the Clip; Save Style", "expect": "A walking clip; Assets/Gaits/<name>.gait", "target": 8.1, "source": "klm", "ui": ["Save Style", "Load Style..."]},
+   {"id": "K14", "task": "Record keys while you pose", "steps": "Animation > Record (the red button); move a hand; move the playhead; move it again", "expect": "A key at each playhead position; the Scene view says Record is on", "target": 6, "source": "estimate", "ui": ["Record"]},
+   {"id": "K15", "task": "Scrub a posed humanoid", "steps": "Drag the playhead across a clip of a skinned humanoid", "expect": "The body follows the playhead without a stall", "target": 3, "source": "estimate", "ui": []}
   ]},
   {"id": "L", "name": "Sequencer and Play", "items": [
    {"id": "L1", "task": "Make a sequence of two clips", "steps": "Sequencer > Create; drop two clips on a track", "expect": "Bars on the timeline; preview plays them", "target": 10, "source": "estimate", "ui": ["Create"]},
@@ -156,6 +164,20 @@
    {"id": "Q2", "task": "Edit Mode on a 200k-face mesh", "steps": "Tab on a big mesh; select and move a face", "expect": "No pause over a fraction of a second", "target": 5, "source": "estimate", "ui": []},
    {"id": "Q3", "task": "First render after start", "steps": "Start Blendity; F12", "expect": "The first render as fast as the second (no long cold start)", "target": 5, "source": "estimate", "ui": []},
    {"id": "Q4", "task": "Resize a window to 1024 x 640", "steps": "Shrink the window", "expect": "Nothing overlaps; long labels end in ...", "target": 3, "source": "sweep", "ui": []}
+  ]},
+  {"id": "R", "name": "Blockout", "items": [
+   {"id": "R1", "task": "Start a Blockout", "steps": "GameObject > Blockout > New Blockout", "expect": "A Blockout with one 2 m box, selected; six handles on its faces", "target": 3, "source": "estimate", "ui": ["New Blockout"]},
+   {"id": "R2", "task": "Cut a hole with a cylinder", "steps": "GameObject > Blockout > Subtract Cylinder", "expect": "The box with a round hole through it; the piece drawn yellow", "target": 5, "source": "estimate", "ui": ["Operation"]},
+   {"id": "R3", "task": "Draw a room with the Draw Piece tool", "steps": "Shift+R (Draw Piece); drag a rectangle on the ground; click for the height", "expect": "A room with walls, floor and ceiling; Esc leaves the tool", "target": 6, "source": "estimate", "ui": ["Draw Piece"]},
+   {"id": "R4", "task": "Stretch a piece by a face handle", "steps": "Select the piece; drag the square on a face", "expect": "That face moves, the opposite one stays; one Undo step", "target": 3, "source": "estimate", "ui": []},
+   {"id": "R5", "task": "Join two rooms", "steps": "Draw a second room overlapping the first", "expect": "The wall between is gone where the air is shared", "target": 6, "source": "estimate", "ui": []},
+   {"id": "R6", "task": "Add a door and a window", "steps": "Point at a wall; GameObject > Blockout > Door; then Window", "expect": "Openings cut in that wall", "target": 6, "source": "estimate", "ui": []},
+   {"id": "R7", "task": "Add stairs and turn them", "steps": "GameObject > Blockout > Add Stairs; Inspector > Turn 90", "expect": "A flight of steps, turned a quarter round; Fill Under makes it solid", "target": 6, "source": "estimate", "ui": ["Stairs", "Turn 90", "Fill Under"]},
+   {"id": "R8", "task": "Draw an L-shaped room", "steps": "Draw Piece > Outline Room; click the corners; Enter; pull the height", "expect": "One room whose wall is as thick at the inner corner as elsewhere", "target": 10, "source": "estimate", "ui": ["Outline Room"]},
+   {"id": "R9", "task": "Round the joins", "steps": "Select a piece; Inspector > Blend Radius 0.2", "expect": "The piece meets its neighbours with a fillet", "target": 4, "source": "estimate", "ui": ["Blend Radius"]},
+   {"id": "R10", "task": "Scale a Blockout without shear", "steps": "Scale the Blockout 2 along X; read its Scale; Apply Scale to Pieces on an old scene", "expect": "Scale reads 1 1 1; turned pieces grow along their own axes", "target": 6, "source": "estimate", "ui": ["Apply Scale to Pieces"]},
+   {"id": "R11", "task": "Bake to a mesh and back", "steps": "Inspector > Bake to Mesh; then Unbake", "expect": "An ordinary mesh that Edit Mode takes; Unbake brings the pieces back", "target": 6, "source": "estimate", "ui": ["Bake to Mesh", "Unbake"]},
+   {"id": "R12", "task": "Try Edit Mode on a Blockout", "steps": "Select the Blockout; Tab", "expect": "Refused, with the reason and what to do instead", "target": 2, "source": "estimate", "ui": []}
   ]}
  ]
 }

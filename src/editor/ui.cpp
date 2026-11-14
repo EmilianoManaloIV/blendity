@@ -114,7 +114,7 @@ using namespace platform;
 /* ===================================================================== */
 
 void Context::begin_frame(Image *target, double now) {
-  if (record_buttons) button_rects.clear(), tooltip_texts.clear();  // (tests: only what this frame drew)
+  if (record_buttons) button_rects.clear(), tooltip_texts.clear(), controls.clear();  // (tests: only what this frame drew)
   elided_key_ = 0, elided_label_.clear();  // (task 0293: a cut label belongs to the frame that drew it)
   if (!in.down[0] && !in.released[0]) touch_candidate_ = touch_scroll_id_ = 0, finger_widget_drag_ = false;  // (task 0215)
   if (in.pressed[0]) touch_scrolled_ = finger_widget_drag_ = false, finger_press_y_ = in.my;
@@ -218,6 +218,7 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
   }
   disabled_reasons[label] = why ? why : "";
   if (record_buttons) button_rects[label] = r;
+  record_control("button", r, label);
   frame(r, theme.strip, theme.border, px(3));
   const int iw = icon != Icon::None ? font.line_height() - px(4) : 0;
   const std::string shown = elide(label, r.w - px(8) - (iw ? iw + px(4) : 0));  // (task 0293: cut with "...", not drawn past the button)
@@ -242,6 +243,7 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
 
 bool Context::button(const Recti &r, const std::string &text, bool selected, Icon icon) {
   if (record_buttons) button_rects[text] = r;
+  record_control("button", r, text);
   Id i = id(text) ^ (rect_key(r) * 0x9E3779B97F4A7C15ull);
   bool hot = hovered(r);
   bool clicked = false;
@@ -291,6 +293,7 @@ std::string Context::elide(const std::string &text, int room) {
 }
 
 bool Context::icon_button(const Recti &r, Icon icon, bool selected, const char *tip) {
+  if (record_buttons) record_control("icon", r, tip ? tip : "");
   Id i = id((uint64_t)icon) ^ (rect_key(r) * 0x9E3779B97F4A7C15ull);
   bool hot = hovered(r);
   bool clicked = false;
@@ -313,6 +316,7 @@ bool Context::checkbox(const Recti &r, bool &v) {
   int s = std::min(r.h, font.line_height()) - px(1);
   Recti box{r.x, r.y + (r.h - s) / 2, s, s};
   bool hot = hovered(box.intersect(r).empty() ? r : Recti{r.x, r.y, s + px(2), r.h});
+  record_control("checkbox", Recti{r.x, r.y, s + px(2), r.h});  // (what a click reaches; toggle_row widens it to its row)
   frame(box, theme.field, hot ? theme.field_hover : theme.field_border, px(2));
   if (v) draw_icon(Icon::Check, box.shrink(px(2)), theme.text_bright);
   bool changed = false;
@@ -327,6 +331,7 @@ bool Context::checkbox(const Recti &r, bool &v) {
 
 bool Context::toggle_row(const Recti &r, const std::string &text, bool &v) {
   bool changed = checkbox(r, v);
+  if (record_buttons && !controls.empty()) controls.back().r = r, controls.back().label = text;  // (the whole row takes the click)
   int s = std::min(r.h, font.line_height());
   label({r.x + s + px(5), r.y, r.w - s - px(5), r.h}, text);
   if (!changed && hovered(r) && in.pressed[0]) {
@@ -338,6 +343,7 @@ bool Context::toggle_row(const Recti &r, const std::string &text, bool &v) {
 
 bool Context::foldout(const Recti &r, const std::string &text, bool &open, Icon icon) {
   bool hot = hovered(r);
+  record_control("foldout", r, text);
   int a = font.line_height() - px(4);
   draw_icon(open ? Icon::ArrowDown : Icon::ArrowRight, {r.x, r.y + (r.h - a) / 2, a, a}, theme.text);
   int x = r.x + a + px(3);
@@ -431,6 +437,7 @@ static size_t utf8_after(const std::string &s, size_t i) {
 
 int Context::edit_text(Id i, const Recti &r, std::string &buf) {
   edit_seen_ = true;
+  edit_rect_ = r;
   int result = 0;
   if (in.pressed[0] && !r.contains(in.mx, in.my)) return 2;  // blur commits
   if (in.pressed[0] && r.contains(in.mx, in.my)) {
@@ -514,6 +521,7 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   bool hot = hovered(r);
   last_widget_ = r;
   last_hovered_ = hot;
+  if (record_buttons) record_control("text", r, placeholder ? placeholder : "", true);
   const Id before = order_last_;
   order_last_ = i;
   if (edit_id_ != i && (focus_next_ || focus_request_ == i)) {
@@ -884,6 +892,7 @@ bool Context::scrub(Id i, const Recti &r, float &v, float speed, float mn, float
 bool Context::float_field(Id i, const Recti &r, float &v, float speed, float mn, float mx, const char *fmt) {
   last_widget_ = r;
   last_hovered_ = hovered(r);
+  record_control("number", r, "", true);
   const Id before = order_last_;  // the field drawn before this one (Shift+Tab)
   order_last_ = i;
   if (edit_id_ != i && (focus_next_ || focus_request_ == i)) {
@@ -968,6 +977,7 @@ bool Context::finger_sideways(int press_x) const {
 }
 
 bool Context::slider(Id i, const Recti &r, float &v, float mn, float mx) {
+  record_control("slider", r);
   bool hot = hovered(r);
   if (hot && in.pressed[0]) active_ = i, slider_press_x_ = in.mx;
   const bool finger = touch_scroll && in.touch;
@@ -999,6 +1009,7 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   }
   bool hot = hovered(r);
   combo_rects_[i] = r;
+  if (record_buttons) record_control("combo", r, (v >= 0 && v < count) ? options[v] : "");
   frame(r, theme.button, hot ? theme.field_hover : theme.border, px(3));
   std::string cur = (v >= 0 && v < count) ? options[v] : "";
   label({r.x + px(5), r.y, r.w - r.h - px(5), r.h}, cur, theme.text_bright);
@@ -1231,6 +1242,7 @@ bool Context::curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel) {
 }
 
 bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
+  record_control("color", r);
   bool changed = false;
   auto it = color_results_.find(i);
   if (it != color_results_.end()) {
@@ -1697,6 +1709,7 @@ void Context::draw_popups() {
 bool Context::menu_item(const std::string &text, const char *shortcut, bool checked, bool enabled, Icon icon) {
   Recti r = popup_row();
   if (record_buttons) button_rects["menu:" + text] = r;  // (tests click a menu row by its text)
+  record_control("menu", r, text);
   if (record_buttons) menu_shortcuts[text] = shortcut ? shortcut : "";
   bool hot = hovered(r);
   if (hot && enabled) {
@@ -1730,6 +1743,7 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
 bool Context::submenu(const std::string &text, int width, std::function<void()> body) {
   Recti r = popup_row();
   if (record_buttons) button_rects["submenu:" + text] = r;  // (tests find a submenu by its text: task 0267)
+  record_control("submenu", r, text);
   Id sid = id(text) ^ (current_layer_ * 0x1000193ull);
   bool open = popup_open(sid);
   bool hot = hovered(r);

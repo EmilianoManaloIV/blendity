@@ -1,5 +1,8 @@
 {
- "elided": 15,
- "no-tooltip": 16,
- "overlap": 3
+ "covered": 18,
+ "elided": 49,
+ "no-key": 328,
+ "no-tooltip": 11,
+ "overlap": 6,
+ "small": 473
 }
