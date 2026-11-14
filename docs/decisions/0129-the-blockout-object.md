@@ -145,6 +145,29 @@ work on the spot.
   `blockout_window_set_style` / `blockout_piece_edited`: a window that becomes Round starts as a circle, an opening
   that is not a window has no style (round 499 gives doors theirs).
 
+## Amended in round 499 (task 0483): a styled door, the same way
+- **A door's Style** (Single, Double, Sliding, Arched, Revolving; Opening Only is the hole of round 478 and builds to
+  the same bytes) uses round 498's mechanism: one piece, kernel pieces made by `blockout_snapshot`, ids that name the
+  door. New numbers: Leaf, Leaf Thickness, Open Amount, Hinge Side, Slide Direction, Drum Radius. `style` is a number
+  in the file and means a door's style on a door, a window's on a window; changing Opening between the two resets it
+  (`blockout_opening_set_style`, `blockout_piece_edited(piece, style_before, opening_before)`).
+- **An eighth class, Leaf**, after Glass: a Blockout material and a piece override; a leaf's faces alone are in it.
+- **A hinged leaf is not an Add solid.** The doorway is cut as its plan with the leaf's footprint left out, so the
+  leaf is what the cut leaves of the blank and is one with the frame at its hinge. A Sliding leaf is an Add box on
+  the wall's face. Revolving is a ring (Add) with a drum and two entries cut (Subtract): the space of a revolving
+  door, nothing in it (the owner's answer).
+- **An open leaf cuts what stands in its swing - a known cost, not a wish.** The kernel adds before it subtracts and
+  a made Add cannot be joined to a cutter's planes to the bit (ADR 0128), so the part of a swung leaf that stands out
+  of the wall is also left by a cut: the blank and its cutters reach past the door's Depth as far as the leaf does
+  (+5 cm), over the doorway's width. A piece or a wall standing there is cut. Measured alternatives: the leaf's
+  outer part as an Add solid left 2-4 unresolved places a build on the exact path, and with a 1 mm overlap 414
+  problems in the 2,000-door sweep, against 0 for the cut. So: Open Amount 0 (the default) cuts nothing; an open
+  leaf's cut is named in the Blockout's status ("Door 'X': its open leaf cuts 'Y'" / "cuts into room 'Y'"); an
+  Arched door's leaf is closed only. A clean leaf needs the kernel to keep an Add after the Subtracts (a build order
+  per piece) - not decided here.
+- **Limits before the kernel:** a styled door over 100 m in any size is left out and named in the status; a swung
+  leaf is no thicker than the frame is wide (its outer face would lie in the reveal's plane).
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.

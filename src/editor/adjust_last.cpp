@@ -171,6 +171,12 @@ void Editor::blockout_last_rerun() {
       bp->panes_across = std::min(12, std::max(1, o.panes_across)), bp->panes_up = std::min(12, std::max(1, o.panes_up));
       bp->glass = o.glass, bp->sill_board = o.sill_board;
     }
+    if (bp->opening == 1 && o.style >= 0) {  // (round 499: a door's style and numbers)
+      bp->style = std::min(kBlockoutDoorStyles - 1, std::max(0, o.style));
+      bp->frame_width = size(o.frame_width), bp->frame_depth = size(o.frame_depth), bp->arch_rise = thick(o.arch_rise);
+      bp->leaf = o.leaf, bp->leaf_thickness = size(o.leaf_thickness), bp->open_amount = finite_bits(o.open_amount) ? std::min(1.0f, std::max(0.0f, o.open_amount)) : 0.0f;
+      bp->hinge_side = o.hinge == 1 ? 1 : 0, bp->slide_direction = o.slide == 1 ? 1 : 0, bp->drum_radius = size(o.drum_radius);
+    }
   }
   else {
     if (bp->shape == 0 || bp->shape == 3 || bp->shape == 4) bp->size = {size(o.a), size(o.c), size(o.b)};
@@ -227,11 +233,27 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     title = "Blockout " + o.what;
     const float mn = kBlockoutMinSize, mx = 10000.0f;
     if (o.n == 3) {
-      if (o.style >= 0) rows.push_back({"Style", nullptr, &o.style, nullptr, 0, 0, 0, 0, kBlockoutWindowStyles - 1, kBlockoutWindowStyleNames});  // (round 498: a dropdown of words)
+      const bool door = o.opening == 1;  // (round 499: a door's style words and rows)
+      if (o.style >= 0)
+        rows.push_back({"Style", nullptr, &o.style, nullptr, 0, 0, 0, 0, (door ? kBlockoutDoorStyles : kBlockoutWindowStyles) - 1, door ? kBlockoutDoorStyleNames : kBlockoutWindowStyleNames});  // (round 498: a dropdown of words)
       rows.push_back({"Width", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Head", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Sill", &o.c, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
-      if (o.style > kWindowOpeningOnly) {  // (only the rows the style reads, as the Inspector shows them)
+      if (door && o.style > kDoorOpeningOnly) {  // (round 499: a door's rows, as the Inspector shows them)
+        const bool revolving = o.style == kDoorRevolving;
+        if (!revolving) {
+          rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          rows.push_back({"Frame Depth", &o.frame_depth, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          if (o.style == kDoorArched) rows.push_back({"Arch Rise", &o.arch_rise, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+          rows.push_back({"Leaf", nullptr, nullptr, &o.leaf, 0, 0, 0, 0, 0});
+          if (o.leaf) rows.push_back({"Leaf Thickness", &o.leaf_thickness, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+          if (o.leaf && o.style != kDoorArched) rows.push_back({"Open Amount", &o.open_amount, nullptr, nullptr, 0.01f, 0.0f, 1.0f, 0, 0});
+          if (o.leaf && o.style == kDoorSingle) rows.push_back({"Hinge Side", nullptr, &o.hinge, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
+          if (o.leaf && o.style == kDoorSliding) rows.push_back({"Slide Direction", nullptr, &o.slide, nullptr, 0, 0, 0, 0, 1, kBlockoutSideNames});
+        }
+        else rows.push_back({"Drum Radius", &o.drum_radius, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
+      }
+      if (!door && o.style > kWindowOpeningOnly) {  // (only the rows the style reads, as the Inspector shows them)
         rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
         rows.push_back({"Frame Depth", &o.frame_depth, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
         if (o.style == kWindowGrid) {
@@ -295,7 +317,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     else if (row.i) changed |= u.int_field(id, fr, *row.i, row.imn, row.imx);
     else if (row.b) changed |= u.checkbox({fr.x, fr.y + u.px(2), rh - u.px(4), rh - u.px(4)}, *row.b);
   }
-  if (changed && o.kind == "blockout" && o.n == 3 && o.style == kWindowRound && style_was != kWindowRound) o.b = o.c + o.a;  // (a Round window starts as a circle: Head = Sill + Width)
+  if (changed && o.kind == "blockout" && o.n == 3 && o.opening == 2 && o.style == kWindowRound && style_was != kWindowRound) o.b = o.c + o.a;  // (a Round window starts as a circle: Head = Sill + Width)
   if (changed) obj_last_rerun();
 }
 

@@ -1471,6 +1471,190 @@ static void window_live_row(Report &rep, const Options &o) {
            std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
 }
 
+/* Round 499 (task 0483): styled doors in a wall between two rooms. As the window sweep: a Room piece of air with a second beside it (they share their -X / +X wall),
+ * each of the five styles in the shared wall at many sizes, places, turns and Open Amounts, hinge sides and slide directions. The pieces are the snapshot's
+ * (blockout_window_pieces, which makes a door's too). */
+static std::vector<Piece> door_arrangement(uint32_t seed, float grid_cell = 0.0f) {
+  Rand r{seed * 2654435761u + 499u};
+  bl::BlockoutPiece bp;
+  bp.opening = 1, bp.operation = 1, bp.style = 1 + (int)(seed % 5);
+  bp.width = r.in(0.5f, 2.2f);
+  bp.sill = 0.0f;
+  bp.head = r.in(1.8f, 2.7f);
+  bp.depth = 0.4f;
+  bp.frame_width = r.in(0.03f, 0.12f), bp.frame_depth = r.in(0.05f, 0.2f);
+  bp.arch_rise = r.pick(2) ? 0.0f : r.in(0.2f, 0.8f);
+  bp.leaf = r.pick(5) != 0, bp.leaf_thickness = r.in(0.02f, 0.1f);
+  bp.open_amount = r.pick(4) == 0 ? 0.0f : r.in(0.0f, 1.0f);
+  bp.hinge_side = r.pick(2), bp.slide_direction = r.pick(2);
+  bp.drum_radius = r.in(0.4f, 1.1f);
+  if (bp.style == bl::kDoorRevolving) bp.width = 2.0f * bp.drum_radius;
+  /* Room A: x -2.9 to 2.9 of air; room B 5.8 m further along X: their shells share the wall 2.9 to 3.1 (0.2 m thick), centred on x = 3.0. */
+  const float along = r.in(-2.4f + 0.5f * bp.width, 2.4f - 0.5f * bp.width);
+  Piece a = box(1, {5.8f, 2.8f, 4.8f}, {0.0f, 1.4f, 0.0f}), b = box(3, {5.8f, 2.8f, 4.8f}, {6.0f, 1.4f, 0.0f});
+  a.room = b.room = true, a.wall = a.floor = a.ceiling = b.wall = b.floor = b.ceiling = 0.2f;
+  std::vector<Piece> pieces{a, b};
+  bl::blockout_window_pieces(bp, 2, Mat4::trs({3.0f, 0.0f, along}, Quat::euler({0.0f, 90.0f, 0.0f}), Vec3(1.0f)), pieces, grid_cell);
+  const int turn = r.pick(6);
+  const float angle = turn < 4 ? 90.0f * (float)turn : r.in(1.0f, 359.0f);
+  const Mat4 building = Mat4::trs({r.in(-60.0f, 60.0f), r.in(-3.0f, 3.0f), r.in(-60.0f, 60.0f)}, Quat::euler({0.0f, angle, 0.0f}), Vec3(1.0f));
+  for (Piece &p : pieces) p.to_blockout = building * p.to_blockout;
+  return pieces;
+}
+
+static void door_style_sweep(Report &rep, const Options &o, bool crisp) {
+  const uint32_t cases = o.quick ? 200 : 2000;
+  const float cell = 0.08f;
+  rep.table({"sweep of styled doors in a wall between two rooms (round 499)", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    const std::string name = path == Path::Crisp ? "styled doors on the exact path" : strprintf("styled doors on the grid (cell %g)", cell);
+    Tally t;
+    const char *one = std::getenv("BLENDITY_BLOCKOUT_DOOR_SEED");  // (one arrangement alone, its pieces and its overlapping faces listed, as BLENDITY_BLOCKOUT_SEED does for the windows)
+    for (uint32_t seed = 1; seed <= cases; seed++) {
+      if (one && (uint32_t)std::atoi(one) != seed) continue;
+      std::vector<Piece> pieces = door_arrangement(seed, path == Path::Field ? cell : 0.0f);
+      bl::blockout::Settings st;
+      st.path = path, st.cell = cell;
+      if (one) list_arrangement(seed, path, 0, pieces, st);
+      Mesh m;
+      bl::blockout::Report rp;
+      bl::blockout::Faces named;
+      if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+        t.refused++;
+        continue;
+      }
+      judge(seed, name.c_str(), m, named, rp, t);
+    }
+    rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved)});
+    if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+  }
+}
+
+/* Round 499: hostile numbers on styled doors, every style, each case below, on each path (the grid at cell 0.1). */
+static void door_hostile_row(Report &rep, const Options &o, bool crisp) {
+  (void)o;
+  using Set = std::function<void(bl::BlockoutPiece &)>;
+  const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+  const std::vector<Set> cases = {
+      [](bl::BlockoutPiece &p) { p.leaf_thickness = 5.0f; },   [](bl::BlockoutPiece &p) { p.leaf_thickness = 1e9f; },    [](bl::BlockoutPiece &p) { p.leaf_thickness = 0.0f; },
+      [](bl::BlockoutPiece &p) { p.leaf_thickness = -0.1f; },  [nan](bl::BlockoutPiece &p) { p.leaf_thickness = nan; },
+      [](bl::BlockoutPiece &p) { p.drum_radius = 50.0f; },     [](bl::BlockoutPiece &p) { p.drum_radius = 1e9f; },      [](bl::BlockoutPiece &p) { p.drum_radius = 0.0f; },
+      [nan](bl::BlockoutPiece &p) { p.drum_radius = nan; },    [](bl::BlockoutPiece &p) { p.drum_radius = 1e-6f; },
+      [](bl::BlockoutPiece &p) { p.open_amount = -1.0f; },     [](bl::BlockoutPiece &p) { p.open_amount = 2.0f; },     [nan](bl::BlockoutPiece &p) { p.open_amount = nan; },
+      [inf](bl::BlockoutPiece &p) { p.open_amount = inf; },    [](bl::BlockoutPiece &p) { p.open_amount = 1e30f; },
+      [](bl::BlockoutPiece &p) { p.frame_width = 5.0f; },      [](bl::BlockoutPiece &p) { p.frame_width = 0.0f; },     [](bl::BlockoutPiece &p) { p.frame_depth = 0.0f; },
+      [](bl::BlockoutPiece &p) { p.frame_depth = 100.0f; },    [nan](bl::BlockoutPiece &p) { p.frame_width = nan; },
+      [](bl::BlockoutPiece &p) { p.width = 9.0f; },            [](bl::BlockoutPiece &p) { p.head = 9.0f; },            [](bl::BlockoutPiece &p) { p.depth = 9.0f; },
+      [](bl::BlockoutPiece &p) { p.width = -0.9f; },           [](bl::BlockoutPiece &p) { p.head = -1.0f; },           [](bl::BlockoutPiece &p) { p.depth = 0.0f; },
+      [](bl::BlockoutPiece &p) { p.depth = 1e-6f; },           [nan](bl::BlockoutPiece &p) { p.width = nan; },         [nan](bl::BlockoutPiece &p) { p.head = nan; },
+      [nan](bl::BlockoutPiece &p) { p.depth = nan; },          [inf](bl::BlockoutPiece &p) { p.width = inf; },         [](bl::BlockoutPiece &p) { p.arch_rise = 1e9f; },
+      [nan](bl::BlockoutPiece &p) { p.arch_rise = nan; },      [](bl::BlockoutPiece &p) { p.style = 99; },             [](bl::BlockoutPiece &p) { p.style = -4; },
+      [](bl::BlockoutPiece &p) { p.hinge_side = 7, p.slide_direction = -3; },
+  };
+  rep.table({"hostile numbers on styled doors (round 499)", "cases", "built", "refused", "problems"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    Tally t;
+    size_t made = 0;
+    for (int style = 1; style < bl::kBlockoutDoorStyles; style++)
+      for (size_t c = 0; c < cases.size(); c++) {
+        bl::BlockoutPiece bp;
+        bp.opening = 1, bp.operation = 1, bp.style = style, bp.width = 0.9f, bp.head = 2.1f, bp.sill = 0.0f, bp.depth = 0.4f, bp.open_amount = 0.6f;
+        cases[c](bp);
+        Piece room = box(1, {5.8f, 2.8f, 4.8f}, {0.0f, 1.4f, 0.0f});
+        room.room = true, room.wall = room.floor = room.ceiling = 0.2f;
+        std::vector<Piece> pieces{room};
+        made++;
+        if (!bl::blockout_window_pieces(bp, 2, Mat4::trs({-3.0f, 0.0f, 0.0f}, Quat::euler({0.0f, 90.0f, 0.0f}), Vec3(1.0f)), pieces, path == Path::Field ? 0.1f : 0.0f)) {
+          t.refused++;
+          continue;
+        }
+        bl::blockout::Settings st;
+        st.path = path, st.cell = 0.1f;
+        Mesh m;
+        bl::blockout::Report rp;
+        bl::blockout::Faces named;
+        if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+          t.refused++;
+          continue;
+        }
+        judge((uint32_t)(style * 100 + c), "hostile doors", m, named, rp, t);
+      }
+    rep.row({path == Path::Crisp ? "styled doors on the exact path" : "styled doors on the grid (cell 0.1)", std::to_string(made), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems)});
+    if (!t.first.empty()) rep.note(std::string("hostile doors: the first problem is ") + t.first);
+  }
+}
+
+/* Round 499: the live row with a Single door - `interior 100` as objects (as live_row) and a Single door, its leaf at Open Amount 0.5, in the first room's -X wall,
+ * moved along it every frame; the verdict is the live row's. A miss is reported, not hidden. */
+static void door_live_row(Report &rep, const Options &o) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  std::vector<GameObject *> roots;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!g.parent) roots.push_back(&g);
+  });
+  ed.scene().destroy(roots);
+  GameObject *bo = ed.scene().create("Blockout");
+  bo->add<Blockout>();
+  bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  bo->add<MeshRenderer>();
+  for (const Piece &p : interior(6, 28)) {
+    GameObject *g = ed.scene().create("Piece", bo);
+    BlockoutPiece *bp = g->add<BlockoutPiece>();
+    bp->operation = p.op == Op::Subtract ? 1 : 0;
+    bp->size = p.size;
+    g->set_local_position(p.to_blockout.translation());
+  }
+  GameObject *door = ed.scene().create("Door", bo);
+  BlockoutPiece *dp = door->add<BlockoutPiece>();
+  dp->shape = 0, dp->operation = 1, dp->opening = 1, dp->style = bl::kDoorSingle, dp->width = 0.9f, dp->head = 2.1f, dp->sill = 0.0f, dp->depth = 0.4f, dp->open_amount = 0.5f;
+  const Vec3 home(-2.0f, -1.4f, -0.6f);
+  door->set_local_position(home);
+  door->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));
+  ed.command("blockout wait");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), cancelled0 = ed.blockout_cancelled_for_test(), main0 = ed.blockout_main_builds_for_test();
+  const int frames = o.quick ? 30 : 120;
+  std::vector<double> frame_ms, landing_ms;
+  uint64_t landed = landed0;
+  double oldest = -1.0;
+  const double start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    const double moved_at = now_seconds();
+    if (oldest < 0.0) oldest = moved_at;
+    door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
+    ScopedTimer t;
+    ed.step_frame_headless();
+    frame_ms.push_back(t.ms());
+    if (ed.blockout_landed_for_test() != landed) {
+      landed = ed.blockout_landed_for_test();
+      landing_ms.push_back((now_seconds() - oldest) * 1000.0);
+      oldest = -1.0;
+    }
+    const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+    if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+  }
+  const double drag_end = now_seconds();
+  ed.command("blockout wait");
+  const double settle_ms = (now_seconds() - drag_end) * 1000.0;
+  std::sort(frame_ms.begin(), frame_ms.end());
+  const double worst = frame_ms.empty() ? 0.0 : frame_ms.back();
+  const double land_median = median(landing_ms), land_worst = landing_ms.empty() ? 0.0 : *std::max_element(landing_ms.begin(), landing_ms.end());
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = worst <= 16.7 && !landing_ms.empty() && land_median <= 100.0 && main_builds == 0;
+  rep.table({"live: interior 100 with a Single door in the editor, the door moved along its wall every frame for " + std::to_string(frames) + " frames (one every 16.7 ms)", "frame median ms", "frame worst ms",
+             "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms", "builds started", "landed", "overtaken by a newer move",
+             "main-thread builds", "verdict"});
+  rep.row({"the running build finishes and lands, then the newest starts (ADR 0129)", f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
+           std::to_string(landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0), std::to_string(ed.blockout_landed_for_test() - landed0),
+           std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -1489,6 +1673,7 @@ static void test_blockout(Report &rep, const Options &o) {
   if (std::getenv("BLENDITY_BLOCKOUT_BENCH")) return bench_rows(rep, o);  // (round 483: the bench interior's drags alone)
   if (std::getenv("BLENDITY_BLOCKOUT_OUTLINE")) return outline_room_sweep(rep, o, crisp);  // (round 497: the outline rooms' sweep alone)
   if (std::getenv("BLENDITY_BLOCKOUT_WINDOWS")) return window_style_sweep(rep, o, crisp), window_hostile_row(rep, o, crisp), window_cost_row(rep, o, crisp), window_live_row(rep, o);  // (round 498: the styled windows' sweep, hostile and cost rows and live row alone)
+  if (std::getenv("BLENDITY_BLOCKOUT_DOORS")) return door_style_sweep(rep, o, crisp), door_hostile_row(rep, o, crisp), door_live_row(rep, o);  // (round 499: the styled doors' sweep, hostile row and live row alone)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -1655,4 +1840,7 @@ static void test_blockout(Report &rep, const Options &o) {
   window_hostile_row(rep, o, crisp);
   window_cost_row(rep, o, crisp);
   window_live_row(rep, o);
+  door_style_sweep(rep, o, crisp);
+  door_hostile_row(rep, o, crisp);
+  door_live_row(rep, o);
 }
