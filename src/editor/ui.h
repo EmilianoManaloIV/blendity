@@ -157,6 +157,19 @@ class Context {
   /* A menu row right-clicked this frame (task 0189: Quick Favorites takes its command by the row's text). */
   std::string favorite_request;
   std::unordered_map<std::string, Recti> button_rects;
+  /* Tests (round 505, the HCI survey): every button, field, checkbox, dropdown, slider, colour, foldout and menu row
+   * drawn this frame (not text_area, drag_label, curve_field or color_ramp: round 509), in drawing order - its kind, rectangle, layer
+   * (0 the window, k inside popup k-1), label, and whether Tab can stop on it. Filled only while record_buttons is set. */
+  struct ControlRec {
+    const char *kind = "";
+    Recti r;
+    int layer = 0;
+    bool tab_stop = false;
+    std::string label;
+    Recti clip;  // (the canvas clip it was drawn under: a control scrolled out of its panel is not on the screen)
+  };
+  std::vector<ControlRec> controls;
+  Recti edit_rect_for_test() const { return edit_id_ ? edit_rect_ : Recti{}; }  // (the field being edited, as last drawn: a frame behind in the frame a click starts the edit)
   std::unordered_map<std::string, std::string> tooltip_texts;  // (tests, task 0293: a widget's tooltip by its rect, "x,y,w,h")
   /* Absolute time at which the UI wants to be woken (tooltips, caret blink); 0 = never. */
   double next_wakeup = 0;
@@ -357,6 +370,10 @@ class Context {
   bool focus_next_ = false;  // Tab: the next field drawn starts editing
   Id focus_request_ = 0;   // Shift+Tab: this field starts editing
   void tab_to(Id previous);
+  Recti edit_rect_;  // (where edit_text last drew the field being edited)
+  void record_control(const char *kind, const Recti &r, const std::string &label = {}, bool tab_stop = false) {
+    if (record_buttons) controls.push_back({kind, r, current_layer_, tab_stop, label, canvas.clip()});
+  }
   struct NumberCommit {
     Id id = 0;
     std::string expr;

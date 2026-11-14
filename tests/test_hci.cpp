@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The live HCI sweep (task 0293): every layout, window, menu, submenu, dialog and component Inspector opened as the
 // artist opens them, and each screen's recorded controls checked - clipped labels, overlaps, popups outside the
-// window, buttons without a word of help, disabled buttons without a reason, targets under 7 mm - with the themes'
-// text contrast. The suite runs one configuration (1366x768, Dark, scale 1); BLENDITY_SWEEP=full runs three sizes, two
-// themes and two scales. BLENDITY_SWEEP_OUT names a JSON file for tools/hci_sweep.py; BLENDITY_SWEEP_SHOTS a folder
-// for a PNG of each screen (the screenshot review, docs/hci/review-313.md).
+// window, buttons without a word of help, disabled buttons without a reason, targets under 7 mm, controls the keyboard
+// cannot reach, a Tab order that jumps backwards (round 505) - with the themes' text contrast. The suite runs one
+// configuration (1366x768, Dark, scale 1); BLENDITY_SWEEP=full runs three sizes, two themes and two scales (twelve).
+// BLENDITY_SWEEP_OUT names a JSON file for tools/hci_sweep.py; BLENDITY_SWEEP_SHOTS a folder for a PNG of each screen of
+// each configuration, one sub-folder a configuration (the screenshot review, docs/hci/review-313.md).
 #include "test_common.h"
 
 #include <cstdlib>
@@ -20,12 +21,24 @@ struct Finding {
   std::string config;
 };
 
+/* What the keyboard table says of one configuration (round 505): controls drawn by kind, those Tab can stop on, and the
+ * steps of the Tab order that go backwards. */
+struct KeyStats {
+  std::map<std::string, int> by_kind;
+  int controls = 0, stops = 0, breaks = 0, small_menu_rows = 0;
+};
+
 struct Sweep {
   std::vector<Finding> findings;
   std::map<std::string, int> tiny;  // config -> targets under 7 mm (reported, not judged: the Fitts audit's ground)
   std::map<std::string, int> controls;
-  int screens = 0;
+  std::map<std::string, KeyStats> keys;
+  std::vector<std::string> config_order;
+  int screens = 0, shots = 0;
 };
+
+/* 7 mm at 96 dpi is 26.5 px; at a UI scale it is that times the scale, with the half rounded down: 26 px at x1, 40 px at x1.5. */
+int small_limit(float scale) { return (int)std::ceil(26.5f * scale - 0.5f); }
 
 std::string env_or(const char *name, const char *def) {
   const char *v = std::getenv(name);
@@ -64,6 +77,63 @@ int overlap_area(const Recti &a, const Recti &b) {
   return w > 0 && h > 0 ? w * h : 0;
 }
 
+/* A control is on the screen when it is inside the screen and most of it inside the clip it was drawn under (a field scrolled out
+ * of its panel is drawn clipped away: it is not there to reach). */
+bool on_screen(const ui::Context::ControlRec &c, const Recti &screen_r) {
+  if (c.r.w <= 0 || c.r.h <= 0 || !inside(c.r, screen_r)) return false;
+  return overlap_area(c.r, c.clip) * 2 >= c.r.w * c.r.h;
+}
+
+/* The recorded controls of one screen (round 505): targets under 7 mm, controls Tab cannot stop on, Tab steps that go
+ * backwards, and the counts for the keyboard table. Menu rows are judged by their row height only as a count. */
+template <class Add>
+void check_controls(const ui::Context &u, Sweep &sw, const std::string &config, const Recti &screen_r, const Add &add) {
+  KeyStats &ks = sw.keys[config];
+  const int limit = small_limit(u.scale);
+  std::map<std::string, std::string> key_of_rect;  // (the name the button table knows a rectangle by)
+  for (const auto &[key, r] : u.button_rects)
+    if (key.rfind("menu:", 0) != 0 && key.rfind("submenu:", 0) != 0) key_of_rect[rect_str(r)] = key;
+  std::set<std::string> seen;
+  std::map<int, std::vector<Recti>> stops;  // layer -> tab stops in drawing order
+  struct Named { std::string name; Recti r; int layer; };
+  std::vector<Named> drawn;  // (every control but the menu rows: the ones that lie on each other, whatever their kind)
+  for (const auto &c : u.controls) {
+    if (!on_screen(c, screen_r) || !seen.insert(std::string(c.kind) + rect_str(c.r)).second) continue;
+    const bool row = std::string(c.kind) == "menu" || std::string(c.kind) == "submenu";
+    ks.controls++;
+    ks.by_kind[c.kind]++;
+    if (c.tab_stop) ks.stops++, stops[c.layer].push_back(c.r);
+    if (row) continue;
+    const auto it = key_of_rect.find(rect_str(c.r));
+    /* Its name: the button table's, else its label, else its kind - and a dropdown's kind always, because its label is
+     * the option it shows now, which would make the count move with the scene. Unlabelled controls of one kind share a
+     * name, so the distinct counts are of names, not of controls. */
+    const bool own_label = !c.label.empty() && std::string(c.kind) != "combo";
+    const std::string name = it != key_of_rect.end() ? it->second : own_label ? c.label : std::string(c.kind);
+    if (std::min(c.r.w, c.r.h) < limit) add("small", name, strprintf("%dx%d px", c.r.w, c.r.h));
+    if (!c.tab_stop) add("no-key", name, c.kind);
+    drawn.push_back({name, c.r, c.layer});
+  }
+  /* One control on another (the old overlap check sees labelled buttons only: an icon on a combo, a toggle on a field,
+   * went unseen). A third of the smaller one covered counts; one wholly inside another is a row and its own button. */
+  for (size_t i = 0; i < drawn.size(); i++)
+    for (size_t j = i + 1; j < drawn.size(); j++) {
+      const Recti &a = drawn[i].r, &b = drawn[j].r;
+      if (drawn[i].layer != drawn[j].layer || inside(a, b) || inside(b, a)) continue;
+      const int o = overlap_area(a, b), small = std::min(a.w * a.h, b.w * b.h);
+      if (small > 0 && o * 3 > small) add("covered", drawn[i].name + " / " + drawn[j].name, rect_str(a) + " " + rect_str(b));
+    }
+  /* A step backwards: the next stop ends at or above the previous one's top, in the same column. */
+  for (const auto &[layer, list] : stops)
+    for (size_t i = 1; i < list.size(); i++) {
+      const Recti &a = list[i - 1], &b = list[i];
+      const bool same_column = std::min(a.right(), b.right()) > std::max(a.x, b.x);
+      if (b.bottom() > a.y || !same_column) continue;
+      ks.breaks++;
+      add("tab-order", rect_str(a) + " -> " + rect_str(b), strprintf("layer %d", layer));
+    }
+}
+
 /* One screen's controls checked. */
 void check_screen(Editor &ed, Sweep &sw, const std::string &config, const std::string &screen, bool shots, const std::string &shot_dir) {
   ed.step_frame_headless();
@@ -75,7 +145,7 @@ void check_screen(Editor &ed, Sweep &sw, const std::string &config, const std::s
   auto add = [&](const char *kind, const std::string &key, const std::string &detail) { sw.findings.push_back({kind, screen, key, detail, config}); };
   for (const Recti &p : pops)
     if (!inside(p, screen_r)) add("popup-outside", "", rect_str(p));
-  const int mm7 = 26;  // (7 mm at 96 dpi: 26.5 px)
+  const int mm7 = small_limit(u.scale);
   std::vector<std::pair<std::string, Recti>> shown;
   std::vector<bool> layer_of;  // (inside a popup: a different layer from what is under it)
   for (const auto &[key, r] : u.button_rects) {
@@ -84,6 +154,7 @@ void check_screen(Editor &ed, Sweep &sw, const std::string &config, const std::s
     const bool menu_row = key.rfind("menu:", 0) == 0;
     sw.controls[config]++;
     if (std::min(r.w, r.h) < mm7) sw.tiny[config]++;
+    if (menu_row && std::min(r.w, r.h) < mm7) sw.keys[config].small_menu_rows++;
     if (!plain_key(key) && !menu_row) continue;
     const std::string label = menu_row ? key.substr(5) : key;
     const int room = r.w - u.px(menu_row ? 30 : 8);  // (a button's own padding: Context::button)
@@ -105,11 +176,13 @@ void check_screen(Editor &ed, Sweep &sw, const std::string &config, const std::s
     }
   for (const auto &[label, why] : u.disabled_reasons)
     if (why.empty()) add("disabled-no-reason", label, "");
+  check_controls(u, sw, config, screen_r, add);
   if (!shots) return;
   std::string name = screen;
   for (char &c : name)
     if (!std::isalnum((unsigned char)c)) c = '_';
   ed.command("screenshot " + fs::join(shot_dir, name + ".png"));
+  sw.shots++;
 }
 
 void close_all(Editor &ed) {
@@ -127,15 +200,50 @@ void click_key(Editor &ed, const std::string &key, bool hover_only) {
   ed.step_frame_headless({ev(platform::EventType::MouseUp, r.x + r.w / 2, r.y + r.h / 2)});
 }
 
-void sweep_config(Sweep &sw, int w, int h, const char *theme, float scale, bool shots, const std::string &shot_dir) {
-  const std::string config = strprintf("%dx%d %s x%g", w, h, theme, scale);
-  Editor ed;
+void setup_editor(Editor &ed, int w, int h, const char *theme, float scale) {
   ed.init_headless(w, h);
   ed.set_guides_for_test(false);
   ed.command(std::string("theme ") + theme);
   ed.set_ui_scale_for_test(scale);
   ed.record_buttons_for_test(true);
   ed.step_frame_headless();
+}
+
+/* States the plain windows do not show (round 505), each set up on a fresh editor by console commands. `key` / `mods`: a
+ * key pressed after them (the command palette opens on Ctrl+K). Their screens are named "scenario ..."; the suite's
+ * baseline assert leaves them out - their panels belong to the rounds that built them. */
+struct Scenario {
+  const char *name;
+  std::vector<const char *> commands;
+  int key = 0, mods = 0;
+};
+
+const std::vector<Scenario> &scenarios() {
+  static const std::vector<Scenario> list = {
+      {"blockout selected", {"layout Default", "window Modeling Tools", "blockout new"}},
+      {"blockout room selected", {"blockout new", "blockout add room box 4 3 4", "window Inspector"}},
+      {"blockout stairs selected", {"blockout new", "blockout add stairs 2 2 4 8"}},
+      {"blockout draw piece tool", {"blockout new", "tool room", "window Modeling Tools"}},
+      {"blockout baked", {"blockout new", "blockout wait", "blockout bake"}},
+      {"humanoid puppet posing", {"rig humanoid", "window Animation", "autopose on"}},
+      {"humanoid rigging", {"rig humanoid", "window Rigging"}},
+      {"avatar window", {"rig humanoid", "window Avatar"}},
+      {"light probe group", {"create Light Probe Group", "window Lighting"}},
+      {"point light baked mode", {"create Point Light", "set Light.Mode 2"}},
+      {"reflection probe", {"create Cube", "component ReflectionProbe"}},
+      {"lighting shadowmask", {"set Lighting.LightingMode 1", "window Lighting"}},
+      {"budget quest", {"create Cube", "budget quest", "window Profiler"}},
+      {"edit mode", {"select Cube", "edit", "window Modeling Tools"}},
+      {"command palette", {}, platform::KEY_K, platform::MOD_CTRL},
+  };
+  return list;
+}
+
+void sweep_config(Sweep &sw, int w, int h, const char *theme, float scale, bool shots, const std::string &shot_dir) {
+  const std::string config = strprintf("%dx%d %s x%g", w, h, theme, scale);
+  sw.config_order.push_back(config);
+  Editor ed;
+  setup_editor(ed, w, h, theme, scale);
   /* The layouts. */
   for (const std::string &l : ed.workspace_names_for_test()) {
     ed.command("layout " + l);
@@ -164,7 +272,7 @@ void sweep_config(Sweep &sw, int w, int h, const char *theme, float scale, bool 
     std::sort(subs.begin(), subs.end());
     for (const std::string &s : subs) {
       click_key(ed, s, true);
-      check_screen(ed, sw, config, "menu " + m.substr(8) + " > " + s.substr(8), false, shot_dir);
+      check_screen(ed, sw, config, "menu " + m.substr(8) + " > " + s.substr(8), shots, shot_dir);
     }
     close_all(ed);
   }
@@ -180,8 +288,21 @@ void sweep_config(Sweep &sw, int w, int h, const char *theme, float scale, bool 
   for (const ComponentInfo &ci : component_registry()) {
     ed.command("create Cube");
     ed.command("component " + ci.name);
-    check_screen(ed, sw, config, "inspector " + ci.name, false, shot_dir);
+    check_screen(ed, sw, config, "inspector " + ci.name, shots, shot_dir);
     ed.command("delete");
+  }
+  /* The scenarios, each on an editor of its own. */
+  for (const Scenario &sc : scenarios()) {
+    Editor fresh;
+    setup_editor(fresh, w, h, theme, scale);
+    for (const char *cmd : sc.commands) fresh.command(cmd);
+    fresh.step_frame_headless();
+    if (sc.key) {
+      platform::Event e = ev(platform::EventType::KeyDown, 5, 5, sc.key);
+      e.mods = sc.mods;
+      fresh.step_frame_headless({e});
+    }
+    check_screen(fresh, sw, config, std::string("scenario ") + sc.name, shots, shot_dir);
   }
 }
 
@@ -195,15 +316,41 @@ void run_hci_tests() {
     Sweep sw;
     struct Config { int w, h; const char *theme; float scale; };
     std::vector<Config> configs = {{1366, 768, "Dark", 1.0f}};
-    if (full) configs = {{1920, 1080, "Dark", 1.0f}, {1366, 768, "Dark", 1.0f}, {1024, 640, "Dark", 1.0f}, {1366, 768, "Light", 1.0f}, {1920, 1080, "Dark", 1.5f}, {1366, 768, "Light", 1.5f}};
+    if (full) {  // (three sizes x two themes x two UI scales)
+      configs.clear();
+      const std::vector<std::pair<int, int>> sizes = {{1920, 1080}, {1366, 768}, {1024, 640}};
+      for (float scale : {1.0f, 1.5f})
+        for (const char *theme : {"Dark", "Light"})
+          for (const auto &size : sizes) configs.push_back({size.first, size.second, theme, scale});
+    }
     const ScopedTimer t;
-    for (const Config &c : configs) sweep_config(sw, c.w, c.h, c.theme, c.scale, !shot_dir.empty() && c.w == 1366 && c.scale == 1.0f && std::string(c.theme) == "Dark", shot_dir);
+    for (const Config &c : configs) {
+      const std::string folder = strprintf("%dx%d_%s_x%g", c.w, c.h, c.theme, c.scale);
+      if (!shot_dir.empty()) fs::make_dirs(fs::join(shot_dir, folder));
+      sweep_config(sw, c.w, c.h, c.theme, c.scale, !shot_dir.empty(), fs::join(shot_dir, folder));
+    }
     std::map<std::string, int> by_kind;
     for (const Finding &f : sw.findings) by_kind[f.kind]++;
     std::printf("    %d screens in %zu configuration(s), %.1f s; findings:", sw.screens, configs.size(), t.ms() / 1000.0);
     for (const auto &[k, n] : by_kind) std::printf(" %s %d", k.c_str(), n);
     std::printf("\n");
-    for (const auto &[c, n] : sw.controls) std::printf("    %s: %d controls on screen, %d under 7 mm\n", c.c_str(), n, sw.tiny[c]);
+    if (!shot_dir.empty()) std::printf("    %d pictures written under %s\n", sw.shots, shot_dir.c_str());
+    for (const auto &[c, n] : sw.controls) std::printf("    %s: %d controls on screen, %d under %d px (7 mm), %d menu rows under it\n", c.c_str(), n, sw.tiny[c], small_limit(c.find("x1.5") != std::string::npos ? 1.5f : 1.0f), sw.keys[c].small_menu_rows);
+    /* The keyboard table (round 505): printed, not asserted - stream 1 adds controls while the survey is open. */
+    std::printf("    keyboard reach, per configuration: controls drawn / with a Tab stop / Tab-order breaks; by kind\n");
+    for (const std::string &c : sw.config_order) {
+      const KeyStats &ks = sw.keys[c];
+      std::printf("    %-22s %5d / %4d / %2d ;", c.c_str(), ks.controls, ks.stops, ks.breaks);
+      for (const auto &[k, n] : ks.by_kind) std::printf(" %s %d", k.c_str(), n);
+      std::printf("\n");
+    }
+    {
+      std::map<std::string, std::set<std::string>> distinct_all;
+      for (const Finding &f : sw.findings) distinct_all[f.kind].insert(f.key);
+      std::printf("    distinct findings:");
+      for (const auto &[k, keys] : distinct_all) std::printf(" %s %zu", k.c_str(), keys.size());
+      std::printf("\n");
+    }
     /* The themes' text on their panels (WCAG 2.1: 4.5 for body text). */
     for (int i = 0; i < ui::kThemeCount; i++) {
       Editor ed;
@@ -221,7 +368,12 @@ void run_hci_tests() {
         const Finding &f = sw.findings[i];
         auto esc = [](std::string s) {
           std::string o;
-          for (char c : s) o += c == '"' || c == '\\' ? std::string("\\") + c : std::string(1, c);
+          for (char c : s) {  // (a tooltip names an icon button: it can hold a line break)
+            if (c == '"' || c == '\\') o += std::string("\\") + c;
+            else if (c == '\n') o += "\\n";
+            else if ((unsigned char)c < 0x20) o += ' ';
+            else o += c;
+          }
           return o;
         };
         j += strprintf("  {\"kind\":\"%s\",\"config\":\"%s\",\"screen\":\"%s\",\"key\":\"%s\",\"detail\":\"%s\"}%s\n", esc(f.kind).c_str(), esc(f.config).c_str(), esc(f.screen).c_str(),
@@ -232,17 +384,24 @@ void run_hci_tests() {
       std::printf("    written: %s\n", out.c_str());
     }
     /* What must stay at none: a popup outside the window, a disabled button that doesn't say why. */
-    CHECK(by_kind["popup-outside"] == 0);
-    CHECK(by_kind["disabled-no-reason"] == 0);
+    int outside = 0, silent = 0;  // (the scenarios are the survey's - their panels belong to the rounds that built them: reported, not judged)
+    for (const Finding &f : sw.findings) {
+      if (f.screen.rfind("scenario ", 0) == 0) continue;
+      outside += f.kind == "popup-outside";
+      silent += f.kind == "disabled-no-reason";
+    }
+    CHECK(outside == 0);
+    CHECK(silent == 0);
     /* The suite's configuration held at its baseline (distinct controls; the full matrix's is tools/hci_sweep_baseline.json):
      * a new button without a tooltip, a label that no longer fits or an overlap shows here. */
     if (!full) {
       std::map<std::string, std::set<std::string>> distinct;
-      for (const Finding &f : sw.findings) distinct[f.kind].insert(f.key);
+      for (const Finding &f : sw.findings)
+        if (f.screen.rfind("scenario ", 0) != 0) distinct[f.kind].insert(f.key);
       std::printf("    distinct: elided %zu (baseline 2), without a tooltip %zu (6), overlapping %zu (0)\n", distinct["elided"].size(), distinct["no-tooltip"].size(), distinct["overlap"].size());
       if (distinct["no-tooltip"].size() > 6)
         for (const Finding &f : sw.findings)
-          if (f.kind != "overlap") std::printf("      %s: '%s' on %s\n", f.kind.c_str(), f.key.c_str(), f.screen.c_str());
+          if (f.kind == "no-tooltip" && f.screen.rfind("scenario ", 0) != 0) std::printf("      %s: '%s' on %s\n", f.kind.c_str(), f.key.c_str(), f.screen.c_str());
       CHECK(distinct["no-tooltip"].size() <= 6 && distinct["overlap"].empty());  // (elided labels hang on the platform's font: Linux's is wider)
     }
   });
@@ -461,5 +620,240 @@ void run_hci_tests() {
       std::printf("    Preferences' help: PR builds at %s, layout guides at %s\n", pr_at.c_str(), guides_at.c_str());
       CHECK(!pr_at.empty() && !guides_at.empty() && pr_at != guides_at);
     }
+  });
+
+  test("hci: Tab walks the Inspector's fields in the order they are drawn, Shift+Tab goes back; the Preferences dialog's fields likewise (round 505, task 0489)", [] {
+    using ET = platform::EventType;
+    /* The tab stops the toolkit recorded this frame inside `region`, one layer, in drawing order. */
+    auto stops_in = [](Editor &ed, const Recti &region, int layer) {
+      std::vector<Recti> out;
+      std::set<std::string> seen;
+      for (const auto &c : ed.ui_for_test().controls) {
+        if (!c.tab_stop || c.layer != layer || c.r.w <= 0 || !inside(c.r, region)) continue;
+        if (seen.insert(rect_str(c.r)).second) out.push_back(c.r);
+      }
+      return out;
+    };
+    /* Click the first stop, Tab once for each of the others, then Shift+Tab once: where the edit lands each time. */
+    auto walk = [](Editor &ed, const std::vector<Recti> &stops, const char *what) {
+      const Recti first = stops.front();
+      for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, first.x + first.w / 2, first.y + first.h / 2)});
+      ed.step_frame_headless();
+      ed.step_frame_headless();
+      std::set<std::string> visited;
+      int failed = -1;
+      for (size_t k = 0; k < stops.size() && failed < 0; k++) {
+        if (k > 0) {
+          ed.step_frame_headless({ev(ET::KeyDown, 5, 5, platform::KEY_TAB)});
+          ed.step_frame_headless();
+        }
+        const Recti at = ed.ui_for_test().edit_rect_for_test();
+        const bool right = rect_str(at) == rect_str(stops[k]) && visited.insert(rect_str(at)).second;
+        if (!right) {
+          failed = (int)k;
+          std::printf("    %s: Tab step %zu should edit %s but edits %s\n", what, k, rect_str(stops[k]).c_str(), rect_str(at).c_str());
+        }
+      }
+      bool back_ok = false;
+      if (failed < 0 && stops.size() >= 2) {
+        platform::Event e = ev(ET::KeyDown, 5, 5, platform::KEY_TAB);
+        e.mods = platform::MOD_SHIFT;
+        ed.step_frame_headless({e});
+        ed.step_frame_headless();
+        back_ok = rect_str(ed.ui_for_test().edit_rect_for_test()) == rect_str(stops[stops.size() - 2]);
+        if (!back_ok) std::printf("    %s: Shift+Tab should edit %s\n", what, rect_str(stops[stops.size() - 2]).c_str());
+      }
+      std::printf("    %s: %zu stops, first failing step %d, Shift+Tab back %d\n", what, stops.size(), failed, (int)back_ok);
+      return failed < 0 && back_ok;
+    };
+    /* The Inspector of a selected cube. A stop scrolled out of the Inspector's view is left out (only stops whose whole
+     * rectangle is in the window are walked). */
+    {
+      Editor ed;
+      ed.init_headless(1366, 768);
+      ed.set_guides_for_test(false);
+      ed.record_buttons_for_test(true);
+      ed.command("layout Default");
+      ed.command("select Cube");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const std::vector<Recti> stops = stops_in(ed, ed.dock_leaf_rect_for_test(WindowKind::Inspector), 0);
+      CHECK(stops.size() >= 3);
+      if (stops.size() >= 3) CHECK(walk(ed, stops, "Inspector"));
+    }
+    /* Preferences: its fields are in a popup layer; Tab from its first reaches each in its own layer. */
+    {
+      Editor ed;
+      ed.init_headless(1366, 1000);
+      ed.set_guides_for_test(false);
+      ed.record_buttons_for_test(true);
+      ed.command("preferences");
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      for (int i = 0; i < 1200 && ed.moonray_busy_for_test(); i++) {  // (its search moves the rows below: wait for it)
+        ed.step_frame_headless();
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+      const std::vector<Recti> stops = stops_in(ed, ed.top_popup_rect_for_test(), 1);
+      std::printf("    Preferences: %zu stops in its dialog\n", stops.size());
+      CHECK(stops.size() >= 2);
+      if (stops.size() >= 2) CHECK(walk(ed, stops, "Preferences"));
+    }
+  });
+
+  test("hci: nothing is recorded while recording is off, and with it on the list is the last frame's alone, not a growing pile (round 505, task 0489)", [] {
+    Editor ed;
+    ed.init_headless(1366, 768);
+    ed.set_guides_for_test(false);
+    ed.command("layout Default");
+    ed.command("select Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    std::printf("    recording off: %zu controls, %zu buttons\n", ed.ui_for_test().controls.size(), ed.ui_for_test().button_rects.size());
+    CHECK(ed.ui_for_test().controls.empty());
+    ed.record_buttons_for_test(true);
+    ed.step_frame_headless();
+    const size_t one = ed.ui_for_test().controls.size();
+    ed.step_frame_headless();
+    const size_t two = ed.ui_for_test().controls.size();
+    std::printf("    recording on: %zu controls after one frame, %zu after the next\n", one, two);
+    CHECK(one > 0);
+    CHECK(two == one);
+    ed.record_buttons_for_test(false);
+    ed.step_frame_headless();
+    /* Switched off, the list is emptied with the button table: a reader never gets the last recorded frame's. */
+    CHECK(ed.ui_for_test().controls.empty());
+  });
+
+  test("hci: each control is recorded once, as its own kind - fields are Tab stops, nothing else is, a toggle's row covers its label, a disabled button shows once (round 505, task 0489)", [] {
+    Editor ed;
+    ed.init_headless(1366, 768);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Default");
+    ed.command("select Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto &u = ed.ui_for_test();
+    std::set<std::string> seen;
+    int dup = 0, bad_stop = 0, number_text = 0, toggles = 0, narrow_toggles = 0;
+    for (const auto &c : u.controls) {
+      const std::string kind = c.kind;
+      if (c.r.w <= 0 || c.r.h <= 0) continue;
+      if (!seen.insert(kind + "|" + std::to_string(c.layer) + "|" + rect_str(c.r)).second) {
+        dup++;
+        std::printf("    twice: %s at %s (%s)\n", c.kind, rect_str(c.r).c_str(), c.label.c_str());
+      }
+      const bool field = kind == "number" || kind == "text";
+      number_text += field;
+      if (c.tab_stop != field) bad_stop++, std::printf("    tab_stop %d on a %s at %s\n", (int)c.tab_stop, c.kind, rect_str(c.r).c_str());
+      if (kind == "checkbox" && !c.label.empty()) {
+        toggles++;
+        if (c.r.w <= 2 * c.r.h) narrow_toggles++, std::printf("    toggle row '%s' only %dx%d\n", c.label.c_str(), c.r.w, c.r.h);
+      }
+    }
+    std::printf("    %zu controls: %d recorded twice, %d with a wrong tab_stop, %d fields, %d toggle rows (%d narrow)\n", u.controls.size(), dup, bad_stop, number_text, toggles, narrow_toggles);
+    CHECK(number_text > 0);
+    CHECK(dup == 0);
+    CHECK(bad_stop == 0);
+    CHECK(narrow_toggles == 0);
+    /* The Inspector of a cube has no toggle rows on screen: the Preferences dialog does. */
+    {
+      Editor pe;
+      pe.init_headless(1366, 1000);
+      pe.set_guides_for_test(false);
+      pe.record_buttons_for_test(true);
+      pe.command("preferences");
+      for (int i = 0; i < 3; i++) pe.step_frame_headless();
+      int rows = 0, narrow = 0;
+      for (const auto &c : pe.ui_for_test().controls)
+        if (std::string(c.kind) == "checkbox" && !c.label.empty()) {
+          rows++;
+          if (c.r.w <= 2 * c.r.h) narrow++, std::printf("    toggle row '%s' only %dx%d\n", c.label.c_str(), c.r.w, c.r.h);
+        }
+      std::printf("    Preferences: %d toggle rows, %d narrow\n", rows, narrow);
+      CHECK(rows > 0);
+      CHECK(narrow == 0);
+    }
+    /* A disabled button: found on a screen that has one (the Default layout, or the Edit Mode panel). */
+    for (const char *cmd : {"window Modeling Tools", "window Inspector", "window Hierarchy", "window Project", "window Animation"}) {
+      if (!ed.ui_for_test().disabled_reasons.empty()) break;
+      ed.command(cmd);
+      for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    }
+    std::string disabled;
+    Recti dr;
+    for (const auto &kv : ed.ui_for_test().disabled_reasons)
+      if (ed.button_rect_for_test(kv.first, dr)) {
+        disabled = kv.first;
+        break;
+      }
+    std::printf("    a disabled button on screen: '%s'\n", disabled.c_str());
+    if (!disabled.empty()) {
+      int n = 0;
+      for (const auto &c : ed.ui_for_test().controls)
+        if (std::string(c.kind) == "button" && c.label == disabled && rect_str(c.r) == rect_str(dr)) n++;
+      CHECK(n == 1);
+    }
+  });
+
+  test("hci: an open menu's rows are recorded on a popup layer above the window's, and gone after Esc; the edited field's rectangle is the clicked one and empty after Esc (round 505, task 0489)", [] {
+    using ET = platform::EventType;
+    Editor ed;
+    ed.init_headless(1366, 768);
+    ed.set_guides_for_test(false);
+    ed.record_buttons_for_test(true);
+    ed.command("layout Default");
+    ed.command("select Cube");
+    for (int i = 0; i < 3; i++) ed.step_frame_headless();
+    const auto count_above = [&](int &menu_rows) {
+      int above = 0;
+      menu_rows = 0;
+      for (const auto &c : ed.ui_for_test().controls) {
+        const std::string k = c.kind;
+        if (c.layer >= 1) above++;
+        if (k == "menu" || k == "submenu") menu_rows += c.layer >= 1;
+      }
+      return above;
+    };
+    /* Nothing is edited and no popup is open. */
+    CHECK(ed.ui_for_test().edit_rect_for_test().empty());
+    int rows = 0;
+    CHECK(count_above(rows) == 0);
+    /* A menu opened by a click. */
+    std::string bar_key;
+    for (const auto &kv : ed.ui_for_test().button_rects)
+      if (kv.first.rfind("menubar:", 0) == 0 && (bar_key.empty() || kv.first < bar_key)) bar_key = kv.first;
+    CHECK(!bar_key.empty());
+    click_key(ed, bar_key, false);
+    ed.step_frame_headless();
+    int wrong_kind_layer = 0;
+    for (const auto &c : ed.ui_for_test().controls) {
+      const std::string k = c.kind;
+      if ((k == "menu" || k == "submenu") && c.layer < 1) wrong_kind_layer++;
+    }
+    const int above = count_above(rows);
+    std::printf("    menu '%s' open: %d controls above the window, %d of them menu rows, %d menu rows on layer 0\n", bar_key.c_str(), above, rows, wrong_kind_layer);
+    CHECK(rows > 0);
+    CHECK(wrong_kind_layer == 0);
+    close_all(ed);
+    ed.step_frame_headless();
+    CHECK(count_above(rows) == 0);
+    /* The edited field: a real click on the Inspector's first number field. */
+    const Recti insp = ed.dock_leaf_rect_for_test(WindowKind::Inspector);
+    Recti field;
+    for (const auto &c : ed.ui_for_test().controls)
+      if (std::string(c.kind) == "number" && c.layer == 0 && inside(c.r, insp)) {
+        field = c.r;
+        break;
+      }
+    std::printf("    Inspector's first number field: %s\n", rect_str(field).c_str());
+    CHECK(!field.empty());
+    if (field.empty()) return;
+    for (ET t : {ET::MouseMove, ET::MouseDown, ET::MouseUp}) ed.step_frame_headless({ev(t, field.x + field.w / 2, field.y + field.h / 2)});
+    ed.step_frame_headless();
+    const Recti edited = ed.ui_for_test().edit_rect_for_test();
+    std::printf("    editing %s\n", rect_str(edited).c_str());
+    CHECK(rect_str(edited) == rect_str(field));
+    ed.step_frame_headless({ev(ET::KeyDown, 5, 5, platform::KEY_ESCAPE)});
+    ed.step_frame_headless();
+    CHECK(ed.ui_for_test().edit_rect_for_test().empty());
   });
 }
