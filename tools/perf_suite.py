@@ -34,6 +34,7 @@ from bench_table import write_between_markers  # noqa: E402
 DEFAULT_SECTIONS = ["responsiveness", "operations", "world_like", "editor_render", "bake", "pathtracer", "serialization", "undo", "livelink",
                     "parity", "memory", "physics", "animation", "filters",  # (round 432: the last five were run by hand only)
                     "posing",  # (round 468: posing, scrubbing and playing a skinned avatar, alone and in a world)
+                    "image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use",  # (round 504: the performance survey - stress/stress_survey.inc: image adjustments and masks, Sculpt and paint strokes, the sequencer, the importers, the Unity exporter, the Materials / Textures / History windows and the palette, first uses; round 511 saves the baseline that holds them)
                     "blockout"]  # (round 483: the Blockout kernel, the live drag and the blend rows - each row carries its own verdict - the kernel and mesh rows against 100 ms, the live rows also needing no frame over 16.7 ms - so --check needs no threshold of its own)
 
 
@@ -158,13 +159,22 @@ def summary_text(findings, against):
     return "%d finding(s) against %s%s" % (len(failing(findings)), against, ", %d row(s) still over their budget" % still if still else "")
 
 
+SECONDS_COLUMN = re.compile(r"(^|[^/\w])s\b")
+
+
+def least_gain(header):
+    """How much a time cell must grow, in its own unit, to count: 1 (a millisecond, a frame, a byte), or a tenth of a
+    second in a seconds column (round 504: the survey's `total s` rows - a 0.9 s import that doubled grew by under 1)."""
+    return 0.1 if SECONDS_COLUMN.search(header) and not re.search(r"\bms\b", header) else 1.0
+
+
 def first_regression(section, head, r, b):
-    """The first time column of row `r` grown over 20 % (and by over 1) against `b`, or None."""
+    """The first time column of row `r` grown over 20 % (and by over `least_gain`) against `b`, or None."""
     for i, cell in enumerate(r[1:], 1):
         a, bb = numeric(cell), numeric(b[i]) if i < len(b) else None
         if a is None or bb is None or bb <= 0 or i >= len(head) or not time_column(head[i]):
             continue
-        if a > bb * 1.2 and a - bb > 1.0:
+        if a > bb * 1.2 and a - bb > least_gain(head[i]):
             return (section, r[0], head[i], b[i], cell, a / bb)
         return None  # (only the row's first time column decides)
     return None
