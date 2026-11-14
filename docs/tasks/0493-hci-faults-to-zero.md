@@ -28,7 +28,7 @@ reaches every control the toolkit draws. `tools/hci_sweep_baseline.json` goes to
     fields and name field at narrow widths; Play / Pause / Step against the toolbar's left group; the Scene view's
     header; the job tray against the status hint; the Draw window's More; the Game view's camera dropdown against
     Guides and Stats; Overlays against Unwrap in the UV Unwrapping layout; Sculpt under the tab overflow's "+1".
-  - **C. Cut labels** (finding 5), the 38 in this stream's windows: grids drop columns before they cut a label; the
+  - **C. Cut labels** (finding 5), the 38 in this stream's windows: a label too long for its grid cell takes a row of its own (the grid keeps its columns); the
     Modeling Tools' Object grid uses the toolkit's ellipsis; the Lighting, Live Link, Layers, Rigging, Light Probe
     Group and Inspector buttons fit or wrap two by two.
   - **D. Small targets** (finding 9): the job tray, a bare checkbox's hit area, the Scene and Game headers, the status

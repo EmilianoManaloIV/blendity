@@ -1529,7 +1529,7 @@ void run_hci_tests() {
       for (WindowKind k : {WindowKind::Scene, WindowKind::Game}) {
         const Recti content = ed.window_rect_for_test(k);
         if (content.empty()) continue;
-        const int bar_h = u.row_h() + u.px(6);
+        const int bar_h = u.row_h() + u.px(4);  // (the strip: its controls a row high on 2 px margins)
         std::vector<std::pair<std::string, Recti>> header;
         for (const auto &ctl : u.controls)
           if (ctl.layer == 0 && ctl.r.w > 0 && inside(ctl.clip, content) && ctl.r.y >= content.y && ctl.r.bottom() <= content.y + bar_h)
@@ -2387,5 +2387,86 @@ void run_hci_tests() {
     }
     std::printf("    x positions that did both: %d\n", both);
     CHECK(both == 0);
+  });
+
+  /* Round 509's fix after CI (task 0493): the round first made panels taller - a grid went to one column for one long
+   * label, Position / Rotation / Scale moved to rows of their own in any Inspector under 300 px, the Scene view's
+   * header grew 2 px - and tests in other groups found their controls below their window's fold or their pictures a
+   * size they were not measured at. These pin that the fixes did not cost the height back. */
+  test("hci: in a 213 px Inspector Position, Rotation and Scale keep their row beside the label where the word leaves each field four digits, else take a row of their own under it (Unity's narrow Inspector) - never a field under four digits, never a row more than that needs (round 509, task 0493)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("select Cube");
+    ed.command("component BooleanModifier");
+    Kb::settle(ed);
+    const ui::Context &u = ed.ui_for_test();
+    const Recti content = ed.window_rect_for_test(WindowKind::Inspector);
+    std::vector<Recti> numbers;
+    for (const auto &ctl : u.controls)
+      if (ctl.layer == 0 && inside(ctl.clip, content) && std::string(ctl.kind) == "number" && numbers.size() < 9) numbers.push_back(ctl.r);
+    Recti field;
+    const bool found = ed.button_rect_for_test("field:Object", field);
+    const int four = ed.text_width_for_test("0000");
+    /* Beside the word: the fields start after "Position" and its gap and need four digits each (vec3_min_width). */
+    const int beside_w = content.w - u.px(18) - (u.px(4) + ed.text_width_for_test("Position") + u.px(8)) - u.px(6);
+    const int min_w = const_cast<ui::Context &>(u).vec3_min_width();  // (a query: text_width is not const)
+    const bool beside = beside_w >= min_w;
+    std::printf("    Inspector %s; %zu numbers, first %s; beside the word %d px for %d (%s); the Boolean's Object field %s\n", rect_str(content).c_str(),
+                numbers.size(), numbers.empty() ? "-" : rect_str(numbers[0]).c_str(), beside_w, min_w, beside ? "beside" : "own rows",
+                found ? rect_str(field).c_str() : "not drawn");
+    CHECK(content.w <= 230 && numbers.size() == 9);  // (the narrow Inspector the other groups' tests use; three rows of three)
+    if (numbers.size() != 9) return;
+    for (int k = 0; k < 3; k++) CHECK(numbers[3 * k].y == numbers[3 * k + 1].y && numbers[3 * k].y == numbers[3 * k + 2].y);  // (the three on one row)
+    for (const Recti &n : numbers) CHECK(n.w >= four);
+    /* A label and its fields take one row beside, two on rows of their own - never more. */
+    const int step = numbers[3].y - numbers[0].y, row = u.row_h();
+    CHECK(step <= (beside ? row + u.px(4) : 2 * (row + u.px(4))));
+    if (beside) CHECK(found && field.bottom() <= content.bottom());  // (the field the drag test drops on is on screen, as before round 509)
+  });
+
+  test("hci: a grid of buttons keeps the columns its caller asked for when one label is too long for a cell - that label takes a row of its own, the short ones stay two to a row (round 509, task 0493)", [] {
+    Editor ed;
+    r34_open(ed);
+    ed.record_buttons_for_test(true);
+    ed.command("create Armature");
+    /* A mesh and a bone of the armature selected: the grid's long buttons (Anime Face Normals (Ellipsoid), Rig Hair from
+     * Mesh...) are the mesh's tools, there only with a mesh. */
+    GameObject *cube = ed.scene().find_by_name("Cube"), *bone = ed.scene().find_by_name("Bone");
+    CHECK(cube && bone);
+    if (!cube || !bone) return;
+    ed.select_for_test(cube->id, false);
+    ed.select_for_test(bone->id, true);
+    ed.command("window Rigging");
+    Kb::settle(ed);
+    const Recti content = ed.window_rect_for_test(WindowKind::Rigging);
+    /* The Skeleton section's grid: short labels (Add Bone, Reset Pose) and long ones (Anime Face Normals (Ellipsoid)). */
+    Recti add_bone, add_arm, longest;
+    ed.button_rect_for_test("Add Bone", add_bone);
+    ed.button_rect_for_test("Add Armature", add_arm);
+    const bool has_long = ed.button_rect_for_test("Anime Face Normals (Ellipsoid)", longest) || ed.button_rect_for_test("Rig Hair from Mesh...", longest);
+    std::printf("    Rigging %s; Add Armature %s, Add Bone %s, a long one %s\n", rect_str(content).c_str(), rect_str(add_arm).c_str(), rect_str(add_bone).c_str(),
+                has_long ? rect_str(longest).c_str() : "not drawn");
+    CHECK(!add_arm.empty() && !add_bone.empty() && has_long);
+    CHECK(add_arm.y == add_bone.y && add_arm.w < content.w / 2);  // (two to a row, as asked)
+    CHECK(longest.w > content.w / 2 && longest.y != add_arm.y);  // (the long one alone on its row, whole)
+    CHECK(ed.text_width_for_test("Anime Face Normals (Ellipsoid)") > add_arm.w - ed.ui_for_test().px(8));  // (it is too long for a cell: the case is the one meant)
+  });
+
+  test("hci: the Scene view's header strip keeps its height (a row and 4 px), its controls a row high on 2 px margins, so the view under it keeps its size (round 509, task 0493)", [] {
+    Editor ed;
+    Fix::open(ed, 1366, 768, 1.0f);
+    Kb::settle(ed);
+    const ui::Context &u = ed.ui_for_test();
+    const Recti win = ed.window_rect_for_test(WindowKind::Scene), view = ed.scene_rect_for_test();
+    std::printf("    Scene window %s, its view %s, a row %d\n", rect_str(win).c_str(), rect_str(view).c_str(), u.row_h());
+    CHECK(view.y - win.y == u.row_h() + u.px(4) && view.bottom() == win.bottom());
+    int header = 0;
+    for (const auto &ctl : u.controls)
+      if (ctl.layer == 0 && ctl.r.y >= win.y && ctl.r.bottom() <= view.y && ctl.r.x >= win.x && ctl.r.right() <= win.right()) {
+        header++;
+        CHECK(ctl.r.h >= u.row_h());
+      }
+    CHECK(header >= 3);
   });
 }

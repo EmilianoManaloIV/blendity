@@ -33,7 +33,7 @@ using ui::Icon;
 void Editor::draw_scene_view(const Recti &r) {
   BL_ZONE("scene_view");
   auto &u = ui_;
-  int bh = u.row_h() + u.px(6);  // (round 509: the header's controls are a row high, so the strip is 2 px taller than it was)
+  int bh = u.row_h() + u.px(4);  // (round 509: the header's controls are a row high, on 2 px margins - the strip, and so the view under it, keep their size)
   Recti bar{r.x, r.y, r.w, bh};
   Recti view{r.x, r.y + bh, r.w, r.h - bh};
   scene_rect_ = view;
@@ -2728,15 +2728,15 @@ void Editor::compute_proportional_weights(const Mat4 &world) {
 void Editor::draw_game_view(const Recti &r) {
   BL_ZONE("game_view");
   auto &u = ui_;
-  int bh = u.row_h() + u.px(6);  // (round 509: the strip's controls are a row high, 2 px more than before)
+  int bh = u.row_h() + u.px(4);  // (round 509: the strip's controls are a row high, on 2 px margins; the view keeps its size)
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
   /* Guides and Stats sit at the right end at their own text's width; the camera dropdown takes what is left of the strip
    * (round 509: a fixed 170 px dropdown lay on both at 1.5x). */
-  const int h = bh - u.px(6);
+  const int h = bh - u.px(4);
   const int stats_w = u.font.text_width("Stats") + u.px(14), guides_w = u.font.text_width("Guides") + u.px(14);
-  const Recti sr{bar.right() - u.px(8) - stats_w, bar.y + u.px(3), stats_w, h};
-  const Recti gr{sr.x - u.px(4) - guides_w, bar.y + u.px(3), guides_w, h};
+  const Recti sr{bar.right() - u.px(8) - stats_w, bar.y + u.px(2), stats_w, h};
+  const Recti gr{sr.x - u.px(4) - guides_w, bar.y + u.px(2), guides_w, h};
   const int cam_w = std::min(u.px(170), gr.x - u.px(6) - (bar.x + u.px(6)));
   if (cam_w >= u.px(60)) {
     /* Which camera the view shows: the scene's Active Camera (Unity: the Display dropdown; Blender: the
@@ -2761,7 +2761,7 @@ void Editor::draw_game_view(const Recti &r) {
     for (auto &n : names) opts.push_back(n.c_str());
     if (opts.empty()) opts.push_back("No cameras");
     int pick = std::max(0, cur);
-    if (u.combo(u.id("game_camera"), {bar.x + u.px(6), bar.y + u.px(3), cam_w, h}, pick, opts.data(), (int)opts.size()) && !cams.empty() &&
+    if (u.combo(u.id("game_camera"), {bar.x + u.px(6), bar.y + u.px(2), cam_w, h}, pick, opts.data(), (int)opts.size()) && !cams.empty() &&
         pick >= 0 && pick < (int)cams.size() && cams[(size_t)pick]->id != scene_->active_camera)
       set_active_camera(cams[(size_t)pick]);
     u.tooltip("The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"

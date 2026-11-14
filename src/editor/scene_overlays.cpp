@@ -21,7 +21,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   auto &u = ui_;
   u.canvas.fill_rect(bar, u.theme.bar);
   u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
-  int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
+  int h = bar.h - u.px(4), y = bar.y + u.px(2), x = bar.x + u.px(6);  // (round 509: a row high on 2 px margins)
   /* Round 509: what the strip gives up, in this order, as the view narrows - the shading dropdown to 110 px, then the
    * Persp / Iso label, then the Edit Mode button's word (its icon stays), then the four quick toggles (the Overlays menu has
    * each of them) and the dropdown to 80 px - so nothing is drawn on anything else (at 1024x640 the label and the button lay
@@ -73,7 +73,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   x += h + u.px(10);
   if (anim_.record && bar.right() - x > u.px(420)) {  // (task 0258: Record said in the view's bar, not only the Animation window's dot - a word, not a colour alone; when the bar has room)
     const int rw = u.font.text_width("RECORD") + u.px(14);
-    const Recti rr{x, bar.y + u.px(3), rw, h};
+    const Recti rr{x, y, rw, h};
     u.canvas.fill_round_rect(rr, u.px(3), Color::hex(0xB03030));
     u.label(rr, "RECORD", Color::hex(0xFFFFFF), ui::Align::Center);
     u.mark_widget(rr);
@@ -88,7 +88,7 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
      * the reason; before, only a card that couldn't be opened did, and the refusal hid in the Profiler. */
     const bool refused = cpu_badge_view_refused();
     const int cw = u.font.text_width("CPU") + u.px(14);
-    const Recti cr{x, bar.y + u.px(3), cw, h};
+    const Recti cr{x, y, cw, h};
     u.frame(cr, u.theme.strip, u.theme.warning, u.px(3));
     u.label(cr, "CPU", u.theme.text_bright, ui::Align::Center);
     u.mark_widget(cr);

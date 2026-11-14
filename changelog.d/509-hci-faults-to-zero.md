@@ -16,11 +16,11 @@ is at least 7 mm in Tablet Mode.
   colours are unchanged). Two keymap actions: `ui.focus_window` (F6, Shift+F6), `ui.menu_bar` (F10; the Maya preset
   keeps F10 for edge mode and the menu bar keeps Alt). A Learn section, "Keys for the controls".
 - **`ui::Context::button_cells`**: a row of buttons that goes side by side when the labels fit and wraps when they
-  do not; `Editor::button_grid` drops columns until its widest label fits (never more columns than asked).
+  do not; in `Editor::button_grid` a label too long for its cell takes a row of its own, the rest keep their columns.
 
 **Fixed** (round 505's findings, in all 12 configurations)
-- The Inspector at narrow widths: Position, Rotation and Scale had no field left at 1024x640 x1.5 (now on a row of
-  their own under the label), the name field lay under Fold and Pin (they have their own row), a property's field was
+- The Inspector at narrow widths: Position, Rotation and Scale had no field left at 1024x640 x1.5 (they start right
+  after the label's word, or, where even that is too narrow, take a row of their own under it), the name field lay under Fold and Pin (they have their own row), a property's field was
   22 px wide in Tablet Mode's side pane (it keeps 48 px at scale 1, 72 px in Tablet Mode; the label gives way).
 - Play, Pause and Step lay on other toolbar buttons (at 1024x640 x1.5 everywhere, in Edit Mode at the default size):
   the transport stands right of the left group, the right group shrinks, and Edit Mode's left group compacts to icons.
@@ -45,19 +45,24 @@ is at least 7 mm in Tablet Mode.
 
 **Known limits** (`docs/hci/sweep-509.md`): "Generate Lighting" and "Clear Baked Data" still end in "..." in the
 Lighting window docked left at 1024x640 x1.5 (the pane is narrower than the label; the tooltip says it whole), as
-does "Edit Origin with Handles..." there. A long label takes its whole grid to one column in a narrow pane. While a
+does "Edit Origin with Handles..." there. A label too long for its grid cell takes a row of its own (up to two rows each). While a
 field is being edited F6, F10 and Alt wait for Esc or Enter. Widgets drawn by hand are not keyboard stops yet, and
 the Sequencer's toolbar is cut by its pane at 1024x640 x1.5 (round 510).
 
 **Checked:** the `hci` and `editor` groups - with Blender's libraries 644 and 2,340; dependency-free 644 and 2,331 (Windows)
 and 643 and 2,333 (Linux); the 12-configuration sweep (2,140 screens) before and after; the consistency audit and the
 coverage map clean; one code review (changes needed, all made) and the test-engineer's 19 tests (one found a fault,
-fixed); the fixes made after the review were tested, not reviewed again; stress `--only editor` ran (6,000 fuzz frames: no crash, 0 stale pictures). The whole suite is CI's.
+fixed); the fixes made after the review were tested, not reviewed again; stress `--only editor` ran (6,000 fuzz frames: no crash, 0 stale pictures).
+After CI found eight tests of other groups red (the panels had grown; see `docs/hci/sweep-509.md`): the whole unit
+suite on Windows with the libraries, in a fresh folder, 36,450 checks - the only failures the three card-picture
+tests of the `gpu` group that fail on main too; on Linux hci 674, editor 2,333, animation 2,229, render 2,550,
+physics 190, sketch 521, sculpt 179, 0 failed; a second code review (changes needed, all made). The whole suite on
+every system is CI's.
 
 <!-- docs/USABILITY.md -->
 after: | Set Origin could only use fixed points
 | Only text and number fields could take the keyboard: no button, checkbox, dropdown, slider or menu. (round 509) | F6 focuses a window's controls, F10 or Alt the menu bar; Tab, Space, Enter and the arrows work every control, with a focus ring. |
-| At 1024x640 with the UI at 1.5 the Inspector's Transform fields had no width, Play / Pause / Step lay on other toolbar buttons, and 49 labels were cut. (round 509) | Rows wrap, the toolbar compacts, grids drop columns; the live sweep finds nothing on anything in 12 configurations. |
+| At 1024x640 with the UI at 1.5 the Inspector's Transform fields had no width, Play / Pause / Step lay on other toolbar buttons, and 49 labels were cut. (round 509) | Rows wrap, the toolbar compacts, a long label in a grid takes its own row; the live sweep finds nothing on anything in 12 configurations. |
 
 <!-- tools/README.md -->
 replace: Kinds since round 505: `no-key`, `small`, `covered`, `tab-order`. |

@@ -15,7 +15,7 @@ The same sweep, 2,140 screens, Windows with Blender's libraries. Distinct names 
 | `no-key` (a control the keyboard cannot stop on) | 328 | **0** | keyboard focus for every toolkit control (ADR 0145) |
 | `covered` (a control lying on another) | 18 | **0** | the toolbar, the Scene and Game headers, the Inspector's header, the job tray, the Draw toolbar, the tab overflow |
 | `overlap` (labelled buttons, the old check) | 6 | **0** | three were real (fixed with `covered`); three were the check's mistake - it now compares what each control's clip lets through |
-| `elided` (a cut label) | 49 | **2** | grids drop columns, pairs of buttons wrap, a word keeps its place before its icon; the two left are below |
+| `elided` (a cut label) | 49 | **2** | a long label in a grid takes a row of its own, pairs of buttons wrap, a word keeps its place before its icon; the two left are below |
 | `no-tooltip` | 11 | **0** | each has one |
 | `small` | 473 (under 7 mm at every scale) | **0** (as decided) | see "Targets" |
 | `tab-order` (a step backwards in a column) | 0 | **0** | the order now covers every kind of control, not only fields |
@@ -50,8 +50,9 @@ widgets a window draws by hand are not stops (round 510 lists them).
 
 ![The Inspector at 1024x640 x1.5](sweep-509/inspector-1024-x1.5.png)
 
-- **2 - the Inspector at narrow widths.** Position, Rotation and Scale put their three fields on a row of their own
-  under the label when the label's column leaves them less than four digits each; the name field keeps its row and
+- **2 - the Inspector at narrow widths.** Position, Rotation and Scale keep four digits a field: in the label's
+  column when it leaves them that, else starting right after the label's word (a 213 px Inspector), and only where
+  even that is too narrow (Tablet Mode's side pane) on a row of their own under the label; the name field keeps its row and
   Fold and Pin go under it. A property row's field keeps at least 48 px (72 px in Tablet Mode) and the label gives
   way with its ellipsis - the Type, Color and Intensity fields of a Light were 22 px wide. Origin's dropdown starts
   right after its word where its column left it nothing.
@@ -73,8 +74,8 @@ widgets a window draws by hand are not stops (round 510 lists them).
   hint leaves; the Draw window's More is its icon in a side pane and the brush group shrinks to floors (the word
   "Size", then the size field itself, give way - the palette's puck sets the size); the Game view's camera dropdown
   ends before Guides and Stats; a tab strip keeps room for its "+N".
-- **5 - cut labels.** A grid of buttons (`Editor::button_grid`, `ui::Context::button_cells`) drops columns until its
-  widest label fits and never gives a caller more columns than it asked for; pairs and triples of buttons (Lighting,
+- **5 - cut labels.** In a grid of buttons (`Editor::button_grid`) a label too long for its cell takes a row of its
+  own and the rest keep the columns the caller asked for; pairs and triples of buttons (Lighting,
   Live Link, Layers, Rigging, Light Probe Group, MeshFilter, the shape keys, the Draw palette's footer) go side by
   side when they fit and one under the other when they do not; a button whose word fits only without its icon keeps
   the word; Update Lighting leaves its key to the tooltip in a narrow pane. This also took the 11 cut labels of
@@ -94,9 +95,18 @@ Remove buttons. The sweep still prints how many targets are under 7 mm at each s
 
 ## What moved at the default size
 
-Part D's rows are visible at 1366x768 and 1920x1080, scale 1, too: the Scene, Game, Hierarchy, Console, Project,
-Materials and Textures strips are 2 px taller, and a three-number row's letters and gaps are 1 to 2 px tighter (so
-four digits fit sooner). Nothing else moves there.
+Part D's rows are visible at 1366x768 and 1920x1080, scale 1, too: the Hierarchy, Console, Project, Materials and
+Textures strips are 2 px taller (the Scene and Game views' strips keep their height: their controls sit on 2 px margins
+instead of 3, so the views keep their size), and a three-number row's letters and gaps are 1 to 2 px tighter (so four
+digits fit sooner). Nothing else moves there.
+
+**Found by CI after the first publish:** the round's first layout made panels taller - a grid went to one column for
+one long label, Position / Rotation / Scale went to rows of their own in any Inspector under about 300 px, the Scene
+view's strip grew 2 px. Eight tests in other groups (render, animation, physics, sketch, sculpt) found a control
+below its window's fold or a picture at another size than they were measured at. The rules above are the fix: a
+panel grows only by the rows a too-long label or a too-narrow pane needs. Three `hci` tests pin it. One row stays:
+in an Inspector under about 300 px Fold and Pin have a row of their own (beside them the name field was 17 px
+wide), so every Inspector control there is a row lower than before round 509.
 
 ## What is left
 
@@ -104,7 +114,7 @@ four digits fit sooner). Nothing else moves there.
 |---|---|---|---|
 | "Generate Lighting" (116 px of label in 110 px) and "Clear Baked Data" (111 in 110) end in "..." | the Lighting window docked in the left pane at 1024x640 x1.5 only | this stream | the pane is about 150 px wide there; the label is longer than the window can give it. The tooltip says it whole. |
 | "Edit Origin with Handles..." ends in "..." | the Inspector at 1024x640 x1.5 | this stream | about 240 px of label in a 200 px pane, on a row of its own; the tooltip says it whole. (The sweep's cut-label check reads labelled buttons by their whole label, so a label that itself ends in "..." is not in its list.) |
-| A long label takes its whole grid to one column | the Modeling Tools' Object grid in a 215 px pane ("Make Faces (Close Holes)") - 20 rows instead of 10 | this stream; a choice | the other way is the cut labels of round 505. Shorter labels would give the columns back: a wording choice for the owner. |
+| A label too long for its grid cell takes a row of its own | the Modeling Tools' Object grid in a 215 px pane ("Make Faces (Close Holes)") | this stream; a choice | up to two rows more for each such label (its own, and a row it leaves part empty), instead of a cut label. Shorter labels would give the rows back: a wording choice for the owner. |
 | The Game view's camera dropdown is left out when its header has under 60 px for it | a Game view narrower than its Guides and Stats buttons and that | this stream, round 510 | the camera can still be picked in the Hierarchy; a dropdown as an icon would be the fix |
 | With a control focused in a docked window, Tab past the window's last control walks on through the other windows, the status bar and the menu bar | every docked window | by ADR 0145 (order is drawing order); Shift+F6 / F6 jump by window | |
 | The Sequencer's toolbar runs past its pane at 1024x640 x1.5 and is cut there | Sequencer window | this stream, round 510 | not a control on another (the clip cuts it); its last buttons cannot be reached there. |

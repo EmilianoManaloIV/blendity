@@ -11,27 +11,37 @@ namespace bl {
 
 using ui::Icon;
 
-/* A grid of buttons, `per` to a row, a disabled one drawn flat with its label dimmed (the Rigging window too). */
+/* A grid of buttons, `per` to a row, a disabled one drawn flat with its label dimmed (the Rigging window too).
+ * Round 509: no label is cut where the window can help it. A label too long for its cell takes a row of its own, the
+ * others keep their columns (the grid stays as tall as it was but for those rows - dropping every button to one column
+ * for one long label pushed the sections under it out of sight). The column count is the caller's; a long label costs
+ * its own row and, in the middle of a row, leaves that row part empty - up to two rows each. */
 void Editor::button_grid(ui::Layout &lay, const std::vector<GridButton> &bs, int per) {
   auto &u = ui_;
-  /* Round 509: as many columns as the longest label fits in (never under one), so a narrow window shows whole words in fewer
-   * columns instead of "Sp..." in four. */
-  int widest = 0;
-  for (const GridButton &b : bs) widest = std::max(widest, u.font.text_width(b.label));
-  const int room_w = lay.area.w - lay.indent;
-  while (per > 1 && (room_w - u.px(4) * (per + 1)) / per < widest + u.px(8)) per--;
-  for (size_t i = 0; i < bs.size(); i += (size_t)per) {
-    Recti row = lay.row(u.row_h() + u.px(2));
-    const int bw = (row.w - u.px(4) * (per + 1)) / per;
-    for (size_t k = i; k < std::min(bs.size(), i + (size_t)per); k++) {
-      Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
-      if (!bs[k].enabled) {
-        u.frame(br, u.theme.strip, u.theme.border, u.px(3));
-        u.label(br, u.elide(bs[k].label, br.w - u.px(8)), u.theme.text_dim, ui::Align::Center);  // (a disabled label was cut at both ends: the same "..." as a button's)
-      }
-      else if (u.button(br, bs[k].label)) bs[k].fn();
-      u.tooltip(bs[k].tip);
+  const int room_w = lay.area.w - lay.indent, gap = u.px(4), pad = u.px(8);
+  per = std::max(1, per);
+  const int bw = (room_w - gap * (per + 1)) / per;
+  auto draw = [&](const GridButton &b, const Recti &br) {
+    if (!b.enabled) {
+      if (u.record_buttons) u.button_rects[b.label] = br;  // (found by its label, as an enabled one is)
+      u.frame(br, u.theme.strip, u.theme.border, u.px(3));
+      u.label(br, u.elide(b.label, br.w - pad), u.theme.text_dim, ui::Align::Center);  // (a disabled label was cut at both ends: the same "..." as a button's)
     }
+    else if (u.button(br, b.label)) b.fn();
+    u.tooltip(b.tip);
+  };
+  int col = 0;
+  Recti row{};
+  for (const GridButton &b : bs) {
+    if (per > 1 && u.font.text_width(b.label) + pad > bw) {  // (a row of its own; the next button starts a new row)
+      row = lay.row(u.row_h() + u.px(2));
+      draw(b, {row.x + gap, row.y, row.w - 2 * gap, row.h});
+      col = 0;
+      continue;
+    }
+    if (col == 0) row = lay.row(u.row_h() + u.px(2));
+    draw(b, {row.x + gap + col * (bw + gap), row.y, bw, row.h});
+    col = (col + 1) % per;
   }
 }
 

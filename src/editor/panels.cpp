@@ -518,10 +518,16 @@ struct InspectorReflector : Reflector {
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
   Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
-  /* Round 509: where a three-number row's fields go - beside the label when each gets four digits, else on a row of their own
-   * under it at the full width (the label column takes 165 px of the 196 an Inspector gives at 1024x640 and 1.5x). */
-  Recti vec3_rect(const Recti &row) {
+  /* Round 509: where a three-number row's fields go, so each gets four digits: in the field column when it is wide
+   * enough; else starting right after the label's word (a 213 px Inspector: the column leaves them 97 px, the word
+   * "Position" leaves them 145); only when even that is too narrow on a row of their own under it, at the full width
+   * (Tablet Mode's side pane: the label column takes 165 px of 196). A row of its own makes the panel taller, so it is
+   * the last resort - every control under it moves down a row. */
+  Recti vec3_rect(const Recti &row, const char *label) {
     if (field_rect(row).w >= u.vec3_min_width()) return field_rect(row);
+    const int after_word = u.px(4) + u.font.text_width(label) + u.px(8);
+    const Recti beside{row.x + after_word, row.y, row.w - after_word - u.px(6), row.h};
+    if (beside.w >= u.vec3_min_width()) return beside;
     const Recti own = lay.row();
     return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
   }
@@ -709,16 +715,21 @@ struct InspectorReflector : Reflector {
   void field(const char *n, Vec3 &v) override {
     if (skip()) return;
     Recti row = lay.row();
-    u.label(label_rect(row), n);
+    /* The fields first: beside a short label they may start inside the label's column, and the label - its right-click
+     * menu, its key diamond, I to key it - must end where they begin. */
+    const Recti f = vec3_rect(row, n);
+    Recti lr = label_rect(row);
+    if (f.y == row.y) lr.w = std::max(0, std::min(lr.w, f.x - lr.x - u.px(4)));
+    u.label(lr, n);
     Vec3 old = v;
-    if (u.vec3_field(fid(n), vec3_rect(row), v, 0.05f)) {
+    if (u.vec3_field(fid(n), f, v, 0.05f)) {
       FieldEdit &e = record(FieldEdit::Vec, n);
       e.v_old = old;
       e.v_new = v;
       u.number_committed(fid(n), &e.expr, &e.component);
       changed = true;
     }
-    if (field_menu(n, label_rect(row), defaults ? &defaults->v : nullptr, v, 3)) {
+    if (field_menu(n, lr, defaults ? &defaults->v : nullptr, v, 3)) {
       FieldEdit &e = record(FieldEdit::Vec, n);
       e.v_old = old;
       e.v_new = v;
@@ -1667,16 +1678,16 @@ void Editor::draw_inspector(const Recti &r) {
     const Vec3 pos_before = t.position, euler_before = t.euler_hint, scale_before = t.scale;
     Recti row = lay.row();
     u.label(ir.label_rect(row), "Position");
-    bool ch = u.vec3_field(u.id("pos"), ir.vec3_rect(row), t.position, 0.05f);
+    bool ch = u.vec3_field(u.id("pos"), ir.vec3_rect(row, "Position"), t.position, 0.05f);
     u.tooltip("Local position. Unity is Y-up left-handed; Blender is Z-up right-handed.");
     row = lay.row();
     u.label(ir.label_rect(row), "Rotation");
     Vec3 e = t.euler_hint;
-    bool rch = u.vec3_field(u.id("rot"), ir.vec3_rect(row), e, 0.5f);
+    bool rch = u.vec3_field(u.id("rot"), ir.vec3_rect(row, "Rotation"), e, 0.5f);
     u.tooltip("Euler angles in degrees, applied Z, X, then Y (Unity order).\nStored internally as a quaternion (GEA Vol. I 5.4).");
     row = lay.row();
     u.label(ir.label_rect(row), "Scale");
-    ch |= u.vec3_field(u.id("scl"), ir.vec3_rect(row), t.scale, 0.01f);
+    ch |= u.vec3_field(u.id("scl"), ir.vec3_rect(row, "Scale"), t.scale, 0.01f);
     if (ch) {
       g->set_local_position(t.position);
       g->set_local_scale(t.scale);
@@ -1720,7 +1731,7 @@ void Editor::draw_inspector(const Recti &r) {
       if (origin_mode_ == 5) {
         row = lay.row();
         u.label(ir.label_rect(row), "  Point (world)");
-        u.vec3_field(u.id("origin_pt"), ir.vec3_rect(row), origin_target_, 0.05f);
+        u.vec3_field(u.id("origin_pt"), ir.vec3_rect(row, "  Point (world)"), origin_target_, 0.05f);
         origin_hover_ = origin_hover_ || u.hovered(row);
         u.tooltip("The world position the origin moves to. Expressions work, e.g. \"+=1\".");
       }
