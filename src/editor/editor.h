@@ -7302,6 +7302,40 @@ class Editor {
   bool moonray_rendering_for_test() const { return mr_job_ != nullptr; }
   const std::string &render_status_for_test() const { return render_status_; }
   void stop_render_for_test() { render_stop(); }  // (the Render window's Stop)
+  /* Round 502 (task 0486), blockout_modifiers.cpp: a Blockout that carries a modifier stack. */
+  bool blockout_stack_changes_faces(const GameObject &g) const;  // (a shown modifier that is no deformer: the drawn faces are not the pieces' own)
+  bool blockout_pick_takes_whole(const GameObject &g);           // (a click on such a Blockout selects it, not a piece; says why once)
+  uint64_t blockout_whole_said_ = 0;                             // the Blockout that was last told so
+  uint64_t blockout_pick_piece_shown(GameObject &g, int view_x, int view_y, const std::unique_ptr<blockout::FaceOwners> *owners = nullptr);  // (the piece of the DRAWN face under a pixel: through deformers; 0: none)
+  bool blockout_box_select_shown(GameObject &g, const Recti &view, const Recti &box);  // (a box's pieces, through the drawn mesh)
+  void blockout_stacks_settle(uint64_t obj = 0);                 // (the Blockouts' stacks brought to their pieces' meshes now: `blockout wait`)
+  /* Round 501 (task 0485), blockout_join.cpp: snapping between Blockouts, and joining Blockouts that touch. */
+  void blockout_cross_candidates(const GameObject &own_blockout, Vec3 origin, Vec3 dir, std::vector<float> &out);  // (the other Blockouts' planes and corners along a line: a piece's snap and a face handle's)
+  bool blockout_whole_snap(const GameObject &lead, Vec3 start_pos, Vec3 axis, const std::vector<uint64_t> &roots, float &d, Vec3 *marker = nullptr);  // (moved Blockouts' corners onto other Blockouts' along an axis; marker: where the landed corner is)
+  bool blockout_gizmo_snap(Vec3 axis, float &along);   // (the Move gizmo's axis drag, scene_view.cpp)
+  bool blockout_modal_snap(Vec3 axis, float &along);   // (the modal G's axis move, modal_transform.cpp)
+  void blockout_touching(const GameObject &a, std::vector<GameObject *> &out);  // (the Blockouts whose result touches or overlaps a's; kept per edit epoch)
+  bool blockout_touches(const GameObject &a, const GameObject &b);
+  bool blockout_join_available();  // (the Mesh menu's entry: two Blockouts selected, or one that touches another)
+  void draw_blockout_join_row(GameObject &g, Blockout &b, ui::Layout &lay);  // (the Inspector's "touches 'Name'" and Join Blockouts)
+  void blockout_join_command(const std::vector<std::string> &t);  // (`blockout join [name ...]`)
+  bool blockout_join(GameObject &active, std::vector<GameObject *> others);  // (the others' pieces under the active Blockout, each in its place in the world; one undo step)
+  const std::vector<Vec3> &blockout_targets(std::vector<uint64_t> excluded);  // (the other Blockouts' world corners, kept for the length of a drag)
+  struct BlockoutCross {
+    const void *scene = nullptr;
+    uint64_t structure = 0;
+    int frame = -10;
+    std::vector<uint64_t> excluded;
+    std::vector<Vec3> points;
+    Vec3 axis;
+    bool axis_valid = false;
+    std::vector<float> sorted;  // (the points along `axis`, ascending)
+  } blockout_cross_;
+  struct BlockoutTouch {
+    const void *scene = nullptr;
+    uint64_t epoch = 0;
+    std::unordered_map<uint64_t, std::vector<uint64_t>> by;  // (a Blockout's id -> the ids of those touching it)
+  } blockout_touch_;
   void set_async_jobs_for_test(bool on) { async_jobs_ = on; }  // (round 412: a headless editor's renders and bakes on workers, as the windowed one's)
   void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
   bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }

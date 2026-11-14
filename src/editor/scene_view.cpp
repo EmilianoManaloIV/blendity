@@ -1259,6 +1259,7 @@ bool Editor::gizmo_update(const Recti &view) {
         const GameObject *lead = scene_->find(gizmo_starts_.back().id);
         float along = dot(delta, axis[h]);
         if (lead && lead->get<BlockoutPiece>() && blockout_move_snap(view, *lead, gizmo_starts_.back().pos, axis[h], along)) delta = axis[h] * along;
+        else if (lead && !lead->get<BlockoutPiece>() && blockout_gizmo_snap(axis[h], along)) delta = axis[h] * along;  // (round 501: moved Blockouts onto other Blockouts)
       }
       if (h <= H_MOVE_Z) typed_axis_move(axis[h], delta);  // (task 0190: type 2.5 while dragging: exactly 2.5 along the axis)
       gizmo_live_delta_ = delta;

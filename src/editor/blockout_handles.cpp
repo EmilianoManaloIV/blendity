@@ -201,6 +201,7 @@ float Editor::blockout_snap_t(const Recti &, const GameObject &g, float raw) {
     if (const GameObject *bo = blockout_of_piece(g)) {
       std::vector<float> ts;
       snap_candidates(*bo, g.id, d.origin_w, d.dir_w, ts);
+      blockout_cross_candidates(*bo, d.origin_w, d.dir_w, ts);  // (round 501: then the other Blockouts')
       float best = reach, at = 0.0f;
       bool found = false;
       for (float c : ts) {
@@ -237,6 +238,7 @@ bool Editor::blockout_move_snap(const Recti &, const GameObject &lead, Vec3 star
   std::vector<float> own, others;
   snap_candidates(*bo, 0, start_pos, axis, own, lead.id);     // (the piece's corners along the axis, where it is now)
   snap_candidates(*bo, lead.id, start_pos, axis, others);     // (every other piece's)
+  blockout_cross_candidates(*bo, start_pos, axis, others);    // (round 501: and the other Blockouts')
   float best = reach, at = d;
   for (float o : own)
     for (float c : others) {
