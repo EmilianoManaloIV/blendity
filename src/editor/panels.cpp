@@ -424,6 +424,17 @@ struct ApplyEditReflector : Reflector {
   void texture(const char *, TextureRef &) override {}
 };
 
+/* One field edit applied to another selected object's component; a Blockout piece then gets the Inspector's after-edit rules (round 498: a Round window is a circle). */
+static void apply_edit_to(Component *oc, const FieldEdit &fe, int index, int count, bool self, int edited_opening = -1) {
+  BlockoutPiece *piece = dynamic_cast<BlockoutPiece *>(oc);
+  /* A Style is the words of its own kind (round 499): a door's Revolving is no window's Grid, so the edit does not go to a piece whose Opening is not the edited one's. */
+  if (piece && fe.name == "Style" && edited_opening >= 0 && piece->opening != edited_opening) return;
+  const int style_before = piece ? piece->style : 0, opening_before = piece ? piece->opening : 2;
+  ApplyEditReflector a(fe, index, count, self);
+  oc->reflect(a);
+  if (piece) blockout_piece_edited(*piece, style_before, opening_before);
+}
+
 /* Draws any component through the Reflector interface (Unity's default
  * inspector / Blender's RNA-driven property panels). */
 /* Round 335's review: the first component of its type on g (a track "Type.Field" names the first). */
@@ -1788,7 +1799,10 @@ void Editor::draw_inspector(const Recti &r) {
       ir.limit = essentials_limit(c->type_name());
       ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
       ir.owner = g;
+      BlockoutPiece *edited_piece = dynamic_cast<BlockoutPiece *>(c);
+      const int style_before = edited_piece ? edited_piece->style : 0, opening_before = edited_piece ? edited_piece->opening : 2;
       c->reflect(ir);
+      if (edited_piece && ir.changed) blockout_piece_edited(*edited_piece, style_before, opening_before);  // (round 498: a Round window is a circle; round 499: a door keeps its style, Door <-> Window starts at Opening Only; the same undo step)
       draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
       if (ir.changed) {
         mark_changed(std::string("Edit ") + c->type_name());
@@ -1812,8 +1826,7 @@ void Editor::draw_inspector(const Recti &r) {
                 break;
               }
             if (!oc) continue;
-            ApplyEditReflector a(fe, (int)i, (int)multi.size(), self);
-            oc->reflect(a);
+            apply_edit_to(oc, fe, (int)i, (int)multi.size(), self, edited_piece ? edited_piece->opening : -1);
           }
       }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)

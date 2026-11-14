@@ -4170,7 +4170,15 @@ class Editor {
   std::vector<std::pair<std::string, bool>> blockout_status_lines(const GameObject &g, const Blockout &b) const;  // (text, a warning)
   GameObject *create_blockout(const std::string &first_piece);
   GameObject *create_blockout_piece(const std::string &what);
-  GameObject *create_opening(GameObject &bo, int opening, const std::vector<float> &numbers, const GameObject *sel);  // (round 478: a door (1) or window (2) put on a wall)
+  GameObject *create_opening(GameObject &bo, int opening, const std::vector<float> &numbers, const GameObject *sel, int style = 0);  // (round 478: a door (1) or window (2) put on a wall; round 498: a window's style)
+  void blockout_window_command(const std::vector<std::string> &t);  // (round 498: blockout set style|frame|panes|glass|sillboard - the selected windows'; round 499: style and frame also for doors, leaf|open|hinge|slide|drum - the selected doors')
+  void blockout_window_fit_lines(const Blockout &b, std::vector<std::pair<std::string, bool>> &lines) const;  // (round 498: windows the grid held coarse)
+  int blockout_window_style_ = 0;  // (round 498: the Modeling Tools window's Style dropdown: the next window made from a button or a menu has it; per editor, not saved)
+  int blockout_door_style_ = 0;    // (round 499: the same for the Door button's Door Style dropdown)
+  /* Round 499: what a Door or Window button or menu entry creates: `kind` with the dropdown's style word (nothing added for Opening Only and for any other kind). The console's
+   * `create Blockout Piece: Door` does not go through this: it makes Opening Only whatever the dropdown shows. */
+  std::string blockout_ui_kind(const std::string &kind) const;
+  void draw_blockout_style_rows(ui::Layout &lay);  // (round 499: the Door Style and Window Style dropdowns under the Blockout buttons in the Modeling Tools window)
   void draw_blockouts();  // (the pieces' wires)
   void blockout_menu_items(bool child);  // (the GameObject menu's, the Hierarchy's + and the Tools window's: New Blockout, Add / Subtract Box, Cylinder, Sphere)
   bool blockout_box_select(GameObject &g, const Recti &view, const Recti &box);  // (a box select over a Blockout: its pieces under the box; false: none to name)
@@ -5999,6 +6007,14 @@ class Editor {
     Vec3 base_p, base_up;
     bool turnable = false;  // a wedge, stairs or arch: the Turn row (round 496); `turn` the quarter turns asked since the piece was made, `turn_done` those applied
     int turn = 0, turn_done = 0;
+    /* A window (round 498): F9 shows its Style and the numbers the style reads (a b c above are Width, Head, Sill). style -1: not a window. */
+    int style = -1, panes_across = 3, panes_up = 3;
+    float frame_width = 0.06f, frame_depth = 0.1f, arch_rise = 0.0f, sill_overhang = 0.04f;
+    bool glass = true, sill_board = true;
+    /* A door (round 499): style is then BlockoutDoorStyle (-1: not a door or window), `opening` says which (1 door, 2 window); these are its leaf's numbers. */
+    int opening = 0, hinge = 0, slide = 0;
+    bool leaf = true;
+    float leaf_thickness = 0.04f, open_amount = 0.0f, drum_radius = 1.0f;
   };
   bool obj_last_valid() const;
   const ObjLastOp &obj_last_for_test() const { return obj_last_; }
