@@ -264,8 +264,8 @@ void Editor::pick(const Recti &view, int mx, int my, int mode) {
   }
   /* Round 477 (ADR 0129): a click on a Blockout's mesh selects the piece that made the face under the cursor. */
   if (GameObject *bo = hit ? scene_->find(hit) : nullptr)
-    if (bo->get<Blockout>())
-      if (const uint64_t piece = blockout_pick_piece(*bo, mx - view.x, my - view.y)) hit = piece;
+    if (bo->get<Blockout>() && !blockout_pick_takes_whole(*bo))  // (round 502: a stack that changes the faces leaves no piece to name)
+      if (const uint64_t piece = blockout_pick_piece_shown(*bo, mx - view.x, my - view.y)) hit = piece;
   if (hit) select(hit, mode);
   else if (mode == SEL_REPLACE) clear_selection();
 }
@@ -383,7 +383,7 @@ void Editor::box_select(const Recti &view, Recti box, int mode) {
     if (!g) continue;
     /* A Blockout in the box gives its pieces there, as a click gives the piece under it (the user, after round 479: a click that
      * moved a few pixels is a small box, and it selected the whole Blockout where the click selects a piece). */
-    if (g->get<Blockout>() && blockout_box_select(*g, view, b)) continue;
+    if (g->get<Blockout>() && !blockout_pick_takes_whole(*g) && blockout_box_select_shown(*g, view, b)) continue;  // (round 502: as the click)
     select(g->id, SEL_ADD);
   }
   scene_->for_each([&](GameObject &g) {

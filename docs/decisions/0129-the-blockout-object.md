@@ -125,3 +125,30 @@ work on the spot.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.
 - The Blend radius as a feature and where a blended part ends: round 481 (ADR 0128's open point).
 - Materials per side, UVs, lightmaps, Bake to Mesh and Unbake, export of mesh pieces: round 482.
+
+## Amendment (round 502)
+Task 0486: **a modifier stack on a Blockout is evaluated over its rebuilt mesh.** The mesh a build lands on the
+MeshFilter is the stack's input, as any object's base mesh is (`GameObject::evaluated_mesh`); nothing of the kernel or
+of the landing knows about modifiers.
+- **Where it runs.** Once a Blockout shows a result of its stack, every later evaluation goes to the editor's
+  evaluation worker (ADR 0107's hook) whatever the stack's size - a drag lands a new base many times and the frame that
+  adopts a landing must not also pay for the stack. The last result stays up meanwhile, so the bare mesh is never
+  shown between two results. The first evaluation (a modifier just added) and a stack that reads another object follow
+  ADR 0107's rule as before. In Play a Blockout's stack is evaluated on the spot: colliders read the exact mesh.
+  A finished result is adopted although the pieces moved on meanwhile (ADR 0107 adopts only the key still wanted):
+  it is of a later landing than what is shown, and the newest is asked for at the next draw - so a drag whose
+  landings come faster than its stack evaluates still shows results. The worker's limit of four evaluations at once
+  stands: past it the main thread evaluates, as for any object.
+- **What trails.** Between a landing and the adoption of its stack's result every reader outside an
+  `EvaluateNowScope` - the views, ray casts, bounds - has the result before it. Export, Generate Lighting, Apply
+  and Play's start wait and evaluate exactly; `Editor::blockout_stacks_settle` does so for a caller that asks.
+- **Who reads what.** The views, Generate Lighting, colliders, the scene's ray casts and the OBJ / FBX / GLB exports
+  read the evaluated mesh, as for any object. The handles, the outlines, the Draw Piece tool's piece numbers and the
+  faces' origins read the pieces and the base mesh.
+- **Picking.** A click or a box on the drawn mesh names a piece only while no shown modifier changes the faces;
+  otherwise it selects the Blockout and says so (`Editor::blockout_pick_takes_whole`). Deformers keep the faces and
+  their order, so with them the ray is cast at the drawn mesh and the face's number names the piece
+  (`Editor::blockout_pick_piece_shown`).
+- **Decision 10 stands:** Apply (one modifier or all) is refused on a Blockout, now with Bake to Mesh as the offered
+  way on. Bake to Mesh and Unbake leave the stack where it is: on a baked object it is an ordinary object's stack.
+- Not done: a modifier on a single piece (a piece is numbers), a modifier that changes the pieces.

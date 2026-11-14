@@ -7302,6 +7302,13 @@ class Editor {
   bool moonray_rendering_for_test() const { return mr_job_ != nullptr; }
   const std::string &render_status_for_test() const { return render_status_; }
   void stop_render_for_test() { render_stop(); }  // (the Render window's Stop)
+  /* Round 502 (task 0486), blockout_modifiers.cpp: a Blockout that carries a modifier stack. */
+  bool blockout_stack_changes_faces(const GameObject &g) const;  // (a shown modifier that is no deformer: the drawn faces are not the pieces' own)
+  bool blockout_pick_takes_whole(const GameObject &g);           // (a click on such a Blockout selects it, not a piece; says why once)
+  uint64_t blockout_whole_said_ = 0;                             // the Blockout that was last told so
+  uint64_t blockout_pick_piece_shown(GameObject &g, int view_x, int view_y, const std::unique_ptr<blockout::FaceOwners> *owners = nullptr);  // (the piece of the DRAWN face under a pixel: through deformers; 0: none)
+  bool blockout_box_select_shown(GameObject &g, const Recti &view, const Recti &box);  // (a box's pieces, through the drawn mesh)
+  void blockout_stacks_settle(uint64_t obj = 0);                 // (the Blockouts' stacks brought to their pieces' meshes now: `blockout wait`)
   void set_async_jobs_for_test(bool on) { async_jobs_ = on; }  // (round 412: a headless editor's renders and bakes on workers, as the windowed one's)
   void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
   bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }

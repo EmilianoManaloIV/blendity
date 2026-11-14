@@ -1966,8 +1966,27 @@ void Editor::draw_inspector(const Recti &r) {
       ui::Id add_mod = u.id("add_modifier");
       if (u.button(ab2, "Add Modifier", false, Icon::Plus)) u.open_popup(add_mod, ab2);
       u.tooltip("Blender: Modifier Properties > Add Modifier (Edit / Generate / Deform).");
-      if (u.button({ab2.right() + u.px(4), ar2.y, half, ar2.h}, "Apply All", false, Icon::Check) && !mods.empty()) mesh_op("apply_modifiers");
-      u.tooltip("Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
+      /* Round 502 (task 0486): Apply on a Blockout is refused with the way on - its mesh is rebuilt from its pieces, so what Apply
+       * wrote would go at the next rebuild; baked, the object is an ordinary mesh with the same stack still on it. */
+      const bool on_blockout = g->get<Blockout>() != nullptr;
+      bool apply_all = false;  // (run after the rows are drawn: it takes the modifiers off the list the rows walk - round 502's test engineer: a crash when the last component was a modifier)
+      auto refuse_apply_on_blockout = [this, g](const std::string &what) {
+        refuse(what + ": '" + g->name + "' is a Blockout - its mesh is rebuilt from its pieces, so what Apply wrote would go at the next rebuild. "
+                      "Bake to Mesh first (the modifiers stay on the baked mesh)",
+               "blockout bake", "Bake to Mesh");
+      };
+      if (u.button({ab2.right() + u.px(4), ar2.y, half, ar2.h}, "Apply All", false, Icon::Check) && !mods.empty()) {
+        if (on_blockout) refuse_apply_on_blockout("Apply All");
+        else apply_all = true;
+      }
+      u.tooltip(on_blockout ? "Refused on a Blockout: Bake to Mesh first (Mesh > Bake Blockout to Mesh), then Apply works on the baked mesh."
+                            : "Bake the whole stack into the mesh (Blender: Ctrl+A on each, top first).");
+      if (on_blockout && !mods.empty()) {
+        Recti nr = lay.row();
+        u.label({nr.x + u.px(8), nr.y, nr.w - u.px(16), nr.h}, "Live over the Blockout's result: runs again when a piece moves.", u.theme.text_dim);
+        u.tooltip("The modifiers take the mesh the pieces make and run again, on a background worker, each time a piece moves or changes. "
+                  "The handles and the Draw Piece tool keep working on the pieces. Apply needs Bake to Mesh first.");
+      }
       u.popup(add_mod, u.px(230), [this] {
         auto &u = ui_;
         struct Item { const char *label, *type; };
@@ -2109,6 +2128,10 @@ void Editor::draw_inspector(const Recti &r) {
       int drag_from = 0, drag_to = 0;  // a header dragged to another place (task 0071)
       if (stack_drag_end("mods:" + std::to_string(g->id), drag_from, drag_to) && (size_t)drag_from < mods.size())
         act = DragTo, act_ci = mods[(size_t)drag_from], act_to = (size_t)drag_to;
+      if (apply_all) {
+        mesh_op("apply_modifiers");
+        act = None;  // (the list is another now: an action chosen in the same frame has nothing to act on)
+      }
       /* Apply the chosen action after drawing (it changes the component list). */
       if (act != None && act_ci < g->components.size()) {
         auto it = std::find(mods.begin(), mods.end(), act_ci);
@@ -2125,7 +2148,11 @@ void Editor::draw_inspector(const Recti &r) {
         };
         switch (act) {
           case Apply: {
-            if (blockout_refuses_edit_mode(g)) break;  // (round 477: applied, the modifier's work would go at the next rebuild)
+            if (on_blockout) {
+              refuse_apply_on_blockout(std::string("Apply ") + g->components[act_ci]->type_name());
+              break;
+            }
+            if (blockout_refuses_edit_mode(g)) break;  // (round 477: a piece has no mesh to apply to)
             auto *mf = g->get<MeshFilter>();
             if (mf && mf->mesh) {
               bool first = true;

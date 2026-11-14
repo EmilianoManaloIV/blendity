@@ -2974,6 +2974,7 @@ void Editor::mesh_job_poll() {
  * themselves, evaluate on the spot. */
 bool Editor::eval_job_request(const GameObject &g, int kind, uint64_t key) {
   if (!jobs_async() || JobSystem::in_background() || kind > 2 || !scene_ || g.scene != scene_.get() || sculpt_stroking_) return false;  // (a stroke writes the base mesh in place: the main thread's)
+  if (playing_ && g.get<Blockout>()) return false;  // (round 502: Play's colliders and views read the stack over the mesh the pieces made at Play's start - exact, not the result before it; nothing rebuilds while playing)
   for (const auto &j : eval_jobs_)
     if (j->obj == g.id && j->kind == kind) return true;
   if (eval_jobs_.size() >= 4) return false;  // (more at once: the main thread, as before)
@@ -2982,7 +2983,10 @@ bool Editor::eval_job_request(const GameObject &g, int kind, uint64_t key) {
   job->copy = std::make_unique<GameObject>();
   job->copy->id = g.id;
   job->copy->name = g.name;
-  for (const auto &c : g.components) job->copy->add_component(c->clone());
+  for (const auto &c : g.components) {
+    if (dynamic_cast<const Blockout *>(c.get())) continue;  // (round 502: the stack reads the mesh, not the pieces' build state - its face origins are not copied at every landing)
+    job->copy->add_component(c->clone());
+  }
   EvalJob *raw = job.get();
   raw->thread = std::thread([raw, kind] {
     JobSystem::global().run_background([raw, kind] {
@@ -3007,7 +3011,13 @@ void Editor::eval_jobs_poll() {
     }
     if (j.thread.joinable()) j.thread.join();
     GameObject *g = scene_->find(j.obj);
-    if (g && g->eval_pending_key(j.kind) == j.key) g->adopt_evaluation(*j.copy, j.kind);  // (the object still waits for exactly this key; else the next call asks again)
+    /* The object still waits for exactly this key; else the next call asks again. Round 502: a Blockout whose pieces moved on meanwhile takes
+     * the result all the same - it is, as a rule, of a later landing than what is shown, and a drag whose landings come faster than its stack evaluates
+     * would otherwise show nothing new until it ends (seldom it is older: when the main thread evaluated in between). Its key is not the wanted
+     * one, so the next call asks for the newest. */
+    const bool wanted = g && g->eval_pending_key(j.kind) == j.key;
+    const bool blockout_behind = g && !wanted && g->eval_pending_key(j.kind) != 0 && g->get<Blockout>() && g->get<MeshFilter>();
+    if (wanted || blockout_behind) g->adopt_evaluation(*j.copy, j.kind);
     eval_jobs_.erase(eval_jobs_.begin() + (std::ptrdiff_t)i);
     ui_.redraw = true;
   }

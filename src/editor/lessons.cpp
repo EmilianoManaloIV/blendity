@@ -2366,6 +2366,28 @@ A Blockout's faces take their materials by what they are - a floor, a wall, a ce
 ? You Bake to Mesh, edit the faces in Edit Mode and then run blockout unbake. What happens? | It asks first: the mesh was edited since the bake and Unbake builds it again from the pieces, so the edits are lost. Cancel keeps the baked mesh; blockout unbake force skips the question.
 ? Two rooms stand side by side and one door's piece has its own Cut Material. Which faces change? | Only the faces that door cut: a piece's override changes its own faces, and the Blockout's Cut Material still covers every other cut.
 )"},
+    {"Modifiers on a Blockout", "Bevel a whole building, mirror half a plan, array a bay: a modifier stack that follows the pieces", R"(
+A Blockout takes modifiers like any mesh object, and they stay live: the pieces build the mesh, the modifiers run over what the pieces built, and when a piece moves both happen again - on background workers, so a drag does not wait for them. You still edit only the pieces; the modifiers are what is drawn, lit, collided with and exported.
+# Try it
+! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6 | 1. A room 4 m by 4 m and 2.6 m high, in a new Blockout
+! cmd:select Blockout; component BevelModifier; set BevelModifier.Width 0.05 | 2. Bevel the whole building: every sharp edge of the result gets a 5 cm chamfer (Inspector > Modifiers > Add Modifier > Bevel)
+! cmd:blockout add box 1 1 1 | 3. Another piece: the bevel runs again over the new result on its own
+! cmd:select Blockout; component MirrorModifier | 4. Mirror half a plan: the result is doubled across the Blockout's local X plane - build one wing, see both
+! cmd:select Blockout; component ArrayModifier; set ArrayModifier.Count 3 | 5. Array a bay: three copies of the mirrored, bevelled result in a row
+! cmd:blockout bake | 6. Bake to Mesh: an ordinary mesh with the same three modifiers still on it - now Apply works
+# What follows the pieces
+- The stack's input is the mesh the pieces make. Every time a build lands - a piece moved, resized, switched off - the stack runs again on a worker and the result is shown when it is ready; until then the last result stays up, so a drag shows the modified mesh a step behind the piece's wire and never the bare mesh in between.
+- Every modifier that takes a mesh works: Bevel, Mirror, Array, Solidify, Subdivision Surface, Displace, Decimate, Triangulate, Weld and the rest of the Add Modifier menu. A modifier that reads another object (a Boolean, a Curve) runs on the main thread, as it does on any object.
+- The Scene and Game views, Generate Lighting, colliders, Play and the OBJ / FBX / GLB exports all use the modified mesh. Saving keeps the stack; the file holds the pieces and the modifiers, not their result.
+- Material slots and UVs go through the stack as any mesh's do: a mirrored wall keeps its Walls Material and its texture.
+# Apply, Bake to Mesh and picking
+- Apply and Apply All are refused on a Blockout - its mesh is made again from the pieces, so what Apply wrote would be gone at the next rebuild. The refusal offers Bake to Mesh; the baked object keeps the stack, live over the baked mesh, and Apply works there. Unbake keeps the stack too.
+- The handles, the outlines and the Draw Piece tool keep working on the pieces whatever the stack does. A click on a face selects the piece that made it while the modifiers only move points (Displace, Smooth, Cast) - the drawn, moved face is the one that counts; with a modifier that changes the faces (Bevel, Mirror, Array, Subdivision) a click selects the Blockout and the status says why - pick the piece in the Hierarchy or by its outline.
+- There is no modifier on a single piece: a piece is numbers, not a mesh.
+? A Blockout has a Mirror modifier and you drag a door along a wall. What do the two halves show during the drag? | Both follow the door together, one step behind its wire: each build of the pieces lands, the Mirror runs over it on a worker, and the mirrored result replaces the last one - the unmirrored mesh is never shown in between.
+? You press Apply on the Bevel of a live Blockout. What happens, and how do you make the bevel permanent? | It is refused: the mesh is rebuilt from the pieces, so an applied bevel would vanish at the next rebuild. The message offers Bake to Mesh - the baked object is an ordinary mesh with the Bevel still on it, and Apply works there.
+? With a Subdivision Surface on a Blockout you click a wall in the Scene view. What is selected? | The Blockout, and the status says the modifiers change the faces: the drawn faces are no longer the pieces' own, so no piece can be named from them. Select the piece in the Hierarchy or click its outline; its handles still work.
+)"},
     {"Building rooms with Blockout", "From an empty scene to a lit interior: two rooms, a door, a window, a rounded column, materials and Bake to Mesh", R"(
 This lesson is the whole path in one sitting, with the other Blockout lessons as its chapters: you make a Blockout, make two materials, drag out two rooms side by side and give each its floor and walls, cut a door between them and a window in an outer wall, stand a column in one room with a rounded foot and bake the result to an ordinary mesh. At every step the mesh is built again from the pieces, so you can go back and change any number. It starts best from File > New Scene: each Try-it works on what the one before it left selected (a piece you draw is selected, and the commands that follow act on its Blockout), so a Blockout left over from another lesson would take the rooms in.
 
