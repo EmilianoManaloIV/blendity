@@ -6,7 +6,7 @@
 - **Decisions:** ADR 0085 (the HCI evaluation artefacts), ADR 0056 (a test pins a behaviour, a measurement is a row);
   none new
 - **Model:** implementer (Sonnet) for the check and the sweep's reporting; main session for the survey and its write-up
-- **PR:** (link when opened)
+- **PR:** https://github.com/EmilianoManaloIV/blendity/pull/401
 
 ## Goal
 One ranked list of what is wrong with the interface today, with pictures, so rounds 509 and 510 can fix it from the

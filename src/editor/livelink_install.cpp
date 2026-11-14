@@ -249,7 +249,11 @@ void Editor::draw_bridge_install(ui::Layout &lay) {
                                       "Choose a Godot project's folder: the add-on goes into addons/ and is enabled in project.godot.",
                                       "Choose an Unreal project's folder: the plugin goes into Plugins/ and its .uproject lists it."};
   Recti r = lay.row(u.row_h() + u.px(4));
-  const int cols = r.w >= u.px(440) ? 4 : 2;  // (task 0293: two by two in a side pane, the labels whole)
+  /* Task 0293: two by two in a side pane, the labels whole. Round 509: and one a row where two do not fit (1.5x). */
+  int widest = 0;
+  for (const char *name : kNames) widest = std::max(widest, u.font.text_width(name));
+  int cols = 4;
+  while (cols > 1 && (r.w - u.px(6) * (cols - 1)) / cols < widest + u.px(8)) cols /= 2;
   const int w = (r.w - u.px(6) * (cols - 1)) / cols;
   for (int i = 0; i < 4; i++) {
     if (i > 0 && i % cols == 0) r = lay.row(u.row_h() + u.px(4));

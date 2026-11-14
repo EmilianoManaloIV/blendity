@@ -245,6 +245,8 @@ const std::vector<ShortcutAction> &shortcut_actions() {
       {"window.research", "References (Learn)", "Windows", CTX_GLOBAL},
       {"window.uv", "UV Editor", "Windows", CTX_GLOBAL},
       {"window.history", "History", "Windows", CTX_GLOBAL},  // (task 0254; no chord in any preset)
+      {"ui.focus_window", "Focus Next Window's Controls", "Windows", CTX_GLOBAL},  // (round 509, ADR 0145: F6; Shift+F6 goes to the previous window)
+      {"ui.menu_bar", "Focus the Menu Bar", "Windows", CTX_GLOBAL},                // (F10, or Alt pressed and let go alone)
   };
   return acts;
 }
@@ -274,6 +276,8 @@ static void common_bindings(Keymap &k) {
   b("render.animation", {"Ctrl+F12"});
   b("window.render", {"F11"});
   b("window.learn", {"F1"});
+  b("ui.focus_window", {"F6", "Shift+F6"});  // (round 509, ADR 0145: the keyboard's way into a window's controls; Shift goes back)
+  b("ui.menu_bar", {"F10"});
   b("edit.adjust_last", {"F9"});
   b("play.toggle", {"Ctrl+P"});
   b("play.pause", {"Ctrl+Shift+P"});
@@ -423,6 +427,7 @@ Keymap keymap_preset(const std::string &name, bool blender_transform_keys) {
     b("mode.edit_toggle", {"F8"});
     b("mode.vertex", {"F9"});
     b("mode.edge", {"F10"});
+    b("ui.menu_bar", {});  // (F10 is Edge mode in Maya: the menu bar keeps Alt)
     b("mode.face", {"F11"});
     b("window.render", {});  // F11 is Face mode in Maya
     b("edit.adjust_last", {"Ctrl+F9"});  // F9 is Vertex mode
@@ -961,6 +966,8 @@ bool Editor::run_action(const std::string &id) {
   else if (id == "window.render") dock_open(WindowKind::Render);
   else if (id == "window.learn") dock_open(WindowKind::Learn);
   else if (id == "window.history") dock_open(WindowKind::History);
+  else if (id == "ui.focus_window") focus_window_step(in.shift() ? -1 : 1);
+  else if (id == "ui.menu_bar") focus_menu_bar();
   else if (id.rfind("anim.", 0) == 0 && anim_shortcuts_stand_down()) return false;  // (task 0258: the Hierarchy's and the UV editor's own arrows, a flown view)
   else if (id == "anim.key") anim_key_all();
   else if (id == "anim.play") anim_toggle_play();
@@ -979,7 +986,11 @@ bool Editor::run_action(const std::string &id) {
  * Scene view, then anywhere), so one key can mean different things there. */
 void Editor::handle_shortcuts() {
   auto &in = ui_.in;
-  if (ui_.wants_keyboard() || dialog_ != Dialog::None || pp_.active || modal_.active || xf_.active || bone_drag_.modal || drag_ == Drag::Gizmo || blockout_drag_.active || (room_.active && room_.stage > 0)) return;  // a running operator (or a gizmo drag's typed number) takes the keys
+  const bool tool_running = pp_.active || modal_.active || xf_.active || bone_drag_.modal || drag_ == Drag::Gizmo || blockout_drag_.active || (room_.active && room_.stage > 0);
+  if (tool_running) ui_.focus_release();  // (round 509: a tool started with a control focused - Enter, Esc and Space are the tool's from here)
+  if (!tool_running && !qm_.open && capturing_binding_.empty()) alt_alone_poll();
+  else alt_clean_ = false, alt_was_down_ = in.key_down[platform::KEY_ALT];  // (Alt+wheel in a modal, a key being bound: not "Alt alone")
+  if (ui_.wants_keyboard() || dialog_ != Dialog::None || tool_running) return;  // a running operator (or a gizmo drag's typed number) takes the keys
   if (qm_.open) return;  // (the Wheel's keys: 1-8, letters, Esc - task 0230)
   if (!capturing_binding_.empty()) return;  // Preferences is waiting for a key to bind
   int mods = 0;
@@ -1038,6 +1049,63 @@ void Editor::handle_shortcuts() {
     if (edit_mode_) last_op_hidden_ = true;
     if (origin_edit_) origin_edit_ = false;
   }
+}
+
+/* Round 509 (ADR 0145): the keyboard's way into the controls. */
+void Editor::dock_leaves_in_order(const DockNode *n, std::vector<const DockNode *> &out) const {
+  if (!n) return;
+  if (!n->split) {
+    if (!n->tabs.empty()) out.push_back(n);
+    return;
+  }
+  dock_leaves_in_order(n->a.get(), out);
+  dock_leaves_in_order(n->b.get(), out);
+}
+
+/* F6: the focus goes to the first control of the window under the pointer - or, when it is in a window already, of the
+ * next one in docking order (Shift+F6: the previous). A window with no control keeps the focus where it was. */
+void Editor::focus_window_step(int dir) {
+  std::vector<const DockNode *> leaves;
+  dock_leaves_in_order(dock_.get(), leaves);
+  if (leaves.empty()) return;
+  const int n = (int)leaves.size();
+  const Recti held = ui_.focus_rect();
+  const auto leaf_of = [&](int x, int y) {
+    for (int k = 0; k < n; k++)
+      if (leaves[(size_t)k]->rect.contains(x, y)) return k;
+    return -1;
+  };
+  const int from = held.empty() ? -1 : leaf_of(held.x + held.w / 2, held.y + held.h / 2);
+  const int under = leaf_of(ui_.in.mx, ui_.in.my);
+  const int target = from >= 0 ? (from + dir + n) % n : under >= 0 ? under : dir > 0 ? 0 : n - 1;
+  const DockNode *leaf = leaves[(size_t)target];
+  const WindowKind k = leaf->tabs[(size_t)std::max(0, std::min(leaf->active, (int)leaf->tabs.size() - 1))];
+  const auto it = window_rects_.find(k);
+  ui_.focus_first_in(it != window_rects_.end() ? it->second : leaf->rect);  // (its content: not the tab strip above it)
+}
+
+/* F10: the menu bar's first menu has the focus; Left / Right change menu, Down opens it. */
+void Editor::focus_menu_bar() {
+  ui_.close_popups();
+  ui_.focus_request(ui_.id("File"), 0);
+}
+
+/* Alt pressed and let go with no mouse button and no other key between (Alt+drag is the Scene view's orbit, Alt+key a
+ * shortcut) focuses the menu bar. Called once a frame. */
+void Editor::alt_alone_poll() {
+  const auto &in = ui_.in;
+  const bool down = in.key_down[platform::KEY_ALT];
+  const bool fresh = in.key_pressed[platform::KEY_ALT] && !alt_was_down_;  // (auto-repeat is not a new press)
+  bool other = in.down[0] || in.down[1] || in.down[2] || in.pressed[0] || in.pressed[1] || in.pressed[2] || in.released[0] || in.released[1] || in.released[2];
+  for (int key = 1; key < platform::KEY_COUNT; key++)
+    if (key != platform::KEY_ALT && in.key_pressed[key]) other = true;
+  if (in.wheel_x != 0 || in.wheel_y != 0 || in.ctrl() || in.shift()) other = true;  // (Alt+wheel, Ctrl+Alt, Shift+Alt: not Alt alone)
+  if (fresh) alt_clean_ = true;
+  if (other) alt_clean_ = false;
+  const bool released = (alt_was_down_ || fresh) && !down;
+  alt_was_down_ = down;
+  if (released && alt_clean_ && !ui_.wants_keyboard() && dialog_ == Dialog::None) focus_menu_bar();
+  if (!down) alt_clean_ = false;
 }
 
 /* The editor's feel (task 0063): Unity, Unreal, Blender or Maya keys and mouse navigation, together. The keymap preset

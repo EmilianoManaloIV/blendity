@@ -249,7 +249,16 @@ void Editor::draw_layers_window(const Recti &r) {
   Sketch &s = sketch_doc();
   if (s.layers.empty()) s.layers.push_back(SketchLayer{});
   const int rh = u.row_h() + u.px(10), bh = u.row_h() + u.px(6);
-  const int rows = r.h >= 8 * bh ? 3 : 2;  // (review 388: a short window keeps two rows - Clip and the masks are in the row's right-click menu too)
+  const char *const labels[9] = {"New Layer", "Group", "Duplicate", "Merge Down", "Flatten", "Delete", "Clip", "Add Mask", "Delete Mask"};
+  /* Round 509: three buttons a row when the longest label fits a third of the width, else two, else one - the labels were cut
+   * ("Merge Dow...") at a side pane's width. A narrower footer shows fewer of them (the rest are in the row's menu). */
+  int widest = 0;
+  for (const char *l : labels) widest = std::max(widest, u.font.text_width(l));
+  int cols = 3;
+  while (cols > 1 && (r.w - u.px(8)) / cols - u.px(2) < widest + u.px(8)) cols--;
+  const int rows_cap = std::max(2, (int)(r.h * 0.45) / bh);  // (the footer takes under half the window)
+  const int rows = cols == 3 ? (r.h >= 8 * bh ? 3 : 2)  // (review 388: a short window keeps two rows - Clip and the masks are in the row's right-click menu too)
+                             : std::min((9 + cols - 1) / cols, rows_cap);
   const Recti footer{r.x, r.bottom() - rows * bh - u.px(4), r.w, rows * bh + u.px(4)};
   const Recti list{r.x, r.y, r.w, footer.y - r.y};
   const int n = (int)s.layers.size();
@@ -276,8 +285,7 @@ void Editor::draw_layers_window(const Recti &r) {
   if (stack_drag_end("sketchlayers", from, to)) layers_drop(from, to);
   u.canvas.pop_clip();
   u.canvas.fill_rect(footer, u.theme.bar);
-  const int bw = (footer.w - u.px(8)) / 3;
-  const char *const labels[9] = {"New Layer", "Group", "Duplicate", "Merge Down", "Flatten", "Delete", "Clip", "Add Mask", "Delete Mask"};
+  const int bw = (footer.w - u.px(8)) / cols;
   const char *const ops[9] = {"add", "group", "duplicate", "merge", "flatten", "delete", "clip", "mask add", "mask delete"};
   const char *const tips[9] = {"A new layer on top of the stack (sketch layer add)", "A group right above the active layer, holding it; its opacity scales the children",
                                "A copy of the active layer with its strokes, above it", "The active layer's strokes onto the one under it (its opacity kept)",
@@ -285,8 +293,8 @@ void Editor::draw_layers_window(const Recti &r) {
                                "A clipping mask: the layer shows only where the layer under it is (again: released). Photoshop: Alt+click the border",
                                "A layer mask from the selection: the layer shows only inside it (no selection: all of it). Photoshop: Add Layer Mask",
                                "The active layer's mask removed: the layer shows whole"};
-  for (int k = 0; k < rows * 3; k++) {
-    const Recti br{footer.x + u.px(4) + (k % 3) * bw, footer.y + u.px(2) + (k / 3) * bh, bw - u.px(2), bh - u.px(2)};
+  for (int k = 0; k < std::min(9, rows * cols); k++) {
+    const Recti br{footer.x + u.px(4) + (k % cols) * bw, footer.y + u.px(2) + (k / cols) * bh, bw - u.px(2), bh - u.px(2)};
     if (u.button(br, labels[k])) sketch_layer_op(ops[k], s.active_layer);
     u.tooltip(tips[k]);
   }

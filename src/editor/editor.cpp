@@ -529,6 +529,7 @@ void Editor::process_events(std::vector<Event> &events) {
         std::fill(std::begin(in.key_down), std::end(in.key_down), false);
         for (bool &d : in.down) d = false;
         in.mods = 0;
+        alt_clean_ = false, in.key_pressed[platform::KEY_ALT] = false;  // (round 509: Alt+Tab away is not "Alt alone" - the menu bar must not take the focus on the way back)
         break;
       case EventType::DpiChanged:
         if (window_) {
@@ -1017,16 +1018,24 @@ void Editor::draw_menubar(const Recti &r) {
   static const char *menus[] = {"File", "Edit", "Assets", "GameObject", "Component", "Mesh", "Window", "Help"};
   int x = r.x + u.px(6);
   bool any_menu_open = false;
-  for (const char *m : menus)
-    if (u.popup_open(u.id(m))) any_menu_open = true;
-  for (const char *m : menus) {
+  const int count = (int)(sizeof(menus) / sizeof(menus[0]));
+  int open_index = -1;
+  for (int k = 0; k < count; k++)
+    if (u.popup_open(u.id(menus[k]))) any_menu_open = true, open_index = k;
+  /* Left / Right on a row of an open menu: the neighbour menu opens, its first row focused (the keys' way, ADR 0145). */
+  const int step = u.take_menu_step();
+  const int step_to = step != 0 && open_index >= 0 ? (open_index + step + count) % count : -1;
+  for (int k = 0; k < count; k++) {
+    const char *m = menus[k];
     int w = u.font.text_width(m) + u.px(16);
     Recti mr{x, r.y, w, r.h};
     if (u.record_buttons) u.button_rects["menubar:" + std::string(m)] = mr;  // (tests open a menu by its name)
     ui::Id id = u.id(m);
+    if (k == step_to) u.open_popup(id, mr), u.focus_enter_popup();
     bool open = u.popup_open(id);
     bool hot = u.hovered(mr);
-    if (open || hot) u.canvas.fill_rect(mr, open ? u.theme.selection : u.theme.tab_hover);
+    const bool focused = u.menubar_stop(id, mr);  // (F10 / Alt: Left and Right walk the bar, Down or Enter opens)
+    if (open || hot || focused) u.canvas.fill_rect(mr, open ? u.theme.selection : u.theme.tab_hover);
     u.label(mr, m, u.theme.text_bright, ui::Align::Center);
     if (hot && u.in.pressed[0]) {
       if (open) u.close_popups();
@@ -1502,15 +1511,31 @@ void Editor::draw_toolbar(const Recti &r) {
     x += bh + u.px(2);
   }
   x += u.px(14);
-  int pw = u.font.text_width("Center") + bh + u.px(10);
-  if (u.button({x, y, pw, bh}, pivot_center_ ? "Center" : "Pivot", false, pivot_center_ ? Icon::Center : Icon::Pivot)) {
+  /* Round 509: when the left group would leave no room for the transport and the right group (1024x640 at 1.5x, or Edit
+   * Mode's buttons), it gives up words in this order - Vertex / Edge / Face, then Pivot and Global (their icons stay, the
+   * tooltips say the rest), then the snap size narrows - until it fits. */
+  const int transport_w = bh * 3 + u.px(4);
+  const int pw_full = u.font.text_width("Center") + bh + u.px(10), gw_full = u.font.text_width("Global") + bh + u.px(10), ew_full = u.font.text_width("Vertex") + bh + u.px(10);
+  const int right_min = u.px(70) + u.px(8) + bh + u.px(16);  // (the narrowest Layout dropdown and Learn's book)
+  const auto left_end_at = [&](int lv) {
+    const int p = lv >= 2 ? bh : pw_full, g = lv >= 2 ? bh : gw_full, e = lv >= 1 ? bh : ew_full, sn = lv >= 3 ? u.px(60) : u.px(76);
+    int end = x + p + u.px(4) + g + u.px(4) + bh + u.px(4) + sn;  // (the snap size's right edge)
+    if (edit_mode_) end += u.px(14) + 3 * e + u.px(8) + bh;
+    return end;
+  };
+  int level = 0;
+  while (level < 3 && left_end_at(level) + u.px(14) + transport_w + u.px(14) + right_min > r.right()) level++;
+  const bool words_edit = level < 1, words_pg = level < 2;
+  const int sw = level >= 3 ? u.px(60) : u.px(76);
+  int pw = words_pg ? pw_full : bh;
+  if (u.button({x, y, pw, bh}, words_pg ? (pivot_center_ ? "Center" : "Pivot") : "", false, pivot_center_ ? Icon::Center : Icon::Pivot)) {
     pivot_center_ = !pivot_center_;
     save_prefs();
   }
   u.tooltip("Tool handle position: selection bounds Center or the active object's Pivot.");
   x += pw + u.px(4);
-  int gw = u.font.text_width("Global") + bh + u.px(10);
-  if (u.button({x, y, gw, bh}, space_local_ ? "Local" : "Global", false, space_local_ ? Icon::Local : Icon::Globe)) space_local_ = !space_local_;
+  int gw = words_pg ? gw_full : bh;
+  if (u.button({x, y, gw, bh}, words_pg ? (space_local_ ? "Local" : "Global") : "", false, space_local_ ? Icon::Local : Icon::Globe)) space_local_ = !space_local_;
   u.tooltip("Handle orientation. Blender: Transform Orientation (Global / Local).");
   x += gw + u.px(4);
   if (u.icon_button({x, y, bh, bh}, Icon::Magnet, snap_, "Increment snapping (or hold Ctrl while dragging).\nBlender: Shift+Tab snapping toggle.")) snap_ = !snap_;
@@ -1520,7 +1545,6 @@ void Editor::draw_toolbar(const Recti &r) {
     int cur = 5;  // (Custom: a value set in Preferences that is none of the steps)
     for (int i = 0; i < 5; i++)
       if (std::fabs(snap_move_ - values[i]) < 1e-4f) cur = i;
-    const int sw = u.px(76);
     if (u.combo(u.id("snap_step"), {x + bh + u.px(4), y, sw, bh}, cur, steps, 6) && cur < 5) {
       snap_move_ = values[cur];
       save_prefs();
@@ -1528,17 +1552,19 @@ void Editor::draw_toolbar(const Recti &r) {
     u.tooltip(strprintf("The move step for a Ctrl drag (and the magnet). A turn snaps to %g degrees (Preferences).", snap_rot_));
     x += sw + u.px(4);
   }
+  /* (x is the magnet's place plus the dropdown's width; the dropdown itself starts a button further right, so it ends at x + bh.) */
+  int left_end = x + bh;  // (round 509: where the left group ends, so the transport never lies on it)
   /* (Round 496: the Draw Piece tool's button is no longer here - a niche tool; it lives in Modeling Tools > Create > Blockout, on Shift+R and in the menu.) */
   x += bh + u.px(14);
   if (edit_mode_) {
-    int ew = u.font.text_width("Vertex") + bh + u.px(10);
-    if (u.button({x, y, ew, bh}, "Vertex", elem_ == EditElement::Vertex, Icon::Vertex)) set_edit_element(EditElement::Vertex);
+    int ew = words_edit ? ew_full : bh;
+    if (u.button({x, y, ew, bh}, words_edit ? "Vertex" : "", elem_ == EditElement::Vertex, Icon::Vertex)) set_edit_element(EditElement::Vertex);
     u.tooltip("Vertex select mode (1). Same as Blender's Edit Mode.");
     x += ew + u.px(2);
-    if (u.button({x, y, ew, bh}, "Edge", elem_ == EditElement::Edge, Icon::Vertex)) set_edit_element(EditElement::Edge);
+    if (u.button({x, y, ew, bh}, words_edit ? "Edge" : "", elem_ == EditElement::Edge, Icon::Vertex)) set_edit_element(EditElement::Edge);
     u.tooltip("Edge select mode (2). Double-click an edge for its edge loop\n(Blender: Alt+click), Ctrl+R over an edge for Loop Cut.");
     x += ew + u.px(2);
-    if (u.button({x, y, ew, bh}, "Face", elem_ == EditElement::Face, Icon::Face)) set_edit_element(EditElement::Face);
+    if (u.button({x, y, ew, bh}, words_edit ? "Face" : "", elem_ == EditElement::Face, Icon::Face)) set_edit_element(EditElement::Face);
     u.tooltip("Face select mode (3).");
     x += ew + u.px(4);
     if (u.icon_button({x, y, bh, bh}, Icon::Globe, proportional_,
@@ -1546,11 +1572,13 @@ void Editor::draw_toolbar(const Recti &r) {
                        "the transform with a smooth falloff; scroll while dragging to resize.\n"
                        "Blender: the same, Unity/ProBuilder: soft selection.").c_str()))
       proportional_ = !proportional_;
+    left_end = x + bh;
     x += bh + u.px(8);
   }
 
-  /* Play controls in the middle, like Unity. */
-  int cx = r.x + r.w / 2 - (bh * 3 + u.px(4)) / 2;
+  /* Play controls in the middle, like Unity - and never on the left group (round 509: at 1024x640 and 1.5x, or with Edit
+   * Mode's buttons, that group runs past the middle: the controls then start a gap after it). */
+  int cx = std::max(r.x + r.w / 2 - transport_w / 2, left_end + u.px(14));
   u.canvas.vline(cx + bh * 3 + u.px(8), y, y + bh, u.theme.border);  // (task 0235)
   if (u.icon_button({cx, y, bh, bh}, Icon::Play, playing_, strprintf("Play (%s)\nEnters Play mode. Changes made while playing are discarded on Stop, like Unity.", key("play.toggle").c_str()).c_str())) {
     if (playing_) exit_play(); else enter_play();
@@ -1576,7 +1604,18 @@ void Editor::draw_toolbar(const Recti &r) {
   names.push_back("Delete Layout...");
   std::vector<const char *> cnames;
   for (const std::string &s : names) cnames.push_back(s.c_str());
-  int lw = u.px(170);
+  /* The right group takes what the transport leaves (round 509): the Layout dropdown narrows first, then Learn becomes its
+   * book alone, then the dropdown narrows again; each is a control that still reads at that width. */
+  const int learn_full = u.font.text_width("Learn") + bh + u.px(14);
+  const int room = r.right() - u.px(8) - (cx + transport_w + u.px(14)) - u.px(8);
+  struct Fit { int combo, learn; };
+  Fit fit{u.px(70), bh};
+  for (const Fit &f : {Fit{u.px(170), learn_full}, Fit{u.px(110), learn_full}, Fit{u.px(110), bh}})
+    if (f.combo + u.px(8) + f.learn <= room) {
+      fit = f;
+      break;
+    }
+  const int lw = fit.combo;
   int rx = r.right() - lw - u.px(8);
   if (u.combo(u.id("layout_combo"), {rx, y, lw, bh}, layout_idx, cnames.data(), (int)cnames.size())) {
     if (layout_idx < (int)n_layouts) {
@@ -1588,13 +1627,19 @@ void Editor::draw_toolbar(const Recti &r) {
   u.tooltip("Layouts for each stage of the work (Reference, Blocking Out, Modeling, UVs, Texturing, Lighting, Rigging,\n"
             "Skinning, Animation): each arranges the windows and shows that stage's tools. Window > Layouts > Show All Tools\n"
             "shows everything. Unity: the Layout dropdown; Blender: Workspaces.");
-  int learn_w = u.font.text_width("Learn") + bh + u.px(14);
+  const int learn_w = fit.learn;
   rx -= learn_w + u.px(8);
   Recti lr{rx, y, learn_w, bh};
   bool hot = u.hovered(lr);
   u.frame(lr, hot ? Color::mix(u.theme.accent, 0xFFFFFFFF, 0.15f) : u.theme.accent, 0, u.px(3));
-  u.draw_icon(Icon::Book, {lr.x + u.px(6), lr.y + u.px(4), bh - u.px(8), bh - u.px(8)}, u.theme.text_on_accent);  // (task 0261: black in High Contrast)
-  u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", u.theme.text_on_accent);
+  const bool book_only = learn_w < learn_full;
+  const int book_x = book_only ? lr.x + (lr.w - (bh - u.px(8))) / 2 : lr.x + u.px(6);
+  u.draw_icon(Icon::Book, {book_x, lr.y + u.px(4), bh - u.px(8), bh - u.px(8)}, u.theme.text_on_accent);  // (task 0261: black in High Contrast)
+  if (!book_only) u.canvas.text(u.font, lr.x + bh, lr.y + (bh - u.font.line_height()) / 2, "Learn", u.theme.text_on_accent);
+  else {
+    u.mark_widget(lr);
+    u.tooltip("Learn: lessons for every tool, with things to try.");
+  }
   if (hot && u.in.pressed[0]) dock_open(WindowKind::Learn);
   if (playing_) u.canvas.fill_rect({r.x, r.bottom() - u.px(2), r.w, u.px(2)}, u.theme.focus);
   draw_layout_dialogs();  // Save / Delete Layout (task 0055)
@@ -1621,7 +1666,8 @@ void Editor::draw_statusbar(const Recti &r) {
   draw_statusbar_log({x, r.y, log_w, r.h});
   const int tray_w = draw_job_tray(r.right() - right_w, r.y, r.h, jobs);
   const int mid_x = x + log_w + u.px(12);
-  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - tray_w - mid_x), r.h});
+  /* The tray has its own slot (round 509): the hint is cut with its ellipsis a gap before it, never run under it. */
+  draw_statusbar_hint({mid_x, r.y, std::max(0, r.right() - right_w - tray_w - mid_x - (tray_w ? u.px(8) : 0)), r.h});
 }
 
 /* The last message: its icon and text; a click opens the Console. */

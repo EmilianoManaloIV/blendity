@@ -171,11 +171,15 @@ void Editor::draw_moonray_settings() {
   u.label({r.x + u.px(160), r.y, r.w - u.px(300), r.h}, state, mr_.ready() ? u.theme.text : u.theme.text_dim);
   u.tooltip(std::string("MoonRay is a separate program Blendity downloads on request and runs for ") + key("render.image") + " renders (on Windows inside WSL).");
   if (!mr_located_) return;
-  const Recti btn{r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)};
+  const int bh = std::min(r.h, u.row_h());  // (round 509: a row high, as the AI row's button)
+  const Recti btn{r.right() - u.px(130), r.y + (r.h - bh) / 2, u.px(118), bh};
   if (mr_task_) return;  // (busy: its result is logged)
+  /* Round 509: this row's button before the row under it - Tab walks in drawing order, and it went back up a row here. */
+  const bool remove = mr_.ready() && !mr_.own_build && u.button(btn, "Remove");
+  const bool install = !remove && !mr_.ready() && mr_.installable() && u.button(btn, "Install...");
   draw_moonray_own_row();
-  if (mr_.ready() && !mr_.own_build && u.button(btn, "Remove")) return moonray_command({"moonray", "remove"});
-  if (!mr_.ready() && mr_.installable() && u.button(btn, "Install...")) moonray_command({"moonray", "install"});
+  if (remove) return moonray_command({"moonray", "remove"});
+  if (install) moonray_command({"moonray", "install"});
 }
 
 /* Task 0288: your own MoonRay (a folder you built) and a test render - what `moonray folder` and `moonray check` did. */

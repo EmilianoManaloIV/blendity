@@ -33,7 +33,7 @@ using ui::Icon;
 void Editor::draw_scene_view(const Recti &r) {
   BL_ZONE("scene_view");
   auto &u = ui_;
-  int bh = u.row_h() + u.px(4);
+  int bh = u.row_h() + u.px(6);  // (round 509: the header's controls are a row high, so the strip is 2 px taller than it was)
   Recti bar{r.x, r.y, r.w, bh};
   Recti view{r.x, r.y + bh, r.w, r.h - bh};
   scene_rect_ = view;
@@ -2728,10 +2728,17 @@ void Editor::compute_proportional_weights(const Mat4 &world) {
 void Editor::draw_game_view(const Recti &r) {
   BL_ZONE("game_view");
   auto &u = ui_;
-  int bh = u.row_h() + u.px(4);
+  int bh = u.row_h() + u.px(6);  // (round 509: the strip's controls are a row high, 2 px more than before)
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
-  {
+  /* Guides and Stats sit at the right end at their own text's width; the camera dropdown takes what is left of the strip
+   * (round 509: a fixed 170 px dropdown lay on both at 1.5x). */
+  const int h = bh - u.px(6);
+  const int stats_w = u.font.text_width("Stats") + u.px(14), guides_w = u.font.text_width("Guides") + u.px(14);
+  const Recti sr{bar.right() - u.px(8) - stats_w, bar.y + u.px(3), stats_w, h};
+  const Recti gr{sr.x - u.px(4) - guides_w, bar.y + u.px(3), guides_w, h};
+  const int cam_w = std::min(u.px(170), gr.x - u.px(6) - (bar.x + u.px(6)));
+  if (cam_w >= u.px(60)) {
     /* Which camera the view shows: the scene's Active Camera (Unity: the Display dropdown; Blender: the
      * scene camera). Choosing one here sets it. */
     std::vector<GameObject *> &cams = game_cam_objs_;
@@ -2754,19 +2761,18 @@ void Editor::draw_game_view(const Recti &r) {
     for (auto &n : names) opts.push_back(n.c_str());
     if (opts.empty()) opts.push_back("No cameras");
     int pick = std::max(0, cur);
-    if (u.combo(u.id("game_camera"), {bar.x + u.px(6), bar.y + u.px(3), u.px(170), bar.h - u.px(6)}, pick, opts.data(), (int)opts.size()) && !cams.empty() &&
+    if (u.combo(u.id("game_camera"), {bar.x + u.px(6), bar.y + u.px(3), cam_w, h}, pick, opts.data(), (int)opts.size()) && !cams.empty() &&
         pick >= 0 && pick < (int)cams.size() && cams[(size_t)pick]->id != scene_->active_camera)
       set_active_camera(cams[(size_t)pick]);
     u.tooltip("The camera this view shows: the scene's Active Camera (Blender: the scene camera; Unity: MainCamera).\n"
               "Without one, \"Main Camera\" by name, else the first camera.");
   }
-  if (bar.w > u.px(460)) u.label({bar.x + u.px(182), bar.y, u.px(110), bar.h}, "Free Aspect", u.theme.text_dim);  // (not under the buttons)
-  int h = bh - u.px(6);
+  const int aspect_x = bar.x + u.px(12) + std::max(0, cam_w), aspect_w = u.font.text_width("Free Aspect");
+  if (aspect_x + aspect_w + u.px(8) <= gr.x) u.label({aspect_x, bar.y, aspect_w, bar.h}, "Free Aspect", u.theme.text_dim);  // (only where it lies on nothing)
   {
     /* Composition guides of the camera shown (task 0033). */
     GameObject *shown = nullptr;
     Camera *gc = main_camera(*scene_, &shown);
-    Recti gr{bar.right() - u.px(144), bar.y + u.px(3), u.px(68), h};
     game_guides_rects_["button"] = gr;
     if (u.button(gr, "Guides", gc && gc->show_guides) && gc) u.open_popup(u.id("game_guides"), {gr.x, gr.bottom(), gr.w, 0});
     u.tooltip("Composition guides over the camera's frame: rule of thirds, golden ratio, safe areas...\n"
@@ -2800,7 +2806,6 @@ void Editor::draw_game_view(const Recti &r) {
       item("Action Safe", gc->guide_action_safe);
     });
   }
-  Recti sr{bar.right() - u.px(70), bar.y + u.px(3), u.px(62), h};
   if (u.button(sr, "Stats", game_stats_overlay_)) game_stats_overlay_ = !game_stats_overlay_;
   u.tooltip("Rendering statistics (Unity: Game view > Stats).");
   Recti view{r.x, r.y + bh, r.w, r.h - bh};

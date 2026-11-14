@@ -131,6 +131,7 @@ void Context::begin_frame(Image *target, double now) {
   redraw = false;
   next_wakeup = 0;
   id_stack_.clear();
+  focus_capture_keys();  // (before the popups' Esc below: a focused control takes it first)
   /* Escape or a click outside closes popups; the click is consumed. */
   if (!popups_.empty()) {
     bool inside = false;
@@ -150,9 +151,12 @@ void Context::begin_frame(Image *target, double now) {
 }
 
 void Context::end_frame() {
+  menu_step_ = 0;  // (a step asked for last frame was the menu bar's to take while it drew)
   draw_popups();
   for (auto &fn : overlays_) fn();
   draw_tooltip();
+  if (focus_id_ && !focus_seen_) focus_id_ = 0;  // (its control was not drawn: the window closed, the object went)
+  focus_resolve_walk();
   if (edit_id_ && !edit_seen_) edit_id_ = 0;
   if (edit_id_) {
     double blink = (std::floor(time * 2.0) + 1.0) / 2.0;
@@ -190,6 +194,240 @@ void Context::frame(const Recti &r, uint32_t fill, uint32_t border, int radius) 
 void Context::separator(const Recti &r) { canvas.hline(r.x, r.right(), r.y + r.h / 2, theme.separator); }
 
 /* ===================================================================== */
+/* Keyboard focus (round 509, ADR 0145)                                   */
+/* ===================================================================== */
+
+/* The frame's start: what the focus takes of this frame's keys, and which layer the walk runs on. Decided from the state
+ * the last frame left, so it holds whatever the editor does with the keys before or after the widgets draw. */
+void Context::focus_capture_keys() {
+  fk_ = FocusKeys{};
+  focus_idle_ = false;
+  stop_seen_.clear();
+  walk_first_ = walk_last_ = 0;
+  focus_seen_ = false;
+  const bool mouse = in.pressed[0] || in.pressed[1] || in.pressed[2];
+  if (mouse) {  // (a press anywhere lets it go: the mouse user never sees the ring)
+    focus_id_ = 0;
+    focus_request_ = 0;
+    focus_next_ = focus_wrap_back_ = focus_area_pending_ = false;
+    reveal_id_ = 0;
+  }
+  focus_start_id_ = focus_id_;
+  pending_at_start_ = focus_request_ != 0 || focus_area_pending_;
+  /* In a dialog or a popup nothing else wants Tab: it puts the focus on the first control (Shift+Tab: the last). */
+  const bool waiting = focus_id_ || focus_request_ || focus_next_ || focus_wrap_back_ || focus_area_pending_;
+  if (!waiting && !mouse && !popups_.empty() && edit_id_ == 0 && in.key_pressed[KEY_TAB] && !in.ctrl() && !in.alt()) {
+    in.key_pressed[KEY_TAB] = false;
+    (in.shift() ? focus_wrap_back_ : focus_next_) = true;
+    pending_layer_ = (int)popups_.size();
+    redraw = true;
+  }
+  focus_idle_ = focus_idle_now();  // (after the popup's Tab above, which asks for the first stop)
+  if (focus_request_ || focus_next_ || focus_wrap_back_ || focus_area_pending_) walk_layer_ = pending_layer_;
+  else if (focus_id_ || edit_id_) walk_layer_ = focus_layer_;
+  else walk_layer_ = (int)popups_.size();
+  const bool holds = focus_id_ || focus_request_ || focus_next_ || focus_wrap_back_ || focus_area_pending_;
+  if (!holds || mouse || in.ctrl() || in.alt()) return;
+  auto take = [&](int key, bool &out) {
+    if (!in.key_pressed[key]) return;
+    out = true;
+    in.key_pressed[key] = false;
+    in.key_down[key] = false;
+  };
+  fk_.shift = in.shift();
+  take(KEY_TAB, fk_.tab);
+  take(KEY_UP, fk_.up), take(KEY_DOWN, fk_.down), take(KEY_LEFT, fk_.left), take(KEY_RIGHT, fk_.right);
+  if (fk_.shift) return;  // (Shift+Space, Shift+Enter, Shift+Esc stay the keymap's)
+  take(KEY_SPACE, fk_.activate), take(KEY_ENTER, fk_.activate);
+  take(KEY_ESCAPE, fk_.esc);
+  if (fk_.esc && !focus_id_) focus_request_ = 0, focus_next_ = focus_wrap_back_ = focus_area_pending_ = false;  // (Esc while the focus was on its way: it stays where it is)
+}
+
+/* Nothing focused, edited or asked for when the frame began (nearly every frame): the stops are not named or walked, so a
+ * control costs no table entry. What is asked for during such a frame (F6, a click in a field) is taken up by the next. */
+bool Context::focus_idle_now() const { return !focus_id_ && !edit_id_ && !focus_request_ && !focus_next_ && !focus_wrap_back_ && !focus_area_pending_; }
+
+/* A name for a stop that stays when the control scrolls: its base id and how many stops before it this frame had it. */
+Id Context::stop_id(Id base) {
+  if (focus_idle_) return base ? base : 1;  // (not looked at this frame)
+  const uint64_t n = (uint64_t)stop_seen_[base]++;
+  const uint64_t h = fnv1a(&n, 8, base);
+  return h ? h : 1;
+}
+
+/* A stop in the Tab walk: true when it takes the focus now (Tab landed here, Shift+Tab or a wrap asked for it, or it is
+ * the first inside the area F6 named). `before` gets the stop drawn before it in the walk's layer, for Shift+Tab. */
+bool Context::walk_stop(Id i, const Recti &r, Id *before) {
+  if (before) *before = 0;
+  if (focus_idle_ || r.w <= 0 || r.h <= 0) return false;
+  if (edit_id_ == i && current_layer_ != walk_layer_) walk_layer_ = current_layer_;  // (a field clicked on another layer than the walk was on)
+  if (edit_id_ == i) focus_layer_ = current_layer_;
+  if (current_layer_ != walk_layer_) return false;
+  stop_before_ = order_last_;
+  if (before) *before = order_last_;
+  order_last_ = i;
+  if (!walk_first_) walk_first_ = i;
+  walk_last_ = i;
+  const int cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+  const bool first_in_area = focus_area_pending_ && current_layer_ == 0 && focus_area_.contains(cx, cy) && canvas.clip().contains(cx, cy);
+  const bool take = focus_next_ || focus_request_ == i || first_in_area;
+  if (take) {
+    focus_next_ = focus_area_pending_ = false;
+    focus_request_ = 0;
+    focus_id_ = 0;  // (a control takes it again in focus_stop; a field starts editing)
+    reveal_id_ = i;
+    reveal_left_ = 4;
+  }
+  if (reveal_id_ == i) focus_reveal(r);
+  return take;
+}
+
+/* A control scrolled out of its area's clip is scrolled to: the enclosing scroll area's offset, else the popup's. */
+void Context::focus_reveal(const Recti &r) {
+  const Recti clip = canvas.clip();
+  const bool seen = r.y >= clip.y && r.bottom() <= clip.bottom();  // (cut at a side only: scrolling up or down would not help)
+  if (seen || reveal_left_-- <= 0) {
+    reveal_id_ = 0;
+    return;
+  }
+  const int pad = px(2);
+  int dy = r.y < clip.y ? r.y - clip.y - pad : std::min(r.bottom() - clip.bottom() + pad, r.y - clip.y - pad);
+  if (!scroll_stack_.empty()) {
+    scroll_[scroll_stack_.back().id] = std::max(0, scroll_stack_.back().offset + dy);
+    redraw = true;
+  }
+  else if (current_layer_ > 0 && current_layer_ <= (int)popups_.size()) {
+    popups_[(size_t)current_layer_ - 1].scroll = std::max(0, popups_[(size_t)current_layer_ - 1].scroll + dy);
+    redraw = true;
+  }
+  else reveal_id_ = 0;
+}
+
+void Context::focus_ring(const Recti &r) {
+  const Recti clip = canvas.clip();
+  const uint32_t color = theme.focus, outline = theme.text;
+  const int t = std::max(2, px(2)), o = std::max(1, px(1));
+  /* Two tones: the focus colour is each theme's own and is only 2.4-2.7:1 on the panel in three of them, so a line of the
+   * text colour directly outside it carries the contrast. */
+  overlay([this, r, clip, color, outline, t, o] {  // (drawn last: a neighbour does not paint over it)
+    canvas.push_clip(clip);
+    canvas.rect_outline(r, color, t);
+    canvas.rect_outline({r.x - o, r.y - o, r.w + 2 * o, r.h + 2 * o}, outline, o);
+    canvas.pop_clip();
+  });
+}
+
+/* The focus moves on: Tab to the next stop drawn (this frame, if one follows), Shift+Tab to the one before. */
+void Context::focus_walk(bool back) {
+  focus_from_ = focus_id_;
+  focus_from_field_ = false;
+  focus_id_ = 0;
+  pending_layer_ = current_layer_;
+  if (!back) focus_next_ = true;
+  else if (stop_before_) focus_request_ = stop_before_;
+  else focus_wrap_back_ = true;
+  redraw = true;
+}
+
+/* After the whole frame drew: a Tab with no stop after it wraps to the first, a Shift+Tab with none before to the last;
+ * what was asked for last frame and never drawn is forgotten (or the keys would stay taken for good). */
+void Context::focus_resolve_walk() {
+  if (focus_idle_) return;  // (what was asked for during an idle frame waits for the next, whole, one)
+  if (pending_at_start_) focus_request_ = 0, focus_area_pending_ = false;
+  /* (A lone field that let go with Tab is not edited again at once: the wrap skips the field it came from.) */
+  auto wrap_to = [&](Id target) {
+    if (!target || (target == focus_from_ && focus_from_field_)) return;
+    focus_request_ = target;
+    redraw = true;
+  };
+  if (focus_next_) wrap_to(walk_first_);
+  if (focus_wrap_back_) wrap_to(walk_last_);
+  focus_next_ = focus_wrap_back_ = false;
+}
+
+int Context::focus_stop(Id i, const Recti &r, StopKind kind) {
+  if (focus_idle_) return 0;
+  if (walk_stop(i, r)) focus_id_ = i;
+  /* A button named by its label changes its name when a press changes the label (Fold / Unfold, Pin / Pinned): the stop
+   * drawn in the focused one's place, before the focused one is seen, is that control - the focus stays on it. */
+  const bool same_place = r.x == focus_rect_.x && r.y == focus_rect_.y && r.w == focus_rect_.w && r.h == focus_rect_.h && current_layer_ == focus_layer_;
+  if (focus_id_ && focus_id_ != i && !focus_seen_ && focus_start_id_ == focus_id_ && same_place) focus_id_ = focus_start_id_ = i;
+  if (focus_id_ != i) return 0;
+  focus_seen_ = true;
+  focus_rect_ = r;
+  focus_layer_ = current_layer_;
+  if (focus_start_id_ == i) {  // (it had the focus when the frame began: the keys are its)
+    if (fk_.tab) return focus_walk(fk_.shift), 0;
+    if (kind == StopMenuRow && (fk_.up || fk_.down)) return focus_walk(fk_.up), 0;
+    if (kind == StopMenuBar && (fk_.left || fk_.right)) return focus_walk(fk_.left), 0;
+    if (fk_.esc && kind == StopMenuRow) return menu_escape(), 0;
+    if (fk_.esc) return focus_id_ = 0, 0;
+  }
+  focus_ring(r);
+  return focus_start_id_ == i && fk_.activate ? kActivated : kFocused;
+}
+
+void Context::focus_first_in(const Recti &area) {
+  if (!popups_.empty()) return;
+  focus_area_ = area;
+  focus_area_pending_ = true;
+  pending_layer_ = walk_layer_ = 0;
+  redraw = true;  // (the focus moves when that stop is drawn: with none in the area it stays where it is)
+}
+
+void Context::focus_request(Id i, int layer) {
+  focus_request_ = i;
+  pending_layer_ = walk_layer_ = layer;
+  focus_id_ = 0;
+  redraw = true;
+}
+
+void Context::focus_enter_popup() {
+  focus_next_ = true;
+  pending_layer_ = walk_layer_ = (int)popups_.size();  // (now: the window's stops drawn after this must not take it)
+  focus_id_ = 0;
+  redraw = true;
+}
+
+bool Context::menubar_stop(Id i, const Recti &r) {
+  const int f = focus_stop(i, r, StopMenuBar);
+  if (!f) return false;
+  if (focus_start_id_ != i || (f != kActivated && !fk_.down)) return true;
+  fk_.down = false;
+  open_popup(i, r);
+  focus_enter_popup();
+  return false;
+}
+
+/* Esc on a menu row closes its menu, and the focus goes back to the row (or the menu bar's entry) that opened it. */
+void Context::menu_escape() {
+  const int layer = current_layer_;
+  if (layer <= 0 || layer > (int)popups_.size()) {
+    focus_id_ = 0;
+    return;
+  }
+  const Id opener = popups_[(size_t)layer - 1].id;  // (a submenu's or a top menu's id is its opener's)
+  popups_.resize((size_t)layer - 1);
+  focus_request(opener, layer - 1);
+}
+
+/* Left and Right on a menu row: Left closes a submenu back to its row (in a top menu it asks for the menu before), Right
+ * asks for the menu after (a submenu row opens its own instead, in submenu()). */
+void Context::menu_arrows(bool submenu_row) {
+  const bool in_submenu = current_layer_ > 0 && current_layer_ <= (int)popups_.size() && popups_[(size_t)current_layer_ - 1].submenu;
+  if (fk_.left) {
+    fk_.left = false;
+    if (in_submenu) menu_escape();
+    else menu_step_ = -1, redraw = true;
+  }
+  else if (fk_.right && !submenu_row) {
+    fk_.right = false;
+    menu_step_ = 1;
+    redraw = true;
+  }
+}
+
+/* ===================================================================== */
 /* Basic widgets                                                          */
 /* ===================================================================== */
 
@@ -218,7 +456,8 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
   }
   disabled_reasons[label] = why ? why : "";
   if (record_buttons) button_rects[label] = r;
-  record_control("button", r, label);
+  record_control("button", r, label, true);
+  const int focus = focus_stop(stop_id(id(label) ^ 0xB7), r);  // (it takes the focus, so its reason can be read - but is never pressed)
   frame(r, theme.strip, theme.border, px(3));
   const int iw = icon != Icon::None ? font.line_height() - px(4) : 0;
   const std::string shown = elide(label, r.w - px(8) - (iw ? iw + px(4) : 0));  // (task 0293: cut with "...", not drawn past the button)
@@ -234,6 +473,7 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
   if (shown != label) elided_key_ = rect_key(r), elided_label_ = label;  // (its whole label before its reason)
   mark_widget(r);  // (the reason is this widget's tooltip; the caller's general tooltip waits until it is enabled)
   reason_key_ = rect_key(r), reason_text_ = why ? why : "";
+  if (focus && !reason_text_.empty() && tooltip_text_.empty()) tooltip_text_ = reason_text_, tooltip_anchor_ = r;
   if (hovered(r)) {
     if (!reason_text_.empty()) tooltip(reason_text_);
     if (in.pressed[0]) consume_click();  // (the click goes nowhere: the reason is the answer)
@@ -243,10 +483,10 @@ bool Context::button_enabled(const Recti &r, const std::string &label, bool enab
 
 bool Context::button(const Recti &r, const std::string &text, bool selected, Icon icon) {
   if (record_buttons) button_rects[text] = r;
-  record_control("button", r, text);
+  record_control("button", r, text, true);
   Id i = id(text) ^ (rect_key(r) * 0x9E3779B97F4A7C15ull);
   bool hot = hovered(r);
-  bool clicked = false;
+  bool clicked = focus_stop(stop_id(id(text) ^ 0xB7), r) == kActivated;  // (Space or Enter on the focused button: a click)
   if (hot && in.pressed[0]) active_ = i;
   if (active_ == i && in.released[0]) {
     clicked = hot;
@@ -255,7 +495,9 @@ bool Context::button(const Recti &r, const std::string &text, bool selected, Ico
   uint32_t bg = selected || (active_ == i && hot) ? theme.button_active : (hot ? theme.button_hover : theme.button);
   frame(r, bg, theme.border, px(3));
   int iw = icon != Icon::None ? r.h - px(6) : 0;
-  const int room = r.w - px(8) - (iw ? iw + px(4) : 0);
+  int room = r.w - px(8) - (iw ? iw + px(4) : 0);
+  /* Round 509: a word that fits the button only without its icon keeps the word - the icon goes. */
+  if (iw && !text.empty() && font.text_width(text) > room && font.text_width(text) <= r.w - px(8)) iw = 0, room = r.w - px(8);
   const std::string shown = elide(text, room);  // (task 0293: a label too long for its button ends in "...", not mid-letter)
   int tw = font.text_width(shown);
   int total = tw + (iw ? iw + (shown.empty() ? 0 : px(4)) : 0);
@@ -292,11 +534,31 @@ std::string Context::elide(const std::string &text, int room) {
   return s.empty() ? std::string() : s + "...";
 }
 
+std::vector<Recti> Context::button_cells(Layout &lay, const std::vector<std::string> &labels, int row_height, int max_per_row, int extra) {
+  std::vector<Recti> cells;
+  const int n = (int)labels.size();
+  if (n == 0) return cells;
+  if (row_height < 0) row_height = row_h() + px(2);
+  const int gap = px(4), avail = lay.area.w - lay.indent - px(8);
+  int widest = 0;
+  for (const std::string &s : labels) widest = std::max(widest, font.text_width(s) + extra);
+  int per = max_per_row > 0 ? std::min(n, max_per_row) : n;
+  while (per > 1 && (avail - gap * (per - 1)) / per < widest + px(8)) per--;  // (a button's own room is its width less 8 px)
+  const int rows = (n + per - 1) / per;
+  per = (n + rows - 1) / rows;  // (those rows, filled evenly)
+  const int cw = std::max(1, (avail - gap * (per - 1)) / per);  // (an area narrower than its own margins: still a width, never none or less)
+  for (int i = 0; i < n; i += per) {
+    const Recti row = lay.row(row_height);
+    for (int k = i; k < std::min(n, i + per); k++) cells.push_back({row.x + px(4) + (k - i) * (cw + gap), row.y, cw, row.h});
+  }
+  return cells;
+}
+
 bool Context::icon_button(const Recti &r, Icon icon, bool selected, const char *tip) {
-  if (record_buttons) record_control("icon", r, tip ? tip : "");
+  if (record_buttons) record_control("icon", r, tip ? tip : "", true);
   Id i = id((uint64_t)icon) ^ (rect_key(r) * 0x9E3779B97F4A7C15ull);
   bool hot = hovered(r);
-  bool clicked = false;
+  bool clicked = focus_stop(stop_id(id((uint64_t)icon) ^ 0x1C), r) == kActivated;
   if (hot && in.pressed[0]) active_ = i;
   if (active_ == i && in.released[0]) {
     clicked = hot;
@@ -312,17 +574,28 @@ bool Context::icon_button(const Recti &r, Icon icon, bool selected, const char *
   return clicked;
 }
 
-bool Context::checkbox(const Recti &r, bool &v) {
+bool Context::checkbox(const Recti &r, bool &v) { return checkbox_impl(r, nullptr, nullptr, v); }
+
+/* `row`: the rectangle the whole row takes (toggle_row), for the focus and its ring; `text`: the row's label, its name. */
+bool Context::checkbox_impl(const Recti &r, const Recti *row, const std::string *text, bool &v) {
   int s = std::min(r.h, font.line_height()) - px(1);
   Recti box{r.x, r.y + (r.h - s) / 2, s, s};
-  bool hot = hovered(box.intersect(r).empty() ? r : Recti{r.x, r.y, s + px(2), r.h});
-  record_control("checkbox", Recti{r.x, r.y, s + px(2), r.h});  // (what a click reaches; toggle_row widens it to its row)
+  /* What a click reaches is at least a row wide and tall (round 509: it was the box and 2 px, 15 px wide); the box drawn stays. */
+  const int reach_w = std::max(s + px(2), row_h()), reach_h = std::max(r.h, row_h());
+  const Recti reach{r.x, r.y + (r.h - reach_h) / 2, reach_w, reach_h};
+  bool hot = hovered(box.intersect(r).empty() ? r : reach);
+  record_control("checkbox", reach, {}, true);  // (what a click reaches; toggle_row widens it to its row)
+  const Id base = text ? id(*text) ^ 0xCB : id((uint64_t)(uint32_t)r.x << 32 | (uint32_t)r.w) ^ 0xCB;
+  const bool pressed = focus_stop(stop_id(base), row ? *row : reach) == kActivated;
   frame(box, theme.field, hot ? theme.field_hover : theme.field_border, px(2));
   if (v) draw_icon(Icon::Check, box.shrink(px(2)), theme.text_bright);
   bool changed = false;
-  if (hot && in.pressed[0]) {
+  if (pressed || (hot && in.pressed[0])) {
     v = !v;
     changed = true;
+    /* The reach is wider than the box: in a header the title starts 2-3 px inside it and folds on a press. The press
+     * that ticked the box is the box's alone. */
+    if (!pressed && !row) consume_click();
   }
   last_widget_ = box;
   last_hovered_ = hot;
@@ -330,7 +603,7 @@ bool Context::checkbox(const Recti &r, bool &v) {
 }
 
 bool Context::toggle_row(const Recti &r, const std::string &text, bool &v) {
-  bool changed = checkbox(r, v);
+  bool changed = checkbox_impl(r, &r, &text, v);
   if (record_buttons && !controls.empty()) controls.back().r = r, controls.back().label = text;  // (the whole row takes the click)
   int s = std::min(r.h, font.line_height());
   label({r.x + s + px(5), r.y, r.w - s - px(5), r.h}, text);
@@ -343,7 +616,8 @@ bool Context::toggle_row(const Recti &r, const std::string &text, bool &v) {
 
 bool Context::foldout(const Recti &r, const std::string &text, bool &open, Icon icon) {
   bool hot = hovered(r);
-  record_control("foldout", r, text);
+  record_control("foldout", r, text, true);
+  const bool pressed = focus_stop(stop_id(id(text) ^ 0xF0), r) == kActivated;
   int a = font.line_height() - px(4);
   draw_icon(open ? Icon::ArrowDown : Icon::ArrowRight, {r.x, r.y + (r.h - a) / 2, a, a}, theme.text);
   int x = r.x + a + px(3);
@@ -352,7 +626,7 @@ bool Context::foldout(const Recti &r, const std::string &text, bool &open, Icon 
     x += a + px(4);
   }
   label({x, r.y, r.right() - x, r.h}, text, theme.text_bright);
-  if (hot && in.pressed[0]) open = !open;
+  if (pressed || (hot && in.pressed[0])) open = !open;
   last_widget_ = r;
   last_hovered_ = hot;
   return open;
@@ -522,13 +796,8 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   last_widget_ = r;
   last_hovered_ = hot;
   if (record_buttons) record_control("text", r, placeholder ? placeholder : "", true);
-  const Id before = order_last_;
-  order_last_ = i;
-  if (edit_id_ != i && (focus_next_ || focus_request_ == i)) {
-    focus_next_ = false;
-    focus_request_ = 0;
-    begin_edit(i, s, true);
-  }
+  Id before = 0;
+  if (walk_stop(i, r, &before) && edit_id_ != i) begin_edit(i, s, true);
   if (edit_id_ != i) {
     if (hot) cursor = Cursor::IBeam;
     frame(r, theme.field, hot ? theme.field_hover : theme.field_border, px(3));
@@ -551,7 +820,7 @@ bool Context::text_field(Id i, const Recti &r, std::string &s, bool *committed, 
   }
   int res = edit_text(i, r, edit_buf_);
   bool changed = false;
-  if (res == 2) tab_to(before);
+  if (res == 2) tab_to(before, i);
   if (res == 1) {
     s = edit_buf_;
     changed = true;
@@ -677,16 +946,21 @@ bool Context::text_area(Id i, const Recti &r, std::string &s, uint32_t paper, ui
 
 /* Tab moves to the next number or text field, Shift+Tab to the previous one
  * (Unity). The key is consumed so the next field doesn't commit at once. */
-void Context::tab_to(Id previous) {
+void Context::tab_to(Id previous, Id self) {
   if (!in.key_pressed[KEY_TAB]) return;
   in.key_pressed[KEY_TAB] = false;
   in.text.clear();
-  if (in.shift()) focus_request_ = previous;
-  else focus_next_ = true;
+  focus_from_ = self;
+  focus_from_field_ = true;
+  pending_layer_ = current_layer_;
+  if (!in.shift()) focus_next_ = true;
+  else if (previous) focus_request_ = previous;
+  else focus_wrap_back_ = true;
   redraw = true;
 }
 
 void Context::begin_edit(Id i, const std::string &text, bool select_all) {
+  focus_id_ = 0;  // (one focus: the field being edited)
   edit_id_ = i;
   edit_seen_ = true;  // started after the field was drawn this frame: don't let end_frame() cancel it
   edit_buf_ = text;
@@ -893,19 +1167,14 @@ bool Context::float_field(Id i, const Recti &r, float &v, float speed, float mn,
   last_widget_ = r;
   last_hovered_ = hovered(r);
   record_control("number", r, "", true);
-  const Id before = order_last_;  // the field drawn before this one (Shift+Tab)
-  order_last_ = i;
-  if (edit_id_ != i && (focus_next_ || focus_request_ == i)) {
-    focus_next_ = false;
-    focus_request_ = 0;
-    begin_edit(i, strprintf("%g", v), true);
-  }
+  Id before = 0;  // the stop drawn before this one (Shift+Tab)
+  if (walk_stop(i, r, &before) && edit_id_ != i) begin_edit(i, strprintf("%g", v), true);
   if (edit_id_ == i) {
     int res = edit_text(i, r, edit_buf_);
     if (res == 2 || res == 3) {
       edit_id_ = 0;
       double d;
-      tab_to(before);
+      tab_to(before, i);
       if (res == 2 && eval_number(edit_buf_, d, v)) {
         commit_ = {i, edit_buf_, -1, frame_};
         float nv = clampf((float)d, mn, mx);
@@ -945,15 +1214,27 @@ bool Context::drag_label(Id i, const Recti &r, const std::string &text, float &v
   return changed;
 }
 
+/* The axis letter's column and the gap between the three (round 509: vec3_min_width and vec3_field agree on them). */
+static int vec3_label_pad(const Context &u) { return u.px(4); }
+static int vec3_gap(const Context &u) { return u.px(3); }
+
+int Context::vec3_min_width() {
+  int letter = 0;
+  for (const char *n : {"X", "Y", "Z"}) letter = std::max(letter, font.text_width(n));
+  return 3 * (letter + vec3_label_pad(*this) + font.text_width("0000") + px(6)) + 2 * vec3_gap(*this);  // (the field's text starts 4 px in)
+}
+
 bool Context::vec3_field(Id i, const Recti &r, Vec3 &v, float speed) {
   bool changed = false;
-  int gap = px(4);
+  /* Narrower than four digits each (a wide font in Tablet Mode's side pane): the letters and the fields close up. */
+  const bool tight = r.w < vec3_min_width();
+  int gap = tight ? px(1) : vec3_gap(*this);
   int cw = (r.w - 2 * gap) / 3;
   const char *names[3] = {"X", "Y", "Z"};
   uint32_t cols[3] = {theme.axis_x, theme.axis_y, theme.axis_z};
   for (int k = 0; k < 3; k++) {
     Recti c{r.x + k * (cw + gap), r.y, cw, r.h};
-    int lw = font.text_width(names[k]) + px(6);
+    int lw = font.text_width(names[k]) + (tight ? px(1) : vec3_label_pad(*this));
     Id ki = i * 31 + k + 1;
     changed |= drag_label(ki ^ 0x55, {c.x, c.y, lw, c.h}, names[k], v[k], speed, Color::mix(theme.text, cols[k], 0.35f));
     changed |= float_field(ki, {c.x + lw, c.y, c.w - lw, c.h}, v[k], speed);
@@ -977,12 +1258,17 @@ bool Context::finger_sideways(int press_x) const {
 }
 
 bool Context::slider(Id i, const Recti &r, float &v, float mn, float mx) {
-  record_control("slider", r);
+  record_control("slider", r, {}, true);
   bool hot = hovered(r);
+  bool changed = false;
+  if (focus_stop(i, r) && focus_start_id_ == i && (fk_.left || fk_.right)) {  // (Left / Right: a twentieth of the range, Shift a hundredth)
+    const float step = (mx - mn) * (fk_.shift ? 0.01f : 0.05f), nv = clampf(v + (fk_.right ? step : -step), std::min(mn, mx), std::max(mn, mx));
+    if (nv != v) v = nv, changed = true;
+    fk_.left = fk_.right = false;
+  }
   if (hot && in.pressed[0]) active_ = i, slider_press_x_ = in.mx;
   const bool finger = touch_scroll && in.touch;
   if (active_ == i && finger && !finger_widget_drag_ && in.down[0] && finger_sideways(slider_press_x_)) finger_widget_drag_ = true;
-  bool changed = false;
   if (active_ == i && (!finger || finger_widget_drag_ || in.released[0])) {
     float t = saturate((in.mx - r.x) / (float)std::max(1, r.w));
     float nv = mn + (mx - mn) * t;
@@ -1009,12 +1295,18 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   }
   bool hot = hovered(r);
   combo_rects_[i] = r;
-  if (record_buttons) record_control("combo", r, (v >= 0 && v < count) ? options[v] : "");
+  if (record_buttons) record_control("combo", r, (v >= 0 && v < count) ? options[v] : "", true);
+  if (focus_start_id_ == i && focus_id_ == i && popup_open(i)) combo_keys(i, count);  // (its list is open: Up / Down / Enter / Esc are the list's)
+  const bool keyed_open = focus_stop(i, r) == kActivated && !popup_open(i);
   frame(r, theme.button, hot ? theme.field_hover : theme.border, px(3));
   std::string cur = (v >= 0 && v < count) ? options[v] : "";
   label({r.x + px(5), r.y, r.w - r.h - px(5), r.h}, cur, theme.text_bright);
   int a = font.line_height() - px(6);
   draw_icon(Icon::ArrowDown, {r.right() - a - px(5), r.y + (r.h - a) / 2, a, a}, theme.text);
+  if (keyed_open) {
+    combo_open(i, r);
+    combo_hi_[i] = std::max(0, std::min(count - 1, v));
+  }
   if (hot && in.pressed[0]) {
     if (popup_open(i)) {
       /* Closing it again: only it when it sits on a dialog. */
@@ -1028,24 +1320,17 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
       }
       else close_popups();
     }
-    else {
-      /* Inside a popup (a dialog such as Preferences): stack the list on it instead of closing it. */
-      const bool nested = current_layer_ > 0;
-      open_popup(i, r, nested);
-      popups_.back().list = true;  // (task 0264)
-      if (nested) {
-        popups_.back().submenu = false;  // still drops down below the field
-        popups_.back().dropdown = true;
-      }
-    }
+    else combo_open(i, r);
     consume_click();
   }
   /* The list draws at the end of the frame, after the caller's option strings may be gone (a list built each frame,
    * like the Layout dropdown's): it keeps its own copy, made only while it is open. */
   if (popup_open(i)) {
     std::vector<std::string> opts(options, options + std::max(0, count));
-    popup(i, std::max(r.w, px(120)), [this, i, v, opts = std::move(opts)] {
+    const int hi = focus_id_ == i ? combo_hi_[i] : -1;  // (opened by key: the row Enter would pick)
+    popup(i, std::max(r.w, px(120)), [this, i, v, hi, opts = std::move(opts)] {
       for (int k = 0; k < (int)opts.size(); k++) {
+        if (k == hi) canvas.fill_rect({popup_area_.x, popup_cursor_y_, popup_area_.w, row_h()}, theme.selection);
         if (menu_item(opts[(size_t)k].c_str(), nullptr, k == v)) {
           int_results_[i] = k;
           redraw = true;
@@ -1057,6 +1342,30 @@ bool Context::combo(Id i, const Recti &r, int &v, const char *const *options, in
   last_widget_ = r;
   last_hovered_ = hot;
   return changed;
+}
+
+/* A combo's list opened: inside a popup (a dialog such as Preferences) it stacks on it instead of closing it. */
+void Context::combo_open(Id i, const Recti &r) {
+  const bool nested = current_layer_ > 0;
+  open_popup(i, r, nested);
+  popups_.back().list = true;  // (task 0264)
+  if (nested) {
+    popups_.back().submenu = false;  // still drops down below the field
+    popups_.back().dropdown = true;
+  }
+}
+
+/* The keys of a combo that has the focus and an open list: Up / Down move the highlighted row, Enter or Space pick it, Esc
+ * closes the list and the focus stays on the combo (Tab closes it and walks on). */
+void Context::combo_keys(Id i, int count) {
+  int &hi = combo_hi_[i];
+  if (fk_.down) hi = std::min(count - 1, hi + 1);
+  if (fk_.up) hi = std::max(0, hi - 1);
+  fk_.up = fk_.down = false;
+  if (fk_.activate && count > 0) int_results_[i] = std::max(0, std::min(count - 1, hi));
+  if (fk_.activate || fk_.esc || fk_.tab) close_popup(i);
+  fk_.activate = fk_.esc = false;
+  redraw = true;
 }
 
 /* HSV <-> RGB for the colour picker (h, s, v in 0..1). */
@@ -1242,8 +1551,9 @@ bool Context::curve_add_point(std::vector<Vec2> &pts, Vec2 p, int &sel) {
 }
 
 bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
-  record_control("color", r);
+  record_control("color", r, {}, true);
   bool changed = false;
+  const bool keyed_open = focus_stop(i, r) == kActivated && !popup_open(i);
   auto it = color_results_.find(i);
   if (it != color_results_.end()) {
     const Vec4 res = it->second;
@@ -1262,12 +1572,13 @@ bool Context::color_field(Id i, const Recti &r, Vec3 &c, float *alpha) {
     canvas.fill_rect({bar.x, bar.y, (int)(bar.w * saturate(*alpha) + 0.5f), bar.h}, 0xFFFFFFFF);
   }
   canvas.rect_outline(r, hot ? theme.text_bright : theme.border);
-  if (hot && in.pressed[0]) {
+  if (keyed_open || (hot && in.pressed[0])) {
     color_edit_[i] = Vec4(c.x, c.y, c.z, alpha ? *alpha : 1.0f);
     color_has_alpha_[i] = alpha != nullptr;
     color_before_[i] = color_edit_[i];
     open_popup(i, r);
-    consume_click();
+    if (keyed_open) focus_enter_popup();  // (opened by key: the picker's first control has the focus, its sliders are Left / Right's)
+    else consume_click();
   }
   popup(i, px(270), [this, i] {
     Vec4 &e = color_edit_[i];
@@ -1709,10 +2020,14 @@ void Context::draw_popups() {
 bool Context::menu_item(const std::string &text, const char *shortcut, bool checked, bool enabled, Icon icon) {
   Recti r = popup_row();
   if (record_buttons) button_rects["menu:" + text] = r;  // (tests click a menu row by its text)
-  record_control("menu", r, text);
+  const bool stop = enabled && !in_list_popup();  // (a combo's list keeps its highlight in the combo; a disabled row is skipped)
+  record_control("menu", r, text, stop);
   if (record_buttons) menu_shortcuts[text] = shortcut ? shortcut : "";
   bool hot = hovered(r);
-  if (hot && enabled) {
+  const Id fid = stop ? stop_id(id(text) ^ ((uint64_t)current_layer_ * 0x1000193ull) ^ 0x3E) : 0;
+  const int focus = stop ? focus_stop(fid, r, StopMenuRow) : 0;
+  if (focus && focus_start_id_ == fid) menu_arrows(false);
+  if ((hot || focus) && enabled) {
     canvas.fill_rect(r, theme.selection);
     if (current_layer_ > 0 && current_layer_ - 1 < (int)popups_.size()) close_popups_above(popups_[current_layer_ - 1].id);
   }
@@ -1728,7 +2043,7 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
   last_widget_ = r;
   last_hovered_ = hot;
   if (hot && enabled && in.pressed[1]) favorite_request = text;  // (right-click: "add to Quick Favorites", task 0189)
-  if (hot && enabled && in.released[0]) {
+  if (enabled && ((hot && in.released[0]) || focus == kActivated)) {
     /* A dropdown inside a dialog closes alone; anything else closes every popup. */
     if (current_layer_ > 0 && current_layer_ - 1 < (int)popups_.size() && popups_[current_layer_ - 1].dropdown) {
       popups_.resize(current_layer_ - 1);
@@ -1743,17 +2058,21 @@ bool Context::menu_item(const std::string &text, const char *shortcut, bool chec
 bool Context::submenu(const std::string &text, int width, std::function<void()> body) {
   Recti r = popup_row();
   if (record_buttons) button_rects["submenu:" + text] = r;  // (tests find a submenu by its text: task 0267)
-  record_control("submenu", r, text);
+  record_control("submenu", r, text, true);
   Id sid = id(text) ^ (current_layer_ * 0x1000193ull);
   bool open = popup_open(sid);
   bool hot = hovered(r);
-  if (hot || open) canvas.fill_rect(r, hot ? theme.selection : theme.selection_dim);
+  const int focus = focus_stop(sid, r, StopMenuRow);  // (its popup's id: Esc or Left in its rows give the focus back to it by that)
+  if (focus && focus_start_id_ == sid) menu_arrows(true);
+  const bool keyed_open = focus && !open && focus_id_ == sid && (focus == kActivated || (focus_start_id_ == sid && fk_.right));
+  if (hot || open || focus) canvas.fill_rect(r, hot || focus ? theme.selection : theme.selection_dim);
   int a = font.line_height() - px(4);
   canvas.text(font, r.x + px(10) + a, r.y + (r.h - font.line_height()) / 2, text, theme.text_bright);
   draw_icon(Icon::ArrowRight, {r.right() - a - px(6), r.y + (r.h - a) / 2, a, a}, theme.text);
-  if (hot && !open) {
+  if ((hot || keyed_open) && !open) {
     open_popup(sid, r, true);
     open = true;
+    if (keyed_open) fk_.right = false, focus_id_ = 0, focus_enter_popup();  // (opened by key: its first row has the focus)
   }
   if (open) popup(sid, width, std::move(body));
   last_widget_ = r;  // (a tooltip written after a submenu is the submenu's: it used to land on the row before - round 482)

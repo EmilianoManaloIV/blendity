@@ -3724,6 +3724,13 @@ class Editor {
   void rebuild_keymap();
   void draw_keymap_settings();
 
+  /* round 509: keyboard focus (ADR 0145) */
+  void focus_window_step(int dir);  // (F6 / Shift+F6: the window under the pointer, then the next / previous in docking order)
+  void focus_menu_bar();            // (F10, or Alt pressed and let go alone)
+  void alt_alone_poll();            // (once a frame: Alt went down and up with no mouse button and no other key between)
+  void dock_leaves_in_order(const DockNode *n, std::vector<const DockNode *> &out) const;
+  bool alt_clean_ = false, alt_was_down_ = false;
+
  public:
   bool run_action(const std::string &id);
   std::string shortcut_text(const std::string &id) const;

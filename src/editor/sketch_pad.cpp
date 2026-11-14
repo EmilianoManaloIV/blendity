@@ -339,10 +339,11 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
   const int h = u.row_h(), gap = u.px(4), sep = u.px(12);
   const int y = bar.y + u.px(3);
   /* Each group's controls' widths: put() places them by these, and the folding sums the same numbers. */
-  const std::vector<int> W[6] = {{u.px(54), u.px(54)}, {u.px(70), u.px(34), u.px(96)}, {u.px(58), u.px(64), u.px(60)},
-                                 {u.px(118), u.px(112)}, {u.px(132), u.px(128)}, {u.px(70)}};
+  std::vector<int> W[6] = {{u.px(54), u.px(54)}, {u.px(70), u.px(34), u.px(96)}, {u.px(58), u.px(64), u.px(60)},
+                           {u.px(118), u.px(112)}, {u.px(132), u.px(128)}, {u.px(70)}};
   const int prio[6] = {3, 0, 1, 2, 2, 3};  // (the higher folds first; each folded group is in More)
-  const int w_zoom = u.px(58), w_more = u.px(70);
+  const int w_zoom = u.px(58);
+  int w_more = u.px(70);
   bool show[6] = {true, true, true, true, true, true}, show_zoom = true;
   auto group_w = [&](int k) {
     int t = gap * ((int)W[k].size() - 1);
@@ -358,6 +359,19 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
     for (int k = 0; k < 6; k++)
       if (prio[k] == p) show[k] = false;
   if (total() > bar.w) show_zoom = false;  // (More > Fit to the Tab, and Home, still fit)
+  /* Round 509: narrower than the brush group and More together (a side pane), More is its icon alone and the brush group's
+   * three controls shrink together, each to a floor - they lay on one another before (More on the size field and the colour). */
+  if (total() > bar.w) {
+    w_more = h;
+    int sum = 0;
+    for (int w : W[1]) sum += w;
+    const int avail = bar.w - (total() - group_w(1)) - gap * 2;
+    const int floors[3] = {u.font.text_width("Brush") + u.px(8), u.px(24), u.px(24)};  // (Brush keeps its word whole)
+    if (avail < sum)
+      for (size_t k = 0; k < 3; k++) W[1][k] = std::max(floors[k], W[1][k] * std::max(1, avail) / sum);
+    /* Still too wide at the floors (Tablet Mode's side pane): the size field goes - the palette's puck sets the size. */
+    if (W[1][0] + W[1][1] + W[1][2] > avail) W[1][2] = 0;
+  }
   pad_bar_folded_ = 0;
   for (int k = 0; k < 6; k++) pad_bar_folded_ += show[k] ? 0 : 1;
   int x = bar.x + gap * 2;
@@ -376,7 +390,8 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
     end_group();
   }
   if (show[1]) {  // (each rect placed in turn: a call's arguments are evaluated in no set order)
-    const Recti brush = put(W[1][0], "draw:Brush"), color = put(W[1][1], "draw:color"), size = put(W[1][2], "draw:size");
+    const Recti brush = put(W[1][0], "draw:Brush"), color = put(W[1][1], "draw:color");
+    const Recti size = W[1][2] > 0 ? put(W[1][2], "draw:size") : Recti{x, y, 0, h};
     draw_pad_brush_group(brush, color, size);
     end_group();
   }
@@ -421,7 +436,7 @@ void Editor::draw_pad_toolbar(const Recti &bar) {
   const Recti more{bar.right() - gap * 2 - w_more, y, w_more, h};
   const Recti zoom{more.x - gap - w_zoom, y, w_zoom, h};
   if (show_zoom) draw_pad_zoom_button(zoom);
-  if (u.button(more, "More", false, ui::Icon::Menu)) u.open_popup(u.id("draw_more_menu"), {more.x, more.bottom(), 0, 0});
+  if (u.button(more, w_more > h ? "More" : "", false, ui::Icon::Menu)) u.open_popup(u.id("draw_more_menu"), {more.x, more.bottom(), 0, 0});
   if (u.record_buttons) u.button_rects["draw:More"] = more;
   u.tooltip("Everything else: the picture's source and the paper, the pen, the guides, Build, Place in 3D, the pad's view\n"
             "(fit, turn, flip) and hiding the tools.");
@@ -453,8 +468,12 @@ void Editor::draw_pad_brush_group(const Recti &brush, const Recti &color, const 
   float a = ((sketch_.color >> 24) & 255) / 255.0f;
   if (u.color_field(u.id("draw_color"), color, c, &a)) sketch_.color = (Color::from(c) & 0xFFFFFF) | ((uint32_t)std::lround(saturate(a) * 255.0f) << 24);
   u.tooltip("The pen's color and opacity: click for any color (the Color window).");
-  u.label({size.x, size.y, u.px(38), size.h}, "Size");
-  u.float_field(u.id("draw_width"), {size.x + u.px(40), size.y, size.w - u.px(40), size.h}, sketch_.width, 0.1f, 0.5f, 200.0f, "%.1f");
+  /* Round 509: in a side pane the group is shrunk, and the word "Size" took the field's room (6 px were left of it):
+   * there the field has the whole place, and its tooltip says what it is. */
+  if (size.w <= 0) return;  // (folded away: no room for it at all)
+  const int word = size.w >= u.px(40) + u.px(36) ? u.px(40) : 0;
+  if (word) u.label({size.x, size.y, u.px(38), size.h}, "Size");
+  u.float_field(u.id("draw_width"), {size.x + word, size.y, size.w - word, size.h}, sketch_.width, 0.1f, 0.5f, 200.0f, "%.1f");
   u.tooltip("The pen's width, in the picture's pixels at 100% (zoomed in, a stroke is wider on screen).");
 }
 

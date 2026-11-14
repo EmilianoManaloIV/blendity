@@ -40,10 +40,10 @@ int hier_drop_mode(int ry, int rh) { return ry < rh / 3 ? 1 : (ry > rh - rh / 3 
 void Editor::draw_hierarchy(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
-  int bh = u.row_h() + u.px(6);
+  int bh = u.row_h() + u.px(8);  // (round 509: the search field and + a full row high, the strip 2 px taller)
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
-  int h = bh - u.px(8);
+  int h = u.row_h();
   Recti plus{bar.x + u.px(5), bar.y + u.px(4), h + u.px(16), h};
   bool plus_hot = u.hovered(plus);
   u.frame(plus, plus_hot ? u.theme.button_hover : u.theme.button, u.theme.border, u.px(3));
@@ -505,7 +505,12 @@ struct InspectorReflector : Reflector {
     hidden += last_skipped;
     return last_skipped;
   }
-  InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) { label_w = std::max(u.px(110), l.area.w * 2 / 5); }
+  /* The label's share of a row. Round 509: in a pane too narrow for both (Tablet Mode's side panes) the field keeps a
+   * width a finger can hit and a number can show in - the label gives way, with its ellipsis. */
+  InspectorReflector(Editor &e, ui::Context &c, ui::Layout &l) : ed(e), u(c), lay(l) {
+    const int w = l.area.w;
+    label_w = std::min(std::max(u.px(110), w * 2 / 5), std::max(w * 2 / 5, w - u.px(54)));
+  }
   /* Round 435 (ADR 0115): a field written here is an edit the views' scene hash must see - whoever drew the reflector. */
   ~InspectorReflector() override {
     if (changed) edit_epoch::bump();
@@ -513,6 +518,13 @@ struct InspectorReflector : Reflector {
   ui::Id fid(const char *n) { return u.id(n); }
   Recti field_rect(Recti row) { return {row.x + label_w, row.y, row.w - label_w - u.px(6), row.h}; }
   Recti label_rect(Recti row) { return {row.x + u.px(4), row.y, label_w - u.px(8), row.h}; }
+  /* Round 509: where a three-number row's fields go - beside the label when each gets four digits, else on a row of their own
+   * under it at the full width (the label column takes 165 px of the 196 an Inspector gives at 1024x640 and 1.5x). */
+  Recti vec3_rect(const Recti &row) {
+    if (field_rect(row).w >= u.vec3_min_width()) return field_rect(row);
+    const Recti own = lay.row();
+    return {own.x + u.px(2), own.y, own.w - u.px(4), own.h};
+  }
   FieldEdit &record(FieldEdit::Kind k, const char *n) {
     edits.emplace_back();
     edits.back().kind = k;
@@ -699,7 +711,7 @@ struct InspectorReflector : Reflector {
     Recti row = lay.row();
     u.label(label_rect(row), n);
     Vec3 old = v;
-    if (u.vec3_field(fid(n), field_rect(row), v, 0.05f)) {
+    if (u.vec3_field(fid(n), vec3_rect(row), v, 0.05f)) {
       FieldEdit &e = record(FieldEdit::Vec, n);
       e.v_old = old;
       e.v_new = v;
@@ -1575,7 +1587,20 @@ void Editor::draw_inspector(const Recti &r) {
   /* The pin (task 0232; Unity's lock): this Inspector keeps showing one object while the selection moves on - a
    * second Inspector on a drawing tablet shows the one being worked on. */
   const int pin_w = u.px(60), fold_w = u.px(64);
-  const Recti pb{hr.right() - pin_w, hr.y + u.px(2), pin_w, hr.h - u.px(4)};
+  /* Round 509: the name keeps at least 90 px; when Pin and Fold would leave it less they go on a row of their own under it
+   * (at 1024x640 they sat on the name field). */
+  const int name_x = hr.x + ic * 2 + u.px(12);
+  const bool buttons_below = hr.right() - name_x - pin_w - fold_w - u.px(12) < u.px(90);
+  /* (The name is drawn first, so the keyboard reaches it before the buttons whichever row they are on.) */
+  std::string name = g->name;
+  bool committed = false;
+  const int name_w = buttons_below ? hr.right() - name_x : hr.right() - name_x - pin_w - fold_w - u.px(12);
+  if (u.text_field(u.id("name"), {name_x, hr.y + u.px(2), name_w, hr.h - u.px(4)}, name, &committed)) {
+    g->name = name;
+    if (committed) mark_changed("Rename");
+  }
+  const Recti bar = buttons_below ? lay.row(u.row_h() + u.px(6)) : hr;
+  const Recti pb{bar.right() - pin_w, bar.y + u.px(2), pin_w, bar.h - u.px(4)};
   if (u.button(pb, inspector_lock_ ? "Pinned" : "Pin", inspector_lock_ != 0)) inspector_lock_ = inspector_lock_ ? 0 : g->id;
   u.tooltip(inspector_lock_ ? "Pinned: this Inspector keeps this object while the selection changes. Click to follow the selection again."
                             : "Pin this Inspector to the object shown (a second Inspector can then follow the selection).");
@@ -1583,12 +1608,6 @@ void Editor::draw_inspector(const Recti &r) {
   const bool any_open = inspector_any_open(g);
   if (u.button({pb.x - fold_w - u.px(4), pb.y, fold_w, pb.h}, any_open ? "Fold" : "Unfold")) inspector_fold_all(g, !any_open);
   u.tooltip("Fold every component to its header line (the Transform stays), or open them all; the folds are kept in the preferences.");
-  std::string name = g->name;
-  bool committed = false;
-  if (u.text_field(u.id("name"), {hr.x + ic * 2 + u.px(12), hr.y + u.px(2), std::max(u.px(40), hr.w - ic * 2 - u.px(14) - pin_w - fold_w - u.px(10)), hr.h - u.px(4)}, name, &committed)) {
-    g->name = name;
-    if (committed) mark_changed("Rename");
-  }
   /* Unity-style multi-object editing: every selected object, in selection order. */
   std::vector<GameObject *> multi;
   for (uint64_t id : selection_)
@@ -1619,12 +1638,12 @@ void Editor::draw_inspector(const Recti &r) {
       if (u.checkbox({x, h.y, a + u.px(2), h.h}, *enabled)) mark_changed("Toggle Component");
       x += a + u.px(8);
     }
-    Recti tr{x, h.y, h.right() - x - u.px(24), h.h};
+    Recti tr{x, h.y, h.right() - x - u.row_h() - u.px(4), h.h};
     u.label(tr, title, u.theme.text_bright);
     if (u.hovered(tr) && u.in.pressed[0]) open = !open;
     u.tooltip(tip);
     if (menu) {
-      Recti kr{h.right() - u.px(20), h.y + u.px(2), u.px(18), h.h - u.px(4)};
+      Recti kr{h.right() - u.row_h() - u.px(2), h.y + u.px(2), u.row_h(), h.h - u.px(4)};  // (round 509: a row wide, not 18 px)
       ui::Id mid = u.id(key + "_menu");
       inspector_menu_rects_[key] = kr;
       if (u.icon_button(kr, Icon::Menu, false, "Component menu")) u.open_popup(mid, kr);
@@ -1648,16 +1667,16 @@ void Editor::draw_inspector(const Recti &r) {
     const Vec3 pos_before = t.position, euler_before = t.euler_hint, scale_before = t.scale;
     Recti row = lay.row();
     u.label(ir.label_rect(row), "Position");
-    bool ch = u.vec3_field(u.id("pos"), ir.field_rect(row), t.position, 0.05f);
+    bool ch = u.vec3_field(u.id("pos"), ir.vec3_rect(row), t.position, 0.05f);
     u.tooltip("Local position. Unity is Y-up left-handed; Blender is Z-up right-handed.");
     row = lay.row();
     u.label(ir.label_rect(row), "Rotation");
     Vec3 e = t.euler_hint;
-    bool rch = u.vec3_field(u.id("rot"), ir.field_rect(row), e, 0.5f);
+    bool rch = u.vec3_field(u.id("rot"), ir.vec3_rect(row), e, 0.5f);
     u.tooltip("Euler angles in degrees, applied Z, X, then Y (Unity order).\nStored internally as a quaternion (GEA Vol. I 5.4).");
     row = lay.row();
     u.label(ir.label_rect(row), "Scale");
-    ch |= u.vec3_field(u.id("scl"), ir.field_rect(row), t.scale, 0.01f);
+    ch |= u.vec3_field(u.id("scl"), ir.vec3_rect(row), t.scale, 0.01f);
     if (ch) {
       g->set_local_position(t.position);
       g->set_local_scale(t.scale);
@@ -1670,9 +1689,13 @@ void Editor::draw_inspector(const Recti &r) {
     /* Set Origin (Blender: Object > Set Origin): pick where the pivot goes. */
     if (g->get<MeshFilter>()) {
       row = lay.row(u.row_h() + u.px(2));
-      u.label(ir.label_rect(row), "Origin");
       Recti fr = ir.field_rect(row);
       int bw = u.font.text_width("Apply") + u.px(16);
+      /* Round 509: the dropdown and Apply share the field's column; where that leaves the dropdown no width (Tablet Mode's
+       * narrow Inspector), the column starts right after the word "Origin". */
+      const int lw = fr.w - bw - u.px(4) < u.px(48) ? std::min(fr.x - row.x, u.font.text_width("Origin") + u.px(12)) : fr.x - row.x;
+      fr = {row.x + lw, fr.y, fr.right() - row.x - lw, fr.h};
+      u.label({row.x + u.px(4), row.y, lw - u.px(8), row.h}, "Origin");
       u.combo(u.id("origin_mode"), {fr.x, fr.y, fr.w - bw - u.px(4), fr.h}, origin_mode_, kOriginModes, kOriginModeCount);
       origin_hover_ = u.hovered(row) || u.popup_open(u.id("origin_mode"));
       u.tooltip("Where the object's origin (pivot) goes. The mesh moves the other way, so nothing\n"
@@ -1681,7 +1704,8 @@ void Editor::draw_inspector(const Recti &r) {
       if (u.button({fr.right() - bw, fr.y, bw, fr.h}, "Apply")) set_origin(origin_mode_, origin_target_);
       if (!edit_mode_) {
         row = lay.row(u.row_h() + u.px(2));
-        if (u.button({fr.x, row.y, fr.w, row.h}, origin_edit_ ? "Done Editing Origin (Esc)" : "Edit Origin with Handles...", origin_edit_, Icon::Move))
+        /* Round 509: the whole row (the field's column left it 22 px at 1.5x in the narrowest Inspector). */
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, origin_edit_ ? "Done Editing Origin (Esc)" : "Edit Origin with Handles...", origin_edit_, Icon::Move))
           origin_edit_ = !origin_edit_;
         u.tooltip("Move or rotate only the origin with the gizmo (the mesh stays put), or click a vertex,\n"
                   "an edge (its midpoint) or a face (its centre) in the Scene view to snap the origin there.\n"
@@ -1689,14 +1713,14 @@ void Editor::draw_inspector(const Recti &r) {
       }
       else {
         row = lay.row(u.row_h() + u.px(2));
-        if (u.button({fr.x, row.y, fr.w, row.h}, "Origin to Selected Elements", false, Icon::Vertex)) set_origin(6);
+        if (u.button({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, "Origin to Selected Elements", false, Icon::Vertex)) set_origin(6);
         u.tooltip("The origin moves to the centre of the selected vertices, edges or faces.\n"
                   "Blender: Shift+S > Cursor to Selected, then Set Origin > Origin to 3D Cursor.");
       }
       if (origin_mode_ == 5) {
         row = lay.row();
         u.label(ir.label_rect(row), "  Point (world)");
-        u.vec3_field(u.id("origin_pt"), ir.field_rect(row), origin_target_, 0.05f);
+        u.vec3_field(u.id("origin_pt"), ir.vec3_rect(row), origin_target_, 0.05f);
         origin_hover_ = origin_hover_ || u.hovered(row);
         u.tooltip("The world position the origin moves to. Expressions work, e.g. \"+=1\".");
       }
@@ -1877,12 +1901,12 @@ void Editor::draw_inspector(const Recti &r) {
       if (auto *mf = dynamic_cast<MeshFilter *>(c)) {
         lay.space(u.px(4));
         u.label(lay.row(), "Mesh Tools (Blender operators)", u.theme.accent);
-        int bw = (lay.area.w - u.px(12)) / 2;
+        /* Round 509: a pair goes side by side when both labels fit so, one under the other when they do not. */
         auto two = [&](const char *a, const char *opa, const char *ta, const char *b, const char *opb, const char *tb) {
-          Recti row = lay.row(u.row_h() + u.px(2));
-          if (u.button({row.x + u.px(4), row.y, bw, row.h}, a)) mesh_op(opa);
+          const std::vector<Recti> cells = u.button_cells(lay, {a, b ? b : ""}, u.row_h() + u.px(2));
+          if (u.button(cells[0], a)) mesh_op(opa);
           u.tooltip(ta);
-          if (b && u.button({row.x + u.px(8) + bw, row.y, bw, row.h}, b)) mesh_op(opb);
+          if (b && u.button(cells[1], b)) mesh_op(opb);
           if (b) u.tooltip(tb);
         };
         two("Subdivide", "subdivide", "Catmull-Clark subdivision (each face -> quads).\nBlender: Subdivision Surface / Subdivide Smooth.",
@@ -2242,10 +2266,10 @@ void Editor::draw_inspector(const Recti &r) {
 void Editor::draw_console(const Recti &r) {
   auto &u = ui_;
   auto &in = u.in;
-  int bh = u.row_h() + u.px(6);
+  int bh = u.row_h() + u.px(8);  // (round 509: its buttons a full row high, so the strip is 2 px taller)
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
-  int h = bh - u.px(8), x = bar.x + u.px(6), y = bar.y + u.px(4);
+  int h = u.row_h(), x = bar.x + u.px(6), y = bar.y + u.px(4);
   if (u.button({x, y, u.px(56), h}, "Clear")) Log::clear();
   x += u.px(60);
   if (u.button({x, y, u.px(72), h}, "Collapse", collapse_)) collapse_ = !collapse_;
@@ -2431,16 +2455,19 @@ void Editor::draw_profiler(const Recti &r) {
   const RasterStats &s = scene_stats_;
   lay.space(u.px(6));
   u.label(lay.row(), "Scene view render breakdown (last frame)", u.theme.text_bright);
-  auto stat = [&](const std::string &k, const std::string &v) {
+  auto stat = [&](const std::string &k, const std::string &v, const char *tip = nullptr) {
     Recti row = lay.row();
     if (u.record_buttons) u.button_rects[k] = row;  // (tests find a row by its name, as a button by its label)
     u.label({row.x, row.y, row.w / 2, row.h}, k, u.theme.text_dim);
     u.label({row.x + row.w / 2, row.y, row.w / 2, row.h}, v);
+    if (!tip) return;
+    u.mark_widget(row);  // (round 509: the row is the control; what it measures is its tooltip)
+    u.tooltip(tip);
   };
-  stat("Vertex stage", strprintf("%.2f ms", s.ms_vertex));
-  stat("Clip / cull / bin", strprintf("%.2f ms", s.ms_setup));
-  stat("  of it binning (CPU, all threads)", strprintf("%.2f ms", s.ms_bin));
-  stat("Raster (tiles)", strprintf("%.2f ms", s.ms_raster));
+  stat("Vertex stage", strprintf("%.2f ms", s.ms_vertex), "Moving every vertex to clip space and lighting it, on the CPU.");
+  stat("Clip / cull / bin", strprintf("%.2f ms", s.ms_setup), "Clipping triangles to the view, dropping the ones that face away or are off screen, and sorting the rest into screen tiles.");
+  stat("  of it binning (CPU, all threads)", strprintf("%.2f ms", s.ms_bin), "The part of that spent sorting triangles into tiles, shared across all the worker threads.");
+  stat("Raster (tiles)", strprintf("%.2f ms", s.ms_raster), "Filling each tile's pixels: coverage, depth and shading, one tile per worker at a time.");
   stat("Total 3D", strprintf("%.2f ms", s.ms_total));
   stat("Editor frame (incl. UI)", strprintf("%.2f ms", frame_ms_));
   stat("Triangles submitted / rasterized", strprintf("%zu / %zu", s.tris_submitted, s.tris_rasterized));
@@ -2534,21 +2561,23 @@ void Editor::draw_lighting_window(const Recti &r) {
     u.canvas.fill_rect({r.x, h.y, r.w, h.h}, u.theme.header);
     u.label({h.x + u.px(4), h.y, h.w, h.h}, t, u.theme.text_bright);
   };
-  Recti b = lay.row(u.row_h() + u.px(8));
-  const int bw = (b.w - u.px(4)) / 2;
+  /* Round 509: the two buttons go side by side when their labels fit so, one under the other when they do not. */
+  const std::vector<Recti> bc = u.button_cells(lay, {baking_ ? "Cancel" : "Generate Lighting", "Clear Baked Data"}, u.row_h() + u.px(8), 0, u.row_h() + u.px(6));
+  const Recti &gen_r = bc[0], &clear_r = bc[1];
   if (baking_) {
-    if (u.button({b.x, b.y, bw, b.h}, "Cancel", true, Icon::Pause)) bake_cancel();
+    if (u.button(gen_r, "Cancel", true, Icon::Pause)) bake_cancel();
   }
-  else if (u.button_enabled({b.x, b.y, bw, b.h}, "Generate Lighting", !playing_ && scene_->lighting.baked_gi && !unity_lighting_job_,
+  else if (u.button_enabled(gen_r, "Generate Lighting", !playing_ && scene_->lighting.baked_gi && !unity_lighting_job_,
                             playing_ ? "Not while playing: stop Play first." : unity_lighting_job_ ? "Not while Unity reads its lightmaps." : "Baked Global Illumination is off (the Lightmapping Settings below).", false, Icon::Lightbulb))
     bake_start();
   u.tooltip("Bakes the Baked and Mixed lights, the sky and their bounces into lightmaps for objects marked\n"
             "Contribute GI (MeshRenderer). Saved next to the scene, in a folder with the scene's name.");
-  if (u.button_enabled({b.x + bw + u.px(4), b.y, bw, b.h}, "Clear Baked Data", !lighting_data_.empty() || !probes_.empty(), "Nothing baked.", false, Icon::Close)) bake_clear();
+  if (u.button_enabled(clear_r, "Clear Baked Data", !lighting_data_.empty() || !probes_.empty(), "Nothing baked.", false, Icon::Close)) bake_clear();
   u.tooltip("Removes the lightmaps (to the trash) and goes back to realtime ambient light.");
   if (!unity_lighting_scene_.empty()) {  // (round 400: a scene from Unity - its own bake, read by Unity)
     Recti ur = lay.row(u.row_h() + u.px(4));
     const bool running = unity_lighting_job_ != nullptr;
+    const int bw = std::min(gen_r.w, (ur.w - u.px(8)) / 2);  // (half the row at most: the note beside it stays on the panel when the pair above is stacked)
     if (u.button_enabled({ur.x, ur.y, bw, ur.h}, running ? "Reading Unity's..." : "Use Unity's Lightmaps", !running && !baking_ && !playing_,
                          running ? "Unity is reading them in the background." : baking_ ? "Not while baking." : "Not while playing.", false, Icon::Lightbulb))
       read_unity_lighting_cmd(false);
@@ -2564,17 +2593,21 @@ void Editor::draw_lighting_window(const Recti &r) {
   }
   {
     /* Task 0020: Update Lighting and the rough preview. */
-    Recti r2 = lay.row(u.row_h() + u.px(4));
-    if (u.button({r2.x, r2.y, bw, r2.h}, lighting_update_requested_ ? std::string("Updating...") : with_key("Update Lighting", "lighting.update"), lighting_update_requested_,
-                 Icon::Lightbulb))
-      lighting_update();
-    u.tooltip("Runs Realtime GI once now: realtime lightmaps and live probes catch up, then stay as they are\n"
-              "(Lighting Updates: Manual). Generate Lighting makes the real bake.");
+    std::string update_label = lighting_update_requested_ ? std::string("Updating...") : with_key("Update Lighting", "lighting.update");
     const bool pv = scene_->lighting.preview;
-    if (u.button({r2.x + bw + u.px(4), r2.y, bw, r2.h}, pv ? "Preview Lighting: On" : "Preview Lighting: Off", pv, Icon::Lightbulb))
-      command(pv ? "lighting preview off" : "lighting preview on");
+    const std::string preview_label = pv ? "Preview Lighting: On" : "Preview Lighting: Off";
+    const std::vector<Recti> pc = u.button_cells(lay, {update_label, preview_label}, u.row_h() + u.px(4), 0, u.row_h() + u.px(4));
+    /* Round 509: in a pane too narrow for the label with its key, the key moves to the tooltip. */
+    if (!lighting_update_requested_ && u.font.text_width(update_label) > pc[0].w - u.px(8)) update_label = "Update Lighting";
+    if (u.button(pc[0], update_label, lighting_update_requested_, Icon::Lightbulb)) lighting_update();
+    const std::string update_key = key("lighting.update");
+    u.tooltip("Runs Realtime GI once now" + (update_key.empty() ? std::string() : " (" + update_key + ")") +
+              ": realtime lightmaps and live probes catch up, then stay as they are\n"
+              "(Lighting Updates: Manual). Generate Lighting makes the real bake.");
+    const bool flip_preview = u.button(pc[1], preview_label, pv, Icon::Lightbulb);
     u.tooltip("A rough bake while you edit, refining 32 -> 64 -> 256 samples half a second after changes stop;\n"
               "shown instead of the bake and never saved (like Bakery's Realtime Preview).");
+    if (flip_preview) command(pv ? "lighting preview off" : "lighting preview on");
     std::string mode = lighting_manual() ? "Lighting Updates: Manual (lighting stays as last computed until you update)"
                                          : "Lighting Updates: Automatic (Realtime GI follows every change)";
     if (pv) mode += preview_running_ ? strprintf("  -  Preview: baking %d samples (%.0f%%)", preview_stage_ <= 0 ? 32 : preview_stage_ == 1 ? 64 : 256,
@@ -3609,16 +3642,16 @@ void Editor::draw_probe_group_extras(GameObject &g, LightProbeGroupComponent &pg
   const std::string line = strprintf("Probes: %zu%s", pg.positions.size(), selected ? strprintf(" (%d selected)", selected).c_str() : "");
   u.label({row.x + u.px(4), row.y, row.w - u.px(8), row.h}, line, u.theme.text_dim);
   if (u.record_buttons) u.button_rects["shown:" + line] = row;  // (tests read the line)
-  row = lay.row(u.row_h() + u.px(2));
-  const int bw = (row.w - u.px(16)) / 3;
-  if (u.button({row.x + u.px(4), row.y, bw, row.h}, "Add Probe")) probe_group_add(&g);
+  /* Round 509: three across when the labels fit, else two and one, else one a row. */
+  const std::vector<Recti> bc = u.button_cells(lay, {"Add Probe", "Delete Selected", "Select All"}, u.row_h() + u.px(2));
+  if (u.button(bc[0], "Add Probe")) probe_group_add(&g);
   u.tooltip("A probe at the middle of the group's probes (then move it with the gizmo).");
-  if (u.button_enabled({row.x + u.px(8) + bw, row.y, bw, row.h}, "Delete Selected", selected > 0, "Click probes in the Scene view first (Shift adds).")) {
+  if (u.button_enabled(bc[1], "Delete Selected", selected > 0, "Click probes in the Scene view first (Shift adds).")) {
     std::vector<int> idx = pt_sel_;
     probe_group_delete(&g, idx);
   }
   u.tooltip("Remove the selected probes.");
-  if (u.button({row.x + u.px(12) + bw * 2, row.y, bw, row.h}, "Select All")) probe_group_select_all(&g);
+  if (u.button(bc[2], "Select All")) probe_group_select_all(&g);
   u.tooltip("Select every probe of this group, to move them together.");
   row = lay.row(u.row_h() + u.px(2));
   if (!pg.enabled) {
@@ -4082,9 +4115,9 @@ void Editor::draw_blend_shape_tools(ui::Layout &lay, GameObject &g) {
   const MeshFilter *mf = g.mesh_filter();
   if (!mf || !mf->mesh || mf->mesh->shape_keys.empty()) return;
   const bool selected = &g == active_object();
-  Recti row = lay.row(u.row_h() + u.px(2));
-  const int tw = (row.w - u.px(16)) / 3;
-  const Recti ren{row.x + u.px(4), row.y, tw, row.h}, dup{ren.right() + u.px(4), row.y, tw, row.h}, mix{dup.right() + u.px(4), row.y, tw, row.h};
+  /* Round 509: three across when the labels fit, else wrapped ("Duplicate" was cut at 1.5x). */
+  const std::vector<Recti> cells = u.button_cells(lay, {"Rename...", "Duplicate", "New from Mix"}, u.row_h() + u.px(2));
+  const Recti ren = cells[0], dup = cells[1], mix = cells[2];
   if (u.record_buttons) u.button_rects["shape:Rename"] = ren, u.button_rects["shape:Duplicate"] = dup, u.button_rects["shape:Mix"] = mix;
   const ui::Id rid = u.id("shape_rename");
   if (u.button_enabled(ren, "Rename...", selected, "The Inspector is pinned to another object: select this one first.")) u.open_popup(rid, ren);
