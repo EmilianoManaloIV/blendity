@@ -4376,7 +4376,14 @@ GameObject *Editor::create_object(const std::string &kind, bool as_child) {
     return g;
   }
   if (kind == "Blockout") return create_blockout("");  // (round 477, ADR 0129)
-  if (starts_with(kind, "Blockout Piece:")) return create_blockout_piece(kind.substr(std::string("Blockout Piece:").size()));
+  if (starts_with(kind, "Blockout Piece:")) {
+    std::string what = kind.substr(std::string("Blockout Piece:").size());
+    /* Round 498: a window from a button or a menu has the style the Modeling Tools window's dropdown shows; `blockout add window` says its own. */
+    const std::vector<std::string> words = split_ws(what);
+    if (words.size() == 1 && to_lower(words[0]) == "window" && blockout_window_style_ > 0 && blockout_window_style_ < kBlockoutWindowStyles)
+      what = "window " + to_lower(kBlockoutWindowStyleNames[blockout_window_style_]);
+    return create_blockout_piece(what);
+  }
   if (canonical.empty()) {  // (round 367, finding 7: it made an empty object named for the typo)
     Log::warn("create: there's no '%s' - Cube, Sphere, Icosphere, Cylinder, Capsule, Cone, Torus, Plane, Quad, Teapot, Empty, Directional / Point / "
               "Spot / Area Light, Light Probe Group, Camera, Armature, Lattice, Curve: Bezier|Circle|Path, Shape: <name>, Blockout, "

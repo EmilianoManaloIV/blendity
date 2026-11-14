@@ -120,6 +120,31 @@ work on the spot.
   sits under a baked object's holder.
 - The kernel is not changed by any of this.
 
+## Amended in round 498 (task 0482): a styled window is one piece that makes its own kernel pieces
+- **A style is numbers on the piece, not objects in the scene.** `BlockoutPiece` gains `style` (Opening Only, Single,
+  Double, Arched, Fixed, Grid, Round), Frame Width and Depth, Panes Across and Up, Arch Rise, Glass, Sill Board and its
+  overhang. Opening Only (0) is the hole of round 478 and reads none of them: a scene from before the round builds to
+  the same bytes. **No child objects are made**: the Hierarchy, the handles, undo and the file hold one piece.
+- **`blockout_snapshot` makes the kernel's pieces** (`blockout_window_pieces`): an Add "blank" that fills the opening
+  and an optional sill board, then Subtract reveals and one "light" for each pane, leaving the frame, the bars and -
+  with Glass on - a thin pane standing. The kernel is not changed and knows nothing of windows.
+- **A made piece's id** has bit 63 set (no object id, which count up from 1, is mistaken for it), the window's object
+  id in the low 32 bits and the part's number above bit 48. Faces name these ids; **`blockout_piece_owner(id)`** is the
+  piece the user means, and everything that answers "which piece is this face" (picking, outlines, the status, the
+  materials) goes through it. `blockout_user_piece_count` counts a window's parts as one.
+- **A seventh class, Glass**, after the six of round 482 (their slots and numbers stay): a Blockout material and a
+  piece override, as the others; the pane's faces alone are in it.
+- **On the grid path a window is made as the grid can show it** (`fit_to_grid`; the snapshot passes the Field Cell
+  when the Method is Field, or Auto in a build with no exact path): a part under about a cell and a half - the frame,
+  a bar, the pane, a frame face's gap to the wall's face - cannot be meshed cleanly there, so the pane is left out,
+  the frame and bars are held at one cell and the frame is as deep as the wall; when a light itself would be under a
+  cell and a half, the window is the plain hole. The piece's own numbers are never changed; the status line says what
+  was held back and which Field Cell would show it (`BlockoutWindowFit`). A cluster Auto sends to the grid for a blend
+  or an open mesh is not known at snapshot time: its windows are made for the exact path (a known limit).
+- **Every way to set a style** (the Inspector, F9, the console, a new window) goes through
+  `blockout_window_set_style` / `blockout_piece_edited`: a window that becomes Round starts as a circle, an opening
+  that is not a window has no style (round 499 gives doors theirs).
+
 ## Not decided here
 - Rooms, the build order with rooms and Intersect, door and window presets: round 478.
 - Handles, snapping, the Room tool, F9 for a piece just added: round 479.

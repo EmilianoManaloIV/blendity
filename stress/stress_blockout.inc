@@ -1216,6 +1216,261 @@ static void surface_row(Report &rep, const Options &o) {
   }
 }
 
+/* Round 498 (task 0482): styled windows in a wall. A window is one piece for the user and several for the kernel (blockout_window_pieces: a blank the frame is
+ * left of, the hole's pieces that carve it, a sill board), so the sweep builds a room - a Room piece of 5.8 x 2.8 x 4.8 m of air - with each of the six styles in
+ * its -X wall at many sizes, places along the wall and turns and places of the whole building; the numbers are the window's own, and the pieces are the ones the
+ * snapshot hands the kernel. Judged as the other sweeps are: a problem is an open, pinched or inside-out result, or two flat faces on top of each other. */
+static std::vector<Piece> window_arrangement(uint32_t seed, float grid_cell = 0.0f) {
+  Rand r{seed * 2654435761u + 498u};
+  bl::BlockoutPiece bp;
+  bp.opening = 2, bp.operation = 1, bp.style = 1 + (int)(seed % 6);
+  bp.width = r.in(0.4f, 2.4f);
+  bp.sill = r.in(0.3f, 1.2f);
+  bp.head = std::min(2.7f, bp.sill + r.in(0.5f, 1.4f));
+  bp.depth = 0.4f;
+  bp.frame_width = r.in(0.03f, 0.12f), bp.frame_depth = r.in(0.05f, 0.2f);
+  bp.panes_across = 1 + r.pick(6), bp.panes_up = 1 + r.pick(6);
+  bp.arch_rise = r.pick(2) ? 0.0f : r.in(0.2f, 0.8f);
+  bp.glass = r.pick(4) != 0, bp.sill_board = r.pick(4) != 0, bp.sill_overhang = r.in(0.0f, 0.1f);
+  /* The room's -X wall is centred on x = -3.0 (the window stands in it, turned to look through it); the window's origin is the floor line. */
+  const float along = r.in(-2.4f + 0.5f * bp.width, 2.4f - 0.5f * bp.width);
+  Piece room = box(1, {5.8f, 2.8f, 4.8f}, {0.0f, 1.4f, 0.0f});
+  room.room = true, room.wall = room.floor = room.ceiling = 0.2f;
+  std::vector<Piece> pieces{room};
+  const Mat4 at = Mat4::trs({-3.0f, 0.0f, along}, Quat::euler({0.0f, 90.0f, 0.0f}), Vec3(1.0f));
+  if (const char *plain = std::getenv("BLENDITY_BLOCKOUT_PLAIN"); plain && std::string(plain) == "hole") {  // (the plain hole a window with no style makes, for comparison)
+    Piece hole = box(2, {bp.depth, bp.head - bp.sill, bp.width}, {0.0f, 0.0f, 0.0f}, Op::Subtract);
+    hole.to_blockout = at * Mat4::translate(Vec3(0.0f, 0.5f * (bp.head + bp.sill), 0.0f)) * Mat4::trs({0, 0, 0}, Quat::euler({0.0f, -90.0f, 0.0f}), Vec3(1.0f));
+    pieces.push_back(hole);
+  }
+  else bl::blockout_window_pieces(bp, 2, at, pieces, grid_cell);  // (grid_cell: the snapshot's fit for the grid)
+  const int turn = r.pick(6);  // (a right angle's multiples, and two turns at odd angles)
+  const float angle = turn < 4 ? 90.0f * (float)turn : r.in(1.0f, 359.0f);
+  const Mat4 building = Mat4::trs({r.in(-60.0f, 60.0f), r.in(-3.0f, 3.0f), r.in(-60.0f, 60.0f)}, Quat::euler({0.0f, angle, 0.0f}), Vec3(1.0f));
+  for (Piece &p : pieces) p.to_blockout = building * p.to_blockout;
+  return pieces;
+}
+
+static void window_style_sweep(Report &rep, const Options &o, bool crisp) {
+  const uint32_t cases = o.quick ? 200 : 2000;
+  const char *cell_env = std::getenv("BLENDITY_BLOCKOUT_CELL");  // (the sweep at another cell, to see what a finer grid resolves)
+  const float cell = cell_env && std::atof(cell_env) > 0.0 ? (float)std::atof(cell_env) : 0.08f;
+  rep.table({"sweep of styled windows in a wall (round 498)", "arrangements", "built", "refused", "problems", "with small faces on top of others", "with faces of no area", "unresolved places"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    const std::string name = path == Path::Crisp ? "styled windows on the exact path" : strprintf("styled windows on the grid (cell %g)", cell);
+    Tally t;
+    const char *one = std::getenv("BLENDITY_BLOCKOUT_SEED");  // (one arrangement alone, its pieces and its overlapping faces listed; BLENDITY_BLOCKOUT_PLAIN=1: the room alone, no window)
+    for (uint32_t seed = 1; seed <= cases; seed++) {
+      if (one && (uint32_t)std::atoi(one) != seed) continue;
+      std::vector<Piece> pieces = window_arrangement(seed, path == Path::Field ? cell : 0.0f);  // (on the grid: the window as the snapshot makes it for that cell)
+      if (const char *plain = std::getenv("BLENDITY_BLOCKOUT_PLAIN"); plain && std::string(plain) == "1") pieces.resize(1);
+      bl::blockout::Settings st;
+      st.path = path, st.cell = cell;
+      if (one) list_arrangement(seed, path, 0, pieces, st);
+      Mesh m;
+      bl::blockout::Report rp;
+      bl::blockout::Faces named;
+      if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+        t.refused++;
+        if (std::getenv("BLENDITY_BLOCKOUT_DEBUG")) std::printf("  window seed %u (%s) refused: %s\n", seed, name.c_str(), rp.why.c_str());
+        continue;
+      }
+      judge(seed, name.c_str(), m, named, rp, t);
+    }
+    rep.row({name, std::to_string(cases), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems), std::to_string(t.overlaps), std::to_string(t.no_area), std::to_string(t.unresolved)});
+    if (!t.first.empty()) rep.note(name + ": the first problem is " + t.first);
+  }
+}
+
+/* Round 498: hostile numbers on styled windows - every style, each case of the list below, a room's wall, on each path (the grid at cell 0.1, the default: soundness is
+ * judged, not detail). The unit test keeps a sample of these cases; this is the whole list. A case that leaves the window out of the snapshot (a number that
+ * is not finite or too small: the plain hole is used then) counts as refused, with a build the kernel refused. */
+static void window_hostile_row(Report &rep, const Options &o, bool crisp) {
+  (void)o;
+  using Set = std::function<void(bl::BlockoutPiece &)>;
+  const float nan = std::numeric_limits<float>::quiet_NaN(), inf = std::numeric_limits<float>::infinity();
+  const std::vector<Set> cases = {
+      [](bl::BlockoutPiece &p) { p.frame_width = 5.0f; },
+      [](bl::BlockoutPiece &p) { p.frame_width = 1e9f; },
+      [](bl::BlockoutPiece &p) { p.frame_width = 0.31f; },
+      [](bl::BlockoutPiece &p) { p.frame_width = 0.0f; },
+      [](bl::BlockoutPiece &p) { p.frame_width = -0.3f; },
+      [](bl::BlockoutPiece &p) { p.frame_depth = 100.0f; },
+      [](bl::BlockoutPiece &p) { p.frame_depth = 0.0f; },
+      [](bl::BlockoutPiece &p) { p.panes_across = 0, p.panes_up = 0; },
+      [](bl::BlockoutPiece &p) { p.panes_across = 500, p.panes_up = 500; },
+      [](bl::BlockoutPiece &p) { p.panes_across = -3, p.panes_up = -3; },
+      [](bl::BlockoutPiece &p) { p.panes_across = 2000000000, p.panes_up = 2000000000; },
+      [](bl::BlockoutPiece &p) { p.width = 9.0f; },
+      [](bl::BlockoutPiece &p) { p.head = 9.0f; },
+      [](bl::BlockoutPiece &p) { p.depth = 9.0f; },
+      [](bl::BlockoutPiece &p) { p.width = -1.2f; },
+      [](bl::BlockoutPiece &p) { p.head = 0.5f; },
+      [](bl::BlockoutPiece &p) { p.depth = 0.0f; },
+      [](bl::BlockoutPiece &p) { p.depth = 1e-6f; },
+      [nan](bl::BlockoutPiece &p) { p.width = nan; },
+      [nan](bl::BlockoutPiece &p) { p.head = nan; },
+      [nan](bl::BlockoutPiece &p) { p.sill = nan; },
+      [nan](bl::BlockoutPiece &p) { p.depth = nan; },
+      [nan](bl::BlockoutPiece &p) { p.frame_width = nan; },
+      [nan](bl::BlockoutPiece &p) { p.frame_depth = nan; },
+      [nan](bl::BlockoutPiece &p) { p.arch_rise = nan; },
+      [nan](bl::BlockoutPiece &p) { p.sill_overhang = nan; },
+      [inf](bl::BlockoutPiece &p) { p.width = inf; },
+      [inf](bl::BlockoutPiece &p) { p.frame_width = inf; },
+      [](bl::BlockoutPiece &p) { p.arch_rise = 1e9f; },
+      [](bl::BlockoutPiece &p) { p.arch_rise = -5.0f; },
+      [](bl::BlockoutPiece &p) { p.arch_rise = 0.001f; },
+      [](bl::BlockoutPiece &p) { p.sill_overhang = 1e6f; },
+      [](bl::BlockoutPiece &p) { p.sill_overhang = -2.0f; },
+      [](bl::BlockoutPiece &p) { p.style = 99; },
+      [](bl::BlockoutPiece &p) { p.style = -4; },
+  };
+  rep.table({"hostile numbers on styled windows (round 498)", "cases", "built", "refused", "problems"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    Tally t;
+    size_t made = 0;
+    for (int style = 1; style < bl::kBlockoutWindowStyles; style++)
+      for (size_t c = 0; c < cases.size(); c++) {
+        bl::BlockoutPiece bp;
+        bp.opening = 2, bp.operation = 1, bp.style = style, bp.width = 1.2f, bp.head = 2.0f, bp.sill = 0.9f, bp.depth = 0.4f;
+        cases[c](bp);
+        Piece room = box(1, {5.8f, 2.8f, 4.8f}, {0.0f, 1.4f, 0.0f});
+        room.room = true, room.wall = room.floor = room.ceiling = 0.2f;
+        std::vector<Piece> pieces{room};
+        made++;
+        if (!bl::blockout_window_pieces(bp, 2, Mat4::trs({-3.0f, 0.0f, 0.0f}, Quat::euler({0.0f, 90.0f, 0.0f}), Vec3(1.0f)), pieces, path == Path::Field ? 0.1f : 0.0f)) {
+          t.refused++;
+          continue;
+        }
+        bl::blockout::Settings st;
+        st.path = path, st.cell = 0.1f;
+        Mesh m;
+        bl::blockout::Report rp;
+        bl::blockout::Faces named;
+        if (!bl::blockout::build(pieces, st, m, &named, &rp)) {
+          t.refused++;
+          continue;
+        }
+        judge((uint32_t)(style * 100 + c), "hostile windows", m, named, rp, t);
+      }
+    rep.row({path == Path::Crisp ? "styled windows on the exact path" : "styled windows on the grid (cell 0.1)", std::to_string(made), std::to_string(t.built), std::to_string(t.refused), std::to_string(t.problems)});
+    if (!t.first.empty()) rep.note(std::string("hostile windows: the first problem is ") + t.first);
+  }
+}
+
+/* Round 498: what many panes cost. 20 Grid windows of 12 x 12 panes with a pane (292 kernel pieces each) in the walls of `interior 100`, against the same
+ * building with 20 plain window cuts: the build's ms on each path, a median of 3 (informative: no verdict). The pieces are the exact path's (grid_cell 0); the
+ * snapshot on the grid at a cell of 0.1 m would hold or drop these windows (fit_to_grid), so the grid's number is what a fine Field Cell costs. */
+static void window_cost_row(Report &rep, const Options &o, bool crisp) {
+  const int n = 6;
+  std::vector<Piece> plain = interior(n, 28);
+  std::vector<Piece> grid = plain;
+  uint64_t id = 100000;
+  size_t made = 0;
+  for (int k = 0; k < 20; k++) {
+    const int i = k % n, j = (k / n) % n, row = k / (n * n);
+    (void)row;
+    const float at_x = 4.0f * (float)i - 2.0f, at_z = 4.0f * (float)j + 1.2f;
+    plain.push_back(box(id++, {0.4f, 1.1f, 1.2f}, {at_x, -1.4f + 1.45f, at_z}, Op::Subtract));
+    bl::BlockoutPiece bp;
+    bp.opening = 2, bp.operation = 1, bp.style = bl::kWindowGrid, bp.width = 1.2f, bp.head = 2.0f, bp.sill = 0.9f, bp.depth = 0.4f;
+    bp.panes_across = 12, bp.panes_up = 12, bp.glass = true;
+    const size_t before = grid.size();
+    bl::blockout_window_pieces(bp, (uint64_t)(2 + k), Mat4::trs({at_x, -1.4f, at_z}, Quat::euler({0.0f, 90.0f, 0.0f}), Vec3(1.0f)), grid);
+    made += grid.size() - before;
+  }
+  rep.table({strprintf("cost of many panes: interior 100 with 20 Grid windows of 12 x 12 panes with glass (%zu kernel pieces), build ms (median of 3)", made), "with 20 plain window cuts", "with 20 Grid 12 x 12 windows", "problems with the Grid windows"});
+  for (int k = 0; k < 2; k++) {
+    const Path path = k == 0 ? Path::Crisp : Path::Field;
+    if (path == Path::Crisp && !crisp) continue;
+    bl::blockout::Settings st;
+    st.path = path, st.cell = 0.1f;
+    std::vector<double> a, b;
+    Tally t;
+    for (int rep_i = 0; rep_i < 3; rep_i++) {
+      const Run ra = on_worker(plain, st);
+      const Run rb = on_worker(grid, st);
+      a.push_back(ra.ms), b.push_back(rb.ms);
+      if (rep_i == 0 && rb.ok) judge(1, "many panes", rb.mesh, rb.faces, rb.rep, t);
+    }
+    rep.row({path == Path::Crisp ? "exact path" : "grid (cell 0.1)", f2(median(a)), f2(median(b)), std::to_string(t.problems)});
+  }
+}
+
+/* Round 498: the live row with a styled window. `interior 100` as objects (as live_row), and a Grid window - 3 x 3 panes, a frame, a pane and a sill board - in the
+ * first room's -X wall, moved a little along it every frame for the same frames (one every 16.7 ms); the verdict is the live row's: no frame over 16.7 ms, a landing
+ * within 100 ms, no kernel call on the main thread. A miss is reported, not hidden. */
+static void window_live_row(Report &rep, const Options &o) {
+  Editor ed;
+  ed.init_headless(1280, 720);
+  ed.set_async_jobs_for_test(true);
+  std::vector<GameObject *> roots;
+  ed.scene().for_each([&](GameObject &g) {
+    if (!g.parent) roots.push_back(&g);
+  });
+  ed.scene().destroy(roots);
+  GameObject *bo = ed.scene().create("Blockout");
+  bo->add<Blockout>();
+  bo->add<MeshFilter>()->mesh = std::make_shared<Mesh>();
+  bo->add<MeshRenderer>();
+  for (const Piece &p : interior(6, 28)) {
+    GameObject *g = ed.scene().create("Piece", bo);
+    BlockoutPiece *bp = g->add<BlockoutPiece>();
+    bp->operation = p.op == Op::Subtract ? 1 : 0;
+    bp->size = p.size;
+    g->set_local_position(p.to_blockout.translation());
+  }
+  /* The first room's air spans x -1.9 to 1.9, y -1.4 to 1.4: its -X wall is centred on x = -2.0 and the floor line is y = -1.4. */
+  GameObject *win = ed.scene().create("Window", bo);
+  BlockoutPiece *wp = win->add<BlockoutPiece>();
+  wp->shape = 0, wp->operation = 1, wp->opening = 2, wp->style = bl::kWindowGrid, wp->width = 1.2f, wp->head = 2.0f, wp->sill = 0.9f, wp->depth = 0.4f;
+  const Vec3 home(-2.0f, -1.4f, -0.6f);
+  win->set_local_position(home);
+  win->set_local_rotation(Quat::euler({0.0f, 90.0f, 0.0f}));
+  ed.command("blockout wait");
+  for (int i = 0; i < 3; i++) ed.step_frame_headless();
+  const uint64_t started0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test(), cancelled0 = ed.blockout_cancelled_for_test(), main0 = ed.blockout_main_builds_for_test();
+  const int frames = o.quick ? 30 : 120;
+  std::vector<double> frame_ms, landing_ms;
+  uint64_t landed = landed0;
+  double oldest = -1.0;
+  const double start = now_seconds();
+  for (int f = 0; f < frames; f++) {
+    const double moved_at = now_seconds();
+    if (oldest < 0.0) oldest = moved_at;
+    win->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
+    ScopedTimer t;
+    ed.step_frame_headless();
+    frame_ms.push_back(t.ms());
+    if (ed.blockout_landed_for_test() != landed) {
+      landed = ed.blockout_landed_for_test();
+      landing_ms.push_back((now_seconds() - oldest) * 1000.0);
+      oldest = -1.0;
+    }
+    const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
+    if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
+  }
+  const double drag_end = now_seconds();
+  ed.command("blockout wait");
+  const double settle_ms = (now_seconds() - drag_end) * 1000.0;
+  std::sort(frame_ms.begin(), frame_ms.end());
+  const double worst = frame_ms.empty() ? 0.0 : frame_ms.back();
+  const double land_median = median(landing_ms), land_worst = landing_ms.empty() ? 0.0 : *std::max_element(landing_ms.begin(), landing_ms.end());
+  const uint64_t main_builds = ed.blockout_main_builds_for_test() - main0;
+  const bool ok = worst <= 16.7 && !landing_ms.empty() && land_median <= 100.0 && main_builds == 0;
+  rep.table({"live: interior 100 with a Grid window in the editor, the window moved along its wall every frame for " + std::to_string(frames) + " frames (one every 16.7 ms)", "frame median ms", "frame worst ms",
+             "move to landing median ms", "move to landing worst ms", "landings during the drag", "wait after the last move ms", "builds started", "landed", "overtaken by a newer move",
+             "main-thread builds", "verdict"});
+  rep.row({"the running build finishes and lands, then the newest starts (ADR 0129)", f2(median(frame_ms)), f2(worst), landing_ms.empty() ? "none" : f2(land_median), landing_ms.empty() ? "none" : f2(land_worst),
+           std::to_string(landing_ms.size()), f2(settle_ms), std::to_string(ed.blockout_started_for_test() - started0), std::to_string(ed.blockout_landed_for_test() - landed0),
+           std::to_string(ed.blockout_cancelled_for_test() - cancelled0), std::to_string(main_builds), ok ? "ok" : "OVER"});
+}
+
 }  // namespace bkstress
 
 static void test_blockout(Report &rep, const Options &o) {
@@ -1233,6 +1488,7 @@ static void test_blockout(Report &rep, const Options &o) {
   if (std::getenv("BLENDITY_BLOCKOUT_LIVE")) return live_row(rep, o, false, true), live_row(rep, o, true, false);
   if (std::getenv("BLENDITY_BLOCKOUT_BENCH")) return bench_rows(rep, o);  // (round 483: the bench interior's drags alone)
   if (std::getenv("BLENDITY_BLOCKOUT_OUTLINE")) return outline_room_sweep(rep, o, crisp);  // (round 497: the outline rooms' sweep alone)
+  if (std::getenv("BLENDITY_BLOCKOUT_WINDOWS")) return window_style_sweep(rep, o, crisp), window_hostile_row(rep, o, crisp), window_cost_row(rep, o, crisp), window_live_row(rep, o);  // (round 498: the styled windows' sweep, hostile and cost rows and live row alone)
   /* (One arrangement of the sweep alone, or the sweep alone - at another cell, say: no timed rows.) */
   if (std::getenv("BLENDITY_BLOCKOUT_SEED") || std::getenv("BLENDITY_BLOCKOUT_SWEEP")) return sweep(rep, o, crisp);
   /* The first build in the process, before anything else here has run the kernel. */
@@ -1395,4 +1651,8 @@ static void test_blockout(Report &rep, const Options &o) {
   sweep(rep, o, crisp);
   blend_sweep(rep, o, crisp);
   outline_room_sweep(rep, o, crisp);
+  window_style_sweep(rep, o, crisp);
+  window_hostile_row(rep, o, crisp);
+  window_cost_row(rep, o, crisp);
+  window_live_row(rep, o);
 }

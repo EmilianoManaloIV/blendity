@@ -23,18 +23,33 @@ const char *const kBlockoutMethodNames[3] = {"Auto", "Exact", "Field"};
 const char *const kBlockoutBlendDetailNames[3] = {"Low", "Medium", "High"};
 const char *const kBlockoutWallNames[2] = {"Merge with neighbours", "Keep walls"};
 const char *const kBlockoutOpeningNames[3] = {"None", "Door", "Window"};
-const char *const kBlockoutClassNames[kBlockoutClasses] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid"};
+const char *const kBlockoutClassNames[kBlockoutClasses] = {"Floor", "Walls", "Ceiling", "Outside", "Cut", "Solid", "Glass"};
+const char *const kBlockoutWindowStyleNames[kBlockoutWindowStyles] = {"Opening Only", "Single", "Double", "Arched", "Fixed", "Grid", "Round"};
+
+int blockout_window_style_from_word(const std::string &word) {
+  std::string w;
+  for (char c : word) w += (char)std::tolower((unsigned char)c);
+  if (w == "opening" || w == "only" || w == "none" || w == "hole" || w == "openingonly") return kWindowOpeningOnly;
+  if (w == "single") return kWindowSingle;
+  if (w == "double") return kWindowDouble;
+  if (w == "arched" || w == "arch") return kWindowArched;
+  if (w == "fixed") return kWindowFixed;
+  if (w == "grid") return kWindowGrid;
+  if (w == "round" || w == "porthole") return kWindowRound;
+  return -1;
+}
 
 namespace {
 
-const char *const kMaterialFieldNames[kBlockoutClasses] = {"Floor Material", "Walls Material", "Ceiling Material", "Outside Material", "Cut Material", "Solid Material"};
+const char *const kMaterialFieldNames[kBlockoutClasses] = {"Floor Material", "Walls Material", "Ceiling Material", "Outside Material", "Cut Material", "Solid Material", "Glass Material"};
 const char *const kMaterialHelp[kBlockoutClasses] = {
     "The material of every room's floor (a .mat from the project; none: the default material). A piece's own Floor Material wins over it.",
     "The material of the inside of every room's walls.",
     "The material of every room's ceiling.",
     "The material of the outer faces of every room's walls, floor and ceiling.",
     "The material of the faces a Subtract piece cut (a door's or window's reveal, a pocket's sides), and of what an Intersect piece trimmed.",
-    "The material of the faces of a plain Add piece that is no room. A face made of several pieces' faces in one plane takes the material of the first of them."};
+    "The material of the faces of a plain Add piece that is no room, and of a styled window's frame, bars and sill board. A face made of several pieces' faces in one plane takes the material of the first of them.",
+    "The material of a styled window's pane (a thin sheet in its light, when its Glass is on)."};
 
 float safe_scale(float v) { return finite_bits(v) && v > 0.0f ? std::min(1000.0f, std::max(0.001f, v)) : 1.0f; }
 
@@ -99,6 +114,39 @@ bool shape_can_be_room(int shape) { return shape == 0 || shape == 1 || shape == 
 
 }  // namespace
 
+/* A window's Style and the numbers its style reads (round 498): the rows another style does not use stay out of the Inspector. */
+static void reflect_window_style(Reflector &r, BlockoutPiece &p, bool all) {
+  r.enumeration("Style", p.style, kBlockoutWindowStyleNames, kBlockoutWindowStyles);
+  r.help("What the window adds to the wall besides the hole. Opening Only: nothing (a plain cut). Single: a frame, a pane and a sill board. Double: two lights "
+         "with a mullion. Arched: a round head. Fixed: a frame and one pane, no sill board. Grid: Panes Across x Panes Up with glazing bars. Round: a porthole - a circle "
+         "when it is made (Head = Sill + Width); change Width or Head afterwards and it is an ellipse. "
+         "The frame, bars and sill board take the Solid material, the pane the Glass material, the hole's reveal the Cut material.");
+  const int st = std::min(kBlockoutWindowStyles - 1, std::max(0, p.style));
+  if (!all && st == kWindowOpeningOnly) return;
+  r.field("Frame Width", p.frame_width, 0.005f, kBlockoutMinSize, 1000.0f);
+  r.help("The frame's width round the light, in metres; glazing bars are half of it, a Double's mullion all of it. The frame and the bars take at most seven tenths of the width and of the height, so a light is always left.");
+  r.field("Frame Depth", p.frame_depth, 0.005f, kBlockoutMinSize, 1000.0f);
+  r.help("How deep the frame (and the pane inside it) stands, centred in the window's Depth; at most the Depth.");
+  if (all || st == kWindowGrid) {
+    r.field("Panes Across", p.panes_across, 1, 12);
+    r.help("Lights side by side, divided by vertical glazing bars (1 to 12).");
+    r.field("Panes Up", p.panes_up, 1, 12);
+    r.help("Lights one above the other, divided by horizontal glazing bars (1 to 12).");
+  }
+  if (all || st == kWindowArched) {
+    r.field("Arch Rise", p.arch_rise, 0.01f, 0.0f, 1000.0f);
+    r.help("How high the round head rises above the line it springs from, in metres: 0 is a half circle (half the Width). The head ends at the window's Head.");
+  }
+  r.field("Glass", p.glass);
+  r.help("A thin pane (thinner than the frame) closes the light. Off: an open light.");
+  if (all || (st != kWindowFixed && st != kWindowRound)) {
+    r.field("Sill Board", p.sill_board);
+    r.help("A board under the window that stands out past the wall on both faces. (Fixed and Round windows have none.)");
+    r.field("Sill Overhang", p.sill_overhang, 0.005f, 0.0f, 1000.0f);
+    r.help("How far the sill board reaches past the opening's sides and past the wall's two faces, in metres (0: flush with them).");
+  }
+}
+
 bool BlockoutPiece::is_room() const { return room && opening == 0 && shape_can_be_room(shape); }
 
 void BlockoutPiece::reflect(Reflector &r) {
@@ -151,8 +199,9 @@ void BlockoutPiece::reflect(Reflector &r) {
     r.field("Sill", sill, 0.01f, 0.0f, 1000.0f);
     r.help("The bottom of the opening above the floor line: 0 for a door, about 0.9 m for a window.");
     r.field("Depth", depth, 0.01f, 0.0f, 1000.0f);
-    r.help("Through the wall: the wall it was put in plus 0.1 m either side, so it always goes through.");
+    r.help("Through the wall: the wall it was put in plus 0.1 m either side, so it always goes through (Depth = the wall's thickness + 0.2 m). A window's sill board reaches out from the wall's face, 0.1 m in from each end of the Depth, and Scale grows the wall part only.");
   }
+  if (all || opening == 2) reflect_window_style(r, *this, all);
   const bool shaped = all || !is_opening;
   if (shaped && (all || k == 0 || k == 3 || k == 4)) {
     r.field("Size", size);
@@ -222,6 +271,7 @@ void BlockoutPiece::reflect(Reflector &r) {
 
 bool BlockoutPiece::has_class(int cls) const {
   if (is_room()) return cls <= kClassOutside;
+  if (is_styled_window()) return cls == kClassCut || cls == kClassSolid || (cls == kClassGlass && glass);  // (round 498: the hole's reveal, the frame, the pane)
   const bool adds = opening == 0 && operation == (int)blockout::Op::Add;
   return cls == (adds ? kClassSolid : kClassCut);
 }
@@ -474,15 +524,304 @@ Mat4 blockout_piece_matrix(const GameObject &piece, const GameObject &blockout) 
   return m;
 }
 
+/* ===================================================================== */
+/* A styled window's pieces (round 498, task 0482)                        */
+/* ===================================================================== */
+
 namespace {
+
+/* What a made piece is. The kernel adds before it subtracts, so a frame added next to the window's hole would be cut by it. The window is therefore made as
+ * a blank (Add: the whole hole's shape, as deep as the frame) that the Subtract pieces carve: the reveal in front of and behind the frame (the whole hole's
+ * shape), and the lights (one cell each, so the bars between them stay) - cut short of the pane, which stays as a thin sheet of the blank. What is left in
+ * the wall is the frame, the bars and the pane; with no wall behind it (a window in the air) the blank stands there as well. The faces of the Subtract
+ * pieces that bound what is left are the frame's and the pane's, so the part says which class each side is (window_face_class). */
+enum WindowPart : int { kPartBlank = 1, kPartBoard, kPartRevealFront, kPartRevealBack, kPartLight, kPartLightFront, kPartLightBack };
+constexpr uint64_t kBoardFlag = 0x8000;  // (in the index field: the window has a sill board, so the hole's floor is its top)
+
+uint64_t window_piece_id(uint64_t owner, int part, uint32_t index, bool board) {
+  return kBlockoutGeneratedBit | ((uint64_t)part << 48) | ((uint64_t)(index & 0x7FFF) | (board ? kBoardFlag : 0)) << 32 | (owner & 0xFFFFFFFFull);
+}
+int window_part(uint64_t id) { return (int)((id >> 48) & 0x7F); }
+bool window_board(uint64_t id) { return ((id >> 32) & kBoardFlag) != 0; }
+
+/* A window's numbers made safe, in its own space (x across, y up from its floor line, z through the wall). */
+struct WindowShape {
+  int style = 0;
+  float w = 0, sill = 0, head = 0, h = 0, depth = 0;
+  float fw = 0, bw = 0;     // frame width, bar width
+  float fd = 0, gt = 0;     // frame depth, glass thickness
+  int nx = 1, ny = 1;       // lights across and up
+  float rise = 0;           // Arched: the head's rise (its semi-axis up)
+  bool glass = false, board = false;
+  float overhang = 0;
+  float board_t = 0.05f;    // the sill board's thickness
+};
+
+constexpr float kBoardThickness = 0.05f;
+constexpr float kOpeningOvershoot = 0.1f;  // (blockout_stand_opening: Depth is the wall's thickness + 0.2)
+constexpr float kSmallest = 1e-4f;  // (a part thinner than this is left out: the kernel would skip it and name it)
+
+bool window_shape(const BlockoutPiece &bp, WindowShape &s) {
+  if (!bp.is_styled_window()) return false;
+  const float vals[] = {bp.width, bp.head, bp.sill, bp.depth, bp.frame_width, bp.frame_depth, bp.arch_rise, bp.sill_overhang};
+  for (float v : vals)
+    if (!finite_bits(v)) return false;
+  s.style = bp.style;
+  s.w = std::fabs(bp.width), s.depth = std::fabs(bp.depth), s.sill = bp.sill, s.head = bp.head, s.h = bp.head - bp.sill;
+  if (!(s.w >= kBlockoutMinSize) || !(s.h >= kBlockoutMinSize) || !(s.depth >= kBlockoutMinSize) || s.w > kBlockoutMaxSize || s.h > kBlockoutMaxSize ||
+      s.depth > kBlockoutMaxSize || std::fabs(s.sill) > kBlockoutMaxSize)
+    return false;
+  s.fd = std::min(s.depth, std::max(kBlockoutMinSize, std::fabs(bp.frame_depth)));
+  s.gt = std::min(0.03f, 0.4f * s.fd);
+  s.glass = bp.glass;
+  s.board = bp.sill_board && s.style != kWindowFixed && s.style != kWindowRound;
+  s.overhang = std::min(kBlockoutMaxSize, std::max(0.0f, bp.sill_overhang));  // (a negative reach is none)
+  if (s.overhang < 0.002f) s.overhang = 0.0f;  // (a board standing out less than 2 mm is flush with the wall: no sliver of it)
+  s.board_t = kBoardThickness;
+  s.nx = s.style == kWindowDouble ? 2 : s.style == kWindowGrid ? std::min(12, std::max(1, bp.panes_across)) : 1;
+  s.ny = s.style == kWindowGrid ? std::min(12, std::max(1, bp.panes_up)) : 1;
+  float fw = std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, std::fabs(bp.frame_width)));
+  const float bar_ratio = s.style == kWindowDouble ? 1.0f : 0.5f;
+  /* Frame and bars together never take more than seven tenths of either side: a light is always left (a frame wider than half the window is held to it). */
+  const float across = 2.0f + (float)(s.nx - 1) * bar_ratio, up = 2.0f + (float)(s.ny - 1) * bar_ratio;
+  fw = std::min(fw, std::min(0.7f * s.w / across, 0.7f * s.h / up));
+  if (s.style == kWindowArched) {
+    s.rise = bp.arch_rise > 0.0f ? bp.arch_rise : 0.5f * s.w;
+    s.rise = std::min(s.h, std::max(kBlockoutMinSize, s.rise));
+    fw = std::min(fw, 0.45f * s.rise);
+  }
+  s.fw = std::max(1e-3f, fw), s.bw = s.fw * bar_ratio;
+  return finite_bits(s.fw) && finite_bits(s.rise) && s.fw > 0.0f;
+}
+
+/* The field path (a grid of `cell` metres) cannot show a part much finer than a cell: a 6 cm frame or a 3 cm pane at 0.1 m comes out as a ragged skin with
+ * many unresolved places - two planes closer than a cell put two corners in one cell, all along the frame. Parts too fine for the cell are the frame or a bar
+ * under 1.5 cells wide, a frame shallower than that, a pane thinner than that, a frame face within 1.5 cells of the wall's face (flush with it is fine) and a
+ * sill board that stands out of the wall (its overhang is far less than a cell and its end lies near the reveals' ends). Then the window is made as the grid can
+ * show it: no pane, no standing sill board, the frame and bars held at one cell, the frame as deep as the wall when its faces were that near to the wall's; and
+ * the status says what Field Cell shows the real thing. False: with that the
+ * lights would close (a light under 1.5 cells), so the window is the plain hole. */
+bool fit_to_grid(WindowShape &s, float cell, BlockoutWindowFit &fit) {
+  const float limit = 1.499f * cell, wall_half = std::max(0.5f * s.fd, 0.5f * s.depth - kOpeningOvershoot);
+  const bool bars = s.nx > 1 || s.ny > 1;
+  const float narrow = bars ? std::min(s.fw, s.bw) : s.fw, gap = std::fabs(wall_half - 0.5f * s.fd);
+  const bool shallow = s.fd < limit, near_face = gap > 1e-4f && gap < limit, short_board = s.board && s.overhang > 1e-4f && s.overhang < limit;  // (a board ending near the cutters' ends - 0.1 m past the wall - measured no worse on the grid: 837 unresolved places in 200 arrangements at cell 0.02 against 820)
+  const bool thin_pane = s.glass && s.gt < limit;
+  /* The lights are checked first, with the numbers as they are: a Grid of 12 x 12 on 0.6 m has lights of 12 mm whatever else is fine. */
+  const float lw0 = (s.w - 2.0f * s.fw - (float)(s.nx - 1) * s.bw) / (float)s.nx, lh0 = (s.h - 2.0f * s.fw - (float)(s.ny - 1) * s.bw) / (float)s.ny;
+  const bool closed_lights = lw0 < limit || lh0 < limit;
+  if (!(narrow < limit) && !shallow && !near_face && !short_board && !thin_pane && !closed_lights) return true;
+  fit.coarse = true, fit.frame = s.fw;
+  fit.narrowest = std::min(narrow, std::min(shallow ? s.fd : 1e30f, std::min(near_face ? gap : 1e30f, short_board && s.overhang < limit ? s.overhang : 1e30f)));
+  if (thin_pane) fit.narrowest = std::min(fit.narrowest, s.gt);
+  if (closed_lights) fit.narrowest = std::min(fit.narrowest, std::min(lw0, lh0));
+  s.glass = false;
+  s.fw = std::max(s.fw, cell), s.bw = bars ? std::max(s.bw, cell) : s.fw;  // (held at one cell)
+  if (shallow || near_face) s.fd = 2.0f * wall_half;
+  /* (A board that stands out of the wall is a sliver at this cell, and its end lies within a cell of the reveals' ends: it is left out. With none standing out it is
+   * inside the wall, whose matter it adds to, and changes nothing.) */
+  if (short_board) s.board = false;
+  const float lw = (s.w - 2.0f * s.fw - (float)(s.nx - 1) * s.bw) / (float)s.nx, lh = (s.h - 2.0f * s.fw - (float)(s.ny - 1) * s.bw) / (float)s.ny;
+  const bool arched_ok = s.style != kWindowArched || (s.head - s.fw) - std::max(s.head - s.rise, s.sill + s.fw) >= cell;
+  if (lw >= limit && lh >= limit && arched_ok) return true;
+  fit.plain = true;
+  return false;
+}
+
+/* The pieces being made: each is placed by `base` (the window's matrix in the Blockout's space) times a matrix of the window's own space. */
+struct WindowMaker {
+  const WindowShape &s;
+  uint64_t owner;
+  const Mat4 &base;
+  std::vector<blockout::Piece> &out;
+  uint32_t index = 0;
+
+  blockout::Piece start(int part, blockout::Op op, blockout::Shape shape) {
+    blockout::Piece p;
+    p.id = window_piece_id(owner, part, index++, s.board);
+    p.op = op, p.shape = shape;
+    return p;
+  }
+  void box(int part, blockout::Op op, float x0, float x1, float y0, float y1, float z0, float z1) {
+    if (!(x1 - x0 > kSmallest) || !(y1 - y0 > kSmallest) || !(z1 - z0 > kSmallest)) return;
+    blockout::Piece p = start(part, op, blockout::Shape::Box);
+    p.size = Vec3(x1 - x0, y1 - y0, z1 - z0);
+    p.to_blockout = base * Mat4::translate(Vec3(0.5f * (x0 + x1), 0.5f * (y0 + y1), 0.5f * (z0 + z1)));
+    out.push_back(std::move(p));
+  }
+  /* The upper half of an ellipse of semi-axes a (x) and b (y) standing on y = spring, z0 to z1 deep (a filled arch, as the Subtract tool's). */
+  void arch(int part, blockout::Op op, float a, float b, float spring, float z0, float z1) {
+    if (!(a > kSmallest) || !(b > kSmallest) || !(z1 - z0 > kSmallest)) return;
+    blockout::Piece p = start(part, op, blockout::Shape::Arch);
+    p.radius = 1.0f, p.inner_radius = 0.0f, p.angle = 180.0f, p.segments = 16, p.height = z1 - z0;
+    Mat4 m = Mat4::translate(Vec3(0.0f, spring, 0.5f * (z0 + z1)));
+    m.m[0] = a, m.m[5] = b;  // (the ellipse is the unit arch stretched: the matrix's own columns)
+    p.to_blockout = base * m;
+    out.push_back(std::move(p));
+  }
+  /* An ellipse of semi-axes a (x) and b (y) round (0, cy), z0 to z1 deep: a cylinder turned so its axis runs through the wall. */
+  void ellipse(int part, blockout::Op op, float a, float b, float cy, float z0, float z1) {
+    if (!(a > kSmallest) || !(b > kSmallest) || !(z1 - z0 > kSmallest)) return;
+    blockout::Piece p = start(part, op, blockout::Shape::Cylinder);
+    p.radius = 1.0f, p.height = z1 - z0, p.segments = 32;
+    Mat4 m(0);  // (x -> a along X, the cylinder's axis y -> +Z, its z -> -b along Y: no turn computed, so no rounding in it)
+    m.m[0] = a, m.m[6] = 1.0f, m.m[9] = -b, m.m[15] = 1.0f;
+    m.m[13] = cy, m.m[14] = 0.5f * (z0 + z1);
+    p.to_blockout = base * m;
+    out.push_back(std::move(p));
+  }
+  /* The window's whole shape pulled in by `inset` (0: the hole itself), z0 to z1 deep. `down`: the box part reaches that far below the floor line (into the sill
+   * board, which is wider and deeper: the same solid, but the two Add pieces overlap instead of touching face to face in the plane y = sill). */
+  void whole(int part, blockout::Op op, float inset, float z0, float z1, float down = 0.0f) {
+    const float a = 0.5f * s.w - inset;
+    if (s.style == kWindowRound) return ellipse(part, op, a, 0.5f * s.h - inset, s.sill + 0.5f * s.h, z0, z1);
+    if (s.style != kWindowArched) return box(part, op, -a, a, s.sill + inset - down, s.head - inset, z0, z1);
+    /* The round head springs from the hole's line, but a light (inset > 0) never springs below its own floor: a tall rise would otherwise cut through the
+     * bottom rail. */
+    const float lo = s.sill + inset, spring = std::max(s.head - s.rise, lo);
+    box(part, op, -a, a, lo - down, spring, z0, z1);
+    arch(part, op, a, (s.head - inset) - spring, spring, z0, z1);
+  }
+  /* The lights: one cell for each pane, the bars left between them. */
+  void lights(int part, float z0, float z1) {
+    if (s.nx == 1 && s.ny == 1) return whole(part, blockout::Op::Subtract, s.fw, z0, z1);
+    const float x_lo = -0.5f * s.w + s.fw, y_lo = s.sill + s.fw;
+    const float cw = (s.w - 2.0f * s.fw - (float)(s.nx - 1) * s.bw) / (float)s.nx, ch = (s.h - 2.0f * s.fw - (float)(s.ny - 1) * s.bw) / (float)s.ny;
+    for (int j = 0; j < s.ny; j++)
+      for (int i = 0; i < s.nx; i++) {
+        const float x0 = x_lo + (float)i * (cw + s.bw), y0 = y_lo + (float)j * (ch + s.bw);
+        box(part, blockout::Op::Subtract, x0, x0 + cw, y0, y0 + ch, z0, z1);
+      }
+  }
+};
+
+/* Which side of a generated piece looks along Z: `plus` +Z, else -Z (a box's 4 and 5, an arch's 2 and 3, a cylinder's bottom and top - its axis is turned onto Z). */
+uint32_t window_depth_side(const blockout::Piece &p, bool plus) {
+  switch (p.shape) {
+    case blockout::Shape::Arch: return plus ? 3u : 2u;
+    case blockout::Shape::Cylinder: return plus ? 2u : 1u;
+    default: return plus ? 5u : 4u;
+  }
+}
+
+/* The class of a face of a window's part (round 498). The frame, the bars and the sill board are Solid, the pane Glass, the reveal Cut. Most of what shows
+ * is a face of a Subtract piece (the wall holds the frame): the face of the front reveal that looks at the frame is the frame's front, a light's sides are
+ * the frame's and bars' inner sides, the face of a light's front half that looks at the pane is the pane's, and with a sill board the hole's floor is its top. */
+int window_face_class(const blockout::Piece &p, uint32_t side) {
+  switch (window_part(p.id)) {
+    case kPartBlank:
+    case kPartBoard: return kClassSolid;
+    case kPartRevealFront:
+    case kPartRevealBack: {
+      const bool toward_frame = side == window_depth_side(p, window_part(p.id) == kPartRevealFront);
+      const bool board_top = window_board(p.id) && p.shape == blockout::Shape::Box && side == 2;  // (a box's -Y: the hole's floor)
+      return toward_frame || board_top ? kClassSolid : kClassCut;
+    }
+    case kPartLightFront: return side == window_depth_side(p, true) ? kClassGlass : kClassSolid;
+    case kPartLightBack: return side == window_depth_side(p, false) ? kClassGlass : kClassSolid;
+    default: return kClassSolid;  // (a light with no pane: the frame's inner sides)
+  }
+}
+
+}  // namespace
+
+bool blockout_window_pieces(const BlockoutPiece &bp, uint64_t owner, const Mat4 &to_blockout, std::vector<blockout::Piece> &out, float grid_cell, BlockoutWindowFit *fit) {
+  WindowShape s;
+  if (owner > 0xFFFFFFFFull || !window_shape(bp, s)) return false;
+  if (grid_cell > 0.0f) {
+    BlockoutWindowFit f;
+    f.id = owner;
+    const bool built = fit_to_grid(s, grid_cell, f);
+    if (fit) *fit = f;
+    if (!built) return false;
+  }
+  using blockout::Op;
+  const size_t first = out.size();
+  WindowMaker mk{s, owner, to_blockout, out};
+  const float half_d = 0.5f * s.depth, half_f = 0.5f * s.fd, half_g = 0.5f * s.gt;
+  /* The Add pieces: the blank the frame is left of, and the sill board under the window (it stands out past the wall on every side). */
+  mk.whole(kPartBlank, Op::Add, 0.0f, -half_f, half_f, s.board ? 0.5f * s.board_t : 0.0f);
+  if (s.board) {
+    const float x = 0.5f * s.w + s.overhang, z = std::max(half_f, half_d - kOpeningOvershoot) + s.overhang;  // (the reach counts from the wall's faces: a made opening is 0.1 m deeper than its wall each side)
+    mk.box(kPartBoard, Op::Add, -x, x, s.sill - s.board_t, s.sill, -z, z);
+  }
+  /* The Subtract pieces: the hole round the frame, and the lights. */
+  mk.whole(kPartRevealFront, Op::Subtract, 0.0f, -half_d, -half_f);
+  mk.whole(kPartRevealBack, Op::Subtract, 0.0f, half_f, half_d);
+  /* The lights stop at the frame's planes, where the reveals end. (Round 498's review asked for them to run out through the reveals, so that cutters never end in one
+   * plane; the exact-path sweep got worse with it - 69 arrangements with small faces on top of others against 65 - so they stop here.) */
+  if (s.glass) {
+    mk.lights(kPartLightFront, -half_f, -half_g);
+    mk.lights(kPartLightBack, half_g, half_f);
+  }
+  else mk.lights(kPartLight, -half_f, half_f);
+  if (out.size() == first) return false;
+  return true;
+}
+
+void blockout_window_set_style(BlockoutPiece &p, int style) {
+  const int before = p.style;
+  p.style = std::min(kBlockoutWindowStyles - 1, std::max(0, style));
+  blockout_piece_edited(p, before);
+}
+
+void blockout_piece_edited(BlockoutPiece &p, int style_before) {
+  /* Style is shared with doors (round 499 will give a door its own meaning): an opening that is no window has none, so a window switched to Door starts a
+   * door's styles from Opening Only. */
+  if (p.opening != 2) p.style = 0;
+  /* A Round window starts as a circle: Head = Sill + Width. Width or Head may be changed afterwards (an ellipse). */
+  if (p.opening == 2 && p.style == kWindowRound && style_before != kWindowRound && finite_bits(p.width) && finite_bits(p.sill) && p.width > 0.0f)
+    p.head = std::min(kBlockoutMaxSize, p.sill + p.width);
+}
+
+size_t blockout_user_piece_count(const std::vector<blockout::Piece> &pieces) {
+  size_t n = 0;
+  std::unordered_set<uint64_t> windows;
+  for (const blockout::Piece &p : pieces) {
+    if (!blockout_id_generated(p.id)) n++;
+    else if (windows.insert(blockout_piece_owner(p.id)).second) n++;
+  }
+  return n;
+}
+
+namespace {
+
+/* The surface notes of a piece (round 482): its own materials, and where its texture starts. */
+BlockoutSurface::Piece surface_of(const BlockoutPiece &bp, uint64_t id) {
+  BlockoutSurface::Piece sp;
+  sp.id = id;
+  for (int k = 0; k < kBlockoutClasses; k++) sp.materials[k] = bp.material[k];
+  sp.offset_u = finite_bits(bp.texture_offset_u) ? bp.texture_offset_u : 0.0f;
+  sp.offset_v = finite_bits(bp.texture_offset_v) ? bp.texture_offset_v : 0.0f;
+  sp.rotation = finite_bits(bp.texture_rotation) ? bp.texture_rotation : 0.0f;
+  return sp;
+}
+
+/* A styled window: its made pieces, each with the window's surface notes. False: the window is built plain. */
+bool collect_window(const BlockoutPiece &bp, uint64_t id, const Mat4 &m, std::vector<blockout::Piece> &pieces, BlockoutSnapshotNotes *notes, float grid_cell) {
+  std::vector<blockout::Piece> made;
+  BlockoutWindowFit fit;
+  const bool built = blockout_window_pieces(bp, id, m, made, grid_cell, &fit);
+  if (notes && (fit.coarse || fit.plain)) notes->window_fits.push_back(fit);
+  if (!built) return false;
+  for (blockout::Piece &p : made) {
+    if (notes) notes->surface.pieces.push_back(surface_of(bp, p.id));
+    pieces.push_back(std::move(p));
+  }
+  return true;
+}
 
 /* Depth first, in the hierarchy's order. `to_here` is the product of the local matrices from the Blockout down to `g`'s
  * parent. A Blockout below is not entered: it is not this one's piece. */
-void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Piece> &pieces, BlockoutSnapshotNotes *notes) {
+void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Piece> &pieces, BlockoutSnapshotNotes *notes, float grid_cell) {
   for (const GameObject *c : g.children) {
     if (!c->active || c->get<Blockout>()) continue;
     const Mat4 m = to_here * c->local_matrix();
     const BlockoutPiece *bp = c->get<BlockoutPiece>();
+    if (bp && bp->enabled && bp->is_styled_window() && collect_window(*bp, c->id, m, pieces, notes, grid_cell)) {
+      collect(*c, m, pieces, notes, grid_cell);
+      continue;
+    }
     if (bp && bp->enabled) {
       std::string why;
       const GameObject *source = nullptr;
@@ -494,18 +833,10 @@ void collect(const GameObject &g, const Mat4 &to_here, std::vector<blockout::Pie
       else {
         pieces.push_back(std::move(p));
         if (source && notes) notes->sources.push_back(source->id);
-        if (notes) {  // (round 482: what the faces of this piece are given besides their shape)
-          BlockoutSurface::Piece sp;
-          sp.id = c->id;
-          for (int k = 0; k < kBlockoutClasses; k++) sp.materials[k] = bp->material[k];
-          sp.offset_u = finite_bits(bp->texture_offset_u) ? bp->texture_offset_u : 0.0f;
-          sp.offset_v = finite_bits(bp->texture_offset_v) ? bp->texture_offset_v : 0.0f;
-          sp.rotation = finite_bits(bp->texture_rotation) ? bp->texture_rotation : 0.0f;
-          notes->surface.pieces.push_back(std::move(sp));
-        }
+        if (notes) notes->surface.pieces.push_back(surface_of(*bp, c->id));  // (round 482: what the faces of this piece are given besides their shape)
       }
     }
-    collect(*c, m, pieces, notes);
+    collect(*c, m, pieces, notes, grid_cell);
   }
 }
 
@@ -522,14 +853,17 @@ void blockout_piece_objects(const GameObject &blockout, std::vector<const GameOb
 
 void blockout_snapshot(const GameObject &blockout, std::vector<blockout::Piece> &pieces, blockout::Settings &settings, BlockoutSnapshotNotes *notes) {
   pieces.clear();
-  if (notes) notes->refused.clear(), notes->sources.clear(), notes->surface = BlockoutSurface();
+  if (notes) notes->refused.clear(), notes->sources.clear(), notes->window_fits.clear(), notes->surface = BlockoutSurface();
   const Blockout *b = blockout.get<Blockout>();
   settings = b ? b->settings() : blockout::Settings();
   if (notes && b) {
     notes->surface.scale = b->safe_texture_scale();
     for (int k = 0; k < kBlockoutClasses; k++) notes->surface.materials[k] = b->material[k];
   }
-  collect(blockout, Mat4::identity(), pieces, notes);
+  /* A styled window meshed on the grid is made as the grid can show it (fit_to_grid). Whether it is: the Method says Field, or Auto in a build with no exact
+   * path. (A cluster that Auto sends to the grid for a blend or an open mesh is not known here: its window is made for the exact path.) */
+  const bool grid = settings.path == blockout::Path::Field || (settings.path == blockout::Path::Auto && !blockout::crisp_available());
+  collect(blockout, Mat4::identity(), pieces, notes, grid && finite_bits(settings.cell) && settings.cell > 0.0f ? settings.cell : 0.0f);
 }
 
 uint64_t blockout_snapshot_hash(const std::vector<blockout::Piece> &pieces, const blockout::Settings &settings, const BlockoutSnapshotNotes *notes) {
@@ -829,6 +1163,7 @@ Vec3 blockout_handle_apply(BlockoutPiece &p, const BlockoutPiece &before, const 
 /* ===================================================================== */
 
 int blockout_face_class(const blockout::Piece &piece, uint32_t side) {
+  if (blockout_id_generated(piece.id) && side != blockout::kSideBlend) return window_face_class(piece, side);
   const bool plain = !piece.room || side == blockout::kSideBlend;  // (a blend only comes from a piece that is no room)
   if (plain) return piece.op == blockout::Op::Add ? kClassSolid : kClassCut;
   switch (blockout::side_class(piece, side)) {
@@ -1060,7 +1395,18 @@ bool blockout_piece_scale(BlockoutPiece &p, Vec3 f) {
     if (f.y != 1.0f && finite_bits(p.sill)) p.sill = std::min(kBlockoutMaxSize - kBlockoutMinSize, std::max(0.0f, p.sill * f.y));
     if (f.y != 1.0f && finite_bits(p.head))
       p.head = std::min(kBlockoutMaxSize, std::max(finite_bits(p.sill) ? p.sill + kBlockoutMinSize : kBlockoutMinSize, p.head * f.y));
-    grow(p.depth, f.z);
+    /* Depth is the wall's thickness + 0.2 (0.1 m through each face, blockout_stand_opening): the scale grows the wall part and keeps the overshoot. */
+    if (f.z != 1.0f && finite_bits(p.depth) && std::fabs(p.depth) > 2.0f * kOpeningOvershoot)
+      p.depth = std::min(kBlockoutMaxSize, std::max(kBlockoutMinSize, (std::fabs(p.depth) - 2.0f * kOpeningOvershoot) * f.z + 2.0f * kOpeningOvershoot));
+    else grow(p.depth, f.z);
+    /* Round 498: a window's style numbers grow with it - the frame's width in the window's plane, its depth and the board's reach through the wall, the head's rise
+     * with the height. (Pane counts stay: a bigger window has bigger panes.) A zero rise is a half circle and follows the width by itself. */
+    if (p.opening == 2) {
+      grow(p.frame_width, round_k(f.x, f.y));
+      grow(p.frame_depth, f.z);
+      if (p.sill_overhang > 0.0f) grow(p.sill_overhang, round_k(f.x, f.z));  // (0 stays 0)
+      if (p.arch_rise > 0.0f) grow(p.arch_rise, f.y);
+    }
     return true;
   }
   switch ((blockout::Shape)p.shape) {

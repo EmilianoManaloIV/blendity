@@ -424,6 +424,15 @@ struct ApplyEditReflector : Reflector {
   void texture(const char *, TextureRef &) override {}
 };
 
+/* One field edit applied to another selected object's component; a Blockout piece then gets the Inspector's after-edit rules (round 498: a Round window is a circle). */
+static void apply_edit_to(Component *oc, const FieldEdit &fe, int index, int count, bool self) {
+  BlockoutPiece *piece = dynamic_cast<BlockoutPiece *>(oc);
+  const int style_before = piece ? piece->style : 0;
+  ApplyEditReflector a(fe, index, count, self);
+  oc->reflect(a);
+  if (piece) blockout_piece_edited(*piece, style_before);
+}
+
 /* Draws any component through the Reflector interface (Unity's default
  * inspector / Blender's RNA-driven property panels). */
 /* Round 335's review: the first component of its type on g (a track "Type.Field" names the first). */
@@ -1788,7 +1797,10 @@ void Editor::draw_inspector(const Recti &r) {
       ir.limit = essentials_limit(c->type_name());
       ir.anim_obj = first_of_its_type(*g, c) ? g : nullptr, ir.anim_prefix = std::string(c->type_name()) + ".";  // (round 335: its fields keyable - a second of a type isn't: a track names the first)
       ir.owner = g;
+      BlockoutPiece *edited_piece = dynamic_cast<BlockoutPiece *>(c);
+      const int style_before = edited_piece ? edited_piece->style : 0;
       c->reflect(ir);
+      if (edited_piece && ir.changed) blockout_piece_edited(*edited_piece, style_before);  // (round 498: a Round window is a circle, a door has no style; the same undo step)
       draw_show_more(lay, c->type_name(), ir.hidden, ir.seen);
       if (ir.changed) {
         mark_changed(std::string("Edit ") + c->type_name());
@@ -1812,8 +1824,7 @@ void Editor::draw_inspector(const Recti &r) {
                 break;
               }
             if (!oc) continue;
-            ApplyEditReflector a(fe, (int)i, (int)multi.size(), self);
-            oc->reflect(a);
+            apply_edit_to(oc, fe, (int)i, (int)multi.size(), self);
           }
       }
       if (auto *vs = dynamic_cast<ViewAngleShapes *>(c)) draw_view_shapes_extras(*g, *vs, lay);  // (round 339)
