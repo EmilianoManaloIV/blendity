@@ -7410,7 +7410,7 @@ int main(int argc, char **argv) {
                {"responsiveness", test_responsiveness}, {"operations", test_operations}, {"world_like", test_world_like}, {"posing", test_posing},
                {"lightmap_quality", test_lightmap_quality}, {"blockout", test_blockout},
                {"image_edit", test_image_edit}, {"sculpt_paint", test_sculpt_paint}, {"sequencer", test_sequencer}, {"importers", test_importers},
-               {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}};
+               {"unity_export", test_unity_export}, {"asset_windows", test_asset_windows}, {"cold_first_use", test_cold_first_use}, {"scene_views", test_scene_views}};
   ScopedTimer total;
   for (auto &t : tests) {
     if (!o.only.empty() && std::string(t.name).find(o.only) == std::string::npos) continue;

@@ -659,8 +659,8 @@ inline void r34_open(Editor &ed, bool two_by_three = true) {
 inline void r34_gizmo_drag_x(Editor &ed, Vec3 world_point, int pixels) {
   int x = 0, y = 0;
   CHECK(ed.project_to_window(world_point, x, y));
-  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
-  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 30, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 30, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + pixels / 2, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + pixels, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 55 + pixels, y)});
@@ -2085,3 +2085,156 @@ inline float r81_weight(const Mesh &m, const char *group, size_t v) {
   const int gi = m.find_group(group);
   return gi < 0 ? 0.0f : m.vertex_groups[(size_t)gi].weights[v];
 }
+
+/* ===================================================================== */
+/* Round 506, the test engineer's pass (task 0490): two editors in lockstep */
+/* ===================================================================== */
+/* Two editors given the same commands and the same events frame by frame: `a` as a window runs it (the keeps on, the scene checked
+ * every `every`-th frame), `b` the truth (the keeps off, every frame checked). After every frame the Scene view's, the Game view's and
+ * the Hierarchy's pictures of the two must be the same pixel for pixel - a stale keep in `a` shows as a frame where they are not. The
+ * Scene view's camera is nudged each frame (so the Scene view really draws): both editors get the same nudges. */
+struct R506ePair {
+  bool keeps0 = view_perf::keeps;
+  unsigned disabled0 = view_perf::disabled, stale0 = view_perf::stale_for_test;
+  Editor a, b;
+  size_t frames = 0, bad = 0, bad_hier = 0, tip_skips = 0;
+  std::string first_bad;
+  int tick = 0;
+  bool nudge = true, compare = true, a_keeps = true, nudge_game = false, verbose = false;
+  const char *cam0 = "camera 26 20 7 0 0.5 0", *cam1 = "camera 25 20 7 0 0.5 0";
+  ~R506ePair() { view_perf::keeps = keeps0, view_perf::disabled = disabled0, view_perf::stale_for_test = stale0; }
+  static size_t differ(const std::vector<uint32_t> &x, const std::vector<uint32_t> &y) {
+    size_t n = x.size() > y.size() ? x.size() - y.size() : y.size() - x.size();
+    for (size_t i = 0; i < x.size() && i < y.size(); i++) n += (x[i] & 0xFFFFFF) != (y[i] & 0xFFFFFF);
+    return n;
+  }
+  static std::vector<uint32_t> hier_pic(Editor &e) { return r34_crop(e, e.window_rect_for_test(WindowKind::Hierarchy)); }
+  explicit R506ePair(int every = 8, bool card = false, const char *c0 = nullptr, const char *c1 = nullptr) {
+    if (c0) cam0 = c0;
+    if (c1) cam1 = c1;
+    view_perf::keeps = true;
+    r34_open(a);
+    view_perf::keeps = false;
+    r34_open(b);
+    view_perf::keeps = true;
+    if (card) a.viewport_device_for_test(2), b.viewport_device_for_test(2);
+    a.set_scene_hash_check_every_for_test(every);
+    b.set_scene_hash_check_every_for_test(1);
+    for (int i = 0; i < 8; i++) step("warm up");
+  }
+  void cmd(const std::string &c) {
+    a.command(c);
+    b.command(c);
+  }
+  void each(const std::function<void(Editor &)> &f) {
+    f(a);
+    f(b);
+  }
+  void step(const char *what, const std::vector<platform::Event> &ev = {}) {
+    if (nudge) cmd((tick % 2) ? cam1 : cam0);
+    if (nudge_game)
+      each([&](Editor &e) {
+        if (GameObject *cam = e.scene().find_by_name("Main Camera")) cam->set_local_position(cam->local().position + Vec3((tick % 2) ? -0.001f : 0.001f, 0.0f, 0.0f));
+      });
+    tick++;
+    view_perf::keeps = a_keeps;
+    a.step_frame_headless(ev);
+    view_perf::keeps = false;
+    b.step_frame_headless(ev);
+    view_perf::keeps = true;
+    frames++;
+    if (!compare) return;
+    /* A tooltip comes up after a delay on the wall clock, and the two editors step one after the other: on a loaded machine one may
+     * show the hovered button's tooltip a frame before the other (seen: one frame of 7,841 Scene view pixels after a click on the
+     * Scene lighting button, only with other runs on the machine, never alone). Such a frame says nothing about a keep: not compared. */
+    if (a.ui_for_test().tooltip_text_for_test() != b.ui_for_test().tooltip_text_for_test()) return (void)tip_skips++;
+    const size_t ds = differ(r35_scene_view(a), r35_scene_view(b)), dg = differ(r35_game(a), r35_game(b));
+    const size_t d = ds + dg;
+    const size_t h = differ(hier_pic(a), hier_pic(b));
+    if (d) bad++;
+    if (h) bad_hier++;
+    if (verbose && (d || h)) {
+      const std::vector<uint32_t> sa = r35_scene_view(a), sb = r35_scene_view(b);
+      const int w = std::max(1, a.scene_view_rect().w);
+      int x0 = 1 << 30, x1 = -1, y0 = 1 << 30, y1 = -1;
+      for (size_t i = 0; i < sa.size() && i < sb.size(); i++)
+        if ((sa[i] & 0xFFFFFF) != (sb[i] & 0xFFFFFF)) x0 = std::min(x0, (int)i % w), x1 = std::max(x1, (int)i % w), y0 = std::min(y0, (int)i / w), y1 = std::max(y1, (int)i / w);
+      GameObject *oa = a.active_object_for_test(), *ob = b.active_object_for_test();
+      std::printf("      frame %zu (%s): Scene %zu px in x %d..%d y %d..%d, Game %zu, Hierarchy %zu; active a '%s' b '%s'\n", frames, what, ds, x0, x1, y0, y1, dg, h, oa ? oa->name.c_str() : "-", ob ? ob->name.c_str() : "-");
+    }
+    if ((d || h) && first_bad.empty())
+      first_bad = std::string(what) + " (frame " + std::to_string(frames) + ": " + std::to_string(ds) + " Scene view px, " + std::to_string(dg) + " Game view px, " + std::to_string(h) + " Hierarchy px)";
+  }
+  void steps(int n, const char *what) {
+    for (int i = 0; i < n; i++) step(what);
+  }
+  /* An edit done to both, then `n` (even) frames; the pixels it changed in `a`'s two views. */
+  size_t edit(const char *what, const std::function<void(Editor &)> &act, int n = 4) {
+    const std::vector<uint32_t> s0 = r35_scene_view(a), g0 = r35_game(a);
+    each(act);
+    steps(n, what);
+    return differ(s0, r35_scene_view(a)) + differ(g0, r35_game(a));
+  }
+  void click(int x, int y, const char *what = "click") {
+    step(what, {r34_mouse(R34ET::MouseMove, x, y)});
+    step(what, {r34_mouse(R34ET::MouseDown, x, y)});
+    step(what, {r34_mouse(R34ET::MouseUp, x, y)});
+  }
+  void hover_scene() {
+    const Recti v = a.scene_view_rect();
+    step("hover the Scene view", {r34_mouse(R34ET::MouseMove, v.x + v.w / 2, v.y + v.h / 2)});
+    step("hover the Scene view", {r34_mouse(R34ET::MouseMove, v.x + v.w / 2 + 1, v.y + v.h / 2)});
+  }
+  void key(int k, int mods = 0, const char *what = "key") {
+    platform::Event d, u;
+    d.type = platform::EventType::KeyDown, u.type = platform::EventType::KeyUp;
+    d.key = u.key = k;
+    d.mods = u.mods = mods;
+    step(what, {d, u});
+  }
+  void text(const std::string &s, const char *what = "text") {
+    for (char c : s) {
+      platform::Event e;
+      e.type = platform::EventType::Text, e.codepoint = (uint32_t)c;
+      step(what, {e});
+    }
+  }
+  /* The verdict: no frame differed. */
+  void report(const char *name) {
+    std::printf("    %s: %zu frames, %zu with a view picture unlike the fresh one, %zu with a Hierarchy unlike it%s%s\n", name, frames, bad, bad_hier, first_bad.empty() ? "" : "; first: ", first_bad.c_str());
+    CHECK(bad == 0);
+    CHECK(tip_skips <= 2);  // (a tooltip a frame early in one editor: a frame or two at most, or it is not that)
+    CHECK(bad_hier == 0);
+    bad = 0, bad_hier = 0, tip_skips = 0, first_bad.clear();
+  }
+};
+inline void r506e_lamp(Editor &e, Vec3 pos, float intensity = 6.0f, const char *kind = "Point Light") {
+  e.command(std::string("create ") + kind);
+  GameObject *l = e.scene().find_by_name(kind);
+  if (!l) return;
+  l->set_local_position(pos);
+  if (Light *lt = l->get<Light>()) lt->intensity = intensity;
+  e.mark_changed_for_test("a lamp");
+}
+
+/* A Move gizmo drag of an object by real mouse events, every frame compared; returns how far the object went in `a`. */
+inline float r506e_drag(R506ePair &p, const char *name, int n, bool escape) {
+  p.cmd(std::string("select ") + name);
+  p.cmd("tool move");
+  p.steps(2, "select");
+  GameObject *g = p.a.scene().find_by_name(name);
+  if (!g) return -1.0f;
+  const Vec3 before = g->world_position();
+  int x = 0, y = 0;
+  if (!p.a.project_to_window(before, x, y)) return -1.0f;
+  p.step("onto the arrow", {r34_mouse(R34ET::MouseMove, x + 30, y)});
+  p.step("onto the arrow", {r34_mouse(R34ET::MouseMove, x + 30, y)});
+  p.step("press", {r34_mouse(R34ET::MouseDown, x + 30, y)});
+  for (int i = 1; i <= n; i++) p.step("dragging", {r34_mouse(R34ET::MouseMove, x + 30 + i * 8, y)});
+  const float mid = length(g->world_position() - before);
+  if (escape) p.key(platform::KEY_ESCAPE, 0, "escape");
+  p.step("release", {r34_mouse(R34ET::MouseUp, x + 30 + n * 8, y)});
+  p.steps(4, "after the release");
+  return escape ? mid : length(g->world_position() - before);
+}
+

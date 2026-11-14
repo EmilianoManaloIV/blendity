@@ -12,6 +12,7 @@
 // Every file a section reads it made itself, in the scratch project (BLENDITY_PROJECT): nothing of Assets/ or research/.
 #include "../src/render/canvas.h"
 #include "../src/render/video_encode.h"
+#include "../src/core/view_perf.h"
 
 #include <memory>
 
@@ -1246,6 +1247,183 @@ static void test_cold_first_use(Report &rep, const Options &o) {
   rep.note("Rows are first-use costs in one process: tools used before in this section (a window the Scene view's layout shares, a codec) warm later ones, so a row's first use is the first in the order listed.");
 }
 
+/* ===================================================================== scene_views */
+
+/* One measured run of a Scene view action: the frames, what the editor's profile and view_perf's counters gained over them. */
+struct ViewRun {
+  std::string name, size;
+  bool keeps = true;
+  Frames f;
+  double scene3d = 0, gpu = 0, instances = 0, render = 0, collect = 0, hash = 0, overlays = 0, ui = 0;  // (the editor's own parts, ms summed over the frames)
+  int pass = 0;  // (0 keeps off, 1 on, 2 off again: the second off shows what a warm cache alone does)
+  view_perf::Counters c;
+  uint64_t gpu_views = 0;
+};
+
+/* `frames` frames of `act(k)` timed one by one, after three that are not: the parts and the counters over the timed ones. */
+static ViewRun view_run(Editor &ed, bool keeps, int frames, const std::string &name, const std::string &size, const std::function<void(int)> &act) {
+  view_perf::keeps = keeps;
+  for (int k = 0; k < 3; k++) act(k);
+  ViewRun r;
+  r.name = name, r.size = size, r.keeps = keeps;
+  view_perf::reset();
+  const FrameProfile p0 = ed.frame_profile_totals();
+  for (int k = 0; k < frames; k++) {
+    ScopedTimer t;
+    act(3 + k);
+    r.f.add(t.ms());
+  }
+  const FrameProfile p1 = ed.frame_profile_totals();
+  r.scene3d = p1.ms_scene3d - p0.ms_scene3d, r.gpu = p1.ms_gpu - p0.ms_gpu, r.instances = p1.ms_gpu_instances - p0.ms_gpu_instances;
+  r.render = p1.ms_gpu_render - p0.ms_gpu_render, r.collect = p1.ms_collect - p0.ms_collect, r.hash = p1.ms_hash - p0.ms_hash;
+  r.overlays = p1.ms_overlays - p0.ms_overlays, r.gpu_views = p1.gpu_views - p0.gpu_views, r.ui = p1.ms_ui - p0.ms_ui;
+  r.c = view_perf::counters;
+  return r;
+}
+
+static std::string per_frame(double v, const ViewRun &r) { return strprintf("%.2f", r.f.ms.empty() ? 0.0 : v / (double)r.f.ms.size()); }
+static std::string count_per_frame(uint64_t v, const ViewRun &r) { return strprintf("%.1f", r.f.ms.empty() ? 0.0 : (double)v / (double)r.f.ms.size()); }
+static std::string hit_miss(const ViewRun &r, int k) { return strprintf("%llu / %llu", (unsigned long long)r.c.hit[k], (unsigned long long)r.c.miss[k]); }
+
+/* The four tables the section prints: the rows (the live shape, so tools/perf_suite.py compares them), off against on, where the
+ * frame's time went, and what was done each frame (counts, which are what the unit tests pin). */
+static void view_tables(Report &rep, const std::vector<ViewRun> &runs) {
+  rep.table(live_header());
+  auto label = [](const ViewRun &r) { return r.name + (r.pass == 1 ? ", keeps on" : r.pass == 2 ? ", keeps off (again)" : ", keeps off"); };
+  for (const ViewRun &r : runs) live_row(rep, label(r), r.size, r.f);
+  rep.table({"row", "size", "median ms, keeps off", "median ms, keeps on", "median ms, keeps off (again)", "off / on (the dearer off)", "longest ms, off", "longest ms, on"});
+  for (size_t i = 0; i + 2 < runs.size(); i += 3) {
+    const ViewRun &off = runs[i], &on = runs[i + 1], &off2 = runs[i + 2];
+    const double dearer = std::max(off.f.median(), off2.f.median());
+    rep.row({on.name, on.size, f1(off.f.median()), f1(on.f.median()), f1(off2.f.median()), strprintf("%.2fx", on.f.median() > 0 ? dearer / on.f.median() : 0.0),
+             f1(std::max(off.f.longest(), off2.f.longest())), f1(on.f.longest())});
+  }
+  rep.table({"row", "size", "keeps", "Scene view ms", "UI ms", "card total ms", "instances ms", "card render ms", "collect ms", "scene hash ms", "overlays ms", "lighting ms", "items copy ms",
+             "instance key ms", "unsupported ms", "card writes ms"});
+  for (const ViewRun &r : runs)
+    rep.row({label(r), r.size, r.keeps ? "on" : "off", per_frame(r.scene3d, r), per_frame(r.ui, r), per_frame(r.gpu, r), per_frame(r.instances, r), per_frame(r.render, r),
+             per_frame(r.collect, r), per_frame(r.hash, r), per_frame(r.overlays, r), per_frame(r.c.lighting_ms, r), per_frame(r.c.items_copy_ms, r), per_frame(r.c.instance_key_ms, r),
+             per_frame(r.c.unsupported_ms, r), per_frame(r.c.table_write_ms, r)});
+  rep.table({"row", "size", "keeps", "light walks", "item copies", "item hashes", "unsupported walks", "rows written", "table writes", "validations", "solid lists", "hierarchy rebuilds",
+             "kept/missed: card buffers", "lighting", "instance key", "items copy", "unsupported", "solid items", "hierarchy rows"});
+  for (const ViewRun &r : runs)
+    rep.row({label(r), r.size, r.keeps ? "on" : "off", count_per_frame(r.c.light_walks, r), count_per_frame(r.c.item_copies, r), count_per_frame(r.c.item_hashes, r),
+             count_per_frame(r.c.unsupported_walks, r), count_per_frame(r.c.instance_rows_written, r), count_per_frame(r.c.table_writes, r),
+             count_per_frame(r.c.validations, r), count_per_frame(r.c.solid_item_builds, r), count_per_frame(r.c.hierarchy_rebuilds, r), hit_miss(r, view_perf::CardBuffers),
+             hit_miss(r, view_perf::Lighting), hit_miss(r, view_perf::InstanceKey), hit_miss(r, view_perf::ItemsCopy), hit_miss(r, view_perf::Unsupported),
+             hit_miss(r, view_perf::SolidItems), hit_miss(r, view_perf::Hierarchy)});
+}
+
+/* A scene's four actions, each with the keeps off and on: the camera orbiting in Shaded and in Solid (a picture drawn every frame, the
+ * scene still), one object moved every frame (a live drag: every keep must miss and rebuild), and the pointer moving over a panel
+ * with the view still (the kept picture). The editor is made as the app makes a window's: the views on the card, the checks of the
+ * change counter every 8th frame. */
+static void scene_views_rows(Report &rep, const std::string &bench, const std::string &size, int frames, std::vector<ViewRun> &runs, std::vector<ViewRun> &singles) {
+  auto ed = std::make_unique<Editor>();
+  ed->init_headless(1600, 900);
+  ed->viewport_device_for_test(2);
+  const char *const kLayout = "H(0.6,V(0.8,L(0:0),L(5:0)),V(0.5,L(1:0),L(3:0)))";  // (the Scene view, a Console under it, the Game view and the Inspector beside - no Hierarchy: its rows are measured on their own below)
+  ed->command(std::string("layout ") + kLayout);
+  ed->command(bench);
+  ed->command("create Camera");  // (the bench scenes have none: the Game view has something to draw)
+  for (int i = 0; i < 4; i++) ed->step_frame_headless();
+  ed->set_scene_hash_check_every_for_test(8);  // (after the open: a window's interval; a headless editor walks every frame, so nothing would be kept)
+  const SceneCamera cam = ed->scene_camera_for_test();
+  auto orbit = [&](int k) {
+    ed->command(strprintf("camera %d %g %g %g %g %g", 30 + k * 3, (double)cam.pitch, (double)cam.distance, (double)cam.pivot.x, (double)cam.pivot.y, (double)cam.pivot.z));
+    ed->step_frame_headless();
+  };
+  /* (A frame that moves the camera draws the view; a still one is the kept picture, which the card did not draw.) */
+  const FrameProfile warm0 = ed->frame_profile_totals();
+  for (int k = 0; k < 4; k++) orbit(k);
+  if (ed->frame_profile_totals().gpu_views == warm0.gpu_views) {
+    rep.note("The Scene view of " + size + " was not drawn by the card here (" + ed->gpu_view_status() + "): no rows for it.");
+    return;
+  }
+  GameObject *mover = ed->scene().find_by_name("Cube 0");
+  auto drag = [&](int k) {
+    if (mover) mover->set_local_position({-179.2f + 0.05f * (float)k, 0.0f, -179.2f});
+    ed->step_frame_headless();
+  };
+  const Recti panel = ed->window_rect_for_test(WindowKind::Inspector);
+  auto pointer = [&](int k) { step(*ed, {mouse(ET::MouseMove, panel.x + 20 + (k % 7) * 9, panel.y + panel.h / 2 + (k % 5) * 3)}); };
+  /* Both views drawn every frame: the camera orbiting and the Game camera nudged, so the Game view's picture changes too. */
+  auto both = [&](int k) {
+    if (GameObject *c = ed->scene().find_by_name("Camera")) c->set_local_position({0.0f, 1.0f, -10.0f + 0.002f * (float)(k % 16)});
+    orbit(k);
+  };
+  auto hierarchy = [&](int k) {
+    const Recti h = ed->window_rect_for_test(WindowKind::Hierarchy);
+    step(*ed, {mouse(ET::MouseMove, h.x + 20 + (k % 7) * 9, h.y + h.h / 2 + (k % 5) * 3)});
+  };
+  struct Action {
+    const char *name;
+    const char *shading;
+    std::function<void(int)> act;
+    const char *layout;  // (a layout of its own: null keeps kLayout)
+  };
+  const std::vector<Action> actions = {{"the camera orbiting, Shaded", "shaded", orbit, nullptr},
+                                       {"the camera orbiting, Solid", "solid", orbit, nullptr},
+                                       {"Scene and Game view, the camera orbiting, Shaded", "shaded", both, nullptr},
+                                       {"one object moved every frame, Shaded", "shaded", drag, nullptr},
+                                       {"the pointer over a panel, the view still", "shaded", pointer, nullptr},
+                                       {"the Hierarchy shown, the pointer moving over it", "shaded", hierarchy, "H(0.4,L(2:0),L(0:0))"}};
+  for (const Action &a : actions) {
+    ed->command(std::string("shading ") + a.shading);
+    ed->command(std::string("layout ") + (a.layout ? a.layout : kLayout));
+    for (int k = 0; k < 3; k++) ed->step_frame_headless();
+    /* Off, on, off again: the second off tells what a warm cache alone does, so it can't flatter "on". */
+    for (int pass = 0; pass < 3; pass++) {
+      runs.push_back(view_run(*ed, pass == 1, frames, a.name, size, a.act));
+      runs.back().pass = pass;
+    }
+  }
+  ed->command(std::string("layout ") + kLayout);
+  /* Each keep alone off, the others on, over the Shaded orbit: what each is worth (the first is the reference, all on, in this window). Keep 4 off
+   * copies the list as before and leaves 3, 5 and 6 the generation that names it. */
+  ed->command("shading shaded");
+  for (int k = 0; k < 3; k++) ed->step_frame_headless();
+  singles.push_back(view_run(*ed, true, frames, "all keeps on", size, orbit));
+  for (int k = 0; k < view_perf::KeepCount; k++) {
+    view_perf::disabled = 1u << k;
+    singles.push_back(view_run(*ed, true, frames, strprintf("%s alone off", view_perf::keep_name(k)), size, orbit));
+  }
+  view_perf::disabled = 0;
+  view_perf::keeps = true;
+}
+
+static void test_scene_views(Report &rep, const Options &o) {
+  Quiet quiet;
+  rep.title("Scene view: the per-frame work kept while the scene holds (round 506)",
+            "50,000 and 10,000 cubes drawn by the card (the views' Viewport Device on the GPU), the checks of the change counter every 8th frame as a window "
+            "has them. Six actions, each run three times in one process - with every keep of round 506 switched off (`view_perf::keeps`), then on, then off again (so a warm cache alone can't flatter the on) - so one build "
+            "and one window give the before and the after: the camera orbiting in Shaded and in Solid (the scene still, the picture drawn every frame), one "
+            "object moved every frame (a live drag: the keeps must miss and rebuild, so this row must not be slower with them), and the pointer moving over a "
+            "panel with the view still (the kept picture); both views drawn every frame (a Scene view and a Game view, each keeping its own); Solid shading; and the Hierarchy window shown with the pointer moving over it (its flattened rows kept). Rows are judged against 16.7 ms by the median frame (the longest also under 100 ms). The other "
+            "tables say where a frame went and what it did: counts a frame (the unit tests pin counts, never times) and each keep's frames kept / missed. "
+            "No Hierarchy window is open except in its own row. A last table turns each keep off alone over the Shaded orbit. A machine or build with no card device says so and has no rows.");
+  if (!gpu::available()) {
+    rep.note("No card: this machine (or this build) has no Vulkan device for the views, so the section has no rows.");
+    return;
+  }
+  const int frames = o.quick ? 10 : 60;
+  std::vector<ViewRun> runs, singles;
+  scene_views_rows(rep, "benchscene cubes50k", "50,000 cubes", frames, runs, singles);
+  scene_views_rows(rep, "benchscene cubes10k", "10,000 cubes", frames, runs, singles);
+  if (runs.empty()) return;
+  view_tables(rep, runs);
+  /* Each keep's own worth: the Shaded orbit with the others on, against all on (the reference run of its own scene, the first of its eight). */
+  rep.table({"keep turned off alone (orbit, Shaded)", "size", "median ms", "p95 ms", "longest ms", "frames", "this keep is worth ms (median)"});
+  double reference = 0;
+  for (size_t i = 0; i < singles.size(); i++) {
+    const ViewRun &r = singles[i];
+    if (i % (view_perf::KeepCount + 1) == 0) reference = r.f.median();
+    rep.row({r.name, r.size, f1(r.f.median()), f1(r.f.p95()), f1(r.f.longest()), std::to_string(r.f.ms.size()),
+             i % (view_perf::KeepCount + 1) == 0 ? "-" : f1(r.f.median() - reference)});
+  }
+  rep.note("Untimed runs on a shared machine are indicative only: the A / B is read from the timed window (round 506's main session).");
+}
+
 }  // namespace survey
 
 static void test_image_edit(Report &rep, const Options &o) { survey::test_image_edit(rep, o); }
@@ -1255,10 +1433,11 @@ static void test_importers(Report &rep, const Options &o) { survey::test_importe
 static void test_unity_export(Report &rep, const Options &o) { survey::test_unity_export(rep, o); }
 static void test_asset_windows(Report &rep, const Options &o) { survey::test_asset_windows(rep, o); }
 static void test_cold_first_use(Report &rep, const Options &o) { survey::test_cold_first_use(rep, o); }
+static void test_scene_views(Report &rep, const Options &o) { survey::test_scene_views(rep, o); }
 
 /* The survey's sections are minutes long: a run without --only leaves them out (tools/perf_suite.py names them). */
 static bool survey_named_only(const char *name) {
-  for (const char *n : {"image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use"})
+  for (const char *n : {"image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use", "scene_views"})
     if (std::string(name) == n) return true;
   return false;
 }

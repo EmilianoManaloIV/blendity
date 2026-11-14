@@ -6,6 +6,7 @@
 #include "../image/image.h"
 #include "gpu_glsl.h"
 #include "../core/math.h"
+#include "../core/view_perf.h"  // (round 506: the counters of the kept buffers)
 
 #include <algorithm>
 #include <cstdlib>
@@ -2595,6 +2596,7 @@ struct Buf {
   VkDeviceMemory mem = VK_NULL_HANDLE;
   VkDeviceSize size = 0;
   void *mapped = nullptr;
+  uint64_t id = 0;  // round 506: which buffer this is (a new one every make_buffer; 0 for none) - what a kept write is kept for
 };
 struct Img {
   VkImage img = VK_NULL_HANDLE;
@@ -2766,6 +2768,7 @@ class VulkanRaster final : public Raster {
       return -1;
     }
     m.live = true;
+    resources_gen_++;
     for (size_t i = 0; i < meshes_.size(); i++)
       if (!meshes_[i].live) {
         meshes_[i] = m;
@@ -2967,6 +2970,7 @@ class VulkanRaster final : public Raster {
     }
     else texs_[(size_t)id] = s;
     tex_tables_dirty_ = true;
+    resources_gen_++;
     return id;
   }
   void remove_texture(int texture) override {
@@ -2976,6 +2980,7 @@ class VulkanRaster final : public Raster {
     s.live = false;
     (s.is_float ? texf_waste_ : tex8_waste_) += s.size;
     tex_tables_dirty_ = true;
+    resources_gen_++;
   }
   bool set_cage_vertices(const std::vector<CageVertex> &v, const std::vector<std::pair<uint32_t, uint32_t>> *ranges, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
@@ -2992,7 +2997,12 @@ class VulkanRaster final : public Raster {
     free_mesh(meshes_[(size_t)mesh]);  // (no wait: every submission here is waited for before its call returns)
   }
 
-  void set_instances(const std::vector<RasterInstance> &in) override { instances_ = in; }
+  /* Round 506 (keep 1): every call is a new generation - what the instance rows and the tables are written from, and what the
+   * validation in record_frame checked, are this array. A caller that skips the call (its array is the one held) leaves them. */
+  void set_instances(const std::vector<RasterInstance> &in) override {
+    instances_ = in;
+    instances_gen_++;
+  }
 
   bool set_view_lut(uint64_t key, const float *rgb, int size, float log_min, float log_max, std::string *err) override {
     if (!settle(err)) return false;  // (task 0204: a frame left running on the card finishes first)
@@ -3081,22 +3091,36 @@ class VulkanRaster final : public Raster {
   /* The frame's three passes recorded into the command buffer (begun here), the timestamps around them; not submitted. */
   bool record_frame(const RasterFrame &fr, std::string *err) {
     if (fr.slot < 0 || fr.slot >= kSlots) return fail(err, "no such view slot");
-    for (const RasterInstance &in : instances_)
-      if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
+    /* (Round 506: the checks of the instances against the meshes and textures run when either has changed, not every frame; a
+     * failed one is run again, as it is not recorded as passed.) */
+    const bool validated = view_perf::on(view_perf::CardBuffers) && validated_instances_ == instances_gen_ && validated_resources_ == resources_gen_;
+    if (!validated) {
+      view_perf::counters.validations++;
+      for (const RasterInstance &in : instances_)
+        if (in.mesh >= meshes_.size() || !meshes_[in.mesh].live) return fail(err, "an instance of a mesh that isn't there");
+    }
     Slot &sl = slots_[fr.slot];
     if (!targets(sl, fr.width, fr.height, fr.shadow_size, err) || !write_frame(fr, err) || !send_tex_tables(err) || !stage_pending(err)) return false;
-    const bool toon = can_draw_toon_maps() &&
-                      std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return (in.flags & RasterInstance::ToonMaps) != 0; });
+    /* (Round 506: which passes the instances need - read from the array once a generation.) */
+    if (!uses_known_ || !validated) {
+      uses_toon_maps_ = std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return (in.flags & RasterInstance::ToonMaps) != 0; });
+      uses_baked_ = std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return in.baked; });
+      uses_known_ = true;
+    }
+    const bool toon = can_draw_toon_maps() && uses_toon_maps_;
     if (toon && !toon_targets(sl, err)) return false;
-    const bool baked = can_draw_baked() && std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return in.baked; });
+    const bool baked = can_draw_baked() && uses_baked_;
     if (baked && !baked_targets(sl, err)) return false;
     if (fr.want_hdr && (!can_draw_hdr() || !hdr_targets(sl, err))) return fail(err, err && !err->empty() ? *err : "no linear-light pass");
     if (!fr.post.empty() && !post_ok_) return fail(err, "no filter passes on the card");
-    for (const RasterInstance &in : instances_)
-      if ((uint64_t)in.first_index + in.index_count > meshes_[in.mesh].indices) return fail(err, "an instance's part past its mesh");
-    for (const RasterInstance &in : instances_)
-      for (int t : in.tex)
-        if (in.textured && t >= 0 && ((size_t)t >= texs_.size() || !texs_[(size_t)t].live)) return fail(err, "an instance of a texture that isn't there");
+    if (!validated) {
+      for (const RasterInstance &in : instances_)
+        if ((uint64_t)in.first_index + in.index_count > meshes_[in.mesh].indices) return fail(err, "an instance's part past its mesh");
+      for (const RasterInstance &in : instances_)
+        for (int t : in.tex)
+          if (in.textured && t >= 0 && ((size_t)t >= texs_.size() || !texs_[(size_t)t].live)) return fail(err, "an instance of a texture that isn't there");
+      validated_instances_ = instances_gen_, validated_resources_ = resources_gen_;
+    }
     begin();
     record_pending();  // (the meshes' and the cage's queued ranges, before anything draws)
     if (timestamps_) f_.vkCmdResetQueryPool(cmd_, queries_, 0, 4);
@@ -3714,6 +3738,18 @@ class VulkanRaster final : public Raster {
   float lut_min_ = 0, lut_max_ = 1;
   std::vector<Mesh> meshes_;
   std::vector<RasterInstance> instances_;
+  /* Round 506 (keep 1): the instance array's generation (set_instances moves it) and the meshes' and textures' (their adding
+   * and removing moves it), which the work below is kept for. The instance buffer and the tables are shared by every view's
+   * slot, so what a write was made for is recorded per buffer - the generation and the buffer's own id (a buffer made again
+   * is empty) - and a frame whose generation is the written one rewrites nothing. */
+  uint64_t instances_gen_ = 1, resources_gen_ = 1, buffers_made_ = 0;
+  uint64_t validated_instances_ = 0, validated_resources_ = 0;  // (the generations the validation loops last passed for)
+  bool uses_known_ = false, uses_toon_maps_ = false, uses_baked_ = false;  // (which passes the array needs: read from it when it changes)
+  struct Written {
+    uint64_t gen = 0, buffer = 0;
+    size_t neutral = 0;  // the lilToon table only: its first `neutral` entries are the all-off ones (no instance is lilToon)
+  };
+  Written inst_written_, toon_written_, baked_written_, lil_written_, lilmap_written_;
   Slot slots_[kSlots];
   VkSampler sampler_ = VK_NULL_HANDLE;
   VkDescriptorSetLayout set_layout_ = VK_NULL_HANDLE;
@@ -3806,6 +3842,7 @@ class VulkanRaster final : public Raster {
     }
     f_.vkBindBufferMemory(dev_, b.buf, b.mem, 0);
     b.size = size;
+    b.id = ++buffers_made_;
     if (props & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) f_.vkMapMemory(dev_, b.mem, 0, VK_WHOLE_SIZE, 0, &b.mapped);
     return true;
   }
@@ -3813,6 +3850,7 @@ class VulkanRaster final : public Raster {
     free_buffer(m.vb);
     free_buffer(m.ib);
     m = Mesh{};
+    resources_gen_++;  // (round 506: what the instances' validation passed against has changed)
   }
   void free_buffer(Buf &b) {
     drop_pending(b.buf);
@@ -4329,8 +4367,17 @@ class VulkanRaster final : public Raster {
     return true;
   }
   /* Task 0197: each instance's baked light (BakedRef), in the instances' order. */
+  /* Round 506 (keep 1): the table is the array's - written once a generation, straight into the buffer (no table made first and
+   * copied), and left alone while the buffer still holds the generation it was written for. */
+  bool table_current(const Written &w, const Buf &b) const {
+    return view_perf::on(view_perf::CardBuffers) && b.id != 0 && w.buffer == b.id && (w.gen == instances_gen_ || (view_perf::stale(view_perf::CardBuffers) && w.gen != 0));
+  }
   bool write_baked_table(std::string *err) {
-    std::vector<int32_t> t(instances_.size() * 8, 0);
+    if (table_current(baked_written_, baked_buf_)) return true;
+    view_perf::Timed write_time(view_perf::counters.table_write_ms);
+    view_perf::counters.table_writes++;
+    if (!fit_array(baked_buf_, instances_.size() * 8 * 4, err)) return false;
+    int32_t *t = (int32_t *)baked_buf_.mapped;
     for (size_t i = 0; i < instances_.size(); i++) {
       const RasterInstance &s = instances_[i];
       int32_t *d = &t[i * 8];
@@ -4338,14 +4385,29 @@ class VulkanRaster final : public Raster {
       const float f[4] = {(float)s.baked_flags, (float)s.lightmap_dir, s.exposure_occlusion, (float)s.shadowmask};  // (b.y: round 426's direction page, b.w: round 444's shadowmask page, -1 none; -1 none; b.z: round 429's exposure occlusion)
       std::memcpy(d + 4, f, 16);
     }
-    return write_array(baked_buf_, t.data(), t.size() * 4, err);
+    baked_written_ = {instances_gen_, baked_buf_.id, 0};
+    return true;
   }
   /* Task 0196: each instance's toon maps (ToonMaps), in the instances' order. */
   /* Round 416: lilToon's tables - the settings (24 vec4 an instance; zeros, off, for the others) and the maps' ids. */
   bool write_lil_tables(std::string *err) {
-    std::vector<float> l(instances_.size() * 96, 0.0f);
-    std::vector<int32_t> m(instances_.size() * 12, -1);
-    for (size_t i = 0; i < instances_.size(); i++) {
+    const size_t n = instances_.size();
+    const bool bufs_same = lil_buf_.id != 0 && lil_written_.buffer == lil_buf_.id && lilmap_written_.buffer == lilmap_buf_.id;
+    if (view_perf::on(view_perf::CardBuffers) && bufs_same && lil_written_.gen == instances_gen_ && lilmap_written_.gen == instances_gen_) return true;
+    /* (Round 506: with no lilToon instance - nearly every scene - the tables are all-off for any count: written once for the
+     * count and left, whatever the array does after, until an instance is lilToon or the count grows.) */
+    const bool any_lil = std::any_of(instances_.begin(), instances_.end(), [](const RasterInstance &in) { return in.lil; });
+    if (view_perf::on(view_perf::CardBuffers) && !any_lil && bufs_same && lil_written_.neutral >= n && lilmap_written_.neutral >= n) {
+      lil_written_.gen = lilmap_written_.gen = instances_gen_;
+      return true;
+    }
+    view_perf::Timed write_time(view_perf::counters.table_write_ms);
+    view_perf::counters.table_writes++;
+    if (!fit_array(lil_buf_, n * 96 * 4, err) || !fit_array(lilmap_buf_, n * 12 * 4, err)) return false;
+    float *l = (float *)lil_buf_.mapped;
+    int32_t *m = (int32_t *)lilmap_buf_.mapped;
+    std::memset(l, 0, n * 96 * sizeof(float));
+    for (size_t i = 0; i < n; i++) {
       const RasterInstance &s = instances_[i];
       if (!s.lil) { for (int k = 0; k < 12; k++) m[i * 12 + k] = k == 10 || k == 11 ? 0 : -1; continue; }
       std::memcpy(&l[i * 96], s.lil_p, 96 * sizeof(float));
@@ -4357,10 +4419,16 @@ class VulkanRaster final : public Raster {
       m[i * 12 + 10] = any ? 1 : 0;
       m[i * 12 + 11] = 0;
     }
-    return write_array(lil_buf_, l.data(), l.size() * 4, err) && write_array(lilmap_buf_, m.data(), m.size() * 4, err);
+    lil_written_ = {instances_gen_, lil_buf_.id, any_lil ? 0 : n};
+    lilmap_written_ = {instances_gen_, lilmap_buf_.id, any_lil ? 0 : n};
+    return true;
   }
   bool write_toon_table(std::string *err) {
-    std::vector<int32_t> t(instances_.size() * 12, 0);
+    if (table_current(toon_written_, toon_buf_)) return true;
+    view_perf::Timed write_time(view_perf::counters.table_write_ms);
+    view_perf::counters.table_writes++;
+    if (!fit_array(toon_buf_, instances_.size() * 12 * 4, err)) return false;
+    int32_t *t = (int32_t *)toon_buf_.mapped;
     for (size_t i = 0; i < instances_.size(); i++) {
       const RasterInstance &s = instances_[i];
       int32_t *d = &t[i * 12];
@@ -4369,7 +4437,8 @@ class VulkanRaster final : public Raster {
       const float c[4] = {s.hatch_scale, s.line_only_shadow ? 1.0f : 0.0f, s.face_softness, s.hair ? 1.0f : 0.0f};
       std::memcpy(d + 8, c, 16);
     }
-    return write_array(toon_buf_, t.data(), t.size() * 4, err);
+    toon_written_ = {instances_gen_, toon_buf_.id, 0};
+    return true;
   }
   /* Task 0192: the frame's overlays into their host-visible buffers (grown as needed; a zero word when none). */
   /* A host-visible buffer at least `bytes` (16 at least: a zero word when empty), grown when needed. */
@@ -4418,19 +4487,29 @@ class VulkanRaster final : public Raster {
         return fail(err, "out of memory for the instances");
       for (Slot &sl : slots_) bind_buffers(sl.set);
     }
-    InstGpu *dst = (InstGpu *)inst_buf_.mapped;
-    for (size_t i = 0; i < instances_.size(); i++) {
-      const RasterInstance &s = instances_[i];
-      std::memcpy(dst[i].model, s.model, sizeof(s.model));
-      std::memcpy(dst[i].albedo_rough, s.albedo_rough, sizeof(s.albedo_rough));
-      std::memcpy(dst[i].metal_spec, s.metal_spec, sizeof(s.metal_spec));
-      std::memcpy(dst[i].emission, s.emission, sizeof(s.emission));
-      dst[i].emission[3] = 0.0f;
-      dst[i].id[0] = s.id;
-      dst[i].id[1] = s.flags;
-      dst[i].id[2] = s.highlight;
-      write_material(s, dst[i]);
+    /* Round 506 (keep 1): the rows are the array's, so they are written once a generation (the array a caller keeps is not
+     * sent again, and nor are its rows). The buffer is shared by every view's slot: what was written for is recorded with the
+     * buffer's id, and another view's array is another generation. */
+    if (!table_current(inst_written_, inst_buf_)) {
+      view_perf::Timed write_time(view_perf::counters.table_write_ms);
+      view_perf::counters.instance_rows_written += instances_.size();
+      view_perf::miss(view_perf::CardBuffers);
+      InstGpu *dst = (InstGpu *)inst_buf_.mapped;
+      for (size_t i = 0; i < instances_.size(); i++) {
+        const RasterInstance &s = instances_[i];
+        std::memcpy(dst[i].model, s.model, sizeof(s.model));
+        std::memcpy(dst[i].albedo_rough, s.albedo_rough, sizeof(s.albedo_rough));
+        std::memcpy(dst[i].metal_spec, s.metal_spec, sizeof(s.metal_spec));
+        std::memcpy(dst[i].emission, s.emission, sizeof(s.emission));
+        dst[i].emission[3] = 0.0f;
+        dst[i].id[0] = s.id;
+        dst[i].id[1] = s.flags;
+        dst[i].id[2] = s.highlight;
+        write_material(s, dst[i]);
+      }
+      inst_written_ = {instances_gen_, inst_buf_.id, 0};
     }
+    else view_perf::hit(view_perf::CardBuffers);
     if (!write_highlight(fr, err) || !write_overlays(fr, err)) return false;
     FrameUbo u{};
     const Mat4 vp = vulkan_clip(fr.view_proj), sun = vulkan_clip(fr.sun_view_proj), inv = vp.inverse();

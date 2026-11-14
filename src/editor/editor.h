@@ -94,6 +94,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "view_keeps.h"
+
 namespace bl {
 
 namespace video {
@@ -2190,6 +2192,9 @@ class Editor {
   void nest_armature(GameObject *armature, GameObject *mesh);  // into the mesh's rig root, unless another mesh uses it
   void nest_armature_for_test(GameObject *armature, GameObject *mesh) { nest_armature(armature, mesh); }
   std::vector<std::string> asset_paths_with_ext(const std::string &ext);
+  void set_hierarchy_expanded_for_test(uint64_t id, bool on) { on ? (void)expanded_.insert(id) : (void)expanded_.erase(id); }  // (round 506)
+  void set_hierarchy_search_for_test(const std::string &s) { hierarchy_search_ = s; }
+  void clear_hierarchy_rows_for_test() { hierarchy_rows_.clear(); }  // (headless runs keep every row ever drawn, by name: a test asking who is gone starts it empty)
   bool hierarchy_row_for_test(const std::string &name, int &x, int &y) const {
     auto it = hierarchy_rows_.find(name);
     if (it == hierarchy_rows_.end()) return false;
@@ -2326,7 +2331,13 @@ class Editor {
   void submit_scene(Renderer3D &r3d, const Scene &scene, bool game, LightingEnv &env, Vec3 eye);
   std::vector<DrawItem> solid_items(const Scene &s, bool game);
   /* render_view.cpp: shared rendering helpers */
-  std::vector<DrawItem> collect_items(bool game, bool want_tangents);
+  std::vector<DrawItem> collect_items(bool game, bool want_tangents);  // (a copy of collect_items_ref's)
+  /* Round 506 (keep 4): the list itself - a reference into items_cache_, valid until the next gather of the same variant (no nested
+   * collect_items(game, tangents) may run while it is held) - and its generation (0: not a kept list: a Camera Flatten or an LOD level). */
+  const std::vector<DrawItem> &collect_items_ref(bool game, bool want_tangents, uint64_t *gen);
+  /* Round 506: Solid shading's items kept on the scene hash (a reference into solid_cache_, its generation 0 when it is not kept: Edit Mode,
+   * Weight Paint, Sculpt). */
+  const std::vector<DrawItem> &solid_items_ref(const Scene &s, bool game, uint64_t *gen);
   /* Round 436: the gather itself; `view_dep` set when an item depends on this view's eye (an outline's width, an LOD
    * Group's level, a camera-shaped mesh), so the kept list is keyed by the eye too. */
   std::vector<DrawItem> collect_items_build(bool game, bool want_tangents, bool &view_dep, bool &lod);
@@ -2372,7 +2383,9 @@ class Editor {
     bool flattening = false;  // (a Camera Flatten or View Angle Shapes was in the scene: the gather filled side tables - never kept)
     bool lod = false;         // (an LOD Group's level was drawn: its mesh lives in a small cache that drops old levels - never kept)
     std::vector<DrawItem> items;
-  } items_cache_[2][2];
+  } items_cache_[3][2];  // (round 506: [0 Scene view, 1 Game view (its LOD levels), 2 any other game gather - the Camera Preview, VR, renders][tangents]: the Game view and the preview each keep theirs)
+  ItemsCache solid_cache_[2];  // (round 506: Solid shading's [game])
+  mutable view_keeps::PerEditor keeps_;  // (round 506: what the Scene view's keeps hold between frames)
   void prebuild_render_meshes(const Scene &s, bool game);  // (round 418: the cold ones on every core before a gather)
   /* The view collect_items builds for (task 0149: an Outline's distance fade and pixel limits): the eye and the pixels
    * per metre at one metre; off between views (exports, bakes: the plain thickness). */
@@ -2436,7 +2449,8 @@ class Editor {
   /* `rasterized`: for the rasterizer, which leaves Baked lights out (task 0021: the bake represents them);
    * the path tracer, which computes true GI, takes every light. */
   LightingEnv make_lighting(Vec3 eye, bool use_scene_lights, bool rasterized = true);
-  void update_environment();
+  /* Round 506: `sun_in` is the sun the lights' keep holds (no walk for it), `sun_out` where a walk leaves the one it found. */
+  void update_environment(const Vec3 *sun_in = nullptr, Vec3 *sun_out = nullptr);
   /* The sun's shadow map for these items, from the cache when its casters and the light are unchanged
    * (null without a sun or casters). */
   /* frame_only (task 0096): only the fitted frame, for the GPU views that render the map themselves. */
@@ -6988,6 +7002,19 @@ class Editor {
   uint64_t rename_id_ = 0;
   std::string rename_buf_;
   std::string hierarchy_search_;
+  /* Round 506: the Hierarchy's flattened rows, kept between frames and made again when what they are made from changes - the scene, its
+   * structure counter (an object added, deleted, re-parented, renamed, re-ordered, activated), the folds and the search text. */
+  struct HierRow {
+    GameObject *g;
+    int depth;
+  };
+  std::vector<HierRow> hier_rows_;
+  struct HierKey {
+    const Scene *scene = nullptr;
+    uint64_t serial = 0, structure = 0, folds = 0, names = 0, frame = 0;  // (names: the names' fold, under a search only)
+    std::string search;
+    bool valid = false;
+  } hier_key_;
   uint64_t hier_drag_ = 0;
   bool hier_dragging_ = false;
   int hier_press_x_ = 0, hier_press_y_ = 0;

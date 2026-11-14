@@ -150,7 +150,7 @@ def main():
     ok = check("posing is run by default", "posing" in perf_suite.DEFAULT_SECTIONS, True) and ok
     ok = check("blockout is run by default (round 483)", "blockout" in perf_suite.DEFAULT_SECTIONS, True) and ok
     # Round 504: the survey's seven sections are run by default and are in blendity_stress's table (read from its source).
-    survey = ["image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use"]
+    survey = ["image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use", "scene_views"]  # (round 506: scene_views is the eighth)
     source = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "stress", "stress_main.cpp"), encoding="utf-8", errors="replace").read()
     ok = check("the survey's sections are run by default (round 504)", [n for n in survey if n not in perf_suite.DEFAULT_SECTIONS], []) and ok
     ok = check("...and known to blendity_stress's table", [n for n in survey if '{"%s", test_' % n not in source], []) and ok
@@ -172,6 +172,7 @@ SURVEY_SHAPES = [
     ("Unity export (round 504)", "| step | objects | total s | longest frame ms | bytes | budget |", "| import the package's scene | 100 | 0.88 | 883.4 | 82k | OVER |", "total s", 2),
     ("Materials, Textures and History windows, command palette (round 504)", "| first open | size | first frame ms | frame after ms | budget |", "| open the Materials window | 10 materials | 117.5 | 183.8 | OVER |", "first frame ms", 2),
     ("Cold first use (round 504)", "| first use | first ms | frame after ms | second ms | first / second | marked | budget |", "| window: Game | 337.8 | 1.6 | 1.4 | 239.9x | cold | OVER |", "first ms", 1),
+    ("Scene view: the per-frame work kept while the scene holds (round 506)", "| row | size | median ms | p95 ms | longest ms | frames | budget |", "| the camera orbiting, Shaded, keeps on | 50,000 cubes | 12.5 | 14.0 | 20.0 | 10 | ok |", "median ms", 2),
     # The two sequencer tables whose second column is a frame count: the comparison must decide on the seconds, not on the count.
     ("Sequencer and video (round 504)", "| video | total s | frames | frame size | budget |", "| encode_png_frames, FFmpeg 8.1 (libx264) | 0.52 | 12 | 320 x 180 | - |", "total s", 1),
     ("Sequencer and video (round 504)", "| render to video | total s | longest frame ms | frames | in the tray | budget |", "| renderanim of an 8-strip sequence at 640 x 360 (an MP4) | 1.21 | 1199.0 | 6 | Rendering animation | OVER |", "total s", 1),

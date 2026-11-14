@@ -34,7 +34,7 @@ from bench_table import write_between_markers  # noqa: E402
 DEFAULT_SECTIONS = ["responsiveness", "operations", "world_like", "editor_render", "bake", "pathtracer", "serialization", "undo", "livelink",
                     "parity", "memory", "physics", "animation", "filters",  # (round 432: the last five were run by hand only)
                     "posing",  # (round 468: posing, scrubbing and playing a skinned avatar, alone and in a world)
-                    "image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use",  # (round 504: the performance survey - stress/stress_survey.inc: image adjustments and masks, Sculpt and paint strokes, the sequencer, the importers, the Unity exporter, the Materials / Textures / History windows and the palette, first uses; round 511 saves the baseline that holds them)
+                    "image_edit", "sculpt_paint", "sequencer", "importers", "unity_export", "asset_windows", "cold_first_use", "scene_views",  # (round 506: the Scene view kept work, off against on; round 504: the performance survey - stress/stress_survey.inc: image adjustments and masks, Sculpt and paint strokes, the sequencer, the importers, the Unity exporter, the Materials / Textures / History windows and the palette, first uses; round 511 saves the baseline that holds them)
                     "blockout"]  # (round 483: the Blockout kernel, the live drag and the blend rows - each row carries its own verdict - the kernel and mesh rows against 100 ms, the live rows also needing no frame over 16.7 ms - so --check needs no threshold of its own)
 
 

@@ -7,6 +7,8 @@
  * renderer stays the reference: the unit tests pin Auto to it (BLENDITY_VIEWPORT_DEVICE=cpu), and the GPU's own tests
  * compare the two. */
 #include "editor.h"
+#include "view_keeps.h"
+#include "../core/view_perf.h"
 #include "../core/profiling.h"
 
 #include "../core/jobs.h"
@@ -215,8 +217,30 @@ std::vector<PostPass> card_post_passes(const FilterStack &filters, const RenderT
 const char *item_unsupported(const DrawItem &it, const LightingEnv &env) {
   if (!it.mesh) return nullptr;
   if (it.flattened) return "a Camera Flatten (the card has no room for its true shape's shading)";  // (round 334)
-  for (uint32_t slot : mesh_slots(*it.mesh))
-    if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
+  if (!view_perf::on(view_perf::Unsupported)) {
+    for (uint32_t slot : mesh_slots(*it.mesh))
+      if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
+    return nullptr;
+  }
+  /* Round 506 (keep 6): the same slots in the same order without a vector for each item - the most meshes have one slot, and
+   * the slots of a few are a bit mask. */
+  const std::vector<uint16_t> &tm = it.mesh->tri_material;
+  const uint16_t first = tm.empty() ? 0 : tm[0];
+  size_t i = 0;
+  while (i < tm.size() && tm[i] == first) i++;
+  if (i == tm.size()) return material_unsupported(*slot_material(it, first));
+  uint64_t seen = 0;
+  bool wide = false;
+  for (uint16_t s : tm) {
+    if (s >= 64) wide = true;
+    else seen |= 1ull << s;
+  }
+  if (wide)
+    for (uint32_t slot : mesh_slots(*it.mesh))
+      if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
+  for (uint32_t slot = 0; !wide && slot < 64; slot++)
+    if ((seen >> slot & 1) != 0)
+      if (const char *why = material_unsupported(*slot_material(it, slot))) return why;
   return nullptr;
 }
 
@@ -995,11 +1019,32 @@ const char *Editor::gpu_view_unsupported(const RenderTarget &rt, const LightingE
     for (const DrawItem &it : items)
       if (it.mesh && !(it.rt_bounce && it.rt_sky && it.rt_uv)) return "realtime GI's per-pixel light (Receive GI: Lightmaps draws on the card)";
   const bool highlight = gpu_view_ && gpu_view_->can_highlight_faces();
-  for (const DrawItem &it : items) {
-    if (it.face_highlight && !highlight) return "Edit Mode's face highlight (the card has no geometry shaders)";
-    if (const char *why = item_unsupported(it, env)) return why;
+  /* Round 506 (keep 6): the answer for the items is kept while they are the kept list under the same generation, the same
+   * materials' textures and the same highlight ability - the render asks twice a frame (may_draw, draw), and nothing in it moves
+   * with the camera. Verify mode walks again and compares. */
+  view_keeps::PerEditor &kp = keeps_;
+  const uint64_t gen = view_perf::on(view_perf::Unsupported) ? view_keeps::gen_of(kp, &items) : 0;
+  const uint64_t tex_gen = gen != 0 ? (uint64_t)material_textures_generation() : 0;
+  view_keeps::UnsupportedKeep &uk = kp.unsupported[kp.cur_slot];
+  const bool held = gen != 0 && uk.valid && (view_perf::stale(view_perf::Unsupported) || (uk.gen == gen && uk.tex_gen == tex_gen && uk.highlight == highlight));
+  if (held && !cache_verify_) {
+    view_perf::hit(view_perf::Unsupported);
+    return uk.why;
   }
-  return nullptr;
+  view_perf::miss(view_perf::Unsupported);
+  view_perf::counters.unsupported_walks++;
+  view_perf::Timed walk_time(view_perf::counters.unsupported_ms);
+  const char *answer = nullptr;
+  for (const DrawItem &it : items) {
+    if (it.face_highlight && !highlight) {
+      answer = "Edit Mode's face highlight (the card has no geometry shaders)";
+      break;
+    }
+    if ((answer = item_unsupported(it, env))) break;
+  }
+  if (held && answer != uk.why) Editor::note_render_cache_mismatch();  // (verify mode: the kept answer was stale)
+  if (gen != 0) uk = {gen, tex_gen, highlight, true, answer};
+  return answer;
 }
 
 /* Before the shadow map: whether the GPU will draw this view as far as is known then (GI and probes are decided
@@ -1841,12 +1886,36 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
    * a scene of baked or see-through frames pays nothing for it.) */
   uint64_t inst_key = 0;
   bool have_key = false;
-  if (keep.valid) inst_key = instances_key(items, env, opt), have_key = true;
+  /* Round 506 (keep 3): the key's hash over every item is not made again when the items are the kept list under the generation
+   * the slot's array was stored for (the list holds the items' words; the materials' versions are inside the scene hash that
+   * kept it) and the key's global words are the same - they are read every frame. Verify mode hashes anyway and compares. */
+  view_keeps::PerEditor &frame_keeps = keeps_;
+  view_keeps::InstanceKeyKeep &ik = frame_keeps.instance_key[slot];
+  const uint64_t items_gen = view_perf::on(view_perf::InstanceKey) ? view_keeps::gen_of(frame_keeps, &items) : 0;
+  const uint64_t global_key = items_gen != 0 ? instances_global_key(env, opt) : 0;
+  auto hash_items = [&] {
+    view_perf::counters.item_hashes++;
+    view_perf::Timed hash_time(view_perf::counters.instance_key_ms);
+    return instances_key(items, env, opt);
+  };
+  if (keep.valid) {
+    const bool held = items_gen != 0 && ik.valid && ik.key == keep.key && (view_perf::stale(view_perf::InstanceKey) || (ik.gen == items_gen && ik.global == global_key));
+    if (held && !cache_verify_) view_perf::hit(view_perf::InstanceKey), inst_key = keep.key;
+    else {
+      view_perf::miss(view_perf::InstanceKey);
+      inst_key = hash_items();
+      if (held && inst_key != keep.key) note_render_cache_mismatch();  // (verify mode: the kept key was stale)
+    }
+    have_key = true;
+  }
   const bool kept_ok = have_key && instance_keep_valid(keep, inst_key);
   const std::vector<gpu::RasterInstance> *insts = &inst;
   bool toon_maps = false, baked = false;
   bool by_rows = false;
   if (kept_ok && !cache_verify_) {
+    /* (The key is confirmed for this list's generation: a list regathered with the same contents - a light edited, Solid and back -
+     * has a new generation, and the record must follow it or every later frame hashes the items again.) */
+    if (items_gen != 0) ik = {items_gen, global_key, inst_key, true};
     insts = &keep.inst;
     approx = keep.approx, approximated = keep.approximated, toon_maps = keep.toon_maps;
     instances_kept_++, prof_.instances_kept++;
@@ -1890,8 +1959,9 @@ bool Editor::gpu_view_draw(RenderTarget &rt, const Mat4 &v, const Mat4 &p, Vec3 
       note_render_cache_mismatch();  // (verify mode: the kept array was stale)
     keep.valid = false;
     if (ok && keepable && !baked && !surface && see_jobs.empty() && tex_err.empty() && corner_err.empty() && hl_bits.empty() && vcols.empty()) {
-      if (!have_key) inst_key = instances_key(items, env, opt);
+      if (!have_key) inst_key = hash_items();
       keep.card = g, keep.key = inst_key, keep.valid = true;
+      ik = {items_gen, global_key, inst_key, items_gen != 0};
       keep.approx = approx, keep.approximated = approximated, keep.toon_maps = toon_maps;
       keep.textures.clear();
       for (const auto &[t, id] : tex_deps) keep.textures.emplace_back(std::weak_ptr<const Texture>(t), id);  // (weakly: a kept array doesn't hold a dropped texture alive)
