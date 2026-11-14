@@ -87,6 +87,7 @@ void run_sculpt_tests();
 void run_hci_tests();
 void run_vr_tests();
 void run_blockout_tests();
+void run_blockout_modifiers_tests();
 void run_runner_tests();
 struct TestGroup { const char *name; void (*run)(); };
 static const TestGroup kTestGroups[] = {
@@ -106,6 +107,7 @@ static const TestGroup kTestGroups[] = {
     {"hci", run_hci_tests},
     {"vr", run_vr_tests},
     {"blockout", run_blockout_tests},
+    {"blockout_modifiers", run_blockout_modifiers_tests},
     {"runner", run_runner_tests},  // (round 492: this program's own options)
 };
 

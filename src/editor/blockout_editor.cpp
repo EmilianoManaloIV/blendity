@@ -1885,6 +1885,7 @@ void Editor::blockout_command(const std::vector<std::string> &t) {
   }
   else if (sub == "wait") {
     blockout_jobs_wait();
+    blockout_stacks_settle();  // (round 502: and the modifier stacks over the meshes that landed - a script's next command reads the drawn mesh)
   }
   else if (sub == "bake") {  // (round 482)
     std::vector<GameObject *> live;  // (the selected Blockouts and those of the selected pieces: with nothing selected nothing is baked - a bake is not one to run on everything)
