@@ -577,10 +577,18 @@ const char *fixed_operation_word(const Tool &r) {
 
 }  // namespace
 
-/* The tool's switch and its options, in the Modeling Tools window (Create > Blockout): the switch, the Shape and, for a room, its wall. */
+/* The tool's switch and its options, in the Modeling Tools window (Create > Blockout): the Window Style row, the switch, the Shape and, for a room, its wall. */
 void Editor::draw_room_tools(ui::Layout &lay) {
   auto &u = ui_;
+  /* Round 498: the style the next Window made from a button or a menu has (the last one chosen); `blockout add window <style>` says its own. */
   Recti row = lay.row(u.row_h() + u.px(2));
+  u.label({row.x + u.px(4), row.y, row.w / 2, row.h}, "Window Style");
+  const Recti style_rect{row.x + row.w / 2, row.y, row.w / 2 - u.px(6), row.h};
+  if (u.record_buttons) u.button_rects["tools:window_style"] = style_rect;
+  u.combo(u.id("tools_window_style"), style_rect, blockout_window_style_, kBlockoutWindowStyleNames, kBlockoutWindowStyles);
+  u.tooltip("What the next Window (the button above, GameObject > Blockout) adds to the wall besides the hole: a frame, bars, a sill board and a pane, in the\n"
+            "style chosen. Opening Only is the plain cut. The numbers (Frame Width, Panes...) are in the Inspector and Adjust Last Operation. Console: blockout add window <style>.");
+  row = lay.row(u.row_h() + u.px(2));
   const std::string k = key("tool.room");
   const Recti sw{row.x + u.px(4), row.y, row.w - u.px(8), row.h};
   if (u.button(sw, k.empty() ? "Draw Piece" : "Draw Piece  (" + k + ")", room_.active)) set_room_tool(!room_.active);

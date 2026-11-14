@@ -165,6 +165,12 @@ void Editor::blockout_last_rerun() {
     bp->width = size(o.a);
     bp->sill = thick(o.c);
     bp->head = std::max(size(o.b), bp->sill + kBlockoutMinSize);
+    if (bp->opening == 2 && o.style >= 0) {  // (round 498: the style and the numbers it reads, as the rows hold them)
+      bp->style = std::min(kBlockoutWindowStyles - 1, std::max(0, o.style));
+      bp->frame_width = size(o.frame_width), bp->frame_depth = size(o.frame_depth), bp->arch_rise = thick(o.arch_rise), bp->sill_overhang = thick(o.sill_overhang);
+      bp->panes_across = std::min(12, std::max(1, o.panes_across)), bp->panes_up = std::min(12, std::max(1, o.panes_up));
+      bp->glass = o.glass, bp->sill_board = o.sill_board;
+    }
   }
   else {
     if (bp->shape == 0 || bp->shape == 3 || bp->shape == 4) bp->size = {size(o.a), size(o.c), size(o.b)};
@@ -221,9 +227,24 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     title = "Blockout " + o.what;
     const float mn = kBlockoutMinSize, mx = 10000.0f;
     if (o.n == 3) {
+      if (o.style >= 0) rows.push_back({"Style", nullptr, &o.style, nullptr, 0, 0, 0, 0, kBlockoutWindowStyles - 1, kBlockoutWindowStyleNames});  // (round 498: a dropdown of words)
       rows.push_back({"Width", &o.a, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Head", &o.b, nullptr, nullptr, 0.01f, mn, mx, 0, 0});
       rows.push_back({"Sill", &o.c, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+      if (o.style > kWindowOpeningOnly) {  // (only the rows the style reads, as the Inspector shows them)
+        rows.push_back({"Frame Width", &o.frame_width, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+        rows.push_back({"Frame Depth", &o.frame_depth, nullptr, nullptr, 0.005f, mn, mx, 0, 0});
+        if (o.style == kWindowGrid) {
+          rows.push_back({"Panes Across", nullptr, &o.panes_across, nullptr, 0, 0, 0, 1, 12});
+          rows.push_back({"Panes Up", nullptr, &o.panes_up, nullptr, 0, 0, 0, 1, 12});
+        }
+        if (o.style == kWindowArched) rows.push_back({"Arch Rise", &o.arch_rise, nullptr, nullptr, 0.01f, 0.0f, mx, 0, 0});
+        rows.push_back({"Glass", nullptr, nullptr, &o.glass, 0, 0, 0, 0, 0});
+        if (o.style != kWindowFixed && o.style != kWindowRound) {
+          rows.push_back({"Sill Board", nullptr, nullptr, &o.sill_board, 0, 0, 0, 0, 0});
+          if (o.sill_board) rows.push_back({"Sill Overhang", &o.sill_overhang, nullptr, nullptr, 0.005f, 0.0f, mx, 0, 0});
+        }
+      }
     }
     else if (o.n == 6) rows.push_back({"Operation", nullptr, &o.op, nullptr, 0, 0, 0, 0, 2, kOperations});  // (a mesh piece's numbers are its mesh's)
     else {
@@ -261,6 +282,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     u.consume_click();
   }
   bool changed = false;
+  const int style_was = o.style;
   int y = hr.bottom() + u.px(2);
   for (size_t k = 0; k < (size_t)nrows; k++, y += rh + u.px(2)) {
     const Row &row = rows[k];
@@ -273,6 +295,7 @@ void Editor::draw_obj_last_panel(const Recti &view) {
     else if (row.i) changed |= u.int_field(id, fr, *row.i, row.imn, row.imx);
     else if (row.b) changed |= u.checkbox({fr.x, fr.y + u.px(2), rh - u.px(4), rh - u.px(4)}, *row.b);
   }
+  if (changed && o.kind == "blockout" && o.n == 3 && o.style == kWindowRound && style_was != kWindowRound) o.b = o.c + o.a;  // (a Round window starts as a circle: Head = Sill + Width)
   if (changed) obj_last_rerun();
 }
 

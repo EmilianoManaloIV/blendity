@@ -2395,6 +2395,40 @@ This lesson is the whole path in one sitting, with the other Blockout lessons as
 ? Why is the column's Blend radius a number on the column and not on the room? | A Blend radius belongs to the Add and Subtract box, cylinder and sphere pieces: the column melts into what it touches. A room is not blended, so the corner where its wall meets its floor stays crisp.
 ? After Bake to Mesh you move a room's piece. Does the mesh follow? | No: the baked object is an ordinary mesh and no Blockout builds it any more; the pieces under the disabled "Blockout Pieces" child are kept so that Unbake can bring the Blockout back and build the mesh from them again.
 )"},
+    {"Windows with a style", "Single, double, arched, fixed, grid and round windows: a frame, bars, a sill board and a pane, made from numbers", R"(
+A window in a Blockout does not have to be a bare hole. Give it a Style and the wall gets a frame, glazing bars, a sill board and a thin pane, all made from the window's own numbers. It stays one piece - one object in the Hierarchy, one set of handles, one undo step to change it - so you can still texture it and change it later. A style is a preset of numbers, not a mesh asset.
+
+# The styles
+- Opening Only is the plain cut, and the style of every window made before styles existed: its mesh does not change.
+- Single: one light in a frame, with a pane and a sill board. Double: two lights side by side with a mullion between them. Fixed: a frame and one pane, no sill board.
+- Arched: a round head. The hole is a box and a half cylinder; Arch Rise says how high the head rises above the line it springs from (0 is a half circle, half the Width), and the head ends at the window's Head.
+- Grid: Panes Across x Panes Up lights, divided by glazing bars (1 to 12 each). Round: a porthole - a round hole in a ring frame. It is made as a circle (Head = Sill + Width); change Width or Head afterwards and it is an ellipse, as wide as the Width and as tall as Head minus Sill.
+# The numbers
+- Width, Head, Sill and Depth are the opening's, as they always were; the window's face handles in the Scene view move Width, Head and Sill and the frame follows. Frame Width (bars are half of it, a Double's mullion all of it), Frame Depth, Panes Across, Panes Up, Arch Rise, Glass, Sill Board and Sill Overhang are in the Inspector - only the rows the style reads - in Adjust Last Operation (F9) right after the window is made, and in the console.
+- Changing the Style keeps every number the two styles share. The frame and the bars take at most seven tenths of the width and of the height, so a light is always left (a wider frame is held to it).
+- The Modeling Tools window has a Window Style dropdown above Draw Piece: the next Window made from a button or a menu has the style last chosen.
+# Materials
+- The frame, the bars and the sill board are Solid faces, the pane is a new class, Glass, and the hole's reveal is Cut. The Blockout has a Glass Material beside Floor, Walls and the rest, and the window has its own override of it, so a glass material goes on every pane at once or on one window only.
+# How it is built
+- A Blockout adds before it subtracts, so a frame added beside the hole would be cut by it. The window is built as a blank as deep as the frame, which the hole's pieces carve: the reveal in front of and behind the frame, and one light for each pane. What is left in the wall is the frame, the bars and a thin pane; a window with no wall behind it stands as its frame and pane. Clicking any of it selects the window.
+- The field path meshes the Blockout on a grid and cannot show a frame under about a cell and a half, or a pane thinner than the cell. On the grid such a window is made with its frame and bars held at one cell and no pane (it has no Glass faces then), and the Blockout's status says "Window ...: its frame is finer than Field Cell ... - lower Field Cell to ... to see it". Lower Field Cell (down to 0.01 m) to see the real frame and pane; the exact path shows them at any Field Cell.
+# Try it
+! cmd:blockout draw room auto at 0 0 0 normal 0 1 0 size 4 4 2.6 | 1. A room 4 m by 4 m and 2.6 m high, in a new Blockout
+! cmd:blockout add window grid 1.6 2 0.9 | 2. A Grid window in the selected room's first wall: 1.6 m wide, from a sill at 0.9 m up to 2 m - three lights across and three up
+! cmd:blockout set panes 4 2 | 3. Four panes across and two up, on the selected window
+! cmd:blockout set frame 0.08 0.12 | 4. A frame 8 cm wide and 12 cm deep
+! cmd:blockout set style arched | 5. The same window as an Arched one: its Width, Head, Sill, Depth and frame stay, the head is round
+! cmd:newmat Tint | 6. A material asset named Tint in Assets/Materials
+! cmd:blockout set material glass Tint | 7. The window's own Glass Material: only its pane takes it (the Blockout's Glass Material would put it on every window's panes)
+! cmd:blockout set sillboard off | 8. No sill board under the window
+! cmd:blockout set style round | 9. A porthole in the same wall
+# From the console
+- `blockout add window [opening|single|double|arched|fixed|grid|round] [width head [sill]]` makes one; `blockout set style <name>`, `blockout set frame <width> [depth]`, `blockout set panes <across> <up>`, `blockout set glass on|off` and `blockout set sillboard on|off [overhang]` change the selected windows; `blockout set material glass <material or none>` is the Glass Material.
+? You change a Grid window to Single. What happens to its Panes Across and Panes Up? | They stay in the piece, unused: Changing the Style keeps every number, and the Inspector only shows the rows the style reads, so Grid brings them back as they were.
+? You set the Frame Width to 2 m on a window 1.2 m wide. What do you get? | A window whose frame and bars take at most seven tenths of its width and of its height: the frame is held to that so that a light is always left, and the mesh stays closed and valid.
+? You give the Blockout a Glass Material and one window its own. Which panes take which? | The window's own: a piece's override wins over the Blockout's for the classes it makes, and every other window's panes take the Blockout's.
+? Why is a window's frame not simply added next to its hole? | A Blockout adds before it subtracts, so the hole would cut a frame added beside it. The window is built as a blank that its hole's pieces carve, which leaves the frame, the bars and the pane in the wall.
+)"},
     {"Where a Posing Frame Goes", "The Profiler's Posing block, what the editor keeps between frames, and what still costs", R"(
 Dragging an IK handle, scrubbing a clip or playing it on a skinned avatar asks the editor for a new pose every frame, and a pose is not one cost: the constraints are solved, every mesh skinned to the moved bones is deformed again, shape keys and outlines follow, the changed meshes go to the card, and the windows draw. This lesson shows how to place a slow frame, what the editor keeps from one frame to the next so a small pose change stays small, and what a pose of the whole body still costs.
 # The Posing block

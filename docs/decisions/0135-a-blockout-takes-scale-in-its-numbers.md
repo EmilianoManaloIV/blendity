@@ -92,6 +92,9 @@ piece. A piece's place is not limited (the pivot is where the user put it), only
   other round axis keeps the quotient): the world shape stays and the piece's Scale is then not 1 1 1. A hand scale still makes it round (the rule above).
 - **Turn** under an unevenly scaled parent does not keep the world box (the swap of two sizes is in the piece's space); Apply Scale to Pieces first.
 - A scale factor that is not finite (a typed 1e39) leaves each place where it is and the sizes as they were.
+- **A styled window's frame numbers are sizes too** (round 498): Frame Width grows by the rounder of the growths across and up, Frame Depth by the growth
+  through the wall, the Sill Overhang and the Arch Rise by theirs; an overhang or rise of 0 stays 0 (0 means "none" and "a half circle"). A door's or window's
+  Depth is the wall plus 0.1 m each side: only the wall's part grows, so the cut does not reach further past a scaled wall.
 - Known limits of the Scale handle: `gizmo_scale_handle_hot` reads last frame's hover, so a press can be swallowed if the mouse left the handle in that frame,
   and `gizmo_hot_` is shared by the Scene views.
 - Not a shear, but worth knowing: a turned piece under a one-axis scale grows along its own axes by what each grew, so a
