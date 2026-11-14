@@ -2097,7 +2097,7 @@ struct R506ePair {
   bool keeps0 = view_perf::keeps;
   unsigned disabled0 = view_perf::disabled, stale0 = view_perf::stale_for_test;
   Editor a, b;
-  size_t frames = 0, bad = 0, bad_hier = 0, tip_skips = 0;
+  size_t frames = 0, bad = 0, bad_hier = 0;
   std::string first_bad;
   int tick = 0;
   bool nudge = true, compare = true, a_keeps = true, nudge_game = false, verbose = false;
@@ -2137,6 +2137,12 @@ struct R506ePair {
         if (GameObject *cam = e.scene().find_by_name("Main Camera")) cam->set_local_position(cam->local().position + Vec3((tick % 2) ? -0.001f : 0.001f, 0.0f, 0.0f));
       });
     tick++;
+    /* One clock for both, a 60th of a second a frame: whatever runs on the clock (a tooltip's delay, a view refined within a time
+     * budget, the meshes uploaded within one) does the same in both editors, however slow the machine or the build. With the wall
+     * clock the two, stepped one after the other, parted for a frame on loaded and sanitizer runs (a Scene-lighting click, a
+     * `world gradient`), which says nothing about a keep. */
+    const double t = 1000.0 + (double)tick / 60.0;
+    a.set_clock_for_test(t), b.set_clock_for_test(t);
     view_perf::keeps = a_keeps;
     a.step_frame_headless(ev);
     view_perf::keeps = false;
@@ -2144,10 +2150,6 @@ struct R506ePair {
     view_perf::keeps = true;
     frames++;
     if (!compare) return;
-    /* A tooltip comes up after a delay on the wall clock, and the two editors step one after the other: on a loaded machine one may
-     * show the hovered button's tooltip a frame before the other (seen: one frame of 7,841 Scene view pixels after a click on the
-     * Scene lighting button, only with other runs on the machine, never alone). Such a frame says nothing about a keep: not compared. */
-    if (a.ui_for_test().tooltip_text_for_test() != b.ui_for_test().tooltip_text_for_test()) return (void)tip_skips++;
     const size_t ds = differ(r35_scene_view(a), r35_scene_view(b)), dg = differ(r35_game(a), r35_game(b));
     const size_t d = ds + dg;
     const size_t h = differ(hier_pic(a), hier_pic(b));
@@ -2203,9 +2205,8 @@ struct R506ePair {
   void report(const char *name) {
     std::printf("    %s: %zu frames, %zu with a view picture unlike the fresh one, %zu with a Hierarchy unlike it%s%s\n", name, frames, bad, bad_hier, first_bad.empty() ? "" : "; first: ", first_bad.c_str());
     CHECK(bad == 0);
-    CHECK(tip_skips <= 2);  // (a tooltip a frame early in one editor: a frame or two at most, or it is not that)
     CHECK(bad_hier == 0);
-    bad = 0, bad_hier = 0, tip_skips = 0, first_bad.clear();
+    bad = 0, bad_hier = 0, first_bad.clear();
   }
 };
 inline void r506e_lamp(Editor &e, Vec3 pos, float intensity = 6.0f, const char *kind = "Point Light") {
