@@ -1566,28 +1566,85 @@ void tests_round502_second() {
     const Mesh *last = bo->evaluated_mesh();
     size_t adopted = 0, bare = 0;
     const PoseCounts before = pose_counts_this_thread();
+    const uint64_t builds0 = ed.blockout_started_for_test(), landed0 = ed.blockout_landed_for_test();
+    const uint64_t evals0 = ed.eval_started_for_test(), taken0 = ed.eval_adopted_for_test(), dropped0 = ed.eval_dropped_for_test();
     const double start = now_seconds();
-    /* The drag goes on until a result was adopted - 100 frames at least, then as long as it takes, under a generous cap. It used to stop at
-     * 100 frames whatever happened: under ASan + UBSan (CI's sanitizer shard, round 502) one evaluation of this stack takes longer than those
-     * 100 frames do, so nothing had been adopted yet when the count ran out. That was the test waiting on a frame count, not the product
-     * starving: a finished evaluation is adopted whenever it finishes, the pieces having moved on or not - which is what this pins. */
-    for (int f = 0; f < 100 || (adopted == 0 && f < 20000); f++) {
+    double work = 0.0;
+    /* The drag goes on until a result was adopted - 100 frames at least, then as long as it takes, under a generous cap: the test waits on the
+     * event it pins (a finished evaluation is taken although the pieces moved on), never on a frame count. On CI's sanitizer shard (round 502's
+     * #406 run) the drag reached the cap with nothing adopted - and with frames that cost no more than the pacing - so the counters below say
+     * which part did not come back: the builds (started, landed) or the evaluations over them (started, adopted, dropped). The test
+     * "...slowed to 0.1, 0.5 and 1.5 s..." shows on any machine that slow evaluations are adopted, not starved. */
+    int f = 0;
+    for (; f < 100 || (adopted == 0 && f < 20000); f++) {
+      const double t = now_seconds();
       door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
       ed.step_frame_headless();
       const Mesh *ev = bo->evaluated_mesh();
+      work += now_seconds() - t;
       bare += ev == nullptr || ev == bo->get<MeshFilter>()->mesh.get();
       adopted += ev != last;
       last = ev;
       const double due = start + 0.0167 * (double)(f + 1) - now_seconds();
       if (due > 0.0) std::this_thread::sleep_for(std::chrono::duration<double>(due));
     }
-    std::printf("    %zu results adopted in the drag, %zu bare frames, %llu main-thread evaluations\n", adopted, bare, (unsigned long long)(pose_counts_this_thread() - before).evaluations);
+    const uint64_t builds = ed.blockout_started_for_test() - builds0, landed = ed.blockout_landed_for_test() - landed0;
+    const uint64_t evals = ed.eval_started_for_test() - evals0, taken = ed.eval_adopted_for_test() - taken0, dropped = ed.eval_dropped_for_test() - dropped0;
+    std::printf("    %d frames in %.1f s (work %.2f ms a frame): builds started %llu, landed %llu; evaluations started %llu, adopted %llu, dropped %llu; the drawn "
+                "result changed %zu times, %zu bare frames, %llu main-thread evaluations\n",
+                f, now_seconds() - start, 1000.0 * work / (double)std::max(1, f), (unsigned long long)builds, (unsigned long long)landed, (unsigned long long)evals,
+                (unsigned long long)taken, (unsigned long long)dropped, adopted, bare, (unsigned long long)(pose_counts_this_thread() - before).evaluations);
+    CHECK(builds >= 1 && landed >= 1);  // (the drag's builds come back)
+    CHECK(evals >= 1 && taken >= 1);    // (the stack over a landing is evaluated on the worker and taken)
+    CHECK(dropped == 0);                // (none thrown away for having been overtaken)
     CHECK(adopted >= 1);
     CHECK(bare == 0);
     CHECK((pose_counts_this_thread() - before).evaluations == 0);
     ed.command("blockout wait");
     const Mesh *ev = bo->evaluated_mesh();
     CHECK(ev && r502_same(*ev, r502_by_hand(*bo)));
+  });
+
+  /* ---- A slow machine never starves the drag of results ---- */
+  test("blockout modifiers: with every evaluation slowed to 0.1, 0.5 and 1.5 s (a slow machine, ASan), a drag still adopts results while it lasts and ends exact", [] {
+    for (int delay : {100, 500, 1500}) {
+      Editor ed;
+      ed.init_headless(900, 600);
+      ed.set_async_jobs_for_test(true);
+      r502_empty(ed);
+      GameObject *bo = r502_hand(ed);
+      const std::vector<GameObject *> rooms = r502_rooms(ed, *bo, 3, 4);
+      ed.command("blockout wait");
+      ed.select_for_test(bo->id, false);
+      ed.command("component SubdivisionSurface");
+      r502_land(ed, *bo);
+      ed.set_eval_delay_ms_for_test(delay);
+      GameObject *door = rooms.back();
+      const Vec3 home = door->local().position;
+      const Mesh *last = bo->evaluated_mesh();
+      const uint64_t started0 = ed.eval_started_for_test(), adopted0 = ed.eval_adopted_for_test(), dropped0 = ed.eval_dropped_for_test();
+      size_t changed = 0;
+      const double start = now_seconds(), length = std::max(3.0, 4.0 * delay / 1000.0);
+      int frames = 0;
+      for (; now_seconds() - start < length; frames++) {
+        door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(frames % 30)));
+        ed.step_frame_headless();
+        const Mesh *ev = bo->evaluated_mesh();
+        changed += ev != last;
+        last = ev;
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+      }
+      const uint64_t started = ed.eval_started_for_test() - started0, adopted = ed.eval_adopted_for_test() - adopted0, dropped = ed.eval_dropped_for_test() - dropped0;
+      std::printf("    delay %d ms, %d frames in %.1f s: evaluations started %llu, adopted %llu, dropped %llu; the drawn result changed %zu times; landings %llu\n", delay, frames,
+                  now_seconds() - start, (unsigned long long)started, (unsigned long long)adopted, (unsigned long long)dropped, changed, (unsigned long long)ed.blockout_landed_for_test());
+      CHECK(adopted >= 1);  // (a drag as long as four evaluations takes adopts at least one: none dropped for having been overtaken)
+      CHECK(dropped == 0);
+      CHECK(changed >= 1);
+      ed.set_eval_delay_ms_for_test(0);
+      ed.command("blockout wait");
+      const Mesh *ev = bo->evaluated_mesh();
+      CHECK(ev && r502_same(*ev, r502_by_hand(*bo)));
+    }
   });
 
   /* ---- A stale cache never shows ---- */

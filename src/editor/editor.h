@@ -7309,6 +7309,12 @@ class Editor {
   uint64_t blockout_pick_piece_shown(GameObject &g, int view_x, int view_y, const std::unique_ptr<blockout::FaceOwners> *owners = nullptr);  // (the piece of the DRAWN face under a pixel: through deformers; 0: none)
   bool blockout_box_select_shown(GameObject &g, const Recti &view, const Recti &box);  // (a box's pieces, through the drawn mesh)
   void blockout_stacks_settle(uint64_t obj = 0);                 // (the Blockouts' stacks brought to their pieces' meshes now: `blockout wait`)
+  uint64_t eval_started_ = 0, eval_adopted_ = 0, eval_dropped_ = 0;  // (the worker's evaluations: begun, taken by the object, thrown away)
+  int eval_delay_ms_for_test_ = 0;                               // (each worker evaluation waits this long first: a slow machine in a test)
+  uint64_t eval_started_for_test() const { return eval_started_; }
+  uint64_t eval_adopted_for_test() const { return eval_adopted_; }
+  uint64_t eval_dropped_for_test() const { return eval_dropped_; }
+  void set_eval_delay_ms_for_test(int ms) { eval_delay_ms_for_test_ = ms; }
   void set_async_jobs_for_test(bool on) { async_jobs_ = on; }  // (round 412: a headless editor's renders and bakes on workers, as the windowed one's)
   void stream_textures_for_test(bool on) { stream_textures_ = on; }  // (round 447)
   bool texture_streaming_for_test() const { return tex_stream_ != nullptr; }

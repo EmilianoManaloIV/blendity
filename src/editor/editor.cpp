@@ -2988,7 +2988,10 @@ bool Editor::eval_job_request(const GameObject &g, int kind, uint64_t key) {
     job->copy->add_component(c->clone());
   }
   EvalJob *raw = job.get();
-  raw->thread = std::thread([raw, kind] {
+  const int delay_ms = eval_delay_ms_for_test_;
+  eval_started_++;
+  raw->thread = std::thread([raw, kind, delay_ms] {
+    if (delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));  // (a test standing in for a slow machine: ASan, a big stack)
     JobSystem::global().run_background([raw, kind] {
       MeshCopyBare bare;  // (the worker's copies of the base mesh without its caches: the main thread may be building them)
       (void)raw->copy->evaluated_mesh(kind);
@@ -3018,6 +3021,7 @@ void Editor::eval_jobs_poll() {
     const bool wanted = g && g->eval_pending_key(j.kind) == j.key;
     const bool blockout_behind = g && !wanted && g->eval_pending_key(j.kind) != 0 && g->get<Blockout>() && g->get<MeshFilter>();
     if (wanted || blockout_behind) g->adopt_evaluation(*j.copy, j.kind);
+    (wanted || blockout_behind ? eval_adopted_ : eval_dropped_)++;
     eval_jobs_.erase(eval_jobs_.begin() + (std::ptrdiff_t)i);
     ui_.redraw = true;
   }
