@@ -659,8 +659,8 @@ inline void r34_open(Editor &ed, bool two_by_three = true) {
 inline void r34_gizmo_drag_x(Editor &ed, Vec3 world_point, int pixels) {
   int x = 0, y = 0;
   CHECK(ed.project_to_window(world_point, x, y));
-  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 30, y)});
-  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 30, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55, y)});
+  ed.step_frame_headless({r34_mouse(R34ET::MouseDown, x + 55, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + pixels / 2, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseMove, x + 55 + pixels, y)});
   ed.step_frame_headless({r34_mouse(R34ET::MouseUp, x + 55 + pixels, y)});
