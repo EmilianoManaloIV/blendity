@@ -229,7 +229,7 @@ void Editor::draw_textures_window(const Recti &r) {
   texture_multi_.sync(list, texture_selected_);  // the multi-selection (task 0053)
   const bool asking = texture_delete_ || !texture_delete_many_.empty();  // a question is up: no new selection or Delete
   /* Toolbar: New (presets), size, Assign to Selection, search. */
-  const int bh = u.row_h() + u.px(6);
+  const int bh = u.row_h() + u.px(8);
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
   Recti nb{bar.x + u.px(6), bar.y + u.px(3), u.px(90), bh - u.px(6)};

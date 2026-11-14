@@ -17,6 +17,8 @@ these files or from a test that prints it.
 | `study-protocol.md` | The think-aloud study with SUS: who, the tasks, the script, what is logged | - |
 | `study-<date>/p1..p6.md`, `summary.md` | One study run | per the protocol |
 | `study-282.md` | Round 282's status: the study not run, what is ready, the predictions it should test | - |
+| `sweep-<round>.md` | The live sweep's ranked findings (round 313: six configurations; round 505: twelve, with keyboard reach, small targets by name and any control lying on another; round 509: the same sweep after the fixes, its counts turned into checks at zero) | `blendity_tests --group hci` with `BLENDITY_TEST_FILTER="the live sweep"`, `BLENDITY_SWEEP=full`, `BLENDITY_SWEEP_OUT=<file>` and, for a picture of every screen, `BLENDITY_SWEEP_SHOTS=<folder>`; then `py tools/hci_sweep.py <file>` (`--check` against `tools/hci_sweep_baseline.json`) |
+| keyboard reach (in the `hci` tests) | Every control the toolkit draws, by kind, and whether Tab stops on it; Tab's order | The sweep prints the table ("keyboard reach, per configuration"); `BLENDITY_TEST_FILTER="Tab walks"` walks the Inspector's and Preferences' fields with real key events (round 505); since round 509 (ADR 0145) every toolkit control is a stop - `BLENDITY_TEST_FILTER="round 509"` runs the key-driven checks (F6, Tab, Space, the arrows, F10) |
 | `contrast` (in the editor tests) | WCAG 2 contrast of every theme: text, dim text, warning, error, accent and focus against the panel | `BLENDITY_TEST_FILTER="task 0261"` prints the ratios (round 281) |
 
 ## The methods, in one line each

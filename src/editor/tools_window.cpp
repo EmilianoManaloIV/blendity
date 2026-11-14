@@ -14,6 +14,12 @@ using ui::Icon;
 /* A grid of buttons, `per` to a row, a disabled one drawn flat with its label dimmed (the Rigging window too). */
 void Editor::button_grid(ui::Layout &lay, const std::vector<GridButton> &bs, int per) {
   auto &u = ui_;
+  /* Round 509: as many columns as the longest label fits in (never under one), so a narrow window shows whole words in fewer
+   * columns instead of "Sp..." in four. */
+  int widest = 0;
+  for (const GridButton &b : bs) widest = std::max(widest, u.font.text_width(b.label));
+  const int room_w = lay.area.w - lay.indent;
+  while (per > 1 && (room_w - u.px(4) * (per + 1)) / per < widest + u.px(8)) per--;
   for (size_t i = 0; i < bs.size(); i += (size_t)per) {
     Recti row = lay.row(u.row_h() + u.px(2));
     const int bw = (row.w - u.px(4) * (per + 1)) / per;
@@ -21,7 +27,7 @@ void Editor::button_grid(ui::Layout &lay, const std::vector<GridButton> &bs, int
       Recti br{row.x + u.px(4) + (int)(k - i) * (bw + u.px(4)), row.y, bw, row.h};
       if (!bs[k].enabled) {
         u.frame(br, u.theme.strip, u.theme.border, u.px(3));
-        u.label(br, bs[k].label, u.theme.text_dim, ui::Align::Center);
+        u.label(br, u.elide(bs[k].label, br.w - u.px(8)), u.theme.text_dim, ui::Align::Center);  // (a disabled label was cut at both ends: the same "..." as a button's)
       }
       else if (u.button(br, bs[k].label)) bs[k].fn();
       u.tooltip(bs[k].tip);
@@ -158,13 +164,14 @@ void Editor::draw_tools_window(const Recti &r) {
                 "With this off, the centre still snaps (orange) when the mouse is near it.");
     }
     {
-      Recti rr = lay.row(u.row_h() + u.px(2));
-      const int gw = (rr.w - u.px(12)) / 3;
-      if (u.button({rr.x + u.px(4), rr.y, gw, rr.h}, "Guides from Edges")) guides_from_selected_edges();
+      /* Round 509: three across when the labels fit ("Guides from Edges" was 1 px short at the default size), else wrapped. */
+      const std::string show_label = show_guides_ ? "Hide Guides" : "Show Guides", clear_label = strprintf("Clear (%zu)", scene_->guides.size());
+      const std::vector<Recti> gc = u.button_cells(lay, {"Guides from Edges", show_label, clear_label}, u.row_h() + u.px(2));
+      if (u.button(gc[0], "Guides from Edges")) guides_from_selected_edges();
       u.tooltip("Edit Mode: a construction line along each selected edge.");
-      if (u.button({rr.x + u.px(6) + gw, rr.y, gw, rr.h}, show_guides_ ? "Hide Guides" : "Show Guides", show_guides_)) show_guides_ = !show_guides_;
+      if (u.button(gc[1], show_label, show_guides_)) show_guides_ = !show_guides_;
       u.tooltip("The construction lines drawn or hidden (they stay, and still snap, when hidden).");
-      const bool clear = u.button({rr.x + u.px(8) + 2 * gw, rr.y, gw, rr.h}, strprintf("Clear (%zu)", scene_->guides.size()));
+      const bool clear = u.button(gc[2], clear_label);
       u.tooltip("Every construction line removed (Undo brings them back).");
       if (clear) {
         scene_->guides.clear();

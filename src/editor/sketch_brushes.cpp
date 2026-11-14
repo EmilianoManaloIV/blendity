@@ -316,14 +316,16 @@ void Editor::draw_pad_palette(const Recti &view) {
   }
   const int rows = ((int)sketch_brushes_.size() + cols - 1) / cols;
   const Recti foot{body.x + u.px(4), puck.bottom() + u.px(6) + rows * (th + u.px(4)), body.w - u.px(8), u.row_h()};
-  const int bw = (foot.w - u.px(8)) / 3;
+  /* Round 509: three across when the labels fit, else two and one ("Duplicate" was cut at 1.5x). */
+  ui::Layout foot_lay{{foot.x - u.px(4), foot.y, foot.w + u.px(8), 0}, foot.y};
+  const std::vector<Recti> bc = u.button_cells(foot_lay, {"Duplicate", "Reset", "Delete"}, u.row_h());
   const bool own = sketch_brush_cur().base >= 0, room = own_brush_count() < kOwnBrushesMax;
-  if (u.button({foot.x, foot.y, bw, foot.h}, "Duplicate") && room) run_console_command("sketch brush duplicate");
+  if (u.button(bc[0], "Duplicate") && room) run_console_command("sketch brush duplicate");
   u.tooltip(room ? "A brush of your own from this one: its size, opacity, edge and pressure, kept in the preferences."
                  : "Eight brushes of your own already: delete one to make another.");
-  if (u.button({foot.x + bw + u.px(4), foot.y, bw, foot.h}, "Reset")) run_console_command("sketch brush reset");
+  if (u.button(bc[1], "Reset")) run_console_command("sketch brush reset");
   u.tooltip("This brush back to its preset's size, opacity, edge, pressure and color.");
-  if (u.button({foot.x + (bw + u.px(4)) * 2, foot.y, bw, foot.h}, "Delete") && own) run_console_command("sketch brush delete");
+  if (u.button(bc[2], "Delete") && own) run_console_command("sketch brush delete");
   u.tooltip(own ? "Delete this brush of your own (the presets stay)." : "Only a brush of your own can be deleted (Duplicate makes one).");
   u.popup(u.id("draw_brush_props"), u.px(240), [this] { draw_brush_properties(); });
 }

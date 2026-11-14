@@ -386,11 +386,11 @@ void Editor::draw_project(const Recti &r) {
     drop_folders_.push_back({rr, dir});
     if (dragging_asset && rr.contains(in.mx, in.my)) u.canvas.rect_outline(rr, Color::hex(0x3A79BB), u.px(2));
   };
-  int bh = u.row_h() + u.px(6);
+  int bh = u.row_h() + u.px(8);  // (round 509: the search field a full row high, the strip 2 px taller)
   Recti bar{r.x, r.y, r.w, bh};
   u.canvas.fill_rect(bar, u.theme.bar);
   /* Unity's "+" (Create) menu. */
-  Recti plus{bar.x + u.px(4), bar.y + u.px(3), u.px(44), bh - u.px(6)};
+  Recti plus{bar.x + u.px(4), bar.y + u.px(4), u.px(44), bh - u.px(8)};
   if (u.button(plus, "", false, Icon::Plus)) u.open_popup(u.id("proj_create"), plus);
   u.tooltip("Create a folder or a material in this folder (Unity: Assets > Create).");
   /* Breadcrumb relative to the project root; each part is a drop target too. */

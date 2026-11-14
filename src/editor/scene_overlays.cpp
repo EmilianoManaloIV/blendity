@@ -22,21 +22,39 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
   u.canvas.fill_rect(bar, u.theme.bar);
   u.canvas.hline(bar.x, bar.right(), bar.bottom() - 1, u.theme.border);
   int h = bar.h - u.px(6), y = bar.y + u.px(3), x = bar.x + u.px(6);
+  /* Round 509: what the strip gives up, in this order, as the view narrows - the shading dropdown to 110 px, then the
+   * Persp / Iso label, then the Edit Mode button's word (its icon stays), then the four quick toggles (the Overlays menu has
+   * each of them) and the dropdown to 80 px - so nothing is drawn on anything else (at 1024x640 the label and the button lay
+   * on Overlays and the toggles). */
+  const std::string edit_label = with_key("Edit Mode", "mode.edit_toggle");  // (the key from the keymap: task 0254)
+  const int persp_w = std::max(u.font.text_width("Persp"), u.font.text_width("Iso")) + u.px(8);
+  const int edit_full = u.font.text_width(edit_label) + h + u.px(12);
+  const int fixed = u.px(6) + u.px(6) + u.px(78) + u.px(2) + h + u.px(10) + u.px(6);  // (Overlays and the camera filters: always there)
+  const int toggles_w = 4 * (h + u.px(2));
+  struct Fit { int combo; bool label, word, toggles; };
+  Fit fit{u.px(80), false, false, false};
+  for (const Fit &f : {Fit{u.px(170), true, true, true}, Fit{u.px(110), true, true, true}, Fit{u.px(110), false, true, true}, Fit{u.px(110), false, false, true}})
+    if (fixed + f.combo + (f.toggles ? toggles_w : 0) + (f.label ? persp_w + u.px(6) : 0) + (f.word ? edit_full : h) <= bar.w) {
+      fit = f;
+      break;
+    }
   static const char *modes[] = {"Wireframe", "Solid", "Shaded", "Shaded Wireframe"};
   int m = (int)shading_;
-  if (u.combo(u.id("shading"), {x, y, u.px(170), h}, m, modes, 4)) shading_ = (Shading)m;
+  if (u.combo(u.id("shading"), {x, y, fit.combo, h}, m, modes, 4)) shading_ = (Shading)m;
   u.tooltip("Draw mode (Blender: Z pie).\nSolid = fast vertex lighting (Workbench).\n"
             "Shaded = materials, textures, shadows (EEVEE / Unity Shaded).\n"
             "Path tracing: " + key("render.image") + ", the Render window, or the Camera Preview's Rendered toggle.");
-  x += u.px(176);
-  if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Grid, show_grid_, "Toggle grid (Blender: Overlays > Floor).")) show_grid_ = !show_grid_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Move, show_gizmos_, "Toggle Gizmos / transform handles.")) show_gizmos_ = !show_gizmos_;
-  x += h + u.px(2);
-  if (u.icon_button({x, y, h, h}, Icon::Chart, show_stats_, "Statistics overlay (Blender: Overlays > Statistics).")) show_stats_ = !show_stats_;
-  x += h + u.px(2);
+  x += fit.combo + u.px(6);
+  if (fit.toggles) {
+    if (u.icon_button({x, y, h, h}, Icon::Lightbulb, scene_lighting_, "Scene lighting on/off.\nOff = headlight from the camera, like Blender's Studio lighting.")) scene_lighting_ = !scene_lighting_;
+    x += h + u.px(2);
+    if (u.icon_button({x, y, h, h}, Icon::Grid, show_grid_, "Toggle grid (Blender: Overlays > Floor).")) show_grid_ = !show_grid_;
+    x += h + u.px(2);
+    if (u.icon_button({x, y, h, h}, Icon::Move, show_gizmos_, "Toggle Gizmos / transform handles.")) show_gizmos_ = !show_gizmos_;
+    x += h + u.px(2);
+    if (u.icon_button({x, y, h, h}, Icon::Chart, show_stats_, "Statistics overlay (Blender: Overlays > Statistics).")) show_stats_ = !show_stats_;
+    x += h + u.px(2);
+  }
   /* The overlay layers (task 0146): a menu of checks, the icons beside it the quick toggles for three of them. */
   Recti ovr{x, y, u.px(78), h};
   overlay_rects_["button"] = ovr;
@@ -80,19 +98,30 @@ void Editor::draw_scene_overlay_bar(const Recti &bar) {
     x += cw + u.px(10);
   }
   /* Blender-style Edit Mode toggle - Unity has no built-in mesh editing (ProBuilder adds it). */
-  const std::string edit_label = with_key("Edit Mode", "mode.edit_toggle");  // (the key from the keymap: task 0254)
-  int ew = u.font.text_width(edit_label) + h + u.px(12);
+  const int ew = fit.word ? edit_full : h;
   Recti er{bar.right() - ew - u.px(6), y, ew, h};
-  draw_breadcrumb(x, y, h, er.x - u.px(160));  // (task 0235: layout > mode > tool, each a dropdown)
+  const int label_x = er.x - u.px(6) - persp_w;
+  draw_breadcrumb(x, y, h, (fit.label ? label_x : er.x) - u.px(6));  // (task 0235: layout > mode > tool, each a dropdown)
   bool can_edit = edit_mode_ || (active_object() && active_object()->get<MeshFilter>());
   bool hot = u.hovered(er);
   uint32_t bg = edit_mode_ ? u.theme.accent : (hot && can_edit ? u.theme.button_hover : u.theme.button);
   u.frame(er, bg, u.theme.border, u.px(3));
   const uint32_t ink = !can_edit ? u.theme.text_dim : edit_mode_ ? 0xFFFFFFFF : u.theme.text_bright;  // (white on the accent only)
-  u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
-  u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, edit_label, ink);
+  if (fit.word) {
+    u.draw_icon(Icon::Vertex, {er.x + u.px(5), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
+    u.canvas.text(u.font, er.x + h + u.px(2), er.y + (h - u.font.line_height()) / 2, edit_label, ink);
+  }
+  else {
+    u.draw_icon(Icon::Vertex, {er.x + u.px(3), er.y + u.px(3), h - u.px(6), h - u.px(6)}, ink);
+    u.mark_widget(er);
+    u.tooltip(edit_label + ": edit the selected mesh's vertices, edges and faces.");
+  }
   if (hot && can_edit && u.in.pressed[0]) { if (edit_mode_) exit_edit_mode(); else enter_edit_mode(); }
-  u.label({er.x - u.px(150), y, u.px(140), h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
+  if (fit.label) u.label({label_x, y, persp_w, h}, cam_.ortho ? "Iso" : "Persp", u.theme.text_dim, ui::Align::Right);
+  if (u.record_buttons) {  // (round 509: the hand-drawn ones, so a test can see where they lie)
+    u.button_rects["overlay:Edit Mode"] = er;
+    if (fit.label) u.button_rects["overlay:Persp"] = {label_x, y, persp_w, h};
+  }
 }
 
 namespace {

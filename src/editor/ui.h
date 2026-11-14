@@ -157,6 +157,19 @@ class Context {
   /* A menu row right-clicked this frame (task 0189: Quick Favorites takes its command by the row's text). */
   std::string favorite_request;
   std::unordered_map<std::string, Recti> button_rects;
+  /* Tests (round 505, the HCI survey): every button, field, checkbox, dropdown, slider, colour, foldout and menu row
+   * drawn this frame (not text_area, drag_label, curve_field or color_ramp: round 509), in drawing order - its kind, rectangle, layer
+   * (0 the window, k inside popup k-1), label, and whether Tab can stop on it. Filled only while record_buttons is set. */
+  struct ControlRec {
+    const char *kind = "";
+    Recti r;
+    int layer = 0;
+    bool tab_stop = false;
+    std::string label;
+    Recti clip;  // (the canvas clip it was drawn under: a control scrolled out of its panel is not on the screen)
+  };
+  std::vector<ControlRec> controls;
+  Recti edit_rect_for_test() const { return edit_id_ ? edit_rect_ : Recti{}; }  // (the field being edited, as last drawn: a frame behind in the frame a click starts the edit)
   std::unordered_map<std::string, std::string> tooltip_texts;  // (tests, task 0293: a widget's tooltip by its rect, "x,y,w,h")
   /* Absolute time at which the UI wants to be woken (tooltips, caret blink); 0 = never. */
   double next_wakeup = 0;
@@ -190,6 +203,40 @@ class Context {
   void stop_editing() { edit_id_ = 0; }
   /* Programmatically start editing a text/number field (e.g. F2 rename). */
   void begin_edit(Id i, const std::string &text, bool select_all);
+
+  /* --- keyboard focus (round 509, ADR 0145) ---
+   * At most one control has it (a field being edited, or any control drawn through focus_stop); it draws a ring in the
+   * theme's focus colour. It is entered on purpose (focus_first_in, focus_request, Tab inside a popup) - never by a bare
+   * Tab over a window - and a mouse press lets it go. While something has it, Tab, Shift+Tab, Space, Enter, Esc and the
+   * arrows are the toolkit's: they are taken out of `in` when the frame begins, so nothing else acts on them. */
+  static constexpr int kFocused = 1, kActivated = 3;  // (focus_stop: has the focus; has it and Space or Enter was pressed)
+  enum StopKind { StopControl = 0, StopMenuRow = 1, StopMenuBar = 2 };
+  /* Every focusable widget calls this where it is drawn: registers it in the Tab walk (drawing order, one layer), tells it
+   * whether it has the focus, and draws the ring. A text or number field uses walk_stop instead (it edits, no ring). */
+  int focus_stop(Id i, const Recti &r, StopKind kind = StopControl);
+  /* The first stop drawn inside `area` on the window layer takes the focus (F6, with a dock leaf's content rect). */
+  void focus_first_in(const Recti &area);
+  /* That stop takes the focus when it is drawn (the menu bar's File on F10); `layer` is the popup layer it is on. */
+  void focus_request(Id i, int layer = 0);
+  /* The first stop of the popup opened this frame takes the focus (a menu opened by its key). */
+  void focus_enter_popup();
+  /* A menu bar entry: a stop with the bar's keys - Left / Right move to the neighbours, Down, Enter or Space open it (and
+   * the focus goes to its first row). True when it has the focus. */
+  bool menubar_stop(Id i, const Recti &r);
+  /* Left / Right pressed on a row of a top menu: -1 or +1, once (the menu bar opens the neighbour). */
+  int take_menu_step() {
+    const int s = menu_step_;
+    menu_step_ = 0;
+    return s;
+  }
+  bool has_focus() const { return focus_id_ != 0; }
+  /* The focus let go, and any on its way (a modal tool began: Enter, Esc and Space are the tool's). */
+  void focus_release() {
+    focus_id_ = focus_request_ = 0;
+    focus_next_ = focus_wrap_back_ = focus_area_pending_ = false;
+  }
+  Recti focus_rect() const { return focus_id_ ? focus_rect_ : edit_id_ ? edit_rect_ : Recti{}; }  // (the focused control, or the field being edited, as last drawn)
+  Recti focus_rect_for_test() const { return focus_rect(); }
   bool mouse_captured() const { return active_ != 0; }
   /* Consumes the click so no other widget reacts this frame. */
   void consume_click() { for (bool &p : in.pressed) p = false; }
@@ -214,6 +261,7 @@ class Context {
   /* A label that scrubs a value when dragged (Unity's prefix labels). */
   bool drag_label(Id i, const Recti &r, const std::string &text, float &v, float speed, uint32_t color = 0);
   bool vec3_field(Id i, const Recti &r, Vec3 &v, float speed = 0.05f);
+  int vec3_min_width();  // (round 509: the narrowest vec3_field that gives each of X, Y, Z room for four digits)
   /* True when number field i (or vec3 field i, component set) was committed
    * by typing this frame; expr is the text, so multi-object editing can
    * evaluate "+=1" or L(0,10) against each object's own value. */
@@ -293,6 +341,11 @@ class Context {
     last_hovered_ = hovered(r);
   }
   int popup_width() const;
+  /* A row of buttons that wraps when its labels do not fit (round 509, task 0493): takes rows of `lay` for the labels given,
+   * as many to a row as hold the widest label whole (at most `max_per_row`, 0 = all of them; one a row at the least), the rows
+   * filled evenly (four labels that do not go four across go two by two, not three and one). Returns each button's rectangle
+   * in label order, `extra` pixels wider than the text for an icon. The caller draws the buttons. */
+  std::vector<Recti> button_cells(Layout &lay, const std::vector<std::string> &labels, int row_height = -1, int max_per_row = 0, int extra = 0);
 
   /* --- drawing helpers --- */
   void draw_icon(Icon icon, const Recti &r, uint32_t color);
@@ -353,10 +406,40 @@ class Context {
   bool edit_seen_ = false;
   bool dragging_value_ = false;
   uint64_t frame_ = 0;
-  Id order_last_ = 0;      // last number / text field drawn this frame (Tab order)
-  bool focus_next_ = false;  // Tab: the next field drawn starts editing
-  Id focus_request_ = 0;   // Shift+Tab: this field starts editing
-  void tab_to(Id previous);
+  Id order_last_ = 0;      // last stop drawn this frame in the walk's layer (Tab order)
+  bool focus_next_ = false;  // Tab: the next stop drawn takes the focus (a field starts editing)
+  Id focus_request_ = 0;   // Shift+Tab, a wrap, F10: this stop takes the focus (a field starts editing)
+  void tab_to(Id previous, Id self);
+  /* Round 509 (ADR 0145). The walk: the layer it runs on this frame, its first and last stop, the one before the stop
+   * being drawn, and what is waiting to take the focus. */
+  struct FocusKeys {  // (this frame's keys while a control has the focus - taken out of `in`)
+    bool tab = false, shift = false, activate = false, esc = false, up = false, down = false, left = false, right = false;
+  } fk_;
+  Id focus_id_ = 0, focus_start_id_ = 0, focus_from_ = 0, reveal_id_ = 0, walk_first_ = 0, walk_last_ = 0, stop_before_ = 0;
+  Recti focus_rect_, focus_area_;
+  int focus_layer_ = 0, walk_layer_ = 0, pending_layer_ = 0, menu_step_ = 0, reveal_left_ = 0;
+  bool focus_seen_ = false, focus_wrap_back_ = false, focus_area_pending_ = false, pending_at_start_ = false, focus_from_field_ = false;
+  bool focus_idle_now() const;
+  bool focus_idle_ = true;  // (this frame began with no focus, no edit and none asked for: the stops cost nothing)
+  std::unordered_map<Id, int> stop_seen_;  // (this frame: how many stops had this name, so equal names get distinct, steady ids)
+  std::unordered_map<Id, int> combo_hi_;   // (a combo's list opened by key: the highlighted row)
+  bool walk_stop(Id i, const Recti &r, Id *before = nullptr);
+  void focus_capture_keys();
+  void focus_walk(bool back);
+  void focus_resolve_walk();
+  void focus_reveal(const Recti &r);
+  void focus_ring(const Recti &r);
+  bool in_list_popup() const { return current_layer_ > 0 && current_layer_ <= (int)popups_.size() && popups_[(size_t)current_layer_ - 1].list; }
+  Id stop_id(Id base);
+  void menu_escape();
+  void menu_arrows(bool submenu_row);
+  void combo_keys(Id i, int count);
+  void combo_open(Id i, const Recti &r);
+  bool checkbox_impl(const Recti &r, const Recti *row, const std::string *text, bool &v);
+  Recti edit_rect_;  // (where edit_text last drew the field being edited)
+  void record_control(const char *kind, const Recti &r, const std::string &label = {}, bool tab_stop = false) {
+    if (record_buttons) controls.push_back({kind, r, current_layer_, tab_stop, label, canvas.clip()});
+  }
   struct NumberCommit {
     Id id = 0;
     std::string expr;

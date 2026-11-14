@@ -1444,7 +1444,9 @@ void Editor::draw_animation_window(const Recti &r) {
   if (!clip) {
     u.label({body.x + u.px(10), body.y + u.px(10), body.w - u.px(20), u.row_h()}, "To begin animating " + root->name + ", create an Animation Clip.",
             u.theme.text_dim);
-    if (u.button({body.x + u.px(10), body.y + u.px(16) + u.row_h(), u.px(110), u.row_h() + u.px(4)}, "Create")) anim_new_clip(root, "");
+    const bool create = u.button({body.x + u.px(10), body.y + u.px(16) + u.row_h(), u.px(110), u.row_h() + u.px(4)}, "Create");
+    u.tooltip("Make an empty Animation Clip on this object; the properties to key are added in the window afterwards.");  // (round 509)
+    if (create) anim_new_clip(root, "");
     return;
   }
   draw_anim_add_property(root);

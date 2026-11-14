@@ -458,7 +458,8 @@ void Editor::draw_ai_settings(const Recti &r) {
   u.label({r.x + u.px(372), r.y, std::max(0, r.w - u.px(510)), r.h}, p.empty() ? "installed" : p,
           p.empty() ? u.theme.text : u.theme.text_dim);
   u.tooltip("The network and ONNX Runtime, in " + ai::install_dir() + ".");
-  const Recti btn{r.right() - u.px(130), r.y + u.px(2), u.px(118), r.h - u.px(4)};
+  const int bh = std::min(r.h, u.row_h());  // (round 509: a row high - it was 18 px in this 22 px row)
+  const Recti btn{r.right() - u.px(130), r.y + (r.h - bh) / 2, u.px(118), bh};
   if (p.empty() && u.button(btn, "Remove")) ai_command({"ai", "remove"});
   else if (!p.empty() && u.button(btn, "Install...")) ai_install("");
   /* Task 0288: an archive already downloaded (another PC, a slow line), and a check of the installed one - on a row of
