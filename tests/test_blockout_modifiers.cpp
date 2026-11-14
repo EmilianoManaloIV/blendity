@@ -1567,7 +1567,11 @@ void tests_round502_second() {
     size_t adopted = 0, bare = 0;
     const PoseCounts before = pose_counts_this_thread();
     const double start = now_seconds();
-    for (int f = 0; f < 100; f++) {
+    /* The drag goes on until a result was adopted - 100 frames at least, then as long as it takes, under a generous cap. It used to stop at
+     * 100 frames whatever happened: under ASan + UBSan (CI's sanitizer shard, round 502) one evaluation of this stack takes longer than those
+     * 100 frames do, so nothing had been adopted yet when the count ran out. That was the test waiting on a frame count, not the product
+     * starving: a finished evaluation is adopted whenever it finishes, the pieces having moved on or not - which is what this pins. */
+    for (int f = 0; f < 100 || (adopted == 0 && f < 20000); f++) {
       door->set_local_position(home + Vec3(0.0f, 0.0f, 0.02f * (float)(f % 30)));
       ed.step_frame_headless();
       const Mesh *ev = bo->evaluated_mesh();
