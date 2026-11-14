@@ -1494,7 +1494,14 @@ void run_hci_tests() {
       if (numbers.size() < 3 || name.empty() || fold.empty() || pin.empty()) continue;
       for (const Recti &n : numbers) CHECK(n.w >= four);
       CHECK(overlap_area(name, fold) == 0 && overlap_area(name, pin) == 0 && overlap_area(fold, pin) == 0);
-      CHECK(name.w >= ed.ui_for_test().px(80));  // (beside Pin and Fold it keeps 90; with them on a row below it has the row less the icon and tick)
+      /* Beside Pin and Fold it keeps 90 px; with them on a row below it takes the whole row less the icon and the tick (its
+       * right edge Pin's) - a width in pixels hangs on the platform's icon and tick: macOS left 118 of 120 at x1.5. */
+      const bool below = fold.y > name.y;
+      CHECK(below ? name.right() >= pin.right() - ed.ui_for_test().px(2) : name.w >= ed.ui_for_test().px(90));
+      /* What the artist needs on every platform: a default object's name reads whole in it, with room to type after it. */
+      const int needed = ed.text_width_for_test("Cylinder") + ed.ui_for_test().px(16);
+      std::printf("      the name field %d px, \"Cylinder\" and room to type need %d\n", name.w, needed);
+      CHECK(name.w >= needed);
     }
   });
 

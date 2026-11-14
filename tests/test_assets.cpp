@@ -3559,17 +3559,16 @@ static void tests_round166_to_round170() {
     const Recti w = ed.window_rect_for_test(win);
     for (int tries = 0; tries < 60; tries++) {
       Recti f;
-      if (!ed.button_rect_for_test(key, f)) {
-        ed.step_frame_headless();
-        continue;
-      }
-      if (f.y >= w.y && f.y + f.h <= w.bottom()) return f;
+      /* (Round 509: a field below the fold is not drawn, so not recorded - it is scrolled to as well; with macOS's font
+       * the Inspector's rows put Toon Bands there. Waiting a frame for it never brought it into view.) */
+      const bool seen = ed.button_rect_for_test(key, f);
+      if (seen && f.y >= w.y && f.y + f.h <= w.bottom()) return f;
       platform::Event mv, wheel;
       mv.type = platform::EventType::MouseMove;
       wheel.type = platform::EventType::Wheel;
-      mv.x = wheel.x = f.x;
+      mv.x = wheel.x = seen ? f.x : w.x + w.w / 2;
       mv.y = wheel.y = w.bottom() - ed.ui_for_test().px(30);
-      wheel.wheel_y = f.y > w.bottom() ? -3.0f : 3.0f;
+      wheel.wheel_y = !seen || f.y > w.bottom() ? -3.0f : 3.0f;
       ed.step_frame_headless({mv});
       ed.step_frame_headless({wheel});
       ed.step_frame_headless();
